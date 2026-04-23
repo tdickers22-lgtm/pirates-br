@@ -1,0 +1,218 @@
+import type { CannonAmmoType, PlayerInput, WeaponSlot } from '../../shared/types/index.js';
+
+export class InputManager {
+  private keys: Set<string> = new Set();
+  private yaw = 0;
+  private pitch = 0;
+  private mouseButtons: Set<number> = new Set();
+  private seq = 0;
+  private locked = false;
+  private wantsRelock = false;
+  private lockElement: HTMLElement | null = null;
+
+  // One-shot flags (cleared each frame)
+  private interactPressed = false;
+  private tradePressed = false;
+  private reloadPressed = false;
+  private placeKegPressed = false;
+  private kegHeld = false;
+  private kegPreviewUntil = 0;
+  private jumpPressed = false;
+  private slotPressed: WeaponSlot | null = null;
+  private cannonAmmoPressed: CannonAmmoType | null = null;
+  /** Hold [V] to open supply wheel; click slices or press 1-4 to use pocket items. */
+  private vHeld = false;
+  private pendingWheelSlot: number | null = null;
+
+  init(lockElement: HTMLElement = document.body) {
+    this.lockElement = lockElement;
+    document.addEventListener('keydown', (e) => {
+      if (
+        e.code === 'ArrowUp'
+        || e.code === 'ArrowDown'
+        || e.code === 'ArrowLeft'
+        || e.code === 'ArrowRight'
+      ) {
+        e.preventDefault();
+      }
+      this.keys.add(e.code);
+      if (e.code === 'KeyV') {
+        if (!this.vHeld && this.locked) document.exitPointerLock?.();
+        this.vHeld = true;
+      }
+      if (this.vHeld && (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3' || e.code === 'Digit4')) {
+        e.preventDefault();
+        const map: Record<string, number> = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3 };
+        this.pendingWheelSlot = map[e.code] ?? null;
+      }
+      if (e.code === 'KeyX') this.interactPressed = true;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        this.jumpPressed = true;
+      }
+      if (e.code === 'KeyT') this.tradePressed = true;
+      if (e.code === 'KeyR') this.reloadPressed = true;
+      if (e.code === 'KeyG' && !this.kegHeld) {
+        e.preventDefault();
+        this.kegHeld = true;
+        this.kegPreviewUntil = Date.now() + 900;
+      }
+      if (!this.vHeld && e.code === 'Digit1') this.slotPressed = 0;
+      if (!this.vHeld && e.code === 'Digit2') this.slotPressed = 1;
+      if (!this.vHeld && e.code === 'Digit3') this.slotPressed = 2;
+      if (!this.vHeld && e.code === 'Digit4') this.slotPressed = 3;
+      if (!this.vHeld && e.code === 'Digit5') this.cannonAmmoPressed = 'cannonball';
+      if (!this.vHeld && e.code === 'Digit6') this.cannonAmmoPressed = 'firebomb';
+      if (!this.vHeld && e.code === 'Digit7') this.cannonAmmoPressed = 'chainshot';
+    });
+    document.addEventListener('keyup', (e) => {
+      this.keys.delete(e.code);
+      if (e.code === 'KeyV') {
+        this.vHeld = false;
+        this.lockElement?.requestPointerLock?.().catch(() => {});
+      }
+      if (e.code === 'KeyG' && this.kegHeld) {
+        e.preventDefault();
+        this.kegHeld = false;
+        this.placeKegPressed = true;
+        this.kegPreviewUntil = Date.now() + 450;
+      }
+    });
+
+    lockElement.addEventListener('mousedown', (e) => {
+      if (this.vHeld) return;
+      if (!this.locked) {
+        this.wantsRelock = true;
+        this.lockElement?.requestPointerLock?.().catch(() => {});
+        e.preventDefault();
+        return;
+      }
+      this.mouseButtons.add(e.button);
+    });
+
+    document.addEventListener('mouseup', (e) => {
+      this.mouseButtons.delete(e.button);
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!this.locked) return;
+      this.applyLookDelta(e.movementX, e.movementY);
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+      this.locked = document.pointerLockElement === this.lockElement;
+      if (!this.locked) {
+        this.mouseButtons.clear();
+      } else if (this.wantsRelock) {
+        this.wantsRelock = false;
+      }
+    });
+
+    window.addEventListener('blur', () => {
+      this.mouseButtons.clear();
+      this.vHeld = false;
+      this.kegHeld = false;
+    });
+  }
+
+  buildInput(): PlayerInput {
+    const aiming = this.isAimHeld();
+    const wheelUse = this.pendingWheelSlot;
+    this.pendingWheelSlot = null;
+
+    const input: PlayerInput = {
+      seq: this.seq++,
+      ts: Date.now(),
+      forward:  this.keys.has('KeyW') || this.keys.has('ArrowUp'),
+      back:     this.keys.has('KeyS') || this.keys.has('ArrowDown'),
+      left:     this.keys.has('KeyA') || this.keys.has('ArrowLeft'),
+      right:    this.keys.has('KeyD') || this.keys.has('ArrowRight'),
+      jump:     this.keys.has('Space'),
+      jumpPressed: this.jumpPressed,
+      fire:     !this.vHeld && this.locked && this.mouseButtons.has(0),
+      aim:      aiming,
+      interact: this.interactPressed,
+      interactHeld: this.keys.has('KeyX'),
+      anchor:   false,
+      sailRaise: this.keys.has('KeyC'),
+      sailLower: this.keys.has('KeyZ'),
+      sailLeft:  this.keys.has('KeyQ'),
+      sailRight: this.keys.has('KeyF'),
+      trade:    this.tradePressed,
+      reload:   this.reloadPressed,
+      placeKeg: this.placeKegPressed,
+      slot:     this.slotPressed,
+      cannonAmmo: this.cannonAmmoPressed,
+      yaw:      this.yaw,
+      pitch:    this.pitch,
+      wheelIndex: wheelUse,
+      useWheelItem: wheelUse !== null,
+      interactIntent: null,
+    };
+
+    // Clear one-shots
+    this.interactPressed = false;
+    this.tradePressed = false;
+    this.reloadPressed = false;
+    this.placeKegPressed = false;
+    this.jumpPressed = false;
+    this.slotPressed = null;
+    this.cannonAmmoPressed = null;
+
+    return input;
+  }
+
+  getYaw()   { return this.yaw; }
+  getPitch() { return this.pitch; }
+  isAiming() { return this.isAimHeld(); }
+  isFiring() { return !this.vHeld && this.locked && this.mouseButtons.has(0); }
+  isLocked() { return this.locked; }
+  isKegPreviewActive() { return this.kegHeld || Date.now() < this.kegPreviewUntil; }
+  isInteractHeld() { return this.keys.has('KeyX'); }
+  /** True while [V] is held — supply wheel overlay */
+  isSupplyWheelOpen() { return this.vHeld; }
+  queueWheelSlot(slot: number) {
+    if (slot >= 0 && slot <= 3) this.pendingWheelSlot = slot;
+  }
+  hasPendingActions() {
+    return this.interactPressed
+      || this.tradePressed
+      || this.reloadPressed
+      || this.placeKegPressed
+      || this.jumpPressed
+      || this.slotPressed !== null
+      || this.cannonAmmoPressed !== null
+      || this.pendingWheelSlot !== null;
+  }
+  /** While supply wheel is open, which pocket slot (0–3) has a digit held — for FP preview */
+  getSupplyWheelHeldSlot(): number | null {
+    if (!this.vHeld) return null;
+    if (this.keys.has('Digit1')) return 0;
+    if (this.keys.has('Digit2')) return 1;
+    if (this.keys.has('Digit3')) return 2;
+    if (this.keys.has('Digit4')) return 3;
+    return null;
+  }
+  getMoveAxes() {
+    return {
+      x: ((this.keys.has('KeyD') || this.keys.has('ArrowRight')) ? 1 : 0)
+        - ((this.keys.has('KeyA') || this.keys.has('ArrowLeft')) ? 1 : 0),
+      z: ((this.keys.has('KeyW') || this.keys.has('ArrowUp')) ? 1 : 0)
+        - ((this.keys.has('KeyS') || this.keys.has('ArrowDown')) ? 1 : 0),
+    };
+  }
+
+  private applyLookDelta(dx: number, dy: number) {
+    this.yaw -= dx * 0.002;
+    this.pitch -= dy * 0.002;
+    this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
+  }
+
+  private isAimHeld() {
+    return this.locked && (
+      this.mouseButtons.has(2)
+      || this.keys.has('ShiftLeft')
+      || this.keys.has('ShiftRight')
+    );
+  }
+}

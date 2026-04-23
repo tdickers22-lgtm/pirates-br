@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pirates BR</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; font-family: 'Georgia', serif; color: #e8d5a3; }
+    canvas { display: block; }
+
+    #loading-screen {
+      position: fixed; inset: 0;
+      background: radial-gradient(ellipse at center, #0a1628 0%, #000 100%);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 1000; transition: opacity 0.8s ease;
+    }
+    #loading-screen.hidden { opacity: 0; pointer-events: none; }
+    #loading-screen h1 {
+      font-size: 3.5rem; letter-spacing: 0.3em; color: #c9a84c;
+      text-shadow: 0 0 40px #c9a84c88; margin-bottom: 0.3em;
+    }
+    #loading-screen .subtitle {
+      font-size: 1rem; letter-spacing: 0.2em; color: #8899aa;
+      margin-bottom: 1.4rem; text-transform: uppercase;
+    }
+    #mode-cards {
+      width: min(700px, calc(100vw - 48px));
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 2rem;
+    }
+    .mode-card {
+      background: linear-gradient(180deg, rgba(10, 22, 40, 0.92), rgba(4, 10, 18, 0.92));
+      border: 1px solid rgba(201, 168, 76, 0.18);
+      border-radius: 10px;
+      padding: 16px 18px 18px;
+      box-shadow: 0 14px 38px rgba(0, 0, 0, 0.26);
+      text-align: left;
+    }
+    .mode-card.live {
+      border-color: rgba(201, 168, 76, 0.42);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(201, 168, 76, 0.14);
+    }
+    .mode-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 74px;
+      padding: 4px 8px;
+      margin-bottom: 10px;
+      border-radius: 999px;
+      font-size: 0.58rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: #c9a84c;
+      background: rgba(201, 168, 76, 0.12);
+      border: 1px solid rgba(201, 168, 76, 0.24);
+    }
+    .mode-card.soon .mode-badge {
+      color: #8ca7bd;
+      background: rgba(94, 124, 150, 0.12);
+      border-color: rgba(94, 124, 150, 0.24);
+    }
+    .mode-card h2 {
+      font-size: 1.02rem;
+      letter-spacing: 0.1em;
+      color: #e8d5a3;
+      margin-bottom: 0.45rem;
+      text-transform: uppercase;
+    }
+    .mode-card p {
+      font-size: 0.78rem;
+      line-height: 1.55;
+      color: #8ea0b2;
+    }
+    @media (max-width: 720px) {
+      #mode-cards {
+        grid-template-columns: 1fr;
+      }
+    }
+    #loading-bar-wrap {
+      width: 320px; height: 4px; background: #1a2a3a;
+      border: 1px solid #2a3a4a; position: relative;
+    }
+    #loading-bar { height: 100%; width: 0%; background: #c9a84c; transition: width 0.3s ease; }
+    #loading-text { margin-top: 1rem; font-size: 0.8rem; color: #556677; letter-spacing: 0.15em; }
+
+    #hud {
+      position: fixed; inset: 0; pointer-events: none;
+      display: none; z-index: 100;
+    }
+    #hud.visible { display: block; }
+
+    /* Compass */
+    #compass {
+      position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+      width: 184px; height: 30px; background: rgba(0,0,0,0.58);
+      border: 1px solid #c9a84c44; border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      overflow: hidden;
+    }
+    #compass-tape {
+      white-space: nowrap; font-size: 0.67rem; letter-spacing: 0.24em;
+      color: #c9a84c; font-family: monospace; transition: none;
+    }
+    #compass-center {
+      position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+      width: 2px; height: 100%; background: #c9a84c88;
+    }
+
+    /* Player health */
+    #health-bar-wrap {
+      position: absolute; bottom: 56px; left: 20px;
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .bar-label { font-size: 0.62rem; letter-spacing: 0.12em; color: #aaa; text-transform: uppercase; }
+    .bar-outer { width: 152px; height: 7px; background: #1a1a1a; border: 1px solid #333; }
+    .bar-inner { height: 100%; transition: width 0.2s ease; }
+    #health-fill { background: linear-gradient(90deg, #c0392b, #e74c3c); }
+    #armor-fill { background: linear-gradient(90deg, #2980b9, #3498db); }
+
+    /* Ship health */
+    #ship-status {
+      position: absolute; bottom: 56px; right: 20px;
+      background: rgba(0,0,0,0.58); border: 1px solid #c9a84c2a;
+      padding: 10px 12px; border-radius: 4px; min-width: 176px;
+    }
+    #ship-status h3 { font-size: 0.62rem; letter-spacing: 0.16em; color: #c9a84c; margin-bottom: 6px; text-transform: uppercase; }
+    .hull-section { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    .hull-section span { font-size: 0.6rem; color: #889; width: 52px; }
+    .hull-bar-outer { flex: 1; height: 5px; background: #1a1a1a; border: 1px solid #333; }
+    .hull-bar-inner { height: 100%; background: linear-gradient(90deg, #8B4513, #CD853F); transition: width 0.3s ease; }
+    #ship-upgrades {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      margin-top: 10px;
+    }
+    .upgrade-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 8px; border-radius: 999px;
+      border: 1px solid rgba(201, 168, 76, 0.18);
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 0.56rem; letter-spacing: 0.12em; text-transform: uppercase;
+    }
+    .upgrade-pill[data-type="hull_reinforcement"] {
+      color: #8fd0ff;
+      border-color: rgba(103, 185, 255, 0.45);
+      background: rgba(103, 185, 255, 0.12);
+    }
+    .upgrade-pill[data-type="charged_cannons"] {
+      color: #ffb08a;
+      border-color: rgba(255, 132, 89, 0.44);
+      background: rgba(255, 132, 89, 0.12);
+    }
+    .upgrade-pill[data-type="swift_sails"] {
+      color: #f7de84;
+      border-color: rgba(246, 211, 96, 0.42);
+      background: rgba(246, 211, 96, 0.12);
+    }
+    #ship-inventory {
+      position: absolute; bottom: 18px; left: 50%;
+      transform: translateX(-50%);
+      display: none; gap: 10px; align-items: center;
+      padding: 10px 14px; border-radius: 14px;
+      background: rgba(4, 14, 28, 0.76);
+      border: 1px solid rgba(201, 168, 76, 0.16);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+    }
+    #ship-inventory.visible { display: flex; }
+    .ship-inventory-item {
+      min-width: 90px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px; border-radius: 10px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .ship-inventory-icon { font-size: 0.86rem; line-height: 1; }
+    .ship-inventory-label {
+      flex: 1;
+      font-size: 0.56rem; letter-spacing: 0.12em; text-transform: uppercase;
+      color: #8ea0b2;
+    }
+    .ship-inventory-qty {
+      font-size: 0.88rem; color: #e8d5a3; font-family: monospace;
+      text-shadow: 0 0 8px rgba(201, 168, 76, 0.2);
+    }
+    #keg-status {
+      position: absolute; bottom: 88px; right: 20px;
+      min-width: 168px;
+      padding: 8px 11px; border-radius: 10px;
+      background: rgba(4, 14, 28, 0.76);
+      border: 1px solid rgba(201, 168, 76, 0.18);
+      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.26);
+      display: none;
+    }
+    #keg-status.visible { display: block; }
+    #keg-status .label {
+      font-size: 0.56rem; letter-spacing: 0.14em; text-transform: uppercase;
+      color: #8ea0b2;
+    }
+    #keg-status .value {
+      margin-top: 3px;
+      font-size: 0.92rem; color: #ffd38b; font-family: monospace;
+    }
+
+    /* Weapons */
+    #weapon-slots {
+      position: absolute; bottom: 18px; right: 20px;
+      display: flex; gap: 6px;
+    }
+    .weapon-slot {
+      width: 58px; height: 58px; background: rgba(0,0,0,0.58);
+      border: 1px solid #333; border-radius: 4px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      font-size: 0.54rem; color: #889; text-align: center; gap: 2px;
+    }
+    .weapon-slot.active { border-color: #c9a84c; background: rgba(201,168,76,0.1); }
+    .weapon-slot .wname { color: #c9a84c; font-size: 0.58rem; }
+    .weapon-slot .ammo { color: #aaa; font-size: 0.72rem; font-weight: bold; font-family: monospace; }
+
+    /* Ammo / reload */
+    #ammo-display {
+      position: absolute; bottom: 18px; left: 20px;
+      font-size: 1.45rem; font-family: monospace; color: #c9a84c;
+      text-shadow: 0 0 10px #c9a84c44;
+    }
+    #reload-indicator {
+      position: absolute; bottom: 48px; left: 22px;
+      font-size: 0.62rem; color: #e74c3c; letter-spacing: 0.16em;
+      display: none;
+    }
+    #reload-indicator.visible { display: block; }
+
+    /* Kill feed */
+    #kill-feed {
+      position: absolute; top: 72px; right: 16px;
+      display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
+      pointer-events: none;
+    }
+    .kill-entry {
+      background: rgba(0,0,0,0.7); padding: 4px 10px;
+      border-left: 2px solid #c9a84c; font-size: 0.75rem; color: #ddd;
+      animation: fadeKill 4s forwards;
+    }
+    @keyframes fadeKill { 0%,70%{opacity:1} 100%{opacity:0} }
+
+    /* Storm info */
+    #storm-info {
+      position: absolute; top: 52px; left: 50%; transform: translateX(-50%);
+      text-align: center; pointer-events: none;
+    }
+    #storm-phase { font-size: 0.64rem; color: #8899aa; letter-spacing: 0.14em; }
+    #storm-timer { font-size: 1.08rem; color: #c9a84c; font-family: monospace; }
+    #storm-warning {
+      font-size: 0.72rem; color: #e74c3c; letter-spacing: 0.12em;
+      display: none; animation: pulse 1s infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* Player count */
+    #player-count {
+      position: absolute; top: 16px; right: 16px;
+      background: rgba(0,0,0,0.58); border: 1px solid #c9a84c22;
+      padding: 6px 11px; border-radius: 4px; text-align: center;
+    }
+    #player-count .num { font-size: 1.2rem; color: #c9a84c; font-family: monospace; }
+    #player-count .lbl { font-size: 0.54rem; color: #889; text-transform: uppercase; letter-spacing: 0.12em; }
+
+    /* Gold */
+    #gold-display {
+      position: absolute; top: 16px; left: 16px;
+      background: rgba(0,0,0,0.58); border: 1px solid #c9a84c22;
+      padding: 6px 11px; border-radius: 4px;
+    }
+    #gold-display .num { font-size: 1.08rem; color: #c9a84c; font-family: monospace; }
+    #gold-display .lbl { font-size: 0.52rem; color: #889; text-transform: uppercase; }
+
+    /* Interaction prompt */
+    #interact-prompt {
+      position: absolute; bottom: 146px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.72); border: 1px solid #c9a84c44;
+      padding: 7px 14px; border-radius: 4px; font-size: 0.72rem;
+      color: #c9a84c; letter-spacing: 0.1em; display: none;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+    #interact-prompt.visible { display: block; }
+
+    /* Crosshair */
+    #crosshair {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 18px; height: 18px; pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ''; position: absolute; background: rgba(255,255,255,0.8);
+    }
+    #crosshair::before { width: 18px; height: 2px; top: 8px; left: 0; }
+    #crosshair::after { width: 2px; height: 18px; left: 8px; top: 0; }
+    #crosshair.dot::before, #crosshair.dot::after { display: none; }
+    #crosshair.dot { width: 4px; height: 4px; background: rgba(255,255,255,0.9); border-radius: 50%; }
+    #crosshair.cannon {
+      width: 42px; height: 42px;
+      border: 2px solid rgba(255,255,255,0.74);
+      border-radius: 50%;
+      box-shadow: 0 0 14px rgba(255,255,255,0.18);
+    }
+    #crosshair.cannon::before { width: 56px; height: 2px; top: 20px; left: -7px; }
+    #crosshair.cannon::after { width: 2px; height: 56px; left: 20px; top: -7px; }
+    #crosshair.shotgun {
+      --shotgun-spread: 108px;
+      width: var(--shotgun-spread);
+      height: var(--shotgun-spread);
+      border: 2px solid rgba(255,255,255,0.72);
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at center, rgba(255,255,255,0.92) 0 2px, transparent 3px),
+        radial-gradient(circle at center, transparent 0 calc(50% - 7px), rgba(255,255,255,0.18) calc(50% - 6px), transparent calc(50% - 1px));
+      box-shadow:
+        inset 0 0 18px rgba(255,255,255,0.08),
+        0 0 14px rgba(255,255,255,0.18);
+    }
+    #crosshair.shotgun::before {
+      width: calc(var(--shotgun-spread) + 22px);
+      height: 2px;
+      top: calc(50% - 1px);
+      left: -11px;
+      background: linear-gradient(90deg,
+        rgba(255,255,255,0.74) 0 18px,
+        transparent 18px calc(50% - 12px),
+        rgba(255,255,255,0.44) calc(50% - 12px) calc(50% + 12px),
+        transparent calc(50% + 12px) calc(100% - 18px),
+        rgba(255,255,255,0.74) calc(100% - 18px) 100%);
+    }
+    #crosshair.shotgun::after {
+      width: 2px;
+      height: calc(var(--shotgun-spread) + 22px);
+      left: calc(50% - 1px);
+      top: -11px;
+      background: linear-gradient(180deg,
+        rgba(255,255,255,0.74) 0 18px,
+        transparent 18px calc(50% - 12px),
+        rgba(255,255,255,0.44) calc(50% - 12px) calc(50% + 12px),
+        transparent calc(50% + 12px) calc(100% - 18px),
+        rgba(255,255,255,0.74) calc(100% - 18px) 100%);
+    }
+    #hit-marker {
+      position: absolute; top: 50%; left: 50%;
+      width: 44px; height: 44px; pointer-events: none;
+      transform: translate(-50%, -50%) scale(0.82);
+      opacity: 0;
+      transition: opacity 80ms ease, transform 80ms ease;
+    }
+    #hit-marker.visible {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
+    #hit-marker.ship {
+      transform: translate(-50%, -50%) scale(1.08);
+    }
+    #hit-marker span {
+      position: absolute;
+      width: 12px;
+      height: 3px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.96);
+      box-shadow: 0 0 10px rgba(255,255,255,0.45);
+    }
+    #hit-marker span:nth-child(1) { top: 11px; left: 6px; transform: rotate(45deg); }
+    #hit-marker span:nth-child(2) { top: 11px; right: 6px; transform: rotate(-45deg); }
+    #hit-marker span:nth-child(3) { bottom: 11px; left: 6px; transform: rotate(-45deg); }
+    #hit-marker span:nth-child(4) { bottom: 11px; right: 6px; transform: rotate(45deg); }
+    #hit-marker.ship span {
+      background: rgba(142, 226, 255, 0.98);
+      box-shadow: 0 0 14px rgba(142, 226, 255, 0.62);
+    }
+    #hit-marker.shark span {
+      background: rgba(118, 231, 211, 0.98);
+      box-shadow: 0 0 14px rgba(118, 231, 211, 0.58);
+    }
+    #hit-marker.headshot span {
+      background: rgba(255, 219, 110, 0.98);
+      box-shadow: 0 0 12px rgba(255, 219, 110, 0.58);
+    }
+    #hit-marker.kill span {
+      background: rgba(255, 146, 106, 0.98);
+      box-shadow: 0 0 12px rgba(255, 146, 106, 0.58);
+    }
+    #damage-indicator-layer {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .damage-number {
+      position: absolute;
+      left: 0;
+      top: 0;
+      transform: translate(-50%, -50%);
+      color: rgba(255,255,255,0.98);
+      font-family: Georgia, serif;
+      font-size: 1.05rem;
+      font-weight: bold;
+      letter-spacing: 0.05em;
+      text-shadow: 0 2px 12px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,0.95);
+      white-space: nowrap;
+      opacity: 0;
+    }
+    .damage-number.headshot { color: rgba(255, 222, 118, 0.98); }
+    .damage-number.kill { color: rgba(255, 152, 118, 0.98); }
+    .damage-number.ship { color: rgba(177, 223, 255, 0.98); }
+    .damage-number .damage-val { display: block; }
+    .damage-number .damage-weapon {
+      display: block;
+      margin-top: 3px;
+      font-size: 0.58rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      opacity: 0.88;
+      text-align: center;
+    }
+
+    /* Scope overlay — above canvas; center hole shows zoomed world (not FP viewmodel) */
+    #scope-overlay {
+      position: fixed; inset: 0;
+      z-index: 150;
+      background: transparent;
+      display: none; pointer-events: none;
+    }
+    #scope-overlay.visible { display: block; }
+    #scope-circle {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%,-50%);
+      width: 300px; height: 300px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 42% 36%, rgba(210,235,255,0.16) 0%, rgba(210,235,255,0.08) 34%, rgba(255,255,255,0.02) 58%, rgba(255,255,255,0) 72%);
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.32), inset 0 0 24px rgba(180,214,255,0.18);
+      border: 2px solid rgba(255,255,255,0.55);
+    }
+    .scope-line {
+      position: absolute; background: rgba(255,255,255,0.5);
+    }
+    .scope-h { width: 100%; height: 1px; top: 50%; left: 0; }
+    .scope-v { width: 1px; height: 100%; left: 50%; top: 0; }
+
+    /* Trade UI */
+    #trade-ui {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.75);
+      display: none; align-items: center; justify-content: center;
+      z-index: 200; pointer-events: all;
+    }
+    #trade-ui.visible { display: flex; }
+    #trade-panel {
+      background: #0a1628; border: 2px solid #c9a84c55;
+      border-radius: 8px; padding: 24px; min-width: 500px; max-width: 600px;
+    }
+    #trade-panel h2 { color: #c9a84c; letter-spacing: 0.2em; font-size: 1.2rem; margin-bottom: 16px; text-align: center; }
+    #trade-sides { display: flex; gap: 20px; }
+    .trade-side { flex: 1; }
+    .trade-side h3 { font-size: 0.75rem; color: #889; text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 8px; }
+    .trade-item-list { min-height: 120px; background: #060f1a; border: 1px solid #1a2a3a; padding: 8px; border-radius: 4px; }
+    .trade-item { padding: 4px 8px; font-size: 0.8rem; color: #ddd; cursor: pointer; border-radius: 2px; display: flex; justify-content: space-between; }
+    .trade-item:hover { background: rgba(201,168,76,0.15); }
+    .trade-item.selected { background: rgba(201,168,76,0.25); }
+    #trade-actions { margin-top: 16px; display: flex; gap: 10px; justify-content: center; }
+    .trade-btn {
+      padding: 8px 20px; border: 1px solid; cursor: pointer;
+      font-family: Georgia, serif; letter-spacing: 0.15em; font-size: 0.8rem;
+      border-radius: 3px; transition: all 0.2s;
+    }
+    #trade-confirm { border-color: #c9a84c; color: #c9a84c; background: transparent; }
+    #trade-confirm:hover { background: rgba(201,168,76,0.2); }
+    #trade-cancel { border-color: #e74c3c; color: #e74c3c; background: transparent; }
+    #trade-cancel:hover { background: rgba(231,76,60,0.2); }
+    #trade-timer { text-align: center; margin-top: 8px; color: #889; font-size: 0.75rem; }
+
+    /* Death/Game over screen */
+    #death-screen, #win-screen {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.88);
+      display: none; align-items: center; justify-content: center;
+      flex-direction: column; z-index: 500;
+    }
+    #death-screen.visible { display: flex; }
+    #win-screen.visible { display: flex; }
+    #death-screen h1 { font-size: 3rem; color: #e74c3c; letter-spacing: 0.3em; text-shadow: 0 0 40px #e74c3c88; }
+    #win-screen h1 { font-size: 3rem; color: #c9a84c; letter-spacing: 0.3em; text-shadow: 0 0 40px #c9a84c88; }
+    .end-stats { margin-top: 20px; font-size: 0.9rem; color: #889; text-align: center; line-height: 2; }
+    .restart-btn {
+      margin-top: 30px; padding: 12px 32px;
+      border: 2px solid #c9a84c; color: #c9a84c;
+      background: transparent; cursor: pointer; font-size: 1rem;
+      font-family: Georgia, serif; letter-spacing: 0.2em;
+      transition: all 0.2s;
+    }
+    .restart-btn:hover { background: rgba(201,168,76,0.2); }
+
+    /* Context label (on ship, swimming, etc.) */
+    #context-label {
+      position: absolute; top: 92px; left: 50%; transform: translateX(-50%);
+      font-size: 0.62rem; color: #8899aa; letter-spacing: 0.15em; text-transform: uppercase;
+    }
+
+    /* Battle map */
+    #minimap-shell {
+      position: absolute; top: 54px; right: 16px;
+      width: 176px; z-index: 105;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    #minimap-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 7px 10px; border-radius: 10px;
+      background: rgba(4, 14, 28, 0.78);
+      border: 1px solid rgba(126, 172, 220, 0.22);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+    }
+    #minimap-title {
+      font-size: 0.62rem; color: #d9e9ff; letter-spacing: 0.12em; text-transform: uppercase;
+    }
+    #minimap-toggle {
+      font-size: 0.58rem; color: #8fb6df; letter-spacing: 0.12em; text-transform: uppercase;
+    }
+    #minimap {
+      position: relative;
+      width: 176px; height: 176px; border-radius: 18px; overflow: hidden;
+      background:
+        radial-gradient(circle at 30% 28%, rgba(74, 118, 173, 0.28), transparent 35%),
+        linear-gradient(180deg, rgba(7, 26, 50, 0.95), rgba(5, 16, 30, 0.9));
+      border: 1px solid rgba(126, 172, 220, 0.24);
+      box-shadow: 0 16px 42px rgba(0, 0, 0, 0.34);
+    }
+    #minimap::after {
+      content: '';
+      position: absolute; inset: 0;
+      background:
+        linear-gradient(transparent 49%, rgba(170, 208, 255, 0.08) 50%, transparent 51%),
+        linear-gradient(90deg, transparent 49%, rgba(170, 208, 255, 0.08) 50%, transparent 51%);
+      pointer-events: none;
+    }
+    #minimap canvas { width: 100%; height: 100%; }
+
+    #map-overlay {
+      position: fixed; inset: 0;
+      display: none; align-items: center; justify-content: center;
+      background:
+        radial-gradient(circle at center, rgba(22, 40, 68, 0.22), rgba(2, 6, 14, 0.78)),
+        rgba(0, 0, 0, 0.45);
+      z-index: 230;
+      pointer-events: none;
+    }
+    #map-overlay.visible { display: flex; }
+    #map-panel {
+      position: relative;
+      width: min(86vw, 900px);
+      aspect-ratio: 1;
+      border-radius: 28px;
+      overflow: hidden;
+      border: 1px solid rgba(151, 195, 241, 0.26);
+      background:
+        radial-gradient(circle at 50% 20%, rgba(48, 86, 132, 0.26), transparent 35%),
+        linear-gradient(180deg, rgba(8, 19, 38, 0.96), rgba(5, 12, 24, 0.96));
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+    }
+    #map-canvas {
+      width: 100%; height: 100%; display: block;
+    }
+    #map-panel::after {
+      content: '';
+      position: absolute; inset: 0;
+      background:
+        linear-gradient(transparent 49%, rgba(170, 208, 255, 0.06) 50%, transparent 51%),
+        linear-gradient(90deg, transparent 49%, rgba(170, 208, 255, 0.06) 50%, transparent 51%);
+      pointer-events: none;
+    }
+    #map-meta {
+      position: absolute; top: 18px; left: 22px; right: 22px;
+      display: flex; align-items: center; justify-content: space-between;
+      z-index: 1;
+    }
+    #map-title {
+      font-size: 0.92rem; color: #eef6ff; letter-spacing: 0.22em; text-transform: uppercase;
+      text-shadow: 0 2px 16px rgba(0, 0, 0, 0.46);
+    }
+    #map-subtitle {
+      font-size: 0.72rem; color: #9ec0e5; letter-spacing: 0.12em; text-transform: uppercase;
+      text-shadow: 0 2px 14px rgba(0, 0, 0, 0.42);
+    }
+    #map-help {
+      position: absolute; bottom: 18px; left: 22px;
+      font-size: 0.72rem; color: #c7def7; letter-spacing: 0.12em; text-transform: uppercase;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, 0.42);
+      z-index: 1;
+    }
+
+    /* Damage vignette */
+    #damage-vignette {
+      position: fixed; inset: 0;
+      background: radial-gradient(ellipse at center, transparent 40%, #e74c3c 100%);
+      opacity: 0; pointer-events: none; z-index: 90; transition: opacity 0.1s;
+    }
+
+    /* Knockback flash */
+    #knockback-flash {
+      position: fixed; inset: 0;
+      background: rgba(255,255,255,0.3);
+      opacity: 0; pointer-events: none; z-index: 91; transition: opacity 0.05s;
+    }
+
+    /* Controls hint */
+    #controls-hint {
+      display: none;
+    }
+
+    #island-banner {
+      position: absolute; top: 42%; left: 50%; transform: translate(-50%, -50%);
+      text-align: center; pointer-events: none; opacity: 0;
+      transition: opacity 0.55s ease;
+      z-index: 110;
+    }
+    #island-banner.visible { opacity: 1; }
+    #island-banner .ib-title {
+      font-size: 1.35rem; color: #f2e8c8; letter-spacing: 0.28em; text-transform: uppercase;
+      text-shadow: 0 0 28px rgba(201, 168, 76, 0.45);
+    }
+    #island-banner .ib-sub {
+      font-size: 0.68rem; color: #9aabbd; margin-top: 8px; letter-spacing: 0.22em;
+    }
+
+    #pocket-strip {
+      position: absolute; bottom: 86px; left: 50%; transform: translateX(-50%);
+      max-width: min(760px, 94vw);
+      padding: 7px 16px; border-radius: 10px;
+      font-size: 0.64rem; letter-spacing: 0.1em; color: #b8c8dc;
+      background: rgba(4, 14, 28, 0.78);
+      border: 1px solid rgba(126, 172, 220, 0.22);
+      pointer-events: none;
+      text-align: center;
+      z-index: 99;
+    }
+
+    #treasure-chart {
+      position: absolute;
+      left: 20px;
+      bottom: 118px;
+      width: 224px;
+      display: none;
+      flex-direction: column;
+      gap: 7px;
+      padding: 9px;
+      border-radius: 8px;
+      background: rgba(29, 20, 10, 0.84);
+      border: 1px solid rgba(201, 168, 76, 0.34);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+      pointer-events: none;
+      z-index: 104;
+    }
+    #treasure-chart.visible { display: flex; }
+    #treasure-chart-canvas {
+      width: 100%;
+      height: 144px;
+      display: block;
+      border-radius: 5px;
+      background: #d8bd7a;
+      border: 1px solid rgba(77, 48, 18, 0.42);
+    }
+    #treasure-chart-island {
+      font-size: 0.62rem;
+      color: #f0ddad;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    #treasure-chart-route {
+      font-size: 0.56rem;
+      color: #c9b886;
+      line-height: 1.32;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    @media (max-width: 720px) {
+      #health-bar-wrap {
+        left: 16px;
+        bottom: 72px;
+      }
+      #ammo-display {
+        left: 16px;
+        bottom: 18px;
+      }
+      #reload-indicator {
+        left: 18px;
+        bottom: 46px;
+      }
+      #weapon-slots {
+        right: 10px;
+        bottom: 14px;
+        gap: 4px;
+      }
+      .weapon-slot {
+        width: 50px;
+        height: 52px;
+        font-size: 0.48rem;
+      }
+      .weapon-slot .wname {
+        font-size: 0.5rem;
+      }
+      #ship-status {
+        right: 10px;
+        bottom: 84px;
+        min-width: 150px;
+        padding: 8px 10px;
+      }
+      #keg-status {
+        right: 10px;
+        bottom: 228px;
+        min-width: 144px;
+        padding: 7px 9px;
+      }
+      #pocket-strip {
+        bottom: 296px;
+        max-width: min(300px, 78vw);
+        padding: 6px 10px;
+        font-size: 0.55rem;
+        line-height: 1.25;
+        letter-spacing: 0.04em;
+      }
+      #treasure-chart {
+        left: 12px;
+        bottom: 140px;
+        width: 168px;
+        padding: 7px;
+      }
+      #treasure-chart-canvas {
+        height: 112px;
+      }
+      #treasure-chart-island {
+        font-size: 0.53rem;
+      }
+      #treasure-chart-route {
+        font-size: 0.49rem;
+      }
+    }
+
+    #pocket-wheel {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      display: none; flex-direction: column; align-items: center; gap: 8px;
+      padding: 10px;
+      pointer-events: auto;
+      z-index: 108;
+      user-select: none;
+    }
+    #pocket-wheel.visible { display: flex; }
+    #pocket-wheel .pw-hint {
+      font-size: 0.58rem; letter-spacing: 0.14em; color: #8fb6df; text-transform: uppercase;
+      text-shadow: 0 2px 10px #000;
+    }
+    #pocket-wheel-svg {
+      width: min(330px, 72vw);
+      height: min(330px, 72vw);
+      filter: drop-shadow(0 22px 34px rgba(0, 0, 0, 0.48));
+    }
+    .wheel-slice {
+      fill: rgba(9, 25, 44, 0.88);
+      stroke: rgba(214, 183, 105, 0.74);
+      stroke-width: 2;
+      cursor: pointer;
+      transition: fill 0.12s ease, stroke 0.12s ease, transform 0.12s ease;
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    .wheel-slice:hover,
+    .wheel-slice.active {
+      fill: rgba(37, 72, 98, 0.95);
+      stroke: rgba(246, 210, 118, 1);
+      transform: scale(1.025);
+    }
+    .wheel-center {
+      fill: rgba(2, 10, 20, 0.94);
+      stroke: rgba(214, 183, 105, 0.55);
+      stroke-width: 2;
+      pointer-events: none;
+    }
+    .wheel-icon,
+    .wheel-count,
+    .wheel-label {
+      pointer-events: none;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      fill: #f0ddb2;
+      text-shadow: 0 1px 7px #000;
+    }
+    .wheel-icon { font-size: 22px; }
+    .wheel-count { font-size: 13px; fill: #c5d5e5; }
+    .wheel-label { font-size: 7px; letter-spacing: 0.12em; text-transform: uppercase; fill: #8fb6df; }
+    #pocket-wheel-stats {
+      font-size: 0.66rem; color: #e8d5a3; font-family: ui-monospace, monospace;
+      text-align: center; line-height: 1.35;
+      padding: 6px 12px;
+      background: rgba(4, 14, 28, 0.72);
+      border: 1px solid rgba(126, 172, 220, 0.2);
+      border-radius: 8px;
+    }
+  </style>
+  <script type="module" crossorigin src="/assets/index-QGJ7jAIi.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/three-BtZRxu_S.js">
+</head>
+<body>
+
+  <!-- Loading screen -->
+  <div id="loading-screen">
+    <h1>PIRATES BR</h1>
+    <div class="subtitle">Skeleton Seas Live Now · Pirate Royale Queues Soon</div>
+    <div id="mode-cards">
+      <div class="mode-card live">
+        <div class="mode-badge">Live Now</div>
+        <h2>Skeleton Seas</h2>
+        <p>Fight pirate NPC crews and island skeletons. Sink a ship or wipe its active crew to scuttle it. Last crew afloat wins the round.</p>
+      </div>
+      <div class="mode-card soon">
+        <div class="mode-badge">Queues Soon</div>
+        <h2>Pirate Royale</h2>
+        <p>Real-player crews, queue-based lobbies, and a full battle royale pass are planned next. The live mode now is the NPC survival version.</p>
+      </div>
+    </div>
+    <button id="play-btn" style="display:none;margin-bottom:1.6rem;padding:12px 38px;border:2px solid #c9a84c;color:#c9a84c;background:transparent;cursor:pointer;font-size:1rem;font-family:Georgia,serif;letter-spacing:0.22em;text-transform:uppercase;transition:background 0.2s;" onmouseover="this.style.background='rgba(201,168,76,0.18)'" onmouseout="this.style.background='transparent'">Enter Skeleton Seas</button>
+    <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+    <div id="loading-text">Initializing...</div>
+  </div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="compass">
+      <div id="compass-tape">N &nbsp;&nbsp;&nbsp; NE &nbsp;&nbsp;&nbsp; E &nbsp;&nbsp;&nbsp; SE &nbsp;&nbsp;&nbsp; S &nbsp;&nbsp;&nbsp; SW &nbsp;&nbsp;&nbsp; W &nbsp;&nbsp;&nbsp; NW &nbsp;&nbsp;&nbsp; N</div>
+      <div id="compass-center"></div>
+    </div>
+
+    <div id="storm-info">
+      <div id="storm-phase">STORM PHASE 1</div>
+      <div id="storm-timer">3:00</div>
+      <div id="storm-warning">⚠ OUTSIDE STORM ZONE</div>
+    </div>
+
+    <div id="player-count">
+      <div class="num" id="ships-alive">16</div>
+      <div class="lbl">Crews Afloat</div>
+    </div>
+
+    <div id="gold-display">
+      <div class="num" id="gold-amount">0</div>
+      <div class="lbl">Gold</div>
+    </div>
+
+    <div id="island-banner"></div>
+
+    <div id="pocket-strip">Pocket: —</div>
+    <div id="treasure-chart">
+      <canvas id="treasure-chart-canvas" width="224" height="144"></canvas>
+      <div id="treasure-chart-island">No chart</div>
+      <div id="treasure-chart-route">Talk to a Gold Hoarder</div>
+    </div>
+
+    <div id="pocket-wheel">
+      <div class="pw-hint">Hold [V] — supply wheel</div>
+      <svg id="pocket-wheel-svg" viewBox="-100 -100 200 200" aria-label="Supply wheel">
+        <path class="wheel-slice" data-wheel-slot="0" d="M 0 0 L 0 -92 A 92 92 0 0 1 92 0 Z"></path>
+        <path class="wheel-slice" data-wheel-slot="1" d="M 0 0 L 92 0 A 92 92 0 0 1 0 92 Z"></path>
+        <path class="wheel-slice" data-wheel-slot="2" d="M 0 0 L 0 92 A 92 92 0 0 1 -92 0 Z"></path>
+        <path class="wheel-slice" data-wheel-slot="3" d="M 0 0 L -92 0 A 92 92 0 0 1 0 -92 Z"></path>
+        <circle class="wheel-center" r="30"></circle>
+        <text class="wheel-icon" x="42" y="-42">🍌</text>
+        <text class="wheel-count" data-wheel-count="0" x="54" y="-18">0</text>
+        <text class="wheel-label" x="47" y="-67">BANANA</text>
+        <text class="wheel-icon" x="42" y="42">🪵</text>
+        <text class="wheel-count" data-wheel-count="1" x="54" y="66">0</text>
+        <text class="wheel-label" x="47" y="18">PLANKS</text>
+        <text class="wheel-icon" x="-42" y="42">🥥</text>
+        <text class="wheel-count" data-wheel-count="2" x="-54" y="66">0</text>
+        <text class="wheel-label" x="-47" y="18">COCONUT</text>
+        <text class="wheel-icon" x="-42" y="-42">🥭</text>
+        <text class="wheel-count" data-wheel-count="3" x="-54" y="-18">0</text>
+        <text class="wheel-label" x="-47" y="-67">MANGO</text>
+        <text class="wheel-label" x="0" y="-4">POCKET</text>
+        <text class="wheel-label" x="0" y="8">ITEMS</text>
+      </svg>
+      <div id="pocket-wheel-stats"></div>
+    </div>
+
+    <div id="kill-feed"></div>
+
+    <div id="health-bar-wrap">
+      <div class="bar-label">Health</div>
+      <div class="bar-outer"><div class="bar-inner" id="health-fill" style="width:100%"></div></div>
+      <div class="bar-label" style="display:none;margin-top:4px">Armor</div>
+      <div class="bar-outer" style="display:none"><div class="bar-inner" id="armor-fill" style="width:0%"></div></div>
+    </div>
+
+    <div id="ship-status">
+      <h3>⚓ Ship Hull</h3>
+      <div class="hull-section">
+        <span>Bow</span>
+        <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-bow" style="width:100%"></div></div>
+        <span id="hull-bow-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#aaa">100%</span>
+      </div>
+      <div class="hull-section">
+        <span>Stern</span>
+        <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-stern" style="width:100%"></div></div>
+        <span id="hull-stern-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#aaa">100%</span>
+      </div>
+      <div class="hull-section">
+        <span>Port</span>
+        <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-port" style="width:100%"></div></div>
+        <span id="hull-port-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#aaa">100%</span>
+      </div>
+      <div class="hull-section">
+        <span>Starboard</span>
+        <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-starboard" style="width:100%"></div></div>
+        <span id="hull-starboard-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#aaa">100%</span>
+      </div>
+      <div style="margin-top:8px;font-size:0.65rem;color:#c9a84c" id="sail-status">Sails: Raised</div>
+      <div id="ship-upgrades"></div>
+    </div>
+
+    <div id="ammo-display"><span id="ammo-current">1</span><span style="color:#556;font-size:1.2rem">/</span><span id="ammo-reserve" style="font-size:1.2rem;color:#889">5</span></div>
+    <div id="reload-indicator">⟳ RELOADING</div>
+
+    <div id="weapon-slots">
+      <div class="weapon-slot active" id="slot-0">
+        <div class="wname">Blunderbuss</div>
+        <div class="ammo">1/5</div>
+        <div style="font-size:0.55rem;color:#556">[ 1 ]</div>
+      </div>
+      <div class="weapon-slot" id="slot-1">
+        <div class="wname">Sniper Rifle</div>
+        <div class="ammo">1/5</div>
+        <div style="font-size:0.55rem;color:#556">[ 2 ]</div>
+      </div>
+      <div class="weapon-slot" id="slot-2">
+        <div class="wname">Flintknock</div>
+        <div class="ammo">1/5</div>
+        <div style="font-size:0.55rem;color:#556">[ 3 ]</div>
+      </div>
+      <div class="weapon-slot" id="slot-3">
+        <div class="wname">Cutlass</div>
+        <div class="ammo">∞</div>
+        <div style="font-size:0.55rem;color:#556">[ 4 ]</div>
+      </div>
+    </div>
+
+    <div id="keg-status">
+      <div class="label">Powder Kegs</div>
+      <div class="value" id="keg-status-value">2 ready</div>
+    </div>
+
+    <div id="ship-inventory">
+      <div class="ship-inventory-item"><span class="ship-inventory-icon">🪵</span><span class="ship-inventory-label">Planks</span><span class="ship-inventory-qty" id="inv-wood">0</span></div>
+      <div class="ship-inventory-item"><span class="ship-inventory-icon">●</span><span class="ship-inventory-label">Cannonballs</span><span class="ship-inventory-qty" id="inv-cannonball">0</span></div>
+      <div class="ship-inventory-item"><span class="ship-inventory-icon">🔥</span><span class="ship-inventory-label">Firebombs</span><span class="ship-inventory-qty" id="inv-firebomb">0</span></div>
+      <div class="ship-inventory-item"><span class="ship-inventory-icon">⛓</span><span class="ship-inventory-label">Chainshot</span><span class="ship-inventory-qty" id="inv-chainshot">0</span></div>
+      <div class="ship-inventory-item"><span class="ship-inventory-icon">🍌</span><span class="ship-inventory-label">Bananas</span><span class="ship-inventory-qty" id="inv-banana">0</span></div>
+    </div>
+
+    <div id="interact-prompt">[X] Open Chest</div>
+    <div id="context-label"></div>
+    <div id="crosshair"></div>
+    <div id="hit-marker"><span></span><span></span><span></span><span></span></div>
+    <div id="damage-indicator-layer"></div>
+
+    <div id="scope-overlay">
+      <div id="scope-circle">
+        <div class="scope-line scope-h"></div>
+        <div class="scope-v scope-line"></div>
+      </div>
+    </div>
+
+    <div id="minimap-shell">
+      <div id="minimap-head">
+        <div id="minimap-title">Battle Map</div>
+        <div id="minimap-toggle">M</div>
+      </div>
+      <div id="minimap"><canvas id="minimap-canvas" width="176" height="176"></canvas></div>
+    </div>
+
+    <div id="controls-hint">
+      WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive off ship
+      <br>X at Sail Ring · Hoist / Angle Sails &nbsp;|&nbsp; C/Z · Hoist / Reef &nbsp;|&nbsp; Q/F · Trim
+      <br>X · Interact &nbsp;|&nbsp; Hold X at Anchor Capstan · Raise Anchor
+      <br>A/D at Helm · Steer &nbsp;|&nbsp; T · Trade Request
+      <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo
+      <br>LMB · Fire &nbsp;|&nbsp; SHIFT / RMB · Aim/Scope
+    </div>
+
+    <div id="damage-vignette"></div>
+    <div id="knockback-flash"></div>
+  </div>
+
+  <div id="map-overlay">
+    <div id="map-panel">
+      <div id="map-meta">
+        <div id="map-title">Battle Map</div>
+        <div id="map-subtitle">M or Esc to close</div>
+      </div>
+      <canvas id="map-canvas" width="1024" height="1024"></canvas>
+      <div id="map-help">Purple is storm. White circle is the safe zone.</div>
+    </div>
+  </div>
+
+  <!-- Trade UI -->
+  <div id="trade-ui">
+    <div id="trade-panel">
+      <h2>⚓ TRADE PARLEY</h2>
+      <div id="trade-sides">
+        <div class="trade-side">
+          <h3>Your Offer</h3>
+          <div class="trade-item-list" id="your-trade-items"></div>
+        </div>
+        <div class="trade-side">
+          <h3>Their Offer</h3>
+          <div class="trade-item-list" id="their-trade-items"></div>
+        </div>
+      </div>
+      <div id="trade-actions">
+        <button class="trade-btn" id="trade-confirm">CONFIRM TRADE</button>
+        <button class="trade-btn" id="trade-cancel">CANCEL</button>
+      </div>
+      <div id="trade-timer">Waiting for response...</div>
+    </div>
+  </div>
+
+  <!-- Death screen -->
+  <div id="death-screen">
+    <h1>SHIP SUNK</h1>
+    <div class="end-stats" id="death-stats"></div>
+    <button class="restart-btn" onclick="location.reload()">SAIL AGAIN</button>
+  </div>
+
+  <!-- Win screen -->
+  <div id="win-screen">
+    <h1>LAST SHIP STANDING</h1>
+    <div class="end-stats" id="win-stats"></div>
+    <button class="restart-btn" onclick="location.reload()">SAIL AGAIN</button>
+  </div>
+
+</body>
+</html>
