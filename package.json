@@ -7,25 +7,30 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
     "dev:client": "vite",
-    "dev:bots": "concurrently \"npm run dev:server:bots\" \"npm run dev:client\"",
-    "dev:server:bots": "tsx watch src/server/index.ts -- --bots --bot-count=6",
+    "dev:bots": "npm run dev",
+    "dev:server:bots": "npm run dev:server",
     "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.json --noEmit && vite build",
-    "start": "node dist/server/index.js --bots --bot-count=6"
+    "start": "node dist/server/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "npm run test:logic",
+    "test:logic": "node scripts/test-edge-gate.mjs && node scripts/test-water-entry.mjs && node scripts/test-barrel-flow.mjs && node scripts/test-kill-streak-powers.mjs && node scripts/test-wildlife-meat.mjs && node --import tsx scripts/test-ship-interactions.mjs && node --import tsx scripts/test-keg-placement.mjs && node --import tsx scripts/test-sea-rock-colliders.mjs && node --import tsx scripts/test-sea-rock-ship-damage.mjs && node --import tsx scripts/test-game-balance.mjs",
+    "test:browser": "node scripts/test-gameplay-smoke.mjs"
   },
   "dependencies": {
+    "simplex-noise": "^4.0.1",
     "three": "^0.160.0",
-    "ws": "^8.16.0",
     "uuid": "^9.0.1",
-    "simplex-noise": "^4.0.1"
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/three": "^0.160.0",
-    "@types/ws": "^8.5.10",
     "@types/uuid": "^9.0.7",
-    "typescript": "^5.3.0",
-    "vite": "^5.0.0",
+    "@types/ws": "^8.5.10",
     "concurrently": "^8.2.2",
-    "tsx": "^4.6.0"
+    "playwright": "^1.59.1",
+    "tsx": "^4.6.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0"
   }
 }
