@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { RenderQuality } from './Renderer.js';
 
 const OCEAN_VERT = /* glsl */`
   uniform float u_time;
@@ -86,6 +87,7 @@ const OCEAN_FRAG = /* glsl */`
   uniform vec3  u_sunDir;
   uniform vec3  u_cameraPos;
   uniform float u_stormIntensity;
+  uniform float u_underwaterDepth;
 
   varying vec2  v_uv;
   varying vec3  v_normal;
@@ -126,15 +128,16 @@ const OCEAN_FRAG = /* glsl */`
     // ── Fresnel reflectance ────────────────────────────────────
     float NdotV  = max(0.0, dot(N, V));
     float fresnel = 0.032 + (1.0 - 0.032) * pow(1.0 - NdotV, 5.0);
-    // sky reflection tint (blue-white)
-    vec3 reflCol = mix(vec3(0.55, 0.74, 0.92), vec3(1.0), 0.25);
+    // sky reflection tint: blue base with warm sunset streaks near the sun path
+    float sunPath = pow(max(0.0, dot(normalize(vec3(V.x, 0.12, V.z)), normalize(vec3(L.x, 0.12, L.z)))), 4.0);
+    vec3 reflCol = mix(vec3(0.42, 0.56, 0.86), vec3(1.0, 0.58, 0.34), 0.32 + sunPath * 0.38);
     base = mix(base, reflCol, fresnel * 0.62);
 
     // ── Sun specular (sharp highlight) ────────────────────────
     float NdotH  = max(0.0, dot(N, H));
     float spec   = pow(NdotH, 260.0) * 3.8;
     float glare  = pow(NdotH, 28.0)  * 0.18;
-    vec3 specCol = vec3(1.0, 0.97, 0.85) * (spec + glare);
+    vec3 specCol = mix(vec3(1.0, 0.92, 0.74), vec3(1.0, 0.40, 0.22), sunPath) * (spec + glare);
 
     // ── Diffuse sun ───────────────────────────────────────────
     float diff = max(0.0, dot(N, L));
@@ -155,7 +158,8 @@ const OCEAN_FRAG = /* glsl */`
 
     // ── Sub-surface scatter tint (wave flanks) ────────────────
     float sss = pow(max(0.0, dot(L, -N)), 3.0) * 0.12;
-    color += vec3(0.06, 0.18, 0.28) * sss;
+    color += mix(vec3(0.06, 0.18, 0.28), vec3(0.22, 0.09, 0.24), sunPath * 0.65) * sss;
+    color += vec3(0.95, 0.28, 0.18) * sunPath * fresnel * 0.18 * (1.0 - u_stormIntensity);
 
     color += specCol;
 
@@ -163,6 +167,18 @@ const OCEAN_FRAG = /* glsl */`
     vec3 stormTint = mix(vec3(1.0), vec3(0.42, 0.48, 0.55), u_stormIntensity);
     color *= stormTint;
     color = mix(color, color * vec3(0.72, 0.76, 0.82), u_stormIntensity * 0.55);
+
+    // From below, the ocean surface should read as a bright wavering ceiling instead
+    // of disappearing due to back-face culling or using the above-water shader.
+    float underwater = smoothstep(0.08, 1.8, u_underwaterDepth);
+    if (underwater > 0.0) {
+      float underside = step(u_cameraPos.y, v_worldPos.y + 0.05);
+      float caustic = noise(v_worldPos.xz * 0.055 + u_time * vec2(0.05, -0.035));
+      vec3 undersideColor = mix(vec3(0.02, 0.20, 0.31), vec3(0.20, 0.74, 0.86), fresnel * 0.72 + caustic * 0.12);
+      undersideColor += vec3(0.05, 0.18, 0.22) * pow(max(0.0, dot(N, L)), 2.0);
+      color = mix(color, mix(color, undersideColor, underside), underwater);
+      color *= mix(vec3(1.0), vec3(0.48, 0.78, 0.9), underwater * (1.0 - underside) * 0.55);
+    }
 
     gl_FragColor = vec4(color, 1.0);
   }
@@ -173,10 +189,11 @@ export class OceanRenderer {
   private material!: THREE.ShaderMaterial;
   private time = 0;
 
-  private readonly sunDir = new THREE.Vector3(0.5, 0.72, 0.3).normalize();
+  private readonly sunDir = new THREE.Vector3(0.62, 0.24, -0.74).normalize();
 
-  init(scene: THREE.Scene) {
-    const geo = new THREE.PlaneGeometry(3200, 3200, 96, 96);
+  init(scene: THREE.Scene, quality: RenderQuality = 'balanced') {
+    const segments = quality === 'low' ? 48 : quality === 'balanced' ? 64 : 96;
+    const geo = new THREE.PlaneGeometry(3200, 3200, segments, segments);
     geo.rotateX(-Math.PI / 2);
 
     this.material = new THREE.ShaderMaterial({
@@ -187,8 +204,9 @@ export class OceanRenderer {
         u_sunDir:    { value: this.sunDir.clone() },
         u_cameraPos: { value: new THREE.Vector3() },
         u_stormIntensity: { value: 0 },
+        u_underwaterDepth: { value: 0 },
       },
-      side: THREE.FrontSide,
+      side: THREE.DoubleSide,
     });
 
     this.mesh = new THREE.Mesh(geo, this.material);
@@ -209,5 +227,14 @@ export class OceanRenderer {
   setStormIntensity(intensity: number) {
     const t = Math.max(0, Math.min(1, intensity));
     this.material.uniforms.u_stormIntensity.value = t;
+  }
+
+  setSunDirection(direction: THREE.Vector3) {
+    this.sunDir.copy(direction).normalize();
+    (this.material.uniforms.u_sunDir.value as THREE.Vector3).copy(this.sunDir);
+  }
+
+  setUnderwaterDepth(depth: number) {
+    this.material.uniforms.u_underwaterDepth.value = Math.max(0, depth);
   }
 }
