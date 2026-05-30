@@ -17,12 +17,14 @@ export interface HullSections {
 
 export interface ShipKeg {
   id: string;
-  shipId: string;
+  shipId: string | null;
   position: Vec3;
-  localPosition: Vec3;
+  localPosition: Vec3 | null;
   section: keyof HullSections;
   plantedById: string;
   timer: number;
+  /** Kill-streak keg: much heavier hull damage when it detonates on a ship. */
+  mega?: boolean;
 }
 
 export type ShipUpgradeType = 'hull_reinforcement' | 'charged_cannons' | 'swift_sails';
@@ -38,7 +40,7 @@ export interface UpgradeStation {
   claimedByShipId: string | null;
 }
 
-export type IslandNpcRole = 'mysterious_stranger' | 'shipwright' | 'oracle' | 'gold_hoarder';
+export type IslandNpcRole = 'mysterious_stranger' | 'shipwright' | 'oracle' | 'gold_hoarder' | 'bartender';
 
 export interface IslandNpc {
   id: string;
@@ -109,6 +111,11 @@ export interface Player {
   knockbackVelocity: Vec3;
   isBot: boolean;
   kills: number;
+  /** Consecutive pirate kills since last death; PvE kills do not count. */
+  playerKillStreak: number;
+  superCannonballs: number;
+  megaKegs: number;
+  tsunamiCharges: number;
   gold: number;
   carryingChestId: string | null;
   treasureMapIslandId: string | null;
@@ -119,6 +126,10 @@ export interface Player {
   sailControlMode: SailControlMode | null;
   /** Climbing / stationed in the main mast crow's nest */
   atCrowNest: boolean;
+  /** Cutlass guard is held; frontal melee damage is mostly blocked. */
+  blocking: boolean;
+  /** 0-1 cutlass lunge charge progress, replicated for third-person windup. */
+  cutlassCharge: number;
   cannonIndex: number;
   nearChestId: string | null;
   nearShipId: string | null;
@@ -139,6 +150,9 @@ export interface Player {
   pocketWood: number;
   pocketCoconut: number;
   pocketMango: number;
+  pocketMeat: number;
+  /** Seconds remaining before the pocket wheel can be used again (one fruit at a time) */
+  pocketUseCooldown: number;
   hasShovel: boolean;
   nearBarrelId: string | null;
 }
@@ -162,7 +176,7 @@ export interface WeaponInstance {
 }
 
 // ── Projectiles ──────────────────────────────────────────────
-export type ProjectileType = 'bullet' | 'cannonball' | 'firebomb' | 'chainshot';
+export type ProjectileType = 'bullet' | 'cannonball' | 'firebomb' | 'chainshot' | 'tsunami';
 
 export interface Projectile {
   id: string;
@@ -178,6 +192,8 @@ export interface Projectile {
   knockback: number;   // 0 = none
   visualOnly: boolean;
   showImpact: boolean;
+  special?: 'super_cannonball' | 'tsunami';
+  weaponId?: WeaponId;
 }
 
 // ── Islands & World ──────────────────────────────────────────
@@ -198,6 +214,10 @@ export interface IslandProfile {
   tertiaryHillOffset: number;
   secondaryHillScale: number;
   tertiaryHillScale: number;
+  /** 0 = ordinary tropical isle, 1 = dramatic mountain peak. Boosts primary-hill height. */
+  peakBoost: number;
+  /** Identifier for the high-level shape archetype, used by the client for decoration. */
+  terrainStyle: 'tropical' | 'mountain' | 'plateau' | 'rocky' | 'twin' | 'archipelago';
 }
 
 export interface IslandDock {
@@ -212,6 +232,32 @@ export interface IslandDock {
   berthRotation: number;
 }
 
+export interface IslandTavern {
+  position: Vec3;
+  rotation: number;
+  /** Footprint width (x) and depth (z) in metres. */
+  width: number;
+  depth: number;
+  /** World position the bartender stands behind the bar. */
+  counterPosition: Vec3;
+}
+
+export interface IslandCave {
+  /** World position at the entrance opening. */
+  position: Vec3;
+  /** Rotation so the entrance faces outward (radians, yaw). */
+  rotation: number;
+  /** Mouth width and height in metres. */
+  width: number;
+  height: number;
+  /** How far the cave tunnel extends into the island. */
+  length: number;
+  /** Half-width of the walkable interior (perpendicular to the tunnel axis). */
+  interiorRadius: number;
+  /** World Y of the cave floor. Surface height inside the footprint is forced to this. */
+  floorY: number;
+}
+
 export interface Island {
   id: string;
   name: string;
@@ -219,6 +265,8 @@ export interface Island {
   radius: number;
   profile: IslandProfile;
   dock: IslandDock | null;
+  tavern: IslandTavern | null;
+  caves: IslandCave[];
   chests: TreasureChest[];
   barrels: IslandBarrel[];
   upgradeStations: UpgradeStation[];
@@ -232,6 +280,9 @@ export interface TreasureChest {
   value: number;
   carriedByPlayerId: string | null;
   storedOnShipId: string | null;
+  /** Loose chest dropped on a moving deck; follows this ship until picked up/stowed/sold. */
+  droppedOnShipId?: string | null;
+  droppedLocalPosition?: Vec3 | null;
   floating: boolean;
   loot: ItemStack[];
   /** When true, chest is underground until digProgress reaches 1 */
@@ -249,6 +300,45 @@ export interface IslandBarrel {
   loot: ItemStack[];
 }
 
+export type WildlifeType = 'crab' | 'chicken' | 'pig' | 'gull';
+
+export interface WildlifeAnimal {
+  id: string;
+  islandId: string;
+  type: WildlifeType;
+  position: Vec3;
+  spawnPosition: Vec3;
+  rotation: number;
+  velocity: Vec3;
+  health: number;
+  wanderAngle: number;
+  wanderTimer: number;
+}
+
+export interface SeaRockCollider {
+  /** Local-space offset from rock origin; rotated by SeaRock.rotation for world collision. */
+  localX: number;
+  localZ: number;
+  /** Horizontal cylinder radius. */
+  radius: number;
+  /** World-space vertical range relative to SeaRock.position.y. */
+  minY: number;
+  maxY: number;
+}
+
+export interface SeaRock {
+  id: string;
+  position: Vec3;
+  radius: number;
+  height: number;
+  rotation: number;
+  variant: 0 | 1 | 2;
+  /** Broadphase radius enclosing all cheap collider primitives. */
+  colliderBoundsRadius: number;
+  /** Low-cost "mesh collider" approximation used by server physics and hitscan. */
+  colliders: SeaRockCollider[];
+}
+
 export interface ItemStack {
   item: ItemType;
   qty: number;
@@ -263,6 +353,7 @@ export type ItemType =
   | 'wood_plank'
   | 'coconut'
   | 'mango'
+  | 'meat'
   | 'flintlock_ammo'
   | 'blunderbuss_ammo'
   | 'eye_ammo'
@@ -274,6 +365,11 @@ export interface StormState {
   phase: number;           // 0-indexed
   centerX: number;
   centerZ: number;
+  nextCenterX: number;     // target safe-zone center for the next shrink
+  nextCenterZ: number;
+  shrinkStartCenterX: number;
+  shrinkStartCenterZ: number;
+  shrinkStartRadius: number;
   safeRadius: number;      // current safe radius
   nextRadius: number;      // radius it's shrinking toward
   shrinking: boolean;
@@ -324,6 +420,8 @@ export interface GameState {
   projectiles: Projectile[];
   kegs: ShipKeg[];
   sharks: Shark[];
+  wildlife: WildlifeAnimal[];
+  seaRocks: SeaRock[];
   islands: Island[];
   tradeSessions: TradeSession[];
   winnerId: string | null;
@@ -331,6 +429,7 @@ export interface GameState {
 
 // ── Network messages ─────────────────────────────────────────
 export type MsgType =
+  // game-scoped messages (within a match)
   | 'join'
   | 'state_snapshot'
   | 'state_delta'
@@ -350,8 +449,77 @@ export type MsgType =
   | 'trade_result'
   | 'trade_action'
   | 'game_over'
+  | 'match_ended'
   | 'ping'
-  | 'pong';
+  | 'pong'
+  // lobby-scoped messages (server orchestration)
+  | 'welcome'
+  | 'set_name'
+  | 'create_party'
+  | 'join_party'
+  | 'leave_party'
+  | 'update_party_settings'
+  | 'start_match'
+  | 'queue_join'
+  | 'queue_leave'
+  | 'queue_update'
+  | 'solo_start'
+  | 'lobby_update'
+  | 'lobby_left'
+  | 'lobby_error'
+  | 'match_start'
+  | 'return_to_menu'
+  | 'play_again'
+  | 'stats_update';
+
+// ── Lobby payload shapes ─────────────────────────────────────
+export interface LobbyMember {
+  clientId: string;
+  name: string;
+  isHost: boolean;
+}
+
+export interface LobbyUpdatePayload {
+  code: string;
+  hostId: string;
+  members: LobbyMember[];
+  botFill: number;
+  capacity: number;
+  canStart: boolean;
+}
+
+export interface QueueUpdatePayload {
+  inQueue: number;
+  needed: number;
+  secondsRemaining: number;
+  /** True when the queue is locked in and a match is about to start. */
+  starting: boolean;
+}
+
+export interface PlayerStatsRecord {
+  name: string;
+  kills: number;
+  deaths: number;
+  wins: number;
+  matchesPlayed: number;
+  totalGold: number;
+  bestPlacement: number;
+}
+
+export interface WelcomePayload {
+  clientId: string;
+  stats: PlayerStatsRecord | null;
+  partyCapacity: number;
+}
+
+export interface MatchStartPayload {
+  matchId: string;
+  source: 'party' | 'queue';
+  expectedHumans: number;
+  botCount: number;
+  /** Set when the match was launched from a private crew party. Null for solo or public-queue. */
+  partyCode: string | null;
+}
 
 export interface NetMsg {
   type: MsgType;
@@ -402,6 +570,8 @@ export interface PlayerInput {
   trade: boolean;
   reload: boolean;
   placeKeg: boolean;
+  dropChest: boolean;
+  specialAttack: boolean;
   slot: WeaponSlot | null;
   cannonAmmo: CannonAmmoType | null;
   yaw: number;
@@ -409,6 +579,8 @@ export interface PlayerInput {
   /** Radial inventory: 0 banana, 1 wood to ship, 2 coconut, 3 mango */
   wheelIndex: number | null;
   useWheelItem: boolean;
+  /** Take-all shortcut while a barrel UI is open (rising-edge). */
+  barrelTakeAll: boolean;
   /** When set, interact (X) must resolve to this action if valid; otherwise no-op (bots send null). */
   interactIntent?: InteractIntent | null;
 }

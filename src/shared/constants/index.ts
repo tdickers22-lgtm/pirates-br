@@ -5,7 +5,7 @@ export const WORLD = {
   SIZE: 2000,
   HALF: 1000,
   ISLAND_COUNT: 10,
-  SHIP_COUNT: 16,
+  SHIP_COUNT: 10,
 } as const;
 
 // ── Physics ──────────────────────────────────────────────────
@@ -22,7 +22,8 @@ export const PLAYER = {
   MAX_HEALTH: 100,
   MOVE_SPEED: 5,
   SPRINT_MULT: 1.6,
-  SWIM_SPEED: 6.1,
+  SWIM_SPEED: 5.2,
+  SWIM_MAX_DEPTH: 42,
   JUMP_FORCE: 6,
   HEIGHT: 1.75,
   RADIUS: 0.35,
@@ -34,21 +35,23 @@ export const PLAYER = {
   RESPAWN_PROTECTION_TIME: 3.5,
   SHIP_EXIT_GRACE_TIME: 0.6,
   BANANA_HEAL: 25,
-  KILL_GOLD_REWARD: 25,
-  HEADSHOT_GOLD_BONUS: 15,
-  BOARDING_KILL_HEAL: 20,
-  BOARDING_GOLD_STEAL_CAP: 60,
+  KILL_GOLD_REWARD: 275,
+  HEADSHOT_GOLD_BONUS: 40,
+  BOARDING_KILL_HEAL: 25,
+  BOARDING_GOLD_STEAL_CAP: 180,
   STARTING_KEGS: 2,
   KEG_REPLENISH_COOLDOWN: 60,
 } as const;
 
 export const ECONOMY = {
-  GOLD_WIN_TARGET: 10000,
-  PLAYER_HIT_GOLD_MIN: 3,
-  PLAYER_HIT_GOLD_MAX: 14,
-  PLAYER_HIT_GOLD_RATIO: 0.08,
+  GOLD_WIN_TARGET: 9000,
+  PLAYER_HIT_GOLD_MIN: 6,
+  PLAYER_HIT_GOLD_MAX: 30,
+  PLAYER_HIT_GOLD_RATIO: 0.18,
   CHEST_VALUE_MIN: 650,
   CHEST_VALUE_MAX: 1450,
+  CHEST_SELL_MULTIPLIER: 1.65,
+  HOARDER_QUEST_CHEST_BONUS: 1.3,
 } as const;
 
 // ── Ships ────────────────────────────────────────────────────
@@ -63,15 +66,15 @@ export const SHIP_STATS: Record<ShipType, {
   mastCount: number;
 }> = {
   sloop: {
-    maxHull: 600, cannonCount: 2, maxSpeed: 11,
+    maxHull: 600, cannonCount: 2, maxSpeed: 15,
     turnRate: 0.7, width: 5, length: 12, height: 2.2, mastCount: 1,
   },
   brigantine: {
-    maxHull: 900, cannonCount: 4, maxSpeed: 9,
+    maxHull: 900, cannonCount: 4, maxSpeed: 13,
     turnRate: 0.45, width: 7, length: 16, height: 2.8, mastCount: 2,
   },
   galleon: {
-    maxHull: 1400, cannonCount: 8, maxSpeed: 6.5,
+    maxHull: 1400, cannonCount: 8, maxSpeed: 10,
     turnRate: 0.25, width: 10, length: 22, height: 3.5, mastCount: 3,
   },
 };
@@ -84,6 +87,7 @@ export const SHIP = {
   FIELD_REPAIR_INTERVAL: 2.5,
   FIELD_REPAIR_HP: 120,
   MAX_SAIL_ANGLE: Math.PI * 0.48,
+  SAIL_HOIST_RATE: 1.65,
   SAIL_TRIM_RATE: 1.55,
   RUDDER_SLEW: 3.25,
   RUDDER_DECAY: 4.1,
@@ -103,10 +107,12 @@ export const SHIP = {
   CANNON_YAW_ARC: Math.PI * 0.42,
   CANNON_PITCH_MIN: -0.16,
   CANNON_PITCH_MAX: 0.62,
-  CANNON_LAUNCH_SPEED: 48,
-  CANNON_LAUNCH_VERTICAL_BIAS: 1.2,
+  CANNON_LAUNCH_SPEED: 62,
+  CANNON_LAUNCH_VERTICAL_BIAS: 3.4,
+  CANNON_PLAYER_LAUNCH_PITCH_MIN: 0.08,
+  CANNON_PLAYER_LAUNCH_PITCH_MAX: 0.38,
   /** Seconds of ballistic arc before normal physics (must cover full trajectory) */
-  CANNON_PLAYER_FLIGHT_MAX: 8,
+  CANNON_PLAYER_FLIGHT_MAX: 10,
   KEG_FUSE_TIME: 10,
   KEG_PLACE_RANGE: 2.7,
   KEG_DIFFUSE_RANGE: 2.4,
@@ -120,6 +126,11 @@ export const SHIP = {
   SAIL_REPAIR_RATE: 0.42,
   SAIL_REPAIR_WOOD_INTERVAL: 0.85,
   CHAINSHOT_SAIL_DAMAGE: 0.38,
+  /** When chainshot hits a sail, the canvas physically collapses by this fraction
+   *  of the current hoist (multiplied by damage). Repairing at the sail station
+   *  hoists the canvas back up at SAIL_HOIST_RATE * SAIL_REPAIR_HOIST_FACTOR. */
+  CHAINSHOT_SAIL_DROP_FACTOR: 1.6,
+  SAIL_REPAIR_HOIST_FACTOR: 0.55,
 } as const;
 
 export const SHARK = {
@@ -128,17 +139,54 @@ export const SHARK = {
   SPAWN_SWIM_GRACE: 8,
   SPAWN_COOLDOWN_MIN: 12,
   SPAWN_COOLDOWN_MAX: 20,
-  /** Takes several gun hits — not a one-tap */
-  HEALTH: 280,
+  /** A few solid hits will down a shark — still threatening up close, no longer a slog. */
+  HEALTH: 110,
   /** Multiplier vs firearm hitscan damage */
-  GUN_DAMAGE_MULT: 0.48,
-  BITE_DAMAGE: 52,
+  GUN_DAMAGE_MULT: 0.9,
+  BITE_DAMAGE: 42,
   BITE_RANGE: 2.35,
   BITE_COOLDOWN: 2.35,
-  CHASE_SPEED: 5.8,
-  HIT_RADIUS: 1.15,
+  CHASE_SPEED: 5.4,
+  HIT_RADIUS: 1.25,
   SPAWN_MIN_DIST: 26,
   SPAWN_MAX_DIST: 52,
+} as const;
+
+export const WILDLIFE = {
+  GUN_DAMAGE_MULT: 1,
+  HEALTH: {
+    crab: 18,
+    chicken: 28,
+    pig: 52,
+    gull: 24,
+  },
+  SPEED: {
+    crab: 0.75,
+    chicken: 1.45,
+    pig: 0.95,
+    gull: 2.8,
+  },
+  HIT_RADIUS: {
+    crab: 0.34,
+    chicken: 0.38,
+    pig: 0.62,
+    gull: 0.42,
+  },
+  MEAT_DROP: {
+    crab: 1,
+    chicken: 1,
+    pig: 3,
+    gull: 1,
+  },
+} as const;
+
+export const SEA_ROCKS = {
+  COUNT: 36,
+  MIN_RADIUS: 8,
+  MAX_RADIUS: 30,
+  MIN_HEIGHT: 8,
+  MAX_HEIGHT: 42,
+  SHIP_DAMAGE_PER_SPEED: 18,
 } as const;
 
 // ── Ship Upgrades ────────────────────────────────────────────
@@ -174,12 +222,12 @@ export const WEAPONS: Record<WeaponId, {
     knockback: 4, melee: false, projectileSpeed: 220, scopeFov: 14,
   },
   blunderbuss: {
-    name: 'Blunderbuss', damage: 13, reloadTime: 2.0,
-    ammoMax: 1, reserveMax: 5, range: 20, spread: 6, pellets: 7,
-    knockback: 6, melee: false, projectileSpeed: 80, scopeFov: null,
+    name: 'Blunderbuss', damage: 17, reloadTime: 2.0,
+    ammoMax: 1, reserveMax: 5, range: 22, spread: 5.4, pellets: 7,
+    knockback: 7, melee: false, projectileSpeed: 80, scopeFov: null,
   },
   flintknock: {
-    name: 'Flintknock Pistol', damage: 30, reloadTime: 2.5,
+    name: 'Flintknock Pistol', damage: 42, reloadTime: 1.65,
     ammoMax: 1, reserveMax: 5, range: 50, spread: 0.4, pellets: 1,
     knockback: 28, melee: false, projectileSpeed: 100, scopeFov: null,
   },
@@ -201,20 +249,20 @@ export const WEAPONS: Record<WeaponId, {
 };
 
 // ── Storm ────────────────────────────────────────────────────
-// Fortnite-style: long first grace period, escalating urgency, lethal endgame.
+// Fortnite-style: readable first grace period, escalating urgency, lethal endgame.
 // Each phase: wait (safe zone static), then shrink to next radius.
 // dmgPerSec tuned ~4× gentler than early builds so the ring is threatening but not instant.
 export const STORM_PHASES = [
-  // Phase 1 — explore, loot, get your bearings (3 min wait)
-  { waitSec: 180, shrinkSec: 90,  startRadius: 950, endRadius: 680, dmgPerSec:  0.5 },
-  // Phase 2 — circle tightens, time to sail inward (2 min wait)
-  { waitSec: 120, shrinkSec: 60,  startRadius: 680, endRadius: 480, dmgPerSec:  1.2 },
-  // Phase 3 — urgency kicks in (90 s wait)
-  { waitSec:  90, shrinkSec: 45,  startRadius: 480, endRadius: 320, dmgPerSec:  2 },
+  // Phase 1 — explore, loot, get your bearings
+  { waitSec: 150, shrinkSec: 85,  startRadius: 950, endRadius: 680, dmgPerSec:  0.6 },
+  // Phase 2 — circle tightens, time to sail inward
+  { waitSec: 105, shrinkSec: 55,  startRadius: 680, endRadius: 480, dmgPerSec:  1.3 },
+  // Phase 3 — urgency kicks in
+  { waitSec:  80, shrinkSec: 45,  startRadius: 480, endRadius: 320, dmgPerSec:  2.2 },
   // Phase 4 — getting spicy (60 s wait)
-  { waitSec:  60, shrinkSec: 35,  startRadius: 320, endRadius: 190, dmgPerSec:  3.5 },
+  { waitSec:  55, shrinkSec: 35,  startRadius: 320, endRadius: 190, dmgPerSec:  3.8 },
   // Phase 5 — danger zone (45 s wait)
-  { waitSec:  45, shrinkSec: 25,  startRadius: 190, endRadius:  95, dmgPerSec:  5.5 },
+  { waitSec:  40, shrinkSec: 25,  startRadius: 190, endRadius:  95, dmgPerSec:  5.8 },
   // Phase 6 — very dangerous (30 s wait)
   { waitSec:  30, shrinkSec: 20,  startRadius:  95, endRadius:  40, dmgPerSec:  8.5 },
   // Phase 7 — endgame, lethal outside (15 s wait)
@@ -243,6 +291,7 @@ export const BARREL_LOOT_TABLE = [
   { item: 'banana' as const,         weight: 22, minQty: 1, maxQty: 3 },
   { item: 'coconut' as const,        weight: 18, minQty: 1, maxQty: 2 },
   { item: 'mango' as const,          weight: 18, minQty: 1, maxQty: 2 },
+  { item: 'meat' as const,           weight: 8,  minQty: 1, maxQty: 2 },
   { item: 'wood_plank' as const,     weight: 20, minQty: 1, maxQty: 3 },
   { item: 'cannonball' as const,     weight: 14, minQty: 2, maxQty: 6 },
   { item: 'firebomb_ball' as const,  weight: 6,  minQty: 1, maxQty: 1 },
@@ -251,9 +300,12 @@ export const BARREL_LOOT_TABLE = [
 
 export const POCKET = {
   FRUIT_HEAL: 22,
+  MEAT_HEAL: 36,
   DIG_RATE: 0.42,
+  /** Seconds between pocket-wheel uses (eat one fruit at a time) */
+  USE_COOLDOWN: 0.85,
 } as const;
 
 // ── Tick rate ────────────────────────────────────────────────
-export const SERVER_TICK_MS = 16;  // ~60 Hz
-export const SNAPSHOT_RATE = 2;    // 30 Hz snapshots; clients interpolate render motion
+export const SERVER_TICK_MS = 16;  // ~60 Hz physics
+export const SNAPSHOT_RATE = 2;    // 30 Hz snapshots — halves JSON serialization & network load
