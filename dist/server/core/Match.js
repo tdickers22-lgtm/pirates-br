@@ -1,10 +1,6 @@
-import { createReadStream, existsSync, statSync } from 'node:fs';
-import { createServer } from 'node:http';
-import { extname, join, normalize } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
-import { SERVER_TICK_MS, SNAPSHOT_RATE, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_UPGRADES, SHIP_STATS, WEAPONS, WORLD } from '../../shared/constants/index.js';
+import { SERVER_TICK_MS, SNAPSHOT_RATE, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_UPGRADES, SHIP_STATS, WEAPONS, WORLD, WILDLIFE } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import { PhysicsSystem } from '../systems/PhysicsSystem.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
@@ -12,29 +8,31 @@ import { StormSystem } from '../systems/StormSystem.js';
 import { IslandSystem } from '../systems/IslandSystem.js';
 import { TradingSystem } from '../systems/TradingSystem.js';
 import { BotSystem } from '../systems/BotSystem.js';
-import { getNearestShipBoardingLadder, getIslandSurfacePoint, getIslandSurfaceY, isPointInsideIslandFootprint, dockLocalToWorld, randRange, randAngle, dist2D, angleWrap, getMainMastLocalZ, getCrowNestStandingY, getCrowNestLadderInteractionBounds, getSailStationLocal, } from '../../shared/utils/index.js';
+import { getNearestShipBoardingLadder, getIslandSurfacePoint, getIslandSurfaceY, isPointInsideIslandFootprint, dockLocalToWorld, randRange, randAngle, dist2D, angleWrap, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, intersectRaySeaRock, } from '../../shared/utils/index.js';
+import { findNearbyCannonIndex as findSharedNearbyCannonIndex, getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition, getSailControlLocal as getSharedSailControlLocal, isNearAnchor as isSharedNearAnchor, isNearCrowNestLadder as isSharedNearCrowNestLadder, isNearHelm as isSharedNearHelm, isNearSailStation as isSharedNearSailStation, toShipLocalPoint, toShipWorldPoint, } from '../../shared/interactions.js';
 const TEAM_COLORS = [
     0xFF4444, 0x44AAFF, 0x44FF88, 0xFFAA44,
     0xFF44FF, 0x44FFFF, 0xFFFF44, 0xFF8844,
     0x8844FF, 0x44FF44, 0xFF4488, 0x88FF44,
     0x4488FF, 0xFF8888, 0x88FFFF, 0xFFFF88,
 ];
-const PROJECT_ROOT = join(fileURLToPath(new URL('../../..', import.meta.url)));
-const CLIENT_DIST_ROOT = join(PROJECT_ROOT, 'dist/client');
-const MIME_TYPES = {
-    '.css': 'text/css; charset=utf-8',
-    '.html': 'text/html; charset=utf-8',
-    '.js': 'application/javascript; charset=utf-8',
-    '.json': 'application/json; charset=utf-8',
-    '.map': 'application/json; charset=utf-8',
-    '.png': 'image/png',
-    '.svg': 'image/svg+xml',
-    '.woff': 'font/woff',
-    '.woff2': 'font/woff2',
-};
-export class GameServer {
-    constructor() {
-        this.httpServer = createServer((req, res) => this.handleHttp(req, res));
+const SKELETON_WAVE_INITIAL_DELAY_MIN = 35;
+const SKELETON_WAVE_INITIAL_DELAY_MAX = 70;
+const SKELETON_WAVE_COOLDOWN_MIN = 120;
+const SKELETON_WAVE_COOLDOWN_MAX = 190;
+const SKELETON_WAVE_LINGER_SECONDS = 85;
+const SKELETON_DEFEAT_DESPAWN_SECONDS = 2.25;
+const SKELETON_ISLAND_ACTIVATION_MARGIN = 70;
+const SKELETON_PLAYER_WAKE_RADIUS = 38;
+const FULL_WORLD_SNAPSHOT_TICKS = SNAPSHOT_RATE * 6; // 5 Hz at the default 60 Hz tick / 30 Hz snapshot cadence
+const MAX_VOLATILE_BUFFERED_BYTES = 512 * 1024;
+const CUTLASS_CHARGE_TIME = 0.72;
+const CUTLASS_CHARGE_MIN_TAP = 0.02;
+const CUTLASS_LUNGE_COOLDOWN = 1.05;
+const CUTLASS_LUNGE_DAMAGE = 50;
+const CUTLASS_LUNGE_IMPULSE = 32;
+export class Match {
+    constructor(opts) {
         this.clients = new Map();
         this.playersById = new Map();
         this.shipsById = new Map();
@@ -42,6 +40,18 @@ export class GameServer {
         this.tickCount = 0;
         this.sharkSpawnCooldown = 0;
         this.configuredBotCount = 0;
+        this.tickInterval = null;
+        this.endedAt = null;
+        this.endReason = null;
+        this.endResultEmitted = false;
+        /** Tracks final stats at the moment of elimination so disconnect-after-elim still has stats. */
+        this.humanFinalStats = new Map();
+        /** Order of elimination — earliest first. Used for placement on match end. */
+        this.eliminationOrder = [];
+        /** Called once when the match definitively ends (winner found, last ship, or abandoned). */
+        this.onMatchEnd = null;
+        /** Called when an in-match client's WebSocket closes — lobby uses this to clean its session. */
+        this.onClientDisconnect = null;
         // Systems
         this.physics = new PhysicsSystem();
         this.weapons = new WeaponSystem();
@@ -51,24 +61,53 @@ export class GameServer {
         this.bots = new BotSystem();
         this.mapGen = new MapGenerator();
         this.skeletonHomes = new Map();
+        this.skeletonWaveTimers = new Map();
+        this.skeletonSpawnedAt = new Map();
+        this.skeletonDefeatedAt = new Map();
+        this.cutlassChargeByPlayer = new Map();
+        this.cutlassFireHeldByPlayer = new Map();
+        this.skeletonNameIndex = 1;
+        this.shipLastDamagedByPlayer = new Map();
         /** Per-player: previous frame had jump key held — used for reliable cannon self-launch edge detection. */
         this.lastJumpHeldByPlayer = new Map();
+        this.id = opts.matchId;
+        this.configuredBotCount = opts.botCount;
+        this.setupWorld(opts.botCount);
     }
-    init(port, botCount) {
-        this.configuredBotCount = botCount;
-        this.setupWorld(botCount);
-        this.wss = new WebSocketServer({ server: this.httpServer, path: '/ws' });
-        this.httpServer.listen(port, () => {
-            console.log(`[Server] HTTP + WebSocket listening on port ${port}`);
-        });
-        this.wss.on('connection', (ws) => this.onConnect(ws));
-        // Game loop
-        setInterval(() => this.tick(), SERVER_TICK_MS);
-        console.log(`[Server] Game started. Bots: ${botCount}`);
+    start() {
+        if (this.tickInterval)
+            return;
+        this.state.phase = 'playing';
+        this.tickInterval = setInterval(() => this.tick(), SERVER_TICK_MS);
+        console.log(`[Match ${this.id}] started — bots: ${this.configuredBotCount}`);
+    }
+    stop() {
+        if (this.tickInterval) {
+            clearInterval(this.tickInterval);
+            this.tickInterval = null;
+        }
+        for (const client of this.clients.values()) {
+            try {
+                if (client.ws.readyState === WebSocket.OPEN)
+                    client.ws.close(1000, 'match closed');
+            }
+            catch { }
+        }
+        this.clients.clear();
+    }
+    isPlaying() { return this.state?.phase === 'playing'; }
+    isEnded() { return this.state?.phase === 'ended'; }
+    endedAtMs() { return this.endedAt; }
+    humanCount() { return this.clients.size; }
+    /** Detach a client from the match (for return-to-menu) without destroying the match. */
+    detachClient(playerId) {
+        this.removeClient(playerId, /*closeWs*/ false);
     }
     setupWorld(botCount) {
         const islandList = this.mapGen.generateIslands();
         const spawns = this.mapGen.generateShipSpawns(islandList);
+        const wildlife = this.mapGen.generateWildlife(islandList);
+        const seaRocks = this.mapGen.generateSeaRocks(islandList, spawns);
         const ships = [];
         const players = [];
         // Create bot ships
@@ -79,17 +118,18 @@ export class GameServer {
             const ship = this.mapGen.buildShip(shipId, botId, spawn, TEAM_COLORS[i % TEAM_COLORS.length]);
             ships.push(ship);
             const bot = this.createPlayer(botId, `Pirate_${i + 1}`, shipId, true);
-            bot.position = {
-                x: spawn.position.x,
-                y: ship.position.y + SHIP_STATS[spawn.type].height + 0.5,
-                z: spawn.position.z,
-            };
+            bot.position = this.getRespawnDeckPosition(ship);
+            bot.rotation.x = ship.rotation;
+            bot.rotation.y = 0;
             bot.onShipId = shipId;
+            bot.state = 'alive';
+            bot.velocity = { x: 0, y: 0, z: 0 };
+            bot.knockbackVelocity = { x: 0, y: 0, z: 0 };
             players.push(bot);
             const diff = i < 5 ? 'easy' : i < 12 ? 'medium' : 'hard';
             this.bots.registerBot(bot, ship, diff);
         }
-        this.spawnIslandSkeletons(players, islandList);
+        this.setupSkeletonWaves(islandList);
         this.state = {
             phase: 'waiting',
             tick: 0,
@@ -99,27 +139,14 @@ export class GameServer {
             players,
             projectiles: [],
             kegs: [],
+            wildlife,
+            seaRocks,
             islands: islandList,
             tradeSessions: [],
             sharks: [],
             winnerId: null,
         };
         this.rebuildEntityIndexes();
-    }
-    resetWorld(botCount = this.configuredBotCount) {
-        this.physics = new PhysicsSystem();
-        this.weapons = new WeaponSystem();
-        this.storm = new StormSystem();
-        this.islands = new IslandSystem();
-        this.trading = new TradingSystem();
-        this.bots = new BotSystem();
-        this.mapGen = new MapGenerator();
-        this.skeletonHomes.clear();
-        this.lastJumpHeldByPlayer.clear();
-        this.sharkSpawnCooldown = 0;
-        this.t = 0;
-        this.tickCount = 0;
-        this.setupWorld(botCount);
     }
     createPlayer(id, name, shipId, isBot) {
         return {
@@ -138,6 +165,10 @@ export class GameServer {
             knockbackVelocity: { x: 0, y: 0, z: 0 },
             isBot,
             kills: 0,
+            playerKillStreak: 0,
+            superCannonballs: 0,
+            megaKegs: 0,
+            tsunamiCharges: 0,
             gold: 0,
             carryingChestId: null,
             treasureMapIslandId: null,
@@ -147,6 +178,8 @@ export class GameServer {
             atSails: false,
             sailControlMode: null,
             atCrowNest: false,
+            blocking: false,
+            cutlassCharge: 0,
             cannonIndex: 0,
             nearChestId: null,
             nearShipId: null,
@@ -165,6 +198,8 @@ export class GameServer {
             pocketWood: 0,
             pocketCoconut: 0,
             pocketMango: 0,
+            pocketMeat: 0,
+            pocketUseCooldown: 0,
             hasShovel: true,
             nearBarrelId: null,
         };
@@ -182,35 +217,6 @@ export class GameServer {
     getAliveShip(shipId) {
         const ship = this.getShip(shipId);
         return ship && ship.alive && !ship.sinking ? ship : null;
-    }
-    pruneDisconnectedHumans() {
-        const connectedPlayerIds = new Set(this.clients.keys());
-        this.state.ships = this.state.ships.filter((ship) => {
-            if (!ship.alive || ship.sinking)
-                return false;
-            const owner = this.playersById.get(ship.ownerId);
-            if (owner?.isBot && owner.state !== 'eliminated')
-                return true;
-            return connectedPlayerIds.has(ship.ownerId) || ship.crewIds.some((id) => connectedPlayerIds.has(id));
-        });
-        const liveShipIds = new Set(this.state.ships.map((ship) => ship.id));
-        this.state.players = this.state.players.filter((player) => {
-            const hasLiveShip = player.shipId === null || liveShipIds.has(player.shipId);
-            if (player.isBot)
-                return player.state !== 'eliminated' && hasLiveShip;
-            return connectedPlayerIds.has(player.id) && hasLiveShip;
-        });
-        const livePlayerIds = new Set(this.state.players.map((player) => player.id));
-        for (const ship of this.state.ships) {
-            ship.crewIds = ship.crewIds.filter((id) => livePlayerIds.has(id));
-        }
-        this.state.tradeSessions = this.state.tradeSessions.filter((session) => (livePlayerIds.has(session.initiatorId)
-            && livePlayerIds.has(session.targetPlayerId)
-            && liveShipIds.has(session.initiatorShipId)
-            && liveShipIds.has(session.targetShipId)));
-        this.state.kegs = this.state.kegs.filter((keg) => liveShipIds.has(keg.shipId));
-        this.state.shipsAlive = this.state.ships.filter((ship) => ship.alive && !ship.sinking).length;
-        this.rebuildEntityIndexes();
     }
     pickHumanSpawn(spawns) {
         let bestSpawn = null;
@@ -253,33 +259,13 @@ export class GameServer {
         return TEAM_COLORS.find((color) => !usedColors.has(color))
             ?? TEAM_COLORS[this.state.ships.length % TEAM_COLORS.length];
     }
-    shouldStartFreshMatchForConnection() {
-        const activeHuman = this.state.players.some((player) => !player.isBot && player.state !== 'eliminated');
-        return this.clients.size === 0 || this.state.phase === 'ended' || !activeHuman;
-    }
-    closeExistingClientsForFreshMatch() {
-        for (const client of this.clients.values()) {
-            client.ws.close();
-        }
-        this.clients.clear();
-    }
-    onConnect(ws) {
-        const startsFreshSoloMatch = this.shouldStartFreshMatchForConnection();
-        if (startsFreshSoloMatch) {
-            this.closeExistingClientsForFreshMatch();
-            this.resetWorld(this.configuredBotCount);
-        }
+    /**
+     * Add a human to this match. Lobby owns the WebSocket lifecycle (message routing,
+     * close handler) — it MUST call removeClient(playerId) on disconnect or detach.
+     */
+    addHumanClient(ws, name) {
         const playerId = uuid();
-        const client = { ws, playerId, lastInput: null, lastPing: Date.now() };
-        this.clients.set(playerId, client);
-        console.log(`[Server] Player connected: ${playerId}`);
-        this.pruneDisconnectedHumans();
-        // If the round ended, reset win state and give a fresh storm.
-        if (this.state.phase === 'ended') {
-            this.state.storm = this.storm.buildInitialState();
-        }
-        this.state.winnerId = null;
-        // Find a free spawn that is as far as possible from current ships.
+        const displayName = (name || '').trim().slice(0, 24) || 'Pirate';
         const spawns = this.mapGen.generateShipSpawns(this.state.islands);
         const spawn = this.pickHumanSpawn(spawns) ?? {
             position: { x: randRange(-600, 600), y: 0, z: randRange(-600, 600) },
@@ -290,9 +276,7 @@ export class GameServer {
         const ship = this.mapGen.buildShip(shipId, playerId, spawn, this.getNextTeamColor());
         ship.crewIds = [playerId];
         this.state.ships.push(ship);
-        const player = this.createPlayer(playerId, 'You', shipId, false);
-        // Try to spawn the player at a dock that is comfortably inside the initial storm circle.
-        // The ship is parked at the dock's berth so they can immediately board it.
+        const player = this.createPlayer(playerId, displayName, shipId, false);
         const spawnDock = this.pickSafeSpawnDock();
         if (spawnDock) {
             this.parkShipAtDock(ship, spawnDock);
@@ -301,7 +285,7 @@ export class GameServer {
                 y: spawnDock.respawnPoint.y + 0.2,
                 z: spawnDock.respawnPoint.z,
             };
-            player.onShipId = null; // player walks across the dock to board their ship
+            player.onShipId = null;
         }
         else {
             player.position = {
@@ -313,50 +297,167 @@ export class GameServer {
         }
         this.state.players.push(player);
         this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
-        this.state.phase = 'playing';
         this.rebuildEntityIndexes();
-        // Send initial snapshot
+        const client = {
+            ws,
+            playerId,
+            name: displayName,
+            lastInput: null,
+            lastPing: Date.now(),
+            joinedAt: Date.now(),
+            killsAtJoin: 0,
+            deathsAtJoin: 0,
+            consumedSeq: {
+                interact: -1,
+                trade: -1,
+                wheel: -1,
+                reload: -1,
+                jump: -1,
+                placeKeg: -1,
+                dropChest: -1,
+                special: -1,
+                cannonAmmo: -1,
+                slot: -1,
+                barrelTakeAll: -1,
+            },
+        };
+        this.clients.set(playerId, client);
+        const snapshot = this.buildSnapshot(true);
         this.send(ws, {
             type: 'join',
             ts: Date.now(),
-            payload: {
-                playerId,
-                shipId,
-                snapshot: this.buildSnapshot(),
-            },
+            payload: { playerId, shipId, snapshot, matchId: this.id },
         });
-        ws.on('message', (data) => {
+        console.log(`[Match ${this.id}] human joined: ${displayName} (${playerId.slice(0, 6)}); humans=${this.clients.size}`);
+        return { playerId, shipId, snapshot };
+    }
+    /**
+     * Lobby calls this on WS close OR when the client returns to menu.
+     * If closeWs=true the client's WS is also closed.
+     */
+    removeClient(playerId, closeWs = false) {
+        const client = this.clients.get(playerId);
+        if (!client)
+            return;
+        this.clients.delete(playerId);
+        const player = this.playersById.get(playerId);
+        if (player && !this.humanFinalStats.has(playerId)) {
+            this.humanFinalStats.set(playerId, {
+                name: player.name,
+                kills: player.kills,
+                deaths: player.state === 'eliminated' ? 1 : 0,
+                gold: player.gold,
+            });
+        }
+        else if (!player && client.name && !this.humanFinalStats.has(playerId)) {
+            this.humanFinalStats.set(playerId, {
+                name: client.name,
+                kills: 0,
+                deaths: 0,
+                gold: 0,
+            });
+        }
+        const removedShipIds = new Set(this.state.ships
+            .filter((ship) => ship.ownerId === playerId)
+            .map((ship) => ship.id));
+        for (const other of this.state.players) {
+            if (other.id === playerId || !other.onShipId || !removedShipIds.has(other.onShipId))
+                continue;
+            other.onShipId = null;
+            other.nearShipId = null;
+            other.state = other.state === 'eliminated' || other.state === 'respawning' ? other.state : 'swimming';
+            this.clearStationFlags(other);
+        }
+        this.state.ships = this.state.ships.filter(s => s.ownerId !== playerId);
+        this.state.players = this.state.players.filter(p => p.id !== playerId);
+        this.state.kegs = this.state.kegs.filter((keg) => !keg.shipId || !removedShipIds.has(keg.shipId));
+        this.state.tradeSessions = this.state.tradeSessions.filter((session) => (session.initiatorId !== playerId
+            && session.targetPlayerId !== playerId
+            && !removedShipIds.has(session.initiatorShipId)
+            && !removedShipIds.has(session.targetShipId)));
+        this.lastJumpHeldByPlayer.delete(playerId);
+        this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
+        this.rebuildEntityIndexes();
+        if (closeWs) {
             try {
-                const msg = JSON.parse(data.toString());
-                this.handleMessage(client, msg);
+                client.ws.close(1000, 'removed from match');
             }
             catch { }
-        });
-        ws.on('close', () => {
-            this.clients.delete(playerId);
-            const removedShipIds = new Set(this.state.ships
-                .filter((ship) => ship.ownerId === playerId)
-                .map((ship) => ship.id));
-            for (const other of this.state.players) {
-                if (other.id === playerId || !other.onShipId || !removedShipIds.has(other.onShipId))
-                    continue;
-                other.onShipId = null;
-                other.nearShipId = null;
-                other.state = other.state === 'eliminated' || other.state === 'respawning' ? other.state : 'swimming';
-                this.clearStationFlags(other);
-            }
-            this.state.ships = this.state.ships.filter(s => s.ownerId !== playerId);
-            this.state.players = this.state.players.filter(p => p.id !== playerId);
-            this.state.kegs = this.state.kegs.filter((keg) => !removedShipIds.has(keg.shipId));
-            this.state.tradeSessions = this.state.tradeSessions.filter((session) => (session.initiatorId !== playerId
-                && session.targetPlayerId !== playerId
-                && !removedShipIds.has(session.initiatorShipId)
-                && !removedShipIds.has(session.targetShipId)));
-            this.lastJumpHeldByPlayer.delete(playerId);
-            this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
-            this.rebuildEntityIndexes();
-            console.log(`[Server] Player disconnected: ${playerId}`);
-        });
+        }
+        console.log(`[Match ${this.id}] client removed: ${playerId.slice(0, 6)}; humans=${this.clients.size}`);
+        // If everyone left and we never officially ended, abandon the match.
+        if (this.clients.size === 0 && this.state.phase === 'playing') {
+            this.endMatchAbandoned();
+        }
+    }
+    /** Lobby forwards in-match game messages here. */
+    handleClientMessage(playerId, msg) {
+        const client = this.clients.get(playerId);
+        if (!client)
+            return;
+        this.handleMessage(client, msg);
+    }
+    endMatchAbandoned() {
+        if (this.endResultEmitted)
+            return;
+        this.state.phase = 'ended';
+        this.endedAt = Date.now();
+        this.endReason = 'abandoned';
+        this.emitMatchEnd();
+    }
+    emitMatchEnd() {
+        if (this.endResultEmitted)
+            return;
+        this.endResultEmitted = true;
+        const winnerPlayer = this.state.winnerId ? this.playersById.get(this.state.winnerId) ?? null : null;
+        const allHumanIds = new Set([
+            ...Array.from(this.humanFinalStats.keys()),
+            ...this.state.players.filter((p) => !p.isBot).map((p) => p.id),
+        ]);
+        const placements = [];
+        const seen = new Set();
+        const pushHuman = (playerId, isWinner) => {
+            if (seen.has(playerId))
+                return;
+            seen.add(playerId);
+            const live = this.playersById.get(playerId);
+            const final = this.humanFinalStats.get(playerId);
+            const name = live?.name ?? final?.name ?? this.clients.get(playerId)?.name ?? 'Pirate';
+            const kills = live?.kills ?? final?.kills ?? 0;
+            const deaths = final?.deaths ?? (live?.state === 'eliminated' ? 1 : 0);
+            const gold = live?.gold ?? final?.gold ?? 0;
+            placements.push({
+                playerId,
+                name,
+                kills,
+                deaths,
+                gold,
+                placement: placements.length + 1,
+                isWinner,
+            });
+        };
+        if (winnerPlayer && !winnerPlayer.isBot)
+            pushHuman(winnerPlayer.id, true);
+        const remainingLiving = this.state.players
+            .filter((p) => !p.isBot && !seen.has(p.id) && p.state !== 'eliminated')
+            .sort((a, b) => b.gold - a.gold);
+        for (const p of remainingLiving)
+            pushHuman(p.id, false);
+        for (const elimId of [...this.eliminationOrder].reverse()) {
+            if (allHumanIds.has(elimId))
+                pushHuman(elimId, false);
+        }
+        for (const id of allHumanIds)
+            pushHuman(id, false);
+        const result = {
+            matchId: this.id,
+            winnerId: this.state.winnerId,
+            winnerName: winnerPlayer?.name ?? null,
+            reason: this.endReason ?? 'last_ship',
+            humans: placements,
+        };
+        this.broadcast({ type: 'match_ended', ts: Date.now(), payload: result });
+        this.onMatchEnd?.(result);
     }
     handleMessage(client, msg) {
         switch (msg.type) {
@@ -377,6 +478,8 @@ export class GameServer {
         player.atSails = false;
         player.sailControlMode = null;
         player.atCrowNest = false;
+        player.blocking = false;
+        player.cutlassCharge = 0;
     }
     isStationOccupied(ship, station, playerId, cannonIndex = null) {
         return this.state.players.some((other) => {
@@ -444,11 +547,13 @@ export class GameServer {
         for (const player of this.state.players) {
             if (player.kegCooldown > 0)
                 player.kegCooldown = Math.max(0, player.kegCooldown - dt);
+            if (player.pocketUseCooldown > 0)
+                player.pocketUseCooldown = Math.max(0, player.pocketUseCooldown - dt);
         }
         // Apply player inputs
         for (const [, client] of this.clients) {
             if (client.lastInput) {
-                this.applyInput(client.playerId, client.lastInput, dt);
+                this.applyInput(client, client.lastInput, dt);
             }
         }
         for (const ship of this.state.ships) {
@@ -460,6 +565,17 @@ export class GameServer {
         }
         // Update bots
         this.bots.update(dt, this.t, this.state.players, this.state.ships, this.state.islands, this.state.storm, this.weapons);
+        // Resolve any personal-weapon shots fired by bots this tick.
+        for (const shot of this.bots.flushFirearmShots()) {
+            const shooter = this.playersById.get(shot.playerId);
+            if (!shooter || shooter.state === 'eliminated')
+                continue;
+            const ship = this.getAliveShip(shooter.shipId);
+            const traces = this.weapons.tryFire(shooter, ship, shot.yaw, shot.pitch, 0, { aiming: false, aimPoint: shot.aimPoint });
+            if (traces.length > 0)
+                this.resolveFirearmHits(shooter, traces);
+        }
+        this.updateSkeletonWaves(dt);
         this.updateIslandSkeletons(dt);
         this.processBotLooting();
         // Update weapon reloads
@@ -470,10 +586,11 @@ export class GameServer {
         this.state.projectiles.push(...newProjs);
         // Physics
         this.syncTreasureChests();
-        this.physics.update(dt, this.t, this.state.ships, this.state.players, this.state.projectiles, this.state.islands);
+        this.physics.update(dt, this.t, this.state.ships, this.state.players, this.state.projectiles, this.state.islands, this.state.seaRocks);
         this.relayPendingCombatEvents();
         this.syncTreasureChests();
         this.updateSharks(dt);
+        this.updateWildlife(dt);
         // Storm
         this.storm.update(dt, this.state.storm, this.state.ships, this.state.players);
         this.syncTreasureChests();
@@ -502,7 +619,7 @@ export class GameServer {
             const sections = [ship.hull.bow, ship.hull.stern, ship.hull.port, ship.hull.starboard];
             const avg = sections.reduce((sum, value) => sum + value, 0) / sections.length;
             if (sections.some((value) => value <= 0) || avg <= 0.18) {
-                this.startShipSinking(ship);
+                this.startShipSinking(ship, false, this.getRecentShipSinkAttackerId(ship));
             }
         }
         // Clean dead projectiles
@@ -514,12 +631,25 @@ export class GameServer {
         this.checkWinCondition();
         // Send snapshot/delta
         if (this.tickCount % SNAPSHOT_RATE === 0) {
-            const snap = this.buildSnapshot();
+            const includeStaticWorld = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0;
+            const snap = this.buildSnapshot(includeStaticWorld);
             this.broadcast({ type: 'state_snapshot', ts: Date.now(), payload: snap });
         }
     }
-    applyInput(playerId, input, dt) {
-        const player = this.getPlayer(playerId);
+    /**
+     * Edge-trigger gate for press-style inputs.
+     * Returns true at most once per unique input.seq for the given action key.
+     * Without this, server replays of `client.lastInput` every tick would re-fire
+     * one-shots like interact/trade/wheel use 60× per second.
+     */
+    consumeOneShot(client, action, seq) {
+        if (client.consumedSeq[action] === seq)
+            return false;
+        client.consumedSeq[action] = seq;
+        return true;
+    }
+    applyInput(client, input, dt) {
+        const player = this.getPlayer(client.playerId);
         if (!player || player.state === 'eliminated' || player.state === 'respawning')
             return;
         const ship = this.getAliveShip(player.onShipId);
@@ -529,44 +659,81 @@ export class GameServer {
         const cannonAim = ship && player.atCannon
             ? this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch)
             : null;
-        const prevJumpHeld = this.lastJumpHeldByPlayer.get(playerId) ?? false;
+        const prevJumpHeld = this.lastJumpHeldByPlayer.get(client.playerId) ?? false;
         const jumpEdge = input.jumpPressed || (!!input.jump && !prevJumpHeld);
-        this.lastJumpHeldByPlayer.set(playerId, !!input.jump);
+        this.lastJumpHeldByPlayer.set(client.playerId, !!input.jump);
         player.rotation.x = player.atHelm && ship ? ship.rotation : (cannonAim?.yaw ?? input.yaw);
         player.rotation.y = cannonAim?.pitch ?? input.pitch;
-        // Weapon switch
-        if (input.slot !== null && input.slot !== player.activeSlot) {
+        // Weapon switch — edge-triggered so a held slot key doesn't keep "switching" each tick.
+        if (input.slot !== null && input.slot !== player.activeSlot && this.consumeOneShot(client, 'slot', input.seq)) {
             player.activeSlot = input.slot;
         }
-        if (input.cannonAmmo) {
+        if (input.cannonAmmo && this.consumeOneShot(client, 'cannonAmmo', input.seq)) {
             player.selectedCannonAmmo = input.cannonAmmo;
         }
-        // Reload
-        if (input.reload) {
-            this.weapons.startReload(player);
+        if (input.dropChest && player.carryingChestId && this.consumeOneShot(client, 'dropChest', input.seq)) {
+            this.dropCarriedChest(player, true);
+            return;
         }
-        if (ship && player.atCannon && jumpEdge) {
+        // Reload (also blocked while a chest fills your hands)
+        if (input.reload && !player.carryingChestId && this.consumeOneShot(client, 'reload', input.seq)) {
+            const activeWeapon = player.weapons[player.activeSlot];
+            if (!activeWeapon || !WEAPONS[activeWeapon.weaponId].melee) {
+                this.weapons.startReload(player);
+            }
+        }
+        this.updateBlockingState(player, input);
+        if (ship && player.atCannon && jumpEdge && this.consumeOneShot(client, 'jump', input.seq)) {
             this.launchPlayerFromCannon(player, ship, cannonAim ?? this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch));
             return;
         }
-        if (input.placeKeg && ship && ship.id !== player.shipId && player.kegs > 0 && player.kegCooldown <= 0 && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest) {
-            const kegPlacement = this.getKegPlacement(player, ship);
+        if (input.specialAttack
+            && player.tsunamiCharges > 0
+            && !player.carryingChestId
+            && !player.atCannon
+            && !player.atHelm
+            && !player.atSails
+            && !player.atCrowNest
+            && this.consumeOneShot(client, 'special', input.seq)) {
+            this.fireTsunamiSpecial(player, input.yaw);
+            return;
+        }
+        const canPlaceNormalKeg = player.kegs > 0 && player.kegCooldown <= 0;
+        const canPlaceMegaKeg = player.megaKegs > 0;
+        if (input.placeKeg && (canPlaceMegaKeg || canPlaceNormalKeg) && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest && this.consumeOneShot(client, 'placeKeg', input.seq)) {
+            const kegPlacement = this.getKegPlacement(player, ship ?? null);
             if (kegPlacement) {
+                const useMegaKeg = player.megaKegs > 0;
                 this.state.kegs.push({
                     id: uuid(),
-                    shipId: ship.id,
+                    shipId: kegPlacement.shipId,
                     plantedById: player.id,
                     section: kegPlacement.section,
                     position: kegPlacement.position,
                     localPosition: kegPlacement.localPosition,
                     timer: SHIP.KEG_FUSE_TIME,
+                    mega: useMegaKeg,
                 });
-                player.kegs -= 1;
-                player.kegCooldown = player.kegs > 0 ? PLAYER.KEG_REPLENISH_COOLDOWN : 0;
+                if (useMegaKeg) {
+                    player.megaKegs = Math.max(0, player.megaKegs - 1);
+                    player.kegCooldown = Math.max(player.kegCooldown, 1.0);
+                }
+                else {
+                    player.kegs -= 1;
+                    player.kegCooldown = player.kegs > 0 ? PLAYER.KEG_REPLENISH_COOLDOWN : 0;
+                }
+            }
+        }
+        // Take-all from a nearby barrel (rising-edge). Independent of interact so the player
+        // can browse first via interact and then commit with this shortcut, or commit directly.
+        if (input.barrelTakeAll && this.consumeOneShot(client, 'barrelTakeAll', input.seq)) {
+            const barrelEvent = this.islands.tryTakeAllFromNearbyBarrel(player, this.state.islands, this.state.ships);
+            if (barrelEvent) {
+                this.broadcast({ type: 'barrel_opened', ts: Date.now(), payload: barrelEvent });
             }
         }
         // Interact (X key) — exit current station always wins
-        if (input.interact) {
+        if (input.interact && this.consumeOneShot(client, 'interact', input.seq)) {
             if (player.atCannon) {
                 player.atCannon = false;
                 return;
@@ -582,11 +749,14 @@ export class GameServer {
             }
             if (player.atCrowNest) {
                 player.atCrowNest = false;
+                if (ship)
+                    this.snapPlayerToCrowNestLadderBase(player, ship);
                 return;
             }
+            // Modern clients send the HUD-selected action. If that validation misses, do nothing:
+            // falling through to the legacy chain is what made one [X] press trigger a different station.
             if (input.interactIntent) {
-                if (this.tryInteractIntent(player, input, ship ?? null))
-                    return;
+                this.tryInteractIntent(player, input, ship ?? null);
                 return;
             }
             if (this.tryClimbIslandDockFromWater(player))
@@ -594,7 +764,7 @@ export class GameServer {
             if (this.returnPlayerByMermaid(player))
                 return;
             // Legacy (bots / old clients): fixed priority chain
-            const keg = ship ? this.getNearbyKeg(player, ship) : null;
+            const keg = this.getNearbyKeg(player, ship ?? null);
             if (keg) {
                 this.diffuseKeg(keg);
                 return;
@@ -671,7 +841,7 @@ export class GameServer {
             }
         }
         // Trade request
-        if (input.trade && ship) {
+        if (input.trade && ship && this.consumeOneShot(client, 'trade', input.seq)) {
             let nearest = null;
             let nearestDist = Infinity;
             for (const other of this.state.ships) {
@@ -696,10 +866,13 @@ export class GameServer {
         if (ship && player.onShipId === ship.id) {
             const stats = SHIP_STATS[ship.type];
             if (player.atSails) {
-                if (input.sailRaise)
-                    ship.sailHeight = Math.min(1, ship.sailHeight + 0.8 * dt);
-                if (input.sailLower)
-                    ship.sailHeight = Math.max(0, ship.sailHeight - 0.8 * dt);
+                // Chainshot keeps the sail capped at the integrity ceiling; you have to repair
+                // (interact + wood) to hoist the canvas back up past the damage line.
+                const integrityCap = ship.sailIntegrity;
+                if (input.sailRaise || input.forward)
+                    ship.sailHeight = Math.min(integrityCap, ship.sailHeight + SHIP.SAIL_HOIST_RATE * dt);
+                if (input.sailLower || input.back)
+                    ship.sailHeight = Math.max(0, ship.sailHeight - SHIP.SAIL_HOIST_RATE * dt);
                 if (input.sailLeft)
                     ship.sailAngle = Math.max(-SHIP.MAX_SAIL_ANGLE, ship.sailAngle - SHIP.SAIL_TRIM_RATE * dt);
                 if (input.sailRight)
@@ -714,14 +887,16 @@ export class GameServer {
                 && this.isNearAnchor(player, ship)) {
                 ship.anchorRaiseProgress = Math.min(1, ship.anchorRaiseProgress + dt / SHIP.ANCHOR_RAISE_TIME);
                 if (ship.anchorRaiseProgress >= 1) {
+                    // Anchor is fully raised — release the brake but keep progress at 1 so the HUD reads
+                    // "100% — Anchor Raised" until the player drops the anchor again. The drop path resets
+                    // progress back to 0; we never reset mid-frame here, which used to cause the "100% → 0%"
+                    // flicker the moment the raise completed.
                     ship.anchored = false;
-                    ship.anchorRaiseProgress = 0;
+                    ship.anchorRaiseProgress = 1;
                 }
             }
-            else if (!ship.anchored && ship.anchorRaiseProgress !== 0) {
-                ship.anchorRaiseProgress = 0;
-            }
-            // Repair torn sails (hold interact + wood at sail station)
+            // Repair torn sails (hold interact + wood at sail station). Repairing both
+            // restores rigging integrity and physically hoists the canvas back up.
             if (player.atSails && ship.sailIntegrity < 1 && input.interactHeld) {
                 const plankStack = ship.inventory.find(entry => entry.item === 'wood_plank' && entry.qty > 0);
                 if (plankStack) {
@@ -733,6 +908,9 @@ export class GameServer {
                         ship.sailIntegrity = Math.min(1, ship.sailIntegrity + 0.28);
                     }
                 }
+                // Continuous canvas hoist while at the sail station — independent of plank
+                // consumption so even a single plank visibly raises the canvas back.
+                ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + SHIP.SAIL_HOIST_RATE * SHIP.SAIL_REPAIR_HOIST_FACTOR * dt);
             }
             else if (!player.atSails) {
                 ship.sailRepairWoodTimer = 0;
@@ -745,7 +923,7 @@ export class GameServer {
                 if (input.right)
                     steerInput += 1;
                 if (input.forward)
-                    ship.sailHeight = Math.min(1, ship.sailHeight + 0.48 * dt);
+                    ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + 0.48 * dt);
                 if (input.back)
                     ship.sailHeight = Math.max(0, ship.sailHeight - 0.6 * dt);
                 const chainshotted = Date.now() / 1000 < ship.chainshottedUntil;
@@ -787,6 +965,11 @@ export class GameServer {
             player.velocity.x = 0;
             player.velocity.z = 0;
         }
+        else if (player.cannonBallistic) {
+            // In free ballistic flight after being launched from a cannon — physics drives
+            // motion. Don't run the on-foot/swim handlers (they would zero velocity.x/z
+            // every tick when no WASD is pressed, which is why launches went straight up).
+        }
         else {
             if (ship && player.onShipId === ship.id) {
                 this.armShipExitGrace(player, ship, input);
@@ -823,20 +1006,32 @@ export class GameServer {
                     wishY += 0.95;
                 if (input.sailLower)
                     wishY -= 0.95;
+                // While plunging from a fall/cannon launch, don't let upward swim input
+                // steal the plunge momentum. The player can still dive deeper or steer
+                // horizontally; once the plunge slows, jump becomes a swim-up again.
+                const plunging = player.velocity.y < -1.5;
+                if (plunging && wishY > 0)
+                    wishY = 0;
                 const swimLen = Math.sqrt(wishX * wishX + wishY * wishY + wishZ * wishZ);
                 if (swimLen > 0.001) {
                     const swimSpeed = PLAYER.SWIM_SPEED * (input.forward ? 1.06 : 1);
-                    player.velocity.x = (wishX / swimLen) * swimSpeed;
-                    player.velocity.y = (wishY / swimLen) * PLAYER.SWIM_SPEED * 0.92;
-                    player.velocity.z = (wishZ / swimLen) * swimSpeed;
+                    const targetVx = (wishX / swimLen) * swimSpeed;
+                    const targetVz = (wishZ / swimLen) * swimSpeed;
+                    const targetVy = (wishY / swimLen) * PLAYER.SWIM_SPEED * 0.92;
+                    // Blend toward swim input rather than replacing velocity outright. This
+                    // preserves cannon-launch / cliff-jump plunge momentum even if the player
+                    // is holding space when they hit the water — they slow first, then rise.
+                    const horizBlend = 1 - Math.exp(-dt * 9); // ~0.11 s response on X/Z
+                    const vertBlend = 1 - Math.exp(-dt * 3.5); // ~0.29 s response on Y
+                    player.velocity.x += (targetVx - player.velocity.x) * horizBlend;
+                    player.velocity.z += (targetVz - player.velocity.z) * horizBlend;
+                    player.velocity.y += (targetVy - player.velocity.y) * vertBlend;
                     player.position.x += player.velocity.x * dt;
                     player.position.z += player.velocity.z * dt;
                 }
-                else {
-                    player.velocity.x = 0;
-                    player.velocity.z = 0;
-                    player.velocity.y *= 0.82;
-                }
+                // No-input case is intentionally left to PhysicsSystem so cannon-launch and
+                // cliff-jump plunges keep their downward momentum. Killing velocity here at
+                // 0.82 per tick = 0.82^60/sec destroyed plunges in a single frame.
             }
             else {
                 const len = Math.sqrt(moveX * moveX + moveZ * moveZ) || 1;
@@ -862,7 +1057,7 @@ export class GameServer {
                 }
                 else {
                     for (const island of this.state.islands) {
-                        if (isPointInsideIslandFootprint(island, player.position.x, player.position.z, 1.0)) {
+                        if (isPointInsideIslandFootprint(island, player.position.x, player.position.z, 0)) {
                             grounded = verticalReady && Math.abs(player.position.y - getIslandSurfaceY(island, player.position.x, player.position.z)) < 0.24;
                             if (grounded)
                                 break;
@@ -888,49 +1083,14 @@ export class GameServer {
                 }
             }
         }
-        // Fire
-        if (input.fire) {
+        const cutlassHandled = this.updateCutlassAttack(player, input, dt);
+        // Fire (suppressed entirely while a treasure chest is in your hands — Sea-of-Thieves style)
+        if (!cutlassHandled && input.fire && !player.carryingChestId) {
             if (player.respawnProtectionTimer > 0) {
                 player.respawnProtectionTimer = 0;
             }
             const activeWeapon = player.weapons[player.activeSlot];
-            if (activeWeapon && WEAPONS[activeWeapon.weaponId].melee) {
-                if (!activeWeapon.reloading) {
-                    const hits = this.weapons.tryMeleeAttack(player, this.state.players, input.yaw);
-                    for (const hit of hits) {
-                        const target = this.getPlayer(hit.targetId);
-                        if (!target)
-                            continue;
-                        if (target.respawnProtectionTimer > 0 || target.state === 'respawning')
-                            continue;
-                        target.lastDamagedById = player.id;
-                        target.lastDamageWasHeadshot = false;
-                        target.health -= hit.damage;
-                        this.awardPlayerHitGold(player.id, hit.damage);
-                        this.notifyPlayerHit(player.id, {
-                            targetId: target.id,
-                            damage: hit.damage,
-                            position: {
-                                x: target.position.x,
-                                y: target.position.y + PLAYER.HEIGHT * 0.72,
-                                z: target.position.z,
-                            },
-                            kill: target.health <= 0,
-                            remainingHealth: Math.max(0, target.health),
-                            weaponId: activeWeapon.weaponId,
-                        });
-                        const dx = target.position.x - player.position.x;
-                        const dz = target.position.z - player.position.z;
-                        const len = Math.sqrt(dx * dx + dz * dz) || 1;
-                        target.knockbackVelocity.x += (dx / len) * hit.knockback;
-                        target.knockbackVelocity.y += hit.knockback * 0.2;
-                        target.knockbackVelocity.z += (dz / len) * hit.knockback;
-                    }
-                    activeWeapon.reloading = true;
-                    activeWeapon.reloadTimer = WEAPONS[activeWeapon.weaponId].reloadTime;
-                }
-            }
-            else {
+            if (!activeWeapon || !WEAPONS[activeWeapon.weaponId].melee) {
                 const activeWeapon = player.weapons[player.activeSlot];
                 const aimPoint = activeWeapon && !WEAPONS[activeWeapon.weaponId].melee
                     ? this.getFirearmAimPoint(player, ship ?? null, input, activeWeapon.weaponId)
@@ -944,7 +1104,152 @@ export class GameServer {
             }
         }
         this.tryDigChest(player, input, dt);
-        this.tryUsePocketWheel(player, ship ?? null, input);
+        this.tryUsePocketWheel(client, player, ship ?? null, input);
+    }
+    updateCutlassAttack(player, input, dt) {
+        const activeWeapon = player.weapons[player.activeSlot];
+        const isCutlass = !!activeWeapon && activeWeapon.weaponId === 'cutlass';
+        if (!isCutlass || player.carryingChestId || player.atCannon || player.atHelm || player.atSails || player.blocking) {
+            this.cutlassChargeByPlayer.delete(player.id);
+            this.cutlassFireHeldByPlayer.set(player.id, !!input.fire && isCutlass);
+            player.cutlassCharge = 0;
+            return false;
+        }
+        const wasHeld = this.cutlassFireHeldByPlayer.get(player.id) ?? false;
+        const previousCharge = this.cutlassChargeByPlayer.get(player.id) ?? 0;
+        this.cutlassFireHeldByPlayer.set(player.id, !!input.fire);
+        if (activeWeapon.reloading) {
+            if (!input.fire)
+                this.cutlassChargeByPlayer.delete(player.id);
+            player.cutlassCharge = 0;
+            return input.fire || wasHeld;
+        }
+        if (input.fire) {
+            if (player.respawnProtectionTimer > 0) {
+                player.respawnProtectionTimer = 0;
+            }
+            const charge = Math.min(CUTLASS_CHARGE_TIME, previousCharge + dt);
+            this.cutlassChargeByPlayer.set(player.id, charge);
+            player.cutlassCharge = charge / CUTLASS_CHARGE_TIME;
+            if (charge >= CUTLASS_CHARGE_TIME) {
+                this.performMeleeAttack(player, input.yaw, {
+                    damageMultiplier: CUTLASS_LUNGE_DAMAGE / WEAPONS.cutlass.damage,
+                    rangeMultiplier: 2.15,
+                    knockbackMultiplier: 2.35,
+                });
+                this.applyCutlassLunge(player, input.yaw);
+                activeWeapon.reloading = true;
+                activeWeapon.reloadTimer = CUTLASS_LUNGE_COOLDOWN;
+                this.cutlassChargeByPlayer.delete(player.id);
+                this.cutlassFireHeldByPlayer.set(player.id, false);
+                player.cutlassCharge = 0;
+            }
+            return true;
+        }
+        if (wasHeld && previousCharge >= CUTLASS_CHARGE_MIN_TAP) {
+            this.performMeleeAttack(player, input.yaw);
+            activeWeapon.reloading = true;
+            activeWeapon.reloadTimer = WEAPONS.cutlass.reloadTime;
+            this.cutlassChargeByPlayer.delete(player.id);
+            player.cutlassCharge = 0;
+            return true;
+        }
+        this.cutlassChargeByPlayer.delete(player.id);
+        player.cutlassCharge = 0;
+        return false;
+    }
+    performMeleeAttack(player, yaw, options) {
+        const activeWeapon = player.weapons[player.activeSlot];
+        if (!activeWeapon || !WEAPONS[activeWeapon.weaponId].melee)
+            return;
+        const hits = this.weapons.tryMeleeAttack(player, this.state.players, yaw, options);
+        for (const hit of hits) {
+            const target = this.getPlayer(hit.targetId);
+            if (!target)
+                continue;
+            if (target.respawnProtectionTimer > 0 || target.state === 'respawning')
+                continue;
+            const blockScale = this.getCutlassBlockScale(target, player);
+            const damage = hit.damage * blockScale;
+            const knockback = hit.knockback * (blockScale < 1 ? 0.32 : 1);
+            target.lastDamagedById = player.id;
+            target.lastDamageWasHeadshot = false;
+            target.health -= damage;
+            this.awardPlayerHitGold(player.id, damage);
+            this.notifyPlayerHit(player.id, {
+                targetId: target.id,
+                damage,
+                position: {
+                    x: target.position.x,
+                    y: target.position.y + PLAYER.HEIGHT * 0.72,
+                    z: target.position.z,
+                },
+                kill: target.health <= 0,
+                remainingHealth: Math.max(0, target.health),
+                weaponId: activeWeapon.weaponId,
+            });
+            this.notifyIncomingPlayerHit(target.id, {
+                attackerId: player.id,
+                attackerName: player.name,
+                damage,
+                position: {
+                    x: target.position.x,
+                    y: target.position.y + PLAYER.HEIGHT * 0.72,
+                    z: target.position.z,
+                },
+                sourcePosition: {
+                    x: player.position.x,
+                    y: player.position.y + PLAYER.HEIGHT * 0.72,
+                    z: player.position.z,
+                },
+                kill: target.health <= 0,
+                remainingHealth: Math.max(0, target.health),
+                weaponId: activeWeapon.weaponId,
+            });
+            const dx = target.position.x - player.position.x;
+            const dz = target.position.z - player.position.z;
+            const len = Math.sqrt(dx * dx + dz * dz) || 1;
+            target.knockbackVelocity.x += (dx / len) * knockback;
+            target.knockbackVelocity.y += knockback * 0.2;
+            target.knockbackVelocity.z += (dz / len) * knockback;
+        }
+    }
+    updateBlockingState(player, input) {
+        const activeWeapon = player.weapons[player.activeSlot];
+        player.blocking = !!activeWeapon
+            && activeWeapon.weaponId === 'cutlass'
+            && !activeWeapon.reloading
+            && input.aim
+            && !input.fire
+            && !player.carryingChestId
+            && !player.atCannon
+            && !player.atHelm
+            && !player.atSails
+            && player.state !== 'swimming';
+    }
+    getCutlassBlockScale(target, attacker) {
+        if (!target.blocking || target.state === 'swimming' || target.carryingChestId)
+            return 1;
+        const activeWeapon = target.weapons[target.activeSlot];
+        if (!activeWeapon || activeWeapon.weaponId !== 'cutlass')
+            return 1;
+        const dx = attacker.position.x - target.position.x;
+        const dz = attacker.position.z - target.position.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist < 0.001)
+            return 1;
+        const angleToAttacker = Math.atan2(dx, dz);
+        const facingDelta = Math.abs(angleWrap(angleToAttacker - target.rotation.x));
+        return facingDelta <= Math.PI * 0.58 ? 0.16 : 1;
+    }
+    applyCutlassLunge(player, yaw) {
+        const forwardX = Math.sin(yaw);
+        const forwardZ = Math.cos(yaw);
+        player.knockbackVelocity.x += forwardX * CUTLASS_LUNGE_IMPULSE;
+        player.knockbackVelocity.y += 1.4;
+        player.knockbackVelocity.z += forwardZ * CUTLASS_LUNGE_IMPULSE;
+        player.velocity.y = Math.max(player.velocity.y, 1.8);
+        player.shipBoundaryGraceTimer = Math.max(player.shipBoundaryGraceTimer, PLAYER.SHIP_EXIT_GRACE_TIME + 0.35);
     }
     tryDigChest(player, input, dt) {
         if (!player.nearChestId || !input.interactHeld)
@@ -965,37 +1270,59 @@ export class GameServer {
             }
         }
     }
-    tryUsePocketWheel(player, ship, input) {
+    tryUsePocketWheel(client, player, ship, input) {
         if (!input.useWheelItem || input.wheelIndex === null)
             return;
         if (player.state === 'eliminated' || player.state === 'respawning')
             return;
+        if (player.carryingChestId)
+            return;
+        if (player.pocketUseCooldown > 0)
+            return;
+        // Edge-trigger guard: same input replayed across ticks must not consume twice.
+        if (!this.consumeOneShot(client, 'wheel', input.seq))
+            return;
         const crewShip = ship ??
             this.getAliveShip(player.shipId);
         const ix = input.wheelIndex;
+        let consumed = false;
         if (ix === 0) {
             if (player.pocketBanana <= 0)
                 return;
             player.pocketBanana -= 1;
             player.health = Math.min(PLAYER.MAX_HEALTH, player.health + PLAYER.BANANA_HEAL);
+            consumed = true;
         }
         else if (ix === 1) {
             if (player.pocketWood <= 0 || !crewShip)
                 return;
             player.pocketWood -= 1;
             this.islands.addItemToShipInventory(crewShip, 'wood_plank', 1);
+            consumed = true;
         }
         else if (ix === 2) {
             if (player.pocketCoconut <= 0)
                 return;
             player.pocketCoconut -= 1;
             player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
+            consumed = true;
         }
         else if (ix === 3) {
-            if (player.pocketMango <= 0)
+            if (player.pocketMeat > 0) {
+                player.pocketMeat -= 1;
+                player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.MEAT_HEAL);
+            }
+            else if (player.pocketMango > 0) {
+                player.pocketMango -= 1;
+                player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
+            }
+            else {
                 return;
-            player.pocketMango -= 1;
-            player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
+            }
+            consumed = true;
+        }
+        if (consumed) {
+            player.pocketUseCooldown = POCKET.USE_COOLDOWN;
         }
     }
     getChestById(chestId) {
@@ -1017,6 +1344,8 @@ export class GameServer {
                     const carrier = this.getPlayer(chest.carriedByPlayerId);
                     if (!carrier || carrier.state === 'eliminated' || carrier.state === 'respawning') {
                         chest.carriedByPlayerId = null;
+                        chest.droppedOnShipId = null;
+                        chest.droppedLocalPosition = null;
                         chest.floating = true;
                         chest.position.y = 0.45;
                         continue;
@@ -1026,6 +1355,8 @@ export class GameServer {
                     chest.position.y = carrier.position.y + (carrier.state === 'swimming' ? 0.45 : 0.72);
                     chest.position.z = carrier.position.z - Math.cos(yaw) * 0.52 - Math.sin(yaw) * 0.36;
                     chest.storedOnShipId = null;
+                    chest.droppedOnShipId = null;
+                    chest.droppedLocalPosition = null;
                     chest.floating = false;
                     continue;
                 }
@@ -1033,6 +1364,8 @@ export class GameServer {
                     const ship = this.getShip(chest.storedOnShipId);
                     if (!ship || !ship.alive || ship.sinking) {
                         chest.storedOnShipId = null;
+                        chest.droppedOnShipId = null;
+                        chest.droppedLocalPosition = null;
                         chest.floating = true;
                         chest.position.y = 0.45;
                         continue;
@@ -1044,6 +1377,24 @@ export class GameServer {
                     const world = this.toShipWorld(localX, localZ, ship);
                     chest.position.x = world.x;
                     chest.position.y = ship.position.y + stats.height + 0.42;
+                    chest.position.z = world.z;
+                    chest.droppedOnShipId = null;
+                    chest.droppedLocalPosition = null;
+                    chest.floating = false;
+                    continue;
+                }
+                if (chest.droppedOnShipId && chest.droppedLocalPosition) {
+                    const ship = this.getShip(chest.droppedOnShipId);
+                    if (!ship || !ship.alive || ship.sinking) {
+                        chest.droppedOnShipId = null;
+                        chest.droppedLocalPosition = null;
+                        chest.floating = true;
+                        chest.position.y = 0.45;
+                        continue;
+                    }
+                    const world = this.toShipWorld(chest.droppedLocalPosition.x, chest.droppedLocalPosition.z, ship);
+                    chest.position.x = world.x;
+                    chest.position.y = ship.position.y + chest.droppedLocalPosition.y;
                     chest.position.z = world.z;
                     chest.floating = false;
                     continue;
@@ -1083,6 +1434,8 @@ export class GameServer {
         }
         chest.carriedByPlayerId = player.id;
         chest.storedOnShipId = null;
+        chest.droppedOnShipId = null;
+        chest.droppedLocalPosition = null;
         chest.floating = false;
         player.carryingChestId = chest.id;
         this.syncTreasureChests();
@@ -1107,6 +1460,8 @@ export class GameServer {
         const chest = found.chest;
         chest.carriedByPlayerId = null;
         chest.storedOnShipId = ship.id;
+        chest.droppedOnShipId = null;
+        chest.droppedLocalPosition = null;
         chest.floating = false;
         player.carryingChestId = null;
         if (!ship.treasureChestIds.includes(chest.id))
@@ -1119,7 +1474,7 @@ export class GameServer {
         });
         return true;
     }
-    dropCarriedChest(player) {
+    dropCarriedChest(player, announce = false) {
         if (!player.carryingChestId)
             return;
         const found = this.getChestById(player.carryingChestId);
@@ -1136,7 +1491,31 @@ export class GameServer {
             y: chest.floating ? 0.45 : player.position.y + 0.25,
             z: player.position.z,
         };
+        const deckShip = !chest.floating && player.onShipId ? this.getAliveShip(player.onShipId) : null;
+        if (deckShip) {
+            const local = this.toShipLocal(chest.position, deckShip);
+            chest.droppedOnShipId = deckShip.id;
+            chest.droppedLocalPosition = {
+                x: local.x,
+                y: chest.position.y - deckShip.position.y,
+                z: local.z,
+            };
+        }
+        else {
+            chest.droppedOnShipId = null;
+            chest.droppedLocalPosition = null;
+        }
+        const chestId = chest.id;
+        const value = chest.value;
         player.carryingChestId = null;
+        this.syncTreasureChests();
+        if (announce) {
+            this.broadcast({
+                type: 'chest_opened',
+                ts: Date.now(),
+                payload: { playerId: player.id, chestId, value, action: 'drop' },
+            });
+        }
     }
     getNearbyGoldHoarder(player) {
         let closest = null;
@@ -1159,7 +1538,7 @@ export class GameServer {
         if (player.carryingChestId) {
             return this.sellCarriedChest(player, hoarder.island);
         }
-        return this.grantTreasureMap(player);
+        return this.grantTreasureMap(player, hoarder.island.id);
     }
     sellCarriedChest(player, island) {
         const found = this.getChestById(player.carryingChestId);
@@ -1171,9 +1550,15 @@ export class GameServer {
         chest.opened = true;
         chest.carriedByPlayerId = null;
         chest.storedOnShipId = null;
+        chest.droppedOnShipId = null;
+        chest.droppedLocalPosition = null;
         chest.floating = false;
         player.carryingChestId = null;
-        player.gold += chest.value;
+        const fromActiveMap = player.treasureMapIslandId === found.island.id;
+        const saleValue = Math.round(chest.value
+            * ECONOMY.CHEST_SELL_MULTIPLIER
+            * (fromActiveMap ? ECONOMY.HOARDER_QUEST_CHEST_BONUS : 1));
+        player.gold += saleValue;
         this.broadcast({
             type: 'treasure_sold',
             ts: Date.now(),
@@ -1182,15 +1567,17 @@ export class GameServer {
                 playerName: player.name,
                 chestId: chest.id,
                 islandName: island.name,
-                gold: chest.value,
+                gold: saleValue,
+                baseGold: chest.value,
+                questBonus: fromActiveMap,
                 totalGold: player.gold,
             },
         });
-        this.grantTreasureMap(player);
+        this.grantTreasureMap(player, island.id);
         this.checkWinCondition();
         return true;
     }
-    grantTreasureMap(player) {
+    grantTreasureMap(player, excludeIslandId = null) {
         const isBuriedMapChest = (chest) => chest.buried
             && chest.digProgress < 1
             && !chest.opened
@@ -1202,10 +1589,12 @@ export class GameServer {
             player.treasureMapIslandId = null;
             return false;
         }
+        const eligible = candidates.filter((island) => island.id !== excludeIslandId);
+        const targetPool = eligible.length > 0 ? eligible : candidates;
         const current = player.treasureMapIslandId
-            ? candidates.find((island) => island.id === player.treasureMapIslandId)
+            ? targetPool.find((island) => island.id === player.treasureMapIslandId)
             : null;
-        const target = current ?? candidates
+        const target = current ?? targetPool
             .map((island) => ({
             island,
             distance: dist2D(player.position.x, player.position.z, island.position.x, island.position.z),
@@ -1229,7 +1618,7 @@ export class GameServer {
     updateKegs(dt) {
         for (const keg of this.state.kegs) {
             const ship = this.syncKegPosition(keg);
-            if (!ship || !ship.alive || ship.sinking) {
+            if (keg.shipId && (!ship || !ship.alive || ship.sinking)) {
                 keg.timer = 0;
                 continue;
             }
@@ -1241,16 +1630,17 @@ export class GameServer {
     }
     explodeKeg(keg) {
         this.syncKegPosition(keg);
-        const ship = this.getAliveShip(keg.shipId);
         const attacker = this.getPlayer(keg.plantedById);
-        if (ship) {
-            const splashSections = ['bow', 'stern', 'port', 'starboard'];
-            for (const section of splashSections) {
-                const damageRatio = section === keg.section ? SHIP.KEG_PRIMARY_DAMAGE_RATIO : SHIP.KEG_SPLASH_DAMAGE_RATIO;
-                this.physics.damageHullSection(ship, section, damageRatio);
+        const hullDamageMult = keg.mega ? 5 : 1;
+        const playerDamageMult = keg.mega ? 1.35 : 1;
+        for (const hit of this.getKegShipHits(keg)) {
+            this.markShipDamagedByPlayer(hit.ship.id, keg.plantedById);
+            for (const section of this.getHullSections()) {
+                const damageRatio = (section === hit.section ? SHIP.KEG_PRIMARY_DAMAGE_RATIO : SHIP.KEG_SPLASH_DAMAGE_RATIO) * hullDamageMult;
+                this.physics.damageHullSection(hit.ship, section, damageRatio);
             }
-            ship.onFire = true;
-            ship.fireTimer = Math.max(ship.fireTimer, SHIP.FIRE_DURATION);
+            hit.ship.onFire = true;
+            hit.ship.fireTimer = Math.max(hit.ship.fireTimer, SHIP.FIRE_DURATION);
         }
         for (const player of this.state.players) {
             if (player.state === 'eliminated' || player.state === 'respawning' || player.respawnProtectionTimer > 0)
@@ -1262,7 +1652,8 @@ export class GameServer {
             if (distance > SHIP.KEG_PLAYER_RADIUS)
                 continue;
             const damageScale = 1 - Math.min(1, distance / SHIP.KEG_PLAYER_RADIUS);
-            const damage = SHIP.KEG_PLAYER_MIN_DAMAGE + (SHIP.KEG_PLAYER_DAMAGE - SHIP.KEG_PLAYER_MIN_DAMAGE) * Math.pow(damageScale, 1.7);
+            const damage = (SHIP.KEG_PLAYER_MIN_DAMAGE
+                + (SHIP.KEG_PLAYER_DAMAGE - SHIP.KEG_PLAYER_MIN_DAMAGE) * Math.pow(damageScale, 1.7)) * playerDamageMult;
             player.lastDamagedById = attacker?.id ?? null;
             player.lastDamageWasHeadshot = false;
             player.health -= damage;
@@ -1280,6 +1671,20 @@ export class GameServer {
                     weaponId: 'powder_keg',
                 });
             }
+            this.notifyIncomingPlayerHit(player.id, {
+                attackerId: attacker?.id,
+                attackerName: attacker?.name ?? 'Powder Keg',
+                damage,
+                position: {
+                    x: player.position.x,
+                    y: player.position.y + PLAYER.HEIGHT * 0.72,
+                    z: player.position.z,
+                },
+                sourcePosition: { ...keg.position },
+                kill: player.health <= 0,
+                remainingHealth: Math.max(0, player.health),
+                weaponId: 'powder_keg',
+            });
             const force = Math.max(3.5, SHIP.KEG_BLAST_FORCE * Math.pow(damageScale, 1.2));
             const inv = distance > 0.001 ? 1 / distance : 0;
             player.knockbackVelocity.x += dx * inv * force;
@@ -1292,9 +1697,115 @@ export class GameServer {
             payload: {
                 position: { ...keg.position },
                 radius: SHIP.KEG_PLAYER_RADIUS,
+                mega: !!keg.mega,
             },
         });
         keg.timer = 0;
+    }
+    getKegShipHits(keg) {
+        if (keg.shipId) {
+            const attachedShip = this.getAliveShip(keg.shipId);
+            return attachedShip ? [{ ship: attachedShip, section: keg.section }] : [];
+        }
+        const hits = [];
+        for (const ship of this.state.ships) {
+            if (!ship.alive || ship.sinking)
+                continue;
+            const stats = SHIP_STATS[ship.type];
+            const local = this.toShipLocal(keg.position, ship);
+            const blastPadding = SHIP.KEG_PLAYER_RADIUS * 0.85;
+            if (Math.abs(local.x) > stats.width * 0.5 + blastPadding)
+                continue;
+            if (Math.abs(local.z) > stats.length * 0.5 + blastPadding)
+                continue;
+            hits.push({ ship, section: this.getHullSectionFromLocal(local) });
+        }
+        return hits;
+    }
+    getHullSectionFromLocal(local) {
+        return Math.abs(local.x) > Math.abs(local.z)
+            ? (local.x >= 0 ? 'starboard' : 'port')
+            : (local.z >= 0 ? 'bow' : 'stern');
+    }
+    getHullSections() {
+        return ['bow', 'stern', 'port', 'starboard'];
+    }
+    fireTsunamiSpecial(player, yaw) {
+        if (player.tsunamiCharges <= 0)
+            return;
+        player.tsunamiCharges = Math.max(0, player.tsunamiCharges - 1);
+        const dirX = Math.sin(yaw);
+        const dirZ = Math.cos(yaw);
+        const rightX = Math.cos(yaw);
+        const rightZ = -Math.sin(yaw);
+        const origin = {
+            x: player.position.x + dirX * 2.5,
+            y: Math.max(0.55, player.position.y + 0.25),
+            z: player.position.z + dirZ * 2.5,
+        };
+        const length = 520;
+        const baseWidth = 44;
+        this.weapons.queueProjectile({
+            id: uuid(),
+            type: 'tsunami',
+            ownerId: player.id,
+            ownerShipId: player.shipId,
+            position: { ...origin },
+            velocity: { x: dirX * 132, y: 0, z: dirZ * 132 },
+            alive: true,
+            age: 0,
+            maxAge: 3.9,
+            damage: 0,
+            knockback: 0,
+            visualOnly: true,
+            showImpact: false,
+            special: 'tsunami',
+        });
+        for (const target of this.state.players) {
+            if (target.id === player.id
+                || target.state === 'eliminated'
+                || target.state === 'respawning'
+                || target.respawnProtectionTimer > 0)
+                continue;
+            const dx = target.position.x - origin.x;
+            const dz = target.position.z - origin.z;
+            const along = dx * dirX + dz * dirZ;
+            if (along < -5 || along > length)
+                continue;
+            const across = Math.abs(dx * rightX + dz * rightZ);
+            const width = baseWidth * (1 - Math.min(0.42, along / length * 0.42));
+            if (across > width)
+                continue;
+            const lateralFalloff = 1 - Math.min(1, across / Math.max(1, width));
+            const forwardImpulse = 78 + lateralFalloff * 40;
+            this.clearStationFlags(target);
+            target.onShipId = null;
+            target.shipBoundaryGraceTimer = Math.max(target.shipBoundaryGraceTimer, PLAYER.SHIP_EXIT_GRACE_TIME + 1.2);
+            target.cannonBallistic = false;
+            target.cannonFlightTimer = 0;
+            target.knockbackVelocity.x += dirX * forwardImpulse;
+            target.knockbackVelocity.y += 7.5 + lateralFalloff * 3.5;
+            target.knockbackVelocity.z += dirZ * forwardImpulse;
+            target.position.x += dirX * 0.85;
+            target.position.z += dirZ * 0.85;
+        }
+        for (const ship of this.state.ships) {
+            if (!ship.alive || ship.sinking || ship.id === player.shipId)
+                continue;
+            const dx = ship.position.x - origin.x;
+            const dz = ship.position.z - origin.z;
+            const along = dx * dirX + dz * dirZ;
+            if (along < -10 || along > length)
+                continue;
+            const across = Math.abs(dx * rightX + dz * rightZ);
+            const width = baseWidth * 1.45;
+            if (across > width)
+                continue;
+            const falloff = 1 - Math.min(1, across / width);
+            ship.velocity.x += dirX * (18 + falloff * 14);
+            ship.velocity.z += dirZ * (18 + falloff * 14);
+            ship.angularVelocity += (across < 1 ? 0 : Math.sign(dx * rightX + dz * rightZ)) * 0.22 * falloff;
+        }
     }
     updateFieldRepairs(dt) {
         for (const ship of this.state.ships) {
@@ -1327,11 +1838,13 @@ export class GameServer {
         }
         return weakest && weakestValue < 0.98 ? weakest : null;
     }
-    getNearbyKeg(player, ship) {
+    getNearbyKeg(player, ship = null) {
         let closest = null;
         let closestDistance = SHIP.KEG_DIFFUSE_RANGE;
         for (const keg of this.state.kegs) {
-            if (keg.shipId !== ship.id || keg.timer <= 0)
+            if (ship && keg.shipId && keg.shipId !== ship.id)
+                continue;
+            if (keg.timer <= 0)
                 continue;
             this.syncKegPosition(keg);
             const dx = player.position.x - keg.position.x;
@@ -1371,41 +1884,72 @@ export class GameServer {
         }
     }
     getKegPlacement(player, ship) {
-        if (player.onShipId !== ship.id)
-            return null;
-        const stats = SHIP_STATS[ship.type];
-        const local = this.toShipLocal(player.position, ship);
-        if (Math.abs(local.x) > stats.width * 0.42 || Math.abs(local.z) > stats.length * 0.42)
-            return null;
-        const belowDeck = player.position.y < ship.position.y + stats.height - 0.25;
-        const section = Math.abs(local.x) > Math.abs(local.z)
-            ? (local.x >= 0 ? 'starboard' : 'port')
-            : (local.z >= 0 ? 'bow' : 'stern');
-        const clampedLocal = {
-            x: Math.max(-stats.width * 0.34, Math.min(stats.width * 0.34, local.x)),
-            z: Math.max(-stats.length * 0.34, Math.min(stats.length * 0.34, local.z)),
-        };
-        const world = this.toShipWorld(clampedLocal.x, clampedLocal.z, ship);
+        if (ship && player.onShipId === ship.id) {
+            const stats = SHIP_STATS[ship.type];
+            const local = this.toShipLocal(player.position, ship);
+            if (Math.abs(local.x) <= stats.width * 0.42 && Math.abs(local.z) <= stats.length * 0.42) {
+                const belowDeck = player.position.y < ship.position.y + stats.height - 0.25;
+                const section = this.getHullSectionFromLocal(local);
+                // Snap to gunwale / quarterdeck rail so kegs never sit on the open deck center (matches equipment staging).
+                const railX = Math.sign(local.x || 1) * stats.width * 0.41;
+                const railZ = Math.sign(local.z || 1) * stats.length * 0.18;
+                const preferRailX = Math.abs(local.x) >= Math.abs(local.z) * 0.55;
+                const snappedLocal = belowDeck
+                    ? {
+                        x: Math.max(-stats.width * 0.34, Math.min(stats.width * 0.34, local.x)),
+                        z: Math.max(-stats.length * 0.34, Math.min(stats.length * 0.34, local.z)),
+                    }
+                    : preferRailX
+                        ? { x: railX, z: Math.max(-stats.length * 0.36, Math.min(stats.length * 0.36, local.z)) }
+                        : { x: Math.max(-stats.width * 0.36, Math.min(stats.width * 0.36, local.x)), z: railZ };
+                const world = this.toShipWorld(snappedLocal.x, snappedLocal.z, ship);
+                return {
+                    shipId: ship.id,
+                    section,
+                    localPosition: {
+                        x: snappedLocal.x,
+                        y: belowDeck ? 0.55 : stats.height + 0.14,
+                        z: snappedLocal.z,
+                    },
+                    position: {
+                        x: world.x,
+                        y: ship.position.y + (belowDeck ? 0.55 : stats.height + 0.14),
+                        z: world.z,
+                    },
+                };
+            }
+        }
+        const forwardX = Math.sin(player.rotation.x);
+        const forwardZ = Math.cos(player.rotation.x);
+        const placeX = player.position.x + forwardX * 1.25;
+        const placeZ = player.position.z + forwardZ * 1.25;
+        let placeY = player.state === 'swimming' || player.position.y < 1.1
+            ? 0.45
+            : player.position.y + 0.08;
+        for (const island of this.state.islands) {
+            if (!isPointInsideIslandFootprint(island, placeX, placeZ, 1.5))
+                continue;
+            placeY = getIslandSurfaceY(island, placeX, placeZ) + 0.22;
+            break;
+        }
         return {
-            section,
-            localPosition: {
-                x: clampedLocal.x,
-                y: belowDeck ? 0.55 : stats.height + 0.14,
-                z: clampedLocal.z,
-            },
+            shipId: null,
+            section: 'bow',
+            localPosition: null,
             position: {
-                x: world.x,
-                y: ship.position.y + (belowDeck ? 0.55 : stats.height + 0.14),
-                z: world.z,
+                x: placeX,
+                y: placeY,
+                z: placeZ,
             },
         };
     }
     launchPlayerFromCannon(player, ship, aim) {
-        const muzzle = this.getCannonMuzzlePosition(ship, player.cannonIndex, aim.yaw, aim.pitch);
+        const launchPitch = Math.max(SHIP.CANNON_PLAYER_LAUNCH_PITCH_MIN, Math.min(SHIP.CANNON_PLAYER_LAUNCH_PITCH_MAX, aim.pitch));
+        const muzzle = this.getCannonMuzzlePosition(ship, player.cannonIndex, aim.yaw, launchPitch);
         const dir = {
-            x: Math.sin(aim.yaw) * Math.cos(aim.pitch),
-            y: Math.sin(aim.pitch),
-            z: Math.cos(aim.yaw) * Math.cos(aim.pitch),
+            x: Math.sin(aim.yaw) * Math.cos(launchPitch),
+            y: Math.sin(launchPitch),
+            z: Math.cos(aim.yaw) * Math.cos(launchPitch),
         };
         this.clearStationFlags(player);
         player.onShipId = null;
@@ -1414,9 +1958,9 @@ export class GameServer {
         player.state = 'alive';
         player.position = { ...muzzle };
         player.velocity = {
-            x: dir.x * SHIP.CANNON_LAUNCH_SPEED,
+            x: ship.velocity.x + dir.x * SHIP.CANNON_LAUNCH_SPEED,
             y: dir.y * SHIP.CANNON_LAUNCH_SPEED + SHIP.CANNON_LAUNCH_VERTICAL_BIAS,
-            z: dir.z * SHIP.CANNON_LAUNCH_SPEED,
+            z: ship.velocity.z + dir.z * SHIP.CANNON_LAUNCH_SPEED,
         };
         player.knockbackVelocity = { x: 0, y: 0, z: 0 };
         player.shipBoundaryGraceTimer = PLAYER.SHIP_EXIT_GRACE_TIME + 0.8;
@@ -1425,6 +1969,8 @@ export class GameServer {
         ship.cannonCooldowns[player.cannonIndex] = Math.max(ship.cannonCooldowns[player.cannonIndex], SHIP.CANNON_RELOAD * 0.75);
     }
     syncKegPosition(keg) {
+        if (!keg.shipId || !keg.localPosition)
+            return null;
         const ship = this.getShip(keg.shipId);
         if (!ship)
             return null;
@@ -1456,34 +2002,48 @@ export class GameServer {
         const stats = SHIP_STATS[ship.type];
         const deckY = ship.position.y + stats.height + 0.1;
         const holdFloor = ship.position.y + 0.35;
+        const local = this.toShipLocal(position, ship);
+        const stair = getShipCompanionwayConfig(stats);
+        if (Math.abs(local.x - stair.cx) <= stair.stairHalfWidth
+            && local.z <= stair.stairFrontZ
+            && local.z >= stair.stairBackZ) {
+            const descent = Math.max(0, Math.min(1, (stair.stairFrontZ - local.z) / Math.max(0.001, stair.stairFrontZ - stair.stairBackZ)));
+            return deckY + (holdFloor - deckY) * descent;
+        }
         return position.y < deckY - 0.25 ? holdFloor : deckY;
     }
-    getAnchorControlLocal(stats) {
-        return {
-            x: 0,
-            z: stats.length * 0.42,
-        };
-    }
     getSailControlLocal(stats) {
-        return getSailStationLocal(stats);
+        return getSharedSailControlLocal(stats);
     }
     resolveFirearmHits(shooter, traces) {
         const hitFeedback = new Map();
         const sharkHitFeedback = new Map();
+        const wildlifeHitFeedback = new Map();
         for (const trace of traces) {
             const playerHit = this.findClosestFirearmHit(shooter, trace);
             const sharkHit = this.findClosestSharkHit(trace);
-            let usePlayer = !!playerHit;
-            let useShark = !!sharkHit;
-            if (playerHit && sharkHit) {
-                if (sharkHit.distance < playerHit.distance)
-                    usePlayer = false;
-                else
-                    useShark = false;
-            }
+            const wildlifeHit = this.findClosestWildlifeHit(trace);
+            const kegHit = this.findClosestKegHit(trace);
+            const seaRockHit = this.findClosestSeaRockHit(trace);
+            const closestDistance = Math.min(playerHit?.distance ?? Infinity, sharkHit?.distance ?? Infinity, wildlifeHit?.distance ?? Infinity, kegHit?.distance ?? Infinity, seaRockHit?.distance ?? Infinity);
+            const usePlayer = !!playerHit && playerHit.distance <= closestDistance;
+            const useShark = !!sharkHit && sharkHit.distance < closestDistance + 0.0001 && !usePlayer;
+            const useWildlife = !!wildlifeHit && wildlifeHit.distance < closestDistance + 0.0001 && !usePlayer && !useShark;
+            const useKeg = !!kegHit && kegHit.distance < closestDistance + 0.0001 && !usePlayer && !useShark && !useWildlife;
+            const useSeaRock = !!seaRockHit
+                && seaRockHit.distance < closestDistance + 0.0001
+                && !usePlayer
+                && !useShark
+                && !useWildlife
+                && !useKeg;
             let tracerDistance = trace.range;
             let showImpact = false;
-            if (useShark && sharkHit) {
+            if (useKeg && kegHit) {
+                tracerDistance = kegHit.distance;
+                showImpact = true;
+                this.explodeKeg(kegHit.keg);
+            }
+            else if (useShark && sharkHit) {
                 tracerDistance = sharkHit.distance;
                 showImpact = true;
                 const damage = trace.damage * SHARK.GUN_DAMAGE_MULT;
@@ -1510,6 +2070,45 @@ export class GameServer {
                         position,
                         weaponId: trace.weaponId,
                         targetType: 'shark',
+                    });
+                }
+            }
+            else if (useWildlife && wildlifeHit) {
+                tracerDistance = wildlifeHit.distance;
+                showImpact = true;
+                const animal = wildlifeHit.animal;
+                const damage = trace.damage * WILDLIFE.GUN_DAMAGE_MULT;
+                const wasAlive = animal.health > 0;
+                animal.health -= damage;
+                const killed = wasAlive && animal.health <= 0;
+                const meat = killed ? WILDLIFE.MEAT_DROP[animal.type] : 0;
+                if (meat > 0)
+                    shooter.pocketMeat += meat;
+                const position = {
+                    x: animal.position.x,
+                    y: animal.position.y + (animal.type === 'gull' ? 0.2 : 0.28),
+                    z: animal.position.z,
+                };
+                const existing = wildlifeHitFeedback.get(animal.id);
+                if (existing) {
+                    existing.damage += damage;
+                    existing.kill = existing.kill || killed;
+                    existing.remainingHealth = Math.max(0, animal.health);
+                    existing.position = position;
+                    existing.weaponId = trace.weaponId;
+                    if (meat > 0)
+                        existing.meat = (existing.meat ?? 0) + meat;
+                }
+                else {
+                    wildlifeHitFeedback.set(animal.id, {
+                        targetId: animal.id,
+                        damage,
+                        kill: killed,
+                        remainingHealth: Math.max(0, animal.health),
+                        position,
+                        weaponId: trace.weaponId,
+                        targetType: 'wildlife',
+                        meat: meat || undefined,
                     });
                 }
             }
@@ -1558,6 +2157,10 @@ export class GameServer {
                     hit.player.knockbackVelocity.z += trace.direction.z * impulse;
                 }
             }
+            else if (useSeaRock && seaRockHit) {
+                tracerDistance = seaRockHit.distance;
+                showImpact = true;
+            }
             else {
                 const waterImpactDistance = this.getWaterImpactDistance(trace.origin, trace.direction, trace.range);
                 if (waterImpactDistance !== null) {
@@ -1570,8 +2173,26 @@ export class GameServer {
         for (const feedback of hitFeedback.values()) {
             this.awardPlayerHitGold(shooter.id, feedback.damage);
             this.notifyPlayerHit(shooter.id, feedback);
+            this.notifyIncomingPlayerHit(feedback.targetId, {
+                attackerId: shooter.id,
+                attackerName: shooter.name,
+                damage: feedback.damage,
+                position: feedback.position,
+                sourcePosition: {
+                    x: shooter.position.x,
+                    y: shooter.position.y + PLAYER.HEIGHT * 0.72,
+                    z: shooter.position.z,
+                },
+                headshot: feedback.headshot,
+                kill: feedback.kill,
+                remainingHealth: feedback.remainingHealth,
+                weaponId: feedback.weaponId,
+            });
         }
         for (const feedback of sharkHitFeedback.values()) {
+            this.notifyPlayerHit(shooter.id, feedback);
+        }
+        for (const feedback of wildlifeHitFeedback.values()) {
             this.notifyPlayerHit(shooter.id, feedback);
         }
     }
@@ -1608,27 +2229,102 @@ export class GameServer {
         }
         return best;
     }
+    findClosestWildlifeHit(trace) {
+        let best = null;
+        for (const animal of this.state.wildlife) {
+            if (animal.health <= 0)
+                continue;
+            const radius = WILDLIFE.HIT_RADIUS[animal.type];
+            const center = {
+                x: animal.position.x,
+                y: animal.position.y + (animal.type === 'gull' ? 0.1 : radius * 0.6),
+                z: animal.position.z,
+            };
+            const t = this.raySphereIntersection(trace.origin, trace.direction, center, radius);
+            if (t === null || t > trace.range)
+                continue;
+            if (!best || t < best.distance)
+                best = { animal, distance: t };
+        }
+        return best;
+    }
+    findClosestKegHit(trace) {
+        let best = null;
+        for (const keg of this.state.kegs) {
+            if (keg.timer <= 0)
+                continue;
+            this.syncKegPosition(keg);
+            const center = { x: keg.position.x, y: keg.position.y + 0.35, z: keg.position.z };
+            const distance = this.raySphereIntersection(trace.origin, trace.direction, center, 0.48);
+            if (distance === null || distance > trace.range)
+                continue;
+            if (!best || distance < best.distance)
+                best = { keg, distance };
+        }
+        return best;
+    }
+    findClosestSeaRockHit(trace) {
+        let best = null;
+        for (const rock of this.state.seaRocks) {
+            const distance = intersectRaySeaRock(trace.origin, trace.direction, trace.range, rock, 0.035);
+            if (distance === null)
+                continue;
+            if (!best || distance < best.distance)
+                best = { rock, distance };
+        }
+        return best;
+    }
     intersectPlayerHitboxes(origin, direction, range, target) {
         const swimming = target.state === 'swimming';
-        const headCenter = {
-            x: target.position.x,
-            y: target.position.y + (swimming ? 0.52 : PLAYER.HEIGHT * 0.9),
-            z: target.position.z,
-        };
-        const upperBodyCenter = {
-            x: target.position.x,
-            y: target.position.y + (swimming ? 0.14 : PLAYER.HEIGHT * 0.58),
-            z: target.position.z,
-        };
-        const lowerBodyCenter = {
-            x: target.position.x,
-            y: target.position.y + (swimming ? -0.12 : PLAYER.HEIGHT * 0.28),
-            z: target.position.z,
-        };
+        const islandSkeleton = !!target.isBot && target.shipId === null;
+        let headCenter;
+        let upperBodyCenter;
+        let lowerBodyCenter;
+        let headRadius;
+        let upperRadius;
+        let lowerRadius;
+        if (swimming) {
+            // The swim visual lays the body horizontal along the player's facing yaw,
+            // not stacked vertically. Hitboxes must match that pose or shooters miss
+            // anyone in the water entirely.
+            const yaw = target.rotation.x;
+            const fx = Math.sin(yaw);
+            const fz = Math.cos(yaw);
+            const surfaceLift = 0.42; // body floats roughly half a metre above feet position
+            headCenter = {
+                x: target.position.x + fx * 0.62,
+                y: target.position.y + surfaceLift + 0.18,
+                z: target.position.z + fz * 0.62,
+            };
+            upperBodyCenter = {
+                x: target.position.x + fx * 0.12,
+                y: target.position.y + surfaceLift,
+                z: target.position.z + fz * 0.12,
+            };
+            lowerBodyCenter = {
+                x: target.position.x - fx * 0.45,
+                y: target.position.y + surfaceLift - 0.08,
+                z: target.position.z - fz * 0.45,
+            };
+            headRadius = 0.34;
+            upperRadius = 0.6;
+            lowerRadius = 0.5;
+        }
+        else {
+            const headY = islandSkeleton ? 1.92 : PLAYER.HEIGHT * 0.96;
+            const upperY = islandSkeleton ? 1.24 : PLAYER.HEIGHT * 0.58;
+            const lowerY = islandSkeleton ? 0.62 : PLAYER.HEIGHT * 0.28;
+            headCenter = { x: target.position.x, y: target.position.y + headY, z: target.position.z };
+            upperBodyCenter = { x: target.position.x, y: target.position.y + upperY, z: target.position.z };
+            lowerBodyCenter = { x: target.position.x, y: target.position.y + lowerY, z: target.position.z };
+            headRadius = islandSkeleton ? 0.28 : 0.25;
+            upperRadius = islandSkeleton ? 0.42 : 0.5;
+            lowerRadius = islandSkeleton ? 0.34 : 0.38;
+        }
         const hitboxes = [
-            { center: headCenter, radius: swimming ? 0.22 : 0.24, headshot: true },
-            { center: upperBodyCenter, radius: swimming ? 0.46 : 0.5, headshot: false },
-            { center: lowerBodyCenter, radius: swimming ? 0.34 : 0.38, headshot: false },
+            { center: headCenter, radius: headRadius, headshot: true },
+            { center: upperBodyCenter, radius: upperRadius, headshot: false },
+            { center: lowerBodyCenter, radius: lowerRadius, headshot: false },
         ];
         let closest = null;
         for (const hitbox of hitboxes) {
@@ -1681,6 +2377,7 @@ export class GameServer {
             knockback: 0,
             visualOnly: true,
             showImpact,
+            weaponId: trace.weaponId,
         };
         this.weapons.queueProjectile(projectile);
     }
@@ -1871,7 +2568,7 @@ export class GameServer {
             case 'mermaid':
                 return this.returnPlayerByMermaid(player);
             case 'keg_diffuse': {
-                const keg = ship ? this.getNearbyKeg(player, ship) : null;
+                const keg = this.getNearbyKeg(player, ship ?? null);
                 if (!keg)
                     return false;
                 this.diffuseKeg(keg);
@@ -2046,7 +2743,53 @@ export class GameServer {
             }
         }
     }
-    startShipSinking(ship, rapid = false) {
+    updateWildlife(dt) {
+        for (const animal of this.state.wildlife) {
+            if (animal.health <= 0)
+                continue;
+            const island = this.state.islands.find((candidate) => candidate.id === animal.islandId);
+            if (!island) {
+                animal.health = 0;
+                continue;
+            }
+            animal.wanderTimer -= dt;
+            if (animal.wanderTimer <= 0) {
+                const homeAngle = Math.atan2(animal.spawnPosition.z - animal.position.z, animal.spawnPosition.x - animal.position.x);
+                const farFromHome = dist2D(animal.position.x, animal.position.z, animal.spawnPosition.x, animal.spawnPosition.z) > island.radius * 0.32;
+                animal.wanderAngle = farFromHome
+                    ? homeAngle + randRange(-0.55, 0.55)
+                    : animal.wanderAngle + randRange(-1.35, 1.35);
+                animal.wanderTimer = randRange(0.7, animal.type === 'gull' ? 2.0 : 3.0);
+            }
+            const speed = WILDLIFE.SPEED[animal.type];
+            const moveScale = animal.type === 'crab' ? (0.55 + Math.abs(Math.sin(this.t * 3.5 + animal.position.x)) * 0.55) : 1;
+            const vx = Math.cos(animal.wanderAngle) * speed * moveScale;
+            const vz = Math.sin(animal.wanderAngle) * speed * moveScale;
+            const nextX = animal.position.x + vx * dt;
+            const nextZ = animal.position.z + vz * dt;
+            const allowed = isPointInsideIslandFootprint(island, nextX, nextZ, animal.type === 'gull' ? -4 : -2);
+            if (allowed) {
+                animal.position.x = nextX;
+                animal.position.z = nextZ;
+                animal.velocity.x = vx;
+                animal.velocity.z = vz;
+            }
+            else {
+                animal.wanderAngle += Math.PI + randRange(-0.45, 0.45);
+                animal.velocity.x = 0;
+                animal.velocity.z = 0;
+            }
+            const groundY = getIslandSurfaceY(island, animal.position.x, animal.position.z);
+            animal.position.y = animal.type === 'gull'
+                ? groundY + 1.8 + Math.sin(this.t * 3.2 + animal.position.x * 0.04) * 0.35
+                : groundY + 0.06;
+            if (Math.abs(animal.velocity.x) + Math.abs(animal.velocity.z) > 0.01) {
+                animal.rotation = Math.atan2(animal.velocity.x, animal.velocity.z);
+            }
+        }
+        this.state.wildlife = this.state.wildlife.filter((animal) => animal.health > 0);
+    }
+    startShipSinking(ship, rapid = false, sunkByPlayerId = null) {
         if (!ship.alive || ship.sinking)
             return;
         this.dropShipTreasure(ship);
@@ -2069,6 +2812,10 @@ export class GameServer {
         ship.hull.stern = Math.min(ship.hull.stern, 0.04);
         ship.hull.port = Math.min(ship.hull.port, 0.04);
         ship.hull.starboard = Math.min(ship.hull.starboard, 0.04);
+        const sinkKiller = sunkByPlayerId ? this.getPlayer(sunkByPlayerId) : null;
+        if (sinkKiller && sinkKiller.state !== 'eliminated' && sinkKiller.shipId !== ship.id) {
+            this.eliminateCrewForShipSink(ship, sinkKiller);
+        }
         for (const player of this.state.players) {
             if (player.onShipId !== ship.id || player.state === 'eliminated' || player.state === 'respawning' || player.health <= 0) {
                 continue;
@@ -2092,6 +2839,7 @@ export class GameServer {
         }
         ship.crewIds = [];
         this.state.kegs = this.state.kegs.filter((keg) => keg.shipId !== ship.id);
+        this.shipLastDamagedByPlayer.delete(ship.id);
     }
     dropShipTreasure(ship) {
         if (ship.treasureChestIds.length === 0)
@@ -2107,6 +2855,8 @@ export class GameServer {
             const scatter = stats.width * 0.45 + 1.2 + (index % 3) * 0.8;
             chest.carriedByPlayerId = null;
             chest.storedOnShipId = null;
+            chest.droppedOnShipId = null;
+            chest.droppedLocalPosition = null;
             chest.floating = true;
             chest.position = {
                 x: ship.position.x + Math.sin(angle) * scatter,
@@ -2116,11 +2866,101 @@ export class GameServer {
         });
         ship.treasureChestIds = [];
     }
+    markShipDamagedByPlayer(shipId, attackerId) {
+        if (!attackerId)
+            return;
+        const attacker = this.getPlayer(attackerId);
+        if (!attacker || attacker.state === 'eliminated')
+            return;
+        this.shipLastDamagedByPlayer.set(shipId, { attackerId, at: this.t });
+    }
+    getRecentShipSinkAttackerId(ship) {
+        const recent = this.shipLastDamagedByPlayer.get(ship.id);
+        if (!recent || this.t - recent.at > 55)
+            return null;
+        const attacker = this.getPlayer(recent.attackerId);
+        if (!attacker || attacker.state === 'eliminated' || attacker.shipId === ship.id)
+            return null;
+        return attacker.id;
+    }
     isBoardingKill(killer, victim) {
         return !!killer.shipId
             && !!victim.shipId
             && killer.shipId !== victim.shipId
             && killer.onShipId === victim.shipId;
+    }
+    awardPlayerKillStreak(killer) {
+        killer.playerKillStreak += 1;
+        if (killer.playerKillStreak === 5) {
+            killer.superCannonballs += 1;
+            return { type: 'super_cannonball', label: 'Super cannonball ready' };
+        }
+        if (killer.playerKillStreak === 10) {
+            killer.megaKegs += 1;
+            return { type: 'mega_keg', label: 'Mega keg ready' };
+        }
+        if (killer.playerKillStreak === 20) {
+            killer.tsunamiCharges += 1;
+            return { type: 'tsunami', label: 'Tsunami ready' };
+        }
+        return null;
+    }
+    creditPlayerKill(killer, victim) {
+        killer.kills += 1;
+        let streakReward = null;
+        if (killer.shipId && victim.shipId && killer.shipId !== victim.shipId) {
+            streakReward = this.awardPlayerKillStreak(killer);
+        }
+        killer.gold += PLAYER.KILL_GOLD_REWARD;
+        this.checkWinCondition();
+        return streakReward;
+    }
+    eliminateCrewForShipSink(ship, killer) {
+        for (const victim of this.state.players) {
+            if (victim.shipId !== ship.id
+                || victim.id === killer.id
+                || victim.state === 'eliminated'
+                || victim.state === 'respawning') {
+                continue;
+            }
+            const streakReward = this.creditPlayerKill(killer, victim);
+            victim.state = 'eliminated';
+            this.recordElimination(victim);
+            this.applyEliminatedPlayerFields(victim);
+            if (victim.isBot) {
+                this.bots.removeBot(victim.id);
+            }
+            else {
+                const client = this.clients.get(victim.id);
+                if (client) {
+                    this.send(client.ws, {
+                        type: 'game_over',
+                        ts: Date.now(),
+                        payload: { winnerId: null, died: true, kills: victim.kills, gold: victim.gold },
+                    });
+                }
+            }
+            this.broadcast({
+                type: 'kill_event',
+                ts: Date.now(),
+                payload: {
+                    victimId: victim.id,
+                    victimName: victim.name,
+                    killerId: killer.id,
+                    killerName: killer.name,
+                    respawning: false,
+                    headshot: false,
+                    boardingKill: false,
+                    shipSink: true,
+                    stolenGold: 0,
+                    healed: 0,
+                    killerStreak: killer.playerKillStreak,
+                    streakReward,
+                    killGold: PLAYER.KILL_GOLD_REWARD,
+                    headshotGold: 0,
+                },
+            });
+        }
     }
     /** Home ship must be afloat and inside the storm safe circle for respawn / mid-respawn validity. */
     isShipInStormSafeZone(ship) {
@@ -2132,6 +2972,7 @@ export class GameServer {
     applyEliminatedPlayerFields(player) {
         this.dropCarriedChest(player);
         player.health = 0;
+        player.playerKillStreak = 0;
         player.respawnTimer = 0;
         player.respawnProtectionTimer = 0;
         player.shipBoundaryGraceTimer = 0;
@@ -2145,6 +2986,21 @@ export class GameServer {
         player.cannonFlightTimer = 0;
         player.cannonBallistic = false;
         player.lastDamageWasHeadshot = false;
+        player.blocking = false;
+        player.cutlassCharge = 0;
+    }
+    recordElimination(p) {
+        if (this.eliminationOrder.includes(p.id))
+            return;
+        this.eliminationOrder.push(p.id);
+        if (!p.isBot && !this.humanFinalStats.has(p.id)) {
+            this.humanFinalStats.set(p.id, {
+                name: p.name,
+                kills: p.kills,
+                deaths: 1,
+                gold: p.gold,
+            });
+        }
     }
     /** Eliminate other crew on the same ship, then sink it (caller must already have marked one player eliminated). */
     eliminateRemainingCrewAndSinkShip(ship, alreadyEliminatedPlayerId) {
@@ -2156,6 +3012,7 @@ export class GameServer {
             if (p.state === 'eliminated')
                 continue;
             p.state = 'eliminated';
+            this.recordElimination(p);
             this.applyEliminatedPlayerFields(p);
             if (p.isBot) {
                 this.bots.removeBot(p.id);
@@ -2183,10 +3040,13 @@ export class GameServer {
         const boardingKill = !!killer && this.isBoardingKill(killer, player);
         let stolenGold = 0;
         let healed = 0;
+        let streakReward = null;
         this.dropCarriedChest(player);
+        player.playerKillStreak = 0;
         if (killer) {
-            killer.kills += 1;
-            killer.gold += PLAYER.KILL_GOLD_REWARD + (headshot ? PLAYER.HEADSHOT_GOLD_BONUS : 0);
+            streakReward = this.creditPlayerKill(killer, player);
+            if (headshot)
+                killer.gold += PLAYER.HEADSHOT_GOLD_BONUS;
             if (boardingKill) {
                 const previousHealth = killer.health;
                 stolenGold = Math.min(player.gold, PLAYER.BOARDING_GOLD_STEAL_CAP);
@@ -2220,9 +3080,12 @@ export class GameServer {
             player.cannonFlightTimer = 0;
             player.cannonBallistic = false;
             player.lastDamageWasHeadshot = false;
+            player.blocking = false;
+            player.cutlassCharge = 0;
         }
         else {
             player.state = 'eliminated';
+            this.recordElimination(player);
             this.applyEliminatedPlayerFields(player);
         }
         if (player.state === 'eliminated' && player.shipId) {
@@ -2257,6 +3120,10 @@ export class GameServer {
                 boardingKill,
                 stolenGold,
                 healed,
+                killerStreak: killer?.playerKillStreak ?? 0,
+                streakReward,
+                killGold: killer ? PLAYER.KILL_GOLD_REWARD : 0,
+                headshotGold: killer && headshot ? PLAYER.HEADSHOT_GOLD_BONUS : 0,
             },
         });
     }
@@ -2269,6 +3136,8 @@ export class GameServer {
         if (goldWinner) {
             this.state.phase = 'ended';
             this.state.winnerId = goldWinner.id;
+            this.endedAt = Date.now();
+            this.endReason = 'gold';
             this.broadcast({
                 type: 'game_over',
                 ts: Date.now(),
@@ -2279,6 +3148,7 @@ export class GameServer {
                     targetGold: ECONOMY.GOLD_WIN_TARGET,
                 },
             });
+            this.emitMatchEnd();
             return;
         }
         const aliveShips = this.state.ships.filter((ship) => ship.alive && !ship.sinking);
@@ -2286,20 +3156,25 @@ export class GameServer {
         if (aliveShips.length <= 1 && this.state.ships.length > 1) {
             this.state.phase = 'ended';
             this.state.winnerId = aliveShips[0]?.ownerId ?? null;
+            this.endedAt = Date.now();
+            this.endReason = 'last_ship';
             this.broadcast({ type: 'game_over', ts: Date.now(), payload: { winnerId: this.state.winnerId } });
+            this.emitMatchEnd();
         }
     }
-    buildSnapshot() {
+    buildSnapshot(includeStaticWorld = true) {
         return {
             ...this.state,
             projectiles: this.state.projectiles.filter(p => p.alive),
             kegs: this.state.kegs.filter((keg) => keg.timer > 0),
+            islands: includeStaticWorld ? this.state.islands : [],
         };
     }
     relayPendingCombatEvents() {
         for (const event of this.physics.flushCombatEvents()) {
             if (event.type === 'player_hit') {
                 this.awardPlayerHitGold(event.attackerId, event.damage);
+                const attacker = this.getPlayer(event.attackerId);
                 this.notifyPlayerHit(event.attackerId, {
                     targetId: event.targetId,
                     damage: event.damage,
@@ -2308,8 +3183,25 @@ export class GameServer {
                     remainingHealth: Math.max(0, this.getPlayer(event.targetId)?.health ?? 0),
                     weaponId: event.projectileType,
                 });
+                this.notifyIncomingPlayerHit(event.targetId, {
+                    attackerId: event.attackerId,
+                    attackerName: attacker?.name,
+                    damage: event.damage,
+                    position: event.position,
+                    sourcePosition: attacker
+                        ? {
+                            x: attacker.position.x,
+                            y: attacker.position.y + PLAYER.HEIGHT * 0.72,
+                            z: attacker.position.z,
+                        }
+                        : undefined,
+                    kill: event.kill,
+                    remainingHealth: Math.max(0, this.getPlayer(event.targetId)?.health ?? 0),
+                    weaponId: event.projectileType,
+                });
             }
             else {
+                this.markShipDamagedByPlayer(event.targetId, event.attackerId);
                 this.notifyShipHit(event.attackerId, {
                     targetId: event.targetId,
                     damage: event.damage,
@@ -2344,6 +3236,19 @@ export class GameServer {
             payload,
         });
     }
+    notifyIncomingPlayerHit(victimId, payload) {
+        const client = this.clients.get(victimId);
+        if (!client)
+            return;
+        this.send(client.ws, {
+            type: 'player_hit',
+            ts: Date.now(),
+            payload: {
+                ...payload,
+                incoming: true,
+            },
+        });
+    }
     notifyShipHit(attackerId, payload) {
         const client = this.clients.get(attackerId);
         if (!client)
@@ -2356,15 +3261,24 @@ export class GameServer {
     }
     broadcast(msg) {
         const data = JSON.stringify(msg);
+        const volatile = msg.type === 'state_snapshot';
         for (const [, client] of this.clients) {
             if (client.ws.readyState === WebSocket.OPEN) {
-                client.ws.send(data);
+                if (volatile && client.ws.bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES)
+                    continue;
+                try {
+                    client.ws.send(data);
+                }
+                catch { }
             }
         }
     }
     send(ws, msg) {
         if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(msg));
+            try {
+                ws.send(JSON.stringify(msg));
+            }
+            catch { }
         }
     }
     processBotLooting() {
@@ -2379,37 +3293,158 @@ export class GameServer {
             const event = this.tryTakeChest(player);
             if (event) {
                 this.broadcast({ type: 'chest_opened', ts: Date.now(), payload: event });
+                const homeShip = this.getAliveShip(player.shipId);
+                if (homeShip && player.carryingChestId) {
+                    const stats = SHIP_STATS[homeShip.type];
+                    player.onShipId = homeShip.id;
+                    player.nearShipId = homeShip.id;
+                    player.state = 'alive';
+                    player.position = {
+                        x: homeShip.position.x,
+                        y: homeShip.position.y + stats.height + 0.35,
+                        z: homeShip.position.z,
+                    };
+                    this.clearStationFlags(player);
+                    this.tryStowCarriedChest(player, homeShip);
+                }
             }
         }
     }
-    spawnIslandSkeletons(players, islands) {
-        let skeletonIndex = 1;
+    setupSkeletonWaves(islands) {
+        this.skeletonWaveTimers.clear();
+        this.skeletonSpawnedAt.clear();
+        this.skeletonDefeatedAt.clear();
+        this.skeletonHomes.clear();
+        this.skeletonNameIndex = 1;
         for (const island of islands) {
-            const skeletonCount = island.radius > 72 ? 2 : island.radius > 54 ? 1 : 0;
-            for (let i = 0; i < skeletonCount; i++) {
-                const skeletonId = uuid();
-                const skeleton = this.createPlayer(skeletonId, `Skeleton_${skeletonIndex++}`, null, true);
-                skeleton.health = 70;
-                skeleton.weapons = [
-                    { weaponId: 'cutlass', ammo: 0, reserve: 0, reloading: false, reloadTimer: 0 },
-                    null,
-                    null,
-                    null,
-                ];
-                skeleton.activeSlot = 0;
-                const angle = randAngle();
-                const spawnPoint = getIslandSurfacePoint(island, 0.22 + Math.random() * 0.28, angle, 0.06);
-                skeleton.position = spawnPoint;
-                skeleton.rotation.x = angle + Math.PI;
-                skeleton.rotation.y = 0;
-                players.push(skeleton);
-                this.skeletonHomes.set(skeletonId, island.id);
-            }
+            if (this.getSkeletonWaveSize(island) <= 0)
+                continue;
+            this.skeletonWaveTimers.set(island.id, randRange(SKELETON_WAVE_INITIAL_DELAY_MIN, SKELETON_WAVE_INITIAL_DELAY_MAX));
         }
+    }
+    updateSkeletonWaves(dt) {
+        let playersChanged = false;
+        const retainedPlayers = [];
+        for (const player of this.state.players) {
+            const homeIslandId = this.skeletonHomes.get(player.id);
+            if (!homeIslandId) {
+                retainedPlayers.push(player);
+                continue;
+            }
+            const eliminated = player.state === 'eliminated' || player.health <= 0;
+            if (eliminated) {
+                const defeatedAt = this.skeletonDefeatedAt.get(player.id) ?? this.t;
+                this.skeletonDefeatedAt.set(player.id, defeatedAt);
+                if (this.t - defeatedAt >= SKELETON_DEFEAT_DESPAWN_SECONDS) {
+                    this.forgetSkeleton(player.id);
+                    playersChanged = true;
+                    continue;
+                }
+            }
+            else {
+                this.skeletonDefeatedAt.delete(player.id);
+                const spawnedAt = this.skeletonSpawnedAt.get(player.id) ?? this.t;
+                if (this.t - spawnedAt >= SKELETON_WAVE_LINGER_SECONDS
+                    && !this.hasHumanNearPoint(player.position.x, player.position.z, SKELETON_PLAYER_WAKE_RADIUS)) {
+                    this.forgetSkeleton(player.id);
+                    playersChanged = true;
+                    continue;
+                }
+            }
+            retainedPlayers.push(player);
+        }
+        if (playersChanged) {
+            this.state.players = retainedPlayers;
+        }
+        for (const island of this.state.islands) {
+            const waveSize = this.getSkeletonWaveSize(island);
+            if (waveSize <= 0)
+                continue;
+            if (this.countActiveSkeletonsOnIsland(island.id) > 0)
+                continue;
+            const activationRadius = island.radius + SKELETON_ISLAND_ACTIVATION_MARGIN;
+            if (!this.hasHumanNearPoint(island.position.x, island.position.z, activationRadius)) {
+                continue;
+            }
+            let timer = this.skeletonWaveTimers.get(island.id);
+            if (timer == null) {
+                timer = randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX);
+            }
+            timer -= dt;
+            if (timer <= 0) {
+                this.spawnSkeletonWave(island, waveSize);
+                timer = randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX);
+                playersChanged = true;
+            }
+            this.skeletonWaveTimers.set(island.id, timer);
+        }
+        if (playersChanged) {
+            this.rebuildEntityIndexes();
+        }
+    }
+    getSkeletonWaveSize(island) {
+        if (island.radius > 84)
+            return 4;
+        if (island.radius > 68)
+            return 3;
+        if (island.radius > 52)
+            return 2;
+        if (island.radius > 42)
+            return 1;
+        return 0;
+    }
+    countActiveSkeletonsOnIsland(islandId) {
+        let count = 0;
+        for (const player of this.state.players) {
+            if (this.skeletonHomes.get(player.id) !== islandId)
+                continue;
+            if (player.state === 'eliminated' || player.state === 'respawning' || player.health <= 0)
+                continue;
+            count++;
+        }
+        return count;
+    }
+    hasHumanNearPoint(x, z, radius) {
+        return this.state.players.some((player) => !player.isBot
+            && player.state !== 'eliminated'
+            && player.state !== 'respawning'
+            && dist2D(player.position.x, player.position.z, x, z) <= radius);
+    }
+    spawnSkeletonWave(island, count) {
+        const baseAngle = randAngle();
+        for (let i = 0; i < count; i++) {
+            const skeletonId = uuid();
+            const skeleton = this.createPlayer(skeletonId, `Skeleton_${this.skeletonNameIndex++}`, null, true);
+            skeleton.health = 70;
+            skeleton.weapons = [
+                { weaponId: 'cutlass', ammo: 0, reserve: 0, reloading: false, reloadTimer: 0 },
+                null,
+                null,
+                null,
+            ];
+            skeleton.activeSlot = 0;
+            const offset = (i - (count - 1) * 0.5) * 0.42 + randRange(-0.18, 0.18);
+            const angle = baseAngle + offset;
+            const spawnPoint = getIslandSurfacePoint(island, randRange(0.2, 0.5), angle, 0.06);
+            skeleton.position = spawnPoint;
+            skeleton.rotation.x = angle + Math.PI;
+            skeleton.rotation.y = 0;
+            skeleton.velocity.x = 0;
+            skeleton.velocity.y = 0;
+            skeleton.velocity.z = 0;
+            this.state.players.push(skeleton);
+            this.skeletonHomes.set(skeletonId, island.id);
+            this.skeletonSpawnedAt.set(skeletonId, this.t);
+        }
+    }
+    forgetSkeleton(skeletonId) {
+        this.skeletonHomes.delete(skeletonId);
+        this.skeletonSpawnedAt.delete(skeletonId);
+        this.skeletonDefeatedAt.delete(skeletonId);
     }
     updateIslandSkeletons(dt) {
         for (const skeleton of this.state.players) {
-            if (!skeleton.isBot || skeleton.shipId !== null || skeleton.state === 'eliminated' || skeleton.state === 'respawning') {
+            if (!skeleton.isBot || skeleton.shipId !== null || skeleton.health <= 0 || skeleton.state === 'eliminated' || skeleton.state === 'respawning') {
                 continue;
             }
             const homeIslandId = this.skeletonHomes.get(skeleton.id);
@@ -2445,6 +3480,10 @@ export class GameServer {
                         skeleton.velocity.x = (dx / distance) * moveSpeed;
                         skeleton.velocity.z = (dz / distance) * moveSpeed;
                     }
+                    else {
+                        skeleton.velocity.x = 0;
+                        skeleton.velocity.z = 0;
+                    }
                 }
                 else {
                     skeleton.velocity.x = 0;
@@ -2456,7 +3495,26 @@ export class GameServer {
                             target.lastDamagedById = skeleton.id;
                             target.lastDamageWasHeadshot = false;
                             // 65% weapon damage — skeletons are a real threat now
-                            target.health -= hit.damage * 0.65;
+                            const damage = hit.damage * 0.65;
+                            target.health -= damage;
+                            this.notifyIncomingPlayerHit(target.id, {
+                                attackerId: skeleton.id,
+                                attackerName: skeleton.name,
+                                damage,
+                                position: {
+                                    x: target.position.x,
+                                    y: target.position.y + PLAYER.HEIGHT * 0.72,
+                                    z: target.position.z,
+                                },
+                                sourcePosition: {
+                                    x: skeleton.position.x,
+                                    y: skeleton.position.y + PLAYER.HEIGHT * 0.72,
+                                    z: skeleton.position.z,
+                                },
+                                kill: target.health <= 0,
+                                remainingHealth: Math.max(0, target.health),
+                                weaponId: weapon.weaponId,
+                            });
                             const len = Math.sqrt(dx * dx + dz * dz) || 1;
                             target.knockbackVelocity.x += (dx / len) * hit.knockback * 0.72;
                             target.knockbackVelocity.y += hit.knockback * 0.18;
@@ -2522,6 +3580,7 @@ export class GameServer {
             const homeShip = this.getAliveShip(player.shipId);
             if (!homeShip) {
                 player.state = 'eliminated';
+                this.recordElimination(player);
                 this.applyEliminatedPlayerFields(player);
                 if (player.isBot) {
                     this.bots.removeBot(player.id);
@@ -2540,6 +3599,7 @@ export class GameServer {
             }
             if (!this.isShipInStormSafeZone(homeShip)) {
                 player.state = 'eliminated';
+                this.recordElimination(player);
                 this.applyEliminatedPlayerFields(player);
                 this.eliminateRemainingCrewAndSinkShip(homeShip, player.id);
                 if (player.isBot) {
@@ -2576,6 +3636,8 @@ export class GameServer {
             player.swimTimer = 0;
             player.cannonFlightTimer = 0;
             player.cannonBallistic = false;
+            player.blocking = false;
+            player.cutlassCharge = 0;
             player.respawnProtectionTimer = respawnPlan.protectionTime;
             player.shipBoundaryGraceTimer = 0;
             if (respawnPlan.dock) {
@@ -2588,50 +3650,16 @@ export class GameServer {
         }
     }
     getNearbyCannonIndex(player, ship) {
-        if (player.onShipId !== ship.id)
-            return null;
-        const stats = SHIP_STATS[ship.type];
-        const local = this.toShipLocal(player.position, ship);
-        const cannonOffsetX = stats.width * 0.5 + 0.1;
-        const cannonReach = 1.1;
-        const maxDeckZ = stats.length * 0.35;
-        if (Math.abs(local.z) > maxDeckZ)
-            return null;
-        if (Math.abs(Math.abs(local.x) - cannonOffsetX) > cannonReach)
-            return null;
-        const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-        const minZ = -stats.length * 0.3;
-        const maxZ = stats.length * 0.2;
-        const span = Math.max(0.001, maxZ - minZ);
-        const normalized = Math.max(0, Math.min(1, (maxZ - local.z) / span));
-        const slotWithinSide = cannonsPerSide === 1
-            ? 0
-            : Math.round(normalized * (cannonsPerSide - 1));
-        const sideOffset = local.x >= 0 ? 0 : cannonsPerSide;
-        return sideOffset + slotWithinSide;
+        return findSharedNearbyCannonIndex(player, ship);
     }
     isNearHelm(player, ship) {
-        if (player.onShipId !== ship.id)
-            return false;
-        const local = this.toShipLocal(player.position, ship);
-        return Math.abs(local.x) < 0.9 && Math.abs(local.z + SHIP_STATS[ship.type].length * 0.37) < 1.15;
+        return isSharedNearHelm(player, ship);
     }
     isNearSailStation(player, ship) {
-        if (player.onShipId !== ship.id)
-            return false;
-        const stats = SHIP_STATS[ship.type];
-        if (player.position.y < ship.position.y + stats.height - 0.35)
-            return false;
-        const local = this.toShipLocal(player.position, ship);
-        const station = this.getSailControlLocal(stats);
-        return Math.abs(local.x - station.x) < 0.78 && Math.abs(local.z - station.z) < 0.92;
+        return isSharedNearSailStation(player, ship);
     }
     isNearAnchor(player, ship) {
-        if (player.onShipId !== ship.id)
-            return false;
-        const local = this.toShipLocal(player.position, ship);
-        const anchor = this.getAnchorControlLocal(SHIP_STATS[ship.type]);
-        return Math.abs(local.x - anchor.x) < 0.95 && Math.abs(local.z - anchor.z) < 1.0;
+        return isSharedNearAnchor(player, ship);
     }
     snapPlayerToHelm(player, ship) {
         const stats = SHIP_STATS[ship.type];
@@ -2651,24 +3679,25 @@ export class GameServer {
         player.position.y = ship.position.y + stats.height + 0.1;
     }
     isNearCrowNestLadder(player, ship) {
-        if (player.onShipId !== ship.id)
-            return false;
-        const stats = SHIP_STATS[ship.type];
-        const local = this.toShipLocal(player.position, ship);
-        const { mastZ, maxAbsX, maxAbsZ } = getCrowNestLadderInteractionBounds(stats);
-        const deckY = ship.position.y + stats.height + 0.1;
-        return Math.abs(local.x) < maxAbsX
-            && Math.abs(local.z - mastZ) < maxAbsZ
-            && player.position.y >= deckY - 0.35
-            && player.position.y < deckY + stats.height * 4.2;
+        return isSharedNearCrowNestLadder(player, ship);
     }
     snapPlayerToCrowNest(player, ship) {
         const stats = SHIP_STATS[ship.type];
         const mastZ = getMainMastLocalZ(stats);
-        const world = this.toShipWorld(0, mastZ, ship);
+        const world = this.toShipWorld(0.42, mastZ - 0.12, ship);
         player.position.x = world.x;
         player.position.z = world.z;
         player.position.y = ship.position.y + getCrowNestStandingY(stats);
+    }
+    snapPlayerToCrowNestLadderBase(player, ship) {
+        const stats = SHIP_STATS[ship.type];
+        const mastZ = getMainMastLocalZ(stats);
+        const world = this.toShipWorld(0.42, mastZ - 0.42, ship);
+        player.position.x = world.x;
+        player.position.z = world.z;
+        player.position.y = ship.position.y + stats.height + 0.1;
+        player.velocity = { x: 0, y: 0, z: 0 };
+        player.knockbackVelocity = { x: 0, y: 0, z: 0 };
     }
     getRepairableHullSection(player, ship) {
         if (this.getRepairPlankCount(player, ship) <= 0)
@@ -2714,16 +3743,7 @@ export class GameServer {
         player.position.y = ship.position.y + SHIP_STATS[ship.type].height + 0.1;
     }
     getCannonDeckPosition(ship, cannonIndex) {
-        const stats = SHIP_STATS[ship.type];
-        const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-        const side = cannonIndex < cannonsPerSide ? 0 : 1;
-        const slotWithinSide = cannonIndex % cannonsPerSide;
-        const cannonSpacing = cannonsPerSide <= 1
-            ? 0
-            : stats.length * 0.5 / (cannonsPerSide - 1);
-        const z = stats.length * 0.2 - slotWithinSide * cannonSpacing;
-        const x = (side === 0 ? 1 : -1) * (stats.width * 0.5 - 0.65);
-        return { x, z };
+        return getSharedCannonDeckLocalPosition(SHIP_STATS[ship.type], cannonIndex);
     }
     getRespawnDeckPosition(ship) {
         const stats = SHIP_STATS[ship.type];
@@ -2811,49 +3831,9 @@ export class GameServer {
         }
     }
     toShipLocal(position, ship) {
-        const dx = position.x - ship.position.x;
-        const dz = position.z - ship.position.z;
-        const cos = Math.cos(ship.rotation);
-        const sin = Math.sin(ship.rotation);
-        return {
-            x: dx * cos - dz * sin,
-            z: dx * sin + dz * cos,
-        };
+        return toShipLocalPoint(position, ship);
     }
     toShipWorld(x, z, ship) {
-        const cos = Math.cos(ship.rotation);
-        const sin = Math.sin(ship.rotation);
-        return {
-            x: ship.position.x + x * cos + z * sin,
-            z: ship.position.z + z * cos - x * sin,
-        };
-    }
-    handleHttp(req, res) {
-        if ((req.url ?? '').startsWith('/ws')) {
-            res.writeHead(426, { 'content-type': 'text/plain; charset=utf-8' });
-            res.end('Upgrade Required');
-            return;
-        }
-        if (!existsSync(join(CLIENT_DIST_ROOT, 'index.html'))) {
-            res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' });
-            res.end('Pirates BR WebSocket server is running. Build the client bundle or use Vite on port 3000.');
-            return;
-        }
-        const rawPath = new URL(req.url ?? '/', 'http://localhost').pathname;
-        const normalizedPath = normalize(decodeURIComponent(rawPath === '/' ? '/index.html' : rawPath))
-            .replace(/^(\.\.(\/|\\|$))+/, '');
-        let filePath = join(CLIENT_DIST_ROOT, normalizedPath);
-        if (!filePath.startsWith(CLIENT_DIST_ROOT)) {
-            filePath = join(CLIENT_DIST_ROOT, 'index.html');
-        }
-        else if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
-            filePath = join(CLIENT_DIST_ROOT, 'index.html');
-        }
-        const ext = extname(filePath);
-        res.writeHead(200, {
-            'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
-            'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
-        });
-        createReadStream(filePath).pipe(res);
+        return toShipWorldPoint({ x, z }, ship);
     }
 }

@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
-import { WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY } from '../../shared/constants/index.js';
-import { directionToYaw, getIslandMaxRadius, getIslandSurfacePoint, randRange, randAngle, weightedRandom, randInt, } from '../../shared/utils/index.js';
+import { WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS } from '../../shared/constants/index.js';
+import { directionToYaw, buildSeaRockColliders, getIslandMaxRadius, getIslandSurfacePoint, randRange, randAngle, weightedRandom, randInt, } from '../../shared/utils/index.js';
 const SHIP_TYPES = ['sloop', 'brigantine', 'galleon'];
 const ISLAND_NAMES = [
     "Smuggler's Rest",
@@ -19,9 +19,14 @@ const ISLAND_NAMES = [
 export class MapGenerator {
     generateIslands() {
         const islands = [];
-        const minDist = 160;
-        const attempts = 200;
+        const minDist = 145;
+        const attempts = 320;
         for (let i = 0; i < WORLD.ISLAND_COUNT; i++) {
+            const radius = i % 5 === 0
+                ? randRange(86, 118)
+                : i % 3 === 0
+                    ? randRange(58, 100)
+                    : randRange(34, 82);
             let pos = null;
             for (let a = 0; a < attempts; a++) {
                 const candidate = {
@@ -33,7 +38,8 @@ export class MapGenerator {
                 for (const existing of islands) {
                     const dx = candidate.x - existing.position.x;
                     const dz = candidate.z - existing.position.z;
-                    if (Math.sqrt(dx * dx + dz * dz) < minDist) {
+                    const requiredGap = Math.max(minDist, radius + existing.radius + 46);
+                    if (Math.sqrt(dx * dx + dz * dz) < requiredGap) {
                         ok = false;
                         break;
                     }
@@ -45,14 +51,15 @@ export class MapGenerator {
             }
             if (!pos)
                 continue;
-            const radius = randRange(40, 90);
             const island = {
                 id: uuid(),
                 name: ISLAND_NAMES[islands.length % ISLAND_NAMES.length],
                 position: pos,
                 radius,
-                profile: this.generateIslandProfile(radius),
+                profile: this.generateIslandProfile(radius, islands.length),
                 dock: null,
+                tavern: null,
+                caves: [],
                 chests: [],
                 barrels: [],
                 upgradeStations: [],
@@ -62,35 +69,191 @@ export class MapGenerator {
             island.chests = this.generateChests(island);
             island.barrels = this.generateBarrels(island);
             island.upgradeStations = this.generateUpgradeStations(island);
+            island.caves = this.generateCaves(island, islands.length);
+            island.tavern = this.generateTavern(island, islands.length);
             island.npcs = this.generateStoryNpcs(island, islands.length);
             islands.push(island);
         }
         return islands;
     }
-    generateIslandProfile(radius) {
+    generateIslandProfile(radius, islandIndex) {
         const islandHeading = randAngle();
         const ridgeAxis = islandHeading + randRange(-0.48, 0.48);
-        const secondaryHillScale = randRange(0.28, 0.72);
-        const tertiaryHillScale = Math.random() > 0.5 ? randRange(0.14, 0.46) : 0;
+        // Distribution: more variety, including multi-peak styles
+        const styles = [
+            'tropical', 'tropical',
+            'mountain', 'mountain', 'mountain',
+            'plateau', 'plateau',
+            'rocky', 'rocky',
+            'twin', 'twin',
+            'archipelago',
+        ];
+        let terrainStyle = styles[(islandIndex + Math.floor(Math.random() * 3)) % styles.length];
+        if (radius > 96) {
+            const largeStyles = ['mountain', 'plateau', 'twin'];
+            terrainStyle = largeStyles[(islandIndex + Math.floor(Math.random() * largeStyles.length)) % largeStyles.length];
+        }
+        else if (radius < 46) {
+            const smallStyles = ['tropical', 'rocky', 'archipelago'];
+            terrainStyle = smallStyles[(islandIndex + Math.floor(Math.random() * smallStyles.length)) % smallStyles.length];
+        }
+        let heightProfile = randRange(0.2, 0.48);
+        let mesaBias = randRange(0.15, 1);
+        let secondaryHillScale = randRange(0.28, 0.72);
+        let tertiaryHillScale = Math.random() > 0.5 ? randRange(0.14, 0.46) : 0;
+        let peakBoost = 0;
+        let footprintX = randRange(1.08, 1.72);
+        let footprintZ = randRange(1.08, 1.72);
+        let ridgeBias = randRange(-0.24, 0.24);
+        let primaryHillOffset = radius * randRange(0.18, 0.34);
+        let secondaryHillOffset = radius * randRange(0.16, 0.36);
+        let tertiaryHillOffset = radius * randRange(0.12, 0.28);
+        let secondaryAngleSpread = Math.PI * randRange(0.72, 1.06);
+        if (terrainStyle === 'mountain') {
+            heightProfile = randRange(0.68, 1.22);
+            peakBoost = randRange(1.05, 2.05);
+            mesaBias = randRange(0.05, 0.35);
+            secondaryHillScale = randRange(0.4, 0.8);
+        }
+        else if (terrainStyle === 'plateau') {
+            heightProfile = randRange(0.42, 0.74);
+            mesaBias = randRange(0.7, 1.0);
+            peakBoost = 0;
+            ridgeBias = randRange(-0.12, 0.12);
+        }
+        else if (terrainStyle === 'rocky') {
+            heightProfile = randRange(0.28, 0.58);
+            tertiaryHillScale = randRange(0.32, 0.64);
+            secondaryHillScale = randRange(0.42, 0.78);
+            footprintX = randRange(1.0, 1.5);
+            footprintZ = randRange(1.0, 1.5);
+        }
+        else if (terrainStyle === 'twin') {
+            // Two distinct peaks of comparable height — ridge running between them
+            heightProfile = randRange(0.48, 0.86);
+            peakBoost = randRange(0.5, 1.05);
+            mesaBias = randRange(0.05, 0.3);
+            secondaryHillScale = randRange(0.78, 1.05);
+            tertiaryHillScale = 0;
+            // Hills sit on opposite sides, well-separated
+            primaryHillOffset = radius * randRange(0.36, 0.5);
+            secondaryHillOffset = radius * randRange(0.36, 0.5);
+            secondaryAngleSpread = Math.PI * randRange(0.92, 1.08);
+            footprintX = randRange(1.4, 1.85);
+            footprintZ = randRange(1.05, 1.4);
+        }
+        else if (terrainStyle === 'archipelago') {
+            // Three smaller peaks each forming their own islet, water flows between them
+            heightProfile = randRange(0.34, 0.56);
+            peakBoost = randRange(0.2, 0.55);
+            mesaBias = randRange(0.05, 0.25);
+            secondaryHillScale = randRange(0.7, 0.95);
+            tertiaryHillScale = randRange(0.55, 0.85);
+            primaryHillOffset = radius * randRange(0.32, 0.46);
+            secondaryHillOffset = radius * randRange(0.34, 0.5);
+            tertiaryHillOffset = radius * randRange(0.32, 0.48);
+            secondaryAngleSpread = Math.PI * randRange(0.7, 0.95);
+            footprintX = randRange(1.5, 2.0);
+            footprintZ = randRange(1.5, 2.0);
+        }
         const primaryHillAngle = ridgeAxis + randRange(-0.42, 0.42);
+        const secondaryHillAngle = primaryHillAngle + secondaryAngleSpread;
+        // Tertiary hill: for archipelago, the third peak goes off perpendicular to the ridge
+        const tertiaryHillAngle = terrainStyle === 'archipelago'
+            ? primaryHillAngle + Math.PI * 0.5 + randRange(-0.18, 0.18)
+            : ridgeAxis + Math.PI * 0.5 + randRange(-0.42, 0.42);
         return {
             islandHeading,
-            footprintX: randRange(1.08, 1.72),
-            footprintZ: randRange(1.08, 1.72),
-            heightProfile: randRange(0.18, 0.42),
+            footprintX,
+            footprintZ,
+            heightProfile,
             beachSpread: randRange(1.08, 1.26),
             ridgeAxis,
-            ridgeBias: randRange(-0.24, 0.24),
-            mesaBias: randRange(0.15, 1),
+            ridgeBias,
+            mesaBias,
             primaryHillAngle,
-            secondaryHillAngle: primaryHillAngle + Math.PI * randRange(0.72, 1.06),
-            tertiaryHillAngle: ridgeAxis + Math.PI * 0.5 + randRange(-0.42, 0.42),
-            primaryHillOffset: radius * randRange(0.18, 0.34),
-            secondaryHillOffset: radius * randRange(0.16, 0.36),
-            tertiaryHillOffset: radius * randRange(0.12, 0.28),
+            secondaryHillAngle,
+            tertiaryHillAngle,
+            primaryHillOffset,
+            secondaryHillOffset,
+            tertiaryHillOffset,
             secondaryHillScale,
             tertiaryHillScale,
+            peakBoost,
+            terrainStyle,
         };
+    }
+    generateCaves(island, islandIndex) {
+        const style = island.profile.terrainStyle;
+        let count = 0;
+        if (style === 'rocky')
+            count = 1 + (Math.random() < 0.6 ? 1 : 0);
+        else if (style === 'mountain')
+            count = Math.random() < 0.7 ? 1 : 0;
+        else if (style === 'plateau')
+            count = Math.random() < 0.4 ? 1 : 0;
+        else
+            count = Math.random() < 0.25 ? 1 : 0;
+        if (count === 0)
+            return [];
+        const caves = [];
+        for (let i = 0; i < count; i++) {
+            let angle = randAngle();
+            // Avoid putting cave entrances on top of the dock
+            if (island.dock && Math.abs(Math.atan2(Math.sin(angle - island.dock.shoreAngle), Math.cos(angle - island.dock.shoreAngle))) < 0.6) {
+                angle += Math.PI * (0.5 + Math.random() * 0.5);
+            }
+            const distRatio = randRange(0.55, 0.78);
+            const pos = getIslandSurfacePoint(island, distRatio, angle, 0);
+            const rotation = directionToYaw(Math.cos(angle), Math.sin(angle));
+            const interiorRadius = randRange(2.6, 3.6);
+            const length = randRange(8, 14);
+            caves.push({
+                position: pos,
+                rotation,
+                width: interiorRadius * 2,
+                height: randRange(3.4, 5.0),
+                length,
+                interiorRadius,
+                // Floor sits 0.4m below the entrance surface so players step down into the cave
+                floorY: pos.y - 0.4,
+            });
+        }
+        void islandIndex;
+        return caves;
+    }
+    generateTavern(island, islandIndex) {
+        // Only the bigger islands with docks host taverns, ~3 across the map.
+        if (!island.dock)
+            return null;
+        if (island.radius < 58)
+            return null;
+        // Deterministic-ish: every third hosting island.
+        if (islandIndex % 3 !== 1) {
+            // Allow a small extra chance
+            if (Math.random() > 0.18)
+                return null;
+        }
+        const dock = island.dock;
+        // Place the tavern off the side of the dock, set back inland.
+        const sideAngle = dock.shoreAngle + dock.moorSide * 0.55;
+        const distRatio = 0.62;
+        const pos = getIslandSurfacePoint(island, distRatio, sideAngle, 0);
+        const facing = directionToYaw(island.position.x - pos.x, island.position.z - pos.z) + Math.PI; // door faces outward (toward dock)
+        const rotation = directionToYaw(dock.position.x - pos.x, dock.position.z - pos.z);
+        const width = 7.6;
+        const depth = 6.4;
+        void facing;
+        const cosR = Math.cos(rotation);
+        const sinR = Math.sin(rotation);
+        // Tavern floor sits 0.18m above the surface — counter Y must match so the
+        // bartender stands on planks, not under them.
+        const counterPosition = {
+            x: pos.x + sinR * (-depth * 0.28),
+            y: pos.y + 0.18,
+            z: pos.z + cosR * (-depth * 0.28),
+        };
+        return { position: pos, rotation, width, depth, counterPosition };
     }
     generateDock(island) {
         const dockChance = island.radius > 70 ? 0.82 : island.radius > 55 ? 0.62 : 0.36;
@@ -214,21 +377,48 @@ export class MapGenerator {
     generateStoryNpcs(island, islandIndex) {
         const shouldSpawn = islandIndex < 3 || (island.radius > 62 && islandIndex % 4 === 0);
         const npcs = [];
-        const hoarderAngle = island.dock
-            ? island.dock.shoreAngle + island.dock.moorSide * 0.42
-            : island.profile.primaryHillAngle - 0.62;
-        const hoarderDistRatio = island.dock ? 0.74 : 0.38;
-        const hoarderPos = getIslandSurfacePoint(island, hoarderDistRatio, hoarderAngle, 0.08);
-        npcs.push({
-            id: uuid(),
-            role: 'gold_hoarder',
-            name: 'Gold Hoarder Darius',
-            cutsceneTitle: 'The Hoarder at the Shore',
-            line: 'Bring me sealed chests, not loose excuses. I pay gold, and my charts point to the next mark.',
-            cue: 'Sell carried chests here or take a treasure map.',
-            position: hoarderPos,
-            rotation: directionToYaw(island.position.x - hoarderPos.x, island.position.z - hoarderPos.z),
-        });
+        // Gold hoarders only on a subset of islands — every other dock-hosting island,
+        // plus a guaranteed couple early so first-game discovery is fast.
+        const hoarderEligible = !!island.dock && island.radius > 50;
+        const hoarderHere = hoarderEligible && (islandIndex < 2 || islandIndex % 2 === 0);
+        if (hoarderHere) {
+            const hoarderAngle = island.dock
+                ? island.dock.shoreAngle + island.dock.moorSide * 0.42
+                : island.profile.primaryHillAngle - 0.62;
+            const hoarderDistRatio = island.dock ? 0.74 : 0.38;
+            const hoarderPos = getIslandSurfacePoint(island, hoarderDistRatio, hoarderAngle, 0.08);
+            npcs.push({
+                id: uuid(),
+                role: 'gold_hoarder',
+                name: 'Gold Hoarder Darius',
+                cutsceneTitle: 'The Hoarder at the Shore',
+                line: 'Bring me sealed chests, not loose excuses. I pay gold, and my charts point to the next mark.',
+                cue: 'Sell carried chests here or take a treasure map.',
+                position: hoarderPos,
+                rotation: directionToYaw(island.position.x - hoarderPos.x, island.position.z - hoarderPos.z),
+            });
+        }
+        if (island.tavern) {
+            const t = island.tavern;
+            const cosR = Math.cos(t.rotation);
+            const sinR = Math.sin(t.rotation);
+            // Stand the bartender just behind the bar counter, facing the door.
+            const barPos = {
+                x: t.counterPosition.x + sinR * 0.55,
+                y: t.counterPosition.y,
+                z: t.counterPosition.z + cosR * 0.55,
+            };
+            npcs.push({
+                id: uuid(),
+                role: 'bartender',
+                name: 'Tavernkeeper Bess',
+                cutsceneTitle: 'A Mug at the Counter',
+                line: 'Sit, sailor. Trade rumors keep the rum warm — drink up and the next horizon will feel a touch closer.',
+                cue: 'Tavern: rest, restock, and listen for tales.',
+                position: barPos,
+                rotation: t.rotation + Math.PI,
+            });
+        }
         if (!shouldSpawn)
             return npcs;
         const cast = [
@@ -278,6 +468,120 @@ export class MapGenerator {
             loot.set(entry.item, (loot.get(entry.item) ?? 0) + qty);
         }
         return Array.from(loot.entries()).map(([item, qty]) => ({ item, qty }));
+    }
+    generateWildlife(islands) {
+        const animals = [];
+        for (const island of islands) {
+            const baseCount = island.radius > 96 ? 8 : island.radius > 70 ? 6 : island.radius > 54 ? 5 : 4;
+            let placed = 0;
+            let attempts = 0;
+            while (placed < baseCount && attempts < baseCount * 6) {
+                attempts++;
+                const roll = Math.random();
+                const type = roll < 0.34
+                    ? 'crab'
+                    : roll < 0.62
+                        ? 'chicken'
+                        : roll < 0.82
+                            ? 'pig'
+                            : 'gull';
+                let angle = randAngle();
+                if (island.dock && Math.abs(Math.atan2(Math.sin(angle - island.dock.shoreAngle), Math.cos(angle - island.dock.shoreAngle))) < 0.32) {
+                    angle += Math.PI * 0.55;
+                }
+                const shoreBias = type === 'crab' ? randRange(0.72, 0.9) : type === 'gull' ? randRange(0.42, 0.76) : randRange(0.22, 0.68);
+                const pos = getIslandSurfacePoint(island, shoreBias, angle, type === 'gull' ? 2.2 : 0.08);
+                // Skip underwater spawns (archipelago saddles) and inside cave footprints.
+                const groundOnly = pos.y - (type === 'gull' ? 2.2 : 0.08);
+                if (groundOnly < 4.8)
+                    continue;
+                let inCave = false;
+                for (const cave of island.caves) {
+                    const dx = pos.x - cave.position.x;
+                    const dz = pos.z - cave.position.z;
+                    const cosR = Math.cos(cave.rotation);
+                    const sinR = Math.sin(cave.rotation);
+                    const lx = dx * cosR - dz * sinR;
+                    const lz = dx * sinR + dz * cosR;
+                    if (Math.abs(lx) < cave.interiorRadius + 0.5 && lz > -cave.length - 0.5 && lz < 1.0) {
+                        inCave = true;
+                        break;
+                    }
+                }
+                if (inCave)
+                    continue;
+                animals.push({
+                    id: uuid(),
+                    islandId: island.id,
+                    type,
+                    position: { ...pos },
+                    spawnPosition: { ...pos },
+                    rotation: randAngle(),
+                    velocity: { x: 0, y: 0, z: 0 },
+                    health: WILDLIFE.HEALTH[type],
+                    wanderAngle: randAngle(),
+                    wanderTimer: randRange(0.4, 2.4),
+                });
+                placed++;
+            }
+        }
+        return animals;
+    }
+    generateSeaRocks(islands, spawns) {
+        const rocks = [];
+        const attempts = SEA_ROCKS.COUNT * 36;
+        for (let attempt = 0; attempt < attempts && rocks.length < SEA_ROCKS.COUNT; attempt++) {
+            const angle = randAngle();
+            const dist = randRange(170, WORLD.HALF - 95);
+            const radius = randRange(SEA_ROCKS.MIN_RADIUS, SEA_ROCKS.MAX_RADIUS);
+            const height = randRange(SEA_ROCKS.MIN_HEIGHT, SEA_ROCKS.MAX_HEIGHT);
+            const rotation = randAngle();
+            const variant = randInt(0, 2);
+            const colliderSet = buildSeaRockColliders(radius, height, rotation, variant);
+            const candidate = {
+                id: uuid(),
+                position: {
+                    x: Math.cos(angle) * dist,
+                    y: 0,
+                    z: Math.sin(angle) * dist,
+                },
+                radius,
+                height,
+                rotation,
+                variant,
+                colliderBoundsRadius: colliderSet.boundsRadius,
+                colliders: colliderSet.colliders,
+            };
+            let blocked = false;
+            for (const island of islands) {
+                const d = Math.hypot(candidate.position.x - island.position.x, candidate.position.z - island.position.z);
+                if (d < getIslandMaxRadius(island) + radius + 38) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked)
+                continue;
+            for (const spawn of spawns) {
+                const d = Math.hypot(candidate.position.x - spawn.position.x, candidate.position.z - spawn.position.z);
+                if (d < radius + 80) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (blocked)
+                continue;
+            for (const rock of rocks) {
+                const d = Math.hypot(candidate.position.x - rock.position.x, candidate.position.z - rock.position.z);
+                if (d < candidate.radius + rock.radius + 45) {
+                    blocked = true;
+                    break;
+                }
+            }
+            if (!blocked)
+                rocks.push(candidate);
+        }
+        return rocks;
     }
     generateShipSpawns(islands) {
         const spawns = [];

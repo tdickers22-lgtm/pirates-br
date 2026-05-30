@@ -99,13 +99,16 @@ export class WeaponSystem {
         }
         return traces;
     }
-    tryMeleeAttack(attacker, targets, yaw) {
+    tryMeleeAttack(attacker, targets, yaw, options) {
         const weapon = attacker.weapons[attacker.activeSlot];
         if (!weapon)
             return [];
         const def = WEAPONS[weapon.weaponId];
         if (!def.melee)
             return [];
+        const damageMultiplier = options?.damageMultiplier ?? 1;
+        const rangeMultiplier = options?.rangeMultiplier ?? 1;
+        const knockbackMultiplier = options?.knockbackMultiplier ?? 1;
         const results = [];
         for (const target of targets) {
             if (target.id === attacker.id || target.state === 'eliminated')
@@ -113,12 +116,16 @@ export class WeaponSystem {
             const dx = target.position.x - attacker.position.x;
             const dz = target.position.z - attacker.position.z;
             const d = Math.sqrt(dx * dx + dz * dz);
-            if (d < def.range) {
+            if (d < def.range * rangeMultiplier) {
                 // Check frontal arc (120 degree cone)
                 const angle = Math.atan2(dx, dz);
                 const diff = Math.abs(((angle - yaw) + Math.PI) % (2 * Math.PI) - Math.PI);
                 if (diff < Math.PI * 0.67) {
-                    results.push({ targetId: target.id, damage: def.damage, knockback: def.knockback });
+                    results.push({
+                        targetId: target.id,
+                        damage: def.damage * damageMultiplier,
+                        knockback: def.knockback * knockbackMultiplier,
+                    });
                 }
             }
         }
@@ -129,7 +136,8 @@ export class WeaponSystem {
             return [];
         if (ship.cannonCooldowns[cannonIndex] > 0)
             return [];
-        // Check inventory for cannonball type
+        // Ship cannons spend shared stores; the HUD shows the same finite counts.
+        const cannonballIdx = ship.inventory.findIndex(s => s.item === 'cannonball' && s.qty > 0);
         const firebombIdx = ship.inventory.findIndex(s => s.item === 'firebomb_ball' && s.qty > 0);
         const chainshotIdx = ship.inventory.findIndex(s => s.item === 'chainshot' && s.qty > 0);
         const preferredAmmo = player.selectedCannonAmmo;
@@ -146,8 +154,10 @@ export class WeaponSystem {
                 usedIdx = chainshotIdx;
                 consumesInventory = true;
             }
-            else {
+            else if (cannonballIdx >= 0) {
                 projType = 'cannonball';
+                usedIdx = cannonballIdx;
+                consumesInventory = true;
             }
         }
         else if (preferredAmmo === 'chainshot') {
@@ -160,16 +170,26 @@ export class WeaponSystem {
                 usedIdx = firebombIdx;
                 consumesInventory = true;
             }
-            else {
+            else if (cannonballIdx >= 0) {
                 projType = 'cannonball';
+                usedIdx = cannonballIdx;
+                consumesInventory = true;
             }
         }
         else {
             projType = 'cannonball';
+            if (cannonballIdx >= 0) {
+                usedIdx = cannonballIdx;
+                consumesInventory = true;
+            }
         }
-        if (consumesInventory && usedIdx < 0)
+        const usesSuperShot = projType === 'cannonball' && player.superCannonballs > 0;
+        if (!usesSuperShot && (!consumesInventory || usedIdx < 0))
             return [];
-        if (consumesInventory) {
+        if (usesSuperShot) {
+            player.superCannonballs = Math.max(0, player.superCannonballs - 1);
+        }
+        else if (consumesInventory) {
             ship.inventory[usedIdx].qty--;
             if (ship.inventory[usedIdx].qty <= 0)
                 ship.inventory.splice(usedIdx, 1);
@@ -194,10 +214,13 @@ export class WeaponSystem {
             alive: true,
             age: 0,
             maxAge: 8,
-            damage: SHIP.CANNON_DAMAGE_HULL * (ship.upgrades.some(u => u.type === 'charged_cannons') ? SHIP_UPGRADES.CANNON_DAMAGE_MULT : 1),
+            damage: SHIP.CANNON_DAMAGE_HULL
+                * (ship.upgrades.some(u => u.type === 'charged_cannons') ? SHIP_UPGRADES.CANNON_DAMAGE_MULT : 1)
+                * (usesSuperShot ? 5 : 1),
             knockback: 0,
             visualOnly: false,
             showImpact: true,
+            special: usesSuperShot ? 'super_cannonball' : undefined,
         };
         this.pendingProjectiles.push(proj);
         return [proj];
