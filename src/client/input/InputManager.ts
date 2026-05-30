@@ -15,12 +15,14 @@ export class InputManager {
   private tradePressed = false;
   private reloadPressed = false;
   private placeKegPressed = false;
+  private dropChestPressed = false;
+  private specialAttackPressed = false;
   private kegHeld = false;
   private kegPreviewUntil = 0;
   private jumpPressed = false;
   private slotPressed: WeaponSlot | null = null;
   private cannonAmmoPressed: CannonAmmoType | null = null;
-  /** Hold [V] to open supply wheel; click slices or press 1-4 to use pocket items. */
+  /** Hold [I] to open supply wheel; click slices or press 1-4 to use pocket items. */
   private vHeld = false;
   private pendingWheelSlot: number | null = null;
 
@@ -36,7 +38,11 @@ export class InputManager {
         e.preventDefault();
       }
       this.keys.add(e.code);
-      if (e.code === 'KeyV') {
+      // OS keyboard auto-repeat fires keydown repeatedly while a key is held.
+      // Edge-triggered actions (interact, jump, trade, reload, slot, etc.) must only fire on the
+      // initial press — otherwise holding [X] near the anchor wheel cycles drop/raise forever.
+      if (e.repeat) return;
+      if (e.code === 'KeyI') {
         if (!this.vHeld && this.locked) document.exitPointerLock?.();
         this.vHeld = true;
       }
@@ -52,6 +58,8 @@ export class InputManager {
       }
       if (e.code === 'KeyT') this.tradePressed = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
+      if (e.code === 'KeyB') this.dropChestPressed = true;
+      if (e.code === 'KeyE') this.specialAttackPressed = true;
       if (e.code === 'KeyG' && !this.kegHeld) {
         e.preventDefault();
         this.kegHeld = true;
@@ -67,7 +75,7 @@ export class InputManager {
     });
     document.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
-      if (e.code === 'KeyV') {
+      if (e.code === 'KeyI') {
         this.vHeld = false;
         this.lockElement?.requestPointerLock?.().catch(() => {});
       }
@@ -85,6 +93,13 @@ export class InputManager {
         this.wantsRelock = true;
         this.lockElement?.requestPointerLock?.().catch(() => {});
         e.preventDefault();
+        return;
+      }
+      if (this.kegHeld && e.button === 0) {
+        e.preventDefault();
+        this.kegHeld = false;
+        this.placeKegPressed = true;
+        this.kegPreviewUntil = Date.now() + 450;
         return;
       }
       this.mouseButtons.add(e.button);
@@ -141,12 +156,15 @@ export class InputManager {
       trade:    this.tradePressed,
       reload:   this.reloadPressed,
       placeKeg: this.placeKegPressed,
+      dropChest: this.dropChestPressed,
+      specialAttack: this.specialAttackPressed,
       slot:     this.slotPressed,
       cannonAmmo: this.cannonAmmoPressed,
       yaw:      this.yaw,
       pitch:    this.pitch,
       wheelIndex: wheelUse,
       useWheelItem: wheelUse !== null,
+      barrelTakeAll: false,
       interactIntent: null,
     };
 
@@ -155,6 +173,8 @@ export class InputManager {
     this.tradePressed = false;
     this.reloadPressed = false;
     this.placeKegPressed = false;
+    this.dropChestPressed = false;
+    this.specialAttackPressed = false;
     this.jumpPressed = false;
     this.slotPressed = null;
     this.cannonAmmoPressed = null;
@@ -169,7 +189,7 @@ export class InputManager {
   isLocked() { return this.locked; }
   isKegPreviewActive() { return this.kegHeld || Date.now() < this.kegPreviewUntil; }
   isInteractHeld() { return this.keys.has('KeyX'); }
-  /** True while [V] is held — supply wheel overlay */
+  /** True while [I] is held — supply wheel overlay */
   isSupplyWheelOpen() { return this.vHeld; }
   queueWheelSlot(slot: number) {
     if (slot >= 0 && slot <= 3) this.pendingWheelSlot = slot;
@@ -179,6 +199,8 @@ export class InputManager {
       || this.tradePressed
       || this.reloadPressed
       || this.placeKegPressed
+      || this.dropChestPressed
+      || this.specialAttackPressed
       || this.jumpPressed
       || this.slotPressed !== null
       || this.cannonAmmoPressed !== null
@@ -202,9 +224,22 @@ export class InputManager {
     };
   }
 
+  getSwimVerticalIntent() {
+    return (this.keys.has('Space') ? 1 : 0) - (this.keys.has('KeyZ') ? 1 : 0);
+  }
+
+  /** 1.0 is the historical default; clamped to a sane range to avoid flick-aim accidents. */
+  private sensitivity = 1.0;
+  setSensitivity(scale: number) {
+    if (!Number.isFinite(scale)) return;
+    this.sensitivity = Math.max(0.2, Math.min(2.5, scale));
+  }
+  getSensitivity() { return this.sensitivity; }
+
   private applyLookDelta(dx: number, dy: number) {
-    this.yaw -= dx * 0.002;
-    this.pitch -= dy * 0.002;
+    const k = 0.002 * this.sensitivity;
+    this.yaw -= dx * k;
+    this.pitch -= dy * k;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 

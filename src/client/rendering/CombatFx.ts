@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Projectile, ProjectileType, Vec3 } from '../../shared/types/index.js';
+import type { Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
 
 type Burst = {
   mesh: THREE.Mesh;
@@ -66,18 +66,18 @@ export class CombatFx {
 
   emitLaunch(projectile: Projectile, cameraPos: THREE.Vector3, isLocalSource: boolean) {
     const palette = this.getPalette(projectile.type);
-    const size = projectile.type === 'bullet' ? 0.45 : projectile.type === 'cannonball' ? 1.1 : 0.85;
+    const size = projectile.type === 'bullet' ? 0.45 : projectile.type === 'tsunami' ? 3.4 : projectile.type === 'cannonball' ? 1.1 : 0.85;
     this.spawnBurst(
       projectile.position,
       size,
-      size * (projectile.type === 'bullet' ? 2.2 : 2.9),
+      size * (projectile.type === 'bullet' ? 2.2 : projectile.type === 'tsunami' ? 4.4 : 2.9),
       0.12,
       palette.flash,
       0.9,
       0,
-      projectile.type === 'bullet' ? 1.2 : 2.3,
+      projectile.type === 'bullet' ? 1.2 : projectile.type === 'tsunami' ? 3.4 : 2.3,
     );
-    this.playShotSound(projectile.type, projectile.position, cameraPos, isLocalSource);
+    this.playShotSound(projectile.type, projectile.position, cameraPos, isLocalSource, projectile.weaponId);
   }
 
   emitImpact(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3) {
@@ -193,14 +193,17 @@ export class CombatFx {
         return { flash: 0xff8642, impact: 0xff5b2d };
       case 'chainshot':
         return { flash: 0xb8d9ff, impact: 0x7fb4ee };
+      case 'tsunami':
+        return { flash: 0x8fefff, impact: 0x60cfff };
       case 'bullet':
       default:
         return { flash: 0xfff2c2, impact: 0xece8ff };
     }
   }
 
-  private playShotSound(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3, isLocalSource: boolean) {
-    const volume = this.getSpatialVolume(position, cameraPos, isLocalSource ? 1.4 : 1, type === 'cannonball' ? 240 : 130);
+  private playShotSound(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3, isLocalSource: boolean, weaponId?: WeaponId) {
+    const bulletRange = weaponId === 'eye_of_reach' ? 320 : weaponId === 'blunderbuss' ? 150 : 130;
+    const volume = this.getSpatialVolume(position, cameraPos, isLocalSource ? 1.4 : 1, type === 'tsunami' ? 420 : type === 'cannonball' ? 240 : bulletRange);
     if (volume <= 0.01) return;
     this.unlockAudio();
     const ctx = this.audioContext;
@@ -218,6 +221,24 @@ export class CombatFx {
     } else if (type === 'chainshot') {
       this.playNoise(now, 0.16, 900, 0.9, volume * 0.6, 'bandpass');
       this.playTone(now, 210, 120, 0.16, volume * 0.38, 'square');
+    } else if (type === 'tsunami') {
+      this.playNoise(now, 0.55, 240, 0.95, volume * 0.9, 'lowpass');
+      this.playTone(now, 70, 46, 0.46, volume * 0.58, 'sawtooth');
+    } else if (weaponId === 'eye_of_reach') {
+      // Long rifle crack: bright muzzle snap, wood/steel body, and a low echo tail.
+      this.playNoise(now, 0.06, 5200, 1.4, volume * 0.95, 'highpass');
+      this.playTone(now, 1160, 620, 0.09, volume * 0.34, 'square');
+      this.playTone(now + 0.012, 92, 56, 0.34, volume * 0.42, 'triangle');
+      this.playNoise(now + 0.08, 0.42, 310, 0.72, volume * 0.34, 'lowpass');
+      this.playTone(now + 0.16, 260, 150, 0.22, volume * 0.12, 'sine');
+    } else if (weaponId === 'blunderbuss') {
+      this.playNoise(now, 0.11, 2800, 1.1, volume * 0.72, 'bandpass');
+      this.playNoise(now + 0.025, 0.22, 430, 0.7, volume * 0.55, 'lowpass');
+      this.playTone(now, 180, 88, 0.18, volume * 0.34, 'triangle');
+    } else if (weaponId === 'flintknock') {
+      this.playNoise(now, 0.08, 3600, 1.1, volume * 0.68, 'bandpass');
+      this.playTone(now, 340, 120, 0.13, volume * 0.3, 'square');
+      this.playNoise(now + 0.06, 0.18, 260, 0.75, volume * 0.28, 'lowpass');
     } else {
       this.playNoise(now, 0.12, 1500, 0.8, volume * 0.55, 'bandpass');
       this.playTone(now, 280, 120, 0.1, volume * 0.25, 'triangle');

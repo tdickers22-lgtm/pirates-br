@@ -1,15 +1,60 @@
 import * as THREE from 'three';
-import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, STORM_PHASES, WEAPONS, WORLD } from '../../shared/constants/index.js';
+import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS, WORLD } from '../../shared/constants/index.js';
 import type {
-  GameState, InteractIntent, Island, IslandNpc, ItemStack, Player, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance,
+  GameState, InteractIntent, Island, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, getCrowNestLadderInteractionBounds, getSailStationLocal, gerstnerHeight, WAVE_PARAMS } from '../../shared/utils/index.js';
+import { getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS } from '../../shared/utils/index.js';
+import {
+  findNearbyCannonIndex as findSharedNearbyCannonIndex,
+  getAnchorControlLocal as getSharedAnchorControlLocal,
+  getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition,
+  getSailControlLocal as getSharedSailControlLocal,
+  isNearAnchor as isSharedNearAnchor,
+  isNearCrowNestLadder as isSharedNearCrowNestLadder,
+  isNearHelm as isSharedNearHelm,
+  isNearSailStation as isSharedNearSailStation,
+  toShipLocalPoint,
+} from '../../shared/interactions.js';
 import { Renderer } from '../rendering/Renderer.js';
 import { OceanRenderer } from '../rendering/OceanRenderer.js';
 import { ShipRenderer } from '../rendering/ShipRenderer.js';
 import { CombatFx } from '../rendering/CombatFx.js';
+import { SoundEngine } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
+import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
+
+const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
+const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
+const CUTLASS_VIEW_CHARGE_TIME = 0.72;
+const CUTLASS_VIEW_LUNGE_COOLDOWN = 1.05;
+
+function installGeometryNaNGuard() {
+  const proto = THREE.BufferGeometry.prototype as THREE.BufferGeometry & {
+    __piratesBrNaNGuard?: boolean;
+  };
+  if (proto.__piratesBrNaNGuard) return;
+  proto.__piratesBrNaNGuard = true;
+
+  const originalComputeBoundingSphere = proto.computeBoundingSphere;
+  proto.computeBoundingSphere = function guardedComputeBoundingSphere(this: THREE.BufferGeometry) {
+    const position = this.getAttribute('position') as THREE.BufferAttribute | undefined;
+    const values = position?.array as ArrayLike<number> & { [index: number]: number } | undefined;
+    if (values) {
+      let changed = false;
+      for (let i = 0; i < values.length; i++) {
+        if (!Number.isFinite(values[i])) {
+          values[i] = 0;
+          changed = true;
+        }
+      }
+      if (changed && position) position.needsUpdate = true;
+    }
+    return originalComputeBoundingSphere.call(this);
+  };
+}
+
+installGeometryNaNGuard();
 
 type ChestMeshRecord = {
   root: THREE.Group;
@@ -77,6 +122,8 @@ type UiRefs = {
   stormWarning: HTMLDivElement;
   shipsAlive: HTMLDivElement;
   goldAmount: HTMLDivElement;
+  goldLeaders: HTMLDivElement;
+  killCount: HTMLDivElement;
   healthFill: HTMLDivElement;
   armorFill: HTMLDivElement;
   hullBow: HTMLDivElement;
@@ -103,6 +150,9 @@ type UiRefs = {
   kegStatusValue: HTMLDivElement;
   interactPrompt: HTMLDivElement;
   contextLabel: HTMLDivElement;
+  barrelPanel: HTMLDivElement;
+  barrelPanelLoot: HTMLDivElement;
+  barrelPanelInventory: HTMLDivElement;
   crosshair: HTMLDivElement;
   hitMarker: HTMLDivElement;
   damageIndicatorLayer: HTMLDivElement;
@@ -132,6 +182,7 @@ type UiRefs = {
   treasureChartCanvas: HTMLCanvasElement;
   treasureChartIsland: HTMLDivElement;
   treasureChartRoute: HTMLDivElement;
+  brProgressFeed: HTMLDivElement;
 };
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -142,6 +193,36 @@ function requireElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
+type PlayerTeamMaterials = {
+  coatMat: THREE.MeshStandardMaterial;
+  clothMat: THREE.MeshStandardMaterial;
+  beltMat: THREE.MeshStandardMaterial;
+  bandanaMat: THREE.MeshStandardMaterial;
+};
+
+function makeTeamShirtColor(color: number) {
+  return new THREE.Color(color).lerp(new THREE.Color(0xf4ead8), 0.38);
+}
+
+function makeTeamBeltColor(color: number) {
+  return new THREE.Color(color).lerp(new THREE.Color(0x2a1d14), 0.62);
+}
+
+function applyPlayerTeamColor(mesh: THREE.Group, color: number) {
+  const userData = mesh.userData as {
+    animation?: { variant?: 'pirate' | 'skeleton' };
+    teamColor?: number;
+    teamMaterials?: PlayerTeamMaterials;
+  };
+  if (userData.animation?.variant === 'skeleton' || userData.teamColor === color || !userData.teamMaterials) return;
+
+  userData.teamMaterials.coatMat.color.set(color);
+  userData.teamMaterials.clothMat.color.copy(makeTeamShirtColor(color));
+  userData.teamMaterials.beltMat.color.copy(makeTeamBeltColor(color));
+  userData.teamMaterials.bandanaMat.color.set(color);
+  userData.teamColor = color;
+}
+
 function makePlayerMesh(
   color: number,
   variant: 'pirate' | 'skeleton' = 'pirate',
@@ -150,6 +231,8 @@ function makePlayerMesh(
   const group = new THREE.Group();
   const isSkeleton = variant === 'skeleton';
   const isCaptain = role === 'captain';
+  const teamShirtColor = makeTeamShirtColor(color);
+  const teamBeltColor = makeTeamBeltColor(color);
 
   const boneMat = new THREE.MeshStandardMaterial({
     color: 0xe5dfd2,
@@ -166,10 +249,10 @@ function makePlayerMesh(
   });
   const pirateSkinMat = new THREE.MeshStandardMaterial({ color: 0xd4a070, roughness: 0.98 });
   const coatMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xd9d3c4 : color, roughness: 0.92 });
-  const clothMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xcfc8b8 : 0xe7dfcf, roughness: 0.96 });
+  const clothMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xcfc8b8 : teamShirtColor, roughness: 0.96 });
   const skinMat = isSkeleton ? boneMat : pirateSkinMat;
   const darkMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xb5ac98 : 0x2a2019, roughness: 1 });
-  const beltMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xc9c0ab : 0x6f4a1f, roughness: 1 });
+  const beltMat = new THREE.MeshStandardMaterial({ color: isSkeleton ? 0xc9c0ab : teamBeltColor, roughness: 1 });
 
   const torso = new THREE.Mesh(
     new THREE.BoxGeometry(isSkeleton ? 0.46 : 0.62, 0.82, isSkeleton ? 0.24 : 0.34),
@@ -411,9 +494,10 @@ function makePlayerMesh(
     head.add(moustache);
   }
 
+  const bandanaMat = new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
   const bandana = new THREE.Mesh(
     new THREE.TorusGeometry(0.2, 0.04, 6, 18),
-    new THREE.MeshStandardMaterial({ color: role === 'raider' ? 0x2c4f7f : 0x8f2f25, roughness: 0.9 }),
+    bandanaMat,
   );
   bandana.rotation.x = Math.PI * 0.5;
   bandana.position.y = 2.0;
@@ -461,6 +545,13 @@ function makePlayerMesh(
     root: healthBarRoot,
     fill: healthBarFill,
     fullWidth: 0.84,
+  };
+  group.userData.teamColor = color;
+  group.userData.teamMaterials = isSkeleton ? undefined : {
+    coatMat,
+    clothMat,
+    beltMat,
+    bandanaMat,
   };
 
   return group;
@@ -764,7 +855,7 @@ function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
   return group;
 }
 
-type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'powder_keg' | 'shovel';
+type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest';
 
 function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
   const group = new THREE.Group();
@@ -772,6 +863,9 @@ function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
   const husk = new THREE.MeshStandardMaterial({ color: 0x4a3320, roughness: 0.88 });
   const woodMat = new THREE.MeshStandardMaterial({ color: 0x7a4e28, roughness: 0.9 });
   const flesh = new THREE.MeshStandardMaterial({ color: 0xff9a30, roughness: 0.48 });
+  const meatMat = new THREE.MeshStandardMaterial({ color: 0x7f2d1f, roughness: 0.74 });
+  const searMat = new THREE.MeshStandardMaterial({ color: 0x2c1710, roughness: 0.92 });
+  const boneMat = new THREE.MeshStandardMaterial({ color: 0xe7d7b2, roughness: 0.8 });
   const leaf = new THREE.MeshStandardMaterial({ color: 0x3d8f42, roughness: 0.65 });
   const iron = new THREE.MeshStandardMaterial({ color: 0x2d3034, roughness: 0.58, metalness: 0.7 });
   const fuseMat = new THREE.MeshStandardMaterial({ color: 0x1d1711, roughness: 0.92 });
@@ -863,6 +957,67 @@ function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
     const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.03, 0.055, 6), leaf);
     stem.position.y = 0.1;
     group.add(stem);
+  } else if (kind === 'meat') {
+    const cut = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 8), meatMat);
+    cut.scale.set(1.3, 0.72, 0.92);
+    cut.rotation.z = -0.2;
+    group.add(cut);
+
+    const bone = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.028, 0.26, 8), boneMat);
+    bone.rotation.z = Math.PI * 0.5;
+    bone.position.x = 0.13;
+    group.add(bone);
+
+    for (const x of [-0.03, 0.03]) {
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.018, 0.18), searMat);
+      stripe.position.set(x, 0.066, 0);
+      stripe.rotation.z = 0.5;
+      group.add(stripe);
+    }
+  } else if (kind === 'chest') {
+    const chestWood = new THREE.MeshStandardMaterial({ color: 0x6a3f1c, roughness: 0.78 });
+    const chestTrim = new THREE.MeshStandardMaterial({ color: 0xc9a84c, roughness: 0.36, metalness: 0.78, emissive: 0x3a2a06, emissiveIntensity: 0.34 });
+    const lock = new THREE.MeshStandardMaterial({ color: 0x2d2218, roughness: 0.62, metalness: 0.62 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: 0x8f5f3c, roughness: 0.82 });
+
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.26, 0.3), chestWood);
+    body.position.y = -0.06;
+    group.add(body);
+
+    const lid = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.16, 0.3), chestWood);
+    lid.position.set(0, 0.13, 0);
+    lid.scale.y = 0.62;
+    group.add(lid);
+
+    const lidCap = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.46, 18, 1, true, 0, Math.PI), chestWood);
+    lidCap.rotation.z = Math.PI * 0.5;
+    lidCap.position.set(0, 0.18, 0);
+    group.add(lidCap);
+
+    for (const dx of [-0.21, 0, 0.21]) {
+      const band = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.42, 0.31), chestTrim);
+      band.position.set(dx, 0.04, 0);
+      group.add(band);
+    }
+    const rim = new THREE.Mesh(new THREE.BoxGeometry(0.47, 0.025, 0.31), chestTrim);
+    rim.position.set(0, 0.06, 0);
+    group.add(rim);
+
+    const lockMesh = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.08, 0.025), lock);
+    lockMesh.position.set(0, 0.05, 0.16);
+    group.add(lockMesh);
+
+    const glow = new THREE.PointLight(0xffd278, 0.55, 1.4, 1.5);
+    glow.position.set(0, 0.06, 0.2);
+    group.add(glow);
+
+    // Forearms gripping the chest from below — sells the carry pose in first-person.
+    for (const side of [-1, 1]) {
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 8), skinMat);
+      hand.position.set(side * 0.22, -0.18, 0.18);
+      hand.scale.set(1.1, 0.85, 1.0);
+      group.add(hand);
+    }
   } else {
     const body = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 10), flesh);
     body.scale.set(1.05, 0.82, 1.12);
@@ -894,22 +1049,39 @@ function applyViewmodelMaterialSettings(root: THREE.Object3D) {
 }
 
 function makeProjectileMesh(projectile: Projectile): THREE.Mesh {
+  if (projectile.type === 'tsunami') {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(46, 3.4, 6),
+      new THREE.MeshBasicMaterial({
+        color: 0x7fe7ff,
+        transparent: true,
+        opacity: 0.38,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    mesh.castShadow = false;
+    return mesh;
+  }
+
+  const superShot = projectile.special === 'super_cannonball';
   const colorByType: Record<Projectile['type'], number> = {
     bullet: 0xf7e7a9,
-    cannonball: 0x2e2e2e,
+    cannonball: superShot ? 0xffd15c : 0x2e2e2e,
     firebomb: 0xff6b2d,
     chainshot: 0x91b7c8,
+    tsunami: 0x7fe7ff,
   };
 
-  const radius = projectile.type === 'bullet' ? 0.08 : 0.26;
+  const radius = projectile.type === 'bullet' ? 0.08 : superShot ? 0.42 : 0.26;
   const mesh = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 12, 12),
     new THREE.MeshStandardMaterial({
       color: colorByType[projectile.type],
-      emissive: projectile.type === 'firebomb' ? 0xaa3300 : 0x000000,
-      emissiveIntensity: projectile.type === 'firebomb' ? 1.2 : 0,
-      roughness: projectile.type === 'cannonball' ? 0.95 : 0.45,
-      metalness: projectile.type === 'cannonball' ? 0.2 : 0,
+      emissive: projectile.type === 'firebomb' ? 0xaa3300 : superShot ? 0x8f4d00 : 0x000000,
+      emissiveIntensity: projectile.type === 'firebomb' ? 1.2 : superShot ? 0.9 : 0,
+      roughness: projectile.type === 'cannonball' ? 0.82 : 0.45,
+      metalness: projectile.type === 'cannonball' ? 0.34 : 0,
     }),
   );
   mesh.castShadow = true;
@@ -1107,13 +1279,141 @@ function makeUpgradeStationProp(type: ShipUpgradeType, accentHex: number) {
   return prop;
 }
 
+/**
+ * Stylized mermaid: glowing aqua humanoid torso + tail. Placed in the water near
+ * a swimming player to mark their "Press X to return to ship" target.
+ */
+function buildMermaidMesh(): THREE.Group {
+  const group = new THREE.Group();
+  group.name = 'mermaid';
+
+  // Soft glow halo so she's visible at distance
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(1.4, 24, 16),
+    new THREE.MeshBasicMaterial({
+      color: 0x86e8ff,
+      transparent: true,
+      opacity: 0.18,
+      depthWrite: false,
+    }),
+  );
+  halo.position.y = 0.6;
+  group.add(halo);
+
+  // Torso
+  const torso = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.32, 0.7, 6, 12),
+    new THREE.MeshStandardMaterial({
+      color: 0xfdd9b8,
+      emissive: 0x86e8ff,
+      emissiveIntensity: 0.45,
+      roughness: 0.55,
+      metalness: 0.05,
+    }),
+  );
+  torso.position.y = 1.05;
+  group.add(torso);
+
+  // Head
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.22, 16, 12),
+    new THREE.MeshStandardMaterial({
+      color: 0xffe6cc,
+      roughness: 0.5,
+      metalness: 0.05,
+    }),
+  );
+  head.position.y = 1.55;
+  group.add(head);
+
+  // Hair (dark teal flowing back)
+  const hair = new THREE.Mesh(
+    new THREE.SphereGeometry(0.26, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.6),
+    new THREE.MeshStandardMaterial({ color: 0x153a4a, roughness: 0.7 }),
+  );
+  hair.position.set(0, 1.6, -0.05);
+  group.add(hair);
+
+  // Tail (longer cone, scales)
+  const tailMat = new THREE.MeshStandardMaterial({
+    color: 0x2cd0bf,
+    emissive: 0x47e8d6,
+    emissiveIntensity: 0.55,
+    roughness: 0.35,
+    metalness: 0.4,
+  });
+  const tailUpper = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.18, 0.8, 12), tailMat);
+  tailUpper.position.y = 0.35;
+  group.add(tailUpper);
+  const tailLower = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.07, 0.6, 12), tailMat);
+  tailLower.position.y = -0.18;
+  group.add(tailLower);
+
+  // Tail fin (a flat fan)
+  const finGeom = new THREE.ConeGeometry(0.55, 0.55, 8, 1, true);
+  const fin = new THREE.Mesh(finGeom, tailMat);
+  fin.rotation.x = Math.PI;
+  fin.scale.set(1.0, 0.18, 1.0);
+  fin.position.set(0, -0.5, 0);
+  group.add(fin);
+
+  // Arm hints (just blobs)
+  const armMat = new THREE.MeshStandardMaterial({
+    color: 0xfdd9b8,
+    emissive: 0x86e8ff,
+    emissiveIntensity: 0.3,
+    roughness: 0.55,
+  });
+  for (const sx of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 0.55, 4, 8), armMat);
+    arm.position.set(0.34 * sx, 1.05, 0);
+    arm.rotation.z = (Math.PI / 6) * sx;
+    group.add(arm);
+  }
+
+  group.userData.bobPhase = Math.random() * Math.PI * 2;
+  return group;
+}
+
 export class Game {
   private readonly renderer = new Renderer();
   private readonly ocean = new OceanRenderer();
   private readonly shipRenderer = new ShipRenderer();
   private readonly combatFx = new CombatFx();
+  private readonly audio = new SoundEngine();
+  // Edge-detect state for sound triggers (chest carry, drowning, eating, sail/anchor changes).
+  private prevCarryingChestId: string | null = null;
+  private prevPlayerStateForAudio: string | null = null;
+  private prevPocketUseCooldown = 0;
+  private prevAnchored: boolean | null = null;
+  private prevAnchorRaiseProgress: number | null = null;
+  private prevSailHeightForAudio: number | null = null;
+  private prevSailAngleForAudio: number | null = null;
+  private lastSailTrimSoundAt = 0;
+  private lastAnchorMoveSoundAt = 0;
+  private lastHelmTurnSoundAt = 0;
+  private lastHullSplashAt = 0;
+  private lastSwimSplashAt = 0;
+  private prevStormPhase = -1;
+  private digStrikePhase = 0;
+  private prevMeleeReloading = false;
+  private prevCannonBallistic = false;
+  /** Currently-browsed barrel — renders the side-by-side inventory comparison panel */
+  private barrelBrowse: { barrelId: string; loot: ItemStack[]; lastEventAt: number } | null = null;
   private readonly network = new NetworkClient();
   private readonly input = new InputManager();
+  private readonly menu = new MenuController({
+    network: this.network,
+    audio: this.audio,
+    input: this.input,
+    onMatchStart: (payload) => this.onMatchStartFromMenu(payload),
+    onReturnToMenu: () => this.onReturnToMenuFromEnd(),
+  });
+  // Used by ambient render & end-of-round flow.
+  // @ts-expect-error reserved for future ambient-vs-in-match branching
+  private inMatch = false;
+  // @ts-expect-error reserved for showing the leaderboard until user dismisses it
+  private endmatchPending = false;
   private readonly ui: UiRefs = {
     loadingScreen: requireElement('loading-screen'),
     loadingBar: requireElement('loading-bar'),
@@ -1124,6 +1424,8 @@ export class Game {
     stormWarning: requireElement('storm-warning'),
     shipsAlive: requireElement('ships-alive'),
     goldAmount: requireElement('gold-amount'),
+    goldLeaders: requireElement('gold-leaders'),
+    killCount: requireElement('kill-count'),
     healthFill: requireElement('health-fill'),
     armorFill: requireElement('armor-fill'),
     hullBow: requireElement('hull-bow'),
@@ -1150,6 +1452,9 @@ export class Game {
     kegStatusValue: requireElement('keg-status-value'),
     interactPrompt: requireElement('interact-prompt'),
     contextLabel: requireElement('context-label'),
+    barrelPanel: requireElement('barrel-panel'),
+    barrelPanelLoot: requireElement('barrel-panel-loot'),
+    barrelPanelInventory: requireElement('barrel-panel-inventory'),
     crosshair: requireElement('crosshair'),
     hitMarker: requireElement('hit-marker'),
     damageIndicatorLayer: requireElement('damage-indicator-layer'),
@@ -1179,6 +1484,7 @@ export class Game {
     treasureChartCanvas: requireElement('treasure-chart-canvas'),
     treasureChartIsland: requireElement('treasure-chart-island'),
     treasureChartRoute: requireElement('treasure-chart-route'),
+    brProgressFeed: requireElement('br-progress-feed'),
   };
 
   private state: GameState | null = null;
@@ -1189,14 +1495,29 @@ export class Game {
   private liveKegIds = new Set<string>();
   private localPlayerId: string | null = null;
   private localShipId: string | null = null;
-  private returningToLobby = false;
+  /** Cleared when the server sends `join`; avoids an endless 68% bar if assignment stalls. */
+  private joinAssignmentWatchdog: number | null = null;
   private lastFrameTime = performance.now();
   private frameDt = 1 / 60;
+  private readonly debugPerfEnabled = (() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.has('debug') || params.has('perf');
+  })();
+  private debugPerfPanel: HTMLDivElement | null = null;
+  private debugFrameCounter = 0;
+  private debugFrameAccum = 0;
+  private debugFps = 0;
+  private debugWorstFrameMs = 0;
+  private debugUpdateTimer = 0;
   private hudTimer = 0;
   private minimapTimer = 0;
   private interactScanTimer = 0;
   private slowSceneTimer = 0;
   private inputSendTimer = 0;
+  private inputHeartbeatTimer = 0;
+  private windWispTimer = 0;
+  private rainOverlayTimer = 0;
+  private lastSentInputSignature = '';
   private previousHealth: number = PLAYER.MAX_HEALTH;
   private previousKnockback = 0;
   private activeTradeSessionId: string | null = null;
@@ -1227,7 +1548,12 @@ export class Game {
   private readonly stormWallTexture = makeStormTexture();
   private readonly windWispTexture = makeWindWispTexture();
   private readonly tempProjectilePos = new THREE.Vector3();
+  private readonly tempKegPos = new THREE.Vector3();
+  private readonly tempSharkPos = new THREE.Vector3();
+  private readonly tempWildlifePos = new THREE.Vector3();
   private readonly tempHudVector = new THREE.Vector3();
+  private readonly tempRenderPos = new THREE.Vector3();
+  private readonly tempBallisticPos = new THREE.Vector3();
   private readonly localViewWeaponRoot = new THREE.Group();
   private readonly localViewPocketRoot = new THREE.Group();
   private localViewPocketKind: PocketPreviewKind | null = null;
@@ -1237,9 +1563,11 @@ export class Game {
   private pocketStripSignature = '';
   private shipUpgradeSignature = '';
   private shipInventorySignature = '';
+  private brProgressSignature = '';
   private localViewWeaponId: WeaponInstance['weaponId'] | null = null;
   private localViewWeaponKick = 0;
   private localViewWeaponReloadPhase = 0;
+  private localCutlassCharge = 0;
   private localViewWeaponAmmoSignature = '';
   private lastSnapshotAt = performance.now();
   private hitMarkerTimer = 0;
@@ -1253,6 +1581,8 @@ export class Game {
   private readonly chestMeshes = new Map<string, ChestMeshRecord>();
   private readonly barrelMeshes = new Map<string, THREE.Group>();
   private readonly sharkMeshes = new Map<string, THREE.Group>();
+  private readonly wildlifeMeshes = new Map<string, THREE.Group>();
+  private readonly seaRockMeshes = new Map<string, THREE.Group>();
   private readonly kegMeshes = new Map<string, KegMeshRecord>();
   private readonly upgradeStationMeshes = new Map<string, UpgradeStationMeshRecord>();
   private readonly npcMeshes = new Map<string, NpcMeshRecord>();
@@ -1263,6 +1593,8 @@ export class Game {
 
   private readonly environment = new THREE.Group();
   private readonly windWisps = new THREE.Group();
+  private readonly mermaidGroup = buildMermaidMesh();
+  private mermaidAnchor: { x: number; z: number; shipId: string } | null = null;
   private readonly stormRing = new THREE.LineLoop(
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({ color: 0x587ca5, transparent: true, opacity: 0.58 }),
@@ -1289,10 +1621,16 @@ export class Game {
   );
 
   async init() {
-    this.setLoading(12, 'Hoisting sails...');
     document.addEventListener('contextmenu', (event) => event.preventDefault());
 
+    this.setLoading(10, 'Hoisting sails...');
+    await this.yieldForLoadingPaint();
+
     this.renderer.init();
+    this.setupDebugPerfPanel();
+    this.setLoading(14, 'Charting the horizon...');
+    await this.yieldForLoadingPaint();
+
     this.setupStormWeatherOverlay();
     this.setupStoryCutsceneOverlay();
     this.bindInteractPromptClick();
@@ -1302,11 +1640,19 @@ export class Game {
     this.localViewPocketRoot.visible = false;
     this.localViewPocketRoot.renderOrder = 999;
     this.renderer.camera.add(this.localViewPocketRoot);
-    this.ocean.init(this.renderer.scene);
-    this.shipRenderer.init(this.renderer.scene);
+    this.ocean.init(this.renderer.scene, this.renderer.getQuality());
+    this.setLoading(18, 'Stirring the deep...');
+    await this.yieldForLoadingPaint();
+
+    this.shipRenderer.init(this.renderer.scene, this.renderer.getQuality());
+    this.setLoading(22, 'Rigging the brigantine...');
+    await this.yieldForLoadingPaint();
+
     this.combatFx.init(this.renderer.scene);
     this.renderer.scene.add(this.environment);
     this.renderer.scene.add(this.windWisps);
+    this.renderer.scene.add(this.mermaidGroup);
+    this.mermaidGroup.visible = false;
     this.renderer.scene.add(this.stormRing);
     this.renderer.scene.add(this.stormWall);
     this.renderer.scene.add(this.stormHalo);
@@ -1320,46 +1666,135 @@ export class Game {
     this.stormHalo.rotation.x = Math.PI * 0.5;
     this.stormHalo.renderOrder = 2;
     this.stormHalo.frustumCulled = false;
+    this.setLoading(26, 'Reading the weather glass...');
+    await this.yieldForLoadingPaint();
 
     this.input.init(this.renderer.renderer.domElement);
     this.bindSupplyWheelActions();
-    document.body.addEventListener('pointerdown', () => this.combatFx.unlockAudio());
+    document.body.addEventListener('pointerdown', () => {
+      this.combatFx.unlockAudio();
+      this.audio.unlock();
+    });
+    document.body.addEventListener('keydown', () => {
+      this.combatFx.unlockAudio();
+      this.audio.unlock();
+    });
+    // Universal UI feedback — anything that's a <button> chirps on click.
+    document.body.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('button, [data-ui-click]')) {
+        this.audio.playUiClick();
+      }
+    }, true);
     this.bindMapUiActions();
     this.bindTradeUiActions();
     this.bindNetworkEvents();
 
-    await this.waitForLobbyLaunch('Ready to sail...', 'Enter 7-Crew Seas');
-    await this.connectToMatch();
+    this.showLoadingScreen('Opening crew waters...', 30);
+    await this.yieldForLoadingPaint();
+    this.menu.init();
+    const connected = await this.connectToServer();
+    if (!connected) return;
+    // Hide loading, show main menu — the game frame loop still runs for ambient render later.
+    this.ui.loadingScreen.classList.add('hidden');
+    this.ui.loadingScreen.style.display = 'none';
+    this.menu.show();
 
     requestAnimationFrame((time) => this.frame(time));
   }
 
-  private async waitForLobbyLaunch(message: string, buttonText: string) {
-    const playBtn = document.getElementById('play-btn');
+  private async connectToServer(): Promise<boolean> {
+    const socketUrl = this.getSocketUrl();
+    this.setLoading(38, `Connecting to ${socketUrl} ...`);
+    await this.yieldForLoadingPaint();
+    const connectTimeoutMs = 6_000;
+    try {
+      await Promise.race([
+        this.network.connect(socketUrl),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error('connect-timeout')), connectTimeoutMs);
+        }),
+      ]);
+    } catch {
+      this.network.disconnect();
+      this.setLoading(
+        0,
+        `Cannot reach game server at ${socketUrl}. Make sure 'npm run dev' is running (server on :8080), then refresh.`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  private onMatchStartFromMenu(payload?: MatchStartPayload): void {
+    this.resetLocalRoundState();
+    this.inMatch = true;
+    this.endmatchPending = false;
+    this.menu.setLastMatchPartyCode(payload?.partyCode ?? null);
+    this.scheduleJoinAssignmentWatchdog();
+    this.bindReturnToMenuButtons();
+    this.audio.unlock();
+    this.audio.playMatchStart();
+  }
+
+  private returnToMenuButtonsBound = false;
+  private pointerLockHintEl: HTMLElement | null = null;
+  private bindReturnToMenuButtons(): void {
+    if (this.returnToMenuButtonsBound) return;
+    this.returnToMenuButtonsBound = true;
+    const handler = () => this.goBackToMenuFromMatch();
+    document.getElementById('death-return-btn')?.addEventListener('click', handler);
+    document.getElementById('win-return-btn')?.addEventListener('click', handler);
+  }
+
+  private onReturnToMenuFromEnd(): void {
+    this.inMatch = false;
+    this.endmatchPending = false;
+    this.ui.deathScreen.classList.remove('visible');
+    this.ui.deathScreen.style.display = 'none';
+    this.ui.winScreen.classList.remove('visible');
+    this.ui.winScreen.style.display = 'none';
+    document.getElementById('hud')?.classList.remove('visible');
+    this.resetLocalRoundState();
+  }
+
+  private showLoadingScreen(message: string, percent: number) {
     this.ui.loadingScreen.style.display = 'flex';
     this.ui.loadingScreen.style.opacity = '1';
     this.ui.loadingScreen.style.pointerEvents = 'auto';
-    this.setLoading(28, message);
+    this.setLoading(percent, message);
+  }
 
-    if (!playBtn) return;
-    playBtn.textContent = buttonText;
-    playBtn.style.display = 'block';
-    await new Promise<void>((resolve) => {
-      playBtn.addEventListener('click', () => {
-        playBtn.style.display = 'none';
-        resolve();
-      }, { once: true });
+  private scheduleJoinAssignmentWatchdog() {
+    this.clearJoinAssignmentWatchdog();
+    this.joinAssignmentWatchdog = window.setTimeout(() => {
+      this.joinAssignmentWatchdog = null;
+      if (this.localPlayerId != null) return;
+      this.setLoading(
+        0,
+        'Connected but no ship assignment yet. Check the server log or refresh.',
+      );
+    }, 45_000);
+  }
+
+  private clearJoinAssignmentWatchdog() {
+    if (this.joinAssignmentWatchdog != null) {
+      window.clearTimeout(this.joinAssignmentWatchdog);
+      this.joinAssignmentWatchdog = null;
+    }
+  }
+
+  /** Lets the browser paint `setLoading` before the next long synchronous chunk (main-thread init was freezing the bar). */
+  private yieldForLoadingPaint(): Promise<void> {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      });
     });
   }
 
-  private async connectToMatch() {
-    this.resetLocalRoundState();
-    this.setLoading(38, 'Opening a fresh 7-crew sea lane...');
-    await this.network.connect(this.getSocketUrl());
-    this.setLoading(68, 'Waiting for ship assignment...');
-  }
-
   private resetLocalRoundState() {
+    this.clearJoinAssignmentWatchdog();
     this.state = null;
     this.localPlayerId = null;
     this.localShipId = null;
@@ -1387,6 +1822,20 @@ export class Game {
     this.localViewPocketKind = null;
     this.pocketUsePreviewKind = null;
     this.pocketUsePreviewTimer = 0;
+    this.inputSendTimer = 0;
+    this.inputHeartbeatTimer = 0;
+    this.lastSentInputSignature = '';
+    this.prevAnchored = null;
+    this.prevAnchorRaiseProgress = null;
+    this.prevSailHeightForAudio = null;
+    this.prevSailAngleForAudio = null;
+    this.lastSailTrimSoundAt = 0;
+    this.lastAnchorMoveSoundAt = 0;
+    this.lastHelmTurnSoundAt = 0;
+    this.lastHullSplashAt = 0;
+    this.lastSwimSplashAt = 0;
+    this.prevPlayerStateForAudio = null;
+    this.prevCannonBallistic = false;
 
     document.getElementById('hud')?.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
@@ -1420,6 +1869,8 @@ export class Game {
     this.chestMeshes.clear();
     this.barrelMeshes.clear();
     this.sharkMeshes.clear();
+    this.wildlifeMeshes.clear();
+    this.seaRockMeshes.clear();
     this.kegMeshes.clear();
     this.upgradeStationMeshes.clear();
     this.npcMeshes.clear();
@@ -1429,18 +1880,26 @@ export class Game {
   }
 
   private returnToLobbyAfterLoss(kills: number, gold: number, reason = 'Defeated') {
-    if (this.returningToLobby) return;
-    this.returningToLobby = true;
-    this.network.disconnect();
+    // In multiplayer mode: don't disconnect or auto-respawn. Show the death screen
+    // with a "Return to Port" button. The server-side match_ended will deliver the
+    // full leaderboard when (or if) the round actually ends.
+    this.ui.deathStats.innerHTML = `<div>${reason}</div><div>Kills: ${kills}</div><div>Gold: ${gold}</div>`;
+    this.ui.deathScreen.classList.add('visible');
+    this.ui.deathScreen.style.display = 'flex';
+  }
+
+  private goBackToMenuFromMatch(): void {
+    this.network.returnToMenu();
+    this.inMatch = false;
+    this.endmatchPending = false;
+    this.ui.deathScreen.classList.remove('visible');
+    this.ui.deathScreen.style.display = 'none';
+    this.ui.winScreen.classList.remove('visible');
+    this.ui.winScreen.style.display = 'none';
+    document.getElementById('hud')?.classList.remove('visible');
+    this.menu.hideEndmatch();
+    this.menu.show();
     this.resetLocalRoundState();
-    void (async () => {
-      await this.waitForLobbyLaunch(`${reason} · Kills ${kills} · Gold ${gold}`, 'Start New 7-Crew Match');
-      this.returningToLobby = false;
-      await this.connectToMatch();
-    })().catch((error) => {
-      console.error(error);
-      this.setLoading(0, 'Failed to launch new match. Refresh and try again.');
-    });
   }
 
   private bindMapUiActions() {
@@ -1462,6 +1921,10 @@ export class Game {
         event.stopPropagation();
         const slot = Number(slice.dataset.wheelSlot);
         if (!Number.isInteger(slot)) return;
+        const local = this.getLocalPlayer();
+        if (local?.carryingChestId) return;
+        if (local && local.pocketUseCooldown > 0) return;
+        if (this.pocketUsePreviewTimer > 0) return;
         this.input.queueWheelSlot(slot);
         this.startPocketUsePreview(slot);
       });
@@ -1470,6 +1933,7 @@ export class Game {
 
   private bindNetworkEvents() {
     this.network.onJoin = (playerId, shipId, snapshot) => {
+      this.clearJoinAssignmentWatchdog();
       this.localPlayerId = playerId;
       this.localShipId = shipId;
       this.previousHealth = PLAYER.MAX_HEALTH;
@@ -1490,14 +1954,29 @@ export class Game {
     };
 
     this.network.onPlayerHit = (payload) => {
-      this.handleCombatHit(payload as {
+      const hitPayload = payload as {
         damage?: number;
         position?: { x: number; y: number; z: number };
+        sourcePosition?: { x: number; y: number; z: number };
         headshot?: boolean;
         kill?: boolean;
-        weaponId?: WeaponId;
-        targetType?: 'player' | 'shark';
-      });
+        weaponId?: WeaponId | string;
+        targetType?: 'player' | 'shark' | 'wildlife';
+        incoming?: boolean;
+        attackerName?: string;
+        meat?: number;
+      };
+      if (hitPayload.incoming) {
+        this.handleIncomingHit(hitPayload);
+        this.audio.playPlayerHurt(hitPayload.damage ?? 10);
+      } else {
+        this.handleCombatHit(hitPayload);
+        if (hitPayload.kill) {
+          this.audio.playKill();
+        } else {
+          this.audio.playHitMarker(Boolean(hitPayload.headshot));
+        }
+      }
     };
 
     this.network.onShipHit = (payload) => {
@@ -1512,42 +1991,67 @@ export class Game {
 
     this.network.onKillEvent = (payload) => {
       const event = payload as {
+        killerId?: string | null;
         victimName?: string;
         killerName?: string | null;
         respawning?: boolean;
         headshot?: boolean;
         boardingKill?: boolean;
+        shipSink?: boolean;
         stolenGold?: number;
+        killGold?: number;
+        headshotGold?: number;
+        killerStreak?: number;
+        streakReward?: { type?: string; label?: string } | null;
       };
       if (event.killerName && event.victimName) {
         const details = [
           event.headshot ? 'headshot' : '',
           event.boardingKill ? 'boarding raid' : '',
-          event.stolenGold ? `+${event.stolenGold} gold` : '',
+          event.shipSink ? 'ship sunk' : '',
+          event.killerStreak && event.killerStreak > 1 ? `${event.killerStreak} streak` : '',
+          event.killGold ? `+${event.killGold} kill gold` : '',
+          event.headshotGold ? `+${event.headshotGold} headshot` : '',
+          event.stolenGold ? `+${event.stolenGold} stolen` : '',
         ].filter(Boolean).join(' · ');
         this.pushFeed(
-          `${event.killerName} dropped ${event.victimName}${details ? ` (${details})` : ''}${event.respawning ? ', but they will respawn.' : '.'}`,
+          `${event.killerName} ${event.shipSink ? 'sank' : 'dropped'} ${event.victimName}${details ? ` (${details})` : ''}${event.respawning ? ', but they will respawn.' : '.'}`,
         );
+        if (event.killerId === this.localPlayerId && event.streakReward?.label) {
+          this.pushFeed(`${event.streakReward.label}.`, '#7fe7ff');
+        }
       } else {
         this.pushFeed(event.victimName ? `${event.victimName} went under.` : 'A pirate was eliminated.');
       }
     };
 
     this.network.onKegExploded = (payload) => {
-      const event = payload as { position?: { x: number; y: number; z: number } };
+      const event = payload as { position?: { x: number; y: number; z: number }; mega?: boolean };
       if (event.position) {
         this.combatFx.emitKegExplosion(event.position, this.renderer.camera.position);
+        if (event.mega) {
+          this.combatFx.emitKegExplosion(
+            { x: event.position.x, y: event.position.y + 0.7, z: event.position.z },
+            this.renderer.camera.position,
+          );
+          this.pushFeed('Mega keg detonated for 5x ship damage.', '#ff9d6f');
+        }
       }
     };
 
     this.network.onChestOpened = (payload) => {
       const event = payload as { action?: string; value?: number; loot?: Array<{ item: string; qty: number }> };
       if (event.action === 'pickup') {
-        this.pushFeed(`Chest taken: worth ${event.value ?? 0} gold at a Gold Hoarder.`, '#d9c17e');
+        this.pushFeed(`Chest taken: base ${event.value ?? 0} gold, Hoarders pay more.`, '#d9c17e');
+        // The carryingChestId edge-detector also fires for the local player; this covers other crew.
         return;
       }
       if (event.action === 'stow') {
-        this.pushFeed(`Chest stowed aboard: ${event.value ?? 0} gold if sold.`, '#d9c17e');
+        this.pushFeed(`Chest stowed aboard: base ${event.value ?? 0} gold before Hoarder payout.`, '#d9c17e');
+        return;
+      }
+      if (event.action === 'drop') {
+        this.pushFeed(`Chest dropped: base ${event.value ?? 0} gold.`, '#d9c17e');
         return;
       }
       const loot = (event.loot ?? [])
@@ -1555,37 +2059,63 @@ export class Game {
         .map((entry) => `${entry.qty} ${entry.item.replace(/_/g, ' ')}`)
         .join(', ');
       this.pushFeed(loot ? `Treasure seized: ${loot}` : 'Treasure chest opened.', '#d9c17e');
+      this.audio.playChestOpen();
     };
 
     this.network.onBarrelOpened = (payload) => {
-      const event = payload as { loot?: Array<{ item: string; qty: number }> };
-      const loot = (event.loot ?? [])
+      const event = payload as {
+        playerId?: string;
+        barrelId?: string;
+        loot?: Array<{ item: string; qty: number }>;
+        taken?: boolean;
+      };
+      const isLocal = event.playerId === this.localPlayerId;
+      const loot = (event.loot ?? []).map((entry) => ({ item: entry.item as ItemStack['item'], qty: entry.qty }));
+      if (isLocal) {
+        if (event.taken) {
+          // Player committed — close the panel
+          this.barrelBrowse = null;
+        } else if (event.barrelId) {
+          // Browsing — show the side-by-side panel
+          this.barrelBrowse = { barrelId: event.barrelId, loot, lastEventAt: performance.now() };
+        }
+      }
+      const summary = loot
         .slice(0, 2)
         .map((entry) => `${entry.qty} ${entry.item.replace(/_/g, ' ')}`)
         .join(', ');
-      this.pushFeed(loot ? `Barrel supplies: ${loot}` : 'Barrel opened.', '#9ec0e5');
+      const verb = event.taken ? 'Took' : 'Inspecting';
+      this.pushFeed(summary ? `${verb} barrel: ${summary}` : `${verb} barrel.`, '#9ec0e5');
     };
 
     this.network.onShipUpgraded = (payload) => {
       const event = payload as { shipId?: string; type?: ShipUpgradeType };
       if (!event.type) return;
       const meta = this.getUpgradePresentation(event.type);
-      const subject = event.shipId === this.localShipId ? 'Your ship claimed' : 'A crew claimed';
+      const isOwn = event.shipId === this.localShipId;
+      const subject = isOwn ? 'Your ship claimed' : 'A crew claimed';
       this.pushFeed(`${subject} ${meta.name}.`, meta.color);
+      if (isOwn) this.audio.playUpgradeBought();
     };
 
     this.network.onTreasureSold = (payload) => {
       const event = payload as {
         playerName?: string;
+        playerId?: string;
         gold?: number;
+        questBonus?: boolean;
         totalGold?: number;
         islandName?: string;
       };
       const seller = event.playerName ?? 'A pirate';
+      const bonus = event.questBonus ? ' with map bonus' : '';
       this.pushFeed(
-        `${seller} sold a chest for ${event.gold ?? 0} gold (${event.totalGold ?? 0}/${ECONOMY.GOLD_WIN_TARGET}).`,
+        `${seller} sold a chest${bonus} for ${event.gold ?? 0} gold (${event.totalGold ?? 0}/${ECONOMY.GOLD_WIN_TARGET}).`,
         '#f0c86a',
       );
+      if (event.playerId === this.localPlayerId || (event.playerName && this.getLocalPlayer()?.name === event.playerName)) {
+        this.audio.playGoldEarn();
+      }
     };
 
     this.network.onTreasureMap = (payload) => {
@@ -1618,10 +2148,13 @@ export class Game {
       const result = payload as { died?: boolean; winnerId?: string | null; kills?: number; gold?: number; reason?: string; targetGold?: number };
       const player = this.getLocalPlayer();
       if (result.died) {
+        this.audio.playDefeat();
         this.returnToLobbyAfterLoss(result.kills ?? player?.kills ?? 0, result.gold ?? player?.gold ?? 0, 'Crew lost');
       } else if (result.winnerId && result.winnerId === this.localPlayerId) {
+        this.audio.playVictory();
         this.showVictory(player?.kills ?? 0, result.gold ?? player?.gold ?? 0);
       } else {
+        this.audio.playDefeat();
         const reason = result.reason === 'gold'
           ? `Enemy reached ${result.targetGold ?? ECONOMY.GOLD_WIN_TARGET} gold`
           : 'Crew lost';
@@ -1633,8 +2166,45 @@ export class Game {
       const event = payload as { playerId?: string; mermaid?: boolean };
       if (event.playerId === this.localPlayerId) {
         this.ui.deathScreen.style.display = 'none';
-        if (event.mermaid) this.pushFeed('The mermaid returned you to your ship.', '#8bc2d7');
+        if (event.mermaid) {
+          this.mermaidAnchor = null;
+          if (this.mermaidGroup.visible) this.mermaidGroup.visible = false;
+          this.pushFeed('The mermaid returned you to your ship.', '#8bc2d7');
+        }
       }
+    };
+
+
+    this.network.onMatchEnded = (payload) => {
+      const result = payload as {
+        winnerId: string | null;
+        winnerName: string | null;
+        reason: string;
+        humans: Array<{ playerId: string; name: string; kills: number; deaths: number; gold: number; placement: number; isWinner: boolean }>;
+      };
+      this.endmatchPending = true;
+      const youId = this.localPlayerId;
+      const youRow = result.humans.find((r) => r.playerId === youId);
+      const won = !!result.winnerId && result.winnerId === youId;
+      const subtitle = result.reason === 'gold'
+        ? `${result.winnerName ?? 'A pirate'} amassed enough gold`
+        : result.reason === 'last_ship'
+          ? 'Last crew afloat takes the seas'
+          : 'The voyage ended';
+      this.menu.showEndmatch({
+        isWinner: won,
+        title: won ? 'VICTORY' : (youRow?.deaths ? 'DEFEATED' : 'VOYAGE ENDED'),
+        subtitle,
+        rows: result.humans.map((r) => ({
+          placement: r.placement,
+          name: r.name,
+          kills: r.kills,
+          deaths: r.deaths,
+          gold: r.gold,
+          you: r.playerId === youId,
+          winner: r.isWinner,
+        })),
+      });
     };
   }
 
@@ -1668,14 +2238,16 @@ export class Game {
       headshot?: boolean;
       kill?: boolean;
       weaponId?: WeaponId | string;
-      targetType?: 'player' | 'shark';
+      targetType?: 'player' | 'shark' | 'wildlife';
       remainingHull?: number;
       shipHealthMilestone?: 'half' | 'critical' | null;
+      meat?: number;
     },
     ship = false,
   ) {
     const damage = Math.max(1, Math.round(payload.damage ?? 0));
     const shark = payload.targetType === 'shark';
+    const wildlife = payload.targetType === 'wildlife';
     this.hitMarkerTimer = Math.max(this.hitMarkerTimer, ship ? 0.22 : shark ? 0.16 : payload.headshot ? 0.18 : 0.14);
     this.hitMarkerHeadshot = this.hitMarkerHeadshot || !!payload.headshot;
     this.hitMarkerKill = this.hitMarkerKill || !!payload.kill;
@@ -1693,6 +2265,9 @@ export class Game {
         payload.shipHealthMilestone === 'half' ? '#f0c86a' : '#ff9878',
       );
     }
+    if (wildlife && payload.kill && (payload.meat ?? 0) > 0) {
+      this.pushFeed(`Harvested ${payload.meat} meat.`, '#d7b48a');
+    }
     const wid = payload.weaponId;
     const weaponLabel = wid && wid in WEAPONS ? WEAPONS[wid as WeaponId].name : undefined;
     if (payload.position) {
@@ -1703,6 +2278,37 @@ export class Game {
         weaponLabel,
       });
     }
+  }
+
+  private handleIncomingHit(payload: {
+    damage?: number;
+    sourcePosition?: { x: number; y: number; z: number };
+    headshot?: boolean;
+    kill?: boolean;
+    weaponId?: WeaponId | string;
+    attackerName?: string;
+  }) {
+    const damage = Math.max(1, Math.round(payload.damage ?? 0));
+    const wid = payload.weaponId;
+    const weaponLabel = wid && wid in WEAPONS
+      ? WEAPONS[wid as WeaponId].name
+      : wid === 'powder_keg'
+        ? 'Powder Keg'
+        : 'attack';
+    const attacker = payload.attackerName?.trim() || 'Enemy';
+    const critical = payload.headshot ? ' headshot' : '';
+    this.pushFeed(`Hit by ${attacker}${critical} - ${damage} (${weaponLabel})`, payload.headshot ? '#ff8f6d' : '#ffb37a');
+    if (payload.sourcePosition) this.spawnIncomingDamageDirection(payload.sourcePosition);
+  }
+
+  private spawnIncomingDamageDirection(sourcePosition: { x: number; y: number; z: number }) {
+    this.tempHudVector.set(sourcePosition.x, sourcePosition.y, sourcePosition.z).project(this.renderer.camera);
+    const angle = Math.atan2(this.tempHudVector.x, -this.tempHudVector.y);
+    const element = document.createElement('div');
+    element.className = 'incoming-damage-arrow';
+    element.style.setProperty('--hit-angle', `${angle}rad`);
+    this.ui.damageIndicatorLayer.appendChild(element);
+    window.setTimeout(() => element.remove(), 760);
   }
 
   private spawnFloatingDamageIndicator(
@@ -1731,16 +2337,22 @@ export class Game {
   }
 
   private applySnapshot(snapshot: GameState) {
+    const hasFreshIslandState = snapshot.islands.length > 0 || !this.state;
+    const nextSnapshot = snapshot.islands.length === 0 && this.state
+      ? { ...snapshot, islands: this.state.islands }
+      : snapshot;
     const previousLocalState = this.getLocalPlayer()?.state ?? this.previousLocalState;
-    this.state = snapshot;
-    this.rebuildStateIndexes(snapshot);
+    this.state = nextSnapshot;
+    this.rebuildStateIndexes(nextSnapshot);
     this.lastSnapshotAt = performance.now();
-    this.ensureWorldMeshes(snapshot);
-    this.syncChests();
-    this.syncBarrels();
+    if (hasFreshIslandState) {
+      this.ensureWorldMeshes(nextSnapshot);
+      this.syncChests();
+      this.syncBarrels();
+    }
     this.updateStormRing();
     this.updateDamageFx();
-    this.syncTradeUi(snapshot);
+    this.syncTradeUi(nextSnapshot);
     const localPlayer = this.getLocalPlayer();
     if (localPlayer && previousLocalState === 'respawning' && localPlayer.state === 'alive') {
       this.combatFx.emitRespawn(localPlayer.position, this.renderer.camera.position);
@@ -1749,11 +2361,20 @@ export class Game {
   }
 
   private rebuildStateIndexes(state: GameState) {
-    this.playersById = new Map(state.players.map((player) => [player.id, player]));
-    this.shipsById = new Map(state.ships.map((ship) => [ship.id, ship]));
-    this.livePlayerIds = new Set(state.players.map((player) => player.id));
-    this.liveProjectileIds = new Set(state.projectiles.filter((projectile) => projectile.alive).map((projectile) => projectile.id));
-    this.liveKegIds = new Set(state.kegs.filter((keg) => keg.timer > 0).map((keg) => keg.id));
+    this.playersById.clear();
+    for (const player of state.players) this.playersById.set(player.id, player);
+    this.shipsById.clear();
+    for (const ship of state.ships) this.shipsById.set(ship.id, ship);
+    this.livePlayerIds.clear();
+    for (const player of state.players) this.livePlayerIds.add(player.id);
+    this.liveProjectileIds.clear();
+    for (const projectile of state.projectiles) {
+      if (projectile.alive) this.liveProjectileIds.add(projectile.id);
+    }
+    this.liveKegIds.clear();
+    for (const keg of state.kegs) {
+      if (keg.timer > 0) this.liveKegIds.add(keg.id);
+    }
   }
 
   private ensureWorldMeshes(state: GameState) {
@@ -1762,10 +2383,66 @@ export class Game {
         this.buildIsland(island);
       }
     }
+    for (const rock of state.seaRocks ?? []) {
+      if (!this.seaRockMeshes.has(rock.id)) {
+        const mesh = this.buildSeaRockMesh(rock);
+        this.environment.add(mesh);
+        this.seaRockMeshes.set(rock.id, mesh);
+      }
+    }
+  }
+
+  private buildSeaRockMesh(rock: SeaRock) {
+    const group = new THREE.Group();
+    group.name = `sea-rock-${rock.id}`;
+    group.position.set(rock.position.x, rock.position.y, rock.position.z);
+    group.rotation.y = rock.rotation;
+    const lowDetail = this.renderer.getQuality() === 'low';
+
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x292d2b, roughness: 1, flatShading: true });
+    const wetMat = new THREE.MeshStandardMaterial({ color: 0x3c403a, roughness: 0.92, flatShading: true });
+    const topMat = new THREE.MeshStandardMaterial({ color: 0x595548, roughness: 0.98, flatShading: true });
+    const mainGeo = rock.variant === 1
+      ? new THREE.ConeGeometry(rock.radius * 0.72, rock.height, 6, 1)
+      : new THREE.DodecahedronGeometry(rock.radius * 0.62, 1);
+    const main = new THREE.Mesh(mainGeo, rock.variant === 2 ? wetMat : darkMat);
+    main.scale.set(1.05, rock.variant === 1 ? 1 : rock.height / Math.max(1, rock.radius), 0.82 + rock.variant * 0.08);
+    main.position.y = rock.height * 0.34 - 1.8;
+    main.rotation.set(-0.16 + rock.variant * 0.11, 0, 0.09);
+    main.castShadow = !lowDetail;
+    main.receiveShadow = !lowDetail;
+    group.add(main);
+
+    const shardCount = lowDetail ? 1 + Math.min(1, rock.variant) : 4 + rock.variant;
+    for (let i = 0; i < shardCount; i++) {
+      const angle = (i / shardCount) * Math.PI * 2 + rock.rotation * 0.17;
+      const radius = rock.radius * (0.28 + (i % 2) * 0.16);
+      const shardH = rock.height * (0.34 + (i % 3) * 0.08);
+      const shard = new THREE.Mesh(
+        new THREE.ConeGeometry(rock.radius * (0.16 + (i % 2) * 0.04), shardH, 5, 1),
+        i % 2 === 0 ? wetMat : topMat,
+      );
+      shard.position.set(Math.cos(angle) * radius, shardH * 0.28 - 1.2, Math.sin(angle) * radius);
+      shard.rotation.set((i % 2 ? 0.24 : -0.18), angle, (i % 3 - 1) * 0.18);
+      shard.castShadow = !lowDetail;
+      shard.receiveShadow = !lowDetail;
+      group.add(shard);
+    }
+
+    const foam = new THREE.Mesh(
+      new THREE.RingGeometry(rock.radius * 0.78, rock.radius * 1.16, lowDetail ? 12 : 24),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false }),
+    );
+    foam.rotation.x = -Math.PI * 0.5;
+    foam.position.y = 0.04;
+    group.add(foam);
+
+    return group;
   }
 
   private buildIsland(island: Island) {
     const group = new THREE.Group();
+    group.name = `island-${island.name}`;
     group.position.set(island.position.x, island.position.y, island.position.z);
 
     const r = island.radius;
@@ -1778,6 +2455,13 @@ export class Game {
     const rng = (seed: number) => {
       const value = Math.sin(seed * 127.13 + islandSeed * 0.173 + r * 0.021) * 43758.5453;
       return value - Math.floor(value);
+    };
+    const visualDetail = this.renderer.getEffectScale();
+    const lowDetail = visualDetail < 0.55;
+    const scaledCount = (base: number, min: number) => {
+      const scale = lowDetail ? visualDetail * 0.28 : visualDetail;
+      const floor = lowDetail ? 0 : min;
+      return Math.max(floor, Math.round(base * scale));
     };
 
     const reefMat = new THREE.MeshStandardMaterial({ color: 0x4d4a42, roughness: 1, side: THREE.DoubleSide });
@@ -1830,12 +2514,15 @@ export class Game {
       jagged?: number;
       lean?: number;
     }) => {
+      const tr = Math.max(0.01, Number.isFinite(config.topRadius) ? config.topRadius : 0.01);
+      const br = Math.max(0.01, Number.isFinite(config.bottomRadius) ? config.bottomRadius : 0.01);
+      const h = Math.max(0.01, Number.isFinite(config.height) ? config.height : 0.01);
       const geometry = new THREE.CylinderGeometry(
-        config.topRadius,
-        config.bottomRadius,
-        config.height,
-        config.radialSegments ?? 24,
-        config.heightSegments ?? 5,
+        tr,
+        br,
+        h,
+        Math.max(3, Math.floor((config.radialSegments ?? 24) * visualDetail)),
+        Math.max(1, Math.floor((config.heightSegments ?? 5) * (lowDetail ? 0.6 : visualDetail))),
       );
       const position = geometry.getAttribute('position') as THREE.BufferAttribute;
       const vertex = new THREE.Vector3();
@@ -1844,7 +2531,7 @@ export class Game {
         vertex.fromBufferAttribute(position, index);
         const angle = Math.atan2(vertex.z, vertex.x);
         const baseRadius = Math.hypot(vertex.x, vertex.z);
-        const y01 = (vertex.y + config.height * 0.5) / config.height;
+        const y01 = (vertex.y + h * 0.5) / h;
         const lobeA = Math.sin(angle * 2 + islandHeading + y01 * 0.7) * 0.14;
         const lobeB = Math.sin(angle * 3 - islandHeading * 1.8 + y01 * 1.9) * 0.09;
         const lobeC = Math.cos(angle * 5 + islandHeading * 0.6 - y01 * 2.7) * 0.04;
@@ -1857,11 +2544,11 @@ export class Game {
           Math.cos(angle * 17 - y01 * 12 + islandHeading * 0.4)
         ) * (config.jagged ?? 0.015);
         const radialScale = 1 + lobeA + lobeB + lobeC + shelf + cliff - cap + asymmetry + jagged;
-        const drift = (y01 - 0.5) * (config.lean ?? 0.02) * config.height;
+        const drift = (y01 - 0.5) * (config.lean ?? 0.02) * h;
         if (baseRadius > 0.0001) {
           vertex.x = Math.cos(angle) * baseRadius * radialScale * (config.scaleX ?? 1) + (config.massOffsetX ?? 0) + Math.cos(islandHeading) * drift;
           vertex.z = Math.sin(angle) * baseRadius * radialScale * (config.scaleZ ?? 1) + (config.massOffsetZ ?? 0) + Math.sin(islandHeading) * drift;
-          vertex.y += (lobeA * 0.06 + lobeB * 0.04) * config.height * (0.3 + y01);
+          vertex.y += (lobeA * 0.06 + lobeB * 0.04) * h * (0.3 + y01);
         } else {
           vertex.x += (config.massOffsetX ?? 0);
           vertex.z += (config.massOffsetZ ?? 0);
@@ -1871,7 +2558,7 @@ export class Game {
 
       geometry.computeVertexNormals();
       const mesh = new THREE.Mesh(geometry, config.material);
-      mesh.position.y = config.y;
+      mesh.position.y = Number.isFinite(config.y) ? config.y : 0;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       group.add(mesh);
@@ -1907,8 +2594,8 @@ export class Game {
     const terrainPositions: number[] = [];
     const terrainColors: number[] = [];
     const terrainIndices: number[] = [];
-    const radialSegments = 12;
-    const angularSegments = 34;
+    const radialSegments = lowDetail ? 8 : visualDetail < 0.85 ? 10 : 12;
+    const angularSegments = lowDetail ? 22 : visualDetail < 0.85 ? 28 : 34;
     const terrainColor = new THREE.Color();
     const scratchColor = new THREE.Color();
 
@@ -1979,7 +2666,7 @@ export class Game {
     const skirtPositions: number[] = [];
     const skirtColors: number[] = [];
     const skirtIndices: number[] = [];
-    const skirtSegments = 44;
+    const skirtSegments = lowDetail ? 26 : visualDetail < 0.85 ? 34 : 44;
     const skirtBottomColor = new THREE.Color(0x5d5a50);
     for (let segment = 0; segment <= skirtSegments; segment++) {
       const angle = (segment / skirtSegments) * Math.PI * 2;
@@ -2016,6 +2703,8 @@ export class Game {
     group.add(shoreSkirt);
 
     if (island.dock) {
+      const dockW = Math.max(1, Math.min(120, Number(island.dock.width) || 8));
+      const dockL = Math.max(1, Math.min(200, Number(island.dock.length) || 14));
       const dock = new THREE.Group();
       dock.position.set(
         island.dock.position.x - island.position.x,
@@ -2030,7 +2719,7 @@ export class Game {
       const plankMats = [0x8d6230, 0x83592d, 0x976a35].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.96 }));
 
       const deck = new THREE.Mesh(
-        new THREE.BoxGeometry(island.dock.width, 0.22, island.dock.length),
+        new THREE.BoxGeometry(dockW, 0.22, dockL),
         dockMat,
       );
       deck.position.y = 0.12;
@@ -2039,69 +2728,78 @@ export class Game {
       dock.add(deck);
 
       const shorePlatform = new THREE.Mesh(
-        new THREE.BoxGeometry(island.dock.width * 1.2, 0.24, Math.min(4.6, island.dock.length * 0.3)),
+        new THREE.BoxGeometry(dockW * 1.2, 0.24, Math.min(4.6, dockL * 0.3)),
         dockMat,
       );
-      shorePlatform.position.set(0, 0.14, -island.dock.length * 0.34);
+      shorePlatform.position.set(0, 0.14, -dockL * 0.34);
       shorePlatform.castShadow = true;
       shorePlatform.receiveShadow = true;
       dock.add(shorePlatform);
 
-      const ladderZ = -island.dock.length * 0.46;
+      const ladderZ = -dockL * 0.46;
       const railMat = new THREE.MeshStandardMaterial({ color: 0x4a3018, roughness: 0.95 });
       const rungMat = new THREE.MeshStandardMaterial({ color: 0x6a4828, roughness: 0.92 });
-      const side = island.dock.width * 0.22;
+      const side = dockW * 0.22;
       for (const sx of [-side, side] as const) {
         const rail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.35, 0.1), railMat);
         rail.position.set(sx, 0.72, ladderZ + 0.12);
         rail.castShadow = true;
         dock.add(rail);
       }
-      const rungCount = 8;
-      for (let r = 0; r < rungCount; r++) {
-        const rung = new THREE.Mesh(new THREE.BoxGeometry(side * 2.1, 0.07, 0.12), rungMat);
-        rung.position.set(0, 0.18 + r * 0.14, ladderZ + r * 0.04);
-        rung.castShadow = true;
-        dock.add(rung);
-      }
+      if (!lowDetail) {
+        const rungCount = 8;
+        for (let r = 0; r < rungCount; r++) {
+          const rung = new THREE.Mesh(new THREE.BoxGeometry(side * 2.1, 0.07, 0.12), rungMat);
+          rung.position.set(0, 0.18 + r * 0.14, ladderZ + r * 0.04);
+          rung.castShadow = true;
+          dock.add(rung);
+        }
 
-      const plankCount = Math.max(5, Math.round(island.dock.width));
-      for (let i = 0; i < plankCount; i++) {
-        const plank = new THREE.Mesh(
-          new THREE.BoxGeometry(island.dock.width / plankCount * 0.82, 0.04, island.dock.length * 0.96),
-            plankMats[i % plankMats.length],
-        );
-        plank.position.set(
-          -island.dock.width * 0.5 + (i + 0.5) * (island.dock.width / plankCount),
-          0.25,
-          0,
-        );
-        plank.castShadow = true;
-        plank.receiveShadow = true;
-        dock.add(plank);
-      }
-
-      for (const side of [-1, 1] as const) {
-        for (let i = 0; i < 4; i++) {
-          const z = -island.dock.length * 0.42 + i * (island.dock.length * 0.28);
-          const postHeight = 1.35 + rng(i * 191 + side) * 0.4;
-          const post = new THREE.Mesh(
-            new THREE.BoxGeometry(0.18, postHeight, 0.18),
-            beamMat,
+        const plankCount = scaledCount(Math.round(dockW), 4);
+        for (let i = 0; i < plankCount; i++) {
+          const plank = new THREE.Mesh(
+            new THREE.BoxGeometry(dockW / plankCount * 0.82, 0.04, dockL * 0.96),
+              plankMats[i % plankMats.length],
           );
-          post.position.set(side * (island.dock.width * 0.45), postHeight * 0.45, z);
-          post.castShadow = true;
-          dock.add(post);
+          plank.position.set(
+            -dockW * 0.5 + (i + 0.5) * (dockW / plankCount),
+            0.25,
+            0,
+          );
+          plank.castShadow = true;
+          plank.receiveShadow = true;
+          dock.add(plank);
+        }
 
-          if (i < 3) {
-            const rail = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.035, 0.035, island.dock.length * 0.24, 6),
-              ropeMat,
+        for (const side of [-1, 1] as const) {
+          for (let i = 0; i < 4; i++) {
+            const z = -dockL * 0.42 + i * (dockL * 0.28);
+            const postHeight = 1.35 + rng(i * 191 + side) * 0.4;
+            const post = new THREE.Mesh(
+              new THREE.BoxGeometry(0.18, postHeight, 0.18),
+              beamMat,
             );
-            rail.rotation.z = Math.PI * 0.5;
-            rail.position.set(side * (island.dock.width * 0.44), 0.88, z + island.dock.length * 0.14);
-            dock.add(rail);
+            post.position.set(side * (island.dock.width * 0.45), postHeight * 0.45, z);
+            post.castShadow = true;
+            dock.add(post);
+
+            if (i < 3) {
+              const railLen = Math.max(0.15, dockL * 0.24);
+              const rail = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.035, 0.035, railLen, 6),
+                ropeMat,
+              );
+              rail.rotation.z = Math.PI * 0.5;
+              rail.position.set(side * (dockW * 0.44), 0.88, z + dockL * 0.14);
+              dock.add(rail);
+            }
           }
+        }
+      } else {
+        for (const postSide of [-1, 1] as const) {
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.25, 0.18), beamMat);
+          post.position.set(postSide * (dockW * 0.44), 0.65, dockL * 0.22);
+          dock.add(post);
         }
       }
 
@@ -2109,64 +2807,401 @@ export class Game {
         new THREE.CylinderGeometry(0.11, 0.13, 0.55, 8),
         beamMat,
       );
-      bollard.position.set(island.dock.moorSide * island.dock.width * 0.28, 0.26, island.dock.length * 0.18);
+      bollard.position.set(island.dock.moorSide * dockW * 0.28, 0.26, dockL * 0.18);
       bollard.castShadow = true;
       dock.add(bollard);
 
-      // Lanterns at dock entrance posts
-      const lanternMat = new THREE.MeshStandardMaterial({
-        color: 0x8b6c2a,
-        emissive: 0xffcc44,
-        emissiveIntensity: 0.5,
-        roughness: 0.9,
-      });
-      for (const lanternSide of [-1, 1] as const) {
-        const lanternPost = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.8, 0.16), beamMat);
-        lanternPost.position.set(lanternSide * (island.dock.width * 0.46), 0.9, -island.dock.length * 0.38);
-        lanternPost.castShadow = true;
-        dock.add(lanternPost);
+      if (!lowDetail) {
+        // Lanterns at dock entrance posts
+        const lanternMat = new THREE.MeshStandardMaterial({
+          color: 0x8b6c2a,
+          emissive: 0xffcc44,
+          emissiveIntensity: 0.5,
+          roughness: 0.9,
+        });
+        for (const lanternSide of [-1, 1] as const) {
+          const lanternPost = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.8, 0.16), beamMat);
+          lanternPost.position.set(lanternSide * (dockW * 0.46), 0.9, -dockL * 0.38);
+          lanternPost.castShadow = true;
+          dock.add(lanternPost);
 
-        const lanternBox = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.3, 0.28), lanternMat);
-        lanternBox.position.set(lanternSide * (island.dock.width * 0.46), 1.95, -island.dock.length * 0.38);
-        dock.add(lanternBox);
+          const lanternBox = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.3, 0.28), lanternMat);
+          lanternBox.position.set(lanternSide * (dockW * 0.46), 1.95, -dockL * 0.38);
+          dock.add(lanternBox);
 
-        if (lanternSide === 1) {
-          const lanternGlow = new THREE.PointLight(0xffa840, 1.25, 16);
-          lanternGlow.position.set(0, 2.0, -island.dock.length * 0.38);
-          dock.add(lanternGlow);
+          if (lanternSide === 1) {
+            const lanternGlow = new THREE.PointLight(0xffa840, 1.25, 16);
+            lanternGlow.position.set(0, 2.0, -dockL * 0.38);
+            dock.add(lanternGlow);
+          }
         }
       }
 
       group.add(dock);
     }
 
-    const boulderCount = Math.max(3, Math.round(r / 20));
+    if (island.tavern) {
+      const t = island.tavern;
+      const tavern = new THREE.Group();
+      tavern.position.set(t.position.x - island.position.x, t.position.y, t.position.z - island.position.z);
+      tavern.rotation.y = t.rotation;
+
+      const wallMat = new THREE.MeshStandardMaterial({ color: 0x6e4823, roughness: 0.95 });
+      const beamMat2 = new THREE.MeshStandardMaterial({ color: 0x2f1d10, roughness: 1 });
+      const thatchMat = new THREE.MeshStandardMaterial({ color: 0xa68040, roughness: 1 });
+      const floorMat = new THREE.MeshStandardMaterial({ color: 0x553823, roughness: 1 });
+      const counterMat = new THREE.MeshStandardMaterial({ color: 0x3f2616, roughness: 0.9 });
+      const lanternMat2 = new THREE.MeshStandardMaterial({ color: 0x8b6c2a, emissive: 0xff9c44, emissiveIntensity: 0.65, roughness: 0.9 });
+      const signMat = new THREE.MeshStandardMaterial({ color: 0x3a2414, roughness: 1 });
+
+      const wallH = 3.0;
+      const w = t.width;
+      const d = t.depth;
+
+      const floor = new THREE.Mesh(new THREE.BoxGeometry(w + 0.6, 0.18, d + 0.6), floorMat);
+      floor.position.y = 0.09;
+      floor.receiveShadow = true;
+      tavern.add(floor);
+
+      const wallThickness = 0.22;
+      const makeWall = (sx: number, sy: number, sz: number, x: number, y: number, z: number) => {
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), wallMat);
+        wall.position.set(x, y, z);
+        wall.castShadow = true;
+        wall.receiveShadow = true;
+        return wall;
+      };
+
+      // Back wall (full)
+      tavern.add(makeWall(w, wallH, wallThickness, 0, wallH * 0.5 + 0.18, -d * 0.5));
+      // Side walls (full)
+      tavern.add(makeWall(wallThickness, wallH, d, -w * 0.5, wallH * 0.5 + 0.18, 0));
+      tavern.add(makeWall(wallThickness, wallH, d, w * 0.5, wallH * 0.5 + 0.18, 0));
+      // Front wall split with door opening
+      const doorWidth = 1.6;
+      const sideFrontW = (w - doorWidth) * 0.5;
+      tavern.add(makeWall(sideFrontW, wallH, wallThickness, -(w * 0.5 - sideFrontW * 0.5), wallH * 0.5 + 0.18, d * 0.5));
+      tavern.add(makeWall(sideFrontW, wallH, wallThickness, w * 0.5 - sideFrontW * 0.5, wallH * 0.5 + 0.18, d * 0.5));
+      // Door lintel above the doorway
+      tavern.add(makeWall(doorWidth + 0.1, 0.4, wallThickness, 0, wallH + 0.18 - 0.2, d * 0.5));
+
+      // Corner beams
+      for (const cx of [-1, 1] as const) {
+        for (const cz of [-1, 1] as const) {
+          const beam = new THREE.Mesh(new THREE.BoxGeometry(0.22, wallH + 0.6, 0.22), beamMat2);
+          beam.position.set(cx * (w * 0.5 + 0.04), wallH * 0.5 + 0.18, cz * (d * 0.5 + 0.04));
+          beam.castShadow = true;
+          tavern.add(beam);
+        }
+      }
+
+      // Steep thatched roof — two slabs forming a gable
+      const ridgeY = wallH + 0.18 + 1.4;
+      const slope = Math.atan2(1.4, d * 0.5 + 0.18);
+      for (const side of [-1, 1] as const) {
+        const slab = new THREE.Mesh(new THREE.BoxGeometry(w + 1.0, 0.22, Math.hypot(d * 0.5 + 0.18, 1.4) + 0.2), thatchMat);
+        slab.position.set(0, (wallH + 0.18 + ridgeY) * 0.5, side * (d * 0.25 + 0.1));
+        slab.rotation.x = side * (Math.PI * 0.5 - slope);
+        slab.castShadow = true;
+        slab.receiveShadow = true;
+        tavern.add(slab);
+      }
+      // Ridge beam
+      const ridge = new THREE.Mesh(new THREE.BoxGeometry(w + 1.0, 0.16, 0.2), beamMat2);
+      ridge.position.set(0, ridgeY, 0);
+      ridge.castShadow = true;
+      tavern.add(ridge);
+      // Gable triangles (filled with wall planks visually)
+      for (const side of [-1, 1] as const) {
+        const gable = new THREE.Mesh(new THREE.BoxGeometry(w * 0.96, 1.4, 0.18), wallMat);
+        gable.position.set(0, wallH + 0.18 + 0.7, side * (d * 0.5));
+        tavern.add(gable);
+      }
+
+      if (!lowDetail) {
+        // Bar counter inside the tavern, set back from the door
+        const counter = new THREE.Mesh(new THREE.BoxGeometry(w * 0.7, 1.0, 0.7), counterMat);
+        counter.position.set(0, 0.6, -d * 0.18);
+        counter.castShadow = true;
+        counter.receiveShadow = true;
+        tavern.add(counter);
+        // Counter top accent
+        const counterTop = new THREE.Mesh(new THREE.BoxGeometry(w * 0.74, 0.06, 0.78), beamMat2);
+        counterTop.position.set(0, 1.13, -d * 0.18);
+        tavern.add(counterTop);
+
+        // Stools at the bar
+        for (let s = -1; s <= 1; s++) {
+          const stool = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.24, 0.7, 8), counterMat);
+          stool.position.set(s * 1.3, 0.35, -d * 0.18 + 0.85);
+          stool.castShadow = true;
+          tavern.add(stool);
+        }
+
+        // Tables
+        for (const tableSide of [-1, 1] as const) {
+          const tableGroup = new THREE.Group();
+          tableGroup.position.set(tableSide * (w * 0.32), 0, d * 0.12);
+          const top = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.1, 1.2), counterMat);
+          top.position.y = 0.78;
+          top.castShadow = true;
+          tableGroup.add(top);
+          const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.12, 0.78, 6), beamMat2);
+          leg.position.y = 0.39;
+          tableGroup.add(leg);
+          tavern.add(tableGroup);
+        }
+
+        // Hanging lanterns under roof
+        for (const lx of [-1.4, 1.4, 0] as const) {
+          const lantern = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.34, 0.28), lanternMat2);
+          lantern.position.set(lx, wallH - 0.3, 0);
+          tavern.add(lantern);
+          if (lx === 0) {
+            const tavernGlow = new THREE.PointLight(0xffae5a, 1.6, 18);
+            tavernGlow.position.set(0, wallH - 0.4, 0);
+            tavern.add(tavernGlow);
+          }
+        }
+      }
+
+      // Hanging signpost above the door
+      const signPost = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.2, 0.14), beamMat2);
+      signPost.position.set(0, wallH + 0.6, d * 0.5 + 0.55);
+      tavern.add(signPost);
+      const signPlank = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.5, 0.08), signMat);
+      signPlank.position.set(0, wallH + 0.2, d * 0.5 + 0.55);
+      tavern.add(signPlank);
+      if (!lowDetail) {
+        const tankardSign = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.13, 0.16, 0.32, 10),
+          new THREE.MeshStandardMaterial({ color: 0xc89b3a, roughness: 0.55, metalness: 0.5 }),
+        );
+        tankardSign.position.set(0, wallH + 0.2, d * 0.5 + 0.6);
+        tankardSign.rotation.x = Math.PI * 0.5;
+        tavern.add(tankardSign);
+      }
+
+      // Chimney with a smoke puff (just static)
+      const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.6, 0.7), beamMat2);
+      chimney.position.set(w * 0.32, wallH + 0.9, -d * 0.32);
+      chimney.castShadow = true;
+      tavern.add(chimney);
+
+      group.add(tavern);
+    }
+
+    // Walkable caves — terrain hollows out via getIslandSurfaceY, this block adds the
+    // ceiling, side walls, back wall, entrance frame, and a torch so the cavern reads
+    // as a real explorable cave you can step into.
+    if (island.caves && island.caves.length > 0) {
+      const caveStoneMat = new THREE.MeshStandardMaterial({ color: 0x3a342a, roughness: 1 });
+      const caveWallMat = new THREE.MeshStandardMaterial({ color: 0x2a241d, roughness: 1, side: THREE.DoubleSide });
+      const caveCeilingMat = new THREE.MeshStandardMaterial({ color: 0x1a1610, roughness: 1, side: THREE.DoubleSide });
+      const caveFloorMat = new THREE.MeshStandardMaterial({ color: 0x4a3e2c, roughness: 1 });
+      const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
+      const flameMat = new THREE.MeshStandardMaterial({ color: 0xff8a20, emissive: 0xff5500, emissiveIntensity: 1.4, roughness: 0.4 });
+
+      for (const cave of island.caves) {
+        const caveGroup = new THREE.Group();
+        caveGroup.position.set(cave.position.x - island.position.x, cave.position.y, cave.position.z - island.position.z);
+        caveGroup.rotation.y = cave.rotation;
+
+        const cw = cave.width;
+        const ch = cave.height;
+        const cLen = (cave as { length?: number }).length ?? 10;
+        const cR = (cave as { interiorRadius?: number }).interiorRadius ?? 3.0;
+        // Cave-local Y where floor sits (heightmap drops here via getIslandSurfaceY)
+        const floorLocalY = -0.4;
+        const ceilingLocalY = floorLocalY + ch;
+        // Cave tunnel runs from local z=0 (entrance) to z=-cLen (back)
+
+        // ── Entrance frame: chunky rim boulders so the opening reads as a cliff hole ──
+        const frameSegments = lowDetail ? 5 : 8;
+        for (let i = 0; i < frameSegments; i++) {
+          const t = i / (frameSegments - 1);
+          const angle = Math.PI * (1 - t);
+          const fx = Math.cos(angle) * cR * 1.05;
+          const fy = floorLocalY + Math.sin(angle) * ch * 0.85 + 0.2;
+          const rock = new THREE.Mesh(boulderGeo, caveStoneMat);
+          rock.scale.setScalar(0.55 + rng(i * 311 + cw * 3) * 0.5);
+          rock.position.set(fx, fy, 0.18);
+          rock.rotation.set(rng(i * 313) * Math.PI, rng(i * 317) * Math.PI, rng(i * 319) * Math.PI);
+          rock.castShadow = true;
+          caveGroup.add(rock);
+        }
+        for (const side of [-1, 1] as const) {
+          const base = new THREE.Mesh(boulderGeo, caveStoneMat);
+          base.scale.set(0.9, 0.7, 0.9);
+          base.position.set(side * (cR + 0.3), floorLocalY + 0.45, 0.1);
+          base.castShadow = true;
+          caveGroup.add(base);
+        }
+
+        // ── Cave floor: a flat slab inside the tunnel so the surface reads cleanly
+        //     even where terrain mesh resolution can't capture the hollow precisely ──
+        const floorMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(cR * 2, 0.16, cLen),
+          caveFloorMat,
+        );
+        floorMesh.position.set(0, floorLocalY - 0.08, -cLen * 0.5);
+        floorMesh.receiveShadow = true;
+        caveGroup.add(floorMesh);
+
+        // ── Side walls: rough stone running the length of the tunnel ──
+        for (const side of [-1, 1] as const) {
+          const wall = new THREE.Mesh(
+            new THREE.PlaneGeometry(cLen, ch),
+            caveWallMat,
+          );
+          wall.position.set(side * cR, floorLocalY + ch * 0.5, -cLen * 0.5);
+          wall.rotation.y = side > 0 ? -Math.PI * 0.5 : Math.PI * 0.5;
+          wall.receiveShadow = true;
+          caveGroup.add(wall);
+        }
+
+        // ── Ceiling: a slightly arched roof using two angled slabs ──
+        const archHalf = cR + 0.2;
+        for (const side of [-1, 1] as const) {
+          const slab = new THREE.Mesh(
+            new THREE.PlaneGeometry(archHalf, cLen),
+            caveCeilingMat,
+          );
+          slab.position.set(side * archHalf * 0.5, ceilingLocalY - 0.08, -cLen * 0.5);
+          slab.rotation.x = Math.PI * 0.5;
+          slab.rotation.z = side * 0.18;
+          slab.receiveShadow = true;
+          caveGroup.add(slab);
+        }
+        // Centre ridge of the ceiling
+        const ridge = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.6, cLen),
+          caveCeilingMat,
+        );
+        ridge.position.set(0, ceilingLocalY, -cLen * 0.5);
+        ridge.rotation.x = Math.PI * 0.5;
+        caveGroup.add(ridge);
+
+        // ── Back wall: closes off the tunnel ──
+        const back = new THREE.Mesh(
+          new THREE.PlaneGeometry(cR * 2, ch),
+          caveWallMat,
+        );
+        back.position.set(0, floorLocalY + ch * 0.5, -cLen);
+        back.rotation.y = 0; // facing +Z, visible from inside
+        caveGroup.add(back);
+
+        // ── Stalactite + stalagmite accents ──
+        const stoneAccentMat = new THREE.MeshStandardMaterial({ color: 0x4a3e2e, roughness: 1, flatShading: true });
+        const accentCount = lowDetail ? 3 : 6;
+        for (let s = 0; s < accentCount; s++) {
+          const lz = -1 - rng(s * 401) * (cLen - 2);
+          const lx = (rng(s * 403) - 0.5) * cR * 1.4;
+          const stalH = 0.4 + rng(s * 407) * 0.7;
+          const fromCeiling = rng(s * 409) > 0.5;
+          const stal = new THREE.Mesh(
+            new THREE.ConeGeometry(0.16 + rng(s * 411) * 0.12, stalH, 5),
+            stoneAccentMat,
+          );
+          if (fromCeiling) {
+            stal.position.set(lx, ceilingLocalY - stalH * 0.5, lz);
+            stal.rotation.x = Math.PI;
+          } else {
+            stal.position.set(lx, floorLocalY + stalH * 0.5, lz);
+          }
+          caveGroup.add(stal);
+        }
+
+        // ── Torch sconce on the side wall + warm point light so the inside isn't pitch-black ──
+        const torchSide = rng(cw * 7) > 0.5 ? 1 : -1;
+        const torchZ = -cLen * 0.55;
+        const torchMount = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), torchMat);
+        torchMount.position.set(torchSide * (cR - 0.1), floorLocalY + ch * 0.65, torchZ);
+        caveGroup.add(torchMount);
+        const torchStaff = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.55, 5), torchMat);
+        torchStaff.rotation.z = -torchSide * 0.45;
+        torchStaff.position.set(torchSide * (cR - 0.18), floorLocalY + ch * 0.78, torchZ);
+        caveGroup.add(torchStaff);
+        const flame = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), flameMat);
+        flame.position.set(torchSide * (cR - 0.34), floorLocalY + ch * 0.95, torchZ);
+        caveGroup.add(flame);
+        if (!lowDetail) {
+          const torchLight = new THREE.PointLight(0xff8030, 1.6, 14);
+          torchLight.position.copy(flame.position);
+          caveGroup.add(torchLight);
+        }
+
+        // ── Treasure chest tucked at the back of the cave (visual only — gameplay
+        //     chests still spawn from server). A subtle gold glint that draws explorers in. ──
+        if (rng(cw * 11) > 0.5 && !lowDetail) {
+          const goldChestMat = new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 });
+          const goldLidMat = new THREE.MeshStandardMaterial({ color: 0xc9a84c, roughness: 0.5, metalness: 0.6 });
+          const treasure = new THREE.Group();
+          treasure.position.set(0, floorLocalY + 0.35, -cLen + 1.0);
+          treasure.rotation.y = (rng(cw * 13) - 0.5) * 0.6;
+          const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.55, 0.7), goldChestMat);
+          body.position.y = 0;
+          treasure.add(body);
+          const lid = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.18, 0.74), goldLidMat);
+          lid.position.y = 0.32;
+          treasure.add(lid);
+          caveGroup.add(treasure);
+        }
+
+        group.add(caveGroup);
+      }
+    }
+
+    const boulderCount = scaledCount(Math.round(r / 10), 5);
+    const boulderInst = new THREE.InstancedMesh(boulderGeo, boulderMat, boulderCount);
+    boulderInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const bM = new THREE.Matrix4();
+    const bQ = new THREE.Quaternion();
+    const bE = new THREE.Euler();
+    const bS = new THREE.Vector3();
+    const bP = new THREE.Vector3();
+    const SURFACE_ABOVE_WATER = 5.0; // any sample below this is in/under water — skip decoration
+    let placedBoulders = 0;
     for (let i = 0; i < boulderCount; i++) {
       const angle = rng(i * 3) * Math.PI * 2;
       const distRatio = 0.5 + rng(i * 7) * 0.36;
       const scale = 0.7 + rng(i * 11) * 1.6;
-      const boulder = new THREE.Mesh(boulderGeo, boulderMat);
-      boulder.scale.set(
-        scale * (0.85 + rng(i * 19) * 0.45),
-        scale * (0.6 + rng(i * 23) * 0.55),
-        scale * (0.8 + rng(i * 29) * 0.5),
-      );
-      boulder.position.copy(surfacePoint(distRatio, angle, boulder.scale.y * 0.34));
-      boulder.rotation.set(rng(i * 31) * Math.PI, rng(i * 37) * Math.PI, rng(i * 41) * Math.PI);
-      boulder.castShadow = true;
-      boulder.receiveShadow = true;
-      group.add(boulder);
+      const sx = scale * (0.85 + rng(i * 19) * 0.45);
+      const sy = scale * (0.6 + rng(i * 23) * 0.55);
+      const sz = scale * (0.8 + rng(i * 29) * 0.5);
+      const sample = surfacePoint(distRatio, angle, sy * 0.34);
+      if (sample.y < SURFACE_ABOVE_WATER) continue; // underwater (archipelago saddle)
+      bP.copy(sample);
+      bE.set(rng(i * 31) * Math.PI, rng(i * 37) * Math.PI, rng(i * 41) * Math.PI);
+      bQ.setFromEuler(bE);
+      bS.set(sx, sy, sz);
+      bM.compose(bP, bQ, bS);
+      boulderInst.setMatrixAt(placedBoulders, bM);
+      placedBoulders++;
     }
+    boulderInst.castShadow = true;
+    boulderInst.receiveShadow = true;
+    boulderInst.count = placedBoulders;
+    boulderInst.instanceMatrix.needsUpdate = true;
+    group.add(boulderInst);
 
-    const outcropCount = Math.max(2, Math.round(r / 34));
+    const outcropCount = scaledCount(Math.round(r / 18), 2);
     for (let i = 0; i < outcropCount; i++) {
       const angle = islandHeading + i * ((Math.PI * 2) / outcropCount) + rng(i * 43) * 0.55;
       const distRatio = 0.62 + rng(i * 47) * 0.14;
+      const ocH = Math.max(0.12, 0.85 + rng(i * 61) * 0.9);
+      const outcropSample = surfacePoint(distRatio, angle, ocH * 0.22);
+      if (outcropSample.y < 5.0) continue; // archipelago saddle — skip
       const outcrop = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.18 + rng(i * 53) * 0.2, 0.34 + rng(i * 59) * 0.22, 0.85 + rng(i * 61) * 0.9, 6),
+        new THREE.CylinderGeometry(
+          Math.max(0.06, 0.18 + rng(i * 53) * 0.2),
+          Math.max(0.06, 0.34 + rng(i * 59) * 0.22),
+          ocH,
+          6,
+        ),
         cliffMat,
       );
-      outcrop.position.copy(surfacePoint(distRatio, angle, outcrop.scale.y * 0.22));
+      outcrop.position.copy(outcropSample);
       outcrop.rotation.set(rng(i * 67) * 0.2, rng(i * 71) * Math.PI * 2, (rng(i * 73) - 0.5) * 0.28);
       outcrop.scale.setScalar(0.9 + rng(i * 79) * 0.6);
       outcrop.castShadow = true;
@@ -2174,12 +3209,18 @@ export class Game {
       group.add(outcrop);
     }
 
-    const palmCount = Math.max(2, Math.round(r / 24));
+    const palmCount = lowDetail
+      ? Math.min(2, scaledCount(Math.round(r / 18), 1))
+      : scaledCount(Math.round(r / 12), 4);
+    const palmHeightCap = 5.15 + island.radius * 0.0085 + island.radius * 0.085 * (1 + (island.profile.peakBoost ?? 0) * 0.3); // skip palms near rocky summits
     for (let i = 0; i < palmCount; i++) {
       const angle = rng(i * 83) * Math.PI * 2;
       const distRatio = 0.18 + rng(i * 89) * 0.3;
+      const palmSurface = surfacePoint(distRatio, angle);
+      if (palmSurface.y > palmHeightCap) continue;
+      if (palmSurface.y < 5.0) continue; // skip underwater (archipelago saddles)
       const palm = new THREE.Group();
-      palm.position.copy(surfacePoint(distRatio, angle));
+      palm.position.copy(palmSurface);
 
       const trunkH = 3.6 + rng(i * 97) * 2.1;
       const tiltZ = (rng(i * 101) - 0.5) * 0.28;
@@ -2194,7 +3235,7 @@ export class Game {
       trunk.castShadow = true;
       palm.add(trunk);
 
-      const frondCount = 5 + Math.floor(rng(i * 107) * 2);
+      const frondCount = lowDetail ? 4 : 5 + Math.floor(rng(i * 107) * 2);
       for (let f = 0; f < frondCount; f++) {
         const frondAngle = (f / frondCount) * Math.PI * 2 + rng(f * 109 + i) * 0.4;
         const frondLen = 2.4 + rng(f * 113 + i) * 1.4;
@@ -2216,7 +3257,7 @@ export class Game {
       }
 
       // Coconut clusters near treetop
-      const coconutCount = 2 + Math.floor(rng(i * 211) * 2);
+      const coconutCount = lowDetail ? 0 : 2 + Math.floor(rng(i * 211) * 2);
       for (let c = 0; c < coconutCount; c++) {
         const cAngle = (c / coconutCount) * Math.PI * 2 + rng(c * 213 + i) * 0.8;
         const coconut = new THREE.Mesh(coconutGeo, coconutMat);
@@ -2233,24 +3274,27 @@ export class Game {
       group.add(palm);
     }
 
-    const tuftCount = Math.max(4, Math.round(r / 18));
+    const tuftCount = scaledCount(Math.round(r / 9), 5);
     for (let i = 0; i < tuftCount; i++) {
       const angle = rng(i * 139) * Math.PI * 2;
       const distRatio = rng(i * 149) * 0.42;
+      const tuftSample = surfacePoint(distRatio, angle, 0.16);
+      if (tuftSample.y < 5.0) continue;
       const tuft = new THREE.Mesh(tuftGeo, tuftMat);
       tuft.scale.set(0.18 + rng(i * 151) * 0.22, 0.6 + rng(i * 157) * 0.55, 0.18 + rng(i * 151) * 0.22);
-      tuft.position.copy(surfacePoint(distRatio, angle, 0.16));
+      tuft.position.copy(tuftSample);
       tuft.rotation.set(rng(i * 163) * 0.2, rng(i * 167) * Math.PI * 2, rng(i * 173) * 0.2);
       tuft.castShadow = false;
       group.add(tuft);
     }
 
     // Ferns in the jungle interior
-    const fernCount = Math.max(2, Math.round(r / 24));
+    const fernCount = lowDetail ? 0 : scaledCount(Math.round(r / 12), 4);
     for (let i = 0; i < fernCount; i++) {
       const angle = rng(i * 179) * Math.PI * 2;
       const distRatio = rng(i * 181) * 0.3;
       const fernPos = surfacePoint(distRatio, angle, 0.1);
+      if (fernPos.y < 5.0) continue;
       const fernGroup = new THREE.Group();
       fernGroup.position.copy(fernPos);
       const leafCount = 4 + Math.floor(rng(i * 183) * 2);
@@ -2272,11 +3316,12 @@ export class Game {
     }
 
     // Tropical flowers scattered across the interior
-    const flowerCount = Math.max(3, Math.round(r / 22));
+    const flowerCount = lowDetail ? 0 : scaledCount(Math.round(r / 10), 5);
     for (let i = 0; i < flowerCount; i++) {
       const angle = rng(i * 193) * Math.PI * 2;
       const distRatio = 0.04 + rng(i * 197) * 0.38;
       const flowerPos = surfacePoint(distRatio, angle, 0.06);
+      if (flowerPos.y < 5.0) continue;
       const stemH = 0.22 + rng(i * 199) * 0.24;
       const flowerMat = flowerMats[Math.floor(rng(i * 201) * flowerMats.length)];
       const flowerGroup = new THREE.Group();
@@ -2296,11 +3341,12 @@ export class Game {
     }
 
     // Driftwood on the beach
-    const driftwoodCount = 1 + Math.floor(rng(islandSeed) * 3);
+    const driftwoodCount = lowDetail ? 0 : 3 + Math.floor(rng(islandSeed) * 3);
     for (let i = 0; i < driftwoodCount; i++) {
       const angle = rng(i * 223 + 7) * Math.PI * 2;
       const distRatio = 0.76 + rng(i * 229) * 0.16;
       const logPos = surfacePoint(distRatio, angle, 0.04);
+      if (logPos.y < 5.0) continue;
       const logLen = 1.4 + rng(i * 233) * 2.2;
       const log = new THREE.Mesh(
         new THREE.CylinderGeometry(0.08 + rng(i * 239) * 0.05, 0.11, logLen, 6),
@@ -2318,12 +3364,13 @@ export class Game {
     }
 
     // Bamboo clusters on larger islands
-    if (r > 52) {
+    if (!lowDetail && r > 52) {
       const bambooClusters = 1 + Math.floor(rng(islandSeed * 3 + 1) * 2);
       for (let g = 0; g < bambooClusters; g++) {
         const clusterAngle = rng(g * 251) * Math.PI * 2;
         const clusterDist = 0.12 + rng(g * 257) * 0.22;
         const clusterCenter = surfacePoint(clusterDist, clusterAngle);
+        if (clusterCenter.y < 5.0) continue;
         const stalkCount = 3 + Math.floor(rng(g * 263) * 3);
         for (let b = 0; b < stalkCount; b++) {
           const bh = 3.2 + rng(g * 269 + b) * 2.8;
@@ -2345,53 +3392,1427 @@ export class Game {
       }
     }
 
-    if (r > 50 && rng(islandSeed * 5 + 19) > 0.42) {
+    if (!lowDetail && r > 38) {
       const wreck = new THREE.Group();
       const wreckAngle = islandHeading + Math.PI * (0.55 + rng(islandSeed * 7) * 0.5);
-      const wreckPos = surfacePoint(0.82 + rng(islandSeed * 11) * 0.08, wreckAngle, 0.12);
+      const wreckPos = surfacePoint(0.82 + rng(islandSeed * 11) * 0.08, wreckAngle, 0.0);
       wreck.position.copy(wreckPos);
       wreck.rotation.y = -wreckAngle + Math.PI * 0.5;
+      // Heel the whole wreck slightly to one side so it lies plausibly on the beach
+      wreck.rotation.z = (rng(islandSeed * 19) - 0.5) * 0.45;
 
-      const keel = new THREE.Mesh(new THREE.BoxGeometry(r * 0.12, 0.12, 0.42 + r * 0.025), wreckMat);
-      keel.position.y = 0.08;
+      const keel = new THREE.Mesh(new THREE.BoxGeometry(r * 0.14, 0.18, 0.5 + r * 0.03), wreckMat);
+      keel.position.y = 0.12;
       keel.castShadow = true;
+      keel.receiveShadow = true;
       wreck.add(keel);
 
-      for (let rib = 0; rib < 5; rib++) {
-        const z = -r * 0.06 + rib * (r * 0.03);
+      const ribCount = 7;
+      for (let rib = 0; rib < ribCount; rib++) {
+        const z = -r * 0.07 + rib * (r * 0.025);
         for (const sx of [-1, 1] as const) {
+          const broken = rng(rib * 307 + (sx > 0 ? 1 : 0)) > 0.65;
+          const ribH = (broken ? 0.4 : 1.2) + rng(rib * 311) * 0.7;
           const frame = new THREE.Mesh(
-            new THREE.BoxGeometry(0.09, 1.1 + rng(rib * 307) * 0.6, 0.1),
+            new THREE.BoxGeometry(0.11, ribH, 0.12),
             wreckMat,
           );
-          frame.position.set(sx * (0.34 + rib * 0.06), 0.46, z);
-          frame.rotation.z = sx * (0.58 + rib * 0.04);
+          frame.position.set(sx * (0.36 + rib * 0.055), 0.18 + ribH * 0.5, z);
+          frame.rotation.z = sx * (0.58 + rib * 0.035 + (broken ? 0.4 : 0));
           frame.castShadow = true;
           wreck.add(frame);
         }
       }
 
-      for (let plank = 0; plank < 6; plank++) {
+      // Hull planks attached to outer ribs (only some — rotting away)
+      const plankSpan = r * 0.13;
+      for (let p = 0; p < 8; p++) {
+        if (rng(p * 313 + islandSeed) > 0.55) continue;
+        const sx = rng(p * 317) > 0.5 ? 1 : -1;
+        const plank = new THREE.Mesh(
+          new THREE.BoxGeometry(0.07, 0.42 + rng(p * 319) * 0.4, plankSpan + rng(p * 323) * 0.4),
+          wreckMat,
+        );
+        plank.position.set(sx * (0.5 + rng(p * 331) * 0.18), 0.32 + rng(p * 337) * 0.35, -r * 0.04 + p * 0.16);
+        plank.rotation.z = sx * (0.62 + rng(p * 343) * 0.18);
+        plank.rotation.y = (rng(p * 347) - 0.5) * 0.1;
+        plank.castShadow = true;
+        wreck.add(plank);
+      }
+
+      // Loose planks scattered around the wreck (surface-attached, not floating)
+      for (let plank = 0; plank < 8; plank++) {
         const loose = new THREE.Mesh(
           new THREE.BoxGeometry(0.16, 0.08, 1.1 + rng(plank * 311) * 0.9),
           wreckMat,
         );
-        loose.position.set((rng(plank * 313) - 0.5) * 2.4, 0.14, (rng(plank * 317) - 0.5) * 2.2);
-        loose.rotation.set(0.04, rng(plank * 331) * Math.PI * 2, (rng(plank * 337) - 0.5) * 0.18);
+        const lx = (rng(plank * 313) - 0.5) * 3.2;
+        const lz = (rng(plank * 317) - 0.5) * 3.0;
+        const lWorldX = wreckPos.x + island.position.x + lx;
+        const lWorldZ = wreckPos.z + island.position.z + lz;
+        const lSurfY = getIslandSurfaceY(island, lWorldX, lWorldZ);
+        loose.position.set(lx, lSurfY - wreckPos.y + 0.06, lz);
+        loose.rotation.set(0.04, rng(plank * 331) * Math.PI * 2, (rng(plank * 337) - 0.5) * 0.22);
         loose.castShadow = true;
         wreck.add(loose);
       }
 
-      const tornSail = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.1, 1, 2), canvasMat);
-      tornSail.position.set(-0.65, 0.62, -0.55);
+      // Snapped mast lying alongside the keel
+      const mastLen = r * 0.18 + 1.8;
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.18, mastLen, 7), wreckMat);
+      mast.rotation.x = Math.PI * 0.5;
+      mast.rotation.z = 0.18;
+      mast.position.set(-0.55, 0.32, -r * 0.02);
+      mast.castShadow = true;
+      wreck.add(mast);
+
+      // Mast stump still standing
+      const stumpH = 1.2 + rng(islandSeed * 23) * 1.0;
+      const stump = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, stumpH, 7), wreckMat);
+      stump.position.set(0.05, 0.18 + stumpH * 0.5, r * 0.0);
+      stump.rotation.z = 0.08;
+      stump.castShadow = true;
+      wreck.add(stump);
+
+      // Tattered sail draped over the stump
+      const tornSail = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.4, 2, 2), canvasMat);
+      tornSail.position.set(-0.55, 0.7, -0.55);
       tornSail.rotation.set(-0.45, 0.2, -0.18);
       tornSail.castShadow = false;
       wreck.add(tornSail);
 
+      // Half-buried barrel & ruptured cargo
+      const barrelMat2 = new THREE.MeshStandardMaterial({ color: 0x4a3217, roughness: 1 });
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.7, 12), barrelMat2);
+      const bx = 1.2 + rng(islandSeed * 29) * 0.6;
+      const bz = -0.6 + rng(islandSeed * 31) * 0.5;
+      const bSurfY = getIslandSurfaceY(island, wreckPos.x + island.position.x + bx, wreckPos.z + island.position.z + bz);
+      barrel.rotation.z = Math.PI * 0.5;
+      barrel.position.set(bx, bSurfY - wreckPos.y + 0.34, bz);
+      barrel.castShadow = true;
+      wreck.add(barrel);
+      // Iron bands
+      for (let band = -1; band <= 1; band++) {
+        const ring = new THREE.Mesh(
+          new THREE.TorusGeometry(0.36, 0.03, 6, 14),
+          new THREE.MeshStandardMaterial({ color: 0x2a221a, roughness: 1 }),
+        );
+        ring.position.set(bx + band * 0.18, bSurfY - wreckPos.y + 0.34, bz);
+        ring.rotation.y = Math.PI * 0.5;
+        wreck.add(ring);
+      }
+
+      // Anchor in the sand
+      const anchorMat = new THREE.MeshStandardMaterial({ color: 0x222018, roughness: 0.95, metalness: 0.4 });
+      const ax = -1.6 + rng(islandSeed * 37) * 0.4;
+      const az = 1.0 + rng(islandSeed * 41) * 0.5;
+      const aSurfY = getIslandSurfaceY(island, wreckPos.x + island.position.x + ax, wreckPos.z + island.position.z + az);
+      const anchorShank = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1.4, 6), anchorMat);
+      anchorShank.position.set(ax, aSurfY - wreckPos.y + 0.18, az);
+      anchorShank.rotation.x = Math.PI * 0.5;
+      anchorShank.rotation.z = 0.45;
+      anchorShank.castShadow = true;
+      wreck.add(anchorShank);
+      const anchorArm = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.07, 6, 12, Math.PI), anchorMat);
+      anchorArm.position.set(ax + 0.4, aSurfY - wreckPos.y + 0.16, az);
+      anchorArm.rotation.set(Math.PI * 0.5, 0.25, 0);
+      wreck.add(anchorArm);
+
+      // Trailing rope from anchor to wreck stump (just a poly-line)
+      const ropeGeo = new THREE.BufferGeometry();
+      ropeGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+        ax, aSurfY - wreckPos.y + 0.36, az,
+        ax * 0.4, 0.6, az * 0.4,
+        0.05, 0.55, 0.0,
+      ], 3));
+      const rope = new THREE.Line(ropeGeo, new THREE.LineBasicMaterial({ color: 0xa68f5a }));
+      wreck.add(rope);
+
       group.add(wreck);
     }
 
-    if (r > 58 && rng(islandSeed * 13 + 29) > 0.36) {
+    // ── Beach detail: shells, starfish, seaweed clumps, tide pools, washed-up jellyfish ──
+    if (!lowDetail) {
+      const shellMat = new THREE.MeshStandardMaterial({ color: 0xf6e3b8, roughness: 0.6 });
+      const shellMatPink = new THREE.MeshStandardMaterial({ color: 0xf2b5b0, roughness: 0.55 });
+      const seaweedMat = new THREE.MeshStandardMaterial({ color: 0x2d5b2c, roughness: 0.95, side: THREE.DoubleSide });
+      const starfishMat = new THREE.MeshStandardMaterial({ color: 0xe07a36, roughness: 0.9 });
+      const tidePoolMat = new THREE.MeshBasicMaterial({ color: 0x3a86a8, transparent: true, opacity: 0.7 });
+
+      const beachItems = scaledCount(Math.round(r / 9), 4);
+      for (let i = 0; i < beachItems; i++) {
+        const angle = rng(i * 601 + 11) * Math.PI * 2;
+        const distRatio = 0.78 + rng(i * 607) * 0.18;
+        const pos = surfacePoint(distRatio, angle, 0.04);
+        if (pos.y > 5.5) continue; // beach only
+        const pick = rng(i * 613) * 4;
+        if (pick < 1) {
+          // Conch shell
+          const shell = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.32, 8), rng(i * 617) > 0.5 ? shellMat : shellMatPink);
+          shell.position.copy(pos);
+          shell.rotation.z = Math.PI * 0.5 + (rng(i * 619) - 0.5) * 0.4;
+          shell.rotation.y = rng(i * 623) * Math.PI * 2;
+          shell.scale.setScalar(0.7 + rng(i * 631) * 0.6);
+          shell.castShadow = false;
+          group.add(shell);
+        } else if (pick < 2) {
+          // Bivalve
+          const half = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 5, 0, Math.PI * 2, 0, Math.PI * 0.5), shellMat);
+          half.position.copy(pos);
+          half.rotation.y = rng(i * 637) * Math.PI * 2;
+          half.scale.setScalar(0.6 + rng(i * 641) * 0.8);
+          group.add(half);
+        } else if (pick < 3) {
+          // Starfish (5-arm)
+          const star = new THREE.Group();
+          star.position.copy(pos);
+          star.rotation.y = rng(i * 643) * Math.PI * 2;
+          for (let arm = 0; arm < 5; arm++) {
+            const a = (arm / 5) * Math.PI * 2;
+            const limb = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.28, 5), starfishMat);
+            limb.rotation.z = -Math.PI * 0.5;
+            limb.rotation.y = a;
+            limb.position.set(Math.cos(a) * 0.14, 0.04, Math.sin(a) * 0.14);
+            star.add(limb);
+          }
+          star.scale.setScalar(0.7 + rng(i * 647) * 0.5);
+          group.add(star);
+        } else {
+          // Seaweed / kelp clump
+          const clump = new THREE.Group();
+          clump.position.copy(pos);
+          for (let s = 0; s < 5; s++) {
+            const blade = new THREE.Mesh(new THREE.PlaneGeometry(0.12 + rng(s * 651 + i) * 0.08, 0.6 + rng(s * 653 + i) * 0.6), seaweedMat);
+            blade.position.set((rng(s * 657 + i) - 0.5) * 0.2, 0.3, (rng(s * 659 + i) - 0.5) * 0.2);
+            blade.rotation.set((rng(s * 661 + i) - 0.5) * 0.4, rng(s * 663 + i) * Math.PI * 2, (rng(s * 667 + i) - 0.5) * 0.6);
+            clump.add(blade);
+          }
+          group.add(clump);
+        }
+      }
+
+      // Tide pools — small flat blue disks where rocks shelter water on the rocky shore
+      if (!lowDetail) {
+        const tidePoolCount = scaledCount(Math.round(r / 30), 1);
+        for (let i = 0; i < tidePoolCount; i++) {
+          const angle = rng(i * 671 + 7) * Math.PI * 2;
+          const distRatio = 0.84 + rng(i * 677) * 0.1;
+          const pos = surfacePoint(distRatio, angle, 0.02);
+          if (pos.y > 5.7) continue;
+          const pool = new THREE.Mesh(
+            new THREE.CircleGeometry(0.7 + rng(i * 681) * 0.6, 14),
+            tidePoolMat,
+          );
+          pool.rotation.x = -Math.PI * 0.5;
+          pool.position.copy(pos);
+          pool.position.y += 0.02;
+          group.add(pool);
+          // Encircling rocks
+          for (let r2 = 0; r2 < 5; r2++) {
+            const ra = (r2 / 5) * Math.PI * 2;
+            const rock = new THREE.Mesh(boulderGeo, boulderMat);
+            rock.scale.setScalar(0.16 + rng(r2 * 683 + i) * 0.18);
+            rock.position.copy(pos);
+            rock.position.x += Math.cos(ra) * (0.85 + rng(r2 * 687 + i) * 0.3);
+            rock.position.z += Math.sin(ra) * (0.85 + rng(r2 * 689 + i) * 0.3);
+            rock.position.y += 0.08;
+            rock.rotation.set(rng(r2 * 691) * Math.PI, rng(r2 * 693) * Math.PI, rng(r2 * 697) * Math.PI);
+            group.add(rock);
+          }
+        }
+      }
+    }
+
+    // ── Snow cap on tall mountain peaks ──
+    if (island.profile.terrainStyle === 'mountain' && (island.profile.peakBoost ?? 0) > 0.65) {
+      const snowMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65, emissive: 0x8aa4c4, emissiveIntensity: 0.04 });
+      const peakAngle = island.profile.primaryHillAngle;
+      const peakOffset = island.profile.primaryHillOffset;
+      const px = Math.cos(peakAngle) * peakOffset * island.profile.footprintX;
+      const pz = Math.sin(peakAngle) * peakOffset * island.profile.footprintZ;
+      const peakWorldX = px + island.position.x;
+      const peakWorldZ = pz + island.position.z;
+      const peakY = getIslandSurfaceY(island, peakWorldX, peakWorldZ);
+      const cap = new THREE.Mesh(
+        new THREE.ConeGeometry(2.6 + island.profile.peakBoost * 1.4, 1.4 + island.profile.peakBoost * 1.6, 9, 1),
+        snowMat,
+      );
+      cap.position.set(px, peakY + 0.6, pz);
+      cap.castShadow = true;
+      cap.receiveShadow = true;
+      group.add(cap);
+      // Snow patches around the peak — flat circles laid on the surface
+      const snowPatchMat = new THREE.MeshStandardMaterial({ color: 0xeaf1f8, roughness: 0.85, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
+      for (let s = 0; s < 8; s++) {
+        const sa = (s / 8) * Math.PI * 2 + rng(s * 701) * 0.4;
+        const sd = 1.2 + rng(s * 703) * 1.6;
+        const sx = px + Math.cos(sa) * sd;
+        const sz = pz + Math.sin(sa) * sd;
+        const sWorldY = getIslandSurfaceY(island, sx + island.position.x, sz + island.position.z);
+        if (sWorldY < peakY - 4) continue; // only near the summit
+        const patch = new THREE.Mesh(
+          new THREE.CircleGeometry(0.6 + rng(s * 707) * 0.7, 10),
+          snowPatchMat,
+        );
+        patch.rotation.x = -Math.PI * 0.5;
+        patch.position.set(sx, sWorldY + 0.05, sz);
+        group.add(patch);
+      }
+    }
+
+    // ── Waterfall on mountain islands — emissive ribbon from a high band down to the sea ──
+    if (island.profile.terrainStyle === 'mountain' && rng(islandSeed * 41 + 7) > 0.35) {
+      const fallAngle = island.profile.ridgeAxis + Math.PI * (rng(islandSeed * 43) > 0.5 ? 0.5 : -0.5) + (rng(islandSeed * 47) - 0.5) * 0.4;
+      const upper = surfacePoint(0.32, fallAngle);
+      const lower = surfacePoint(0.94, fallAngle);
+      const drop = upper.y - lower.y;
+      if (drop > 4) {
+        const fallMat = new THREE.MeshStandardMaterial({
+          color: 0xc7e6f4,
+          emissive: 0xb8e0f5,
+          emissiveIntensity: 0.32,
+          roughness: 0.4,
+          transparent: true,
+          opacity: 0.78,
+          side: THREE.DoubleSide,
+        });
+        // Vertical ribbons drawn with explicit corner geometry — guarantees the
+        // ribbons hang directly between the upper sample and the lower sample.
+        const ribbons = lowDetail ? 1 : 3;
+        const dxFall = lower.x - upper.x;
+        const dzFall = lower.z - upper.z;
+        const horizFall = Math.hypot(dxFall, dzFall);
+        const wAxisX = horizFall > 0.001 ? -dzFall / horizFall : 1;
+        const wAxisZ = horizFall > 0.001 ? dxFall / horizFall : 0;
+        for (let rib = 0; rib < ribbons; rib++) {
+          const t = ribbons === 1 ? 0 : rib / (ribbons - 1);
+          const offset = (t - 0.5) * 1.0;
+          const ax = upper.x + wAxisX * offset;
+          const az = upper.z + wAxisZ * offset;
+          const bx = lower.x + wAxisX * offset;
+          const bz = lower.z + wAxisZ * offset;
+          const ribbonW = 0.6 + rng(rib * 711) * 0.4;
+          const corners = [
+            ax + wAxisX * ribbonW * 0.5, upper.y, az + wAxisZ * ribbonW * 0.5,
+            ax - wAxisX * ribbonW * 0.5, upper.y, az - wAxisZ * ribbonW * 0.5,
+            bx + wAxisX * ribbonW * 0.5, lower.y, bz + wAxisZ * ribbonW * 0.5,
+            bx - wAxisX * ribbonW * 0.5, lower.y, bz - wAxisZ * ribbonW * 0.5,
+          ];
+          const ribbonGeo = new THREE.BufferGeometry();
+          ribbonGeo.setAttribute('position', new THREE.Float32BufferAttribute(corners, 3));
+          ribbonGeo.setIndex([0, 2, 1, 1, 2, 3]);
+          ribbonGeo.computeVertexNormals();
+          const ribbon = new THREE.Mesh(ribbonGeo, fallMat);
+          ribbon.position.set(0, 0, 0);
+          group.add(ribbon);
+        }
+        // Foam pool at the base
+        const pool = new THREE.Mesh(
+          new THREE.CircleGeometry(2.0, 18),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, side: THREE.DoubleSide }),
+        );
+        pool.rotation.x = -Math.PI * 0.5;
+        pool.position.set(lower.x, lower.y + 0.05, lower.z);
+        group.add(pool);
+        // Mist particles (simple white spheres with low opacity)
+        if (!lowDetail) {
+          for (let m = 0; m < 5; m++) {
+            const mist = new THREE.Mesh(
+              new THREE.SphereGeometry(0.6 + rng(m * 713) * 0.4, 6, 4),
+              new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.2 }),
+            );
+            mist.position.set(
+              lower.x + (rng(m * 717) - 0.5) * 1.4,
+              lower.y + 0.4 + rng(m * 721) * 1.2,
+              lower.z + (rng(m * 723) - 0.5) * 1.4,
+            );
+            group.add(mist);
+          }
+        }
+        // Add a stream channel — darker dirt strip from base toward the shore
+        const streamSteps = 6;
+        const streamMat = new THREE.MeshStandardMaterial({ color: 0x4a6478, roughness: 0.6, emissive: 0x224050, emissiveIntensity: 0.2 });
+        for (let st = 0; st < streamSteps; st++) {
+          const t = st / streamSteps;
+          const sx = lower.x + (lower.x * 0.06) * t;
+          const sz = lower.z + (lower.z * 0.06) * t;
+          const sy = getIslandSurfaceY(island, sx + island.position.x, sz + island.position.z);
+          if (sy < 5.2) continue;
+          const seg = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.06, 0.8), streamMat);
+          seg.position.set(sx, sy + 0.03, sz);
+          group.add(seg);
+        }
+      }
+    }
+
+    // ── Layered cliff strata — exposed rock bands wrapping high cliffs ──
+    if (island.profile.heightProfile > 0.35 && !lowDetail) {
+      const strataMats = [
+        new THREE.MeshStandardMaterial({ color: 0x6a5d48, roughness: 1, flatShading: true }),
+        new THREE.MeshStandardMaterial({ color: 0x564b3a, roughness: 1, flatShading: true }),
+        new THREE.MeshStandardMaterial({ color: 0x46402f, roughness: 1, flatShading: true }),
+      ];
+      const bandCount = Math.min(4, 2 + Math.floor(island.profile.heightProfile * 4));
+      for (let band = 0; band < bandCount; band++) {
+        const h01 = 0.45 + (band / bandCount) * 0.4;
+        const segCount = scaledCount(8 + band * 2, 6);
+        for (let s = 0; s < segCount; s++) {
+          const angle = (s / segCount) * Math.PI * 2 + rng(band * 731 + s * 11) * 0.4;
+          const distRatio = 0.42 + rng(band * 737 + s * 13) * 0.22;
+          const pt = surfacePoint(distRatio, angle, 0);
+          const slabH = 0.35 + rng(band * 741 + s) * 0.45;
+          const slab = new THREE.Mesh(
+            new THREE.BoxGeometry(1.5 + rng(band * 743 + s) * 1.2, slabH, 0.5 + rng(band * 747 + s) * 0.6),
+            strataMats[band % strataMats.length],
+          );
+          slab.position.copy(pt);
+          slab.position.y += h01 * 0.4;
+          slab.rotation.set(
+            (rng(band * 751 + s) - 0.5) * 0.18,
+            angle + Math.PI * 0.5 + (rng(band * 753 + s) - 0.5) * 0.3,
+            (rng(band * 757 + s) - 0.5) * 0.16,
+          );
+          slab.castShadow = true;
+          slab.receiveShadow = true;
+          group.add(slab);
+        }
+      }
+    }
+
+    // ── Stone arch landmark ──
+    if (!lowDetail && r > 42) {
+      const archAngle = island.profile.ridgeAxis + Math.PI * 0.5 + rng(islandSeed * 59) * 0.6;
+      const archBase = surfacePoint(0.42 + rng(islandSeed * 61) * 0.18, archAngle, 0);
+      const arch = new THREE.Group();
+      const archYaw = archAngle;
+      arch.rotation.y = archYaw;
+      const archMat = new THREE.MeshStandardMaterial({ color: 0x6c5e48, roughness: 1, flatShading: true });
+      const span = 4.5 + rng(islandSeed * 67) * 2.5;
+      const tall = 4.0 + rng(islandSeed * 71) * 2.0;
+      const thickness = 0.9;
+      // Sample ground at each pillar position so neither pillar floats
+      const cosY = Math.cos(archYaw);
+      const sinY = Math.sin(archYaw);
+      const pillarSurfaces: Record<-1 | 1, number> = { [-1]: 0, [1]: 0 } as Record<-1 | 1, number>;
+      for (const side of [-1, 1] as const) {
+        const localX = side * span * 0.5;
+        const wx = archBase.x + island.position.x + localX * cosY;
+        const wz = archBase.z + island.position.z + -localX * sinY;
+        pillarSurfaces[side] = getIslandSurfaceY(island, wx, wz);
+      }
+      const minPillarSurface = Math.min(pillarSurfaces[-1], pillarSurfaces[1]);
+      const maxPillarSurface = Math.max(pillarSurfaces[-1], pillarSurfaces[1]);
+      arch.position.set(archBase.x, minPillarSurface, archBase.z);
+      const liftedTall = tall + (maxPillarSurface - minPillarSurface);
+      for (const side of [-1, 1] as const) {
+        const localBase = pillarSurfaces[side] - minPillarSurface;
+        const pillarH = liftedTall - localBase;
+        const pillar = new THREE.Mesh(new THREE.BoxGeometry(thickness, pillarH, thickness), archMat);
+        pillar.position.set(side * span * 0.5, localBase + pillarH * 0.5, 0);
+        pillar.rotation.y = (rng((side > 0 ? 1 : 2) * 73) - 0.5) * 0.18;
+        pillar.castShadow = true;
+        pillar.receiveShadow = true;
+        arch.add(pillar);
+        // Boulders piling against the base of the pillar to ground it
+        for (let s = 0; s < 4; s++) {
+          const sa = (s / 4) * Math.PI * 2;
+          const stone = new THREE.Mesh(boulderGeo, boulderMat);
+          stone.scale.setScalar(0.32 + rng(s * 871 + (side > 0 ? 1 : 2)) * 0.2);
+          stone.position.set(
+            side * span * 0.5 + Math.cos(sa) * 0.6,
+            localBase + 0.18,
+            Math.sin(sa) * 0.6,
+          );
+          stone.rotation.set(rng(s * 873) * Math.PI, rng(s * 877) * Math.PI, rng(s * 881) * Math.PI);
+          stone.castShadow = true;
+          arch.add(stone);
+        }
+      }
+      const archSegs = 7;
+      for (let i = 0; i < archSegs; i++) {
+        const t = i / (archSegs - 1);
+        const ax = (t - 0.5) * span;
+        const ay = liftedTall + Math.sin(t * Math.PI) * 1.2;
+        const stone = new THREE.Mesh(new THREE.BoxGeometry(span / archSegs * 1.05, 0.8, thickness), archMat);
+        stone.position.set(ax, ay, 0);
+        stone.rotation.z = (t - 0.5) * 0.6;
+        stone.castShadow = true;
+        arch.add(stone);
+      }
+      group.add(arch);
+    }
+
+    // ── Lookout post — wooden tower on or near a high point ──
+    if (!lowDetail && r > 40) {
+      const lookout = new THREE.Group();
+      const angle = island.profile.primaryHillAngle + (rng(islandSeed * 83) - 0.5) * 0.6;
+      const distRatio = 0.18 + rng(islandSeed * 89) * 0.18;
+      const base = surfacePoint(distRatio, angle, 0);
+      lookout.position.set(base.x, base.y, base.z);
+      const towerYaw = rng(islandSeed * 97) * Math.PI * 2;
+      lookout.rotation.y = towerYaw;
+      const towerMat = new THREE.MeshStandardMaterial({ color: 0x4a3018, roughness: 1 });
+      const beamMat = new THREE.MeshStandardMaterial({ color: 0x2d1d0e, roughness: 1 });
+      const towerH = 4.2 + rng(islandSeed * 101) * 1.6;
+      // Find the highest leg base so we know how to extend the others
+      const legOffset = 0.7;
+      const legPositions: { sx: number; sz: number; surfaceY: number }[] = [];
+      const cosY = Math.cos(towerYaw);
+      const sinY = Math.sin(towerYaw);
+      for (const sx of [-1, 1] as const) {
+        for (const sz of [-1, 1] as const) {
+          // Local (sx*0.7, sz*0.7) in lookout space → world position
+          const wx = base.x + island.position.x + (sx * legOffset * cosY + sz * legOffset * sinY);
+          const wz = base.z + island.position.z + (-sx * legOffset * sinY + sz * legOffset * cosY);
+          const wy = getIslandSurfaceY(island, wx, wz);
+          legPositions.push({ sx, sz, surfaceY: wy });
+        }
+      }
+      const minSurface = Math.min(...legPositions.map((p) => p.surfaceY));
+      const platformY = Math.max(...legPositions.map((p) => p.surfaceY)) + towerH;
+      // Anchor lookout group at the lowest leg base so all positions are >= 0 in local
+      lookout.position.y = minSurface;
+      // Legs extend from each ground point up to the platform
+      for (const { sx, sz, surfaceY } of legPositions) {
+        const localBaseY = surfaceY - minSurface;
+        const localTopY = platformY - minSurface;
+        const legH = localTopY - localBaseY;
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18, legH, 0.18), towerMat);
+        leg.position.set(sx * legOffset, localBaseY + legH * 0.5, sz * legOffset);
+        leg.castShadow = true;
+        lookout.add(leg);
+      }
+      const platformLocalY = platformY - minSurface;
+      // Cross braces
+      for (const sz of [-1, 1] as const) {
+        const brace = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.1), beamMat);
+        brace.position.set(0, platformLocalY * 0.5, sz * 0.7);
+        brace.rotation.z = sz * 0.6;
+        lookout.add(brace);
+      }
+      // Platform
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.16, 2.0), towerMat);
+      deck.position.y = platformLocalY;
+      deck.castShadow = true;
+      deck.receiveShadow = true;
+      lookout.add(deck);
+      // Railings
+      for (const sx of [-1, 1] as const) {
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.1, 2.0), beamMat);
+        rail.position.set(sx * 0.94, platformLocalY + 0.55, 0);
+        lookout.add(rail);
+      }
+      for (const sz of [-1, 1] as const) {
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.1, 0.08), beamMat);
+        rail.position.set(0, platformLocalY + 0.55, sz * 0.94);
+        lookout.add(rail);
+      }
+      // Flag
+      const flagPole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.5, 5), beamMat);
+      flagPole.position.set(0.6, platformLocalY + 1.25, 0.6);
+      lookout.add(flagPole);
+      const flag = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.0, 0.5),
+        new THREE.MeshStandardMaterial({ color: 0x6e1313, roughness: 0.95, side: THREE.DoubleSide }),
+      );
+      flag.position.set(1.1, platformLocalY + 2.1, 0.6);
+      lookout.add(flag);
+      // Ladder up the front (anchored at the front-corner leg's base)
+      const frontLeg = legPositions.find((p) => p.sz === 1) ?? legPositions[0];
+      const ladderBase = frontLeg.surfaceY - minSurface;
+      const ladderTop = platformLocalY;
+      const rungCount = Math.max(6, Math.floor((ladderTop - ladderBase) / 0.45));
+      for (let rung = 0; rung < rungCount; rung++) {
+        const ry = ladderBase + 0.2 + rung * (ladderTop - ladderBase - 0.4) / Math.max(1, rungCount - 1);
+        const r2 = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.05, 0.06), towerMat);
+        r2.position.set(0, ry, 0.92);
+        lookout.add(r2);
+      }
+      void towerH;
+      group.add(lookout);
+    }
+
+    // ── Pirate camp — fire pit, bedrolls, totem, hung skull ──
+    if (!lowDetail && r > 38) {
+      const camp = new THREE.Group();
+      const angle = island.profile.secondaryHillAngle + (rng(islandSeed * 113) - 0.5) * 0.8;
+      const distRatio = 0.28 + rng(islandSeed * 127) * 0.24;
+      const base = surfacePoint(distRatio, angle, 0);
+      const campYaw = rng(islandSeed * 131) * Math.PI * 2;
+      camp.position.copy(base);
+      camp.rotation.y = campYaw;
+      const cosCY = Math.cos(campYaw);
+      const sinCY = Math.sin(campYaw);
+      const groundOffsetAt = (lx: number, lz: number) => {
+        // Convert local camp coords back to world to sample terrain Y
+        const wx = base.x + island.position.x + (lx * cosCY + lz * sinCY);
+        const wz = base.z + island.position.z + (-lx * sinCY + lz * cosCY);
+        return getIslandSurfaceY(island, wx, wz) - base.y;
+      };
+      const stoneMatC = new THREE.MeshStandardMaterial({ color: 0x3d352b, roughness: 1 });
+      const charredMat = new THREE.MeshStandardMaterial({ color: 0x141210, roughness: 1, emissive: 0x6b2a06, emissiveIntensity: 0.4 });
+      // Fire ring
+      for (let s = 0; s < 8; s++) {
+        const a = (s / 8) * Math.PI * 2;
+        const stone = new THREE.Mesh(boulderGeo, stoneMatC);
+        stone.position.set(Math.cos(a) * 0.8, 0.18, Math.sin(a) * 0.8);
+        stone.scale.setScalar(0.22 + rng(s * 137) * 0.15);
+        stone.rotation.set(rng(s * 139) * Math.PI, rng(s * 143) * Math.PI, rng(s * 149) * Math.PI);
+        camp.add(stone);
+      }
+      // Logs criss-crossed
+      const logMatC = new THREE.MeshStandardMaterial({ color: 0x2a1a0c, roughness: 1 });
+      for (let l = 0; l < 4; l++) {
+        const log = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.2, 5), logMatC);
+        log.rotation.z = Math.PI * 0.5;
+        log.rotation.y = (l / 4) * Math.PI;
+        log.position.set(0, 0.18, 0);
+        camp.add(log);
+      }
+      // Glowing embers
+      const embers = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 8), charredMat);
+      embers.position.y = 0.22;
+      camp.add(embers);
+      const fireGlow = new THREE.PointLight(0xff7022, 1.6, 14);
+      fireGlow.position.set(0, 0.6, 0);
+      camp.add(fireGlow);
+
+      // Bedrolls
+      const bedMat = new THREE.MeshStandardMaterial({ color: 0x6b3823, roughness: 0.95 });
+      for (let b = 0; b < 2; b++) {
+        const bedAngle = b === 0 ? 1.3 : -1.3;
+        const bedLx = Math.cos(bedAngle) * 1.7;
+        const bedLz = Math.sin(bedAngle) * 1.7;
+        const bedY = groundOffsetAt(bedLx, bedLz);
+        const bed = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.22, 0.6), bedMat);
+        bed.position.set(bedLx, bedY + 0.12, bedLz);
+        bed.rotation.y = -bedAngle + Math.PI * 0.5;
+        bed.castShadow = true;
+        camp.add(bed);
+        const pillowLx = Math.cos(bedAngle) * 2.2;
+        const pillowLz = Math.sin(bedAngle) * 2.2;
+        const pillowY = groundOffsetAt(pillowLx, pillowLz);
+        const pillow = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.5), new THREE.MeshStandardMaterial({ color: 0x2a1a14, roughness: 1 }));
+        pillow.position.set(pillowLx, pillowY + 0.18, pillowLz);
+        pillow.rotation.y = -bedAngle + Math.PI * 0.5;
+        camp.add(pillow);
+      }
+      // Totem with skull — ground its base
+      const totemY = groundOffsetAt(-2.2, 0.6);
+      const totem = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 2.4, 6), logMatC);
+      totem.position.set(-2.2, totemY + 1.2, 0.6);
+      totem.castShadow = true;
+      camp.add(totem);
+      const skull = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), new THREE.MeshStandardMaterial({ color: 0xe8dec2, roughness: 0.85 }));
+      skull.position.set(-2.2, totemY + 2.55, 0.6);
+      camp.add(skull);
+      // Two black eyes
+      for (const sx of [-1, 1] as const) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 5), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+        eye.position.set(-2.2 + sx * 0.07, totemY + 2.58, 0.78);
+        camp.add(eye);
+      }
+      // Cookpot — sits on the ground next to fire
+      const potY = groundOffsetAt(1.4, 0.4);
+      const potMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.95, metalness: 0.4 });
+      const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 0.5, 10), potMat);
+      pot.position.set(1.4, potY + 0.34, 0.4);
+      pot.castShadow = true;
+      camp.add(pot);
+      // Tripod over fire
+      for (let t = 0; t < 3; t++) {
+        const a = (t / 3) * Math.PI * 2;
+        const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 1.6, 4), logMatC);
+        stick.position.set(Math.cos(a) * 0.8, 0.8, Math.sin(a) * 0.8);
+        stick.rotation.x = Math.cos(a) * 0.5;
+        stick.rotation.z = Math.sin(a) * 0.5;
+        camp.add(stick);
+      }
+      group.add(camp);
+    }
+
+    // ── Rock cairns scattered along higher ground ──
+    if (!lowDetail) {
+      const cairnCount = scaledCount(2 + Math.round(r / 50), 1);
+      for (let i = 0; i < cairnCount; i++) {
+        const angle = rng(i * 311 + 17) * Math.PI * 2;
+        const distRatio = 0.3 + rng(i * 313 + 19) * 0.3;
+        const base = surfacePoint(distRatio, angle, 0);
+        if (base.y < 5.6) continue;
+        const cairn = new THREE.Group();
+        cairn.position.copy(base);
+        const stoneCount = 3 + Math.floor(rng(i * 317) * 2);
+        let yOff = 0;
+        for (let s = 0; s < stoneCount; s++) {
+          const stone = new THREE.Mesh(boulderGeo, boulderMat);
+          const sc = 0.42 - s * 0.06 + rng(s * 319 + i) * 0.06;
+          stone.scale.setScalar(sc);
+          yOff += sc * 0.7;
+          stone.position.set((rng(s * 323 + i) - 0.5) * 0.06, yOff, (rng(s * 329 + i) - 0.5) * 0.06);
+          stone.rotation.set(rng(s * 331 + i) * Math.PI, rng(s * 337 + i) * Math.PI, rng(s * 341 + i) * Math.PI);
+          stone.castShadow = true;
+          cairn.add(stone);
+        }
+        group.add(cairn);
+      }
+    }
+
+    // ── Banana trees — short fat-trunked palms with hanging fruit ──
+    if (r > 38) {
+      const bananaCount = scaledCount(Math.round(r / 36), 1);
+      const bananaTrunkMat = new THREE.MeshStandardMaterial({ color: 0x6c4d2a, roughness: 1 });
+      const bananaLeafMat = new THREE.MeshStandardMaterial({ color: 0x4ea832, roughness: 0.85, side: THREE.DoubleSide });
+      const bananaFruitMat = new THREE.MeshStandardMaterial({ color: 0xeacf3a, roughness: 0.7 });
+      for (let i = 0; i < bananaCount; i++) {
+        const angle = rng(i * 351 + 23) * Math.PI * 2;
+        const distRatio = 0.18 + rng(i * 357) * 0.34;
+        const pos = surfacePoint(distRatio, angle, 0);
+        if (pos.y > palmHeightCap) continue;
+        const tree = new THREE.Group();
+        tree.position.copy(pos);
+        const trunkH = 1.8 + rng(i * 359) * 1.0;
+        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, trunkH, 6), bananaTrunkMat);
+        trunk.position.y = trunkH * 0.5;
+        trunk.castShadow = true;
+        tree.add(trunk);
+        // 6 broad drooping leaves
+        for (let l = 0; l < 6; l++) {
+          const la = (l / 6) * Math.PI * 2;
+          const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 1.6), bananaLeafMat);
+          leaf.position.set(Math.cos(la) * 0.5, trunkH + 0.1, Math.sin(la) * 0.5);
+          leaf.rotation.set(-0.5, la, 0);
+          tree.add(leaf);
+        }
+        // Fruit cluster
+        if (rng(i * 363) > 0.4) {
+          for (let f = 0; f < 5; f++) {
+            const fruit = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.22, 5), bananaFruitMat);
+            fruit.rotation.z = Math.PI * 0.5;
+            fruit.rotation.y = (f / 5) * 0.6 - 0.3;
+            fruit.position.set(0.2 + f * 0.04, trunkH - 0.15, 0.12 + (f - 2) * 0.06);
+            tree.add(fruit);
+          }
+        }
+        group.add(tree);
+      }
+    }
+
+    // ── Dead/weathered trees — bone-grey snags ──
+    {
+      const deadCount = scaledCount(Math.round(r / 52), 0);
+      const deadMat = new THREE.MeshStandardMaterial({ color: 0xa19684, roughness: 1 });
+      for (let i = 0; i < deadCount; i++) {
+        const angle = rng(i * 367 + 29) * Math.PI * 2;
+        const distRatio = 0.32 + rng(i * 369) * 0.36;
+        const pos = surfacePoint(distRatio, angle, 0);
+        const tree = new THREE.Group();
+        tree.position.copy(pos);
+        const trunkH = 2.6 + rng(i * 371) * 2.2;
+        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.22, trunkH, 5), deadMat);
+        trunk.rotation.z = (rng(i * 373) - 0.5) * 0.18;
+        trunk.position.y = trunkH * 0.5;
+        trunk.castShadow = true;
+        tree.add(trunk);
+        // Two-three angular branches
+        const branchCount = 2 + Math.floor(rng(i * 377) * 2);
+        for (let b = 0; b < branchCount; b++) {
+          const branch = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, 1.0 + rng(b * 379 + i) * 0.8, 5), deadMat);
+          const ba = rng(b * 381 + i) * Math.PI * 2;
+          branch.position.set(Math.cos(ba) * 0.3, trunkH - 0.2 - b * 0.4, Math.sin(ba) * 0.3);
+          branch.rotation.set(rng(b * 383 + i) * 0.6 + 0.4, ba, rng(b * 387 + i) * 0.4);
+          tree.add(branch);
+        }
+        group.add(tree);
+      }
+    }
+
+    // ── Mossy fallen log on the jungle floor ──
+    if (!lowDetail && r > 40) {
+      const logAngle = rng(islandSeed * 163) * Math.PI * 2;
+      const pos = surfacePoint(0.32 + rng(islandSeed * 167) * 0.18, logAngle, 0);
+      const log = new THREE.Group();
+      log.position.copy(pos);
+      log.rotation.y = rng(islandSeed * 173) * Math.PI * 2;
+      const logMat = new THREE.MeshStandardMaterial({ color: 0x4d3a23, roughness: 1 });
+      const mossMat = new THREE.MeshStandardMaterial({ color: 0x3a6b30, roughness: 0.9 });
+      const length = 3.4 + rng(islandSeed * 179) * 2.0;
+      const main = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.36, length, 8), logMat);
+      main.rotation.z = Math.PI * 0.5;
+      main.position.y = 0.3;
+      main.castShadow = true;
+      log.add(main);
+      // Moss patches as small flattened spheres on top
+      for (let m = 0; m < 5; m++) {
+        const moss = new THREE.Mesh(new THREE.SphereGeometry(0.22, 6, 5), mossMat);
+        moss.scale.set(1, 0.4, 1);
+        moss.position.set((rng(m * 191 + islandSeed) - 0.5) * length * 0.7, 0.55, (rng(m * 193 + islandSeed) - 0.5) * 0.2);
+        log.add(moss);
+      }
+      // Mushrooms — anchored on the ground next to the log (radius 0.32, log center y=0.3)
+      const mushMat = new THREE.MeshStandardMaterial({ color: 0xc4534a, roughness: 0.9 });
+      const mushStemMat = new THREE.MeshStandardMaterial({ color: 0xeae0c8, roughness: 0.95 });
+      for (let s = 0; s < 3; s++) {
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.18, 5), mushStemMat);
+        const localX = (rng(s * 197 + islandSeed) - 0.5) * length * 0.6;
+        const sideZ = (rng(s * 199 + islandSeed) > 0.5 ? 1 : -1) * (0.42 + rng(s * 201 + islandSeed) * 0.12);
+        stem.position.set(localX, 0.09, sideZ);
+        log.add(stem);
+        const cap = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 5, 0, Math.PI * 2, 0, Math.PI * 0.5), mushMat);
+        cap.position.set(localX, 0.18, sideZ);
+        log.add(cap);
+      }
+      group.add(log);
+    }
+
+    // ── Beached dinghy — small wrecked rowboat in the dunes ──
+    if (!lowDetail && r > 40) {
+      const dinghyAngle = islandHeading + Math.PI * (rng(islandSeed * 217) > 0.5 ? 0.4 : -0.4);
+      const pos = surfacePoint(0.86 + rng(islandSeed * 223) * 0.06, dinghyAngle, 0);
+      const dinghy = new THREE.Group();
+      dinghy.position.copy(pos);
+      dinghy.rotation.y = -dinghyAngle + Math.PI * 0.5 + (rng(islandSeed * 229) - 0.5) * 0.5;
+      dinghy.rotation.z = (rng(islandSeed * 233) - 0.5) * 0.4;
+      const hullMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
+      // Hull halves — two box sides angled inward
+      for (const sx of [-1, 1] as const) {
+        const side = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 2.4), hullMat);
+        side.position.set(sx * 0.42, 0.28, 0);
+        side.rotation.z = sx * 0.32;
+        side.castShadow = true;
+        dinghy.add(side);
+      }
+      // Bottom
+      const bottom = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.1, 2.4), hullMat);
+      bottom.position.y = 0.06;
+      dinghy.add(bottom);
+      // Bow & stern caps (triangular)
+      for (const sz of [-1, 1] as const) {
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.12), hullMat);
+        cap.position.set(0, 0.2, sz * 1.2);
+        cap.rotation.x = sz * 0.2;
+        dinghy.add(cap);
+      }
+      // Oar
+      const oar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.05, 1.4), hullMat);
+      oar.position.set(0.3, 0.4, -0.3);
+      oar.rotation.y = 0.4;
+      dinghy.add(oar);
+      const blade = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.04, 0.4), hullMat);
+      blade.position.set(0.55, 0.4, -0.95);
+      blade.rotation.y = 0.4;
+      dinghy.add(blade);
+      group.add(dinghy);
+    }
+
+    // ── Crab traps & fishing nets near the dock ──
+    if (island.dock && !lowDetail) {
+      const dock = island.dock;
+      const ropeMatN = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
+      const trapMat = new THREE.MeshStandardMaterial({ color: 0x4a3018, roughness: 1 });
+      const netMat = new THREE.MeshStandardMaterial({ color: 0xb39c6a, roughness: 1, side: THREE.DoubleSide, transparent: true, opacity: 0.7 });
+      // Hanging fishing net on a frame next to the dock
+      const netSideAngle = dock.shoreAngle + dock.moorSide * 0.95;
+      const netPos = surfacePoint(0.86, netSideAngle, 0);
+      const netGroup = new THREE.Group();
+      netGroup.position.copy(netPos);
+      // Net frame faces inland so the net spreads toward the dock approach
+      netGroup.rotation.y = Math.atan2(-netPos.x, -netPos.z);
+      // Frame: two posts + cross bar
+      for (const sx of [-1, 1] as const) {
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 2.2, 5), trapMat);
+        post.position.set(sx * 0.9, 1.1, 0);
+        post.castShadow = true;
+        netGroup.add(post);
+      }
+      const cross = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.9, 5), trapMat);
+      cross.rotation.z = Math.PI * 0.5;
+      cross.position.set(0, 2.0, 0);
+      netGroup.add(cross);
+      // Net plane
+      const net = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 1.6, 4, 4), netMat);
+      net.position.set(0, 1.15, 0.04);
+      netGroup.add(net);
+      // Drying fish hung on the cross bar
+      const fishMat = new THREE.MeshStandardMaterial({ color: 0xb6a37a, roughness: 0.9 });
+      for (let f = 0; f < 3; f++) {
+        const fish = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.36, 6), fishMat);
+        fish.rotation.z = Math.PI * 0.5;
+        fish.position.set(-0.6 + f * 0.6, 1.78, 0);
+        netGroup.add(fish);
+      }
+      group.add(netGroup);
+
+      // Crab traps: 2-3 stacked baskets near the shore
+      const trapAngle = dock.shoreAngle - dock.moorSide * 0.7;
+      const trapBase = surfacePoint(0.84, trapAngle, 0);
+      for (let t = 0; t < 3; t++) {
+        const offX = (rng(t * 901 + islandSeed) - 0.5) * 1.2;
+        const offZ = (rng(t * 907 + islandSeed) - 0.5) * 1.2;
+        const trapWX = trapBase.x + island.position.x + offX;
+        const trapWZ = trapBase.z + island.position.z + offZ;
+        const trapY = getIslandSurfaceY(island, trapWX, trapWZ);
+        const trap = new THREE.Group();
+        trap.position.set(trapBase.x + offX, trapY, trapBase.z + offZ);
+        trap.rotation.y = rng(t * 911 + islandSeed) * Math.PI * 2;
+        // Cube-cage of 4 vertical posts and 3 horizontal bands
+        for (const sx of [-1, 1] as const) {
+          for (const sz of [-1, 1] as const) {
+            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.5, 4), trapMat);
+            post.position.set(sx * 0.22, 0.25, sz * 0.22);
+            trap.add(post);
+          }
+        }
+        for (let band = 0; band < 3; band++) {
+          for (const ax of ['x', 'z'] as const) {
+            const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.46, 4), ropeMatN);
+            bar.rotation.z = ax === 'x' ? 0 : Math.PI * 0.5;
+            bar.rotation.x = ax === 'z' ? 0 : Math.PI * 0.5;
+            bar.position.set(ax === 'x' ? 0 : 0.22, 0.08 + band * 0.16, ax === 'z' ? 0 : 0.22);
+            // Two parallel sides per axis
+            const bar2 = bar.clone();
+            bar2.position.set(ax === 'x' ? 0 : -0.22, 0.08 + band * 0.16, ax === 'z' ? 0 : -0.22);
+            trap.add(bar);
+            trap.add(bar2);
+          }
+        }
+        trap.castShadow = true;
+        group.add(trap);
+      }
+    }
+
+    // ── Stone idol cluster — three carved tiki-style faces ──
+    if (!lowDetail && r > 50) {
+      const idolMat = new THREE.MeshStandardMaterial({ color: 0x4a4338, roughness: 1, flatShading: true });
+      const idolEyeMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 1, emissive: 0x6b1a06, emissiveIntensity: 0.3 });
+      const idolAngle = island.profile.tertiaryHillAngle + (rng(islandSeed * 311) - 0.5) * 0.6;
+      const cluster = new THREE.Group();
+      const clusterCenter = surfacePoint(0.34 + rng(islandSeed * 313) * 0.18, idolAngle, 0);
+      cluster.position.copy(clusterCenter);
+      cluster.rotation.y = idolAngle + Math.PI;
+      for (let i = 0; i < 3; i++) {
+        const ix = (i - 1) * 1.4;
+        const iz = (i - 1) * 0.3 + (rng(i * 317 + islandSeed) - 0.5) * 0.4;
+        const groundY = getIslandSurfaceY(island, clusterCenter.x + island.position.x + ix, clusterCenter.z + island.position.z + iz) - clusterCenter.y;
+        const idolH = 1.8 + rng(i * 319 + islandSeed) * 0.8;
+        // Body block
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, idolH, 0.6), idolMat);
+        body.position.set(ix, groundY + idolH * 0.5, iz);
+        body.rotation.y = (rng(i * 321 + islandSeed) - 0.5) * 0.3;
+        body.castShadow = true;
+        body.receiveShadow = true;
+        cluster.add(body);
+        // Head
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.55, 0.55), idolMat);
+        head.position.set(ix, groundY + idolH + 0.27, iz);
+        head.rotation.y = body.rotation.y;
+        cluster.add(head);
+        // Brow
+        const brow = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.12, 0.16), idolMat);
+        brow.position.set(ix, groundY + idolH + 0.35, iz + 0.22);
+        brow.rotation.y = body.rotation.y;
+        cluster.add(brow);
+        // Eyes
+        for (const sx of [-1, 1] as const) {
+          const eye = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.05), idolEyeMat);
+          eye.position.set(ix + sx * 0.14, groundY + idolH + 0.25, iz + 0.3);
+          eye.rotation.y = body.rotation.y;
+          cluster.add(eye);
+        }
+        // Wide mouth
+        const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.08, 0.04), idolEyeMat);
+        mouth.position.set(ix, groundY + idolH + 0.05, iz + 0.3);
+        cluster.add(mouth);
+      }
+      group.add(cluster);
+    }
+
+    // ── Hanging vines from the highest cliff & tallest trees ──
+    if (!lowDetail && island.profile.heightProfile > 0.3) {
+      const vineMat = new THREE.MeshStandardMaterial({ color: 0x355224, roughness: 0.95, side: THREE.DoubleSide });
+      const vineCount = scaledCount(Math.round(r / 14), 3);
+      for (let i = 0; i < vineCount; i++) {
+        const va = rng(i * 941 + 23) * Math.PI * 2;
+        const vd = 0.34 + rng(i * 947) * 0.32;
+        const top = surfacePoint(vd, va, 0);
+        // Find ground a bit further out so the vine hangs over a slope drop
+        const drop = 1.5 + rng(i * 953) * 3.0;
+        const groundWX = top.x + island.position.x + Math.cos(va) * 1.6;
+        const groundWZ = top.z + island.position.z + Math.sin(va) * 1.6;
+        const groundY = getIslandSurfaceY(island, groundWX, groundWZ);
+        const vineLen = Math.max(1.2, top.y - groundY + 0.2);
+        if (vineLen > drop * 2) continue; // skip if vines would tunnel through ground
+        // Vine ribbon
+        const vine = new THREE.Mesh(new THREE.PlaneGeometry(0.16, vineLen), vineMat);
+        vine.position.set(top.x + Math.cos(va) * 0.4, top.y - vineLen * 0.5 + 0.1, top.z + Math.sin(va) * 0.4);
+        vine.rotation.y = va + Math.PI * 0.5;
+        vine.rotation.z = (rng(i * 957) - 0.5) * 0.18;
+        group.add(vine);
+        // Leaves along the vine
+        for (let l = 0; l < 4; l++) {
+          const lt = (l + 0.5) / 4;
+          const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.18), vineMat);
+          leaf.position.set(
+            top.x + Math.cos(va) * 0.4,
+            top.y - vineLen * lt + 0.1,
+            top.z + Math.sin(va) * 0.4 + (rng(l * 961 + i) - 0.5) * 0.1,
+          );
+          leaf.rotation.y = va + Math.PI * 0.5 + (rng(l * 963 + i) - 0.5) * 0.6;
+          leaf.rotation.z = (rng(l * 967 + i) - 0.5) * 0.6;
+          group.add(leaf);
+        }
+      }
+    }
+
+    // ── Buried-treasure stake markers (visual decoration, separate from gameplay chests) ──
+    if (!lowDetail) {
+      const stakeMat = new THREE.MeshStandardMaterial({ color: 0x3d2614, roughness: 1 });
+      const stakeCount = 2 + Math.floor(rng(islandSeed * 971) * 3);
+      for (let i = 0; i < stakeCount; i++) {
+        const sa = rng(i * 977 + islandSeed) * Math.PI * 2;
+        const sd = 0.22 + rng(i * 981 + islandSeed) * 0.42;
+        const sp = surfacePoint(sd, sa, 0);
+        const stake = new THREE.Group();
+        stake.position.copy(sp);
+        stake.rotation.y = rng(i * 983 + islandSeed) * Math.PI * 2;
+        // Two crossed sticks forming an X
+        for (let cross = 0; cross < 2; cross++) {
+          const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.7, 4), stakeMat);
+          stick.position.y = 0.35;
+          stick.rotation.x = cross === 0 ? 0.5 : -0.5;
+          stick.rotation.z = cross === 0 ? 0.5 : -0.5;
+          stake.add(stick);
+        }
+        // Tiny red ribbon at the join
+        const ribbon = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.08), new THREE.MeshStandardMaterial({ color: 0xc02828, roughness: 0.9, side: THREE.DoubleSide }));
+        ribbon.position.y = 0.55;
+        stake.add(ribbon);
+        group.add(stake);
+      }
+    }
+
+    // ── Rope cliff ladder dangling from a high terrace down toward the beach ──
+    if (!lowDetail && island.profile.heightProfile > 0.32 && rng(islandSeed * 991) > 0.25) {
+      const ladderAngle = island.profile.ridgeAxis + Math.PI + (rng(islandSeed * 997) - 0.5) * 0.8;
+      const top = surfacePoint(0.4, ladderAngle, 0);
+      const bottom = surfacePoint(0.78, ladderAngle, 0);
+      const dropY = top.y - bottom.y;
+      if (dropY > 2.5) {
+        const dx = bottom.x - top.x;
+        const dz = bottom.z - top.z;
+        const horiz = Math.hypot(dx, dz);
+        if (horiz > 0.5) {
+          const len = Math.hypot(horiz, dropY);
+          const yaw = Math.atan2(dx, dz);
+          // Perpendicular horizontal direction (for ladder width)
+          const perpX = Math.cos(yaw); // = dz/horiz
+          const perpZ = -Math.sin(yaw); // = -dx/horiz
+          const ladderRopeMat = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
+          // Two parallel ropes drawn from top → bottom in world coords
+          for (const sx of [-1, 1] as const) {
+            const ox = perpX * sx * 0.22;
+            const oz = perpZ * sx * 0.22;
+            const ropePts = [
+              top.x + ox, top.y, top.z + oz,
+              bottom.x + ox, bottom.y, bottom.z + oz,
+            ];
+            const ropeGeo = new THREE.BufferGeometry();
+            ropeGeo.setAttribute('position', new THREE.Float32BufferAttribute(ropePts, 3));
+            const rope = new THREE.Line(ropeGeo, new THREE.LineBasicMaterial({ color: 0xc8b27a, linewidth: 2 }));
+            group.add(rope);
+          }
+          // Rungs spaced along the descent
+          const rungCount = Math.max(8, Math.floor(len / 0.45));
+          const rungMat2 = new THREE.MeshStandardMaterial({ color: 0x6e4c25, roughness: 0.95 });
+          for (let r2 = 0; r2 < rungCount; r2++) {
+            const t = (r2 + 0.5) / rungCount;
+            const rung = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.04, 0.05), rungMat2);
+            rung.position.set(top.x + dx * t, top.y - dropY * t, top.z + dz * t);
+            rung.rotation.y = yaw;
+            group.add(rung);
+          }
+          // Anchor stakes at the top of the cliff
+          const anchorStakeMat = new THREE.MeshStandardMaterial({ color: 0x3d2614, roughness: 1 });
+          for (const sx of [-1, 1] as const) {
+            const ox = perpX * sx * 0.3;
+            const oz = perpZ * sx * 0.3;
+            const stake = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.6, 5), anchorStakeMat);
+            stake.position.set(top.x + ox, top.y + 0.1, top.z + oz);
+            stake.castShadow = true;
+            group.add(stake);
+          }
+          // Ladder ropes use Line which uses ladderRopeMat-like color; suppress unused warning
+          void ladderRopeMat;
+        }
+      }
+    }
+
+    // ── Secondary smaller wreck on bigger islands so they feel storied ──
+    if (!lowDetail && r > 64 && island.tavern === null) {
+      const wAngle = islandHeading + Math.PI * 1.45 + rng(islandSeed * 999) * 0.5;
+      const wPos = surfacePoint(0.85 + rng(islandSeed * 1003) * 0.06, wAngle, 0);
+      const wreck2 = new THREE.Group();
+      wreck2.position.copy(wPos);
+      wreck2.rotation.y = -wAngle + Math.PI * 0.4;
+      wreck2.rotation.z = (rng(islandSeed * 1009) - 0.5) * 0.6;
+      // Just a half-buried hull section + scattered planks
+      const sectionMat = new THREE.MeshStandardMaterial({ color: 0x4b2f16, roughness: 1 });
+      const section = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.7, 1.2), sectionMat);
+      section.position.y = 0.22;
+      section.rotation.z = -0.18;
+      section.castShadow = true;
+      wreck2.add(section);
+      for (let p = 0; p < 5; p++) {
+        const plank = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.07, 1.0 + rng(p * 1019 + islandSeed) * 0.6), sectionMat);
+        const lx = (rng(p * 1021 + islandSeed) - 0.5) * 2.6;
+        const lz = (rng(p * 1023 + islandSeed) - 0.5) * 2.4;
+        const lY = getIslandSurfaceY(island, wPos.x + island.position.x + lx, wPos.z + island.position.z + lz) - wPos.y;
+        plank.position.set(lx, lY + 0.05, lz);
+        plank.rotation.set(0.04, rng(p * 1027 + islandSeed) * Math.PI * 2, (rng(p * 1031 + islandSeed) - 0.5) * 0.3);
+        wreck2.add(plank);
+      }
+      // Loose rib timbers stuck in the sand
+      for (let r3 = 0; r3 < 3; r3++) {
+        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.9 + rng(r3 * 1037 + islandSeed) * 0.5, 0.12), sectionMat);
+        rib.position.set(0.6 + r3 * 0.4, 0.42, 0.6);
+        rib.rotation.z = 0.45 + rng(r3 * 1041) * 0.2;
+        wreck2.add(rib);
+      }
+      group.add(wreck2);
+    }
+
+    // ── Trails — packed-dirt paths between dock, tavern, upgrade stations, hoarder, ruins ──
+    {
+      type WP = { x: number; z: number; kind: 'dock' | 'tavern' | 'npc' | 'upgrade' };
+      const waypoints: WP[] = [];
+      if (island.dock) waypoints.push({ x: island.dock.respawnPoint.x, z: island.dock.respawnPoint.z, kind: 'dock' });
+      if (island.tavern) {
+        const t = island.tavern;
+        const cosR = Math.cos(t.rotation);
+        const sinR = Math.sin(t.rotation);
+        waypoints.push({
+          x: t.position.x + sinR * (t.depth * 0.5 + 1.6),
+          z: t.position.z + cosR * (t.depth * 0.5 + 1.6),
+          kind: 'tavern',
+        });
+      }
+      for (const station of island.upgradeStations) waypoints.push({ x: station.position.x, z: station.position.z, kind: 'upgrade' });
+      for (const npc of island.npcs) {
+        if (npc.role === 'bartender') continue; // bartender is inside the tavern
+        waypoints.push({ x: npc.position.x, z: npc.position.z, kind: 'npc' });
+      }
+
+      if (waypoints.length >= 2) {
+        // Greedy nearest-neighbour ordering anchored at the dock if present.
+        const ordered: WP[] = [];
+        const remaining = [...waypoints];
+        const startIndex = Math.max(0, remaining.findIndex((w) => w.kind === 'dock'));
+        ordered.push(remaining.splice(startIndex, 1)[0]);
+        while (remaining.length) {
+          const last = ordered[ordered.length - 1];
+          let bestIndex = 0;
+          let bestDist = Infinity;
+          for (let i = 0; i < remaining.length; i++) {
+            const dx = remaining[i].x - last.x;
+            const dz = remaining[i].z - last.z;
+            const d = dx * dx + dz * dz;
+            if (d < bestDist) { bestDist = d; bestIndex = i; }
+          }
+          ordered.push(remaining.splice(bestIndex, 1)[0]);
+        }
+
+        const trailMat = new THREE.MeshStandardMaterial({ color: 0xb09169, roughness: 1 });
+        const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6c5e4a, roughness: 1 });
+        const trailWidth = 1.6;
+        const stepLen = 1.6;
+
+        for (let w = 0; w < ordered.length - 1; w++) {
+          const a = ordered[w];
+          const b = ordered[w + 1];
+          const dx = b.x - a.x;
+          const dz = b.z - a.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist < 1.5 || dist > island.radius * 1.6) continue;
+          const steps = Math.max(2, Math.floor(dist / stepLen));
+          const yaw = Math.atan2(dx, dz);
+          for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            // Slight serpentine to feel hand-walked, not surveyed.
+            const wiggleAmp = Math.min(1.2, dist * 0.04);
+            const offset = Math.sin(t * Math.PI * 2 + w * 1.7) * wiggleAmp * (1 - Math.abs(t - 0.5) * 1.4);
+            const px = a.x + dx * t + Math.cos(yaw) * offset;
+            const pz = a.z + dz * t - Math.sin(yaw) * offset;
+            const py = getIslandSurfaceY(island, px, pz);
+            if (py < 5.4) continue;
+            const seg = new THREE.Mesh(new THREE.BoxGeometry(trailWidth + (rng(s * 17 + w * 13) - 0.5) * 0.3, 0.08, stepLen + 0.05), trailMat);
+            seg.position.set(px - island.position.x, py + 0.05, pz - island.position.z);
+            seg.rotation.y = yaw + (rng(s * 19 + w * 23) - 0.5) * 0.06;
+            seg.receiveShadow = true;
+            group.add(seg);
+            // Occasional border stones
+            if (!lowDetail && rng(s * 29 + w * 31) > 0.78) {
+              const side = rng(s * 33 + w * 41) > 0.5 ? 1 : -1;
+              const stone = new THREE.Mesh(boulderGeo, stoneMat);
+              const stx = px + Math.cos(yaw) * side * (trailWidth * 0.55 + 0.2);
+              const stz = pz - Math.sin(yaw) * side * (trailWidth * 0.55 + 0.2);
+              const sty = getIslandSurfaceY(island, stx, stz);
+              stone.position.set(stx - island.position.x, sty + 0.16, stz - island.position.z);
+              stone.scale.setScalar(0.18 + rng(s * 47 + w * 53) * 0.18);
+              stone.rotation.set(rng(s * 51) * Math.PI, rng(s * 57) * Math.PI, rng(s * 61) * Math.PI);
+              stone.castShadow = true;
+              group.add(stone);
+            }
+          }
+        }
+
+        // Trailhead post at the dock side
+        if (island.dock) {
+          const head = new THREE.Group();
+          const hx = island.dock.respawnPoint.x;
+          const hz = island.dock.respawnPoint.z;
+          const hy = getIslandSurfaceY(island, hx, hz);
+          head.position.set(hx - island.position.x, hy, hz - island.position.z);
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.5, 0.18), new THREE.MeshStandardMaterial({ color: 0x4a3018, roughness: 1 }));
+          post.position.y = 0.75;
+          post.castShadow = true;
+          head.add(post);
+          const sign = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.32, 0.06), new THREE.MeshStandardMaterial({ color: 0x6e4c25, roughness: 0.95 }));
+          sign.position.set(0.42, 1.25, 0);
+          head.add(sign);
+          group.add(head);
+        }
+      }
+    }
+
+    // ── Reef ring — sharp dark rocks just offshore ──
+    {
+      const reefMatDark = new THREE.MeshStandardMaterial({ color: 0x282520, roughness: 1 });
+      const reefMatWet = new THREE.MeshStandardMaterial({ color: 0x3a3328, roughness: 0.9 });
+      const reefCount = scaledCount(Math.round(r / 8), 5);
+      const reefGeoSharp = new THREE.ConeGeometry(0.7, 1.2, 5);
+      const reefGeoChunk = new THREE.DodecahedronGeometry(0.6, 0);
+      for (let i = 0; i < reefCount; i++) {
+        const angle = rng(i * 401 + 91) * Math.PI * 2;
+        const distRatio = 1.06 + rng(i * 409 + 97) * 0.22;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        const fx = cosA * island.radius * distRatio * island.profile.footprintX;
+        const fz = sinA * island.radius * distRatio * island.profile.footprintZ;
+        const seaY = 0.05;
+        const sharp = rng(i * 419) > 0.5;
+        const reef = new THREE.Mesh(
+          sharp ? reefGeoSharp : reefGeoChunk,
+          rng(i * 421) > 0.4 ? reefMatDark : reefMatWet,
+        );
+        const stickOut = (rng(i * 431) - 0.3) * 1.6; // some submerged, some breaking
+        reef.position.set(fx, seaY + stickOut, fz);
+        const scale = 0.7 + rng(i * 433) * 1.4;
+        reef.scale.set(scale * (0.7 + rng(i * 437) * 0.6), scale * (0.6 + rng(i * 441) * 1.2), scale * (0.7 + rng(i * 443) * 0.6));
+        reef.rotation.set(rng(i * 447) * 0.6, rng(i * 449) * Math.PI * 2, (rng(i * 451) - 0.5) * 0.6);
+        reef.castShadow = false;
+        reef.receiveShadow = true;
+        group.add(reef);
+
+        // Add a small splash collar of foam (a flat ring sliver) for ones poking above water
+        if (stickOut > 0.05 && !lowDetail) {
+          const foam = new THREE.Mesh(
+            new THREE.RingGeometry(scale * 0.55, scale * 0.95, 12),
+            new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false }),
+          );
+          foam.rotation.x = -Math.PI * 0.5;
+          foam.position.set(fx, seaY + 0.01, fz);
+          group.add(foam);
+        }
+      }
+    }
+
+    // ── Sharp rock spires — jagged peaks for mountain/rocky islands ──
+    if (island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky') {
+      const spireMat = new THREE.MeshStandardMaterial({ color: 0x4d4338, roughness: 1, flatShading: true });
+      const spireCount = scaledCount(island.profile.terrainStyle === 'mountain' ? 4 : 3, 2);
+      for (let i = 0; i < spireCount; i++) {
+        const angle = island.profile.ridgeAxis + (i / spireCount) * Math.PI + rng(i * 503 + 13) * 0.6;
+        const distRatio = 0.32 + rng(i * 509 + 17) * 0.4;
+        const surface = surfacePoint(distRatio, angle);
+        const spireH = 4 + rng(i * 521) * (island.profile.terrainStyle === 'mountain' ? 9 : 5);
+        const spireR = 0.7 + rng(i * 523) * 1.6;
+        // Tilt is bounded so cos(tilt) ≈ 1 and the base never lifts visibly.
+        const tiltX = (rng(i * 533) - 0.5) * 0.12;
+        const tiltZ = (rng(i * 541) - 0.5) * 0.14;
+        const spire = new THREE.Mesh(
+          new THREE.ConeGeometry(spireR, spireH, 4 + Math.floor(rng(i * 529) * 2), 1),
+          spireMat,
+        );
+        // Sink a portion of the base into the ground so even with a small tilt, no
+        // wedge of rock is visibly hovering. Cones are centered, so y = base + h/2.
+        const burial = 0.35 + rng(i * 545) * 0.4;
+        spire.position.set(surface.x, surface.y + spireH * 0.5 - burial, surface.z);
+        spire.rotation.set(tiltX, rng(i * 537) * Math.PI * 2, tiltZ);
+        spire.castShadow = true;
+        spire.receiveShadow = true;
+        group.add(spire);
+
+        // Anchoring rubble pile around the spire base so the transition reads as
+        // weathered rather than placed.
+        const rubbleMat = new THREE.MeshStandardMaterial({ color: 0x3e342a, roughness: 1 });
+        for (let s = 0; s < 4; s++) {
+          const sa = (s / 4) * Math.PI * 2 + rng(i * 543 + s) * 0.5;
+          const rOff = spireR * (0.85 + rng(i * 549 + s) * 0.35);
+          const rx = surface.x + Math.cos(sa) * rOff;
+          const rz = surface.z + Math.sin(sa) * rOff;
+          const ry = getIslandSurfaceY(island, rx + island.position.x, rz + island.position.z);
+          const rock = new THREE.Mesh(boulderGeo, rubbleMat);
+          rock.scale.setScalar(0.35 + rng(i * 551 + s) * 0.32);
+          rock.position.set(rx, ry + 0.18, rz);
+          rock.rotation.set(rng(i * 553 + s) * Math.PI, rng(i * 557 + s) * Math.PI, rng(i * 561 + s) * Math.PI);
+          rock.castShadow = true;
+          group.add(rock);
+        }
+
+        // Sometimes a smaller adjoining spike, also grounded properly
+        if (rng(i * 547) > 0.45) {
+          const sub = new THREE.Mesh(
+            new THREE.ConeGeometry(spireR * 0.55, spireH * 0.6, 4, 1),
+            spireMat,
+          );
+          const offX = (rng(i * 549) - 0.5) * spireR * 2.5;
+          const offZ = (rng(i * 551) - 0.5) * spireR * 2.5;
+          const subSurfY = getIslandSurfaceY(island, surface.x + offX + island.position.x, surface.z + offZ + island.position.z);
+          const subTiltX = (rng(i * 553) - 0.5) * 0.18;
+          const subTiltZ = (rng(i * 561) - 0.5) * 0.22;
+          const subBurial = 0.25;
+          sub.position.set(surface.x + offX, subSurfY + spireH * 0.6 * 0.5 - subBurial, surface.z + offZ);
+          sub.rotation.set(subTiltX, rng(i * 557) * Math.PI * 2, subTiltZ);
+          sub.castShadow = true;
+          group.add(sub);
+        }
+      }
+    }
+
+    // ── Bridge — rope-and-plank between primary & secondary peaks. Always present for
+    // twin/archipelago since those styles are designed around split landmasses.
+    const bridgeEligible = island.profile.terrainStyle === 'twin'
+      || island.profile.terrainStyle === 'archipelago'
+      || ((island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky') && island.profile.secondaryHillScale > 0.45);
+    if (bridgeEligible) {
+      const profile = island.profile;
+      const peak = (hillAngle: number, hillOffset: number) => {
+        const px = Math.cos(hillAngle) * hillOffset * profile.footprintX;
+        const pz = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
+        const wx = px + island.position.x;
+        const wz = pz + island.position.z;
+        const wy = getIslandSurfaceY(island, wx, wz);
+        return { lx: px, lz: pz, y: wy };
+      };
+      const a = peak(profile.primaryHillAngle, profile.primaryHillOffset);
+      const b = peak(profile.secondaryHillAngle, profile.secondaryHillOffset);
+      const dx = b.lx - a.lx;
+      const dz = b.lz - a.lz;
+      const span = Math.hypot(dx, dz);
+      // Both peaks must actually rise above the surrounding terrain for a bridge to make sense
+      const peakReliefA = a.y - 5.15;
+      const peakReliefB = b.y - 5.15;
+      if (span > 6 && span < island.radius * 1.1 && peakReliefA > 3 && peakReliefB > 3) {
+        const bridge = new THREE.Group();
+        const midX = (a.lx + b.lx) * 0.5;
+        const midZ = (a.lz + b.lz) * 0.5;
+        const yaw = Math.atan2(dx, dz);
+        // Anchor bridge at midpoint, midpoint y = average of the two peaks (so each end rests at its peak)
+        const midY = (a.y + b.y) * 0.5;
+        bridge.position.set(midX, midY, midZ);
+        bridge.rotation.y = yaw;
+        // Tilt bridge so each end matches its own peak height (rotate around X axis;
+        // local +Z corresponds to peak b after rotation.y, so we need negative tilt).
+        const tilt = Math.atan2(b.y - a.y, span);
+        bridge.rotation.x = -tilt;
+
+        const plankMat2 = new THREE.MeshStandardMaterial({ color: 0x6b4623, roughness: 0.95 });
+        const ropeMat2 = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
+        const postMat2 = new THREE.MeshStandardMaterial({ color: 0x3d2814, roughness: 1 });
+
+        // End posts: their bases sit at z = ±span/2 in local space (which maps to each peak after tilt)
+        for (const end of [-1, 1] as const) {
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.32, 1.6, 0.32), postMat2);
+          post.position.set(0, 0.8, end * span * 0.5);
+          post.castShadow = true;
+          bridge.add(post);
+          const cap = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.16, 0.5), postMat2);
+          cap.position.set(0, 1.7, end * span * 0.5);
+          bridge.add(cap);
+          // Anchoring cairn (so the post visually grounds into the rock)
+          for (let s = 0; s < 4; s++) {
+            const stone = new THREE.Mesh(boulderGeo, boulderMat);
+            const ang = (s / 4) * Math.PI * 2;
+            stone.position.set(Math.cos(ang) * 0.5, 0.18, end * span * 0.5 + Math.sin(ang) * 0.5);
+            stone.scale.setScalar(0.22 + rng(s * 851 + (end > 0 ? 1 : 2)) * 0.18);
+            stone.rotation.set(rng(s * 853) * Math.PI, rng(s * 857) * Math.PI, rng(s * 859) * Math.PI);
+            bridge.add(stone);
+          }
+        }
+
+        // Sagging plank deck — sag is measured from the y=0 reference plane (bridge midline)
+        const plankCount = Math.max(8, Math.floor(span / 0.55));
+        for (let i = 0; i < plankCount; i++) {
+          const t = (i + 0.5) / plankCount;
+          const z = (t - 0.5) * span;
+          const sag = -Math.sin(t * Math.PI) * Math.min(0.9, span * 0.04);
+          const plank = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.06, 0.42), plankMat2);
+          plank.position.set((rng(i * 601) - 0.5) * 0.05, sag, z);
+          plank.rotation.z = (rng(i * 607) - 0.5) * 0.04;
+          plank.rotation.x = (rng(i * 611) - 0.5) * 0.03;
+          plank.castShadow = true;
+          plank.receiveShadow = true;
+          bridge.add(plank);
+        }
+
+        // Two rope rails
+        const ropeSegments = 24;
+        for (const side of [-1, 1] as const) {
+          const railPositions: number[] = [];
+          for (let i = 0; i <= ropeSegments; i++) {
+            const t = i / ropeSegments;
+            const z = (t - 0.5) * span;
+            const sag = -Math.sin(t * Math.PI) * Math.min(0.6, span * 0.03);
+            railPositions.push(side * 0.7, 0.78 + sag, z);
+          }
+          const railGeo = new THREE.BufferGeometry();
+          railGeo.setAttribute('position', new THREE.Float32BufferAttribute(railPositions, 3));
+          const rail = new THREE.Line(railGeo, new THREE.LineBasicMaterial({ color: 0xc8b27a }));
+          bridge.add(rail);
+
+          // Lower handhold rope
+          const lowerPos: number[] = [];
+          for (let i = 0; i <= ropeSegments; i++) {
+            const t = i / ropeSegments;
+            const z = (t - 0.5) * span;
+            const sag = -Math.sin(t * Math.PI) * Math.min(0.9, span * 0.04);
+            lowerPos.push(side * 0.6, 0.04 + sag, z);
+          }
+          const lowerGeo = new THREE.BufferGeometry();
+          lowerGeo.setAttribute('position', new THREE.Float32BufferAttribute(lowerPos, 3));
+          const lower = new THREE.Line(lowerGeo, new THREE.LineBasicMaterial({ color: 0xc8b27a }));
+          bridge.add(lower);
+
+          // Vertical lashings
+          const verticalCount = Math.max(6, Math.floor(span / 1.2));
+          for (let v = 0; v < verticalCount; v++) {
+            const tv = (v + 0.5) / verticalCount;
+            const zv = (tv - 0.5) * span;
+            const sagTop = -Math.sin(tv * Math.PI) * Math.min(0.6, span * 0.03);
+            const sagBot = -Math.sin(tv * Math.PI) * Math.min(0.9, span * 0.04);
+            const lash = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.02, 0.02, Math.max(0.5, 0.78 - 0.04 + sagTop - sagBot), 4),
+              ropeMat2,
+            );
+            lash.position.set(side * 0.65, (0.78 + sagTop + 0.04 + sagBot) * 0.5, zv);
+            bridge.add(lash);
+          }
+        }
+
+        group.add(bridge);
+      }
+    }
+
+    if (!lowDetail && r > 48) {
       const ruin = new THREE.Group();
       const ruinAngle = island.profile.primaryHillAngle + rng(islandSeed * 17) * 0.8;
       ruin.position.copy(surfacePoint(0.18 + rng(islandSeed * 23) * 0.18, ruinAngle, 0.02));
@@ -2423,6 +4844,142 @@ export class Game {
       group.add(ruin);
     }
 
+    if (!lowDetail) {
+      const terraceMat = new THREE.MeshStandardMaterial({ color: 0xa48d62, roughness: 0.98 });
+      const terraceCount = r > 58 ? 3 : 2;
+      for (let i = 0; i < terraceCount; i++) {
+        const angle = island.profile.ridgeAxis + (i - 1) * 0.46 + (rng(i * 1103 + islandSeed) - 0.5) * 0.18;
+        const pos = surfacePoint(0.34 + i * 0.08 + rng(i * 1109 + islandSeed) * 0.06, angle, 0.035);
+        if (pos.y < 1.4) continue;
+        const ledge = new THREE.Mesh(
+          new THREE.BoxGeometry(3.8 + rng(i * 1117 + islandSeed) * 2.2, 0.12, 1.0 + rng(i * 1123 + islandSeed) * 0.65),
+          terraceMat,
+        );
+        ledge.position.copy(pos);
+        ledge.rotation.y = -angle + Math.PI * 0.5;
+        ledge.rotation.z = (rng(i * 1129 + islandSeed) - 0.5) * 0.08;
+        ledge.castShadow = true;
+        ledge.receiveShadow = true;
+        group.add(ledge);
+      }
+
+      const crabMat = new THREE.MeshStandardMaterial({ color: 0xb53a2b, roughness: 0.86 });
+      const shellMat = new THREE.MeshStandardMaterial({ color: 0xeee0c2, roughness: 0.94 });
+      const animalCount = 0; // replicated wildlife is rendered separately so every animal can move and be killed
+      for (let i = 0; i < animalCount; i++) {
+        const angle = islandHeading + Math.PI * 0.72 + rng(i * 1201 + islandSeed) * Math.PI * 1.1;
+        const crab = new THREE.Group();
+        crab.position.copy(surfacePoint(0.78 + rng(i * 1207 + islandSeed) * 0.15, angle, 0.08));
+        crab.rotation.y = rng(i * 1213 + islandSeed) * Math.PI * 2;
+        const body = new THREE.Mesh(new THREE.SphereGeometry(0.16, 7, 5), crabMat);
+        body.scale.set(1.35, 0.55, 0.9);
+        crab.add(body);
+        for (const side of [-1, 1]) {
+          const claw = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 4), crabMat);
+          claw.position.set(0.18, 0.02, side * 0.18);
+          claw.scale.set(1.25, 0.7, 1);
+          crab.add(claw);
+          for (let leg = 0; leg < 3; leg++) {
+            const limb = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.018, 0.025), crabMat);
+            limb.position.set(-0.05 - leg * 0.055, -0.03, side * (0.12 + leg * 0.055));
+            limb.rotation.y = side * (0.55 + leg * 0.18);
+            crab.add(limb);
+          }
+        }
+        group.add(crab);
+      }
+
+      const gullBodyMat = new THREE.MeshStandardMaterial({ color: 0xf2f0e8, roughness: 0.78 });
+      const gullWingMat = new THREE.MeshStandardMaterial({ color: 0xb9bdc4, roughness: 0.82, side: THREE.DoubleSide });
+      const gullCount = 0; // replicated wildlife is rendered separately so gulls are not static props
+      for (let i = 0; i < gullCount; i++) {
+        const angle = island.profile.primaryHillAngle + rng(i * 1301 + islandSeed) * Math.PI * 2;
+        const gull = new THREE.Group();
+        gull.position.copy(surfacePoint(0.48 + rng(i * 1307 + islandSeed) * 0.34, angle, 0.22));
+        gull.rotation.y = rng(i * 1313 + islandSeed) * Math.PI * 2;
+        const body = new THREE.Mesh(new THREE.SphereGeometry(0.12, 7, 5), gullBodyMat);
+        body.scale.set(1.25, 0.75, 0.85);
+        gull.add(body);
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 4), gullBodyMat);
+        head.position.set(0.14, 0.08, 0);
+        gull.add(head);
+        for (const side of [-1, 1]) {
+          const wing = new THREE.Mesh(new THREE.PlaneGeometry(0.38, 0.12), gullWingMat);
+          wing.position.set(0, 0.02, side * 0.13);
+          wing.rotation.set(0.18, 0, side * 0.32);
+          gull.add(wing);
+        }
+        group.add(gull);
+
+        if (rng(i * 1321 + islandSeed) > 0.45) {
+          const shell = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 4), shellMat);
+          shell.scale.set(1.3, 0.35, 0.8);
+          shell.position.copy(surfacePoint(0.86 + rng(i * 1327 + islandSeed) * 0.08, angle + 0.35, 0.05));
+          shell.rotation.y = rng(i * 1331 + islandSeed) * Math.PI * 2;
+          group.add(shell);
+        }
+      }
+    }
+
+    if (lowDetail) {
+      const detailRoot = new THREE.Group();
+      detailRoot.name = 'island-detail-root';
+      while (group.children.length > 0) {
+        detailRoot.add(group.children[0]);
+      }
+
+      const proxyRoot = new THREE.Group();
+      proxyRoot.name = 'island-proxy-root';
+      proxyRoot.visible = false;
+      const proxySandMat = new THREE.MeshStandardMaterial({ color: 0xd7bd7f, roughness: 0.98, flatShading: true });
+      const proxyGrassMat = new THREE.MeshStandardMaterial({ color: 0x4f8433, roughness: 0.95, flatShading: true });
+      const proxyRockMat = new THREE.MeshStandardMaterial({ color: 0x635b49, roughness: 1, flatShading: true });
+      const proxyBase = new THREE.Mesh(
+        new THREE.CylinderGeometry(r * 0.88, r * 1.15, Math.max(4, r * 0.16), 14, 1),
+        proxySandMat,
+      );
+      proxyBase.position.y = -Math.max(1.8, r * 0.05);
+      proxyBase.scale.set(footprintX, 1, footprintZ);
+      proxyRoot.add(proxyBase);
+      const proxyTop = new THREE.Mesh(
+        new THREE.CylinderGeometry(r * 0.42, r * 0.82, Math.max(2.2, r * 0.09), 12, 1),
+        proxyGrassMat,
+      );
+      proxyTop.position.y = Math.max(2.0, r * 0.035);
+      proxyTop.scale.set(footprintX * 0.86, 1, footprintZ * 0.86);
+      proxyRoot.add(proxyTop);
+      if (island.profile.heightProfile > 0.42) {
+        const proxyPeak = new THREE.Mesh(
+          new THREE.ConeGeometry(r * 0.28, Math.max(4.2, r * 0.18), 9, 1),
+          proxyRockMat,
+        );
+        proxyPeak.position.set(
+          Math.cos(island.profile.primaryHillAngle) * island.profile.primaryHillOffset * 0.35,
+          Math.max(4.5, r * 0.13),
+          Math.sin(island.profile.primaryHillAngle) * island.profile.primaryHillOffset * 0.35,
+        );
+        proxyRoot.add(proxyPeak);
+      }
+
+      detailRoot.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.castShadow = false;
+          obj.receiveShadow = false;
+        }
+      });
+      proxyRoot.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.castShadow = false;
+          obj.receiveShadow = true;
+        }
+      });
+
+      group.add(detailRoot);
+      group.add(proxyRoot);
+      group.userData.detailRoot = detailRoot;
+      group.userData.proxyRoot = proxyRoot;
+    }
+
     this.environment.add(group);
     this.islandMeshes.set(island.id, group);
 
@@ -2448,6 +5005,7 @@ export class Game {
 
       const glow = new THREE.PointLight(0xffc75a, 1.2, 12);
       glow.position.set(0, 1.2, 0);
+      glow.visible = !lowDetail;
       chestGroup.add(glow);
 
       let mound: THREE.Mesh | null = null;
@@ -2567,6 +5125,7 @@ export class Game {
 
       const light = new THREE.PointLight(meta.hex, 2.2, 16);
       light.position.set(0, 1.06, 0);
+      light.visible = !lowDetail;
       stationGroup.add(light);
 
       const stationProp = makeUpgradeStationProp(station.type, meta.hex);
@@ -2640,6 +5199,7 @@ export class Game {
       shipwright: 0x7b4a24,
       oracle: 0x3c4f37,
       gold_hoarder: 0x7a5a1c,
+      bartender: 0x6f3320,
     };
     const body = makePlayerMesh(roleColor[npc.role], 'pirate', 'captain');
     body.rotation.y = npc.rotation;
@@ -2651,6 +5211,7 @@ export class Game {
       shipwright: 0x70421d,
       oracle: 0x384a32,
       gold_hoarder: 0x6d4f19,
+      bartender: 0x5a2a18,
     };
     const rug = new THREE.Mesh(
       new THREE.CircleGeometry(1.1, 18),
@@ -2685,6 +5246,17 @@ export class Game {
       );
       orb.position.set(-0.82, 0.63, -0.16);
       root.add(orb);
+    } else if (npc.role === 'bartender') {
+      // No rug — bartender stands behind the bar inside the tavern building.
+      rug.visible = false;
+      const tankard = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, 0.3, 8), brassMat);
+      tankard.position.set(0.55, 1.12, -0.05);
+      tankard.castShadow = true;
+      root.add(tankard);
+      const handle = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 6, 10, Math.PI), brassMat);
+      handle.rotation.y = Math.PI * 0.5;
+      handle.position.set(0.69, 1.12, -0.05);
+      root.add(handle);
     } else {
       const crate = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.52, 0.58), propMat);
       crate.position.set(-0.82, 0.28, -0.2);
@@ -2701,6 +5273,7 @@ export class Game {
 
     const light = new THREE.PointLight(0xf2b45b, 1.4, 12);
     light.position.set(0.36, 1.45, -0.18);
+    light.visible = this.renderer.getQuality() !== 'low';
     root.add(light);
     const lantern = new THREE.Mesh(
       new THREE.BoxGeometry(0.18, 0.26, 0.18),
@@ -2718,6 +5291,9 @@ export class Game {
     this.frameDt = dt;
     this.minimapTimer -= dt;
     this.inputSendTimer -= dt;
+    this.inputHeartbeatTimer -= dt;
+    this.windWispTimer -= dt;
+    this.rainOverlayTimer -= dt;
 
     this.ocean.update(dt, this.renderer.camera.position);
     this.updateScene(dt);
@@ -2728,24 +5304,276 @@ export class Game {
       if (input.useWheelItem && input.wheelIndex !== null) {
         this.startPocketUsePreview(input.wheelIndex);
       }
+      const uiInteract = this.pendingInteractFromUi;
       if (this.pendingInteractFromUi) {
         input.interact = true;
         this.pendingInteractFromUi = false;
       }
+      const currentInteractKind = this.resolveCurrentInteractKind();
       input.interactIntent = input.interact
-        ? (this.resolveCurrentInteractKind() ?? this.visibleInteractKind ?? this.lastInteractKind)
-        : this.lastInteractKind;
+        ? (currentInteractKind ?? (uiInteract ? this.lastInteractKind : null))
+        : null;
       if (this.pendingLaunchFromUi) {
         input.jumpPressed = true;
         this.pendingLaunchFromUi = false;
       }
-      this.network.sendInput(input);
-      this.inputSendTimer = 1 / 60;
+      const signature = this.getInputSignature(input);
+      const changed = signature !== this.lastSentInputSignature;
+      if (hasForcedInput || changed || this.inputHeartbeatTimer <= 0) {
+        this.network.sendInput(input);
+        this.lastSentInputSignature = signature;
+        this.inputHeartbeatTimer = CLIENT_INPUT_HEARTBEAT_INTERVAL;
+      }
+      this.inputSendTimer = CLIENT_INPUT_SEND_INTERVAL;
     }
 
+    this.updateMermaid(now);
+    this.renderer.updatePerformance(dt);
     this.renderer.render();
+    this.updatePointerLockHint();
+    this.updateDebugPerfPanel(dt);
 
     requestAnimationFrame((time) => this.frame(time));
+  }
+
+  private setupDebugPerfPanel() {
+    if (!this.debugPerfEnabled || this.debugPerfPanel) return;
+
+    const panel = document.createElement('div');
+    panel.id = 'debug-perf-panel';
+    panel.style.cssText = [
+      'position:fixed',
+      'left:10px',
+      'bottom:10px',
+      'z-index:99999',
+      'min-width:260px',
+      'max-width:380px',
+      'padding:9px 10px',
+      'border:1px solid rgba(141,185,255,0.42)',
+      'border-radius:6px',
+      'background:rgba(4,11,23,0.78)',
+      'box-shadow:0 8px 28px rgba(0,0,0,0.35)',
+      'color:#d9e8ff',
+      'font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace',
+      'white-space:pre',
+      'pointer-events:none',
+      'text-shadow:0 1px 2px rgba(0,0,0,0.7)',
+    ].join(';');
+    panel.textContent = 'Pirates BR debug\nwaiting for first frame...';
+    document.body.appendChild(panel);
+    this.debugPerfPanel = panel;
+  }
+
+  private updateDebugPerfPanel(dt: number) {
+    if (!this.debugPerfPanel) return;
+
+    this.debugFrameCounter++;
+    this.debugFrameAccum += dt;
+    this.debugWorstFrameMs = Math.max(this.debugWorstFrameMs, dt * 1000);
+    this.debugUpdateTimer -= dt;
+    if (this.debugUpdateTimer > 0) return;
+
+    this.debugFps = this.debugFrameCounter / Math.max(0.001, this.debugFrameAccum);
+    const worstFrame = this.debugWorstFrameMs;
+    this.debugFrameCounter = 0;
+    this.debugFrameAccum = 0;
+    this.debugWorstFrameMs = 0;
+    this.debugUpdateTimer = 0.5;
+
+    const info = this.renderer.renderer.info;
+    const player = this.getLocalPlayer();
+    const ship = this.getTrackedShip();
+    const activeWeapon = player?.weapons[player.activeSlot] ?? null;
+    const averageHull = ship
+      ? (ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard) * 25
+      : null;
+    const prompt = (this.ui.interactPrompt.textContent ?? '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .slice(0, 80);
+    const snapshotAgeMs = performance.now() - this.lastSnapshotAt;
+
+    const stateLine = this.state
+      ? [
+          `state ${this.state.phase}`,
+          `ships ${this.state.shipsAlive}/${this.state.ships.length}`,
+          `players ${this.state.players.length}`,
+          `proj ${this.state.projectiles.length}`,
+          `kegs ${this.state.kegs.length}`,
+        ].join(' | ')
+      : 'state menu/waiting';
+
+    const playerLine = player
+      ? [
+          `player ${player.state}`,
+          `hp ${Math.round(player.health)}`,
+          `onShip ${player.onShipId ? 'yes' : 'no'}`,
+          `helm ${player.atHelm ? 'Y' : 'n'}`,
+          `cannon ${player.atCannon ? player.cannonIndex : 'n'}`,
+          `sails ${player.atSails ? 'Y' : 'n'}`,
+          `weapon ${activeWeapon?.weaponId ?? 'none'}`,
+        ].join(' | ')
+      : 'player none';
+
+    const shipLine = ship
+      ? [
+          `ship ${ship.type}`,
+          `hull ${Math.round(averageHull ?? 0)}%`,
+          `sail ${Math.round(ship.sailHeight * 100)}%`,
+          `anchor ${ship.anchored ? `down ${Math.round((ship.anchorRaiseProgress ?? 0) * 100)}%` : 'up'}`,
+          `speed ${Math.hypot(ship.velocity.x, ship.velocity.z).toFixed(1)}`,
+        ].join(' | ')
+      : 'ship none';
+
+    this.debugPerfPanel.textContent = [
+      'Pirates BR debug',
+      `fps ${this.debugFps.toFixed(0)} | worst ${worstFrame.toFixed(1)}ms | quality ${this.renderer.getQuality()} | dpr ${this.renderer.renderer.getPixelRatio().toFixed(2)}`,
+      `draw ${info.render.calls} | tris ${info.render.triangles} | geom ${info.memory.geometries} | tex ${info.memory.textures}`,
+      stateLine,
+      playerLine,
+      shipLine,
+      `snapshot ${Math.round(snapshotAgeMs)}ms | interact ${this.visibleInteractKind ?? this.lastInteractKind ?? 'none'} | prompt ${prompt || 'none'}`,
+    ].join('\n');
+  }
+
+  private updateEnvironmentLod() {
+    if (!this.state || this.renderer.getQuality() !== 'low') return;
+
+    const cam = this.renderer.camera.position;
+    const detailRadius = 180;
+    const wildlifeRadius = 220;
+    const lootRadius = 340;
+    const seaRockRadius = 650;
+    const upgradeRadius = 420;
+    const npcRadius = 360;
+
+    for (const island of this.state.islands) {
+      const group = this.islandMeshes.get(island.id);
+      if (!group) continue;
+      const dist = this.distance2D(cam.x, cam.z, island.position.x, island.position.z);
+      const detailRoot = group.userData.detailRoot as THREE.Object3D | undefined;
+      const proxyRoot = group.userData.proxyRoot as THREE.Object3D | undefined;
+      if (detailRoot && proxyRoot) {
+        const showDetail = dist < detailRadius;
+        detailRoot.visible = showDetail;
+        proxyRoot.visible = !showDetail;
+      }
+
+      for (const chest of island.chests) {
+        const record = this.chestMeshes.get(chest.id);
+        if (!record) continue;
+        const chestDist = this.distance2D(cam.x, cam.z, chest.position.x, chest.position.z);
+        const carriedByLocal = chest.carriedByPlayerId === this.localPlayerId;
+        record.root.visible = chestDist < lootRadius && !chest.opened && !carriedByLocal;
+      }
+
+      for (const barrel of island.barrels) {
+        const root = this.barrelMeshes.get(barrel.id);
+        if (!root) continue;
+        const barrelDist = this.distance2D(cam.x, cam.z, barrel.position.x, barrel.position.z);
+        root.visible = barrelDist < lootRadius && (!barrel.opened || barrel.loot.length > 0);
+      }
+
+      for (const station of island.upgradeStations) {
+        const record = this.upgradeStationMeshes.get(station.id);
+        if (!record) continue;
+        const stationDist = this.distance2D(cam.x, cam.z, station.position.x, station.position.z);
+        record.root.visible = stationDist < upgradeRadius;
+      }
+
+      for (const npc of island.npcs ?? []) {
+        const record = this.npcMeshes.get(npc.id);
+        if (!record) continue;
+        const npcDist = this.distance2D(cam.x, cam.z, npc.position.x, npc.position.z);
+        record.root.visible = npcDist < npcRadius;
+      }
+    }
+
+    for (const animal of this.state.wildlife ?? []) {
+      const mesh = this.wildlifeMeshes.get(animal.id);
+      if (!mesh) continue;
+      const dist = this.distance2D(cam.x, cam.z, animal.position.x, animal.position.z);
+      mesh.visible = animal.health > 0 && dist < (animal.type === 'gull' ? wildlifeRadius * 1.35 : wildlifeRadius);
+    }
+
+    for (const rock of this.state.seaRocks ?? []) {
+      const mesh = this.seaRockMeshes.get(rock.id);
+      if (!mesh) continue;
+      const dist = this.distance2D(cam.x, cam.z, rock.position.x, rock.position.z);
+      mesh.visible = dist < seaRockRadius;
+    }
+  }
+
+  private getInputSignature(input: PlayerInput): string {
+    return [
+      input.forward ? 1 : 0,
+      input.back ? 1 : 0,
+      input.left ? 1 : 0,
+      input.right ? 1 : 0,
+      input.jump ? 1 : 0,
+      input.fire ? 1 : 0,
+      input.aim ? 1 : 0,
+      input.interactHeld ? 1 : 0,
+      input.sailRaise ? 1 : 0,
+      input.sailLower ? 1 : 0,
+      input.sailLeft ? 1 : 0,
+      input.sailRight ? 1 : 0,
+      input.dropChest ? 1 : 0,
+      input.specialAttack ? 1 : 0,
+      input.slot ?? '',
+      input.cannonAmmo ?? '',
+      input.interactIntent ?? '',
+      Math.round(input.yaw * 1000),
+      Math.round(input.pitch * 1000),
+    ].join('|');
+  }
+
+  private updateMermaid(now: number): void {
+    const player = this.getLocalPlayer();
+    const ship = player ? this.getMermaidReturnShip(player) : null;
+    if (!player || !ship) {
+      this.mermaidAnchor = null;
+      if (this.mermaidGroup.visible) this.mermaidGroup.visible = false;
+      return;
+    }
+    if (
+      !this.mermaidAnchor
+      || this.mermaidAnchor.shipId !== ship.id
+      || this.distance2D(player.position.x, player.position.z, this.mermaidAnchor.x, this.mermaidAnchor.z) > 62
+    ) {
+      this.mermaidAnchor = this.createMermaidAnchor(player, ship);
+    }
+    const phase = (this.mermaidGroup.userData.bobPhase as number) ?? 0;
+    const bob = Math.sin(now * 0.0023 + phase) * 0.18;
+    this.mermaidGroup.position.set(this.mermaidAnchor.x, 0.18 + bob, this.mermaidAnchor.z);
+    this.mermaidGroup.rotation.y = Math.atan2(
+      player.position.x - this.mermaidAnchor.x,
+      player.position.z - this.mermaidAnchor.z,
+    );
+    this.mermaidGroup.visible = true;
+  }
+
+  private createMermaidAnchor(player: Player, ship: Ship) {
+    const dx = ship.position.x - player.position.x;
+    const dz = ship.position.z - player.position.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const offset = Math.min(8, Math.max(5, len * 0.12));
+    return {
+      x: player.position.x + (dx / len) * offset,
+      z: player.position.z + (dz / len) * offset,
+      shipId: ship.id,
+    };
+  }
+
+  private updatePointerLockHint(): void {
+    if (!this.pointerLockHintEl) {
+      this.pointerLockHintEl = document.getElementById('pointer-lock-hint');
+    }
+    if (!this.pointerLockHintEl) return;
+    const inMatch = !!this.localPlayerId;
+    const menuVisible = this.menu.isVisible();
+    const showHint = inMatch && !menuVisible && !this.input.isLocked();
+    this.pointerLockHintEl.classList.toggle('visible', showHint);
   }
 
   private updateScene(dt: number) {
@@ -2753,16 +5581,32 @@ export class Game {
       return;
     }
 
+    this.audioFrameTriggers(dt);
     const snapshotAge = Math.min(0.22, (performance.now() - this.lastSnapshotAt) / 1000);
-    this.shipRenderer.update(this.state.ships, this.state.players, this.ocean.getTime(), dt, snapshotAge, this.renderer.camera.position);
+    this.shipRenderer.update(
+      this.state.ships,
+      this.state.players,
+      this.ocean.getTime(),
+      dt,
+      snapshotAge,
+      this.renderer.camera.position,
+      this.localPlayerId ?? undefined,
+    );
     this.syncSharks(dt);
+    this.syncWildlife(dt);
+    this.updateEnvironmentLod();
     this.stormWall.rotation.y = this.ocean.getTime() * 0.035;
     this.stormWallTexture.offset.x = this.ocean.getTime() * 0.018;
     this.stormHalo.rotation.z = this.ocean.getTime() * 0.12;
     this.stormWeatherIntensity = this.computeStormWeatherIntensity();
     this.renderer.updateStormWeather(this.stormWeatherIntensity);
     this.ocean.setStormIntensity(this.stormWeatherIntensity);
-    this.updateStormRainOverlay(dt, this.computeStormRainIntensity());
+    const effectScale = this.renderer.getEffectScale();
+    const rainInterval = effectScale < 0.55 ? 1 / 12 : effectScale < 0.85 ? 1 / 18 : 0;
+    if (this.rainOverlayTimer <= 0) {
+      this.updateStormRainOverlay(dt, this.computeStormRainIntensity());
+      this.rainOverlayTimer = rainInterval;
+    }
     this.updateStormLightningFlash(dt);
     const stormW = this.stormWeatherIntensity;
     const wallMat = this.stormWall.material as THREE.MeshBasicMaterial;
@@ -2771,7 +5615,7 @@ export class Game {
     const haloMat = this.stormHalo.material as THREE.MeshBasicMaterial;
     haloMat.opacity = 0.08 + stormW * 0.16;
     this.combatFx.update(dt);
-    this.syncKegs();
+    this.syncKegs(dt);
     this.slowSceneTimer -= dt;
     if (this.slowSceneTimer <= 0) {
       this.updateUpgradeStations(Math.max(dt, 0.1));
@@ -2781,18 +5625,22 @@ export class Game {
     this.syncPlayers(dt);
     this.syncProjectiles(dt);
     this.updateCamera();
+    this.updateWaterEnvironment();
     this.updateCombatHud(dt);
     this.syncLocalViewWeapon();
-    this.updateWindWisps();
+    if (this.windWispTimer <= 0) {
+      this.updateWindWisps();
+      this.windWispTimer = effectScale < 0.55 ? 1 / 20 : effectScale < 0.85 ? 1 / 30 : 0;
+    }
     this.updateLightning(dt);
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
       this.updateHud();
-      this.hudTimer = 0.08;
+      this.hudTimer = effectScale < 0.55 ? 0.12 : 0.08;
     }
     if (this.minimapTimer <= 0) {
       this.drawMaps();
-      this.minimapTimer = 0.25;
+      this.minimapTimer = effectScale < 0.55 ? 0.5 : effectScale < 0.85 ? 0.35 : 0.25;
     }
 
     this.interactScanTimer -= dt;
@@ -2832,14 +5680,13 @@ export class Game {
     const steps = Math.max(4, Math.ceil(total / 0.022));
     const step = total / steps;
     for (let i = 0; i < steps; i++) {
-      vx *= Math.pow(PHYSICS.AIR_DRAG, step * 60);
-      vz *= Math.pow(PHYSICS.AIR_DRAG, step * 60);
       vy += PHYSICS.GRAVITY * step;
       px += vx * step;
       py += vy * step;
       pz += vz * step;
     }
-    return new THREE.Vector3(px, py, pz);
+    this.tempBallisticPos.set(px, py, pz);
+    return this.tempBallisticPos;
   }
 
   private getPlayerRenderPosition(player: Player, leadSeconds: number) {
@@ -2879,7 +5726,7 @@ export class Game {
     // Lag compensation: extrapolate from last snapshot velocity only.
     // Do NOT add a second "input × speed × window" step on land or on ships — server velocity already
     // matches movement input each tick; duplicating it here caused rubber-banding (shuffle back/forth).
-    if (isLocal && !player.atHelm && !player.atCannon && !player.atSails && !player.atCrowNest) {
+    if (isLocal && !player.atHelm && !player.atCannon && !player.atSails) {
       // On deck the server already couples you to the ship; full velocity×age extrapolation reads as double-counted lag.
       const deckDamp = player.onShipId ? 0.48 : 1;
       predictedX += player.velocity.x * snapshotAge * deckDamp;
@@ -2906,16 +5753,20 @@ export class Game {
         }
       }
       if (player.state === 'swimming') {
+        const predictionWindow = Math.min(0.22, snapshotAge + leadSeconds + 0.04);
+        const verticalIntent = this.input.getSwimVerticalIntent();
         if (moveAxes.x !== 0 || moveAxes.z !== 0) {
           const yaw = this.input.getYaw();
           const pitch = this.input.getPitch();
           const len = Math.hypot(moveAxes.x, moveAxes.z) || 1;
           const nx = moveAxes.x / len;
           const nz = moveAxes.z / len;
-          const predictionWindow = Math.min(0.22, snapshotAge + leadSeconds + 0.04);
           predictedX += (Math.sin(yaw) * nz - Math.cos(yaw) * nx) * PLAYER.SWIM_SPEED * predictionWindow * 1.05;
           predictedZ += (Math.cos(yaw) * nz + Math.sin(yaw) * nx) * PLAYER.SWIM_SPEED * predictionWindow * 1.05;
           visualY += Math.sin(pitch) * nz * PLAYER.SWIM_SPEED * predictionWindow * 0.72;
+        }
+        if (verticalIntent !== 0) {
+          visualY += verticalIntent * PLAYER.SWIM_SPEED * predictionWindow * 0.68;
         }
       }
     }
@@ -2924,8 +5775,20 @@ export class Game {
       const waveY = gerstnerHeight(predictedX, predictedZ, t, WAVE_PARAMS);
       const waterSurface = waveY + 0.28;
       const targetFeetY = waterSurface - 0.18;
-      const waveSnap = isLocal ? 0.88 : 0.82;
-      visualY = THREE.MathUtils.lerp(visualY, targetFeetY, waveSnap);
+      // Only snap the visual to the surface when the SERVER position is also
+      // near the surface and the player isn't actively plunging. Otherwise the
+      // snap was pulling the visual up to the surface during a deep cannon dive,
+      // making it look like the player splashed without ever going under.
+      const serverDepth = waterSurface - player.position.y;
+      const plunging = player.velocity.y < -1.2;
+      const depthBelowSurface = waterSurface - visualY;
+      if (!plunging && serverDepth < 0.6 && depthBelowSurface < 1.15) {
+        const waveSnap = isLocal ? 0.7 : 0.6;
+        visualY = THREE.MathUtils.lerp(visualY, targetFeetY, waveSnap);
+      } else if (!plunging && serverDepth < 1.4 && depthBelowSurface < 2.0 && player.velocity.y > -0.35) {
+        // Gentle pull as the player surfaces and starts to bob with the waves
+        visualY = THREE.MathUtils.lerp(visualY, targetFeetY, 0.14);
+      }
     }
     // Match server: only treat as walkable island ground when inside the real footprint (not a huge ocean margin).
     // A loose margin here snapped feet to island height over the water past cliffs ("buffering" in mid-air).
@@ -2938,7 +5801,7 @@ export class Game {
         const islandReach = island.radius * 1.75 + 48;
         if (r2 > islandReach * islandReach) continue;
 
-        if (isPointInsideIslandFootprint(island, predictedX, predictedZ, 1.0)) {
+        if (isPointInsideIslandFootprint(island, predictedX, predictedZ, 0)) {
           resolvedSurfaceY = Math.max(resolvedSurfaceY, getIslandSurfaceY(island, predictedX, predictedZ) + 0.03);
         }
         if (island.dock) {
@@ -2965,7 +5828,22 @@ export class Game {
         }
       }
     }
-    return new THREE.Vector3(predictedX, visualY, predictedZ);
+    this.tempRenderPos.set(predictedX, visualY, predictedZ);
+    return this.tempRenderPos;
+  }
+
+  private getPlayerTeamColor(player: Player): number {
+    const homeShip = player.shipId ? this.shipsById.get(player.shipId) ?? null : null;
+    const currentShip = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+    return homeShip?.teamColor
+      ?? currentShip?.teamColor
+      ?? (player.id === this.localPlayerId ? 0x6f2d22 : player.isBot ? 0x9a3340 : 0x365879);
+  }
+
+  private getPlayerTeamRole(player: Player): 'captain' | 'crew' | 'raider' {
+    const homeShip = player.shipId ? this.shipsById.get(player.shipId) ?? null : null;
+    if (homeShip?.ownerId === player.id) return 'captain';
+    return player.shipId ? 'crew' : 'raider';
   }
 
   private syncPlayers(dt: number) {
@@ -2979,16 +5857,19 @@ export class Game {
     }
 
     for (const player of this.state.players) {
+      const playerIsSkeleton = player.isBot && player.shipId === null;
+      const playerTeamColor = playerIsSkeleton ? 0xd7d1c4 : this.getPlayerTeamColor(player);
       let mesh = this.playerMeshes.get(player.id);
       if (!mesh) {
-        const isSkeleton = player.isBot && player.shipId === null;
         mesh = makePlayerMesh(
-          isSkeleton ? 0xd7d1c4 : player.id === this.localPlayerId ? 0x6f2d22 : player.isBot ? 0x9a3340 : 0x365879,
-          isSkeleton ? 'skeleton' : 'pirate',
-          player.id === this.localPlayerId ? 'captain' : player.isBot ? 'crew' : 'raider',
+          playerTeamColor,
+          playerIsSkeleton ? 'skeleton' : 'pirate',
+          playerIsSkeleton ? 'crew' : this.getPlayerTeamRole(player),
         );
         this.playerMeshes.set(player.id, mesh);
         this.renderer.scene.add(mesh);
+      } else if (!playerIsSkeleton) {
+        applyPlayerTeamColor(mesh, playerTeamColor);
       }
 
       const isLocal = player.id === this.localPlayerId;
@@ -3046,7 +5927,11 @@ export class Game {
         mesh.rotation.z = 0;
         mesh.userData.initialized = true;
       } else {
-        mesh.position.lerp(targetPos, positionAlpha);
+        if (mesh.position.distanceToSquared(targetPos) > (isLocal ? 20 * 20 : 34 * 34)) {
+          mesh.position.copy(targetPos);
+        } else {
+          mesh.position.lerp(targetPos, positionAlpha);
+        }
         mesh.rotation.y += angleWrap(targetYaw - mesh.rotation.y) * (isLocal ? 1 : rotationAlpha);
       }
 
@@ -3156,10 +6041,17 @@ export class Game {
         this.tempProjectilePos.set(projectile.position.x, projectile.position.y, projectile.position.z),
         1 - Math.exp(-24 * dt),
       );
+      if (projectile.type === 'tsunami') {
+        mesh.rotation.y = Math.atan2(projectile.velocity.x, projectile.velocity.z);
+        const life = 1 - Math.min(1, projectile.age / Math.max(0.001, projectile.maxAge));
+        mesh.scale.set(1 + projectile.age * 0.18, 1 + (1 - life) * 0.35, 1 + projectile.age * 0.55);
+        const material = mesh.material as THREE.MeshBasicMaterial;
+        material.opacity = Math.max(0, 0.42 * life);
+      }
     }
   }
 
-  private syncKegs() {
+  private syncKegs(dt: number) {
     if (!this.state) return;
 
     for (const [kegId, mesh] of this.kegMeshes) {
@@ -3172,16 +6064,23 @@ export class Game {
     for (const keg of this.state.kegs) {
       if (keg.timer <= 0) continue;
       let mesh = this.kegMeshes.get(keg.id);
+      let created = false;
       if (!mesh) {
         const root = new THREE.Group();
+        const mega = !!keg.mega;
         const barrel = new THREE.Mesh(
           new THREE.CylinderGeometry(0.22, 0.26, 0.58, 10),
-          new THREE.MeshStandardMaterial({ color: 0x5a3418, roughness: 0.92 }),
+          new THREE.MeshStandardMaterial({
+            color: mega ? 0x2a1510 : 0x5a3418,
+            emissive: mega ? 0x4a0f08 : 0x000000,
+            emissiveIntensity: mega ? 0.26 : 0,
+            roughness: 0.92,
+          }),
         );
         barrel.castShadow = true;
         root.add(barrel);
 
-        const bandMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.45, metalness: 0.85 });
+        const bandMat = new THREE.MeshStandardMaterial({ color: mega ? 0xd89b3a : 0x2b2b2b, roughness: 0.45, metalness: 0.85 });
         for (const y of [-0.18, 0.18]) {
           const band = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.03, 6, 10), bandMat);
           band.rotation.x = Math.PI * 0.5;
@@ -3196,31 +6095,44 @@ export class Game {
         fuseStem.position.set(0.04, 0.36, 0);
         root.add(fuseStem);
 
-        const fuse = new THREE.PointLight(0xff7a26, 1.2, 3.5);
+        const fuse = new THREE.PointLight(mega ? 0xff3226 : 0xff7a26, mega ? 2.2 : 1.2, mega ? 6.5 : 3.5);
         fuse.position.set(0.04, 0.48, 0);
         root.add(fuse);
+        root.scale.setScalar(mega ? 1.55 : 1);
 
         this.renderer.scene.add(root);
         mesh = { root, fuse };
         this.kegMeshes.set(keg.id, mesh);
+        created = true;
       }
 
-      mesh.root.position.set(keg.position.x, keg.position.y + 0.28, keg.position.z);
-      const hostShip = this.shipsById.get(keg.shipId) ?? null;
-      mesh.root.rotation.y = hostShip?.rotation ?? 0;
-      mesh.fuse.intensity = 0.6 + Math.max(0.2, Math.sin((SHIP.KEG_FUSE_TIME - keg.timer) * 12) * 0.35 + (1 - Math.min(1, keg.timer / SHIP.KEG_FUSE_TIME)) * 2.1);
+      this.tempKegPos.set(keg.position.x, keg.position.y + 0.28, keg.position.z);
+      const moveAlpha = 1 - Math.exp(-28 * dt);
+      if (created || mesh.root.position.distanceToSquared(this.tempKegPos) > 16 * 16) {
+        mesh.root.position.copy(this.tempKegPos);
+      } else {
+        mesh.root.position.lerp(this.tempKegPos, moveAlpha);
+      }
+      const hostShip = keg.shipId ? this.shipsById.get(keg.shipId) ?? null : null;
+      const targetYaw = hostShip?.rotation ?? 0;
+      mesh.root.rotation.y += angleWrap(targetYaw - mesh.root.rotation.y) * (1 - Math.exp(-24 * dt));
+      const megaBoost = keg.mega ? 1.75 : 1;
+      mesh.root.scale.setScalar(keg.mega ? 1.55 : 1);
+      mesh.fuse.intensity = megaBoost * (0.6 + Math.max(0.2, Math.sin((SHIP.KEG_FUSE_TIME - keg.timer) * 12) * 0.35 + (1 - Math.min(1, keg.timer / SHIP.KEG_FUSE_TIME)) * 2.1));
     }
   }
 
   private syncChests() {
     if (!this.state) return;
+    const showGlow = this.renderer.getQuality() !== 'low';
 
     for (const island of this.state.islands) {
       for (const chest of island.chests) {
         const chestMesh = this.chestMeshes.get(chest.id);
         if (!chestMesh) continue;
         chestMesh.root.position.set(chest.position.x, chest.position.y, chest.position.z);
-        chestMesh.root.visible = !chest.opened;
+        const carriedByLocal = chest.carriedByPlayerId === this.localPlayerId;
+        chestMesh.root.visible = !chest.opened && !carriedByLocal;
         const portable = !!chest.carriedByPlayerId || !!chest.storedOnShipId || chest.floating;
         const dug = portable || chest.digProgress >= 1;
         if (chest.buried && chestMesh.mound) {
@@ -3230,7 +6142,7 @@ export class Game {
         }
         chestMesh.chestMesh.visible = !chest.opened && (!chest.buried || dug);
         chestMesh.lid.visible = chestMesh.chestMesh.visible;
-        chestMesh.glow.visible = !chest.opened && (dug || !chest.buried);
+        chestMesh.glow.visible = showGlow && !chest.opened && (dug || !chest.buried) && !carriedByLocal;
         chestMesh.glow.intensity = chest.floating ? 1.45 : chest.carriedByPlayerId ? 1.15 : 0.9;
         if (chestMesh.chestMesh.visible) {
           chestMesh.glow.position.set(0, 1.2, 0);
@@ -3245,12 +6157,12 @@ export class Game {
       for (const barrel of island.barrels) {
         const root = this.barrelMeshes.get(barrel.id);
         if (!root) continue;
-        root.visible = !barrel.opened;
+        root.visible = !barrel.opened || barrel.loot.length > 0;
       }
     }
   }
 
-  private syncSharks(_dt: number) {
+  private syncSharks(dt: number) {
     if (!this.state) return;
     const sharks = this.state.sharks ?? [];
     const seen = new Set<string>();
@@ -3258,13 +6170,21 @@ export class Game {
       if (shark.health <= 0) continue;
       seen.add(shark.id);
       let mesh = this.sharkMeshes.get(shark.id);
+      let created = false;
       if (!mesh) {
         mesh = this.buildSharkMesh();
         this.environment.add(mesh);
         this.sharkMeshes.set(shark.id, mesh);
+        created = true;
       }
-      mesh.position.set(shark.position.x, shark.position.y + 0.15, shark.position.z);
-      mesh.rotation.y = shark.rotation;
+      this.tempSharkPos.set(shark.position.x, shark.position.y + 0.15, shark.position.z);
+      const moveAlpha = 1 - Math.exp(-18 * dt);
+      if (created || mesh.position.distanceToSquared(this.tempSharkPos) > 55 * 55) {
+        mesh.position.copy(this.tempSharkPos);
+      } else {
+        mesh.position.lerp(this.tempSharkPos, moveAlpha);
+      }
+      mesh.rotation.y += angleWrap(shark.rotation - mesh.rotation.y) * (1 - Math.exp(-16 * dt));
     }
     for (const [id, mesh] of this.sharkMeshes) {
       if (!seen.has(id)) {
@@ -3278,11 +6198,199 @@ export class Game {
     }
   }
 
+  private syncWildlife(dt: number) {
+    if (!this.state) return;
+    const seen = new Set<string>();
+    const t = this.ocean.getTime();
+    for (const animal of this.state.wildlife ?? []) {
+      if (animal.health <= 0) continue;
+      seen.add(animal.id);
+      let mesh = this.wildlifeMeshes.get(animal.id);
+      let created = false;
+      if (!mesh) {
+        mesh = this.buildWildlifeMesh(animal);
+        this.environment.add(mesh);
+        this.wildlifeMeshes.set(animal.id, mesh);
+        created = true;
+      }
+
+      this.tempWildlifePos.set(animal.position.x, animal.position.y, animal.position.z);
+      const alpha = 1 - Math.exp(-16 * dt);
+      if (created || mesh.position.distanceToSquared(this.tempWildlifePos) > 18 * 18) {
+        mesh.position.copy(this.tempWildlifePos);
+      } else {
+        mesh.position.lerp(this.tempWildlifePos, alpha);
+      }
+      mesh.rotation.y += angleWrap(animal.rotation - mesh.rotation.y) * (1 - Math.exp(-14 * dt));
+      mesh.position.y += animal.type === 'gull'
+        ? Math.sin(t * 8 + animal.position.x * 0.03) * 0.025
+        : Math.sin(t * 10 + animal.position.x * 0.07) * 0.01;
+
+      const parts = mesh.userData.parts as Record<string, THREE.Object3D | undefined> | undefined;
+      const phase = t * (animal.type === 'gull' ? 9.5 : animal.type === 'chicken' ? 11 : animal.type === 'crab' ? 14 : 6.5)
+        + animal.position.x * 0.04
+        + animal.position.z * 0.03;
+      if (parts?.leftWing) parts.leftWing.rotation.z = 0.35 + Math.sin(phase) * 0.55;
+      if (parts?.rightWing) parts.rightWing.rotation.z = -0.35 - Math.sin(phase) * 0.55;
+      if (parts?.head) parts.head.rotation.y = Math.sin(phase * 0.55) * 0.22;
+      if (parts?.body) parts.body.rotation.z = Math.sin(phase) * (animal.type === 'crab' ? 0.035 : 0.02);
+      for (let leg = 0; leg < 6; leg++) {
+        const limb = parts?.[`leg${leg}`];
+        if (limb) limb.rotation.z = (leg % 2 === 0 ? 1 : -1) * (0.18 + Math.sin(phase + leg) * 0.16);
+      }
+    }
+
+    for (const [id, mesh] of this.wildlifeMeshes) {
+      if (!seen.has(id)) {
+        this.combatFx.emitSharkDeathBloom(
+          { x: mesh.position.x, y: mesh.position.y + 0.12, z: mesh.position.z },
+          this.renderer.camera.position,
+        );
+        this.environment.remove(mesh);
+        this.wildlifeMeshes.delete(id);
+      }
+    }
+  }
+
+  private buildWildlifeMesh(animal: WildlifeAnimal): THREE.Group {
+    const group = new THREE.Group();
+    group.name = `wildlife-${animal.id}`;
+    const parts: Record<string, THREE.Object3D> = {};
+    group.userData.parts = parts;
+
+    const add = (name: string, mesh: THREE.Object3D) => {
+      mesh.name = name;
+      parts[name] = mesh;
+      group.add(mesh);
+      return mesh;
+    };
+
+    if (this.renderer.getQuality() === 'low') {
+      const color =
+        animal.type === 'crab' ? 0xb53a2b :
+        animal.type === 'chicken' ? 0xe8dcc4 :
+        animal.type === 'pig' ? 0xc58d7d :
+        0xf2f0e8;
+      const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.88 });
+      const body = add('body', new THREE.Mesh(new THREE.SphereGeometry(0.18, 7, 5), mat));
+      body.position.y = animal.type === 'gull' ? 0 : animal.type === 'crab' ? 0.08 : 0.28;
+      body.scale.set(
+        animal.type === 'pig' ? 2.0 : animal.type === 'crab' ? 1.45 : animal.type === 'gull' ? 1.45 : 1.05,
+        animal.type === 'pig' ? 1.05 : animal.type === 'crab' ? 0.42 : animal.type === 'gull' ? 0.72 : 1.2,
+        animal.type === 'pig' ? 1.0 : animal.type === 'crab' ? 0.9 : 0.85,
+      );
+
+      if (animal.type !== 'crab') {
+        const head = add('head', new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 4), mat));
+        head.position.set(animal.type === 'pig' ? 0.42 : 0.18, body.position.y + 0.16, 0);
+      }
+
+      if (animal.type === 'gull') {
+        const wingMat = new THREE.MeshStandardMaterial({ color: 0xb9bdc4, roughness: 0.82, side: THREE.DoubleSide });
+        for (const side of [-1, 1]) {
+          const wing = add(side < 0 ? 'leftWing' : 'rightWing', new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.16), wingMat));
+          wing.position.set(0, 0.0, side * 0.16);
+          wing.rotation.set(0.12, 0, side * 0.42);
+        }
+      }
+
+      group.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.castShadow = false;
+          obj.receiveShadow = false;
+        }
+      });
+      return group;
+    }
+
+    if (animal.type === 'crab') {
+      const mat = new THREE.MeshStandardMaterial({ color: 0xb53a2b, roughness: 0.86 });
+      const body = add('body', new THREE.Mesh(new THREE.SphereGeometry(0.17, 8, 5), mat));
+      body.scale.set(1.35, 0.48, 0.9);
+      for (const side of [-1, 1]) {
+        const claw = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 4), mat);
+        claw.position.set(0.2, 0.02, side * 0.18);
+        claw.scale.set(1.3, 0.7, 1);
+        group.add(claw);
+        for (let leg = 0; leg < 3; leg++) {
+          const limb = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.018, 0.026), mat);
+          limb.position.set(-0.05 - leg * 0.055, -0.03, side * (0.12 + leg * 0.055));
+          limb.rotation.y = side * (0.55 + leg * 0.18);
+          add(`leg${side > 0 ? leg : leg + 3}`, limb);
+        }
+      }
+    } else if (animal.type === 'chicken') {
+      const feather = new THREE.MeshStandardMaterial({ color: 0xe8dcc4, roughness: 0.92 });
+      const red = new THREE.MeshStandardMaterial({ color: 0xb82e24, roughness: 0.8 });
+      const beak = new THREE.MeshStandardMaterial({ color: 0xd9a33f, roughness: 0.75 });
+      const body = add('body', new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), feather));
+      body.scale.set(1.0, 1.15, 0.82);
+      body.position.y = 0.22;
+      const head = add('head', new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), feather));
+      head.position.set(0.18, 0.43, 0);
+      const crest = new THREE.Mesh(new THREE.SphereGeometry(0.045, 6, 4), red);
+      crest.position.set(0.18, 0.55, 0);
+      group.add(crest);
+      const bill = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.12, 5), beak);
+      bill.position.set(0.29, 0.43, 0);
+      bill.rotation.z = -Math.PI * 0.5;
+      group.add(bill);
+      for (const side of [-1, 1]) {
+        const wing = add(side < 0 ? 'leftWing' : 'rightWing', new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.14), feather));
+        wing.position.set(0.02, 0.25, side * 0.16);
+        wing.rotation.y = side * 0.65;
+      }
+    } else if (animal.type === 'pig') {
+      const skin = new THREE.MeshStandardMaterial({ color: 0xc58d7d, roughness: 0.88 });
+      const snoutMat = new THREE.MeshStandardMaterial({ color: 0xe2a69a, roughness: 0.86 });
+      const body = add('body', new THREE.Mesh(new THREE.SphereGeometry(0.34, 12, 8), skin));
+      body.scale.set(1.45, 0.82, 0.86);
+      body.position.y = 0.34;
+      const head = add('head', new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 7), skin));
+      head.position.set(0.45, 0.43, 0);
+      const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.1, 8), snoutMat);
+      snout.rotation.z = Math.PI * 0.5;
+      snout.position.set(0.62, 0.42, 0);
+      group.add(snout);
+      for (let i = 0; i < 4; i++) {
+        const leg = add(`leg${i}`, new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 0.28, 6), skin));
+        leg.position.set(i < 2 ? -0.22 : 0.24, 0.05, i % 2 === 0 ? -0.18 : 0.18);
+      }
+    } else {
+      const bodyMat = new THREE.MeshStandardMaterial({ color: 0xf2f0e8, roughness: 0.78 });
+      const wingMat = new THREE.MeshStandardMaterial({ color: 0xb9bdc4, roughness: 0.82, side: THREE.DoubleSide });
+      const beakMat = new THREE.MeshStandardMaterial({ color: 0xd3a13b, roughness: 0.76 });
+      const body = add('body', new THREE.Mesh(new THREE.SphereGeometry(0.14, 9, 6), bodyMat));
+      body.scale.set(1.35, 0.72, 0.85);
+      const head = add('head', new THREE.Mesh(new THREE.SphereGeometry(0.075, 7, 5), bodyMat));
+      head.position.set(0.18, 0.08, 0);
+      const beak = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.1, 5), beakMat);
+      beak.position.set(0.27, 0.08, 0);
+      beak.rotation.z = -Math.PI * 0.5;
+      group.add(beak);
+      for (const side of [-1, 1]) {
+        const wing = add(side < 0 ? 'leftWing' : 'rightWing', new THREE.Mesh(new THREE.PlaneGeometry(0.48, 0.16), wingMat));
+        wing.position.set(0, 0.0, side * 0.14);
+        wing.rotation.set(0.12, 0, side * 0.42);
+      }
+    }
+
+    group.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+    return group;
+  }
+
   private buildSharkMesh(): THREE.Group {
     const g = new THREE.Group();
     const topMat = new THREE.MeshStandardMaterial({ color: 0x2a4a5c, roughness: 0.82, metalness: 0.08 });
     const bellyMat = new THREE.MeshStandardMaterial({ color: 0x8aa8b8, roughness: 0.75, metalness: 0.02 });
     const finMat = new THREE.MeshStandardMaterial({ color: 0x3a5c6e, roughness: 0.78, metalness: 0.05 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x071016, roughness: 0.9 });
+    const toothMat = new THREE.MeshStandardMaterial({ color: 0xf4ead0, roughness: 0.62 });
 
     const body = new THREE.Mesh(new THREE.SphereGeometry(0.48, 14, 12), topMat);
     body.scale.set(1.15, 0.72, 2.35);
@@ -3329,6 +6437,51 @@ export class Game {
     const eyeR = eyeL.clone();
     eyeR.position.z = -0.16;
     g.add(eyeR);
+
+    const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.035, 0.3), darkMat);
+    mouth.position.set(1.26, -0.12, 0);
+    mouth.rotation.z = -0.12;
+    g.add(mouth);
+
+    for (let i = 0; i < 7; i++) {
+      const z = -0.18 + i * 0.06;
+      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.018, 0.07, 4), toothMat);
+      tooth.position.set(1.28, -0.16, z);
+      tooth.rotation.z = Math.PI;
+      tooth.rotation.x = i % 2 === 0 ? 0.12 : -0.12;
+      g.add(tooth);
+    }
+
+    for (const side of [-1, 1]) {
+      for (let i = 0; i < 4; i++) {
+        const slit = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.16, 0.012), darkMat);
+        slit.position.set(0.55 - i * 0.07, 0.04, side * 0.36);
+        slit.rotation.set(0.25, 0, side * 0.48);
+        g.add(slit);
+      }
+
+      const flankStripe = new THREE.Mesh(
+        new THREE.BoxGeometry(0.42, 0.025, 0.018),
+        new THREE.MeshStandardMaterial({ color: 0x1d3544, roughness: 0.9 }),
+      );
+      flankStripe.position.set(-0.12, 0.2, side * 0.44);
+      flankStripe.rotation.set(0.12, 0, side * 0.2);
+      g.add(flankStripe);
+    }
+
+    const tailTop = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.58, 0.08), finMat);
+    tailTop.position.set(-1.45, 0.34, 0);
+    tailTop.rotation.z = -0.42;
+    g.add(tailTop);
+    const tailBottom = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.08), finMat);
+    tailBottom.position.set(-1.43, -0.18, 0);
+    tailBottom.rotation.z = 0.52;
+    g.add(tailBottom);
+
+    const rearDorsal = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.34, 5), finMat);
+    rearDorsal.position.set(-0.62, 0.38, 0);
+    rearDorsal.rotation.z = Math.PI * 0.5;
+    g.add(rearDorsal);
 
     return g;
   }
@@ -3453,7 +6606,7 @@ export class Game {
     if (!player) return;
 
     const trackedShip = player.onShipId ? this.getTrackedShip() : null;
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails || player.atCrowNest ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
     const swimming = player.state === 'swimming';
     const firearmEquipped = !!activeWeapon && !WEAPONS[activeWeapon.weaponId].melee;
     const aiming = this.input.isAiming();
@@ -3491,6 +6644,23 @@ export class Game {
         .add(new THREE.Vector3(0, 1.08, 0));
       lookTarget = cannonWorld.clone().addScaledVector(forward, 74).add(new THREE.Vector3(0, 0.44, 0));
       targetFov = 80;
+    } else if (player.atHelm && trackedShip) {
+      const stats = SHIP_STATS[trackedShip.type];
+      const helmZ = -stats.length * 0.39;
+      const starboardX = stats.width * 0.28;
+      desired = this.getShipWorldPoint(
+        trackedShip,
+        starboardX,
+        helmZ - stats.length * 0.02,
+        stats.height + 1.48,
+      );
+      lookTarget = this.getShipWorldPoint(
+        trackedShip,
+        starboardX * 0.68,
+        stats.length * 0.22,
+        stats.height + 1.55,
+      );
+      targetFov = 78;
     } else if (player.atSails && trackedShip) {
       const stats = SHIP_STATS[trackedShip.type];
       const station = this.getSailControlLocal(stats);
@@ -3542,6 +6712,15 @@ export class Game {
     }
   }
 
+  private updateWaterEnvironment() {
+    const camera = this.renderer.camera.position;
+    const waveY = gerstnerHeight(camera.x, camera.z, this.ocean.getTime(), WAVE_PARAMS);
+    const depthBelowSurface = Math.max(0, waveY + 0.18 - camera.y);
+    this.renderer.updateWaterEnvironment(depthBelowSurface, this.stormWeatherIntensity, this.ocean.getTime());
+    this.ocean.setSunDirection(this.renderer.getSunDirection());
+    this.ocean.setUnderwaterDepth(depthBelowSurface);
+  }
+
   private getBlunderbussCrosshairSize(player: Player) {
     const spreadMultiplier = this.getLocalSpreadMultiplier(player, 'blunderbuss', this.input.isAiming());
     const spreadRad = THREE.MathUtils.degToRad(WEAPONS.blunderbuss.spread * spreadMultiplier);
@@ -3582,6 +6761,65 @@ export class Game {
     return headings[Math.round(degrees / 45) % headings.length];
   }
 
+  private getStormTimerSeconds() {
+    if (!this.state) return 0;
+    return this.state.storm.shrinking
+      ? Math.max(0, Math.ceil((1 - this.state.storm.shrinkProgress) * this.state.storm.shrinkDuration))
+      : Math.max(0, Math.ceil(this.state.storm.shrinkTimer));
+  }
+
+  private formatStormTimer(seconds: number) {
+    const safeSeconds = Math.max(0, Math.floor(seconds));
+    return `${Math.floor(safeSeconds / 60)}:${String(safeSeconds % 60).padStart(2, '0')}`;
+  }
+
+  private updateBarrelPanel(player: Player, ship: Ship | null) {
+    // Close the panel as soon as the player walks away from the barrel they were
+    // browsing, or after a brief grace period if no event has refreshed it.
+    if (this.barrelBrowse && player.nearBarrelId !== this.barrelBrowse.barrelId) {
+      this.barrelBrowse = null;
+    }
+    if (this.barrelBrowse && performance.now() - this.barrelBrowse.lastEventAt > 12000) {
+      this.barrelBrowse = null;
+    }
+
+    if (!this.barrelBrowse) {
+      this.ui.barrelPanel.style.display = 'none';
+      return;
+    }
+
+    this.ui.barrelPanel.style.display = 'block';
+
+    const niceName = (item: string) => item.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    const renderRows = (target: HTMLElement, rows: ItemStack[], emptyMsg: string) => {
+      if (rows.length === 0) {
+        target.innerHTML = `<div class="bp-empty">${emptyMsg}</div>`;
+        return;
+      }
+      target.innerHTML = rows
+        .map((r) => `<div class="bp-row"><span>${niceName(r.item)}</span><span class="bp-qty">×${r.qty}</span></div>`)
+        .join('');
+    };
+
+    renderRows(this.ui.barrelPanelLoot, this.barrelBrowse.loot, '(empty)');
+
+    // Player + ship inventory snapshot (combine pocket + ship inventory)
+    const pocket: ItemStack[] = [];
+    if (player.pocketBanana) pocket.push({ item: 'banana', qty: player.pocketBanana });
+    if (player.pocketCoconut) pocket.push({ item: 'coconut', qty: player.pocketCoconut });
+    if (player.pocketMango) pocket.push({ item: 'mango', qty: player.pocketMango });
+    if (player.pocketMeat) pocket.push({ item: 'meat', qty: player.pocketMeat });
+    if (player.pocketWood) pocket.push({ item: 'wood_plank', qty: player.pocketWood });
+    const shipRows = ship ? ship.inventory.filter((s) => s.qty > 0) : [];
+    const combined: ItemStack[] = [...pocket];
+    for (const row of shipRows) {
+      const existing = combined.find((c) => c.item === row.item);
+      if (existing) existing.qty += row.qty;
+      else combined.push({ ...row });
+    }
+    renderRows(this.ui.barrelPanelInventory, combined, ship ? '(empty hold)' : '(no ship — picks up to pockets)');
+  }
+
   private updateHud() {
     if (!this.state) return;
 
@@ -3589,11 +6827,12 @@ export class Game {
     const ship = this.getTrackedShip();
     if (!player) return;
 
-    this.ui.stormPhase.textContent = `STORM PHASE ${this.state.storm.phase + 1}`;
-    const timerSeconds = this.state.storm.shrinking
-      ? Math.max(0, Math.ceil((1 - this.state.storm.shrinkProgress) * this.state.storm.shrinkDuration))
-      : Math.max(0, Math.ceil(this.state.storm.shrinkTimer));
-    this.ui.stormTimer.textContent = `${Math.floor(timerSeconds / 60)}:${String(timerSeconds % 60).padStart(2, '0')}`;
+    this.updateBarrelPanel(player, ship);
+
+    const timerSeconds = this.getStormTimerSeconds();
+    const stormVerb = this.state.storm.shrinking ? 'CLOSING' : 'NEXT SHRINK';
+    this.ui.stormPhase.textContent = `STORM PHASE ${this.state.storm.phase + 1} - ${stormVerb}`;
+    this.ui.stormTimer.textContent = this.formatStormTimer(timerSeconds);
     this.ui.mapSubtitle.textContent = this.state.storm.shrinking
       ? `Storm moving now · closes in ${timerSeconds}s`
       : `Next storm shift in ${timerSeconds}s`;
@@ -3614,6 +6853,8 @@ export class Game {
 
     this.ui.shipsAlive.textContent = String(this.state.shipsAlive);
     this.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
+    this.renderGoldLeaderboard(player.id);
+    this.ui.killCount.textContent = String(player.kills);
     this.ui.healthFill.style.width = `${Math.max(0, player.health)}%`;
     this.ui.armorFill.style.width = '0%';
 
@@ -3641,9 +6882,10 @@ export class Game {
         ship.sailIntegrity < 0.99
           ? ` · Rigging ${Math.round(ship.sailIntegrity * 100)}% (hold [X] at sails + planks)`
           : '';
+      const windLine = `Wind ${windHeading} ${windArrow} ${windDegrees}deg ${windSide}`;
       this.ui.sailStatus.textContent = ship.anchored
-        ? `Anchor Dropped · Hold [X] at capstan to raise · Wind ${windHeading} ${windArrow} ${windDegrees}deg ${windSide}`
-        : `Sail power ${Math.round(ship.sailHeight * 100)}%${rig} · Trim ${trimSide} · Wind ${windHeading} ${windArrow} ${windDegrees}deg ${windSide} · Catch ${Math.round(trimCatch * 100)}% · ${trimHint}`;
+        ? `Anchored · Hold [X] raise · ${windLine}`
+        : `Sails ${Math.round(ship.sailHeight * 100)}%${rig} · Trim ${trimSide} · Catch ${Math.round(trimCatch * 100)}% · ${trimHint} · ${windLine}`;
     } else {
       this.ui.sailStatus.textContent = 'No tracked ship';
     }
@@ -3651,20 +6893,48 @@ export class Game {
     this.renderShipInventory(ship, player);
     this.renderKegStatus(player);
 
-    const pk = player;
-    const mappedIsland = pk.treasureMapIslandId
-      ? this.state.islands.find((island) => island.id === pk.treasureMapIslandId) ?? null
+    let chestsInHold = 0;
+    if (ship) {
+      for (const isl of this.state.islands) {
+        for (const ch of isl.chests) {
+          if (ch.storedOnShipId === ship.id && !ch.opened) chestsInHold += 1;
+        }
+      }
+    }
+    const mappedIsland = player.treasureMapIslandId
+      ? this.state.islands.find((island) => island.id === player.treasureMapIslandId) ?? null
       : null;
-    const closestHoarder = this.getClosestGoldHoarder(pk);
+    const closestHoarder = this.getClosestGoldHoarder(player);
+    const powerLine = this.getSpecialSummary(player);
+    const objectiveLine = this.getObjectiveSummary(player, ship, {
+      chestsInHold,
+      mappedIsland,
+      closestHoarder,
+      outsideStorm,
+      shipCritical,
+      shipOnFire,
+    });
+    const progLine = ship
+      ? `${objectiveLine} · ${powerLine} · Gold ${player.gold}/${ECONOMY.GOLD_WIN_TARGET} · Hold ${chestsInHold} · Upgrades ${ship.upgrades.length}`
+      : `${objectiveLine} · ${powerLine}`;
+    if (progLine !== this.brProgressSignature) {
+      this.ui.brProgressFeed.textContent = progLine;
+      this.brProgressSignature = progLine;
+    }
+
+    const pk = player;
     const stripParts = [
       `Pocket: 1 Banana ${pk.pocketBanana}`,
       `2 Plank ${pk.pocketWood}`,
       `3 Coconut ${pk.pocketCoconut}`,
-      `4 Mango ${pk.pocketMango}`,
+      `4 Meat ${pk.pocketMeat} / Mango ${pk.pocketMango}`,
       `Tool: ${pk.hasShovel ? 'Shovel' : 'None'}`,
     ];
     if (mappedIsland) stripParts.push(`Chart: ${mappedIsland.name}`);
     if (closestHoarder && (mappedIsland || pk.carryingChestId)) stripParts.push(`Gold Hoarder: ${closestHoarder.island.name}`);
+    if (pk.playerKillStreak > 0) stripParts.push(`Streak ${pk.playerKillStreak}`);
+    const specialSummary = this.getSpecialSummary(pk);
+    if (specialSummary) stripParts.push(specialSummary);
     const pocketText = stripParts.join(' | ');
     if (pocketText !== this.pocketStripSignature) {
       this.ui.pocketStrip.textContent = pocketText;
@@ -3672,7 +6942,7 @@ export class Game {
     }
     this.renderTreasureInventoryChart(player, mappedIsland, closestHoarder);
     this.ui.pocketWheelStats.textContent = this.input.isSupplyWheelOpen()
-      ? 'Fruit heals immediately · Planks go to ship repairs'
+      ? 'Pocket: fruit heals you · wood transfers to Ship stores for repairs · kegs stay in equipment until placed'
       : '';
     this.updateSupplyWheelCounts(player);
     this.ui.pocketWheel.classList.toggle('visible', this.input.isSupplyWheelOpen());
@@ -3696,22 +6966,26 @@ export class Game {
       this.ui.islandBanner.classList.remove('visible');
     }
 
-    const weapon = player.atHelm || player.atSails || player.atCrowNest ? null : player.weapons[player.activeSlot];
+    const weapon = player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
     if (player.atCannon && ship) {
-      this.ui.ammoCurrent.textContent = player.selectedCannonAmmo === 'cannonball'
-        ? '∞'
-        : String(
-          player.selectedCannonAmmo === 'firebomb'
-            ? this.getInventoryQty(ship, 'firebomb_ball')
-            : this.getInventoryQty(ship, 'chainshot'),
-        );
-      this.ui.ammoReserve.textContent = player.selectedCannonAmmo === 'cannonball'
-        ? 'cannonballs'
-        : player.selectedCannonAmmo.replace('_', ' ');
+      const cb = this.getInventoryQty(ship, 'cannonball');
+      this.ui.ammoCurrent.textContent =
+        player.selectedCannonAmmo === 'cannonball'
+          ? String(cb)
+          : String(
+              player.selectedCannonAmmo === 'firebomb'
+                ? this.getInventoryQty(ship, 'firebomb_ball')
+                : this.getInventoryQty(ship, 'chainshot'),
+            );
+      this.ui.ammoReserve.textContent =
+        player.selectedCannonAmmo === 'cannonball'
+          ? 'ship store (each shot spends 1)'
+          : player.selectedCannonAmmo.replace('_', ' ');
       this.ui.reloadIndicator.style.display = ship.cannonCooldowns[player.cannonIndex] > 0 ? 'block' : 'none';
     } else {
       this.updateWeaponHud(player.activeSlot, weapon, player.weapons);
-      this.ui.reloadIndicator.style.display = weapon?.reloading ? 'block' : 'none';
+      const weaponDef = weapon ? WEAPONS[weapon.weaponId] : null;
+      this.ui.reloadIndicator.style.display = weapon?.reloading && weaponDef && !weaponDef.melee ? 'block' : 'none';
     }
     this.ui.scopeOverlay.style.display =
       this.input.isAiming() && weapon && WEAPONS[weapon.weaponId].scopeFov ? 'block' : 'none';
@@ -3738,7 +7012,10 @@ export class Game {
       this.ui.interactPrompt.style.display = 'block';
       this.ui.interactPrompt.textContent = '[X] Leave Cannon · [SPACE] Launch Yourself';
       this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')} · [4/5/6] shot type`;
+      const superShot = player.superCannonballs > 0 && player.selectedCannonAmmo === 'cannonball'
+        ? ` · SUPER x5 ready (${player.superCannonballs})`
+        : '';
+      this.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · [4/5/6] shot type`;
     } else if (player.atHelm) {
       this.ui.interactPrompt.style.display = 'block';
       this.ui.interactPrompt.textContent = '[X] Leave Helm';
@@ -3752,7 +7029,7 @@ export class Game {
       this.ui.interactPrompt.style.display = 'block';
       this.ui.interactPrompt.textContent = '[X] Leave Sail Ring';
       this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = 'Sail ring · C/Z hoist · Q/F angle · hold [X] + planks to mend canvas';
+      this.ui.contextLabel.textContent = 'Sail ring · W/C hoist · S/Z lower · Q/F angle · hold [X] + planks to mend canvas';
     } else if (player.atCrowNest) {
       this.ui.interactPrompt.style.display = 'block';
       this.ui.interactPrompt.textContent = '[X] Climb Down From Crow\'s Nest';
@@ -3764,11 +7041,20 @@ export class Game {
       this.ui.interactPrompt.textContent = lookInteraction.prompt;
       this.ui.contextLabel.style.display = 'block';
       this.ui.contextLabel.textContent = lookInteraction.label;
+    } else if (player.carryingChestId) {
+      this.ui.interactPrompt.style.display = 'block';
+      this.ui.interactPrompt.textContent = '[B] Drop Chest';
+      this.ui.contextLabel.style.display = 'block';
+      this.ui.contextLabel.textContent = 'Carrying treasure · sell at Gold Hoarder or stow on ship';
     } else {
       this.ui.interactPrompt.style.display = 'none';
+      const powers = this.getSpecialSummary(player);
+      const powerText = powers ? ` · ${powers}` : '';
       const ambientLabel = player.state === 'swimming'
         ? 'Swimming · W follows look · Space up · Z down · LMB fire · Shift/RMB aim'
-        : `First-person BR · [V] hold supply wheel (1–4) · Pocket counts below · Shift/RMB ADS · ${this.getKegSummary(player)}`;
+        : weapon?.weaponId === 'cutlass'
+          ? `Cutlass · hold LMB charge dash · Shift/RMB block · ${this.getKegSummary(player)}${powerText}`
+          : `First-person BR · [I] hold supply wheel (1–4) · Pocket counts below · Shift/RMB ADS · ${this.getKegSummary(player)}${powerText}`;
       this.ui.contextLabel.style.display = ambientLabel ? 'block' : 'none';
       this.ui.contextLabel.textContent = ambientLabel;
     }
@@ -3881,7 +7167,7 @@ export class Game {
     ctx.strokeStyle = 'rgba(60, 35, 12, 0.76)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    const segments = 42;
+    const segments = this.renderer.getQuality() === 'low' ? 24 : this.renderer.getQuality() === 'balanced' ? 32 : 42;
     for (let segment = 0; segment <= segments; segment++) {
       const angle = (segment / segments) * Math.PI * 2;
       const point = getIslandSurfacePoint(chartIsland, 0.98, angle, 0);
@@ -3987,7 +7273,11 @@ export class Game {
     const stormX = centerX + this.state.storm.centerX * scale;
     const stormY = centerY + this.state.storm.centerZ * scale;
     const stormRadius = this.state.storm.safeRadius * scale;
+    const nextStormX = centerX + this.state.storm.nextCenterX * scale;
+    const nextStormY = centerY + this.state.storm.nextCenterZ * scale;
     const nextRadius = Math.max(0, this.state.storm.nextRadius * scale);
+    const timerSeconds = this.getStormTimerSeconds();
+    const stormLabel = `${this.state.storm.shrinking ? 'CLOSING' : 'NEXT'} ${this.formatStormTimer(timerSeconds)}`;
 
     ctx.clearRect(0, 0, width, height);
 
@@ -4029,7 +7319,7 @@ export class Game {
       ctx.strokeStyle = 'rgba(233, 244, 255, 0.78)';
       ctx.lineWidth = fullscreen ? 3 : 2;
       ctx.beginPath();
-      ctx.arc(stormX, stormY, nextRadius, 0, Math.PI * 2);
+      ctx.arc(nextStormX, nextStormY, nextRadius, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
@@ -4043,8 +7333,36 @@ export class Game {
     ctx.restore();
 
     ctx.save();
+    ctx.fillStyle = fullscreen ? 'rgba(5, 14, 28, 0.72)' : 'rgba(5, 14, 28, 0.68)';
+    ctx.strokeStyle = 'rgba(201, 168, 76, 0.32)';
+    ctx.lineWidth = 1.2;
+    ctx.fillRect(8, 8, fullscreen ? 154 : 104, fullscreen ? 34 : 24);
+    ctx.strokeRect(8, 8, fullscreen ? 154 : 104, fullscreen ? 34 : 24);
+    ctx.fillStyle = this.state.storm.shrinking ? '#d7e8ff' : '#c9a84c';
+    ctx.font = fullscreen ? '700 15px Georgia, serif' : '700 10px Georgia, serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(stormLabel, 15, fullscreen ? 26 : 20);
+    ctx.restore();
+
+    ctx.save();
     for (const island of this.state.islands) {
       this.drawIslandChart(ctx, island, centerX, centerY, scale, fullscreen);
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.fillStyle = fullscreen ? 'rgba(95, 91, 82, 0.92)' : 'rgba(95, 91, 82, 0.86)';
+    ctx.strokeStyle = fullscreen ? 'rgba(235, 228, 204, 0.44)' : 'rgba(235, 228, 204, 0.36)';
+    ctx.lineWidth = fullscreen ? 1.5 : 1;
+    for (const rock of this.state.seaRocks ?? []) {
+      const x = centerX + rock.position.x * scale;
+      const y = centerY + rock.position.z * scale;
+      const r = Math.max(fullscreen ? 4 : 2.5, rock.radius * scale);
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
     }
     ctx.restore();
 
@@ -4195,7 +7513,12 @@ export class Game {
     scale: number,
     fullscreen: boolean,
   ) {
-    const detailSegments = fullscreen ? 28 : 18;
+    const quality = this.renderer.getQuality();
+    const detailSegments = quality === 'low'
+      ? (fullscreen ? 16 : 10)
+      : quality === 'balanced'
+        ? (fullscreen ? 22 : 14)
+        : (fullscreen ? 28 : 18);
     ctx.save();
     ctx.fillStyle = fullscreen ? '#d9bf80' : '#d6bc83';
     ctx.strokeStyle = fullscreen ? 'rgba(69, 45, 18, 0.72)' : 'rgba(65, 41, 14, 0.58)';
@@ -4501,6 +7824,185 @@ export class Game {
     }
   }
 
+  /**
+   * Per-frame edge-detection that fires sound effects driven by client state:
+   * eating fruit, digging rhythm, chest pickup/stow, water entry, storm wind.
+   */
+  private audioFrameTriggers(dt: number) {
+    if (!this.state) return;
+    const player = this.getLocalPlayer();
+    const localShip = this.localShipId ? this.state.ships.find((s) => s.id === this.localShipId) ?? null : null;
+    const now = this.ocean.getTime();
+
+    // Fruit/wood eat — fire on the rising edge of pocketUseCooldown.
+    if (player) {
+      const cooldown = player.pocketUseCooldown ?? 0;
+      if (cooldown > this.prevPocketUseCooldown + 0.2) {
+        const kind = this.pocketUsePreviewKind;
+        if (kind === 'wood') {
+          this.audio.playWoodPlank();
+        } else if (kind === 'meat') {
+          this.audio.playMeatEat();
+        } else if (kind === 'banana' || kind === 'coconut' || kind === 'mango') {
+          this.audio.playFruitEat(kind);
+        } else {
+          this.audio.playFruitEat('banana');
+        }
+      }
+      this.prevPocketUseCooldown = cooldown;
+    }
+
+    // Carrying a chest — pickup vs stow vs drop.
+    const carryingNow = player?.carryingChestId ?? null;
+    if (carryingNow !== this.prevCarryingChestId) {
+      if (carryingNow && !this.prevCarryingChestId) {
+        this.audio.playChestPickup();
+      } else if (!carryingNow && this.prevCarryingChestId) {
+        const onShip = player?.onShipId && player.onShipId === this.localShipId;
+        if (onShip) this.audio.playChestStow();
+      }
+      this.prevCarryingChestId = carryingNow;
+    }
+
+    // Water entry — alive→swimming transition.
+    if (player) {
+      const stateNow = player.state;
+      if (this.prevPlayerStateForAudio && this.prevPlayerStateForAudio !== 'swimming' && stateNow === 'swimming') {
+        const speed = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z);
+        this.audio.playSplash(THREE.MathUtils.clamp(speed / 12, 0.35, 1.4));
+      }
+      this.prevPlayerStateForAudio = stateNow;
+    }
+
+    // Digging strike rhythm — match the client-side animation cycle.
+    const digChest = player?.nearChestId ? this.findChestById(player.nearChestId) : null;
+    const digging =
+      !!digChest
+      && !!player?.hasShovel
+      && this.input.isInteractHeld()
+      && !player?.carryingChestId
+      && digChest.buried
+      && digChest.digProgress < 1;
+    if (digging) {
+      // Roughly two strikes per second — same rhythm the shovel viewmodel runs at.
+      this.digStrikePhase += dt;
+      if (this.digStrikePhase >= 0.55) {
+        this.digStrikePhase = 0;
+        this.audio.playDigStrike();
+      }
+    } else {
+      this.digStrikePhase = 0;
+    }
+
+    // Storm wind ambient — louder as the safe zone shrinks past you.
+    const stormPhase = this.state.storm?.phase ?? 0;
+    if (stormPhase !== this.prevStormPhase) {
+      this.prevStormPhase = stormPhase;
+    }
+    this.audio.setWindIntensity(THREE.MathUtils.clamp(this.stormWeatherIntensity, 0, 1));
+
+    const localShipSpeed = localShip ? Math.hypot(localShip.velocity.x, localShip.velocity.z) : 0;
+    const localShipStats = localShip ? SHIP_STATS[localShip.type] : null;
+    const localShipMotion = localShipStats
+      ? THREE.MathUtils.clamp(localShipSpeed / Math.max(localShipStats.maxSpeed, 0.001), 0, 1)
+      : 0;
+    const swimmingWaveBoost = player?.state === 'swimming' ? 0.26 : 0;
+    this.audio.setWaveBed(THREE.MathUtils.clamp(0.36 + swimmingWaveBoost + localShipMotion * 0.32 + this.stormWeatherIntensity * 0.38, 0, 1));
+    this.audio.setHullCreakIntensity(
+      localShip ? THREE.MathUtils.clamp(0.18 + localShipMotion * 0.62 + this.stormWeatherIntensity * 0.28, 0, 1) : 0,
+      localShipMotion,
+    );
+
+    if (localShip) {
+      const hullSplashAmount = THREE.MathUtils.clamp(localShipMotion * 0.9 + this.stormWeatherIntensity * 0.38, 0, 1.25);
+      const hullSplashInterval = THREE.MathUtils.clamp(1.15 - hullSplashAmount * 0.58 + Math.sin(now * 1.9) * 0.08, 0.38, 1.25);
+      if (hullSplashAmount > 0.16 && now - this.lastHullSplashAt > hullSplashInterval) {
+        this.audio.playHullSplash(hullSplashAmount);
+        this.lastHullSplashAt = now;
+      }
+    }
+
+    if (player?.state === 'swimming') {
+      const swimSpeed = Math.hypot(player.velocity.x, player.velocity.z) + Math.abs(player.velocity.y) * 0.24;
+      const swimInput = this.input.getMoveAxes();
+      const swimIntent = Math.min(1, Math.hypot(swimInput.x, swimInput.z) + Math.abs(this.input.getSwimVerticalIntent()) * 0.65);
+      const swimSplashAmount = THREE.MathUtils.clamp(swimSpeed / 5.6 + swimIntent * 0.45, 0, 1.15);
+      if (swimSplashAmount > 0.22 && now - this.lastSwimSplashAt > 0.48) {
+        this.audio.playSwimSplash(swimSplashAmount);
+        this.lastSwimSplashAt = now;
+      }
+    }
+
+    // Sail/anchor change cues for the local ship — physical deck feedback instead of UI clicks.
+    if (localShip) {
+      if (this.prevAnchored !== null && this.prevAnchored !== localShip.anchored) {
+        this.audio.playAnchorChange(localShip.anchored);
+      }
+      this.prevAnchored = localShip.anchored;
+
+      const anchorProgress = THREE.MathUtils.clamp(localShip.anchorRaiseProgress ?? 0, 0, 1);
+      if (this.prevAnchorRaiseProgress !== null) {
+        const anchorDelta = Math.abs(anchorProgress - this.prevAnchorRaiseProgress);
+        const anchorMoving = localShip.anchored && anchorProgress > 0 && anchorProgress < 1 && anchorDelta > 0.0012;
+        if (anchorMoving && now - this.lastAnchorMoveSoundAt > 0.16) {
+          this.audio.playAnchorMovement(THREE.MathUtils.clamp(anchorDelta * 88 + 0.28, 0.32, 1.15));
+          this.lastAnchorMoveSoundAt = now;
+        }
+      }
+      this.prevAnchorRaiseProgress = anchorProgress;
+
+      const helmAxes = this.input.getMoveAxes();
+      const helmIntent = Math.abs(helmAxes.x);
+      const helmMotion = Math.abs(localShip.angularVelocity);
+      if (player?.atHelm && (helmIntent > 0 || helmMotion > 0.006)) {
+        const helmAmount = THREE.MathUtils.clamp(helmIntent * 0.55 + helmMotion * 4.4 + localShipMotion * 0.18, 0.25, 1.15);
+        const helmInterval = THREE.MathUtils.clamp(0.34 - helmAmount * 0.16, 0.14, 0.34);
+        if (now - this.lastHelmTurnSoundAt > helmInterval) {
+          this.audio.playHelmTurn(helmAmount);
+          this.lastHelmTurnSoundAt = now;
+        }
+      }
+
+      if (this.prevSailHeightForAudio !== null && this.prevSailAngleForAudio !== null) {
+        const heightDelta = Math.abs(localShip.sailHeight - this.prevSailHeightForAudio);
+        const angleDelta = Math.abs(angleWrap(localShip.sailAngle - this.prevSailAngleForAudio));
+        if ((heightDelta > 0.055 || angleDelta > 0.18) && now - this.lastSailTrimSoundAt > 0.36) {
+          this.audio.playSailTrim(THREE.MathUtils.clamp(heightDelta * 7 + angleDelta * 1.6, 0.35, 1.25));
+          this.lastSailTrimSoundAt = now;
+        }
+      }
+      this.prevSailHeightForAudio = localShip.sailHeight;
+      this.prevSailAngleForAudio = localShip.sailAngle;
+    } else {
+      this.prevAnchored = null;
+      this.prevAnchorRaiseProgress = null;
+      this.prevSailHeightForAudio = null;
+      this.prevSailAngleForAudio = null;
+    }
+
+    // Cannon launch — local player just got fired out of a ship cannon.
+    if (player) {
+      const ballisticNow = !!player.cannonBallistic;
+      if (ballisticNow && !this.prevCannonBallistic) {
+        this.audio.playCannonFire();
+      }
+      this.prevCannonBallistic = ballisticNow;
+    }
+
+    // Cutlass swing — when the active melee weapon enters its reload window we just swung.
+    if (player && !player.atCannon && !player.atHelm && !player.atSails) {
+      const active = player.weapons[player.activeSlot];
+      const isMelee = active && WEAPONS[active.weaponId]?.melee;
+      const reloading = !!(active && active.reloading);
+      if (isMelee && reloading && !this.prevMeleeReloading) {
+        this.audio.playCutlassSwing();
+      }
+      this.prevMeleeReloading = !!(isMelee && reloading);
+    } else {
+      this.prevMeleeReloading = false;
+    }
+  }
+
   private setHull(fill: HTMLDivElement, label: HTMLElement, value: number) {
     const percent = Math.round(value * 100);
     fill.style.width = `${percent}%`;
@@ -4508,7 +8010,15 @@ export class Game {
   }
 
   private renderShipInventory(ship: Ship | null, player: Player) {
-    const visible = !!ship && player.onShipId === ship.id && player.state !== 'swimming';
+    const nearOwnShip = !!ship
+      && player.shipId === ship.id
+      && player.state === 'alive'
+      && this.distance2D(player.position.x, player.position.z, ship.position.x, ship.position.z) < 58;
+    const visible = !!ship
+      && player.state !== 'swimming'
+      && player.state !== 'eliminated'
+      && player.state !== 'respawning'
+      && (player.onShipId === ship.id || nearOwnShip);
     this.ui.shipInventory.classList.toggle('visible', visible);
     if (!ship) {
       this.shipInventorySignature = '';
@@ -4530,8 +8040,38 @@ export class Game {
     this.ui.inventoryBanana.textContent = String(banana);
   }
 
+  private getPocketWheelCount(player: Player, slot: number) {
+    switch (slot) {
+      case 0:
+        return player.pocketBanana;
+      case 1:
+        return player.pocketWood;
+      case 2:
+        return player.pocketCoconut;
+      case 3:
+        return player.pocketMeat + player.pocketMango;
+      default:
+        return 0;
+    }
+  }
+
+  private getPocketWheelKind(player: Player | null, slot: number): PocketPreviewKind | null {
+    switch (slot) {
+      case 0:
+        return 'banana';
+      case 1:
+        return 'wood';
+      case 2:
+        return 'coconut';
+      case 3:
+        return (player?.pocketMeat ?? 0) > 0 ? 'meat' : 'mango';
+      default:
+        return null;
+    }
+  }
+
   private updateSupplyWheelCounts(player: Player) {
-    const counts = [player.pocketBanana, player.pocketWood, player.pocketCoconut, player.pocketMango];
+    const counts = [player.pocketBanana, player.pocketWood, player.pocketCoconut, player.pocketMeat + player.pocketMango];
     for (const countEl of this.ui.pocketWheel.querySelectorAll<SVGTextElement>('[data-wheel-count]')) {
       const slot = Number(countEl.dataset.wheelCount);
       countEl.textContent = Number.isInteger(slot) ? String(counts[slot] ?? 0) : '0';
@@ -4543,18 +8083,49 @@ export class Game {
   }
 
   private startPocketUsePreview(slot: number) {
-    const kinds: PocketPreviewKind[] = ['banana', 'wood', 'coconut', 'mango'];
-    const kind = kinds[slot];
+    const kind = this.getPocketWheelKind(this.getLocalPlayer(), slot);
     if (!kind) return;
     const player = this.getLocalPlayer();
-    const counts = player ? [player.pocketBanana, player.pocketWood, player.pocketCoconut, player.pocketMango] : [];
-    if ((counts[slot] ?? 0) <= 0) return;
+    if (player?.carryingChestId) return;
+    if (player && player.pocketUseCooldown > 0) return;
+    if (this.pocketUsePreviewTimer > 0) return;
+    if (!player || this.getPocketWheelCount(player, slot) <= 0) return;
     this.pocketUsePreviewKind = kind;
     this.pocketUsePreviewTimer = kind === 'wood' ? 0.45 : 0.82;
   }
 
+  private goldLeaderboardSignature = '';
+  private renderGoldLeaderboard(localPlayerId: string) {
+    if (!this.state) return;
+    const ranked = this.state.players
+      .filter((p) => p.state !== 'eliminated')
+      .slice()
+      .sort((a, b) => b.gold - a.gold)
+      .slice(0, 3);
+    const signature = `${localPlayerId}:${ranked.map((p) => `${p.id}:${p.gold}`).join('|')}`;
+    if (signature === this.goldLeaderboardSignature) return;
+    this.goldLeaderboardSignature = signature;
+    if (!ranked.length) {
+      this.ui.goldLeaders.innerHTML = '';
+      return;
+    }
+    this.ui.goldLeaders.innerHTML = ranked
+      .map((p, index) => {
+        const isSelf = p.id === localPlayerId;
+        const safeName = (p.name || 'Pirate').replace(/[<>&"]/g, (c) =>
+          c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '&' ? '&amp;' : '&quot;',
+        );
+        return `<div class="leader-row" data-rank="${index + 1}" data-self="${isSelf ? 1 : 0}">
+          <span class="leader-rank">${index + 1}</span>
+          <span class="leader-name">${safeName}</span>
+          <span class="leader-amt">${p.gold}</span>
+        </div>`;
+      })
+      .join('');
+  }
+
   private renderShipUpgrades(ship: Ship | null) {
-    if (!ship || ship.upgrades.length === 0) {
+    if (!ship) {
       if (this.shipUpgradeSignature !== '') {
         this.ui.shipUpgrades.innerHTML = '';
         this.shipUpgradeSignature = '';
@@ -4562,15 +8133,53 @@ export class Game {
       return;
     }
 
-    const signature = `${ship.id}:${ship.upgrades.map((upgrade) => upgrade.type).join('|')}`;
+    const baseStats = SHIP_STATS[ship.type];
+    const hasHull = ship.upgrades.some((u) => u.type === 'hull_reinforcement');
+    const hasCannons = ship.upgrades.some((u) => u.type === 'charged_cannons');
+    const hasSails = ship.upgrades.some((u) => u.type === 'swift_sails');
+
+    const cannonBaseDmg = SHIP.CANNON_DAMAGE_HULL;
+    const cannonDmg = Math.round(cannonBaseDmg * (hasCannons ? SHIP_UPGRADES.CANNON_DAMAGE_MULT : 1));
+    const sailSpeed = (baseStats.maxSpeed * (hasSails ? SHIP_UPGRADES.SWIFT_SPEED_MULT : 1)).toFixed(1);
+
+    const signature = [
+      ship.id,
+      ship.maxHull,
+      hasHull ? 1 : 0,
+      hasCannons ? 1 : 0,
+      hasSails ? 1 : 0,
+    ].join(':');
     if (signature === this.shipUpgradeSignature) return;
     this.shipUpgradeSignature = signature;
-    this.ui.shipUpgrades.innerHTML = ship.upgrades
-      .map((upgrade) => {
-        const meta = this.getUpgradePresentation(upgrade.type);
-        return `<span class="upgrade-pill" data-type="${upgrade.type}">${meta.icon} ${meta.short}</span>`;
-      })
-      .join('');
+
+    const statRow = `
+      <div class="ship-stat-row">
+        <span class="ship-stat" data-stat="hull"${hasHull ? ' data-upgraded="1"' : ''}>
+          <span class="ship-stat-icon">🛡</span>
+          <span class="ship-stat-label">Max Hull</span>
+          <span class="ship-stat-value">${ship.maxHull}${hasHull ? ` <em>(+${Math.round((SHIP_UPGRADES.HULL_HP_MULT - 1) * 100)}%)</em>` : ''}</span>
+        </span>
+        <span class="ship-stat" data-stat="cannons"${hasCannons ? ' data-upgraded="1"' : ''}>
+          <span class="ship-stat-icon">✹</span>
+          <span class="ship-stat-label">Cannon Dmg</span>
+          <span class="ship-stat-value">${cannonDmg}${hasCannons ? ` <em>(+${Math.round((SHIP_UPGRADES.CANNON_DAMAGE_MULT - 1) * 100)}%)</em>` : ''}</span>
+        </span>
+        <span class="ship-stat" data-stat="sails"${hasSails ? ' data-upgraded="1"' : ''}>
+          <span class="ship-stat-icon">✦</span>
+          <span class="ship-stat-label">Top Speed</span>
+          <span class="ship-stat-value">${sailSpeed}<span class="ship-stat-unit">kn</span>${hasSails ? ` <em>(+${Math.round((SHIP_UPGRADES.SWIFT_SPEED_MULT - 1) * 100)}%)</em>` : ''}</span>
+        </span>
+      </div>
+    `;
+
+    const pills = ship.upgrades.length === 0
+      ? ''
+      : `<div class="ship-upgrade-pills">${ship.upgrades.map((upgrade) => {
+          const meta = this.getUpgradePresentation(upgrade.type);
+          return `<span class="upgrade-pill" data-type="${upgrade.type}" title="${meta.name}: ${meta.effect}">${meta.icon} ${meta.short} <em>${meta.effect}</em></span>`;
+        }).join('')}</div>`;
+
+    this.ui.shipUpgrades.innerHTML = statRow + pills;
   }
 
   private renderKegStatus(player: Player) {
@@ -4580,9 +8189,58 @@ export class Game {
   }
 
   private getKegSummary(player: Player) {
-    if (player.kegs <= 0) return 'None remaining';
-    if (player.kegCooldown > 0) return `${Math.max(1, Math.ceil(player.kegCooldown))}s until second keg`;
-    return player.kegs === 1 ? '1 ready' : `${player.kegs} ready`;
+    const normal = player.kegs <= 0
+      ? 'None remaining'
+      : player.kegCooldown > 0
+        ? `${Math.max(1, Math.ceil(player.kegCooldown))}s until second keg`
+        : player.kegs === 1 ? '1 ready' : `${player.kegs} ready`;
+    return player.megaKegs > 0 ? `Mega ${player.megaKegs} ready · ${normal}` : normal;
+  }
+
+  private getSpecialSummary(player: Player) {
+    const parts: string[] = [];
+    if (player.superCannonballs > 0) parts.push(`Super cannonball x${player.superCannonballs} (use cannonball at cannon)`);
+    if (player.megaKegs > 0) parts.push(`Mega keg x${player.megaKegs} (hold G, click/place)`);
+    if (player.tsunamiCharges > 0) parts.push(`Tsunami x${player.tsunamiCharges} [E]`);
+    if (parts.length > 0) return `Powers READY: ${parts.join(' · ')}`;
+
+    const next = player.playerKillStreak < 5
+      ? { count: 5, reward: 'super cannonball' }
+      : player.playerKillStreak < 10
+        ? { count: 10, reward: 'mega keg' }
+        : player.playerKillStreak < 20
+          ? { count: 20, reward: 'tsunami' }
+          : null;
+    return next
+      ? `Powers: streak ${player.playerKillStreak}/${next.count} for ${next.reward} (5 super cannonball, 10 mega keg, 20 tsunami)`
+      : `Powers: streak ${player.playerKillStreak} · all rewards unlocked at 5/10/20`;
+  }
+
+  private getObjectiveSummary(
+    player: Player,
+    ship: Ship | null,
+    context: {
+      chestsInHold: number;
+      mappedIsland: Island | null;
+      closestHoarder: { npc: IslandNpc; island: Island; distance: number } | null;
+      outsideStorm: boolean;
+      shipCritical: boolean;
+      shipOnFire: boolean;
+    },
+  ) {
+    if (context.outsideStorm) return 'Objective: sail inside the storm circle';
+    if (context.shipCritical) return 'Objective: repair hull before the ship goes down';
+    if (context.shipOnFire) return 'Objective: douse fire at the repair point';
+    if (player.carryingChestId && context.closestHoarder) {
+      return `Objective: sell chest at ${context.closestHoarder.island.name}`;
+    }
+    if (context.chestsInHold > 0 && context.closestHoarder) {
+      return `Objective: deliver ${context.chestsInHold} chest${context.chestsInHold === 1 ? '' : 's'} to ${context.closestHoarder.island.name}`;
+    }
+    if (context.mappedIsland) return `Objective: dig Gold Hoarder chests on ${context.mappedIsland.name}`;
+    if (player.gold >= ECONOMY.GOLD_WIN_TARGET * 0.72) return 'Objective: protect your lead and finish the gold run';
+    if (ship && ship.upgrades.length < 2) return 'Objective: claim upgrades, raid ships, and sell treasure';
+    return 'Objective: raid ships, sell treasure, and stay ahead of the storm';
   }
 
   private getUpgradePresentation(type: ShipUpgradeType) {
@@ -4658,6 +8316,14 @@ export class Game {
 
   private getSocketUrl(): string {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const host = window.location.hostname;
+    const port = window.location.port;
+    const isLocalhost = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
+    // Any localhost port other than the game server's own (8080) is a dev server (Vite, etc.).
+    // Connect directly to 8080 instead of relying on a proxy — works for 3000/3003/5173/etc.
+    if (isLocalhost && port && port !== '8080') {
+      return `${protocol}://${host}:8080/ws`;
+    }
     return `${protocol}://${window.location.host}/ws`;
   }
 
@@ -4726,18 +8392,21 @@ export class Game {
   }
 
   private getCutlassSwingProgress(player: Player) {
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails || player.atCrowNest ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
     if (!activeWeapon || activeWeapon.weaponId !== 'cutlass' || !activeWeapon.reloading) {
       return 0;
     }
-    return 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / WEAPONS.cutlass.reloadTime, 0, 1);
+    const cooldown = activeWeapon.reloadTimer > WEAPONS.cutlass.reloadTime
+      ? CUTLASS_VIEW_LUNGE_COOLDOWN
+      : WEAPONS.cutlass.reloadTime;
+    return 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / cooldown, 0, 1);
   }
 
   private syncHeldWeapon(mesh: THREE.Group, player: Player) {
     const rightHand = mesh.getObjectByName('right-hand');
     if (!rightHand) return;
 
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails || player.atCrowNest ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
     const currentId = activeWeapon?.weaponId ?? null;
     const existing = rightHand.getObjectByName('held-weapon') as THREE.Group | null;
     const useLocalSwimViewmodel = player.id === this.localPlayerId;
@@ -4759,6 +8428,25 @@ export class Game {
     switch (currentId) {
       case 'cutlass':
         {
+          if (player.blocking) {
+            weaponMesh.position.set(0.0, 0.1, 0.2);
+            weaponMesh.rotation.set(-0.82, -0.08, -0.18);
+            break;
+          }
+          const charge = THREE.MathUtils.clamp(player.cutlassCharge ?? 0, 0, 1);
+          if (charge > 0.01) {
+            weaponMesh.position.set(
+              0.02 - charge * 0.08,
+              0.04 + charge * 0.09,
+              0.12 - charge * 0.08,
+            );
+            weaponMesh.rotation.set(
+              -0.1 - charge * 0.72,
+              0.1 - charge * 0.18,
+              -0.68 - charge * 0.5,
+            );
+            break;
+          }
           const swingProgress = this.getCutlassSwingProgress(player);
           const slashArc = Math.sin(THREE.MathUtils.clamp((swingProgress - 0.18) / 0.42, 0, 1) * Math.PI);
           const recover = THREE.MathUtils.smoothstep(swingProgress, 0.6, 1);
@@ -4812,10 +8500,34 @@ export class Game {
       this.localViewPocketKind = null;
       return false;
     }
-    if (player.atCannon || player.atHelm || player.atSails || player.atCrowNest) {
+    if (player.atCannon || player.atHelm || player.atSails) {
       this.localViewPocketRoot.visible = false;
       this.localViewPocketKind = null;
       return false;
+    }
+    // Carrying a treasure chest takes over both hands — nothing else can be held.
+    if (player.carryingChestId) {
+      const kind: PocketPreviewKind = 'chest';
+      let mesh = this.localViewPocketRoot.getObjectByName('local-pocket') as THREE.Group | null;
+      if (!mesh || this.localViewPocketKind !== kind) {
+        this.localViewPocketRoot.clear();
+        mesh = makePocketPreviewMesh(kind);
+        mesh.name = 'local-pocket';
+        mesh.rotation.y = Math.PI;
+        mesh.scale.setScalar(1.0);
+        applyViewmodelMaterialSettings(mesh);
+        this.localViewPocketRoot.add(mesh);
+        this.localViewPocketKind = kind;
+      }
+      const time = this.ocean.getTime();
+      const moveAxes = this.input.getMoveAxes();
+      const moveAmount = Math.min(1, Math.hypot(moveAxes.x, moveAxes.z));
+      const trudge = Math.sin(time * (3.6 + moveAmount * 1.8)) * (0.012 + moveAmount * 0.02);
+      const sway = Math.sin(time * (1.9 + moveAmount * 0.9)) * (0.008 + moveAmount * 0.012);
+      this.localViewPocketRoot.visible = true;
+      this.localViewPocketRoot.position.set(0 + sway * 0.4, -0.34 + trudge, -0.55);
+      this.localViewPocketRoot.rotation.set(-0.18 + trudge * 0.5, 0 + sway * 0.18, 0);
+      return true;
     }
     if (this.input.isKegPreviewActive() && player.kegs > 0) {
       const kind: PocketPreviewKind = 'powder_keg';
@@ -4858,17 +8570,27 @@ export class Game {
         mesh = makePocketPreviewMesh(kind);
         mesh.name = 'local-pocket';
         mesh.rotation.y = Math.PI;
-        mesh.scale.setScalar(1.55);
+        mesh.scale.setScalar(2.0);
         applyViewmodelMaterialSettings(mesh);
         this.localViewPocketRoot.add(mesh);
         this.localViewPocketKind = kind;
       }
+      // Two-beat dig cycle: lift the shovel, then drive it into the dirt.
       const time = this.ocean.getTime();
-      const chop = Math.sin(time * 11.5) * 0.035;
-      const scoop = Math.max(0, Math.sin(time * 5.8)) * 0.22;
+      const cycle = (time * 1.9) % 1;
+      const lift = Math.sin(cycle * Math.PI) ** 2;            // 0 → 1 → 0 (raise)
+      const strike = Math.max(0, Math.sin((cycle - 0.5) * Math.PI * 2)); // sharp drop
       this.localViewPocketRoot.visible = true;
-      this.localViewPocketRoot.position.set(-0.22, -0.42 - scoop * 0.12 + chop, -0.6 + scoop * 0.18);
-      this.localViewPocketRoot.rotation.set(-0.7 - scoop * 0.95, 0.18, -0.18 + scoop * 0.18);
+      this.localViewPocketRoot.position.set(
+        -0.05,
+        -0.34 + lift * 0.22 - strike * 0.12,
+        -0.55 + lift * 0.05 - strike * 0.08,
+      );
+      this.localViewPocketRoot.rotation.set(
+        -0.55 - lift * 0.55 + strike * 0.85,
+        0.12 + lift * 0.18,
+        -0.08 + strike * 0.05,
+      );
       return true;
     }
     if (this.pocketUsePreviewTimer > 0) {
@@ -4889,10 +8611,8 @@ export class Game {
       this.localViewPocketKind = null;
       return false;
     }
-    const counts = [player.pocketBanana, player.pocketWood, player.pocketCoconut, player.pocketMango] as const;
-    const kinds: PocketPreviewKind[] = ['banana', 'wood', 'coconut', 'mango'];
-    const kind = usingPreview ? this.pocketUsePreviewKind! : kinds[slot!];
-    if (!usingPreview && counts[slot!] <= 0) {
+    const kind = usingPreview ? this.pocketUsePreviewKind! : this.getPocketWheelKind(player, slot!);
+    if (!kind || (!usingPreview && this.getPocketWheelCount(player, slot!) <= 0)) {
       this.localViewPocketRoot.visible = false;
       this.localViewPocketKind = null;
       return false;
@@ -4941,16 +8661,18 @@ export class Game {
       this.localViewWeaponAmmoSignature = '';
       this.localViewWeaponKick = 0;
       this.localViewWeaponReloadPhase = 0;
+      this.localCutlassCharge = 0;
       return;
     }
 
     const player = this.getLocalPlayer();
-    const activeWeapon = player?.atCannon || player?.atHelm || player?.atSails || player?.atCrowNest ? null : player?.weapons[player.activeSlot] ?? null;
+    const activeWeapon = player?.atCannon || player?.atHelm || player?.atSails ? null : player?.weapons[player.activeSlot] ?? null;
     if (!player || !activeWeapon || activeWeapon.weaponId === 'ship_cannon' || player.state === 'eliminated' || player.state === 'respawning') {
       this.localViewWeaponRoot.visible = false;
       this.localViewWeaponAmmoSignature = '';
       this.localViewWeaponKick = 0;
       this.localViewWeaponReloadPhase = 0;
+      this.localCutlassCharge = 0;
       return;
     }
     const weaponId = activeWeapon.weaponId;
@@ -4961,13 +8683,27 @@ export class Game {
       weaponMesh = makeHeldWeaponMesh(weaponId);
       weaponMesh.name = 'local-view-weapon';
       weaponMesh.rotation.y = Math.PI;
-      weaponMesh.scale.setScalar(weaponId === 'blunderbuss' ? 1.0 : 1.2);
+      weaponMesh.scale.setScalar(
+        weaponId === 'eye_of_reach'
+          ? 0.74
+          : weaponId === 'blunderbuss'
+            ? 0.92
+            : 1.2,
+      );
       applyViewmodelMaterialSettings(weaponMesh);
       this.localViewWeaponRoot.add(weaponMesh);
       this.localViewWeaponId = weaponId;
     }
 
     const firearmEquipped = !WEAPONS[weaponId].melee;
+    const cutlassEquipped = weaponId === 'cutlass';
+    const cutlassBlocking = cutlassEquipped && this.input.isAiming() && !this.input.isFiring() && !activeWeapon.reloading;
+    const cutlassCharging = cutlassEquipped && this.input.isFiring() && !cutlassBlocking && !activeWeapon.reloading;
+    if (cutlassCharging) {
+      this.localCutlassCharge = Math.min(1, this.localCutlassCharge + this.frameDt / CUTLASS_VIEW_CHARGE_TIME);
+    } else {
+      this.localCutlassCharge += (0 - this.localCutlassCharge) * Math.min(1, this.frameDt * (activeWeapon.reloading ? 14 : 8));
+    }
     const aimBlend = firearmEquipped && this.input.isAiming() ? 1 : 0;
     const time = this.ocean.getTime();
     const moveAxes = this.input.getMoveAxes();
@@ -4983,10 +8719,10 @@ export class Game {
     this.localViewWeaponAmmoSignature = ammoSignature;
     const kickTarget = firearmEquipped && this.input.isFiring() && !activeWeapon.reloading ? 0.72 : 0;
     this.localViewWeaponKick += (kickTarget - this.localViewWeaponKick) * Math.min(1, this.frameDt * (kickTarget > this.localViewWeaponKick ? 18 : 13));
-    const reloadBlend = activeWeapon.reloading
+    const reloadBlend = activeWeapon.reloading && firearmEquipped
       ? 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / Math.max(0.001, WEAPONS[weaponId].reloadTime), 0, 1)
       : 0;
-    if (activeWeapon.reloading) {
+    if (activeWeapon.reloading && firearmEquipped) {
       this.localViewWeaponReloadPhase = reloadBlend;
     } else {
       this.localViewWeaponReloadPhase += (0 - this.localViewWeaponReloadPhase) * Math.min(1, this.frameDt * 10);
@@ -5001,14 +8737,14 @@ export class Game {
     switch (weaponId) {
       case 'eye_of_reach':
         this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.28, 0.025, aimBlend) + sway * 0.38 + travelSwing * 0.26 + reloadArc * 0.08,
-          THREE.MathUtils.lerp(-0.2, -0.15, aimBlend) + bob - recoilLift - reloadArc * 0.05,
-          THREE.MathUtils.lerp(-0.62, -0.42, aimBlend) - recoilBack + reloadArc * 0.08,
+          THREE.MathUtils.lerp(0.48, 0.025, aimBlend) + sway * 0.26 + travelSwing * 0.18 + reloadArc * 0.06,
+          THREE.MathUtils.lerp(-0.46, -0.15, aimBlend) + bob * 0.75 - recoilLift - reloadArc * 0.04,
+          THREE.MathUtils.lerp(-1.06, -0.42, aimBlend) - recoilBack * 0.72 + reloadArc * 0.06,
         );
         this.localViewWeaponRoot.rotation.set(
-          -0.14 - aimBlend * 0.12 - recoilLift * 1.2 + reloadArc * 0.22,
-          -0.16 + aimBlend * 0.11 - reloadArc * 0.28,
-          -0.03 - strafeTilt - recoilRoll + reloadArc * 0.12,
+          -0.26 + aimBlend * 0.0 - recoilLift * 1.1 + reloadArc * 0.18,
+          -0.24 + aimBlend * 0.19 - reloadArc * 0.22,
+          -0.1 - strafeTilt * 0.8 - recoilRoll + reloadArc * 0.1,
         );
         break;
       case 'blunderbuss':
@@ -5024,16 +8760,39 @@ export class Game {
         );
         break;
       case 'cutlass':
-        this.localViewWeaponRoot.position.set(
-          0.3 + sway * 0.28 + travelSwing * 0.52,
-          -0.3 + bob * 0.9 - reloadArc * 0.1,
-          -0.58 + reloadArc * 0.08,
-        );
-        this.localViewWeaponRoot.rotation.set(
-          -0.02 + reloadArc * 0.48,
-          -0.28 - reloadArc * 0.18,
-          -0.82 - strafeTilt * 1.6 - reloadArc * 0.95,
-        );
+        {
+          const cooldownProgress = activeWeapon.reloading
+            ? 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / CUTLASS_VIEW_LUNGE_COOLDOWN, 0, 1)
+            : 0;
+          const slashArc = Math.sin(THREE.MathUtils.clamp((cooldownProgress - 0.08) / 0.58, 0, 1) * Math.PI);
+          const lungePush = THREE.MathUtils.smoothstep(cooldownProgress, 0.06, 0.34)
+            * (1 - THREE.MathUtils.smoothstep(cooldownProgress, 0.52, 1));
+          const charge = this.localCutlassCharge;
+          const chargeReadyPulse = charge > 0.96 ? Math.sin(time * 22) * 0.018 : 0;
+          if (cutlassBlocking) {
+            this.localViewWeaponRoot.position.set(
+              0.16 + sway * 0.14,
+              -0.18 + bob * 0.45,
+              -0.48 + travelSwing * 0.08,
+            );
+            this.localViewWeaponRoot.rotation.set(
+              -0.92,
+              -0.08,
+              -0.18 - strafeTilt * 0.8,
+            );
+          } else {
+            this.localViewWeaponRoot.position.set(
+              0.31 - charge * 0.16 + slashArc * 0.1 + sway * 0.24 + travelSwing * 0.42,
+              -0.3 + charge * 0.1 + chargeReadyPulse + bob * 0.75 - slashArc * 0.08,
+              -0.58 - charge * 0.22 + lungePush * 0.18,
+            );
+            this.localViewWeaponRoot.rotation.set(
+              -0.02 - charge * 0.58 + slashArc * 0.54,
+              -0.28 - charge * 0.22 - slashArc * 0.2,
+              -0.82 - charge * 0.62 - strafeTilt * 1.4 - slashArc * 1.02,
+            );
+          }
+        }
         break;
       default:
         this.localViewWeaponRoot.position.set(
@@ -5094,18 +8853,35 @@ export class Game {
 
     const mermaidShip = this.getMermaidReturnShip(player);
     if (mermaidShip) {
-      candidates.push({
-        prompt: '[X] Return To Ship',
-        label: 'Mermaid ferry waiting nearby',
-        score: 1.8,
-        kind: 'mermaid',
-      });
+      if (!this.mermaidAnchor || this.mermaidAnchor.shipId !== mermaidShip.id) {
+        this.mermaidAnchor = this.createMermaidAnchor(player, mermaidShip);
+      }
+      this.pushInteractionCandidate(
+        candidates,
+        player,
+        new THREE.Vector3(this.mermaidAnchor.x, player.position.y + 0.65, this.mermaidAnchor.z),
+        6.4,
+        0.12,
+        '[X] Return To Ship',
+        'Mermaid ferry waiting nearby',
+        'mermaid',
+      );
     }
 
     if (player.nearBarrelId) {
       const barrelPos = this.getBarrelWorldPoint(player.nearBarrelId);
       if (barrelPos) {
-        this.pushInteractionCandidate(candidates, player, barrelPos, 5.5, 0.72, '[X] Open Barrel', 'Island supplies', 'barrel');
+        const browsingThisBarrel = this.barrelBrowse?.barrelId === player.nearBarrelId;
+        this.pushInteractionCandidate(
+          candidates,
+          player,
+          barrelPos,
+          5.5,
+          0.72,
+          browsingThisBarrel ? '[X] Take All' : '[X] Open Barrel',
+          browsingThisBarrel ? 'Transfer supplies' : 'Island supplies',
+          'barrel',
+        );
       }
     }
 
@@ -5141,7 +8917,7 @@ export class Game {
                 : '[X] Pick Up Chest';
         const label = digging
           ? `Buried treasure · ${Math.round(chest.digProgress * 100)}% dug`
-          : `Worth ${chest.value} gold at Gold Hoarder`;
+          : `Base ${chest.value} gold · Gold Hoarder pays more`;
         this.pushInteractionCandidate(candidates, player, chestPos, 5.5, 0.72, prompt, label, 'chest');
       }
     }
@@ -5183,6 +8959,20 @@ export class Game {
       }
     }
 
+    const nearbyKeg = this.findNearbyKeg(player, ship ?? null);
+    if (nearbyKeg) {
+      this.pushInteractionCandidate(
+        candidates,
+        player,
+        new THREE.Vector3(nearbyKeg.position.x, nearbyKeg.position.y + 0.45, nearbyKeg.position.z),
+        3,
+        0.3,
+        '[X] Defuse Powder Keg',
+        `${Math.max(1, Math.ceil(nearbyKeg.timer))}s until detonation`,
+        'keg_diffuse',
+      );
+    }
+
     if (ship) {
       if (player.carryingChestId && player.onShipId === ship.id) {
         const stats = SHIP_STATS[ship.type];
@@ -5196,20 +8986,6 @@ export class Game {
           '[X] Stow Chest',
           'Place chest on deck for the crew',
           'stow_chest',
-        );
-      }
-
-      const nearbyKeg = this.findNearbyKeg(player, ship);
-      if (nearbyKeg) {
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          new THREE.Vector3(nearbyKeg.position.x, nearbyKeg.position.y + 0.45, nearbyKeg.position.z),
-          3,
-          0.3,
-          '[X] Defuse Powder Keg',
-          `${Math.max(1, Math.ceil(nearbyKeg.timer))}s until detonation`,
-          'keg_diffuse',
         );
       }
 
@@ -5234,7 +9010,7 @@ export class Game {
 
       if (this.isNearHelm(player, ship)) {
         const helmPoint = this.getShipWorldPoint(ship, 0, -SHIP_STATS[ship.type].length * 0.37, SHIP_STATS[ship.type].height + 0.95);
-        this.pushInteractionCandidate(candidates, player, helmPoint, 3.6, 0.6, '[X] Take Helm', 'A/D or arrows turn · W/S trims sails', 'helm');
+        this.pushInteractionCandidate(candidates, player, helmPoint, 4.2, 0.2, '[X] Take Helm', 'A/D or arrows turn · W/S trims sails', 'helm');
       }
 
       if (this.isNearSailStation(player, ship)) {
@@ -5244,10 +9020,10 @@ export class Game {
           candidates,
           player,
           sailPoint,
-          3.4,
-          0.45,
+          4.2,
+          0.18,
           '[X] Use Sail Ring',
-          'C/Z hoist sails · Q/F angle sails',
+          'W/C hoist · S/Z lower · Q/F angle',
           'sails',
         );
       }
@@ -5276,8 +9052,8 @@ export class Game {
           candidates,
           player,
           anchorPoint,
-          3.8,
-          0.58,
+          4.4,
+          0.18,
           ship.anchored ? `[Hold X] Raise Anchor ${anchorProgress}%` : '[X] Drop Anchor',
           ship.anchored ? 'Turn the capstan wheel to raise' : 'Drop anchor to stop fast',
           'anchor',
@@ -5304,21 +9080,19 @@ export class Game {
       }
 
       if (nearbyCannon !== null) {
-        const cannonPoint = this.shipRenderer.getCannonWorldPos(ship.id, nearbyCannon)
-          ?? this.getShipWorldPoint(
-            ship,
-            nearbyCannon < Math.max(1, SHIP_STATS[ship.type].cannonCount / 2)
-              ? SHIP_STATS[ship.type].width * 0.6
-              : -SHIP_STATS[ship.type].width * 0.6,
-            0,
-            SHIP_STATS[ship.type].height + 0.2,
-          );
+        const cannonLocal = this.getCannonDeckLocalPosition(SHIP_STATS[ship.type], nearbyCannon);
+        const cannonPoint = this.getShipWorldPoint(
+          ship,
+          cannonLocal.x,
+          cannonLocal.z,
+          SHIP_STATS[ship.type].height + 0.75,
+        );
         this.pushInteractionCandidate(
           candidates,
           player,
           cannonPoint,
-          4.2,
-          0.52,
+          4.8,
+          0.16,
           '[X] Use Cannon',
           `Broadside cannon ${nearbyCannon + 1} · [4/5/6] ammo`,
           'cannon',
@@ -5397,12 +9171,13 @@ export class Game {
     };
   }
 
-  private findNearbyKeg(player: Player, ship: Ship): ShipKeg | null {
+  private findNearbyKeg(player: Player, ship: Ship | null = null): ShipKeg | null {
     if (!this.state) return null;
     let closest: ShipKeg | null = null;
     let closestDistance: number = SHIP.KEG_DIFFUSE_RANGE;
     for (const keg of this.state.kegs) {
-      if (keg.shipId !== ship.id || keg.timer <= 0) continue;
+      if (ship && keg.shipId && keg.shipId !== ship.id) continue;
+      if (keg.timer <= 0) continue;
       const dx = player.position.x - keg.position.x;
       const dy = player.position.y - keg.position.y;
       const dz = player.position.z - keg.position.z;
@@ -5593,9 +9368,10 @@ export class Game {
     const walkSwing = Math.sin(phase) * 0.8 * moveRatio;
     const walkLift = Math.cos(phase * 2) * 0.05 * moveRatio;
     const idleBob = deckSway + Math.sin(this.ocean.getTime() * 2.1 + phase) * 0.018;
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails || player.atCrowNest ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
     const cutlassReady = activeWeapon?.weaponId === 'cutlass';
     const cutlassSwing = cutlassReady ? this.getCutlassSwingProgress(player) : 0;
+    const cutlassCharge = cutlassReady ? THREE.MathUtils.clamp(player.cutlassCharge ?? 0, 0, 1) : 0;
     const firearmReady = !!activeWeapon && !WEAPONS[activeWeapon.weaponId].melee;
     const localSwimAim = player.id === this.localPlayerId && firearmReady && this.input.isAiming();
 
@@ -5668,15 +9444,24 @@ export class Game {
         leftLegPivot.rotation.set(-0.34 + Math.sin(strokePhase + Math.PI) * 0.34, 0, -0.08);
         rightLegPivot.rotation.set(-0.34 + Math.sin(strokePhase) * 0.34, 0, 0.08);
       }
+    } else if (cutlassReady && player.blocking) {
+      torso.rotation.x = 0.12;
+      torso.rotation.y = -0.08;
+      pelvis.rotation.y = 0.04;
+      leftArmPivot.rotation.set(-0.42, 0.22, 0.34);
+      rightArmPivot.rotation.set(-0.88, -0.1, -0.28);
+      leftLegPivot.rotation.set(-walkSwing * 0.72, 0, -0.06);
+      rightLegPivot.rotation.set(walkSwing * 0.72, 0, 0.06);
+      torso.rotation.z = -walkSwing * 0.035;
     } else if (cutlassReady) {
       torso.rotation.x = 0.08;
-      torso.rotation.y = -0.14;
-      pelvis.rotation.y = 0.08;
-      leftArmPivot.rotation.set(0.08 + walkSwing * 0.45, 0.08, 0.24);
-      rightArmPivot.rotation.set(-0.42 - walkSwing * 0.18, -0.16, -0.38);
+      torso.rotation.y = -0.14 - cutlassCharge * 0.24;
+      pelvis.rotation.y = 0.08 + cutlassCharge * 0.12;
+      leftArmPivot.rotation.set(0.08 + walkSwing * 0.45 - cutlassCharge * 0.22, 0.08 + cutlassCharge * 0.22, 0.24);
+      rightArmPivot.rotation.set(-0.42 - walkSwing * 0.18 - cutlassCharge * 0.82, -0.16 - cutlassCharge * 0.24, -0.38 - cutlassCharge * 0.35);
       leftLegPivot.rotation.set(-walkSwing * 1.05, 0, -0.04);
       rightLegPivot.rotation.set(walkSwing * 1.05, 0, 0.04);
-      torso.rotation.z = -walkSwing * 0.06;
+      torso.rotation.z = -walkSwing * 0.06 - cutlassCharge * 0.1;
     } else {
       const armRest = 0.2;
       leftArmPivot.rotation.set(armRest + walkSwing, 0, -0.12);
@@ -5686,7 +9471,7 @@ export class Game {
       torso.rotation.z = walkSwing * 0.08;
     }
 
-    if (cutlassReady && player.state !== 'swimming' && !player.atHelm && !player.atCannon && !player.atSails && !player.atCrowNest) {
+    if (cutlassReady && !player.blocking && player.state !== 'swimming' && !player.atHelm && !player.atCannon && !player.atSails) {
       const windup = THREE.MathUtils.smoothstep(cutlassSwing, 0.02, 0.26);
       const strike = THREE.MathUtils.smoothstep(cutlassSwing, 0.18, 0.58);
       const recover = THREE.MathUtils.smoothstep(cutlassSwing, 0.62, 1);
@@ -5754,12 +9539,17 @@ export class Game {
     if (this.windWispMeshes.length > 0) return;
 
     const geometry = new THREE.PlaneGeometry(3.1, 0.22);
-    for (let index = 0; index < 16; index++) {
+    const count = this.renderer.getQuality() === 'low' ? 0 : this.renderer.getQuality() === 'balanced' ? 4 : 8;
+    if (count === 0) {
+      this.windWisps.visible = false;
+      return;
+    }
+    for (let index = 0; index < count; index++) {
       const material = new THREE.MeshBasicMaterial({
         map: this.windWispTexture,
         color: 0xe5f7ff,
         transparent: true,
-        opacity: 0.07 + Math.random() * 0.04,
+        opacity: 0.032 + Math.random() * 0.025,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         side: THREE.DoubleSide,
@@ -5769,17 +9559,21 @@ export class Game {
       this.windWisps.add(mesh);
       this.windWispMeshes.push({
         mesh,
-        radius: 1.6 + Math.random() * 7.5,
-        height: 0.35 + Math.random() * 3.4,
+        radius: 1.2 + Math.random() * 4.8,
+        height: 0.18 + Math.random() * 1.7,
         phase: Math.random(),
         speed: 0.16 + Math.random() * 0.18,
-        sway: (Math.random() - 0.5) * 2.6,
+        sway: (Math.random() - 0.5) * 1.8,
         tilt: (Math.random() - 0.5) * 0.08,
       });
     }
   }
 
   private updateWindWisps() {
+    if (this.windWispMeshes.length === 0) {
+      this.windWisps.visible = false;
+      return;
+    }
     const player = this.getLocalPlayer();
     if (!player) {
       this.windWisps.visible = false;
@@ -5814,65 +9608,37 @@ export class Game {
       );
       wisp.mesh.rotation.set(wisp.tilt, wind.direction, 0);
       wisp.mesh.scale.set(0.86 + wind.strength * 0.78, 1 + wind.strength * 0.3, 1);
-      const alpha = (0.055 + wind.strength * 0.085) * (1 - Math.abs(cycle - 0.5) * 1.05);
-      (wisp.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0.018, alpha);
+      const alpha = (0.028 + wind.strength * 0.052) * (1 - Math.abs(cycle - 0.5) * 1.05);
+      (wisp.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0.01, alpha);
     }
   }
 
   private toShipLocal(player: Player, ship: Ship) {
-    const dx = player.position.x - ship.position.x;
-    const dz = player.position.z - ship.position.z;
-    const cos = Math.cos(ship.rotation);
-    const sin = Math.sin(ship.rotation);
-    return {
-      x: dx * cos - dz * sin,
-      z: dx * sin + dz * cos,
-    };
+    return toShipLocalPoint(player.position, ship);
   }
 
   private isNearHelm(player: Player, ship: Ship) {
-    if (player.onShipId !== ship.id) return false;
-    const local = this.toShipLocal(player, ship);
-    return Math.abs(local.x) < 0.9 && Math.abs(local.z + SHIP_STATS[ship.type].length * 0.37) < 1.15;
+    return isSharedNearHelm(player, ship);
   }
 
   private isNearSailStation(player: Player, ship: Ship) {
-    if (player.onShipId !== ship.id) return false;
-    const stats = SHIP_STATS[ship.type];
-    if (player.position.y < ship.position.y + stats.height - 0.35) return false;
-    const local = this.toShipLocal(player, ship);
-    const station = this.getSailControlLocal(stats);
-    return Math.abs(local.x - station.x) < 0.78 && Math.abs(local.z - station.z) < 0.92;
+    return isSharedNearSailStation(player, ship);
   }
 
   private isNearCrowNestLadder(player: Player, ship: Ship): boolean {
-    if (player.onShipId !== ship.id) return false;
-    const stats = SHIP_STATS[ship.type];
-    const local = this.toShipLocal(player, ship);
-    const { mastZ, maxAbsX, maxAbsZ } = getCrowNestLadderInteractionBounds(stats);
-    const deckY = ship.position.y + stats.height + 0.1;
-    return Math.abs(local.x) < maxAbsX
-      && Math.abs(local.z - mastZ) < maxAbsZ
-      && player.position.y >= deckY - 0.35
-      && player.position.y < deckY + stats.height * 4.2;
+    return isSharedNearCrowNestLadder(player, ship);
   }
 
   private isNearAnchor(player: Player, ship: Ship) {
-    if (player.onShipId !== ship.id) return false;
-    const local = this.toShipLocal(player, ship);
-    const anchor = this.getAnchorControlLocal(SHIP_STATS[ship.type]);
-    return Math.abs(local.x - anchor.x) < 0.95 && Math.abs(local.z - anchor.z) < 1.0;
+    return isSharedNearAnchor(player, ship);
   }
 
   private getAnchorControlLocal(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {
-    return {
-      x: 0,
-      z: stats.length * 0.42,
-    };
+    return getSharedAnchorControlLocal(stats);
   }
 
   private getSailControlLocal(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {
-    return getSailStationLocal(stats);
+    return getSharedSailControlLocal(stats);
   }
 
   private findRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null {
@@ -5889,23 +9655,14 @@ export class Game {
   }
 
   private findNearbyCannonIndex(player: Player, ship: Ship): number | null {
-    if (player.onShipId !== ship.id) return null;
+    return findSharedNearbyCannonIndex(player, ship);
+  }
 
-    const stats = SHIP_STATS[ship.type];
-    const local = this.toShipLocal(player, ship);
-    const cannonOffsetX = stats.width * 0.5 + 0.1;
-
-    if (Math.abs(local.z) > stats.length * 0.35) return null;
-    if (Math.abs(Math.abs(local.x) - cannonOffsetX) > 1.1) return null;
-
-    const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-    const minZ = -stats.length * 0.3;
-    const maxZ = stats.length * 0.2;
-    const normalized = Math.max(0, Math.min(1, (maxZ - local.z) / Math.max(0.001, maxZ - minZ)));
-    const slotWithinSide = cannonsPerSide === 1 ? 0 : Math.round(normalized * (cannonsPerSide - 1));
-    const sideOffset = local.x >= 0 ? 0 : cannonsPerSide;
-
-    return sideOffset + slotWithinSide;
+  private getCannonDeckLocalPosition(
+    stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS],
+    cannonIndex: number,
+  ): { x: number; z: number } {
+    return getSharedCannonDeckLocalPosition(stats, cannonIndex);
   }
 
   private bindInteractPromptClick() {
@@ -6041,7 +9798,9 @@ export class Game {
     if (!cv || !ctx) return;
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const effectScale = this.renderer.getEffectScale();
+    const dprCap = effectScale < 0.55 ? 0.62 : effectScale < 0.85 ? 0.8 : 1.25;
+    const dpr = Math.min(dprCap, window.devicePixelRatio || 1);
     const rw = Math.floor(w * dpr);
     const rh = Math.floor(h * dpr);
     if (cv.width !== rw || cv.height !== rh) {
@@ -6054,7 +9813,7 @@ export class Game {
     ctx.clearRect(0, 0, w, h);
     if (intensity <= 0.001) return;
     const t = this.ocean.getTime();
-    const drops = Math.floor(65 + intensity * 420);
+    const drops = Math.floor((65 + intensity * 420) * (0.42 + effectScale * 0.58));
     const alpha = 0.09 + intensity * 0.34;
     ctx.strokeStyle = `rgba(205, 222, 245, ${alpha})`;
     ctx.lineWidth = 1;
