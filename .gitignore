@@ -16,3 +16,9 @@ build/
 .vite/
 .DS_Store
 *.log
+node_modules/
+dist/
+build/
+.vite/
+.DS_Store
+*.log
