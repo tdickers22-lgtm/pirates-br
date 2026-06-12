@@ -1,8 +1,46 @@
+import { createNoise2D } from 'simplex-noise';
 import type { Island, IslandDock, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
 import { SHIP_STATS } from '../constants/index.js';
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+/** Deterministic PRNG (mulberry32) so the terrain noise permutation table is
+ *  identical on server and client — never seed terrain noise from Math.random. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const TERRAIN_NOISE_SEED = 0x51a7e11;
+const terrainNoise2D = createNoise2D(mulberry32(TERRAIN_NOISE_SEED));
+
+/** Deterministic fractal terrain noise in roughly [-1, 1]. Shared by server
+ *  physics and client island meshes so both always agree on surface height. */
+export function terrainFbm(x: number, z: number, octaves = 3): number {
+  let amplitude = 0.5;
+  let frequency = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += terrainNoise2D(x * frequency, z * frequency) * amplitude;
+    norm += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2.1;
+  }
+  return norm > 0 ? sum / norm : 0;
+}
+
+/** Ridged terrain noise in [0, 1] — sharp crests used for exposed cliff bands. */
+export function terrainRidge(x: number, z: number): number {
+  const n = 1 - Math.abs(terrainNoise2D(x, z));
+  return n * n;
 }
 
 export function clamp(v: number, lo: number, hi: number): number {
@@ -376,7 +414,45 @@ export function getIslandSurfaceY(island: Island, x: number, z: number): number 
     seaLift = 1.0 + (seaLift - 1.0) * landFactor;
   }
 
-  const naturalY = seaLift + beachRise + cliffRise + plateauRise + crownRise + primaryHill + secondaryHill + tertiaryHill + angleNoise;
+  const baseY = seaLift + beachRise + cliffRise + plateauRise + crownRise + primaryHill + secondaryHill + tertiaryHill + angleNoise;
+
+  // ── Deterministic noise detail (shared by server physics & client meshes) ──
+  // Interior mask fades every detail term to zero approaching the shoreline so
+  // beaches stay smooth and dock/berth/NPC placement is unaffected.
+  const interiorMask = clamp(1 - distRatio / 0.97, 0, 1);
+  const detailMask = Math.min(1, interiorMask * 1.6);
+  // Rolling hill detail — low-frequency fbm carves valleys and knolls.
+  const hillDetail = terrainFbm(x * 0.016, z * 0.016, 3)
+    * island.radius * 0.05
+    * (0.45 + profile.heightProfile * 0.85)
+    * detailMask;
+  // Cliff bands — ridged noise pushes sharp exposed-rock crests on taller styles.
+  const cliffBands = terrainRidge(x * 0.021, z * 0.021)
+    * island.radius * 0.034
+    * clamp((profile.heightProfile - 0.24) * 1.4, 0, 1)
+    * detailMask;
+  // Noise must never carve interior land below the wave-safe shelf — but keep
+  // intentional underwater saddles (twin/archipelago) untouched.
+  const lowestAllowed = Math.min(baseY, 5.4);
+  let detailedY = Math.max(baseY + hillDetail + cliffBands, lowestAllowed);
+
+  // Terraced "levels": soft-quantize relief above the sea shelf so hillsides
+  // read as walkable tiers. Strong on plateau/rocky islands, subtle on tropical.
+  const terraceStrength = profile.terrainStyle === 'plateau' ? 0.6
+    : profile.terrainStyle === 'rocky' ? 0.42
+      : profile.terrainStyle === 'mountain' ? 0.32
+        : 0.16;
+  const relief = detailedY - seaLift;
+  if (relief > 0.5) {
+    const stepHeight = Math.max(2.4, island.radius * 0.055);
+    const stepIndex = Math.floor(relief / stepHeight);
+    const stepFrac = relief / stepHeight - stepIndex;
+    const eased = stepFrac * stepFrac * (3 - 2 * stepFrac);
+    const steppedRelief = (stepIndex + eased) * stepHeight;
+    detailedY = seaLift + lerp(relief, steppedRelief, terraceStrength * detailMask);
+  }
+
+  const naturalY = detailedY;
 
   // Caves hollow out the heightmap inside their tunnel footprint — the natural
   // surface sweeps down to the cave floor with a smooth lateral/longitudinal falloff

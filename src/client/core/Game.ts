@@ -2592,12 +2592,14 @@ export class Game {
     });
 
     const terrainPositions: number[] = [];
-    const terrainColors: number[] = [];
     const terrainIndices: number[] = [];
-    const radialSegments = lowDetail ? 8 : visualDetail < 0.85 ? 10 : 12;
-    const angularSegments = lowDetail ? 22 : visualDetail < 0.85 ? 28 : 34;
+    // Higher density than before so noise detail, cliff bands, and terraces
+    // from getIslandSurfaceY actually resolve in the mesh.
+    const radialSegments = lowDetail ? 14 : visualDetail < 0.85 ? 18 : 24;
+    const angularSegments = lowDetail ? 36 : visualDetail < 0.85 ? 48 : 64;
     const terrainColor = new THREE.Color();
     const scratchColor = new THREE.Color();
+    const rockSlopeColor = new THREE.Color(0x6b6052);
 
     for (let ring = 0; ring <= radialSegments; ring++) {
       const distRatio = ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9);
@@ -2605,34 +2607,6 @@ export class Game {
         const angle = (segment / angularSegments) * Math.PI * 2;
         const point = surfacePoint(distRatio, angle, 0.02);
         terrainPositions.push(point.x, point.y, point.z);
-
-        const heightNorm = THREE.MathUtils.clamp(point.y / Math.max(r * 0.18, 1), 0, 1);
-        const shoreMask = THREE.MathUtils.smoothstep(distRatio, 0.72, 0.99);
-        const grassMask = THREE.MathUtils.smoothstep(heightNorm, 0.06, 0.5)
-          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.78, 0.98));
-        const jungleMask = THREE.MathUtils.smoothstep(heightNorm, 0.1, 0.44)
-          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.7;
-        const rockMask = THREE.MathUtils.smoothstep(heightNorm, 0.6, 0.94) * (1 - shoreMask * 0.6);
-        const peakMask = THREE.MathUtils.smoothstep(heightNorm, 0.86, 1) * 0.35;
-        const mudMask = THREE.MathUtils.smoothstep(distRatio, 0.62, 0.78) * (1 - shoreMask) * 0.3;
-
-        terrainColor.copy(sandColor);
-        terrainColor.lerp(beachColor, shoreMask * 0.9);
-        terrainColor.lerp(mudColor, mudMask);
-        terrainColor.lerp(grassColor, grassMask * 0.9);
-        terrainColor.lerp(jungleColor, jungleMask);
-        terrainColor.lerp(cliffColor, rockMask * 0.6);
-        terrainColor.lerp(peakColor, peakMask);
-        scratchColor.copy(beachColor).multiplyScalar(THREE.MathUtils.smoothstep(distRatio, 0.9, 1) * 0.14);
-        terrainColor.add(scratchColor);
-
-        // Per-vertex noise for natural variation
-        const vnoise = (rng(ring * 113 + segment * 17) - 0.5) * 0.035;
-        terrainColors.push(
-          THREE.MathUtils.clamp(terrainColor.r + vnoise * 0.5, 0, 1),
-          THREE.MathUtils.clamp(terrainColor.g + vnoise, 0, 1),
-          THREE.MathUtils.clamp(terrainColor.b + vnoise * 0.3, 0, 1),
-        );
       }
     }
 
@@ -2649,9 +2623,52 @@ export class Game {
 
     const terrainGeometry = new THREE.BufferGeometry();
     terrainGeometry.setAttribute('position', new THREE.Float32BufferAttribute(terrainPositions, 3));
-    terrainGeometry.setAttribute('color', new THREE.Float32BufferAttribute(terrainColors, 3));
     terrainGeometry.setIndex(terrainIndices);
     terrainGeometry.computeVertexNormals();
+
+    // Colors are computed after normals: slope (1 - normal.y) drives exposed
+    // rock on steep faces while flat ground keeps sand/grass/jungle.
+    const terrainNormals = terrainGeometry.getAttribute('normal') as THREE.BufferAttribute;
+    const terrainColors: number[] = [];
+    for (let ring = 0; ring <= radialSegments; ring++) {
+      const distRatio = ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9);
+      for (let segment = 0; segment <= angularSegments; segment++) {
+        const index = ring * (angularSegments + 1) + segment;
+        const pointY = terrainPositions[index * 3 + 1];
+        const slope = THREE.MathUtils.clamp(1 - terrainNormals.getY(index), 0, 1);
+
+        const heightNorm = THREE.MathUtils.clamp(pointY / Math.max(r * 0.18, 1), 0, 1);
+        const shoreMask = THREE.MathUtils.smoothstep(distRatio, 0.72, 0.99);
+        const grassMask = THREE.MathUtils.smoothstep(heightNorm, 0.06, 0.5)
+          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.78, 0.98));
+        const jungleMask = THREE.MathUtils.smoothstep(heightNorm, 0.1, 0.44)
+          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.7;
+        const rockMask = THREE.MathUtils.smoothstep(heightNorm, 0.6, 0.94) * (1 - shoreMask * 0.6);
+        const peakMask = THREE.MathUtils.smoothstep(heightNorm, 0.86, 1) * 0.35;
+        const mudMask = THREE.MathUtils.smoothstep(distRatio, 0.62, 0.78) * (1 - shoreMask) * 0.3;
+        const slopeRockMask = THREE.MathUtils.smoothstep(slope, 0.28, 0.62) * (1 - shoreMask);
+
+        terrainColor.copy(sandColor);
+        terrainColor.lerp(beachColor, shoreMask * 0.9);
+        terrainColor.lerp(mudColor, mudMask);
+        terrainColor.lerp(grassColor, grassMask * 0.9);
+        terrainColor.lerp(jungleColor, jungleMask);
+        terrainColor.lerp(cliffColor, rockMask * 0.6);
+        terrainColor.lerp(rockSlopeColor, slopeRockMask * 0.85);
+        terrainColor.lerp(peakColor, peakMask * (1 - slopeRockMask));
+        scratchColor.copy(beachColor).multiplyScalar(THREE.MathUtils.smoothstep(distRatio, 0.9, 1) * 0.14);
+        terrainColor.add(scratchColor);
+
+        // Per-vertex noise for natural variation
+        const vnoise = (rng(ring * 113 + segment * 17) - 0.5) * 0.035;
+        terrainColors.push(
+          THREE.MathUtils.clamp(terrainColor.r + vnoise * 0.5, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.g + vnoise, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.b + vnoise * 0.3, 0, 1),
+        );
+      }
+    }
+    terrainGeometry.setAttribute('color', new THREE.Float32BufferAttribute(terrainColors, 3));
 
     const terrain = new THREE.Mesh(
       terrainGeometry,
