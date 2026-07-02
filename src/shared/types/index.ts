@@ -25,6 +25,8 @@ export interface ShipKeg {
   timer: number;
   /** Kill-streak keg: much heavier hull damage when it detonates on a ship. */
   mega?: boolean;
+  /** Set when a player cuts the fuse — the keg is inert and must never detonate. */
+  defused?: boolean;
 }
 
 export type ShipUpgradeType = 'hull_reinforcement' | 'charged_cannons' | 'swift_sails';
@@ -74,7 +76,7 @@ export interface Ship {
   sinkProgress: number;   // 0-1; 1 = fully sunk
   sinking: boolean;
   cannonCooldowns: number[];  // seconds until ready
-  chainshottedUntil: number; // timestamp
+  chainshottedUntil: number; // sim-time seconds (GameState.serverTime clock)
   /** 0–1 rigging health; chainshot tears canvas and caps speed until repaired at sails */
   sailIntegrity: number;
   /** Seconds accumulated toward next wood plank spent while repairing sails */
@@ -87,6 +89,27 @@ export interface Ship {
   teamColor: number;      // hex for rendering
   alive: boolean;
   upgrades: ShipUpgrade[];
+  // ── Server wave-riding dynamics (optional: set by PhysicsSystem each tick,
+  //    read defensively by the client renderer) ───────────────────────────
+  /** Wave attitude pitch in radians, spring-damped. Positive dips the bow. */
+  pitch?: number;
+  /** Wave attitude roll in radians, spring-damped. Positive raises the starboard rail. */
+  roll?: number;
+  /** Residual water-surface detail (m) the smoothed hull position filtered out —
+   *  the renderer adds it to position.y so hulls sit exactly on the Gerstner surface. */
+  heave?: number;
+  /** Rudder blade deflection in radians; positive = helm-right input. Turning only
+   *  bites with way on the ship. */
+  rudderAngle?: number;
+  /** True when pointed inside the upwind no-go cone with canvas set — sails luff. */
+  luffing?: boolean;
+  // ── Flooding (SoT naval damage loop) ─────────────────────────────────────
+  /** Normalized bilge fill 0 (dry) – 1 (swamped → sinks). Holed sections below
+   *  the waterline take on water; bailing / bilge pump removes it. */
+  waterLevel?: number;
+  /** Net water-level rate/sec from ingress vs the passive pump (client gauge
+   *  trend arrow). Positive = flooding, negative = draining, 0 = dry/holding. */
+  floodingRate?: number;
 }
 
 // ── Players ──────────────────────────────────────────────────
@@ -128,6 +151,8 @@ export interface Player {
   atCrowNest: boolean;
   /** Cutlass guard is held; frontal melee damage is mostly blocked. */
   blocking: boolean;
+  /** True while actively bailing water out of the current ship's bilge. */
+  bailing?: boolean;
   /** 0-1 cutlass lunge charge progress, replicated for third-person windup. */
   cutlassCharge: number;
   cannonIndex: number;
@@ -138,6 +163,8 @@ export interface Player {
   respawnProtectionTimer: number;
   shipBoundaryGraceTimer: number;
   lastDamagedById: string | null;
+  /** Sim time (seconds) when lastDamagedById was set — stale credit expires. */
+  lastDamagedAt: number | null;
   lastDamageWasHeadshot: boolean;
   selectedCannonAmmo: CannonAmmoType;
   kegs: number;
@@ -197,6 +224,39 @@ export interface Projectile {
 }
 
 // ── Islands & World ──────────────────────────────────────────
+/** High-level biome identity — drives client vertex palettes and prop mixes. */
+export type IslandBiome = 'lush' | 'palm_atoll' | 'volcanic' | 'highland' | 'bone';
+
+/** Exact GLB asset names in public/assets/models (see its README manifest). */
+export type IslandPropType =
+  | 'palm_a' | 'palm_b' | 'palm_c'
+  | 'boulder_a' | 'boulder_b' | 'boulder_c'
+  | 'barrel' | 'crate' | 'campfire' | 'lantern_post'
+  | 'watchtower' | 'shipwreck' | 'standing_stones'
+  | 'dock_mid' | 'dock_end';
+
+/** Deterministic decorative/landmark prop. Positions are WORLD-space XZ; Y is
+ *  sampled via getIslandSurfaceY at need (dock_mid/dock_end/dock lanterns sit at
+ *  dock deck height instead of terrain height). */
+export interface IslandProp {
+  type: IslandPropType;
+  x: number;
+  z: number;
+  yaw: number;
+  scale: number;
+}
+
+/** World-space flatten disc applied inside getIslandSurfaceY so structures
+ *  (docks, taverns, camps, stations) sit on level ground. */
+export interface TerrainStamp {
+  x: number;
+  z: number;
+  radius: number;
+  targetY: number;
+  /** 0..1 fraction of the radius used as the smooth falloff rim. */
+  blend: number;
+}
+
 export interface IslandProfile {
   islandHeading: number;
   footprintX: number;
@@ -218,6 +278,29 @@ export interface IslandProfile {
   peakBoost: number;
   /** Identifier for the high-level shape archetype, used by the client for decoration. */
   terrainStyle: 'tropical' | 'mountain' | 'plateau' | 'rocky' | 'twin' | 'archipelago';
+  /** Concave shoreline indentations — narrow deep ones read as coves, wide
+   *  shallow ones as bays. Shared by physics + mesh so the carved water is
+   *  walkable/sailable identically on server and client. */
+  inlets?: IslandInlet[];
+  /** Fixed per-roster-entry seed. Drives the coast-type bands, prop scatter and
+   *  structure stamps deterministically — the same named island is identical
+   *  (up to placement/rotation) every match. */
+  seed?: number;
+  /** Biome identity for client palettes/prop mixes. */
+  biome?: IslandBiome;
+  /** Palette hints (0xRRGGBB) the client keys vertex colors off. */
+  palette?: { sand: number; grass: number; rock: number; foliage: number };
+  /** Shifts the per-angle coast field: -1 ⇒ almost all beach, +1 ⇒ mostly cliff. */
+  coastBias?: number;
+}
+
+export interface IslandInlet {
+  /** World-space angle (radians) of the inlet mouth from the island centre. */
+  angle: number;
+  /** Angular half-width of the mouth (radians). Wider ⇒ bay, narrower ⇒ cove. */
+  width: number;
+  /** 0..1 fraction of the radius the inlet bites inward. */
+  depth: number;
 }
 
 export interface IslandDock {
@@ -254,8 +337,12 @@ export interface IslandCave {
   length: number;
   /** Half-width of the walkable interior (perpendicular to the tunnel axis). */
   interiorRadius: number;
-  /** World Y of the cave floor. Surface height inside the footprint is forced to this. */
+  /** World Y of the cave floor. getCaveFloorY blends the carved trench to this. */
   floorY: number;
+  /** World Y of the interior ceiling (≈ floorY + height). Together with
+   *  interiorRadius/length/floorY this defines the walkable interior box —
+   *  the physics track clamps in-cave player Y to [floorY, ceilingY]. */
+  ceilingY?: number;
 }
 
 export interface Island {
@@ -271,6 +358,10 @@ export interface Island {
   barrels: IslandBarrel[];
   upgradeStations: UpgradeStation[];
   npcs: IslandNpc[];
+  /** Deterministic per-island props (world-space XZ; see IslandProp). */
+  props?: IslandProp[];
+  /** Flatten discs consumed by getIslandSurfaceY (docks/taverns/camps/stations). */
+  stamps?: TerrainStamp[];
 }
 
 export interface TreasureChest {
@@ -413,6 +504,8 @@ export interface Shark {
 export interface GameState {
   phase: GamePhase;
   tick: number;
+  /** Server simulation clock in seconds — clients sync the ocean wave clock to this. */
+  serverTime: number;
   shipsAlive: number;
   storm: StormState;
   ships: Ship[];
@@ -546,6 +639,7 @@ export type InteractIntent =
   | 'crow'
   | 'anchor'
   | 'repair'
+  | 'bail'
   | 'cannon';
 
 export interface PlayerInput {

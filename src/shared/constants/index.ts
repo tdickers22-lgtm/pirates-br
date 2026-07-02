@@ -4,6 +4,10 @@ import type { WeaponId, ShipType } from '../types/index.js';
 export const WORLD = {
   SIZE: 2000,
   HALF: 1000,
+  /** Ships bounce off a soft wall this far inside the world edge. */
+  SHIP_MARGIN: 50,
+  /** Players hard-clamp this far inside the world edge. */
+  PLAYER_MARGIN: 10,
   ISLAND_COUNT: 10,
   SHIP_COUNT: 10,
 } as const;
@@ -36,6 +40,8 @@ export const PLAYER = {
   SHIP_EXIT_GRACE_TIME: 0.6,
   BANANA_HEAL: 25,
   KILL_GOLD_REWARD: 275,
+  /** PvE skeletons pay a small bounty, not the full pirate reward. */
+  SKELETON_KILL_GOLD: 60,
   HEADSHOT_GOLD_BONUS: 40,
   BOARDING_KILL_HEAL: 25,
   BOARDING_GOLD_STEAL_CAP: 180,
@@ -91,6 +97,12 @@ export const SHIP = {
   SAIL_TRIM_RATE: 1.55,
   RUDDER_SLEW: 3.25,
   RUDDER_DECAY: 4.1,
+  /** Physical rudder blade deflection limit (radians). */
+  RUDDER_MAX_ANGLE: 0.62,
+  /** Half-angle of the upwind no-go cone (~35°) — sails luff inside it. */
+  SAIL_NO_GO_ANGLE: 0.611,
+  /** Keel depth below the waterline as a fraction of hull height — grounding tests. */
+  KEEL_DRAFT_RATIO: 0.55,
   ANCHOR_BRAKE: 4.8,
   ANCHOR_RAISE_TIME: 3.2,
   FIRE_DURATION: 18,
@@ -131,6 +143,40 @@ export const SHIP = {
    *  hoists the canvas back up at SAIL_HOIST_RATE * SAIL_REPAIR_HOIST_FACTOR. */
   CHAINSHOT_SAIL_DROP_FACTOR: 1.6,
   SAIL_REPAIR_HOIST_FACTOR: 0.55,
+} as const;
+
+// ── Flooding / bailing (SoT-style naval damage loop) ─────────────
+// A hull section that has been holed (HP ≤ HOLE_THRESHOLD) AND whose waterline
+// hole sits below the local Gerstner surface takes on water. waterLevel is a
+// normalized 0..1 bilge fill. Two holed-below-waterline sections sink an
+// untended ship in ~45–75 s (bigger hulls flood slower). Repairing every hole
+// above the threshold stops ingress; a passive bilge pump then slowly recovers.
+export const FLOODING = {
+  /** HP ratio (per section) at/below which the section is "holed" and can flood. */
+  HOLE_THRESHOLD: 0.5,
+  /** Per-holed-below-waterline section ingress, water-level/sec (sloop reference). */
+  SECTION_INGRESS: 0.0100,
+  /** Per hull-class scale on ingress — bigger hull, slower to fill.
+   *  sloop 50 s / brigantine ~60 s / galleon ~71 s to fill on 2 open sections. */
+  INGRESS_CLASS_SCALE: { sloop: 1.0, brigantine: 0.84, galleon: 0.70 } as Record<ShipType, number>,
+  /** One player bails this much water-level/sec (beats one open hole, loses to two). */
+  BAIL_RATE: 0.014,
+  /** Passive bilge pump drain (× BAIL_RATE) when NOTHING is holed-below-waterline. */
+  PASSIVE_PUMP_FACTOR: 0.25,
+  /** Bots start bailing once standing water exceeds this. */
+  BOT_BAIL_THRESHOLD: 0.35,
+  /** Longitudinal position of the bow/stern flood test point (fraction of length). */
+  SECTION_LON: 0.42,
+  /** A holed section floods when its waterline hole sits within this many metres
+   *  above the local surface (holes are punched near/below the static float line). */
+  HOLE_WATERLINE_DEPTH: 0.30,
+  /** Full bilge lowers the buoyancy/heave target this many metres (freeboard loss →
+   *  more sections dip under → the doom spiral). */
+  FREEBOARD_DROP: 0.8,
+  /** Full bilge cuts max speed to (1 − this): 0.38 → 0.62× at waterLevel 1. */
+  SPEED_PENALTY: 0.38,
+  /** Full bilge dulls rudder authority by this fraction (~40%). */
+  RUDDER_PENALTY: 0.40,
 } as const;
 
 export const SHARK = {

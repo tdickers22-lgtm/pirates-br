@@ -243,6 +243,14 @@ export class InputManager {
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 
+  /** Headless-automation hook: pointer lock never engages under Playwright,
+   *  so screenshot tours drive the camera through this instead of mouse deltas. */
+  setLook(yaw: number, pitch: number) {
+    if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) return;
+    this.yaw = yaw;
+    this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, pitch));
+  }
+
   private isAimHeld() {
     return this.locked && (
       this.mouseButtons.has(2)

@@ -1,6 +1,33 @@
 import * as THREE from 'three';
 import type { Vec3 } from '../../shared/types/index.js';
 
+/** A looped, filtered-noise voice with an optional tremolo/gust LFO on its gain. */
+interface LoopVoice {
+  source: AudioBufferSourceNode;
+  gain: GainNode;
+  filter: BiquadFilterNode;
+  lfo?: OscillatorNode;
+  lfoGain?: GainNode;
+}
+
+/** Options for the spatial one-shot dispatcher. */
+export interface SpatialOpts {
+  /** Extra intensity/size multiplier (splashes, explosions). Default 1. */
+  intensity?: number;
+}
+
+/** Kinds routed through {@link SoundEngine.playAt}. */
+export type SpatialKind =
+  | 'cannonFire'
+  | 'cannonballWhistle'
+  | 'hullImpact'
+  | 'splashSmall'
+  | 'splashLarge'
+  | 'chainshotWhirr'
+  | 'sailRip'
+  | 'kegFuse'
+  | 'kegExplosion';
+
 /**
  * Procedural sound engine — synthesizes every effect from oscillators + filtered
  * noise so the game ships with zero audio assets. CombatFx already does the same
@@ -30,6 +57,20 @@ export class SoundEngine {
     lfo: OscillatorNode;
     lfoGain: GainNode;
   } | null = null;
+  // Ambient bed bus — every looped ambience routes here so big booms can duck it.
+  private busBed: GainNode | null = null;
+  // Sailing beds (driven by setSailingState)
+  private sailingRush: LoopVoice | null = null;
+  private canvasFlap: LoopVoice | null = null;
+  // World ambience beds (driven by setAmbience; max 4 alive: wind, waveBed, crickets, breaker)
+  private crickets: LoopVoice | null = null;
+  private breaker: LoopVoice | null = null;
+  private nextGullAt = 0;
+  private nextThunderAt = 0;
+  // Interior flooding slosh (single instance)
+  private flooding: (LoopVoice & { lfo2?: OscillatorNode }) | null = null;
+  // Per-burning-ship fire crackle loops (capped at 2 concurrent)
+  private readonly fires = new Map<string, LoopVoice>();
 
   unlock(): void {
     if (!this.ctx) {
@@ -63,6 +104,11 @@ export class SoundEngine {
       this.busDry = ctx.createGain();
       this.busDry.gain.value = 1;
       this.busDry.connect(this.master);
+
+      // Ambient bed bus — looped ambience routes through here so booms can duck it.
+      this.busBed = ctx.createGain();
+      this.busBed.gain.value = 1;
+      this.busBed.connect(this.master);
 
       this.noise = this.createNoiseBuffer(ctx);
     }
@@ -127,18 +173,32 @@ export class SoundEngine {
     this.playTone(now + 0.34, 150, 82, 0.2, 0.1, 'sine', 0.06);
   }
 
+  /** One mallet strike. Factored out so the repair sequence can chain several. */
+  private plankHit(when: number, vol = 1): void {
+    // Heavy mallet-on-board: stiff transient, woody body resonance, low thud.
+    this.playNoise(when, 0.05, 1800, 1.2, 0.25 * vol, 'bandpass');
+    this.playTone(when, 240, 110, 0.16, 0.32 * vol, 'triangle', 0.005);
+    this.playTone(when + 0.005, 165, 78, 0.22, 0.28 * vol, 'triangle');
+    this.playTone(when + 0.04, 92, 60, 0.18, 0.18 * vol, 'sine');
+    this.playNoise(when, 0.12, 360, 0.9, 0.16 * vol, 'lowpass');
+    // Hammer ring
+    this.playTone(when, 1320, 880, 0.06, 0.06 * vol, 'square');
+  }
+
   playWoodPlank(): void {
     this.unlock();
     if (!this.ctx) return;
+    this.plankHit(this.ctx.currentTime, 1);
+  }
+
+  /** Three-hit hammering burst for a full repair action. */
+  playRepairSequence(): void {
+    this.unlock();
+    if (!this.ctx) return;
     const now = this.ctx.currentTime;
-    // Heavy mallet-on-board: stiff transient, woody body resonance, low thud.
-    this.playNoise(now, 0.05, 1800, 1.2, 0.25, 'bandpass');
-    this.playTone(now, 240, 110, 0.16, 0.32, 'triangle', 0.005);
-    this.playTone(now + 0.005, 165, 78, 0.22, 0.28, 'triangle');
-    this.playTone(now + 0.04, 92, 60, 0.18, 0.18, 'sine');
-    this.playNoise(now, 0.12, 360, 0.9, 0.16, 'lowpass');
-    // Hammer ring
-    this.playTone(now, 1320, 880, 0.06, 0.06, 'square');
+    const offsets = [0, 0.24, 0.46];
+    const vols = [0.95, 1, 0.85];
+    for (let i = 0; i < 3; i++) this.plankHit(now + offsets[i], vols[i]);
   }
 
   // ── Digging ──────────────────────────────────────────────────────
@@ -274,36 +334,76 @@ export class SoundEngine {
   }
 
   // ── Cannon (fired from a ship cannon) — used for player-launch confirmation ──
-  playCannonFire(): void {
+  /**
+   * @param distance metres from the listener. 0 = on top of you (unchanged local feel).
+   *   Beyond 140m this becomes a soft, delayed distant thump instead of a sharp crack.
+   */
+  playCannonFire(distance = 0): void {
     this.unlock();
-    if (!this.ctx) return;
-    const now = this.ctx.currentTime;
+    const ctx = this.ctx;
+    if (!ctx || !this.busDry) return;
+    const now = ctx.currentTime;
+    if (distance > 140) {
+      this.distantCannonThump(now, distance);
+      return;
+    }
+    const { dest, gain: g } = this.makeSpatialDest(distance);
     // Muzzle crack, low pressure wave, carriage thump, and a short smoky tail.
-    this.playNoise(now, 0.045, 5200, 0.8, 0.34, 'highpass');
-    this.playTone(now, 104, 34, 0.48, 0.54, 'sawtooth', 0.003);
-    this.playTone(now + 0.018, 58, 29, 0.68, 0.34, 'sine', 0.006);
-    this.playNoise(now, 0.34, 180, 0.7, 0.54, 'lowpass');
-    this.playNoise(now + 0.012, 0.3, 1450, 0.95, 0.3, 'bandpass');
-    this.playNoise(now + 0.06, 0.18, 320, 1.1, 0.18, 'bandpass');
-    this.playTone(now + 0.06, 82, 56, 0.22, 0.2, 'triangle', 0.01);
-    this.playNoise(now + 0.18, 0.62, 420, 0.42, 0.2, 'lowpass');
+    this.playNoise(now, 0.045, 5200, 0.8, 0.34 * g, 'highpass', dest);
+    this.playTone(now, 104, 34, 0.48, 0.54 * g, 'sawtooth', 0.003, dest);
+    this.playTone(now + 0.018, 58, 29, 0.68, 0.34 * g, 'sine', 0.006, dest);
+    this.playNoise(now, 0.34, 180, 0.7, 0.54 * g, 'lowpass', dest);
+    this.playNoise(now + 0.012, 0.3, 1450, 0.95, 0.3 * g, 'bandpass', dest);
+    this.playNoise(now + 0.06, 0.18, 320, 1.1, 0.18 * g, 'bandpass', dest);
+    this.playTone(now + 0.06, 82, 56, 0.22, 0.2 * g, 'triangle', 0.01, dest);
+    this.playNoise(now + 0.18, 0.62, 420, 0.42, 0.2 * g, 'lowpass', dest);
+    // Ship-shaking sub + bed duck at close range.
+    if (distance < 28) {
+      const shake = 1 - distance / 28;
+      this.playTone(now, 44, 26, 0.7, 0.4 * shake, 'sine', 0.01, dest);
+      this.duckBeds(0.5, 0.4, 0.4);
+    }
+  }
+
+  /** Low, delayed rumble for a cannon fired far away — no sharp transient reaches you. */
+  private distantCannonThump(now: number, distance: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.busDry) return;
+    const delay = THREE.MathUtils.clamp(distance / 343, 0.2, 1.2); // ~sound-travel time
+    const at = now + delay;
+    const g = 1 / (1 + distance / 60); // gentler rolloff for the low thump
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 320;
+    filter.Q.value = 0.6;
+    filter.connect(this.busDry);
+    this.playTone(at, 70, 40, 0.6, 0.5 * g, 'sine', 0.02, filter);
+    this.playTone(at + 0.02, 48, 30, 0.85, 0.4 * g, 'sine', 0.03, filter);
+    this.playNoise(at, 0.5, 200, 0.5, 0.3 * g, 'lowpass', filter);
+    this.playNoise(at + 0.12, 0.6, 140, 0.4, 0.18 * g, 'lowpass', filter);
   }
 
   // ── Water ────────────────────────────────────────────────────────
-  playSplash(intensity: number): void {
+  /**
+   * @param intensity ~0.35 = small plop, ~1.4 = large splash.
+   * @param distance metres from the listener (0 = local).
+   */
+  playSplash(intensity: number, distance = 0): void {
     this.unlock();
-    if (!this.ctx) return;
+    if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(intensity, 0.1, 1.5);
-    this.playNoise(now, 0.26, 4600, 0.45, 0.36 * volume, 'highpass');
-    this.playNoise(now + 0.025, 0.42, 980, 0.75, 0.38 * volume, 'bandpass');
-    this.playNoise(now + 0.08, 0.55, 260, 0.55, 0.22 * volume, 'lowpass');
-    this.playTone(now + 0.018, 210, 72, 0.32, 0.15 * volume, 'triangle');
-    this.playTone(now + 0.1, 92, 55, 0.44, 0.12 * volume, 'sine', 0.03);
+    const { dest, gain } = this.makeSpatialDest(distance);
+    const v = volume * gain;
+    this.playNoise(now, 0.26, 4600, 0.45, 0.36 * v, 'highpass', dest);
+    this.playNoise(now + 0.025, 0.42, 980, 0.75, 0.38 * v, 'bandpass', dest);
+    this.playNoise(now + 0.08, 0.55, 260, 0.55, 0.22 * v, 'lowpass', dest);
+    this.playTone(now + 0.018, 210, 72, 0.32, 0.15 * v, 'triangle', 0, dest);
+    this.playTone(now + 0.1, 92, 55, 0.44, 0.12 * v, 'sine', 0.03, dest);
     for (let i = 0; i < 5; i++) {
       const at = now + 0.18 + i * 0.055;
-      this.playTone(at, 980 + i * 190, 1500 + i * 240, 0.05, 0.038 * volume, 'sine');
-      this.playNoise(at, 0.04, 5200 + i * 260, 1.35, 0.045 * volume, 'highpass');
+      this.playTone(at, 980 + i * 190, 1500 + i * 240, 0.05, 0.038 * v, 'sine', 0, dest);
+      this.playNoise(at, 0.04, 5200 + i * 260, 1.35, 0.045 * v, 'highpass', dest);
     }
   }
 
@@ -501,9 +601,9 @@ export class SoundEngine {
     }
     this.unlock();
     const ctx = this.ctx;
-    const master = this.master;
+    const bed = this.busBed;
     const noise = this.noise;
-    if (!ctx || !master || !noise) return;
+    if (!ctx || !bed || !noise) return;
     if (!this.wind) {
       const source = ctx.createBufferSource();
       source.buffer = noise;
@@ -525,7 +625,7 @@ export class SoundEngine {
       lfo.start();
       source.connect(filter);
       filter.connect(gain);
-      gain.connect(master);
+      gain.connect(bed);
       source.start();
       this.wind = { source, gain, filter, lfo, lfoGain };
     }
@@ -557,9 +657,9 @@ export class SoundEngine {
     }
     this.unlock();
     const ctx = this.ctx;
-    const master = this.master;
+    const bed = this.busBed;
     const noise = this.noise;
-    if (!ctx || !master || !noise) return;
+    if (!ctx || !bed || !noise) return;
     if (!this.waveBed) {
       const source = ctx.createBufferSource();
       source.buffer = noise;
@@ -572,7 +672,7 @@ export class SoundEngine {
       gain.gain.value = 0;
       source.connect(filter);
       filter.connect(gain);
-      gain.connect(master);
+      gain.connect(bed);
       source.start();
       this.waveBed = { source, gain, filter };
     }
@@ -592,10 +692,10 @@ export class SoundEngine {
     }
     this.unlock();
     const ctx = this.ctx;
-    const dry = this.busDry;
+    const bed = this.busBed;
     const wet = this.busReverb;
     const noise = this.noise;
-    if (!ctx || !dry || !wet || !noise) return;
+    if (!ctx || !bed || !wet || !noise) return;
     if (!this.hullCreak) {
       const source = ctx.createBufferSource();
       source.buffer = noise;
@@ -615,7 +715,7 @@ export class SoundEngine {
       lfoGain.connect(filter.frequency);
       source.connect(filter);
       filter.connect(gain);
-      gain.connect(dry);
+      gain.connect(bed);
       const wetGain = ctx.createGain();
       wetGain.gain.value = 0.18;
       gain.connect(wetGain);
@@ -643,6 +743,479 @@ export class SoundEngine {
     return n * n * boost;
   }
 
+  // ── Spatial one-shot dispatcher ──────────────────────────────────
+  /**
+   * Fire a positioned one-shot with distance-based gain rolloff (~1/(1+d/24)) and a
+   * distance lowpass. Cannon/keg beyond 140m degrade into a soft, delayed distant thump.
+   */
+  playAt(kind: SpatialKind, worldDistance: number, opts: SpatialOpts = {}): void {
+    const d = Math.max(0, worldDistance);
+    const intensity = opts.intensity ?? 1;
+    switch (kind) {
+      case 'cannonFire': this.playCannonFire(d); break;
+      case 'cannonballWhistle': this.playCannonballWhistle(d); break;
+      case 'hullImpact': this.playHullImpact(d); break;
+      case 'splashSmall': this.playSplash(0.4 * intensity, d); break;
+      case 'splashLarge': this.playSplash(1.3 * intensity, d); break;
+      case 'chainshotWhirr': this.playChainshotWhirr(d); break;
+      case 'sailRip': this.playSailRip(d); break;
+      case 'kegFuse': this.playKegFuse(1.6, d); break;
+      case 'kegExplosion': this.playKegExplosion(d); break;
+    }
+  }
+
+  /**
+   * Build a per-shot lowpass→busDry group plus the distance gain multiplier.
+   * Nearer = brighter + louder; distance colours the dry path, gain scales the whole voice.
+   */
+  private makeSpatialDest(distance: number): { dest: BiquadFilterNode; gain: number } {
+    const ctx = this.ctx as AudioContext;
+    const d = Math.max(0, distance);
+    const gain = 1 / (1 + d / 24);
+    const cutoff = THREE.MathUtils.clamp(19000 / (1 + d / 45), 380, 19000);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = cutoff;
+    filter.Q.value = 0.5;
+    filter.connect(this.busDry as GainNode);
+    return { dest: filter, gain };
+  }
+
+  // ── Naval combat one-shots ───────────────────────────────────────
+  /** Airy whistle that rises then falls to fake a cannonball passing by (no true doppler). */
+  playCannonballWhistle(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    this.playTone(now, 900, 1700, 0.16, 0.12 * g, 'sine', 0.02, dest);
+    this.playTone(now + 0.16, 1700, 620, 0.26, 0.12 * g, 'sine', 0, dest);
+    this.playNoise(now, 0.4, 2400, 3.2, 0.06 * g, 'bandpass', dest);
+  }
+
+  /** Cannonball smashing a hull — deep thud under a burst of wood splinters. */
+  playHullImpact(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    this.playTone(now, 120, 46, 0.22, 0.42 * g, 'triangle', 0.004, dest);
+    this.playTone(now + 0.006, 76, 40, 0.3, 0.3 * g, 'sine', 0.008, dest);
+    this.playNoise(now, 0.16, 300, 0.8, 0.4 * g, 'lowpass', dest);
+    this.playNoise(now, 0.12, 1500, 1.1, 0.22 * g, 'bandpass', dest);
+    for (let i = 0; i < 6; i++) {
+      const at = now + 0.01 + Math.random() * 0.14;
+      this.playNoise(at, 0.05, 2600 + Math.random() * 2600, 2.4, 0.1 * g, 'bandpass', dest);
+    }
+    if (distance < 24) this.duckBeds(0.6, 0.3, 0.25);
+  }
+
+  /** Rotating whoosh of chainshot spinning on its chain — deliberate pitch wobble. */
+  playChainshotWhirr(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    this.playNoise(now, 0.55, 780, 1.6, 0.16 * g, 'bandpass', dest);
+    this.playNoise(now + 0.05, 0.42, 2200, 0.9, 0.06 * g, 'highpass', dest);
+    const segs = 8;
+    for (let i = 0; i < segs; i++) {
+      const at = now + i * 0.06;
+      const hi = i % 2 === 0;
+      this.playTone(at, hi ? 320 : 210, hi ? 210 : 320, 0.07, 0.09 * g, 'sawtooth', 0.008, dest);
+    }
+  }
+
+  /** Canvas tearing when chainshot rips a sail. */
+  playSailRip(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    this.playNoise(now, 0.5, 3200, 1.2, 0.18 * g, 'bandpass', dest);
+    this.playNoise(now + 0.04, 0.4, 1500, 1.4, 0.14 * g, 'bandpass', dest);
+    for (let i = 0; i < 10; i++) {
+      const at = now + i * 0.035;
+      this.playNoise(at, 0.03, 4200 - i * 260, 3, 0.05 * g, 'bandpass', dest);
+    }
+    this.playNoise(now + 0.3, 0.24, 900, 0.8, 0.08 * g, 'bandpass', dest);
+  }
+
+  /** Powder-keg fuse hiss. Call once when the fuse lights, passing its burn time. */
+  playKegFuse(duration = 1.6, distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    const dur = THREE.MathUtils.clamp(duration, 0.3, 4);
+    this.playNoise(now, dur, 5200, 1.1, 0.09 * g, 'highpass', dest);
+    this.playNoise(now, dur, 1800, 0.8, 0.05 * g, 'bandpass', dest);
+    const sparks = Math.floor(dur / 0.12);
+    for (let i = 0; i < sparks; i++) {
+      const at = now + i * 0.12 + Math.random() * 0.05;
+      this.playNoise(at, 0.03, 6000 + Math.random() * 2000, 2, 0.05 * g, 'highpass', dest);
+    }
+  }
+
+  /** Powder-keg detonation — sub drop, blast body, debris patter, and a rolling tail. */
+  playKegExplosion(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const delay = distance > 140 ? THREE.MathUtils.clamp(distance / 343, 0.2, 1.2) : 0;
+    const at = now + delay;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    this.playNoise(at, 0.06, 6000, 0.7, 0.4 * g, 'highpass', dest);
+    this.playTone(at, 120, 30, 0.9, 0.7 * g, 'sine', 0.005, dest);
+    this.playTone(at + 0.02, 70, 24, 1.2, 0.55 * g, 'sine', 0.01, dest);
+    this.playNoise(at, 0.5, 260, 0.6, 0.6 * g, 'lowpass', dest);
+    this.playNoise(at + 0.02, 0.4, 1200, 0.9, 0.34 * g, 'bandpass', dest);
+    for (let i = 0; i < 14; i++) {
+      const t = at + 0.2 + Math.random() * 0.9;
+      this.playNoise(t, 0.05, 900 + Math.random() * 3200, 2.2, 0.06 * g, 'bandpass', dest);
+      if (i % 3 === 0) this.playTone(t, 180 + Math.random() * 220, 90, 0.06, 0.05 * g, 'triangle', 0, dest);
+    }
+    this.playNoise(at + 0.15, 1.0, 200, 0.4, 0.24 * g, 'lowpass', dest);
+    this.duckBeds(0.5, 0.6, 0.4);
+  }
+
+  // ── Burning-ship fire crackle (looped, max 2 concurrent) ─────────
+  /** Start a fire crackle loop keyed by ship id. Ignored if two fires already burn. */
+  startFire(id: string, distance = 0): void {
+    this.unlock();
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    if (!ctx || !bed || !this.noise) return;
+    if (this.fires.has(id)) { this.updateFire(id, distance); return; }
+    if (this.fires.size >= 2) return; // cap concurrent burning ships
+    const v = this.makeNoiseLoop('bandpass', 620, 1.1, bed);
+    const trem = this.addGainTremolo(v.gain, 6.5, 0.045); // flicker
+    this.fires.set(id, { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain });
+    this.updateFire(id, distance);
+  }
+
+  /** Update a fire's distance-driven loudness/brightness each frame. */
+  updateFire(id: string, distance = 0): void {
+    const f = this.fires.get(id);
+    if (!f || !this.ctx) return;
+    const g = 1 / (1 + distance / 24);
+    this.ramp(f.gain.gain, 0.12 * g, 0.4);
+    this.ramp(f.filter.frequency, 480 + 260 * g, 0.4);
+  }
+
+  /** Fade out and dispose a fire loop. */
+  stopFire(id: string): void {
+    const f = this.fires.get(id);
+    const ctx = this.ctx;
+    this.fires.delete(id);
+    if (!f || !ctx) return;
+    f.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.6);
+    window.setTimeout(() => {
+      try { f.source.stop(); } catch { /* ignore */ }
+      try { f.lfo?.stop(); } catch { /* ignore */ }
+    }, 800);
+  }
+
+  // ── Interior flooding slosh (single instance) ────────────────────
+  /** Begin the interior water-slosh loop. level is 0..1 waterline. */
+  startFlooding(level = 0): void {
+    this.unlock();
+    const ctx = this.ctx;
+    if (!ctx || !this.busDry || !this.noise) return;
+    if (!this.flooding) {
+      // Route to dry (not the bed bus): flooding is critical feedback, not ambience to duck.
+      const v = this.makeNoiseLoop('lowpass', 420, 0.7, this.busDry);
+      const trem = this.addGainTremolo(v.gain, 0.5, 0.02); // slow swell
+      // Slosh: a slow LFO wobbles the filter cutoff for a moving-water feel.
+      const lfo2 = ctx.createOscillator();
+      lfo2.type = 'sine';
+      lfo2.frequency.value = 0.32;
+      const lfo2Gain = ctx.createGain();
+      lfo2Gain.gain.value = 120;
+      lfo2.connect(lfo2Gain);
+      lfo2Gain.connect(v.filter.frequency);
+      lfo2.start();
+      this.flooding = { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain, lfo2 };
+    }
+    this.updateFlooding(level);
+  }
+
+  /** Follow the waterline: louder + brighter as the interior floods. */
+  updateFlooding(level: number): void {
+    if (!this.ctx) return;
+    if (!this.flooding) { this.startFlooding(level); return; }
+    const l = THREE.MathUtils.clamp(level, 0, 1);
+    this.ramp(this.flooding.gain.gain, 0.03 + l * 0.16, 0.4);
+    this.ramp(this.flooding.filter.frequency, 300 + l * 700, 0.5);
+  }
+
+  /** Fade out and dispose the flooding loop. */
+  stopFlooding(): void {
+    const ctx = this.ctx;
+    const f = this.flooding;
+    this.flooding = null;
+    if (!ctx || !f) return;
+    f.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.7);
+    window.setTimeout(() => {
+      try { f.source.stop(); } catch { /* ignore */ }
+      try { f.lfo?.stop(); } catch { /* ignore */ }
+      try { f.lfo2?.stop(); } catch { /* ignore */ }
+    }, 900);
+  }
+
+  /** Scoop-and-toss bilge bail one-shot. */
+  playBail(): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    // Scoop swish
+    this.playNoise(now, 0.16, 700, 1.2, 0.12, 'bandpass');
+    this.playNoise(now + 0.04, 0.14, 2200, 0.9, 0.08, 'highpass');
+    // Toss-out splash
+    this.playNoise(now + 0.18, 0.3, 3600, 0.5, 0.16, 'highpass');
+    this.playNoise(now + 0.2, 0.34, 800, 0.7, 0.14, 'bandpass');
+    this.playNoise(now + 0.26, 0.4, 240, 0.5, 0.1, 'lowpass');
+    this.playTone(now + 0.2, 180, 90, 0.28, 0.06, 'sine', 0.02);
+  }
+
+  // ── Sailing feel (continuous) ────────────────────────────────────
+  /**
+   * Drive the sailing beds each frame. Owns hull creak (heel/roughness), the along-hull
+   * water rush (speed), and canvas flap (luffing). Wind/waveBed remain owned by setAmbience.
+   */
+  setSailingState(state: { speed01: number; roughness01: number; heel01: number; luffing: boolean }): void {
+    this.unlock();
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    if (!ctx || !bed || !this.noise) return;
+    const speed = THREE.MathUtils.clamp(state.speed01, 0, 1);
+    const rough = THREE.MathUtils.clamp(state.roughness01, 0, 1);
+    const heel = THREE.MathUtils.clamp(state.heel01, 0, 1);
+    // Water rush along the hull scales with speed.
+    if (!this.sailingRush) this.sailingRush = this.makeNoiseLoop('bandpass', 900, 0.7, bed);
+    this.ramp(this.sailingRush.gain.gain, speed * speed * 0.13, 0.3);
+    this.ramp(this.sailingRush.filter.frequency, 480 + speed * 1500 + rough * 380, 0.3);
+    // Hull creak follows heel + roughness + speed.
+    this.setHullCreakIntensity(
+      THREE.MathUtils.clamp(0.14 + heel * 0.6 + rough * 0.34, 0, 1),
+      THREE.MathUtils.clamp(heel * 0.6 + speed * 0.4 + rough * 0.5, 0, 1),
+    );
+    // Luffing adds irregular canvas flap.
+    this.setCanvasFlap(state.luffing ? THREE.MathUtils.clamp(0.4 + speed * 0.5, 0, 1) : 0);
+  }
+
+  private setCanvasFlap(amount: number): void {
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    if (!ctx || !bed || !this.noise) return;
+    if (amount <= 0.001) {
+      if (this.canvasFlap) this.canvasFlap.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
+      return;
+    }
+    if (!this.canvasFlap) {
+      const v = this.makeNoiseLoop('bandpass', 1100, 1.5, bed);
+      const trem = this.addGainTremolo(v.gain, 4.5, 0.05); // flapping bursts
+      this.canvasFlap = { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain };
+    }
+    this.ramp(this.canvasFlap.gain.gain, THREE.MathUtils.clamp(amount, 0, 1) * 0.08, 0.25);
+  }
+
+  // ── World / night ambience ───────────────────────────────────────
+  /**
+   * Crossfade the world beds. Max 4 loops alive: storm wind, ocean wave bed,
+   * night crickets, near-shore breaker. Gulls (day) and thunder (storm) are sparse one-shots.
+   */
+  setAmbience(a: { nightFactor: number; storminess: number; nearShore01: number }): void {
+    this.unlock();
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    if (!ctx || !bed || !this.noise) return;
+    const night = THREE.MathUtils.clamp(a.nightFactor, 0, 1);
+    const storm = THREE.MathUtils.clamp(a.storminess, 0, 1);
+    const shore = THREE.MathUtils.clamp(a.nearShore01, 0, 1);
+    // Bed 1: storm wind.
+    this.setWindIntensity(storm);
+    // Bed 2: ocean wave bed — gentler "lap" at night, swells in a storm.
+    this.setWaveBed(THREE.MathUtils.clamp(THREE.MathUtils.lerp(0.6, 0.32, night) + storm * 0.4, 0, 1));
+    // Bed 3: night crickets (hushed in a storm).
+    this.setCrickets(night * (1 - storm * 0.7));
+    // Bed 4: near-shore breaker wash.
+    this.setBreaker(shore);
+    // Sparse day gulls.
+    const now = ctx.currentTime;
+    if (night < 0.4 && storm < 0.5) {
+      if (this.nextGullAt === 0) this.nextGullAt = now + 4 + Math.random() * 8;
+      else if (now >= this.nextGullAt) {
+        this.playGullCry();
+        this.nextGullAt = now + 8 + Math.random() * 12;
+      }
+    } else {
+      this.nextGullAt = 0;
+    }
+    // Sparse storm thunder, distance-varied.
+    if (storm > 0.45) {
+      if (this.nextThunderAt === 0) this.nextThunderAt = now + 3 + Math.random() * 6;
+      else if (now >= this.nextThunderAt) {
+        this.playThunder(80 + Math.random() * 620);
+        this.nextThunderAt = now + 6 + Math.random() * 8;
+      }
+    } else {
+      this.nextThunderAt = 0;
+    }
+  }
+
+  private setCrickets(amount: number): void {
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    if (!ctx || !bed || !this.noise) return;
+    if (amount <= 0.001) {
+      if (this.crickets) this.crickets.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.6);
+      return;
+    }
+    if (!this.crickets) {
+      const v = this.makeNoiseLoop('bandpass', 4600, 8, bed);
+      const trem = this.addGainTremolo(v.gain, 16, 0.03); // chirp trill
+      this.crickets = { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain };
+    }
+    this.ramp(this.crickets.gain.gain, THREE.MathUtils.clamp(amount, 0, 1) * 0.04, 0.8);
+  }
+
+  private setBreaker(amount: number): void {
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    if (!ctx || !bed || !this.noise) return;
+    if (amount <= 0.001) {
+      if (this.breaker) this.breaker.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.7);
+      return;
+    }
+    if (!this.breaker) {
+      const v = this.makeNoiseLoop('lowpass', 700, 0.6, bed);
+      const trem = this.addGainTremolo(v.gain, 0.16, 0.04); // slow wash swell
+      this.breaker = { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain };
+    }
+    const a = THREE.MathUtils.clamp(amount, 0, 1);
+    this.ramp(this.breaker.gain.gain, a * 0.1, 0.9);
+    this.ramp(this.breaker.filter.frequency, 500 + a * 500, 0.9);
+  }
+
+  private playGullCry(): void {
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const calls = 2 + Math.floor(Math.random() * 2);
+    for (let i = 0; i < calls; i++) {
+      const at = now + i * (0.22 + Math.random() * 0.1);
+      const base = 1200 + Math.random() * 500;
+      // "kee-yah" up-then-down warble
+      this.playTone(at, base, base * 1.5, 0.08, 0.05, 'sawtooth', 0.01);
+      this.playTone(at + 0.08, base * 1.5, base * 0.8, 0.14, 0.05, 'sawtooth', 0);
+      this.playTone(at, base * 2, base * 2.4, 0.1, 0.02, 'sine', 0.01);
+    }
+  }
+
+  /** One thunder crack + rolling rumble. distance in metres varies delay, brightness, and length. */
+  playThunder(distance = 300): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const d = THREE.MathUtils.clamp(distance, 20, 900);
+    const g = 1 / (1 + d / 220);
+    const near = d < 120;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = near ? 1600 : 400 + (1 - d / 900) * 600;
+    filter.Q.value = 0.5;
+    filter.connect(this.busDry);
+    const at = now + THREE.MathUtils.clamp(d / 343, 0, 1.5);
+    if (near) {
+      this.playNoise(at, 0.08, 5000, 0.7, 0.34 * g, 'highpass', filter);
+      this.playTone(at, 90, 40, 0.5, 0.4 * g, 'sine', 0.004, filter);
+    }
+    this.playNoise(at, 1.4 + (1 - g) * 1.2, 220, 0.4, 0.3 * g, 'lowpass', filter);
+    this.playNoise(at + 0.3, 1.2, 140, 0.35, 0.2 * g, 'lowpass', filter);
+    this.playTone(at + 0.1, 60, 34, 1.6, 0.22 * g, 'sine', 0.05, filter);
+    if (near) this.duckBeds(0.55, 0.5, 0.5);
+  }
+
+  // ── Stingers ─────────────────────────────────────────────────────
+  /** Ominous rising swell for a storm-zone shrink warning. < 2.5s. */
+  playStormShrink(): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    this.playTone(now, 55, 110, 1.6, 0.3, 'sawtooth', 0.4);
+    this.playTone(now, 82, 138, 1.6, 0.18, 'triangle', 0.4);
+    this.playNoise(now, 1.6, 300, 0.6, 0.16, 'lowpass');
+    this.playTone(now + 0.2, 220, 660, 1.2, 0.08, 'sawtooth', 0.3);
+    // Tension hit at the crest
+    this.playTone(now + 1.4, 70, 40, 0.6, 0.3, 'sine', 0.02);
+    this.playNoise(now + 1.4, 0.4, 1800, 0.8, 0.12, 'bandpass');
+    this.duckBeds(0.7, 0.4, 0.6);
+  }
+
+  /** Tiny coin tick for animating a gold counter. Pitch rises with index for a run-up feel. */
+  playGoldCount(index = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const freq = 1500 + THREE.MathUtils.clamp(index, 0, 24) * 40;
+    this.playTone(now, freq, freq, 0.03, 0.1, 'sine');
+    this.playTone(now + 0.004, freq * 1.5, freq * 1.5, 0.04, 0.06, 'sine');
+    this.playNoise(now, 0.02, 6000, 1.6, 0.04, 'highpass');
+  }
+
+  // ── Loop / mix helpers ───────────────────────────────────────────
+  private makeNoiseLoop(type: BiquadFilterType, freq: number, q: number, dest: AudioNode): LoopVoice {
+    const ctx = this.ctx as AudioContext;
+    const source = ctx.createBufferSource();
+    source.buffer = this.noise as AudioBuffer;
+    source.loop = true;
+    const filter = ctx.createBiquadFilter();
+    filter.type = type;
+    filter.frequency.value = freq;
+    filter.Q.value = q;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(dest);
+    source.start();
+    return { source, gain, filter };
+  }
+
+  private addGainTremolo(gain: GainNode, rate: number, depth: number): { lfo: OscillatorNode; lfoGain: GainNode } {
+    const ctx = this.ctx as AudioContext;
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = rate;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = depth;
+    lfo.connect(lfoGain);
+    lfoGain.connect(gain.gain);
+    lfo.start();
+    return { lfo, lfoGain };
+  }
+
+  private ramp(param: AudioParam, value: number, time = 0.3): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    param.linearRampToValueAtTime(value, ctx.currentTime + time);
+  }
+
+  /** Sidechain-ish duck of every ambient bed for a boom. depth ~0.5 ≈ -6dB. */
+  private duckBeds(depth = 0.5, hold = 0.5, recover = 0.3): void {
+    const ctx = this.ctx;
+    const bus = this.busBed;
+    if (!ctx || !bus) return;
+    const now = ctx.currentTime;
+    const g = bus.gain;
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(Math.max(0.0001, g.value), now);
+    g.linearRampToValueAtTime(depth, now + 0.03);
+    g.setValueAtTime(depth, now + hold);
+    g.linearRampToValueAtTime(1, now + hold + recover);
+  }
+
   // ── Primitives ───────────────────────────────────────────────────
   /**
    * @param attack optional attack time in seconds (default 0). Use a small attack to soften
@@ -656,6 +1229,7 @@ export class SoundEngine {
     volume: number,
     type: OscillatorType,
     attack = 0,
+    dest?: AudioNode,
   ): void {
     const ctx = this.ctx;
     const dry = this.busDry;
@@ -677,7 +1251,7 @@ export class SoundEngine {
       gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
     }
     osc.connect(gain);
-    gain.connect(dry);
+    gain.connect(dest ?? dry);
     // Send a small portion to reverb for spatial glue
     const wetGain = ctx.createGain();
     wetGain.gain.value = 0.35;
@@ -694,6 +1268,7 @@ export class SoundEngine {
     q: number,
     volume: number,
     filterType: BiquadFilterType,
+    dest?: AudioNode,
   ): void {
     const ctx = this.ctx;
     const dry = this.busDry;
@@ -711,7 +1286,7 @@ export class SoundEngine {
     gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
     source.connect(filter);
     filter.connect(gain);
-    gain.connect(dry);
+    gain.connect(dest ?? dry);
     const wetGain = ctx.createGain();
     wetGain.gain.value = 0.25;
     gain.connect(wetGain);

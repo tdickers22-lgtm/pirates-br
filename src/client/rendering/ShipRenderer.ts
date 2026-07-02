@@ -1,7 +1,8 @@
 import * as THREE from 'three';
-import type { Player, Ship, ShipUpgradeType } from '../../shared/types/index.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import type { Player, Ship, ShipType, ShipUpgradeType } from '../../shared/types/index.js';
 import { SHIP, SHIP_STATS } from '../../shared/constants/index.js';
-import { sampleWind, angleWrap, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getSailStationLocal, getShipCompanionwayConfig } from '../../shared/utils/index.js';
+import { sampleWind, angleWrap, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getSailStationLocal, getShipCompanionwayConfig, gerstnerHeight, WAVE_PARAMS } from '../../shared/utils/index.js';
 import type { RenderQuality } from './Renderer.js';
 
 const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
@@ -12,42 +13,75 @@ const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
 
 const CYLINDER_UP = new THREE.Vector3(0, 1, 0);
 
-function woodTexture(w: number, h: number, dark = false): THREE.CanvasTexture {
+/** Marks canvas art as sRGB (authored colors, not linear data) and enables
+ *  anisotropic filtering so deck planks stay crisp at grazing angles. */
+function finishCanvasTexture(canvas: HTMLCanvasElement): THREE.CanvasTexture {
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+type WoodVariant = 'hull' | 'dark' | 'deck';
+
+const WOOD_PALETTES: Record<WoodVariant, { bases: string[]; separator: string; grain: string; knot: string }> = {
+  // Hull: rich dark planking. Deck: sun-bleached lighter boards. Dark: trim/beams.
+  hull: { bases: ['#5A3418', '#4E2C12', '#633A1B', '#553016'], separator: '#2C180A', grain: '#71431F', knot: '#3E2410' },
+  dark: { bases: ['#2E1A08', '#28160A', '#331E0B'], separator: '#150A03', grain: '#3E2412', knot: '#241105' },
+  deck: { bases: ['#93714A', '#8A6942', '#9C7A50', '#856340'], separator: '#57391D', grain: '#A8865C', knot: '#5E3F20' },
+};
+
+function woodCanvas(w: number, h: number, variant: WoodVariant = 'hull'): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d')!;
-  const base = dark ? '#2E1A08' : '#5A3214';
-  ctx.fillStyle = base;
+  const palette = WOOD_PALETTES[variant];
+  ctx.fillStyle = palette.bases[0];
   ctx.fillRect(0, 0, w, h);
 
   const plankH = Math.floor(h / 7);
   for (let row = 0; row < 7; row++) {
+    // Per-plank hue variation so large surfaces don't read as a flat wash
+    ctx.fillStyle = palette.bases[(row * 3 + 1) % palette.bases.length];
+    ctx.fillRect(0, row * plankH + 2, w, plankH - 2);
     // Plank separator
-    ctx.fillStyle = dark ? '#1A0D04' : '#3A1E0A';
+    ctx.fillStyle = palette.separator;
     ctx.fillRect(0, row * plankH, w, 2);
     // Grain lines within plank
-    ctx.strokeStyle = dark ? '#382012' : '#6A3C1C';
+    ctx.strokeStyle = palette.grain;
     ctx.lineWidth = 1;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 12; i++) {
       const x = Math.random() * w;
+      ctx.globalAlpha = 0.35 + Math.random() * 0.55;
       ctx.beginPath();
       ctx.moveTo(x, row * plankH + 3);
-      ctx.lineTo(x + (Math.random() - 0.5) * 24, (row + 1) * plankH - 1);
+      ctx.lineTo(x + (Math.random() - 0.5) * 30, (row + 1) * plankH - 1);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
+    // Butt joints between plank sections
+    ctx.fillStyle = palette.separator;
+    for (let seam = 0; seam < 2; seam++) {
+      const sx = Math.random() * w;
+      ctx.fillRect(sx, row * plankH + 2, 1.5, plankH - 2);
+    }
     // Knots
-    if (Math.random() < 0.25) {
+    if (Math.random() < 0.3) {
       const kx = Math.random() * w, ky = row * plankH + plankH * 0.5;
-      ctx.fillStyle = dark ? '#2A1408' : '#4A2A10';
+      ctx.fillStyle = palette.knot;
       ctx.beginPath();
       ctx.ellipse(kx, ky, 4, 2.5, 0, 0, Math.PI * 2);
       ctx.fill();
     }
   }
-  return new THREE.CanvasTexture(canvas);
+  return canvas;
 }
 
-function sailTexture(): THREE.CanvasTexture {
+function woodTexture(w: number, h: number, variant: WoodVariant = 'hull'): THREE.CanvasTexture {
+  return finishCanvasTexture(woodCanvas(w, h, variant));
+}
+
+function sailTexture(teamColor?: number): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 256; canvas.height = 256;
   const ctx = canvas.getContext('2d')!;
@@ -69,7 +103,63 @@ function sailTexture(): THREE.CanvasTexture {
     ctx.lineTo(256, y + (Math.random() - 0.5) * 4);
     ctx.stroke();
   }
-  return new THREE.CanvasTexture(canvas);
+  // Team emblem: painted band across the lower third — team readability without
+  // tinting the whole canvas.
+  if (teamColor !== undefined) {
+    const hex = `#${teamColor.toString(16).padStart(6, '0')}`;
+    ctx.globalAlpha = 0.82;
+    ctx.fillStyle = hex;
+    ctx.fillRect(0, 168, 256, 36);
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(0, 210, 256, 7);
+    ctx.globalAlpha = 1;
+  }
+  return finishCanvasTexture(canvas);
+}
+
+/** Streaky foam for the wake ribbon — additive, so black regions vanish. */
+function foamTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * 128;
+    const y = Math.random() * 128;
+    const r = 2 + Math.random() * 9;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    const a = 0.25 + Math.random() * 0.55;
+    g.addColorStop(0, `rgba(235, 248, 255, ${a})`);
+    g.addColorStop(1, 'rgba(235, 248, 255, 0)');
+    ctx.fillStyle = g;
+    // Stretch blobs along V (wake travel direction) for streaky foam
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(0.6, 1.6);
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  const tex = finishCanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+/** Soft radial puff used by bow-spray sprites. */
+function sprayTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(240, 250, 255, 0.9)');
+  g.addColorStop(0.4, 'rgba(220, 240, 252, 0.4)');
+  g.addColorStop(1, 'rgba(210, 235, 250, 0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return finishCanvasTexture(canvas);
 }
 
 function makeHullGeometry(W: number, H: number, L: number): THREE.BufferGeometry {
@@ -171,7 +261,7 @@ function makeBillowedSailGeometry(
   height: number,
   segmentsX = 8,
   segmentsY = 6,
-  billowDepth = Math.min(width, height) * 0.08,
+  billowDepth = Math.min(width, height) * 0.14,
 ): THREE.PlaneGeometry {
   const geo = new THREE.PlaneGeometry(width, height, segmentsX, segmentsY);
   const pos = geo.attributes.position as THREE.BufferAttribute;
@@ -233,7 +323,8 @@ function makeCylinderBetween(
 
 function makeBarrel(
   woodMat: THREE.Material,
-  topColor: number,
+  hoopMat: THREE.Material,
+  lidMat: THREE.Material,
 ): THREE.Group {
   const g = new THREE.Group();
 
@@ -246,7 +337,6 @@ function makeBarrel(
   g.add(body);
 
   // Bulge rings (hoops)
-  const hoopMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.7 });
   for (const hy of [-0.22, 0, 0.22]) {
     const hoop = new THREE.Mesh(
       new THREE.TorusGeometry(0.4, 0.045, 6, 14),
@@ -261,7 +351,7 @@ function makeBarrel(
   // Top lid with colour indicating contents
   const lid = new THREE.Mesh(
     new THREE.CylinderGeometry(0.35, 0.35, 0.06, 10),
-    new THREE.MeshStandardMaterial({ color: topColor, roughness: 0.8 }),
+    lidMat,
   );
   lid.position.y = 0.39;
   lid.castShadow = true;
@@ -276,6 +366,200 @@ function makeBarrel(
   g.add(cap);
 
   return g;
+}
+
+/** Per-type carved figurehead at the stem (bow = +Z). Body is gilded carved wood
+ *  (goldMat), with the team accent on fins / tail / eyes so the ship reads at a
+ *  glance. Deliberately low-poly — it merges into two static meshes per ship. */
+function makeFigurehead(
+  type: ShipType,
+  goldMat: THREE.Material,
+  accentMat: THREE.Material,
+): THREE.Group {
+  const g = new THREE.Group();
+  const add = (
+    geo: THREE.BufferGeometry,
+    mat: THREE.Material,
+    x: number, y: number, z: number,
+    rx = 0, ry = 0, rz = 0,
+    sx = 1, sy = 1, sz = 1,
+  ) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.rotation.set(rx, ry, rz);
+    m.scale.set(sx, sy, sz);
+    m.castShadow = true;
+    g.add(m);
+    return m;
+  };
+
+  if (type === 'sloop') {
+    // Leaping fish arcing up and forward off the stem.
+    add(new THREE.SphereGeometry(0.16, 10, 8), goldMat, 0, 0.02, 0.12, -0.55, 0, 0, 0.72, 0.95, 1.9);
+    // Tail fluke (accent), swept down-aft
+    add(new THREE.ConeGeometry(0.19, 0.36, 4), accentMat, 0, -0.16, -0.16, 2.5, Math.PI * 0.25, 0, 1, 1, 0.22);
+    // Dorsal fin (accent)
+    add(new THREE.ConeGeometry(0.1, 0.22, 3), accentMat, 0, 0.2, 0.02, -0.3, 0, 0, 1, 1, 0.2);
+    // Eye
+    add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, 0.09, 0.11, 0.28);
+    add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, -0.09, 0.11, 0.28);
+  } else if (type === 'brigantine') {
+    // Mermaid silhouette: torso rising, head, and a curled tail below.
+    add(new THREE.ConeGeometry(0.12, 0.42, 8), goldMat, 0, 0.2, 0.08, -0.2, 0, 0, 1, 1, 0.7);
+    add(new THREE.SphereGeometry(0.1, 10, 8), goldMat, 0, 0.44, 0.12);
+    // Hair (accent)
+    add(new THREE.SphereGeometry(0.11, 8, 6), accentMat, 0, 0.5, 0.06, 0, 0, 0, 1, 0.7, 0.9);
+    // Curled fish tail (accent)
+    add(new THREE.ConeGeometry(0.14, 0.5, 6), accentMat, 0, -0.14, -0.02, 0.5, 0, 0, 0.5, 1, 1);
+    add(new THREE.ConeGeometry(0.2, 0.24, 4), accentMat, 0, -0.36, -0.16, 1.9, Math.PI * 0.25, 0, 1, 1, 0.22);
+  } else {
+    // Galleon: fierce sea-dragon head thrusting forward off the beakhead.
+    add(new THREE.CylinderGeometry(0.11, 0.15, 0.44, 8), goldMat, 0, 0.05, -0.04, Math.PI * 0.5 - 0.5, 0, 0); // neck
+    add(new THREE.BoxGeometry(0.2, 0.2, 0.42), goldMat, 0, 0.22, 0.2, -0.35, 0, 0); // skull
+    add(new THREE.ConeGeometry(0.11, 0.34, 5), goldMat, 0, 0.16, 0.42, Math.PI * 0.5 - 0.2, 0, 0); // snout
+    add(new THREE.BoxGeometry(0.18, 0.06, 0.24), accentMat, 0, 0.09, 0.42, -0.2, 0, 0); // lower jaw (accent)
+    // Horns (accent)
+    for (const s of [-1, 1]) add(new THREE.ConeGeometry(0.04, 0.24, 4), accentMat, s * 0.08, 0.36, 0.06, -0.9, 0, s * 0.3);
+    // Mane frills along the neck (accent)
+    for (let i = 0; i < 3; i++) add(new THREE.ConeGeometry(0.06, 0.18, 3), accentMat, 0, 0.02 - i * 0.06, -0.14 - i * 0.06, -0.3, 0, 0, 1, 1, 0.3);
+    // Eyes (accent)
+    for (const s of [-1, 1]) add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, s * 0.09, 0.26, 0.34);
+  }
+  return g;
+}
+
+/** Cargo-hatch grating: a framed grid of slats. Cheap deck furniture; light shows
+ *  through the gaps so the hold (and rising water) reads from above. */
+function makeHatchGrating(
+  w: number,
+  l: number,
+  frameMat: THREE.Material,
+  slatMat: THREE.Material,
+): THREE.Group {
+  const g = new THREE.Group();
+  const fh = 0.12;
+  const hw = w * 0.5, hl = l * 0.5;
+  for (const [x, z, bw, bl] of [
+    [0, hl, w + 0.08, 0.08],
+    [0, -hl, w + 0.08, 0.08],
+    [hw, 0, 0.08, l],
+    [-hw, 0, 0.08, l],
+  ] as const) {
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(bw, fh, bl), frameMat);
+    frame.position.set(x, 0, z);
+    frame.castShadow = true;
+    g.add(frame);
+  }
+  const barsX = Math.max(3, Math.round(w / 0.28));
+  const barsZ = Math.max(3, Math.round(l / 0.28));
+  for (let i = 1; i < barsX; i++) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.04, fh * 0.7, l), slatMat);
+    bar.position.set(-hw + (i / barsX) * w, -0.01, 0);
+    g.add(bar);
+  }
+  for (let i = 1; i < barsZ; i++) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(w, fh * 0.55, 0.04), slatMat);
+    bar.position.set(0, -0.02, -hl + (i / barsZ) * l);
+    g.add(bar);
+  }
+  return g;
+}
+
+/** Warm ship lantern fixture: an emissive amber glass core in a dark metal cage
+ *  with a hanging hook. The glass uses the SHARED glassMat so it merges into one
+ *  controllable mesh whose emissive ramps with night. */
+function makeLanternFixture(glassMat: THREE.Material, metalMat: THREE.Material): THREE.Group {
+  const g = new THREE.Group();
+  const glass = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.3, 0.2), glassMat);
+  glass.position.y = 0;
+  g.add(glass);
+  // Cage: top + bottom caps and four corner posts
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 0.1, 6), metalMat);
+  cap.position.y = 0.2;
+  cap.castShadow = true;
+  g.add(cap);
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.1, 0.08, 6), metalMat);
+  base.position.y = -0.18;
+  g.add(base);
+  for (const sx of [-1, 1] as const) {
+    for (const sz of [-1, 1] as const) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.32, 0.02), metalMat);
+      post.position.set(sx * 0.1, 0, sz * 0.1);
+      g.add(post);
+    }
+  }
+  const hook = new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.014, 5, 8), metalMat);
+  hook.position.y = 0.3;
+  hook.rotation.x = Math.PI * 0.5;
+  g.add(hook);
+  return g;
+}
+
+const NO_MERGE_EXCLUDE: ReadonlySet<THREE.Object3D> = new Set();
+
+/** Rebuilds a geometry so it can be merged with siblings: non-indexed, only
+ *  position/normal/uv attributes, with zero-filled uv when the source has none. */
+function normalizeForMerge(geo: THREE.BufferGeometry, matrix: THREE.Matrix4): THREE.BufferGeometry {
+  const g = geo.index ? geo.toNonIndexed() : geo.clone();
+  for (const name of Object.keys(g.attributes)) {
+    if (name !== 'position' && name !== 'normal' && name !== 'uv') g.deleteAttribute(name);
+  }
+  if (!g.attributes.uv) {
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
+  }
+  g.applyMatrix4(matrix);
+  if (!g.attributes.normal) g.computeVertexNormals();
+  g.clearGroups();
+  g.morphAttributes = {};
+  return g;
+}
+
+/** Bakes every static leaf mesh under `root` into one mesh per material,
+ *  skipping excluded subtrees (anything animated, tinted, or toggled at
+ *  runtime). This is the main per-ship draw-call reduction. */
+function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<THREE.Object3D>) {
+  root.updateMatrixWorld(true);
+  const rootInverse = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const relative = new THREE.Matrix4();
+  const buckets = new Map<THREE.Material, { geos: THREE.BufferGeometry[]; meshes: THREE.Mesh[]; castShadow: boolean; receiveShadow: boolean }>();
+
+  const visit = (obj: THREE.Object3D) => {
+    if (excluded.has(obj)) return;
+    for (const child of obj.children) visit(child);
+    if (obj === root || !(obj as THREE.Mesh).isMesh || (obj as THREE.InstancedMesh).isInstancedMesh) return;
+    const mesh = obj as THREE.Mesh;
+    if (mesh.children.length > 0 || Array.isArray(mesh.material)) return;
+    if (!mesh.geometry.attributes.position) return;
+    let bucket = buckets.get(mesh.material);
+    if (!bucket) {
+      bucket = { geos: [], meshes: [], castShadow: false, receiveShadow: false };
+      buckets.set(mesh.material, bucket);
+    }
+    relative.multiplyMatrices(rootInverse, mesh.matrixWorld);
+    bucket.geos.push(normalizeForMerge(mesh.geometry, relative));
+    bucket.meshes.push(mesh);
+    bucket.castShadow ||= mesh.castShadow;
+    bucket.receiveShadow ||= mesh.receiveShadow;
+  };
+  visit(root);
+
+  for (const [material, bucket] of buckets) {
+    if (bucket.meshes.length < 2) {
+      for (const geo of bucket.geos) geo.dispose();
+      continue;
+    }
+    const merged = mergeGeometries(bucket.geos, false);
+    for (const geo of bucket.geos) geo.dispose();
+    if (!merged) continue;
+    const mesh = new THREE.Mesh(merged, material);
+    mesh.castShadow = bucket.castShadow;
+    mesh.receiveShadow = bucket.receiveShadow;
+    root.add(mesh);
+    for (const original of bucket.meshes) {
+      original.parent?.remove(original);
+      original.geometry.dispose();
+    }
+  }
 }
 
 interface StairwellHole {
@@ -465,7 +749,7 @@ function makeShipInterior(
   // featureless "tarp".
   const holdLantern = new THREE.Mesh(
     new THREE.BoxGeometry(0.18, 0.28, 0.18),
-    new THREE.MeshStandardMaterial({ color: 0xFFD66A, emissive: 0xFF8800, emissiveIntensity: 1.6 }),
+    new THREE.MeshStandardMaterial({ color: 0xFFD66A, emissive: 0xFF8800, emissiveIntensity: 2.0 }),
   );
   holdLantern.position.set(0, H * 0.55, 0);
   g.add(holdLantern);
@@ -488,6 +772,29 @@ interface CannonMeshGroup {
   pitchPivot: THREE.Group;
 }
 
+interface WakeSpray {
+  sprite: THREE.Sprite;
+  velocity: THREE.Vector3;
+  life: number;
+  maxLife: number;
+}
+
+/** Scene-level animated wake: the ribbon lives in WORLD space (never parented
+ *  to the ship) so hull pitch/roll/sinking can't tilt it out of the water. */
+interface ShipWake {
+  group: THREE.Group;
+  ribbon: THREE.Mesh;
+  positions: THREE.BufferAttribute;
+  material: THREE.MeshBasicMaterial;
+  spray: WakeSpray[];
+  sprayCursor: number;
+  sprayTimer: number;
+  scroll: number;
+}
+
+const WAKE_ROWS = 9;
+const WAKE_COLS = 3;
+
 interface ShipMeshGroup {
   root: THREE.Group;
   detailRoot: THREE.Group;
@@ -508,33 +815,104 @@ interface ShipMeshGroup {
   anchor: THREE.Group;
   anchorChain: THREE.Mesh;
   anchorCapstan: THREE.Group;
-  wake: THREE.Mesh;
+  /** Shared warm-amber glass materials whose emissiveIntensity ramps with night. */
+  lanternGlassMats: THREE.MeshStandardMaterial[];
+  /** One warm PointLight per ship (budgeted: only the nearest few get lit at night). */
+  nightLight: THREE.PointLight | null;
+  /** Dark water plane inside the hold, raised by (ship as any).waterLevel. */
+  holdWater: THREE.Mesh | null;
+  holdWaterBase: Float32Array | null;
+  wake: ShipWake;
 }
 
 export class ShipRenderer {
   private shipMeshes: Map<string, ShipMeshGroup> = new Map();
   private scene!: THREE.Scene;
   private quality: RenderQuality = 'balanced';
-  private woodTex!: THREE.CanvasTexture;
   private darkWoodTex!: THREE.CanvasTexture;
+  private deckTex!: THREE.CanvasTexture;
   private sailTex!: THREE.CanvasTexture;
+  private foamTex!: THREE.CanvasTexture;
+  private sprayTex!: THREE.CanvasTexture;
+  private readonly teamSailTex = new Map<number, THREE.CanvasTexture>();
+  private readonly teamHullTex = new Map<number, THREE.CanvasTexture>();
   private readonly tempShipPos = new THREE.Vector3();
   private readonly tempCannonPos = new THREE.Vector3();
   private readonly cannonOperators = new Map<string, Player>();
+  private waveTimeOverride: number | null = null;
+  private windOverride: { direction: number; strength: number } | null = null;
+  private readonly waveMotion = { pitch: 0, roll: 0, heave: 0 };
+  /** 0 = day, 1 = night. Drives lantern glass emissive + per-ship PointLights. */
+  private nightFactor = 0;
 
   init(scene: THREE.Scene, quality: RenderQuality = 'balanced') {
     this.scene = scene;
     this.quality = quality;
-    this.woodTex     = woodTexture(256, 128, false);
-    this.darkWoodTex = woodTexture(256, 128, true);
+    this.darkWoodTex = woodTexture(256, 128, 'dark');
+    this.deckTex     = woodTexture(256, 256, 'deck');
     this.sailTex     = sailTexture();
+    this.foamTex     = foamTexture();
+    this.sprayTex    = sprayTexture();
+  }
+
+  /** Optional external sync point: orchestrator can drive the wave clock used
+   *  for wake/heave sampling. Defaults to the `t` passed to update(). */
+  setWaveTime(t: number) {
+    this.waveTimeOverride = t;
+  }
+
+  /** Optional wind override for sail cloth + pennants. Defaults to sampleWind(t). */
+  setWind(dirRad: number, strength: number) {
+    this.windOverride = { direction: dirRad, strength: THREE.MathUtils.clamp(strength, 0, 1.5) };
+  }
+
+  /** Day↔night lantern control. 0 = day (glass barely emissive, ship lights off),
+   *  1 = night (warm glass glow + one warm PointLight on the nearest few ships).
+   *  Game.ts should call this every frame with the sky's night factor (0–1). */
+  setNightFactor(nf: number) {
+    this.nightFactor = THREE.MathUtils.clamp(nf, 0, 1);
   }
 
   clear() {
     for (const mesh of this.shipMeshes.values()) {
       this.scene.remove(mesh.root);
+      this.scene.remove(mesh.wake.group);
     }
     this.shipMeshes.clear();
+  }
+
+  private getTeamSailTexture(teamColor: number): THREE.CanvasTexture {
+    let tex = this.teamSailTex.get(teamColor);
+    if (!tex) {
+      tex = sailTexture(teamColor);
+      this.teamSailTex.set(teamColor, tex);
+    }
+    return tex;
+  }
+
+  /** Natural wood hull with a painted team stripe along the sheer line. The
+   *  hull UV maps v = y/height, so a band near v≈0.9 hugs the sheer curve —
+   *  no extra stripe meshes, and no whole-hull team tint. */
+  private getTeamHullTexture(teamColor: number): THREE.CanvasTexture {
+    let tex = this.teamHullTex.get(teamColor);
+    if (!tex) {
+      const canvas = woodCanvas(256, 128, 'hull');
+      const ctx = canvas.getContext('2d')!;
+      const hex = `#${teamColor.toString(16).padStart(6, '0')}`;
+      // CanvasTexture flips Y: v≈0.86–0.94 lives near the TOP of the canvas
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = hex;
+      ctx.fillRect(0, 128 * 0.06, 256, 128 * 0.09);
+      // Dark caulked edging above/below the painted band
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = '#1c1008';
+      ctx.fillRect(0, 128 * 0.05, 256, 2);
+      ctx.fillRect(0, 128 * 0.15, 256, 2);
+      ctx.globalAlpha = 1;
+      tex = finishCanvasTexture(canvas);
+      this.teamHullTex.set(teamColor, tex);
+    }
+    return tex;
   }
 
   private buildShipProxy(
@@ -548,14 +926,27 @@ export class ShipRenderer {
     const group = new THREE.Group();
     group.name = 'ship-proxy';
 
-    const teamColor = new THREE.Color(ship.teamColor);
-    const hullMat = new THREE.MeshStandardMaterial({ color: teamColor, roughness: 0.9, metalness: 0 });
+    // Natural wood hull — team identity comes from stripe, flag and sail band.
+    const hullMat = new THREE.MeshStandardMaterial({ color: 0x5c3a1c, roughness: 0.85, metalness: 0.02 });
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x241407, roughness: 0.95 });
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide });
+    const stripeMat = new THREE.MeshStandardMaterial({
+      color: ship.teamColor,
+      emissive: ship.teamColor,
+      emissiveIntensity: 0.3,
+      roughness: 0.6,
+    });
 
     const hull = new THREE.Mesh(new THREE.BoxGeometry(W * 0.82, H * 0.48, L * 0.86), hullMat);
     hull.position.y = H * 0.42;
     group.add(hull);
+
+    // Team stripe along the sheer line — readable at distance without the toy-boat tint
+    for (const sx of [-1, 1] as const) {
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.08, H * 0.12, L * 0.84), stripeMat);
+      stripe.position.set(sx * W * 0.42, H * 0.6, 0);
+      group.add(stripe);
+    }
 
     const deck = new THREE.Mesh(new THREE.BoxGeometry(W * 0.9, H * 0.08, L * 0.72), darkMat);
     deck.position.y = H * 0.9;
@@ -571,7 +962,9 @@ export class ShipRenderer {
       mast.position.set(0, H + mastH * 0.5, mastZ);
       group.add(mast);
 
-      const sail = new THREE.Mesh(new THREE.PlaneGeometry(W * 1.05, H * 1.02), sailMat);
+      const proxySailMat = m === 0 ? sailMat.clone() : sailMat;
+      if (m === 0) proxySailMat.map = this.getTeamSailTexture(ship.teamColor);
+      const sail = new THREE.Mesh(new THREE.PlaneGeometry(W * 1.05, H * 1.02), proxySailMat);
       sail.position.set(0, H + mastH * 0.58, mastZ);
       sail.rotation.y = 0;
       group.add(sail);
@@ -579,17 +972,19 @@ export class ShipRenderer {
     }
 
     const flag = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.9, 0.48),
+      new THREE.PlaneGeometry(1.15, 0.62),
       new THREE.MeshStandardMaterial({
         color: ship.teamColor,
         emissive: ship.teamColor,
-        emissiveIntensity: 0.12,
+        emissiveIntensity: 0.3,
         side: THREE.DoubleSide,
         roughness: 0.85,
       }),
     );
     flag.position.set(0.38, H * 3.9, mastStartZ);
     group.add(flag);
+
+    mergeStaticMeshes(group, new Set<THREE.Object3D>([...proxySails, flag]));
 
     return group;
   }
@@ -600,35 +995,43 @@ export class ShipRenderer {
     group.name = `ship_${ship.id}`;
     const proxySails: THREE.Mesh[] = [];
 
+    // Natural dark wood hull — NO team tint on the whole hull. Team color goes on
+    // the painted sheer stripe (in the texture), flag cloth and main-sail band only.
     const hullMat = new THREE.MeshStandardMaterial({
-      map: this.woodTex,
-      roughness: 0.9,
-      metalness: 0.0,
-      color: new THREE.Color(ship.teamColor),
+      map: this.getTeamHullTexture(ship.teamColor),
+      roughness: 0.82,
+      metalness: 0.02,
       side: THREE.DoubleSide,
     });
     const darkMat = new THREE.MeshStandardMaterial({
       map: this.darkWoodTex,
-      roughness: 0.95,
+      roughness: 0.92,
       metalness: 0.0,
     });
     const deckMat = new THREE.MeshStandardMaterial({
-      map: this.woodTex,
-      roughness: 0.85,
-      color: 0x8B6914,
+      map: this.deckTex,
+      roughness: 0.78,
+      metalness: 0.0,
     });
     const sailMat = new THREE.MeshStandardMaterial({
       map: this.sailTex,
       color: 0xf5edd2,
-      roughness: 0.62,
+      roughness: 0.68,
       emissive: 0x221a08,
       emissiveIntensity: 0.04,
       side: THREE.DoubleSide,
     });
-    const metalMat = new THREE.MeshStandardMaterial({ color: 0x484848, roughness: 0.45, metalness: 0.85 });
-    const brassHardwareMat = new THREE.MeshStandardMaterial({ color: 0x9A6E28, roughness: 0.5, metalness: 0.8 });
+    const teamAccentMat = new THREE.MeshStandardMaterial({
+      color: ship.teamColor,
+      emissive: ship.teamColor,
+      emissiveIntensity: 0.22,
+      roughness: 0.55,
+      metalness: 0.08,
+    });
+    const metalMat = new THREE.MeshStandardMaterial({ color: 0x484848, roughness: 0.4, metalness: 0.88 });
+    const brassHardwareMat = new THREE.MeshStandardMaterial({ color: 0x9A6E28, roughness: 0.42, metalness: 0.82 });
     const ropeCoilMat = new THREE.MeshStandardMaterial({ color: 0x9a8050, roughness: 1 });
-    const barrelWoodMat = new THREE.MeshStandardMaterial({ map: this.darkWoodTex, roughness: 0.95 });
+    const barrelWoodMat = new THREE.MeshStandardMaterial({ map: this.darkWoodTex, roughness: 0.92 });
 
     const W = stats.width, L = stats.length, H = stats.height;
     const upgradeVisuals: Record<ShipUpgradeType, THREE.Object3D[]> = {
@@ -652,6 +1055,7 @@ export class ShipRenderer {
       emissiveIntensity: 0.35,
       side: THREE.DoubleSide,
     });
+    const splinterMat = new THREE.MeshStandardMaterial({ color: 0x140b05, roughness: 1, side: THREE.DoubleSide });
     const addHole = (x: number, y: number, z: number, rotX: number, rotY: number) => {
       const hm = new THREE.Group();
       hm.position.set(x, y, z);
@@ -664,6 +1068,26 @@ export class ShipRenderer {
         new THREE.MeshStandardMaterial({ color: 0x20120a, roughness: 0.95, side: THREE.DoubleSide }),
       );
       hm.add(rim);
+      // Splintered plank shards jutting from the rim — merged into one mesh so a
+      // blown-through hole reads as jagged torn timber, not a clean drilled circle.
+      const shardGeos: THREE.BufferGeometry[] = [];
+      const shardCount = 7;
+      for (let k = 0; k < shardCount; k++) {
+        const a = (k / shardCount) * Math.PI * 2 + 0.3;
+        const len = 0.14 + (k % 3) * 0.06;
+        const cone = new THREE.ConeGeometry(0.05, len, 4);
+        const rq = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, a - Math.PI * 0.5));
+        const pos = new THREE.Vector3(
+          Math.cos(a) * (0.44 + len * 0.5),
+          Math.sin(a) * (0.44 + len * 0.5),
+          (k % 2 ? 0.03 : -0.02),
+        );
+        cone.applyMatrix4(new THREE.Matrix4().compose(pos, rq, new THREE.Vector3(1, 1, 0.5)));
+        shardGeos.push(cone);
+      }
+      const shardsMerged = mergeGeometries(shardGeos, false);
+      for (const sg of shardGeos) sg.dispose();
+      if (shardsMerged) hm.add(new THREE.Mesh(shardsMerged, splinterMat));
       group.add(hm);
       return hm;
     };
@@ -686,6 +1110,28 @@ export class ShipRenderer {
         group.add(stripMesh);
       }
     }
+
+    // Rub rails (wales) — the two proud strakes that run the length of a real hull:
+    // one at the sheer just below the cap rail, one at the turn of the bilge. They
+    // stand slightly proud of the planking and take the taper of the hull.
+    for (const sx of [-1, 1] as const) {
+      for (const wale of [{ y: H * 0.86, r: 0.075, th: 0.12 }, { y: H * 0.5, r: 0.06, th: 0.1 }] as const) {
+        const rubRail = new THREE.Mesh(new THREE.BoxGeometry(wale.r, wale.th, L * 0.8), darkMat);
+        rubRail.position.set(sx * (W * 0.5 + 0.01), wale.y, -L * 0.02);
+        rubRail.rotation.z = -sx * 0.04;
+        rubRail.castShadow = true;
+        group.add(rubRail);
+      }
+    }
+
+    // Painted team band across the transom (side stripe lives in the hull
+    // texture, so it follows the sheer curve exactly).
+    const transomBand = new THREE.Mesh(
+      new THREE.BoxGeometry(W * 0.9, H * 0.09, 0.07),
+      teamAccentMat,
+    );
+    transomBand.position.set(0, H * 0.82, -L * 0.51 - 0.12);
+    group.add(transomBand);
 
     // Hull-reinforcement upgrade: actual bolted armor belts, ribs, and bow/stern plates.
     {
@@ -774,16 +1220,10 @@ export class ShipRenderer {
       emissive: 0x2a1500,
       emissiveIntensity: 0.08,
     });
-    const figurehead = new THREE.Group();
-    figurehead.position.set(0, H * 0.74, L * 0.555);
-    const figureTorso = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.34, 8), figureheadMat);
-    figureTorso.rotation.x = Math.PI;
-    figureTorso.castShadow = true;
-    figurehead.add(figureTorso);
-    const figureHead = new THREE.Mesh(new THREE.SphereGeometry(0.105, 10, 8), figureheadMat);
-    figureHead.position.y = 0.22;
-    figureHead.castShadow = true;
-    figurehead.add(figureHead);
+    // Per-type carved figurehead at the stem, team accent on the fins/tail/eyes.
+    const figurehead = makeFigurehead(ship.type, figureheadMat, teamAccentMat);
+    figurehead.position.set(0, H * 0.72, L * 0.55);
+    figurehead.rotation.x = -0.12;
     group.add(figurehead);
 
     const sternTransom = new THREE.Mesh(
@@ -825,6 +1265,33 @@ export class ShipRenderer {
       halfZ: voidHalfZ,
     });
     group.add(interior);
+
+    // ── Water-in-hull plane ──────────────────────────────────
+    // Dark flooding water inside the hold, visible from above through the open
+    // companionway / hatch grating. Hidden until (ship as any).waterLevel > 0;
+    // its Y rises with the flood level and a few verts ripple in update().
+    const holdWaterGeo = new THREE.PlaneGeometry(W * 0.8, L * 0.82, 6, 8);
+    holdWaterGeo.rotateX(-Math.PI * 0.5);
+    const holdWater = new THREE.Mesh(
+      holdWaterGeo,
+      new THREE.MeshStandardMaterial({
+        color: 0x0a2028,
+        roughness: 0.18,
+        metalness: 0.35,
+        emissive: 0x03141c,
+        emissiveIntensity: 0.4,
+        transparent: true,
+        opacity: 0.9,
+        side: THREE.DoubleSide,
+      }),
+    );
+    holdWater.position.set(0, 0.42, holeCz * 0.4);
+    holdWater.visible = false;
+    holdWater.renderOrder = 1;
+    const holdWaterBase = Float32Array.from(
+      (holdWaterGeo.attributes.position as THREE.BufferAttribute).array as Float32Array,
+    );
+    group.add(holdWater);
 
     // ── Weather deck (split around stairwell — no hatch lids; open companionway like Sea of Thieves)
 
@@ -876,6 +1343,16 @@ export class ShipRenderer {
       endLip.position.set(holeCx, H + 0.07, holeCz + sz * (voidHalfZ + 0.05));
       endLip.castShadow = true;
       group.add(endLip);
+    }
+
+    // Cargo-hold hatch grating amidships (forward of the companionway) — light and
+    // rising floodwater read through its slats from above.
+    {
+      const grateW = Math.min(W * 0.34, 1.4);
+      const grateL = Math.min(L * 0.16, 1.5);
+      const grating = makeHatchGrating(grateW, grateL, darkMat, coamingMat);
+      grating.position.set(W * 0.2, H + 0.13, holeCz + voidHalfZ + grateL * 0.65 + 0.22);
+      group.add(grating);
     }
 
     // Stairwell down to the hold: a single solid run with broad treads, so there
@@ -1244,6 +1721,11 @@ export class ShipRenderer {
     const mastSpacing = L * 0.55 / Math.max(mastCount - 1, 1);
     const mastStartZ = L * 0.22;
 
+    // All rigging collapses into two LineSegments draw calls (rope + ratline)
+    // instead of ~50 individual Line objects per ship.
+    const ropeSegmentPts: THREE.Vector3[] = [];
+    const ratlineSegmentPts: THREE.Vector3[] = [];
+
     for (let m = 0; m < mastCount; m++) {
       const mastZ = mastStartZ - m * mastSpacing;
       const mastH = H * (mastCount === 1 ? 3.6 : 3.1);
@@ -1300,19 +1782,15 @@ export class ShipRenderer {
       group.add(yard);
 
       // Rigging lines from yardarm to deck
-      const rigMat = new THREE.LineBasicMaterial({ color: 0x6a5030 });
       for (const sx of [-1, 1]) {
-        const rigPoints = [
+        ropeSegmentPts.push(
           new THREE.Vector3(sx * yardW * 0.48, H + mastH * 0.82, mastZ),
           new THREE.Vector3(sx * W * 0.44, H + 0.15, mastZ - L * 0.04),
-        ];
-        const rigGeo = new THREE.BufferGeometry().setFromPoints(rigPoints);
-        group.add(new THREE.Line(rigGeo, rigMat));
+        );
       }
 
-      const ratlineMat = new THREE.LineBasicMaterial({ color: 0x4b3520 });
       const addRigLine = (a: THREE.Vector3, b: THREE.Vector3) => {
-        group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), ratlineMat));
+        ratlineSegmentPts.push(a, b);
       };
       for (const sx of [-1, 1] as const) {
         const topA = new THREE.Vector3(sx * mastR * 1.8, H + mastH * 0.78, mastZ - L * 0.025);
@@ -1336,7 +1814,10 @@ export class ShipRenderer {
       // (drops toward deck), normal along +Z (faces forward when "square" to wind).
       // The sail trim animation rotates around Y by `ship.sailAngle`.
       const sailGeo = makeBillowedSailGeometry(yardW * 0.92, mastH * 0.72, 10, 7);
-      const sail = new THREE.Mesh(sailGeo, sailMat.clone());
+      const mastSailMat = sailMat.clone();
+      // Main sail carries the painted team band (team read at distance)
+      if (m === 0) mastSailMat.map = this.getTeamSailTexture(ship.teamColor);
+      const sail = new THREE.Mesh(sailGeo, mastSailMat);
       sail.rotation.order = 'YXZ';
       sail.rotation.y = 0;
       sail.position.set(0, H + mastH * 0.55, mastZ);
@@ -1344,6 +1825,12 @@ export class ShipRenderer {
       sail.userData.hoistHeight = mastH * 0.72;
       sail.userData.hoistCentered = true;
       sail.userData.sailKind = 'square';
+      // Cloth flutter: keep the rest-pose so per-frame displacement is additive
+      sail.userData.clothBase = Float32Array.from(
+        (sailGeo.attributes.position as THREE.BufferAttribute).array as Float32Array,
+      );
+      sail.userData.clothW = yardW * 0.92;
+      sail.userData.clothH = mastH * 0.72;
       sail.castShadow = false;
       sail.receiveShadow = false;
       this.addSwiftSailTrim(sail, yardW * 0.92, mastH * 0.72, upgradeVisuals.swift_sails);
@@ -1468,20 +1955,30 @@ export class ShipRenderer {
     furledSails.push(furledJib);
 
     // Fore-stay rigging (bowsprit to foremast)
-    const stayMat = new THREE.LineBasicMaterial({ color: 0x6a5030 });
     const foreMastZ = mastStartZ;
-    const stayPoints = [
+    ropeSegmentPts.push(
       new THREE.Vector3(0, H + H * 2.15, foreMastZ),
       new THREE.Vector3(0, H + 0.55, L * 0.76),
-    ];
-    const stayGeo = new THREE.BufferGeometry().setFromPoints(stayPoints);
-    group.add(new THREE.Line(stayGeo, stayMat));
+    );
     for (const sx of [-1, 1] as const) {
-      const bowLine = new THREE.BufferGeometry().setFromPoints([
+      ropeSegmentPts.push(
         new THREE.Vector3(sx * W * 0.18, H + 0.52, L * 0.74),
         new THREE.Vector3(0, H + H * 1.95, foreMastZ),
-      ]);
-      group.add(new THREE.Line(bowLine, stayMat));
+      );
+    }
+
+    // Flush all collected rigging into two draw calls
+    if (ropeSegmentPts.length > 0) {
+      group.add(new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(ropeSegmentPts),
+        new THREE.LineBasicMaterial({ color: 0x6a5030 }),
+      ));
+    }
+    if (ratlineSegmentPts.length > 0) {
+      group.add(new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(ratlineSegmentPts),
+        new THREE.LineBasicMaterial({ color: 0x4b3520 }),
+      ));
     }
 
     // ── Cannons ──────────────────────────────────────────────
@@ -1499,7 +1996,22 @@ export class ShipRenderer {
     const oakMat = new THREE.MeshStandardMaterial({ color: 0x4f3520, roughness: 0.95 });
     const wheelMat = new THREE.MeshStandardMaterial({ color: 0x261810, roughness: 0.95 });
     const ironBandMat = new THREE.MeshStandardMaterial({ color: 0x3a3a40, roughness: 0.5, metalness: 0.7 });
-    void darkMat; void metalMat;
+    const boreMat = new THREE.MeshBasicMaterial({ color: 0x040404 });
+    const lashingMat = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
+    const chargedMetalMat = new THREE.MeshStandardMaterial({
+      color: UPGRADE_PENNANT_COLORS.charged_cannons,
+      emissive: 0xff3200,
+      emissiveIntensity: 1.15,
+      roughness: 0.3,
+      metalness: 0.62,
+    });
+    const chargedGlowMat = new THREE.MeshBasicMaterial({
+      color: 0xff6c22,
+      transparent: true,
+      opacity: 0.4,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
     const barrelLen = 1.5;
     const barrelR = 0.18;
     for (let side = 0; side < 2; side++) {
@@ -1547,7 +2059,7 @@ export class ShipRenderer {
         // Dark muzzle bore (interior)
         const bore = new THREE.Mesh(
           new THREE.CylinderGeometry(barrelR * 0.65, barrelR * 0.65, 0.06, 12),
-          new THREE.MeshBasicMaterial({ color: 0x040404 }),
+          boreMat,
         );
         bore.rotation.z = Math.PI * 0.5;
         bore.position.x = barrelLen - 0.1 + 0.13;
@@ -1556,20 +2068,6 @@ export class ShipRenderer {
         const chargeGroup = new THREE.Group();
         chargeGroup.name = 'upgrade-charged-cannon';
         chargeGroup.visible = false;
-        const chargedMetalMat = new THREE.MeshStandardMaterial({
-          color: UPGRADE_PENNANT_COLORS.charged_cannons,
-          emissive: 0xff3200,
-          emissiveIntensity: 1.15,
-          roughness: 0.3,
-          metalness: 0.62,
-        });
-        const chargedGlowMat = new THREE.MeshBasicMaterial({
-          color: 0xff6c22,
-          transparent: true,
-          opacity: 0.4,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-        });
         for (const offset of [0.26, 0.7, 1.05] as const) {
           const chargeBand = new THREE.Mesh(
             new THREE.CylinderGeometry(barrelR * 1.34, barrelR * 1.38, 0.035, 14),
@@ -1658,7 +2156,7 @@ export class ShipRenderer {
         // Lashing rope on the back of the carriage (visual flair)
         const lashing = new THREE.Mesh(
           new THREE.TorusGeometry(0.1, 0.025, 6, 12),
-          new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 }),
+          lashingMat,
         );
         lashing.rotation.y = Math.PI * 0.5;
         lashing.position.set(-0.16, 0.05, 0);
@@ -1686,6 +2184,12 @@ export class ShipRenderer {
         gunportDoor.rotation.z = sideSign * 0.5;
         gunportDoor.castShadow = true;
         group.add(gunportDoor);
+
+        // Merge rigid geometry per pivot: barrel hardware bakes into ~2 meshes
+        // that still swing with the pitch pivot, carriage into a few under root.
+        mergeStaticMeshes(chargeGroup, NO_MERGE_EXCLUDE);
+        mergeStaticMeshes(pitchPivot, new Set<THREE.Object3D>([chargeGroup]));
+        mergeStaticMeshes(cg, new Set<THREE.Object3D>([yawPivot]));
 
         cg.position.set(sideX, H + 0.18, cz);
         cg.rotation.y = side === 0 ? 0 : Math.PI;
@@ -1716,8 +2220,15 @@ export class ShipRenderer {
       barrelConfigs.push({ x: -W * 0.34, z: -L * 0.32, color: 0x6a2808, label: 'rum' });
     }
 
+    const barrelHoopMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.7 });
+    const barrelLidMats = new Map<number, THREE.MeshStandardMaterial>();
     for (const bc of barrelConfigs) {
-      const barrel = makeBarrel(barrelWoodMat, bc.color);
+      let lidMat = barrelLidMats.get(bc.color);
+      if (!lidMat) {
+        lidMat = new THREE.MeshStandardMaterial({ color: bc.color, roughness: 0.8 });
+        barrelLidMats.set(bc.color, lidMat);
+      }
+      const barrel = makeBarrel(barrelWoodMat, barrelHoopMat, lidMat);
       barrel.position.set(bc.x, H + 0.36, bc.z);
       barrel.rotation.y = Math.random() * Math.PI * 2;
       group.add(barrel);
@@ -1744,41 +2255,47 @@ export class ShipRenderer {
     group.add(sternRope);
 
     // ── Lanterns ─────────────────────────────────────────────
-    const lanterns: THREE.PointLight[] = [];
-    const lanternPositions = [
-      { x: 0, y: H + 0.85, z: -L * 0.44 },
-    ];
-    for (const lp of lanternPositions) {
-      const light = new THREE.PointLight(0xFFAA44, 0.9, 18);
-      light.position.set(lp.x, lp.y, lp.z);
-      light.visible = this.quality === 'high';
-      group.add(light);
-      lanterns.push(light);
+    // Warm amber glass (matches the GLB Lantern_Glass palette). ONE shared glass
+    // material per ship so every fixture merges into a single controllable mesh
+    // whose emissive ramps day→night via setNightFactor().
+    const lanternGlassMat = new THREE.MeshStandardMaterial({
+      color: 0xffcf87,
+      emissive: 0xff9a34,
+      emissiveIntensity: 0.15,
+      roughness: 0.32,
+      metalness: 0.1,
+    });
+    const lanternGlassMats = [lanternGlassMat];
 
-      // Lantern housing
-      const lanternGeo = new THREE.BoxGeometry(0.22, 0.32, 0.22);
-      const lanternMesh = new THREE.Mesh(
-        lanternGeo,
-        new THREE.MeshStandardMaterial({ color: 0xFFCC66, emissive: 0xFFAA00, emissiveIntensity: 1.6 }),
-      );
-      lanternMesh.position.set(lp.x, lp.y, lp.z);
-      group.add(lanternMesh);
-
-      // Lantern hook chain
-      const chain = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.02, 0.02, 0.3, 6),
-        metalMat,
-      );
-      chain.position.set(lp.x, lp.y + 0.28, lp.z);
-      group.add(chain);
+    const sternLanternPos = new THREE.Vector3(0, H + 0.9, -L * 0.46);
+    const lanternMounts: THREE.Vector3[] = [sternLanternPos.clone()];
+    if (ship.type === 'sloop') {
+      // Mast lantern lashed to the single mast
+      lanternMounts.push(new THREE.Vector3(0.16, H + 2.15, mastStartZ + 0.12));
+    } else if (ship.type === 'galleon') {
+      // Extra lantern by the helm
+      lanternMounts.push(new THREE.Vector3(W * 0.22, H + 1.5, -L * 0.3));
     }
+    for (const mount of lanternMounts) {
+      const fixture = makeLanternFixture(lanternGlassMat, metalMat);
+      fixture.position.copy(mount);
+      group.add(fixture);
+    }
+
+    // ONE warm PointLight per ship, ~9 m reach. Off by day; at night only the
+    // nearest handful of ships light it (see update()).
+    const nightLight = new THREE.PointLight(0xffb060, 0, 9, 1.6);
+    nightLight.position.copy(sternLanternPos);
+    nightLight.visible = false;
+    group.add(nightLight);
+    const lanterns: THREE.PointLight[] = [nightLight];
 
     // ── Flag ─────────────────────────────────────────────────
     const flagGeo = new THREE.PlaneGeometry(0.85, 0.52);
     const flagMat = new THREE.MeshStandardMaterial({
       color: ship.teamColor,
       emissive: ship.teamColor,
-      emissiveIntensity: 0.08,
+      emissiveIntensity: 0.28,
       side: THREE.DoubleSide,
       roughness: 0.8,
     });
@@ -1852,9 +2369,34 @@ export class ShipRenderer {
       group.add(pennant);
     }
 
+    // Bake all static dressing into one mesh per material — this is where the
+    // per-ship draw-call count collapses. Everything animated, tinted or
+    // visibility-toggled at runtime is excluded and keeps its own object.
+    mergeStaticMeshes(wheelGroup, NO_MERGE_EXCLUDE);
+    mergeStaticMeshes(anchor, NO_MERGE_EXCLUDE);
+    mergeStaticMeshes(anchorCapstan, new Set<THREE.Object3D>([anchorChain]));
+    const mergeExclude = new Set<THREE.Object3D>([
+      ...sails,
+      ...furledSails,
+      ...pennants,
+      ...Object.values(upgradePennants),
+      ...Object.values(upgradeVisuals).flat(),
+      ...Object.values(hullHoles),
+      ...cannonGroups.map((cannon) => cannon.root),
+      wheelGroup,
+      compassNeedle,
+      anchor,
+      anchorCapstan,
+      holdWater,
+    ]);
+    mergeStaticMeshes(group, mergeExclude);
+
     // ── Wake foam ─────────────────────────────────────────────
-    const wake = this.createWakeMesh(W, L);
-    group.add(wake);
+    // Scene-level (NOT parented to the ship): the old wake quad inherited hull
+    // pitch/roll/sinking rotation and reared out of the water as a giant tilted
+    // white rectangle. This one follows the Gerstner surface in world space.
+    const wake = this.createShipWake();
+    this.scene.add(wake.group);
 
     const detailRoot = new THREE.Group();
     detailRoot.name = 'ship-detail-root';
@@ -1891,6 +2433,10 @@ export class ShipRenderer {
       anchor,
       anchorChain,
       anchorCapstan,
+      lanternGlassMats,
+      nightLight,
+      holdWater,
+      holdWaterBase,
       wake,
     });
 
@@ -1974,7 +2520,9 @@ export class ShipRenderer {
   }
 
   update(ships: Ship[], players: Player[], t: number, dt = 1 / 60, snapshotAge = 0, cameraPosition?: THREE.Vector3, localPlayerId?: string) {
-    const wind = sampleWind(t);
+    const wind = this.windOverride ?? sampleWind(t);
+    // `t` is already the ocean clock in Game.ts; setWaveTime() can override it.
+    const waveT = this.waveTimeOverride ?? t;
     const positionAlpha = 1 - Math.exp(-18 * dt);
     const rotationAlpha = 1 - Math.exp(-20 * dt);
     const cannonOperators = this.cannonOperators;
@@ -1984,6 +2532,10 @@ export class ShipRenderer {
       const key = `${player.onShipId}:${player.cannonIndex}`;
       cannonOperators.set(key, player);
     }
+
+    // Night lantern budget: only the nearest few ships get a real PointLight.
+    const nightLightIds = this.pickNightLightShips(ships, cameraPosition);
+    const lanternEmissive = THREE.MathUtils.lerp(0.15, 2.2, this.nightFactor);
 
     for (const ship of ships) {
       let mesh = this.shipMeshes.get(ship.id);
@@ -1996,10 +2548,12 @@ export class ShipRenderer {
         mesh.root.visible = false;
         mesh.detailRoot.visible = false;
         mesh.proxyRoot.visible = false;
+        mesh.wake.group.visible = false;
         continue;
       }
 
       mesh.root.visible = true;
+      const stats = SHIP_STATS[ship.type];
       const activeUpgrades = new Set(ship.upgrades.map(upgrade => upgrade.type));
       this.updateUpgradeVisuals(mesh, activeUpgrades);
       const detailDistance = this.quality === 'low' ? 170 : this.quality === 'balanced' ? 285 : 380;
@@ -2011,9 +2565,24 @@ export class ShipRenderer {
       mesh.detailRoot.visible = detailNear;
       mesh.proxyRoot.visible = !detailNear;
       const extrapolation = Math.min(0.14, snapshotAge + dt * 0.5);
+      // Wave attitude: prefer server-sent pitch/roll/heave when the snapshot
+      // carries them (fields are optional/upcoming — read defensively), else
+      // fall back to sampling the shared Gerstner field client-side.
+      const dyn = ship as Ship & { pitch?: number; roll?: number; heave?: number };
+      const serverPitch = typeof dyn.pitch === 'number' && Number.isFinite(dyn.pitch)
+        ? THREE.MathUtils.clamp(dyn.pitch, -0.5, 0.5) : null;
+      const serverRoll = typeof dyn.roll === 'number' && Number.isFinite(dyn.roll)
+        ? THREE.MathUtils.clamp(dyn.roll, -0.6, 0.6) : null;
+      const serverHeave = typeof dyn.heave === 'number' && Number.isFinite(dyn.heave)
+        ? THREE.MathUtils.clamp(dyn.heave, -2, 2) : null;
+      const motion = this.computeWaveMotion(
+        ship.position.x, ship.position.z, mesh.root.rotation.y,
+        stats.length * 0.5, stats.width * 0.5, waveT,
+      );
+      const heave = ship.sinking ? 0 : (serverHeave ?? motion.heave);
       this.tempShipPos.set(
         ship.position.x + ship.velocity.x * extrapolation,
-        ship.position.y,
+        ship.position.y + heave,
         ship.position.z + ship.velocity.z * extrapolation,
       );
       if (mesh.root.position.distanceToSquared(this.tempShipPos) > 75 * 75) {
@@ -2031,10 +2600,10 @@ export class ShipRenderer {
       if (!detailNear) {
         const visualSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
         const motionPhase = t * 0.9 + ship.id.charCodeAt(0) * 0.37;
-        const wavePitch = Math.sin(motionPhase) * 0.012 + Math.sin(t * 0.47 + ship.position.x * 0.006) * 0.007;
         const steerRoll = THREE.MathUtils.clamp(-ship.angularVelocity * 0.09, -0.05, 0.05);
         const sailLean = THREE.MathUtils.clamp(ship.sailHeight * 0.014 + visualSpeed * 0.0015, 0, 0.035);
-        const rollTarget = Math.sin(motionPhase * 1.18 + ship.position.z * 0.004) * (0.01 + sailLean) + steerRoll;
+        const wavePitch = serverPitch ?? (motion.pitch + Math.sin(motionPhase) * 0.004);
+        const rollTarget = serverRoll ?? (motion.roll + Math.sin(motionPhase * 1.18) * sailLean + steerRoll);
         if (ship.sinking) {
           mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, wavePitch * 0.5, 1 - Math.exp(-4 * dt));
           mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, ship.sinkProgress * Math.PI * 0.36, 1 - Math.exp(-6 * dt));
@@ -2043,6 +2612,7 @@ export class ShipRenderer {
           mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, wavePitch, 1 - Math.exp(-3 * dt));
           mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, rollTarget, 1 - Math.exp(-3 * dt));
         }
+        this.updateWake(mesh, ship, stats, waveT, dt, false);
         continue;
       }
       mesh.wheel.rotation.z -= ship.angularVelocity * 0.22;
@@ -2067,10 +2637,10 @@ export class ShipRenderer {
 
       const visualSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
       const motionPhase = t * 0.9 + ship.id.charCodeAt(0) * 0.37;
-      const wavePitch = Math.sin(motionPhase) * 0.014 + Math.sin(t * 0.47 + ship.position.x * 0.006) * 0.009;
       const steerRoll = THREE.MathUtils.clamp(-ship.angularVelocity * 0.12, -0.07, 0.07);
       const sailLean = THREE.MathUtils.clamp(ship.sailHeight * 0.018 + visualSpeed * 0.002, 0, 0.045);
-      const rollTarget = Math.sin(motionPhase * 1.18 + ship.position.z * 0.004) * (0.012 + sailLean) + steerRoll;
+      const wavePitch = serverPitch ?? (motion.pitch + Math.sin(motionPhase) * 0.005);
+      const rollTarget = serverRoll ?? (motion.roll + Math.sin(motionPhase * 1.18) * sailLean + steerRoll);
 
       // Sinking tilt
       if (ship.sinking) {
@@ -2085,14 +2655,19 @@ export class ShipRenderer {
       // Sail state — keep canvas mostly vertical so it stays visible; tear is subtle
       const rawInt = ship.sailIntegrity ?? 1;
       const sailIntegrity = Number.isFinite(rawInt) ? Math.max(0, Math.min(1, rawInt)) : 1;
-      const chainshotted = Date.now() / 1000 < ship.chainshottedUntil;
+      // chainshottedUntil is in server sim seconds; `t` is the server-synced wave clock
+      const chainshotted = t < ship.chainshottedUntil;
       const tornPitch = (1 - sailIntegrity) * 0.52 + (chainshotted ? 0.12 : 0);
       const sailAlpha = 1 - Math.exp(-11 * dt);
+      // Round-2 field, read defensively: sails luff (flap, depowered) when pointed
+      // into the no-go cone. Force the canvas slack so the cloth flutter goes hard.
+      const luffing = !!(ship as Ship & { luffing?: boolean }).luffing;
       for (const sail of mesh.sails) {
         sail.visible = ship.sailHeight > 0.05;
         const signedRelative = angleWrap(wind.direction - ship.rotation);
         const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.95;
-        const trimCatch = 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE);
+        const rawTrimCatch = 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE);
+        const trimCatch = luffing ? Math.min(rawTrimCatch, 0.08) : rawTrimCatch;
         // Jibs and other stay-sails have a fixed yaw (centerline of the ship).
         // Square sails on yardarms rotate with `ship.sailAngle`.
         const fixedYaw = sail.userData.fixedYaw;
@@ -2111,6 +2686,17 @@ export class ShipRenderer {
         // own local frame (set up at construction). scale.z grows the billow depth.
         const billow = Math.sin(t * 1.2 + sail.position.z * 0.3) * (0.12 + trimCatch * 0.2) * ship.sailHeight * sailIntegrity;
         sail.scale.z = THREE.MathUtils.lerp(sail.scale.z, 1 + billow, sailAlpha);
+        if (sail.visible) {
+          if (sail.userData.sailKind === 'stay') {
+            // Jib has no cloth grid — a leech shiver keeps it alive, stronger when
+            // depowered and hardest when luffing.
+            const shiver = luffing ? 0.055 : 0.012 + (1 - trimCatch) * 0.028;
+            const freq = luffing ? 13.5 : 7.4;
+            sail.rotation.z = Math.sin(t * freq + sail.position.z * 0.5) * shiver * ship.sailHeight;
+          } else {
+            this.updateSailCloth(sail, t, wind.strength, trimCatch, ship.sailHeight, sailIntegrity, luffing);
+          }
+        }
       }
       for (const furled of mesh.furledSails) {
         furled.visible = ship.sailHeight <= 0.12;
@@ -2151,24 +2737,24 @@ export class ShipRenderer {
         cannon.pitchPivot.rotation.z = THREE.MathUtils.lerp(cannon.pitchPivot.rotation.z, desiredPitch, cannonAlpha);
       }
 
-      // Lantern flicker
-      for (const lantern of mesh.lanterns) {
-        lantern.visible = this.quality === 'high' && detailNear;
-        lantern.intensity = lantern.visible ? 1.3 + Math.sin(t * 8.5 + ship.id.charCodeAt(0)) * 0.3 : 0;
+      // Ship lanterns: warm glass emissive ramps day→night (setNightFactor). At
+      // night the nearest few ships also get one real PointLight with fast noise
+      // flicker (deliberately NOT a smooth sine — reads like a real flame).
+      for (const glassMat of mesh.lanternGlassMats) glassMat.emissiveIntensity = lanternEmissive;
+      if (mesh.nightLight) {
+        const wantLight = this.nightFactor > 0.02 && nightLightIds.has(ship.id);
+        mesh.nightLight.visible = wantLight;
+        if (wantLight) {
+          const seed = ship.id.charCodeAt(0) * 1.37 + ship.id.charCodeAt(ship.id.length - 1) * 0.53;
+          const flicker = 0.8 + 0.2 * this.flickerNoise(t * 9 + seed);
+          mesh.nightLight.intensity = this.nightFactor * 1.8 * flicker;
+        } else {
+          mesh.nightLight.intensity = 0;
+        }
       }
 
-      // Wake foam: scale opacity with ship speed
-      {
-        const stats = SHIP_STATS[ship.type];
-        const speed = Math.hypot(ship.velocity.x, ship.velocity.z);
-        const targetAlpha = ship.alive && !ship.sinking
-          ? Math.min(0.75, Math.pow(Math.min(speed / (stats.maxSpeed * 0.18), 1.0), 0.55) * 0.75)
-          : 0;
-        const wakeMat = mesh.wake.material as THREE.MeshBasicMaterial;
-        wakeMat.opacity = THREE.MathUtils.lerp(wakeMat.opacity, targetAlpha, 1 - Math.exp(-3.5 * dt));
-        // Lift wake slightly above wave surface so it doesn't z-fight
-        mesh.wake.position.y = 0.12 - mesh.root.position.y;
-      }
+      // Animated foam wake ribbon + bow spray, tracking the Gerstner surface
+      this.updateWake(mesh, ship, stats, waveT, dt, true);
 
       const hullSections = ['bow', 'stern', 'port', 'starboard'] as const;
       for (const s of hullSections) {
@@ -2177,6 +2763,34 @@ export class ShipRenderer {
         hole.visible = hp < 0.9;
         const sc = THREE.MathUtils.clamp((1 - hp) * 2.5, 0.18, 1.45);
         hole.scale.setScalar(sc);
+      }
+
+      // Water-in-hull: a dark plane rises with the flood level, visible from above
+      // through the open companionway / hatch grating. `waterLevel` is a naval-track
+      // field (read defensively). Past 0.55 the surface sloshes harder as a spill
+      // hint; streaming-water particle FX at the holes is left for the CombatFx pass.
+      if (mesh.holdWater && mesh.holdWaterBase) {
+        const waterLevel = THREE.MathUtils.clamp(
+          (ship as unknown as { waterLevel?: number }).waterLevel ?? 0, 0, 1,
+        );
+        const show = waterLevel > 0.01 && !ship.sinking;
+        mesh.holdWater.visible = show;
+        if (show) {
+          const floorY = 0.5;
+          const topY = stats.height + 0.05;
+          mesh.holdWater.position.y = floorY + (topY - floorY) * waterLevel;
+          const agitation = waterLevel > 0.55 ? 1.9 : 1;
+          const base = mesh.holdWaterBase;
+          const posAttr = mesh.holdWater.geometry.attributes.position as THREE.BufferAttribute;
+          const arr = posAttr.array as Float32Array;
+          const amp = 0.03 * agitation;
+          for (let i = 0; i < posAttr.count; i++) {
+            const i3 = i * 3;
+            arr[i3 + 1] = base[i3 + 1] + Math.sin(t * (1.8 + agitation) + base[i3] * 1.3 + base[i3 + 2] * 0.9) * amp;
+          }
+          posAttr.needsUpdate = true;
+          (mesh.holdWater.material as THREE.MeshStandardMaterial).opacity = 0.82 + 0.12 * Math.min(1, waterLevel * 1.4);
+        }
       }
 
       // Fire visual
@@ -2200,43 +2814,269 @@ export class ShipRenderer {
     }
   }
 
-  private createWakeMesh(W: number, L: number): THREE.Mesh {
-    // V-shaped foam wake that fans out from the stern
-    const sternZ  = -L * 0.42;  // local Z of stern
-    const wakeLen = L * 2.4;
-    const halfNear = W * 0.08;  // narrow at stern
-    const halfFar  = W * 0.72;  // wide at back of wake
+  private createShipWake(): ShipWake {
+    const group = new THREE.Group();
+    group.name = 'ship-wake';
 
-    // Trapezoid: narrow at stern, wide at aft end
-    const verts = new Float32Array([
-      -halfNear, 0, sternZ,
-       halfNear, 0, sternZ,
-      -halfFar,  0, sternZ - wakeLen,
-       halfFar,  0, sternZ - wakeLen,
-    ]);
-    const uvs = new Float32Array([
-      0.5, 0,   0.5, 0,
-      0.0, 1,   1.0, 1,
-    ]);
-    const idx = new Uint16Array([0, 1, 2,  1, 3, 2]);
-
+    // Tapered foam ribbon: WAKE_ROWS rows x 3 columns, positions rewritten
+    // every frame in world space along the ship's track.
+    const vertCount = WAKE_ROWS * WAKE_COLS;
+    const positions = new THREE.BufferAttribute(new Float32Array(vertCount * 3), 3);
+    positions.setUsage(THREE.DynamicDrawUsage);
+    const uvs = new Float32Array(vertCount * 2);
+    const colors = new Float32Array(vertCount * 4);
+    for (let row = 0; row < WAKE_ROWS; row++) {
+      const jt = row / (WAKE_ROWS - 1);
+      const rowAlpha = Math.pow(1 - jt, 1.35);
+      for (let col = 0; col < WAKE_COLS; col++) {
+        const i = row * WAKE_COLS + col;
+        uvs[i * 2] = col / (WAKE_COLS - 1);
+        uvs[i * 2 + 1] = jt * 2; // texture tiles twice along the ribbon
+        const edge = col === 1 ? 1 : 0.32;
+        colors[i * 4] = 1;
+        colors[i * 4 + 1] = 1;
+        colors[i * 4 + 2] = 1;
+        colors[i * 4 + 3] = rowAlpha * edge;
+      }
+    }
+    const indices: number[] = [];
+    for (let row = 0; row < WAKE_ROWS - 1; row++) {
+      for (let col = 0; col < WAKE_COLS - 1; col++) {
+        const a = row * WAKE_COLS + col;
+        const b = a + 1;
+        const c = a + WAKE_COLS;
+        const d = c + 1;
+        indices.push(a, b, c, b, d, c);
+      }
+    }
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-    geo.setAttribute('uv',       new THREE.BufferAttribute(uvs,   2));
-    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    geo.setAttribute('position', positions);
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+    geo.setIndex(indices);
 
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xD8EEF8,
+    const material = new THREE.MeshBasicMaterial({
+      map: this.foamTex.clone(), // per-ship clone so scroll offsets don't fight
+      color: 0xcfe9f5,
+      vertexColors: true,
       transparent: true,
       opacity: 0,
       depthWrite: false,
+      blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
+    material.map!.needsUpdate = true;
 
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.renderOrder = 2;
-    mesh.frustumCulled = false;
-    return mesh;
+    const ribbon = new THREE.Mesh(geo, material);
+    ribbon.renderOrder = 2;
+    ribbon.frustumCulled = false;
+    group.add(ribbon);
+
+    // Bow-spray sprite pool
+    const spray: WakeSpray[] = [];
+    for (let i = 0; i < 8; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.sprayTex,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }));
+      sprite.visible = false;
+      group.add(sprite);
+      spray.push({ sprite, velocity: new THREE.Vector3(), life: 0, maxLife: 0.7 });
+    }
+
+    group.visible = false;
+    return { group, ribbon, positions, material, spray, sprayCursor: 0, sprayTimer: 0, scroll: 0 };
+  }
+
+  private updateWake(
+    mesh: ShipMeshGroup,
+    ship: Ship,
+    stats: typeof SHIP_STATS[keyof typeof SHIP_STATS],
+    waveT: number,
+    dt: number,
+    detailNear: boolean,
+  ) {
+    const wake = mesh.wake;
+    const speed = Math.hypot(ship.velocity.x, ship.velocity.z);
+    const speedFrac = THREE.MathUtils.clamp(speed / Math.max(stats.maxSpeed, 0.001), 0, 1);
+    const foaming = ship.alive && !ship.sinking && speed > 0.4;
+    const targetAlpha = foaming
+      ? Math.min(0.85, Math.pow(Math.min(speed / (stats.maxSpeed * 0.2), 1), 0.6) * (0.35 + speedFrac * 0.5))
+      : 0;
+    wake.material.opacity = THREE.MathUtils.lerp(wake.material.opacity, targetAlpha, 1 - Math.exp(-3.5 * dt));
+
+    let sprayAlive = false;
+    for (const p of wake.spray) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.sprite.visible = false;
+        continue;
+      }
+      sprayAlive = true;
+      p.velocity.y -= 7.5 * dt;
+      p.sprite.position.addScaledVector(p.velocity, dt);
+      const age = 1 - p.life / p.maxLife;
+      const scale = 0.45 + age * 1.6;
+      p.sprite.scale.set(scale, scale * 0.8, 1);
+      p.sprite.material.opacity = (p.life / p.maxLife) * 0.55;
+    }
+
+    wake.group.visible = wake.material.opacity > 0.02 || sprayAlive;
+    if (!wake.group.visible) return;
+
+    const W = stats.width;
+    const L = stats.length;
+    const yaw = mesh.root.rotation.y;
+    const fwdX = Math.sin(yaw), fwdZ = Math.cos(yaw);
+    const latX = Math.cos(yaw), latZ = -Math.sin(yaw);
+    const sternX = mesh.root.position.x - fwdX * L * 0.46;
+    const sternZ = mesh.root.position.z - fwdZ * L * 0.46;
+    const wakeLen = L * (1.1 + speedFrac * 1.5);
+
+    const pos = wake.positions;
+    for (let row = 0; row < WAKE_ROWS; row++) {
+      const jt = row / (WAKE_ROWS - 1);
+      const dist = Math.pow(jt, 1.25) * wakeLen;
+      const sway = Math.sin(waveT * 0.9 + jt * 4.2) * W * 0.05 * jt;
+      const cx = sternX - fwdX * dist + latX * sway;
+      const cz = sternZ - fwdZ * dist + latZ * sway;
+      const half = W * (0.14 + jt * (0.42 + 0.42 * speedFrac));
+      for (let col = 0; col < WAKE_COLS; col++) {
+        const u = col - 1; // -1, 0, 1
+        const x = cx + latX * half * u;
+        const z = cz + latZ * half * u;
+        const y = gerstnerHeight(x, z, waveT, WAVE_PARAMS) + 0.08 + (1 - jt) * 0.04;
+        pos.setXYZ(row * WAKE_COLS + col, x, y, z);
+      }
+    }
+    pos.needsUpdate = true;
+
+    // Scroll foam toward the tail so blobs read as staying put in the water
+    wake.scroll = (wake.scroll - (speed * dt) / Math.max(wakeLen, 1)) % 1;
+    wake.material.map!.offset.y = wake.scroll;
+
+    // Bow spray bursts once the ship is really driving
+    if (detailNear && foaming && speedFrac > 0.4) {
+      wake.sprayTimer -= dt;
+      if (wake.sprayTimer <= 0) {
+        wake.sprayTimer = 0.12 / (0.4 + speedFrac);
+        const bowX = mesh.root.position.x + fwdX * L * 0.5;
+        const bowZ = mesh.root.position.z + fwdZ * L * 0.5;
+        const bowY = gerstnerHeight(bowX, bowZ, waveT, WAVE_PARAMS) + 0.25;
+        for (const side of [-1, 1] as const) {
+          const p = wake.spray[wake.sprayCursor];
+          wake.sprayCursor = (wake.sprayCursor + 1) % wake.spray.length;
+          p.maxLife = 0.5 + Math.random() * 0.35;
+          p.life = p.maxLife;
+          p.sprite.visible = true;
+          p.sprite.position.set(
+            bowX + latX * side * W * 0.32,
+            bowY,
+            bowZ + latZ * side * W * 0.32,
+          );
+          p.velocity.set(
+            latX * side * (1.1 + Math.random() * 1.2) + fwdX * speed * 0.35,
+            1.7 + Math.random() * 1.3 + speedFrac,
+            latZ * side * (1.1 + Math.random() * 1.2) + fwdZ * speed * 0.35,
+          );
+          p.sprite.scale.set(0.45, 0.36, 1);
+          p.sprite.material.opacity = 0.55;
+        }
+      }
+    }
+  }
+
+  /** Samples the shared Gerstner field at bow/stern/port/starboard to derive
+   *  hull attitude coherent with the visible ocean. Amplitudes stay small:
+   *  players on deck are placed in flat world coords by the server. */
+  private computeWaveMotion(x: number, z: number, yaw: number, halfL: number, halfW: number, waveT: number) {
+    const fwdX = Math.sin(yaw), fwdZ = Math.cos(yaw);
+    const latX = Math.cos(yaw), latZ = -Math.sin(yaw);
+    const hBow = gerstnerHeight(x + fwdX * halfL, z + fwdZ * halfL, waveT, WAVE_PARAMS);
+    const hStern = gerstnerHeight(x - fwdX * halfL, z - fwdZ * halfL, waveT, WAVE_PARAMS);
+    const hRight = gerstnerHeight(x + latX * halfW, z + latZ * halfW, waveT, WAVE_PARAMS);
+    const hLeft = gerstnerHeight(x - latX * halfW, z - latZ * halfW, waveT, WAVE_PARAMS);
+    const out = this.waveMotion;
+    // rotation.x > 0 dips the bow (local +z), so pitch follows stern-minus-bow
+    out.pitch = THREE.MathUtils.clamp((hStern - hBow) / (2 * halfL) * 0.85, -0.05, 0.05);
+    out.roll = THREE.MathUtils.clamp((hRight - hLeft) / (2 * halfW) * 0.6, -0.06, 0.06);
+    out.heave = THREE.MathUtils.clamp((hBow + hStern + hRight + hLeft) * 0.25 * 0.45, -0.4, 0.4);
+    return out;
+  }
+
+  /** Cheap 1-D value noise in [0,1): smoothstep-interpolated hashes of the integer
+   *  lattice. Used for lantern flame flicker — chaotic, not a periodic sine. */
+  private flickerNoise(x: number): number {
+    const i = Math.floor(x);
+    const f = x - i;
+    const u = f * f * (3 - 2 * f);
+    const hash = (n: number) => {
+      const s = Math.sin(n * 127.1) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    return hash(i) * (1 - u) + hash(i + 1) * u;
+  }
+
+  /** Light budget: returns the ids of the nearest (up to 6) alive ships to the
+   *  camera that should receive a real PointLight at night. Empty by day. */
+  private pickNightLightShips(ships: Ship[], cam?: THREE.Vector3): Set<string> {
+    const set = new Set<string>();
+    if (this.nightFactor <= 0.02) return set;
+    const alive = ships.filter((s) => s.alive);
+    if (cam) {
+      alive.sort((a, b) =>
+        ((a.position.x - cam.x) ** 2 + (a.position.z - cam.z) ** 2) -
+        ((b.position.x - cam.x) ** 2 + (b.position.z - cam.z) ** 2));
+    }
+    for (let i = 0; i < Math.min(6, alive.length); i++) set.add(alive[i].id);
+    return set;
+  }
+
+  /** CPU cloth: traveling wind ripple plus hard luff flutter when the sail is
+   *  depowered (trim far from the wind). Displaces the low-vert sail plane
+   *  along its billow normal; the yard-attached top edge stays pinned. */
+  private updateSailCloth(
+    sail: THREE.Mesh,
+    t: number,
+    windStrength: number,
+    trimCatch: number,
+    sailHeight: number,
+    sailIntegrity: number,
+    luffing = false,
+  ) {
+    const base = sail.userData.clothBase as Float32Array | undefined;
+    if (!base) return;
+    const w = sail.userData.clothW as number;
+    const h = sail.userData.clothH as number;
+    const minDim = Math.min(w, h);
+    const phase = sail.position.z * 0.7 + sail.position.y * 0.31;
+    const rippleAmp = (0.012 + 0.02 * windStrength) * minDim * sailHeight;
+    const depower = 1 - trimCatch;
+    // Luffing hits the whole sail (not just the leech) with a fast, deep flap.
+    const luffGain = luffing ? 0.14 : 0.055;
+    const luffFreq = luffing ? 16.5 : 11.5;
+    const luffAmp = Math.min(0.55, depower * depower * luffGain * minDim) * sailHeight * (0.4 + 0.6 * sailIntegrity);
+    if (rippleAmp < 0.001 && luffAmp < 0.001) return;
+
+    const posAttr = sail.geometry.attributes.position as THREE.BufferAttribute;
+    const arr = posAttr.array as Float32Array;
+    const invH = 1 / Math.max(h, 0.001);
+    for (let i = 0; i < posAttr.count; i++) {
+      const i3 = i * 3;
+      const x = base[i3];
+      const y = base[i3 + 1];
+      const nyTop = (y + h * 0.5) * invH; // 1 at the yard, 0 at the foot
+      const pin = 1 - nyTop * nyTop;
+      const ripple = Math.sin(t * 2.7 + x * 0.85 + y * 0.55 + phase) * rippleAmp;
+      const luff = Math.sin(t * luffFreq + x * 2.7 + phase * 1.7) * luffAmp;
+      arr[i3 + 2] = base[i3 + 2] + (ripple + luff) * pin;
+    }
+    posAttr.needsUpdate = true;
+    sail.geometry.computeVertexNormals();
   }
 
   private createFireParticles(): THREE.Points {

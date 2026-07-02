@@ -22,3 +22,6 @@ build/
 .vite/
 .DS_Store
 *.log
+
+# stale nested duplicate of this repo (182MB) — never commit
+/pirates-br/

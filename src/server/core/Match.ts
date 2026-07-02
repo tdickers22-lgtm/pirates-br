@@ -1,11 +1,11 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal,
+  GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { SERVER_TICK_MS, SNAPSHOT_RATE, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_UPGRADES, SHIP_STATS, WEAPONS, WORLD, WILDLIFE } from '../../shared/constants/index.js';
+import { SERVER_TICK_MS, SNAPSHOT_RATE, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_UPGRADES, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
-import { PhysicsSystem } from '../systems/PhysicsSystem.js';
+import { PhysicsSystem, applyShipRudderSteering } from '../systems/PhysicsSystem.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { HitscanTrace } from '../systems/WeaponSystem.js';
 import { StormSystem } from '../systems/StormSystem.js';
@@ -22,11 +22,15 @@ import {
   randAngle,
   dist2D,
   angleWrap,
+  clamp,
   getMainMastLocalZ,
   getCrowNestStandingY,
   getShipCompanionwayConfig,
+  gerstnerHeight,
+  WAVE_PARAMS,
   intersectRaySeaRock,
 } from '../../shared/utils/index.js';
+import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition,
@@ -48,6 +52,19 @@ const TEAM_COLORS = [
 
 type ShipSpawn = ReturnType<MapGenerator['generateShipSpawns']>[number];
 
+type OneShotAction =
+  | 'interact'
+  | 'trade'
+  | 'wheel'
+  | 'reload'
+  | 'jump'
+  | 'placeKeg'
+  | 'dropChest'
+  | 'special'
+  | 'cannonAmmo'
+  | 'slot'
+  | 'barrelTakeAll';
+
 interface ConnectedClient {
   ws: WebSocket;
   playerId: string;
@@ -62,19 +79,9 @@ interface ConnectedClient {
    * Server applies client.lastInput every tick until a fresh one arrives, so press-style
    * flags (interact, trade, useWheelItem, cannonAmmo, slot) would otherwise re-fire 60×/sec.
    */
-  consumedSeq: {
-    interact: number;
-    trade: number;
-    wheel: number;
-    reload: number;
-    jump: number;
-    placeKeg: number;
-    dropChest: number;
-    special: number;
-    cannonAmmo: number;
-    slot: number;
-    barrelTakeAll: number;
-  };
+  consumedSeq: Record<OneShotAction, number>;
+  /** Sim time each rate-limited one-shot was last accepted — seq dedupe alone is spoofable. */
+  lastOneShotAt: Partial<Record<OneShotAction, number>>;
 }
 
 export interface MatchHumanResult {
@@ -118,6 +125,22 @@ const CUTLASS_CHARGE_MIN_TAP = 0.02;
 const CUTLASS_LUNGE_COOLDOWN = 1.05;
 const CUTLASS_LUNGE_DAMAGE = 50;
 const CUTLASS_LUNGE_IMPULSE = 32;
+/** Kill credit for prior damage expires after this long (storm/drown deaths). */
+const KILL_CREDIT_WINDOW_SECONDS = 90;
+/** Catch-up steps per timer callback — bounds the death spiral after a stall. */
+const MAX_CATCHUP_TICKS = 5;
+/** Minimum sim-time interval between accepted one-shot actions (anti-spam). */
+const ONE_SHOT_MIN_INTERVAL: Partial<Record<OneShotAction, number>> = {
+  interact: 0.2,
+  wheel: 0.15,
+  trade: 0.3,
+  barrelTakeAll: 0.3,
+};
+const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<InteractIntent>([
+  'barrel', 'chest', 'board', 'dock', 'mermaid', 'keg_diffuse', 'upgrade',
+  'gold_hoarder', 'stow_chest', 'helm', 'sails', 'sail_hoist', 'sail_angle',
+  'crow', 'anchor', 'repair', 'bail', 'cannon',
+]);
 
 export class Match {
   readonly id: string;
@@ -127,6 +150,8 @@ export class Match {
   private state!: GameState;
   private t = 0;
   private tickCount = 0;
+  private lastTickWallMs = 0;
+  private tickBacklogSec = 0;
   private sharkSpawnCooldown = 0;
   private configuredBotCount = 0;
   private tickInterval: ReturnType<typeof setInterval> | null = null;
@@ -161,6 +186,8 @@ export class Match {
   private shipLastDamagedByPlayer = new Map<string, { attackerId: string; at: number }>();
   /** Per-player: previous frame had jump key held — used for reliable cannon self-launch edge detection. */
   private lastJumpHeldByPlayer = new Map<string, boolean>();
+  /** Per-bot cooldown (sim seconds) before the next plank-repair while flooding. */
+  private botRepairCooldownAt = new Map<string, number>();
 
   constructor(opts: MatchOptions) {
     this.id = opts.matchId;
@@ -171,8 +198,32 @@ export class Match {
   start(): void {
     if (this.tickInterval) return;
     this.state.phase = 'playing';
-    this.tickInterval = setInterval(() => this.tick(), SERVER_TICK_MS);
+    this.lastTickWallMs = performance.now();
+    this.tickBacklogSec = 0;
+    this.tickInterval = setInterval(() => this.runTicks(), SERVER_TICK_MS);
     console.log(`[Match ${this.id}] started — bots: ${this.configuredBotCount}`);
+  }
+
+  /**
+   * Fixed-step sim driven by a wall-clock accumulator. setInterval fires late
+   * under load, so we run enough fixed-dt steps per callback for sim time to
+   * track wall time, capped at MAX_CATCHUP_TICKS to avoid a death spiral.
+   */
+  private runTicks() {
+    const now = performance.now();
+    this.tickBacklogSec += (now - this.lastTickWallMs) / 1000;
+    this.lastTickWallMs = now;
+    const step = SERVER_TICK_MS / 1000;
+    let steps = 0;
+    while (this.tickBacklogSec >= step && steps < MAX_CATCHUP_TICKS) {
+      this.tickBacklogSec -= step;
+      this.tick();
+      steps++;
+    }
+    // After an extreme stall, drop the surplus backlog instead of grinding through it.
+    if (this.tickBacklogSec > step * MAX_CATCHUP_TICKS) {
+      this.tickBacklogSec = step * MAX_CATCHUP_TICKS;
+    }
   }
 
   stop(): void {
@@ -234,6 +285,7 @@ export class Match {
     this.state = {
       phase: 'waiting',
       tick: 0,
+      serverTime: 0,
       shipsAlive: ships.length,
       storm: this.storm.buildInitialState(),
       ships,
@@ -281,6 +333,7 @@ export class Match {
       sailControlMode: null,
       atCrowNest: false,
       blocking: false,
+      bailing: false,
       cutlassCharge: 0,
       cannonIndex: 0,
       nearChestId: null,
@@ -290,6 +343,7 @@ export class Match {
       respawnProtectionTimer: 0,
       shipBoundaryGraceTimer: 0,
       lastDamagedById: null,
+      lastDamagedAt: null,
       lastDamageWasHeadshot: false,
       selectedCannonAmmo: 'cannonball',
       kegs: PLAYER.STARTING_KEGS,
@@ -440,6 +494,7 @@ export class Match {
         slot: -1,
         barrelTakeAll: -1,
       },
+      lastOneShotAt: {},
     };
     this.clients.set(playerId, client);
 
@@ -591,9 +646,11 @@ export class Match {
 
   private handleMessage(client: ConnectedClient, msg: NetMsg) {
     switch (msg.type) {
-      case 'player_input':
-        client.lastInput = msg.payload as PlayerInput;
+      case 'player_input': {
+        const input = this.sanitizeInput(msg.payload);
+        if (input) client.lastInput = input;
         break;
+      }
       case 'trade_action':
         this.handleTradeAction(client.playerId, msg.payload as TradeActionPayload);
         break;
@@ -610,6 +667,7 @@ export class Match {
     player.sailControlMode = null;
     player.atCrowNest = false;
     player.blocking = false;
+    player.bailing = false;
     player.cutlassCharge = 0;
   }
 
@@ -679,6 +737,7 @@ export class Match {
     this.state.tick++;
 
     if (this.state.phase !== 'playing') return;
+    this.state.serverTime = this.t;
 
     this.updateRespawns(dt);
 
@@ -694,11 +753,8 @@ export class Match {
       }
     }
 
-    for (const ship of this.state.ships) {
-      if (!ship.alive || ship.sinking) continue;
-      const helmed = this.state.players.some((p) => p.atHelm && p.onShipId === ship.id);
-      if (!helmed) ship.angularVelocity *= Math.exp(-dt * SHIP.RUDDER_DECAY);
-    }
+    // Ship rotation integration + rudder decay for unhelmed ships lives in
+    // PhysicsSystem.updateShips so external impulses turn every hull.
 
     // Update bots
     this.bots.update(
@@ -723,6 +779,7 @@ export class Match {
     this.updateSkeletonWaves(dt);
     this.updateIslandSkeletons(dt);
     this.processBotLooting();
+    this.updateBotFlooding(dt);
 
     // Update weapon reloads
     this.weapons.update(dt, this.state.players);
@@ -774,16 +831,12 @@ export class Match {
     // Check ship sunk
     for (const ship of this.state.ships) {
       if (!ship.alive || ship.sinking) continue;
-      const sections = [ship.hull.bow, ship.hull.stern, ship.hull.port, ship.hull.starboard];
-      const avg = sections.reduce((sum, value) => sum + value, 0) / sections.length;
-      if (sections.some((value) => value <= 0) || avg <= 0.18) {
-        this.startShipSinking(ship, false, this.getRecentShipSinkAttackerId(ship));
-      }
+      this.evaluateShipSinking(ship);
     }
 
     // Clean dead projectiles
     this.state.projectiles = this.state.projectiles.filter(p => p.alive && p.age < p.maxAge);
-    this.state.kegs = this.state.kegs.filter((keg) => keg.timer > 0);
+    this.state.kegs = this.state.kegs.filter((keg) => keg.timer > 0 && !keg.defused);
 
     // Count alive ships
     this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
@@ -804,11 +857,82 @@ export class Match {
    * Returns true at most once per unique input.seq for the given action key.
    * Without this, server replays of `client.lastInput` every tick would re-fire
    * one-shots like interact/trade/wheel use 60× per second.
+   * Rate-limited actions additionally enforce a minimum sim-time interval, since
+   * a hostile client can bump seq every packet.
    */
-  private consumeOneShot(client: ConnectedClient, action: keyof ConnectedClient['consumedSeq'], seq: number): boolean {
+  private consumeOneShot(client: ConnectedClient, action: OneShotAction, seq: number): boolean {
     if (client.consumedSeq[action] === seq) return false;
     client.consumedSeq[action] = seq;
+    const minInterval = ONE_SHOT_MIN_INTERVAL[action];
+    if (minInterval !== undefined) {
+      const last = client.lastOneShotAt[action];
+      if (last !== undefined && this.t - last < minInterval) return false;
+      client.lastOneShotAt[action] = this.t;
+    }
     return true;
+  }
+
+  /**
+   * Validate and normalize a raw player_input payload. Returns null (input is
+   * dropped) when any required numeric is non-finite. Enum-ish fields fall back
+   * to null rather than rejecting the whole packet.
+   */
+  private sanitizeInput(raw: unknown): PlayerInput | null {
+    if (typeof raw !== 'object' || raw === null) return null;
+    const input = raw as Record<keyof PlayerInput, unknown>;
+    const seq = input.seq;
+    const yaw = input.yaw;
+    const pitch = input.pitch;
+    if (typeof seq !== 'number' || !Number.isFinite(seq)) return null;
+    if (typeof yaw !== 'number' || !Number.isFinite(yaw)) return null;
+    if (typeof pitch !== 'number' || !Number.isFinite(pitch)) return null;
+
+    const slot = input.slot === 0 || input.slot === 1 || input.slot === 2 || input.slot === 3
+      ? input.slot
+      : null;
+    const wheelIndex = input.wheelIndex === 0 || input.wheelIndex === 1 || input.wheelIndex === 2 || input.wheelIndex === 3
+      ? input.wheelIndex
+      : null;
+    const cannonAmmo = input.cannonAmmo === 'cannonball' || input.cannonAmmo === 'firebomb' || input.cannonAmmo === 'chainshot'
+      ? input.cannonAmmo
+      : null;
+    const interactIntent = typeof input.interactIntent === 'string'
+      && VALID_INTERACT_INTENTS.has(input.interactIntent as InteractIntent)
+      ? input.interactIntent as InteractIntent
+      : null;
+
+    return {
+      seq,
+      ts: typeof input.ts === 'number' && Number.isFinite(input.ts) ? input.ts : 0,
+      forward: !!input.forward,
+      back: !!input.back,
+      left: !!input.left,
+      right: !!input.right,
+      jump: !!input.jump,
+      jumpPressed: !!input.jumpPressed,
+      fire: !!input.fire,
+      aim: !!input.aim,
+      interact: !!input.interact,
+      interactHeld: !!input.interactHeld,
+      anchor: !!input.anchor,
+      sailRaise: !!input.sailRaise,
+      sailLower: !!input.sailLower,
+      sailLeft: !!input.sailLeft,
+      sailRight: !!input.sailRight,
+      trade: !!input.trade,
+      reload: !!input.reload,
+      placeKeg: !!input.placeKeg,
+      dropChest: !!input.dropChest,
+      specialAttack: !!input.specialAttack,
+      slot,
+      cannonAmmo,
+      yaw: angleWrap(yaw),
+      pitch: clamp(pitch, -Math.PI / 2, Math.PI / 2),
+      wheelIndex,
+      useWheelItem: !!input.useWheelItem,
+      barrelTakeAll: !!input.barrelTakeAll,
+      interactIntent,
+    };
   }
 
   private applyInput(client: ConnectedClient, input: PlayerInput, dt: number) {
@@ -1029,8 +1153,6 @@ export class Match {
 
     // Ship controls
     if (ship && player.onShipId === ship.id) {
-      const stats = SHIP_STATS[ship.type];
-
       if (player.atSails) {
         // Chainshot keeps the sail capped at the integrity ceiling; you have to repair
         // (interact + wood) to hoist the canvas back up past the damage line.
@@ -1061,6 +1183,23 @@ export class Match {
         }
       }
 
+      // Bail the bilge: hold interact with the bail action selected. Continuous
+      // BAIL_RATE/s while held (SoT bucket work). Player.bailing drives the HUD.
+      const wantsBail =
+        input.interactHeld
+        && input.interactIntent === 'bail'
+        && !player.atCannon
+        && !player.atHelm
+        && !player.atSails
+        && !player.atCrowNest
+        && (ship.waterLevel ?? 0) > 0;
+      if (wantsBail) {
+        ship.waterLevel = Math.max(0, (ship.waterLevel ?? 0) - FLOODING.BAIL_RATE * dt);
+        player.bailing = true;
+      } else {
+        player.bailing = false;
+      }
+
       // Repair torn sails (hold interact + wood at sail station). Repairing both
       // restores rigging integrity and physically hoists the canvas back up.
       if (player.atSails && ship.sailIntegrity < 1 && input.interactHeld) {
@@ -1087,20 +1226,17 @@ export class Match {
         if (input.right) steerInput += 1;
         if (input.forward) ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + 0.48 * dt);
         if (input.back) ship.sailHeight = Math.max(0, ship.sailHeight - 0.6 * dt);
-        const chainshotted = Date.now() / 1000 < ship.chainshottedUntil;
-        const speed = Math.sqrt(ship.velocity.x * ship.velocity.x + ship.velocity.z * ship.velocity.z);
-        const speedTurnFactor = Math.max(0.42, Math.min(1, speed / Math.max(1, stats.maxSpeed * 0.36)));
-        const maxOmega = stats.turnRate * (0.5 + ship.sailHeight * 0.5)
-          * (chainshotted ? 0.88 : 1)
-          * (ship.sailIntegrity < 0.5 ? 0.9 : 1)
-          * speedTurnFactor;
-        const targetOmega = -steerInput * maxOmega;
-        const rudderBlend = 1 - Math.exp(-dt * SHIP.RUDDER_SLEW);
-        ship.angularVelocity += (targetOmega - ship.angularVelocity) * rudderBlend;
-        if (steerInput === 0) {
-          ship.angularVelocity *= Math.exp(-dt * SHIP.RUDDER_DECAY * 0.35);
-        }
-        ship.rotation += ship.angularVelocity * dt;
+        const chainshotted = this.t < ship.chainshottedUntil;
+        // Rudder + way: the helm slews ship.rudderAngle toward the input and the
+        // blade only bites with water flowing past it — full-sail handling keeps
+        // the classic turnRate cap, a stationary ship barely answers the helm.
+        // Chainshot fouls the rigging AND the helm — ~25% rudder authority cut
+        // while active (waterLevel dulls it further inside applyShipRudderSteering).
+        const omegaCapScale = (0.5 + ship.sailHeight * 0.5)
+          * (chainshotted ? 0.75 : 1)
+          * (ship.sailIntegrity < 0.5 ? 0.9 : 1);
+        applyShipRudderSteering(ship, dt, steerInput, omegaCapScale);
+        // Rotation itself is integrated in PhysicsSystem.updateShips for all ships.
       }
     }
 
@@ -1348,6 +1484,7 @@ export class Match {
       const damage = hit.damage * blockScale;
       const knockback = hit.knockback * (blockScale < 1 ? 0.32 : 1);
       target.lastDamagedById = player.id;
+      target.lastDamagedAt = this.t;
       target.lastDamageWasHeadshot = false;
       target.health -= damage;
       this.awardPlayerHitGold(player.id, damage);
@@ -1780,6 +1917,7 @@ export class Match {
 
   private updateKegs(dt: number) {
     for (const keg of this.state.kegs) {
+      if (keg.defused) continue; // cut fuse — inert until cleanup removes it
       const ship = this.syncKegPosition(keg);
       if (keg.shipId && (!ship || !ship.alive || ship.sinking)) {
         keg.timer = 0;
@@ -1793,6 +1931,7 @@ export class Match {
   }
 
   private explodeKeg(keg: ShipKeg) {
+    if (keg.defused) return;
     this.syncKegPosition(keg);
     const attacker = this.getPlayer(keg.plantedById);
     const hullDamageMult = keg.mega ? 5 : 1;
@@ -1822,6 +1961,7 @@ export class Match {
         + (SHIP.KEG_PLAYER_DAMAGE - SHIP.KEG_PLAYER_MIN_DAMAGE) * Math.pow(damageScale, 1.7)
       ) * playerDamageMult;
       player.lastDamagedById = attacker?.id ?? null;
+      player.lastDamagedAt = attacker ? this.t : null;
       player.lastDamageWasHeadshot = false;
       player.health -= damage;
       if (attacker) {
@@ -1979,6 +2119,66 @@ export class Match {
     }
   }
 
+  /**
+   * A ship sinks when a section is completely destroyed, its average hull is
+   * shattered, OR its bilge fills (waterLevel ≥ 1) — the usual SoT path: holes
+   * flood the hull faster than an unattended crew can bail. All three routes
+   * reuse the same sink/elimination flow (loot drop, crew, respawn unchanged).
+   */
+  private evaluateShipSinking(ship: Ship) {
+    if (!ship.alive || ship.sinking) return;
+    const sections = [ship.hull.bow, ship.hull.stern, ship.hull.port, ship.hull.starboard];
+    const avg = sections.reduce((sum, value) => sum + value, 0) / sections.length;
+    if (
+      sections.some((value) => value <= 0)
+      || avg <= 0.18
+      || (ship.waterLevel ?? 0) >= 1
+    ) {
+      this.startShipSinking(ship, false, this.getRecentShipSinkAttackerId(ship));
+    }
+  }
+
+  /**
+   * Minimal bot damage-control (Match-side so BotSystem stays untouched): a bot
+   * crewing a flooding ship plugs the worst hole with a plank (stops ingress),
+   * then bails standing water once it climbs past BOT_BAIL_THRESHOLD.
+   */
+  private updateBotFlooding(dt: number) {
+    for (const player of this.state.players) {
+      if (!player.isBot || player.state === 'eliminated' || player.state === 'respawning') continue;
+      const ship = this.getAliveShip(player.shipId);
+      if (!ship || player.onShipId !== ship.id) {
+        if (player.bailing) player.bailing = false;
+        continue;
+      }
+      const water = ship.waterLevel ?? 0;
+      const holedSection = this.getWeakestHoledSection(ship);
+
+      // Priority 1: plug the hole so ingress stops (throttled, consumes planks).
+      if (holedSection && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t) {
+        if (this.consumeRepairPlank(player, ship)) {
+          this.physics.repairHullSection(ship, holedSection, SHIP.REPAIR_HP);
+          this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL);
+        }
+      }
+
+      // Priority 2: bail down deep water.
+      if (water > FLOODING.BOT_BAIL_THRESHOLD) {
+        ship.waterLevel = Math.max(0, water - FLOODING.BAIL_RATE * dt);
+        player.bailing = true;
+      } else if (player.bailing) {
+        player.bailing = false;
+      }
+    }
+  }
+
+  /** Weakest hull section that has been holed (≤ HOLE_THRESHOLD), else null. */
+  private getWeakestHoledSection(ship: Ship): keyof Ship['hull'] | null {
+    const weakest = this.getWeakestHullSection(ship);
+    if (weakest && ship.hull[weakest] <= FLOODING.HOLE_THRESHOLD) return weakest;
+    return null;
+  }
+
   private updateFieldRepairs(dt: number) {
     for (const ship of this.state.ships) {
       if (!ship.alive || ship.sinking) continue;
@@ -2031,6 +2231,9 @@ export class Match {
   }
 
   private diffuseKeg(keg: ShipKeg) {
+    // Flag first — a bare timer=0 would read as "fuse burnt down" and detonate
+    // in the same tick's updateKegs pass.
+    keg.defused = true;
     keg.timer = 0;
   }
 
@@ -2171,13 +2374,7 @@ export class Match {
   }
 
   private getCannonMuzzlePosition(ship: Ship, cannonIndex: number, yaw: number, pitch: number) {
-    const stats = SHIP_STATS[ship.type];
-    const cannon = this.getCannonDeckPosition(ship, cannonIndex);
-    return {
-      x: ship.position.x + cannon.x * Math.cos(ship.rotation) + cannon.z * Math.sin(ship.rotation) + Math.sin(yaw) * Math.cos(pitch) * 1.04,
-      y: ship.position.y + stats.height + 0.28 + Math.sin(pitch) * 0.32,
-      z: ship.position.z + cannon.z * Math.cos(ship.rotation) - cannon.x * Math.sin(ship.rotation) + Math.cos(yaw) * Math.cos(pitch) * 1.04,
-    };
+    return this.weapons.getCannonMuzzlePosition(ship, cannonIndex, yaw, pitch);
   }
 
   private getShipFloorY(position: Vec3, ship: Ship) {
@@ -2235,11 +2432,16 @@ export class Match {
     }>();
 
     for (const trace of traces) {
-      const playerHit = this.findClosestFirearmHit(shooter, trace);
-      const sharkHit = this.findClosestSharkHit(trace);
-      const wildlifeHit = this.findClosestWildlifeHit(trace);
-      const kegHit = this.findClosestKegHit(trace);
-      const seaRockHit = this.findClosestSeaRockHit(trace);
+      // Terrain and ship hulls clamp the trace before any target test — a hit
+      // beyond the first solid surface never lands.
+      const occlusionDistance = this.getFirearmOcclusionDistance(shooter, trace);
+      const occluded = occlusionDistance < trace.range;
+      const effectiveTrace = occluded ? { ...trace, range: occlusionDistance } : trace;
+      const playerHit = this.findClosestFirearmHit(shooter, effectiveTrace);
+      const sharkHit = this.findClosestSharkHit(effectiveTrace);
+      const wildlifeHit = this.findClosestWildlifeHit(effectiveTrace);
+      const kegHit = this.findClosestKegHit(effectiveTrace);
+      const seaRockHit = this.findClosestSeaRockHit(effectiveTrace);
       const closestDistance = Math.min(
         playerHit?.distance ?? Infinity,
         sharkHit?.distance ?? Infinity,
@@ -2335,6 +2537,7 @@ export class Match {
         const damage = trace.damage * (hit.headshot ? this.getHeadshotMultiplier(trace.weaponId) : 1);
         const preserveCritical = hit.player.lastDamagedById === shooter.id && hit.player.lastDamageWasHeadshot;
         hit.player.lastDamagedById = shooter.id;
+        hit.player.lastDamagedAt = this.t;
         hit.player.lastDamageWasHeadshot = hit.headshot || preserveCritical;
         hit.player.health -= damage;
         const existing = hitFeedback.get(hit.player.id);
@@ -2375,6 +2578,9 @@ export class Match {
       } else if (useSeaRock && seaRockHit) {
         tracerDistance = seaRockHit.distance;
         showImpact = true;
+      } else if (occluded) {
+        tracerDistance = occlusionDistance;
+        showImpact = true;
       } else {
         const waterImpactDistance = this.getWaterImpactDistance(trace.origin, trace.direction, trace.range);
         if (waterImpactDistance !== null) {
@@ -2411,6 +2617,23 @@ export class Match {
     for (const feedback of wildlifeHitFeedback.values()) {
       this.notifyPlayerHit(shooter.id, feedback);
     }
+  }
+
+  /** Distance to the first solid occluder (island terrain or a ship hull) along
+   *  a hitscan trace; returns trace.range when the path is clear. The shooter's
+   *  own ship never occludes so deck shooters can always fire outward past
+   *  their bulwark. */
+  private getFirearmOcclusionDistance(shooter: Player, trace: HitscanTrace): number {
+    let occlusion = trace.range;
+    const terrainHit = raymarchIslandSurface(trace.origin, trace.direction, occlusion, this.state.islands);
+    if (terrainHit.hit) occlusion = Math.min(occlusion, terrainHit.distance);
+    for (const ship of this.state.ships) {
+      if (!ship.alive) continue;
+      if (ship.id === shooter.onShipId) continue;
+      const hullDistance = intersectRayShipHull(trace.origin, trace.direction, occlusion, ship);
+      if (hullDistance !== null) occlusion = Math.min(occlusion, hullDistance);
+    }
+    return occlusion;
   }
 
   private findClosestFirearmHit(
@@ -2606,10 +2829,38 @@ export class Match {
     this.weapons.queueProjectile(projectile);
   }
 
+  /** March the hitscan ray against the real Gerstner surface (waves swing ±~1m)
+   *  so splash effects land on the visible water, not the flat y=0 plane. */
   private getWaterImpactDistance(origin: Vec3, direction: Vec3, maxDistance: number) {
-    if (origin.y <= 0 || direction.y >= -0.0001) return null;
-    const distance = origin.y / -direction.y;
-    return distance <= maxDistance ? distance : null;
+    // Above any possible crest a non-descending ray can never land.
+    const crestBound = 4.4;
+    if (direction.y >= -0.0001 && origin.y > crestBound) return null;
+    if (origin.y <= gerstnerHeight(origin.x, origin.z, this.t, WAVE_PARAMS)) return null;
+
+    const range = Math.min(maxDistance, 600); // splash is cosmetic — cap the march
+    const step = 3;
+    const waveYAt = (dist: number) => gerstnerHeight(
+      origin.x + direction.x * dist,
+      origin.z + direction.z * dist,
+      this.t,
+      WAVE_PARAMS,
+    );
+    let prev = 0;
+    for (let d = step; ; d += step) {
+      const dist = Math.min(d, range);
+      if (origin.y + direction.y * dist <= waveYAt(dist)) {
+        let lo = prev;
+        let hi = dist;
+        for (let i = 0; i < 10; i++) {
+          const mid = (lo + hi) * 0.5;
+          if (origin.y + direction.y * mid <= waveYAt(mid)) hi = mid;
+          else lo = mid;
+        }
+        return hi;
+      }
+      prev = dist;
+      if (dist >= range) return null;
+    }
   }
 
   private getFirearmAimPoint(player: Player, ship: Ship | null, input: PlayerInput, weaponId: WeaponId): Vec3 {
@@ -2823,6 +3074,12 @@ export class Match {
         }
         return true;
       }
+      case 'bail': {
+        // The press just confirms intent; the continuous drain runs in the
+        // held-interact block (applyInput). Consume it so [X] doesn't fall through.
+        if (!ship || player.onShipId !== ship.id) return false;
+        return (ship.waterLevel ?? 0) > 0;
+      }
       case 'anchor': {
         if (!ship || player.onShipId !== ship.id) return false;
         if (!this.isNearAnchor(player, ship)) return false;
@@ -2929,8 +3186,10 @@ export class Match {
       }
 
       if (!target) {
-        s.velocity.x *= 0.92;
-        s.velocity.z *= 0.92;
+        // Frame-rate-independent decay preserving the previous per-16ms feel.
+        const idleDamp = Math.pow(0.92, dt / 0.016);
+        s.velocity.x *= idleDamp;
+        s.velocity.z *= idleDamp;
         s.position.x += s.velocity.x * dt;
         s.position.z += s.velocity.z * dt;
         continue;
@@ -2950,6 +3209,7 @@ export class Match {
       if (d < SHARK.BITE_RANGE && s.biteCooldown <= 0) {
         target.health -= SHARK.BITE_DAMAGE;
         target.lastDamagedById = null;
+        target.lastDamagedAt = null;
         target.lastDamageWasHeadshot = false;
         s.biteCooldown = SHARK.BITE_COOLDOWN;
       }
@@ -3126,15 +3386,20 @@ export class Match {
     return null;
   }
 
-  private creditPlayerKill(killer: Player, victim: Player): { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null {
+  private creditPlayerKill(killer: Player, victim: Player): {
+    streakReward: { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null;
+    killGold: number;
+  } {
     killer.kills += 1;
     let streakReward: { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null = null;
     if (killer.shipId && victim.shipId && killer.shipId !== victim.shipId) {
       streakReward = this.awardPlayerKillStreak(killer);
     }
-    killer.gold += PLAYER.KILL_GOLD_REWARD;
+    const isSkeleton = victim.isBot && this.skeletonHomes.has(victim.id);
+    const killGold = isSkeleton ? PLAYER.SKELETON_KILL_GOLD : PLAYER.KILL_GOLD_REWARD;
+    killer.gold += killGold;
     this.checkWinCondition();
-    return streakReward;
+    return { streakReward, killGold };
   }
 
   private eliminateCrewForShipSink(ship: Ship, killer: Player) {
@@ -3148,7 +3413,7 @@ export class Match {
         continue;
       }
 
-      const streakReward = this.creditPlayerKill(killer, victim);
+      const { streakReward, killGold } = this.creditPlayerKill(killer, victim);
       victim.state = 'eliminated';
       this.recordElimination(victim);
       this.applyEliminatedPlayerFields(victim);
@@ -3182,7 +3447,7 @@ export class Match {
           healed: 0,
           killerStreak: killer.playerKillStreak,
           streakReward,
-          killGold: PLAYER.KILL_GOLD_REWARD,
+          killGold,
           headshotGold: 0,
         },
       });
@@ -3260,17 +3525,24 @@ export class Match {
       ? this.getPlayer(player.lastDamagedById)
       : null;
     if (killer?.id === player.id) killer = null;
+    // Stale damage (e.g. shot minutes before drowning in the storm) pays nothing.
+    if (killer && (player.lastDamagedAt === null || this.t - player.lastDamagedAt > KILL_CREDIT_WINDOW_SECONDS)) {
+      killer = null;
+    }
     const headshot = !!killer && player.lastDamageWasHeadshot;
     const boardingKill = !!killer && this.isBoardingKill(killer, player);
     let stolenGold = 0;
     let healed = 0;
+    let killGold = 0;
     let streakReward: { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null = null;
 
     this.dropCarriedChest(player);
     player.playerKillStreak = 0;
 
     if (killer) {
-      streakReward = this.creditPlayerKill(killer, player);
+      const credit = this.creditPlayerKill(killer, player);
+      streakReward = credit.streakReward;
+      killGold = credit.killGold;
       if (headshot) killer.gold += PLAYER.HEADSHOT_GOLD_BONUS;
       if (boardingKill) {
         const previousHealth = killer.health;
@@ -3351,7 +3623,7 @@ export class Match {
         healed,
         killerStreak: killer?.playerKillStreak ?? 0,
         streakReward,
-        killGold: killer ? PLAYER.KILL_GOLD_REWARD : 0,
+        killGold,
         headshotGold: killer && headshot ? PLAYER.HEADSHOT_GOLD_BONUS : 0,
       },
     });
@@ -3399,8 +3671,9 @@ export class Match {
   private buildSnapshot(includeStaticWorld = true): GameState {
     return {
       ...this.state,
+      serverTime: this.t,
       projectiles: this.state.projectiles.filter(p => p.alive),
-      kegs: this.state.kegs.filter((keg) => keg.timer > 0),
+      kegs: this.state.kegs.filter((keg) => keg.timer > 0 && !keg.defused),
       islands: includeStaticWorld ? this.state.islands : [],
     };
   }
@@ -3551,19 +3824,43 @@ export class Match {
     }
   }
 
+  /**
+   * Bot shore parties: BotSystem walks the bot's body to the chest and back
+   * along the island surface. Here we resolve the world interactions — dig +
+   * pick up when standing at the chest, then board + stow once the bot is back
+   * at its own hull (the final hop aboard replaces climbing the ladder).
+   */
   private processBotLooting() {
     for (const player of this.state.players) {
-      if (!player.isBot || player.shipId === null || !player.nearChestId || player.state === 'eliminated') continue;
-      for (const island of this.state.islands) {
-        const chest = island.chests.find((c) => c.id === player.nearChestId);
-        if (chest && chest.buried && chest.digProgress < 1) chest.digProgress = 1;
+      if (!player.isBot || player.shipId === null || player.state === 'eliminated') continue;
+
+      if (player.nearChestId && !player.carryingChestId) {
+        for (const island of this.state.islands) {
+          const chest = island.chests.find((c) => c.id === player.nearChestId);
+          if (chest && chest.buried && chest.digProgress < 1) {
+            chest.digProgress = 1;
+            chest.position.y = getIslandSurfaceY(island, chest.position.x, chest.position.z) + 0.32;
+          }
+        }
+        const event = this.tryTakeChest(player);
+        if (event) {
+          this.broadcast({ type: 'chest_opened', ts: Date.now(), payload: event });
+        }
       }
-      const event = this.tryTakeChest(player);
-      if (event) {
-        this.broadcast({ type: 'chest_opened', ts: Date.now(), payload: event });
+
+      if (player.carryingChestId) {
         const homeShip = this.getAliveShip(player.shipId);
-        if (homeShip && player.carryingChestId) {
-          const stats = SHIP_STATS[homeShip.type];
+        if (!homeShip) continue;
+        if (player.onShipId === homeShip.id) {
+          this.tryStowCarriedChest(player, homeShip);
+          continue;
+        }
+        const stats = SHIP_STATS[homeShip.type];
+        const hullDistance = dist2D(
+          player.position.x, player.position.z,
+          homeShip.position.x, homeShip.position.z,
+        );
+        if (hullDistance <= stats.length * 0.55 + 3.2 && !player.onShipId) {
           player.onShipId = homeShip.id;
           player.nearShipId = homeShip.id;
           player.state = 'alive';
@@ -3572,6 +3869,7 @@ export class Match {
             y: homeShip.position.y + stats.height + 0.35,
             z: homeShip.position.z,
           };
+          player.velocity = { x: 0, y: 0, z: 0 };
           this.clearStationFlags(player);
           this.tryStowCarriedChest(player, homeShip);
         }
@@ -3782,6 +4080,7 @@ export class Match {
             const hits = this.weapons.tryMeleeAttack(skeleton, [target], skeleton.rotation.x);
             for (const hit of hits) {
               target.lastDamagedById = skeleton.id;
+              target.lastDamagedAt = this.t;
               target.lastDamageWasHeadshot = false;
               // 65% weapon damage — skeletons are a real threat now
               const damage = hit.damage * 0.65;
@@ -3929,6 +4228,7 @@ export class Match {
       player.nearChestId = null;
       player.nearShipId = null;
       player.lastDamagedById = null;
+      player.lastDamagedAt = null;
       player.lastDamageWasHeadshot = false;
       player.respawnTimer = 0;
       player.swimTimer = 0;
@@ -4134,8 +4434,10 @@ export class Match {
     const nz = moveZ / len;
     const cosY = Math.cos(input.yaw);
     const sinY = Math.sin(input.yaw);
-    const worldMoveX = (sinY * nz + cosY * nx);
-    const worldMoveZ = (cosY * nz - sinY * nx);
+    // Must match the on-foot movement basis in applyInput exactly, or strafing
+    // toward a rail reads as strafing away and the exit grace never arms.
+    const worldMoveX = (sinY * nz - cosY * nx);
+    const worldMoveZ = (cosY * nz + sinY * nx);
 
     const cos = Math.cos(ship.rotation);
     const sin = Math.sin(ship.rotation);
