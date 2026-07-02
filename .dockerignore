@@ -1,0 +1,15 @@
+node_modules
+dist
+build
+.vite
+pirates-br
+test-results
+data
+.git
+.gitignore
+*.log
+.env
+.env.*
+.DS_Store
+scripts/blender
+public/assets/models/README.md
