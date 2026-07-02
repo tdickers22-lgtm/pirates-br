@@ -3,7 +3,8 @@ import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES
 import type {
   GameState, InteractIntent, Island, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS } from '../../shared/utils/index.js';
+import { getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
+import { BIOME_PALETTES } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   getAnchorControlLocal as getSharedAnchorControlLocal,
@@ -23,6 +24,7 @@ import { SoundEngine } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
 import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
+import { assets, type AssetName } from '../assets/AssetLibrary.js';
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
@@ -59,8 +61,10 @@ installGeometryNaNGuard();
 type ChestMeshRecord = {
   root: THREE.Group;
   glow: THREE.PointLight;
-  chestMesh: THREE.Mesh;
-  lid: THREE.Mesh;
+  /** Chest body — a GLB clone group, or the procedural box mesh fallback. */
+  chestMesh: THREE.Object3D;
+  /** Procedural lid (fallback only); a no-op placeholder group when the GLB body includes the lid. */
+  lid: THREE.Object3D;
   mound: THREE.Mesh | null;
 };
 
@@ -112,6 +116,22 @@ type FloatingDamageIndicator = {
   riseSpeed: number;
 };
 
+/**
+ * A warm island light source (dock lantern, campfire, cave torch, tavern lantern).
+ * The nearest few of each kind get a real PointLight at night; everything else
+ * shows an additive glow sprite scaled by the night factor. `anchor` lives inside
+ * its island group so it inherits the island transform and is disposed with it.
+ */
+type LanternEmitter = {
+  anchor: THREE.Object3D;
+  kind: 'lantern' | 'campfire';
+  glow: THREE.Sprite;
+  flame: THREE.Sprite | null;
+  worldPos: THREE.Vector3;
+  dist: number;
+  phase: number;
+};
+
 type UiRefs = {
   loadingScreen: HTMLDivElement;
   loadingBar: HTMLDivElement;
@@ -135,6 +155,7 @@ type UiRefs = {
   hullPortTxt: HTMLSpanElement;
   hullStarboardTxt: HTMLSpanElement;
   sailStatus: HTMLDivElement;
+  shipStatus: HTMLDivElement;
   shipUpgrades: HTMLDivElement;
   ammoCurrent: HTMLSpanElement;
   ammoReserve: HTMLSpanElement;
@@ -150,6 +171,10 @@ type UiRefs = {
   kegStatusValue: HTMLDivElement;
   interactPrompt: HTMLDivElement;
   contextLabel: HTMLDivElement;
+  waterGauge: HTMLDivElement;
+  waterGaugeFill: HTMLDivElement;
+  waterGaugeTrend: HTMLSpanElement;
+  waterGaugePct: HTMLSpanElement;
   barrelPanel: HTMLDivElement;
   barrelPanelLoot: HTMLDivElement;
   barrelPanelInventory: HTMLDivElement;
@@ -1064,6 +1089,27 @@ function makeProjectileMesh(projectile: Projectile): THREE.Mesh {
     return mesh;
   }
 
+  if (projectile.type === 'chainshot') {
+    // Spinning ball-and-chain: two iron balls joined by a short chain, whirled in
+    // flight (see syncProjectiles). Parent mesh is one ball; the other + chain are
+    // children so the whole assembly tumbles as a unit.
+    const ballGeo = new THREE.SphereGeometry(0.14, 10, 8);
+    const ballMat = new THREE.MeshStandardMaterial({ color: 0x33383d, roughness: 0.5, metalness: 0.75 });
+    const mesh = new THREE.Mesh(ballGeo, ballMat);
+    mesh.castShadow = true;
+    const ballB = new THREE.Mesh(ballGeo, ballMat);
+    ballB.position.set(0, 0, 0.42);
+    ballB.castShadow = true;
+    mesh.add(ballB);
+    const chain = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0.42)]),
+      new THREE.LineBasicMaterial({ color: 0x1c2024 }),
+    );
+    mesh.add(chain);
+    mesh.userData.chainshot = true;
+    return mesh;
+  }
+
   const superShot = projectile.special === 'super_cannonball';
   const colorByType: Record<Projectile['type'], number> = {
     bullet: 0xf7e7a9,
@@ -1156,6 +1202,50 @@ function makeWindWispTexture() {
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.needsUpdate = true;
+  return texture;
+}
+
+/** Soft warm radial halo for island lantern / campfire glow sprites. */
+function makeLanternGlowTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    const grad = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grad.addColorStop(0, 'rgba(255,240,200,0.95)');
+    grad.addColorStop(0.32, 'rgba(255,196,116,0.52)');
+    grad.addColorStop(0.7, 'rgba(255,150,72,0.14)');
+    grad.addColorStop(1, 'rgba(255,140,64,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 128, 128);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+/** Teardrop flame billboard for campfire flame sprites (bright base, wispy tip). */
+function makeLanternFlameTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 96;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    const grad = ctx.createRadialGradient(32, 74, 2, 32, 62, 46);
+    grad.addColorStop(0, 'rgba(255,248,214,0.98)');
+    grad.addColorStop(0.35, 'rgba(255,190,96,0.85)');
+    grad.addColorStop(0.7, 'rgba(255,120,44,0.34)');
+    grad.addColorStop(1, 'rgba(200,64,20,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(32, 4);
+    ctx.quadraticCurveTo(60, 52, 48, 82);
+    ctx.quadraticCurveTo(32, 100, 16, 82);
+    ctx.quadraticCurveTo(4, 52, 32, 4);
+    ctx.fill();
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
 
@@ -1378,6 +1468,8 @@ function buildMermaidMesh(): THREE.Group {
 export class Game {
   private readonly renderer = new Renderer();
   private readonly ocean = new OceanRenderer();
+  /** EMA-smoothed offset mapping performance.now()/1000 onto server sim seconds. */
+  private serverTimeOffset: number | null = null;
   private readonly shipRenderer = new ShipRenderer();
   private readonly combatFx = new CombatFx();
   private readonly audio = new SoundEngine();
@@ -1398,6 +1490,29 @@ export class Game {
   private digStrikePhase = 0;
   private prevMeleeReloading = false;
   private prevCannonBallistic = false;
+  private prevStormShrinking = false;
+  // Bilge flooding audio loop + FX throttles (naval damage loop).
+  private floodingLoopActive = false;
+  private lastBailFxAt = 0;
+  private lastHullLeakAt = 0;
+  private readonly lastChainshotWhirrAt = new Map<string, number>();
+  // Camera feel — additive on top of updateCamera's base FOV/orientation.
+  private cameraFovKick = 0;      // eased FOV bump in degrees
+  private cameraShake = 0;        // trauma 0..1, decays each frame
+  private cameraShakeCannon = 0;  // brief own-cannon FOV pop 0..1
+  private cameraRoll = 0;         // smoothed deck-roll coupling (rad)
+  private prevOwnHullTotal = 4;   // sum of local ship hull sections for hit detection
+  private prevOwnShipId: string | null = null;
+  private readonly tempShakeVec = new THREE.Vector3();
+  // Island lantern / campfire warm-light budget.
+  private readonly lanternRoot = new THREE.Group();
+  private readonly lanternLightPool: THREE.PointLight[] = [];
+  private readonly campfireLightPool: THREE.PointLight[] = [];
+  private readonly lanternEmitters: LanternEmitter[] = [];
+  private readonly assignedLanterns: LanternEmitter[] = [];
+  private readonly assignedCampfires: LanternEmitter[] = [];
+  private lanternGlowTexture: THREE.Texture | null = null;
+  private lanternFlameTexture: THREE.Texture | null = null;
   /** Currently-browsed barrel — renders the side-by-side inventory comparison panel */
   private barrelBrowse: { barrelId: string; loot: ItemStack[]; lastEventAt: number } | null = null;
   private readonly network = new NetworkClient();
@@ -1437,6 +1552,7 @@ export class Game {
     hullPortTxt: requireElement('hull-port-txt'),
     hullStarboardTxt: requireElement('hull-starboard-txt'),
     sailStatus: requireElement('sail-status'),
+    shipStatus: requireElement('ship-status'),
     shipUpgrades: requireElement('ship-upgrades'),
     ammoCurrent: requireElement('ammo-current'),
     ammoReserve: requireElement('ammo-reserve'),
@@ -1452,6 +1568,10 @@ export class Game {
     kegStatusValue: requireElement('keg-status-value'),
     interactPrompt: requireElement('interact-prompt'),
     contextLabel: requireElement('context-label'),
+    waterGauge: requireElement('water-gauge'),
+    waterGaugeFill: requireElement('wg-fill'),
+    waterGaugeTrend: requireElement('wg-trend'),
+    waterGaugePct: requireElement('wg-pct'),
     barrelPanel: requireElement('barrel-panel'),
     barrelPanelLoot: requireElement('barrel-panel-loot'),
     barrelPanelInventory: requireElement('barrel-panel-inventory'),
@@ -1623,12 +1743,19 @@ export class Game {
   async init() {
     document.addEventListener('contextmenu', (event) => event.preventDefault());
 
-    this.setLoading(10, 'Hoisting sails...');
+    this.setLoading(4, 'Hoisting sails...');
     await this.yieldForLoadingPaint();
 
     this.renderer.init();
     this.setupDebugPerfPanel();
-    this.setLoading(14, 'Charting the horizon...');
+    this.setLoading(8, 'Charting the horizon...');
+    await this.yieldForLoadingPaint();
+
+    // Real progress: the GLB prop library is the bulk of boot time. Failures are
+    // tolerated inside preload() — missing assets keep their procedural fallbacks.
+    await assets.preload((done, total) => {
+      this.setLoading(8 + (done / total) * 44, `Loading ship's stores... ${done}/${total}`);
+    });
     await this.yieldForLoadingPaint();
 
     this.setupStormWeatherOverlay();
@@ -1641,14 +1768,15 @@ export class Game {
     this.localViewPocketRoot.renderOrder = 999;
     this.renderer.camera.add(this.localViewPocketRoot);
     this.ocean.init(this.renderer.scene, this.renderer.getQuality());
-    this.setLoading(18, 'Stirring the deep...');
+    this.setLoading(56, 'Stirring the deep...');
     await this.yieldForLoadingPaint();
 
     this.shipRenderer.init(this.renderer.scene, this.renderer.getQuality());
-    this.setLoading(22, 'Rigging the brigantine...');
+    this.setLoading(62, 'Rigging the brigantine...');
     await this.yieldForLoadingPaint();
 
     this.combatFx.init(this.renderer.scene);
+    this.initLanternSystem();
     this.renderer.scene.add(this.environment);
     this.renderer.scene.add(this.windWisps);
     this.renderer.scene.add(this.mermaidGroup);
@@ -1666,7 +1794,7 @@ export class Game {
     this.stormHalo.rotation.x = Math.PI * 0.5;
     this.stormHalo.renderOrder = 2;
     this.stormHalo.frustumCulled = false;
-    this.setLoading(26, 'Reading the weather glass...');
+    this.setLoading(68, 'Reading the weather glass...');
     await this.yieldForLoadingPaint();
 
     this.input.init(this.renderer.renderer.domElement);
@@ -1690,7 +1818,7 @@ export class Game {
     this.bindTradeUiActions();
     this.bindNetworkEvents();
 
-    this.showLoadingScreen('Opening crew waters...', 30);
+    this.showLoadingScreen('Opening crew waters...', 74);
     await this.yieldForLoadingPaint();
     this.menu.init();
     const connected = await this.connectToServer();
@@ -1705,7 +1833,7 @@ export class Game {
 
   private async connectToServer(): Promise<boolean> {
     const socketUrl = this.getSocketUrl();
-    this.setLoading(38, `Connecting to ${socketUrl} ...`);
+    this.setLoading(80, `Connecting to ${socketUrl} ...`);
     await this.yieldForLoadingPaint();
     const connectTimeoutMs = 6_000;
     try {
@@ -1836,6 +1964,21 @@ export class Game {
     this.lastSwimSplashAt = 0;
     this.prevPlayerStateForAudio = null;
     this.prevCannonBallistic = false;
+    this.prevStormShrinking = false;
+    this.lastBailFxAt = 0;
+    this.lastHullLeakAt = 0;
+    this.lastChainshotWhirrAt.clear();
+    this.cameraFovKick = 0;
+    this.cameraShake = 0;
+    this.cameraShakeCannon = 0;
+    this.cameraRoll = 0;
+    this.prevOwnHullTotal = 4;
+    this.prevOwnShipId = null;
+    if (this.floodingLoopActive) {
+      this.audio.stopFlooding();
+      this.floodingLoopActive = false;
+    }
+    this.ui.waterGauge.classList.remove('visible', 'danger');
 
     document.getElementById('hud')?.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
@@ -1850,8 +1993,10 @@ export class Game {
     this.ui.crosshair.style.removeProperty('--shotgun-spread');
     this.ui.islandBanner.classList.remove('visible');
     this.localViewWeaponRoot.visible = false;
+    this.disposeSceneObject(this.localViewWeaponRoot);
     this.localViewWeaponRoot.clear();
     this.localViewPocketRoot.visible = false;
+    this.disposeSceneObject(this.localViewPocketRoot);
     this.localViewPocketRoot.clear();
 
     for (const indicator of this.floatingDamageIndicators) {
@@ -1859,11 +2004,26 @@ export class Game {
     }
     this.floatingDamageIndicators.length = 0;
 
-    for (const mesh of this.playerMeshes.values()) this.renderer.scene.remove(mesh);
-    for (const mesh of this.projectileMeshes.values()) this.renderer.scene.remove(mesh);
-    for (const record of this.kegMeshes.values()) this.renderer.scene.remove(record.root);
+    for (const mesh of this.playerMeshes.values()) {
+      this.renderer.scene.remove(mesh);
+      this.disposeSceneObject(mesh);
+    }
+    for (const mesh of this.projectileMeshes.values()) {
+      this.renderer.scene.remove(mesh);
+      this.disposeSceneObject(mesh);
+    }
+    for (const record of this.kegMeshes.values()) {
+      this.renderer.scene.remove(record.root);
+      this.disposeSceneObject(record.root);
+    }
 
+    // Free GPU resources from the previous match (geometries/materials/textures).
+    // AssetLibrary-owned shared resources are skipped inside disposeSceneObject.
+    for (const child of [...this.environment.children]) {
+      this.disposeSceneObject(child);
+    }
     this.environment.clear();
+    this.clearLanternEmitters();
     this.shipRenderer.clear();
     this.islandMeshes.clear();
     this.chestMeshes.clear();
@@ -1877,6 +2037,236 @@ export class Game {
     this.playerMeshes.clear();
     this.projectileMeshes.clear();
     this.seenStoryNpcIds.clear();
+  }
+
+  /**
+   * Recursively dispose GPU resources (geometry, materials, textures) of a
+   * per-match scene graph. Resources owned by the shared AssetLibrary cache
+   * (GLB clones/instances) are skipped — they outlive matches by design.
+   */
+  private disposeSceneObject(root: THREE.Object3D) {
+    root.traverse((obj) => {
+      const light = obj as THREE.Light;
+      if (light.isLight) {
+        light.dispose();
+        return;
+      }
+      const mesh = obj as THREE.Mesh;
+      const drawable = mesh as unknown as { isMesh?: boolean; isLine?: boolean; isPoints?: boolean; isSprite?: boolean };
+      if (!drawable.isMesh && !drawable.isLine && !drawable.isPoints && !drawable.isSprite) return;
+      const instanced = obj as THREE.InstancedMesh;
+      if (instanced.isInstancedMesh) instanced.dispose();
+      if (mesh.geometry && !assets.isShared(mesh.geometry)) mesh.geometry.dispose();
+      const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+      for (const material of materials) {
+        if (assets.isShared(material)) continue;
+        const record = material as unknown as Record<string, unknown>;
+        for (const key of Object.keys(record)) {
+          const value = record[key] as { isTexture?: boolean; dispose?: () => void } | null;
+          if (value && value.isTexture && typeof value.dispose === 'function' && !assets.isShared(value)) {
+            value.dispose();
+          }
+        }
+        material.dispose();
+      }
+    });
+  }
+
+  /**
+   * Clone a GLB library prop and place it. Returns null when the asset failed
+   * to load (callers keep their procedural fallback). Kept signature-stable so
+   * a later server-driven prop registry can reuse it.
+   */
+  private buildPropInstance(type: AssetName, position: THREE.Vector3, yaw: number, scale = 1): THREE.Group | null {
+    const clone = assets.clone(type);
+    if (!clone) return null;
+    clone.position.copy(position);
+    clone.rotation.y = yaw;
+    clone.scale.setScalar(scale);
+    return clone;
+  }
+
+  // ── Island lantern / campfire warm-light budget ──────────────────────────
+  // Shared point-light pools (added once, reused across matches) plus per-emitter
+  // additive glow / flame sprites. The nearest N of each kind are lit for real at
+  // night; everything else is a cheap sprite. See updateLanterns().
+  private initLanternSystem() {
+    this.lanternGlowTexture = makeLanternGlowTexture();
+    this.lanternFlameTexture = makeLanternFlameTexture();
+    for (let i = 0; i < 4; i++) {
+      const light = new THREE.PointLight(0xffb257, 0, 17, 1.6);
+      light.visible = false;
+      this.lanternRoot.add(light);
+      this.lanternLightPool.push(light);
+    }
+    for (let i = 0; i < 3; i++) {
+      const light = new THREE.PointLight(0xff7a30, 0, 15, 1.5);
+      light.visible = false;
+      this.lanternRoot.add(light);
+      this.campfireLightPool.push(light);
+    }
+    this.renderer.scene.add(this.lanternRoot);
+  }
+
+  /** Register a warm island light. `container` is an island sub-group (dock/camp/
+   *  tavern/cave); the anchor tracks its transform so world positions stay correct. */
+  private registerLanternEmitter(
+    container: THREE.Object3D,
+    localX: number,
+    localY: number,
+    localZ: number,
+    kind: 'lantern' | 'campfire',
+  ) {
+    if (!this.lanternGlowTexture) return;
+    const anchor = new THREE.Object3D();
+    anchor.position.set(localX, localY, localZ);
+    container.add(anchor);
+
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: this.lanternGlowTexture,
+      color: kind === 'campfire' ? 0xff8a3c : 0xffbb66,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0,
+    }));
+    glow.scale.setScalar(kind === 'campfire' ? 3.4 : 2.1);
+    glow.visible = false;
+    this.lanternRoot.add(glow);
+
+    let flame: THREE.Sprite | null = null;
+    if (kind === 'campfire' && this.lanternFlameTexture) {
+      flame = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.lanternFlameTexture,
+        color: 0xffb257,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.85,
+      }));
+      flame.center.set(0.5, 0.08); // pivot near the base so it grows upward
+      flame.scale.set(0.5, 0.9, 1);
+      this.lanternRoot.add(flame);
+    }
+
+    this.lanternEmitters.push({
+      anchor, kind, glow, flame,
+      worldPos: new THREE.Vector3(),
+      dist: 0,
+      phase: Math.random() * Math.PI * 2,
+    });
+  }
+
+  private updateLanterns(nf: number, cameraPos: THREE.Vector3, t: number) {
+    if (this.lanternEmitters.length === 0) return;
+    const day = nf <= 0.02;
+
+    for (const e of this.lanternEmitters) {
+      e.anchor.getWorldPosition(e.worldPos);
+      e.dist = e.worldPos.distanceTo(cameraPos);
+    }
+
+    const lanterns = this.lanternEmitters.filter((e) => e.kind === 'lantern');
+    const campfires = this.lanternEmitters.filter((e) => e.kind === 'campfire');
+    this.assignLanternBudget(lanterns, this.assignedLanterns, this.lanternLightPool.length);
+    this.assignLanternBudget(campfires, this.assignedCampfires, this.campfireLightPool.length);
+
+    for (let i = 0; i < this.lanternLightPool.length; i++) {
+      const light = this.lanternLightPool[i];
+      const e = this.assignedLanterns[i];
+      if (day || !e) {
+        light.visible = false;
+        light.intensity = 0;
+      } else {
+        const flicker = 1 + Math.sin(t * 7.3 + e.phase) * 0.05 + Math.sin(t * 13.7 + e.phase * 1.7) * 0.03;
+        light.position.copy(e.worldPos);
+        light.intensity = nf * 1.55 * flicker;
+        light.visible = true;
+      }
+    }
+    for (let i = 0; i < this.campfireLightPool.length; i++) {
+      const light = this.campfireLightPool[i];
+      const e = this.assignedCampfires[i];
+      if (day || !e) {
+        light.visible = false;
+        light.intensity = 0;
+      } else {
+        const flicker = 1 + Math.sin(t * 11 + e.phase) * 0.24 + Math.sin(t * 23 + e.phase * 2.1) * 0.14 + (Math.random() - 0.5) * 0.08;
+        light.position.copy(e.worldPos);
+        light.intensity = nf * 1.9 * Math.max(0.25, flicker);
+        light.visible = true;
+      }
+    }
+
+    for (const e of this.lanternEmitters) {
+      const hasRealLight = e.kind === 'lantern'
+        ? this.assignedLanterns.includes(e)
+        : this.assignedCampfires.includes(e);
+      const glowFlicker = e.kind === 'campfire'
+        ? 1 + Math.sin(t * 12 + e.phase) * 0.18
+        : 1 + Math.sin(t * 6 + e.phase) * 0.06;
+      const glowBase = hasRealLight ? 0.3 : 0.85;
+      const glowOpacity = day ? 0 : nf * glowBase * glowFlicker;
+      e.glow.position.copy(e.worldPos);
+      e.glow.material.opacity = glowOpacity;
+      e.glow.visible = glowOpacity > 0.01;
+
+      if (e.flame) {
+        // A lit campfire always shows a small flame; it grows and brightens at night.
+        const flick = 0.85 + Math.sin(t * 15 + e.phase) * 0.12 + Math.sin(t * 27 + e.phase * 1.9) * 0.07;
+        e.flame.position.copy(e.worldPos);
+        e.flame.scale.set(0.4 * (0.92 + (flick - 0.85) * 0.5), (0.5 + nf * 0.5) * flick, 1);
+        e.flame.material.opacity = (0.5 + nf * 0.42) * flick;
+        e.flame.visible = true;
+      }
+    }
+  }
+
+  /** Fill the light budget from the nearest emitters, with 15%-closer hysteresis so
+   *  the active set doesn't pop as the camera drifts between equidistant sources. */
+  private assignLanternBudget(emitters: LanternEmitter[], assigned: LanternEmitter[], budget: number) {
+    for (let i = assigned.length - 1; i >= 0; i--) {
+      if (!emitters.includes(assigned[i])) assigned.splice(i, 1);
+    }
+    while (assigned.length < budget) {
+      let best: LanternEmitter | null = null;
+      for (const e of emitters) {
+        if (assigned.includes(e)) continue;
+        if (!best || e.dist < best.dist) best = e;
+      }
+      if (!best) break;
+      assigned.push(best);
+    }
+    for (let guard = 0; guard <= budget; guard++) {
+      let furthest: LanternEmitter | null = null;
+      for (const e of assigned) if (!furthest || e.dist > furthest.dist) furthest = e;
+      let nearestOut: LanternEmitter | null = null;
+      for (const e of emitters) {
+        if (assigned.includes(e)) continue;
+        if (!nearestOut || e.dist < nearestOut.dist) nearestOut = e;
+      }
+      if (furthest && nearestOut && nearestOut.dist < furthest.dist * 0.85) {
+        assigned[assigned.indexOf(furthest)] = nearestOut;
+      } else {
+        break;
+      }
+    }
+  }
+
+  private clearLanternEmitters() {
+    for (const e of this.lanternEmitters) {
+      this.lanternRoot.remove(e.glow);
+      e.glow.material.dispose();
+      if (e.flame) {
+        this.lanternRoot.remove(e.flame);
+        e.flame.material.dispose();
+      }
+    }
+    this.lanternEmitters.length = 0;
+    this.assignedLanterns.length = 0;
+    this.assignedCampfires.length = 0;
+    for (const light of this.lanternLightPool) { light.visible = false; light.intensity = 0; }
+    for (const light of this.campfireLightPool) { light.visible = false; light.intensity = 0; }
   }
 
   private returnToLobbyAfterLoss(kills: number, gold: number, reason = 'Defeated') {
@@ -2345,6 +2735,12 @@ export class Game {
     this.state = nextSnapshot;
     this.rebuildStateIndexes(nextSnapshot);
     this.lastSnapshotAt = performance.now();
+    if (Number.isFinite(nextSnapshot.serverTime)) {
+      const offset = nextSnapshot.serverTime - performance.now() / 1000;
+      this.serverTimeOffset = this.serverTimeOffset === null
+        ? offset
+        : this.serverTimeOffset + (offset - this.serverTimeOffset) * 0.1;
+    }
     if (hasFreshIslandState) {
       this.ensureWorldMeshes(nextSnapshot);
       this.syncChests();
@@ -2381,6 +2777,7 @@ export class Game {
     for (const island of state.islands) {
       if (!this.islandMeshes.has(island.id)) {
         this.buildIsland(island);
+        this.ocean.setIslands(state.islands.map((i) => ({ x: i.position.x, z: i.position.z, r: i.radius })));
       }
     }
     for (const rock of state.seaRocks ?? []) {
@@ -2398,6 +2795,38 @@ export class Game {
     group.position.set(rock.position.x, rock.position.y, rock.position.z);
     group.rotation.y = rock.rotation;
     const lowDetail = this.renderer.getQuality() === 'low';
+
+    // GLB sea spires by size tier, fitted inside the server collider envelope
+    // (main collider cylinder) so visuals never exceed the collision size.
+    const tier: AssetName = rock.height > 26 ? 'searock_b' : rock.height > 13 ? 'searock_a' : 'searock_c';
+    const rockClone = assets.clone(tier);
+    const rockBounds = assets.bounds(tier);
+    if (rockClone && rockBounds) {
+      const assetHoriz = Math.max(-rockBounds.min.x, rockBounds.max.x, -rockBounds.min.z, rockBounds.max.z, 0.001);
+      const mainColliderRadius = rock.variant === 1 ? rock.radius * 0.72 : rock.radius * (0.62 + rock.variant * 0.035);
+      const mainColliderTop = rock.height * (rock.variant === 1 ? 0.84 : 0.94) - 1.3;
+      const sxz = mainColliderRadius / assetHoriz;
+      const sy = Math.max(0.4, mainColliderTop / Math.max(rockBounds.max.y, 0.001));
+      rockClone.scale.set(sxz, sy, sxz);
+      if (lowDetail) {
+        rockClone.traverse((o) => {
+          if (o instanceof THREE.Mesh) {
+            o.castShadow = false;
+            o.receiveShadow = false;
+          }
+        });
+      }
+      group.add(rockClone);
+
+      const foam = new THREE.Mesh(
+        new THREE.RingGeometry(rock.radius * 0.78, rock.radius * 1.16, lowDetail ? 12 : 24),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false }),
+      );
+      foam.rotation.x = -Math.PI * 0.5;
+      foam.position.y = 0.04;
+      group.add(foam);
+      return group;
+    }
 
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x292d2b, roughness: 1, flatShading: true });
     const wetMat = new THREE.MeshStandardMaterial({ color: 0x3c403a, roughness: 0.92, flatShading: true });
@@ -2466,18 +2895,29 @@ export class Game {
 
     const reefMat = new THREE.MeshStandardMaterial({ color: 0x4d4a42, roughness: 1, side: THREE.DoubleSide });
     const cliffMat = new THREE.MeshStandardMaterial({ color: 0x564f3f, roughness: 0.98, side: THREE.DoubleSide });
-    const beachColor = new THREE.Color(0xfae8b8);
-    const sandColor = new THREE.Color(0xdcbc80);
-    const grassColor = new THREE.Color(0x4e8c32);
-    const jungleColor = new THREE.Color(0x2e6a22);
-    const peakColor = new THREE.Color(0x5a7e38);
-    const cliffColor = new THREE.Color(0x7a6e56);
-    const mudColor = new THREE.Color(0x907560);
-    const boulderMat = new THREE.MeshStandardMaterial({ color: 0x8a7c65, roughness: 1 });
+    // Biome palette drives per-island vertex + foliage colors so a volcanic isle
+    // reads dark and ashen while a lush one reads verdant and a bone atoll reads
+    // pale. MapGenerator copies profile.palette from BIOME_PALETTES; fall back to
+    // the biome table (then lush) if a profile predates the palette field.
+    const palette = island.profile.palette
+      ?? BIOME_PALETTES[island.profile.biome ?? 'lush']
+      ?? BIOME_PALETTES.lush;
+    const paletteSand = new THREE.Color(palette.sand);
+    const paletteGrass = new THREE.Color(palette.grass);
+    const paletteRock = new THREE.Color(palette.rock);
+    const paletteFoliage = new THREE.Color(palette.foliage);
+    const beachColor = paletteSand.clone().lerp(new THREE.Color(0xffffff), 0.16);
+    const sandColor = paletteSand.clone();
+    const grassColor = paletteGrass.clone();
+    const jungleColor = paletteFoliage.clone();
+    const peakColor = paletteGrass.clone().lerp(paletteRock, 0.42);
+    const cliffColor = paletteRock.clone().lerp(new THREE.Color(0xffffff), 0.06);
+    const mudColor = paletteRock.clone().lerp(paletteFoliage, 0.3);
+    const boulderMat = new THREE.MeshStandardMaterial({ color: paletteRock.clone().lerp(new THREE.Color(0xffffff), 0.08).getHex(), roughness: 1 });
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x7a5430, roughness: 1 });
-    const frondMat = new THREE.MeshStandardMaterial({ color: 0x2a7040, roughness: 0.85, side: THREE.DoubleSide });
-    const tuftMat = new THREE.MeshStandardMaterial({ color: 0x5e9040, roughness: 0.95, side: THREE.DoubleSide });
-    const fernMat = new THREE.MeshStandardMaterial({ color: 0x246832, roughness: 0.9, side: THREE.DoubleSide });
+    const frondMat = new THREE.MeshStandardMaterial({ color: paletteFoliage.getHex(), roughness: 0.85, side: THREE.DoubleSide });
+    const tuftMat = new THREE.MeshStandardMaterial({ color: paletteGrass.clone().lerp(paletteFoliage, 0.4).getHex(), roughness: 0.95, side: THREE.DoubleSide });
+    const fernMat = new THREE.MeshStandardMaterial({ color: paletteFoliage.clone().multiplyScalar(0.86).getHex(), roughness: 0.9, side: THREE.DoubleSide });
     const driftwoodMat = new THREE.MeshStandardMaterial({ color: 0xc4b08a, roughness: 1 });
     const bambooMat = new THREE.MeshStandardMaterial({ color: 0x72b040, roughness: 0.8 });
     const wreckMat = new THREE.MeshStandardMaterial({ color: 0x4b2f16, roughness: 1, map: null });
@@ -2573,6 +3013,16 @@ export class Game {
         point.z - island.position.z,
       );
     };
+    const SURFACE_ABOVE_WATER = 5.0;
+    const isSolidDecorPoint = (point: THREE.Vector3, minY = SURFACE_ABOVE_WATER, margin = -0.35) => (
+      point.y >= minY
+      && isPointInsideIslandFootprint(
+        island,
+        point.x + island.position.x,
+        point.z + island.position.z,
+        margin,
+      )
+    );
 
     createLayer({
       topRadius: r * 1.02,
@@ -2599,7 +3049,7 @@ export class Game {
     const angularSegments = lowDetail ? 36 : visualDetail < 0.85 ? 48 : 64;
     const terrainColor = new THREE.Color();
     const scratchColor = new THREE.Color();
-    const rockSlopeColor = new THREE.Color(0x6b6052);
+    const rockSlopeColor = paletteRock.clone().multiplyScalar(0.8);
 
     for (let ring = 0; ring <= radialSegments; ring++) {
       const distRatio = ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9);
@@ -2634,6 +3084,9 @@ export class Game {
       const distRatio = ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9);
       for (let segment = 0; segment <= angularSegments; segment++) {
         const index = ring * (angularSegments + 1) + segment;
+        const angle = (segment / angularSegments) * Math.PI * 2;
+        const coast = getIslandCoastWeights(island, angle);
+        const rockyCoast = coast.rocky + coast.cliff;
         const pointY = terrainPositions[index * 3 + 1];
         const slope = THREE.MathUtils.clamp(1 - terrainNormals.getY(index), 0, 1);
 
@@ -2649,7 +3102,8 @@ export class Game {
         const slopeRockMask = THREE.MathUtils.smoothstep(slope, 0.28, 0.62) * (1 - shoreMask);
 
         terrainColor.copy(sandColor);
-        terrainColor.lerp(beachColor, shoreMask * 0.9);
+        terrainColor.lerp(beachColor, shoreMask * coast.beach * 0.95);
+        terrainColor.lerp(cliffColor, shoreMask * rockyCoast * 0.75);
         terrainColor.lerp(mudColor, mudMask);
         terrainColor.lerp(grassColor, grassMask * 0.9);
         terrainColor.lerp(jungleColor, jungleMask);
@@ -2735,14 +3189,48 @@ export class Game {
       const ropeMat = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
       const plankMats = [0x8d6230, 0x83592d, 0x976a35].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.96 }));
 
-      const deck = new THREE.Mesh(
-        new THREE.BoxGeometry(dockW, 0.22, dockL),
-        dockMat,
-      );
-      deck.position.y = 0.12;
-      deck.castShadow = true;
-      deck.receiveShadow = true;
-      dock.add(deck);
+      // GLB dock modules: walkway runs along the module's local X (6×3 mid,
+      // 4×3 end, deck at +1.1); the game dock runs along local Z. Purely a
+      // visual swap — server walk/collision math is untouched.
+      const dockUsesGlb = assets.has('dock_mid') && assets.has('dock_end');
+      if (dockUsesGlb) {
+        const MID_LEN = 6;
+        const END_LEN = 4;
+        const MODULE_W = 3;
+        const DECK_H = 1.1;
+        const midCount = Math.max(1, Math.round((dockL - END_LEN) / MID_LEN));
+        const runLen = midCount * MID_LEN + END_LEN;
+        const alongScale = dockL / runLen;
+        const widthScale = dockW / MODULE_W;
+        // Server walk surface sits at dock.position.y + 0.14; keep the visual deck flush with it.
+        const moduleY = 0.18 - DECK_H;
+        let cursor = -dockL * 0.5;
+        for (let m = 0; m < midCount; m++) {
+          const piece = assets.clone('dock_mid');
+          if (!piece) break;
+          piece.rotation.y = Math.PI * 0.5;
+          piece.scale.set(alongScale, 1, widthScale);
+          piece.position.set(0, moduleY, cursor + MID_LEN * alongScale * 0.5);
+          dock.add(piece);
+          cursor += MID_LEN * alongScale;
+        }
+        const endPiece = assets.clone('dock_end');
+        if (endPiece) {
+          endPiece.rotation.y = Math.PI * 0.5;
+          endPiece.scale.set(alongScale, 1, widthScale);
+          endPiece.position.set(0, moduleY, cursor + END_LEN * alongScale * 0.5);
+          dock.add(endPiece);
+        }
+      } else {
+        const deck = new THREE.Mesh(
+          new THREE.BoxGeometry(dockW, 0.22, dockL),
+          dockMat,
+        );
+        deck.position.y = 0.12;
+        deck.castShadow = true;
+        deck.receiveShadow = true;
+        dock.add(deck);
+      }
 
       const shorePlatform = new THREE.Mesh(
         new THREE.BoxGeometry(dockW * 1.2, 0.24, Math.min(4.6, dockL * 0.3)),
@@ -2772,47 +3260,49 @@ export class Game {
           dock.add(rung);
         }
 
-        const plankCount = scaledCount(Math.round(dockW), 4);
-        for (let i = 0; i < plankCount; i++) {
-          const plank = new THREE.Mesh(
-            new THREE.BoxGeometry(dockW / plankCount * 0.82, 0.04, dockL * 0.96),
-              plankMats[i % plankMats.length],
-          );
-          plank.position.set(
-            -dockW * 0.5 + (i + 0.5) * (dockW / plankCount),
-            0.25,
-            0,
-          );
-          plank.castShadow = true;
-          plank.receiveShadow = true;
-          dock.add(plank);
-        }
-
-        for (const side of [-1, 1] as const) {
-          for (let i = 0; i < 4; i++) {
-            const z = -dockL * 0.42 + i * (dockL * 0.28);
-            const postHeight = 1.35 + rng(i * 191 + side) * 0.4;
-            const post = new THREE.Mesh(
-              new THREE.BoxGeometry(0.18, postHeight, 0.18),
-              beamMat,
+        if (!dockUsesGlb) {
+          const plankCount = scaledCount(Math.round(dockW), 4);
+          for (let i = 0; i < plankCount; i++) {
+            const plank = new THREE.Mesh(
+              new THREE.BoxGeometry(dockW / plankCount * 0.82, 0.04, dockL * 0.96),
+                plankMats[i % plankMats.length],
             );
-            post.position.set(side * (island.dock.width * 0.45), postHeight * 0.45, z);
-            post.castShadow = true;
-            dock.add(post);
+            plank.position.set(
+              -dockW * 0.5 + (i + 0.5) * (dockW / plankCount),
+              0.25,
+              0,
+            );
+            plank.castShadow = true;
+            plank.receiveShadow = true;
+            dock.add(plank);
+          }
 
-            if (i < 3) {
-              const railLen = Math.max(0.15, dockL * 0.24);
-              const rail = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.035, 0.035, railLen, 6),
-                ropeMat,
+          for (const side of [-1, 1] as const) {
+            for (let i = 0; i < 4; i++) {
+              const z = -dockL * 0.42 + i * (dockL * 0.28);
+              const postHeight = 1.35 + rng(i * 191 + side) * 0.4;
+              const post = new THREE.Mesh(
+                new THREE.BoxGeometry(0.18, postHeight, 0.18),
+                beamMat,
               );
-              rail.rotation.z = Math.PI * 0.5;
-              rail.position.set(side * (dockW * 0.44), 0.88, z + dockL * 0.14);
-              dock.add(rail);
+              post.position.set(side * (island.dock.width * 0.45), postHeight * 0.45, z);
+              post.castShadow = true;
+              dock.add(post);
+
+              if (i < 3) {
+                const railLen = Math.max(0.15, dockL * 0.24);
+                const rail = new THREE.Mesh(
+                  new THREE.CylinderGeometry(0.035, 0.035, railLen, 6),
+                  ropeMat,
+                );
+                rail.rotation.z = Math.PI * 0.5;
+                rail.position.set(side * (dockW * 0.44), 0.88, z + dockL * 0.14);
+                dock.add(rail);
+              }
             }
           }
         }
-      } else {
+      } else if (!dockUsesGlb) {
         for (const postSide of [-1, 1] as const) {
           const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.25, 0.18), beamMat);
           post.position.set(postSide * (dockW * 0.44), 0.65, dockL * 0.22);
@@ -2829,27 +3319,38 @@ export class Game {
       dock.add(bollard);
 
       if (!lowDetail) {
-        // Lanterns at dock entrance posts
-        const lanternMat = new THREE.MeshStandardMaterial({
-          color: 0x8b6c2a,
-          emissive: 0xffcc44,
-          emissiveIntensity: 0.5,
-          roughness: 0.9,
-        });
-        for (const lanternSide of [-1, 1] as const) {
-          const lanternPost = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.8, 0.16), beamMat);
-          lanternPost.position.set(lanternSide * (dockW * 0.46), 0.9, -dockL * 0.38);
-          lanternPost.castShadow = true;
-          dock.add(lanternPost);
+        // Lanterns at the dock's shore end. Warm light is routed through the
+        // night-budget system (registerLanternEmitter) instead of always-on lamps.
+        if (assets.has('lantern_post')) {
+          const deckY = dockUsesGlb ? 0.18 : 0.26;
+          for (const lanternSide of [-1, 1] as const) {
+            const post = this.buildPropInstance(
+              'lantern_post',
+              new THREE.Vector3(lanternSide * (dockW * 0.46 - 0.12), deckY, -dockL * 0.38),
+              // lantern arm points +X in asset space — swing it inward over the walkway
+              lanternSide === 1 ? Math.PI : 0,
+            );
+            if (post) dock.add(post);
+            this.registerLanternEmitter(dock, lanternSide * (dockW * 0.46 - 0.12), deckY + 2.1, -dockL * 0.38, 'lantern');
+          }
+        } else {
+          const lanternMat = new THREE.MeshStandardMaterial({
+            color: 0x8b6c2a,
+            emissive: 0xffcc44,
+            emissiveIntensity: 0.5,
+            roughness: 0.9,
+          });
+          for (const lanternSide of [-1, 1] as const) {
+            const lanternPost = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.8, 0.16), beamMat);
+            lanternPost.position.set(lanternSide * (dockW * 0.46), 0.9, -dockL * 0.38);
+            lanternPost.castShadow = true;
+            dock.add(lanternPost);
 
-          const lanternBox = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.3, 0.28), lanternMat);
-          lanternBox.position.set(lanternSide * (dockW * 0.46), 1.95, -dockL * 0.38);
-          dock.add(lanternBox);
+            const lanternBox = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.3, 0.28), lanternMat);
+            lanternBox.position.set(lanternSide * (dockW * 0.46), 1.95, -dockL * 0.38);
+            dock.add(lanternBox);
 
-          if (lanternSide === 1) {
-            const lanternGlow = new THREE.PointLight(0xffa840, 1.25, 16);
-            lanternGlow.position.set(0, 2.0, -dockL * 0.38);
-            dock.add(lanternGlow);
+            this.registerLanternEmitter(dock, lanternSide * (dockW * 0.46), 1.95, -dockL * 0.38, 'lantern');
           }
         }
       }
@@ -2969,15 +3470,13 @@ export class Game {
           tavern.add(tableGroup);
         }
 
-        // Hanging lanterns under roof
+        // Hanging lanterns under roof (warm light via the night-budget system).
         for (const lx of [-1.4, 1.4, 0] as const) {
           const lantern = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.34, 0.28), lanternMat2);
           lantern.position.set(lx, wallH - 0.3, 0);
           tavern.add(lantern);
           if (lx === 0) {
-            const tavernGlow = new THREE.PointLight(0xffae5a, 1.6, 18);
-            tavernGlow.position.set(0, wallH - 0.4, 0);
-            tavern.add(tavernGlow);
+            this.registerLanternEmitter(tavern, 0, wallH - 0.4, 0, 'lantern');
           }
         }
       }
@@ -3143,9 +3642,8 @@ export class Game {
         flame.position.set(torchSide * (cR - 0.34), floorLocalY + ch * 0.95, torchZ);
         caveGroup.add(flame);
         if (!lowDetail) {
-          const torchLight = new THREE.PointLight(0xff8030, 1.6, 14);
-          torchLight.position.copy(flame.position);
-          caveGroup.add(torchLight);
+          // Warm cave torch light via the night-budget system (glow sprite by day).
+          this.registerLanternEmitter(caveGroup, flame.position.x, flame.position.y, flame.position.z, 'lantern');
         }
 
         // ── Treasure chest tucked at the back of the cave (visual only — gameplay
@@ -3170,37 +3668,70 @@ export class Game {
     }
 
     const boulderCount = scaledCount(Math.round(r / 10), 5);
-    const boulderInst = new THREE.InstancedMesh(boulderGeo, boulderMat, boulderCount);
-    boulderInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     const bM = new THREE.Matrix4();
     const bQ = new THREE.Quaternion();
     const bE = new THREE.Euler();
     const bS = new THREE.Vector3();
     const bP = new THREE.Vector3();
-    const SURFACE_ABOVE_WATER = 5.0; // any sample below this is in/under water — skip decoration
-    let placedBoulders = 0;
-    for (let i = 0; i < boulderCount; i++) {
-      const angle = rng(i * 3) * Math.PI * 2;
-      const distRatio = 0.5 + rng(i * 7) * 0.36;
-      const scale = 0.7 + rng(i * 11) * 1.6;
-      const sx = scale * (0.85 + rng(i * 19) * 0.45);
-      const sy = scale * (0.6 + rng(i * 23) * 0.55);
-      const sz = scale * (0.8 + rng(i * 29) * 0.5);
-      const sample = surfacePoint(distRatio, angle, sy * 0.34);
-      if (sample.y < SURFACE_ABOVE_WATER) continue; // underwater (archipelago saddle)
-      bP.copy(sample);
-      bE.set(rng(i * 31) * Math.PI, rng(i * 37) * Math.PI, rng(i * 41) * Math.PI);
-      bQ.setFromEuler(bE);
-      bS.set(sx, sy, sz);
-      bM.compose(bP, bQ, bS);
-      boulderInst.setMatrixAt(placedBoulders, bM);
-      placedBoulders++;
+    const boulderVariants = ['boulder_a', 'boulder_b', 'boulder_c'] as const;
+    const boulderMerged = boulderVariants.map((name) => assets.mergedGeometry(name));
+    if (boulderMerged.every((m) => m !== null)) {
+      // GLB boulders: one InstancedMesh per variant, deterministic from the
+      // same island-hash rng stream as the old procedural scatter.
+      const boulderHalfExtent = [1.5, 2.6, 1.1]; // manifest footprint radii
+      const matrices: THREE.Matrix4[][] = [[], [], []];
+      for (let i = 0; i < boulderCount; i++) {
+        const angle = rng(i * 3) * Math.PI * 2;
+        const distRatio = 0.5 + rng(i * 7) * 0.36;
+        const scale = 0.7 + rng(i * 11) * 1.6;
+        const variant = Math.min(2, Math.floor(rng(i * 19) * 3));
+        const s = (scale * 0.95) / boulderHalfExtent[variant];
+        const sample = surfacePoint(distRatio, angle, -scale * 0.16);
+        if (!isSolidDecorPoint(sample)) continue; // underwater / carved-out saddle
+        bP.copy(sample);
+        bE.set((rng(i * 31) - 0.5) * 0.22, rng(i * 37) * Math.PI * 2, (rng(i * 41) - 0.5) * 0.22);
+        bQ.setFromEuler(bE);
+        bS.set(s * (0.85 + rng(i * 23) * 0.35), s * (0.8 + rng(i * 29) * 0.35), s);
+        bM.compose(bP, bQ, bS);
+        matrices[variant].push(bM.clone());
+      }
+      boulderMerged.forEach((merged, variant) => {
+        const list = matrices[variant];
+        if (!merged || list.length === 0) return;
+        const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
+        list.forEach((matrix, index) => inst.setMatrixAt(index, matrix));
+        inst.castShadow = true;
+        inst.receiveShadow = true;
+        inst.instanceMatrix.needsUpdate = true;
+        group.add(inst);
+      });
+    } else {
+      const boulderInst = new THREE.InstancedMesh(boulderGeo, boulderMat, boulderCount);
+      boulderInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      let placedBoulders = 0;
+      for (let i = 0; i < boulderCount; i++) {
+        const angle = rng(i * 3) * Math.PI * 2;
+        const distRatio = 0.5 + rng(i * 7) * 0.36;
+        const scale = 0.7 + rng(i * 11) * 1.6;
+        const sx = scale * (0.85 + rng(i * 19) * 0.45);
+        const sy = scale * (0.6 + rng(i * 23) * 0.55);
+        const sz = scale * (0.8 + rng(i * 29) * 0.5);
+        const sample = surfacePoint(distRatio, angle, sy * 0.34);
+        if (!isSolidDecorPoint(sample)) continue; // underwater / carved-out saddle
+        bP.copy(sample);
+        bE.set(rng(i * 31) * Math.PI, rng(i * 37) * Math.PI, rng(i * 41) * Math.PI);
+        bQ.setFromEuler(bE);
+        bS.set(sx, sy, sz);
+        bM.compose(bP, bQ, bS);
+        boulderInst.setMatrixAt(placedBoulders, bM);
+        placedBoulders++;
+      }
+      boulderInst.castShadow = true;
+      boulderInst.receiveShadow = true;
+      boulderInst.count = placedBoulders;
+      boulderInst.instanceMatrix.needsUpdate = true;
+      group.add(boulderInst);
     }
-    boulderInst.castShadow = true;
-    boulderInst.receiveShadow = true;
-    boulderInst.count = placedBoulders;
-    boulderInst.instanceMatrix.needsUpdate = true;
-    group.add(boulderInst);
 
     const outcropCount = scaledCount(Math.round(r / 18), 2);
     for (let i = 0; i < outcropCount; i++) {
@@ -3208,7 +3739,7 @@ export class Game {
       const distRatio = 0.62 + rng(i * 47) * 0.14;
       const ocH = Math.max(0.12, 0.85 + rng(i * 61) * 0.9);
       const outcropSample = surfacePoint(distRatio, angle, ocH * 0.22);
-      if (outcropSample.y < 5.0) continue; // archipelago saddle — skip
+      if (!isSolidDecorPoint(outcropSample)) continue; // archipelago saddle — skip
       const outcrop = new THREE.Mesh(
         new THREE.CylinderGeometry(
           Math.max(0.06, 0.18 + rng(i * 53) * 0.2),
@@ -3230,12 +3761,51 @@ export class Game {
       ? Math.min(2, scaledCount(Math.round(r / 18), 1))
       : scaledCount(Math.round(r / 12), 4);
     const palmHeightCap = 5.15 + island.radius * 0.0085 + island.radius * 0.085 * (1 + (island.profile.peakBoost ?? 0) * 0.3); // skip palms near rocky summits
-    for (let i = 0; i < palmCount; i++) {
+    const palmVariants = ['palm_a', 'palm_b', 'palm_c'] as const;
+    const palmMerged = palmVariants.map((name) => assets.mergedGeometry(name));
+    const palmsUseGlb = palmMerged.every((m) => m !== null);
+    if (palmsUseGlb) {
+      // GLB palms: 3 InstancedMeshes per island instead of 5-7 meshes per tree.
+      // Placement/variant/scale/yaw all come from the same island-hash stream.
+      const palmMatrices: THREE.Matrix4[][] = [[], [], []];
+      const pM = new THREE.Matrix4();
+      const pQ = new THREE.Quaternion();
+      const pE = new THREE.Euler();
+      const pS = new THREE.Vector3();
+      for (let i = 0; i < palmCount; i++) {
+        const angle = rng(i * 83) * Math.PI * 2;
+        const distRatio = 0.18 + rng(i * 89) * 0.3;
+        const palmSurface = surfacePoint(distRatio, angle, -0.12);
+        if (palmSurface.y > palmHeightCap) continue;
+        if (!isSolidDecorPoint(palmSurface)) continue; // skip underwater (archipelago saddles)
+        const variant = Math.min(2, Math.floor(rng(i * 107) * 3));
+        const scale = 0.72 + rng(i * 97) * 0.34;
+        const yaw = rng(i * 101) * Math.PI * 2;
+        const tilt = (rng(i * 103) - 0.5) * 0.14;
+        pE.set(tilt, yaw, -tilt * 0.6);
+        pQ.setFromEuler(pE);
+        pS.setScalar(scale);
+        pM.compose(palmSurface, pQ, pS);
+        palmMatrices[variant].push(pM.clone());
+      }
+      palmMerged.forEach((merged, variant) => {
+        const list = palmMatrices[variant];
+        if (!merged || list.length === 0) return;
+        const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
+        list.forEach((matrix, index) => inst.setMatrixAt(index, matrix));
+        inst.castShadow = true;
+        inst.receiveShadow = true;
+        inst.instanceMatrix.needsUpdate = true;
+        group.add(inst);
+      });
+    }
+    const proceduralPalmCount = palmsUseGlb ? 0 : palmCount;
+    for (let i = 0; i < proceduralPalmCount; i++) {
       const angle = rng(i * 83) * Math.PI * 2;
       const distRatio = 0.18 + rng(i * 89) * 0.3;
       const palmSurface = surfacePoint(distRatio, angle);
       if (palmSurface.y > palmHeightCap) continue;
-      if (palmSurface.y < 5.0) continue; // skip underwater (archipelago saddles)
+      if (!isSolidDecorPoint(palmSurface)) continue; // skip underwater (archipelago saddles)
       const palm = new THREE.Group();
       palm.position.copy(palmSurface);
 
@@ -3296,7 +3866,7 @@ export class Game {
       const angle = rng(i * 139) * Math.PI * 2;
       const distRatio = rng(i * 149) * 0.42;
       const tuftSample = surfacePoint(distRatio, angle, 0.16);
-      if (tuftSample.y < 5.0) continue;
+      if (!isSolidDecorPoint(tuftSample)) continue;
       const tuft = new THREE.Mesh(tuftGeo, tuftMat);
       tuft.scale.set(0.18 + rng(i * 151) * 0.22, 0.6 + rng(i * 157) * 0.55, 0.18 + rng(i * 151) * 0.22);
       tuft.position.copy(tuftSample);
@@ -3311,7 +3881,7 @@ export class Game {
       const angle = rng(i * 179) * Math.PI * 2;
       const distRatio = rng(i * 181) * 0.3;
       const fernPos = surfacePoint(distRatio, angle, 0.1);
-      if (fernPos.y < 5.0) continue;
+      if (!isSolidDecorPoint(fernPos)) continue;
       const fernGroup = new THREE.Group();
       fernGroup.position.copy(fernPos);
       const leafCount = 4 + Math.floor(rng(i * 183) * 2);
@@ -3338,7 +3908,7 @@ export class Game {
       const angle = rng(i * 193) * Math.PI * 2;
       const distRatio = 0.04 + rng(i * 197) * 0.38;
       const flowerPos = surfacePoint(distRatio, angle, 0.06);
-      if (flowerPos.y < 5.0) continue;
+      if (!isSolidDecorPoint(flowerPos)) continue;
       const stemH = 0.22 + rng(i * 199) * 0.24;
       const flowerMat = flowerMats[Math.floor(rng(i * 201) * flowerMats.length)];
       const flowerGroup = new THREE.Group();
@@ -3363,7 +3933,7 @@ export class Game {
       const angle = rng(i * 223 + 7) * Math.PI * 2;
       const distRatio = 0.76 + rng(i * 229) * 0.16;
       const logPos = surfacePoint(distRatio, angle, 0.04);
-      if (logPos.y < 5.0) continue;
+      if (!isSolidDecorPoint(logPos, SURFACE_ABOVE_WATER, -0.2)) continue;
       const logLen = 1.4 + rng(i * 233) * 2.2;
       const log = new THREE.Mesh(
         new THREE.CylinderGeometry(0.08 + rng(i * 239) * 0.05, 0.11, logLen, 6),
@@ -3387,7 +3957,7 @@ export class Game {
         const clusterAngle = rng(g * 251) * Math.PI * 2;
         const clusterDist = 0.12 + rng(g * 257) * 0.22;
         const clusterCenter = surfacePoint(clusterDist, clusterAngle);
-        if (clusterCenter.y < 5.0) continue;
+        if (!isSolidDecorPoint(clusterCenter)) continue;
         const stalkCount = 3 + Math.floor(rng(g * 263) * 3);
         for (let b = 0; b < stalkCount; b++) {
           const bh = 3.2 + rng(g * 269 + b) * 2.8;
@@ -3410,13 +3980,28 @@ export class Game {
     }
 
     if (!lowDetail && r > 38) {
-      const wreck = new THREE.Group();
       const wreckAngle = islandHeading + Math.PI * (0.55 + rng(islandSeed * 7) * 0.5);
       const wreckPos = surfacePoint(0.82 + rng(islandSeed * 11) * 0.08, wreckAngle, 0.0);
-      wreck.position.copy(wreckPos);
-      wreck.rotation.y = -wreckAngle + Math.PI * 0.5;
-      // Heel the whole wreck slightly to one side so it lies plausibly on the beach
-      wreck.rotation.z = (rng(islandSeed * 19) - 0.5) * 0.45;
+      const wreckSolid = isSolidDecorPoint(wreckPos, SURFACE_ABOVE_WATER, -0.15);
+      const wreckGlb = wreckSolid
+        ? this.buildPropInstance(
+          'shipwreck',
+          wreckPos,
+          -wreckAngle + Math.PI * 0.5,
+          THREE.MathUtils.clamp(r / 70, 0.55, 1.0),
+        )
+        : null;
+      if (wreckGlb) {
+        // Beached hull skeleton from the GLB library (interim placement — a
+        // later pass moves landmarks to the server prop registry).
+        wreckGlb.rotation.z = (rng(islandSeed * 19) - 0.5) * 0.2;
+        group.add(wreckGlb);
+      } else if (wreckSolid) {
+        const wreck = new THREE.Group();
+        wreck.position.copy(wreckPos);
+        wreck.rotation.y = -wreckAngle + Math.PI * 0.5;
+        // Heel the whole wreck slightly to one side so it lies plausibly on the beach
+        wreck.rotation.z = (rng(islandSeed * 19) - 0.5) * 0.45;
 
       const keel = new THREE.Mesh(new THREE.BoxGeometry(r * 0.14, 0.18, 0.5 + r * 0.03), wreckMat);
       keel.position.y = 0.12;
@@ -3545,7 +4130,8 @@ export class Game {
       const rope = new THREE.Line(ropeGeo, new THREE.LineBasicMaterial({ color: 0xa68f5a }));
       wreck.add(rope);
 
-      group.add(wreck);
+        group.add(wreck);
+      }
     }
 
     // ── Beach detail: shells, starfish, seaweed clumps, tide pools, washed-up jellyfish ──
@@ -3561,7 +4147,7 @@ export class Game {
         const angle = rng(i * 601 + 11) * Math.PI * 2;
         const distRatio = 0.78 + rng(i * 607) * 0.18;
         const pos = surfacePoint(distRatio, angle, 0.04);
-        if (pos.y > 5.5) continue; // beach only
+        if (pos.y > 5.5 || !isSolidDecorPoint(pos, 0.2, -0.18)) continue; // beach only
         const pick = rng(i * 613) * 4;
         if (pick < 1) {
           // Conch shell
@@ -3615,7 +4201,7 @@ export class Game {
           const angle = rng(i * 671 + 7) * Math.PI * 2;
           const distRatio = 0.84 + rng(i * 677) * 0.1;
           const pos = surfacePoint(distRatio, angle, 0.02);
-          if (pos.y > 5.7) continue;
+          if (pos.y > 5.7 || !isSolidDecorPoint(pos, 0.2, -0.18)) continue;
           const pool = new THREE.Mesh(
             new THREE.CircleGeometry(0.7 + rng(i * 681) * 0.6, 14),
             tidePoolMat,
@@ -3777,6 +4363,7 @@ export class Game {
           const angle = (s / segCount) * Math.PI * 2 + rng(band * 731 + s * 11) * 0.4;
           const distRatio = 0.42 + rng(band * 737 + s * 13) * 0.22;
           const pt = surfacePoint(distRatio, angle, 0);
+          if (!isSolidDecorPoint(pt, SURFACE_ABOVE_WATER, -0.2)) continue;
           const slabH = 0.35 + rng(band * 741 + s) * 0.45;
           const slab = new THREE.Mesh(
             new THREE.BoxGeometry(1.5 + rng(band * 743 + s) * 1.2, slabH, 0.5 + rng(band * 747 + s) * 0.6),
@@ -3800,63 +4387,65 @@ export class Game {
     if (!lowDetail && r > 42) {
       const archAngle = island.profile.ridgeAxis + Math.PI * 0.5 + rng(islandSeed * 59) * 0.6;
       const archBase = surfacePoint(0.42 + rng(islandSeed * 61) * 0.18, archAngle, 0);
-      const arch = new THREE.Group();
-      const archYaw = archAngle;
-      arch.rotation.y = archYaw;
-      const archMat = new THREE.MeshStandardMaterial({ color: 0x6c5e48, roughness: 1, flatShading: true });
-      const span = 4.5 + rng(islandSeed * 67) * 2.5;
-      const tall = 4.0 + rng(islandSeed * 71) * 2.0;
-      const thickness = 0.9;
-      // Sample ground at each pillar position so neither pillar floats
-      const cosY = Math.cos(archYaw);
-      const sinY = Math.sin(archYaw);
-      const pillarSurfaces: Record<-1 | 1, number> = { [-1]: 0, [1]: 0 } as Record<-1 | 1, number>;
-      for (const side of [-1, 1] as const) {
-        const localX = side * span * 0.5;
-        const wx = archBase.x + island.position.x + localX * cosY;
-        const wz = archBase.z + island.position.z + -localX * sinY;
-        pillarSurfaces[side] = getIslandSurfaceY(island, wx, wz);
-      }
-      const minPillarSurface = Math.min(pillarSurfaces[-1], pillarSurfaces[1]);
-      const maxPillarSurface = Math.max(pillarSurfaces[-1], pillarSurfaces[1]);
-      arch.position.set(archBase.x, minPillarSurface, archBase.z);
-      const liftedTall = tall + (maxPillarSurface - minPillarSurface);
-      for (const side of [-1, 1] as const) {
-        const localBase = pillarSurfaces[side] - minPillarSurface;
-        const pillarH = liftedTall - localBase;
-        const pillar = new THREE.Mesh(new THREE.BoxGeometry(thickness, pillarH, thickness), archMat);
-        pillar.position.set(side * span * 0.5, localBase + pillarH * 0.5, 0);
-        pillar.rotation.y = (rng((side > 0 ? 1 : 2) * 73) - 0.5) * 0.18;
-        pillar.castShadow = true;
-        pillar.receiveShadow = true;
-        arch.add(pillar);
-        // Boulders piling against the base of the pillar to ground it
-        for (let s = 0; s < 4; s++) {
-          const sa = (s / 4) * Math.PI * 2;
-          const stone = new THREE.Mesh(boulderGeo, boulderMat);
-          stone.scale.setScalar(0.32 + rng(s * 871 + (side > 0 ? 1 : 2)) * 0.2);
-          stone.position.set(
-            side * span * 0.5 + Math.cos(sa) * 0.6,
-            localBase + 0.18,
-            Math.sin(sa) * 0.6,
-          );
-          stone.rotation.set(rng(s * 873) * Math.PI, rng(s * 877) * Math.PI, rng(s * 881) * Math.PI);
+      if (isSolidDecorPoint(archBase, SURFACE_ABOVE_WATER, -0.2)) {
+        const arch = new THREE.Group();
+        const archYaw = archAngle;
+        arch.rotation.y = archYaw;
+        const archMat = new THREE.MeshStandardMaterial({ color: 0x6c5e48, roughness: 1, flatShading: true });
+        const span = 4.5 + rng(islandSeed * 67) * 2.5;
+        const tall = 4.0 + rng(islandSeed * 71) * 2.0;
+        const thickness = 0.9;
+        // Sample ground at each pillar position so neither pillar floats
+        const cosY = Math.cos(archYaw);
+        const sinY = Math.sin(archYaw);
+        const pillarSurfaces: Record<-1 | 1, number> = { [-1]: 0, [1]: 0 } as Record<-1 | 1, number>;
+        for (const side of [-1, 1] as const) {
+          const localX = side * span * 0.5;
+          const wx = archBase.x + island.position.x + localX * cosY;
+          const wz = archBase.z + island.position.z + -localX * sinY;
+          pillarSurfaces[side] = getIslandSurfaceY(island, wx, wz);
+        }
+        const minPillarSurface = Math.min(pillarSurfaces[-1], pillarSurfaces[1]);
+        const maxPillarSurface = Math.max(pillarSurfaces[-1], pillarSurfaces[1]);
+        arch.position.set(archBase.x, minPillarSurface, archBase.z);
+        const liftedTall = tall + (maxPillarSurface - minPillarSurface);
+        for (const side of [-1, 1] as const) {
+          const localBase = pillarSurfaces[side] - minPillarSurface;
+          const pillarH = liftedTall - localBase;
+          const pillar = new THREE.Mesh(new THREE.BoxGeometry(thickness, pillarH, thickness), archMat);
+          pillar.position.set(side * span * 0.5, localBase + pillarH * 0.5, 0);
+          pillar.rotation.y = (rng((side > 0 ? 1 : 2) * 73) - 0.5) * 0.18;
+          pillar.castShadow = true;
+          pillar.receiveShadow = true;
+          arch.add(pillar);
+          // Boulders piling against the base of the pillar to ground it
+          for (let s = 0; s < 4; s++) {
+            const sa = (s / 4) * Math.PI * 2;
+            const stone = new THREE.Mesh(boulderGeo, boulderMat);
+            stone.scale.setScalar(0.32 + rng(s * 871 + (side > 0 ? 1 : 2)) * 0.2);
+            stone.position.set(
+              side * span * 0.5 + Math.cos(sa) * 0.6,
+              localBase + 0.18,
+              Math.sin(sa) * 0.6,
+            );
+            stone.rotation.set(rng(s * 873) * Math.PI, rng(s * 877) * Math.PI, rng(s * 881) * Math.PI);
+            stone.castShadow = true;
+            arch.add(stone);
+          }
+        }
+        const archSegs = 7;
+        for (let i = 0; i < archSegs; i++) {
+          const t = i / (archSegs - 1);
+          const ax = (t - 0.5) * span;
+          const ay = liftedTall + Math.sin(t * Math.PI) * 1.2;
+          const stone = new THREE.Mesh(new THREE.BoxGeometry(span / archSegs * 1.05, 0.8, thickness), archMat);
+          stone.position.set(ax, ay, 0);
+          stone.rotation.z = (t - 0.5) * 0.6;
           stone.castShadow = true;
           arch.add(stone);
         }
+        group.add(arch);
       }
-      const archSegs = 7;
-      for (let i = 0; i < archSegs; i++) {
-        const t = i / (archSegs - 1);
-        const ax = (t - 0.5) * span;
-        const ay = liftedTall + Math.sin(t * Math.PI) * 1.2;
-        const stone = new THREE.Mesh(new THREE.BoxGeometry(span / archSegs * 1.05, 0.8, thickness), archMat);
-        stone.position.set(ax, ay, 0);
-        stone.rotation.z = (t - 0.5) * 0.6;
-        stone.castShadow = true;
-        arch.add(stone);
-      }
-      group.add(arch);
     }
 
     // ── Lookout post — wooden tower on or near a high point ──
@@ -3946,7 +4535,7 @@ export class Game {
         lookout.add(r2);
       }
       void towerH;
-      group.add(lookout);
+      if (isSolidDecorPoint(base, SURFACE_ABOVE_WATER, -0.2)) group.add(lookout);
     }
 
     // ── Pirate camp — fire pit, bedrolls, totem, hung skull ──
@@ -3968,31 +4557,43 @@ export class Game {
       };
       const stoneMatC = new THREE.MeshStandardMaterial({ color: 0x3d352b, roughness: 1 });
       const charredMat = new THREE.MeshStandardMaterial({ color: 0x141210, roughness: 1, emissive: 0x6b2a06, emissiveIntensity: 0.4 });
-      // Fire ring
-      for (let s = 0; s < 8; s++) {
-        const a = (s / 8) * Math.PI * 2;
-        const stone = new THREE.Mesh(boulderGeo, stoneMatC);
-        stone.position.set(Math.cos(a) * 0.8, 0.18, Math.sin(a) * 0.8);
-        stone.scale.setScalar(0.22 + rng(s * 137) * 0.15);
-        stone.rotation.set(rng(s * 139) * Math.PI, rng(s * 143) * Math.PI, rng(s * 149) * Math.PI);
-        camp.add(stone);
-      }
-      // Logs criss-crossed
       const logMatC = new THREE.MeshStandardMaterial({ color: 0x2a1a0c, roughness: 1 });
-      for (let l = 0; l < 4; l++) {
-        const log = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.2, 5), logMatC);
-        log.rotation.z = Math.PI * 0.5;
-        log.rotation.y = (l / 4) * Math.PI;
-        log.position.set(0, 0.18, 0);
-        camp.add(log);
+      // Fire pit: GLB stone ring + charred logs when available (interim — a
+      // later pass moves camp placement to the server prop registry).
+      const campfireGlb = this.buildPropInstance(
+        'campfire',
+        new THREE.Vector3(0, 0.02, 0),
+        rng(islandSeed * 151) * Math.PI * 2,
+        1.15,
+      );
+      if (campfireGlb) {
+        camp.add(campfireGlb);
+      } else {
+        // Fire ring
+        for (let s = 0; s < 8; s++) {
+          const a = (s / 8) * Math.PI * 2;
+          const stone = new THREE.Mesh(boulderGeo, stoneMatC);
+          stone.position.set(Math.cos(a) * 0.8, 0.18, Math.sin(a) * 0.8);
+          stone.scale.setScalar(0.22 + rng(s * 137) * 0.15);
+          stone.rotation.set(rng(s * 139) * Math.PI, rng(s * 143) * Math.PI, rng(s * 149) * Math.PI);
+          camp.add(stone);
+        }
+        // Logs criss-crossed
+        for (let l = 0; l < 4; l++) {
+          const log = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.2, 5), logMatC);
+          log.rotation.z = Math.PI * 0.5;
+          log.rotation.y = (l / 4) * Math.PI;
+          log.position.set(0, 0.18, 0);
+          camp.add(log);
+        }
       }
-      // Glowing embers
+      // Glowing embers (the in-engine "flame" over the GLB fire pit)
       const embers = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 8), charredMat);
       embers.position.y = 0.22;
       camp.add(embers);
-      const fireGlow = new THREE.PointLight(0xff7022, 1.6, 14);
-      fireGlow.position.set(0, 0.6, 0);
-      camp.add(fireGlow);
+      // Campfire light + flame sprite via the night-budget system (keeps a small
+      // day-time flame; a strong flickering PointLight lights it at night).
+      this.registerLanternEmitter(camp, 0, 0.42, 0, 'campfire');
 
       // Bedrolls
       const bedMat = new THREE.MeshStandardMaterial({ color: 0x6b3823, roughness: 0.95 });
@@ -4045,7 +4646,7 @@ export class Game {
         stick.rotation.z = Math.sin(a) * 0.5;
         camp.add(stick);
       }
-      group.add(camp);
+      if (isSolidDecorPoint(base, SURFACE_ABOVE_WATER, -0.2)) group.add(camp);
     }
 
     // ── Rock cairns scattered along higher ground ──
@@ -4055,7 +4656,7 @@ export class Game {
         const angle = rng(i * 311 + 17) * Math.PI * 2;
         const distRatio = 0.3 + rng(i * 313 + 19) * 0.3;
         const base = surfacePoint(distRatio, angle, 0);
-        if (base.y < 5.6) continue;
+        if (base.y < 5.6 || !isSolidDecorPoint(base, 5.6, -0.2)) continue;
         const cairn = new THREE.Group();
         cairn.position.copy(base);
         const stoneCount = 3 + Math.floor(rng(i * 317) * 2);
@@ -4085,6 +4686,7 @@ export class Game {
         const distRatio = 0.18 + rng(i * 357) * 0.34;
         const pos = surfacePoint(distRatio, angle, 0);
         if (pos.y > palmHeightCap) continue;
+        if (!isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
         const tree = new THREE.Group();
         tree.position.copy(pos);
         const trunkH = 1.8 + rng(i * 359) * 1.0;
@@ -4122,6 +4724,7 @@ export class Game {
         const angle = rng(i * 367 + 29) * Math.PI * 2;
         const distRatio = 0.32 + rng(i * 369) * 0.36;
         const pos = surfacePoint(distRatio, angle, 0);
+        if (!isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
         const tree = new THREE.Group();
         tree.position.copy(pos);
         const trunkH = 2.6 + rng(i * 371) * 2.2;
@@ -4178,7 +4781,7 @@ export class Game {
         cap.position.set(localX, 0.18, sideZ);
         log.add(cap);
       }
-      group.add(log);
+      if (isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) group.add(log);
     }
 
     // ── Beached dinghy — small wrecked rowboat in the dunes ──
@@ -4218,7 +4821,7 @@ export class Game {
       blade.position.set(0.55, 0.4, -0.95);
       blade.rotation.y = 0.4;
       dinghy.add(blade);
-      group.add(dinghy);
+      if (isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.15)) group.add(dinghy);
     }
 
     // ── Crab traps & fishing nets near the dock ──
@@ -4257,12 +4860,13 @@ export class Game {
         fish.position.set(-0.6 + f * 0.6, 1.78, 0);
         netGroup.add(fish);
       }
-      group.add(netGroup);
+      if (isSolidDecorPoint(netPos, SURFACE_ABOVE_WATER, -0.15)) group.add(netGroup);
 
       // Crab traps: 2-3 stacked baskets near the shore
       const trapAngle = dock.shoreAngle - dock.moorSide * 0.7;
       const trapBase = surfacePoint(0.84, trapAngle, 0);
       for (let t = 0; t < 3; t++) {
+        if (!isSolidDecorPoint(trapBase, SURFACE_ABOVE_WATER, -0.15)) continue;
         const offX = (rng(t * 901 + islandSeed) - 0.5) * 1.2;
         const offZ = (rng(t * 907 + islandSeed) - 0.5) * 1.2;
         const trapWX = trapBase.x + island.position.x + offX;
@@ -4340,7 +4944,7 @@ export class Game {
         mouth.position.set(ix, groundY + idolH + 0.05, iz + 0.3);
         cluster.add(mouth);
       }
-      group.add(cluster);
+      if (isSolidDecorPoint(clusterCenter, SURFACE_ABOVE_WATER, -0.2)) group.add(cluster);
     }
 
     // ── Hanging vines from the highest cliff & tallest trees ──
@@ -4351,6 +4955,7 @@ export class Game {
         const va = rng(i * 941 + 23) * Math.PI * 2;
         const vd = 0.34 + rng(i * 947) * 0.32;
         const top = surfacePoint(vd, va, 0);
+        if (!isSolidDecorPoint(top, SURFACE_ABOVE_WATER, -0.2)) continue;
         // Find ground a bit further out so the vine hangs over a slope drop
         const drop = 1.5 + rng(i * 953) * 3.0;
         const groundWX = top.x + island.position.x + Math.cos(va) * 1.6;
@@ -4388,6 +4993,7 @@ export class Game {
         const sa = rng(i * 977 + islandSeed) * Math.PI * 2;
         const sd = 0.22 + rng(i * 981 + islandSeed) * 0.42;
         const sp = surfacePoint(sd, sa, 0);
+        if (!isSolidDecorPoint(sp, SURFACE_ABOVE_WATER, -0.2)) continue;
         const stake = new THREE.Group();
         stake.position.copy(sp);
         stake.rotation.y = rng(i * 983 + islandSeed) * Math.PI * 2;
@@ -4413,7 +5019,7 @@ export class Game {
       const top = surfacePoint(0.4, ladderAngle, 0);
       const bottom = surfacePoint(0.78, ladderAngle, 0);
       const dropY = top.y - bottom.y;
-      if (dropY > 2.5) {
+      if (dropY > 2.5 && isSolidDecorPoint(top, SURFACE_ABOVE_WATER, -0.2) && isSolidDecorPoint(bottom, SURFACE_ABOVE_WATER, -0.15)) {
         const dx = bottom.x - top.x;
         const dz = bottom.z - top.z;
         const horiz = Math.hypot(dx, dz);
@@ -4467,6 +5073,14 @@ export class Game {
     if (!lowDetail && r > 64 && island.tavern === null) {
       const wAngle = islandHeading + Math.PI * 1.45 + rng(islandSeed * 999) * 0.5;
       const wPos = surfacePoint(0.85 + rng(islandSeed * 1003) * 0.06, wAngle, 0);
+      const wreck2Solid = isSolidDecorPoint(wPos, SURFACE_ABOVE_WATER, -0.15);
+      const wreck2Glb = wreck2Solid
+        ? this.buildPropInstance('shipwreck', wPos, -wAngle + Math.PI * 0.4, 0.5)
+        : null;
+      if (wreck2Glb) {
+        wreck2Glb.rotation.z = (rng(islandSeed * 1009) - 0.5) * 0.24;
+        group.add(wreck2Glb);
+      } else if (wreck2Solid) {
       const wreck2 = new THREE.Group();
       wreck2.position.copy(wPos);
       wreck2.rotation.y = -wAngle + Math.PI * 0.4;
@@ -4495,6 +5109,7 @@ export class Game {
         wreck2.add(rib);
       }
       group.add(wreck2);
+      }
     }
 
     // ── Trails — packed-dirt paths between dock, tavern, upgrade stations, hoarder, ruins ──
@@ -4650,6 +5265,7 @@ export class Game {
         const angle = island.profile.ridgeAxis + (i / spireCount) * Math.PI + rng(i * 503 + 13) * 0.6;
         const distRatio = 0.32 + rng(i * 509 + 17) * 0.4;
         const surface = surfacePoint(distRatio, angle);
+        if (!isSolidDecorPoint(surface, SURFACE_ABOVE_WATER, -0.2)) continue;
         const spireH = 4 + rng(i * 521) * (island.profile.terrainStyle === 'mountain' ? 9 : 5);
         const spireR = 0.7 + rng(i * 523) * 1.6;
         // Tilt is bounded so cos(tilt) ≈ 1 and the base never lifts visibly.
@@ -4832,7 +5448,8 @@ export class Game {
     if (!lowDetail && r > 48) {
       const ruin = new THREE.Group();
       const ruinAngle = island.profile.primaryHillAngle + rng(islandSeed * 17) * 0.8;
-      ruin.position.copy(surfacePoint(0.18 + rng(islandSeed * 23) * 0.18, ruinAngle, 0.02));
+      const ruinPos = surfacePoint(0.18 + rng(islandSeed * 23) * 0.18, ruinAngle, 0.02);
+      ruin.position.copy(ruinPos);
       ruin.rotation.y = rng(islandSeed * 31) * Math.PI * 2;
 
       for (let pillar = 0; pillar < 3; pillar++) {
@@ -4858,7 +5475,7 @@ export class Game {
       bowl.position.set(0.18, 0.12, 0.34);
       ruin.add(bowl);
 
-      group.add(ruin);
+      if (isSolidDecorPoint(ruinPos, SURFACE_ABOVE_WATER, -0.2)) group.add(ruin);
     }
 
     if (!lowDetail) {
@@ -4867,7 +5484,7 @@ export class Game {
       for (let i = 0; i < terraceCount; i++) {
         const angle = island.profile.ridgeAxis + (i - 1) * 0.46 + (rng(i * 1103 + islandSeed) - 0.5) * 0.18;
         const pos = surfacePoint(0.34 + i * 0.08 + rng(i * 1109 + islandSeed) * 0.06, angle, 0.035);
-        if (pos.y < 1.4) continue;
+        if (pos.y < 1.4 || !isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
         const ledge = new THREE.Mesh(
           new THREE.BoxGeometry(3.8 + rng(i * 1117 + islandSeed) * 2.2, 0.12, 1.0 + rng(i * 1123 + islandSeed) * 0.65),
           terraceMat,
@@ -4938,7 +5555,7 @@ export class Game {
       }
     }
 
-    if (lowDetail) {
+    {
       const detailRoot = new THREE.Group();
       detailRoot.name = 'island-detail-root';
       while (group.children.length > 0) {
@@ -4978,12 +5595,14 @@ export class Game {
         proxyRoot.add(proxyPeak);
       }
 
-      detailRoot.traverse((obj) => {
-        if (obj instanceof THREE.Mesh) {
-          obj.castShadow = false;
-          obj.receiveShadow = false;
-        }
-      });
+      if (lowDetail) {
+        detailRoot.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.castShadow = false;
+            obj.receiveShadow = false;
+          }
+        });
+      }
       proxyRoot.traverse((obj) => {
         if (obj instanceof THREE.Mesh) {
           obj.castShadow = false;
@@ -5006,19 +5625,36 @@ export class Game {
 
       const surfaceY = getIslandSurfaceY(island, chest.position.x, chest.position.z);
 
-      const chestMesh = new THREE.Mesh(
-        new THREE.BoxGeometry(1.1, 0.7, 0.75),
-        new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 }),
+      let chestMesh: THREE.Object3D;
+      let lid: THREE.Object3D;
+      const chestGlb = this.buildPropInstance(
+        'chest_closed',
+        new THREE.Vector3(0, -0.42, 0),
+        (chest.position.x * 7.13 + chest.position.z * 3.71) % (Math.PI * 2),
+        1.15,
       );
-      chestMesh.castShadow = true;
-      chestGroup.add(chestMesh);
+      if (chestGlb) {
+        chestGroup.add(chestGlb);
+        chestMesh = chestGlb;
+        lid = new THREE.Group(); // GLB includes the lid; keep the record shape for syncChests
+        chestGroup.add(lid);
+      } else {
+        const chestBox = new THREE.Mesh(
+          new THREE.BoxGeometry(1.1, 0.7, 0.75),
+          new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 }),
+        );
+        chestBox.castShadow = true;
+        chestGroup.add(chestBox);
+        chestMesh = chestBox;
 
-      const lid = new THREE.Mesh(
-        new THREE.BoxGeometry(1.08, 0.2, 0.75),
-        new THREE.MeshStandardMaterial({ color: 0x8b5e2f, roughness: 0.9 }),
-      );
-      lid.position.y = 0.42;
-      chestGroup.add(lid);
+        const lidMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(1.08, 0.2, 0.75),
+          new THREE.MeshStandardMaterial({ color: 0x8b5e2f, roughness: 0.9 }),
+        );
+        lidMesh.position.y = 0.42;
+        chestGroup.add(lidMesh);
+        lid = lidMesh;
+      }
 
       const glow = new THREE.PointLight(0xffc75a, 1.2, 12);
       glow.position.set(0, 1.2, 0);
@@ -5047,17 +5683,27 @@ export class Game {
     for (const barrel of island.barrels) {
       const barrelRoot = new THREE.Group();
       barrelRoot.position.set(barrel.position.x, barrel.position.y, barrel.position.z);
-      const woodMat = new THREE.MeshStandardMaterial({ color: 0x4a3010, roughness: 0.95 });
-      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.72, 10), woodMat);
-      body.position.y = 0.36;
-      body.castShadow = true;
-      barrelRoot.add(body);
-      const lidB = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.36, 0.36, 0.06, 10),
-        new THREE.MeshStandardMaterial({ color: 0x2a4a6a, roughness: 0.85 }),
+      const barrelGlb = this.buildPropInstance(
+        'barrel',
+        new THREE.Vector3(0, 0, 0),
+        (barrel.position.x * 5.31 + barrel.position.z * 2.17) % (Math.PI * 2),
+        0.88,
       );
-      lidB.position.y = 0.78;
-      barrelRoot.add(lidB);
+      if (barrelGlb) {
+        barrelRoot.add(barrelGlb);
+      } else {
+        const woodMat = new THREE.MeshStandardMaterial({ color: 0x4a3010, roughness: 0.95 });
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.72, 10), woodMat);
+        body.position.y = 0.36;
+        body.castShadow = true;
+        barrelRoot.add(body);
+        const lidB = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.36, 0.36, 0.06, 10),
+          new THREE.MeshStandardMaterial({ color: 0x2a4a6a, roughness: 0.85 }),
+        );
+        lidB.position.y = 0.78;
+        barrelRoot.add(lidB);
+      }
       this.environment.add(barrelRoot);
       this.barrelMeshes.set(barrel.id, barrelRoot);
     }
@@ -5275,10 +5921,16 @@ export class Game {
       handle.position.set(0.69, 1.12, -0.05);
       root.add(handle);
     } else {
-      const crate = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.52, 0.58), propMat);
-      crate.position.set(-0.82, 0.28, -0.2);
-      crate.castShadow = true;
-      root.add(crate);
+      // Supply crate GLB (0.72³ footprint, origin at ground) with the old box fallback.
+      const crateGlb = this.buildPropInstance('crate', new THREE.Vector3(-0.82, 0.02, -0.2), 0.35, 0.75);
+      if (crateGlb) {
+        root.add(crateGlb);
+      } else {
+        const crate = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.52, 0.58), propMat);
+        crate.position.set(-0.82, 0.28, -0.2);
+        crate.castShadow = true;
+        root.add(crate);
+      }
       const chart = new THREE.Mesh(
         new THREE.PlaneGeometry(0.52, 0.34),
         new THREE.MeshStandardMaterial({ color: 0xd0b57f, roughness: 0.92, side: THREE.DoubleSide }),
@@ -5312,7 +5964,11 @@ export class Game {
     this.windWispTimer -= dt;
     this.rainOverlayTimer -= dt;
 
+    if (this.serverTimeOffset !== null) {
+      this.ocean.setWaveTime(performance.now() / 1000 + this.serverTimeOffset);
+    }
     this.ocean.update(dt, this.renderer.camera.position);
+    this.ocean.setAtmosphere(this.renderer.getAtmosphere());
     this.updateScene(dt);
 
     const hasForcedInput = this.input.hasPendingActions() || this.pendingInteractFromUi || this.pendingLaunchFromUi;
@@ -5329,7 +5985,9 @@ export class Game {
       const currentInteractKind = this.resolveCurrentInteractKind();
       input.interactIntent = input.interact
         ? (currentInteractKind ?? (uiInteract ? this.lastInteractKind : null))
-        : null;
+        // Bail is a continuous hold, so its intent must ride every held frame — not
+        // just the press edge — for the server's held-interact drain to keep running.
+        : (input.interactHeld && currentInteractKind === 'bail' ? 'bail' : null);
       if (this.pendingLaunchFromUi) {
         input.jumpPressed = true;
         this.pendingLaunchFromUi = false;
@@ -5454,15 +6112,16 @@ export class Game {
   }
 
   private updateEnvironmentLod() {
-    if (!this.state || this.renderer.getQuality() !== 'low') return;
+    if (!this.state) return;
 
+    const quality = this.renderer.getQuality();
     const cam = this.renderer.camera.position;
-    const detailRadius = 180;
-    const wildlifeRadius = 220;
-    const lootRadius = 340;
-    const seaRockRadius = 650;
-    const upgradeRadius = 420;
-    const npcRadius = 360;
+    const detailRadius = quality === 'low' ? 180 : quality === 'balanced' ? 300 : 420;
+    const wildlifeRadius = quality === 'low' ? 220 : quality === 'balanced' ? 360 : 520;
+    const lootRadius = quality === 'low' ? 340 : quality === 'balanced' ? 520 : 760;
+    const seaRockRadius = quality === 'low' ? 650 : quality === 'balanced' ? 900 : 1200;
+    const upgradeRadius = quality === 'low' ? 420 : quality === 'balanced' ? 620 : 820;
+    const npcRadius = quality === 'low' ? 360 : quality === 'balanced' ? 560 : 760;
 
     for (const island of this.state.islands) {
       const group = this.islandMeshes.get(island.id);
@@ -5599,6 +6258,10 @@ export class Game {
     }
 
     this.audioFrameTriggers(dt);
+    // Single source of night-ness for every warm-light system this frame.
+    const nightFactor = THREE.MathUtils.clamp(this.renderer.getAtmosphere().nightFactor, 0, 1);
+    this.shipRenderer.setNightFactor(nightFactor);
+    this.updateLanterns(nightFactor, this.renderer.camera.position, this.ocean.getTime());
     const snapshotAge = Math.min(0.22, (performance.now() - this.lastSnapshotAt) / 1000);
     this.shipRenderer.update(
       this.state.ships,
@@ -5805,6 +6468,34 @@ export class Game {
       } else if (!plunging && serverDepth < 1.4 && depthBelowSurface < 2.0 && player.velocity.y > -0.35) {
         // Gentle pull as the player surfaces and starts to bob with the waves
         visualY = THREE.MathUtils.lerp(visualY, targetFeetY, 0.14);
+      }
+
+      // Hull collision parity: mirror the authoritative resolveSwimmerShipCollision
+      // so a swimmer never *visually* clips into a ship hull (or rubber-bands out
+      // when the server correction arrives). Uses the same shared footprint math.
+      if (!player.onShipId && !player.cannonBallistic && this.state) {
+        const hullMargin = PLAYER.RADIUS + 0.18;
+        for (const ship of this.state.ships) {
+          if (!ship.alive || ship.sinking) continue;
+          const stats = SHIP_STATS[ship.type];
+          const band = getSwimHullVerticalBand(ship.position.y, stats);
+          const dx = predictedX - ship.position.x;
+          const dz = predictedZ - ship.position.z;
+          const cos = Math.cos(ship.rotation);
+          const sin = Math.sin(ship.rotation);
+          const localX = dx * cos - dz * sin;
+          const localZ = dx * sin + dz * cos;
+          if (!isInsideSwimHullFootprint(stats, localX, localZ, hullMargin)) continue;
+          if (visualY < band.keelY) {
+            if (visualY > band.keelY - (PLAYER.HEIGHT + 0.4)) visualY = Math.min(visualY, band.keelY - 0.02);
+            continue;
+          }
+          if (visualY > band.deckY + 0.35) continue;
+          const out = pushOutOfSwimHullFootprint(stats, localX, localZ, hullMargin);
+          if (!out.pushed) continue;
+          predictedX = ship.position.x + out.x * cos + out.z * sin;
+          predictedZ = ship.position.z + out.z * cos - out.x * sin;
+        }
       }
     }
     // Match server: only treat as walkable island ground when inside the real footprint (not a huge ocean margin).
@@ -6034,8 +6725,19 @@ export class Game {
             { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
             this.renderer.camera.position,
           );
+          // Chainshot that dies above the water almost certainly caught rigging —
+          // tear canvas audibly (visual scraps come from emitImpact's chainshot case).
+          if (projectileType === 'chainshot' && mesh.position.y > 0.9) {
+            const d = this.distance2D(
+              this.renderer.camera.position.x, this.renderer.camera.position.z,
+              mesh.position.x, mesh.position.z,
+            );
+            this.audio.playSailRip(d);
+          }
         }
+        this.lastChainshotWhirrAt.delete(projectileId);
         this.renderer.scene.remove(mesh);
+        this.disposeSceneObject(mesh);
         this.projectileMeshes.delete(projectileId);
       }
     }
@@ -6051,6 +6753,11 @@ export class Game {
         mesh.userData.projectileType = projectile.type;
         mesh.userData.showImpact = projectile.showImpact;
         this.combatFx.emitLaunch(projectile, this.renderer.camera.position, projectile.ownerId === this.localPlayerId);
+        // Own-ship broadside just fired — brief FOV pop + a touch of shake.
+        if (projectile.ownerShipId && projectile.ownerShipId === this.localShipId && projectile.type !== 'bullet') {
+          this.cameraShakeCannon = 1;
+          this.cameraShake = Math.min(1, this.cameraShake + 0.18);
+        }
       }
       mesh.userData.projectileType = projectile.type;
       mesh.userData.showImpact = projectile.showImpact;
@@ -6064,6 +6771,21 @@ export class Game {
         mesh.scale.set(1 + projectile.age * 0.18, 1 + (1 - life) * 0.35, 1 + projectile.age * 0.55);
         const material = mesh.material as THREE.MeshBasicMaterial;
         material.opacity = Math.max(0, 0.42 * life);
+      } else if (mesh.userData.chainshot) {
+        // Whirl the ball-and-chain in flight; lay a pale trail; whistle by distance.
+        mesh.rotation.y += dt * 15;
+        mesh.rotation.x += dt * 5.5;
+        this.combatFx.emitTrail(projectile.position, 0x9fd0ff);
+        const nowT = this.ocean.getTime();
+        const last = this.lastChainshotWhirrAt.get(projectile.id) ?? -1;
+        if (nowT - last > 0.5) {
+          const d = this.distance2D(
+            this.renderer.camera.position.x, this.renderer.camera.position.z,
+            projectile.position.x, projectile.position.z,
+          );
+          this.audio.playChainshotWhirr(d);
+          this.lastChainshotWhirrAt.set(projectile.id, nowT);
+        }
       }
     }
   }
@@ -6074,6 +6796,7 @@ export class Game {
     for (const [kegId, mesh] of this.kegMeshes) {
       if (!this.liveKegIds.has(kegId)) {
         this.renderer.scene.remove(mesh.root);
+        this.disposeSceneObject(mesh.root);
         this.kegMeshes.delete(kegId);
       }
     }
@@ -6085,32 +6808,41 @@ export class Game {
       if (!mesh) {
         const root = new THREE.Group();
         const mega = !!keg.mega;
-        const barrel = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.22, 0.26, 0.58, 10),
-          new THREE.MeshStandardMaterial({
-            color: mega ? 0x2a1510 : 0x5a3418,
-            emissive: mega ? 0x4a0f08 : 0x000000,
-            emissiveIntensity: mega ? 0.26 : 0,
-            roughness: 0.92,
-          }),
-        );
-        barrel.castShadow = true;
-        root.add(barrel);
+        const kegGlb = mega
+          ? assets.cloneTinted('keg', 'Wood_Dark', 0x1d0e08)
+          : assets.clone('keg');
+        if (kegGlb) {
+          kegGlb.scale.setScalar(0.62);
+          kegGlb.position.y = -0.3;
+          root.add(kegGlb);
+        } else {
+          const barrel = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.22, 0.26, 0.58, 10),
+            new THREE.MeshStandardMaterial({
+              color: mega ? 0x2a1510 : 0x5a3418,
+              emissive: mega ? 0x4a0f08 : 0x000000,
+              emissiveIntensity: mega ? 0.26 : 0,
+              roughness: 0.92,
+            }),
+          );
+          barrel.castShadow = true;
+          root.add(barrel);
 
-        const bandMat = new THREE.MeshStandardMaterial({ color: mega ? 0xd89b3a : 0x2b2b2b, roughness: 0.45, metalness: 0.85 });
-        for (const y of [-0.18, 0.18]) {
-          const band = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.03, 6, 10), bandMat);
-          band.rotation.x = Math.PI * 0.5;
-          band.position.y = y;
-          root.add(band);
+          const bandMat = new THREE.MeshStandardMaterial({ color: mega ? 0xd89b3a : 0x2b2b2b, roughness: 0.45, metalness: 0.85 });
+          for (const y of [-0.18, 0.18]) {
+            const band = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.03, 6, 10), bandMat);
+            band.rotation.x = Math.PI * 0.5;
+            band.position.y = y;
+            root.add(band);
+          }
+
+          const fuseStem = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.018, 0.018, 0.22, 6),
+            new THREE.MeshStandardMaterial({ color: 0x2b1f12, roughness: 1 }),
+          );
+          fuseStem.position.set(0.04, 0.36, 0);
+          root.add(fuseStem);
         }
-
-        const fuseStem = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.018, 0.018, 0.22, 6),
-          new THREE.MeshStandardMaterial({ color: 0x2b1f12, roughness: 1 }),
-        );
-        fuseStem.position.set(0.04, 0.36, 0);
-        root.add(fuseStem);
 
         const fuse = new THREE.PointLight(mega ? 0xff3226 : 0xff7a26, mega ? 2.2 : 1.2, mega ? 6.5 : 3.5);
         fuse.position.set(0.04, 0.48, 0);
@@ -6723,9 +7455,48 @@ export class Game {
     const cameraFollow = 1 - Math.exp(-followHz * this.frameDt);
     this.renderer.camera.position.lerp(desired, cameraFollow);
     this.renderer.camera.lookAt(lookTarget);
-    if (Math.abs(this.renderer.camera.fov - targetFov) > 0.05) {
-      this.renderer.camera.fov += (targetFov - this.renderer.camera.fov) * Math.min(1, this.frameDt * 10);
-      this.renderer.camera.updateProjectionMatrix();
+
+    const camera = this.renderer.camera;
+    const onDeck = !!player.onShipId && !!trackedShip && !swimming;
+    const shipSpeed01 = onDeck && trackedShip
+      ? THREE.MathUtils.clamp(
+          Math.hypot(trackedShip.velocity.x, trackedShip.velocity.z) / Math.max(SHIP_STATS[trackedShip.type].maxSpeed, 0.001),
+          0, 1,
+        )
+      : 0;
+
+    // ── FOV kick: +4° eased into full sail speed, +2° brief pop on own cannon fire.
+    const fovKickTarget = shipSpeed01 * 4 + this.cameraShakeCannon * 2;
+    this.cameraFovKick += (fovKickTarget - this.cameraFovKick) * Math.min(1, this.frameDt * 6);
+    this.cameraShakeCannon = Math.max(0, this.cameraShakeCannon - this.frameDt * 3.2);
+    const finalFov = targetFov + this.cameraFovKick;
+    if (Math.abs(camera.fov - finalFov) > 0.02) {
+      camera.fov += (finalFov - camera.fov) * Math.min(1, this.frameDt * 10);
+      camera.updateProjectionMatrix();
+    }
+
+    // ── Deck roll coupling: lean the view with the hull heel, clamped to ±0.06 rad.
+    let rollTarget = 0;
+    if (onDeck && trackedShip) {
+      rollTarget = THREE.MathUtils.clamp(-(trackedShip.roll ?? 0) * 0.5, -0.06, 0.06);
+    }
+    this.cameraRoll += (rollTarget - this.cameraRoll) * Math.min(1, this.frameDt * 4);
+    this.cameraRoll = THREE.MathUtils.clamp(this.cameraRoll, -0.06, 0.06);
+    if (Math.abs(this.cameraRoll) > 0.0002) camera.rotateZ(this.cameraRoll);
+
+    // ── Impact shake (own-hull hits) + a sluggish wallow when heavily flooded.
+    this.cameraShake = Math.max(0, this.cameraShake - this.frameDt * 2.4);
+    let shake = this.cameraShake;
+    const water = onDeck && trackedShip ? (trackedShip.waterLevel ?? 0) : 0;
+    if (water > 0.5) shake += (water - 0.5) * 0.14;
+    if (shake > 0.0005) {
+      const amp = Math.min(0.9, shake) * 0.12;
+      const st = this.ocean.getTime();
+      camera.rotateX(Math.sin(st * 41.0) * amp * 0.5);
+      camera.rotateY(Math.cos(st * 37.0) * amp * 0.5);
+      this.tempShakeVec.set(Math.sin(st * 53.0) * amp, Math.cos(st * 59.0) * amp, 0)
+        .applyQuaternion(camera.quaternion);
+      camera.position.add(this.tempShakeVec);
     }
   }
 
@@ -6909,6 +7680,7 @@ export class Game {
     this.renderShipUpgrades(ship);
     this.renderShipInventory(ship, player);
     this.renderKegStatus(player);
+    this.updateWaterGauge(player);
 
     let chestsInHold = 0;
     if (ship) {
@@ -7065,13 +7837,11 @@ export class Game {
       this.ui.contextLabel.textContent = 'Carrying treasure · sell at Gold Hoarder or stow on ship';
     } else {
       this.ui.interactPrompt.style.display = 'none';
-      const powers = this.getSpecialSummary(player);
-      const powerText = powers ? ` · ${powers}` : '';
       const ambientLabel = player.state === 'swimming'
         ? 'Swimming · W follows look · Space up · Z down · LMB fire · Shift/RMB aim'
         : weapon?.weaponId === 'cutlass'
-          ? `Cutlass · hold LMB charge dash · Shift/RMB block · ${this.getKegSummary(player)}${powerText}`
-          : `First-person BR · [I] hold supply wheel (1–4) · Pocket counts below · Shift/RMB ADS · ${this.getKegSummary(player)}${powerText}`;
+          ? `Cutlass · hold LMB to charge dash · Shift/RMB block · ${this.getKegSummary(player)}`
+          : `[I] Supply wheel · Shift/RMB aim · ${this.getKegSummary(player)}`;
       this.ui.contextLabel.style.display = ambientLabel ? 'block' : 'none';
       this.ui.contextLabel.textContent = ambientLabel;
     }
@@ -7684,6 +8454,42 @@ export class Game {
 
     this.previousKnockback = knockbackMagnitude;
     this.previousHealth = player.health;
+
+    // Own-ship hull damage: shake the camera (scaled by the hit) and flash a
+    // damage-direction arc toward the likeliest shooter (nearest enemy ship).
+    const localShip = this.localShipId ? this.shipsById.get(this.localShipId) ?? null : null;
+    if (localShip) {
+      const total = localShip.hull.bow + localShip.hull.stern + localShip.hull.port + localShip.hull.starboard;
+      if (localShip.id !== this.prevOwnShipId) {
+        this.prevOwnShipId = localShip.id;
+      } else {
+        const drop = this.prevOwnHullTotal - total;
+        if (drop > 0.01) {
+          this.cameraShake = Math.min(1, this.cameraShake + THREE.MathUtils.clamp(drop * 1.6, 0.12, 0.8));
+          const shooter = this.findNearestEnemyShip(localShip);
+          if (shooter) this.spawnIncomingDamageDirection(shooter.position);
+        }
+      }
+      this.prevOwnHullTotal = total;
+    } else {
+      this.prevOwnShipId = null;
+      this.prevOwnHullTotal = 4;
+    }
+  }
+
+  private findNearestEnemyShip(ownShip: Ship): Ship | null {
+    if (!this.state) return null;
+    let best: Ship | null = null;
+    let bestDist = Infinity;
+    for (const ship of this.state.ships) {
+      if (ship.id === ownShip.id || !ship.alive) continue;
+      const d = this.distance2D(ownShip.position.x, ownShip.position.z, ship.position.x, ship.position.z);
+      if (d < bestDist) {
+        bestDist = d;
+        best = ship;
+      }
+    }
+    return best;
   }
 
   private updateCombatHud(dt: number) {
@@ -8018,12 +8824,182 @@ export class Game {
     } else {
       this.prevMeleeReloading = false;
     }
+
+    this.updateNavalAudioAndFx(dt, player, localShip);
+  }
+
+  /**
+   * Round-3 naval audio + FX bed: world ambience (night/storm/shore), the sailing
+   * bed for the ship you're aboard, the flooding loop for that ship (or the nearest
+   * flooding hull within 20 m), bail scoop arcs, hull leaks, and the storm stinger.
+   */
+  private updateNavalAudioAndFx(_dt: number, player: Player | null, localShip: Ship | null) {
+    if (!this.state) return;
+    const t = this.ocean.getTime();
+    const cam = this.renderer.camera.position;
+    const atmo = this.renderer.getAtmosphere();
+    const nightFactor = THREE.MathUtils.clamp(atmo.nightFactor, 0, 1);
+    const storminess = THREE.MathUtils.clamp(this.stormWeatherIntensity, 0, 1);
+
+    // Shore proximity — closest island edge to the listener drives breaker ambience.
+    let nearestEdge = Infinity;
+    for (const island of this.state.islands) {
+      const edge = this.distance2D(cam.x, cam.z, island.position.x, island.position.z) - island.radius;
+      if (edge < nearestEdge) nearestEdge = edge;
+    }
+    const nearShore01 = Number.isFinite(nearestEdge)
+      ? THREE.MathUtils.clamp(1 - THREE.MathUtils.clamp(nearestEdge / 70, 0, 1), 0, 1)
+      : 0;
+    this.audio.setAmbience({ nightFactor, storminess, nearShore01 });
+
+    // Sailing bed — reflects the ship the player is physically standing on.
+    const aboardShip = player?.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+    if (aboardShip) {
+      const stats = SHIP_STATS[aboardShip.type];
+      const speed = Math.hypot(aboardShip.velocity.x, aboardShip.velocity.z);
+      const speed01 = THREE.MathUtils.clamp(speed / Math.max(stats.maxSpeed, 0.001), 0, 1);
+      const heel01 = THREE.MathUtils.clamp(Math.abs(aboardShip.roll ?? 0) / 0.3, 0, 1);
+      const roughness01 = THREE.MathUtils.clamp(storminess * 0.8 + heel01 * 0.4, 0, 1);
+      this.audio.setSailingState({ speed01, roughness01, heel01, luffing: !!aboardShip.luffing });
+    } else {
+      this.audio.setSailingState({ speed01: 0, roughness01: 0, heel01: 0, luffing: false });
+    }
+
+    // Flooding loop — the ship you're on if it's taking water, else the nearest
+    // flooding hull within earshot.
+    const floodShip = aboardShip && (aboardShip.waterLevel ?? 0) > 0.02
+      ? aboardShip
+      : this.findNearestFloodingShip(cam, 20);
+    if (floodShip && (floodShip.waterLevel ?? 0) > 0.02) {
+      const level = THREE.MathUtils.clamp(floodShip.waterLevel ?? 0, 0, 1);
+      if (!this.floodingLoopActive) {
+        this.audio.startFlooding(level);
+        this.floodingLoopActive = true;
+      } else {
+        this.audio.updateFlooding(level);
+      }
+      if (t - this.lastHullLeakAt > 0.4) {
+        this.emitHullLeaks(floodShip);
+        this.lastHullLeakAt = t;
+      }
+    } else if (this.floodingLoopActive) {
+      this.audio.stopFlooding();
+      this.floodingLoopActive = false;
+    }
+
+    // Bail scoop arcs (+ the local scoop one-shot), beaten out for all bailers.
+    if (t - this.lastBailFxAt > 0.6) {
+      this.lastBailFxAt = t;
+      let localBailing = false;
+      for (const bailer of this.state.players) {
+        if (!bailer.bailing) continue;
+        const bShip = bailer.onShipId ? this.shipsById.get(bailer.onShipId) ?? null : null;
+        let dx = 1;
+        let dz = 0;
+        if (bShip) {
+          dx = bailer.position.x - bShip.position.x;
+          dz = bailer.position.z - bShip.position.z;
+          const len = Math.hypot(dx, dz) || 1;
+          dx /= len;
+          dz /= len;
+        }
+        this.combatFx.emitBailScoop(
+          { x: bailer.position.x + dx * 0.3, y: bailer.position.y + PLAYER.HEIGHT * 0.5, z: bailer.position.z + dz * 0.3 },
+          dx, dz,
+        );
+        if (bailer.id === this.localPlayerId) localBailing = true;
+      }
+      if (localBailing) this.audio.playBail();
+    }
+
+    // Storm-shrink stinger on the rising edge.
+    const shrinkingNow = !!this.state.storm.shrinking;
+    if (shrinkingNow && !this.prevStormShrinking) this.audio.playStormShrink();
+    this.prevStormShrinking = shrinkingNow;
+
+    void localShip;
+  }
+
+  private findNearestFloodingShip(pos: THREE.Vector3, maxDist: number): Ship | null {
+    if (!this.state) return null;
+    let best: Ship | null = null;
+    let bestDist = maxDist;
+    for (const ship of this.state.ships) {
+      if (!ship.alive || (ship.waterLevel ?? 0) <= 0.02) continue;
+      const d = this.distance2D(pos.x, pos.z, ship.position.x, ship.position.z);
+      if (d < bestDist) {
+        bestDist = d;
+        best = ship;
+      }
+    }
+    return best;
+  }
+
+  /** Streaming water at holed hull sections sitting near/below the waterline. */
+  private emitHullLeaks(ship: Ship) {
+    const stats = SHIP_STATS[ship.type];
+    const sections: Array<[keyof Ship['hull'], number, number]> = [
+      ['bow', 0, stats.length * 0.42],
+      ['stern', 0, -stats.length * 0.42],
+      ['port', -stats.width * 0.5, 0],
+      ['starboard', stats.width * 0.5, 0],
+    ];
+    for (const [section, lx, lz] of sections) {
+      if (ship.hull[section] > 0.55) continue;
+      const point = this.getShipWorldPoint(ship, lx, lz, 0.16);
+      this.combatFx.emitHullLeak(
+        { x: point.x, y: point.y, z: point.z },
+        point.x - ship.position.x,
+        point.z - ship.position.z,
+      );
+    }
   }
 
   private setHull(fill: HTMLDivElement, label: HTMLElement, value: number) {
     const percent = Math.round(value * 100);
     fill.style.width = `${percent}%`;
     label.textContent = `${percent}%`;
+  }
+
+  /** Bilge water gauge — vertical ship-silhouette fill, trend arrow, red alarm > 75%.
+   *  Visible only while the local player stands on a ship that's taking on water. */
+  private updateWaterGauge(player: Player) {
+    const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+    const level = ship ? THREE.MathUtils.clamp(ship.waterLevel ?? 0, 0, 1) : 0;
+    const show = !!ship
+      && level > 0.02
+      && player.state !== 'eliminated'
+      && player.state !== 'respawning';
+    this.ui.waterGauge.classList.toggle('visible', show);
+    if (!show || !ship) {
+      this.ui.waterGauge.classList.remove('danger');
+      // Damp the ship-status widget tint back to normal when not flooding.
+      this.ui.shipStatus.classList.remove('flooding', 'flooding-critical');
+      return;
+    }
+
+    const pct = Math.round(level * 100);
+    this.ui.waterGaugeFill.style.height = `${pct}%`;
+    this.ui.waterGaugePct.textContent = `${pct}%`;
+    const danger = level > 0.75;
+    this.ui.waterGauge.classList.toggle('danger', danger);
+
+    const rate = ship.floodingRate ?? 0;
+    const trend = this.ui.waterGaugeTrend;
+    if (rate > 0.0005) {
+      trend.textContent = '▲';
+      trend.style.color = danger ? '#ff8a6a' : '#ffb37a';
+    } else if (rate < -0.0005) {
+      trend.textContent = '▼';
+      trend.style.color = '#7fe0a0';
+    } else {
+      trend.textContent = '▬';
+      trend.style.color = '#9aa8b8';
+    }
+
+    // Tint the ship-status widget so the hull panel reads "flooding" at a glance.
+    this.ui.shipStatus.classList.toggle('flooding', level > 0.02 && !danger);
+    this.ui.shipStatus.classList.toggle('flooding-critical', danger);
   }
 
   private renderShipInventory(ship: Ship | null, player: Player) {
@@ -8991,6 +9967,19 @@ export class Game {
     }
 
     if (ship) {
+      // Bail the bilge — available anywhere on deck when the hull is taking water.
+      // Lowest priority (fixed score below every look-based candidate) so cannons,
+      // the helm, repairs, etc. always win when you're actually facing one.
+      if (player.onShipId === ship.id && (ship.waterLevel ?? 0) > 0.02) {
+        const pct = Math.round((ship.waterLevel ?? 0) * 100);
+        candidates.push({
+          prompt: '[Hold X] Bail Water',
+          label: `Bilge flooding ${pct}% · scoop it overboard`,
+          score: -0.5,
+          kind: 'bail',
+        });
+      }
+
       if (player.carryingChestId && player.onShipId === ship.id) {
         const stats = SHIP_STATS[ship.type];
         const stowPoint = this.getShipWorldPoint(ship, 0, -stats.length * 0.22, stats.height + 0.7);

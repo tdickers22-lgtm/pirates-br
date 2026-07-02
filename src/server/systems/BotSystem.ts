@@ -1,6 +1,8 @@
 import type { Player, Ship, Island, StormState, Vec3, WeaponId } from '../../shared/types/index.js';
-import { SHIP_STATS, SHIP, PHYSICS } from '../../shared/constants/index.js';
+import { SHIP_STATS, SHIP, PHYSICS, PLAYER } from '../../shared/constants/index.js';
 import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY } from '../../shared/utils/index.js';
+import { raymarchIslandSurface } from '../../shared/raycast.js';
+import { applyShipRudderSteering } from './PhysicsSystem.js';
 import type { WeaponSystem } from './WeaponSystem.js';
 
 type BotBehavior = 'patrol' | 'chase' | 'engage' | 'flee' | 'loot' | 'return';
@@ -19,6 +21,14 @@ interface BotState {
   stateTimer: number;
   /** Cooldown between personal-weapon shots at boarders. */
   firearmTimer: number;
+  /** Remaining seconds for the current shore-party leg (walk to chest / back).
+   *  Expiry falls back to the legacy warp so bots can never brick. */
+  shoreTimer: number;
+  /** Which shore-party leg the timer budgets. */
+  shoreLeg: 'toChest' | 'toShip' | null;
+  /** Seconds spent unintentionally off the ship (knocked overboard, stranded)
+   *  outside the loot behavior — recalled aboard after a short grace. */
+  overboardTimer: number;
 }
 
 export interface BotFirearmShot {
@@ -53,6 +63,9 @@ export class BotSystem {
       difficulty,
       stateTimer: 5 + Math.random() * 10,
       firearmTimer: 0.3 + Math.random() * 0.6,
+      shoreTimer: 0,
+      shoreLeg: null,
+      overboardTimer: 0,
     });
   }
 
@@ -177,9 +190,23 @@ export class BotSystem {
     dt: number, t: number,
     weaponSystem: WeaponSystem,
   ) {
+    // Shore parties belong to the 'loot' behavior only — any other behavior
+    // with the body off the ship recalls it aboard after a short grace so a
+    // knocked-overboard bot isn't an instant teleport, yet can never strand.
+    if (bot.behavior !== 'loot' && !player.onShipId && player.state !== 'eliminated' && player.state !== 'respawning') {
+      bot.overboardTimer += dt;
+      if (bot.overboardTimer >= 6) {
+        this.recallCrewToShip(player, ship);
+        this.resetShoreLeg(bot);
+        bot.overboardTimer = 0;
+      }
+    } else {
+      bot.overboardTimer = 0;
+    }
+
     switch (bot.behavior) {
       case 'patrol':
-        this.steerToward(ship, bot.patrolAngle, dt);
+        this.steerToward(ship, bot.patrolAngle, dt, t);
         ship.sailHeight = Math.min(ship.sailHeight + dt * 0.08, 0.35);
         ship.anchored = false;
         ship.anchorRaiseProgress = 0;
@@ -197,14 +224,14 @@ export class BotSystem {
 
         const orbitRange = 90;
         if (d > orbitRange * 1.6) {
-          this.steerToward(ship, angleToTarget, dt);
+          this.steerToward(ship, angleToTarget, dt, t);
           ship.sailHeight = Math.min(ship.sailHeight + dt * 0.14, 0.5);
         } else if (d < orbitRange * 0.6) {
-          this.steerToward(ship, angleToTarget + Math.PI, dt);
+          this.steerToward(ship, angleToTarget + Math.PI, dt, t);
           ship.sailHeight = 0.22;
         } else {
           // Broadside — turn perpendicular to target so cannons face them.
-          this.steerToward(ship, angleToTarget + Math.PI * 0.5, dt);
+          this.steerToward(ship, angleToTarget + Math.PI * 0.5, dt, t);
           ship.sailHeight = 0.16;
         }
         ship.anchored = false;
@@ -223,26 +250,32 @@ export class BotSystem {
           : 3.5;
         const inCannonRange = d < (bot.difficulty === 'hard' ? 270 : 245);
         if (bot.fireTimer <= 0 && inCannonRange) {
-          // Try every cannon on the ship; the broadside-facing one will accept the aim.
+          // Side-aware gunnery: only cannons whose broadside arc actually
+          // contains the firing solution shoot — the other rail holds instead
+          // of wasting a ball 180° off. Island occlusion also holds fire.
           let fired = false;
-          for (let cidx = 0; cidx < ship.cannonCooldowns.length && !fired; cidx++) {
-            if (ship.cannonCooldowns[cidx] > 0) continue;
-            player.atCannon = true;
-            player.cannonIndex = cidx;
-            const before = ship.cannonCooldowns[cidx];
-            weaponSystem.tryFire(player, ship, bot.aimYaw, bot.aimPitch, cidx);
-            player.atCannon = false;
-            if (ship.cannonCooldowns[cidx] !== before) fired = true;
+          if (this.hasCannonLineOfSight(ship, target, islands)) {
+            for (let cidx = 0; cidx < ship.cannonCooldowns.length && !fired; cidx++) {
+              if (ship.cannonCooldowns[cidx] > 0) continue;
+              const broadsideYaw = weaponSystem.getCannonBroadsideYaw(ship, cidx);
+              if (Math.abs(angleWrap(bot.aimYaw - broadsideYaw)) > SHIP.CANNON_YAW_ARC) continue;
+              player.atCannon = true;
+              player.cannonIndex = cidx;
+              const before = ship.cannonCooldowns[cidx];
+              weaponSystem.tryFire(player, ship, bot.aimYaw, bot.aimPitch, cidx);
+              player.atCannon = false;
+              if (ship.cannonCooldowns[cidx] !== before) fired = true;
+            }
           }
-          // Reset cadence even if no cannon was facing — re-aim next tick.
-          bot.fireTimer = minDelay + Math.random() * 0.6;
+          // Full cadence after a shot; quick re-check while holding fire.
+          bot.fireTimer = fired ? minDelay + Math.random() * 0.6 : 0.35;
         }
         break;
       }
 
       case 'flee': {
         const angleToCenter = Math.atan2(storm.centerX - ship.position.x, storm.centerZ - ship.position.z);
-        this.steerToward(ship, angleToCenter, dt);
+        this.steerToward(ship, angleToCenter, dt, t);
         ship.sailHeight = Math.min(ship.sailHeight + dt * 0.5, 1.0);
         ship.anchored = false;
         ship.anchorRaiseProgress = 0;
@@ -258,14 +291,21 @@ export class BotSystem {
 
       case 'loot': {
         const island = islands.find(i => i.id === bot.targetIslandId);
-        if (!island || island.chests.every(c => c.opened || c.carriedByPlayerId || c.storedOnShipId || c.floating)) { bot.behavior = 'patrol'; break; }
+        if (!island || island.chests.every(c => c.opened || c.carriedByPlayerId || c.storedOnShipId || c.floating)) {
+          if (!player.onShipId && !player.carryingChestId) {
+            this.recallCrewToShip(player, ship);
+            this.resetShoreLeg(bot);
+          }
+          bot.behavior = 'patrol';
+          break;
+        }
         const angleToIsland = Math.atan2(
           island.position.x - ship.position.x,
           island.position.z - ship.position.z,
         );
         const d = dist2D(ship.position.x, ship.position.z, island.position.x, island.position.z);
         if (d > island.radius + 40) {
-          this.steerToward(ship, angleToIsland, dt);
+          this.steerToward(ship, angleToIsland, dt, t);
           ship.sailHeight = 0.32;
           ship.anchored = false;
           ship.anchorRaiseProgress = 0;
@@ -274,26 +314,8 @@ export class BotSystem {
           ship.anchored = true;
           ship.anchorRaiseProgress = 0;
           ship.sailHeight = 0;
-          ship.sailAngle *= 0.9;
-          const chest = island.chests.find(candidate => !candidate.opened && !candidate.carriedByPlayerId && !candidate.storedOnShipId && !candidate.floating);
-          if (!chest) {
-            bot.behavior = 'return';
-            bot.stateTimer = 8 + Math.random() * 6;
-            ship.anchored = false;
-            ship.anchorRaiseProgress = 0;
-            break;
-          }
-          player.onShipId = null;
-          player.state = 'alive';
-          player.position.x = chest.position.x;
-          const groundY = getIslandSurfaceY(island, chest.position.x, chest.position.z);
-          player.position.y = groundY + 0.18;
-          player.position.z = chest.position.z;
-          if (chest.buried) {
-            chest.digProgress = 1;
-            chest.position.y = groundY + 0.32;
-          }
-          player.nearChestId = chest.id;
+          ship.sailAngle *= Math.pow(0.9, dt / 0.016); // frame-rate-independent decay
+          this.updateShoreParty(bot, player, ship, island, dt);
         }
         break;
       }
@@ -311,7 +333,7 @@ export class BotSystem {
         );
         const distance = dist2D(ship.position.x, ship.position.z, island.position.x, island.position.z);
         if (distance < island.radius + 115) {
-          this.steerToward(ship, awayAngle, dt);
+          this.steerToward(ship, awayAngle, dt, t);
           ship.sailHeight = Math.min(ship.sailHeight + dt * 0.14, 0.44);
           ship.anchored = false;
           ship.anchorRaiseProgress = 0;
@@ -411,14 +433,167 @@ export class BotSystem {
     return 'blunderbuss';
   }
 
-  private steerToward(ship: Ship, targetAngle: number, dt: number) {
+  private steerToward(ship: Ship, targetAngle: number, dt: number, t: number) {
+    // Upwind no-go awareness: a course inside the cone is unsailable — offset
+    // to the nearer ~40°-off-the-wind tack instead of pinching straight in.
+    const wind = sampleWind(t);
+    const upwind = angleWrap(wind.direction + Math.PI);
+    let desired = targetAngle;
+    const offUpwind = angleWrap(desired - upwind);
+    if (Math.abs(offUpwind) < SHIP.SAIL_NO_GO_ANGLE) {
+      desired = upwind + (offUpwind >= 0 ? 1 : -1) * (SHIP.SAIL_NO_GO_ANGLE + 0.09);
+    }
+    // Same rudder physics as the player helm (negative steer turns toward a
+    // positive heading error); turning still requires way on the ship.
+    const diff = angleWrap(desired - ship.rotation);
+    const steer = Math.max(-1, Math.min(1, -diff * 1.5));
+    applyShipRudderSteering(ship, dt, steer, 0.36 + ship.sailHeight * 0.52);
+    // Rotation is integrated once for all ships in PhysicsSystem.updateShips;
+    // integrating here too would double the bot turn rate.
+  }
+
+  /** Straight-line island occlusion check from this deck to the target's deck. */
+  private hasCannonLineOfSight(ship: Ship, target: Ship, islands: Island[]): boolean {
+    const origin = {
+      x: ship.position.x,
+      y: ship.position.y + SHIP_STATS[ship.type].height + 1.1,
+      z: ship.position.z,
+    };
+    const dx = target.position.x - origin.x;
+    const dy = target.position.y + SHIP_STATS[target.type].height + 0.6 - origin.y;
+    const dz = target.position.z - origin.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < 1) return true;
+    const hit = raymarchIslandSurface(
+      origin,
+      { x: dx / dist, y: dy / dist, z: dz / dist },
+      Math.max(0, dist - SHIP_STATS[target.type].length * 0.4),
+      islands,
+    );
+    return !hit.hit;
+  }
+
+  /**
+   * Walk the bot's body across the island: ship → chest, then (carrying) back
+   * to the hull, where Match.processBotLooting boards + stows. A generous
+   * timeout per leg falls back to the legacy warp so bots can never brick.
+   */
+  private updateShoreParty(bot: BotState, player: Player, ship: Ship, island: Island, dt: number) {
     const stats = SHIP_STATS[ship.type];
-    const diff = angleWrap(targetAngle - ship.rotation);
-    const maxOmega = stats.turnRate * (0.36 + ship.sailHeight * 0.52);
-    const targetOmega = Math.max(-maxOmega, Math.min(maxOmega, diff * 1.18));
-    const blend = 1 - Math.exp(-dt * SHIP.RUDDER_SLEW * 0.78);
-    ship.angularVelocity += (targetOmega - ship.angularVelocity) * blend;
-    ship.rotation += ship.angularVelocity * dt;
+
+    if (player.carryingChestId) {
+      // Haul the chest home; Match boards + stows once we reach the hull.
+      if (bot.shoreLeg !== 'toShip') {
+        bot.shoreLeg = 'toShip';
+        bot.shoreTimer = this.shoreLegBudget(
+          dist2D(player.position.x, player.position.z, ship.position.x, ship.position.z),
+        );
+      }
+      bot.shoreTimer -= dt;
+      if (bot.shoreTimer <= 0) {
+        player.position.x = ship.position.x;
+        player.position.y = ship.position.y + 0.4;
+        player.position.z = ship.position.z;
+        return;
+      }
+      this.walkBotToward(player, ship.position.x, ship.position.z, dt);
+      return;
+    }
+
+    const chest = island.chests.find(candidate => !candidate.opened && !candidate.carriedByPlayerId && !candidate.storedOnShipId && !candidate.floating);
+    if (!chest) {
+      if (!player.onShipId) {
+        this.recallCrewToShip(player, ship);
+        this.resetShoreLeg(bot);
+      }
+      bot.behavior = 'return';
+      bot.stateTimer = 8 + Math.random() * 6;
+      ship.anchored = false;
+      ship.anchorRaiseProgress = 0;
+      return;
+    }
+
+    if (player.onShipId) {
+      // Step off the rail toward the chest and start the walk timer.
+      const dx = chest.position.x - ship.position.x;
+      const dz = chest.position.z - ship.position.z;
+      const len = Math.hypot(dx, dz) || 1;
+      player.onShipId = null;
+      player.state = 'alive';
+      player.atCannon = false;
+      player.atHelm = false;
+      player.atSails = false;
+      player.atCrowNest = false;
+      player.sailControlMode = null;
+      player.position.x = ship.position.x + (dx / len) * (stats.width * 0.5 + 1.6);
+      player.position.z = ship.position.z + (dz / len) * (stats.width * 0.5 + 1.6);
+      player.position.y = ship.position.y + 0.4;
+      player.velocity = { x: 0, y: 0, z: 0 };
+      bot.shoreLeg = 'toChest';
+      bot.shoreTimer = this.shoreLegBudget(len);
+      return;
+    }
+
+    const dChest = dist2D(player.position.x, player.position.z, chest.position.x, chest.position.z);
+    if (dChest <= 1.2) {
+      // Standing on the X — Match digs + picks up via the proximity flag; the
+      // carrying branch above budgets the trip home next tick.
+      player.nearChestId = chest.id;
+      return;
+    }
+    bot.shoreTimer -= dt;
+    if (bot.shoreTimer <= 0) {
+      // Timeout fallback — the legacy teleport straight to the chest.
+      const groundY = getIslandSurfaceY(island, chest.position.x, chest.position.z);
+      player.position.x = chest.position.x;
+      player.position.y = groundY + 0.18;
+      player.position.z = chest.position.z;
+      player.nearChestId = chest.id;
+      bot.shoreTimer = 30;
+      return;
+    }
+    this.walkBotToward(player, chest.position.x, chest.position.z, dt);
+  }
+
+  /** Generous walking-time budget for one shore-party leg before the legacy
+   *  warp fallback rescues the bot (distance-scaled — far chests need longer). */
+  private shoreLegBudget(distance: number): number {
+    const walkSeconds = distance / (PLAYER.MOVE_SPEED * 0.92);
+    return Math.min(75, Math.max(20, walkSeconds * 1.8));
+  }
+
+  /** Step the bot's body toward a point; PhysicsSystem owns ground snap /
+   *  swimming transitions, so only the horizontal walk lives here. */
+  private walkBotToward(player: Player, tx: number, tz: number, dt: number) {
+    const dx = tx - player.position.x;
+    const dz = tz - player.position.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 0.001) return;
+    const speed = player.state === 'swimming' ? PLAYER.SWIM_SPEED * 0.85 : PLAYER.MOVE_SPEED * 0.92;
+    const step = Math.min(d, speed * dt);
+    player.position.x += (dx / d) * step;
+    player.position.z += (dz / d) * step;
+    player.rotation.x = Math.atan2(dx, dz);
+  }
+
+  /** Emergency recall: pop the crew back on deck (bots must never be stranded). */
+  private recallCrewToShip(player: Player, ship: Ship) {
+    const stats = SHIP_STATS[ship.type];
+    player.onShipId = ship.id;
+    player.state = 'alive';
+    player.position = {
+      x: ship.position.x,
+      y: ship.position.y + stats.height + 0.3,
+      z: ship.position.z,
+    };
+    player.velocity = { x: 0, y: 0, z: 0 };
+    player.swimTimer = 0;
+    player.nearChestId = null;
+  }
+
+  private resetShoreLeg(bot: BotState) {
+    bot.shoreLeg = null;
+    bot.shoreTimer = 0;
   }
 
   private trimSails(ship: Ship, t: number, dt: number) {

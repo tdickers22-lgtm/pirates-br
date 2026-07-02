@@ -1,14 +1,15 @@
 import { createNoise2D } from 'simplex-noise';
 import type { Island, IslandDock, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
-import { SHIP_STATS } from '../constants/index.js';
+import { SHIP_STATS, PLAYER } from '../constants/index.js';
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
 /** Deterministic PRNG (mulberry32) so the terrain noise permutation table is
- *  identical on server and client — never seed terrain noise from Math.random. */
-function mulberry32(seed: number): () => number {
+ *  identical on server and client — never seed terrain noise from Math.random.
+ *  Also used by MapGenerator for per-island prop/stamp determinism. */
+export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) | 0;
@@ -45,6 +46,12 @@ export function terrainRidge(x: number, z: number): number {
 
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
+}
+
+/** Hermite smoothstep — 0 below e0, 1 above e1, smooth in between. */
+export function smoothstep(e0: number, e1: number, x: number): number {
+  const t = clamp((x - e0) / Math.max(1e-6, e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 export function dist2D(ax: number, az: number, bx: number, bz: number): number {
@@ -296,6 +303,22 @@ function islandAngleMask(angle: number, center: number, width: number): number {
   return Math.exp(-Math.pow(islandAngleDelta(angle, center) / width, 2));
 }
 
+/** Total inward bite (0..~0.6 of radius) from all inlets at a given angle. */
+export function getIslandInletCut(island: Island, angle: number): number {
+  const inlets = island.profile.inlets;
+  if (!inlets || inlets.length === 0) return 0;
+  let cut = 0;
+  for (const inlet of inlets) {
+    const d = islandAngleDelta(angle, inlet.angle);
+    // Smooth cosine lobe across the mouth; zero outside [-width, width].
+    const t = Math.abs(d) / Math.max(inlet.width, 0.001);
+    if (t >= 1) continue;
+    const falloff = 0.5 + 0.5 * Math.cos(t * Math.PI);
+    cut += inlet.depth * falloff;
+  }
+  return Math.min(cut, 0.6); // never bite past the island core
+}
+
 function getIslandShapeTerms(island: Island, angle: number) {
   const profile = island.profile;
   const primaryMask = islandAngleMask(angle, profile.primaryHillAngle, 0.8);
@@ -303,11 +326,12 @@ function getIslandShapeTerms(island: Island, angle: number) {
   const tertiaryMask = profile.tertiaryHillScale > 0
     ? islandAngleMask(angle, profile.tertiaryHillAngle, 0.62) * profile.tertiaryHillScale
     : 0;
-  const bulge = 1
+  const bulge = (1
     + Math.cos(angle - profile.ridgeAxis) * profile.ridgeBias * 0.4
     + primaryMask * 0.1
     + secondaryMask * 0.08
-    + tertiaryMask * 0.06;
+    + tertiaryMask * 0.06)
+    * (1 - getIslandInletCut(island, angle)); // coves/bays pull the shore inward
   return { primaryMask, secondaryMask, tertiaryMask, bulge };
 }
 
@@ -322,7 +346,105 @@ export function getIslandDistRatio(island: Island, x: number, z: number) {
   return { angle, distRatio, bulge };
 }
 
-export function getIslandSurfaceY(island: Island, x: number, z: number): number {
+// ── Coast profile ───────────────────────────────────────────────────────────
+// Every island shoreline is split into deterministic per-angle bands of three
+// coast types. Beach coasts ease from the interior through a wet-sand strip
+// (~+0.4m) and continue UNDERWATER past the footprint edge so a swimmer can
+// walk straight up onto land. Cliff coasts keep a tall dramatic plinth
+// (7–10m). Rocky coasts sit in between. Inlet mouths are always beach.
+
+function coastPhase(seed: number, k: number): number {
+  let h = (seed + Math.imul(k, 0x9e3779b9)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  return (h / 4294967296) * Math.PI * 2;
+}
+
+/** Smooth per-angle coast field in [-1, 1]: negative ⇒ beach, positive ⇒ cliff. */
+export function getIslandCoastField(island: Island, angle: number): number {
+  const seed = (island.profile.seed ?? 0x5eed) >>> 0;
+  const f = Math.sin(angle + coastPhase(seed, 1)) * 0.55
+    + Math.sin(angle * 2 + coastPhase(seed, 2)) * 0.34
+    + Math.sin(angle * 3 + coastPhase(seed, 3)) * 0.22;
+  return clamp(f * 0.95 + (island.profile.coastBias ?? 0), -1, 1);
+}
+
+/** Normalized blend weights of the three coast types at a shoreline angle.
+ *  Weights vary smoothly with angle so the heightfield never steps. */
+export function getIslandCoastWeights(island: Island, angle: number): { beach: number; rocky: number; cliff: number } {
+  const f = getIslandCoastField(island, angle);
+  let cliff = smoothstep(0.14, 0.52, f);
+  let beach = smoothstep(0.14, 0.52, -f);
+  // Inlet mouths (coves/bays) always land on beach so they read as harbors.
+  const inletCut = getIslandInletCut(island, angle);
+  if (inletCut > 0) {
+    const force = clamp(inletCut * 6, 0, 1);
+    beach = Math.max(beach, force);
+    cliff *= 1 - force;
+  }
+  const sum = beach + cliff;
+  if (sum > 1) {
+    beach /= sum;
+    cliff /= sum;
+  }
+  return { beach, cliff, rocky: Math.max(0, 1 - beach - cliff) };
+}
+
+/** Dominant coast type at a shoreline angle (beach | rocky | cliff). */
+export function getIslandCoastType(island: Island, angle: number): 'beach' | 'rocky' | 'cliff' {
+  const w = getIslandCoastWeights(island, angle);
+  if (w.beach >= w.cliff && w.beach >= w.rocky) return 'beach';
+  return w.cliff >= w.rocky ? 'cliff' : 'rocky';
+}
+
+export interface IslandSurfaceOptions {
+  /** Opt in to carving cave tunnel trenches into the returned height (used for
+   *  cave-interior mesh building / in-cave locomotion). Default OFF: walking
+   *  ABOVE a cave stands on the natural hillside, not in the trench. */
+  carveCaves?: boolean;
+}
+
+/** Carve mask/floor of the deepest-overlapping cave at (x, z), or null. */
+function getCaveCarve(island: Island, x: number, z: number): { mask: number; floorY: number } | null {
+  if (!island.caves || island.caves.length === 0) return null;
+  let bestMask = 0;
+  let bestFloorY = 0;
+  for (const cave of island.caves) {
+    const cLen = (cave as { length?: number }).length ?? 10;
+    const cRadius = (cave as { interiorRadius?: number }).interiorRadius ?? 3.0;
+    const cFloorY = (cave as { floorY?: number }).floorY ?? cave.position.y - 0.4;
+    const dx = x - cave.position.x;
+    const dz = z - cave.position.z;
+    const cosR = Math.cos(cave.rotation);
+    const sinR = Math.sin(cave.rotation);
+    // Cave-local: +z points OUTWARD from the island (entrance side); tunnel goes to -z
+    const lx = dx * cosR - dz * sinR;
+    const lz = dx * sinR + dz * cosR;
+    const lateralPad = 0.7;
+    const longPad = 1.0;
+    const latFalloff = Math.abs(lx) <= cRadius
+      ? 1
+      : Math.abs(lx) <= cRadius + lateralPad
+        ? 1 - (Math.abs(lx) - cRadius) / lateralPad
+        : 0;
+    const longFalloff = lz <= 0 && lz >= -cLen
+      ? 1
+      : lz > 0 && lz <= longPad
+        ? 1 - lz / longPad
+        : lz < -cLen && lz >= -(cLen + longPad)
+          ? 1 - (-cLen - lz) / longPad
+          : 0;
+    const mask = latFalloff * longFalloff;
+    if (mask > bestMask) {
+      bestMask = mask;
+      bestFloorY = cFloorY;
+    }
+  }
+  return bestMask > 0 ? { mask: bestMask, floorY: bestFloorY } : null;
+}
+
+export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: IslandSurfaceOptions): number {
   const { angle, distRatio } = getIslandDistRatio(island, x, z);
   const { primaryMask, secondaryMask, tertiaryMask } = getIslandShapeTerms(island, angle);
   const profile = island.profile;
@@ -395,7 +517,16 @@ export function getIslandSurfaceY(island: Island, x: number, z: number): number 
     Math.sin(angle * 2 + profile.islandHeading) * 0.009 +
     Math.cos(angle * 4 - profile.islandHeading * 1.6) * 0.006
   ) * island.radius;
-  let seaLift = 5.15 + island.radius * 0.0085;
+  // ── Signed coast profile: rim height depends on the per-angle coast type ──
+  const coast = getIslandCoastWeights(island, angle);
+  const seaLiftBase = 5.15 + island.radius * 0.0085;
+  const cliffLift = clamp(7.4 + island.radius * 0.03 * (0.7 + profile.heightProfile * 0.45), 7, 10);
+  const rockyLift = 3.9 + island.radius * 0.006;
+  const beachLift = 2.3 + island.radius * 0.004;
+  const coastLift = coast.beach * beachLift + coast.rocky * rockyLift + coast.cliff * cliffLift;
+  // Interior keeps the classic plinth; the rim morphs toward the coast profile.
+  const shoreMix = smoothstep(0.55, 0.92, distRatio);
+  let seaLift = lerp(seaLiftBase, coastLift, shoreMix);
   let floor = 0.08;
   // Combined hill mask drives the "land vs water" effect for archipelago islands
   if (isArchipelago) {
@@ -454,49 +585,79 @@ export function getIslandSurfaceY(island: Island, x: number, z: number): number 
 
   const naturalY = detailedY;
 
-  // Caves hollow out the heightmap inside their tunnel footprint — the natural
-  // surface sweeps down to the cave floor with a smooth lateral/longitudinal falloff
-  // so the walls of the slot ARE the natural terrain. The client adds a ceiling
-  // mesh on top to seal the cavern.
-  let bestMask = 0;
-  let bestFloorY = naturalY;
-  if (island.caves && island.caves.length > 0) {
-    for (const cave of island.caves) {
-      const cLen = (cave as { length?: number }).length ?? 10;
-      const cRadius = (cave as { interiorRadius?: number }).interiorRadius ?? 3.0;
-      const cFloorY = (cave as { floorY?: number }).floorY ?? cave.position.y - 0.4;
-      const dx = x - cave.position.x;
-      const dz = z - cave.position.z;
-      const cosR = Math.cos(cave.rotation);
-      const sinR = Math.sin(cave.rotation);
-      // Cave-local: +z points OUTWARD from the island (entrance side); tunnel goes to -z
-      const lx = dx * cosR - dz * sinR;
-      const lz = dx * sinR + dz * cosR;
-      const lateralPad = 0.7;
-      const longPad = 1.0;
-      const latFalloff = Math.abs(lx) <= cRadius
-        ? 1
-        : Math.abs(lx) <= cRadius + lateralPad
-          ? 1 - (Math.abs(lx) - cRadius) / lateralPad
-          : 0;
-      const longFalloff = lz <= 0 && lz >= -cLen
-        ? 1
-        : lz > 0 && lz <= longPad
-          ? 1 - lz / longPad
-          : lz < -cLen && lz >= -(cLen + longPad)
-            ? 1 - (-cLen - lz) / longPad
-            : 0;
-      const mask = latFalloff * longFalloff;
-      if (mask > bestMask) {
-        bestMask = mask;
-        bestFloorY = cFloorY;
-      }
+  // ── Signed shore drop past the rim (heightfield continues UNDERWATER) ──
+  // Beach: ease interior → wet sand (~+0.42m) by distRatio ~0.97, then slide
+  // under the waterline to ~−2.6m by ~1.15 so a swimmer walks straight in.
+  const beachEase = smoothstep(0.84, 0.97, distRatio);
+  const beachUnder = smoothstep(0.985, 1.15, distRatio);
+  const beachY = lerp(naturalY, lerp(0.42, -2.6, beachUnder), beachEase);
+  // Rocky: mid shelf holds a little longer, then steps down.
+  const rockyY = lerp(naturalY, -3.4, smoothstep(0.96, 1.14, distRatio));
+  // Cliff: tall plinth holds to the footprint edge, then plunges — a wall.
+  const cliffY = lerp(naturalY, -5.5, smoothstep(1.005, 1.12, distRatio));
+  let surfaceY = coast.beach * beachY + coast.rocky * rockyY + coast.cliff * cliffY;
+
+  // ── Structure stamps: flatten discs so buildings sit on level ground ──
+  if (island.stamps && island.stamps.length > 0) {
+    for (const stamp of island.stamps) {
+      const sd = Math.hypot(x - stamp.x, z - stamp.z);
+      if (sd >= stamp.radius) continue;
+      const inner = stamp.radius * (1 - clamp(stamp.blend, 0.05, 0.95));
+      const m = sd <= inner ? 1 : 1 - smoothstep(inner, stamp.radius, sd);
+      surfaceY = lerp(surfaceY, stamp.targetY, m);
     }
   }
-  const blendedY = bestMask > 0
-    ? naturalY * (1 - bestMask) + bestFloorY * bestMask
-    : naturalY;
-  return Math.max(floor, blendedY);
+
+  // ── Cave trench carve is OPT-IN (see IslandSurfaceOptions) ──
+  if (opts?.carveCaves) {
+    const carve = getCaveCarve(island, x, z);
+    if (carve) surfaceY = surfaceY * (1 - carve.mask) + carve.floorY * carve.mask;
+  }
+
+  // The floor relaxes toward the rim so beach/cliff shores may dip below the
+  // waterline; interior floors (incl. archipelago saddles) are unchanged.
+  const effFloor = lerp(floor, -6.5, smoothstep(0.9, 1.02, distRatio));
+  return Math.max(effFloor, surfaceY);
+}
+
+/** Carved cave-tunnel floor height at (x, z), or null outside every cave
+ *  footprint. In-cave locomotion (later physics track) walks on this while
+ *  getIslandSurfaceY keeps returning the natural hillside above the tunnel. */
+export function getCaveFloorY(island: Island, x: number, z: number): number | null {
+  const carve = getCaveCarve(island, x, z);
+  if (!carve) return null;
+  const natural = getIslandSurfaceY(island, x, z);
+  return natural * (1 - carve.mask) + carve.floorY * carve.mask;
+}
+
+/** Interior ceiling height above (x, z), or null outside every cave's interior
+ *  box. The physics track clamps in-cave player Y below this. */
+export function getCaveCeilingY(island: Island, x: number, z: number): number | null {
+  if (!island.caves || island.caves.length === 0) return null;
+  let best: number | null = null;
+  for (const cave of island.caves) {
+    const cLen = cave.length ?? 10;
+    const cRadius = cave.interiorRadius ?? 3.0;
+    const dx = x - cave.position.x;
+    const dz = z - cave.position.z;
+    const cosR = Math.cos(cave.rotation);
+    const sinR = Math.sin(cave.rotation);
+    const lx = dx * cosR - dz * sinR;
+    const lz = dx * sinR + dz * cosR;
+    if (Math.abs(lx) <= cRadius && lz <= 0.6 && lz >= -cLen) {
+      const ceil = cave.ceilingY ?? ((cave.floorY ?? cave.position.y - 0.4) + cave.height);
+      if (best === null || ceil < best) best = ceil;
+    }
+  }
+  return best;
+}
+
+/** True when the standing ground at (x, z) sits deep enough under the local
+ *  wave surface that a walker should be swimming (beach walk-ins, archipelago
+ *  channels). The locomotion track flips player state off this. */
+export function isSubmergedAt(island: Island, x: number, z: number, t: number, depth = 1.05): boolean {
+  const ground = getIslandSurfaceY(island, x, z);
+  return ground < gerstnerHeight(x, z, t, WAVE_PARAMS) - depth;
 }
 
 export function getIslandSurfacePoint(island: Island, distRatio: number, angle: number, extraY = 0): Vec3 {
@@ -621,6 +782,94 @@ export function getNearestShipBoardingLadder(ship: Pick<Ship, 'type' | 'position
     }
   }
   return nearest;
+}
+
+// ── Swim-hull footprint ───────────────────────────────────────────────────
+// A ship's underwater hull as a tapered XZ prism. Shared verbatim by the
+// authoritative server collision (PhysicsSystem.resolveSwimmerShipCollision)
+// AND the client swimmer prediction (Game.ts) so the two never drift and a
+// swimmer can never visually clip into / rubber-band through the hull.
+// `stats` is structural ({ width, length }) so callers can pass SHIP_STATS[type]
+// or a ship's stats without a type round-trip.
+type HullFootprintStats = { width: number; length: number };
+
+const SWIM_HULL_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
+  { z: -0.52, half: 0.18 },
+  { z: -0.40, half: 0.45 },
+  { z: -0.18, half: 0.57 },
+  { z: 0.10, half: 0.60 },
+  { z: 0.30, half: 0.46 },
+  { z: 0.46, half: 0.22 },
+  { z: 0.52, half: 0.07 },
+];
+
+/** Half-width of the swim hull at a given ship-local Z (bow +Z), plus margin. */
+export function getSwimHullHalfWidth(stats: HullFootprintStats, localZ: number, margin = 0): number {
+  const z = clamp(localZ / Math.max(0.001, stats.length), -0.52, 0.52);
+  for (let i = 0; i < SWIM_HULL_STATIONS.length - 1; i++) {
+    const a = SWIM_HULL_STATIONS[i];
+    const b = SWIM_HULL_STATIONS[i + 1];
+    if (z >= a.z && z <= b.z) {
+      const t = (z - a.z) / Math.max(0.001, b.z - a.z);
+      return Math.max(PLAYER.RADIUS + 0.1, stats.width * (a.half + (b.half - a.half) * t) + margin);
+    }
+  }
+  return Math.max(PLAYER.RADIUS + 0.1, stats.width * SWIM_HULL_STATIONS[SWIM_HULL_STATIONS.length - 1].half + margin);
+}
+
+/** True when a ship-local point lies inside the swim-hull footprint. */
+export function isInsideSwimHullFootprint(stats: HullFootprintStats, localX: number, localZ: number, margin = 0): boolean {
+  if (Math.abs(localZ) > stats.length * 0.52 + margin) return false;
+  return Math.abs(localX) <= getSwimHullHalfWidth(stats, localZ, margin);
+}
+
+/** Push a ship-local point out of the swim-hull footprint along the axis of
+ *  least penetration (matches the server resolver exactly). */
+export function pushOutOfSwimHullFootprint(
+  stats: HullFootprintStats,
+  localX: number,
+  localZ: number,
+  margin: number,
+): { x: number; z: number; pushed: boolean } {
+  if (!isInsideSwimHullFootprint(stats, localX, localZ, margin)) {
+    return { x: localX, z: localZ, pushed: false };
+  }
+  const halfLength = stats.length * 0.52 + margin;
+  const halfWidthHere = getSwimHullHalfWidth(stats, localZ, margin);
+  const sidePen = halfWidthHere - Math.abs(localX);
+  const endPen = halfLength - Math.abs(localZ);
+  let ux = 0;
+  let uz = 0;
+  if (sidePen <= endPen) {
+    ux = localX >= 0 ? 1 : -1;
+  } else {
+    uz = localZ >= 0 ? 1 : -1;
+  }
+  let x = localX;
+  let z = localZ;
+  const step = 0.16;
+  for (let i = 0; i < 56; i++) {
+    if (!isInsideSwimHullFootprint(stats, x, z, margin * 0.55)) {
+      return { x, z, pushed: true };
+    }
+    x += ux * step;
+    z += uz * step;
+  }
+  return {
+    x: localX + ux * (PLAYER.RADIUS + 0.45),
+    z: localZ + uz * (PLAYER.RADIUS + 0.45),
+    pushed: true,
+  };
+}
+
+/** Vertical band [keelY, deckY] within which the swim hull blocks a swimmer.
+ *  Below keelY a swimmer transits under the keel; above deckY they are on/above
+ *  the deck (boarding is handled separately via the ladder prompt). */
+export function getSwimHullVerticalBand(shipY: number, stats: { height: number }): { keelY: number; deckY: number } {
+  return {
+    keelY: shipY - stats.height * 0.72 - PLAYER.RADIUS,
+    deckY: shipY + stats.height + 0.1,
+  };
 }
 
 /** Dock-local space: +Z is inland, seaward ladder is at negative Z. */

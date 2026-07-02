@@ -202,17 +202,20 @@ export class TradingSystem {
     const seen = new Set<string>();
 
     for (const entry of offer) {
-      if (!entry || seen.has(entry.item) || entry.qty <= 0) continue;
+      if (!entry || seen.has(entry.item)) continue;
+      // Fractional/NaN quantities from a hostile client floor to whole items.
+      const qty = Math.floor(Number(entry.qty));
+      if (!Number.isFinite(qty) || qty <= 0) continue;
       seen.add(entry.item);
 
       if (entry.item === 'gold') {
-        sanitized.push({ item: 'gold', qty: Math.min(entry.qty, player.gold) });
+        sanitized.push({ item: 'gold', qty: Math.min(qty, player.gold) });
         continue;
       }
 
       const stack = ship.inventory.find((candidate) => candidate.item === entry.item);
       if (!stack) continue;
-      sanitized.push({ item: entry.item, qty: Math.min(entry.qty, stack.qty) });
+      sanitized.push({ item: entry.item, qty: Math.min(qty, stack.qty) });
     }
 
     return sanitized.filter((entry) => entry.qty > 0);

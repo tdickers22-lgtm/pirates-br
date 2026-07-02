@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PostFx } from './PostFx.js';
 
 export type RenderQuality = 'low' | 'balanced' | 'high';
 
@@ -13,6 +14,9 @@ const SKY_VERT = /* glsl */`
   }
 `;
 
+// Sky is authored in display-referred values, then shaped to linear at the end so the
+// same shader looks identical through the post chain (OutputPass) and direct rendering
+// (in-shader tonemapping/colorspace chunks) on 'low'.
 const SKY_FRAG = /* glsl */`
   varying vec3 v_dir;
   uniform vec3 u_sunDir;
@@ -21,6 +25,33 @@ const SKY_FRAG = /* glsl */`
   uniform float u_dayAmount;
   uniform float u_twilightAmount;
   uniform float u_nightAmount;
+  uniform float u_time;
+
+  float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+  }
+
+  float hash31(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.11369, 0.13787));
+    p += dot(p, p.yzx + 19.19);
+    return fract((p.x + p.y) * p.z);
+  }
+
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+      mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+      f.y);
+  }
+
+  float fbm2(vec2 p) {
+    return vnoise(p) * 0.6667 + vnoise(p * 2.13 + 19.7) * 0.3333;
+  }
 
   void main() {
     vec3 d = normalize(v_dir);
@@ -33,9 +64,9 @@ const SKY_FRAG = /* glsl */`
     vec3 twilightZenith = vec3(0.10, 0.12, 0.44);
     vec3 twilightMid = vec3(0.44, 0.36, 0.72);
     vec3 twilightHorizon = vec3(1.00, 0.54, 0.28);
-    vec3 nightZenith = vec3(0.035, 0.075, 0.19);
-    vec3 nightMid = vec3(0.08, 0.15, 0.27);
-    vec3 nightHorizon = vec3(0.18, 0.27, 0.39);
+    vec3 nightZenith = vec3(0.06, 0.11, 0.25);
+    vec3 nightMid = vec3(0.11, 0.19, 0.33);
+    vec3 nightHorizon = vec3(0.22, 0.32, 0.45);
 
     vec3 daySky = mix(dayHorizon, dayMid, smoothstep(0.0, 0.30, h));
     daySky = mix(daySky, dayZenith, smoothstep(0.24, 0.74, h));
@@ -48,40 +79,102 @@ const SKY_FRAG = /* glsl */`
     float antiSun = pow(max(0.0, dot(d, normalize(vec3(-u_sunDir.x, 0.18, -u_sunDir.z)))), 2.2);
     sky = mix(sky, mix(vec3(0.28, 0.22, 0.62), vec3(0.08, 0.13, 0.24), u_nightAmount), antiSun * 0.18 * (1.0 - u_stormIntensity));
 
-    // Storm layer: slate-gray overcast
-    vec3 sZen = vec3(0.08, 0.09, 0.12);
-    vec3 sMid = vec3(0.20, 0.22, 0.26);
-    vec3 sHor = vec3(0.42, 0.44, 0.48);
+    // Storm layer: desaturate, then blend to a dark brooding overcast
+    float grey = dot(sky, vec3(0.299, 0.587, 0.114));
+    sky = mix(sky, vec3(grey), u_stormIntensity * 0.4);
+    vec3 sZen = vec3(0.12, 0.13, 0.17);
+    vec3 sMid = vec3(0.26, 0.28, 0.32);
+    vec3 sHor = vec3(0.45, 0.46, 0.50);
     vec3 stormSky = mix(sHor, sMid, smoothstep(0.0, 0.32, h));
     stormSky = mix(stormSky, sZen, smoothstep(0.18, 0.78, h));
     sky = mix(sky, stormSky, u_stormIntensity);
+
+    // Stylized drifting 2-octave fbm cloud layer
+    float skyUp = smoothstep(0.015, 0.14, d.y);
+    vec2 cuv = d.xz / (abs(d.y) * 0.85 + 0.22);
+    vec2 drift = vec2(u_time * 0.010, u_time * 0.0042);
+    float cf = fbm2(cuv * 1.15 + drift);
+    float coverage = mix(0.55, 0.26, u_stormIntensity);
+    float cloud = smoothstep(coverage, coverage + mix(0.33, 0.40, u_stormIntensity), cf) * skyUp;
+    float cfLit = fbm2(cuv * 1.15 + drift + u_sunDir.xz * 0.16);
+    float litEdge = clamp((cf - cfLit) * 2.6 + 0.55, 0.0, 1.0);
+    vec3 cloudLit = vec3(1.00, 0.99, 0.96) * u_dayAmount + vec3(1.00, 0.62, 0.40) * u_twilightAmount + vec3(0.30, 0.35, 0.47) * u_nightAmount;
+    vec3 cloudShade = vec3(0.62, 0.68, 0.78) * u_dayAmount + vec3(0.42, 0.33, 0.46) * u_twilightAmount + vec3(0.12, 0.15, 0.22) * u_nightAmount;
+    cloudLit = mix(cloudLit, vec3(0.35, 0.37, 0.41), u_stormIntensity);
+    cloudShade = mix(cloudShade, vec3(0.10, 0.11, 0.13), u_stormIntensity);
+    float cloudAlpha = cloud * mix(0.85, 0.97, u_stormIntensity);
+    sky = mix(sky, mix(cloudShade, cloudLit, litEdge), cloudAlpha);
+
+    // Storm scud: fast low dark wisps racing along the horizon band
+    float scud = smoothstep(0.48, 0.92, fbm2(cuv * 2.4 + vec2(u_time * 0.055, u_time * 0.020) + 31.7));
+    float scudBand = smoothstep(-0.02, 0.06, d.y) * (1.0 - smoothstep(0.16, 0.52, d.y));
+    sky = mix(sky, vec3(0.055, 0.060, 0.075), scud * scudBand * u_stormIntensity * 0.85);
 
     // Sun disk + glow corona (heavily muted in storm)
     float sunDot  = dot(d, u_sunDir);
     float sunAbove = smoothstep(-0.04, 0.09, u_sunDir.y);
     float sunDisk = smoothstep(0.9994, 0.9999, sunDot);
-    float corona  = pow(max(0.0, sunDot), 9.0) * 0.48;
-    float scatter = pow(max(0.0, sunDot), 3.2) * 0.24;
-    float sunVis = mix(1.0, 0.08, u_stormIntensity) * sunAbove;
-    sky += vec3(1.0, 0.86, 0.42) * (sunDisk + corona) * sunVis;
-    sky += mix(vec3(1.0, 0.78, 0.35), vec3(1.0, 0.32, 0.22), u_twilightAmount) * scatter * (1.15 - h) * sunVis;
+    float corona  = pow(max(0.0, sunDot), 9.0);
+    float scatter = pow(max(0.0, sunDot), 3.2);
+    float sunVis = mix(1.0, 0.06, u_stormIntensity) * sunAbove;
+    vec3 scatterTint = mix(vec3(1.0, 0.78, 0.35), vec3(1.0, 0.32, 0.22), u_twilightAmount);
+    sky += scatterTint * scatter * 0.22 * (1.15 - h) * sunVis * (1.0 - cloudAlpha * 0.6);
     sky += vec3(0.62, 0.22, 0.72) * pow(max(0.0, sunDot), 1.8) * 0.08 * sunVis * u_twilightAmount;
     float moonDot = dot(d, -u_sunDir);
     float moonDisk = smoothstep(0.99972, 0.99994, moonDot) * u_nightAmount * (1.0 - u_stormIntensity * 0.7);
-    sky += vec3(0.56, 0.68, 0.95) * moonDisk;
+
+    // Hash-grid stars, fading in with night and hidden by clouds/storm
+    float starField = 0.0;
+    vec3 sp = d * 150.0;
+    float sh = hash31(floor(sp));
+    if (sh > 0.905) {
+      vec3 jitter = fract(vec3(sh * 719.7, sh * 431.3, sh * 213.9)) - 0.5;
+      float distToStar = length(fract(sp) - 0.5 - jitter * 0.55);
+      float twinkle = 0.72 + 0.28 * sin(u_time * (1.2 + fract(sh * 57.0) * 2.4) + sh * 41.0);
+      starField = smoothstep(0.30, 0.02, distToStar) * (0.3 + 0.7 * fract(sh * 97.0)) * twinkle;
+    }
+    float starVis = u_nightAmount * (1.0 - u_stormIntensity) * (1.0 - cloudAlpha) * smoothstep(0.02, 0.24, d.y);
+    sky += vec3(0.62, 0.70, 0.86) * starField * starVis * 0.55;
 
     // Horizon haze band
     float haze = pow(1.0 - abs(d.y), 7.0) * 0.38 * mix(1.0, 0.35, u_stormIntensity);
     vec3 hazeColor = dayHorizon * u_dayAmount + twilightHorizon * u_twilightAmount + nightHorizon * u_nightAmount;
-    sky = mix(sky, mix(hazeColor, vec3(0.55, 0.58, 0.62), u_stormIntensity), haze);
+    sky = mix(sky, mix(hazeColor, vec3(0.50, 0.53, 0.57), u_stormIntensity), haze);
 
     vec3 waterBelow = mix(vec3(0.00, 0.04, 0.08), vec3(0.02, 0.18, 0.27), smoothstep(-0.7, 0.2, d.y));
     vec3 waterGlow = vec3(0.08, 0.42, 0.52) * pow(max(0.0, d.y), 2.0);
     sky = mix(sky, waterBelow + waterGlow, u_underwaterIntensity);
 
+    // Display-authored -> linear, shaped so ACES + sRGB output lands near the authored values
+    sky = max(sky, vec3(0.0));
+    sky = sky * sky * sky * 0.55 + sky * 0.06;
+
+    // Emissive terms added in linear so bloom picks them up
+    float notUnder = 1.0 - u_underwaterIntensity;
+    float cloudOcclusion = 1.0 - cloudAlpha * 0.85;
+    sky += vec3(1.0, 0.86, 0.42) * (sunDisk * 3.2 + corona * 0.30) * sunVis * cloudOcclusion * notUnder;
+    sky += vec3(0.55, 0.68, 1.00) * moonDisk * 1.5 * cloudOcclusion * notUnder;
+    sky += vec3(0.80, 0.88, 1.10) * starField * starVis * 0.9 * notUnder;
+
     gl_FragColor = vec4(sky, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
+
+export interface Atmosphere {
+  sunDir: THREE.Vector3;
+  fogColor: THREE.Color;
+  horizonColor: THREE.Color;
+  storminess: number;
+  nightFactor: number;
+}
+
+// Camera-following shadow frustum: a tight ortho box snapped to shadow texels.
+const SHADOW_HALF_EXTENT = 85;
+const SHADOW_LIGHT_DISTANCE = 210;
+const SHADOW_UP = new THREE.Vector3(0, 1, 0);
+const SHADOW_ORIGIN = new THREE.Vector3(0, 0, 0);
 
 export class Renderer {
   public renderer!: THREE.WebGLRenderer;
@@ -121,13 +214,32 @@ export class Renderer {
   private readonly horizonDayColor = new THREE.Color(0xffddb0);
   private readonly horizonTwilightColor = new THREE.Color(0xff7f8e);
   private readonly horizonNightColor = new THREE.Color(0x334c7a);
+  private readonly skyHorizonDayColor = new THREE.Color(0xc7e6fa);
+  private readonly skyHorizonTwilightColor = new THREE.Color(0xff8a47);
+  private readonly skyHorizonNightColor = new THREE.Color(0x38516f);
+  private readonly skyHorizonStormColor = new THREE.Color(0x73767f);
   private dayAmount = 1;
   private twilightAmount = 0;
   private nightAmount = 0;
+  private stormLevel = 0;
   private readonly quality = detectRenderQuality();
-  private readonly minPixelRatio = this.quality === 'low' ? 0.5 : this.quality === 'balanced' ? 0.58 : 0.72;
-  private readonly maxPixelRatio = this.quality === 'low' ? 0.72 : this.quality === 'balanced' ? 0.86 : 1;
+  private readonly minPixelRatio = this.quality === 'low' ? 0.44 : this.quality === 'balanced' ? 0.58 : 0.8;
+  private readonly maxPixelRatio = this.quality === 'low'
+    ? 0.62
+    : Math.min(window.devicePixelRatio || 1, this.quality === 'balanced' ? 1.5 : 2);
   private currentPixelRatio = 1;
+  private postFx: PostFx | null = null;
+  private readonly shadowFocus = new THREE.Vector3();
+  private readonly shadowBasis = new THREE.Matrix4();
+  private readonly shadowBasisInv = new THREE.Matrix4();
+  private readonly cameraForward = new THREE.Vector3();
+  private readonly atmosphere: Atmosphere = {
+    sunDir: new THREE.Vector3(0.2, 0.92, -0.34).normalize(),
+    fogColor: new THREE.Color(0x9bbfd4),
+    horizonColor: new THREE.Color(0xc7e6fa),
+    storminess: 0,
+    nightFactor: 0,
+  };
   private perfTimer = 0;
   private perfFrameCount = 0;
   private perfFrameTime = 0;
@@ -147,16 +259,18 @@ export class Renderer {
     // Required so first-person viewmodels parented to the camera are included in scene traversal.
     this.scene.add(this.camera);
 
+    // AA comes from the post chain (MSAA target or FXAA); low renders direct without AA.
     this.renderer = new THREE.WebGLRenderer({
-      antialias: this.quality === 'high',
+      antialias: false,
       powerPreference: 'high-performance',
     });
     this.applyPixelRatio(this.maxPixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.shadowMap.enabled = this.quality === 'high';
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.enabled = this.quality !== 'low';
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     document.body.insertBefore(this.renderer.domElement, document.body.firstChild);
 
     // ── Sky dome ────────────────────────────────────────────────
@@ -171,6 +285,7 @@ export class Renderer {
         u_dayAmount: { value: 1 },
         u_twilightAmount: { value: 0 },
         u_nightAmount: { value: 0 },
+        u_time: { value: 0 },
       },
       side: THREE.BackSide,
       depthWrite: false,
@@ -215,16 +330,21 @@ export class Renderer {
 
     this.sun = new THREE.DirectionalLight(0xfff0d8, 2.75);
     this.sun.position.copy(sunWorldDir);
-    this.sun.castShadow = this.quality === 'high';
-    this.sun.shadow.mapSize.set(512, 512);
-    this.sun.shadow.camera.near = 10;
-    this.sun.shadow.camera.far = 1600;
-    this.sun.shadow.camera.left   = -550;
-    this.sun.shadow.camera.right  =  550;
-    this.sun.shadow.camera.top    =  550;
-    this.sun.shadow.camera.bottom = -550;
-    this.sun.shadow.bias = -0.0002;
+    this.sun.castShadow = this.quality !== 'low';
+    const shadowMapSize = this.quality === 'high' ? 2048 : 1024;
+    this.sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
+    this.sun.shadow.camera.near = 30;
+    this.sun.shadow.camera.far = SHADOW_LIGHT_DISTANCE + 230;
+    this.sun.shadow.camera.left   = -SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.right  =  SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.top    =  SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.bottom = -SHADOW_HALF_EXTENT;
+    this.sun.shadow.camera.updateProjectionMatrix();
+    this.sun.shadow.bias = -0.00035;
+    this.sun.shadow.normalBias = this.quality === 'high' ? 1.0 : 1.8;
     this.scene.add(this.sun);
+    // Target must be in the graph so the follow-camera shadow frustum updates.
+    this.scene.add(this.sun.target);
 
     // Ambient sky light (blue-ish to simulate skylight scatter)
     this.ambientLight = new THREE.AmbientLight(0x7090b8, 0.68);
@@ -239,11 +359,23 @@ export class Renderer {
     this.horizonFill.position.set(-300, 30, -450);
     this.scene.add(this.horizonFill);
 
+    if (this.quality !== 'low') {
+      try {
+        this.postFx = new PostFx(this.renderer, this.scene, this.camera, this.quality);
+        this.postFx.setSize(window.innerWidth, window.innerHeight);
+        this.postFx.setPixelRatio(this.currentPixelRatio);
+      } catch (error) {
+        console.warn('PostFx unavailable, falling back to direct rendering', error);
+        this.postFx = null;
+      }
+    }
+
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.applyPixelRatio(this.currentPixelRatio);
       this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.postFx?.setSize(window.innerWidth, window.innerHeight);
     });
   }
 
@@ -296,6 +428,7 @@ export class Renderer {
     const t = clamp(intensity, 0, 1);
     if (Math.abs(t - this.lastStormWeather) < 0.008) return;
     this.lastStormWeather = t;
+    this.stormLevel = t;
     this.skyMaterial.uniforms.u_stormIntensity.value = t;
 
     const fog = this.scene.fog as THREE.FogExp2;
@@ -315,6 +448,7 @@ export class Renderer {
   updateWaterEnvironment(depthBelowSurface: number, stormIntensity: number, elapsedSeconds = 0) {
     this.updateDayNight(elapsedSeconds);
     const storm = clamp(stormIntensity, 0, 1);
+    this.stormLevel = storm;
     const depth = Math.max(0, depthBelowSurface);
     const underwater = clamp(depth / 1.45, 0, 1);
     const deep = clamp(depth / 28, 0, 1);
@@ -365,7 +499,49 @@ export class Renderer {
     this.sunDisc.position.copy(sunPos);
     this.sunGlow.lookAt(this.camera.position);
     this.sunDisc.lookAt(this.camera.position);
-    this.renderer.render(this.scene, this.camera);
+    this.updateShadowFrustum();
+    if (this.postFx) {
+      this.postFx.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  /** Per-frame atmosphere snapshot for the ocean/other systems. Returned objects are reused. */
+  getAtmosphere(): Atmosphere {
+    const a = this.atmosphere;
+    a.sunDir.copy(this.sunDir);
+    const fog = this.scene?.fog as THREE.FogExp2 | null;
+    if (fog) a.fogColor.copy(fog.color);
+    this.getCycleColor(a.horizonColor, this.skyHorizonDayColor, this.skyHorizonTwilightColor, this.skyHorizonNightColor);
+    a.horizonColor.lerp(this.skyHorizonStormColor, this.stormLevel);
+    a.storminess = this.stormLevel;
+    a.nightFactor = this.nightAmount;
+    return a;
+  }
+
+  /** Keeps a tight shadow ortho box centered ahead of the camera, snapped to shadow texels. */
+  private updateShadowFrustum() {
+    if (!this.sun.castShadow) return;
+    this.camera.getWorldDirection(this.cameraForward);
+    this.cameraForward.y = 0;
+    if (this.cameraForward.lengthSq() < 1e-4) this.cameraForward.set(0, 0, 1);
+    else this.cameraForward.normalize();
+    // Anchor at sea level so wave/camera bob doesn't shift the frustum vertically.
+    this.shadowFocus.copy(this.camera.position).addScaledVector(this.cameraForward, SHADOW_HALF_EXTENT * 0.7);
+    this.shadowFocus.y = 0;
+
+    // Snap the focus to the shadow-texel grid in light space to stop edge crawling.
+    const texel = (SHADOW_HALF_EXTENT * 2) / this.sun.shadow.mapSize.x;
+    this.shadowBasis.lookAt(this.activeLightDir, SHADOW_ORIGIN, SHADOW_UP);
+    this.shadowBasisInv.copy(this.shadowBasis).invert();
+    this.shadowFocus.applyMatrix4(this.shadowBasisInv);
+    this.shadowFocus.x = Math.round(this.shadowFocus.x / texel) * texel;
+    this.shadowFocus.y = Math.round(this.shadowFocus.y / texel) * texel;
+    this.shadowFocus.applyMatrix4(this.shadowBasis);
+
+    this.sun.target.position.copy(this.shadowFocus);
+    this.sun.position.copy(this.shadowFocus).addScaledVector(this.activeLightDir, SHADOW_LIGHT_DISTANCE);
   }
 
   private setSunDiscWeather(storm: number, underwater: number) {
@@ -406,6 +582,7 @@ export class Renderer {
     this.skyMaterial.uniforms.u_dayAmount.value = this.dayAmount;
     this.skyMaterial.uniforms.u_twilightAmount.value = this.twilightAmount;
     this.skyMaterial.uniforms.u_nightAmount.value = this.nightAmount;
+    this.skyMaterial.uniforms.u_time.value = elapsedSeconds;
 
     const sunAbove = smoothstep(-0.06, 0.12, this.sunDir.y);
     this.activeLightDir.copy(this.sunDir);
@@ -455,6 +632,7 @@ export class Renderer {
     const viewportCap = window.innerWidth < 900 ? Math.min(this.maxPixelRatio, 0.72) : this.maxPixelRatio;
     this.currentPixelRatio = clamp(Math.min(deviceRatio, target, viewportCap), this.minPixelRatio, this.maxPixelRatio);
     this.renderer?.setPixelRatio(this.currentPixelRatio);
+    this.postFx?.setPixelRatio(this.currentPixelRatio);
   }
 }
 

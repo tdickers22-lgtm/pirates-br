@@ -24,7 +24,10 @@ export class WeaponSystem {
           w.reloadTimer -= dt;
           if (w.reloadTimer <= 0) {
             const def = WEAPONS[w.weaponId];
-            w.ammo = def.ammoMax;
+            // Reloads pull from the finite reserve — ammo pickups matter.
+            const refill = Math.min(Math.max(0, def.ammoMax - w.ammo), Math.max(0, w.reserve));
+            w.ammo += refill;
+            w.reserve -= refill;
             w.reloading = false;
             w.reloadTimer = 0;
           }
@@ -273,6 +276,7 @@ export class WeaponSystem {
     if (!weapon || weapon.reloading) return;
     const def = WEAPONS[weapon.weaponId];
     if (def.melee || weapon.ammo >= def.ammoMax) return;
+    if (weapon.reserve <= 0) return; // nothing left to load — find an ammo pickup
     weapon.reloading = true;
     weapon.reloadTimer = def.reloadTime;
   }
@@ -368,7 +372,8 @@ export class WeaponSystem {
     };
   }
 
-  private getCannonMuzzlePosition(ship: Ship, cannonIndex: number, yaw: number, pitch: number): Vec3 {
+  /** Single source of truth for cannon muzzle placement — Match delegates here. */
+  getCannonMuzzlePosition(ship: Ship, cannonIndex: number, yaw: number, pitch: number): Vec3 {
     const stats = SHIP_STATS[ship.type];
     const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
     const slotWithinSide = cannonIndex % cannonsPerSide;
@@ -388,10 +393,15 @@ export class WeaponSystem {
     };
   }
 
+  /** World yaw this cannon's broadside faces — bot gunnery and the aim clamp
+   *  below share it so "which rail can hit the target" is a single truth. */
+  getCannonBroadsideYaw(ship: Ship, cannonIndex: number): number {
+    const cannonsPerSide = Math.max(1, SHIP_STATS[ship.type].cannonCount / 2);
+    return ship.rotation + (cannonIndex < cannonsPerSide ? Math.PI * 0.5 : -Math.PI * 0.5);
+  }
+
   private getConstrainedCannonAim(ship: Ship, cannonIndex: number, yaw: number, pitch: number) {
-    const stats = SHIP_STATS[ship.type];
-    const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-    const broadsideYaw = ship.rotation + (cannonIndex < cannonsPerSide ? Math.PI * 0.5 : -Math.PI * 0.5);
+    const broadsideYaw = this.getCannonBroadsideYaw(ship, cannonIndex);
     return {
       yaw: broadsideYaw + Math.max(-SHIP.CANNON_YAW_ARC, Math.min(SHIP.CANNON_YAW_ARC, angleWrap(yaw - broadsideYaw))),
       pitch: Math.max(SHIP.CANNON_PITCH_MIN, Math.min(SHIP.CANNON_PITCH_MAX, pitch)),
