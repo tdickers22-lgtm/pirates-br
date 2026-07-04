@@ -115,3 +115,77 @@ and multiply it into gerstnerHeight when an optional islands arg is provided
   (u_stormCenter vec2, u_stormSafeRadius float = -1 when no storm,
   u_stormPhase01 float). GLSL parity with shared gerstnerHeight verified to
   <1e-12 m and shaders compile+link in a real WebGL2 context.
+
+---
+
+# INTEGRATION_NOTES — ShipRenderer naval-combat visual layer (ship agent)
+
+All ShipRenderer changes are backward compatible (new params optional / default
+0). Two orchestrator-side wirings are wanted in Game.ts:
+
+## A. Pass the storm sea-state into shipRenderer.update() (REQUIRED for hulls to ride storm swell)
+
+`update()` gained a final optional param:
+
+```ts
+export type ShipStormSource =
+  | number                                                  // precomputed 0..1 intensity
+  | { center: Vec2; safeRadius: number; phase: number }     // replicated storm ring
+  | null | undefined;                                       // default 0 = calm
+
+shipRenderer.update(ships, players, t, dt, snapshotAge, camPos, localId, storm)
+```
+
+At the existing call site (Game.ts ~6330, updateScene), append the storm arg.
+Either form works; passing the ring lets the renderer evaluate the shared
+`getStormWaveIntensity()` PER SHIP POSITION (better for ships straddling the
+wall). Suggested:
+
+```ts
+const s = this.state.storm;
+this.shipRenderer.update(
+  this.state.ships, this.state.players, this.ocean.getTime(), dt, snapshotAge,
+  this.renderer.camera.position, this.localPlayerId ?? undefined,
+  s ? { center: { x: s.centerX, y: s.centerZ }, safeRadius: s.safeRadius, phase: s.phase } : 0,
+);
+```
+
+Until wired, ships sample the calm Gerstner field (exactly today's behavior —
+no visual regression outside storms; inside a storm hull attitude/wake/spray
+will sit on the calm surface while the drawn ocean towers ±2.6 m).
+
+## B. Hang below-waterline gush FX on the hole anchors (CombatFx / Game)
+
+```ts
+shipRenderer.getHoleAnchors(shipId): Array<{
+  section: 'bow' | 'stern' | 'port' | 'starboard';
+  anchor: THREE.Object3D;      // child of the rendered ship — worldPos/quat follow heave/pitch/roll/list
+  belowWaterline: boolean;     // true for port/starboard (waterline-band holes)
+  active: boolean;             // section holed below FLOODING.HOLE_THRESHOLD → should gush NOW
+}>
+```
+
+Each anchor is named `hole-gush-anchor`, sits 0.12 m proud of the hull surface
+and its +Z axis points along the outward surface normal — spawn spray cones
+along `anchor.getWorldDirection()`. Recommended beat (Game.updateScene, next to
+the existing emitHullLeaks throttle): for every ship, for every
+`getHoleAnchors()` entry with `active && belowWaterline`, emit a water-jet
+burst every ~0.25 s scaled by `ship.waterLevel`; skip when `!ship.alive ||
+ship.sinking`. Existing `emitHullLeaks` droplets can then be retired or kept
+for the above-waterline (bow/stern) sections only.
+
+## C. FYI (self-contained, no action)
+
+- Hole decals now sit ON the lofted hull surface (position + outward normal
+  from the station table) — dark punched core, splinter-ring shards, mirrored
+  bow-cheek pair, transom-cap stern decal. polygonOffset kills z-fighting.
+- Interior flood water: one plane per ship fitted to the loft's waterline
+  half-widths (stays inside the silhouette), rises floor→deck-underside with
+  `ship.waterLevel`, visible only past 0.02 and never interpenetrates the deck.
+- Flood attitude is client-blended: settle to ~45% of freeboard at full flood
+  (on top of the server FREEBOARD_DROP) and list up to ~7° toward the
+  most-damaged below-waterline side (from ship.hull port/starboard + bow/stern),
+  smoothed by the existing attitude exp-lerp. Server pitch/roll still win while
+  snapshots are fresh; past ~180 ms the renderer blends to the deterministic
+  client Gerstner attitude so rocking never freezes.
+- `update()`'s 5th param `snapshotAge` is SECONDS (Game already passes it).
