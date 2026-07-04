@@ -46,7 +46,8 @@ export class WeaponSystem {
       aimPoint?: Vec3 | null;
     },
   ): HitscanTrace[] {
-    if (player.state === 'eliminated') return [];
+    // Downed pirates crawl — weapons are locked until revived.
+    if (player.state === 'eliminated' || player.state === 'downed') return [];
 
     // If player is at a cannon, fire ship cannon
     if (player.atCannon && ship) {
@@ -145,6 +146,7 @@ export class WeaponSystem {
       knockbackMultiplier?: number;
     },
   ): Array<{ targetId: string; damage: number; knockback: number }> {
+    if (attacker.state === 'downed') return [];
     const weapon = attacker.weapons[attacker.activeSlot];
     if (!weapon) return [];
     const def = WEAPONS[weapon.weaponId];
@@ -220,9 +222,22 @@ export class WeaponSystem {
         consumesInventory = true;
       }
     } else {
+      // Cannonball preference falls back like the other ammo types: super
+      // shots keep their cannonball-only gate, then firebomb, then chainshot —
+      // an empty ball rack no longer silently refuses to fire.
       projType = 'cannonball';
       if (cannonballIdx >= 0) {
         usedIdx = cannonballIdx;
+        consumesInventory = true;
+      } else if (player.superCannonballs > 0) {
+        // No inventory consumed — the super-shot path below takes over.
+      } else if (firebombIdx >= 0) {
+        projType = 'firebomb';
+        usedIdx = firebombIdx;
+        consumesInventory = true;
+      } else if (chainshotIdx >= 0) {
+        projType = 'chainshot';
+        usedIdx = chainshotIdx;
         consumesInventory = true;
       }
     }

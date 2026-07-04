@@ -1,8 +1,9 @@
-import type { Ship, Player, Projectile, Island, Vec3, HullSections, SeaRock } from '../../shared/types/index.js';
+import type { Ship, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, SEA_ROCKS, WORLD, FLOODING } from '../../shared/constants/index.js';
 import { toShipLocalPoint, toShipWorldPoint } from '../../shared/interactions.js';
 import {
   gerstnerHeight,
+  getStormWaveIntensity,
   WAVE_PARAMS,
   angleWrap,
   clamp,
@@ -128,6 +129,28 @@ export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, o
   ship.angularVelocity += (targetOmega - ship.angularVelocity) * blend;
 }
 
+// ── Storm sea-state ──────────────────────────────────────────────────────────
+/**
+ * Local storm sea-state in [0, 1] at a world position, adapted from the
+ * replicated StormState shape (centerX/centerZ) to the shared
+ * getStormWaveIntensity API. Every server-side gerstnerHeight sample threads
+ * this through so ships inside the storm genuinely pitch/heave harder, take
+ * waves over their holes, and swimmers/projectiles ride the same swell the
+ * client renders.
+ */
+export function stormSeaState(
+  storm: Pick<StormState, 'centerX' | 'centerZ' | 'safeRadius' | 'phase'> | null | undefined,
+  x: number,
+  z: number,
+): number {
+  if (!storm) return 0;
+  return getStormWaveIntensity(
+    { center: { x: storm.centerX, y: storm.centerZ }, safeRadius: storm.safeRadius, phase: storm.phase },
+    x,
+    z,
+  );
+}
+
 // ── Flooding model ───────────────────────────────────────────────────────────
 /** Canonical ship-local flood test point for each hull section (+z bow,
  *  +x starboard — matches toShipLocalPoint/toShipWorldPoint). */
@@ -152,6 +175,7 @@ function sectionFloodLocal(
 export function evaluateSectionFlood(
   ship: Ship,
   t: number,
+  storm = 0,
 ): Array<{ section: keyof HullSections; holed: boolean; submerged: boolean; flooding: boolean }> {
   const stats = SHIP_STATS[ship.type];
   const sinR = Math.sin(ship.rotation);
@@ -165,7 +189,8 @@ export function evaluateSectionFlood(
     const worldZ = ship.position.z + local.z * cosR - local.x * sinR;
     // Positive roll lifts starboard (+x); positive pitch dips the bow (+z).
     const holeY = ship.position.y + local.x * Math.sin(roll) - local.z * Math.sin(pitch);
-    const waterlineY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS);
+    // Storm seas break over holes that calm water would leave dry.
+    const waterlineY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
     const submerged = holeY - waterlineY < FLOODING.HOLE_WATERLINE_DEPTH;
     const holed = ship.hull[section] <= FLOODING.HOLE_THRESHOLD;
     return { section, holed, submerged, flooding: holed && submerged };
@@ -173,10 +198,10 @@ export function evaluateSectionFlood(
 }
 
 /** Total ingress (water-level/sec) from every holed-below-waterline section. */
-export function shipIngressRate(ship: Ship, t: number): number {
+export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
   const scale = FLOODING.INGRESS_CLASS_SCALE[ship.type] ?? 1;
   let openSections = 0;
-  for (const s of evaluateSectionFlood(ship, t)) {
+  for (const s of evaluateSectionFlood(ship, t, storm)) {
     if (s.flooding) openSections += 1;
   }
   return openSections * FLOODING.SECTION_INGRESS * scale;
@@ -188,9 +213,9 @@ export function shipIngressRate(ship: Ship, t: number): number {
  * client gauge trend) and douses fire once a holed section goes under. Bailing
  * (player/bot) removes water separately, before this runs in the tick.
  */
-export function updateShipFlooding(ship: Ship, t: number, dt: number): void {
+export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0): void {
   const water = ship.waterLevel ?? 0;
-  const ingress = shipIngressRate(ship, t);
+  const ingress = shipIngressRate(ship, t, storm);
   if (ingress > 0) {
     ship.waterLevel = clamp(water + ingress * dt, 0, 1);
     ship.floodingRate = ingress;
@@ -228,6 +253,13 @@ export type PhysicsCombatEvent =
       remainingSection: number;
       remainingHull: number;
       milestone: 'half' | 'critical' | null;
+    }
+  | {
+      /** Ram damage credit — banked for ship-sink attribution (no client toast). */
+      type: 'ship_ram';
+      attackerId: string;
+      targetId: string;
+      damage: number;
     };
 
 export class PhysicsSystem {
@@ -249,21 +281,26 @@ export class PhysicsSystem {
     projectiles: Projectile[],
     islands: Island[],
     seaRocks: SeaRock[] = [],
+    storm: StormState | null = null,
   ) {
-    this.updateProjectiles(dt, t, projectiles, ships, players, islands, seaRocks);
-    this.updateShips(dt, t, ships, players, islands, seaRocks);
-    this.updatePlayers(dt, t, players, ships, islands, seaRocks);
+    this.updateProjectiles(dt, t, projectiles, ships, players, islands, seaRocks, storm);
+    this.updateShips(dt, t, ships, players, islands, seaRocks, storm);
+    this.updatePlayers(dt, t, players, ships, islands, seaRocks, storm);
   }
 
   flushCombatEvents(): PhysicsCombatEvent[] {
     return this.combatEvents.splice(0);
   }
 
-  private updateShips(dt: number, t: number, ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[]) {
+  private updateShips(dt: number, t: number, ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     const wind = sampleWind(t);
     const helmedShipIds = new Set<string>();
+    const helmsmanByShip = new Map<string, string>();
     for (const player of players) {
-      if (player.atHelm && player.onShipId) helmedShipIds.add(player.onShipId);
+      if (player.atHelm && player.onShipId) {
+        helmedShipIds.add(player.onShipId);
+        helmsmanByShip.set(player.onShipId, player.id);
+      }
     }
     this.shipRotationDeltas.clear();
 
@@ -388,7 +425,11 @@ export class PhysicsSystem {
       // surface detail the smoothing filtered out; the renderer adds it back so
       // hulls sit exactly on the visible Gerstner surface.
       const dyn = this.getShipDynamics(ship.id);
-      const waveY = gerstnerHeight(ship.position.x, ship.position.z, t, WAVE_PARAMS);
+      // Local storm sea-state (0 calm → 1 raging) boosts every wave sample for
+      // this hull: buoyancy target, attitude sampling and hole waterlines all
+      // ride the same boosted sea, so ships inside the storm genuinely heave.
+      const seaState = stormSeaState(storm, ship.position.x, ship.position.z);
+      const waveY = gerstnerHeight(ship.position.x, ship.position.z, t, WAVE_PARAMS, seaState);
       // A flooding hull rides lower — the bilge water pushes the buoyancy target
       // down by up to FREEBOARD_DROP, dipping more sections under (the SoT spiral).
       const buoyTarget = waveY - clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.FREEBOARD_DROP;
@@ -408,13 +449,18 @@ export class PhysicsSystem {
       for (const other of ships) {
         if (other.id === ship.id || !other.alive) continue;
         if (ship.id > other.id) continue;
-        this.resolveShipShipCollision(ship, other);
+        this.resolveShipShipCollision(ship, other, helmsmanByShip);
       }
 
       // Wave attitude — pitch/roll chase the sampled Gerstner slope through a
-      // spring-damper so the deck genuinely rides the ocean.
-      const windHeel = clamp(-Math.sin(signedRelative) * sailDeployment * wind.strength * 0.05, -0.05, 0.05);
-      this.updateShipWaveAttitude(ship, stats, t, dt, windHeel);
+      // spring-damper so the deck genuinely rides the ocean. Storm winds heel
+      // the hull noticeably harder.
+      const windHeelCap = 0.05 * (1 + seaState * 0.8);
+      const windHeel = clamp(
+        -Math.sin(signedRelative) * sailDeployment * wind.strength * windHeelCap,
+        -windHeelCap, windHeelCap,
+      );
+      this.updateShipWaveAttitude(ship, stats, t, dt, windHeel, seaState);
 
       if (ship.onFire) {
         ship.fireTimer = Math.max(0, ship.fireTimer - dt);
@@ -437,11 +483,12 @@ export class PhysicsSystem {
 
       // Bilge: ingress from open holes below the waterline (or passive pumping
       // when patched). Runs after bailing (applied earlier in the tick).
-      updateShipFlooding(ship, t, dt);
+      // Storm seas wash over holes calm water would spare.
+      updateShipFlooding(ship, t, dt, seaState);
     }
   }
 
-  private updatePlayers(dt: number, t: number, players: Player[], ships: Ship[], islands: Island[], seaRocks: SeaRock[]) {
+  private updatePlayers(dt: number, t: number, players: Player[], ships: Ship[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     // Frame-rate-independent decay preserving the previous 0.9-per-16ms feel.
     const knockbackDamp = Math.pow(0.9, dt / 0.016);
     const playerBoundary = WORLD.HALF - WORLD.PLAYER_MARGIN;
@@ -453,6 +500,11 @@ export class PhysicsSystem {
         player.shipBoundaryGraceTimer = Math.max(0, player.shipBoundaryGraceTimer - dt);
       }
       if (player.state === 'eliminated' || player.state === 'respawning') continue;
+
+      // Downed pirates keep full physics (gravity, deck carry, water) but the
+      // locomotion state machine below must never overwrite 'downed' — Match
+      // owns entering/leaving that state (bleed-out, revive, finish).
+      const downed = player.state === 'downed';
 
       // Apply knockback velocity decay
       player.knockbackVelocity.x *= knockbackDamp;
@@ -538,7 +590,8 @@ export class PhysicsSystem {
           continue;
         }
 
-        const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS);
+        const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS,
+          stormSeaState(storm, player.position.x, player.position.z));
         const waterSurface = waveY + 0.32;
         if (player.position.y <= waterSurface) {
           // Don't snap to the surface — let the player keep their downward
@@ -656,7 +709,7 @@ export class PhysicsSystem {
         }
 
         player.swimTimer = 0;
-        player.state = 'alive';
+        if (!downed) player.state = 'alive';
         if (onShip.onFire && player.respawnProtectionTimer <= 0) {
           player.lastDamagedById = null;
           player.lastDamagedAt = null;
@@ -693,10 +746,11 @@ export class PhysicsSystem {
         // enter/exit threshold prevents alive⇄swimming flapping at the shoreline.
         let submergeDepth = -Infinity;
         let swimHere = false;
+        const playerSea = stormSeaState(storm, player.position.x, player.position.z);
         if (onIsland && !standingOnDock) {
-          const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS);
+          const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS, playerSea);
           submergeDepth = waveY - islandFloor;
-          swimHere = player.state === 'swimming'
+          swimHere = player.state === 'swimming' || downed
             ? submergeDepth > LOCO.SWIM_EXIT_DEPTH
             : submergeDepth > LOCO.SWIM_ENTER_DEPTH;
         }
@@ -738,7 +792,7 @@ export class PhysicsSystem {
             player.velocity.y = 0;
           }
           player.swimTimer = 0;
-          player.state = 'alive';
+          if (!downed) player.state = 'alive';
           // Cave roof: a jump inside a cave can't punch the player's head through it.
           if (
             ceilingY !== null
@@ -764,15 +818,18 @@ export class PhysicsSystem {
             player.position.y = rescueY;
             player.velocity.y = 0;
             player.swimTimer = 0;
-            player.state = 'alive';
+            if (!downed) player.state = 'alive';
             continue;
           }
 
           // Not on any surface — airborne above sea or in water
-          const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS);
+          const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS, playerSea);
           const surfaceY = waveY + 0.32;
 
-          const alreadySwimming = player.state === 'swimming';
+          // A downed pirate in the water floats with the swim physics (their
+          // state stays 'downed'; Match's crawl input is the only propulsion).
+          const alreadySwimming = player.state === 'swimming'
+            || (downed && player.position.y <= surfaceY + 0.001);
           if (!alreadySwimming && player.position.y > surfaceY) {
             // Airborne until the player's feet actually cross the waterline. Applying
             // swimming drag a metre above the surface made dock jumps and cannon arcs
@@ -836,7 +893,7 @@ export class PhysicsSystem {
               player.position.y = ceilingY - PLAYER.HEIGHT;
               if (player.velocity.y > 0) player.velocity.y = 0;
             }
-            player.state = 'swimming';
+            if (!downed) player.state = 'swimming';
 
             // Drowning
             player.swimTimer += dt;
@@ -919,7 +976,7 @@ export class PhysicsSystem {
     }
   }
 
-  private updateProjectiles(dt: number, t: number, projectiles: Projectile[], ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[]) {
+  private updateProjectiles(dt: number, t: number, projectiles: Projectile[], ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     for (const proj of projectiles) {
       if (!proj.alive) continue;
 
@@ -968,22 +1025,26 @@ export class PhysicsSystem {
         }
       }
 
-      // Water hit — real wave surface, not the y=0 plane (Gerstner swings ±1m)
-      if (proj.position.y < gerstnerHeight(proj.position.x, proj.position.z, t, WAVE_PARAMS)) {
-        proj.alive = false;
-        continue;
-      }
-
-      // Ship hit
+      // Ship hit — tested BEFORE the water kill so waterline shots punch holes
+      // (a wave cresting over the impact point no longer eats the ball).
+      // Chainshot additionally checks a taller rigging band so it can actually
+      // shred the canvas it exists for.
       for (const ship of ships) {
         if (!ship.alive || ship.id === proj.ownerShipId) continue;
-        if (this.isProjectileInsideShipHull(proj, ship)) {
+        if (this.isProjectileInsideShipHull(proj, ship) || this.isChainshotInRiggingBand(proj, ship)) {
           this.onProjectileHitShip(proj, ship, t);
           proj.alive = false;
           break;
         }
       }
       if (!proj.alive) continue;
+
+      // Water hit — real wave surface incl. local storm swell, not the y=0 plane
+      const projSea = stormSeaState(storm, proj.position.x, proj.position.z);
+      if (proj.position.y < gerstnerHeight(proj.position.x, proj.position.z, t, WAVE_PARAMS, projSea)) {
+        proj.alive = false;
+        continue;
+      }
 
       // Player hit
       for (const player of players) {
@@ -1427,6 +1488,7 @@ export class PhysicsSystem {
     t: number,
     dt: number,
     windHeel: number,
+    seaState = 0,
   ) {
     const dyn = this.getShipDynamics(ship.id);
     const halfL = stats.length * 0.4;
@@ -1435,10 +1497,10 @@ export class PhysicsSystem {
     const stern = this.toShipWorld(0, -halfL, ship);
     const starboard = this.toShipWorld(halfW, 0, ship);
     const port = this.toShipWorld(-halfW, 0, ship);
-    const bowY = gerstnerHeight(bow.x, bow.z, t, WAVE_PARAMS);
-    const sternY = gerstnerHeight(stern.x, stern.z, t, WAVE_PARAMS);
-    const starboardY = gerstnerHeight(starboard.x, starboard.z, t, WAVE_PARAMS);
-    const portY = gerstnerHeight(port.x, port.z, t, WAVE_PARAMS);
+    const bowY = gerstnerHeight(bow.x, bow.z, t, WAVE_PARAMS, seaState);
+    const sternY = gerstnerHeight(stern.x, stern.z, t, WAVE_PARAMS, seaState);
+    const starboardY = gerstnerHeight(starboard.x, starboard.z, t, WAVE_PARAMS, seaState);
+    const portY = gerstnerHeight(port.x, port.z, t, WAVE_PARAMS, seaState);
 
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
@@ -1446,14 +1508,19 @@ export class PhysicsSystem {
     const speedFrac = clamp(Math.abs(forwardSpeed) / Math.max(1, stats.maxSpeed), 0, 1.15);
 
     // Slight bow-up trim at speed; turn heel leans the hull out of a hard turn.
+    // Storm seas produce steeper sampled slopes — let the targets breathe a
+    // little wider so heavy weather genuinely pitches the deck (still inside
+    // the client renderer's defensive clamps of ±0.5 / ±0.6).
+    const pitchCap = 0.35 + seaState * 0.1;
+    const rollCap = 0.45 + seaState * 0.08;
     const targetPitch = clamp(
       Math.atan2(sternY - bowY, stats.length * 0.8) - speedFrac * 0.035,
-      -0.35, 0.35,
+      -pitchCap, pitchCap,
     );
     const turnHeel = clamp(-ship.angularVelocity * speedFrac * 0.5, -0.06, 0.06);
     const targetRoll = clamp(
       Math.atan2(starboardY - portY, stats.width * 0.8) + turnHeel + windHeel,
-      -0.45, 0.45,
+      -rollCap, rollCap,
     );
 
     const pitch = ship.pitch ?? 0;
@@ -1470,7 +1537,7 @@ export class PhysicsSystem {
    * phantom contact, while rams resolve at the true contact point with a
    * linear impulse plus r×J torque on both hulls.
    */
-  private resolveShipShipCollision(ship: Ship, other: Ship) {
+  private resolveShipShipCollision(ship: Ship, other: Ship, helmsmanByShip?: Map<string, string>) {
     const stats = SHIP_STATS[ship.type];
     const otherStats = SHIP_STATS[other.type];
     const dxC = ship.position.x - other.position.x;
@@ -1573,6 +1640,23 @@ export class PhysicsSystem {
           this.damageHullSection(other, adj, otherDmg * otherSplash);
         }
       }
+
+      // Ram kill credit: each hull's damage is banked to the OTHER hull's
+      // helmsman (or its owner), so ramming a ship to death now credits the
+      // rammer — eliminating the crew and awarding kills like every other
+      // sink route (Match resolves it via markShipDamagedByPlayer).
+      this.combatEvents.push({
+        type: 'ship_ram',
+        attackerId: helmsmanByShip?.get(other.id) ?? other.ownerId,
+        targetId: ship.id,
+        damage: baseDmg * shipFactor,
+      });
+      this.combatEvents.push({
+        type: 'ship_ram',
+        attackerId: helmsmanByShip?.get(ship.id) ?? ship.ownerId,
+        targetId: other.id,
+        damage: baseDmg * otherFactor,
+      });
     }
   }
 
@@ -1755,7 +1839,7 @@ export class PhysicsSystem {
       player.position.y = best.topY;
       if (player.velocity.y < 0) player.velocity.y = 0;
       player.swimTimer = 0;
-      player.state = 'alive';
+      if (player.state !== 'downed') player.state = 'alive';
       return true;
     }
 
@@ -1856,6 +1940,21 @@ export class PhysicsSystem {
     const local = this.toShipLocal(projectile.position, ship);
     return Math.abs(projectile.position.y - ship.position.y) < stats.height + 1.1
       && this.isInsideShipDeckFootprint(local, stats, 0.38);
+  }
+
+  /** Chainshot is a rigging weapon: it also connects through the mast/sail
+   *  band ABOVE the hull — a narrower footprint reaching to the mast tops —
+   *  so a shot aimed through the canvas actually tears it instead of passing
+   *  clean over the hull band. Matches the client mast layout (mast height =
+   *  H × 3.6 single-mast / 3.1 multi-mast, see getCrowNestStandingY). */
+  private isChainshotInRiggingBand(projectile: Projectile, ship: Ship): boolean {
+    if (projectile.type !== 'chainshot') return false;
+    const stats = SHIP_STATS[ship.type];
+    const mastHeight = stats.height * (stats.mastCount === 1 ? 3.6 : 3.1);
+    const dy = projectile.position.y - ship.position.y;
+    if (dy < 0 || dy > stats.height + mastHeight + 0.8) return false;
+    const local = this.toShipLocal(projectile.position, ship);
+    return Math.abs(local.x) <= stats.width * 0.75 && Math.abs(local.z) <= stats.length * 0.42;
   }
 
   private getShipFloorY(position: Vec3, ship: Ship, providedLocal?: { x: number; z: number }) {

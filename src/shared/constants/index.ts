@@ -49,6 +49,34 @@ export const PLAYER = {
   KEG_REPLENISH_COOLDOWN: 60,
 } as const;
 
+// ── Down-but-not-out (DBNO) ──────────────────────────────────
+// hp ≤ 0 with a living crewmate downs the pirate instead of killing them:
+// crawl at 30% speed, no weapons/stations, bleed out over BLEEDOUT_SECONDS
+// (2× faster outside the storm ring). A crewmate holding interact for
+// REVIVE_SECONDS revives at REVIVE_HEALTH. Any damage can finish the downed.
+export const DBNO = {
+  /** Seconds from downed to bleed-out death inside the storm safe ring. */
+  BLEEDOUT_SECONDS: 30,
+  /** Bleed-out drain multiplier while outside the storm safe ring. */
+  STORM_BLEEDOUT_MULT: 2,
+  /** Vitality pool while downed — damage against it "finishes" the player. */
+  DOWNED_HEALTH: 30,
+  /** Crawl speed as a fraction of PLAYER.MOVE_SPEED. */
+  CRAWL_SPEED_SCALE: 0.3,
+  /** Hold-interact seconds for a crewmate to complete a revive. */
+  REVIVE_SECONDS: 4,
+  /** Max distance (m) between reviver and downed body. */
+  REVIVE_RANGE: 2.8,
+  /** Health granted on a successful revive (fraction of MAX_HEALTH). */
+  REVIVE_HEALTH_RATIO: 0.3,
+  /** Interrupted revives decay progress at this rate per second. */
+  PROGRESS_DECAY_PER_SEC: 0.5,
+  /** Bots only revive crewmates when no enemy is within this range. */
+  BOT_REVIVE_SAFE_RADIUS: 40,
+  /** Bots walk over and finish downed enemies inside this range. */
+  BOT_FINISH_RADIUS: 12,
+} as const;
+
 export const ECONOMY = {
   GOLD_WIN_TARGET: 9000,
   PLAYER_HIT_GOLD_MIN: 6,
@@ -353,5 +381,9 @@ export const POCKET = {
 } as const;
 
 // ── Tick rate ────────────────────────────────────────────────
-export const SERVER_TICK_MS = 16;  // ~60 Hz physics
-export const SNAPSHOT_RATE = 2;    // 30 Hz snapshots — halves JSON serialization & network load
+export const SERVER_TICK_MS = 16;  // 62.5 Hz physics
+/** Hot (light) snapshots go out every SNAPSHOT_RATE ticks (31.25 Hz). */
+export const SNAPSHOT_RATE = 2;
+/** Full snapshots go out every FULL_SNAPSHOT_TICKS ticks (~10.4 Hz);
+ *  hot 'state_hot' updates fill the snapshot ticks in between. */
+export const FULL_SNAPSHOT_TICKS = SNAPSHOT_RATE * 3;
