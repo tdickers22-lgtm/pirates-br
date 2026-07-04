@@ -209,6 +209,10 @@ export class Match {
   /** downedPlayerId → reviverId contributions gathered this tick (humans via
    *  held interact intent, bots via updateBotDbno). */
   private reviveActionsThisTick = new Map<string, string>();
+  /** Halyard hold direction per player (locked at hold start) + crew count per
+   *  ship this tick (teamwork on the rope speeds the haul, capped 2×). */
+  private sailHaulTargetByPlayer = new Map<string, number>();
+  private sailHaulCrewThisTick = new Map<string, number>();
   /** Ship waterLevel at tick start — floodingRate is published NET of bailing. */
   private waterLevelAtTickStart = new Map<string, number>();
 
@@ -727,14 +731,6 @@ export class Match {
     return true;
   }
 
-  private enterSails(player: Player, ship: Ship): boolean {
-    if (this.isStationOccupied(ship, 'sails', player.id)) return false;
-    this.clearStationFlags(player);
-    player.atSails = true;
-    this.snapPlayerToSails(player, ship);
-    return true;
-  }
-
   private enterCrowNest(player: Player, ship: Ship): boolean {
     if (this.isStationOccupied(ship, 'crow', player.id)) return false;
     this.clearStationFlags(player);
@@ -1194,10 +1190,6 @@ export class Match {
           if (this.enterCrowNest(player, ship)) return;
         }
 
-        if (this.isNearSailStation(player, ship)) {
-          if (this.enterSails(player, ship)) return;
-        }
-
         if (this.isNearHelm(player, ship)) {
           if (this.enterHelm(player, ship)) return;
         }
@@ -1230,14 +1222,30 @@ export class Match {
 
     // Ship controls
     if (ship && player.onShipId === ship.id) {
-      if (player.atSails) {
-        // Chainshot keeps the sail capped at the integrity ceiling; you have to repair
-        // (interact + wood) to hoist the canvas back up past the damage line.
-        const integrityCap = ship.sailIntegrity;
-        if (input.sailRaise || input.forward) ship.sailHeight = Math.min(integrityCap, ship.sailHeight + SHIP.SAIL_HOIST_RATE * dt);
-        if (input.sailLower || input.back) ship.sailHeight = Math.max(0, ship.sailHeight - SHIP.SAIL_HOIST_RATE * dt);
-        if (input.sailLeft) ship.sailAngle = Math.max(-SHIP.MAX_SAIL_ANGLE, ship.sailAngle - SHIP.SAIL_TRIM_RATE * dt);
-        if (input.sailRight) ship.sailAngle = Math.min(SHIP.MAX_SAIL_ANGLE, ship.sailAngle + SHIP.SAIL_TRIM_RATE * dt);
+      // ── Halyard: HOLD [X] at the rigging — no captive mode, no key chords.
+      // Direction locks when the hold starts (mostly-furled → drop to full
+      // canvas, mostly-set → raise) so crossing the midpoint mid-haul never
+      // reverses on you. Extra crewmates on the rope speed the haul (up to 2×).
+      const haulingSails = input.interactIntent === 'sails'
+        && input.interactHeld
+        && !player.atCannon && !player.atHelm && !player.atCrowNest
+        && player.state === 'alive'
+        && this.isNearSailStation(player, ship);
+      if (haulingSails && ship.sailIntegrity >= 0.995) {
+        let target = this.sailHaulTargetByPlayer.get(player.id);
+        if (target === undefined) {
+          target = ship.sailHeight < 0.5 ? 1 : 0;
+          this.sailHaulTargetByPlayer.set(player.id, target);
+        }
+        const crewOnRope = Math.min(2, 1 + (this.sailHaulCrewThisTick.get(ship.id) ?? 0));
+        this.sailHaulCrewThisTick.set(ship.id, crewOnRope);
+        const cap = ship.sailIntegrity;
+        const rate = SHIP.SAIL_HOIST_RATE * (0.5 + crewOnRope * 0.5) * dt;
+        ship.sailHeight = target > 0.5
+          ? Math.min(cap, ship.sailHeight + rate)
+          : Math.max(0, ship.sailHeight - rate);
+      } else {
+        this.sailHaulTargetByPlayer.delete(player.id);
       }
 
       if (
@@ -1277,9 +1285,13 @@ export class Match {
         player.bailing = false;
       }
 
-      // Repair torn sails (hold interact + wood at sail station). Repairing both
+      // Repair torn sails (hold [X] + wood at the rigging). Repairing both
       // restores rigging integrity and physically hoists the canvas back up.
-      if (player.atSails && ship.sailIntegrity < 1 && input.interactHeld) {
+      const mendingSails = input.interactIntent === 'sails'
+        && input.interactHeld
+        && !player.atCannon && !player.atHelm && !player.atCrowNest
+        && this.isNearSailStation(player, ship);
+      if (mendingSails && ship.sailIntegrity < 1) {
         const plankStack = ship.inventory.find(entry => entry.item === 'wood_plank' && entry.qty > 0);
         if (plankStack) {
           ship.sailRepairWoodTimer += dt;
@@ -1292,7 +1304,7 @@ export class Match {
         // Continuous canvas hoist while at the sail station — independent of plank
         // consumption so even a single plank visibly raises the canvas back.
         ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + SHIP.SAIL_HOIST_RATE * SHIP.SAIL_REPAIR_HOIST_FACTOR * dt);
-      } else if (!player.atSails) {
+      } else if (!mendingSails) {
         ship.sailRepairWoodTimer = 0;
       }
 
@@ -3211,9 +3223,10 @@ export class Match {
         return this.enterCrowNest(player, ship);
       }
       case 'sails': {
+        // No captive sail mode: the press confirms intent, the continuous
+        // hold in applyInput hauls the halyard (Sea-of-Thieves style).
         if (!ship || player.onShipId !== ship.id) return false;
-        if (!this.isNearSailStation(player, ship)) return false;
-        return this.enterSails(player, ship);
+        return this.isNearSailStation(player, ship);
       }
       case 'revive': {
         // The press just confirms intent; the continuous revive runs off the
@@ -3776,6 +3789,7 @@ export class Match {
       }
     }
     this.reviveActionsThisTick.clear();
+    this.sailHaulCrewThisTick.clear();
   }
 
   private completeRevive(player: Player, reviverId: string | null) {

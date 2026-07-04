@@ -527,6 +527,12 @@ console.log('\n7. Storm damage punches holes (damageHullSection) instead of melt
   });
   testShip.position = { x: calmSpot.x, y: 0, z: calmSpot.z };
   testShip.velocity = { x: 0, y: 0, z: 0 };
+  // Grind the holed section down to breach level: a destroyed section gushes
+  // regardless of the waterline (the new deterministic rule), so this stops
+  // depending on wave phase over the hole.
+  const stormSections = ['bow', 'stern', 'port', 'starboard'];
+  const stormHoled = stormSections.find((sec) => testShip.hull[sec] <= FLOODING.HOLE_THRESHOLD) ?? 'bow';
+  testShip.hull[stormHoled] = Math.min(testShip.hull[stormHoled], 0.05);
   const waterBefore = testShip.waterLevel ?? 0;
   for (let i = 0; i < 600; i++) {
     b0.health = 100;
