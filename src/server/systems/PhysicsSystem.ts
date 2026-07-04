@@ -195,18 +195,29 @@ export function evaluateSectionFlood(
     const waterlineY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
     const submerged = holeY - waterlineY < FLOODING.HOLE_WATERLINE_DEPTH;
     const holed = ship.hull[section] <= FLOODING.HOLE_THRESHOLD;
-    return { section, holed, submerged, flooding: holed && submerged };
+    // A DESTROYED section (hp ~0) is breached below the line somewhere no
+    // matter how the hull rides — it always takes water. Barely-holed
+    // sections only flood when the sea actually reaches the hole.
+    const breached = ship.hull[section] <= 0.12;
+    return { section, holed, submerged, flooding: (holed && submerged) || breached };
   });
+}
+
+/** How hard a holed section floods: a fresh hole at the threshold trickles at
+ *  ~0.55×, a destroyed section gushes at ~1.65× the base ingress. */
+export function sectionIngressScale(sectionHp: number): number {
+  const severity = clamp(1 - sectionHp / FLOODING.HOLE_THRESHOLD, 0, 1);
+  return 0.55 + 1.1 * severity;
 }
 
 /** Total ingress (water-level/sec) from every holed-below-waterline section. */
 export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
   const scale = FLOODING.INGRESS_CLASS_SCALE[ship.type] ?? 1;
-  let openSections = 0;
+  let total = 0;
   for (const s of evaluateSectionFlood(ship, t, storm)) {
-    if (s.flooding) openSections += 1;
+    if (s.flooding) total += FLOODING.SECTION_INGRESS * sectionIngressScale(ship.hull[s.section]);
   }
-  return openSections * FLOODING.SECTION_INGRESS * scale;
+  return total * scale;
 }
 
 /**

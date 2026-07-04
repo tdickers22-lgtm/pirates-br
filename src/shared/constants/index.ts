@@ -115,7 +115,7 @@ export const SHIP_STATS: Record<ShipType, {
 
 export const SHIP = {
   HULL_SECTION_RATIO: 0.25,   // each section is 1/4 of total
-  SINK_TIME: 10,              // seconds
+  SINK_TIME: 20,              // seconds — the founder is a scene, not a pop
   REPAIR_HP: 100,
   FIELD_REPAIR_DELAY: 10,
   FIELD_REPAIR_INTERVAL: 2.5,
@@ -182,8 +182,11 @@ export const SHIP = {
 export const FLOODING = {
   /** HP ratio (per section) at/below which the section is "holed" and can flood. */
   HOLE_THRESHOLD: 0.5,
-  /** Per-holed-below-waterline section ingress, water-level/sec (sloop reference). */
-  SECTION_INGRESS: 0.0100,
+  /** Base per-holed-section ingress, water-level/sec (sloop reference). The
+   *  effective rate scales with how wrecked the section is — see
+   *  sectionIngressScale in PhysicsSystem: a fresh hole trickles (bailable
+   *  solo), a destroyed section gushes (must be planked before bailing wins). */
+  SECTION_INGRESS: 0.0085,
   /** Per hull-class scale on ingress — bigger hull, slower to fill.
    *  sloop 50 s / brigantine ~60 s / galleon ~71 s to fill on 2 open sections. */
   INGRESS_CLASS_SCALE: { sloop: 1.0, brigantine: 0.84, galleon: 0.70 } as Record<ShipType, number>,

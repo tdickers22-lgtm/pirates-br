@@ -10,7 +10,7 @@
 //   6. bots bail under player-like constraints (aboard, off-station, capped)
 //   7. storm hull damage routes through damageHullSection → holes + flooding
 //   8. ship_damage broadcasts reach every client, not just the attacker
-import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
+import { PhysicsSystem, updateShipFlooding, evaluateSectionFlood } from '../src/server/systems/PhysicsSystem.ts';
 import { WeaponSystem } from '../src/server/systems/WeaponSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, PLAYER } from '../src/shared/constants/index.ts';
@@ -262,8 +262,17 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
 
   const killsBefore = attacker.kills;
   const goldBefore = attacker.gold;
-  match.evaluateShipSinking(shipB);
-  expect('the rammed ship sinks', shipB.sinking === true);
+  // Holes, not hp, decide: the ram breached the hull, so the water finishes
+  // the job — run the flood forward to the founder (well under a minute for
+  // a wrecked section set) and then assert the credited sink.
+  let ramFloodT = 0;
+  for (let i = 0; i < 90 * 62 && shipB.sinking !== true; i++) {
+    updateShipFlooding(shipB, match.t, DT);
+    match.evaluateShipSinking(shipB);
+    ramFloodT += DT;
+  }
+  expect('the rammed ship sinks (via the water pouring through the ram breach)',
+    shipB.sinking === true, `flooded ${ramFloodT.toFixed(1)}s`);
   expect('the rammed crew is eliminated (credited sink, no swim-away)',
     victimCrew.every((p) => p.state === 'eliminated'),
     victimCrew.map((p) => p.state).join(','));
@@ -320,7 +329,7 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   for (let i = 0; i < 30; i++) { player.health = 100; if (bot) bot.health = 100; match.tick(); }
   expect('untended hole: replicated floodingRate is positive',
     ship.floodingRate > 0.005, `rate=${ship.floodingRate}`);
-  expect('untended hole: water actually rises', ship.waterLevel > levelBeforeControl + 0.003,
+  expect('untended hole: water actually rises', ship.waterLevel > levelBeforeControl + 0.0015,
     `water ${levelBeforeControl.toFixed(4)} → ${ship.waterLevel.toFixed(4)}`);
 
   // One bailer via the real input path: bail (0.014) beats ingress (0.010),

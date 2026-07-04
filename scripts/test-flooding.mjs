@@ -4,6 +4,7 @@
 // fire dousing, and chainshot (rigging-only, no hull holes). Real modules via tsx.
 import {
   PhysicsSystem,
+  sectionIngressScale,
   applyShipRudderSteering,
   evaluateSectionFlood,
   shipIngressRate,
@@ -68,7 +69,7 @@ function makeShip(type = 'sloop', overrides = {}) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('Ingress: 2 open sections sink an untended ship in 45–75 s');
+console.log('Ingress: 2 open sections sink an untended ship in ~55–100 s (severity-scaled)');
 
 /** Untended fill time (seconds) for a level ship with two holed lateral sections. */
 function untendedFillTime(type) {
@@ -92,12 +93,12 @@ function untendedFillTime(type) {
     && sloop.floodingSections.includes('port')
     && sloop.floodingSections.includes('starboard'),
     `flooding=${JSON.stringify(sloop.floodingSections)}`);
-  expect('sloop: 2 open holes sink in 45–75 s untended',
-    sloop.t >= 45 && sloop.t <= 75, `t=${sloop.t.toFixed(1)}s`);
+  expect('sloop: 2 open holes sink in 50–80 s untended',
+    sloop.t >= 50 && sloop.t <= 80, `t=${sloop.t.toFixed(1)}s`);
 
   const galleon = untendedFillTime('galleon');
-  expect('galleon: 2 open holes sink in 45–75 s untended',
-    galleon.t >= 45 && galleon.t <= 75, `t=${galleon.t.toFixed(1)}s`);
+  expect('galleon: 2 open holes sink in 70–110 s untended',
+    galleon.t >= 70 && galleon.t <= 110, `t=${galleon.t.toFixed(1)}s`);
   expect('bigger hull floods slower (galleon > sloop)',
     galleon.t > sloop.t, `sloop=${sloop.t.toFixed(1)} galleon=${galleon.t.toFixed(1)}`);
 }
@@ -119,8 +120,11 @@ console.log('\nHeeled ship: the raised windward hole does NOT flood');
     stbd.holed && !stbd.submerged && !stbd.flooding);
   expect('leeward (dipped port) hole floods',
     port.holed && port.submerged && port.flooding);
+  const expectedLowSideRate = FLOODING.SECTION_INGRESS
+    * sectionIngressScale(ship.hull.port)
+    * FLOODING.INGRESS_CLASS_SCALE.sloop;
   expect('heeled ship only takes water on the low side',
-    shipIngressRate(ship, 0) === FLOODING.SECTION_INGRESS * FLOODING.INGRESS_CLASS_SCALE.sloop,
+    Math.abs(shipIngressRate(ship, 0) - expectedLowSideRate) < 1e-9,
     `rate=${shipIngressRate(ship, 0)}`);
 }
 
@@ -281,11 +285,25 @@ console.log('\nSinking by flooding (waterLevel ≥ 1) reuses the sink + eliminat
   // Sink flow untouched: treasure is dropped off the hull (not retained).
   expect('sink flow still drops treasure', victimShip.treasureChestIds.length === 0, `chests=${chestsBefore}`);
 
-  // Direct HP-zero still sinks (regression: flooding is additive, not a replacement).
+  // Hull hp alone never sinks a ship anymore — cannonballs make holes, only
+  // water sinks. A destroyed hull is breached everywhere (all four sections
+  // gush regardless of waterline) so the water wins fast without bailers.
   const hpVictim = st.ships[1];
   hpVictim.hull = { bow: 0, stern: 0, port: 0, starboard: 0 };
+  hpVictim.waterLevel = 0;
   match.evaluateShipSinking(hpVictim);
-  expect('destroyed-hull ships still sink (HP path preserved)', hpVictim.sinking === true);
+  expect('destroyed hull does NOT insta-sink (holes, not hp, decide)', hpVictim.sinking !== true);
+  const wreckedFlood = evaluateSectionFlood(hpVictim, 0);
+  expect('every destroyed section is breached and gushing',
+    wreckedFlood.every((sec) => sec.flooding), JSON.stringify(wreckedFlood));
+  let wreckT = 0;
+  for (let i = 0; i < 90 * 60 && (hpVictim.waterLevel ?? 0) < 1; i++) {
+    updateShipFlooding(hpVictim, 0, DT);
+    wreckT += DT;
+  }
+  match.evaluateShipSinking(hpVictim);
+  expect('a shot-to-pieces hull still founders — via the rising water (<45 s)',
+    hpVictim.sinking === true && wreckT < 45, `filled in ${wreckT.toFixed(1)}s`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
