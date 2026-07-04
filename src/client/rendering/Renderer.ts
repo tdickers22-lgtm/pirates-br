@@ -412,10 +412,12 @@ export class Renderer {
       return;
     }
 
-    if (avgFps > 58 && this.smoothFrameTime < 1 / 55) {
+    // Recovery must be reachable under 60Hz vsync (58fps+perfect frames never
+    // happened, so quality only ratcheted down over a session).
+    if (avgFps > 55.5 && this.smoothFrameTime < 1 / 50) {
       this.recoverTimer += 1.15;
-      if (this.recoverTimer > 8 && this.currentPixelRatio < this.maxPixelRatio - 0.01) {
-        this.applyPixelRatio(Math.min(this.maxPixelRatio, this.currentPixelRatio + 0.04));
+      if (this.recoverTimer > 4 && this.currentPixelRatio < this.maxPixelRatio - 0.01) {
+        this.applyPixelRatio(Math.min(this.maxPixelRatio, this.currentPixelRatio + 0.06));
         this.recoverTimer = 0;
       }
     } else {
@@ -663,10 +665,12 @@ function detectRenderQuality(): RenderQuality {
   const memory = nav.deviceMemory;
   const memoryLimited = typeof memory === 'number' && memory <= 4;
   const memoryStrong = typeof memory === 'number' ? memory >= 8 : true;
-  const dpr = window.devicePixelRatio || 1;
-  const pixels = window.innerWidth * window.innerHeight * dpr * dpr;
+  // Judge on CSS pixels: the adaptive pixel-ratio scaler owns the actual
+  // output resolution, so a HiDPI screen must not permanently veto 'high'
+  // (every Retina Mac was stuck on 'balanced' forever).
+  const cssPixels = window.innerWidth * window.innerHeight;
 
-  if (cores <= 4 || memoryLimited || (pixels > 3_400_000 && cores <= 6)) return 'low';
-  if (cores >= 8 && memoryStrong && pixels <= 2_800_000 && dpr <= 1.5) return 'high';
+  if (cores <= 4 || memoryLimited || (cssPixels > 3_400_000 && cores <= 6)) return 'low';
+  if (cores >= 8 && memoryStrong && cssPixels <= 2_600_000) return 'high';
   return 'balanced';
 }
