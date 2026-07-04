@@ -1,5 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import type {
+  IslandBridge,
   Island, IslandBarrel, IslandBiome, IslandCave, IslandDock, IslandInlet, IslandNpc,
   IslandProfile, IslandProp, IslandPropType, IslandTavern, ItemType,
   TreasureChest, UpgradeStation, ShipUpgradeType, Vec3, Ship, WildlifeAnimal, WildlifeType, SeaRock,
@@ -230,10 +231,51 @@ export class MapGenerator {
       island.barrels = this.generateBarrels(island, islandRng);
       island.npcs = this.generateStoryNpcs(island, islands.length, islandRng);
       island.props = this.generateProps(island, entry, islandRng, camps, landmarks);
+      island.bridges = this.generateBridges(island);
       islands.push(island);
     }
 
     return islands;
+  }
+
+  /** Walkable rope bridge between the two main peaks on split-landmass styles.
+   *  Endpoints are the actual LOCAL MAXIMA of the final heightfield (grid
+   *  search around each gaussian hill center — detail noise shifts the true
+   *  summit off-center), so both ends sit flush on the terrain. Deterministic:
+   *  pure function of the island, no rng. Deck math is shared
+   *  (getBridgeDeckY), so the deck the client draws is the deck physics walks. */
+  private generateBridges(island: Island): IslandBridge[] {
+    const profile = island.profile;
+    const eligible = profile.terrainStyle === 'twin'
+      || profile.terrainStyle === 'archipelago'
+      || ((profile.terrainStyle === 'mountain' || profile.terrainStyle === 'rocky') && profile.secondaryHillScale > 0.45);
+    if (!eligible) return [];
+    const localPeak = (hillAngle: number, hillOffset: number) => {
+      const cx = island.position.x + Math.cos(hillAngle) * hillOffset * profile.footprintX;
+      const cz = island.position.z + Math.sin(hillAngle) * hillOffset * profile.footprintZ;
+      let best = { x: cx, z: cz, y: getIslandSurfaceY(island, cx, cz) };
+      for (let gx = -3; gx <= 3; gx++) {
+        for (let gz = -3; gz <= 3; gz++) {
+          const x = cx + gx * 2.4;
+          const z = cz + gz * 2.4;
+          const y = getIslandSurfaceY(island, x, z);
+          if (y > best.y) best = { x, z, y };
+        }
+      }
+      return best;
+    };
+    const a = localPeak(profile.primaryHillAngle, profile.primaryHillOffset);
+    const b = localPeak(profile.secondaryHillAngle, profile.secondaryHillOffset);
+    const span = Math.hypot(b.x - a.x, b.z - a.z);
+    const seaBase = 5.15 + island.radius * 0.0085;
+    if (span < 7 || span > island.radius * 1.15) return [];
+    if (a.y - seaBase < 3 || b.y - seaBase < 3) return [];
+    // The bridge must clear the saddle between the peaks — if the terrain
+    // midway rises to (or above) the straight deck line, a bridge is silly.
+    const midY = (a.y + b.y) * 0.5;
+    const saddleY = getIslandSurfaceY(island, (a.x + b.x) * 0.5, (a.z + b.z) * 0.5);
+    if (saddleY > midY - 1.6) return [];
+    return [{ ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z, width: 1.9 }];
   }
 
   private buildProfile(entry: RosterEntry, rotation: number): IslandProfile {

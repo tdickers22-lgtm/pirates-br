@@ -710,9 +710,16 @@ export function getCaveCeilingY(island: Island, x: number, z: number): number | 
 /** True when the standing ground at (x, z) sits deep enough under the local
  *  wave surface that a walker should be swimming (beach walk-ins, archipelago
  *  channels). The locomotion track flips player state off this. */
-export function isSubmergedAt(island: Island, x: number, z: number, t: number, depth = 1.05): boolean {
+export function isSubmergedAt(
+  island: Island,
+  x: number,
+  z: number,
+  t: number,
+  depth = 1.05,
+  storm = 0,
+): boolean {
   const ground = getIslandSurfaceY(island, x, z);
-  return ground < gerstnerHeight(x, z, t, WAVE_PARAMS) - depth;
+  return ground < gerstnerHeight(x, z, t, WAVE_PARAMS, storm) - depth;
 }
 
 export function getIslandSurfacePoint(island: Island, distRatio: number, angle: number, extraY = 0): Vec3 {
@@ -726,6 +733,30 @@ export function getIslandSurfacePoint(island: Island, distRatio: number, angle: 
     ) + extraY,
     z: island.position.z + Math.sin(angle) * island.radius * distRatio * island.profile.footprintZ * bulge,
   };
+}
+
+/** Deck height of a rope bridge at (x, z), or null when off the deck strip.
+ *  Linear span between the two anchored endpoints; the walkable strip extends
+ *  width/2 to each side. Shared by server locomotion, client prediction and
+ *  the renderer so bridges are genuinely solid. */
+export function getBridgeDeckY(
+  bridge: { ax: number; ay: number; az: number; bx: number; by: number; bz: number; width: number },
+  x: number,
+  z: number,
+): number | null {
+  const dx = bridge.bx - bridge.ax;
+  const dz = bridge.bz - bridge.az;
+  const len2 = dx * dx + dz * dz;
+  if (len2 < 1e-6) return null;
+  const t = ((x - bridge.ax) * dx + (z - bridge.az) * dz) / len2;
+  if (t < 0 || t > 1) return null;
+  const px = bridge.ax + dx * t;
+  const pz = bridge.az + dz * t;
+  if (Math.hypot(x - px, z - pz) > bridge.width * 0.5) return null;
+  // Same catenary sag the client planks draw — feet stand ON the boards.
+  const span = Math.sqrt(len2);
+  const sag = -Math.sin(t * Math.PI) * Math.min(0.9, span * 0.04);
+  return lerp(bridge.ay, bridge.by, t) + sag + 0.16; // plank-top standing surface
 }
 
 export function isPointInsideIslandFootprint(island: Island, x: number, z: number, margin = 0): boolean {

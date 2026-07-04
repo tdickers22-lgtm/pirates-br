@@ -1774,7 +1774,11 @@ export class Match {
           continue;
         }
         if (chest.floating) {
-          chest.position.y = 0.45 + Math.sin(this.t * 1.8 + chest.value * 0.01) * 0.06;
+          // Ride the real sea (storm included) — a fixed 0.45 clipped under
+          // every crest once base waves reached ±1m and storm swell ±3.5m.
+          const chestSea = stormSeaState(this.state.storm, chest.position.x, chest.position.z);
+          chest.position.y = gerstnerHeight(chest.position.x, chest.position.z, this.t, WAVE_PARAMS, chestSea)
+            + 0.32 + Math.sin(this.t * 1.8 + chest.value * 0.01) * 0.05;
         }
       }
     }
@@ -1855,10 +1859,15 @@ export class Match {
     const chest = found.chest;
     chest.carriedByPlayerId = null;
     chest.storedOnShipId = null;
-    chest.floating = player.position.y < 1.1 || player.state === 'swimming';
+    const dropWaveY = gerstnerHeight(player.position.x, player.position.z, this.t, WAVE_PARAMS,
+      stormSeaState(this.state.storm, player.position.x, player.position.z));
+    chest.floating = player.position.y < dropWaveY + 0.65 || player.state === 'swimming';
     chest.position = {
       x: player.position.x,
-      y: chest.floating ? 0.45 : player.position.y + 0.25,
+      y: chest.floating
+        ? gerstnerHeight(player.position.x, player.position.z, this.t, WAVE_PARAMS,
+          stormSeaState(this.state.storm, player.position.x, player.position.z)) + 0.32
+        : player.position.y + 0.25,
       z: player.position.z,
     };
     const deckShip = !chest.floating && player.onShipId ? this.getAliveShip(player.onShipId) : null;
