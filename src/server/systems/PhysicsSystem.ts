@@ -2,6 +2,8 @@ import type { Ship, Player, Projectile, Island, Vec3, HullSections, SeaRock, Sto
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, SEA_ROCKS, WORLD, FLOODING } from '../../shared/constants/index.js';
 import { toShipLocalPoint, toShipWorldPoint } from '../../shared/interactions.js';
 import {
+  getBridgeDeckY,
+  getIslandDistRatio,
   gerstnerHeight,
   getStormWaveIntensity,
   WAVE_PARAMS,
@@ -737,7 +739,19 @@ export class PhysicsSystem {
         const islandFloor = stand.floorY;
         const ceilingY = stand.ceilingY;
         const dockFloor = onDock ? onDock.position.y + 0.14 : -Infinity;
-        const groundY = Math.max(islandFloor, dockFloor);
+        // Rope-bridge deck: a real standing surface, but only when the player
+        // is at deck level (within a step) — walking through the saddle UNDER
+        // the bridge must not teleport them up onto it.
+        let bridgeFloor = -Infinity;
+        if (onIsland?.bridges) {
+          for (const bridge of onIsland.bridges) {
+            const deckY = getBridgeDeckY(bridge, player.position.x, player.position.z);
+            if (deckY !== null && player.position.y > deckY - 1.2) {
+              bridgeFloor = Math.max(bridgeFloor, deckY);
+            }
+          }
+        }
+        const groundY = Math.max(islandFloor, dockFloor, bridgeFloor);
         const standingOnDock = onDock !== null && dockFloor >= islandFloor;
 
         // ── Water entry: submerged island ground makes the player swim ──
@@ -878,11 +892,34 @@ export class PhysicsSystem {
               player.position.y = maxBreachHeight;
               player.velocity.y *= 0.12;
             }
-            // Shallow-water seabed: a wading-depth swimmer (beach walk-in, saddle)
-            // rests on the sand instead of sinking through it toward SWIM_MAX_DEPTH.
-            if (swimHere && islandFloor > -Infinity && player.position.y < islandFloor) {
-              player.position.y = islandFloor;
-              if (player.velocity.y < 0) player.velocity.y = 0;
+            // Underwater terrain: a swimmer below the local ground is inside
+            // rock. Resolve by penetration depth — shallow means a gentle
+            // walk-in slope (ride up onto the sand); deep means they swam into
+            // a submerged face or under the shell (push the step back out,
+            // then settle onto whatever seabed is legal there). The seabed
+            // covers the full underwater apron (distRatio ≤ ~1.22), not just
+            // the walk footprint, so diving under the island is impossible.
+            const seabedY = this.swimSeabedY(islands, player.position.x, player.position.z);
+            // A swim resolution may lift you onto the sand but never OUT of
+            // the sea — cap at the wave surface; if the ground is genuinely
+            // above water the walk branch takes over next tick.
+            const seabedClampCap = waveY + 0.05;
+            if (seabedY > -Infinity && player.position.y < seabedY) {
+              const penetration = seabedY - player.position.y;
+              if (penetration > 1.2) {
+                player.position.x -= player.velocity.x * dt;
+                player.position.z -= player.velocity.z * dt;
+                player.velocity.x *= -0.05;
+                player.velocity.z *= -0.05;
+                const restoredSeabedY = this.swimSeabedY(islands, player.position.x, player.position.z);
+                if (restoredSeabedY > -Infinity && player.position.y < Math.min(restoredSeabedY, seabedClampCap)) {
+                  player.position.y = Math.min(restoredSeabedY, seabedClampCap);
+                  if (player.velocity.y < 0) player.velocity.y = 0;
+                }
+              } else if (player.position.y < Math.min(seabedY, seabedClampCap)) {
+                player.position.y = Math.min(seabedY, seabedClampCap);
+                if (player.velocity.y < 0) player.velocity.y = 0;
+              }
             }
             // Flooded-cave roof clamp mirrors the on-foot case.
             if (
@@ -1336,6 +1373,20 @@ export class PhysicsSystem {
     }
 
     return null;
+  }
+
+  /** Seabed under a swimmer: the shared heightfield keeps descending past the
+   *  footprint (wet-sand walk-in to distRatio ~1.16), so the collision floor
+   *  must cover that apron too — inside-footprint-only checks let swimmers
+   *  dive straight under the island shell. Returns -Infinity in open water. */
+  private swimSeabedY(islands: Island[], x: number, z: number): number {
+    let floor = -Infinity;
+    for (const island of islands) {
+      const { distRatio } = getIslandDistRatio(island, x, z);
+      if (distRatio > 1.22) continue;
+      floor = Math.max(floor, getIslandSurfaceY(island, x, z));
+    }
+    return floor;
   }
 
   private findPlayerIsland(player: Player, islands: Island[]): Island | null {

@@ -3,7 +3,7 @@ import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, IslandProp, IslandPropType, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
 import { BIOME_PALETTES, getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
@@ -2892,6 +2892,7 @@ export class Game {
       ship.sinking = h.sinking;
       ship.sinkProgress = h.sinkProgress;
       if (h.waterLevel !== undefined) ship.waterLevel = h.waterLevel;
+      if (h.floodingRate !== undefined) ship.floodingRate = h.floodingRate;
     }
     for (const h of hot.players) {
       const player = this.playersById.get(h.id);
@@ -3375,6 +3376,7 @@ export class Game {
       terrainGeometry,
       new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98, side: THREE.DoubleSide }),
     );
+    terrain.name = 'island-terrain';
     terrain.castShadow = true;
     terrain.receiveShadow = true;
     group.add(terrain);
@@ -3417,6 +3419,7 @@ export class Game {
       skirtGeometry,
       new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, side: THREE.DoubleSide }),
     );
+    shoreSkirt.name = 'island-shore-skirt';
     shoreSkirt.castShadow = true;
     shoreSkirt.receiveShadow = true;
     group.add(shoreSkirt);
@@ -5089,7 +5092,10 @@ export class Game {
     }
 
     // ── Secondary smaller wreck on bigger islands so they feel storied ──
-    if (!lowDetail && r > 64 && island.tavern === null) {
+    // (skipped when the server registry already placed a shipwreck landmark —
+    // two wrecks on one beach reads as a bug, not a story)
+    const hasRegistryWreck = (island.props ?? []).some((prop) => prop.type === 'shipwreck');
+    if (!lowDetail && r > 64 && island.tavern === null && !hasRegistryWreck) {
       const wAngle = islandHeading + Math.PI * 1.45 + rng(islandSeed * 999) * 0.5;
       const wPos = surfacePoint(0.85 + rng(islandSeed * 1003) * 0.06, wAngle, 0);
       const wreck2Solid = isSolidDecorPoint(wPos, SURFACE_ABOVE_WATER, -0.15);
@@ -5340,30 +5346,18 @@ export class Game {
       }
     }
 
-    // ── Bridge — rope-and-plank between primary & secondary peaks. Always present for
-    // twin/archipelago since those styles are designed around split landmasses.
-    const bridgeEligible = island.profile.terrainStyle === 'twin'
-      || island.profile.terrainStyle === 'archipelago'
-      || ((island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky') && island.profile.secondaryHillScale > 0.45);
-    if (bridgeEligible) {
-      const profile = island.profile;
-      const peak = (hillAngle: number, hillOffset: number) => {
-        const px = Math.cos(hillAngle) * hillOffset * profile.footprintX;
-        const pz = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
-        const wx = px + island.position.x;
-        const wz = pz + island.position.z;
-        const wy = getIslandSurfaceY(island, wx, wz);
-        return { lx: px, lz: pz, y: wy };
-      };
-      const a = peak(profile.primaryHillAngle, profile.primaryHillOffset);
-      const b = peak(profile.secondaryHillAngle, profile.secondaryHillOffset);
+    // ── Bridges — rope-and-plank, rendered from the SERVER's replicated
+    // registry: endpoints are true terrain local-maxima found at generation,
+    // and the deck players walk on is the shared getBridgeDeckY math, so the
+    // bridge is genuinely solid and both ends sit flush on their peaks (the
+    // old client-only version guessed hill centers and connected to nothing).
+    for (const islandBridge of island.bridges ?? []) {
+      const a = { lx: islandBridge.ax - island.position.x, lz: islandBridge.az - island.position.z, y: islandBridge.ay };
+      const b = { lx: islandBridge.bx - island.position.x, lz: islandBridge.bz - island.position.z, y: islandBridge.by };
       const dx = b.lx - a.lx;
       const dz = b.lz - a.lz;
       const span = Math.hypot(dx, dz);
-      // Both peaks must actually rise above the surrounding terrain for a bridge to make sense
-      const peakReliefA = a.y - 5.15;
-      const peakReliefB = b.y - 5.15;
-      if (span > 6 && span < island.radius * 1.1 && peakReliefA > 3 && peakReliefB > 3) {
+      {
         const bridge = new THREE.Group();
         const midX = (a.lx + b.lx) * 0.5;
         const midZ = (a.lz + b.lz) * 0.5;
@@ -5579,6 +5573,36 @@ export class Game {
       detailRoot.name = 'island-detail-root';
       while (group.children.length > 0) {
         detailRoot.add(group.children[0]);
+      }
+
+      // ── Micro-decor tier ──────────────────────────────────────────────
+      // Islands used to render EVERY bespoke decor mesh (shells, rubble,
+      // stalactites, tidepools, camp clutter…) out to the full detail radius —
+      // ~370 visible meshes per island, ~3.7k scene-wide, most far too small
+      // to read past 250m. Reparent small pieces into a near-only tier: no
+      // shadow casting, hidden beyond microRadius in updateEnvironmentLod.
+      const microRoot = new THREE.Group();
+      microRoot.name = 'island-micro-root';
+      {
+        const keepNames = new Set(['island-terrain', 'island-shore-skirt']);
+        const bbox = new THREE.Box3();
+        const size = new THREE.Vector3();
+        const micro: THREE.Object3D[] = [];
+        for (const child of detailRoot.children) {
+          if (keepNames.has(child.name)) continue;
+          if (child instanceof THREE.InstancedMesh) continue; // prop batches stay
+          bbox.setFromObject(child);
+          if (bbox.isEmpty()) continue;
+          bbox.getSize(size);
+          if (Math.max(size.x, size.y, size.z) < 3.6) micro.push(child);
+        }
+        for (const child of micro) {
+          microRoot.add(child);
+          child.traverse((obj) => {
+            if (obj instanceof THREE.Mesh) obj.castShadow = false;
+          });
+        }
+        detailRoot.add(microRoot);
       }
 
       // Proxy LOD = a genuine low-res sample of the same shared heightfield
@@ -6214,6 +6238,10 @@ export class Game {
         const showDetail = edgeDist < detailRadius;
         detailRoot.visible = showDetail;
         proxyRoot.visible = !showDetail;
+        // Micro decor (shells, rubble, clutter) only reads up close — culling
+        // it past ~260m cuts hundreds of draw calls per distant island.
+        const microRoot = detailRoot.getObjectByName('island-micro-root');
+        if (microRoot) microRoot.visible = showDetail && edgeDist < (quality === 'low' ? 180 : 260);
       }
 
       for (const chest of island.chests) {
@@ -6307,8 +6335,14 @@ export class Game {
       this.mermaidAnchor = this.createMermaidAnchor(player, ship);
     }
     const phase = (this.mermaidGroup.userData.bobPhase as number) ?? 0;
-    const bob = Math.sin(now * 0.0023 + phase) * 0.18;
-    this.mermaidGroup.position.set(this.mermaidAnchor.x, 0.18 + bob, this.mermaidAnchor.z);
+    const bob = Math.sin(now * 0.0023 + phase) * 0.12;
+    // Ride the real sea — a fixed 0.18 left her hovering over troughs and
+    // submerged under storm crests.
+    const mermaidWaveY = gerstnerHeight(
+      this.mermaidAnchor.x, this.mermaidAnchor.z, this.ocean.getTime(), WAVE_PARAMS,
+      getStormWaveIntensity(this.state?.storm, this.mermaidAnchor.x, this.mermaidAnchor.z),
+    );
+    this.mermaidGroup.position.set(this.mermaidAnchor.x, mermaidWaveY + 0.14 + bob, this.mermaidAnchor.z);
     this.mermaidGroup.rotation.y = Math.atan2(
       player.position.x - this.mermaidAnchor.x,
       player.position.z - this.mermaidAnchor.z,
@@ -6387,7 +6421,10 @@ export class Game {
       const cam = this.renderer.camera.position;
       this.stormWeatherIntensity = 0.85;
       this.ocean.setStormIntensity(0.85);
-      this.ocean.setStormState(cam.x, cam.z, -240, 1);
+      // Positive radius, ring parked far away: we are ~780m outside it, so the
+      // shared sea-state formula returns 1 here. (A negative radius hits the
+      // shader's no-storm sentinel and silently disables the swell geometry.)
+      this.ocean.setStormState(cam.x + 900, cam.z, 120, 1);
     } else if (this.state?.storm) {
       const storm = this.state.storm;
       this.ocean.setStormState(
@@ -6638,6 +6675,13 @@ export class Game {
             if (caveFloor !== null && caveFloor < standY) standY = caveFloor;
           }
           resolvedSurfaceY = Math.max(resolvedSurfaceY, standY + 0.03);
+        }
+        // Rope-bridge decks are real floors (mirror the server's step gate).
+        for (const islandBridge of island.bridges ?? []) {
+          const deckY = getBridgeDeckY(islandBridge, predictedX, predictedZ);
+          if (deckY !== null && player.position.y > deckY - 1.2) {
+            resolvedSurfaceY = Math.max(resolvedSurfaceY, deckY + 0.03);
+          }
         }
         if (island.dock) {
           const dx = predictedX - island.dock.position.x;

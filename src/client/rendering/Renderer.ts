@@ -226,7 +226,7 @@ export class Renderer {
   private readonly minPixelRatio = this.quality === 'low' ? 0.44 : this.quality === 'balanced' ? 0.58 : 0.8;
   private readonly maxPixelRatio = this.quality === 'low'
     ? 0.62
-    : Math.min(window.devicePixelRatio || 1, this.quality === 'balanced' ? 1.5 : 2);
+    : Math.min(window.devicePixelRatio || 1, this.quality === 'balanced' ? 1.5 : 1.75);
   private currentPixelRatio = 1;
   private postFx: PostFx | null = null;
   private readonly shadowFocus = new THREE.Vector3();
@@ -264,7 +264,11 @@ export class Renderer {
       antialias: false,
       powerPreference: 'high-performance',
     });
-    this.applyPixelRatio(this.maxPixelRatio);
+    // Start BELOW the ceiling: on a dpr-2 Retina panel, opening at the max
+    // means 4x the fragments of 1.0 before the machine has proven any
+    // headroom — fanless Macs stuttered until the down-ratchet caught up.
+    // The recovery loop climbs toward maxPixelRatio when frames stay fast.
+    this.applyPixelRatio(Math.min(this.maxPixelRatio, 1.2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = this.quality !== 'low';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;

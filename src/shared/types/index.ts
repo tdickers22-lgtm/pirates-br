@@ -373,6 +373,17 @@ export interface Island {
   props?: IslandProp[];
   /** Flatten discs consumed by getIslandSurfaceY (docks/taverns/camps/stations). */
   stamps?: TerrainStamp[];
+  /** Walkable rope bridges between peaks (world-space endpoints ON the terrain).
+   *  Deck height is shared math (getBridgeDeckY) so client visuals, client
+   *  prediction and server locomotion all agree. */
+  bridges?: IslandBridge[];
+}
+
+export interface IslandBridge {
+  ax: number; ay: number; az: number;
+  bx: number; by: number; bz: number;
+  /** Walkable deck width in meters. */
+  width: number;
 }
 
 export interface TreasureChest {
