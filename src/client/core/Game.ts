@@ -3427,6 +3427,80 @@ export class Game {
     // Server prop registry: the palms/boulders/landmarks players collide with.
     this.buildServerProps(island, group, lowDetail);
 
+    // ── Grass: one InstancedMesh of cross-plane tufts over the grassy interior.
+    // Deterministic from the profile seed; culled with the micro tier past
+    // ~260m; zero colliders (ankle-high ground cover).
+    if (!lowDetail) {
+      const grassCount = Math.min(1400, Math.round(r * r * 0.16));
+      const bladeGeo = new THREE.PlaneGeometry(0.34, 0.42, 1, 1);
+      bladeGeo.translate(0, 0.21, 0);
+      const crossGeo = (() => {
+        const a = bladeGeo.clone();
+        const b = bladeGeo.clone();
+        b.rotateY(Math.PI * 0.5);
+        const merged = new THREE.BufferGeometry();
+        const pa = a.getAttribute('position');
+        const pb = b.getAttribute('position');
+        const uva = a.getAttribute('uv');
+        const uvb = b.getAttribute('uv');
+        const positions = new Float32Array((pa.count + pb.count) * 3);
+        positions.set(pa.array as Float32Array, 0);
+        positions.set(pb.array as Float32Array, pa.count * 3);
+        const uvs = new Float32Array((uva.count + uvb.count) * 2);
+        uvs.set(uva.array as Float32Array, 0);
+        uvs.set(uvb.array as Float32Array, uva.count * 2);
+        const idxA = Array.from(a.getIndex()!.array);
+        const idxB = Array.from(b.getIndex()!.array).map((i) => i + pa.count);
+        merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        merged.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+        merged.setIndex([...idxA, ...idxB]);
+        merged.computeVertexNormals();
+        return merged;
+      })();
+      const grassMat = new THREE.MeshStandardMaterial({
+        color: paletteGrass.clone().lerp(paletteFoliage, 0.35),
+        roughness: 0.94,
+        side: THREE.DoubleSide,
+        alphaTest: 0,
+      });
+      const grass = new THREE.InstancedMesh(crossGeo, grassMat, grassCount);
+      const gM = new THREE.Matrix4();
+      const gP = new THREE.Vector3();
+      const gQ = new THREE.Quaternion();
+      const gE = new THREE.Euler();
+      const gS = new THREE.Vector3();
+      const gColor = new THREE.Color();
+      const seaBaseForGrass = 5.15 + r * 0.0085;
+      let placed = 0;
+      for (let i = 0; i < grassCount * 3 && placed < grassCount; i++) {
+        const angle = rng(i * 7 + 3) * Math.PI * 2;
+        const dRatio = 0.06 + rng(i * 11 + 5) * 0.78;
+        const sample = surfacePoint(dRatio, angle, 0);
+        // grassy band: above the beach, below the rocky heights, not too steep
+        if (sample.y < seaBaseForGrass - 1.6) continue;
+        if (sample.y > seaBaseForGrass + peakEst * 0.72) continue;
+        const ahead = surfacePoint(dRatio + 0.015, angle, 0);
+        if (Math.abs(ahead.y - sample.y) > 0.9) continue;
+        gP.set(sample.x, sample.y - 0.02, sample.z);
+        gE.set((rng(i * 13) - 0.5) * 0.3, rng(i * 17) * Math.PI, (rng(i * 19) - 0.5) * 0.3);
+        gQ.setFromEuler(gE);
+        const sc = 0.7 + rng(i * 23) * 0.9;
+        gS.set(sc, sc * (0.8 + rng(i * 29) * 0.5), sc);
+        gM.compose(gP, gQ, gS);
+        grass.setMatrixAt(placed, gM);
+        gColor.copy(paletteGrass).lerp(paletteFoliage, rng(i * 31) * 0.7).multiplyScalar(0.82 + rng(i * 37) * 0.4);
+        grass.setColorAt(placed, gColor);
+        placed += 1;
+      }
+      grass.count = placed;
+      grass.instanceMatrix.needsUpdate = true;
+      if (grass.instanceColor) grass.instanceColor.needsUpdate = true;
+      grass.castShadow = false;
+      grass.receiveShadow = true;
+      grass.name = 'island-grass';
+      group.add(grass);
+    }
+
     if (island.dock) {
       const dockW = Math.max(1, Math.min(120, Number(island.dock.width) || 8));
       const dockL = Math.max(1, Math.min(200, Number(island.dock.length) || 14));
@@ -6244,6 +6318,8 @@ export class Game {
         // it past ~260m cuts hundreds of draw calls per distant island.
         const microRoot = detailRoot.getObjectByName('island-micro-root');
         if (microRoot) microRoot.visible = showDetail && edgeDist < (quality === 'low' ? 180 : 260);
+        const grassMesh = detailRoot.getObjectByName('island-grass');
+        if (grassMesh) grassMesh.visible = showDetail && edgeDist < 300;
       }
 
       for (const chest of island.chests) {
@@ -6554,7 +6630,7 @@ export class Game {
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
       this.updateHud();
-      this.hudTimer = effectScale < 0.55 ? 0.07 : 0.05;
+      this.hudTimer = effectScale < 0.55 ? 0.09 : 0.06;
     }
     if (this.minimapTimer <= 0) {
       this.drawMaps();
@@ -10063,10 +10139,12 @@ export class Game {
         );
         break;
       case 'blunderbuss':
+        // Tucked low-right and pushed back: the old pose parked a quarter of
+        // the screen behind the stock.
         this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.28, 0.06, aimBlend) + sway * 0.36 + travelSwing * 0.28 + reloadArc * 0.08,
-          THREE.MathUtils.lerp(-0.24, -0.17, aimBlend) + bob - recoilLift * 0.8 - reloadArc * 0.06,
-          THREE.MathUtils.lerp(-0.74, -0.52, aimBlend) - recoilBack * 0.72 + reloadArc * 0.1,
+          THREE.MathUtils.lerp(0.42, 0.07, aimBlend) + sway * 0.36 + travelSwing * 0.28 + reloadArc * 0.08,
+          THREE.MathUtils.lerp(-0.4, -0.2, aimBlend) + bob - recoilLift * 0.8 - reloadArc * 0.06,
+          THREE.MathUtils.lerp(-0.98, -0.6, aimBlend) - recoilBack * 0.72 + reloadArc * 0.1,
         );
         this.localViewWeaponRoot.rotation.set(
           -0.24 - aimBlend * 0.07 - recoilLift + reloadArc * 0.28,
@@ -10154,7 +10232,8 @@ export class Game {
         const liveHalf = THREE.MathUtils.degToRad(Math.max(adsFov * 0.85, this.renderer.camera.fov) * 0.5);
         this.localViewWeaponRoot.scale.setScalar(Math.tan(liveHalf) / Math.tan(hipHalf));
       } else {
-        this.localViewWeaponRoot.scale.setScalar(1);
+        // Hip viewmodels at 82%: guns should frame the fight, not block it.
+        this.localViewWeaponRoot.scale.setScalar(0.82);
       }
     } else {
       this.localViewWeaponRoot.scale.setScalar(1);

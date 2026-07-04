@@ -4801,13 +4801,10 @@ export class Match {
   }
 
   private parkShipAtDock(ship: Ship, dock: IslandDock) {
-    const stats = SHIP_STATS[ship.type];
-    const rightX = Math.cos(dock.rotation);
-    const rightZ = -Math.sin(dock.rotation);
-    const lateralOffset = dock.moorSide * (dock.width * 0.5 + stats.width * 0.62 + 0.8);
-
-    ship.position.x = dock.position.x + rightX * lateralOffset;
-    ship.position.z = dock.position.z + rightZ * lateralOffset;
+    // Park at the depth-verified berth point (dock.berthPosition clears both
+    // hull ends of a galleon) instead of re-deriving a too-shallow spot.
+    ship.position.x = dock.berthPosition.x;
+    ship.position.z = dock.berthPosition.z;
     ship.rotation = dock.berthRotation;
     ship.velocity = { x: 0, y: 0, z: 0 };
     ship.angularVelocity = 0;

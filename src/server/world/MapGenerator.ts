@@ -523,11 +523,27 @@ export class MapGenerator {
         y: deckY + 0.26,
         z: shore.z + forward.z * Math.min(length * 0.22, 5.5),
       },
-      berthPosition: {
-        x: center.x + right.x * moorSide * (width * 0.65 + 3.4),
-        y: 0.12,
-        z: center.z + right.z * moorSide * (width * 0.65 + 3.4),
-      },
+      // Berth: beside the dock, pushed seaward until BOTH hull ends of the
+      // biggest ship class float clear of the beach (281/286 berths used to
+      // bury a hull end in the sand — parked ships looked welded to the island).
+      berthPosition: (() => {
+        const galleonHalf = SHIP_STATS.galleon.length * 0.5 + 5;
+        let along = length * 0.42;
+        for (let tries = 0; tries < 40; tries++) {
+          const cx = shore.x + forward.x * along + right.x * moorSide * (width * 0.65 + 4.6);
+          const cz = shore.z + forward.z * along + right.z * moorSide * (width * 0.65 + 4.6);
+          const bowGround = getIslandSurfaceY(island, cx + forward.x * galleonHalf, cz + forward.z * galleonHalf);
+          const sternGround = getIslandSurfaceY(island, cx - forward.x * galleonHalf, cz - forward.z * galleonHalf);
+          const midGround = getIslandSurfaceY(island, cx, cz);
+          if (bowGround < -1.2 && sternGround < -1.2 && midGround < -1.2) {
+            return { x: cx, y: 0.12, z: cz };
+          }
+          along += 2.2;
+        }
+        const cx = shore.x + forward.x * (along + galleonHalf) + right.x * moorSide * (width * 0.65 + 4.6);
+        const cz = shore.z + forward.z * (along + galleonHalf) + right.z * moorSide * (width * 0.65 + 4.6);
+        return { x: cx, y: 0.12, z: cz };
+      })(),
       berthRotation: rotation,
     };
   }
