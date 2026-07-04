@@ -3,9 +3,10 @@ import { v4 as uuid } from 'uuid';
 import type {
   GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { SERVER_TICK_MS, SNAPSHOT_RATE, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_UPGRADES, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
+import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_UPGRADES, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
-import { PhysicsSystem, applyShipRudderSteering } from '../systems/PhysicsSystem.js';
+import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
+import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { HitscanTrace } from '../systems/WeaponSystem.js';
 import { StormSystem } from '../systems/StormSystem.js';
@@ -82,6 +83,11 @@ interface ConnectedClient {
   consumedSeq: Record<OneShotAction, number>;
   /** Sim time each rate-limited one-shot was last accepted — seq dedupe alone is spoofable. */
   lastOneShotAt: Partial<Record<OneShotAction, number>>;
+  /** Latest full snapshot skipped while the socket was congested — flushed
+   *  (newest only, older ones dropped) once the buffer drains. */
+  pendingFullSnapshot: string | null;
+  /** Latest hot snapshot skipped while congested (superseded by any newer send). */
+  pendingHotSnapshot: string | null;
 }
 
 export interface MatchHumanResult {
@@ -118,8 +124,12 @@ const SKELETON_WAVE_LINGER_SECONDS = 85;
 const SKELETON_DEFEAT_DESPAWN_SECONDS = 2.25;
 const SKELETON_ISLAND_ACTIVATION_MARGIN = 70;
 const SKELETON_PLAYER_WAKE_RADIUS = 38;
-const FULL_WORLD_SNAPSHOT_TICKS = SNAPSHOT_RATE * 6; // 5 Hz at the default 60 Hz tick / 30 Hz snapshot cadence
+/** Static world (islands + seaRocks) rides every 4th full snapshot (~2.6 Hz) —
+ *  it is immutable apart from chest/barrel state, which also has explicit events. */
+const FULL_WORLD_SNAPSHOT_TICKS = FULL_SNAPSHOT_TICKS * 4;
 const MAX_VOLATILE_BUFFERED_BYTES = 512 * 1024;
+/** End-screen clients keep receiving a slow full snapshot so spectate views stay live. */
+const ENDED_SNAPSHOT_TICKS = SNAPSHOT_RATE * 15;
 const CUTLASS_CHARGE_TIME = 0.72;
 const CUTLASS_CHARGE_MIN_TAP = 0.02;
 const CUTLASS_LUNGE_COOLDOWN = 1.05;
@@ -138,8 +148,8 @@ const ONE_SHOT_MIN_INTERVAL: Partial<Record<OneShotAction, number>> = {
 };
 const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<InteractIntent>([
   'barrel', 'chest', 'board', 'dock', 'mermaid', 'keg_diffuse', 'upgrade',
-  'gold_hoarder', 'stow_chest', 'helm', 'sails', 'sail_hoist', 'sail_angle',
-  'crow', 'anchor', 'repair', 'bail', 'cannon',
+  'gold_hoarder', 'stow_chest', 'helm', 'sails',
+  'crow', 'anchor', 'repair', 'bail', 'revive', 'cannon',
 ]);
 
 export class Match {
@@ -188,6 +198,16 @@ export class Match {
   private lastJumpHeldByPlayer = new Map<string, boolean>();
   /** Per-bot cooldown (sim seconds) before the next plank-repair while flooding. */
   private botRepairCooldownAt = new Map<string, number>();
+  /** Per-bot cooldown (sim seconds) between finisher swings on downed enemies. */
+  private botFinishCooldownAt = new Map<string, number>();
+  /** Who downed each DBNO player — bleed-out/finish credit survives env damage
+   *  (drowning/fire) that clears lastDamagedById. */
+  private downedByPlayer = new Map<string, { attackerId: string | null; at: number; headshot: boolean }>();
+  /** downedPlayerId → reviverId contributions gathered this tick (humans via
+   *  held interact intent, bots via updateBotDbno). */
+  private reviveActionsThisTick = new Map<string, string>();
+  /** Ship waterLevel at tick start — floodingRate is published NET of bailing. */
+  private waterLevelAtTickStart = new Map<string, number>();
 
   constructor(opts: MatchOptions) {
     this.id = opts.matchId;
@@ -330,7 +350,6 @@ export class Match {
       atCannon: false,
       atHelm: false,
       atSails: false,
-      sailControlMode: null,
       atCrowNest: false,
       blocking: false,
       bailing: false,
@@ -357,7 +376,10 @@ export class Match {
       pocketMeat: 0,
       pocketUseCooldown: 0,
       hasShovel: true,
+      hasSpyglass: true,
       nearBarrelId: null,
+      downedUntil: 0,
+      reviveProgress: 0,
     };
   }
 
@@ -495,6 +517,8 @@ export class Match {
         barrelTakeAll: -1,
       },
       lastOneShotAt: {},
+      pendingFullSnapshot: null,
+      pendingHotSnapshot: null,
     };
     this.clients.set(playerId, client);
 
@@ -664,7 +688,6 @@ export class Match {
     player.atCannon = false;
     player.atHelm = false;
     player.atSails = false;
-    player.sailControlMode = null;
     player.atCrowNest = false;
     player.blocking = false;
     player.bailing = false;
@@ -705,7 +728,6 @@ export class Match {
     if (this.isStationOccupied(ship, 'sails', player.id)) return false;
     this.clearStationFlags(player);
     player.atSails = true;
-    player.sailControlMode = null;
     this.snapPlayerToSails(player, ship);
     return true;
   }
@@ -736,8 +758,25 @@ export class Match {
     this.tickCount++;
     this.state.tick++;
 
+    if (this.state.phase === 'ended') {
+      // Keep end-screen clients live at a slow cadence so spectate/placement
+      // views don't freeze at the last pre-end snapshot.
+      if (this.tickCount % ENDED_SNAPSHOT_TICKS === 0) {
+        const snap = buildWireSnapshot(this.buildSnapshot(false), false);
+        this.broadcastVolatile({ type: 'state_snapshot', ts: Date.now(), payload: snap }, 'full');
+      }
+      return;
+    }
     if (this.state.phase !== 'playing') return;
     this.state.serverTime = this.t;
+
+    // Pre-tick water levels — floodingRate is published NET of bailing at the
+    // end of the tick (bailers seeing a red "rising" arrow while winning was
+    // inverted feedback).
+    this.waterLevelAtTickStart.clear();
+    for (const ship of this.state.ships) {
+      if (ship.alive && !ship.sinking) this.waterLevelAtTickStart.set(ship.id, ship.waterLevel ?? 0);
+    }
 
     this.updateRespawns(dt);
 
@@ -780,6 +819,8 @@ export class Match {
     this.updateIslandSkeletons(dt);
     this.processBotLooting();
     this.updateBotFlooding(dt);
+    this.updateBotDbno(dt);
+    this.updateDownedAndRevives(dt);
 
     // Update weapon reloads
     this.weapons.update(dt, this.state.players);
@@ -789,7 +830,8 @@ export class Match {
     const newProjs = this.weapons.flushProjectiles();
     this.state.projectiles.push(...newProjs);
 
-    // Physics
+    // Physics — storm state rides along so every wave sample (buoyancy,
+    // attitude, flooding waterlines, swimmers, projectiles) sees storm seas.
     this.syncTreasureChests();
     this.physics.update(
       dt, this.t,
@@ -798,15 +840,28 @@ export class Match {
       this.state.projectiles,
       this.state.islands,
       this.state.seaRocks,
+      this.state.storm,
     );
     this.relayPendingCombatEvents();
     this.syncTreasureChests();
 
+    // Publish the net bilge trend (ingress − bailing) for the client gauge.
+    for (const ship of this.state.ships) {
+      if (!ship.alive || ship.sinking) continue;
+      const before = this.waterLevelAtTickStart.get(ship.id);
+      if (before === undefined) continue;
+      const net = ((ship.waterLevel ?? 0) - before) / dt;
+      ship.floodingRate = Math.abs(net) < 1e-6 ? 0 : net;
+    }
+
     this.updateSharks(dt);
     this.updateWildlife(dt);
 
-    // Storm
-    this.storm.update(dt, this.state.storm, this.state.ships, this.state.players);
+    // Storm — hull damage routes through damageHullSection so the storm
+    // punctures hulls (holes + flooding) instead of silently melting them.
+    this.storm.update(dt, this.state.storm, this.state.ships, this.state.players, {
+      damageHullSection: (ship, section, ratio) => this.physics.damageHullSection(ship, section, ratio),
+    });
     this.syncTreasureChests();
     this.updateKegs(dt);
     this.updateFieldRepairs(dt);
@@ -821,12 +876,10 @@ export class Match {
       }
     }
 
-    // Check player deaths
-    for (const player of this.state.players) {
-      if (player.state !== 'eliminated' && player.state !== 'respawning' && player.health <= 0) {
-        this.handlePlayerDeath(player);
-      }
-    }
+    // Check player deaths — hp 0 with a living crewmate downs the pirate
+    // (down-but-not-out) instead of killing outright; damage against a downed
+    // pirate finishes them.
+    this.resolveHealthDeaths();
 
     // Check ship sunk
     for (const ship of this.state.ships) {
@@ -844,11 +897,17 @@ export class Match {
     // Check win condition
     this.checkWinCondition();
 
-    // Send snapshot/delta
+    // Send snapshots: quantized full state at ~10.4 Hz, light 'state_hot'
+    // transform updates on the snapshot ticks in between (31.25 Hz total).
     if (this.tickCount % SNAPSHOT_RATE === 0) {
-      const includeStaticWorld = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0;
-      const snap = this.buildSnapshot(includeStaticWorld);
-      this.broadcast({ type: 'state_snapshot', ts: Date.now(), payload: snap });
+      if (this.tickCount % FULL_SNAPSHOT_TICKS === 0) {
+        const includeStaticWorld = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0;
+        const snap = buildWireSnapshot(this.buildSnapshot(includeStaticWorld), includeStaticWorld);
+        this.broadcastVolatile({ type: 'state_snapshot', ts: Date.now(), payload: snap }, 'full');
+      } else {
+        const hot = buildHotSnapshot(this.state, this.t);
+        this.broadcastVolatile({ type: 'state_hot', ts: Date.now(), payload: hot }, 'hot');
+      }
     }
   }
 
@@ -938,6 +997,10 @@ export class Match {
   private applyInput(client: ConnectedClient, input: PlayerInput, dt: number) {
     const player = this.getPlayer(client.playerId);
     if (!player || player.state === 'eliminated' || player.state === 'respawning') return;
+    if (player.state === 'downed') {
+      this.applyDownedInput(player, input, dt);
+      return;
+    }
 
     const ship = this.getAliveShip(player.onShipId);
     if (!ship) {
@@ -977,6 +1040,17 @@ export class Match {
     }
 
     this.updateBlockingState(player, input);
+
+    // Revive a downed crewmate: hold interact (~4 s) next to the body with the
+    // revive action selected. Contributions are resolved in updateDownedAndRevives.
+    if (
+      input.interactHeld
+      && input.interactIntent === 'revive'
+      && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
+    ) {
+      const target = this.findReviveTarget(player);
+      if (target) this.reviveActionsThisTick.set(target.id, player.id);
+    }
 
     if (ship && player.atCannon && jumpEdge && this.consumeOneShot(client, 'jump', input.seq)) {
       this.launchPlayerFromCannon(player, ship, cannonAim ?? this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch));
@@ -1036,7 +1110,7 @@ export class Match {
     if (input.interact && this.consumeOneShot(client, 'interact', input.seq)) {
       if (player.atCannon) { player.atCannon = false; return; }
       if (player.atHelm)   { player.atHelm   = false; return; }
-      if (player.atSails)  { player.atSails = false; player.sailControlMode = null; return; }
+      if (player.atSails)  { player.atSails = false; return; }
       if (player.atCrowNest) {
         player.atCrowNest = false;
         if (ship) this.snapPlayerToCrowNestLadderBase(player, ship);
@@ -2139,36 +2213,66 @@ export class Match {
   }
 
   /**
-   * Minimal bot damage-control (Match-side so BotSystem stays untouched): a bot
-   * crewing a flooding ship plugs the worst hole with a plank (stops ingress),
-   * then bails standing water once it climbs past BOT_BAIL_THRESHOLD.
+   * Bot damage-control (Match-side so BotSystem stays untouched), now under
+   * the SAME constraints as players: no bailing/repairing while manning a
+   * station, plank repairs only while standing at the holed section's rail
+   * (bots walk there first), and at most two bailers per hull.
    */
   private updateBotFlooding(dt: number) {
+    const bailersByShip = new Map<string, number>();
     for (const player of this.state.players) {
-      if (!player.isBot || player.state === 'eliminated' || player.state === 'respawning') continue;
+      if (!player.isBot || player.state === 'eliminated' || player.state === 'respawning' || player.state === 'downed') continue;
       const ship = this.getAliveShip(player.shipId);
       if (!ship || player.onShipId !== ship.id) {
+        if (player.bailing) player.bailing = false;
+        continue;
+      }
+      // Station crew keep fighting/steering — they can't bail or patch, same as humans.
+      if (player.atCannon || player.atHelm || player.atSails || player.atCrowNest) {
         if (player.bailing) player.bailing = false;
         continue;
       }
       const water = ship.waterLevel ?? 0;
       const holedSection = this.getWeakestHoledSection(ship);
 
-      // Priority 1: plug the hole so ingress stops (throttled, consumes planks).
-      if (holedSection && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t) {
-        if (this.consumeRepairPlank(player, ship)) {
-          this.physics.repairHullSection(ship, holedSection, SHIP.REPAIR_HP);
-          this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL);
+      // Priority 1: get to the holed section's rail and plug it (throttled,
+      // consumes planks — same proximity rule getRepairableHullSection applies
+      // to humans).
+      if (holedSection && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t && this.getRepairPlankCount(player, ship) > 0) {
+        if (this.getRepairableHullSection(player, ship) === holedSection) {
+          if (this.consumeRepairPlank(player, ship)) {
+            this.physics.repairHullSection(ship, holedSection, SHIP.REPAIR_HP);
+            this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL);
+          }
+        } else {
+          const rail = this.getSectionRailLocal(ship, holedSection);
+          const world = this.toShipWorld(rail.x, rail.z, ship);
+          this.stepBotToward(player, { x: world.x, y: player.position.y, z: world.z }, dt);
+          if (player.bailing) player.bailing = false;
+          continue;
         }
       }
 
-      // Priority 2: bail down deep water.
-      if (water > FLOODING.BOT_BAIL_THRESHOLD) {
+      // Priority 2: bail down deep water (bucket line caps at two per hull).
+      const activeBailers = bailersByShip.get(ship.id) ?? 0;
+      if (water > FLOODING.BOT_BAIL_THRESHOLD && activeBailers < 2) {
         ship.waterLevel = Math.max(0, water - FLOODING.BAIL_RATE * dt);
         player.bailing = true;
+        bailersByShip.set(ship.id, activeBailers + 1);
       } else if (player.bailing) {
         player.bailing = false;
       }
+    }
+  }
+
+  /** Ship-local standing point at a hull section's repair rail. */
+  private getSectionRailLocal(ship: Ship, section: keyof Ship['hull']): { x: number; z: number } {
+    const stats = SHIP_STATS[ship.type];
+    switch (section) {
+      case 'bow': return { x: 0, z: stats.length * 0.38 };
+      case 'stern': return { x: 0, z: -stats.length * 0.38 };
+      case 'starboard': return { x: stats.width * 0.42, z: 0 };
+      case 'port': return { x: -stats.width * 0.42, z: 0 };
     }
   }
 
@@ -2833,18 +2937,19 @@ export class Match {
    *  so splash effects land on the visible water, not the flat y=0 plane. */
   private getWaterImpactDistance(origin: Vec3, direction: Vec3, maxDistance: number) {
     // Above any possible crest a non-descending ray can never land.
-    const crestBound = 4.4;
+    // (Bound covers full storm seas: base ±~2.6m + storm swell ±~2.6m.)
+    const crestBound = 6.4;
     if (direction.y >= -0.0001 && origin.y > crestBound) return null;
-    if (origin.y <= gerstnerHeight(origin.x, origin.z, this.t, WAVE_PARAMS)) return null;
+    const originSea = stormSeaState(this.state.storm, origin.x, origin.z);
+    if (origin.y <= gerstnerHeight(origin.x, origin.z, this.t, WAVE_PARAMS, originSea)) return null;
 
     const range = Math.min(maxDistance, 600); // splash is cosmetic — cap the march
     const step = 3;
-    const waveYAt = (dist: number) => gerstnerHeight(
-      origin.x + direction.x * dist,
-      origin.z + direction.z * dist,
-      this.t,
-      WAVE_PARAMS,
-    );
+    const waveYAt = (dist: number) => {
+      const x = origin.x + direction.x * dist;
+      const z = origin.z + direction.z * dist;
+      return gerstnerHeight(x, z, this.t, WAVE_PARAMS, stormSeaState(this.state.storm, x, z));
+    };
     let prev = 0;
     for (let d = step; ; d += step) {
       const dist = Math.min(d, range);
@@ -3095,16 +3200,15 @@ export class Match {
         if (!this.isNearCrowNestLadder(player, ship)) return false;
         return this.enterCrowNest(player, ship);
       }
-      case 'sails':
-      case 'sail_hoist': {
+      case 'sails': {
         if (!ship || player.onShipId !== ship.id) return false;
         if (!this.isNearSailStation(player, ship)) return false;
         return this.enterSails(player, ship);
       }
-      case 'sail_angle': {
-        if (!ship || player.onShipId !== ship.id) return false;
-        if (!this.isNearSailStation(player, ship)) return false;
-        return this.enterSails(player, ship);
+      case 'revive': {
+        // The press just confirms intent; the continuous revive runs off the
+        // held-interact block in applyInput. Consume so [X] doesn't fall through.
+        return this.findReviveTarget(player) !== null;
       }
       case 'helm': {
         if (!ship || player.onShipId !== ship.id) return false;
@@ -3301,7 +3405,9 @@ export class Match {
         continue;
       }
       player.onShipId = null;
-      player.state = 'swimming';
+      // Downed crew splash out with everyone else but STAY downed (bleeding
+      // out in the water) — only Match's DBNO pass may change that state.
+      if (player.state !== 'downed') player.state = 'swimming';
       this.dropCarriedChest(player);
       this.clearStationFlags(player);
       player.nearShipId = null;
@@ -3454,11 +3560,12 @@ export class Match {
     }
   }
 
-  /** Home ship must be afloat and inside the storm safe circle for respawn / mid-respawn validity. */
+  /** Home ship afloat and inside the VISIBLE storm ring (tiny 5m margin, not
+   *  the old hidden 35m band) — respawn timers hold while this is false. */
   private isShipInStormSafeZone(ship: Ship): boolean {
     if (!ship.alive || ship.sinking) return false;
     const d = dist2D(ship.position.x, ship.position.z, this.state.storm.centerX, this.state.storm.centerZ);
-    return d <= this.state.storm.safeRadius - 35;
+    return d <= this.state.storm.safeRadius - 5;
   }
 
   private applyEliminatedPlayerFields(player: Player) {
@@ -3480,6 +3587,9 @@ export class Match {
     player.lastDamageWasHeadshot = false;
     player.blocking = false;
     player.cutlassCharge = 0;
+    player.downedUntil = 0;
+    player.reviveProgress = 0;
+    this.downedByPlayer.delete(player.id);
   }
 
   private recordElimination(p: Player) {
@@ -3495,32 +3605,273 @@ export class Match {
     }
   }
 
-  /** Eliminate other crew on the same ship, then sink it (caller must already have marked one player eliminated). */
-  private eliminateRemainingCrewAndSinkShip(ship: Ship, alreadyEliminatedPlayerId: string) {
-    for (const p of this.state.players) {
-      if (p.shipId !== ship.id) continue;
-      if (p.id === alreadyEliminatedPlayerId) continue;
-      if (p.state === 'eliminated') continue;
-      p.state = 'eliminated';
-      this.recordElimination(p);
-      this.applyEliminatedPlayerFields(p);
-      if (p.isBot) {
-        this.bots.removeBot(p.id);
+  // ── Down-but-not-out (DBNO) ─────────────────────────────────────────────
+
+  /** The per-tick death gate: hp ≤ 0 downs the pirate when a living crewmate
+   *  exists, finishes them if already downed, else it is a plain death. */
+  private resolveHealthDeaths() {
+    for (const player of this.state.players) {
+      if (player.state === 'eliminated' || player.state === 'respawning') continue;
+      if (player.health > 0) continue;
+      if (player.state === 'downed') {
+        this.finishDownedPlayer(player);
+      } else if (this.hasLivingCrewmate(player)) {
+        this.enterDowned(player);
       } else {
-        const client = this.clients.get(p.id);
-        if (client) {
-          this.send(client.ws, {
-            type: 'game_over',
+        this.handlePlayerDeath(player);
+      }
+    }
+  }
+
+  /** Crewmates = players sharing the same home ship (player.shipId). Anyone
+   *  not eliminated counts — a downed or respawning mate can still come back
+   *  and revive you, so the squad isn't wiped yet. */
+  private hasLivingCrewmate(player: Player): boolean {
+    if (!player.shipId) return false;
+    return this.state.players.some((mate) =>
+      mate.id !== player.id
+      && mate.shipId === player.shipId
+      && mate.state !== 'eliminated',
+    );
+  }
+
+  /** hp hit 0 with crewmates alive → crawl state instead of death. */
+  private enterDowned(player: Player) {
+    // Remember who put them down so bleed-out/finish still credits the
+    // attacker even if environmental damage (drowning, fire) clears
+    // lastDamagedById in the meantime.
+    this.downedByPlayer.set(player.id, {
+      attackerId: player.lastDamagedById !== player.id ? player.lastDamagedById : null,
+      at: player.lastDamagedAt ?? this.t,
+      headshot: player.lastDamageWasHeadshot,
+    });
+    const downerName = this.getPlayer(player.lastDamagedById)?.name ?? null;
+    player.state = 'downed';
+    player.health = DBNO.DOWNED_HEALTH;
+    player.downedUntil = DBNO.BLEEDOUT_SECONDS;
+    player.reviveProgress = 0;
+    this.dropCarriedChest(player);
+    this.clearStationFlags(player);
+    player.reloading = false;
+    player.reloadTimer = 0;
+    player.cannonBallistic = false;
+    player.cannonFlightTimer = 0;
+    this.cutlassChargeByPlayer.delete(player.id);
+    this.cutlassFireHeldByPlayer.delete(player.id);
+    this.broadcast({
+      type: 'player_downed',
+      ts: Date.now(),
+      payload: {
+        playerId: player.id,
+        playerName: player.name,
+        attackerId: player.lastDamagedById,
+        attackerName: downerName,
+        bleedoutSeconds: DBNO.BLEEDOUT_SECONDS,
+      },
+    });
+  }
+
+  /** Bleed-out expired or a finisher drove downed vitality to 0 — real death. */
+  private finishDownedPlayer(player: Player) {
+    const downedBy = this.downedByPlayer.get(player.id);
+    // Environmental damage clears lastDamagedById; fall back to whoever downed
+    // them so bleed-out and finish always credit the killer.
+    if (downedBy?.attackerId && !player.lastDamagedById) {
+      player.lastDamagedById = downedBy.attackerId;
+      player.lastDamagedAt = downedBy.at;
+      player.lastDamageWasHeadshot = downedBy.headshot;
+    }
+    this.downedByPlayer.delete(player.id);
+    player.downedUntil = 0;
+    player.reviveProgress = 0;
+    player.health = 0;
+    this.handlePlayerDeath(player, /*wasDowned*/ true);
+  }
+
+  /** Nearest downed crewmate within revive range of the reviver, or null. */
+  private findReviveTarget(reviver: Player): Player | null {
+    if (!reviver.shipId || reviver.state === 'downed') return null;
+    let best: Player | null = null;
+    let bestDistance: number = DBNO.REVIVE_RANGE;
+    for (const mate of this.state.players) {
+      if (mate.id === reviver.id || mate.state !== 'downed') continue;
+      if (mate.shipId !== reviver.shipId) continue;
+      const dx = mate.position.x - reviver.position.x;
+      const dy = mate.position.y - reviver.position.y;
+      const dz = mate.position.z - reviver.position.z;
+      const distance = Math.sqrt(dx * dx + Math.min(Math.abs(dy), 1.6) ** 2 + dz * dz);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = mate;
+      }
+    }
+    return best;
+  }
+
+  /** Downed movement: crawl at 30% speed, look around, nothing else. */
+  private applyDownedInput(player: Player, input: PlayerInput, dt: number) {
+    player.rotation.x = input.yaw;
+    player.rotation.y = input.pitch;
+    const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    const moveZ = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
+    if (moveX !== 0 || moveZ !== 0) {
+      const len = Math.hypot(moveX, moveZ) || 1;
+      const speed = PLAYER.MOVE_SPEED * DBNO.CRAWL_SPEED_SCALE;
+      const cosY = Math.cos(input.yaw);
+      const sinY = Math.sin(input.yaw);
+      player.velocity.x = (sinY * (moveZ / len) - cosY * (moveX / len)) * speed;
+      player.velocity.z = (cosY * (moveZ / len) + sinY * (moveX / len)) * speed;
+      player.position.x += player.velocity.x * dt;
+      player.position.z += player.velocity.z * dt;
+    } else {
+      player.velocity.x = 0;
+      player.velocity.z = 0;
+    }
+  }
+
+  /** Per-tick DBNO bookkeeping: revive progress (with decay) and bleed-out. */
+  private updateDownedAndRevives(dt: number) {
+    for (const player of this.state.players) {
+      if (player.state !== 'downed') {
+        if (player.reviveProgress !== 0) player.reviveProgress = 0;
+        if (player.downedUntil !== 0) player.downedUntil = 0;
+        continue;
+      }
+
+      const reviverId = this.reviveActionsThisTick.get(player.id) ?? null;
+      if (reviverId) {
+        const previous = player.reviveProgress;
+        player.reviveProgress = Math.min(1, player.reviveProgress + dt / DBNO.REVIVE_SECONDS);
+        if (previous <= 0 && player.reviveProgress > 0) {
+          this.broadcast({
+            type: 'revive_start',
             ts: Date.now(),
-            payload: { winnerId: null, died: true, kills: p.kills, gold: p.gold },
+            payload: { playerId: player.id, reviverId },
           });
+        }
+        if (player.reviveProgress >= 1) {
+          this.completeRevive(player, reviverId);
+          continue;
+        }
+      } else if (player.reviveProgress > 0) {
+        player.reviveProgress = Math.max(0, player.reviveProgress - DBNO.PROGRESS_DECAY_PER_SEC * dt);
+      }
+
+      // Bleed out — twice as fast outside the storm safe ring (the storm DoT
+      // itself skips downed players so this is their only clock out there).
+      const outsideStorm = this.storm.isOutside(player.position.x, player.position.z, this.state.storm);
+      player.downedUntil -= dt * (outsideStorm ? DBNO.STORM_BLEEDOUT_MULT : 1);
+      if (player.downedUntil <= 0) {
+        this.finishDownedPlayer(player);
+      }
+    }
+    this.reviveActionsThisTick.clear();
+  }
+
+  private completeRevive(player: Player, reviverId: string | null) {
+    this.downedByPlayer.delete(player.id);
+    player.state = 'alive'; // physics flips to swimming next tick if they're in water
+    player.health = Math.round(PLAYER.MAX_HEALTH * DBNO.REVIVE_HEALTH_RATIO);
+    player.downedUntil = 0;
+    player.reviveProgress = 0;
+    player.respawnProtectionTimer = Math.max(player.respawnProtectionTimer, 1.0);
+    player.lastDamagedById = null;
+    player.lastDamagedAt = null;
+    player.lastDamageWasHeadshot = false;
+    this.broadcast({
+      type: 'revive_complete',
+      ts: Date.now(),
+      payload: {
+        playerId: player.id,
+        playerName: player.name,
+        reviverId,
+        reviverName: this.getPlayer(reviverId)?.name ?? null,
+      },
+    });
+  }
+
+  /**
+   * Bot DBNO behavior (Match-side, mirroring updateBotFlooding so BotSystem
+   * stays lean): medics revive downed crewmates when no enemy is within
+   * BOT_REVIVE_SAFE_RADIUS; otherwise bots walk over and finish downed
+   * enemies inside BOT_FINISH_RADIUS with cutlass-cadence swings.
+   */
+  private updateBotDbno(dt: number) {
+    for (const bot of this.state.players) {
+      if (!bot.isBot || bot.health <= 0) continue;
+      if (bot.state === 'eliminated' || bot.state === 'respawning' || bot.state === 'downed') continue;
+      if (this.skeletonHomes.has(bot.id)) continue; // skeleton melee already mauls downed players
+      if (bot.atCannon || bot.atHelm || bot.atSails || bot.atCrowNest) continue;
+
+      // 1. Medic: revive a downed crewmate when the coast is clear.
+      const downedMate = this.state.players.find((mate) =>
+        mate.id !== bot.id
+        && mate.state === 'downed'
+        && mate.shipId !== null
+        && mate.shipId === bot.shipId
+        && dist2D(mate.position.x, mate.position.z, bot.position.x, bot.position.z) <= DBNO.BOT_REVIVE_SAFE_RADIUS,
+      );
+      if (downedMate) {
+        const enemyNear = this.state.players.some((enemy) =>
+          enemy.shipId !== bot.shipId
+          && enemy.state !== 'eliminated'
+          && enemy.state !== 'respawning'
+          && enemy.state !== 'downed'
+          && dist2D(enemy.position.x, enemy.position.z, bot.position.x, bot.position.z) <= DBNO.BOT_REVIVE_SAFE_RADIUS,
+        );
+        if (!enemyNear) {
+          const d = dist2D(downedMate.position.x, downedMate.position.z, bot.position.x, bot.position.z);
+          if (d <= DBNO.REVIVE_RANGE) {
+            this.reviveActionsThisTick.set(downedMate.id, bot.id);
+          } else if (bot.onShipId === downedMate.onShipId) {
+            this.stepBotToward(bot, downedMate.position, dt);
+          }
+          continue;
+        }
+      }
+
+      // 2. Finisher: close on a downed enemy and end them.
+      let downedEnemy: Player | null = null;
+      let downedEnemyDistance: number = DBNO.BOT_FINISH_RADIUS;
+      for (const enemy of this.state.players) {
+        if (enemy.state !== 'downed' || enemy.shipId === bot.shipId) continue;
+        const d = dist2D(enemy.position.x, enemy.position.z, bot.position.x, bot.position.z);
+        if (d < downedEnemyDistance) {
+          downedEnemyDistance = d;
+          downedEnemy = enemy;
+        }
+      }
+      if (downedEnemy) {
+        if (downedEnemyDistance <= 2.3) {
+          if ((this.botFinishCooldownAt.get(bot.id) ?? 0) <= this.t) {
+            downedEnemy.lastDamagedById = bot.id;
+            downedEnemy.lastDamagedAt = this.t;
+            downedEnemy.lastDamageWasHeadshot = false;
+            downedEnemy.health -= WEAPONS.cutlass.damage;
+            this.botFinishCooldownAt.set(bot.id, this.t + WEAPONS.cutlass.reloadTime * 1.6);
+          }
+        } else if (bot.onShipId === downedEnemy.onShipId) {
+          this.stepBotToward(bot, downedEnemy.position, dt);
         }
       }
     }
-    this.startShipSinking(ship, true);
   }
 
-  private handlePlayerDeath(player: Player) {
+  /** Step a bot's body toward a point at walking pace (deck clamps and slope
+   *  blocking in PhysicsSystem keep the walk honest). */
+  private stepBotToward(bot: Player, target: Vec3, dt: number) {
+    const dx = target.x - bot.position.x;
+    const dz = target.z - bot.position.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 0.001) return;
+    const speed = PLAYER.MOVE_SPEED * 0.9;
+    const step = Math.min(d, speed * dt);
+    bot.position.x += (dx / d) * step;
+    bot.position.z += (dz / d) * step;
+    bot.rotation.x = Math.atan2(dx, dz);
+  }
+
+  private handlePlayerDeath(player: Player, wasDowned = false) {
     let killer = player.lastDamagedById
       ? this.getPlayer(player.lastDamagedById)
       : null;
@@ -3561,8 +3912,14 @@ export class Match {
       occupiedShip.crewIds = occupiedShip.crewIds.filter(id => id !== player.id);
     }
 
+    // A death only eliminates when the home ship is gone. The old rule also
+    // required the ship to sit ≥35m INSIDE the storm ring — an invisible
+    // margin that insta-eliminated players (and force-sank their whole crewed
+    // ship) for boundary proximity. Now the respawn simply HOLDS while the
+    // ship is outside the ring (see updateRespawns) and the storm's hull
+    // punctures decide the ship's fate naturally.
     const homeShip = this.getAliveShip(player.shipId);
-    const canRespawn = !!homeShip && this.isShipInStormSafeZone(homeShip);
+    const canRespawn = !!homeShip;
 
     if (canRespawn) {
       player.state = 'respawning';
@@ -3582,17 +3939,13 @@ export class Match {
       player.lastDamageWasHeadshot = false;
       player.blocking = false;
       player.cutlassCharge = 0;
+      player.downedUntil = 0;
+      player.reviveProgress = 0;
+      this.downedByPlayer.delete(player.id);
     } else {
       player.state = 'eliminated';
       this.recordElimination(player);
       this.applyEliminatedPlayerFields(player);
-    }
-
-    if (player.state === 'eliminated' && player.shipId) {
-      const shipToDestroy = this.getAliveShip(player.shipId);
-      if (shipToDestroy) {
-        this.eliminateRemainingCrewAndSinkShip(shipToDestroy, player.id);
-      }
     }
 
     if (player.isBot && player.state === 'eliminated') {
@@ -3619,6 +3972,8 @@ export class Match {
         respawning: player.state === 'respawning',
         headshot,
         boardingKill,
+        /** True when the victim bled out / was finished from the downed state. */
+        downed: wasDowned,
         stolenGold,
         healed,
         killerStreak: killer?.playerKillStreak ?? 0,
@@ -3707,6 +4062,10 @@ export class Match {
           remainingHealth: Math.max(0, this.getPlayer(event.targetId)?.health ?? 0),
           weaponId: event.projectileType,
         });
+      } else if (event.type === 'ship_ram') {
+        // Ram damage banks sink credit like any other ship damage; no
+        // attacker-only toast (the collision itself is the feedback).
+        this.markShipDamagedByPlayer(event.targetId, event.attackerId);
       } else {
         this.markShipDamagedByPlayer(event.targetId, event.attackerId);
         this.notifyShipHit(event.attackerId, {
@@ -3718,6 +4077,22 @@ export class Match {
           remainingHull: event.remainingHull,
           shipHealthMilestone: event.milestone,
           weaponId: event.projectileType,
+        });
+        // Victims and bystanders get a slim broadcast so every client can
+        // render impact FX / hole decals at the hit point (the attacker-only
+        // ship_hit above stays the hit-confirm channel).
+        this.broadcast({
+          type: 'ship_damage',
+          ts: Date.now(),
+          payload: {
+            targetId: event.targetId,
+            attackerId: event.attackerId,
+            section: event.section,
+            position: event.position,
+            damage: event.damage,
+            remainingSection: event.remainingSection,
+            projectileType: event.projectileType,
+          },
         });
       }
     }
@@ -3809,12 +4184,40 @@ export class Match {
 
   private broadcast(msg: NetMsg) {
     const data = JSON.stringify(msg);
-    const volatile = msg.type === 'state_snapshot';
     for (const [, client] of this.clients) {
       if (client.ws.readyState === WebSocket.OPEN) {
-        if (volatile && client.ws.bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES) continue;
         try { client.ws.send(data); } catch {}
       }
+    }
+  }
+
+  /**
+   * Snapshot broadcast with drop-OLD backpressure: when a client's socket is
+   * congested we hold the NEWEST update per kind (any older pending one is
+   * simply replaced — dropped) and flush it as soon as the buffer drains,
+   * instead of silently skipping new snapshots while stale bytes sit in
+   * flight (the old behavior that ran clients ~1 s behind).
+   */
+  private broadcastVolatile(msg: NetMsg, kind: 'full' | 'hot') {
+    const data = JSON.stringify(msg);
+    for (const [, client] of this.clients) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      if (client.ws.bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES) {
+        if (kind === 'full') client.pendingFullSnapshot = data;
+        else client.pendingHotSnapshot = data;
+        continue;
+      }
+      if (kind === 'full') {
+        // A newer full snapshot supersedes any pending one outright.
+        client.pendingFullSnapshot = null;
+      } else if (client.pendingFullSnapshot) {
+        // Hot updates patch onto the last full state — deliver the withheld
+        // full base first so the client never applies patches to stale data.
+        try { client.ws.send(client.pendingFullSnapshot); } catch {}
+        client.pendingFullSnapshot = null;
+      }
+      client.pendingHotSnapshot = null;
+      try { client.ws.send(data); } catch {}
     }
   }
 
@@ -3832,7 +4235,7 @@ export class Match {
    */
   private processBotLooting() {
     for (const player of this.state.players) {
-      if (!player.isBot || player.shipId === null || player.state === 'eliminated') continue;
+      if (!player.isBot || player.shipId === null || player.state === 'eliminated' || player.state === 'downed') continue;
 
       if (player.nearChestId && !player.carryingChestId) {
         for (const island of this.state.islands) {
@@ -4195,22 +4598,10 @@ export class Match {
       }
 
       if (!this.isShipInStormSafeZone(homeShip)) {
-        player.state = 'eliminated';
-        this.recordElimination(player);
-        this.applyEliminatedPlayerFields(player);
-        this.eliminateRemainingCrewAndSinkShip(homeShip, player.id);
-        if (player.isBot) {
-          this.bots.removeBot(player.id);
-        } else {
-          const client = this.clients.get(player.id);
-          if (client) {
-            this.send(client.ws, {
-              type: 'game_over',
-              ts: Date.now(),
-              payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold },
-            });
-          }
-        }
+        // Home ship is outside the ring: HOLD the respawn (timer pauses)
+        // instead of the old instant crew-wide elimination + force-sink.
+        // The storm's hull punctures sink the ship (handled above via the
+        // homeShip-gone branch) or the crew sails it back to safety.
         continue;
       }
 
