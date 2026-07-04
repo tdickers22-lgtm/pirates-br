@@ -938,12 +938,30 @@ export class MapGenerator {
     for (const camp of camps) {
       const theta = ra(rng);
       addProp('campfire', camp.x, camp.z, ra(rng), 1);
+      // Tent faces the fire from ~3m; bedroll tucked at the tent mouth.
+      const tentAngle = theta + Math.PI * 0.72;
+      const tentX = camp.x + Math.cos(tentAngle) * 3.1;
+      const tentZ = camp.z + Math.sin(tentAngle) * 3.1;
+      addProp('tent_a', tentX, tentZ, Math.atan2(camp.x - tentX, camp.z - tentZ) + Math.PI * 0.5, rr(rng, 0.95, 1.1));
+      addProp('bedroll', camp.x + Math.cos(tentAngle + 0.9) * 1.9, camp.z + Math.sin(tentAngle + 0.9) * 1.9, ra(rng), 1);
       addProp('lantern_post', camp.x + Math.cos(theta) * 1.7, camp.z + Math.sin(theta) * 1.7, ra(rng), 1);
       const clutter = ri(rng, 1, 3);
       for (let i = 0; i < clutter; i++) {
-        const a = theta + (i + 1) * 1.9;
+        // Clutter keeps to the arc opposite the tent so nothing spawns
+        // inside the canvas (tent sits at theta + ~2.26 rad).
+        const a = theta + 3.5 + i * 0.85; // arc clear of tent (+2.26) and lantern (+0), wide enough between neighbours
         const d = rr(rng, 1.8, 2.3);
         addProp(rng() < 0.5 ? 'crate' : 'barrel', camp.x + Math.cos(a) * d, camp.z + Math.sin(a) * d, ra(rng), rr(rng, 0.9, 1.1));
+      }
+    }
+
+    // 2b. One natural rock arch on rugged islands — a real Blender asset at a
+    // scenic mid-slope spot (replaces the old blocky client-side arch).
+    if (entry.biome === 'bone' || entry.biome === 'highland' || entry.style === 'rocky') {
+      const archAngle = island.profile.ridgeAxis + Math.PI * 0.5;
+      const archPoint = getIslandSurfacePoint(island, 0.52, archAngle, 0);
+      if (archPoint.y > 1.2) {
+        addProp('rock_arch', archPoint.x, archPoint.z, archAngle + Math.PI * 0.5, rr(rng, 0.9, 1.25));
       }
     }
 

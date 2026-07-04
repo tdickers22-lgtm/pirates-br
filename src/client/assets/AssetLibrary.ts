@@ -19,6 +19,7 @@ export const ASSET_NAMES = [
   'barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire',
   'dock_mid', 'dock_end',
   'watchtower', 'shipwreck', 'standing_stones', 'lantern_post',
+  'tent_a', 'bedroll', 'rock_arch',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
