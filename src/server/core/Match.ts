@@ -126,7 +126,10 @@ const SKELETON_ISLAND_ACTIVATION_MARGIN = 70;
 const SKELETON_PLAYER_WAKE_RADIUS = 38;
 /** Static world (islands + seaRocks) rides every 4th full snapshot (~2.6 Hz) —
  *  it is immutable apart from chest/barrel state, which also has explicit events. */
-const FULL_WORLD_SNAPSHOT_TICKS = FULL_SNAPSHOT_TICKS * 4;
+// Statics ride the 'join' message, and the websocket is TCP (no loss), so the
+// periodic static-world re-send is belt-and-suspenders only — every ~20s keeps
+// worst-case bandwidth negligible (~10KB/s) instead of ~470KB/s at every 4th full.
+const FULL_WORLD_SNAPSHOT_TICKS = FULL_SNAPSHOT_TICKS * 200;
 const MAX_VOLATILE_BUFFERED_BYTES = 512 * 1024;
 /** End-screen clients keep receiving a slow full snapshot so spectate views stay live. */
 const ENDED_SNAPSHOT_TICKS = SNAPSHOT_RATE * 15;
