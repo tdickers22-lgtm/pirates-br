@@ -8,7 +8,7 @@ export const WORLD = {
   SHIP_MARGIN: 50,
   /** Players hard-clamp this far inside the world edge. */
   PLAYER_MARGIN: 10,
-  ISLAND_COUNT: 10,
+  ISLAND_COUNT: 14,
   SHIP_COUNT: 10,
 } as const;
 
