@@ -1090,7 +1090,7 @@ export class ShipRenderer {
       // ship paint, not plastic. ~55% team hue, 45% dark oiled timber.
       const tr = (teamColor >> 16) & 0xff, tg = (teamColor >> 8) & 0xff, tb = teamColor & 0xff;
       const mix = (a: number, b: number, t: number) => Math.round(a + (b - a) * t);
-      const pr = mix(tr, 0x3a, 0.45), pg = mix(tg, 0x2a, 0.45), pb = mix(tb, 0x18, 0.45);
+      const pr = mix(tr, 0x3a, 0.62), pg = mix(tg, 0x2a, 0.62), pb = mix(tb, 0x18, 0.62);
       // CanvasTexture flips Y: high v (sheer) lives near the TOP of the canvas.
       // Painted wale band (v≈0.81-0.89 → canvas y 14-25), matte and worn.
       ctx.globalAlpha = 0.68;
