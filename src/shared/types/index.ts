@@ -113,10 +113,13 @@ export interface Ship {
 }
 
 // ── Players ──────────────────────────────────────────────────
-export type PlayerState = 'alive' | 'swimming' | 'boarding' | 'respawning' | 'eliminated';
+/** 'downed' = down-but-not-out: hp reached 0 with living crewmates — the pirate
+ *  crawls at reduced speed, cannot use weapons/stations, bleeds out over
+ *  DBNO.BLEEDOUT_SECONDS (2× faster outside the storm ring) and can be revived
+ *  by a crewmate holding interact, or finished by any damage. */
+export type PlayerState = 'alive' | 'swimming' | 'boarding' | 'downed' | 'respawning' | 'eliminated';
 export type WeaponSlot = 0 | 1 | 2 | 3;
 export type CannonAmmoType = 'cannonball' | 'firebomb' | 'chainshot';
-export type SailControlMode = 'hoist' | 'angle';
 
 export interface Player {
   id: string;
@@ -146,7 +149,6 @@ export interface Player {
   atCannon: boolean;
   atHelm: boolean;
   atSails: boolean;
-  sailControlMode: SailControlMode | null;
   /** Climbing / stationed in the main mast crow's nest */
   atCrowNest: boolean;
   /** Cutlass guard is held; frontal melee damage is mostly blocked. */
@@ -181,7 +183,16 @@ export interface Player {
   /** Seconds remaining before the pocket wheel can be used again (one fruit at a time) */
   pocketUseCooldown: number;
   hasShovel: boolean;
+  /** Spyglass tool — always in the pirate's kit; the client implements the zoom. */
+  hasSpyglass: boolean;
   nearBarrelId: string | null;
+  // ── Down-but-not-out (DBNO) ────────────────────────────────
+  /** Seconds of bleed-out remaining while state === 'downed'. Drains 2× faster
+   *  outside the storm safe ring. 0 when not downed. */
+  downedUntil: number;
+  /** 0-1 revive progress while a crewmate holds interact next to this downed
+   *  player. Decays when the revive is interrupted. 0 when not downed. */
+  reviveProgress: number;
 }
 
 // ── Weapons ──────────────────────────────────────────────────
@@ -449,7 +460,8 @@ export type ItemType =
   | 'blunderbuss_ammo'
   | 'eye_ammo'
   | 'flintknock_ammo'
-  | 'pistol_ammo';
+  | 'pistol_ammo'
+  | 'spyglass';
 
 // ── Storm ────────────────────────────────────────────────────
 export interface StormState {
@@ -520,17 +532,90 @@ export interface GameState {
   winnerId: string | null;
 }
 
+// ── Hot snapshot (high-rate light wire format) ────────────────
+// 'state_hot' rides every snapshot tick (~31 Hz) carrying only fast-moving
+// transforms; full 'state_snapshot' messages (~10 Hz) remain the source of
+// truth. The client patches hot fields by id onto its last full state.
+// Clients that ignore 'state_hot' keep working off full snapshots alone.
+export interface HotShipState {
+  id: string;
+  position: Vec3;
+  rotation: number;
+  velocity: Vec3;
+  angularVelocity: number;
+  pitch?: number;
+  roll?: number;
+  heave?: number;
+  rudderAngle?: number;
+  sailHeight: number;
+  sailAngle: number;
+  sinking: boolean;
+  sinkProgress: number;
+  waterLevel?: number;
+  floodingRate?: number;
+}
+
+export interface HotPlayerState {
+  id: string;
+  position: Vec3;
+  rotation: Vec2;
+  velocity: Vec3;
+  health: number;
+  state: PlayerState;
+  onShipId: string | null;
+  cutlassCharge: number;
+  downedUntil: number;
+  reviveProgress: number;
+}
+
+export interface HotProjectileState {
+  id: string;
+  type: ProjectileType;
+  position: Vec3;
+  velocity: Vec3;
+}
+
+export interface HotKegState {
+  id: string;
+  position: Vec3;
+  timer: number;
+}
+
+export interface HotSharkState {
+  id: string;
+  position: Vec3;
+  rotation: number;
+  health: number;
+}
+
+export interface HotSnapshotPayload {
+  tick: number;
+  serverTime: number;
+  shipsAlive: number;
+  storm: StormState;
+  ships: HotShipState[];
+  players: HotPlayerState[];
+  projectiles: HotProjectileState[];
+  kegs: HotKegState[];
+  sharks: HotSharkState[];
+}
+
 // ── Network messages ─────────────────────────────────────────
 export type MsgType =
   // game-scoped messages (within a match)
   | 'join'
   | 'state_snapshot'
+  | 'state_hot'
   | 'state_delta'
   | 'player_input'
   | 'player_spawned'
   | 'ship_hit'
+  | 'ship_damage'
   | 'player_hit'
   | 'kill_event'
+  | 'player_downed'
+  | 'revive_start'
+  | 'revive_complete'
   | 'keg_exploded'
   | 'chest_opened'
   | 'barrel_opened'
@@ -634,12 +719,11 @@ export type InteractIntent =
   | 'stow_chest'
   | 'helm'
   | 'sails'
-  | 'sail_hoist'
-  | 'sail_angle'
   | 'crow'
   | 'anchor'
   | 'repair'
   | 'bail'
+  | 'revive'
   | 'cannon';
 
 export interface PlayerInput {

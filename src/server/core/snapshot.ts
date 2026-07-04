@@ -1,0 +1,174 @@
+import type {
+  GameState,
+  HotSnapshotPayload,
+  Player,
+  WildlifeAnimal,
+} from '../../shared/types/index.js';
+
+// ============================================================
+// SNAPSHOT WIRE FORMAT
+// ============================================================
+// Full snapshots were 83–210 KB of raw JSON at 31 Hz — enough to saturate the
+// 512 KB socket gate and starve clients (~1 s snapshot age). The wire layer
+// now (a) quantizes floats (positions 2 decimals, angles 3), (b) strips
+// server-internal / static fields, and (c) splits cadence: quantized full
+// snapshots at ~10 Hz plus tiny 'state_hot' transform updates at ~31 Hz.
+//
+// IMPORTANT: islands and seaRocks are NEVER quantized — their parameters feed
+// the shared deterministic terrain/collision math on the client, and rounding
+// them would desync client prediction from server physics. They are static,
+// so they simply ride the (rare) includeStaticWorld snapshots at full
+// precision instead.
+
+/** Keys whose numeric leaves are angles/phases — kept at 3 decimals. */
+const ANGLE_KEYS = new Set([
+  'rotation',
+  'pitch',
+  'roll',
+  'yaw',
+  'sailAngle',
+  'rudderAngle',
+  'angularVelocity',
+  'shrinkProgress',
+  'serverTime',
+]);
+
+function roundTo(value: number, decimals: 2 | 3): number {
+  if (!Number.isFinite(value)) return value;
+  const f = decimals === 3 ? 1000 : 100;
+  return Math.round(value * f) / f;
+}
+
+/** Fast recursive rounder. Numbers are rounded to `decimals` (angle-ish keys
+ *  get 3), strings/booleans/null pass through, objects/arrays are cloned. */
+export function quantizeDeep<T>(value: T, decimals: 2 | 3 = 2): T {
+  if (typeof value === 'number') return roundTo(value, decimals) as T;
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => quantizeDeep(entry, decimals)) as T;
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    const entry = (value as Record<string, unknown>)[key];
+    out[key] = quantizeDeep(entry, ANGLE_KEYS.has(key) ? 3 : decimals);
+  }
+  return out as T;
+}
+
+/** Server-internal player fields the client never reads — stripped from the wire. */
+function stripPlayerInternals(player: Player): Player {
+  const {
+    lastDamagedById: _lastDamagedById,
+    lastDamagedAt: _lastDamagedAt,
+    lastDamageWasHeadshot: _lastDamageWasHeadshot,
+    ...wire
+  } = player;
+  return wire as unknown as Player;
+}
+
+/** Wildlife wire trim: drop server AI internals (spawnPosition, wander state,
+ *  velocity, islandId) — the client only reads id/type/position/rotation/health. */
+function trimWildlife(animal: WildlifeAnimal): WildlifeAnimal {
+  return {
+    id: animal.id,
+    type: animal.type,
+    position: quantizeDeep(animal.position, 2),
+    rotation: roundTo(animal.rotation, 3),
+    health: roundTo(animal.health, 2),
+  } as WildlifeAnimal;
+}
+
+/**
+ * Quantized + trimmed full snapshot for the wire. `snap` is the state-shaped
+ * snapshot from Match.buildSnapshot (islands already stripped unless this is
+ * a static-world tick); seaRocks follow the same static-world cadence.
+ */
+export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean): GameState {
+  return {
+    ...snap,
+    serverTime: roundTo(snap.serverTime, 3),
+    storm: quantizeDeep(snap.storm, 2),
+    ships: snap.ships.map((ship) => quantizeDeep(ship, 2)),
+    players: snap.players.map((player) => quantizeDeep(stripPlayerInternals(player), 2)),
+    projectiles: snap.projectiles.map((proj) => quantizeDeep(proj, 2)),
+    kegs: snap.kegs.map((keg) => quantizeDeep(keg, 2)),
+    sharks: snap.sharks.map((shark) => quantizeDeep(shark, 2)),
+    wildlife: snap.wildlife.map(trimWildlife),
+    // Static world data at full precision (deterministic shared math), only on
+    // includeStaticWorld ticks — the client preserves its previous copy.
+    islands: includeStaticWorld ? snap.islands : [],
+    seaRocks: includeStaticWorld ? snap.seaRocks : [],
+  };
+}
+
+/**
+ * Tiny high-rate update: ships + players + projectiles (+ kegs/sharks)
+ * transforms only. ~3–6 KB at 14 players / 10 ships, sent at ~31 Hz between
+ * ~10 Hz full snapshots. The client patches these by id onto its last full
+ * state; entities it has never seen in a full snapshot are ignored (except
+ * projectiles, which carry their type so muzzle-fresh rounds can render).
+ */
+export function buildHotSnapshot(state: GameState, serverTime: number): HotSnapshotPayload {
+  return {
+    tick: state.tick,
+    serverTime: roundTo(serverTime, 3),
+    shipsAlive: state.shipsAlive,
+    storm: quantizeDeep(state.storm, 2),
+    ships: state.ships
+      .filter((ship) => ship.alive)
+      .map((ship) => ({
+        id: ship.id,
+        position: quantizeDeep(ship.position, 2),
+        rotation: roundTo(ship.rotation, 3),
+        velocity: quantizeDeep(ship.velocity, 2),
+        angularVelocity: roundTo(ship.angularVelocity, 3),
+        pitch: ship.pitch !== undefined ? roundTo(ship.pitch, 3) : undefined,
+        roll: ship.roll !== undefined ? roundTo(ship.roll, 3) : undefined,
+        heave: ship.heave !== undefined ? roundTo(ship.heave, 2) : undefined,
+        rudderAngle: ship.rudderAngle !== undefined ? roundTo(ship.rudderAngle, 3) : undefined,
+        sailHeight: roundTo(ship.sailHeight, 2),
+        sailAngle: roundTo(ship.sailAngle, 3),
+        sinking: ship.sinking,
+        sinkProgress: roundTo(ship.sinkProgress, 2),
+        waterLevel: ship.waterLevel !== undefined ? roundTo(ship.waterLevel, 2) : undefined,
+        floodingRate: ship.floodingRate !== undefined ? roundTo(ship.floodingRate, 3) : undefined,
+      })),
+    players: state.players
+      .filter((player) => player.state !== 'eliminated' && player.state !== 'respawning')
+      .map((player) => ({
+        id: player.id,
+        position: quantizeDeep(player.position, 2),
+        rotation: quantizeDeep(player.rotation, 3),
+        velocity: quantizeDeep(player.velocity, 2),
+        health: roundTo(player.health, 2),
+        state: player.state,
+        onShipId: player.onShipId,
+        cutlassCharge: roundTo(player.cutlassCharge, 2),
+        downedUntil: roundTo(player.downedUntil, 2),
+        reviveProgress: roundTo(player.reviveProgress, 2),
+      })),
+    projectiles: state.projectiles
+      .filter((proj) => proj.alive)
+      .map((proj) => ({
+        id: proj.id,
+        type: proj.type,
+        position: quantizeDeep(proj.position, 2),
+        velocity: quantizeDeep(proj.velocity, 2),
+      })),
+    kegs: state.kegs
+      .filter((keg) => keg.timer > 0 && !keg.defused)
+      .map((keg) => ({
+        id: keg.id,
+        position: quantizeDeep(keg.position, 2),
+        timer: roundTo(keg.timer, 2),
+      })),
+    sharks: state.sharks
+      .filter((shark) => shark.health > 0)
+      .map((shark) => ({
+        id: shark.id,
+        position: quantizeDeep(shark.position, 2),
+        rotation: roundTo(shark.rotation, 3),
+        health: roundTo(shark.health, 2),
+      })),
+  };
+}

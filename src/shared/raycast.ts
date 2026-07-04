@@ -1,6 +1,8 @@
 import type { Island, Ship, Vec3 } from './types/index.js';
 import { SHIP_STATS } from './constants/index.js';
 import {
+  getCaveCeilingY,
+  getCaveFloorY,
   getIslandDistRatio,
   getIslandMaxRadius,
   getIslandSurfaceY,
@@ -59,7 +61,17 @@ function getIslandPeakBound(island: Island): number {
 function isInsideIslandTerrain(island: Island, x: number, y: number, z: number): boolean {
   const { distRatio } = getIslandDistRatio(island, x, z);
   if (distRatio > TERRAIN_FOOTPRINT_LIMIT) return false;
-  return y <= getIslandSurfaceY(island, x, z);
+  if (y > getIslandSurfaceY(island, x, z)) return false;
+  // Cave-air exemption: a point inside a carved cave interior (between the
+  // cave floor and ceiling) is shootable air, not rock — players in caves can
+  // fire out of the mouth and be shot through it. Deterministic and shared by
+  // client + server so hit registration stays in lockstep.
+  const ceiling = getCaveCeilingY(island, x, z);
+  if (ceiling !== null && y <= ceiling) {
+    const floor = getCaveFloorY(island, x, z);
+    if (floor !== null && y >= floor - 0.05) return false;
+  }
+  return true;
 }
 
 /**
