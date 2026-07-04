@@ -1,9 +1,13 @@
 import * as THREE from 'three';
 import type { Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
 
-// Approximate sea surface height; impacts below this read as water hits.
+// Fallback sea surface height; Game feeds the live Gerstner surface via
+// setWaterSurfaceY each frame so splash-vs-hull classification tracks swells
+// (fixed constants misread every waterline hit once storm waves reach ±3m).
 const WATER_SURFACE_Y = 0.22;
 const WATER_IMPACT_THRESHOLD_Y = 0.9;
+let liveWaterSurfaceY = WATER_SURFACE_Y;
+let liveWaterImpactThresholdY = WATER_IMPACT_THRESHOLD_Y;
 
 // Shared scratch objects so emits never allocate.
 const scratchColor = new THREE.Color();
@@ -618,7 +622,7 @@ class DebrisPool {
       const life = this.state[base + 13];
       if (life <= 0) continue;
       const age = this.state[base + 12] + dt;
-      if (age >= life || this.state[base + 1] < WATER_SURFACE_Y - 0.15) {
+      if (age >= life || this.state[base + 1] < liveWaterSurfaceY - 0.15) {
         this.state[base + 13] = 0;
         this.activeCount--;
         scratchMatrix.makeScale(0, 0, 0);
@@ -705,6 +709,14 @@ class LightPool {
 }
 
 export class CombatFx {
+  /** Live wave surface near the action (Game feeds gerstnerHeight each frame)
+   *  so splash-vs-hull classification and splash rings ride the swell. */
+  setWaterSurfaceY(y: number) {
+    if (!Number.isFinite(y)) return;
+    liveWaterSurfaceY = y + 0.22;
+    liveWaterImpactThresholdY = y + 0.9;
+  }
+
   private readonly root = new THREE.Group();
   private smoke: SpritePool | null = null;
   private flame: SpritePool | null = null;
@@ -838,7 +850,7 @@ export class CombatFx {
   }
 
   emitImpact(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3) {
-    const onWater = position.y < WATER_IMPACT_THRESHOLD_Y;
+    const onWater = position.y < liveWaterImpactThresholdY;
     if (onWater) {
       const magnitude = type === 'bullet' ? 0.5 : type === 'cannonball' ? 1.15 : type === 'tsunami' ? 1.5 : 0.9;
       this.spawnWaterSplash(position.x, position.z, magnitude);
@@ -1008,7 +1020,7 @@ export class CombatFx {
 
   /** Shark killed — blood bloom on the water surface */
   emitSharkDeathBloom(position: Vec3, cameraPos: THREE.Vector3) {
-    const surfaceY = Math.max(WATER_SURFACE_Y, position.y - 0.05);
+    const surfaceY = Math.max(liveWaterSurfaceY, position.y - 0.05);
     this.playSharkDeathSound({ x: position.x, y: surfaceY, z: position.z }, cameraPos);
     if (!this.smoke || !this.droplets || !this.rings) return;
 
@@ -1095,7 +1107,7 @@ export class CombatFx {
     }
     this.lights.request(position.x, position.y + 0.8, position.z, 0xffa64d, 5, 0.32, 60);
 
-    if (position.y < WATER_IMPACT_THRESHOLD_Y + 0.3) {
+    if (position.y < liveWaterImpactThresholdY + 0.3) {
       this.spawnWaterSplash(position.x, position.z, 1.6);
       this.playSplashSound('cannonball', position, cameraPos);
     }
@@ -1104,7 +1116,7 @@ export class CombatFx {
   /** Splash column + expanding foam ring + ballistic droplets at the sea surface. */
   private spawnWaterSplash(x: number, z: number, magnitude: number) {
     if (!this.splashes || !this.rings || !this.droplets || !this.smoke) return;
-    const y = WATER_SURFACE_Y;
+    const y = liveWaterSurfaceY;
     this.splashes.emit(x, y, z, rand(0.65, 0.85) * Math.max(0.7, Math.sqrt(magnitude)), rand(2.4, 3.2) * magnitude, 0.92, 0xdfeef6);
     this.rings.emit(x, y + 0.02, z, rand(0.8, 1.1), 0.4, rand(2.6, 3.4) * magnitude, 0.75, 0, 0xeaf6fa, false);
     const dropletCount = Math.round(8 + magnitude * 5);

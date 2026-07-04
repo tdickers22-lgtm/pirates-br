@@ -1623,6 +1623,9 @@ export class Game {
     const params = new URLSearchParams(window.location.search);
     return params.has('debug') || params.has('perf');
   })();
+  /** ?stormdemo — client-visual storm preview (raging seas, rain, tint) without
+   *  waiting for real storm phases. Screenshot/dev aid; server sim unaffected. */
+  private readonly debugStormDemo = new URLSearchParams(window.location.search).has('stormdemo');
   private debugPerfPanel: HTMLDivElement | null = null;
   private debugFrameCounter = 0;
   private debugFrameAccum = 0;
@@ -1658,6 +1661,8 @@ export class Game {
   private storyCutsceneNpcId: string | null = null;
   private storyCutsceneHideAt = 0;
   /** Matches the HUD [X] prompt — server must perform this action only. */
+  private lightningLightPool: THREE.PointLight | null = null;
+  private lightningBolt: THREE.Line | null = null;
   private spyglassActive = false;
   private lastInteractKind: InteractIntent | null = null;
   private visibleInteractKind: InteractIntent | null = null;
@@ -5702,7 +5707,8 @@ export class Game {
 
       const glow = new THREE.PointLight(0xffc75a, 1.2, 12);
       glow.position.set(0, 1.2, 0);
-      glow.visible = !lowDetail;
+      glow.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
+      chestGroup.userData.decorLight = lowDetail ? null : glow;
       chestGroup.add(glow);
 
       let mound: THREE.Mesh | null = null;
@@ -5832,7 +5838,8 @@ export class Game {
 
       const light = new THREE.PointLight(meta.hex, 2.2, 16);
       light.position.set(0, 1.06, 0);
-      light.visible = !lowDetail;
+      light.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
+      stationGroup.userData.decorLight = lowDetail ? null : light;
       stationGroup.add(light);
 
       const stationProp = makeUpgradeStationProp(station.type, meta.hex);
@@ -5986,7 +5993,8 @@ export class Game {
 
     const light = new THREE.PointLight(0xf2b45b, 1.4, 12);
     light.position.set(0.36, 1.45, -0.18);
-    light.visible = this.renderer.getQuality() !== 'low';
+    light.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
+    root.userData.decorLight = this.renderer.getQuality() === 'low' ? null : light;
     root.add(light);
     const lantern = new THREE.Mesh(
       new THREE.BoxGeometry(0.18, 0.26, 0.18),
@@ -6205,6 +6213,8 @@ export class Game {
         const chestDist = this.distance2D(cam.x, cam.z, chest.position.x, chest.position.z);
         const carriedByLocal = chest.carriedByPlayerId === this.localPlayerId;
         record.root.visible = chestDist < lootRadius && !chest.opened && !carriedByLocal;
+        const chestLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
+        if (chestLight) chestLight.visible = record.root.visible && chestDist < 55;
       }
 
       for (const barrel of island.barrels) {
@@ -6219,6 +6229,8 @@ export class Game {
         if (!record) continue;
         const stationDist = this.distance2D(cam.x, cam.z, station.position.x, station.position.z);
         record.root.visible = stationDist < upgradeRadius;
+        const stationLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
+        if (stationLight) stationLight.visible = record.root.visible && stationDist < 55;
       }
 
       for (const npc of island.npcs ?? []) {
@@ -6226,6 +6238,8 @@ export class Game {
         if (!record) continue;
         const npcDist = this.distance2D(cam.x, cam.z, npc.position.x, npc.position.z);
         record.root.visible = npcDist < npcRadius;
+        const npcLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
+        if (npcLight) npcLight.visible = record.root.visible && npcDist < 55;
       }
     }
 
@@ -6335,6 +6349,11 @@ export class Game {
       snapshotAge,
       this.renderer.camera.position,
       this.localPlayerId ?? undefined,
+      // Ring form: the renderer evaluates the shared storm sea-state per ship,
+      // so hulls straddling the wall ride the same swell the ocean draws.
+      this.state.storm
+        ? { center: { x: this.state.storm.centerX, y: this.state.storm.centerZ }, safeRadius: this.state.storm.safeRadius, phase: this.state.storm.phase }
+        : 0,
     );
     this.syncSharks(dt);
     this.syncWildlife(dt);
@@ -6346,13 +6365,21 @@ export class Game {
     this.stormWallTexture.offset.x = this.ocean.getTime() * 0.018;
     this.stormHalo.rotation.z = this.ocean.getTime() * 0.12;
     this.stormWeatherIntensity = this.computeStormWeatherIntensity();
-    this.renderer.updateStormWeather(this.stormWeatherIntensity);
+    // (renderer storm weather is applied via updateWaterEnvironment below —
+    // calling updateStormWeather here too did the same work twice per frame)
     this.ocean.setStormIntensity(this.stormWeatherIntensity);
     // Storm SEA GEOMETRY (separate from the color tint above): the shader
     // mirrors getStormWaveIntensity, so waves genuinely rage inside the ring.
     // phase01 must match the shared formula: clamp(phase / 6, 0, 1) — phase is
     // 0-indexed over the 7 STORM_PHASES.
-    if (this.state?.storm) {
+    if (this.debugStormDemo) {
+      // Park a tiny full-power ring at the camera: locally we are deep outside
+      // it, so the shared sea-state formula returns ~1 right here.
+      const cam = this.renderer.camera.position;
+      this.stormWeatherIntensity = 0.85;
+      this.ocean.setStormIntensity(0.85);
+      this.ocean.setStormState(cam.x, cam.z, -240, 1);
+    } else if (this.state?.storm) {
       const storm = this.state.storm;
       this.ocean.setStormState(
         storm.centerX,
@@ -6366,7 +6393,7 @@ export class Game {
     const effectScale = this.renderer.getEffectScale();
     // World-space rain runs every frame (cheap buffer update; the old canvas
     // overlay throttle is gone with the overlay).
-    this.updateStormRain3D(dt, this.computeStormRainIntensity());
+    this.updateStormRain3D(dt, this.debugStormDemo ? 0.9 : this.computeStormRainIntensity());
     this.updateStormLightningFlash(dt);
     const stormW = this.stormWeatherIntensity;
     const wallMat = this.stormWall.material as THREE.MeshBasicMaterial;
@@ -6396,7 +6423,7 @@ export class Game {
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
       this.updateHud();
-      this.hudTimer = effectScale < 0.55 ? 0.12 : 0.08;
+      this.hudTimer = effectScale < 0.55 ? 0.07 : 0.05;
     }
     if (this.minimapTimer <= 0) {
       this.drawMaps();
@@ -6734,6 +6761,19 @@ export class Game {
         mesh.rotation.y += angleWrap(targetYaw - mesh.rotation.y) * (isLocal ? 1 : rotationAlpha);
       }
 
+      // Downed pirates read prone at a glance: tipped onto their side, sunk to
+      // ground level, with a slow pained sway while they crawl/bleed out.
+      const downedLean = mesh.userData.downedLean as number | undefined ?? 0;
+      const downedTarget = player.state === 'downed' ? 1 : 0;
+      const nextLean = downedLean + (downedTarget - downedLean) * Math.min(1, dt * 6);
+      mesh.userData.downedLean = nextLean;
+      if (nextLean > 0.002) {
+        mesh.rotation.z = (Math.PI * 0.42 + Math.sin(this.ocean.getTime() * 1.7) * 0.05) * nextLean;
+        mesh.position.y -= 0.55 * nextLean;
+      } else if (mesh.rotation.z !== 0 && player.state !== 'eliminated') {
+        mesh.rotation.z = 0;
+      }
+
       const healthBar = mesh.userData.healthBar as {
         root: THREE.Group;
         fill: THREE.Mesh;
@@ -6757,8 +6797,19 @@ export class Game {
           healthBar.fill.scale.x = Math.max(0.001, ratio);
           healthBar.fill.position.x = -(healthBar.fullWidth * 0.5) + (healthBar.fullWidth * ratio) * 0.5;
           const fillMat = healthBar.fill.material as THREE.MeshBasicMaterial;
-          fillMat.color.setHSL(0.02 + ratio * 0.31, 0.82, 0.56);
-          fillMat.opacity = 0.68 + ratio * 0.28;
+          if (player.state === 'downed') {
+            // Downed: show bleed-out red, or revive teal while a mate holds X.
+            if ((player.reviveProgress ?? 0) > 0) {
+              fillMat.color.setHSL(0.45, 0.75, 0.55);
+              healthBar.fill.scale.x = Math.max(0.001, player.reviveProgress ?? 0);
+            } else {
+              fillMat.color.setHSL(0.995, 0.85, 0.5);
+            }
+            fillMat.opacity = 0.9;
+          } else {
+            fillMat.color.setHSL(0.02 + ratio * 0.31, 0.82, 0.56);
+            fillMat.opacity = 0.68 + ratio * 0.28;
+          }
         }
       }
 
@@ -7605,6 +7656,7 @@ export class Game {
     const camera = this.renderer.camera.position;
     const camStorm = getStormWaveIntensity(this.state?.storm, camera.x, camera.z);
     const waveY = gerstnerHeight(camera.x, camera.z, this.ocean.getTime(), WAVE_PARAMS, camStorm);
+    this.combatFx.setWaterSurfaceY(waveY);
     const depthBelowSurface = Math.max(0, waveY + 0.18 - camera.y);
     this.renderer.updateWaterEnvironment(depthBelowSurface, this.stormWeatherIntensity, this.ocean.getTime());
     this.ocean.setSunDirection(this.renderer.getSunDirection());
@@ -7739,13 +7791,22 @@ export class Game {
       : 1;
     const shipCritical = !!ship && (ship.sinking || avgHull < 0.2);
     const shipOnFire = !!ship && ship.onFire && !ship.sinking;
-    this.ui.stormWarning.style.display = outsideStorm || shipCritical || shipOnFire ? 'block' : 'none';
-    this.ui.stormWarning.textContent = shipCritical
-      ? (ship?.sinking ? 'SHIP IS SINKING' : 'SHIP CRITICAL - REPAIR NOW')
-      : shipOnFire
-        ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
-        : 'OUTSIDE STORM ZONE';
-    this.ui.stormWarning.style.color = shipCritical || shipOnFire ? '#ffb366' : '#ff6b6b';
+    const localDowned = player.state === 'downed';
+    this.ui.stormWarning.style.display = localDowned || outsideStorm || shipCritical || shipOnFire ? 'block' : 'none';
+    if (localDowned) {
+      const bleed = Math.max(0, Math.ceil(player.downedUntil ?? 0));
+      this.ui.stormWarning.textContent = (player.reviveProgress ?? 0) > 0
+        ? `CREWMATE REVIVING YOU — ${Math.round((player.reviveProgress ?? 0) * 100)}%`
+        : `DOWNED — BLEEDING OUT 0:${String(bleed).padStart(2, '0')} · CRAWL TO YOUR CREW`;
+      this.ui.stormWarning.style.color = (player.reviveProgress ?? 0) > 0 ? '#7ce38b' : '#ff6b6b';
+    } else {
+      this.ui.stormWarning.textContent = shipCritical
+        ? (ship?.sinking ? 'SHIP IS SINKING' : 'SHIP CRITICAL - REPAIR NOW')
+        : shipOnFire
+          ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
+          : 'OUTSIDE STORM ZONE';
+      this.ui.stormWarning.style.color = shipCritical || shipOnFire ? '#ffb366' : '#ff6b6b';
+    }
 
     this.ui.shipsAlive.textContent = String(this.state.shipsAlive);
     this.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
@@ -8988,6 +9049,20 @@ export class Game {
       }
       if (t - this.lastHullLeakAt > 0.4) {
         this.emitHullLeaks(floodShip);
+        // Pressure jets from holes punched below the waterline: the anchors
+        // ride the lofted hull (heave/pitch/roll/list), +Z = outward normal.
+        if (!floodShip.sinking) {
+          for (const hole of this.shipRenderer.getHoleAnchors(floodShip.id)) {
+            if (!hole.active || !hole.belowWaterline) continue;
+            hole.anchor.getWorldPosition(this.tempRenderPos);
+            hole.anchor.getWorldDirection(this.tempHudVector);
+            this.combatFx.emitHullLeak(
+              { x: this.tempRenderPos.x, y: this.tempRenderPos.y, z: this.tempRenderPos.z },
+              this.tempHudVector.x * (0.7 + (floodShip.waterLevel ?? 0) * 0.9),
+              this.tempHudVector.z * (0.7 + (floodShip.waterLevel ?? 0) * 0.9),
+            );
+          }
+        }
         this.lastHullLeakAt = t;
       }
     } else if (this.floodingLoopActive) {
@@ -9833,7 +9908,8 @@ export class Game {
     const recoilLift = this.localViewWeaponKick * 0.045;
     const recoilRoll = this.localViewWeaponKick * 0.055;
 
-    this.localViewWeaponRoot.visible = true;
+    // A raised spyglass (hold P) occupies both hands — stow the weapon.
+    this.localViewWeaponRoot.visible = !this.spyglassActive;
 
     switch (weaponId) {
       case 'eye_of_reach':
@@ -9933,9 +10009,12 @@ export class Game {
         if (scopePart) scopePart.visible = true;
       }
       if (adsScope) {
+        // Counter-scale against the LIVE camera fov (not the target constant)
+        // so the viewmodel keeps its apparent size through the zoom lerp and
+        // under any non-74 base fov (swimming 78, aiming 64, settings).
         const hipHalf = THREE.MathUtils.degToRad(HIP_FOV * 0.5);
-        const adsHalf = THREE.MathUtils.degToRad(adsFov * 0.5);
-        this.localViewWeaponRoot.scale.setScalar(Math.tan(adsHalf) / Math.tan(hipHalf));
+        const liveHalf = THREE.MathUtils.degToRad(Math.max(adsFov * 0.85, this.renderer.camera.fov) * 0.5);
+        this.localViewWeaponRoot.scale.setScalar(Math.tan(liveHalf) / Math.tan(hipHalf));
       } else {
         this.localViewWeaponRoot.scale.setScalar(1);
       }
@@ -10172,7 +10251,7 @@ export class Game {
           ladderPoint,
           3.2,
           0.24,
-          'Press X to Climb Crow\'s Nest',
+          '[X] Climb Crow\'s Nest',
           'Main mast ladder · spotting platform above',
           'crow',
         );
@@ -11043,9 +11122,13 @@ export class Game {
     if (this.lightningFlash) {
       this.lightningFlash.intensity -= dt * (18 + this.state.storm.phase * 4);
       if (this.lightningFlash.intensity <= 0) {
-        this.renderer.scene.remove(this.lightningFlash);
+        this.lightningFlash.intensity = 0; // pooled light stays in the scene
         this.lightningFlash = null;
       }
+    }
+    if (this.lightningBolt) {
+      const boltMat = this.lightningBolt.material as THREE.LineBasicMaterial;
+      if (boltMat.opacity > 0) boltMat.opacity = Math.max(0, boltMat.opacity - dt * 6);
     }
 
     const phase = this.state.storm.phase;
@@ -11069,14 +11152,48 @@ export class Game {
       const lx = this.state.storm.centerX + Math.cos(angle) * dist;
       const lz = this.state.storm.centerZ + Math.sin(angle) * dist;
 
-      const flash = new THREE.PointLight(
-        0x9fc4e6,
-        60 + phase * 10,
-        Math.max(300, stormR * 0.9),
-      );
+      // Pooled flash light (allocating one per strike forced shader churn).
+      if (!this.lightningLightPool) {
+        this.lightningLightPool = new THREE.PointLight(0x9fc4e6, 0, 300);
+        this.renderer.scene.add(this.lightningLightPool);
+      }
+      const flash = this.lightningLightPool;
+      flash.intensity = 60 + phase * 10;
+      flash.distance = Math.max(300, stormR * 0.9);
       flash.position.set(lx, 85 + Math.random() * 50, lz);
-      this.renderer.scene.add(flash);
       this.lightningFlash = flash;
+
+      // Jagged bolt: cloud base to the sea, brief life synced with the flash.
+      if (!this.lightningBolt) {
+        const boltGeo = new THREE.BufferGeometry();
+        boltGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9 * 3), 3));
+        this.lightningBolt = new THREE.Line(
+          boltGeo,
+          new THREE.LineBasicMaterial({ color: 0xdceeff, transparent: true, opacity: 0, depthWrite: false }),
+        );
+        this.lightningBolt.frustumCulled = false;
+        this.renderer.scene.add(this.lightningBolt);
+      }
+      {
+        const positions = this.lightningBolt.geometry.getAttribute('position') as THREE.BufferAttribute;
+        const topY = 150 + Math.random() * 40;
+        let bx = lx;
+        let bz = lz;
+        for (let i = 0; i < 9; i++) {
+          const f = i / 8;
+          positions.setXYZ(i, bx, topY * (1 - f), bz);
+          bx += (Math.random() - 0.5) * 14;
+          bz += (Math.random() - 0.5) * 14;
+        }
+        positions.needsUpdate = true;
+        (this.lightningBolt.material as THREE.LineBasicMaterial).opacity = 0.9;
+      }
+
+      // Thunder boom matched to the actual strike distance.
+      const localPlayerForThunder = this.getLocalPlayer();
+      if (localPlayerForThunder) {
+        this.audio.playThunder(this.distance2D(localPlayerForThunder.position.x, localPlayerForThunder.position.z, lx, lz));
+      }
 
       this.stormLightningFlashOpacity = Math.max(
         this.stormLightningFlashOpacity,
