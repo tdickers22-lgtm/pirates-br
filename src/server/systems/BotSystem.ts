@@ -81,7 +81,9 @@ export class BotSystem {
     for (const [pid, bot] of this.bots) {
       const player = players.find(p => p.id === pid);
       const ship = ships.find(s => s.id === bot.shipId);
-      if (!player || !ship || player.state === 'eliminated' || !ship.alive) continue;
+      // Downed bots stop steering/firing — Match's DBNO pass owns them until
+      // a crewmate revives them or they bleed out.
+      if (!player || !ship || player.state === 'eliminated' || player.state === 'downed' || !ship.alive) continue;
 
       bot.stateTimer -= dt;
       bot.firearmTimer -= dt;
@@ -524,7 +526,6 @@ export class BotSystem {
       player.atHelm = false;
       player.atSails = false;
       player.atCrowNest = false;
-      player.sailControlMode = null;
       player.position.x = ship.position.x + (dx / len) * (stats.width * 0.5 + 1.6);
       player.position.z = ship.position.z + (dz / len) * (stats.width * 0.5 + 1.6);
       player.position.y = ship.position.y + 0.4;
