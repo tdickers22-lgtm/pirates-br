@@ -1187,9 +1187,18 @@
       opacity: 0; pointer-events: none; z-index: 91; transition: opacity 0.05s;
     }
 
-    /* Controls hint */
+    /* Controls legend — toggled with L in-match */
     #controls-hint {
       display: none;
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      z-index: 130; padding: 18px 26px; border-radius: 10px;
+      background: rgba(8, 12, 20, 0.92); border: 1px solid rgba(214, 178, 94, 0.45);
+      color: #e8dcc0; font: 500 13px/1.9 'Georgia', serif; letter-spacing: 0.04em;
+      text-align: left; pointer-events: none; white-space: nowrap;
+    }
+    #controls-hint .legend-title {
+      font-weight: 700; color: #d6b25e; letter-spacing: 0.14em;
+      text-align: center; margin-bottom: 6px;
     }
 
     #island-banner {
@@ -1908,12 +1917,13 @@
     </div>
 
     <div id="controls-hint">
-      WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive off ship
-      <br>X at Sail Ring · Hoist / Angle Sails &nbsp;|&nbsp; C/Z · Hoist / Reef &nbsp;|&nbsp; Q/F · Trim
-      <br>X · Interact &nbsp;|&nbsp; Hold X at Anchor Capstan · Raise Anchor
-      <br>A/D at Helm · Steer &nbsp;|&nbsp; T · Trade Request
-      <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo
-      <br>LMB · Fire &nbsp;|&nbsp; SHIFT / RMB · Aim/Scope
+      <div class="legend-title">SHIP'S ORDERS — [L] to close</div>
+      WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; X · Interact (hold for capstan/bail/revive)
+      <br>Helm: A/D · Steer &nbsp;|&nbsp; W/S · Trim Sails from Helm
+      <br>Sails: C · Hoist &nbsp;|&nbsp; Z · Reef &nbsp;|&nbsp; Q/F · Angle to the Wind
+      <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Powder Keg
+      <br>LMB · Fire &nbsp;|&nbsp; SHIFT/RMB · Aim &nbsp;|&nbsp; P · Spyglass (12x) &nbsp;|&nbsp; T · Trade
+      <br>M · Map &nbsp;|&nbsp; Climb the mainmast ratlines to the Crow's Nest
     </div>
 
     <div id="damage-vignette"></div>

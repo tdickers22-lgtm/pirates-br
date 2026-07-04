@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS, WORLD } from '../../shared/constants/index.js';
 import type {
-  GameState, InteractIntent, Island, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
+  GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, IslandProp, IslandPropType, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
-import { BIOME_PALETTES } from '../../shared/props.js';
+import { getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
+import { BIOME_PALETTES, getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   getAnchorControlLocal as getSharedAnchorControlLocal,
@@ -1658,6 +1658,7 @@ export class Game {
   private storyCutsceneNpcId: string | null = null;
   private storyCutsceneHideAt = 0;
   /** Matches the HUD [X] prompt — server must perform this action only. */
+  private spyglassActive = false;
   private lastInteractKind: InteractIntent | null = null;
   private visibleInteractKind: InteractIntent | null = null;
   private pendingInteractFromUi = false;
@@ -2086,6 +2087,74 @@ export class Game {
     return clone;
   }
 
+  /** Render the SERVER's deterministic prop registry (island.props) — the same
+   *  registry PhysicsSystem collides against every tick. Before this, the
+   *  client scattered its own decorative palms/boulders while the real
+   *  colliders stayed invisible: players got shoved by nothing and walked
+   *  through every visible tree. Rendering the registry makes visuals ==
+   *  colliders, and finally shows the roster landmarks (watchtowers, standing
+   *  stones, wrecks) that were generated but never drawn. */
+  private buildServerProps(island: Island, group: THREE.Group, lowDetail: boolean) {
+    const props = island.props ?? [];
+    if (props.length === 0) return;
+    const instancedTypes: ReadonlySet<string> = new Set([
+      'palm_a', 'palm_b', 'palm_c', 'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
+    ]);
+    const buckets = new Map<IslandPropType, IslandProp[]>();
+    for (const prop of props) {
+      // Dock modules are collider-only entries; the dock is drawn from island.dock.
+      if (prop.type === 'dock_mid' || prop.type === 'dock_end') continue;
+      const list = buckets.get(prop.type);
+      if (list) list.push(prop);
+      else buckets.set(prop.type, [prop]);
+    }
+    const mat4 = new THREE.Matrix4();
+    const pos = new THREE.Vector3();
+    const quat = new THREE.Quaternion();
+    const euler = new THREE.Euler();
+    const scl = new THREE.Vector3();
+    for (const [type, list] of buckets) {
+      const merged = instancedTypes.has(type) ? assets.mergedGeometry(type as AssetName) : null;
+      if (merged) {
+        const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
+        list.forEach((prop, i) => {
+          pos.set(prop.x - island.position.x, getPropGroundY(island, prop), prop.z - island.position.z);
+          euler.set(0, prop.yaw, 0);
+          quat.setFromEuler(euler);
+          scl.setScalar(prop.scale);
+          mat4.compose(pos, quat, scl);
+          inst.setMatrixAt(i, mat4);
+        });
+        inst.castShadow = !lowDetail;
+        inst.receiveShadow = true;
+        inst.instanceMatrix.needsUpdate = true;
+        group.add(inst);
+        continue;
+      }
+      for (const prop of list) {
+        const localPos = new THREE.Vector3(
+          prop.x - island.position.x,
+          getPropGroundY(island, prop),
+          prop.z - island.position.z,
+        );
+        const node = this.buildPropInstance(prop.type as AssetName, localPos, prop.yaw, prop.scale);
+        if (!node) continue;
+        node.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.castShadow = !lowDetail;
+            obj.receiveShadow = true;
+          }
+        });
+        group.add(node);
+        if (prop.type === 'campfire') {
+          this.registerLanternEmitter(group, localPos.x, localPos.y + 0.4, localPos.z, 'campfire');
+        } else if (prop.type === 'lantern_post') {
+          this.registerLanternEmitter(group, localPos.x, localPos.y + 2.1, localPos.z, 'lantern');
+        }
+      }
+    }
+  }
+
   // ── Island lantern / campfire warm-light budget ──────────────────────────
   // Shared point-light pools (added once, reused across matches) plus per-emitter
   // additive glow / flame sprites. The nearest N of each kind are lit for real at
@@ -2339,6 +2408,25 @@ export class Game {
       }, 650);
     };
 
+    this.network.onPlayerDowned = (payload) => {
+      const isMe = payload.playerId === this.localPlayerId;
+      const byWho = payload.attackerName ? ` by ${payload.attackerName}` : '';
+      this.pushFeed(
+        isMe ? `You were downed${byWho} — a crewmate can revive you!` : `${payload.playerName} was downed${byWho}`,
+        isMe ? '#ff8a7a' : '#e0b090',
+      );
+    };
+    this.network.onReviveComplete = (payload) => {
+      const isMe = payload.playerId === this.localPlayerId;
+      const byWho = payload.reviverName ? ` by ${payload.reviverName}` : '';
+      this.pushFeed(
+        isMe ? `You were revived${byWho}!` : `${payload.playerName} was revived${byWho}`,
+        '#7ce38b',
+      );
+    };
+    this.network.onHotSnapshot = (hot) => {
+      this.applyHotSnapshot(hot);
+    };
     this.network.onSnapshot = (snapshot) => {
       this.applySnapshot(snapshot);
     };
@@ -2728,8 +2816,14 @@ export class Game {
 
   private applySnapshot(snapshot: GameState) {
     const hasFreshIslandState = snapshot.islands.length > 0 || !this.state;
-    const nextSnapshot = snapshot.islands.length === 0 && this.state
-      ? { ...snapshot, islands: this.state.islands }
+    // Static world (islands + seaRocks) rides only every 4th full snapshot on
+    // the wire — preserve the previous copies on the ticks that omit them.
+    const nextSnapshot = this.state && (snapshot.islands.length === 0 || (snapshot.seaRocks?.length ?? 0) === 0)
+      ? {
+        ...snapshot,
+        islands: snapshot.islands.length === 0 ? this.state.islands : snapshot.islands,
+        seaRocks: (snapshot.seaRocks?.length ?? 0) === 0 ? this.state.seaRocks : snapshot.seaRocks,
+      }
       : snapshot;
     const previousLocalState = this.getLocalPlayer()?.state ?? this.previousLocalState;
     this.state = nextSnapshot;
@@ -2756,6 +2850,85 @@ export class Game {
     this.previousLocalState = localPlayer?.state ?? null;
   }
 
+  /** Merge a 31Hz 'state_hot' transform update into the last full snapshot.
+   *  Hot payloads carry only moving-entity transforms (plus storm), so ships,
+   *  players and projectiles glide at full rate while the heavyweight world
+   *  state arrives at ~10Hz — this is what fixed the ~1s snapshot starvation. */
+  private applyHotSnapshot(hot: HotSnapshotPayload) {
+    const state = this.state;
+    if (!state) return; // need one full snapshot first
+    if (hot.tick < state.tick) return; // stale hot arriving after a newer full
+    state.tick = hot.tick;
+    state.serverTime = hot.serverTime;
+    state.shipsAlive = hot.shipsAlive;
+    state.storm = hot.storm;
+    for (const h of hot.ships) {
+      const ship = this.shipsById.get(h.id);
+      if (!ship) continue;
+      ship.position = h.position;
+      ship.rotation = h.rotation;
+      ship.velocity = h.velocity;
+      ship.angularVelocity = h.angularVelocity;
+      ship.pitch = h.pitch;
+      ship.roll = h.roll;
+      ship.heave = h.heave;
+      if (h.rudderAngle !== undefined) ship.rudderAngle = h.rudderAngle;
+      ship.sailHeight = h.sailHeight;
+      ship.sailAngle = h.sailAngle;
+      ship.sinking = h.sinking;
+      ship.sinkProgress = h.sinkProgress;
+      if (h.waterLevel !== undefined) ship.waterLevel = h.waterLevel;
+    }
+    for (const h of hot.players) {
+      const player = this.playersById.get(h.id);
+      if (!player) continue;
+      player.position = h.position;
+      player.rotation = h.rotation;
+      player.velocity = h.velocity;
+      player.health = h.health;
+      player.state = h.state;
+      player.onShipId = h.onShipId;
+      player.cutlassCharge = h.cutlassCharge;
+      player.downedUntil = h.downedUntil;
+      player.reviveProgress = h.reviveProgress;
+    }
+    for (const h of hot.projectiles) {
+      for (const projectile of state.projectiles) {
+        if (projectile.id === h.id) {
+          projectile.position = h.position;
+          projectile.velocity = h.velocity;
+          break;
+        }
+      }
+    }
+    for (const h of hot.kegs) {
+      for (const keg of state.kegs) {
+        if (keg.id === h.id) {
+          keg.position = h.position;
+          keg.timer = h.timer;
+          break;
+        }
+      }
+    }
+    for (const h of hot.sharks) {
+      for (const shark of state.sharks ?? []) {
+        if (shark.id === h.id) {
+          shark.position = h.position;
+          shark.rotation = h.rotation;
+          shark.health = h.health;
+          break;
+        }
+      }
+    }
+    this.lastSnapshotAt = performance.now();
+    if (Number.isFinite(hot.serverTime)) {
+      const offset = hot.serverTime - performance.now() / 1000;
+      this.serverTimeOffset = this.serverTimeOffset === null
+        ? offset
+        : this.serverTimeOffset + (offset - this.serverTimeOffset) * 0.1;
+    }
+  }
+
   private rebuildStateIndexes(state: GameState) {
     this.playersById.clear();
     for (const player of state.players) this.playersById.set(player.id, player);
@@ -2773,12 +2946,38 @@ export class Game {
     }
   }
 
+  /** Islands still waiting to be built, drained a few per frame so joining a
+   *  match never freezes the main thread for seconds (10 islands × a heavy
+   *  buildIsland used to run synchronously inside the ws message handler). */
+  private pendingIslandBuilds: Island[] = [];
+
   private ensureWorldMeshes(state: GameState) {
+    let islandsQueued = false;
     for (const island of state.islands) {
-      if (!this.islandMeshes.has(island.id)) {
-        this.buildIsland(island);
-        this.ocean.setIslands(state.islands.map((i) => ({ x: i.position.x, z: i.position.z, r: i.radius })));
+      if (!this.islandMeshes.has(island.id)
+        && !this.pendingIslandBuilds.some((queued) => queued.id === island.id)) {
+        this.pendingIslandBuilds.push(island);
+        islandsQueued = true;
       }
+    }
+    if (islandsQueued) {
+      // Nearest islands first so the spawn area appears immediately.
+      const cam = this.renderer.camera.position;
+      this.pendingIslandBuilds.sort((a, b) =>
+        this.distance2D(cam.x, cam.z, a.position.x, a.position.z)
+        - this.distance2D(cam.x, cam.z, b.position.x, b.position.z));
+      // Elliptical footprints: foam/shallows/damping land at the real
+      // waterline (the old circle-of-roster-radius buried the foam band tens
+      // of meters inside the beach).
+      this.ocean.setIslands(state.islands.map((i) => ({
+        x: i.position.x,
+        z: i.position.z,
+        rx: i.radius * i.profile.footprintX,
+        rz: i.radius * i.profile.footprintZ,
+      })));
+      // Build the two closest synchronously so the player never sees a bare
+      // horizon at spawn; the rest stream in over the next frames.
+      this.drainIslandBuildQueue(2);
     }
     for (const rock of state.seaRocks ?? []) {
       if (!this.seaRockMeshes.has(rock.id)) {
@@ -2786,6 +2985,15 @@ export class Game {
         this.environment.add(mesh);
         this.seaRockMeshes.set(rock.id, mesh);
       }
+    }
+  }
+
+  /** Build up to `count` queued islands (called once per frame from the main
+   *  loop with count=1, and from ensureWorldMeshes for the spawn area). */
+  drainIslandBuildQueue(count = 1) {
+    for (let i = 0; i < count && this.pendingIslandBuilds.length > 0; i++) {
+      const island = this.pendingIslandBuilds.shift()!;
+      if (!this.islandMeshes.has(island.id)) this.buildIsland(island);
     }
   }
 
@@ -2914,26 +3122,12 @@ export class Game {
     const cliffColor = paletteRock.clone().lerp(new THREE.Color(0xffffff), 0.06);
     const mudColor = paletteRock.clone().lerp(paletteFoliage, 0.3);
     const boulderMat = new THREE.MeshStandardMaterial({ color: paletteRock.clone().lerp(new THREE.Color(0xffffff), 0.08).getHex(), roughness: 1 });
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x7a5430, roughness: 1 });
-    const frondMat = new THREE.MeshStandardMaterial({ color: paletteFoliage.getHex(), roughness: 0.85, side: THREE.DoubleSide });
-    const tuftMat = new THREE.MeshStandardMaterial({ color: paletteGrass.clone().lerp(paletteFoliage, 0.4).getHex(), roughness: 0.95, side: THREE.DoubleSide });
-    const fernMat = new THREE.MeshStandardMaterial({ color: paletteFoliage.clone().multiplyScalar(0.86).getHex(), roughness: 0.9, side: THREE.DoubleSide });
     const driftwoodMat = new THREE.MeshStandardMaterial({ color: 0xc4b08a, roughness: 1 });
     const bambooMat = new THREE.MeshStandardMaterial({ color: 0x72b040, roughness: 0.8 });
     const wreckMat = new THREE.MeshStandardMaterial({ color: 0x4b2f16, roughness: 1, map: null });
     const canvasMat = new THREE.MeshStandardMaterial({ color: 0xc9b57d, roughness: 0.96, side: THREE.DoubleSide });
     const shrineMat = new THREE.MeshStandardMaterial({ color: 0x625846, roughness: 1 });
-    const coconutMat = new THREE.MeshStandardMaterial({ color: 0x3a5818, roughness: 0.95 });
-    const flowerStemMat = new THREE.MeshStandardMaterial({ color: 0x2e6820, roughness: 1 });
-    const flowerColors = [0xff4499, 0xff8030, 0xffe820, 0xff3322, 0xcc44ff, 0xff6699];
-    const flowerMats = flowerColors.map((color) => new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.12, roughness: 0.9 }));
-    const palmFrondGeo = new THREE.PlaneGeometry(1, 1, 1, 2);
-    const coconutGeo = new THREE.SphereGeometry(1, 6, 5);
     const boulderGeo = new THREE.DodecahedronGeometry(0.9, 0);
-    const tuftGeo = new THREE.ConeGeometry(1, 1, 5);
-    const fernLeafGeo = new THREE.PlaneGeometry(1, 1, 1, 2);
-    const flowerStemGeo = new THREE.CylinderGeometry(0.016, 0.022, 1, 4);
-    const flowerBloomGeo = new THREE.SphereGeometry(1, 6, 5);
     const bambooGeo = new THREE.CylinderGeometry(0.05, 0.075, 1, 5);
 
     const createLayer = (config: {
@@ -3043,16 +3237,31 @@ export class Game {
 
     const terrainPositions: number[] = [];
     const terrainIndices: number[] = [];
-    // Higher density than before so noise detail, cliff bands, and terraces
-    // from getIslandSurfaceY actually resolve in the mesh.
-    const radialSegments = lowDetail ? 14 : visualDetail < 0.85 ? 18 : 24;
-    const angularSegments = lowDetail ? 36 : visualDetail < 0.85 ? 48 : 64;
+    // Mesh density scales with the island's real footprint so the shared
+    // heightfield's fbm knolls, ridged cliff bands, and 2.4-6m terraces
+    // actually resolve instead of aliasing into a smooth dome. A 56x160 cap is
+    // ~9k verts — trivial for a landmark mesh.
+    const islandMaxR = getIslandMaxRadius(island);
+    const radialDetailStep = lowDetail ? 8 : visualDetail < 0.85 ? 5.5 : 4;
+    const angularDetailStep = lowDetail ? 11 : visualDetail < 0.85 ? 7 : 5;
+    const radialSegments = THREE.MathUtils.clamp(Math.round(islandMaxR / radialDetailStep), 16, 60);
+    const angularSegments = THREE.MathUtils.clamp(Math.round((Math.PI * 2 * islandMaxR) / angularDetailStep), 48, 176);
+    // Extra rings past the footprint follow the shared heightfield UNDERWATER
+    // (beach slides to −3m by distRatio ~1.15) so sand visibly walks into the
+    // sea — the old cap stopped at 1.0 and hid the walk-in slope behind a
+    // vertical rock curtain.
+    const shoreRings = lowDetail ? 3 : 5;
+    const shoreRingSpan = 0.16;
+    const totalRings = radialSegments + shoreRings;
+    const ringDistRatio = (ring: number): number => ring <= radialSegments
+      ? (ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9))
+      : 1 + ((ring - radialSegments) / shoreRings) * shoreRingSpan;
     const terrainColor = new THREE.Color();
     const scratchColor = new THREE.Color();
     const rockSlopeColor = paletteRock.clone().multiplyScalar(0.8);
 
-    for (let ring = 0; ring <= radialSegments; ring++) {
-      const distRatio = ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9);
+    for (let ring = 0; ring <= totalRings; ring++) {
+      const distRatio = ringDistRatio(ring);
       for (let segment = 0; segment <= angularSegments; segment++) {
         const angle = (segment / angularSegments) * Math.PI * 2;
         const point = surfacePoint(distRatio, angle, 0.02);
@@ -3060,7 +3269,7 @@ export class Game {
       }
     }
 
-    for (let ring = 0; ring < radialSegments; ring++) {
+    for (let ring = 0; ring < totalRings; ring++) {
       for (let segment = 0; segment < angularSegments; segment++) {
         const a = ring * (angularSegments + 1) + segment;
         const b = a + 1;
@@ -3080,8 +3289,19 @@ export class Game {
     // rock on steep faces while flat ground keeps sand/grass/jungle.
     const terrainNormals = terrainGeometry.getAttribute('normal') as THREE.BufferAttribute;
     const terrainColors: number[] = [];
-    for (let ring = 0; ring <= radialSegments; ring++) {
-      const distRatio = ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9);
+    // Normalize height by the island's EXPECTED relief (sea plinth → estimated
+    // peak) instead of a fixed r*0.18 — the old mask saturated to rock-gray on
+    // any mid-tall island, washing every biome to the same monochrome dome.
+    const profileForColor = island.profile;
+    const seaBase = 5.15 + r * 0.0085;
+    const peakEst = Math.max(
+      4,
+      r * (0.10 + profileForColor.heightProfile * 0.25 + (profileForColor.peakBoost ?? 0) * 0.15),
+    );
+    const wetSandColor = sandColor.clone().multiplyScalar(0.62).lerp(new THREE.Color(0x2e5d63), 0.22);
+    const submergedColor = new THREE.Color(0x1d4a52);
+    for (let ring = 0; ring <= totalRings; ring++) {
+      const distRatio = ringDistRatio(ring);
       for (let segment = 0; segment <= angularSegments; segment++) {
         const index = ring * (angularSegments + 1) + segment;
         const angle = (segment / angularSegments) * Math.PI * 2;
@@ -3090,35 +3310,48 @@ export class Game {
         const pointY = terrainPositions[index * 3 + 1];
         const slope = THREE.MathUtils.clamp(1 - terrainNormals.getY(index), 0, 1);
 
-        const heightNorm = THREE.MathUtils.clamp(pointY / Math.max(r * 0.18, 1), 0, 1);
+        const heightNorm = THREE.MathUtils.clamp((pointY - seaBase) / peakEst, 0, 1);
         const shoreMask = THREE.MathUtils.smoothstep(distRatio, 0.72, 0.99);
-        const grassMask = THREE.MathUtils.smoothstep(heightNorm, 0.06, 0.5)
+        const grassMask = THREE.MathUtils.smoothstep(heightNorm, 0.02, 0.42)
           * (1 - THREE.MathUtils.smoothstep(distRatio, 0.78, 0.98));
-        const jungleMask = THREE.MathUtils.smoothstep(heightNorm, 0.1, 0.44)
-          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.7;
-        const rockMask = THREE.MathUtils.smoothstep(heightNorm, 0.6, 0.94) * (1 - shoreMask * 0.6);
-        const peakMask = THREE.MathUtils.smoothstep(heightNorm, 0.86, 1) * 0.35;
-        const mudMask = THREE.MathUtils.smoothstep(distRatio, 0.62, 0.78) * (1 - shoreMask) * 0.3;
-        const slopeRockMask = THREE.MathUtils.smoothstep(slope, 0.28, 0.62) * (1 - shoreMask);
+        const jungleMask = THREE.MathUtils.smoothstep(heightNorm, 0.08, 0.4)
+          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.75;
+        // Rock is earned by SLOPE first; only genuinely high ground rock-caps.
+        const rockMask = THREE.MathUtils.smoothstep(heightNorm, 0.72, 0.97) * (1 - shoreMask * 0.6) * 0.55;
+        const peakMask = THREE.MathUtils.smoothstep(heightNorm, 0.88, 1) * 0.4;
+        const mudMask = THREE.MathUtils.smoothstep(distRatio, 0.62, 0.78) * (1 - shoreMask) * 0.25;
+        const slopeRockMask = THREE.MathUtils.smoothstep(slope, 0.26, 0.6) * (1 - shoreMask);
 
         terrainColor.copy(sandColor);
         terrainColor.lerp(beachColor, shoreMask * coast.beach * 0.95);
         terrainColor.lerp(cliffColor, shoreMask * rockyCoast * 0.75);
         terrainColor.lerp(mudColor, mudMask);
-        terrainColor.lerp(grassColor, grassMask * 0.9);
+        terrainColor.lerp(grassColor, grassMask);
         terrainColor.lerp(jungleColor, jungleMask);
-        terrainColor.lerp(cliffColor, rockMask * 0.6);
+        terrainColor.lerp(cliffColor, rockMask);
         terrainColor.lerp(rockSlopeColor, slopeRockMask * 0.85);
         terrainColor.lerp(peakColor, peakMask * (1 - slopeRockMask));
         scratchColor.copy(beachColor).multiplyScalar(THREE.MathUtils.smoothstep(distRatio, 0.9, 1) * 0.14);
         terrainColor.add(scratchColor);
 
-        // Per-vertex noise for natural variation
-        const vnoise = (rng(ring * 113 + segment * 17) - 0.5) * 0.035;
+        // Waterline gradient on the new shore rings: dry sand → darker wet
+        // sand at the lapping band → blue-green submerged slope, so the
+        // beach visually walks into the sea.
+        const wetMask = THREE.MathUtils.smoothstep(-pointY, -0.55, 0.25);
+        const depthMask = THREE.MathUtils.smoothstep(-pointY, 0.2, 2.6);
+        if (wetMask > 0) {
+          terrainColor.lerp(wetSandColor, wetMask * (0.45 + coast.beach * 0.35));
+          terrainColor.lerp(submergedColor, depthMask * 0.8);
+        }
+
+        // Per-vertex noise + a low-frequency hue drift so large faces never
+        // read as one flat paint bucket (survives ACES tonemapping).
+        const vnoise = (rng(ring * 113 + segment * 17) - 0.5) * 0.07;
+        const hueDrift = Math.sin(angle * 3.1 + distRatio * 5.3 + r * 0.13) * 0.03;
         terrainColors.push(
-          THREE.MathUtils.clamp(terrainColor.r + vnoise * 0.5, 0, 1),
-          THREE.MathUtils.clamp(terrainColor.g + vnoise, 0, 1),
-          THREE.MathUtils.clamp(terrainColor.b + vnoise * 0.3, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.r + vnoise * 0.5 - hueDrift * 0.4, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.g + vnoise + hueDrift, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.b + vnoise * 0.3 - hueDrift * 0.5, 0, 1),
         );
       }
     }
@@ -3132,24 +3365,25 @@ export class Game {
     terrain.receiveShadow = true;
     group.add(terrain);
 
-    // Shore skirt closes the gap between the terrain cap and the underwater reef
-    // so islands read as solid landforms instead of floating tops.
+    // Underwater plinth: the terrain cap itself now follows the heightfield
+    // below the waterline (shore rings above), so this skirt is fully
+    // submerged — it just closes the volume from the mesh's underwater edge
+    // down to the reef base so islands never read as floating shells.
     const skirtPositions: number[] = [];
     const skirtColors: number[] = [];
     const skirtIndices: number[] = [];
     const skirtSegments = lowDetail ? 26 : visualDetail < 0.85 ? 34 : 44;
-    const skirtBottomColor = new THREE.Color(0x5d5a50);
+    const skirtBottomColor = new THREE.Color(0x28414b);
+    const skirtTopColor = new THREE.Color(0x2c545c);
     for (let segment = 0; segment <= skirtSegments; segment++) {
       const angle = (segment / skirtSegments) * Math.PI * 2;
-      const top = surfacePoint(0.978, angle, -0.08);
+      const top = surfacePoint(1 + shoreRingSpan - 0.005, angle, -0.04);
       const expand = 1.018 + (rng(segment * 313 + 11) - 0.5) * 0.02;
-      const bottomY = -Math.max(3.4, r * 0.14) - rng(segment * 317 + 17) * Math.max(0.5, r * 0.022);
+      const bottomY = -Math.max(4.5, r * 0.16) - rng(segment * 317 + 17) * Math.max(0.5, r * 0.022);
       skirtPositions.push(top.x, top.y, top.z);
       skirtPositions.push(top.x * expand, bottomY, top.z * expand);
 
-      const topBlend = THREE.MathUtils.smoothstep(Math.abs(top.y) / Math.max(1, r * 0.2), 0.08, 0.7);
-      const topColor = cliffColor.clone().lerp(mudColor, 0.24 + topBlend * 0.14);
-      skirtColors.push(topColor.r, topColor.g, topColor.b);
+      skirtColors.push(skirtTopColor.r, skirtTopColor.g, skirtTopColor.b);
       skirtColors.push(skirtBottomColor.r, skirtBottomColor.g, skirtBottomColor.b);
     }
     for (let segment = 0; segment < skirtSegments; segment++) {
@@ -3172,6 +3406,9 @@ export class Game {
     shoreSkirt.castShadow = true;
     shoreSkirt.receiveShadow = true;
     group.add(shoreSkirt);
+
+    // Server prop registry: the palms/boulders/landmarks players collide with.
+    this.buildServerProps(island, group, lowDetail);
 
     if (island.dock) {
       const dockW = Math.max(1, Math.min(120, Number(island.dock.width) || 8));
@@ -3667,71 +3904,9 @@ export class Game {
       }
     }
 
-    const boulderCount = scaledCount(Math.round(r / 10), 5);
-    const bM = new THREE.Matrix4();
-    const bQ = new THREE.Quaternion();
-    const bE = new THREE.Euler();
-    const bS = new THREE.Vector3();
-    const bP = new THREE.Vector3();
-    const boulderVariants = ['boulder_a', 'boulder_b', 'boulder_c'] as const;
-    const boulderMerged = boulderVariants.map((name) => assets.mergedGeometry(name));
-    if (boulderMerged.every((m) => m !== null)) {
-      // GLB boulders: one InstancedMesh per variant, deterministic from the
-      // same island-hash rng stream as the old procedural scatter.
-      const boulderHalfExtent = [1.5, 2.6, 1.1]; // manifest footprint radii
-      const matrices: THREE.Matrix4[][] = [[], [], []];
-      for (let i = 0; i < boulderCount; i++) {
-        const angle = rng(i * 3) * Math.PI * 2;
-        const distRatio = 0.5 + rng(i * 7) * 0.36;
-        const scale = 0.7 + rng(i * 11) * 1.6;
-        const variant = Math.min(2, Math.floor(rng(i * 19) * 3));
-        const s = (scale * 0.95) / boulderHalfExtent[variant];
-        const sample = surfacePoint(distRatio, angle, -scale * 0.16);
-        if (!isSolidDecorPoint(sample)) continue; // underwater / carved-out saddle
-        bP.copy(sample);
-        bE.set((rng(i * 31) - 0.5) * 0.22, rng(i * 37) * Math.PI * 2, (rng(i * 41) - 0.5) * 0.22);
-        bQ.setFromEuler(bE);
-        bS.set(s * (0.85 + rng(i * 23) * 0.35), s * (0.8 + rng(i * 29) * 0.35), s);
-        bM.compose(bP, bQ, bS);
-        matrices[variant].push(bM.clone());
-      }
-      boulderMerged.forEach((merged, variant) => {
-        const list = matrices[variant];
-        if (!merged || list.length === 0) return;
-        const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
-        list.forEach((matrix, index) => inst.setMatrixAt(index, matrix));
-        inst.castShadow = true;
-        inst.receiveShadow = true;
-        inst.instanceMatrix.needsUpdate = true;
-        group.add(inst);
-      });
-    } else {
-      const boulderInst = new THREE.InstancedMesh(boulderGeo, boulderMat, boulderCount);
-      boulderInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      let placedBoulders = 0;
-      for (let i = 0; i < boulderCount; i++) {
-        const angle = rng(i * 3) * Math.PI * 2;
-        const distRatio = 0.5 + rng(i * 7) * 0.36;
-        const scale = 0.7 + rng(i * 11) * 1.6;
-        const sx = scale * (0.85 + rng(i * 19) * 0.45);
-        const sy = scale * (0.6 + rng(i * 23) * 0.55);
-        const sz = scale * (0.8 + rng(i * 29) * 0.5);
-        const sample = surfacePoint(distRatio, angle, sy * 0.34);
-        if (!isSolidDecorPoint(sample)) continue; // underwater / carved-out saddle
-        bP.copy(sample);
-        bE.set(rng(i * 31) * Math.PI, rng(i * 37) * Math.PI, rng(i * 41) * Math.PI);
-        bQ.setFromEuler(bE);
-        bS.set(sx, sy, sz);
-        bM.compose(bP, bQ, bS);
-        boulderInst.setMatrixAt(placedBoulders, bM);
-        placedBoulders++;
-      }
-      boulderInst.castShadow = true;
-      boulderInst.receiveShadow = true;
-      boulderInst.count = placedBoulders;
-      boulderInst.instanceMatrix.needsUpdate = true;
-      group.add(boulderInst);
-    }
+    // (Client-only boulder/palm scatter removed: palms and boulders now come
+    // from the server prop registry via buildServerProps — visuals match the
+    // colliders players actually hit. Micro-decor below has no colliders.)
 
     const outcropCount = scaledCount(Math.round(r / 18), 2);
     for (let i = 0; i < outcropCount; i++) {
@@ -3757,177 +3932,6 @@ export class Game {
       group.add(outcrop);
     }
 
-    const palmCount = lowDetail
-      ? Math.min(2, scaledCount(Math.round(r / 18), 1))
-      : scaledCount(Math.round(r / 12), 4);
-    const palmHeightCap = 5.15 + island.radius * 0.0085 + island.radius * 0.085 * (1 + (island.profile.peakBoost ?? 0) * 0.3); // skip palms near rocky summits
-    const palmVariants = ['palm_a', 'palm_b', 'palm_c'] as const;
-    const palmMerged = palmVariants.map((name) => assets.mergedGeometry(name));
-    const palmsUseGlb = palmMerged.every((m) => m !== null);
-    if (palmsUseGlb) {
-      // GLB palms: 3 InstancedMeshes per island instead of 5-7 meshes per tree.
-      // Placement/variant/scale/yaw all come from the same island-hash stream.
-      const palmMatrices: THREE.Matrix4[][] = [[], [], []];
-      const pM = new THREE.Matrix4();
-      const pQ = new THREE.Quaternion();
-      const pE = new THREE.Euler();
-      const pS = new THREE.Vector3();
-      for (let i = 0; i < palmCount; i++) {
-        const angle = rng(i * 83) * Math.PI * 2;
-        const distRatio = 0.18 + rng(i * 89) * 0.3;
-        const palmSurface = surfacePoint(distRatio, angle, -0.12);
-        if (palmSurface.y > palmHeightCap) continue;
-        if (!isSolidDecorPoint(palmSurface)) continue; // skip underwater (archipelago saddles)
-        const variant = Math.min(2, Math.floor(rng(i * 107) * 3));
-        const scale = 0.72 + rng(i * 97) * 0.34;
-        const yaw = rng(i * 101) * Math.PI * 2;
-        const tilt = (rng(i * 103) - 0.5) * 0.14;
-        pE.set(tilt, yaw, -tilt * 0.6);
-        pQ.setFromEuler(pE);
-        pS.setScalar(scale);
-        pM.compose(palmSurface, pQ, pS);
-        palmMatrices[variant].push(pM.clone());
-      }
-      palmMerged.forEach((merged, variant) => {
-        const list = palmMatrices[variant];
-        if (!merged || list.length === 0) return;
-        const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
-        list.forEach((matrix, index) => inst.setMatrixAt(index, matrix));
-        inst.castShadow = true;
-        inst.receiveShadow = true;
-        inst.instanceMatrix.needsUpdate = true;
-        group.add(inst);
-      });
-    }
-    const proceduralPalmCount = palmsUseGlb ? 0 : palmCount;
-    for (let i = 0; i < proceduralPalmCount; i++) {
-      const angle = rng(i * 83) * Math.PI * 2;
-      const distRatio = 0.18 + rng(i * 89) * 0.3;
-      const palmSurface = surfacePoint(distRatio, angle);
-      if (palmSurface.y > palmHeightCap) continue;
-      if (!isSolidDecorPoint(palmSurface)) continue; // skip underwater (archipelago saddles)
-      const palm = new THREE.Group();
-      palm.position.copy(palmSurface);
-
-      const trunkH = 3.6 + rng(i * 97) * 2.1;
-      const tiltZ = (rng(i * 101) - 0.5) * 0.28;
-      const tiltX = (rng(i * 103) - 0.5) * 0.16;
-
-      const trunk = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.1, 0.22, trunkH, 7),
-        trunkMat,
-      );
-      trunk.rotation.set(tiltX, 0, tiltZ);
-      trunk.position.y = trunkH * 0.5;
-      trunk.castShadow = true;
-      palm.add(trunk);
-
-      const frondCount = lowDetail ? 4 : 5 + Math.floor(rng(i * 107) * 2);
-      for (let f = 0; f < frondCount; f++) {
-        const frondAngle = (f / frondCount) * Math.PI * 2 + rng(f * 109 + i) * 0.4;
-        const frondLen = 2.4 + rng(f * 113 + i) * 1.4;
-        const frondW = 0.55 + rng(f * 127 + i) * 0.32;
-        const frond = new THREE.Mesh(palmFrondGeo, frondMat);
-        frond.scale.set(frondW, frondLen, 1);
-        frond.position.set(
-          Math.cos(frondAngle) * frondLen * 0.44,
-          trunkH + frondLen * 0.16,
-          Math.sin(frondAngle) * frondLen * 0.44,
-        );
-        frond.rotation.set(
-          Math.PI * 0.28 + rng(f * 131 + i) * 0.2,
-          frondAngle + Math.PI * 0.5,
-          rng(f * 137 + i) * 0.15,
-        );
-        frond.castShadow = false;
-        palm.add(frond);
-      }
-
-      // Coconut clusters near treetop
-      const coconutCount = lowDetail ? 0 : 2 + Math.floor(rng(i * 211) * 2);
-      for (let c = 0; c < coconutCount; c++) {
-        const cAngle = (c / coconutCount) * Math.PI * 2 + rng(c * 213 + i) * 0.8;
-        const coconut = new THREE.Mesh(coconutGeo, coconutMat);
-        coconut.scale.setScalar(0.15 + rng(c * 217 + i) * 0.05);
-        coconut.position.set(
-          Math.cos(cAngle) * (0.22 + rng(c * 219 + i) * 0.18),
-          trunkH + 0.18 + rng(c * 223 + i) * 0.22,
-          Math.sin(cAngle) * (0.22 + rng(c * 227 + i) * 0.18),
-        );
-        coconut.castShadow = false;
-        palm.add(coconut);
-      }
-
-      group.add(palm);
-    }
-
-    const tuftCount = scaledCount(Math.round(r / 9), 5);
-    for (let i = 0; i < tuftCount; i++) {
-      const angle = rng(i * 139) * Math.PI * 2;
-      const distRatio = rng(i * 149) * 0.42;
-      const tuftSample = surfacePoint(distRatio, angle, 0.16);
-      if (!isSolidDecorPoint(tuftSample)) continue;
-      const tuft = new THREE.Mesh(tuftGeo, tuftMat);
-      tuft.scale.set(0.18 + rng(i * 151) * 0.22, 0.6 + rng(i * 157) * 0.55, 0.18 + rng(i * 151) * 0.22);
-      tuft.position.copy(tuftSample);
-      tuft.rotation.set(rng(i * 163) * 0.2, rng(i * 167) * Math.PI * 2, rng(i * 173) * 0.2);
-      tuft.castShadow = false;
-      group.add(tuft);
-    }
-
-    // Ferns in the jungle interior
-    const fernCount = lowDetail ? 0 : scaledCount(Math.round(r / 12), 4);
-    for (let i = 0; i < fernCount; i++) {
-      const angle = rng(i * 179) * Math.PI * 2;
-      const distRatio = rng(i * 181) * 0.3;
-      const fernPos = surfacePoint(distRatio, angle, 0.1);
-      if (!isSolidDecorPoint(fernPos)) continue;
-      const fernGroup = new THREE.Group();
-      fernGroup.position.copy(fernPos);
-      const leafCount = 4 + Math.floor(rng(i * 183) * 2);
-      for (let l = 0; l < leafCount; l++) {
-        const leafAngle = (l / leafCount) * Math.PI * 2 + rng(l * 187 + i) * 0.55;
-        const leafLen = 0.7 + rng(l * 189 + i) * 0.7;
-        const leaf = new THREE.Mesh(fernLeafGeo, fernMat);
-        leaf.scale.set(0.2 + rng(l * 191 + i) * 0.12, leafLen, 1);
-        leaf.position.set(
-          Math.cos(leafAngle) * leafLen * 0.28,
-          leafLen * 0.18,
-          Math.sin(leafAngle) * leafLen * 0.28,
-        );
-        leaf.rotation.set(-0.4 - rng(l * 193 + i) * 0.3, leafAngle + Math.PI * 0.5, 0);
-        leaf.castShadow = false;
-        fernGroup.add(leaf);
-      }
-      group.add(fernGroup);
-    }
-
-    // Tropical flowers scattered across the interior
-    const flowerCount = lowDetail ? 0 : scaledCount(Math.round(r / 10), 5);
-    for (let i = 0; i < flowerCount; i++) {
-      const angle = rng(i * 193) * Math.PI * 2;
-      const distRatio = 0.04 + rng(i * 197) * 0.38;
-      const flowerPos = surfacePoint(distRatio, angle, 0.06);
-      if (!isSolidDecorPoint(flowerPos)) continue;
-      const stemH = 0.22 + rng(i * 199) * 0.24;
-      const flowerMat = flowerMats[Math.floor(rng(i * 201) * flowerMats.length)];
-      const flowerGroup = new THREE.Group();
-      flowerGroup.position.copy(flowerPos);
-
-      const stem = new THREE.Mesh(flowerStemGeo, flowerStemMat);
-      stem.position.y = stemH * 0.5;
-      stem.scale.y = stemH;
-      flowerGroup.add(stem);
-
-      const bloom = new THREE.Mesh(flowerBloomGeo, flowerMat);
-      bloom.scale.setScalar(0.07 + rng(i * 203) * 0.04);
-      bloom.position.y = stemH + 0.04;
-      bloom.castShadow = false;
-      flowerGroup.add(bloom);
-      group.add(flowerGroup);
-    }
-
-    // Driftwood on the beach
     const driftwoodCount = lowDetail ? 0 : 3 + Math.floor(rng(islandSeed) * 3);
     for (let i = 0; i < driftwoodCount; i++) {
       const angle = rng(i * 223 + 7) * Math.PI * 2;
@@ -4685,7 +4689,8 @@ export class Game {
         const angle = rng(i * 351 + 23) * Math.PI * 2;
         const distRatio = 0.18 + rng(i * 357) * 0.34;
         const pos = surfacePoint(distRatio, angle, 0);
-        if (pos.y > palmHeightCap) continue;
+        const bananaHeightCap = 5.15 + island.radius * 0.0085 + island.radius * 0.085 * (1 + (island.profile.peakBoost ?? 0) * 0.3);
+        if (pos.y > bananaHeightCap) continue;
         if (!isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
         const tree = new THREE.Group();
         tree.position.copy(pos);
@@ -5562,37 +5567,76 @@ export class Game {
         detailRoot.add(group.children[0]);
       }
 
+      // Proxy LOD = a genuine low-res sample of the same shared heightfield
+      // with the same biome coloring, so distant islands keep their true
+      // silhouette, coast shape, and palette — no pop, no monochrome domes.
       const proxyRoot = new THREE.Group();
       proxyRoot.name = 'island-proxy-root';
       proxyRoot.visible = false;
-      const proxySandMat = new THREE.MeshStandardMaterial({ color: 0xd7bd7f, roughness: 0.98, flatShading: true });
-      const proxyGrassMat = new THREE.MeshStandardMaterial({ color: 0x4f8433, roughness: 0.95, flatShading: true });
-      const proxyRockMat = new THREE.MeshStandardMaterial({ color: 0x635b49, roughness: 1, flatShading: true });
-      const proxyBase = new THREE.Mesh(
-        new THREE.CylinderGeometry(r * 0.88, r * 1.15, Math.max(4, r * 0.16), 14, 1),
-        proxySandMat,
-      );
-      proxyBase.position.y = -Math.max(1.8, r * 0.05);
-      proxyBase.scale.set(footprintX, 1, footprintZ);
-      proxyRoot.add(proxyBase);
-      const proxyTop = new THREE.Mesh(
-        new THREE.CylinderGeometry(r * 0.42, r * 0.82, Math.max(2.2, r * 0.09), 12, 1),
-        proxyGrassMat,
-      );
-      proxyTop.position.y = Math.max(2.0, r * 0.035);
-      proxyTop.scale.set(footprintX * 0.86, 1, footprintZ * 0.86);
-      proxyRoot.add(proxyTop);
-      if (island.profile.heightProfile > 0.42) {
-        const proxyPeak = new THREE.Mesh(
-          new THREE.ConeGeometry(r * 0.28, Math.max(4.2, r * 0.18), 9, 1),
-          proxyRockMat,
+      {
+        const pRad = 10;
+        const pAng = 30;
+        const pShore = 2;
+        const pTotal = pRad + pShore;
+        const pRingDist = (ring: number): number => ring <= pRad
+          ? (ring === 0 ? 0 : Math.pow(ring / pRad, 0.9))
+          : 1 + ((ring - pRad) / pShore) * shoreRingSpan;
+        const pPos: number[] = [];
+        const pIdx: number[] = [];
+        const pCol: number[] = [];
+        for (let ring = 0; ring <= pTotal; ring++) {
+          const dRatio = pRingDist(ring);
+          for (let seg = 0; seg <= pAng; seg++) {
+            const angle = (seg / pAng) * Math.PI * 2;
+            const point = surfacePoint(dRatio, angle, 0.02);
+            pPos.push(point.x, point.y, point.z);
+          }
+        }
+        for (let ring = 0; ring < pTotal; ring++) {
+          for (let seg = 0; seg < pAng; seg++) {
+            const a = ring * (pAng + 1) + seg;
+            const b = a + 1;
+            const c = a + pAng + 1;
+            const d = c + 1;
+            pIdx.push(a, c, b, b, c, d);
+          }
+        }
+        const pGeo = new THREE.BufferGeometry();
+        pGeo.setAttribute('position', new THREE.Float32BufferAttribute(pPos, 3));
+        pGeo.setIndex(pIdx);
+        pGeo.computeVertexNormals();
+        const pNorm = pGeo.getAttribute('normal') as THREE.BufferAttribute;
+        const pColor = new THREE.Color();
+        for (let ring = 0; ring <= pTotal; ring++) {
+          const dRatio = pRingDist(ring);
+          for (let seg = 0; seg <= pAng; seg++) {
+            const index = ring * (pAng + 1) + seg;
+            const angle = (seg / pAng) * Math.PI * 2;
+            const coast = getIslandCoastWeights(island, angle);
+            const pointY = pPos[index * 3 + 1];
+            const slope = THREE.MathUtils.clamp(1 - pNorm.getY(index), 0, 1);
+            const heightNorm = THREE.MathUtils.clamp((pointY - seaBase) / peakEst, 0, 1);
+            const shoreMask = THREE.MathUtils.smoothstep(dRatio, 0.72, 0.99);
+            pColor.copy(sandColor);
+            pColor.lerp(beachColor, shoreMask * coast.beach * 0.95);
+            pColor.lerp(cliffColor, shoreMask * (coast.rocky + coast.cliff) * 0.75);
+            pColor.lerp(grassColor, THREE.MathUtils.smoothstep(heightNorm, 0.02, 0.42) * (1 - shoreMask));
+            pColor.lerp(rockSlopeColor, THREE.MathUtils.smoothstep(slope, 0.26, 0.6) * (1 - shoreMask) * 0.85);
+            pColor.lerp(peakColor, THREE.MathUtils.smoothstep(heightNorm, 0.88, 1) * 0.4);
+            const wet = THREE.MathUtils.smoothstep(-pointY, -0.55, 0.25);
+            if (wet > 0) {
+              pColor.lerp(wetSandColor, wet * 0.6);
+              pColor.lerp(submergedColor, THREE.MathUtils.smoothstep(-pointY, 0.2, 2.6) * 0.8);
+            }
+            pCol.push(pColor.r, pColor.g, pColor.b);
+          }
+        }
+        pGeo.setAttribute('color', new THREE.Float32BufferAttribute(pCol, 3));
+        const proxyMesh = new THREE.Mesh(
+          pGeo,
+          new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98 }),
         );
-        proxyPeak.position.set(
-          Math.cos(island.profile.primaryHillAngle) * island.profile.primaryHillOffset * 0.35,
-          Math.max(4.5, r * 0.13),
-          Math.sin(island.profile.primaryHillAngle) * island.profile.primaryHillOffset * 0.35,
-        );
-        proxyRoot.add(proxyPeak);
+        proxyRoot.add(proxyMesh);
       }
 
       if (lowDetail) {
@@ -5973,7 +6017,16 @@ export class Game {
 
     const hasForcedInput = this.input.hasPendingActions() || this.pendingInteractFromUi || this.pendingLaunchFromUi;
     if (this.network.isConnected() && (this.inputSendTimer <= 0 || hasForcedInput)) {
+      if (this.input.consumeLegendPressed()) {
+        const legend = document.getElementById('controls-hint');
+        if (legend) legend.style.display = legend.style.display === 'block' ? 'none' : 'block';
+      }
       const input = this.input.buildInput();
+      if (this.spyglassActive) {
+        // A raised spyglass occupies both hands.
+        input.fire = false;
+        input.aim = false;
+      }
       if (input.useWheelItem && input.wheelIndex !== null) {
         this.startPocketUsePreview(input.wheelIndex);
       }
@@ -5987,7 +6040,11 @@ export class Game {
         ? (currentInteractKind ?? (uiInteract ? this.lastInteractKind : null))
         // Bail is a continuous hold, so its intent must ride every held frame — not
         // just the press edge — for the server's held-interact drain to keep running.
-        : (input.interactHeld && currentInteractKind === 'bail' ? 'bail' : null);
+        // Bail and revive are continuous holds — their intent must ride every
+        // held frame for the server-side drain/charge to keep running.
+        : (input.interactHeld && (currentInteractKind === 'bail' || currentInteractKind === 'revive')
+          ? currentInteractKind
+          : null);
       if (this.pendingLaunchFromUi) {
         input.jumpPressed = true;
         this.pendingLaunchFromUi = false;
@@ -6003,6 +6060,9 @@ export class Game {
     }
 
     this.updateMermaid(now);
+    // Stream one queued island build per frame (join used to build all 10
+    // synchronously and freeze the tab for seconds).
+    this.drainIslandBuildQueue(1);
     this.renderer.updatePerformance(dt);
     this.renderer.render();
     this.updatePointerLockHint();
@@ -6116,7 +6176,10 @@ export class Game {
 
     const quality = this.renderer.getQuality();
     const cam = this.renderer.camera.position;
-    const detailRadius = quality === 'low' ? 180 : quality === 'balanced' ? 300 : 420;
+    // Islands are THE landmark visuals: hold full detail out to AAA distances,
+    // measured from the island EDGE (footprint radius), not its center — a
+    // 200m-radius island's shoreline used to flip to proxy while you stood on it.
+    const detailRadius = quality === 'low' ? 420 : quality === 'balanced' ? 700 : 950;
     const wildlifeRadius = quality === 'low' ? 220 : quality === 'balanced' ? 360 : 520;
     const lootRadius = quality === 'low' ? 340 : quality === 'balanced' ? 520 : 760;
     const seaRockRadius = quality === 'low' ? 650 : quality === 'balanced' ? 900 : 1200;
@@ -6130,7 +6193,8 @@ export class Game {
       const detailRoot = group.userData.detailRoot as THREE.Object3D | undefined;
       const proxyRoot = group.userData.proxyRoot as THREE.Object3D | undefined;
       if (detailRoot && proxyRoot) {
-        const showDetail = dist < detailRadius;
+        const edgeDist = dist - getIslandMaxRadius(island);
+        const showDetail = edgeDist < detailRadius;
         detailRoot.visible = showDetail;
         proxyRoot.visible = !showDetail;
       }
@@ -6275,18 +6339,34 @@ export class Game {
     this.syncSharks(dt);
     this.syncWildlife(dt);
     this.updateEnvironmentLod();
+    // Per-frame so the wall/ring track the shrink smoothly instead of stepping
+    // only when snapshots arrive.
+    this.updateStormRing();
     this.stormWall.rotation.y = this.ocean.getTime() * 0.035;
     this.stormWallTexture.offset.x = this.ocean.getTime() * 0.018;
     this.stormHalo.rotation.z = this.ocean.getTime() * 0.12;
     this.stormWeatherIntensity = this.computeStormWeatherIntensity();
     this.renderer.updateStormWeather(this.stormWeatherIntensity);
     this.ocean.setStormIntensity(this.stormWeatherIntensity);
-    const effectScale = this.renderer.getEffectScale();
-    const rainInterval = effectScale < 0.55 ? 1 / 12 : effectScale < 0.85 ? 1 / 18 : 0;
-    if (this.rainOverlayTimer <= 0) {
-      this.updateStormRainOverlay(dt, this.computeStormRainIntensity());
-      this.rainOverlayTimer = rainInterval;
+    // Storm SEA GEOMETRY (separate from the color tint above): the shader
+    // mirrors getStormWaveIntensity, so waves genuinely rage inside the ring.
+    // phase01 must match the shared formula: clamp(phase / 6, 0, 1) — phase is
+    // 0-indexed over the 7 STORM_PHASES.
+    if (this.state?.storm) {
+      const storm = this.state.storm;
+      this.ocean.setStormState(
+        storm.centerX,
+        storm.centerZ,
+        storm.safeRadius,
+        THREE.MathUtils.clamp(storm.phase / 6, 0, 1),
+      );
+    } else {
+      this.ocean.clearStormState();
     }
+    const effectScale = this.renderer.getEffectScale();
+    // World-space rain runs every frame (cheap buffer update; the old canvas
+    // overlay throttle is gone with the overlay).
+    this.updateStormRain3D(dt, this.computeStormRainIntensity());
     this.updateStormLightningFlash(dt);
     const stormW = this.stormWeatherIntensity;
     const wallMat = this.stormWall.material as THREE.MeshBasicMaterial;
@@ -6452,7 +6532,8 @@ export class Game {
     }
     if (player.state === 'swimming') {
       const t = this.ocean.getTime();
-      const waveY = gerstnerHeight(predictedX, predictedZ, t, WAVE_PARAMS);
+      const swimStorm = getStormWaveIntensity(this.state?.storm, predictedX, predictedZ);
+      const waveY = gerstnerHeight(predictedX, predictedZ, t, WAVE_PARAMS, swimStorm);
       const waterSurface = waveY + 0.28;
       const targetFeetY = waterSurface - 0.18;
       // Only snap the visual to the surface when the SERVER position is also
@@ -6510,7 +6591,17 @@ export class Game {
         if (r2 > islandReach * islandReach) continue;
 
         if (isPointInsideIslandFootprint(island, predictedX, predictedZ, 0)) {
-          resolvedSurfaceY = Math.max(resolvedSurfaceY, getIslandSurfaceY(island, predictedX, predictedZ) + 0.03);
+          // Mirror the server's islandStandY: inside a cave tunnel the
+          // authoritative floor is the carved cave floor, 2-6m below the
+          // natural hillside — snapping to the hilltop made players pop out
+          // of caves and jitter against server corrections.
+          let standY = getIslandSurfaceY(island, predictedX, predictedZ);
+          const caveCeil = getCaveCeilingY(island, predictedX, predictedZ);
+          if (caveCeil !== null && player.position.y < caveCeil - 0.1) {
+            const caveFloor = getCaveFloorY(island, predictedX, predictedZ);
+            if (caveFloor !== null && caveFloor < standY) standY = caveFloor;
+          }
+          resolvedSurfaceY = Math.max(resolvedSurfaceY, standY + 0.03);
         }
         if (island.dock) {
           const dx = predictedX - island.dock.position.x;
@@ -7367,7 +7458,16 @@ export class Game {
 
     let desired: THREE.Vector3;
     let lookTarget: THREE.Vector3;
-    let targetFov = scopedFov ?? (aimingFirearm ? 64 : swimming ? 78 : 74);
+    // Spyglass: hold P — 6° (~12x) beats the sniper's 14° by design. Active
+    // when not manning a cannon, not aiming a firearm, and able to stand.
+    const spyglassActive = this.input.isSpyglassHeld()
+      && !aiming
+      && !player.atCannon
+      && player.state !== 'downed'
+      && player.state !== 'respawning'
+      && player.state !== 'eliminated';
+    this.spyglassActive = spyglassActive;
+    let targetFov = spyglassActive ? 6 : scopedFov ?? (aimingFirearm ? 64 : swimming ? 78 : 74);
 
     if (player.atCannon && trackedShip) {
       const aim = this.getCannonAim(trackedShip, player.cannonIndex, this.input.getYaw(), this.input.getPitch());
@@ -7472,6 +7572,7 @@ export class Game {
     const finalFov = targetFov + this.cameraFovKick;
     if (Math.abs(camera.fov - finalFov) > 0.02) {
       camera.fov += (finalFov - camera.fov) * Math.min(1, this.frameDt * 10);
+      this.input.setFovScale(camera.fov / 74);
       camera.updateProjectionMatrix();
     }
 
@@ -7502,7 +7603,8 @@ export class Game {
 
   private updateWaterEnvironment() {
     const camera = this.renderer.camera.position;
-    const waveY = gerstnerHeight(camera.x, camera.z, this.ocean.getTime(), WAVE_PARAMS);
+    const camStorm = getStormWaveIntensity(this.state?.storm, camera.x, camera.z);
+    const waveY = gerstnerHeight(camera.x, camera.z, this.ocean.getTime(), WAVE_PARAMS, camStorm);
     const depthBelowSurface = Math.max(0, waveY + 0.18 - camera.y);
     this.renderer.updateWaterEnvironment(depthBelowSurface, this.stormWeatherIntensity, this.ocean.getTime());
     this.ocean.setSunDirection(this.renderer.getSunDirection());
@@ -7618,12 +7720,18 @@ export class Game {
     this.updateBarrelPanel(player, ship);
 
     const timerSeconds = this.getStormTimerSeconds();
+    const lastPhase = this.state.storm.phase >= STORM_PHASES.length - 1;
+    const finalHold = lastPhase && !this.state.storm.shrinking && timerSeconds <= 0;
     const stormVerb = this.state.storm.shrinking ? 'CLOSING' : 'NEXT SHRINK';
-    this.ui.stormPhase.textContent = `STORM PHASE ${this.state.storm.phase + 1} - ${stormVerb}`;
-    this.ui.stormTimer.textContent = this.formatStormTimer(timerSeconds);
-    this.ui.mapSubtitle.textContent = this.state.storm.shrinking
-      ? `Storm moving now · closes in ${timerSeconds}s`
-      : `Next storm shift in ${timerSeconds}s`;
+    this.ui.stormPhase.textContent = finalHold
+      ? 'FINAL STORM - NO SAFE HARBOR'
+      : `STORM PHASE ${Math.min(this.state.storm.phase + 1, STORM_PHASES.length)} - ${stormVerb}`;
+    this.ui.stormTimer.textContent = finalHold ? '' : this.formatStormTimer(timerSeconds);
+    this.ui.mapSubtitle.textContent = finalHold
+      ? 'The storm has fully closed — finish the fight'
+      : this.state.storm.shrinking
+        ? `Storm moving now · closes in ${timerSeconds}s`
+        : `Next storm shift in ${timerSeconds}s`;
 
     const outsideStorm = this.distance2D(player.position.x, player.position.z, this.state.storm.centerX, this.state.storm.centerZ) > this.state.storm.safeRadius;
     const avgHull = ship
@@ -7777,7 +7885,7 @@ export class Game {
       this.ui.reloadIndicator.style.display = weapon?.reloading && weaponDef && !weaponDef.melee ? 'block' : 'none';
     }
     this.ui.scopeOverlay.style.display =
-      this.input.isAiming() && weapon && WEAPONS[weapon.weaponId].scopeFov ? 'block' : 'none';
+      this.spyglassActive || (this.input.isAiming() && weapon && WEAPONS[weapon.weaponId].scopeFov) ? 'block' : 'none';
     this.ui.crosshair.classList.toggle('cannon', player.atCannon);
     const shotgunCrosshair = !player.atCannon && weapon?.weaponId === 'blunderbuss';
     this.ui.crosshair.classList.toggle('shotgun', shotgunCrosshair);
@@ -7804,7 +7912,7 @@ export class Game {
       const superShot = player.superCannonballs > 0 && player.selectedCannonAmmo === 'cannonball'
         ? ` · SUPER x5 ready (${player.superCannonballs})`
         : '';
-      this.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · [4/5/6] shot type`;
+      this.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · [5/6/7] shot type`;
     } else if (player.atHelm) {
       this.ui.interactPrompt.style.display = 'block';
       this.ui.interactPrompt.textContent = '[X] Leave Helm';
@@ -9844,6 +9952,26 @@ export class Game {
   ): { prompt: string; label: string; kind: InteractIntent } | null {
     const candidates: Array<{ prompt: string; label: string; score: number; kind: InteractIntent }> = [];
 
+    // Downed crewmate nearby → hold to revive (server drains reviveProgress).
+    if (this.state && player.state === 'alive' && player.shipId) {
+      for (const other of this.state.players) {
+        if (other.id === player.id || other.state !== 'downed') continue;
+        if (other.shipId !== player.shipId) continue;
+        const d2 = this.distance2D(player.position.x, player.position.z, other.position.x, other.position.z);
+        if (d2 > 3.2 || Math.abs(other.position.y - player.position.y) > 2.2) continue;
+        this.pushInteractionCandidate(
+          candidates,
+          player,
+          new THREE.Vector3(other.position.x, other.position.y + 0.5, other.position.z),
+          3.4,
+          0.1,
+          `[X] Revive ${other.name}`,
+          'Hold to stabilize your crewmate',
+          'revive',
+        );
+      }
+    }
+
     const mermaidShip = this.getMermaidReturnShip(player);
     if (mermaidShip) {
       if (!this.mermaidAnchor || this.mermaidAnchor.shipId !== mermaidShip.id) {
@@ -10100,7 +10228,7 @@ export class Game {
           4.8,
           0.16,
           '[X] Use Cannon',
-          `Broadside cannon ${nearbyCannon + 1} · [4/5/6] ammo`,
+          `Broadside cannon ${nearbyCannon + 1} · [5/6/7] ammo`,
           'cannon',
         );
       }
@@ -10761,25 +10889,24 @@ export class Game {
   private computeStormWeatherIntensity(): number {
     if (!this.state) return 0;
     const player = this.getLocalPlayer();
-    const dist = player
-      ? this.distance2D(player.position.x, player.position.z, this.state.storm.centerX, this.state.storm.centerZ)
-      : 0;
     if (!player) return 0;
+    const dist = this.distance2D(player.position.x, player.position.z, this.state.storm.centerX, this.state.storm.centerZ);
 
     const safeRadius = Math.max(1, this.state.storm.safeRadius);
-    const outside = dist > safeRadius;
     const phase = this.state.storm.phase;
     const maxPhase = Math.max(1, STORM_PHASES.length);
     const phaseBoost = Math.min(1, phase / maxPhase) * 0.2;
     const shrinkBoost = this.state.storm.shrinking ? 0.08 + this.state.storm.shrinkProgress * 0.08 : 0;
 
-    if (outside) {
-      const stormDepth = THREE.MathUtils.clamp((dist - safeRadius) / 240, 0, 1);
-      return Math.min(1, 0.52 + phaseBoost + shrinkBoost + stormDepth * 0.32);
-    }
-
+    // Crossfade across a ±30m band at the wall — weather used to snap from
+    // 0.24 to 0.52+ the frame you crossed the boundary.
+    const distOutside = dist - safeRadius;
+    const outsideBlend = THREE.MathUtils.smoothstep(distOutside, -30, 30);
+    const stormDepth = THREE.MathUtils.clamp(distOutside / 240, 0, 1);
     const edgeFade = THREE.MathUtils.clamp((dist / safeRadius - 0.84) / 0.16, 0, 1);
-    return Math.min(0.24, edgeFade * 0.14 + shrinkBoost * 0.45);
+    const insideIntensity = Math.min(0.24, edgeFade * 0.14 + shrinkBoost * 0.45);
+    const outsideIntensity = Math.min(1, 0.52 + phaseBoost + shrinkBoost + stormDepth * 0.32);
+    return THREE.MathUtils.lerp(insideIntensity, outsideIntensity, outsideBlend);
   }
 
   private computeStormRainIntensity(): number {
@@ -10789,49 +10916,118 @@ export class Game {
 
     const dist = this.distance2D(player.position.x, player.position.z, this.state.storm.centerX, this.state.storm.centerZ);
     const safeRadius = Math.max(1, this.state.storm.safeRadius);
-    if (dist <= safeRadius) return 0;
-
     const phase = this.state.storm.phase;
     const maxPhase = Math.max(1, STORM_PHASES.length);
-    const stormDepth = THREE.MathUtils.clamp((dist - safeRadius) / 220, 0, 1);
+
+    // Rain builds across the wall band instead of popping on at the boundary.
+    const distOutside = dist - safeRadius;
+    const outsideBlend = THREE.MathUtils.smoothstep(distOutside, -25, 35);
+    if (outsideBlend <= 0.001) return 0;
+    const stormDepth = THREE.MathUtils.clamp(distOutside / 220, 0, 1);
     const shrinkBoost = this.state.storm.shrinking ? 0.08 : 0;
-    return Math.min(1, 0.34 + stormDepth * 0.42 + (phase / maxPhase) * 0.2 + shrinkBoost);
+    return Math.min(1, 0.34 + stormDepth * 0.42 + (phase / maxPhase) * 0.2 + shrinkBoost) * outsideBlend;
   }
 
-  private updateStormRainOverlay(_dt: number, intensity: number) {
-    const cv = this.stormRainCanvas;
-    const ctx = this.stormRainCtx;
-    if (!cv || !ctx) return;
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    const effectScale = this.renderer.getEffectScale();
-    const dprCap = effectScale < 0.55 ? 0.62 : effectScale < 0.85 ? 0.8 : 1.25;
-    const dpr = Math.min(dprCap, window.devicePixelRatio || 1);
-    const rw = Math.floor(w * dpr);
-    const rh = Math.floor(h * dpr);
-    if (cv.width !== rw || cv.height !== rh) {
-      cv.width = rw;
-      cv.height = rh;
-      cv.style.width = `${w}px`;
-      cv.style.height = `${h}px`;
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    if (intensity <= 0.001) return;
-    const t = this.ocean.getTime();
-    const drops = Math.floor((65 + intensity * 420) * (0.42 + effectScale * 0.58));
-    const alpha = 0.09 + intensity * 0.34;
-    ctx.strokeStyle = `rgba(205, 222, 245, ${alpha})`;
-    ctx.lineWidth = 1;
+  /** World-space rain: wind-blown line-segment drops falling around the
+   *  camera (replaces the old screen-space canvas overlay — rain now exists
+   *  in the world, slants with the wind, and reads correctly in motion). */
+  private rain3D: {
+    lines: THREE.LineSegments;
+    material: THREE.LineBasicMaterial;
+    geo: THREE.BufferGeometry;
+    pos: Float32Array;
+    drops: number;
+  } | null = null;
+
+  private ensureRain3D() {
+    if (this.rain3D) return this.rain3D;
+    const drops = 1600;
+    const pos = new Float32Array(drops * 2 * 3);
+    // Seed deterministically around the origin; first update recenters on camera.
     for (let i = 0; i < drops; i++) {
-      const sx = (i * 173.17 + Math.sin(t * 0.31 + i) * 14) % w;
-      const sy = ((i * 67.31 + t * (88 + intensity * 160)) % (h + 36)) - 18;
-      const len = 6 + intensity * 26;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(sx - 1.35, sy + len);
-      ctx.stroke();
+      const o = i * 6;
+      const a = (i * 2.399963) % (Math.PI * 2); // golden-angle spiral: even disc coverage
+      const rad = 30 * Math.sqrt(((i * 7919) % 1000) / 1000);
+      pos[o] = Math.cos(a) * rad;
+      pos[o + 1] = ((i * 37) % 240) / 10 - 4;
+      pos[o + 2] = Math.sin(a) * rad;
+      pos[o + 3] = pos[o];
+      pos[o + 4] = pos[o + 1] - 0.5;
+      pos[o + 5] = pos[o + 2];
     }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+    const material = new THREE.LineBasicMaterial({
+      color: 0xcfe0f4,
+      transparent: true,
+      opacity: 0.3,
+      depthWrite: false,
+    });
+    const lines = new THREE.LineSegments(geo, material);
+    lines.frustumCulled = false;
+    lines.renderOrder = 8;
+    lines.visible = false;
+    this.renderer.scene.add(lines);
+    this.rain3D = { lines, material, geo, pos, drops };
+    return this.rain3D;
+  }
+
+  private updateStormRain3D(dt: number, intensity: number) {
+    // Clear the legacy canvas overlay once (kept in the DOM for compatibility).
+    if (this.stormRainCanvas && this.stormRainCtx && this.stormRainCanvas.width > 0) {
+      this.stormRainCtx.clearRect(0, 0, this.stormRainCanvas.width, this.stormRainCanvas.height);
+      this.stormRainCanvas.width = 0;
+    }
+    if (intensity <= 0.001) {
+      if (this.rain3D) this.rain3D.lines.visible = false;
+      return;
+    }
+    const rain = this.ensureRain3D();
+    rain.lines.visible = true;
+    const cam = this.renderer.camera.position;
+    const t = this.ocean.getTime();
+    const wind = sampleWind(t);
+    const gust = Math.sin(t * 2.7) * 0.5 + Math.sin(t * 6.3 + 1.4) * 0.3;
+    const windSpeed = (4 + intensity * 9) * wind.strength + gust * intensity * 3;
+    const windX = Math.sin(wind.direction) * windSpeed;
+    const windZ = Math.cos(wind.direction) * windSpeed;
+    const fallSpeed = 21 + intensity * 11;
+    const active = Math.max(24, Math.floor(rain.drops * (0.22 + intensity * 0.78)));
+    const streak = 0.32 + intensity * 0.5;
+    // Normalized fall direction × streak length for the trailing vertex.
+    const vLen = Math.hypot(windX, windZ, fallSpeed);
+    const sx = (windX / vLen) * streak;
+    const sy = (fallSpeed / vLen) * streak;
+    const sz = (windZ / vLen) * streak;
+    const pos = rain.pos;
+    const spawnRadius = 32;
+    for (let i = 0; i < active; i++) {
+      const o = i * 6;
+      let x = pos[o] + windX * dt * 0.85;
+      let y = pos[o + 1] - fallSpeed * dt;
+      let z = pos[o + 2] + windZ * dt * 0.85;
+      // Recycle drops that fell below the camera or drifted out of the volume.
+      const dx = x - cam.x;
+      const dz = z - cam.z;
+      if (y < cam.y - 8 || dx * dx + dz * dz > spawnRadius * spawnRadius * 1.9) {
+        const a = Math.random() * Math.PI * 2;
+        const rad = spawnRadius * Math.sqrt(Math.random());
+        // Bias the spawn upwind so the slanted fall carries drops across the view.
+        x = cam.x + Math.cos(a) * rad - (windX / Math.max(1, windSpeed)) * 8;
+        z = cam.z + Math.sin(a) * rad - (windZ / Math.max(1, windSpeed)) * 8;
+        y = cam.y + 12 + Math.random() * 14;
+      }
+      pos[o] = x;
+      pos[o + 1] = y;
+      pos[o + 2] = z;
+      pos[o + 3] = x - sx;
+      pos[o + 4] = y + sy;
+      pos[o + 5] = z - sz;
+    }
+    rain.geo.setDrawRange(0, active * 2);
+    (rain.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    const nightFactor = this.renderer.getAtmosphere().nightFactor ?? 0;
+    rain.material.opacity = (0.16 + intensity * 0.26) * (1 - nightFactor * 0.35);
   }
 
   private updateStormLightningFlash(dt: number) {

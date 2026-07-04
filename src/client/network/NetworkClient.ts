@@ -1,4 +1,5 @@
 import type {
+  HotSnapshotPayload,
   NetMsg, PlayerInput, GameState, TradeActionPayload,
   WelcomePayload, LobbyUpdatePayload, QueueUpdatePayload, MatchStartPayload,
   PlayerStatsRecord,
@@ -14,6 +15,9 @@ export class NetworkClient {
 
   // Game-scoped events
   public onSnapshot: ((state: GameState) => void) | null = null;
+  public onHotSnapshot: ((hot: HotSnapshotPayload) => void) | null = null;
+  public onPlayerDowned: ((payload: { playerId: string; playerName: string; attackerId: string | null; attackerName: string | null }) => void) | null = null;
+  public onReviveComplete: ((payload: { playerId: string; playerName: string; reviverId: string | null; reviverName: string | null }) => void) | null = null;
   public onJoin: ((playerId: string, shipId: string, snapshot: GameState) => void) | null = null;
   public onPlayerHit: ((payload: unknown) => void) | null = null;
   public onShipHit: ((payload: unknown) => void) | null = null;
@@ -94,6 +98,11 @@ export class NetworkClient {
       case 'state_snapshot':
         this.queueSnapshot(msg.payload as GameState);
         break;
+      case 'state_hot':
+        this.queueHotSnapshot(msg.payload as HotSnapshotPayload);
+        break;
+      case 'player_downed': this.onPlayerDowned?.(msg.payload as Parameters<NonNullable<typeof this.onPlayerDowned>>[0]); break;
+      case 'revive_complete': this.onReviveComplete?.(msg.payload as Parameters<NonNullable<typeof this.onReviveComplete>>[0]); break;
       case 'player_hit': this.onPlayerHit?.(msg.payload); break;
       case 'ship_hit': this.onShipHit?.(msg.payload); break;
       case 'kill_event': this.onKillEvent?.(msg.payload); break;
@@ -127,6 +136,21 @@ export class NetworkClient {
       const latest = this.pendingSnapshot;
       this.pendingSnapshot = null;
       if (latest) this.onSnapshot?.(latest);
+    });
+  }
+
+  private pendingHot: HotSnapshotPayload | null = null;
+  private hotFlushQueued = false;
+
+  private queueHotSnapshot(hot: HotSnapshotPayload) {
+    this.pendingHot = hot;
+    if (this.hotFlushQueued) return;
+    this.hotFlushQueued = true;
+    requestAnimationFrame(() => {
+      this.hotFlushQueued = false;
+      const latest = this.pendingHot;
+      this.pendingHot = null;
+      if (latest) this.onHotSnapshot?.(latest);
     });
   }
 

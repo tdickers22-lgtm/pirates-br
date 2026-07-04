@@ -11,9 +11,13 @@ const GAME_URL = 'http://127.0.0.1:3000/?debug&quality=high';
 
 mkdirSync(OUT, { recursive: true });
 
-const browser = await chromium.launch();
+// Real GPU (ANGLE→Metal) instead of SwiftShader: software rasterization makes
+// the full-canvas readback for screenshots time out on heavy scenes.
+const browser = await chromium.launch({
+  args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'],
+});
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-const shot = (name) => page.screenshot({ path: `${OUT}/${name}.png` });
+const shot = (name) => page.screenshot({ path: `${OUT}/${name}.png`, timeout: 60_000 });
 const look = (yaw, pitch = -0.06) =>
   page.evaluate(([y, p]) => window.__piratesBR?.input?.setLook(y, p), [yaw, pitch]);
 
