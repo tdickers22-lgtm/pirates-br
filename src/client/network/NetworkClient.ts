@@ -21,6 +21,7 @@ export class NetworkClient {
   public onJoin: ((playerId: string, shipId: string, snapshot: GameState) => void) | null = null;
   public onPlayerHit: ((payload: unknown) => void) | null = null;
   public onShipHit: ((payload: unknown) => void) | null = null;
+  public onShipDamage: ((payload: unknown) => void) | null = null;
   public onKillEvent: ((payload: unknown) => void) | null = null;
   public onKegExploded: ((payload: unknown) => void) | null = null;
   public onChestOpened: ((payload: unknown) => void) | null = null;
@@ -105,6 +106,7 @@ export class NetworkClient {
       case 'revive_complete': this.onReviveComplete?.(msg.payload as Parameters<NonNullable<typeof this.onReviveComplete>>[0]); break;
       case 'player_hit': this.onPlayerHit?.(msg.payload); break;
       case 'ship_hit': this.onShipHit?.(msg.payload); break;
+      case 'ship_damage': this.onShipDamage?.(msg.payload); break;
       case 'kill_event': this.onKillEvent?.(msg.payload); break;
       case 'keg_exploded': this.onKegExploded?.(msg.payload); break;
       case 'chest_opened': this.onChestOpened?.(msg.payload); break;

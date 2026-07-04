@@ -2472,6 +2472,15 @@ export class Game {
       }, true);
     };
 
+    this.network.onShipDamage = (payload) => {
+      // Broadcast to everyone in range: victims and bystanders see the hit
+      // splinter where the ball actually struck ('ship_hit' stays the
+      // attacker-only confirm with hitmarker + sound).
+      const hit = payload as { attackerId?: string | null; position?: { x: number; y: number; z: number }; projectileType?: string };
+      if (!hit.position || hit.attackerId === this.localPlayerId) return;
+      this.combatFx.emitShipHitConfirm(hit.position, this.renderer.camera.position);
+    };
+
     this.network.onKillEvent = (payload) => {
       const event = payload as {
         killerId?: string | null;
