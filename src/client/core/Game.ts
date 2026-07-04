@@ -4091,7 +4091,7 @@ export class Game {
         // later pass moves landmarks to the server prop registry).
         wreckGlb.rotation.z = (rng(islandSeed * 19) - 0.5) * 0.2;
         group.add(wreckGlb);
-      } else if (wreckSolid) {
+      } else if (false as boolean) { // procedural wreck fallback retired — GLB or nothing
         const wreck = new THREE.Group();
         wreck.position.copy(wreckPos);
         wreck.rotation.y = -wreckAngle + Math.PI * 0.5;
@@ -4485,70 +4485,9 @@ export class Game {
       }
     }
 
-    // ── Stone arch landmark ──
-    if (!lowDetail && r > 42) {
-      const archAngle = island.profile.ridgeAxis + Math.PI * 0.5 + rng(islandSeed * 59) * 0.6;
-      const archBase = surfacePoint(0.42 + rng(islandSeed * 61) * 0.18, archAngle, 0);
-      if (isSolidDecorPoint(archBase, SURFACE_ABOVE_WATER, -0.2)) {
-        const arch = new THREE.Group();
-        const archYaw = archAngle;
-        arch.rotation.y = archYaw;
-        const archMat = new THREE.MeshStandardMaterial({ color: 0x6c5e48, roughness: 1, flatShading: true });
-        const span = 4.5 + rng(islandSeed * 67) * 2.5;
-        const tall = 4.0 + rng(islandSeed * 71) * 2.0;
-        const thickness = 0.9;
-        // Sample ground at each pillar position so neither pillar floats
-        const cosY = Math.cos(archYaw);
-        const sinY = Math.sin(archYaw);
-        const pillarSurfaces: Record<-1 | 1, number> = { [-1]: 0, [1]: 0 } as Record<-1 | 1, number>;
-        for (const side of [-1, 1] as const) {
-          const localX = side * span * 0.5;
-          const wx = archBase.x + island.position.x + localX * cosY;
-          const wz = archBase.z + island.position.z + -localX * sinY;
-          pillarSurfaces[side] = getIslandSurfaceY(island, wx, wz);
-        }
-        const minPillarSurface = Math.min(pillarSurfaces[-1], pillarSurfaces[1]);
-        const maxPillarSurface = Math.max(pillarSurfaces[-1], pillarSurfaces[1]);
-        arch.position.set(archBase.x, minPillarSurface, archBase.z);
-        const liftedTall = tall + (maxPillarSurface - minPillarSurface);
-        for (const side of [-1, 1] as const) {
-          const localBase = pillarSurfaces[side] - minPillarSurface;
-          const pillarH = liftedTall - localBase;
-          const pillar = new THREE.Mesh(new THREE.BoxGeometry(thickness, pillarH, thickness), archMat);
-          pillar.position.set(side * span * 0.5, localBase + pillarH * 0.5, 0);
-          pillar.rotation.y = (rng((side > 0 ? 1 : 2) * 73) - 0.5) * 0.18;
-          pillar.castShadow = true;
-          pillar.receiveShadow = true;
-          arch.add(pillar);
-          // Boulders piling against the base of the pillar to ground it
-          for (let s = 0; s < 4; s++) {
-            const sa = (s / 4) * Math.PI * 2;
-            const stone = new THREE.Mesh(boulderGeo, boulderMat);
-            stone.scale.setScalar(0.32 + rng(s * 871 + (side > 0 ? 1 : 2)) * 0.2);
-            stone.position.set(
-              side * span * 0.5 + Math.cos(sa) * 0.6,
-              localBase + 0.18,
-              Math.sin(sa) * 0.6,
-            );
-            stone.rotation.set(rng(s * 873) * Math.PI, rng(s * 877) * Math.PI, rng(s * 881) * Math.PI);
-            stone.castShadow = true;
-            arch.add(stone);
-          }
-        }
-        const archSegs = 7;
-        for (let i = 0; i < archSegs; i++) {
-          const t = i / (archSegs - 1);
-          const ax = (t - 0.5) * span;
-          const ay = liftedTall + Math.sin(t * Math.PI) * 1.2;
-          const stone = new THREE.Mesh(new THREE.BoxGeometry(span / archSegs * 1.05, 0.8, thickness), archMat);
-          stone.position.set(ax, ay, 0);
-          stone.rotation.z = (t - 0.5) * 0.6;
-          stone.castShadow = true;
-          arch.add(stone);
-        }
-        group.add(arch);
-      }
-    }
+    // (Procedural stone arch removed — rock_arch is a real Blender GLB
+    // placed by the server prop registry now.)
+
 
     // ── Lookout post — wooden tower on or near a high point ──
     if (!lowDetail && r > 40) {

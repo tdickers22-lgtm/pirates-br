@@ -29,6 +29,9 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   watchtower: { shape: 'capsule', radius: 2.5, height: 9.0 },
   shipwreck: { shape: 'sphere', radius: 2.6, height: 3.2 },
   standing_stones: { shape: 'sphere', radius: 1.2, height: 2.6 },
+  tent_a: { shape: 'sphere', radius: 1.3, height: 1.6 },
+  bedroll: { shape: 'none', radius: 0, height: 0.2 },
+  rock_arch: { shape: 'none', radius: 0, height: 4.6 },
   dock_mid: { shape: 'none', radius: 0, height: 1.1 },
   dock_end: { shape: 'none', radius: 0, height: 1.1 },
 };

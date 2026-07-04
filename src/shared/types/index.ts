@@ -244,6 +244,7 @@ export type IslandPropType =
   | 'boulder_a' | 'boulder_b' | 'boulder_c'
   | 'barrel' | 'crate' | 'campfire' | 'lantern_post'
   | 'watchtower' | 'shipwreck' | 'standing_stones'
+  | 'tent_a' | 'bedroll' | 'rock_arch'
   | 'dock_mid' | 'dock_end';
 
 /** Deterministic decorative/landmark prop. Positions are WORLD-space XZ; Y is
