@@ -20,7 +20,10 @@ const look = (yaw, pitch = -0.06) =>
 await page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#menu-solo-btn', { timeout: 15_000 });
 await shot('01-menu');
-await page.click('#menu-solo-btn');
+// noWaitAfter: the synchronous world build can freeze the main thread long
+// enough that Playwright's post-click navigation wait times out even though
+// the click landed and the join succeeded.
+await page.click('#menu-solo-btn', { noWaitAfter: true });
 await page.waitForFunction(() => {
   const g = window.__piratesBR;
   return g?.state?.phase === 'playing';

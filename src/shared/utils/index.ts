@@ -242,27 +242,50 @@ export function weightedRandom<T>(items: Array<{ weight: number } & T>): T {
 }
 
 /**
- * Roughness scalar in [0.25, 1.55] — slow drift between glassy calm and proper chop.
- * Two superimposed sines guarantee an irregular pattern: every match feels different
- * and the sea visibly transitions between flat days and rolling swells.
+ * Roughness scalar in [0.55, 1.6] — slow drift between gentle seas and proper chop
+ * (never glassy: the ocean should always visibly breathe). Two superimposed sines
+ * guarantee an irregular pattern so every match feels different.
  *
  * The function is deterministic in `t` so client and server agree on the same wave
  * height at every shared timestamp — physics stays consistent with rendering.
  */
 export function getOceanRoughness(t: number): number {
-  const slow = Math.sin(t * 0.013) * 0.55;
-  const slower = Math.sin(t * 0.0042 + 1.7) * 0.35;
-  return clamp(0.85 + slow + slower, 0.25, 1.55);
+  const slow = Math.sin(t * 0.013) * 0.45;
+  const slower = Math.sin(t * 0.0042 + 1.7) * 0.3;
+  return clamp(1.0 + slow + slower, 0.55, 1.6);
+}
+
+/** Storm sea-state at a world position: 0 = calm seas, 1 = full raging swell.
+ *  Deterministic from replicated storm state (center/safeRadius/phase), so the
+ *  client shader, client gameplay and server physics all agree. Seas heave
+ *  hardest INSIDE the deadly ring, ramp up across a band around its edge, and
+ *  get globally rougher in late phases even in the safe zone. */
+export function getStormWaveIntensity(
+  storm: { center: Vec2; safeRadius: number; phase: number } | null | undefined,
+  x: number,
+  z: number,
+): number {
+  if (!storm) return 0;
+  const phase01 = clamp((storm.phase - 1) / 6, 0, 1);
+  const distOutside = Math.hypot(x - storm.center.x, z - storm.center.y) - storm.safeRadius;
+  // Inside the ring: full storm. Approaching the edge (within 140m): ramp up.
+  const edge = smoothstep(-140, 40, distOutside);
+  // Ambient late-game chop everywhere, so the endgame ocean feels hostile.
+  const ambient = phase01 * 0.38;
+  return clamp(Math.max(edge * (0.55 + phase01 * 0.45), ambient), 0, 1);
 }
 
 /** Simple Gerstner wave height at world position. Amplitude is modulated by the
- *  global ocean roughness so the same call site produces the same wave height
- *  on client and server at any given time. */
+ *  global ocean roughness — and by the local storm sea-state, which both scales
+ *  the base waves and blends in the dedicated STORM_WAVE_PARAMS swell — so the
+ *  same call site produces the same wave height on client and server at any
+ *  given time. `storm` is getStormWaveIntensity() at (x, z); omit for calm. */
 export function gerstnerHeight(
   x: number, z: number, t: number,
-  waves: Array<{ amplitude: number; wavelength: number; direction: Vec2; speed: number }>
+  waves: Array<{ amplitude: number; wavelength: number; direction: Vec2; speed: number }>,
+  storm = 0,
 ): number {
-  const roughness = getOceanRoughness(t);
+  const roughness = getOceanRoughness(t) * (1 + storm * 0.85);
   let height = 0;
   for (const w of waves) {
     const k = (2 * Math.PI) / w.wavelength;
@@ -271,14 +294,33 @@ export function gerstnerHeight(
     const f = k * (d.x * x + d.y * z - c * t);
     height += w.amplitude * roughness * Math.sin(f);
   }
+  if (storm > 0) {
+    for (const w of STORM_WAVE_PARAMS) {
+      const k = (2 * Math.PI) / w.wavelength;
+      const d = normalize2D(w.direction);
+      const f = k * (d.x * x + d.y * z - w.speed * t);
+      height += w.amplitude * storm * Math.sin(f);
+    }
+  }
   return height;
 }
 
+/** Base sea. Amplitudes chosen so calm water visibly breathes (~±1m combined
+ *  at roughness 1) without making decks nauseating. */
 export const WAVE_PARAMS = [
-  { amplitude: 0.32, wavelength: 86, direction: { x: 1, y: 0.4 }, speed: 5.6 },
-  { amplitude: 0.20, wavelength: 52, direction: { x: -0.5, y: 1 }, speed: 4.6 },
-  { amplitude: 0.12, wavelength: 34, direction: { x: 0.8, y: -0.6 }, speed: 6.5 },
-  { amplitude: 0.06, wavelength: 20, direction: { x: -0.3, y: -0.9 }, speed: 7.4 },
+  { amplitude: 0.46, wavelength: 96, direction: { x: 1, y: 0.4 }, speed: 6.4 },
+  { amplitude: 0.30, wavelength: 58, direction: { x: -0.5, y: 1 }, speed: 5.2 },
+  { amplitude: 0.17, wavelength: 34, direction: { x: 0.8, y: -0.6 }, speed: 6.5 },
+  { amplitude: 0.08, wavelength: 20, direction: { x: -0.3, y: -0.9 }, speed: 7.4 },
+];
+
+/** Dedicated storm swell, blended in by the local storm sea-state: two long
+ *  aligned rollers plus a short chaotic chop. At storm=1 this adds ~±2.6m on
+ *  top of the boosted base sea — decks pitch hard, small boats struggle. */
+export const STORM_WAVE_PARAMS = [
+  { amplitude: 1.55, wavelength: 150, direction: { x: 0.92, y: 0.39 }, speed: 11.5 },
+  { amplitude: 0.75, wavelength: 74, direction: { x: 0.72, y: 0.7 }, speed: 8.6 },
+  { amplitude: 0.35, wavelength: 30, direction: { x: -0.2, y: -0.98 }, speed: 9.8 },
 ];
 
 export function sampleWind(t: number): { direction: number; strength: number } {
@@ -521,8 +563,11 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const coast = getIslandCoastWeights(island, angle);
   const seaLiftBase = 5.15 + island.radius * 0.0085;
   const cliffLift = clamp(7.4 + island.radius * 0.03 * (0.7 + profile.heightProfile * 0.45), 7, 10);
-  const rockyLift = 3.9 + island.radius * 0.006;
-  const beachLift = 2.3 + island.radius * 0.004;
+  const rockyLift = 3.3 + island.radius * 0.005;
+  // Beaches hug the sea: low enough that swell laps visibly up the sand, high
+  // enough that storm waves (~+2.5m peaks near the rim's wet-sand band) don't
+  // flood the dry berm where camps/chests sit.
+  const beachLift = 1.45 + island.radius * 0.003;
   const coastLift = coast.beach * beachLift + coast.rocky * rockyLift + coast.cliff * cliffLift;
   // Interior keeps the classic plinth; the rim morphs toward the coast profile.
   const shoreMix = smoothstep(0.55, 0.92, distRatio);
@@ -588,9 +633,9 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // ── Signed shore drop past the rim (heightfield continues UNDERWATER) ──
   // Beach: ease interior → wet sand (~+0.42m) by distRatio ~0.97, then slide
   // under the waterline to ~−2.6m by ~1.15 so a swimmer walks straight in.
-  const beachEase = smoothstep(0.84, 0.97, distRatio);
-  const beachUnder = smoothstep(0.985, 1.15, distRatio);
-  const beachY = lerp(naturalY, lerp(0.42, -2.6, beachUnder), beachEase);
+  const beachEase = smoothstep(0.8, 0.96, distRatio);
+  const beachUnder = smoothstep(0.975, 1.15, distRatio);
+  const beachY = lerp(naturalY, lerp(0.38, -3.0, beachUnder), beachEase);
   // Rocky: mid shelf holds a little longer, then steps down.
   const rockyY = lerp(naturalY, -3.4, smoothstep(0.96, 1.14, distRatio));
   // Cliff: tall plinth holds to the footprint edge, then plunges — a wall.
