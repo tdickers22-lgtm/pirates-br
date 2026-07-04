@@ -1592,10 +1592,26 @@ export class ShipRenderer {
 
     // ── Water-in-hull plane ──────────────────────────────────
     // Dark flooding water inside the hold, visible from above through the open
-    // companionway / hatch grating. Hidden until (ship as any).waterLevel > 0;
+    // companionway / hatch grating. Hidden until ship.waterLevel > 0.02;
     // its Y rises with the flood level and a few verts ripple in update().
-    const holdWaterGeo = new THREE.PlaneGeometry(W * 0.8, L * 0.82, 6, 8);
+    // The plane is FITTED to the interior footprint: each z-row is scaled to
+    // the loft's waterline half-width at that station, so the rising sheet
+    // stays inside the hull silhouette instead of poking through the tapered
+    // bow/stern planking. (Above local y=0 the hull only gets wider toward the
+    // wale, so the waterline half-width is a safe inner bound at every fill.)
+    const holdWaterGeo = new THREE.PlaneGeometry(1, 1, 6, 8);
     holdWaterGeo.rotateX(-Math.PI * 0.5);
+    {
+      const pos = holdWaterGeo.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        const zLocal = pos.getZ(i) * L * 0.9; // rows span ±0.45 L
+        const half = Math.max(0.16, hullSurfacePointAt(profile, zLocal, 0).x * 0.92);
+        pos.setX(i, pos.getX(i) * 2 * half); // ±0.5 → ±half at this station
+        pos.setZ(i, zLocal);
+      }
+      pos.needsUpdate = true;
+      holdWaterGeo.computeVertexNormals();
+    }
     const holdWater = new THREE.Mesh(
       holdWaterGeo,
       new THREE.MeshStandardMaterial({
@@ -1609,7 +1625,7 @@ export class ShipRenderer {
         side: THREE.DoubleSide,
       }),
     );
-    holdWater.position.set(0, 0.42, holeCz * 0.4);
+    holdWater.position.set(0, 0.42, 0);
     holdWater.visible = false;
     holdWater.renderOrder = 1;
     const holdWaterBase = Float32Array.from(
@@ -2959,7 +2975,9 @@ export class ShipRenderer {
       const dmg = ship.hull;
       const floodRoll = ((1 - THREE.MathUtils.clamp(dmg.port, 0, 1)) - (1 - THREE.MathUtils.clamp(dmg.starboard, 0, 1))) * 0.122 * floodGate;
       const floodPitch = ((1 - THREE.MathUtils.clamp(dmg.bow, 0, 1)) - (1 - THREE.MathUtils.clamp(dmg.stern, 0, 1))) * 0.06 * floodGate;
-      const floodSettle = ship.sinking ? 0 : waterLevel * waterLevel * Math.max(0, stats.height * 0.5 - 0.8);
+      // Visual extra on top of the server's FREEBOARD_DROP (0.8·wl, already in
+      // heave): total settle tops out at ~45% of freeboard at full flood.
+      const floodSettle = ship.sinking ? 0 : waterLevel * waterLevel * Math.max(0, stats.height * 0.45 - 0.8);
       const heave = ship.sinking
         ? 0
         : (serverHeave === null ? clientHeave : THREE.MathUtils.lerp(serverHeave, clientHeave, staleBlend)) - floodSettle;
@@ -3171,11 +3189,14 @@ export class ShipRenderer {
         const waterLevel = THREE.MathUtils.clamp(
           (ship as unknown as { waterLevel?: number }).waterLevel ?? 0, 0, 1,
         );
-        const show = waterLevel > 0.01 && !ship.sinking;
+        const show = waterLevel > 0.02 && !ship.sinking;
         mesh.holdWater.visible = show;
         if (show) {
           const floorY = 0.5;
-          const topY = stats.height + 0.05;
+          // Ceiling sits below the deck-slab underside (slab bottom = H − 0.05)
+          // with headroom for the slosh amplitude, so the water surface never
+          // interpenetrates or z-fights the deck planks at full flood.
+          const topY = stats.height - 0.12;
           mesh.holdWater.position.y = floorY + (topY - floorY) * waterLevel;
           const agitation = waterLevel > 0.55 ? 1.9 : 1;
           const base = mesh.holdWaterBase;
