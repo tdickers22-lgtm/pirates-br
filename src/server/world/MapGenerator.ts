@@ -63,23 +63,26 @@ interface RosterEntry {
   hasTavern: boolean;
   /** Guaranteed inlet (cove/bay) — [widthLo, widthHi], [depthLo, depthHi]. */
   forcedInlet?: { width: [number, number]; depth: [number, number] };
+  /** HAND-AUTHORED world placement — the map is a designed, fixed world
+   *  ("The Shattered Reach"), identical every match. Players learn it. */
+  layout: { x: number; z: number; rotation: number };
 }
 
 const ISLAND_ROSTER: readonly RosterEntry[] = [
-  { name: "Smuggler's Rest", style: 'tropical', biome: 'lush', seed: 0x5310a11, radius: 74, coastBias: -0.25, landmarks: ['standing_stones'], hasDock: true, hasTavern: true },
-  { name: 'Skull Cove', style: 'rocky', biome: 'bone', seed: 0x2b0be5c, radius: 62, coastBias: 0.05, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, forcedInlet: { width: [0.34, 0.46], depth: [0.3, 0.4] } },
-  { name: 'The Crooked Atoll', style: 'archipelago', biome: 'palm_atoll', seed: 0x3c400a7, radius: 88, coastBias: -0.55, landmarks: ['shipwreck'], hasDock: true, hasTavern: false },
-  { name: 'Dead Man Shoals', style: 'archipelago', biome: 'bone', seed: 0x4dead10, radius: 56, coastBias: -0.3, landmarks: ['shipwreck'], hasDock: false, hasTavern: false },
-  { name: 'Rumrunner Key', style: 'tropical', biome: 'palm_atoll', seed: 0x5b0b0b0, radius: 44, coastBias: -0.6, landmarks: ['shipwreck'], hasDock: true, hasTavern: false },
-  { name: "Crow's Perch", style: 'mountain', biome: 'highland', seed: 0x6c0ffee, radius: 96, coastBias: 0.45, landmarks: ['watchtower'], hasDock: true, hasTavern: false },
-  { name: "Mermaid's Folly", style: 'plateau', biome: 'lush', seed: 0x7f01111, radius: 70, coastBias: -0.1, landmarks: ['standing_stones'], hasDock: true, hasTavern: false },
-  { name: 'Castaway Reach', style: 'tropical', biome: 'lush', seed: 0x8beac42, radius: 102, coastBias: -0.35, landmarks: ['standing_stones', 'shipwreck'], hasDock: true, hasTavern: true },
-  { name: 'Kraken Tooth', style: 'twin', biome: 'volcanic', seed: 0x9707071, radius: 78, coastBias: 0.55, landmarks: ['watchtower'], hasDock: false, hasTavern: false },
-  { name: 'Booty Bay', style: 'plateau', biome: 'lush', seed: 0xab00713, radius: 108, coastBias: -0.2, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, forcedInlet: { width: [0.75, 0.95], depth: [0.2, 0.28] } },
-  { name: 'Gallows Sands', style: 'rocky', biome: 'bone', seed: 0xb6a1105, radius: 40, coastBias: -0.15, landmarks: ['shipwreck'], hasDock: false, hasTavern: false },
-  { name: 'Parley Point', style: 'plateau', biome: 'highland', seed: 0xc9a41e4, radius: 66, coastBias: 0.2, landmarks: ['watchtower'], hasDock: true, hasTavern: true },
-  { name: 'Old Maw Caldera', style: 'mountain', biome: 'volcanic', seed: 0xdca1de6, radius: 112, coastBias: 0.5, landmarks: ['watchtower'], hasDock: true, hasTavern: false },
-  { name: "Widow's Watch", style: 'mountain', biome: 'highland', seed: 0xe51d0e7, radius: 84, coastBias: 0.35, landmarks: ['watchtower', 'standing_stones'], hasDock: false, hasTavern: false },
+  { name: "Smuggler's Rest", style: 'tropical', biome: 'lush', seed: 0x5310a11, radius: 66, coastBias: -0.25, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, layout: { x: 40, z: 690, rotation: 2.7 } },
+  { name: 'Skull Cove', style: 'rocky', biome: 'bone', seed: 0x2b0be5c, radius: 52, coastBias: 0.05, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, forcedInlet: { width: [0.34, 0.46], depth: [0.3, 0.4] }, layout: { x: 700, z: -70, rotation: 4.4 } },
+  { name: 'The Crooked Atoll', style: 'archipelago', biome: 'palm_atoll', seed: 0x3c400a7, radius: 70, coastBias: -0.55, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: -588, z: 558, rotation: 2.4 } },
+  { name: 'Dead Man Shoals', style: 'archipelago', biome: 'bone', seed: 0x4dead10, radius: 50, coastBias: -0.3, landmarks: ['shipwreck'], hasDock: false, hasTavern: false, layout: { x: 612, z: 592, rotation: 3.3 } },
+  { name: 'Rumrunner Key', style: 'tropical', biome: 'palm_atoll', seed: 0x5b0b0b0, radius: 42, coastBias: -0.6, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: 640, z: 310, rotation: 0.9 } },
+  { name: "Crow's Perch", style: 'mountain', biome: 'highland', seed: 0x6c0ffee, radius: 84, coastBias: 0.45, landmarks: ['watchtower'], hasDock: true, hasTavern: false, layout: { x: -278, z: 290, rotation: 3.9 } },
+  { name: "Mermaid's Folly", style: 'plateau', biome: 'lush', seed: 0x7f01111, radius: 62, coastBias: -0.1, landmarks: ['standing_stones'], hasDock: true, hasTavern: false, layout: { x: 372, z: 372, rotation: 1.2 } },
+  { name: 'Castaway Reach', style: 'tropical', biome: 'lush', seed: 0x8beac42, radius: 88, coastBias: -0.35, landmarks: ['standing_stones', 'shipwreck'], hasDock: true, hasTavern: true, layout: { x: 420, z: -385, rotation: 5.6 } },
+  { name: 'Kraken Tooth', style: 'twin', biome: 'volcanic', seed: 0x9707071, radius: 68, coastBias: 0.55, landmarks: ['watchtower'], hasDock: false, hasTavern: false, layout: { x: -705, z: 25, rotation: 5.1 } },
+  { name: 'Booty Bay', style: 'plateau', biome: 'lush', seed: 0xab00713, radius: 90, coastBias: -0.2, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, forcedInlet: { width: [0.75, 0.95], depth: [0.2, 0.28] }, layout: { x: -365, z: -295, rotation: 2.1 } },
+  { name: 'Gallows Sands', style: 'rocky', biome: 'bone', seed: 0xb6a1105, radius: 38, coastBias: -0.15, landmarks: ['shipwreck'], hasDock: false, hasTavern: false, layout: { x: 646, z: -641, rotation: 0.6 } },
+  { name: 'Parley Point', style: 'plateau', biome: 'highland', seed: 0xc9a41e4, radius: 58, coastBias: 0.2, landmarks: ['watchtower'], hasDock: true, hasTavern: true, layout: { x: -10, z: -690, rotation: 0.3 } },
+  { name: 'Old Maw Caldera', style: 'mountain', biome: 'volcanic', seed: 0xdca1de6, radius: 96, coastBias: 0.5, landmarks: ['watchtower'], hasDock: true, hasTavern: false, layout: { x: 0, z: 0, rotation: 0.8 } },
+  { name: "Widow's Watch", style: 'mountain', biome: 'highland', seed: 0xe51d0e7, radius: 70, coastBias: 0.35, landmarks: ['watchtower', 'standing_stones'], hasDock: false, hasTavern: false, layout: { x: -592, z: -590, rotation: 1.7 } },
 ] as const;
 
 // ── Biome prop scatter tables ───────────────────────────────────────────────
@@ -163,50 +166,22 @@ export class MapGenerator {
   }
 
   generateIslands(): Island[] {
-    const rng = this.rng;
     const islands: Island[] = [];
-    const minDist = 145;
-    const attempts = 320;
 
-    // Pick this match's subset of the roster; place the big islands first so
-    // packing is reliable. Both steps are seeded ⇒ reproducible.
-    const picked = shuffled(rng, ISLAND_ROSTER).slice(0, WORLD.ISLAND_COUNT);
-    let variant = 0;
-    while (picked.length < WORLD.ISLAND_COUNT) {
-      const base = ISLAND_ROSTER[variant % ISLAND_ROSTER.length];
-      picked.push({ ...base, name: `${base.name} II`, seed: (base.seed ^ (0x1000 + variant)) >>> 0 });
-      variant++;
-    }
-    picked.sort((a, b) => b.radius - a.radius);
-
-    for (const entry of picked) {
-      const radius = entry.radius;
-      let pos: Vec3 | null = null;
-      for (let a = 0; a < attempts; a++) {
-        const candidate: Vec3 = {
-          x: rr(rng, -800, 800),
-          y: 0,
-          z: rr(rng, -800, 800),
-        };
-        let ok = true;
-        for (const existing of islands) {
-          const dx = candidate.x - existing.position.x;
-          const dz = candidate.z - existing.position.z;
-          const requiredGap = Math.max(minDist, radius + existing.radius + 46);
-          if (Math.sqrt(dx * dx + dz * dz) < requiredGap) { ok = false; break; }
-        }
-        if (ok) { pos = candidate; break; }
-      }
-      if (!pos) continue;
-
-      // Per-match variation is placement + rigid rotation ONLY — everything
-      // else derives from the entry's fixed seed.
-      const rotation = ra(rng);
+    // THE SHATTERED REACH — a designed, fixed world. Every island sits where
+    // it was authored, every match. Old Maw Caldera is the volcanic heart;
+    // four big anchors hold the quadrants; taverns mark the cardinal lanes;
+    // the corner archipelagos are the risky edge. Layout invariants (pairwise
+    // spacing, world bounds, determinism) are pinned by test-world-fixed.mjs.
+    for (const entry of ISLAND_ROSTER) {
+      const pos: Vec3 = { x: entry.layout.x, y: 0, z: entry.layout.z };
+      const rotation = entry.layout.rotation;
+      const slug = entry.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
       const island: Island = {
-        id: uuid(),
+        id: slug,
         name: entry.name,
         position: pos,
-        radius,
+        radius: entry.radius,
         profile: this.buildProfile(entry, rotation),
         dock: null,
         tavern: null,
@@ -300,7 +275,7 @@ export class MapGenerator {
 
     if (terrainStyle === 'mountain') {
       heightProfile = rr(rng, 0.68, 1.22);
-      peakBoost = rr(rng, 1.05, 2.05);
+      peakBoost = rr(rng, 1.7, 2.6); // sheer SoT-style spires — the skyline landmark
       mesaBias = rr(rng, 0.05, 0.35);
       secondaryHillScale = rr(rng, 0.4, 0.8);
     } else if (terrainStyle === 'plateau') {
@@ -315,9 +290,9 @@ export class MapGenerator {
       footprintX = rr(rng, 1.0, 1.5);
       footprintZ = rr(rng, 1.0, 1.5);
     } else if (terrainStyle === 'twin') {
-      // Two distinct peaks of comparable height — ridge running between them
-      heightProfile = rr(rng, 0.48, 0.86);
-      peakBoost = rr(rng, 0.5, 1.05);
+      // Two distinct FANGS of comparable height — ridge/bridge running between
+      heightProfile = rr(rng, 0.62, 0.95);
+      peakBoost = rr(rng, 1.0, 1.5);
       mesaBias = rr(rng, 0.05, 0.3);
       secondaryHillScale = rr(rng, 0.78, 1.05);
       tertiaryHillScale = 0;

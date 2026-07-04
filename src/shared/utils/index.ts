@@ -548,7 +548,11 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const primaryHill = hillContribution(
     profile.primaryHillAngle,
     profile.primaryHillOffset,
-    0.34 + profile.mesaBias * 0.08 + peakBoost * 0.04,
+    // Mountains: the gaussian NARROWS as the peak grows — a sheer spire that
+    // dominates the skyline (reference: SoT), not a wider rounded knoll.
+    isMountain
+      ? Math.max(0.16, 0.3 - peakBoost * 0.045) + profile.mesaBias * 0.05
+      : 0.34 + profile.mesaBias * 0.08 + peakBoost * 0.04,
     (0.018 + profile.heightProfile * 0.022) * (1 + peakBoost * mountainBoostFactor) * (isTwin || isArchipelago ? 1.4 : isMountain ? 1.6 : 1),
   );
   const secondaryHill = hillContribution(

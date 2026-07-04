@@ -68,7 +68,7 @@ const SEED = 101;
 const islandsA = new MapGenerator(SEED).generateIslands();
 const islandsB = new MapGenerator(SEED).generateIslands();
 expect('Same seed produces bit-identical islands/props/stamps/caves', strip(islandsA) === strip(islandsB));
-expect('Different seeds produce different maps', strip(islandsA) !== strip(new MapGenerator(SEED + 1).generateIslands()));
+expect('The Shattered Reach is FIXED: different match seeds, identical world', strip(islandsA) === strip(new MapGenerator(SEED + 1).generateIslands()));
 expect('A full roster map generated', islandsA.length >= 8, `islands=${islandsA.length}`);
 
 // ── Per-island prop rules across two seeds ──

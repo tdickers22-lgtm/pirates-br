@@ -4358,10 +4358,17 @@ export class Game {
       }
     }
 
-    // ── Waterfall on mountain islands — emissive ribbon from a high band down to the sea ──
-    if (island.profile.terrainStyle === 'mountain' && rng(islandSeed * 41 + 7) > 0.35) {
-      const fallAngle = island.profile.ridgeAxis + Math.PI * (rng(islandSeed * 43) > 0.5 ? 0.5 : -0.5) + (rng(islandSeed * 47) - 0.5) * 0.4;
-      const upper = surfacePoint(0.32, fallAngle);
+    // ── Waterfalls — every tall island earns cascades (SoT reference: white
+    // ribbons pouring off the rock with mist at the base). Mountains get two
+    // falls on opposite shoulders; tall plateaus one.
+    const fallCount = island.profile.terrainStyle === 'mountain' ? 2
+      : (island.profile.terrainStyle === 'plateau' || island.profile.terrainStyle === 'twin') ? 1
+        : 0;
+    for (let fall = 0; fall < fallCount; fall++) {
+      const fallAngle = island.profile.ridgeAxis
+        + Math.PI * (fall === 0 ? 0.5 : -0.55)
+        + (rng(islandSeed * 47 + fall * 131) - 0.5) * 0.4;
+      const upper = surfacePoint(0.3, fallAngle);
       const lower = surfacePoint(0.94, fallAngle);
       const drop = upper.y - lower.y;
       if (drop > 4) {
@@ -4376,20 +4383,20 @@ export class Game {
         });
         // Vertical ribbons drawn with explicit corner geometry — guarantees the
         // ribbons hang directly between the upper sample and the lower sample.
-        const ribbons = lowDetail ? 1 : 3;
+        const ribbons = lowDetail ? 2 : 4;
         const dxFall = lower.x - upper.x;
         const dzFall = lower.z - upper.z;
         const horizFall = Math.hypot(dxFall, dzFall);
         const wAxisX = horizFall > 0.001 ? -dzFall / horizFall : 1;
         const wAxisZ = horizFall > 0.001 ? dxFall / horizFall : 0;
         for (let rib = 0; rib < ribbons; rib++) {
-          const t = ribbons === 1 ? 0 : rib / (ribbons - 1);
+          const t = rib / Math.max(1, ribbons - 1);
           const offset = (t - 0.5) * 1.0;
           const ax = upper.x + wAxisX * offset;
           const az = upper.z + wAxisZ * offset;
           const bx = lower.x + wAxisX * offset;
           const bz = lower.z + wAxisZ * offset;
-          const ribbonW = 0.6 + rng(rib * 711) * 0.4;
+          const ribbonW = 1.25 + rng(rib * 711) * 0.9;
           const corners = [
             ax + wAxisX * ribbonW * 0.5, upper.y, az + wAxisZ * ribbonW * 0.5,
             ax - wAxisX * ribbonW * 0.5, upper.y, az - wAxisZ * ribbonW * 0.5,
@@ -5529,6 +5536,46 @@ export class Game {
         }
 
         group.add(bridge);
+      }
+    }
+
+    // ── Peak mist — tall summits wear a slow ring of cloud (SoT reference) ──
+    {
+      const profileMist = island.profile;
+      const peakLocalX = Math.cos(profileMist.primaryHillAngle) * profileMist.primaryHillOffset * profileMist.footprintX;
+      const peakLocalZ = Math.sin(profileMist.primaryHillAngle) * profileMist.primaryHillOffset * profileMist.footprintZ;
+      const peakY = getIslandSurfaceY(island, island.position.x + peakLocalX, island.position.z + peakLocalZ);
+      if (!lowDetail && peakY > 30) {
+        const size = 96;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d')!;
+        const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        grad.addColorStop(0, 'rgba(255,255,255,0.55)');
+        grad.addColorStop(0.6, 'rgba(255,255,255,0.22)');
+        grad.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, size, size);
+        const mistTex = new THREE.CanvasTexture(canvas);
+        for (let m = 0; m < 6; m++) {
+          const mistSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: mistTex,
+            transparent: true,
+            opacity: 0.4 + rng(m * 977) * 0.2,
+            depthWrite: false,
+          }));
+          const ma = (m / 6) * Math.PI * 2 + rng(m * 983) * 0.8;
+          const mr = 7 + rng(m * 991) * 9;
+          mistSprite.position.set(
+            peakLocalX + Math.cos(ma) * mr,
+            peakY - 4 - rng(m * 997) * 5,
+            peakLocalZ + Math.sin(ma) * mr,
+          );
+          const ms = 9 + rng(m * 1009) * 8;
+          mistSprite.scale.set(ms, ms * 0.55, 1);
+          group.add(mistSprite);
+        }
       }
     }
 
