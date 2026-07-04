@@ -259,15 +259,25 @@ export function getOceanRoughness(t: number): number {
  *  Deterministic from replicated storm state (center/safeRadius/phase), so the
  *  client shader, client gameplay and server physics all agree. Seas heave
  *  hardest INSIDE the deadly ring, ramp up across a band around its edge, and
- *  get globally rougher in late phases even in the safe zone. */
+ *  get globally rougher in late phases even in the safe zone.
+ *  Accepts the replicated StormState shape (centerX/centerZ, 0-indexed phase
+ *  over the 7 STORM_PHASES) or a {center: Vec2} equivalent. */
 export function getStormWaveIntensity(
-  storm: { center: Vec2; safeRadius: number; phase: number } | null | undefined,
+  storm: {
+    safeRadius: number;
+    phase: number;
+    center?: Vec2;
+    centerX?: number;
+    centerZ?: number;
+  } | null | undefined,
   x: number,
   z: number,
 ): number {
   if (!storm) return 0;
-  const phase01 = clamp((storm.phase - 1) / 6, 0, 1);
-  const distOutside = Math.hypot(x - storm.center.x, z - storm.center.y) - storm.safeRadius;
+  const cx = storm.center?.x ?? storm.centerX ?? 0;
+  const cz = storm.center?.y ?? storm.centerZ ?? 0;
+  const phase01 = clamp(storm.phase / 6, 0, 1);
+  const distOutside = Math.hypot(x - cx, z - cz) - storm.safeRadius;
   // Inside the ring: full storm. Approaching the edge (within 140m): ramp up.
   const edge = smoothstep(-140, 40, distOutside);
   // Ambient late-game chop everywhere, so the endgame ocean feels hostile.

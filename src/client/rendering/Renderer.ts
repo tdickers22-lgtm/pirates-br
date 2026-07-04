@@ -500,6 +500,11 @@ export class Renderer {
     this.sunGlow.lookAt(this.camera.position);
     this.sunDisc.lookAt(this.camera.position);
     this.updateShadowFrustum();
+    // Accumulate draw/tri counters across ALL passes for this frame — with
+    // autoReset the post-fx composer wipes them per pass and the debug overlay
+    // forever reads the final fullscreen quad ("draw 1 | tris 1").
+    this.renderer.info.autoReset = false;
+    this.renderer.info.reset();
     if (this.postFx) {
       this.postFx.render();
     } else {

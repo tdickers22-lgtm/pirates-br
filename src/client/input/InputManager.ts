@@ -57,6 +57,8 @@ export class InputManager {
         this.jumpPressed = true;
       }
       if (e.code === 'KeyT') this.tradePressed = true;
+      if (e.code === 'KeyP') this.spyglassHeld = true;
+      if (e.code === 'KeyL') this.legendPressed = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
       if (e.code === 'KeyB') this.dropChestPressed = true;
       if (e.code === 'KeyE') this.specialAttackPressed = true;
@@ -75,6 +77,7 @@ export class InputManager {
     });
     document.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
+      if (e.code === 'KeyP') this.spyglassHeld = false;
       if (e.code === 'KeyI') {
         this.vHeld = false;
         this.lockElement?.requestPointerLock?.().catch(() => {});
@@ -228,6 +231,27 @@ export class InputManager {
     return (this.keys.has('Space') ? 1 : 0) - (this.keys.has('KeyZ') ? 1 : 0);
   }
 
+  /** Spyglass raise key (P) — read by Game each frame; hold-to-use. */
+  private spyglassHeld = false;
+  isSpyglassHeld() { return this.spyglassHeld; }
+
+  /** Controls-legend toggle key (L) — press edge, consumed by Game. */
+  private legendPressed = false;
+  consumeLegendPressed() {
+    const pressed = this.legendPressed;
+    this.legendPressed = false;
+    return pressed;
+  }
+
+  /** Aim sensitivity scales with FOV so scoped optics (sniper 14°, spyglass 6°)
+   *  turn proportionally slower instead of 5-12x too fast. Game sets this each
+   *  frame to currentFov / baseFov. */
+  private fovScale = 1;
+  setFovScale(scale: number) {
+    if (!Number.isFinite(scale)) return;
+    this.fovScale = Math.max(0.05, Math.min(1, scale));
+  }
+
   /** 1.0 is the historical default; clamped to a sane range to avoid flick-aim accidents. */
   private sensitivity = 1.0;
   setSensitivity(scale: number) {
@@ -237,7 +261,7 @@ export class InputManager {
   getSensitivity() { return this.sensitivity; }
 
   private applyLookDelta(dx: number, dy: number) {
-    const k = 0.002 * this.sensitivity;
+    const k = 0.002 * this.sensitivity * this.fovScale;
     this.yaw -= dx * k;
     this.pitch -= dy * k;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));

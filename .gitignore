@@ -25,3 +25,5 @@ build/
 
 # stale nested duplicate of this repo (182MB) — never commit
 /pirates-br/
+.claude/
+scripts/_probe*.tmp.mjs
