@@ -1,47 +1,79 @@
 import * as THREE from 'three';
-import { WAVE_PARAMS, getOceanRoughness } from '../../shared/utils/index.js';
+import { WAVE_PARAMS, STORM_WAVE_PARAMS, getOceanRoughness } from '../../shared/utils/index.js';
 import type { RenderQuality } from './Renderer.js';
 
 const MAX_ISLANDS = 16;
 
-// GLSL is generated from the shared WAVE_PARAMS so the rendered surface is the
-// same field gameplay samples via gerstnerHeight(): vertical-only displacement,
-// amplitude × getOceanRoughness(t), phase k·(d·p − speed·t). The only rendering
+// GLSL is generated from the shared WAVE_PARAMS / STORM_WAVE_PARAMS so the
+// rendered surface is the same field gameplay samples via
+// gerstnerHeight(x, z, t, WAVE_PARAMS, storm): vertical-only displacement,
+// base amplitude × getOceanRoughness(t) × (1 + storm·0.85), plus the dedicated
+// storm swell × storm, where storm is the shared getStormWaveIntensity()
+// replicated exactly in stormWaveIntensity() below. The only rendering
 // liberties are a per-wave distance fade (keeps far coarse cells above Nyquist,
 // sub-10cm and >90m from camera) and slight shore damping near islands.
 const fmt = (n: number) => n.toFixed(6);
 
-const WAVE_FIELD_GLSL = `
-  // Returns vec3(height, dHeight/dx, dHeight/dz) of the shared Gerstner field.
-  vec3 waveField(vec2 p, float camDist) {
-    float h = 0.0; float dhx = 0.0; float dhz = 0.0;
-    float f; float a; float c;
-${WAVE_PARAMS.map((w) => {
+const waveComponentGlsl = (
+  w: { amplitude: number; wavelength: number; direction: { x: number; y: number }; speed: number },
+  ampExpr: string,
+  indent: string,
+) => {
   const len = Math.hypot(w.direction.x, w.direction.y);
   const dx = w.direction.x / len;
   const dz = w.direction.y / len;
   const k = (2 * Math.PI) / w.wavelength;
   const fadeStart = w.wavelength * 9;
   const fadeEnd = w.wavelength * 20;
-  return `    f = ${fmt(k)} * (dot(vec2(${fmt(dx)}, ${fmt(dz)}), p) - ${fmt(w.speed)} * u_time);
-    a = ${fmt(w.amplitude)} * u_roughness * (1.0 - smoothstep(${fmt(fadeStart)}, ${fmt(fadeEnd)}, camDist));
-    h += a * sin(f);
-    c = a * ${fmt(k)} * cos(f);
-    dhx += c * ${fmt(dx)};
-    dhz += c * ${fmt(dz)};`;
-}).join('\n')}
+  return `${indent}f = ${fmt(k)} * (dot(vec2(${fmt(dx)}, ${fmt(dz)}), p) - ${fmt(w.speed)} * u_time);
+${indent}a = ${fmt(w.amplitude)} * ${ampExpr} * (1.0 - smoothstep(${fmt(fadeStart)}, ${fmt(fadeEnd)}, camDist));
+${indent}h += a * sin(f);
+${indent}c = a * ${fmt(k)} * cos(f);
+${indent}dhx += c * ${fmt(dx)};
+${indent}dhz += c * ${fmt(dz)};`;
+};
+
+const WAVE_FIELD_GLSL = `
+  // Local storm sea-state in 0..1 — EXACT GLSL replica of the shared
+  // getStormWaveIntensity(): full swell inside the deadly ring, ramp across a
+  // 180m band around its edge, late-phase ambient chop everywhere.
+  // u_stormSafeRadius < 0 means "no storm" (matches storm == null on the CPU).
+  float stormWaveIntensity(vec2 p) {
+    if (u_stormSafeRadius < -0.5) return 0.0;
+    float distOutside = length(p - u_stormCenter) - u_stormSafeRadius;
+    float edge = smoothstep(-140.0, 40.0, distOutside);
+    float ambient = u_stormPhase01 * 0.38;
+    return clamp(max(edge * (0.55 + u_stormPhase01 * 0.45), ambient), 0.0, 1.0);
+  }
+
+  // Returns vec3(height, dHeight/dx, dHeight/dz) of the shared Gerstner field
+  // gerstnerHeight(x, z, t, WAVE_PARAMS, storm). Identical GLSL runs in both
+  // the vertex and fragment stages so analytic normals match displacement.
+  vec3 waveField(vec2 p, float camDist) {
+    float storm = stormWaveIntensity(p);
+    float rough = u_roughness * (1.0 + storm * 0.85);
+    float h = 0.0; float dhx = 0.0; float dhz = 0.0;
+    float f; float a; float c;
+${WAVE_PARAMS.map((w) => waveComponentGlsl(w, 'rough', '    ')).join('\n')}
+    if (storm > 0.0) {
+${STORM_WAVE_PARAMS.map((w) => waveComponentGlsl(w, 'storm', '      ')).join('\n')}
+    }
     return vec3(h, dhx, dhz);
   }
 `;
 
 const SHORE_GLSL = `
-  // Signed distance (m) to the nearest island waterline; huge when no islands.
+  // Approx signed distance (m) to the nearest island waterline. Each island is
+  // an elliptical footprint vec4(centerX, centerZ, rx, rz); the normalized
+  // ellipse distance is rescaled to meters by the minor half-extent, which is
+  // exact on the minor axis and slightly conservative on the major one.
   float shoreDist(vec2 p) {
     float d = 100000.0;
     for (int i = 0; i < ${MAX_ISLANDS}; i++) {
       if (i >= u_islandCount) break;
-      vec3 isl = u_islands[i];
-      d = min(d, length(p - isl.xy) - isl.z);
+      vec4 isl = u_islands[i];
+      vec2 q = (p - isl.xy) / isl.zw;
+      d = min(d, (length(q) - 1.0) * min(isl.z, isl.w));
     }
     return d;
   }
@@ -51,8 +83,11 @@ const OCEAN_VERT = /* glsl */`
   uniform float u_time;
   uniform float u_roughness;
   uniform vec3  u_cameraPos;
-  uniform vec3  u_islands[${MAX_ISLANDS}];
+  uniform vec4  u_islands[${MAX_ISLANDS}];
   uniform int   u_islandCount;
+  uniform vec2  u_stormCenter;
+  uniform float u_stormSafeRadius;
+  uniform float u_stormPhase01;
 
   varying vec3  v_worldPos;
   varying float v_height;
@@ -67,8 +102,10 @@ const OCEAN_VERT = /* glsl */`
     vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
     float camDist = distance(u_cameraPos.xz, wp.xz);
 
-    // Slight rendering-only wave damping in island shallows.
-    v_shoreDamp = mix(0.6, 1.0, smoothstep(-8.0, 34.0, shoreDist(wp.xz)));
+    // Slight rendering-only wave damping in island shallows. Floor kept at
+    // 0.85 so the drawn surface stays within ~15% of the shared physics field
+    // (which applies no shore damping yet — see INTEGRATION_NOTES).
+    v_shoreDamp = mix(0.85, 1.0, smoothstep(-8.0, 34.0, shoreDist(wp.xz)));
 
     float h = waveField(wp.xz, camDist).x * v_shoreDamp;
     wp.y += h;
@@ -89,8 +126,11 @@ const OCEAN_FRAG = /* glsl */`
   uniform float u_nightFactor;
   uniform vec3  u_fogColor;
   uniform vec3  u_horizonColor;
-  uniform vec3  u_islands[${MAX_ISLANDS}];
+  uniform vec4  u_islands[${MAX_ISLANDS}];
   uniform int   u_islandCount;
+  uniform vec2  u_stormCenter;
+  uniform float u_stormSafeRadius;
+  uniform float u_stormPhase01;
 
   varying vec3  v_worldPos;
   varying float v_height;
@@ -136,27 +176,34 @@ const OCEAN_FRAG = /* glsl */`
     vec3 wf = waveField(wp, camDist);
     vec3 N = normalize(vec3(-wf.y * v_shoreDamp, 1.0, -wf.z * v_shoreDamp));
 
+    // Local storm sea-state (same value waveField used for displacement).
+    float stormSea = stormWaveIntensity(wp);
+
     vec3 V = normalize(u_cameraPos - v_worldPos);
     vec3 L = normalize(u_sunDir);
 
-    // ── Fine ripple detail normals: fade with distance (specular AA) and
-    //    flatten on glassy-calm days ─────────────────────────────────────
-    float calm = clamp((u_roughness - 0.25) / 1.3, 0.0, 1.0);
+    // ── Fine ripple detail normals: fade with distance (specular AA),
+    //    flatten on gentle days, churn harder inside the storm ──────────
+    float calm = clamp((u_roughness - 0.55) / 1.05, 0.0, 1.0);
     float detailFade = 1.0 - smoothstep(40.0, 560.0, camDist);
     if (detailFade > 0.001) {
       float e  = 0.85;
       float h0 = rippleField(wp);
       float hx = rippleField(wp + vec2(e, 0.0));
       float hz = rippleField(wp + vec2(0.0, e));
-      float rippleAmp = (0.9 + 1.5 * calm) * detailFade;
+      float rippleAmp = (0.9 + 1.5 * calm + 1.1 * stormSea) * detailFade;
       N = normalize(N + vec3(-(hx - h0), 0.0, -(hz - h0)) * rippleAmp);
     }
 
-    // ── Base water color: deep troughs to lifted flanks ────────────────
-    float hn = clamp(v_height / max(0.22, u_roughness * 0.70), -1.0, 1.0);
-    float flank = clamp(hn * 0.32 + 0.5, 0.0, 1.0);
-    vec3 deep   = vec3(0.008, 0.09, 0.28);
-    vec3 lifted = vec3(0.045, 0.30, 0.50);
+    // ── Base water color: deep troughs to lifted flanks. Height is
+    //    normalized against the storm-boosted expected swell so hn keeps
+    //    tracking crest/trough across sea states; storm steepens the
+    //    trough/crest contrast and pulls the palette slate-dark ──────────
+    float ampNorm = u_roughness * 0.70 * (1.0 + stormSea * 0.85) + stormSea * 1.85;
+    float hn = clamp(v_height / max(0.22, ampNorm), -1.0, 1.0);
+    float flank = clamp(hn * (0.32 + 0.18 * stormSea) + 0.5, 0.0, 1.0);
+    vec3 deep   = mix(vec3(0.008, 0.09, 0.28), vec3(0.004, 0.045, 0.15), stormSea);
+    vec3 lifted = mix(vec3(0.045, 0.30, 0.50), vec3(0.11, 0.33, 0.44), stormSea);
     vec3 base   = mix(deep, lifted, flank);
 
     // ── Shore shallows: turquoise ramp toward the beach ─────────────────
@@ -192,11 +239,14 @@ const OCEAN_FRAG = /* glsl */`
     specCol = min(specCol, vec3(1.8));
     specCol = mix(specCol, specCol * vec3(0.62, 0.74, 1.05), u_nightFactor);
 
-    // ── Foam: noise-broken crests + animated shore band ────────────────
-    float crest = pow(clamp(hn * 1.15 - 0.10, 0.0, 1.0), 3.0) * (0.55 + 0.45 * calm + u_stormIntensity * 0.5);
+    // ── Foam: noise-broken crests + animated shore band. Storm lowers the
+    //    breaking threshold and softens the exponent so whitecap coverage
+    //    grows dramatically as the sea state rises ─────────────────────────
+    float crest = pow(clamp(hn * (1.15 + 0.35 * stormSea) - (0.10 - 0.06 * stormSea), 0.0, 1.0), 3.0 - 1.2 * stormSea)
+                * (0.55 + 0.45 * calm + u_stormIntensity * 0.5 + stormSea * 0.6);
     vec2 foamUv = wp * 0.018 + u_time * vec2(0.012, 0.008);
     float foamN = noise(foamUv * 3.0) * noise(foamUv * 7.0 + 1.5);
-    float breakup = mix(0.55, smoothstep(0.28, 0.62, foamN), detailFade * 0.85 + 0.15);
+    float breakup = mix(0.55, smoothstep(0.28 - 0.12 * stormSea, 0.62, foamN), detailFade * 0.85 + 0.15);
     float foam = clamp(crest * breakup * 1.4, 0.0, 1.0);
 
     float shoreDetail = 1.0 - smoothstep(260.0, 900.0, camDist);
@@ -209,6 +259,11 @@ const OCEAN_FRAG = /* glsl */`
 
     vec3 foamCol = vec3(0.88, 0.93, 1.0) * mix(1.0, 0.45, u_nightFactor);
     vec3 color = mix(base, foamCol, foam);
+
+    // ── Storm spray: wind-torn white haze over the wave tops, present even
+    //    where the crest-foam noise breaks up ─────────────────────────────
+    float spray = stormSea * smoothstep(0.20, 0.80, hn) * (0.40 + 0.60 * smoothstep(0.15, 0.50, foamN));
+    color = mix(color, foamCol * 0.92, clamp(spray, 0.0, 1.0) * 0.55);
 
     // ── Subtle sub-surface scatter on lit wave flanks ───────────────────
     float sss = pow(max(0.0, dot(L, -N)), 3.0) * 0.14 * clamp(hn + 0.6, 0.0, 1.0);
@@ -314,12 +369,26 @@ export interface OceanAtmosphere {
   nightFactor?: number;
 }
 
+/** Island footprint for the shoreline SDF. Preferred: elliptical half-extents
+ *  rx/rz in meters (radius × profile.footprintX/Z). Legacy circular `r` is
+ *  still accepted and treated as rx = rz = r. */
+export interface OceanIslandFootprint {
+  x: number;
+  z: number;
+  r?: number;
+  rx?: number;
+  rz?: number;
+}
+
+interface StormSeaState { centerX: number; centerZ: number; safeRadius: number; phase01: number }
+
 export class OceanRenderer {
   private group!: THREE.Group;
   private material!: THREE.ShaderMaterial;
   private time = 0;
   private snapSize = 64;
-  private pendingIslands: Array<{ x: number; z: number; r: number }> | null = null;
+  private pendingIslands: OceanIslandFootprint[] | null = null;
+  private pendingStorm: StormSeaState | null = null;
 
   private readonly sunDir = new THREE.Vector3(0.62, 0.24, -0.74).normalize();
 
@@ -342,8 +411,13 @@ export class OceanRenderer {
         // the sea-sky junction is seamless before live values get wired in.
         u_fogColor:     { value: new THREE.Color(0x9bbfd4) },
         u_horizonColor: { value: new THREE.Color(0.78, 0.90, 0.98) },
-        u_islands:     { value: Array.from({ length: MAX_ISLANDS }, () => new THREE.Vector3()) },
+        u_islands:     { value: Array.from({ length: MAX_ISLANDS }, () => new THREE.Vector4(0, 0, 1, 1)) },
         u_islandCount: { value: 0 },
+        // Storm sea-state (shared getStormWaveIntensity inputs). Negative
+        // safe radius = no storm, matching storm == null on the CPU side.
+        u_stormCenter:     { value: new THREE.Vector2() },
+        u_stormSafeRadius: { value: -1 },
+        u_stormPhase01:    { value: 0 },
       },
       side: THREE.DoubleSide,
     });
@@ -359,14 +433,15 @@ export class OceanRenderer {
 
     // Opaque deep-water sheet just under the surface: hides any sub-pixel
     // T-junction cracks at LOD seams. Front side only so it never occludes
-    // the surface when the camera is underwater looking up.
+    // the surface when the camera is underwater looking up. Sits below the
+    // deepest storm trough (~-5.6m at storm=1) so it never pokes through.
     const underGeo = new THREE.PlaneGeometry(2400, 2400, 1, 1);
     underGeo.rotateX(-Math.PI / 2);
     const underlayer = new THREE.Mesh(
       underGeo,
       new THREE.MeshBasicMaterial({ color: 0x04182b }),
     );
-    underlayer.position.y = -1.6;
+    underlayer.position.y = -6.5;
     this.group.add(underlayer);
 
     scene.add(this.group);
@@ -374,6 +449,11 @@ export class OceanRenderer {
     if (this.pendingIslands) {
       this.setIslands(this.pendingIslands);
       this.pendingIslands = null;
+    }
+    if (this.pendingStorm) {
+      const s = this.pendingStorm;
+      this.pendingStorm = null;
+      this.setStormState(s.centerX, s.centerZ, s.safeRadius, s.phase01);
     }
   }
 
@@ -399,17 +479,45 @@ export class OceanRenderer {
     }
   }
 
-  setIslands(islands: Array<{ x: number; z: number; r: number }>) {
+  /** Feed island footprints for the shoreline SDF (foam band, shallows ramp,
+   *  shore damping). Accepts elliptical {x, z, rx, rz} entries; legacy
+   *  {x, z, r} circles still work (rx = rz = r). */
+  setIslands(islands: OceanIslandFootprint[]) {
     if (!this.material) {
       this.pendingIslands = islands;
       return;
     }
-    const arr = this.material.uniforms.u_islands.value as THREE.Vector3[];
+    const arr = this.material.uniforms.u_islands.value as THREE.Vector4[];
     const count = Math.min(islands.length, MAX_ISLANDS);
     for (let i = 0; i < count; i++) {
-      arr[i].set(islands[i].x, islands[i].z, islands[i].r);
+      const isl = islands[i];
+      const rx = Math.max(1, isl.rx ?? isl.r ?? 1);
+      const rz = Math.max(1, isl.rz ?? isl.r ?? 1);
+      arr[i].set(isl.x, isl.z, rx, rz);
     }
     this.material.uniforms.u_islandCount.value = count;
+  }
+
+  /** Drive the storm SEA STATE (wave geometry) from replicated storm data —
+   *  mirrors shared getStormWaveIntensity(), so pass the same inputs gameplay
+   *  physics uses: storm center, current safeRadius, and
+   *  phase01 = clamp((storm.phase - 1) / 6, 0, 1). Pass a negative safeRadius
+   *  (or call clearStormState) when there is no storm. This is separate from
+   *  setStormIntensity, which only tints the water for local weather. */
+  setStormState(centerX: number, centerZ: number, safeRadius: number, phase01: number) {
+    if (!this.material) {
+      this.pendingStorm = { centerX, centerZ, safeRadius, phase01 };
+      return;
+    }
+    const u = this.material.uniforms;
+    (u.u_stormCenter.value as THREE.Vector2).set(centerX, centerZ);
+    u.u_stormSafeRadius.value = safeRadius;
+    u.u_stormPhase01.value = Math.max(0, Math.min(1, phase01));
+  }
+
+  /** Return the sea to its calm (no-storm) state. */
+  clearStormState() {
+    this.setStormState(0, 0, -1, 0);
   }
 
   setAtmosphere(atmo: OceanAtmosphere) {
@@ -424,6 +532,8 @@ export class OceanRenderer {
     }
   }
 
+  /** Local-weather storm COLOR intensity (darken/desaturate tint, wider spec
+   *  lobe, denser fog). Wave GEOMETRY is driven by setStormState instead. */
   setStormIntensity(intensity: number) {
     const t = Math.max(0, Math.min(1, intensity));
     this.material.uniforms.u_stormIntensity.value = t;
