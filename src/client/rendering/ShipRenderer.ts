@@ -3173,11 +3173,13 @@ export class ShipRenderer {
       for (const s of hullSections) {
         const hp = ship.hull[s];
         const hole = mesh.hullHoles[s];
-        hole.visible = hp < 0.9;
+        hole.visible = hp < 0.92;
         // A section actually floods below the hole threshold — that's when the
         // gush anchor (see getHoleAnchors) should carry water-jet FX.
         hole.userData.floodActive = hp <= FLOODING.HOLE_THRESHOLD;
-        const sc = THREE.MathUtils.clamp((1 - hp) * 2.5, 0.18, 1.45);
+        // Damage must READ: a fresh hit shows a clear crack, a holed section
+        // (hp ≤ 0.5, actively flooding) is a gaping breach.
+        const sc = THREE.MathUtils.clamp((1 - hp) * 3.2, 0.4, 2.1);
         hole.scale.setScalar(sc);
       }
 
@@ -3189,16 +3191,25 @@ export class ShipRenderer {
         const waterLevel = THREE.MathUtils.clamp(
           (ship as unknown as { waterLevel?: number }).waterLevel ?? 0, 0, 1,
         );
-        const show = waterLevel > 0.02 && !ship.sinking;
+        // The rising water IS the drama: keep it visible through the founder
+        // (it used to vanish the instant sinking started), let it climb past
+        // the hold and wash OVER the deck planks in the final stage, and
+        // slosh harder the fuller the hull gets.
+        const sinkLevel = ship.sinking ? 1 : waterLevel;
+        const show = sinkLevel > 0.02;
         mesh.holdWater.visible = show;
         if (show) {
           const floorY = 0.5;
-          // Ceiling sits below the deck-slab underside (slab bottom = H − 0.05)
-          // with headroom for the slosh amplitude, so the water surface never
-          // interpenetrates or z-fights the deck planks at full flood.
-          const topY = stats.height - 0.12;
-          mesh.holdWater.position.y = floorY + (topY - floorY) * waterLevel;
-          const agitation = waterLevel > 0.55 ? 1.9 : 1;
+          const holdTopY = stats.height - 0.12;
+          // 0 → 0.8: fill the hold. 0.8 → 1: break over the deck (deck slab
+          // top sits at H + 0.025; +0.09 reads as a sheet of water on deck).
+          const awash = THREE.MathUtils.clamp((sinkLevel - 0.8) / 0.2, 0, 1);
+          const topY = awash > 0
+            ? holdTopY + (stats.height + 0.09 - holdTopY) * awash
+            : holdTopY;
+          const fillT = Math.min(1, sinkLevel / 0.8);
+          mesh.holdWater.position.y = awash > 0 ? topY : floorY + (holdTopY - floorY) * fillT;
+          const agitation = 1 + sinkLevel * 1.6 + (ship.sinking ? 0.8 : 0);
           const base = mesh.holdWaterBase;
           const posAttr = mesh.holdWater.geometry.attributes.position as THREE.BufferAttribute;
           const arr = posAttr.array as Float32Array;
@@ -3208,7 +3219,10 @@ export class ShipRenderer {
             arr[i3 + 1] = base[i3 + 1] + Math.sin(t * (1.8 + agitation) + base[i3] * 1.3 + base[i3 + 2] * 0.9) * amp;
           }
           posAttr.needsUpdate = true;
-          (mesh.holdWater.material as THREE.MeshStandardMaterial).opacity = 0.82 + 0.12 * Math.min(1, waterLevel * 1.4);
+          const mat = mesh.holdWater.material as THREE.MeshStandardMaterial;
+          mat.opacity = 0.82 + 0.12 * Math.min(1, sinkLevel * 1.4);
+          // Awash water flashes brighter foam-green so the overwhelm reads at a glance.
+          mat.emissiveIntensity = 0.4 + awash * 0.5;
         }
       }
 

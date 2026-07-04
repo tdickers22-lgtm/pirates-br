@@ -2207,19 +2207,17 @@ export class Match {
 
   /**
    * A ship sinks when a section is completely destroyed, its average hull is
-   * shattered, OR its bilge fills (waterLevel ≥ 1) — the usual SoT path: holes
-   * flood the hull faster than an unattended crew can bail. All three routes
-   * reuse the same sink/elimination flow (loot drop, crew, respawn unchanged).
+   * fills (waterLevel ≥ 1) — the SoT path: holes flood the hull faster than
+   * the crew can bail. Hull hp alone never sinks a ship; wrecked sections just
+   * gush so hard the water wins unless they're planked.
    */
   private evaluateShipSinking(ship: Ship) {
     if (!ship.alive || ship.sinking) return;
-    const sections = [ship.hull.bow, ship.hull.stern, ship.hull.port, ship.hull.starboard];
-    const avg = sections.reduce((sum, value) => sum + value, 0) / sections.length;
-    if (
-      sections.some((value) => value <= 0)
-      || avg <= 0.18
-      || (ship.waterLevel ?? 0) >= 1
-    ) {
+    // Cannonballs make HOLES; only WATER sinks the ship. Wrecked sections
+    // (hp 0) gush hard — evaluateSectionFlood treats them as breached even
+    // above the waterline — so a shot-to-pieces hull still founders, but only
+    // after the crew visibly loses the fight against the rising bilge.
+    if ((ship.waterLevel ?? 0) >= 1) {
       this.startShipSinking(ship, false, this.getRecentShipSinkAttackerId(ship));
     }
   }
