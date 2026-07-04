@@ -152,10 +152,12 @@ export class InputManager {
       interact: this.interactPressed,
       interactHeld: this.keys.has('KeyX'),
       anchor:   false,
-      sailRaise: this.keys.has('KeyC'),
-      sailLower: this.keys.has('KeyZ'),
-      sailLeft:  this.keys.has('KeyQ'),
-      sailRight: this.keys.has('KeyF'),
+      // Sails are hauled by holding [X] at the rigging (SoT-style) — the old
+      // C/Z/Q/F key chords are gone; fields ride the wire as false for compat.
+      sailRaise: false,
+      sailLower: false,
+      sailLeft:  false,
+      sailRight: false,
       trade:    this.tradePressed,
       reload:   this.reloadPressed,
       placeKeg: this.placeKegPressed,

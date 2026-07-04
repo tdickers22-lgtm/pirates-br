@@ -6081,9 +6081,10 @@ export class Game {
         ? (currentInteractKind ?? (uiInteract ? this.lastInteractKind : null))
         // Bail is a continuous hold, so its intent must ride every held frame — not
         // just the press edge — for the server's held-interact drain to keep running.
-        // Bail and revive are continuous holds — their intent must ride every
-        // held frame for the server-side drain/charge to keep running.
-        : (input.interactHeld && (currentInteractKind === 'bail' || currentInteractKind === 'revive')
+        // Bail, revive and the sail halyard are continuous holds — their
+        // intent must ride every held frame for the server-side work to run.
+        : (input.interactHeld
+          && (currentInteractKind === 'bail' || currentInteractKind === 'revive' || currentInteractKind === 'sails')
           ? currentInteractKind
           : null);
       if (this.pendingLaunchFromUi) {
@@ -6100,6 +6101,7 @@ export class Game {
       this.inputSendTimer = CLIENT_INPUT_SEND_INTERVAL;
     }
 
+    this.updateStationMarkers();
     this.updateMermaid(now);
     // Stream one queued island build per frame (join used to build all 10
     // synchronously and freeze the tab for seconds).
@@ -6317,6 +6319,89 @@ export class Game {
       Math.round(input.yaw * 1000),
       Math.round(input.pitch * 1000),
     ].join('|');
+  }
+
+  /** SoT-style station beacons: soft pulsing rings floating over the anchor
+   *  capstan, the sail rigging, and the helm while you're aboard your ship —
+   *  you can SEE where to go from across the deck. The anchor ring burns
+   *  red while the anchor is down (the #1 'why is my ship not moving'). */
+  private stationMarkers: { anchor: THREE.Sprite; sails: THREE.Sprite; helm: THREE.Sprite } | null = null;
+
+  private makeStationMarkerTexture(): THREE.CanvasTexture {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const cx = size / 2;
+    ctx.clearRect(0, 0, size, size);
+    const ring = ctx.createRadialGradient(cx, cx, size * 0.16, cx, cx, size * 0.46);
+    ring.addColorStop(0, 'rgba(255,255,255,0)');
+    ring.addColorStop(0.62, 'rgba(255,255,255,0.0)');
+    ring.addColorStop(0.78, 'rgba(255,255,255,0.9)');
+    ring.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = ring;
+    ctx.fillRect(0, 0, size, size);
+    const core = ctx.createRadialGradient(cx, cx, 0, cx, cx, size * 0.2);
+    core.addColorStop(0, 'rgba(255,255,255,0.85)');
+    core.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = core;
+    ctx.fillRect(0, 0, size, size);
+    return new THREE.CanvasTexture(canvas);
+  }
+
+  private ensureStationMarkers() {
+    if (this.stationMarkers) return this.stationMarkers;
+    const tex = this.makeStationMarkerTexture();
+    const make = () => {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: tex,
+        color: 0xffd27a,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        depthTest: false,
+      }));
+      sprite.renderOrder = 20;
+      sprite.visible = false;
+      this.renderer.scene.add(sprite);
+      return sprite;
+    };
+    this.stationMarkers = { anchor: make(), sails: make(), helm: make() };
+    return this.stationMarkers;
+  }
+
+  private updateStationMarkers() {
+    const markers = this.ensureStationMarkers();
+    const player = this.getLocalPlayer();
+    const ship = player?.onShipId ? this.shipsById.get(player.onShipId) : null;
+    const aboard = !!player && !!ship && ship.alive && player.state === 'alive';
+    if (!aboard || !ship || !player) {
+      markers.anchor.visible = false;
+      markers.sails.visible = false;
+      markers.helm.visible = false;
+      return;
+    }
+    const stats = SHIP_STATS[ship.type];
+    const t = this.ocean.getTime();
+    const pulse = 0.62 + Math.sin(t * 2.6) * 0.22;
+    const bob = Math.sin(t * 1.7) * 0.07;
+    const place = (sprite: THREE.Sprite, localX: number, localZ: number, lift: number, hidden: boolean, color: number, urgency = 0) => {
+      sprite.visible = !hidden;
+      if (hidden) return;
+      const world = this.getShipWorldPoint(ship, localX, localZ, stats.height + lift + bob);
+      sprite.position.copy(world);
+      const mat = sprite.material as THREE.SpriteMaterial;
+      mat.color.setHex(color);
+      mat.opacity = (0.34 + urgency * 0.3) * pulse + urgency * 0.2;
+      const scale = 0.62 + pulse * 0.18 + urgency * 0.16;
+      sprite.scale.set(scale, scale, 1);
+    };
+    const anchorLocal = this.getAnchorControlLocal(stats);
+    const sailLocal = this.getSailControlLocal(stats);
+    place(markers.anchor, anchorLocal.x, anchorLocal.z, 1.15, false, ship.anchored ? 0xff5a3c : 0xffd27a, ship.anchored ? 1 : 0);
+    place(markers.sails, sailLocal.x, sailLocal.z, 1.5, false, ship.sailIntegrity < 0.995 ? 0xff9a4c : 0x8fd8ff, ship.sailHeight < 0.05 && !ship.anchored ? 0.7 : 0);
+    place(markers.helm, 0, -stats.length * 0.37, 1.65, player.atHelm, 0xd9c07a);
   }
 
   private updateMermaid(now: number): void {
@@ -8038,9 +8123,9 @@ export class Game {
       }
     } else if (player.atSails) {
       this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = '[X] Leave Sail Ring';
+      this.ui.interactPrompt.textContent = '';
       this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = 'Sail ring · W/C hoist · S/Z lower · Q/F angle · hold [X] + planks to mend canvas';
+      this.ui.contextLabel.textContent = '';
     } else if (player.atCrowNest) {
       this.ui.interactPrompt.style.display = 'block';
       this.ui.interactPrompt.textContent = '[X] Climb Down From Crow\'s Nest';
@@ -10282,14 +10367,21 @@ export class Game {
       if (this.isNearSailStation(player, ship)) {
         const sailControl = this.getSailControlLocal(SHIP_STATS[ship.type]);
         const sailPoint = this.getShipWorldPoint(ship, sailControl.x, sailControl.z, SHIP_STATS[ship.type].height + 0.85);
+        const sailPct = Math.round(ship.sailHeight * 100);
+        const canvasTorn = ship.sailIntegrity < 0.995;
+        const sailPrompt = canvasTorn
+          ? `[X] Hold — Mend the Rigging (${Math.round(ship.sailIntegrity * 100)}%)`
+          : ship.sailHeight < 0.5
+            ? `[X] Hold — Drop the Sails (${sailPct}%)`
+            : `[X] Hold — Raise the Sails (${sailPct}%)`;
         this.pushInteractionCandidate(
           candidates,
           player,
           sailPoint,
           4.2,
           0.18,
-          '[X] Use Sail Ring',
-          'W/C hoist · S/Z lower · Q/F angle',
+          sailPrompt,
+          canvasTorn ? 'Needs planks aboard · crewmates on the rope haul faster' : 'Crewmates on the rope haul faster',
           'sails',
         );
       }
@@ -10320,8 +10412,8 @@ export class Game {
           anchorPoint,
           4.4,
           0.18,
-          ship.anchored ? `[Hold X] Raise Anchor ${anchorProgress}%` : '[X] Drop Anchor',
-          ship.anchored ? 'Turn the capstan wheel to raise' : 'Drop anchor to stop fast',
+          ship.anchored ? `[X] Hold — Raise the Anchor (${anchorProgress}%)` : '[X] Drop the Anchor',
+          ship.anchored ? 'Man the capstan · crewmates speed the turn' : 'Stops the ship fast — you will have to crank it back up',
           'anchor',
         );
       }
