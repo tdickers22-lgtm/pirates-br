@@ -1,3 +1,35 @@
+# INTEGRATION_NOTES — combat fixes verification (agent: server/combat)
+
+Server-side combat audit fixes (.audit/combat.md 1/2/6/7/10/11/12 + storm 6)
+are implemented and pinned by `scripts/test-combat-fixes.mjs` (in the
+`test:logic` chain). Client wiring that belongs to the orchestrator:
+
+1. **`ship_damage` broadcast is live** (Match.relayPendingCombatEvents): every
+   client now receives `{ targetId, attackerId, section, position, damage,
+   remainingSection, projectileType }` for each hull hit; `ship_hit` stays the
+   attacker-only confirm. Client side (NetworkClient switch → Game →
+   `ShipRenderer.addHullDamage(shipId, section, worldPos)`) can consume it for
+   impact-point hole decals / victim FX (audit combat finding 2's client half).
+   The message type `'ship_damage'` is already in the shared NetMsgType union.
+
+2. **`ship.floodingRate` semantics changed to NET trend** (ingress − bailing −
+   pump, published end-of-tick in Match.update). The HUD water gauge
+   (Game.ts ~8964-9003) needs no code change but now shows ▼ while bailers are
+   winning — if any client logic assumed floodingRate === raw ingress, it
+   should read holes from hull sections instead.
+
+3. **Chainshot rigging band** (PhysicsSystem.isChainshotInRiggingBand) assumes
+   client mast height = H × 3.6 (single mast) / 3.1 (multi) per
+   getCrowNestStandingY. If ShipRenderer mast proportions change, keep that
+   multiplier in sync (or export a shared mast-height helper).
+
+4. **Client-side splash-vs-wood classification** (audit combat finding 8,
+   CombatFx WATER_IMPACT_THRESHOLD_Y) is still open and lives in
+   orchestrator-owned files; the server now reliably reports waterline hull
+   hits (finding 1 fixed), so the fixed y=0.9 misclassification is visible.
+
+---
+
 # INTEGRATION_NOTES — OceanRenderer storm sea + true shoreline (agent 1)
 
 OceanRenderer.ts now (a) displaces wave GEOMETRY with the shared storm sea-state
