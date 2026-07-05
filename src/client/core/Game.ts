@@ -9005,8 +9005,14 @@ export class Game {
       const weaponDef = weapon ? WEAPONS[weapon.weaponId] : null;
       this.ui.reloadIndicator.style.display = weapon?.reloading && weaponDef && !weaponDef.melee ? 'block' : 'none';
     }
-    this.ui.scopeOverlay.style.display =
-      this.spyglassActive || (this.input.isAiming() && weapon && WEAPONS[weapon.weaponId].scopeFov) ? 'block' : 'none';
+    const scopeShowing = !!(this.spyglassActive
+      || (this.input.isAiming() && weapon && WEAPONS[weapon.weaponId].scopeFov));
+    this.ui.scopeOverlay.style.display = scopeShowing ? 'block' : 'none';
+    // The SPYGLASS is a clean lens — no reticle. (A weapon sniper scope keeps
+    // its cross-lines to aim with.) Either way the FPS crosshair is hidden while
+    // looking through a scope.
+    this.ui.scopeOverlay.classList.toggle('spyglass', this.spyglassActive);
+    this.ui.crosshair.style.display = scopeShowing ? 'none' : '';
     this.ui.crosshair.classList.toggle('cannon', player.atCannon);
     const shotgunCrosshair = !player.atCannon && weapon?.weaponId === 'blunderbuss';
     this.ui.crosshair.classList.toggle('shotgun', shotgunCrosshair);
