@@ -100,9 +100,14 @@ interface ScatterSpec {
 const PALM_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.9, maxSlope: 1.4, dMin: 0.25, dMax: 0.93, sMin: 0.85, sMax: 1.25 };
 const BOULDER_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.5, maxSlope: 2.4, dMin: 0.08, dMax: 0.95, sMin: 0.75, sMax: 1.35 };
 const CLUTTER_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 1.2, maxSlope: 0.42, dMin: 0.2, dMax: 0.8, sMin: 0.9, sMax: 1.1 };
+const SHRUB_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.7, maxSlope: 1.0, dMin: 0.08, dMax: 0.95, sMin: 0.8, sMax: 1.35 };
 
 const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
   lush: [
+    { type: 'bush', weight: 2.0, ...SHRUB_SPECS },
+    { type: 'bush_berry', weight: 1.2, ...SHRUB_SPECS },
+    { type: 'flower_bush', weight: 1.4, ...SHRUB_SPECS },
+    { type: 'fern_plant', weight: 2.2, ...SHRUB_SPECS },
     { type: 'palm_a', weight: 3.0, ...PALM_SPECS },
     { type: 'palm_b', weight: 2.2, ...PALM_SPECS },
     { type: 'palm_c', weight: 2.0, ...PALM_SPECS },
@@ -112,6 +117,9 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'barrel', weight: 0.5, ...CLUTTER_SPECS },
   ],
   palm_atoll: [
+    { type: 'bush', weight: 1.6, ...SHRUB_SPECS },
+    { type: 'flower_bush', weight: 1.0, ...SHRUB_SPECS },
+    { type: 'fern_plant', weight: 1.8, ...SHRUB_SPECS },
     { type: 'palm_a', weight: 3.4, ...PALM_SPECS },
     { type: 'palm_b', weight: 2.6, ...PALM_SPECS },
     { type: 'palm_c', weight: 2.4, ...PALM_SPECS },
@@ -120,6 +128,8 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'crate', weight: 0.3, ...CLUTTER_SPECS },
   ],
   volcanic: [
+    { type: 'bush', weight: 1.0, ...SHRUB_SPECS },
+    { type: 'fern_plant', weight: 1.2, ...SHRUB_SPECS },
     { type: 'boulder_a', weight: 2.6, ...BOULDER_SPECS },
     { type: 'boulder_b', weight: 1.4, ...BOULDER_SPECS },
     { type: 'boulder_c', weight: 2.2, ...BOULDER_SPECS },
@@ -127,6 +137,9 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'crate', weight: 0.4, ...CLUTTER_SPECS },
   ],
   highland: [
+    { type: 'bush', weight: 1.6, ...SHRUB_SPECS },
+    { type: 'bush_berry', weight: 1.0, ...SHRUB_SPECS },
+    { type: 'fern_plant', weight: 1.4, ...SHRUB_SPECS },
     { type: 'boulder_a', weight: 2.4, ...BOULDER_SPECS },
     { type: 'boulder_b', weight: 1.2, ...BOULDER_SPECS },
     { type: 'boulder_c', weight: 1.8, ...BOULDER_SPECS },
@@ -136,6 +149,8 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'crate', weight: 0.5, ...CLUTTER_SPECS },
   ],
   bone: [
+    { type: 'bush', weight: 0.8, ...SHRUB_SPECS },
+    { type: 'fern_plant', weight: 0.8, ...SHRUB_SPECS },
     { type: 'boulder_c', weight: 1.6, ...BOULDER_SPECS },
     { type: 'boulder_a', weight: 1.0, ...BOULDER_SPECS },
     { type: 'palm_c', weight: 0.8, ...PALM_SPECS },

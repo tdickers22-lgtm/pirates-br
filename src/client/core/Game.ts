@@ -1249,6 +1249,91 @@ function makeLanternFlameTexture() {
   return texture;
 }
 
+// ── Foliage alpha textures (cached; white shapes so per-instance colors tint
+// them). These turn the flat cross-quads from solid green rectangles into
+// wispy grass blades / feathered fern fronds. ──
+let _grassBladeTex: THREE.CanvasTexture | null = null;
+let _fernFrondTex: THREE.CanvasTexture | null = null;
+
+function makeGrassBladeTexture(): THREE.CanvasTexture {
+  if (_grassBladeTex) return _grassBladeTex;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+  // A tuft of tapering blades fanning up from the bottom edge. White with a
+  // slight top-fade so tips feel soft; alpha carries the blade shape.
+  const blades = 7;
+  for (let i = 0; i < blades; i++) {
+    const baseX = size * (0.12 + (i / (blades - 1)) * 0.76);
+    const lean = (i - (blades - 1) / 2) * 6 + (Math.sin(i * 2.3) * 5);
+    const tipX = baseX + lean;
+    const w = 6 + (i % 3) * 2;
+    const tipY = size * (0.06 + (i % 4) * 0.05);
+    const grad = ctx.createLinearGradient(0, size, 0, tipY);
+    grad.addColorStop(0, 'rgba(230,255,220,0.95)');
+    grad.addColorStop(0.6, 'rgba(255,255,255,0.98)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(baseX - w * 0.5, size);
+    ctx.quadraticCurveTo((baseX + tipX) * 0.5 - w * 0.3, size * 0.5, tipX, tipY);
+    ctx.quadraticCurveTo((baseX + tipX) * 0.5 + w * 0.3, size * 0.5, baseX + w * 0.5, size);
+    ctx.closePath();
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  _grassBladeTex = tex;
+  return tex;
+}
+
+function makeFernFrondTexture(): THREE.CanvasTexture {
+  if (_fernFrondTex) return _fernFrondTex;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+  // A single arching frond: central rachis + paired pinnae (leaflets).
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineCap = 'round';
+  const baseX = size * 0.5;
+  const tipX = size * 0.66;
+  const rachis = (t: number) => ({
+    x: baseX + (tipX - baseX) * t,
+    y: size - (size * 0.92) * t,
+  });
+  // rachis
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(baseX, size);
+  for (let t = 0; t <= 1; t += 0.1) { const p = rachis(t); ctx.lineTo(p.x, p.y); }
+  ctx.stroke();
+  // pinnae
+  ctx.lineWidth = 3;
+  for (let t = 0.08; t < 0.98; t += 0.075) {
+    const p = rachis(t);
+    const len = (1 - t) * size * 0.32 + 6;
+    const droop = 0.5 + t * 0.5;
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.quadraticCurveTo(p.x + side * len * 0.6, p.y + len * 0.15 * droop, p.x + side * len, p.y + len * 0.35 * droop);
+      ctx.stroke();
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  _fernFrondTex = tex;
+  return tex;
+}
+
 function makeUpgradeSignTexture(title: string, effect: string, accentHex: number) {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
@@ -2140,6 +2225,7 @@ export class Game {
     if (props.length === 0) return;
     const instancedTypes: ReadonlySet<string> = new Set([
       'palm_a', 'palm_b', 'palm_c', 'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
+      'bush', 'bush_berry', 'flower_bush', 'fern_plant',
     ]);
     const buckets = new Map<IslandPropType, IslandProp[]>();
     for (const prop of props) {
@@ -3477,8 +3563,8 @@ export class Game {
     // ~260m; zero colliders (ankle-high ground cover).
     if (!lowDetail) {
       const grassCount = Math.min(2600, Math.round(r * r * 0.3));
-      const bladeGeo = new THREE.PlaneGeometry(0.34, 0.42, 1, 1);
-      bladeGeo.translate(0, 0.21, 0);
+      const bladeGeo = new THREE.PlaneGeometry(0.4, 0.5, 1, 1);
+      bladeGeo.translate(0, 0.25, 0);
       const crossGeo = (() => {
         const a = bladeGeo.clone();
         const b = bladeGeo.clone();
@@ -3506,9 +3592,11 @@ export class Game {
       // base squared every tuft toward black (the 'invisible grass' bug).
       const grassMat = new THREE.MeshStandardMaterial({
         color: 0xffffff,
+        map: makeGrassBladeTexture(),
         roughness: 0.94,
         side: THREE.DoubleSide,
-        alphaTest: 0,
+        alphaTest: 0.42,
+        transparent: false,
       });
       const grass = new THREE.InstancedMesh(crossGeo, grassMat, grassCount);
       const gM = new THREE.Matrix4();
@@ -3563,7 +3651,7 @@ export class Game {
       }
       const ferns = new THREE.InstancedMesh(
         fernGeo,
-        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, side: THREE.DoubleSide }),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, map: makeFernFrondTexture(), roughness: 0.92, side: THREE.DoubleSide, alphaTest: 0.4 }),
         fernCount,
       );
       // Cluster ferns into leafy clumps (2-3 fronds per seed) instead of
