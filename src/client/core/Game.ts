@@ -9179,11 +9179,13 @@ export class Game {
 
     const trackedShip = this.getTrackedShip();
     const localPlayer = this.getLocalPlayer();
-    const localX = trackedShip?.position.x ?? localPlayer?.position.x ?? 0;
-    const localZ = trackedShip?.position.z ?? localPlayer?.position.z ?? 0;
-    // Live heading: the ship's heading on deck, else the client's current look
-    // yaw — instant, so the arrow turns as you do with the map open.
-    const localHeading = trackedShip ? trackedShip.rotation : this.input.getYaw();
+    // The "you" marker follows the PLAYER's live position and current look yaw,
+    // so it moves when you walk/sail (you're carried by the deck) and rotates
+    // when you turn — even while parked on an anchored ship. Your ship is drawn
+    // as its own marker below.
+    const localX = localPlayer?.position.x ?? trackedShip?.position.x ?? 0;
+    const localZ = localPlayer?.position.z ?? trackedShip?.position.z ?? 0;
+    const localHeading = this.input.getYaw();
     // Whole-world fit, then a zoom the player can scroll on the full map. Zoomed
     // in, pan so the player stays centred; at 1× show the entire Shattered Reach.
     const baseScale = Math.min(width, height) / WORLD.SIZE;
@@ -9401,15 +9403,15 @@ export class Game {
 
     for (const ship of this.state.ships) {
       if (!ship.alive || ship.sinking) continue;
-      if (ship.id === trackedShip?.id) continue;
+      const isOwn = ship.id === trackedShip?.id;
       this.drawShipMarker(
         ctx,
         centerX + ship.position.x * scale,
         centerY + ship.position.z * scale,
         ship.rotation,
         fullscreen ? 12 : 7.5,
-        '#ff8f70',
-        'rgba(43, 12, 8, 0.55)',
+        isOwn ? '#7fd4ff' : '#ff8f70',
+        isOwn ? 'rgba(12, 40, 60, 0.62)' : 'rgba(43, 12, 8, 0.55)',
       );
     }
 
