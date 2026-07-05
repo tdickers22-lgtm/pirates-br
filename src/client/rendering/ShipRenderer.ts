@@ -2281,11 +2281,9 @@ export class ShipRenderer {
         coil2.rotation.y = Math.PI * 0.5;
         coil2.position.set(ropeStation.x + 0.02, H + 0.46, ropeStation.z - 0.12);
         group.add(coil2);
-        // rope tail dropping from the rig toward the rack
-        const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, H * 1.3, 5), ropeStationMat);
-        tail.position.set(ropeStation.x * 0.92, H + H * 0.9, ropeStation.z);
-        tail.rotation.z = ropeStation.x > 0 ? 0.14 : -0.14;
-        group.add(tail);
+        // (No dangling rope tail: it ended in mid-air below the rigging and
+        // read as a floating gold rod. The rack + pins + coils mark the
+        // station clearly on their own.)
       }
     }
 
