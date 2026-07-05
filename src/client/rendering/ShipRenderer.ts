@@ -2104,9 +2104,11 @@ export class ShipRenderer {
       group.add(pennant);
       pennants.push(pennant);
 
-      // Crow's nest on main/top mast
+      // Crow's nest on the main mast — sits just ABOVE the sail's yard (sail top
+      // settles at ~0.82·mastH) so the canvas hangs below it, not through it.
+      // Keep in sync with getCrowNestStandingY (the standing spot).
       if (m === 0 && mastH > 6) {
-        const nestY = H + mastH * 0.72;
+        const nestY = H + mastH * 0.86;
         const nestFloor = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.5, 0.14, 8), darkMat);
         nestFloor.position.set(0, nestY, mastZ);
         group.add(nestFloor);
