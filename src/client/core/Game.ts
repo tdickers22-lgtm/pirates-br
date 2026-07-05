@@ -11288,8 +11288,10 @@ export class Game {
       'position:fixed',
       'left:0',
       'right:0',
-      'bottom:8vh',
-      'z-index:76',
+      // Sit ABOVE the bottom HUD stack (pocket/stores bars) and on a higher
+      // z-index so NPC dialogue is never rendered behind the panels.
+      'bottom:20vh',
+      'z-index:140',
       'pointer-events:none',
       'display:flex',
       'justify-content:center',
