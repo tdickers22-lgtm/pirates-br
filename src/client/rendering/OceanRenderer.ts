@@ -242,8 +242,11 @@ const OCEAN_FRAG = /* glsl */`
     // ── Foam: noise-broken crests + animated shore band. Storm lowers the
     //    breaking threshold and softens the exponent so whitecap coverage
     //    grows dramatically as the sea state rises ─────────────────────────
+    // Whitecap coverage thins with distance in a storm — full-strength crest
+    // foam at every range merged into a horizon-wide ice sheet (patrol-1).
+    float stormFoamFade = 1.0 - smoothstep(220.0, 1400.0, camDist) * max(u_stormIntensity, stormSea) * 0.8;
     float crest = pow(clamp(hn * (1.15 + 0.35 * stormSea) - (0.10 - 0.06 * stormSea), 0.0, 1.0), 3.0 - 1.2 * stormSea)
-                * (0.55 + 0.45 * calm + u_stormIntensity * 0.5 + stormSea * 0.6);
+                * (0.55 + 0.45 * calm + u_stormIntensity * 0.32 + stormSea * 0.42) * stormFoamFade;
     vec2 foamUv = wp * 0.018 + u_time * vec2(0.012, 0.008);
     float foamN = noise(foamUv * 3.0) * noise(foamUv * 7.0 + 1.5);
     float breakup = mix(0.55, smoothstep(0.28 - 0.12 * stormSea, 0.62, foamN), detailFade * 0.85 + 0.15);
