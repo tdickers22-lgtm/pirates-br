@@ -6694,8 +6694,8 @@ export class Game {
       // Park a tiny full-power ring at the camera: locally we are deep outside
       // it, so the shared sea-state formula returns ~1 right here.
       const cam = this.renderer.camera.position;
-      this.stormWeatherIntensity = 0.85;
-      this.ocean.setStormIntensity(0.85);
+      this.stormWeatherIntensity = 0.7;
+      this.ocean.setStormIntensity(0.7);
       // Positive radius, ring parked far away: we are ~780m outside it, so the
       // shared sea-state formula returns 1 here. (A negative radius hits the
       // shader's no-storm sentinel and silently disables the swell geometry.)
@@ -11408,12 +11408,12 @@ export class Game {
     const t = this.ocean.getTime();
     const wind = sampleWind(t);
     const gust = Math.sin(t * 2.7) * 0.5 + Math.sin(t * 6.3 + 1.4) * 0.3;
-    const windSpeed = (4 + intensity * 9) * wind.strength + gust * intensity * 3;
+    const windSpeed = (6 + intensity * 12) * wind.strength + gust * intensity * 3;
     const windX = Math.sin(wind.direction) * windSpeed;
     const windZ = Math.cos(wind.direction) * windSpeed;
     const fallSpeed = 21 + intensity * 11;
     const active = Math.max(24, Math.floor(rain.drops * (0.22 + intensity * 0.78)));
-    const streak = 0.32 + intensity * 0.5;
+    const streak = 0.55 + intensity * 0.8;
     // Normalized fall direction × streak length for the trailing vertex.
     const vLen = Math.hypot(windX, windZ, fallSpeed);
     const sx = (windX / vLen) * streak;
@@ -11447,7 +11447,7 @@ export class Game {
     rain.geo.setDrawRange(0, active * 2);
     (rain.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
     const nightFactor = this.renderer.getAtmosphere().nightFactor ?? 0;
-    rain.material.opacity = (0.16 + intensity * 0.26) * (1 - nightFactor * 0.35);
+    rain.material.opacity = (0.13 + intensity * 0.2) * (1 - nightFactor * 0.35);
   }
 
   private updateStormLightningFlash(dt: number) {

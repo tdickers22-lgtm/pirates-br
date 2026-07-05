@@ -97,7 +97,9 @@ export function resolvePropCollision(
   return { x, z, pushed };
 }
 
-/** Convenience for placement/tests: world-space Y a prop rests at. */
+/** Convenience for placement/tests: world-space Y a prop rests at. Sunk a
+ *  few cm so bases bite into sloped terrain instead of hovering on the
+ *  single-sample point (patrol-1: crates/chests/tents floating on hills). */
 export function getPropGroundY(island: Island, prop: IslandProp): number {
-  return getIslandSurfaceY(island, prop.x, prop.z);
+  return getIslandSurfaceY(island, prop.x, prop.z) - 0.07;
 }
