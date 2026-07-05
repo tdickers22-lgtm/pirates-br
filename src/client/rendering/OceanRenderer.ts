@@ -209,7 +209,7 @@ const OCEAN_FRAG = /* glsl */`
     // ── Shore shallows: turquoise ramp toward the beach ─────────────────
     float sd = shoreDist(wp);
     float shallowMask = 1.0 - smoothstep(4.0, 52.0, sd);
-    vec3 shallowCol = mix(vec3(0.06, 0.46, 0.50), vec3(0.30, 0.68, 0.62), 1.0 - smoothstep(0.0, 14.0, sd));
+    vec3 shallowCol = mix(vec3(0.07, 0.48, 0.52), vec3(0.32, 0.70, 0.64), 1.0 - smoothstep(0.0, 14.0, sd));
     base = mix(base, shallowCol, shallowMask * 0.9 * (1.0 - u_stormIntensity * 0.55));
 
     // ── Fresnel reflectance toward sky/horizon ──────────────────────────
@@ -275,7 +275,7 @@ const OCEAN_FRAG = /* glsl */`
     color += specCol;
 
     // Night: dim the water body (fog/horizon colors arrive pre-dimmed)
-    color *= mix(1.0, 0.34, u_nightFactor * (1.0 - foam * 0.4));
+    color *= mix(1.0, 0.42, u_nightFactor * (1.0 - foam * 0.4) * (1.0 - shallowMask * 0.4));
 
     // Storm: darker, desaturated water under gray skies
     vec3 stormTint = mix(vec3(1.0), vec3(0.42, 0.48, 0.55), u_stormIntensity);

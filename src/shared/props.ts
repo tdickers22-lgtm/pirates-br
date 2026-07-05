@@ -41,7 +41,7 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
 export const BIOME_PALETTES: Record<IslandBiome, { sand: number; grass: number; rock: number; foliage: number }> = {
   lush: { sand: 0xe8d5a3, grass: 0x5fa84c, rock: 0x8b8578, foliage: 0x3e7a34 },
   palm_atoll: { sand: 0xf2e3b6, grass: 0x7cbf5a, rock: 0x9c927f, foliage: 0x4c9c46 },
-  volcanic: { sand: 0x55493f, grass: 0x6b7a3e, rock: 0x3b3430, foliage: 0x516838 },
+  volcanic: { sand: 0x6e6154, grass: 0x77863f, rock: 0x5a5148, foliage: 0x5c7440 },
   highland: { sand: 0xc9bb94, grass: 0x6e8f4e, rock: 0x7c7c74, foliage: 0x49663c },
   bone: { sand: 0xe6ddc4, grass: 0x9ba06a, rock: 0xb0a896, foliage: 0x7c8256 },
 };
