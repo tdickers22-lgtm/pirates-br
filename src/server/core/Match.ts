@@ -1686,7 +1686,6 @@ export class Match {
     if (!input.useWheelItem || input.wheelIndex === null) return;
     if (player.state === 'eliminated' || player.state === 'respawning') return;
     if (player.carryingChestId) return;
-    if (player.pocketUseCooldown > 0) return;
     // Edge-trigger guard: same input replayed across ticks must not consume twice.
     if (!this.consumeOneShot(client, 'wheel', input.seq)) return;
     const crewShip =
@@ -1703,9 +1702,12 @@ export class Match {
             : ix === 7 ? 'shovel'
               : null;
     if (tool) {
+      // Equipping a tool is instant — bypasses the consumable use-cooldown.
       player.equippedTool = player.equippedTool === tool ? null : tool;
       return;
     }
+    // Consumables/planks respect the use-cooldown (one fruit at a time).
+    if (player.pocketUseCooldown > 0) return;
     let consumed = false;
     if (ix === 3) {
       if (player.pocketWood <= 0 || !crewShip) return;

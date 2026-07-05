@@ -1768,6 +1768,10 @@ export class Game {
   private mapOpen = false;
   /** Full-map zoom (1 = whole world fit; scroll to zoom in, pans to the player). */
   private mapZoom = 1;
+  /** Supply-wheel slot the mouse is hovering while it's open (radial select). */
+  private wheelHoverSlot: number | null = null;
+  /** Whether the supply wheel was open last frame — to catch the release edge. */
+  private wheelWasOpen = false;
   private previousLocalState: Player['state'] | null = null;
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
@@ -2531,16 +2535,43 @@ export class Game {
       slice.addEventListener('pointerdown', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        const slot = Number(slice.dataset.wheelSlot);
-        if (!Number.isInteger(slot)) return;
-        const local = this.getLocalPlayer();
-        if (local?.carryingChestId) return;
-        if (local && local.pocketUseCooldown > 0) return;
-        if (this.pocketUsePreviewTimer > 0) return;
-        this.input.queueWheelSlot(slot);
-        this.startPocketUsePreview(slot);
+        this.activateWheelSlot(Number(slice.dataset.wheelSlot));
       });
     }
+    // Radial select: while the wheel is open, the mouse angle from the hub picks
+    // a slot (highlighted); releasing [I] over it activates it — the SoT feel.
+    const svgEl = this.ui.pocketWheel.querySelector<SVGSVGElement>('#pocket-wheel-svg');
+    window.addEventListener('mousemove', (e) => {
+      if (!this.input.isSupplyWheelOpen() || !svgEl) { this.wheelHoverSlot = null; return; }
+      const rect = svgEl.getBoundingClientRect();
+      const dx = e.clientX - (rect.left + rect.width * 0.5);
+      const dy = e.clientY - (rect.top + rect.height * 0.5);
+      // Inside the hub dead-zone (r≈26 of the 200-unit viewBox) selects nothing.
+      if (Math.hypot(dx, dy) < rect.width * 0.13) { this.wheelHoverSlot = null; return; }
+      let ang = Math.atan2(dx, -dy); // clockwise from the top (slot 0)
+      if (ang < 0) ang += Math.PI * 2;
+      this.wheelHoverSlot = Math.round(ang / (Math.PI / 4)) % 8;
+    });
+  }
+
+  /** Use/equip a supply-wheel slot (shared by click and hover-release). */
+  private activateWheelSlot(slot: number) {
+    if (!Number.isInteger(slot) || slot < 0 || slot > 7) return;
+    const local = this.getLocalPlayer();
+    if (local?.carryingChestId) return;
+    if (this.pocketUsePreviewTimer > 0) return;
+    this.input.queueWheelSlot(slot);
+    this.startPocketUsePreview(slot);
+  }
+
+  /** On the frame the wheel closes, activate whatever slot was hovered. */
+  private updateWheelRelease() {
+    const open = this.input.isSupplyWheelOpen();
+    if (this.wheelWasOpen && !open && this.wheelHoverSlot !== null) {
+      this.activateWheelSlot(this.wheelHoverSlot);
+    }
+    if (!open) this.wheelHoverSlot = null;
+    this.wheelWasOpen = open;
   }
 
   private bindNetworkEvents() {
@@ -6682,6 +6713,10 @@ export class Game {
       : performance.now() / 1000;
     this.updateVolcanicFx(dt, worldTime);
 
+    // Radial release: if the wheel just closed over a hovered slot, queue it now
+    // (before hasPendingActions so the resulting input is force-sent this frame).
+    this.updateWheelRelease();
+
     const hasForcedInput = this.input.hasPendingActions() || this.pendingInteractFromUi || this.pendingLaunchFromUi;
     if (this.network.isConnected() && (this.inputSendTimer <= 0 || hasForcedInput)) {
       if (this.input.consumeLegendPressed()) {
@@ -10238,7 +10273,9 @@ export class Game {
     const equippedSlot = this.toolWheelSlot(player.equippedTool);
     for (const slice of this.ui.pocketWheel.querySelectorAll<SVGPathElement>('[data-wheel-slot]')) {
       const s = Number(slice.dataset.wheelSlot);
-      slice.classList.toggle('active', s === heldSlot || s === equippedSlot);
+      // The mouse-hovered slot lights up brightest; also mark held-digit + equipped.
+      slice.classList.toggle('hovered', s === this.wheelHoverSlot);
+      slice.classList.toggle('active', s === heldSlot || s === equippedSlot || s === this.wheelHoverSlot);
     }
   }
 
