@@ -1037,6 +1037,22 @@ export class PhysicsSystem {
             }
           }
         }
+
+        // ── Anti-embed safety net ──────────────────────────────────────────
+        // A pirate can never stay stuck INSIDE above-water island terrain (e.g.
+        // wedged in a cliff/rock after a jump at the shore): if they end up well
+        // below the solid surface, pop them back onto it. Caves (they legit
+        // stand below the natural surface) and open-water swimming are exempt.
+        if (onIsland && !downed) {
+          const solidY = getIslandSurfaceY(onIsland, player.position.x, player.position.z);
+          const inCave = getCaveCeilingY(onIsland, player.position.x, player.position.z) !== null;
+          if (!inCave && solidY > 0.5 && player.position.y < solidY - 1.0) {
+            player.position.y = solidY;
+            if (player.velocity.y < 0) player.velocity.y = 0;
+            player.swimTimer = 0;
+            player.state = 'alive';
+          }
+        }
       }
 
       this.resolveSwimmerShipCollision(player, ships);
