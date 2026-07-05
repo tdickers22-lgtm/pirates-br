@@ -1,5 +1,5 @@
 import type { Ship, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
-import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, SEA_ROCKS, WORLD, FLOODING, GEYSER } from '../../shared/constants/index.js';
+import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER } from '../../shared/constants/index.js';
 import { toShipLocalPoint, toShipWorldPoint } from '../../shared/interactions.js';
 import {
   getBridgeDeckY,
@@ -178,16 +178,16 @@ function sectionFloodLocal(
 }
 
 /**
- * Per-section flood evaluation. A section takes on water when it is BOTH holed
- * (HP ≤ HOLE_THRESHOLD) and its waterline hole sits at/below the local Gerstner
- * surface. The hole's world Y includes ship heave (via position.y), pitch and
- * roll, so a hole on the raised windward rail of a heeled ship stays dry.
+ * Per-section flood evaluation. A section takes on water when it has at least
+ * one open hole AND that hole sits at/below the local Gerstner surface. The
+ * hole's world Y includes ship heave (via position.y), pitch and roll, so holes
+ * on the raised windward rail of a heeled ship stay dry — aim below the line.
  */
 export function evaluateSectionFlood(
   ship: Ship,
   t: number,
   storm = 0,
-): Array<{ section: keyof HullSections; holed: boolean; submerged: boolean; flooding: boolean }> {
+): Array<{ section: keyof HullSections; holes: number; submerged: boolean; flooding: boolean }> {
   const stats = SHIP_STATS[ship.type];
   const sinR = Math.sin(ship.rotation);
   const cosR = Math.cos(ship.rotation);
@@ -203,30 +203,23 @@ export function evaluateSectionFlood(
     // Storm seas break over holes that calm water would leave dry.
     const waterlineY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
     const submerged = holeY - waterlineY < FLOODING.HOLE_WATERLINE_DEPTH;
-    const holed = ship.hull[section] <= FLOODING.HOLE_THRESHOLD;
-    // A DESTROYED section (hp ~0) is breached below the line somewhere no
-    // matter how the hull rides — it always takes water. Barely-holed
-    // sections only flood when the sea actually reaches the hole.
-    const breached = ship.hull[section] <= 0.12;
-    return { section, holed, submerged, flooding: (holed && submerged) || breached };
+    const holes = ship.holes ? ship.holes[section] : 0;
+    return { section, holes, submerged, flooding: holes > 0 && submerged };
   });
 }
 
-/** How hard a holed section floods: a fresh hole at the threshold trickles at
- *  ~0.55×, a destroyed section gushes at ~1.65× the base ingress. */
-export function sectionIngressScale(sectionHp: number): number {
-  const severity = clamp(1 - sectionHp / FLOODING.HOLE_THRESHOLD, 0, 1);
-  return 0.55 + 1.1 * severity;
-}
-
-/** Total ingress (water-level/sec) from every holed-below-waterline section. */
+/** Total ingress (water-level/sec) from every open, submerged hole. Each hole
+ *  leaks INGRESS_PER_HOLE; a reinforced hull seeps slower (HULL_INGRESS_MULT). */
 export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
-  const scale = FLOODING.INGRESS_CLASS_SCALE[ship.type] ?? 1;
+  const classScale = FLOODING.INGRESS_CLASS_SCALE[ship.type] ?? 1;
+  const reinforced = ship.upgrades.some((u) => u.type === 'hull_reinforcement')
+    ? SHIP_UPGRADES.HULL_INGRESS_MULT
+    : 1;
   let total = 0;
   for (const s of evaluateSectionFlood(ship, t, storm)) {
-    if (s.flooding) total += FLOODING.SECTION_INGRESS * sectionIngressScale(ship.hull[s.section]);
+    if (s.flooding) total += FLOODING.INGRESS_PER_HOLE * s.holes;
   }
-  return total * scale;
+  return total * classScale * reinforced;
 }
 
 /**
@@ -248,7 +241,10 @@ export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0)
       ship.fireDamageAccum = 0;
     }
   } else {
-    const pump = FLOODING.BAIL_RATE * FLOODING.PASSIVE_PUMP_FACTOR;
+    const pumpMult = ship.upgrades.some((u) => u.type === 'hull_reinforcement')
+      ? SHIP_UPGRADES.HULL_PUMP_MULT
+      : 1;
+    const pump = FLOODING.BAIL_RATE * FLOODING.PASSIVE_PUMP_FACTOR * pumpMult;
     ship.waterLevel = clamp(water - pump * dt, 0, 1);
     ship.floodingRate = (ship.waterLevel ?? 0) > 0 ? -pump : 0;
   }
@@ -489,15 +485,17 @@ export class PhysicsSystem {
 
       if (ship.onFire) {
         ship.fireTimer = Math.max(0, ship.fireTimer - dt);
-        ship.fireDamageAccum += SHIP.FIRE_HULL_DAMAGE_PER_SEC * dt;
-        if (ship.fireDamageAccum >= 1) {
-          const dmg = Math.floor(ship.fireDamageAccum);
-          ship.fireDamageAccum -= dmg;
+        // A deck fire burns THROUGH the hull, charring a fresh hole every
+        // FIRE_HOLE_INTERVAL seconds into the least-holed section, so an
+        // untended blaze spreads leaks around the ship until it floods.
+        ship.fireDamageAccum += dt;
+        if (ship.fireDamageAccum >= SHIP.FIRE_HOLE_INTERVAL) {
+          ship.fireDamageAccum -= SHIP.FIRE_HOLE_INTERVAL;
           const sections = ['bow', 'stern', 'port', 'starboard'] as const;
-          const weakestSection = sections.reduce((weakest, section) => (
-            ship.hull[section] < ship.hull[weakest] ? section : weakest
+          const target = sections.reduce((least, section) => (
+            ship.holes[section] < ship.holes[least] ? section : least
           ), sections[0]);
-          this.damageHullSection(ship, weakestSection, dmg / ship.maxHull);
+          this.openHole(ship, target, 1);
         }
         if (ship.fireTimer <= 0) {
           ship.onFire = false;
@@ -1250,15 +1248,15 @@ export class PhysicsSystem {
 
     const beforeHull = this.getAverageHull(ship);
     // Chainshot is a rigging weapon — it shreds canvas and fouls the helm but
-    // never opens a hull hole, so it deals no section damage (see below).
-    const dmg = proj.type === 'chainshot' ? 0 : proj.damage / ship.maxHull;
+    // never opens a hull hole, so it punches nothing (see below).
     if (proj.type !== 'chainshot') {
-      this.damageHullSection(ship, section, dmg);
-      const splashRatio = 0.14;
-      for (const otherSection of Object.keys(ship.hull) as Array<keyof typeof ship.hull>) {
-        if (otherSection === section) continue;
-        this.damageHullSection(ship, otherSection, dmg * splashRatio);
-      }
+      // Discrete holes: one per ball, +CHARGED_EXTRA_HOLES for a Heavy Shot ship,
+      // and a super cannonball caves in three. No HP pool — the ball punches the
+      // hull; water through the hole is what actually sinks the ship.
+      const superShot = proj.special === 'super_cannonball';
+      const charged = proj.damage > SHIP.CANNON_DAMAGE_HULL * 1.15;
+      const holeCount = superShot ? 3 : (charged ? 1 + SHIP_UPGRADES.CHARGED_EXTRA_HOLES : 1);
+      this.openHole(ship, section, holeCount);
     }
     const remainingHull = this.getAverageHull(ship);
     const milestone = beforeHull > 0.5 && remainingHull <= 0.5
@@ -1332,10 +1330,34 @@ export class PhysicsSystem {
     }
   }
 
-  damageHullSection(ship: Ship, section: keyof Ship['hull'], dmgRatio: number) {
-    ship.hull[section] = Math.max(0, ship.hull[section] - dmgRatio);
+  /** Recompute the derived per-section integrity (0..1) from the open-hole
+   *  counts — the HUD gauges and damage decals read this; `holes` is the truth. */
+  syncHullFromHoles(ship: Ship) {
+    if (!ship.holes) ship.holes = { bow: 0, stern: 0, port: 0, starboard: 0 };
+    const max = FLOODING.MAX_HOLES_PER_SECTION;
+    ship.hull.bow = clamp(1 - ship.holes.bow / max, 0, 1);
+    ship.hull.stern = clamp(1 - ship.holes.stern / max, 0, 1);
+    ship.hull.port = clamp(1 - ship.holes.port / max, 0, 1);
+    ship.hull.starboard = clamp(1 - ship.holes.starboard / max, 0, 1);
+  }
+
+  /** Punch `count` holes into a hull section (capped per section). Below the
+   *  waterline these flood — the ONLY way to sink a ship. Re-arms the repair
+   *  cooldown so the passive field-repair can't instantly patch a fresh hit. */
+  openHole(ship: Ship, section: keyof Ship['holes'], count = 1) {
+    if (count <= 0) return;
+    if (!ship.holes) ship.holes = { bow: 0, stern: 0, port: 0, starboard: 0 };
+    ship.holes[section] = Math.min(FLOODING.MAX_HOLES_PER_SECTION, ship.holes[section] + count);
+    this.syncHullFromHoles(ship);
     ship.repairCooldown = Math.max(ship.repairCooldown, SHIP.FIELD_REPAIR_DELAY);
     ship.autoRepairProgress = 0;
+  }
+
+  /** Patch `count` holes in a section (one plank per hole). */
+  patchHole(ship: Ship, section: keyof Ship['holes'], count = 1) {
+    if (!ship.holes) ship.holes = { bow: 0, stern: 0, port: 0, starboard: 0 };
+    ship.holes[section] = Math.max(0, ship.holes[section] - count);
+    this.syncHullFromHoles(ship);
   }
 
   /** Rotate a world-space direction into a ship's local frame. +z = forward, +x = starboard.
@@ -1364,17 +1386,13 @@ export class PhysicsSystem {
       : (localImpact.x >= 0 ? 'starboard' : 'port');
   }
 
-  private adjacentSections(section: keyof HullSections): Array<keyof HullSections> {
-    if (section === 'port' || section === 'starboard') return ['bow', 'stern'];
-    return ['port', 'starboard'];
-  }
-
   private getAverageHull(ship: Ship) {
     return (ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard) / 4;
   }
 
-  repairHullSection(ship: Ship, section: keyof Ship['hull'], amount: number) {
-    ship.hull[section] = Math.min(1, ship.hull[section] + amount / ship.maxHull);
+  /** Back-compat shim: a repair action patches one hole in the section. */
+  repairHullSection(ship: Ship, section: keyof Ship['holes']) {
+    this.patchHole(ship, section, 1);
   }
 
   /** Block passing through the full hull — swimmers AND walkers whose feet are
@@ -1786,25 +1804,13 @@ export class PhysicsSystem {
       // Impacted section from the actual contact point via the canonical transform.
       const shipSection = this.impactHullSection(this.toShipLocal({ x: cx, y: 0, z: cz }, ship));
       const otherSection = this.impactHullSection(this.toShipLocal({ x: cx, y: 0, z: cz }, other));
-      const shipDmg = (baseDmg * shipFactor) / ship.maxHull;
-      const otherDmg = (baseDmg * otherFactor) / other.maxHull;
-      this.damageHullSection(ship, shipSection, shipDmg);
-      this.damageHullSection(other, otherSection, otherDmg);
-
-      // True T-bones (factor > 1) wrap damage to neighbouring sections —
-      // a perpendicular slam shears bow/stern adjacent to the broadside hit.
-      const shipSplash = Math.max(0, shipFactor - 1.0) * 0.4;
-      const otherSplash = Math.max(0, otherFactor - 1.0) * 0.4;
-      if (shipSplash > 0) {
-        for (const adj of this.adjacentSections(shipSection)) {
-          this.damageHullSection(ship, adj, shipDmg * shipSplash);
-        }
-      }
-      if (otherSplash > 0) {
-        for (const adj of this.adjacentSections(otherSection)) {
-          this.damageHullSection(other, adj, otherDmg * otherSplash);
-        }
-      }
+      // Discrete holes: a bow-on ram stoves in one plank; a broadside T-bone
+      // (high factor) caves in two; a very hard slam adds a third. The T-boned
+      // victim therefore always loses more planks than the rammer.
+      const ramHoles = (factor: number) =>
+        1 + (factor > 1.4 ? 1 : 0) + (baseDmg * factor > 90 ? 1 : 0);
+      this.openHole(ship, shipSection, ramHoles(shipFactor));
+      this.openHole(other, otherSection, ramHoles(otherFactor));
 
       // Ram kill credit: each hull's damage is banked to the OTHER hull's
       // helmsman (or its owner), so ramming a ship to death now credits the
@@ -1889,8 +1895,8 @@ export class PhysicsSystem {
       ship.angularVelocity += clamp((rz * nx - rx * nz) * impactSpeed * 0.004, -0.12, 0.12);
       if (impactSpeed > 2.0) {
         const section = this.impactHullSection(this.rotateWorldToShipLocal(-nx, -nz, ship.rotation));
-        const damage = Math.min(90, (impactSpeed - 2.0) * SEA_ROCKS.SHIP_DAMAGE_PER_SPEED * 0.6) / ship.maxHull;
-        this.damageHullSection(ship, section, damage);
+        // Running aground stoves a hole in the keel — hard groundings punch two.
+        this.openHole(ship, section, impactSpeed > 5 ? 2 : 1);
       }
     }
   }
@@ -1948,8 +1954,8 @@ export class PhysicsSystem {
         - (deepest.sampleX - ship.position.x) * deepest.nz * 0.012;
 
       if (impactSpeed > 2.2) {
-        const damage = Math.min(120, (impactSpeed - 2.2) * SEA_ROCKS.SHIP_DAMAGE_PER_SPEED) / ship.maxHull;
-        this.damageHullSection(ship, deepest.section, damage);
+        // Striking a sea rock tears the hull open — a fast strike punches two holes.
+        this.openHole(ship, deepest.section, impactSpeed > 5 ? 2 : 1);
       }
     }
   }

@@ -1396,6 +1396,7 @@ export class MapGenerator {
       sailAngle: 0,
       anchored: false,
       anchorRaiseProgress: 0,
+      holes: { bow: 0, stern: 0, port: 0, starboard: 0 },
       hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
       maxHull: stats.maxHull,
       onFire: false,

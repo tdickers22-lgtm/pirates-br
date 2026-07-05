@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_UPGRADES, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
+import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
@@ -857,10 +857,10 @@ export class Match {
     this.updateSharks(dt);
     this.updateWildlife(dt);
 
-    // Storm — hull damage routes through damageHullSection so the storm
-    // punctures hulls (holes + flooding) instead of silently melting them.
+    // Storm — routes through openHole so the tempest punches real holes into
+    // the seaward face (holes + flooding), the SoT damage loop.
     this.storm.update(dt, this.state.storm, this.state.ships, this.state.players, {
-      damageHullSection: (ship, section, ratio) => this.physics.damageHullSection(ship, section, ratio),
+      openHole: (ship, section, count) => this.physics.openHole(ship, section, count),
     });
     this.syncTreasureChests();
     this.updateKegs(dt);
@@ -1168,7 +1168,7 @@ export class Match {
       if (ship) {
         const repairSection = this.getRepairableHullSection(player, ship);
         if (repairSection && this.consumeRepairPlank(player, ship)) {
-          this.physics.repairHullSection(ship, repairSection, SHIP.REPAIR_HP);
+          this.physics.repairHullSection(ship, repairSection);
           if (ship.onFire) {
             ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
             if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
@@ -2033,14 +2033,18 @@ export class Match {
     if (keg.defused) return;
     this.syncKegPosition(keg);
     const attacker = this.getPlayer(keg.plantedById);
-    const hullDamageMult = keg.mega ? 5 : 1;
     const playerDamageMult = keg.mega ? 1.35 : 1;
 
     for (const hit of this.getKegShipHits(keg)) {
       this.markShipDamagedByPlayer(hit.ship.id, keg.plantedById);
+      // A keg blast caves the hull in: the detonation section is stove wide
+      // open, the rest take a hole each. A MEGA keg riddles the whole hull.
       for (const section of this.getHullSections()) {
-        const damageRatio = (section === hit.section ? SHIP.KEG_PRIMARY_DAMAGE_RATIO : SHIP.KEG_SPLASH_DAMAGE_RATIO) * hullDamageMult;
-        this.physics.damageHullSection(hit.ship, section, damageRatio);
+        const isPrimary = section === hit.section;
+        const holes = keg.mega
+          ? (isPrimary ? FLOODING.MAX_HOLES_PER_SECTION : 2)
+          : (isPrimary ? 2 : 1);
+        this.physics.openHole(hit.ship, section, holes);
       }
       hit.ship.onFire = true;
       hit.ship.fireTimer = Math.max(hit.ship.fireTimer, SHIP.FIRE_DURATION);
@@ -2264,7 +2268,7 @@ export class Match {
       if (holedSection && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t && this.getRepairPlankCount(player, ship) > 0) {
         if (this.getRepairableHullSection(player, ship) === holedSection) {
           if (this.consumeRepairPlank(player, ship)) {
-            this.physics.repairHullSection(ship, holedSection, SHIP.REPAIR_HP);
+            this.physics.repairHullSection(ship, holedSection);
             this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL);
           }
         } else {
@@ -2299,11 +2303,9 @@ export class Match {
     }
   }
 
-  /** Weakest hull section that has been holed (≤ HOLE_THRESHOLD), else null. */
+  /** Most-holed section (the one to plank first), or null if the hull is whole. */
   private getWeakestHoledSection(ship: Ship): keyof Ship['hull'] | null {
-    const weakest = this.getWeakestHullSection(ship);
-    if (weakest && ship.hull[weakest] <= FLOODING.HOLE_THRESHOLD) return weakest;
-    return null;
+    return this.getWeakestHullSection(ship);
   }
 
   private updateFieldRepairs(dt: number) {
@@ -2322,20 +2324,22 @@ export class Match {
       if (ship.autoRepairProgress < SHIP.FIELD_REPAIR_INTERVAL) continue;
       ship.autoRepairProgress = 0;
       if (!this.consumeShipItem(ship, 'wood_plank', 1)) continue;
-      this.physics.repairHullSection(ship, weakestSection, SHIP.FIELD_REPAIR_HP);
+      this.physics.repairHullSection(ship, weakestSection);
     }
   }
 
+  /** The section with the most open holes (repair/bail target), or null if the
+   *  hull has no holes at all. */
   private getWeakestHullSection(ship: Ship): keyof Ship['hull'] | null {
-    let weakest: keyof Ship['hull'] | null = null;
-    let weakestValue = Infinity;
+    let worst: keyof Ship['hull'] | null = null;
+    let worstHoles = 0;
     for (const section of ['bow', 'stern', 'port', 'starboard'] as Array<keyof Ship['hull']>) {
-      if (ship.hull[section] < weakestValue) {
-        weakestValue = ship.hull[section];
-        weakest = section;
+      if (ship.holes[section] > worstHoles) {
+        worstHoles = ship.holes[section];
+        worst = section;
       }
     }
-    return weakest && weakestValue < 0.98 ? weakest : null;
+    return worst;
   }
 
   private getNearbyKeg(player: Player, ship: Ship | null = null) {
@@ -2376,15 +2380,11 @@ export class Match {
   }
 
   private applyShipUpgrade(ship: Ship, type: ShipUpgrade['type']) {
+    // Every upgrade is now a stateless read of ship.upgrades at point-of-use
+    // (hull_reinforcement → slower flooding + faster pump in the flood loop;
+    // charged_cannons → extra holes + blast at fire/impact; swift_sails → speed),
+    // so claiming one just records it — no stat mutation, no HP pool to inflate.
     ship.upgrades.push({ type });
-    if (type === 'hull_reinforcement') {
-      const ratio = SHIP_UPGRADES.HULL_HP_MULT;
-      ship.maxHull = Math.round(ship.maxHull * ratio);
-      ship.hull.bow      = Math.min(1, ship.hull.bow      * ratio);
-      ship.hull.stern    = Math.min(1, ship.hull.stern    * ratio);
-      ship.hull.port     = Math.min(1, ship.hull.port     * ratio);
-      ship.hull.starboard = Math.min(1, ship.hull.starboard * ratio);
-    }
   }
 
   private getKegPlacement(player: Player, ship: Ship | null) {
@@ -3195,7 +3195,7 @@ export class Match {
         if (!ship || player.onShipId !== ship.id) return false;
         const repairSection = this.getRepairableHullSection(player, ship);
         if (!repairSection || !this.consumeRepairPlank(player, ship)) return false;
-        this.physics.repairHullSection(ship, repairSection, SHIP.REPAIR_HP);
+        this.physics.repairHullSection(ship, repairSection);
         if (ship.onFire) {
           ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
           if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
@@ -3414,10 +3414,12 @@ export class Match {
     ship.velocity.z *= 0.3;
     ship.angularVelocity *= 0.35;
     ship.sinkProgress = Math.max(ship.sinkProgress, rapid ? 0.22 : 0);
-    ship.hull.bow = Math.min(ship.hull.bow, 0.04);
-    ship.hull.stern = Math.min(ship.hull.stern, 0.04);
-    ship.hull.port = Math.min(ship.hull.port, 0.04);
-    ship.hull.starboard = Math.min(ship.hull.starboard, 0.04);
+    // A foundering ship is riddled — max out its holes so it renders wrecked.
+    ship.holes.bow = FLOODING.MAX_HOLES_PER_SECTION;
+    ship.holes.stern = FLOODING.MAX_HOLES_PER_SECTION;
+    ship.holes.port = FLOODING.MAX_HOLES_PER_SECTION;
+    ship.holes.starboard = FLOODING.MAX_HOLES_PER_SECTION;
+    this.physics.syncHullFromHoles(ship);
 
     const sinkKiller = sunkByPlayerId ? this.getPlayer(sunkByPlayerId) : null;
     if (sinkKiller && sinkKiller.state !== 'eliminated' && sinkKiller.shipId !== ship.id) {
@@ -4738,7 +4740,7 @@ export class Match {
         : Math.abs(local.x) > SHIP_STATS[ship.type].width * 0.38;
 
     if (!closeEnough) return null;
-    return ship.hull[candidate] < 0.98 ? candidate : null;
+    return ship.holes[candidate] > 0 ? candidate : null;
   }
 
   private getRepairPlankCount(player: Player, ship: Ship) {
@@ -4823,10 +4825,14 @@ export class Match {
     ship.sinkProgress = 0;
     ship.repairCooldown = 0;
     ship.autoRepairProgress = 0;
-    ship.hull.bow = Math.max(ship.hull.bow, 0.5);
-    ship.hull.stern = Math.max(ship.hull.stern, 0.5);
-    ship.hull.port = Math.max(ship.hull.port, 0.5);
-    ship.hull.starboard = Math.max(ship.hull.starboard, 0.5);
+    // A reset/respawned ship is seaworthy again — patch every hole (any open
+    // hole would keep flooding it under the new model).
+    ship.holes.bow = 0;
+    ship.holes.stern = 0;
+    ship.holes.port = 0;
+    ship.holes.starboard = 0;
+    ship.waterLevel = 0;
+    this.physics.syncHullFromHoles(ship);
   }
 
   private armShipExitGrace(player: Player, ship: Ship, input: PlayerInput) {

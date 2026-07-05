@@ -10267,8 +10267,8 @@ export class Game {
       <div class="ship-stat-row">
         <span class="ship-stat" data-stat="hull"${hasHull ? ' data-upgraded="1"' : ''}>
           <span class="ship-stat-icon">🛡</span>
-          <span class="ship-stat-label">Max Hull</span>
-          <span class="ship-stat-value">${ship.maxHull}${hasHull ? ` <em>(+${Math.round((SHIP_UPGRADES.HULL_HP_MULT - 1) * 100)}%)</em>` : ''}</span>
+          <span class="ship-stat-label">Hull</span>
+          <span class="ship-stat-value">${hasHull ? `Reinforced <em>(−${Math.round((1 - SHIP_UPGRADES.HULL_INGRESS_MULT) * 100)}% flood)</em>` : 'Standard'}</span>
         </span>
         <span class="ship-stat" data-stat="cannons"${hasCannons ? ' data-upgraded="1"' : ''}>
           <span class="ship-stat-icon">✹</span>
@@ -10358,21 +10358,21 @@ export class Game {
     switch (type) {
       case 'hull_reinforcement':
         return {
-          name: 'Hull Reinforcement',
+          name: 'Reinforced Hull',
           short: 'Hull+',
           icon: '🛡',
           color: '#8fd0ff',
           hex: 0x67b9ff,
-          effect: '+25% hull durability',
+          effect: `−${Math.round((1 - SHIP_UPGRADES.HULL_INGRESS_MULT) * 100)}% flooding`,
         };
       case 'charged_cannons':
         return {
-          name: 'Charged Cannons',
+          name: 'Heavy Shot',
           short: 'Cannons+',
           icon: '✹',
           color: '#ffb08a',
           hex: 0xff8459,
-          effect: '+30% cannon damage',
+          effect: `+${SHIP_UPGRADES.CHARGED_EXTRA_HOLES} hole per hit`,
         };
       case 'swift_sails':
       default:
