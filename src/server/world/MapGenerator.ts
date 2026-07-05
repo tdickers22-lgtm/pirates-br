@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import type {
-  IslandBridge,
+  IslandBridge, IslandGeyser,
   Island, IslandBarrel, IslandBiome, IslandCave, IslandDock, IslandInlet, IslandNpc,
   IslandProfile, IslandProp, IslandPropType, IslandTavern, ItemType,
   TreasureChest, UpgradeStation, ShipUpgradeType, Vec3, Ship, WildlifeAnimal, WildlifeType, SeaRock,
@@ -107,6 +107,8 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'bush', weight: 2.0, ...SHRUB_SPECS },
     { type: 'bush_berry', weight: 1.2, ...SHRUB_SPECS },
     { type: 'flower_bush', weight: 1.4, ...SHRUB_SPECS },
+    { type: 'flower_patch', weight: 1.0, ...SHRUB_SPECS },
+    { type: 'wildflowers', weight: 1.2, ...SHRUB_SPECS },
     { type: 'fern_plant', weight: 2.2, ...SHRUB_SPECS },
     { type: 'palm_a', weight: 3.0, ...PALM_SPECS },
     { type: 'palm_b', weight: 2.2, ...PALM_SPECS },
@@ -119,6 +121,7 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
   palm_atoll: [
     { type: 'bush', weight: 1.6, ...SHRUB_SPECS },
     { type: 'flower_bush', weight: 1.0, ...SHRUB_SPECS },
+    { type: 'wildflowers', weight: 1.0, ...SHRUB_SPECS },
     { type: 'fern_plant', weight: 1.8, ...SHRUB_SPECS },
     { type: 'palm_a', weight: 3.4, ...PALM_SPECS },
     { type: 'palm_b', weight: 2.6, ...PALM_SPECS },
@@ -139,6 +142,7 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
   highland: [
     { type: 'bush', weight: 1.6, ...SHRUB_SPECS },
     { type: 'bush_berry', weight: 1.0, ...SHRUB_SPECS },
+    { type: 'wildflowers', weight: 0.9, ...SHRUB_SPECS },
     { type: 'fern_plant', weight: 1.4, ...SHRUB_SPECS },
     { type: 'boulder_a', weight: 2.4, ...BOULDER_SPECS },
     { type: 'boulder_b', weight: 1.2, ...BOULDER_SPECS },
@@ -166,6 +170,34 @@ const SCATTER_DENSITY: Record<IslandBiome, number> = {
   volcanic: 0.7,
   highland: 0.75,
   bone: 0.6,
+};
+
+// ── Lush patches ────────────────────────────────────────────────────────────
+// The base scatter above is an even sprinkle; on top of it we drop a few DENSE
+// patches — flower meadows on green isles, fern/bush thickets on the harsh ones
+// — so each island reads as clustered groves that flourish, not a flat spread.
+// Patch flora is all soft (shape 'none') so it packs tight without collider
+// interpenetration; a small local gap keeps individual plants readable.
+interface PatchFlora { type: IslandPropType; weight: number }
+const MEADOW_MIX: PatchFlora[] = [
+  { type: 'flower_patch', weight: 3.0 },
+  { type: 'wildflowers', weight: 2.2 },
+  { type: 'flower_bush', weight: 2.2 },
+  { type: 'bush', weight: 1.6 },
+  { type: 'fern_plant', weight: 1.4 },
+];
+const THICKET_MIX: PatchFlora[] = [
+  { type: 'fern_plant', weight: 2.8 },
+  { type: 'bush', weight: 2.0 },
+  { type: 'bush_berry', weight: 1.2 },
+  { type: 'flower_bush', weight: 0.8 },
+];
+const PATCH_MIX: Record<IslandBiome, PatchFlora[]> = {
+  lush: MEADOW_MIX,
+  palm_atoll: MEADOW_MIX,
+  highland: MEADOW_MIX,
+  volcanic: THICKET_MIX,
+  bone: THICKET_MIX,
 };
 
 interface CampSite { x: number; z: number; y: number }
@@ -222,6 +254,7 @@ export class MapGenerator {
       island.npcs = this.generateStoryNpcs(island, islands.length, islandRng);
       island.props = this.generateProps(island, entry, islandRng, camps, landmarks);
       island.bridges = this.generateBridges(island);
+      island.geysers = this.generateGeysers(island, islandRng);
       islands.push(island);
     }
 
@@ -291,6 +324,42 @@ export class MapGenerator {
     }
     if (pokes || deepestDrop < Math.min(2.2, span * 0.09)) return [];
     return [{ ax: anchor.x, ay: anchor.y, az: anchor.z, bx: b.x, by: b.y, bz: b.z, width: 1.9 }];
+  }
+
+  /** Steam/water geysers on the volcanic isles. Placed on footable ground (a
+   *  vent, not a wall) up the flanks toward the caldera, spaced apart, on a
+   *  deterministic eruption cycle. Launches are shared math (geyserEruptionLevel)
+   *  so the client plume and the server launch fire in lockstep. */
+  private generateGeysers(island: Island, rng: Rng): IslandGeyser[] {
+    if (island.profile.biome !== 'volcanic') return [];
+    const geysers: IslandGeyser[] = [];
+    const target = island.profile.terrainStyle === 'mountain' ? 4 : 3;
+    const GOLDEN = 2.399963229728653;
+    for (let attempt = 0; attempt < 110 && geysers.length < target; attempt++) {
+      const angle = ra(rng) + attempt * GOLDEN;
+      const distRatio = rr(rng, 0.3, 0.82);
+      const pt = getIslandSurfacePoint(island, distRatio, angle, 0);
+      if (pt.y < 4.5) continue; // clear the wave line + beach band
+      // A vent must be footable — reject genuinely steep faces (matches the
+      // on-foot slope gate, so a launched pirate was actually standing there).
+      const e = 0.9;
+      const gx = (getIslandSurfaceY(island, pt.x + e, pt.z) - getIslandSurfaceY(island, pt.x - e, pt.z)) / (2 * e);
+      const gz = (getIslandSurfaceY(island, pt.x, pt.z + e) - getIslandSurfaceY(island, pt.x, pt.z - e)) / (2 * e);
+      if (Math.hypot(gx, gz) > 0.75) continue;
+      // Keep vents apart so their trigger radii don't overlap into a launch pad.
+      if (geysers.some((g) => Math.hypot(g.x - pt.x, g.z - pt.z) < 15)) continue;
+      geysers.push({
+        x: pt.x,
+        z: pt.z,
+        y: pt.y,
+        radius: rr(rng, 2.4, 3.2),
+        period: rr(rng, 7.5, 11),
+        activeDuration: rr(rng, 2.2, 3.0),
+        phaseOffset: rr(rng, 0, 12),
+        power: rr(rng, 18, 22),
+      });
+    }
+    return geysers;
   }
 
   private buildProfile(entry: RosterEntry, rotation: number): IslandProfile {
@@ -1042,9 +1111,61 @@ export class MapGenerator {
       addProp(site.type, site.x, site.z, site.yaw, 1);
     }
 
-    // 4. Biome scatter — density scales with radius (big islands 40–120 props).
+    // 4a. Dense flourishing patches — a few clustered groves/meadows so the
+    //     island reads as flourishing thickets, not an even sprinkle. Placed
+    //     BEFORE the base scatter so the sparser sprinkle fills between them.
+    const patchFlora = PATCH_MIX[entry.biome];
+    const patchCount = Math.max(1, Math.min(3, Math.round(island.radius / 30)));
+    for (let p = 0; p < patchCount; p++) {
+      // A gentle, well-above-water centre clear of structures/caves/docks.
+      let cx = 0;
+      let cz = 0;
+      let found = false;
+      for (let tryC = 0; tryC < 26 && !found; tryC++) {
+        const a = ra(rng);
+        const dr = rr(rng, 0.22, 0.74);
+        const pt = getIslandSurfacePoint(island, dr, a, 0);
+        if (pt.y < 1.6) continue;
+        if (this.slopeAt(island, pt.x, pt.z) > 0.7) continue;
+        if (this.nearStamp(island, pt.x, pt.z, 5)) continue;
+        if (this.nearCave(island, pt.x, pt.z, 4)) continue;
+        if (island.dock && this.nearDockLine(island.dock, pt.x, pt.z, 6)) continue;
+        cx = pt.x;
+        cz = pt.z;
+        found = true;
+      }
+      if (!found) continue;
+      // Each flower_patch/thicket prop is itself a dense bed, so a modest count
+      // reads chock-full while keeping the replicated prop registry lean.
+      const patchR = rr(rng, 4.5, 7.5);
+      const fill = Math.min(14, Math.round(patchR * patchR * 0.2));
+      const localPlaced: Array<{ x: number; z: number }> = [];
+      let patchAttempts = fill * 6;
+      let placedInPatch = 0;
+      while (placedInPatch < fill && patchAttempts-- > 0) {
+        const a = ra(rng);
+        const rad = Math.pow(rng(), 1.5) * patchR; // denser toward the centre
+        const x = cx + Math.cos(a) * rad;
+        const z = cz + Math.sin(a) * rad;
+        const y = getIslandSurfaceY(island, x, z);
+        if (y < 1.4) continue;
+        if (this.slopeAt(island, x, z) > 0.95) continue;
+        if (this.nearStamp(island, x, z, 0.6)) continue;
+        if (island.dock && this.nearDockLine(island.dock, x, z, 1.4)) continue;
+        if (!clearOf(x, z, 0.3)) continue; // stay off palms/boulders/structures
+        // A small readable gap between neighbours inside the dense bed.
+        if (localPlaced.some((q) => Math.hypot(q.x - x, q.z - z) < 0.62)) continue;
+        const spec = pickWeighted(rng, patchFlora);
+        addProp(spec.type, x, z, ra(rng), rr(rng, 0.85, 1.3));
+        localPlaced.push({ x, z });
+        placedInPatch++;
+      }
+    }
+
+    // 4. Biome scatter — an even sprinkle between the patches (pulled back a
+    //    little so the dense patches above stand out as the flourishing spots).
     const mix = SCATTER_MIX[entry.biome];
-    const target = Math.min(120, Math.max(14, Math.round(island.radius * SCATTER_DENSITY[entry.biome])));
+    const target = Math.min(110, Math.max(12, Math.round(island.radius * SCATTER_DENSITY[entry.biome] * 0.8)));
     let placed = 0;
     let attempts = target * 10;
     while (placed < target && attempts-- > 0) {

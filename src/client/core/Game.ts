@@ -3,7 +3,7 @@ import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, IslandProp, IslandPropType, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getSailRopeStationLocals, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getSailRopeStationLocals, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights, geyserEruptionLevel } from '../../shared/utils/index.js';
 import { BIOME_PALETTES, getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
@@ -1717,6 +1717,17 @@ export class Game {
   private joinAssignmentWatchdog: number | null = null;
   private lastFrameTime = performance.now();
   private frameDt = 1 / 60;
+  /** Shared emissive-glow flicker for volcanic magma veins + caldera lava,
+   *  driven per-frame in updateVolcanicFx and read by the terrain shader. */
+  private readonly magmaPulseUniform = { value: 1 };
+  /** Per-frame FX closures for volcanic islands (ash drift, embers, smoke,
+   *  caldera lava, erupting geyser plumes). Cleared with the island meshes. */
+  private volcanicFx: Array<(dt: number, worldTime: number, camera: THREE.Vector3) => void> = [];
+  /** Cached soft radial particle sprite (ash/steam/ember points share it). */
+  private softParticleTexture: THREE.Texture | null = null;
+  /** Dev-only detached camera. Inert unless enableFreeCam() is called (e.g. from
+   *  a visual-tour harness via window.__piratesBR); normal play never touches it. */
+  private freeCam: { pos: THREE.Vector3; yaw: number; pitch: number } | null = null;
   private readonly debugPerfEnabled = (() => {
     const params = new URLSearchParams(window.location.search);
     return params.has('debug') || params.has('perf');
@@ -2153,6 +2164,11 @@ export class Game {
     this.clearLanternEmitters();
     this.shipRenderer.clear();
     this.islandMeshes.clear();
+    this.volcanicFx = [];
+    // disposeSceneObject() disposes this shared particle texture along with the
+    // volcanic point clouds (it isn't an AssetLibrary-owned resource), so drop
+    // the cache — the next match rebuilds it instead of reusing a disposed one.
+    this.softParticleTexture = null;
     this.chestMeshes.clear();
     this.barrelMeshes.clear();
     this.sharkMeshes.clear();
@@ -2225,7 +2241,7 @@ export class Game {
     if (props.length === 0) return;
     const instancedTypes: ReadonlySet<string> = new Set([
       'palm_a', 'palm_b', 'palm_c', 'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
-      'bush', 'bush_berry', 'flower_bush', 'fern_plant',
+      'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
     ]);
     const buckets = new Map<IslandPropType, IslandProp[]>();
     for (const prop of props) {
@@ -3402,6 +3418,11 @@ export class Game {
     const terrainColor = new THREE.Color();
     const scratchColor = new THREE.Color();
     const rockSlopeColor = paletteRock.clone().multiplyScalar(0.8);
+    // Volcanic isles: the upper cone chars to ash, and glowing magma seeps
+    // through cracks in the rock (per-vertex aMagma → emissive in the shader).
+    const isVolcanic = (island.profile.biome ?? 'lush') === 'volcanic';
+    const ashCharcoal = new THREE.Color(0x2b2621);
+    const terrainMagma: number[] = [];
 
     for (let ring = 0; ring <= totalRings; ring++) {
       const distRatio = ringDistRatio(ring);
@@ -3487,6 +3508,34 @@ export class Game {
           terrainColor.lerp(submergedColor, depthMask * 0.8);
         }
 
+        // ── Volcanic: char the upper cone to ash, seep magma through cracks ──
+        let magma = 0;
+        if (isVolcanic) {
+          const wx = terrainPositions[index * 3 + 0] + island.position.x;
+          const wz = terrainPositions[index * 3 + 2] + island.position.z;
+          // Two rotated sine fields cross into a marbled network; sharpen to
+          // thin veins so it reads as cracks, not a wash. Concentrate the glow
+          // up the cone (and hottest at the caldera) where the rock is charred.
+          // A coarse crack network plus a finer overlay, sharpened to thin veins.
+          const c1 = Math.sin(wx * 0.14 + Math.sin(wz * 0.07) * 2.2);
+          const c2 = Math.sin(wz * 0.13 - Math.sin(wx * 0.061) * 2.0);
+          const c3 = Math.sin(wx * 0.31 - Math.sin(wz * 0.27) * 1.6);
+          const c4 = Math.sin(wz * 0.29 + Math.sin(wx * 0.33) * 1.5);
+          const coarse = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c1), Math.abs(c2))), 7);
+          const fine = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c3), Math.abs(c4))), 9) * 0.6;
+          const vein = Math.min(1, coarse + fine);
+          // Veins run across the whole upper cone — a volcano's flanks are ALL
+          // slope, so don't suppress by steepness; just keep them off the beach.
+          const heightGate = THREE.MathUtils.smoothstep(heightNorm, 0.14, 0.66);
+          magma = vein * heightGate * (1 - shoreMask);
+          // Scorch the high ground to ashen charcoal so the veins glow against it.
+          const scorch = THREE.MathUtils.smoothstep(heightNorm, 0.16, 0.7) * (1 - shoreMask);
+          terrainColor.lerp(ashCharcoal, scorch * 0.72);
+          // Darken the rock right at a vein so the emissive pops (hot rim).
+          if (magma > 0.02) terrainColor.multiplyScalar(1 - magma * 0.4);
+        }
+        terrainMagma.push(magma);
+
         // Per-vertex noise + a low-frequency hue drift so large faces never
         // read as one flat paint bucket (survives ACES tonemapping). Sand
         // (near shore) gets extra tonal variation so beaches don't clip to a
@@ -3503,10 +3552,32 @@ export class Game {
     }
     terrainGeometry.setAttribute('color', new THREE.Float32BufferAttribute(terrainColors, 3));
 
-    const terrain = new THREE.Mesh(
-      terrainGeometry,
-      new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98, side: THREE.DoubleSide }),
-    );
+    const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98, side: THREE.DoubleSide });
+    if (isVolcanic) {
+      terrainGeometry.setAttribute('aMagma', new THREE.Float32BufferAttribute(terrainMagma, 1));
+      // Inject a per-vertex emissive magma term, flickered by the shared pulse
+      // uniform, so lava genuinely glows through the cracks in the rock.
+      const pulse = this.magmaPulseUniform;
+      terrainMat.onBeforeCompile = (shader) => {
+        shader.uniforms.uMagmaPulse = pulse;
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', '#include <common>\nattribute float aMagma;\nvarying float vMagma;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvMagma = aMagma;');
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>', '#include <common>\nuniform float uMagmaPulse;\nvarying float vMagma;')
+          .replace(
+            '#include <emissivemap_fragment>',
+            '#include <emissivemap_fragment>\n'
+            + 'if (vMagma > 0.001) {\n'
+            + '  float g = vMagma * uMagmaPulse;\n'
+            + '  vec3 mc = mix(vec3(0.95, 0.16, 0.02), vec3(1.0, 0.72, 0.16), clamp(vMagma * 1.4, 0.0, 1.0));\n'
+            + '  totalEmissiveRadiance += mc * g * 3.6;\n'
+            + '}',
+          );
+      };
+      terrainMat.customProgramCacheKey = () => 'pirates-volcanic-magma';
+    }
+    const terrain = new THREE.Mesh(terrainGeometry, terrainMat);
     terrain.name = 'island-terrain';
     terrain.castShadow = true;
     terrain.receiveShadow = true;
@@ -4588,6 +4659,221 @@ export class Game {
         patch.rotation.x = -Math.PI * 0.5;
         patch.position.set(sx, sWorldY + 0.05, sz);
         group.add(patch);
+      }
+    }
+
+    // ── Volcanic isle FX: caldera lava, ashfall, embers, smoke, geyser plumes ──
+    if (isVolcanic) {
+      const pulse = this.magmaPulseUniform;
+      const particleTex = this.getSoftParticleTexture();
+      const islandCenter = new THREE.Vector3(island.position.x, 0, island.position.z);
+      const cullRadius = islandMaxR + 440;
+
+      // Caldera lava pool at the summit crater (self-lit; flickers with pulse).
+      const peakAngle = island.profile.primaryHillAngle;
+      const peakOffset = island.profile.primaryHillOffset;
+      const cpx = Math.cos(peakAngle) * peakOffset * footprintX;
+      const cpz = Math.sin(peakAngle) * peakOffset * footprintZ;
+      const peakY = getIslandSurfaceY(island, cpx + island.position.x, cpz + island.position.z);
+      const lavaR = Math.max(2.6, r * 0.055);
+      const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff5a1e, transparent: true, opacity: 0.95, side: THREE.DoubleSide });
+      const lavaPool = new THREE.Mesh(new THREE.CircleGeometry(lavaR, 26), lavaMat);
+      lavaPool.rotation.x = -Math.PI * 0.5;
+      lavaPool.position.set(cpx, peakY - 0.5, cpz);
+      group.add(lavaPool);
+      const crustMat = new THREE.MeshStandardMaterial({ color: 0x241c17, roughness: 1, side: THREE.DoubleSide, emissive: 0x7a2606, emissiveIntensity: 0.6 });
+      const crust = new THREE.Mesh(new THREE.RingGeometry(lavaR * 0.98, lavaR * 1.55, 26), crustMat);
+      crust.rotation.x = -Math.PI * 0.5;
+      crust.position.set(cpx, peakY - 0.4, cpz);
+      group.add(crust);
+      this.volcanicFx.push((_dt, _wt, cam) => {
+        const vis = cam.distanceTo(islandCenter) <= cullRadius;
+        lavaPool.visible = vis;
+        crust.visible = vis;
+        if (vis) lavaMat.opacity = 0.82 + 0.16 * pulse.value;
+      });
+
+      // Ashfall — grey flakes settling over the whole island (drift + wrap).
+      const baseAshY = Math.max(6, peakY * 0.4);
+      const ashTopY = peakY + 46;
+      const ashCount = lowDetail ? 70 : Math.round(200 * visualDetail);
+      {
+        const pos = new Float32Array(ashCount * 3);
+        const spd = new Float32Array(ashCount);
+        for (let i = 0; i < ashCount; i++) {
+          const a = rng(i * 91) * Math.PI * 2;
+          const rad = Math.sqrt(rng(i * 47 + 3)) * islandMaxR * 0.98;
+          pos[i * 3] = Math.cos(a) * rad;
+          pos[i * 3 + 1] = baseAshY + rng(i * 13 + 7) * (ashTopY - baseAshY);
+          pos[i * 3 + 2] = Math.sin(a) * rad;
+          spd[i] = 2.2 + rng(i * 29) * 2.4;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        const mat = new THREE.PointsMaterial({ size: 0.5, map: particleTex, color: 0x8f8880, transparent: true, opacity: 0.5, depthWrite: false });
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        group.add(points);
+        this.volcanicFx.push((dt, _wt, cam) => {
+          const vis = cam.distanceTo(islandCenter) <= cullRadius;
+          points.visible = vis;
+          if (!vis) return;
+          for (let i = 0; i < ashCount; i++) {
+            let y = pos[i * 3 + 1] - spd[i] * dt;
+            let x = pos[i * 3] + 0.7 * dt;
+            let z = pos[i * 3 + 2] + 0.35 * dt;
+            if (y < baseAshY) {
+              y = ashTopY;
+              const a = Math.random() * Math.PI * 2;
+              const rad = Math.sqrt(Math.random()) * islandMaxR * 0.98;
+              x = Math.cos(a) * rad;
+              z = Math.sin(a) * rad;
+            }
+            pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = z;
+          }
+          geo.attributes.position.needsUpdate = true;
+        });
+      }
+
+      // Embers rising off the caldera (additive, flicker with the pulse).
+      if (!lowDetail) {
+        const emberCount = 40;
+        const emberTop = peakY + 18;
+        const pos = new Float32Array(emberCount * 3);
+        const spd = new Float32Array(emberCount);
+        for (let i = 0; i < emberCount; i++) {
+          const a = rng(i * 71 + 5) * Math.PI * 2;
+          const rad = Math.sqrt(rng(i * 53 + 1)) * lavaR * 2.2;
+          pos[i * 3] = cpx + Math.cos(a) * rad;
+          pos[i * 3 + 1] = peakY + rng(i * 19) * (emberTop - peakY);
+          pos[i * 3 + 2] = cpz + Math.sin(a) * rad;
+          spd[i] = 3.0 + rng(i * 37) * 3.5;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        const mat = new THREE.PointsMaterial({ size: 0.42, map: particleTex, color: 0xff8b2e, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending });
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        group.add(points);
+        this.volcanicFx.push((dt, _wt, cam) => {
+          const vis = cam.distanceTo(islandCenter) <= cullRadius;
+          points.visible = vis;
+          if (!vis) return;
+          mat.opacity = 0.55 + 0.4 * pulse.value;
+          for (let i = 0; i < emberCount; i++) {
+            let y = pos[i * 3 + 1] + spd[i] * dt;
+            let x = pos[i * 3] + Math.sin(_wt * 1.7 + i) * 0.6 * dt;
+            if (y > emberTop) {
+              y = peakY;
+              const a = Math.random() * Math.PI * 2;
+              const rad = Math.sqrt(Math.random()) * lavaR * 2.2;
+              x = cpx + Math.cos(a) * rad;
+              pos[i * 3 + 2] = cpz + Math.sin(a) * rad;
+            }
+            pos[i * 3] = x; pos[i * 3 + 1] = y;
+          }
+          geo.attributes.position.needsUpdate = true;
+        });
+      }
+
+      // Smoke column billowing off the caldera (widens as it rises).
+      {
+        const smokeCount = lowDetail ? 22 : 44;
+        const smokeTop = peakY + 60;
+        const pos = new Float32Array(smokeCount * 3);
+        const ang = new Float32Array(smokeCount);
+        const spd = new Float32Array(smokeCount);
+        for (let i = 0; i < smokeCount; i++) {
+          ang[i] = rng(i * 61 + 9) * Math.PI * 2;
+          const y = peakY + rng(i * 23 + 2) * (smokeTop - peakY);
+          const hf = (y - peakY) / (smokeTop - peakY);
+          const rad = 1.6 + hf * 9;
+          pos[i * 3] = cpx + Math.cos(ang[i]) * rad;
+          pos[i * 3 + 1] = y;
+          pos[i * 3 + 2] = cpz + Math.sin(ang[i]) * rad;
+          spd[i] = 2.4 + rng(i * 41) * 2.2;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        const mat = new THREE.PointsMaterial({ size: 6.5, map: particleTex, color: 0x2b2724, transparent: true, opacity: 0.34, depthWrite: false });
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        group.add(points);
+        this.volcanicFx.push((dt, _wt, cam) => {
+          const vis = cam.distanceTo(islandCenter) <= cullRadius;
+          points.visible = vis;
+          if (!vis) return;
+          for (let i = 0; i < smokeCount; i++) {
+            let y = pos[i * 3 + 1] + spd[i] * dt;
+            if (y > smokeTop) y = peakY + (y - smokeTop);
+            const hf = (y - peakY) / (smokeTop - peakY);
+            const rad = 1.6 + hf * 9;
+            pos[i * 3] = cpx + Math.cos(ang[i] + _wt * 0.12) * rad;
+            pos[i * 3 + 1] = y;
+            pos[i * 3 + 2] = cpz + Math.sin(ang[i] + _wt * 0.12) * rad;
+          }
+          geo.attributes.position.needsUpdate = true;
+        });
+      }
+
+      // ── Geyser vents + erupting plumes (synced to the server launch) ──
+      for (const geyser of island.geysers ?? []) {
+        const gx = geyser.x - island.position.x;
+        const gz = geyser.z - island.position.z;
+        const gy = geyser.y;
+        // Vent: a charred rock ring around a glowing hot throat.
+        const ventRing = new THREE.Mesh(
+          new THREE.RingGeometry(geyser.radius * 0.55, geyser.radius * 1.05, 18),
+          new THREE.MeshStandardMaterial({ color: 0x1f1a16, roughness: 1, side: THREE.DoubleSide, emissive: 0x832a08, emissiveIntensity: 0.7 }),
+        );
+        ventRing.rotation.x = -Math.PI * 0.5;
+        ventRing.position.set(gx, gy + 0.05, gz);
+        group.add(ventRing);
+        const throat = new THREE.Mesh(
+          new THREE.CircleGeometry(geyser.radius * 0.55, 16),
+          new THREE.MeshBasicMaterial({ color: 0xff6a24, transparent: true, opacity: 0.85, side: THREE.DoubleSide }),
+        );
+        throat.rotation.x = -Math.PI * 0.5;
+        throat.position.set(gx, gy + 0.06, gz);
+        group.add(throat);
+
+        // Plume: a steam/water column that rises only while erupting.
+        const plumeCount = lowDetail ? 22 : 46;
+        const plumeH = Math.max(9, geyser.power * 0.7);
+        const pos = new Float32Array(plumeCount * 3);
+        const phase = new Float32Array(plumeCount);
+        const ang = new Float32Array(plumeCount);
+        for (let i = 0; i < plumeCount; i++) {
+          phase[i] = rng(i * 17 + 3);
+          ang[i] = rng(i * 29 + 7) * Math.PI * 2;
+          pos[i * 3] = gx;
+          pos[i * 3 + 1] = gy;
+          pos[i * 3 + 2] = gz;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        const mat = new THREE.PointsMaterial({ size: 0.9, map: particleTex, color: 0xd8ecf4, transparent: true, opacity: 0, depthWrite: false });
+        const plume = new THREE.Points(geo, mat);
+        plume.frustumCulled = false;
+        group.add(plume);
+        this.volcanicFx.push((_dt, wt, cam) => {
+          if (cam.distanceTo(islandCenter) > cullRadius) { plume.visible = false; return; }
+          const level = geyserEruptionLevel(geyser, wt);
+          if (level <= 0.01) { plume.visible = false; throat.scale.setScalar(1); return; }
+          plume.visible = true;
+          mat.opacity = 0.8 * level;
+          throat.scale.setScalar(1 + level * 0.5);
+          const h = plumeH * level;
+          for (let i = 0; i < plumeCount; i++) {
+            const f = (phase[i] + wt * 0.9) % 1; // rise up the column, looping
+            const y = f * h;
+            const spread = geyser.radius * (0.4 + f * 1.1);
+            pos[i * 3] = gx + Math.cos(ang[i]) * spread;
+            pos[i * 3 + 1] = gy + y;
+            pos[i * 3 + 2] = gz + Math.sin(ang[i]) * spread;
+          }
+          geo.attributes.position.needsUpdate = true;
+        });
       }
     }
 
@@ -6334,6 +6620,41 @@ export class Game {
     return { root, body, light, baseY: npc.position.y, role: npc.role };
   }
 
+  /** Soft round particle sprite (radial alpha falloff), shared by ash / ember /
+   *  steam / smoke point clouds so they render as puffs, not hard squares. */
+  private getSoftParticleTexture(): THREE.Texture {
+    if (this.softParticleTexture) return this.softParticleTexture;
+    const size = 64;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.45, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    this.softParticleTexture = tex;
+    return tex;
+  }
+
+  /** Per-frame driver for volcanic islands: flickers the shared magma pulse
+   *  (terrain veins + caldera lava) and steps every registered FX closure
+   *  (ashfall, embers, smoke, erupting geyser plumes). Each closure distance-
+   *  culls itself against its own island, so idle isles cost almost nothing. */
+  private updateVolcanicFx(dt: number, worldTime: number) {
+    if (this.volcanicFx.length === 0) return;
+    // Warm flicker in ~[0.55, 1.1]: a slow throb plus a faster shimmer.
+    const throb = Math.sin(worldTime * 1.6) * 0.5 + 0.5;
+    const shimmer = Math.sin(worldTime * 7.3 + 1.7) * 0.5 + 0.5;
+    this.magmaPulseUniform.value = 0.62 + throb * 0.34 + shimmer * 0.08;
+    const cam = this.renderer.camera.position;
+    for (const fx of this.volcanicFx) fx(dt, worldTime, cam);
+  }
+
   private frame(now: number) {
     const rawDtMs = now - this.lastFrameTime;
     const dt = Math.min(0.05, rawDtMs / 1000);
@@ -6354,6 +6675,12 @@ export class Game {
     this.ocean.update(dt, this.renderer.camera.position);
     this.ocean.setAtmosphere(this.renderer.getAtmosphere());
     this.updateScene(dt);
+    // Shared match clock (same value the server passes to the physics/geyser
+    // timing) drives the volcanic magma flicker + geyser plumes in lockstep.
+    const worldTime = this.serverTimeOffset !== null
+      ? performance.now() / 1000 + this.serverTimeOffset
+      : performance.now() / 1000;
+    this.updateVolcanicFx(dt, worldTime);
 
     const hasForcedInput = this.input.hasPendingActions() || this.pendingInteractFromUi || this.pendingLaunchFromUi;
     if (this.network.isConnected() && (this.inputSendTimer <= 0 || hasForcedInput)) {
@@ -8068,7 +8395,39 @@ export class Game {
     this.stormHalo.visible = true;
   }
 
+  /** Dev/tour hook: detach the camera and place it in the world. Call
+   *  disableFreeCam() to hand control back to the player follow. */
+  enableFreeCam(x: number, y: number, z: number, yaw = 0, pitch = -0.12) {
+    this.freeCam = { pos: new THREE.Vector3(x, y, z), yaw, pitch };
+  }
+
+  disableFreeCam() {
+    this.freeCam = null;
+  }
+
+  /** Dev/tour helper: world ground height at (x, z) via the shared heightfield,
+   *  or 0 over open sea. Lets a tour aim the free-cam at real terrain. */
+  sampleGroundY(x: number, z: number): number {
+    let best = 0;
+    for (const island of this.state?.islands ?? []) {
+      if (!isPointInsideIslandFootprint(island, x, z, 4)) continue;
+      best = Math.max(best, getIslandSurfaceY(island, x, z));
+    }
+    return best;
+  }
+
   private updateCamera() {
+    if (this.freeCam) {
+      const { pos, yaw, pitch } = this.freeCam;
+      const forward = new THREE.Vector3(
+        Math.sin(yaw) * Math.cos(pitch),
+        Math.sin(pitch),
+        Math.cos(yaw) * Math.cos(pitch),
+      ).normalize();
+      this.renderer.camera.position.copy(pos);
+      this.renderer.camera.lookAt(pos.clone().add(forward));
+      return;
+    }
     const player = this.getLocalPlayer();
     if (!player) return;
 

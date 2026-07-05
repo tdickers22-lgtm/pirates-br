@@ -128,8 +128,122 @@ def build_fern(name):
     return obj
 
 
+def _flower(coll, name, i, pos, tilt, petal_mat, rng, petal_r=0.085):
+    """A stylized 5-petal flower head + yellow center on a short stem."""
+    parts = []
+    # short stem
+    sbm = bmesh.new()
+    stem_h = 0.10 + rng.random() * 0.14
+    bmesh.ops.create_cone(sbm, cap_ends=True, segments=4, radius1=0.012, radius2=0.008, depth=stem_h)
+    bmesh.ops.transform(sbm, matrix=Matrix.Translation((pos.x, pos.y, pos.z + stem_h * 0.5)), verts=sbm.verts)
+    parts.append(obj_from_bmesh(f"{name}_stem{i}", sbm, coll, mat("Stem")))
+    head = Vector((pos.x, pos.y, pos.z + stem_h))
+    # petals
+    pbm = bmesh.new()
+    bmesh.ops.create_circle(pbm, cap_ends=True, segments=5, radius=petal_r)
+    bmesh.ops.transform(
+        pbm,
+        matrix=Matrix.Translation(head)
+        @ Matrix.Rotation(rng.random() * math.tau, 4, 'Z')
+        @ Matrix.Rotation(tilt, 4, 'X'),
+        verts=pbm.verts,
+    )
+    parts.append(obj_from_bmesh(f"{name}_petal{i}", pbm, coll, mat(petal_mat)))
+    # center
+    cbm = bmesh.new()
+    bmesh.ops.create_icosphere(cbm, subdivisions=0, radius=petal_r * 0.34)
+    bmesh.ops.transform(cbm, matrix=Matrix.Translation(head + Vector((0, 0, 0.012))), verts=cbm.verts)
+    parts.append(obj_from_bmesh(f"{name}_center{i}", cbm, coll, mat("Flower_Yellow")))
+    return parts
+
+
+def build_flower_patch(name):
+    """A dense, flourishing bed: a low grassy mound carpeted with flowers — the
+    'chock-full' patch dropped into meadow clusters."""
+    coll = asset_collection(name)
+    rng = random.Random(hash(name) & 0xffff)
+    parts = []
+    radius = 0.74
+    # low green mound base (squashed sphere)
+    bm = bmesh.new()
+    bmesh.ops.create_icosphere(bm, subdivisions=1, radius=radius * 0.94)
+    for v in bm.verts:
+        v.co.z *= 0.2
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, 0.05)), verts=bm.verts)
+    parts.append(obj_from_bmesh(f"{name}_mound", bm, coll, mat("Leaf_A"), smooth=False))
+    # tufts of grass blades poking through
+    for i in range(14):
+        ang = rng.random() * math.tau
+        rr = radius * (0.15 + rng.random() * 0.8)
+        gbm = bmesh.new()
+        blade = 0.16 + rng.random() * 0.22
+        bmesh.ops.create_cone(gbm, cap_ends=True, segments=3, radius1=0.02, radius2=0.004, depth=blade)
+        bmesh.ops.transform(
+            gbm,
+            matrix=Matrix.Translation((math.cos(ang) * rr, math.sin(ang) * rr, blade * 0.5 + 0.03))
+            @ Matrix.Rotation((rng.random() - 0.5) * 0.5, 4, 'X'),
+            verts=gbm.verts,
+        )
+        parts.append(obj_from_bmesh(f"{name}_grass{i}", gbm, coll, mat("Leaf_C")))
+    # flowers carpeting the mound — dense, bold heads so the bed reads as a
+    # flourishing burst of colour, not a green lump with a few dots.
+    palettes = ["Flower_Pink", "Flower_Yellow", "Flower_White", "Flower_Pink", "Flower_Yellow"]
+    count = 46 + int(rng.random() * 12)
+    for i in range(count):
+        ang = rng.random() * math.tau
+        rr = radius * math.sqrt(rng.random()) * 0.98
+        pos = Vector((math.cos(ang) * rr, math.sin(ang) * rr, 0.05 + rng.random() * 0.08))
+        tilt = -1.2 + rng.random() * 0.55
+        parts.extend(_flower(coll, name, i, pos, tilt, rng.choice(palettes), rng, petal_r=0.1 + rng.random() * 0.045))
+    join(parts, name)
+    export_collection(coll, f"{name}.glb")
+
+
+def build_wildflowers(name):
+    """A clump of tall wildflower stalks — vertical flower interest for lush
+    meadows, mixed colours on slender stems."""
+    coll = asset_collection(name)
+    rng = random.Random(hash(name) & 0xffff)
+    parts = []
+    palettes = ["Flower_Pink", "Flower_Yellow", "Flower_White"]
+    stalks = 6 + int(rng.random() * 3)
+    for i in range(stalks):
+        ang = rng.random() * math.tau
+        base_r = rng.random() * 0.28
+        bx = math.cos(ang) * base_r
+        by = math.sin(ang) * base_r
+        height = 0.5 + rng.random() * 0.42
+        lean = (rng.random() - 0.5) * 0.35
+        stem = bmesh.new()
+        bmesh.ops.create_cone(stem, cap_ends=True, segments=4, radius1=0.02, radius2=0.008, depth=height)
+        m = (Matrix.Translation((bx, by, 0))
+             @ Matrix.Rotation(ang, 4, 'Z')
+             @ Matrix.Rotation(lean, 4, 'X')
+             @ Matrix.Translation((0, 0, height * 0.5)))
+        bmesh.ops.transform(stem, matrix=m, verts=stem.verts)
+        parts.append(obj_from_bmesh(f"{name}_stem{i}", stem, coll, mat("Leaf_C")))
+        # a couple of leaves midway
+        for k in range(2):
+            leaf = bmesh.new()
+            bmesh.ops.create_cone(leaf, cap_ends=True, segments=3, radius1=0.05, radius2=0.006, depth=0.16)
+            lm = (Matrix.Translation((bx, by, height * (0.4 + k * 0.2)))
+                  @ Matrix.Rotation(ang + k * math.pi, 4, 'Z')
+                  @ Matrix.Rotation(math.radians(60), 4, 'X'))
+            bmesh.ops.transform(leaf, matrix=lm, verts=leaf.verts)
+            parts.append(obj_from_bmesh(f"{name}_leaf{i}_{k}", leaf, coll, mat("Leaf_B")))
+        # flower head on top (lean carries it outward)
+        head = Vector((bx + math.sin(ang) * math.sin(lean) * height,
+                       by - math.cos(ang) * math.sin(lean) * height,
+                       height * math.cos(lean)))
+        parts.extend(_flower(coll, name, i, head, -1.4, rng.choice(palettes), rng, petal_r=0.1))
+    join(parts, name)
+    export_collection(coll, f"{name}.glb")
+
+
 build_bush("bush")
 build_bush("bush_berry", berry="Berry_Red")
 build_bush("flower_bush", flower="Flower_Pink")
 build_fern("fern_plant")
+build_flower_patch("flower_patch")
+build_wildflowers("wildflowers")
 print("PLANTS DONE")

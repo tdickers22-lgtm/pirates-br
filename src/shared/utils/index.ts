@@ -1,5 +1,5 @@
 import { createNoise2D } from 'simplex-noise';
-import type { Island, IslandDock, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
+import type { Island, IslandDock, IslandGeyser, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
 import { SHIP_STATS, PLAYER } from '../constants/index.js';
 
 export function lerp(a: number, b: number, t: number): number {
@@ -761,6 +761,25 @@ export function getBridgeDeckY(
   const span = Math.sqrt(len2);
   const sag = -Math.sin(t * Math.PI) * Math.min(0.9, span * 0.04);
   return lerp(bridge.ay, bridge.by, t) + sag + 0.16; // plank-top standing surface
+}
+
+/**
+ * Eruption level of a geyser at shared match time `t`, in [0, 1]: 0 = dormant,
+ * 1 = full plume. The cycle rises fast, holds, then eases out over the active
+ * window. Deterministic in `t` so the client plume and the server launch
+ * impulse agree frame-for-frame (server passes its match clock; the client
+ * passes performance.now()/1000 + serverTimeOffset, which tracks the same clock).
+ */
+export function geyserEruptionLevel(geyser: IslandGeyser, t: number): number {
+  const period = Math.max(0.1, geyser.period);
+  let phase = (t + geyser.phaseOffset) % period;
+  if (phase < 0) phase += period;
+  const active = Math.min(geyser.activeDuration, period);
+  if (phase >= active) return 0;
+  const u = phase / active; // 0..1 across the eruption window
+  const rise = smoothstep(0, 0.12, u);
+  const fall = 1 - smoothstep(0.72, 1, u);
+  return clamp(rise * fall, 0, 1);
 }
 
 export function isPointInsideIslandFootprint(island: Island, x: number, z: number, margin = 0): boolean {

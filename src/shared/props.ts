@@ -36,6 +36,8 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   bush_berry: { shape: 'none', radius: 0, height: 1.0 },
   flower_bush: { shape: 'none', radius: 0, height: 1.0 },
   fern_plant: { shape: 'none', radius: 0, height: 0.8 },
+  flower_patch: { shape: 'none', radius: 0, height: 0.6 },
+  wildflowers: { shape: 'none', radius: 0, height: 0.9 },
   dock_mid: { shape: 'none', radius: 0, height: 1.1 },
   dock_end: { shape: 'none', radius: 0, height: 1.1 },
 };

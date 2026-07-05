@@ -245,7 +245,7 @@ export type IslandPropType =
   | 'barrel' | 'crate' | 'campfire' | 'lantern_post'
   | 'watchtower' | 'shipwreck' | 'standing_stones'
   | 'tent_a' | 'bedroll' | 'rock_arch'
-  | 'bush' | 'bush_berry' | 'flower_bush' | 'fern_plant'
+  | 'bush' | 'bush_berry' | 'flower_bush' | 'fern_plant' | 'flower_patch' | 'wildflowers'
   | 'dock_mid' | 'dock_end';
 
 /** Deterministic decorative/landmark prop. Positions are WORLD-space XZ; Y is
@@ -379,6 +379,10 @@ export interface Island {
    *  Deck height is shared math (getBridgeDeckY) so client visuals, client
    *  prediction and server locomotion all agree. */
   bridges?: IslandBridge[];
+  /** Volcanic geyser vents that launch a pirate skyward on eruption (volcanic
+   *  biome only). Timing is shared (geyserEruptionLevel) so the plume and the
+   *  server launch fire together. */
+  geysers?: IslandGeyser[];
 }
 
 export interface IslandBridge {
@@ -386,6 +390,27 @@ export interface IslandBridge {
   bx: number; by: number; bz: number;
   /** Walkable deck width in meters. */
   width: number;
+}
+
+/** A volcanic geyser vent. Erupts on a deterministic cycle keyed off shared
+ *  match time, so the plume the client draws fires exactly when the server
+ *  launches a pirate standing on it (shared geyserEruptionLevel). */
+export interface IslandGeyser {
+  /** World XZ of the vent center. */
+  x: number;
+  z: number;
+  /** Ground surface Y at the vent rim (where the plume erupts from). */
+  y: number;
+  /** Horizontal radius within which a grounded pirate is launched. */
+  radius: number;
+  /** Full eruption cycle length (seconds). */
+  period: number;
+  /** Seconds of each cycle the plume is actually erupting. */
+  activeDuration: number;
+  /** Per-vent phase offset (seconds) so neighbouring vents don't fire in unison. */
+  phaseOffset: number;
+  /** Peak upward launch speed (m/s) at full eruption. */
+  power: number;
 }
 
 export interface TreasureChest {
