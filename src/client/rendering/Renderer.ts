@@ -3,7 +3,7 @@ import { PostFx } from './PostFx.js';
 
 export type RenderQuality = 'low' | 'balanced' | 'high';
 
-const DAY_NIGHT_CYCLE_SECONDS = 540;
+const DAY_NIGHT_CYCLE_SECONDS = 960; // slower cycle: dusk is a scene, not a flash
 const DAY_NIGHT_START_OFFSET = 0.47;
 
 const SKY_VERT = /* glsl */`
