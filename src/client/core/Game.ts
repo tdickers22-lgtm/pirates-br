@@ -3472,8 +3472,10 @@ export class Game {
         merged.computeVertexNormals();
         return merged;
       })();
+      // White base: per-instance colors MULTIPLY material.color — a tinted
+      // base squared every tuft toward black (the 'invisible grass' bug).
       const grassMat = new THREE.MeshStandardMaterial({
-        color: paletteGrass.clone().lerp(paletteFoliage, 0.35),
+        color: 0xffffff,
         roughness: 0.94,
         side: THREE.DoubleSide,
         alphaTest: 0,
@@ -3493,17 +3495,17 @@ export class Game {
         const sample = surfacePoint(dRatio, angle, 0);
         // grassy band: above the beach, below the rocky heights, not too steep
         if (sample.y < seaBaseForGrass - 1.6) continue;
-        if (sample.y > seaBaseForGrass + peakEst * 0.72) continue;
+        if (sample.y > seaBaseForGrass + peakEst * 0.95) continue;
         const ahead = surfacePoint(dRatio + 0.015, angle, 0);
         if (Math.abs(ahead.y - sample.y) > 0.9) continue;
-        gP.set(sample.x, sample.y - 0.02, sample.z);
+        gP.set(sample.x, sample.y - 0.06, sample.z);
         gE.set((rng(i * 13) - 0.5) * 0.3, rng(i * 17) * Math.PI, (rng(i * 19) - 0.5) * 0.3);
         gQ.setFromEuler(gE);
         const sc = 0.7 + rng(i * 23) * 0.9;
         gS.set(sc, sc * (0.8 + rng(i * 29) * 0.5), sc);
         gM.compose(gP, gQ, gS);
         grass.setMatrixAt(placed, gM);
-        gColor.copy(paletteGrass).lerp(paletteFoliage, rng(i * 31) * 0.7).multiplyScalar(0.82 + rng(i * 37) * 0.4);
+        gColor.copy(paletteGrass).lerp(paletteFoliage, rng(i * 31) * 0.6).multiplyScalar(1.05 + rng(i * 37) * 0.45);
         grass.setColorAt(placed, gColor);
         placed += 1;
       }
@@ -3516,9 +3518,9 @@ export class Game {
       group.add(grass);
 
       // ── Ferns: taller arched fronds in the shaded inner jungle band ──
-      const fernCount = Math.min(520, Math.round(r * r * 0.05));
+      const fernCount = Math.min(380, Math.round(r * r * 0.035));
       const fernGeo = crossGeo.clone();
-      fernGeo.scale(1.9, 2.6, 1.9);
+      fernGeo.scale(1.15, 2.1, 1.15);
       {
         const fpos = fernGeo.getAttribute('position') as THREE.BufferAttribute;
         for (let i = 0; i < fpos.count; i++) {
@@ -3531,7 +3533,7 @@ export class Game {
       }
       const ferns = new THREE.InstancedMesh(
         fernGeo,
-        new THREE.MeshStandardMaterial({ color: paletteFoliage.clone().multiplyScalar(0.72), roughness: 0.92, side: THREE.DoubleSide }),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, side: THREE.DoubleSide }),
         fernCount,
       );
       let fernsPlaced = 0;
@@ -3539,15 +3541,15 @@ export class Game {
         const angle = rng(i * 41 + 9) * Math.PI * 2;
         const dRatio = 0.05 + rng(i * 43 + 3) * 0.6;
         const sample = surfacePoint(dRatio, angle, 0);
-        if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + peakEst * 0.6) continue;
-        gP.set(sample.x, sample.y - 0.03, sample.z);
+        if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + peakEst * 0.85) continue;
+        gP.set(sample.x, sample.y - 0.09, sample.z);
         gE.set((rng(i * 47) - 0.5) * 0.24, rng(i * 53) * Math.PI, (rng(i * 59) - 0.5) * 0.24);
         gQ.setFromEuler(gE);
         const sc = 0.6 + rng(i * 61) * 0.8;
         gS.set(sc, sc, sc);
         gM.compose(gP, gQ, gS);
         ferns.setMatrixAt(fernsPlaced, gM);
-        gColor.copy(paletteFoliage).multiplyScalar(0.55 + rng(i * 67) * 0.5);
+        gColor.copy(paletteFoliage).multiplyScalar(0.95 + rng(i * 67) * 0.55);
         ferns.setColorAt(fernsPlaced, gColor);
         fernsPlaced += 1;
       }
@@ -3565,7 +3567,7 @@ export class Game {
       shellGeo.scale(1.25, 0.4, 1);
       const shells = new THREE.InstancedMesh(
         shellGeo,
-        new THREE.MeshStandardMaterial({ color: 0xf2e8da, roughness: 0.72 }),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.72 }),
         shellCount,
       );
       const shellTints = [0xf6efe4, 0xe8cdbf, 0xdfa7a0, 0xc9d8d5, 0xf0dcc2];
