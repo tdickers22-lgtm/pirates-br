@@ -3,7 +3,7 @@ import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, IslandProp, IslandPropType, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getSailRopeStationLocals, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights } from '../../shared/utils/index.js';
 import { BIOME_PALETTES, getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
@@ -6472,81 +6472,16 @@ export class Game {
    *  red while the anchor is down (the #1 'why is my ship not moving'). */
   private stationMarkers: { anchor: THREE.Sprite; sails: THREE.Sprite; helm: THREE.Sprite } | null = null;
 
-  private makeStationMarkerTexture(): THREE.CanvasTexture {
-    const size = 128;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d')!;
-    const cx = size / 2;
-    ctx.clearRect(0, 0, size, size);
-    const ring = ctx.createRadialGradient(cx, cx, size * 0.16, cx, cx, size * 0.46);
-    ring.addColorStop(0, 'rgba(255,255,255,0)');
-    ring.addColorStop(0.62, 'rgba(255,255,255,0.0)');
-    ring.addColorStop(0.78, 'rgba(255,255,255,0.9)');
-    ring.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = ring;
-    ctx.fillRect(0, 0, size, size);
-    const core = ctx.createRadialGradient(cx, cx, 0, cx, cx, size * 0.2);
-    core.addColorStop(0, 'rgba(255,255,255,0.85)');
-    core.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = core;
-    ctx.fillRect(0, 0, size, size);
-    return new THREE.CanvasTexture(canvas);
-  }
-
-  private ensureStationMarkers() {
-    if (this.stationMarkers) return this.stationMarkers;
-    const tex = this.makeStationMarkerTexture();
-    const make = () => {
-      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: tex,
-        color: 0xffd27a,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
-        depthTest: false,
-      }));
-      sprite.renderOrder = 20;
-      sprite.visible = false;
-      this.renderer.scene.add(sprite);
-      return sprite;
-    };
-    this.stationMarkers = { anchor: make(), sails: make(), helm: make() };
-    return this.stationMarkers;
-  }
-
   private updateStationMarkers() {
-    const markers = this.ensureStationMarkers();
-    const player = this.getLocalPlayer();
-    const ship = player?.onShipId ? this.shipsById.get(player.onShipId) : null;
-    const aboard = !!player && !!ship && ship.alive && player.state === 'alive';
-    if (!aboard || !ship || !player) {
-      markers.anchor.visible = false;
-      markers.sails.visible = false;
-      markers.helm.visible = false;
-      return;
+    // Retired: the floating beacon orbs read as UI garbage in-world (they
+    // glowed through sniper scopes at night). Stations are now marked by
+    // PHYSICAL implements — rope coils on the rails, the capstan itself —
+    // plus the [X] prompts. Keep sprites hidden if they were ever created.
+    if (this.stationMarkers) {
+      this.stationMarkers.anchor.visible = false;
+      this.stationMarkers.sails.visible = false;
+      this.stationMarkers.helm.visible = false;
     }
-    const stats = SHIP_STATS[ship.type];
-    const t = this.ocean.getTime();
-    const pulse = 0.62 + Math.sin(t * 2.6) * 0.22;
-    const bob = Math.sin(t * 1.7) * 0.07;
-    const place = (sprite: THREE.Sprite, localX: number, localZ: number, lift: number, hidden: boolean, color: number, urgency = 0) => {
-      sprite.visible = !hidden;
-      if (hidden) return;
-      const world = this.getShipWorldPoint(ship, localX, localZ, stats.height + lift + bob);
-      sprite.position.copy(world);
-      const mat = sprite.material as THREE.SpriteMaterial;
-      mat.color.setHex(color);
-      mat.opacity = (0.34 + urgency * 0.3) * pulse + urgency * 0.2;
-      const scale = 0.62 + pulse * 0.18 + urgency * 0.16;
-      sprite.scale.set(scale, scale, 1);
-    };
-    const anchorLocal = this.getAnchorControlLocal(stats);
-    const sailLocal = this.getSailControlLocal(stats);
-    place(markers.anchor, anchorLocal.x, anchorLocal.z, 1.15, false, ship.anchored ? 0xff5a3c : 0xffd27a, ship.anchored ? 1 : 0);
-    place(markers.sails, sailLocal.x, sailLocal.z, 1.5, false, ship.sailIntegrity < 0.995 ? 0xff9a4c : 0x8fd8ff, ship.sailHeight < 0.05 && !ship.anchored ? 0.7 : 0);
-    place(markers.helm, 0, -stats.length * 0.37, 1.65, player.atHelm, 0xd9c07a);
   }
 
   private updateMermaid(now: number): void {
@@ -10513,7 +10448,10 @@ export class Game {
       }
 
       if (this.isNearSailStation(player, ship)) {
-        const sailControl = this.getSailControlLocal(SHIP_STATS[ship.type]);
+        const ropeStations = getSailRopeStationLocals(SHIP_STATS[ship.type]);
+        const localHere = this.toShipLocal(player, ship);
+        const sailControl = ropeStations.reduce((best, st) =>
+          Math.hypot(localHere.x - st.x, localHere.z - st.z) < Math.hypot(localHere.x - best.x, localHere.z - best.z) ? st : best);
         const sailPoint = this.getShipWorldPoint(ship, sailControl.x, sailControl.z, SHIP_STATS[ship.type].height + 0.85);
         const sailPct = Math.round(ship.sailHeight * 100);
         const canvasTorn = ship.sailIntegrity < 0.995;

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
-import { sampleWind, angleWrap, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getSailStationLocal, getShipCompanionwayConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
+import { sampleWind, angleWrap, getSailRopeStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
 import type { RenderQuality } from './Renderer.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
@@ -2244,39 +2244,34 @@ export class ShipRenderer {
     {
       const markerMat = new THREE.MeshStandardMaterial({ color: 0x3d2814, roughness: 1, side: THREE.DoubleSide });
       const brassMat = new THREE.MeshStandardMaterial({ color: 0xa8792a, roughness: 0.55, metalness: 0.55 });
-      const sailRing = getSailStationLocal(stats);
-      const ring = new THREE.Mesh(new THREE.RingGeometry(0.58, 0.82, 32), markerMat);
-      ring.rotation.x = -Math.PI * 0.5;
-      ring.position.set(sailRing.x, H + 0.105, sailRing.z);
-      ring.receiveShadow = true;
-      group.add(ring);
-      const ringCore = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.16, 0.16, 0.038, 16),
-        new THREE.MeshStandardMaterial({ color: 0x78a9cf, roughness: 0.68 }),
-      );
-      ringCore.position.set(sailRing.x, H + 0.115, sailRing.z);
-      group.add(ringCore);
-
-      const cleat = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.12, 0.16), brassMat);
-      cleat.position.set(sailRing.x - 0.34, H + 0.22, sailRing.z);
-      cleat.castShadow = true;
-      group.add(cleat);
-      for (const sx of [-0.28, 0.28]) {
-        const horn = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.24, 8), brassMat);
-        horn.rotation.z = Math.PI * 0.5;
-        horn.position.set(sailRing.x - 0.34 + sx, H + 0.31, sailRing.z);
-        group.add(horn);
+      // Rail rope stations (SoT braces): worked from the bulwarks on BOTH
+      // sides — coiled halyard rope on a belaying rack, tail dropping from
+      // the rigging above. The floating deck-ring station is gone.
+      const ropeStationMat = new THREE.MeshStandardMaterial({ color: 0xb99e6a, roughness: 0.95 });
+      for (const ropeStation of getSailRopeStationLocals(stats)) {
+        const rack = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.1, 0.16), markerMat);
+        rack.position.set(ropeStation.x, H + 0.78, ropeStation.z);
+        rack.castShadow = true;
+        group.add(rack);
+        for (const pinOff of [-0.3, 0, 0.3]) {
+          const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.035, 0.34, 6), brassMat);
+          pin.position.set(ropeStation.x + pinOff, H + 0.68, ropeStation.z);
+          group.add(pin);
+        }
+        const coil = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.075, 8, 16), ropeStationMat);
+        coil.rotation.y = Math.PI * 0.5;
+        coil.position.set(ropeStation.x, H + 0.5, ropeStation.z + 0.02);
+        group.add(coil);
+        const coil2 = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.06, 8, 14), ropeStationMat);
+        coil2.rotation.y = Math.PI * 0.5;
+        coil2.position.set(ropeStation.x + 0.02, H + 0.46, ropeStation.z - 0.12);
+        group.add(coil2);
+        // rope tail dropping from the rig toward the rack
+        const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, H * 1.3, 5), ropeStationMat);
+        tail.position.set(ropeStation.x * 0.92, H + H * 0.9, ropeStation.z);
+        tail.rotation.z = ropeStation.x > 0 ? 0.14 : -0.14;
+        group.add(tail);
       }
-
-      const trimWheel = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.038, 8, 20), brassMat);
-      trimWheel.rotation.x = Math.PI * 0.5;
-      trimWheel.position.set(sailRing.x + 0.38, H + 0.35, sailRing.z);
-      trimWheel.castShadow = true;
-      group.add(trimWheel);
-      const trimPost = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.42, 8), darkMat);
-      trimPost.position.set(sailRing.x + 0.38, H + 0.2, sailRing.z);
-      trimPost.castShadow = true;
-      group.add(trimPost);
     }
 
     // Forward jib tied to the bowsprit; this gives the bow a proper pirate-ship profile from side view.
