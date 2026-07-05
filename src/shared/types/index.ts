@@ -68,7 +68,13 @@ export interface Ship {
   sailAngle: number;      // radians, negative = port, positive = starboard
   anchored: boolean;
   anchorRaiseProgress: number; // 0-1 while the capstan is being turned
+  /** Open holes per hull section (integer counts, 0..MAX_HOLES_PER_SECTION) —
+   *  the AUTHORITATIVE damage state. Cannonballs punch holes; planks patch them. */
+  holes: HullSections;
+  /** Derived per-section integrity (0..1) computed from `holes`, kept purely for
+   *  the HUD gauges and damage visuals. Damage/flood/sink all key off `holes`. */
   hull: HullSections;
+  /** Legacy hull-class number kept for display; no longer scales any damage. */
   maxHull: number;
   onFire: boolean;
   fireTimer: number;

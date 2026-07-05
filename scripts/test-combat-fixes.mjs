@@ -43,6 +43,7 @@ function makeShip(type = 'sloop', overrides = {}) {
     sailAngle: 0,
     anchored: false,
     anchorRaiseProgress: 0,
+    holes: { bow: 0, stern: 0, port: 0, starboard: 0 },
     hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
     maxHull: stats.maxHull,
     onFire: false,
@@ -236,7 +237,9 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
   shipB.rotation = 0;
   shipB.velocity = { x: 0, y: 0, z: 0 };
   shipB.anchored = false;
-  shipB.hull = { bow: 1, stern: 1, port: 0.06, starboard: 0.06 };
+  // Lateral sections pre-holed to the brink so the slam maxes one out.
+  shipB.holes = { bow: 0, stern: 0, port: 2, starboard: 2 };
+  match.physics.syncHullFromHoles(shipB);
   shipA.position = { x: -3, y: 0, z: 0 };
   shipA.rotation = 0;
   shipA.velocity = { x: 8, y: 0, z: 0 };
@@ -264,7 +267,11 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
   const goldBefore = attacker.gold;
   // Holes, not hp, decide: the ram breached the hull, so the water finishes
   // the job — run the flood forward to the founder (well under a minute for
-  // a wrecked section set) and then assert the credited sink.
+  // a wrecked section set) and then assert the credited sink. Sit the wreck
+  // low so its ram holes are cleanly below the waterline for the flood.
+  shipB.position.y = -1.2;
+  shipB.pitch = 0;
+  shipB.roll = 0;
   let ramFloodT = 0;
   for (let i = 0; i < 90 * 62 && shipB.sinking !== true; i++) {
     updateShipFlooding(shipB, match.t, DT);
@@ -301,7 +308,8 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   ship.velocity = { x: 0, y: 0, z: 0 };
   ship.anchored = true;
   ship.inventory = ship.inventory.filter((s) => s.item !== 'wood_plank');
-  ship.hull.port = 0.3;
+  ship.holes.port = 1;
+  match.physics.syncHullFromHoles(ship);
   player.state = 'alive';
   player.onShipId = ship.id;
   player.position = {
@@ -527,12 +535,12 @@ console.log('\n7. Storm damage punches holes (damageHullSection) instead of melt
   });
   testShip.position = { x: calmSpot.x, y: 0, z: calmSpot.z };
   testShip.velocity = { x: 0, y: 0, z: 0 };
-  // Grind the holed section down to breach level: a destroyed section gushes
-  // regardless of the waterline (the new deterministic rule), so this stops
-  // depending on wave phase over the hole.
+  // Max out the storm-holed section so it gushes hard once submerged, then let
+  // the calm-water flood loop below prove the hole is REAL (holes + water).
   const stormSections = ['bow', 'stern', 'port', 'starboard'];
-  const stormHoled = stormSections.find((sec) => testShip.hull[sec] <= FLOODING.HOLE_THRESHOLD) ?? 'bow';
-  testShip.hull[stormHoled] = Math.min(testShip.hull[stormHoled], 0.05);
+  const stormHoled = stormSections.find((sec) => testShip.holes[sec] > 0) ?? 'bow';
+  testShip.holes[stormHoled] = FLOODING.MAX_HOLES_PER_SECTION;
+  match.physics.syncHullFromHoles(testShip);
   const waterBefore = testShip.waterLevel ?? 0;
   for (let i = 0; i < 600; i++) {
     b0.health = 100;

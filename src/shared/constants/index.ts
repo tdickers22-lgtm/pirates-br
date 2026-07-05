@@ -134,6 +134,8 @@ export const SHIP = {
   ANCHOR_BRAKE: 4.8,
   ANCHOR_RAISE_TIME: 3.2,
   FIRE_DURATION: 18,
+  /** A deck fire chars a fresh hull hole every this-many seconds (burn-through). */
+  FIRE_HOLE_INTERVAL: 6,
   FIRE_HULL_DAMAGE_PER_SEC: 1.5,
   FIRE_PLAYER_DAMAGE_PER_SEC: 4,
   FIRE_REPAIR_DOUSE_TIME: 9,
@@ -173,19 +175,26 @@ export const SHIP = {
   SAIL_REPAIR_HOIST_FACTOR: 0.55,
 } as const;
 
-// ── Flooding / bailing (SoT-style naval damage loop) ─────────────
-// A hull section that has been holed (HP ≤ HOLE_THRESHOLD) AND whose waterline
-// hole sits below the local Gerstner surface takes on water. waterLevel is a
-// normalized 0..1 bilge fill. Two holed-below-waterline sections sink an
-// untended ship in ~45–75 s (bigger hulls flood slower). Repairing every hole
-// above the threshold stops ingress; a passive bilge pump then slowly recovers.
+// ── Flooding / bailing (SoT-style, PURELY hole-based naval damage loop) ──
+// There is no hull-HP pool. Each cannonball (keg blast, ram, rock, storm, fire)
+// punches a discrete HOLE into a hull section (ship.holes[section], an integer
+// count capped at MAX_HOLES_PER_SECTION). Any hole sitting at/below the local
+// wave surface takes on water; ingress scales with the number of open,
+// submerged holes. waterLevel is a normalized 0..1 bilge fill and the ship
+// founders ONLY when it reaches 1. Planks patch holes (one per plank); a
+// bucket bails water; a passive bilge pump slowly recovers a fully-patched hull.
 export const FLOODING = {
-  /** HP ratio (per section) at/below which the section is "holed" and can flood. */
+  /** Max open holes a single hull section can hold (a cannonball opens one). */
+  MAX_HOLES_PER_SECTION: 3,
+  /** Derived-integrity threshold the client damage decals treat as "gushing"
+   *  (hull ≤ this ⇔ the section carries ≥ half its holes). Display only. */
   HOLE_THRESHOLD: 0.5,
-  /** Base per-holed-section ingress, water-level/sec (sloop reference). The
-   *  effective rate scales with how wrecked the section is — see
-   *  sectionIngressScale in PhysicsSystem: a fresh hole trickles (bailable
-   *  solo), a destroyed section gushes (must be planked before bailing wins). */
+  /** Water-level/sec that ONE open, submerged hole lets in (sloop reference).
+   *  One bailer (BAIL_RATE 0.014) beats a single hole but loses to two, so a
+   *  gushing hull must be planked, not just bailed. ~67 s to founder a sloop on
+   *  two open holes, faster with more; a reinforced hull seeps slower still. */
+  INGRESS_PER_HOLE: 0.0075,
+  /** Legacy per-section base (kept for any callers that predate the hole model). */
   SECTION_INGRESS: 0.0085,
   /** Per hull-class scale on ingress — bigger hull, slower to fill.
    *  sloop 50 s / brigantine ~60 s / galleon ~71 s to fill on 2 open sections. */
@@ -289,8 +298,21 @@ export const SEA_ROCKS = {
 } as const;
 
 // ── Ship Upgrades ────────────────────────────────────────────
+// Redefined for the hole-based damage model (there is no HP pool to buff):
+//  - hull_reinforcement ("Reinforced Hull") → the sea seeps through reinforced
+//    planking slower, so open holes flood at HULL_INGRESS_MULT and the passive
+//    pump runs faster: you stay afloat far longer and one bailer wins more often.
+//  - charged_cannons ("Heavy Shot") → each ball punches CHARGED_EXTRA_HOLES more
+//    hole(s) into the section it hits, and still deals more anti-personnel blast.
+//  - swift_sails → unchanged top-speed multiplier.
 export const SHIP_UPGRADES = {
-  HULL_HP_MULT: 1.25,
+  /** Reinforced hull: open holes flood at this fraction of the base rate. */
+  HULL_INGRESS_MULT: 0.6,
+  /** Reinforced hull: passive bilge pump runs this much faster. */
+  HULL_PUMP_MULT: 1.6,
+  /** Heavy shot: extra holes punched per cannon hit on the struck section. */
+  CHARGED_EXTRA_HOLES: 1,
+  /** Heavy shot: anti-personnel cannonball blast multiplier (unchanged). */
   CANNON_DAMAGE_MULT: 1.30,
   SWIFT_SPEED_MULT: 1.20,
 } as const;
