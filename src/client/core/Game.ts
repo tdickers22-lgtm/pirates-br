@@ -3442,6 +3442,12 @@ export class Game {
     const isVolcanic = (island.profile.biome ?? 'lush') === 'volcanic';
     const ashCharcoal = new THREE.Color(0x2b2621);
     const terrainMagma: number[] = [];
+    // Snow on tall NON-volcanic mountains: whiten the summit above the snow line
+    // as part of the terrain itself (no floating cone). Volcanoes stay bare rock.
+    const isSnowy = island.profile.terrainStyle === 'mountain'
+      && !isVolcanic
+      && (island.profile.peakBoost ?? 0) > 0.65;
+    const snowColor = new THREE.Color(0xeef3fb);
 
     for (let ring = 0; ring <= totalRings; ring++) {
       const distRatio = ringDistRatio(ring);
@@ -3554,6 +3560,15 @@ export class Game {
           if (magma > 0.02) terrainColor.multiplyScalar(1 - magma * 0.4);
         }
         terrainMagma.push(magma);
+
+        // ── Snow line: the summit of a tall mountain whitens (terrain-hugging,
+        // heavier on flatter shelves where snow settles, thinner on sheer faces). ──
+        if (isSnowy) {
+          const snow = THREE.MathUtils.smoothstep(heightNorm, 0.62, 0.9)
+            * (1 - shoreMask)
+            * (1 - slopeRockMask * 0.55);
+          if (snow > 0) terrainColor.lerp(snowColor, Math.min(1, snow * 1.15));
+        }
 
         // Per-vertex noise + a low-frequency hue drift so large faces never
         // read as one flat paint bucket (survives ACES tonemapping). Sand
@@ -4644,42 +4659,8 @@ export class Game {
       }
     }
 
-    // ── Snow cap on tall mountain peaks ──
-    if (island.profile.terrainStyle === 'mountain' && (island.profile.peakBoost ?? 0) > 0.65) {
-      const snowMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.65, emissive: 0x8aa4c4, emissiveIntensity: 0.04 });
-      const peakAngle = island.profile.primaryHillAngle;
-      const peakOffset = island.profile.primaryHillOffset;
-      const px = Math.cos(peakAngle) * peakOffset * island.profile.footprintX;
-      const pz = Math.sin(peakAngle) * peakOffset * island.profile.footprintZ;
-      const peakWorldX = px + island.position.x;
-      const peakWorldZ = pz + island.position.z;
-      const peakY = getIslandSurfaceY(island, peakWorldX, peakWorldZ);
-      const cap = new THREE.Mesh(
-        new THREE.ConeGeometry(2.6 + island.profile.peakBoost * 1.4, 1.4 + island.profile.peakBoost * 1.6, 9, 1),
-        snowMat,
-      );
-      cap.position.set(px, peakY + 0.6, pz);
-      cap.castShadow = true;
-      cap.receiveShadow = true;
-      group.add(cap);
-      // Snow patches around the peak — flat circles laid on the surface
-      const snowPatchMat = new THREE.MeshStandardMaterial({ color: 0xeaf1f8, roughness: 0.85, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
-      for (let s = 0; s < 8; s++) {
-        const sa = (s / 8) * Math.PI * 2 + rng(s * 701) * 0.4;
-        const sd = 1.2 + rng(s * 703) * 1.6;
-        const sx = px + Math.cos(sa) * sd;
-        const sz = pz + Math.sin(sa) * sd;
-        const sWorldY = getIslandSurfaceY(island, sx + island.position.x, sz + island.position.z);
-        if (sWorldY < peakY - 4) continue; // only near the summit
-        const patch = new THREE.Mesh(
-          new THREE.CircleGeometry(0.6 + rng(s * 707) * 0.7, 10),
-          snowPatchMat,
-        );
-        patch.rotation.x = -Math.PI * 0.5;
-        patch.position.set(sx, sWorldY + 0.05, sz);
-        group.add(patch);
-      }
-    }
+    // (Snow on tall mountains is now painted into the terrain vertex colours
+    // above — the snow line — instead of a floating cone + flat patches.)
 
     // ── Volcanic isle FX: caldera lava, ashfall, embers, smoke, geyser plumes ──
     if (isVolcanic) {
