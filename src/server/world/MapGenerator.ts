@@ -223,7 +223,8 @@ export class MapGenerator {
     const profile = island.profile;
     const eligible = profile.terrainStyle === 'twin'
       || profile.terrainStyle === 'archipelago'
-      || ((profile.terrainStyle === 'mountain' || profile.terrainStyle === 'rocky') && profile.secondaryHillScale > 0.45);
+      || profile.terrainStyle === 'mountain'
+      || (profile.terrainStyle === 'rocky' && profile.secondaryHillScale > 0.3);
     if (!eligible) return [];
     const localPeak = (hillAngle: number, hillOffset: number) => {
       const cx = island.position.x + Math.cos(hillAngle) * hillOffset * profile.footprintX;
@@ -385,7 +386,7 @@ export class MapGenerator {
     const style = island.profile.terrainStyle;
     let count = 0;
     if (style === 'rocky') count = 1 + (rng() < 0.6 ? 1 : 0);
-    else if (style === 'mountain') count = rng() < 0.75 ? 1 : 0;
+    else if (style === 'mountain') count = 1; // every mountain hides a cavern
     else if (style === 'plateau') count = rng() < 0.45 ? 1 : 0;
     else count = rng() < 0.25 ? 1 : 0;
     if (count === 0) return [];
@@ -438,6 +439,38 @@ export class MapGenerator {
           floorY,
           ceilingY,
         });
+        // ── Fully underground chamber ──
+        // Long tunnels open into a wide vaulted room deeper in the hill: a
+        // second cave record continuing the axis (the shared carve/ceiling
+        // math unions overlapping records, so tunnel and room connect
+        // seamlessly for locomotion, raycasts, and the client interior).
+        if (length >= 11) {
+          const roomRadius = rr(rng, 5.2, 7.0);
+          const roomLength = rr(rng, 9, 12);
+          const roomHeight = rr(rng, 5.2, 6.4);
+          const roomFloorY = floorY - 0.7;
+          const roomCeilY = roomFloorY + roomHeight;
+          const roomEntryX = pos.x - Math.sin(rotation) * (length - 1.5);
+          const roomEntryZ = pos.z - Math.cos(rotation) * (length - 1.5);
+          let roomRoofed = true;
+          for (const f of [0.3, 0.65, 1.0]) {
+            const sx = roomEntryX - Math.sin(rotation) * roomLength * f;
+            const sz = roomEntryZ - Math.cos(rotation) * roomLength * f;
+            if (getIslandSurfaceY(island, sx, sz) < roomCeilY + 2.2) { roomRoofed = false; break; }
+          }
+          if (roomRoofed) {
+            caves.push({
+              position: { x: roomEntryX, y: pos.y, z: roomEntryZ },
+              rotation,
+              width: roomRadius * 2,
+              height: roomHeight,
+              length: roomLength,
+              interiorRadius: roomRadius,
+              floorY: roomFloorY,
+              ceilingY: roomCeilY,
+            });
+          }
+        }
         break;
       }
     }
