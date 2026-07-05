@@ -880,7 +880,7 @@ function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
   return group;
 }
 
-type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest';
+type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass';
 
 function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
   const group = new THREE.Group();
@@ -1042,6 +1042,90 @@ function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
       hand.position.set(side * 0.22, -0.18, 0.18);
       hand.scale.set(1.1, 0.85, 1.0);
       group.add(hand);
+    }
+  } else if (kind === 'bucket') {
+    const staveMat = new THREE.MeshStandardMaterial({ color: 0x7a5024, roughness: 0.9 });
+    const innerMat = new THREE.MeshStandardMaterial({ color: 0x4a3218, roughness: 0.96, side: THREE.BackSide });
+    const waterMat = new THREE.MeshStandardMaterial({ color: 0x2f7fb0, roughness: 0.22, metalness: 0.1 });
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.084, 0.2, 18, 1, true), staveMat);
+    group.add(body);
+    const inner = new THREE.Mesh(new THREE.CylinderGeometry(0.104, 0.08, 0.19, 18, 1, true), innerMat);
+    group.add(inner);
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.086, 0.086, 0.02, 18), staveMat);
+    base.position.y = -0.1;
+    group.add(base);
+    const surface = new THREE.Mesh(new THREE.CylinderGeometry(0.099, 0.099, 0.008, 18), waterMat);
+    surface.position.y = 0.045;
+    group.add(surface);
+    for (const [y, r] of [[-0.075, 0.092], [0.086, 0.112]] as const) {
+      const hoop = new THREE.Mesh(new THREE.TorusGeometry(r, 0.008, 6, 20), iron);
+      hoop.rotation.x = Math.PI * 0.5;
+      hoop.position.y = y;
+      group.add(hoop);
+    }
+    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.007, 6, 18, Math.PI), iron);
+    handle.position.y = 0.1;
+    handle.rotation.y = Math.PI * 0.5;
+    group.add(handle);
+  } else if (kind === 'compass') {
+    const brass = new THREE.MeshStandardMaterial({ color: 0xc9a24a, roughness: 0.32, metalness: 0.85, emissive: 0x140d02, emissiveIntensity: 0.12 });
+    const faceMat = new THREE.MeshStandardMaterial({ color: 0xe9dcbb, roughness: 0.6 });
+    const glassMat = new THREE.MeshStandardMaterial({ color: 0xbfe0ff, roughness: 0.1, metalness: 0.1, transparent: true, opacity: 0.3 });
+    const caseMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.078, 0.078, 0.034, 22), brass);
+    caseMesh.rotation.x = Math.PI * 0.5;
+    group.add(caseMesh);
+    const face = new THREE.Mesh(new THREE.CylinderGeometry(0.064, 0.064, 0.006, 22), faceMat);
+    face.rotation.x = Math.PI * 0.5;
+    face.position.z = -0.014;
+    group.add(face);
+    const glass = new THREE.Mesh(new THREE.CylinderGeometry(0.066, 0.066, 0.004, 22), glassMat);
+    glass.rotation.x = Math.PI * 0.5;
+    glass.position.z = -0.02;
+    group.add(glass);
+    const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, 0.03, 8), brass);
+    pin.rotation.x = Math.PI * 0.5;
+    pin.position.z = -0.02;
+    group.add(pin);
+    const needleN = new THREE.Mesh(new THREE.ConeGeometry(0.011, 0.05, 4), new THREE.MeshStandardMaterial({ color: 0xd2382a }));
+    needleN.position.set(0, 0.025, -0.02);
+    group.add(needleN);
+    const needleS = new THREE.Mesh(new THREE.ConeGeometry(0.011, 0.05, 4), new THREE.MeshStandardMaterial({ color: 0xdedbd0 }));
+    needleS.position.set(0, -0.025, -0.02);
+    needleS.rotation.z = Math.PI;
+    group.add(needleS);
+    const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.082, 0.082, 0.014, 22, 1, false, 0, Math.PI), brass);
+    lid.rotation.x = Math.PI * 0.5;
+    lid.position.set(0, 0.086, -0.02);
+    lid.rotation.z = -0.5;
+    group.add(lid);
+  } else if (kind === 'spyglass') {
+    const brass = new THREE.MeshStandardMaterial({ color: 0xc9a24a, roughness: 0.32, metalness: 0.85 });
+    const leather = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.88 });
+    const lensMat = new THREE.MeshStandardMaterial({ color: 0x1a2a33, roughness: 0.15, metalness: 0.3 });
+    const eye = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.034, 0.1, 16), brass);
+    eye.rotation.x = Math.PI * 0.5;
+    eye.position.z = -0.12;
+    group.add(eye);
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.037, 0.037, 0.11, 16), leather);
+    grip.rotation.x = Math.PI * 0.5;
+    grip.position.z = -0.02;
+    group.add(grip);
+    const mid = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.12, 16), brass);
+    mid.rotation.x = Math.PI * 0.5;
+    mid.position.z = 0.08;
+    group.add(mid);
+    const obj = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.03, 0.12, 16), brass);
+    obj.rotation.x = Math.PI * 0.5;
+    obj.position.z = 0.2;
+    group.add(obj);
+    const objLens = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.024, 0.006, 16), lensMat);
+    objLens.rotation.x = Math.PI * 0.5;
+    objLens.position.z = 0.26;
+    group.add(objLens);
+    for (const z of [-0.07, 0.03, 0.14] as const) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.035, 0.006, 6, 16), brass);
+      ring.position.z = z;
+      group.add(ring);
     }
   } else {
     const body = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 10), flesh);
@@ -6708,12 +6792,12 @@ export class Game {
     // (before hasPendingActions so the resulting input is force-sent this frame).
     this.updateWheelRelease();
 
-    // Right-click LOWERS a raised spyglass (equipped from the wheel) — the
-    // intuitive "zoom out". Re-selecting SCOPE (slot 0) toggles the tool off.
-    const scopedByTool = this.spyglassActive && this.getLocalPlayer()?.equippedTool === 'spyglass';
+    // Right-click PUTS AWAY the equipped tool — lowers a raised spyglass, or
+    // stows the bucket/compass/shovel. Re-selecting its wheel slot toggles it off.
+    const equippedTool = this.getLocalPlayer()?.equippedTool ?? null;
     const aimDown = this.input.isAiming();
-    if (scopedByTool && aimDown && !this.scopeAimWasDown) {
-      this.input.queueWheelSlot(0);
+    if (equippedTool && aimDown && !this.scopeAimWasDown) {
+      this.input.queueWheelSlot(this.toolWheelSlot(equippedTool));
     }
     this.scopeAimWasDown = aimDown;
 
@@ -6724,8 +6808,8 @@ export class Game {
         if (legend) legend.style.display = legend.style.display === 'block' ? 'none' : 'block';
       }
       const input = this.input.buildInput();
-      if (this.spyglassActive) {
-        // A raised spyglass occupies both hands.
+      if (this.spyglassActive || equippedTool) {
+        // A raised spyglass or a held tool occupies both hands — no shooting.
         input.fire = false;
         input.aim = false;
       }
@@ -10800,6 +10884,43 @@ export class Game {
 
     const usingPreview = this.pocketUsePreviewKind !== null && this.pocketUsePreviewTimer > 0;
     if (!this.input.isSupplyWheelOpen() && !usingPreview) {
+      // Persistently hold the equipped TOOL in first-person so you can SEE what's
+      // in your hands. The spyglass is the exception — raised, the full-screen
+      // scope overlay is the visual, so no barrel viewmodel is drawn.
+      const tool = player.equippedTool;
+      if (tool && !(tool === 'spyglass' && this.spyglassActive)) {
+        const kind = tool as PocketPreviewKind;
+        let mesh = this.localViewPocketRoot.getObjectByName('local-pocket') as THREE.Group | null;
+        if (!mesh || this.localViewPocketKind !== kind) {
+          this.localViewPocketRoot.clear();
+          mesh = makePocketPreviewMesh(kind);
+          mesh.name = 'local-pocket';
+          mesh.rotation.y = Math.PI;
+          mesh.scale.setScalar(tool === 'compass' ? 1.7 : tool === 'bucket' ? 1.4 : tool === 'shovel' ? 1.7 : 1.5);
+          applyViewmodelMaterialSettings(mesh);
+          this.localViewPocketRoot.add(mesh);
+          this.localViewPocketKind = kind;
+        }
+        const time = this.ocean.getTime();
+        const moveAxes = this.input.getMoveAxes();
+        const moveAmount = Math.min(1, Math.hypot(moveAxes.x, moveAxes.z));
+        const bob = Math.sin(time * (3.1 + moveAmount * 2.4)) * (0.006 + moveAmount * 0.02);
+        const sway = Math.sin(time * (1.8 + moveAmount * 1.1)) * (0.006 + moveAmount * 0.014);
+        const cfg = tool === 'compass'
+          ? { p: [0.2 + sway * 0.5, -0.19 + bob, -0.38], r: [-0.88 + bob, 0.16 + sway * 0.3, 0.08] }
+          : tool === 'bucket'
+            ? { p: [0.24 + sway * 0.5, -0.35 + bob, -0.56], r: [-0.12 + bob, 0.2 + sway * 0.3, -0.1] }
+            : tool === 'spyglass'
+              ? { p: [0.2 + sway * 0.4, -0.2 + bob, -0.46], r: [0.05, -0.5 + sway * 0.2, 0.12] }
+              // Shovel is long — lay it DIAGONALLY across the lower-right (blade
+              // low, handle up-left) via a roll about the view axis, so the whole
+              // tool stays in the frame plane instead of receding down-forward.
+              : { p: [0.22 + sway * 0.4, -0.34 + bob, -0.54], r: [-0.2 + bob, 0.3 + sway * 0.2, 0.8] }; // shovel
+        this.localViewPocketRoot.visible = true;
+        this.localViewPocketRoot.position.set(cfg.p[0], cfg.p[1], cfg.p[2]);
+        this.localViewPocketRoot.rotation.set(cfg.r[0], cfg.r[1], cfg.r[2]);
+        return true;
+      }
       this.localViewPocketRoot.visible = false;
       this.localViewPocketKind = null;
       return false;
