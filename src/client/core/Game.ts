@@ -3195,7 +3195,10 @@ export class Game {
         vertex.fromBufferAttribute(position, index);
         const angle = Math.atan2(vertex.z, vertex.x);
         const baseRadius = Math.hypot(vertex.x, vertex.z);
-        const y01 = (vertex.y + h * 0.5) / h;
+        // Clamp: rounding can put the top row at 1.0000000000000002, and
+        // Math.pow(1 - y01, 1.35) with a negative base is NaN — which
+        // silently corrupted the reef layer on 3 of 14 islands.
+        const y01 = THREE.MathUtils.clamp((vertex.y + h * 0.5) / h, 0, 1);
         const lobeA = Math.sin(angle * 2 + islandHeading + y01 * 0.7) * 0.14;
         const lobeB = Math.sin(angle * 3 - islandHeading * 1.8 + y01 * 1.9) * 0.09;
         const lobeC = Math.cos(angle * 5 + islandHeading * 0.6 - y01 * 2.7) * 0.04;
