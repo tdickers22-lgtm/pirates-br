@@ -8470,10 +8470,11 @@ export class Game {
 
     let desired: THREE.Vector3;
     let lookTarget: THREE.Vector3;
-    // Spyglass: 6° (~12x) beats the sniper's 14° by design. Raise it either by
-    // holding P (shortcut) or, with the SCOPE tool equipped from the supply
-    // wheel, by aiming (right mouse). Not while manning a cannon or downed.
-    const spyglassActive = (this.input.isSpyglassHeld() || (player.equippedTool === 'spyglass' && aiming))
+    // Spyglass: 6° (~12x) beats the sniper's 14° by design. Selecting the SCOPE
+    // tool from the supply wheel RAISES it (stays up until you re-select the
+    // scope to stow it); holding P is a momentary shortcut. Not while manning a
+    // cannon or downed.
+    const spyglassActive = (this.input.isSpyglassHeld() || player.equippedTool === 'spyglass')
       && !player.atCannon
       && player.state !== 'downed'
       && player.state !== 'respawning'

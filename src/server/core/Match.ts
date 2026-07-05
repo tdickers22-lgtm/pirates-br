@@ -1024,8 +1024,12 @@ export class Match {
     player.rotation.y = cannonAim?.pitch ?? input.pitch;
 
     // Weapon switch — edge-triggered so a held slot key doesn't keep "switching" each tick.
-    if (input.slot !== null && input.slot !== player.activeSlot && this.consumeOneShot(client, 'slot', input.seq)) {
+    if (input.slot !== null && (input.slot !== player.activeSlot || player.equippedTool === 'spyglass')
+      && this.consumeOneShot(client, 'slot', input.seq)) {
       player.activeSlot = input.slot;
+      // Drawing/selecting any weapon stows a raised spyglass (both hands back on
+      // the gun) — the quick way to lower the scope without opening the wheel.
+      if (player.equippedTool === 'spyglass') player.equippedTool = null;
     }
     if (input.cannonAmmo && this.consumeOneShot(client, 'cannonAmmo', input.seq)) {
       player.selectedCannonAmmo = input.cannonAmmo;
