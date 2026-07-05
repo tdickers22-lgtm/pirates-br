@@ -3270,8 +3270,17 @@ export class Game {
     // Beach sand read as a flat near-white halo ringing sunlit islands
     // (patrol-3): pull the whitening way back and warm/darken the base so it's
     // sand, not a bloom band.
-    const beachColor = paletteSand.clone().lerp(new THREE.Color(0xffffff), 0.05);
-    const sandColor = paletteSand.clone().multiplyScalar(0.9);
+    // Postcard isles (profile.whiteSand) get bright white-sand beaches; the rest
+    // keep their muted biome tan. A warm off-white (not pure white) so the berm
+    // reads as brilliant sand without blowing out into a bloom halo.
+    const whiteSand = !!island.profile.whiteSand;
+    const sandWhite = new THREE.Color(0xf7f0dd);
+    const beachColor = whiteSand
+      ? paletteSand.clone().lerp(sandWhite, 0.72)
+      : paletteSand.clone().lerp(new THREE.Color(0xffffff), 0.05);
+    const sandColor = whiteSand
+      ? paletteSand.clone().lerp(sandWhite, 0.55)
+      : paletteSand.clone().multiplyScalar(0.9);
     const grassColor = paletteGrass.clone();
     const jungleColor = paletteFoliage.clone();
     const peakColor = paletteGrass.clone().lerp(paletteRock, 0.42);
@@ -8444,10 +8453,10 @@ export class Game {
 
     let desired: THREE.Vector3;
     let lookTarget: THREE.Vector3;
-    // Spyglass: hold P — 6° (~12x) beats the sniper's 14° by design. Active
-    // when not manning a cannon, not aiming a firearm, and able to stand.
-    const spyglassActive = this.input.isSpyglassHeld()
-      && !aiming
+    // Spyglass: 6° (~12x) beats the sniper's 14° by design. Raise it either by
+    // holding P (shortcut) or, with the SCOPE tool equipped from the supply
+    // wheel, by aiming (right mouse). Not while manning a cannon or downed.
+    const spyglassActive = (this.input.isSpyglassHeld() || (player.equippedTool === 'spyglass' && aiming))
       && !player.atCannon
       && player.state !== 'downed'
       && player.state !== 'respawning'
@@ -8835,7 +8844,9 @@ export class Game {
     }
     this.renderTreasureInventoryChart(player, mappedIsland, closestHoarder);
     this.ui.pocketWheelStats.textContent = this.input.isSupplyWheelOpen()
-      ? 'Pocket: fruit heals you · wood transfers to Ship stores for repairs · kegs stay in equipment until placed'
+      ? (player.equippedTool
+          ? `Equipped: ${player.equippedTool.toUpperCase()} · re-select to stow · tools = scope/compass/bucket/shovel · fruit heals · planks → ship stores`
+          : 'Tools: scope · compass · bucket (bail) · shovel — select to equip · fruit heals · planks → ship stores')
       : '';
     this.updateSupplyWheelCounts(player);
     this.ui.pocketWheel.classList.toggle('visible', this.input.isSupplyWheelOpen());
@@ -10151,45 +10162,43 @@ export class Game {
     this.ui.inventoryBanana.textContent = String(banana);
   }
 
+  /** Supply-wheel slot layout: 0 scope · 1 compass · 2 bucket · 3 planks ·
+   *  4 banana · 5 coconut · 6 meat/mango · 7 shovel. Tools (0-2,7) equip. */
   private getPocketWheelCount(player: Player, slot: number) {
     switch (slot) {
-      case 0:
-        return player.pocketBanana;
-      case 1:
-        return player.pocketWood;
-      case 2:
-        return player.pocketCoconut;
-      case 3:
-        return player.pocketMeat + player.pocketMango;
-      default:
-        return 0;
+      case 3: return player.pocketWood;
+      case 4: return player.pocketBanana;
+      case 5: return player.pocketCoconut;
+      case 6: return player.pocketMeat + player.pocketMango;
+      default: return 0;
     }
   }
 
   private getPocketWheelKind(player: Player | null, slot: number): PocketPreviewKind | null {
     switch (slot) {
-      case 0:
-        return 'banana';
-      case 1:
-        return 'wood';
-      case 2:
-        return 'coconut';
-      case 3:
-        return (player?.pocketMeat ?? 0) > 0 ? 'meat' : 'mango';
-      default:
-        return null;
+      case 3: return 'wood';
+      case 4: return 'banana';
+      case 5: return 'coconut';
+      case 6: return (player?.pocketMeat ?? 0) > 0 ? 'meat' : 'mango';
+      default: return null; // tool slots have no consumable preview
     }
   }
 
+  /** Wheel slice index for an equipped tool (for the highlight), else -1. */
+  private toolWheelSlot(tool: Player['equippedTool']): number {
+    return tool === 'spyglass' ? 0 : tool === 'compass' ? 1 : tool === 'bucket' ? 2 : tool === 'shovel' ? 7 : -1;
+  }
+
   private updateSupplyWheelCounts(player: Player) {
-    const counts = [player.pocketBanana, player.pocketWood, player.pocketCoconut, player.pocketMeat + player.pocketMango];
     for (const countEl of this.ui.pocketWheel.querySelectorAll<SVGTextElement>('[data-wheel-count]')) {
       const slot = Number(countEl.dataset.wheelCount);
-      countEl.textContent = Number.isInteger(slot) ? String(counts[slot] ?? 0) : '0';
+      countEl.textContent = Number.isInteger(slot) ? String(this.getPocketWheelCount(player, slot)) : '0';
     }
     const heldSlot = this.input.getSupplyWheelHeldSlot();
+    const equippedSlot = this.toolWheelSlot(player.equippedTool);
     for (const slice of this.ui.pocketWheel.querySelectorAll<SVGPathElement>('[data-wheel-slot]')) {
-      slice.classList.toggle('active', Number(slice.dataset.wheelSlot) === heldSlot);
+      const s = Number(slice.dataset.wheelSlot);
+      slice.classList.toggle('active', s === heldSlot || s === equippedSlot);
     }
   }
 
@@ -11127,14 +11136,17 @@ export class Game {
     }
 
     if (ship) {
-      // Bail the bilge — available anywhere on deck when the hull is taking water.
-      // Lowest priority (fixed score below every look-based candidate) so cannons,
-      // the helm, repairs, etc. always win when you're actually facing one.
+      // Bail the bilge — physical bucket work. Only offered with the BUCKET tool
+      // equipped from the supply wheel; otherwise a hint nudges you to equip it.
+      // Low priority so cannons/helm/repairs win when you're facing one.
       if (player.onShipId === ship.id && (ship.waterLevel ?? 0) > 0.02) {
         const pct = Math.round((ship.waterLevel ?? 0) * 100);
+        const hasBucket = player.equippedTool === 'bucket';
         candidates.push({
-          prompt: '[Hold X] Bail Water',
-          label: `Bilge flooding ${pct}% · scoop it overboard`,
+          prompt: hasBucket ? '[Hold X] Bail Water' : 'Equip the Bucket [Hold I] to bail',
+          label: hasBucket
+            ? `Bilge flooding ${pct}% · scoop it overboard`
+            : `Bilge flooding ${pct}% · grab the bucket from the supply wheel`,
           score: -0.5,
           kind: 'bail',
         });

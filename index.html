@@ -1795,27 +1795,37 @@
         <div id="treasure-chart-route">Talk to a Gold Hoarder</div>
       </div>
       <div id="pocket-wheel">
-        <div class="pw-hint">Hold [I] — supply wheel (pocket → use / transfer)</div>
+        <div class="pw-hint">Hold [I] — supply wheel · click a tool to equip, a supply to use</div>
         <svg id="pocket-wheel-svg" viewBox="-100 -100 200 200" aria-label="Supply wheel">
-          <path class="wheel-slice" data-wheel-slot="0" d="M 0 0 L 0 -92 A 92 92 0 0 1 92 0 Z"></path>
-          <path class="wheel-slice" data-wheel-slot="1" d="M 0 0 L 92 0 A 92 92 0 0 1 0 92 Z"></path>
-          <path class="wheel-slice" data-wheel-slot="2" d="M 0 0 L 0 92 A 92 92 0 0 1 -92 0 Z"></path>
-          <path class="wheel-slice" data-wheel-slot="3" d="M 0 0 L -92 0 A 92 92 0 0 1 0 -92 Z"></path>
-          <circle class="wheel-center" r="30"></circle>
-          <text class="wheel-icon" x="42" y="-42">🍌</text>
-          <text class="wheel-count" data-wheel-count="0" x="54" y="-18">0</text>
-          <text class="wheel-label" x="47" y="-67">BANANA</text>
-          <text class="wheel-icon" x="42" y="42">🪵</text>
-          <text class="wheel-count" data-wheel-count="1" x="54" y="66">0</text>
-          <text class="wheel-label" x="47" y="18">PLANKS</text>
-          <text class="wheel-icon" x="-42" y="42">🥥</text>
-          <text class="wheel-count" data-wheel-count="2" x="-54" y="66">0</text>
-          <text class="wheel-label" x="-47" y="18">COCONUT</text>
-          <text class="wheel-icon" x="-42" y="-42">🥩</text>
-          <text class="wheel-count" data-wheel-count="3" x="-54" y="-18">0</text>
-          <text class="wheel-label" x="-47" y="-67">MEAT/MANGO</text>
-          <text class="wheel-label" x="0" y="-4">POCKET</text>
-          <text class="wheel-label" x="0" y="8">ITEMS</text>
+          <path class="wheel-slice" data-wheel-slot="0" d="M 0 0 L -35 -85 A 92 92 0 0 1 35 -85 Z"></path>
+          <path class="wheel-slice" data-wheel-slot="1" d="M 0 0 L 35 -85 A 92 92 0 0 1 85 -35 Z"></path>
+          <path class="wheel-slice" data-wheel-slot="2" d="M 0 0 L 85 -35 A 92 92 0 0 1 85 35 Z"></path>
+          <path class="wheel-slice" data-wheel-slot="3" d="M 0 0 L 85 35 A 92 92 0 0 1 35 85 Z"></path>
+          <path class="wheel-slice" data-wheel-slot="4" d="M 0 0 L 35 85 A 92 92 0 0 1 -35 85 Z"></path>
+          <path class="wheel-slice" data-wheel-slot="5" d="M 0 0 L -35 85 A 92 92 0 0 1 -85 35 Z"></path>
+          <path class="wheel-slice" data-wheel-slot="6" d="M 0 0 L -85 35 A 92 92 0 0 1 -85 -35 Z"></path>
+          <path class="wheel-slice" data-wheel-slot="7" d="M 0 0 L -85 -35 A 92 92 0 0 1 -35 -85 Z"></path>
+          <circle class="wheel-center" r="26"></circle>
+          <text class="wheel-icon" x="0" y="-52">🔭</text>
+          <text class="wheel-label" x="0" y="-82">SCOPE</text>
+          <text class="wheel-icon" x="40" y="-36">🧭</text>
+          <text class="wheel-label" x="57" y="-53">COMPASS</text>
+          <text class="wheel-icon" x="56" y="4">🪣</text>
+          <text class="wheel-label" x="80" y="4">BUCKET</text>
+          <text class="wheel-icon" x="40" y="44">🪵</text>
+          <text class="wheel-count" data-wheel-count="3" x="27" y="30">0</text>
+          <text class="wheel-label" x="57" y="61">PLANKS</text>
+          <text class="wheel-icon" x="0" y="60">🍌</text>
+          <text class="wheel-count" data-wheel-count="4" x="0" y="34">0</text>
+          <text class="wheel-label" x="0" y="84">BANANA</text>
+          <text class="wheel-icon" x="-40" y="44">🥥</text>
+          <text class="wheel-count" data-wheel-count="5" x="-27" y="30">0</text>
+          <text class="wheel-label" x="-57" y="61">COCONUT</text>
+          <text class="wheel-icon" x="-56" y="4">🥩</text>
+          <text class="wheel-count" data-wheel-count="6" x="-38" y="4">0</text>
+          <text class="wheel-label" x="-80" y="4">MEAT</text>
+          <text class="wheel-icon" x="-40" y="-36">⛏️</text>
+          <text class="wheel-label" x="-57" y="-53">SHOVEL</text>
         </svg>
         <div id="pocket-wheel-stats"></div>
       </div>

@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal,
+  GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, EquippableTool,
 } from '../../shared/types/index.js';
 import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
@@ -385,6 +385,8 @@ export class Match {
       pocketUseCooldown: 0,
       hasShovel: true,
       hasSpyglass: true,
+      equippedTool: null,
+      bailScoopProgress: 0,
       nearBarrelId: null,
       downedUntil: 0,
       reviveProgress: 0,
@@ -949,7 +951,10 @@ export class Match {
     const slot = input.slot === 0 || input.slot === 1 || input.slot === 2 || input.slot === 3
       ? input.slot
       : null;
-    const wheelIndex = input.wheelIndex === 0 || input.wheelIndex === 1 || input.wheelIndex === 2 || input.wheelIndex === 3
+    const wheelIndex = typeof input.wheelIndex === 'number'
+      && Number.isInteger(input.wheelIndex)
+      && input.wheelIndex >= 0
+      && input.wheelIndex <= 7
       ? input.wheelIndex
       : null;
     const cannonAmmo = input.cannonAmmo === 'cannonball' || input.cannonAmmo === 'firebomb' || input.cannonAmmo === 'chainshot'
@@ -1269,8 +1274,10 @@ export class Match {
         }
       }
 
-      // Bail the bilge: hold interact with the bail action selected. Continuous
-      // BAIL_RATE/s while held (SoT bucket work). Player.bailing drives the HUD.
+      // Physically bucket out the bilge: the pirate must have the BUCKET tool
+      // equipped (supply wheel), then hold interact on the flooding deck. The
+      // water drains at BAIL_RATE while held; bailScoopProgress cycles the
+      // fill→heave-overboard animation the client draws (discrete scoops).
       const wantsBail =
         input.interactHeld
         && input.interactIntent === 'bail'
@@ -1278,12 +1285,15 @@ export class Match {
         && !player.atHelm
         && !player.atSails
         && !player.atCrowNest
-        && (ship.waterLevel ?? 0) > 0;
+        && (ship.waterLevel ?? 0) > 0
+        && player.equippedTool === 'bucket';
       if (wantsBail) {
         ship.waterLevel = Math.max(0, (ship.waterLevel ?? 0) - FLOODING.BAIL_RATE * dt);
         player.bailing = true;
+        player.bailScoopProgress = (player.bailScoopProgress + dt / FLOODING.BAIL_SCOOP_TIME) % 1;
       } else {
         player.bailing = false;
+        player.bailScoopProgress = 0;
       }
 
       // Repair torn sails (hold [X] + wood at the rigging). Repairing both
@@ -1293,11 +1303,13 @@ export class Match {
         && !player.atCannon && !player.atHelm && !player.atCrowNest
         && this.isNearSailStation(player, ship);
       if (mendingSails && ship.sailIntegrity < 1) {
-        const plankStack = ship.inventory.find(entry => entry.item === 'wood_plank' && entry.qty > 0);
-        if (plankStack) {
+        // Sail repair draws planks from the SAME source hull repair does —
+        // your pocket first, then ship stores (was ship-only, so you couldn't
+        // mend canvas with planks in your pocket).
+        if (this.getRepairPlankCount(player, ship) > 0) {
           ship.sailRepairWoodTimer += dt;
           while (ship.sailRepairWoodTimer >= SHIP.SAIL_REPAIR_WOOD_INTERVAL && ship.sailIntegrity < 1) {
-            if (!this.consumeShipItem(ship, 'wood_plank', 1)) break;
+            if (!this.consumeRepairPlank(player, ship)) break;
             ship.sailRepairWoodTimer -= SHIP.SAIL_REPAIR_WOOD_INTERVAL;
             ship.sailIntegrity = Math.min(1, ship.sailIntegrity + 0.28);
           }
@@ -1681,28 +1693,46 @@ export class Match {
       ship ??
       this.getAliveShip(player.shipId);
     const ix = input.wheelIndex;
+    // Unified supply wheel — slots 0-2,7 EQUIP a tool (instant toggle, no
+    // cooldown); slot 3 transfers a plank to ship stores; slots 4-6 eat one
+    // consumable. Layout mirrors the client SVG.
+    const tool: EquippableTool | null =
+      ix === 0 ? 'spyglass'
+        : ix === 1 ? 'compass'
+          : ix === 2 ? 'bucket'
+            : ix === 7 ? 'shovel'
+              : null;
+    if (tool) {
+      player.equippedTool = player.equippedTool === tool ? null : tool;
+      return;
+    }
     let consumed = false;
-    if (ix === 0) {
-      if (player.pocketBanana <= 0) return;
-      player.pocketBanana -= 1;
-      player.health = Math.min(PLAYER.MAX_HEALTH, player.health + PLAYER.BANANA_HEAL);
-      consumed = true;
-    } else if (ix === 1) {
+    if (ix === 3) {
       if (player.pocketWood <= 0 || !crewShip) return;
       player.pocketWood -= 1;
       this.islands.addItemToShipInventory(crewShip, 'wood_plank', 1);
       consumed = true;
-    } else if (ix === 2) {
-      if (player.pocketCoconut <= 0) return;
-      player.pocketCoconut -= 1;
+    } else if (ix === 4) {
+      // Eat from your pocket first, then the ship's larder (shared crew food).
+      if (player.pocketBanana > 0) player.pocketBanana -= 1;
+      else if (!crewShip || !this.consumeShipItem(crewShip, 'banana', 1)) return;
+      player.health = Math.min(PLAYER.MAX_HEALTH, player.health + PLAYER.BANANA_HEAL);
+      consumed = true;
+    } else if (ix === 5) {
+      if (player.pocketCoconut > 0) player.pocketCoconut -= 1;
+      else if (!crewShip || !this.consumeShipItem(crewShip, 'coconut', 1)) return;
       player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
       consumed = true;
-    } else if (ix === 3) {
+    } else if (ix === 6) {
       if (player.pocketMeat > 0) {
         player.pocketMeat -= 1;
         player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.MEAT_HEAL);
       } else if (player.pocketMango > 0) {
         player.pocketMango -= 1;
+        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
+      } else if (crewShip && this.consumeShipItem(crewShip, 'meat', 1)) {
+        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.MEAT_HEAL);
+      } else if (crewShip && this.consumeShipItem(crewShip, 'mango', 1)) {
         player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
       } else {
         return;

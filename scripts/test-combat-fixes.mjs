@@ -300,6 +300,7 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   const player = st.players.find((p) => p.id === joined.playerId);
   const ship = st.ships.find((s) => s.id === joined.shipId);
   const bot = st.players.find((p) => p.isBot);
+  player.equippedTool = 'bucket'; // physical bailing requires the bucket equipped
 
   // Park in open water inside a pinned storm ring, one holed section, no
   // auto-repair planks — one bailer (0.014/s) beats one hole (0.010/s).

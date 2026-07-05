@@ -63,17 +63,19 @@ interface RosterEntry {
   hasTavern: boolean;
   /** Guaranteed inlet (cove/bay) — [widthLo, widthHi], [depthLo, depthHi]. */
   forcedInlet?: { width: [number, number]; depth: [number, number] };
+  /** Bright white-sand beaches (postcard tropical isles). */
+  whiteSand?: boolean;
   /** HAND-AUTHORED world placement — the map is a designed, fixed world
    *  ("The Shattered Reach"), identical every match. Players learn it. */
   layout: { x: number; z: number; rotation: number };
 }
 
 const ISLAND_ROSTER: readonly RosterEntry[] = [
-  { name: "Smuggler's Rest", style: 'tropical', biome: 'lush', seed: 0x5310a11, radius: 66, coastBias: -0.25, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, layout: { x: 40, z: 690, rotation: 2.7 } },
+  { name: "Smuggler's Rest", style: 'tropical', biome: 'lush', seed: 0x5310a11, radius: 66, coastBias: -0.25, whiteSand: true, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, layout: { x: 40, z: 690, rotation: 2.7 } },
   { name: 'Skull Cove', style: 'rocky', biome: 'bone', seed: 0x2b0be5c, radius: 52, coastBias: 0.05, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, forcedInlet: { width: [0.34, 0.46], depth: [0.3, 0.4] }, layout: { x: 700, z: -70, rotation: 4.4 } },
-  { name: 'The Crooked Atoll', style: 'archipelago', biome: 'palm_atoll', seed: 0x3c400a7, radius: 70, coastBias: -0.55, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: -588, z: 558, rotation: 2.4 } },
+  { name: 'The Crooked Atoll', style: 'archipelago', biome: 'palm_atoll', seed: 0x3c400a7, radius: 70, coastBias: -0.55, whiteSand: true, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: -588, z: 558, rotation: 2.4 } },
   { name: 'Dead Man Shoals', style: 'archipelago', biome: 'bone', seed: 0x4dead10, radius: 50, coastBias: -0.3, landmarks: ['shipwreck'], hasDock: false, hasTavern: false, layout: { x: 612, z: 592, rotation: 3.3 } },
-  { name: 'Rumrunner Key', style: 'tropical', biome: 'palm_atoll', seed: 0x5b0b0b0, radius: 42, coastBias: -0.6, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: 640, z: 310, rotation: 0.9 } },
+  { name: 'Rumrunner Key', style: 'tropical', biome: 'palm_atoll', seed: 0x5b0b0b0, radius: 42, coastBias: -0.6, whiteSand: true, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: 640, z: 310, rotation: 0.9 } },
   { name: "Crow's Perch", style: 'mountain', biome: 'highland', seed: 0x6c0ffee, radius: 84, coastBias: 0.45, landmarks: ['watchtower'], hasDock: true, hasTavern: false, layout: { x: -278, z: 290, rotation: 3.9 } },
   { name: "Mermaid's Folly", style: 'plateau', biome: 'lush', seed: 0x7f01111, radius: 62, coastBias: -0.1, landmarks: ['standing_stones'], hasDock: true, hasTavern: false, layout: { x: 372, z: 372, rotation: 1.2 } },
   { name: 'Castaway Reach', style: 'tropical', biome: 'lush', seed: 0x8beac42, radius: 88, coastBias: -0.35, landmarks: ['standing_stones', 'shipwreck'], hasDock: true, hasTavern: true, layout: { x: 420, z: -385, rotation: 5.6 } },
@@ -486,6 +488,7 @@ export class MapGenerator {
       biome: entry.biome,
       palette: BIOME_PALETTES[entry.biome],
       coastBias: entry.coastBias,
+      whiteSand: entry.whiteSand,
     };
   }
 
