@@ -796,12 +796,21 @@ export function getCrowNestLadderInteractionBounds(stats: { length: number }) {
   };
 }
 
-/** Shared sail ring for raising / reefing and angling canvas, kept clear of ladders, anchor, helm, and cannon rails. */
+/** Rail rope stations (SoT braces): the halyard is worked from the bulwarks
+ *  on EITHER side of the ship, where the rigging ropes come down — not from a
+ *  floating ring amidships. */
+export function getSailRopeStationLocals(stats: { length: number; mastCount: number; width?: number }): Array<{ x: number; z: number }> {
+  const halfW = (stats.width ?? 5) * 0.5;
+  const z = -stats.length * 0.24;
+  return [
+    { x: halfW - 0.55, z },
+    { x: -(halfW - 0.55), z },
+  ];
+}
+
+/** Legacy single-point accessor — resolves to the starboard rope station. */
 export function getSailStationLocal(stats: { length: number; mastCount: number; width?: number }): { x: number; z: number } {
-  return {
-    x: 0,
-    z: -stats.length * 0.24,
-  };
+  return getSailRopeStationLocals(stats)[0];
 }
 
 /** Back-compat: old hoist callers now resolve to the shared sail ring. */

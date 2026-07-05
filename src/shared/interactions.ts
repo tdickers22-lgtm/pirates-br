@@ -1,6 +1,7 @@
 import { SHIP_STATS } from './constants/index.js';
 import type { Player, Ship, Vec3 } from './types/index.js';
-import { getCrowNestLadderInteractionBounds, getSailStationLocal } from './utils/index.js';
+import {
+  getSailRopeStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal } from './utils/index.js';
 
 type ShipStats = (typeof SHIP_STATS)[keyof typeof SHIP_STATS];
 type ShipLocalPoint = { x: number; z: number };
@@ -84,8 +85,9 @@ export function isNearSailStation(player: PlayerLike, ship: ShipLike): boolean {
   const stats = SHIP_STATS[ship.type];
   if ((player.position as Vec3).y < ship.position.y + stats.height - 0.35) return false;
   const local = toShipLocalPoint(player.position, ship);
-  const station = getSailControlLocal(stats);
-  return Math.abs(local.x - station.x) < 1.15 && Math.abs(local.z - station.z) < 1.35;
+  // Both rail rope stations work the halyard (port and starboard bulwarks).
+  return getSailRopeStationLocals(stats).some((station) =>
+    Math.abs(local.x - station.x) < 1.3 && Math.abs(local.z - station.z) < 1.6);
 }
 
 export function isNearAnchor(player: PlayerLike, ship: ShipLike): boolean {
