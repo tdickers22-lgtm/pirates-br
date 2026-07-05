@@ -652,8 +652,11 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const beachY = lerp(naturalY, lerp(0.38, -3.0, beachUnder), beachEase);
   // Rocky: mid shelf holds a little longer, then steps down.
   const rockyY = lerp(naturalY, -3.4, smoothstep(0.96, 1.14, distRatio));
-  // Cliff: tall plinth holds to the footprint edge, then plunges — a wall.
-  const cliffY = lerp(naturalY, -5.5, smoothstep(1.005, 1.12, distRatio));
+  // Cliff: tall plinth holds to the footprint edge, then plunges as a SHEER wall
+  // right at the rim (drop bottoms out by ~1.05 instead of a wide 1.12 ramp), so
+  // stepping or jumping off the edge drops you cleanly into the sea rather than
+  // landing back on a sloped shelf.
+  const cliffY = lerp(naturalY, -5.5, smoothstep(1.0, 1.05, distRatio));
   let surfaceY = coast.beach * beachY + coast.rocky * rockyY + coast.cliff * cliffY;
 
   // ── Structure stamps: flatten discs so buildings sit on level ground ──
