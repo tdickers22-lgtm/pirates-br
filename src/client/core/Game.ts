@@ -1654,6 +1654,7 @@ export class Game {
   private debugFrameAccum = 0;
   private debugFps = 0;
   private debugWorstFrameMs = 0;
+  private debugRawFrameMs = 16.7;
   private debugUpdateTimer = 0;
   private hudTimer = 0;
   private minimapTimer = 0;
@@ -3565,22 +3566,29 @@ export class Game {
         new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, side: THREE.DoubleSide }),
         fernCount,
       );
+      // Cluster ferns into leafy clumps (2-3 fronds per seed) instead of
+      // isolated cards, so they read as bushes/groundcover not scattered
+      // cardboard (patrol-3).
       let fernsPlaced = 0;
-      for (let i = 0; i < fernCount * 3 && fernsPlaced < fernCount; i++) {
-        const angle = rng(i * 41 + 9) * Math.PI * 2;
-        const dRatio = 0.05 + rng(i * 43 + 3) * 0.6;
+      for (let seed = 0; seed < fernCount && fernsPlaced < fernCount; seed++) {
+        const angle = rng(seed * 41 + 9) * Math.PI * 2;
+        const dRatio = 0.05 + rng(seed * 43 + 3) * 0.6;
         const sample = surfacePoint(dRatio, angle, 0);
         if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + peakEst * 0.85) continue;
-        gP.set(sample.x, sample.y - 0.09, sample.z);
-        gE.set((rng(i * 47) - 0.5) * 0.24, rng(i * 53) * Math.PI, (rng(i * 59) - 0.5) * 0.24);
-        gQ.setFromEuler(gE);
-        const sc = 0.6 + rng(i * 61) * 0.8;
-        gS.set(sc, sc, sc);
-        gM.compose(gP, gQ, gS);
-        ferns.setMatrixAt(fernsPlaced, gM);
-        gColor.copy(paletteFoliage).multiplyScalar(0.95 + rng(i * 67) * 0.55);
-        ferns.setColorAt(fernsPlaced, gColor);
-        fernsPlaced += 1;
+        const clump = 2 + Math.floor(rng(seed * 71) * 2);
+        for (let c = 0; c < clump && fernsPlaced < fernCount; c++) {
+          const i = seed * 7 + c;
+          gP.set(sample.x + (rng(i * 47) - 0.5) * 0.7, sample.y - 0.09, sample.z + (rng(i * 59) - 0.5) * 0.7);
+          gE.set((rng(i * 47) - 0.5) * 0.24, rng(i * 53) * Math.PI * 2, (rng(i * 59) - 0.5) * 0.24);
+          gQ.setFromEuler(gE);
+          const sc = 0.55 + rng(i * 61) * 0.85;
+          gS.set(sc, sc, sc);
+          gM.compose(gP, gQ, gS);
+          ferns.setMatrixAt(fernsPlaced, gM);
+          gColor.copy(paletteFoliage).multiplyScalar(0.95 + rng(i * 67) * 0.55);
+          ferns.setColorAt(fernsPlaced, gColor);
+          fernsPlaced += 1;
+        }
       }
       ferns.count = fernsPlaced;
       ferns.instanceMatrix.needsUpdate = true;
@@ -6239,9 +6247,13 @@ export class Game {
   }
 
   private frame(now: number) {
-    const dt = Math.min(0.05, (now - this.lastFrameTime) / 1000);
+    const rawDtMs = now - this.lastFrameTime;
+    const dt = Math.min(0.05, rawDtMs / 1000);
     this.lastFrameTime = now;
     this.frameDt = dt;
+    // True frame time for the debug overlay (physics dt above is clamped to
+    // 50ms for sim stability, which was pinning 'worst' at exactly 50.0).
+    this.debugRawFrameMs = rawDtMs;
     this.minimapTimer -= dt;
     this.inputSendTimer -= dt;
     this.inputHeartbeatTimer -= dt;
@@ -6385,7 +6397,7 @@ export class Game {
 
     this.debugFrameCounter++;
     this.debugFrameAccum += dt;
-    this.debugWorstFrameMs = Math.max(this.debugWorstFrameMs, dt * 1000);
+    this.debugWorstFrameMs = Math.max(this.debugWorstFrameMs, this.debugRawFrameMs);
     this.debugUpdateTimer -= dt;
     if (this.debugUpdateTimer > 0) return;
 
