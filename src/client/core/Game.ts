@@ -10575,7 +10575,7 @@ export class Game {
           player,
           sailPoint,
           4.2,
-          0.18,
+          0.08,
           sailPrompt,
           canvasTorn ? 'Needs planks aboard · crewmates on the rope haul faster' : 'Crewmates on the rope haul faster',
           'sails',

@@ -189,8 +189,14 @@ export class InputManager {
 
   getYaw()   { return this.yaw; }
   getPitch() { return this.pitch; }
+  /** Headless-QA hook: patrols can't acquire pointer lock, so ?forceinput
+   *  treats the pointer as locked for aim/fire gating. */
+  private readonly debugAssumeLocked = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('forceinput');
+  private get lockedOrForced() { return this.locked || this.debugAssumeLocked; }
+
   isAiming() { return this.isAimHeld(); }
-  isFiring() { return !this.vHeld && this.locked && this.mouseButtons.has(0); }
+  isFiring() { return !this.vHeld && this.lockedOrForced && this.mouseButtons.has(0); }
   isLocked() { return this.locked; }
   isKegPreviewActive() { return this.kegHeld || Date.now() < this.kegPreviewUntil; }
   isInteractHeld() { return this.keys.has('KeyX'); }
@@ -278,7 +284,7 @@ export class InputManager {
   }
 
   private isAimHeld() {
-    return this.locked && (
+    return this.lockedOrForced && (
       this.mouseButtons.has(2)
       || this.keys.has('ShiftLeft')
       || this.keys.has('ShiftRight')

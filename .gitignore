@@ -27,3 +27,5 @@ build/
 /pirates-br/
 .claude/
 scripts/_probe*.tmp.mjs
+scripts/_patrol_*.tmp.mjs
+data/bugsnaps/
