@@ -3583,7 +3583,10 @@ export class Game {
           // Veins run across the whole upper cone — a volcano's flanks are ALL
           // slope, so don't suppress by steepness; just keep them off the beach.
           const heightGate = THREE.MathUtils.smoothstep(heightNorm, 0.14, 0.66);
-          magma = vein * heightGate * (1 - shoreMask);
+          // Just the very tip glows molten (the caldera itself), painted into the
+          // terrain so the crater reads as part of the peak — not a floating disc.
+          const summitGlow = THREE.MathUtils.smoothstep(heightNorm, 0.9, 0.995) * 0.8 * (1 - shoreMask);
+          magma = Math.min(1, vein * heightGate * (1 - shoreMask) + summitGlow);
           // Scorch the high ground to ashen charcoal so the veins glow against it.
           const scorch = THREE.MathUtils.smoothstep(heightNorm, 0.16, 0.7) * (1 - shoreMask);
           terrainColor.lerp(ashCharcoal, scorch * 0.72);
@@ -4700,29 +4703,15 @@ export class Game {
       const islandCenter = new THREE.Vector3(island.position.x, 0, island.position.z);
       const cullRadius = islandMaxR + 440;
 
-      // Caldera lava pool at the summit crater (self-lit; flickers with pulse).
+      // Caldera / peak position — anchors the smoke plume + ember source. The
+      // molten glow of the crater is painted into the summit TERRAIN (aMagma
+      // summitGlow above), so there's no flat floating lava disc.
       const peakAngle = island.profile.primaryHillAngle;
       const peakOffset = island.profile.primaryHillOffset;
       const cpx = Math.cos(peakAngle) * peakOffset * footprintX;
       const cpz = Math.sin(peakAngle) * peakOffset * footprintZ;
       const peakY = getIslandSurfaceY(island, cpx + island.position.x, cpz + island.position.z);
       const lavaR = Math.max(2.6, r * 0.055);
-      const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff5a1e, transparent: true, opacity: 0.95, side: THREE.DoubleSide });
-      const lavaPool = new THREE.Mesh(new THREE.CircleGeometry(lavaR, 26), lavaMat);
-      lavaPool.rotation.x = -Math.PI * 0.5;
-      lavaPool.position.set(cpx, peakY - 0.5, cpz);
-      group.add(lavaPool);
-      const crustMat = new THREE.MeshStandardMaterial({ color: 0x241c17, roughness: 1, side: THREE.DoubleSide, emissive: 0x7a2606, emissiveIntensity: 0.6 });
-      const crust = new THREE.Mesh(new THREE.RingGeometry(lavaR * 0.98, lavaR * 1.55, 26), crustMat);
-      crust.rotation.x = -Math.PI * 0.5;
-      crust.position.set(cpx, peakY - 0.4, cpz);
-      group.add(crust);
-      this.volcanicFx.push((_dt, _wt, cam) => {
-        const vis = cam.distanceTo(islandCenter) <= cullRadius;
-        lavaPool.visible = vis;
-        crust.visible = vis;
-        if (vis) lavaMat.opacity = 0.82 + 0.16 * pulse.value;
-      });
 
       // Ashfall — grey flakes settling over the whole island (drift + wrap).
       const baseAshY = Math.max(6, peakY * 0.4);
