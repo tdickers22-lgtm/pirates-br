@@ -1,11 +1,12 @@
 import type { Ship, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
-import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, SEA_ROCKS, WORLD, FLOODING } from '../../shared/constants/index.js';
+import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, SEA_ROCKS, WORLD, FLOODING, GEYSER } from '../../shared/constants/index.js';
 import { toShipLocalPoint, toShipWorldPoint } from '../../shared/interactions.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
   gerstnerHeight,
   getStormWaveIntensity,
+  geyserEruptionLevel,
   WAVE_PARAMS,
   angleWrap,
   clamp,
@@ -62,8 +63,16 @@ const LOCO = {
   WADE_MIN_DEPTH: 0.2,
   WADE_SPEED_SCALE: 0.55,
   /** Rise/run above which terrain is a cliff face — unwalkable (block/slide);
-   *  jumping is still permitted (this gate only fires for grounded walkers). */
-  SLOPE_MAX: 1.6,
+   *  jumping is still permitted (this gate only fires for grounded walkers).
+   *  ~1.15 ≈ 49°: beaches and hill flanks (typically <40°) stay walkable, but
+   *  sheer volcanic spires / cliff plinths genuinely wall a pirate out. */
+  SLOPE_MAX: 1.15,
+  /** The macro slope ahead is sampled over this many metres along the direction
+   *  of travel, rather than from the raw ~0.08m per-tick step. A stable baseline
+   *  reads the true face steepness instead of aliasing into terrace micro-relief
+   *  (which would stutter-block a walkable terraced hillside). Kept modest so the
+   *  block engages near the face, not as an invisible wall a metre short of it. */
+  SLOPE_PROBE: 1.05,
   /** A single-tick footing step longer than this is treated as a warp/teleport
    *  and never slope-blocked (avoids reverting a respawn/warp to a stale spot). */
   SLOPE_MAX_STEP: 1.0,
@@ -285,6 +294,9 @@ export class PhysicsSystem {
    *  point for steep-slope blocking. Keyed by id so it governs bot body-walk
    *  (BotSystem moves position directly, not velocity) exactly like human input. */
   private playerPrevXZ = new Map<string, { x: number; z: number }>();
+  /** Seconds of remaining geyser-launch immunity per player, so one eruption
+   *  launches a pirate once instead of trampolining them to death. */
+  private playerGeyserCooldown = new Map<string, number>();
 
   update(
     dt: number,
@@ -512,6 +524,8 @@ export class PhysicsSystem {
       if (player.shipBoundaryGraceTimer > 0) {
         player.shipBoundaryGraceTimer = Math.max(0, player.shipBoundaryGraceTimer - dt);
       }
+      const geyserCooldown = this.playerGeyserCooldown.get(player.id) ?? 0;
+      if (geyserCooldown > 0) this.playerGeyserCooldown.set(player.id, Math.max(0, geyserCooldown - dt));
       if (player.state === 'eliminated' || player.state === 'respawning') continue;
 
       // Downed pirates keep full physics (gravity, deck carry, water) but the
@@ -595,6 +609,25 @@ export class PhysicsSystem {
           onDock ? onDock.position.y + 0.14 : -Infinity,
         );
         if (groundY > -Infinity && player.position.y <= groundY) {
+          // A geyser arc (flagged by the live launch cooldown) lands as a real
+          // fall — hard ground hurts. Cannon self-launches never set the cooldown,
+          // so they keep their damage-free landing.
+          const geyserFall = (this.playerGeyserCooldown.get(player.id) ?? 0) > 0;
+          const impactSpeed = -player.velocity.y;
+          if (
+            geyserFall
+            && impactSpeed > LOCO.FALL_SAFE_SPEED
+            && player.respawnProtectionTimer <= 0
+          ) {
+            const dmg = Math.min(
+              LOCO.FALL_DAMAGE_MAX,
+              (impactSpeed - LOCO.FALL_SAFE_SPEED) * LOCO.FALL_DAMAGE_PER_SPEED,
+            );
+            player.lastDamagedById = null;
+            player.lastDamagedAt = null;
+            player.lastDamageWasHeadshot = false;
+            player.health -= dmg;
+          }
           player.position.y = groundY;
           player.velocity.y = 0;
           player.cannonFlightTimer = 0;
@@ -827,6 +860,59 @@ export class PhysicsSystem {
             player.position.y = ceilingY - PLAYER.HEIGHT;
             if (player.velocity.y > 0) player.velocity.y = 0;
           }
+          // ── Geysers: an erupting vent launches a grounded pirate skyward ──
+          // Launched as a true ballistic arc (the cannon-flight path: it
+          // integrates x/z AND is exempt from Match's idle velocity-zeroing), so
+          // the outward kick genuinely carries the pirate up AND OFF the vent —
+          // otherwise a stationary/AFK pirate would rise straight up, drop back
+          // on the same vent, and get relaunched to death across eruptions. The
+          // one-launch cooldown then gates re-fire; landing on rock deals fall
+          // damage below (geyser arcs are flagged via the live cooldown). Downed
+          // crawlers are spared.
+          if (
+            !downed
+            && onIsland?.geysers
+            && onIsland.geysers.length > 0
+            && (this.playerGeyserCooldown.get(player.id) ?? 0) <= 0
+          ) {
+            for (const g of onIsland.geysers) {
+              if (player.position.y > g.y + GEYSER.TRIGGER_MAX_HEIGHT) continue;
+              const dxg = player.position.x - g.x;
+              const dzg = player.position.z - g.z;
+              if (dxg * dxg + dzg * dzg > g.radius * g.radius) continue;
+              const level = geyserEruptionLevel(g, t);
+              if (level < GEYSER.LAUNCH_THRESHOLD) continue;
+              // Full-power launch for the whole eruption: the one-launch cooldown
+              // fires on the rising edge, so scaling by `level` here would only
+              // ever land the weak threshold-crossing throw. The plume visual
+              // carries the ramp; the impulse is the vent's rated power.
+              const launch = g.power;
+              // Escape direction: outward from the vent if off-centre, else down
+              // the fall line (away from the island centre) so a dead-centre
+              // pirate is still thrown clear rather than straight back up.
+              let dirX = dxg;
+              let dirZ = dzg;
+              let dLen = Math.hypot(dirX, dirZ);
+              if (dLen < 0.4) {
+                dirX = g.x - onIsland.position.x;
+                dirZ = g.z - onIsland.position.z;
+                dLen = Math.hypot(dirX, dirZ) || 1;
+              }
+              dirX /= dLen;
+              dirZ /= dLen;
+              player.velocity.x = dirX * launch * GEYSER.OUTWARD_BOOST;
+              player.velocity.z = dirZ * launch * GEYSER.OUTWARD_BOOST;
+              player.velocity.y = launch;
+              player.position.y = g.y + GEYSER.TRIGGER_MAX_HEIGHT + 0.05;
+              player.cannonBallistic = true;
+              player.cannonFlightTimer = SHIP.CANNON_PLAYER_FLIGHT_MAX;
+              player.swimTimer = 0;
+              // One launch per eruption — the cooldown outlasts the whole arc and
+              // also flags the ballistic landing below as a geyser fall.
+              this.playerGeyserCooldown.set(player.id, GEYSER.LAUNCH_COOLDOWN);
+              break;
+            }
+          }
         } else {
           // If we ever end up spatially inside dock geometry, snap back to solid ground.
           // Do not rescue against the wider island footprint here: just past a cliff
@@ -1016,10 +1102,13 @@ export class PhysicsSystem {
     }
 
     // Forget footing for players who left the match so the map can't grow unbounded.
-    if (this.playerPrevXZ.size > players.length) {
+    if (this.playerPrevXZ.size > players.length || this.playerGeyserCooldown.size > players.length) {
       const live = new Set(players.map((p) => p.id));
       for (const id of this.playerPrevXZ.keys()) {
         if (!live.has(id)) this.playerPrevXZ.delete(id);
+      }
+      for (const id of this.playerGeyserCooldown.keys()) {
+        if (!live.has(id)) this.playerGeyserCooldown.delete(id);
       }
     }
   }
@@ -1467,13 +1556,17 @@ export class PhysicsSystem {
   }
 
   /**
-   * Steep terrain is unwalkable: if a grounded walker's step climbs a rise/run
-   * steeper than LOCO.SLOPE_MAX, revert this tick's footing (block). Compares
-   * the natural surface at last tick's footing vs. the new position, so it uses
-   * the actual displacement — this is what makes bot body-walk (which moves
-   * position directly, not velocity) obey the same limit humans do. Jumping is
-   * untouched: the gate only fires while the player is on the ground and not
-   * being knocked back, and never reverts a warp-sized step.
+   * Steep terrain is unwalkable: if a grounded walker is climbing INTO a face
+   * steeper than LOCO.SLOPE_MAX, revert this tick's footing (block) but keep any
+   * sideways momentum so the pirate slides along the cliff base instead of
+   * sticking. The steepness is the MACRO terrain slope sampled LOCO.SLOPE_PROBE
+   * metres ahead along the direction of travel — a stable baseline that reads
+   * the true face angle rather than aliasing into 2.4-6m terrace micro-relief
+   * (a raw per-tick 0.08m sample would stutter-block walkable terraced hills).
+   * Because it keys off the actual footing displacement, bot body-walk (which
+   * moves position directly, not velocity) obeys the same limit humans do.
+   * Jumping is untouched: the gate only fires while grounded, not rising, and
+   * not being knocked back, and never reverts a warp-sized step.
    */
   private resolveSlopeBlock(player: Player, island: Island | null) {
     if (!island || player.state !== 'alive') return;
@@ -1489,12 +1582,22 @@ export class PhysicsSystem {
     const grounded = player.position.y <= gTo + 0.4;
     const knocked = Math.hypot(player.knockbackVelocity.x, player.knockbackVelocity.z) > 1;
     if (!grounded || knocked || player.velocity.y > 0.2) return;
-    const gFrom = getIslandSurfaceY(island, prev.x, prev.z);
-    if (gTo - gFrom > LOCO.SLOPE_MAX * run) {
+    // Macro slope of the terrain immediately ahead in the travel direction.
+    const dirX = stepX / run;
+    const dirZ = stepZ / run;
+    const probe = LOCO.SLOPE_PROBE;
+    const gAhead = getIslandSurfaceY(island, player.position.x + dirX * probe, player.position.z + dirZ * probe);
+    const slopeAhead = (gAhead - gTo) / probe;
+    if (slopeAhead > LOCO.SLOPE_MAX) {
       player.position.x = prev.x;
       player.position.z = prev.z;
-      player.velocity.x = 0;
-      player.velocity.z = 0;
+      // Cancel only the into-slope component of velocity so lateral travel along
+      // the cliff base still works (find the walkable saddle, don't get bricked).
+      const into = player.velocity.x * dirX + player.velocity.z * dirZ;
+      if (into > 0) {
+        player.velocity.x -= into * dirX;
+        player.velocity.z -= into * dirZ;
+      }
     }
   }
 

@@ -210,6 +210,28 @@ export const FLOODING = {
   RUDDER_PENALTY: 0.40,
 } as const;
 
+// ── Geysers ──────────────────────────────────────────────────
+// Volcanic vents that erupt on a shared deterministic cycle and launch any
+// grounded pirate (players + bots) skyward. Landing is owned by the normal
+// fall-damage path, so a big launch onto hard rock genuinely hurts — aim for a
+// water landing. Per-vent power/period/phase live on the IslandGeyser record.
+export const GEYSER = {
+  /** Eruption level (0..1) at/above which a standing pirate is launched. */
+  LAUNCH_THRESHOLD: 0.5,
+  /** A pirate more than this far above the vent rim is already airborne — the
+   *  launch won't re-fire on them until they land back on the vent. */
+  TRIGGER_MAX_HEIGHT: 1.6,
+  /** Outward horizontal kick as a fraction of the vertical launch — enough that
+   *  the ballistic arc genuinely carries a rider clear of the vent footprint
+   *  (so an idle pirate can't be relaunched onto the same vent every eruption)
+   *  while still usually landing back on the island. */
+  OUTWARD_BOOST: 0.24,
+  /** Seconds a pirate is immune to re-launch after being thrown — long enough
+   *  to cover a full up-and-down arc so one eruption launches them ONCE (no
+   *  trampoline death-stack of fall-damage hits). */
+  LAUNCH_COOLDOWN: 3.0,
+} as const;
+
 export const SHARK = {
   MAX_WORLD: 4,
   SPAWN_CHANCE_PER_TICK: 0.00055,
