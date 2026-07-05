@@ -2193,17 +2193,30 @@ export class ShipRenderer {
       trimPivot.add(sail);
       sails.push(sail);
 
+      // Furled canvas: a fat lashed BUNDLE gathered against the yard, not a
+      // thin rod — an anchored ship must read as "sails stowed", not
+      // dismasted. Slight vertical sag + gasket lashings sell the bundle.
+      const furledGroup = new THREE.Group();
       const furled = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.08, 0.1, yardW * 0.86, 9),
+        new THREE.CylinderGeometry(0.26, 0.3, yardW * 0.86, 10),
         sailMat.clone(),
       );
       furled.rotation.z = Math.PI * 0.5;
-      furled.position.set(0, -mastH * 0.03, -0.03);
-      furled.userData.phaseSeed = mastZ;
-      furled.scale.y = 1;
       furled.castShadow = true;
-      trimPivot.add(furled);
-      furledSails.push(furled);
+      furledGroup.add(furled);
+      // Rope gaskets lashing the bundle to the yard at intervals
+      const gasketMat = new THREE.MeshStandardMaterial({ color: 0x6b5836, roughness: 1 });
+      for (let g = -2; g <= 2; g++) {
+        const gasket = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.028, 5, 10), gasketMat);
+        gasket.rotation.y = Math.PI * 0.5;
+        gasket.position.x = g * yardW * 0.17;
+        furledGroup.add(gasket);
+      }
+      furledGroup.position.set(0, -mastH * 0.045, -0.04);
+      furledGroup.userData.phaseSeed = mastZ;
+      furledGroup.scale.y = 1;
+      trimPivot.add(furledGroup);
+      furledSails.push(furledGroup as unknown as THREE.Mesh);
     }
 
     // Crow's nest ladder — vertical rails hug the main mast pole (x=0), not offset toward the rail edge

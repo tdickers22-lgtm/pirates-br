@@ -4090,6 +4090,18 @@ export class Game {
           caveGroup.add(treasure);
         }
 
+        // Cave interiors are boxy meshes carved into a steep hillside — their
+        // dark ceiling/wall slabs poke out through the terrain shell and read
+        // as black slabs floating on the mountain from a distance. Gate their
+        // visibility to camera proximity (world entrance pos cached on the
+        // group): you only see the hollow when you're near enough to be about
+        // to enter it. Also a perf win (dozens of hidden slabs at range).
+        caveGroup.userData.caveEntranceWorld = {
+          x: cave.position.x,
+          y: cave.position.y,
+          z: cave.position.z,
+        };
+        (group.userData.caveGroups ??= []).push(caveGroup);
         group.add(caveGroup);
       }
     }
@@ -6446,6 +6458,17 @@ export class Game {
         for (const layerName of ['island-grass', 'island-ferns', 'island-shells'] as const) {
           const layer = detailRoot.getObjectByName(layerName);
           if (layer) layer.visible = showDetail && edgeDist < (layerName === 'island-shells' ? 200 : 300);
+        }
+        // Cave interiors: only visible when the camera is within ~55m of the
+        // entrance, so their dark boxy slabs never show poking through the
+        // hillside from across the map.
+        const caveGroups = group.userData.caveGroups as THREE.Object3D[] | undefined;
+        if (caveGroups) {
+          for (const caveGroup of caveGroups) {
+            const e = caveGroup.userData.caveEntranceWorld as { x: number; y: number; z: number };
+            const cd = this.distance2D(cam.x, cam.z, e.x, e.z);
+            caveGroup.visible = showDetail && cd < 55;
+          }
         }
       }
 
