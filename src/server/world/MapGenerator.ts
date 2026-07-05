@@ -240,18 +240,42 @@ export class MapGenerator {
       }
       return best;
     };
-    const a = localPeak(profile.primaryHillAngle, profile.primaryHillOffset);
-    const b = localPeak(profile.secondaryHillAngle, profile.secondaryHillOffset);
-    const span = Math.hypot(b.x - a.x, b.z - a.z);
+    let a = localPeak(profile.primaryHillAngle, profile.primaryHillOffset);
+    let b = localPeak(profile.secondaryHillAngle, profile.secondaryHillOffset);
+    // NEAR-LEVEL bridges (SoT): both ends anchor at the LOWER peak's height.
+    // From the low top, cross the dip to wherever the taller flank rises back
+    // to that height — the deck meets the spire's cliff face at altitude
+    // instead of ramping to its summit.
+    if (a.y < b.y) { const swap = a; a = b; b = swap; }
+    let anchor: { x: number; z: number; y: number } | null = null;
+    for (let u = 0.45; u <= 0.96; u += 0.017) {
+      const nx = b.x + (a.x - b.x) * u;
+      const nz = b.z + (a.z - b.z) * u;
+      const ny = getIslandSurfaceY(island, nx, nz);
+      if (ny >= b.y + 0.3) { anchor = { x: nx, z: nz, y: ny }; break; }
+    }
+    if (!anchor) return [];
+    const span = Math.hypot(b.x - anchor.x, b.z - anchor.z);
     const seaBase = 5.15 + island.radius * 0.0085;
     if (span < 7 || span > island.radius * 1.15) return [];
-    if (a.y - seaBase < 3 || b.y - seaBase < 3) return [];
-    // The bridge must clear the saddle between the peaks — if the terrain
-    // midway rises to (or above) the straight deck line, a bridge is silly.
-    const midY = (a.y + b.y) * 0.5;
-    const saddleY = getIslandSurfaceY(island, (a.x + b.x) * 0.5, (a.z + b.z) * 0.5);
-    if (saddleY > midY - 1.6) return [];
-    return [{ ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z, width: 1.9 }];
+    if (b.y - seaBase < 3) return [];
+    if (Math.abs(anchor.y - b.y) / span > 0.18) return []; // near-level or nothing
+    // A bridge needs a real gap under it: some point of the crossing must
+    // drop well below the deck, and terrain must never poke through the deck.
+    let deepestDrop = 0;
+    let pokes = false;
+    // Middle window only: the deck naturally grazes terrain at both ends
+    // (that's what an anchor is) — the GAP must exist mid-crossing.
+    for (let f = 0.3; f <= 0.7; f += 0.08) {
+      const sx = b.x + (anchor.x - b.x) * f;
+      const sz = b.z + (anchor.z - b.z) * f;
+      const deckY = b.y + (anchor.y - b.y) * f;
+      const ground = getIslandSurfaceY(island, sx, sz);
+      deepestDrop = Math.max(deepestDrop, deckY - ground);
+      if (ground > deckY - 0.22) pokes = true;
+    }
+    if (pokes || deepestDrop < Math.min(2.2, span * 0.09)) return [];
+    return [{ ax: anchor.x, ay: anchor.y, az: anchor.z, bx: b.x, by: b.y, bz: b.z, width: 1.9 }];
   }
 
   private buildProfile(entry: RosterEntry, rotation: number): IslandProfile {
