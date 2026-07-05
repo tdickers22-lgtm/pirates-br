@@ -806,7 +806,9 @@ export function getMainMastLocalZ(stats: { length: number }): number {
 export function getCrowNestStandingY(stats: { height: number; mastCount: number }): number {
   const H = stats.height;
   const mastH = H * (stats.mastCount === 1 ? 3.6 : 3.1);
-  return H + mastH * 0.72 + 0.12;
+  // Nest rides just ABOVE the main sail's yard (sail top settles at ~0.82·mastH),
+  // so the canvas hangs below it instead of clipping through the basket.
+  return H + mastH * 0.86 + 0.12;
 }
 
 /** Climb prompt zone for the crow's-nest ladder (main mast is at x=0 in ship-local space). */
