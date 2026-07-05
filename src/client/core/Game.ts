@@ -6792,11 +6792,12 @@ export class Game {
     // (before hasPendingActions so the resulting input is force-sent this frame).
     this.updateWheelRelease();
 
-    // Right-click PUTS AWAY the equipped tool — lowers a raised spyglass, or
-    // stows the bucket/compass/shovel. Re-selecting its wheel slot toggles it off.
+    // Right-click PUTS AWAY a held tool (bucket/compass/shovel) — re-selecting
+    // its wheel slot toggles it off. The SPYGLASS is excluded: for it, aim
+    // (right-click) RAISES the scope to zoom, so it must not stow on right-click.
     const equippedTool = this.getLocalPlayer()?.equippedTool ?? null;
     const aimDown = this.input.isAiming();
-    if (equippedTool && aimDown && !this.scopeAimWasDown) {
+    if (equippedTool && equippedTool !== 'spyglass' && aimDown && !this.scopeAimWasDown) {
       this.input.queueWheelSlot(this.toolWheelSlot(equippedTool));
     }
     this.scopeAimWasDown = aimDown;
@@ -8565,11 +8566,11 @@ export class Game {
 
     let desired: THREE.Vector3;
     let lookTarget: THREE.Vector3;
-    // Spyglass: 6° (~12x) beats the sniper's 14° by design. Selecting the SCOPE
-    // tool from the supply wheel RAISES it (stays up until you re-select the
-    // scope to stow it); holding P is a momentary shortcut. Not while manning a
-    // cannon or downed.
-    const spyglassActive = (this.input.isSpyglassHeld() || player.equippedTool === 'spyglass')
+    // Spyglass: 6° (~12x) beats the sniper's 14° by design. With the SCOPE tool
+    // equipped it sits in your hand; AIM (right-click) raises it to the eye and
+    // zooms, release lowers it back to your hand — it stays equipped until you
+    // draw a weapon or re-select it. Holding P is a momentary shortcut.
+    const spyglassActive = (this.input.isSpyglassHeld() || (player.equippedTool === 'spyglass' && aiming))
       && !player.atCannon
       && player.state !== 'downed'
       && player.state !== 'respawning'
@@ -8958,7 +8959,7 @@ export class Game {
     this.renderTreasureInventoryChart(player, mappedIsland, closestHoarder);
     this.ui.pocketWheelStats.textContent = this.input.isSupplyWheelOpen()
       ? (player.equippedTool
-          ? `Equipped: ${player.equippedTool.toUpperCase()} · ${player.equippedTool === 'spyglass' ? 'right-click or draw a weapon to lower' : 're-select to stow'} · tools = scope/compass/bucket/shovel · fruit heals · planks → ship stores`
+          ? `Equipped: ${player.equippedTool.toUpperCase()} · ${player.equippedTool === 'spyglass' ? 'aim (right-click) to zoom · draw a weapon to stow' : 'right-click or re-select to stow'} · tools = scope/compass/bucket/shovel · fruit heals · planks → ship stores`
           : 'Tools: scope · compass · bucket (bail) · shovel — select to equip · fruit heals · planks → ship stores')
       : '';
     this.updateSupplyWheelCounts(player);
