@@ -1626,6 +1626,16 @@ export class Game {
   /** ?stormdemo — client-visual storm preview (raging seas, rain, tint) without
    *  waiting for real storm phases. Screenshot/dev aid; server sim unaffected. */
   private readonly debugStormDemo = new URLSearchParams(window.location.search).has('stormdemo');
+  /** F8 = one-keypress bug report: next frame is captured (canvas + state)
+   *  and POSTed to /bugsnap on the game server → data/bugsnaps/. */
+  private bugSnapRequested = false;
+  private bugSnapListenerBound = false;
+  private readonly bugSnapListener = (event: KeyboardEvent) => {
+    if (event.code === 'F8') {
+      event.preventDefault();
+      this.bugSnapRequested = true;
+    }
+  };
   private debugPerfPanel: HTMLDivElement | null = null;
   private debugFrameCounter = 0;
   private debugFrameAccum = 0;
@@ -6243,12 +6253,49 @@ export class Game {
     }
 
     this.updateStationMarkers();
+    if (!this.bugSnapListenerBound) {
+      this.bugSnapListenerBound = true;
+      window.addEventListener('keydown', this.bugSnapListener);
+    }
     this.updateMermaid(now);
     // Stream one queued island build per frame (join used to build all 10
     // synchronously and freeze the tab for seconds).
     this.drainIslandBuildQueue(1);
     this.renderer.updatePerformance(dt);
     this.renderer.render();
+    if (this.bugSnapRequested) {
+      this.bugSnapRequested = false;
+      try {
+        const image = this.renderer.renderer.domElement.toDataURL('image/png');
+        const player = this.getLocalPlayer();
+        const ship = player?.onShipId ? this.shipsById.get(player.onShipId) : null;
+        const meta = {
+          at: new Date().toISOString(),
+          position: player?.position ?? null,
+          state: player?.state ?? null,
+          onShipId: player?.onShipId ?? null,
+          shipType: ship?.type ?? null,
+          nearestIsland: (() => {
+            let best: { id: string; d: number } | null = null;
+            for (const island of this.state?.islands ?? []) {
+              const d = this.distance2D(player?.position.x ?? 0, player?.position.z ?? 0, island.position.x, island.position.z);
+              if (!best || d < best.d) best = { id: island.id, d: Math.round(d) };
+            }
+            return best;
+          })(),
+          fps: Math.round(this.debugFps),
+          note: 'F8 bug snap',
+        };
+        void fetch('/bugsnap', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ image, meta }),
+        }).then(() => this.pushFeed('Bug snap saved — thanks, captain!', '#7ce38b'))
+          .catch(() => this.pushFeed('Bug snap failed to save', '#ff8a7a'));
+      } catch {
+        this.pushFeed('Bug snap failed to capture', '#ff8a7a');
+      }
+    }
     this.updatePointerLockHint();
     this.updateDebugPerfPanel(dt);
 

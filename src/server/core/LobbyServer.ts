@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -630,6 +630,37 @@ export class LobbyServer {
         matches: this.matches.size,
         queue: this.queue.length,
       }));
+      return;
+    }
+
+    if (rawPath === '/bugsnap' && req.method === 'POST') {
+      // One-keypress bug reports (F8 in the client): { image: dataURL, meta }.
+      // Saved under data/bugsnaps/ for the next polish pass to read.
+      const chunks: Buffer[] = [];
+      let size = 0;
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > 12 * 1024 * 1024) { req.destroy(); return; }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { image?: string; meta?: unknown };
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const dir = join(PROJECT_ROOT, 'data/bugsnaps');
+          mkdirSync(dir, { recursive: true });
+          if (typeof body.image === 'string' && body.image.startsWith('data:image/png;base64,')) {
+            writeFileSync(join(dir, `${stamp}.png`), Buffer.from(body.image.slice('data:image/png;base64,'.length), 'base64'));
+          }
+          writeFileSync(join(dir, `${stamp}.json`), JSON.stringify(body.meta ?? {}, null, 2));
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"ok":true}');
+          console.log(`[BugSnap] saved ${stamp}`);
+        } catch {
+          res.writeHead(400);
+          res.end('{"ok":false}');
+        }
+      });
       return;
     }
 
