@@ -4530,7 +4530,9 @@ export class Game {
     }
 
     // ── Layered cliff strata — exposed rock bands wrapping high cliffs ──
-    if (island.profile.heightProfile > 0.35 && !lowDetail) {
+    // (skipped on mountains: the sheer spires changed the slopes those slabs
+    // were sampled against, leaving them floating mid-air)
+    if (island.profile.heightProfile > 0.35 && !lowDetail && island.profile.terrainStyle !== 'mountain') {
       const strataMats = [
         new THREE.MeshStandardMaterial({ color: 0x6a5d48, roughness: 1, flatShading: true }),
         new THREE.MeshStandardMaterial({ color: 0x564b3a, roughness: 1, flatShading: true }),
@@ -10209,9 +10211,9 @@ export class Game {
         // Tucked low-right and pushed back: the old pose parked a quarter of
         // the screen behind the stock.
         this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.42, 0.07, aimBlend) + sway * 0.36 + travelSwing * 0.28 + reloadArc * 0.08,
-          THREE.MathUtils.lerp(-0.4, -0.2, aimBlend) + bob - recoilLift * 0.8 - reloadArc * 0.06,
-          THREE.MathUtils.lerp(-0.98, -0.6, aimBlend) - recoilBack * 0.72 + reloadArc * 0.1,
+          THREE.MathUtils.lerp(0.42, 0.24, aimBlend) + sway * 0.36 + travelSwing * 0.28 + reloadArc * 0.08,
+          THREE.MathUtils.lerp(-0.4, -0.3, aimBlend) + bob - recoilLift * 0.8 - reloadArc * 0.06,
+          THREE.MathUtils.lerp(-0.98, -0.82, aimBlend) - recoilBack * 0.72 + reloadArc * 0.1,
         );
         this.localViewWeaponRoot.rotation.set(
           -0.24 - aimBlend * 0.07 - recoilLift + reloadArc * 0.28,
