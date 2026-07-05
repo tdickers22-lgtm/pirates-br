@@ -1766,6 +1766,8 @@ export class Game {
   private activeTradeSessionId: string | null = null;
   private localTradeOffer: ItemStack[] = [];
   private mapOpen = false;
+  /** Full-map zoom (1 = whole world fit; scroll to zoom in, pans to the player). */
+  private mapZoom = 1;
   private previousLocalState: Player['state'] | null = null;
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
@@ -1937,6 +1939,14 @@ export class Game {
 
     this.input.init(this.renderer.renderer.domElement);
     this.bindSupplyWheelActions();
+    // Scroll to zoom the opened map (pans to keep the player centred). Bound on
+    // window so it catches regardless of the overlay's pointer-events.
+    window.addEventListener('wheel', (e) => {
+      if (!this.mapOpen) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+      this.mapZoom = Math.max(1, Math.min(7, this.mapZoom * factor));
+    }, { passive: false });
     document.body.addEventListener('pointerdown', () => {
       this.combatFx.unlockAudio();
       this.audio.unlock();
@@ -7334,6 +7344,8 @@ export class Game {
       this.drawMaps();
       this.minimapTimer = effectScale < 0.55 ? 0.5 : effectScale < 0.85 ? 0.35 : 0.25;
     }
+    // The opened map tracks live (arrow + ships) every frame; minimap throttled.
+    if (this.mapOpen) this.drawFullMap();
 
     this.interactScanTimer -= dt;
     if (this.interactScanTimer <= 0) {
@@ -8980,17 +8992,20 @@ export class Game {
 
   private drawMaps() {
     if (!this.state) return;
-
     const minimapCtx = this.ui.minimapCanvas.getContext('2d');
     if (minimapCtx) {
       this.renderBattleMap(minimapCtx, this.ui.minimapCanvas.width, this.ui.minimapCanvas.height, false);
     }
+    if (this.mapOpen) this.drawFullMap();
+  }
 
-    if (this.mapOpen) {
-      const mapCtx = this.ui.mapCanvas.getContext('2d');
-      if (mapCtx) {
-        this.renderBattleMap(mapCtx, this.ui.mapCanvas.width, this.ui.mapCanvas.height, true);
-      }
+  /** The opened map redraws every frame while it's up, so your arrow and the
+   *  other ships track live as you move/turn (the minimap stays throttled). */
+  private drawFullMap() {
+    if (!this.state || !this.mapOpen) return;
+    const mapCtx = this.ui.mapCanvas.getContext('2d');
+    if (mapCtx) {
+      this.renderBattleMap(mapCtx, this.ui.mapCanvas.width, this.ui.mapCanvas.height, true);
     }
   }
 
@@ -9162,16 +9177,22 @@ export class Game {
   ) {
     if (!this.state) return;
 
-    const centerX = width * 0.5;
-    const centerY = height * 0.5;
-    const scale = Math.min(width, height) / WORLD.SIZE;
     const trackedShip = this.getTrackedShip();
     const localPlayer = this.getLocalPlayer();
     const localX = trackedShip?.position.x ?? localPlayer?.position.x ?? 0;
     const localZ = trackedShip?.position.z ?? localPlayer?.position.z ?? 0;
-    const localHeading = trackedShip
-      ? trackedShip.rotation
-      : (localPlayer?.rotation.x ?? this.input.getYaw());
+    // Live heading: the ship's heading on deck, else the client's current look
+    // yaw — instant, so the arrow turns as you do with the map open.
+    const localHeading = trackedShip ? trackedShip.rotation : this.input.getYaw();
+    // Whole-world fit, then a zoom the player can scroll on the full map. Zoomed
+    // in, pan so the player stays centred; at 1× show the entire Shattered Reach.
+    const baseScale = Math.min(width, height) / WORLD.SIZE;
+    const zoom = fullscreen ? this.mapZoom : 1;
+    const scale = baseScale * zoom;
+    const focusX = zoom > 1.001 ? localX : 0;
+    const focusZ = zoom > 1.001 ? localZ : 0;
+    const centerX = width * 0.5 - focusX * scale;
+    const centerY = height * 0.5 - focusZ * scale;
     const stormX = centerX + this.state.storm.centerX * scale;
     const stormY = centerY + this.state.storm.centerZ * scale;
     const stormRadius = this.state.storm.safeRadius * scale;
@@ -9252,6 +9273,43 @@ export class Game {
       this.drawIslandChart(ctx, island, centerX, centerY, scale, fullscreen);
     }
     ctx.restore();
+
+    // Full map: peak/volcano markers, big landmarks, and island name labels.
+    if (fullscreen) {
+      ctx.save();
+      ctx.textAlign = 'center';
+      for (const island of this.state.islands) {
+        const ix = centerX + island.position.x * scale;
+        const iy = centerY + island.position.z * scale;
+        const rPx = getIslandMaxRadius(island) * scale;
+        const isVolcanic = island.profile.biome === 'volcanic';
+        if (isVolcanic || island.profile.terrainStyle === 'mountain') {
+          ctx.textBaseline = 'middle';
+          ctx.font = `${Math.max(13, Math.min(30, rPx * 0.55))}px serif`;
+          ctx.fillText(isVolcanic ? '🌋' : '⛰️', ix, iy);
+        }
+        // Big charted landmarks — the "where to raid" markers SoT shows.
+        for (const prop of island.props ?? []) {
+          const icon = prop.type === 'shipwreck' ? '⚓'
+            : prop.type === 'watchtower' ? '🗼'
+              : prop.type === 'standing_stones' ? '🗿'
+                : prop.type === 'rock_arch' ? '⛰' : '';
+          if (!icon) continue;
+          ctx.textBaseline = 'middle';
+          ctx.font = '14px serif';
+          ctx.fillText(icon, centerX + prop.x * scale, centerY + prop.z * scale);
+        }
+        // Name label above the isle, outlined for legibility over any tint.
+        ctx.textBaseline = 'bottom';
+        ctx.font = '600 13px Georgia, serif';
+        ctx.lineWidth = 3.5;
+        ctx.strokeStyle = 'rgba(6, 14, 26, 0.9)';
+        ctx.strokeText(island.name, ix, iy - rPx - 4);
+        ctx.fillStyle = '#f4e8c6';
+        ctx.fillText(island.name, ix, iy - rPx - 4);
+      }
+      ctx.restore();
+    }
 
     ctx.save();
     ctx.fillStyle = fullscreen ? 'rgba(95, 91, 82, 0.92)' : 'rgba(95, 91, 82, 0.86)';
@@ -9421,38 +9479,37 @@ export class Game {
       : quality === 'balanced'
         ? (fullscreen ? 22 : 14)
         : (fullscreen ? 28 : 18);
-    ctx.save();
-    ctx.fillStyle = fullscreen ? '#d9bf80' : '#d6bc83';
-    ctx.strokeStyle = fullscreen ? 'rgba(69, 45, 18, 0.72)' : 'rgba(65, 41, 14, 0.58)';
-    ctx.lineWidth = fullscreen ? 2 : 1;
-    ctx.beginPath();
-    for (let segment = 0; segment <= detailSegments; segment++) {
-      const angle = (segment / detailSegments) * Math.PI * 2;
-      const point = getIslandSurfacePoint(island, 0.98, angle, 0);
-      const x = centerX + point.x * scale;
-      const y = centerY + point.z * scale;
-      if (segment === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    if (fullscreen) {
-      ctx.strokeStyle = 'rgba(76, 112, 61, 0.38)';
-      ctx.lineWidth = 1.5;
+    // Biome-tinted chart: a sandy coast ring around a darker interior, so a
+    // volcanic isle reads charcoal, a lush one green, a bone atoll pale (SoT).
+    const palette = island.profile.palette
+      ?? BIOME_PALETTES[island.profile.biome ?? 'lush']
+      ?? BIOME_PALETTES.lush;
+    const toHex = (n: number) => `#${(n & 0xffffff).toString(16).padStart(6, '0')}`;
+    const coastColor = toHex(palette.sand);
+    const interiorColor = toHex(palette.grass);
+    const traceRing = (dist: number) => {
       ctx.beginPath();
       for (let segment = 0; segment <= detailSegments; segment++) {
         const angle = (segment / detailSegments) * Math.PI * 2;
-        const point = getIslandSurfacePoint(island, 0.55, angle, 0);
+        const point = getIslandSurfacePoint(island, dist, angle, 0);
         const x = centerX + point.x * scale;
         const y = centerY + point.z * scale;
         if (segment === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.closePath();
-      ctx.stroke();
-    }
+    };
+    ctx.save();
+    ctx.fillStyle = coastColor;
+    ctx.strokeStyle = fullscreen ? 'rgba(30, 22, 12, 0.7)' : 'rgba(30, 22, 12, 0.55)';
+    ctx.lineWidth = fullscreen ? 2 : 1;
+    traceRing(0.98);
+    ctx.fill();
+    ctx.stroke();
+    // Interior landmass fill (grass/rock tint) so coast vs inland reads.
+    ctx.fillStyle = interiorColor;
+    traceRing(0.6);
+    ctx.fill();
 
     if (island.dock) {
       const dock = island.dock;
@@ -10424,6 +10481,7 @@ export class Game {
     this.mapOpen = next;
     this.ui.mapOverlay.classList.toggle('visible', next);
     if (next) {
+      this.mapZoom = 1; // always open at the whole-world view; scroll to zoom in
       this.ui.scopeOverlay.style.display = 'none';
       this.drawMaps();
     }
