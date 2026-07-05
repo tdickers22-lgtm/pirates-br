@@ -10331,9 +10331,9 @@ export class Game {
       weaponMesh.rotation.y = Math.PI;
       weaponMesh.scale.setScalar(
         weaponId === 'eye_of_reach'
-          ? 0.74
+          ? 0.92
           : weaponId === 'blunderbuss'
-            ? 0.92
+            ? 0.95
             : 1.2,
       );
       applyViewmodelMaterialSettings(weaponMesh);
@@ -10393,10 +10393,12 @@ export class Game {
 
     switch (weaponId) {
       case 'eye_of_reach':
+        // Brought up/in/closer for real screen presence (was a tiny stick in
+        // the far corner); ADS still swings it to center-scope.
         this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.48, 0.025, aimBlend) + sway * 0.26 + travelSwing * 0.18 + reloadArc * 0.06,
-          THREE.MathUtils.lerp(-0.46, -0.15, aimBlend) + bob * 0.75 - recoilLift - reloadArc * 0.04,
-          THREE.MathUtils.lerp(-1.06, -0.42, aimBlend) - recoilBack * 0.72 + reloadArc * 0.06,
+          THREE.MathUtils.lerp(0.32, 0.025, aimBlend) + sway * 0.26 + travelSwing * 0.18 + reloadArc * 0.06,
+          THREE.MathUtils.lerp(-0.3, -0.15, aimBlend) + bob * 0.75 - recoilLift - reloadArc * 0.04,
+          THREE.MathUtils.lerp(-0.8, -0.42, aimBlend) - recoilBack * 0.72 + reloadArc * 0.06,
         );
         this.localViewWeaponRoot.rotation.set(
           -0.26 + aimBlend * 0.0 - recoilLift * 1.1 + reloadArc * 0.18,
@@ -10455,10 +10457,12 @@ export class Game {
         }
         break;
       default:
+        // Flintknock + fallback: readable lower-right presence, barrel angled
+        // toward the crosshair so the muzzle flash lands on screen.
         this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.31, 0.085, aimBlend) + sway * 0.64 + travelSwing * 0.38 + reloadArc * 0.07,
-          THREE.MathUtils.lerp(-0.24, -0.17, aimBlend) + bob - recoilLift * 0.62 - reloadArc * 0.05,
-          THREE.MathUtils.lerp(-0.6, -0.4, aimBlend) - recoilBack * 0.8 + reloadArc * 0.06,
+          THREE.MathUtils.lerp(0.26, 0.085, aimBlend) + sway * 0.64 + travelSwing * 0.38 + reloadArc * 0.07,
+          THREE.MathUtils.lerp(-0.22, -0.17, aimBlend) + bob - recoilLift * 0.62 - reloadArc * 0.05,
+          THREE.MathUtils.lerp(-0.52, -0.4, aimBlend) - recoilBack * 0.8 + reloadArc * 0.06,
         );
         this.localViewWeaponRoot.rotation.set(
           -0.2 - aimBlend * 0.07 - recoilLift + reloadArc * 0.24,
