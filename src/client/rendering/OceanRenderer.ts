@@ -210,7 +210,7 @@ const OCEAN_FRAG = /* glsl */`
     float sd = shoreDist(wp);
     float shallowMask = 1.0 - smoothstep(4.0, 52.0, sd);
     vec3 shallowCol = mix(vec3(0.06, 0.46, 0.50), vec3(0.30, 0.68, 0.62), 1.0 - smoothstep(0.0, 14.0, sd));
-    base = mix(base, shallowCol, shallowMask * 0.8 * (1.0 - u_stormIntensity * 0.55));
+    base = mix(base, shallowCol, shallowMask * 0.9 * (1.0 - u_stormIntensity * 0.55));
 
     // ── Fresnel reflectance toward sky/horizon ──────────────────────────
     float NdotV   = max(0.0, dot(N, V));
@@ -221,7 +221,7 @@ const OCEAN_FRAG = /* glsl */`
     float sunPath = pow(max(0.0, dot(normalize(vec3(V.x, 0.14, V.z)), normalize(vec3(L.x, 0.14, L.z)))), 5.0);
     vec3 reflCol = mix(vec3(0.38, 0.54, 0.82), u_horizonColor, 0.42);
     reflCol = mix(reflCol, vec3(1.0, 0.55, 0.30), sunPath * sunLow * 0.6);
-    base = mix(base, reflCol, fresnel * 0.58);
+    base = mix(base, reflCol, fresnel * 0.42);
 
     // ── Diffuse sun ─────────────────────────────────────────────────────
     float diff = max(0.0, dot(N, L));
@@ -233,10 +233,10 @@ const OCEAN_FRAG = /* glsl */`
     float NdotH = max(0.0, dot(N, H));
     float lobeWiden = max(smoothstep(90.0, 1400.0, camDist), u_stormIntensity * 0.5);
     float shininess = mix(310.0, 46.0, lobeWiden);
-    float spec  = pow(NdotH, shininess) * mix(3.0, 0.55, lobeWiden);
-    float glare = pow(NdotH, 24.0) * 0.15;
+    float spec  = pow(NdotH, shininess) * mix(1.9, 0.5, lobeWiden);
+    float glare = pow(NdotH, 24.0) * 0.1;
     vec3 specCol = mix(vec3(1.0, 0.94, 0.80), vec3(1.0, 0.50, 0.28), sunPath * sunLow) * (spec + glare) * sunUp;
-    specCol = min(specCol, vec3(1.8));
+    specCol = min(specCol, vec3(1.15));
     specCol = mix(specCol, specCol * vec3(0.62, 0.74, 1.05), u_nightFactor);
 
     // ── Foam: noise-broken crests + animated shore band. Storm lowers the
@@ -255,9 +255,9 @@ const OCEAN_FRAG = /* glsl */`
     float shoreDetail = 1.0 - smoothstep(260.0, 900.0, camDist);
     float lap = sin(sd * 0.5 - u_time * 1.3) * 0.5 + 0.5;
     float lapNoise = noise(wp * 0.3 + u_time * vec2(0.05, -0.04));
-    float shoreBand = (1.0 - smoothstep(2.0, 17.0, sd)) * smoothstep(0.42, 0.86, lap * (0.55 + 0.45 * lapNoise));
-    float waterline = 1.0 - smoothstep(0.0, 3.5, sd);
-    float shoreFoam = max(shoreBand * (0.35 + 0.65 * shoreDetail), waterline * 0.85);
+    float shoreBand = (1.0 - smoothstep(2.0, 11.0, sd)) * smoothstep(0.5, 0.9, lap * (0.55 + 0.45 * lapNoise));
+    float waterline = 1.0 - smoothstep(0.0, 2.2, sd);
+    float shoreFoam = max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55);
     foam = clamp(foam + shoreFoam, 0.0, 1.0);
 
     vec3 foamCol = vec3(0.88, 0.93, 1.0) * mix(1.0, 0.45, u_nightFactor);

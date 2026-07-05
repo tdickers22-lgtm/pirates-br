@@ -1259,27 +1259,40 @@ function makeUpgradeSignTexture(title: string, effect: string, accentHex: number
   }
 
   const accent = `#${accentHex.toString(16).padStart(6, '0')}`;
+  // Weathered WOOD plank, not a near-black board — reads as a carved sign from
+  // a distance against bright terrain instead of a black slab.
   const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  gradient.addColorStop(0, 'rgba(58, 38, 20, 0.98)');
-  gradient.addColorStop(1, 'rgba(24, 18, 13, 0.98)');
+  gradient.addColorStop(0, 'rgba(158, 118, 66, 0.99)');
+  gradient.addColorStop(0.5, 'rgba(139, 101, 54, 0.99)');
+  gradient.addColorStop(1, 'rgba(122, 87, 46, 0.99)');
   ctx.fillStyle = gradient;
   ctx.fillRect(12, 12, canvas.width - 24, canvas.height - 24);
+  // Plank grain streaks
+  ctx.strokeStyle = 'rgba(90, 62, 32, 0.35)';
+  ctx.lineWidth = 2;
+  for (let gy = 30; gy < canvas.height - 20; gy += 22) {
+    ctx.beginPath();
+    ctx.moveTo(16, gy + Math.sin(gy) * 3);
+    ctx.lineTo(canvas.width - 16, gy + Math.cos(gy * 0.7) * 3);
+    ctx.stroke();
+  }
   ctx.lineWidth = 8;
   ctx.strokeStyle = accent;
   ctx.strokeRect(18, 18, canvas.width - 36, canvas.height - 36);
   ctx.lineWidth = 3;
-  ctx.strokeStyle = 'rgba(244, 222, 174, 0.78)';
+  ctx.strokeStyle = 'rgba(58, 38, 18, 0.7)';
   ctx.strokeRect(34, 34, canvas.width - 68, canvas.height - 68);
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#f6ead1';
-  ctx.font = '700 44px Georgia, serif';
+  // Dark engraved lettering on the light plank
+  ctx.fillStyle = '#2c1a0a';
+  ctx.font = '700 46px Georgia, serif';
   ctx.fillText(title.toUpperCase(), canvas.width * 0.5, 72);
   ctx.fillStyle = accent;
   ctx.font = '700 28px system-ui, sans-serif';
   ctx.fillText(effect, canvas.width * 0.5, 122);
-  ctx.fillStyle = 'rgba(246, 234, 209, 0.78)';
+  ctx.fillStyle = 'rgba(52, 34, 16, 0.82)';
   ctx.font = '700 20px system-ui, sans-serif';
   ctx.fillText('UPGRADE FORGE', canvas.width * 0.5, 157);
 
@@ -6689,11 +6702,13 @@ export class Game {
   private updateCapstanHands() {
     const player = this.getLocalPlayer();
     const ship = player?.onShipId ? this.shipsById.get(player.onShipId) : null;
+    // Show the crank hands the instant you grab the capstan (holding X with
+    // the anchor interaction resolved), not only once the anchor is already
+    // rising — the old progress>0.001 gate made them flicker/never show.
     const cranking = !!player && !!ship
       && ship.anchored
       && this.input.isInteractHeld()
-      && (this.visibleInteractKind === 'anchor' || this.lastInteractKind === 'anchor')
-      && (ship.anchorRaiseProgress ?? 0) > 0.001;
+      && (this.visibleInteractKind === 'anchor' || this.lastInteractKind === 'anchor');
     if (cranking) this.buildCapstanHands();
     this.localViewHandsRoot.visible = !!cranking;
     if (cranking) {

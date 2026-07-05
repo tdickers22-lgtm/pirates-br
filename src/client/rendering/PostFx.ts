@@ -77,7 +77,7 @@ export class PostFx {
 
     this.composer = new EffectComposer(renderer, target);
     this.composer.addPass(new RenderPass(scene, camera));
-    this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(this.width, this.height), 0.35, 0.5, 0.85));
+    this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(this.width, this.height), 0.42, 0.55, 1.05));
     this.composer.addPass(new OutputPass());
     if (!useMsaa) {
       this.fxaaPass = new ShaderPass(FXAAShader);

@@ -202,7 +202,7 @@ export class Renderer {
   private readonly sunDayColor = new THREE.Color(0xfff0d8);
   private readonly sunTwilightColor = new THREE.Color(0xffbd6d);
   private readonly moonColor = new THREE.Color(0x8aa6ff);
-  private readonly ambientDayColor = new THREE.Color(0x7090b8);
+  private readonly ambientDayColor = new THREE.Color(0x8a9aad);
   private readonly ambientTwilightColor = new THREE.Color(0x6270aa);
   private readonly ambientNightColor = new THREE.Color(0x526f95);
   private readonly hemiSkyDayColor = new THREE.Color(0x88bbdd);
@@ -619,11 +619,11 @@ export class Renderer {
   }
 
   private getCycleAmbientIntensity() {
-    return this.dayAmount * 0.7 + this.twilightAmount * 0.66 + this.nightAmount * 0.54;
+    return this.dayAmount * 0.84 + this.twilightAmount * 0.72 + this.nightAmount * 0.6;
   }
 
   private getCycleHemisphereIntensity() {
-    return this.dayAmount * 0.8 + this.twilightAmount * 0.72 + this.nightAmount * 0.52;
+    return this.dayAmount * 1.0 + this.twilightAmount * 0.82 + this.nightAmount * 0.58;
   }
 
   private getCycleHorizonIntensity() {
