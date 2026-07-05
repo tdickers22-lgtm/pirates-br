@@ -3164,8 +3164,11 @@ export class Game {
     const paletteGrass = new THREE.Color(palette.grass);
     const paletteRock = new THREE.Color(palette.rock);
     const paletteFoliage = new THREE.Color(palette.foliage);
-    const beachColor = paletteSand.clone().lerp(new THREE.Color(0xffffff), 0.16);
-    const sandColor = paletteSand.clone();
+    // Beach sand read as a flat near-white halo ringing sunlit islands
+    // (patrol-3): pull the whitening way back and warm/darken the base so it's
+    // sand, not a bloom band.
+    const beachColor = paletteSand.clone().lerp(new THREE.Color(0xffffff), 0.05);
+    const sandColor = paletteSand.clone().multiplyScalar(0.9);
     const grassColor = paletteGrass.clone();
     const jungleColor = paletteFoliage.clone();
     const peakColor = paletteGrass.clone().lerp(paletteRock, 0.42);
@@ -3398,8 +3401,11 @@ export class Game {
         }
 
         // Per-vertex noise + a low-frequency hue drift so large faces never
-        // read as one flat paint bucket (survives ACES tonemapping).
-        const vnoise = (rng(ring * 113 + segment * 17) - 0.5) * 0.07;
+        // read as one flat paint bucket (survives ACES tonemapping). Sand
+        // (near shore) gets extra tonal variation so beaches don't clip to a
+        // uniform bright halo.
+        const sandiness = shoreMask * coast.beach;
+        const vnoise = (rng(ring * 113 + segment * 17) - 0.5) * (0.07 + sandiness * 0.06);
         const hueDrift = Math.sin(angle * 3.1 + distRatio * 5.3 + r * 0.13) * 0.03;
         terrainColors.push(
           THREE.MathUtils.clamp(terrainColor.r + vnoise * 0.5 - hueDrift * 0.4, 0, 1),
@@ -6488,7 +6494,7 @@ export class Game {
           for (const caveGroup of caveGroups) {
             const e = caveGroup.userData.caveEntranceWorld as { x: number; y: number; z: number };
             const cd = this.distance2D(cam.x, cam.z, e.x, e.z);
-            caveGroup.visible = showDetail && cd < 55;
+            caveGroup.visible = showDetail && cd < 34;
           }
         }
       }
