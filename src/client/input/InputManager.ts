@@ -92,7 +92,7 @@ export class InputManager {
 
     lockElement.addEventListener('mousedown', (e) => {
       if (this.vHeld) return;
-      if (!this.locked) {
+      if (!this.locked && !this.debugAssumeLocked) {
         this.wantsRelock = true;
         this.lockElement?.requestPointerLock?.().catch(() => {});
         e.preventDefault();
@@ -147,7 +147,7 @@ export class InputManager {
       right:    this.keys.has('KeyD') || this.keys.has('ArrowRight'),
       jump:     this.keys.has('Space'),
       jumpPressed: this.jumpPressed,
-      fire:     !this.vHeld && this.locked && this.mouseButtons.has(0),
+      fire:     !this.vHeld && this.lockedOrForced && this.mouseButtons.has(0),
       aim:      aiming,
       interact: this.interactPressed,
       interactHeld: this.keys.has('KeyX'),

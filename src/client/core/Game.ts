@@ -1705,6 +1705,12 @@ export class Game {
   private brProgressSignature = '';
   private localViewWeaponId: WeaponInstance['weaponId'] | null = null;
   private localViewWeaponKick = 0;
+  /** First-person muzzle flash + powder smoke on the local viewmodel barrel. */
+  private muzzleFlash: THREE.Sprite | null = null;
+  private muzzleGlow: THREE.PointLight | null = null;
+  private muzzleSmoke: THREE.Sprite[] = [];
+  private muzzleFlashTimer = 0;
+  private prevLocalFiring = false;
   private localViewWeaponReloadPhase = 0;
   private localCutlassCharge = 0;
   private localViewWeaponAmmoSignature = '';
@@ -1783,6 +1789,7 @@ export class Game {
     this.localViewWeaponRoot.visible = false;
     this.localViewWeaponRoot.renderOrder = 999;
     this.renderer.camera.add(this.localViewWeaponRoot);
+    this.setupMuzzleFlash();
     this.localViewHandsRoot.visible = false;
     this.renderer.camera.add(this.localViewHandsRoot);
     this.localViewPocketRoot.visible = false;
@@ -6276,6 +6283,7 @@ export class Game {
 
     this.updateStationMarkers();
     this.updateCapstanHands();
+    this.updateMuzzleFlash(dt);
     if (!this.bugSnapListenerBound) {
       this.bugSnapListenerBound = true;
       window.addEventListener('keydown', this.bugSnapListener);
@@ -6552,6 +6560,102 @@ export class Game {
    *  you can SEE where to go from across the deck. The anchor ring burns
    *  red while the anchor is down (the #1 'why is my ship not moving'). */
   private stationMarkers: { anchor: THREE.Sprite; sails: THREE.Sprite; helm: THREE.Sprite } | null = null;
+
+  private setupMuzzleFlash() {
+    // Radial flare texture for the flash + smoke, drawn once.
+    const tex = (inner: string, outer: string) => {
+      const size = 64;
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const ctx = c.getContext('2d')!;
+      const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      g.addColorStop(0, inner);
+      g.addColorStop(0.5, outer);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, size, size);
+      return new THREE.CanvasTexture(c);
+    };
+    const flashTex = tex('rgba(255,246,214,1)', 'rgba(255,168,52,0.7)');
+    this.muzzleFlash = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: flashTex, blending: THREE.AdditiveBlending, transparent: true,
+      opacity: 0, depthTest: false, depthWrite: false,
+    }));
+    this.muzzleFlash.renderOrder = 1000;
+    this.muzzleFlash.visible = false;
+    this.localViewWeaponRoot.add(this.muzzleFlash);
+    this.muzzleGlow = new THREE.PointLight(0xffb347, 0, 6, 2);
+    this.localViewWeaponRoot.add(this.muzzleGlow);
+    const smokeTex = tex('rgba(180,180,180,0.6)', 'rgba(120,120,120,0.25)');
+    for (let i = 0; i < 4; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: smokeTex, transparent: true, opacity: 0, depthTest: false, depthWrite: false,
+      }));
+      s.renderOrder = 999;
+      s.visible = false;
+      this.localViewWeaponRoot.add(s);
+      this.muzzleSmoke.push(s);
+    }
+  }
+
+  /** Barrel-tip offset per weapon (local to the viewmodel root). */
+  private muzzleTipFor(weaponId: WeaponId): [number, number, number] {
+    switch (weaponId) {
+      case 'eye_of_reach': return [0, 0.075, 1.5];
+      case 'blunderbuss': return [0, 0.055, 1.0];
+      case 'flintknock': return [0, 0.05, 0.62];
+      default: return [0, 0.05, 0.7];
+    }
+  }
+
+  private triggerMuzzleFlash(weaponId: WeaponId) {
+    if (!this.muzzleFlash || !this.muzzleGlow) return;
+    const [tx, ty, tz] = this.muzzleTipFor(weaponId);
+    const scatter = weaponId === 'blunderbuss' ? 1.5 : 1;
+    this.muzzleFlash.position.set(tx, ty, tz);
+    const flashScale = (weaponId === 'blunderbuss' ? 0.55 : weaponId === 'eye_of_reach' ? 0.4 : 0.32) * scatter;
+    this.muzzleFlash.scale.set(flashScale, flashScale, 1);
+    this.muzzleFlash.material.rotation = Math.sin(this.ocean.getTime() * 91.7) * Math.PI;
+    this.muzzleFlash.visible = true;
+    this.muzzleFlash.material.opacity = 1;
+    this.muzzleGlow.position.set(tx, ty, tz);
+    this.muzzleGlow.intensity = 5 * scatter;
+    this.muzzleFlashTimer = 0.09;
+    // Smoke puffs drift forward from the barrel and fade.
+    for (let i = 0; i < this.muzzleSmoke.length; i++) {
+      const s = this.muzzleSmoke[i];
+      s.position.set(tx + (Math.sin(i * 2.1) * 0.05), ty + 0.02 + i * 0.015, tz + 0.05 + i * 0.04);
+      s.scale.setScalar(0.12 + i * 0.04);
+      s.material.opacity = 0.5 - i * 0.08;
+      s.visible = true;
+      s.userData.smokeLife = 0.5 + i * 0.12;
+      s.userData.smokeAge = 0;
+    }
+  }
+
+  private updateMuzzleFlash(dt: number) {
+    if (this.muzzleFlash && this.muzzleFlashTimer > 0) {
+      this.muzzleFlashTimer -= dt;
+      const k = Math.max(0, this.muzzleFlashTimer / 0.09);
+      this.muzzleFlash.material.opacity = k;
+      if (this.muzzleGlow) this.muzzleGlow.intensity = 5 * k;
+      if (this.muzzleFlashTimer <= 0) {
+        this.muzzleFlash.visible = false;
+        if (this.muzzleGlow) this.muzzleGlow.intensity = 0;
+      }
+    }
+    for (const s of this.muzzleSmoke) {
+      if (!s.visible) continue;
+      s.userData.smokeAge = (s.userData.smokeAge ?? 0) + dt;
+      const life = s.userData.smokeLife ?? 0.5;
+      const a = s.userData.smokeAge / life;
+      if (a >= 1) { s.visible = false; continue; }
+      s.position.z += dt * 0.5;
+      s.position.y += dt * 0.12;
+      s.scale.setScalar(s.scale.x + dt * 0.35);
+      s.material.opacity = (1 - a) * 0.4;
+    }
+  }
 
   private buildCapstanHands() {
     if (this.capstanHandsBuilt) return;
@@ -10244,6 +10348,16 @@ export class Game {
       this.localViewWeaponKick = Math.min(1.25, this.localViewWeaponKick + 0.24);
     }
     this.localViewWeaponAmmoSignature = ammoSignature;
+    // Muzzle flash + smoke + recoil the instant you pull the trigger
+    // (client-predicted press edge), so feedback is immediate rather than
+    // waiting on the server ammo round-trip. Gated on a loaded, ready weapon.
+    const firingNow = firearmEquipped && this.input.isFiring();
+    const canFire = activeWeapon.ammo > 0 && !activeWeapon.reloading;
+    if (firingNow && canFire && !this.prevLocalFiring) {
+      this.triggerMuzzleFlash(weaponId);
+      this.localViewWeaponKick = Math.min(1.35, this.localViewWeaponKick + 0.55);
+    }
+    this.prevLocalFiring = firingNow;
     const kickTarget = firearmEquipped && this.input.isFiring() && !activeWeapon.reloading ? 0.72 : 0;
     this.localViewWeaponKick += (kickTarget - this.localViewWeaponKick) * Math.min(1, this.frameDt * (kickTarget > this.localViewWeaponKick ? 18 : 13));
     const reloadBlend = activeWeapon.reloading && firearmEquipped
@@ -10276,12 +10390,13 @@ export class Game {
         );
         break;
       case 'blunderbuss':
-        // Tucked low-right and pushed back: the old pose parked a quarter of
-        // the screen behind the stock.
+        // Lower-right hip with real screen PRESENCE (reads as a gun) without
+        // parking the fat stock over center; barrel angled toward the
+        // crosshair so the muzzle flash lands in the visible lower third.
         this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.42, 0.24, aimBlend) + sway * 0.36 + travelSwing * 0.28 + reloadArc * 0.08,
-          THREE.MathUtils.lerp(-0.4, -0.3, aimBlend) + bob - recoilLift * 0.8 - reloadArc * 0.06,
-          THREE.MathUtils.lerp(-0.98, -0.82, aimBlend) - recoilBack * 0.72 + reloadArc * 0.1,
+          THREE.MathUtils.lerp(0.34, 0.16, aimBlend) + sway * 0.36 + travelSwing * 0.28 + reloadArc * 0.08,
+          THREE.MathUtils.lerp(-0.28, -0.24, aimBlend) + bob - recoilLift * 0.8 - reloadArc * 0.06,
+          THREE.MathUtils.lerp(-0.82, -0.7, aimBlend) - recoilBack * 0.72 + reloadArc * 0.1,
         );
         this.localViewWeaponRoot.rotation.set(
           -0.24 - aimBlend * 0.07 - recoilLift + reloadArc * 0.28,
