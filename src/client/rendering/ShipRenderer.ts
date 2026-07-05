@@ -2198,7 +2198,7 @@ export class ShipRenderer {
       // dismasted. Slight vertical sag + gasket lashings sell the bundle.
       const furledGroup = new THREE.Group();
       const furled = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.26, 0.3, yardW * 0.86, 10),
+        new THREE.CylinderGeometry(0.34, 0.4, yardW * 0.88, 10),
         sailMat.clone(),
       );
       furled.rotation.z = Math.PI * 0.5;
@@ -2207,7 +2207,7 @@ export class ShipRenderer {
       // Rope gaskets lashing the bundle to the yard at intervals
       const gasketMat = new THREE.MeshStandardMaterial({ color: 0x6b5836, roughness: 1 });
       for (let g = -2; g <= 2; g++) {
-        const gasket = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.028, 5, 10), gasketMat);
+        const gasket = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.032, 5, 10), gasketMat);
         gasket.rotation.y = Math.PI * 0.5;
         gasket.position.x = g * yardW * 0.17;
         furledGroup.add(gasket);
