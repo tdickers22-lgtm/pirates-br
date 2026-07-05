@@ -31,6 +31,9 @@ export interface ShipKeg {
 
 export type ShipUpgradeType = 'hull_reinforcement' | 'charged_cannons' | 'swift_sails';
 
+/** Held tools selectable from the supply wheel (all innate to the pirate). */
+export type EquippableTool = 'spyglass' | 'compass' | 'bucket' | 'shovel';
+
 export interface ShipUpgrade {
   type: ShipUpgradeType;
 }
@@ -191,6 +194,12 @@ export interface Player {
   hasShovel: boolean;
   /** Spyglass tool — always in the pirate's kit; the client implements the zoom. */
   hasSpyglass: boolean;
+  /** Tool currently held from the supply wheel — drives the spyglass zoom,
+   *  physical bucket bailing, and the compass bearing. null = weapon in hand. */
+  equippedTool: EquippableTool | null;
+  /** 0..1 fill of the current bucket scoop; at 1 a scoop of bilge water is
+   *  tossed overboard (waterLevel drops a discrete chunk) and it resets. */
+  bailScoopProgress: number;
   nearBarrelId: string | null;
   // ── Down-but-not-out (DBNO) ────────────────────────────────
   /** Seconds of bleed-out remaining while state === 'downed'. Drains 2× faster
@@ -311,6 +320,8 @@ export interface IslandProfile {
   palette?: { sand: number; grass: number; rock: number; foliage: number };
   /** Shifts the per-angle coast field: -1 ⇒ almost all beach, +1 ⇒ mostly cliff. */
   coastBias?: number;
+  /** Bright white-sand beaches (tropical postcard isles) rather than muted tan. */
+  whiteSand?: boolean;
 }
 
 export interface IslandInlet {

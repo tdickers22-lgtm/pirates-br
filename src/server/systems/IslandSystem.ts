@@ -103,7 +103,7 @@ export class IslandSystem {
 
   private giveAmmoToPlayer(player: Player, item: string, qty: number) {
     const ammoMap: Record<string, WeaponId> = {
-      flintlock_ammo: 'flintknock',
+      flintlock_ammo: 'flintlock',
       blunderbuss_ammo: 'blunderbuss',
       eye_ammo: 'eye_of_reach',
       flintknock_ammo: 'flintknock',

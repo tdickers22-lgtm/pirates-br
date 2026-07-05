@@ -201,6 +201,11 @@ export const FLOODING = {
   INGRESS_CLASS_SCALE: { sloop: 1.0, brigantine: 0.84, galleon: 0.70 } as Record<ShipType, number>,
   /** One player bails this much water-level/sec (beats one open hole, loses to two). */
   BAIL_RATE: 0.014,
+  /** Physical bucket bailing: seconds to fill + toss one bucket overboard, and
+   *  the water-level removed per toss. Net ≈ BAIL_RATE, but as discrete scoops
+   *  (SoT: scoop the bilge, heave it over the side) rather than a smooth drain. */
+  BAIL_SCOOP_TIME: 0.9,
+  BAIL_SCOOP_VOLUME: 0.013,
   /** Passive bilge pump drain (× BAIL_RATE) when NOTHING is holed-below-waterline. */
   PASSIVE_PUMP_FACTOR: 0.25,
   /** Bots start bailing once standing water exceeds this. */

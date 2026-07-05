@@ -46,10 +46,9 @@ export class InputManager {
         if (!this.vHeld && this.locked) document.exitPointerLock?.();
         this.vHeld = true;
       }
-      if (this.vHeld && (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3' || e.code === 'Digit4')) {
+      if (this.vHeld && /^Digit[1-8]$/.test(e.code)) {
         e.preventDefault();
-        const map: Record<string, number> = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3 };
-        this.pendingWheelSlot = map[e.code] ?? null;
+        this.pendingWheelSlot = Number(e.code.slice(5)) - 1; // Digit1→0 … Digit8→7
       }
       if (e.code === 'KeyX') this.interactPressed = true;
       if (e.code === 'Space') {
@@ -203,7 +202,7 @@ export class InputManager {
   /** True while [I] is held — supply wheel overlay */
   isSupplyWheelOpen() { return this.vHeld; }
   queueWheelSlot(slot: number) {
-    if (slot >= 0 && slot <= 3) this.pendingWheelSlot = slot;
+    if (slot >= 0 && slot <= 7) this.pendingWheelSlot = slot;
   }
   hasPendingActions() {
     return this.interactPressed
@@ -217,13 +216,10 @@ export class InputManager {
       || this.cannonAmmoPressed !== null
       || this.pendingWheelSlot !== null;
   }
-  /** While supply wheel is open, which pocket slot (0–3) has a digit held — for FP preview */
+  /** While supply wheel is open, which slot (0–7) has a digit held — for FP preview */
   getSupplyWheelHeldSlot(): number | null {
     if (!this.vHeld) return null;
-    if (this.keys.has('Digit1')) return 0;
-    if (this.keys.has('Digit2')) return 1;
-    if (this.keys.has('Digit3')) return 2;
-    if (this.keys.has('Digit4')) return 3;
+    for (let i = 1; i <= 8; i++) if (this.keys.has(`Digit${i}`)) return i - 1;
     return null;
   }
   getMoveAxes() {
