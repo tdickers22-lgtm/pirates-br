@@ -3431,7 +3431,7 @@ export class Game {
     // Deterministic from the profile seed; culled with the micro tier past
     // ~260m; zero colliders (ankle-high ground cover).
     if (!lowDetail) {
-      const grassCount = Math.min(1400, Math.round(r * r * 0.16));
+      const grassCount = Math.min(2600, Math.round(r * r * 0.3));
       const bladeGeo = new THREE.PlaneGeometry(0.34, 0.42, 1, 1);
       bladeGeo.translate(0, 0.21, 0);
       const crossGeo = (() => {
@@ -3499,6 +3499,85 @@ export class Game {
       grass.receiveShadow = true;
       grass.name = 'island-grass';
       group.add(grass);
+
+      // ── Ferns: taller arched fronds in the shaded inner jungle band ──
+      const fernCount = Math.min(520, Math.round(r * r * 0.05));
+      const fernGeo = crossGeo.clone();
+      fernGeo.scale(1.9, 2.6, 1.9);
+      {
+        const fpos = fernGeo.getAttribute('position') as THREE.BufferAttribute;
+        for (let i = 0; i < fpos.count; i++) {
+          const fy = fpos.getY(i);
+          // arch the tips outward for a frond silhouette
+          fpos.setX(i, fpos.getX(i) * (1 + fy * 0.5));
+          fpos.setZ(i, fpos.getZ(i) * (1 + fy * 0.5));
+        }
+        fpos.needsUpdate = true;
+      }
+      const ferns = new THREE.InstancedMesh(
+        fernGeo,
+        new THREE.MeshStandardMaterial({ color: paletteFoliage.clone().multiplyScalar(0.72), roughness: 0.92, side: THREE.DoubleSide }),
+        fernCount,
+      );
+      let fernsPlaced = 0;
+      for (let i = 0; i < fernCount * 3 && fernsPlaced < fernCount; i++) {
+        const angle = rng(i * 41 + 9) * Math.PI * 2;
+        const dRatio = 0.05 + rng(i * 43 + 3) * 0.6;
+        const sample = surfacePoint(dRatio, angle, 0);
+        if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + peakEst * 0.6) continue;
+        gP.set(sample.x, sample.y - 0.03, sample.z);
+        gE.set((rng(i * 47) - 0.5) * 0.24, rng(i * 53) * Math.PI, (rng(i * 59) - 0.5) * 0.24);
+        gQ.setFromEuler(gE);
+        const sc = 0.6 + rng(i * 61) * 0.8;
+        gS.set(sc, sc, sc);
+        gM.compose(gP, gQ, gS);
+        ferns.setMatrixAt(fernsPlaced, gM);
+        gColor.copy(paletteFoliage).multiplyScalar(0.55 + rng(i * 67) * 0.5);
+        ferns.setColorAt(fernsPlaced, gColor);
+        fernsPlaced += 1;
+      }
+      ferns.count = fernsPlaced;
+      ferns.instanceMatrix.needsUpdate = true;
+      if (ferns.instanceColor) ferns.instanceColor.needsUpdate = true;
+      ferns.castShadow = false;
+      ferns.receiveShadow = true;
+      ferns.name = 'island-ferns';
+      group.add(ferns);
+
+      // ── Seashells + starfish flecks on the wet-sand band ──
+      const shellCount = Math.min(240, Math.round(r * 2.2));
+      const shellGeo = new THREE.SphereGeometry(0.09, 6, 4);
+      shellGeo.scale(1.25, 0.4, 1);
+      const shells = new THREE.InstancedMesh(
+        shellGeo,
+        new THREE.MeshStandardMaterial({ color: 0xf2e8da, roughness: 0.72 }),
+        shellCount,
+      );
+      const shellTints = [0xf6efe4, 0xe8cdbf, 0xdfa7a0, 0xc9d8d5, 0xf0dcc2];
+      let shellsPlaced = 0;
+      for (let i = 0; i < shellCount * 4 && shellsPlaced < shellCount; i++) {
+        const angle = rng(i * 71 + 13) * Math.PI * 2;
+        const dRatio = 0.86 + rng(i * 73 + 5) * 0.2;
+        const sample = surfacePoint(dRatio, angle, 0);
+        if (sample.y < 0.06 || sample.y > 1.5) continue; // wet-to-dry sand band only
+        gP.set(sample.x, sample.y + 0.015, sample.z);
+        gE.set(0, rng(i * 79) * Math.PI * 2, 0);
+        gQ.setFromEuler(gE);
+        const sc = 0.6 + rng(i * 83) * 1.1;
+        gS.set(sc, sc, sc);
+        gM.compose(gP, gQ, gS);
+        shells.setMatrixAt(shellsPlaced, gM);
+        gColor.setHex(shellTints[Math.floor(rng(i * 89) * shellTints.length) % shellTints.length]);
+        shells.setColorAt(shellsPlaced, gColor);
+        shellsPlaced += 1;
+      }
+      shells.count = shellsPlaced;
+      shells.instanceMatrix.needsUpdate = true;
+      if (shells.instanceColor) shells.instanceColor.needsUpdate = true;
+      shells.castShadow = false;
+      shells.receiveShadow = true;
+      shells.name = 'island-shells';
+      group.add(shells);
     }
 
     if (island.dock) {
@@ -6304,8 +6383,10 @@ export class Game {
         // it past ~260m cuts hundreds of draw calls per distant island.
         const microRoot = detailRoot.getObjectByName('island-micro-root');
         if (microRoot) microRoot.visible = showDetail && edgeDist < (quality === 'low' ? 180 : 260);
-        const grassMesh = detailRoot.getObjectByName('island-grass');
-        if (grassMesh) grassMesh.visible = showDetail && edgeDist < 300;
+        for (const layerName of ['island-grass', 'island-ferns', 'island-shells'] as const) {
+          const layer = detailRoot.getObjectByName(layerName);
+          if (layer) layer.visible = showDetail && edgeDist < (layerName === 'island-shells' ? 200 : 300);
+        }
       }
 
       for (const chest of island.chests) {
