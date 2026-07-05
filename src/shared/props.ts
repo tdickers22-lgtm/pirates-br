@@ -32,6 +32,10 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   tent_a: { shape: 'sphere', radius: 1.3, height: 1.6 },
   bedroll: { shape: 'none', radius: 0, height: 0.2 },
   rock_arch: { shape: 'none', radius: 0, height: 4.6 },
+  bush: { shape: 'none', radius: 0, height: 1.0 },
+  bush_berry: { shape: 'none', radius: 0, height: 1.0 },
+  flower_bush: { shape: 'none', radius: 0, height: 1.0 },
+  fern_plant: { shape: 'none', radius: 0, height: 0.8 },
   dock_mid: { shape: 'none', radius: 0, height: 1.1 },
   dock_end: { shape: 'none', radius: 0, height: 1.1 },
 };
