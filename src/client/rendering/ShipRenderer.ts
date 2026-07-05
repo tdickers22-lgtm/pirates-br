@@ -31,8 +31,10 @@ type WoodVariant = 'hull' | 'dark' | 'deck';
 
 const WOOD_PALETTES: Record<WoodVariant, { bases: string[]; separator: string; grain: string; knot: string }> = {
   // Hull: rich dark planking. Deck: sun-bleached lighter boards. Dark: trim/beams.
-  hull: { bases: ['#5A3418', '#4E2C12', '#633A1B', '#553016'], separator: '#2C180A', grain: '#71431F', knot: '#3E2410' },
-  dark: { bases: ['#2E1A08', '#28160A', '#331E0B'], separator: '#150A03', grain: '#3E2412', knot: '#241105' },
+  // Brightened after patrol-1: the old values read as featureless black at
+  // noon under ACES (deck planks were fine; every vertical surface vanished).
+  hull: { bases: ['#7B4A22', '#6E401C', '#8A5527', '#75441F'], separator: '#3A2210', grain: '#96602E', knot: '#54301A' },
+  dark: { bases: ['#4A2C12', '#422810', '#523314'], separator: '#241204', grain: '#5E3A1E', knot: '#38200E' },
   deck: { bases: ['#93714A', '#8A6942', '#9C7A50', '#856340'], separator: '#57391D', grain: '#A8865C', knot: '#5E3F20' },
 };
 
@@ -1154,7 +1156,7 @@ export class ShipRenderer {
       roughness: 0.85,
       metalness: 0.02,
     });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x241407, roughness: 0.95 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.95 });
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide });
 
     const hull = new THREE.Mesh(makeLoftedHullGeometry(profile, true), hullMat);
