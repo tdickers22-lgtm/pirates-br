@@ -1772,6 +1772,8 @@ export class Game {
   private wheelHoverSlot: number | null = null;
   /** Whether the supply wheel was open last frame — to catch the release edge. */
   private wheelWasOpen = false;
+  /** Aim button state last frame — so right-click can lower a raised spyglass. */
+  private scopeAimWasDown = false;
   private previousLocalState: Player['state'] | null = null;
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
@@ -6706,6 +6708,15 @@ export class Game {
     // (before hasPendingActions so the resulting input is force-sent this frame).
     this.updateWheelRelease();
 
+    // Right-click LOWERS a raised spyglass (equipped from the wheel) — the
+    // intuitive "zoom out". Re-selecting SCOPE (slot 0) toggles the tool off.
+    const scopedByTool = this.spyglassActive && this.getLocalPlayer()?.equippedTool === 'spyglass';
+    const aimDown = this.input.isAiming();
+    if (scopedByTool && aimDown && !this.scopeAimWasDown) {
+      this.input.queueWheelSlot(0);
+    }
+    this.scopeAimWasDown = aimDown;
+
     const hasForcedInput = this.input.hasPendingActions() || this.pendingInteractFromUi || this.pendingLaunchFromUi;
     if (this.network.isConnected() && (this.inputSendTimer <= 0 || hasForcedInput)) {
       if (this.input.consumeLegendPressed()) {
@@ -8863,7 +8874,7 @@ export class Game {
     this.renderTreasureInventoryChart(player, mappedIsland, closestHoarder);
     this.ui.pocketWheelStats.textContent = this.input.isSupplyWheelOpen()
       ? (player.equippedTool
-          ? `Equipped: ${player.equippedTool.toUpperCase()} · re-select to stow · tools = scope/compass/bucket/shovel · fruit heals · planks → ship stores`
+          ? `Equipped: ${player.equippedTool.toUpperCase()} · ${player.equippedTool === 'spyglass' ? 'right-click or draw a weapon to lower' : 're-select to stow'} · tools = scope/compass/bucket/shovel · fruit heals · planks → ship stores`
           : 'Tools: scope · compass · bucket (bail) · shovel — select to equip · fruit heals · planks → ship stores')
       : '';
     this.updateSupplyWheelCounts(player);
@@ -10844,7 +10855,10 @@ export class Game {
   }
 
   private syncLocalViewWeapon() {
-    if (this.syncLocalViewPocket()) {
+    if (this.syncLocalViewPocket()
+      // Opening the supply wheel or the map holsters the gun — you're not aiming.
+      || this.input.isSupplyWheelOpen()
+      || this.mapOpen) {
       this.localViewWeaponRoot.visible = false;
       this.localViewWeaponAmmoSignature = '';
       this.localViewWeaponKick = 0;
