@@ -1691,6 +1691,9 @@ export class Game {
   private readonly tempRenderPos = new THREE.Vector3();
   private readonly tempBallisticPos = new THREE.Vector3();
   private readonly localViewWeaponRoot = new THREE.Group();
+  /** First-person hands shown while cranking the capstan (anchor hold). */
+  private readonly localViewHandsRoot = new THREE.Group();
+  private capstanHandsBuilt = false;
   private readonly localViewPocketRoot = new THREE.Group();
   private localViewPocketKind: PocketPreviewKind | null = null;
   private pocketUsePreviewKind: PocketPreviewKind | null = null;
@@ -1780,6 +1783,8 @@ export class Game {
     this.localViewWeaponRoot.visible = false;
     this.localViewWeaponRoot.renderOrder = 999;
     this.renderer.camera.add(this.localViewWeaponRoot);
+    this.localViewHandsRoot.visible = false;
+    this.renderer.camera.add(this.localViewHandsRoot);
     this.localViewPocketRoot.visible = false;
     this.localViewPocketRoot.renderOrder = 999;
     this.renderer.camera.add(this.localViewPocketRoot);
@@ -6253,6 +6258,7 @@ export class Game {
     }
 
     this.updateStationMarkers();
+    this.updateCapstanHands();
     if (!this.bugSnapListenerBound) {
       this.bugSnapListenerBound = true;
       window.addEventListener('keydown', this.bugSnapListener);
@@ -6518,6 +6524,58 @@ export class Game {
    *  you can SEE where to go from across the deck. The anchor ring burns
    *  red while the anchor is down (the #1 'why is my ship not moving'). */
   private stationMarkers: { anchor: THREE.Sprite; sails: THREE.Sprite; helm: THREE.Sprite } | null = null;
+
+  private buildCapstanHands() {
+    if (this.capstanHandsBuilt) return;
+    this.capstanHandsBuilt = true;
+    const sleeveMat = new THREE.MeshStandardMaterial({ color: 0x7a3f2a, roughness: 0.92 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: 0xc98d5f, roughness: 0.85 });
+    const barMat = new THREE.MeshStandardMaterial({ color: 0x4a331e, roughness: 0.9 });
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.9, 8), barMat);
+    bar.rotation.z = Math.PI * 0.5;
+    bar.position.set(0, -0.32, -0.62);
+    this.localViewHandsRoot.add(bar);
+    for (const side of [-1, 1] as const) {
+      const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.42, 8), sleeveMat);
+      forearm.position.set(side * 0.24, -0.42, -0.44);
+      forearm.rotation.x = -1.05;
+      forearm.rotation.z = side * 0.18;
+      this.localViewHandsRoot.add(forearm);
+      const hand = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.075, 0.13), skinMat);
+      hand.position.set(side * 0.22, -0.325, -0.6);
+      this.localViewHandsRoot.add(hand);
+      for (let f = 0; f < 3; f++) {
+        const finger = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.05, 0.024), skinMat);
+        finger.position.set(side * 0.22 - 0.026 + f * 0.026, -0.29, -0.655);
+        finger.rotation.x = 0.7;
+        this.localViewHandsRoot.add(finger);
+      }
+    }
+  }
+
+  /** Show working hands on the capstan bar while the anchor hold runs. */
+  private updateCapstanHands() {
+    const player = this.getLocalPlayer();
+    const ship = player?.onShipId ? this.shipsById.get(player.onShipId) : null;
+    const cranking = !!player && !!ship
+      && ship.anchored
+      && this.input.isInteractHeld()
+      && (this.visibleInteractKind === 'anchor' || this.lastInteractKind === 'anchor')
+      && (ship.anchorRaiseProgress ?? 0) > 0.001;
+    if (cranking) this.buildCapstanHands();
+    this.localViewHandsRoot.visible = !!cranking;
+    if (cranking) {
+      this.localViewWeaponRoot.visible = false;
+      const t = this.ocean.getTime();
+      // push rhythm: lean into the bar, sway with the crank
+      this.localViewHandsRoot.position.set(
+        Math.sin(t * 3.1) * 0.045,
+        Math.abs(Math.sin(t * 3.1)) * -0.03,
+        Math.sin(t * 6.2) * 0.02,
+      );
+      this.localViewHandsRoot.rotation.z = Math.sin(t * 3.1) * 0.06;
+    }
+  }
 
   private updateStationMarkers() {
     // Retired: the floating beacon orbs read as UI garbage in-world (they
