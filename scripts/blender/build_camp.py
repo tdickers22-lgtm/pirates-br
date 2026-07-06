@@ -17,9 +17,9 @@ def build_tent(name):
     rng = random.Random(7)
     parts = []
 
-    ridge_h = 1.62
-    half_w = 1.35
-    length = 2.6
+    ridge_h = 1.95   # taller + narrower → steep slopes read as a TENT, not a flat sheet
+    half_w = 1.02
+    length = 2.7
 
     # A-frame pole pairs (crossed) at both ends + ridge pole
     for ey in (-length / 2, length / 2):
@@ -64,6 +64,17 @@ def build_tent(name):
          for dx, dy in ((0, 0), (0.34, 0.05), (0.3, 0.42), (-0.03, 0.38))]
     bm.faces.new(p)
     parts.append(obj_from_bmesh(f"{name}_patch", bm, coll, mat("Canvas")))
+
+    # Closed back gable — a triangular canvas wall so the tent reads as an
+    # enclosed shelter with depth (the front stays open as the entrance).
+    back_y = (length + 0.35) / 2
+    for sgn in (1,):  # back only
+        bm = bmesh.new()
+        apex = bm.verts.new((0, sgn * back_y, ridge_h - 0.06))
+        bl = bm.verts.new((-half_w * 1.05, sgn * back_y, 0.05))
+        br = bm.verts.new((half_w * 1.05, sgn * back_y, 0.05))
+        bm.faces.new((apex, bl, br) if sgn > 0 else (apex, br, bl))
+        parts.append(obj_from_bmesh(f"{name}_gable{sgn}", bm, coll, mat("Canvas_Dirty")))
 
     # Guy ropes + stakes from the ridge ends
     for ey, sy in ((-length / 2 - 0.24, -1), (length / 2 + 0.24, 1)):
