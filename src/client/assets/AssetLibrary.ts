@@ -13,7 +13,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
  */
 
 export const ASSET_NAMES = [
-  'palm_a', 'palm_b', 'palm_c',
+  'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
   'boulder_a', 'boulder_b', 'boulder_c',
   'searock_a', 'searock_b', 'searock_c',
   'barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire',

@@ -882,6 +882,12 @@ function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
 
 type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass';
 
+/** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
+const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
+  'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
+  'fern_plant', 'bush', 'bush_berry', 'flower_bush', 'wildflowers', 'flower_patch',
+]);
+
 function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
   const group = new THREE.Group();
   const yellow = new THREE.MeshStandardMaterial({ color: 0xf0c040, roughness: 0.42 });
@@ -1858,6 +1864,9 @@ export class Game {
   private wheelWasOpen = false;
   /** Aim button state last frame — so right-click can lower a raised spyglass. */
   private scopeAimWasDown = false;
+  /** Wind vector + clock driving the palm/foliage sway shader (updated per frame). */
+  private readonly foliageWind = { value: new THREE.Vector2(0.62, 0.42) };
+  private readonly foliageTime = { value: 0 };
   private previousLocalState: Player['state'] | null = null;
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
@@ -2336,11 +2345,41 @@ export class Game {
    *  through every visible tree. Rendering the registry makes visuals ==
    *  colliders, and finally shows the roster landmarks (watchtowers, standing
    *  stones, wrecks) that were generated but never drawn. */
+  /** Inject a vertex wind-sway into an instanced foliage material: higher parts
+   *  bend more, each instance offset by its world position so a grove ripples
+   *  rather than swaying in lockstep. Applied once per shared material. */
+  private applyFoliageSway(material: THREE.Material | THREE.Material[]) {
+    if (Array.isArray(material)) {
+      for (const m of material) this.applyFoliageSway(m);
+      return;
+    }
+    const ud = material.userData as { swayApplied?: boolean };
+    if (ud.swayApplied) return;
+    ud.swayApplied = true;
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uFoliageTime = this.foliageTime;
+      shader.uniforms.uFoliageWind = this.foliageWind;
+      shader.vertexShader = 'uniform float uFoliageTime;\nuniform vec2 uFoliageWind;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+         float swayH = max(0.0, transformed.y - 0.6) * 0.06;   // bend the crown, not the trunk base
+         vec3 iPos = vec3(instanceMatrix[3].x, instanceMatrix[3].y, instanceMatrix[3].z);
+         float ph = iPos.x * 0.13 + iPos.z * 0.11;
+         float s = sin(uFoliageTime * 1.5 + ph) + 0.35 * sin(uFoliageTime * 3.2 + ph * 1.7);
+         transformed.x += swayH * uFoliageWind.x * s;
+         transformed.z += swayH * uFoliageWind.y * s;`,
+      );
+    };
+    material.needsUpdate = true;
+  }
+
   private buildServerProps(island: Island, group: THREE.Group, lowDetail: boolean) {
     const props = island.props ?? [];
     if (props.length === 0) return;
     const instancedTypes: ReadonlySet<string> = new Set([
-      'palm_a', 'palm_b', 'palm_c', 'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
+      'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
+      'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
       'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
     ]);
     const buckets = new Map<IslandPropType, IslandProp[]>();
@@ -2359,6 +2398,7 @@ export class Game {
     for (const [type, list] of buckets) {
       const merged = instancedTypes.has(type) ? assets.mergedGeometry(type as AssetName) : null;
       if (merged) {
+        if (SWAYING_FOLIAGE.has(type)) this.applyFoliageSway(merged.material);
         const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
         list.forEach((prop, i) => {
           pos.set(prop.x - island.position.x, getPropGroundY(island, prop), prop.z - island.position.z);
@@ -6787,6 +6827,10 @@ export class Game {
       ? performance.now() / 1000 + this.serverTimeOffset
       : performance.now() / 1000;
     this.updateVolcanicFx(dt, worldTime);
+    // Drive the palm/foliage sway: advance its clock and gust the wind strength.
+    this.foliageTime.value = worldTime;
+    const gust = 0.75 + 0.35 * Math.sin(worldTime * 0.27) + 0.15 * Math.sin(worldTime * 0.11);
+    this.foliageWind.value.set(0.68 * gust, 0.46 * gust);
 
     // Radial release: if the wheel just closed over a hovered slot, queue it now
     // (before hasPendingActions so the resulting input is force-sent this frame).

@@ -255,7 +255,7 @@ export type IslandBiome = 'lush' | 'palm_atoll' | 'volcanic' | 'highland' | 'bon
 
 /** Exact GLB asset names in public/assets/models (see its README manifest). */
 export type IslandPropType =
-  | 'palm_a' | 'palm_b' | 'palm_c'
+  | 'palm_a' | 'palm_b' | 'palm_c' | 'palm_tall' | 'palm_ground'
   | 'boulder_a' | 'boulder_b' | 'boulder_c'
   | 'barrel' | 'crate' | 'campfire' | 'lantern_post'
   | 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort'
