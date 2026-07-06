@@ -305,7 +305,7 @@ export interface IslandProfile {
   /** 0 = ordinary tropical isle, 1 = dramatic mountain peak. Boosts primary-hill height. */
   peakBoost: number;
   /** Identifier for the high-level shape archetype, used by the client for decoration. */
-  terrainStyle: 'tropical' | 'mountain' | 'plateau' | 'rocky' | 'twin' | 'archipelago';
+  terrainStyle: 'tropical' | 'mountain' | 'plateau' | 'rocky' | 'twin' | 'archipelago' | 'crescent';
   /** Concave shoreline indentations — narrow deep ones read as coves, wide
    *  shallow ones as bays. Shared by physics + mesh so the carved water is
    *  walkable/sailable identically on server and client. */
