@@ -375,6 +375,12 @@ export interface IslandCave {
    *  interiorRadius/length/floorY this defines the walkable interior box —
    *  the physics track clamps in-cave player Y to [floorY, ceilingY]. */
   ceilingY?: number;
+  /** This segment breaks the surface as a real mouth (entrance frame + the
+   *  hillside is carved open here). Internal tunnels/chambers set this false. */
+  hasMouth?: boolean;
+  /** Cap the far end with a back wall (a dead-end chamber). Through-tunnels and
+   *  junction-connected segments set this false so the system stays open. */
+  hasBackWall?: boolean;
 }
 
 export interface Island {

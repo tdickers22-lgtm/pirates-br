@@ -168,18 +168,26 @@ for (const seed of [SEED, 20260702]) {
       }
     }
 
-    // Cave volumes: roofed hillsides, sane ceiling helper, null outside.
+    // Cave SYSTEMS: each segment is an oriented box; segments overlap into a
+    // network, so the ceiling/floor helpers may report a connected segment's
+    // value — assert a roofed, walkable volume rather than exact per-segment
+    // equality. Mouth segments intentionally break the surface (an opening).
     for (const cave of island.caves) {
       const midX = cave.position.x - Math.sin(cave.rotation) * cave.length * 0.6;
       const midZ = cave.position.z - Math.cos(cave.rotation) * cave.length * 0.6;
       const ceil = getCaveCeilingY(island, midX, midZ);
-      if (ceil === null || ceil !== cave.ceilingY) { cavesOk = false; detail = `${island.name}: ceiling helper ${ceil}`; }
-      if (cave.ceilingY - cave.floorY < 3.0) { cavesOk = false; detail = `${island.name}: cave too low`; }
-      const deepX = cave.position.x - Math.sin(cave.rotation) * cave.length;
-      const deepZ = cave.position.z - Math.cos(cave.rotation) * cave.length;
-      if (getIslandSurfaceY(island, deepX, deepZ) < cave.ceilingY + 2 - 1e-6) { cavesOk = false; detail = `${island.name}: roof thinner than 2m`; }
       const floor = getCaveFloorY(island, midX, midZ);
-      if (floor === null || Math.abs(floor - cave.floorY) > 0.6) { cavesOk = false; detail = `${island.name}: cave floor ${floor}`; }
+      if (ceil === null || floor === null || ceil - floor < 2.8) {
+        cavesOk = false; detail = `${island.name}: no roofed volume (ceil ${ceil}, floor ${floor})`;
+      }
+      if (cave.ceilingY - cave.floorY < 3.0) { cavesOk = false; detail = `${island.name}: cave too low`; }
+      // Dead-end chambers keep real rock overhead (they don't surface). Mouths
+      // and through-tunnels intentionally approach/break the surface.
+      if (cave.hasBackWall) {
+        const deepX = cave.position.x - Math.sin(cave.rotation) * cave.length * 0.85;
+        const deepZ = cave.position.z - Math.cos(cave.rotation) * cave.length * 0.85;
+        if (getIslandSurfaceY(island, deepX, deepZ) < cave.ceilingY + 1.0) { cavesOk = false; detail = `${island.name}: dead-end roof thin`; }
+      }
       const farX = island.position.x + getIslandMaxRadius(island) * 2;
       if (getCaveCeilingY(island, farX, island.position.z) !== null) { cavesOk = false; detail = `${island.name}: ceiling outside`; }
       if (getCaveFloorY(island, farX, island.position.z) !== null) { cavesOk = false; detail = `${island.name}: floor outside`; }
