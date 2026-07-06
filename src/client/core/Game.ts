@@ -882,6 +882,60 @@ function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
 
 type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass' | 'lantern';
 
+/** One cave segment as a CONTINUOUS, enclosed, organically-displaced rock tube
+ *  (walls + floor + arched ceiling as a single surface — no gaps, no flat
+ *  slabs). Rings are lofted along the tunnel axis with per-ring wander and
+ *  per-vertex rock jitter; the floor is flattened for walking. Both ends stay
+ *  open so overlapping segments blend into a network; `capBack` seals dead-ends. */
+function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, ceilY: number, seed: number, capBack: boolean): THREE.BufferGeometry {
+  const segs = 16;
+  const rings = Math.max(5, Math.round(cLen / 1.3));
+  const hash = (n: number) => { const x = Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453; return x - Math.floor(x); };
+  const vc = (floorY + ceilY) * 0.5;
+  const vh = (ceilY - floorY) * 0.5;
+  const positions: number[] = [];
+  const ringIdx: number[][] = [];
+  let vi = 0;
+  for (let j = 0; j <= rings; j++) {
+    const z = -cLen * (j / rings);
+    const cxWob = (hash(j * 3.7) - 0.5) * cR * 0.5;      // tunnel meanders
+    const rMul = 0.85 + hash(j * 6.3) * 0.35;             // pinches + widenings
+    const idxs: number[] = [];
+    for (let s = 0; s < segs; s++) {
+      const a = (s / segs) * Math.PI * 2;                 // 0=right, π/2=up, 3π/2=down
+      const n = 1 + (hash(j * 131 + s * 7.7) - 0.5) * 0.42; // rocky per-vertex jitter
+      let x = Math.cos(a) * cR * rMul * n + cxWob;
+      let y = vc + Math.sin(a) * vh * rMul * n;
+      const sa = Math.sin(a);
+      if (sa < -0.28) { const k = (-sa - 0.28) / 0.72; y = y * (1 - k) + (floorY + 0.05) * k; } // flat floor
+      positions.push(x, Math.max(y, floorY - 0.02), z);
+      idxs.push(vi++);
+    }
+    ringIdx.push(idxs);
+  }
+  const indices: number[] = [];
+  for (let j = 0; j < rings; j++) {
+    for (let s = 0; s < segs; s++) {
+      const s2 = (s + 1) % segs;
+      const a = ringIdx[j][s], b = ringIdx[j][s2], c = ringIdx[j + 1][s2], d = ringIdx[j + 1][s];
+      indices.push(a, d, c, a, c, b); // inward-facing
+    }
+  }
+  if (capBack) {
+    const last = ringIdx[rings];
+    let cx = 0, cy = 0;
+    for (const idx of last) { cx += positions[idx * 3]; cy += positions[idx * 3 + 1]; }
+    const cIdx = vi++;
+    positions.push(cx / segs, cy / segs, -cLen);
+    for (let s = 0; s < segs; s++) indices.push(last[s], cIdx, last[(s + 1) % segs]);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 /** Floating name label (billboard) that hovers over an opponent's head. */
 function makeNameplateSprite(name: string): THREE.Sprite {
   const canvas = document.createElement('canvas');
@@ -4339,9 +4393,9 @@ export class Game {
     // as a real explorable cave you can step into.
     if (island.caves && island.caves.length > 0) {
       const caveStoneMat = new THREE.MeshStandardMaterial({ color: 0x3a342a, roughness: 1 });
-      const caveWallMat = new THREE.MeshStandardMaterial({ color: 0x2a241d, roughness: 1, side: THREE.DoubleSide });
-      const caveCeilingMat = new THREE.MeshStandardMaterial({ color: 0x1a1610, roughness: 1, side: THREE.DoubleSide });
-      const caveFloorMat = new THREE.MeshStandardMaterial({ color: 0x4a3e2c, roughness: 1 });
+      // Dark faceted rock for the continuous cave tube (both sides so you never
+      // see a hole through a wall from any angle).
+      const caveRockMat = new THREE.MeshStandardMaterial({ color: 0x352e26, roughness: 1, flatShading: true, side: THREE.DoubleSide });
       const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
       const flameMat = new THREE.MeshStandardMaterial({ color: 0xff8a20, emissive: 0xff5500, emissiveIntensity: 1.4, roughness: 0.4 });
 
@@ -4384,61 +4438,16 @@ export class Game {
           caveGroup.add(base);
         }
 
-        // ── Cave floor: a flat slab inside the tunnel so the surface reads cleanly
-        //     even where terrain mesh resolution can't capture the hollow precisely ──
-        const floorMesh = new THREE.Mesh(
-          new THREE.BoxGeometry(cR * 2, 0.16, cLen),
-          caveFloorMat,
+        // ── The cave itself: one CONTINUOUS enclosed rock tube (floor + walls +
+        //    arched ceiling), organically displaced — replaces the old flat
+        //    floor/wall/ceiling slabs that left black gaps. Dead-ends get a
+        //    fan-capped back; mouths/junctions stay open so segments connect. ──
+        const tube = new THREE.Mesh(
+          makeCaveTubeGeometry(cR, cLen, floorLocalY, ceilingLocalY, cw * 7.3 + cLen * 2.1 + cR, cave.hasBackWall ?? true),
+          caveRockMat,
         );
-        floorMesh.position.set(0, floorLocalY - 0.08, -cLen * 0.5);
-        floorMesh.receiveShadow = true;
-        caveGroup.add(floorMesh);
-
-        // ── Side walls: rough stone running the length of the tunnel ──
-        for (const side of [-1, 1] as const) {
-          const wall = new THREE.Mesh(
-            new THREE.PlaneGeometry(cLen, ch),
-            caveWallMat,
-          );
-          wall.position.set(side * cR, floorLocalY + ch * 0.5, -cLen * 0.5);
-          wall.rotation.y = side > 0 ? -Math.PI * 0.5 : Math.PI * 0.5;
-          wall.receiveShadow = true;
-          caveGroup.add(wall);
-        }
-
-        // ── Ceiling: a slightly arched roof using two angled slabs ──
-        const archHalf = cR + 0.2;
-        for (const side of [-1, 1] as const) {
-          const slab = new THREE.Mesh(
-            new THREE.PlaneGeometry(archHalf, cLen),
-            caveCeilingMat,
-          );
-          slab.position.set(side * archHalf * 0.5, ceilingLocalY - 0.08, -cLen * 0.5);
-          slab.rotation.x = Math.PI * 0.5;
-          slab.rotation.z = side * 0.18;
-          slab.receiveShadow = true;
-          caveGroup.add(slab);
-        }
-        // Centre ridge of the ceiling
-        const ridge = new THREE.Mesh(
-          new THREE.PlaneGeometry(0.6, cLen),
-          caveCeilingMat,
-        );
-        ridge.position.set(0, ceilingLocalY, -cLen * 0.5);
-        ridge.rotation.x = Math.PI * 0.5;
-        caveGroup.add(ridge);
-
-        // ── Back wall: only caps a dead-end chamber; through-tunnels and
-        //    junctions stay open so the system connects. ──
-        if (cave.hasBackWall ?? true) {
-          const back = new THREE.Mesh(
-            new THREE.PlaneGeometry(cR * 2, ch),
-            caveWallMat,
-          );
-          back.position.set(0, floorLocalY + ch * 0.5, -cLen);
-          back.rotation.y = 0; // facing +Z, visible from inside
-          caveGroup.add(back);
-        }
+        tube.receiveShadow = true;
+        caveGroup.add(tube);
 
         // ── Stalactite + stalagmite accents ──
         const stoneAccentMat = new THREE.MeshStandardMaterial({ color: 0x4a3e2e, roughness: 1, flatShading: true });
