@@ -46,9 +46,9 @@ export class InputManager {
         if (!this.vHeld && this.locked) document.exitPointerLock?.();
         this.vHeld = true;
       }
-      if (this.vHeld && /^Digit[1-8]$/.test(e.code)) {
+      if (this.vHeld && /^Digit[1-9]$/.test(e.code)) {
         e.preventDefault();
-        this.pendingWheelSlot = Number(e.code.slice(5)) - 1; // Digit1→0 … Digit8→7
+        this.pendingWheelSlot = Number(e.code.slice(5)) - 1; // Digit1→0 … Digit9→8
       }
       if (e.code === 'KeyX') this.interactPressed = true;
       if (e.code === 'Space') {
@@ -202,7 +202,7 @@ export class InputManager {
   /** True while [I] is held — supply wheel overlay */
   isSupplyWheelOpen() { return this.vHeld; }
   queueWheelSlot(slot: number) {
-    if (slot >= 0 && slot <= 7) this.pendingWheelSlot = slot;
+    if (slot >= 0 && slot <= 8) this.pendingWheelSlot = slot;
   }
   hasPendingActions() {
     return this.interactPressed
@@ -219,7 +219,7 @@ export class InputManager {
   /** While supply wheel is open, which slot (0–7) has a digit held — for FP preview */
   getSupplyWheelHeldSlot(): number | null {
     if (!this.vHeld) return null;
-    for (let i = 1; i <= 8; i++) if (this.keys.has(`Digit${i}`)) return i - 1;
+    for (let i = 1; i <= 9; i++) if (this.keys.has(`Digit${i}`)) return i - 1;
     return null;
   }
   getMoveAxes() {

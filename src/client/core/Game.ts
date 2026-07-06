@@ -880,7 +880,7 @@ function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
   return group;
 }
 
-type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass';
+type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass' | 'lantern';
 
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
@@ -1104,6 +1104,33 @@ function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
     lid.position.set(0, 0.086, -0.02);
     lid.rotation.z = -0.5;
     group.add(lid);
+  } else if (kind === 'lantern') {
+    const metal = new THREE.MeshStandardMaterial({ color: 0x2a2622, roughness: 0.5, metalness: 0.7 });
+    const glassMat = new THREE.MeshStandardMaterial({ color: 0xffd27a, roughness: 0.15, transparent: true, opacity: 0.5, emissive: 0xff9a2e, emissiveIntensity: 1.8 });
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.13, 0.05, 12), metal);
+    base.position.y = -0.13;
+    group.add(base);
+    const glass = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.1, 0.18, 12), glassMat);
+    group.add(glass);
+    const flame = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffcf6a }));
+    flame.scale.y = 1.5;
+    group.add(flame);
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.2, 4), metal);
+      bar.position.set(Math.cos(a) * 0.1, 0, Math.sin(a) * 0.1);
+      group.add(bar);
+    }
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.12, 0.07, 12), metal);
+    cap.position.y = 0.12;
+    group.add(cap);
+    const vent = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.06, 8), metal);
+    vent.position.y = 0.185;
+    group.add(vent);
+    const handle = new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.008, 6, 14, Math.PI), metal);
+    handle.position.y = 0.22;
+    handle.rotation.z = Math.PI;
+    group.add(handle);
   } else if (kind === 'spyglass') {
     const brass = new THREE.MeshStandardMaterial({ color: 0xc9a24a, roughness: 0.32, metalness: 0.85 });
     const leather = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.88 });
@@ -1867,6 +1894,8 @@ export class Game {
   /** Wind vector + clock driving the palm/foliage sway shader (updated per frame). */
   private readonly foliageWind = { value: new THREE.Vector2(0.62, 0.42) };
   private readonly foliageTime = { value: 0 };
+  /** Warm point light carried by the player while the LANTERN tool is equipped. */
+  private readonly heldLampLight = new THREE.PointLight(0xffb262, 0, 26, 1.6);
   private previousLocalState: Player['state'] | null = null;
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
@@ -2006,6 +2035,10 @@ export class Game {
     this.localViewPocketRoot.visible = false;
     this.localViewPocketRoot.renderOrder = 999;
     this.renderer.camera.add(this.localViewPocketRoot);
+    // Held-lamp light rides with the view (off until the lantern is equipped),
+    // offset to the held hand so it washes the world around the player.
+    this.heldLampLight.position.set(0.35, -0.1, -0.5);
+    this.renderer.camera.add(this.heldLampLight);
     this.ocean.init(this.renderer.scene, this.renderer.getQuality());
     this.setLoading(56, 'Stirring the deep...');
     await this.yieldForLoadingPaint();
@@ -2676,13 +2709,13 @@ export class Game {
       if (Math.hypot(dx, dy) < rect.width * 0.13) { this.wheelHoverSlot = null; return; }
       let ang = Math.atan2(dx, -dy); // clockwise from the top (slot 0)
       if (ang < 0) ang += Math.PI * 2;
-      this.wheelHoverSlot = Math.round(ang / (Math.PI / 4)) % 8;
+      this.wheelHoverSlot = Math.round(ang / (Math.PI * 2 / 9)) % 9; // 9-slice wheel
     });
   }
 
   /** Use/equip a supply-wheel slot (shared by click and hover-release). */
   private activateWheelSlot(slot: number) {
-    if (!Number.isInteger(slot) || slot < 0 || slot > 7) return;
+    if (!Number.isInteger(slot) || slot < 0 || slot > 8) return;
     const local = this.getLocalPlayer();
     if (local?.carryingChestId) return;
     if (this.pocketUsePreviewTimer > 0) return;
@@ -3606,11 +3639,40 @@ export class Game {
       && (island.profile.peakBoost ?? 0) > 0.65;
     const snowColor = new THREE.Color(0xeef3fb);
 
+    // Carve a real MOUTH into the hillside at each cave entrance so it reads as a
+    // gaping hole you walk into — not a shallow dip in a solid hill. Only the
+    // front of the tunnel is opened; the deep tunnel keeps its natural rock roof
+    // (the interior mesh encloses it). Cave-local frame matches caveGroup.rotation.
+    const carveCaveMouth = (worldX: number, worldZ: number, y: number): number => {
+      if (!island.caves) return y;
+      let out = y;
+      for (const cave of island.caves) {
+        if (out <= cave.floorY) continue;
+        const dx = worldX - cave.position.x;
+        const dz = worldZ - cave.position.z;
+        const cs = Math.cos(cave.rotation);
+        const sn = Math.sin(cave.rotation);
+        const lx = dx * cs - dz * sn;      // lateral
+        const lz = dx * sn + dz * cs;      // +z outward (entrance), tunnel to -z
+        const cLen = (cave as { length?: number }).length ?? 10;
+        const cR = (cave as { interiorRadius?: number }).interiorRadius ?? 3;
+        const lat = 1 - THREE.MathUtils.smoothstep(Math.abs(lx), cR - 0.4, cR + 0.7);
+        // Open the terrain down the WHOLE tunnel (fade only at the very back wall)
+        // so the hollow is clear; the interior arched-ceiling mesh is the roof.
+        const inner = THREE.MathUtils.smoothstep(lz, -cLen * 1.05, -cLen * 0.9);
+        const outer = 1 - THREE.MathUtils.smoothstep(lz, 0.8, 2.6);
+        const mask = lat * inner * outer;
+        if (mask > 0) out += (cave.floorY - out) * mask;
+      }
+      return out;
+    };
+
     for (let ring = 0; ring <= totalRings; ring++) {
       const distRatio = ringDistRatio(ring);
       for (let segment = 0; segment <= angularSegments; segment++) {
         const angle = (segment / angularSegments) * Math.PI * 2;
         const point = surfacePoint(distRatio, angle, 0.02);
+        point.y = carveCaveMouth(point.x + island.position.x, point.z + island.position.z, point.y);
         terrainPositions.push(point.x, point.y, point.z);
       }
     }
@@ -4341,8 +4403,9 @@ export class Game {
         const ch = cave.height;
         const cLen = (cave as { length?: number }).length ?? 10;
         const cR = (cave as { interiorRadius?: number }).interiorRadius ?? 3.0;
-        // Cave-local Y where floor sits (heightmap drops here via getIslandSurfaceY)
-        const floorLocalY = -0.4;
+        // Floor sits at the SAME depth physics stands you on (cave.floorY), so
+        // your feet meet the visible slab instead of floating ~0.6-1.3m above it.
+        const floorLocalY = cave.floorY - cave.position.y;
         const ceilingLocalY = floorLocalY + ch;
         // Cave tunnel runs from local z=0 (entrance) to z=-cLen (back)
 
@@ -4455,9 +4518,32 @@ export class Game {
         const flame = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), flameMat);
         flame.position.set(torchSide * (cR - 0.34), floorLocalY + ch * 0.95, torchZ);
         caveGroup.add(flame);
+        // Underground is dark regardless of day/night, so caves get their OWN
+        // always-on warm torch light (parented to the group → only lit when the
+        // cave is in view range, so no global light-budget blowout).
+        const torchLight = new THREE.PointLight(0xffa64d, 3.2, cLen + cR * 2.2, 1.5);
+        torchLight.position.copy(flame.position);
+        caveGroup.add(torchLight);
+        // Sparse glowing crystals deeper in — cool blue emissive clusters with a
+        // faint light each, so the tunnel reads as lit but moody, not a flat box.
         if (!lowDetail) {
-          // Warm cave torch light via the night-budget system (glow sprite by day).
-          this.registerLanternEmitter(caveGroup, flame.position.x, flame.position.y, flame.position.z, 'lantern');
+          const crystalMat = new THREE.MeshStandardMaterial({ color: 0x6fd3ff, emissive: 0x2f8fe0, emissiveIntensity: 2.2, roughness: 0.3 });
+          const clusters = 2 + Math.floor(rng(cw * 5) * 2);
+          for (let c = 0; c < clusters; c++) {
+            const cz = -cLen * (0.4 + c * 0.28) - rng(c * 91) * 1.2;
+            const cx = (rng(c * 93) - 0.5) * cR * 1.5;
+            const onCeil = rng(c * 95) > 0.6;
+            const cy = onCeil ? ceilingLocalY - 0.3 : floorLocalY + 0.1;
+            for (let s = 0; s < 3; s++) {
+              const shard = new THREE.Mesh(new THREE.ConeGeometry(0.06 + rng(c * 97 + s) * 0.05, 0.3 + rng(c * 99 + s) * 0.4, 5), crystalMat);
+              shard.position.set(cx + (rng(s * 13) - 0.5) * 0.4, cy + (onCeil ? -0.15 : 0.15), cz + (rng(s * 17) - 0.5) * 0.4);
+              shard.rotation.set(rng(s * 19) * 0.6 - 0.3 + (onCeil ? Math.PI : 0), rng(s * 21) * Math.PI, rng(s * 23) * 0.6 - 0.3);
+              caveGroup.add(shard);
+            }
+            const glow = new THREE.PointLight(0x5fbfff, 1.1, 6.5, 1.8);
+            glow.position.set(cx, cy, cz);
+            caveGroup.add(glow);
+          }
         }
 
         // ── Treasure chest tucked at the back of the cave (visual only — gameplay
@@ -6831,6 +6917,10 @@ export class Game {
     this.foliageTime.value = worldTime;
     const gust = 0.75 + 0.35 * Math.sin(worldTime * 0.27) + 0.15 * Math.sin(worldTime * 0.11);
     this.foliageWind.value.set(0.68 * gust, 0.46 * gust);
+    // Held lantern: warm light follows the view while the lantern tool is up,
+    // with a gentle candle flicker. Lets you see inside caves and at night.
+    const lampOn = this.getLocalPlayer()?.equippedTool === 'lantern';
+    this.heldLampLight.intensity = lampOn ? 2.5 + 0.25 * Math.sin(worldTime * 8.3) + 0.12 * Math.sin(worldTime * 17.0) : 0;
 
     // Radial release: if the wheel just closed over a hovered slot, queue it now
     // (before hasPendingActions so the resulting input is force-sent this frame).
@@ -9004,7 +9094,7 @@ export class Game {
     this.ui.pocketWheelStats.textContent = this.input.isSupplyWheelOpen()
       ? (player.equippedTool
           ? `Equipped: ${player.equippedTool.toUpperCase()} · ${player.equippedTool === 'spyglass' ? 'aim (right-click) to zoom · draw a weapon to stow' : 'right-click or re-select to stow'} · tools = scope/compass/bucket/shovel · fruit heals · planks → ship stores`
-          : 'Tools: scope · compass · bucket (bail) · shovel — select to equip · fruit heals · planks → ship stores')
+          : 'Tools: scope · compass · bucket (bail) · shovel · lantern — select to equip · fruit heals · planks → ship stores')
       : '';
     this.updateSupplyWheelCounts(player);
     this.ui.pocketWheel.classList.toggle('visible', this.input.isSupplyWheelOpen());
@@ -10400,7 +10490,7 @@ export class Game {
 
   /** Wheel slice index for an equipped tool (for the highlight), else -1. */
   private toolWheelSlot(tool: Player['equippedTool']): number {
-    return tool === 'spyglass' ? 0 : tool === 'compass' ? 1 : tool === 'bucket' ? 2 : tool === 'shovel' ? 7 : -1;
+    return tool === 'spyglass' ? 0 : tool === 'compass' ? 1 : tool === 'bucket' ? 2 : tool === 'shovel' ? 7 : tool === 'lantern' ? 8 : -1;
   }
 
   private updateSupplyWheelCounts(player: Player) {
@@ -10950,7 +11040,7 @@ export class Game {
           mesh = makePocketPreviewMesh(kind);
           mesh.name = 'local-pocket';
           mesh.rotation.y = Math.PI;
-          mesh.scale.setScalar(tool === 'compass' ? 1.7 : tool === 'bucket' ? 1.4 : tool === 'shovel' ? 1.7 : 1.5);
+          mesh.scale.setScalar(tool === 'compass' ? 1.7 : tool === 'bucket' ? 1.4 : tool === 'shovel' ? 1.7 : tool === 'lantern' ? 1.5 : 1.5);
           applyViewmodelMaterialSettings(mesh);
           this.localViewPocketRoot.add(mesh);
           this.localViewPocketKind = kind;
@@ -10966,6 +11056,8 @@ export class Game {
             ? { p: [0.24 + sway * 0.5, -0.35 + bob, -0.56], r: [-0.12 + bob, 0.2 + sway * 0.3, -0.1] }
             : tool === 'spyglass'
               ? { p: [0.2 + sway * 0.4, -0.2 + bob, -0.46], r: [0.05, -0.5 + sway * 0.2, 0.12] }
+              : tool === 'lantern'
+                ? { p: [0.26 + sway * 0.5, -0.16 + bob, -0.5], r: [0.02 + bob, 0.2, -0.05] } // held up like a lamp
               // Shovel is long — lay it DIAGONALLY across the lower-right (blade
               // low, handle up-left) via a roll about the view axis, so the whole
               // tool stays in the frame plane instead of receding down-forward.
