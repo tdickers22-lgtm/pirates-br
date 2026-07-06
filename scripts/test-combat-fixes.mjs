@@ -122,12 +122,12 @@ function makeFakeWs(sink = null) {
   };
 }
 
-function makeBailInput() {
+function makeBailInput(seq = 1) {
   return {
-    seq: 1, ts: 0,
+    seq, ts: 0,
     forward: false, back: false, left: false, right: false,
     jump: false, jumpPressed: false, fire: false, aim: false,
-    interact: false, interactHeld: true,
+    interact: true, interactHeld: true,
     anchor: false, sailRaise: false, sailLower: false, sailLeft: false, sailRight: false,
     trade: false, reload: false, placeKeg: false, dropChest: false, specialAttack: false,
     slot: null, cannonAmmo: null, yaw: 0, pitch: 0,
@@ -341,17 +341,25 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   expect('untended hole: water actually rises', ship.waterLevel > levelBeforeControl + 0.0015,
     `water ${levelBeforeControl.toFixed(4)} → ${ship.waterLevel.toFixed(4)}`);
 
-  // One bailer via the real input path: bail (0.014) beats ingress (0.010),
-  // so the NET trend the client sees must go negative even though the hole
-  // is still open (the old code published raw ingress = inverted feedback).
+  // One bailer via the real input path — the SCOOP → HEAVE cycle. Pressing
+  // interact each tick (fresh seq) fires an action whenever the scoop/heave lock
+  // clears, so a diligent bailer's net rate beats one open hole and the standing
+  // water falls even though the hole stays open.
   const client = match.clients.get(joined.playerId);
-  client.lastInput = makeBailInput();
   const levelBeforeBail = ship.waterLevel;
-  for (let i = 0; i < 30; i++) { player.health = 100; if (bot) bot.health = 100; match.tick(); }
-  expect('bailer is recognized (player.bailing set)', player.bailing === true);
-  expect('winning bailer: replicated floodingRate goes NEGATIVE',
-    ship.floodingRate < -0.001, `rate=${ship.floodingRate}`);
-  expect('winning bailer: water actually falls', ship.waterLevel < levelBeforeBail - 0.001,
+  let bailSeq = 1000;
+  let sawFilledBucket = false;
+  let sawBailing = false;
+  for (let i = 0; i < 300; i++) {
+    player.health = 100; if (bot) bot.health = 100;
+    client.lastInput = makeBailInput(bailSeq++);
+    match.tick();
+    if (player.bucketFilled) sawFilledBucket = true;
+    if (player.bailing) sawBailing = true;
+  }
+  expect('bailer scoops (bucket fills during the cycle)', sawFilledBucket === true);
+  expect('bailer is recognized (player.bailing set during a scoop/heave)', sawBailing === true);
+  expect('cycling bailer: water actually falls', ship.waterLevel < levelBeforeBail - 0.01,
     `water ${levelBeforeBail.toFixed(4)} → ${ship.waterLevel.toFixed(4)}`);
 }
 

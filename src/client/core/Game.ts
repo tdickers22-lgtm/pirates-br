@@ -1062,6 +1062,7 @@ function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
     group.add(base);
     const surface = new THREE.Mesh(new THREE.CylinderGeometry(0.099, 0.099, 0.008, 18), waterMat);
     surface.position.y = 0.045;
+    surface.name = 'bucket-water'; // toggled by bucketFilled in syncLocalViewPocket
     group.add(surface);
     for (const [y, r] of [[-0.075, 0.092], [0.086, 0.112]] as const) {
       const hoop = new THREE.Mesh(new THREE.TorusGeometry(r, 0.008, 6, 20), iron);
@@ -6889,12 +6890,11 @@ export class Game {
       const currentInteractKind = this.resolveCurrentInteractKind();
       input.interactIntent = input.interact
         ? (currentInteractKind ?? (uiInteract ? this.lastInteractKind : null))
-        // Bail is a continuous hold, so its intent must ride every held frame — not
-        // just the press edge — for the server's held-interact drain to keep running.
-        // Bail, revive and the sail halyard are continuous holds — their
-        // intent must ride every held frame for the server-side work to run.
+        // Revive and the sail halyard are continuous holds — their intent must
+        // ride every held frame for the server-side work to run. (Bailing is now
+        // a discrete press per scoop/heave, so it only fires on the press edge.)
         : (input.interactHeld
-          && (currentInteractKind === 'bail' || currentInteractKind === 'revive' || currentInteractKind === 'sails')
+          && (currentInteractKind === 'revive' || currentInteractKind === 'sails')
           ? currentInteractKind
           : null);
       if (this.pendingLaunchFromUi) {
@@ -10994,6 +10994,11 @@ export class Game {
           this.localViewPocketRoot.add(mesh);
           this.localViewPocketKind = kind;
         }
+        // The bucket only shows water once you've scooped a bucketful.
+        if (tool === 'bucket') {
+          const water = mesh.getObjectByName('bucket-water');
+          if (water) water.visible = !!player.bucketFilled;
+        }
         const time = this.ocean.getTime();
         const moveAxes = this.input.getMoveAxes();
         const moveAmount = Math.min(1, Math.hypot(moveAxes.x, moveAxes.z));
@@ -11437,17 +11442,23 @@ export class Game {
       // Bail the bilge — physical bucket work. Only offered with the BUCKET tool
       // equipped from the supply wheel; otherwise a hint nudges you to equip it.
       // Low priority so cannons/helm/repairs win when you're facing one.
-      if (player.onShipId === ship.id && (ship.waterLevel ?? 0) > 0.02) {
+      const flooded = (ship.waterLevel ?? 0) > 0.02;
+      const hasBucket = player.equippedTool === 'bucket';
+      if (player.onShipId === ship.id && (flooded || (hasBucket && player.bucketFilled))) {
         const pct = Math.round((ship.waterLevel ?? 0) * 100);
-        const hasBucket = player.equippedTool === 'bucket';
-        candidates.push({
-          prompt: hasBucket ? '[Hold X] Bail Water' : 'Equip the Bucket [Hold I] to bail',
-          label: hasBucket
-            ? `Bilge flooding ${pct}% · scoop it overboard`
-            : `Bilge flooding ${pct}% · grab the bucket from the supply wheel`,
-          score: -0.5,
-          kind: 'bail',
-        });
+        let prompt: string;
+        let label: string;
+        if (!hasBucket) {
+          prompt = 'Equip the Bucket [Hold I] to bail';
+          label = `Bilge flooding ${pct}% · grab the bucket from the supply wheel`;
+        } else if (player.bucketFilled) {
+          prompt = '[X] Heave the water overboard';
+          label = 'Bucket full — toss it over the side';
+        } else {
+          prompt = '[X] Fill the bucket from the bilge';
+          label = `Bilge flooding ${pct}% · scoop a bucketful out`;
+        }
+        candidates.push({ prompt, label, score: -0.5, kind: 'bail' });
       }
 
       if (player.carryingChestId && player.onShipId === ship.id) {

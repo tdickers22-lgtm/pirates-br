@@ -197,9 +197,11 @@ export interface Player {
   /** Tool currently held from the supply wheel — drives the spyglass zoom,
    *  physical bucket bailing, and the compass bearing. null = weapon in hand. */
   equippedTool: EquippableTool | null;
-  /** 0..1 fill of the current bucket scoop; at 1 a scoop of bilge water is
-   *  tossed overboard (waterLevel drops a discrete chunk) and it resets. */
+  /** 0..1 animation timer for the current scoop/heave action (paces the cycle). */
   bailScoopProgress: number;
+  /** True once a bucketful of bilge has been scooped and is being carried; the
+   *  next bail action heaves it overboard (empties the bucket). */
+  bucketFilled: boolean;
   nearBarrelId: string | null;
   // ── Down-but-not-out (DBNO) ────────────────────────────────
   /** Seconds of bleed-out remaining while state === 'downed'. Drains 2× faster
