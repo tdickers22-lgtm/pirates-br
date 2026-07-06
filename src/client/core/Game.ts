@@ -9012,7 +9012,9 @@ export class Game {
     // its cross-lines to aim with.) Either way the FPS crosshair is hidden while
     // looking through a scope.
     this.ui.scopeOverlay.classList.toggle('spyglass', this.spyglassActive);
-    this.ui.crosshair.style.display = scopeShowing ? 'none' : '';
+    // No crosshair while looking through a scope OR holding any tool (bucket/
+    // compass/shovel/spyglass) — you're not aiming a weapon.
+    this.ui.crosshair.style.display = scopeShowing || player.equippedTool ? 'none' : '';
     this.ui.crosshair.classList.toggle('cannon', player.atCannon);
     const shotgunCrosshair = !player.atCannon && weapon?.weaponId === 'blunderbuss';
     this.ui.crosshair.classList.toggle('shotgun', shotgunCrosshair);
