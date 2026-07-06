@@ -168,6 +168,7 @@ export interface Atmosphere {
   horizonColor: THREE.Color;
   storminess: number;
   nightFactor: number;
+  twilightFactor: number;
 }
 
 // Camera-following shadow frustum: an ortho box snapped to shadow texels. Sized
@@ -194,7 +195,7 @@ export class Renderer {
   private readonly sunDir = new THREE.Vector3(0.2, 0.92, -0.34).normalize();
   private readonly activeLightDir = new THREE.Vector3();
   private readonly fogDayColor = new THREE.Color(0x9bbfd4);
-  private readonly fogTwilightColor = new THREE.Color(0xdca48c);
+  private readonly fogTwilightColor = new THREE.Color(0xc0968a);
   private readonly fogNightColor = new THREE.Color(0x35506d);
   private readonly fogStormColor = new THREE.Color(0x5a6a78);
   private readonly fogUnderwaterNearColor = new THREE.Color(0x0d5f78);
@@ -241,6 +242,7 @@ export class Renderer {
     horizonColor: new THREE.Color(0xc7e6fa),
     storminess: 0,
     nightFactor: 0,
+    twilightFactor: 0,
   };
   private perfTimer = 0;
   private perfFrameCount = 0;
@@ -531,6 +533,7 @@ export class Renderer {
     a.horizonColor.lerp(this.skyHorizonStormColor, this.stormLevel);
     a.storminess = this.stormLevel;
     a.nightFactor = this.nightAmount;
+    a.twilightFactor = this.twilightAmount;
     return a;
   }
 
@@ -624,13 +627,15 @@ export class Renderer {
   private getCycleAmbientIntensity() {
     // Raised so slopes facing away from an overhead sun read as deep colour, not
     // black — the shaded side of an island should still show its biome tone.
-    return this.dayAmount * 0.9 + this.twilightAmount * 0.78 + this.nightAmount * 0.64;
+    // Twilight fill is kept LOWER than day: the low dusk sun must still shape the
+    // terrain (directional warm light + long shadows), so fill can't out-power it.
+    return this.dayAmount * 0.9 + this.twilightAmount * 0.58 + this.nightAmount * 0.64;
   }
 
   private getCycleHemisphereIntensity() {
     // Sky/ground fill is the main lever that keeps steep terrain readable; it is
     // normal-oriented so it lifts shaded faces without flattening lit ones.
-    return this.dayAmount * 1.34 + this.twilightAmount * 1.02 + this.nightAmount * 0.66;
+    return this.dayAmount * 1.34 + this.twilightAmount * 0.78 + this.nightAmount * 0.66;
   }
 
   private getCycleHorizonIntensity() {
@@ -642,7 +647,7 @@ export class Renderer {
   }
 
   private getCycleFogDensity() {
-    return this.dayAmount * 0.00135 + this.twilightAmount * 0.0015 + this.nightAmount * 0.0019;
+    return this.dayAmount * 0.00135 + this.twilightAmount * 0.00175 + this.nightAmount * 0.0019;
   }
 
   private applyPixelRatio(target: number) {
