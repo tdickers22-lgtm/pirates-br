@@ -1770,6 +1770,10 @@ export class Game {
   private readonly ocean = new OceanRenderer();
   /** EMA-smoothed offset mapping performance.now()/1000 onto server sim seconds. */
   private serverTimeOffset: number | null = null;
+  /** Dev/tour hook: when non-null, forces the day/night clock to this many
+   *  seconds (see setDayNightOverride), so a visual tour can capture noon,
+   *  dusk and night deterministically. Inert during normal play. */
+  private dayNightOverrideSec: number | null = null;
   private readonly shipRenderer = new ShipRenderer();
   private readonly combatFx = new CombatFx();
   private readonly audio = new SoundEngine();
@@ -3566,8 +3570,11 @@ export class Game {
     const sandColor = whiteSand
       ? paletteSand.clone().lerp(sandWhite, 0.55)
       : paletteSand.clone().multiplyScalar(0.9);
-    const grassColor = paletteGrass.clone();
-    const jungleColor = paletteFoliage.clone();
+    // Lush, sunlit greens: lift the base grass a touch for vibrancy, and blend
+    // the (dark) foliage toward grass so jungle interiors read as rich green —
+    // not a murky near-black blanket under the raised sky fill.
+    const grassColor = paletteGrass.clone().multiplyScalar(1.12);
+    const jungleColor = paletteFoliage.clone().lerp(paletteGrass, 0.4);
     const peakColor = paletteGrass.clone().lerp(paletteRock, 0.42);
     const cliffColor = paletteRock.clone().lerp(new THREE.Color(0xffffff), 0.06);
     const mudColor = paletteRock.clone().lerp(paletteFoliage, 0.3);
@@ -3811,15 +3818,21 @@ export class Game {
 
         const heightNorm = THREE.MathUtils.clamp((pointY - seaBase) / peakEst, 0, 1);
         const shoreMask = THREE.MathUtils.smoothstep(distRatio, 0.72, 0.99);
-        const grassMask = THREE.MathUtils.smoothstep(heightNorm, 0.02, 0.42)
-          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.78, 0.98));
+        // Grass is the DEFAULT interior ground: any land above the waterline is
+        // green (the distRatio gate alone keeps a sand berm at the shore), so
+        // even low, wide aprons on big islands read lush — not as tan dunes.
+        const grassMask = THREE.MathUtils.smoothstep(heightNorm, -0.08, 0.05)
+          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.84, 0.99));
         const jungleMask = THREE.MathUtils.smoothstep(heightNorm, 0.08, 0.4)
-          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.75;
+          * (1 - THREE.MathUtils.smoothstep(distRatio, 0.55, 0.82)) * 0.58;
         // Rock is earned by SLOPE first; only genuinely high ground rock-caps.
         const rockMask = THREE.MathUtils.smoothstep(heightNorm, 0.72, 0.97) * (1 - shoreMask * 0.6) * 0.55;
         const peakMask = THREE.MathUtils.smoothstep(heightNorm, 0.88, 1) * 0.4;
         const mudMask = THREE.MathUtils.smoothstep(distRatio, 0.62, 0.78) * (1 - shoreMask) * 0.25;
-        const slopeRockMask = THREE.MathUtils.smoothstep(slope, 0.26, 0.6) * (1 - shoreMask);
+        // Rock is earned on genuinely STEEP faces (~50°+). The old 0.26 start
+        // painted grey rock over every gently-sloped dome flank, washing lush
+        // islands to a muddy monochrome; grass now holds the walkable slopes.
+        const slopeRockMask = THREE.MathUtils.smoothstep(slope, 0.42, 0.74) * (1 - shoreMask);
 
         terrainColor.copy(sandColor);
         terrainColor.lerp(beachColor, shoreMask * coast.beach * 0.95);
@@ -3828,7 +3841,7 @@ export class Game {
         terrainColor.lerp(grassColor, grassMask);
         terrainColor.lerp(jungleColor, jungleMask);
         terrainColor.lerp(cliffColor, rockMask);
-        terrainColor.lerp(rockSlopeColor, slopeRockMask * 0.85);
+        terrainColor.lerp(rockSlopeColor, slopeRockMask * 0.72);
         terrainColor.lerp(peakColor, peakMask * (1 - slopeRockMask));
         scratchColor.copy(beachColor).multiplyScalar(THREE.MathUtils.smoothstep(distRatio, 0.9, 1) * 0.14);
         terrainColor.add(scratchColor);
@@ -3926,7 +3939,11 @@ export class Game {
     }
     const terrain = new THREE.Mesh(terrainGeometry, terrainMat);
     terrain.name = 'island-terrain';
-    terrain.castShadow = true;
+    // The DoubleSide heightfield casting onto ITSELF produced a heavy self-shadow
+    // acne wash that crushed every island to murky olive. Let the terrain receive
+    // shadows (props/trees/ships ground onto it) but not cast — a single-dome
+    // island barely shadows itself anyway, and this restores lush sunlit ground.
+    terrain.castShadow = false;
     terrain.receiveShadow = true;
     group.add(terrain);
 
@@ -7546,6 +7563,13 @@ export class Game {
     this.updateWaterEnvironment();
     this.updateCombatHud(dt);
     this.syncLocalViewWeapon();
+    if (this.freeCam) {
+      // A detached tour/dev camera is not "the pirate's eyes" — hide the
+      // first-person weapon/hands/pocket viewmodels so audit shots are clean.
+      this.localViewWeaponRoot.visible = false;
+      this.localViewHandsRoot.visible = false;
+      this.localViewPocketRoot.visible = false;
+    }
     if (this.windWispTimer <= 0) {
       this.updateWindWisps();
       this.windWispTimer = effectScale < 0.55 ? 1 / 20 : effectScale < 0.85 ? 1 / 30 : 0;
@@ -8652,6 +8676,13 @@ export class Game {
     this.freeCam = null;
   }
 
+  /** Dev/tour hook: force the day/night clock. Pass seconds into the 960s cycle
+   *  (0 ≈ the DAY_NIGHT_START_OFFSET phase; +240 ≈ dusk, +480 ≈ deep night) to
+   *  audit lighting at a fixed time; pass null to resume the live match clock. */
+  setDayNightOverride(seconds: number | null) {
+    this.dayNightOverrideSec = seconds;
+  }
+
   /** Dev/tour helper: world ground height at (x, z) via the shared heightfield,
    *  or 0 over open sea. Lets a tour aim the free-cam at real terrain. */
   sampleGroundY(x: number, z: number): number {
@@ -8842,7 +8873,11 @@ export class Game {
     const waveY = gerstnerHeight(camera.x, camera.z, this.ocean.getTime(), WAVE_PARAMS, camStorm);
     this.combatFx.setWaterSurfaceY(waveY);
     const depthBelowSurface = Math.max(0, waveY + 0.18 - camera.y);
-    this.renderer.updateWaterEnvironment(depthBelowSurface, this.stormWeatherIntensity, this.ocean.getTime());
+    this.renderer.updateWaterEnvironment(
+      depthBelowSurface,
+      this.stormWeatherIntensity,
+      this.dayNightOverrideSec ?? this.ocean.getTime(),
+    );
     this.ocean.setSunDirection(this.renderer.getSunDirection());
     this.ocean.setUnderwaterDepth(depthBelowSurface);
   }
