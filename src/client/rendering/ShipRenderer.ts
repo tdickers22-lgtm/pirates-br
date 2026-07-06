@@ -1178,8 +1178,10 @@ export class ShipRenderer {
     group.add(bowsprit);
 
     const mastCount = stats.mastCount;
-    const mastSpacing = L * 0.55 / Math.max(mastCount - 1, 1);
-    const mastStartZ = L * 0.22;
+    // Keep the aftmost mast forward of the stern helm so its sail never drapes
+    // over the wheel (aftmost lands ~-L*0.14, wheel sits at -L*0.315).
+    const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
+    const mastStartZ = L * 0.28;
     for (let m = 0; m < mastCount; m++) {
       const mastZ = mastStartZ - m * mastSpacing;
       // Same mast height law as the detail model — no rig-height pop at the LOD line
@@ -1896,14 +1898,44 @@ export class ShipRenderer {
     }
     group.add(galleryRail);
 
-    // Helm wheel
+    // ── Quarterdeck: a raised helm dais at the stern so there is a clear
+    //    captain's station — the wheel sits on it, a step leads up, and a low
+    //    rail wraps the back. ──
+    const qdRise = 0.22;
+    const qdZ = -L * 0.36;
+    const qdLen = L * 0.22, qdW = W * 0.72;
+    const quarterdeck = new THREE.Mesh(new THREE.BoxGeometry(qdW, qdRise, qdLen), deckMat);
+    quarterdeck.position.set(0, H + qdRise * 0.5, qdZ);
+    quarterdeck.castShadow = true;
+    quarterdeck.receiveShadow = true;
+    group.add(quarterdeck);
+    const qdStep = new THREE.Mesh(new THREE.BoxGeometry(qdW * 0.44, qdRise * 0.5, 0.34), deckMat);
+    qdStep.position.set(0, H + qdRise * 0.25, qdZ + qdLen * 0.5 + 0.17);
+    qdStep.receiveShadow = true;
+    group.add(qdStep);
+    // Low rail hugging the quarterdeck sides + stern.
+    for (const [rx, rz, rlen, rot] of [
+      [-qdW * 0.5, qdZ, qdLen, 0], [qdW * 0.5, qdZ, qdLen, 0], [0, qdZ - qdLen * 0.5, qdW, Math.PI * 0.5],
+    ] as const) {
+      const railTop = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, rlen), darkMat);
+      railTop.position.set(rx, H + qdRise + 0.62, rz);
+      railTop.rotation.y = rot;
+      group.add(railTop);
+      for (const t of [-0.36, 0, 0.36]) {
+        const baluster = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.62, 5), darkMat);
+        baluster.position.set(rx + Math.cos(rot) * t * rlen, H + qdRise + 0.31, rz + Math.sin(rot) * t * rlen);
+        group.add(baluster);
+      }
+    }
+
+    // Helm wheel (seated on the quarterdeck dais)
     const wheelPost = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.095, 1.06, 8), darkMat);
-    wheelPost.position.set(0, H + 0.56, -L * 0.315);
+    wheelPost.position.set(0, H + qdRise + 0.56, -L * 0.315);
     wheelPost.castShadow = true;
     group.add(wheelPost);
 
     const wheelGroup = new THREE.Group();
-    wheelGroup.position.set(0, H + 1.16, -L * 0.315);
+    wheelGroup.position.set(0, H + qdRise + 1.16, -L * 0.315);
     group.add(wheelGroup);
 
     const wheelBase = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.13, 8), metalMat);
@@ -2063,8 +2095,10 @@ export class ShipRenderer {
     const pennants: THREE.Mesh[] = [];
     const trimPivots: THREE.Group[] = [];
     const mastCount = stats.mastCount;
-    const mastSpacing = L * 0.55 / Math.max(mastCount - 1, 1);
-    const mastStartZ = L * 0.22;
+    // Keep the aftmost mast forward of the stern helm so its sail never drapes
+    // over the wheel (aftmost lands ~-L*0.14, wheel sits at -L*0.315).
+    const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
+    const mastStartZ = L * 0.28;
 
     // All rigging collapses into two LineSegments draw calls (rope + ratline)
     // instead of ~50 individual Line objects per ship.

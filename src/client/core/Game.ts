@@ -8731,11 +8731,12 @@ export class Game {
       const stats = SHIP_STATS[trackedShip.type];
       const helmZ = -stats.length * 0.39;
       const starboardX = stats.width * 0.28;
+      // +0.22 for the raised quarterdeck dais the captain now stands on.
       desired = this.getShipWorldPoint(
         trackedShip,
         starboardX,
         helmZ - stats.length * 0.02,
-        stats.height + 1.48,
+        stats.height + 1.70,
       );
       lookTarget = this.getShipWorldPoint(
         trackedShip,
