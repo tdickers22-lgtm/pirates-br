@@ -170,8 +170,10 @@ export interface Atmosphere {
   nightFactor: number;
 }
 
-// Camera-following shadow frustum: a tight ortho box snapped to shadow texels.
-const SHADOW_HALF_EXTENT = 85;
+// Camera-following shadow frustum: an ortho box snapped to shadow texels. Sized
+// to swallow a whole large island (radius up to ~96m) so its cast/self shadows
+// never clip to a hard rectangular seam on the terrain you're standing near.
+const SHADOW_HALF_EXTENT = 155;
 const SHADOW_LIGHT_DISTANCE = 210;
 const SHADOW_UP = new THREE.Vector3(0, 1, 0);
 const SHADOW_ORIGIN = new THREE.Vector3(0, 0, 0);
@@ -335,7 +337,8 @@ export class Renderer {
     this.sun = new THREE.DirectionalLight(0xfff0d8, 2.75);
     this.sun.position.copy(sunWorldDir);
     this.sun.castShadow = this.quality !== 'low';
-    const shadowMapSize = this.quality === 'high' ? 2048 : 1024;
+    // Larger frustum (see SHADOW_HALF_EXTENT) needs more texels to stay crisp.
+    const shadowMapSize = this.quality === 'high' ? 4096 : 2048;
     this.sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     this.sun.shadow.camera.near = 30;
     this.sun.shadow.camera.far = SHADOW_LIGHT_DISTANCE + 230;
@@ -619,11 +622,15 @@ export class Renderer {
   }
 
   private getCycleAmbientIntensity() {
-    return this.dayAmount * 0.84 + this.twilightAmount * 0.72 + this.nightAmount * 0.6;
+    // Raised so slopes facing away from an overhead sun read as deep colour, not
+    // black — the shaded side of an island should still show its biome tone.
+    return this.dayAmount * 0.9 + this.twilightAmount * 0.78 + this.nightAmount * 0.64;
   }
 
   private getCycleHemisphereIntensity() {
-    return this.dayAmount * 1.0 + this.twilightAmount * 0.82 + this.nightAmount * 0.58;
+    // Sky/ground fill is the main lever that keeps steep terrain readable; it is
+    // normal-oriented so it lifts shaded faces without flattening lit ones.
+    return this.dayAmount * 1.34 + this.twilightAmount * 1.02 + this.nightAmount * 0.66;
   }
 
   private getCycleHorizonIntensity() {
