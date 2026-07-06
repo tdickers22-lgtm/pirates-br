@@ -375,6 +375,9 @@ export interface IslandCave {
    *  interiorRadius/length/floorY this defines the walkable interior box —
    *  the physics track clamps in-cave player Y to [floorY, ceilingY]. */
   ceilingY?: number;
+  /** Floor height at the FAR end (z=-length); the floor ramps from floorY to
+   *  this, so a tunnel can descend deep into the mountain. Defaults to floorY. */
+  floorYEnd?: number;
   /** This segment breaks the surface as a real mouth (entrance frame + the
    *  hillside is carved open here). Internal tunnels/chambers set this false. */
   hasMouth?: boolean;

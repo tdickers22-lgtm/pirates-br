@@ -466,6 +466,7 @@ function getCaveCarve(island: Island, x: number, z: number): { mask: number; flo
     const cLen = (cave as { length?: number }).length ?? 10;
     const cRadius = (cave as { interiorRadius?: number }).interiorRadius ?? 3.0;
     const cFloorY = (cave as { floorY?: number }).floorY ?? cave.position.y - 0.4;
+    const cFloorEnd = (cave as { floorYEnd?: number }).floorYEnd ?? cFloorY;
     const dx = x - cave.position.x;
     const dz = z - cave.position.z;
     const cosR = Math.cos(cave.rotation);
@@ -473,6 +474,10 @@ function getCaveCarve(island: Island, x: number, z: number): { mask: number; flo
     // Cave-local: +z points OUTWARD from the island (entrance side); tunnel goes to -z
     const lx = dx * cosR - dz * sinR;
     const lz = dx * sinR + dz * cosR;
+    // Floor ramps from cFloorY (mouth) to cFloorEnd (far end) so the cave can
+    // DESCEND deep into the mountain rather than sit under a thin roof.
+    const along = cLen > 0 ? clamp(-lz / cLen, 0, 1) : 0;
+    const floorAt = cFloorY + (cFloorEnd - cFloorY) * along;
     const lateralPad = 0.7;
     const longPad = 1.0;
     const latFalloff = Math.abs(lx) <= cRadius
@@ -490,7 +495,7 @@ function getCaveCarve(island: Island, x: number, z: number): { mask: number; flo
     const mask = latFalloff * longFalloff;
     if (mask > bestMask) {
       bestMask = mask;
-      bestFloorY = cFloorY;
+      bestFloorY = floorAt;
     }
   }
   return bestMask > 0 ? { mask: bestMask, floorY: bestFloorY } : null;
@@ -735,7 +740,12 @@ export function getCaveCeilingY(island: Island, x: number, z: number): number | 
     const lx = dx * cosR - dz * sinR;
     const lz = dx * sinR + dz * cosR;
     if (Math.abs(lx) <= cRadius && lz <= 0.6 && lz >= -cLen) {
-      const ceil = cave.ceilingY ?? ((cave.floorY ?? cave.position.y - 0.4) + cave.height);
+      // Ceiling ramps down with the descending floor (keeps constant headroom).
+      const f0 = cave.floorY ?? cave.position.y - 0.4;
+      const fEnd = (cave as { floorYEnd?: number }).floorYEnd ?? f0;
+      const along = cLen > 0 ? clamp(-lz / cLen, 0, 1) : 0;
+      const floorAt = f0 + (fEnd - f0) * along;
+      const ceil = floorAt + cave.height;
       if (best === null || ceil < best) best = ceil;
     }
   }

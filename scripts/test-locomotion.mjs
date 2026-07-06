@@ -19,6 +19,7 @@ import {
   getIslandSurfaceY,
   getIslandMaxRadius,
   getCaveCeilingY,
+  getCaveFloorY,
   getIslandCoastType,
   isSubmergedAt,
   isPointInsideIslandFootprint,
@@ -200,15 +201,17 @@ console.log('Player locomotion (terrain v2)');
     const ceilingY = getCaveCeilingY(island, mid.x, mid.z);
     expect('Cave ceiling helper returns a height at the tunnel interior', ceilingY !== null, `ceilingY=${ceilingY}`);
 
-    // Jump inside the cave — a strong upward launch must never punch the head through the roof.
+    // Jump inside the cave — a strong upward launch must never punch the head
+    // through the roof. Stand on the RAMPED floor at the midpoint (caves descend).
+    const floorAtMid = getCaveFloorY(island, mid.x, mid.z);
     const physics = new PhysicsSystem();
-    const inside = makePlayer({ x: mid.x, y: cave.floorY, z: mid.z }, { state: 'alive', velocity: { x: 0, y: 12, z: 0 } });
+    const inside = makePlayer({ x: mid.x, y: floorAtMid, z: mid.z }, { state: 'alive', velocity: { x: 0, y: 12, z: 0 } });
     let maxHead = -Infinity;
     for (let i = 0; i < 40; i++) {
       step(physics, inside, [island], null);
       maxHead = Math.max(maxHead, inside.position.y + PLAYER.HEIGHT);
     }
-    const wouldOvershoot = cave.floorY + (12 * 12) / (2 * 18) + PLAYER.HEIGHT; // free-flight head apex
+    const wouldOvershoot = floorAtMid + (12 * 12) / (2 * 18) + PLAYER.HEIGHT; // free-flight head apex
     expect('Cave jump would overshoot the roof without a clamp (precondition)', wouldOvershoot > ceilingY + 0.3, `apex=${wouldOvershoot.toFixed(2)} ceiling=${ceilingY.toFixed(2)}`);
     expect('Cave ceiling clamps a jump (head stays under the roof)', maxHead <= ceilingY + 0.05, `maxHead=${maxHead.toFixed(2)} ceiling=${ceilingY.toFixed(2)}`);
 
