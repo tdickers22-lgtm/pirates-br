@@ -882,6 +882,32 @@ function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
 
 type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'powder_keg' | 'shovel' | 'chest' | 'bucket' | 'compass' | 'spyglass' | 'lantern';
 
+/** Floating name label (billboard) that hovers over an opponent's head. */
+function makeNameplateSprite(name: string): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.font = '600 34px Georgia, serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const label = (name || 'Pirate').slice(0, 16);
+  ctx.lineWidth = 7;
+  ctx.strokeStyle = 'rgba(6, 12, 22, 0.94)';
+  ctx.strokeText(label, 128, 34);
+  ctx.fillStyle = '#f4e8c6';
+  ctx.fillText(label, 128, 34);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sprite.scale.set(3.4, 0.85, 1);
+  sprite.position.y = 2.35;
+  sprite.name = 'nameplate';
+  sprite.renderOrder = 998;
+  return sprite;
+}
+
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
   'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
@@ -7781,6 +7807,10 @@ export class Game {
           playerIsSkeleton ? 'skeleton' : 'pirate',
           playerIsSkeleton ? 'crew' : this.getPlayerTeamRole(player),
         );
+        // Floating username over every OPPONENT's head (not yourself).
+        if (player.id !== this.localPlayerId) {
+          mesh.add(makeNameplateSprite(player.name));
+        }
         this.playerMeshes.set(player.id, mesh);
         this.renderer.scene.add(mesh);
       } else if (!playerIsSkeleton) {
@@ -7788,6 +7818,12 @@ export class Game {
       }
 
       const isLocal = player.id === this.localPlayerId;
+      // Nameplate: shown for living opponents within ~85m, hidden when downed/gone.
+      const plate = mesh.getObjectByName('nameplate');
+      if (plate) {
+        const ndist = this.distance2D(this.renderer.camera.position.x, this.renderer.camera.position.z, player.position.x, player.position.z);
+        plate.visible = !isLocal && player.state === 'alive' && ndist < 85;
+      }
       const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
       const hideForLocalAim = isLocal;
       const useLocalSwimViewmodel = false;
