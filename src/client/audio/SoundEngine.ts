@@ -463,10 +463,47 @@ export class SoundEngine {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(amount, 0.2, 1.1);
-    // Smaller hand/shoulder splash for swimming movement.
-    this.playNoise(now, 0.16, 3600, 0.7, 0.09 * volume, 'highpass');
-    this.playNoise(now + 0.02, 0.22, 720, 0.85, 0.11 * volume, 'bandpass');
-    this.playNoise(now + 0.08, 0.24, 220, 0.45, 0.055 * volume, 'lowpass');
+    // A swim stroke: a broadband water "swoosh" sweeping DOWN in pitch as the
+    // limb pushes through water, a low body burble, and a soft bubbly "gloop".
+    // (The old version was a sharp 3.6kHz hiss — nothing like water.)
+    this.playSweptNoise(now, 0.34, 880, 300, 0.75, 0.13 * volume, 'bandpass');
+    this.playNoise(now + 0.02, 0.3, 175, 0.5, 0.085 * volume, 'lowpass');
+    this.playTone(now + 0.03, 260, 120, 0.17, 0.045 * volume, 'sine', 0.01);
+    // Faint surface droplets — subtle, well under the swoosh so it's not tinny.
+    this.playNoise(now + 0.05, 0.1, 1900, 0.9, 0.02 * volume, 'highpass');
+  }
+
+  /** Noise whose band-filter sweeps f0→f1 over its life — reads as water/wind
+   *  moving, not a static hiss. */
+  private playSweptNoise(
+    when: number, duration: number, f0: number, f1: number, q: number,
+    volume: number, filterType: BiquadFilterType,
+  ): void {
+    const ctx = this.ctx;
+    const dry = this.busDry;
+    const wet = this.busReverb;
+    const noise = this.noise;
+    if (!ctx || !dry || !wet || !noise) return;
+    const source = ctx.createBufferSource();
+    source.buffer = noise;
+    const filter = ctx.createBiquadFilter();
+    filter.type = filterType;
+    filter.frequency.setValueAtTime(f0, when);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(20, f1), when + duration);
+    filter.Q.value = q;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, when);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), when + duration * 0.22);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(dry);
+    const wetGain = ctx.createGain();
+    wetGain.gain.value = 0.28;
+    gain.connect(wetGain);
+    wetGain.connect(wet);
+    source.start(when);
+    source.stop(when + duration + 0.02);
   }
 
   playSailTrim(amount = 1): void {

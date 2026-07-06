@@ -787,7 +787,7 @@ export class MapGenerator {
         if (this.nearCave(island, pos.x, pos.z, 3)) continue;
         if (this.nearStamp(island, pos.x, pos.z, 4)) continue;
         if (camps.some((c) => Math.hypot(c.x - pos.x, c.z - pos.z) < 18)) continue;
-        island.stamps!.push({ x: pos.x, z: pos.z, radius: 3.8, targetY: pos.y, blend: 0.45 });
+        island.stamps!.push({ x: pos.x, z: pos.z, radius: 4.8, targetY: pos.y, blend: 0.3 });
         camps.push({ x: pos.x, z: pos.z, y: pos.y });
       }
       if (camps.length >= target) break;
