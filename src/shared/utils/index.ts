@@ -539,6 +539,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const isTwin = profile.terrainStyle === 'twin';
   const isArchipelago = profile.terrainStyle === 'archipelago';
   const isMountain = profile.terrainStyle === 'mountain';
+  const isCrescent = profile.terrainStyle === 'crescent';
   // Twin/archipelago push secondary peak amplitude up so the second hill is a true peak
   const secondaryAmp = isTwin ? 2.2 : isArchipelago ? 1.8 : isMountain ? 1.35 : 1.0;
   const tertiaryAmp = isArchipelago ? 1.6 : 1.0;
@@ -587,16 +588,36 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const shoreMix = smoothstep(0.55, 0.92, distRatio);
   let seaLift = lerp(seaLiftBase, coastLift, shoreMix);
   let floor = 0.08;
-  // Combined hill mask drives the "land vs water" effect for archipelago islands
+  // 2D islet discs: a true gaussian around each sub-peak CENTER (not the angular
+  // mask), so an archipelago reads as separate islets with open water between —
+  // rather than one blob with pie-slice notches.
+  const isletDisc = (hillAngle: number, hillOffset: number, discR: number) => {
+    const cx = Math.cos(hillAngle) * hillOffset * profile.footprintX;
+    const cz = Math.sin(hillAngle) * hillOffset * profile.footprintZ;
+    const ddx = localX - cx;
+    const ddz = localZ - cz;
+    const r = Math.max(6, island.radius * discR);
+    return Math.exp(-(ddx * ddx + ddz * ddz) / (r * r));
+  };
+  let archLandFactor = 1;
+  let crescentBay = 0;
   if (isArchipelago) {
-    const totalHillMask = primaryMask
-      + secondaryMask * Math.max(0.4, profile.secondaryHillScale)
-      + tertiaryMask * Math.max(0.2, profile.tertiaryHillScale);
-    // Hills present → full sea lift, hills absent → seaLift drops below water surface
-    // so the "saddle" between sub-peaks becomes actual ocean.
-    const landFactor = Math.min(1.0, totalHillMask * 1.5);
-    seaLift = -2.4 + (seaLift + 2.4) * landFactor;
-    floor = -3.5;
+    const d1 = isletDisc(profile.primaryHillAngle, profile.primaryHillOffset, 0.46);
+    const d2 = profile.secondaryHillScale > 0.05
+      ? isletDisc(profile.secondaryHillAngle, profile.secondaryHillOffset, 0.42) : 0;
+    const d3 = profile.tertiaryHillScale > 0
+      ? isletDisc(profile.tertiaryHillAngle, profile.tertiaryHillOffset, 0.38) : 0;
+    archLandFactor = smoothstep(0.1, 0.42, Math.max(d1, d2, d3));
+    floor = -3.6;
+  } else if (isCrescent) {
+    // Horseshoe: carve an open-water bay out of one side (opposite the main
+    // ridge) so the land wraps as a C around a lagoon. The two arms stay land.
+    const bayAngle = profile.primaryHillAngle + Math.PI;
+    const angFromBay = Math.abs(islandAngleDelta(angle, bayAngle));
+    const wedge = smoothstep(1.15, 0.35, angFromBay);          // 1 straight into the mouth
+    const bayRadial = smoothstep(0.16, 0.5, distRatio);        // keep a back land-bridge
+    crescentBay = wedge * bayRadial;
+    floor = -3.6;
   } else if (isTwin) {
     // Twin peaks: saddle drops noticeably (still above water) between the two hills
     const totalHillMask = primaryMask + secondaryMask * profile.secondaryHillScale;
@@ -604,7 +625,14 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     seaLift = 1.0 + (seaLift - 1.0) * landFactor;
   }
 
-  const baseY = seaLift + beachRise + cliffRise + plateauRise + crownRise + primaryHill + secondaryHill + tertiaryHill + angleNoise;
+  let baseY = seaLift + beachRise + cliffRise + plateauRise + crownRise + primaryHill + secondaryHill + tertiaryHill + angleNoise;
+  if (isArchipelago) {
+    // Sink everything between islets to open ocean; the islet cores keep height.
+    baseY = -3.2 + (baseY + 3.2) * archLandFactor;
+  } else if (isCrescent && crescentBay > 0) {
+    // Drop the bay wedge to open water, leaving the wrapping arms as land.
+    baseY = lerp(baseY, -3.0, crescentBay * 0.95);
+  }
 
   // ── Deterministic noise detail (shared by server physics & client meshes) ──
   // Interior mask fades every detail term to zero approaching the shoreline so
