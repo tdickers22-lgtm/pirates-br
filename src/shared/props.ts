@@ -27,6 +27,7 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   campfire: { shape: 'sphere', radius: 0.55, height: 0.5 },
   lantern_post: { shape: 'capsule', radius: 0.16, height: 2.6 },
   watchtower: { shape: 'capsule', radius: 2.5, height: 9.0 },
+  fort: { shape: 'capsule', radius: 5.2, height: 10.0 },
   shipwreck: { shape: 'sphere', radius: 2.6, height: 3.2 },
   standing_stones: { shape: 'sphere', radius: 1.2, height: 2.6 },
   tent_a: { shape: 'sphere', radius: 1.3, height: 1.6 },
@@ -58,6 +59,7 @@ export const BIOME_PALETTES: Record<IslandBiome, { sand: number; grass: number; 
 const SPACING_OVERRIDES: Partial<Record<IslandPropType, number>> = {
   standing_stones: 3.6,
   shipwreck: 5.2,
+  fort: 8.5,
 };
 
 /** Spacing radius used when scattering props (slightly wider than the hard

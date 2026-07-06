@@ -48,7 +48,7 @@ const angleDelta = (a: number, b: number) => Math.atan2(Math.sin(a - b), Math.co
 // Every named island has a FIXED archetype, biome, size and seed so its
 // silhouette, coast bands, caves, stamps and props are identical every match —
 // only world placement and rotation vary. Players learn the islands.
-type LandmarkType = 'watchtower' | 'shipwreck' | 'standing_stones';
+type LandmarkType = 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort';
 
 interface RosterEntry {
   name: string;
@@ -78,7 +78,7 @@ const ISLAND_ROSTER: readonly RosterEntry[] = [
   { name: 'Rumrunner Key', style: 'tropical', biome: 'palm_atoll', seed: 0x5b0b0b0, radius: 42, coastBias: -0.6, whiteSand: true, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: 640, z: 310, rotation: 0.9 } },
   { name: "Crow's Perch", style: 'mountain', biome: 'highland', seed: 0x6c0ffee, radius: 84, coastBias: 0.45, landmarks: ['watchtower'], hasDock: true, hasTavern: false, layout: { x: -278, z: 290, rotation: 3.9 } },
   { name: "Mermaid's Folly", style: 'crescent', biome: 'lush', seed: 0x7f01111, radius: 62, coastBias: -0.1, landmarks: ['standing_stones'], hasDock: true, hasTavern: false, layout: { x: 372, z: 372, rotation: 1.2 } },
-  { name: 'Castaway Reach', style: 'tropical', biome: 'lush', seed: 0x8beac42, radius: 88, coastBias: -0.35, landmarks: ['standing_stones', 'shipwreck'], hasDock: true, hasTavern: true, layout: { x: 420, z: -385, rotation: 5.6 } },
+  { name: 'Castaway Reach', style: 'tropical', biome: 'lush', seed: 0x8beac42, radius: 88, coastBias: -0.35, landmarks: ['fort', 'shipwreck'], hasDock: true, hasTavern: true, layout: { x: 420, z: -385, rotation: 5.6 } },
   { name: 'Kraken Tooth', style: 'twin', biome: 'volcanic', seed: 0x9707071, radius: 68, coastBias: 0.55, landmarks: ['watchtower'], hasDock: false, hasTavern: false, layout: { x: -705, z: 25, rotation: 5.1 } },
   { name: 'Booty Bay', style: 'crescent', biome: 'lush', seed: 0xab00713, radius: 90, coastBias: -0.2, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, layout: { x: -365, z: -295, rotation: 2.1 } },
   { name: 'Gallows Sands', style: 'rocky', biome: 'bone', seed: 0xb6a1105, radius: 38, coastBias: -0.15, landmarks: ['shipwreck'], hasDock: false, hasTavern: false, layout: { x: 646, z: -641, rotation: 0.6 } },
@@ -823,7 +823,13 @@ export class MapGenerator {
   private planLandmarks(island: Island, entry: RosterEntry, rng: Rng): LandmarkSite[] {
     const sites: LandmarkSite[] = [];
     for (const type of entry.landmarks) {
-      if (type === 'watchtower') {
+      if (type === 'fort') {
+        // A big stronghold needs a large flat interior pad; stamp a wide disc.
+        const s = this.findLandmarkSite(island, rng, sites.length, {
+          minY: 3, maxSlope: 0.5, dLo: 0.12, dHi: 0.42, stampRadius: 7.6, blend: 0.42, pad: 8,
+        });
+        sites.push({ type, x: s.x, z: s.z, yaw: ra(rng) });
+      } else if (type === 'watchtower') {
         const s = this.findLandmarkSite(island, rng, sites.length, {
           minY: 4, maxSlope: 0.7, dLo: 0.2, dHi: 0.48, stampRadius: 3.6, blend: 0.5, pad: 4,
         });

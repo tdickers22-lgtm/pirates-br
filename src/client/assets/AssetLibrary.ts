@@ -18,7 +18,7 @@ export const ASSET_NAMES = [
   'searock_a', 'searock_b', 'searock_c',
   'barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire',
   'dock_mid', 'dock_end',
-  'watchtower', 'shipwreck', 'standing_stones', 'lantern_post',
+  'watchtower', 'shipwreck', 'standing_stones', 'lantern_post', 'fort',
   'tent_a', 'bedroll', 'rock_arch',
   'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
 ] as const;
