@@ -65,7 +65,8 @@ type OneShotAction =
   | 'special'
   | 'cannonAmmo'
   | 'slot'
-  | 'barrelTakeAll';
+  | 'barrelTakeAll'
+  | 'bail';
 
 interface ConnectedClient {
   ws: WebSocket;
@@ -387,6 +388,7 @@ export class Match {
       hasSpyglass: true,
       equippedTool: null,
       bailScoopProgress: 0,
+      bucketFilled: false,
       nearBarrelId: null,
       downedUntil: 0,
       reviveProgress: 0,
@@ -525,6 +527,7 @@ export class Match {
         cannonAmmo: -1,
         slot: -1,
         barrelTakeAll: -1,
+        bail: -1,
       },
       lastOneShotAt: {},
       pendingFullSnapshot: null,
@@ -1278,27 +1281,38 @@ export class Match {
         }
       }
 
-      // Physically bucket out the bilge: the pirate must have the BUCKET tool
-      // equipped (supply wheel), then hold interact on the flooding deck. The
-      // water drains at BAIL_RATE while held; bailScoopProgress cycles the
-      // fill→heave-overboard animation the client draws (discrete scoops).
-      const wantsBail =
-        input.interactHeld
+      // Physical bucket bailing as a SCOOP → CARRY → HEAVE cycle: with the BUCKET
+      // equipped, press interact to fill the empty bucket from the bilge (ship
+      // water drops one scoop), then press again to heave that bucketful over the
+      // side (empties the bucket). Each action animates over BAIL_SCOOP_TIME so
+      // you can't spam; the cycle alternates fill/heave.
+      const bailPress =
+        input.interact
         && input.interactIntent === 'bail'
         && !player.atCannon
         && !player.atHelm
         && !player.atSails
         && !player.atCrowNest
-        && (ship.waterLevel ?? 0) > 0
-        && player.equippedTool === 'bucket';
-      if (wantsBail) {
-        ship.waterLevel = Math.max(0, (ship.waterLevel ?? 0) - FLOODING.BAIL_RATE * dt);
-        player.bailing = true;
-        player.bailScoopProgress = (player.bailScoopProgress + dt / FLOODING.BAIL_SCOOP_TIME) % 1;
-      } else {
-        player.bailing = false;
-        player.bailScoopProgress = 0;
+        && player.equippedTool === 'bucket'
+        && player.bailScoopProgress <= 0.05
+        && this.consumeOneShot(client, 'bail', input.seq);
+      if (bailPress) {
+        if (player.bucketFilled) {
+          // Heave the carried bucketful overboard — empties it.
+          player.bucketFilled = false;
+          player.bailScoopProgress = 1;
+        } else if ((ship.waterLevel ?? 0) > 0.001) {
+          // Scoop a bucketful out of the bilge — fills the bucket, water drops.
+          player.bucketFilled = true;
+          ship.waterLevel = Math.max(0, (ship.waterLevel ?? 0) - FLOODING.BAIL_SCOOP_VOLUME);
+          player.bailScoopProgress = 1;
+        }
       }
+      // Decay the scoop/heave animation; bailing flag rides it for client FX.
+      if (player.bailScoopProgress > 0) {
+        player.bailScoopProgress = Math.max(0, player.bailScoopProgress - dt / FLOODING.BAIL_SCOOP_TIME);
+      }
+      player.bailing = player.bailScoopProgress > 0;
 
       // Repair torn sails (hold [X] + wood at the rigging). Repairing both
       // restores rigging integrity and physically hoists the canvas back up.
