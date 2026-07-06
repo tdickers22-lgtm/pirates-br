@@ -4240,76 +4240,21 @@ export class Game {
       tavern.position.set(t.position.x - island.position.x, t.position.y, t.position.z - island.position.z);
       tavern.rotation.y = t.rotation;
 
-      const wallMat = new THREE.MeshStandardMaterial({ color: 0x6e4823, roughness: 0.95 });
       const beamMat2 = new THREE.MeshStandardMaterial({ color: 0x2f1d10, roughness: 1 });
-      const thatchMat = new THREE.MeshStandardMaterial({ color: 0xa68040, roughness: 1 });
-      const floorMat = new THREE.MeshStandardMaterial({ color: 0x553823, roughness: 1 });
       const counterMat = new THREE.MeshStandardMaterial({ color: 0x3f2616, roughness: 0.9 });
       const lanternMat2 = new THREE.MeshStandardMaterial({ color: 0x8b6c2a, emissive: 0xff9c44, emissiveIntensity: 0.65, roughness: 0.9 });
-      const signMat = new THREE.MeshStandardMaterial({ color: 0x3a2414, roughness: 1 });
 
       const wallH = 3.0;
       const w = t.width;
       const d = t.depth;
 
-      const floor = new THREE.Mesh(new THREE.BoxGeometry(w + 0.6, 0.18, d + 0.6), floorMat);
-      floor.position.y = 0.09;
-      floor.receiveShadow = true;
-      tavern.add(floor);
-
-      const wallThickness = 0.22;
-      const makeWall = (sx: number, sy: number, sz: number, x: number, y: number, z: number) => {
-        const wall = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), wallMat);
-        wall.position.set(x, y, z);
-        wall.castShadow = true;
-        wall.receiveShadow = true;
-        return wall;
-      };
-
-      // Back wall (full)
-      tavern.add(makeWall(w, wallH, wallThickness, 0, wallH * 0.5 + 0.18, -d * 0.5));
-      // Side walls (full)
-      tavern.add(makeWall(wallThickness, wallH, d, -w * 0.5, wallH * 0.5 + 0.18, 0));
-      tavern.add(makeWall(wallThickness, wallH, d, w * 0.5, wallH * 0.5 + 0.18, 0));
-      // Front wall split with door opening
-      const doorWidth = 1.6;
-      const sideFrontW = (w - doorWidth) * 0.5;
-      tavern.add(makeWall(sideFrontW, wallH, wallThickness, -(w * 0.5 - sideFrontW * 0.5), wallH * 0.5 + 0.18, d * 0.5));
-      tavern.add(makeWall(sideFrontW, wallH, wallThickness, w * 0.5 - sideFrontW * 0.5, wallH * 0.5 + 0.18, d * 0.5));
-      // Door lintel above the doorway
-      tavern.add(makeWall(doorWidth + 0.1, 0.4, wallThickness, 0, wallH + 0.18 - 0.2, d * 0.5));
-
-      // Corner beams
-      for (const cx of [-1, 1] as const) {
-        for (const cz of [-1, 1] as const) {
-          const beam = new THREE.Mesh(new THREE.BoxGeometry(0.22, wallH + 0.6, 0.22), beamMat2);
-          beam.position.set(cx * (w * 0.5 + 0.04), wallH * 0.5 + 0.18, cz * (d * 0.5 + 0.04));
-          beam.castShadow = true;
-          tavern.add(beam);
-        }
-      }
-
-      // Steep thatched roof — two slabs forming a gable
-      const ridgeY = wallH + 0.18 + 1.4;
-      const slope = Math.atan2(1.4, d * 0.5 + 0.18);
-      for (const side of [-1, 1] as const) {
-        const slab = new THREE.Mesh(new THREE.BoxGeometry(w + 1.0, 0.22, Math.hypot(d * 0.5 + 0.18, 1.4) + 0.2), thatchMat);
-        slab.position.set(0, (wallH + 0.18 + ridgeY) * 0.5, side * (d * 0.25 + 0.1));
-        slab.rotation.x = side * (Math.PI * 0.5 - slope);
-        slab.castShadow = true;
-        slab.receiveShadow = true;
-        tavern.add(slab);
-      }
-      // Ridge beam
-      const ridge = new THREE.Mesh(new THREE.BoxGeometry(w + 1.0, 0.16, 0.2), beamMat2);
-      ridge.position.set(0, ridgeY, 0);
-      ridge.castShadow = true;
-      tavern.add(ridge);
-      // Gable triangles (filled with wall planks visually)
-      for (const side of [-1, 1] as const) {
-        const gable = new THREE.Mesh(new THREE.BoxGeometry(w * 0.96, 1.4, 0.18), wallMat);
-        gable.position.set(0, wallH + 0.18 + 0.7, side * (d * 0.5));
-        tavern.add(gable);
+      // Nice half-timbered tavern SHELL from Blender (seated gable roof, timber
+      // framing, chimney, hanging sign) — replaces the old floating-roof boxes.
+      // The GLB front (door) faces +Z, matching the tavern's dock-facing rotation.
+      const shell = assets.clone('tavern');
+      if (shell) {
+        shell.traverse((o) => { if (o instanceof THREE.Mesh) { o.castShadow = true; o.receiveShadow = true; } });
+        tavern.add(shell);
       }
 
       if (!lowDetail) {
@@ -4357,29 +4302,7 @@ export class Game {
         }
       }
 
-      // Hanging signpost above the door
-      const signPost = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.2, 0.14), beamMat2);
-      signPost.position.set(0, wallH + 0.6, d * 0.5 + 0.55);
-      tavern.add(signPost);
-      const signPlank = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.5, 0.08), signMat);
-      signPlank.position.set(0, wallH + 0.2, d * 0.5 + 0.55);
-      tavern.add(signPlank);
-      if (!lowDetail) {
-        const tankardSign = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.13, 0.16, 0.32, 10),
-          new THREE.MeshStandardMaterial({ color: 0xc89b3a, roughness: 0.55, metalness: 0.5 }),
-        );
-        tankardSign.position.set(0, wallH + 0.2, d * 0.5 + 0.6);
-        tankardSign.rotation.x = Math.PI * 0.5;
-        tavern.add(tankardSign);
-      }
-
-      // Chimney with a smoke puff (just static)
-      const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.6, 0.7), beamMat2);
-      chimney.position.set(w * 0.32, wallH + 0.9, -d * 0.32);
-      chimney.castShadow = true;
-      tavern.add(chimney);
-
+      // (Sign, chimney and roof now come from the Blender tavern GLB.)
       group.add(tavern);
     }
 
@@ -6781,6 +6704,13 @@ export class Game {
     rug.position.y = 0.02;
     rug.receiveShadow = true;
     root.add(rug);
+
+    // Outdoor vendors get a proper market STALL (canopy + counter) so they read
+    // as little shops. The bartender works inside the tavern, so no stall there.
+    if (npc.role !== 'bartender') {
+      const stall = this.buildPropInstance('stall', new THREE.Vector3(-Math.sin(npc.rotation) * 0.95, 0, -Math.cos(npc.rotation) * 0.95), npc.rotation, 1);
+      if (stall) { stall.traverse((o) => { if (o instanceof THREE.Mesh) o.castShadow = true; }); root.add(stall); }
+    }
 
     const propMat = new THREE.MeshStandardMaterial({ color: 0x6b4726, roughness: 0.96 });
     const brassMat = new THREE.MeshStandardMaterial({ color: 0xb48335, roughness: 0.55, metalness: 0.6 });
@@ -9545,6 +9475,25 @@ export class Game {
           ctx.textBaseline = 'middle';
           ctx.font = '14px serif';
           ctx.fillText(icon, centerX + prop.x * scale, centerY + prop.z * scale);
+        }
+        // Services & POIs: tavern, vendor NPCs, and cave mouths.
+        ctx.textBaseline = 'middle';
+        if (island.tavern) {
+          ctx.font = '15px serif';
+          ctx.fillText('🍺', centerX + island.tavern.position.x * scale, centerY + island.tavern.position.z * scale);
+        }
+        for (const npc of island.npcs ?? []) {
+          const nicon = npc.role === 'gold_hoarder' ? '💰'
+            : npc.role === 'shipwright' ? '⚒️'
+              : npc.role === 'oracle' ? '🔮'
+                : npc.role === 'mysterious_stranger' ? '🕯️' : '';
+          if (!nicon) continue;
+          ctx.font = '13px serif';
+          ctx.fillText(nicon, centerX + npc.position.x * scale, centerY + npc.position.z * scale);
+        }
+        for (const cave of island.caves ?? []) {
+          ctx.font = '13px serif';
+          ctx.fillText('🕳️', centerX + cave.position.x * scale, centerY + cave.position.z * scale);
         }
         // Name label above the isle, outlined for legibility over any tint.
         ctx.textBaseline = 'bottom';
