@@ -19,6 +19,8 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   palm_a: { shape: 'capsule', radius: 0.38, height: 8.5 },
   palm_b: { shape: 'capsule', radius: 0.4, height: 6.5 },
   palm_c: { shape: 'capsule', radius: 0.42, height: 5.0 },
+  palm_tall: { shape: 'capsule', radius: 0.3, height: 13.5 },
+  palm_ground: { shape: 'capsule', radius: 0.5, height: 2.0 },
   boulder_a: { shape: 'sphere', radius: 1.6, height: 2.4 },
   boulder_b: { shape: 'sphere', radius: 2.6, height: 2.0 },
   boulder_c: { shape: 'sphere', radius: 1.1, height: 2.0 },
