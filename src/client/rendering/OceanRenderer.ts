@@ -124,6 +124,7 @@ const OCEAN_FRAG = /* glsl */`
   uniform float u_underwaterDepth;
   uniform float u_roughness;
   uniform float u_nightFactor;
+  uniform float u_twilightFactor;
   uniform vec3  u_fogColor;
   uniform vec3  u_horizonColor;
   uniform vec4  u_islands[${MAX_ISLANDS}];
@@ -212,7 +213,7 @@ const OCEAN_FRAG = /* glsl */`
     // Richer, slightly deeper turquoise so shallows read as tropical water, not a
     // pale wash that the specular then blows to white.
     vec3 shallowCol = mix(vec3(0.04, 0.40, 0.50), vec3(0.10, 0.62, 0.62), 1.0 - smoothstep(0.0, 14.0, sd));
-    base = mix(base, shallowCol, shallowMask * 0.9 * (1.0 - u_stormIntensity * 0.55));
+    base = mix(base, shallowCol, shallowMask * 0.9 * (1.0 - u_stormIntensity * 0.55) * (1.0 - u_twilightFactor * 0.42));
 
     // ── Fresnel reflectance toward sky/horizon ──────────────────────────
     float NdotV   = max(0.0, dot(N, V));
@@ -234,8 +235,10 @@ const OCEAN_FRAG = /* glsl */`
     vec3  H = normalize(L + V);
     float NdotH = max(0.0, dot(N, H));
     float lobeWiden = max(smoothstep(90.0, 1400.0, camDist), u_stormIntensity * 0.5);
-    float shininess = mix(310.0, 46.0, lobeWiden);
-    float spec  = pow(NdotH, shininess) * mix(1.9, 0.5, lobeWiden);
+    // Keep a higher shininess floor at low sun so the sunset reflection stays a
+    // fine shimmering glitter path, not big hard red paint-splat blobs.
+    float shininess = mix(310.0, mix(46.0, 130.0, sunLow), lobeWiden);
+    float spec  = pow(NdotH, shininess) * mix(1.9, 0.5, lobeWiden) * (1.0 - sunLow * 0.35);
     float glare = pow(NdotH, 24.0) * 0.1;
     vec3 specCol = mix(vec3(1.0, 0.94, 0.80), vec3(1.0, 0.50, 0.28), sunPath * sunLow) * (spec + glare) * sunUp;
     specCol = min(specCol, vec3(1.15));
@@ -266,7 +269,8 @@ const OCEAN_FRAG = /* glsl */`
     float shoreFoam = max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55);
     foam = clamp(foam + shoreFoam, 0.0, 1.0);
 
-    vec3 foamCol = vec3(0.88, 0.93, 1.0) * mix(1.0, 0.45, u_nightFactor);
+    vec3 foamCol = vec3(0.88, 0.93, 1.0) * mix(1.0, 0.45, u_nightFactor)
+                 * mix(vec3(1.0), vec3(1.0, 0.82, 0.66), u_twilightFactor * 0.7);
     vec3 color = mix(base, foamCol, foam);
 
     // ── Storm spray: wind-torn white haze over the wave tops, present even
@@ -285,6 +289,11 @@ const OCEAN_FRAG = /* glsl */`
 
     // Night: dim the water body (fog/horizon colors arrive pre-dimmed)
     color *= mix(1.0, 0.42, u_nightFactor * (1.0 - foam * 0.4) * (1.0 - shallowMask * 0.4));
+
+    // Twilight: the sea takes the warm, dimmed cast of the sunset sky instead of
+    // staying daytime cyan under a peach/indigo horizon.
+    color = mix(color, color * vec3(1.12, 0.82, 0.68), u_twilightFactor * 0.6);
+    color *= mix(1.0, 0.66, u_twilightFactor);
 
     // Storm: darker, desaturated water under gray skies
     vec3 stormTint = mix(vec3(1.0), vec3(0.42, 0.48, 0.55), u_stormIntensity);
@@ -379,6 +388,7 @@ export interface OceanAtmosphere {
   sunDir?: THREE.Vector3;
   storminess?: number;
   nightFactor?: number;
+  twilightFactor?: number;
 }
 
 /** Island footprint for the shoreline SDF. Preferred: elliptical half-extents
@@ -419,6 +429,7 @@ export class OceanRenderer {
         u_stormIntensity: { value: 0 },
         u_underwaterDepth: { value: 0 },
         u_nightFactor: { value: 0 },
+        u_twilightFactor: { value: 0 },
         // Defaults match the sky shader's daytime horizon haze / scene fog so
         // the sea-sky junction is seamless before live values get wired in.
         u_fogColor:     { value: new THREE.Color(0x9bbfd4) },
@@ -541,6 +552,9 @@ export class OceanRenderer {
     if (atmo.storminess !== undefined) this.setStormIntensity(atmo.storminess);
     if (atmo.nightFactor !== undefined) {
       u.u_nightFactor.value = Math.max(0, Math.min(1, atmo.nightFactor));
+    }
+    if (atmo.twilightFactor !== undefined) {
+      u.u_twilightFactor.value = Math.max(0, Math.min(1, atmo.twilightFactor));
     }
   }
 
