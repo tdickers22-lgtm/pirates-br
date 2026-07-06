@@ -209,7 +209,9 @@ const OCEAN_FRAG = /* glsl */`
     // ── Shore shallows: turquoise ramp toward the beach ─────────────────
     float sd = shoreDist(wp);
     float shallowMask = 1.0 - smoothstep(4.0, 52.0, sd);
-    vec3 shallowCol = mix(vec3(0.07, 0.48, 0.52), vec3(0.32, 0.70, 0.64), 1.0 - smoothstep(0.0, 14.0, sd));
+    // Richer, slightly deeper turquoise so shallows read as tropical water, not a
+    // pale wash that the specular then blows to white.
+    vec3 shallowCol = mix(vec3(0.04, 0.40, 0.50), vec3(0.10, 0.62, 0.62), 1.0 - smoothstep(0.0, 14.0, sd));
     base = mix(base, shallowCol, shallowMask * 0.9 * (1.0 - u_stormIntensity * 0.55));
 
     // ── Fresnel reflectance toward sky/horizon ──────────────────────────
@@ -245,12 +247,16 @@ const OCEAN_FRAG = /* glsl */`
     // Whitecap coverage thins with distance in a storm — full-strength crest
     // foam at every range merged into a horizon-wide ice sheet (patrol-1).
     float stormFoamFade = 1.0 - smoothstep(220.0, 1400.0, camDist) * max(u_stormIntensity, stormSea) * 0.8;
-    float crest = pow(clamp(hn * (1.15 + 0.35 * stormSea) - (0.10 - 0.06 * stormSea), 0.0, 1.0), 3.0 - 1.2 * stormSea)
-                * (0.55 + 0.45 * calm + u_stormIntensity * 0.32 + stormSea * 0.42) * stormFoamFade;
+    // Only the STEEPEST crests break into whitecaps on a calm/moderate sea, so
+    // open water reads as clear blue with sparse foam — not a dense grid of
+    // whitecaps on every wave. Storms still lower the threshold for full coverage.
+    float crest = pow(clamp(hn * (1.15 + 0.35 * stormSea) - (0.30 - 0.24 * stormSea), 0.0, 1.0), 3.4 - 1.6 * stormSea)
+                * (0.5 + 0.5 * calm + u_stormIntensity * 0.4 + stormSea * 0.5) * stormFoamFade;
     vec2 foamUv = wp * 0.018 + u_time * vec2(0.012, 0.008);
     float foamN = noise(foamUv * 3.0) * noise(foamUv * 7.0 + 1.5);
-    float breakup = mix(0.55, smoothstep(0.28 - 0.12 * stormSea, 0.62, foamN), detailFade * 0.85 + 0.15);
-    float foam = clamp(crest * breakup * 1.4, 0.0, 1.0);
+    // Break foam up harder (lower floor) so whitecaps are irregular, not a lattice.
+    float breakup = mix(0.32, smoothstep(0.30 - 0.14 * stormSea, 0.66, foamN), detailFade * 0.9 + 0.1);
+    float foam = clamp(crest * breakup * 1.15, 0.0, 1.0);
 
     float shoreDetail = 1.0 - smoothstep(260.0, 900.0, camDist);
     float lap = sin(sd * 0.5 - u_time * 1.3) * 0.5 + 0.5;
@@ -272,7 +278,10 @@ const OCEAN_FRAG = /* glsl */`
     float sss = pow(max(0.0, dot(L, -N)), 3.0) * 0.14 * clamp(hn + 0.6, 0.0, 1.0);
     color += mix(vec3(0.05, 0.20, 0.26), vec3(0.24, 0.10, 0.20), sunPath * sunLow) * sss;
 
-    color += specCol;
+    // Calm, flat shallow water near shore was reflecting the overhead sun as a
+    // broad white sheen — a blinding halo/lagoon plate. Damp the specular in the
+    // shallows so tropical water keeps its turquoise instead of blowing out.
+    color += specCol * (1.0 - shallowMask * 0.62);
 
     // Night: dim the water body (fog/horizon colors arrive pre-dimmed)
     color *= mix(1.0, 0.42, u_nightFactor * (1.0 - foam * 0.4) * (1.0 - shallowMask * 0.4));
