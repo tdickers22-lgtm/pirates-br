@@ -516,96 +516,109 @@ export class MapGenerator {
     };
   }
 
-  // ── Caves (before any structure so placement can avoid them) ──────────────
+  // ── Caves: proper branching SYSTEMS (entrance tunnel → junction chamber →
+  //    side branch to a treasure room → a through-tunnel that surfaces on the
+  //    far flank). Each segment is an oriented box; the shared carve/ceiling
+  //    math unions overlapping segments so the whole network is one walkable,
+  //    raycastable, rendered space. ──────────────────────────────────────────
   private generateCaves(island: Island, rng: Rng): IslandCave[] {
     const style = island.profile.terrainStyle;
-    let count = 0;
-    if (style === 'rocky') count = 1 + (rng() < 0.6 ? 1 : 0);
-    else if (style === 'mountain') count = 1; // every mountain hides a cavern
-    else if (style === 'plateau') count = rng() < 0.45 ? 1 : 0;
-    else count = rng() < 0.25 ? 1 : 0;
-    if (count === 0) return [];
+    const systems = style === 'rocky' ? 1 + (rng() < 0.5 ? 1 : 0)
+      : style === 'mountain' ? 1
+        : style === 'plateau' ? (rng() < 0.45 ? 1 : 0)
+          : (rng() < 0.25 ? 1 : 0);
+    if (systems === 0) return [];
 
     const caves: IslandCave[] = [];
     const profile = island.profile;
-    // Only the steep flanks of the island's hills rise fast enough to roof a
-    // tunnel — bias the entrance hunt there, then fall back to a golden-angle
-    // sweep of the whole interior.
     const hillAngles = [profile.primaryHillAngle, profile.secondaryHillAngle];
     if (profile.tertiaryHillScale > 0) hillAngles.push(profile.tertiaryHillAngle);
     const GOLDEN = 2.399963229728653;
-    for (let i = 0; i < count; i++) {
-      for (let attempt = 0; attempt < 72; attempt++) {
-        const angle = attempt < 36
-          ? hillAngles[attempt % hillAngles.length] + rr(rng, -0.9, 0.9)
+    // Natural surface stays ≥ `clear` above `ceil` along a ray → the roof holds.
+    // Sample from mid-tunnel inward (skip the mouth, where the hill is thin).
+    const roofed = (fx: number, fz: number, dx: number, dz: number, len: number, ceil: number, clear: number): boolean => {
+      for (const f of [0.45, 0.65, 0.85, 1.0]) {
+        if (getIslandSurfaceY(island, fx + dx * len * f, fz + dz * len * f) < ceil + clear) return false;
+      }
+      return true;
+    };
+    const seg = (x: number, z: number, rot: number, rad: number, len: number, floor: number, h: number,
+                 opts: { mouth?: boolean; back?: boolean }): IslandCave => ({
+      position: { x, y: island.position.y, z }, rotation: rot, width: rad * 2, height: h,
+      length: len, interiorRadius: rad, floorY: floor, ceilingY: floor + h,
+      hasMouth: !!opts.mouth, hasBackWall: !!opts.back,
+    });
+
+    for (let i = 0; i < systems; i++) {
+      for (let attempt = 0; attempt < 80; attempt++) {
+        const angle = attempt < 40
+          ? hillAngles[attempt % hillAngles.length] + rr(rng, -0.85, 0.85)
           : ra(rng) + attempt * GOLDEN;
-        const distRatio = rr(rng, 0.34, 0.68);
-        const pos = getIslandSurfacePoint(island, distRatio, angle, 0);
-        if (pos.y < 3.2) continue; // entrance must clear waves + beach band
-        const rotation = directionToYaw(Math.cos(angle), Math.sin(angle));
-        const interiorRadius = rr(rng, 2.6, 3.6);
-        const height = rr(rng, 3.4, 4.6);
-        // Mouth ramps ~1m down into the hillside for headroom under the roof.
-        const floorY = pos.y - 1.0;
-        const ceilingY = floorY + height;
-        // Only hillsides thick enough to roof the tunnel qualify: the natural
-        // surface must clear the ceiling by ≥2m along the tunnel. Try the
-        // longest tunnel that stays roofed.
-        let length = 0;
-        for (const tryLen of [14, 11.5, 9, 7]) {
-          let roofed = true;
-          for (const f of [0.5, 0.8, 1.0]) {
-            const sx = pos.x - Math.sin(rotation) * tryLen * f;
-            const sz = pos.z - Math.cos(rotation) * tryLen * f;
-            if (getIslandSurfaceY(island, sx, sz) < ceilingY + 2) { roofed = false; break; }
-          }
-          if (roofed) { length = tryLen; break; }
-        }
-        if (length === 0) continue;
-        // Keep caves apart from each other.
-        if (caves.some((c) => Math.hypot(c.position.x - pos.x, c.position.z - pos.z) < c.length + length)) continue;
-        caves.push({
-          position: pos,
-          rotation,
-          width: interiorRadius * 2,
-          height,
-          length,
-          interiorRadius,
-          floorY,
-          ceilingY,
-        });
-        // ── Fully underground chamber ──
-        // Long tunnels open into a wide vaulted room deeper in the hill: a
-        // second cave record continuing the axis (the shared carve/ceiling
-        // math unions overlapping records, so tunnel and room connect
-        // seamlessly for locomotion, raycasts, and the client interior).
-        if (length >= 11) {
-          const roomRadius = rr(rng, 5.2, 7.0);
-          const roomLength = rr(rng, 9, 12);
-          const roomHeight = rr(rng, 5.2, 6.4);
-          const roomFloorY = floorY - 0.7;
-          const roomCeilY = roomFloorY + roomHeight;
-          const roomEntryX = pos.x - Math.sin(rotation) * (length - 1.5);
-          const roomEntryZ = pos.z - Math.cos(rotation) * (length - 1.5);
-          let roomRoofed = true;
-          for (const f of [0.3, 0.65, 1.0]) {
-            const sx = roomEntryX - Math.sin(rotation) * roomLength * f;
-            const sz = roomEntryZ - Math.cos(rotation) * roomLength * f;
-            if (getIslandSurfaceY(island, sx, sz) < roomCeilY + 2.2) { roomRoofed = false; break; }
-          }
-          if (roomRoofed) {
-            caves.push({
-              position: { x: roomEntryX, y: pos.y, z: roomEntryZ },
-              rotation,
-              width: roomRadius * 2,
-              height: roomHeight,
-              length: roomLength,
-              interiorRadius: roomRadius,
-              floorY: roomFloorY,
-              ceilingY: roomCeilY,
-            });
+        const mouth = getIslandSurfacePoint(island, rr(rng, 0.34, 0.6), angle, 0);
+        if (mouth.y < 3.2) continue;
+        const rot = directionToYaw(Math.cos(angle), Math.sin(angle));
+        const inX = -Math.sin(rot), inZ = -Math.cos(rot); // into the hill (toward centre)
+        const h = rr(rng, 3.6, 4.4);
+        const floorY = mouth.y - 1.0;
+        const ceilingY = floorY + h;
+        const iRad = rr(rng, 2.7, 3.4);
+        // Longest roofed entrance run (down to a short cavern on small isles).
+        let mainLen = 0;
+        for (const L of [15, 12, 9, 7, 6, 5]) { if (roofed(mouth.x, mouth.z, inX, inZ, L, ceilingY, 2.1)) { mainLen = L; break; } }
+        if (mainLen === 0) continue;
+        if (caves.some((c) => Math.hypot(c.position.x - mouth.x, c.position.z - mouth.z) < c.length + mainLen)) continue;
+
+        const sys: IslandCave[] = [];
+        sys.push(seg(mouth.x, mouth.z, rot, iRad, mainLen, floorY, h, { mouth: true }));
+
+        // Central junction chamber (deeper, taller).
+        const jx = mouth.x + inX * mainLen, jz = mouth.z + inZ * mainLen;
+        const jRad = rr(rng, 5.0, 6.4), jLen = rr(rng, 6, 9), jFloor = floorY - 0.8, jH = h + 1.8, jCeil = jFloor + jH;
+        if (!roofed(jx, jz, inX, inZ, jLen, jCeil, 2.2)) { sys[0].hasBackWall = true; caves.push(...sys); break; }
+        const junction = seg(jx, jz, rot, jRad, jLen, jFloor, jH, {});
+        sys.push(junction);
+        const jcx = jx + inX * jLen * 0.5, jcz = jz + inZ * jLen * 0.5;
+
+        // Side branch → treasure chamber (dead-end) off the junction.
+        const bRot = rot + (rng() < 0.5 ? 1 : -1) * rr(rng, 0.85, 1.35);
+        const bX = -Math.sin(bRot), bZ = -Math.cos(bRot);
+        const bH = rr(rng, 3.6, 4.4), bFloor = jFloor + 0.2, bRad = rr(rng, 2.4, 3.1);
+        let bLen = 0;
+        for (const L of [11, 8, 6]) { if (roofed(jcx, jcz, bX, bZ, L, bFloor + bH, 2)) { bLen = L; break; } }
+        if (bLen > 0) {
+          const branchSeg = seg(jcx, jcz, bRot, bRad, bLen, bFloor, bH, {});
+          sys.push(branchSeg);
+          const tcx = jcx + bX * bLen, tcz = jcz + bZ * bLen;
+          const tRad = rr(rng, 4.0, 5.2), tLen = rr(rng, 5, 7), tFloor = bFloor - 0.7, tH = rr(rng, 4.6, 5.6);
+          if (roofed(tcx, tcz, bX, bZ, tLen, tFloor + tH, 2.2)) {
+            sys.push(seg(tcx, tcz, bRot, tRad, tLen, tFloor, tH, { back: true }));
+          } else {
+            branchSeg.hasBackWall = true; // no room for a chamber → branch dead-ends
           }
         }
+
+        // THROUGH-tunnel: keep boring inward until the roof thins on the far
+        // flank, then break out as a SECOND mouth (cuts clean through the hill).
+        let exit: { x: number; z: number; y: number; dist: number } | null = null;
+        for (let d = jLen + 4; d < 70; d += 2) {
+          const ex = jx + inX * d, ez = jz + inZ * d;
+          const surf = getIslandSurfaceY(island, ex, ez);
+          if (surf < ceilingY + 0.4) { if (surf > 3.0) exit = { x: ex, z: ez, y: surf, dist: d }; break; }
+        }
+        if (exit) {
+          const exTunLen = exit.dist - jLen;
+          // Level run from the junction toward the far side.
+          sys.push(seg(jx + inX * jLen, jz + inZ * jLen, rot, iRad, exTunLen - 2, floorY - 0.4, h, {}));
+          // Far mouth segment, facing outward on the far flank.
+          const exAngle = Math.atan2(exit.z - island.position.z, exit.x - island.position.x);
+          const exRot = directionToYaw(Math.cos(exAngle), Math.sin(exAngle));
+          const exFloor = exit.y - 1.0;
+          sys.push(seg(exit.x, exit.z, exRot, iRad, Math.min(exTunLen, 10), exFloor, h, { mouth: true }));
+        } else {
+          junction.hasBackWall = true; // no through-route → seal the deep end
+        }
+
+        caves.push(...sys);
         break;
       }
     }

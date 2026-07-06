@@ -3674,6 +3674,7 @@ export class Game {
       if (!island.caves) return y;
       let out = y;
       for (const cave of island.caves) {
+        if (!cave.hasMouth) continue; // only real surface mouths open the hillside
         if (out <= cave.floorY) continue;
         const dx = worldX - cave.position.x;
         const dz = worldZ - cave.position.z;
@@ -4359,9 +4360,11 @@ export class Game {
         const ceilingLocalY = floorLocalY + ch;
         // Cave tunnel runs from local z=0 (entrance) to z=-cLen (back)
 
-        // ── Entrance frame: chunky rim boulders so the opening reads as a cliff hole ──
+        // ── Entrance frame: chunky rim boulders — only at real surface mouths
+        //    (internal junctions/branches connect, so they get no frame). ──
+        const isMouth = cave.hasMouth ?? true;
         const frameSegments = lowDetail ? 5 : 8;
-        for (let i = 0; i < frameSegments; i++) {
+        for (let i = 0; isMouth && i < frameSegments; i++) {
           const t = i / (frameSegments - 1);
           const angle = Math.PI * (1 - t);
           const fx = Math.cos(angle) * cR * 1.05;
@@ -4373,7 +4376,7 @@ export class Game {
           rock.castShadow = true;
           caveGroup.add(rock);
         }
-        for (const side of [-1, 1] as const) {
+        for (const side of isMouth ? [-1, 1] as const : [] as const) {
           const base = new THREE.Mesh(boulderGeo, caveStoneMat);
           base.scale.set(0.9, 0.7, 0.9);
           base.position.set(side * (cR + 0.3), floorLocalY + 0.45, 0.1);
@@ -4425,14 +4428,17 @@ export class Game {
         ridge.rotation.x = Math.PI * 0.5;
         caveGroup.add(ridge);
 
-        // ── Back wall: closes off the tunnel ──
-        const back = new THREE.Mesh(
-          new THREE.PlaneGeometry(cR * 2, ch),
-          caveWallMat,
-        );
-        back.position.set(0, floorLocalY + ch * 0.5, -cLen);
-        back.rotation.y = 0; // facing +Z, visible from inside
-        caveGroup.add(back);
+        // ── Back wall: only caps a dead-end chamber; through-tunnels and
+        //    junctions stay open so the system connects. ──
+        if (cave.hasBackWall ?? true) {
+          const back = new THREE.Mesh(
+            new THREE.PlaneGeometry(cR * 2, ch),
+            caveWallMat,
+          );
+          back.position.set(0, floorLocalY + ch * 0.5, -cLen);
+          back.rotation.y = 0; // facing +Z, visible from inside
+          caveGroup.add(back);
+        }
 
         // ── Stalactite + stalagmite accents ──
         const stoneAccentMat = new THREE.MeshStandardMaterial({ color: 0x4a3e2e, roughness: 1, flatShading: true });
@@ -4497,8 +4503,8 @@ export class Game {
         }
 
         // ── Treasure chest tucked at the back of the cave (visual only — gameplay
-        //     chests still spawn from server). A subtle gold glint that draws explorers in. ──
-        if (rng(cw * 11) > 0.5 && !lowDetail) {
+        //     chests still spawn from server). Only in the dead-end treasure room. ──
+        if ((cave.hasBackWall ?? true) && rng(cw * 11) > 0.35 && !lowDetail) {
           const goldChestMat = new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 });
           const goldLidMat = new THREE.MeshStandardMaterial({ color: 0xc9a84c, roughness: 0.5, metalness: 0.6 });
           const treasure = new THREE.Group();
