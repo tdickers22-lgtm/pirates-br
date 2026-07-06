@@ -258,7 +258,7 @@ export type IslandPropType =
   | 'palm_a' | 'palm_b' | 'palm_c'
   | 'boulder_a' | 'boulder_b' | 'boulder_c'
   | 'barrel' | 'crate' | 'campfire' | 'lantern_post'
-  | 'watchtower' | 'shipwreck' | 'standing_stones'
+  | 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort'
   | 'tent_a' | 'bedroll' | 'rock_arch'
   | 'bush' | 'bush_berry' | 'flower_bush' | 'fern_plant' | 'flower_patch' | 'wildflowers'
   | 'dock_mid' | 'dock_end';

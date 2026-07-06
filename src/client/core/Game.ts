@@ -9405,7 +9405,8 @@ export class Game {
           const icon = prop.type === 'shipwreck' ? '⚓'
             : prop.type === 'watchtower' ? '🗼'
               : prop.type === 'standing_stones' ? '🗿'
-                : prop.type === 'rock_arch' ? '⛰' : '';
+                : prop.type === 'fort' ? '💀'
+                  : prop.type === 'rock_arch' ? '⛰' : '';
           if (!icon) continue;
           ctx.textBaseline = 'middle';
           ctx.font = '14px serif';
