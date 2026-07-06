@@ -3563,12 +3563,14 @@ export class Game {
     // keep their muted biome tan. A warm off-white (not pure white) so the berm
     // reads as brilliant sand without blowing out into a bloom halo.
     const whiteSand = !!island.profile.whiteSand;
-    const sandWhite = new THREE.Color(0xf7f0dd);
+    // A warm bone-white, not paper-white: postcard beaches should read as bright
+    // sand, not a snow/ice shelf that blows out (worst on the atoll's shallows).
+    const sandWhite = new THREE.Color(0xece0c4);
     const beachColor = whiteSand
-      ? paletteSand.clone().lerp(sandWhite, 0.72)
+      ? paletteSand.clone().lerp(sandWhite, 0.6)
       : paletteSand.clone().lerp(new THREE.Color(0xffffff), 0.05);
     const sandColor = whiteSand
-      ? paletteSand.clone().lerp(sandWhite, 0.55)
+      ? paletteSand.clone().lerp(sandWhite, 0.42)
       : paletteSand.clone().multiplyScalar(0.9);
     // Lush, sunlit greens: lift the base grass a touch for vibrancy, and blend
     // the (dark) foliage toward grass so jungle interiors read as rich green —
@@ -3849,11 +3851,14 @@ export class Game {
         // Waterline gradient on the new shore rings: dry sand → darker wet
         // sand at the lapping band → blue-green submerged slope, so the
         // beach visually walks into the sea.
-        const wetMask = THREE.MathUtils.smoothstep(-pointY, -0.55, 0.25);
-        const depthMask = THREE.MathUtils.smoothstep(-pointY, 0.2, 2.6);
+        // Waves lap above mean sea level, so start wetting/submerging sand a bit
+        // ABOVE y=0: a barely-submerged shelf (e.g. the atoll lagoon floor) then
+        // reads as turquoise shallow water, not a blinding white sand plate.
+        const wetMask = THREE.MathUtils.smoothstep(-pointY, -0.9, 0.12);
+        const depthMask = THREE.MathUtils.smoothstep(-pointY, -0.15, 2.2);
         if (wetMask > 0) {
-          terrainColor.lerp(wetSandColor, wetMask * (0.45 + coast.beach * 0.35));
-          terrainColor.lerp(submergedColor, depthMask * 0.8);
+          terrainColor.lerp(wetSandColor, wetMask * (0.6 + coast.beach * 0.3));
+          terrainColor.lerp(submergedColor, depthMask * 0.9);
         }
 
         // ── Volcanic: char the upper cone to ash, seep magma through cracks ──
