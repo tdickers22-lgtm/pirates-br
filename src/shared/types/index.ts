@@ -32,7 +32,7 @@ export interface ShipKeg {
 export type ShipUpgradeType = 'hull_reinforcement' | 'charged_cannons' | 'swift_sails';
 
 /** Held tools selectable from the supply wheel (all innate to the pirate). */
-export type EquippableTool = 'spyglass' | 'compass' | 'bucket' | 'shovel';
+export type EquippableTool = 'spyglass' | 'compass' | 'bucket' | 'shovel' | 'lantern';
 
 export interface ShipUpgrade {
   type: ShipUpgradeType;

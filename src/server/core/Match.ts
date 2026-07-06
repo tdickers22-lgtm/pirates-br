@@ -954,7 +954,7 @@ export class Match {
     const wheelIndex = typeof input.wheelIndex === 'number'
       && Number.isInteger(input.wheelIndex)
       && input.wheelIndex >= 0
-      && input.wheelIndex <= 7
+      && input.wheelIndex <= 8
       ? input.wheelIndex
       : null;
     const cannonAmmo = input.cannonAmmo === 'cannonball' || input.cannonAmmo === 'firebomb' || input.cannonAmmo === 'chainshot'
@@ -1696,15 +1696,16 @@ export class Match {
       ship ??
       this.getAliveShip(player.shipId);
     const ix = input.wheelIndex;
-    // Unified supply wheel — slots 0-2,7 EQUIP a tool (instant toggle, no
+    // Unified supply wheel — slots 0-2,7,8 EQUIP a tool (instant toggle, no
     // cooldown); slot 3 transfers a plank to ship stores; slots 4-6 eat one
-    // consumable. Layout mirrors the client SVG.
+    // consumable. Layout mirrors the client SVG (9-slice wheel).
     const tool: EquippableTool | null =
       ix === 0 ? 'spyglass'
         : ix === 1 ? 'compass'
           : ix === 2 ? 'bucket'
             : ix === 7 ? 'shovel'
-              : null;
+              : ix === 8 ? 'lantern'
+                : null;
     if (tool) {
       // Equipping a tool is instant — bypasses the consumable use-cooldown.
       player.equippedTool = player.equippedTool === tool ? null : tool;
