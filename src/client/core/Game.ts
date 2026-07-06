@@ -887,17 +887,21 @@ type PocketPreviewKind = 'banana' | 'wood' | 'coconut' | 'mango' | 'meat' | 'pow
  *  slabs). Rings are lofted along the tunnel axis with per-ring wander and
  *  per-vertex rock jitter; the floor is flattened for walking. Both ends stay
  *  open so overlapping segments blend into a network; `capBack` seals dead-ends. */
-function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, ceilY: number, seed: number, capBack: boolean): THREE.BufferGeometry {
+function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, ceilY: number, seed: number, capBack: boolean, floorYEnd?: number): THREE.BufferGeometry {
   const segs = 16;
   const rings = Math.max(5, Math.round(cLen / 1.3));
   const hash = (n: number) => { const x = Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453; return x - Math.floor(x); };
-  const vc = (floorY + ceilY) * 0.5;
-  const vh = (ceilY - floorY) * 0.5;
+  const fEnd = floorYEnd ?? floorY;
+  const height = ceilY - floorY;
   const positions: number[] = [];
   const ringIdx: number[][] = [];
   let vi = 0;
   for (let j = 0; j <= rings; j++) {
-    const z = -cLen * (j / rings);
+    const t = j / rings;
+    const z = -cLen * t;
+    const floorJ = floorY + (fEnd - floorY) * t;          // ramp down into the mountain
+    const vc = floorJ + height * 0.5;
+    const vh = height * 0.5;
     const cxWob = (hash(j * 3.7) - 0.5) * cR * 0.5;      // tunnel meanders
     const rMul = 0.85 + hash(j * 6.3) * 0.35;             // pinches + widenings
     const idxs: number[] = [];
@@ -907,8 +911,8 @@ function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, ceilY: n
       let x = Math.cos(a) * cR * rMul * n + cxWob;
       let y = vc + Math.sin(a) * vh * rMul * n;
       const sa = Math.sin(a);
-      if (sa < -0.28) { const k = (-sa - 0.28) / 0.72; y = y * (1 - k) + (floorY + 0.05) * k; } // flat floor
-      positions.push(x, Math.max(y, floorY - 0.02), z);
+      if (sa < -0.28) { const k = (-sa - 0.28) / 0.72; y = y * (1 - k) + (floorJ + 0.05) * k; } // flat floor
+      positions.push(x, Math.max(y, floorJ - 0.02), z);
       idxs.push(vi++);
     }
     ringIdx.push(idxs);
@@ -3744,7 +3748,12 @@ export class Game {
         const inner = THREE.MathUtils.smoothstep(lz, -cLen * 1.05, -cLen * 0.9);
         const outer = 1 - THREE.MathUtils.smoothstep(lz, 0.8, 2.6);
         const mask = lat * inner * outer;
-        if (mask > 0) out += (cave.floorY - out) * mask;
+        // Carve toward the ramping floor so a descending entrance cuts down into
+        // the hillside (rather than a flat slot).
+        const fEnd = (cave as { floorYEnd?: number }).floorYEnd ?? cave.floorY;
+        const along = cLen > 0 ? Math.min(1, Math.max(0, -lz / cLen)) : 0;
+        const floorAt = cave.floorY + (fEnd - cave.floorY) * along;
+        if (mask > 0 && out > floorAt) out += (floorAt - out) * mask;
       }
       return out;
     };
@@ -4442,8 +4451,9 @@ export class Game {
         //    arched ceiling), organically displaced — replaces the old flat
         //    floor/wall/ceiling slabs that left black gaps. Dead-ends get a
         //    fan-capped back; mouths/junctions stay open so segments connect. ──
+        const floorEndLocalY = ((cave as { floorYEnd?: number }).floorYEnd ?? cave.floorY) - cave.position.y;
         const tube = new THREE.Mesh(
-          makeCaveTubeGeometry(cR, cLen, floorLocalY, ceilingLocalY, cw * 7.3 + cLen * 2.1 + cR, cave.hasBackWall ?? true),
+          makeCaveTubeGeometry(cR, cLen, floorLocalY, ceilingLocalY, cw * 7.3 + cLen * 2.1 + cR, cave.hasBackWall ?? true, floorEndLocalY),
           caveRockMat,
         );
         tube.receiveShadow = true;

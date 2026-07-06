@@ -3385,7 +3385,26 @@ export class Match {
       s.position.z += s.velocity.z * dt;
       s.position.y = 0.38;
 
-      if (d < SHARK.BITE_RANGE && s.biteCooldown <= 0) {
+      // Sharks stay in OPEN WATER — shove them back out of any island footprint
+      // so they never chase under the terrain (where they'd be invisible and bite
+      // the swimmer from inside the rock = "random" damage).
+      let inLand = false;
+      for (const island of islands) {
+        if (!isPointInsideIslandFootprint(island, s.position.x, s.position.z, 4)) continue;
+        const ax = s.position.x - island.position.x;
+        const az = s.position.z - island.position.z;
+        const al = Math.hypot(ax, az) || 1;
+        let px = s.position.x, pz = s.position.z;
+        for (let step = 0; step < 40 && isPointInsideIslandFootprint(island, px, pz, 4); step++) {
+          px += (ax / al) * 1.5; pz += (az / al) * 1.5;
+        }
+        s.position.x = px; s.position.z = pz;
+        s.velocity.x *= 0.25; s.velocity.z *= 0.25;
+        inLand = true;
+      }
+
+      // Only bite from open water within range (not from inside the shore rock).
+      if (!inLand && d < SHARK.BITE_RANGE && s.biteCooldown <= 0) {
         target.health -= SHARK.BITE_DAMAGE;
         target.lastDamagedById = null;
         target.lastDamagedAt = null;

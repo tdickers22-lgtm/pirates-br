@@ -543,9 +543,10 @@ export class MapGenerator {
       return true;
     };
     const seg = (x: number, z: number, rot: number, rad: number, len: number, floor: number, h: number,
-                 opts: { mouth?: boolean; back?: boolean }): IslandCave => ({
+                 opts: { mouth?: boolean; back?: boolean; floorEnd?: number }): IslandCave => ({
       position: { x, y: island.position.y, z }, rotation: rot, width: rad * 2, height: h,
       length: len, interiorRadius: rad, floorY: floor, ceilingY: floor + h,
+      floorYEnd: opts.floorEnd ?? floor,
       hasMouth: !!opts.mouth, hasBackWall: !!opts.back,
     });
 
@@ -568,12 +569,16 @@ export class MapGenerator {
         if (mainLen === 0) continue;
         if (caves.some((c) => Math.hypot(c.position.x - mouth.x, c.position.z - mouth.z) < c.length + mainLen)) continue;
 
+        // Entrance tunnel RAMPS DOWN into the mountain (not a thin roof slab):
+        // deeper on bigger, taller islands so mountains hide genuine caverns.
+        const descend = Math.min(9, 4 + island.radius * 0.05);
+        const deepFloor = floorY - descend;
         const sys: IslandCave[] = [];
-        sys.push(seg(mouth.x, mouth.z, rot, iRad, mainLen, floorY, h, { mouth: true }));
+        sys.push(seg(mouth.x, mouth.z, rot, iRad, mainLen, floorY, h, { mouth: true, floorEnd: deepFloor }));
 
-        // Central junction chamber (deeper, taller).
+        // Central junction chamber, deep underground (taller, at the ramp's base).
         const jx = mouth.x + inX * mainLen, jz = mouth.z + inZ * mainLen;
-        const jRad = rr(rng, 5.0, 6.4), jLen = rr(rng, 6, 9), jFloor = floorY - 0.8, jH = h + 1.8, jCeil = jFloor + jH;
+        const jRad = rr(rng, 5.0, 6.4), jLen = rr(rng, 6, 9), jFloor = deepFloor - 0.6, jH = h + 2.2, jCeil = jFloor + jH;
         if (!roofed(jx, jz, inX, inZ, jLen, jCeil, 2.2)) { sys[0].hasBackWall = true; caves.push(...sys); break; }
         const junction = seg(jx, jz, rot, jRad, jLen, jFloor, jH, {});
         sys.push(junction);
@@ -607,13 +612,12 @@ export class MapGenerator {
         }
         if (exit) {
           const exTunLen = exit.dist - jLen;
-          // Level run from the junction toward the far side.
-          sys.push(seg(jx + inX * jLen, jz + inZ * jLen, rot, iRad, exTunLen - 2, floorY - 0.4, h, {}));
-          // Far mouth segment, facing outward on the far flank.
+          // Tunnel ramps UP from the deep junction back to the far surface.
+          sys.push(seg(jx + inX * jLen, jz + inZ * jLen, rot, iRad, Math.max(4, exTunLen - 2), jFloor, h, { floorEnd: exit.y - 1 }));
+          // Far mouth on the far flank (descends inward to meet the ramp).
           const exAngle = Math.atan2(exit.z - island.position.z, exit.x - island.position.x);
           const exRot = directionToYaw(Math.cos(exAngle), Math.sin(exAngle));
-          const exFloor = exit.y - 1.0;
-          sys.push(seg(exit.x, exit.z, exRot, iRad, Math.min(exTunLen, 10), exFloor, h, { mouth: true }));
+          sys.push(seg(exit.x, exit.z, exRot, iRad, Math.min(exTunLen, 9), exit.y - 1, h, { mouth: true, floorEnd: exit.y - 2 }));
         } else {
           junction.hasBackWall = true; // no through-route → seal the deep end
         }
@@ -973,6 +977,19 @@ export class MapGenerator {
     return Array.from(loot.entries()).map(([item, qty]) => ({ item, qty }));
   }
 
+  /** A dry standing spot for a shore NPC: march inward from `distRatio` along
+   *  `angle` until the surface clears the waterline, so vendors never spawn
+   *  knee-deep (or fully submerged) in the surf. */
+  private findDryNpcSpot(island: Island, distRatio: number, angle: number): Vec3 {
+    let d = distRatio;
+    let pos = getIslandSurfacePoint(island, d, angle, 0);
+    for (let i = 0; i < 26 && pos.y < 0.85; i++) {
+      d = Math.max(0.16, d - 0.03);
+      pos = getIslandSurfacePoint(island, d, angle, 0);
+    }
+    return { x: pos.x, y: pos.y, z: pos.z };
+  }
+
   private generateStoryNpcs(island: Island, islandIndex: number, rng: Rng): IslandNpc[] {
     const shouldSpawn = islandIndex < 3 || (island.radius > 62 && islandIndex % 4 === 0);
     const npcs: IslandNpc[] = [];
@@ -985,8 +1002,8 @@ export class MapGenerator {
       const hoarderAngle = island.dock
         ? island.dock.shoreAngle + island.dock.moorSide * 0.42
         : island.profile.primaryHillAngle - 0.62;
-      const hoarderDistRatio = island.dock ? 0.74 : 0.38;
-      const hoarderPos = getIslandSurfacePoint(island, hoarderDistRatio, hoarderAngle, 0.08);
+      const hoarderDistRatio = island.dock ? 0.72 : 0.38;
+      const hoarderPos = this.findDryNpcSpot(island, hoarderDistRatio, hoarderAngle);
       npcs.push({
         id: uuid(),
         role: 'gold_hoarder',
@@ -1051,8 +1068,8 @@ export class MapGenerator {
     const angle = island.dock
       ? island.dock.shoreAngle + rr(rng, -0.34, 0.34)
       : island.profile.primaryHillAngle + rr(rng, -0.42, 0.42);
-    const distRatio = island.dock ? rr(rng, 0.66, 0.78) : rr(rng, 0.22, 0.42);
-    const pos = getIslandSurfacePoint(island, distRatio, angle, 0.06);
+    const distRatio = island.dock ? rr(rng, 0.6, 0.74) : rr(rng, 0.22, 0.42);
+    const pos = this.findDryNpcSpot(island, distRatio, angle);
     const rotation = directionToYaw(island.position.x - pos.x, island.position.z - pos.z);
 
     npcs.push({
