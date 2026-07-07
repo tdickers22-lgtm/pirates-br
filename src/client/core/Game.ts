@@ -1974,6 +1974,10 @@ export class Game {
   private mapOpen = false;
   /** Full-map zoom (1 = whole world fit; scroll to zoom in, pans to the player). */
   private mapZoom = 1;
+  /** Cached per-island land-shape bitmaps for the chart. The world is fixed, so
+   *  each island's true above-water footprint (archipelago islets, crescent bays,
+   *  twin saddles) is rasterized once from getIslandSurfaceY and reused. */
+  private readonly islandChartCache = new Map<string, { canvas: HTMLCanvasElement; extent: number }>();
   /** Supply-wheel slot the mouse is hovering while it's open (radial select). */
   private wheelHoverSlot: number | null = null;
   /** Whether the supply wheel was open last frame — to catch the release edge. */
@@ -9969,6 +9973,52 @@ export class Game {
     ctx.restore();
   }
 
+  /** Rasterize an island's TRUE above-water land shape (once, cached). Sampling
+   *  getIslandSurfaceY over the footprint means archipelagos draw as separate
+   *  islets, crescents as a C around their bay, twins with their saddle — instead
+   *  of the old single smooth footprint-ring blob. */
+  private getIslandChartBitmap(island: Island): { canvas: HTMLCanvasElement; extent: number } {
+    const cached = this.islandChartCache.get(island.id);
+    if (cached) return cached;
+    const extent = getIslandMaxRadius(island) * 1.04;
+    const gridN = THREE.MathUtils.clamp(Math.round(extent / 1.4), 48, 150);
+    const canvas = document.createElement('canvas');
+    canvas.width = gridN;
+    canvas.height = gridN;
+    const g = canvas.getContext('2d')!;
+    const img = g.createImageData(gridN, gridN);
+    const data = img.data;
+    const palette = island.profile.palette
+      ?? BIOME_PALETTES[island.profile.biome ?? 'lush'] ?? BIOME_PALETTES.lush;
+    const sand = new THREE.Color(palette.sand);
+    const grass = new THREE.Color(palette.grass);
+    const rock = new THREE.Color(palette.rock);
+    const isVolcanic = (island.profile.biome ?? 'lush') === 'volcanic';
+    const ash = new THREE.Color(0x2b2621);
+    const col = new THREE.Color();
+    for (let gz = 0; gz < gridN; gz++) {
+      for (let gx = 0; gx < gridN; gx++) {
+        const lx = ((gx + 0.5) / gridN * 2 - 1) * extent;
+        const lz = ((gz + 0.5) / gridN * 2 - 1) * extent;
+        const y = getIslandSurfaceY(island, island.position.x + lx, island.position.z + lz);
+        const idx = (gz * gridN + gx) * 4;
+        if (y <= 0.35) { data[idx + 3] = 0; continue; }   // below the waterline → sea shows through
+        const t = THREE.MathUtils.clamp((y - 0.35) / 3.0, 0, 1); // shore sand → interior grass
+        col.copy(sand).lerp(grass, t);
+        if (y > 7) col.lerp(rock, THREE.MathUtils.clamp((y - 7) / 15, 0, 0.65));   // rocky heights
+        if (isVolcanic && y > 6) col.lerp(ash, THREE.MathUtils.clamp((y - 6) / 12, 0, 0.7));
+        data[idx] = Math.round(col.r * 255);
+        data[idx + 1] = Math.round(col.g * 255);
+        data[idx + 2] = Math.round(col.b * 255);
+        data[idx + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    const entry = { canvas, extent };
+    this.islandChartCache.set(island.id, entry);
+    return entry;
+  }
+
   private drawIslandChart(
     ctx: CanvasRenderingContext2D,
     island: Island,
@@ -9977,43 +10027,21 @@ export class Game {
     scale: number,
     fullscreen: boolean,
   ) {
-    const quality = this.renderer.getQuality();
-    const detailSegments = quality === 'low'
-      ? (fullscreen ? 16 : 10)
-      : quality === 'balanced'
-        ? (fullscreen ? 22 : 14)
-        : (fullscreen ? 28 : 18);
-    // Biome-tinted chart: a sandy coast ring around a darker interior, so a
-    // volcanic isle reads charcoal, a lush one green, a bone atoll pale (SoT).
-    const palette = island.profile.palette
-      ?? BIOME_PALETTES[island.profile.biome ?? 'lush']
-      ?? BIOME_PALETTES.lush;
-    const toHex = (n: number) => `#${(n & 0xffffff).toString(16).padStart(6, '0')}`;
-    const coastColor = toHex(palette.sand);
-    const interiorColor = toHex(palette.grass);
-    const traceRing = (dist: number) => {
-      ctx.beginPath();
-      for (let segment = 0; segment <= detailSegments; segment++) {
-        const angle = (segment / detailSegments) * Math.PI * 2;
-        const point = getIslandSurfacePoint(island, dist, angle, 0);
-        const x = centerX + point.x * scale;
-        const y = centerY + point.z * scale;
-        if (segment === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-    };
+    // Draw the island's TRUE above-water shape from a cached land-mask bitmap
+    // (archipelago islets separate, crescent bays open, twin saddles) instead of
+    // a single smooth footprint ring.
+    const bmp = this.getIslandChartBitmap(island);
+    const size = bmp.extent * 2 * scale;
     ctx.save();
-    ctx.fillStyle = coastColor;
-    ctx.strokeStyle = fullscreen ? 'rgba(30, 22, 12, 0.7)' : 'rgba(30, 22, 12, 0.55)';
-    ctx.lineWidth = fullscreen ? 2 : 1;
-    traceRing(0.98);
-    ctx.fill();
-    ctx.stroke();
-    // Interior landmass fill (grass/rock tint) so coast vs inland reads.
-    ctx.fillStyle = interiorColor;
-    traceRing(0.6);
-    ctx.fill();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(
+      bmp.canvas,
+      centerX + (island.position.x - bmp.extent) * scale,
+      centerY + (island.position.z - bmp.extent) * scale,
+      size,
+      size,
+    );
+    ctx.restore();
 
     if (island.dock) {
       const dock = island.dock;
