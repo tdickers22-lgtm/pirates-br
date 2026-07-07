@@ -198,8 +198,8 @@ export class Renderer {
   private readonly fogTwilightColor = new THREE.Color(0xc0968a);
   private readonly fogNightColor = new THREE.Color(0x35506d);
   private readonly fogStormColor = new THREE.Color(0x5a6a78);
-  private readonly fogUnderwaterNearColor = new THREE.Color(0x0d5f78);
-  private readonly fogUnderwaterDeepColor = new THREE.Color(0x031f35);
+  private readonly fogUnderwaterNearColor = new THREE.Color(0x1a6f86);
+  private readonly fogUnderwaterDeepColor = new THREE.Color(0x0a3a4a); // murky teal, not a black void
   private readonly tempFogColor = new THREE.Color();
   private readonly tempUnderwaterFogColor = new THREE.Color();
   private readonly sunDayColor = new THREE.Color(0xfff0d8);
@@ -473,7 +473,7 @@ export class Renderer {
     this.tempUnderwaterFogColor.copy(this.fogUnderwaterNearColor).lerp(this.fogUnderwaterDeepColor, deep);
     fog.color.copy(this.tempFogColor).lerp(this.tempUnderwaterFogColor, underwater);
     const weatherFog = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, storm);
-    const waterFog = THREE.MathUtils.lerp(0.0065, 0.018, deep);
+    const waterFog = THREE.MathUtils.lerp(0.0058, 0.011, deep); // gentler falloff so silhouettes survive at depth
     fog.density = THREE.MathUtils.lerp(weatherFog, waterFog, underwater);
 
     this.getCycleColor(this.sun.color, this.sunDayColor, this.sunTwilightColor, this.moonColor);
