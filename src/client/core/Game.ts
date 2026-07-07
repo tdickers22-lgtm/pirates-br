@@ -2567,14 +2567,14 @@ export class Game {
   private initLanternSystem() {
     this.lanternGlowTexture = makeLanternGlowTexture();
     this.lanternFlameTexture = makeLanternFlameTexture();
-    for (let i = 0; i < 4; i++) {
-      const light = new THREE.PointLight(0xffb257, 0, 17, 1.6);
+    for (let i = 0; i < 6; i++) {
+      const light = new THREE.PointLight(0xffb257, 0, 24, 1.6);
       light.visible = false;
       this.lanternRoot.add(light);
       this.lanternLightPool.push(light);
     }
-    for (let i = 0; i < 3; i++) {
-      const light = new THREE.PointLight(0xff7a30, 0, 15, 1.5);
+    for (let i = 0; i < 4; i++) {
+      const light = new THREE.PointLight(0xff7a30, 0, 21, 1.5);
       light.visible = false;
       this.lanternRoot.add(light);
       this.campfireLightPool.push(light);
@@ -2654,7 +2654,7 @@ export class Game {
       } else {
         const flicker = 1 + Math.sin(t * 7.3 + e.phase) * 0.05 + Math.sin(t * 13.7 + e.phase * 1.7) * 0.03;
         light.position.copy(e.worldPos);
-        light.intensity = nf * 1.55 * flicker;
+        light.intensity = nf * 2.1 * flicker;
         light.visible = true;
       }
     }
@@ -2667,7 +2667,7 @@ export class Game {
       } else {
         const flicker = 1 + Math.sin(t * 11 + e.phase) * 0.24 + Math.sin(t * 23 + e.phase * 2.1) * 0.14 + (Math.random() - 0.5) * 0.08;
         light.position.copy(e.worldPos);
-        light.intensity = nf * 1.9 * Math.max(0.25, flicker);
+        light.intensity = nf * 2.5 * Math.max(0.25, flicker);
         light.visible = true;
       }
     }
@@ -3977,10 +3977,13 @@ export class Game {
         // ── Snow line: the summit of a tall mountain whitens (terrain-hugging,
         // heavier on flatter shelves where snow settles, thinner on sheer faces). ──
         if (isSnowy) {
-          const snow = THREE.MathUtils.smoothstep(heightNorm, 0.62, 0.9)
+          // Snow keyed on ABSOLUTE height above the sea (not heightNorm, whose
+          // peakEst over-estimated relief so the band never triggered) — the top
+          // third of a real spire whitens, heavier on flatter shelves.
+          const snow = THREE.MathUtils.smoothstep(pointY, seaBase + 15, seaBase + 27)
             * (1 - shoreMask)
-            * (1 - slopeRockMask * 0.55);
-          if (snow > 0) terrainColor.lerp(snowColor, Math.min(1, snow * 1.15));
+            * (1 - slopeRockMask * 0.5);
+          if (snow > 0) terrainColor.lerp(snowColor, Math.min(1, snow * 1.2));
         }
 
         // Per-vertex noise + a low-frequency hue drift so large faces never
@@ -6127,8 +6130,8 @@ export class Game {
 
     // ── Reef ring — sharp dark rocks just offshore ──
     {
-      const reefMatDark = new THREE.MeshStandardMaterial({ color: 0x282520, roughness: 1 });
-      const reefMatWet = new THREE.MeshStandardMaterial({ color: 0x3a3328, roughness: 0.9 });
+      const reefMatDark = new THREE.MeshStandardMaterial({ color: 0x5b5348, roughness: 1 });
+      const reefMatWet = new THREE.MeshStandardMaterial({ color: 0x6d6455, roughness: 0.9 });
       const reefCount = scaledCount(Math.round(r / 8), 5);
       const reefGeoSharp = new THREE.ConeGeometry(0.7, 1.2, 5);
       const reefGeoChunk = new THREE.DodecahedronGeometry(0.6, 0);
@@ -6169,7 +6172,7 @@ export class Game {
 
     // ── Sharp rock spires — jagged peaks for mountain/rocky islands ──
     if (island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky') {
-      const spireMat = new THREE.MeshStandardMaterial({ color: 0x4d4338, roughness: 1, flatShading: true });
+      const spireMat = new THREE.MeshStandardMaterial({ color: 0x6a5f52, roughness: 1, flatShading: true });
       const spireCount = scaledCount(island.profile.terrainStyle === 'mountain' ? 4 : 3, 2);
       for (let i = 0; i < spireCount; i++) {
         const angle = island.profile.ridgeAxis + (i / spireCount) * Math.PI + rng(i * 503 + 13) * 0.6;
