@@ -546,7 +546,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const isMountain = profile.terrainStyle === 'mountain';
   const isCrescent = profile.terrainStyle === 'crescent';
   // Twin/archipelago push secondary peak amplitude up so the second hill is a true peak
-  const secondaryAmp = isTwin ? 2.2 : isArchipelago ? 1.8 : isMountain ? 1.35 : 1.0;
+  const secondaryAmp = isTwin ? 2.2 : isArchipelago ? 1.8 : isMountain ? 1.35 : 1.55;
   const tertiaryAmp = isArchipelago ? 1.6 : 1.0;
   // Mountain islands now build dramatically taller peaks — peakBoost can hit 1.6 and
   // the multiplier is steeper, so a tall mountain genuinely dominates the skyline.
@@ -559,7 +559,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     isMountain
       ? Math.max(0.16, 0.3 - peakBoost * 0.045) + profile.mesaBias * 0.05
       : 0.34 + profile.mesaBias * 0.08 + peakBoost * 0.04,
-    (0.018 + profile.heightProfile * 0.022) * (1 + peakBoost * mountainBoostFactor) * (isTwin || isArchipelago ? 1.4 : isMountain ? 1.6 : 1),
+    (0.018 + profile.heightProfile * 0.022) * (1 + peakBoost * mountainBoostFactor) * (isTwin || isArchipelago ? 1.4 : isMountain ? 1.6 : 1.32),
   );
   const secondaryHill = hillContribution(
     profile.secondaryHillAngle,
@@ -644,9 +644,17 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // beaches stay smooth and dock/berth/NPC placement is unaffected.
   const interiorMask = clamp(1 - distRatio / 0.97, 0, 1);
   const detailMask = Math.min(1, interiorMask * 1.6);
-  // Rolling hill detail — low-frequency fbm carves valleys and knolls.
-  const hillDetail = terrainFbm(x * 0.016, z * 0.016, 3)
-    * island.radius * 0.05
+  // Rolling hill detail — a LARGE-scale octave carves headlands/knolls/valleys
+  // that give the aerial silhouette real relief (flat styles read as domes, not
+  // discs), plus a medium octave for surface undulation. Interior-only
+  // (detailMask fades it to the shore, so the beach walk-in stays gentle) and
+  // fully deterministic (world-space), so collision/props stay in sync.
+  const bigHill = terrainFbm(x * 0.0065, z * 0.0065, 2)
+    * island.radius * 0.062
+    * (0.5 + profile.heightProfile * 0.7)
+    * detailMask;
+  const hillDetail = bigHill + terrainFbm(x * 0.016, z * 0.016, 3)
+    * island.radius * 0.055
     * (0.45 + profile.heightProfile * 0.85)
     * detailMask;
   // Cliff bands — ridged noise pushes sharp exposed-rock crests on taller styles.
