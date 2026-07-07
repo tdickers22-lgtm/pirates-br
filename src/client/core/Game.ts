@@ -3439,6 +3439,46 @@ export class Game {
     }
   }
 
+  private seaRockMaterialCache: THREE.MeshStandardMaterial | null = null;
+  /** Shared enriched sea-stack material: the Blender GLB gives the eroded pillar
+   *  geometry, this paints it with sedimentary strata bands, a wet dark base at
+   *  the waterline, a sun-bleached crown and position mottling so stacks read as
+   *  real weathered rock — not flat pale monoliths. Keyed on local/world pos so a
+   *  single shared material still varies per rock. */
+  private getSeaRockMaterial(): THREE.MeshStandardMaterial {
+    if (this.seaRockMaterialCache) return this.seaRockMaterialCache;
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.97, flatShading: true });
+    mat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vRockWorld;\nvarying float vRockLocalY;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRockLocalY = position.y;\nvRockWorld = (modelMatrix * vec4(position, 1.0)).xyz;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vRockWorld;\nvarying float vRockLocalY;')
+        .replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n'
+          + 'float _band = sin(vRockLocalY * 1.35 + 0.6) * 0.5 + 0.5;\n'
+          + '_band = pow(_band, 1.4);\n'                                    // crisper band edges
+          + 'vec3 _rockA = vec3(0.20, 0.185, 0.16);\n'                      // dark weathered stone
+          + 'vec3 _rockB = vec3(0.40, 0.36, 0.30);\n'                       // warm lit band
+          + 'vec3 _col = mix(_rockA, _rockB, _band);\n'
+          + '_col *= 0.88 + 0.12 * sin(vRockLocalY * 5.0 + 1.3);\n'
+          + 'float _m = fract(sin(dot(floor(vRockWorld.xz * 0.55), vec2(12.9898, 78.233))) * 43758.5453);\n'
+          + '_col *= 0.86 + 0.2 * _m;\n'
+          + 'float _wet = 1.0 - smoothstep(-1.0, 5.5, vRockWorld.y);\n'
+          + '_col = mix(_col, vec3(0.11, 0.13, 0.14), _wet * 0.75);\n'      // dark salt-wet base
+          + 'float _crown = smoothstep(7.0, 12.5, vRockLocalY);\n'
+          + '_col = mix(_col, vec3(0.55, 0.53, 0.47), _crown * 0.55);\n'    // sun-bleached / guano crown
+          + '_col += vec3(0.03, 0.045, 0.02) * (1.0 - _band) * (1.0 - _wet);\n' // faint lichen in shaded bands
+
+          + 'diffuseColor.rgb = _col;',
+        );
+    };
+    mat.customProgramCacheKey = () => 'pirates-searock';
+    this.seaRockMaterialCache = mat;
+    return mat;
+  }
+
   private buildSeaRockMesh(rock: SeaRock) {
     const group = new THREE.Group();
     group.name = `sea-rock-${rock.id}`;
@@ -3458,19 +3498,19 @@ export class Game {
       const sxz = mainColliderRadius / assetHoriz;
       const sy = Math.max(0.4, mainColliderTop / Math.max(rockBounds.max.y, 0.001));
       rockClone.scale.set(sxz, sy, sxz);
-      if (lowDetail) {
-        rockClone.traverse((o) => {
-          if (o instanceof THREE.Mesh) {
-            o.castShadow = false;
-            o.receiveShadow = false;
-          }
-        });
-      }
+      const seaRockMat = this.getSeaRockMaterial();
+      rockClone.traverse((o) => {
+        if (o instanceof THREE.Mesh) {
+          o.material = seaRockMat;          // enriched strata/wet/mottle look
+          o.castShadow = !lowDetail;
+          o.receiveShadow = !lowDetail;
+        }
+      });
       group.add(rockClone);
 
       const foam = new THREE.Mesh(
-        new THREE.RingGeometry(rock.radius * 0.78, rock.radius * 1.16, lowDetail ? 12 : 24),
-        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false }),
+        new THREE.RingGeometry(rock.radius * 0.8, rock.radius * 1.12, lowDetail ? 12 : 24),
+        new THREE.MeshBasicMaterial({ color: 0xdcede8, transparent: true, opacity: 0.26, side: THREE.DoubleSide, depthWrite: false }),
       );
       foam.rotation.x = -Math.PI * 0.5;
       foam.position.y = 0.04;
@@ -3509,8 +3549,8 @@ export class Game {
     }
 
     const foam = new THREE.Mesh(
-      new THREE.RingGeometry(rock.radius * 0.78, rock.radius * 1.16, lowDetail ? 12 : 24),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false }),
+      new THREE.RingGeometry(rock.radius * 0.8, rock.radius * 1.12, lowDetail ? 12 : 24),
+      new THREE.MeshBasicMaterial({ color: 0xdcede8, transparent: true, opacity: 0.26, side: THREE.DoubleSide, depthWrite: false }),
     );
     foam.rotation.x = -Math.PI * 0.5;
     foam.position.y = 0.04;
