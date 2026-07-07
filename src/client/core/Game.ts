@@ -9560,6 +9560,97 @@ export class Game {
     ctx.restore();
   }
 
+  /** Draw a charted-POI marker as a monochrome gold vector glyph in the map's
+   *  parchment palette. Replaces OS colour emoji (which rendered as glossy Apple
+   *  art on Mac and tofu boxes / different art elsewhere — non-deterministic). */
+  private drawPoiIcon(ctx: CanvasRenderingContext2D, kind: string, x: number, y: number, s = 6) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.lineWidth = Math.max(1, s * 0.26);
+    ctx.strokeStyle = 'rgba(6, 14, 26, 0.92)';
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const gold = '#e7c766';
+    const dark = 'rgba(6, 14, 26, 0.9)';
+    ctx.fillStyle = gold;
+    const tri = (x1: number, y1: number, x2: number, y2: number, x3: number, y3: number) => {
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath();
+    };
+    switch (kind) {
+      case 'volcano':
+        ctx.beginPath(); ctx.moveTo(-s, s * 0.8); ctx.lineTo(-s * 0.34, -s * 0.4);
+        ctx.lineTo(s * 0.34, -s * 0.4); ctx.lineTo(s, s * 0.8); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#e2552e'; ctx.beginPath(); ctx.arc(0, -s * 0.4, s * 0.24, 0, Math.PI * 2); ctx.fill();
+        break;
+      case 'peak':
+        tri(-s, s * 0.8, 0, -s * 0.9, s, s * 0.8); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#f4e8c6'; tri(-s * 0.32, -s * 0.12, 0, -s * 0.9, s * 0.32, -s * 0.12); ctx.fill();
+        break;
+      case 'fort': // skull
+        ctx.beginPath(); ctx.arc(0, -s * 0.1, s * 0.72, Math.PI, 0); ctx.lineTo(s * 0.48, s * 0.55); ctx.lineTo(-s * 0.48, s * 0.55); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = dark;
+        ctx.beginPath(); ctx.arc(-s * 0.3, -s * 0.1, s * 0.2, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(s * 0.3, -s * 0.1, s * 0.2, 0, Math.PI * 2); ctx.fill();
+        break;
+      case 'anchor': // shipwreck
+        ctx.beginPath();
+        ctx.arc(0, -s * 0.68, s * 0.26, 0, Math.PI * 2);
+        ctx.moveTo(0, -s * 0.42); ctx.lineTo(0, s * 0.6);
+        ctx.moveTo(-s * 0.5, s * 0.05); ctx.lineTo(s * 0.5, s * 0.05);
+        ctx.moveTo(-s * 0.6, s * 0.3); ctx.quadraticCurveTo(0, s * 0.95, s * 0.6, s * 0.3);
+        ctx.stroke();
+        break;
+      case 'tower': // watchtower
+        ctx.beginPath(); ctx.moveTo(-s * 0.42, s * 0.85); ctx.lineTo(-s * 0.28, -s * 0.4); ctx.lineTo(s * 0.28, -s * 0.4); ctx.lineTo(s * 0.42, s * 0.85);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.rect(-s * 0.42, -s * 0.78, s * 0.84, s * 0.36); ctx.fill(); ctx.stroke();
+        break;
+      case 'stones': // standing stones (trilithon)
+        ctx.beginPath();
+        ctx.rect(-s * 0.72, -s * 0.35, s * 0.36, s * 1.15);
+        ctx.rect(s * 0.36, -s * 0.35, s * 0.36, s * 1.15);
+        ctx.rect(-s * 0.85, -s * 0.72, s * 1.7, s * 0.36);
+        ctx.fill(); ctx.stroke();
+        break;
+      case 'arch':
+        ctx.beginPath(); ctx.arc(0, s * 0.45, s * 0.78, Math.PI, 0); ctx.stroke();
+        break;
+      case 'mug': // tavern
+        ctx.beginPath(); ctx.rect(-s * 0.5, -s * 0.35, s * 0.82, s * 1.0); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(s * 0.36, s * 0.15, s * 0.32, -Math.PI * 0.5, Math.PI * 0.5); ctx.stroke();
+        ctx.fillStyle = '#f4e8c6'; ctx.beginPath(); ctx.ellipse(-s * 0.09, -s * 0.35, s * 0.44, s * 0.2, 0, 0, Math.PI * 2); ctx.fill();
+        break;
+      case 'coin': // gold hoarder
+        ctx.beginPath(); ctx.arc(0, 0, s * 0.72, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#8a6d1f'; ctx.font = `bold ${Math.round(s * 1.1)}px Georgia, serif`; ctx.fillText('$', 0, s * 0.08);
+        break;
+      case 'hammer': // shipwright
+        ctx.beginPath(); ctx.moveTo(0, s * 0.85); ctx.lineTo(0, -s * 0.2); ctx.stroke();
+        ctx.beginPath(); ctx.rect(-s * 0.5, -s * 0.6, s * 1.0, s * 0.42); ctx.fill(); ctx.stroke();
+        break;
+      case 'crystal': // oracle
+        ctx.beginPath(); ctx.moveTo(0, -s * 0.9); ctx.lineTo(s * 0.6, -s * 0.05); ctx.lineTo(0, s * 0.9); ctx.lineTo(-s * 0.6, -s * 0.05); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        break;
+      case 'hood': // mysterious stranger
+        ctx.beginPath(); ctx.moveTo(0, -s * 0.9); ctx.quadraticCurveTo(s * 0.72, -s * 0.15, s * 0.5, s * 0.7);
+        ctx.lineTo(-s * 0.5, s * 0.7); ctx.quadraticCurveTo(-s * 0.72, -s * 0.15, 0, -s * 0.9); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = dark; ctx.beginPath(); ctx.ellipse(0, s * 0.08, s * 0.3, s * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+        break;
+      case 'cave':
+        ctx.fillStyle = dark;
+        ctx.beginPath(); ctx.arc(0, s * 0.5, s * 0.7, Math.PI, 0); ctx.lineTo(s * 0.7, s * 0.5); ctx.lineTo(-s * 0.7, s * 0.5); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        break;
+    }
+    ctx.restore();
+  }
+
   private renderBattleMap(
     ctx: CanvasRenderingContext2D,
     width: number,
@@ -9648,18 +9739,23 @@ export class Game {
     ctx.stroke();
     ctx.restore();
 
-    ctx.save();
-    ctx.fillStyle = fullscreen ? 'rgba(5, 14, 28, 0.72)' : 'rgba(5, 14, 28, 0.68)';
-    ctx.strokeStyle = 'rgba(201, 168, 76, 0.32)';
-    ctx.lineWidth = 1.2;
-    ctx.fillRect(8, 8, fullscreen ? 154 : 104, fullscreen ? 34 : 24);
-    ctx.strokeRect(8, 8, fullscreen ? 154 : 104, fullscreen ? 34 : 24);
-    ctx.fillStyle = this.state.storm.shrinking ? '#d7e8ff' : '#c9a84c';
-    ctx.font = fullscreen ? '700 15px Georgia, serif' : '700 10px Georgia, serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(stormLabel, 15, fullscreen ? 26 : 20);
-    ctx.restore();
+    // Storm countdown chip — minimap only. On the fullscreen map the "BATTLE MAP"
+    // HTML title sits in this same corner and the countdown is already the panel
+    // subtitle, so drawing the chip here just smeared over the title.
+    if (!fullscreen) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(5, 14, 28, 0.68)';
+      ctx.strokeStyle = 'rgba(201, 168, 76, 0.32)';
+      ctx.lineWidth = 1.2;
+      ctx.fillRect(8, 8, 104, 24);
+      ctx.strokeRect(8, 8, 104, 24);
+      ctx.fillStyle = this.state.storm.shrinking ? '#d7e8ff' : '#c9a84c';
+      ctx.font = '700 10px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(stormLabel, 15, 20);
+      ctx.restore();
+    }
 
     ctx.save();
     for (const island of this.state.islands) {
@@ -9677,40 +9773,32 @@ export class Game {
         const rPx = getIslandMaxRadius(island) * scale;
         const isVolcanic = island.profile.biome === 'volcanic';
         if (isVolcanic || island.profile.terrainStyle === 'mountain') {
-          ctx.textBaseline = 'middle';
-          ctx.font = `${Math.max(13, Math.min(30, rPx * 0.55))}px serif`;
-          ctx.fillText(isVolcanic ? '🌋' : '⛰️', ix, iy);
+          this.drawPoiIcon(ctx, isVolcanic ? 'volcano' : 'peak', ix, iy, Math.max(7, Math.min(13, rPx * 0.28)));
         }
         // Big charted landmarks — the "where to raid" markers SoT shows.
         for (const prop of island.props ?? []) {
-          const icon = prop.type === 'shipwreck' ? '⚓'
-            : prop.type === 'watchtower' ? '🗼'
-              : prop.type === 'standing_stones' ? '🗿'
-                : prop.type === 'fort' ? '💀'
-                  : prop.type === 'rock_arch' ? '⛰' : '';
-          if (!icon) continue;
-          ctx.textBaseline = 'middle';
-          ctx.font = '14px serif';
-          ctx.fillText(icon, centerX + prop.x * scale, centerY + prop.z * scale);
+          const kind = prop.type === 'shipwreck' ? 'anchor'
+            : prop.type === 'watchtower' ? 'tower'
+              : prop.type === 'standing_stones' ? 'stones'
+                : prop.type === 'fort' ? 'fort'
+                  : prop.type === 'rock_arch' ? 'arch' : '';
+          if (!kind) continue;
+          this.drawPoiIcon(ctx, kind, centerX + prop.x * scale, centerY + prop.z * scale, kind === 'fort' ? 8 : 6);
         }
         // Services & POIs: tavern, vendor NPCs, and cave mouths.
-        ctx.textBaseline = 'middle';
         if (island.tavern) {
-          ctx.font = '15px serif';
-          ctx.fillText('🍺', centerX + island.tavern.position.x * scale, centerY + island.tavern.position.z * scale);
+          this.drawPoiIcon(ctx, 'mug', centerX + island.tavern.position.x * scale, centerY + island.tavern.position.z * scale, 6);
         }
         for (const npc of island.npcs ?? []) {
-          const nicon = npc.role === 'gold_hoarder' ? '💰'
-            : npc.role === 'shipwright' ? '⚒️'
-              : npc.role === 'oracle' ? '🔮'
-                : npc.role === 'mysterious_stranger' ? '🕯️' : '';
-          if (!nicon) continue;
-          ctx.font = '13px serif';
-          ctx.fillText(nicon, centerX + npc.position.x * scale, centerY + npc.position.z * scale);
+          const nkind = npc.role === 'gold_hoarder' ? 'coin'
+            : npc.role === 'shipwright' ? 'hammer'
+              : npc.role === 'oracle' ? 'crystal'
+                : npc.role === 'mysterious_stranger' ? 'hood' : '';
+          if (!nkind) continue;
+          this.drawPoiIcon(ctx, nkind, centerX + npc.position.x * scale, centerY + npc.position.z * scale, 5.5);
         }
         for (const cave of island.caves ?? []) {
-          ctx.font = '13px serif';
-          ctx.fillText('🕳️', centerX + cave.position.x * scale, centerY + cave.position.z * scale);
+          this.drawPoiIcon(ctx, 'cave', centerX + cave.position.x * scale, centerY + cave.position.z * scale, 5.5);
         }
         // Name label above the isle, outlined for legibility over any tint.
         ctx.textBaseline = 'bottom';
