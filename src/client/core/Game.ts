@@ -10986,6 +10986,10 @@ export class Game {
     const next = force ?? !this.mapOpen;
     this.mapOpen = next;
     this.ui.mapOverlay.classList.toggle('visible', next);
+    // Hide the corner minimap while the fullscreen chart is open (it was drawing
+    // a redundant second map over the top-right of the fullscreen view).
+    const minimapShell = document.getElementById('minimap-shell');
+    if (minimapShell) minimapShell.style.visibility = next ? 'hidden' : '';
     if (next) {
       this.mapZoom = 1; // always open at the whole-world view; scroll to zoom in
       this.ui.scopeOverlay.style.display = 'none';
