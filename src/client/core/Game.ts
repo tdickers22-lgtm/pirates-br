@@ -428,6 +428,29 @@ function makePlayerMesh(
       socket.scale.z = 0.8;
       head.add(socket);
     }
+  } else {
+    // Living pirate face — brow, eyes, nose, a chin beard and a moustache, so
+    // crew/NPCs read as weathered pirates, not blank mannequin heads.
+    const eyeMat = new THREE.MeshStandardMaterial({ color: 0x140f0a, roughness: 0.6 });
+    for (const side of [-1, 1] as const) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.032, 8, 6), eyeMat);
+      eye.position.set(side * 0.085, 0.035, 0.205);
+      eye.scale.z = 0.65;
+      head.add(eye);
+      const brow = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.024, 0.03), darkMat);
+      brow.position.set(side * 0.085, 0.095, 0.208);
+      brow.rotation.z = side * -0.14;
+      head.add(brow);
+    }
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.08, 0.06), skinMat);
+    nose.position.set(0, -0.01, 0.225);
+    head.add(nose);
+    const beard = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.15, 0.12), darkMat);
+    beard.position.set(0, -0.135, 0.135);
+    head.add(beard);
+    const moustache = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.035, 0.05), darkMat);
+    moustache.position.set(0, -0.055, 0.205);
+    head.add(moustache);
   }
   group.add(head);
 
