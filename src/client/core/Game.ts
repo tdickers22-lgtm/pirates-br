@@ -1789,7 +1789,6 @@ export class Game {
   private lastAnchorMoveSoundAt = 0;
   private lastHelmTurnSoundAt = 0;
   private lastHullSplashAt = 0;
-  private lastSwimSplashAt = 0;
   private prevStormPhase = -1;
   private digStrikePhase = 0;
   private prevMeleeReloading = false;
@@ -2334,7 +2333,6 @@ export class Game {
     this.lastAnchorMoveSoundAt = 0;
     this.lastHelmTurnSoundAt = 0;
     this.lastHullSplashAt = 0;
-    this.lastSwimSplashAt = 0;
     this.prevPlayerStateForAudio = null;
     this.prevCannonBallistic = false;
     this.prevStormShrinking = false;
@@ -10449,16 +10447,7 @@ export class Game {
       }
     }
 
-    if (player?.state === 'swimming') {
-      const swimSpeed = Math.hypot(player.velocity.x, player.velocity.z) + Math.abs(player.velocity.y) * 0.24;
-      const swimInput = this.input.getMoveAxes();
-      const swimIntent = Math.min(1, Math.hypot(swimInput.x, swimInput.z) + Math.abs(this.input.getSwimVerticalIntent()) * 0.65);
-      const swimSplashAmount = THREE.MathUtils.clamp(swimSpeed / 5.6 + swimIntent * 0.45, 0, 1.15);
-      if (swimSplashAmount > 0.22 && now - this.lastSwimSplashAt > 0.48) {
-        this.audio.playSwimSplash(swimSplashAmount);
-        this.lastSwimSplashAt = now;
-      }
-    }
+    // Swim stroke SFX removed by request — no sound while swimming.
 
     // Sail/anchor change cues for the local ship — physical deck feedback instead of UI clicks.
     if (localShip) {
