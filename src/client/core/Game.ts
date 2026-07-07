@@ -3860,8 +3860,11 @@ export class Game {
       4,
       r * (0.10 + profileForColor.heightProfile * 0.25 + (profileForColor.peakBoost ?? 0) * 0.15),
     );
-    const wetSandColor = sandColor.clone().multiplyScalar(0.62).lerp(new THREE.Color(0x2e5d63), 0.22);
-    const submergedColor = new THREE.Color(0x1d4a52);
+    // Bright white-sand shelves (atoll/crescent lagoons) sit at ~sea level, so
+    // pull their wet/submerged tints hard toward lagoon turquoise — otherwise the
+    // barely-emergent floor stays a blinding white plate from above (audit P1).
+    const wetSandColor = sandColor.clone().multiplyScalar(0.6).lerp(new THREE.Color(0x2f7d84), whiteSand ? 0.45 : 0.24);
+    const submergedColor = new THREE.Color(whiteSand ? 0x2a8a90 : 0x1d4a52);
     // Smooth WORLD-SPACE value noise for organic ground mottling. Keying colour
     // on world XZ (not the ring/segment indices) kills the radial "pinwheel"
     // smear that streaked from every island centre, and gives the flat
@@ -3925,11 +3928,19 @@ export class Game {
         // Waves lap above mean sea level, so start wetting/submerging sand a bit
         // ABOVE y=0: a barely-submerged shelf (e.g. the atoll lagoon floor) then
         // reads as turquoise shallow water, not a blinding white sand plate.
-        const wetMask = THREE.MathUtils.smoothstep(-pointY, -0.9, 0.12);
-        const depthMask = THREE.MathUtils.smoothstep(-pointY, -0.15, 2.2);
+        const wetMask = THREE.MathUtils.smoothstep(-pointY, -1.1, 0.35);
+        const depthMask = THREE.MathUtils.smoothstep(-pointY, -0.5, 1.8);
         if (wetMask > 0) {
           terrainColor.lerp(wetSandColor, wetMask * (0.6 + coast.beach * 0.3));
           terrainColor.lerp(submergedColor, depthMask * 0.9);
+        }
+        // whiteSand archipelago/crescent lagoons sit as emergent bright-sand
+        // flats AT sea level (above water, so the depth tint never engages) that
+        // read as a blinding white plate from above. Tint the low, non-berm
+        // interior toward lagoon aqua so it reads as the shallow water it should.
+        if (whiteSand) {
+          const lagoon = (1 - THREE.MathUtils.smoothstep(heightNorm, 0.0, 0.13)) * (1 - shoreMask * 0.55);
+          terrainColor.lerp(new THREE.Color(0x54b8bd), lagoon * 0.55);
         }
 
         // ── Volcanic: char the upper cone to ash, seep magma through cracks ──
@@ -3957,7 +3968,7 @@ export class Game {
           magma = Math.min(1, vein * heightGate * (1 - shoreMask) + summitGlow);
           // Scorch the high ground to ashen charcoal so the veins glow against it.
           const scorch = THREE.MathUtils.smoothstep(heightNorm, 0.16, 0.7) * (1 - shoreMask);
-          terrainColor.lerp(ashCharcoal, scorch * 0.72);
+          terrainColor.lerp(ashCharcoal, scorch * 0.9);
           // Darken the rock right at a vein so the emissive pops (hot rim).
           if (magma > 0.02) terrainColor.multiplyScalar(1 - magma * 0.4);
         }
@@ -4013,7 +4024,7 @@ export class Game {
             + 'if (vMagma > 0.001) {\n'
             + '  float g = vMagma * uMagmaPulse;\n'
             + '  vec3 mc = mix(vec3(0.95, 0.16, 0.02), vec3(1.0, 0.72, 0.16), clamp(vMagma * 1.4, 0.0, 1.0));\n'
-            + '  totalEmissiveRadiance += mc * g * 3.6;\n'
+            + '  totalEmissiveRadiance += mc * g * 1.5;\n'
             + '}',
           );
       };
@@ -4079,8 +4090,8 @@ export class Game {
     // Deterministic from the profile seed; culled with the micro tier past
     // ~260m; zero colliders (ankle-high ground cover).
     if (!lowDetail) {
-      const grassCount = Math.min(2600, Math.round(r * r * 0.3));
-      const bladeGeo = new THREE.PlaneGeometry(0.4, 0.5, 1, 1);
+      const grassCount = Math.min(7000, Math.round(r * r * 0.8));
+      const bladeGeo = new THREE.PlaneGeometry(0.52, 0.64, 1, 1);
       bladeGeo.translate(0, 0.25, 0);
       const crossGeo = (() => {
         const a = bladeGeo.clone();
@@ -4124,25 +4135,32 @@ export class Game {
       const gColor = new THREE.Color();
       const seaBaseForGrass = 5.15 + r * 0.0085;
       let placed = 0;
-      for (let i = 0; i < grassCount * 3 && placed < grassCount; i++) {
+      for (let i = 0; i < grassCount && placed < grassCount; i++) {
         const angle = rng(i * 7 + 3) * Math.PI * 2;
-        const dRatio = 0.06 + rng(i * 11 + 5) * 0.78;
+        const dRatio = 0.06 + rng(i * 11 + 5) * 0.86;
         const sample = surfacePoint(dRatio, angle, 0);
         // grassy band: above the beach, below the rocky heights, not too steep
         if (sample.y < seaBaseForGrass - 1.6) continue;
         if (sample.y > seaBaseForGrass + peakEst * 0.95) continue;
         const ahead = surfacePoint(dRatio + 0.015, angle, 0);
         if (Math.abs(ahead.y - sample.y) > 0.9) continue;
-        gP.set(sample.x, sample.y - 0.06, sample.z);
-        gE.set((rng(i * 13) - 0.5) * 0.3, rng(i * 17) * Math.PI, (rng(i * 19) - 0.5) * 0.3);
-        gQ.setFromEuler(gE);
-        const sc = 0.7 + rng(i * 23) * 0.9;
-        gS.set(sc, sc * (0.8 + rng(i * 29) * 0.5), sc);
-        gM.compose(gP, gQ, gS);
-        grass.setMatrixAt(placed, gM);
-        gColor.copy(paletteGrass).lerp(paletteFoliage, rng(i * 31) * 0.6).multiplyScalar(1.05 + rng(i * 37) * 0.45);
-        grass.setColorAt(placed, gColor);
-        placed += 1;
+        // Place a small CLUMP of blades per seed so grass reads as tufts and
+        // masses (carpeting the interior), not isolated specks (audit P1).
+        const clump = 2 + Math.floor(rng(i * 3 + 1) * 3); // 2-4 blades
+        for (let c = 0; c < clump && placed < grassCount; c++) {
+          const jx = (rng(i * 41 + c * 7) - 0.5) * 1.15;
+          const jz = (rng(i * 43 + c * 11) - 0.5) * 1.15;
+          gP.set(sample.x + jx, sample.y - 0.06, sample.z + jz);
+          gE.set((rng(i * 13 + c) - 0.5) * 0.3, rng(i * 17 + c * 5) * Math.PI, (rng(i * 19 + c) - 0.5) * 0.3);
+          gQ.setFromEuler(gE);
+          const sc = 0.65 + rng(i * 23 + c * 3) * 1.0;
+          gS.set(sc, sc * (0.85 + rng(i * 29 + c) * 0.6), sc);
+          gM.compose(gP, gQ, gS);
+          grass.setMatrixAt(placed, gM);
+          gColor.copy(paletteGrass).lerp(paletteFoliage, rng(i * 31 + c) * 0.6).multiplyScalar(1.0 + rng(i * 37 + c) * 0.4);
+          grass.setColorAt(placed, gColor);
+          placed += 1;
+        }
       }
       grass.count = placed;
       grass.instanceMatrix.needsUpdate = true;
@@ -5220,7 +5238,7 @@ export class Game {
         const fallMat = new THREE.MeshStandardMaterial({
           color: 0xc7e6f4,
           emissive: 0xb8e0f5,
-          emissiveIntensity: 0.32,
+          emissiveIntensity: 0.06, // falls catch the sky, they don't self-glow at night
           roughness: 0.4,
           transparent: true,
           opacity: 0.78,

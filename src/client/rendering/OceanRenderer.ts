@@ -285,7 +285,7 @@ const OCEAN_FRAG = /* glsl */`
     // Calm, flat shallow water near shore was reflecting the overhead sun as a
     // broad white sheen — a blinding halo/lagoon plate. Damp the specular in the
     // shallows so tropical water keeps its turquoise instead of blowing out.
-    color += specCol * (1.0 - shallowMask * 0.62);
+    color += specCol * (1.0 - shallowMask * 0.82);
 
     // Night: dim the water body (fog/horizon colors arrive pre-dimmed)
     color *= mix(1.0, 0.42, u_nightFactor * (1.0 - foam * 0.4) * (1.0 - shallowMask * 0.4));
