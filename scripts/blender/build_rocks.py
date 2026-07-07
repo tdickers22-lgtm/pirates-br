@@ -150,7 +150,7 @@ clear_default_scene()
 BOULDERS = [
     ("boulder_a", 1.6, 0.85, 101, "Rock_Grey"),
     ("boulder_b", 2.6, 0.70, 202, "Rock_Grey"),
-    ("boulder_c", 1.1, 1.05, 303, "Rock_Dark"),
+    ("boulder_c", 1.1, 1.05, 303, "Rock_Grey"),
 ]
 # (name, authored height, base radius, seed, companion spires, squat)
 SEAROCKS = [
