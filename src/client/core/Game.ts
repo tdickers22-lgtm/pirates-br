@@ -3596,6 +3596,20 @@ export class Game {
     const paletteGrass = new THREE.Color(palette.grass);
     const paletteRock = new THREE.Color(palette.rock);
     const paletteFoliage = new THREE.Color(palette.foliage);
+    // Only 5 biome palettes drive 14 islands, so same-biome neighbours looked
+    // identical from the air. Nudge each island's greens by a seeded hue/sat
+    // shift (deterministic from its id) so the archipelago reads varied.
+    let _hueH = 2166136261;
+    for (let ci = 0; ci < island.id.length; ci++) { _hueH ^= island.id.charCodeAt(ci); _hueH = Math.imul(_hueH, 16777619); }
+    const hueSeed = ((_hueH >>> 0) % 1000) / 1000;
+    const _hsl = { h: 0, s: 0, l: 0 };
+    const nudgeGreen = (c: THREE.Color) => {
+      c.getHSL(_hsl);
+      c.setHSL((_hsl.h + (hueSeed - 0.5) * 0.05 + 1) % 1, Math.min(1, _hsl.s * (0.9 + hueSeed * 0.28)), _hsl.l * (0.94 + hueSeed * 0.12));
+      return c;
+    };
+    nudgeGreen(paletteGrass);
+    nudgeGreen(paletteFoliage);
     // Beach sand read as a flat near-white halo ringing sunlit islands
     // (patrol-3): pull the whitening way back and warm/darken the base so it's
     // sand, not a bloom band.
@@ -3611,7 +3625,7 @@ export class Game {
       : paletteSand.clone().lerp(new THREE.Color(0xffffff), 0.05);
     const sandColor = whiteSand
       ? paletteSand.clone().lerp(sandWhite, 0.42)
-      : paletteSand.clone().multiplyScalar(0.9);
+      : paletteSand.clone().multiplyScalar(0.94).lerp(new THREE.Color(0xe4c88f), 0.16); // warm golden berm
     // Lush, sunlit greens: lift the base grass a touch for vibrancy, and blend
     // the (dark) foliage toward grass so jungle interiors read as rich green —
     // not a murky near-black blanket under the raised sky fill.
@@ -3848,6 +3862,23 @@ export class Game {
     );
     const wetSandColor = sandColor.clone().multiplyScalar(0.62).lerp(new THREE.Color(0x2e5d63), 0.22);
     const submergedColor = new THREE.Color(0x1d4a52);
+    // Smooth WORLD-SPACE value noise for organic ground mottling. Keying colour
+    // on world XZ (not the ring/segment indices) kills the radial "pinwheel"
+    // smear that streaked from every island centre, and gives the flat
+    // vertex-colour terrain large- and small-scale variation at eye level.
+    const vHash = (ix: number, iz: number): number => {
+      const s = Math.sin(ix * 127.1 + iz * 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const vNoise = (x: number, z: number): number => {
+      const ix = Math.floor(x), iz = Math.floor(z);
+      const fx = x - ix, fz = z - iz;
+      const ux = fx * fx * (3 - 2 * fx), uz = fz * fz * (3 - 2 * fz);
+      const a = vHash(ix, iz), b = vHash(ix + 1, iz), c = vHash(ix, iz + 1), d = vHash(ix + 1, iz + 1);
+      return a * (1 - ux) * (1 - uz) + b * ux * (1 - uz) + c * (1 - ux) * uz + d * ux * uz;
+    };
+    const groundFbm = (x: number, z: number): number =>
+      vNoise(x * 0.045, z * 0.045) * 0.55 + vNoise(x * 0.14, z * 0.14) * 0.3 + vNoise(x * 0.46, z * 0.46) * 0.15;
     for (let ring = 0; ring <= totalRings; ring++) {
       const distRatio = ringDistRatio(ring);
       for (let segment = 0; segment <= angularSegments; segment++) {
@@ -3870,7 +3901,7 @@ export class Game {
         // Rock is earned by SLOPE first; only genuinely high ground rock-caps.
         const rockMask = THREE.MathUtils.smoothstep(heightNorm, 0.72, 0.97) * (1 - shoreMask * 0.6) * 0.55;
         const peakMask = THREE.MathUtils.smoothstep(heightNorm, 0.88, 1) * 0.4;
-        const mudMask = THREE.MathUtils.smoothstep(distRatio, 0.62, 0.78) * (1 - shoreMask) * 0.25;
+        const mudMask = THREE.MathUtils.smoothstep(distRatio, 0.62, 0.78) * (1 - shoreMask) * 0.14;
         // Rock is earned on genuinely STEEP faces (~50°+). The old 0.26 start
         // painted grey rock over every gently-sloped dome flank, washing lush
         // islands to a muddy monochrome; grass now holds the walkable slopes.
@@ -3946,12 +3977,18 @@ export class Game {
         // (near shore) gets extra tonal variation so beaches don't clip to a
         // uniform bright halo.
         const sandiness = shoreMask * coast.beach;
-        const vnoise = (rng(ring * 113 + segment * 17) - 0.5) * (0.07 + sandiness * 0.06);
-        const hueDrift = Math.sin(angle * 3.1 + distRatio * 5.3 + r * 0.13) * 0.03;
+        const worldX = terrainPositions[index * 3 + 0] + island.position.x;
+        const worldZ = terrainPositions[index * 3 + 2] + island.position.z;
+        // World-space fbm: broad tonal drift + finer mottle, plus a hint of
+        // per-vertex grain. Warm the brighter patches, cool the darker ones.
+        const fbm = groundFbm(worldX, worldZ) - 0.5;                       // -0.5..0.5
+        const grain = (rng(ring * 113 + segment * 17) - 0.5) * (0.05 + sandiness * 0.05);
+        const bright = 1 + fbm * 0.26 + grain;
+        const warm = fbm * 0.05;
         terrainColors.push(
-          THREE.MathUtils.clamp(terrainColor.r + vnoise * 0.5 - hueDrift * 0.4, 0, 1),
-          THREE.MathUtils.clamp(terrainColor.g + vnoise + hueDrift, 0, 1),
-          THREE.MathUtils.clamp(terrainColor.b + vnoise * 0.3 - hueDrift * 0.5, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.r * bright + warm, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.g * bright, 0, 1),
+          THREE.MathUtils.clamp(terrainColor.b * bright - warm * 0.6, 0, 1),
         );
       }
     }
@@ -5156,8 +5193,28 @@ export class Game {
       const fallAngle = island.profile.ridgeAxis
         + Math.PI * (fall === 0 ? 0.5 : -0.55)
         + (rng(islandSeed * 47 + fall * 131) - 0.5) * 0.4;
-      const upper = surfacePoint(0.3, fallAngle);
-      const lower = surfacePoint(0.94, fallAngle);
+      // Find the STEEPEST short segment along this heading (a real cliff lip) so
+      // the ribbon hangs ~vertically off it. The old fixed 0.3→0.94 span was a
+      // 30m+ mostly-horizontal reach that drew the fall as a flat white bar lying
+      // across the island (worst on low plateaus).
+      let lip = surfacePoint(0.3, fallAngle);
+      let toe = surfacePoint(0.42, fallAngle);
+      let bestDrop = -1;
+      for (let d = 0.32; d <= 0.86; d += 0.05) {
+        const hi = surfacePoint(d, fallAngle);
+        const lo = surfacePoint(d + 0.12, fallAngle);
+        const dr = hi.y - lo.y;
+        const horiz = Math.hypot(lo.x - hi.x, lo.z - hi.z);
+        if (dr > bestDrop && dr / Math.max(0.1, horiz) > 0.6) { bestDrop = dr; lip = hi; toe = lo; }
+      }
+      // The sheet falls vertically from the lip, landing near the cliff base
+      // (only a little outward), so it reads as a plunging cascade.
+      const upper = lip;
+      const lower = {
+        x: lip.x + (toe.x - lip.x) * 0.35,
+        y: toe.y,
+        z: lip.z + (toe.z - lip.z) * 0.35,
+      };
       const drop = upper.y - lower.y;
       if (drop > 4) {
         const fallMat = new THREE.MeshStandardMaterial({

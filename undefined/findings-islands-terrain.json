@@ -1,0 +1,60 @@
+{
+  "findings": [
+    {
+      "title": "Old Maw Caldera cone glows as one smooth uniform orange/gold pyramid instead of charred rock with discrete lava cracks",
+      "severity": "P1",
+      "what": "The centerpiece volcano's entire upper cone is washed into a single glowing caramel/orange gradient with no rock detail (13-old-maw-caldera-shore.png, whole cone above the treeline). From directly above (13-old-maw-caldera-aerial.png) the same emissive + caldera FX read as a flat 2D orange flame decal stuck on a green hill. The intended 'charred ash cone with thin glowing magma veins' (per the code comments) is not what renders: the ashCharcoal scorch is completely overpowered and the veins have merged into a solid wash. Vs SoT, a volcano should be dark/charred with a few bright discrete lava fissures.",
+      "where": "test-results/audit-noon3/13-old-maw-caldera-shore.png (cone body) and 13-old-maw-caldera-aerial.png (summit); also visible on background Old Maw in 01/07/04 aerials as an orange smear",
+      "root_cause_guess": "src/client/core/Game.ts magma shader emissive is far too strong and the veins cover the whole flank: line ~3979 'totalEmissiveRadiance += mc * g * 3.6;' (3.6x is huge after ACES), plus the vein height-gate spans the entire cone (heightGate smoothstep(heightNorm,0.14,0.66) at ~3922) and the coarse/fine vein power (Math.pow(...,7)/(...,9) at 3917-3918) leaves too much coverage. The scorch lerp toward ashCharcoal (3929, *0.72) is too weak to darken the cone under that emissive.",
+      "suggested_fix": "In Game.ts buildIsland volcanic block: drop the emissive multiplier from 3.6 to ~1.2-1.6; sharpen veins (raise the pow exponents / lower the additive so 'vein' is <0.3 across most of the flank); and strengthen the ash scorch (ashCharcoal lerp toward ~0.9 and darken base rock) so the cone reads dark charcoal with a few bright cracks and a hot caldera rim, not a solid orange pyramid."
+    },
+    {
+      "title": "Crooked Atoll & Dead Man Shoals lagoons render as a blinding near-white sand plate, not a turquoise lagoon",
+      "severity": "P1",
+      "what": "The Crooked Atoll's interior 'lagoon' between its two landmasses is a huge, nearly pure-white flat plate with only a faint cyan tint (03-the-crooked-atoll-aerial.png, entire ring/center). Dead Man Shoals shows the identical oversized white plate around its two tan domes (04-dead-man-shoals-aerial.png). A stylized-AAA atoll lagoon should read as vivid turquoise shallow water ringed by white beach; here the shallow shelf stays bright sand, so the signature 'white lagoon' looks washed-out and flat rather than tropical.",
+      "where": "test-results/audit-noon3/03-the-crooked-atoll-aerial.png (whole interior lagoon) and 04-dead-man-shoals-aerial.png (surrounding plate); confirmed up close in 03-the-crooked-atoll-shore.png (milky-white water)",
+      "root_cause_guess": "src/client/core/Game.ts terrain color: the lagoon floor sits at/just above waterline so the turquoise tinting never engages. depthMask = smoothstep(-pointY,-0.15,2.2) (line ~3898) needs the vertex several metres underwater to add submergedColor; a barely-emergent shelf keeps the bright whiteSand beachColor (whiteSand lerp toward sandWhite 0.6, lines ~3609-3611). So on the whiteSand atoll the shallow shelf reads as a white sand plate.",
+      "suggested_fix": "Add an explicit shallow-lagoon turquoise for the interior shelf: make depthMask/submergedColor engage at much shallower depth (start near pointY < +0.3 and reach full by ~-1.0), or blend a dedicated lagoon-turquoise for archipelago interiors below the berm. Also cap whiteSand brightness on submerged/near-water verts so the lagoon floor tints aqua instead of staying paper-white."
+    },
+    {
+      "title": "Snow/mountain biome barely reads: Widow's Watch is a flat pancake with no peak or snow; Crow's Perch has only a thin grey spire",
+      "severity": "P2",
+      "what": "The two highland 'mountain' islands that should be snow-capped skyline landmarks don't read as mountains. Widow's Watch (14-widow-s-watch-aerial.png) is an almost completely flat green-brown dome with no summit and zero snow. Crow's Perch (06-crow-s-perch-aerial.png) has a single narrow grey rock spire with only a faint whitish puff at the tip - no real snow cap. Vs SoT, snowy peaks are a distinctive biome; here they're indistinguishable from the plateau/highland islands.",
+      "where": "test-results/audit-noon3/14-widow-s-watch-aerial.png (no peak, no snow) and 06-crow-s-perch-aerial.png (thin spire, minimal snow)",
+      "root_cause_guess": "Snow is gated on heightNorm = (pointY - seaBase)/peakEst where peakEst OVERestimates true relief (src/client/core/Game.ts ~3845-3847: r*(0.10 + heightProfile*0.25 + peakBoost*0.15)). The snow band is smoothstep(heightNorm,0.62,0.9) (~3937-3941), but actual peaks rarely reach 0.62*peakEst, so snow only paints a few summit verts (invisible). Separately, mountain peak amplitude (primaryHill in src/shared/utils/index.ts ~554-563) plus the narrow gaussian can build a low/thin spire when peakBoost/heightProfile roll low, so Widow's Watch is nearly flat.",
+      "suggested_fix": "Base the snow line on ABSOLUTE height above sea (e.g. snow above ~pointY 18-20m) rather than a normalized fraction of an over-estimated peakEst, and widen the band; raise the minimum mountain peakBoost/height so Widow's Watch actually builds a dominating spire. Snow should then blanket the top third with a clean bright cap."
+    },
+    {
+      "title": "Bone/rocky islands (Skull Cove, Gallows Sands, Dead Man Shoals) are featureless monotone tan sand domes with no grass or rock character",
+      "severity": "P2",
+      "what": "The three 'bone' biome islands read as uniform beige sand blobs. Skull Cove (02-skull-cove-aerial.png) - billed 'rocky' - is a smooth tan dome with almost no grass and no exposed rock outcrops. Gallows Sands (11-gallows-sands-aerial.png) is a flat tan sandbar. Dead Man Shoals domes (04) are pure sand. They lack the exposed-stone/scrub character SoT rocky isles have and barely differ from each other or from beaches.",
+      "where": "test-results/audit-noon3/02-skull-cove-aerial.png, 11-gallows-sands-aerial.png, 04-dead-man-shoals-aerial.png",
+      "root_cause_guess": "src/shared/props.ts BIOME_PALETTES.bone (line ~55): grass 0x9ba06a is a pale khaki that sits very close to sand 0xe6ddc4, so the grassMask barely changes the color. Combined with low relief on these small islands (heightNorm never reaches the rockMask/peakMask bands in Game.ts ~3871-3872), no grass, rock, or cliff color is earned - everything stays sand.",
+      "suggested_fix": "Push bone grass more olive/desaturated-green (further from sand), lower the grass height threshold so the interior greens up, and add scattered rock outcrops (boulders/rock_arch) to 'rocky' bone islands so Skull Cove/Gallows read as weathered stone-and-scrub, not a plain sandbar."
+    },
+    {
+      "title": "Central radial-fan pinwheel discoloration at every island's geometric center",
+      "severity": "P2",
+      "what": "Most islands show a purplish/streaky pinwheel or 'dirt star' smudge at their exact center where the terrain triangulation converges. Clearest on Rumrunner Key (05-rumrunner-key-aerial.png, center), Gallows Sands (11), Parley Point (12), Booty Bay (10) and Smuggler's Rest (01). It reads as an unnatural shading/texture defect radiating out from a pinch point.",
+      "where": "test-results/audit-noon3/05-rumrunner-key-aerial.png (dead center), also 11-gallows-sands-aerial.png, 12-parley-point-aerial.png, 10-booty-bay-aerial.png, 01-smuggler-s-rest-aerial.png",
+      "root_cause_guess": "src/client/core/Game.ts terrain is a radial ring mesh with a single coincident center pole: ringDistRatio ring===0 -> distRatio 0 (lines ~3758-3759), so all angularSegments+1 verts collapse onto one point. Each of those coincident verts is then given DIFFERENT per-segment vertex noise and hue drift (vnoise = rng(ring*113+segment*17), hueDrift from angle; lines ~3949-3954), and computeVertexNormals over the degenerate fan yields noisy normals - producing a colored pinwheel + shading streaks at the center.",
+      "suggested_fix": "Collapse ring 0 to a single shared vertex (one position/color/normal for the pole), or force vnoise=0 and use one averaged color at ring===0 and skip the degenerate fan triangles. That removes the center smudge and gives a clean apex."
+    },
+    {
+      "title": "Volcanic islands' shaded flanks and shoreline collapse to a purple/magenta cast",
+      "severity": "P2",
+      "what": "On Old Maw Caldera's shore shot the entire left (shadowed) shoreline band is a vivid purple/magenta strip (13-old-maw-caldera-shore.png, left third at the waterline), and the shaded lower flank in the aerial has the same mauve cast. Kraken Tooth's shaded flank shows the same purple tint (09-kraken-tooth-aerial.png, lower-right). A purple beach/rock face reads as a color bug, not natural volcanic stone.",
+      "where": "test-results/audit-noon3/13-old-maw-caldera-shore.png (left shoreline) and 09-kraken-tooth-aerial.png (shaded flank)",
+      "root_cause_guess": "src/shared/props.ts BIOME_PALETTES.volcanic (line ~53): sand 0x6e6154 and rock 0x5a5148 are very dark and desaturated. On shadowed faces lit only by the cool sky-fill these collapse toward blue/violet, so shaded volcanic sand/rock reads purple. (This is a terrain-palette problem, not the lighting rig - the same fill on brighter biomes stays neutral.)",
+      "suggested_fix": "Warm and slightly lighten the volcanic palette (raise the red/green in sand ~0x7a695a and rock ~0x6b5f52, reduce how blue they can get), or clamp the ambient/sky-fill contribution on the volcanic vertex colors, so shadowed volcanic flanks read as warm charcoal-brown basalt instead of purple."
+    },
+    {
+      "title": "Kraken Tooth 'twin' island reads as one flat oval pancake with a cake-like vertical cliff wall, not twin peaks",
+      "severity": "P2",
+      "what": "Kraken Tooth is styled 'twin' (two peaks with a saddle) but renders as a single low flat oval green disc whose entire rim drops as a near-vertical brown cliff wall to the water - it looks like a green-topped brown cake/cylinder, not a two-peaked volcanic islet (09-kraken-tooth-aerial.png). There is no readable saddle or second peak, and the flat top plus straight extruded sides kills the silhouette.",
+      "where": "test-results/audit-noon3/09-kraken-tooth-aerial.png (whole island; note the continuous vertical brown cliff wall around the perimeter and absent second peak)",
+      "root_cause_guess": "src/shared/utils/index.ts getIslandSurfaceY twin branch (~626-631) only drops the saddle relative to a low seaLift; with the actual peak amplitudes here both hills stay short so no twin profile forms. Meanwhile the high cliff coast (coastBias +0.55 -> cliffLift 7-10, lines ~585/591) makes the whole rim a vertical wall, so the island reads as a flat-topped plinth.",
+      "suggested_fix": "Raise twin peak amplitude (secondaryAmp / primaryHill height for twin) and deepen the saddle so two distinct peaks emerge; and taper the cliff rim on part of the coast (mix some beach/rocky coast) so it isn't a continuous vertical wall - giving an organic two-peaked volcanic islet."
+    }
+  ]
+}
