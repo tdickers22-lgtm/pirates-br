@@ -21,10 +21,12 @@ await page.evaluate(() => window.__piratesBR.setDayNightOverride(854));
 await page.evaluate(() => { const e=document.createElement('style'); e.textContent='#hud{visibility:hidden!important;}'; document.head.appendChild(e); });
 await wait(500);
 const AVOID_VOLCANIC = process.argv[3] === 'nonvolcanic';
-const info = await page.evaluate((avoidVolc) => {
+const WANT_NAME = process.argv[4] ?? '';
+const info = await page.evaluate(([avoidVolc, wantName]) => {
   const g = window.__piratesBR;
   const score = (isl) => (isl.profile?.terrainStyle === 'mountain' ? 2 : 0)
-    + (avoidVolc && (isl.profile?.biome === 'volcanic') ? -3 : 0);
+    + (avoidVolc && (isl.profile?.biome === 'volcanic') ? -3 : 0)
+    + (wantName && (isl.name ?? '').toLowerCase().includes(wantName.toLowerCase()) ? 100 : 0);
   const isls = (g.state.islands ?? []).slice().sort((a, b) => score(b) - score(a));
   for (const isl of isls) {
     const mouth = (isl.caves ?? []).find((c) => c.hasMouth);
@@ -37,7 +39,7 @@ const info = await page.evaluate((avoidVolc) => {
     };
   }
   return null;
-}, AVOID_VOLCANIC);
+}, [AVOID_VOLCANIC, WANT_NAME]);
 console.log(JSON.stringify(info));
 if (info) {
   const ox = Math.sin(info.rot), oz = Math.cos(info.rot);      // outward (+z-local)
@@ -47,6 +49,10 @@ if (info) {
   // 1b) HERO 3/4 — ground level, cave mouth set into the mountain flank behind it
   await freeLook([info.cx + ox*26 + oz*16, info.floorY + 7, info.cz + oz*26 - ox*16], [info.cx, info.floorY + 3.0, info.cz]);
   await wait(600); await page.screenshot({ path: `${OUT}/hero.png`, timeout: 60000 });
+  // 1c) FAR — ~95m back (well past the 45m interior gate): the rock PORTAL must
+  // still be visible so the entrance reads from across the island.
+  await freeLook([info.cx + ox*95, info.floorY + 26, info.cz + oz*95], [info.cx, info.floorY + 2, info.cz]);
+  await wait(600); await page.screenshot({ path: `${OUT}/far.png`, timeout: 60000 });
   // 2) entrance exterior (stand outside the mouth)
   await freeLook([info.cx + ox*14, info.floorY + 4.0, info.cz + oz*14], [info.cx, info.floorY + 2.6, info.cz]);
   await wait(600); await page.screenshot({ path: `${OUT}/entrance.png`, timeout: 60000 });

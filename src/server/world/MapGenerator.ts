@@ -559,18 +559,25 @@ export class MapGenerator {
         // wide, high mouth carved deep into the massif — not a token side-tunnel.
         // Other styles keep modest grottos.
         const grand = style === 'mountain' || style === 'rocky';
-        const mouth = getIslandSurfacePoint(island, rr(rng, grand ? 0.42 : 0.34, grand ? 0.66 : 0.6), angle, 0);
+        const mouth = getIslandSurfacePoint(island, rr(rng, 0.34, grand ? 0.62 : 0.6), angle, 0);
         if (mouth.y < 3.2) continue;
         const rot = directionToYaw(Math.cos(angle), Math.sin(angle));
         const inX = -Math.sin(rot), inZ = -Math.cos(rot); // into the hill (toward centre)
-        const h = grand ? rr(rng, 5.4, 6.6) : rr(rng, 3.6, 4.4);
         const floorY = mouth.y - (grand ? 1.9 : 1.0);
-        const ceilingY = floorY + h;
-        const iRad = grand ? rr(rng, 4.4, 5.6) : rr(rng, 2.7, 3.4);
-        // Longest roofed entrance run (down to a short cavern on small isles).
-        let mainLen = 0;
-        for (const L of [15, 12, 9, 7, 6, 5]) { if (roofed(mouth.x, mouth.z, inX, inZ, L, ceilingY, 2.1)) { mainLen = L; break; } }
+        // Pick the TALLEST mouth that still roofs at this spot: grand caverns aim
+        // high, but fall back to a shorter cave (and a shorter run) before giving up
+        // on the location — so a tall island whose flank can't roof a 6m ceiling
+        // still gets a real cave instead of generateCaves silently producing none.
+        const heightMenu = grand ? [rr(rng, 5.4, 6.6), 4.8, 4.2, 3.6] : [rr(rng, 3.6, 4.4)];
+        let h = 0, ceilingY = 0, mainLen = 0;
+        for (const hc of heightMenu) {
+          const cY = floorY + hc;
+          let L0 = 0;
+          for (const L of [15, 12, 9, 7, 6, 5]) { if (roofed(mouth.x, mouth.z, inX, inZ, L, cY, 2.1)) { L0 = L; break; } }
+          if (L0 > 0) { h = hc; ceilingY = cY; mainLen = L0; break; }
+        }
         if (mainLen === 0) continue;
+        const iRad = grand ? rr(rng, 4.4, 5.6) : rr(rng, 2.7, 3.4);
         if (caves.some((c) => Math.hypot(c.position.x - mouth.x, c.position.z - mouth.z) < c.length + mainLen)) continue;
 
         // Entrance tunnel RAMPS DOWN into the mountain (not a thin roof slab):
