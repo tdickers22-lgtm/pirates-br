@@ -555,14 +555,18 @@ export class MapGenerator {
         const angle = attempt < 40
           ? hillAngles[attempt % hillAngles.length] + rr(rng, -0.85, 0.85)
           : ra(rng) + attempt * GOLDEN;
-        const mouth = getIslandSurfacePoint(island, rr(rng, 0.34, 0.6), angle, 0);
+        // Grand landmark caverns belong to tall mountains (and rocky isles): a
+        // wide, high mouth carved deep into the massif — not a token side-tunnel.
+        // Other styles keep modest grottos.
+        const grand = style === 'mountain' || style === 'rocky';
+        const mouth = getIslandSurfacePoint(island, rr(rng, grand ? 0.42 : 0.34, grand ? 0.66 : 0.6), angle, 0);
         if (mouth.y < 3.2) continue;
         const rot = directionToYaw(Math.cos(angle), Math.sin(angle));
         const inX = -Math.sin(rot), inZ = -Math.cos(rot); // into the hill (toward centre)
-        const h = rr(rng, 3.6, 4.4);
-        const floorY = mouth.y - 1.0;
+        const h = grand ? rr(rng, 5.4, 6.6) : rr(rng, 3.6, 4.4);
+        const floorY = mouth.y - (grand ? 1.9 : 1.0);
         const ceilingY = floorY + h;
-        const iRad = rr(rng, 2.7, 3.4);
+        const iRad = grand ? rr(rng, 4.4, 5.6) : rr(rng, 2.7, 3.4);
         // Longest roofed entrance run (down to a short cavern on small isles).
         let mainLen = 0;
         for (const L of [15, 12, 9, 7, 6, 5]) { if (roofed(mouth.x, mouth.z, inX, inZ, L, ceilingY, 2.1)) { mainLen = L; break; } }

@@ -399,17 +399,25 @@ function findSaddle(pool) {
 }
 
 function findCave(pool) {
+  // Prefer the TIGHTEST dry cave (lowest headroom) so the ceiling-clamp assertion
+  // is meaningfully exercised: grand mountain caverns are now tall enough that a
+  // jump clears them, so the first-found cave no longer overshoots its roof.
+  let best = null;
   for (const island of pool) {
     for (const cave of island.caves) {
       if ((cave.floorY ?? -99) <= 1.0) continue; // want a dry (above-water) cave
       const midX = cave.position.x - Math.sin(cave.rotation) * cave.length * 0.6;
       const midZ = cave.position.z - Math.cos(cave.rotation) * cave.length * 0.6;
-      if (getCaveCeilingY(island, midX, midZ) === null) continue;
+      const ceil = getCaveCeilingY(island, midX, midZ);
+      if (ceil === null) continue;
       if (!isPointInsideIslandFootprint(island, midX, midZ, 0)) continue;
-      return { island, cave, mid: { x: midX, z: midZ } };
+      const headroom = ceil - getCaveFloorY(island, midX, midZ);
+      if (best === null || headroom < best.headroom) {
+        best = { island, cave, mid: { x: midX, z: midZ }, headroom };
+      }
     }
   }
-  return null;
+  return best;
 }
 
 function findIsolatedPalm(pool) {
