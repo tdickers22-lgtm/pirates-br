@@ -2449,7 +2449,11 @@ export class Match {
     if (ship && player.onShipId === ship.id) {
       const stats = SHIP_STATS[ship.type];
       const local = this.toShipLocal(player.position, ship);
-      if (Math.abs(local.x) <= stats.width * 0.42 && Math.abs(local.z) <= stats.length * 0.42) {
+      // Aboard your ship → ALWAYS attach the keg to the hull (the snap below clamps
+      // it onto the deck). The old tight 0.42 box dropped a detached WORLD keg when
+      // you stood near a rail/bow, and the moving ship immediately sailed away from
+      // it — a keg that "wasn't put down properly".
+      {
         const belowDeck = player.position.y < ship.position.y + stats.height - 0.25;
         const section = this.getHullSectionFromLocal(local);
         // Snap to gunwale / quarterdeck rail so kegs never sit on the open deck center (matches equipment staging).

@@ -2156,8 +2156,18 @@ export class PhysicsSystem {
       && local.z <= stair.frontZ
       && local.z >= stair.backZ
     ) {
-      const descent = clamp((stair.frontZ - local.z) / Math.max(0.001, stair.frontZ - stair.backZ), 0, 1);
-      return deckY + (holdFloor - deckY) * descent;
+      // The companionway is a ONE-WAY stair down from its forward lip — not an open
+      // trapdoor across its whole footprint. Only descend when entering from the
+      // front top step or already below deck; a lateral/aft step onto the hole
+      // stays at deck level (the coaming colliders below keep you from stepping
+      // there in the first place), so you no longer fall through beside the stairs.
+      const alreadyBelow = position.y < deckY - 0.25;
+      const nearFrontLip = local.z >= stair.frontZ - 0.6;
+      if (alreadyBelow || nearFrontLip) {
+        const descent = clamp((stair.frontZ - local.z) / Math.max(0.001, stair.frontZ - stair.backZ), 0, 1);
+        return deckY + (holdFloor - deckY) * descent;
+      }
+      return deckY;
     }
     if (this.isInsideShipHoldFootprint(local, stats, 0.08) && position.y < deckY - 0.25) {
       return holdFloor;
@@ -2226,6 +2236,32 @@ export class PhysicsSystem {
     for (let m = 0; m < mastCount; m++) {
       pushCircle(0, mastStartZ - m * mastSpacing, PLAYER.RADIUS + mastRadius * 1.85);
     }
+
+    // Helm furniture — the wheel post and the compass binnacle are solid, so you
+    // can't stand inside the wheel or clip through the binnacle.
+    pushCircle(0, -stats.length * 0.315, PLAYER.RADIUS + 0.16);          // wheel post
+    pushCircle(stats.width * 0.19, -stats.length * 0.205, PLAYER.RADIUS + 0.24); // binnacle
+
+    // Companionway coamings — a thin wall on port, starboard and the AFT edge of
+    // the stairwell so the only way down is the forward stair lip. Without these a
+    // sideways step drops through the deck beside the hatch.
+    const cw = getShipCompanionwayConfig(stats);
+    const pushAABB = (minX: number, maxX: number, minZ: number, maxZ: number) => {
+      const ex0 = minX - PLAYER.RADIUS, ex1 = maxX + PLAYER.RADIUS;
+      const ez0 = minZ - PLAYER.RADIUS, ez1 = maxZ + PLAYER.RADIUS;
+      if (x <= ex0 || x >= ex1 || z <= ez0 || z >= ez1) return;
+      // Push out along the least-penetration axis.
+      const dl = x - ex0, dr = ex1 - x, db = z - ez0, dt = ez1 - z;
+      const m = Math.min(dl, dr, db, dt);
+      if (m === dl) x = ex0; else if (m === dr) x = ex1;
+      else if (m === db) z = ez0; else z = ez1;
+      pushed = true;
+    };
+    const hMinX = cw.cx - cw.stairHalfWidth, hMaxX = cw.cx + cw.stairHalfWidth;
+    const coamT = 0.05;
+    pushAABB(hMinX - coamT, hMinX + coamT, cw.stairBackZ, cw.stairFrontZ); // port coaming
+    pushAABB(hMaxX - coamT, hMaxX + coamT, cw.stairBackZ, cw.stairFrontZ); // starboard coaming
+    pushAABB(hMinX, hMaxX, cw.stairBackZ - coamT, cw.stairBackZ + coamT);  // aft coaming (front open)
 
     return { x, z, pushed };
   }

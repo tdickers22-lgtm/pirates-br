@@ -11325,7 +11325,12 @@ export class Game {
       this.localViewPocketRoot.rotation.set(-0.18 + trudge * 0.5, 0 + sway * 0.18, 0);
       return true;
     }
-    if (this.input.isKegPreviewActive() && player.kegs > 0) {
+    // Only show the in-hand keg + place animation when the server would ACTUALLY
+    // spawn one: a mega keg, or a normal keg off cooldown. Otherwise the preview
+    // "places" a keg client-side that never appears (60s replenish cooldown) — the
+    // "kegs aren't being put down properly" feeling. getKegSummary shows the timer.
+    const kegPlaceable = player.megaKegs > 0 || (player.kegs > 0 && (player.kegCooldown ?? 0) <= 0);
+    if (this.input.isKegPreviewActive() && kegPlaceable) {
       const kind: PocketPreviewKind = 'powder_keg';
       let mesh = this.localViewPocketRoot.getObjectByName('local-pocket') as THREE.Group | null;
       if (!mesh || this.localViewPocketKind !== kind) {

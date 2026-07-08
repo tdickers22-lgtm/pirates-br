@@ -91,17 +91,20 @@ export class InputManager {
 
     lockElement.addEventListener('mousedown', (e) => {
       if (this.vHeld) return;
-      if (!this.locked && !this.debugAssumeLocked) {
-        this.wantsRelock = true;
-        this.lockElement?.requestPointerLock?.().catch(() => {});
-        e.preventDefault();
-        return;
-      }
+      // Place a held keg even on the click that re-acquires pointer lock, so a
+      // click-to-place right after Esc / closing the supply wheel isn't swallowed.
       if (this.kegHeld && e.button === 0) {
         e.preventDefault();
         this.kegHeld = false;
         this.placeKegPressed = true;
         this.kegPreviewUntil = Date.now() + 450;
+        if (!this.locked && !this.debugAssumeLocked) this.lockElement?.requestPointerLock?.().catch(() => {});
+        return;
+      }
+      if (!this.locked && !this.debugAssumeLocked) {
+        this.wantsRelock = true;
+        this.lockElement?.requestPointerLock?.().catch(() => {});
+        e.preventDefault();
         return;
       }
       this.mouseButtons.add(e.button);
