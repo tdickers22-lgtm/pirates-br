@@ -581,8 +581,9 @@ export class MapGenerator {
         if (caves.some((c) => Math.hypot(c.position.x - mouth.x, c.position.z - mouth.z) < c.length + mainLen)) continue;
 
         // Entrance tunnel RAMPS DOWN into the mountain (not a thin roof slab):
-        // deeper on bigger, taller islands so mountains hide genuine caverns.
-        const descend = Math.min(9, 4 + island.radius * 0.05);
+        // deeper on bigger, taller islands so mountains hide genuine caverns. Grand
+        // caves plunge far below grade so the network has real vertical depth.
+        const descend = Math.min(grand ? 16 : 9, (grand ? 6.5 : 4) + island.radius * (grand ? 0.095 : 0.05));
         const deepFloor = floorY - descend;
         const sys: IslandCave[] = [];
         sys.push(seg(mouth.x, mouth.z, rot, iRad, mainLen, floorY, h, { mouth: true, floorEnd: deepFloor }));
@@ -595,28 +596,88 @@ export class MapGenerator {
         sys.push(junction);
         const jcx = jx + inX * jLen * 0.5, jcz = jz + inZ * jLen * 0.5;
 
-        // Side branch → treasure chamber (dead-end) off the junction.
-        const bRot = rot + (rng() < 0.5 ? 1 : -1) * rr(rng, 0.85, 1.35);
-        const bX = -Math.sin(bRot), bZ = -Math.cos(bRot);
-        const bH = rr(rng, 3.6, 4.4), bFloor = jFloor + 0.2, bRad = rr(rng, 2.4, 3.1);
-        let bLen = 0;
-        for (const L of [11, 8, 6]) { if (roofed(jcx, jcz, bX, bZ, L, bFloor + bH, 2)) { bLen = L; break; } }
-        if (bLen > 0) {
-          const branchSeg = seg(jcx, jcz, bRot, bRad, bLen, bFloor, bH, {});
-          sys.push(branchSeg);
-          const tcx = jcx + bX * bLen, tcz = jcz + bZ * bLen;
-          const tRad = rr(rng, 4.0, 5.2), tLen = rr(rng, 5, 7), tFloor = bFloor - 0.7, tH = rr(rng, 4.6, 5.6);
-          if (roofed(tcx, tcz, bX, bZ, tLen, tFloor + tH, 2.2)) {
-            sys.push(seg(tcx, tcz, bRot, tRad, tLen, tFloor, tH, { back: true }));
-          } else {
-            branchSeg.hasBackWall = true; // no room for a chamber → branch dead-ends
+        // ── Branching, multi-level VEIN network off the junction ──────────────
+        // Recursively bore passages: run each as far as the roof allows, descend it
+        // (down-and-OUT, never stacked over another gallery), then open a chamber,
+        // FORK into diverging children, or dead-end — so a grand cave is a deep,
+        // forking warren reaching several levels, not one straight side-tunnel.
+        const MAX_SEGS = grand ? 14 : 8;
+        // The floor of an already-placed segment at world (px,pz), or null if the
+        // point is outside its footprint. Used to reject a NEW passage that would
+        // cross an existing gallery at a clashing depth: the ceiling helpers report
+        // the globally-lowest ceiling, so stacking two galleries at one (x,z) makes
+        // the roof read as collapsed. Keeping the network non-stacked keeps it valid.
+        const segFloorAt = (c: IslandCave, px: number, pz: number): number | null => {
+          const cLen = c.length, cR = c.interiorRadius ?? 3;
+          const dx = px - c.position.x, dz = pz - c.position.z;
+          const cs = Math.cos(c.rotation), sn = Math.sin(c.rotation);
+          const lx = dx * cs - dz * sn, lz = dx * sn + dz * cs;
+          if (Math.abs(lx) > cR + 1.4 || lz > 1.2 || lz < -cLen - 1.2) return null;
+          const along = cLen > 0 ? Math.max(0, Math.min(1, -lz / cLen)) : 0;
+          const fE = (c as { floorYEnd?: number }).floorYEnd ?? c.floorY;
+          return c.floorY + (fE - c.floorY) * along;
+        };
+        const overlapClash = (sx: number, sz: number, dX: number, dZ: number, len: number, f0: number, f1: number): boolean => {
+          for (let s = 0.12; s <= 1.001; s += 0.19) {
+            const px = sx + dX * len * s, pz = sz + dZ * len * s;
+            const newFloor = f0 + (f1 - f0) * s;
+            for (const c of sys) {
+              const cf = segFloorAt(c, px, pz);
+              // Overlapping galleries must share a level (the ceiling helper reports
+              // the globally-lowest roof, so a deeper crosser would collapse the
+              // reported headroom). Connected passages meet at equal floors → fine.
+              if (cf !== null && Math.abs(cf - newFloor) > 0.5) return true;
+            }
           }
-        }
+          return false;
+        };
+        const drill = (sx: number, sz: number, dRot: number, floor: number, rad: number, height: number, depth: number): void => {
+          if (sys.length >= MAX_SEGS || depth <= 0) return;
+          const dX = -Math.sin(dRot), dZ = -Math.cos(dRot);
+          let len = 0;
+          for (const L of [13, 10, 8, 6, 5, 4]) { if (roofed(sx, sz, dX, dZ, L, floor + height, 1.8)) { len = L; break; } }
+          if (len < 4) return;
+          // Gentle DESCENT along the run (down-and-out) → deeper levels you ramp to,
+          // small enough that connected passages stay within the ceiling helper's
+          // tolerance while the network still steps down through several levels.
+          const floorEnd = floor - rng() * 1.5;
+          const ex = sx + dX * len, ez = sz + dZ * len;
+          if (overlapClash(sx, sz, dX, dZ, len, floor, floorEnd)) return;
+          const passage = seg(sx, sz, dRot, rad, len, floor, height, { floorEnd });
+          sys.push(passage);
+          const roll = rng();
+          if (sys.length >= MAX_SEGS || depth <= 1 || roll < 0.22) {
+            // Terminate this vein in a chamber (treasure room) or a plain dead-end.
+            const cRad = rr(rng, 3.6, 5.0), cLen = rr(rng, 4, 6), cH = rr(rng, 4.4, 5.8);
+            if (!overlapClash(ex, ez, dX, dZ, cLen, floorEnd, floorEnd) && roofed(ex, ez, dX, dZ, cLen, floorEnd + cH, 2)) {
+              sys.push(seg(ex, ez, dRot, cRad, cLen, floorEnd, cH, { back: true }));
+            } else {
+              passage.hasBackWall = true;
+            }
+            return;
+          }
+          // FORK into a Y — two diverging children (or one), each a fresh vein.
+          const spread = rr(rng, 0.6, 1.2);
+          const forks = roll < 0.72 ? 2 : 1;
+          for (let f = 0; f < forks; f++) {
+            const side = f === 0 ? 1 : -1;
+            const childRot = dRot + side * spread + (rng() - 0.5) * 0.3;
+            const childRad = Math.max(2.2, rad - rr(rng, 0.3, 0.9));
+            const childH = Math.max(3.4, height - rr(rng, 0.2, 0.8));
+            drill(ex, ez, childRot, floorEnd, childRad, childH, depth - 1);
+          }
+        };
+        // Two vein systems diverge off the junction at near-opposite headings (so
+        // they sprawl to opposite sides of the massif and never cross), one starting
+        // lower than the other for a genuine level difference.
+        const veinBase = rot + (rng() < 0.5 ? 1 : -1) * rr(rng, 0.7, 1.2);
+        drill(jcx, jcz, veinBase, jFloor + 0.1, rr(rng, 2.8, 3.6), rr(rng, 3.8, 4.6), grand ? 3 : 2);
+        drill(jcx, jcz, veinBase + Math.PI * (0.72 + rng() * 0.46), jFloor + 0.1, rr(rng, 2.8, 3.6), rr(rng, 3.8, 4.6), grand ? 3 : 1);
 
         // THROUGH-tunnel: keep boring inward until the roof thins on the far
         // flank, then break out as a SECOND mouth (cuts clean through the hill).
         let exit: { x: number; z: number; y: number; dist: number } | null = null;
-        for (let d = jLen + 4; d < 70; d += 2) {
+        for (let d = jLen + 4; d < 90; d += 2) {
           const ex = jx + inX * d, ez = jz + inZ * d;
           const surf = getIslandSurfaceY(island, ex, ez);
           if (surf < ceilingY + 0.4) { if (surf > 3.0) exit = { x: ex, z: ez, y: surf, dist: d }; break; }

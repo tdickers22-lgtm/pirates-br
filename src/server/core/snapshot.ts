@@ -1,6 +1,7 @@
 import type {
   GameState,
   HotSnapshotPayload,
+  Island,
   Player,
   WildlifeAnimal,
 } from '../../shared/types/index.js';
@@ -83,6 +84,22 @@ function trimWildlife(animal: WildlifeAnimal): WildlifeAnimal {
  * snapshot from Match.buildSnapshot (islands already stripped unless this is
  * a static-world tick); seaRocks follow the same static-world cadence.
  */
+/** Quantize an island's DECORATIVE/entity data (props, caves, chests, barrels,
+ *  npcs, …) to 2 decimals (~1cm — visually lossless) while leaving the fields that
+ *  feed the shared deterministic terrain math (profile, stamps, position, radius)
+ *  at full precision. Props alone are ~110KB of the world payload at full float
+ *  precision, so this is what keeps the join snapshot lean. */
+function quantizeIslandForWire(island: Island): Island {
+  const q = quantizeDeep(island, 2) as Island;
+  return {
+    ...q,
+    position: island.position,
+    radius: island.radius,
+    profile: island.profile,
+    stamps: island.stamps,
+  };
+}
+
 export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean): GameState {
   return {
     ...snap,
@@ -95,8 +112,11 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
     sharks: snap.sharks.map((shark) => quantizeDeep(shark, 2)),
     wildlife: snap.wildlife.map(trimWildlife),
     // Static world data at full precision (deterministic shared math), only on
-    // includeStaticWorld ticks — the client preserves its previous copy.
-    islands: includeStaticWorld ? snap.islands : [],
+    // includeStaticWorld ticks — the client preserves its previous copy. Cave
+    // networks are TRANSMITTED data (not regenerated from a seed), so their now
+    // much larger multi-vein segment lists quantize to 2 decimals (~1cm) to keep
+    // the world payload lean without touching the island's terrain parameters.
+    islands: includeStaticWorld ? snap.islands.map(quantizeIslandForWire) : [],
     seaRocks: includeStaticWorld ? snap.seaRocks : [],
   };
 }

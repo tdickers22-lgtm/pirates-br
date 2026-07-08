@@ -4580,6 +4580,14 @@ export class Game {
       const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
       const flameMat = new THREE.MeshStandardMaterial({ color: 0xff8a20, emissive: 0xff5500, emissiveIntensity: 1.4, roughness: 0.4 });
 
+      // Light budget for the (now much larger, multi-vein) cave network: every
+      // segment still gets a glowing torch/crystal MESH (emissive, free), but only
+      // the first several segments get a real dynamic PointLight so a deep warren
+      // can't blow the renderer's light count. Torches go to the most-travelled
+      // segments (mouth + junction + main veins come first in island.caves).
+      let caveTorchBudget = lowDetail ? 5 : 9;
+      let caveGlowBudget = lowDetail ? 2 : 5;
+
       for (const cave of island.caves) {
         const caveGroup = new THREE.Group();
         caveGroup.position.set(cave.position.x - island.position.x, cave.position.y, cave.position.z - island.position.z);
@@ -4705,9 +4713,12 @@ export class Game {
         // Underground is dark regardless of day/night, so caves get their OWN
         // always-on warm torch light (parented to the group → only lit when the
         // cave is in view range, so no global light-budget blowout).
-        const torchLight = new THREE.PointLight(0xffa64d, 3.2, cLen + cR * 2.2, 1.5);
-        torchLight.position.copy(flame.position);
-        caveGroup.add(torchLight);
+        if (caveTorchBudget > 0) {
+          caveTorchBudget--;
+          const torchLight = new THREE.PointLight(0xffa64d, 3.2, cLen + cR * 2.2, 1.5);
+          torchLight.position.copy(flame.position);
+          caveGroup.add(torchLight);
+        }
         // Sparse glowing crystals deeper in — cool blue emissive clusters with a
         // faint light each, so the tunnel reads as lit but moody, not a flat box.
         if (!lowDetail) {
@@ -4724,9 +4735,12 @@ export class Game {
               shard.rotation.set(rng(s * 19) * 0.6 - 0.3 + (onCeil ? Math.PI : 0), rng(s * 21) * Math.PI, rng(s * 23) * 0.6 - 0.3);
               caveGroup.add(shard);
             }
-            const glow = new THREE.PointLight(0x5fbfff, 1.1, 6.5, 1.8);
-            glow.position.set(cx, cy, cz);
-            caveGroup.add(glow);
+            if (caveGlowBudget > 0) {
+              caveGlowBudget--;
+              const glow = new THREE.PointLight(0x5fbfff, 1.1, 6.5, 1.8);
+              glow.position.set(cx, cy, cz);
+              caveGroup.add(glow);
+            }
           }
         }
 
