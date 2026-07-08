@@ -3,7 +3,7 @@ import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, IslandProp, IslandPropType, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getSailRopeStationLocals, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights, geyserEruptionLevel } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getSailRopeStationLocals, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights, geyserEruptionLevel, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { BIOME_PALETTES, getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
@@ -8974,12 +8974,14 @@ export class Game {
       const stats = SHIP_STATS[trackedShip.type];
       const helmZ = -stats.length * 0.39;
       const starboardX = stats.width * 0.28;
-      // +0.22 for the raised quarterdeck dais the captain now stands on.
+      // Ride the raised quarterdeck dais the captain stands on, so the eye sits at
+      // helmsman head height instead of sunk toward the main-deck plane.
+      const qdRise = getShipQuarterdeckConfig(stats).rise;
       desired = this.getShipWorldPoint(
         trackedShip,
         starboardX,
         helmZ - stats.length * 0.02,
-        stats.height + 1.70,
+        stats.height + 1.70 + qdRise,
       );
       lookTarget = this.getShipWorldPoint(
         trackedShip,
@@ -9253,7 +9255,9 @@ export class Game {
       this.setHull(this.ui.hullStarboard, this.ui.hullStarboardTxt, ship.hull.starboard);
       const wind = sampleWind(this.ocean.getTime());
       const signedRelative = angleWrap(wind.direction - ship.rotation);
-      const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.95;
+      // 0.92 matches PhysicsSystem's desired-trim constant + the sail-cloth luff
+      // visual, so the displayed Catch% peaks exactly where the ship is fastest.
+      const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
       const trimCatch = 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE);
       const trimDelta = angleWrap(desiredTrim - ship.sailAngle);
       const trimSide = ship.sailAngle < -0.06 ? 'Port' : ship.sailAngle > 0.06 ? 'Starboard' : 'Centered';

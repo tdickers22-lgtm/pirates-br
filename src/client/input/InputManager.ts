@@ -151,12 +151,13 @@ export class InputManager {
       interact: this.interactPressed,
       interactHeld: this.keys.has('KeyX'),
       anchor:   false,
-      // Sails are hauled by holding [X] at the rigging (SoT-style) — the old
-      // C/Z/Q/F key chords are gone; fields ride the wire as false for compat.
+      // Canvas AMOUNT is hauled by holding [X] at the rigging / W-S at the helm.
+      // Sail ANGLE (yard brace / trim) is Q/F while steering — the HUD names these
+      // keys ("Trim Left [Q]" / "Trim Right [F]") and the server applies them.
       sailRaise: false,
       sailLower: false,
-      sailLeft:  false,
-      sailRight: false,
+      sailLeft:  this.keys.has('KeyQ'),
+      sailRight: this.keys.has('KeyF'),
       trade:    this.tradePressed,
       reload:   this.reloadPressed,
       placeKeg: this.placeKegPressed,

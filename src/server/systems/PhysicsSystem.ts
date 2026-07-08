@@ -20,6 +20,7 @@ import {
   getCrowNestStandingY,
   getMainMastLocalZ,
   getShipCompanionwayConfig,
+  getShipDeckRaiseAt,
   getSeaRockBoundsRadius,
   getSeaRockColliders,
   intersectRaySeaRock,
@@ -2161,7 +2162,9 @@ export class PhysicsSystem {
     if (this.isInsideShipHoldFootprint(local, stats, 0.08) && position.y < deckY - 0.25) {
       return holdFloor;
     }
-    return deckY;
+    // Stern quarterdeck dais — a genuinely raised helm platform (ramps up over its
+    // front step). 0 everywhere off the dais, so the rest of the deck is unchanged.
+    return deckY + getShipDeckRaiseAt(local, stats);
   }
 
   private getShipStairConfig(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {

@@ -27,6 +27,7 @@ import {
   getMainMastLocalZ,
   getCrowNestStandingY,
   getShipCompanionwayConfig,
+  getShipDeckRaiseAt,
   gerstnerHeight,
   WAVE_PARAMS,
   intersectRaySeaRock,
@@ -1346,6 +1347,12 @@ export class Match {
         if (input.right) steerInput += 1;
         if (input.forward) ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + 0.48 * dt);
         if (input.back) ship.sailHeight = Math.max(0, ship.sailHeight - 0.6 * dt);
+        // Q/F brace the yard: trim the sail ANGLE to port/starboard so the helmsman
+        // can catch a crosswind on a reach (PhysicsSystem's trimEfficiency rewards
+        // matching the wind-relative optimum). Without this the yard stayed centred
+        // and a human was stuck at ~0.24× speed on every reach vs auto-trimming bots.
+        if (input.sailLeft) ship.sailAngle = Math.max(-SHIP.MAX_SAIL_ANGLE, ship.sailAngle - SHIP.SAIL_TRIM_RATE * dt);
+        if (input.sailRight) ship.sailAngle = Math.min(SHIP.MAX_SAIL_ANGLE, ship.sailAngle + SHIP.SAIL_TRIM_RATE * dt);
         const chainshotted = this.t < ship.chainshottedUntil;
         // Rudder + way: the helm slews ship.rudderAngle toward the input and the
         // blade only bites with water flowing past it — full-sail handling keeps
@@ -4759,7 +4766,8 @@ export class Match {
     const sin = Math.sin(ship.rotation);
     player.position.x = ship.position.x + local.x * cos + local.z * sin;
     player.position.z = ship.position.z + local.z * cos - local.x * sin;
-    player.position.y = ship.position.y + stats.height + 0.1;
+    // Stand ON the raised quarterdeck dais, not sunk into it.
+    player.position.y = ship.position.y + stats.height + 0.1 + getShipDeckRaiseAt(local, stats);
   }
 
   private snapPlayerToSails(player: Player, ship: Ship) {

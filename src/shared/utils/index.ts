@@ -936,6 +936,53 @@ export function getShipCompanionwayConfig(stats: { width: number; length: number
   };
 }
 
+export interface ShipQuarterdeckConfig {
+  /** Dais footprint (ship-local). */
+  cx: number;
+  cz: number;
+  halfX: number;
+  halfZ: number;
+  /** How far the dais top sits above the flat weather deck (metres). */
+  rise: number;
+  /** Depth of the front step run that ramps up onto the dais. */
+  stepDepth: number;
+  /** Convenience: forward (bow-side) and aft edges of the dais footprint. */
+  frontZ: number;
+  backZ: number;
+}
+
+/** The stern helm dais (quarterdeck): a genuinely raised captain's platform the
+ *  wheel sits on. Single source of truth shared by the renderer (geometry), the
+ *  server (raised foot height at the stern) and the helm camera, so the visible
+ *  platform and the surface you stand on can never drift apart. */
+export function getShipQuarterdeckConfig(stats: { width: number; length: number }): ShipQuarterdeckConfig {
+  const cx = 0;
+  const cz = -stats.length * 0.33;
+  const halfX = stats.width * 0.36;
+  const halfZ = stats.length * 0.095;
+  return {
+    cx,
+    cz,
+    halfX,
+    halfZ,
+    rise: 0.45,
+    stepDepth: 0.6,
+    frontZ: cz + halfZ,
+    backZ: cz - halfZ,
+  };
+}
+
+/** Raised standing height at a ship-local point relative to the flat deck: the
+ *  quarterdeck dais lifts the stern, ramping up over its front step so a walker
+ *  steps up smoothly. Returns 0 anywhere off the dais. */
+export function getShipDeckRaiseAt(local: { x: number; z: number }, stats: { width: number; length: number }): number {
+  const qd = getShipQuarterdeckConfig(stats);
+  if (Math.abs(local.x - qd.cx) > qd.halfX || local.z > qd.frontZ || local.z < qd.backZ) return 0;
+  // Ramp from 0 at the front lip up to full rise over stepDepth, flat thereafter.
+  const up = clamp((qd.frontZ - local.z) / Math.max(0.001, qd.stepDepth), 0, 1);
+  return qd.rise * up;
+}
+
 export function getShipBoardingLadderLocals(type: ShipType): Array<{ x: number; z: number }> {
   const stats = SHIP_STATS[type];
   const ladderX = stats.width * 0.56;

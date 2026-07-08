@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
-import { sampleWind, angleWrap, getSailRopeStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
+import { sampleWind, angleWrap, getSailRopeStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
 import type { RenderQuality } from './Renderer.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
@@ -1898,22 +1898,34 @@ export class ShipRenderer {
     }
     group.add(galleryRail);
 
-    // ── Quarterdeck: a raised helm dais at the stern so there is a clear
-    //    captain's station — the wheel sits on it, a step leads up, and a low
-    //    rail wraps the back. ──
-    const qdRise = 0.22;
-    const qdZ = -L * 0.36;
-    const qdLen = L * 0.22, qdW = W * 0.72;
-    const quarterdeck = new THREE.Mesh(new THREE.BoxGeometry(qdW, qdRise, qdLen), deckMat);
-    quarterdeck.position.set(0, H + qdRise * 0.5, qdZ);
+    // ── Quarterdeck: a genuinely RAISED helm dais at the stern (config-driven so
+    //    the geometry matches the server's raised foot height exactly). The wheel
+    //    sits on it, a two-step run leads up, and a low rail wraps the back. ──
+    const qd = getShipQuarterdeckConfig({ width: W, length: L });
+    const qdRise = qd.rise;                       // ~0.45m — a real step-up, not a curb
+    const qdZ = qd.cz;
+    const qdLen = qd.halfZ * 2, qdW = qd.halfX * 2;
+    // Flat dais covers the aft footprint; the forward stepDepth is the stair run.
+    const flatFrontZ = qd.frontZ - qd.stepDepth;
+    const flatLen = Math.max(0.5, flatFrontZ - qd.backZ);
+    const quarterdeck = new THREE.Mesh(new THREE.BoxGeometry(qdW, qdRise, flatLen), deckMat);
+    quarterdeck.position.set(0, H + qdRise * 0.5, (qd.backZ + flatFrontZ) * 0.5);
     quarterdeck.castShadow = true;
     quarterdeck.receiveShadow = true;
     group.add(quarterdeck);
-    const qdStep = new THREE.Mesh(new THREE.BoxGeometry(qdW * 0.44, qdRise * 0.5, 0.34), deckMat);
-    qdStep.position.set(0, H + qdRise * 0.25, qdZ + qdLen * 0.5 + 0.17);
-    qdStep.receiveShadow = true;
-    group.add(qdStep);
-    // Low rail hugging the quarterdeck sides + stern.
+    // Two-step run up the forward face — matches getShipDeckRaiseAt's ramp so feet
+    // track the visible treads instead of walking through a vertical curb.
+    const nSteps = 2;
+    for (let si = 0; si < nSteps; si++) {
+      const stepH = qdRise * (si + 1) / nSteps;
+      const stepDepth = qd.stepDepth / nSteps;
+      const step = new THREE.Mesh(new THREE.BoxGeometry(qdW * 0.56, stepH, stepDepth), deckMat);
+      step.position.set(0, H + stepH * 0.5, qd.frontZ - (si + 0.5) * stepDepth);
+      step.receiveShadow = true;
+      step.castShadow = true;
+      group.add(step);
+    }
+    // Low rail hugging the quarterdeck sides + stern (sits on the raised dais).
     for (const [rx, rz, rlen, rot] of [
       [-qdW * 0.5, qdZ, qdLen, 0], [qdW * 0.5, qdZ, qdLen, 0], [0, qdZ - qdLen * 0.5, qdW, Math.PI * 0.5],
     ] as const) {
@@ -1930,7 +1942,7 @@ export class ShipRenderer {
 
     // Helm wheel (seated on the quarterdeck dais)
     const wheelPost = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.095, 1.06, 8), darkMat);
-    wheelPost.position.set(0, H + qdRise + 0.56, -L * 0.315);
+    wheelPost.position.set(0, H + qdRise + 0.53, -L * 0.315);
     wheelPost.castShadow = true;
     group.add(wheelPost);
 
@@ -1966,9 +1978,10 @@ export class ShipRenderer {
       }
     }
 
-    // Compass binnacle next to helm, close enough to read while steering.
+    // Compass binnacle at the foot of the helm steps (on the main deck, just
+    // forward of the raised dais so it doesn't sink into the platform).
     const compassX = W * 0.19;
-    const compassZ = -L * 0.318;
+    const compassZ = -L * 0.205;
     const binnacle = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.72, 10), darkMat);
     binnacle.position.set(compassX, H + 0.48, compassZ);
     binnacle.castShadow = true;
@@ -2323,19 +2336,22 @@ export class ShipRenderer {
       }
     }
 
-    // Forward jib tied to the bowsprit; this gives the bow a proper pirate-ship profile from side view.
+    // Forward jib — a triangular headsail whose LUFF runs along the forestay from
+    // the bowsprit tip (forward + low) up to the foremast (aft + high), so the
+    // canvas hugs the rig instead of floating as a vertical slab above the bow.
+    // (Local X → world -Z after the y=90° rotation; local Y → world Y.)
     const jibShape = new THREE.Shape();
-    jibShape.moveTo(0, 0);
-    jibShape.lineTo(L * 0.24, H * 0.34);
-    jibShape.lineTo(0.02, H * 1.18);
-    jibShape.lineTo(0, 0);
+    jibShape.moveTo(-L * 0.20, 0);        // tack — at the bowsprit tip (world z≈L*0.76)
+    jibShape.lineTo(L * 0.26, H * 0.30);  // clew — aft + low (sheet corner, the belly)
+    jibShape.lineTo(L * 0.28, H * 1.18);  // head — up the foremast (world z≈L*0.28)
+    jibShape.lineTo(-L * 0.20, 0);
     const jib = new THREE.Mesh(new THREE.ShapeGeometry(jibShape), sailMat.clone());
     jib.rotation.order = 'YXZ';
     // Jib is a stay-sail running on the centerline (YZ plane), so its plane normal
     // points sideways. It does NOT trim with the yardarm sails — fixed yaw.
     jib.rotation.y = Math.PI * 0.5;
-    jib.position.set(0, H + 0.68, L * 0.56);
-    jib.userData.hoistTopY = H + 0.68 + H * 1.18;
+    jib.position.set(0, H + 0.52, L * 0.56);
+    jib.userData.hoistTopY = H + 0.52 + H * 1.18;
     jib.userData.hoistHeight = H * 1.18;
     jib.userData.hoistCentered = false;
     jib.userData.sailKind = 'stay';
@@ -2346,10 +2362,11 @@ export class ShipRenderer {
     this.addSwiftSailTrim(jib, L * 0.24, H * 1.18, upgradeVisuals.swift_sails, true);
     group.add(jib);
     sails.push(jib);
-    const furledJib = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, L * 0.22, 8), sailMat.clone());
-    furledJib.rotation.x = Math.PI * 0.5;
-    furledJib.rotation.z = -0.18;
-    furledJib.position.set(0, H + 1.02, L * 0.66);
+    // Furled jib bundle lies ALONG the forestay toward the bowsprit tip, not
+    // hovering above the bow.
+    const furledJib = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, L * 0.34, 8), sailMat.clone());
+    furledJib.rotation.x = Math.PI * 0.5 + 0.4;   // tilt down toward the bowsprit tip
+    furledJib.position.set(0, H + 0.74, L * 0.58);
     furledJib.userData.phaseSeed = L * 0.66;
     furledJib.castShadow = true;
     group.add(furledJib);
@@ -3129,8 +3146,8 @@ export class ShipRenderer {
         const targetSailY = hoistTopY - hoistHeight * deployedHeight * (hoistCentered ? 0.5 : 1);
         if (trimPivot) {
           // Clamp the visible brace angle — gameplay trim can reach ±86° but a
-          // yard braced past ~50° reads broken. The full value still drives physics.
-          const visualTrim = THREE.MathUtils.clamp(targetSailYaw, -0.9, 0.9);
+          // yard braced past ~65° reads broken. The full value still drives physics.
+          const visualTrim = THREE.MathUtils.clamp(targetSailYaw, -1.15, 1.15);
           trimPivot.rotation.y += angleWrap(visualTrim - trimPivot.rotation.y) * sailAlpha;
         } else {
           sail.rotation.y += angleWrap(targetSailYaw - sail.rotation.y) * sailAlpha;
