@@ -4599,6 +4599,18 @@ export class Game {
         //    tone (charred on volcanoes) and slab-flattened (not round balls), so
         //    the DARK cavity behind them reads as a cave bored into the cliff. ──
         const isMouth = cave.hasMouth ?? true;
+        // The exterior rock PORTAL (frame + the mouth's tube) is a landmark that
+        // must read from across the island — it stays visible with the terrain.
+        // Only the interior decor + lights hide behind the proximity gate below
+        // (light budget). Non-mouth segments have no portal; all on caveGroup.
+        let portalGroup: THREE.Group | null = null;
+        if (isMouth) {
+          portalGroup = new THREE.Group();
+          portalGroup.position.copy(caveGroup.position);
+          portalGroup.rotation.copy(caveGroup.rotation);
+          group.add(portalGroup);
+        }
+        const exterior = portalGroup ?? caveGroup;
         if (isMouth) {
           const cliffCol = isVolcanic
             ? new THREE.Color(0x2b2621).lerp(paletteRock, 0.3)   // charred, matching the cone
@@ -4610,7 +4622,7 @@ export class Game {
           brow.position.set((rng(cw) - 0.5) * cR * 0.3, floorLocalY + ch * 1.02, 0.85);
           brow.rotation.set(-0.16 + rng(7) * 0.18, rng(9) * Math.PI, (rng(11) - 0.5) * 0.3);
           brow.castShadow = true;
-          caveGroup.add(brow);
+          exterior.add(brow);
           // Side jambs + shoulder blocks — tall angular masses framing the opening.
           for (const side of [-1, 1] as const) {
             const jamb = new THREE.Mesh(boulderGeo, cliffMat);
@@ -4618,13 +4630,13 @@ export class Game {
             jamb.position.set(side * (cR * 1.02), floorLocalY + ch * 0.44, 0.3);
             jamb.rotation.set((rng(side * 41) - 0.5) * 0.32, rng(side * 43) * Math.PI, side * 0.15);
             jamb.castShadow = true;
-            caveGroup.add(jamb);
+            exterior.add(jamb);
             const sh = new THREE.Mesh(boulderGeo, cliffMat);
             sh.scale.set(cR * 0.62, cR * 0.56, cR * 0.72);
             sh.position.set(side * (cR * 0.76), floorLocalY + ch * 0.9, 0.5);
             sh.rotation.set(rng(side * 51) * 0.4, rng(side * 53) * Math.PI, side * 0.28);
             sh.castShadow = true;
-            caveGroup.add(sh);
+            exterior.add(sh);
           }
           // Fallen slabs at the threshold — rubble spilling from the mouth.
           for (let i = 0; i < (lowDetail ? 2 : 4); i++) {
@@ -4635,7 +4647,7 @@ export class Game {
             fb.position.set(side * (cR * 0.5 + rng(i * 73) * cR * 0.5), floorLocalY + 0.2, 1.0 + rng(i * 77) * 1.7);
             fb.rotation.set(rng(i * 79) * Math.PI, rng(i * 83) * Math.PI, rng(i * 89) * Math.PI);
             fb.castShadow = true;
-            caveGroup.add(fb);
+            exterior.add(fb);
           }
         }
 
@@ -4649,7 +4661,10 @@ export class Game {
           caveRockMat,
         );
         tube.receiveShadow = true;
-        caveGroup.add(tube);
+        // Mouth tube rides with the always-visible portal so the entrance has real
+        // dark depth (and no see-through) from a distance; deeper interior segments
+        // stay gated (only seen once you're inside).
+        exterior.add(tube);
 
         // ── Stalactite + stalagmite accents ──
         const stoneAccentMat = new THREE.MeshStandardMaterial({ color: caveRockCol.clone().multiplyScalar(1.35).getHex(), roughness: 1, flatShading: true });
@@ -7360,15 +7375,17 @@ export class Game {
           const layer = detailRoot.getObjectByName(layerName);
           if (layer) layer.visible = showDetail && edgeDist < (layerName === 'island-shells' ? 200 : 300);
         }
-        // Cave interiors: only visible when the camera is within ~55m of the
-        // entrance, so their dark boxy slabs never show poking through the
-        // hillside from across the map.
+        // Cave INTERIOR decor + lights (torch, crystals, stalactites, treasure)
+        // reveal within ~45m so the warm glow greets you at the mouth and the
+        // light budget isn't spent on unseen caverns across the map. The exterior
+        // rock PORTAL + its mouth tube live in a separate group that stays visible
+        // with the terrain, so the entrance always reads from across the island.
         const caveGroups = group.userData.caveGroups as THREE.Object3D[] | undefined;
         if (caveGroups) {
           for (const caveGroup of caveGroups) {
             const e = caveGroup.userData.caveEntranceWorld as { x: number; y: number; z: number };
             const cd = this.distance2D(cam.x, cam.z, e.x, e.z);
-            caveGroup.visible = showDetail && cd < 34;
+            caveGroup.visible = showDetail && cd < 45;
           }
         }
       }
