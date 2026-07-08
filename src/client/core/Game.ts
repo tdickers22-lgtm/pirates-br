@@ -3956,6 +3956,11 @@ export class Game {
         if (isMountainColor) {
           const craggy = THREE.MathUtils.smoothstep(heightNorm, 0.4, 0.8) * (1 - shoreMask);
           terrainColor.lerp(rockSlopeColor, craggy * 0.55 * (1 - grassMask * 0.4));
+          // Mottle the exposed rock (darken crevices, lift facets) on world-space
+          // noise so the massif reads as fractured stone, not flat monochrome.
+          const mwx = terrainPositions[index * 3 + 0] + island.position.x;
+          const mwz = terrainPositions[index * 3 + 2] + island.position.z;
+          terrainColor.multiplyScalar(1 + craggy * (groundFbm(mwx, mwz) - 0.5) * 0.55);
         }
         terrainColor.lerp(peakColor, peakMask * (1 - slopeRockMask));
         scratchColor.copy(beachColor).multiplyScalar(THREE.MathUtils.smoothstep(distRatio, 0.9, 1) * 0.14);

@@ -657,15 +657,31 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     * island.radius * 0.055
     * (0.45 + profile.heightProfile * 0.85)
     * detailMask;
-  // Cliff bands — ridged noise pushes sharp exposed-rock crests on taller styles.
+  // Cliff bands — ridged noise pushes sharp exposed-rock crests on taller styles
+  // (heavier on mountains, whose bare upper massif should read as fractured rock).
+  const isMountainStyle = profile.terrainStyle === 'mountain';
   const cliffBands = terrainRidge(x * 0.021, z * 0.021)
-    * island.radius * 0.034
+    * island.radius * (isMountainStyle ? 0.05 : 0.034)
     * clamp((profile.heightProfile - 0.24) * 1.4, 0, 1)
     * detailMask;
+  // Mountains fracture their upper slopes with an extra high-frequency crag octave
+  // (ridged crests + a signed fbm for spurs AND crevices), so the peak reads as
+  // craggy rock rather than a smooth cone. World-space deterministic (server↔client
+  // parity) and rides detailMask so it fades out before the shore.
+  const mtnCrag = isMountainStyle
+    ? (terrainRidge(x * 0.032 + 11.3, z * 0.032 - 7.1) * 0.6
+        + terrainFbm(x * 0.06, z * 0.06, 3) * 0.5)
+      * island.radius * 0.045
+      * clamp((profile.heightProfile - 0.18) * 1.4, 0, 1)
+      // Only fracture the inner/upper massif — fully faded by distRatio 0.6 so the
+      // gentle beach walk-in (≈0.8–1.0) keeps its sub-0.45m/step continuity.
+      * clamp(1 - distRatio / 0.6, 0, 1)
+      * detailMask
+    : 0;
   // Noise must never carve interior land below the wave-safe shelf — but keep
   // intentional underwater saddles (twin/archipelago) untouched.
   const lowestAllowed = Math.min(baseY, 5.4);
-  let detailedY = Math.max(baseY + hillDetail + cliffBands, lowestAllowed);
+  let detailedY = Math.max(baseY + hillDetail + cliffBands + mtnCrag, lowestAllowed);
 
   // Terraced "levels": soft-quantize relief above the sea shelf so hillsides
   // read as walkable tiers. Strong on plateau/rocky islands, subtle on tropical.
