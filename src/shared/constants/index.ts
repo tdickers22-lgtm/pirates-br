@@ -167,6 +167,8 @@ export const SHIP = {
   /** Rigging repair at sail station (per second while holding interact + wood) */
   SAIL_REPAIR_RATE: 0.42,
   SAIL_REPAIR_WOOD_INTERVAL: 0.85,
+  /** Seconds per hull-plank hammer swing: one plank patches one hole per swing. */
+  HULL_REPAIR_SWING_TIME: 0.9,
   CHAINSHOT_SAIL_DAMAGE: 0.38,
   /** When chainshot hits a sail, the canvas physically collapses by this fraction
    *  of the current hoist (multiplied by damage). Repairing at the sail station
@@ -205,9 +207,11 @@ export const FLOODING = {
    *  fill the empty bucket (water drops BAIL_SCOOP_VOLUME), press again to heave
    *  it over the side. Each action locks for BAIL_SCOOP_TIME, so a full cycle is
    *  ~2×BAIL_SCOOP_TIME and clears BAIL_SCOOP_VOLUME → a diligent bailer's net
-   *  rate (~0.026/s) still beats one open hole and loses to two. */
+   *  rate (~0.014/s) still beats one open hole (0.0075/s) and loses to two
+   *  (0.015/s), so a real breach demands repair, not just bailing (matches
+   *  BAIL_RATE + the code comment; the old 0.03 let one bailer out-drain two holes). */
   BAIL_SCOOP_TIME: 0.6,
-  BAIL_SCOOP_VOLUME: 0.03,
+  BAIL_SCOOP_VOLUME: 0.017,
   /** Passive bilge pump drain (× BAIL_RATE) when NOTHING is holed-below-waterline. */
   PASSIVE_PUMP_FACTOR: 0.25,
   /** Bots start bailing once standing water exceeds this. */

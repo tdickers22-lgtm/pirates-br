@@ -199,6 +199,9 @@ export interface Player {
   equippedTool: EquippableTool | null;
   /** 0..1 animation timer for the current scoop/heave action (paces the cycle). */
   bailScoopProgress: number;
+  /** 0..1 hull-plank repair swing progress while holding [X] at a breached section;
+   *  each full swing consumes a plank and patches one hole. Drives the hammer anim. */
+  hullRepairProgress: number;
   /** True once a bucketful of bilge has been scooped and is being carried; the
    *  next bail action heaves it overboard (empties the bucket). */
   bucketFilled: boolean;

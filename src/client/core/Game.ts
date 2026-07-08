@@ -7196,11 +7196,11 @@ export class Game {
       const currentInteractKind = this.resolveCurrentInteractKind();
       input.interactIntent = input.interact
         ? (currentInteractKind ?? (uiInteract ? this.lastInteractKind : null))
-        // Revive and the sail halyard are continuous holds — their intent must
-        // ride every held frame for the server-side work to run. (Bailing is now
-        // a discrete press per scoop/heave, so it only fires on the press edge.)
+        // Revive, the sail halyard and hull REPAIR are continuous holds — their
+        // intent must ride every held frame for the server-side work to run.
+        // (Bailing is a discrete press per scoop/heave, so it only fires on the edge.)
         : (input.interactHeld
-          && (currentInteractKind === 'revive' || currentInteractKind === 'sails')
+          && (currentInteractKind === 'revive' || currentInteractKind === 'sails' || currentInteractKind === 'repair')
           ? currentInteractKind
           : null);
       if (this.pendingLaunchFromUi) {
@@ -10696,8 +10696,13 @@ export class Game {
         // ride the lofted hull (heave/pitch/roll/list), +Z = outward normal.
         if (!floodShip.sinking) {
           for (const hole of this.shipRenderer.getHoleAnchors(floodShip.id)) {
-            if (!hole.active || !hole.belowWaterline) continue;
+            if (!hole.active) continue;
             hole.anchor.getWorldPosition(this.tempRenderPos);
+            // Submerged = the breach sits at/below the LIVE wave surface — computed
+            // per-hole (not a hardcoded per-section flag) so a holed, submerged bow
+            // or stern jets water just like the port/starboard breaches do.
+            const waveY = gerstnerHeight(this.tempRenderPos.x, this.tempRenderPos.z, this.ocean.getTime(), WAVE_PARAMS, storminess);
+            if (this.tempRenderPos.y > waveY + 0.2) continue;
             hole.anchor.getWorldDirection(this.tempHudVector);
             this.combatFx.emitHullLeak(
               { x: this.tempRenderPos.x, y: this.tempRenderPos.y, z: this.tempRenderPos.z },
@@ -10771,7 +10776,10 @@ export class Game {
       ['starboard', stats.width * 0.5, 0],
     ];
     for (const [section, lx, lz] of sections) {
-      if (ship.hull[section] > 0.55) continue;
+      // Spray from ANY breached section (hull < 1 == at least one hole), matching
+      // the server which floods on any submerged hole — not only once a section is
+      // half-gone. So a single fresh hole visibly weeps where it was punched.
+      if (ship.hull[section] > 0.995) continue;
       const point = this.getShipWorldPoint(ship, lx, lz, 0.16);
       this.combatFx.emitHullLeak(
         { x: point.x, y: point.y, z: point.z },
@@ -11351,6 +11359,31 @@ export class Game {
       this.localViewPocketRoot.visible = true;
       this.localViewPocketRoot.position.set(0 + sway * 0.4, -0.34 + trudge, -0.55);
       this.localViewPocketRoot.rotation.set(-0.18 + trudge * 0.5, 0 + sway * 0.18, 0);
+      return true;
+    }
+    // Hull repair: hammer a fresh PLANK over the breach while holding [X]. The
+    // down-strikes are driven by the server's hullRepairProgress (one plank/swing),
+    // so the wood-and-hammer motion the user asked for reads in first person.
+    if ((player.hullRepairProgress ?? 0) > 0.001) {
+      const kind: PocketPreviewKind = 'wood';
+      let mesh = this.localViewPocketRoot.getObjectByName('local-pocket') as THREE.Group | null;
+      if (!mesh || this.localViewPocketKind !== kind) {
+        this.localViewPocketRoot.clear();
+        mesh = makePocketPreviewMesh(kind);
+        mesh.name = 'local-pocket';
+        mesh.rotation.y = Math.PI;
+        mesh.scale.setScalar(1.3);
+        applyViewmodelMaterialSettings(mesh);
+        this.localViewPocketRoot.add(mesh);
+        this.localViewPocketKind = kind;
+      }
+      const t = this.ocean.getTime();
+      const swing = Math.sin((player.hullRepairProgress ?? 0) * Math.PI);   // eases in over the swing
+      const tap = Math.max(0, Math.sin(t * 16));                            // rapid hammer taps
+      const strike = tap * swing;
+      this.localViewPocketRoot.visible = true;
+      this.localViewPocketRoot.position.set(0.16, -0.34 - strike * 0.08, -0.5 + swing * 0.06);
+      this.localViewPocketRoot.rotation.set(-0.5 - strike * 0.55, 0.28, 0.12);
       return true;
     }
     // Only show the in-hand keg + place animation when the server would ACTUALLY

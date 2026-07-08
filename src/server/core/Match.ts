@@ -389,6 +389,7 @@ export class Match {
       hasSpyglass: true,
       equippedTool: null,
       bailScoopProgress: 0,
+      hullRepairProgress: 0,
       bucketFilled: false,
       nearBarrelId: null,
       downedUntil: 0,
@@ -1180,15 +1181,10 @@ export class Match {
       }
 
       if (ship) {
-        const repairSection = this.getRepairableHullSection(player, ship);
-        if (repairSection && this.consumeRepairPlank(player, ship)) {
-          this.physics.repairHullSection(ship, repairSection);
-          if (ship.onFire) {
-            ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
-            if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
-          }
-          return;
-        }
+        // Hull repair is now a HOLD (the hammer-swing block below patches one hole
+        // per ~0.9s plank), so a bare press at a breach is consumed here rather than
+        // falling through to another interaction.
+        if (this.getRepairableHullSection(player, ship)) return;
 
         if (player.carryingChestId && this.tryStowCarriedChest(player, ship)) return;
 
@@ -1338,6 +1334,30 @@ export class Match {
         ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + SHIP.SAIL_HOIST_RATE * SHIP.SAIL_REPAIR_HOIST_FACTOR * dt);
       } else if (!mendingSails) {
         ship.sailRepairWoodTimer = 0;
+      }
+
+      // Repair breached HULL sections by HOLDING [X] at the damage with wood: each
+      // ~0.9s hammer swing consumes one plank and patches one hole. The progress
+      // drives the first-person plank+hammer animation (and rides the wire so
+      // onlookers see the swing too). Replaces the old instant one-press patch.
+      const mendingHull = input.interactHeld
+        && input.interactIntent === 'repair'
+        && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest;
+      const hullRepairTarget = mendingHull ? this.getRepairableHullSection(player, ship) : null;
+      if (hullRepairTarget && this.getRepairPlankCount(player, ship) > 0) {
+        player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / SHIP.HULL_REPAIR_SWING_TIME);
+        if (player.hullRepairProgress >= 1) {
+          player.hullRepairProgress = 0;
+          if (this.consumeRepairPlank(player, ship)) {
+            this.physics.repairHullSection(ship, hullRepairTarget);
+            if (ship.onFire) {
+              ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
+              if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
+            }
+          }
+        }
+      } else if (player.hullRepairProgress > 0) {
+        player.hullRepairProgress = Math.max(0, player.hullRepairProgress - dt / 0.3);
       }
 
       // Helm: A/D or arrow keys steer; W/S or arrow up/down trims sail while driving.
