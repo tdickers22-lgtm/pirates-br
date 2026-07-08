@@ -3807,9 +3807,13 @@ export class Game {
     const terrainMagma: number[] = [];
     // Snow on tall NON-volcanic mountains: whiten the summit above the snow line
     // as part of the terrain itself (no floating cone). Volcanoes stay bare rock.
-    const isSnowy = island.profile.terrainStyle === 'mountain'
+    // A tall mountain reads as craggy grey STONE with grass lower down — snow is
+    // only ever a thin dusting on the very tip of a genuinely towering peak (the
+    // old low, greedy band whitewashed the whole summit into a smooth blob).
+    const isMountainColor = island.profile.terrainStyle === 'mountain';
+    const isSnowy = isMountainColor
       && !isVolcanic
-      && (island.profile.peakBoost ?? 0) > 0.65;
+      && (island.profile.peakBoost ?? 0) > 0.95;
     const snowColor = new THREE.Color(0xeef3fb);
 
     // Carve a real MOUTH into the hillside at each cave entrance so it reads as a
@@ -3830,11 +3834,14 @@ export class Game {
         const lz = dx * sn + dz * cs;      // +z outward (entrance), tunnel to -z
         const cLen = (cave as { length?: number }).length ?? 10;
         const cR = (cave as { interiorRadius?: number }).interiorRadius ?? 3;
-        const lat = 1 - THREE.MathUtils.smoothstep(Math.abs(lx), cR - 0.4, cR + 0.7);
+        const lat = 1 - THREE.MathUtils.smoothstep(Math.abs(lx), cR - 0.2, cR + 1.7);
         // Open the terrain down the WHOLE tunnel (fade only at the very back wall)
         // so the hollow is clear; the interior arched-ceiling mesh is the roof.
         const inner = THREE.MathUtils.smoothstep(lz, -cLen * 1.05, -cLen * 0.9);
-        const outer = 1 - THREE.MathUtils.smoothstep(lz, 0.8, 2.6);
+        // Recess the approach OUTWARD too (fade to lz≈4) so the ground dips into a
+        // short rocky gully leading up to the mouth — the cave sinks into the
+        // massif instead of a slot cut flush with a smooth slope.
+        const outer = 1 - THREE.MathUtils.smoothstep(lz, 1.6, 4.4);
         const mask = lat * inner * outer;
         // Carve toward the ramping floor so a descending entrance cuts down into
         // the hillside (rather than a flat slot).
@@ -3943,6 +3950,13 @@ export class Game {
         terrainColor.lerp(jungleColor, jungleMask);
         terrainColor.lerp(cliffColor, rockMask);
         terrainColor.lerp(rockSlopeColor, slopeRockMask * 0.72);
+        // Mountains bare craggy grey stone across their upper flanks (not just the
+        // steepest faces) so the peak reads as rock — the same stone the cave mouth
+        // is carved from — instead of a smooth green dome.
+        if (isMountainColor) {
+          const craggy = THREE.MathUtils.smoothstep(heightNorm, 0.4, 0.8) * (1 - shoreMask);
+          terrainColor.lerp(rockSlopeColor, craggy * 0.55 * (1 - grassMask * 0.4));
+        }
         terrainColor.lerp(peakColor, peakMask * (1 - slopeRockMask));
         scratchColor.copy(beachColor).multiplyScalar(THREE.MathUtils.smoothstep(distRatio, 0.9, 1) * 0.14);
         terrainColor.add(scratchColor);
@@ -3981,21 +3995,24 @@ export class Game {
           const c2 = Math.sin(wz * 0.13 - Math.sin(wx * 0.061) * 2.0);
           const c3 = Math.sin(wx * 0.31 - Math.sin(wz * 0.27) * 1.6);
           const c4 = Math.sin(wz * 0.29 + Math.sin(wx * 0.33) * 1.5);
-          const coarse = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c1), Math.abs(c2))), 7);
-          const fine = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c3), Math.abs(c4))), 9) * 0.6;
+          // Sharpen HARD (high exponents) so only the hairline centre of each
+          // crack glows — the flank stays dark charred rock, not a molten coat.
+          const coarse = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c1), Math.abs(c2))), 13);
+          const fine = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c3), Math.abs(c4))), 16) * 0.5;
           const vein = Math.min(1, coarse + fine);
           // Veins run across the whole upper cone — a volcano's flanks are ALL
           // slope, so don't suppress by steepness; just keep them off the beach.
           const heightGate = THREE.MathUtils.smoothstep(heightNorm, 0.14, 0.66);
           // Just the very tip glows molten (the caldera itself), painted into the
           // terrain so the crater reads as part of the peak — not a floating disc.
-          const summitGlow = THREE.MathUtils.smoothstep(heightNorm, 0.9, 0.995) * 0.8 * (1 - shoreMask);
+          const summitGlow = THREE.MathUtils.smoothstep(heightNorm, 0.9, 0.995) * 0.55 * (1 - shoreMask);
           magma = Math.min(1, vein * heightGate * (1 - shoreMask) + summitGlow);
-          // Scorch the high ground to ashen charcoal so the veins glow against it.
-          const scorch = THREE.MathUtils.smoothstep(heightNorm, 0.16, 0.7) * (1 - shoreMask);
-          terrainColor.lerp(ashCharcoal, scorch * 0.9);
+          // Scorch the high ground to ashen charcoal so the thin veins glow against
+          // dark rock (deeper char now that the flanks aren't washed molten).
+          const scorch = THREE.MathUtils.smoothstep(heightNorm, 0.12, 0.6) * (1 - shoreMask);
+          terrainColor.lerp(ashCharcoal, scorch * 0.95);
           // Darken the rock right at a vein so the emissive pops (hot rim).
-          if (magma > 0.02) terrainColor.multiplyScalar(1 - magma * 0.4);
+          if (magma > 0.02) terrainColor.multiplyScalar(1 - magma * 0.5);
         }
         terrainMagma.push(magma);
 
@@ -4005,10 +4022,10 @@ export class Game {
           // Snow keyed on ABSOLUTE height above the sea (not heightNorm, whose
           // peakEst over-estimated relief so the band never triggered) — the top
           // third of a real spire whitens, heavier on flatter shelves.
-          const snow = THREE.MathUtils.smoothstep(pointY, seaBase + 15, seaBase + 27)
+          const snow = THREE.MathUtils.smoothstep(pointY, seaBase + 34, seaBase + 50)
             * (1 - shoreMask)
-            * (1 - slopeRockMask * 0.5);
-          if (snow > 0) terrainColor.lerp(snowColor, Math.min(1, snow * 1.2));
+            * (1 - slopeRockMask * 0.65);
+          if (snow > 0) terrainColor.lerp(snowColor, Math.min(1, snow * 0.85));
         }
 
         // Per-vertex noise + a low-frequency hue drift so large faces never
@@ -4052,7 +4069,7 @@ export class Game {
             + 'if (vMagma > 0.001) {\n'
             + '  float g = vMagma * uMagmaPulse;\n'
             + '  vec3 mc = mix(vec3(0.95, 0.16, 0.02), vec3(1.0, 0.72, 0.16), clamp(vMagma * 1.4, 0.0, 1.0));\n'
-            + '  totalEmissiveRadiance += mc * g * 1.5;\n'
+            + '  totalEmissiveRadiance += mc * g * 1.05;\n'
             + '}',
           );
       };
@@ -4546,10 +4563,13 @@ export class Game {
     // ceiling, side walls, back wall, entrance frame, and a torch so the cavern reads
     // as a real explorable cave you can step into.
     if (island.caves && island.caves.length > 0) {
-      const caveStoneMat = new THREE.MeshStandardMaterial({ color: 0x3a342a, roughness: 1 });
-      // Dark faceted rock for the continuous cave tube (both sides so you never
+      // Cave stone is the MOUNTAIN'S OWN rock (its palette, darkened for depth) so
+      // the mouth reads as an opening carved into the rock face — not a foreign
+      // pile of dark boulders bolted onto a smooth hillside.
+      const caveRockCol = paletteRock.clone().multiplyScalar(0.44);
+      // Slightly deeper tone for the continuous cave tube (both sides so you never
       // see a hole through a wall from any angle).
-      const caveRockMat = new THREE.MeshStandardMaterial({ color: 0x352e26, roughness: 1, flatShading: true, side: THREE.DoubleSide });
+      const caveRockMat = new THREE.MeshStandardMaterial({ color: caveRockCol.clone().multiplyScalar(0.82).getHex(), roughness: 1, flatShading: true, side: THREE.DoubleSide });
       const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
       const flameMat = new THREE.MeshStandardMaterial({ color: 0xff8a20, emissive: 0xff5500, emissiveIntensity: 1.4, roughness: 0.4 });
 
@@ -4568,28 +4588,50 @@ export class Game {
         const ceilingLocalY = floorLocalY + ch;
         // Cave tunnel runs from local z=0 (entrance) to z=-cLen (back)
 
-        // ── Entrance frame: chunky rim boulders — only at real surface mouths
-        //    (internal junctions/branches connect, so they get no frame). ──
+        // ── The mouth is an OPENING IN THE MOUNTAIN'S OWN ROCK — not a foreign
+        //    boulder pile. A heavy overhanging BROW, two tall side JAMBS, shoulder
+        //    blocks, and a few fallen slabs frame it, all in the cliff's own stone
+        //    tone (charred on volcanoes) and slab-flattened (not round balls), so
+        //    the DARK cavity behind them reads as a cave bored into the cliff. ──
         const isMouth = cave.hasMouth ?? true;
-        const frameSegments = lowDetail ? 5 : 8;
-        for (let i = 0; isMouth && i < frameSegments; i++) {
-          const t = i / (frameSegments - 1);
-          const angle = Math.PI * (1 - t);
-          const fx = Math.cos(angle) * cR * 1.05;
-          const fy = floorLocalY + Math.sin(angle) * ch * 0.85 + 0.2;
-          const rock = new THREE.Mesh(boulderGeo, caveStoneMat);
-          rock.scale.setScalar(0.55 + rng(i * 311 + cw * 3) * 0.5);
-          rock.position.set(fx, fy, 0.18);
-          rock.rotation.set(rng(i * 313) * Math.PI, rng(i * 317) * Math.PI, rng(i * 319) * Math.PI);
-          rock.castShadow = true;
-          caveGroup.add(rock);
-        }
-        for (const side of isMouth ? [-1, 1] as const : [] as const) {
-          const base = new THREE.Mesh(boulderGeo, caveStoneMat);
-          base.scale.set(0.9, 0.7, 0.9);
-          base.position.set(side * (cR + 0.3), floorLocalY + 0.45, 0.1);
-          base.castShadow = true;
-          caveGroup.add(base);
+        if (isMouth) {
+          const cliffCol = isVolcanic
+            ? new THREE.Color(0x2b2621).lerp(paletteRock, 0.3)   // charred, matching the cone
+            : paletteRock.clone().multiplyScalar(0.8);
+          const cliffMat = new THREE.MeshStandardMaterial({ color: cliffCol.getHex(), roughness: 1, flatShading: true });
+          // Overhanging brow across the crown (flattened slab jutting outward).
+          const brow = new THREE.Mesh(boulderGeo, cliffMat);
+          brow.scale.set(cR * 1.7, cR * 0.5, cR * 1.15);
+          brow.position.set((rng(cw) - 0.5) * cR * 0.3, floorLocalY + ch * 1.02, 0.85);
+          brow.rotation.set(-0.16 + rng(7) * 0.18, rng(9) * Math.PI, (rng(11) - 0.5) * 0.3);
+          brow.castShadow = true;
+          caveGroup.add(brow);
+          // Side jambs + shoulder blocks — tall angular masses framing the opening.
+          for (const side of [-1, 1] as const) {
+            const jamb = new THREE.Mesh(boulderGeo, cliffMat);
+            jamb.scale.set(cR * 0.72, cR * 1.32, cR * 1.02);
+            jamb.position.set(side * (cR * 1.02), floorLocalY + ch * 0.44, 0.3);
+            jamb.rotation.set((rng(side * 41) - 0.5) * 0.32, rng(side * 43) * Math.PI, side * 0.15);
+            jamb.castShadow = true;
+            caveGroup.add(jamb);
+            const sh = new THREE.Mesh(boulderGeo, cliffMat);
+            sh.scale.set(cR * 0.62, cR * 0.56, cR * 0.72);
+            sh.position.set(side * (cR * 0.76), floorLocalY + ch * 0.9, 0.5);
+            sh.rotation.set(rng(side * 51) * 0.4, rng(side * 53) * Math.PI, side * 0.28);
+            sh.castShadow = true;
+            caveGroup.add(sh);
+          }
+          // Fallen slabs at the threshold — rubble spilling from the mouth.
+          for (let i = 0; i < (lowDetail ? 2 : 4); i++) {
+            const fb = new THREE.Mesh(boulderGeo, cliffMat);
+            const s = cR * (0.18 + rng(i * 71) * 0.22);
+            fb.scale.set(s, s * 0.72, s);
+            const side = i % 2 === 0 ? 1 : -1;
+            fb.position.set(side * (cR * 0.5 + rng(i * 73) * cR * 0.5), floorLocalY + 0.2, 1.0 + rng(i * 77) * 1.7);
+            fb.rotation.set(rng(i * 79) * Math.PI, rng(i * 83) * Math.PI, rng(i * 89) * Math.PI);
+            fb.castShadow = true;
+            caveGroup.add(fb);
+          }
         }
 
         // ── The cave itself: one CONTINUOUS enclosed rock tube (floor + walls +
@@ -4605,7 +4647,7 @@ export class Game {
         caveGroup.add(tube);
 
         // ── Stalactite + stalagmite accents ──
-        const stoneAccentMat = new THREE.MeshStandardMaterial({ color: 0x4a3e2e, roughness: 1, flatShading: true });
+        const stoneAccentMat = new THREE.MeshStandardMaterial({ color: caveRockCol.clone().multiplyScalar(1.35).getHex(), roughness: 1, flatShading: true });
         const accentCount = lowDetail ? 3 : 6;
         for (let s = 0; s < accentCount; s++) {
           const lz = -1 - rng(s * 401) * (cLen - 2);
