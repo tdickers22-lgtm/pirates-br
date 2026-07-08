@@ -2011,6 +2011,8 @@ export class Game {
   private readonly foliageTime = { value: 0 };
   /** Warm point light carried by the player while the LANTERN tool is equipped. */
   private readonly heldLampLight = new THREE.PointLight(0xffb262, 0, 26, 1.6);
+  /** 0→1 eased "lantern raised" state (ATTACK/LMB while holding the lantern). */
+  private lanternRaise01 = 0;
   private previousLocalState: Player['state'] | null = null;
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
@@ -7129,7 +7131,16 @@ export class Game {
     // Held lantern: warm light follows the view while the lantern tool is up,
     // with a gentle candle flicker. Lets you see inside caves and at night.
     const lampOn = this.getLocalPlayer()?.equippedTool === 'lantern';
-    this.heldLampLight.intensity = lampOn ? 2.5 + 0.25 * Math.sin(worldTime * 8.3) + 0.12 * Math.sin(worldTime * 17.0) : 0;
+    // Hold ATTACK (LMB) to RAISE the lantern — it flares much brighter and throws
+    // its light far ahead so you can flood a cave or the deck at night. Eased so
+    // the flare ramps smoothly. (Dedicated light → no lantern-budget pressure.)
+    const raiseTarget = lampOn && this.input.isFiring() ? 1 : 0;
+    this.lanternRaise01 += (raiseTarget - this.lanternRaise01) * 0.16;
+    const lr = this.lanternRaise01;
+    const lampFlicker = 1 + 0.09 * Math.sin(worldTime * 8.3) + 0.05 * Math.sin(worldTime * 17.0);
+    this.heldLampLight.intensity = lampOn ? THREE.MathUtils.lerp(2.6, 9.5, lr) * lampFlicker : 0;
+    this.heldLampLight.distance = THREE.MathUtils.lerp(24, 54, lr);
+    this.heldLampLight.position.set(0.35 - lr * 0.18, -0.1 + lr * 0.55, -0.5 - lr * 0.55);
 
     // Radial release: if the wheel just closed over a hovered slot, queue it now
     // (before hasPendingActions so the resulting input is force-sent this frame).
@@ -7153,7 +7164,10 @@ export class Game {
       }
       const input = this.input.buildInput();
       if (this.spyglassActive || equippedTool) {
-        // A raised spyglass or a held tool occupies both hands — no shooting.
+        // A raised spyglass or a held tool occupies both hands — no weapon fire.
+        // But the ATTACK button (LMB) now drives the held tool's own verb: bail
+        // with the bucket, raise the lantern. Route it via useItem, keep fire off.
+        input.useItem = !!equippedTool && !this.spyglassActive && this.input.isFiring();
         input.fire = false;
         input.aim = false;
       }
@@ -11486,14 +11500,16 @@ export class Game {
     const biteArc = Math.sin(eatProgress * Math.PI);
     const toMouth = kind === 'wood' ? 0 : THREE.MathUtils.smoothstep(eatProgress, 0.1, 0.72);
 
+    // Lift the lantern up into view when raised (ATTACK held), matching the light flare.
+    const lanternLift = kind === 'lantern' ? this.lanternRaise01 : 0;
     this.localViewPocketRoot.visible = true;
     this.localViewPocketRoot.position.set(
-      -0.34 + sway * 0.5 + toMouth * 0.22,
-      -0.38 + bob + toMouth * 0.3 + biteArc * 0.035,
-      -0.52 + toMouth * 0.22,
+      -0.34 + sway * 0.5 + toMouth * 0.22 - lanternLift * 0.14,
+      -0.38 + bob + toMouth * 0.3 + biteArc * 0.035 + lanternLift * 0.44,
+      -0.52 + toMouth * 0.22 + lanternLift * 0.17,
     );
     this.localViewPocketRoot.rotation.set(
-      -0.12 + bob * 1.2 - toMouth * 0.46,
+      -0.12 + bob * 1.2 - toMouth * 0.46 - lanternLift * 0.38,
       0.22 + sway * 0.4 + toMouth * 0.22,
       0.08 + biteArc * 0.12,
     );
@@ -11572,6 +11588,9 @@ export class Game {
     const canFire = activeWeapon.ammo > 0 && !activeWeapon.reloading;
     if (firingNow && canFire && !this.prevLocalFiring) {
       this.triggerMuzzleFlash(weaponId);
+      // Crack the shot locally the instant the trigger drops (sniper included),
+      // instead of waiting for the server tracer to replicate ~1 RTT later.
+      this.combatFx.playLocalShot(weaponId, this.renderer.camera.position);
       this.localViewWeaponKick = Math.min(1.35, this.localViewWeaponKick + 0.55);
     }
     this.prevLocalFiring = firingNow;

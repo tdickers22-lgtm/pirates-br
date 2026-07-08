@@ -979,6 +979,7 @@ export class Match {
       jump: !!input.jump,
       jumpPressed: !!input.jumpPressed,
       fire: !!input.fire,
+      useItem: !!input.useItem,
       aim: !!input.aim,
       interact: !!input.interact,
       interactHeld: !!input.interactHeld,
@@ -1288,8 +1289,7 @@ export class Match {
       // side (empties the bucket). Each action animates over BAIL_SCOOP_TIME so
       // you can't spam; the cycle alternates fill/heave.
       const bailPress =
-        input.interact
-        && input.interactIntent === 'bail'
+        ((input.interact && input.interactIntent === 'bail') || input.useItem)
         && !player.atCannon
         && !player.atHelm
         && !player.atSails

@@ -150,6 +150,8 @@ export class InputManager {
       jump:     this.keys.has('Space'),
       jumpPressed: this.jumpPressed,
       fire:     !this.vHeld && this.lockedOrForced && this.mouseButtons.has(0),
+      // Set by Game.ts when a use-tool is held (routes LMB to the tool's verb).
+      useItem:  false,
       aim:      aiming,
       interact: this.interactPressed,
       interactHeld: this.keys.has('KeyX'),

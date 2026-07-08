@@ -802,6 +802,9 @@ export interface PlayerInput {
   jump: boolean;
   jumpPressed: boolean;
   fire: boolean;
+  /** ATTACK button (LMB) while a use-tool is held: bail with the bucket, etc.
+   *  (weapon fire is suppressed for held tools, so this carries the tool verb). */
+  useItem: boolean;
   aim: boolean;
   interact: boolean;
   /** True while interact key is held (digging, etc.) */

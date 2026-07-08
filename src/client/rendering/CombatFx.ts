@@ -772,8 +772,19 @@ export class CombatFx {
     this.lights?.update(dt);
   }
 
+  /** Fire a firearm's shot sound on the LOCAL predicted press edge (Game.ts), so
+   *  your own gun — the sniper especially — cracks the instant you pull the trigger
+   *  instead of a full network round-trip later when the tracer replicates back.
+   *  The tracer-driven sound for local-owned bullets is suppressed in emitLaunch. */
+  playLocalShot(weaponId: WeaponId, cameraPos: THREE.Vector3) {
+    this.playShotSound('bullet', { x: cameraPos.x, y: cameraPos.y, z: cameraPos.z }, cameraPos, true, weaponId);
+  }
+
   emitLaunch(projectile: Projectile, cameraPos: THREE.Vector3, isLocalSource: boolean) {
-    this.playShotSound(projectile.type, projectile.position, cameraPos, isLocalSource, projectile.weaponId);
+    // Local small-arms already cracked on the predicted press edge — don't double it.
+    if (!(isLocalSource && projectile.type === 'bullet')) {
+      this.playShotSound(projectile.type, projectile.position, cameraPos, isLocalSource, projectile.weaponId);
+    }
     if (!this.flame || !this.smoke || !this.sparks || !this.droplets || !this.lights) return;
 
     const position = projectile.position;
@@ -1177,12 +1188,14 @@ export class CombatFx {
       this.playNoise(now, 0.55, 240, 0.95, volume * 0.9, 'lowpass');
       this.playTone(now, 70, 46, 0.46, volume * 0.58, 'sawtooth');
     } else if (weaponId === 'eye_of_reach') {
-      // Long rifle crack: bright muzzle snap, wood/steel body, and a low echo tail.
-      this.playNoise(now, 0.06, 5200, 1.4, volume * 0.95, 'highpass');
-      this.playTone(now, 1160, 620, 0.09, volume * 0.34, 'square');
-      this.playTone(now + 0.012, 92, 56, 0.34, volume * 0.42, 'triangle');
-      this.playNoise(now + 0.08, 0.42, 310, 0.72, volume * 0.34, 'lowpass');
-      this.playTone(now + 0.16, 260, 150, 0.22, volume * 0.12, 'sine');
+      // Long rifle crack: a hard bright muzzle SNAP, a punchy body thump, and a
+      // low rolling echo tail so the sniper reads as a heavy report, not a pop.
+      this.playNoise(now, 0.05, 6200, 1.6, volume * 1.15, 'highpass');
+      this.playTone(now, 1320, 560, 0.08, volume * 0.42, 'square');
+      this.playTone(now + 0.008, 150, 60, 0.16, volume * 0.5, 'triangle');
+      this.playTone(now + 0.014, 78, 48, 0.4, volume * 0.5, 'triangle');
+      this.playNoise(now + 0.07, 0.5, 300, 0.78, volume * 0.4, 'lowpass');
+      this.playTone(now + 0.16, 240, 130, 0.26, volume * 0.14, 'sine');
     } else if (weaponId === 'blunderbuss') {
       this.playNoise(now, 0.11, 2800, 1.1, volume * 0.72, 'bandpass');
       this.playNoise(now + 0.025, 0.22, 430, 0.7, volume * 0.55, 'lowpass');
