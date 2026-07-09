@@ -699,6 +699,8 @@ export type MsgType =
   | 'match_ended'
   | 'ping'
   | 'pong'
+  // dev-only (honoured solo): bots ignore this human + their ship
+  | 'dev_bot_peace'
   // lobby-scoped messages (server orchestration)
   | 'welcome'
   | 'set_name'

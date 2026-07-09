@@ -39,8 +39,8 @@ const st = [x - fwd[0]*22 + rightv[0]*8, 9, z - fwd[1]*22 + rightv[1]*8];
 await freeLook(st, [x, 5, z]); await wait(600); await shot('stern');
 // on-deck (above midship looking to bow)
 await freeLook([x, 9, z], [x + fwd[0]*14, 4.5, z + fwd[1]*14]); await wait(600); await shot('deck');
-// helm close-up (behind + above the stern, looking forward down onto the quarterdeck/wheel)
-await freeLook([x - fwd[0]*9 + rightv[0]*3, 8.2, z - fwd[1]*9 + rightv[1]*3], [x - fwd[0]*3, 5.4, z - fwd[1]*3]); await wait(600); await shot('helm');
+// helm close-up (low + side-on off the stern quarter, at ~deck level, so the RAISED quarterdeck dais reads)
+await freeLook([x - fwd[0]*6 + rightv[0]*9, 5.6, z - fwd[1]*6 + rightv[1]*9], [x - fwd[0]*7, 5.0, z - fwd[1]*7]); await wait(600); await shot('helm');
 // bow close-up (ahead + to the side, low — sees the jib on the forestay + bowsprit)
 await freeLook([x + fwd[0]*15 + rightv[0]*7, 6.5, z + fwd[1]*15 + rightv[1]*7], [x + fwd[0]*7, 5, z + fwd[1]*7]); await wait(600); await shot('bow');
 await browser.close();

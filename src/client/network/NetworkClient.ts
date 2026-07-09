@@ -160,6 +160,8 @@ export class NetworkClient {
   sendInput(input: PlayerInput) { this.send({ type: 'player_input', ts: Date.now(), payload: input }); }
   sendTradeAction(action: TradeActionPayload) { this.send({ type: 'trade_action', ts: Date.now(), payload: action }); }
   sendPing() { this.send({ type: 'ping', ts: Date.now(), payload: { t: Date.now() } }); }
+  /** Dev-only (honoured solo): ask the server to make bots ignore you + your ship. */
+  sendDevBotPeace(enabled: boolean) { this.send({ type: 'dev_bot_peace', ts: Date.now(), payload: { enabled } }); }
 
   // ─── Lobby-scoped sends ──────────────────────────────────────
   setName(name: string) { this.send({ type: 'set_name', ts: Date.now(), payload: { name } }); }

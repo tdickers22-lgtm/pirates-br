@@ -191,6 +191,8 @@ export class Match {
   private islands = new IslandSystem();
   private trading = new TradingSystem();
   private bots = new BotSystem();
+  /** Dev-only (solo): when true, bots ignore human players + their ships. */
+  private botPeace = false;
   private mapGen = new MapGenerator();
   private skeletonHomes: Map<string, string> = new Map();
   private skeletonWaveTimers: Map<string, number> = new Map();
@@ -696,6 +698,16 @@ export class Match {
       case 'ping':
         this.send(client.ws, { type: 'pong', ts: Date.now(), payload: msg.payload });
         break;
+      case 'dev_bot_peace': {
+        // Dev/testing convenience — only honoured when a single human is in the
+        // match (solo), so it can't be abused to disable bot aggression in a real
+        // multiplayer game.
+        if (this.clients.size <= 1) {
+          this.botPeace = !!(msg.payload as { enabled?: boolean } | null)?.enabled;
+          console.log(`[Match ${this.id}] dev bot-peace ${this.botPeace ? 'ON' : 'OFF'}`);
+        }
+        break;
+      }
     }
   }
 
@@ -801,6 +813,22 @@ export class Match {
 
     // Ship rotation integration + rudder decay for unhelmed ships lives in
     // PhysicsSystem.updateShips so external impulses turn every hull.
+
+    // Dev-only bot-peace (solo testing): bots ignore the human + their ship as
+    // targets while still fighting each other. Empty sets = normal aggression.
+    if (this.botPeace) {
+      const peaceShips = new Set<string>();
+      const peacePlayers = new Set<string>();
+      for (const p of this.state.players) {
+        if (p.isBot) continue;
+        peacePlayers.add(p.id);
+        if (p.shipId) peaceShips.add(p.shipId);
+        if (p.onShipId) peaceShips.add(p.onShipId);
+      }
+      this.bots.setPeace(peaceShips, peacePlayers);
+    } else {
+      this.bots.setPeace([], []);
+    }
 
     // Update bots
     this.bots.update(

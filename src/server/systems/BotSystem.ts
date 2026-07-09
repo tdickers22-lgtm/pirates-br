@@ -48,6 +48,17 @@ const FIREARM_AIM_HEIGHT = 1.4;
 export class BotSystem {
   private bots: Map<string, BotState> = new Map();
   private pendingFirearmFires: BotFirearmShot[] = [];
+  /** Dev-only "leave me alone" (solo testing): ships/players bots must not target
+   *  or shoot at. Bots still fight each other. Set by Match each tick. */
+  private peaceShipIds: Set<string> = new Set();
+  private peacePlayerIds: Set<string> = new Set();
+
+  /** Match calls this each tick with the human's ship + player id when bot-peace is
+   *  on (empty sets otherwise), so bots ignore that ship/player as a target. */
+  setPeace(shipIds: Iterable<string>, playerIds: Iterable<string>) {
+    this.peaceShipIds = new Set(shipIds);
+    this.peacePlayerIds = new Set(playerIds);
+  }
 
   registerBot(player: Player, ship: Ship, difficulty: 'easy' | 'medium' | 'hard' = 'medium') {
     this.bots.set(player.id, {
@@ -125,7 +136,7 @@ export class BotSystem {
     // Mid-engagement re-target check: if the current target is dead/out of range, drop it.
     if (bot.behavior === 'engage' && bot.targetShipId) {
       const tgt = ships.find(s => s.id === bot.targetShipId);
-      if (!tgt || !tgt.alive || tgt.sinking) {
+      if (!tgt || !tgt.alive || tgt.sinking || this.peaceShipIds.has(bot.targetShipId)) {
         bot.targetShipId = null;
         bot.stateTimer = 0; // re-evaluate now
       }
@@ -144,6 +155,8 @@ export class BotSystem {
       let nearestScore = Infinity;
       for (const other of ships) {
         if (other.id === ship.id || !other.alive || other.sinking) continue;
+        if (this.peaceShipIds.has(other.id)) continue; // dev bot-peace: never engage this ship
+
         const d = dist2D(ship.position.x, ship.position.z, other.position.x, other.position.z);
         // Score: distance, but humans get only a modest discount so bots contest players
         // without feeling like they are hard-locked from across the map.
@@ -369,6 +382,7 @@ export class BotSystem {
     for (const other of players) {
       if (other.id === player.id) continue;
       if (other.state === 'eliminated' || other.state === 'respawning') continue;
+      if (this.peacePlayerIds.has(other.id)) continue; // dev bot-peace: never shoot this player
       // Don't shoot allies on the same ship.
       if (other.shipId === player.shipId && other.isBot) continue;
       const dx = other.position.x - player.position.x;

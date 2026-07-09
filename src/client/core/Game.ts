@@ -2856,6 +2856,10 @@ export class Game {
       this.localShipId = shipId;
       this.previousHealth = PLAYER.MAX_HEALTH;
       this.applySnapshot(snapshot);
+      // Dev: ?peace makes solo bots leave you (and your ship) alone from the start.
+      if (new URLSearchParams(window.location.search).has('peace')) {
+        this.network.sendDevBotPeace(true);
+      }
       this.setLoading(100, 'Battle underway');
       window.setTimeout(() => {
         this.ui.loadingScreen.style.opacity = '0';
@@ -8921,6 +8925,13 @@ export class Game {
    *  audit lighting at a fixed time; pass null to resume the live match clock. */
   setDayNightOverride(seconds: number | null) {
     this.dayNightOverrideSec = seconds;
+  }
+
+  /** Dev hook (honoured solo): make bots ignore YOU and your ship (they keep
+   *  fighting each other). Call window.__piratesBR.setBotPeace(true) to test in
+   *  peace, false to restore aggression. Also auto-enabled by the ?peace URL param. */
+  setBotPeace(enabled = true) {
+    this.network.sendDevBotPeace(enabled);
   }
 
   /** Dev/tour helper: world ground height at (x, z) via the shared heightfield,
