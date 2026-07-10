@@ -1447,12 +1447,15 @@ export class ShipRenderer {
     }
 
     // Painted team band across the transom (side stripe lives in the hull
-    // texture, so it follows the sheer curve exactly).
+    // texture, so it follows the sheer curve exactly). Seat it ON the raked
+    // stern surface at its height — a fixed -0.505L offset hovered it ~0.15m
+    // aft of the counter (visible as a detached bar from above).
+    const bowStation = profile.stations[profile.stations.length - 1];
     const transomBand = new THREE.Mesh(
       new THREE.BoxGeometry(W * 0.6, H * 0.09, 0.07),
       teamAccentMat,
     );
-    transomBand.position.set(0, H * 0.82, -L * 0.505 - 0.1);
+    transomBand.position.set(0, H * 0.82, stationSurfaceAt(sternStation, H * 0.82).z - 0.045);
     group.add(transomBand);
 
     // Hull-reinforcement upgrade: actual bolted armor belts, ribs, and bow/stern plates.
@@ -1494,12 +1497,15 @@ export class ShipRenderer {
         rib.castShadow = true;
         armor.add(rib);
       }
+      // Bow/stern plates hug the raked stem/counter at their own height — the
+      // old fixed ±0.535/0.565·L offsets floated them 0.8-1.9m off the hull in
+      // open air (the loft's stern surface at this height is only ~0.48L aft).
       const bowPlate = new THREE.Mesh(new THREE.BoxGeometry(W * 0.48, H * 0.34, 0.08), armorMat);
-      bowPlate.position.set(0, H * 0.52, L * 0.535);
+      bowPlate.position.set(0, H * 0.52, stationSurfaceAt(bowStation, H * 0.52).z + 0.05);
       bowPlate.castShadow = true;
       armor.add(bowPlate);
       const sternPlate = new THREE.Mesh(new THREE.BoxGeometry(W * 0.82, H * 0.28, 0.08), armorMat);
-      sternPlate.position.set(0, H * 0.52, -L * 0.565);
+      sternPlate.position.set(0, H * 0.52, stationSurfaceAt(sternStation, H * 0.52).z - 0.05);
       sternPlate.castShadow = true;
       armor.add(sternPlate);
 
