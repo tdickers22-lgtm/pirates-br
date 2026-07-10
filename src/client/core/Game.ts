@@ -935,7 +935,14 @@ function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, ceilY: n
       let y = vc + Math.sin(a) * vh * rMul * n;
       const sa = Math.sin(a);
       if (sa < -0.28) { const k = (-sa - 0.28) / 0.72; y = y * (1 - k) + (floorJ + 0.05) * k; } // flat floor
-      positions.push(x, Math.max(y, floorJ - 0.02), z);
+      else if (sa < 0.45) {
+        // Wall SKIRT: tuck the lower side walls ~1.2m below the floor plane so
+        // no light leaks under the wall edge where the carved mouth trench sits
+        // slightly lower/wider than the tube (white slivers at the wall base).
+        const k = 1 - (sa + 0.28) / 0.73;
+        y -= k * 1.25;
+      }
+      positions.push(x, sa < -0.28 ? Math.max(y, floorJ - 0.02) : y, z);
       idxs.push(vi++);
     }
     ringIdx.push(idxs);
@@ -981,7 +988,10 @@ function makeNameplateSprite(name: string): THREE.Sprite {
   const tex = new THREE.CanvasTexture(canvas);
   tex.minFilter = THREE.LinearFilter;
   tex.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  // depthTest ON: names must not read through mountains/ships (wallhack feel —
+  // caves made it obvious, every plate on the island glowed through the rock).
+  // depthWrite stays off so the transparent quad never punches holes in FX.
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, transparent: true }));
   sprite.scale.set(3.4, 0.85, 1);
   sprite.position.y = 2.35;
   sprite.name = 'nameplate';
@@ -3795,6 +3805,11 @@ export class Game {
         point.z + island.position.z,
         margin,
       )
+      // Never decorate the cave-mouth trench: the analytic surface these points
+      // sample from gets carved open there, leaving tufts/outcrops hovering
+      // mid-air inside the opening. (carveCaveMouth is defined below; every
+      // isSolidDecorPoint call happens well after initialization.)
+      && carveCaveMouth(point.x + island.position.x, point.z + island.position.z, point.y).carved < 0.3
     );
 
     createLayer({
@@ -3855,12 +3870,18 @@ export class Game {
     const snowColor = new THREE.Color(0xeef3fb);
 
     // Carve a real MOUTH into the hillside at each cave entrance so it reads as a
-    // gaping hole you walk into — not a shallow dip in a solid hill. Only the
-    // front of the tunnel is opened; the deep tunnel keeps its natural rock roof
-    // (the interior mesh encloses it). Cave-local frame matches caveGroup.rotation.
-    const carveCaveMouth = (worldX: number, worldZ: number, y: number): number => {
-      if (!island.caves) return y;
+    // gaping hole you walk into — not a shallow dip in a solid hill. The trench
+    // stays open-air ONLY while the natural hillside can't yet roof the tube
+    // (clearance-keyed, not a fixed z-fraction): the old whole-length cut, sized
+    // for 1.9m ramps, left 10m+ grass-colored cliff faces knifing through the
+    // passage once entrances started plunging to the waterline — walking in put
+    // the camera inside terrain backfaces. Past the throat the tunnel keeps its
+    // natural rock roof and the interior arched tube encloses the passage.
+    // Cave-local frame matches caveGroup.rotation.
+    const carveCaveMouth = (worldX: number, worldZ: number, y: number): { y: number; carved: number } => {
+      if (!island.caves) return { y, carved: 0 };
       let out = y;
+      let carved = 0;
       for (const cave of island.caves) {
         if (!cave.hasMouth) continue; // only real surface mouths open the hillside
         if (out <= cave.floorY) continue;
@@ -3872,31 +3893,53 @@ export class Game {
         const lz = dx * sn + dz * cs;      // +z outward (entrance), tunnel to -z
         const cLen = (cave as { length?: number }).length ?? 10;
         const cR = (cave as { interiorRadius?: number }).interiorRadius ?? 3;
-        const lat = 1 - THREE.MathUtils.smoothstep(Math.abs(lx), cR - 0.2, cR + 1.7);
-        // Open the terrain down the WHOLE tunnel (fade only at the very back wall)
-        // so the hollow is clear; the interior arched-ceiling mesh is the roof.
-        const inner = THREE.MathUtils.smoothstep(lz, -cLen * 1.05, -cLen * 0.9);
-        // Recess the approach OUTWARD too (fade to lz≈4) so the ground dips into a
-        // short rocky gully leading up to the mouth — the cave sinks into the
-        // massif instead of a slot cut flush with a smooth slope.
-        const outer = 1 - THREE.MathUtils.smoothstep(lz, 1.6, 4.4);
-        const mask = lat * inner * outer;
-        // Carve toward the ramping floor so a descending entrance cuts down into
-        // the hillside (rather than a flat slot).
         const fEnd = (cave as { floorYEnd?: number }).floorYEnd ?? cave.floorY;
         const along = cLen > 0 ? Math.min(1, Math.max(0, -lz / cLen)) : 0;
         const floorAt = cave.floorY + (fEnd - cave.floorY) * along;
-        if (mask > 0 && out > floorAt) out += (floorAt - out) * mask;
+        const ceilAt = floorAt + cave.height;
+        // Any terrain surface skimming the passage volume gets flagged so the
+        // color pass paints it CAVE ROCK and decor skips it — near the mouth
+        // the natural hillside legitimately crosses the arch's upper region
+        // (the tube pokes out of the hill until the roof builds), and those
+        // shelves must not read as floating grass.
+        const inStrip = Math.abs(lx) < cR * 1.6 && lz < 1.2 && lz > -cLen - 1;
+        if (inStrip && out < ceilAt + 1.2) carved = Math.max(carved, 0.35);
+        // Gully walls fade OUTSIDE the tube's wobbliest wall radius (~1.5·cR) so
+        // partially-carved vertices land on the open-air cut sides, never inside.
+        const latK = THREE.MathUtils.smoothstep(Math.abs(lx), cR * 1.5, cR * 1.5 + 1.9);
+        // Approach gully outward of the mouth plane (fades by lz≈4.4).
+        const outerK = THREE.MathUtils.smoothstep(lz, 1.6, 4.4);
+        // DOORWAY-ONLY cut: open the sky above just the first ~2.6m. The
+        // carved→natural transition wall this creates is short (natural ground
+        // sits barely above the arch this close to the mouth), lands above head
+        // height, and is wrapped by the rock collar — it reads as the doorway's
+        // inner lintel. The cut MUST be a smooth function of (lz, lx) only:
+        // an earlier per-vertex "already roofed → skip" gate made neighbouring
+        // vertices diverge by metres and sliced diagonal faces across the
+        // passage (the "green walls inside the cave" screenshot).
+        const depthCapK = THREE.MathUtils.smoothstep(-lz, 1.4, 2.6);
+        const keep = Math.max(latK, outerK, depthCapK);
+        const target = floorAt + (out - floorAt) * keep;
+        if (target < out) {
+          carved = Math.max(carved, out - target);
+          out = target;
+        }
       }
-      return out;
+      return { y: out, carved };
     };
 
+    // Per-vertex carve depth (parallel to terrainPositions) — drives the cut
+    // faces' ROCK recolor in the color pass below (they'd read as floating
+    // grass-green slabs otherwise) and lets decor placement skip the trench.
+    const mouthCarveDepth: number[] = [];
     for (let ring = 0; ring <= totalRings; ring++) {
       const distRatio = ringDistRatio(ring);
       for (let segment = 0; segment <= angularSegments; segment++) {
         const angle = (segment / angularSegments) * Math.PI * 2;
         const point = surfacePoint(distRatio, angle, 0.02);
-        point.y = carveCaveMouth(point.x + island.position.x, point.z + island.position.z, point.y);
+        const carve = carveCaveMouth(point.x + island.position.x, point.z + island.position.z, point.y);
+        point.y = carve.y;
+        mouthCarveDepth.push(carve.carved);
         terrainPositions.push(point.x, point.y, point.z);
       }
     }
@@ -4001,6 +4044,14 @@ export class Game {
           terrainColor.multiplyScalar(1 + craggy * (groundFbm(mwx, mwz) - 0.5) * 0.55);
         }
         terrainColor.lerp(peakColor, peakMask * (1 - slopeRockMask));
+        // Cave-mouth cut faces (and passage-skimming shelves, sentinel 0.35)
+        // are freshly exposed ROCK, not turf: without this the trench and the
+        // shelves crossing the arch keep their grass/sand height-band colors
+        // and the opening reads as green slabs floating in the hillside.
+        const cutDepth = mouthCarveDepth[index] ?? 0;
+        if (cutDepth > 0.3) {
+          terrainColor.lerp(rockSlopeColor, Math.max(0.78, Math.min(1, cutDepth / 1.6)) * 0.9);
+        }
         scratchColor.copy(beachColor).multiplyScalar(THREE.MathUtils.smoothstep(distRatio, 0.9, 1) * 0.14);
         terrainColor.add(scratchColor);
 
@@ -4232,6 +4283,9 @@ export class Game {
         if (sample.y > seaBaseForGrass + peakEst * 0.95) continue;
         const ahead = surfacePoint(dRatio + 0.015, angle, 0);
         if (Math.abs(ahead.y - sample.y) > 0.9) continue;
+        // No tufts hovering in the cave-mouth trench (the mesh is carved open
+        // below this analytic sample).
+        if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
         // Place a small CLUMP of blades per seed so grass reads as tufts and
         // masses (carpeting the interior), not isolated specks (audit P1).
         const clump = 2 + Math.floor(rng(i * 3 + 1) * 3); // 2-4 blades
@@ -4286,6 +4340,7 @@ export class Game {
         const dRatio = 0.05 + rng(seed * 43 + 3) * 0.6;
         const sample = surfacePoint(dRatio, angle, 0);
         if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + peakEst * 0.85) continue;
+        if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
         const clump = 2 + Math.floor(rng(seed * 71) * 2);
         for (let c = 0; c < clump && fernsPlaced < fernCount; c++) {
           const i = seed * 7 + c;
@@ -4718,8 +4773,16 @@ export class Game {
         //    floor/wall/ceiling slabs that left black gaps. Dead-ends get a
         //    fan-capped back; mouths/junctions stay open so segments connect. ──
         const floorEndLocalY = ((cave as { floorYEnd?: number }).floorYEnd ?? cave.floorY) - cave.position.y;
+        // Overshoot the tube 1.2m past its nominal end so its open rim lands
+        // INSIDE the connecting segment's walls: butt-joined open rims meeting
+        // at an angle left wedge gaps at every junction (bright slits of sky
+        // where a sightline threaded between the two rims). The floor ramp
+        // continues at the same gradient — the overshoot buries harmlessly
+        // under the neighbour's floor.
+        const tubeLen = cLen + 1.2;
+        const tubeFloorEnd = cLen > 0 ? floorEndLocalY + (floorEndLocalY - floorLocalY) * (1.2 / cLen) : floorEndLocalY;
         const tube = new THREE.Mesh(
-          makeCaveTubeGeometry(cR, cLen, floorLocalY, ceilingLocalY, cw * 7.3 + cLen * 2.1 + cR, cave.hasBackWall ?? true, floorEndLocalY),
+          makeCaveTubeGeometry(cR, tubeLen, floorLocalY, ceilingLocalY, cw * 7.3 + cLen * 2.1 + cR, cave.hasBackWall ?? true, tubeFloorEnd),
           caveRockMat,
         );
         tube.receiveShadow = true;
@@ -4727,6 +4790,26 @@ export class Game {
         // dark depth (and no see-through) from a distance; deeper interior segments
         // stay gated (only seen once you're inside).
         exterior.add(tube);
+
+        // ── Throat COLLAR (mouths only): a short, wider rock tube wrapping the
+        //    first ~7m of the passage. The terrain's carved→natural transition
+        //    face lands inside it (unavoidable at terrain-mesh resolution — it
+        //    used to slice visibly across the tunnel), and it seals the sliver
+        //    gaps between the arch and the trench walls. DoubleSide: its outer
+        //    face is the portal's rocky throat seen from the approach. ──
+        if (isMouth) {
+          const collarLen = Math.min(7.0, cLen * 0.95);
+          const collarFloorEnd = floorLocalY + (floorEndLocalY - floorLocalY) * (collarLen / Math.max(1, cLen));
+          const collarMat = new THREE.MeshStandardMaterial({
+            color: caveRockMat.color.getHex(), roughness: 1, flatShading: true, side: THREE.DoubleSide,
+          });
+          const collar = new THREE.Mesh(
+            makeCaveTubeGeometry(cR * 1.26, collarLen, floorLocalY - 0.02, floorLocalY + ch * 1.08, cw * 3.1 + 17, false, collarFloorEnd - 0.02),
+            collarMat,
+          );
+          collar.receiveShadow = true;
+          exterior.add(collar);
+        }
 
         // ── Stalactite + stalagmite accents ──
         const stoneAccentMat = new THREE.MeshStandardMaterial({ color: caveRockCol.clone().multiplyScalar(1.35).getHex(), roughness: 1, flatShading: true });
@@ -11864,15 +11947,19 @@ export class Game {
               -0.18 - strafeTilt * 0.8,
             );
           } else {
+            // Charge wind-up stays LOW-RIGHT and pulls AWAY from the lens: the
+            // old pose (x→0.15, pitch −0.6) tipped the grip straight at the
+            // camera, parking the brass guard ring huge in screen center for
+            // the whole hold (user-flagged).
             this.localViewWeaponRoot.position.set(
-              0.31 - charge * 0.16 + slashArc * 0.1 + sway * 0.24 + travelSwing * 0.42,
-              -0.3 + charge * 0.1 + chargeReadyPulse + bob * 0.75 - slashArc * 0.08,
-              -0.58 - charge * 0.22 + lungePush * 0.18,
+              0.31 - charge * 0.07 + slashArc * 0.1 + sway * 0.24 + travelSwing * 0.42,
+              -0.3 - charge * 0.03 + chargeReadyPulse + bob * 0.75 - slashArc * 0.08,
+              -0.58 - charge * 0.34 + lungePush * 0.18,
             );
             this.localViewWeaponRoot.rotation.set(
-              -0.02 - charge * 0.58 + slashArc * 0.54,
-              -0.28 - charge * 0.22 - slashArc * 0.2,
-              -0.82 - charge * 0.62 - strafeTilt * 1.4 - slashArc * 1.02,
+              -0.02 - charge * 0.34 + slashArc * 0.54,
+              -0.28 - charge * 0.3 - slashArc * 0.2,
+              -0.82 - charge * 0.52 - strafeTilt * 1.4 - slashArc * 1.02,
             );
           }
         }
