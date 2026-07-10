@@ -522,7 +522,7 @@ function makeBarrel(
 
   // Barrel body — rounded cylinder approximated with tapered ends
   const body = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.38, 0.38, 0.72, 10),
+    new THREE.CylinderGeometry(0.38, 0.38, 0.72, 16),
     woodMat,
   );
   body.castShadow = true;
@@ -542,7 +542,7 @@ function makeBarrel(
 
   // Top lid with colour indicating contents
   const lid = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.35, 0.35, 0.06, 10),
+    new THREE.CylinderGeometry(0.35, 0.35, 0.06, 16),
     lidMat,
   );
   lid.position.y = 0.39;
@@ -551,7 +551,7 @@ function makeBarrel(
 
   // Bottom cap
   const cap = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.35, 0.35, 0.06, 10),
+    new THREE.CylinderGeometry(0.35, 0.35, 0.06, 16),
     woodMat,
   );
   cap.position.y = -0.39;
@@ -589,9 +589,9 @@ function makeFigurehead(
     // Leaping fish arcing up and forward off the stem.
     add(new THREE.SphereGeometry(0.16, 10, 8), goldMat, 0, 0.02, 0.12, -0.55, 0, 0, 0.72, 0.95, 1.9);
     // Tail fluke (accent), swept down-aft
-    add(new THREE.ConeGeometry(0.19, 0.36, 4), accentMat, 0, -0.16, -0.16, 2.5, Math.PI * 0.25, 0, 1, 1, 0.22);
+    add(new THREE.ConeGeometry(0.19, 0.36, 8), accentMat, 0, -0.16, -0.16, 2.5, Math.PI * 0.25, 0, 1, 1, 0.22);
     // Dorsal fin (accent)
-    add(new THREE.ConeGeometry(0.1, 0.22, 3), accentMat, 0, 0.2, 0.02, -0.3, 0, 0, 1, 1, 0.2);
+    add(new THREE.ConeGeometry(0.1, 0.22, 8), accentMat, 0, 0.2, 0.02, -0.3, 0, 0, 1, 1, 0.2);
     // Eye
     add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, 0.09, 0.11, 0.28);
     add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, -0.09, 0.11, 0.28);
@@ -602,18 +602,18 @@ function makeFigurehead(
     // Hair (accent)
     add(new THREE.SphereGeometry(0.11, 8, 6), accentMat, 0, 0.5, 0.06, 0, 0, 0, 1, 0.7, 0.9);
     // Curled fish tail (accent)
-    add(new THREE.ConeGeometry(0.14, 0.5, 6), accentMat, 0, -0.14, -0.02, 0.5, 0, 0, 0.5, 1, 1);
-    add(new THREE.ConeGeometry(0.2, 0.24, 4), accentMat, 0, -0.36, -0.16, 1.9, Math.PI * 0.25, 0, 1, 1, 0.22);
+    add(new THREE.ConeGeometry(0.14, 0.5, 8), accentMat, 0, -0.14, -0.02, 0.5, 0, 0, 0.5, 1, 1);
+    add(new THREE.ConeGeometry(0.2, 0.24, 8), accentMat, 0, -0.36, -0.16, 1.9, Math.PI * 0.25, 0, 1, 1, 0.22);
   } else {
     // Galleon: fierce sea-dragon head thrusting forward off the beakhead.
     add(new THREE.CylinderGeometry(0.11, 0.15, 0.44, 8), goldMat, 0, 0.05, -0.04, Math.PI * 0.5 - 0.5, 0, 0); // neck
     add(new THREE.BoxGeometry(0.2, 0.2, 0.42), goldMat, 0, 0.22, 0.2, -0.35, 0, 0); // skull
-    add(new THREE.ConeGeometry(0.11, 0.34, 5), goldMat, 0, 0.16, 0.42, Math.PI * 0.5 - 0.2, 0, 0); // snout
+    add(new THREE.ConeGeometry(0.11, 0.34, 8), goldMat, 0, 0.16, 0.42, Math.PI * 0.5 - 0.2, 0, 0); // snout
     add(new THREE.BoxGeometry(0.18, 0.06, 0.24), accentMat, 0, 0.09, 0.42, -0.2, 0, 0); // lower jaw (accent)
     // Horns (accent)
-    for (const s of [-1, 1]) add(new THREE.ConeGeometry(0.04, 0.24, 4), accentMat, s * 0.08, 0.36, 0.06, -0.9, 0, s * 0.3);
+    for (const s of [-1, 1]) add(new THREE.ConeGeometry(0.04, 0.24, 8), accentMat, s * 0.08, 0.36, 0.06, -0.9, 0, s * 0.3);
     // Mane frills along the neck (accent)
-    for (let i = 0; i < 3; i++) add(new THREE.ConeGeometry(0.06, 0.18, 3), accentMat, 0, 0.02 - i * 0.06, -0.14 - i * 0.06, -0.3, 0, 0, 1, 1, 0.3);
+    for (let i = 0; i < 3; i++) add(new THREE.ConeGeometry(0.06, 0.18, 8), accentMat, 0, 0.02 - i * 0.06, -0.14 - i * 0.06, -0.3, 0, 0, 1, 1, 0.3);
     // Eyes (accent)
     for (const s of [-1, 1]) add(new THREE.SphereGeometry(0.035, 6, 5), accentMat, s * 0.09, 0.26, 0.34);
   }
@@ -666,11 +666,11 @@ function makeLanternFixture(glassMat: THREE.Material, metalMat: THREE.Material):
   glass.position.y = 0;
   g.add(glass);
   // Cage: top + bottom caps and four corner posts
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 0.1, 6), metalMat);
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 0.1, 10), metalMat);
   cap.position.y = 0.2;
   cap.castShadow = true;
   g.add(cap);
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.1, 0.08, 6), metalMat);
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.1, 0.08, 10), metalMat);
   base.position.y = -0.18;
   g.add(base);
   for (const sx of [-1, 1] as const) {
@@ -1065,6 +1065,15 @@ export class ShipRenderer {
     for (const mesh of this.shipMeshes.values()) {
       this.scene.remove(mesh.root);
       this.scene.remove(mesh.wake.group);
+      // Dispose per-ship GPU buffers (lofted hulls, rigging, decals are unique
+      // per ship) or every match restart leaks them all. Materials are mostly
+      // shared palette/canvas singletons — leave those alive.
+      for (const root of [mesh.root, mesh.wake.group]) {
+        root.traverse((obj) => {
+          const geo = (obj as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
+          geo?.dispose?.();
+        });
+      }
     }
     this.shipMeshes.clear();
   }
@@ -1940,42 +1949,48 @@ export class ShipRenderer {
       }
     }
 
-    // Helm wheel (seated on the quarterdeck dais)
-    const wheelPost = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.095, 1.06, 8), darkMat);
+    // Helm wheel (seated on the quarterdeck dais). Scaled with hull class so the
+    // galleon's wheel reads bigger than the sloop's instead of one fixed size,
+    // and rounded out (higher-segment rim/spokes) since it's the hero helm object
+    // right in front of the captain.
+    const wheelScale = 0.9 + Math.min(0.42, Math.max(0, (L - 12) / 26));
+    const rimR = 0.4 * wheelScale;
+    const spokeLen = rimR * 1.42;
+    const wheelPost = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.1, 1.06, 10), darkMat);
     wheelPost.position.set(0, H + qdRise + 0.53, -L * 0.315);
     wheelPost.castShadow = true;
     group.add(wheelPost);
 
     const wheelGroup = new THREE.Group();
-    wheelGroup.position.set(0, H + qdRise + 1.16, -L * 0.315);
+    wheelGroup.position.set(0, H + qdRise + 0.74 + rimR, -L * 0.315);
     group.add(wheelGroup);
 
-    const wheelBase = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.13, 8), metalMat);
+    const wheelBase = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.13, 12), metalMat);
     wheelBase.rotation.x = Math.PI * 0.5;
     wheelBase.castShadow = true;
     wheelGroup.add(wheelBase);
 
-    const wheelRim = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.055, 8, 18), metalMat);
+    const wheelRim = new THREE.Mesh(new THREE.TorusGeometry(rimR, 0.055 * wheelScale, 12, 28), metalMat);
     wheelRim.castShadow = true;
     wheelGroup.add(wheelRim);
 
-    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.2, 8), metalMat);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.2, 12), metalMat);
     hub.rotation.x = Math.PI * 0.5;
     hub.castShadow = true;
     wheelGroup.add(hub);
 
-    for (let spoke = 0; spoke < 8; spoke++) {
-      const spokeMesh = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.58, 0.042), darkMat);
-      spokeMesh.rotation.z = (spoke / 8) * Math.PI * 2;
+    const spokeCount = 8;
+    for (let spoke = 0; spoke < spokeCount; spoke++) {
+      const ang = (spoke / spokeCount) * Math.PI * 2;
+      const spokeMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.03, spokeLen, 8), darkMat);
+      spokeMesh.rotation.z = ang;
       wheelGroup.add(spokeMesh);
 
-      // Handle pegs on alternating spokes
-      if (spoke % 2 === 0) {
-        const peg = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.12, 6), darkMat);
-        peg.rotation.x = Math.PI * 0.5;
-        peg.position.set(Math.cos((spoke / 8) * Math.PI * 2) * 0.36, Math.sin((spoke / 8) * Math.PI * 2) * 0.36, 0.06);
-        wheelGroup.add(peg);
-      }
+      // Turned handle pegs jutting past the rim on every spoke (classic ship's wheel).
+      const peg = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.032, 0.16, 8), darkMat);
+      peg.rotation.x = Math.PI * 0.5;
+      peg.position.set(Math.cos(ang) * (rimR + 0.02), Math.sin(ang) * (rimR + 0.02), 0.06);
+      wheelGroup.add(peg);
     }
 
     // Compass binnacle at the foot of the helm steps (on the main deck, just
@@ -2124,7 +2139,7 @@ export class ShipRenderer {
       const mastR = 0.075 + (ship.type === 'galleon' ? 0.045 : ship.type === 'brigantine' ? 0.025 : 0);
 
       const mast = new THREE.Mesh(
-        new THREE.CylinderGeometry(mastR * 0.8, mastR * 1.4, mastH, 8),
+        new THREE.CylinderGeometry(mastR * 0.8, mastR * 1.4, mastH, 16),
         darkMat,
       );
       mast.position.set(0, H + mastH * 0.5, mastZ);
@@ -2175,7 +2190,7 @@ export class ShipRenderer {
       group.add(trimPivot);
       trimPivots.push(trimPivot);
       const yard = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.042, 0.042, yardW, 6),
+        new THREE.CylinderGeometry(0.042, 0.042, yardW, 12),
         darkMat,
       );
       yard.rotation.z = Math.PI * 0.5;

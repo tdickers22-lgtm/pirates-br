@@ -1812,6 +1812,8 @@ export class Game {
   private lastAnchorMoveSoundAt = 0;
   private lastHelmTurnSoundAt = 0;
   private lastHullSplashAt = 0;
+  private lastSwimStrokeAt = 0;
+  private readonly remoteSwimAudioState = new Map<string, string>();
   private prevStormPhase = -1;
   private digStrikePhase = 0;
   private prevMeleeReloading = false;
@@ -1850,8 +1852,7 @@ export class Game {
     onMatchStart: (payload) => this.onMatchStartFromMenu(payload),
     onReturnToMenu: () => this.onReturnToMenuFromEnd(),
   });
-  // Used by ambient render & end-of-round flow.
-  // @ts-expect-error reserved for future ambient-vs-in-match branching
+  // Used by ambient render & end-of-round flow + gameplay-key gating.
   private inMatch = false;
   // @ts-expect-error reserved for showing the leaderboard until user dismisses it
   private endmatchPending = false;
@@ -2358,6 +2359,8 @@ export class Game {
     this.lastAnchorMoveSoundAt = 0;
     this.lastHelmTurnSoundAt = 0;
     this.lastHullSplashAt = 0;
+    this.lastSwimStrokeAt = 0;
+    this.remoteSwimAudioState.clear();
     this.prevPlayerStateForAudio = null;
     this.prevCannonBallistic = false;
     this.prevStormShrinking = false;
@@ -2422,6 +2425,9 @@ export class Game {
     this.clearLanternEmitters();
     this.shipRenderer.clear();
     this.islandMeshes.clear();
+    // Islands still queued from the previous match must not drain into the
+    // next one as untracked ghost terrain.
+    this.pendingIslandBuilds.length = 0;
     this.volcanicFx = [];
     // disposeSceneObject() disposes this shared particle texture along with the
     // volcanic point clouds (it isn't an AssetLibrary-owned resource), so drop
@@ -2796,8 +2802,11 @@ export class Game {
   private bindMapUiActions() {
     window.addEventListener('keydown', (event) => {
       if (event.repeat) return;
+      // Don't toggle the map while typing (menu name field) or before a match.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
 
-      if (event.code === 'KeyM') {
+      if (event.code === 'KeyM' && this.inMatch) {
         this.toggleMap();
       } else if (event.code === 'Escape' && this.mapOpen) {
         this.toggleMap(false);
@@ -2937,6 +2946,21 @@ export class Game {
       const hit = payload as { attackerId?: string | null; position?: { x: number; y: number; z: number }; projectileType?: string };
       if (!hit.position || hit.attackerId === this.localPlayerId) return;
       this.combatFx.emitShipHitConfirm(hit.position, this.renderer.camera.position);
+      // Physical wood-smash layer (the confirm chime alone reads as a UI blip).
+      const cam = this.renderer.camera.position;
+      const d = Math.hypot(hit.position.x - cam.x, hit.position.y - cam.y, hit.position.z - cam.z);
+      if (d < 200) this.audio.playHullImpact(d);
+    };
+
+    this.network.onShipImpact = (payload) => {
+      // A ship physically crashed (ram / aground / sea-rock) — play the spatial
+      // hull-smash so a wreck actually sounds like one.
+      const ev = payload as { kind?: 'ram' | 'ground' | 'rock'; position?: { x: number; y: number; z: number }; speed?: number };
+      if (!ev.position || !ev.kind) return;
+      const cam = this.renderer.camera.position;
+      const d = Math.hypot(ev.position.x - cam.x, ev.position.y - cam.y, ev.position.z - cam.z);
+      if (d > 240) return;
+      this.audio.playShipImpact(ev.kind, ev.speed ?? 4, d);
     };
 
     this.network.onKillEvent = (payload) => {
@@ -3466,7 +3490,15 @@ export class Game {
   drainIslandBuildQueue(count = 1) {
     for (let i = 0; i < count && this.pendingIslandBuilds.length > 0; i++) {
       const island = this.pendingIslandBuilds.shift()!;
-      if (!this.islandMeshes.has(island.id)) this.buildIsland(island);
+      if (this.islandMeshes.has(island.id)) continue;
+      // Contain per-island build throws: this drains inside frame() BEFORE the
+      // next requestAnimationFrame is scheduled, so one bad island otherwise
+      // kills the render loop outright (frozen canvas, no error surface).
+      try {
+        this.buildIsland(island);
+      } catch (err) {
+        console.error(`[World] failed to build island ${island.id}:`, err);
+      }
     }
   }
 
@@ -4146,7 +4178,7 @@ export class Game {
     // Deterministic from the profile seed; culled with the micro tier past
     // ~260m; zero colliders (ankle-high ground cover).
     if (!lowDetail) {
-      const grassCount = Math.min(7000, Math.round(r * r * 0.8));
+      const grassCount = Math.min(9000, Math.round(r * r * 1.05));
       const bladeGeo = new THREE.PlaneGeometry(0.52, 0.64, 1, 1);
       bladeGeo.translate(0, 0.25, 0);
       const crossGeo = (() => {
@@ -4580,7 +4612,13 @@ export class Game {
       const caveRockCol = paletteRock.clone().multiplyScalar(0.44);
       // Slightly deeper tone for the continuous cave tube (both sides so you never
       // see a hole through a wall from any angle).
-      const caveRockMat = new THREE.MeshStandardMaterial({ color: caveRockCol.clone().multiplyScalar(0.82).getHex(), roughness: 1, flatShading: true, side: THREE.DoubleSide });
+      // A faint warm self-glow on the cave stone so the deep interior reads as a
+      // dim lantern-lit cavern instead of a pitch-black void where the torch
+      // PointLights don't reach (they're range-culled for the light budget).
+      const caveRockMat = new THREE.MeshStandardMaterial({
+        color: caveRockCol.clone().multiplyScalar(0.82).getHex(), roughness: 1, flatShading: true, side: THREE.DoubleSide,
+        emissive: new THREE.Color(0x30200f), emissiveIntensity: 0.5,
+      });
       const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
       const flameMat = new THREE.MeshStandardMaterial({ color: 0xff8a20, emissive: 0xff5500, emissiveIntensity: 1.4, roughness: 0.4 });
 
@@ -4589,8 +4627,8 @@ export class Game {
       // the first several segments get a real dynamic PointLight so a deep warren
       // can't blow the renderer's light count. Torches go to the most-travelled
       // segments (mouth + junction + main veins come first in island.caves).
-      let caveTorchBudget = lowDetail ? 5 : 9;
-      let caveGlowBudget = lowDetail ? 2 : 5;
+      let caveTorchBudget = lowDetail ? 6 : 12;
+      let caveGlowBudget = lowDetail ? 2 : 6;
 
       for (const cave of island.caves) {
         const caveGroup = new THREE.Group();
@@ -4663,6 +4701,16 @@ export class Game {
             fb.castShadow = true;
             exterior.add(fb);
           }
+          // Warm glow spilling from the throat of the mouth — the entrance beckons
+          // as you approach (rides the always-visible portal group, but the LIGHT
+          // itself is distance-gated in updateEnvironmentLod like every other
+          // decor light: an unbudgeted always-on PointLight per mouth multiplies
+          // every island's forward-pass lighting cost across the whole map).
+          const mouthGlow = new THREE.PointLight(0xffa24d, 2.6, cR * 5.5, 1.5);
+          mouthGlow.position.set(0, floorLocalY + ch * 0.42, -1.4);
+          mouthGlow.visible = false;
+          exterior.add(mouthGlow);
+          (group.userData.caveMouthGlows ??= []).push({ light: mouthGlow, x: cave.position.x, z: cave.position.z });
         }
 
         // ── The cave itself: one CONTINUOUS enclosed rock tube (floor + walls +
@@ -4719,7 +4767,7 @@ export class Game {
         // cave is in view range, so no global light-budget blowout).
         if (caveTorchBudget > 0) {
           caveTorchBudget--;
-          const torchLight = new THREE.PointLight(0xffa64d, 3.2, cLen + cR * 2.2, 1.5);
+          const torchLight = new THREE.PointLight(0xffb060, 4.4, cLen + cR * 3.0, 1.4);
           torchLight.position.copy(flame.position);
           caveGroup.add(torchLight);
         }
@@ -5688,6 +5736,50 @@ export class Game {
           cairn.add(stone);
         }
         group.add(cairn);
+      }
+    }
+
+    // ── Exposed bedrock CRAGS on the upper flanks of mountains/rocky isles ──
+    // Big angular rock masses that emerge from the slope so a tall island reads
+    // as a rugged, cave-riddled massif instead of a smooth green cone. Purely
+    // decorative client geometry sitting on the shared surface (no collision /
+    // determinism impact), seeded so it's stable across frames.
+    if (!lowDetail && (island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky')) {
+      const cragRockCol = paletteRock.clone().multiplyScalar(0.7).lerp(new THREE.Color(0x2b2620), 0.15);
+      const cragMat = new THREE.MeshStandardMaterial({ color: cragRockCol.getHex(), roughness: 1, flatShading: true });
+      const isMtn = island.profile.terrainStyle === 'mountain';
+      const cragCount = scaledCount(Math.round(r / (isMtn ? 12 : 18)) + 4, 3);
+      for (let i = 0; i < cragCount; i++) {
+        const angle = rng(i * 733 + 31) * Math.PI * 2;
+        // Bias toward the upper/mid flanks where bare rock shows through.
+        const distRatio = 0.1 + rng(i * 739 + 3) * (isMtn ? 0.42 : 0.5);
+        const base = surfacePoint(distRatio, angle, 0);
+        if (base.y < 9 || !isSolidDecorPoint(base, 8, -0.3)) continue;
+        const crag = new THREE.Group();
+        crag.position.copy(base);
+        // Face the outcrop's long axis downslope (away from the island centre,
+        // which sits at the local origin for decorative surface geometry).
+        crag.rotation.y = Math.atan2(base.x, base.z) + (rng(i * 743) - 0.5) * 0.8;
+        const slabs = 2 + Math.floor(rng(i * 747) * 3);
+        const bigness = 1.3 + rng(i * 751) * (isMtn ? 2.1 : 1.2) + base.y * 0.03;
+        for (let s = 0; s < slabs; s++) {
+          const slab = new THREE.Mesh(boulderGeo, cragMat);
+          // Jagged non-uniform slab: tall and blade-like, tilted, partly buried.
+          const w = bigness * (0.5 + rng(s * 61 + i) * 0.6);
+          const h = bigness * (0.9 + rng(s * 67 + i) * 1.5);
+          const d = bigness * (0.4 + rng(s * 71 + i) * 0.5);
+          slab.scale.set(w, h, d);
+          slab.position.set(
+            (rng(s * 73 + i) - 0.5) * bigness * 1.4,
+            h * 0.5 - bigness * 0.55,
+            (rng(s * 79 + i) - 0.5) * bigness * 1.4,
+          );
+          slab.rotation.set((rng(s * 83 + i) - 0.5) * 0.6, rng(s * 89 + i) * Math.PI, (rng(s * 97 + i) - 0.5) * 0.7);
+          slab.castShadow = true;
+          slab.receiveShadow = true;
+          crag.add(slab);
+        }
+        group.add(crag);
       }
     }
 
@@ -7420,6 +7512,14 @@ export class Game {
             caveGroup.visible = showDetail && cd < 45;
           }
         }
+        // Mouth-glow lights ride the always-visible portal group, so gate the
+        // LIGHTS by camera distance here (same 55m budget as chest/station glows).
+        const mouthGlows = group.userData.caveMouthGlows as { light: THREE.PointLight; x: number; z: number }[] | undefined;
+        if (mouthGlows) {
+          for (const glow of mouthGlows) {
+            glow.light.visible = showDetail && this.distance2D(cam.x, cam.z, glow.x, glow.z) < 55;
+          }
+        }
       }
 
       for (const chest of island.chests) {
@@ -7482,6 +7582,11 @@ export class Game {
       input.jump ? 1 : 0,
       input.fire ? 1 : 0,
       input.aim ? 1 : 0,
+      // Tool use (bucket scoop / lantern raise) rides useItem with fire forced
+      // off — omitting it here meant an LMB edge with a tool equipped changed
+      // no signature field, so the action only reached the server on the next
+      // unrelated input change.
+      input.useItem ? 1 : 0,
       input.interactHeld ? 1 : 0,
       input.sailRaise ? 1 : 0,
       input.sailLower ? 1 : 0,
@@ -9012,7 +9117,10 @@ export class Game {
     } else if (player.atHelm && trackedShip) {
       const stats = SHIP_STATS[trackedShip.type];
       const helmZ = -stats.length * 0.39;
-      const starboardX = stats.width * 0.28;
+      // The wheel mesh sits on the centerline (x=0); keep the eye nearly centered
+      // (a slight starboard nudge for an over-the-shoulder feel) so the wheel is
+      // framed dead-ahead instead of jammed into the lower-left corner.
+      const starboardX = stats.width * 0.06;
       // Ride the raised quarterdeck dais the captain stands on, so the eye sits at
       // helmsman head height instead of sunk toward the main-deck plane.
       const qdRise = getShipQuarterdeckConfig(stats).rise;
@@ -9933,6 +10041,10 @@ export class Game {
           this.drawPoiIcon(ctx, nkind, centerX + npc.position.x * scale, centerY + npc.position.z * scale, 5.5);
         }
         for (const cave of island.caves ?? []) {
+          // Only ENTRANCES are chartable POIs — interior galleries are hidden
+          // segments, and drawing all of them stamped a dozen cave icons per
+          // mountain across the map.
+          if (!cave.hasMouth) continue;
           this.drawPoiIcon(ctx, 'cave', centerX + cave.position.x * scale, centerY + cave.position.z * scale, 5.5);
         }
         // Name label above the isle, outlined for legibility over any tint.
@@ -10519,12 +10631,17 @@ export class Game {
       this.prevCarryingChestId = carryingNow;
     }
 
-    // Water entry — alive→swimming transition.
+    // Water entry / exit — alive↔swimming transitions.
     if (player) {
       const stateNow = player.state;
       if (this.prevPlayerStateForAudio && this.prevPlayerStateForAudio !== 'swimming' && stateNow === 'swimming') {
+        // Splashing IN — scaled by how fast you hit the water.
         const speed = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z);
         this.audio.playSplash(THREE.MathUtils.clamp(speed / 12, 0.35, 1.4));
+      } else if (this.prevPlayerStateForAudio === 'swimming' && (stateNow === 'alive' || stateNow === 'boarding')) {
+        // Climbing OUT / hauling onto deck — a lighter surfacing splash + stroke.
+        this.audio.playSplash(0.55);
+        this.audio.playSwimSplash(1.1);
       }
       this.prevPlayerStateForAudio = stateNow;
     }
@@ -10577,7 +10694,32 @@ export class Game {
       }
     }
 
-    // Swim stroke SFX removed by request — no sound while swimming.
+    // Swim stroke SFX — a soft slosh on a movement-scaled cadence while the
+    // local player is in the water, so swimming isn't eerily silent.
+    if (player?.state === 'swimming') {
+      const swimSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+      const move01 = THREE.MathUtils.clamp(swimSpeed / 3.2, 0, 1);
+      // ~0.85s idle tread down to ~0.42s at a hard stroke, with a little jitter.
+      const strokeInterval = 0.85 - move01 * 0.43 + Math.sin(now * 2.3) * 0.05;
+      if (now - this.lastSwimStrokeAt > strokeInterval) {
+        this.audio.playSwimSplash(0.45 + move01 * 0.6);
+        this.lastSwimStrokeAt = now;
+      }
+    }
+
+    // Remote pirates hitting the water beside you get a spatial splash.
+    if (this.state?.players) {
+      const camPos = this.renderer.camera.position;
+      for (const other of this.state.players) {
+        if (other.id === this.localPlayerId) continue;
+        const prev = this.remoteSwimAudioState.get(other.id);
+        if (prev && prev !== 'swimming' && other.state === 'swimming') {
+          const d = Math.hypot(other.position.x - camPos.x, other.position.y - camPos.y, other.position.z - camPos.z);
+          if (d < 90) this.audio.playSplash(THREE.MathUtils.clamp(1.1 - d / 110, 0.3, 1.0), d);
+        }
+        this.remoteSwimAudioState.set(other.id, other.state);
+      }
+    }
 
     // Sail/anchor change cues for the local ship — physical deck feedback instead of UI clicks.
     if (localShip) {

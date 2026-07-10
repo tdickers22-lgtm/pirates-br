@@ -534,11 +534,23 @@ export class MapGenerator {
     const hillAngles = [profile.primaryHillAngle, profile.secondaryHillAngle];
     if (profile.tertiaryHillScale > 0) hillAngles.push(profile.tertiaryHillAngle);
     const GOLDEN = 2.399963229728653;
-    // Natural surface stays ≥ `clear` above `ceil` along a ray → the roof holds.
-    // Sample from mid-tunnel inward (skip the mouth, where the hill is thin).
-    const roofed = (fx: number, fz: number, dx: number, dz: number, len: number, ceil: number, clear: number): boolean => {
-      for (const f of [0.45, 0.65, 0.85, 1.0]) {
-        if (getIslandSurfaceY(island, fx + dx * len * f, fz + dz * len * f) < ceil + clear) return false;
+    // Cave floors stay ABOVE the waves: a floor below the gerstner surface flips
+    // walkers into the swim branch (submergeDepth keys off the standing floor),
+    // which then ejects them through the roof via swimSeabedY. Deep networks get
+    // their verticality from descending toward this waterline, never past it.
+    const CAVE_MIN_FLOOR = 1.0;
+    // Natural surface stays ≥ `clear` above the tube's (ramping) ceiling along a
+    // ray → the roof holds. The ceiling follows the floor ramp f0→f1 (+h), so a
+    // descending entrance needs far less overhead rock than its mouth height
+    // suggests. Sample from mid-tunnel inward (skip the mouth, where the hill is
+    // thin by construction).
+    const roofed = (fx: number, fz: number, dx: number, dz: number, len: number, f0: number, f1: number, h: number, clear: number): boolean => {
+      // The 0.33 sample guards the stretch just past the mouth with a thinner
+      // requirement — enough that the tube arch never pokes proud of the hill,
+      // without demanding full rock cover where the portal is still opening up.
+      for (const [f, cScale] of [[0.33, 0.3], [0.45, 1], [0.65, 1], [0.85, 1], [1.0, 1]] as const) {
+        const ceilAt = f0 + (f1 - f0) * f + h;
+        if (getIslandSurfaceY(island, fx + dx * len * f, fz + dz * len * f) < ceilAt + clear * cScale) return false;
       }
       return true;
     };
@@ -563,35 +575,51 @@ export class MapGenerator {
         if (mouth.y < 3.2) continue;
         const rot = directionToYaw(Math.cos(angle), Math.sin(angle));
         const inX = -Math.sin(rot), inZ = -Math.cos(rot); // into the hill (toward centre)
-        const floorY = mouth.y - (grand ? 1.9 : 1.0);
+        // The mouth floor meets the natural surface at the lip (a small readable
+        // step, never a climb): sinking it 1-1.9m below grade left an unwalkable
+        // wall at the mouth plane — you could drop in but never step back OUT.
+        const floorY = mouth.y - 0.35;
+        // Entrance tunnel RAMPS DOWN into the mountain (not a thin roof slab):
+        // deeper on bigger, taller islands so mountains hide genuine caverns —
+        // but always bottoming out above the waterline (CAVE_MIN_FLOOR).
+        const descend = Math.min(grand ? 16 : 9, (grand ? 6.5 : 4) + island.radius * (grand ? 0.095 : 0.05));
+        const deepFloor = Math.max(floorY - descend, CAVE_MIN_FLOOR);
         // Pick the TALLEST mouth that still roofs at this spot: grand caverns aim
         // high, but fall back to a shorter cave (and a shorter run) before giving up
         // on the location — so a tall island whose flank can't roof a 6m ceiling
         // still gets a real cave instead of generateCaves silently producing none.
-        const heightMenu = grand ? [rr(rng, 5.4, 6.6), 4.8, 4.2, 3.6] : [rr(rng, 3.6, 4.4)];
-        let h = 0, ceilingY = 0, mainLen = 0;
+        // Rocky knolls (12-16m peaks) can only roof modest grottos, so their menu
+        // reaches lower and their roof-clearance is thinner.
+        const clearance = style === 'rocky' ? 1.2 : 2.1;
+        const heightMenu = grand
+          ? (style === 'rocky' ? [rr(rng, 3.6, 4.4), 3.2, 2.8, 2.5] : [rr(rng, 5.4, 6.6), 4.8, 4.2, 3.6])
+          : [rr(rng, 3.6, 4.4)];
+        let h = 0, ceilingY = 0, mainLen = 0, rampFloor = deepFloor;
         for (const hc of heightMenu) {
-          const cY = floorY + hc;
           let L0 = 0;
-          for (const L of [15, 12, 9, 7, 6, 5]) { if (roofed(mouth.x, mouth.z, inX, inZ, L, cY, 2.1)) { L0 = L; break; } }
-          if (L0 > 0) { h = hc; ceilingY = cY; mainLen = L0; break; }
+          for (const L of [15, 12, 9, 7, 6, 5]) {
+            // The entrance ramp must stay WALKABLE both ways: cap its drop by a
+            // 0.75 gradient (SLOPE_MAX is ~1.15) so a short mouth on a steep flank
+            // descends gently instead of becoming a fall-damage pit with an
+            // unclimbable exit. The roof check runs against this capped ramp.
+            const rf = Math.max(floorY - L * 0.75, deepFloor);
+            if (roofed(mouth.x, mouth.z, inX, inZ, L, floorY, rf, hc, clearance)) { L0 = L; rampFloor = rf; break; }
+          }
+          if (L0 > 0) { h = hc; ceilingY = floorY + hc; mainLen = L0; break; }
         }
         if (mainLen === 0) continue;
-        const iRad = grand ? rr(rng, 4.4, 5.6) : rr(rng, 2.7, 3.4);
+        const iRad = grand ? (style === 'rocky' ? rr(rng, 3.2, 4.2) : rr(rng, 4.4, 5.6)) : rr(rng, 2.7, 3.4);
         if (caves.some((c) => Math.hypot(c.position.x - mouth.x, c.position.z - mouth.z) < c.length + mainLen)) continue;
-
-        // Entrance tunnel RAMPS DOWN into the mountain (not a thin roof slab):
-        // deeper on bigger, taller islands so mountains hide genuine caverns. Grand
-        // caves plunge far below grade so the network has real vertical depth.
-        const descend = Math.min(grand ? 16 : 9, (grand ? 6.5 : 4) + island.radius * (grand ? 0.095 : 0.05));
-        const deepFloor = floorY - descend;
         const sys: IslandCave[] = [];
-        sys.push(seg(mouth.x, mouth.z, rot, iRad, mainLen, floorY, h, { mouth: true, floorEnd: deepFloor }));
+        sys.push(seg(mouth.x, mouth.z, rot, iRad, mainLen, floorY, h, { mouth: true, floorEnd: rampFloor }));
 
         // Central junction chamber, deep underground (taller, at the ramp's base).
+        // Its floor meets the ramp base EXACTLY: any dip below it reads, through
+        // the segment union, as ramp-gradient-plus-dip to the slope probe at the
+        // boundary — which crosses SLOPE_MAX and bricks the walk back out.
         const jx = mouth.x + inX * mainLen, jz = mouth.z + inZ * mainLen;
-        const jRad = rr(rng, 5.0, 6.4), jLen = rr(rng, 6, 9), jFloor = deepFloor - 0.6, jH = h + 2.2, jCeil = jFloor + jH;
-        if (!roofed(jx, jz, inX, inZ, jLen, jCeil, 2.2)) { sys[0].hasBackWall = true; caves.push(...sys); break; }
+        const jRad = rr(rng, 5.0, 6.4), jLen = rr(rng, 6, 9), jFloor = rampFloor, jH = h + 2.2;
+        if (!roofed(jx, jz, inX, inZ, jLen, jFloor, jFloor, jH, 2.2)) { sys[0].hasBackWall = true; caves.push(...sys); break; }
         const junction = seg(jx, jz, rot, jRad, jLen, jFloor, jH, {});
         sys.push(junction);
         const jcx = jx + inX * jLen * 0.5, jcz = jz + inZ * jLen * 0.5;
@@ -635,12 +663,12 @@ export class MapGenerator {
           if (sys.length >= MAX_SEGS || depth <= 0) return;
           const dX = -Math.sin(dRot), dZ = -Math.cos(dRot);
           let len = 0;
-          for (const L of [13, 10, 8, 6, 5, 4]) { if (roofed(sx, sz, dX, dZ, L, floor + height, 1.8)) { len = L; break; } }
+          for (const L of [13, 10, 8, 6, 5, 4]) { if (roofed(sx, sz, dX, dZ, L, floor, floor, height, 1.8)) { len = L; break; } }
           if (len < 4) return;
           // Gentle DESCENT along the run (down-and-out) → deeper levels you ramp to,
           // small enough that connected passages stay within the ceiling helper's
           // tolerance while the network still steps down through several levels.
-          const floorEnd = floor - rng() * 1.5;
+          const floorEnd = Math.max(floor - rng() * 1.5, CAVE_MIN_FLOOR);
           const ex = sx + dX * len, ez = sz + dZ * len;
           if (overlapClash(sx, sz, dX, dZ, len, floor, floorEnd)) return;
           const passage = seg(sx, sz, dRot, rad, len, floor, height, { floorEnd });
@@ -649,7 +677,7 @@ export class MapGenerator {
           if (sys.length >= MAX_SEGS || depth <= 1 || roll < 0.22) {
             // Terminate this vein in a chamber (treasure room) or a plain dead-end.
             const cRad = rr(rng, 3.6, 5.0), cLen = rr(rng, 4, 6), cH = rr(rng, 4.4, 5.8);
-            if (!overlapClash(ex, ez, dX, dZ, cLen, floorEnd, floorEnd) && roofed(ex, ez, dX, dZ, cLen, floorEnd + cH, 2)) {
+            if (!overlapClash(ex, ez, dX, dZ, cLen, floorEnd, floorEnd) && roofed(ex, ez, dX, dZ, cLen, floorEnd, floorEnd, cH, 2)) {
               sys.push(seg(ex, ez, dRot, cRad, cLen, floorEnd, cH, { back: true }));
             } else {
               passage.hasBackWall = true;
@@ -674,15 +702,47 @@ export class MapGenerator {
         drill(jcx, jcz, veinBase, jFloor + 0.1, rr(rng, 2.8, 3.6), rr(rng, 3.8, 4.6), grand ? 3 : 2);
         drill(jcx, jcz, veinBase + Math.PI * (0.72 + rng() * 0.46), jFloor + 0.1, rr(rng, 2.8, 3.6), rr(rng, 3.8, 4.6), grand ? 3 : 1);
 
-        // THROUGH-tunnel: keep boring inward until the roof thins on the far
-        // flank, then break out as a SECOND mouth (cuts clean through the hill).
+        // THROUGH-tunnel: bore inward until the roof thins on the far flank, then
+        // break out as a SECOND mouth — but ONLY when it stays HONEST. The scan is
+        // CAPPED so a valid through-tunnel is a believable length (never an ~80m
+        // featureless straight box), and the whole run is roof-validated against the
+        // tube's OWN (ramping) ceiling so the closed tube can never float proud of the
+        // hillside. If no thin-roof exit is found within the cap — or the roof would
+        // breach mid-run — the deep end is sealed instead of boring a protruding tube.
+        const THROUGH_SCAN_CAP = 48; // ≈46 + one step, so a genuinely honest far-flank
+        //   through-tunnel still qualifies while long straight boxes are rejected.
         let exit: { x: number; z: number; y: number; dist: number } | null = null;
-        for (let d = jLen + 4; d < 90; d += 2) {
+        for (let d = jLen + 4; d < THROUGH_SCAN_CAP; d += 2) {
           const ex = jx + inX * d, ez = jz + inZ * d;
           const surf = getIslandSurfaceY(island, ex, ez);
-          if (surf < ceilingY + 0.4) { if (surf > 3.0) exit = { x: ex, z: ez, y: surf, dist: d }; break; }
+          if (surf < ceilingY + 0.4) {
+            // The breakout must be on the FAR FLANK — a thin-roof reading near the
+            // island centre is an interior basin/saddle (twin peaks, calderas), and
+            // boring up into it leaves a tube floating proud of the terrain with a
+            // "far" mouth in the middle of the island. No honest exit here → seal.
+            const exDist = Math.hypot(ex - island.position.x, ez - island.position.z);
+            if (surf > 3.0 && exDist > island.radius * 0.45) exit = { x: ex, z: ez, y: surf, dist: d };
+            break;
+          }
         }
+        // Roof-validate the mid-run: the natural surface must stay a clear ≥1.2m ABOVE
+        // the tube ceiling (floor ramps jFloor→exit.y−1, ceiling = floorAt + h — the
+        // same ramp getCaveCeilingY reads) over all but the final approach to the
+        // breakout mouth. If any sample breaches, the tube would poke out → reject it.
+        let throughRoofed = false;
         if (exit) {
+          const tubeLen = Math.max(4, exit.dist - jLen - 2);
+          const throughFloorEnd = exit.y - 1;
+          throughRoofed = true;
+          for (const f of [0.15, 0.3, 0.45, 0.6, 0.72]) {
+            const px = jx + inX * (jLen + tubeLen * f), pz = jz + inZ * (jLen + tubeLen * f);
+            const tubeCeil = jFloor + (throughFloorEnd - jFloor) * f + h;
+            if (getIslandSurfaceY(island, px, pz) < tubeCeil + 1.2) { throughRoofed = false; break; }
+          }
+        }
+        // Only open the far mouth once BOTH the thin-roof breakout (surf < ceilingY+0.4,
+        // above) and the along-length roof validation pass; otherwise seal the junction.
+        if (exit && throughRoofed) {
           const exTunLen = exit.dist - jLen;
           // Tunnel ramps UP from the deep junction back to the far surface.
           sys.push(seg(jx + inX * jLen, jz + inZ * jLen, rot, iRad, Math.max(4, exTunLen - 2), jFloor, h, { floorEnd: exit.y - 1 }));
@@ -691,7 +751,7 @@ export class MapGenerator {
           const exRot = directionToYaw(Math.cos(exAngle), Math.sin(exAngle));
           sys.push(seg(exit.x, exit.z, exRot, iRad, Math.min(exTunLen, 9), exit.y - 1, h, { mouth: true, floorEnd: exit.y - 2 }));
         } else {
-          junction.hasBackWall = true; // no through-route → seal the deep end
+          junction.hasBackWall = true; // no honest through-route → seal the deep end
         }
 
         caves.push(...sys);

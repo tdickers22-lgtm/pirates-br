@@ -458,9 +458,28 @@ export class SoundEngine {
     this.playTone(now + 0.03, 88, 58, 0.3, 0.055 * volume, 'sine', 0.03);
   }
 
-  // Swim SFX removed by request: no sound plays while swimming. Kept as a no-op
-  // so any stray caller is harmless.
-  playSwimSplash(_amount = 1): void {}
+  /**
+   * One swim stroke — a soft low water slosh with a light spray fleck and a
+   * gentle bubble tail. Called on a stroke cadence while swimming (and once,
+   * louder, when you break the surface). Kept quiet so a long swim never nags.
+   * @param amount 0.4 = idle tread, ~1.1 = a hard forward stroke / surfacing.
+   */
+  playSwimSplash(amount = 1): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const v = THREE.MathUtils.clamp(amount, 0.3, 1.25);
+    // Body of the stroke: a short swept low slosh (arm/leg pushing water).
+    this.playNoise(now, 0.2 + 0.1 * v, 300, 0.5, 0.09 * v, 'lowpass');
+    this.playNoise(now + 0.015, 0.16, 780, 0.7, 0.06 * v, 'bandpass');
+    // Bright spray flecks off the surface.
+    this.playNoise(now + 0.02, 0.09, 3600, 1.1, 0.045 * v, 'highpass');
+    // A couple of low glooping bubbles trailing the stroke.
+    for (let i = 0; i < 2; i++) {
+      const at = now + 0.12 + i * 0.07;
+      this.playTone(at, 150 - i * 34, 90 + i * 40, 0.09, 0.03 * v, 'sine', 0.02);
+    }
+  }
 
   playSailTrim(amount = 1): void {
     this.unlock();
@@ -801,6 +820,75 @@ export class SoundEngine {
       this.playNoise(at, 0.05, 2600 + Math.random() * 2600, 2.4, 0.1 * g, 'bandpass', dest);
     }
     if (distance < 24) this.duckBeds(0.6, 0.3, 0.25);
+  }
+
+  /**
+   * A ship physically CRASHING — ramming another hull, running aground on a
+   * beach/bar, or striking a sea rock. Builds a heavy timber smash (deep thud +
+   * groaning strain + splinters) and layers a kind-specific tail:
+   *   ram    → a second wooden boom as the two hulls slam and grind
+   *   ground → a long gritty gravel/sand scrape as the keel drags
+   *   rock   → a sharp high stone crack as rock tears into the planks
+   * @param kind    what got hit
+   * @param speed   impact speed (m/s); scales weight, brightness, and duck
+   * @param distance metres from the listener (0 = your own ship)
+   */
+  playShipImpact(kind: 'ram' | 'ground' | 'rock', speed: number, distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    // 2..9 m/s maps to a 0.45..1.15 weight so a light nudge is a bump and a
+    // full-speed slam is a house-shaking crash.
+    const w = THREE.MathUtils.clamp(0.45 + (speed - 2) / 10, 0.45, 1.15);
+    // Core timber smash: sub thud, a low wooden boom, a lowpassed body, and a
+    // splinter burst — heavier and a touch lower than a cannonball hull hit.
+    this.playTone(now, 96, 44, 0.3, 0.5 * w * g, 'triangle', 0.004, dest);
+    this.playTone(now + 0.008, 60, 52, 0.42, 0.4 * w * g, 'sine', 0.01, dest);
+    this.playNoise(now, 0.22, 260, 0.7, 0.46 * w * g, 'lowpass', dest);
+    this.playNoise(now + 0.01, 0.18, 1200, 0.9, 0.2 * w * g, 'bandpass', dest);
+    // Hull strain groan (planks flexing) — a detuned low saw that decays.
+    this.playTone(now + 0.04, 138, 96, 0.5, 0.14 * w * g, 'sawtooth', 0.05, dest);
+    for (let i = 0; i < 7; i++) {
+      const at = now + 0.01 + Math.random() * 0.2;
+      this.playNoise(at, 0.05, 2400 + Math.random() * 2800, 2.2, 0.09 * w * g, 'bandpass', dest);
+    }
+    if (kind === 'ram') {
+      // Second boom + a grinding wood-on-wood scrape as the hulls rub apart.
+      this.playTone(now + 0.09, 82, 60, 0.34, 0.3 * w * g, 'triangle', 0.02, dest);
+      this.playNoise(now + 0.06, 0.5, 520, 0.6, 0.16 * w * g, 'bandpass', dest);
+    } else if (kind === 'ground') {
+      // Long gritty keel-drag: sustained gravel/sand hiss under a wood groan.
+      this.playNoise(now + 0.02, 0.8 + 0.4 * w, 180, 0.4, 0.2 * w * g, 'lowpass', dest);
+      this.playNoise(now + 0.05, 0.7, 900, 0.5, 0.11 * w * g, 'bandpass', dest);
+      this.playTone(now + 0.06, 70, 130, 0.6, 0.1 * w * g, 'triangle', 0.06, dest);
+    } else {
+      // Rock strike: a bright high-Q stone crack cutting over the timber.
+      this.playNoise(now, 0.09, 5200, 2.6, 0.22 * w * g, 'highpass', dest);
+      this.playTone(now + 0.004, 640, 380, 0.1, 0.12 * w * g, 'square', 0, dest);
+      this.playNoise(now + 0.05, 0.16, 2600, 1.4, 0.12 * w * g, 'bandpass', dest);
+    }
+    if (distance < 40) this.duckBeds(0.55 * w, 0.35, 0.3);
+  }
+
+  /**
+   * Body hitting the ground hard after a fall/geyser launch — a dull thud plus
+   * a short grunt-like low tone. Scales with impact so a survivable drop is a
+   * soft "oof" and a near-lethal fall is a heavy slam.
+   * @param intensity 0..1 (fall speed / lethal speed)
+   * @param distance  metres from the listener
+   */
+  playBodyThud(intensity = 1, distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    const v = THREE.MathUtils.clamp(intensity, 0.3, 1);
+    this.playTone(now, 78, 40, 0.18, 0.34 * v * g, 'sine', 0.006, dest);
+    this.playNoise(now, 0.13, 240, 0.8, 0.3 * v * g, 'lowpass', dest);
+    this.playNoise(now + 0.01, 0.09, 900, 1.0, 0.12 * v * g, 'bandpass', dest);
+    // Short grunt (only on a real impact).
+    if (v > 0.5) this.playTone(now + 0.02, 150, 120, 0.14, 0.08 * v * g, 'sawtooth', 0.04, dest);
   }
 
   /** Rotating whoosh of chainshot spinning on its chain — deliberate pitch wobble. */

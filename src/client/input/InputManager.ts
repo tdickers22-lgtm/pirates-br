@@ -29,6 +29,13 @@ export class InputManager {
   init(lockElement: HTMLElement = document.body) {
     this.lockElement = lockElement;
     document.addEventListener('keydown', (e) => {
+      // Never hijack keys while the player is typing in a text field (e.g. the
+      // pirate-name input) — otherwise Space/arrows are preventDefault-ed and
+      // gameplay actions fire from letters typed into the menu.
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+        return;
+      }
       if (
         e.code === 'ArrowUp'
         || e.code === 'ArrowDown'
@@ -76,6 +83,12 @@ export class InputManager {
     });
     document.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
+      // Same typing guard as keydown: without it, releasing 'i' while typing a
+      // pirate name in the menu fired requestPointerLock mid-text-entry.
+      const activeUp = document.activeElement as HTMLElement | null;
+      if (activeUp && (activeUp.tagName === 'INPUT' || activeUp.tagName === 'TEXTAREA' || activeUp.isContentEditable)) {
+        return;
+      }
       if (e.code === 'KeyP') this.spyglassHeld = false;
       if (e.code === 'KeyI') {
         this.vHeld = false;

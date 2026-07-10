@@ -269,6 +269,12 @@ export class MenuController {
     this.nameInput.addEventListener('blur', () => submitName());
 
     this.playBtn.addEventListener('click', () => {
+      // Same guard as soloBtn/lobbyStartBtn: queueing while the socket is down
+      // showed a fake infinite matchmaking screen (queueJoin silently no-ops).
+      if (!this.network.isConnected()) {
+        this.flashStatus('Still connecting to the game server. Try again in a second.', true);
+        return;
+      }
       if (!submitName()) return;
       this.network.queueJoin();
       this.showPanel('queue');
@@ -446,6 +452,29 @@ export class MenuController {
     this.network.onConnectionClosed = () => {
       this.clearMatchStartState();
       this.flashStatus('Disconnected from server.', true);
+      // Mid-match the menu (and its status line) is display:none, so a socket
+      // drop was a SILENT permanent freeze — last snapshot kept rendering, HUD
+      // up, inputs dropped. Surface an unmissable overlay with the only real
+      // recovery (there is no reconnect flow; the server removes the player
+      // immediately on disconnect).
+      if (!this.isVisible() && !document.getElementById('disconnect-overlay')) {
+        const overlay = document.createElement('div');
+        overlay.id = 'disconnect-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:400;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(8,10,14,0.82);color:#f3e7c8;font-family:inherit;text-align:center;';
+        const title = document.createElement('div');
+        title.textContent = 'Lost connection to the server';
+        title.style.cssText = 'font-size:28px;letter-spacing:0.06em;';
+        const sub = document.createElement('div');
+        sub.textContent = 'The match went on without you, pirate. Reload to set sail again.';
+        sub.style.cssText = 'font-size:15px;opacity:0.8;';
+        const btn = document.createElement('button');
+        btn.textContent = 'Reload';
+        btn.style.cssText = 'padding:10px 34px;font-size:17px;cursor:pointer;background:#c8a24a;border:none;border-radius:4px;color:#1c1408;';
+        btn.onclick = () => window.location.reload();
+        overlay.append(title, sub, btn);
+        document.body.appendChild(overlay);
+        document.exitPointerLock?.();
+      }
     };
   }
 

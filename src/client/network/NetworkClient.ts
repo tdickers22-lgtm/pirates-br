@@ -22,6 +22,7 @@ export class NetworkClient {
   public onPlayerHit: ((payload: unknown) => void) | null = null;
   public onShipHit: ((payload: unknown) => void) | null = null;
   public onShipDamage: ((payload: unknown) => void) | null = null;
+  public onShipImpact: ((payload: unknown) => void) | null = null;
   public onKillEvent: ((payload: unknown) => void) | null = null;
   public onKegExploded: ((payload: unknown) => void) | null = null;
   public onChestOpened: ((payload: unknown) => void) | null = null;
@@ -65,7 +66,11 @@ export class NetworkClient {
         try {
           const msg: NetMsg = JSON.parse(e.data);
           this.handleMsg(msg);
-        } catch {}
+        } catch (err) {
+          // Swallowing silently turned any join-time build throw into an
+          // undiagnosable stuck loading screen — always leave a trace.
+          console.error('[Net] error handling server message:', err);
+        }
       };
       this.ws.onclose = () => {
         this.connected = false;
@@ -107,6 +112,7 @@ export class NetworkClient {
       case 'player_hit': this.onPlayerHit?.(msg.payload); break;
       case 'ship_hit': this.onShipHit?.(msg.payload); break;
       case 'ship_damage': this.onShipDamage?.(msg.payload); break;
+      case 'ship_impact': this.onShipImpact?.(msg.payload); break;
       case 'kill_event': this.onKillEvent?.(msg.payload); break;
       case 'keg_exploded': this.onKegExploded?.(msg.payload); break;
       case 'chest_opened': this.onChestOpened?.(msg.payload); break;

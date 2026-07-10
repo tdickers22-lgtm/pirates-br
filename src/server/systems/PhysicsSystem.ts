@@ -41,15 +41,18 @@ const ATTITUDE_DAMPING = 3.8;
 /** Broad reach (~110° off the wind) is the power point of the sail polar. */
 const SAIL_POLAR_PEAK = 1.92;
 /** Centerline hull stations (z as a fraction of length, half-width as a
- *  fraction of beam) for the ship-ship / grounding capsule chain. */
+ *  fraction of beam) for the ship-ship / grounding capsule chain.
+ *  CONTRACT (pinned by test-ship-dynamics): parallel galleons (beam 10) at 11m
+ *  centers are rail-to-rail BOARDING range with no phantom contact — so the
+ *  widest station must keep 2·half·beam comfortably under 11 (0.52 → 10.4m). */
 const HULL_CONTACT_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
-  { z: -0.44, half: 0.30 },
-  { z: -0.30, half: 0.44 },
-  { z: -0.15, half: 0.485 },
-  { z: 0.00, half: 0.485 },
-  { z: 0.15, half: 0.46 },
-  { z: 0.30, half: 0.36 },
-  { z: 0.44, half: 0.16 },
+  { z: -0.44, half: 0.32 },
+  { z: -0.30, half: 0.47 },
+  { z: -0.15, half: 0.515 },
+  { z: 0.00, half: 0.52 },
+  { z: 0.15, half: 0.49 },
+  { z: 0.30, half: 0.39 },
+  { z: 0.44, half: 0.17 },
 ];
 
 // ── On-foot locomotion tuning (terrain v2) ───────────────────────────────────
@@ -279,6 +282,14 @@ export type PhysicsCombatEvent =
       attackerId: string;
       targetId: string;
       damage: number;
+    }
+  | {
+      /** A physical hull crash (ram / running aground / sea-rock strike). Purely
+       *  for FX — broadcast to nearby clients so the smash is audible. No credit. */
+      type: 'ship_impact';
+      kind: 'ram' | 'ground' | 'rock';
+      position: Vec3;
+      speed: number;
     };
 
 export class PhysicsSystem {
@@ -778,7 +789,7 @@ export class PhysicsSystem {
         // under the ceiling they stand on the carved cave floor instead.
         const stand = onIsland
           ? this.islandStandY(onIsland, player.position.x, player.position.z, player.position.y)
-          : { floorY: -Infinity, ceilingY: null as number | null };
+          : { floorY: -Infinity, ceilingY: null as number | null, inCave: false };
         const islandFloor = stand.floorY;
         const ceilingY = stand.ceilingY;
         const dockFloor = onDock ? onDock.position.y + 0.14 : -Infinity;
@@ -804,7 +815,12 @@ export class PhysicsSystem {
         let submergeDepth = -Infinity;
         let swimHere = false;
         const playerSea = stormSeaState(storm, player.position.x, player.position.z);
-        if (onIsland && !standingOnDock) {
+        if (onIsland && !standingOnDock && !stand.inCave) {
+          // Caves are DRY by fiat (stand.inCave exempt): the generator keeps every
+          // cave floor above the waterline, and comparing a carved interior floor
+          // against the open-sea wave height would flip deep-cave walkers into the
+          // swim branch — whose seabed resolve (natural surface, 20-45m overhead)
+          // then ejects them through the roof onto the hillside.
           const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS, playerSea);
           submergeDepth = waveY - islandFloor;
           swimHere = player.state === 'swimming' || downed
@@ -1543,15 +1559,16 @@ export class PhysicsSystem {
     x: number,
     z: number,
     playerY: number,
-  ): { floorY: number; ceilingY: number | null } {
+  ): { floorY: number; ceilingY: number | null; inCave: boolean } {
     const natural = getIslandSurfaceY(island, x, z);
     const ceilingY = getCaveCeilingY(island, x, z);
     let floorY = natural;
+    let inCave = false;
     if (ceilingY !== null && playerY < ceilingY - LOCO.CAVE_HEAD_CLEARANCE) {
       const caveFloor = getCaveFloorY(island, x, z);
-      if (caveFloor !== null && caveFloor < natural) floorY = caveFloor;
+      if (caveFloor !== null && caveFloor < natural) { floorY = caveFloor; inCave = true; }
     }
-    return { floorY, ceilingY };
+    return { floorY, ceilingY, inCave };
   }
 
   /**
@@ -1611,17 +1628,37 @@ export class PhysicsSystem {
     const stepZ = player.position.z - prev.z;
     const run = Math.hypot(stepX, stepZ);
     if (run <= 1e-4 || run > LOCO.SLOPE_MAX_STEP) return;
+    // Effective footing surface: INSIDE a cave the walkable floor is the gently
+    // ramping cave floor, not the steep natural mountain roof above it. Measuring
+    // the cliff-block against the natural surface bricked the player a few metres
+    // into every cave mouth (the flank rises fastest exactly where caves bore in),
+    // making the whole interior unreachable — so sample the cave floor when under
+    // a roof and let the mouth-approach read the descending floor ahead.
+    const standY = (sx: number, sz: number): number => {
+      const natural = getIslandSurfaceY(island, sx, sz);
+      const ceil = getCaveCeilingY(island, sx, sz);
+      // Mirror islandStandY's playerY gate: only substitute the cave floor when
+      // the walker is actually UNDER the roof. Without it, a player on the
+      // hillside ABOVE a cave probed the cave floor 10-20m below their feet,
+      // read the "slope" as a plunge, and the steep-slope block never fired —
+      // letting them walk straight up cliff faces over any cave footprint.
+      if (ceil !== null && player.position.y < ceil - LOCO.CAVE_HEAD_CLEARANCE) {
+        const cf = getCaveFloorY(island, sx, sz);
+        if (cf !== null && cf < natural) return cf;
+      }
+      return natural;
+    };
     // Only cliff-block a grounded walker (airborne jumpers clear steep ground),
     // and never fight an explosion/cannon knockback impulse.
-    const gTo = getIslandSurfaceY(island, player.position.x, player.position.z);
+    const gTo = standY(player.position.x, player.position.z);
     const grounded = player.position.y <= gTo + 0.4;
     const knocked = Math.hypot(player.knockbackVelocity.x, player.knockbackVelocity.z) > 1;
     if (!grounded || knocked || player.velocity.y > 0.2) return;
-    // Macro slope of the terrain immediately ahead in the travel direction.
+    // Macro slope of the (effective) footing immediately ahead in the travel dir.
     const dirX = stepX / run;
     const dirZ = stepZ / run;
     const probe = LOCO.SLOPE_PROBE;
-    const gAhead = getIslandSurfaceY(island, player.position.x + dirX * probe, player.position.z + dirZ * probe);
+    const gAhead = standY(player.position.x + dirX * probe, player.position.z + dirZ * probe);
     const slopeAhead = (gAhead - gTo) / probe;
     if (slopeAhead > LOCO.SLOPE_MAX) {
       player.position.x = prev.x;
@@ -1845,6 +1882,10 @@ export class PhysicsSystem {
         targetId: other.id,
         damage: baseDmg * otherFactor,
       });
+      // One spatial crash FX at the contact point (the two hulls slamming).
+      this.combatEvents.push({
+        type: 'ship_impact', kind: 'ram', position: { x: cx, y: 0, z: cz }, speed: relSpd,
+      });
     }
   }
 
@@ -1914,6 +1955,9 @@ export class PhysicsSystem {
         const section = this.impactHullSection(this.rotateWorldToShipLocal(-nx, -nz, ship.rotation));
         // Running aground stoves a hole in the keel — hard groundings punch two.
         this.openHole(ship, section, impactSpeed > 5 ? 2 : 1);
+        this.combatEvents.push({
+          type: 'ship_impact', kind: 'ground', position: { x: deepest.x, y: 0, z: deepest.z }, speed: impactSpeed,
+        });
       }
     }
   }
@@ -1973,6 +2017,9 @@ export class PhysicsSystem {
       if (impactSpeed > 2.2) {
         // Striking a sea rock tears the hull open — a fast strike punches two holes.
         this.openHole(ship, deepest.section, impactSpeed > 5 ? 2 : 1);
+        this.combatEvents.push({
+          type: 'ship_impact', kind: 'rock', position: { x: deepest.sampleX, y: 0, z: deepest.sampleZ }, speed: impactSpeed,
+        });
       }
     }
   }
@@ -2283,13 +2330,17 @@ export class PhysicsSystem {
 
   private getDeckHalfWidth(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], localZ: number, margin = 0) {
     const z = clamp(localZ / Math.max(0.001, stats.length), -0.5, 0.5);
+    // Walkable half-width tracks the BULWARK INNER FACE (~0.42·W), not the loft
+    // deck-edge/sheer (~0.56·W) — clamping to the sheer let pirates stand out on
+    // the covering board and clip through the rail. Kept a hair inboard of the
+    // bulwark wall (ShipRenderer sets it at ±0.42·W) so feet stay on flat deck.
     const stations = [
-      { z: -0.5, half: 0.30 },
-      { z: -0.36, half: 0.50 },
-      { z: -0.08, half: 0.56 },
-      { z: 0.22, half: 0.48 },
-      { z: 0.42, half: 0.26 },
-      { z: 0.5, half: 0.055 },
+      { z: -0.5, half: 0.23 },
+      { z: -0.36, half: 0.38 },
+      { z: -0.08, half: 0.42 },
+      { z: 0.22, half: 0.37 },
+      { z: 0.42, half: 0.20 },
+      { z: 0.5, half: 0.05 },
     ];
     for (let i = 0; i < stations.length - 1; i++) {
       const a = stations[i];

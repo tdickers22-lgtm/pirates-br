@@ -692,9 +692,15 @@ export class Match {
         if (input) client.lastInput = input;
         break;
       }
-      case 'trade_action':
-        this.handleTradeAction(client.playerId, msg.payload as TradeActionPayload);
+      case 'trade_action': {
+        // Shape-check like player_input's sanitizeInput: the unvalidated cast
+        // crashed the process on hostile payloads (null action, non-array offer).
+        const p = msg.payload as TradeActionPayload | null;
+        if (!p || typeof p !== 'object' || typeof p.action !== 'string') break;
+        if (p.offer !== undefined && !Array.isArray(p.offer)) break;
+        this.handleTradeAction(client.playerId, p);
         break;
+      }
       case 'ping':
         this.send(client.ws, { type: 'pong', ts: Date.now(), payload: msg.payload });
         break;
@@ -4222,6 +4228,14 @@ export class Match {
         // Ram damage banks sink credit like any other ship damage; no
         // attacker-only toast (the collision itself is the feedback).
         this.markShipDamagedByPlayer(event.targetId, event.attackerId);
+      } else if (event.type === 'ship_impact') {
+        // A physical crash (ram / aground / sea-rock) — broadcast the contact
+        // point so every nearby client plays the hull-smash SFX.
+        this.broadcast({
+          type: 'ship_impact',
+          ts: Date.now(),
+          payload: { kind: event.kind, position: event.position, speed: event.speed },
+        });
       } else {
         this.markShipDamagedByPlayer(event.targetId, event.attackerId);
         this.notifyShipHit(event.attackerId, {

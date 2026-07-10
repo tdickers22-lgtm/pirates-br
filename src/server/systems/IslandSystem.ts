@@ -136,18 +136,10 @@ export class IslandSystem {
     for (let i = 0; i < player.weapons.length; i++) {
       if (!player.weapons[i]) return i as 0 | 1 | 2 | 3;
     }
-    let worst: 0 | 1 | 2 | 3 = 0;
-    let worstScore = Infinity;
-    for (let i = 0; i < player.weapons.length; i++) {
-      const w = player.weapons[i];
-      if (!w || WEAPONS[w.weaponId].melee) continue;
-      const score = w.ammo + w.reserve;
-      if (score < worstScore) {
-        worstScore = score;
-        worst = i as 0 | 1 | 2 | 3;
-      }
-    }
-    return worstScore < Infinity ? worst : null;
+    // Never evict an equipped gun to make room for a new unlock — only unlock
+    // into a genuinely empty slot. The matching-owned case is already handled
+    // by the reserve credit in giveAmmoToPlayer before we get here.
+    return null;
   }
 
   addItemToShipInventory(ship: Ship, item: ItemStack['item'], qty: number) {

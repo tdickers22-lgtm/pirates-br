@@ -177,10 +177,14 @@ for (const seed of [SEED, 20260702]) {
       const midZ = cave.position.z - Math.cos(cave.rotation) * cave.length * 0.6;
       const ceil = getCaveCeilingY(island, midX, midZ);
       const floor = getCaveFloorY(island, midX, midZ);
-      if (ceil === null || floor === null || ceil - floor < 2.8) {
+      // Rocky knolls (12-16m peaks) can only roof modest grottos — their menu
+      // legitimately reaches 2.5m, still comfortable headroom over the 1.8m
+      // player. Mountains and everything else keep the full 3.0m bar.
+      const minH = island.profile.terrainStyle === 'rocky' ? 2.4 : 3.0;
+      if (ceil === null || floor === null || ceil - floor < minH - 0.2) {
         cavesOk = false; detail = `${island.name}: no roofed volume (ceil ${ceil}, floor ${floor})`;
       }
-      if (cave.ceilingY - cave.floorY < 3.0) { cavesOk = false; detail = `${island.name}: cave too low`; }
+      if (cave.ceilingY - cave.floorY < minH) { cavesOk = false; detail = `${island.name}: cave too low`; }
       // Dead-end chambers keep real rock overhead (they don't surface). Mouths
       // and through-tunnels intentionally approach/break the surface.
       if (cave.hasBackWall) {

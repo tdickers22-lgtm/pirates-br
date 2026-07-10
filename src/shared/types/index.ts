@@ -680,6 +680,7 @@ export type MsgType =
   | 'player_spawned'
   | 'ship_hit'
   | 'ship_damage'
+  | 'ship_impact'
   | 'player_hit'
   | 'kill_event'
   | 'player_downed'

@@ -117,7 +117,14 @@ export class LobbyServer {
     ws.on('message', (data) => {
       let msg: NetMsg;
       try { msg = JSON.parse(data.toString()) as NetMsg; } catch { return; }
-      this.routeMessage(session, msg);
+      // A handler throw on one client's (possibly malformed/hostile) message
+      // must never escape to the ws 'message' emit — uncaught there it kills
+      // the whole process and every match on it. Log and drop instead.
+      try {
+        this.routeMessage(session, msg);
+      } catch (err) {
+        console.error(`[Lobby] error handling '${msg?.type}' from ${session.id.slice(0, 6)}:`, err);
+      }
     });
 
     ws.on('close', () => this.onDisconnect(session));

@@ -148,6 +148,8 @@ export class StormSystem {
       const d = dist2D(player.position.x, player.position.z, storm.centerX, storm.centerZ);
       if (d > storm.safeRadius) {
         const excess = (d - storm.safeRadius) / Math.max(1, storm.safeRadius);
+        player.lastDamagedById = null;
+        player.lastDamagedAt = null;
         player.lastDamageWasHeadshot = false;
         player.health -= dmg * (1 + excess * 0.75);
       }

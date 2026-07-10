@@ -164,7 +164,7 @@ export class WeaponSystem {
       if (d < def.range * rangeMultiplier) {
         // Check frontal arc (120 degree cone)
         const angle = Math.atan2(dx, dz);
-        const diff = Math.abs(((angle - yaw) + Math.PI) % (2 * Math.PI) - Math.PI);
+        const diff = Math.abs(angleWrap(angle - yaw));
         if (diff < Math.PI * 0.67) {
           results.push({
             targetId: target.id,
