@@ -228,7 +228,7 @@ expect('Caves generate across the roster (hillside placement finds sites)', tota
   expect('resolvePropCollision ignores props the player is above', !above.pushed);
   const far = resolvePropCollision({ x: island.position.x + getIslandMaxRadius(island) * 3, y: 0, z: island.position.z }, 0.35, island);
   expect('resolvePropCollision leaves clear positions untouched', !far.pushed);
-  expect('Every prop type has collider metadata', Object.keys(PROP_COLLIDERS).length === 27);
+  expect('Every prop type has collider metadata', Object.keys(PROP_COLLIDERS).length === 45);
 }
 
 // ── Chest map offsets reconstruct the true world position ──

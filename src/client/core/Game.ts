@@ -2546,6 +2546,7 @@ export class Game {
       'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
       'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
       'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
+      'bone_pile', 'driftwood_log', 'grave_marker',
     ]);
     const buckets = new Map<IslandPropType, IslandProp[]>();
     for (const prop of props) {
@@ -2598,6 +2599,12 @@ export class Game {
           this.registerLanternEmitter(group, localPos.x, localPos.y + 0.4, localPos.z, 'campfire');
         } else if (prop.type === 'lantern_post') {
           this.registerLanternEmitter(group, localPos.x, localPos.y + 2.1, localPos.z, 'lantern');
+        } else if (prop.type === 'widow_memorial') {
+          // The widow's kept flame — must read from the sea at night.
+          this.registerLanternEmitter(group, localPos.x, localPos.y + 3.0, localPos.z, 'lantern');
+        } else if (prop.type === 'mermaid_shrine') {
+          // Offering candles at the throne's base.
+          this.registerLanternEmitter(group, localPos.x, localPos.y + 0.7, localPos.z, 'campfire');
         }
       }
     }
@@ -9973,6 +9980,27 @@ export class Game {
         ctx.beginPath(); ctx.arc(0, s * 0.5, s * 0.7, Math.PI, 0); ctx.lineTo(s * 0.7, s * 0.5); ctx.lineTo(-s * 0.7, s * 0.5); ctx.closePath();
         ctx.fill(); ctx.stroke();
         break;
+      case 'noose': // gallows
+        ctx.beginPath(); ctx.moveTo(0, -s * 0.9); ctx.lineTo(0, -s * 0.1); ctx.stroke();
+        ctx.beginPath(); ctx.arc(0, s * 0.32, s * 0.42, 0, Math.PI * 2); ctx.stroke();
+        break;
+      case 'ribs': // whale skeleton
+        ctx.beginPath(); ctx.moveTo(-s * 0.85, s * 0.55); ctx.lineTo(s * 0.85, s * 0.55); ctx.stroke();
+        for (const rx of [-0.45, 0, 0.45]) {
+          ctx.beginPath(); ctx.arc(rx * s, s * 0.55, s * 0.62, Math.PI, 0); ctx.stroke();
+        }
+        break;
+      case 'tentacle': // kraken wreck
+        ctx.beginPath();
+        ctx.moveTo(-s * 0.6, s * 0.85);
+        ctx.quadraticCurveTo(-s * 0.9, -s * 0.1, 0, -s * 0.25);
+        ctx.quadraticCurveTo(s * 0.85, -s * 0.4, s * 0.5, -s * 0.9);
+        ctx.lineWidth = Math.max(1.4, s * 0.34); ctx.stroke();
+        ctx.fillStyle = '#e7c766';
+        for (const [dx, dy] of [[-0.55, 0.45], [-0.3, -0.02], [0.25, -0.28]]) {
+          ctx.beginPath(); ctx.arc(dx * s, dy * s, s * 0.12, 0, Math.PI * 2); ctx.fill();
+        }
+        break;
     }
     ctx.restore();
   }
@@ -10103,11 +10131,21 @@ export class Game {
         }
         // Big charted landmarks — the "where to raid" markers SoT shows.
         for (const prop of island.props ?? []) {
+          // Only sea-visible hero landmarks are charted — intimate story
+          // vignettes (smuggler cache, dig site, parley table…) stay
+          // uncharted so finding them means something.
           const kind = prop.type === 'shipwreck' ? 'anchor'
             : prop.type === 'watchtower' ? 'tower'
               : prop.type === 'standing_stones' ? 'stones'
                 : prop.type === 'fort' ? 'fort'
-                  : prop.type === 'rock_arch' ? 'arch' : '';
+                  : prop.type === 'rock_arch' ? 'arch'
+                    : prop.type === 'gallows' ? 'noose'
+                      : prop.type === 'whale_skeleton' ? 'ribs'
+                        : prop.type === 'kraken_wreck' ? 'tentacle'
+                          : prop.type === 'skull_totem' ? 'fort'
+                            : prop.type === 'wrecker_tower' ? 'tower'
+                              : prop.type === 'mine_head' ? 'hammer'
+                                : prop.type === 'widow_memorial' ? 'hood' : '';
           if (!kind) continue;
           this.drawPoiIcon(ctx, kind, centerX + prop.x * scale, centerY + prop.z * scale, kind === 'fort' ? 8 : 6);
         }

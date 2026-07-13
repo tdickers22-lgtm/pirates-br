@@ -48,7 +48,15 @@ const angleDelta = (a: number, b: number) => Math.atan2(Math.sin(a - b), Math.co
 // Every named island has a FIXED archetype, biome, size and seed so its
 // silhouette, coast bands, caves, stamps and props are identical every match —
 // only world placement and rotation vary. Players learn the islands.
-type LandmarkType = 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort';
+type LandmarkType =
+  | 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort'
+  // Story scenes (docs/ISLAND_STORY_BIBLE.md) — one hero vignette per island.
+  // Placed from a SEPARATE rng stream so adding them never reshuffled the
+  // long-tuned placements drawn from islandRng (see planLandmarks).
+  | 'smuggler_cache' | 'skull_totem' | 'wrecker_tower' | 'whale_skeleton'
+  | 'rum_still' | 'crow_roost' | 'mermaid_shrine' | 'castaway_camp'
+  | 'kraken_wreck' | 'dig_site' | 'gallows' | 'parley_table'
+  | 'mine_head' | 'widow_memorial' | 'gibbet_cage';
 
 interface RosterEntry {
   name: string;
@@ -71,21 +79,58 @@ interface RosterEntry {
 }
 
 const ISLAND_ROSTER: readonly RosterEntry[] = [
-  { name: "Smuggler's Rest", style: 'tropical', biome: 'lush', seed: 0x5310a11, radius: 66, coastBias: -0.25, whiteSand: true, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, layout: { x: 40, z: 690, rotation: 2.7 } },
-  { name: 'Skull Cove', style: 'rocky', biome: 'bone', seed: 0x2b0be5c, radius: 52, coastBias: 0.05, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, forcedInlet: { width: [0.34, 0.46], depth: [0.3, 0.4] }, layout: { x: 700, z: -70, rotation: 4.4 } },
-  { name: 'The Crooked Atoll', style: 'archipelago', biome: 'palm_atoll', seed: 0x3c400a7, radius: 70, coastBias: -0.55, whiteSand: true, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: -588, z: 558, rotation: 2.4 } },
-  { name: 'Dead Man Shoals', style: 'archipelago', biome: 'bone', seed: 0x4dead10, radius: 50, coastBias: -0.3, landmarks: ['shipwreck'], hasDock: false, hasTavern: false, layout: { x: 612, z: 592, rotation: 3.3 } },
-  { name: 'Rumrunner Key', style: 'tropical', biome: 'palm_atoll', seed: 0x5b0b0b0, radius: 42, coastBias: -0.6, whiteSand: true, landmarks: ['shipwreck'], hasDock: true, hasTavern: false, layout: { x: 640, z: 310, rotation: 0.9 } },
-  { name: "Crow's Perch", style: 'mountain', biome: 'highland', seed: 0x6c0ffee, radius: 84, coastBias: 0.45, landmarks: ['watchtower'], hasDock: true, hasTavern: false, layout: { x: -278, z: 290, rotation: 3.9 } },
-  { name: "Mermaid's Folly", style: 'crescent', biome: 'lush', seed: 0x7f01111, radius: 62, coastBias: -0.1, landmarks: ['standing_stones'], hasDock: true, hasTavern: false, layout: { x: 372, z: 372, rotation: 1.2 } },
-  { name: 'Castaway Reach', style: 'tropical', biome: 'lush', seed: 0x8beac42, radius: 88, coastBias: -0.35, landmarks: ['fort', 'shipwreck'], hasDock: true, hasTavern: true, layout: { x: 420, z: -385, rotation: 5.6 } },
-  { name: 'Kraken Tooth', style: 'twin', biome: 'volcanic', seed: 0x9707071, radius: 68, coastBias: 0.55, landmarks: ['watchtower'], hasDock: false, hasTavern: false, layout: { x: -705, z: 25, rotation: 5.1 } },
-  { name: 'Booty Bay', style: 'crescent', biome: 'lush', seed: 0xab00713, radius: 90, coastBias: -0.2, landmarks: ['standing_stones'], hasDock: true, hasTavern: true, layout: { x: -365, z: -295, rotation: 2.1 } },
-  { name: 'Gallows Sands', style: 'rocky', biome: 'bone', seed: 0xb6a1105, radius: 38, coastBias: -0.15, landmarks: ['shipwreck'], hasDock: false, hasTavern: false, layout: { x: 646, z: -641, rotation: 0.6 } },
-  { name: 'Parley Point', style: 'plateau', biome: 'highland', seed: 0xc9a41e4, radius: 58, coastBias: 0.2, landmarks: ['watchtower'], hasDock: true, hasTavern: true, layout: { x: -10, z: -690, rotation: 0.3 } },
-  { name: 'Old Maw Caldera', style: 'mountain', biome: 'volcanic', seed: 0xdca1de6, radius: 96, coastBias: 0.5, landmarks: ['watchtower'], hasDock: true, hasTavern: false, layout: { x: 0, z: 0, rotation: 0.8 } },
-  { name: "Widow's Watch", style: 'mountain', biome: 'highland', seed: 0xe51d0e7, radius: 70, coastBias: 0.35, landmarks: ['watchtower', 'standing_stones'], hasDock: false, hasTavern: false, layout: { x: -592, z: -590, rotation: 1.7 } },
+  { name: "Smuggler's Rest", style: 'tropical', biome: 'lush', seed: 0x5310a11, radius: 66, coastBias: -0.25, whiteSand: true, landmarks: ['standing_stones', 'smuggler_cache'], hasDock: true, hasTavern: true, layout: { x: 40, z: 690, rotation: 2.7 } },
+  { name: 'Skull Cove', style: 'rocky', biome: 'bone', seed: 0x2b0be5c, radius: 52, coastBias: 0.05, landmarks: ['shipwreck', 'skull_totem'], hasDock: true, hasTavern: false, forcedInlet: { width: [0.34, 0.46], depth: [0.3, 0.4] }, layout: { x: 700, z: -70, rotation: 4.4 } },
+  { name: 'The Crooked Atoll', style: 'archipelago', biome: 'palm_atoll', seed: 0x3c400a7, radius: 70, coastBias: -0.55, whiteSand: true, landmarks: ['shipwreck', 'wrecker_tower'], hasDock: true, hasTavern: false, layout: { x: -588, z: 558, rotation: 2.4 } },
+  { name: 'Dead Man Shoals', style: 'archipelago', biome: 'bone', seed: 0x4dead10, radius: 50, coastBias: -0.3, landmarks: ['shipwreck', 'whale_skeleton', 'gibbet_cage'], hasDock: false, hasTavern: false, layout: { x: 612, z: 592, rotation: 3.3 } },
+  { name: 'Rumrunner Key', style: 'tropical', biome: 'palm_atoll', seed: 0x5b0b0b0, radius: 42, coastBias: -0.6, whiteSand: true, landmarks: ['shipwreck', 'rum_still'], hasDock: true, hasTavern: false, layout: { x: 640, z: 310, rotation: 0.9 } },
+  { name: "Crow's Perch", style: 'mountain', biome: 'highland', seed: 0x6c0ffee, radius: 84, coastBias: 0.45, landmarks: ['watchtower', 'crow_roost'], hasDock: true, hasTavern: false, layout: { x: -278, z: 290, rotation: 3.9 } },
+  { name: "Mermaid's Folly", style: 'crescent', biome: 'lush', seed: 0x7f01111, radius: 62, coastBias: -0.1, landmarks: ['standing_stones', 'mermaid_shrine'], hasDock: true, hasTavern: false, layout: { x: 372, z: 372, rotation: 1.2 } },
+  { name: 'Castaway Reach', style: 'tropical', biome: 'lush', seed: 0x8beac42, radius: 88, coastBias: -0.35, landmarks: ['fort', 'shipwreck', 'castaway_camp'], hasDock: true, hasTavern: true, layout: { x: 420, z: -385, rotation: 5.6 } },
+  { name: 'Kraken Tooth', style: 'twin', biome: 'volcanic', seed: 0x9707071, radius: 68, coastBias: 0.55, landmarks: ['watchtower', 'kraken_wreck'], hasDock: false, hasTavern: false, layout: { x: -705, z: 25, rotation: 5.1 } },
+  { name: 'Booty Bay', style: 'crescent', biome: 'lush', seed: 0xab00713, radius: 90, coastBias: -0.2, landmarks: ['standing_stones', 'dig_site'], hasDock: true, hasTavern: true, layout: { x: -365, z: -295, rotation: 2.1 } },
+  { name: 'Gallows Sands', style: 'rocky', biome: 'bone', seed: 0xb6a1105, radius: 38, coastBias: -0.15, landmarks: ['shipwreck', 'gallows', 'gibbet_cage'], hasDock: false, hasTavern: false, layout: { x: 646, z: -641, rotation: 0.6 } },
+  { name: 'Parley Point', style: 'plateau', biome: 'highland', seed: 0xc9a41e4, radius: 58, coastBias: 0.2, landmarks: ['watchtower', 'parley_table'], hasDock: true, hasTavern: true, layout: { x: -10, z: -690, rotation: 0.3 } },
+  { name: 'Old Maw Caldera', style: 'mountain', biome: 'volcanic', seed: 0xdca1de6, radius: 96, coastBias: 0.5, landmarks: ['watchtower', 'mine_head'], hasDock: true, hasTavern: false, layout: { x: 0, z: 0, rotation: 0.8 } },
+  { name: "Widow's Watch", style: 'mountain', biome: 'highland', seed: 0xe51d0e7, radius: 70, coastBias: 0.35, landmarks: ['watchtower', 'standing_stones', 'widow_memorial'], hasDock: false, hasTavern: false, layout: { x: -592, z: -590, rotation: 1.7 } },
 ] as const;
+
+// ── Story-scene placement tuning (docs/ISLAND_STORY_BIBLE.md) ───────────────
+// Inland scenes ride findLandmarkSite (flatten stamp + slope/height limits);
+// coastal scenes ride a shipwreck-style beach scan but must land DRY.
+interface StoryInlandSpec {
+  minY: number; maxSlope: number; dLo: number; dHi: number;
+  stampRadius: number; blend: number; pad: number;
+  /** Face the scene's authored front (game +Z at yaw 0) out to sea. */
+  faceSeaward?: boolean;
+}
+const STORY_INLAND: Partial<Record<LandmarkType, StoryInlandSpec>> = {
+  smuggler_cache: { minY: 2.5, maxSlope: 0.5, dLo: 0.18, dHi: 0.42, stampRadius: 5.5, blend: 0.4, pad: 5 },
+  skull_totem: { minY: 3, maxSlope: 0.55, dLo: 0.2, dHi: 0.5, stampRadius: 5, blend: 0.45, pad: 5, faceSeaward: true },
+  rum_still: { minY: 2, maxSlope: 0.5, dLo: 0.2, dHi: 0.45, stampRadius: 6, blend: 0.4, pad: 5.5 },
+  crow_roost: { minY: 5, maxSlope: 0.7, dLo: 0.25, dHi: 0.55, stampRadius: 5, blend: 0.5, pad: 5, faceSeaward: true },
+  dig_site: { minY: 2.5, maxSlope: 0.45, dLo: 0.16, dHi: 0.4, stampRadius: 7, blend: 0.4, pad: 6 },
+  gallows: { minY: 3.5, maxSlope: 0.6, dLo: 0.15, dHi: 0.45, stampRadius: 6, blend: 0.45, pad: 5.5, faceSeaward: true },
+  parley_table: { minY: 4, maxSlope: 0.45, dLo: 0.15, dHi: 0.4, stampRadius: 6, blend: 0.4, pad: 5.5 },
+  mine_head: { minY: 6, maxSlope: 0.85, dLo: 0.3, dHi: 0.6, stampRadius: 6, blend: 0.5, pad: 5.5, faceSeaward: true },
+  // High and rim-ward: the widow keeps her vigil at the cliff edge, lantern
+  // visible from open water at night.
+  widow_memorial: { minY: 8, maxSlope: 0.6, dLo: 0.45, dHi: 0.75, stampRadius: 6, blend: 0.45, pad: 5.5, faceSeaward: true },
+};
+interface StoryCoastalSpec { bandLo: number; bandHi: number; stampRadius: number; pad: number }
+// bandLo well above the swell: scene base discs are 4-13m wide, so a centre
+// sampled at ~0.4m still dips its rim underwater (audit P0: wrecker tower
+// half-submerged, whale pad seam over the shallows).
+const STORY_COASTAL: Partial<Record<LandmarkType, StoryCoastalSpec>> = {
+  // Wide scenes need pads that clear a camp's furniture ring (~5m), not just
+  // the camp stamp centre.
+  whale_skeleton: { bandLo: 0.45, bandHi: 2.0, stampRadius: 7, pad: 8 },
+  kraken_wreck: { bandLo: 0.6, bandHi: 2.6, stampRadius: 7.5, pad: 8 },
+  wrecker_tower: { bandLo: 0.7, bandHi: 2.2, stampRadius: 5.5, pad: 4.5 },
+  castaway_camp: { bandLo: 0.7, bandHi: 2.2, stampRadius: 6, pad: 4.5 },
+  mermaid_shrine: { bandLo: 0.4, bandHi: 1.5, stampRadius: 5, pad: 4.5 },
+  gibbet_cage: { bandLo: 0.3, bandHi: 1.1, stampRadius: 2, pad: 3 },
+};
 
 // ── Biome prop scatter tables ───────────────────────────────────────────────
 interface ScatterSpec {
@@ -103,6 +148,10 @@ const PALM_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.9, maxSlope: 
 const BOULDER_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.5, maxSlope: 2.4, dMin: 0.08, dMax: 0.95, sMin: 0.75, sMax: 1.35 };
 const CLUTTER_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 1.2, maxSlope: 0.42, dMin: 0.2, dMax: 0.8, sMin: 0.9, sMax: 1.1 };
 const SHRUB_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.7, maxSlope: 1.0, dMin: 0.08, dMax: 0.95, sMin: 0.8, sMax: 1.35 };
+// Story scatter: driftwood hugs the beach band, bone piles + graves dress the interior.
+const DRIFTWOOD_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.35, maxSlope: 0.8, dMin: 0.72, dMax: 0.99, sMin: 0.8, sMax: 1.3 };
+const BONE_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 0.6, maxSlope: 0.9, dMin: 0.15, dMax: 0.9, sMin: 0.8, sMax: 1.25 };
+const GRAVE_SPECS: Omit<ScatterSpec, 'type' | 'weight'> = { minY: 1.2, maxSlope: 0.5, dMin: 0.2, dMax: 0.75, sMin: 0.9, sMax: 1.1 };
 
 const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
   lush: [
@@ -121,6 +170,7 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'boulder_c', weight: 0.8, ...BOULDER_SPECS },
     { type: 'crate', weight: 0.5, ...CLUTTER_SPECS },
     { type: 'barrel', weight: 0.5, ...CLUTTER_SPECS },
+    { type: 'driftwood_log', weight: 0.7, ...DRIFTWOOD_SPECS },
   ],
   palm_atoll: [
     { type: 'bush', weight: 1.6, ...SHRUB_SPECS },
@@ -135,6 +185,7 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'boulder_c', weight: 0.5, ...BOULDER_SPECS },
     { type: 'barrel', weight: 0.4, ...CLUTTER_SPECS },
     { type: 'crate', weight: 0.3, ...CLUTTER_SPECS },
+    { type: 'driftwood_log', weight: 0.9, ...DRIFTWOOD_SPECS },
   ],
   volcanic: [
     { type: 'bush', weight: 1.0, ...SHRUB_SPECS },
@@ -144,6 +195,8 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'boulder_c', weight: 2.2, ...BOULDER_SPECS },
     { type: 'palm_c', weight: 0.6, ...PALM_SPECS },
     { type: 'crate', weight: 0.4, ...CLUTTER_SPECS },
+    { type: 'bone_pile', weight: 0.4, ...BONE_SPECS },
+    { type: 'driftwood_log', weight: 0.3, ...DRIFTWOOD_SPECS },
   ],
   highland: [
     { type: 'bush', weight: 1.6, ...SHRUB_SPECS },
@@ -157,6 +210,8 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'palm_c', weight: 0.7, ...PALM_SPECS },
     { type: 'barrel', weight: 0.5, ...CLUTTER_SPECS },
     { type: 'crate', weight: 0.5, ...CLUTTER_SPECS },
+    { type: 'grave_marker', weight: 0.5, ...GRAVE_SPECS },
+    { type: 'driftwood_log', weight: 0.4, ...DRIFTWOOD_SPECS },
   ],
   bone: [
     { type: 'bush', weight: 0.8, ...SHRUB_SPECS },
@@ -167,6 +222,9 @@ const SCATTER_MIX: Record<IslandBiome, ScatterSpec[]> = {
     { type: 'palm_b', weight: 0.5, ...PALM_SPECS },
     { type: 'crate', weight: 0.9, ...CLUTTER_SPECS },
     { type: 'barrel', weight: 0.9, ...CLUTTER_SPECS },
+    { type: 'bone_pile', weight: 1.6, ...BONE_SPECS },
+    { type: 'grave_marker', weight: 1.0, ...GRAVE_SPECS },
+    { type: 'driftwood_log', weight: 1.2, ...DRIFTWOOD_SPECS },
   ],
 };
 
@@ -1013,6 +1071,82 @@ export class MapGenerator {
         const site = best as { x: number; z: number; angle: number; score: number } | null;
         if (site) {
           sites.push({ type, x: site.x, z: site.z, yaw: angleWrap(site.angle + Math.PI * 0.5 + rr(rng, -0.3, 0.3)) });
+        }
+      }
+    }
+    // ── Story scenes (docs/ISLAND_STORY_BIBLE.md) ────────────────────────────
+    // A SEPARATE deterministic stream: consuming islandRng here would reshuffle
+    // every placement drawn after landmarks (chests/barrels/npcs/props) on the
+    // island — the tuned world stays bit-identical with story scenes added.
+    const storyRng = mulberry32((entry.seed ^ 0x53ce7a11) >>> 0);
+    // Coastal scenes share the rim with un-stamped shipwrecks — enforce the
+    // pairwise prop-spacing contract against every already-planned site.
+    const farFromSites = (x: number, z: number, type: LandmarkType) => {
+      const myR = getPropSpacingRadius(type as IslandPropType, 1);
+      for (const s of sites) {
+        const otherR = getPropSpacingRadius(s.type as IslandPropType, 1);
+        if (Math.hypot(x - s.x, z - s.z) < myR + otherR + 0.6) return false;
+      }
+      return true;
+    };
+    for (const type of entry.landmarks) {
+      const inland = STORY_INLAND[type];
+      if (inland) {
+        const s = this.findLandmarkSite(island, storyRng, sites.length, inland);
+        // Skull Cove's totem glares over the inlet mouth; other seaward scenes
+        // face outward from the island centre.
+        const inlet = type === 'skull_totem' ? island.profile.inlets?.[0] : undefined;
+        const yaw = inlet
+          ? Math.atan2(
+              island.position.x + Math.cos(inlet.angle) * island.radius - s.x,
+              island.position.z + Math.sin(inlet.angle) * island.radius - s.z,
+            )
+          : inland.faceSeaward
+            ? Math.atan2(s.x - island.position.x, s.z - island.position.z)
+            : ra(storyRng);
+        sites.push({ type, x: s.x, z: s.z, yaw: angleWrap(yaw) });
+        continue;
+      }
+      const coastal = STORY_COASTAL[type];
+      if (coastal) {
+        let best: { x: number; z: number; angle: number; score: number } | null = null;
+        const consider = (angle: number, distRatio: number, strict: boolean) => {
+          if (island.dock && Math.abs(angleDelta(angle, island.dock.shoreAngle)) < 0.7) return;
+          const w = getIslandCoastWeights(island, angle);
+          if (strict && w.beach < 0.5) return;
+          const pos = getIslandSurfacePoint(island, distRatio, angle, 0);
+          // Scenes must sit DRY (unlike half-beached wrecks) — keep the band
+          // even when relaxing beachiness.
+          if (pos.y < coastal.bandLo || pos.y > coastal.bandHi) return;
+          if (this.nearStamp(island, pos.x, pos.z, coastal.pad)) return;
+          if (!farFromSites(pos.x, pos.z, type)) return;
+          const score = w.beach * 2 - Math.abs(pos.y - (coastal.bandLo + coastal.bandHi) * 0.5);
+          if (!best || score > best.score) best = { x: pos.x, z: pos.z, angle, score };
+        };
+        // Deep ratios matter on archipelagos: the footprint envelope is mostly
+        // water, and islet beaches sit well inside it.
+        const ratios = [0.97, 0.9, 0.82, 0.72, 0.62];
+        for (let attempt = 0; attempt < 40 && !best; attempt++) {
+          consider(ra(storyRng), ratios[attempt % ratios.length], true);
+        }
+        for (const strict of [true, false]) {
+          if (best) break;
+          for (const dr of ratios) {
+            for (let k = 0; k < 72; k++) consider((k / 72) * Math.PI * 2 + 0.031, dr, strict);
+          }
+        }
+        const site = best as { x: number; z: number; angle: number; score: number } | null;
+        if (site) {
+          island.stamps!.push({ x: site.x, z: site.z, radius: coastal.stampRadius, targetY: getIslandSurfaceY(island, site.x, site.z), blend: 0.45 });
+          // Face the scene out to sea (authored fronts point game +Z at yaw 0).
+          const yaw = Math.atan2(site.x - island.position.x, site.z - island.position.z);
+          sites.push({ type, x: site.x, z: site.z, yaw: angleWrap(yaw + rr(storyRng, -0.2, 0.2)) });
+        } else {
+          // Absolute fallback: inland pad so the scene always exists.
+          const s = this.findLandmarkSite(island, storyRng, sites.length, {
+            minY: 1.5, maxSlope: 0.6, dLo: 0.3, dHi: 0.6, stampRadius: coastal.stampRadius, blend: 0.45, pad: coastal.pad,
+          });
+          sites.push({ type, x: s.x, z: s.z, yaw: Math.atan2(s.x - island.position.x, s.z - island.position.z) });
         }
       }
     }

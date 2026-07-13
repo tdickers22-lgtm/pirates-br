@@ -266,7 +266,14 @@ export type IslandPropType =
   | 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort'
   | 'tent_a' | 'bedroll' | 'rock_arch'
   | 'bush' | 'bush_berry' | 'flower_bush' | 'fern_plant' | 'flower_patch' | 'wildflowers'
-  | 'dock_mid' | 'dock_end';
+  | 'dock_mid' | 'dock_end'
+  // Story scenes — one hero vignette per roster island (docs/ISLAND_STORY_BIBLE.md)
+  | 'smuggler_cache' | 'skull_totem' | 'wrecker_tower' | 'whale_skeleton'
+  | 'rum_still' | 'crow_roost' | 'mermaid_shrine' | 'castaway_camp'
+  | 'kraken_wreck' | 'dig_site' | 'gallows' | 'parley_table'
+  | 'mine_head' | 'widow_memorial' | 'gibbet_cage'
+  // Story scatter (instanced clutter)
+  | 'bone_pile' | 'driftwood_log' | 'grave_marker';
 
 /** Deterministic decorative/landmark prop. Positions are WORLD-space XZ; Y is
  *  sampled via getIslandSurfaceY at need (dock_mid/dock_end/dock lanterns sit at

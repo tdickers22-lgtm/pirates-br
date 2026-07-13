@@ -43,6 +43,26 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   wildflowers: { shape: 'none', radius: 0, height: 0.9 },
   dock_mid: { shape: 'none', radius: 0, height: 1.1 },
   dock_end: { shape: 'none', radius: 0, height: 1.1 },
+  // Story scenes: the collider blocks only the core structure so players can
+  // walk INTO the vignette; SPACING_OVERRIDES reserves the visual footprint.
+  smuggler_cache: { shape: 'capsule', radius: 1.6, height: 2.2 },
+  skull_totem: { shape: 'capsule', radius: 2.4, height: 4.5 },
+  wrecker_tower: { shape: 'capsule', radius: 2.0, height: 7.3 },
+  whale_skeleton: { shape: 'none', radius: 0, height: 3.0 },
+  rum_still: { shape: 'capsule', radius: 1.1, height: 2.4 },
+  crow_roost: { shape: 'capsule', radius: 2.0, height: 9.0 },
+  mermaid_shrine: { shape: 'capsule', radius: 2.0, height: 2.8 },
+  castaway_camp: { shape: 'capsule', radius: 0.5, height: 4.0 },
+  kraken_wreck: { shape: 'capsule', radius: 4.0, height: 4.6 },
+  dig_site: { shape: 'none', radius: 0, height: 1.0 },
+  gallows: { shape: 'capsule', radius: 0.4, height: 4.4 },
+  parley_table: { shape: 'capsule', radius: 1.9, height: 1.0 },
+  mine_head: { shape: 'capsule', radius: 3.2, height: 5.0 },
+  widow_memorial: { shape: 'capsule', radius: 1.6, height: 3.4 },
+  gibbet_cage: { shape: 'capsule', radius: 0.5, height: 3.4 },
+  bone_pile: { shape: 'none', radius: 0, height: 0.6 },
+  driftwood_log: { shape: 'sphere', radius: 1.1, height: 0.9 },
+  grave_marker: { shape: 'capsule', radius: 0.3, height: 1.1 },
 };
 
 /** Palette hints per biome (0xRRGGBB) — the client keys vertex colors off
@@ -62,14 +82,34 @@ const SPACING_OVERRIDES: Partial<Record<IslandPropType, number>> = {
   standing_stones: 3.6,
   shipwreck: 5.2,
   fort: 8.5,
+  // Story vignettes reserve their whole visual footprint (walk-in scenes have
+  // small or no hard collider, but scatter must stay out of the tableau).
+  smuggler_cache: 5.0,
+  skull_totem: 5.0,
+  wrecker_tower: 5.5,
+  whale_skeleton: 10.0,
+  rum_still: 5.5,
+  crow_roost: 5.0,
+  mermaid_shrine: 5.0,
+  castaway_camp: 5.5,
+  kraken_wreck: 9.0,
+  dig_site: 6.5,
+  gallows: 6.0,
+  parley_table: 5.5,
+  mine_head: 6.0,
+  widow_memorial: 5.5,
+  gibbet_cage: 1.4,
 };
 
 /** Spacing radius used when scattering props (slightly wider than the hard
- *  collider so trunks/rocks never visually interpenetrate). */
+ *  collider so trunks/rocks never visually interpenetrate). Walk-through
+ *  scenes (shape 'none') still reserve space via SPACING_OVERRIDES. */
 export function getPropSpacingRadius(type: IslandPropType, scale: number): number {
   const col = PROP_COLLIDERS[type];
-  if (!col || col.shape === 'none') return 0;
-  return (SPACING_OVERRIDES[type] ?? (col.radius + 0.12)) * scale;
+  if (!col) return 0;
+  const override = SPACING_OVERRIDES[type];
+  if (col.shape === 'none') return (override ?? 0) * scale;
+  return (override ?? (col.radius + 0.12)) * scale;
 }
 
 /**

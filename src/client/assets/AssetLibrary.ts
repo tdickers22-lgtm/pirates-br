@@ -21,6 +21,12 @@ export const ASSET_NAMES = [
   'watchtower', 'shipwreck', 'standing_stones', 'lantern_post', 'fort', 'tavern', 'stall',
   'tent_a', 'bedroll', 'rock_arch',
   'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
+  // Story scenes + story scatter (docs/ISLAND_STORY_BIBLE.md)
+  'smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton',
+  'rum_still', 'crow_roost', 'mermaid_shrine', 'castaway_camp',
+  'kraken_wreck', 'dig_site', 'gallows', 'parley_table',
+  'mine_head', 'widow_memorial', 'gibbet_cage',
+  'bone_pile', 'driftwood_log', 'grave_marker',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
@@ -205,12 +211,19 @@ function subGeometry(geom: THREE.BufferGeometry, start: number, count: number): 
   const index = geom.getIndex();
   const pos = geom.getAttribute('position') as THREE.BufferAttribute;
   const normal = geom.getAttribute('normal') as THREE.BufferAttribute | null;
+  // COLOR_0 (baked vertex AO) must survive the slice: materials from the GLTF
+  // loader have vertexColors=true, and a geometry missing the attribute makes
+  // WebGL read (0,0,0) — every instanced prop rendered black. getX/getY/getZ
+  // denormalize u8/u16 automatically (three r152+).
+  const color = geom.getAttribute('color') as THREE.BufferAttribute | null;
 
   const positions: number[] = [];
   const normals: number[] = [];
+  const colors: number[] = [];
   const readVertex = (vi: number) => {
     positions.push(pos.getX(vi), pos.getY(vi), pos.getZ(vi));
     if (normal) normals.push(normal.getX(vi), normal.getY(vi), normal.getZ(vi));
+    if (color) colors.push(color.getX(vi), color.getY(vi), color.getZ(vi));
   };
   if (index) {
     for (let i = start; i < start + count; i++) readVertex(index.getX(i));
@@ -219,24 +232,34 @@ function subGeometry(geom: THREE.BufferGeometry, start: number, count: number): 
   }
   out.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   if (normal) out.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  if (color) out.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   return out;
 }
 
-/** Minimal non-indexed geometry merge (positions + normals), optionally keeping groups. */
+/** Minimal non-indexed geometry merge (positions + normals + vertex color),
+ *  optionally keeping groups. Vertex color (baked AO) defaults to white for
+ *  sources without the attribute so the merged buffer stays uniform. */
 function mergeGeoms(geoms: THREE.BufferGeometry[], withGroups = false): THREE.BufferGeometry {
   if (geoms.length === 1 && !withGroups) return geoms[0];
   const out = new THREE.BufferGeometry();
   const positions: number[] = [];
   const normals: number[] = [];
+  const colors: number[] = [];
+  const anyColor = geoms.some((g) => !!g.getAttribute('color'));
   let offset = 0;
   geoms.forEach((g, gi) => {
     const src = g.getIndex() ? g.toNonIndexed() : g;
     const pos = src.getAttribute('position') as THREE.BufferAttribute;
     const nor = src.getAttribute('normal') as THREE.BufferAttribute | null;
+    const col = src.getAttribute('color') as THREE.BufferAttribute | null;
     for (let i = 0; i < pos.count; i++) {
       positions.push(pos.getX(i), pos.getY(i), pos.getZ(i));
       if (nor) normals.push(nor.getX(i), nor.getY(i), nor.getZ(i));
       else normals.push(0, 1, 0);
+      if (anyColor) {
+        if (col) colors.push(col.getX(i), col.getY(i), col.getZ(i));
+        else colors.push(1, 1, 1);
+      }
     }
     if (withGroups) {
       out.addGroup(offset, pos.count, gi);
@@ -246,6 +269,7 @@ function mergeGeoms(geoms: THREE.BufferGeometry[], withGroups = false): THREE.Bu
   });
   out.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   out.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  if (anyColor) out.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   return out;
 }
 
