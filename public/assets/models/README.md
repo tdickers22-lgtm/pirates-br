@@ -73,4 +73,5 @@ Core: `TeamTint`, `Wood_Dark/Mid/Light/Bleached/Wet`, `Rock_Grey/Dark/Sea/Stack/
 Fidelity-pass additions: `Ember` (emissive), `Wood_Wet`, `Rust`, `Flag_Fin`,
 `Flag_White`, `Flag_Rival`, `Coral`, `Shell_Pearl`, `Candle_Wax` (emissive),
 `Glass_Dead` (deliberately non-emissive), `Bottle_Green`, `Copper`, `Dirt`,
-`Kraken_Flesh`, `Kraken_Sucker`, `Obsidian`, `Crow_Black`.
+`Kraken_Flesh`, `Kraken_Sucker`, `Obsidian`, `Crow_Black`, `Sand_Pad`, `Grave_Dirt`
+(scene base pads — warmer than `Sand`, rims authored sunk + feathered).

@@ -19,7 +19,8 @@ RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
 
 EXTRA = {
-    "Bone": ((0.82, 0.78, 0.68, 1.0), 0.9, 0.0),
+    "Bone": ((0.76, 0.73, 0.62, 1.0), 0.9, 0.0),   # ivory, not paper-white (audit)
+    "Sand_Pad": ((0.70, 0.63, 0.47, 1.0), 0.95, 0.0),  # pad rule: warm, rim buried
 }
 for k, v in EXTRA.items():
     PALETTE.setdefault(k, v)
@@ -101,7 +102,7 @@ def finish(objs, width=0.02, segments=1):
 def build_whale_skeleton(name="whale_skeleton"):
     coll = asset_collection(name)
     rng = random.Random(11)
-    bone, sand = mat("Bone"), mat("Sand")
+    bone, sand = mat("Bone"), mat("Sand_Pad")
     dark = mat("Char_Black")
     parts, bev = [], []
 
@@ -117,7 +118,7 @@ def build_whale_skeleton(name="whale_skeleton"):
         rr = min(1.0, (eu * eu + ew * ew) ** 0.5)
         h = 0.40 * max(0.0, (1 - rr * rr)) ** 1.3
         h += 0.18 * math.exp(-((eu * 5.6) ** 2) / 2.2) * max(0.0, 1 - abs(ew))
-        v.co = Vector((eu * SX, ew * SY - 0.6, h - 0.10 - 0.3 * rr ** 6))
+        v.co = Vector((eu * SX, ew * SY - 0.6, h - 0.10 - 1.1 * rr ** 6))
     base = obj_from_bmesh(f"{name}_sand", bm, coll, sand, smooth=True)
     displace_noise(base, strength=0.10, scale=2.2, seed=4)
     apply_modifiers(base)
@@ -343,7 +344,7 @@ def build_whale_skeleton(name="whale_skeleton"):
         parts.append(o)
 
     obj = join(parts, name)
-    bake_ao(coll, floor=0.5, height_gradient=0.18)
+    bake_ao(coll, floor=0.45, height_gradient=0.18)
     path = export_collection_vc(coll, f"{name}.glb")
     verify_glb(path)
     if RENDER_DIR:

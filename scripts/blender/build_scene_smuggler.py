@@ -19,6 +19,7 @@ RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
 
 EXTRA = {
+    "Sand_Pad": ((0.70, 0.63, 0.47, 1.0), 0.95, 0.0),
     "Bottle_Green": ((0.10, 0.30, 0.16, 1.0), 0.35, 0.0),
     "Bone": ((0.82, 0.78, 0.68, 1.0), 0.9, 0.0),
 }
@@ -435,7 +436,7 @@ def build(name):
     parts = []
     bev_all = []
 
-    parts.append(ground_disc(coll, f"{name}_ground", R, hfn, mat("Sand")))
+    parts.append(ground_disc(coll, f"{name}_ground", R, hfn, mat("Sand_Pad")))
     displace_noise(parts[0], strength=0.035, scale=0.55, seed=5)
     apply_modifiers(parts[0])
 

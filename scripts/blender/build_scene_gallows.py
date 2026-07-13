@@ -33,7 +33,14 @@ for k, v in EXTRA.items():
 # UNIVERSAL PAD RULE: tint this scene's ground to warm dune sand. Local
 # override of the bright palette Sand — the script runs in its own headless
 # session so only this GLB is affected; the material NAME stays "Sand".
-_sand = mat("Sand")
+EXTRA_PAD = {
+    "Sand_Pad": ((0.66, 0.58, 0.42, 1.0), 0.95, 0.0),
+    "Grave_Dirt": ((0.45, 0.38, 0.28, 1.0), 0.95, 0.0),
+}
+for _k, _v in EXTRA_PAD.items():
+    if _k not in PALETTE:
+        PALETTE[_k] = _v
+_sand = mat("Sand_Pad")
 _sand.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = \
     (0.66, 0.58, 0.42, 1.0)
 
@@ -163,7 +170,7 @@ def build_gallows(name="gallows"):
     bmesh.ops.scale(bm, vec=Vector((BASE_R, BASE_R * 0.92, BASE_H)), verts=bm.verts)
     for v in bm.verts:                          # wind-blown ripples
         v.co.z += 0.028 * math.sin(v.co.x * 3.4 + v.co.y * 1.2) * max(0.0, v.co.z / BASE_H)
-    o = obj_from_bmesh(f"{name}_dune", bm, coll, mat("Sand"), smooth=True)
+    o = obj_from_bmesh(f"{name}_dune", bm, coll, mat("Sand_Pad"), smooth=True)
     displace_noise(o, strength=0.09, scale=2.2, seed=3)
     displace_noise(o, strength=0.04, scale=0.55, seed=13)
     apply_modifiers(o)
@@ -266,7 +273,7 @@ def build_gallows(name="gallows"):
         bmesh.ops.scale(bm, vec=Vector((0.40, 0.86, 0.27)), verts=bm.verts)
         bmesh.ops.transform(bm, matrix=Matrix.Translation((gx, gy, gz(gx, gy) + 0.015)) @
                             Matrix.Rotation(gyaw, 4, 'Z'), verts=bm.verts)
-        o = obj_from_bmesh(f"{name}_grave{gi}", bm, coll, mat("Sand"), smooth=True)
+        o = obj_from_bmesh(f"{name}_grave{gi}", bm, coll, mat("Grave_Dirt"), smooth=True)
         displace_noise(o, strength=0.05, scale=0.5, seed=23 + gi)
         apply_modifiers(o)
         parts.append(o)
@@ -374,7 +381,7 @@ def build_gallows(name="gallows"):
         bmesh.ops.scale(bm, vec=Vector((s, s * 1.3, s * 0.32)), verts=bm.verts)
         bmesh.ops.transform(bm, matrix=Matrix.Translation((dx, dy, gz(dx, dy) + 0.01)) @
                             Matrix.Rotation(rng.uniform(0, 3), 4, 'Z'), verts=bm.verts)
-        o = obj_from_bmesh(f"{name}_drift{di}", bm, coll, mat("Sand"), smooth=True)
+        o = obj_from_bmesh(f"{name}_drift{di}", bm, coll, mat("Sand_Pad"), smooth=True)
         displace_noise(o, strength=0.05, scale=0.5, seed=41 + di)
         apply_modifiers(o)
         parts.append(o)
