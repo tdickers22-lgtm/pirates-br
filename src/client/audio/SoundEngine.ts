@@ -271,6 +271,23 @@ export class SoundEngine {
     }
   }
 
+  playDoorCreak(opening: boolean): void {
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    // Hinge creak — same rasp family as the chest lid, pitched by direction.
+    this.playNoise(now, 0.3, opening ? 1050 : 850, 1.3, 0.14, 'bandpass');
+    this.playTone(now, opening ? 220 : 300, opening ? 430 : 170, 0.3, 0.09, 'sawtooth');
+    if (opening) {
+      // Latch lifts first
+      this.playNoise(now, 0.035, 4200, 1.6, 0.12, 'highpass');
+    } else {
+      // Frame thud + latch clack as it seats
+      this.playTone(now + 0.24, 120, 80, 0.14, 0.2, 'triangle');
+      this.playNoise(now + 0.26, 0.04, 3800, 1.5, 0.12, 'highpass');
+    }
+  }
+
   // ── Combat feedback ──────────────────────────────────────────────
   playPlayerHurt(damage: number): void {
     this.unlock();

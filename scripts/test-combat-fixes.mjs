@@ -280,12 +280,15 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
   }
   expect('the rammed ship sinks (via the water pouring through the ram breach)',
     shipB.sinking === true, `flooded ${ramFloodT.toFixed(1)}s`);
-  expect('the rammed crew is eliminated (credited sink, no swim-away)',
-    victimCrew.every((p) => p.state === 'eliminated'),
+  // Sinking a ship does NOT eliminate its crew — they swim out and stay in
+  // the fight (their respawn anchor is gone, nothing else). The rammer is
+  // paid in a ship-sink bounty, not kill credit.
+  expect('the rammed crew survives the sink (swimming, not eliminated)',
+    victimCrew.every((p) => p.state === 'swimming' && p.health > 0),
     victimCrew.map((p) => p.state).join(','));
-  expect('rammer banks the kill(s)', attacker.kills === killsBefore + victimCrew.length,
+  expect('rammer banks NO kills for the sink itself', attacker.kills === killsBefore,
     `kills=${attacker.kills}`);
-  expect('rammer banks the kill gold', attacker.gold >= goldBefore + PLAYER.KILL_GOLD_REWARD * victimCrew.length,
+  expect('rammer banks the ship-sink bounty', attacker.gold >= goldBefore + PLAYER.SHIP_SINK_GOLD,
     `gold=${attacker.gold} (was ${goldBefore})`);
 }
 

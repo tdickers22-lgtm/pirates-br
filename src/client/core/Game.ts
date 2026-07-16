@@ -140,6 +140,7 @@ type UiRefs = {
   stormPhase: HTMLDivElement;
   stormTimer: HTMLDivElement;
   stormWarning: HTMLDivElement;
+  downedBanner: HTMLDivElement;
   shipsAlive: HTMLDivElement;
   goldAmount: HTMLDivElement;
   goldLeaders: HTMLDivElement;
@@ -999,6 +1000,38 @@ function makeNameplateSprite(name: string): THREE.Sprite {
   return sprite;
 }
 
+/** Floating "fix it here" chip over a holed hull section of YOUR ship — the
+ *  hole decals live on the OUTER hull at the waterline, invisible from the
+ *  deck, so this is what actually guides the repair. Depth-tested like the
+ *  nameplates (never reads through the hull or a scope). */
+function makeRepairMarkerSprite(holes: number): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 80;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = 'rgba(10, 14, 20, 0.82)';
+  ctx.strokeStyle = 'rgba(255, 179, 71, 0.95)';
+  ctx.lineWidth = 4;
+  const r = 18;
+  ctx.beginPath();
+  ctx.roundRect(6, 10, 244, 60, r);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = '700 33px Georgia, serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd48f';
+  ctx.fillText(holes > 1 ? `⚒ REPAIR ×${holes}` : '⚒ REPAIR', 128, 41);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, transparent: true }));
+  sprite.scale.set(2.2, 0.69, 1);
+  sprite.name = 'repair-marker';
+  sprite.renderOrder = 997;
+  return sprite;
+}
+
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
   'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
@@ -1831,7 +1864,6 @@ export class Game {
   private prevStormShrinking = false;
   // Bilge flooding audio loop + FX throttles (naval damage loop).
   private floodingLoopActive = false;
-  private lastBailFxAt = 0;
   private lastHullLeakAt = 0;
   private readonly lastChainshotWhirrAt = new Map<string, number>();
   // Camera feel — additive on top of updateCamera's base FOV/orientation.
@@ -1874,6 +1906,7 @@ export class Game {
     stormPhase: requireElement('storm-phase'),
     stormTimer: requireElement('storm-timer'),
     stormWarning: requireElement('storm-warning'),
+    downedBanner: requireElement('downed-banner'),
     shipsAlive: requireElement('ships-alive'),
     goldAmount: requireElement('gold-amount'),
     goldLeaders: requireElement('gold-leaders'),
@@ -2042,8 +2075,10 @@ export class Game {
   private lightningLightPool: THREE.PointLight | null = null;
   private lightningBolt: THREE.Line | null = null;
   private spyglassActive = false;
-  private lastInteractKind: InteractIntent | null = null;
-  private visibleInteractKind: InteractIntent | null = null;
+  // 'door' is a CLIENT-ONLY interaction kind (tavern doors are cosmetic and
+  // collision-less) — it must never be sent as a server interactIntent.
+  private lastInteractKind: InteractIntent | 'door' | null = null;
+  private visibleInteractKind: InteractIntent | 'door' | null = null;
   private pendingInteractFromUi = false;
   private pendingLaunchFromUi = false;
   private readonly stormRingPositions = new Float32Array(96 * 3);
@@ -2091,6 +2126,14 @@ export class Game {
   private readonly floatingDamageIndicators: FloatingDamageIndicator[] = [];
 
   private readonly islandMeshes = new Map<string, THREE.Group>();
+  /** Swingable tavern door leaves (GLB node 'door', origin on the hinge). */
+  private tavernDoors: Array<{ islandId: string; node: THREE.Object3D; open: boolean }> = [];
+  /** Deck-level repair chips for the local ship's holed sections. */
+  private readonly repairMarkers = new Map<'bow' | 'stern' | 'port' | 'starboard', { sprite: THREE.Sprite; holes: number }>();
+  /** Per-player swing-type latch so the cutlass anim keeps ONE denominator per swing. */
+  private readonly cutlassSwingKind = new Map<string, 'lunge' | 'swing'>();
+  /** bucketFilled edge-detector per player — bail FX fire on the transitions. */
+  private readonly prevBucketFilled = new Map<string, boolean>();
   private readonly chestMeshes = new Map<string, ChestMeshRecord>();
   private readonly barrelMeshes = new Map<string, THREE.Group>();
   private readonly sharkMeshes = new Map<string, THREE.Group>();
@@ -2374,7 +2417,8 @@ export class Game {
     this.prevPlayerStateForAudio = null;
     this.prevCannonBallistic = false;
     this.prevStormShrinking = false;
-    this.lastBailFxAt = 0;
+    this.prevBucketFilled.clear();
+    this.cutlassSwingKind.clear();
     this.lastHullLeakAt = 0;
     this.lastChainshotWhirrAt.clear();
     this.cameraFovKick = 0;
@@ -2435,6 +2479,9 @@ export class Game {
     this.clearLanternEmitters();
     this.shipRenderer.clear();
     this.islandMeshes.clear();
+    this.tavernDoors = [];
+    // Sprites themselves were disposed with the environment children above.
+    this.repairMarkers.clear();
     // Islands still queued from the previous match must not drain into the
     // next one as untracked ghost terrain.
     this.pendingIslandBuilds.length = 0;
@@ -4613,6 +4660,14 @@ export class Game {
       if (shell) {
         shell.traverse((o) => { if (o instanceof THREE.Mesh) { o.castShadow = true; o.receiveShadow = true; } });
         tavern.add(shell);
+        // The GLB keeps the door leaf as its own node with the origin ON the
+        // hinge axis — register it so [X] can swing it (client-local; the
+        // tavern has no collision so no server round-trip is needed).
+        const doorNode = shell.getObjectByName('door');
+        if (doorNode) {
+          this.tavernDoors = this.tavernDoors.filter((entry) => entry.islandId !== island.id);
+          this.tavernDoors.push({ islandId: island.id, node: doorNode, open: false });
+        }
       }
 
       if (!lowDetail) {
@@ -7324,6 +7379,8 @@ export class Game {
       ? performance.now() / 1000 + this.serverTimeOffset
       : performance.now() / 1000;
     this.updateVolcanicFx(dt, worldTime);
+    this.updateTavernDoors(dt);
+    this.updateRepairMarkers();
     // Drive the palm/foliage sway: advance its clock and gust the wind strength.
     this.foliageTime.value = worldTime;
     const gust = 0.75 + 0.35 * Math.sin(worldTime * 0.27) + 0.15 * Math.sin(worldTime * 0.11);
@@ -7380,8 +7437,17 @@ export class Game {
         this.pendingInteractFromUi = false;
       }
       const currentInteractKind = this.resolveCurrentInteractKind();
+      if (input.interact && currentInteractKind === 'door') {
+        // Tavern doors are purely client-side — swing it here and swallow the
+        // press so the server's legacy interact fallback can't grab something
+        // else (a chest, a ladder) the player never aimed at.
+        this.toggleNearestTavernDoor();
+        input.interact = false;
+      }
+      const toServerIntent = (kind: InteractIntent | 'door' | null): InteractIntent | null =>
+        (kind === 'door' ? null : kind);
       input.interactIntent = input.interact
-        ? (currentInteractKind ?? (uiInteract ? this.lastInteractKind : null))
+        ? (toServerIntent(currentInteractKind) ?? (uiInteract ? toServerIntent(this.lastInteractKind) : null))
         // Revive, the sail halyard and hull REPAIR are continuous holds — their
         // intent must ride every held frame for the server-side work to run.
         // (Bailing is a discrete press per scoop/heave, so it only fires on the edge.)
@@ -8038,7 +8104,7 @@ export class Game {
     this.lastInteractKind = this.resolveCurrentInteractKind();
   }
 
-  private resolveCurrentInteractKind(): InteractIntent | null {
+  private resolveCurrentInteractKind(): InteractIntent | 'door' | null {
     if (!this.state) return null;
     const player = this.getLocalPlayer();
     if (!player) return null;
@@ -9077,7 +9143,8 @@ export class Game {
     this.storyCutscene.cue.textContent = npc.cue;
     this.storyCutscene.root.style.opacity = '1';
     this.storyCutscene.root.style.transform = 'translateY(0)';
-    this.pushFeed(`${npc.name}: ${npc.cue}`, '#f0d08a');
+    // The cutscene overlay IS the delivery — echoing the same line into the
+    // kill feed printed every NPC's words twice on screen at once.
   }
 
   private updateStormRing() {
@@ -9461,22 +9528,24 @@ export class Game {
       : 1;
     const shipCritical = !!ship && (ship.sinking || avgHull < 0.2);
     const shipOnFire = !!ship && ship.onFire && !ship.sinking;
+    // DOWNED lives on its OWN banner so a fire/storm/critical warning can
+    // show at the same time — the old shared element silently swallowed one.
     const localDowned = player.state === 'downed';
-    this.ui.stormWarning.style.display = localDowned || outsideStorm || shipCritical || shipOnFire ? 'block' : 'none';
+    this.ui.downedBanner.style.display = localDowned ? 'block' : 'none';
     if (localDowned) {
       const bleed = Math.max(0, Math.ceil(player.downedUntil ?? 0));
-      this.ui.stormWarning.textContent = (player.reviveProgress ?? 0) > 0
+      this.ui.downedBanner.textContent = (player.reviveProgress ?? 0) > 0
         ? `CREWMATE REVIVING YOU — ${Math.round((player.reviveProgress ?? 0) * 100)}%`
         : `DOWNED — BLEEDING OUT 0:${String(bleed).padStart(2, '0')} · CRAWL TO YOUR CREW`;
-      this.ui.stormWarning.style.color = (player.reviveProgress ?? 0) > 0 ? '#7ce38b' : '#ff6b6b';
-    } else {
-      this.ui.stormWarning.textContent = shipCritical
-        ? (ship?.sinking ? 'SHIP IS SINKING' : 'SHIP CRITICAL - REPAIR NOW')
-        : shipOnFire
-          ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
-          : 'OUTSIDE STORM ZONE';
-      this.ui.stormWarning.style.color = shipCritical || shipOnFire ? '#ffb366' : '#ff6b6b';
+      this.ui.downedBanner.style.color = (player.reviveProgress ?? 0) > 0 ? '#7ce38b' : '#ff6b6b';
     }
+    this.ui.stormWarning.style.display = outsideStorm || shipCritical || shipOnFire ? 'block' : 'none';
+    this.ui.stormWarning.textContent = shipCritical
+      ? (ship?.sinking ? 'SHIP IS SINKING' : 'SHIP CRITICAL - REPAIR NOW')
+      : shipOnFire
+        ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
+        : 'OUTSIDE STORM ZONE';
+    this.ui.stormWarning.style.color = shipCritical || shipOnFire ? '#ffb366' : '#ff6b6b';
 
     this.ui.shipsAlive.textContent = String(this.state.shipsAlive);
     this.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
@@ -9553,11 +9622,16 @@ export class Game {
     }
 
     const pk = player;
+    // The 1–4 digit labels are MODAL (they select pocket items only while the
+    // wheel is held; otherwise 1–4 are weapon slots, labeled bottom-right).
+    // Only advertise the numbers while they actually do that, or the two
+    // always-on strips claim the same keys mean two things at once.
+    const wheelHeld = this.input.isSupplyWheelOpen();
     const stripParts = [
-      `Pocket: 1 Banana ${pk.pocketBanana}`,
-      `2 Plank ${pk.pocketWood}`,
-      `3 Coconut ${pk.pocketCoconut}`,
-      `4 Meat ${pk.pocketMeat} / Mango ${pk.pocketMango}`,
+      `Pocket: ${wheelHeld ? '1 ' : ''}Banana ${pk.pocketBanana}`,
+      `${wheelHeld ? '2 ' : ''}Plank ${pk.pocketWood}`,
+      `${wheelHeld ? '3 ' : ''}Coconut ${pk.pocketCoconut}`,
+      `${wheelHeld ? '4 ' : ''}Meat ${pk.pocketMeat} / Mango ${pk.pocketMango}`,
       `Tool: ${pk.hasShovel ? 'Shovel' : 'None'}`,
     ];
     if (mappedIsland) stripParts.push(`Chart: ${mappedIsland.name}`);
@@ -9578,6 +9652,12 @@ export class Game {
       : '';
     this.updateSupplyWheelCounts(player);
     this.ui.pocketWheel.classList.toggle('visible', this.input.isSupplyWheelOpen());
+    // The controls legend and the supply wheel park on the same screen center
+    // — holding [I] closes the legend rather than stacking on top of it.
+    if (this.input.isSupplyWheelOpen()) {
+      const legend = document.getElementById('controls-hint');
+      if (legend && legend.style.display === 'block') legend.style.display = 'none';
+    }
 
     let insideIslandId: string | null = null;
     for (const isl of this.state.islands) {
@@ -9688,11 +9768,14 @@ export class Game {
       this.ui.contextLabel.textContent = 'Carrying treasure · sell at Gold Hoarder or stow on ship';
     } else {
       this.ui.interactPrompt.style.display = 'none';
-      const ambientLabel = player.state === 'swimming'
-        ? 'Swimming · W follows look · Space up · Z down · LMB fire · Shift/RMB aim'
-        : weapon?.weaponId === 'cutlass'
-          ? `Cutlass · hold LMB to charge dash · Shift/RMB block · ${this.getKegSummary(player)}`
-          : `[I] Supply wheel · Shift/RMB aim · ${this.getKegSummary(player)}`;
+      // No busywork hints while bleeding out — the DOWNED banner is the guidance.
+      const ambientLabel = player.state === 'downed'
+        ? ''
+        : player.state === 'swimming'
+          ? 'Swimming · W follows look · Space up · Z down · LMB fire · Shift/RMB aim'
+          : weapon?.weaponId === 'cutlass'
+            ? `Cutlass · hold LMB to charge dash · Shift/RMB block · ${this.getKegSummary(player)}`
+            : `[I] Supply wheel · Shift/RMB aim · ${this.getKegSummary(player)}`;
       this.ui.contextLabel.style.display = ambientLabel ? 'block' : 'none';
       this.ui.contextLabel.textContent = ambientLabel;
     }
@@ -10520,8 +10603,9 @@ export class Game {
     this.previousKnockback = knockbackMagnitude;
     this.previousHealth = player.health;
 
-    // Own-ship hull damage: shake the camera (scaled by the hit) and flash a
-    // damage-direction arc toward the likeliest shooter (nearest enemy ship).
+    // Own-ship hull damage: shake the camera (scaled by the hit). No direction
+    // arrow for ship hits — the shake + hull HUD + hole markers carry it; the
+    // red arc stays reserved for the player's own body being shot.
     const localShip = this.localShipId ? this.shipsById.get(this.localShipId) ?? null : null;
     if (localShip) {
       const total = localShip.hull.bow + localShip.hull.stern + localShip.hull.port + localShip.hull.starboard;
@@ -10531,8 +10615,6 @@ export class Game {
         const drop = this.prevOwnHullTotal - total;
         if (drop > 0.01) {
           this.cameraShake = Math.min(1, this.cameraShake + THREE.MathUtils.clamp(drop * 1.6, 0.12, 0.8));
-          const shooter = this.findNearestEnemyShip(localShip);
-          if (shooter) this.spawnIncomingDamageDirection(shooter.position);
         }
       }
       this.prevOwnHullTotal = total;
@@ -10540,21 +10622,6 @@ export class Game {
       this.prevOwnShipId = null;
       this.prevOwnHullTotal = 4;
     }
-  }
-
-  private findNearestEnemyShip(ownShip: Ship): Ship | null {
-    if (!this.state) return null;
-    let best: Ship | null = null;
-    let bestDist = Infinity;
-    for (const ship of this.state.ships) {
-      if (ship.id === ownShip.id || !ship.alive) continue;
-      const d = this.distance2D(ownShip.position.x, ownShip.position.z, ship.position.x, ship.position.z);
-      if (d < bestDist) {
-        bestDist = d;
-        best = ship;
-      }
-    }
-    return best;
   }
 
   private updateCombatHud(dt: number) {
@@ -10993,28 +11060,35 @@ export class Game {
     }
 
     // Bail scoop arcs (+ the local scoop one-shot), beaten out for all bailers.
-    if (t - this.lastBailFxAt > 0.6) {
-      this.lastBailFxAt = t;
-      let localBailing = false;
-      for (const bailer of this.state.players) {
-        if (!bailer.bailing) continue;
-        const bShip = bailer.onShipId ? this.shipsById.get(bailer.onShipId) ?? null : null;
-        let dx = 1;
-        let dz = 0;
-        if (bShip) {
-          dx = bailer.position.x - bShip.position.x;
-          dz = bailer.position.z - bShip.position.z;
-          const len = Math.hypot(dx, dz) || 1;
-          dx /= len;
-          dz /= len;
-        }
+    // Bail FX ride the bucketFilled EDGES (10Hz snapshot resolution) so the
+    // thrown-water arc lands ON the heave instead of drifting on a timer:
+    // false→true = scoop (small dip splash), true→false = HEAVE (fling arc).
+    for (const bailer of this.state.players) {
+      const filled = !!bailer.bucketFilled;
+      const prev = this.prevBucketFilled.get(bailer.id);
+      this.prevBucketFilled.set(bailer.id, filled);
+      if (prev === undefined || prev === filled) continue;
+      const bShip = bailer.onShipId ? this.shipsById.get(bailer.onShipId) ?? null : null;
+      let dx = 1;
+      let dz = 0;
+      if (bShip) {
+        dx = bailer.position.x - bShip.position.x;
+        dz = bailer.position.z - bShip.position.z;
+        const len = Math.hypot(dx, dz) || 1;
+        dx /= len;
+        dz /= len;
+      }
+      if (!filled) {
+        // HEAVE — throw the arc outward from chest height, over the rail.
         this.combatFx.emitBailScoop(
-          { x: bailer.position.x + dx * 0.3, y: bailer.position.y + PLAYER.HEIGHT * 0.5, z: bailer.position.z + dz * 0.3 },
+          { x: bailer.position.x + dx * 0.55, y: bailer.position.y + PLAYER.HEIGHT * 0.62, z: bailer.position.z + dz * 0.55 },
           dx, dz,
         );
-        if (bailer.id === this.localPlayerId) localBailing = true;
+        if (bailer.id === this.localPlayerId) this.audio.playBail();
+      } else if (bailer.id === this.localPlayerId) {
+        // SCOOP — just the dip, no thrown water.
+        this.audio.playSwimSplash(0.5);
       }
-      if (localBailing) this.audio.playBail();
     }
 
     // Storm-shrink stinger on the rising edge.
@@ -11500,9 +11574,21 @@ export class Game {
   private getCutlassSwingProgress(player: Player) {
     const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
     if (!activeWeapon || activeWeapon.weaponId !== 'cutlass' || !activeWeapon.reloading) {
+      this.cutlassSwingKind.delete(player.id);
       return 0;
     }
-    const cooldown = activeWeapon.reloadTimer > WEAPONS.cutlass.reloadTime
+    // Lock the denominator for the WHOLE swing. The old per-frame pick flipped
+    // from the 1.05s lunge cooldown to the 0.55s basic one the instant the
+    // timer decayed past reloadTime — the animation snapped backwards and
+    // replayed mid-swing (and the first-person path always divided by the
+    // lunge cooldown, so a basic slash STARTED near its arc peak and swept
+    // back to idle: the swing literally played in reverse).
+    if (activeWeapon.reloadTimer > WEAPONS.cutlass.reloadTime + 0.001) {
+      this.cutlassSwingKind.set(player.id, 'lunge');
+    } else if (!this.cutlassSwingKind.has(player.id)) {
+      this.cutlassSwingKind.set(player.id, 'swing');
+    }
+    const cooldown = this.cutlassSwingKind.get(player.id) === 'lunge'
       ? CUTLASS_VIEW_LUNGE_COOLDOWN
       : WEAPONS.cutlass.reloadTime;
     return 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / cooldown, 0, 1);
@@ -11767,7 +11853,29 @@ export class Game {
         const cfg = tool === 'compass'
           ? { p: [0.2 + sway * 0.5, -0.19 + bob, -0.38], r: [-0.88 + bob, 0.16 + sway * 0.3, 0.08] }
           : tool === 'bucket'
-            ? { p: [0.24 + sway * 0.5, -0.35 + bob, -0.56], r: [-0.12 + bob, 0.2 + sway * 0.3, -0.1] }
+            ? (() => {
+              // The SCOOP→HEAVE cycle must READ: bailScoopProgress runs 1→0
+              // over 0.6s after each press. Just-scooped (filled) dips the
+              // bucket low then lifts the load; just-heaved (emptied) hoists
+              // and FLINGS it forward — the eject the cycle was missing.
+              const prog = THREE.MathUtils.clamp(player.bailScoopProgress ?? 0, 0, 1);
+              const anim = 1 - prog; // 0 → 1 across the action
+              if (prog > 0.01 && player.bucketFilled) {
+                const dip = Math.sin(Math.min(1, anim / 0.7) * Math.PI);
+                return {
+                  p: [0.24 + sway * 0.3, -0.35 - dip * 0.24 + bob, -0.56 - dip * 0.14],
+                  r: [-0.12 - dip * 0.55 + bob, 0.2, -0.1 + dip * 0.08],
+                };
+              }
+              if (prog > 0.01 && !player.bucketFilled) {
+                const fling = Math.sin(Math.min(1, anim / 0.5) * Math.PI);
+                return {
+                  p: [0.24, -0.35 + fling * 0.3 + bob, -0.56 - fling * 0.36],
+                  r: [-0.12 - fling * 1.25 + bob, 0.2, -0.1 + fling * 0.16],
+                };
+              }
+              return { p: [0.24 + sway * 0.5, -0.35 + bob, -0.56], r: [-0.12 + bob, 0.2 + sway * 0.3, -0.1] };
+            })()
             : tool === 'spyglass'
               ? { p: [0.2 + sway * 0.4, -0.2 + bob, -0.46], r: [0.05, -0.5 + sway * 0.2, 0.12] }
               : tool === 'lantern'
@@ -11965,9 +12073,9 @@ export class Game {
         break;
       case 'cutlass':
         {
-          const cooldownProgress = activeWeapon.reloading
-            ? 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / CUTLASS_VIEW_LUNGE_COOLDOWN, 0, 1)
-            : 0;
+          // Shared progress helper — denominator locked per swing (basic 0.55s
+          // vs lunge 1.05s) so the slash arc always plays forward from windup.
+          const cooldownProgress = this.getCutlassSwingProgress(player);
           const slashArc = Math.sin(THREE.MathUtils.clamp((cooldownProgress - 0.08) / 0.58, 0, 1) * Math.PI);
           const lungePush = THREE.MathUtils.smoothstep(cooldownProgress, 0.06, 0.34)
             * (1 - THREE.MathUtils.smoothstep(cooldownProgress, 0.52, 1));
@@ -12062,8 +12170,8 @@ export class Game {
     ship: Ship | null,
     nearbyCannon: number | null,
     repairSection: keyof Ship['hull'] | null,
-  ): { prompt: string; label: string; kind: InteractIntent } | null {
-    const candidates: Array<{ prompt: string; label: string; score: number; kind: InteractIntent }> = [];
+  ): { prompt: string; label: string; kind: InteractIntent | 'door' } | null {
+    const candidates: Array<{ prompt: string; label: string; score: number; kind: InteractIntent | 'door' }> = [];
 
     // Downed crewmate nearby → hold to revive (server drains reviveProgress).
     if (this.state && player.state === 'alive' && player.shipId) {
@@ -12112,8 +12220,8 @@ export class Game {
           barrelPos,
           5.5,
           0.72,
-          browsingThisBarrel ? '[X] Take All' : '[X] Open Barrel',
-          browsingThisBarrel ? 'Transfer supplies' : 'Island supplies',
+          browsingThisBarrel ? '[X] Take All' : '[X] Look Inside',
+          browsingThisBarrel ? 'Transfer supplies' : 'Supply barrel · opening shows what’s inside',
           'barrel',
         );
       }
@@ -12366,19 +12474,39 @@ export class Game {
       }
     }
 
+    // Tavern doors — a client-local toggle; the candidate rides the same
+    // arbiter so its prompt can never stack with another [X] prompt.
+    if (this.tavernDoors.length > 0) {
+      const doorPoint = new THREE.Vector3();
+      for (const door of this.tavernDoors) {
+        if (!door.node.parent) continue;
+        this.getTavernDoorWorldPoint(door, doorPoint);
+        this.pushInteractionCandidate(
+          candidates,
+          player,
+          doorPoint,
+          3.4,
+          0.2,
+          `[X] ${door.open ? 'Close' : 'Open'} Door`,
+          'Tavern',
+          'door',
+        );
+      }
+    }
+
     candidates.sort((a, b) => b.score - a.score);
     return candidates[0] ?? null;
   }
 
   private pushInteractionCandidate(
-    candidates: Array<{ prompt: string; label: string; score: number; kind: InteractIntent }>,
+    candidates: Array<{ prompt: string; label: string; score: number; kind: InteractIntent | 'door' }>,
     player: Player,
     point: THREE.Vector3,
     maxDistance: number,
     minDot: number,
     prompt: string,
     label: string,
-    kind: InteractIntent,
+    kind: InteractIntent | 'door',
   ) {
     const eyePos = new THREE.Vector3(player.position.x, player.position.y + PLAYER.HEIGHT * 0.72, player.position.z);
     const toPoint = point.clone().sub(eyePos);
@@ -12398,6 +12526,78 @@ export class Game {
       Math.sin(player.rotation.y),
       Math.cos(player.rotation.x) * Math.cos(player.rotation.y),
     ).normalize();
+  }
+
+  /** Mid-leaf point of a tavern door (the node origin sits on the hinge). */
+  private getTavernDoorWorldPoint(door: { node: THREE.Object3D }, out: THREE.Vector3) {
+    return door.node.localToWorld(out.set(0.8, 1.2, 0));
+  }
+
+  private toggleNearestTavernDoor() {
+    const player = this.getLocalPlayer();
+    if (!player) return;
+    const point = new THREE.Vector3();
+    let best: { islandId: string; node: THREE.Object3D; open: boolean } | null = null;
+    let bestDist = 3.8;
+    for (const door of this.tavernDoors) {
+      if (!door.node.parent) continue;
+      this.getTavernDoorWorldPoint(door, point);
+      const d = Math.hypot(point.x - player.position.x, point.z - player.position.z);
+      if (d < bestDist) {
+        bestDist = d;
+        best = door;
+      }
+    }
+    if (!best) return;
+    best.open = !best.open;
+    this.audio.playDoorCreak(best.open);
+  }
+
+  /** Ease every registered tavern door toward its open/closed pose. The GLB
+   *  front faces +Z, so negative yaw swings the leaf OUTWARD (clear of the
+   *  interior furniture and the barrel clutter beside the jamb). */
+  private updateTavernDoors(dt: number) {
+    const ease = Math.min(1, dt * 5.5);
+    for (const door of this.tavernDoors) {
+      const target = door.open ? -1.83 : 0;
+      const diff = target - door.node.rotation.y;
+      if (Math.abs(diff) < 0.002) {
+        door.node.rotation.y = target;
+        continue;
+      }
+      door.node.rotation.y += diff * ease;
+    }
+  }
+
+  /** Float a ⚒ REPAIR chip over each holed section of the local ship. The
+   *  hull-hole decals sit on the OUTER planking at the waterline — invisible
+   *  from the deck — so this chip is what tells the crew where to swing the
+   *  hammer. Depth-tested; disappears once the section is patched. */
+  private updateRepairMarkers() {
+    const localShip = this.localShipId ? this.shipsById.get(this.localShipId) ?? null : null;
+    const sections = ['bow', 'stern', 'port', 'starboard'] as const;
+    for (const section of sections) {
+      const holes = localShip && !localShip.sinking ? (localShip.holes?.[section] ?? 0) : 0;
+      const entry = this.repairMarkers.get(section);
+      if (holes <= 0) {
+        if (entry) entry.sprite.visible = false;
+        continue;
+      }
+      let marker = entry;
+      if (!marker || marker.holes !== holes) {
+        if (marker) {
+          marker.sprite.removeFromParent();
+          (marker.sprite.material.map as THREE.Texture | null)?.dispose();
+          marker.sprite.material.dispose();
+        }
+        marker = { sprite: makeRepairMarkerSprite(holes), holes };
+        this.environment.add(marker.sprite);
+        this.repairMarkers.set(section, marker);
+      }
+      const point = this.getRepairWorldPoint(localShip!, section);
+      marker.sprite.position.set(point.x, point.y + 0.55, point.z);
+      marker.sprite.visible = true;
+    }
   }
 
   private getShipWorldPoint(ship: Ship, localX: number, localZ: number, worldY: number) {
@@ -12564,6 +12764,10 @@ export class Game {
   }
 
   private flashIslandBanner(name: string) {
+    // Don't slam a discovery banner over an open wheel/legend — the next
+    // island (or re-entry) will announce itself when the center is clear.
+    const legend = document.getElementById('controls-hint');
+    if (this.input.isSupplyWheelOpen() || legend?.style.display === 'block') return;
     this.ui.islandBanner.innerHTML = `<div class="ib-title">${name}</div><div class="ib-sub">Land discovered</div>`;
     this.ui.islandBanner.classList.add('visible');
     this.islandBannerHideAt = performance.now() + 4500;
@@ -12728,6 +12932,26 @@ export class Game {
       leftLegPivot.rotation.set(-walkSwing * 1.05, 0, -0.04);
       rightLegPivot.rotation.set(walkSwing * 1.05, 0, 0.04);
       torso.rotation.z = -walkSwing * 0.06 - cutlassCharge * 0.1;
+    } else if (player.bailing) {
+      // Bailing crew visibly SCOOP (bow low, arms down into the bilge) and
+      // TOSS (straighten, both arms flinging out) so remote players read the
+      // bucket work instead of a default idle-swing.
+      const bailProg = 1 - THREE.MathUtils.clamp(player.bailScoopProgress ?? 0, 0, 1);
+      const bailArc = Math.sin(Math.min(1, bailProg / 0.7) * Math.PI);
+      if (player.bucketFilled) {
+        torso.rotation.x = 0.16 + bailArc * 0.34;
+        pelvis.rotation.x = 0.06 + bailArc * 0.12;
+        leftArmPivot.rotation.set(0.55 + bailArc * 0.6, 0.1, -0.2);
+        rightArmPivot.rotation.set(0.55 + bailArc * 0.6, -0.1, 0.2);
+      } else {
+        torso.rotation.x = 0.24 - bailArc * 0.42;
+        pelvis.rotation.x = 0.08 - bailArc * 0.1;
+        leftArmPivot.rotation.set(0.7 - bailArc * 1.9, 0.12, -0.16);
+        rightArmPivot.rotation.set(0.7 - bailArc * 1.9, -0.12, 0.16);
+      }
+      leftLegPivot.rotation.set(-walkSwing * 0.4, 0, -0.04);
+      rightLegPivot.rotation.set(walkSwing * 0.4, 0, 0.04);
+      torso.rotation.z = walkSwing * 0.04;
     } else {
       const armRest = 0.2;
       leftArmPivot.rotation.set(armRest + walkSwing, 0, -0.12);

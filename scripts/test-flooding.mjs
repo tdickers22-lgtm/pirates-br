@@ -10,7 +10,7 @@ import {
   updateShipFlooding,
 } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
-import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES } from '../src/shared/constants/index.ts';
+import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared/constants/index.ts';
 import { angleWrap, sampleWind } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -280,7 +280,7 @@ console.log('\nA submerged open hole douses a deck fire');
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\nSinking by flooding (waterLevel ≥ 1) reuses the sink + elimination flow');
+console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (swims out), sinker banks gold');
 
 {
   const match = new Match({ matchId: 'flooding-test', botCount: 3 });
@@ -295,13 +295,20 @@ console.log('\nSinking by flooding (waterLevel ≥ 1) reuses the sink + eliminat
   match.markShipDamagedByPlayer(victimShip.id, attacker.id);
   victimShip.waterLevel = 1;
   const chestsBefore = victimShip.treasureChestIds.length;
+  const goldBefore = attacker.gold;
   match.evaluateShipSinking(victimShip);
 
   expect('a fully-flooded ship starts sinking', victimShip.sinking === true);
-  expect('the flooded crew is eliminated (attacker credited)',
-    victimCrew.every((p) => p.state === 'eliminated'),
+  // Losing the ship does NOT eliminate the crew — they splash out alive and
+  // keep fighting; the sink only costs them their respawn anchor.
+  expect('the flooded crew survives the sink (swimming, not eliminated)',
+    victimCrew.every((p) => p.state === 'swimming' && p.health > 0),
     victimCrew.map((p) => p.state).join(','));
-  expect('attacker banked the ship-sink kill', attacker.kills >= 1, `kills=${attacker.kills}`);
+  expect('crew keeps NO respawn anchor (home ship sinking)',
+    victimShip.sinking && victimCrew.every((p) => p.shipId === victimShip.id));
+  expect('sinker banked the ship-sink bounty (gold, not kills)',
+    attacker.gold - goldBefore === PLAYER.SHIP_SINK_GOLD && attacker.kills === 0,
+    `goldΔ=${attacker.gold - goldBefore} kills=${attacker.kills}`);
   expect('sink flow still drops treasure', victimShip.treasureChestIds.length === 0, `chests=${chestsBefore}`);
 
   // Holes, not hp, decide: a fully-holed hull sitting dry does NOT insta-sink —

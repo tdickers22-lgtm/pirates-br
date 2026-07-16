@@ -714,6 +714,17 @@
       font-size: 0.72rem; color: #e74c3c; letter-spacing: 0.12em;
       display: none; animation: pulse 1s infinite;
     }
+    /* DOWNED state gets its OWN banner (center screen) so ship/storm warnings
+       in the top bar can show at the same time instead of being suppressed. */
+    #downed-banner {
+      position: fixed; top: 31%; left: 50%; transform: translateX(-50%);
+      font-size: 1.05rem; color: #ff6b6b; letter-spacing: 0.14em;
+      text-shadow: 0 2px 10px rgba(0,0,0,0.85);
+      background: rgba(10, 6, 6, 0.62); border: 1px solid #ff6b6b44;
+      padding: 8px 18px; border-radius: 6px;
+      display: none; animation: pulse 1s infinite; z-index: 120;
+      pointer-events: none;
+    }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
     /* Player count */
@@ -1862,7 +1873,7 @@
     <div id="barrel-panel" style="display:none">
       <div class="bp-header">
         <div class="bp-title">Barrel</div>
-        <div class="bp-hint">[X] Take All · walk away to leave</div>
+        <div class="bp-hint">Walk away to leave</div>
       </div>
       <div class="bp-cols">
         <div class="bp-col">
@@ -1947,14 +1958,15 @@
 
     <div id="controls-hint">
       <div class="legend-title">SHIP'S ORDERS — [L] to close</div>
-      WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; X · Interact / Hold to work a station
-      <br>Follow the glowing rings: ⚓ Capstan · Hold X raises the anchor (red ring = anchor is down!)
-      <br>⛵ Rigging · Hold X drops or raises the sails &nbsp;|&nbsp; Helm: A/D · Steer · W/S · Raise/Lower Sails · Q/F · Trim (angle) Sails
-      <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Powder Keg
-      <br>LMB · Fire &nbsp;|&nbsp; SHIFT/RMB · Aim &nbsp;|&nbsp; P · Spyglass (12x) &nbsp;|&nbsp; T · Trade
-      <br>M · Map &nbsp;|&nbsp; F8 · Report a bug (saves a snapshot) &nbsp;|&nbsp; Crow's Nest up the mainmast
+      WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; X · Interact — walk up and look at a thing, one prompt shows
+      <br>Look for the gold station tags aboard: ⚓ Capstan at the bow · Hold X raises the anchor
+      <br>⛵ Rope stations at the mast rails · Hold X drops / raises the sails (crewmates on the rope haul faster)
+      <br>Helm: A/D · Steer &nbsp;·&nbsp; W/S · Sails up / down &nbsp;·&nbsp; Q/F · Angle the sails &nbsp;|&nbsp; Crow's nest · ladder up the mainmast
+      <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Powder Keg &nbsp;|&nbsp; Hold I · Supply wheel &amp; tools
+      <br>LMB · Fire &nbsp;|&nbsp; SHIFT or RMB · Aim &nbsp;|&nbsp; P · Spyglass &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; F8 · Bug report
     </div>
 
+    <div id="downed-banner">DOWNED</div>
     <div id="damage-vignette"></div>
     <div id="knockback-flash"></div>
     <div id="pointer-lock-hint">Click to look around · WASD to move</div>

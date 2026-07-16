@@ -1399,8 +1399,10 @@ export class Match {
         let steerInput = 0;
         if (input.left) steerInput -= 1;
         if (input.right) steerInput += 1;
-        if (input.forward) ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + 0.48 * dt);
-        if (input.back) ship.sailHeight = Math.max(0, ship.sailHeight - 0.6 * dt);
+        // Slower than the rope stations — the helm trim is a convenience, the
+        // rigging (with crew) is the fast way to make or shorten sail.
+        if (input.forward) ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + 0.22 * dt);
+        if (input.back) ship.sailHeight = Math.max(0, ship.sailHeight - 0.28 * dt);
         // Q/F brace the yard: trim the sail ANGLE to port/starboard so the helmsman
         // can catch a crosswind on a reach (PhysicsSystem's trimEfficiency rewards
         // matching the wind-relative optimum). Without this the yard stayed centred
@@ -1565,8 +1567,8 @@ export class Match {
       const activeWeapon = player.weapons[player.activeSlot];
       if (!activeWeapon || !WEAPONS[activeWeapon.weaponId].melee) {
         const activeWeapon = player.weapons[player.activeSlot];
-        const aimPoint = activeWeapon && !WEAPONS[activeWeapon.weaponId].melee
-          ? this.getFirearmAimPoint(player, ship ?? null, input, activeWeapon.weaponId)
+        const aimRay = activeWeapon && !WEAPONS[activeWeapon.weaponId].melee
+          ? this.getFirearmAimRay(player, ship ?? null, input, activeWeapon.weaponId)
           : null;
         const fireYaw = cannonAim?.yaw ?? input.yaw;
         const firePitch = cannonAim?.pitch ?? input.pitch;
@@ -1576,7 +1578,7 @@ export class Match {
           fireYaw,
           firePitch,
           player.cannonIndex,
-          { aiming: input.aim, aimPoint },
+          { aiming: input.aim, aimPoint: aimRay?.point ?? null, aimOrigin: aimRay?.eye ?? null },
         );
         if (traces.length > 0) {
           this.resolveFirearmHits(player, traces);
@@ -3048,17 +3050,31 @@ export class Match {
   private spawnHitscanTracer(shooter: Player, trace: HitscanTrace, distance: number, showImpact: boolean) {
     const clampedDistance = Math.max(0.45, Math.min(trace.range, distance));
     const maxAge = Math.max(0.08, Math.min(0.14, clampedDistance / 260));
-    const speed = clampedDistance / maxAge;
+    // The tracer starts at the MUZZLE but flies toward the true hit point on
+    // the eye ray, so the visual agrees with where the shot actually landed.
+    const start = trace.visualOrigin ?? trace.origin;
+    const hitPoint = {
+      x: trace.origin.x + trace.direction.x * clampedDistance,
+      y: trace.origin.y + trace.direction.y * clampedDistance,
+      z: trace.origin.z + trace.direction.z * clampedDistance,
+    };
+    const toHit = {
+      x: hitPoint.x - start.x,
+      y: hitPoint.y - start.y,
+      z: hitPoint.z - start.z,
+    };
+    const visualDistance = Math.max(0.3, Math.hypot(toHit.x, toHit.y, toHit.z));
+    const speed = visualDistance / maxAge;
     const projectile: Projectile = {
       id: uuid(),
       type: 'bullet',
       ownerId: shooter.id,
       ownerShipId: shooter.shipId,
-      position: { ...trace.origin },
+      position: { ...start },
       velocity: {
-        x: trace.direction.x * speed,
-        y: trace.direction.y * speed,
-        z: trace.direction.z * speed,
+        x: (toHit.x / visualDistance) * speed,
+        y: (toHit.y / visualDistance) * speed,
+        z: (toHit.z / visualDistance) * speed,
       },
       alive: true,
       age: 0,
@@ -3107,7 +3123,7 @@ export class Match {
     }
   }
 
-  private getFirearmAimPoint(player: Player, ship: Ship | null, input: PlayerInput, weaponId: WeaponId): Vec3 {
+  private getFirearmAimRay(player: Player, ship: Ship | null, input: PlayerInput, weaponId: WeaponId): { eye: Vec3; point: Vec3 } {
     const swimming = player.state === 'swimming';
     const aimingFirearm = !WEAPONS[weaponId].melee && (input.aim || input.fire);
     const scoped = input.aim && !!WEAPONS[weaponId].scopeFov;
@@ -3135,9 +3151,12 @@ export class Match {
     });
 
     return {
-      x: cameraPos.x + rayDir.x * WEAPONS[weaponId].range,
-      y: cameraPos.y + rayDir.y * WEAPONS[weaponId].range,
-      z: cameraPos.z + rayDir.z * WEAPONS[weaponId].range,
+      eye: cameraPos,
+      point: {
+        x: cameraPos.x + rayDir.x * WEAPONS[weaponId].range,
+        y: cameraPos.y + rayDir.y * WEAPONS[weaponId].range,
+        z: cameraPos.z + rayDir.z * WEAPONS[weaponId].range,
+      },
     };
   }
 
@@ -3556,9 +3575,12 @@ export class Match {
     ship.holes.starboard = FLOODING.MAX_HOLES_PER_SECTION;
     this.physics.syncHullFromHoles(ship);
 
+    // Sinking a crew's ship does NOT eliminate them — they splash out and keep
+    // fighting; they just have no home ship left to respawn on. The sinker
+    // still earns credit for the play.
     const sinkKiller = sunkByPlayerId ? this.getPlayer(sunkByPlayerId) : null;
     if (sinkKiller && sinkKiller.state !== 'eliminated' && sinkKiller.shipId !== ship.id) {
-      this.eliminateCrewForShipSink(ship, sinkKiller);
+      this.creditShipSink(ship, sinkKiller);
     }
 
     for (const player of this.state.players) {
@@ -3669,56 +3691,32 @@ export class Match {
     return { streakReward, killGold };
   }
 
-  private eliminateCrewForShipSink(ship: Ship, killer: Player) {
-    for (const victim of this.state.players) {
-      if (
-        victim.shipId !== ship.id
-        || victim.id === killer.id
-        || victim.state === 'eliminated'
-        || victim.state === 'respawning'
-      ) {
-        continue;
-      }
-
-      const { streakReward, killGold } = this.creditPlayerKill(killer, victim);
-      victim.state = 'eliminated';
-      this.recordElimination(victim);
-      this.applyEliminatedPlayerFields(victim);
-
-      if (victim.isBot) {
-        this.bots.removeBot(victim.id);
-      } else {
-        const client = this.clients.get(victim.id);
-        if (client) {
-          this.send(client.ws, {
-            type: 'game_over',
-            ts: Date.now(),
-            payload: { winnerId: null, died: true, kills: victim.kills, gold: victim.gold },
-          });
-        }
-      }
-
-      this.broadcast({
-        type: 'kill_event',
-        ts: Date.now(),
-        payload: {
-          victimId: victim.id,
-          victimName: victim.name,
-          killerId: killer.id,
-          killerName: killer.name,
-          respawning: false,
-          headshot: false,
-          boardingKill: false,
-          shipSink: true,
-          stolenGold: 0,
-          healed: 0,
-          killerStreak: killer.playerKillStreak,
-          streakReward,
-          killGold,
-          headshotGold: 0,
-        },
-      });
-    }
+  /** Award the sinker gold + a feed line for the sink itself. The crew is NOT
+   *  eliminated — they swim out (startShipSinking's splash loop) and stay in
+   *  the fight; losing the ship only costs them their respawn anchor. */
+  private creditShipSink(ship: Ship, killer: Player) {
+    killer.gold += PLAYER.SHIP_SINK_GOLD;
+    const owner = this.state.players.find((p) => p.id === ship.ownerId);
+    this.broadcast({
+      type: 'kill_event',
+      ts: Date.now(),
+      payload: {
+        victimId: ship.id,
+        victimName: owner ? `${owner.name}'s ship` : 'a ship',
+        killerId: killer.id,
+        killerName: killer.name,
+        respawning: false,
+        headshot: false,
+        boardingKill: false,
+        shipSink: true,
+        stolenGold: 0,
+        healed: 0,
+        killerStreak: killer.playerKillStreak,
+        streakReward: 0,
+        killGold: PLAYER.SHIP_SINK_GOLD,
+        headshotGold: 0,
+      },
+    });
   }
 
   /** Home ship afloat and inside the VISIBLE storm ring (tiny 5m margin, not
@@ -4176,8 +4174,23 @@ export class Match {
     const aliveShips = this.state.ships.filter((ship) => ship.alive && !ship.sinking);
     this.state.shipsAlive = aliveShips.length;
     if (aliveShips.length <= 1 && this.state.ships.length > 1) {
+      // A sunk crew is NOT out of the fight — shipless survivors (swimming,
+      // boarding, marooned) keep the match alive until only one crew remains
+      // standing. Ship count alone doesn't end it.
+      const lastShip = aliveShips[0] ?? null;
+      const activeCrews = new Set<string>();
+      let lastContender: Player | null = null;
+      for (const p of this.state.players) {
+        if (p.state === 'eliminated') continue;
+        const standing = p.health > 0;
+        const canReturn = p.state === 'respawning' && aliveShips.some((s) => s.id === p.shipId);
+        if (!standing && !canReturn) continue;
+        activeCrews.add(p.shipId ?? p.id);
+        lastContender = p;
+      }
+      if (activeCrews.size > 1) return;
       this.state.phase = 'ended';
-      this.state.winnerId = aliveShips[0]?.ownerId ?? null;
+      this.state.winnerId = lastShip?.ownerId ?? lastContender?.id ?? null;
       this.endedAt = Date.now();
       this.endReason = 'last_ship';
       this.broadcast({ type: 'game_over', ts: Date.now(), payload: { winnerId: this.state.winnerId } });
@@ -4948,10 +4961,16 @@ export class Match {
   }
 
   private parkShipAtDock(ship: Ship, dock: IslandDock) {
-    // Park at the depth-verified berth point (dock.berthPosition clears both
-    // hull ends of a galleon) instead of re-deriving a too-shallow spot.
-    ship.position.x = dock.berthPosition.x;
-    ship.position.z = dock.berthPosition.z;
+    // Normalized berth, computed for THIS ship: parallel to the dock, bow
+    // seaward, a consistent ~1m gap between hull side and dock edge, midship
+    // abreast the dock's outer half. The old pre-baked point was sized for a
+    // galleon and slid up to 88m seaward on shallow shores — sloops floated
+    // far off crooked-looking docks. Depth is verified per ship type; the
+    // pre-baked galleon berth stays as the fallback.
+    const berth = this.computeShipBerth(ship, dock) ?? dock.berthPosition;
+    ship.position.x = berth.x;
+    ship.position.z = berth.z;
+    ship.position.y = 0.05;
     ship.rotation = dock.berthRotation;
     ship.velocity = { x: 0, y: 0, z: 0 };
     ship.angularVelocity = 0;
@@ -4977,6 +4996,38 @@ export class Match {
     ship.holes.starboard = 0;
     ship.waterLevel = 0;
     this.physics.syncHullFromHoles(ship);
+  }
+
+  /** Depth-verified side-berth for THIS ship type: parallel to the dock, a
+   *  fixed ~1m rail gap, midship starting abreast the dock's outer half and
+   *  only sliding seaward as far as the draft demands. Tries the dock's
+   *  preferred side first, then the other; null → caller falls back to the
+   *  pre-baked galleon berth. */
+  private computeShipBerth(ship: Ship, dock: IslandDock): { x: number; z: number } | null {
+    const island = this.state.islands.find((isl) => isl.dock === dock);
+    if (!island) return null;
+    const stats = SHIP_STATS[ship.type];
+    const fwd = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
+    const right = { x: fwd.z, z: -fwd.x };
+    const half = stats.length * 0.5;
+    const lateral = dock.width * 0.5 + stats.width * 0.5 + 1.0;
+    // The berth must clear the KEEL (draft = height × KEEL_DRAFT_RATIO) with
+    // margin, per ship type — a too-shallow berth grounds the hull and the
+    // buoyancy/grounding resolve visibly shoves it out of the water.
+    const needDepth = -(stats.height * SHIP.KEEL_DRAFT_RATIO + 0.55);
+    const alongStart = Math.max(dock.length * 0.55, dock.length - half);
+    for (const side of [dock.moorSide, -dock.moorSide]) {
+      for (let step = 0; step < 24; step++) {
+        const along = alongStart + step * 1.5;
+        const cx = dock.position.x + fwd.x * along + right.x * side * lateral;
+        const cz = dock.position.z + fwd.z * along + right.z * side * lateral;
+        const clear = [half + 1.5, 0, -(half + 1.5)].every((offset) =>
+          getIslandSurfaceY(island, cx + fwd.x * offset, cz + fwd.z * offset) < needDepth,
+        );
+        if (clear) return { x: cx, z: cz };
+      }
+    }
+    return null;
   }
 
   private armShipExitGrace(player: Player, ship: Ship, input: PlayerInput) {

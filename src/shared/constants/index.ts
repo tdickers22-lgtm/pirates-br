@@ -40,6 +40,9 @@ export const PLAYER = {
   SHIP_EXIT_GRACE_TIME: 0.6,
   BANANA_HEAL: 25,
   KILL_GOLD_REWARD: 275,
+  /** Bounty for foundering an enemy ship — the crew is not eliminated by the
+   *  sink (they lose their respawn anchor, not the match). */
+  SHIP_SINK_GOLD: 400,
   /** PvE skeletons pay a small bounty, not the full pirate reward. */
   SKELETON_KILL_GOLD: 60,
   HEADSHOT_GOLD_BONUS: 40,
@@ -121,7 +124,8 @@ export const SHIP = {
   FIELD_REPAIR_INTERVAL: 2.5,
   FIELD_REPAIR_HP: 120,
   MAX_SAIL_ANGLE: Math.PI * 0.48,
-  SAIL_HOIST_RATE: 1.65,
+  /** Full hoist takes ~2.2s solo, ~1.5s with a crewmate on the rope. */
+  SAIL_HOIST_RATE: 0.45,
   SAIL_TRIM_RATE: 1.55,
   RUDDER_SLEW: 3.25,
   RUDDER_DECAY: 4.1,

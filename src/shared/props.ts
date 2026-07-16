@@ -147,9 +147,25 @@ export function resolvePropCollision(
   return { x, z, pushed };
 }
 
-/** Convenience for placement/tests: world-space Y a prop rests at. Sunk a
- *  few cm so bases bite into sloped terrain instead of hovering on the
- *  single-sample point (patrol-1: crates/chests/tents floating on hills). */
+/** Convenience for placement/tests: world-space Y a prop rests at. The base
+ *  seats on the LOWEST terrain sample under its footprint (center + 4 points
+ *  at ~70% of the collider radius) minus a small bite — a center-only sample
+ *  left rocks and story vignettes hovering wherever the relief-octave terrain
+ *  fell away under one edge of the base. */
 export function getPropGroundY(island: Island, prop: IslandProp): number {
-  return getIslandSurfaceY(island, prop.x, prop.z) - 0.07;
+  const col = PROP_COLLIDERS[prop.type];
+  const footprint = col && col.shape !== 'none'
+    ? col.radius * prop.scale * 0.7
+    : (SPACING_OVERRIDES[prop.type] ?? 0) * prop.scale * 0.45;
+  const center = getIslandSurfaceY(island, prop.x, prop.z);
+  let ground = center;
+  if (footprint > 0.2) {
+    for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      ground = Math.min(ground, getIslandSurfaceY(island, prop.x + ox * footprint, prop.z + oz * footprint));
+    }
+    // Cap the extra sink so a wide vignette on one steep edge beds its low
+    // side without drowning the whole scene.
+    ground = Math.max(ground, center - 0.35);
+  }
+  return ground - 0.07;
 }

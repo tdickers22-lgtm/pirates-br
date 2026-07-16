@@ -882,12 +882,13 @@ export function getCrowNestLadderInteractionBounds(stats: { length: number }) {
   };
 }
 
-/** Rail rope stations (SoT braces): the halyard is worked from the bulwarks
- *  on EITHER side of the ship, where the rigging ropes come down — not from a
- *  floating ring amidships. */
+/** Rail rope stations (SoT braces): the halyard is worked from the bulwark
+ *  pin rails ABEAM THE MAINMAST — where the shrouds and halyards physically
+ *  come down to the rail — so the station sits where the rigging actually is,
+ *  not on an arbitrary aft rail. */
 export function getSailRopeStationLocals(stats: { length: number; mastCount: number; width?: number }): Array<{ x: number; z: number }> {
   const halfW = (stats.width ?? 5) * 0.5;
-  const z = -stats.length * 0.24;
+  const z = getMainMastLocalZ(stats);
   return [
     { x: halfW - 0.55, z },
     { x: -(halfW - 0.55), z },

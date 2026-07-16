@@ -10,6 +10,9 @@ export interface HitscanTrace {
   damage: number;
   knockback: number;
   weaponId: WeaponId;
+  /** Where the tracer FX should start (the gun muzzle). Hit tests always run
+   *  from `origin` — the camera eye — so shots land on the reticle. */
+  visualOrigin?: Vec3;
 }
 
 export class WeaponSystem {
@@ -44,6 +47,9 @@ export class WeaponSystem {
     options?: {
       aiming?: boolean;
       aimPoint?: Vec3 | null;
+      /** Camera eye — when provided, hit tests run from here so the shot
+       *  follows the reticle ray exactly (the muzzle is visual-only). */
+      aimOrigin?: Vec3 | null;
     },
   ): HitscanTrace[] {
     // Downed pirates crawl — weapons are locked until revived.
@@ -101,16 +107,21 @@ export class WeaponSystem {
       );
     }
 
+    // Hit tests run from the camera eye when the caller provides it, so the
+    // shot rides the crosshair ray at EVERY distance (a muzzle-origin ray only
+    // converges with the reticle at max range — sniper shots landed low-right
+    // at all combat ranges). The muzzle stays as the tracer's visual start.
+    const hitOrigin = options?.aimOrigin ?? spawnPosition;
     const aimPoint = options?.aimPoint ?? {
-      x: spawnPosition.x + dirX * def.range,
-      y: spawnPosition.y + dirY * def.range,
-      z: spawnPosition.z + dirZ * def.range,
+      x: hitOrigin.x + dirX * def.range,
+      y: hitOrigin.y + dirY * def.range,
+      z: hitOrigin.z + dirZ * def.range,
     };
     const baseDirection = this.normalizeVector(
       {
-        x: aimPoint.x - spawnPosition.x,
-        y: aimPoint.y - spawnPosition.y,
-        z: aimPoint.z - spawnPosition.z,
+        x: aimPoint.x - hitOrigin.x,
+        y: aimPoint.y - hitOrigin.y,
+        z: aimPoint.z - hitOrigin.z,
       },
       { x: dirX, y: dirY, z: dirZ },
     );
@@ -124,7 +135,8 @@ export class WeaponSystem {
         : { ...baseDirection };
       const isKnockback = weapon.weaponId === 'flintknock';
       traces.push({
-        origin: { ...spawnPosition },
+        origin: { ...hitOrigin },
+        visualOrigin: { ...spawnPosition },
         direction,
         range: def.range,
         damage: def.damage,

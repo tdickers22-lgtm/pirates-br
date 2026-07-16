@@ -149,16 +149,20 @@ def build_tavern(name="tavern"):
                                  sx * (W * 0.5 - sideW * 0.5), -D * 0.5,
                                  floorTop + wallH * 0.5, seed=9 + sx))
     parts.append(box(coll, "lintel", doorW + 0.3, th + 0.08, 0.5, 0, -D * 0.5, wallTop - 0.25, "Timber", bev=0.02))
-    parts.append(box(coll, "door", doorW - 0.1, 0.08, wallH - 0.5, 0, -D * 0.5 - 0.04,
-                     floorTop + (wallH - 0.5) * 0.5, "Wood_Dark", bev=0.015))
-    # door planks + iron hinges + handle
+    # door leaf lives in its OWN exported object (see join below) so the game
+    # can swing it on its hinge; keep it out of the main shell mesh.
+    door_parts = []
+    door_parts.append(box(coll, "door", doorW - 0.1, 0.08, wallH - 0.5, 0, -D * 0.5 - 0.04,
+                          floorTop + (wallH - 0.5) * 0.5, "Wood_Dark", bev=0.015))
+    # door planks + iron hinges + handles (outside + inside)
     for i in range(3):
-        parts.append(box(coll, f"doorp{i}", 0.05, 0.03, wallH - 0.6, -0.5 + i * 0.5,
-                         -D * 0.5 - 0.09, floorTop + (wallH - 0.5) * 0.5, "Wood_Dark", bev=0.008))
+        door_parts.append(box(coll, f"doorp{i}", 0.05, 0.03, wallH - 0.6, -0.5 + i * 0.5,
+                              -D * 0.5 - 0.09, floorTop + (wallH - 0.5) * 0.5, "Wood_Dark", bev=0.008))
     for hz in (0.8, 2.2):
-        parts.append(box(coll, f"hinge{hz}", 0.9, 0.03, 0.09, -0.3, -D * 0.5 - 0.10,
-                         floorTop + hz, "Metal_Iron", bev=0.008))
-    parts.append(box(coll, "handle", 0.06, 0.08, 0.22, 0.6, -D * 0.5 - 0.11, floorTop + 1.25, "Metal_Iron", bev=0.01))
+        door_parts.append(box(coll, f"hinge{hz}", 0.9, 0.03, 0.09, -0.3, -D * 0.5 - 0.10,
+                              floorTop + hz, "Metal_Iron", bev=0.008))
+    door_parts.append(box(coll, "handle", 0.06, 0.08, 0.22, 0.6, -D * 0.5 - 0.11, floorTop + 1.25, "Metal_Iron", bev=0.01))
+    door_parts.append(box(coll, "handle_in", 0.06, 0.08, 0.22, 0.6, -D * 0.5 + 0.03, floorTop + 1.25, "Metal_Iron", bev=0.01))
     # door frame jambs
     for sx in (-1, 1):
         parts.append(box(coll, f"jamb{sx}", 0.16, th + 0.1, wallH - 0.3, sx * doorW * 0.5,
@@ -347,6 +351,13 @@ def build_tavern(name="tavern"):
                     rot_z=1.2, tilt=math.radians(4))
 
     join(parts, name)
+    # Door leaf = its OWN object with the origin ON the hinge axis (left jamb
+    # edge) so the game can swing it open with a simple rotation. World
+    # placement is preserved: vertices shift by -hinge, object moves to +hinge.
+    door_obj = join(door_parts, "door")
+    hinge = Vector((-(doorW - 0.1) * 0.5, -D * 0.5 - 0.04, 0.0))
+    door_obj.data.transform(Matrix.Translation(-hinge))
+    door_obj.location = hinge
     bake_ao(coll)
     export_collection_vc(coll, f"{name}.glb")
     verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))

@@ -1018,9 +1018,40 @@ export class PhysicsSystem {
             const seabedClampCap = waveY + 0.05;
             if (seabedY > -Infinity && player.position.y < seabedY) {
               const penetration = seabedY - player.position.y;
-              if (penetration > 1.2) {
-                player.position.x -= player.velocity.x * dt;
-                player.position.z -= player.velocity.z * dt;
+              if (seabedY > seabedClampCap + 0.3) {
+                // SHORE FACE: the terrain at this column pokes ABOVE the waves
+                // (rocky/cliff aprons at distRatio ~1.0–1.05). The old cap
+                // pinned the swimmer at the water surface INSIDE the rock —
+                // never converting to walk (outside the footprint), never
+                // rescued by the anti-embed net. Push them seaward along the
+                // descending terrain gradient instead; a couple of ticks walks
+                // them back into open water regardless of how they got in
+                // (swimming, knockback, geyser ballistic, wave surge).
+                const probe = 0.9;
+                let bestX = player.position.x;
+                let bestZ = player.position.z;
+                let bestY = seabedY;
+                for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [0.707, 0.707], [-0.707, 0.707], [0.707, -0.707], [-0.707, -0.707]] as const) {
+                  const nx = player.position.x + ox * probe;
+                  const nz = player.position.z + oz * probe;
+                  const ny = this.swimSeabedY(islands, nx, nz);
+                  if (ny < bestY) {
+                    bestY = ny;
+                    bestX = nx;
+                    bestZ = nz;
+                  }
+                }
+                player.position.x = bestX;
+                player.position.z = bestZ;
+                player.position.y = Math.max(player.position.y, Math.min(bestY, seabedClampCap));
+                // Kill the inward drive so holding forward can't bore back in.
+                player.velocity.x *= 0.15;
+                player.velocity.z *= 0.15;
+                player.knockbackVelocity.x *= 0.15;
+                player.knockbackVelocity.z *= 0.15;
+              } else if (penetration > 1.2) {
+                player.position.x -= (player.velocity.x + player.knockbackVelocity.x) * dt;
+                player.position.z -= (player.velocity.z + player.knockbackVelocity.z) * dt;
                 player.velocity.x *= -0.05;
                 player.velocity.z *= -0.05;
                 const restoredSeabedY = this.swimSeabedY(islands, player.position.x, player.position.z);
@@ -1750,13 +1781,16 @@ export class PhysicsSystem {
     // the client renderer's defensive clamps of ±0.5 / ±0.6).
     const pitchCap = 0.35 + seaState * 0.1;
     const rollCap = 0.45 + seaState * 0.08;
+    // An anchored hull holds nearly flat — berthed ships used to heel with
+    // every passing wave, so identical docks showed randomly tilted parks.
+    const anchorCalm = ship.anchored ? 0.3 : 1;
     const targetPitch = clamp(
-      Math.atan2(sternY - bowY, stats.length * 0.8) - speedFrac * 0.035,
+      (Math.atan2(sternY - bowY, stats.length * 0.8) - speedFrac * 0.035) * anchorCalm,
       -pitchCap, pitchCap,
     );
     const turnHeel = clamp(-ship.angularVelocity * speedFrac * 0.5, -0.06, 0.06);
     const targetRoll = clamp(
-      Math.atan2(starboardY - portY, stats.width * 0.8) + turnHeel + windHeel,
+      (Math.atan2(starboardY - portY, stats.width * 0.8) + turnHeel + windHeel) * anchorCalm,
       -rollCap, rollCap,
     );
 
