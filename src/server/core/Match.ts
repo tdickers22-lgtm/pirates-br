@@ -141,9 +141,10 @@ const CUTLASS_CHARGE_TIME = 0.72;
 const CUTLASS_CHARGE_MIN_TAP = 0.02;
 const CUTLASS_LUNGE_COOLDOWN = 1.05;
 const CUTLASS_LUNGE_DAMAGE = 50;
-// Dash travel ≈ impulse × 0.16 (0.9/tick knockback decay) → ~8.3m at a
-// blink-fast peak. Was 32 (~5m) — the lunge should FEEL like a teleport-cut.
-const CUTLASS_LUNGE_IMPULSE = 52;
+// Dash impulse, calibrated by probe: 32 measured ~9.2m travel (incl. landing
+// slide), 52 measured ~15m ("wayyyy too far"). 40 lands ~11.5-12m — a real
+// gap-closer that stays chill.
+const CUTLASS_LUNGE_IMPULSE = 40;
 /** Kill credit for prior damage expires after this long (storm/drown deaths). */
 const KILL_CREDIT_WINDOW_SECONDS = 90;
 /** Catch-up steps per timer callback — bounds the death spiral after a stall. */

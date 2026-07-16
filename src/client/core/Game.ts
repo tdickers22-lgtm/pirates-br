@@ -9376,7 +9376,7 @@ export class Game {
 
     // ── FOV kick: +4° eased into full sail speed, +2° brief pop on own cannon
     // fire, +5° rush on the cutlass dash.
-    const fovKickTarget = shipSpeed01 * 4 + this.cameraShakeCannon * 2 + this.cutlassDashKick * 5;
+    const fovKickTarget = shipSpeed01 * 4 + this.cameraShakeCannon * 2 + this.cutlassDashKick * 3.5;
     this.cameraFovKick += (fovKickTarget - this.cameraFovKick) * Math.min(1, this.frameDt * 6);
     this.cameraShakeCannon = Math.max(0, this.cameraShakeCannon - this.frameDt * 3.2);
     this.cutlassDashKick = Math.max(0, this.cutlassDashKick - this.frameDt * 2.6);
