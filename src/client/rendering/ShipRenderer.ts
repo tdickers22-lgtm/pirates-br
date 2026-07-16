@@ -2678,7 +2678,6 @@ export class ShipRenderer {
     const cannonGroups: CannonMeshGroup[] = [];
     const cannonCount = stats.cannonCount;
     const cannonsPerSide = cannonCount / 2;
-    const cannonSpacing = L * 0.5 / Math.max(cannonsPerSide - 1, 1);
 
     // Bigger, more visibly detailed cannons. Material highlights:
     // - Dark iron barrel with three brass reinforcing bands
@@ -2710,7 +2709,10 @@ export class ShipRenderer {
     for (let side = 0; side < 2; side++) {
       const sideX = (side === 0 ? 1 : -1) * (W * 0.5 + 0.06);
       for (let c = 0; c < cannonsPerSide; c++) {
-        const cz = L * 0.2 - c * cannonSpacing;
+        // Row z comes from the SHARED stand-point math so the visual gun, the
+        // [X] prompt zone and the mount snap always agree (the sloop's single
+        // gun per side sits amidships now, not up in the anchor/mast band).
+        const cz = getCannonDeckLocalPosition(stats, side === 0 ? c : cannonsPerSide + c).z;
         const cg = new THREE.Group();
         const yawPivot = new THREE.Group();
         const pitchPivot = new THREE.Group();

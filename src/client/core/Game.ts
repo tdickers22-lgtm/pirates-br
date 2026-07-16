@@ -1008,7 +1008,7 @@ function cullCaveTubeAgainstNeighbors(geo: THREE.BufferGeometry, cave: IslandCav
       const sinR = Math.sin(other.rotation);
       const lx = dx * cosR - dz * sinR;
       const lz = dx * sinR + dz * cosR;
-      if (Math.abs(lx) > oRadius || lz > 0.6 || lz < -oLen) continue;
+      if (Math.abs(lx) > oRadius || lz > -0.4 || lz < -(oLen - 0.6)) continue;
       // Per-segment floor ramp — mirrors shared getCaveFloorY/getCaveCeilingY.
       const f0 = other.floorY ?? other.position.y - 0.4;
       const fEnd = other.floorYEnd ?? f0;
@@ -1035,7 +1035,11 @@ function cullCaveTubeAgainstNeighbors(geo: THREE.BufferGeometry, cave: IslandCav
     const wx = cave.position.x + lx * cosSelf + lz * sinSelf;
     const wy = cave.position.y + ly;
     const wz = cave.position.z - lx * sinSelf + lz * cosSelf;
-    if (!insideOther(wx, wy, wz)) kept.push(ia, ib, ic);
+    // Exterior guard: only cull faces genuinely BURIED under the hillside —
+    // culling walls at/above the natural surface opened literal windows from
+    // inside the cave to open daylight (segment boxes overshoot the rock).
+    if (insideOther(wx, wy, wz) && wy < getIslandSurfaceY(island, wx, wz) - 0.4) continue;
+    kept.push(ia, ib, ic);
   }
   if (kept.length !== index.count) {
     geo.setIndex(kept);
@@ -2265,6 +2269,8 @@ export class Game {
   private prevCutlassSwingProgress = 0;
   /** 0..1 FOV punch on the cutlass dash, decays fast (rush feel). */
   private cutlassDashKick = 0;
+  /** True while the axe has a harvestable in range — gates the chop thunk. */
+  private harvestTargetActive = false;
   // ── Anime slash trails: pooled, zero per-swing allocations ──
   /** Camera-space crescent ribbons (2, alternating) for the first-person slash. */
   private slashRibbons: Array<{ mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; age: number; life: number; side: 1 | -1 }> = [];
@@ -2960,6 +2966,7 @@ export class Game {
       && !player.carryingChestId
       && this.input.isFiring();
     const target = chopping && player ? this.findHarvestTarget(player) : null;
+    this.harvestTargetActive = !!target;
 
     if (!target || target.prop.id === undefined) {
       this.demotePromotedHarvestProp();
@@ -11806,7 +11813,9 @@ export class Game {
       && player.state === 'alive'
       && !player.carryingChestId;
     const chopCycle = (now * 1.4) % 1;
-    if (chopping && chopCycle >= 0.75 && this.prevAxeChopCycle < 0.75) {
+    // The thunk means CONTACT — air swings stay silent; harvestTargetActive
+    // is maintained by updateHarvestDestruction from the live target scan.
+    if (chopping && this.harvestTargetActive && chopCycle >= 0.75 && this.prevAxeChopCycle < 0.75) {
       this.audio.playAxeChop();
     }
     this.prevAxeChopCycle = chopping ? chopCycle : 1;

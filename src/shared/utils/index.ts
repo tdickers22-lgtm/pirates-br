@@ -770,7 +770,11 @@ export function getCaveCeilingY(island: Island, x: number, z: number): number | 
       const along = cLen > 0 ? clamp(-lz / cLen, 0, 1) : 0;
       const floorAt = f0 + (fEnd - f0) * along;
       const ceil = floorAt + cave.height;
-      if (best === null || ceil < best) best = ceil;
+      // Open space is the UNION of segment boxes — the ceiling at a point is
+      // the HIGHEST covering segment. Keeping the lowest meant a side-vein
+      // overlapping a tall chamber slammed an invisible 2m lid onto the open
+      // room: jumping in caves bonked on nothing.
+      if (best === null || ceil > best) best = ceil;
     }
   }
   return best;
@@ -873,6 +877,32 @@ export function getCrowNestStandingY(stats: { height: number; mastCount: number 
   return H + mastH * 0.86 + 0.12;
 }
 
+/** Walkable deck half-width at a ship-local z — the BULWARK INNER FACE taper
+ *  (single source of truth; PhysicsSystem's clamp and every station placement
+ *  read this). Stations placed with the naive W/2−margin fell OFF this taper
+ *  near bow/stern on the wider hulls, which is how "use cannon" could snap a
+ *  player outside the walkable deck and into the sea. */
+export function getShipDeckWalkHalfWidth(stats: { width: number; length: number }, localZ: number, margin = 0): number {
+  const z = Math.max(-0.5, Math.min(0.5, localZ / Math.max(0.001, stats.length)));
+  const stations = [
+    { z: -0.5, half: 0.23 },
+    { z: -0.36, half: 0.38 },
+    { z: -0.08, half: 0.42 },
+    { z: 0.22, half: 0.37 },
+    { z: 0.42, half: 0.20 },
+    { z: 0.5, half: 0.05 },
+  ];
+  for (let i = 0; i < stations.length - 1; i++) {
+    const a = stations[i];
+    const b = stations[i + 1];
+    if (z >= a.z && z <= b.z) {
+      const t = (z - a.z) / Math.max(0.001, b.z - a.z);
+      return stats.width * (a.half + (b.half - a.half) * t) + margin;
+    }
+  }
+  return stats.width * stations[stations.length - 1].half + margin;
+}
+
 /** Climb prompt zone for the crow's-nest ladder (main mast is at x=0 in ship-local space). */
 export function getCrowNestLadderInteractionBounds(stats: { length: number }) {
   return {
@@ -882,45 +912,56 @@ export function getCrowNestLadderInteractionBounds(stats: { length: number }) {
   };
 }
 
-/** Rail rope stations (halyards): worked from the pin rails ABEAM THE
- *  MAINMAST — where the shrouds and halyards physically come down. The hull
- *  narrows toward the mast station, so x is a fraction of the DECK width
- *  there (~0.9 of half-beam per the loft), not the full aft-rail beam —
- *  full-beam placement left the racks floating in mid-air off the deck edge. */
-export function getSailRopeStationLocals(stats: { length: number; mastCount: number; width?: number }): Array<{ x: number; z: number }> {
-  const halfW = (stats.width ?? 5) * 0.5;
-  const deckHalf = halfW * 0.9;
-  const z = getMainMastLocalZ(stats);
+/** Rail rope stations (halyards), worked from the pin rails at the bulwark.
+ *  Single-master: abeam the mainmast (classic). Multi-master: in the CLEAR
+ *  BAND midway between the first two cannon rows — abeam-the-mast placement
+ *  stacked the halyard cleat directly on the forward gun ("the ships are too
+ *  cramped, I don't know what I'm pressing X for"). x hugs the bulwark taper
+ *  so the rack never floats off the deck edge. */
+export function getSailRopeStationLocals(stats: { length: number; mastCount: number; width: number }): Array<{ x: number; z: number }> {
+  const halfW = stats.width * 0.5;
+  let z = getMainMastLocalZ(stats);
+  if (stats.mastCount > 1) {
+    // Midway between the first two broadside rows (rows sit at L*0.2 − slot ·
+    // L*0.5/(perSide−1); brig carries 2 guns a side, galleon 4).
+    const cannonsPerSide = stats.mastCount === 2 ? 2 : 4;
+    const rowSpacing = stats.length * 0.5 / (cannonsPerSide - 1);
+    z = stats.length * 0.2 - rowSpacing * 0.5;
+  }
+  const x = Math.min(halfW * 0.9 - 0.6, getShipDeckWalkHalfWidth(stats, z, -0.2));
   return [
-    { x: deckHalf - 0.6, z },
-    { x: -(deckHalf - 0.6), z },
+    { x, z },
+    { x: -x, z },
   ];
 }
 
-/** Brace stations: the ropes that ANGLE the yard, worked from the rails just
- *  forward of the quarterdeck. Port station hauls the yard to port, starboard
- *  to starboard — a physical home for sail trim (the helm's Q/F stays). */
-export function getBraceStationLocals(stats: { length: number; width?: number }): Array<{ x: number; z: number; dir: -1 | 1 }> {
-  const halfW = (stats.width ?? 5) * 0.5;
-  const z = -stats.length * 0.22;
+/** Brace stations: the ropes that ANGLE the yard. Single-master: at the rails
+ *  forward of the quarterdeck. Multi-masters keep them INBOARD amidships-aft —
+ *  their rails are wall-to-wall gun stations, so rail braces sat on top of the
+ *  aft cannons. */
+export function getBraceStationLocals(stats: { length: number; width: number; mastCount?: number }): Array<{ x: number; z: number; dir: -1 | 1 }> {
+  const halfW = stats.width * 0.5;
+  const multi = (stats.mastCount ?? 1) > 1;
+  const z = multi ? -stats.length * 0.2 : -stats.length * 0.22;
+  const x = multi ? Math.min(1.1, stats.width * 0.16) : halfW - 0.6;
   return [
-    { x: halfW - 0.6, z, dir: 1 },
-    { x: -(halfW - 0.6), z, dir: -1 },
+    { x, z, dir: 1 },
+    { x: -x, z, dir: -1 },
   ];
 }
 
 /** Legacy single-point accessor — resolves to the starboard rope station. */
-export function getSailStationLocal(stats: { length: number; mastCount: number; width?: number }): { x: number; z: number } {
+export function getSailStationLocal(stats: { length: number; mastCount: number; width: number }): { x: number; z: number } {
   return getSailRopeStationLocals(stats)[0];
 }
 
 /** Back-compat: old hoist callers now resolve to the shared sail ring. */
-export function getSailHoistStationLocal(stats: { length: number; mastCount: number; width?: number }): { x: number; z: number } {
+export function getSailHoistStationLocal(stats: { length: number; mastCount: number; width: number }): { x: number; z: number } {
   return getSailStationLocal(stats);
 }
 
 /** Back-compat: old angle callers now resolve to the shared sail ring. */
-export function getSailAngleStationLocal(stats: { length: number; mastCount: number; width?: number }): { x: number; z: number } {
+export function getSailAngleStationLocal(stats: { length: number; mastCount: number; width: number }): { x: number; z: number } {
   return getSailStationLocal(stats);
 }
 
@@ -935,9 +976,15 @@ export interface ShipCompanionwayConfig {
 }
 
 export function getShipCompanionwayConfig(stats: { width: number; length: number }): ShipCompanionwayConfig {
-  const halfX = Math.max(1.35, stats.width * 0.2);
+  // Deliberately NARROW and near the centreline: the stairwell footprint (and its
+  // coaming colliders, inflated by player radius) must stay clear of the rail
+  // columns where the cannon stands, sail-rope stations and gangways live. The
+  // old W*0.2 halfX reached x≈1.95 on the sloop — the starboard coaming AABB then
+  // CONTAINED the cannon stand point (x=1.85), so mounting a cannon snapped you
+  // inside the wall collider and its ejection shoved you overboard.
+  const halfX = Math.min(1.1, Math.max(0.85, stats.width * 0.16));
   const halfZ = Math.max(1.4, stats.length * 0.13);
-  const cx = stats.width * 0.12;
+  const cx = stats.width * 0.05;
   const cz = stats.length * 0.08;
 
   return {

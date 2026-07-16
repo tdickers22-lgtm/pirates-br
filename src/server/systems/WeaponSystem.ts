@@ -2,6 +2,7 @@ import { v4 as uuid } from 'uuid';
 import type { Player, Ship, Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
 import { WEAPONS, SHIP, SHIP_STATS, PLAYER, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { angleWrap, degreesToRad } from '../../shared/utils/index.js';
+import { getCannonDeckLocalPosition } from '../../shared/interactions.js';
 
 export interface HitscanTrace {
   origin: Vec3;
@@ -403,13 +404,12 @@ export class WeaponSystem {
   getCannonMuzzlePosition(ship: Ship, cannonIndex: number, yaw: number, pitch: number): Vec3 {
     const stats = SHIP_STATS[ship.type];
     const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-    const slotWithinSide = cannonIndex % cannonsPerSide;
     const starboardSide = cannonIndex < cannonsPerSide;
-    const cannonSpacing = cannonsPerSide <= 1
-      ? 0
-      : stats.length * 0.5 / (cannonsPerSide - 1);
+    // Muzzle x pokes outboard of the bulwark; the row z comes from the SHARED
+    // stand-point math so the visual gun, prompt zone, mount snap and muzzle
+    // always agree (the sloop's single gun per side sits amidships now).
     const localX = (starboardSide ? 1 : -1) * (stats.width * 0.5 + 0.08);
-    const localZ = stats.length * 0.2 - slotWithinSide * cannonSpacing;
+    const localZ = getCannonDeckLocalPosition(stats, cannonIndex).z;
     const baseX = ship.position.x + localX * Math.cos(ship.rotation) + localZ * Math.sin(ship.rotation);
     const baseY = ship.position.y + stats.height + 0.18;
     const baseZ = ship.position.z + localZ * Math.cos(ship.rotation) - localX * Math.sin(ship.rotation);

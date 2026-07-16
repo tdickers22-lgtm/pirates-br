@@ -21,6 +21,7 @@ import {
   getMainMastLocalZ,
   getShipCompanionwayConfig,
   getShipDeckRaiseAt,
+  getShipDeckWalkHalfWidth,
   getSeaRockBoundsRadius,
   getSeaRockColliders,
   intersectRaySeaRock,
@@ -97,8 +98,10 @@ const LOCO = {
   FALL_SAFE_SPEED: 15,
   FALL_DAMAGE_PER_SPEED: 4.5,
   FALL_DAMAGE_MAX: 70,
-  /** Standing water at least this deep cancels fall damage entirely. */
-  FALL_SAFE_WATER_DEPTH: 1.5,
+  /** Standing water at least this deep cancels fall damage entirely — any real
+   *  splash is safe (SoT rule: water landings never hurt); only ankle-film
+   *  puddles still count as hard ground. */
+  FALL_SAFE_WATER_DEPTH: 0.3,
 } as const;
 
 /**
@@ -638,8 +641,14 @@ export class PhysicsSystem {
           // so they keep their damage-free landing.
           const geyserFall = (this.playerGeyserCooldown.get(player.id) ?? 0) > 0;
           const impactSpeed = -player.velocity.y;
+          // Splash rule: an arc that ends in standing water is always a free
+          // landing, same as ordinary falls — only hard (dry) ground hurts.
+          const landingSea = stormSeaState(storm, player.position.x, player.position.z);
+          const landingWaveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS, landingSea);
+          const landedInWater = !onDock && landingWaveY - groundY > LOCO.FALL_SAFE_WATER_DEPTH;
           if (
             geyserFall
+            && !landedInWater
             && impactSpeed > LOCO.FALL_SAFE_SPEED
             && player.respawnProtectionTimer <= 0
           ) {
@@ -2288,18 +2297,12 @@ export class PhysicsSystem {
       && local.z <= stair.frontZ
       && local.z >= stair.backZ
     ) {
-      // The companionway is a ONE-WAY stair down from its forward lip — not an open
-      // trapdoor across its whole footprint. Only descend when entering from the
-      // front top step or already below deck; a lateral/aft step onto the hole
-      // stays at deck level (the coaming colliders below keep you from stepping
-      // there in the first place), so you no longer fall through beside the stairs.
-      const alreadyBelow = position.y < deckY - 0.25;
-      const nearFrontLip = local.z >= stair.frontZ - 0.6;
-      if (alreadyBelow || nearFrontLip) {
-        const descent = clamp((stair.frontZ - local.z) / Math.max(0.001, stair.frontZ - stair.backZ), 0, 1);
-        return deckY + (holdFloor - deckY) * descent;
-      }
-      return deckY;
+      // The whole stairwell footprint is open air — the floor there is always the
+      // stair ramp, never a deck-level lid. Walking onto the hole from ANY side
+      // drops you onto the steps; the coaming colliders around the sides/back are
+      // what stop accidental entry, not a phantom floor.
+      const descent = clamp((stair.frontZ - local.z) / Math.max(0.001, stair.frontZ - stair.backZ), 0, 1);
+      return deckY + (holdFloor - deckY) * descent;
     }
     if (this.isInsideShipHoldFootprint(local, stats, 0.08) && position.y < deckY - 0.25) {
       return holdFloor;
@@ -2414,28 +2417,11 @@ export class PhysicsSystem {
   }
 
   private getDeckHalfWidth(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], localZ: number, margin = 0) {
-    const z = clamp(localZ / Math.max(0.001, stats.length), -0.5, 0.5);
     // Walkable half-width tracks the BULWARK INNER FACE (~0.42·W), not the loft
     // deck-edge/sheer (~0.56·W) — clamping to the sheer let pirates stand out on
-    // the covering board and clip through the rail. Kept a hair inboard of the
-    // bulwark wall (ShipRenderer sets it at ±0.42·W) so feet stay on flat deck.
-    const stations = [
-      { z: -0.5, half: 0.23 },
-      { z: -0.36, half: 0.38 },
-      { z: -0.08, half: 0.42 },
-      { z: 0.22, half: 0.37 },
-      { z: 0.42, half: 0.20 },
-      { z: 0.5, half: 0.05 },
-    ];
-    for (let i = 0; i < stations.length - 1; i++) {
-      const a = stations[i];
-      const b = stations[i + 1];
-      if (z >= a.z && z <= b.z) {
-        const t = (z - a.z) / Math.max(0.001, b.z - a.z);
-        return Math.max(PLAYER.RADIUS + 0.08, stats.width * (a.half + (b.half - a.half) * t) + margin);
-      }
-    }
-    return Math.max(PLAYER.RADIUS + 0.08, stats.width * stations[stations.length - 1].half + margin);
+    // the covering board and clip through the rail. The taper itself lives in
+    // shared getShipDeckWalkHalfWidth so station placement uses the same line.
+    return Math.max(PLAYER.RADIUS + 0.08, getShipDeckWalkHalfWidth(stats, localZ, margin));
   }
 
 }
