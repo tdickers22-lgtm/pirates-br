@@ -277,6 +277,16 @@ export const SHARK = {
   BITE_RANGE: 2.35,
   BITE_COOLDOWN: 2.35,
   CHASE_SPEED: 5.4,
+  /** Telegraphed attack: windup is the dodge window (direction locks at its
+   *  START), the lunge is a straight dash, recovery leaves the shark slow
+   *  and biteable. Damage only lands on the lunge if the swimmer is still
+   *  inside the locked corridor. */
+  AGGRO_RANGE: 26,
+  WINDUP_TIME: 0.75,
+  LUNGE_TIME: 0.32,
+  LUNGE_SPEED: 14,
+  RECOVER_TIME: 1.15,
+  LUNGE_HIT_RADIUS: 1.7,
   HIT_RADIUS: 1.25,
   SPAWN_MIN_DIST: 26,
   SPAWN_MAX_DIST: 52,
@@ -341,6 +351,26 @@ export const SEA_ROCKS = {
 //  - charged_cannons ("Heavy Shot") → each ball punches CHARGED_EXTRA_HOLES more
 //    hole(s) into the section it hits, and still deals more anti-personnel blast.
 //  - swift_sails → unchanged top-speed multiplier.
+/** Gathering loop: the axe fells palms (wood) and cracks boulders (ore);
+ *  upgrade stations consume materials from the pocket+ship pool. Yields and
+ *  costs are paced against the ~12.6min storm window: one upgrade ≈ 2-3
+ *  minutes of focused gathering, or loot barrels/chests for a shortcut. */
+export const HARVEST = {
+  CHOP_TIME: 2.2,          // seconds of axe work per palm
+  MINE_TIME: 3.0,          // seconds per boulder
+  WOOD_PER_TREE_MIN: 2,
+  WOOD_PER_TREE_MAX: 4,
+  ORE_PER_BOULDER_MIN: 2,
+  ORE_PER_BOULDER_MAX: 3,
+  RANGE: 3.2,              // how close the axe must be
+} as const;
+
+export const UPGRADE_COSTS: Record<'hull_reinforcement' | 'charged_cannons' | 'swift_sails', { wood: number; ore: number }> = {
+  hull_reinforcement: { wood: 6, ore: 3 },
+  charged_cannons: { wood: 3, ore: 6 },
+  swift_sails: { wood: 8, ore: 2 },
+};
+
 export const SHIP_UPGRADES = {
   /** Reinforced hull: open holes flood at this fraction of the base rate. */
   HULL_INGRESS_MULT: 0.6,

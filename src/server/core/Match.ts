@@ -394,6 +394,8 @@ export class Match {
       pocketMango: 0,
       pocketMeat: 0,
       pocketMeatByType: {},
+      pocketOre: 0,
+      mastClimb: null,
       armor: 0,
       pocketUseCooldown: 0,
       hasShovel: true,
@@ -759,6 +761,7 @@ export class Match {
   }
 
   private enterHelm(player: Player, ship: Ship): boolean {
+    if (ship.sinking) return false;
     if (this.isStationOccupied(ship, 'helm', player.id)) return false;
     this.clearStationFlags(player);
     player.atHelm = true;
@@ -767,6 +770,7 @@ export class Match {
   }
 
   private enterCrowNest(player: Player, ship: Ship): boolean {
+    if (ship.sinking) return false;
     if (this.isStationOccupied(ship, 'crow', player.id)) return false;
     this.clearStationFlags(player);
     player.atCrowNest = true;
@@ -775,6 +779,7 @@ export class Match {
   }
 
   private enterCannon(player: Player, ship: Ship, cannonIndex: number, yaw: number, pitch: number): boolean {
+    if (ship.sinking) return false;
     if (this.isStationOccupied(ship, 'cannon', player.id, cannonIndex)) return false;
     this.clearStationFlags(player);
     player.atCannon = true;
@@ -3512,6 +3517,10 @@ export class Match {
               velocity: { x: 0, y: 0, z: 0 },
               health: SHARK.HEALTH,
               biteCooldown: 1.2,
+        attackState: 'cruise',
+        attackTimer: 0,
+        lungeDirX: 0,
+        lungeDirZ: 0,
               targetId: p.id,
             });
             this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX);
@@ -4312,6 +4321,7 @@ export class Match {
       projectiles: this.state.projectiles.filter(p => p.alive),
       kegs: this.state.kegs.filter((keg) => keg.timer > 0 && !keg.defused),
       islands: includeStaticWorld ? this.state.islands : [],
+      chestSync: this.state.islands.flatMap((island) => island.chests),
     };
   }
 

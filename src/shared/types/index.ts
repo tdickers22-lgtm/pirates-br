@@ -32,7 +32,7 @@ export interface ShipKeg {
 export type ShipUpgradeType = 'hull_reinforcement' | 'charged_cannons' | 'swift_sails';
 
 /** Held tools selectable from the supply wheel (all innate to the pirate). */
-export type EquippableTool = 'spyglass' | 'compass' | 'bucket' | 'shovel' | 'lantern';
+export type EquippableTool = 'spyglass' | 'compass' | 'bucket' | 'shovel' | 'lantern' | 'axe';
 
 export interface ShipUpgrade {
   type: ShipUpgradeType;
@@ -192,6 +192,11 @@ export interface Player {
   /** Typed breakdown of pocketMeat by the animal it came from — each cut has
    *  its own heal value; the aggregate pocketMeat stays the wheel/HUD count. */
   pocketMeatByType: Partial<Record<WildlifeType, number>>;
+  /** Mined ore for upgrade-station recipes (axe on boulders). */
+  pocketOre: number;
+  /** Ladder-climb progress toward the crow's nest (0 deck → 1 nest); null when
+   *  not on the ladder. Drives the manual climb + third-person pose. */
+  mastClimb: number | null;
   /** Iron Cuirass pool (0..PLAYER.MAX_ARMOR): combat damage drains this
    *  before health. Bought from the Gold Hoarder, lost on death. */
   armor: number;
@@ -285,6 +290,8 @@ export type IslandPropType =
  *  sampled via getIslandSurfaceY at need (dock_mid/dock_end/dock lanterns sit at
  *  dock deck height instead of terrain height). */
 export interface IslandProp {
+  /** Stable per-island id for runtime addressing (harvest/removal). */
+  id?: number;
   type: IslandPropType;
   x: number;
   z: number;
@@ -543,7 +550,8 @@ export type ItemType =
   | 'eye_ammo'
   | 'flintknock_ammo'
   | 'pistol_ammo'
-  | 'spyglass';
+  | 'spyglass'
+  | 'ore';
 
 // ── Storm ────────────────────────────────────────────────────
 export interface StormState {
@@ -585,6 +593,8 @@ export interface TradeSession {
 export type GamePhase = 'waiting' | 'playing' | 'ended';
 
 /** Great white — rare surface predator; heavy bites, low HP */
+export type SharkAttackState = 'cruise' | 'windup' | 'lunge' | 'recover';
+
 export interface Shark {
   id: string;
   position: Vec3;
@@ -592,6 +602,12 @@ export interface Shark {
   velocity: Vec3;
   health: number;
   biteCooldown: number;
+  /** Telegraphed attack phase — windup is the dodge window, lunge is the
+   *  locked dash (direction frozen at windup start), recover is vulnerable. */
+  attackState: SharkAttackState;
+  attackTimer: number;
+  lungeDirX: number;
+  lungeDirZ: number;
   targetId: string | null;
 }
 
@@ -612,6 +628,11 @@ export interface GameState {
   islands: Island[];
   tradeSessions: TradeSession[];
   winnerId: string | null;
+  /** Fresh treasure-chest state rides EVERY full snapshot (the chests
+   *  themselves live inside island.chests, which only ships on the rare
+   *  static-world tick — pickups/stows/drops looked frozen for ~19s: ghost
+   *  chests at the original pickup spot). The client merges these by id. */
+  chestSync?: TreasureChest[];
 }
 
 // ── Hot snapshot (high-rate light wire format) ────────────────
@@ -645,6 +666,7 @@ export interface HotPlayerState {
   health: number;
   armor: number;
   state: PlayerState;
+  mastClimb: number | null;
   onShipId: string | null;
   cutlassCharge: number;
   downedUntil: number;
@@ -669,6 +691,8 @@ export interface HotSharkState {
   position: Vec3;
   rotation: number;
   health: number;
+  attackState: SharkAttackState;
+  attackTimer: number;
 }
 
 export interface HotSnapshotPayload {
@@ -706,6 +730,7 @@ export type MsgType =
   | 'ship_upgraded'
   | 'treasure_sold'
   | 'armor_bought'
+  | 'prop_removed'
   | 'treasure_map'
   | 'trade_request'
   | 'trade_update'

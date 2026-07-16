@@ -118,6 +118,7 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
     // the world payload lean without touching the island's terrain parameters.
     islands: includeStaticWorld ? snap.islands.map(quantizeIslandForWire) : [],
     seaRocks: includeStaticWorld ? snap.seaRocks : [],
+    chestSync: (snap.chestSync ?? []).map((chest) => quantizeDeep(chest, 2)),
   };
 }
 
@@ -163,6 +164,7 @@ export function buildHotSnapshot(state: GameState, serverTime: number): HotSnaps
         health: roundTo(player.health, 2),
         armor: roundTo(player.armor ?? 0, 2),
         state: player.state,
+        mastClimb: player.mastClimb ?? null,
         onShipId: player.onShipId,
         cutlassCharge: roundTo(player.cutlassCharge, 2),
         downedUntil: roundTo(player.downedUntil, 2),
@@ -190,6 +192,8 @@ export function buildHotSnapshot(state: GameState, serverTime: number): HotSnaps
         position: quantizeDeep(shark.position, 2),
         rotation: roundTo(shark.rotation, 3),
         health: roundTo(shark.health, 2),
+        attackState: shark.attackState ?? 'cruise',
+        attackTimer: roundTo(shark.attackTimer ?? 0, 2),
       })),
   };
 }

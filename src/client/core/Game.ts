@@ -3413,11 +3413,24 @@ export class Game {
         ? offset
         : this.serverTimeOffset + (offset - this.serverTimeOffset) * 0.1;
     }
+    // Fresh chest state rides EVERY full snapshot (chestSync) — merge it into
+    // the (usually preserved) island copies so pickups/stows/drops/digs read
+    // instantly instead of freezing until the ~19s static-world resync left
+    // ghost chests at the original pickup spot.
+    if (snapshot.chestSync && snapshot.chestSync.length > 0 && nextSnapshot.islands.length > 0) {
+      const byId = new Map(snapshot.chestSync.map((chest) => [chest.id, chest]));
+      for (const island of nextSnapshot.islands) {
+        for (let i = 0; i < island.chests.length; i++) {
+          const fresh = byId.get(island.chests[i].id);
+          if (fresh) island.chests[i] = fresh;
+        }
+      }
+    }
     if (hasFreshIslandState) {
       this.ensureWorldMeshes(nextSnapshot);
-      this.syncChests();
       this.syncBarrels();
     }
+    this.syncChests();
     this.updateStormRing();
     this.updateDamageFx();
     this.syncTradeUi(nextSnapshot);
@@ -3482,12 +3495,28 @@ export class Game {
       }
     }
     for (const h of hot.kegs) {
+      let known = false;
       for (const keg of state.kegs) {
         if (keg.id === h.id) {
           keg.position = h.position;
           keg.timer = h.timer;
+          known = true;
           break;
         }
+      }
+      if (!known) {
+        // A keg placed between full snapshots must render NOW — spawn a
+        // minimal record; the next full snapshot fills shipId/localPosition.
+        state.kegs.push({
+          id: h.id,
+          shipId: null,
+          position: h.position,
+          localPosition: null,
+          section: 'bow',
+          plantedById: '',
+          timer: h.timer,
+        } as ShipKeg);
+        this.liveKegIds.add(h.id);
       }
     }
     for (const h of hot.sharks) {
@@ -8701,7 +8730,21 @@ export class Game {
         created = true;
       }
 
-      this.tempKegPos.set(keg.position.x, keg.position.y + 0.28, keg.position.z);
+      // Ship-mounted kegs re-base onto the CLIENT's ship transform from their
+      // ship-local position (like players do) — raw server world coords lag
+      // the rendered deck on a moving/turning ship and slid the keg around.
+      const kegHostShip = keg.shipId ? this.shipsById.get(keg.shipId) ?? null : null;
+      if (kegHostShip && keg.localPosition) {
+        const cos = Math.cos(kegHostShip.rotation);
+        const sin = Math.sin(kegHostShip.rotation);
+        this.tempKegPos.set(
+          kegHostShip.position.x + keg.localPosition.x * cos + keg.localPosition.z * sin,
+          kegHostShip.position.y + keg.localPosition.y + 0.28,
+          kegHostShip.position.z + keg.localPosition.z * cos - keg.localPosition.x * sin,
+        );
+      } else {
+        this.tempKegPos.set(keg.position.x, keg.position.y + 0.28, keg.position.z);
+      }
       const moveAlpha = 1 - Math.exp(-28 * dt);
       if (created || mesh.root.position.distanceToSquared(this.tempKegPos) > 16 * 16) {
         mesh.root.position.copy(this.tempKegPos);
@@ -12265,6 +12308,15 @@ export class Game {
     repairSection: keyof Ship['hull'] | null,
   ): { prompt: string; label: string; kind: InteractIntent | 'door' } | null {
     const candidates: Array<{ prompt: string; label: string; score: number; kind: InteractIntent | 'door' }> = [];
+    // A FOUNDERING ship offers no work: every station/repair/board prompt on
+    // it is a lie (the server refuses, the crew has splashed out) — pressing
+    // a stale "[X] Use Cannon" on a sinking deck read as "X threw me in the
+    // water". Drop the ship from candidate generation entirely.
+    if (ship?.sinking) {
+      ship = null;
+      nearbyCannon = null;
+      repairSection = null;
+    }
 
     // Downed crewmate nearby → hold to revive (server drains reviveProgress).
     if (this.state && player.state === 'alive' && player.shipId) {
