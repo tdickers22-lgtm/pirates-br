@@ -1,7 +1,7 @@
 import { SHIP_STATS } from './constants/index.js';
 import type { Player, Ship, Vec3 } from './types/index.js';
 import {
-  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal } from './utils/index.js';
+  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig } from './utils/index.js';
 
 type ShipStats = (typeof SHIP_STATS)[keyof typeof SHIP_STATS];
 type ShipLocalPoint = { x: number; z: number };
@@ -46,10 +46,18 @@ export function getCannonDeckLocalPosition(stats: Pick<ShipStats, 'cannonCount' 
   const cannonSpacing = cannonsPerSide <= 1
     ? 0
     : stats.length * 0.5 / (cannonsPerSide - 1);
-  return {
-    x: (side === 0 ? 1 : -1) * (stats.width * 0.5 - 0.65),
-    z: stats.length * 0.2 - slotWithinSide * cannonSpacing,
-  };
+  const x = (side === 0 ? 1 : -1) * (stats.width * 0.5 - 0.65);
+  let z = stats.length * 0.2 - slotWithinSide * cannonSpacing;
+  // The stand point must NEVER fall inside the companionway stairwell —
+  // mounting the SLOOP's starboard gun snapped the player onto the open
+  // stair hole, the floor logic dropped them into the hold and out of the
+  // hull ("using the cannon teleported me under the ship"). Slide the gun
+  // aft of the stairwell when the deck spot would overlap it.
+  const hatch = getShipCompanionwayConfig(stats);
+  if (Math.abs(x - hatch.cx) < hatch.halfX + 0.5 && z > hatch.stairBackZ - 0.55 && z < hatch.stairFrontZ + 0.55) {
+    z = hatch.stairBackZ - 0.9;
+  }
+  return { x, z };
 }
 
 export function findNearbyCannonIndex(player: PlayerLike, ship: ShipLike): number | null {

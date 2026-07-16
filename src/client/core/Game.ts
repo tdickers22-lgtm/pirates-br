@@ -1090,37 +1090,6 @@ function makeNameplateSprite(name: string): THREE.Sprite {
   return sprite;
 }
 
-/** Floating "fix it here" chip over a holed hull section of YOUR ship — the
- *  hole decals live on the OUTER hull at the waterline, invisible from the
- *  deck, so this is what actually guides the repair. Depth-tested like the
- *  nameplates (never reads through the hull or a scope). */
-function makeRepairMarkerSprite(holes: number): THREE.Sprite {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 80;
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = 'rgba(10, 14, 20, 0.82)';
-  ctx.strokeStyle = 'rgba(255, 179, 71, 0.95)';
-  ctx.lineWidth = 4;
-  const r = 18;
-  ctx.beginPath();
-  ctx.roundRect(6, 10, 244, 60, r);
-  ctx.fill();
-  ctx.stroke();
-  ctx.font = '700 33px Georgia, serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ffd48f';
-  ctx.fillText(holes > 1 ? `⚒ REPAIR ×${holes}` : '⚒ REPAIR', 128, 41);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.minFilter = THREE.LinearFilter;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, transparent: true }));
-  sprite.scale.set(2.2, 0.69, 1);
-  sprite.name = 'repair-marker';
-  sprite.renderOrder = 997;
-  return sprite;
-}
 
 /** Zero-scale matrix used to collapse a removed prop's InstancedMesh slot. */
 const ZERO_SCALE_MAT4 = new THREE.Matrix4().makeScale(0, 0, 0);
@@ -2252,8 +2221,6 @@ export class Game {
   private readonly islandPropInstances = new Map<string, Map<number, { inst: THREE.InstancedMesh; index: number }>>();
   /** Swingable tavern door leaves (GLB node 'door', origin on the hinge). */
   private tavernDoors: Array<{ islandId: string; node: THREE.Object3D; open: boolean }> = [];
-  /** Deck-level repair chips for the local ship's holed sections. */
-  private readonly repairMarkers = new Map<'bow' | 'stern' | 'port' | 'starboard', { sprite: THREE.Sprite; holes: number }>();
   /** Locally-promoted harvest target: the instanced palm/boulder is swapped for a
    *  live clone while the axe works it, so strikes shake it and completion plays a
    *  real breakdown. One slot — the axe only ever works one prop at a time. */
@@ -2660,8 +2627,6 @@ export class Game {
     this.islandMeshes.clear();
     this.islandPropInstances.clear();
     this.tavernDoors = [];
-    // Sprites themselves were disposed with the environment children above.
-    this.repairMarkers.clear();
     // Promoted harvest clones / mid-fall palms lived inside island groups —
     // already disposed with the environment children above.
     this.harvestPromoted = null;
@@ -8013,7 +7978,6 @@ export class Game {
       : performance.now() / 1000;
     this.updateVolcanicFx(dt, worldTime);
     this.updateTavernDoors(dt);
-    this.updateRepairMarkers();
     // Drive the palm/foliage sway: advance its clock and gust the wind strength.
     this.foliageTime.value = worldTime;
     const gust = 0.75 + 0.35 * Math.sin(worldTime * 0.27) + 0.15 * Math.sin(worldTime * 0.11);
@@ -13730,36 +13694,6 @@ export class Game {
     }
   }
 
-  /** Float a ⚒ REPAIR chip over each holed section of the local ship. The
-   *  hull-hole decals sit on the OUTER planking at the waterline — invisible
-   *  from the deck — so this chip is what tells the crew where to swing the
-   *  hammer. Depth-tested; disappears once the section is patched. */
-  private updateRepairMarkers() {
-    const localShip = this.localShipId ? this.shipsById.get(this.localShipId) ?? null : null;
-    const sections = ['bow', 'stern', 'port', 'starboard'] as const;
-    for (const section of sections) {
-      const holes = localShip && !localShip.sinking ? (localShip.holes?.[section] ?? 0) : 0;
-      const entry = this.repairMarkers.get(section);
-      if (holes <= 0) {
-        if (entry) entry.sprite.visible = false;
-        continue;
-      }
-      let marker = entry;
-      if (!marker || marker.holes !== holes) {
-        if (marker) {
-          marker.sprite.removeFromParent();
-          (marker.sprite.material.map as THREE.Texture | null)?.dispose();
-          marker.sprite.material.dispose();
-        }
-        marker = { sprite: makeRepairMarkerSprite(holes), holes };
-        this.environment.add(marker.sprite);
-        this.repairMarkers.set(section, marker);
-      }
-      const point = this.getRepairWorldPoint(localShip!, section);
-      marker.sprite.position.set(point.x, point.y + 0.55, point.z);
-      marker.sprite.visible = true;
-    }
-  }
 
   private getShipWorldPoint(ship: Ship, localX: number, localZ: number, worldY: number) {
     const cos = Math.cos(ship.rotation);
