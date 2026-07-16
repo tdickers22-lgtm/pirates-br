@@ -28,6 +28,7 @@ export class NetworkClient {
   public onChestOpened: ((payload: unknown) => void) | null = null;
   public onBarrelOpened: ((payload: unknown) => void) | null = null;
   public onShipUpgraded: ((payload: unknown) => void) | null = null;
+  public onPropRemoved: ((payload: unknown) => void) | null = null;
   public onTreasureSold: ((payload: unknown) => void) | null = null;
   public onArmorBought: ((payload: unknown) => void) | null = null;
   public onTreasureMap: ((payload: unknown) => void) | null = null;
@@ -119,6 +120,7 @@ export class NetworkClient {
       case 'chest_opened': this.onChestOpened?.(msg.payload); break;
       case 'barrel_opened': this.onBarrelOpened?.(msg.payload); break;
       case 'ship_upgraded': this.onShipUpgraded?.(msg.payload); break;
+      case 'prop_removed': this.onPropRemoved?.(msg.payload); break;
       case 'treasure_sold': this.onTreasureSold?.(msg.payload); break;
       case 'armor_bought': this.onArmorBought?.(msg.payload); break;
       case 'treasure_map': this.onTreasureMap?.(msg.payload); break;

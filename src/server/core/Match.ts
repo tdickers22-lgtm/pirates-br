@@ -1,9 +1,9 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
+  GameState, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
-import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
+import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
@@ -21,11 +21,10 @@ import {
   dockLocalToWorld,
   randRange,
   randAngle,
+  randInt,
   dist2D,
   angleWrap,
   clamp,
-  getMainMastLocalZ,
-  getCrowNestStandingY,
   getShipCompanionwayConfig,
   getShipDeckRaiseAt,
   gerstnerHeight,
@@ -147,6 +146,9 @@ const CUTLASS_LUNGE_DAMAGE = 50;
 const CUTLASS_LUNGE_IMPULSE = 40;
 /** Kill credit for prior damage expires after this long (storm/drown deaths). */
 const KILL_CREDIT_WINDOW_SECONDS = 90;
+/** Mast ladder climb rate — fraction of the full ladder per second (W up, S
+ *  down). ~1.8s deck→nest on a sloop keeps the nest a commitment, not a snap. */
+const MAST_CLIMB_RATE = 0.55;
 /** Catch-up steps per timer callback — bounds the death spiral after a stall. */
 const MAX_CATCHUP_TICKS = 5;
 /** Minimum sim-time interval between accepted one-shot actions (anti-spam). */
@@ -227,6 +229,9 @@ export class Match {
   private readonly lastToolEquip = new Map<string, { tool: EquippableTool; at: number }>();
   /** Ship waterLevel at tick start — floodingRate is published NET of bailing. */
   private waterLevelAtTickStart = new Map<string, number>();
+  /** Axe-swing accumulation per player — resets when the target prop changes
+   *  or the swing stops (progress is per-prop, not a global charge). */
+  private harvestProgressByPlayer = new Map<string, { islandId: string; propId: number; t: number }>();
 
   constructor(opts: MatchOptions) {
     this.id = opts.matchId;
@@ -733,6 +738,7 @@ export class Match {
     player.atHelm = false;
     player.atSails = false;
     player.atCrowNest = false;
+    player.mastClimb = null;
     player.blocking = false;
     player.bailing = false;
     player.cutlassCharge = 0;
@@ -753,7 +759,8 @@ export class Match {
         case 'sails':
           return other.atSails;
         case 'crow':
-          return other.atCrowNest;
+          // The ladder is single-file too — a climber en route reserves the nest.
+          return other.atCrowNest || other.mastClimb !== null;
         case 'cannon':
           return other.atCannon && other.cannonIndex === cannonIndex;
       }
@@ -769,12 +776,15 @@ export class Match {
     return true;
   }
 
-  private enterCrowNest(player: Player, ship: Ship): boolean {
+  /** Mount the mast ladder at its base — no teleport. The climb itself runs in
+   *  applyInput (W/S drives mastClimb) with PhysicsSystem pinning the body to
+   *  the ladder line; reaching the top hands off to the walkable nest. */
+  private startMastClimb(player: Player, ship: Ship): boolean {
     if (ship.sinking) return false;
+    if (player.isBot) return false; // bots have no ladder AI — keep them off it
     if (this.isStationOccupied(ship, 'crow', player.id)) return false;
     this.clearStationFlags(player);
-    player.atCrowNest = true;
-    this.snapPlayerToCrowNest(player, ship);
+    player.mastClimb = 0;
     return true;
   }
 
@@ -1007,7 +1017,7 @@ export class Match {
     const wheelIndex = typeof input.wheelIndex === 'number'
       && Number.isInteger(input.wheelIndex)
       && input.wheelIndex >= 0
-      && input.wheelIndex <= 8
+      && input.wheelIndex <= 9
       ? input.wheelIndex
       : null;
     const cannonAmmo = input.cannonAmmo === 'cannonball' || input.cannonAmmo === 'firebomb' || input.cannonAmmo === 'chainshot'
@@ -1108,6 +1118,31 @@ export class Match {
       }
     }
 
+    // ── Mast ladder climb: captive mode. W/S slides mastClimb along the ladder
+    // (PhysicsSystem pins the body each tick); [X] lets go mid-climb and drops
+    // back to the deck. Nothing else — no weapons, no stations — while aloft.
+    if (player.mastClimb !== null) {
+      if (input.interact && this.consumeOneShot(client, 'interact', input.seq)) {
+        player.mastClimb = null;
+        return;
+      }
+      if (!ship || player.onShipId !== ship.id || ship.sinking) {
+        player.mastClimb = null;
+        return;
+      }
+      const climbDir = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
+      player.mastClimb = clamp(player.mastClimb + climbDir * MAST_CLIMB_RATE * dt, 0, 1);
+      if (player.mastClimb >= 1) {
+        // Top of the ladder — step into the (walkable) basket.
+        player.mastClimb = null;
+        player.atCrowNest = true;
+      } else if (player.mastClimb <= 0 && climbDir < 0) {
+        // Back at the base — release standing on deck at the ladder foot.
+        player.mastClimb = null;
+      }
+      return;
+    }
+
     this.updateBlockingState(player, input);
 
     // Revive a downed crewmate: hold interact (~4 s) next to the body with the
@@ -1181,8 +1216,10 @@ export class Match {
       if (player.atHelm)   { player.atHelm   = false; return; }
       if (player.atSails)  { player.atSails = false; return; }
       if (player.atCrowNest) {
+        // [X] at the nest remounts the ladder — climbing down is manual now,
+        // no instant deck teleport.
         player.atCrowNest = false;
-        if (ship) this.snapPlayerToCrowNestLadderBase(player, ship);
+        player.mastClimb = ship ? 1 : null;
         return;
       }
 
@@ -1228,9 +1265,24 @@ export class Match {
         && upgradeStation.claimedByShipId !== homeShip.id
         && !homeShip.upgrades.some(upgrade => upgrade.type === upgradeStation.type)
       ) {
+        // Same material gate as the intent path — a short press consumes the
+        // interact (station feedback) without claiming.
+        const cost = UPGRADE_COSTS[upgradeStation.type];
+        if (
+          this.getMaterialCount(player, homeShip, 'wood') < cost.wood
+          || this.getMaterialCount(player, homeShip, 'ore') < cost.ore
+        ) {
+          return;
+        }
+        this.consumeMaterial(player, homeShip, 'wood', cost.wood);
+        this.consumeMaterial(player, homeShip, 'ore', cost.ore);
         upgradeStation.claimedByShipId = homeShip.id;
         this.applyShipUpgrade(homeShip, upgradeStation.type);
-        this.broadcast({ type: 'ship_upgraded', ts: Date.now(), payload: { shipId: homeShip.id, type: upgradeStation.type } });
+        this.broadcast({
+          type: 'ship_upgraded',
+          ts: Date.now(),
+          payload: { shipId: homeShip.id, type: upgradeStation.type, costWood: cost.wood, costOre: cost.ore },
+        });
         return;
       }
 
@@ -1252,7 +1304,7 @@ export class Match {
         }
 
         if (this.isNearCrowNestLadder(player, ship)) {
-          if (this.enterCrowNest(player, ship)) return;
+          if (this.startMastClimb(player, ship)) return;
         }
 
         if (this.isNearHelm(player, ship)) {
@@ -1470,10 +1522,6 @@ export class Match {
       this.snapPlayerToSails(player, ship);
       player.velocity.x = 0;
       player.velocity.z = 0;
-    } else if (player.atCrowNest && ship) {
-      this.snapPlayerToCrowNest(player, ship);
-      player.velocity.x = 0;
-      player.velocity.z = 0;
     } else if (player.atCannon && ship) {
       const aim = this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch);
       player.rotation.x = aim.yaw;
@@ -1626,6 +1674,7 @@ export class Match {
     }
 
     this.tryDigChest(player, input, dt);
+    this.tryHarvestProp(player, input, dt);
     this.tryUsePocketWheel(client, player, ship ?? null, input);
   }
 
@@ -1804,6 +1853,78 @@ export class Match {
     }
   }
 
+  /** Axe gathering: swing (useItem) at a palm → pocket wood, at a boulder →
+   *  pocket ore. Progress accumulates per-prop over CHOP_TIME/MINE_TIME; the
+   *  felled prop is spliced out of island.props server-side (that also kills
+   *  its collider — resolvePropCollision iterates the live array) and clients
+   *  learn about it via the prop_removed broadcast. */
+  private tryHarvestProp(player: Player, input: PlayerInput, dt: number) {
+    const swinging = !!input.useItem
+      && player.equippedTool === 'axe'
+      && player.state === 'alive'
+      && player.onShipId === null
+      && !player.carryingChestId;
+    if (!swinging) {
+      this.harvestProgressByPlayer.delete(player.id);
+      return;
+    }
+
+    let best: { island: Island; prop: IslandProp; d: number } | null = null;
+    for (const island of this.state.islands) {
+      if (!island.props) continue;
+      // Broad phase: every harvestable prop lives inside the footprint.
+      if (!isPointInsideIslandFootprint(island, player.position.x, player.position.z, HARVEST.RANGE + 3)) continue;
+      for (const prop of island.props) {
+        if (prop.id === undefined) continue;
+        const isPalm = prop.type.startsWith('palm_') && prop.type !== 'palm_ground';
+        if (!isPalm && !prop.type.startsWith('boulder_')) continue;
+        const d = dist2D(player.position.x, player.position.z, prop.x, prop.z);
+        if (d < HARVEST.RANGE && (!best || d < best.d)) best = { island, prop, d };
+      }
+    }
+    if (!best || best.prop.id === undefined) {
+      this.harvestProgressByPlayer.delete(player.id);
+      return;
+    }
+
+    const previous = this.harvestProgressByPlayer.get(player.id);
+    const progress = previous && previous.islandId === best.island.id && previous.propId === best.prop.id
+      ? previous
+      : { islandId: best.island.id, propId: best.prop.id, t: 0 };
+    progress.t += dt;
+    this.harvestProgressByPlayer.set(player.id, progress);
+
+    const isPalm = best.prop.type.startsWith('palm_');
+    if (progress.t < (isPalm ? HARVEST.CHOP_TIME : HARVEST.MINE_TIME)) return;
+
+    const index = best.island.props?.indexOf(best.prop) ?? -1;
+    if (index >= 0) best.island.props?.splice(index, 1);
+    this.harvestProgressByPlayer.delete(player.id);
+
+    let wood: number | undefined;
+    let ore: number | undefined;
+    if (isPalm) {
+      wood = randInt(HARVEST.WOOD_PER_TREE_MIN, HARVEST.WOOD_PER_TREE_MAX);
+      player.pocketWood += wood;
+    } else {
+      ore = randInt(HARVEST.ORE_PER_BOULDER_MIN, HARVEST.ORE_PER_BOULDER_MAX);
+      player.pocketOre += ore;
+    }
+    this.broadcast({
+      type: 'prop_removed',
+      ts: Date.now(),
+      payload: {
+        islandId: best.island.id,
+        propId: best.prop.id,
+        propType: best.prop.type,
+        byPlayerId: player.id,
+        byPlayerName: player.name,
+        ...(wood !== undefined ? { wood } : {}),
+        ...(ore !== undefined ? { ore } : {}),
+      },
+    });
+  }
+
   private tryUsePocketWheel(client: ConnectedClient, player: Player, ship: Ship | null, input: PlayerInput) {
     if (!input.useWheelItem || input.wheelIndex === null) return;
     if (player.state === 'eliminated' || player.state === 'respawning') return;
@@ -1814,16 +1935,17 @@ export class Match {
       ship ??
       this.getAliveShip(player.shipId);
     const ix = input.wheelIndex;
-    // Unified supply wheel — slots 0-2,7,8 EQUIP a tool (instant toggle, no
+    // Unified supply wheel — slots 0-2,7-9 EQUIP a tool (instant toggle, no
     // cooldown); slot 3 transfers a plank to ship stores; slots 4-6 eat one
-    // consumable. Layout mirrors the client SVG (9-slice wheel).
+    // consumable. Layout mirrors the client SVG (10-slice wheel).
     const tool: EquippableTool | null =
       ix === 0 ? 'spyglass'
         : ix === 1 ? 'compass'
           : ix === 2 ? 'bucket'
             : ix === 7 ? 'shovel'
               : ix === 8 ? 'lantern'
-                : null;
+                : ix === 9 ? 'axe'
+                  : null;
     if (tool) {
       // Equipping a tool is instant — bypasses the consumable use-cooldown.
       // The toggle-to-stow is guarded by a short grace window: the wheel UI
@@ -3413,9 +3535,24 @@ export class Match {
         ) {
           return false;
         }
+        // Claims cost materials (pocket + ship stores). A short press simply
+        // fails — the client HUD already shows the recipe.
+        const cost = UPGRADE_COSTS[upgradeStation.type];
+        if (
+          this.getMaterialCount(player, homeShip, 'wood') < cost.wood
+          || this.getMaterialCount(player, homeShip, 'ore') < cost.ore
+        ) {
+          return false;
+        }
+        this.consumeMaterial(player, homeShip, 'wood', cost.wood);
+        this.consumeMaterial(player, homeShip, 'ore', cost.ore);
         upgradeStation.claimedByShipId = homeShip.id;
         this.applyShipUpgrade(homeShip, upgradeStation.type);
-        this.broadcast({ type: 'ship_upgraded', ts: Date.now(), payload: { shipId: homeShip.id, type: upgradeStation.type } });
+        this.broadcast({
+          type: 'ship_upgraded',
+          ts: Date.now(),
+          payload: { shipId: homeShip.id, type: upgradeStation.type, costWood: cost.wood, costOre: cost.ore },
+        });
         return true;
       }
       case 'repair': {
@@ -3448,7 +3585,7 @@ export class Match {
       case 'crow': {
         if (!ship || player.onShipId !== ship.id) return false;
         if (!this.isNearCrowNestLadder(player, ship)) return false;
-        return this.enterCrowNest(player, ship);
+        return this.startMastClimb(player, ship);
       }
       case 'sails': {
         // No captive sail mode: the press confirms intent, the continuous
@@ -3517,10 +3654,10 @@ export class Match {
               velocity: { x: 0, y: 0, z: 0 },
               health: SHARK.HEALTH,
               biteCooldown: 1.2,
-        attackState: 'cruise',
-        attackTimer: 0,
-        lungeDirX: 0,
-        lungeDirZ: 0,
+              attackState: 'cruise',
+              attackTimer: 0,
+              lungeDirX: 0,
+              lungeDirZ: 0,
               targetId: p.id,
             });
             this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX);
@@ -3550,7 +3687,7 @@ export class Match {
         s.targetId = target?.id ?? null;
       }
 
-      if (!target) {
+      if (!target && s.attackState === 'cruise') {
         // Frame-rate-independent decay preserving the previous per-16ms feel.
         const idleDamp = Math.pow(0.92, dt / 0.016);
         s.velocity.x *= idleDamp;
@@ -3560,13 +3697,49 @@ export class Match {
         continue;
       }
 
-      const dx = target.position.x - s.position.x;
-      const dz = target.position.z - s.position.z;
+      // ── Telegraphed attack state machine ──────────────────────────────────
+      // cruise → (in range, off cooldown) windup: hard brake, aim LOCKED at the
+      // target's position at windup start → lunge: dash along the locked vector,
+      // biting anything (the target) inside LUNGE_HIT_RADIUS → recover: drift,
+      // harmless. A swimmer strafing perpendicular during the windup leaves the
+      // lunge corridor — the bite is dodgeable, unlike the old proximity check.
+      // A target lost mid-attack (boarded, died) still plays the phase out.
+      const dx = target ? target.position.x - s.position.x : 0;
+      const dz = target ? target.position.z - s.position.z : 0;
       const d = Math.sqrt(dx * dx + dz * dz) || 1;
-      s.rotation = Math.atan2(dx, dz);
-      const sp = SHARK.CHASE_SPEED;
-      s.velocity.x = (dx / d) * sp;
-      s.velocity.z = (dz / d) * sp;
+      switch (s.attackState) {
+        case 'cruise': {
+          s.rotation = Math.atan2(dx, dz);
+          s.velocity.x = (dx / d) * SHARK.CHASE_SPEED;
+          s.velocity.z = (dz / d) * SHARK.CHASE_SPEED;
+          break;
+        }
+        case 'windup': {
+          const brake = Math.pow(0.85, dt / 0.016);
+          s.velocity.x *= brake;
+          s.velocity.z *= brake;
+          s.attackTimer -= dt;
+          if (s.attackTimer <= 0) {
+            s.attackState = 'lunge';
+            s.attackTimer = SHARK.LUNGE_TIME;
+          }
+          break;
+        }
+        case 'lunge': {
+          s.velocity.x = s.lungeDirX * SHARK.LUNGE_SPEED;
+          s.velocity.z = s.lungeDirZ * SHARK.LUNGE_SPEED;
+          s.attackTimer -= dt;
+          break;
+        }
+        case 'recover': {
+          const drift = Math.pow(0.9, dt / 0.016);
+          s.velocity.x *= drift;
+          s.velocity.z *= drift;
+          s.attackTimer -= dt;
+          if (s.attackTimer <= 0) s.attackState = 'cruise';
+          break;
+        }
+      }
       s.position.x += s.velocity.x * dt;
       s.position.z += s.velocity.z * dt;
       s.position.y = 0.38;
@@ -3589,13 +3762,37 @@ export class Match {
         inLand = true;
       }
 
-      // Only bite from open water within range (not from inside the shore rock).
-      if (!inLand && d < SHARK.BITE_RANGE && s.biteCooldown <= 0) {
-        target.health -= this.absorbWithArmor(target, SHARK.BITE_DAMAGE);
-        target.lastDamagedById = null;
-        target.lastDamagedAt = null;
-        target.lastDamageWasHeadshot = false;
-        s.biteCooldown = SHARK.BITE_COOLDOWN;
+      // Only wind up from open water (not from inside the shore rock) — the
+      // 1.9× bite range gives the windup brake room before the lunge fires.
+      if (
+        s.attackState === 'cruise'
+        && target
+        && !inLand
+        && d < SHARK.BITE_RANGE * 1.9
+        && s.biteCooldown <= 0
+      ) {
+        s.attackState = 'windup';
+        s.attackTimer = SHARK.WINDUP_TIME;
+        s.lungeDirX = dx / d;
+        s.lungeDirZ = dz / d;
+        s.rotation = Math.atan2(s.lungeDirX, s.lungeDirZ);
+      }
+
+      // The lunge only connects while dashing: CURRENT distance to the target,
+      // one bite max, then straight into the vulnerable recover drift.
+      if (s.attackState === 'lunge') {
+        if (target && dist2D(target.position.x, target.position.z, s.position.x, s.position.z) < SHARK.LUNGE_HIT_RADIUS) {
+          target.health -= this.absorbWithArmor(target, SHARK.BITE_DAMAGE);
+          target.lastDamagedById = null;
+          target.lastDamagedAt = null;
+          target.lastDamageWasHeadshot = false;
+          s.biteCooldown = SHARK.BITE_COOLDOWN;
+          s.attackState = 'recover';
+          s.attackTimer = SHARK.RECOVER_TIME;
+        } else if (s.attackTimer <= 0) {
+          s.attackState = 'recover';
+          s.attackTimer = SHARK.RECOVER_TIME;
+        }
       }
     }
   }
@@ -4980,26 +5177,6 @@ export class Match {
     return isSharedNearCrowNestLadder(player, ship);
   }
 
-  private snapPlayerToCrowNest(player: Player, ship: Ship) {
-    const stats = SHIP_STATS[ship.type];
-    const mastZ = getMainMastLocalZ(stats);
-    const world = this.toShipWorld(0.42, mastZ - 0.12, ship);
-    player.position.x = world.x;
-    player.position.z = world.z;
-    player.position.y = ship.position.y + getCrowNestStandingY(stats);
-  }
-
-  private snapPlayerToCrowNestLadderBase(player: Player, ship: Ship) {
-    const stats = SHIP_STATS[ship.type];
-    const mastZ = getMainMastLocalZ(stats);
-    const world = this.toShipWorld(0.42, mastZ - 0.42, ship);
-    player.position.x = world.x;
-    player.position.z = world.z;
-    player.position.y = ship.position.y + stats.height + 0.1;
-    player.velocity = { x: 0, y: 0, z: 0 };
-    player.knockbackVelocity = { x: 0, y: 0, z: 0 };
-  }
-
   private getRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null {
     if (this.getRepairPlankCount(player, ship) <= 0) return null;
 
@@ -5029,6 +5206,26 @@ export class Match {
       return true;
     }
     return this.consumeShipItem(ship, 'wood_plank', 1);
+  }
+
+  /** Upgrade-station materials pool: your pocket plus the ship's stores
+   *  ('wood' rides the same wood_plank stack hull repair draws from). */
+  private getMaterialCount(player: Player, ship: Ship, material: 'wood' | 'ore'): number {
+    const item = material === 'wood' ? 'wood_plank' : 'ore';
+    const shipStock = ship.inventory.find(entry => entry.item === item)?.qty ?? 0;
+    return (material === 'wood' ? player.pocketWood : player.pocketOre) + shipStock;
+  }
+
+  /** Spend pocket first, then the ship stack — mirrors consumeRepairPlank.
+   *  All-or-nothing: callers gate on getMaterialCount before consuming. */
+  private consumeMaterial(player: Player, ship: Ship, material: 'wood' | 'ore', qty: number): boolean {
+    if (this.getMaterialCount(player, ship, material) < qty) return false;
+    const pocket = material === 'wood' ? player.pocketWood : player.pocketOre;
+    const fromPocket = Math.min(pocket, qty);
+    if (material === 'wood') player.pocketWood -= fromPocket;
+    else player.pocketOre -= fromPocket;
+    const fromShip = qty - fromPocket;
+    return fromShip <= 0 || this.consumeShipItem(ship, material === 'wood' ? 'wood_plank' : 'ore', fromShip);
   }
 
   private consumeShipItem(ship: Ship, item: string, qty: number): boolean {

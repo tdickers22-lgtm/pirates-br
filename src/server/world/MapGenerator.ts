@@ -1369,8 +1369,11 @@ export class MapGenerator {
   ): IslandProp[] {
     const props: IslandProp[] = [];
     const blockers: Array<{ x: number; z: number; r: number }> = [];
+    // Island-local sequential id, stable because generation order is
+    // deterministic — the harvest system addresses props by (islandId, id).
+    let nextPropId = 0;
     const addProp = (type: IslandPropType, x: number, z: number, yaw: number, scale: number) => {
-      props.push({ type, x, z, yaw: angleWrap(yaw), scale });
+      props.push({ id: nextPropId++, type, x, z, yaw: angleWrap(yaw), scale });
       const r = getPropSpacingRadius(type, scale);
       if (r > 0) blockers.push({ x, z, r });
     };

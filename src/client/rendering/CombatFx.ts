@@ -1029,6 +1029,19 @@ export class CombatFx {
     this.lights.request(position.x, position.y + 1, position.z, 0x9bddff, 1.6, 0.4, 24);
   }
 
+  /** Shark windup telegraph — reddish warning ripple on the surface (the dodge cue). */
+  emitSharkTelegraph(position: Vec3) {
+    if (!this.rings) return;
+    const surfaceY = Math.max(liveWaterSurfaceY, position.y - 0.05);
+    this.rings.emit(position.x, surfaceY + 0.04, position.z, 0.5, 0.6, 2.5, 0.85, 0, 0xff5a3c, true);
+  }
+
+  /** Shark lunge launch — burst of white water as it explodes forward. */
+  emitSharkLungeSplash(position: Vec3, cameraPos: THREE.Vector3) {
+    this.spawnWaterSplash(position.x, position.z, 1.15);
+    this.playSplashSound('cannonball', position, cameraPos);
+  }
+
   /** Shark killed — blood bloom on the water surface */
   emitSharkDeathBloom(position: Vec3, cameraPos: THREE.Vector3) {
     const surfaceY = Math.max(liveWaterSurfaceY, position.y - 0.05);

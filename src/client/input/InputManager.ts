@@ -221,7 +221,7 @@ export class InputManager {
   /** True while [I] is held — supply wheel overlay */
   isSupplyWheelOpen() { return this.vHeld; }
   queueWheelSlot(slot: number) {
-    if (slot >= 0 && slot <= 8) this.pendingWheelSlot = slot;
+    if (slot >= 0 && slot <= 9) this.pendingWheelSlot = slot;
   }
   hasPendingActions() {
     return this.interactPressed

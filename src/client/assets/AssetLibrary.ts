@@ -27,6 +27,8 @@ export const ASSET_NAMES = [
   'kraken_wreck', 'dig_site', 'gallows', 'parley_table',
   'mine_head', 'widow_memorial', 'gibbet_cage',
   'bone_pile', 'driftwood_log', 'grave_marker',
+  // Creatures with named animatable pivot nodes (scripts/blender/build_animals.py)
+  'shark', 'crab', 'chicken', 'pig', 'gull',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];

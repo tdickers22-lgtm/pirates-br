@@ -55,6 +55,10 @@ const HULL_CONTACT_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
   { z: 0.44, half: 0.17 },
 ];
 
+/** Walkable crow's-nest basket: ship-local disc radius around the mast the
+ *  lookout can pace (matches the client nest geometry, minus a rail margin). */
+const CROW_NEST_WALK_RADIUS = 0.55;
+
 // ── On-foot locomotion tuning (terrain v2) ───────────────────────────────────
 const LOCO = {
   /** Walk→swim once the standing ground sits this far below the LOCAL wave
@@ -546,6 +550,13 @@ export class PhysicsSystem {
       // owns entering/leaving that state (bleed-out, revive, finish).
       const downed = player.state === 'downed';
 
+      // Ladder climbers are welded to the mast — knockback can't peel them off.
+      if (player.mastClimb !== null) {
+        player.knockbackVelocity.x = 0;
+        player.knockbackVelocity.y = 0;
+        player.knockbackVelocity.z = 0;
+      }
+
       // Apply knockback velocity decay
       player.knockbackVelocity.x *= knockbackDamp;
       player.knockbackVelocity.y *= knockbackDamp;
@@ -673,6 +684,25 @@ export class PhysicsSystem {
         player.onShipId = onShip.id;
 
         const stats = SHIP_STATS[onShip.type];
+
+        // ── Mast ladder: the body is pinned to the ladder line in ship space,
+        // Y lerped base→nest by mastClimb (Match drives the fraction from W/S).
+        // No gravity, no swim, no deck passes — the ship transform owns motion.
+        if (player.mastClimb !== null) {
+          const mastZ = getMainMastLocalZ(stats);
+          const world = this.toShipWorld(0.42, mastZ - 0.12, onShip);
+          const baseY = onShip.position.y + stats.height + 0.2;
+          const nestY = onShip.position.y + getCrowNestStandingY(stats);
+          player.position.x = world.x;
+          player.position.z = world.z;
+          player.position.y = baseY + (nestY - baseY) * player.mastClimb;
+          player.velocity.x = 0;
+          player.velocity.y = 0;
+          player.velocity.z = 0;
+          player.swimTimer = 0;
+          if (!downed) player.state = 'alive';
+          continue;
+        }
         const deckY = onShip.position.y + stats.height + 0.1;
         const localBeforeCarry = this.toShipLocal(player.position, onShip);
 
@@ -714,13 +744,23 @@ export class PhysicsSystem {
 
         const floorY = this.getShipFloorY(player.position, onShip, local);
 
-        // Gravity (crow's nest: fixed height, no gravity)
+        // Gravity (crow's nest: walkable basket — Y pinned to the mast top,
+        // WASD movement kept but clamped to the nest disc around the mast so
+        // the lookout can pace the rim without stepping into thin air).
         if (player.atCrowNest) {
-          const nestY = onShip.position.y + getCrowNestStandingY(stats);
-          player.position.y = nestY;
+          const mastZ = getMainMastLocalZ(stats);
+          const offX = local.x;
+          const offZ = local.z - mastZ;
+          const offR = Math.hypot(offX, offZ);
+          if (offR > CROW_NEST_WALK_RADIUS) {
+            const pull = CROW_NEST_WALK_RADIUS / offR;
+            const world = this.toShipWorld(offX * pull, mastZ + offZ * pull, onShip);
+            player.position.x = world.x;
+            player.position.z = world.z;
+            local = this.toShipLocal(player.position, onShip);
+          }
+          player.position.y = onShip.position.y + getCrowNestStandingY(stats);
           player.velocity.y = 0;
-          player.velocity.x = 0;
-          player.velocity.z = 0;
         } else {
           player.velocity.y += PHYSICS.GRAVITY * dt;
           player.position.y += player.velocity.y * dt;

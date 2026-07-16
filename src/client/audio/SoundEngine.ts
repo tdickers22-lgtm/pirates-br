@@ -219,6 +219,49 @@ export class SoundEngine {
     this.playNoise(now + 0.14, 0.18, 380, 0.4, 0.12, 'lowpass');
   }
 
+  // ── Harvesting ───────────────────────────────────────────────────
+  /** Axe biting into a palm trunk / boulder face — low knock + wood crack. */
+  playAxeChop(): void {
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    // Low haft knock — the blow landing.
+    this.playTone(now, 130, 62, 0.14, 0.34, 'triangle', 0.004);
+    this.playNoise(now, 0.1, 320, 0.9, 0.3, 'lowpass');
+    // Wood crack — bright splintering transient.
+    this.playNoise(now + 0.008, 0.06, 2400, 1.3, 0.26, 'bandpass');
+    this.playTone(now + 0.01, 1500, 620, 0.05, 0.1, 'square');
+    // Fibres tearing as the edge pulls free.
+    this.playNoise(now + 0.07, 0.12, 900, 0.7, 0.1, 'bandpass');
+  }
+
+  // ── Shark telegraphs ─────────────────────────────────────────────
+  /** Windup growl — low sawtooth slide under a noise rumble (the dodge cue).
+   *  @param distance metres from the listener; rolls off like other spatials. */
+  playSharkGrowl(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    if (distance > 90) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    this.playTone(now, 70, 50, 0.5, 0.34 * g, 'sawtooth', 0.05, dest);
+    this.playTone(now + 0.03, 46, 34, 0.46, 0.22 * g, 'triangle', 0.06, dest);
+    this.playNoise(now, 0.5, 180, 0.8, 0.24 * g, 'lowpass', dest);
+  }
+
+  /** Lunge bite — sharp noise snap over two low body tones. */
+  playSharkChomp(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    if (distance > 90) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    this.playNoise(now, 0.05, 2600, 1.6, 0.3 * g, 'bandpass', dest);
+    this.playNoise(now + 0.01, 0.09, 700, 1.0, 0.26 * g, 'lowpass', dest);
+    this.playTone(now, 150, 70, 0.12, 0.3 * g, 'triangle', 0.002, dest);
+    this.playTone(now + 0.05, 95, 48, 0.18, 0.24 * g, 'sine', 0.004, dest);
+  }
+
   // ── Treasure chests ──────────────────────────────────────────────
   playChestPickup(): void {
     this.unlock();

@@ -118,7 +118,20 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
     // the world payload lean without touching the island's terrain parameters.
     islands: includeStaticWorld ? snap.islands.map(quantizeIslandForWire) : [],
     seaRocks: includeStaticWorld ? snap.seaRocks : [],
-    chestSync: (snap.chestSync ?? []).map((chest) => quantizeDeep(chest, 2)),
+    // Only DIRTY chests (touched by play: dug/carried/stowed/floating/opened)
+    // ride the 10Hz sync, trimmed to their dynamic fields — pristine buried
+    // chests never change, and shipping all ~50 in full blew the snapshot cap.
+    chestSync: (snap.chestSync ?? [])
+      .filter((chest) => chest.carriedByPlayerId || chest.storedOnShipId || chest.floating || chest.opened || chest.digProgress > 0)
+      .map((chest) => quantizeDeep({
+        id: chest.id,
+        position: chest.position,
+        carriedByPlayerId: chest.carriedByPlayerId,
+        storedOnShipId: chest.storedOnShipId,
+        floating: chest.floating,
+        opened: chest.opened,
+        digProgress: chest.digProgress,
+      } as typeof chest, 2)),
   };
 }
 

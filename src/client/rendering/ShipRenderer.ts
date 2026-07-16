@@ -3,6 +3,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import type { Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
 import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
+import { getCannonDeckLocalPosition } from '../../shared/interactions.js';
 import type { RenderQuality } from './Renderer.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
@@ -122,6 +123,86 @@ function sailTexture(teamColor?: number): THREE.CanvasTexture {
     ctx.globalAlpha = 1;
   }
   return finishCanvasTexture(canvas);
+}
+
+type SupplyKind = 'food' | 'plank' | 'shot';
+
+const SUPPLY_LID_TEX_CACHE = new Map<SupplyKind, THREE.CanvasTexture>();
+
+/** Painted barrel-lid label for the three FUNCTIONAL supply barrels. The glyph
+ *  sits centered so the cylinder cap's radial UVs show it upright from above
+ *  regardless of the barrel's deck rotation. */
+function supplyLidTexture(kind: SupplyKind): THREE.CanvasTexture {
+  let tex = SUPPLY_LID_TEX_CACHE.get(kind);
+  if (tex) return tex;
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  const base = kind === 'food' ? '#C8A030' : kind === 'plank' ? '#C9AE7E' : '#17171A';
+  const rim = kind === 'shot' ? '#3A3A40' : '#5A3D1C';
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, 128, 128);
+  if (kind === 'food') {
+    // Banana: yellow crescent (disc minus offset disc) + brown tips
+    ctx.fillStyle = '#F2D53C';
+    ctx.beginPath();
+    ctx.arc(64, 58, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(64, 34, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    // destination-out also cut the base/ring under the crescent — repaint base there
+    ctx.fillStyle = base;
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.fillRect(0, 0, 128, 128);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#5E4014';
+    ctx.fillRect(30, 62, 8, 9);
+    ctx.fillRect(90, 62, 8, 9);
+  } else if (kind === 'plank') {
+    // Single repair plank, tilted, with grain + nail heads
+    ctx.save();
+    ctx.translate(64, 64);
+    ctx.rotate(-0.5);
+    ctx.fillStyle = '#8A5A2E';
+    ctx.fillRect(-42, -13, 84, 26);
+    ctx.strokeStyle = '#6B4220';
+    ctx.lineWidth = 2;
+    for (const gy of [-5, 3]) {
+      ctx.beginPath();
+      ctx.moveTo(-38, gy);
+      ctx.lineTo(38, gy + 2);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#2E2E32';
+    for (const nx of [-32, 32]) {
+      ctx.beginPath();
+      ctx.arc(nx, 0, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  } else {
+    // Cannonball: iron sphere with a specular bite
+    ctx.fillStyle = '#3A3A42';
+    ctx.beginPath();
+    ctx.arc(64, 64, 28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(230, 230, 240, 0.55)';
+    ctx.beginPath();
+    ctx.arc(55, 55, 8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Rim ring last — the banana's destination-out cut must not bite it
+  ctx.strokeStyle = rim;
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.arc(64, 64, 56, 0, Math.PI * 2);
+  ctx.stroke();
+  tex = finishCanvasTexture(canvas);
+  SUPPLY_LID_TEX_CACHE.set(kind, tex);
+  return tex;
 }
 
 /** Streaky foam for the wake ribbon — additive, so black regions vanish. */
@@ -1213,7 +1294,10 @@ export class ShipRenderer {
 
       const proxySailMat = m === 0 ? sailMat.clone() : sailMat;
       if (m === 0) proxySailMat.map = this.getTeamSailTexture(ship.teamColor);
-      const sail = new THREE.Mesh(new THREE.PlaneGeometry(W * 1.05, H * 1.02), proxySailMat);
+      // ~12% smaller than the old proxy (tracks the detail-model sail shrink);
+      // the aftmost mast narrows a further 10% — it's the helm's view blocker.
+      const proxySailW = W * 0.92 * (mastCount > 1 && m === mastCount - 1 ? 0.9 : 1);
+      const sail = new THREE.Mesh(new THREE.PlaneGeometry(proxySailW, H * 0.9), proxySailMat);
       sail.position.set(0, H + mastH * 0.58, mastZ);
       sail.rotation.order = 'YXZ';
       sail.rotation.x = 0.055; // slight billow tilt so the plane doesn't read flat
@@ -1361,12 +1445,14 @@ export class ShipRenderer {
     // come from the profile query, so decals hug the planking instead of floating
     // beside a box approximation. Each carries an empty gush-anchor Object3D that
     // Game.ts can hang water-jet FX on (see getHoleAnchors()).
+    const innerBreachDecals: THREE.Group[] = [];
     const addHole = (
       position: THREE.Vector3,
       normal: THREE.Vector3,
       radius: number,
       belowWaterline: boolean,
       extraDecal?: { offset: THREE.Vector3; normal: THREE.Vector3 },
+      innerDecal?: { position: THREE.Vector3; normal: THREE.Vector3 },
     ) => {
       const hm = new THREE.Group();
       hm.position.copy(position);
@@ -1398,6 +1484,21 @@ export class ShipRenderer {
       hm.userData.gushAnchor = gush;
       hm.userData.belowWaterline = belowWaterline;
       hm.userData.floodActive = false;
+      if (innerDecal) {
+        // Inner breach on the inboard bulwark/rail face: a holed section shows
+        // torn planking FROM ON DECK, not only from the water. Kept as its own
+        // group (not a child of hm) so the outer group's scale ramp doesn't
+        // drag it along its offset — update() drives visible + scale directly.
+        const inner = new THREE.Group();
+        inner.position.copy(innerDecal.position);
+        inner.visible = false;
+        const innerFace = makeHoleDecal(radius * 0.7);
+        innerFace.quaternion.setFromUnitVectors(Z_AXIS, innerDecal.normal.clone().normalize());
+        inner.add(innerFace);
+        group.add(inner);
+        innerBreachDecals.push(inner);
+        hm.userData.innerDecal = inner;
+      }
       group.add(hm);
       return hm;
     };
@@ -1418,6 +1519,11 @@ export class ShipRenderer {
       sternStation.slots[0].z - sternStation.slots[sternStation.slots.length - 1].z,
       -(sternStation.sheerY - sternStation.keelY),
     ).normalize();
+    // Inner breach mounts — where each section's torn planking shows FROM ON
+    // DECK: bow → inboard face of the bow breastwork (box at z=L*0.36, 0.16
+    // thick, so the face sits at L*0.36-0.08); sides → inboard bulwark faces;
+    // stern → flat on the poop-castle top behind the helm (every vertical
+    // stern face is buried under the quarterdeck dais / castle box overlap).
     const hullHoles = {
       // Bow breach: mirrored decals on both flared cheeks (the stem itself is
       // too narrow to carry a readable hole), anchored on the starboard cheek.
@@ -1427,24 +1533,31 @@ export class ShipRenderer {
         0.3,
         false,
         { offset: new THREE.Vector3(-2 * bowCheekX, 0, 0), normal: new THREE.Vector3(-bowN.x, bowN.y, bowN.z) },
+        { position: new THREE.Vector3(0, H + 0.17, L * 0.36 - 0.11), normal: new THREE.Vector3(0, 0, -1) },
       ),
       stern: addHole(
         new THREE.Vector3(0, H * 0.24, sternSurf.z).addScaledVector(sternN, 0.05),
         sternN.clone(),
         0.38,
         false,
+        undefined,
+        { position: new THREE.Vector3(0, H + H * 0.28 + 0.03, -L * 0.37), normal: new THREE.Vector3(0, 1, 0) },
       ),
       port: addHole(
         new THREE.Vector3(-sideSurf.x - sideSurf.nx * 0.03, holeY, -L * 0.04),
         new THREE.Vector3(-sideSurf.nx, sideSurf.ny, 0),
         0.4,
         true,
+        undefined,
+        { position: new THREE.Vector3(-(W * 0.44 - 0.1), H + 0.17, -L * 0.04), normal: new THREE.Vector3(1, 0, 0) },
       ),
       starboard: addHole(
         new THREE.Vector3(sideSurf.x + sideSurf.nx * 0.03, holeY, -L * 0.04),
         new THREE.Vector3(sideSurf.nx, sideSurf.ny, 0),
         0.4,
         true,
+        undefined,
+        { position: new THREE.Vector3(W * 0.44 - 0.1, H + 0.17, -L * 0.04), normal: new THREE.Vector3(-1, 0, 0) },
       ),
     };
 
@@ -2077,12 +2190,22 @@ export class ShipRenderer {
     capstanWheel.position.y = 0.88;
     capstanWheel.castShadow = true;
     anchorCapstan.add(capstanWheel);
+    // Hub column ties the wheel ring onto the post (post top y=0.78, ring y=0.88)
+    const capstanHub = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.23, 0.24, 12), darkMat);
+    capstanHub.position.y = 0.86;
+    capstanHub.castShadow = true;
+    anchorCapstan.add(capstanHub);
+    let capstanGrip: THREE.Mesh | undefined;
     for (let spoke = 0; spoke < 8; spoke++) {
       const angle = (spoke / 8) * Math.PI * 2;
       const handle = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.075, 0.095), darkMat);
       handle.position.y = 0.88;
       handle.rotation.y = angle;
       handle.castShadow = true;
+      if (spoke === 0) {
+        handle.name = 'capstan-grip'; // hand-tracking anchor — kept out of the merge
+        capstanGrip = handle;
+      }
       anchorCapstan.add(handle);
       for (const sign of [-1, 1]) {
         const knob = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.12, 8), brassHardwareMat);
@@ -2103,6 +2226,15 @@ export class ShipRenderer {
 
     group.add(anchorCapstan);
 
+    // Bow anchors: seated against the visible topside. The loft tapers well
+    // inboard of the deck box at the bow, so "flush" is governed by whichever
+    // is prouder — the hull surface or the straight bulwark line. Arms run
+    // fore-aft (y-rotated 90°) so the flukes lie flat along the planking.
+    const anchorZ = L * 0.38;
+    const anchorX = Math.max(
+      hullSurfacePointAt(profile, anchorZ, H * 0.6).x + 0.05,
+      W * 0.44 + 0.16,
+    );
     const anchor = new THREE.Group();
     const buildAnchor = (side: -1 | 1) => {
       const g = new THREE.Group();
@@ -2132,15 +2264,40 @@ export class ShipRenderer {
         g.add(fluke);
       }
 
-      g.position.set(side * (W * 0.46), 0, L * 0.44);
-      g.rotation.z = side * Math.PI * 0.33;
-      g.rotation.y = side * Math.PI * 0.06;
+      g.position.set(side * anchorX, 0, anchorZ);
+      g.rotation.y = side * Math.PI * 0.5;
       return g;
     };
     anchor.add(buildAnchor(-1));
     anchor.add(buildAnchor(1));
     anchor.position.y = H + 0.34;
     group.add(anchor);
+
+    // Cat beam + chain per side: the stowed anchor HANGS from the ship instead
+    // of floating beside it. Static dressing — the anchor group alone descends
+    // on drop, paying out visually below the beam.
+    for (const side of [-1, 1] as const) {
+      const beamInnerX = W * 0.44 - 0.7;
+      const beamOuterX = anchorX + 0.22;
+      const catBeam = new THREE.Mesh(
+        new THREE.BoxGeometry(beamOuterX - beamInnerX, 0.14, 0.15),
+        darkMat,
+      );
+      catBeam.position.set(side * (beamInnerX + beamOuterX) * 0.5, H + 1.1, anchorZ);
+      catBeam.castShadow = true;
+      group.add(catBeam);
+      // Knee bracing the beam down onto the cap-rail line
+      const knee = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.62, 0.13), darkMat);
+      knee.position.set(side * (W * 0.44), H + 0.73, anchorZ);
+      knee.castShadow = true;
+      group.add(knee);
+      // Chain: anchor ring (raised pose, y=H+1.22) → over the beam → capstan drum
+      const ringPt = new THREE.Vector3(side * anchorX, H + 1.2, anchorZ);
+      const beamPt = new THREE.Vector3(side * (W * 0.44 - 0.35), H + 1.06, anchorZ + 0.05);
+      const drumPt = new THREE.Vector3(side * 0.3, H + 0.78, L * 0.415);
+      group.add(makeCylinderBetween(ringPt, beamPt, 0.03, metalMat, 6));
+      group.add(makeCylinderBetween(beamPt, drumPt, 0.03, metalMat, 6));
+    }
 
     // Rope coil near anchor
     const ropeCoil = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.065, 6, 12), ropeCoilMat);
@@ -2153,6 +2310,7 @@ export class ShipRenderer {
     const furledSails: THREE.Mesh[] = [];
     const pennants: THREE.Mesh[] = [];
     const trimPivots: THREE.Group[] = [];
+    let nestFloorMesh: THREE.Mesh | undefined;
     const mastCount = stats.mastCount;
     // Keep the aftmost mast forward of the stern helm so its sail never drapes
     // over the wheel (aftmost lands ~-L*0.14, wheel sits at -L*0.315).
@@ -2202,10 +2360,14 @@ export class ShipRenderer {
       // Keep in sync with getCrowNestStandingY (the standing spot).
       if (m === 0 && mastH > 6) {
         const nestY = H + mastH * 0.86;
-        const nestFloor = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.5, 0.14, 8), darkMat);
+        // Floor is wide enough for the server's 0.55m walkable disc; named so
+        // the client can resolve it (kept out of the static merge).
+        const nestFloor = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.5, 0.14, 8), darkMat);
+        nestFloor.name = 'nest-floor';
         nestFloor.position.set(0, nestY, mastZ);
         group.add(nestFloor);
-        const nestRail = new THREE.Mesh(new THREE.TorusGeometry(0.68, 0.05, 6, 12), darkMat);
+        nestFloorMesh = nestFloor;
+        const nestRail = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.05, 6, 12), darkMat);
         nestRail.rotation.x = Math.PI * 0.5;
         nestRail.position.set(0, nestY + 0.45, mastZ);
         group.add(nestRail);
@@ -2214,7 +2376,8 @@ export class ShipRenderer {
       // Boom / yardarm — lives inside a trim pivot together with its sail and
       // furled roll, so bracing the sails visibly swings the SPAR too instead
       // of the canvas rotating away from a frozen yard.
-      const yardW = W * (1.2 - m * 0.1);
+      // ~12% narrower than round-1 (1.2 base) so the helm can see forward past the rig
+      const yardW = W * (1.06 - m * 0.1);
       const trimPivot = new THREE.Group();
       trimPivot.name = 'yard-trim-pivot';
       trimPivot.position.set(0, H + mastH * 0.82, mastZ);
@@ -2260,7 +2423,11 @@ export class ShipRenderer {
       // exactly what we want: width along X (matches yardarm direction), height along Y
       // (drops toward deck), normal along +Z (faces forward when "square" to wind).
       // The sail trim animation rotates around Y by `ship.sailAngle`.
-      const sailGeo = makeBillowedSailGeometry(yardW * 0.92, mastH * 0.72, 10, 7);
+      // The aftmost mast's canvas is what blocks the helm's forward view —
+      // it narrows a further 10% on top of the global shrink.
+      const sailW = yardW * 0.85 * (mastCount > 1 && m === mastCount - 1 ? 0.9 : 1);
+      const sailH = mastH * 0.64;
+      const sailGeo = makeBillowedSailGeometry(sailW, sailH, 10, 7);
       const mastSailMat = sailMat.clone();
       // Main sail carries the painted team band (team read at distance)
       if (m === 0) mastSailMat.map = this.getTeamSailTexture(ship.teamColor);
@@ -2269,9 +2436,9 @@ export class ShipRenderer {
       sail.rotation.y = 0;
       // Pivot-local frame: the pivot sits AT the yard, so hoist metadata is
       // relative to it (hoistTopY = 0 = the yard height).
-      sail.position.set(0, -mastH * 0.27, 0);
+      sail.position.set(0, -sailH * 0.375, 0);
       sail.userData.hoistTopY = 0;
-      sail.userData.hoistHeight = mastH * 0.72;
+      sail.userData.hoistHeight = sailH;
       sail.userData.hoistCentered = true;
       sail.userData.sailKind = 'square';
       sail.userData.trimPivot = trimPivot;
@@ -2280,11 +2447,11 @@ export class ShipRenderer {
       sail.userData.clothBase = Float32Array.from(
         (sailGeo.attributes.position as THREE.BufferAttribute).array as Float32Array,
       );
-      sail.userData.clothW = yardW * 0.92;
-      sail.userData.clothH = mastH * 0.72;
+      sail.userData.clothW = sailW;
+      sail.userData.clothH = sailH;
       sail.castShadow = false;
       sail.receiveShadow = false;
-      this.addSwiftSailTrim(sail, yardW * 0.92, mastH * 0.72, upgradeVisuals.swift_sails);
+      this.addSwiftSailTrim(sail, sailW, sailH, upgradeVisuals.swift_sails);
       trimPivot.add(sail);
       sails.push(sail);
 
@@ -2438,13 +2605,19 @@ export class ShipRenderer {
     this.addSwiftSailTrim(jib, L * 0.24, H * 1.18, upgradeVisuals.swift_sails, true);
     group.add(jib);
     sails.push(jib);
-    // Furled jib bundle lies ALONG the forestay toward the bowsprit tip, not
-    // hovering above the bow.
-    const furledJib = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, L * 0.34, 8), sailMat.clone());
-    furledJib.rotation.x = Math.PI * 0.5 + 0.4;   // tilt down toward the bowsprit tip
-    furledJib.position.set(0, H + 0.74, L * 0.58);
+    // Furled jib bundle lies ALONG the forestay (bowsprit tip → foremast head),
+    // axis exactly on the stay so it reads as canvas lashed to it.
+    const stayTip = new THREE.Vector3(0, H + 0.55, L * 0.76);
+    const stayHead = new THREE.Vector3(0, H + H * 2.15, mastStartZ);
+    const stayDir = stayHead.clone().sub(stayTip).normalize();
+    const furledJib = makeCylinderBetween(
+      stayTip.clone().addScaledVector(stayDir, 0.2),
+      stayTip.clone().addScaledVector(stayDir, 0.2 + L * 0.34),
+      0.05,
+      sailMat.clone(),
+      8,
+    );
     furledJib.userData.phaseSeed = L * 0.66;
-    furledJib.castShadow = true;
     group.add(furledJib);
     furledSails.push(furledJib);
 
@@ -2454,9 +2627,10 @@ export class ShipRenderer {
       new THREE.Vector3(0, H + H * 2.15, foreMastZ),
       new THREE.Vector3(0, H + 0.55, L * 0.76),
     );
+    // Side stays land ON the bowsprit shaft just behind the tip — never in open air
     for (const sx of [-1, 1] as const) {
       ropeSegmentPts.push(
-        new THREE.Vector3(sx * W * 0.18, H + 0.52, L * 0.74),
+        new THREE.Vector3(sx * 0.06, H + 0.53, L * 0.72),
         new THREE.Vector3(0, H + H * 1.95, foreMastZ),
       );
     }
@@ -2698,53 +2872,89 @@ export class ShipRenderer {
     }
 
     // ── Barrels on Deck ──────────────────────────────────────
-    const barrelConfigs: Array<{ x: number; z: number; color: number; label: string }> = [];
-
-    // Barrel cluster near stern (water/supplies)
-    barrelConfigs.push({ x: -W * 0.28, z: -L * 0.28, color: 0x3a6ab0, label: 'water' });
-    barrelConfigs.push({ x: -W * 0.28, z: -L * 0.38, color: 0x3a6ab0, label: 'water' });
-
-    // Cannon ordnance — port quarter, away from mast / rigging ring
-    barrelConfigs.push({ x: -W * 0.38, z: -L * 0.26, color: 0x282828, label: 'powder' });
-    if (cannonCount >= 4) {
-      barrelConfigs.push({ x: -W * 0.38, z: -L * 0.36, color: 0x282828, label: 'powder' });
+    // Three FUNCTIONAL supply barrels (SoT read): FOOD / PLANK / CANNONBALL,
+    // named + tagged so the client can hang interactions off them, plus 1-2
+    // unlabeled decor barrels. Every spot is validated against the deck work
+    // stations so no hull class lands a barrel inside a walk/work zone.
+    const mainMastLocalZ = getMainMastLocalZ(stats);
+    const deckStations: Array<{ x: number; z: number; r: number }> = [
+      { x: 0, z: L * 0.42, r: 1.25 },     // anchor capstan (handles sweep 0.71)
+      { x: 0, z: -L * 0.315, r: 1.4 },    // helm wheel
+      ...getSailRopeStationLocals(stats).map((s) => ({ x: s.x, z: s.z, r: 1.3 })),
+      ...getBraceStationLocals(stats).map((s) => ({ x: s.x, z: s.z, r: 1.3 })),
+    ];
+    for (let ci = 0; ci < cannonCount; ci++) {
+      const spot = getCannonDeckLocalPosition(stats, ci);
+      deckStations.push({ x: spot.x, z: spot.z, r: 1.2 });
     }
-    barrelConfigs.push({ x: -W * 0.3, z: -L * 0.2, color: 0x3a3530, label: 'chain' });
-
-    // Food/banana barrel (gold lid) — forward port, clear of mast
-    barrelConfigs.push({ x: -W * 0.32, z: L * 0.18, color: 0xc8a030, label: 'food' });
-
-    // Rum barrel (dark brown lid)
-    if (ship.type !== 'sloop') {
-      barrelConfigs.push({ x: -W * 0.34, z: -L * 0.32, color: 0x6a2808, label: 'rum' });
-    }
+    const clearOfStations = (x: number, z: number): boolean => {
+      // Companionway stair lip: keep the run-up in front of the stairs free.
+      if (Math.abs(z - companionway.stairFrontZ) < 1.2
+        && Math.abs(x - companionway.cx) < companionway.stairHalfWidth + 0.7) return false;
+      // The open stairwell itself — a barrel there floats over the hole.
+      if (Math.abs(x - companionway.cx) < companionway.halfX + 0.45
+        && Math.abs(z - companionway.cz) < companionway.halfZ + 0.45) return false;
+      return deckStations.every((s) => (x - s.x) ** 2 + (z - s.z) ** 2 >= s.r * s.r);
+    };
+    const pickSpot = (candidates: Array<[number, number]>): [number, number] => {
+      for (const c of candidates) if (clearOfStations(c[0], c[1])) return c;
+      return candidates[candidates.length - 1]; // last candidate clears on every hull class
+    };
 
     const barrelHoopMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.7 });
-    const barrelLidMats = new Map<number, THREE.MeshStandardMaterial>();
-    for (const bc of barrelConfigs) {
-      let lidMat = barrelLidMats.get(bc.color);
-      if (!lidMat) {
-        lidMat = new THREE.MeshStandardMaterial({ color: bc.color, roughness: 0.8 });
-        barrelLidMats.set(bc.color, lidMat);
-      }
+    const supplyBarrels: THREE.Group[] = [];
+    const addSupplyBarrel = (kind: SupplyKind, x: number, z: number) => {
+      const lidMat = new THREE.MeshStandardMaterial({ map: supplyLidTexture(kind), roughness: 0.78 });
       const barrel = makeBarrel(barrelWoodMat, barrelHoopMat, lidMat);
-      barrel.position.set(bc.x, H + 0.5, bc.z);
+      barrel.name = `supply-barrel-${kind}`;
+      barrel.userData.supplyKind = kind;
+      barrel.position.set(x, H + 0.5, z);
       barrel.rotation.y = Math.random() * Math.PI * 2;
+      // Bake the barrel's own staves/hoops, but keep the named group intact
+      // (it's excluded from the ship-level merge below).
+      mergeStaticMeshes(barrel, NO_MERGE_EXCLUDE);
       group.add(barrel);
+      supplyBarrels.push(barrel);
+    };
+    // FOOD: at the mainmast base, forward-port of the mast (the rope stations
+    // sit abeam it and the companionway opens aft-starboard).
+    const foodSpot = pickSpot([
+      [-W * 0.16, mainMastLocalZ + 1.35],
+      [-W * 0.24, mainMastLocalZ + 1.7],
+    ]);
+    addSupplyBarrel('food', foodSpot[0], foodSpot[1]);
+    // PLANK: on the main deck just forward of the quarterdeck front step.
+    const plankSpot = pickSpot([
+      [-W * 0.28, qd.frontZ + 1.7],
+      [W * 0.28, qd.frontZ + 1.7],
+    ]);
+    addSupplyBarrel('plank', plankSpot[0], plankSpot[1]);
+    // CANNONBALL: one per side between the broadside cannons. Same z both
+    // sides — first candidate that clears the cannon spots AND the stairwell
+    // (the galleon has a gun at z≈L*0.033; the sloop's stairwell owns z≈0).
+    const shotX = W * 0.5 - 1.3;
+    const shotZ = ([L * 0.02, -L * 0.05, -L * 0.12].find(
+      (z) => clearOfStations(shotX, z) && clearOfStations(-shotX, z),
+    ) ?? -L * 0.12);
+    for (const side of [-1, 1] as const) {
+      addSupplyBarrel('shot', side * shotX, shotZ);
     }
 
-    // Stacked shot (port quarter with ordnance — not over the main deck / companionway)
-    const ballMat = new THREE.MeshStandardMaterial({ color: 0x1e1e1e, roughness: 0.9 });
-    const ballPositions = [
-      [0, 0], [0.28, 0], [-0.28, 0], [0.14, 0.24], [-0.14, 0.24],
-    ];
-    const shotRackX = -W * 0.42;
-    const shotRackZ = -L * 0.34;
-    for (const [bx, by] of ballPositions) {
-      const ball = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 8), ballMat);
-      ball.position.set(shotRackX + bx * 0.06, H + 0.22 + by, shotRackZ);
-      ball.castShadow = true;
-      group.add(ball);
+    // Decor barrels (unlabeled, merge into the static bake): a water barrel at
+    // the port rail amidships; a rum barrel forward-starboard on bigger hulls.
+    const decorSpots: Array<{ x: number; z: number; lid: number }> = [];
+    const waterSpot = pickSpot([[-W * 0.31, L * 0.02], [-W * 0.31, -L * 0.06]]);
+    decorSpots.push({ x: waterSpot[0], z: waterSpot[1], lid: 0x3a6ab0 });
+    if (ship.type !== 'sloop') {
+      const rumSpot = pickSpot([[W * 0.36, mainMastLocalZ + 1.5], [W * 0.3, mainMastLocalZ + 1.9]]);
+      decorSpots.push({ x: rumSpot[0], z: rumSpot[1], lid: 0x6a2808 });
+    }
+    for (const spot of decorSpots) {
+      const lidMat = new THREE.MeshStandardMaterial({ color: spot.lid, roughness: 0.8 });
+      const barrel = makeBarrel(barrelWoodMat, barrelHoopMat, lidMat);
+      barrel.position.set(spot.x, H + 0.5, spot.z);
+      barrel.rotation.y = Math.random() * Math.PI * 2;
+      group.add(barrel);
     }
 
     // Rope coil near stern
@@ -2873,7 +3083,9 @@ export class ShipRenderer {
     // visibility-toggled at runtime is excluded and keeps its own object.
     mergeStaticMeshes(wheelGroup, NO_MERGE_EXCLUDE);
     mergeStaticMeshes(anchor, NO_MERGE_EXCLUDE);
-    mergeStaticMeshes(anchorCapstan, new Set<THREE.Object3D>([anchorChain]));
+    mergeStaticMeshes(anchorCapstan, new Set<THREE.Object3D>(
+      capstanGrip ? [anchorChain, capstanGrip] : [anchorChain],
+    ));
     const mergeExclude = new Set<THREE.Object3D>([
       ...sails,
       ...furledSails,
@@ -2882,7 +3094,10 @@ export class ShipRenderer {
       ...Object.values(upgradePennants),
       ...Object.values(upgradeVisuals).flat(),
       ...Object.values(hullHoles),
+      ...innerBreachDecals,
+      ...supplyBarrels,
       ...cannonGroups.map((cannon) => cannon.root),
+      ...(nestFloorMesh ? [nestFloorMesh] : []),
       wheelGroup,
       compassNeedle,
       anchor,
@@ -3320,6 +3535,12 @@ export class ShipRenderer {
         // (hp ≤ 0.5, actively flooding) is a gaping breach.
         const sc = THREE.MathUtils.clamp((1 - hp) * 3.2, 0.4, 2.1);
         hole.scale.setScalar(sc);
+        // Inner breach (deck-side torn planking) follows the same gate + ramp.
+        const inner = hole.userData.innerDecal as THREE.Group | undefined;
+        if (inner) {
+          inner.visible = hole.visible;
+          inner.scale.setScalar(sc);
+        }
         // The halo only pulses while there's something to patch — a foundering
         // wreck is past saving, so it goes dark there.
         const marker = hole.userData.marker as THREE.Mesh | undefined;
