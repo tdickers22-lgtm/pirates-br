@@ -141,7 +141,9 @@ const CUTLASS_CHARGE_TIME = 0.72;
 const CUTLASS_CHARGE_MIN_TAP = 0.02;
 const CUTLASS_LUNGE_COOLDOWN = 1.05;
 const CUTLASS_LUNGE_DAMAGE = 50;
-const CUTLASS_LUNGE_IMPULSE = 32;
+// Dash travel ≈ impulse × 0.16 (0.9/tick knockback decay) → ~8.3m at a
+// blink-fast peak. Was 32 (~5m) — the lunge should FEEL like a teleport-cut.
+const CUTLASS_LUNGE_IMPULSE = 52;
 /** Kill credit for prior damage expires after this long (storm/drown deaths). */
 const KILL_CREDIT_WINDOW_SECONDS = 90;
 /** Catch-up steps per timer callback — bounds the death spiral after a stall. */
@@ -1772,9 +1774,9 @@ export class Match {
     const forwardX = Math.sin(yaw);
     const forwardZ = Math.cos(yaw);
     player.knockbackVelocity.x += forwardX * CUTLASS_LUNGE_IMPULSE;
-    player.knockbackVelocity.y += 1.4;
+    player.knockbackVelocity.y += 1.2;
     player.knockbackVelocity.z += forwardZ * CUTLASS_LUNGE_IMPULSE;
-    player.velocity.y = Math.max(player.velocity.y, 1.8);
+    player.velocity.y = Math.max(player.velocity.y, 1.6);
     player.shipBoundaryGraceTimer = Math.max(player.shipBoundaryGraceTimer, PLAYER.SHIP_EXIT_GRACE_TIME + 0.35);
   }
 

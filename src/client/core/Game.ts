@@ -2134,6 +2134,11 @@ export class Game {
   private readonly cutlassSwingKind = new Map<string, 'lunge' | 'swing'>();
   /** bucketFilled edge-detector per player — bail FX fire on the transitions. */
   private readonly prevBucketFilled = new Map<string, boolean>();
+  /** Alternating slash diagonal for the first-person cutlass (flips per swing). */
+  private cutlassSlashSide: 1 | -1 = 1;
+  private prevCutlassSwingProgress = 0;
+  /** 0..1 FOV punch on the cutlass dash, decays fast (rush feel). */
+  private cutlassDashKick = 0;
   private readonly chestMeshes = new Map<string, ChestMeshRecord>();
   private readonly barrelMeshes = new Map<string, THREE.Group>();
   private readonly sharkMeshes = new Map<string, THREE.Group>();
@@ -2419,6 +2424,8 @@ export class Game {
     this.prevStormShrinking = false;
     this.prevBucketFilled.clear();
     this.cutlassSwingKind.clear();
+    this.prevCutlassSwingProgress = 0;
+    this.cutlassDashKick = 0;
     this.lastHullLeakAt = 0;
     this.lastChainshotWhirrAt.clear();
     this.cameraFovKick = 0;
@@ -9367,10 +9374,12 @@ export class Game {
         )
       : 0;
 
-    // ── FOV kick: +4° eased into full sail speed, +2° brief pop on own cannon fire.
-    const fovKickTarget = shipSpeed01 * 4 + this.cameraShakeCannon * 2;
+    // ── FOV kick: +4° eased into full sail speed, +2° brief pop on own cannon
+    // fire, +5° rush on the cutlass dash.
+    const fovKickTarget = shipSpeed01 * 4 + this.cameraShakeCannon * 2 + this.cutlassDashKick * 5;
     this.cameraFovKick += (fovKickTarget - this.cameraFovKick) * Math.min(1, this.frameDt * 6);
     this.cameraShakeCannon = Math.max(0, this.cameraShakeCannon - this.frameDt * 3.2);
+    this.cutlassDashKick = Math.max(0, this.cutlassDashKick - this.frameDt * 2.6);
     const finalFov = targetFov + this.cameraFovKick;
     if (Math.abs(camera.fov - finalFov) > 0.02) {
       camera.fov += (finalFov - camera.fov) * Math.min(1, this.frameDt * 10);
@@ -11658,6 +11667,13 @@ export class Game {
             break;
           }
           const swingProgress = this.getCutlassSwingProgress(player);
+          if (this.cutlassSwingKind.get(player.id) === 'lunge' && swingProgress > 0) {
+            // Dash stab: blade rams straight out with the extended arm.
+            const ext = Math.sin(Math.min(1, swingProgress / 0.55) * Math.PI);
+            weaponMesh.position.set(0.02, 0.04 + ext * 0.06, 0.1 + ext * 0.3);
+            weaponMesh.rotation.set(-0.06 - ext * 1.35, 0.1, -0.62 + ext * 0.5);
+            break;
+          }
           const slashArc = Math.sin(THREE.MathUtils.clamp((swingProgress - 0.18) / 0.42, 0, 1) * Math.PI);
           const recover = THREE.MathUtils.smoothstep(swingProgress, 0.6, 1);
           weaponMesh.position.set(
@@ -12092,13 +12108,30 @@ export class Game {
       case 'cutlass':
         {
           // Shared progress helper — denominator locked per swing (basic 0.55s
-          // vs lunge 1.05s) so the slash arc always plays forward from windup.
+          // vs lunge 1.05s) so the animation always plays forward from windup.
           const cooldownProgress = this.getCutlassSwingProgress(player);
-          const slashArc = Math.sin(THREE.MathUtils.clamp((cooldownProgress - 0.08) / 0.58, 0, 1) * Math.PI);
-          const lungePush = THREE.MathUtils.smoothstep(cooldownProgress, 0.06, 0.34)
-            * (1 - THREE.MathUtils.smoothstep(cooldownProgress, 0.52, 1));
+          const swingKind = this.cutlassSwingKind.get(player.id) ?? 'swing';
           const charge = this.localCutlassCharge;
           const chargeReadyPulse = charge > 0.96 ? Math.sin(time * 22) * 0.018 : 0;
+          // Swing-start edge: alternate the slash diagonal each basic swing;
+          // a lunge kicks the FOV + camera for the dash rush.
+          if (cooldownProgress > 0.001 && this.prevCutlassSwingProgress <= 0.001) {
+            if (swingKind === 'lunge') {
+              this.cutlassDashKick = 1;
+              this.cameraShake = Math.min(1, this.cameraShake + 0.2);
+            } else {
+              this.cutlassSlashSide = this.cutlassSlashSide === 1 ? -1 : 1;
+            }
+          }
+          this.prevCutlassSwingProgress = cooldownProgress;
+          // Keyframe mixer: chained lerps through explicit poses so the
+          // motion READS — cock, cut, follow-through — instead of a mushy
+          // sine wobble around the rest pose.
+          const mixPose = (a: number[], b: number[], t: number) => {
+            for (let i = 0; i < 6; i++) a[i] += (b[i] - a[i]) * t;
+            return a;
+          };
+          const REST = [0.31, -0.3, -0.58, -0.02, -0.28, -0.82];
           if (cutlassBlocking) {
             this.localViewWeaponRoot.position.set(
               0.16 + sway * 0.14,
@@ -12110,20 +12143,62 @@ export class Game {
               -0.08,
               -0.18 - strafeTilt * 0.8,
             );
+          } else if (cooldownProgress > 0.001 && swingKind === 'lunge') {
+            // DASH THRUST: snap back, RAM the blade out dead-center and hold
+            // it extended through the dash, then sweep back to the hip.
+            const p = cooldownProgress;
+            const windup = THREE.MathUtils.smoothstep(p, 0, 0.09);
+            const stab = THREE.MathUtils.smoothstep(p, 0.09, 0.24);
+            const carry = THREE.MathUtils.smoothstep(p, 0.24, 0.6);
+            const recover = THREE.MathUtils.smoothstep(p, 0.6, 1);
+            // Stab keys keep the blade EDGE-ON and the hilt low-right — a
+            // centered flat blade at full extension read as a wall across
+            // the whole lens (first probe caught it).
+            const pose = mixPose(
+              mixPose(
+                mixPose(
+                  mixPose([...REST], [0.38, -0.36, -0.42, -0.18, -0.42, -1.0], windup),
+                  [0.14, -0.26, -0.92, 0.36, -0.1, -0.45], stab,
+                ),
+                [0.17, -0.28, -0.8, 0.28, -0.12, -0.52], carry,
+              ),
+              REST, recover,
+            );
+            this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
+            this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.6);
+          } else if (cooldownProgress > 0.001) {
+            // SLASH: cock high on one side, CUT hard across the screen to the
+            // other, follow through low, ease home. Alternates diagonals.
+            const s = this.cutlassSlashSide;
+            const p = cooldownProgress;
+            const cock = THREE.MathUtils.smoothstep(p, 0, 0.14);
+            const cut = THREE.MathUtils.smoothstep(p, 0.14, 0.4);
+            const through = THREE.MathUtils.smoothstep(p, 0.4, 0.58);
+            const recover = THREE.MathUtils.smoothstep(p, 0.62, 1);
+            const pose = mixPose(
+              mixPose(
+                mixPose(
+                  mixPose([...REST], [0.31 + 0.17 * s, 0.04, -0.5, -0.88, -0.28 - 0.34 * s, -0.3 * s - 0.35], cock),
+                  [0.31 - 0.55 * s, -0.36, -0.8, 0.5, -0.28 + 0.3 * s, 1.35 * s - 0.6], cut,
+                ),
+                [0.31 - 0.62 * s, -0.44, -0.6, 0.32, -0.28 + 0.36 * s, 1.55 * s - 0.62], through,
+              ),
+              REST, recover,
+            );
+            this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
+            this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.8);
           } else {
-            // Charge wind-up stays LOW-RIGHT and pulls AWAY from the lens: the
-            // old pose (x→0.15, pitch −0.6) tipped the grip straight at the
-            // camera, parking the brass guard ring huge in screen center for
-            // the whole hold (user-flagged).
+            // Rest / charge wind-up: stays LOW-RIGHT and pulls AWAY from the
+            // lens (the old pose parked the brass guard huge in screen center).
             this.localViewWeaponRoot.position.set(
-              0.31 - charge * 0.07 + slashArc * 0.1 + sway * 0.24 + travelSwing * 0.42,
-              -0.3 - charge * 0.03 + chargeReadyPulse + bob * 0.75 - slashArc * 0.08,
-              -0.58 - charge * 0.34 + lungePush * 0.18,
+              0.31 - charge * 0.07 + sway * 0.24 + travelSwing * 0.42,
+              -0.3 - charge * 0.03 + chargeReadyPulse + bob * 0.75,
+              -0.58 - charge * 0.34,
             );
             this.localViewWeaponRoot.rotation.set(
-              -0.02 - charge * 0.34 + slashArc * 0.54,
-              -0.28 - charge * 0.3 - slashArc * 0.2,
-              -0.82 - charge * 0.52 - strafeTilt * 1.4 - slashArc * 1.02,
+              -0.02 - charge * 0.34,
+              -0.28 - charge * 0.3,
+              -0.82 - charge * 0.52 - strafeTilt * 1.4,
             );
           }
         }
@@ -13005,7 +13080,25 @@ export class Game {
       torso.rotation.z = walkSwing * 0.08;
     }
 
-    if (cutlassReady && !player.blocking && player.state !== 'swimming' && !player.atHelm && !player.atCannon && !player.atSails) {
+    if (cutlassReady && !player.blocking && player.state !== 'swimming' && !player.atHelm && !player.atCannon && !player.atSails
+      && this.cutlassSwingKind.get(player.id) === 'lunge' && cutlassSwing > 0) {
+      // DASH STAB: full-extension fencer's thrust — body lunges forward, sword
+      // arm rams horizontal, trailing arm flung back, legs in a deep stride.
+      const ext = Math.sin(Math.min(1, cutlassSwing / 0.55) * Math.PI);
+      torso.rotation.x += ext * 0.44;
+      torso.rotation.y += -0.34 * ext;
+      pelvis.rotation.x += ext * 0.14;
+      head.rotation.y += 0.18 * ext;
+      hair.rotation.y = head.rotation.y;
+      bandana.rotation.y = head.rotation.y;
+      rightArmPivot.rotation.x = -0.62 - ext * 0.98;
+      rightArmPivot.rotation.y = -0.16 + ext * 0.1;
+      rightArmPivot.rotation.z = -0.42 + ext * 0.3;
+      leftArmPivot.rotation.x = -0.18 + ext * 0.72;
+      leftArmPivot.rotation.z = 0.32 + ext * 0.35;
+      leftLegPivot.rotation.x -= ext * 0.55;
+      rightLegPivot.rotation.x += ext * 0.68;
+    } else if (cutlassReady && !player.blocking && player.state !== 'swimming' && !player.atHelm && !player.atCannon && !player.atSails) {
       const windup = THREE.MathUtils.smoothstep(cutlassSwing, 0.02, 0.26);
       const strike = THREE.MathUtils.smoothstep(cutlassSwing, 0.18, 0.58);
       const recover = THREE.MathUtils.smoothstep(cutlassSwing, 0.62, 1);
