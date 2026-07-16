@@ -75,6 +75,19 @@ await freeLook(
   [park.ship.x, 0.6, park.ship.z],
 );
 await wait(700); await shot('hole-markers-port');
+// Repair one hole (2 → 1) so a plank patch spawns, then look again.
+await page.evaluate(() => {
+  const g = window.__piratesBR;
+  const me = g.state.players.find((p) => p.id === g.localPlayerId);
+  clearInterval(window.__holeForce);
+  window.__holeForce = setInterval(() => {
+    const ship = g.state.ships.find((s) => s.id === me?.shipId) ?? g.state.ships[0];
+    if (!ship) return;
+    ship.holes.port = 1; ship.hull.port = 1 - 1 / 3;
+    ship.holes.bow = 0; ship.hull.bow = 1;
+  }, 30);
+});
+await wait(900); await shot('hole-patched-port');
 await freeLook(
   [park.ship.x + Math.sin(park.ship.rot) * -9, 8, park.ship.z + Math.cos(park.ship.rot) * -9],
   [park.ship.x, 3.5, park.ship.z],

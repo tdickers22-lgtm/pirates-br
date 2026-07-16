@@ -1097,6 +1097,9 @@ interface ShipMeshGroup {
   holdWater: THREE.Mesh | null;
   holdWaterBase: Float32Array | null;
   wake: ShipWake;
+  /** vec4 (xyz = hull-local hole center, w = radius) driving the hull's
+   *  fragment-discard breaches; slot radius 0 = inactive. */
+  hullHoleUniform: { value: THREE.Vector4[] };
 }
 
 export class ShipRenderer {
@@ -1382,6 +1385,21 @@ export class ShipRenderer {
     // walkable footprint (sheer half-widths) are identical to the server tables.
     const profile = getHullProfile(ship.type);
     const hullGeo = makeLoftedHullGeometry(profile);
+    // REAL see-through breaches: the fragment shader discards hull planking
+    // inside each active hole (hull-local space — the loft mesh sits at
+    // identity in the ship group, so `position` IS hull-local). The material
+    // is DoubleSide, so looking through an opening shows the far interior
+    // wall instead of vanished backfaces.
+    const hullHoleUniform = { value: Array.from({ length: 6 }, () => new THREE.Vector4(0, 0, 0, 0)) };
+    hullMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uHoles = hullHoleUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vHullPos;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHullPos = position;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vHullPos;\nuniform vec4 uHoles[6];')
+        .replace('#include <map_fragment>', 'for (int i = 0; i < 6; i++) { if (uHoles[i].w > 0.0 && distance(vHullPos, uHoles[i].xyz) < uHoles[i].w) discard; }\n#include <map_fragment>');
+    };
     const hull = new THREE.Mesh(hullGeo, hullMat);
     hull.castShadow = true;
     hull.receiveShadow = true;
@@ -1415,6 +1433,7 @@ export class ShipRenderer {
     const makeHoleDecal = (radius: number) => {
       const decal = new THREE.Group();
       const opening = new THREE.Mesh(new THREE.CircleGeometry(radius, 16), holeMat);
+      opening.name = 'hole-opening';
       decal.add(opening);
       const rim = new THREE.Mesh(new THREE.RingGeometry(radius * 1.05, radius * 1.3, 16), holeRimMat);
       decal.add(rim);
@@ -1484,6 +1503,12 @@ export class ShipRenderer {
       hm.userData.gushAnchor = gush;
       hm.userData.belowWaterline = belowWaterline;
       hm.userData.floodActive = false;
+      // Shader-hole points + plank-patch anchor (hull-local pos, decal quat).
+      hm.userData.shaderPoints = extraDecal
+        ? [position.clone(), position.clone().add(extraDecal.offset)]
+        : [position.clone()];
+      hm.userData.patchQuat = decal.quaternion.clone();
+      hm.userData.patchNormal = n.clone();
       if (innerDecal) {
         // Inner breach on the inboard bulwark/rail face: a holed section shows
         // torn planking FROM ON DECK, not only from the water. Kept as its own
@@ -3153,9 +3178,35 @@ export class ShipRenderer {
       holdWater,
       holdWaterBase,
       wake,
+      hullHoleUniform,
     });
 
     return group;
+  }
+
+  /** A crossed pair of rough planks nailed over a repaired breach — mounted
+   *  on the hole group so it rides the hull; slight per-patch jitter so
+   *  stacked repairs read as separate boards. */
+  private addPlankPatch(holeGroup: THREE.Group, index: number) {
+    const quat = holeGroup.userData.patchQuat as THREE.Quaternion | undefined;
+    const n = holeGroup.userData.patchNormal as THREE.Vector3 | undefined;
+    if (!quat || !n) return;
+    const patch = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ map: this.darkWoodTex, roughness: 0.95 });
+    for (let i = 0; i < 2; i++) {
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.15, 0.035), mat);
+      plank.rotation.z = (i === 0 ? 0.5 : -0.45) + (index - 1) * 0.16;
+      plank.position.z = 0.02 + i * 0.035;
+      plank.castShadow = true;
+      patch.add(plank);
+    }
+    patch.quaternion.copy(quat);
+    // Parent to the SHIP group, not the hole group: the hole group scales
+    // with the damage ramp and goes INVISIBLE once the section is healed —
+    // exactly when the patch must remain showing.
+    patch.position.copy(holeGroup.position).addScaledVector(n, 0.05 + index * 0.015);
+    (holeGroup.parent ?? holeGroup).add(patch);
+    patch.userData.isPlankPatch = true;
   }
 
   private addSwiftSailTrim(
@@ -3524,10 +3575,50 @@ export class ShipRenderer {
       const hullSections = ['bow', 'stern', 'port', 'starboard'] as const;
       // Shared pulse for every hole halo (one material, breathing in sync).
       this.holeMarkerMat.opacity = 0.28 + 0.24 * (0.5 + 0.5 * Math.sin(t * 3.4));
+      // Drive the REAL see-through breaches + plank patches. Repairs are
+      // observed as per-section hole-count DECREASES; a multi-section drop or
+      // a founder is a reset/respawn, not carpentry — no patches for those.
+      const patchState = (mesh.root.userData.patchState ??= {
+        prev: { bow: 0, stern: 0, port: 0, starboard: 0 } as Record<'bow' | 'stern' | 'port' | 'starboard', number>,
+        planks: { bow: 0, stern: 0, port: 0, starboard: 0 } as Record<'bow' | 'stern' | 'port' | 'starboard', number>,
+        init: false,
+      });
+      const curHoles = {
+        bow: ship.holes?.bow ?? 0,
+        stern: ship.holes?.stern ?? 0,
+        port: ship.holes?.port ?? 0,
+        starboard: ship.holes?.starboard ?? 0,
+      };
+      const totalDrop = (patchState.prev.bow - curHoles.bow) + (patchState.prev.stern - curHoles.stern)
+        + (patchState.prev.port - curHoles.port) + (patchState.prev.starboard - curHoles.starboard);
+      const resetLike = !patchState.init || ship.sinking || totalDrop > 1;
+      let holeSlot = 0;
       for (const s of hullSections) {
         const hp = ship.hull[s];
         const hole = mesh.hullHoles[s];
         hole.visible = hp < 0.92;
+        // Shader holes: one uniform slot per surface point, radius grows with
+        // the section's open-hole count. The old dark "opening" discs retire —
+        // the hull now genuinely opens.
+        const points = (hole.userData.shaderPoints as THREE.Vector3[] | undefined) ?? [];
+        const holeRadius = curHoles[s] > 0 ? 0.2 + 0.09 * (curHoles[s] - 1) : 0;
+        for (const point of points) {
+          if (holeSlot < 6) {
+            mesh.hullHoleUniform.value[holeSlot].set(point.x, point.y, point.z, holeRadius);
+            holeSlot++;
+          }
+        }
+        hole.traverse((o) => { if (o.name === 'hole-opening') o.visible = false; });
+        // Plank patches: carpentry shows. One crossed-plank patch per repaired
+        // hole, mounted flush at the breach point, persisting for the match.
+        if (!resetLike && curHoles[s] < patchState.prev[s] && patchState.planks[s] < 3) {
+          const repaired = patchState.prev[s] - curHoles[s];
+          for (let r = 0; r < repaired && patchState.planks[s] < 3; r++) {
+            this.addPlankPatch(hole, patchState.planks[s]);
+            patchState.planks[s]++;
+          }
+        }
+        patchState.prev[s] = curHoles[s];
         // A section actually floods below the hole threshold — that's when the
         // gush anchor (see getHoleAnchors) should carry water-jet FX.
         hole.userData.floodActive = hp <= FLOODING.HOLE_THRESHOLD;
@@ -3550,6 +3641,9 @@ export class ShipRenderer {
           marker.scale.setScalar(mp);
         }
       }
+      patchState.init = true;
+      // Unused slots off.
+      for (; holeSlot < 6; holeSlot++) mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
 
       // Water-in-hull: a dark plane rises with the flood level, visible from above
       // through the open companionway / hatch grating. `waterLevel` is a naval-track

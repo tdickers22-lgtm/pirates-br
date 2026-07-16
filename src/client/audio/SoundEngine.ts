@@ -235,6 +235,23 @@ export class SoundEngine {
     this.playNoise(now + 0.07, 0.12, 900, 0.7, 0.1, 'bandpass');
   }
 
+  /** Felled palm hitting the ground — soft heavy earth thud + frond rustle.
+   *  @param distance metres from the listener; rolls off like other spatials. */
+  playTreeFallThud(distance = 0): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    if (distance > 110) return;
+    const now = this.ctx.currentTime;
+    const { dest, gain: g } = this.makeSpatialDest(distance);
+    // Deep soft ground impact.
+    this.playTone(now, 72, 42, 0.3, 0.4 * g, 'sine', 0.01, dest);
+    this.playNoise(now, 0.24, 200, 0.8, 0.42 * g, 'lowpass', dest);
+    // Trunk knock.
+    this.playTone(now + 0.01, 150, 84, 0.14, 0.2 * g, 'triangle', 0.004, dest);
+    // Fronds settling.
+    this.playNoise(now + 0.06, 0.32, 1500, 0.5, 0.12 * g, 'bandpass', dest);
+  }
+
   // ── Shark telegraphs ─────────────────────────────────────────────
   /** Windup growl — low sawtooth slide under a noise rumble (the dodge cue).
    *  @param distance metres from the listener; rolls off like other spatials. */

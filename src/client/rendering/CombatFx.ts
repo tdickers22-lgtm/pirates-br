@@ -650,6 +650,128 @@ class DebrisPool {
   }
 }
 
+/** Chunky 3D shards (boulder breakup) via a single InstancedMesh. Unlike the
+ *  flat DebrisPool quads these are lit solids with a per-fragment ground plane:
+ *  each shard falls ballistically, bounces once off its groundY, then settles
+ *  and shrinks away. */
+class FragmentPool {
+  readonly mesh: THREE.InstancedMesh;
+  private readonly capacity: number;
+  private readonly state: Float32Array; // x y z vx vy vz rx ry rz avx avy avz age life size groundY bounced
+  private static readonly STRIDE = 17;
+  private cursor = 0;
+  private activeCount = 0;
+
+  constructor(capacity: number) {
+    this.capacity = capacity;
+    this.state = new Float32Array(capacity * FragmentPool.STRIDE);
+    const geometry = new THREE.IcosahedronGeometry(1, 0);
+    const material = new THREE.MeshLambertMaterial();
+    this.mesh = new THREE.InstancedMesh(geometry, material, capacity);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.frustumCulled = false;
+    scratchMatrix.makeScale(0, 0, 0);
+    scratchColor.setHex(0x808488);
+    for (let index = 0; index < capacity; index++) {
+      this.mesh.setMatrixAt(index, scratchMatrix);
+      this.mesh.setColorAt(index, scratchColor);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  }
+
+  emit(
+    x: number,
+    y: number,
+    z: number,
+    vx: number,
+    vy: number,
+    vz: number,
+    life: number,
+    size: number,
+    groundY: number,
+    colorHex: number,
+  ) {
+    const index = this.cursor;
+    this.cursor = (this.cursor + 1) % this.capacity;
+    const base = index * FragmentPool.STRIDE;
+    if (this.state[base + 13] <= 0) this.activeCount++;
+    this.state[base] = x;
+    this.state[base + 1] = y;
+    this.state[base + 2] = z;
+    this.state[base + 3] = vx;
+    this.state[base + 4] = vy;
+    this.state[base + 5] = vz;
+    this.state[base + 6] = Math.random() * Math.PI * 2;
+    this.state[base + 7] = Math.random() * Math.PI * 2;
+    this.state[base + 8] = Math.random() * Math.PI * 2;
+    this.state[base + 9] = rand(-7, 7);
+    this.state[base + 10] = rand(-7, 7);
+    this.state[base + 11] = rand(-7, 7);
+    this.state[base + 12] = 0;
+    this.state[base + 13] = life;
+    this.state[base + 14] = size;
+    this.state[base + 15] = groundY;
+    this.state[base + 16] = 0;
+    scratchColor.setHex(colorHex);
+    this.mesh.setColorAt(index, scratchColor);
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  }
+
+  update(dt: number) {
+    if (this.activeCount === 0) return;
+    for (let index = 0; index < this.capacity; index++) {
+      const base = index * FragmentPool.STRIDE;
+      const life = this.state[base + 13];
+      if (life <= 0) continue;
+      const age = this.state[base + 12] + dt;
+      if (age >= life) {
+        this.state[base + 13] = 0;
+        this.activeCount--;
+        scratchMatrix.makeScale(0, 0, 0);
+        this.mesh.setMatrixAt(index, scratchMatrix);
+        continue;
+      }
+      this.state[base + 12] = age;
+      const size = this.state[base + 14];
+      const restY = this.state[base + 15] + size * 0.5;
+      this.state[base + 4] -= 20 * dt;
+      this.state[base] += this.state[base + 3] * dt;
+      this.state[base + 1] += this.state[base + 4] * dt;
+      this.state[base + 2] += this.state[base + 5] * dt;
+      if (this.state[base + 1] < restY && this.state[base + 4] < 0) {
+        this.state[base + 1] = restY;
+        if (this.state[base + 16] < 1) {
+          // One bounce, then the shard beds down and stops tumbling.
+          this.state[base + 16] = 1;
+          this.state[base + 4] *= -0.32;
+          this.state[base + 3] *= 0.55;
+          this.state[base + 5] *= 0.55;
+        } else {
+          this.state[base + 3] = 0;
+          this.state[base + 4] = 0;
+          this.state[base + 5] = 0;
+          this.state[base + 9] = 0;
+          this.state[base + 10] = 0;
+          this.state[base + 11] = 0;
+        }
+      }
+      this.state[base + 6] += this.state[base + 9] * dt;
+      this.state[base + 7] += this.state[base + 10] * dt;
+      this.state[base + 8] += this.state[base + 11] * dt;
+      const progress = age / life;
+      const shrink = progress > 0.62 ? (1 - progress) / 0.38 : 1;
+      scratchEuler.set(this.state[base + 6], this.state[base + 7], this.state[base + 8]);
+      scratchQuat.setFromEuler(scratchEuler);
+      scratchVecA.set(this.state[base], this.state[base + 1], this.state[base + 2]);
+      scratchVecB.setScalar(size * shrink);
+      scratchMatrix.compose(scratchVecA, scratchQuat, scratchVecB);
+      this.mesh.setMatrixAt(index, scratchMatrix);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
 type LightSlot = {
   light: THREE.PointLight;
   age: number;
@@ -725,6 +847,7 @@ export class CombatFx {
   private rings: RingPool | null = null;
   private splashes: SplashPool | null = null;
   private debris: DebrisPool | null = null;
+  private fragments: FragmentPool | null = null;
   private lights: LightPool | null = null;
   private audioContext: AudioContext | null = null;
   private masterGain: GainNode | null = null;
@@ -739,8 +862,9 @@ export class CombatFx {
       this.rings = new RingPool(this.root, 12, createRingTexture());
       this.splashes = new SplashPool(this.root, 10, createSplashTexture());
       this.debris = new DebrisPool(64);
+      this.fragments = new FragmentPool(24);
       this.lights = new LightPool(this.root, 4);
-      this.root.add(this.smoke.points, this.flame.points, this.sparks.points, this.droplets.points, this.debris.mesh);
+      this.root.add(this.smoke.points, this.flame.points, this.sparks.points, this.droplets.points, this.debris.mesh, this.fragments.mesh);
     }
     scene.add(this.root);
   }
@@ -769,6 +893,7 @@ export class CombatFx {
     this.rings?.update(dt);
     this.splashes?.update(dt);
     this.debris?.update(dt);
+    this.fragments?.update(dt);
     this.lights?.update(dt);
   }
 
@@ -968,6 +1093,108 @@ export class CombatFx {
       nx * 0.7, 0.5, nz * 0.7,
       rand(0.4, 0.62), 0.2, 0.55, 0.26, 0, 0xdfeef2, 0.2, 1.8, rand(-1, 1),
     );
+  }
+
+  // ── Harvest destruction ───────────────────────────────────────────────────
+  // Per-chop impact + completion breakdown FX for palms/boulders. All pooled
+  // (DebrisPool quads, FragmentPool shards, smoke/rings) — no per-swing allocations.
+
+  /** Axe biting a palm trunk: 6-9 tan/brown chips flung ballistically off the cut. */
+  emitWoodChips(position: Vec3) {
+    if (!this.debris || !this.smoke) return;
+    const chipCount = 6 + Math.floor(Math.random() * 4);
+    for (let index = 0; index < chipCount; index++) {
+      const theta = Math.random() * Math.PI * 2;
+      const spd = rand(1.6, 3.8);
+      this.debris.emit(
+        position.x, position.y, position.z,
+        Math.cos(theta) * spd, rand(1.6, 3.6), Math.sin(theta) * spd,
+        rand(0.4, 0.55), rand(0.06, 0.13), pick(0xc9a06a, pick(0x8a6134, 0x6b4a26)),
+      );
+    }
+    this.smoke.emit(
+      position.x, position.y, position.z,
+      rand(-0.3, 0.3), rand(0.4, 0.8), rand(-0.3, 0.3),
+      rand(0.3, 0.45), 0.14, 0.5, 0.22, 0, 0xa88d68, 0.3, 2, rand(-1.5, 1.5),
+    );
+  }
+
+  /** Palm-frond flutter — shed leaves from the crown on each strike and a
+   *  bigger burst when the tree comes down. */
+  emitLeafPuff(position: Vec3, count = 4) {
+    if (!this.debris || !this.smoke) return;
+    for (let index = 0; index < count; index++) {
+      const theta = Math.random() * Math.PI * 2;
+      const spd = rand(0.8, 2.6);
+      this.debris.emit(
+        position.x, position.y, position.z,
+        Math.cos(theta) * spd, rand(0.2, 1.6), Math.sin(theta) * spd,
+        rand(0.55, 0.9), rand(0.1, 0.2), pick(0x3f7d3a, pick(0x5da24a, 0x2e5c2b)),
+      );
+    }
+    this.smoke.emit(
+      position.x, position.y, position.z,
+      rand(-0.3, 0.3), rand(0.2, 0.6), rand(-0.3, 0.3),
+      rand(0.35, 0.55), 0.3, 0.9, 0.16, 0, 0x6f9c5e, 0.15, 1.6, rand(-1, 1),
+    );
+  }
+
+  /** Axe cracking a boulder face: grey stone chips + a brief dust puff. */
+  emitStoneChips(position: Vec3) {
+    if (!this.debris || !this.smoke) return;
+    const chipCount = 5 + Math.floor(Math.random() * 4);
+    for (let index = 0; index < chipCount; index++) {
+      const theta = Math.random() * Math.PI * 2;
+      const spd = rand(1.4, 3.4);
+      this.debris.emit(
+        position.x, position.y, position.z,
+        Math.cos(theta) * spd, rand(1.2, 3), Math.sin(theta) * spd,
+        rand(0.4, 0.55), rand(0.05, 0.11), pick(0x8d9298, pick(0x767b81, 0x63686e)),
+      );
+    }
+    this.smoke.emit(
+      position.x, position.y + 0.1, position.z,
+      rand(-0.25, 0.25), rand(0.3, 0.7), rand(-0.25, 0.25),
+      rand(0.35, 0.5), 0.18, 0.6, 0.26, 0, 0x9a948a, 0.25, 2, rand(-1.5, 1.5),
+    );
+  }
+
+  /** Boulder giving way: 6-8 solid shards explode outward, bounce once off the
+   *  terrain and shrink away, under a dust ring + rolling dust. */
+  emitRockShatter(position: Vec3, groundY: number) {
+    if (!this.fragments || !this.smoke || !this.rings) return;
+    const shardCount = 6 + Math.floor(Math.random() * 3);
+    for (let index = 0; index < shardCount; index++) {
+      const theta = Math.random() * Math.PI * 2;
+      const spd = rand(2, 5.5);
+      this.fragments.emit(
+        position.x, position.y + rand(0.1, 0.5), position.z,
+        Math.cos(theta) * spd, rand(2.4, 5.5), Math.sin(theta) * spd,
+        rand(0.9, 1.3), rand(0.09, 0.22), groundY, pick(0x8d9298, pick(0x767b81, 0x5c6167)),
+      );
+    }
+    this.rings.emit(position.x, groundY + 0.05, position.z, 0.55, 0.5, 3.4, 0.5, 0, 0xa39c8f, false);
+    for (let index = 0; index < 3; index++) {
+      this.smoke.emit(
+        position.x + rand(-0.3, 0.3), position.y + rand(0.1, 0.5), position.z + rand(-0.3, 0.3),
+        rand(-0.7, 0.7), rand(0.6, 1.4), rand(-0.7, 0.7),
+        rand(0.6, 1), rand(0.35, 0.5), rand(1.2, 1.9), 0.4, 0, pick(0x9a948a, 0x7d7870), 0.35, 1.8, rand(-1.6, 1.6),
+      );
+    }
+  }
+
+  /** Felled palm slamming the ground: dust ring + low dust wash at the crown's
+   *  landing point (the leaf burst rides emitLeafPuff at the same spot). */
+  emitTreeFallImpact(position: Vec3, groundY: number) {
+    if (!this.smoke || !this.rings) return;
+    this.rings.emit(position.x, groundY + 0.05, position.z, 0.6, 0.5, 3, 0.45, 0, 0xa89a80, false);
+    for (let index = 0; index < 3; index++) {
+      this.smoke.emit(
+        position.x + rand(-0.5, 0.5), position.y + rand(0, 0.3), position.z + rand(-0.5, 0.5),
+        rand(-0.8, 0.8), rand(0.4, 1), rand(-0.8, 0.8),
+        rand(0.55, 0.9), rand(0.3, 0.45), rand(1, 1.7), 0.35, 0, pick(0xa89a80, 0x8a7f6a), 0.3, 1.7, rand(-1.4, 1.4),
+      );
+    }
   }
 
   /** A faint travelling trail marker — pale-blue for chainshot to read distinctly

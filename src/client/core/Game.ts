@@ -2254,6 +2254,41 @@ export class Game {
   private tavernDoors: Array<{ islandId: string; node: THREE.Object3D; open: boolean }> = [];
   /** Deck-level repair chips for the local ship's holed sections. */
   private readonly repairMarkers = new Map<'bow' | 'stern' | 'port' | 'starboard', { sprite: THREE.Sprite; holes: number }>();
+  /** Locally-promoted harvest target: the instanced palm/boulder is swapped for a
+   *  live clone while the axe works it, so strikes shake it and completion plays a
+   *  real breakdown. One slot — the axe only ever works one prop at a time. */
+  private harvestPromoted: {
+    islandId: string;
+    propId: number;
+    type: IslandPropType;
+    node: THREE.Object3D;
+    /** Original instance matrix, restored on a clean demote (chop abandoned). */
+    savedMatrix: THREE.Matrix4;
+    basePos: THREE.Vector3;
+    /** World-space height of the clone (crown offset for palm FX). */
+    height: number;
+    shakeTimer: number;
+    shakeSeed: number;
+  } | null = null;
+  /** Felled palms mid-topple → bounce → sink-and-fade (promoted clones, or
+   *  just-in-time clones when a REMOTE player felled the tree). */
+  private readonly harvestFalls: Array<{
+    node: THREE.Object3D;
+    age: number;
+    baseYaw: number;
+    fallDirX: number;
+    fallDirZ: number;
+    trunkHeight: number;
+    baseLocalY: number;
+    baseWorld: THREE.Vector3;
+    impactFired: boolean;
+    fadeMats: THREE.Material[] | null;
+  }> = [];
+  /** Own copy of the 1.4Hz chop-beat edge detector (audioFrameTriggers keeps its own). */
+  private prevHarvestChopCycle = 1;
+  private readonly tempHarvestVec = new THREE.Vector3();
+  private readonly tempHarvestQuatA = new THREE.Quaternion();
+  private readonly tempHarvestQuatB = new THREE.Quaternion();
   /** Per-player swing-type latch so the cutlass anim keeps ONE denominator per swing. */
   private readonly cutlassSwingKind = new Map<string, 'lunge' | 'swing'>();
   /** bucketFilled edge-detector per player — bail FX fire on the transitions. */
@@ -2627,6 +2662,11 @@ export class Game {
     this.tavernDoors = [];
     // Sprites themselves were disposed with the environment children above.
     this.repairMarkers.clear();
+    // Promoted harvest clones / mid-fall palms lived inside island groups —
+    // already disposed with the environment children above.
+    this.harvestPromoted = null;
+    this.harvestFalls.length = 0;
+    this.prevHarvestChopCycle = 1;
     // Islands still queued from the previous match must not drain into the
     // next one as untracked ghost terrain.
     this.pendingIslandBuilds.length = 0;
@@ -2800,6 +2840,269 @@ export class Game {
         } else if (prop.type === 'mermaid_shrine') {
           // Offering candles at the throne's base.
           this.registerLanternEmitter(group, localPos.x, localPos.y + 0.7, localPos.z, 'campfire');
+        }
+      }
+    }
+  }
+
+  // ── Harvest destruction: promote-on-chop + real breakdown ─────────────────
+  // The instanced palm/boulder under the local axe is swapped for a live GLB
+  // clone so each strike can shake it and completion can topple/burst it for
+  // real instead of the prop silently zero-scaling away.
+
+  /** Nearest choppable palm/boulder within axe range — the SAME nearest-prop
+   *  logic the harvest prompt uses, shared so prompt and promotion agree. */
+  private findHarvestTarget(player: Player): { prop: IslandProp; island: Island } | null {
+    if (!this.state) return null;
+    let bestProp: IslandProp | null = null;
+    let bestIsland: Island | null = null;
+    let bestD: number = HARVEST.RANGE;
+    for (const isl of this.state.islands) {
+      if (!isl.props?.length) continue;
+      if (!isPointInsideIslandFootprint(isl, player.position.x, player.position.z, 8)) continue;
+      for (const prop of isl.props) {
+        if (!prop.type.startsWith('palm_') && !prop.type.startsWith('boulder_')) continue;
+        const d = this.distance2D(player.position.x, player.position.z, prop.x, prop.z);
+        if (d < bestD) {
+          bestD = d;
+          bestProp = prop;
+          bestIsland = isl;
+        }
+      }
+    }
+    return bestProp && bestIsland ? { prop: bestProp, island: bestIsland } : null;
+  }
+
+  /** Live clone of an instanced prop at its exact registry transform, parented
+   *  into the island group (same space the InstancedMesh slots live in). */
+  private buildHarvestClone(island: Island, prop: IslandProp): THREE.Object3D | null {
+    const slot = prop.id !== undefined ? this.islandPropInstances.get(island.id)?.get(prop.id) : undefined;
+    const parent = slot?.inst.parent ?? this.islandMeshes.get(island.id);
+    if (!parent) return null;
+    const node = this.buildPropInstance(
+      prop.type as AssetName,
+      new THREE.Vector3(prop.x - island.position.x, getPropGroundY(island, prop), prop.z - island.position.z),
+      prop.yaw,
+      prop.scale,
+    );
+    if (!node) return null;
+    node.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+    parent.add(node);
+    return node;
+  }
+
+  /** Swap the instance for a live clone: zero the instance slot (keeping its
+   *  matrix for a clean demote) and stand the clone at the same transform. */
+  private promoteHarvestProp(island: Island, prop: IslandProp) {
+    if (prop.id === undefined) return;
+    const slot = this.islandPropInstances.get(island.id)?.get(prop.id);
+    if (!slot) return;
+    const node = this.buildHarvestClone(island, prop);
+    if (!node) return;
+    const savedMatrix = new THREE.Matrix4();
+    slot.inst.getMatrixAt(slot.index, savedMatrix);
+    slot.inst.setMatrixAt(slot.index, ZERO_SCALE_MAT4);
+    slot.inst.instanceMatrix.needsUpdate = true;
+    this.harvestPromoted = {
+      islandId: island.id,
+      propId: prop.id,
+      type: prop.type,
+      node,
+      savedMatrix,
+      basePos: node.position.clone(),
+      height: new THREE.Box3().setFromObject(node).getSize(this.tempHarvestVec).y,
+      shakeTimer: 0,
+      shakeSeed: 0,
+    };
+  }
+
+  /** Chop abandoned before completion: restore the instance matrix, drop the clone. */
+  private demotePromotedHarvestProp() {
+    const promoted = this.harvestPromoted;
+    if (!promoted) return;
+    this.harvestPromoted = null;
+    const slot = this.islandPropInstances.get(promoted.islandId)?.get(promoted.propId);
+    if (slot) {
+      slot.inst.setMatrixAt(slot.index, promoted.savedMatrix);
+      slot.inst.instanceMatrix.needsUpdate = true;
+    }
+    promoted.node.removeFromParent();
+    this.disposeSceneObject(promoted.node);
+  }
+
+  /** Start a felled palm's topple: away from the harvester when known, else a
+   *  random lean. The node animates in updateHarvestDestruction. */
+  private beginPalmTopple(node: THREE.Object3D, byPlayerId: string | undefined) {
+    node.getWorldPosition(this.tempHarvestVec);
+    const baseWorld = this.tempHarvestVec.clone();
+    const harvester = byPlayerId ? this.playersById.get(byPlayerId) : undefined;
+    let dirX = harvester ? baseWorld.x - harvester.position.x : 0;
+    let dirZ = harvester ? baseWorld.z - harvester.position.z : 0;
+    const len = Math.hypot(dirX, dirZ);
+    if (len < 0.3) {
+      const theta = Math.random() * Math.PI * 2;
+      dirX = Math.cos(theta);
+      dirZ = Math.sin(theta);
+    } else {
+      dirX /= len;
+      dirZ /= len;
+    }
+    const height = new THREE.Box3().setFromObject(node).getSize(this.tempHarvestVec).y;
+    this.harvestFalls.push({
+      node,
+      age: 0,
+      baseYaw: node.rotation.y,
+      fallDirX: dirX,
+      fallDirZ: dirZ,
+      trunkHeight: Math.max(1.5, height),
+      baseLocalY: node.position.y,
+      baseWorld,
+      impactFired: false,
+      fadeMats: null,
+    });
+  }
+
+  /** Fade prep for the sink phase: clone every material (the GLB library ones
+   *  are shared) so opacity can animate; clones are disposed with the node. */
+  private makeHarvestNodeFadable(node: THREE.Object3D): THREE.Material[] {
+    const mats: THREE.Material[] = [];
+    node.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!(mesh as { isMesh?: boolean }).isMesh || !mesh.material) return;
+      const swap = (material: THREE.Material) => {
+        const clone = material.clone();
+        clone.transparent = true;
+        mats.push(clone);
+        return clone;
+      };
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(swap) : swap(mesh.material);
+    });
+    return mats;
+  }
+
+  /** Per-frame driver: promote/demote the live chop target, pulse strike FX on
+   *  the 1.4Hz swing beat, and play out palm topples. */
+  private updateHarvestDestruction(dt: number) {
+    const player = this.getLocalPlayer();
+    const chopping = !!player
+      && player.equippedTool === 'axe'
+      && player.state === 'alive'
+      && !player.carryingChestId
+      && this.input.isFiring();
+    const target = chopping && player ? this.findHarvestTarget(player) : null;
+
+    if (!target || target.prop.id === undefined) {
+      this.demotePromotedHarvestProp();
+    } else if (
+      !this.harvestPromoted
+      || this.harvestPromoted.islandId !== target.island.id
+      || this.harvestPromoted.propId !== target.prop.id
+    ) {
+      this.demotePromotedHarvestProp();
+      this.promoteHarvestProp(target.island, target.prop);
+    }
+
+    // Strike beat — same clock as the axe viewmodel + playAxeChop (beat at 0.75).
+    const chopCycle = (this.ocean.getTime() * 1.4) % 1;
+    const struck = chopping && chopCycle >= 0.75 && this.prevHarvestChopCycle < 0.75;
+    this.prevHarvestChopCycle = chopping ? chopCycle : 1;
+
+    const promoted = this.harvestPromoted;
+    if (promoted && player) {
+      const isPalm = promoted.type.startsWith('palm_');
+      if (struck) {
+        promoted.shakeTimer = 0.3;
+        promoted.shakeSeed = Math.random() * Math.PI * 2;
+        // Strike point: trunk/face height, nudged toward the axe wielder.
+        promoted.node.getWorldPosition(this.tempHarvestVec);
+        const toX = player.position.x - this.tempHarvestVec.x;
+        const toZ = player.position.z - this.tempHarvestVec.z;
+        const toLen = Math.hypot(toX, toZ) || 1;
+        this.tempHarvestVec.x += (toX / toLen) * 0.4;
+        this.tempHarvestVec.z += (toZ / toLen) * 0.4;
+        if (isPalm) {
+          this.tempHarvestVec.y += 1.1;
+          this.combatFx.emitWoodChips(this.tempHarvestVec);
+          // Frond shiver at the crown.
+          this.tempHarvestVec.x -= (toX / toLen) * 0.4;
+          this.tempHarvestVec.z -= (toZ / toLen) * 0.4;
+          this.tempHarvestVec.y += promoted.height - 1.4;
+          this.combatFx.emitLeafPuff(this.tempHarvestVec);
+        } else {
+          this.tempHarvestVec.y += Math.min(0.7, promoted.height * 0.5);
+          this.combatFx.emitStoneChips(this.tempHarvestVec);
+        }
+      }
+      // Strike impulse: palms whip at the trunk, boulders jitter in place.
+      const node = promoted.node;
+      if (promoted.shakeTimer > 0) {
+        promoted.shakeTimer = Math.max(0, promoted.shakeTimer - dt);
+        const k = promoted.shakeTimer / 0.3;
+        const wobble = Math.sin((0.3 - promoted.shakeTimer) * 42 + promoted.shakeSeed) * 0.04 * k * k;
+        if (isPalm) {
+          node.rotation.x = wobble * Math.cos(promoted.shakeSeed);
+          node.rotation.z = wobble * Math.sin(promoted.shakeSeed);
+        } else {
+          node.position.x = promoted.basePos.x + wobble * 0.55;
+          node.position.z = promoted.basePos.z + wobble * 0.4;
+        }
+      } else {
+        node.rotation.x = 0;
+        node.rotation.z = 0;
+        node.position.copy(promoted.basePos);
+      }
+    }
+
+    // Palm topple playback: ease-in fall (gravity feel) → damped bounce at
+    // ~85° → sink 1.5m + fade → gone.
+    const TOPPLE = 1.1;
+    const BOUNCE = 0.35;
+    const SINK = 0.7;
+    const FALL_ANGLE = 1.484; // ~85°
+    for (let index = this.harvestFalls.length - 1; index >= 0; index--) {
+      const fall = this.harvestFalls[index];
+      fall.age += dt;
+      const node = fall.node;
+      let tilt: number;
+      if (fall.age < TOPPLE) {
+        const t = fall.age / TOPPLE;
+        tilt = FALL_ANGLE * t * t * (0.4 + 0.6 * t); // accelerating lean
+      } else {
+        const s = fall.age - TOPPLE;
+        tilt = FALL_ANGLE - Math.abs(Math.sin(s * 16)) * 0.06 * Math.exp(-s * 7);
+        if (!fall.impactFired) {
+          fall.impactFired = true;
+          // Crown slams down trunkHeight out along the fall direction.
+          this.tempHarvestVec.set(
+            fall.baseWorld.x + fall.fallDirX * fall.trunkHeight * 0.9,
+            fall.baseWorld.y + 0.3,
+            fall.baseWorld.z + fall.fallDirZ * fall.trunkHeight * 0.9,
+          );
+          this.combatFx.emitLeafPuff(this.tempHarvestVec, 10);
+          this.combatFx.emitTreeFallImpact(this.tempHarvestVec, fall.baseWorld.y);
+          this.audio.playTreeFallThud(this.renderer.camera.position.distanceTo(this.tempHarvestVec));
+        }
+      }
+      // Tip about the base: tilt axis ⊥ fall direction, composed over the yaw.
+      this.tempHarvestVec.set(fall.fallDirZ, 0, -fall.fallDirX);
+      this.tempHarvestQuatA.setFromAxisAngle(this.tempHarvestVec, tilt);
+      this.tempHarvestVec.set(0, 1, 0);
+      this.tempHarvestQuatB.setFromAxisAngle(this.tempHarvestVec, fall.baseYaw);
+      node.quaternion.multiplyQuaternions(this.tempHarvestQuatA, this.tempHarvestQuatB);
+      if (fall.age >= TOPPLE + BOUNCE) {
+        const sinkT = Math.min(1, (fall.age - TOPPLE - BOUNCE) / SINK);
+        if (!fall.fadeMats) fall.fadeMats = this.makeHarvestNodeFadable(node);
+        node.position.y = fall.baseLocalY - 1.5 * sinkT;
+        for (const material of fall.fadeMats) material.opacity = 1 - sinkT;
+        if (sinkT >= 1) {
+          node.removeFromParent();
+          this.disposeSceneObject(node);
+          this.harvestFalls.splice(index, 1);
         }
       }
     }
@@ -3286,8 +3589,28 @@ export class Game {
     };
 
     this.network.onPropRemoved = (payload) => {
-      const event = payload as { islandId?: string; propId?: number; wood?: number; ore?: number };
+      const event = payload as {
+        islandId?: string; propId?: number; propType?: string;
+        byPlayerId?: string; byPlayerName?: string; wood?: number; ore?: number;
+      };
       if (!event.islandId || event.propId === undefined) return;
+      const island = this.state?.islands.find((i) => i.id === event.islandId);
+      // Look the prop up BEFORE the splice below — the breakdown clone and the
+      // pickup text both need its transform.
+      const prop = island?.props?.find((p) => p.id === event.propId);
+      const propType = event.propType ?? prop?.type;
+      // Consume the promoted clone (if the LOCAL axe was working this prop) —
+      // it becomes the breakdown actor; its saved matrix must never restore.
+      let liveNode: THREE.Object3D | null = null;
+      if (this.harvestPromoted
+        && this.harvestPromoted.islandId === event.islandId
+        && this.harvestPromoted.propId === event.propId) {
+        liveNode = this.harvestPromoted.node;
+        liveNode.rotation.x = 0;
+        liveNode.rotation.z = 0;
+        liveNode.position.copy(this.harvestPromoted.basePos);
+        this.harvestPromoted = null;
+      }
       const slot = this.islandPropInstances.get(event.islandId)?.get(event.propId);
       if (slot) {
         // Collapse the instance to zero scale — far cheaper than rebuilding
@@ -3295,19 +3618,44 @@ export class Game {
         slot.inst.setMatrixAt(slot.index, ZERO_SCALE_MAT4);
         slot.inst.instanceMatrix.needsUpdate = true;
       }
+      // Real breakdown — palms topple, boulders burst. Spawn the clone
+      // just-in-time when another player harvested so EVERYONE sees it.
+      if (island && propType?.startsWith('palm_')) {
+        if (!liveNode && prop) liveNode = this.buildHarvestClone(island, prop);
+        if (liveNode) this.beginPalmTopple(liveNode, event.byPlayerId);
+      } else if (island && propType?.startsWith('boulder_')) {
+        if (liveNode) {
+          liveNode.getWorldPosition(this.tempHarvestVec);
+          liveNode.removeFromParent();
+          this.disposeSceneObject(liveNode);
+          this.combatFx.emitRockShatter(this.tempHarvestVec, this.tempHarvestVec.y);
+        } else if (prop) {
+          const groundY = island.position.y + getPropGroundY(island, prop);
+          this.tempHarvestVec.set(prop.x, groundY + 0.4 * prop.scale, prop.z);
+          this.combatFx.emitRockShatter(this.tempHarvestVec, groundY);
+        }
+      }
       // Keep the client's static-world copy honest until the next rare
       // island resync (harvest prompts must not target a removed prop).
-      const island = this.state?.islands.find((i) => i.id === event.islandId);
       if (island?.props) {
         const idx = island.props.findIndex((p) => p.id === event.propId);
         if (idx >= 0) island.props.splice(idx, 1);
       }
+      // Local harvests get a floating pickup number at the stump; everyone
+      // else keeps the feed line.
+      const localHarvest = !!event.byPlayerId && event.byPlayerId === this.localPlayerId;
+      const pickupPos = island && prop
+        ? { x: prop.x, y: island.position.y + getPropGroundY(island, prop) + 1.5, z: prop.z }
+        : null;
       if ((event.wood ?? 0) > 0) {
-        this.pushFeed(`+${event.wood} wood — palm felled`, '#d7b48a');
+        if (localHarvest && pickupPos) this.spawnFloatingDamageIndicator(`+${event.wood} wood`, pickupPos, { pickup: true });
+        else this.pushFeed(`+${event.wood} wood — palm felled`, '#d7b48a');
+        // Trunk CRACK at the fell moment; the ground thud follows at topple impact.
         this.audio.playWoodPlank();
       }
       if ((event.ore ?? 0) > 0) {
-        this.pushFeed(`+${event.ore} ore — boulder cracked`, '#9ec0e5');
+        if (localHarvest && pickupPos) this.spawnFloatingDamageIndicator(`+${event.ore} ore`, pickupPos, { pickup: true });
+        else this.pushFeed(`+${event.ore} ore — boulder cracked`, '#9ec0e5');
         this.audio.playDigStrike();
       }
     };
@@ -3538,13 +3886,19 @@ export class Game {
   private spawnFloatingDamageIndicator(
     text: string,
     position: { x: number; y: number; z: number },
-    options?: { headshot?: boolean; kill?: boolean; ship?: boolean; weaponLabel?: string },
+    options?: { headshot?: boolean; kill?: boolean; ship?: boolean; weaponLabel?: string; pickup?: boolean },
   ) {
     const element = document.createElement('div');
     element.className = 'damage-number';
     if (options?.headshot) element.classList.add('headshot');
     if (options?.kill) element.classList.add('kill');
     if (options?.ship) element.classList.add('ship');
+    if (options?.pickup) {
+      // Harvest pickup variant ('+3 wood') — gold/tan, styled inline so the
+      // shared .damage-number CSS stays combat-only.
+      element.style.color = '#eec981';
+      element.style.textShadow = '0 1px 3px rgba(43,26,5,0.9), 0 0 10px rgba(240,200,106,0.35)';
+    }
     if (options?.weaponLabel && !options.ship) {
       element.innerHTML = `<span class="damage-val">${text}</span><span class="damage-weapon">${options.weaponLabel}</span>`;
     } else {
@@ -3555,8 +3909,8 @@ export class Game {
       element,
       worldPos: new THREE.Vector3(position.x, position.y + 0.2, position.z),
       life: 0,
-      duration: options?.headshot ? 0.72 : 0.62,
-      riseSpeed: options?.ship ? 0.7 : 0.95,
+      duration: options?.pickup ? 1.0 : options?.headshot ? 0.72 : 0.62,
+      riseSpeed: options?.pickup ? 0.8 : options?.ship ? 0.7 : 0.95,
     });
   }
 
@@ -8539,6 +8893,7 @@ export class Game {
     const haloMat = this.stormHalo.material as THREE.MeshBasicMaterial;
     haloMat.opacity = 0.08 + stormW * 0.16;
     this.combatFx.update(dt);
+    this.updateHarvestDestruction(dt);
     this.syncKegs(dt);
     this.slowSceneTimer -= dt;
     if (this.slowSceneTimer <= 0) {
@@ -13033,23 +13388,9 @@ export class Game {
     // Axe harvest — CLIENT-ONLY prompt ('harvest' never rides interactIntent);
     // holding LMB swings the axe and the server does the felling via useItem.
     if (player.equippedTool === 'axe' && player.state === 'alive' && this.state) {
-      let bestProp: IslandProp | null = null;
-      let bestIsland: Island | null = null;
-      let bestD: number = HARVEST.RANGE;
-      for (const isl of this.state.islands) {
-        if (!isl.props?.length) continue;
-        if (!isPointInsideIslandFootprint(isl, player.position.x, player.position.z, 8)) continue;
-        for (const prop of isl.props) {
-          if (!prop.type.startsWith('palm_') && !prop.type.startsWith('boulder_')) continue;
-          const d = this.distance2D(player.position.x, player.position.z, prop.x, prop.z);
-          if (d < bestD) {
-            bestD = d;
-            bestProp = prop;
-            bestIsland = isl;
-          }
-        }
-      }
-      if (bestProp && bestIsland) {
+      const harvestTarget = this.findHarvestTarget(player);
+      if (harvestTarget) {
+        const { prop: bestProp, island: bestIsland } = harvestTarget;
         const isPalm = bestProp.type.startsWith('palm_');
         const propY = getIslandSurfaceY(bestIsland, bestProp.x, bestProp.z);
         this.pushInteractionCandidate(

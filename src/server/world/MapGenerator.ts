@@ -1420,7 +1420,21 @@ export class MapGenerator {
       const tentAngle = theta + Math.PI * 0.72;
       const tentX = camp.x + Math.cos(tentAngle) * 3.1;
       const tentZ = camp.z + Math.sin(tentAngle) * 3.1;
-      addProp('tent_a', tentX, tentZ, Math.atan2(camp.x - tentX, camp.z - tentZ) + Math.PI * 0.5, rr(rng, 0.95, 1.1));
+      // A tent's base can't drape a drop-off: if the terrain under its ~1.3m
+      // footprint falls away more than 1.2m, skip the canvas (the camp keeps
+      // its fire). Consume the scale roll REGARDLESS so the rng stream — and
+      // every later placement — stays bit-identical (fixed-world contract).
+      const tentScale = rr(rng, 0.95, 1.1);
+      let tentLo = Infinity;
+      let tentHi = -Infinity;
+      for (const [ox, oz] of [[0, 0], [1.3, 0], [-1.3, 0], [0, 1.3], [0, -1.3]] as const) {
+        const ty = getIslandSurfaceY(island, tentX + ox, tentZ + oz);
+        tentLo = Math.min(tentLo, ty);
+        tentHi = Math.max(tentHi, ty);
+      }
+      if (tentHi - tentLo <= 1.2) {
+        addProp('tent_a', tentX, tentZ, Math.atan2(camp.x - tentX, camp.z - tentZ) + Math.PI * 0.5, tentScale);
+      }
       addProp('bedroll', camp.x + Math.cos(tentAngle + 0.9) * 1.9, camp.z + Math.sin(tentAngle + 0.9) * 1.9, ra(rng), 1);
       addProp('lantern_post', camp.x + Math.cos(theta) * 1.7, camp.z + Math.sin(theta) * 1.7, ra(rng), 1);
       const clutter = ri(rng, 1, 3);

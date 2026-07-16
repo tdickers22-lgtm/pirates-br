@@ -147,25 +147,35 @@ export function resolvePropCollision(
   return { x, z, pushed };
 }
 
+/** 8-point sampling ring at unit radius (compass + diagonals). */
+const FOOTPRINT_RING: ReadonlyArray<readonly [number, number]> = (() => {
+  const d = Math.SQRT1_2;
+  return [[1, 0], [-1, 0], [0, 1], [0, -1], [d, d], [d, -d], [-d, d], [-d, -d]];
+})();
+
 /** Convenience for placement/tests: world-space Y a prop rests at. The base
- *  seats on the LOWEST terrain sample under its footprint (center + 4 points
- *  at ~70% of the collider radius) minus a small bite — a center-only sample
- *  left rocks and story vignettes hovering wherever the relief-octave terrain
- *  fell away under one edge of the base. */
+ *  seats on the LOWEST terrain sample under its FULL footprint (center + 8
+ *  ring points at the collider radius) minus a small bite — narrower/sparser
+ *  sampling left rocks hovering wherever the terrain fell away under one edge
+ *  of the base (shore drops, relief octaves). Loose boulders sink UNCAPPED:
+ *  a half-buried rock on a slope reads natural, a hovering one never does.
+ *  Built scenes keep the sink cap so one steep edge can't drown the whole
+ *  vignette (their placement stamps a flat pad instead). */
 export function getPropGroundY(island: Island, prop: IslandProp): number {
   const col = PROP_COLLIDERS[prop.type];
   const footprint = col && col.shape !== 'none'
-    ? col.radius * prop.scale * 0.7
+    ? col.radius * prop.scale
     : (SPACING_OVERRIDES[prop.type] ?? 0) * prop.scale * 0.45;
   const center = getIslandSurfaceY(island, prop.x, prop.z);
   let ground = center;
   if (footprint > 0.2) {
-    for (const [ox, oz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    for (const [ox, oz] of FOOTPRINT_RING) {
       ground = Math.min(ground, getIslandSurfaceY(island, prop.x + ox * footprint, prop.z + oz * footprint));
     }
-    // Cap the extra sink so a wide vignette on one steep edge beds its low
-    // side without drowning the whole scene.
-    ground = Math.max(ground, center - 0.35);
+    // Tents may bed deeper into a hillside (canvas skirts hide it); other
+    // built props keep the tight cap so a steep edge can't drown a vignette.
+    const sinkCap = prop.type === 'tent_a' ? 0.65 : 0.35;
+    if (!prop.type.startsWith('boulder_')) ground = Math.max(ground, center - sinkCap);
   }
   return ground - 0.07;
 }
