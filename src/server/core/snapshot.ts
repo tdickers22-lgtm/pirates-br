@@ -178,6 +178,7 @@ export function buildHotSnapshot(state: GameState, serverTime: number): HotSnaps
         armor: roundTo(player.armor ?? 0, 2),
         state: player.state,
         mastClimb: player.mastClimb ?? null,
+        crouching: !!player.crouching,
         onShipId: player.onShipId,
         cutlassCharge: roundTo(player.cutlassCharge, 2),
         downedUntil: roundTo(player.downedUntil, 2),

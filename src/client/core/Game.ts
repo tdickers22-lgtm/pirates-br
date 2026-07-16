@@ -3967,6 +3967,7 @@ export class Game {
       player.velocity = h.velocity;
       player.health = h.health;
       player.armor = h.armor ?? player.armor ?? 0;
+      player.crouching = h.crouching ?? player.crouching ?? false;
       player.state = h.state;
       player.mastClimb = h.mastClimb;
       player.onShipId = h.onShipId;
@@ -10255,7 +10256,7 @@ export class Game {
         Math.sin(pitch),
         Math.cos(yaw) * Math.cos(pitch),
       ).normalize();
-      const eyePos = this.getPlayerRenderPosition(player, 0.02).add(new THREE.Vector3(0, swimming ? PLAYER.HEIGHT * 0.56 : PLAYER.HEIGHT * 0.84, 0));
+      const eyePos = this.getPlayerRenderPosition(player, 0.02).add(new THREE.Vector3(0, swimming ? PLAYER.HEIGHT * 0.56 : player.crouching ? PLAYER.HEIGHT * 0.55 : PLAYER.HEIGHT * 0.84, 0));
       desired = eyePos;
       lookTarget = eyePos
         .clone()
@@ -14077,6 +14078,18 @@ export class Game {
       leftLegPivot.rotation.set(-walkSwing * 1.15, 0, 0);
       rightLegPivot.rotation.set(walkSwing * 1.15, 0, 0);
       torso.rotation.z = walkSwing * 0.08;
+    }
+
+    if (player.crouching) {
+      // Hold-C crouch: everything sinks, knees bend; walk swing stays subtle.
+      const crouchDrop = 0.32;
+      torso.position.y -= crouchDrop;
+      shirt.position.y -= crouchDrop;
+      pelvis.position.y -= crouchDrop * 0.8;
+      head.position.y -= crouchDrop;
+      torso.rotation.x += 0.14;
+      leftLegPivot.rotation.x = -0.95 + walkSwing * 0.4;
+      rightLegPivot.rotation.x = -0.75 - walkSwing * 0.4;
     }
 
     if (cutlassReady && !player.blocking && player.state !== 'swimming' && !player.atHelm && !player.atCannon && !player.atSails

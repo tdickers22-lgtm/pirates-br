@@ -401,6 +401,7 @@ export class Match {
       pocketMeatByType: {},
       pocketOre: 0,
       mastClimb: null,
+      crouching: false,
       armor: 0,
       pocketUseCooldown: 0,
       hasShovel: true,
@@ -1039,6 +1040,7 @@ export class Match {
       jumpPressed: !!input.jumpPressed,
       fire: !!input.fire,
       useItem: !!input.useItem,
+      crouch: !!input.crouch,
       aim: !!input.aim,
       interact: !!input.interact,
       interactHeld: !!input.interactHeld,
@@ -1086,6 +1088,12 @@ export class Match {
 
     player.rotation.x = player.atHelm && ship ? ship.rotation : (cannonAim?.yaw ?? input.yaw);
     player.rotation.y = cannonAim?.pitch ?? input.pitch;
+
+    // Crouch is a plain hold — meaningless in water, on ladders or at stations.
+    player.crouching = !!input.crouch
+      && player.state === 'alive'
+      && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
+      && player.mastClimb === null;
 
     // Weapon switch — edge-triggered so a held slot key doesn't keep "switching" each tick.
     if (input.slot !== null && (input.slot !== player.activeSlot || player.equippedTool !== null)
@@ -1597,7 +1605,7 @@ export class Match {
       } else {
         const len = Math.sqrt(moveX * moveX + moveZ * moveZ) || 1;
         const nx = moveX / len, nz = moveZ / len;
-        const speed = PLAYER.MOVE_SPEED;
+        const speed = PLAYER.MOVE_SPEED * (player.crouching ? 0.55 : 1);
 
         if (moveX !== 0 || moveZ !== 0) {
           const cosY = Math.cos(yaw);
@@ -3216,7 +3224,7 @@ export class Match {
       upperRadius = 0.6;
       lowerRadius = 0.5;
     } else {
-      const headY = islandSkeleton ? 1.92 : PLAYER.HEIGHT * 0.96;
+      const headY = islandSkeleton ? 1.92 : target.crouching ? PLAYER.HEIGHT * 0.66 : PLAYER.HEIGHT * 0.96;
       const upperY = islandSkeleton ? 1.24 : PLAYER.HEIGHT * 0.58;
       const lowerY = islandSkeleton ? 0.62 : PLAYER.HEIGHT * 0.28;
       headCenter = { x: target.position.x, y: target.position.y + headY, z: target.position.z };
@@ -3350,7 +3358,7 @@ export class Match {
     });
     const cameraPos = {
       x: player.position.x,
-      y: player.position.y + (swimming ? PLAYER.HEIGHT * 0.56 : PLAYER.HEIGHT * 0.84),
+      y: player.position.y + (swimming ? PLAYER.HEIGHT * 0.56 : player.crouching ? PLAYER.HEIGHT * 0.55 : PLAYER.HEIGHT * 0.84),
       z: player.position.z,
     };
     const lookTarget = {

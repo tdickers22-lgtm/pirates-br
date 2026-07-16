@@ -197,6 +197,8 @@ export interface Player {
   /** Ladder-climb progress toward the crow's nest (0 deck → 1 nest); null when
    *  not on the ladder. Drives the manual climb + third-person pose. */
   mastClimb: number | null;
+  /** Hold-C crouch: slower move, lower eye + headshot profile. */
+  crouching: boolean;
   /** Iron Cuirass pool (0..PLAYER.MAX_ARMOR): combat damage drains this
    *  before health. Bought from the Gold Hoarder, lost on death. */
   armor: number;
@@ -667,6 +669,7 @@ export interface HotPlayerState {
   armor: number;
   state: PlayerState;
   mastClimb: number | null;
+  crouching: boolean;
   onShipId: string | null;
   cutlassCharge: number;
   downedUntil: number;
@@ -840,6 +843,8 @@ export type InteractIntent =
   | 'cannon';
 
 export interface PlayerInput {
+  /** Hold C — slower, lower profile. */
+  crouch?: boolean;
   seq: number;
   ts: number;
   forward: boolean;

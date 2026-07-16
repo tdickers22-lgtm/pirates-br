@@ -162,6 +162,7 @@ export class InputManager {
       right:    this.keys.has('KeyD') || this.keys.has('ArrowRight'),
       jump:     this.keys.has('Space'),
       jumpPressed: this.jumpPressed,
+      crouch:   this.keys.has('KeyC'),
       fire:     !this.vHeld && this.lockedOrForced && this.mouseButtons.has(0),
       // Set by Game.ts when a use-tool is held (routes LMB to the tool's verb).
       useItem:  false,
