@@ -1,9 +1,9 @@
 import * as THREE from 'three';
-import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS, WORLD } from '../../shared/constants/index.js';
+import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS, WILDLIFE, WORLD } from '../../shared/constants/index.js';
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, IslandProp, IslandPropType, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WeaponInstance, WildlifeAnimal, SeaRock,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getSailRopeStationLocals, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights, geyserEruptionLevel, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getSailRopeStationLocals, getBraceStationLocals, getIslandSurfacePoint, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getIslandCoastWeights, geyserEruptionLevel, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { BIOME_PALETTES, getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
@@ -2979,6 +2979,7 @@ export class Game {
         incoming?: boolean;
         attackerName?: string;
         meat?: number;
+      meatType?: string;
       };
       if (hitPayload.incoming) {
         this.handleIncomingHit(hitPayload);
@@ -3156,6 +3157,12 @@ export class Game {
       }
     };
 
+    this.network.onArmorBought = (payload) => {
+      const event = payload as { price?: number; armor?: number };
+      this.pushFeed(`Iron Cuirass fitted — +${event.armor ?? PLAYER.MAX_ARMOR} armor (${event.price ?? ECONOMY.ARMOR_PRICE}g).`, '#67b9ff');
+      this.audio.playUpgradeBought();
+    };
+
     this.network.onTreasureMap = (payload) => {
       const event = payload as { islandName?: string; chestCount?: number };
       this.pushFeed(
@@ -3280,6 +3287,7 @@ export class Game {
       remainingHull?: number;
       shipHealthMilestone?: 'half' | 'critical' | null;
       meat?: number;
+      meatType?: string;
     },
     ship = false,
   ) {
@@ -3304,7 +3312,10 @@ export class Game {
       );
     }
     if (wildlife && payload.kill && (payload.meat ?? 0) > 0) {
-      this.pushFeed(`Harvested ${payload.meat} meat.`, '#d7b48a');
+      const cut = payload.meatType && payload.meatType in WILDLIFE.MEAT_NAME
+        ? WILDLIFE.MEAT_NAME[payload.meatType as keyof typeof WILDLIFE.MEAT_NAME]
+        : 'meat';
+      this.pushFeed(`Harvested ${cut} ×${payload.meat}.`, '#d7b48a');
     }
     const wid = payload.weaponId;
     const weaponLabel = wid && wid in WEAPONS ? WEAPONS[wid as WeaponId].name : undefined;
@@ -3447,6 +3458,7 @@ export class Game {
       player.rotation = h.rotation;
       player.velocity = h.velocity;
       player.health = h.health;
+      player.armor = h.armor ?? player.armor ?? 0;
       player.state = h.state;
       player.onShipId = h.onShipId;
       player.cutlassCharge = h.cutlassCharge;
@@ -7411,7 +7423,11 @@ export class Game {
     if (equippedTool && equippedTool !== 'spyglass' && aimDown && !this.scopeAimWasDown) {
       this.input.queueWheelSlot(this.toolWheelSlot(equippedTool));
     }
-    this.scopeAimWasDown = aimDown;
+    // While the wheel is open the pointer is UNLOCKED, so isAiming() reads
+    // false even with Shift physically held — on wheel close + relock that
+    // used to register as a fresh aim edge and instantly stow the tool you
+    // JUST equipped (compass bounced straight back to the gun).
+    this.scopeAimWasDown = aimDown || this.input.isSupplyWheelOpen();
 
     const hasForcedInput = this.input.hasPendingActions() || this.pendingInteractFromUi || this.pendingLaunchFromUi;
     if (this.network.isConnected() && (this.inputSendTimer <= 0 || hasForcedInput)) {
@@ -7448,11 +7464,13 @@ export class Game {
         (kind === 'door' ? null : kind);
       input.interactIntent = input.interact
         ? (toServerIntent(currentInteractKind) ?? (uiInteract ? toServerIntent(this.lastInteractKind) : null))
-        // Revive, the sail halyard and hull REPAIR are continuous holds — their
-        // intent must ride every held frame for the server-side work to run.
-        // (Bailing is a discrete press per scoop/heave, so it only fires on the edge.)
+        // Revive, the sail halyard, the yard braces and hull REPAIR are
+        // continuous holds — their intent must ride every held frame for the
+        // server-side work to run. (Bailing is a discrete press per
+        // scoop/heave, so it only fires on the edge.)
         : (input.interactHeld
-          && (currentInteractKind === 'revive' || currentInteractKind === 'sails' || currentInteractKind === 'repair')
+          && (currentInteractKind === 'revive' || currentInteractKind === 'sails'
+            || currentInteractKind === 'brace' || currentInteractKind === 'repair')
           ? currentInteractKind
           : null);
       if (this.pendingLaunchFromUi) {
@@ -9552,7 +9570,7 @@ export class Game {
     this.renderGoldLeaderboard(player.id);
     this.ui.killCount.textContent = String(player.kills);
     this.ui.healthFill.style.width = `${Math.max(0, player.health)}%`;
-    this.ui.armorFill.style.width = '0%';
+    this.ui.armorFill.style.width = `${Math.max(0, Math.min(100, ((player.armor ?? 0) / PLAYER.MAX_ARMOR) * 100))}%`;
 
     if (ship) {
       this.setHull(this.ui.hullBow, this.ui.hullBowTxt, ship.hull.bow);
@@ -10839,7 +10857,7 @@ export class Game {
     const digging =
       !!digChest
       && !!player?.hasShovel
-      && this.input.isInteractHeld()
+      && (this.input.isInteractHeld() || (player?.equippedTool === 'shovel' && this.input.isFiring()))
       && !player?.carryingChestId
       && digChest.buried
       && digChest.digProgress < 1;
@@ -12235,10 +12253,16 @@ export class Game {
         new THREE.Vector3(nearbyGoldHoarder.npc.position.x, nearbyGoldHoarder.npc.position.y + 1.05, nearbyGoldHoarder.npc.position.z),
         4.6,
         0.2,
-        player.carryingChestId ? '[X] Sell Chest' : '[X] Get Treasure Map',
+        player.carryingChestId
+          ? '[X] Sell Chest'
+          : (player.treasureMapIslandId && player.gold >= ECONOMY.ARMOR_PRICE && (player.armor ?? 0) < PLAYER.MAX_ARMOR * 0.5)
+            ? `[X] Buy Iron Cuirass (${ECONOMY.ARMOR_PRICE}g)`
+            : '[X] Get Treasure Map',
         player.carryingChestId
           ? `Gold Hoarder pays toward ${ECONOMY.GOLD_WIN_TARGET}`
-          : 'Gold Hoarder chart marks buried treasure',
+          : (player.treasureMapIslandId && player.gold >= ECONOMY.ARMOR_PRICE && (player.armor ?? 0) < PLAYER.MAX_ARMOR * 0.5)
+            ? `Combat plate — absorbs ${PLAYER.MAX_ARMOR} damage, lost on death`
+            : 'Gold Hoarder chart marks buried treasure',
         'gold_hoarder',
       );
     }
@@ -12400,6 +12424,26 @@ export class Game {
           canvasTorn ? 'Needs planks aboard · crewmates on the rope haul faster' : 'Crewmates on the rope haul faster',
           'sails',
         );
+      }
+
+      if (player.onShipId === ship.id && ship.sailIntegrity >= 0.995) {
+        // Brace rails — the physical station that ANGLES the yard. One
+        // candidate per side; the arbiter picks whichever you're looking at.
+        const stats = SHIP_STATS[ship.type];
+        const trimDeg = Math.round((ship.sailAngle * 180) / Math.PI);
+        for (const brace of getBraceStationLocals(stats)) {
+          const bracePoint = this.getShipWorldPoint(ship, brace.x, brace.z, stats.height + 0.7);
+          this.pushInteractionCandidate(
+            candidates,
+            player,
+            bracePoint,
+            4.0,
+            0.1,
+            `[X] Hold — Brace the Yard to ${brace.dir > 0 ? 'Starboard' : 'Port'} (${trimDeg > 0 ? '+' : ''}${trimDeg}°)`,
+            'Angle the sails to catch the wind',
+            'brace',
+          );
+        }
       }
 
       if (this.isNearCrowNestLadder(player, ship)) {

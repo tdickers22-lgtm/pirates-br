@@ -86,10 +86,13 @@ const LOCO = {
   PROP_BROADPHASE_PAD: 6,
   /** Fall-damage curve on hard ground: harmless below FALL_SAFE_SPEED (m/s of
    *  downward impact), then linear to a per-landing cap. Deep-water entry never
-   *  reaches this path (the swim branch owns it), and is guarded again below. */
-  FALL_SAFE_SPEED: 12,
-  FALL_DAMAGE_PER_SPEED: 7,
-  FALL_DAMAGE_MAX: 85,
+   *  reaches this path (the swim branch owns it), and is guarded again below.
+   *  Tuned lenient (SoT-style): drops under ~11m are free, a 25m cliff stings
+   *  (~30), only huge falls approach the cap — the old 12/7 curve made
+   *  ordinary mountain hops hit like musket balls. */
+  FALL_SAFE_SPEED: 15,
+  FALL_DAMAGE_PER_SPEED: 4.5,
+  FALL_DAMAGE_MAX: 70,
   /** Standing water at least this deep cancels fall damage entirely. */
   FALL_SAFE_WATER_DEPTH: 1.5,
 } as const;
@@ -1368,7 +1371,15 @@ export class PhysicsSystem {
     player.lastDamagedById = proj.ownerId;
     player.lastDamagedAt = t;
     player.lastDamageWasHeadshot = false;
-    player.health -= damage;
+    // Iron Cuirass absorbs combat rounds before flesh (Match owns the same
+    // rule for guns/melee; environmental damage in this file bypasses armor).
+    let healthDamage = damage;
+    if (player.armor && player.armor > 0) {
+      const absorbed = Math.min(player.armor, healthDamage);
+      player.armor -= absorbed;
+      healthDamage -= absorbed;
+    }
+    player.health -= healthDamage;
     this.combatEvents.push({
       type: 'player_hit',
       attackerId: proj.ownerId,

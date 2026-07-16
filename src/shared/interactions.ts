@@ -1,7 +1,7 @@
 import { SHIP_STATS } from './constants/index.js';
 import type { Player, Ship, Vec3 } from './types/index.js';
 import {
-  getSailRopeStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal } from './utils/index.js';
+  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal } from './utils/index.js';
 
 type ShipStats = (typeof SHIP_STATS)[keyof typeof SHIP_STATS];
 type ShipLocalPoint = { x: number; z: number };
@@ -88,6 +88,19 @@ export function isNearSailStation(player: PlayerLike, ship: ShipLike): boolean {
   // Both rail rope stations work the halyard (port and starboard bulwarks).
   return getSailRopeStationLocals(stats).some((station) =>
     Math.abs(local.x - station.x) < 1.3 && Math.abs(local.z - station.z) < 1.6);
+}
+
+/** Which brace station the player is working: -1 = port (yard to port),
+ *  +1 = starboard, 0 = not at a brace rail. */
+export function findBraceStationDir(player: PlayerLike, ship: ShipLike): -1 | 0 | 1 {
+  if (player.onShipId !== ship.id) return 0;
+  const stats = SHIP_STATS[ship.type];
+  if ((player.position as Vec3).y < ship.position.y + stats.height - 0.35) return 0;
+  const local = toShipLocalPoint(player.position, ship);
+  for (const station of getBraceStationLocals(stats)) {
+    if (Math.abs(local.x - station.x) < 1.25 && Math.abs(local.z - station.z) < 1.5) return station.dir;
+  }
+  return 0;
 }
 
 export function isNearAnchor(player: PlayerLike, ship: ShipLike): boolean {

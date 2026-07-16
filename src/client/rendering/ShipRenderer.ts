@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
-import { sampleWind, angleWrap, getSailRopeStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
+import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
 import type { RenderQuality } from './Renderer.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
@@ -25,37 +25,6 @@ function finishCanvasTexture(canvas: HTMLCanvasElement): THREE.CanvasTexture {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
   return tex;
-}
-
-/** Small floating gold chip naming a work station (ANCHOR / SAILS / HELM) so
- *  new crew can FIND them. depthTest stays ON — the retired beacon orbs
- *  taught us depthTest:false glows through hulls and sniper scopes. */
-function makeStationTagSprite(label: string): THREE.Sprite {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 72;
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = 'rgba(8, 11, 16, 0.72)';
-  ctx.strokeStyle = 'rgba(201, 168, 76, 0.9)';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.roundRect(34, 8, 188, 56, 14);
-  ctx.fill();
-  ctx.stroke();
-  ctx.font = '700 30px Georgia, serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#e9c96a';
-  ctx.fillText(label, 128, 38);
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: finishCanvasTexture(canvas),
-    depthTest: true,
-    depthWrite: false,
-    transparent: true,
-  }));
-  sprite.scale.set(1.72, 0.48, 1);
-  sprite.renderOrder = 996;
-  return sprite;
 }
 
 type WoodVariant = 'hull' | 'dark' | 'deck';
@@ -1047,8 +1016,6 @@ interface ShipMeshGroup {
   holdWater: THREE.Mesh | null;
   holdWaterBase: Float32Array | null;
   wake: ShipWake;
-  /** Floating ANCHOR / SAILS / HELM chips — shown close-up, hidden on wrecks. */
-  stationTags: THREE.Sprite[];
 }
 
 export class ShipRenderer {
@@ -2017,8 +1984,6 @@ export class ShipRenderer {
     // galleon's wheel reads bigger than the sloop's instead of one fixed size,
     // and rounded out (higher-segment rim/spokes) since it's the hero helm object
     // right in front of the captain.
-    /** Floating gold chips naming the work stations — distance-gated in update(). */
-    const stationTags: THREE.Sprite[] = [];
     const wheelScale = 0.9 + Math.min(0.42, Math.max(0, (L - 12) / 26));
     const rimR = 0.4 * wheelScale;
     const spokeLen = rimR * 1.42;
@@ -2030,10 +1995,6 @@ export class ShipRenderer {
     const wheelGroup = new THREE.Group();
     wheelGroup.position.set(0, H + qdRise + 0.74 + rimR, -L * 0.315);
     group.add(wheelGroup);
-    const helmTag = makeStationTagSprite('HELM');
-    helmTag.position.set(0, 1.28, 0);
-    wheelGroup.add(helmTag);
-    stationTags.push(helmTag);
 
     const wheelBase = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.13, 12), metalMat);
     wheelBase.rotation.x = Math.PI * 0.5;
@@ -2103,10 +2064,6 @@ export class ShipRenderer {
     // Bow anchor capstan: a clear manual wheel station for dropping / raising anchor.
     const anchorCapstan = new THREE.Group();
     anchorCapstan.position.set(0, H + 0.1, L * 0.42);
-    const anchorTag = makeStationTagSprite('ANCHOR');
-    anchorTag.position.set(0, 1.72, 0);
-    anchorCapstan.add(anchorTag);
-    stationTags.push(anchorTag);
     const capstanPost = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.4, 0.78, 12), darkMat);
     capstanPost.position.y = 0.39;
     capstanPost.castShadow = true;
@@ -2403,34 +2360,55 @@ export class ShipRenderer {
       const ropeStationMat = new THREE.MeshStandardMaterial({ color: 0xb99e6a, roughness: 0.95 });
       const mastHForHalyard = H * (stats.mastCount === 1 ? 3.6 : 3.1);
       for (const ropeStation of getSailRopeStationLocals(stats)) {
+        // Clamp the rack onto the REAL deck at this station — the hull
+        // narrows toward the mast, and the shared approximation can land a
+        // few dm outboard of the loft (racks floated in mid-air off the bow).
+        const deckEdge = Math.abs(hullSurfacePointAt(profile, ropeStation.z, H * 0.9).x);
+        const sx = Math.sign(ropeStation.x);
+        const rackX = sx * Math.min(Math.abs(ropeStation.x), Math.max(0.9, deckEdge - 0.5));
         const rack = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.1, 0.16), markerMat);
-        rack.position.set(ropeStation.x, H + 0.78, ropeStation.z);
+        rack.position.set(rackX, H + 0.78, ropeStation.z);
         rack.castShadow = true;
         group.add(rack);
         for (const pinOff of [-0.3, 0, 0.3]) {
           const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.035, 0.34, 6), brassMat);
-          pin.position.set(ropeStation.x + pinOff, H + 0.68, ropeStation.z);
+          pin.position.set(rackX + pinOff, H + 0.68, ropeStation.z);
           group.add(pin);
         }
         const coil = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.075, 8, 16), ropeStationMat);
         coil.rotation.y = Math.PI * 0.5;
-        coil.position.set(ropeStation.x, H + 0.5, ropeStation.z + 0.02);
+        coil.position.set(rackX, H + 0.5, ropeStation.z + 0.02);
         group.add(coil);
         const coil2 = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.06, 8, 14), ropeStationMat);
         coil2.rotation.y = Math.PI * 0.5;
-        coil2.position.set(ropeStation.x + 0.02, H + 0.46, ropeStation.z - 0.12);
+        coil2.position.set(rackX + 0.02, H + 0.46, ropeStation.z - 0.12);
         group.add(coil2);
-        // The stations now sit abeam the mainmast, so the halyard can run
-        // from the pin rail UP to the yard — the rope you haul visibly leads
-        // to the sail it moves (taut both ends, no floating tail).
+        // The stations sit abeam the mainmast, so the halyard runs from the
+        // pin rail UP to the yard — the rope you haul visibly leads to the
+        // sail it moves (taut both ends, no floating tail, no text tag).
         ropeSegmentPts.push(
-          new THREE.Vector3(ropeStation.x, H + 0.72, ropeStation.z),
-          new THREE.Vector3(ropeStation.x * 0.1, H + mastHForHalyard * 0.55, getMainMastLocalZ(stats)),
+          new THREE.Vector3(rackX, H + 0.72, ropeStation.z),
+          new THREE.Vector3(rackX * 0.1, H + mastHForHalyard * 0.55, getMainMastLocalZ(stats)),
         );
-        const sailTag = makeStationTagSprite('SAILS');
-        sailTag.position.set(ropeStation.x, H + 1.62, ropeStation.z);
-        group.add(sailTag);
-        stationTags.push(sailTag);
+      }
+      // Brace stations: cleat + coil at the quarterdeck rails, brace rope
+      // running up to the yard END on that side — the physical "angle the
+      // sails" handle ([X] hold sweeps the yard toward that rail).
+      for (const brace of getBraceStationLocals(stats)) {
+        const deckEdge = Math.abs(hullSurfacePointAt(profile, brace.z, H * 0.9).x);
+        const bx = Math.sign(brace.x) * Math.min(Math.abs(brace.x), Math.max(0.9, deckEdge - 0.5));
+        const cleat = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 0.14), markerMat);
+        cleat.position.set(bx, H + 0.74, brace.z);
+        cleat.castShadow = true;
+        group.add(cleat);
+        const braceCoil = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.065, 8, 14), ropeStationMat);
+        braceCoil.rotation.y = Math.PI * 0.5;
+        braceCoil.position.set(bx, H + 0.48, brace.z);
+        group.add(braceCoil);
+        ropeSegmentPts.push(
+          new THREE.Vector3(bx, H + 0.7, brace.z),
+          new THREE.Vector3(Math.sign(brace.x) * L * 0.2, H + mastHForHalyard * 0.6, getMainMastLocalZ(stats)),
+        );
       }
     }
 
@@ -2960,7 +2938,6 @@ export class ShipRenderer {
       holdWater,
       holdWaterBase,
       wake,
-      stationTags,
     });
 
     return group;
@@ -3097,10 +3074,6 @@ export class ShipRenderer {
       const detailNear = !cameraPosition || localCrewShip || distSq < detailDistance * detailDistance;
       mesh.detailRoot.visible = detailNear;
       mesh.proxyRoot.visible = !detailNear;
-      // Station chips read close-up (your own ship, or a boarding target) and
-      // vanish on wrecks — they mark work to do, not scenery.
-      const tagsOn = detailNear && !ship.sinking && (localCrewShip || distSq < 30 * 30);
-      for (const tag of mesh.stationTags) tag.visible = tagsOn;
       const extrapolation = Math.min(0.14, snapshotAge + dt * 0.5);
       // Local storm sea-state feeds the SAME boosted Gerstner field the ocean
       // surface uses, so hulls keep riding the visible water inside a storm.

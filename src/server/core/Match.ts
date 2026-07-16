@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, EquippableTool,
+  GameState, InteractIntent, Island, IslandDock, IslandNpc, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
 import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
@@ -41,6 +41,7 @@ import {
   isNearCrowNestLadder as isSharedNearCrowNestLadder,
   isNearHelm as isSharedNearHelm,
   isNearSailStation as isSharedNearSailStation,
+  findBraceStationDir,
   toShipLocalPoint,
   toShipWorldPoint,
 } from '../../shared/interactions.js';
@@ -154,7 +155,7 @@ const ONE_SHOT_MIN_INTERVAL: Partial<Record<OneShotAction, number>> = {
 };
 const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<InteractIntent>([
   'barrel', 'chest', 'board', 'dock', 'mermaid', 'keg_diffuse', 'upgrade',
-  'gold_hoarder', 'stow_chest', 'helm', 'sails',
+  'gold_hoarder', 'stow_chest', 'helm', 'sails', 'brace',
   'crow', 'anchor', 'repair', 'bail', 'revive', 'cannon',
 ]);
 
@@ -218,6 +219,9 @@ export class Match {
    *  ship this tick (teamwork on the rope speeds the haul, capped 2×). */
   private sailHaulTargetByPlayer = new Map<string, number>();
   private sailHaulCrewThisTick = new Map<string, number>();
+  /** Grace window per player so a tool equip can't be instantly undone by the
+   *  wheel's double-fire or the shared wheel/weapon digit keys. */
+  private readonly lastToolEquip = new Map<string, { tool: EquippableTool; at: number }>();
   /** Ship waterLevel at tick start — floodingRate is published NET of bailing. */
   private waterLevelAtTickStart = new Map<string, number>();
 
@@ -386,6 +390,8 @@ export class Match {
       pocketCoconut: 0,
       pocketMango: 0,
       pocketMeat: 0,
+      pocketMeatByType: {},
+      armor: 0,
       pocketUseCooldown: 0,
       hasShovel: true,
       hasSpyglass: true,
@@ -1069,7 +1075,13 @@ export class Match {
       player.activeSlot = input.slot;
       // Drawing/selecting any weapon puts away a held tool (both hands back on
       // the gun) — the quick way to stow the scope/bucket without the wheel.
-      if (player.equippedTool !== null) player.equippedTool = null;
+      // EXCEPT within a grace window of the equip: the wheel digits double as
+      // weapon-slot keys (Digit2 = compass AND slot 1), so a stray slot edge
+      // right after equipping used to stow the tool instantly.
+      const equip = this.lastToolEquip.get(player.id);
+      if (player.equippedTool !== null && !(equip && this.t - equip.at < 0.5)) {
+        player.equippedTool = null;
+      }
     }
     if (input.cannonAmmo && this.consumeOneShot(client, 'cannonAmmo', input.seq)) {
       player.selectedCannonAmmo = input.cannonAmmo;
@@ -1291,6 +1303,25 @@ export class Match {
           : Math.max(0, ship.sailHeight - rate);
       } else {
         this.sailHaulTargetByPlayer.delete(player.id);
+      }
+
+      // ── Braces: HOLD [X] at a quarterdeck brace rail — sweeps the yard
+      // toward that side, the physical home for sail TRIM (helm Q/F remains
+      // the convenience). Canvas must be sound, same as the halyard.
+      if (
+        input.interactIntent === 'brace'
+        && input.interactHeld
+        && !player.atCannon && !player.atHelm && !player.atCrowNest
+        && player.state === 'alive'
+        && ship.sailIntegrity >= 0.995
+      ) {
+        const braceDir = findBraceStationDir(player, ship);
+        if (braceDir !== 0) {
+          ship.sailAngle = Math.max(
+            -SHIP.MAX_SAIL_ANGLE,
+            Math.min(SHIP.MAX_SAIL_ANGLE, ship.sailAngle + braceDir * SHIP.SAIL_TRIM_RATE * 0.75 * dt),
+          );
+        }
       }
 
       if (
@@ -1669,7 +1700,7 @@ export class Match {
       target.lastDamagedById = player.id;
       target.lastDamagedAt = this.t;
       target.lastDamageWasHeadshot = false;
-      target.health -= damage;
+      target.health -= this.absorbWithArmor(target, damage);
       this.awardPlayerHitGold(player.id, damage);
       this.notifyPlayerHit(player.id, {
         targetId: target.id,
@@ -1748,7 +1779,9 @@ export class Match {
   }
 
   private tryDigChest(player: Player, input: PlayerInput, dt: number) {
-    if (!player.nearChestId || !input.interactHeld) return;
+    // HOLD [X] digs, and so does the trigger with the shovel actually in hand.
+    const shovelSwing = !!input.useItem && player.equippedTool === 'shovel';
+    if (!player.nearChestId || !(input.interactHeld || shovelSwing)) return;
     if (!player.hasShovel) return;
     for (const island of this.state.islands) {
       for (const chest of island.chests) {
@@ -1785,7 +1818,17 @@ export class Match {
                 : null;
     if (tool) {
       // Equipping a tool is instant — bypasses the consumable use-cooldown.
-      player.equippedTool = player.equippedTool === tool ? null : tool;
+      // The toggle-to-stow is guarded by a short grace window: the wheel UI
+      // can emit the same slot twice for one gesture (slice click + hover
+      // release), which used to equip-then-instantly-stow the tool.
+      const equip = this.lastToolEquip.get(player.id);
+      if (player.equippedTool === tool) {
+        if (equip && equip.tool === tool && this.t - equip.at < 0.5) return;
+        player.equippedTool = null;
+      } else {
+        player.equippedTool = tool;
+        this.lastToolEquip.set(player.id, { tool, at: this.t });
+      }
       return;
     }
     // Consumables/planks respect the use-cooldown (one fruit at a time).
@@ -1810,7 +1853,20 @@ export class Match {
     } else if (ix === 6) {
       if (player.pocketMeat > 0) {
         player.pocketMeat -= 1;
-        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.MEAT_HEAL);
+        // Eat the BEST typed cut first (pork before gull scraps); meat with
+        // no known animal (barrels, larder pickups) heals the generic value.
+        let heal: number = POCKET.MEAT_HEAL;
+        let best: WildlifeType | null = null;
+        for (const type of Object.keys(player.pocketMeatByType) as WildlifeType[]) {
+          if ((player.pocketMeatByType[type] ?? 0) > 0 && (best === null || WILDLIFE.MEAT_HEAL[type] > WILDLIFE.MEAT_HEAL[best])) {
+            best = type;
+          }
+        }
+        if (best) {
+          player.pocketMeatByType[best] = (player.pocketMeatByType[best] ?? 1) - 1;
+          heal = WILDLIFE.MEAT_HEAL[best];
+        }
+        player.health = Math.min(PLAYER.MAX_HEALTH, player.health + heal);
       } else if (player.pocketMango > 0) {
         player.pocketMango -= 1;
         player.health = Math.min(PLAYER.MAX_HEALTH, player.health + POCKET.FRUIT_HEAL);
@@ -2043,6 +2099,25 @@ export class Match {
     if (player.carryingChestId) {
       return this.sellCarriedChest(player, hoarder.island);
     }
+    // Iron Cuirass — deliberately pricey combat plate, offered once you've
+    // taken a map job and can pay. One plate at a time (no topping a full set).
+    if (
+      player.treasureMapIslandId
+      && player.gold >= ECONOMY.ARMOR_PRICE
+      && player.armor < PLAYER.MAX_ARMOR * 0.5
+    ) {
+      player.gold -= ECONOMY.ARMOR_PRICE;
+      player.armor = PLAYER.MAX_ARMOR;
+      const client = this.clients.get(player.id);
+      if (client) {
+        this.send(client.ws, {
+          type: 'armor_bought',
+          ts: Date.now(),
+          payload: { price: ECONOMY.ARMOR_PRICE, armor: player.armor },
+        });
+      }
+      return true;
+    }
     return this.grantTreasureMap(player, hoarder.island.id);
   }
 
@@ -2180,7 +2255,7 @@ export class Match {
       player.lastDamagedById = attacker?.id ?? null;
       player.lastDamagedAt = attacker ? this.t : null;
       player.lastDamageWasHeadshot = false;
-      player.health -= damage;
+      player.health -= this.absorbWithArmor(player, damage);
       if (attacker) {
         this.notifyPlayerHit(attacker.id, {
           targetId: player.id,
@@ -2674,6 +2749,7 @@ export class Match {
       weaponId: WeaponId;
       targetType: 'wildlife';
       meat?: number;
+      meatType?: WildlifeType;
     }>();
 
     for (const trace of traces) {
@@ -2749,7 +2825,11 @@ export class Match {
         animal.health -= damage;
         const killed = wasAlive && animal.health <= 0;
         const meat = killed ? WILDLIFE.MEAT_DROP[animal.type] : 0;
-        if (meat > 0) shooter.pocketMeat += meat;
+        if (meat > 0) {
+          shooter.pocketMeat += meat;
+          // Typed cut — each animal's meat heals differently when eaten.
+          shooter.pocketMeatByType[animal.type] = (shooter.pocketMeatByType[animal.type] ?? 0) + meat;
+        }
         const position = {
           x: animal.position.x,
           y: animal.position.y + (animal.type === 'gull' ? 0.2 : 0.28),
@@ -2762,7 +2842,10 @@ export class Match {
           existing.remainingHealth = Math.max(0, animal.health);
           existing.position = position;
           existing.weaponId = trace.weaponId;
-          if (meat > 0) existing.meat = (existing.meat ?? 0) + meat;
+          if (meat > 0) {
+            existing.meat = (existing.meat ?? 0) + meat;
+            existing.meatType = animal.type;
+          }
         } else {
           wildlifeHitFeedback.set(animal.id, {
             targetId: animal.id,
@@ -2773,6 +2856,7 @@ export class Match {
             weaponId: trace.weaponId,
             targetType: 'wildlife',
             meat: meat || undefined,
+            meatType: meat > 0 ? animal.type : undefined,
           });
         }
       } else if (usePlayer && playerHit) {
@@ -2784,7 +2868,7 @@ export class Match {
         hit.player.lastDamagedById = shooter.id;
         hit.player.lastDamagedAt = this.t;
         hit.player.lastDamageWasHeadshot = hit.headshot || preserveCritical;
-        hit.player.health -= damage;
+        hit.player.health -= this.absorbWithArmor(hit.player, damage);
         const existing = hitFeedback.get(hit.player.id);
         if (existing) {
           existing.damage += damage;
@@ -3364,6 +3448,12 @@ export class Match {
         if (!ship || player.onShipId !== ship.id) return false;
         return this.isNearSailStation(player, ship);
       }
+      case 'brace': {
+        // Same pattern as the halyard: press confirms, the hold in applyInput
+        // sweeps the yard toward the station's side.
+        if (!ship || player.onShipId !== ship.id) return false;
+        return findBraceStationDir(player, ship) !== 0;
+      }
       case 'revive': {
         // The press just confirms intent; the continuous revive runs off the
         // held-interact block in applyInput. Consume so [X] doesn't fall through.
@@ -3489,7 +3579,7 @@ export class Match {
 
       // Only bite from open water within range (not from inside the shore rock).
       if (!inLand && d < SHARK.BITE_RANGE && s.biteCooldown <= 0) {
-        target.health -= SHARK.BITE_DAMAGE;
+        target.health -= this.absorbWithArmor(target, SHARK.BITE_DAMAGE);
         target.lastDamagedById = null;
         target.lastDamagedAt = null;
         target.lastDamageWasHeadshot = false;
@@ -3691,6 +3781,17 @@ export class Match {
     return { streakReward, killGold };
   }
 
+  /** Iron Cuirass: COMBAT damage (guns, blades, cannon, kegs, shark bites)
+   *  chews through armor before flesh. Environmental attrition — storm,
+   *  drowning, fire, falls — bypasses it: plate doesn't help you breathe.
+   *  Returns the health damage left after absorption. */
+  private absorbWithArmor(target: Player, amount: number): number {
+    if (!target.armor || target.armor <= 0) return amount;
+    const absorbed = Math.min(target.armor, amount);
+    target.armor -= absorbed;
+    return amount - absorbed;
+  }
+
   /** Award the sinker gold + a feed line for the sink itself. The crew is NOT
    *  eliminated — they swim out (startShipSinking's splash loop) and stay in
    *  the fight; losing the ship only costs them their respawn anchor. */
@@ -3730,6 +3831,7 @@ export class Match {
   private applyEliminatedPlayerFields(player: Player) {
     this.dropCarriedChest(player);
     player.health = 0;
+    player.armor = 0;
     player.playerKillStreak = 0;
     player.respawnTimer = 0;
     player.respawnProtectionTimer = 0;
@@ -4007,7 +4109,7 @@ export class Match {
             downedEnemy.lastDamagedById = bot.id;
             downedEnemy.lastDamagedAt = this.t;
             downedEnemy.lastDamageWasHeadshot = false;
-            downedEnemy.health -= WEAPONS.cutlass.damage;
+            downedEnemy.health -= this.absorbWithArmor(downedEnemy, WEAPONS.cutlass.damage);
             this.botFinishCooldownAt.set(bot.id, this.t + WEAPONS.cutlass.reloadTime * 1.6);
           }
         } else if (bot.onShipId === downedEnemy.onShipId) {
@@ -4032,6 +4134,8 @@ export class Match {
   }
 
   private handlePlayerDeath(player: Player, wasDowned = false) {
+    // The cuirass dies with you — armor never survives a respawn.
+    player.armor = 0;
     let killer = player.lastDamagedById
       ? this.getPlayer(player.lastDamagedById)
       : null;
@@ -4306,6 +4410,7 @@ export class Match {
       weaponId?: string;
       targetType?: 'player' | 'shark' | 'wildlife';
       meat?: number;
+      meatType?: WildlifeType;
     },
   ) {
     const client = this.clients.get(attackerId);
@@ -4670,7 +4775,7 @@ export class Match {
               target.lastDamageWasHeadshot = false;
               // 65% weapon damage — skeletons are a real threat now
               const damage = hit.damage * 0.65;
-              target.health -= damage;
+              target.health -= this.absorbWithArmor(target, damage);
               this.notifyIncomingPlayerHit(target.id, {
                 attackerId: skeleton.id,
                 attackerName: skeleton.name,

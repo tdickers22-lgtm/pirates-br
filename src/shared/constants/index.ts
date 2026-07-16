@@ -43,6 +43,10 @@ export const PLAYER = {
   /** Bounty for foundering an enemy ship — the crew is not eliminated by the
    *  sink (they lose their respawn anchor, not the match). */
   SHIP_SINK_GOLD: 400,
+  /** Iron Cuirass pool: combat damage chews through this before health.
+   *  Bought from the Gold Hoarder (pricey), lost on death — deliberately
+   *  a mid/late-game investment, not a lobby pickup. */
+  MAX_ARMOR: 50,
   /** PvE skeletons pay a small bounty, not the full pirate reward. */
   SKELETON_KILL_GOLD: 60,
   HEADSHOT_GOLD_BONUS: 40,
@@ -89,6 +93,9 @@ export const ECONOMY = {
   CHEST_VALUE_MAX: 1450,
   CHEST_SELL_MULTIPLIER: 1.65,
   HOARDER_QUEST_CHEST_BONUS: 1.3,
+  /** Iron Cuirass price at the Gold Hoarder — ~a chest-and-a-half of gold,
+   *  so armor is a real decision against the 9000g win target. */
+  ARMOR_PRICE: 1200,
 } as const;
 
 // ── Ships ────────────────────────────────────────────────────
@@ -300,6 +307,20 @@ export const WILDLIFE = {
     chicken: 1,
     pig: 3,
     gull: 1,
+  },
+  /** Each animal's cut heals differently — pork is the prize, gull is scraps.
+   *  Untyped meat (barrels, ship larder) heals the generic POCKET.MEAT_HEAL. */
+  MEAT_HEAL: {
+    crab: 20,
+    chicken: 26,
+    pig: 42,
+    gull: 18,
+  },
+  MEAT_NAME: {
+    crab: 'crab meat',
+    chicken: 'chicken drumstick',
+    pig: 'pork shank',
+    gull: 'gull cut',
   },
 } as const;
 

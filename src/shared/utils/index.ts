@@ -882,16 +882,30 @@ export function getCrowNestLadderInteractionBounds(stats: { length: number }) {
   };
 }
 
-/** Rail rope stations (SoT braces): the halyard is worked from the bulwark
- *  pin rails ABEAM THE MAINMAST — where the shrouds and halyards physically
- *  come down to the rail — so the station sits where the rigging actually is,
- *  not on an arbitrary aft rail. */
+/** Rail rope stations (halyards): worked from the pin rails ABEAM THE
+ *  MAINMAST — where the shrouds and halyards physically come down. The hull
+ *  narrows toward the mast station, so x is a fraction of the DECK width
+ *  there (~0.9 of half-beam per the loft), not the full aft-rail beam —
+ *  full-beam placement left the racks floating in mid-air off the deck edge. */
 export function getSailRopeStationLocals(stats: { length: number; mastCount: number; width?: number }): Array<{ x: number; z: number }> {
   const halfW = (stats.width ?? 5) * 0.5;
+  const deckHalf = halfW * 0.9;
   const z = getMainMastLocalZ(stats);
   return [
-    { x: halfW - 0.55, z },
-    { x: -(halfW - 0.55), z },
+    { x: deckHalf - 0.6, z },
+    { x: -(deckHalf - 0.6), z },
+  ];
+}
+
+/** Brace stations: the ropes that ANGLE the yard, worked from the rails just
+ *  forward of the quarterdeck. Port station hauls the yard to port, starboard
+ *  to starboard — a physical home for sail trim (the helm's Q/F stays). */
+export function getBraceStationLocals(stats: { length: number; width?: number }): Array<{ x: number; z: number; dir: -1 | 1 }> {
+  const halfW = (stats.width ?? 5) * 0.5;
+  const z = -stats.length * 0.22;
+  return [
+    { x: halfW - 0.6, z, dir: 1 },
+    { x: -(halfW - 0.6), z, dir: -1 },
   ];
 }
 

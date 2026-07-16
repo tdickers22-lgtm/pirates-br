@@ -189,6 +189,12 @@ export interface Player {
   pocketCoconut: number;
   pocketMango: number;
   pocketMeat: number;
+  /** Typed breakdown of pocketMeat by the animal it came from — each cut has
+   *  its own heal value; the aggregate pocketMeat stays the wheel/HUD count. */
+  pocketMeatByType: Partial<Record<WildlifeType, number>>;
+  /** Iron Cuirass pool (0..PLAYER.MAX_ARMOR): combat damage drains this
+   *  before health. Bought from the Gold Hoarder, lost on death. */
+  armor: number;
   /** Seconds remaining before the pocket wheel can be used again (one fruit at a time) */
   pocketUseCooldown: number;
   hasShovel: boolean;
@@ -637,6 +643,7 @@ export interface HotPlayerState {
   rotation: Vec2;
   velocity: Vec3;
   health: number;
+  armor: number;
   state: PlayerState;
   onShipId: string | null;
   cutlassCharge: number;
@@ -698,6 +705,7 @@ export type MsgType =
   | 'barrel_opened'
   | 'ship_upgraded'
   | 'treasure_sold'
+  | 'armor_bought'
   | 'treasure_map'
   | 'trade_request'
   | 'trade_update'
@@ -798,6 +806,7 @@ export type InteractIntent =
   | 'stow_chest'
   | 'helm'
   | 'sails'
+  | 'brace'
   | 'crow'
   | 'anchor'
   | 'repair'

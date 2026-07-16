@@ -161,6 +161,7 @@ export function buildHotSnapshot(state: GameState, serverTime: number): HotSnaps
         rotation: quantizeDeep(player.rotation, 3),
         velocity: quantizeDeep(player.velocity, 2),
         health: roundTo(player.health, 2),
+        armor: roundTo(player.armor ?? 0, 2),
         state: player.state,
         onShipId: player.onShipId,
         cutlassCharge: roundTo(player.cutlassCharge, 2),
