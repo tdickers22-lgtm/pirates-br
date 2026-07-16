@@ -58,6 +58,18 @@ for (let f = 0; f < 5; f++) {
 }
 await mouse(false);
 await wait(900);
+
+// AXE: equip via wheel slot 9, then chop frames.
+await page.evaluate(() => { const g = window.__piratesBR; g.input.queueWheelSlot(9); });
+await wait(700);
+await shot('axe-rest');
+await mouse(true);
+for (let f = 0; f < 6; f++) {
+  await shot(`axe-chop-f${f}`);
+  await wait(110);
+}
+await mouse(false);
+await wait(400);
 const after = await page.evaluate(() => {
   const g = window.__piratesBR;
   const me = g.state.players.find((p) => p.id === g.localPlayerId);

@@ -12527,19 +12527,32 @@ export class Game {
                 ? { p: [0.26 + sway * 0.5, -0.16 + bob, -0.5], r: [0.02 + bob, 0.2, -0.05] } // held up like a lamp
               : tool === 'axe'
                 ? (() => {
-                  // CHOP while swinging (LMB): two-beat raise-and-strike, same
-                  // cycle the audioFrameTriggers axe thunk keys off.
+                  // AXIS NOTE: the hatchet's haft runs along Z (head at the far
+                  // end after the pocket-root π yaw, cutting edge DOWN), so
+                  // rot.x pitches the HEAD up/down — the chop is a clean
+                  // raise-overhead → drive-down-forward on X alone.
                   if (this.input.isFiring()) {
                     const cycle = (time * 1.4) % 1;
-                    const lift = Math.sin(cycle * Math.PI) ** 2;
-                    const strike = Math.max(0, Math.sin((cycle - 0.5) * Math.PI * 2));
+                    // 0→0.55 raise (ease up), 0.55→0.78 STRIKE (fast), →1 recover.
+                    const raise = THREE.MathUtils.smoothstep(cycle, 0, 0.55);
+                    const strike = THREE.MathUtils.smoothstep(cycle, 0.55, 0.78);
+                    const recover = THREE.MathUtils.smoothstep(cycle, 0.8, 1);
+                    // Head stays IN FRAME at the raise apex (−1.3 max pitch);
+                    // the strike drives it down-forward past level.
+                    const headPitch = (-0.55 - raise * 0.75 + strike * 1.55) * (1 - recover) + -0.55 * recover;
                     return {
-                      p: [0.18, -0.28 + lift * 0.2 - strike * 0.14, -0.5 + lift * 0.04 - strike * 0.1],
-                      r: [-0.45 - lift * 0.6 + strike * 0.95, 0.18 + lift * 0.14, 0.4 + strike * 0.08],
+                      p: [
+                        0.3 - strike * 0.14 * (1 - recover),
+                        -0.2 + raise * 0.06 - strike * 0.24 * (1 - recover),
+                        -0.78 - strike * 0.08 * (1 - recover),
+                      ],
+                      r: [headPitch, 0.15 - strike * 0.1, -0.15],
                     };
                   }
-                  // Rest: diagonal across the lower-right like the shovel, shorter.
-                  return { p: [0.24 + sway * 0.4, -0.3 + bob, -0.5], r: [-0.25 + bob, 0.25 + sway * 0.2, 0.62] };
+                  // Rest: head raised up-right, edge forward-down — visibly an
+                  // axe. z −0.78: the haft butt extends ~0.68 toward the camera
+                  // at 1.8 scale, so anything nearer clips the near plane.
+                  return { p: [0.3 + sway * 0.4, -0.2 + bob, -0.78], r: [-0.55 + bob, 0.15 + sway * 0.2, -0.15] };
                 })()
               // Shovel is long — lay it DIAGONALLY across the lower-right (blade
               // low, handle up-left) via a roll about the view axis, so the whole
@@ -12736,12 +12749,14 @@ export class Game {
         {
           // Shared progress helper — denominator locked per swing (basic 0.55s
           // vs lunge 1.05s) so the animation always plays forward from windup.
+          // POSE MATH NOTE: the cutlass mesh is authored blade-UP along +Y
+          // (grip at the origin, tip at y≈1). Every key below was derived from
+          // that axis and verified frame-by-frame — small positive X pitches
+          // point the tip INTO the camera (the old "upside down" read).
           const cooldownProgress = this.getCutlassSwingProgress(player);
           const swingKind = this.cutlassSwingKind.get(player.id) ?? 'swing';
           const charge = this.localCutlassCharge;
           const chargeReadyPulse = charge > 0.96 ? Math.sin(time * 22) * 0.018 : 0;
-          // Swing-start edge: alternate the slash diagonal each basic swing;
-          // a lunge kicks the FOV + camera for the dash rush.
           if (cooldownProgress > 0.001 && this.prevCutlassSwingProgress <= 0.001) {
             if (swingKind === 'lunge') {
               this.cutlassDashKick = 1;
@@ -12753,81 +12768,79 @@ export class Game {
             }
           }
           this.prevCutlassSwingProgress = cooldownProgress;
-          // Keyframe mixer: chained lerps through explicit poses so the
-          // motion READS — cock, cut, follow-through — instead of a mushy
-          // sine wobble around the rest pose.
           const mixPose = (a: number[], b: number[], t: number) => {
             for (let i = 0; i < 6; i++) a[i] += (b[i] - a[i]) * t;
             return a;
           };
-          const REST = [0.31, -0.3, -0.58, -0.02, -0.28, -0.82];
+          // Ready stance: hilt lower-right, blade rising across toward screen
+          // center, tip angled forward — the sword is SEEN at rest.
+          const REST = [0.34, -0.36, -0.6, -0.62, -0.1, 0.28];
           if (cutlassBlocking) {
+            // Guard: blade held horizontally across the view.
             this.localViewWeaponRoot.position.set(
-              0.16 + sway * 0.14,
-              -0.18 + bob * 0.45,
-              -0.48 + travelSwing * 0.08,
+              0.2 + sway * 0.14,
+              -0.2 + bob * 0.45,
+              -0.5 + travelSwing * 0.08,
             );
-            this.localViewWeaponRoot.rotation.set(
-              -0.92,
-              -0.08,
-              -0.18 - strafeTilt * 0.8,
-            );
+            this.localViewWeaponRoot.rotation.set(-0.7, -0.1, -1.35 - strafeTilt * 0.4);
           } else if (cooldownProgress > 0.001 && swingKind === 'lunge') {
-            // DASH THRUST: snap back, RAM the blade out dead-center and hold
-            // it extended through the dash, then sweep back to the hip.
+            // DASH THRUST: pull back, then the blade rams dead-forward
+            // (rot.x −1.62 maps the +Y blade onto the view axis) and holds
+            // extended through the dash before sweeping home.
             const p = cooldownProgress;
             const windup = THREE.MathUtils.smoothstep(p, 0, 0.09);
             const stab = THREE.MathUtils.smoothstep(p, 0.09, 0.24);
             const carry = THREE.MathUtils.smoothstep(p, 0.24, 0.6);
             const recover = THREE.MathUtils.smoothstep(p, 0.6, 1);
-            // Stab keys keep the blade EDGE-ON and the hilt low-right — a
-            // centered flat blade at full extension read as a wall across
-            // the whole lens (first probe caught it).
             const pose = mixPose(
               mixPose(
                 mixPose(
-                  mixPose([...REST], [0.38, -0.36, -0.42, -0.18, -0.42, -1.0], windup),
-                  [0.14, -0.26, -0.92, 0.36, -0.1, -0.45], stab,
+                  mixPose([...REST], [0.45, -0.35, -0.45, -0.55, -0.35, -0.55], windup),
+                  [0.1, -0.22, -0.85, -1.62, 0, -0.08], stab,
                 ),
-                [0.17, -0.28, -0.8, 0.28, -0.12, -0.52], carry,
+                [0.13, -0.25, -0.78, -1.5, -0.04, -0.16], carry,
               ),
               REST, recover,
             );
             this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
             this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.6);
           } else if (cooldownProgress > 0.001) {
-            // SLASH: cock high on one side, CUT hard across the screen to the
-            // other, follow through low, ease home. Alternates diagonals.
-            const s = this.cutlassSlashSide;
+            // SLASH: cock high on one side, tip driven FORWARD through a
+            // cross-screen arc (roll carries the sweep), follow through low
+            // on the other side, ease home. Alternates diagonals.
+            const sSide = this.cutlassSlashSide;
             const p = cooldownProgress;
             const cock = THREE.MathUtils.smoothstep(p, 0, 0.14);
             const cut = THREE.MathUtils.smoothstep(p, 0.14, 0.4);
             const through = THREE.MathUtils.smoothstep(p, 0.4, 0.58);
             const recover = THREE.MathUtils.smoothstep(p, 0.62, 1);
+            // Roll-dominant arc: the blade lies BACK on the cock side, sweeps
+            // visibly ACROSS the screen at the cut (tip strongly lateral, only
+            // moderately forward), and finishes low on the far side. Pitch-
+            // dominant keys foreshorten the blade into an unreadable smudge.
             const pose = mixPose(
               mixPose(
                 mixPose(
-                  mixPose([...REST], [0.31 + 0.17 * s, 0.04, -0.5, -0.88, -0.28 - 0.34 * s, -0.3 * s - 0.35], cock),
-                  [0.31 - 0.55 * s, -0.36, -0.8, 0.5, -0.28 + 0.3 * s, 1.35 * s - 0.6], cut,
+                  mixPose([...REST], [0.28 + 0.24 * sSide, -0.05, -0.6, -0.75, -0.25 * sSide, -1.15 * sSide], cock),
+                  [0.05 - 0.15 * sSide, -0.32, -0.6, -0.7, 0.15 * sSide, 1.1 * sSide], cut,
                 ),
-                [0.31 - 0.62 * s, -0.44, -0.6, 0.32, -0.28 + 0.36 * s, 1.55 * s - 0.62], through,
+                [0.05 - 0.35 * sSide, -0.38, -0.55, -0.55, 0.25 * sSide, 1.75 * sSide], through,
               ),
               REST, recover,
             );
             this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
             this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.8);
           } else {
-            // Rest / charge wind-up: stays LOW-RIGHT and pulls AWAY from the
-            // lens (the old pose parked the brass guard huge in screen center).
+            // Rest / charge wind-up: cocks deeper low-right as the charge builds.
             this.localViewWeaponRoot.position.set(
-              0.31 - charge * 0.07 + sway * 0.24 + travelSwing * 0.42,
-              -0.3 - charge * 0.03 + chargeReadyPulse + bob * 0.75,
-              -0.58 - charge * 0.34,
+              REST[0] + charge * 0.08 + sway * 0.24 + travelSwing * 0.42,
+              REST[1] - charge * 0.06 + chargeReadyPulse + bob * 0.75,
+              REST[2] + charge * 0.1,
             );
             this.localViewWeaponRoot.rotation.set(
-              -0.02 - charge * 0.34,
-              -0.28 - charge * 0.3,
-              -0.82 - charge * 0.52 - strafeTilt * 1.4,
+              REST[3] + charge * 0.12,
+              REST[4] - charge * 0.25,
+              REST[5] - charge * 0.68 - strafeTilt * 1.4,
             );
           }
         }
