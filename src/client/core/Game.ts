@@ -12847,32 +12847,33 @@ export class Game {
                 ? { p: [0.26 + sway * 0.5, -0.16 + bob, -0.5], r: [0.02 + bob, 0.2, -0.05] } // held up like a lamp
               : tool === 'axe'
                 ? (() => {
-                  // AXIS NOTE: the hatchet's haft runs along Z (head at the far
-                  // end after the pocket-root π yaw, cutting edge DOWN), so
-                  // rot.x pitches the HEAD up/down — the chop is a clean
-                  // raise-overhead → drive-down-forward on X alone.
+                  // AXIS NOTE (corrected from a user screenshot of the flipped
+                  // grip): with the haft along Z, POSITIVE rot.x raises the
+                  // HEAD (the far −Z end) — negative pitch lifted the BUTT and
+                  // read as holding the axe by its head, handle in the sky.
                   if (this.input.isFiring()) {
                     const cycle = (time * 1.4) % 1;
-                    // 0→0.55 raise (ease up), 0.55→0.78 STRIKE (fast), →1 recover.
+                    // Fortnite-style harvest swing: cock the head up-right,
+                    // SWEEP it diagonally down-across to the left, recover.
                     const raise = THREE.MathUtils.smoothstep(cycle, 0, 0.55);
                     const strike = THREE.MathUtils.smoothstep(cycle, 0.55, 0.78);
                     const recover = THREE.MathUtils.smoothstep(cycle, 0.8, 1);
-                    // Head stays IN FRAME at the raise apex (−1.3 max pitch);
-                    // the strike drives it down-forward past level.
-                    const headPitch = (-0.55 - raise * 0.75 + strike * 1.55) * (1 - recover) + -0.55 * recover;
+                    const arc = 1 - recover;
                     return {
                       p: [
-                        0.3 - strike * 0.14 * (1 - recover),
-                        -0.2 + raise * 0.06 - strike * 0.24 * (1 - recover),
-                        -0.78 - strike * 0.08 * (1 - recover),
+                        0.3 + (raise * 0.1 - strike * 0.32) * arc,
+                        -0.24 + (raise * 0.08 - strike * 0.2) * arc,
+                        -0.7 - strike * 0.12 * arc,
                       ],
-                      r: [headPitch, 0.15 - strike * 0.1, -0.15],
+                      r: [
+                        0.5 + (raise * 0.6 - strike * 1.5) * arc,
+                        0.15 + (raise * 0.25 - strike * 0.6) * arc,
+                        -0.15 + (-raise * 0.15 + strike * 0.45) * arc,
+                      ],
                     };
                   }
-                  // Rest: head raised up-right, edge forward-down — visibly an
-                  // axe. z −0.78: the haft butt extends ~0.68 toward the camera
-                  // at 1.8 scale, so anything nearer clips the near plane.
-                  return { p: [0.3 + sway * 0.4, -0.2 + bob, -0.78], r: [-0.55 + bob, 0.15 + sway * 0.2, -0.15] };
+                  // Rest: head UP at the far end, hand low on the haft.
+                  return { p: [0.3 + sway * 0.4, -0.24 + bob, -0.7], r: [0.5 + bob, 0.15 + sway * 0.2, -0.15] };
                 })()
               // Shovel is long — lay it DIAGONALLY across the lower-right (blade
               // low, handle up-left) via a roll about the view axis, so the whole
