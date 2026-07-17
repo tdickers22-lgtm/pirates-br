@@ -104,6 +104,33 @@ export interface MatchHumanResult {
   /** 1 = winner, 2 = runner-up, etc. Higher is worse. */
   placement: number;
   isWinner: boolean;
+  shipsSunk?: number;
+  chestsSold?: number;
+  chestsDug?: number;
+  sharksKilled?: number;
+  skeletonsKilled?: number;
+  bestKillStreak?: number;
+  woodChopped?: number;
+  oreMined?: number;
+  damageDealt?: number;
+  headshots?: number;
+  playSeconds?: number;
+}
+
+interface PlayerMatchDeltas {
+  shipsSunk: number;
+  chestsSold: number;
+  chestsDug: number;
+  sharksKilled: number;
+  skeletonsKilled: number;
+  bestKillStreak: number;
+  woodChopped: number;
+  oreMined: number;
+  damageDealt: number;
+  headshots: number;
+  joinedAtSimTime: number;
+  /** Frozen on removeClient so a leaver's playSeconds stops at departure. */
+  leftAtSimTime: number | null;
 }
 
 export interface MatchEndResult {
@@ -184,6 +211,8 @@ export class Match {
   private endResultEmitted = false;
   /** Tracks final stats at the moment of elimination so disconnect-after-elim still has stats. */
   private humanFinalStats: Map<string, { name: string; kills: number; deaths: number; gold: number }> = new Map();
+  /** Per-player lifetime-stat deltas accumulated over the match (bots too — only humans persist). */
+  private matchStatDeltas = new Map<string, PlayerMatchDeltas>();
   /** Order of elimination — earliest first. Used for placement on match end. */
   private eliminationOrder: string[] = [];
 
@@ -487,6 +516,28 @@ export class Match {
       ?? TEAM_COLORS[this.state.ships.length % TEAM_COLORS.length];
   }
 
+  private statsDelta(playerId: string): PlayerMatchDeltas {
+    let delta = this.matchStatDeltas.get(playerId);
+    if (!delta) {
+      delta = {
+        shipsSunk: 0,
+        chestsSold: 0,
+        chestsDug: 0,
+        sharksKilled: 0,
+        skeletonsKilled: 0,
+        bestKillStreak: 0,
+        woodChopped: 0,
+        oreMined: 0,
+        damageDealt: 0,
+        headshots: 0,
+        joinedAtSimTime: this.t,
+        leftAtSimTime: null,
+      };
+      this.matchStatDeltas.set(playerId, delta);
+    }
+    return delta;
+  }
+
   /**
    * Add a human to this match. Lobby owns the WebSocket lifecycle (message routing,
    * close handler) — it MUST call removeClient(playerId) on disconnect or detach.
@@ -529,6 +580,7 @@ export class Match {
     this.state.players.push(player);
     this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
     this.rebuildEntityIndexes();
+    this.statsDelta(playerId); // stamp join sim-time for playSeconds (match start = 0, late join > 0)
 
     const client: ConnectedClient = {
       ws,
@@ -579,6 +631,9 @@ export class Match {
     const client = this.clients.get(playerId);
     if (!client) return;
     this.clients.delete(playerId);
+
+    const leaverDelta = this.matchStatDeltas.get(playerId);
+    if (leaverDelta && leaverDelta.leftAtSimTime === null) leaverDelta.leftAtSimTime = this.t;
 
     const player = this.playersById.get(playerId);
     if (player && !this.humanFinalStats.has(playerId)) {
@@ -668,9 +723,15 @@ export class Match {
       const live = this.playersById.get(playerId);
       const final = this.humanFinalStats.get(playerId);
       const name = live?.name ?? final?.name ?? this.clients.get(playerId)?.name ?? 'Pirate';
-      const kills = live?.kills ?? final?.kills ?? 0;
       const deaths = final?.deaths ?? (live?.state === 'eliminated' ? 1 : 0);
       const gold = live?.gold ?? final?.gold ?? 0;
+      const delta = this.matchStatDeltas.get(playerId);
+      // The LIFETIME kills stat is PvP only: the in-match scoreboard counts
+      // skeletons too, but persisting that would let the front-page K/D be
+      // farmed off endlessly-respawning island waves (skeletonsKilled is its
+      // own panel stat).
+      const scoreboardKills = live?.kills ?? final?.kills ?? 0;
+      const kills = Math.max(0, scoreboardKills - (delta?.skeletonsKilled ?? 0));
       placements.push({
         playerId,
         name,
@@ -679,6 +740,19 @@ export class Match {
         gold,
         placement: placements.length + 1,
         isWinner,
+        ...(delta ? {
+          shipsSunk: delta.shipsSunk,
+          chestsSold: delta.chestsSold,
+          chestsDug: delta.chestsDug,
+          sharksKilled: delta.sharksKilled,
+          skeletonsKilled: delta.skeletonsKilled,
+          bestKillStreak: delta.bestKillStreak,
+          woodChopped: delta.woodChopped,
+          oreMined: delta.oreMined,
+          damageDealt: delta.damageDealt,
+          headshots: delta.headshots,
+          playSeconds: Math.max(0, (delta.leftAtSimTime ?? this.t) - delta.joinedAtSimTime),
+        } : {}),
       });
     };
 
@@ -1890,6 +1964,7 @@ export class Match {
         chest.digProgress = Math.min(1, chest.digProgress + POCKET.DIG_RATE * dt);
         if (chest.digProgress >= 1) {
           chest.position.y = getIslandSurfaceY(island, chest.position.x, chest.position.z) + 0.32;
+          this.statsDelta(player.id).chestsDug += 1;
         }
         return;
       }
@@ -1949,9 +2024,11 @@ export class Match {
     if (isPalm) {
       wood = randInt(HARVEST.WOOD_PER_TREE_MIN, HARVEST.WOOD_PER_TREE_MAX);
       player.pocketWood += wood;
+      this.statsDelta(player.id).woodChopped += wood;
     } else {
       ore = randInt(HARVEST.ORE_PER_BOULDER_MIN, HARVEST.ORE_PER_BOULDER_MAX);
       player.pocketOre += ore;
+      this.statsDelta(player.id).oreMined += ore;
     }
     this.broadcast({
       type: 'prop_removed',
@@ -2315,6 +2392,7 @@ export class Match {
       * (fromActiveMap ? ECONOMY.HOARDER_QUEST_CHEST_BONUS : 1),
     );
     player.gold += saleValue;
+    this.statsDelta(player.id).chestsSold += 1;
     this.broadcast({
       type: 'treasure_sold',
       ts: Date.now(),
@@ -3150,6 +3228,9 @@ export class Match {
       });
     }
     for (const feedback of sharkHitFeedback.values()) {
+      // One entry per shark per volley, and dead sharks can't be re-hit
+      // (findClosestSharkHit skips health<=0) — so this counts each kill once.
+      if (feedback.kill) this.statsDelta(shooter.id).sharksKilled += 1;
       this.notifyPlayerHit(shooter.id, feedback);
     }
     for (const feedback of wildlifeHitFeedback.values()) {
@@ -4060,6 +4141,8 @@ export class Match {
 
   private awardPlayerKillStreak(killer: Player): { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null {
     killer.playerKillStreak += 1;
+    const delta = this.statsDelta(killer.id);
+    if (killer.playerKillStreak > delta.bestKillStreak) delta.bestKillStreak = killer.playerKillStreak;
     if (killer.playerKillStreak === 5) {
       killer.superCannonballs += 1;
       return { type: 'super_cannonball', label: 'Super cannonball ready' };
@@ -4085,6 +4168,7 @@ export class Match {
       streakReward = this.awardPlayerKillStreak(killer);
     }
     const isSkeleton = victim.isBot && this.skeletonHomes.has(victim.id);
+    if (isSkeleton) this.statsDelta(killer.id).skeletonsKilled += 1;
     const killGold = isSkeleton ? PLAYER.SKELETON_KILL_GOLD : PLAYER.KILL_GOLD_REWARD;
     killer.gold += killGold;
     this.checkWinCondition();
@@ -4107,6 +4191,7 @@ export class Match {
    *  the fight; losing the ship only costs them their respawn anchor. */
   private creditShipSink(ship: Ship, killer: Player) {
     killer.gold += PLAYER.SHIP_SINK_GOLD;
+    this.statsDelta(killer.id).shipsSunk += 1;
     const owner = this.state.players.find((p) => p.id === ship.ownerId);
     this.broadcast({
       type: 'kill_event',
@@ -4725,6 +4810,14 @@ export class Match {
       blocked?: boolean;
     },
   ) {
+    // Single per-hit confirm channel — melee, hitscan (merged per volley), keg
+    // and projectile paths each call this once per landed hit, so player-target
+    // damage/headshot stats accumulate here without double counting.
+    if ((payload.targetType ?? 'player') === 'player' && payload.targetId !== attackerId && payload.damage > 0) {
+      const delta = this.statsDelta(attackerId);
+      delta.damageDealt += payload.damage;
+      if (payload.headshot) delta.headshots += 1;
+    }
     const client = this.clients.get(attackerId);
     if (!client) return;
     this.send(client.ws, {

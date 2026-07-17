@@ -59,6 +59,11 @@ export class MenuController {
   private statsDeaths!: HTMLElement;
   private statsGold!: HTMLElement;
   private statsBest!: HTMLElement;
+  private statsBtn!: HTMLButtonElement;
+  private statsBackdrop!: HTMLElement;
+  private statsPanelName!: HTMLElement;
+  private statsPanelBody!: HTMLElement;
+  private statsCloseBtn!: HTMLButtonElement;
 
   private lobbyCode!: HTMLElement;
   private lobbyCopyBtn!: HTMLButtonElement;
@@ -81,6 +86,7 @@ export class MenuController {
   private endmatchReturnBtn!: HTMLButtonElement;
   private endmatchPlayAgainBtn!: HTMLButtonElement;
 
+  private latestStats: PlayerStatsRecord | null = null;
   private nameSubmitted = false;
   private statusTimer: number | null = null;
   private matchStartWatchdog: number | null = null;
@@ -119,6 +125,11 @@ export class MenuController {
     this.statsDeaths = this.must('stats-deaths');
     this.statsGold = this.must('stats-gold');
     this.statsBest = this.must('stats-best');
+    this.statsBtn = this.must<HTMLButtonElement>('menu-stats-btn');
+    this.statsBackdrop = this.must('stats-backdrop');
+    this.statsPanelName = this.must('stats-panel-name');
+    this.statsPanelBody = this.must('stats-panel-body');
+    this.statsCloseBtn = this.must<HTMLButtonElement>('stats-close-btn');
 
     this.lobbyCode = this.must('lobby-code');
     this.lobbyCopyBtn = this.must<HTMLButtonElement>('lobby-copy-btn');
@@ -195,6 +206,10 @@ export class MenuController {
 
   hide(): void {
     this.screen.classList.remove('visible');
+    // The stats modal is a top-level overlay ABOVE the game HUD — a match
+    // starting while it's open (queue pops mid-browse) would leave it covering
+    // the spawn. Menu gone ⇒ modal gone.
+    this.closeStatsPanel();
     // Drop focus from any menu input/button so keydown WASD lands on document, not the input/button.
     const active = document.activeElement;
     if (active instanceof HTMLElement) active.blur();
@@ -359,6 +374,16 @@ export class MenuController {
     this.queueCancelBtn.addEventListener('click', () => {
       this.network.queueLeave();
       this.showPanel('main');
+    });
+
+    // Lifetime stats modal
+    this.statsBtn.addEventListener('click', () => this.openStatsPanel());
+    this.statsCloseBtn.addEventListener('click', () => this.closeStatsPanel());
+    this.statsBackdrop.addEventListener('click', (e) => {
+      if (e.target === this.statsBackdrop) this.closeStatsPanel();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.statsBackdrop.classList.contains('visible')) this.closeStatsPanel();
     });
 
     // Settings
@@ -560,12 +585,70 @@ export class MenuController {
   }
 
   private applyStats(stats: PlayerStatsRecord): void {
+    this.latestStats = stats;
     this.statsMatches.textContent = String(stats.matchesPlayed);
     this.statsWins.textContent = String(stats.wins);
     this.statsKills.textContent = String(stats.kills);
     this.statsDeaths.textContent = String(stats.deaths);
     this.statsGold.textContent = String(stats.totalGold);
     this.statsBest.textContent = stats.bestPlacement > 0 ? `#${stats.bestPlacement}` : '—';
+    this.statsBtn.style.display = '';
+    if (this.statsBackdrop.classList.contains('visible')) this.renderStatsPanel();
+  }
+
+  private openStatsPanel(): void {
+    if (!this.latestStats) return;
+    this.renderStatsPanel();
+    this.statsBackdrop.classList.add('visible');
+  }
+
+  private closeStatsPanel(): void {
+    this.statsBackdrop.classList.remove('visible');
+  }
+
+  private renderStatsPanel(): void {
+    const s = this.latestStats;
+    if (!s) return;
+    // Records written before the lifetime-stats expansion lack the new fields.
+    const n = (v: number | undefined) => v ?? 0;
+    this.statsPanelName.textContent = s.name || this.nameInput.value.trim() || 'Unknown Pirate';
+    const matches = n(s.matchesPlayed);
+    const winRate = matches > 0 ? `${Math.round((n(s.wins) / matches) * 100)}%` : '—';
+    const kd = (n(s.kills) / Math.max(1, n(s.deaths))).toFixed(2);
+    const section = (title: string, rows: Array<[string, string | number]>) => `
+      <div class="stats-section">
+        <h3>${title}</h3>
+        ${rows.map(([label, val]) => `<div class="stats-line"><span>${label}</span><span class="val">${val}</span></div>`).join('')}
+      </div>`;
+    this.statsPanelBody.innerHTML =
+      section('Voyages', [
+        ['Matches', matches],
+        ['Wins', n(s.wins)],
+        ['Win rate', winRate],
+        ['Best placement', n(s.bestPlacement) > 0 ? `#${s.bestPlacement}` : '—'],
+      ]) +
+      section('Combat', [
+        ['Kills', n(s.kills)],
+        ['Deaths', n(s.deaths)],
+        ['K/D', kd],
+        ['Headshots', n(s.headshots)],
+        ['Best kill streak', n(s.bestKillStreak)],
+        ['Damage dealt', Math.round(n(s.damageDealt))],
+      ]) +
+      section('Treasure', [
+        ['Total gold', n(s.totalGold)],
+        ['Best match gold', n(s.bestMatchGold)],
+        ['Chests sold', n(s.chestsSold)],
+        ['Chests dug', n(s.chestsDug)],
+      ]) +
+      section('Island Life', [
+        ['Wood chopped', n(s.woodChopped)],
+        ['Ore mined', n(s.oreMined)],
+        ['Sharks killed', n(s.sharksKilled)],
+        ['Skeletons killed', n(s.skeletonsKilled)],
+      ]) +
+      section('Naval', [['Ships sunk', n(s.shipsSunk)]]) +
+      section('Time', [['Time played', formatPlayTime(n(s.playSeconds))]]);
   }
 
   private refreshButtonStates(): void {
@@ -644,6 +727,13 @@ export class MenuController {
 
 function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v));
+}
+
+function formatPlayTime(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
 function escapeHtml(s: string): string {

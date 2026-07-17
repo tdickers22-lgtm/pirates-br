@@ -553,6 +553,17 @@ export class LobbyServer {
         gold: r.gold,
         placement: r.placement,
         isWinner: r.isWinner,
+        shipsSunk: r.shipsSunk,
+        chestsSold: r.chestsSold,
+        chestsDug: r.chestsDug,
+        sharksKilled: r.sharksKilled,
+        skeletonsKilled: r.skeletonsKilled,
+        bestKillStreak: r.bestKillStreak,
+        woodChopped: r.woodChopped,
+        oreMined: r.oreMined,
+        damageDealt: r.damageDealt,
+        headshots: r.headshots,
+        playSeconds: r.playSeconds,
       });
       const clientSession = this.findClientByPlayerId(r.playerId);
       if (clientSession) {

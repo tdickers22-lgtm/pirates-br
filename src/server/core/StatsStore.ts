@@ -15,7 +15,40 @@ const EMPTY_STATS = (name: string): PlayerStatsRecord => ({
   matchesPlayed: 0,
   totalGold: 0,
   bestPlacement: 0,
+  shipsSunk: 0,
+  chestsSold: 0,
+  chestsDug: 0,
+  sharksKilled: 0,
+  skeletonsKilled: 0,
+  bestKillStreak: 0,
+  bestMatchGold: 0,
+  woodChopped: 0,
+  oreMined: 0,
+  damageDealt: 0,
+  headshots: 0,
+  playSeconds: 0,
 });
+
+/** Per-match deltas rolled into the lifetime record at match end. */
+export interface MatchStatDeltas {
+  name: string;
+  kills: number;
+  deaths: number;
+  gold: number;
+  placement: number; // 1 = winner
+  isWinner: boolean;
+  shipsSunk?: number;
+  chestsSold?: number;
+  chestsDug?: number;
+  sharksKilled?: number;
+  skeletonsKilled?: number;
+  bestKillStreak?: number;
+  woodChopped?: number;
+  oreMined?: number;
+  damageDealt?: number;
+  headshots?: number;
+  playSeconds?: number;
+}
 
 /**
  * Tiny JSON-backed key/value store keyed by lowercased player name.
@@ -48,7 +81,8 @@ export class StatsStore {
 
   get(name: string): PlayerStatsRecord | null {
     const key = this.keyFor(name);
-    return this.data.players[key] ?? null;
+    const rec = this.data.players[key];
+    return rec ? this.normalize(rec) : null;
   }
 
   /** Get-or-create. Used so a freshly-named player gets a baseline record. */
@@ -62,17 +96,22 @@ export class StatsStore {
       this.data.players[key].name = name;
       this.markDirty();
     }
-    return this.data.players[key];
+    return this.normalize(this.data.players[key]);
   }
 
-  applyMatchResult(input: {
-    name: string;
-    kills: number;
-    deaths: number;
-    gold: number;
-    placement: number; // 1 = winner
-    isWinner: boolean;
-  }): PlayerStatsRecord {
+  /** Records written before the stats-panel fields existed load without them —
+   *  fill zeros IN PLACE so accumulation `+=` never touches undefined. */
+  private normalize(rec: PlayerStatsRecord): PlayerStatsRecord {
+    const defaults = EMPTY_STATS(rec.name);
+    for (const [field, zero] of Object.entries(defaults)) {
+      if (typeof zero === 'number' && typeof (rec as unknown as Record<string, unknown>)[field] !== 'number') {
+        (rec as unknown as Record<string, number>)[field] = zero;
+      }
+    }
+    return rec;
+  }
+
+  applyMatchResult(input: MatchStatDeltas): PlayerStatsRecord {
     const rec = this.ensure(input.name);
     rec.kills += input.kills;
     rec.deaths += input.deaths;
@@ -82,6 +121,18 @@ export class StatsStore {
     if (input.placement > 0 && (rec.bestPlacement === 0 || input.placement < rec.bestPlacement)) {
       rec.bestPlacement = input.placement;
     }
+    rec.shipsSunk += input.shipsSunk ?? 0;
+    rec.chestsSold += input.chestsSold ?? 0;
+    rec.chestsDug += input.chestsDug ?? 0;
+    rec.sharksKilled += input.sharksKilled ?? 0;
+    rec.skeletonsKilled += input.skeletonsKilled ?? 0;
+    rec.woodChopped += input.woodChopped ?? 0;
+    rec.oreMined += input.oreMined ?? 0;
+    rec.damageDealt += Math.round(input.damageDealt ?? 0);
+    rec.headshots += input.headshots ?? 0;
+    rec.playSeconds += Math.max(0, Math.round(input.playSeconds ?? 0));
+    if ((input.bestKillStreak ?? 0) > rec.bestKillStreak) rec.bestKillStreak = input.bestKillStreak ?? 0;
+    if (input.gold > rec.bestMatchGold) rec.bestMatchGold = input.gold;
     this.markDirty();
     return rec;
   }

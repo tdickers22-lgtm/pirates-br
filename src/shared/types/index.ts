@@ -802,6 +802,27 @@ export interface PlayerStatsRecord {
   matchesPlayed: number;
   totalGold: number;
   bestPlacement: number;
+  // ── Lifetime accumulators (front-page STATS panel) ──
+  /** Enemy ships whose sinking you were credited for. */
+  shipsSunk: number;
+  /** Treasure chests sold to a Gold Hoarder. */
+  chestsSold: number;
+  /** Buried chests fully dug up. */
+  chestsDug: number;
+  sharksKilled: number;
+  skeletonsKilled: number;
+  /** Highest single-match kill streak. */
+  bestKillStreak: number;
+  /** Most gold banked in one match. */
+  bestMatchGold: number;
+  woodChopped: number;
+  oreMined: number;
+  /** Damage dealt to enemy pirates — the raw hit numbers players see on
+   *  screen (pre-armor, overkill included), summed for the lifetime. */
+  damageDealt: number;
+  headshots: number;
+  /** Total seconds in matches. */
+  playSeconds: number;
 }
 
 export interface WelcomePayload {
