@@ -154,6 +154,10 @@ export interface Player {
   gold: number;
   carryingChestId: string | null;
   treasureMapIslandId: string | null;
+  /** Every quest map currently held (island ids, oldest first). The ACTIVE one
+   *  (treasureMapIslandId) earns the hoarder sale bonus; the map wheel page
+   *  flips between these like Sea of Thieves' quest radial. */
+  questMaps: string[];
   swimTimer: number;   // seconds in open water
   atCannon: boolean;
   atHelm: boolean;
@@ -733,6 +737,7 @@ export type MsgType =
   | 'ship_upgraded'
   | 'treasure_sold'
   | 'armor_bought'
+  | 'ammo_refilled'
   | 'prop_removed'
   | 'treasure_map'
   | 'trade_request'
@@ -840,7 +845,8 @@ export type InteractIntent =
   | 'repair'
   | 'bail'
   | 'revive'
-  | 'cannon';
+  | 'cannon'
+  | 'ammo';
 
 export interface PlayerInput {
   /** Hold C — slower, lower profile. */
@@ -882,6 +888,8 @@ export interface PlayerInput {
   barrelTakeAll: boolean;
   /** When set, interact (X) must resolve to this action if valid; otherwise no-op (bots send null). */
   interactIntent?: InteractIntent | null;
+  /** One-shot: equip this held quest map (island id) as the active one. */
+  selectMap?: string | null;
 }
 
 export interface TradeActionPayload {

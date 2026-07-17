@@ -941,9 +941,12 @@ export function getSailRopeStationLocals(stats: { length: number; mastCount: num
  *  aft cannons. */
 export function getBraceStationLocals(stats: { length: number; width: number; mastCount?: number }): Array<{ x: number; z: number; dir: -1 | 1 }> {
   const halfW = stats.width * 0.5;
-  const multi = (stats.mastCount ?? 1) > 1;
-  const z = multi ? -stats.length * 0.2 : -stats.length * 0.22;
-  const x = multi ? Math.min(1.1, stats.width * 0.16) : halfW - 0.6;
+  const mastCount = stats.mastCount ?? 1;
+  const multi = mastCount > 1;
+  // Multi-masters: inboard columns x-clear of the centreline ammo chest, z
+  // threaded between the aft gun rows, the helm furniture and the binnacle.
+  const z = mastCount === 3 ? -stats.length * 0.24 : multi ? -stats.length * 0.2 : -stats.length * 0.22;
+  const x = multi ? 1.3 : halfW - 0.6;
   return [
     { x, z, dir: 1 },
     { x: -x, z, dir: -1 },

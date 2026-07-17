@@ -3,7 +3,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import type { Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
 import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
-import { getCannonDeckLocalPosition } from '../../shared/interactions.js';
+import { getAmmoCrateLocal, getCannonDeckLocalPosition } from '../../shared/interactions.js';
 import type { RenderQuality } from './Renderer.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
@@ -2965,6 +2965,45 @@ export class ShipRenderer {
     ) ?? -L * 0.12);
     for (const side of [-1, 1] as const) {
       addSupplyBarrel('shot', side * shotX, shotZ);
+    }
+
+    // ── Ammo chest (SoT): centreline aft of the companionway — [X] refills
+    // every firearm. The spot comes from shared getAmmoCrateLocal so the
+    // prompt zone and the visible crate can never drift apart.
+    {
+      const crateSpot = getAmmoCrateLocal(stats);
+      const crate = new THREE.Group();
+      crate.name = 'ammo-crate';
+      const crateOak = new THREE.MeshStandardMaterial({ color: 0x453019, roughness: 0.9 });
+      const crateIron = new THREE.MeshStandardMaterial({ color: 0x23232a, roughness: 0.5, metalness: 0.65 });
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.5, 0.62), crateOak);
+      body.position.y = 0.25;
+      body.castShadow = true;
+      crate.add(body);
+      for (const bx of [-0.34, 0.34]) {
+        const band = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.52, 0.65), crateIron);
+        band.position.set(bx, 0.25, 0);
+        crate.add(band);
+      }
+      // Lid propped open against the aft face, balls visible inside.
+      const lid = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.05, 0.62), crateOak);
+      lid.position.set(0, 0.62, -0.36);
+      lid.rotation.x = -Math.PI * 0.42;
+      crate.add(lid);
+      const ballMat = new THREE.MeshStandardMaterial({ color: 0x14141a, roughness: 0.35, metalness: 0.6 });
+      for (const [bx, bz] of [[-0.2, 0.08], [0.05, -0.1], [0.26, 0.1], [0.02, 0.14]] as const) {
+        const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8), ballMat);
+        ball.position.set(bx, 0.52, bz);
+        crate.add(ball);
+      }
+      const horn = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.09, 0.3, 8), crateIron);
+      horn.position.set(-0.32, 0.56, -0.18);
+      horn.rotation.z = Math.PI * 0.4;
+      crate.add(horn);
+      mergeStaticMeshes(crate, NO_MERGE_EXCLUDE);
+      crate.position.set(crateSpot.x, H + 0.1, crateSpot.z);
+      group.add(crate);
+      deckStations.push({ x: crateSpot.x, z: crateSpot.z, r: 1.15 });
     }
 
     // Decor barrels (unlabeled, merge into the static bake): a water barrel at

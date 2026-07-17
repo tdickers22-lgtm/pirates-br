@@ -410,6 +410,18 @@ export class SoundEngine {
     this.playTone(now, 1980, 1320, 0.08, 0.08, 'square');
   }
 
+  /** Parried swing — steel-on-steel CLANG (bright strike + long metallic ring).
+   *  This is the audible proof the guard worked, for both fencers. */
+  playSwordBlock(): void {
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.playNoise(now, 0.05, 5200, 0.9, 0.24, 'highpass');   // impact snap
+    this.playTone(now, 2350, 2280, 0.34, 0.16, 'triangle');   // main ring
+    this.playTone(now + 0.01, 3140, 2960, 0.28, 0.09, 'sine'); // inharmonic shimmer
+    this.playTone(now, 620, 400, 0.1, 0.1, 'square');         // body of the hit
+  }
+
   // ── Cannon (fired from a ship cannon) — used for player-launch confirmation ──
   /**
    * @param distance metres from the listener. 0 = on top of you (unchanged local feel).

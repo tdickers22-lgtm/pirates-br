@@ -1,7 +1,7 @@
 import { SHIP_STATS } from './constants/index.js';
 import type { Player, Ship, Vec3 } from './types/index.js';
 import {
-  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipDeckWalkHalfWidth } from './utils/index.js';
+  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckWalkHalfWidth } from './utils/index.js';
 
 type ShipStats = (typeof SHIP_STATS)[keyof typeof SHIP_STATS];
 type ShipLocalPoint = { x: number; z: number };
@@ -122,6 +122,21 @@ export function isNearAnchor(player: PlayerLike, ship: ShipLike): boolean {
   const local = toShipLocalPoint(player.position, ship);
   const anchor = getAnchorControlLocal(SHIP_STATS[ship.type]);
   return Math.abs(local.x - anchor.x) < 1.25 && Math.abs(local.z - anchor.z) < 1.3;
+}
+
+/** Ammo chest (Sea-of-Thieves style): centreline just aft of the companionway —
+ *  the only deck band clear of every station on all three hulls. [X] here
+ *  instantly tops up every firearm. */
+export function getAmmoCrateLocal(stats: Pick<ShipStats, 'width' | 'length'>): ShipLocalPoint {
+  const hatch = getShipCompanionwayConfig(stats);
+  return { x: 0, z: hatch.stairBackZ - 1.3 };
+}
+
+export function isNearAmmoCrate(player: PlayerLike, ship: ShipLike): boolean {
+  if (player.onShipId !== ship.id) return false;
+  const local = toShipLocalPoint(player.position, ship);
+  const crate = getAmmoCrateLocal(SHIP_STATS[ship.type]);
+  return Math.abs(local.x - crate.x) < 1.0 && Math.abs(local.z - crate.z) < 1.0;
 }
 
 export function isNearCrowNestLadder(player: PlayerLike, ship: ShipLike): boolean {

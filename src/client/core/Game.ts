@@ -7,9 +7,11 @@ import { getBridgeDeckY, getSailRopeStationLocals, getBraceStationLocals, getIsl
 import { BIOME_PALETTES, getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
+  getAmmoCrateLocal,
   getAnchorControlLocal as getSharedAnchorControlLocal,
   getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition,
   getSailControlLocal as getSharedSailControlLocal,
+  isNearAmmoCrate,
   isNearAnchor as isSharedNearAnchor,
   isNearCrowNestLadder as isSharedNearCrowNestLadder,
   isNearHelm as isSharedNearHelm,
@@ -203,6 +205,8 @@ type UiRefs = {
   islandBanner: HTMLDivElement;
   pocketWheel: HTMLDivElement;
   pocketWheelStats: HTMLDivElement;
+  mapWheel: HTMLDivElement;
+  mapWheelList: HTMLDivElement;
   pocketStrip: HTMLDivElement;
   treasureChart: HTMLDivElement;
   treasureChartCanvas: HTMLCanvasElement;
@@ -2063,6 +2067,8 @@ export class Game {
     islandBanner: requireElement('island-banner'),
     pocketWheel: requireElement('pocket-wheel'),
     pocketWheelStats: requireElement('pocket-wheel-stats'),
+    mapWheel: requireElement('map-wheel'),
+    mapWheelList: requireElement('map-wheel-list'),
     pocketStrip: requireElement('pocket-strip'),
     treasureChart: requireElement('treasure-chart'),
     treasureChartCanvas: requireElement('treasure-chart-canvas'),
@@ -2731,12 +2737,19 @@ export class Game {
       shader.vertexShader = shader.vertexShader.replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
+         // Guarded: these materials are SHARED with non-instanced clones of the
+         // same GLB (assets.clone → harvest promote/topple actors). three.js only
+         // declares instanceMatrix under USE_INSTANCING, so an unguarded read
+         // fails shader compilation and the clone silently renders NOTHING —
+         // the "tree vanishes while chopping" bug.
+         #ifdef USE_INSTANCING
          float swayH = max(0.0, transformed.y - 0.6) * 0.06;   // bend the crown, not the trunk base
          vec3 iPos = vec3(instanceMatrix[3].x, instanceMatrix[3].y, instanceMatrix[3].z);
          float ph = iPos.x * 0.13 + iPos.z * 0.11;
          float s = sin(uFoliageTime * 1.5 + ph) + 0.35 * sin(uFoliageTime * 3.2 + ph * 1.7);
          transformed.x += swayH * uFoliageWind.x * s;
-         transformed.z += swayH * uFoliageWind.y * s;`,
+         transformed.z += swayH * uFoliageWind.y * s;
+         #endif`,
       );
     };
     material.needsUpdate = true;
@@ -3401,9 +3414,21 @@ export class Game {
         targetType?: 'player' | 'shark' | 'wildlife';
         incoming?: boolean;
         attackerName?: string;
+        blocked?: boolean;
         meat?: number;
       meatType?: string;
       };
+      if (hitPayload.blocked) {
+        // A parried swing — steel on steel, not a wound. The clang IS the
+        // feedback that the guard worked (both for the blocker and attacker).
+        this.audio.playSwordBlock();
+        if (hitPayload.incoming) {
+          this.pushFeed(`Blocked ${hitPayload.attackerName?.trim() || 'an enemy'}'s swing.`, '#9fc7e8');
+        } else if (hitPayload.position) {
+          this.spawnFloatingDamageIndicator('BLOCKED', hitPayload.position, { weaponLabel: 'parried' });
+        }
+        if ((hitPayload.damage ?? 0) <= 0) return;
+      }
       if (hitPayload.incoming) {
         this.handleIncomingHit(hitPayload);
         this.audio.playPlayerHurt(hitPayload.damage ?? 10);
@@ -3665,6 +3690,11 @@ export class Game {
         '#d9c17e',
       );
       if (this.mapOpen) this.drawMaps();
+    };
+
+    this.network.onAmmoRefilled = () => {
+      this.pushFeed('Ammo chest — every firearm topped up.', '#9fd18a');
+      this.audio.playRepairSequence();
     };
 
     this.network.onTradeRequest = () => {
@@ -8040,6 +8070,14 @@ export class Game {
       if (input.useWheelItem && input.wheelIndex !== null) {
         this.startPocketUsePreview(input.wheelIndex);
       }
+      // Quest-map equip (maps wheel page): digit index or clicked row → the
+      // held chart's island id rides ONE input as a server one-shot.
+      const selectMapIndex = this.input.consumeSelectMapIndex();
+      const me = this.getLocalPlayer();
+      const selectMapId = this.pendingSelectMapFromUi
+        ?? (selectMapIndex !== null ? me?.questMaps?.[selectMapIndex] ?? null : null);
+      this.pendingSelectMapFromUi = null;
+      if (selectMapId) input.selectMap = selectMapId;
       const uiInteract = this.pendingInteractFromUi;
       if (this.pendingInteractFromUi) {
         input.interact = true;
@@ -10596,10 +10634,16 @@ export class Game {
           : 'Tools: scope · compass · bucket (bail) · shovel · lantern · axe (chop/mine) — select to equip · fruit heals · planks → ship stores')
       : '';
     this.updateSupplyWheelCounts(player);
-    this.ui.pocketWheel.classList.toggle('visible', this.input.isSupplyWheelOpen());
+    // [Q] while the wheel is held flips between the SUPPLY page and the QUEST
+    // MAPS page (SoT radial) — only one occupies the screen center at a time.
+    const wheelOpen = this.input.isSupplyWheelOpen();
+    const mapsPage = wheelOpen && this.input.getWheelPage() === 'maps';
+    this.ui.pocketWheel.classList.toggle('visible', wheelOpen && !mapsPage);
+    this.ui.mapWheel.classList.toggle('visible', mapsPage);
+    if (mapsPage) this.renderMapWheel(player);
     // The controls legend and the supply wheel park on the same screen center
     // — holding [I] closes the legend rather than stacking on top of it.
-    if (this.input.isSupplyWheelOpen()) {
+    if (wheelOpen) {
       const legend = document.getElementById('controls-hint');
       if (legend && legend.style.display === 'block') legend.style.display = 'none';
     }
@@ -10766,6 +10810,49 @@ export class Game {
       this.renderBattleMap(mapCtx, this.ui.mapCanvas.width, this.ui.mapCanvas.height, true);
     }
   }
+
+  /** Quest-maps wheel page: one row per held chart — digit or click equips it
+   *  as the ACTIVE map (red-X chart bottom-right + hoarder sale bonus). */
+  private mapWheelSignature = '';
+  private renderMapWheel(player: Player) {
+    const maps = player.questMaps ?? [];
+    const signature = `${maps.join(',')}|${player.treasureMapIslandId ?? ''}`;
+    if (signature === this.mapWheelSignature) return;
+    this.mapWheelSignature = signature;
+    const list = this.ui.mapWheelList;
+    list.textContent = '';
+    if (maps.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'mw-empty';
+      empty.textContent = 'No charts held — visit a Gold Hoarder for a treasure map.';
+      list.appendChild(empty);
+      return;
+    }
+    maps.forEach((islandId, index) => {
+      const island = this.state?.islands.find((candidate) => candidate.id === islandId) ?? null;
+      const digs = island
+        ? island.chests.filter((chest) => chest.buried && chest.digProgress < 1 && !chest.opened).length
+        : 0;
+      const entry = document.createElement('div');
+      entry.className = `mw-entry${islandId === player.treasureMapIslandId ? ' active' : ''}`;
+      const digit = document.createElement('span');
+      digit.className = 'mw-digit';
+      digit.textContent = String(index + 1);
+      const name = document.createElement('span');
+      name.textContent = island?.name ?? 'Uncharted isle';
+      name.style.flex = '1';
+      const marks = document.createElement('span');
+      marks.className = 'mw-x';
+      marks.textContent = `${'✕'.repeat(Math.min(3, Math.max(0, digs)))}${digs > 3 ? '+' : ''}${digs === 0 ? '·dug out' : ''}`;
+      const activeTag = document.createElement('span');
+      activeTag.textContent = islandId === player.treasureMapIslandId ? 'ACTIVE' : '';
+      activeTag.style.color = '#f0c86a';
+      entry.append(digit, name, marks, activeTag);
+      entry.addEventListener('click', () => { this.pendingSelectMapFromUi = islandId; });
+      list.appendChild(entry);
+    });
+  }
+  private pendingSelectMapFromUi: string | null = null;
 
   private renderTreasureInventoryChart(
     player: Player,
@@ -11787,13 +11874,22 @@ export class Game {
 
     // Digging strike rhythm — match the client-side animation cycle.
     const digChest = player?.nearChestId ? this.findChestById(player.nearChestId) : null;
-    const digging =
+    const chestDig =
       !!digChest
       && !!player?.hasShovel
       && (this.input.isInteractHeld() || (player?.equippedTool === 'shovel' && this.input.isFiring()))
       && !player?.carryingChestId
       && digChest.buried
       && digChest.digProgress < 1;
+    // A shovel digs ANYWHERE (SoT): swinging it over empty ground still bites —
+    // only a spot with treasure actually progresses a dig.
+    const freeDig = !chestDig
+      && !!player?.hasShovel
+      && player?.equippedTool === 'shovel'
+      && this.input.isFiring()
+      && player?.state === 'alive'
+      && !player?.carryingChestId;
+    const digging = chestDig || freeDig;
     if (digging) {
       // Roughly two strikes per second — same rhythm the shovel viewmodel runs at.
       this.digStrikePhase += dt;
@@ -12751,13 +12847,22 @@ export class Game {
       return true;
     }
     const digChest = player.nearChestId ? this.findChestById(player.nearChestId) : null;
-    const digging =
+    const chestDig =
       !!digChest
       && player.hasShovel
       && this.input.isInteractHeld()
       && !player.carryingChestId
       && digChest.buried
       && digChest.digProgress < 1;
+    // The shovel also digs over EMPTY ground (SoT feel) — same swing animation,
+    // it just never uncovers anything unless an X marks the spot.
+    const freeDig = !chestDig
+      && player.hasShovel
+      && player.equippedTool === 'shovel'
+      && this.input.isFiring()
+      && player.state === 'alive'
+      && !player.carryingChestId;
+    const digging = chestDig || freeDig;
     if (digging) {
       const kind: PocketPreviewKind = 'shovel';
       let mesh = this.localViewPocketRoot.getObjectByName('local-pocket') as THREE.Group | null;
@@ -13606,6 +13711,22 @@ export class Game {
           '[X] Use Cannon',
           `Broadside cannon ${nearbyCannon + 1} · [5/6/7] ammo`,
           'cannon',
+        );
+      }
+
+      // Ammo chest (SoT): aft of the companionway — instant firearm top-up.
+      if (player.onShipId === ship.id && isNearAmmoCrate(player, ship)) {
+        const crateLocal = getAmmoCrateLocal(SHIP_STATS[ship.type]);
+        const cratePoint = this.getShipWorldPoint(ship, crateLocal.x, crateLocal.z, SHIP_STATS[ship.type].height + 0.5);
+        this.pushInteractionCandidate(
+          candidates,
+          player,
+          cratePoint,
+          3.6,
+          0.2,
+          '[X] Ammo Chest — Refill Firearms',
+          'Tops up every gun and clears reloads',
+          'ammo',
         );
       }
     }

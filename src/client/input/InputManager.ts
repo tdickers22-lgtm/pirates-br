@@ -25,6 +25,9 @@ export class InputManager {
   /** Hold [I] to open supply wheel; click slices or press 1-4 to use pocket items. */
   private vHeld = false;
   private pendingWheelSlot: number | null = null;
+  /** Second wheel page ([Q] while the wheel is held): quest maps (SoT radial). */
+  private wheelPage: 'items' | 'maps' = 'items';
+  private pendingSelectMapIndex: number | null = null;
 
   init(lockElement: HTMLElement = document.body) {
     this.lockElement = lockElement;
@@ -52,10 +55,19 @@ export class InputManager {
       if (e.code === 'KeyI') {
         if (!this.vHeld && this.locked) document.exitPointerLock?.();
         this.vHeld = true;
+        this.wheelPage = 'items';
+      }
+      if (this.vHeld && e.code === 'KeyQ') {
+        e.preventDefault();
+        this.wheelPage = this.wheelPage === 'items' ? 'maps' : 'items';
       }
       if (this.vHeld && /^Digit[1-9]$/.test(e.code)) {
         e.preventDefault();
-        this.pendingWheelSlot = Number(e.code.slice(5)) - 1; // Digit1→0 … Digit9→8
+        if (this.wheelPage === 'maps') {
+          this.pendingSelectMapIndex = Number(e.code.slice(5)) - 1; // Digit1→map 0 …
+        } else {
+          this.pendingWheelSlot = Number(e.code.slice(5)) - 1; // Digit1→0 … Digit9→8
+        }
       }
       if (e.code === 'KeyX') this.interactPressed = true;
       if (e.code === 'Space') {
@@ -175,7 +187,8 @@ export class InputManager {
       // keys ("Trim Left [Q]" / "Trim Right [F]") and the server applies them.
       sailRaise: false,
       sailLower: false,
-      sailLeft:  this.keys.has('KeyQ'),
+      // [Q] is the maps-page toggle while the wheel is held — don't trim sails.
+      sailLeft:  !this.vHeld && this.keys.has('KeyQ'),
       sailRight: this.keys.has('KeyF'),
       trade:    this.tradePressed,
       reload:   this.reloadPressed,
@@ -221,6 +234,14 @@ export class InputManager {
   isInteractHeld() { return this.keys.has('KeyX'); }
   /** True while [I] is held — supply wheel overlay */
   isSupplyWheelOpen() { return this.vHeld; }
+  /** Which wheel page is showing while [I] is held ([Q] toggles). */
+  getWheelPage(): 'items' | 'maps' { return this.wheelPage; }
+  /** One-shot: quest-map index picked on the maps page (Digit1..3). */
+  consumeSelectMapIndex(): number | null {
+    const index = this.pendingSelectMapIndex;
+    this.pendingSelectMapIndex = null;
+    return index;
+  }
   queueWheelSlot(slot: number) {
     if (slot >= 0 && slot <= 9) this.pendingWheelSlot = slot;
   }

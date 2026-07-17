@@ -14,8 +14,10 @@ import { SHIP_STATS, PLAYER } from '../src/shared/constants/index.ts';
 import {
   findNearbyCannonIndex,
   findBraceStationDir,
+  getAmmoCrateLocal,
   getAnchorControlLocal,
   getCannonDeckLocalPosition,
+  isNearAmmoCrate,
   isNearAnchor,
   isNearCrowNestLadder,
   isNearHelm,
@@ -61,6 +63,8 @@ for (const [type, stats] of Object.entries(SHIP_STATS)) {
   }
   const ladder = getCrowNestLadderInteractionBounds(stats);
   stations.push({ name: 'crowLadder', action: 'crow', x: 0, z: ladder.mastZ });
+  const ammo = getAmmoCrateLocal(stats);
+  stations.push({ name: 'ammoCrate', action: 'ammo', x: ammo.x, z: ammo.z });
 
   const playerAt = (local) => {
     const w = toShipWorldPoint(local, ship);
@@ -75,6 +79,7 @@ for (const [type, stats] of Object.entries(SHIP_STATS)) {
     if (isNearSailStation(player, ship)) out.push('sails');
     if (findBraceStationDir(player, ship) !== 0) out.push('brace');
     if (isNearCrowNestLadder(player, ship)) out.push('crow');
+    if (isNearAmmoCrate(player, ship)) out.push('ammo');
     return out;
   };
 

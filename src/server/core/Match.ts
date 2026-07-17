@@ -36,6 +36,7 @@ import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition,
   getSailControlLocal as getSharedSailControlLocal,
+  isNearAmmoCrate as isSharedNearAmmoCrate,
   isNearAnchor as isSharedNearAnchor,
   isNearCrowNestLadder as isSharedNearCrowNestLadder,
   isNearHelm as isSharedNearHelm,
@@ -67,7 +68,8 @@ type OneShotAction =
   | 'cannonAmmo'
   | 'slot'
   | 'barrelTakeAll'
-  | 'bail';
+  | 'bail'
+  | 'selectMap';
 
 interface ConnectedClient {
   ws: WebSocket;
@@ -370,6 +372,7 @@ export class Match {
       gold: 0,
       carryingChestId: null,
       treasureMapIslandId: null,
+      questMaps: [],
       swimTimer: 0,
       atCannon: false,
       atHelm: false,
@@ -549,6 +552,7 @@ export class Match {
         slot: -1,
         barrelTakeAll: -1,
         bail: -1,
+        selectMap: -1,
       },
       lastOneShotAt: {},
       pendingFullSnapshot: null,
@@ -967,6 +971,7 @@ export class Match {
     // transform updates on the snapshot ticks in between (31.25 Hz total).
     if (this.tickCount % SNAPSHOT_RATE === 0) {
       if (this.tickCount % FULL_SNAPSHOT_TICKS === 0) {
+        this.pruneQuestMaps();
         const includeStaticWorld = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0;
         const snap = buildWireSnapshot(this.buildSnapshot(includeStaticWorld), includeStaticWorld);
         this.broadcastVolatile({ type: 'state_snapshot', ts: Date.now(), payload: snap }, 'full');
@@ -1215,6 +1220,27 @@ export class Match {
       const barrelEvent = this.islands.tryTakeAllFromNearbyBarrel(player, this.state.islands, this.state.ships);
       if (barrelEvent) {
         this.broadcast({ type: 'barrel_opened', ts: Date.now(), payload: barrelEvent });
+      }
+    }
+
+    // Equip a held quest map from the wheel's map page (one-shot).
+    if (input.selectMap && this.consumeOneShot(client, 'selectMap', input.seq)) {
+      if (player.questMaps.includes(input.selectMap)) {
+        player.treasureMapIslandId = input.selectMap;
+        const island = this.state.islands.find((candidate) => candidate.id === input.selectMap);
+        if (island) {
+          this.send(client.ws, {
+            type: 'treasure_map',
+            ts: Date.now(),
+            payload: {
+              islandId: island.id,
+              islandName: island.name,
+              chestCount: island.chests.filter((chest) =>
+                chest.buried && chest.digProgress < 1 && !chest.opened
+                && !chest.carriedByPlayerId && !chest.storedOnShipId && !chest.floating).length,
+            },
+          });
+        }
       }
     }
 
@@ -1718,6 +1744,7 @@ export class Match {
           damageMultiplier: CUTLASS_LUNGE_DAMAGE / WEAPONS.cutlass.damage,
           rangeMultiplier: 2.15,
           knockbackMultiplier: 2.35,
+          guardBreak: true,
         });
         this.applyCutlassLunge(player, input.yaw);
         activeWeapon.reloading = true;
@@ -1750,6 +1777,7 @@ export class Match {
       damageMultiplier?: number;
       rangeMultiplier?: number;
       knockbackMultiplier?: number;
+      guardBreak?: boolean;
     },
   ) {
     const activeWeapon = player.weapons[player.activeSlot];
@@ -1759,9 +1787,10 @@ export class Match {
       const target = this.getPlayer(hit.targetId);
       if (!target) continue;
       if (target.respawnProtectionTimer > 0 || target.state === 'respawning') continue;
-      const blockScale = this.getCutlassBlockScale(target, player);
+      const blockScale = this.getCutlassBlockScale(target, player, options?.guardBreak);
+      const blocked = blockScale < 1;
       const damage = hit.damage * blockScale;
-      const knockback = hit.knockback * (blockScale < 1 ? 0.32 : 1);
+      const knockback = hit.knockback * (blocked ? 0.32 : 1);
       target.lastDamagedById = player.id;
       target.lastDamagedAt = this.t;
       target.lastDamageWasHeadshot = false;
@@ -1770,6 +1799,7 @@ export class Match {
       this.notifyPlayerHit(player.id, {
         targetId: target.id,
         damage,
+        blocked,
         position: {
           x: target.position.x,
           y: target.position.y + PLAYER.HEIGHT * 0.72,
@@ -1783,6 +1813,7 @@ export class Match {
         attackerId: player.id,
         attackerName: player.name,
         damage,
+        blocked,
         position: {
           x: target.position.x,
           y: target.position.y + PLAYER.HEIGHT * 0.72,
@@ -1820,7 +1851,7 @@ export class Match {
       && player.state !== 'swimming';
   }
 
-  private getCutlassBlockScale(target: Player, attacker: Player): number {
+  private getCutlassBlockScale(target: Player, attacker: Player, guardBreak = false): number {
     if (!target.blocking || target.state === 'swimming' || target.carryingChestId) return 1;
     const activeWeapon = target.weapons[target.activeSlot];
     if (!activeWeapon || activeWeapon.weaponId !== 'cutlass') return 1;
@@ -1830,7 +1861,11 @@ export class Match {
     if (dist < 0.001) return 1;
     const angleToAttacker = Math.atan2(dx, dz);
     const facingDelta = Math.abs(angleWrap(angleToAttacker - target.rotation.x));
-    return facingDelta <= Math.PI * 0.58 ? 0.16 : 1;
+    if (facingDelta > Math.PI * 0.58) return 1;
+    // A guard that faces the swing WORKS (Sea-of-Thieves rule): ordinary swipes
+    // are fully turned; only the charged lunge is a guard-breaker that still
+    // lands part of its weight through the parry.
+    return guardBreak ? 0.45 : 0;
   }
 
   private applyCutlassLunge(player: Player, yaw: number) {
@@ -2319,13 +2354,28 @@ export class Match {
     const current = player.treasureMapIslandId
       ? targetPool.find((island) => island.id === player.treasureMapIslandId)
       : null;
-    const target = current ?? targetPool
+    // Prefer a fresh island the player doesn't already hold a map for — the
+    // hoarder hands out a POCKETFUL of maps (SoT quest radial), not one.
+    const unheld = targetPool.filter((island) => !player.questMaps.includes(island.id));
+    const drawPool = unheld.length > 0 ? unheld : targetPool;
+    const target = (current && !player.questMaps.includes(current.id) ? current : null) ?? drawPool
       .map((island) => ({
         island,
         distance: dist2D(player.position.x, player.position.z, island.position.x, island.position.z),
       }))
       .sort((a, b) => a.distance - b.distance)[0].island;
-    player.treasureMapIslandId = target.id;
+    if (!player.questMaps.includes(target.id)) {
+      player.questMaps.push(target.id);
+      // Pocket holds three maps — oldest goes back to the hoarder.
+      while (player.questMaps.length > 3) {
+        const dropped = player.questMaps.shift();
+        if (dropped === player.treasureMapIslandId) player.treasureMapIslandId = null;
+      }
+    }
+    player.treasureMapIslandId = player.treasureMapIslandId ?? target.id;
+    if (!player.questMaps.includes(player.treasureMapIslandId)) {
+      player.treasureMapIslandId = target.id;
+    }
     const client = this.clients.get(player.id);
     if (client) {
       this.send(client.ws, {
@@ -2339,6 +2389,27 @@ export class Match {
       });
     }
     return true;
+  }
+
+  /** Drop quest maps whose island has no diggable chest left; keep the active
+   *  map pointing at a REAL objective. Runs cheaply on the snapshot cadence. */
+  private pruneQuestMaps() {
+    const islandHasDig = (id: string) => {
+      const island = this.state.islands.find((candidate) => candidate.id === id);
+      return !!island && island.chests.some((chest) =>
+        chest.buried && chest.digProgress < 1 && !chest.opened
+        && !chest.carriedByPlayerId && !chest.storedOnShipId && !chest.floating);
+    };
+    for (const player of this.state.players) {
+      if (player.isBot || player.questMaps.length === 0) continue;
+      const kept = player.questMaps.filter(islandHasDig);
+      if (kept.length !== player.questMaps.length) {
+        player.questMaps = kept;
+        if (player.treasureMapIslandId && !kept.includes(player.treasureMapIslandId)) {
+          player.treasureMapIslandId = kept[0] ?? null;
+        }
+      }
+    }
   }
 
   private updateKegs(dt: number) {
@@ -3623,6 +3694,28 @@ export class Match {
         if (nearbyCannon === null) return false;
         return this.enterCannon(player, ship, nearbyCannon, input.yaw, input.pitch);
       }
+      case 'ammo': {
+        // Sea-of-Thieves ammo chest: [X] at the crate tops up every firearm.
+        if (!ship || player.onShipId !== ship.id) return false;
+        if (!isSharedNearAmmoCrate(player, ship)) return false;
+        let refilled = false;
+        for (const weapon of player.weapons) {
+          if (!weapon || WEAPONS[weapon.weaponId].melee) continue;
+          const def = WEAPONS[weapon.weaponId];
+          if (weapon.ammo < def.ammoMax || weapon.reserve < def.reserveMax || weapon.reloading) refilled = true;
+          weapon.ammo = def.ammoMax;
+          weapon.reserve = def.reserveMax;
+          weapon.reloading = false;
+          weapon.reloadTimer = 0;
+        }
+        if (refilled) {
+          const client = this.clients.get(player.id);
+          if (client) {
+            this.send(client.ws, { type: 'ammo_refilled', ts: Date.now(), payload: {} });
+          }
+        }
+        return refilled;
+      }
       default:
         return false;
     }
@@ -4629,6 +4722,7 @@ export class Match {
       targetType?: 'player' | 'shark' | 'wildlife';
       meat?: number;
       meatType?: WildlifeType;
+      blocked?: boolean;
     },
   ) {
     const client = this.clients.get(attackerId);
@@ -4652,6 +4746,7 @@ export class Match {
       kill?: boolean;
       remainingHealth?: number;
       weaponId?: string;
+      blocked?: boolean;
     },
   ) {
     const client = this.clients.get(victimId);
@@ -4968,6 +5063,7 @@ export class Match {
         skeleton.rotation.y = 0;
 
         if (distance > 2.0) {
+          skeleton.blocking = false;
           // Skeletons sprint at 38% player speed — fast enough to be threatening
           const moveSpeed = PLAYER.MOVE_SPEED * 0.38;
           const nextX = skeleton.position.x + (dx / distance) * moveSpeed * dt;
@@ -4985,19 +5081,37 @@ export class Match {
           skeleton.velocity.x = 0;
           skeleton.velocity.z = 0;
           const weapon = skeleton.weapons[skeleton.activeSlot];
-          if (weapon && !weapon.reloading) {
+          // Swordplay: a skeleton facing a player who is winding up a cutlass
+          // RAISES ITS GUARD instead of trading — the same block rules players
+          // get (getCutlassBlockScale reads skeleton.blocking + facing). Reflexes
+          // vary per skeleton so a crowd doesn't parry in lockstep.
+          const targetWeapon = target.weapons[target.activeSlot];
+          const targetThreatens = !!targetWeapon
+            && targetWeapon.weaponId === 'cutlass'
+            && (target.cutlassCharge > 0.12 || (this.cutlassFireHeldByPlayer.get(target.id) ?? false))
+            && distance < 4.2;
+          const guardReflex = ((skeleton.id.charCodeAt(1) ?? 0) % 10) / 10;
+          skeleton.blocking = targetThreatens && guardReflex < 0.7
+            && !!weapon && weapon.weaponId === 'cutlass' && !weapon.reloading;
+          if (weapon && !weapon.reloading && !skeleton.blocking) {
             const hits = this.weapons.tryMeleeAttack(skeleton, [target], skeleton.rotation.x);
             for (const hit of hits) {
+              // The same guard players rely on works against skeletons — their
+              // swings used to bypass the block check entirely, which is why
+              // "blocking doesn't work" was mostly true in practice.
+              const blockScale = this.getCutlassBlockScale(target, skeleton);
+              const blocked = blockScale < 1;
               target.lastDamagedById = skeleton.id;
               target.lastDamagedAt = this.t;
               target.lastDamageWasHeadshot = false;
               // 65% weapon damage — skeletons are a real threat now
-              const damage = hit.damage * 0.65;
+              const damage = hit.damage * 0.65 * blockScale;
               target.health -= this.absorbWithArmor(target, damage);
               this.notifyIncomingPlayerHit(target.id, {
                 attackerId: skeleton.id,
                 attackerName: skeleton.name,
                 damage,
+                blocked,
                 position: {
                   x: target.position.x,
                   y: target.position.y + PLAYER.HEIGHT * 0.72,
@@ -5013,15 +5127,17 @@ export class Match {
                 weaponId: weapon.weaponId,
               });
               const len = Math.sqrt(dx * dx + dz * dz) || 1;
-              target.knockbackVelocity.x += (dx / len) * hit.knockback * 0.72;
-              target.knockbackVelocity.y += hit.knockback * 0.18;
-              target.knockbackVelocity.z += (dz / len) * hit.knockback * 0.72;
+              const kbScale = blocked ? 0.28 : 0.72;
+              target.knockbackVelocity.x += (dx / len) * hit.knockback * kbScale;
+              target.knockbackVelocity.y += hit.knockback * (blocked ? 0.06 : 0.18);
+              target.knockbackVelocity.z += (dz / len) * hit.knockback * kbScale;
             }
             weapon.reloading = true;
             weapon.reloadTimer = WEAPONS.cutlass.reloadTime * 1.5;
           }
         }
       } else {
+        skeleton.blocking = false;
         const roamSeed = skeleton.id.charCodeAt(0) * 0.17 + skeleton.id.charCodeAt(skeleton.id.length - 1) * 0.11;
         const patrolAngle = (this.t * 0.22 + roamSeed) % (Math.PI * 2);
         const patrolRadius = 0.2 + ((Math.sin(this.t * 0.13 + roamSeed) + 1) * 0.5) * 0.24;

@@ -1611,6 +1611,46 @@
       border: 1px solid rgba(126, 172, 220, 0.2);
       border-radius: 8px;
     }
+    /* Quest-map page — the wheel's second radial ([Q] flips pages, SoT-style). */
+    #map-wheel {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      display: none; flex-direction: column; align-items: center; gap: 10px;
+      padding: 18px 22px;
+      min-width: min(360px, 78vw);
+      background: rgba(6, 16, 30, 0.92);
+      border: 1px solid rgba(214, 183, 105, 0.55);
+      border-radius: 14px;
+      box-shadow: 0 22px 34px rgba(0, 0, 0, 0.48);
+      pointer-events: auto;
+      z-index: 108;
+      user-select: none;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    #map-wheel.visible { display: flex; }
+    #map-wheel .mw-title {
+      font-size: 0.72rem; letter-spacing: 0.2em; color: #f0c86a; text-transform: uppercase;
+      text-shadow: 0 2px 10px #000;
+    }
+    #map-wheel .mw-hint {
+      font-size: 0.58rem; letter-spacing: 0.14em; color: #8fb6df; text-transform: uppercase;
+    }
+    #map-wheel .mw-entry {
+      width: 100%;
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px;
+      border: 1px solid rgba(126, 172, 220, 0.25);
+      border-radius: 8px;
+      background: rgba(9, 25, 44, 0.88);
+      color: #e8d5a3; font-size: 0.72rem;
+      cursor: pointer;
+    }
+    #map-wheel .mw-entry:hover { border-color: rgba(246, 210, 118, 1); background: rgba(37, 72, 98, 0.95); }
+    #map-wheel .mw-entry.active { border-color: rgba(246, 210, 118, 1); box-shadow: 0 0 12px rgba(240, 200, 106, 0.35) inset; }
+    #map-wheel .mw-entry .mw-digit {
+      color: #f0c86a; font-weight: bold; min-width: 1.2em; text-align: center;
+    }
+    #map-wheel .mw-entry .mw-x { color: #c23a2b; font-weight: bold; }
+    #map-wheel .mw-empty { color: #7d92a8; font-size: 0.66rem; padding: 8px 4px; }
   </style>
 </head>
 <body>
@@ -1814,7 +1854,7 @@
         <div id="treasure-chart-route">Talk to a Gold Hoarder</div>
       </div>
       <div id="pocket-wheel">
-        <div class="pw-hint">Hold [I] — supply wheel · click a tool to equip, a supply to use</div>
+        <div class="pw-hint">Hold [I] — supply wheel · click a tool to equip, a supply to use · [Q] quest maps</div>
         <svg id="pocket-wheel-svg" viewBox="-100 -100 200 200" aria-label="Supply wheel">
           <path class="wheel-slice" data-wheel-slot="0" d="M 0 0 L -28.4 -87.5 A 92 92 0 0 1 28.4 -87.5 Z"></path>
           <path class="wheel-slice" data-wheel-slot="1" d="M 0 0 L 28.4 -87.5 A 92 92 0 0 1 74.4 -54.1 Z"></path>
@@ -1853,6 +1893,11 @@
           <text class="wheel-label" x="-48.2" y="-66.3">AXE</text>
         </svg>
         <div id="pocket-wheel-stats"></div>
+      </div>
+      <div id="map-wheel">
+        <div class="mw-title">Quest Maps</div>
+        <div class="mw-hint">[Q] back to supplies · press a number (or click) to equip a chart</div>
+        <div id="map-wheel-list" style="width:100%; display:flex; flex-direction:column; gap:6px;"></div>
       </div>
     </aside>
 
