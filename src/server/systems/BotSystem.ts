@@ -1,6 +1,10 @@
-import type { Player, Ship, Island, StormState, Vec3, WeaponId } from '../../shared/types/index.js';
-import { SHIP_STATS, SHIP, PHYSICS, PLAYER } from '../../shared/constants/index.js';
-import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY } from '../../shared/utils/index.js';
+import type { Player, Ship, Island, SeaRock, StormState, Vec3, WeaponId } from '../../shared/types/index.js';
+import {
+  SHIP_STATS, SHIP, PHYSICS, PLAYER,
+  BOT_EARLY_PEACE_SECONDS, BOT_ENGAGE_RANGE_BY_PHASE, BOT_ENGAGE_SHRINK_MULT, BOT_DEFEND_RANGE,
+  BOT_MAX_HUNTERS_BY_PHASE, BOT_LOOKAHEAD_METERS, BOT_OBSTACLE_MARGIN, BOT_KEEL_CLEARANCE,
+} from '../../shared/constants/index.js';
+import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 import { applyShipRudderSteering } from './PhysicsSystem.js';
 import type { WeaponSystem } from './WeaponSystem.js';
@@ -29,6 +33,11 @@ interface BotState {
   /** Seconds spent unintentionally off the ship (knocked overboard, stranded)
    *  outside the loot behavior — recalled aboard after a short grace. */
   overboardTimer: number;
+  /** Hull total at the last check — a drop means somebody is shooting at us. */
+  lastHullTotal: number;
+  /** Sim time until which this bot counts as "under fire" and may fight back
+   *  during the early-game peace window. */
+  underFireUntil: number;
 }
 
 export interface BotFirearmShot {
@@ -44,6 +53,12 @@ const CANNON_GRAVITY = -PHYSICS.GRAVITY * SHIP.CANNON_GRAVITY_MULT; // positive 
 const CANNON_VY_BOOST = 5; // matches WeaponSystem.fireShipCannon
 const FIREARM_RANGE = 24;
 const FIREARM_AIM_HEIGHT = 1.4;
+/** How long a bot stays willing to fight back after taking hull damage. */
+const BOT_RETALIATE_SECONDS = 45;
+
+function hullTotal(ship: Ship): number {
+  return ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard;
+}
 
 export class BotSystem {
   private bots: Map<string, BotState> = new Map();
@@ -52,6 +67,10 @@ export class BotSystem {
    *  or shoot at. Bots still fight each other. Set by Match each tick. */
   private peaceShipIds: Set<string> = new Set();
   private peacePlayerIds: Set<string> = new Set();
+  /** Navigation context for the current bot's steering (set per bot each tick). */
+  private navIslands: Island[] = [];
+  private navSeaRocks: SeaRock[] = [];
+  private navSkipIslandId: string | null = null;
 
   /** Match calls this each tick with the human's ship + player id when bot-peace is
    *  on (empty sets otherwise), so bots ignore that ship/player as a target. */
@@ -77,6 +96,8 @@ export class BotSystem {
       shoreTimer: 0,
       shoreLeg: null,
       overboardTimer: 0,
+      lastHullTotal: hullTotal(ship),
+      underFireUntil: 0,
     });
   }
 
@@ -88,6 +109,7 @@ export class BotSystem {
     islands: Island[],
     storm: StormState,
     weaponSystem: WeaponSystem,
+    seaRocks: SeaRock[] = [],
   ) {
     for (const [pid, bot] of this.bots) {
       const player = players.find(p => p.id === pid);
@@ -99,10 +121,24 @@ export class BotSystem {
       bot.stateTimer -= dt;
       bot.firearmTimer -= dt;
 
-      this.decideBehavior(bot, ship, ships, islands, storm, players);
-      this.executeBehavior(bot, player, ship, ships, islands, storm, dt, t, weaponSystem);
+      // Taking hull damage lifts the early-game peace for this bot — it may hunt
+      // whoever is in range for a while (self-defence, not lobby-wide aggression).
+      const hull = hullTotal(ship);
+      if (hull < bot.lastHullTotal - 0.001) bot.underFireUntil = t + BOT_RETALIATE_SECONDS;
+      bot.lastHullTotal = hull;
+
+      this.decideBehavior(bot, ship, ships, islands, storm, players, t);
+      this.executeBehavior(bot, player, ship, ships, islands, storm, dt, t, weaponSystem, seaRocks);
       this.maybeFireAtBoarder(bot, player, ship, players, weaponSystem);
     }
+  }
+
+  /** How many bot crews are currently hunting a ship (bounded by the lobby size,
+   *  so a straight recount per decision is cheaper than keeping a live tally). */
+  private countHunters(): number {
+    let n = 0;
+    for (const other of this.bots.values()) if (other.behavior === 'engage') n++;
+    return n;
   }
 
   /** Drain any personal-weapon shots generated this tick. Match resolves their hits. */
@@ -113,7 +149,7 @@ export class BotSystem {
   private decideBehavior(
     bot: BotState, ship: Ship,
     ships: Ship[], islands: Island[], storm: StormState,
-    players: Player[],
+    players: Player[], t: number,
   ) {
     const distToCenter = dist2D(ship.position.x, ship.position.z, storm.centerX, storm.centerZ);
     const distRatio = distToCenter / Math.max(1, storm.safeRadius);
@@ -177,10 +213,30 @@ export class BotSystem {
         ? dist2D(ship.position.x, ship.position.z, nearest.position.x, nearest.position.z)
         : Infinity;
 
-      // Wide enough to keep the seas alive, but not so wide that every bot beelines the
-      // player before they can loot, repair, or learn the current objective.
-      const engageRange = storm.shrinking ? 780 : 920;
-      if (nearestActualDist < engageRange) {
+      // Early-game pacing governor. For the first BOT_EARLY_PEACE_SECONDS bots do
+      // not SEEK ship fights — they patrol and loot — unless something shot them
+      // (underFireUntil). Half the lobby used to be gone before the first shrink,
+      // which collapsed the whole 7-phase storm arc into the opening minutes.
+      // After that window the seek radius is a local skirmish range instead of the
+      // old map-wide 780/920 that had every bot converging on the player at once.
+      const inEarlyWindow = t < BOT_EARLY_PEACE_SECONDS;
+      const underFire = t < bot.underFireUntil;
+      const phaseRange = BOT_ENGAGE_RANGE_BY_PHASE[
+        Math.min(Math.max(0, storm.phase), BOT_ENGAGE_RANGE_BY_PHASE.length - 1)
+      ];
+      const engageRange = inEarlyWindow
+        ? (underFire ? BOT_DEFEND_RANGE : 0)
+        : phaseRange * (storm.shrinking ? BOT_ENGAGE_SHRINK_MULT : 1);
+      // Concurrency cap on top of the range gate: when the peace window lifted,
+      // every bot flipped to 'engage' in the same tick and six crews went down
+      // inside 33 s. Only so many crews may be hunting at once (already-engaged
+      // bots keep their fight; the cap only gates NEW ones), which spreads the
+      // same number of fights across the ring arc.
+      const hunterCap = BOT_MAX_HUNTERS_BY_PHASE[
+        Math.min(Math.max(0, storm.phase), BOT_MAX_HUNTERS_BY_PHASE.length - 1)
+      ];
+      const alreadyHunting = bot.behavior === 'engage';
+      if (nearestActualDist < engageRange && (alreadyHunting || this.countHunters() < hunterCap)) {
         bot.behavior = 'engage';
         bot.targetShipId = nearest?.id ?? null;
       } else if (nearIsland && nearIslandDist < 540 && Math.random() < 0.28) {
@@ -204,7 +260,13 @@ export class BotSystem {
     ships: Ship[], islands: Island[], storm: StormState,
     dt: number, t: number,
     weaponSystem: WeaponSystem,
+    seaRocks: SeaRock[] = [],
   ) {
+    // Navigation context for steerToward's obstacle lookahead. A looting bot is
+    // deliberately closing on its target island, so that one is exempt.
+    this.navIslands = islands;
+    this.navSeaRocks = seaRocks;
+    this.navSkipIslandId = bot.behavior === 'loot' ? bot.targetIslandId : null;
     // Shore parties belong to the 'loot' behavior only — any other behavior
     // with the body off the ship recalls it aboard after a short grace so a
     // knocked-overboard bot isn't an instant teleport, yet can never strand.
@@ -319,7 +381,12 @@ export class BotSystem {
           island.position.z - ship.position.z,
         );
         const d = dist2D(ship.position.x, ship.position.z, island.position.x, island.position.z);
-        if (d > island.radius + 40) {
+        // Island footprints are lobed: `radius` is the nominal disc, but land
+        // reaches out to getIslandMaxRadius (157m vs a nominal 96m on the
+        // caldera). Closing to a fixed radius+40 parked bots several metres
+        // INSIDE the hillside, which is where most bot beachings came from.
+        // Keep closing only while there is still water under the keel ahead.
+        if (d > island.radius + 40 && this.hasSeaRoomAhead(ship, angleToIsland, islands)) {
           this.steerToward(ship, angleToIsland, dt, t);
           ship.sailHeight = 0.32;
           ship.anchored = false;
@@ -450,11 +517,13 @@ export class BotSystem {
   }
 
   private steerToward(ship: Ship, targetAngle: number, dt: number, t: number) {
+    // Land/rock avoidance FIRST: bots used to sail dead straight at their target
+    // and beach themselves on anything in between (zero avoidance terms existed).
+    let desired = this.avoidObstacles(ship, targetAngle);
     // Upwind no-go awareness: a course inside the cone is unsailable — offset
     // to the nearer ~40°-off-the-wind tack instead of pinching straight in.
     const wind = sampleWind(t);
     const upwind = angleWrap(wind.direction + Math.PI);
-    let desired = targetAngle;
     const offUpwind = angleWrap(desired - upwind);
     if (Math.abs(offUpwind) < SHIP.SAIL_NO_GO_ANGLE) {
       desired = upwind + (offUpwind >= 0 ? 1 : -1) * (SHIP.SAIL_NO_GO_ANGLE + 0.09);
@@ -466,6 +535,78 @@ export class BotSystem {
     applyShipRudderSteering(ship, dt, steer, 0.36 + ship.sailHeight * 0.52);
     // Rotation is integrated once for all ships in PhysicsSystem.updateShips;
     // integrating here too would double the bot turn rate.
+  }
+
+  /**
+   * Is there still water under the keel along `heading`? Samples the seabed a
+   * hull-length-and-a-bit ahead against the SAME draft the grounding resolve
+   * uses, so an approaching bot stops in floating water instead of at a nominal
+   * radius that can sit well inside the shore.
+   */
+  private hasSeaRoomAhead(ship: Ship, heading: number, islands: Island[]): boolean {
+    const stats = SHIP_STATS[ship.type];
+    const need = -(stats.height * SHIP.HULL_DRAFT_F[ship.type] + BOT_KEEL_CLEARANCE);
+    const dirX = Math.sin(heading);
+    const dirZ = Math.cos(heading);
+    const half = stats.length * 0.5;
+    for (const ahead of [half + 4, half + 18, half + 32]) {
+      const x = ship.position.x + dirX * ahead;
+      const z = ship.position.z + dirZ * ahead;
+      for (const island of islands) {
+        const dx = x - island.position.x;
+        const dz = z - island.position.z;
+        const reach = getIslandMaxRadius(island) + 20;
+        if (dx * dx + dz * dz > reach * reach) continue;
+        if (getIslandSurfaceY(island, x, z) > need) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Steer around land and sea rocks: probe BOT_LOOKAHEAD_METERS along the desired
+   * heading and, if the swept path clips an obstacle's inflated circle, aim at the
+   * nearer tangent instead. Only the closest blocker is resolved — the next tick
+   * re-probes, which is enough to skirt an island smoothly and keeps the whole
+   * thing deterministic (no randomness, no per-bot memory).
+   */
+  private avoidObstacles(ship: Ship, desired: number): number {
+    const look = BOT_LOOKAHEAD_METERS + SHIP_STATS[ship.type].length;
+    const dirX = Math.sin(desired);
+    const dirZ = Math.cos(desired);
+    let blocker: { angle: number; distance: number; clear: number; side: number } | null = null;
+
+    const consider = (ox: number, oz: number, radius: number) => {
+      const dx = ox - ship.position.x;
+      const dz = oz - ship.position.z;
+      const along = dx * dirX + dz * dirZ;
+      if (along < -radius || along > look) return;
+      const cross = dx * dirZ - dz * dirX; // signed lateral offset from the path
+      if (Math.abs(cross) > radius) return;
+      const distance = Math.hypot(dx, dz);
+      if (blocker && distance >= blocker.distance) return;
+      blocker = {
+        angle: Math.atan2(dx, dz),
+        distance,
+        clear: radius,
+        side: cross >= 0 ? -1 : 1,
+      };
+    };
+
+    for (const island of this.navIslands) {
+      if (island.id === this.navSkipIslandId) continue;
+      consider(island.position.x, island.position.z, getIslandMaxRadius(island) + BOT_OBSTACLE_MARGIN);
+    }
+    for (const rock of this.navSeaRocks) {
+      consider(rock.position.x, rock.position.z, (rock.colliderBoundsRadius || rock.radius) + BOT_OBSTACLE_MARGIN * 0.5);
+    }
+    if (!blocker) return desired;
+
+    const hit = blocker as { angle: number; distance: number; clear: number; side: number };
+    // Already inside the danger circle: turn straight out of it.
+    if (hit.distance <= hit.clear) return angleWrap(hit.angle + Math.PI);
+    const offset = Math.asin(Math.min(1, hit.clear / hit.distance)) + 0.08;
+    return angleWrap(hit.angle + hit.side * offset);
   }
 
   /** Straight-line island occlusion check from this deck to the target's deck. */

@@ -1,9 +1,10 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
+  GameState, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, IslandTavern, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
-import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
+import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
+import { PROP_COLLIDERS } from '../../shared/props.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
@@ -30,6 +31,10 @@ import {
   gerstnerHeight,
   WAVE_PARAMS,
   intersectRaySeaRock,
+  toTavernLocal,
+  getTavernWallSegments,
+  getTavernWallBand,
+  getTavernBoundsRadius,
 } from '../../shared/utils/index.js';
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
 import {
@@ -91,8 +96,6 @@ interface ConnectedClient {
   /** Latest full snapshot skipped while the socket was congested — flushed
    *  (newest only, older ones dropped) once the buffer drains. */
   pendingFullSnapshot: string | null;
-  /** Latest hot snapshot skipped while congested (superseded by any newer send). */
-  pendingHotSnapshot: string | null;
 }
 
 export interface MatchHumanResult {
@@ -187,6 +190,34 @@ const ONE_SHOT_MIN_INTERVAL: Partial<Record<OneShotAction, number>> = {
   trade: 0.3,
   barrelTakeAll: 0.3,
 };
+/** Dock-local z of the swim-up ladder as a fraction of dock length — the SEAWARD
+ *  end. Must stay in step with getIslandDockSwimLadderPoint in shared/utils
+ *  (the client prompt anchors on that point; this gate must accept where it is). */
+const DOCK_LADDER_LOCAL_Z_FRAC = 0.44;
+/** How close (metres, dock-local XZ) a swimmer must be to the ladder to climb. */
+const DOCK_CLIMB_REACH = 4.2;
+/** Gap between a berthed hull's side and the dock edge (metres). */
+const BERTH_RAIL_GAP = 1.0;
+/** How far inside the dock's seaward tip a berthed bow sits. */
+const BERTH_BOW_INSET = 0.6;
+/** Extra water under a berthed keel beyond the grounding threshold (wave bob). */
+const BERTH_BOB_MARGIN = 0.25;
+/** How far along the dock axis a berth may shift from the canonical anchor. */
+const BERTH_SEARCH_REACH = 14;
+/** Best-effort berths (reef-mouth docks) must at least keep the hull in water. */
+const BERTH_MIN_WATER = 0.4;
+
+/** Candidate along-dock offsets from the canonical bow-at-the-tip anchor, nearest
+ *  first: 0, +0.75, −0.75, +1.5, … Seaward wins ties. A dock whose seaward end
+ *  runs onto a reef (the atoll) finds its water on the SHOREWARD side, which the
+ *  old seaward-only slide could never do — it gave up and fell back to a berth
+ *  tens of metres past the tip. */
+function berthShiftLadder(dockLength: number): number[] {
+  const reach = Math.min(BERTH_SEARCH_REACH, dockLength * 0.5 + 6);
+  const shifts: number[] = [0];
+  for (let d = 0.75; d <= reach; d += 0.75) shifts.push(d, -d);
+  return shifts;
+}
 const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<InteractIntent>([
   'barrel', 'chest', 'board', 'dock', 'mermaid', 'keg_diffuse', 'upgrade',
   'gold_hoarder', 'stow_chest', 'helm', 'sails', 'brace',
@@ -201,6 +232,14 @@ export class Match {
   private state!: GameState;
   private t = 0;
   private tickCount = 0;
+  /** Monotonic snapshot counter shared by hot + full snapshots (wire field `seq`). */
+  private snapshotSeq = 0;
+  /** Seconds left on the staged start; 0 once the sim is live. */
+  private countdownRemaining = 0;
+  /** Last whole second broadcast as a 'match_countdown' tick. */
+  private lastCountdownBroadcast = -1;
+  /** Countdown-phase tick counter (state.tick stays frozen until the horn). */
+  private countdownTick = 0;
   private lastTickWallMs = 0;
   private tickBacklogSec = 0;
   private sharkSpawnCooldown = 0;
@@ -270,13 +309,62 @@ export class Match {
     this.setupWorld(opts.botCount);
   }
 
+  /**
+   * Begin the match. With MATCH_START_COUNTDOWN_SEC > 0 the match holds in phase
+   * 'waiting' for that long — the sim is frozen and inputs are ignored (tick()
+   * only runs the countdown branch) — broadcasting one 'match_countdown' per
+   * whole second, then 'match_horn' the instant the sim goes live. At 0 this is
+   * the legacy instant start, byte-for-byte.
+   */
   start(): void {
     if (this.tickInterval) return;
-    this.state.phase = 'playing';
+    this.countdownRemaining = Math.max(0, MATCH_START_COUNTDOWN_SEC);
+    if (this.countdownRemaining > 0) {
+      this.state.phase = 'waiting';
+      this.state.countdownRemaining = this.countdownRemaining;
+      this.lastCountdownBroadcast = -1;
+    } else {
+      this.state.phase = 'playing';
+    }
     this.lastTickWallMs = performance.now();
     this.tickBacklogSec = 0;
     this.tickInterval = setInterval(() => this.runTicks(), SERVER_TICK_MS);
-    console.log(`[Match ${this.id}] started — bots: ${this.configuredBotCount}`);
+    console.log(`[Match ${this.id}] started — bots: ${this.configuredBotCount}${this.countdownRemaining > 0 ? `, countdown ${this.countdownRemaining}s` : ''}`);
+  }
+
+  /** Countdown phase step: broadcast whole-second ticks, then the horn. */
+  private tickCountdown(dt: number): void {
+    this.countdownRemaining = Math.max(0, this.countdownRemaining - dt);
+    this.state.countdownRemaining = this.countdownRemaining;
+    // Keep feeding hot snapshots (frozen world, countdownRemaining aboard) —
+    // going silent for the whole countdown would read to the client exactly like
+    // a dropped connection.
+    this.countdownTick++;
+    if (this.countdownTick % SNAPSHOT_RATE === 0) {
+      const hot = buildHotSnapshot(this.state, this.t, ++this.snapshotSeq);
+      this.broadcastVolatile({ type: 'state_hot', ts: Date.now(), payload: hot }, 'hot');
+    }
+    const whole = Math.ceil(this.countdownRemaining);
+    if (whole !== this.lastCountdownBroadcast) {
+      this.lastCountdownBroadcast = whole;
+      this.broadcast({
+        type: 'match_countdown',
+        ts: Date.now(),
+        payload: {
+          secondsRemaining: whole,
+          totalSeconds: MATCH_START_COUNTDOWN_SEC,
+          crews: this.state.shipsAlive,
+        },
+      });
+    }
+    if (this.countdownRemaining > 0) return;
+    this.state.phase = 'playing';
+    this.state.countdownRemaining = 0;
+    this.broadcast({
+      type: 'match_horn',
+      ts: Date.now(),
+      payload: { crews: this.state.shipsAlive },
+    });
   }
 
   /**
@@ -356,6 +444,9 @@ export class Match {
     }
 
     this.setupSkeletonWaves(islandList);
+    // The storm samples terrain when picking late ring centres (see
+    // StormSystem.pickNextSafeCenter) — must be set before buildInitialState.
+    this.storm.setIslands(islandList);
 
     this.state = {
       phase: 'waiting',
@@ -539,10 +630,25 @@ export class Match {
   }
 
   /**
-   * Add a human to this match. Lobby owns the WebSocket lifecycle (message routing,
-   * close handler) — it MUST call removeClient(playerId) on disconnect or detach.
+   * Add a human to this match and send their join message immediately.
+   * Lobby owns the WebSocket lifecycle (message routing, close handler) — it MUST
+   * call removeClient(playerId) on disconnect or detach.
    */
   addHumanClient(ws: WebSocket, name: string): { playerId: string; shipId: string; snapshot: GameState } {
+    return this.createHumanClient(ws, name).send();
+  }
+
+  /**
+   * Spawn + register the human and BUILD their join message without sending it.
+   * The lobby needs the two-step so it can emit 'match_start' (which tears down
+   * the menu) only once the join payload definitely exists — and so
+   * expectedHumans is the real count instead of humanCount()+1.
+   */
+  createHumanClient(ws: WebSocket, name: string): {
+    playerId: string;
+    shipId: string;
+    send: () => { playerId: string; shipId: string; snapshot: GameState };
+  } {
     const playerId = uuid();
     const displayName = (name || '').trim().slice(0, 24) || 'Pirate';
 
@@ -608,19 +714,26 @@ export class Match {
       },
       lastOneShotAt: {},
       pendingFullSnapshot: null,
-      pendingHotSnapshot: null,
     };
     this.clients.set(playerId, client);
 
-    const snapshot = this.buildSnapshot(true);
-    this.send(ws, {
-      type: 'join',
-      ts: Date.now(),
-      payload: { playerId, shipId, snapshot, matchId: this.id },
-    });
-
-    console.log(`[Match ${this.id}] human joined: ${displayName} (${playerId.slice(0, 6)}); humans=${this.clients.size}`);
-    return { playerId, shipId, snapshot };
+    // The join snapshot goes out through the SAME wire encoder as every later
+    // full snapshot: raw buildSnapshot was ~310KB (vs ~214KB quantized) and its
+    // unquantized floats disagreed with the quantized stream that followed.
+    const snapshot = buildWireSnapshot(this.buildSnapshot(true), true);
+    return {
+      playerId,
+      shipId,
+      send: () => {
+        this.send(ws, {
+          type: 'join',
+          ts: Date.now(),
+          payload: { playerId, shipId, snapshot, matchId: this.id },
+        });
+        console.log(`[Match ${this.id}] human joined: ${displayName} (${playerId.slice(0, 6)}); humans=${this.clients.size}`);
+        return { playerId, shipId, snapshot };
+      },
+    };
   }
 
   /**
@@ -882,6 +995,16 @@ export class Match {
 
   private tick() {
     const dt = SERVER_TICK_MS / 1000;
+
+    // Staged start: sim time itself is frozen so the storm clock, playSeconds and
+    // the wave clock all begin at the horn, not at match creation. Only start()
+    // arms the countdown, so with MATCH_START_COUNTDOWN_SEC = 0 this branch never
+    // runs and tick() behaves exactly as it did before the staged start existed.
+    if (this.state.phase === 'waiting' && this.countdownRemaining > 0) {
+      this.tickCountdown(dt);
+      return;
+    }
+
     this.t += dt;
     this.tickCount++;
     this.state.tick++;
@@ -947,6 +1070,7 @@ export class Match {
       this.state.islands,
       this.state.storm,
       this.weapons,
+      this.state.seaRocks,
     );
     // Resolve any personal-weapon shots fired by bots this tick.
     for (const shot of this.bots.flushFirearmShots()) {
@@ -1050,7 +1174,7 @@ export class Match {
         const snap = buildWireSnapshot(this.buildSnapshot(includeStaticWorld), includeStaticWorld);
         this.broadcastVolatile({ type: 'state_snapshot', ts: Date.now(), payload: snap }, 'full');
       } else {
-        const hot = buildHotSnapshot(this.state, this.t);
+        const hot = buildHotSnapshot(this.state, this.t, ++this.snapshotSeq);
         this.broadcastVolatile({ type: 'state_hot', ts: Date.now(), payload: hot }, 'hot');
       }
     }
@@ -3252,7 +3376,49 @@ export class Match {
       const hullDistance = intersectRayShipHull(trace.origin, trace.direction, occlusion, ship);
       if (hullDistance !== null) occlusion = Math.min(occlusion, hullDistance);
     }
+    const structure = this.intersectRayIslandStructures(trace.origin, trace.direction, occlusion);
+    if (structure !== null) occlusion = Math.min(occlusion, structure);
     return occlusion;
+  }
+
+  /** Distance to the first SOLID island structure (tavern walls, boulders, towers,
+   *  the fort, story landmarks) along a ray, or null when the path is clear.
+   *  Cover that reads as solid has to stop bullets — snipers used to shoot clean
+   *  through a 2.6m boulder or a fort wall. Thin capsules (palms, posts, lanterns,
+   *  crates) are deliberately NOT occluders: they are see-through-ish dressing and
+   *  blocking on them would feel arbitrary. */
+  private intersectRayIslandStructures(origin: Vec3, direction: Vec3, maxDistance: number): number | null {
+    let best: number | null = null;
+    for (const island of this.state.islands) {
+      // Broadphase: skip islands whose whole footprint is off the ray.
+      const reach = island.radius + 60;
+      const toCenterX = island.position.x - origin.x;
+      const toCenterZ = island.position.z - origin.z;
+      const alongRay = clamp(toCenterX * direction.x + toCenterZ * direction.z, 0, maxDistance);
+      const perpX = toCenterX - direction.x * alongRay;
+      const perpZ = toCenterZ - direction.z * alongRay;
+      if (perpX * perpX + perpZ * perpZ > reach * reach) continue;
+
+      if (island.tavern && rayPassesNear(origin, direction, maxDistance, island.tavern.position, getTavernBoundsRadius(island.tavern))) {
+        const hit = intersectRayTavern(origin, direction, maxDistance, island.tavern);
+        if (hit !== null && (best === null || hit < best)) best = hit;
+      }
+      for (const prop of island.props ?? []) {
+        const collider = PROP_COLLIDERS[prop.type];
+        if (!collider || collider.shape === 'none') continue;
+        const scale = prop.scale ?? 1;
+        const radius = collider.radius * scale;
+        if (radius < PROP_OCCLUDER_MIN_RADIUS) continue; // palms/posts/crates stay shootable-through
+        const baseY = getIslandSurfaceY(island, prop.x, prop.z);
+        const hit = intersectRayVerticalCylinder(
+          origin, direction, maxDistance,
+          prop.x, prop.z, radius * 0.9,
+          baseY, baseY + collider.height * scale,
+        );
+        if (hit !== null && (best === null || hit < best)) best = hit;
+      }
+    }
+    return best;
   }
 
   private findClosestFirearmHit(
@@ -3559,6 +3725,11 @@ export class Match {
     };
   }
 
+  /** Swim-up ladder at the dock's SEAWARD end. Dock-local space is the canonical
+   *  three.js frame (world = center + Ry(θ)·local, +local-z seaward) — the same
+   *  frame as the client dock mesh, PhysicsSystem.toDockLocal and
+   *  dockLocalToWorld. The old mirrored frame put the prompt (and the climb
+   *  target) up to 37m off the dock, dumping climbers straight back into the sea. */
   private tryClimbIslandDockFromWater(player: Player): boolean {
     if (player.state !== 'swimming') return false;
     for (const island of this.state.islands) {
@@ -3568,13 +3739,15 @@ export class Match {
       const dz = player.position.z - dock.position.z;
       const cos = Math.cos(dock.rotation);
       const sin = Math.sin(dock.rotation);
-      const localX = dx * cos + dz * sin;
-      const localZ = -dx * sin + dz * cos;
-      if (Math.abs(localX) > dock.width * 0.42) continue;
-      if (localZ > -dock.length * 0.08 || localZ < -dock.length * 0.58) continue;
-      const targetDist = Math.hypot(localX, localZ + dock.length * 0.34);
-      if (targetDist > 4.2) continue;
-      const top = dockLocalToWorld(dock, 0, 0.55, -dock.length * 0.12);
+      const localX = dx * cos - dz * sin;
+      const localZ = dx * sin + dz * cos;
+      if (Math.abs(localX) > dock.width * 0.42 + PLAYER.RADIUS) continue;
+      if (localZ < dock.length * 0.08 || localZ > dock.length * 0.58) continue;
+      const ladderZ = dock.length * DOCK_LADDER_LOCAL_Z_FRAC;
+      if (Math.hypot(localX, localZ - ladderZ) > DOCK_CLIMB_REACH) continue;
+      // Land ON the walkable deck: the deck spans |localZ| ≤ length/2, so the
+      // climb-out sits just inboard of the ladder, never past the seaward tip.
+      const top = dockLocalToWorld(dock, 0, 0.52, Math.min(ladderZ, dock.length * 0.5 - 0.6));
       player.position.x = top.x;
       player.position.z = top.z;
       player.position.y = dock.position.y + 0.52;
@@ -4091,6 +4264,26 @@ export class Match {
     ship.crewIds = [];
     this.state.kegs = this.state.kegs.filter((keg) => keg.shipId !== ship.id);
     this.shipLastDamagedByPlayer.delete(ship.id);
+    this.announceCrewEliminated(ship, sinkKiller);
+  }
+
+  /** A ship going under is what the CREWS AFLOAT counter tracks, and it used to
+   *  drop silently (10 → 7 → 5 with no on-screen event). Announce it so the BR's
+   *  tension meter is audible; the crew itself may still be swimming/fighting. */
+  private announceCrewEliminated(ship: Ship, sunkBy: Player | null) {
+    const owner = this.state.players.find((p) => p.id === ship.ownerId);
+    const remaining = this.state.ships.filter((s) => s.alive && !s.sinking && s.id !== ship.id).length;
+    this.broadcast({
+      type: 'crew_eliminated',
+      ts: Date.now(),
+      payload: {
+        crewId: ship.id,
+        crewName: owner ? `${owner.name}'s crew` : 'A crew',
+        remaining,
+        byPlayerId: sunkBy?.id ?? null,
+        byName: sunkBy?.name ?? null,
+      },
+    });
   }
 
   private dropShipTreasure(ship: Ship) {
@@ -4697,9 +4890,12 @@ export class Match {
     }
   }
 
+  /** Every full snapshot (join included) stamps the next `seq`; hot snapshots draw
+   *  from the same counter, so the client can order the two interleaved streams. */
   private buildSnapshot(includeStaticWorld = true): GameState {
     return {
       ...this.state,
+      seq: ++this.snapshotSeq,
       serverTime: this.t,
       projectiles: this.state.projectiles.filter(p => p.alive),
       kegs: this.state.kegs.filter((keg) => keg.timer > 0 && !keg.defused),
@@ -4897,8 +5093,9 @@ export class Match {
     for (const [, client] of this.clients) {
       if (client.ws.readyState !== WebSocket.OPEN) continue;
       if (client.ws.bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES) {
+        // Hot updates are superseded ~31x/second, so a withheld one is simply
+        // dropped; only the newest FULL base is worth holding for the flush.
         if (kind === 'full') client.pendingFullSnapshot = data;
-        else client.pendingHotSnapshot = data;
         continue;
       }
       if (kind === 'full') {
@@ -4910,7 +5107,6 @@ export class Match {
         try { client.ws.send(client.pendingFullSnapshot); } catch {}
         client.pendingFullSnapshot = null;
       }
-      client.pendingHotSnapshot = null;
       try { client.ws.send(data); } catch {}
     }
   }
@@ -5494,11 +5690,10 @@ export class Match {
 
   private parkShipAtDock(ship: Ship, dock: IslandDock) {
     // Normalized berth, computed for THIS ship: parallel to the dock, bow
-    // seaward, a consistent ~1m gap between hull side and dock edge, midship
-    // abreast the dock's outer half. The old pre-baked point was sized for a
-    // galleon and slid up to 88m seaward on shallow shores — sloops floated
-    // far off crooked-looking docks. Depth is verified per ship type; the
-    // pre-baked galleon berth stays as the fallback.
+    // seaward, a consistent 1m gap between hull side and dock edge, and the hull
+    // laid ALONGSIDE the dock's seaward run (stern always inside the dock span,
+    // so the ship is boardable from the deck). Depth is verified per ship type;
+    // the pre-baked galleon berth stays as the last-resort fallback.
     const berth = this.computeShipBerth(ship, dock) ?? dock.berthPosition;
     ship.position.x = berth.x;
     ship.position.z = berth.z;
@@ -5530,34 +5725,72 @@ export class Match {
     this.physics.syncHullFromHoles(ship);
   }
 
-  /** Depth-verified side-berth for THIS ship type: parallel to the dock, a
-   *  fixed ~1m rail gap, midship starting abreast the dock's outer half and
-   *  only sliding seaward as far as the draft demands. Tries the dock's
-   *  preferred side first, then the other; null → caller falls back to the
-   *  pre-baked galleon berth. */
+  /** Depth-verified side-berth for THIS ship type, in the canonical dock frame
+   *  (world = dock.position + Ry(θ)·local, +local-z SEAWARD, dock.position is the
+   *  MIDDLE of a deck that spans ±length/2).
+   *
+   *  Along-dock anchor: the hull is centred on the dock's SEAWARD HALF with its
+   *  bow tucked one hull-margin inside the tip, so every ship type — sloop, brig,
+   *  galleon — lies fully ALONGSIDE the dock run at the same relative spot
+   *  instead of drifting off the end. (The old formula measured a shore-frame
+   *  offset from the dock CENTRE: 80% of sloop berths had zero hull-alongside
+   *  overlap and some sat 24-38m past the tip.)
+   *
+   *  Lateral: hull side to dock edge is a fixed BERTH_RAIL_GAP.
+   *  Depth: the keel must clear the seabed at the same three centreline stations
+   *  grounding uses (±0.44·length, mid). If the canonical anchor is too shallow
+   *  the berth shifts along the dock by the SMALLEST amount that floats — never
+   *  more than BERTH_SEARCH_REACH, so a ship can never end up parked in open
+   *  water tens of metres off the pier. Returns null only when even the deepest
+   *  spot in reach would leave the hull sitting on dry ground. */
   private computeShipBerth(ship: Ship, dock: IslandDock): { x: number; z: number } | null {
     const island = this.state.islands.find((isl) => isl.dock === dock);
     if (!island) return null;
     const stats = SHIP_STATS[ship.type];
     const fwd = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = { x: Math.cos(dock.rotation), z: -Math.sin(dock.rotation) };
     const half = stats.length * 0.5;
-    const lateral = dock.width * 0.5 + stats.width * 0.5 + 1.0;
-    // The berth must clear the KEEL (draft = height × KEEL_DRAFT_RATIO) with
-    // margin, per ship type — a too-shallow berth grounds the hull and the
-    // buoyancy/grounding resolve visibly shoves it out of the water.
-    const needDepth = -(stats.height * SHIP.KEEL_DRAFT_RATIO + 0.55);
-    const alongStart = Math.max(dock.length * 0.55, dock.length - half);
-    for (const side of [dock.moorSide, -dock.moorSide]) {
-      for (let step = 0; step < 24; step++) {
-        const along = alongStart + step * 1.5;
+    const lateral = dock.width * 0.5 + stats.width * 0.5 + BERTH_RAIL_GAP;
+    // Depth requirement measured off the RENDERED keel (SHIP.HULL_DRAFT_F — the
+    // draft grounding and swim-hull collision use) plus the grounding safety bite
+    // and a wave-bob margin. The old conservative KEEL_DRAFT_RATIO figure demanded
+    // ~0.7m more water than the hull actually needs, which is a big part of why
+    // berths slid off the end of shallow-shelf docks.
+    const draft = stats.height * SHIP.HULL_DRAFT_F[ship.type];
+    const needDepth = -(draft + SHIP.GROUND_KEEL_SAFETY + BERTH_BOB_MARGIN);
+    // Sample where PhysicsSystem's HULL_CONTACT_STATIONS do, so "floats here"
+    // means exactly the same thing to the berth planner and to grounding.
+    const stations = [stats.length * 0.44, 0, -stats.length * 0.44];
+    // Bow tucked just inside the seaward tip; clamped to 0 (hull centred on the
+    // dock) when the hull is longer than the dock's seaward half.
+    const tip = dock.length * 0.5;
+    const alongStart = Math.max(0, tip - half - BERTH_BOW_INSET);
+
+    let fallback: { x: number; z: number; shallowest: number } | null = null;
+    // Search outward from that anchor for the SMALLEST displacement that floats,
+    // seaward first. Shoreward candidates matter: a couple of docks (the atoll)
+    // run out onto a reef, so their deep water is on the INSIDE — the old
+    // seaward-only slide gave up there and fell back to a berth ~40m off the tip.
+    for (const shift of berthShiftLadder(dock.length)) {
+      for (const side of [dock.moorSide, -dock.moorSide]) {
+        const along = alongStart + shift;
         const cx = dock.position.x + fwd.x * along + right.x * side * lateral;
         const cz = dock.position.z + fwd.z * along + right.z * side * lateral;
-        const clear = [half + 1.5, 0, -(half + 1.5)].every((offset) =>
-          getIslandSurfaceY(island, cx + fwd.x * offset, cz + fwd.z * offset) < needDepth,
-        );
-        if (clear) return { x: cx, z: cz };
+        let shallowest = -Infinity;
+        for (const offset of stations) {
+          const y = getIslandSurfaceY(island, cx + fwd.x * offset, cz + fwd.z * offset);
+          if (y > shallowest) shallowest = y;
+        }
+        if (shallowest < needDepth) return { x: cx, z: cz };
+        // Best effort for docks with no floating berth in reach (reef mouths):
+        // the wettest spot alongside beats a "perfect" one out at sea.
+        if (!fallback || shallowest < fallback.shallowest) {
+          fallback = { x: cx, z: cz, shallowest };
+        }
       }
+    }
+    if (fallback && fallback.shallowest < -BERTH_MIN_WATER) {
+      return { x: fallback.x, z: fallback.z };
     }
     return null;
   }
@@ -5609,4 +5842,87 @@ export class Match {
     return toShipWorldPoint({ x, z }, ship);
   }
 
+}
+
+/** Props with a blocking radius below this stay shoot-through (palms, lantern
+ *  posts, barrels, crates, grave markers) — only masses that read as hard cover
+ *  stop a bullet. */
+const PROP_OCCLUDER_MIN_RADIUS = 1.0;
+/** Cheap broadphase: does the ray's XZ segment pass within `radius` of a point? */
+function rayPassesNear(origin: Vec3, direction: Vec3, maxDistance: number, point: Vec3, radius: number): boolean {
+  const dx = point.x - origin.x;
+  const dz = point.z - origin.z;
+  const along = clamp(dx * direction.x + dz * direction.z, 0, maxDistance);
+  const px = dx - direction.x * along;
+  const pz = dz - direction.z * along;
+  return px * px + pz * pz <= radius * radius;
+}
+
+/**
+ * Ray vs an axis-aligned vertical cylinder (XZ circle × [minY, maxY]).
+ * Returns the entry distance, or null when the ray misses / the hit is outside
+ * the height band. Used for prop occluders — cheap and stable at grazing angles.
+ */
+function intersectRayVerticalCylinder(
+  origin: Vec3, direction: Vec3, maxDistance: number,
+  cx: number, cz: number, radius: number,
+  minY: number, maxY: number,
+): number | null {
+  const ox = origin.x - cx;
+  const oz = origin.z - cz;
+  const a = direction.x * direction.x + direction.z * direction.z;
+  if (a < 1e-8) return null; // straight up/down: never blocked by a prop side
+  const b = 2 * (ox * direction.x + oz * direction.z);
+  const c = ox * ox + oz * oz - radius * radius;
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return null;
+  const sq = Math.sqrt(disc);
+  for (const t of [(-b - sq) / (2 * a), (-b + sq) / (2 * a)]) {
+    if (t < 0 || t > maxDistance) continue;
+    const y = origin.y + direction.y * t;
+    if (y >= minY && y <= maxY) return t;
+  }
+  return null;
+}
+
+/**
+ * Ray vs the tavern shell — the wall AABBs from getTavernWallSegments (the same
+ * SINGLE TRUTH PhysicsSystem walks into), so the building is as solid to a musket
+ * ball as it is to a boot. Bullets used to pass straight through the only
+ * structure on the island a player can stand inside; the doorway gap stays open.
+ */
+function intersectRayTavern(origin: Vec3, direction: Vec3, maxDistance: number, tavern: IslandTavern): number | null {
+  const local = toTavernLocal(tavern, origin.x, origin.z);
+  const cos = Math.cos(tavern.rotation);
+  const sin = Math.sin(tavern.rotation);
+  const dx = direction.x * cos - direction.z * sin;
+  const dz = direction.x * sin + direction.z * cos;
+  const band = getTavernWallBand(tavern);
+
+  let best: number | null = null;
+  for (const seg of getTavernWallSegments(tavern)) {
+    // 2D slab test in tavern-local space, then gate on the wall's height band.
+    let tEnter = 0;
+    let tExit = maxDistance;
+    let missed = false;
+    for (const axis of [
+      { o: local.x, d: dx, min: seg.minX, max: seg.maxX },
+      { o: local.z, d: dz, min: seg.minZ, max: seg.maxZ },
+    ]) {
+      if (Math.abs(axis.d) < 1e-8) {
+        if (axis.o < axis.min || axis.o > axis.max) { missed = true; break; }
+        continue;
+      }
+      const t0 = (axis.min - axis.o) / axis.d;
+      const t1 = (axis.max - axis.o) / axis.d;
+      tEnter = Math.max(tEnter, Math.min(t0, t1));
+      tExit = Math.min(tExit, Math.max(t0, t1));
+      if (tEnter > tExit) { missed = true; break; }
+    }
+    if (missed || tEnter > maxDistance) continue;
+    const y = origin.y + direction.y * tEnter;
+    if (y < band.minY || y > band.maxY) continue;
+    if (best === null || tEnter < best) best = tEnter;
+  }
+  return best;
 }

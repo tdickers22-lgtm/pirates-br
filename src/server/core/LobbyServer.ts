@@ -23,6 +23,16 @@ const QUEUE_TIMER_SECONDS = 15;
 const QUEUE_MATCH_BOTS_FILL_TO = MATCH_TOTAL_SHIPS; // total ships per match (humans + bots)
 const MATCH_GC_AFTER_END_MS = 60_000;
 const ENDED_MATCH_DETACH_MS = 25_000; // auto-return-to-menu after this if client doesn't act
+/** Hard cap on a single inbound ws message. The largest legitimate client frame
+ *  is a player_input (<1KB); anything past this is junk or an attack, and ws
+ *  raises WS_ERR_UNSUPPORTED_MESSAGE_LENGTH which our 'error' handler contains. */
+const MAX_INBOUND_MESSAGE_BYTES = 64 * 1024;
+/** Belt on top of maxPayload: a frame that decodes but is absurd never reaches JSON.parse. */
+const MAX_DECODED_MESSAGE_BYTES = 32 * 1024;
+/** App-level heartbeat: ping every HEARTBEAT_INTERVAL_MS, drop a socket that has
+ *  not answered (pong / any message) within HEARTBEAT_TIMEOUT_MS. */
+const HEARTBEAT_INTERVAL_MS = 5_000;
+const HEARTBEAT_TIMEOUT_MS = 10_000;
 
 const PROJECT_ROOT = join(fileURLToPath(new URL('../../..', import.meta.url)));
 const CLIENT_DIST_ROOT = join(PROJECT_ROOT, 'dist/client');
@@ -51,6 +61,12 @@ interface ClientSession {
   matchPlayerId?: string;
   joinedQueueAt?: number;
   endedMatchSince?: number;
+  /** Wall time of the last byte received from this socket (pong counts) — the
+   *  heartbeat sweep drops sockets that go silent so their player leaves the match. */
+  lastSeenAt: number;
+  /** Set by onDisconnect so the heartbeat sweep and a later 'close' can't tear
+   *  the same session down twice. */
+  disposed?: boolean;
 }
 
 interface Party {
@@ -90,8 +106,19 @@ export class LobbyServer {
   }
 
   init(port: number): void {
-    this.wss = new WebSocketServer({ server: this.httpServer, path: '/ws' });
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      path: '/ws',
+      // Oversized frames are rejected by ws itself (emits a socket 'error' we
+      // contain) instead of being buffered into memory.
+      maxPayload: MAX_INBOUND_MESSAGE_BYTES,
+    });
     this.wss.on('connection', (ws) => this.onConnect(ws));
+    // A ws-level error (failed upgrade, socket blow-up before 'connection') is
+    // emitted on the SERVER; unhandled it takes the whole process down.
+    this.wss.on('error', (err) => {
+      console.error('[Lobby] WebSocketServer error:', err);
+    });
     // Bind to 0.0.0.0 so 127.0.0.1 (Vite proxy / direct) reaches us reliably on macOS
     // where Node's default IPv6 wildcard sometimes refuses IPv4 connections.
     this.httpServer.listen(port, '0.0.0.0', () => {
@@ -101,6 +128,7 @@ export class LobbyServer {
       console.error(`[Lobby] HTTP server error:`, err);
     });
     setInterval(() => this.tick(), 1000);
+    setInterval(() => this.sweepDeadSockets(), HEARTBEAT_INTERVAL_MS);
   }
 
   // ─── Connection lifecycle ────────────────────────────────────
@@ -111,12 +139,30 @@ export class LobbyServer {
       ws,
       name: '',
       state: 'menu',
+      lastSeenAt: Date.now(),
     };
     this.clients.set(clientId, session);
 
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      session.lastSeenAt = Date.now();
+      // Frame decode itself must be contained: a hostile payload that throws in
+      // Buffer/JSON handling would otherwise escape the 'message' emit.
       let msg: NetMsg;
-      try { msg = JSON.parse(data.toString()) as NetMsg; } catch { return; }
+      try {
+        if (isBinary) return;
+        const bytes = Array.isArray(data)
+          ? data.reduce((sum, part) => sum + part.length, 0)
+          : (data as Buffer).byteLength;
+        if (bytes > MAX_DECODED_MESSAGE_BYTES) {
+          console.warn(`[Lobby] dropping ${bytes}B message from ${session.id.slice(0, 6)}`);
+          return;
+        }
+        const parsed = JSON.parse(data.toString()) as unknown;
+        if (!parsed || typeof parsed !== 'object' || typeof (parsed as NetMsg).type !== 'string') return;
+        msg = parsed as NetMsg;
+      } catch {
+        return;
+      }
       // A handler throw on one client's (possibly malformed/hostile) message
       // must never escape to the ws 'message' emit — uncaught there it kills
       // the whole process and every match on it. Log and drop instead.
@@ -128,6 +174,16 @@ export class LobbyServer {
     });
 
     ws.on('close', () => this.onDisconnect(session));
+    // Without this, ws re-emits every protocol violation (bad RSV bit, reserved
+    // opcode, invalid close code, invalid UTF-8, junk bytes, oversized frame) as
+    // an unhandled 'error' — which exits the process and kills EVERY live match.
+    // Verified: 6/7 hostile frames took the server down before this handler.
+    ws.on('error', (err) => {
+      const code = (err as NodeJS.ErrnoException).code ?? err.message;
+      console.error(`[Lobby] ws error ${session.id.slice(0, 6)}: ${code}`);
+      try { ws.close(1002, 'protocol error'); } catch {}
+    });
+    ws.on('pong', () => { session.lastSeenAt = Date.now(); });
 
     const welcome: WelcomePayload = {
       clientId,
@@ -139,6 +195,8 @@ export class LobbyServer {
   }
 
   private onDisconnect(session: ClientSession): void {
+    if (session.disposed) return;
+    session.disposed = true;
     console.log(`[Lobby] client disconnected: ${session.id.slice(0, 6)} (state=${session.state})`);
     this.clients.delete(session.id);
     if (session.state === 'queue') {
@@ -154,6 +212,30 @@ export class LobbyServer {
       const code = session.partyCode;
       this.removeFromParty(session, /*notify*/ true);
       this.maybeClearPartyInMatch(code);
+    }
+  }
+
+  /**
+   * Liveness: ping every socket, and terminate any that has produced no traffic
+   * (message OR pong) for HEARTBEAT_TIMEOUT_MS. Without this a half-open socket
+   * (laptop lid, dropped wifi) keeps its player standing in the match forever —
+   * ws 'close' never fires on a silently dead TCP connection. terminate() fires
+   * 'close', so onDisconnect does the actual player cleanup.
+   */
+  private sweepDeadSockets(): void {
+    const now = Date.now();
+    for (const session of Array.from(this.clients.values())) {
+      if (session.ws.readyState !== WebSocket.OPEN) continue;
+      if (now - session.lastSeenAt > HEARTBEAT_TIMEOUT_MS) {
+        console.log(`[Lobby] dropping silent client ${session.id.slice(0, 6)} (${now - session.lastSeenAt}ms)`);
+        try { session.ws.terminate(); } catch {}
+        // terminate() is not guaranteed to emit 'close' on an already-broken
+        // socket in every Node version — clean up explicitly (onDisconnect is
+        // idempotent via session.disposed).
+        this.onDisconnect(session);
+        continue;
+      }
+      try { session.ws.ping(); } catch {}
     }
   }
 
@@ -494,6 +576,20 @@ export class LobbyServer {
       return;
     }
 
+    // "Crew found" beat: the cohort is spliced OUT of the queue above, so without
+    // this they never receive a final queue_update — the client's `starting`
+    // branch was unreachable and players jumped from "Searching the seas…"
+    // straight to the match teardown with no acknowledgement.
+    const foundPayload: QueueUpdatePayload = {
+      inQueue: cohortSessions.length,
+      needed: QUEUE_TARGET,
+      secondsRemaining: 0,
+      starting: true,
+    };
+    for (const c of cohortSessions) {
+      this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload: foundPayload });
+    }
+
     const botCount = Math.max(0, QUEUE_MATCH_BOTS_FILL_TO - cohortSessions.length);
     const match = this.spawnMatch({ botCount, source: 'queue' });
     for (const c of cohortSessions) {
@@ -519,19 +615,21 @@ export class LobbyServer {
   }
 
   private placeClientIntoMatch(session: ClientSession, match: Match, source: 'party' | 'queue', partyCode: string | null = null): void {
-    // Send match_start FIRST so the client tears down the menu and resets local round
-    // state BEFORE the join snapshot arrives — otherwise the post-join reset wipes
-    // localPlayerId/state and the camera + input lose their anchor.
+    // Build the join payload first (no send) so a throw in world/spawn setup can
+    // never leave the client with a torn-down menu and no join ever arriving.
+    // The client still needs match_start BEFORE the join snapshot — it resets
+    // local round state on match_start, which would otherwise wipe
+    // localPlayerId and unanchor the camera/input.
+    const pending = match.createHumanClient(session.ws, session.name);
     const startMsg: MatchStartPayload = {
       matchId: match.id,
       source,
-      expectedHumans: match.humanCount() + 1,
+      expectedHumans: match.humanCount(),
       botCount: 0,
       partyCode,
     };
     this.send(session.ws, { type: 'match_start', ts: Date.now(), payload: startMsg });
-
-    const { playerId } = match.addHumanClient(session.ws, session.name);
+    const { playerId } = pending.send();
     session.state = 'in_match';
     session.matchId = match.id;
     session.matchPlayerId = playerId;

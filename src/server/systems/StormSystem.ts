@@ -1,6 +1,6 @@
-import type { StormState, Ship, Player, HullSections } from '../../shared/types/index.js';
+import type { StormState, Ship, Player, HullSections, Island } from '../../shared/types/index.js';
 import { STORM_PHASES, WORLD, FLOODING } from '../../shared/constants/index.js';
-import { dist2D, lerp } from '../../shared/utils/index.js';
+import { dist2D, lerp, getIslandSurfaceY } from '../../shared/utils/index.js';
 
 export interface StormDamageHooks {
   /** Route storm damage through PhysicsSystem.openHole so the tempest punches
@@ -13,9 +13,26 @@ export interface StormDamageHooks {
  *  a fresh hole into the seaward hull section. */
 const STORM_HOLE_DAMAGE = 30;
 
+/** Fraction of the final circle that may sit on dry land before a candidate
+ *  centre is rejected (rings this small are the endgame arena). */
+const RING_LAND_REJECT_FRACTION = 0.4;
+/** Rings at or below this radius get the land check — earlier rings are large
+ *  enough that an island inside them is a feature, not a dead arena. */
+const RING_LAND_CHECK_RADIUS = 200;
+/** Rejection-sampling budget per pick (deterministic bound; last candidate wins). */
+const RING_CENTER_TRIES = 12;
+
 export class StormSystem {
   /** Per-ship storm-damage accumulation toward the next punched hole. */
   private shipStormAccum = new Map<string, number>();
+  /** Islands, for keeping the late rings off dry land (Old Maw Caldera sits at
+   *  the world origin, which is exactly where the ring converges). */
+  private islands: Island[] = [];
+
+  /** Match hands the world in once at setup — purely read-only sampling. */
+  setIslands(islands: Island[]): void {
+    this.islands = islands;
+  }
 
   buildInitialState(): StormState {
     const phase = STORM_PHASES[0];
@@ -162,12 +179,45 @@ export class StormSystem {
 
   private pickNextSafeCenter(centerX: number, centerZ: number, currentRadius: number, nextRadius: number) {
     const allowedDrift = Math.max(0, currentRadius - nextRadius - 8);
-    const drift = allowedDrift * (0.22 + Math.random() * 0.68);
-    const angle = Math.random() * Math.PI * 2;
     const worldBound = Math.max(0, WORLD.HALF - nextRadius - 36);
-    return {
-      x: Math.max(-worldBound, Math.min(worldBound, centerX + Math.cos(angle) * drift)),
-      z: Math.max(-worldBound, Math.min(worldBound, centerZ + Math.sin(angle) * drift)),
+    const roll = () => {
+      const drift = allowedDrift * (0.22 + Math.random() * 0.68);
+      const angle = Math.random() * Math.PI * 2;
+      return {
+        x: Math.max(-worldBound, Math.min(worldBound, centerX + Math.cos(angle) * drift)),
+        z: Math.max(-worldBound, Math.min(worldBound, centerZ + Math.sin(angle) * drift)),
+      };
     };
+    // Small end circles must be sailable water, not a volcano. Re-roll (bounded)
+    // and keep the driest candidate; every draw comes from the storm's own
+    // Math.random stream, so island generation (its own seeded rng) is untouched.
+    if (nextRadius > RING_LAND_CHECK_RADIUS || this.islands.length === 0) return roll();
+    let best: { x: number; z: number; land: number } | null = null;
+    for (let i = 0; i < RING_CENTER_TRIES; i++) {
+      const candidate = roll();
+      const land = this.ringLandFraction(candidate.x, candidate.z, nextRadius);
+      if (land <= RING_LAND_REJECT_FRACTION) return candidate;
+      if (!best || land < best.land) best = { ...candidate, land };
+    }
+    return { x: best!.x, z: best!.z };
+  }
+
+  /** Fraction of a ring's area that is dry land, sampled on a coarse polar grid. */
+  private ringLandFraction(cx: number, cz: number, radius: number): number {
+    let dry = 0;
+    let total = 0;
+    for (const fraction of [0, 0.45, 0.8]) {
+      const steps = fraction === 0 ? 1 : 8;
+      for (let i = 0; i < steps; i++) {
+        const angle = (i / steps) * Math.PI * 2;
+        const x = cx + Math.cos(angle) * radius * fraction;
+        const z = cz + Math.sin(angle) * radius * fraction;
+        total++;
+        for (const island of this.islands) {
+          if (getIslandSurfaceY(island, x, z) > 0.2) { dry++; break; }
+        }
+      }
+    }
+    return total === 0 ? 0 : dry / total;
   }
 }

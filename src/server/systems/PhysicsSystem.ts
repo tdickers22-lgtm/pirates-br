@@ -29,8 +29,16 @@ import {
   isInsideSwimHullFootprint,
   pushOutOfSwimHullFootprint,
   getSwimHullVerticalBand,
+  getSwimHullVerticalT,
+  getTavernBoundsRadius,
+  getTavernWallBand,
+  intersectRayTavern,
+  pushOutOfTavernWalls,
+  tavernLocalToWorld,
+  toDockLocalPoint,
+  toTavernLocal,
 } from '../../shared/utils/index.js';
-import { resolvePropCollision } from '../../shared/props.js';
+import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 
 // ── Ship wave-riding dynamics tuning ─────────────────────────────────────────
@@ -92,9 +100,9 @@ const LOCO = {
   /** Fall-damage curve on hard ground: harmless below FALL_SAFE_SPEED (m/s of
    *  downward impact), then linear to a per-landing cap. Deep-water entry never
    *  reaches this path (the swim branch owns it), and is guarded again below.
-   *  Tuned lenient (SoT-style): drops under ~11m are free, a 25m cliff stings
-   *  (~30), only huge falls approach the cap — the old 12/7 curve made
-   *  ordinary mountain hops hit like musket balls. */
+   *  Tuned lenient (SoT-style): with GRAVITY −18 the free-fall ceiling is
+   *  15²/(2·18) ≈ 6.2 m, a 25 m cliff costs ~67, only huge falls approach the
+   *  cap — the old 12/7 curve made ordinary mountain hops hit like musket balls. */
   FALL_SAFE_SPEED: 15,
   FALL_DAMAGE_PER_SPEED: 4.5,
   FALL_DAMAGE_MAX: 70,
@@ -483,6 +491,7 @@ export class PhysicsSystem {
       // Ship-island collision
       for (const island of islands) {
         this.pushShipOutOfIsland(ship, island);
+        if (island.dock) this.pushShipOutOfDock(ship, island.dock);
       }
       for (const rock of seaRocks) {
         this.pushShipOutOfSeaRock(ship, rock);
@@ -833,6 +842,7 @@ export class PhysicsSystem {
         // Props (palms/towers/lantern posts/boulders) block walkers and near-shore
         // swimmers via capsule/sphere pushout; steep faces block a walking ascent.
         this.resolvePlayerPropCollision(player, islands);
+        this.resolvePlayerTavernCollision(player, islands);
         this.resolveSlopeBlock(player, onIsland);
 
         const onDock = this.findPlayerDock(player, islands);
@@ -1262,14 +1272,23 @@ export class PhysicsSystem {
       const travelZ = proj.position.z - previousPosition.z;
       const travelDist = Math.sqrt(travelX * travelX + travelY * travelY + travelZ * travelZ);
       if (travelDist > 0.0001) {
-        const terrainHit = raymarchIslandSurface(
-          previousPosition,
-          { x: travelX / travelDist, y: travelY / travelDist, z: travelZ / travelDist },
-          travelDist,
-          islands,
-        );
+        const dir = { x: travelX / travelDist, y: travelY / travelDist, z: travelZ / travelDist };
+        const terrainHit = raymarchIslandSurface(previousPosition, dir, travelDist, islands);
         if (terrainHit.hit) {
           if (terrainHit.point) proj.position = { ...terrainHit.point };
+          proj.alive = false;
+          proj.showImpact = true;
+          continue;
+        }
+        // Solid world structures (boulders, towers, the fort, the tavern) eat a
+        // round — cover that reads as cover must BE cover.
+        const structureT = this.firstStructureHit(previousPosition, dir, travelDist, islands);
+        if (structureT !== null) {
+          proj.position = {
+            x: previousPosition.x + dir.x * structureT,
+            y: previousPosition.y + dir.y * structureT,
+            z: previousPosition.z + dir.z * structureT,
+          };
           proj.alive = false;
           proj.showImpact = true;
           continue;
@@ -1312,6 +1331,32 @@ export class PhysicsSystem {
         }
       }
     }
+  }
+
+  /**
+   * Nearest solid island STRUCTURE along a unit ray (blocking props + tavern
+   * shells), or null. Shared geometry with the on-foot colliders and with
+   * Match's hitscan occlusion, so a boulder that stops your boots also stops
+   * your shot. Broad-phased per island by its max radius.
+   */
+  firstStructureHit(origin: Vec3, direction: Vec3, range: number, islands: Island[]): number | null {
+    let best: number | null = null;
+    for (const island of islands) {
+      const reach = getIslandMaxRadius(island) + LOCO.PROP_BROADPHASE_PAD;
+      const rx = island.position.x - origin.x;
+      const rz = island.position.z - origin.z;
+      const along = clamp(rx * direction.x + rz * direction.z, 0, range);
+      const px = rx - direction.x * along;
+      const pz = rz - direction.z * along;
+      if (px * px + pz * pz > reach * reach) continue;
+      const propT = intersectRayIslandProps(origin, direction, best ?? range, island);
+      if (propT !== null && (best === null || propT < best)) best = propT;
+      if (island.tavern) {
+        const tavernT = intersectRayTavern(origin, direction, best ?? range, island.tavern);
+        if (tavernT !== null && (best === null || tavernT < best)) best = tavernT;
+      }
+    }
+    return best;
   }
 
   /** Torso-centred capsule matching the render pose — swimming lays the body
@@ -1529,11 +1574,14 @@ export class PhysicsSystem {
     for (const ship of ships) {
       if (!ship.alive || ship.sinking) continue;
       const stats = SHIP_STATS[ship.type];
-      const { keelY, deckY } = getSwimHullVerticalBand(ship.position.y, stats);
+      const { keelY, deckY } = getSwimHullVerticalBand(ship.position.y, stats, ship.type);
 
       const local = this.toShipLocal(player.position, ship);
       const margin = PLAYER.RADIUS + 0.18;
-      const insideFootprint = isInsideSwimHullFootprint(stats, local.x, local.z, margin);
+      // The hull tucks in hard below the waterline — a swimmer at depth may hug
+      // the visible bilge curve instead of a straight prism.
+      const verticalT = getSwimHullVerticalT(player.position.y, ship.position.y, stats, ship.type);
+      const insideFootprint = isInsideSwimHullFootprint(stats, local.x, local.z, margin, verticalT);
 
       // Underside barrier: a swimmer beneath the hull footprint cannot rise up
       // through the keel — they must swim out from under it (or board via the
@@ -1553,7 +1601,7 @@ export class PhysicsSystem {
       if (player.position.y > deckY + 0.35) continue;
       if (!insideFootprint) continue;
 
-      const out = pushOutOfSwimHullFootprint(stats, local.x, local.z, margin);
+      const out = pushOutOfSwimHullFootprint(stats, local.x, local.z, margin, verticalT);
       if (!out.pushed) continue;
 
       const w = this.toShipWorld(out.x, out.z, ship);
@@ -1699,6 +1747,43 @@ export class PhysicsSystem {
   }
 
   /**
+   * The tavern is a BUILDING, not a hologram: its four plaster walls block on
+   * foot, with the doorway in the dock-facing (+local-z) wall genuinely open.
+   * Wall geometry comes from the shared getTavernWallSegments so the collision
+   * shell, the shot-occlusion shell and the GLB are one and the same.
+   */
+  private resolvePlayerTavernCollision(player: Player, islands: Island[]) {
+    for (const island of islands) {
+      const tavern = island.tavern;
+      if (!tavern) continue;
+      const band = getTavernWallBand(tavern);
+      if (player.position.y < band.minY || player.position.y > band.maxY) continue;
+      const dx = player.position.x - tavern.position.x;
+      const dz = player.position.z - tavern.position.z;
+      const reach = getTavernBoundsRadius(tavern) + PLAYER.RADIUS;
+      if (dx * dx + dz * dz > reach * reach) continue;
+      const local = toTavernLocal(tavern, player.position.x, player.position.z);
+      const out = pushOutOfTavernWalls(tavern, local.x, local.z, PLAYER.RADIUS);
+      if (!out.pushed) continue;
+      const world = tavernLocalToWorld(tavern, out.x, out.z);
+      const pushX = world.x - player.position.x;
+      const pushZ = world.z - player.position.z;
+      player.position.x = world.x;
+      player.position.z = world.z;
+      const pl = Math.hypot(pushX, pushZ);
+      if (pl > 1e-4) {
+        const nx = pushX / pl;
+        const nz = pushZ / pl;
+        const into = player.velocity.x * nx + player.velocity.z * nz;
+        if (into < 0) {
+          player.velocity.x -= into * nx;
+          player.velocity.z -= into * nz;
+        }
+      }
+    }
+  }
+
+  /**
    * Steep terrain is unwalkable: if a grounded walker is climbing INTO a face
    * steeper than LOCO.SLOPE_MAX, revert this tick's footing (block) but keep any
    * sideways momentum so the pirate slides along the cliff base instead of
@@ -1784,14 +1869,7 @@ export class PhysicsSystem {
   }
 
   private toDockLocal(position: Vec3, dock: NonNullable<Island['dock']>) {
-    const dx = position.x - dock.position.x;
-    const dz = position.z - dock.position.z;
-    const cos = Math.cos(dock.rotation);
-    const sin = Math.sin(dock.rotation);
-    return {
-      x: dx * cos - dz * sin,
-      z: dx * sin + dz * cos,
-    };
+    return toDockLocalPoint(dock, position.x, position.z);
   }
 
   private getShipDynamics(shipId: string) {
@@ -1984,8 +2062,10 @@ export class PhysicsSystem {
   }
 
   /**
-   * Depth-based grounding: the keel (draft ≈ height · KEEL_DRAFT_RATIO below the
-   * waterline) tests the island heightfield under each hull sample. Where the
+   * Depth-based grounding: the keel (the RENDERED draft, height · HULL_DRAFT_F,
+   * plus a small safety bite) tests the island heightfield under each hull
+   * sample — so a scrape lands where the visible keel would touch, not 0.6–0.7 m
+   * of clear water earlier. Where the
    * seabed rises above keel depth the ship scrapes — speed-scaled section
    * damage, a small yaw kick, and a downhill push back toward deep water.
    * Beaches slope gently underwater so shallow approaches ground out, while
@@ -1999,7 +2079,7 @@ export class PhysicsSystem {
     const dzI = ship.position.z - island.position.z;
     if (dxI * dxI + dzI * dzI > broadphase * broadphase) return;
 
-    const keelY = ship.position.y - stats.height * SHIP.KEEL_DRAFT_RATIO;
+    const keelY = ship.position.y - stats.height * SHIP.HULL_DRAFT_F[ship.type] - SHIP.GROUND_KEEL_SAFETY;
     let deepest: { x: number; z: number; depth: number } | null = null;
     for (const sample of this.getShipHullContactSamples(ship)) {
       const depth = getIslandSurfaceY(island, sample.x, sample.z) - keelY;
@@ -2051,6 +2131,76 @@ export class PhysicsSystem {
         this.openHole(ship, section, impactSpeed > 5 ? 2 : 1);
         this.combatEvents.push({
           type: 'ship_impact', kind: 'ground', position: { x: deepest.x, y: 0, z: deepest.z }, speed: impactSpeed,
+        });
+      }
+    }
+  }
+
+  /**
+   * A dock is a pile-driven structure standing on the seabed, not a decal: its
+   * deck and piles stop a hull. Treated as an oriented box in the canonical dock
+   * frame (the same one toDockLocal uses) against the keel-line capsule chain,
+   * resolved along the least-penetration axis with the sea-rock pushback feel.
+   * Berths sit a full beam clear of the box, so moored ships never fight it.
+   */
+  private pushShipOutOfDock(ship: Ship, dock: NonNullable<Island['dock']>) {
+    const stats = SHIP_STATS[ship.type];
+    const dxD = ship.position.x - dock.position.x;
+    const dzD = ship.position.z - dock.position.z;
+    const reach = Math.hypot(dock.width, dock.length) * 0.5 + stats.length * 0.6;
+    if (dxD * dxD + dzD * dzD > reach * reach) return;
+
+    const halfX = dock.width * 0.5;
+    const halfZ = dock.length * 0.5;
+    let deepest: {
+      penetration: number;
+      alongX: boolean;
+      sign: number;
+      sampleX: number;
+      sampleZ: number;
+    } | null = null;
+    for (const sample of this.getShipHullContactSamples(ship)) {
+      const local = this.toDockLocal({ x: sample.x, y: 0, z: sample.z }, dock);
+      const penX = halfX + sample.radius - Math.abs(local.x);
+      const penZ = halfZ + sample.radius - Math.abs(local.z);
+      if (penX <= 0 || penZ <= 0) continue;
+      const alongX = penX <= penZ;
+      const penetration = alongX ? penX : penZ;
+      if (!deepest || penetration > deepest.penetration) {
+        deepest = {
+          penetration,
+          alongX,
+          sign: (alongX ? local.x : local.z) >= 0 ? 1 : -1,
+          sampleX: sample.x,
+          sampleZ: sample.z,
+        };
+      }
+    }
+    if (!deepest) return;
+
+    // Dock-local +x maps to world (cos, −sin) and +z to (sin, cos).
+    const cos = Math.cos(dock.rotation);
+    const sin = Math.sin(dock.rotation);
+    const nx = (deepest.alongX ? cos : sin) * deepest.sign;
+    const nz = (deepest.alongX ? -sin : cos) * deepest.sign;
+    ship.position.x += nx * deepest.penetration;
+    ship.position.z += nz * deepest.penetration;
+
+    const relVel = ship.velocity.x * nx + ship.velocity.z * nz;
+    if (relVel < 0) {
+      const impactSpeed = -relVel;
+      ship.velocity.x -= relVel * nx * 1.35;
+      ship.velocity.z -= relVel * nz * 1.35;
+      // τ about +Y is rz·Fx − rx·Fz — a glancing scrape swings the bow off the pier.
+      ship.angularVelocity += clamp(
+        ((deepest.sampleZ - ship.position.z) * nx - (deepest.sampleX - ship.position.x) * nz) * impactSpeed * 0.004,
+        -0.12, 0.12,
+      );
+      if (impactSpeed > 2.0) {
+        const section = this.impactHullSection(this.rotateWorldToShipLocal(-nx, -nz, ship.rotation));
+        this.openHole(ship, section, impactSpeed > 5 ? 2 : 1);
+        this.combatEvents.push({
+          type: 'ship_impact', kind: 'ground', position: { x: deepest.sampleX, y: 0, z: deepest.sampleZ }, speed: impactSpeed,
         });
       }
     }

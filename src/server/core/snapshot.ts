@@ -142,9 +142,13 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
  * state; entities it has never seen in a full snapshot are ignored (except
  * projectiles, which carry their type so muzzle-fresh rounds can render).
  */
-export function buildHotSnapshot(state: GameState, serverTime: number): HotSnapshotPayload {
+export function buildHotSnapshot(state: GameState, serverTime: number, seq?: number): HotSnapshotPayload {
   return {
     tick: state.tick,
+    ...(seq !== undefined ? { seq } : {}),
+    // Only rides the wire while a staged start is actually counting down, so the
+    // normal hot budget is untouched.
+    ...(state.countdownRemaining ? { countdownRemaining: roundTo(state.countdownRemaining, 2) } : {}),
     serverTime: roundTo(serverTime, 3),
     shipsAlive: state.shipsAlive,
     storm: quantizeDeep(state.storm, 2),

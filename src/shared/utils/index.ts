@@ -1,6 +1,6 @@
 import { createNoise2D } from 'simplex-noise';
-import type { Island, IslandDock, IslandGeyser, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
-import { SHIP_STATS, PLAYER } from '../constants/index.js';
+import type { Island, IslandDock, IslandGeyser, IslandTavern, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
+import { SHIP, SHIP_STATS, PLAYER } from '../constants/index.js';
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -884,12 +884,16 @@ export function getCrowNestStandingY(stats: { height: number; mastCount: number 
  *  player outside the walkable deck and into the sea. */
 export function getShipDeckWalkHalfWidth(stats: { width: number; length: number }, localZ: number, margin = 0): number {
   const z = Math.max(-0.5, Math.min(0.5, localZ / Math.max(0.001, stats.length)));
+  // The forward-quarter stations follow the RENDERED bulwark: the side bulwark is
+  // a straight run at 0.44·W out to z = 0.39·L and the bow breastwork spans
+  // 0.72·W at 0.36·L, so the old 0.37/0.20 taper walled pirates off up to 1.8 m
+  // of visible bow deck. 0.40/0.30 keeps the clamp just inboard of both.
   const stations = [
     { z: -0.5, half: 0.23 },
     { z: -0.36, half: 0.38 },
     { z: -0.08, half: 0.42 },
-    { z: 0.22, half: 0.37 },
-    { z: 0.42, half: 0.20 },
+    { z: 0.22, half: 0.40 },
+    { z: 0.42, half: 0.30 },
     { z: 0.5, half: 0.05 },
   ];
   for (let i = 0; i < stations.length - 1; i++) {
@@ -1090,34 +1094,69 @@ export function getNearestShipBoardingLadder(ship: Pick<Ship, 'type' | 'position
 // or a ship's stats without a type round-trip.
 type HullFootprintStats = { width: number; length: number };
 
+// Plan-view stations mirror the RENDERED wale beam (ShipRenderer LOFT_STATIONS:
+// dh × the tumblehome bulge at `mid`), so the widest blocking line is the widest
+// visible line and nothing invisible sticks out abeam.
 const SWIM_HULL_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
-  { z: -0.52, half: 0.18 },
-  { z: -0.40, half: 0.45 },
-  { z: -0.18, half: 0.57 },
-  { z: 0.10, half: 0.60 },
-  { z: 0.30, half: 0.46 },
-  { z: 0.46, half: 0.22 },
-  { z: 0.52, half: 0.07 },
+  { z: -0.52, half: 0.20 },
+  { z: -0.36, half: 0.526 },
+  { z: -0.22, half: 0.565 },
+  { z: -0.08, half: 0.599 },
+  { z: 0.07, half: 0.556 },
+  { z: 0.22, half: 0.510 },
+  { z: 0.32, half: 0.386 },
+  { z: 0.42, half: 0.266 },
+  { z: 0.52, half: 0.055 },
 ];
 
-/** Half-width of the swim hull at a given ship-local Z (bow +Z), plus margin. */
-export function getSwimHullHalfWidth(stats: HullFootprintStats, localZ: number, margin = 0): number {
+/** Section taper factor on the plan-view half-width at a depth fraction below
+ *  the waterline (0 = at/above the waterline, 1 = keel depth). Mirrors the
+ *  rendered section (wale → waterline wlF → bilgeF → keel): under the waterline
+ *  the hull tucks in hard, so a swimmer can hug the visible bilge curve instead
+ *  of being walled out 1–2 m clear of it. */
+function swimHullSectionFactor(verticalT: number): number {
+  const t = clamp(verticalT, 0, 1);
+  if (t <= 0) return 1;
+  // 1.0 at the waterline → 0.79 just under → 0.5 at the keel (ShipRenderer's
+  // wlF/bilgeF ratios against the wale beam).
+  return t < 0.5
+    ? 1 - 0.42 * (t / 0.5)
+    : 0.58 - 0.08 * ((t - 0.5) / 0.5);
+}
+
+/** Where a swimmer's feet sit in the hull section, 0 = at/above the waterline,
+ *  1 = at (or below) the rendered keel. Shared so client prediction and the
+ *  authoritative resolver taper identically. */
+export function getSwimHullVerticalT(
+  y: number,
+  shipY: number,
+  stats: { height: number },
+  type?: ShipType,
+): number {
+  const draft = stats.height * (type ? SHIP.HULL_DRAFT_F[type] : SHIP.HULL_DRAFT_F_FALLBACK);
+  return clamp((shipY - y) / Math.max(0.001, draft), 0, 1);
+}
+
+/** Half-width of the swim hull at a given ship-local Z (bow +Z), plus margin.
+ *  `verticalT` (see getSwimHullVerticalT) tapers the section with depth. */
+export function getSwimHullHalfWidth(stats: HullFootprintStats, localZ: number, margin = 0, verticalT = 0): number {
   const z = clamp(localZ / Math.max(0.001, stats.length), -0.52, 0.52);
+  const section = swimHullSectionFactor(verticalT);
   for (let i = 0; i < SWIM_HULL_STATIONS.length - 1; i++) {
     const a = SWIM_HULL_STATIONS[i];
     const b = SWIM_HULL_STATIONS[i + 1];
     if (z >= a.z && z <= b.z) {
       const t = (z - a.z) / Math.max(0.001, b.z - a.z);
-      return Math.max(PLAYER.RADIUS + 0.1, stats.width * (a.half + (b.half - a.half) * t) + margin);
+      return Math.max(PLAYER.RADIUS + 0.1, stats.width * (a.half + (b.half - a.half) * t) * section + margin);
     }
   }
-  return Math.max(PLAYER.RADIUS + 0.1, stats.width * SWIM_HULL_STATIONS[SWIM_HULL_STATIONS.length - 1].half + margin);
+  return Math.max(PLAYER.RADIUS + 0.1, stats.width * SWIM_HULL_STATIONS[SWIM_HULL_STATIONS.length - 1].half * section + margin);
 }
 
 /** True when a ship-local point lies inside the swim-hull footprint. */
-export function isInsideSwimHullFootprint(stats: HullFootprintStats, localX: number, localZ: number, margin = 0): boolean {
+export function isInsideSwimHullFootprint(stats: HullFootprintStats, localX: number, localZ: number, margin = 0, verticalT = 0): boolean {
   if (Math.abs(localZ) > stats.length * 0.52 + margin) return false;
-  return Math.abs(localX) <= getSwimHullHalfWidth(stats, localZ, margin);
+  return Math.abs(localX) <= getSwimHullHalfWidth(stats, localZ, margin, verticalT);
 }
 
 /** Push a ship-local point out of the swim-hull footprint along the axis of
@@ -1127,12 +1166,13 @@ export function pushOutOfSwimHullFootprint(
   localX: number,
   localZ: number,
   margin: number,
+  verticalT = 0,
 ): { x: number; z: number; pushed: boolean } {
-  if (!isInsideSwimHullFootprint(stats, localX, localZ, margin)) {
+  if (!isInsideSwimHullFootprint(stats, localX, localZ, margin, verticalT)) {
     return { x: localX, z: localZ, pushed: false };
   }
   const halfLength = stats.length * 0.52 + margin;
-  const halfWidthHere = getSwimHullHalfWidth(stats, localZ, margin);
+  const halfWidthHere = getSwimHullHalfWidth(stats, localZ, margin, verticalT);
   const sidePen = halfWidthHere - Math.abs(localX);
   const endPen = halfLength - Math.abs(localZ);
   let ux = 0;
@@ -1146,7 +1186,7 @@ export function pushOutOfSwimHullFootprint(
   let z = localZ;
   const step = 0.16;
   for (let i = 0; i < 56; i++) {
-    if (!isInsideSwimHullFootprint(stats, x, z, margin * 0.55)) {
+    if (!isInsideSwimHullFootprint(stats, x, z, margin * 0.55, verticalT)) {
       return { x, z, pushed: true };
     }
     x += ux * step;
@@ -1161,26 +1201,202 @@ export function pushOutOfSwimHullFootprint(
 
 /** Vertical band [keelY, deckY] within which the swim hull blocks a swimmer.
  *  Below keelY a swimmer transits under the keel; above deckY they are on/above
- *  the deck (boarding is handled separately via the ladder prompt). */
-export function getSwimHullVerticalBand(shipY: number, stats: { height: number }): { keelY: number; deckY: number } {
+ *  the deck (boarding is handled separately via the ladder prompt).
+ *  keelY tracks the RENDERED draft (SHIP.HULL_DRAFT_F ⇔ ShipRenderer
+ *  HULL_SHAPES.draftF) — the old 0.72·H keel walled swimmers out of ~1.6 m of
+ *  visually open water under every hull. */
+export function getSwimHullVerticalBand(
+  shipY: number,
+  stats: { height: number },
+  type?: ShipType,
+): { keelY: number; deckY: number } {
+  const draftF = type ? SHIP.HULL_DRAFT_F[type] : SHIP.HULL_DRAFT_F_FALLBACK;
   return {
-    keelY: shipY - stats.height * 0.72 - PLAYER.RADIUS,
+    keelY: shipY - stats.height * draftF - 0.15,
     deckY: shipY + stats.height + 0.1,
   };
 }
 
-/** Dock-local space: +Z is inland, seaward ladder is at negative Z. */
+// ── Dock frame (CANONICAL) ──────────────────────────────────────────────────
+// world = dockCenter + Ry(rotation) · local — the same three.js convention the
+// client dock group (group.rotation.y = dock.rotation) and the server's
+// toDockLocal already use. +local-z points SEAWARD: MapGenerator centers the
+// dock at shore + 0.42·L·forward with forward = (sin θ, cos θ), so the shore
+// end is −0.42·L and the swim-up ladder belongs at the +Z tip.
 export function dockLocalToWorld(dock: IslandDock, lx: number, ly: number, lz: number): Vec3 {
   const cos = Math.cos(dock.rotation);
   const sin = Math.sin(dock.rotation);
   return {
-    x: dock.position.x + lx * cos - lz * sin,
+    x: dock.position.x + lx * cos + lz * sin,
     y: dock.position.y + ly,
-    z: dock.position.z + lx * sin + lz * cos,
+    z: dock.position.z - lx * sin + lz * cos,
   };
 }
 
-/** World point at the seaward swim-up ladder (for prompts / climb checks). */
+/** Dock-local XZ of a world point — exact inverse of dockLocalToWorld. */
+export function toDockLocalPoint(dock: IslandDock, x: number, z: number): { x: number; z: number } {
+  const dx = x - dock.position.x;
+  const dz = z - dock.position.z;
+  const cos = Math.cos(dock.rotation);
+  const sin = Math.sin(dock.rotation);
+  return { x: dx * cos - dz * sin, z: dx * sin + dz * cos };
+}
+
+/** World point at the SEAWARD swim-up ladder (for prompts / climb checks). */
 export function getIslandDockSwimLadderPoint(dock: IslandDock): Vec3 {
-  return dockLocalToWorld(dock, 0, 0.38, -dock.length * 0.44);
+  return dockLocalToWorld(dock, 0, 0.38, dock.length * 0.44);
+}
+
+// ── Tavern shell ────────────────────────────────────────────────────────────
+// The tavern GLB is an EXACT 7.6 × 6.4 footprint (scripts/blender/
+// build_buildings.py: `W, D = 7.6, 6.4  # footprint contract — EXACT`) with
+// plaster walls 3.0 m tall on a 0.18 m plank floor and a 1.7 m door in the
+// front (dock-facing) wall. Tavern-local space is the same three.js convention
+// as docks/ships: world = position + Ry(rotation) · local, and MapGenerator
+// aims rotation at the dock, so +local-z is the door/dock-facing side.
+const TAVERN_WALL_HALF_T = 0.18;
+const TAVERN_DOOR_HALF = 0.85;
+const TAVERN_WALL_HEIGHT = 3.18;
+
+export interface TavernWallSegment {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+export function tavernLocalToWorld(tavern: IslandTavern, lx: number, lz: number): { x: number; z: number } {
+  const cos = Math.cos(tavern.rotation);
+  const sin = Math.sin(tavern.rotation);
+  return {
+    x: tavern.position.x + lx * cos + lz * sin,
+    z: tavern.position.z - lx * sin + lz * cos,
+  };
+}
+
+export function toTavernLocal(tavern: IslandTavern, x: number, z: number): { x: number; z: number } {
+  const dx = x - tavern.position.x;
+  const dz = z - tavern.position.z;
+  const cos = Math.cos(tavern.rotation);
+  const sin = Math.sin(tavern.rotation);
+  return { x: dx * cos - dz * sin, z: dx * sin + dz * cos };
+}
+
+/** The four tavern walls as tavern-local AABBs, the front (+Z) wall split
+ *  around the doorway. SINGLE TRUTH for on-foot collision (PhysicsSystem) and
+ *  shot occlusion (Match hitscan / cannonballs) so the building is as solid to
+ *  a musket ball as it is to a boot. */
+export function getTavernWallSegments(tavern: IslandTavern): TavernWallSegment[] {
+  const hx = tavern.width * 0.5;
+  const hz = tavern.depth * 0.5;
+  const t = TAVERN_WALL_HALF_T;
+  const d = TAVERN_DOOR_HALF;
+  return [
+    // back wall (away from the dock)
+    { minX: -hx - t, maxX: hx + t, minZ: -hz - t, maxZ: -hz + t },
+    // side walls (full depth, so the corners are closed)
+    { minX: -hx - t, maxX: -hx + t, minZ: -hz - t, maxZ: hz + t },
+    { minX: hx - t, maxX: hx + t, minZ: -hz - t, maxZ: hz + t },
+    // front wall, split around the door
+    { minX: -hx - t, maxX: -d, minZ: hz - t, maxZ: hz + t },
+    { minX: d, maxX: hx + t, minZ: hz - t, maxZ: hz + t },
+  ];
+}
+
+/** World Y band the tavern walls block within (feet height). */
+export function getTavernWallBand(tavern: IslandTavern): { minY: number; maxY: number } {
+  return { minY: tavern.position.y - 1.2, maxY: tavern.position.y + TAVERN_WALL_HEIGHT };
+}
+
+/** Broad-phase radius covering the whole tavern shell (plus wall thickness). */
+export function getTavernBoundsRadius(tavern: IslandTavern): number {
+  return Math.hypot(tavern.width * 0.5, tavern.depth * 0.5) + TAVERN_WALL_HALF_T;
+}
+
+/** Push a circle of `radius` at a tavern-local XZ out of the wall AABBs along
+ *  the axis of least penetration (same pattern as the ship-deck coamings). */
+export function pushOutOfTavernWalls(
+  tavern: IslandTavern,
+  localX: number,
+  localZ: number,
+  radius: number,
+): { x: number; z: number; pushed: boolean } {
+  let x = localX;
+  let z = localZ;
+  let pushed = false;
+  for (const seg of getTavernWallSegments(tavern)) {
+    const ex0 = seg.minX - radius;
+    const ex1 = seg.maxX + radius;
+    const ez0 = seg.minZ - radius;
+    const ez1 = seg.maxZ + radius;
+    if (x <= ex0 || x >= ex1 || z <= ez0 || z >= ez1) continue;
+    const dl = x - ex0;
+    const dr = ex1 - x;
+    const db = z - ez0;
+    const dt = ez1 - z;
+    const m = Math.min(dl, dr, db, dt);
+    if (m === dl) x = ex0;
+    else if (m === dr) x = ex1;
+    else if (m === db) z = ez0;
+    else z = ez1;
+    pushed = true;
+  }
+  return { x, z, pushed };
+}
+
+/** Nearest hit distance along a unit `direction` against the tavern shell, or
+ *  null. Walls are treated as solid boxes; the doorway gap is genuinely open. */
+export function intersectRayTavern(
+  origin: Vec3,
+  direction: Vec3,
+  range: number,
+  tavern: IslandTavern,
+): number | null {
+  const band = getTavernWallBand(tavern);
+  // Vertical slab first — a shot passing well over the roof never touches walls.
+  let tEnter = 0;
+  let tExit = range;
+  if (Math.abs(direction.y) > 1e-6) {
+    const tA = (band.minY - origin.y) / direction.y;
+    const tB = (band.maxY - origin.y) / direction.y;
+    tEnter = Math.max(tEnter, Math.min(tA, tB));
+    tExit = Math.min(tExit, Math.max(tA, tB));
+  } else if (origin.y < band.minY || origin.y > band.maxY) {
+    return null;
+  }
+  if (tExit < tEnter) return null;
+
+  const cos = Math.cos(tavern.rotation);
+  const sin = Math.sin(tavern.rotation);
+  const ox = origin.x - tavern.position.x;
+  const oz = origin.z - tavern.position.z;
+  const lox = ox * cos - oz * sin;
+  const loz = ox * sin + oz * cos;
+  const ldx = direction.x * cos - direction.z * sin;
+  const ldz = direction.x * sin + direction.z * cos;
+
+  let best: number | null = null;
+  for (const seg of getTavernWallSegments(tavern)) {
+    let t0 = tEnter;
+    let t1 = tExit;
+    let miss = false;
+    for (const axis of [0, 1] as const) {
+      const o = axis === 0 ? lox : loz;
+      const d = axis === 0 ? ldx : ldz;
+      const lo = axis === 0 ? seg.minX : seg.minZ;
+      const hi = axis === 0 ? seg.maxX : seg.maxZ;
+      if (Math.abs(d) < 1e-6) {
+        if (o < lo || o > hi) { miss = true; break; }
+        continue;
+      }
+      const ta = (lo - o) / d;
+      const tb = (hi - o) / d;
+      t0 = Math.max(t0, Math.min(ta, tb));
+      t1 = Math.min(t1, Math.max(ta, tb));
+      if (t1 < t0) { miss = true; break; }
+    }
+    if (miss) continue;
+    if (best === null || t0 < best) best = t0;
+  }
+  return best;
 }

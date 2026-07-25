@@ -140,8 +140,22 @@ export const SHIP = {
   RUDDER_MAX_ANGLE: 0.62,
   /** Half-angle of the upwind no-go cone (~35°) — sails luff inside it. */
   SAIL_NO_GO_ANGLE: 0.611,
-  /** Keel depth below the waterline as a fraction of hull height — grounding tests. */
+  /** Keel depth below the waterline as a fraction of hull height. Berth-depth
+   *  planning still uses this conservative figure; grounding and swim-hull
+   *  collision measure from HULL_DRAFT_F (the RENDERED keel) instead. */
   KEEL_DRAFT_RATIO: 0.55,
+  /** RENDERED hull draft as a fraction of hull height — the single truth for
+   *  "how deep the visible keel sits" (ShipRenderer HULL_SHAPES.draftF mirrors
+   *  these: sloop 0.80 m, brigantine 1.01 m, galleon 1.23 m). Grounding and the
+   *  swim-hull band both read it, so no invisible water is solid and no visible
+   *  rock is phantom. */
+  HULL_DRAFT_F: { sloop: 0.365, brigantine: 0.36, galleon: 0.35 } as Record<ShipType, number>,
+  /** Class-average draft fraction, for callers that only have hull dimensions
+   *  (within 3 cm of every class's true draft). */
+  HULL_DRAFT_F_FALLBACK: 0.357,
+  /** Grounding tests the keel plus this safety bite, so a scrape registers just
+   *  before the visible keel would clip the seabed. */
+  GROUND_KEEL_SAFETY: 0.25,
   ANCHOR_BRAKE: 4.8,
   ANCHOR_RAISE_TIME: 3.2,
   FIRE_DURATION: 18,
@@ -500,3 +514,44 @@ export const SNAPSHOT_RATE = 2;
 /** Full snapshots go out every FULL_SNAPSHOT_TICKS ticks (~10.4 Hz);
  *  hot 'state_hot' updates fill the snapshot ticks in between. */
 export const FULL_SNAPSHOT_TICKS = SNAPSHOT_RATE * 3;
+
+// ── Match start ceremony ─────────────────────────────────────
+/** Seconds the match sits in phase 'waiting' before the sim goes live: the
+ *  server broadcasts one 'match_countdown' per whole second with inputs locked,
+ *  then a 'match_horn' at activation. 0 = the legacy instant start (identical
+ *  behavior, no countdown/horn traffic) — raise it once the client renders the
+ *  title card + countdown. */
+export const MATCH_START_COUNTDOWN_SEC = 0;
+
+// ── Early-game pacing governor ───────────────────────────────
+/** Bots do not SEEK ship-to-ship engagements for this long after the horn
+ *  (they still defend when fired upon and still loot/patrol). Without it ~half
+ *  the lobby was eliminated before the first storm shrink even began, so the
+ *  7-phase ring arc never got to matter. */
+export const BOT_EARLY_PEACE_SECONDS = 150;
+/** Engage-seek radius by storm phase index (clamped to the last entry) once the
+ *  early-peace window is over. The old flat 920/780 had every bot converging
+ *  across the whole map from t=0; measured, that emptied the lobby long before
+ *  the ~12.5-minute ring arc could matter. Ramping the seek radius with the ring
+ *  keeps early fights local and hands the endgame back to the storm. */
+export const BOT_ENGAGE_RANGE_BY_PHASE = [260, 300, 360, 440, 560, 720, 900];
+/** Seek radius multiplier while the ring is actively shrinking — everyone is
+ *  being funnelled together anyway, so hunting is fair game. */
+export const BOT_ENGAGE_SHRINK_MULT = 1.2;
+/** How many bot crews may be actively hunting at once, by storm phase index.
+ *  Measured: without a cap every bot flipped to 'engage' the tick the peace
+ *  window lifted and six of nine crews sank inside 33 s. */
+export const BOT_MAX_HUNTERS_BY_PHASE = [2, 3, 4, 5, 6, 8, 10];
+/** During early peace a bot only answers ships that shot at it inside this range. */
+export const BOT_DEFEND_RANGE = 260;
+
+// ── Bot seamanship ───────────────────────────────────────────
+/** How far ahead a bot helm probes for land / sea rocks along its heading.
+ *  Measured: 55m left bots grazing shoals 1.5m deep (their turning circle is
+ *  wider than that); 90m cut aground samples 444 → 171 and the worst keel
+ *  contact to 0.16m — a wave-trough scrape, not a beaching. */
+export const BOT_LOOKAHEAD_METERS = 90;
+/** Extra clearance added to an obstacle's radius when picking the escape tangent. */
+export const BOT_OBSTACLE_MARGIN = 16;
+/** Water a bot demands under its keel before closing further on a shore. */
+export const BOT_KEEL_CLEARANCE = 1.4;

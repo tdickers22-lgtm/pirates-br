@@ -307,6 +307,58 @@ console.log('\nMatch hitscan occlusion');
   expect('Own hull never blocks shooting outward from deck', nearSwimmer.health < PLAYER.MAX_HEALTH, `health=${nearSwimmer.health}`);
 }
 
+// ── 7. Solid structures stop bullets (tavern walls + big props) ─────────────
+// Cover that reads as solid has to BE solid: snipers used to shoot clean through
+// the tavern, boulders, towers and the fort.
+console.log('\nHitscan vs island structures');
+{
+  const match = new Match({ matchId: 'structure-occlusion', botCount: 0 });
+  const island = makeIsland();
+  const groundY = getIslandSurfaceY(island, 0, 0);
+
+  // Boulder_b (r=2.6, h=2.0) sitting on the island peak.
+  island.props = [{ id: 1, type: 'boulder_b', x: 0, z: 0, yaw: 0, scale: 1 }];
+  match.state.islands = [island];
+
+  const trace = (origin, dir, maxDistance = 40) => {
+    const len = Math.hypot(dir.x, dir.y, dir.z) || 1;
+    return match.intersectRayIslandStructures(
+      origin,
+      { x: dir.x / len, y: dir.y / len, z: dir.z / len },
+      maxDistance,
+    );
+  };
+
+  const throughBoulder = trace({ x: -12, y: groundY + 1, z: 0 }, { x: 1, y: 0, z: 0 });
+  expect('Shot through a boulder is blocked', throughBoulder !== null && Math.abs(throughBoulder - 9.66) < 0.6, `distance=${throughBoulder}`);
+  const besideBoulder = trace({ x: -12, y: groundY + 1, z: 6 }, { x: 1, y: 0, z: 0 });
+  expect('Shot beside the same boulder is clear', besideBoulder === null, `distance=${besideBoulder}`);
+  const overBoulder = trace({ x: -12, y: groundY + 3.2, z: 0 }, { x: 1, y: 0, z: 0 });
+  expect('Shot over the boulder is clear', overBoulder === null, `distance=${overBoulder}`);
+
+  // Palms are deliberately shoot-through (thin capsules, arcade feel).
+  island.props = [{ id: 2, type: 'palm_a', x: 0, z: 0, yaw: 0, scale: 1 }];
+  expect('Palm trunks stay shoot-through', trace({ x: -12, y: groundY + 1, z: 0 }, { x: 1, y: 0, z: 0 }) === null);
+
+  // Tavern shell: walls block, the doorway does not.
+  island.props = [];
+  island.tavern = {
+    position: { x: 0, y: groundY, z: 0 },
+    rotation: 0,
+    width: 7.6,
+    depth: 6.4,
+    counterPosition: { x: 0, y: groundY + 0.18, z: -1.8 },
+  };
+  const throughWall = trace({ x: -12, y: groundY + 1, z: 0 }, { x: 1, y: 0, z: 0 });
+  expect('Shot through the tavern side wall is blocked', throughWall !== null && Math.abs(throughWall - 8.02) < 0.4, `distance=${throughWall}`);
+  const outTheDoor = trace({ x: 0, y: groundY + 1, z: 0 }, { x: 0, y: 0, z: 1 });
+  expect('Shooting out through the doorway is clear', outTheDoor === null, `distance=${outTheDoor}`);
+  const outTheBack = trace({ x: 0, y: groundY + 1, z: 0 }, { x: 0, y: 0, z: -1 });
+  expect('Shooting into the back wall is blocked', outTheBack !== null && outTheBack < 3.6, `distance=${outTheBack}`);
+  const overRoof = trace({ x: -12, y: groundY + 5, z: 0 }, { x: 1, y: 0, z: 0 });
+  expect('Shot above the tavern roof line is clear', overRoof === null, `distance=${overRoof}`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} occlusion assertion(s) failed.`);
   process.exit(1);

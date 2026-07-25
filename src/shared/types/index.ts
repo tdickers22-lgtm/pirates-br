@@ -620,6 +620,12 @@ export interface Shark {
 export interface GameState {
   phase: GamePhase;
   tick: number;
+  /** Monotonic per-match snapshot counter shared by full AND hot snapshots (see
+   *  HotSnapshotPayload.seq) — lets the client reject an out-of-order snapshot. */
+  seq?: number;
+  /** Seconds left on the staged match-start countdown while phase === 'waiting'
+   *  (0/absent once the horn has blown). */
+  countdownRemaining?: number;
   /** Server simulation clock in seconds — clients sync the ocean wave clock to this. */
   serverTime: number;
   shipsAlive: number;
@@ -704,6 +710,12 @@ export interface HotSharkState {
 
 export interface HotSnapshotPayload {
   tick: number;
+  /** Monotonic per-match snapshot counter shared by hot AND full snapshots, so a
+   *  client can drop a full that was overtaken by a newer hot (and vice versa). */
+  seq?: number;
+  /** Present only while a staged match start is counting down (see
+   *  GameState.countdownRemaining) — absent, and free on the wire, otherwise. */
+  countdownRemaining?: number;
   serverTime: number;
   shipsAlive: number;
   storm: StormState;
@@ -746,6 +758,11 @@ export type MsgType =
   | 'trade_action'
   | 'game_over'
   | 'match_ended'
+  // staged match start: countdown ticks while inputs are locked, then the horn
+  | 'match_countdown'
+  | 'match_horn'
+  /** A crew is off the board (their ship went down) — HUD announce + counter pulse. */
+  | 'crew_eliminated'
   | 'ping'
   | 'pong'
   // dev-only (honoured solo): bots ignore this human + their ship
@@ -784,6 +801,33 @@ export interface LobbyUpdatePayload {
   botFill: number;
   capacity: number;
   canStart: boolean;
+}
+
+/** One tick of the staged match start (sent once per whole second, inputs locked). */
+export interface MatchCountdownPayload {
+  /** Whole seconds left before the horn. */
+  secondsRemaining: number;
+  /** Total countdown length, so the client can render a progress arc. */
+  totalSeconds: number;
+  crews: number;
+}
+
+/** Sim is live — the start horn. */
+export interface MatchHornPayload {
+  crews: number;
+}
+
+/** A crew's ship went down: they are off the CREWS AFLOAT board. */
+export interface CrewEliminatedPayload {
+  /** The sunk ship's id (crew identity on the wire). */
+  crewId: string;
+  /** Display name for the announce line, e.g. "Pirate_4's crew". */
+  crewName: string;
+  /** Crews still afloat AFTER this elimination. */
+  remaining: number;
+  /** Who sank them, when the sink was credited. */
+  byPlayerId: string | null;
+  byName: string | null;
 }
 
 export interface QueueUpdatePayload {
