@@ -1028,6 +1028,8 @@ export class EnvironmentFx {
    *  the weather deck. Returns the target, not the eased value. */
   private computeRainCoverTarget(): number {
     const cam = this.view.renderer.camera.position;
+    // Under the surface there is no falling rain to see.
+    if (cam.y < this.view.ocean.getSurfaceY(cam.x, cam.z) - 0.1) return 1;
     const state = this.view.state;
     if (state) {
       for (const island of state.islands) {
@@ -1345,7 +1347,28 @@ export class EnvironmentFx {
     this.splashAccum += 130 * intensity * effectScale * visible * dt;
     let spawns = Math.min(14, Math.floor(this.splashAccum));
     this.splashAccum -= spawns;
+    // Standing on deck, a fair spread of drops across a 13m disc puts only a
+    // handful of hits on the planks — far fewer than the rain you can see
+    // falling onto them. Bias a share of the budget onto the hull footprint
+    // when the camera is aboard, so the deck reads as being rained on.
+    const deckNode = this.getDeckShipNode();
+    const deckShip = deckNode ? this.view.getTrackedShip() : null;
+    const nearDeck = !!deckNode && !!deckShip
+      && dist2D(cam.x, cam.z, deckNode.position.x, deckNode.position.z) < 22;
     while (spawns-- > 0) {
+      if (nearDeck && deckNode && deckShip && Math.random() < 0.45) {
+        const stats = SHIP_STATS[deckShip.type];
+        const lx = (Math.random() * 2 - 1) * stats.width * 0.42;
+        const lz = (Math.random() * 2 - 1) * stats.length * 0.40;
+        const cos = Math.cos(deckNode.rotation.y);
+        const sin = Math.sin(deckNode.rotation.y);
+        this.spawnSplash(
+          deckNode.position.x + lx * cos + lz * sin,
+          deckNode.position.z + lz * cos - lx * sin,
+          cam.y,
+        );
+        continue;
+      }
       const shell = shells[Math.random() < 0.55 || shells.length === 1 ? 0 : 1];
       const o = ((Math.random() * shell.drops) | 0) * 6;
       this.spawnSplash(shell.pos[o], shell.pos[o + 2], cam.y);
