@@ -30,6 +30,7 @@ import { assets, type AssetName } from '../assets/AssetLibrary.js';
 import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
+import { HudController, type HudView } from '../ui/HudController.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { applyViewmodelMaterialSettings, makeHeldWeaponMesh, makePocketPreviewMesh } from '../rendering/factories/WeaponMeshFactory.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeStormTexture, makeWindWispTexture } from '../rendering/factories/TextureFactory.js';
@@ -91,7 +92,7 @@ type WindWispRecord = {
   tilt: number;
 };
 
-type FloatingDamageIndicator = {
+export type FloatingDamageIndicator = {
   element: HTMLDivElement;
   worldPos: THREE.Vector3;
   life: number;
@@ -121,7 +122,7 @@ const ZERO_SCALE_MAT4 = new THREE.Matrix4().makeScale(0, 0, 0);
 /** Interaction kinds the HUD arbiter juggles: server intents plus CLIENT-ONLY
  *  kinds that never ride interactIntent — 'door' (tavern doors swing locally)
  *  and 'harvest' (the axe prompt; LMB does the work via useItem). */
-type ClientInteractKind = InteractIntent | 'door' | 'harvest';
+export type ClientInteractKind = InteractIntent | 'door' | 'harvest';
 
 export class Game {
   private readonly renderer = new Renderer();
@@ -318,10 +319,6 @@ export class Game {
   private pocketUsePreviewKind: PocketPreviewKind | null = null;
   private pocketUsePreviewTimer = 0;
   private treasureChartSignature = '';
-  private pocketStripSignature = '';
-  private shipUpgradeSignature = '';
-  private shipInventorySignature = '';
-  private brProgressSignature = '';
   private localViewWeaponId: WeaponInstance['weaponId'] | null = null;
   private localViewWeaponKick = 0;
   /** First-person muzzle flash + powder smoke on the local viewmodel barrel. */
@@ -442,6 +439,69 @@ export class Game {
     getSoftParticleTexture: () => this.getSoftParticleTexture(),
     getUpgradePresentation: (type) => this.getUpgradePresentation(type),
   });
+
+
+  /** In-match HUD panels and feed (see ui/HudController.ts). */
+  private readonly hud = new HudController(this.createHudView());
+
+  private createHudView(): HudView {
+    const self = this;
+    return {
+      ui: this.ui,
+      input: this.input,
+      renderer: this.renderer,
+      ocean: this.ocean,
+      shipsById: this.shipsById,
+      floatingDamageIndicators: this.floatingDamageIndicators,
+      tempHudVector: this.tempHudVector,
+      get state() { return self.state; },
+      get localPlayerId() { return self.localPlayerId; },
+      get spyglassActive() { return self.spyglassActive; },
+      get wheelHoverSlot() { return self.wheelHoverSlot; },
+      get islandBannerHideAt() { return self.islandBannerHideAt; },
+      get barrelBrowse() { return self.barrelBrowse; },
+      set barrelBrowse(v) { self.barrelBrowse = v; },
+      get hitMarkerTimer() { return self.hitMarkerTimer; },
+      set hitMarkerTimer(v) { self.hitMarkerTimer = v; },
+      get hitMarkerShip() { return self.hitMarkerShip; },
+      set hitMarkerShip(v) { self.hitMarkerShip = v; },
+      get hitMarkerShark() { return self.hitMarkerShark; },
+      set hitMarkerShark(v) { self.hitMarkerShark = v; },
+      get hitMarkerHeadshot() { return self.hitMarkerHeadshot; },
+      set hitMarkerHeadshot(v) { self.hitMarkerHeadshot = v; },
+      get hitMarkerKill() { return self.hitMarkerKill; },
+      set hitMarkerKill(v) { self.hitMarkerKill = v; },
+      get prevIsInsideIsland() { return self.prevIsInsideIsland; },
+      set prevIsInsideIsland(v) { self.prevIsInsideIsland = v; },
+      get visibleInteractKind() { return self.visibleInteractKind; },
+      set visibleInteractKind(v) { self.visibleInteractKind = v; },
+      distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
+      findNearbyCannonIndex: (player, ship) => this.findNearbyCannonIndex(player, ship),
+      findRepairableHullSection: (player, ship) => this.findRepairableHullSection(player, ship),
+      flashIslandBanner: (name) => this.flashIslandBanner(name),
+      formatCompassHeading: (angle) => this.formatCompassHeading(angle),
+      formatStormTimer: (seconds) => this.formatStormTimer(seconds),
+      getBlunderbussCrosshairSize: (player) => this.getBlunderbussCrosshairSize(player),
+      getClosestGoldHoarder: (player) => this.getClosestGoldHoarder(player),
+      getInventoryQty: (ship, item) => this.getInventoryQty(ship, item),
+      getLocalPlayer: () => this.getLocalPlayer(),
+      getLookInteraction: (player, ship, cannon, section) => this.getLookInteraction(player, ship, cannon, section),
+      getPocketWheelCount: (player, slot) => this.getPocketWheelCount(player, slot),
+      getStormTimerSeconds: () => this.getStormTimerSeconds(),
+      getTrackedShip: () => this.getTrackedShip(),
+      getUpgradePresentation: (type) => this.getUpgradePresentation(type),
+      playIslandArrivalFanfare: () => this.playIslandArrivalFanfare(),
+      renderMapWheel: (player) => this.renderMapWheel(player),
+      renderTreasureInventoryChart: (player, mapped, hoarder) => this.renderTreasureInventoryChart(player, mapped, hoarder),
+      returnToLobbyAfterLoss: (kills, gold, reason) => this.returnToLobbyAfterLoss(kills, gold, reason),
+      toolWheelSlot: (tool) => this.toolWheelSlot(tool),
+    };
+  }
+
+  /** Delegate kept so the ~30 existing pushFeed call sites read unchanged. */
+  private pushFeed(message: string, color = '#e7e1d4') {
+    this.hud.pushFeed(message, color);
+  }
 
   /** Delegates so island/harvest code inside Game keeps its old call shape. */
   private buildPropInstance(type: AssetName, position: THREE.Vector3, yaw: number, scale = 1): THREE.Group | null {
@@ -1735,7 +1795,7 @@ export class Game {
         this.returnToLobbyAfterLoss(result.kills ?? player?.kills ?? 0, result.gold ?? player?.gold ?? 0, 'Crew lost');
       } else if (result.winnerId && result.winnerId === this.localPlayerId) {
         this.audio.playVictory();
-        this.showVictory(player?.kills ?? 0, result.gold ?? player?.gold ?? 0);
+        this.hud.showVictory(player?.kills ?? 0, result.gold ?? player?.gold ?? 0);
       } else {
         this.audio.playDefeat();
         const reason = result.reason === 'gold'
@@ -3116,7 +3176,7 @@ export class Game {
     this.syncProjectiles(dt);
     this.updateCamera();
     this.updateWaterEnvironment();
-    this.updateCombatHud(dt);
+    this.hud.updateCombatHud(dt);
     this.syncLocalViewWeapon();
     if (this.freeCam) {
       // A detached tour/dev camera is not "the pirate's eyes" — hide the
@@ -3132,7 +3192,7 @@ export class Game {
     this.updateLightning(dt);
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
-      this.updateHud();
+      this.hud.updateHud();
       this.hudTimer = effectScale < 0.55 ? 0.09 : 0.06;
     }
     if (this.minimapTimer <= 0) {
@@ -4635,364 +4695,6 @@ export class Game {
     return `${Math.floor(safeSeconds / 60)}:${String(safeSeconds % 60).padStart(2, '0')}`;
   }
 
-  private updateBarrelPanel(player: Player, ship: Ship | null) {
-    // Close the panel as soon as the player walks away from the barrel they were
-    // browsing, or after a brief grace period if no event has refreshed it.
-    if (this.barrelBrowse && player.nearBarrelId !== this.barrelBrowse.barrelId) {
-      this.barrelBrowse = null;
-    }
-    if (this.barrelBrowse && performance.now() - this.barrelBrowse.lastEventAt > 12000) {
-      this.barrelBrowse = null;
-    }
-
-    if (!this.barrelBrowse) {
-      this.ui.barrelPanel.style.display = 'none';
-      return;
-    }
-
-    this.ui.barrelPanel.style.display = 'block';
-
-    const niceName = (item: string) => item.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-    const renderRows = (target: HTMLElement, rows: ItemStack[], emptyMsg: string) => {
-      if (rows.length === 0) {
-        target.innerHTML = `<div class="bp-empty">${emptyMsg}</div>`;
-        return;
-      }
-      target.innerHTML = rows
-        .map((r) => `<div class="bp-row"><span>${niceName(r.item)}</span><span class="bp-qty">×${r.qty}</span></div>`)
-        .join('');
-    };
-
-    renderRows(this.ui.barrelPanelLoot, this.barrelBrowse.loot, '(empty)');
-
-    // Player + ship inventory snapshot (combine pocket + ship inventory)
-    const pocket: ItemStack[] = [];
-    if (player.pocketBanana) pocket.push({ item: 'banana', qty: player.pocketBanana });
-    if (player.pocketCoconut) pocket.push({ item: 'coconut', qty: player.pocketCoconut });
-    if (player.pocketMango) pocket.push({ item: 'mango', qty: player.pocketMango });
-    if (player.pocketMeat) pocket.push({ item: 'meat', qty: player.pocketMeat });
-    if (player.pocketWood) pocket.push({ item: 'wood_plank', qty: player.pocketWood });
-    const shipRows = ship ? ship.inventory.filter((s) => s.qty > 0) : [];
-    const combined: ItemStack[] = [...pocket];
-    for (const row of shipRows) {
-      const existing = combined.find((c) => c.item === row.item);
-      if (existing) existing.qty += row.qty;
-      else combined.push({ ...row });
-    }
-    renderRows(this.ui.barrelPanelInventory, combined, ship ? '(empty hold)' : '(no ship — picks up to pockets)');
-  }
-
-  private updateHud() {
-    if (!this.state) return;
-
-    const player = this.getLocalPlayer();
-    const ship = this.getTrackedShip();
-    if (!player) return;
-
-    this.updateBarrelPanel(player, ship);
-
-    const timerSeconds = this.getStormTimerSeconds();
-    const lastPhase = this.state.storm.phase >= STORM_PHASES.length - 1;
-    const finalHold = lastPhase && !this.state.storm.shrinking && timerSeconds <= 0;
-    const stormVerb = this.state.storm.shrinking ? 'CLOSING' : 'NEXT SHRINK';
-    this.ui.stormPhase.textContent = finalHold
-      ? 'FINAL STORM - NO SAFE HARBOR'
-      : `STORM PHASE ${Math.min(this.state.storm.phase + 1, STORM_PHASES.length)} - ${stormVerb}`;
-    this.ui.stormTimer.textContent = finalHold ? '' : this.formatStormTimer(timerSeconds);
-    this.ui.mapSubtitle.textContent = finalHold
-      ? 'The storm has fully closed — finish the fight'
-      : this.state.storm.shrinking
-        ? `Storm moving now · closes in ${timerSeconds}s`
-        : `Next storm shift in ${timerSeconds}s`;
-
-    const outsideStorm = this.distance2D(player.position.x, player.position.z, this.state.storm.centerX, this.state.storm.centerZ) > this.state.storm.safeRadius;
-    const avgHull = ship
-      ? (ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard) / 4
-      : 1;
-    const shipCritical = !!ship && (ship.sinking || avgHull < 0.2);
-    const shipOnFire = !!ship && ship.onFire && !ship.sinking;
-    // DOWNED lives on its OWN banner so a fire/storm/critical warning can
-    // show at the same time — the old shared element silently swallowed one.
-    const localDowned = player.state === 'downed';
-    this.ui.downedBanner.style.display = localDowned ? 'block' : 'none';
-    if (localDowned) {
-      const bleed = Math.max(0, Math.ceil(player.downedUntil ?? 0));
-      this.ui.downedBanner.textContent = (player.reviveProgress ?? 0) > 0
-        ? `CREWMATE REVIVING YOU — ${Math.round((player.reviveProgress ?? 0) * 100)}%`
-        : `DOWNED — BLEEDING OUT 0:${String(bleed).padStart(2, '0')} · CRAWL TO YOUR CREW`;
-      this.ui.downedBanner.style.color = (player.reviveProgress ?? 0) > 0 ? '#7ce38b' : '#ff6b6b';
-    }
-    this.ui.stormWarning.style.display = outsideStorm || shipCritical || shipOnFire ? 'block' : 'none';
-    this.ui.stormWarning.textContent = shipCritical
-      ? (ship?.sinking ? 'SHIP IS SINKING' : 'SHIP CRITICAL - REPAIR NOW')
-      : shipOnFire
-        ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
-        : 'OUTSIDE STORM ZONE';
-    this.ui.stormWarning.style.color = shipCritical || shipOnFire ? '#ffb366' : '#ff6b6b';
-
-    this.ui.shipsAlive.textContent = String(this.state.shipsAlive);
-    this.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
-    this.renderGoldLeaderboard(player.id);
-    this.ui.killCount.textContent = String(player.kills);
-    this.ui.healthFill.style.width = `${Math.max(0, player.health)}%`;
-    this.ui.armorFill.style.width = `${Math.max(0, Math.min(100, ((player.armor ?? 0) / PLAYER.MAX_ARMOR) * 100))}%`;
-
-    if (ship) {
-      this.setHull(this.ui.hullBow, this.ui.hullBowTxt, ship.hull.bow);
-      this.setHull(this.ui.hullStern, this.ui.hullSternTxt, ship.hull.stern);
-      this.setHull(this.ui.hullPort, this.ui.hullPortTxt, ship.hull.port);
-      this.setHull(this.ui.hullStarboard, this.ui.hullStarboardTxt, ship.hull.starboard);
-      const wind = sampleWind(this.ocean.getTime());
-      const signedRelative = angleWrap(wind.direction - ship.rotation);
-      // 0.92 matches PhysicsSystem's desired-trim constant + the sail-cloth luff
-      // visual, so the displayed Catch% peaks exactly where the ship is fastest.
-      const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
-      const trimCatch = 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE);
-      const trimDelta = angleWrap(desiredTrim - ship.sailAngle);
-      const trimSide = ship.sailAngle < -0.06 ? 'Port' : ship.sailAngle > 0.06 ? 'Starboard' : 'Centered';
-      const windSide = signedRelative < -0.22 ? 'from port' : signedRelative > 0.22 ? 'from starboard' : Math.cos(signedRelative) >= 0 ? 'dead ahead' : 'from astern';
-      const windHeading = this.formatCompassHeading(wind.direction);
-      const windArrow = signedRelative < -0.22 ? '<-' : signedRelative > 0.22 ? '->' : Math.cos(signedRelative) >= 0 ? '^' : 'v';
-      const windDegrees = Math.round(Math.abs(THREE.MathUtils.radToDeg(signedRelative)));
-      const trimHint = Math.abs(trimDelta) < 0.08
-        ? 'Trim set'
-        : trimDelta > 0
-          ? 'Trim Right [F]'
-          : 'Trim Left [Q]';
-      const rig =
-        ship.sailIntegrity < 0.99
-          ? ` · Rigging ${Math.round(ship.sailIntegrity * 100)}% (hold [X] at sails + planks)`
-          : '';
-      const windLine = `Wind ${windHeading} ${windArrow} ${windDegrees}deg ${windSide}`;
-      this.ui.sailStatus.textContent = ship.anchored
-        ? `Anchored · Hold [X] raise · ${windLine}`
-        : `Sails ${Math.round(ship.sailHeight * 100)}%${rig} · Trim ${trimSide} · Catch ${Math.round(trimCatch * 100)}% · ${trimHint} · ${windLine}`;
-    } else {
-      this.ui.sailStatus.textContent = 'No tracked ship';
-    }
-    this.renderShipUpgrades(ship);
-    this.renderShipInventory(ship, player);
-    this.renderKegStatus(player);
-    this.updateWaterGauge(player);
-
-    let chestsInHold = 0;
-    if (ship) {
-      for (const isl of this.state.islands) {
-        for (const ch of isl.chests) {
-          if (ch.storedOnShipId === ship.id && !ch.opened) chestsInHold += 1;
-        }
-      }
-    }
-    const mappedIsland = player.treasureMapIslandId
-      ? this.state.islands.find((island) => island.id === player.treasureMapIslandId) ?? null
-      : null;
-    const closestHoarder = this.getClosestGoldHoarder(player);
-    const powerLine = this.getSpecialSummary(player);
-    const objectiveLine = this.getObjectiveSummary(player, ship, {
-      chestsInHold,
-      mappedIsland,
-      closestHoarder,
-      outsideStorm,
-      shipCritical,
-      shipOnFire,
-    });
-    const progLine = ship
-      ? `${objectiveLine} · ${powerLine} · Gold ${player.gold}/${ECONOMY.GOLD_WIN_TARGET} · Hold ${chestsInHold} · Upgrades ${ship.upgrades.length}`
-      : `${objectiveLine} · ${powerLine}`;
-    if (progLine !== this.brProgressSignature) {
-      this.ui.brProgressFeed.textContent = progLine;
-      this.brProgressSignature = progLine;
-    }
-
-    const pk = player;
-    // The 1–4 digit labels are MODAL (they select pocket items only while the
-    // wheel is held; otherwise 1–4 are weapon slots, labeled bottom-right).
-    // Only advertise the numbers while they actually do that, or the two
-    // always-on strips claim the same keys mean two things at once.
-    const wheelHeld = this.input.isSupplyWheelOpen();
-    const stripParts = [
-      `Pocket: ${wheelHeld ? '1 ' : ''}Banana ${pk.pocketBanana}`,
-      `${wheelHeld ? '2 ' : ''}Plank ${pk.pocketWood}`,
-      `Ore ${pk.pocketOre ?? 0}`,
-      `${wheelHeld ? '3 ' : ''}Coconut ${pk.pocketCoconut}`,
-      `${wheelHeld ? '4 ' : ''}Meat ${pk.pocketMeat} / Mango ${pk.pocketMango}`,
-      `Tool: ${pk.hasShovel ? 'Shovel' : 'None'}`,
-    ];
-    if (mappedIsland) stripParts.push(`Chart: ${mappedIsland.name}`);
-    if (closestHoarder && (mappedIsland || pk.carryingChestId)) stripParts.push(`Gold Hoarder: ${closestHoarder.island.name}`);
-    if (pk.playerKillStreak > 0) stripParts.push(`Streak ${pk.playerKillStreak}`);
-    const specialSummary = this.getSpecialSummary(pk);
-    if (specialSummary) stripParts.push(specialSummary);
-    const pocketText = stripParts.join(' | ');
-    if (pocketText !== this.pocketStripSignature) {
-      this.ui.pocketStrip.textContent = pocketText;
-      this.pocketStripSignature = pocketText;
-    }
-    this.renderTreasureInventoryChart(player, mappedIsland, closestHoarder);
-    this.ui.pocketWheelStats.textContent = this.input.isSupplyWheelOpen()
-      ? (player.equippedTool
-          ? `Equipped: ${player.equippedTool.toUpperCase()} · ${player.equippedTool === 'spyglass' ? 'aim (right-click) to zoom · draw a weapon to stow' : 'right-click or re-select to stow'} · tools = scope/compass/bucket/shovel/axe · fruit heals · planks → ship stores`
-          : 'Tools: scope · compass · bucket (bail) · shovel · lantern · axe (chop/mine) — select to equip · fruit heals · planks → ship stores')
-      : '';
-    this.updateSupplyWheelCounts(player);
-    // [Q] while the wheel is held flips between the SUPPLY page and the QUEST
-    // MAPS page (SoT radial) — only one occupies the screen center at a time.
-    const wheelOpen = this.input.isSupplyWheelOpen();
-    const mapsPage = wheelOpen && this.input.getWheelPage() === 'maps';
-    this.ui.pocketWheel.classList.toggle('visible', wheelOpen && !mapsPage);
-    this.ui.mapWheel.classList.toggle('visible', mapsPage);
-    if (mapsPage) this.renderMapWheel(player);
-    // The controls legend and the supply wheel park on the same screen center
-    // — holding [I] closes the legend rather than stacking on top of it.
-    if (wheelOpen) {
-      const legend = document.getElementById('controls-hint');
-      if (legend && legend.style.display === 'block') legend.style.display = 'none';
-    }
-
-    let insideIslandId: string | null = null;
-    for (const isl of this.state.islands) {
-      if (isPointInsideIslandFootprint(isl, player.position.x, player.position.z, 6)) {
-        insideIslandId = isl.id;
-        break;
-      }
-    }
-    if (insideIslandId && insideIslandId !== this.prevIsInsideIsland) {
-      const isl = this.state.islands.find((i) => i.id === insideIslandId);
-      if (isl) {
-        this.flashIslandBanner(isl.name);
-        this.playIslandArrivalFanfare();
-      }
-    }
-    this.prevIsInsideIsland = insideIslandId;
-    if (performance.now() > this.islandBannerHideAt) {
-      this.ui.islandBanner.classList.remove('visible');
-    }
-
-    const weapon = player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
-    if (player.atCannon && ship) {
-      const cb = this.getInventoryQty(ship, 'cannonball');
-      this.ui.ammoCurrent.textContent =
-        player.selectedCannonAmmo === 'cannonball'
-          ? String(cb)
-          : String(
-              player.selectedCannonAmmo === 'firebomb'
-                ? this.getInventoryQty(ship, 'firebomb_ball')
-                : this.getInventoryQty(ship, 'chainshot'),
-            );
-      this.ui.ammoReserve.textContent =
-        player.selectedCannonAmmo === 'cannonball'
-          ? 'ship store (each shot spends 1)'
-          : player.selectedCannonAmmo.replace('_', ' ');
-      this.ui.reloadIndicator.style.display = ship.cannonCooldowns[player.cannonIndex] > 0 ? 'block' : 'none';
-    } else {
-      this.updateWeaponHud(player.activeSlot, weapon, player.weapons);
-      const weaponDef = weapon ? WEAPONS[weapon.weaponId] : null;
-      this.ui.reloadIndicator.style.display = weapon?.reloading && weaponDef && !weaponDef.melee ? 'block' : 'none';
-    }
-    const scopeShowing = !!(this.spyglassActive
-      || (this.input.isAiming() && weapon && WEAPONS[weapon.weaponId].scopeFov));
-    this.ui.scopeOverlay.style.display = scopeShowing ? 'block' : 'none';
-    // The SPYGLASS is a clean lens — no reticle. (A weapon sniper scope keeps
-    // its cross-lines to aim with.) Either way the FPS crosshair is hidden while
-    // looking through a scope.
-    this.ui.scopeOverlay.classList.toggle('spyglass', this.spyglassActive);
-    // No crosshair while looking through a scope OR holding any tool (bucket/
-    // compass/shovel/spyglass) — you're not aiming a weapon.
-    this.ui.crosshair.style.display = scopeShowing || player.equippedTool ? 'none' : '';
-    this.ui.crosshair.classList.toggle('cannon', player.atCannon);
-    const shotgunCrosshair = !player.atCannon && weapon?.weaponId === 'blunderbuss';
-    this.ui.crosshair.classList.toggle('shotgun', shotgunCrosshair);
-    if (shotgunCrosshair) {
-      this.ui.crosshair.style.setProperty('--shotgun-spread', `${this.getBlunderbussCrosshairSize(player)}px`);
-    } else {
-      this.ui.crosshair.style.removeProperty('--shotgun-spread');
-    }
-
-    const nearbyCannon = ship ? this.findNearbyCannonIndex(player, ship) : null;
-    const repairSection = ship ? this.findRepairableHullSection(player, ship) : null;
-    const lookInteraction = this.getLookInteraction(player, ship, nearbyCannon, repairSection);
-    this.visibleInteractKind = null;
-
-    if (player.state === 'respawning') {
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = `Respawning in ${Math.max(1, Math.ceil(player.respawnTimer))}`;
-      this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = 'Returning to your ship';
-    } else if (player.atCannon) {
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = '[X] Leave Cannon · [SPACE] Launch Yourself';
-      this.ui.contextLabel.style.display = 'block';
-      const superShot = player.superCannonballs > 0 && player.selectedCannonAmmo === 'cannonball'
-        ? ` · SUPER x5 ready (${player.superCannonballs})`
-        : '';
-      this.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · [5/6/7] shot type`;
-    } else if (player.atHelm) {
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = '[X] Leave Helm';
-      this.ui.contextLabel.style.display = 'block';
-      if (ship) {
-        this.ui.contextLabel.textContent = `${ship.anchored ? 'Anchored' : 'At the wheel'} · A/D steer · compass on starboard side`;
-      } else {
-        this.ui.contextLabel.textContent = 'At the wheel';
-      }
-    } else if (player.atSails) {
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = '';
-      this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = '';
-    } else if (player.atCrowNest) {
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = '[X] Climb Down';
-      this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = 'Crow\'s nest · [X] remounts the ladder';
-    } else if (player.mastClimb !== null) {
-      // Mid-ladder: W/S climbs (server-driven), X lets go at the bottom.
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = `Climbing the mast — ${Math.round((player.mastClimb ?? 0) * 100)}%`;
-      this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = 'W/S · climb — X · let go';
-    } else if (lookInteraction) {
-      this.visibleInteractKind = lookInteraction.kind;
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = lookInteraction.prompt;
-      this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = lookInteraction.label;
-    } else if (player.carryingChestId) {
-      this.ui.interactPrompt.style.display = 'block';
-      this.ui.interactPrompt.textContent = '[B] Drop Chest';
-      this.ui.contextLabel.style.display = 'block';
-      this.ui.contextLabel.textContent = 'Carrying treasure · sell at Gold Hoarder or stow on ship';
-    } else {
-      this.ui.interactPrompt.style.display = 'none';
-      // No busywork hints while bleeding out — the DOWNED banner is the guidance.
-      const ambientLabel = player.state === 'downed'
-        ? ''
-        : player.state === 'swimming'
-          ? 'Swimming · W follows look · Space up · Z down · LMB fire · Shift/RMB aim'
-          : weapon?.weaponId === 'cutlass'
-            ? `Cutlass · hold LMB to charge dash · Shift/RMB block · ${this.getKegSummary(player)}`
-            : `[I] Supply wheel · Shift/RMB aim · ${this.getKegSummary(player)}`;
-      this.ui.contextLabel.style.display = ambientLabel ? 'block' : 'none';
-      this.ui.contextLabel.textContent = ambientLabel;
-    }
-
-    const heading = ((player.rotation.x * 180) / Math.PI + 360) % 360;
-    this.ui.compassTape.style.transform = `translateX(${Math.round(-heading * 2.6)}px)`;
-    this.ui.compassTape.style.opacity = '1';
-
-    if (this.state.phase === 'ended') {
-      if (this.state.winnerId === this.localPlayerId) {
-        this.showVictory(player.kills, player.gold);
-      } else {
-        this.returnToLobbyAfterLoss(player.kills, player.gold, 'Crew lost');
-      }
-    } else if (player.state === 'eliminated') {
-      this.returnToLobbyAfterLoss(player.kills, player.gold, 'Crew lost');
-    } else if (player.state === 'respawning') {
-      this.ui.deathScreen.style.display = 'none';
-    }
-  }
-
   private drawMaps() {
     if (!this.state) return;
     const minimapCtx = this.ui.minimapCanvas.getContext('2d');
@@ -5788,32 +5490,6 @@ export class Game {
     ctx.restore();
   }
 
-  private updateWeaponHud(activeSlot: number, activeWeapon: WeaponInstance | null, loadout: Array<WeaponInstance | null>) {
-    for (const [slotIndex, slotEl] of this.ui.weaponSlots.entries()) {
-      slotEl.classList.toggle('active', slotIndex === activeSlot);
-      const weapon = loadout[slotIndex];
-      const nameEl = slotEl.querySelector('.wname');
-      const ammoEl = slotEl.querySelector('.ammo');
-      if (nameEl) {
-        nameEl.textContent = weapon ? WEAPONS[weapon.weaponId].name.replace(' Pistol', '') : 'Empty';
-      }
-      if (ammoEl) {
-        ammoEl.textContent = weapon && WEAPONS[weapon.weaponId].ammoMax > 0
-          ? `${weapon.ammo}/∞`
-          : '∞';
-      }
-    }
-
-    if (!activeWeapon || WEAPONS[activeWeapon.weaponId].ammoMax === 0) {
-      this.ui.ammoCurrent.textContent = '∞';
-      this.ui.ammoReserve.textContent = '∞';
-      return;
-    }
-
-    this.ui.ammoCurrent.textContent = String(activeWeapon.ammo);
-    this.ui.ammoReserve.textContent = '∞';
-  }
-
   private updateDamageFx() {
     if (!this.localPlayerId) return;
 
@@ -5860,54 +5536,6 @@ export class Game {
     } else {
       this.prevOwnShipId = null;
       this.prevOwnHullTotal = 4;
-    }
-  }
-
-  private updateCombatHud(dt: number) {
-    if (this.hitMarkerTimer > 0) {
-      this.hitMarkerTimer = Math.max(0, this.hitMarkerTimer - dt);
-    }
-    const hitMarkerActive = this.hitMarkerTimer > 0;
-    this.ui.hitMarker.classList.toggle('visible', hitMarkerActive);
-    this.ui.hitMarker.classList.toggle('ship', hitMarkerActive && this.hitMarkerShip);
-    this.ui.hitMarker.classList.toggle('shark', hitMarkerActive && this.hitMarkerShark);
-    this.ui.hitMarker.classList.toggle('headshot', hitMarkerActive && this.hitMarkerHeadshot);
-    this.ui.hitMarker.classList.toggle('kill', hitMarkerActive && this.hitMarkerKill);
-    if (!hitMarkerActive) {
-      this.hitMarkerShip = false;
-      this.hitMarkerShark = false;
-      this.hitMarkerHeadshot = false;
-      this.hitMarkerKill = false;
-    }
-
-    if (this.floatingDamageIndicators.length === 0) return;
-
-    this.renderer.camera.updateMatrixWorld();
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    for (let index = this.floatingDamageIndicators.length - 1; index >= 0; index--) {
-      const indicator = this.floatingDamageIndicators[index];
-      indicator.life += dt;
-      indicator.worldPos.y += indicator.riseSpeed * dt;
-      const progress = Math.min(1, indicator.life / indicator.duration);
-      this.tempHudVector.copy(indicator.worldPos).project(this.renderer.camera);
-
-      const visible = this.tempHudVector.z > -1 && this.tempHudVector.z < 1;
-      if (!visible) {
-        indicator.element.style.opacity = '0';
-      } else {
-        const x = (this.tempHudVector.x * 0.5 + 0.5) * width;
-        const y = (-this.tempHudVector.y * 0.5 + 0.5) * height;
-        indicator.element.style.left = `${x}px`;
-        indicator.element.style.top = `${y}px`;
-        indicator.element.style.opacity = `${1 - progress}`;
-        indicator.element.style.transform = `translate(-50%, -50%) translateY(${-progress * 44}px) scale(${1 + (1 - progress) * 0.18})`;
-      }
-
-      if (progress >= 1) {
-        indicator.element.remove();
-        this.floatingDamageIndicators.splice(index, 1);
-      }
     }
   }
 
@@ -6400,84 +6028,6 @@ export class Game {
     }
   }
 
-  private setHull(fill: HTMLDivElement, label: HTMLElement, value: number) {
-    const percent = Math.round(value * 100);
-    fill.style.width = `${percent}%`;
-    label.textContent = `${percent}%`;
-  }
-
-  /** Bilge water gauge — vertical ship-silhouette fill, trend arrow, red alarm > 75%.
-   *  Visible only while the local player stands on a ship that's taking on water. */
-  private updateWaterGauge(player: Player) {
-    const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
-    const level = ship ? THREE.MathUtils.clamp(ship.waterLevel ?? 0, 0, 1) : 0;
-    const show = !!ship
-      && level > 0.02
-      && player.state !== 'eliminated'
-      && player.state !== 'respawning';
-    this.ui.waterGauge.classList.toggle('visible', show);
-    if (!show || !ship) {
-      this.ui.waterGauge.classList.remove('danger');
-      // Damp the ship-status widget tint back to normal when not flooding.
-      this.ui.shipStatus.classList.remove('flooding', 'flooding-critical');
-      return;
-    }
-
-    const pct = Math.round(level * 100);
-    this.ui.waterGaugeFill.style.height = `${pct}%`;
-    this.ui.waterGaugePct.textContent = `${pct}%`;
-    const danger = level > 0.75;
-    this.ui.waterGauge.classList.toggle('danger', danger);
-
-    const rate = ship.floodingRate ?? 0;
-    const trend = this.ui.waterGaugeTrend;
-    if (rate > 0.0005) {
-      trend.textContent = '▲';
-      trend.style.color = danger ? '#ff8a6a' : '#ffb37a';
-    } else if (rate < -0.0005) {
-      trend.textContent = '▼';
-      trend.style.color = '#7fe0a0';
-    } else {
-      trend.textContent = '▬';
-      trend.style.color = '#9aa8b8';
-    }
-
-    // Tint the ship-status widget so the hull panel reads "flooding" at a glance.
-    this.ui.shipStatus.classList.toggle('flooding', level > 0.02 && !danger);
-    this.ui.shipStatus.classList.toggle('flooding-critical', danger);
-  }
-
-  private renderShipInventory(ship: Ship | null, player: Player) {
-    const nearOwnShip = !!ship
-      && player.shipId === ship.id
-      && player.state === 'alive'
-      && this.distance2D(player.position.x, player.position.z, ship.position.x, ship.position.z) < 58;
-    const visible = !!ship
-      && player.state !== 'swimming'
-      && player.state !== 'eliminated'
-      && player.state !== 'respawning'
-      && (player.onShipId === ship.id || nearOwnShip);
-    this.ui.shipInventory.classList.toggle('visible', visible);
-    if (!ship) {
-      this.shipInventorySignature = '';
-      return;
-    }
-
-    const wood = this.getInventoryQty(ship, 'wood_plank');
-    const cannonball = this.getInventoryQty(ship, 'cannonball');
-    const firebomb = this.getInventoryQty(ship, 'firebomb_ball');
-    const chainshot = this.getInventoryQty(ship, 'chainshot');
-    const banana = this.getInventoryQty(ship, 'banana');
-    const signature = `${ship.id}:${wood}:${cannonball}:${firebomb}:${chainshot}:${banana}`;
-    if (signature === this.shipInventorySignature) return;
-    this.shipInventorySignature = signature;
-    this.ui.inventoryWood.textContent = String(wood);
-    this.ui.inventoryCannonball.textContent = String(cannonball);
-    this.ui.inventoryFirebomb.textContent = String(firebomb);
-    this.ui.inventoryChainshot.textContent = String(chainshot);
-    this.ui.inventoryBanana.textContent = String(banana);
-  }
-
   /** Supply-wheel slot layout: 0 scope · 1 compass · 2 bucket · 3 planks ·
    *  4 banana · 5 coconut · 6 meat/mango · 7 shovel · 8 lantern · 9 axe.
    *  Tools (0-2, 7-9) equip. */
@@ -6506,21 +6056,6 @@ export class Game {
     return tool === 'spyglass' ? 0 : tool === 'compass' ? 1 : tool === 'bucket' ? 2 : tool === 'shovel' ? 7 : tool === 'lantern' ? 8 : tool === 'axe' ? 9 : -1;
   }
 
-  private updateSupplyWheelCounts(player: Player) {
-    for (const countEl of this.ui.pocketWheel.querySelectorAll<SVGTextElement>('[data-wheel-count]')) {
-      const slot = Number(countEl.dataset.wheelCount);
-      countEl.textContent = Number.isInteger(slot) ? String(this.getPocketWheelCount(player, slot)) : '0';
-    }
-    const heldSlot = this.input.getSupplyWheelHeldSlot();
-    const equippedSlot = this.toolWheelSlot(player.equippedTool);
-    for (const slice of this.ui.pocketWheel.querySelectorAll<SVGPathElement>('[data-wheel-slot]')) {
-      const s = Number(slice.dataset.wheelSlot);
-      // The mouse-hovered slot lights up brightest; also mark held-digit + equipped.
-      slice.classList.toggle('hovered', s === this.wheelHoverSlot);
-      slice.classList.toggle('active', s === heldSlot || s === equippedSlot || s === this.wheelHoverSlot);
-    }
-  }
-
   private startPocketUsePreview(slot: number) {
     const kind = this.getPocketWheelKind(this.getLocalPlayer(), slot);
     if (!kind) return;
@@ -6531,155 +6066,6 @@ export class Game {
     if (!player || this.getPocketWheelCount(player, slot) <= 0) return;
     this.pocketUsePreviewKind = kind;
     this.pocketUsePreviewTimer = kind === 'wood' ? 0.45 : 0.82;
-  }
-
-  private goldLeaderboardSignature = '';
-  private renderGoldLeaderboard(localPlayerId: string) {
-    if (!this.state) return;
-    const ranked = this.state.players
-      .filter((p) => p.state !== 'eliminated')
-      .slice()
-      .sort((a, b) => b.gold - a.gold)
-      .slice(0, 3);
-    const signature = `${localPlayerId}:${ranked.map((p) => `${p.id}:${p.gold}`).join('|')}`;
-    if (signature === this.goldLeaderboardSignature) return;
-    this.goldLeaderboardSignature = signature;
-    if (!ranked.length) {
-      this.ui.goldLeaders.innerHTML = '';
-      return;
-    }
-    this.ui.goldLeaders.innerHTML = ranked
-      .map((p, index) => {
-        const isSelf = p.id === localPlayerId;
-        const safeName = (p.name || 'Pirate').replace(/[<>&"]/g, (c) =>
-          c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '&' ? '&amp;' : '&quot;',
-        );
-        return `<div class="leader-row" data-rank="${index + 1}" data-self="${isSelf ? 1 : 0}">
-          <span class="leader-rank">${index + 1}</span>
-          <span class="leader-name">${safeName}</span>
-          <span class="leader-amt">${p.gold}</span>
-        </div>`;
-      })
-      .join('');
-  }
-
-  private renderShipUpgrades(ship: Ship | null) {
-    if (!ship) {
-      if (this.shipUpgradeSignature !== '') {
-        this.ui.shipUpgrades.innerHTML = '';
-        this.shipUpgradeSignature = '';
-      }
-      return;
-    }
-
-    const baseStats = SHIP_STATS[ship.type];
-    const hasHull = ship.upgrades.some((u) => u.type === 'hull_reinforcement');
-    const hasCannons = ship.upgrades.some((u) => u.type === 'charged_cannons');
-    const hasSails = ship.upgrades.some((u) => u.type === 'swift_sails');
-
-    const cannonBaseDmg = SHIP.CANNON_DAMAGE_HULL;
-    const cannonDmg = Math.round(cannonBaseDmg * (hasCannons ? SHIP_UPGRADES.CANNON_DAMAGE_MULT : 1));
-    const sailSpeed = (baseStats.maxSpeed * (hasSails ? SHIP_UPGRADES.SWIFT_SPEED_MULT : 1)).toFixed(1);
-
-    const signature = [
-      ship.id,
-      ship.maxHull,
-      hasHull ? 1 : 0,
-      hasCannons ? 1 : 0,
-      hasSails ? 1 : 0,
-    ].join(':');
-    if (signature === this.shipUpgradeSignature) return;
-    this.shipUpgradeSignature = signature;
-
-    const statRow = `
-      <div class="ship-stat-row">
-        <span class="ship-stat" data-stat="hull"${hasHull ? ' data-upgraded="1"' : ''}>
-          <span class="ship-stat-icon">🛡</span>
-          <span class="ship-stat-label">Hull</span>
-          <span class="ship-stat-value">${hasHull ? `Reinforced <em>(−${Math.round((1 - SHIP_UPGRADES.HULL_INGRESS_MULT) * 100)}% flood)</em>` : 'Standard'}</span>
-        </span>
-        <span class="ship-stat" data-stat="cannons"${hasCannons ? ' data-upgraded="1"' : ''}>
-          <span class="ship-stat-icon">✹</span>
-          <span class="ship-stat-label">Cannon Dmg</span>
-          <span class="ship-stat-value">${cannonDmg}${hasCannons ? ` <em>(+${Math.round((SHIP_UPGRADES.CANNON_DAMAGE_MULT - 1) * 100)}%)</em>` : ''}</span>
-        </span>
-        <span class="ship-stat" data-stat="sails"${hasSails ? ' data-upgraded="1"' : ''}>
-          <span class="ship-stat-icon">✦</span>
-          <span class="ship-stat-label">Top Speed</span>
-          <span class="ship-stat-value">${sailSpeed}<span class="ship-stat-unit">kn</span>${hasSails ? ` <em>(+${Math.round((SHIP_UPGRADES.SWIFT_SPEED_MULT - 1) * 100)}%)</em>` : ''}</span>
-        </span>
-      </div>
-    `;
-
-    const pills = ship.upgrades.length === 0
-      ? ''
-      : `<div class="ship-upgrade-pills">${ship.upgrades.map((upgrade) => {
-          const meta = this.getUpgradePresentation(upgrade.type);
-          return `<span class="upgrade-pill" data-type="${upgrade.type}" title="${meta.name}: ${meta.effect}">${meta.icon} ${meta.short} <em>${meta.effect}</em></span>`;
-        }).join('')}</div>`;
-
-    this.ui.shipUpgrades.innerHTML = statRow + pills;
-  }
-
-  private renderKegStatus(player: Player) {
-    const hidden = player.state === 'eliminated' || player.state === 'respawning';
-    this.ui.kegStatus.classList.toggle('visible', !hidden);
-    this.ui.kegStatusValue.textContent = this.getKegSummary(player);
-  }
-
-  private getKegSummary(player: Player) {
-    const normal = player.kegs <= 0
-      ? 'None remaining'
-      : player.kegCooldown > 0
-        ? `${Math.max(1, Math.ceil(player.kegCooldown))}s until second keg`
-        : player.kegs === 1 ? '1 ready' : `${player.kegs} ready`;
-    return player.megaKegs > 0 ? `Mega ${player.megaKegs} ready · ${normal}` : normal;
-  }
-
-  private getSpecialSummary(player: Player) {
-    const parts: string[] = [];
-    if (player.superCannonballs > 0) parts.push(`Super cannonball x${player.superCannonballs} (use cannonball at cannon)`);
-    if (player.megaKegs > 0) parts.push(`Mega keg x${player.megaKegs} (hold G, click/place)`);
-    if (player.tsunamiCharges > 0) parts.push(`Tsunami x${player.tsunamiCharges} [E]`);
-    if (parts.length > 0) return `Powers READY: ${parts.join(' · ')}`;
-
-    const next = player.playerKillStreak < 5
-      ? { count: 5, reward: 'super cannonball' }
-      : player.playerKillStreak < 10
-        ? { count: 10, reward: 'mega keg' }
-        : player.playerKillStreak < 20
-          ? { count: 20, reward: 'tsunami' }
-          : null;
-    return next
-      ? `Powers: streak ${player.playerKillStreak}/${next.count} for ${next.reward} (5 super cannonball, 10 mega keg, 20 tsunami)`
-      : `Powers: streak ${player.playerKillStreak} · all rewards unlocked at 5/10/20`;
-  }
-
-  private getObjectiveSummary(
-    player: Player,
-    ship: Ship | null,
-    context: {
-      chestsInHold: number;
-      mappedIsland: Island | null;
-      closestHoarder: { npc: IslandNpc; island: Island; distance: number } | null;
-      outsideStorm: boolean;
-      shipCritical: boolean;
-      shipOnFire: boolean;
-    },
-  ) {
-    if (context.outsideStorm) return 'Objective: sail inside the storm circle';
-    if (context.shipCritical) return 'Objective: repair hull before the ship goes down';
-    if (context.shipOnFire) return 'Objective: douse fire at the repair point';
-    if (player.carryingChestId && context.closestHoarder) {
-      return `Objective: sell chest at ${context.closestHoarder.island.name}`;
-    }
-    if (context.chestsInHold > 0 && context.closestHoarder) {
-      return `Objective: deliver ${context.chestsInHold} chest${context.chestsInHold === 1 ? '' : 's'} to ${context.closestHoarder.island.name}`;
-    }
-    if (context.mappedIsland) return `Objective: dig Gold Hoarder chests on ${context.mappedIsland.name}`;
-    if (player.gold >= ECONOMY.GOLD_WIN_TARGET * 0.72) return 'Objective: protect your lead and finish the gold run';
-    if (ship && ship.upgrades.length < 2) return 'Objective: claim upgrades, raid ships, and sell treasure';
-    return 'Objective: raid ships, sell treasure, and stay ahead of the storm';
   }
 
   private getUpgradePresentation(type: ShipUpgradeType) {
@@ -6713,29 +6099,6 @@ export class Game {
           effect: '+20% sail speed',
         };
     }
-  }
-
-  private pushFeed(message: string, color = '#e7e1d4') {
-    const item = document.createElement('div');
-    item.textContent = message;
-    item.style.color = color;
-    item.style.marginBottom = '8px';
-    item.style.textShadow = '0 2px 6px rgba(0, 0, 0, 0.55)';
-    this.ui.killFeed.prepend(item);
-    while (this.ui.killFeed.childElementCount > 5) {
-      this.ui.killFeed.lastElementChild?.remove();
-    }
-    window.setTimeout(() => {
-      item.style.opacity = '0';
-      item.style.transform = 'translateY(-6px)';
-      item.style.transition = 'opacity 200ms ease, transform 200ms ease';
-    }, 3000);
-    window.setTimeout(() => item.remove(), 3300);
-  }
-
-  private showVictory(kills: number, gold: number) {
-    this.ui.winStats.innerHTML = `<div>Kills: ${kills}</div><div>Gold: ${gold}</div>`;
-    this.ui.winScreen.style.display = 'flex';
   }
 
   private toggleMap(force?: boolean) {
