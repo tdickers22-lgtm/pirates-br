@@ -1,21 +1,28 @@
 /**
- * Builds every island-scale mesh: the island terrain groups and their decoration,
- * the server prop registry instancing, sea-stack rocks and the story NPC props.
+ * The island CONDUCTOR. It owns three things and nothing else: the per-island
+ * scratch every builder shares (palette, seeded rng, surface samplers — see
+ * island/context.ts), the ORDER the builders run in (which is the island's
+ * scene-graph order), and the LOD assembly that sorts the finished children
+ * into the detail / micro / proxy tiers.
  *
- * State that the rest of Game still reads each frame (mesh registries, foliage
- * wind uniforms, the environment group) is handed in by reference through
- * `IslandBuilderCtx` rather than duplicated here, so this extraction stays
- * behaviour-neutral.
+ * Every mesh itself is built by a module under island/: terrain and its proxy,
+ * caves, dock and tavern, server props and ground cover, volcanic FX, the
+ * land's own features, the landmarks people left, the decor scatter, the
+ * chest/barrel/station furniture, and the offshore sea stacks.
+ *
+ * State that the rest of Game reads each frame (mesh registries, foliage wind
+ * uniforms, the environment group) is handed in by reference through
+ * `IslandBuilderCtx` rather than duplicated here.
  */
 import * as THREE from 'three';
 import type { Island, SeaRock } from '../../shared/types/index.js';
-import { assets, type AssetName } from '../assets/AssetLibrary.js';
+import type { AssetName } from '../assets/AssetLibrary.js';
 import { BIOME_PALETTES } from '../../shared/props.js';
 import { getIslandMaxRadius, getIslandSurfacePoint, getIslandSurfaceY, isPointInsideIslandFootprint } from '../../shared/utils/index.js';
-import { makeUpgradeSignTexture } from '../rendering/factories/TextureFactory.js';
-import { makeUpgradeStationProp } from '../rendering/factories/MiscMeshFactory.js';
 import type { IslandBuildCtx, IslandBuilderCtx } from './island/context.js';
 import { buildCaves, makeCaveMouthCarver } from './island/CaveBuilder.js';
+import { buildBarrelMeshes, buildChestMeshes, buildUpgradeStationMeshes } from './island/EntityMeshes.js';
+import { buildSeaRockMesh } from './island/SeaRockBuilder.js';
 import { buildDock, buildDockClutter, buildTavern } from './island/DockBuilder.js';
 import { applyFoliageSway, buildGroundCover, buildPropInstance, buildServerProps, buildStoryNpcMesh } from './island/PropScatterer.js';
 import { buildBeachDecor, buildCairns, buildInteriorDressing, buildPebbles, buildRockAndDriftDecor, buildTreesAndStrays, buildVinesAndStakes } from './island/DecorScatter.js';
@@ -29,124 +36,10 @@ export type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '.
 export class IslandBuilder {
   constructor(private readonly ctx: IslandBuilderCtx) {}
 
-  private seaRockMaterialCache: THREE.MeshStandardMaterial | null = null;
-  /** Shared enriched sea-stack material: the Blender GLB gives the eroded pillar
-   *  geometry, this paints it with sedimentary strata bands, a wet dark base at
-   *  the waterline, a sun-bleached crown and position mottling so stacks read as
-   *  real weathered rock — not flat pale monoliths. Keyed on local/world pos so a
-   *  single shared material still varies per rock. */
-  getSeaRockMaterial(): THREE.MeshStandardMaterial {
-    if (this.seaRockMaterialCache) return this.seaRockMaterialCache;
-    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.97, flatShading: true });
-    mat.onBeforeCompile = (shader) => {
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vRockWorld;\nvarying float vRockLocalY;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRockLocalY = position.y;\nvRockWorld = (modelMatrix * vec4(position, 1.0)).xyz;');
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vRockWorld;\nvarying float vRockLocalY;')
-        .replace(
-          '#include <color_fragment>',
-          '#include <color_fragment>\n'
-          + 'float _band = sin(vRockLocalY * 1.35 + 0.6) * 0.5 + 0.5;\n'
-          + '_band = pow(_band, 1.4);\n'                                    // crisper band edges
-          + 'vec3 _rockA = vec3(0.20, 0.185, 0.16);\n'                      // dark weathered stone
-          + 'vec3 _rockB = vec3(0.40, 0.36, 0.30);\n'                       // warm lit band
-          + 'vec3 _col = mix(_rockA, _rockB, _band);\n'
-          + '_col *= 0.88 + 0.12 * sin(vRockLocalY * 5.0 + 1.3);\n'
-          + 'float _m = fract(sin(dot(floor(vRockWorld.xz * 0.55), vec2(12.9898, 78.233))) * 43758.5453);\n'
-          + '_col *= 0.86 + 0.2 * _m;\n'
-          + 'float _wet = 1.0 - smoothstep(-1.0, 5.5, vRockWorld.y);\n'
-          + '_col = mix(_col, vec3(0.11, 0.13, 0.14), _wet * 0.75);\n'      // dark salt-wet base
-          + 'float _crown = smoothstep(7.0, 12.5, vRockLocalY);\n'
-          + '_col = mix(_col, vec3(0.55, 0.53, 0.47), _crown * 0.55);\n'    // sun-bleached / guano crown
-          + '_col += vec3(0.03, 0.045, 0.02) * (1.0 - _band) * (1.0 - _wet);\n' // faint lichen in shaded bands
-
-          + 'diffuseColor.rgb = _col;',
-        );
-    };
-    mat.customProgramCacheKey = () => 'pirates-searock';
-    this.seaRockMaterialCache = mat;
-    return mat;
-  }
-
+  /** Sea-stack rocks build outside the island pipeline (see
+   *  island/SeaRockBuilder); Game builds them straight from the snapshot. */
   buildSeaRockMesh(rock: SeaRock) {
-    const group = new THREE.Group();
-    group.name = `sea-rock-${rock.id}`;
-    group.position.set(rock.position.x, rock.position.y, rock.position.z);
-    group.rotation.y = rock.rotation;
-    const lowDetail = this.ctx.renderer.getQuality() === 'low';
-
-    // GLB sea spires by size tier, fitted inside the server collider envelope
-    // (main collider cylinder) so visuals never exceed the collision size.
-    const tier: AssetName = rock.height > 26 ? 'searock_b' : rock.height > 13 ? 'searock_a' : 'searock_c';
-    const rockClone = assets.clone(tier);
-    const rockBounds = assets.bounds(tier);
-    if (rockClone && rockBounds) {
-      const assetHoriz = Math.max(-rockBounds.min.x, rockBounds.max.x, -rockBounds.min.z, rockBounds.max.z, 0.001);
-      const mainColliderRadius = rock.variant === 1 ? rock.radius * 0.72 : rock.radius * (0.62 + rock.variant * 0.035);
-      const mainColliderTop = rock.height * (rock.variant === 1 ? 0.84 : 0.94) - 1.3;
-      const sxz = mainColliderRadius / assetHoriz;
-      const sy = Math.max(0.4, mainColliderTop / Math.max(rockBounds.max.y, 0.001));
-      rockClone.scale.set(sxz, sy, sxz);
-      const seaRockMat = this.getSeaRockMaterial();
-      rockClone.traverse((o) => {
-        if (o instanceof THREE.Mesh) {
-          o.material = seaRockMat;          // enriched strata/wet/mottle look
-          o.castShadow = !lowDetail;
-          o.receiveShadow = !lowDetail;
-        }
-      });
-      group.add(rockClone);
-
-      const foam = new THREE.Mesh(
-        new THREE.RingGeometry(rock.radius * 0.8, rock.radius * 1.12, lowDetail ? 12 : 24),
-        new THREE.MeshBasicMaterial({ color: 0xdcede8, transparent: true, opacity: 0.26, side: THREE.DoubleSide, depthWrite: false }),
-      );
-      foam.rotation.x = -Math.PI * 0.5;
-      foam.position.y = 0.04;
-      group.add(foam);
-      return group;
-    }
-
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x292d2b, roughness: 1, flatShading: true });
-    const wetMat = new THREE.MeshStandardMaterial({ color: 0x3c403a, roughness: 0.92, flatShading: true });
-    const topMat = new THREE.MeshStandardMaterial({ color: 0x595548, roughness: 0.98, flatShading: true });
-    const mainGeo = rock.variant === 1
-      ? new THREE.ConeGeometry(rock.radius * 0.72, rock.height, 6, 1)
-      : new THREE.DodecahedronGeometry(rock.radius * 0.62, 1);
-    const main = new THREE.Mesh(mainGeo, rock.variant === 2 ? wetMat : darkMat);
-    main.scale.set(1.05, rock.variant === 1 ? 1 : rock.height / Math.max(1, rock.radius), 0.82 + rock.variant * 0.08);
-    main.position.y = rock.height * 0.34 - 1.8;
-    main.rotation.set(-0.16 + rock.variant * 0.11, 0, 0.09);
-    main.castShadow = !lowDetail;
-    main.receiveShadow = !lowDetail;
-    group.add(main);
-
-    const shardCount = lowDetail ? 1 + Math.min(1, rock.variant) : 4 + rock.variant;
-    for (let i = 0; i < shardCount; i++) {
-      const angle = (i / shardCount) * Math.PI * 2 + rock.rotation * 0.17;
-      const radius = rock.radius * (0.28 + (i % 2) * 0.16);
-      const shardH = rock.height * (0.34 + (i % 3) * 0.08);
-      const shard = new THREE.Mesh(
-        new THREE.ConeGeometry(rock.radius * (0.16 + (i % 2) * 0.04), shardH, 5, 1),
-        i % 2 === 0 ? wetMat : topMat,
-      );
-      shard.position.set(Math.cos(angle) * radius, shardH * 0.28 - 1.2, Math.sin(angle) * radius);
-      shard.rotation.set((i % 2 ? 0.24 : -0.18), angle, (i % 3 - 1) * 0.18);
-      shard.castShadow = !lowDetail;
-      shard.receiveShadow = !lowDetail;
-      group.add(shard);
-    }
-
-    const foam = new THREE.Mesh(
-      new THREE.RingGeometry(rock.radius * 0.8, rock.radius * 1.12, lowDetail ? 12 : 24),
-      new THREE.MeshBasicMaterial({ color: 0xdcede8, transparent: true, opacity: 0.26, side: THREE.DoubleSide, depthWrite: false }),
-    );
-    foam.rotation.x = -Math.PI * 0.5;
-    foam.position.y = 0.04;
-    group.add(foam);
-
-    return group;
+    return buildSeaRockMesh(rock, this.ctx);
   }
 
   /** Clone a GLB library prop and place it (see island/PropScatterer). Kept on
@@ -568,234 +461,11 @@ export class IslandBuilder {
     this.ctx.environment.add(group);
     this.ctx.islandMeshes.set(island.id, group);
 
-    for (const chest of island.chests) {
-      const chestGroup = new THREE.Group();
-      chestGroup.position.set(chest.position.x, chest.position.y, chest.position.z);
+    buildChestMeshes(ctx);
 
-      const surfaceY = getIslandSurfaceY(island, chest.position.x, chest.position.z);
+    buildBarrelMeshes(ctx);
 
-      let chestMesh: THREE.Object3D;
-      let lid: THREE.Object3D;
-      const chestGlb = this.buildPropInstance(
-        'chest_closed',
-        new THREE.Vector3(0, -0.42, 0),
-        (chest.position.x * 7.13 + chest.position.z * 3.71) % (Math.PI * 2),
-        1.15,
-      );
-      if (chestGlb) {
-        chestGroup.add(chestGlb);
-        chestMesh = chestGlb;
-        lid = new THREE.Group(); // GLB includes the lid; keep the record shape for syncChests
-        chestGroup.add(lid);
-      } else {
-        const chestBox = new THREE.Mesh(
-          new THREE.BoxGeometry(1.1, 0.7, 0.75),
-          new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 }),
-        );
-        chestBox.castShadow = true;
-        chestGroup.add(chestBox);
-        chestMesh = chestBox;
-
-        const lidMesh = new THREE.Mesh(
-          new THREE.BoxGeometry(1.08, 0.2, 0.75),
-          new THREE.MeshStandardMaterial({ color: 0x8b5e2f, roughness: 0.9 }),
-        );
-        lidMesh.position.y = 0.42;
-        chestGroup.add(lidMesh);
-        lid = lidMesh;
-      }
-
-      const glow = new THREE.PointLight(0xffc75a, 1.2, 12);
-      glow.position.set(0, 1.2, 0);
-      glow.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
-      chestGroup.userData.decorLight = lowDetail ? null : glow;
-      chestGroup.add(glow);
-
-      let mound: THREE.Mesh | null = null;
-      if (chest.buried) {
-        mound = new THREE.Mesh(
-          new THREE.ConeGeometry(1.05, 0.52, 8),
-          new THREE.MeshStandardMaterial({ color: 0x4a3c26, roughness: 1 }),
-        );
-        mound.position.set(0, surfaceY - chest.position.y + 0.1, 0);
-        mound.castShadow = true;
-        chestGroup.add(mound);
-        chestMesh.visible = false;
-        lid.visible = false;
-        glow.intensity = 0.4;
-        glow.position.set(0, surfaceY - chest.position.y + 0.85, 0);
-      }
-
-      this.ctx.environment.add(chestGroup);
-      this.ctx.chestMeshes.set(chest.id, { root: chestGroup, glow, chestMesh, lid, mound });
-    }
-
-    for (const barrel of island.barrels) {
-      const barrelRoot = new THREE.Group();
-      barrelRoot.position.set(barrel.position.x, barrel.position.y, barrel.position.z);
-      const barrelGlb = this.buildPropInstance(
-        'barrel',
-        new THREE.Vector3(0, 0, 0),
-        (barrel.position.x * 5.31 + barrel.position.z * 2.17) % (Math.PI * 2),
-        0.88,
-      );
-      if (barrelGlb) {
-        barrelRoot.add(barrelGlb);
-      } else {
-        const woodMat = new THREE.MeshStandardMaterial({ color: 0x4a3010, roughness: 0.95 });
-        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.72, 10), woodMat);
-        body.position.y = 0.36;
-        body.castShadow = true;
-        barrelRoot.add(body);
-        const lidB = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.36, 0.36, 0.06, 10),
-          new THREE.MeshStandardMaterial({ color: 0x2a4a6a, roughness: 0.85 }),
-        );
-        lidB.position.y = 0.78;
-        barrelRoot.add(lidB);
-      }
-      this.ctx.environment.add(barrelRoot);
-      this.ctx.barrelMeshes.set(barrel.id, barrelRoot);
-    }
-
-    for (const station of island.upgradeStations) {
-      const meta = this.ctx.getUpgradePresentation(station.type);
-      const stationGroup = new THREE.Group();
-      stationGroup.position.set(station.position.x, station.position.y - 0.24, station.position.z);
-
-      const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6d6558, roughness: 1 });
-      const sootMat = new THREE.MeshStandardMaterial({ color: 0x2b2723, roughness: 1 });
-
-      const groundPad = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.08, 1.24, 0.22, 9),
-        stoneMat,
-      );
-      groundPad.position.y = -0.08;
-      groundPad.castShadow = true;
-      groundPad.receiveShadow = true;
-      stationGroup.add(groundPad);
-
-      const firePit = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.48, 0.56, 0.14, 8),
-        sootMat,
-      );
-      firePit.position.y = 0.06;
-      firePit.castShadow = true;
-      firePit.receiveShadow = true;
-      stationGroup.add(firePit);
-
-      const base = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.72, 0.94, 0.28, 7),
-        new THREE.MeshStandardMaterial({ color: 0x4b3b28, roughness: 0.96 }),
-      );
-      base.position.y = 0.14;
-      base.castShadow = true;
-      base.receiveShadow = true;
-      stationGroup.add(base);
-
-      const anvilBase = new THREE.Mesh(
-        new THREE.BoxGeometry(0.52, 0.34, 0.34),
-        new THREE.MeshStandardMaterial({ color: 0x2f333d, roughness: 0.62, metalness: 0.58 }),
-      );
-      anvilBase.position.y = 0.46;
-      anvilBase.castShadow = true;
-      stationGroup.add(anvilBase);
-
-      const anvilTop = new THREE.Mesh(
-        new THREE.BoxGeometry(0.82, 0.12, 0.28),
-        new THREE.MeshStandardMaterial({ color: 0x4b5262, roughness: 0.42, metalness: 0.75 }),
-      );
-      anvilTop.position.set(0.08, 0.68, 0);
-      anvilTop.castShadow = true;
-      stationGroup.add(anvilTop);
-
-      const core = new THREE.Mesh(
-        new THREE.OctahedronGeometry(0.18, 0),
-        new THREE.MeshStandardMaterial({
-          color: meta.hex,
-          emissive: meta.hex,
-          emissiveIntensity: 0.85,
-          roughness: 0.28,
-          metalness: 0.2,
-        }),
-      );
-      core.position.set(0, 0.96, 0);
-      core.castShadow = true;
-      stationGroup.add(core);
-
-      const halo = new THREE.Mesh(
-        new THREE.TorusGeometry(0.38, 0.035, 6, 24),
-        new THREE.MeshBasicMaterial({
-          color: meta.hex,
-          transparent: true,
-          opacity: 0.75,
-          depthWrite: false,
-        }),
-      );
-      halo.rotation.x = Math.PI * 0.5;
-      halo.position.y = 0.72;
-      stationGroup.add(halo);
-
-      const light = new THREE.PointLight(meta.hex, 2.2, 16);
-      light.position.set(0, 1.06, 0);
-      light.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
-      stationGroup.userData.decorLight = lowDetail ? null : light;
-      stationGroup.add(light);
-
-      const stationProp = makeUpgradeStationProp(station.type, meta.hex);
-      stationGroup.add(stationProp);
-
-      const signTitle = station.type === 'hull_reinforcement'
-        ? 'Hull Armor'
-        : station.type === 'charged_cannons'
-          ? 'Cannons'
-          : 'Sail Speed';
-      const sign = new THREE.Mesh(
-        new THREE.PlaneGeometry(2.05, 0.76),
-        new THREE.MeshBasicMaterial({
-          map: makeUpgradeSignTexture(signTitle, meta.effect, meta.hex),
-          transparent: true,
-          opacity: 0.94,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-        }),
-      );
-      sign.position.set(0, 1.86, 0);
-      sign.renderOrder = 6;
-      stationGroup.add(sign);
-
-      const postMat = new THREE.MeshStandardMaterial({ color: 0x4d321c, roughness: 0.92 });
-      for (const x of [-0.78, 0.78]) {
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 1.32, 7), postMat);
-        post.position.set(x, 1.05, -0.04);
-        post.castShadow = true;
-        stationGroup.add(post);
-      }
-
-      for (let rock = 0; rock < 5; rock++) {
-        const angle = (rock / 5) * Math.PI * 2 + 0.28;
-        const radius = 0.86 + (rock % 2) * 0.12;
-        const stone = new THREE.Mesh(
-          new THREE.DodecahedronGeometry(0.16 + (rock % 2) * 0.05, 0),
-          stoneMat,
-        );
-        stone.position.set(Math.cos(angle) * radius, 0.02, Math.sin(angle) * radius);
-        stone.scale.set(1.2, 0.8, 1);
-        stone.castShadow = true;
-        stone.receiveShadow = true;
-        stationGroup.add(stone);
-      }
-
-      this.ctx.environment.add(stationGroup);
-      this.ctx.upgradeStationMeshes.set(station.id, {
-        root: stationGroup,
-        core,
-        halo,
-        sign,
-        light,
-        type: station.type,
-      });
-    }
+    buildUpgradeStationMeshes(ctx);
 
     for (const npc of island.npcs ?? []) {
       const npcRecord = buildStoryNpcMesh(npc, this.ctx);
