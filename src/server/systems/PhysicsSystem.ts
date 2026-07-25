@@ -1220,7 +1220,7 @@ export class PhysicsSystem {
         }
       }
 
-      this.resolveSwimmerShipCollision(player, ships);
+      this.resolveSwimmerShipCollision(player, ships, gangwayPlans);
       this.resolvePlayerSeaRockCollision(player, seaRocks, false);
 
       // World boundary
@@ -1716,12 +1716,30 @@ export class PhysicsSystem {
    *  replayed sim lands the same breach points. */
   private holeJitter = 0x2f6e2b1;
 
+  /** True while the pirate's feet are on a berthed ship's boarding plank.
+   *  The plank's inboard end hangs off the cap rail — i.e. INSIDE the hull
+   *  footprint — so a walker crossing it must be exempt from the hull pushout
+   *  or they get treadmilled back down the plank (or shoved off the side). */
+  private isStandingOnGangway(player: Player, gangwayPlans: GangwayPlan[]): boolean {
+    for (const plan of gangwayPlans) {
+      const plankY = getGangwayFloorY(plan, player.position.x, player.position.z);
+      if (plankY === null) continue;
+      // Feet on the plank (a step of slack for the walk step + wave bob), head
+      // room above. A swimmer floating UNDER the plank stays collidable.
+      if (player.position.y > plankY - 0.45 && player.position.y < plankY + PLAYER.HEIGHT + 0.6) return true;
+    }
+    return false;
+  }
+
   /** Block passing through the full hull — swimmers AND walkers whose feet are
    *  below the deck rail (docked-ship walk-through). Boarding still happens via
-   *  the ladder prompt; the vertical band below keeps above-rail jumps clear. */
-  private resolveSwimmerShipCollision(player: Player, ships: Ship[]) {
+   *  the ladder prompt or the boarding plank; the vertical band below keeps
+   *  above-rail jumps clear. */
+  private resolveSwimmerShipCollision(player: Player, ships: Ship[], gangwayPlans: GangwayPlan[]) {
     if (player.cannonBallistic || player.onShipId) return;
     if (player.state !== 'swimming' && player.state !== 'alive') return;
+    // Walking aboard up the plank is a sanctioned route through the hull band.
+    if (player.state !== 'swimming' && this.isStandingOnGangway(player, gangwayPlans)) return;
 
     for (const ship of ships) {
       if (!ship.alive || ship.sinking) continue;
