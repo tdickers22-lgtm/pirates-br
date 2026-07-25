@@ -12,6 +12,7 @@ import {
   getAmmoCrateLocal,
   getAnchorControlLocal,
   getCannonDeckLocalPosition,
+  getHelmControlLocal,
   isNearAmmoCrate,
   isNearAnchor,
   isNearCrowNestLadder,
@@ -343,7 +344,8 @@ export class InteractionPrompts {
       }
 
       if (isNearHelm(player, ship)) {
-        const helmPoint = this.view.getShipWorldPoint(ship, 0, -SHIP_STATS[ship.type].length * 0.37, SHIP_STATS[ship.type].height + 0.95);
+        const helm = getHelmControlLocal(SHIP_STATS[ship.type]);
+        const helmPoint = this.view.getShipWorldPoint(ship, helm.x, helm.z, SHIP_STATS[ship.type].height + 0.95);
         this.pushInteractionCandidate(candidates, player, helmPoint, 4.2, 0.2, '[X] Take Helm', 'A/D or arrows turn · W/S trims sails', 'helm');
       }
 
