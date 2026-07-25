@@ -549,9 +549,14 @@ export const FULL_SNAPSHOT_TICKS = SNAPSHOT_RATE * 3;
 /** Seconds the match sits in phase 'waiting' before the sim goes live: the
  *  server broadcasts one 'match_countdown' per whole second with inputs locked,
  *  then a 'match_horn' at activation. 0 = the legacy instant start (identical
- *  behavior, no countdown/horn traffic) — raise it once the client renders the
- *  title card + countdown. */
-export const MATCH_START_COUNTDOWN_SEC = 0;
+ *  behavior, no countdown/horn traffic). The client renders the staged start
+ *  card + countdown off these messages (see Game.showMatchStartSequence). */
+export const MATCH_START_COUNTDOWN_SEC = 8;
+
+/** Crews (ships) per match — humans plus bot fill. The lobby sizes the queue to
+ *  this and the menu's placeholder queue line quotes it, so the two can't drift
+ *  ("0 / 8 pirates" flashed on a 10-pirate queue for months). */
+export const MATCH_TOTAL_SHIPS = 10;
 
 // ── Early-game pacing governor ───────────────────────────────
 /** Bots do not SEEK ship-to-ship engagements for this long after the horn

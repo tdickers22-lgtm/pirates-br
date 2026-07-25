@@ -18,6 +18,8 @@ export type MapView = {
   readonly input: InputManager;
   readonly renderer: Renderer;
   readonly state: GameState | null;
+  /** True until the pirate first boards — highlights their own hull on the chart. */
+  readonly ownShipBeaconActive: boolean;
   formatStormTimer(seconds: number): string;
   getClosestGoldHoarder(player: Player): { npc: IslandNpc; island: Island; distance: number } | null;
   getLocalPlayer(): Player | null;
@@ -638,6 +640,19 @@ export class MapRenderer {
     for (const ship of this.view.state.ships) {
       if (!ship.alive || ship.sinking) continue;
       const isOwn = ship.id === trackedShip?.id;
+      // Until the pirate boards for the first time, their own hull wears a
+      // pulsing gold ring — "that one, over there, is yours".
+      if (isOwn && this.view.ownShipBeaconActive) {
+        const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 260);
+        const ringR = (fullscreen ? 26 : 15) + pulse * (fullscreen ? 6 : 3.5);
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 208, 110, ${0.45 + pulse * 0.45})`;
+        ctx.lineWidth = fullscreen ? 3 : 2;
+        ctx.beginPath();
+        ctx.arc(centerX + ship.position.x * scale, centerY + ship.position.z * scale, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
       this.drawShipMarker(
         ctx,
         centerX + ship.position.x * scale,

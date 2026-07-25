@@ -10,10 +10,10 @@ import type {
 } from '../../shared/types/index.js';
 import { Match, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
+import { MATCH_TOTAL_SHIPS } from '../../shared/constants/index.js';
 
 // ── Tunables ──────────────────────────────────────────────────
 const PARTY_CAPACITY = 16;
-const MATCH_TOTAL_SHIPS = 10;
 const PARTY_DEFAULT_BOTS = MATCH_TOTAL_SHIPS - 1;
 const PARTY_MAX_BOTS = MATCH_TOTAL_SHIPS - 1;
 const QUEUE_TARGET = MATCH_TOTAL_SHIPS;

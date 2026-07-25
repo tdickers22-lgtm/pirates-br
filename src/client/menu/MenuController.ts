@@ -1,6 +1,7 @@
 import type {
   LobbyUpdatePayload, QueueUpdatePayload, PlayerStatsRecord, MatchStartPayload, WelcomePayload,
 } from '../../shared/types/index.js';
+import { MATCH_TOTAL_SHIPS } from '../../shared/constants/index.js';
 import type { NetworkClient } from '../network/NetworkClient.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
@@ -22,6 +23,9 @@ export interface MenuControllerOptions {
   input?: InputManager;
   onMatchStart: (payload: MatchStartPayload) => void;
   onReturnToMenu?: () => void;
+  /** Queue popped — the cohort is being placed. Fires once per queue session so
+   *  the game can open the CREW FOUND beat before the menu tears down. */
+  onCrewFound?: () => void;
 }
 
 export class MenuController {
@@ -30,6 +34,9 @@ export class MenuController {
   private inputMgr: InputManager | null;
   private onMatchStartCb: (payload: MatchStartPayload) => void;
   private onReturnToMenuCb: (() => void) | null;
+  private onCrewFoundCb: (() => void) | null;
+  /** One CREW FOUND beat per queue session (the server may repeat the payload). */
+  private crewFoundFired = false;
 
   // DOM refs
   private screen!: HTMLElement;
@@ -103,6 +110,7 @@ export class MenuController {
     this.inputMgr = opts.input ?? null;
     this.onMatchStartCb = opts.onMatchStart;
     this.onReturnToMenuCb = opts.onReturnToMenu ?? null;
+    this.onCrewFoundCb = opts.onCrewFound ?? null;
   }
 
   init(): void {
@@ -291,10 +299,13 @@ export class MenuController {
         return;
       }
       if (!submitName()) return;
+      this.crewFoundFired = false;
       this.network.queueJoin();
       this.showPanel('queue');
       this.queueStatusLine.textContent = 'Hoisting sails…';
-      this.queueDetailLine.textContent = '0 / 8 pirates · 15s';
+      // The real count lands with the first queue_update; quote the true target
+      // meanwhile (this used to flash "0 / 8" at a 10-pirate queue).
+      this.queueDetailLine.textContent = `— / ${MATCH_TOTAL_SHIPS} pirates · 15s`;
       this.queueProgressBar.style.width = '0%';
     });
 
@@ -372,6 +383,7 @@ export class MenuController {
 
     // Queue
     this.queueCancelBtn.addEventListener('click', () => {
+      this.crewFoundFired = false;
       this.network.queueLeave();
       this.showPanel('main');
     });
@@ -573,8 +585,20 @@ export class MenuController {
 
   private renderQueue(payload: QueueUpdatePayload): void {
     if (payload.starting) {
-      this.queueStatusLine.textContent = 'Match starting…';
-    } else if (payload.inQueue >= payload.needed) {
+      // The "crew found" beat: the cohort has been pulled out of the queue and
+      // is being placed. Hand the moment to the game so the ceremony overlay
+      // (found → countdown → horn) starts here instead of at the horn.
+      this.queueStatusLine.textContent = 'Crew found — boarding…';
+      this.queueProgressBar.style.width = '100%';
+      const aboard = payload.inQueue;
+      this.queueDetailLine.textContent = `${aboard} pirate${aboard === 1 ? '' : 's'} aboard · weighing anchor`;
+      if (!this.crewFoundFired) {
+        this.crewFoundFired = true;
+        this.onCrewFoundCb?.();
+      }
+      return;
+    }
+    if (payload.inQueue >= payload.needed) {
       this.queueStatusLine.textContent = 'Crew complete — setting sail…';
     } else {
       this.queueStatusLine.textContent = 'Searching the seas for fellow pirates…';

@@ -780,6 +780,22 @@ export function getCaveCeilingY(island: Island, x: number, z: number): number | 
   return best;
 }
 
+/**
+ * True when a point is INSIDE a cave tunnel rather than on the hillside above
+ * it: under the tunnel's ceiling, with a carved floor below the natural grade.
+ * This is the same test PhysicsSystem.islandStandY uses to swap the standing
+ * floor for the cave floor, so callers that need "is this pirate in a cave"
+ * (cave reverb, stone footsteps) agree with the ground they're standing on.
+ */
+export function isInsideCaveInterior(island: Island, x: number, y: number, z: number): boolean {
+  const ceiling = getCaveCeilingY(island, x, z);
+  // 0.1m of head clearance — LOCO.CAVE_HEAD_CLEARANCE, mirrored here so the
+  // shared test matches the server's floor swap exactly.
+  if (ceiling === null || y >= ceiling - 0.1) return false;
+  const caveFloor = getCaveFloorY(island, x, z);
+  return caveFloor !== null && caveFloor < getIslandSurfaceY(island, x, z);
+}
+
 /** True when the standing ground at (x, z) sits deep enough under the local
  *  wave surface that a walker should be swimming (beach walk-ins, archipelago
  *  channels). The locomotion track flips player state off this. */

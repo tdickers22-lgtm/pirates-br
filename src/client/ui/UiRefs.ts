@@ -64,6 +64,18 @@ export type UiRefs = {
   mapCanvas: HTMLCanvasElement;
   mapSubtitle: HTMLDivElement;
   islandBanner: HTMLDivElement;
+  /** Staged match start (crew found → countdown → horn). */
+  matchStartSeq: HTMLDivElement;
+  matchStartCrews: HTMLSpanElement;
+  matchStartIsland: HTMLDivElement;
+  matchStartCount: HTMLDivElement;
+  matchStartBanner: HTMLDivElement;
+  matchStartHint: HTMLDivElement;
+  /** Screen-projected "board your ship" marker over the player's own hull. */
+  ownShipMarker: HTMLDivElement;
+  ownShipMarkerDistance: HTMLSpanElement;
+  /** Crews-afloat chip — pulsed on every crew elimination. */
+  playerCount: HTMLDivElement;
   pocketWheel: HTMLDivElement;
   pocketWheelStats: HTMLDivElement;
   mapWheel: HTMLDivElement;
@@ -149,6 +161,15 @@ export function buildUiRefs(): UiRefs {
     mapCanvas: requireElement('map-canvas'),
     mapSubtitle: requireElement('map-subtitle'),
     islandBanner: requireElement('island-banner'),
+    matchStartSeq: requireElement('match-start-seq'),
+    matchStartCrews: requireElement('ms-crews'),
+    matchStartIsland: requireElement('ms-island'),
+    matchStartCount: requireElement('ms-count'),
+    matchStartBanner: requireElement('ms-banner'),
+    matchStartHint: requireElement('ms-hint'),
+    ownShipMarker: requireElement('own-ship-marker'),
+    ownShipMarkerDistance: requireElement('osm-dist'),
+    playerCount: requireElement('player-count'),
     pocketWheel: requireElement('pocket-wheel'),
     pocketWheelStats: requireElement('pocket-wheel-stats'),
     mapWheel: requireElement('map-wheel'),

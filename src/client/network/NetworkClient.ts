@@ -39,6 +39,18 @@ export class NetworkClient {
   public onGameOver: ((payload: unknown) => void) | null = null;
   public onPlayerSpawned: ((payload: unknown) => void) | null = null;
   public onMatchEnded: ((payload: unknown) => void) | null = null;
+  /** Staged start: one per whole second while the sim is frozen in 'waiting'. */
+  public onMatchCountdown: ((payload: { secondsRemaining: number; totalSeconds: number; crews: number }) => void) | null = null;
+  /** Staged start: the sim just went live. */
+  public onMatchHorn: ((payload: { crews: number }) => void) | null = null;
+  /** A crew's ship went down — CREWS AFLOAT just dropped. */
+  public onCrewEliminated: ((payload: {
+    crewId: string;
+    crewName: string;
+    remaining: number;
+    byPlayerId: string | null;
+    byName: string | null;
+  }) => void) | null = null;
 
   // Lobby-scoped events
   public onWelcome: ((payload: WelcomePayload) => void) | null = null;
@@ -157,6 +169,9 @@ export class NetworkClient {
       case 'trade_result': this.onTradeResult?.(msg.payload); break;
       case 'game_over': this.onGameOver?.(msg.payload); break;
       case 'match_ended': this.onMatchEnded?.(msg.payload); break;
+      case 'match_countdown': this.onMatchCountdown?.(msg.payload as Parameters<NonNullable<typeof this.onMatchCountdown>>[0]); break;
+      case 'match_horn': this.onMatchHorn?.(msg.payload as Parameters<NonNullable<typeof this.onMatchHorn>>[0]); break;
+      case 'crew_eliminated': this.onCrewEliminated?.(msg.payload as Parameters<NonNullable<typeof this.onCrewEliminated>>[0]); break;
       case 'player_spawned': this.onPlayerSpawned?.(msg.payload); break;
       case 'lobby_update': this.onLobbyUpdate?.(msg.payload as LobbyUpdatePayload); break;
       case 'lobby_left': this.clearMatchSession(); this.onLobbyLeft?.(); break;

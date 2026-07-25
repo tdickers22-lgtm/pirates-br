@@ -36,6 +36,11 @@ export type HudView = {
   hitMarkerKill: boolean;
   prevIsInsideIsland: string | null;
   visibleInteractKind: ClientInteractKind | null;
+  /** True while the staged-start ceremony owns the screen centre. */
+  readonly startCeremonyActive: boolean;
+  /** True until the player first boards their own hull — drives the first
+   *  objective line ("board your ship") and the world/minimap marker. */
+  readonly ownShipObjectiveActive: boolean;
   distance2D(ax: number, az: number, bx: number, bz: number): number;
   findNearbyCannonIndex(player: Player, ship: Ship): number | null;
   findRepairableHole(player: Player, ship: Ship): ShipHole | null;
@@ -81,6 +86,64 @@ export class HudController {
   private shipUpgradeSignature = '';
   private shipInventorySignature = '';
   private brProgressSignature = '';
+  /** The spawn island must NOT read as a discovery — the first HUD pass only
+   *  seeds where the player already is. */
+  private islandPresenceSeeded = false;
+  private compassTapeBuilt = false;
+  private crewPulseTimer: number | null = null;
+
+  /** Called on match teardown so per-match latches don't leak into the next round. */
+  resetForMatch(): void {
+    this.islandPresenceSeeded = false;
+    this.brProgressSignature = '';
+    this.goldLeaderboardSignature = '';
+    if (this.crewPulseTimer !== null) {
+      window.clearTimeout(this.crewPulseTimer);
+      this.crewPulseTimer = null;
+    }
+    this.view.ui.playerCount.classList.remove('crew-pulse');
+  }
+
+  /** Flash the CREWS AFLOAT chip — the counter used to drop 10 → 7 → 5 in total silence. */
+  pulseCrewsAfloat(): void {
+    const chip = this.view.ui.playerCount;
+    if (this.crewPulseTimer !== null) window.clearTimeout(this.crewPulseTimer);
+    chip.classList.remove('crew-pulse');
+    // Reflow so the animation replays on back-to-back eliminations.
+    void chip.offsetWidth;
+    chip.classList.add('crew-pulse');
+    this.crewPulseTimer = window.setTimeout(() => {
+      this.crewPulseTimer = null;
+      chip.classList.remove('crew-pulse');
+    }, 1000);
+  }
+
+  /** Pixels of tape per degree of bearing (matches the old strip's scale). */
+  private static readonly COMPASS_PX_PER_DEG = 2.6;
+
+  /**
+   * Lay absolute marks along the tape for a FULL TURN either side of north.
+   * The old single finite strip ran out: past its extent the compass bar went
+   * completely blank across a whole arc of headings. With ±360° of marks the
+   * ±40° window under the bezel is always populated, whatever the heading.
+   */
+  private buildCompassTape(): void {
+    if (this.compassTapeBuilt) return;
+    this.compassTapeBuilt = true;
+    const tape = this.view.ui.compassTape;
+    tape.textContent = '';
+    const cardinals: Record<number, string> = { 0: 'N', 90: 'E', 180: 'S', 270: 'W' };
+    const inter: Record<number, string> = { 45: 'NE', 135: 'SE', 225: 'SW', 315: 'NW' };
+    for (let degrees = -360; degrees <= 720; degrees += 15) {
+      const bearing = ((degrees % 360) + 360) % 360;
+      const mark = document.createElement('div');
+      const label = cardinals[bearing] ?? inter[bearing] ?? null;
+      mark.className = `cm ${cardinals[bearing] ? 'cm-card' : inter[bearing] ? 'cm-inter' : 'cm-tick'}`;
+      mark.textContent = label ?? '·';
+      mark.style.left = `${degrees * HudController.COMPASS_PX_PER_DEG}px`;
+      tape.appendChild(mark);
+    }
+  }
 
   private updateBarrelPanel(player: Player, ship: Ship | null) {
     // Close the panel as soon as the player walks away from the barrel they were
@@ -146,11 +209,14 @@ export class HudController {
       ? 'FINAL STORM - NO SAFE HARBOR'
       : `STORM PHASE ${Math.min(this.view.state.storm.phase + 1, STORM_PHASES.length)} - ${stormVerb}`;
     this.view.ui.stormTimer.textContent = finalHold ? '' : this.view.formatStormTimer(timerSeconds);
+    // m:ss, same formatter as the HUD chip and the map legend — the full map
+    // used to print raw seconds ("NEXT STORM SHIFT IN 121S").
+    const stormClock = this.view.formatStormTimer(timerSeconds);
     this.view.ui.mapSubtitle.textContent = finalHold
       ? 'The storm has fully closed — finish the fight'
       : this.view.state.storm.shrinking
-        ? `Storm moving now · closes in ${timerSeconds}s`
-        : `Next storm shift in ${timerSeconds}s`;
+        ? `Storm moving now · closes in ${stormClock}`
+        : `Next storm shift in ${stormClock}`;
 
     const outsideStorm = this.view.distance2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ) > this.view.state.storm.safeRadius;
     // "Critical" is now the flood, not a hull-HP average: she is going down
@@ -308,13 +374,21 @@ export class HudController {
         break;
       }
     }
-    if (insideIslandId && insideIslandId !== this.view.prevIsInsideIsland) {
+    // "Land discovered" is for land you SAILED to. The very first HUD pass just
+    // records where you spawned (you are standing on your start island — the
+    // banner used to hijack the match-start moment), and the whole cue stands
+    // down while the start ceremony holds the screen centre.
+    const isNewIsland = this.islandPresenceSeeded
+      && !!insideIslandId
+      && insideIslandId !== this.view.prevIsInsideIsland;
+    if (isNewIsland && !this.view.startCeremonyActive) {
       const isl = this.view.state.islands.find((i) => i.id === insideIslandId);
       if (isl) {
         this.view.flashIslandBanner(isl.name);
         this.view.playIslandArrivalFanfare();
       }
     }
+    this.islandPresenceSeeded = true;
     this.view.prevIsInsideIsland = insideIslandId;
     if (performance.now() > this.view.islandBannerHideAt) {
       this.view.ui.islandBanner.classList.remove('visible');
@@ -428,8 +502,10 @@ export class HudController {
       this.view.ui.contextLabel.textContent = ambientLabel;
     }
 
-    const heading = ((player.rotation.x * 180) / Math.PI + 360) % 360;
-    this.view.ui.compassTape.style.transform = `translateX(${Math.round(-heading * 2.6)}px)`;
+    this.buildCompassTape();
+    const heading = (((player.rotation.x * 180) / Math.PI) % 360 + 360) % 360;
+    this.view.ui.compassTape.style.transform =
+      `translateX(${Math.round(-heading * HudController.COMPASS_PX_PER_DEG)}px)`;
     this.view.ui.compassTape.style.opacity = '1';
 
     if (this.view.state.phase === 'ended') {
@@ -751,6 +827,11 @@ export class HudController {
       shipOnFire: boolean;
     },
   ) {
+    // First thing a pirate must actually do: get aboard. Clears the moment they
+    // board (see Game.updateOwnShipObjective), so it never nags a sailing crew.
+    if (this.view.ownShipObjectiveActive && !context.outsideStorm) {
+      return 'Objective: board your ship — follow the gold sail marker';
+    }
     if (context.outsideStorm) return 'Objective: sail inside the storm circle';
     if (context.shipCritical) return 'Objective: repair hull before the ship goes down';
     if (context.shipOnFire) return 'Objective: douse fire at the repair point';

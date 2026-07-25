@@ -3,7 +3,7 @@ import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPO
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex,
@@ -16,7 +16,7 @@ import { Renderer } from '../rendering/Renderer.js';
 import { OceanRenderer } from '../rendering/OceanRenderer.js';
 import { ShipRenderer } from '../rendering/ShipRenderer.js';
 import { CombatFx } from '../rendering/CombatFx.js';
-import { SoundEngine } from '../audio/SoundEngine.js';
+import { SoundEngine, type FootstepSurface } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
 import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
@@ -201,6 +201,7 @@ export class Game {
     input: this.input,
     onMatchStart: (payload) => this.onMatchStartFromMenu(payload),
     onReturnToMenu: () => this.onReturnToMenuFromEnd(),
+    onCrewFound: () => this.beginCrewFoundBeat(),
   });
   // Used by ambient render & end-of-round flow + gameplay-key gating.
   private inMatch = false;
@@ -527,6 +528,7 @@ export class Game {
       input: this.input,
       renderer: this.renderer,
       get state() { return self.state; },
+      get ownShipBeaconActive() { return self.ownShipObjectiveActive; },
       formatStormTimer: (seconds) => this.formatStormTimer(seconds),
       getClosestGoldHoarder: (player) => this.getClosestGoldHoarder(player),
       getLocalPlayer: () => this.getLocalPlayer(),
@@ -568,6 +570,8 @@ export class Game {
       set hitMarkerKill(v) { self.hitMarkerKill = v; },
       get prevIsInsideIsland() { return self.prevIsInsideIsland; },
       set prevIsInsideIsland(v) { self.prevIsInsideIsland = v; },
+      get startCeremonyActive() { return self.isStartCeremonyActive(); },
+      get ownShipObjectiveActive() { return self.ownShipObjectiveActive; },
       get visibleInteractKind() { return self.visibleInteractKind; },
       set visibleInteractKind(v) { self.visibleInteractKind = v; },
       distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
@@ -760,14 +764,298 @@ export class Game {
   }
 
   private onMatchStartFromMenu(payload?: MatchStartPayload): void {
+    // The CREW FOUND beat fires from the QUEUE, before this teardown runs — so
+    // carry it across resetLocalRoundState and repaint the card, or the found
+    // hold would blink out the instant the menu came down.
+    const crewFound = this.startSeqPhase === 'found';
+    const foundAt = this.crewFoundAtMs;
     this.resetLocalRoundState();
+    if (crewFound) {
+      this.crewFoundAtMs = foundAt;
+      this.renderCrewFoundCard();
+    }
     this.inMatch = true;
     this.endmatchPending = false;
     this.menu.setLastMatchPartyCode(payload?.partyCode ?? null);
     this.scheduleJoinAssignmentWatchdog();
     this.bindReturnToMenuButtons();
+    // No fanfare here: the horn now blows at the horn (match_horn), not during
+    // the sub-second load where nobody was there to hear it.
     this.audio.unlock();
+  }
+
+  // ── Staged match start ────────────────────────────────────────────────
+  /** 'idle' before/after the ceremony; the rest track the found→count→horn arc. */
+  private startSeqPhase: 'idle' | 'found' | 'countdown' | 'horn' = 'idle';
+  private startSeqHideTimer: number | null = null;
+  private startSeqLastCount = -1;
+  /** performance.now() of the CREW FOUND beat, 0 when the arc began at a countdown. */
+  private crewFoundAtMs = 0;
+  /** How long CREW FOUND holds the screen before the count takes over. */
+  private static readonly CREW_FOUND_HOLD_MS = 1500;
+  /** performance.now() the horn is due, per the last server tick. 0 = not armed. */
+  private startSeqDeadlineMs = 0;
+  private startSeqCrews = 0;
+
+  /** True while the start ceremony owns the screen centre — the island
+   *  discovery banner and its fanfare stand down until it clears. */
+  private isStartCeremonyActive(): boolean {
+    return this.startSeqPhase !== 'idle';
+  }
+
+  private showStartSequence(): void {
+    if (this.startSeqHideTimer !== null) {
+      window.clearTimeout(this.startSeqHideTimer);
+      this.startSeqHideTimer = null;
+    }
+    this.ui.matchStartSeq.classList.add('visible');
+    // Dims the live HUD and pulls the crosshair / pointer-lock hint off the
+    // screen centre, which is exactly where the count is drawn.
+    document.body.classList.add('match-ceremony');
+  }
+
+  private hideStartSequence(): void {
+    this.ui.matchStartSeq.classList.remove('visible');
+    document.body.classList.remove('match-ceremony');
+  }
+
+  /** Paint (or repaint) the CREW FOUND card — no state change, no sound. */
+  private renderCrewFoundCard(): void {
+    this.startSeqPhase = 'found';
+    this.startSeqLastCount = -1;
+    this.ui.matchStartSeq.classList.remove('horn');
+    this.ui.matchStartCrews.textContent = '—';
+    this.ui.matchStartIsland.textContent = 'Crew Found';
+    this.ui.matchStartCount.textContent = '';
+    this.ui.matchStartCount.classList.remove('tick');
+    this.ui.matchStartHint.textContent = 'Boarding your ship…';
+    this.showStartSequence();
+  }
+
+  /** Queue popped: 'CREW FOUND' hold + sting, so joining reads found → countdown → horn. */
+  private beginCrewFoundBeat(): void {
+    this.audio.unlock();
+    this.crewFoundAtMs = performance.now();
+    this.renderCrewFoundCard();
+    // Weighing anchor: iron running in through the hawse. The big fanfare is
+    // saved for the horn — spending it here would make the horn the anticlimax.
+    this.audio.playAnchorChange(false);
+  }
+
+  /**
+   * One whole second of the server's staged start. This only ARMS/resyncs the
+   * local deadline — the digits themselves are painted per frame by
+   * {@link updateStartSequenceFrame}. The client is still streaming the world in
+   * during these 8 seconds, so the ticks land in bursts (measured: 8, then a
+   * 3.3 s gap, then three inside 700 ms) and painting straight off the message
+   * made the count visibly skip 7 and 5.
+   */
+  private onMatchCountdownTick(payload: { secondsRemaining: number; totalSeconds: number; crews: number }): void {
+    const seconds = Math.max(0, Math.round(payload.secondsRemaining));
+    if (seconds <= 0) return;
+    this.startSeqCrews = payload.crews;
+    const deadline = performance.now() + seconds * 1000;
+    // Arm from the first tick, then only ever pull the deadline EARLIER. Island
+    // streaming blocks the main thread for whole seconds during these 8, so
+    // ticks are processed in late bursts: a two-way resync walked the count
+    // backwards (measured: "1" then "2"), and a per-message rearm collapsed the
+    // whole count into a blur. Monotonic + the authoritative horn message ending
+    // it means the digits only ever fall.
+    this.startSeqDeadlineMs = this.startSeqDeadlineMs === 0
+      ? deadline
+      : Math.min(this.startSeqDeadlineMs, deadline);
+    this.showStartSequence();
+  }
+
+  /**
+   * Per-frame face of the staged start: holds the CREW FOUND card for its beat,
+   * then counts down off the local deadline — one number per real second, in
+   * order, whatever the network and the world build are doing.
+   */
+  private updateStartSequenceFrame(): void {
+    if (this.startSeqDeadlineMs === 0 || this.startSeqPhase === 'horn') return;
+    const now = performance.now();
+    if (this.startSeqPhase === 'found' && now - this.crewFoundAtMs < Game.CREW_FOUND_HOLD_MS) return;
+    if (this.startSeqPhase !== 'countdown') {
+      this.startSeqPhase = 'countdown';
+      this.startSeqLastCount = -1;
+      this.ui.matchStartSeq.classList.remove('horn');
+      this.ui.matchStartIsland.textContent = '';
+      this.ui.matchStartHint.textContent = 'Helm locked — the horn sets you loose';
+      this.showStartSequence();
+    }
+    this.ui.matchStartCrews.textContent = String(this.startSeqCrews);
+    const player = this.getLocalPlayer();
+    const island = player ? this.getNearestIsland(player.position.x, player.position.z) : null;
+    // Only overwrite once the spawn island is known — a blank card beats a
+    // flickering one while the join snapshot is still in flight.
+    if (island) this.ui.matchStartIsland.textContent = island.name;
+    // Never below 1: if the horn is a beat late, the count holds at 1 rather
+    // than flashing a 0 nobody counts to.
+    const seconds = Math.max(1, Math.ceil((this.startSeqDeadlineMs - now) / 1000));
+    if (seconds !== this.startSeqLastCount) {
+      this.startSeqLastCount = seconds;
+      this.ui.matchStartCount.textContent = String(seconds);
+      // Restart the pop animation on every tick (reflow forces a replay).
+      this.ui.matchStartCount.classList.remove('tick');
+      void this.ui.matchStartCount.offsetWidth;
+      this.ui.matchStartCount.classList.add('tick');
+      // Dry chrome tick for the long count; the last three escalate to the
+      // rising beacon pip so the final seconds feel like the last seconds.
+      if (seconds <= 3) this.audio.playRespawnBeacon(0);
+      else this.audio.playUiClick();
+    }
+  }
+
+  /** The sim just went live. */
+  private onMatchHornBlown(payload: { crews: number }): void {
+    this.startSeqPhase = 'horn';
+    this.startSeqLastCount = -1;
+    this.crewFoundAtMs = 0;
+    this.startSeqDeadlineMs = 0;
+    this.ui.matchStartCrews.textContent = String(payload.crews);
+    this.ui.matchStartHint.textContent = '';
+    this.ui.matchStartSeq.classList.add('horn');
+    this.showStartSequence();
+    // Release: the HUD comes back UP with the horn, not two seconds after it —
+    // the banner rides over a live HUD, which is what "you are loose" looks like.
+    document.body.classList.remove('match-ceremony');
+    this.audio.unlock();
+    // Deep ship's horn UNDER the heroic fanfare — the pairing the engine's own
+    // doc calls for ("under/before the fanfare").
+    this.audio.playMatchStartHorn();
     this.audio.playMatchStart();
+    this.pushFeed(`The horn sounds — ${payload.crews} crews are loose on these waters.`, '#f0dda6');
+    this.startSeqHideTimer = window.setTimeout(() => {
+      this.startSeqHideTimer = null;
+      this.startSeqPhase = 'idle';
+      this.hideStartSequence();
+      // Keep the horn class until the fade finishes or the banner snaps back.
+      window.setTimeout(() => this.ui.matchStartSeq.classList.remove('horn'), 400);
+    }, 2200);
+  }
+
+  // ── Crew eliminations ─────────────────────────────────────────────────
+  /**
+   * A crew's ship went under. CREWS AFLOAT used to fall 10 → 7 → 5 with no
+   * on-screen event at all, so the BR's tension meter decayed invisibly: a gold
+   * feed line, a counter pulse and a sting now mark every one.
+   */
+  private announceCrewEliminated(payload: {
+    crewId: string;
+    crewName: string;
+    remaining: number;
+    byPlayerId: string | null;
+    byName: string | null;
+  }): void {
+    const remaining = Math.max(0, payload.remaining);
+    const credit = payload.byName ? ` · sunk by ${payload.byName}` : '';
+    this.pushFeed(
+      `CREW ELIMINATED — ${remaining} crew${remaining === 1 ? '' : 's'} remain · ${payload.crewName}${credit}`,
+      '#f0c46a',
+    );
+    this.hud.pulseCrewsAfloat();
+    // The killer already got playKill + playKillConfirm off their own hit —
+    // a second toll on top of those is mud, not drama.
+    if (payload.byPlayerId !== this.localPlayerId) this.audio.playKill();
+    if (remaining === 3) this.pushFeed('THREE CREWS REMAIN — ENDGAME', '#ff9d5c');
+    else if (remaining === 2) this.pushFeed('FINAL DUEL — TWO CREWS LEFT', '#ff8a6a');
+  }
+
+  // ── First objective: your own hull ────────────────────────────────────
+  /** Marker + objective run until the pirate first boards, then never again. */
+  private ownShipObjectiveActive = false;
+  private ownShipObjectiveDone = false;
+  private ownShipObjectiveDeadline = 0;
+  /** Guards the "aboard" feed line — a pirate who SPAWNED aboard was never nudged. */
+  private ownShipMarkerWasShown = false;
+
+  private clearOwnShipObjective(): void {
+    this.ownShipObjectiveActive = false;
+    this.ownShipObjectiveDone = false;
+    this.ownShipObjectiveDeadline = 0;
+    this.ownShipMarkerWasShown = false;
+    this.ui.ownShipMarker.classList.remove('visible');
+  }
+
+  /**
+   * Projects a gold sail glyph over the player's own ship until they board it.
+   * At spawn the hull is parked at the berth ~40 m away carrying no marker at
+   * all — findable, but nothing said it was yours or that boarding was step one.
+   */
+  private updateOwnShipObjective(): void {
+    const marker = this.ui.ownShipMarker;
+    const player = this.getLocalPlayer();
+    const ship = this.localShipId ? this.shipsById.get(this.localShipId) ?? null : null;
+    // The start ceremony owns the screen until the horn — and its 120 s window
+    // must not burn down while the helm is still locked.
+    if (this.ownShipObjectiveDone || !player || !ship || !ship.alive || this.isStartCeremonyActive()) {
+      this.ownShipObjectiveActive = false;
+      if (marker.classList.contains('visible')) marker.classList.remove('visible');
+      return;
+    }
+    if (this.ownShipObjectiveDeadline === 0) {
+      // Long enough to walk the dock even after a scenic detour; the nudge is
+      // guidance for the opening, not a permanent HUD fixture.
+      this.ownShipObjectiveDeadline = performance.now() + 120_000;
+    }
+    this.ownShipObjectiveActive = true;
+    const aboard = player.onShipId === ship.id;
+    if (aboard || performance.now() > this.ownShipObjectiveDeadline) {
+      this.ownShipObjectiveDone = true;
+      this.ownShipObjectiveActive = false;
+      marker.classList.remove('visible');
+      if (aboard && this.ownShipMarkerWasShown) {
+        this.pushFeed('Aboard — take the helm and make for open water.', '#9ec0e5');
+      }
+      return;
+    }
+
+    const camera = this.renderer.camera;
+    camera.updateMatrixWorld();
+    // Above the masthead so the glyph clears the hull from any angle.
+    this.tempHudVector.set(ship.position.x, ship.position.y + 12, ship.position.z);
+    const distance = this.tempHudVector.distanceTo(camera.position);
+    this.tempHudVector.project(camera);
+    const behind = this.tempHudVector.z > 1;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    let x = (this.tempHudVector.x * 0.5 + 0.5) * width;
+    let y = (-this.tempHudVector.y * 0.5 + 0.5) * height;
+    if (behind) {
+      // Behind the camera the projection mirrors — flip it and pin to the edge
+      // so the marker still points the right way round.
+      x = width - x;
+      y = height * 0.72;
+    }
+    // Clamp inside the PLAY AREA, not the viewport: pinned to a screen corner
+    // the marker landed on top of the gold/kills panel ("YOUR SHIP 14m" printed
+    // through the HUD chrome).
+    x = THREE.MathUtils.clamp(x, width * 0.16, width * 0.84);
+    y = THREE.MathUtils.clamp(y, height * 0.22, height * 0.74);
+    marker.style.left = `${Math.round(x)}px`;
+    marker.style.top = `${Math.round(y)}px`;
+    this.ui.ownShipMarkerDistance.textContent = `${Math.round(distance)}m`;
+    marker.classList.add('visible');
+    this.ownShipMarkerWasShown = true;
+  }
+
+  /** Tear the ceremony down instantly (match teardown / return to menu). */
+  private clearStartSequence(): void {
+    if (this.startSeqHideTimer !== null) {
+      window.clearTimeout(this.startSeqHideTimer);
+      this.startSeqHideTimer = null;
+    }
+    this.startSeqPhase = 'idle';
+    this.startSeqLastCount = -1;
+    this.crewFoundAtMs = 0;
+    this.startSeqDeadlineMs = 0;
+    this.startSeqCrews = 0;
+    this.hideStartSequence();
+    this.ui.matchStartSeq.classList.remove('horn');
+    this.ui.matchStartCount.classList.remove('tick');
+    this.ui.matchStartCount.textContent = '';
+    this.ui.matchStartIsland.textContent = '';
   }
 
   private returnToMenuButtonsBound = false;
@@ -829,6 +1117,12 @@ export class Game {
   private resetLocalRoundState() {
     // The server's snapshot counter restarts per match — so must ours.
     this.clientState.lastAppliedSeq = -1;
+    this.clearStartSequence();
+    this.hud.resetForMatch();
+    this.clearOwnShipObjective();
+    this.footstepDistance.clear();
+    this.prevInCaveForAudio = null;
+    this.prevSubmergeDepthForAudio = -1;
     this.clearJoinAssignmentWatchdog();
     this.state = null;
     this.localPlayerId = null;
@@ -1125,6 +1419,10 @@ export class Game {
     this.network.onHotSnapshot = (hot) => {
       this.applyHotSnapshot(hot);
     };
+
+    this.network.onMatchCountdown = (payload) => this.onMatchCountdownTick(payload);
+    this.network.onMatchHorn = (payload) => this.onMatchHornBlown(payload);
+    this.network.onCrewEliminated = (payload) => this.announceCrewEliminated(payload);
 
     this.network.onSnapshot = (snapshot) => {
       this.applySnapshot(snapshot);
@@ -2029,6 +2327,9 @@ export class Game {
       }
     }
     this.updatePointerLockHint();
+    // Outside every `if (!this.state)` guard: the ceremony must keep counting
+    // while the join snapshot and the island builds are still landing.
+    this.updateStartSequenceFrame();
     this.updateDebugPerfPanel(dt);
 
     requestAnimationFrame((time) => this.frame(time));
@@ -2414,7 +2715,8 @@ export class Game {
     const effectScale = this.renderer.getEffectScale();
     // World-space rain runs every frame (cheap buffer update; the old canvas
     // overlay throttle is gone with the overlay).
-    this.envFx.updateStormRain3D(dt, this.debugStormDemo ? 0.9 : this.envFx.computeStormRainIntensity());
+    this.stormRainIntensity = this.debugStormDemo ? 0.9 : this.envFx.computeStormRainIntensity();
+    this.envFx.updateStormRain3D(dt, this.stormRainIntensity);
     this.envFx.updateStormLightningFlash(dt);
     const stormW = this.stormWeatherIntensity;
     const wallMat = this.stormWall.material as THREE.MeshBasicMaterial;
@@ -2436,6 +2738,7 @@ export class Game {
     this.syncProjectiles(dt);
     this.updateCamera();
     this.updateWaterEnvironment();
+    this.updateOwnShipObjective();
     this.hud.updateCombatHud(dt);
     this.viewmodel.syncLocalViewWeapon();
     if (this.freeCam) {
@@ -4233,6 +4536,9 @@ export class Game {
     const waveY = gerstnerHeight(camera.x, camera.z, this.ocean.getTime(), WAVE_PARAMS, camStorm);
     this.combatFx.setWaterSurfaceY(waveY);
     const depthBelowSurface = Math.max(0, waveY + 0.18 - camera.y);
+    // The audio engine's submerge muffle rides the same depth the water shader
+    // uses, so the muffle lands exactly on the visual dunk.
+    this.cameraSubmergeDepth = depthBelowSurface;
     this.renderer.updateWaterEnvironment(
       depthBelowSurface,
       this.stormWeatherIntensity,
@@ -4673,7 +4979,128 @@ export class Game {
       this.prevMeleeReloading = false;
     }
 
+    // Spatial audio needs to know where the ears are before anything positional
+    // plays this frame (footsteps, splashes, gunfire all pan off this pose).
+    this.audio.setListenerFromCamera(this.renderer.camera);
+    this.updateFootstepAudio(dt);
+    this.updateListenerSpaceAudio(player);
+
     this.updateNavalAudioAndFx(dt, player, localShip);
+  }
+
+  // ── Footsteps ─────────────────────────────────────────────────────────
+  /** Metres of ground covered per footfall — half of PlayerAnimator's 2.8 m
+   *  two-step gait cycle, so a step sounds on every planted foot. */
+  private static readonly FOOTSTEP_STRIDE_M = 1.4;
+  private readonly footstepDistance = new Map<string, number>();
+
+  /**
+   * Stride-locked footfalls for the local pirate (dry, first-person) and for
+   * anyone walking nearby (spatial). The stride is spent by integrating the
+   * player's own velocity — exactly what PlayerAnimator's gait lock integrates,
+   * so a step sounds when a foot is planted. (World position deltas would count
+   * a moving ship's travel as walking: a pirate strolling a galleon's deck at
+   * 15 kn would get triple cadence, and a teleport would fire a burst.)
+   */
+  private updateFootstepAudio(dt: number): void {
+    if (!this.state) return;
+    const camera = this.renderer.camera.position;
+    const seen = new Set<string>();
+    for (const player of this.state.players) {
+      const isLocal = player.id === this.localPlayerId;
+      const distance = isLocal
+        ? 0
+        : Math.hypot(player.position.x - camera.x, player.position.y - camera.y, player.position.z - camera.z);
+      if (!isLocal && distance > 46) continue;
+      seen.add(player.id);
+      const grounded = player.state === 'alive'
+        && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
+        && player.mastClimb === null
+        && !player.cannonBallistic
+        && Math.abs(player.velocity.y ?? 0) < 2.2;
+      // Aboard a ship the server keeps velocity deck-relative (the hull's carry
+      // is applied to position), so this is the pirate's own walking speed.
+      const speed = Math.hypot(player.velocity.x, player.velocity.z);
+      if (!grounded || speed < 0.55) {
+        this.footstepDistance.set(player.id, 0);
+        continue;
+      }
+      const walked = (this.footstepDistance.get(player.id) ?? 0) + speed * dt;
+      if (walked < Game.FOOTSTEP_STRIDE_M) {
+        this.footstepDistance.set(player.id, walked);
+        continue;
+      }
+      this.footstepDistance.set(player.id, walked - Game.FOOTSTEP_STRIDE_M);
+      // There is no sprint key in this game (PLAYER.SPRINT_MULT is unused): full
+      // MOVE_SPEED *is* the run, and the soft step belongs to the crouch-walk
+      // (0.55 ×) and to anything the terrain is slowing down.
+      const running = speed > PLAYER.MOVE_SPEED * 0.8 && !player.crouching;
+      this.audio.playFootstep(
+        this.getFootstepSurface(player),
+        running,
+        distance,
+        isLocal ? undefined : player.position,
+      );
+    }
+    for (const id of [...this.footstepDistance.keys()]) {
+      if (!seen.has(id)) this.footstepDistance.delete(id);
+    }
+  }
+
+  /** What the boot lands on: ship/dock planking, beach sand, bare rock, or turf. */
+  private getFootstepSurface(player: Player): FootstepSurface {
+    if (player.onShipId) return 'deck';
+    const island = this.getNearestIsland(player.position.x, player.position.z);
+    if (!island) return 'deck';
+    const x = player.position.x;
+    const z = player.position.z;
+    // Dock planking reads as a deck, not as the beach it is moored off.
+    const dock = island.dock;
+    if (dock) {
+      const local = toDockLocalPoint(dock, x, z);
+      if (Math.abs(local.x) <= dock.width * 0.5 + 0.6 && Math.abs(local.z) <= dock.length * 0.5 + 0.6) {
+        return 'deck';
+      }
+    }
+    // Inside a cave the floor is cut stone.
+    if (isInsideCaveInterior(island, x, player.position.y, z)) return 'stone';
+    const { angle, distRatio } = getIslandDistRatio(island, x, z);
+    if (distRatio > 0.84) {
+      // Shore band: the coast type decides between sand and rock, the same way
+      // IslandBuilder paints it.
+      return getIslandCoastType(island, angle) === 'beach' ? 'sand' : 'stone';
+    }
+    // Interior: grass everywhere the terrain shader keeps green, bare stone on
+    // the high crags (matching the rock cap at ~0.72 of the island's relief).
+    const ground = getIslandSurfaceY(island, x, z);
+    const relief = Math.max(6, island.radius * 0.42 * (0.6 + island.profile.heightProfile));
+    return ground > relief * 0.72 ? 'stone' : 'grass';
+  }
+
+  // ── Listener space: underwater muffle + cave reverb ───────────────────
+  private cameraSubmergeDepth = 0;
+  private stormRainIntensity = 0;
+  private prevInCaveForAudio: boolean | null = null;
+  private prevSubmergeDepthForAudio = -1;
+
+  /** Head under the swell ⇒ muffle; standing under a cave roof ⇒ cave verb. */
+  private updateListenerSpaceAudio(player: Player | null): void {
+    const depth = this.cameraSubmergeDepth;
+    if (Math.abs(depth - this.prevSubmergeDepthForAudio) > 0.02) {
+      this.prevSubmergeDepthForAudio = depth;
+      this.audio.setSubmerged(depth);
+    }
+    let inCave = false;
+    if (player && this.state) {
+      const island = this.getNearestIsland(player.position.x, player.position.z);
+      if (island) {
+        inCave = isInsideCaveInterior(island, player.position.x, player.position.y, player.position.z);
+      }
+    }
+    if (inCave !== this.prevInCaveForAudio) {
+      this.prevInCaveForAudio = inCave;
+      this.audio.setReverbSpace(inCave ? 'cave' : 'outdoor');
+    }
   }
 
   /**
@@ -4698,7 +5125,16 @@ export class Game {
     const nearShore01 = Number.isFinite(nearestEdge)
       ? THREE.MathUtils.clamp(1 - THREE.MathUtils.clamp(nearestEdge / 70, 0, 1), 0, 1)
       : 0;
-    this.audio.setAmbience({ nightFactor, storminess, nearShore01 });
+    // rain01 is the SAME field the world-space rain draws from, so the downpour
+    // you hear starts and stops with the drops you see (the engine's default
+    // guess — storminess × 0.85 — had it raining audibly in clear weather deep
+    // inside the safe zone).
+    this.audio.setAmbience({
+      nightFactor,
+      storminess,
+      nearShore01,
+      rain01: THREE.MathUtils.clamp(this.stormRainIntensity, 0, 1),
+    });
 
     // Sailing bed — reflects the ship the player is physically standing on.
     const aboardShip = player?.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;

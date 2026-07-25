@@ -4,7 +4,7 @@
 // surface, and actually exits past the lip.
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
-import { getIslandSurfaceY, getCaveFloorY } from '../src/shared/utils/index.ts';
+import { getIslandSurfaceY, getCaveFloorY, isInsideCaveInterior } from '../src/shared/utils/index.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 
 const islands = new MapGenerator(12345).generateIslands();
@@ -69,6 +69,14 @@ for (const island of islands) {
     midCave !== null && Math.abs(midY - midCave) < 1.2 && midY < getIslandSurfaceY(island, midX, midZ) - 2,
     `y=${midY.toFixed(2)} caveFloor=${midCave === null ? 'null' : midCave.toFixed(2)} natural=${getIslandSurfaceY(island, midX, midZ).toFixed(2)}`);
   expect('never flipped to swimming inside', !everSwim);
+  // The client swaps the listener's reverb space to 'cave' and its footsteps to
+  // stone off this exact predicate, so it must agree with where the physics
+  // actually put the pirate: true down here, false on the hillside overhead.
+  expect('audio cave test: TRUE at the deep interior',
+    isInsideCaveInterior(island, midX, midY, midZ),
+    `y=${midY.toFixed(2)} caveFloor=${midCave === null ? 'null' : midCave.toFixed(2)}`);
+  expect('audio cave test: FALSE standing on the hillside above the tunnel',
+    !isInsideCaveInterior(island, midX, getIslandSurfaceY(island, midX, midZ) + 0.03, midZ));
   expect('never ejected above the hillside', maxEject === 0, `eject=${maxEject.toFixed(2)}m`);
   // Out: walk back the same axis
   walk(-inX, -inZ, inTicks + Math.round(3 / (SPEED * DT)));
@@ -77,6 +85,8 @@ for (const island of islands) {
   expect('walked back OUT past the mouth lip',
     outDist > 2.0 && Math.abs(p.position.y - outNatural) < 1.0 && getCaveFloorY(island, p.position.x, p.position.z) === null,
     `outDist=${outDist.toFixed(1)} y=${p.position.y.toFixed(2)} natural=${outNatural.toFixed(2)}`);
+  expect('audio cave test: FALSE back outside the mouth (reverb returns to outdoor)',
+    !isInsideCaveInterior(island, p.position.x, p.position.y, p.position.z));
   expect('still alive and unhurt', p.state === 'alive' && p.health > 95, `state=${p.state} hp=${p.health.toFixed(0)}`);
   console.log(`   deepest walk y=${minY.toFixed(2)}`);
 }
