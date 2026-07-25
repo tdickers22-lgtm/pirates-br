@@ -69,7 +69,7 @@ export interface UpgradeStation {
   claimedByShipId: string | null;
 }
 
-export type IslandNpcRole = 'mysterious_stranger' | 'shipwright' | 'oracle' | 'gold_hoarder' | 'bartender';
+type IslandNpcRole = 'mysterious_stranger' | 'shipwright' | 'oracle' | 'gold_hoarder' | 'bartender';
 
 export interface IslandNpc {
   id: string;
@@ -151,7 +151,7 @@ export interface Ship {
  *  crawls at reduced speed, cannot use weapons/stations, bleeds out over
  *  DBNO.BLEEDOUT_SECONDS (2× faster outside the storm ring) and can be revived
  *  by a crewmate holding interact, or finished by any damage. */
-export type PlayerState = 'alive' | 'swimming' | 'boarding' | 'downed' | 'respawning' | 'eliminated';
+type PlayerState = 'alive' | 'swimming' | 'boarding' | 'downed' | 'respawning' | 'eliminated';
 export type WeaponSlot = 0 | 1 | 2 | 3;
 export type CannonAmmoType = 'cannonball' | 'firebomb' | 'chainshot';
 
@@ -334,7 +334,7 @@ export interface IslandProp {
 
 /** World-space flatten disc applied inside getIslandSurfaceY so structures
  *  (docks, taverns, camps, stations) sit on level ground. */
-export interface TerrainStamp {
+interface TerrainStamp {
   x: number;
   z: number;
   radius: number;
@@ -623,7 +623,7 @@ export interface TradeSession {
 }
 
 // ── Game State ───────────────────────────────────────────────
-export type GamePhase = 'waiting' | 'playing' | 'ended';
+type GamePhase = 'waiting' | 'playing' | 'ended';
 
 /** Great white — rare surface predator; heavy bites, low HP */
 export type SharkAttackState = 'cruise' | 'windup' | 'lunge' | 'recover';
@@ -679,7 +679,7 @@ export interface GameState {
 // transforms; full 'state_snapshot' messages (~10 Hz) remain the source of
 // truth. The client patches hot fields by id onto its last full state.
 // Clients that ignore 'state_hot' keep working off full snapshots alone.
-export interface HotShipState {
+interface HotShipState {
   id: string;
   position: Vec3;
   rotation: number;
@@ -697,7 +697,7 @@ export interface HotShipState {
   floodingRate?: number;
 }
 
-export interface HotPlayerState {
+interface HotPlayerState {
   id: string;
   position: Vec3;
   rotation: Vec2;
@@ -713,20 +713,20 @@ export interface HotPlayerState {
   reviveProgress: number;
 }
 
-export interface HotProjectileState {
+interface HotProjectileState {
   id: string;
   type: ProjectileType;
   position: Vec3;
   velocity: Vec3;
 }
 
-export interface HotKegState {
+interface HotKegState {
   id: string;
   position: Vec3;
   timer: number;
 }
 
-export interface HotSharkState {
+interface HotSharkState {
   id: string;
   position: Vec3;
   rotation: number;
@@ -754,7 +754,7 @@ export interface HotSnapshotPayload {
 }
 
 // ── Network messages ─────────────────────────────────────────
-export type MsgType =
+type MsgType =
   // game-scoped messages (within a match)
   | 'join'
   | 'state_snapshot'

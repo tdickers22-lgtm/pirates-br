@@ -34,18 +34,11 @@ export function toShipWorldPoint(local: ShipLocalPoint, ship: Pick<Ship, 'positi
 }
 
 // ── Hull breaches ────────────────────────────────────────────────────────────
-// Holes are POINT ENTITIES in the hull-local frame (see ShipHole). These three
-// helpers are the SHARED truth for "how many leaks are open", "which hole can
-// this pirate plank" and "where is that hole in the world" — the server
-// validates the repair with findRepairableHole and the client prompt calls the
-// exact same function, so the [X] prompt can never offer a patch the server
-// then refuses.
-
-/** Breaches still letting water in (patched entities stay in the list so the
- *  crossed-plank repair keeps rendering at the spot). */
-export function openHoles(ship: Pick<Ship, 'holes'>): ShipHole[] {
-  return (ship.holes ?? []).filter((hole) => !hole.patched);
-}
+// Holes are POINT ENTITIES in the hull-local frame (see ShipHole). These two
+// helpers are the SHARED truth for "how many leaks are open" and "which hole can
+// this pirate plank" — the server validates the repair with findRepairableHole
+// and the client prompt calls the exact same function, so the [X] prompt can
+// never offer a patch the server then refuses.
 
 export function countOpenHoles(ship: Pick<Ship, 'holes'>): number {
   let n = 0;
@@ -77,21 +70,6 @@ export function findRepairableHole(
     }
   }
   return best;
-}
-
-/** World-space point of a hull-local breach (heel/pitch are the renderer's
- *  business — this is the flat-hull transform the server flood test uses). */
-export function holeWorldPoint(
-  ship: Pick<Ship, 'position' | 'rotation'>,
-  hole: { x: number; y: number; z: number },
-): Vec3 {
-  const cos = Math.cos(ship.rotation);
-  const sin = Math.sin(ship.rotation);
-  return {
-    x: ship.position.x + hole.x * cos + hole.z * sin,
-    y: ship.position.y + hole.y,
-    z: ship.position.z + hole.z * cos - hole.x * sin,
-  };
 }
 
 export function getAnchorControlLocal(stats: Pick<ShipStats, 'length'>): ShipLocalPoint {
@@ -298,9 +276,9 @@ export function isNearAmmoCrate(player: PlayerLike, ship: ShipLike): boolean {
 // PhysicsSystem makes exactly this plank walkable.
 
 /** Longest gap the plank will span, rail to dock edge (metres). */
-export const GANGWAY_MAX_GAP = 3.0;
+const GANGWAY_MAX_GAP = 3.0;
 /** Half-width of the walkable/rendered plank. */
-export const GANGWAY_HALF_WIDTH = 0.55;
+const GANGWAY_HALF_WIDTH = 0.55;
 /** Walkable top of a dock deck above the dock's own origin (matches the
  *  server's dock floor: dock.position.y + 0.14). */
 const DOCK_DECK_RISE = 0.14;

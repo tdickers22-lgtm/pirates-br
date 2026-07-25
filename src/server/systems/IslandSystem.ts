@@ -1,7 +1,7 @@
 import type { Island, IslandBarrel, Player, ItemStack, Ship, WeaponId } from '../../shared/types/index.js';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
 
-export interface BarrelOpenEvent {
+interface BarrelOpenEvent {
   playerId: string;
   barrelId: string;
   loot: ItemStack[];

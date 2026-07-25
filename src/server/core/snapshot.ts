@@ -43,7 +43,7 @@ function roundTo(value: number, decimals: 2 | 3): number {
 
 /** Fast recursive rounder. Numbers are rounded to `decimals` (angle-ish keys
  *  get 3), strings/booleans/null pass through, objects/arrays are cloned. */
-export function quantizeDeep<T>(value: T, decimals: 2 | 3 = 2): T {
+function quantizeDeep<T>(value: T, decimals: 2 | 3 = 2): T {
   if (typeof value === 'number') return roundTo(value, decimals) as T;
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {

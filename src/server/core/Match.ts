@@ -149,7 +149,7 @@ export interface MatchEndResult {
   humans: MatchHumanResult[];
 }
 
-export interface MatchOptions {
+interface MatchOptions {
   matchId: string;
   botCount: number;
   /** Names of human players who will join — used so bots get distinct identities. */

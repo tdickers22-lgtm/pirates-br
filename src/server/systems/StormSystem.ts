@@ -3,7 +3,7 @@ import { STORM_PHASES, WORLD, FLOODING } from '../../shared/constants/index.js';
 import { dist2D, lerp, getIslandSurfaceY } from '../../shared/utils/index.js';
 import { SHIP_STATS } from '../../shared/constants/index.js';
 
-export interface StormDamageHooks {
+interface StormDamageHooks {
   /** Route storm damage through PhysicsSystem.openHoleAt so the tempest stoves
    *  REAL breaches into the seaward planking — at a point on that face, not an
    *  abstract section counter — which then flood. Required: the storm has no

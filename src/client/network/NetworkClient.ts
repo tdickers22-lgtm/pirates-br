@@ -2,6 +2,7 @@ import type {
   HotSnapshotPayload,
   NetMsg, PlayerInput, GameState, TradeActionPayload,
   WelcomePayload, LobbyUpdatePayload, QueueUpdatePayload, MatchStartPayload,
+  MatchCountdownPayload, MatchHornPayload, CrewEliminatedPayload,
   PlayerStatsRecord,
 } from '../../shared/types/index.js';
 
@@ -37,17 +38,11 @@ export class NetworkClient {
   public onPlayerSpawned: ((payload: unknown) => void) | null = null;
   public onMatchEnded: ((payload: unknown) => void) | null = null;
   /** Staged start: one per whole second while the sim is frozen in 'waiting'. */
-  public onMatchCountdown: ((payload: { secondsRemaining: number; totalSeconds: number; crews: number }) => void) | null = null;
+  public onMatchCountdown: ((payload: MatchCountdownPayload) => void) | null = null;
   /** Staged start: the sim just went live. */
-  public onMatchHorn: ((payload: { crews: number }) => void) | null = null;
+  public onMatchHorn: ((payload: MatchHornPayload) => void) | null = null;
   /** A crew's ship went down — CREWS AFLOAT just dropped. */
-  public onCrewEliminated: ((payload: {
-    crewId: string;
-    crewName: string;
-    remaining: number;
-    byPlayerId: string | null;
-    byName: string | null;
-  }) => void) | null = null;
+  public onCrewEliminated: ((payload: CrewEliminatedPayload) => void) | null = null;
 
   // Lobby-scoped events
   public onWelcome: ((payload: WelcomePayload) => void) | null = null;

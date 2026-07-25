@@ -273,7 +273,7 @@ export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0)
   }
 }
 
-export type PhysicsCombatEvent =
+type PhysicsCombatEvent =
   | {
       type: 'player_hit';
       attackerId: string;

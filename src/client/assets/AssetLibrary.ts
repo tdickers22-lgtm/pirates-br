@@ -33,7 +33,7 @@ export const ASSET_NAMES = [
 
 export type AssetName = (typeof ASSET_NAMES)[number];
 
-export interface MergedAsset {
+interface MergedAsset {
   geometry: THREE.BufferGeometry;
   material: THREE.Material | THREE.Material[];
 }

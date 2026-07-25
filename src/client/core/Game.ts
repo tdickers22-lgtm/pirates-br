@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
+  CrewEliminatedPayload, GameState, HotSnapshotPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { dist2D, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
@@ -848,7 +848,7 @@ export class Game {
    * 3.3 s gap, then three inside 700 ms) and painting straight off the message
    * made the count visibly skip 7 and 5.
    */
-  private onMatchCountdownTick(payload: { secondsRemaining: number; totalSeconds: number; crews: number }): void {
+  private onMatchCountdownTick(payload: MatchCountdownPayload): void {
     const seconds = Math.max(0, Math.round(payload.secondsRemaining));
     if (seconds <= 0) return;
     this.startSeqCrews = payload.crews;
@@ -906,7 +906,7 @@ export class Game {
   }
 
   /** The sim just went live. */
-  private onMatchHornBlown(payload: { crews: number }): void {
+  private onMatchHornBlown(payload: MatchHornPayload): void {
     this.startSeqPhase = 'horn';
     this.startSeqLastCount = -1;
     this.crewFoundAtMs = 0;
@@ -939,13 +939,7 @@ export class Game {
    * on-screen event at all, so the BR's tension meter decayed invisibly: a gold
    * feed line, a counter pulse and a sting now mark every one.
    */
-  private announceCrewEliminated(payload: {
-    crewId: string;
-    crewName: string;
-    remaining: number;
-    byPlayerId: string | null;
-    byName: string | null;
-  }): void {
+  private announceCrewEliminated(payload: CrewEliminatedPayload): void {
     const remaining = Math.max(0, payload.remaining);
     const credit = payload.byName ? ` · sunk by ${payload.byName}` : '';
     this.pushFeed(

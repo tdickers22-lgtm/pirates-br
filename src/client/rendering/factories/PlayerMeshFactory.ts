@@ -1,18 +1,18 @@
 /** Procedural pirate avatar meshes: body build, team tinting, held-item sockets. */
 import * as THREE from 'three';
 
-export type PlayerTeamMaterials = {
+type PlayerTeamMaterials = {
   coatMat: THREE.MeshStandardMaterial;
   clothMat: THREE.MeshStandardMaterial;
   beltMat: THREE.MeshStandardMaterial;
   bandanaMat: THREE.MeshStandardMaterial;
 };
 
-export function makeTeamShirtColor(color: number) {
+function makeTeamShirtColor(color: number) {
   return new THREE.Color(color).lerp(new THREE.Color(0xf4ead8), 0.38);
 }
 
-export function makeTeamBeltColor(color: number) {
+function makeTeamBeltColor(color: number) {
   return new THREE.Color(color).lerp(new THREE.Color(0x2a1d14), 0.62);
 }
 
@@ -32,7 +32,7 @@ export function applyPlayerTeamColor(mesh: THREE.Group, color: number) {
 }
 
 /** Shared first-person palette so hands, sleeves and cuffs match the avatar. */
-export const VIEW_HAND_PALETTE = {
+const VIEW_HAND_PALETTE = {
   skin: 0xd0a074,
   skinShade: 0xb98a5f,
   coat: 0x5e3626,

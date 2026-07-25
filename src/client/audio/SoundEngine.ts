@@ -20,10 +20,10 @@ interface RichLoopVoice extends LoopVoice {
 }
 
 /** Anything with x/y/z — accepts a THREE.Vector3 or a wire {@link Vec3}. */
-export type SoundPos = Vec3 | THREE.Vector3;
+type SoundPos = Vec3 | THREE.Vector3;
 
 /** Options for the spatial one-shot dispatcher. */
-export interface SpatialOpts {
+interface SpatialOpts {
   /** Extra intensity/size multiplier (splashes, explosions). Default 1. */
   intensity?: number;
   /** World position of the source — enables stereo panning when the listener pose is known. */
@@ -31,7 +31,7 @@ export interface SpatialOpts {
 }
 
 /** Kinds routed through {@link SoundEngine.playAt}. */
-export type SpatialKind =
+type SpatialKind =
   | 'cannonFire'
   | 'cannonballWhistle'
   | 'hullImpact'
@@ -50,13 +50,13 @@ export type FootstepSurface = 'deck' | 'sand' | 'stone' | 'grass';
 export type GunshotKind = 'flintlock' | 'blunderbuss' | 'flintknock' | 'longRifle';
 
 /** Non-cannon projectile launches (cannonballs go through {@link SoundEngine.playCannonFire}). */
-export type LaunchKind = 'firebomb' | 'chainshot' | 'tsunami';
+type LaunchKind = 'firebomb' | 'chainshot' | 'tsunami';
 
 /** Projectile terminal impacts on a solid. */
-export type ImpactKind = 'cannonball' | 'firebomb' | 'bullet';
+type ImpactKind = 'cannonball' | 'firebomb' | 'bullet';
 
 /** Reverb character. `cave` is the long, dark interior tail. */
-export type ReverbSpace = 'outdoor' | 'cave';
+type ReverbSpace = 'outdoor' | 'cave';
 
 /** Per-kind one-shot rate limits: [max starts, window ms]. Bursts past this are dropped. */
 const KIND_LIMITS: Record<string, [number, number]> = {

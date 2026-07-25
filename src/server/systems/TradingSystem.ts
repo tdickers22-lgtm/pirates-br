@@ -5,7 +5,7 @@ const TRADE_RANGE = 50;
 const TRADE_TIMEOUT = 15;
 const BETRAYAL_WINDOW = 2;
 
-export interface TradeEvent {
+interface TradeEvent {
   type: 'trade_completed' | 'trade_betrayed' | 'trade_timeout' | 'trade_rejected' | 'trade_update';
   sessionId: string;
   initiatorId: string;

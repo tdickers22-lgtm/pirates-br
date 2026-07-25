@@ -30,7 +30,7 @@ const EMPTY_STATS = (name: string): PlayerStatsRecord => ({
 });
 
 /** Per-match deltas rolled into the lifetime record at match end. */
-export interface MatchStatDeltas {
+interface MatchStatDeltas {
   name: string;
   kills: number;
   deaths: number;

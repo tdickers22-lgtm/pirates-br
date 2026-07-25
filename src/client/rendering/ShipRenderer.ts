@@ -9,7 +9,7 @@ import type { RenderQuality } from './Renderer.js';
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
  *  intensity, or the replicated storm ring so the renderer can evaluate the
  *  shared getStormWaveIntensity() per ship position. */
-export type ShipStormSource = number | { center: Vec2; safeRadius: number; phase: number } | null | undefined;
+type ShipStormSource = number | { center: Vec2; safeRadius: number; phase: number } | null | undefined;
 
 const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
   hull_reinforcement: 0x67b9ff,

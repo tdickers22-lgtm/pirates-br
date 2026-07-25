@@ -14,14 +14,14 @@ import { getIslandSurfaceY } from './utils/index.js';
 /** One blocking mass of a COMPOUND prop, in prop-local metres at scale 1.
  *  Offsets rotate with prop.yaw (world = prop + Ry(yaw)·offset — the same
  *  three.js convention the renderer uses) and scale with prop.scale. */
-export interface PropSubCollider {
+interface PropSubCollider {
   dx: number;
   dz: number;
   radius: number;
   height: number;
 }
 
-export interface PropCollider {
+interface PropCollider {
   shape: 'capsule' | 'sphere' | 'none';
   radius: number;
   height: number;

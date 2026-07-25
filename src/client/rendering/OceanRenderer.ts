@@ -382,7 +382,7 @@ function buildRingGeometry(level: LodLevel): THREE.BufferGeometry {
   return geo;
 }
 
-export interface OceanAtmosphere {
+interface OceanAtmosphere {
   fogColor?: THREE.Color;
   horizonColor?: THREE.Color;
   sunDir?: THREE.Vector3;
@@ -394,7 +394,7 @@ export interface OceanAtmosphere {
 /** Island footprint for the shoreline SDF. Preferred: elliptical half-extents
  *  rx/rz in meters (radius × profile.footprintX/Z). Legacy circular `r` is
  *  still accepted and treated as rx = rz = r. */
-export interface OceanIslandFootprint {
+interface OceanIslandFootprint {
   x: number;
   z: number;
   r?: number;

@@ -163,7 +163,7 @@ const SKY_FRAG = /* glsl */`
   }
 `;
 
-export interface Atmosphere {
+interface Atmosphere {
   sunDir: THREE.Vector3;
   fogColor: THREE.Color;
   horizonColor: THREE.Color;

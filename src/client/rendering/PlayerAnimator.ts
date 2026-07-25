@@ -12,7 +12,7 @@ import type { OceanRenderer } from './OceanRenderer.js';
 
 /** First-person cutlass charge/lunge timings, shared with the viewmodel code. */
 export const CUTLASS_VIEW_CHARGE_TIME = 0.72;
-export const CUTLASS_VIEW_LUNGE_COOLDOWN = 1.05;
+const CUTLASS_VIEW_LUNGE_COOLDOWN = 1.05;
 
 /** How a pirate died — drives which crumple the corpse plays. */
 export type DeathCause = 'shot' | 'headshot' | 'cutlass' | 'explosion' | 'drown' | 'fall' | 'generic';
@@ -89,7 +89,7 @@ type AnimScratch = {
 };
 
 /** Directional flinch pushed in by Game on any health drop. */
-export type FlinchState = { t: number; mag: number; yaw: number };
+type FlinchState = { t: number; mag: number; yaw: number };
 
 export class PlayerAnimator {
   constructor(private readonly view: PlayerAnimatorView) {}

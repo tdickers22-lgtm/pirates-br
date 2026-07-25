@@ -168,7 +168,7 @@ export function intersectRaySeaRock(origin: Vec3, direction: Vec3, range: number
   return best;
 }
 
-export function normalize2D(v: Vec2): Vec2 {
+function normalize2D(v: Vec2): Vec2 {
   const len = Math.sqrt(v.x * v.x + v.y * v.y);
   if (len < 0.0001) return { x: 0, y: 0 };
   return { x: v.x / len, y: v.y / len };
@@ -369,7 +369,7 @@ function coastPhase(seed: number, k: number): number {
 }
 
 /** Smooth per-angle coast field in [-1, 1]: negative ⇒ beach, positive ⇒ cliff. */
-export function getIslandCoastField(island: Island, angle: number): number {
+function getIslandCoastField(island: Island, angle: number): number {
   const seed = (island.profile.seed ?? 0x5eed) >>> 0;
   const f = Math.sin(angle + coastPhase(seed, 1)) * 0.55
     + Math.sin(angle * 2 + coastPhase(seed, 2)) * 0.34
@@ -405,7 +405,7 @@ export function getIslandCoastType(island: Island, angle: number): 'beach' | 'ro
   return w.cliff >= w.rocky ? 'cliff' : 'rocky';
 }
 
-export interface IslandSurfaceOptions {
+interface IslandSurfaceOptions {
   /** Opt in to carving cave tunnel trenches into the returned height (used for
    *  cave-interior mesh building / in-cave locomotion). Default OFF: walking
    *  ABOVE a cave stands on the natural hillside, not in the trench. */
@@ -933,7 +933,7 @@ export function getSailStationLocal(stats: { length: number; mastCount: number; 
   return getSailRopeStationLocals(stats)[0];
 }
 
-export interface ShipCompanionwayConfig {
+interface ShipCompanionwayConfig {
   cx: number;
   cz: number;
   halfX: number;
@@ -966,7 +966,7 @@ export function getShipCompanionwayConfig(stats: { width: number; length: number
   };
 }
 
-export interface ShipQuarterdeckConfig {
+interface ShipQuarterdeckConfig {
   /** Dais footprint (ship-local). */
   cx: number;
   cz: number;
@@ -1034,7 +1034,7 @@ export function getShipBoardingLadderLocals(type: ShipType): Array<{ x: number; 
   ];
 }
 
-export function getShipBoardingLadderWorldPoints(ship: Pick<Ship, 'type' | 'position' | 'rotation'>): Array<{ x: number; y: number; z: number; localX: number; localZ: number }> {
+function getShipBoardingLadderWorldPoints(ship: Pick<Ship, 'type' | 'position' | 'rotation'>): Array<{ x: number; y: number; z: number; localX: number; localZ: number }> {
   const cos = Math.cos(ship.rotation);
   const sin = Math.sin(ship.rotation);
   return getShipBoardingLadderLocals(ship.type).map((ladder) => ({
@@ -1230,7 +1230,7 @@ const TAVERN_WALL_HALF_T = 0.18;
 const TAVERN_DOOR_HALF = 0.85;
 const TAVERN_WALL_HEIGHT = 3.18;
 
-export interface TavernWallSegment {
+interface TavernWallSegment {
   minX: number;
   maxX: number;
   minZ: number;

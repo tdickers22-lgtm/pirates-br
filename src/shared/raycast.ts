@@ -9,7 +9,7 @@ import {
   isInsideSwimHullFootprint,
 } from './utils/index.js';
 
-export interface SurfaceRaycastHit {
+interface SurfaceRaycastHit {
   hit: boolean;
   point: Vec3 | null;
   /** Distance to the hit, or `maxDist` when nothing was hit. */

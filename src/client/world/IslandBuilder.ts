@@ -45,7 +45,7 @@ export type NpcMeshRecord = {
   role: IslandNpc['role'];
 };
 
-export type IslandBuilderCtx = {
+type IslandBuilderCtx = {
   readonly renderer: Renderer;
   readonly islandPropInstances: Map<string, Map<number, { inst: THREE.InstancedMesh; index: number }>>;
   readonly foliageWind: { value: THREE.Vector2 };

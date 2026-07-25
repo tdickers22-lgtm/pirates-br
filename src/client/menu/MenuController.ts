@@ -17,7 +17,7 @@ interface PersistedSettings {
   sensitivity: number;  // 0.2–2.0
 }
 
-export interface MenuControllerOptions {
+interface MenuControllerOptions {
   network: NetworkClient;
   audio: SoundEngine;
   input?: InputManager;

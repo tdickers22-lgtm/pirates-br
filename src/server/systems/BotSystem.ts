@@ -41,7 +41,7 @@ interface BotState {
   underFireUntil: number;
 }
 
-export interface BotFirearmShot {
+interface BotFirearmShot {
   playerId: string;
   /** Direction used for the hitscan trace; world-aligned aim point. */
   aimPoint: Vec3;
