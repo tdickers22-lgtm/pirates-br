@@ -115,6 +115,13 @@ const RAIN_INV_BAND = 1 / RAIN_BAND_METRES;
 const RAIN_GUST_K1 = (Math.PI * 2 * 6) / RAIN_BAND_SPAN; // ~64m squall bands
 const RAIN_GUST_K2 = (Math.PI * 2) / RAIN_BAND_SPAN;     // ~384m slow swell
 
+// Lightning channel budget: one main stroke plus 2–4 forks, all in a single
+// pooled ribbon (2 draws — core + glow) that lives for one strike.
+const BOLT_MAIN_NODES = 17;
+const BOLT_MAX_NODES = 56;
+const BOLT_MAX_SEGMENTS = 52;
+const BOLT_LIFE = 0.45;
+
 export class EnvironmentFx {
   constructor(private readonly view: EnvironmentFxView) {}
 
@@ -137,7 +144,6 @@ export class EnvironmentFx {
   stormLightningFlashEl: HTMLDivElement | null = null;
   stormLightningFlashOpacity = 0;
   lightningLightPool: THREE.PointLight | null = null;
-  lightningBolt: THREE.Line | null = null;
   readonly windWispTexture = makeWindWispTexture();
   /** Locally-promoted harvest target: the instanced palm/boulder is swapped for a
    *  live clone while the axe works it, so strikes shake it and completion plays a
@@ -1358,24 +1364,293 @@ export class EnvironmentFx {
 
   updateStormLightningFlash(dt: number) {
     if (!this.stormLightningFlashEl) return;
+    // Decay only — a live strike overwrites this from its envelope in
+    // updateLightning, which runs later in the frame.
     this.stormLightningFlashOpacity = Math.max(0, this.stormLightningFlashOpacity - dt * 4.8);
     this.stormLightningFlashEl.style.opacity = String(this.stormLightningFlashOpacity);
+  }
+
+  // ── Lightning ─────────────────────────────────────────────────────────────
+  // A strike is a branched, camera-facing RIBBON (real width, tapering down the
+  // channel and across every fork) driven by a leader-flicker envelope: three
+  // strobe pulses inside ~130ms, then a ~250ms afterglow. While it burns it
+  // lights the sky dome and cloud deck from its own azimuth, throws a
+  // directional pulse across the scene so hulls and islands flash-lit from the
+  // right side, and glints the sea in a band pointing back at it.
+
+  /** Ribbon buffers (core + wider glow) and the current strike's channel graph. */
+  private bolt: {
+    core: THREE.Mesh;
+    glow: THREE.Mesh;
+    corePos: Float32Array;
+    glowPos: Float32Array;
+    coreAttr: THREE.BufferAttribute;
+    glowAttr: THREE.BufferAttribute;
+    coreMat: THREE.MeshBasicMaterial;
+    glowMat: THREE.MeshBasicMaterial;
+  } | null = null;
+  private readonly boltPath = new Float32Array(BOLT_MAX_NODES * 3);
+  private readonly boltWidth = new Float32Array(BOLT_MAX_NODES);
+  private readonly boltSegA = new Int32Array(BOLT_MAX_SEGMENTS);
+  private readonly boltSegB = new Int32Array(BOLT_MAX_SEGMENTS);
+  private readonly boltMainIdx = new Int32Array(BOLT_MAIN_NODES);
+  private boltSegCount = 0;
+  private boltAge = BOLT_LIFE;
+  private boltDirX = 0;
+  private boltDirZ = 1;
+  /** Directional pulse: hulls and islands flash-lit from the strike's bearing.
+   *  Not built on the low tier. */
+  private boltLight: THREE.DirectionalLight | null = null;
+  /** ?stormdemo parks a full-power storm on the camera for visual work; without
+   *  this the strike gate (which keys off the REPLICATED storm ring) never fires
+   *  in the demo, so the flag could not preview lightning at all. */
+  private readonly stormDemo = new URLSearchParams(window.location.search).has('stormdemo');
+  private readonly boltVecA = new THREE.Vector3();
+  private readonly boltVecB = new THREE.Vector3();
+  private readonly boltSide = new THREE.Vector3();
+
+  /** Leader flicker: three strobe pulses inside ~130ms, then afterglow decay. */
+  private boltEnvelope(age: number): number {
+    if (age < 0 || age >= BOLT_LIFE) return 0;
+    if (age < 0.028) return 1;
+    if (age < 0.048) return 0.16;
+    if (age < 0.070) return 0.80;
+    if (age < 0.086) return 0.12;
+    if (age < 0.118) return 0.95;
+    if (age < 0.132) return 0.25;
+    return 0.62 * Math.exp(-(age - 0.132) / 0.085);
+  }
+
+  /** 0..1 brightness of the strike currently burning. Probe hook. */
+  debugBoltEnvelope(): number {
+    return this.boltEnvelope(this.boltAge);
+  }
+
+  private makeBoltTexture(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 4;
+    const ctx = canvas.getContext('2d')!;
+    const g = ctx.createLinearGradient(0, 0, 64, 0);
+    g.addColorStop(0.00, 'rgba(96,150,255,0.00)');
+    g.addColorStop(0.30, 'rgba(150,196,255,0.50)');
+    g.addColorStop(0.50, 'rgba(255,255,255,1.00)');
+    g.addColorStop(0.70, 'rgba(150,196,255,0.50)');
+    g.addColorStop(1.00, 'rgba(96,150,255,0.00)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 64, 4);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  private ensureBoltMeshes() {
+    if (this.bolt) return this.bolt;
+    const verts = BOLT_MAX_SEGMENTS * 4;
+    const uv = new Float32Array(verts * 2);
+    const index = new Uint16Array(BOLT_MAX_SEGMENTS * 6);
+    for (let s = 0; s < BOLT_MAX_SEGMENTS; s++) {
+      const v = s * 4;
+      // v+0 = A-side, v+1 = A+side, v+2 = B-side, v+3 = B+side. u runs ACROSS
+      // the ribbon so the texture paints a hot core with soft edges.
+      uv[v * 2] = 0; uv[v * 2 + 1] = 0;
+      uv[v * 2 + 2] = 1; uv[v * 2 + 3] = 0;
+      uv[v * 2 + 4] = 0; uv[v * 2 + 5] = 1;
+      uv[v * 2 + 6] = 1; uv[v * 2 + 7] = 1;
+      const o = s * 6;
+      index[o] = v; index[o + 1] = v + 1; index[o + 2] = v + 2;
+      index[o + 3] = v + 2; index[o + 4] = v + 1; index[o + 5] = v + 3;
+    }
+    const texture = this.makeBoltTexture();
+    const build = (color: number, opacity: number) => {
+      const pos = new Float32Array(verts * 3);
+      const geo = new THREE.BufferGeometry();
+      const attr = new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute('position', attr);
+      geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      geo.setIndex(new THREE.BufferAttribute(index, 1));
+      const mat = new THREE.MeshBasicMaterial({
+        map: texture,
+        color,
+        transparent: true,
+        opacity,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 10;
+      mesh.visible = false;
+      this.view.renderer.scene.add(mesh);
+      return { pos, attr, mat, mesh };
+    };
+    const glow = build(0x6f9dff, 0.3);
+    const core = build(0xffffff, 1);
+    this.bolt = {
+      core: core.mesh, glow: glow.mesh,
+      corePos: core.pos, glowPos: glow.pos,
+      coreAttr: core.attr, glowAttr: glow.attr,
+      coreMat: core.mat, glowMat: glow.mat,
+    };
+    return this.bolt;
+  }
+
+  /** Lay out a fresh channel: a jagged main stroke from cloud base to the sea
+   *  plus 2–4 forks, each thinner than the trunk it left. */
+  private buildBoltChannel(lx: number, lz: number, topY: number) {
+    const path = this.boltPath;
+    const width = this.boltWidth;
+    let n = 0;
+    let bx = lx;
+    let bz = lz;
+    for (let i = 0; i < BOLT_MAIN_NODES; i++) {
+      const f = i / (BOLT_MAIN_NODES - 1);
+      path[n * 3] = bx;
+      path[n * 3 + 1] = topY * (1 - f);
+      path[n * 3 + 2] = bz;
+      width[n] = 1.62 * (1 - f * 0.5);
+      this.boltMainIdx[i] = n;
+      n++;
+      const jitter = 6 + f * 10;
+      bx += (Math.random() - 0.5) * jitter;
+      bz += (Math.random() - 0.5) * jitter;
+    }
+    let seg = 0;
+    for (let i = 0; i + 1 < BOLT_MAIN_NODES; i++) {
+      this.boltSegA[seg] = this.boltMainIdx[i];
+      this.boltSegB[seg] = this.boltMainIdx[i + 1];
+      seg++;
+    }
+
+    const branches = 2 + ((Math.random() * 3) | 0);
+    const drop = topY / BOLT_MAIN_NODES;
+    for (let b = 0; b < branches; b++) {
+      if (n + 4 >= BOLT_MAX_NODES || seg + 4 >= BOLT_MAX_SEGMENTS) break;
+      const parent = this.boltMainIdx[2 + ((Math.random() * (BOLT_MAIN_NODES - 6)) | 0)];
+      let px = path[parent * 3];
+      let py = path[parent * 3 + 1];
+      let pz = path[parent * 3 + 2];
+      let w = width[parent] * 0.55;
+      const theta = Math.random() * Math.PI * 2;
+      let dx = Math.cos(theta);
+      let dz = Math.sin(theta);
+      let prev = parent;
+      const steps = 4 + ((Math.random() * 3) | 0);
+      for (let s = 0; s < steps && n < BOLT_MAX_NODES && seg < BOLT_MAX_SEGMENTS; s++) {
+        px += dx * (5 + Math.random() * 8);
+        pz += dz * (5 + Math.random() * 8);
+        py = Math.max(0, py - drop * (0.7 + Math.random() * 0.9));
+        path[n * 3] = px;
+        path[n * 3 + 1] = py;
+        path[n * 3 + 2] = pz;
+        w *= 0.74;
+        width[n] = w;
+        this.boltSegA[seg] = prev;
+        this.boltSegB[seg] = n;
+        seg++;
+        prev = n;
+        n++;
+        dx += (Math.random() - 0.5) * 0.8;
+        dz += (Math.random() - 0.5) * 0.8;
+        const len = Math.hypot(dx, dz) || 1;
+        dx /= len;
+        dz /= len;
+      }
+    }
+    this.boltSegCount = seg;
+  }
+
+  /** Re-billboard the ribbon against the camera and push the vertex buffers. */
+  private updateBoltRibbon(env: number) {
+    const bolt = this.bolt;
+    if (!bolt) return;
+    const cam = this.view.renderer.camera.position;
+    const path = this.boltPath;
+    const width = this.boltWidth;
+    // Keep the channel legible whether it strikes on top of you or on the
+    // horizon: widen with distance so it never falls under a pixel.
+    const midDist = Math.max(30, Math.hypot(path[0] - cam.x, path[2] - cam.z));
+    const wScale = Math.min(3.0, Math.max(0.85, midDist / 380));
+    const core = bolt.corePos;
+    const glow = bolt.glowPos;
+    for (let s = 0; s < this.boltSegCount; s++) {
+      const a = this.boltSegA[s] * 3;
+      const b = this.boltSegB[s] * 3;
+      this.boltVecA.set(path[b] - path[a], path[b + 1] - path[a + 1], path[b + 2] - path[a + 2]);
+      this.boltVecB.set(
+        (path[a] + path[b]) * 0.5 - cam.x,
+        (path[a + 1] + path[b + 1]) * 0.5 - cam.y,
+        (path[a + 2] + path[b + 2]) * 0.5 - cam.z,
+      );
+      this.boltSide.crossVectors(this.boltVecA, this.boltVecB);
+      if (this.boltSide.lengthSq() < 1e-8) this.boltSide.set(1, 0, 0);
+      else this.boltSide.normalize();
+      const wa = width[this.boltSegA[s]] * wScale;
+      const wb = width[this.boltSegB[s]] * wScale;
+      const v = s * 12;
+      for (let pass = 0; pass < 2; pass++) {
+        const buf = pass === 0 ? core : glow;
+        const ka = pass === 0 ? wa : wa * 3.8;
+        const kb = pass === 0 ? wb : wb * 3.8;
+        buf[v] = path[a] - this.boltSide.x * ka;
+        buf[v + 1] = path[a + 1] - this.boltSide.y * ka;
+        buf[v + 2] = path[a + 2] - this.boltSide.z * ka;
+        buf[v + 3] = path[a] + this.boltSide.x * ka;
+        buf[v + 4] = path[a + 1] + this.boltSide.y * ka;
+        buf[v + 5] = path[a + 2] + this.boltSide.z * ka;
+        buf[v + 6] = path[b] - this.boltSide.x * kb;
+        buf[v + 7] = path[b + 1] - this.boltSide.y * kb;
+        buf[v + 8] = path[b + 2] - this.boltSide.z * kb;
+        buf[v + 9] = path[b] + this.boltSide.x * kb;
+        buf[v + 10] = path[b + 1] + this.boltSide.y * kb;
+        buf[v + 11] = path[b + 2] + this.boltSide.z * kb;
+      }
+    }
+    bolt.core.geometry.setDrawRange(0, this.boltSegCount * 6);
+    bolt.glow.geometry.setDrawRange(0, this.boltSegCount * 6);
+    bolt.coreAttr.needsUpdate = true;
+    bolt.glowAttr.needsUpdate = true;
+    bolt.coreMat.opacity = env;
+    bolt.glowMat.opacity = env * 0.42;
+    bolt.core.visible = true;
+    bolt.glow.visible = true;
   }
 
   updateLightning(dt: number) {
     if (!this.view.state) return;
 
-    // Fade out any active flash
-    if (this.lightningFlash) {
-      this.lightningFlash.intensity -= dt * (18 + this.view.state.storm.phase * 4);
-      if (this.lightningFlash.intensity <= 0) {
-        this.lightningFlash.intensity = 0; // pooled light stays in the scene
-        this.lightningFlash = null;
+    // ── Play out the strike that is burning ────────────────────────────────
+    if (this.boltAge < BOLT_LIFE) {
+      this.boltAge += dt;
+      const env = this.boltEnvelope(this.boltAge);
+      this.updateBoltRibbon(env);
+      if (this.lightningFlash) this.lightningFlash.intensity = env * (42 + this.view.state.storm.phase * 8);
+      if (this.boltLight) this.boltLight.intensity = env * 2.3;
+      this.view.renderer.setLightningFlash(env * 0.95, this.boltDirX, this.boltDirZ);
+      this.view.ocean.setLightningFlash(env, this.boltDirX, this.boltDirZ);
+      if (this.stormLightningFlashEl) {
+        const peak = 0.20 + this.view.stormWeatherIntensity * 0.28 + this.view.state.storm.phase * 0.015;
+        this.stormLightningFlashOpacity = Math.max(this.stormLightningFlashOpacity, env * peak);
+        this.stormLightningFlashEl.style.opacity = String(this.stormLightningFlashOpacity);
+      }
+      if (this.boltAge >= BOLT_LIFE) {
+        if (this.bolt) {
+          this.bolt.core.visible = false;
+          this.bolt.glow.visible = false;
+        }
+        if (this.lightningFlash) this.lightningFlash.intensity = 0;
+        if (this.boltLight) this.boltLight.intensity = 0;
+        this.view.renderer.setLightningFlash(0, this.boltDirX, this.boltDirZ);
+        this.view.ocean.setLightningFlash(0, this.boltDirX, this.boltDirZ);
       }
     }
-    if (this.lightningBolt) {
-      const boltMat = this.lightningBolt.material as THREE.LineBasicMaterial;
-      if (boltMat.opacity > 0) boltMat.opacity = Math.max(0, boltMat.opacity - dt * 6);
+    // Keep the directional pulse aimed from the strike's bearing at the camera.
+    if (this.boltLight && this.boltLight.intensity > 0) {
+      const cam = this.view.renderer.camera.position;
+      this.boltLight.target.position.copy(cam);
+      this.boltLight.position.set(cam.x + this.boltDirX * 180, cam.y + 130, cam.z + this.boltDirZ * 180);
     }
 
     const phase = this.view.state.storm.phase;
@@ -1388,16 +1663,26 @@ export class EnvironmentFx {
     const nearStormWall = !!player && Math.abs(playerDist - this.view.state.storm.safeRadius) < 85;
 
     // Keep lightning tied to the storm front, not clear water well inside the safe zone.
-    if (!outsideStorm && !(this.view.state.storm.shrinking && nearStormWall) && phase < 2) return;
+    if (!this.stormDemo && !outsideStorm && !(this.view.state.storm.shrinking && nearStormWall) && phase < 2) return;
 
     this.lightningTimer -= dt;
     if (this.lightningTimer <= 0) {
       const stormR = this.view.state.storm.safeRadius;
       const angle = Math.random() * Math.PI * 2;
-      // Strike near the storm wall boundary
-      const dist = stormR * (0.88 + Math.random() * 0.38);
-      const lx = this.view.state.storm.centerX + Math.cos(angle) * dist;
-      const lz = this.view.state.storm.centerZ + Math.sin(angle) * dist;
+      let lx: number;
+      let lz: number;
+      if (this.stormDemo) {
+        // Demo storm is parked on the camera: strike where it can be seen.
+        const camPos = this.view.renderer.camera.position;
+        const demoDist = 190 + Math.random() * 260;
+        lx = camPos.x + Math.cos(angle) * demoDist;
+        lz = camPos.z + Math.sin(angle) * demoDist;
+      } else {
+        // Strike near the storm wall boundary
+        const dist = stormR * (0.88 + Math.random() * 0.38);
+        lx = this.view.state.storm.centerX + Math.cos(angle) * dist;
+        lz = this.view.state.storm.centerZ + Math.sin(angle) * dist;
+      }
 
       // Pooled flash light (allocating one per strike forced shader churn).
       if (!this.lightningLightPool) {
@@ -1405,35 +1690,28 @@ export class EnvironmentFx {
         this.view.renderer.scene.add(this.lightningLightPool);
       }
       const flash = this.lightningLightPool;
-      flash.intensity = 60 + phase * 10;
+      flash.intensity = 42 + phase * 8;
       flash.distance = Math.max(300, stormR * 0.9);
       flash.position.set(lx, 85 + Math.random() * 50, lz);
       this.lightningFlash = flash;
 
-      // Jagged bolt: cloud base to the sea, brief life synced with the flash.
-      if (!this.lightningBolt) {
-        const boltGeo = new THREE.BufferGeometry();
-        boltGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9 * 3), 3));
-        this.lightningBolt = new THREE.Line(
-          boltGeo,
-          new THREE.LineBasicMaterial({ color: 0xdceeff, transparent: true, opacity: 0, depthWrite: false }),
-        );
-        this.lightningBolt.frustumCulled = false;
-        this.view.renderer.scene.add(this.lightningBolt);
-      }
-      {
-        const positions = this.lightningBolt.geometry.getAttribute('position') as THREE.BufferAttribute;
-        const topY = 150 + Math.random() * 40;
-        let bx = lx;
-        let bz = lz;
-        for (let i = 0; i < 9; i++) {
-          const f = i / 8;
-          positions.setXYZ(i, bx, topY * (1 - f), bz);
-          bx += (Math.random() - 0.5) * 14;
-          bz += (Math.random() - 0.5) * 14;
-        }
-        positions.needsUpdate = true;
-        (this.lightningBolt.material as THREE.LineBasicMaterial).opacity = 0.9;
+      // Branched ribbon channel: cloud base down to the sea.
+      this.ensureBoltMeshes();
+      this.buildBoltChannel(lx, lz, 150 + Math.random() * 46);
+      this.boltAge = 0;
+      const cam = this.view.renderer.camera.position;
+      const bdx = lx - cam.x;
+      const bdz = lz - cam.z;
+      const blen = Math.hypot(bdx, bdz) || 1;
+      this.boltDirX = bdx / blen;
+      this.boltDirZ = bdz / blen;
+      // Directional pulse: everything in the scene flash-lit from the bolt's
+      // bearing. Built once on first strike so the shader recompile is paid
+      // one time, and never on the low tier.
+      if (!this.boltLight && this.view.renderer.getQuality() !== 'low') {
+        this.boltLight = new THREE.DirectionalLight(0xc3daff, 0);
+        this.view.renderer.scene.add(this.boltLight);
+        this.view.renderer.scene.add(this.boltLight.target);
       }
 
       // Thunder boom matched to the actual strike distance.
@@ -1442,15 +1720,12 @@ export class EnvironmentFx {
         this.view.audio.playThunder(dist2D(localPlayerForThunder.position.x, localPlayerForThunder.position.z, lx, lz));
       }
 
-      this.stormLightningFlashOpacity = Math.max(
-        this.stormLightningFlashOpacity,
-        0.18 + this.view.stormWeatherIntensity * 0.26 + phase * 0.015,
-      );
-
-      const baseCooldown = Math.max(
-        0.75,
-        10.5 - phase * 1.25 - (outsideStorm ? 3.2 : 0) - this.view.stormWeatherIntensity * 2.5,
-      );
+      const baseCooldown = this.stormDemo
+        ? 1.6 // demo preview: strike often enough to actually look at
+        : Math.max(
+          0.75,
+          10.5 - phase * 1.25 - (outsideStorm ? 3.2 : 0) - this.view.stormWeatherIntensity * 2.5,
+        );
       this.lightningTimer = baseCooldown * (0.35 + Math.random() * 0.85);
     }
   }

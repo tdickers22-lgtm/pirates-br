@@ -116,11 +116,14 @@ const SKY_FRAG = /* glsl */`
     float boltLobe = 0.0;
     if (u_lightningFlash > 0.001) {
       float boltAz = dot(normalize(vec3(d.x, 0.0001, d.z)), u_lightningDir);
-      boltLobe = (0.20 + 0.80 * pow(max(0.0, boltAz), 2.0))
+      boltLobe = (0.08 + 0.92 * pow(max(0.0, boltAz), 2.2))
                * (1.0 - smoothstep(0.05, 0.85, d.y) * 0.55);
       float boltGlow = u_lightningFlash * boltLobe;
-      sky += vec3(0.60, 0.70, 0.92) * boltGlow * (0.20 + cloudAlpha * 1.70);
-      sky = mix(sky, vec3(0.74, 0.82, 0.99), boltGlow * cloudAlpha * 0.38);
+      // Deliberately restrained: the CHANNEL has to stay the brightest thing on
+      // screen, so the sky lifts and the cloud bellies flare, but nothing here
+      // is allowed to blow the whole dome to flat white.
+      sky += vec3(0.60, 0.70, 0.92) * boltGlow * (0.08 + cloudAlpha * 0.95);
+      sky = mix(sky, vec3(0.74, 0.82, 0.99), boltGlow * cloudAlpha * 0.22);
     }
 
     // Storm scud: fast low dark wisps racing along the horizon band
@@ -174,7 +177,7 @@ const SKY_FRAG = /* glsl */`
     sky += vec3(0.55, 0.68, 1.00) * moonDisk * 1.5 * cloudOcclusion * notUnder;
     sky += vec3(0.80, 0.88, 1.10) * starField * starVis * 0.9 * notUnder;
     // Emissive in linear so bloom blooms off the lit cloud belly.
-    sky += vec3(0.55, 0.66, 0.95) * u_lightningFlash * boltLobe * 0.6 * notUnder;
+    sky += vec3(0.55, 0.66, 0.95) * u_lightningFlash * boltLobe * 0.3 * notUnder;
 
     gl_FragColor = vec4(sky, 1.0);
     #include <tonemapping_fragment>
