@@ -48,6 +48,10 @@ import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
+/** Seconds of fuse hiss per burst; re-armed until the keg blows (SHIP.KEG_FUSE_TIME
+ *  is 10s). Short bursts keep the sound tracking a keg that rides a turning deck,
+ *  and stay inside SoundEngine.playKegFuse's per-call duration clamp. */
+const KEG_FUSE_HISS_BURST = 2.5;
 /** Port the game server listens on by default (src/server/index.ts DEFAULT_PORT).
  *  Kept off 8080: local content filters commonly intercept that port and corrupt
  *  the WebSocket handshake. Only used to hop off a dev server (Vite on :3000). */
@@ -87,6 +91,8 @@ installGeometryNaNGuard();
 type KegMeshRecord = {
   root: THREE.Group;
   fuse: THREE.PointLight;
+  /** performance.now() at which the fuse hiss needs re-arming (see syncKegs). */
+  nextFuseHissAt: number;
 };
 
 export type StoryCutsceneRefs = {
@@ -938,12 +944,19 @@ export class Game {
    * A crew's ship went under. CREWS AFLOAT used to fall 10 → 7 → 5 with no
    * on-screen event at all, so the BR's tension meter decayed invisibly: a gold
    * feed line, a counter pulse and a sting now mark every one.
+   *
+   * The line says SHIP SUNK, not "crew eliminated": this fires the moment the
+   * hull starts going down, and under the sink-survival rule that crew is still
+   * in the match — swimming, boarding someone else's deck, marooned on a key.
+   * Calling them eliminated while they are shooting at you is a lie the counter
+   * itself never told (it counts hulls AFLOAT); real eliminations have their own
+   * kill-feed lines.
    */
   private announceCrewEliminated(payload: CrewEliminatedPayload): void {
     const remaining = Math.max(0, payload.remaining);
     const credit = payload.byName ? ` · sunk by ${payload.byName}` : '';
     this.pushFeed(
-      `CREW ELIMINATED — ${remaining} crew${remaining === 1 ? '' : 's'} remain · ${payload.crewName}${credit}`,
+      `SHIP SUNK — ${remaining} crew${remaining === 1 ? '' : 's'} afloat · ${payload.crewName}${credit}`,
       '#f0c46a',
     );
     this.hud.pulseCrewsAfloat();
@@ -3584,7 +3597,7 @@ export class Game {
         root.scale.setScalar(mega ? 1.55 : 1);
 
         this.renderer.scene.add(root);
-        mesh = { root, fuse };
+        mesh = { root, fuse, nextFuseHissAt: 0 };
         this.kegMeshes.set(keg.id, mesh);
         created = true;
       }
@@ -3616,6 +3629,21 @@ export class Game {
       const megaBoost = keg.mega ? 1.75 : 1;
       mesh.root.scale.setScalar(keg.mega ? 1.55 : 1);
       mesh.fuse.intensity = megaBoost * (0.6 + Math.max(0.2, Math.sin((SHIP.KEG_FUSE_TIME - keg.timer) * 12) * 0.35 + (1 - Math.min(1, keg.timer / SHIP.KEG_FUSE_TIME)) * 2.1));
+
+      // A lit fuse is a ten-second warning, and it was SILENT: the only tell was
+      // a point light you had to be looking at. Re-arm the hiss in short bursts
+      // from the keg's CURRENT position rather than firing one long sample at
+      // the spot it was planted — a keg rides a turning deck, and the panic is
+      // in knowing which way to run.
+      const nowMs = performance.now();
+      if (nowMs >= mesh.nextFuseHissAt) {
+        const cam = this.renderer.camera.position;
+        const pos = mesh.root.position;
+        const d = Math.hypot(pos.x - cam.x, pos.y - cam.y, pos.z - cam.z);
+        const burst = Math.min(KEG_FUSE_HISS_BURST, keg.timer);
+        if (burst > 0.2) this.audio.playKegFuse(burst, d, { x: pos.x, y: pos.y, z: pos.z });
+        mesh.nextFuseHissAt = nowMs + burst * 1000;
+      }
     }
   }
 
@@ -5429,18 +5457,30 @@ export class Game {
     );
   }
 
-  /** Prompt anchor for planking a breach: the spot on the RAIL directly above
-   *  it. The hole itself sits at the waterline, metres below the deck and
-   *  behind the planking, so anchoring the prompt there would ask a pirate to
-   *  look through his own feet. Same (x, z) as the hole — the prompt points at
-   *  the right piece of rail, and the reach test is planar anyway. */
+  /** Prompt anchor for planking a breach: the spot on whichever floor the
+   *  pirate is standing on, directly above/beside the hole. Same (x, z) as the
+   *  hole — the prompt points at the right piece of planking, and the server's
+   *  reach test is planar anyway.
+   *
+   *  From the weather deck that means the rail: the hole sits at the waterline,
+   *  metres below and behind the planking, so anchoring it there would ask a
+   *  pirate to look through his own feet. But a breach BELOW DECKS is planked
+   *  from inside the hold, which the server has always allowed (the reach test
+   *  never looked at Y) — the prompt just anchored on the deck OVERHEAD, so a
+   *  pirate standing in the bilge staring straight at the gushing plank got no
+   *  prompt at all. Down there, anchor at chest height in the hold. */
   private getHoleRepairWorldPoint(ship: Ship, hole: ShipHole) {
     const stats = SHIP_STATS[ship.type];
+    const localX = THREE.MathUtils.clamp(hole.x * 1.08, -stats.width * 0.54, stats.width * 0.54);
+    const localZ = THREE.MathUtils.clamp(hole.z * 1.04, -stats.length * 0.46, stats.length * 0.46);
+    const player = this.getLocalPlayer();
+    const deckLineY = ship.position.y + stats.height - 0.5;
+    const inHold = !!player && player.onShipId === ship.id && player.position.y < deckLineY;
     return this.getShipWorldPoint(
       ship,
-      THREE.MathUtils.clamp(hole.x * 1.08, -stats.width * 0.54, stats.width * 0.54),
-      THREE.MathUtils.clamp(hole.z * 1.04, -stats.length * 0.46, stats.length * 0.46),
-      stats.height + 0.4,
+      localX,
+      localZ,
+      inHold ? SHIP.HOLD_FLOOR_OFFSET + 1.0 : stats.height + 0.4,
     );
   }
 

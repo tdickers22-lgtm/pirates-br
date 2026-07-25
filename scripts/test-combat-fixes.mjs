@@ -727,8 +727,14 @@ console.log('\n9. A keg blast clusters breaches on the face it was lashed to');
   const holes = ship.holes.filter((h) => !h.patched);
   const byFace = { bow: 0, stern: 0, port: 0, starboard: 0 };
   for (const h of holes) byFace[holeFace(h, stats)] += 1;
-  expect('the blast breaches every face of the hull', 
-    Object.values(byFace).every((n) => n > 0), JSON.stringify(byFace));
+  // It used to breach ALL FOUR faces, five planks at once (nine on a mega) —
+  // more flooding than bailing and planking together can answer, so a keg lit
+  // on your own deck was a guaranteed scuttling rather than an emergency. The
+  // shock still runs round the hull; the total is capped.
+  expect('the blast never opens more breaches than one crew could fight',
+    holes.length <= SHIP.KEG_MAX_HOLES_PER_BLAST, `${holes.length} holes ${JSON.stringify(byFace)}`);
+  expect('the shock still springs planks beyond the face it sat on',
+    Object.values(byFace).filter((n) => n > 0).length >= 3, JSON.stringify(byFace));
   expect('the face the barrel sat on is stove in hardest',
     byFace.starboard > byFace.port && byFace.starboard > byFace.bow,
     JSON.stringify(byFace));

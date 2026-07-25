@@ -194,6 +194,11 @@ export const SHIP = {
   KEG_PLAYER_DAMAGE: 125,
   KEG_PLAYER_MIN_DAMAGE: 8,
   KEG_BLAST_FORCE: 18,
+  /** Hard ceiling on fresh breaches ONE keg can open in a single hull. A keg
+   *  lit on your own deck used to stove in eight planks at once — past the
+   *  point where bailing or planking can keep up, so the blast wasn't damage,
+   *  it was a scuttling. Four is a genuine emergency a crew can still fight. */
+  KEG_MAX_HOLES_PER_BLAST: 4,
   KEG_PRIMARY_DAMAGE_RATIO: 0.26,
   KEG_SPLASH_DAMAGE_RATIO: 0.08,
   /** Rigging repair at sail station (per second while holding interact + wood) */

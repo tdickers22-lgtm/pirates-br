@@ -23,6 +23,14 @@ const QUEUE_TIMER_SECONDS = 15;
 const QUEUE_MATCH_BOTS_FILL_TO = MATCH_TOTAL_SHIPS; // total ships per match (humans + bots)
 const MATCH_GC_AFTER_END_MS = 60_000;
 const ENDED_MATCH_DETACH_MS = 25_000; // auto-return-to-menu after this if client doesn't act
+/** How long a match may run with nobody human in it before the lobby stops it.
+ *  Match abandons itself when the last human leaves a match already PLAYING —
+ *  but a solo whose human quits during the start countdown never trips that,
+ *  and then simulates a full nine-crew battle royale at 62.5Hz, to its last
+ *  ship, for an audience of nobody. Accumulate a few of those and the host is
+ *  loaded enough to skew the pacing of the game somebody IS playing. The window
+ *  is generous so a rejoin or a queue dispatch mid-handshake is never caught. */
+const EMPTY_MATCH_GC_MS = 60_000;
 /** Hard cap on a single inbound ws message. The largest legitimate client frame
  *  is a player_input (<1KB); anything past this is junk or an attack, and ws
  *  raises WS_ERR_UNSUPPORTED_MESSAGE_LENGTH which our 'error' handler contains. */
@@ -121,6 +129,8 @@ export class LobbyServer {
   private queue: string[] = [];
   private queueTimerStartedAt: number | null = null;
   private matches: Map<string, Match> = new Map();
+  /** When each running match last had zero humans in it (zombie sweep). */
+  private matchEmptySince: Map<string, number> = new Map();
   private clientToMatch: Map<string, string> = new Map(); // clientId → matchId
   private stats: StatsStore;
 
@@ -752,21 +762,19 @@ export class LobbyServer {
     const now = Date.now();
     for (const [matchId, match] of this.matches) {
       const endedAt = match.endedAtMs();
-      if (endedAt && now - endedAt > MATCH_GC_AFTER_END_MS) {
-        match.stop();
-        this.matches.delete(matchId);
-        // Drop client links to this match.
-        for (const session of this.clients.values()) {
-          if (session.matchId === matchId) {
-            session.state = 'menu';
-            session.matchId = undefined;
-            session.matchPlayerId = undefined;
-            session.matchJoinedAt = undefined;
-            session.endedMatchSince = undefined;
-            this.clientToMatch.delete(session.id);
-          }
-        }
+      if (endedAt) {
+        this.matchEmptySince.delete(matchId);
+        if (now - endedAt > MATCH_GC_AFTER_END_MS) this.reapMatch(matchId, match, 'ended');
+        continue;
       }
+      // Zombie sweep — see EMPTY_MATCH_GC_MS.
+      if (match.humanCount() > 0) {
+        this.matchEmptySince.delete(matchId);
+        continue;
+      }
+      const emptySince = this.matchEmptySince.get(matchId);
+      if (emptySince === undefined) this.matchEmptySince.set(matchId, now);
+      else if (now - emptySince > EMPTY_MATCH_GC_MS) this.reapMatch(matchId, match, 'no humans');
     }
 
     // Auto-detach clients lingering on the post-match screen too long.
@@ -776,6 +784,23 @@ export class LobbyServer {
         this.handleReturnToMenu(session);
       }
     }
+  }
+
+  /** Stop a match, forget it, and send any sessions still pointed at it home. */
+  private reapMatch(matchId: string, match: Match, reason: string): void {
+    match.stop();
+    this.matches.delete(matchId);
+    this.matchEmptySince.delete(matchId);
+    for (const session of this.clients.values()) {
+      if (session.matchId !== matchId) continue;
+      session.state = 'menu';
+      session.matchId = undefined;
+      session.matchPlayerId = undefined;
+      session.matchJoinedAt = undefined;
+      session.endedMatchSince = undefined;
+      this.clientToMatch.delete(session.id);
+    }
+    console.log(`[Lobby] match ${matchId.slice(0, 6)} reaped (${reason}) — ${this.matches.size} running`);
   }
 
   // ─── Send helpers ────────────────────────────────────────────

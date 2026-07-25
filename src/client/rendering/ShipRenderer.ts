@@ -1524,6 +1524,9 @@ export class ShipRenderer {
    *  must not inherit the hull's pitch/roll). */
   private gangwayPlanks: THREE.Group[] = [];
   private gangwayMat!: THREE.MeshStandardMaterial;
+  /** Shared across every planked breach on every hull (see addPlankPatch). */
+  private plankPatchMat: THREE.MeshStandardMaterial | null = null;
+  private plankPatchRimMat: THREE.MeshStandardMaterial | null = null;
 
   init(scene: THREE.Scene, quality: RenderQuality = 'balanced') {
     this.scene = scene;
@@ -3710,14 +3713,30 @@ export class ShipRenderer {
 
   /** A crossed pair of rough planks nailed over a repaired breach, flush at the
    *  breach's own point and quaternion — patch and hole are the same entity now,
-   *  so a plank can never float over a still-open hole. */
+   *  so a plank can never float over a still-open hole.
+   *
+   *  Cut FRESH and pale (deck timber, not the tarred hull trim it used to use)
+   *  and set on a dark backing board: the old 0.66 x 0.15 dark-on-dark cross was
+   *  unreadable past about four metres, so from the water you couldn't tell a
+   *  planked hull from a holed one. Now the repair is legible across a broadside.
+   */
   private addPlankPatch(mesh: ShipMeshGroup, vis: HoleVis, seed: number) {
     const patch = new THREE.Group();
-    const mat = new THREE.MeshStandardMaterial({ map: this.darkWoodTex, roughness: 0.95 });
+    this.plankPatchMat ??= new THREE.MeshStandardMaterial({
+      map: this.deckTex,
+      color: 0xd7b98c,
+      roughness: 0.88,
+    });
+    // A shallow scorched-looking backing board reads as a rim around the cross,
+    // which is what separates it from the planking at distance.
+    this.plankPatchRimMat ??= new THREE.MeshStandardMaterial({ color: 0x2a1a0d, roughness: 1 });
+    const rim = new THREE.Mesh(new THREE.CircleGeometry(0.5, 14), this.plankPatchRimMat);
+    rim.position.z = 0.008;
+    patch.add(rim);
     for (let i = 0; i < 2; i++) {
-      const plank = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.15, 0.035), mat);
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.22, 0.05), this.plankPatchMat);
       plank.rotation.z = (i === 0 ? 0.5 : -0.45) + ((seed % 3) - 1) * 0.16;
-      plank.position.z = 0.02 + i * 0.035;
+      plank.position.z = 0.03 + i * 0.045;
       plank.castShadow = true;
       patch.add(plank);
     }

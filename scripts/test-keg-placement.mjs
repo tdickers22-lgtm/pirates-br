@@ -67,6 +67,36 @@ const hits = match.getKegShipHits(worldKeg);
 expect('World keg blast can damage nearby ships', hits.some((hit) => hit.ship.id === ship.id), JSON.stringify(hits));
 expect('World keg blast resolves impact section logically', hits.find((hit) => hit.ship.id === ship.id)?.section === 'bow', JSON.stringify(hits));
 
+// ── Blast damage ceiling ────────────────────────────────────────────────────
+// A keg lit on your own deck used to stove in a plank on every face at once —
+// eight fresh breaches, which is past the point where planking or bailing can
+// keep up. That is not damage, it is a scuttling, and it made your own keg the
+// single most dangerous thing aboard. One blast is capped now.
+for (const mega of [false, true]) {
+  const blastMatch = new Match({ matchId: `keg-blast-${mega}`, botCount: 1 });
+  const target = blastMatch.state.ships[0];
+  target.holes = [];
+  target.nextHoleId = 1;
+  const deckPoint = blastMatch.toShipWorld(0, 0, target);
+  blastMatch.explodeKeg({
+    id: `blast-${mega}`,
+    shipId: target.id,
+    plantedById: 'player-test',
+    section: 'port',
+    position: { x: deckPoint.x, y: target.position.y + SHIP_STATS[target.type].height * 0.4, z: deckPoint.z },
+    localPosition: { x: 0, y: 0, z: 0 },
+    timer: 0,
+    mega,
+  });
+  const opened = target.holes.filter((hole) => !hole.patched).length;
+  expect(
+    `${mega ? 'Mega keg' : 'Keg'} opens at most ${SHIP.KEG_MAX_HOLES_PER_BLAST} breaches in one blast`,
+    opened <= SHIP.KEG_MAX_HOLES_PER_BLAST,
+    `opened=${opened}`,
+  );
+  expect(`${mega ? 'Mega keg' : 'Keg'} still stoves the hull in`, opened >= 3, `opened=${opened}`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} keg-placement assertion(s) failed.`);
   process.exit(1);

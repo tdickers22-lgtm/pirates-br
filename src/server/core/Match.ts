@@ -86,7 +86,6 @@ interface ConnectedClient {
   playerId: string;
   name: string;
   lastInput: PlayerInput | null;
-  lastPing: number;
   joinedAt: number;
   killsAtJoin: number;
   deathsAtJoin: number;
@@ -694,7 +693,6 @@ export class Match {
       playerId,
       name: displayName,
       lastInput: null,
-      lastPing: Date.now(),
       joinedAt: Date.now(),
       killsAtJoin: 0,
       deathsAtJoin: 0,
@@ -910,9 +908,6 @@ export class Match {
         this.handleTradeAction(client.playerId, p);
         break;
       }
-      case 'ping':
-        this.send(client.ws, { type: 'pong', ts: Date.now(), payload: msg.payload });
-        break;
       case 'dev_bot_peace': {
         // Dev/testing convenience — only honoured when a single human is in the
         // match (solo), so it can't be abused to disable bot aggression in a real
@@ -2627,9 +2622,19 @@ export class Match {
       // three faces spring a plank each. A MEGA keg riddles the whole hull.
       const kegLocal = this.toShipLocal(keg.position, hit.ship);
       const bandY = (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5;
-      for (const section of this.getHullSections()) {
+      // The blast face is stove in first and the shock spends what is left on
+      // the others — and the whole blast is capped, so one keg can never open
+      // more breaches than a crew could conceivably plank (see
+      // SHIP.KEG_MAX_HOLES_PER_BLAST).
+      const sections = this.getHullSections()
+        .slice()
+        .sort((a, b) => Number(b === hit.section) - Number(a === hit.section));
+      let budget = SHIP.KEG_MAX_HOLES_PER_BLAST;
+      for (const section of sections) {
+        if (budget <= 0) break;
         const isPrimary = section === hit.section;
-        const holes = keg.mega ? (isPrimary ? 3 : 2) : (isPrimary ? 2 : 1);
+        const holes = Math.min(budget, keg.mega ? (isPrimary ? 3 : 2) : (isPrimary ? 2 : 1));
+        budget -= holes;
         // Primary face: cluster on the blast point itself. Other faces: the
         // shock finds their centre.
         const aim = isPrimary
