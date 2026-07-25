@@ -1,21 +1,13 @@
 import * as THREE from 'three';
-import { ECONOMY, HARVEST, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, UPGRADE_COSTS, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
+import { ECONOMY, HARVEST, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, IslandProp, IslandPropType, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getSailRopeStationLocals, getBraceStationLocals, getIslandSurfaceY, getNearestShipBoardingLadder, getIslandDockSwimLadderPoint, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, sampleWind, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import {
-  findNearbyCannonIndex as findSharedNearbyCannonIndex,
-  getAmmoCrateLocal,
-  getAnchorControlLocal as getSharedAnchorControlLocal,
-  getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition,
-  getSailControlLocal as getSharedSailControlLocal,
-  isNearAmmoCrate,
-  isNearAnchor as isSharedNearAnchor,
-  isNearCrowNestLadder as isSharedNearCrowNestLadder,
-  isNearHelm as isSharedNearHelm,
-  isNearSailStation as isSharedNearSailStation,
+  findNearbyCannonIndex,
+  getSailControlLocal,
   toShipLocalPoint,
 } from '../../shared/interactions.js';
 import { Renderer } from '../rendering/Renderer.js';
@@ -34,6 +26,7 @@ import { HudController, type HudView } from '../ui/HudController.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import { PlayerAnimator, type PlayerAnimatorView } from '../rendering/PlayerAnimator.js';
 import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelController.js';
+import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeStormTexture, makeWindWispTexture } from '../rendering/factories/TextureFactory.js';
 import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
@@ -402,6 +395,48 @@ export class Game {
     getUpgradePresentation: (type) => this.getUpgradePresentation(type),
   });
 
+  /** Look-at prompt arbiter (see systems/InteractionPrompts.ts). */
+  private readonly interactions = new InteractionPrompts(this.createInteractionView());
+
+  private createInteractionView(): InteractionView {
+    const self = this;
+    return {
+      ui: this.ui,
+      get state() { return self.state; },
+      get barrelBrowse() { return self.barrelBrowse; },
+      get tavernDoors() { return self.tavernDoors; },
+      get visibleInteractKind() { return self.visibleInteractKind; },
+      get lastInteractKind() { return self.lastInteractKind; },
+      set lastInteractKind(v) { self.lastInteractKind = v; },
+      get mermaidAnchor() { return self.mermaidAnchor; },
+      set mermaidAnchor(v) { self.mermaidAnchor = v; },
+      get pendingInteractFromUi() { return self.pendingInteractFromUi; },
+      set pendingInteractFromUi(v) { self.pendingInteractFromUi = v; },
+      get pendingLaunchFromUi() { return self.pendingLaunchFromUi; },
+      set pendingLaunchFromUi(v) { self.pendingLaunchFromUi = v; },
+      createMermaidAnchor: (player, ship) => this.createMermaidAnchor(player, ship),
+      distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
+      findChestById: (chestId) => this.findChestById(chestId),
+      findHarvestTarget: (player) => this.findHarvestTarget(player),
+      findNearbyKeg: (player, ship) => this.findNearbyKeg(player, ship),
+      findRepairableHullSection: (player, ship) => this.findRepairableHullSection(player, ship),
+      getBarrelWorldPoint: (barrelId) => this.getBarrelWorldPoint(barrelId),
+      getChestWorldPoint: (chestId) => this.getChestWorldPoint(chestId),
+      getInventoryQty: (ship, item) => this.getInventoryQty(ship, item),
+      getLocalPlayer: () => this.getLocalPlayer(),
+      getLookDirection: (player) => this.getLookDirection(player),
+      getMermaidReturnShip: (player) => this.getMermaidReturnShip(player),
+      getNearbyGoldHoarder: (player) => this.getNearbyGoldHoarder(player),
+      getNearbyUpgradeStation: (player) => this.getNearbyUpgradeStation(player),
+      getRepairPlankCount: (player, ship) => this.getRepairPlankCount(player, ship),
+      getRepairWorldPoint: (ship, section) => this.getRepairWorldPoint(ship, section),
+      getShipWorldPoint: (ship, localX, localZ, worldY) => this.getShipWorldPoint(ship, localX, localZ, worldY),
+      getTavernDoorWorldPoint: (door, out) => this.getTavernDoorWorldPoint(door, out),
+      getTrackedShip: () => this.getTrackedShip(),
+      getUpgradePresentation: (type) => this.getUpgradePresentation(type),
+    };
+  }
+
   /** First-person viewmodel (see rendering/ViewmodelController.ts). */
   private readonly viewmodel = new ViewmodelController(this.createViewmodelView());
 
@@ -521,7 +556,7 @@ export class Game {
       get visibleInteractKind() { return self.visibleInteractKind; },
       set visibleInteractKind(v) { self.visibleInteractKind = v; },
       distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
-      findNearbyCannonIndex: (player, ship) => this.findNearbyCannonIndex(player, ship),
+      findNearbyCannonIndex: (player, ship) => findNearbyCannonIndex(player, ship),
       findRepairableHullSection: (player, ship) => this.findRepairableHullSection(player, ship),
       flashIslandBanner: (name) => this.flashIslandBanner(name),
       formatCompassHeading: (angle) => this.formatCompassHeading(angle),
@@ -530,7 +565,7 @@ export class Game {
       getClosestGoldHoarder: (player) => this.getClosestGoldHoarder(player),
       getInventoryQty: (ship, item) => this.getInventoryQty(ship, item),
       getLocalPlayer: () => this.getLocalPlayer(),
-      getLookInteraction: (player, ship, cannon, section) => this.getLookInteraction(player, ship, cannon, section),
+      getLookInteraction: (player, ship, cannon, section) => this.interactions.getLookInteraction(player, ship, cannon, section),
       getPocketWheelCount: (player, slot) => this.getPocketWheelCount(player, slot),
       getStormTimerSeconds: () => this.getStormTimerSeconds(),
       getTrackedShip: () => this.getTrackedShip(),
@@ -601,7 +636,7 @@ export class Game {
 
     this.setupStormWeatherOverlay();
     this.setupStoryCutsceneOverlay();
-    this.bindInteractPromptClick();
+    this.interactions.bindInteractPromptClick();
     this.viewmodel.localViewWeaponRoot.visible = false;
     this.viewmodel.localViewWeaponRoot.renderOrder = 999;
     this.renderer.camera.add(this.viewmodel.localViewWeaponRoot);
@@ -2389,7 +2424,7 @@ export class Game {
         input.interact = true;
         this.pendingInteractFromUi = false;
       }
-      const currentInteractKind = this.resolveCurrentInteractKind();
+      const currentInteractKind = this.interactions.resolveCurrentInteractKind();
       if (input.interact && currentInteractKind === 'door') {
         // Tavern doors are purely client-side — swing it here and swallow the
         // press so the server's legacy interact fallback can't grab something
@@ -2915,23 +2950,7 @@ export class Game {
 
   /** Same look-based winner as the HUD; refreshed between input sends for prompt previews. */
   private refreshInteractIntentForNet() {
-    this.lastInteractKind = this.resolveCurrentInteractKind();
-  }
-
-  private resolveCurrentInteractKind(): ClientInteractKind | null {
-    if (!this.state) return null;
-    const player = this.getLocalPlayer();
-    if (!player) return null;
-    const ship = this.getTrackedShip();
-    const nearbyCannon = ship ? this.findNearbyCannonIndex(player, ship) : null;
-    const repairSection = ship ? this.findRepairableHullSection(player, ship) : null;
-    const lookInteraction = this.getLookInteraction(player, ship, nearbyCannon, repairSection);
-    // Mid-mast-climb, X means "let go" (server-owned) — don't let a stray
-    // chest/door candidate claim the press.
-    const canPickInteractKind = !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
-      && player.mastClimb === null
-      && player.state !== 'respawning' && player.state !== 'eliminated';
-    return canPickInteractKind && lookInteraction ? lookInteraction.kind : null;
+    this.lastInteractKind = this.interactions.resolveCurrentInteractKind();
   }
 
   /** Match server PhysicsSystem cannon flight between snapshots so launches don't feel ~1–3 ticks behind. */
@@ -4241,7 +4260,7 @@ export class Game {
       targetFov = 78;
     } else if (player.atSails && trackedShip) {
       const stats = SHIP_STATS[trackedShip.type];
-      const station = this.getSailControlLocal(stats);
+      const station = getSailControlLocal(stats);
       const stationWorld = this.getShipWorldPoint(trackedShip, station.x, station.z, stats.height + 0.82);
       const sailTarget = this.getShipWorldPoint(
         trackedShip,
@@ -5107,448 +5126,6 @@ export class Game {
     return offer.map((entry) => ({ ...entry }));
   }
 
-  private getLookInteraction(
-    player: Player,
-    ship: Ship | null,
-    nearbyCannon: number | null,
-    repairSection: keyof Ship['hull'] | null,
-  ): { prompt: string; label: string; kind: ClientInteractKind } | null {
-    const candidates: Array<{ prompt: string; label: string; score: number; kind: ClientInteractKind }> = [];
-    // A FOUNDERING ship offers no work: every station/repair/board prompt on
-    // it is a lie (the server refuses, the crew has splashed out) — pressing
-    // a stale "[X] Use Cannon" on a sinking deck read as "X threw me in the
-    // water". Drop the ship from candidate generation entirely.
-    if (ship?.sinking) {
-      ship = null;
-      nearbyCannon = null;
-      repairSection = null;
-    }
-
-    // Downed crewmate nearby → hold to revive (server drains reviveProgress).
-    if (this.state && player.state === 'alive' && player.shipId) {
-      for (const other of this.state.players) {
-        if (other.id === player.id || other.state !== 'downed') continue;
-        if (other.shipId !== player.shipId) continue;
-        const d2 = this.distance2D(player.position.x, player.position.z, other.position.x, other.position.z);
-        if (d2 > 3.2 || Math.abs(other.position.y - player.position.y) > 2.2) continue;
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          new THREE.Vector3(other.position.x, other.position.y + 0.5, other.position.z),
-          3.4,
-          0.1,
-          `[X] Revive ${other.name}`,
-          'Hold to stabilize your crewmate',
-          'revive',
-        );
-      }
-    }
-
-    const mermaidShip = this.getMermaidReturnShip(player);
-    if (mermaidShip) {
-      if (!this.mermaidAnchor || this.mermaidAnchor.shipId !== mermaidShip.id) {
-        this.mermaidAnchor = this.createMermaidAnchor(player, mermaidShip);
-      }
-      this.pushInteractionCandidate(
-        candidates,
-        player,
-        new THREE.Vector3(this.mermaidAnchor.x, player.position.y + 0.65, this.mermaidAnchor.z),
-        6.4,
-        0.12,
-        '[X] Return To Ship',
-        'Mermaid ferry waiting nearby',
-        'mermaid',
-      );
-    }
-
-    if (player.nearBarrelId) {
-      const barrelPos = this.getBarrelWorldPoint(player.nearBarrelId);
-      if (barrelPos) {
-        const browsingThisBarrel = this.barrelBrowse?.barrelId === player.nearBarrelId;
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          barrelPos,
-          5.5,
-          0.72,
-          browsingThisBarrel ? '[X] Take All' : '[X] Look Inside',
-          browsingThisBarrel ? 'Transfer supplies' : 'Supply barrel · opening shows what’s inside',
-          'barrel',
-        );
-      }
-    }
-
-    const nearbyGoldHoarder = this.getNearbyGoldHoarder(player);
-    if (nearbyGoldHoarder) {
-      this.pushInteractionCandidate(
-        candidates,
-        player,
-        new THREE.Vector3(nearbyGoldHoarder.npc.position.x, nearbyGoldHoarder.npc.position.y + 1.05, nearbyGoldHoarder.npc.position.z),
-        4.6,
-        0.2,
-        player.carryingChestId
-          ? '[X] Sell Chest'
-          : (player.treasureMapIslandId && player.gold >= ECONOMY.ARMOR_PRICE && (player.armor ?? 0) < PLAYER.MAX_ARMOR * 0.5)
-            ? `[X] Buy Iron Cuirass (${ECONOMY.ARMOR_PRICE}g)`
-            : '[X] Get Treasure Map',
-        player.carryingChestId
-          ? `Gold Hoarder pays toward ${ECONOMY.GOLD_WIN_TARGET}`
-          : (player.treasureMapIslandId && player.gold >= ECONOMY.ARMOR_PRICE && (player.armor ?? 0) < PLAYER.MAX_ARMOR * 0.5)
-            ? `Combat plate — absorbs ${PLAYER.MAX_ARMOR} damage, lost on death`
-            : 'Gold Hoarder chart marks buried treasure',
-        'gold_hoarder',
-      );
-    }
-
-    if (player.nearChestId && !player.carryingChestId) {
-      const chestPos = this.getChestWorldPoint(player.nearChestId);
-      const chest = this.findChestById(player.nearChestId);
-      if (chestPos && chest && chest.carriedByPlayerId !== player.id) {
-        const digging = chest.buried && chest.digProgress < 1;
-        const prompt = digging
-          ? (player.hasShovel ? '[Hold X] Dig' : 'Find a shovel')
-          : chest.carriedByPlayerId
-            ? '[X] Steal Chest'
-            : chest.storedOnShipId
-              ? '[X] Take Chest'
-              : chest.floating
-                ? '[X] Grab Floating Chest'
-                : '[X] Pick Up Chest';
-        const label = digging
-          ? `Buried treasure · ${Math.round(chest.digProgress * 100)}% dug`
-          : `Base ${chest.value} gold · Gold Hoarder pays more`;
-        this.pushInteractionCandidate(candidates, player, chestPos, 5.5, 0.72, prompt, label, 'chest');
-      }
-    }
-
-    if (!player.onShipId && player.nearShipId && this.state) {
-      const targetShip = this.state.ships.find((candidate) => candidate.id === player.nearShipId && candidate.alive);
-      if (targetShip) {
-        const ladder = getNearestShipBoardingLadder(targetShip, player.position);
-        // Mirror the server's acceptance (PhysicsSystem nearShipId gate):
-        // swimmers board within 3.5m of the LADDER point, islanders within
-        // 3.0m. The old deck-height candidate showed [X] in spots where
-        // tryBoardFromLadder refused — pressing did nothing.
-        const maxLadderDist = player.state === 'swimming' ? 3.5 : 3.0;
-        if (ladder && ladder.distance <= maxLadderDist) {
-          const boardPoint = new THREE.Vector3(ladder.x, targetShip.position.y + SHIP_STATS[targetShip.type].height * 0.4, ladder.z);
-          this.pushInteractionCandidate(candidates, player, boardPoint, 7.0, 0.35, '[X] Climb Ladder', 'Board from the side ladder', 'board');
-        }
-      }
-    }
-
-    // Axe harvest — CLIENT-ONLY prompt ('harvest' never rides interactIntent);
-    // holding LMB swings the axe and the server does the felling via useItem.
-    if (player.equippedTool === 'axe' && player.state === 'alive' && this.state) {
-      const harvestTarget = this.findHarvestTarget(player);
-      if (harvestTarget) {
-        const { prop: bestProp, island: bestIsland } = harvestTarget;
-        const isPalm = bestProp.type.startsWith('palm_');
-        const propY = getIslandSurfaceY(bestIsland, bestProp.x, bestProp.z);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          new THREE.Vector3(bestProp.x, propY + (isPalm ? 1.6 : 0.7), bestProp.z),
-          HARVEST.RANGE + 1.6,
-          0.2,
-          isPalm ? '[Hold LMB] Chop Palm — wood' : '[Hold LMB] Crack Boulder — ore',
-          isPalm
-            ? `Fells in ~${HARVEST.CHOP_TIME}s · ${HARVEST.WOOD_PER_TREE_MIN}–${HARVEST.WOOD_PER_TREE_MAX} wood`
-            : `Cracks in ~${HARVEST.MINE_TIME}s · ${HARVEST.ORE_PER_BOULDER_MIN}–${HARVEST.ORE_PER_BOULDER_MAX} ore`,
-          'harvest',
-        );
-      }
-    }
-
-    if (player.state === 'swimming' && this.state) {
-      for (const isl of this.state.islands) {
-        if (!isl.dock) continue;
-        const dock = isl.dock;
-        const dx = player.position.x - dock.position.x;
-        const dz = player.position.z - dock.position.z;
-        const cos = Math.cos(dock.rotation);
-        const sin = Math.sin(dock.rotation);
-        const localX = dx * cos + dz * sin;
-        const localZ = -dx * sin + dz * cos;
-        if (Math.abs(localX) > dock.width * 0.42) continue;
-        if (localZ > -dock.length * 0.08 || localZ < -dock.length * 0.58) continue;
-        const ladderPoint = getIslandDockSwimLadderPoint(dock);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          new THREE.Vector3(ladderPoint.x, ladderPoint.y, ladderPoint.z),
-          4.2,
-          0.45,
-          '[X] Climb Dock Ladder',
-          'Swim up to the wooden dock',
-          'dock',
-        );
-      }
-    }
-
-    const nearbyKeg = this.findNearbyKeg(player, ship ?? null);
-    if (nearbyKeg) {
-      this.pushInteractionCandidate(
-        candidates,
-        player,
-        new THREE.Vector3(nearbyKeg.position.x, nearbyKeg.position.y + 0.45, nearbyKeg.position.z),
-        3,
-        0.3,
-        '[X] Defuse Powder Keg',
-        `${Math.max(1, Math.ceil(nearbyKeg.timer))}s until detonation`,
-        'keg_diffuse',
-      );
-    }
-
-    if (ship) {
-      // Bail the bilge — physical bucket work. Only offered with the BUCKET tool
-      // equipped from the supply wheel; otherwise a hint nudges you to equip it.
-      // Low priority so cannons/helm/repairs win when you're facing one.
-      const flooded = (ship.waterLevel ?? 0) > 0.02;
-      const hasBucket = player.equippedTool === 'bucket';
-      if (player.onShipId === ship.id && (flooded || (hasBucket && player.bucketFilled))) {
-        const pct = Math.round((ship.waterLevel ?? 0) * 100);
-        let prompt: string;
-        let label: string;
-        if (!hasBucket) {
-          prompt = 'Equip the Bucket [Hold I] to bail';
-          label = `Bilge flooding ${pct}% · grab the bucket from the supply wheel`;
-        } else if (player.bucketFilled) {
-          prompt = '[X] Heave the water overboard';
-          label = 'Bucket full — toss it over the side';
-        } else {
-          prompt = '[X] Fill the bucket from the bilge';
-          label = `Bilge flooding ${pct}% · scoop a bucketful out`;
-        }
-        candidates.push({ prompt, label, score: -0.5, kind: 'bail' });
-      }
-
-      if (player.carryingChestId && player.onShipId === ship.id) {
-        const stats = SHIP_STATS[ship.type];
-        const stowPoint = this.getShipWorldPoint(ship, 0, -stats.length * 0.22, stats.height + 0.7);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          stowPoint,
-          4.8,
-          0.16,
-          '[X] Stow Chest',
-          'Place chest on deck for the crew',
-          'stow_chest',
-        );
-      }
-
-      const nearbyStation = this.getNearbyUpgradeStation(player);
-      if (
-        nearbyStation
-        && nearbyStation.claimedByShipId !== ship.id
-        && !ship.upgrades.some((upgrade) => upgrade.type === nearbyStation.type)
-      ) {
-        const meta = this.getUpgradePresentation(nearbyStation.type);
-        // Materials honesty: show the recipe and whether the crew can pay it
-        // (pocket + ship hold combined — the server drains the same pool).
-        const cost = UPGRADE_COSTS[nearbyStation.type];
-        const woodHave = player.pocketWood + this.getInventoryQty(ship, 'wood_plank');
-        const oreHave = (player.pocketOre ?? 0) + this.getInventoryQty(ship, 'ore');
-        const needs: string[] = [];
-        if (woodHave < cost.wood) needs.push(`Need ${cost.wood - woodHave} more wood`);
-        if (oreHave < cost.ore) needs.push(`Need ${cost.ore - oreHave} more ore`);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          new THREE.Vector3(nearbyStation.position.x, nearbyStation.position.y + 0.9, nearbyStation.position.z),
-          4.4,
-          0.2,
-          `[X] Claim ${meta.name} — ${cost.wood} wood · ${cost.ore} ore`,
-          `${needs.length > 0 ? needs.join(' · ') : 'Materials ready'} · ${meta.effect}`,
-          'upgrade',
-        );
-      }
-
-      if (this.isNearHelm(player, ship)) {
-        const helmPoint = this.getShipWorldPoint(ship, 0, -SHIP_STATS[ship.type].length * 0.37, SHIP_STATS[ship.type].height + 0.95);
-        this.pushInteractionCandidate(candidates, player, helmPoint, 4.2, 0.2, '[X] Take Helm', 'A/D or arrows turn · W/S trims sails', 'helm');
-      }
-
-      if (this.isNearSailStation(player, ship)) {
-        const ropeStations = getSailRopeStationLocals(SHIP_STATS[ship.type]);
-        const localHere = this.toShipLocal(player, ship);
-        const sailControl = ropeStations.reduce((best, st) =>
-          Math.hypot(localHere.x - st.x, localHere.z - st.z) < Math.hypot(localHere.x - best.x, localHere.z - best.z) ? st : best);
-        const sailPoint = this.getShipWorldPoint(ship, sailControl.x, sailControl.z, SHIP_STATS[ship.type].height + 0.85);
-        const sailPct = Math.round(ship.sailHeight * 100);
-        const canvasTorn = ship.sailIntegrity < 0.995;
-        const sailPrompt = canvasTorn
-          ? `[X] Hold — Mend the Rigging (${Math.round(ship.sailIntegrity * 100)}%)`
-          : ship.sailHeight < 0.5
-            ? `[X] Hold — Drop the Sails (${sailPct}%)`
-            : `[X] Hold — Raise the Sails (${sailPct}%)`;
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          sailPoint,
-          4.2,
-          0.08,
-          sailPrompt,
-          canvasTorn ? 'Needs planks aboard · crewmates on the rope haul faster' : 'Crewmates on the rope haul faster',
-          'sails',
-        );
-      }
-
-      if (player.onShipId === ship.id && ship.sailIntegrity >= 0.995) {
-        // Brace rails — the physical station that ANGLES the yard. One
-        // candidate per side; the arbiter picks whichever you're looking at.
-        const stats = SHIP_STATS[ship.type];
-        const trimDeg = Math.round((ship.sailAngle * 180) / Math.PI);
-        for (const brace of getBraceStationLocals(stats)) {
-          const bracePoint = this.getShipWorldPoint(ship, brace.x, brace.z, stats.height + 0.7);
-          this.pushInteractionCandidate(
-            candidates,
-            player,
-            bracePoint,
-            4.0,
-            0.1,
-            `[X] Hold — Brace the Yard to ${brace.dir > 0 ? 'Starboard' : 'Port'} (${trimDeg > 0 ? '+' : ''}${trimDeg}°)`,
-            'Angle the sails to catch the wind',
-            'brace',
-          );
-        }
-      }
-
-      if (this.isNearCrowNestLadder(player, ship)) {
-        const stats = SHIP_STATS[ship.type];
-        const mastZ = getMainMastLocalZ(stats);
-        const ladderPoint = this.getShipWorldPoint(ship, 0, mastZ, stats.height + 1.15);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          ladderPoint,
-          3.2,
-          0.24,
-          '[X] Climb the Mast',
-          'Main mast ladder · W/S climbs to the crow\'s nest',
-          'crow',
-        );
-      }
-
-      if (this.isNearAnchor(player, ship)) {
-        const anchorLocal = this.getAnchorControlLocal(SHIP_STATS[ship.type]);
-        const anchorPoint = this.getShipWorldPoint(ship, anchorLocal.x, anchorLocal.z, SHIP_STATS[ship.type].height + 0.45);
-        const anchorProgress = Math.round((ship.anchorRaiseProgress ?? 0) * 100);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          anchorPoint,
-          4.4,
-          0.18,
-          ship.anchored ? `[X] Hold — Raise the Anchor (${anchorProgress}%)` : '[X] Drop the Anchor',
-          ship.anchored ? 'Man the capstan · crewmates speed the turn' : 'Stops the ship fast — you will have to crank it back up',
-          'anchor',
-        );
-      }
-
-      if (repairSection) {
-        const repairPoint = this.getRepairWorldPoint(ship, repairSection);
-        const plankCount = this.getRepairPlankCount(player, ship);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          repairPoint,
-          4.5,
-          0.52,
-          plankCount > 0
-            ? `[X] Repair ${repairSection[0].toUpperCase()}${repairSection.slice(1)}`
-            : `⚠ Damaged ${repairSection[0].toUpperCase()}${repairSection.slice(1)}`,
-          plankCount > 0
-            ? `${plankCount} plank${plankCount === 1 ? '' : 's'} ready`
-            : 'No planks ready',
-          'repair',
-        );
-      }
-
-      if (nearbyCannon !== null) {
-        const cannonLocal = this.getCannonDeckLocalPosition(SHIP_STATS[ship.type], nearbyCannon);
-        const cannonPoint = this.getShipWorldPoint(
-          ship,
-          cannonLocal.x,
-          cannonLocal.z,
-          SHIP_STATS[ship.type].height + 0.75,
-        );
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          cannonPoint,
-          4.8,
-          0.16,
-          '[X] Use Cannon',
-          `Broadside cannon ${nearbyCannon + 1} · [5/6/7] ammo`,
-          'cannon',
-        );
-      }
-
-      // Ammo chest (SoT): aft of the companionway — instant firearm top-up.
-      if (player.onShipId === ship.id && isNearAmmoCrate(player, ship)) {
-        const crateLocal = getAmmoCrateLocal(SHIP_STATS[ship.type]);
-        const cratePoint = this.getShipWorldPoint(ship, crateLocal.x, crateLocal.z, SHIP_STATS[ship.type].height + 0.5);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          cratePoint,
-          3.6,
-          0.2,
-          '[X] Ammo Chest — Refill Firearms',
-          'Tops up every gun and clears reloads',
-          'ammo',
-        );
-      }
-    }
-
-    // Tavern doors — a client-local toggle; the candidate rides the same
-    // arbiter so its prompt can never stack with another [X] prompt.
-    if (this.tavernDoors.length > 0) {
-      const doorPoint = new THREE.Vector3();
-      for (const door of this.tavernDoors) {
-        if (!door.node.parent) continue;
-        this.getTavernDoorWorldPoint(door, doorPoint);
-        this.pushInteractionCandidate(
-          candidates,
-          player,
-          doorPoint,
-          3.4,
-          0.2,
-          `[X] ${door.open ? 'Close' : 'Open'} Door`,
-          'Tavern',
-          'door',
-        );
-      }
-    }
-
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0] ?? null;
-  }
-
-  private pushInteractionCandidate(
-    candidates: Array<{ prompt: string; label: string; score: number; kind: ClientInteractKind }>,
-    player: Player,
-    point: THREE.Vector3,
-    maxDistance: number,
-    minDot: number,
-    prompt: string,
-    label: string,
-    kind: ClientInteractKind,
-  ) {
-    const eyePos = new THREE.Vector3(player.position.x, player.position.y + PLAYER.HEIGHT * 0.72, player.position.z);
-    const toPoint = point.clone().sub(eyePos);
-    const distance = toPoint.length();
-    if (distance > maxDistance) return;
-
-    const lookDir = this.getLookDirection(player);
-    const dot = toPoint.normalize().dot(lookDir);
-    if (dot < minDot) return;
-
-    candidates.push({ prompt, label, score: dot - distance * 0.035, kind });
-  }
-
   private getLookDirection(player: Player) {
     return new THREE.Vector3(
       Math.sin(player.rotation.x) * Math.cos(player.rotation.y),
@@ -5877,36 +5454,8 @@ export class Game {
     }
   }
 
-  private toShipLocal(player: Player, ship: Ship) {
-    return toShipLocalPoint(player.position, ship);
-  }
-
-  private isNearHelm(player: Player, ship: Ship) {
-    return isSharedNearHelm(player, ship);
-  }
-
-  private isNearSailStation(player: Player, ship: Ship) {
-    return isSharedNearSailStation(player, ship);
-  }
-
-  private isNearCrowNestLadder(player: Player, ship: Ship): boolean {
-    return isSharedNearCrowNestLadder(player, ship);
-  }
-
-  private isNearAnchor(player: Player, ship: Ship) {
-    return isSharedNearAnchor(player, ship);
-  }
-
-  private getAnchorControlLocal(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {
-    return getSharedAnchorControlLocal(stats);
-  }
-
-  private getSailControlLocal(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {
-    return getSharedSailControlLocal(stats);
-  }
-
   private findRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null {
-    const local = this.toShipLocal(player, ship);
+    const local = toShipLocalPoint(player.position, ship);
     const candidate: keyof Ship['hull'] =
       Math.abs(local.x) > Math.abs(local.z)
         ? (local.x >= 0 ? 'starboard' : 'port')
@@ -5916,33 +5465,6 @@ export class Game {
         ? Math.abs(local.z) > SHIP_STATS[ship.type].length * 0.34
         : Math.abs(local.x) > SHIP_STATS[ship.type].width * 0.38;
     return closeEnough && ship.hull[candidate] < 0.98 ? candidate : null;
-  }
-
-  private findNearbyCannonIndex(player: Player, ship: Ship): number | null {
-    return findSharedNearbyCannonIndex(player, ship);
-  }
-
-  private getCannonDeckLocalPosition(
-    stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS],
-    cannonIndex: number,
-  ): { x: number; z: number } {
-    return getSharedCannonDeckLocalPosition(stats, cannonIndex);
-  }
-
-  private bindInteractPromptClick() {
-    const el = this.ui.interactPrompt;
-    el.style.pointerEvents = 'auto';
-    el.style.cursor = 'pointer';
-    el.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.lastInteractKind = this.resolveCurrentInteractKind() ?? this.visibleInteractKind;
-      this.pendingInteractFromUi = true;
-      const t = el.textContent ?? '';
-      if (t.includes('Launch')) {
-        this.pendingLaunchFromUi = true;
-      }
-    });
   }
 
   private setupStormWeatherOverlay() {
