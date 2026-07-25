@@ -20,6 +20,15 @@ const EXEMPT = new Set(['shipwreck', 'dock_mid', 'dock_end']);
 // Blocking props whose GLB base is wide enough that a center-ish terrain
 // sample can miss a shore drop under one edge.
 const WIDE_RADIUS = 1.0;
+// A blocking capsule is sized to stop a PLAYER, not to describe the masonry.
+// The watchtower's stone drum is r 2.02 with its block courses reaching ~2.2
+// (scripts/blender/build_landmarks.py), inside a 2.9m capsule — so sampling the
+// capsule ring reads ground almost a metre outside anything the model touches,
+// and a tower bedded flush on its drum on a hillside reported a 1.1m "float".
+// Where the authored base skirt is narrower than the collider, audit THAT.
+const BASE_SKIRT_RADIUS = {
+  watchtower: 2.2,
+};
 
 const DIAG = Math.SQRT1_2;
 const RING = [
@@ -50,7 +59,7 @@ for (const island of islands) {
       kind = 'scene';
     } else {
       if (col.radius * prop.scale < WIDE_RADIUS && !prop.type.startsWith('boulder_')) continue;
-      footprint = col.radius * prop.scale;
+      footprint = (BASE_SKIRT_RADIUS[prop.type] ?? col.radius) * prop.scale;
       kind = prop.type.startsWith('boulder_') ? 'rock' : 'wide';
     }
     audited++;

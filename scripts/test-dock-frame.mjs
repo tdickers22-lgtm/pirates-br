@@ -143,11 +143,12 @@ expect('the fixed world has docks to check', docks.length >= 8, `${docks.length}
   expect('every berthed hull still reaches the dock (stern inside the dock span)', pastTip.length === 0,
     pastTip.map((r) => `${r.type} @ L=${r.dock.length.toFixed(1)}: along=${r.along.toFixed(1)}`).join('\n     '));
 
-  // Docks shorter than the hull cannot give 100% overlap without dredging the
-  // shallows (MapGenerator's job); what must hold is that a real stretch of the
-  // hull is abreast the deck at every dock.
-  const thinOverlap = placed.filter((r) => r.overlap < 0.2);
-  expect('at least 20% of every hull lies abreast the dock deck', thinOverlap.length === 0,
+  // MapGenerator now holds every pier to at least a galleon's length and dredges
+  // the mooring lane, so the berth planner never has to slide a hull off the end
+  // hunting for water. A berthed ship is boardable from the deck it is tied to,
+  // so the majority of every hull must lie abreast the planking.
+  const thinOverlap = placed.filter((r) => r.overlap < 0.6);
+  expect('at least 60% of every hull lies abreast the dock deck', thinOverlap.length === 0,
     thinOverlap.map((r) => `${r.type} @ L=${r.dock.length.toFixed(1)}: overlap=${(r.overlap * 100).toFixed(0)}%`).join('\n     '));
 
   const farOut = placed.filter((r) => r.along > r.dock.length * 0.5 + 14 || r.along < -r.dock.length * 0.5);

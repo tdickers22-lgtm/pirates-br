@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   GameState, HullSections, InteractIntent, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
-import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
+import { BERTH, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
@@ -201,16 +201,13 @@ const ONE_SHOT_MIN_INTERVAL: Partial<Record<OneShotAction, number>> = {
 const DOCK_LADDER_LOCAL_Z_FRAC = 0.44;
 /** How close (metres, dock-local XZ) a swimmer must be to the ladder to climb. */
 const DOCK_CLIMB_REACH = 4.2;
-/** Gap between a berthed hull's side and the dock edge (metres). */
-const BERTH_RAIL_GAP = 1.0;
-/** How far inside the dock's seaward tip a berthed bow sits. */
-const BERTH_BOW_INSET = 0.6;
-/** Extra water under a berthed keel beyond the grounding threshold (wave bob). */
-const BERTH_BOB_MARGIN = 0.25;
-/** How far along the dock axis a berth may shift from the canonical anchor. */
-const BERTH_SEARCH_REACH = 14;
-/** Best-effort berths (reef-mouth docks) must at least keep the hull in water. */
-const BERTH_MIN_WATER = 0.4;
+// Berthing geometry is SHARED with the map generator's mooring-lane dredge —
+// the planner must look for water exactly where the generator dug it.
+const BERTH_RAIL_GAP = BERTH.RAIL_GAP;
+const BERTH_BOW_INSET = BERTH.BOW_INSET;
+const BERTH_BOB_MARGIN = BERTH.BOB_MARGIN;
+const BERTH_SEARCH_REACH = BERTH.SEARCH_REACH;
+const BERTH_MIN_WATER = BERTH.MIN_WATER;
 
 /** Candidate along-dock offsets from the canonical bow-at-the-tip anchor, nearest
  *  first: 0, +0.75, −0.75, +1.5, … Seaward wins ties. A dock whose seaward end

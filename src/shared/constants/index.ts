@@ -209,6 +209,30 @@ export const SHIP = {
   SAIL_REPAIR_HOIST_FACTOR: 0.55,
 } as const;
 
+// ── Berthing ─────────────────────────────────────────────────────────────────
+// One description of where a hull lies when it is tied up, shared by the two
+// halves that have to agree about it: MapGenerator, which dredges the mooring
+// lane while it lays a dock out, and Match.computeShipBerth, which parks the
+// hull. When these drifted apart, the planner slid a galleon 13m past the tip
+// of a short pier looking for water the generator had never dug.
+export const BERTH = {
+  /** Gap between a berthed hull's side and the dock edge (metres). */
+  RAIL_GAP: 1.0,
+  /** How far inside the dock's seaward tip a berthed bow sits. */
+  BOW_INSET: 0.6,
+  /** Extra water under a berthed keel beyond the grounding threshold (wave bob). */
+  BOB_MARGIN: 0.25,
+  /** How far along the dock axis a berth may shift from the canonical anchor. */
+  SEARCH_REACH: 14,
+  /** Best-effort berths (reef-mouth docks) must at least keep the hull in water. */
+  MIN_WATER: 0.4,
+  /** No pier is shorter than the biggest hull plus a bow inset at each end —
+   *  below that even a perfect berth leaves a galleon hanging off the end. */
+  MIN_DOCK_LENGTH: SHIP_STATS.galleon.length + 4,
+  /** Extra water the dredger digs beyond what the deepest keel needs. */
+  DREDGE_HEADROOM: 0.9,
+} as const;
+
 // ── Flooding / bailing (SoT-style, PURELY hole-based naval damage loop) ──
 // There is no hull-HP pool and no per-section bucket. Each cannonball (keg
 // blast, ram, rock, grounding, storm sea, fire burn-through) punches a discrete

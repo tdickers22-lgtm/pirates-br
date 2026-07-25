@@ -5,7 +5,7 @@ import type {
   IslandProfile, IslandProp, IslandPropType, IslandTavern, ItemType,
   TreasureChest, UpgradeStation, ShipUpgradeType, Vec3, Ship, WildlifeAnimal, WildlifeType, SeaRock,
 } from '../../shared/types/index.js';
-import { WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS } from '../../shared/constants/index.js';
+import { BERTH, SHIP, WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS } from '../../shared/constants/index.js';
 import {
   angleWrap,
   directionToYaw,
@@ -340,6 +340,10 @@ export class MapGenerator {
       island.upgradeStations = this.generateUpgradeStations(island, islandRng);
       const camps = this.planCamps(island, islandRng);
       const landmarks = this.planLandmarks(island, entry, islandRng);
+      // Dredge last of the terrain edits, first of the content: the mooring lane
+      // must survive the tavern pad and the landmark flattens, and everything
+      // scattered afterwards must see the dredged seabed.
+      this.dredgeMooringLane(island);
       island.chests = this.generateChests(island, islandRng);
       island.barrels = this.generateBarrels(island, islandRng);
       island.npcs = this.generateStoryNpcs(island, islands.length, islandRng);
@@ -871,7 +875,10 @@ export class MapGenerator {
 
     const shoreAngle = best.angle;
     const rotation = directionToYaw(Math.cos(shoreAngle), Math.sin(shoreAngle));
-    const length = rr(rng, Math.max(14, island.radius * 0.3), Math.max(20, island.radius * 0.52));
+    // Draw first (the rng ladder must stay bit-identical), then hold the run to
+    // a length a galleon can actually lie alongside: Rumrunner Key's 15.8m pier
+    // berthed every class mostly PAST its tip.
+    const length = Math.max(rr(rng, Math.max(14, island.radius * 0.3), Math.max(20, island.radius * 0.52)), BERTH.MIN_DOCK_LENGTH);
     const width = rr(rng, 3.6, 5.6);
     const moorSide = (rng() < 0.5 ? -1 : 1) as -1 | 1;
     // Anchor at the outermost dry point along the shore ray (the waterline
@@ -928,6 +935,69 @@ export class MapGenerator {
       })(),
       berthRotation: rotation,
     };
+  }
+
+  /**
+   * Dig the mooring lane so a hull can lie ALONGSIDE the pier.
+   *
+   * Match.computeShipBerth anchors a berth with the bow just inside the seaward
+   * tip and then slides it along the dock hunting for water deep enough to float
+   * the keel. On a shallow shelf that hunt is the whole problem: it would push a
+   * galleon 13m past a short pier (Rumrunner Key berthed all three classes at
+   * ~25% alongside) rather than admit there was no water at the berth. A real
+   * harbour answers that with a dredger, so the generator does too.
+   *
+   * Only shallow stations get a stamp — a dock already standing in deep water
+   * (Booty Bay, Castaway Reach) is left bit-identical. Consumes no rng, and runs
+   * AFTER the structure stamps (tavern pad, landmark flattens) so nothing fills
+   * the channel back in behind the dredger.
+   */
+  private dredgeMooringLane(island: Island) {
+    const dock = island.dock;
+    if (!dock) return;
+    const { position: center, length, width, moorSide } = dock;
+    const forward = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
+    const right = { x: Math.cos(dock.rotation), z: -Math.sin(dock.rotation) };
+    // Dredge for the DEEPEST keel that can tie up here; smaller hulls float in
+    // the same lane. Same depth arithmetic as the berth planner.
+    const stats = SHIP_STATS.galleon;
+    const need = -(stats.height * SHIP.HULL_DRAFT_F.galleon + SHIP.GROUND_KEEL_SAFETY + BERTH.BOB_MARGIN);
+    const targetY = need - BERTH.DREDGE_HEADROOM;
+    const lateral = width * 0.5 + stats.width * 0.5 + BERTH.RAIL_GAP;
+    // Wide enough to swallow the three centreline stations the berth planner and
+    // grounding both sample, but held off the pier itself: a disc that reached
+    // under the walkway sank its lantern posts to the waterline.
+    const radius = lateral - width * 0.5 - 1.8;
+    // The lane must reach the AFTMOST point the planner samples — a galleon's
+    // stern station at the canonical anchor — or the hunt still slides seaward
+    // off a shallow patch nobody dug. Held clear of the shore end so the dredge
+    // can never bite a notch out of the beach the walkway lands on.
+    const anchor = Math.max(0, length * 0.5 - stats.length * 0.5 - BERTH.BOW_INSET);
+    const start = Math.max(-length * 0.34, anchor - stats.length * 0.44 - 0.8);
+    for (let along = start; along <= length * 0.5 + 2.5; along += 3.2) {
+      const x = center.x + forward.x * along + right.x * moorSide * lateral;
+      const z = center.z + forward.z * along + right.z * moorSide * lateral;
+      if (getIslandSurfaceY(island, x, z) <= targetY) continue;
+      const blend = 0.55;
+      island.stamps!.push({ x, z, radius, targetY, blend });
+      // Close inshore the island's own floor sits ABOVE the target depth, so the
+      // cut cannot be made there at all. Take the stamp back out rather than
+      // leave one in the list that flattens to a height nothing reaches — a
+      // stamp that doesn't hold its own disc is a lie about the terrain.
+      if (!this.stampHolds(island, x, z, radius, blend, targetY)) island.stamps!.pop();
+    }
+  }
+
+  /** Does a stamp actually flatten its inner disc to targetY? (The island floor
+   *  clamp in getIslandSurfaceY can refuse a cut this deep.) */
+  private stampHolds(island: Island, x: number, z: number, radius: number, blend: number, targetY: number): boolean {
+    const inner = radius * (1 - Math.min(0.95, Math.max(0.05, blend))) * 0.8;
+    if (Math.abs(getIslandSurfaceY(island, x, z) - targetY) > 0.05) return false;
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      if (Math.abs(getIslandSurfaceY(island, x + Math.cos(a) * inner, z + Math.sin(a) * inner) - targetY) > 0.05) return false;
+    }
+    return true;
   }
 
   private generateTavern(island: Island, rng: Rng): IslandTavern | null {
