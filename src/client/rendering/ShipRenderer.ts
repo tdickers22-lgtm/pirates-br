@@ -3653,8 +3653,10 @@ export class ShipRenderer {
     group.position.copy(point);
     const quat = new THREE.Quaternion().setFromUnitVectors(HULL_Z_AXIS, normal);
 
+    // NO dark opening disc on the outer face: the hull shader DISCARDS the
+    // planking inside this radius, so the breach is a genuine see-through hole
+    // and a filled disc would just paint over it. Only the torn rim + splinters.
     const decal = new THREE.Group();
-    decal.add(new THREE.Mesh(geo.opening, this.holeMat));
     decal.add(new THREE.Mesh(geo.rim, this.holeRimMat));
     if (geo.shards) decal.add(new THREE.Mesh(geo.shards, this.splinterMat));
     decal.quaternion.copy(quat);
@@ -3684,6 +3686,8 @@ export class ShipRenderer {
         stats.height + 0.17,
         THREE.MathUtils.clamp(point.z, -stats.length * 0.36, stats.length * 0.36),
       );
+      // The inboard bulwark face has no discard shader, so THIS one does carry
+      // a dark opening disc to read as torn-through planking from on deck.
       const innerFace = new THREE.Group();
       innerFace.add(new THREE.Mesh(geo.opening, this.holeMat));
       innerFace.add(new THREE.Mesh(geo.rim, this.holeRimMat));
