@@ -672,7 +672,7 @@ export class ViewmodelController {
   }
 
   syncHeldWeapon(mesh: THREE.Group, player: Player) {
-    const rightHand = mesh.getObjectByName('right-hand');
+    const rightHand = (mesh.userData.animation?.parts as Record<string, THREE.Object3D | undefined> | undefined)?.rightHand;
     if (!rightHand) return;
 
     const activeWeapon = player.atCannon || player.atHelm ? null : player.weapons[player.activeSlot];

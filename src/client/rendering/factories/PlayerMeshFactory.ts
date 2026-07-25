@@ -441,6 +441,7 @@ export function makePlayerMesh(
       head,
       hair,
       bandana,
+      rightHand,
     },
   };
   group.userData.healthBar = {

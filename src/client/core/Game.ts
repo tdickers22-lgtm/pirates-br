@@ -2455,11 +2455,11 @@ export class Game {
         proxyRoot.visible = !showDetail;
         // Micro decor (shells, rubble, clutter) only reads up close — culling
         // it past ~260m cuts hundreds of draw calls per distant island.
-        const microRoot = detailRoot.getObjectByName('island-micro-root');
+        const microRoot = group.userData.microRoot as THREE.Object3D | undefined;
         if (microRoot) microRoot.visible = showDetail && edgeDist < (quality === 'low' ? 180 : 260);
-        for (const layerName of ['island-grass', 'island-ferns', 'island-shells'] as const) {
-          const layer = detailRoot.getObjectByName(layerName);
-          if (layer) layer.visible = showDetail && edgeDist < (layerName === 'island-shells' ? 200 : 300);
+        const lodLayers = group.userData.lodLayers as { node: THREE.Object3D; radius: number }[] | undefined;
+        if (lodLayers) {
+          for (const layer of lodLayers) layer.node.visible = showDetail && edgeDist < layer.radius;
         }
         // Cave INTERIOR decor + lights (torch, crystals, stalactites, treasure)
         // reveal within ~45m so the warm glow greets you at the mouth and the
@@ -3017,7 +3017,9 @@ export class Game {
         );
         // Floating username over every OPPONENT's head (not yourself).
         if (player.id !== this.localPlayerId) {
-          mesh.add(makeNameplateSprite(player.name));
+          const nameplate = makeNameplateSprite(player.name);
+          mesh.userData.nameplate = nameplate;
+          mesh.add(nameplate);
         }
         this.playerMeshes.set(player.id, mesh);
         this.renderer.scene.add(mesh);
@@ -3027,7 +3029,7 @@ export class Game {
 
       const isLocal = player.id === this.localPlayerId;
       // Nameplate: shown for living opponents within ~85m, hidden when downed/gone.
-      const plate = mesh.getObjectByName('nameplate');
+      const plate = mesh.userData.nameplate as THREE.Sprite | undefined;
       if (plate) {
         const ndist = dist2D(this.renderer.camera.position.x, this.renderer.camera.position.z, player.position.x, player.position.z);
         plate.visible = !isLocal && player.state === 'alive' && ndist < 85;
@@ -3196,10 +3198,10 @@ export class Game {
         }
       }
 
-      const head = mesh.getObjectByName('head');
-      const hair = mesh.getObjectByName('hair');
-      const bandana = mesh.getObjectByName('bandana');
       const animParts = (mesh.userData.animation?.parts ?? {}) as Record<string, THREE.Object3D | undefined>;
+      const head = animParts.head;
+      const hair = animParts.hair;
+      const bandana = animParts.bandana;
       const torso = animParts.torso;
       const shirt = animParts.shirt;
       const coatSkirt = animParts.coatSkirt ?? animParts['coat-skirt'];
@@ -3278,7 +3280,7 @@ export class Game {
     // A corpse carries no floating UI.
     const healthBar = mesh.userData.healthBar as { root: THREE.Group } | undefined;
     if (healthBar) healthBar.root.visible = false;
-    const plate = mesh.getObjectByName('nameplate');
+    const plate = mesh.userData.nameplate as THREE.Sprite | undefined;
     if (plate) plate.visible = false;
     this.dropHeldWeapon(mesh, corpse);
     if (isLocal) {
@@ -3331,7 +3333,7 @@ export class Game {
   private dropHeldWeapon(mesh: THREE.Group, corpse: CorpseState) {
     if (corpse.weaponDropped) return;
     corpse.weaponDropped = true;
-    const hand = mesh.getObjectByName('right-hand');
+    const hand = (mesh.userData.animation?.parts as Record<string, THREE.Object3D | undefined> | undefined)?.rightHand;
     const weapon = hand?.getObjectByName('held-weapon') as THREE.Group | null;
     if (!weapon) return;
     weapon.getWorldPosition(this.tempRenderPos);

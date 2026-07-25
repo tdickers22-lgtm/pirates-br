@@ -4213,6 +4213,17 @@ export class IslandBuilder {
       group.add(proxyRoot);
       group.userData.detailRoot = detailRoot;
       group.userData.proxyRoot = proxyRoot;
+      group.userData.microRoot = microRoot;
+      // Resolve the distance-gated foliage layers ONCE. updateEnvironmentLod runs
+      // every frame for every island; looking these up by name there meant four
+      // recursive scene-graph walks per island per frame.
+      group.userData.lodLayers = (['island-grass', 'island-ferns', 'island-shells'] as const)
+        .map((name) => ({
+          node: detailRoot.getObjectByName(name) ?? null,
+          // Shells are ankle-height flecks — they stop reading first.
+          radius: name === 'island-shells' ? 200 : 300,
+        }))
+        .filter((layer): layer is { node: THREE.Object3D; radius: number } => layer.node !== null);
     }
 
     this.ctx.environment.add(group);

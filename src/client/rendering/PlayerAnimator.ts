@@ -176,7 +176,7 @@ export class PlayerAnimator {
     if (player.id !== this.view.localPlayerId) {
       const prevSwing = (mesh.userData.prevCutlassSwing as number | undefined) ?? 0;
       if (cutlassSwing > 0.001 && prevSwing <= 0.001) {
-        const hand = mesh.getObjectByName('right-hand');
+        const hand = parts.rightHand;
         if (hand) {
           hand.getWorldPosition(this.view.tempSlashPos);
           this.view.spawnRemoteSlashArc(this.view.tempSlashPos);
