@@ -129,5 +129,4 @@ export type IslandBuildCtx = {
 
   readonly buildPropInstance: (type: AssetName, position: THREE.Vector3, yaw: number, scale?: number) => THREE.Group | null;
   readonly applyFoliageSway: (material: THREE.Material | THREE.Material[]) => void;
-  readonly blendStoryPad: (mesh: THREE.Mesh, island: Island) => void;
 };
