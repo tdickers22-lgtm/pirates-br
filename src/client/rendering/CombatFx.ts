@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
+import { getSharedSoundEngine, type GunshotKind, type SoundEngine } from '../audio/SoundEngine.js';
 
 // Fallback sea surface height; Game feeds the live Gerstner surface via
 // setWaterSurfaceY each frame so splash-vs-hull classification tracks swells
@@ -849,9 +850,6 @@ export class CombatFx {
   private debris: DebrisPool | null = null;
   private fragments: FragmentPool | null = null;
   private lights: LightPool | null = null;
-  private audioContext: AudioContext | null = null;
-  private masterGain: GainNode | null = null;
-  private noiseBuffer: AudioBuffer | null = null;
 
   init(scene: THREE.Scene) {
     if (!this.smoke) {
@@ -869,20 +867,19 @@ export class CombatFx {
     scene.add(this.root);
   }
 
+  /**
+   * Combat audio has no context of its own: every shot, impact, splash and
+   * explosion is synthesized by the shared SoundEngine, so the volume slider,
+   * the mute toggle, the master compressor, ducking and reverb all apply. This
+   * only wakes that engine's context on the first user gesture.
+   */
   unlockAudio() {
-    if (!this.audioContext) {
-      const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) return;
-      this.audioContext = new AudioCtx();
-      this.masterGain = this.audioContext.createGain();
-      this.masterGain.gain.value = 0.22;
-      this.masterGain.connect(this.audioContext.destination);
-      this.noiseBuffer = this.createNoiseBuffer(this.audioContext);
-    }
+    getSharedSoundEngine()?.unlock();
+  }
 
-    if (this.audioContext.state === 'suspended') {
-      void this.audioContext.resume();
-    }
+  /** The one engine Game constructed; null before that (audio then no-ops). */
+  private get audio(): SoundEngine | null {
+    return getSharedSoundEngine();
   }
 
   update(dt: number) {
@@ -910,6 +907,7 @@ export class CombatFx {
     if (!(isLocalSource && projectile.type === 'bullet')) {
       this.playShotSound(projectile.type, projectile.position, cameraPos, isLocalSource, projectile.weaponId);
     }
+    if (!isLocalSource) this.maybeWhistle(projectile, cameraPos);
     if (!this.flame || !this.smoke || !this.sparks || !this.droplets || !this.lights) return;
 
     const position = projectile.position;
@@ -1297,14 +1295,7 @@ export class CombatFx {
   }
 
   private playSharkDeathSound(position: Vec3, cameraPos: THREE.Vector3) {
-    const volume = this.getSpatialVolume(position, cameraPos, 1, 200);
-    if (volume <= 0.01) return;
-    this.unlockAudio();
-    const ctx = this.audioContext;
-    if (!ctx) return;
-    const now = ctx.currentTime;
-    this.playNoise(now, 0.35, 420, 0.55, volume * 0.55, 'lowpass');
-    this.playTone(now + 0.02, 95, 220, 0.4, volume * 0.35, 'sawtooth');
+    this.audio?.playSharkDeath(this.distanceTo(position, cameraPos), position);
   }
 
   emitKegExplosion(position: Vec3, cameraPos: THREE.Vector3) {
@@ -1404,199 +1395,116 @@ export class CombatFx {
     }
   }
 
+  /**
+   * All shot audio routes to the shared engine. Local shots pass distance 0 so
+   * your own weapon keeps its on-top-of-you punch; everything else rolls off on
+   * the engine's single distance model. Cannons stay audible out to 600m — past
+   * 140m the engine turns them into delayed over-the-horizon thumps, which is
+   * exactly the "battle somewhere out there" cue a BR needs.
+   */
   private playShotSound(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3, isLocalSource: boolean, weaponId?: WeaponId) {
+    const audio = this.audio;
+    if (!audio) return;
     const bulletRange = weaponId === 'eye_of_reach' ? 320 : weaponId === 'blunderbuss' ? 150 : 130;
-    const volume = this.getSpatialVolume(position, cameraPos, isLocalSource ? 1.4 : 1, type === 'tsunami' ? 420 : type === 'cannonball' ? 240 : bulletRange);
-    if (volume <= 0.01) return;
-    this.unlockAudio();
-    const ctx = this.audioContext;
-    const master = this.masterGain;
-    if (!ctx || !master) return;
-
-    const now = ctx.currentTime;
-    if (type === 'cannonball') {
-      this.playNoise(now, 0.38, 180, 0.7, volume * 1.15, 'lowpass');
-      this.playTone(now, 82, 38, 0.34, volume * 0.9, 'triangle');
-      this.playTone(now + 0.02, 180, 110, 0.12, volume * 0.25, 'square');
-    } else if (type === 'firebomb') {
-      this.playNoise(now, 0.2, 1200, 1.2, volume * 0.8, 'bandpass');
-      this.playTone(now, 180, 90, 0.18, volume * 0.45, 'sawtooth');
-    } else if (type === 'chainshot') {
-      this.playNoise(now, 0.16, 900, 0.9, volume * 0.6, 'bandpass');
-      this.playTone(now, 210, 120, 0.16, volume * 0.38, 'square');
-    } else if (type === 'tsunami') {
-      this.playNoise(now, 0.55, 240, 0.95, volume * 0.9, 'lowpass');
-      this.playTone(now, 70, 46, 0.46, volume * 0.58, 'sawtooth');
-    } else if (weaponId === 'eye_of_reach') {
-      // Long rifle crack: a hard bright muzzle SNAP, a punchy body thump, and a
-      // low rolling echo tail so the sniper reads as a heavy report, not a pop.
-      this.playNoise(now, 0.05, 6200, 1.6, volume * 1.15, 'highpass');
-      this.playTone(now, 1320, 560, 0.08, volume * 0.42, 'square');
-      this.playTone(now + 0.008, 150, 60, 0.16, volume * 0.5, 'triangle');
-      this.playTone(now + 0.014, 78, 48, 0.4, volume * 0.5, 'triangle');
-      this.playNoise(now + 0.07, 0.5, 300, 0.78, volume * 0.4, 'lowpass');
-      this.playTone(now + 0.16, 240, 130, 0.26, volume * 0.14, 'sine');
-    } else if (weaponId === 'blunderbuss') {
-      this.playNoise(now, 0.11, 2800, 1.1, volume * 0.72, 'bandpass');
-      this.playNoise(now + 0.025, 0.22, 430, 0.7, volume * 0.55, 'lowpass');
-      this.playTone(now, 180, 88, 0.18, volume * 0.34, 'triangle');
-    } else if (weaponId === 'flintknock') {
-      this.playNoise(now, 0.08, 3600, 1.1, volume * 0.68, 'bandpass');
-      this.playTone(now, 340, 120, 0.13, volume * 0.3, 'square');
-      this.playNoise(now + 0.06, 0.18, 260, 0.75, volume * 0.28, 'lowpass');
-    } else {
-      this.playNoise(now, 0.12, 1500, 0.8, volume * 0.55, 'bandpass');
-      this.playTone(now, 280, 120, 0.1, volume * 0.25, 'triangle');
+    const range = type === 'tsunami' ? 420 : type === 'cannonball' ? 600 : bulletRange;
+    const distance = this.distanceTo(position, cameraPos);
+    if (distance > range) return;
+    const d = isLocalSource ? 0 : distance;
+    switch (type) {
+      case 'cannonball':
+        audio.playCannonFire(d, position);
+        break;
+      case 'firebomb':
+        audio.playProjectileLaunch('firebomb', d, position);
+        break;
+      case 'chainshot':
+        audio.playProjectileLaunch('chainshot', d, position);
+        break;
+      case 'tsunami':
+        audio.playProjectileLaunch('tsunami', d, position);
+        break;
+      default:
+        audio.playGunshot(gunshotKind(weaponId), d, position);
+        break;
     }
   }
 
-  private playImpactSound(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3) {
-    const volume = this.getSpatialVolume(position, cameraPos, 1, type === 'cannonball' ? 220 : 120);
-    if (volume <= 0.01) return;
-    this.unlockAudio();
-    const ctx = this.audioContext;
-    if (!ctx) return;
+  /**
+   * A cannonball that will pass close by gets an air whistle timed to its
+   * closest approach — the "that one nearly had us" cue. Own shots and balls
+   * that never come near are silent.
+   */
+  private maybeWhistle(projectile: Projectile, cameraPos: THREE.Vector3) {
+    const audio = this.audio;
+    if (!audio || projectile.type !== 'cannonball') return;
+    const velocity = projectile.velocity;
+    const speedSq = velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z;
+    if (speedSq < 1) return;
+    const dx = cameraPos.x - projectile.position.x;
+    const dy = cameraPos.y - projectile.position.y;
+    const dz = cameraPos.z - projectile.position.z;
+    // Time of closest approach along the (locally straight) flight path.
+    const t = (dx * velocity.x + dy * velocity.y + dz * velocity.z) / speedSq;
+    if (t < 0.2 || t > 4) return;
+    const missX = dx - velocity.x * t;
+    const missY = dy - velocity.y * t;
+    const missZ = dz - velocity.z * t;
+    const miss = Math.sqrt(missX * missX + missY * missY + missZ * missZ);
+    if (miss > 18) return;
+    audio.playCannonballWhistle(miss, {
+      x: projectile.position.x + velocity.x * t,
+      y: projectile.position.y + velocity.y * t,
+      z: projectile.position.z + velocity.z * t,
+    }, Math.max(0, t - 0.35));
+  }
 
-    const now = ctx.currentTime;
-    if (type === 'cannonball') {
-      this.playNoise(now, 0.22, 240, 1.1, volume * 0.72, 'lowpass');
-      this.playTone(now, 70, 42, 0.22, volume * 0.42, 'triangle');
-    } else if (type === 'firebomb') {
-      this.playNoise(now, 0.2, 950, 1.2, volume * 0.6, 'bandpass');
-      this.playTone(now, 150, 70, 0.18, volume * 0.28, 'sawtooth');
-    } else {
-      this.playNoise(now, 0.1, 850, 0.85, volume * 0.28, 'bandpass');
-    }
+  private playImpactSound(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3) {
+    const audio = this.audio;
+    if (!audio) return;
+    const distance = this.distanceTo(position, cameraPos);
+    if (distance > (type === 'cannonball' ? 220 : 120)) return;
+    audio.playProjectileImpact(
+      type === 'cannonball' || type === 'tsunami' ? 'cannonball' : type === 'firebomb' ? 'firebomb' : 'bullet',
+      distance,
+      position,
+    );
   }
 
   /** Water-miss splash: bright slap, low whoomp, and a short foam hiss. */
   private playSplashSound(type: ProjectileType, position: Vec3, cameraPos: THREE.Vector3) {
-    const volume = this.getSpatialVolume(position, cameraPos, 1, type === 'cannonball' || type === 'tsunami' ? 200 : 110);
-    if (volume <= 0.01) return;
-    this.unlockAudio();
-    const ctx = this.audioContext;
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    const scale = type === 'bullet' ? 0.55 : 1;
-    this.playNoise(now, 0.14, 1700, 0.9, volume * 0.5 * scale, 'bandpass');
-    this.playNoise(now + 0.04, 0.38, 520, 0.6, volume * 0.55 * scale, 'lowpass');
-    this.playTone(now + 0.01, 130, 58, 0.2, volume * 0.22 * scale, 'sine');
-    this.playNoise(now + 0.16, 0.28, 2600, 0.7, volume * 0.16 * scale, 'highpass');
+    const audio = this.audio;
+    if (!audio) return;
+    const distance = this.distanceTo(position, cameraPos);
+    if (distance > (type === 'cannonball' || type === 'tsunami' ? 200 : 110)) return;
+    audio.playSplash(type === 'bullet' ? 0.5 : 1.2, distance, position);
   }
 
   private playRespawnSound(position: Vec3, cameraPos: THREE.Vector3) {
-    const volume = this.getSpatialVolume(position, cameraPos, 1.2, 220);
-    if (volume <= 0.01) return;
-    this.unlockAudio();
-    const ctx = this.audioContext;
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    this.playTone(now, 240, 360, 0.18, volume * 0.22, 'sine');
-    this.playTone(now + 0.06, 360, 520, 0.24, volume * 0.18, 'sine');
-    this.playNoise(now, 0.16, 1400, 1.1, volume * 0.12, 'bandpass');
+    this.audio?.playRespawnBeacon(this.distanceTo(position, cameraPos), position);
   }
 
   private playKegExplosionSound(position: Vec3, cameraPos: THREE.Vector3) {
-    const volume = this.getSpatialVolume(position, cameraPos, 1.4, 260);
-    if (volume <= 0.01) return;
-    this.unlockAudio();
-    const ctx = this.audioContext;
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    this.playNoise(now, 0.36, 180, 0.68, volume * 1.25, 'lowpass');
-    this.playNoise(now + 0.03, 0.22, 980, 1.15, volume * 0.5, 'bandpass');
-    this.playTone(now, 62, 34, 0.28, volume * 0.52, 'triangle');
-    this.playTone(now + 0.02, 180, 92, 0.18, volume * 0.18, 'sawtooth');
+    this.audio?.playKegExplosion(this.distanceTo(position, cameraPos), position);
   }
 
   private playShipHitConfirmSound(position: Vec3, cameraPos: THREE.Vector3) {
-    const spatial = this.getSpatialVolume(position, cameraPos, 1.1, 260);
-    const volume = Math.max(0.18, spatial * 0.95);
-    this.unlockAudio();
-    const ctx = this.audioContext;
-    if (!ctx) return;
-
-    const now = ctx.currentTime;
-    this.playNoise(now, 0.09, 720, 1.1, volume * 0.12, 'bandpass');
-    this.playTone(now, 246, 294, 0.11, volume * 0.16, 'sine');
-    this.playTone(now + 0.035, 369, 440, 0.16, volume * 0.2, 'triangle');
-    this.playTone(now + 0.075, 440, 392, 0.12, volume * 0.12, 'triangle');
+    this.audio?.playShipHitConfirm(this.distanceTo(position, cameraPos));
   }
 
-  private playTone(
-    when: number,
-    fromFreq: number,
-    toFreq: number,
-    duration: number,
-    volume: number,
-    type: OscillatorType,
-  ) {
-    const ctx = this.audioContext;
-    const master = this.masterGain;
-    if (!ctx || !master) return;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = type;
-    osc.frequency.setValueAtTime(fromFreq, when);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(20, toFreq), when + duration);
-    gain.gain.setValueAtTime(Math.max(0.0001, volume), when);
-    gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
-    osc.connect(gain);
-    gain.connect(master);
-    osc.start(when);
-    osc.stop(when + duration);
-  }
-
-  private playNoise(
-    when: number,
-    duration: number,
-    frequency: number,
-    q: number,
-    volume: number,
-    filterType: BiquadFilterType,
-  ) {
-    const ctx = this.audioContext;
-    const master = this.masterGain;
-    const noiseBuffer = this.noiseBuffer;
-    if (!ctx || !master || !noiseBuffer) return;
-    const source = ctx.createBufferSource();
-    source.buffer = noiseBuffer;
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = filterType;
-    filter.frequency.setValueAtTime(frequency, when);
-    filter.Q.value = q;
-
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(Math.max(0.0001, volume), when);
-    gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
-
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(master);
-    source.start(when);
-    source.stop(when + duration);
-  }
-
-  private getSpatialVolume(position: Vec3, cameraPos: THREE.Vector3, boost: number, maxDistance: number) {
+  private distanceTo(position: Vec3, cameraPos: THREE.Vector3) {
     const dx = position.x - cameraPos.x;
     const dy = position.y - cameraPos.y;
     const dz = position.z - cameraPos.z;
-    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    const normalized = 1 - THREE.MathUtils.clamp(distance / maxDistance, 0, 1);
-    return normalized * normalized * boost;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
+}
 
-  private createNoiseBuffer(ctx: AudioContext) {
-    const length = Math.floor(ctx.sampleRate * 0.8);
-    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let index = 0; index < length; index++) {
-      data[index] = (Math.random() * 2 - 1) * (1 - index / length * 0.1);
-    }
-    return buffer;
+/** Map a weapon to the black-powder family the engine synthesizes. */
+function gunshotKind(weaponId?: WeaponId): GunshotKind {
+  switch (weaponId) {
+    case 'eye_of_reach': return 'longRifle';
+    case 'blunderbuss': return 'blunderbuss';
+    case 'flintknock': return 'flintknock';
+    default: return 'flintlock';
   }
 }
