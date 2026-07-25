@@ -15,77 +15,12 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())
 
-RENDER_DIR = os.environ.get(
-    "BR_RENDER_DIR",
-    "/private/tmp/claude-501/-Users-tobiasdicker/41616ba1-624a-493b-a065-3ec5830f1dbe/scratchpad/renders/s-monuments/round1")
-
-EXTRA = {
-    "Bone":        ((0.82, 0.78, 0.68, 1.0), 0.9, 0.0),
-    "Bone_Shadow": ((0.46, 0.43, 0.36, 1.0), 0.82, 0.0),
-}
-for _n, _v in EXTRA.items():
-    PALETTE.setdefault(_n, _v)
+RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
+EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
 
 rng = random.Random(42)
-
-
-# ── small transform helpers ──────────────────────────────────
-def T(x, y, z):
-    return Matrix.Translation((x, y, z))
-
-
-def RX(a):
-    return Matrix.Rotation(a, 4, 'X')
-
-
-def RY(a):
-    return Matrix.Rotation(a, 4, 'Y')
-
-
-def RZ(a):
-    return Matrix.Rotation(a, 4, 'Z')
-
-
-def xform(bm, m):
-    bmesh.ops.transform(bm, matrix=m, verts=bm.verts)
-    return bm
-
-
-def bm_bevel(bm, width=0.02):
-    bmesh.ops.bevel(bm, geom=list(bm.edges), offset=width, offset_type='OFFSET',
-                    segments=1, profile=0.72, affect='EDGES', clamp_overlap=True)
-    return bm
-
-
-def bm_torus(R, r, segs=12, ring=6):
-    bm = bmesh.new()
-    rings = []
-    for i in range(segs):
-        a = i / segs * math.tau
-        c = Vector((math.cos(a) * R, math.sin(a) * R, 0))
-        rv = []
-        for j in range(ring):
-            b = j / ring * math.tau
-            rad = Vector((math.cos(a) * math.cos(b) * r,
-                          math.sin(a) * math.cos(b) * r,
-                          math.sin(b) * r))
-            rv.append(bm.verts.new(c + rad))
-        rings.append(rv)
-    for i in range(segs):
-        r1, r2 = rings[i], rings[(i + 1) % segs]
-        for j in range(ring):
-            bm.faces.new((r1[j], r1[(j + 1) % ring], r2[(j + 1) % ring], r2[j]))
-    return bm
-
-
-def seg_between(coll, name, p1, p2, r1, r2, material, segs=6, smooth=True):
-    p1, p2 = Vector(p1), Vector(p2)
-    d = p2 - p1
-    bm = bm_cylinder(r1, r2, max(0.01, d.length), segs=segs)
-    q = d.to_track_quat('Z', 'Y')
-    xform(bm, Matrix.Translation((p1 + p2) / 2) @ q.to_matrix().to_4x4())
-    return obj_from_bmesh(name, bm, coll, material, smooth=smooth)
 
 
 # ── stylized skeleton (chunky, readable, ~1.8k tris) ─────────
@@ -96,7 +31,7 @@ def skel_head(coll, name, world, pos, yaw, pitch, parts):
     bmesh.ops.scale(bm, vec=Vector((0.88, 1.0, 1.02)), verts=bm.verts)
     xform(bm, R)
     parts.append(obj_from_bmesh(name, bm, coll, mat("Bone"), smooth=True))
-    jaw = bm_bevel(bm_box(0.13, 0.11, 0.07), 0.02)
+    jaw = bm_bevel(bm_box(0.13, 0.11, 0.07), 0.02, 1)
     xform(jaw, R @ T(0, -0.035, -0.10))
     parts.append(obj_from_bmesh(name + "_jaw", jaw, coll, mat("Bone")))
     for sx in (-1, 1):
@@ -112,7 +47,7 @@ def skeleton(coll, name, loc, yaw, pose):
     P = {k: (world @ Vector(v)) for k, v in pose.items() if k != "head_pitch"}
     parts = []
     # pelvis
-    pel = bm_bevel(bm_box(0.26, 0.17, 0.13), 0.035)
+    pel = bm_bevel(bm_box(0.26, 0.17, 0.13), 0.035, 1)
     xform(pel, Matrix.Translation(P["pelvis"]) @ RZ(yaw))
     parts.append(obj_from_bmesh(name + "_pelvis", pel, coll, mat("Bone")))
     # spine + ribs
@@ -123,7 +58,7 @@ def skeleton(coll, name, loc, yaw, pose):
     q = d.to_track_quat('Z', 'Y').to_matrix().to_4x4()
     for i, (f, rr) in enumerate(((0.42, 0.14), (0.56, 0.165), (0.70, 0.155),
                                  (0.82, 0.125))):
-        rib = bm_torus(rr, 0.032, segs=12, ring=5)
+        rib = bm_torus(rr, 0.032, segs=12, rings=5)
         bmesh.ops.scale(rib, vec=Vector((1.0, 0.78, 0.5)), verts=rib.verts)
         xform(rib, Matrix.Translation(sp + d * f) @ q)
         parts.append(obj_from_bmesh(f"{name}_rib{i}", rib, coll,
@@ -150,7 +85,7 @@ def skeleton(coll, name, loc, yaw, pose):
         parts.append(obj_from_bmesh(f"{name}_j_{j}", jb, coll,
                                     mat("Bone"), smooth=True))
     for h in ("handL", "handR", "footL", "footR"):
-        hb = bm_bevel(bm_box(0.08, 0.11, 0.04), 0.012)
+        hb = bm_bevel(bm_box(0.08, 0.11, 0.04), 0.012, 1)
         xform(hb, Matrix.Translation(P[h]) @ RZ(yaw))
         parts.append(obj_from_bmesh(f"{name}_{h}", hb, coll, mat("Bone")))
     return parts
@@ -186,7 +121,7 @@ POSE_FLEE = {  # face-down mid-flee (away = local -Y), arms forward, leg bent
 def cutlass_in_back(coll, name, loc, yaw, parts):
     """Blade stabbed downward into a prone ribcage; grip up at ~35 deg."""
     R = T(*loc) @ RZ(yaw) @ RX(math.radians(-35))
-    blade = bm_bevel(bm_box(0.045, 0.012, 0.42), 0.006)
+    blade = bm_bevel(bm_box(0.045, 0.012, 0.42), 0.006, 1)
     xform(blade, R @ T(0, 0, 0.10))
     parts.append(obj_from_bmesh(name + "_blade", blade, coll, mat("Metal_Iron")))
     guard = bm_cylinder(0.075, 0.075, 0.025, segs=10)
@@ -221,6 +156,11 @@ def carve(bm, direction, width, depth):
 
 def build():
     clear_default_scene()
+    agx_palette({
+        "Feather_Black": ((0.045, 0.042, 0.050, 1.0), 0.70, 0.0),
+        "Ember":         ((0.55, 0.16, 0.03, 1.0), 0.80, 0.0),
+    })
+    emissive("Ember", (1.0, 0.40, 0.10, 1.0), 2.6)
     name = "skull_totem"
     coll = asset_collection(name)
     parts = []
@@ -255,20 +195,96 @@ def build():
     # temple dents (weathering)
     carve(bm, (-0.95, -0.1, 0.35), 0.30, 0.08)
     carve(bm, (0.92, 0.2, 0.30), 0.32, 0.08)
+    # CARVED, not tessellated: chisel planes everywhere except the face, then
+    # flat-shade. This is the fix for the audit's "raw icosphere facets".
+    carve_facets(bm, 1.0, count=26, depth=(0.72, 0.91), seed=5, softness=0.0,
+                 skip_dirs=((0, -1, 0), (-0.4, -0.86, 0.16), (0.4, -0.86, 0.16),
+                            (0, -0.9, -0.5)))
+    # ── the BACK of the head (round 2) ──────────────────────────
+    # The face carving was the whole fidelity budget last pass, so anyone who
+    # walked round the monolith saw a featureless grey wedge. Detail here has
+    # to be carved INTO the mesh: the chisel planes above pull the real surface
+    # 9-28% inside the ideal sphere, so any box "stuck on" at the nominal
+    # radius floats off in space and reads as black tape (tried it; it did).
+    def back_dir(a, e):
+        """Unit direction, a = yaw from +Y (the back), e = elevation."""
+        return (math.sin(a) * math.cos(e), math.cos(a) * math.cos(e),
+                math.sin(e))
+
+    # two courses of tally grooves cut round the occiput
+    # width must stay well above the subdiv-5 icosphere's ~0.035 rad vertex
+    # spacing or the groove falls between verts and simply never appears
+    for elev, cnt, span, dep in ((0.32, 7, 1.20, 0.085),
+                                 (-0.10, 6, 1.00, 0.070)):
+        for k in range(cnt):
+            a = (k / (cnt - 1) - 0.5) * 2.0 * span
+            d = back_dir(a, elev)
+            # every third stroke is the deeper "count of five" cut
+            carve(bm, d, 0.155, dep * (1.5 if k % 3 == 0 else 1.0))
+    # split fissures running down the crown and the back
+    for fa, fe, n, dep in ((0.42, 0.86, 5, 0.075), (-0.62, 0.70, 4, 0.062),
+                           (0.15, 0.48, 4, 0.050), (-1.10, 0.30, 3, 0.044)):
+        for s in range(n):
+            t = s / max(1, n - 1)
+            carve(bm, back_dir(fa + 0.05 * math.sin(t * 4.0), fe - t * 0.36),
+                  0.20, dep * 1.5 * (1.0 - 0.30 * t))
+    # weather-blistered shelves: shallow wide scoops that catch the sun and
+    # give the back a value break instead of one uniform grey plane
+    for sa, se, w, dep in ((0.95, 0.52, 0.44, 0.055), (-0.85, 0.14, 0.40, 0.048),
+                           (0.30, -0.20, 0.36, 0.042), (-0.20, 0.72, 0.34, 0.040)):
+        carve(bm, back_dir(sa, se), w, dep)
     bmesh.ops.scale(bm, vec=Vector((SX, SY, SZ)), verts=bm.verts)
     xform(bm, Matrix.Translation(skull_c))
-    skull = obj_from_bmesh("skull_mono", bm, coll, mat("Rock_Dark"), smooth=True)
-    displace_noise(skull, strength=0.07, scale=1.1, seed=7)
-    displace_noise(skull, strength=0.035, scale=0.4, seed=13)
+    skull = obj_from_bmesh("skull_mono", bm, coll, mat("Rock_Dark"), smooth=False)
+    displace_noise(skull, strength=0.05, scale=1.1, seed=7)
     apply_modifiers(skull)
     parts.append(skull)
 
+    # ── votive spikes driven into the back of the skull ──────────
+    # Anything ADDED to the monolith has to be driven deep enough to survive
+    # the chisel planes pulling the real surface up to 28% inside the ideal
+    # sphere — hence the 0.80 seat factor and the long buried shank.
+    def on_skull(a, e, k=0.80):
+        d = Vector((math.sin(a) * math.cos(e), math.cos(a) * math.cos(e),
+                    math.sin(e)))
+        return skull_c + Vector((d.x * SX, d.y * SY, d.z * SZ)) * k, d
+
+    for si, (sa, se) in enumerate(((0.75, 0.58), (-0.45, 0.40), (0.20, 0.80),
+                                   (-1.02, 0.18))):
+        p, d = on_skull(sa, se)
+        out_n = Vector((d.x / SX, d.y / SY, d.z / SZ)).normalized()
+        sp = bm_cylinder(0.045, 0.016, 0.78, segs=6)
+        q = out_n.to_track_quat('Z', 'Y')
+        xform(sp, Matrix.Translation(p + out_n * 0.30) @ q.to_matrix().to_4x4())
+        parts.append(obj_from_bmesh(f"votive{si}", sp, coll, mat("Rust"),
+                                    smooth=True))
+        if si % 2 == 0:                          # bone charm hung off the spike
+            tip = p + out_n * 0.60
+            ch = bm_icosphere(0.058, 2)
+            bmesh.ops.scale(ch, vec=Vector((0.8, 0.8, 1.30)), verts=ch.verts)
+            xform(ch, Matrix.Translation(tip - Vector((0, 0, 0.22))))
+            parts.append(obj_from_bmesh(f"charm{si}", ch, coll, mat("Bone"),
+                                        smooth=True))
+            cd = bm_cylinder(0.008, 0.008, 0.20, segs=4)
+            xform(cd, Matrix.Translation(tip - Vector((0, 0, 0.10))))
+            parts.append(obj_from_bmesh(f"charmcord{si}", cd, coll,
+                                        mat("Rope"), smooth=True))
+    # cranial suture: a shallow inlaid ridge of paler stone, sunk into the
+    # crown so it reads as a carved line, not a blade stuck to the face
+    for i, (ax, az, ln, yaw2) in enumerate(((-0.34, 1.30, 0.85, 0.30),
+                                            (0.30, 1.42, 0.70, -0.40))):
+        cut = bm_bevel(bm_box(0.05, 0.16, ln), 0.012, 1)
+        xform(cut, Matrix.Translation(skull_c) @
+              T(ax * SX * 0.55, -SY * 0.60, az * SZ * 0.30) @ RY(yaw2) @
+              RX(math.radians(12)))
+        parts.append(obj_from_bmesh(f"suture{i}", cut, coll, mat("Rock_Grey")))
+
     # brow ridge slabs (glare) — Bone_Shadow accents, embedded in the rock
     for sx in (-1, 1):
-        bb = bm_bevel(bm_box(0.88, 0.5, 0.26), 0.06)
+        bb = bm_bevel(bm_box(0.62, 0.30, 0.20), 0.05, 2)
         m = (Matrix.Translation(skull_c) @
-             T(sx * 0.58, -SY * 0.62, SZ * 0.335) @
-             RZ(sx * -0.16) @ RX(math.radians(14)) @ RY(sx * math.radians(-10)))
+             T(sx * 0.60, -SY * 0.40, SZ * 0.30) @
+             RZ(sx * -0.10) @ RX(math.radians(26)) @ RY(sx * math.radians(-16)))
         xform(bb, m)
         o = obj_from_bmesh(f"brow{sx}", bb, coll, mat("Bone_Shadow"))
         displace_noise(o, strength=0.05, scale=0.6, seed=21 + sx)
@@ -301,7 +317,7 @@ def build():
         th = 0.34 - abs(t) * 0.10 + rng.uniform(-0.03, 0.03)
         if i == 2:      # one tooth broken
             th *= 0.45
-        tb = bm_bevel(bm_box(tw, 0.16, th), 0.03)
+        tb = bm_bevel(bm_box(tw, 0.16, th), 0.03, 2)
         px = math.sin(a) * SX * 0.72
         py = -math.cos(a * 0.8) * SY * 0.86
         pz = -SZ * 0.44 - abs(t) * 0.14
@@ -319,19 +335,18 @@ def build():
         bmesh.ops.scale(st, vec=Vector((rng.uniform(0.8, 1.3),
                                         rng.uniform(0.8, 1.3),
                                         rng.uniform(0.55, 0.85))), verts=st.verts)
+        carve_facets(st, sr, count=8, depth=(0.74, 0.95), seed=100 + i,
+                     softness=0.015)
         xform(st, T(math.cos(a) * rr, math.sin(a) * rr * 0.9 + 0.15, sz) @
               RZ(rng.uniform(0, math.tau)))
-        o = obj_from_bmesh(f"cairn{i}", st, coll,
-                           mat("Rock_Grey" if rng.random() < 0.55 else "Rock_Dark"),
-                           smooth=True)
-        displace_noise(o, strength=sr * 0.45, scale=sr * 1.3, seed=100 + i)
-        apply_modifiers(o)
-        parts.append(o)
+        parts.append(obj_from_bmesh(f"cairn{i}", st, coll,
+                                    mat("Rock_Grey" if rng.random() < 0.55
+                                        else "Rock_Dark"), smooth=False))
     # core mound so no gaps under the skull
     core = bm_icosphere(1.0, 4)
     bmesh.ops.scale(core, vec=Vector((1.75, 1.55, 0.62)), verts=core.verts)
     xform(core, T(0, 0.15, 0.20))
-    o = obj_from_bmesh("cairn_core", core, coll, mat("Rock_Grey"), smooth=True)
+    o = obj_from_bmesh("cairn_core", core, coll, mat("Rock_Grey"), smooth=False)
     displace_noise(o, strength=0.28, scale=1.4, seed=88)
     apply_modifiers(o)
     parts.append(o)
@@ -364,6 +379,130 @@ def build():
         displace_noise(o, strength=0.04, scale=0.2, seed=200 + i)
         apply_modifiers(o)
         parts.append(o)
+        # rope lashing + feather charms, built on the stake's own matrix so
+        # they ride the lean instead of floating beside it
+        for li in range(3):
+            ring = bm_torus(0.072, 0.017, segs=12, rings=5)
+            xform(ring, m @ T(0, 0, h * 0.62 + (li - 1) * 0.055))
+            parts.append(obj_from_bmesh(f"stakelash{i}_{li}", ring, coll,
+                                        mat("Rope"), smooth=True))
+        for k in range(2):
+            fm = (m @ T(0, 0, h * 0.62) @ RZ(k * 2.1 + 0.6) @
+                  T(0, -0.07, -0.02) @ RX(math.radians(166 + k * 8)))
+            parts += feather(coll, f"stakefeather{i}_{k}", fm, 0.26,
+                             mat("Feather_Black"), width=0.045)
+        tie = bm_cylinder(0.012, 0.008, 0.16, segs=5)
+        xform(tie, m @ T(0.05, -0.05, h * 0.55) @ RX(math.radians(20)))
+        parts.append(obj_from_bmesh(f"staketie{i}", tie, coll, mat("Rope"),
+                                    smooth=True))
+
+    # ── two BONE TOTEM spears: stacked skulls, rope lashings, feathers ──
+    def bone_totem(tag, bx, by, yaw, n_sk=3, h=2.35):
+        nonlocal parts
+        m0 = T(bx, by, 0) @ RZ(yaw) @ RY(math.radians(rng.uniform(-6, 6)))
+        shaft = bm_cylinder(0.055, 0.038, h, segs=8)
+        xform(shaft, m0 @ T(0, 0, h / 2))
+        parts.append(obj_from_bmesh(f"{tag}_shaft", shaft, coll,
+                                    mat("Wood_Dark"), smooth=True))
+        for k in range(n_sk):
+            z = h - 0.30 - k * 0.42
+            sc = 1.0 - k * 0.08
+            sk = bm_icosphere(0.155 * sc, 2)
+            bmesh.ops.scale(sk, vec=Vector((0.88, 1.0, 1.05)), verts=sk.verts)
+            carve_facets(sk, 0.155 * sc, count=7, depth=(0.88, 0.99),
+                         seed=500 + k, softness=0.01,
+                         skip_dirs=((0, -1, 0),))
+            xform(sk, m0 @ T(0, 0, z) @ RZ(rng.uniform(-0.4, 0.4)))
+            parts.append(obj_from_bmesh(f"{tag}_skull{k}", sk, coll,
+                                        mat("Bone"), smooth=False))
+            jw = bm_bevel(bm_box(0.17 * sc, 0.14 * sc, 0.075), 0.02, 1)
+            xform(jw, m0 @ T(0, -0.03, z - 0.135 * sc))
+            parts.append(obj_from_bmesh(f"{tag}_jaw{k}", jw, coll,
+                                        mat("Bone")))
+            for sxe in (-1, 1):               # socket shadows
+                e = bm_icosphere(0.045 * sc, 2)
+                bmesh.ops.scale(e, vec=Vector((1.0, 0.6, 0.85)), verts=e.verts)
+                xform(e, m0 @ T(sxe * 0.062 * sc, -0.115 * sc, z + 0.025))
+                parts.append(obj_from_bmesh(f"{tag}_eye{k}{sxe}", e, coll,
+                                            mat("Char_Black"), smooth=True))
+            for li in range(2):
+                g = bm_torus(0.075, 0.016, segs=12, rings=5)
+                xform(g, m0 @ T(0, 0, z - 0.26 + li * 0.05))
+                parts.append(obj_from_bmesh(f"{tag}_lash{k}_{li}", g, coll,
+                                            mat("Rope"), smooth=True))
+        for k in range(3):
+            fm = (m0 @ T(0.06 * (k - 1), -0.02, h - 0.02) @ RZ(k * 1.2 - 1.2) @
+                  RX(math.radians(150 + k * 10)))
+            parts += feather(coll, f"{tag}_feather{k}", fm, 0.30,
+                             mat("Feather_Black"), width=0.05)
+        for gi in range(4):
+            g = bm_torus(0.062, 0.015, segs=12, rings=5)
+            xform(g, m0 @ T(0, 0, 0.95 + (gi - 1.5) * 0.05))
+            parts.append(obj_from_bmesh(f"{tag}_grip{gi}", g, coll, mat("Rope"),
+                                        smooth=True))
+
+    bone_totem("totemL", -2.55, 1.25, 0.5)
+    bone_totem("totemR", 2.70, 0.55, -0.7, n_sk=2, h=2.05)
+
+    # ── iron brazier (bible): tripod legs, coal bowl, ember glow ──
+    BX, BY = 2.30, -2.15
+    for k in range(3):
+        a = k * math.tau / 3 + 0.4
+        parts.append(seg_between(coll, f"brz_leg{k}",
+                                 (BX + math.cos(a) * 0.30,
+                                  BY + math.sin(a) * 0.30, 0.0),
+                                 (BX + math.cos(a) * 0.09,
+                                  BY + math.sin(a) * 0.09, 0.72),
+                                 0.032, 0.026, mat("Metal_Iron"), segs=6))
+    bowl2 = bm_cylinder(0.42, 0.26, 0.30, segs=14)
+    xform(bowl2, T(BX, BY, 0.86))
+    parts.append(obj_from_bmesh("brz_bowl", bowl2, coll, mat("Rust"),
+                                smooth=True))
+    rim = bm_torus(0.42, 0.035, segs=16, rings=6)
+    xform(rim, T(BX, BY, 1.01))
+    parts.append(obj_from_bmesh("brz_rim", rim, coll, mat("Metal_Iron"),
+                                smooth=True))
+    for k in range(9):                        # coals + one live ember
+        cz = bm_icosphere(rng.uniform(0.05, 0.09), 1)
+        xform(cz, T(BX + rng.uniform(-0.24, 0.24), BY + rng.uniform(-0.24, 0.24),
+                    0.99 + rng.uniform(0, 0.05)))
+        parts.append(obj_from_bmesh(f"brz_coal{k}", cz, coll,
+                                    mat("Ember" if k in (2, 6) else "Char_Black"),
+                                    smooth=False))
+
+    # ── bone heap banked against the cairn (backlog: the bone-heap beat) ──
+    for i in range(11):
+        a = rng.uniform(-2.5, -0.6)
+        rr = rng.uniform(1.6, 2.4)
+        bx2, by2 = math.cos(a) * rr, math.sin(a) * rr * 0.95 + 0.15
+        kind = i % 3
+        if kind == 0:
+            sk = bm_icosphere(0.135, 2)
+            bmesh.ops.scale(sk, vec=Vector((0.88, 1.0, 1.02)), verts=sk.verts)
+            carve_facets(sk, 0.135, count=6, depth=(0.9, 0.99), seed=600 + i,
+                         softness=0.01, skip_dirs=((0, -1, 0),))
+            xform(sk, T(bx2, by2, 0.14) @ RZ(rng.uniform(0, 3)) @
+                  RX(rng.uniform(-0.6, 0.6)))
+            parts.append(obj_from_bmesh(f"heap_sk{i}", sk, coll, mat("Bone"),
+                                        smooth=False))
+        elif kind == 1:
+            rib = bm_torus(0.20, 0.024, segs=12, rings=5)
+            bmesh.ops.scale(rib, vec=Vector((1, 0.7, 0.45)), verts=rib.verts)
+            xform(rib, T(bx2, by2, 0.06) @ RZ(rng.uniform(0, 3)) @
+                  RX(math.radians(rng.uniform(60, 100))))
+            parts.append(obj_from_bmesh(f"heap_rib{i}", rib, coll, mat("Bone"),
+                                        smooth=True))
+        else:
+            lb = bm_cylinder(0.040, 0.032, 0.52, segs=6)
+            xform(lb, T(bx2, by2, 0.05) @ RZ(rng.uniform(0, 3)) @
+                  RX(math.radians(rng.uniform(78, 100))))
+            parts.append(obj_from_bmesh(f"heap_bn{i}", lb, coll, mat("Bone"),
+                                        smooth=True))
+            kn = bm_icosphere(0.052, 1)
+            xform(kn, T(bx2 + rng.uniform(-0.22, 0.22),
+                        by2 + rng.uniform(-0.22, 0.22), 0.05))
+            parts.append(obj_from_bmesh(f"heap_kn{i}", kn, coll, mat("Bone"),
+                                        smooth=True))
 
     # ── offering bowl of coins at the mouth ──
     ped = bm_icosphere(0.42, 2)
@@ -405,7 +544,7 @@ def build():
 
     # scatter bones near the cairn edge
     for i, (bx, by) in enumerate(((2.1, -1.6), (-2.4, -0.8), (1.6, 1.9))):
-        rib = bm_torus(0.14, 0.018, segs=10, ring=5)
+        rib = bm_torus(0.14, 0.018, segs=10, rings=5)
         bmesh.ops.scale(rib, vec=Vector((1, 0.75, 0.5)), verts=rib.verts)
         xform(rib, T(bx, by, 0.03) @ RZ(rng.uniform(0, 3)) @
               RX(math.radians(80)))
@@ -417,12 +556,22 @@ def build():
         parts.append(obj_from_bmesh(f"sbone{i}", lb, coll, mat("Bone"),
                                     smooth=True))
 
-    all_objs = [o for o in coll.objects if o.type == 'MESH']
-    join(all_objs, name)
-    bake_ao(coll)
-    export_collection_vc(coll, f"{name}.glb")
-    verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    render_turntable(coll, name, RENDER_DIR, views=4)
+    SPEC = tint_spec(moss=0.40)
+    SPEC['Rock_Dark'] = dict(
+        tone=0.14, hue=((1.22, 1.10, 0.94), (0.76, 0.82, 0.96)), scale=1.8,
+        mottle=0.13, mscale=0.32,
+        patch=dict(col=(0.45, 0.85, 0.35), amt=0.55, scale=0.9, thresh=0.62,
+                   width=0.14, up=0.8),
+        low=dict(z=0.55, amt=0.30, col=(0.55, 0.52, 0.42)))
+    SPEC['Bone'] = dict(
+        tone=0.14, hue=((1.18, 1.12, 1.00), (0.78, 0.78, 0.74)), scale=0.5,
+        mottle=0.10, mscale=0.13,
+        patch=dict(col=(0.55, 0.72, 0.42), amt=0.45, scale=0.4, thresh=0.66,
+                   width=0.12, up=0.7),
+        low=dict(z=0.25, amt=0.40, col=(0.45, 0.44, 0.36)))
+    SPEC['Feather_Black'] = dict(tone=0.10, mottle=0.12, mscale=0.08)
+    ship_asset(coll, name, spec=SPEC, ao=dict(samples=22, floor=0.42),
+               render_dir=RENDER_DIR, views=4, elev=14)
     print(f"built {name}")
 
 

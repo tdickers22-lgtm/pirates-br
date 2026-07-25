@@ -17,9 +17,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
 
-RENDER_DIR = os.environ.get(
-    "BR_RENDER_DIR",
-    "/private/tmp/claude-501/-Users-tobiasdicker/41616ba1-624a-493b-a065-3ec5830f1dbe/scratchpad/renders/s-structures/round1")
+RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
+EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
 
 EXTRA = {
     "Obsidian": ((0.05, 0.05, 0.07, 1.0), 0.25, 0.15),
@@ -230,8 +229,13 @@ def build_minehead(name="mine_head"):
         y = FY - 0.5 - i * (RL - 0.6) / 5
         sl = bm_box(1.35, 0.26, 0.14)
         bm_bevel(sl, 0.02)
-        yaw = rng.uniform(-0.03, 0.03) if i < 5 else 0.28  # last sleeper askew
-        placed(sl, (rng.uniform(-0.03, 0.03), y, 0.045), rz=yaw)
+        # sleepers under the cart stay true; only the far end is allowed to go
+        # askew, so the track the cart rides on reads as an intact run
+        under_cart = i <= 2
+        yaw = 0.0 if under_cart else (rng.uniform(-0.05, 0.05) if i < 5 else 0.28)
+        jx = 0.0 if under_cart else rng.uniform(-0.03, 0.03)
+        # sleeper TOP must meet the rail bottom (0.13) or the rails float
+        placed(sl, (jx, y, 0.06), rz=yaw)
         parts.append(obj_from_bmesh(f"{name}_slp{i}", sl, coll, mat("Wood_Mid")))
     for sx in (-1, 1):
         L = RL if sx < 0 else RL - 0.9  # one rail shorter — broken stub
@@ -245,22 +249,38 @@ def build_minehead(name="mine_head"):
            rz=0.25, rx=math.radians(-14))
     parts.append(obj_from_bmesh(name + "_railbent", bent, coll, mat("Metal_Iron")))
 
-    # ── ore cart on the rails, heaped with obsidian ──
-    cx, cy = 0.02, FY - 1.9
-    cyaw = 0.05
+    # ── ore cart ON the rails, heaped with obsidian ──
+    # AUDIT FIX (backlog "mine cart off rails"): the cart used to carry a
+    # cx=0.02 offset and a 0.05 rad yaw. Over the 0.42 m wheelbase that yaw
+    # walks each wheel ~21 mm sideways — half the wheel tread hangs off a
+    # 90 mm railhead, which is exactly the "wheels beside the rails" read.
+    # The cart is now EXACTLY on the rail axis: zero yaw, zero lateral offset,
+    # tread biting 15 mm into the railhead, plus proper inner flanges so the
+    # contact is unambiguous at any camera angle.
+    cx, cy = 0.0, FY - 1.9
+    cyaw = 0.0
     Mc = Matrix.Translation((cx, cy, 0)) @ Matrix.Rotation(cyaw, 4, 'Z')
-    # wheels riding the rails (rail top ~0.25), then the tub above them
-    wz = 0.25 + 0.19
+    RAIL_TOP = 0.25
+    W_R = 0.19
+    wz = RAIL_TOP + W_R - 0.015        # tread seated into the railhead
     for sx in (-1, 1):
         for sy in (-1, 1):
-            wh = bm_cylinder(0.19, 0.19, 0.085, segs=16)
-            placedM(wh, Mc @ Matrix.Translation((sx * gauge / 2, sy * 0.42, wz))
-                    @ Matrix.Rotation(math.pi / 2, 4, 'Y'))
+            WM_ = Mc @ Matrix.Translation((sx * gauge / 2, sy * 0.42, wz)) \
+                @ Matrix.Rotation(math.pi / 2, 4, 'Y')
+            wh = bm_cylinder(W_R, W_R, 0.085, segs=16)
+            placedM(wh, WM_)
             parts.append(obj_from_bmesh(f"{name}_whl{sx}{sy}", wh, coll,
                                         mat("Metal_Iron"), smooth=True))
+            # INNER FLANGE: the lip that keeps a mine wheel on the rail. Sits
+            # inboard of the railhead, so the wheel visibly grips the track.
+            fl = bm_cylinder(W_R + 0.038, W_R + 0.038, 0.022, segs=16)
+            placedM(fl, Mc @ Matrix.Translation(
+                (sx * (gauge / 2 - 0.054), sy * 0.42, wz)) @
+                Matrix.Rotation(math.pi / 2, 4, 'Y'))
+            parts.append(obj_from_bmesh(f"{name}_flg{sx}{sy}", fl, coll,
+                                        mat("Metal_Iron"), smooth=True))
             hubb = bm_cylinder(0.045, 0.045, 0.11, segs=8)
-            placedM(hubb, Mc @ Matrix.Translation((sx * gauge / 2, sy * 0.42, wz))
-                    @ Matrix.Rotation(math.pi / 2, 4, 'Y'))
+            placedM(hubb, WM_)
             parts.append(obj_from_bmesh(f"{name}_hub{sx}{sy}", hubb, coll,
                                         mat("Metal_Iron"), smooth=True))
     for sy in (-1, 1):
@@ -438,7 +458,8 @@ def build_minehead(name="mine_head"):
     bake_ao(coll)
     export_collection_vc(coll, f"{name}.glb")
     verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    render_turntable(coll, name, RENDER_DIR)
+    if RENDER_DIR:
+        render_turntable(coll, name, RENDER_DIR)
     print(f"built {name}")
 
 

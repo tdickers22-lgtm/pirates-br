@@ -15,14 +15,18 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())
+exec(open(os.path.join(HERE, "_story_props.py")).read())
 
-RENDER_DIR = os.environ.get(
-    "BR_RENDER_DIR",
-    "/private/tmp/claude-501/-Users-tobiasdicker/41616ba1-624a-493b-a065-3ec5830f1dbe/scratchpad/renders/s-structures/round1")
+RENDER_DIR = os.environ.get("BR_RENDER_DIR", "")
+EXPORT_DIR = os.environ.get("BR_EXPORT_DIR", EXPORT_DIR)
 
 EXTRA = {
     "Bone":       ((0.82, 0.78, 0.68, 1.0), 0.9, 0.0),
     "Crow_Black": ((0.05, 0.05, 0.06, 1.0), 0.85, 0.0),
+    # needed by the signal pyre's tar barrel (this scene keeps its own
+    # palette rather than calling agx_palette, so register it explicitly)
+    "Tar_Black":  ((0.04, 0.037, 0.042, 1.0), 0.6, 0.0),
 }
 for _n, _v in EXTRA.items():
     PALETTE.setdefault(_n, _v)
@@ -557,17 +561,37 @@ def build_crowroost(name="crow_roost"):
     apply_modifiers(o)
     parts.append(o)
 
+    # ── THE SIGNAL PYRE (backlog: was unshipped) ──
+    # The lookout's whole job: a laid, unlit beacon he never got to light.
+    # Seaward of the tripod, clear of the ladder leg at (0, -2.35).
+    # Same builder as the standalone signal_pyre.glb.
+    signal_pyre(coll, "pyre",
+                Matrix.Translation((-1.05, -1.45, 0.0)) @
+                Matrix.Rotation(math.radians(-24), 4, 'Z'),
+                parts, rng=random.Random(404))
+
     # ── finalize ──
     bpy.ops.object.select_all(action='DESELECT')
     for o in parts:
         o.select_set(True)
     bpy.context.view_layer.objects.active = parts[0]
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    # AO first (needs every part separate), then the per-material vertex tint
+    # (needs one material per object), THEN the join. Adding the tint pass is
+    # what stops the tower reading as one flat brown mass at range.
+    bake_ao(coll, samples=22, floor=0.46)
+    SPEC = tint_spec(moss=0.26, seed=21)
+    SPEC['Crow_Black'] = dict(tone=0.09, mottle=0.11, mscale=0.09,
+                              hue=((1.14, 1.10, 1.14), (0.84, 0.86, 0.94)),
+                              scale=0.25)
+    tint_pass(coll, SPEC, seed=21)
     join(parts, name)
-    bake_ao(coll)
     export_collection_vc(coll, f"{name}.glb")
     verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    render_turntable(coll, name, RENDER_DIR)
+    if RENDER_DIR:
+        preview_vertex_colors(coll)
+        render_orbit(coll, name, RENDER_DIR, angles=(-90, -35, 25, 120),
+                     elev=14)
     print(f"built {name}")
 
 
