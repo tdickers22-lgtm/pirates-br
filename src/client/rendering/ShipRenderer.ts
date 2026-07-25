@@ -1007,8 +1007,88 @@ function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<THREE.Obj
 const FLAG_FLY = 0.85;
 const FLAG_DROP = 0.44;
 
-/** Wave uniforms shared by a flag's cloth and its blazon so the skull rides the
- *  same ripple instead of hovering rigidly in front of a moving sheet. */
+/** One flag texture per team colour (there are ~16), shared by every ship on
+ *  that team — the jolly roger is PAINTED on rather than built from little
+ *  spheres and boxes, so the blazon deforms with the cloth for free and the
+ *  whole flag stays a single draw call. */
+const flagTextureCache = new Map<number, THREE.CanvasTexture>();
+
+function flagTexture(teamColor: number): THREE.CanvasTexture {
+  const cached = flagTextureCache.get(teamColor);
+  if (cached) return cached;
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  const hex = `#${teamColor.toString(16).padStart(6, '0')}`;
+  ctx.fillStyle = hex;
+  ctx.fillRect(0, 0, 256, 128);
+  // Weathered cloth: a few sun-bleached patches and horizontal seam stitching so
+  // the flag doesn't read as a flat swatch of colour.
+  ctx.globalAlpha = 0.14;
+  ctx.fillStyle = '#ffffff';
+  for (let i = 0; i < 7; i++) {
+    ctx.beginPath();
+    ctx.arc(Math.random() * 256, Math.random() * 128, 10 + Math.random() * 22, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 0.16;
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = 1.5;
+  for (let y = 20; y < 128; y += 26) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(256, y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Skull and crossbones, centred on the fly half.
+  const cx = 150, cy = 64;
+  ctx.strokeStyle = '#f2efe6';
+  ctx.fillStyle = '#f2efe6';
+  ctx.lineWidth = 9;
+  ctx.lineCap = 'round';
+  for (const dir of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(cx - 34, cy + 16 * dir + 8);
+    ctx.lineTo(cx + 34, cy - 16 * dir + 8);
+    ctx.stroke();
+  }
+  for (const dir of [-1, 1]) {
+    for (const end of [-1, 1]) {
+      ctx.beginPath();
+      ctx.arc(cx + 34 * end, cy + 16 * dir * -end + 8, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // Cranium + jaw over the bones.
+  ctx.beginPath();
+  ctx.ellipse(cx, cy - 12, 22, 20, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(cx - 11, cy + 4, 22, 11);
+  // Eye sockets + nasal notch.
+  ctx.fillStyle = hex;
+  ctx.beginPath();
+  ctx.ellipse(cx - 9, cy - 14, 6.5, 7.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(cx + 9, cy - 14, 6.5, 7.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 4);
+  ctx.lineTo(cx - 4, cy + 3);
+  ctx.lineTo(cx + 4, cy + 3);
+  ctx.closePath();
+  ctx.fill();
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  flagTextureCache.set(teamColor, tex);
+  return tex;
+}
+
+/** Drives the flag's vertex ripple. */
 interface FlagUniforms {
   uFlagTime: { value: number };
   /** x = ripple amplitude in metres, y = per-ship phase offset in radians. */
@@ -1037,14 +1117,10 @@ function flagPhaseFromId(id: string): number {
  * the fly whose amplitude ramps quadratically from the hoist (pinned to the
  * halyard, so it never detaches from the mast) out to the free end. Costs no
  * per-frame CPU geometry work — only the two meshes it keeps out of the static
- * hull merge.
- *
- * `bendNormals` re-aims the surface normal from the analytic slope of the main
- * wave, so the cloth catches light as it undulates. The blazon skips it: those
- * are little spheres and boxes riding along, and rotating their normals by the
- * cloth's slope would just make them shade wrong.
+ * hull merge. The surface normal is re-aimed from the analytic slope of the main
+ * wave, so the cloth catches light as it undulates instead of shading flat.
  */
-function applyFlagWave(material: THREE.Material, uniforms: FlagUniforms, bendNormals: boolean) {
+function applyFlagWave(material: THREE.Material, uniforms: FlagUniforms) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uFlagTime = uniforms.uFlagTime;
     shader.uniforms.uFlagWave = uniforms.uFlagWave;
@@ -1075,23 +1151,21 @@ function applyFlagWave(material: THREE.Material, uniforms: FlagUniforms, bendNor
       transformed.y += cos( position.x * 7.0 - uFlagTime * 6.0 + uFlagWave.y ) * flagAmp( position ) * 0.3;
       `,
     );
-    if (bendNormals) {
-      shader.vertexShader = shader.vertexShader.replace(
-        '#include <beginnormal_vertex>',
-        `
-        vec3 objectNormal = vec3( normal );
-        // d(waveZ)/dx of the dominant term — the cloth plane's own normal is +Z,
-        // so tilting by the slope is a single component tweak.
-        objectNormal = normalize( objectNormal + vec3(
-          -cos( position.x * 9.0 - uFlagTime * 7.0 + uFlagWave.y ) * 9.0 * flagAmp( position ),
-          0.0, 0.0 ) );
-        `,
-      );
-    }
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <beginnormal_vertex>',
+      `
+      vec3 objectNormal = vec3( normal );
+      // d(waveZ)/dx of the dominant term — the cloth plane's own normal is +Z,
+      // so tilting by the slope is a single component tweak.
+      objectNormal = normalize( objectNormal + vec3(
+        -cos( position.x * 9.0 - uFlagTime * 7.0 + uFlagWave.y ) * 9.0 * flagAmp( position ),
+        0.0, 0.0 ) );
+      `,
+    );
   };
-  // Both variants patch the same program source, so they must not share a
-  // compiled-shader cache slot with each other or with a plain standard material.
-  material.customProgramCacheKey = () => (bendNormals ? 'flag-wave-cloth' : 'flag-wave-blazon');
+  // This patches the standard program source, so it must not share a compiled-
+  // shader cache slot with a plain standard material.
+  material.customProgramCacheKey = () => 'flag-wave-cloth';
 }
 
 interface StairwellHole {
@@ -3458,9 +3532,9 @@ export class ShipRenderer {
 
     // ── Flag ─────────────────────────────────────────────────
     // The colours here ARE the team identity at range, so the flag gets its own
-    // pivot (yawed to the wind each frame) and its own two meshes held OUT of
-    // the static hull merge. Merged in, it was a rigid painted board nailed to
-    // the masthead of a ship that pitches and rolls under it.
+    // pivot (yawed to the wind each frame) and a mesh held OUT of the static hull
+    // merge. Merged in, it was a rigid painted board nailed to the masthead of a
+    // ship that pitches and rolls under it.
     // Height: on a staff at the TRUCK, above the mast cap. It used to sit at
     // H + height*3, which on every hull is inside the crow's-nest basket — the
     // cloth passed straight through the floor and staves. Above the cap it is
@@ -3484,48 +3558,22 @@ export class ShipRenderer {
     const flag: ShipFlag = { pivot: flagPivot, uniforms: flagUniforms };
 
     // Cloth: segmented along the fly so the vertex wave has something to bend,
-    // with the hoist at local x = 0 (the halyard the shader pins).
+    // with the hoist at local x = 0 (the halyard the shader pins). The jolly
+    // roger is PAINTED into the per-team texture rather than built from little
+    // spheres and boxes — the blazon then deforms with the cloth for free, and
+    // the whole flag stays ONE draw call instead of three.
     const flagGeo = new THREE.PlaneGeometry(FLAG_FLY, FLAG_DROP, 14, 4);
     flagGeo.translate(FLAG_FLY * 0.5 + 0.06, 0, 0);
     const flagMat = new THREE.MeshStandardMaterial({
-      color: ship.teamColor,
+      color: 0xffffff,
+      map: flagTexture(ship.teamColor),
       emissive: ship.teamColor,
-      emissiveIntensity: 0.28,
+      emissiveIntensity: 0.22,
       side: THREE.DoubleSide,
       roughness: 0.8,
     });
-    applyFlagWave(flagMat, flagUniforms, true);
-    const flagCloth = new THREE.Mesh(flagGeo, flagMat);
-    flagPivot.add(flagCloth);
-
-    // Skull and crossbones, baked into ONE blazon mesh in flag-local space so it
-    // rides the same ripple as the cloth. (Separate meshes would either be eaten
-    // by the hull merge or float rigidly in front of a moving sheet.)
-    const skullMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, side: THREE.DoubleSide });
-    applyFlagWave(skullMat, flagUniforms, false);
-    const blazonCx = FLAG_FLY * 0.5 + 0.06;
-    const blazonGeos: THREE.BufferGeometry[] = [
-      new THREE.SphereGeometry(0.08, 6, 6).translate(blazonCx, 0.04, 0),
-    ];
-    for (const boneAngle of [-0.62, 0.62]) {
-      blazonGeos.push(
-        new THREE.BoxGeometry(0.34, 0.035, 0.035)
-          .rotateZ(boneAngle)
-          .translate(blazonCx, -0.07, 0.002),
-      );
-      for (const end of [-1, 1] as const) {
-        blazonGeos.push(
-          new THREE.SphereGeometry(0.035, 6, 5).translate(
-            blazonCx + Math.cos(boneAngle) * end * 0.17,
-            -0.07 + Math.sin(boneAngle) * end * 0.17,
-            0.004,
-          ),
-        );
-      }
-    }
-    const blazonGeo = mergeGeometries(blazonGeos, false);
-    for (const geo of blazonGeos) geo.dispose();
-    if (blazonGeo) flagPivot.add(new THREE.Mesh(blazonGeo, skullMat));
+    applyFlagWave(flagMat, flagUniforms);
+    flagPivot.add(new THREE.Mesh(flagGeo, flagMat));
 
     const upgradePennants = {
       hull_reinforcement: new THREE.Mesh(
