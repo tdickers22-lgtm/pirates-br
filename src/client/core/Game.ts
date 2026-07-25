@@ -28,6 +28,7 @@ import { PlayerAnimator, type PlayerAnimatorView } from '../rendering/PlayerAnim
 import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelController.js';
 import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
 import { EnvironmentFx, ZERO_SCALE_MAT4, type EnvironmentFxView } from '../rendering/EnvironmentFx.js';
+import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { makeStormTexture } from '../rendering/factories/TextureFactory.js';
 import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
@@ -110,17 +111,34 @@ export type LanternEmitter = {
   phase: number;
 };
 
-
 /** Interaction kinds the HUD arbiter juggles: server intents plus CLIENT-ONLY
  *  kinds that never ride interactIntent — 'door' (tavern doors swing locally)
  *  and 'harvest' (the axe prompt; LMB does the work via useItem). */
 export type ClientInteractKind = InteractIntent | 'door' | 'harvest';
 
 export class Game {
+  /** Server world snapshot + id indexes (see core/ClientState.ts). Declared
+   *  first so every accessor below can delegate to it. */
+  private readonly clientState = new ClientState();
+
+  private get state() { return this.clientState.state; }
+  private set state(v: GameState | null) { this.clientState.state = v; }
+  private get playersById() { return this.clientState.playersById; }
+  private get shipsById() { return this.clientState.shipsById; }
+  private get livePlayerIds() { return this.clientState.livePlayerIds; }
+  private get liveProjectileIds() { return this.clientState.liveProjectileIds; }
+  private get liveKegIds() { return this.clientState.liveKegIds; }
+  private get serverTimeOffset() { return this.clientState.serverTimeOffset; }
+  private set serverTimeOffset(v: number | null) { this.clientState.serverTimeOffset = v; }
+  private get lastSnapshotAt() { return this.clientState.lastSnapshotAt; }
+  private set lastSnapshotAt(v: number) { this.clientState.lastSnapshotAt = v; }
+
+  private applyHotSnapshot(hot: HotSnapshotPayload) { this.clientState.applyHotSnapshot(hot); }
+
+  private rebuildStateIndexes(state: GameState) { this.clientState.rebuildStateIndexes(state); }
+
   private readonly renderer = new Renderer();
   private readonly ocean = new OceanRenderer();
-  /** EMA-smoothed offset mapping performance.now()/1000 onto server sim seconds. */
-  private serverTimeOffset: number | null = null;
   /** Dev/tour hook: when non-null, forces the day/night clock to this many
    *  seconds (see setDayNightOverride), so a visual tour can capture noon,
    *  dusk and night deterministically. Inert during normal play. */
@@ -177,12 +195,6 @@ export class Game {
   private endmatchPending = false;
   private readonly ui: UiRefs = buildUiRefs();
 
-  private state: GameState | null = null;
-  private playersById = new Map<string, Player>();
-  private shipsById = new Map<string, Ship>();
-  private livePlayerIds = new Set<string>();
-  private liveProjectileIds = new Set<string>();
-  private liveKegIds = new Set<string>();
   private localPlayerId: string | null = null;
   private localShipId: string | null = null;
   /** Cleared when the server sends `join`; avoids an endless 68% bar if assignment stalls. */
@@ -276,7 +288,6 @@ export class Game {
   private readonly tempBallisticPos = new THREE.Vector3();
   private pocketUsePreviewKind: PocketPreviewKind | null = null;
   private pocketUsePreviewTimer = 0;
-  private lastSnapshotAt = performance.now();
   private hitMarkerTimer = 0;
   private hitMarkerHeadshot = false;
   private hitMarkerKill = false;
@@ -1636,124 +1647,6 @@ export class Game {
       this.combatFx.emitRespawn(localPlayer.position, this.renderer.camera.position);
     }
     this.previousLocalState = localPlayer?.state ?? null;
-  }
-
-  /** Merge a 31Hz 'state_hot' transform update into the last full snapshot.
-   *  Hot payloads carry only moving-entity transforms (plus storm), so ships,
-   *  players and projectiles glide at full rate while the heavyweight world
-   *  state arrives at ~10Hz — this is what fixed the ~1s snapshot starvation. */
-  private applyHotSnapshot(hot: HotSnapshotPayload) {
-    const state = this.state;
-    if (!state) return; // need one full snapshot first
-    if (hot.tick < state.tick) return; // stale hot arriving after a newer full
-    state.tick = hot.tick;
-    state.serverTime = hot.serverTime;
-    state.shipsAlive = hot.shipsAlive;
-    state.storm = hot.storm;
-    for (const h of hot.ships) {
-      const ship = this.shipsById.get(h.id);
-      if (!ship) continue;
-      ship.position = h.position;
-      ship.rotation = h.rotation;
-      ship.velocity = h.velocity;
-      ship.angularVelocity = h.angularVelocity;
-      ship.pitch = h.pitch;
-      ship.roll = h.roll;
-      ship.heave = h.heave;
-      if (h.rudderAngle !== undefined) ship.rudderAngle = h.rudderAngle;
-      ship.sailHeight = h.sailHeight;
-      ship.sailAngle = h.sailAngle;
-      ship.sinking = h.sinking;
-      ship.sinkProgress = h.sinkProgress;
-      if (h.waterLevel !== undefined) ship.waterLevel = h.waterLevel;
-      if (h.floodingRate !== undefined) ship.floodingRate = h.floodingRate;
-    }
-    for (const h of hot.players) {
-      const player = this.playersById.get(h.id);
-      if (!player) continue;
-      player.position = h.position;
-      player.rotation = h.rotation;
-      player.velocity = h.velocity;
-      player.health = h.health;
-      player.armor = h.armor ?? player.armor ?? 0;
-      player.crouching = h.crouching ?? player.crouching ?? false;
-      player.state = h.state;
-      player.mastClimb = h.mastClimb;
-      player.onShipId = h.onShipId;
-      player.cutlassCharge = h.cutlassCharge;
-      player.downedUntil = h.downedUntil;
-      player.reviveProgress = h.reviveProgress;
-    }
-    for (const h of hot.projectiles) {
-      for (const projectile of state.projectiles) {
-        if (projectile.id === h.id) {
-          projectile.position = h.position;
-          projectile.velocity = h.velocity;
-          break;
-        }
-      }
-    }
-    for (const h of hot.kegs) {
-      let known = false;
-      for (const keg of state.kegs) {
-        if (keg.id === h.id) {
-          keg.position = h.position;
-          keg.timer = h.timer;
-          known = true;
-          break;
-        }
-      }
-      if (!known) {
-        // A keg placed between full snapshots must render NOW — spawn a
-        // minimal record; the next full snapshot fills shipId/localPosition.
-        state.kegs.push({
-          id: h.id,
-          shipId: null,
-          position: h.position,
-          localPosition: null,
-          section: 'bow',
-          plantedById: '',
-          timer: h.timer,
-        } as ShipKeg);
-        this.liveKegIds.add(h.id);
-      }
-    }
-    for (const h of hot.sharks) {
-      for (const shark of state.sharks ?? []) {
-        if (shark.id === h.id) {
-          shark.position = h.position;
-          shark.rotation = h.rotation;
-          shark.health = h.health;
-          shark.attackState = h.attackState;
-          shark.attackTimer = h.attackTimer;
-          break;
-        }
-      }
-    }
-    this.lastSnapshotAt = performance.now();
-    if (Number.isFinite(hot.serverTime)) {
-      const offset = hot.serverTime - performance.now() / 1000;
-      this.serverTimeOffset = this.serverTimeOffset === null
-        ? offset
-        : this.serverTimeOffset + (offset - this.serverTimeOffset) * 0.1;
-    }
-  }
-
-  private rebuildStateIndexes(state: GameState) {
-    this.playersById.clear();
-    for (const player of state.players) this.playersById.set(player.id, player);
-    this.shipsById.clear();
-    for (const ship of state.ships) this.shipsById.set(ship.id, ship);
-    this.livePlayerIds.clear();
-    for (const player of state.players) this.livePlayerIds.add(player.id);
-    this.liveProjectileIds.clear();
-    for (const projectile of state.projectiles) {
-      if (projectile.alive) this.liveProjectileIds.add(projectile.id);
-    }
-    this.liveKegIds.clear();
-    for (const keg of state.kegs) {
-      if (keg.timer > 0) this.liveKegIds.add(keg.id);
-    }
   }
 
   /** Islands still waiting to be built, drained a few per frame so joining a
