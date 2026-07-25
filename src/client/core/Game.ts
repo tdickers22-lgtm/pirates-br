@@ -150,12 +150,6 @@ const ZERO_SCALE_MAT4 = new THREE.Matrix4().makeScale(0, 0, 0);
  *  and 'harvest' (the axe prompt; LMB does the work via useItem). */
 type ClientInteractKind = InteractIntent | 'door' | 'harvest';
 
-/** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
-const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
-  'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
-  'fern_plant', 'bush', 'bush_berry', 'flower_bush', 'wildflowers', 'flower_patch',
-]);
-
 export class Game {
   private readonly renderer = new Renderer();
   private readonly ocean = new OceanRenderer();
@@ -456,7 +450,20 @@ export class Game {
   /** Island terrain / prop / sea-rock mesh construction (see world/IslandBuilder.ts). */
   private readonly islands = new IslandBuilder({
     renderer: this.renderer,
+    islandPropInstances: this.islandPropInstances,
+    foliageWind: this.foliageWind,
+    foliageTime: this.foliageTime,
+    registerLanternEmitter: (container, x, y, z, kind) => this.registerLanternEmitter(container, x, y, z, kind),
   });
+
+  /** Delegates so island/harvest code inside Game keeps its old call shape. */
+  private buildPropInstance(type: AssetName, position: THREE.Vector3, yaw: number, scale = 1): THREE.Group | null {
+    return this.islands.buildPropInstance(type, position, yaw, scale);
+  }
+
+  private buildServerProps(island: Island, group: THREE.Group, lowDetail: boolean) {
+    this.islands.buildServerProps(island, group, lowDetail);
+  }
   private readonly windWisps = new THREE.Group();
   private readonly mermaidGroup = buildMermaidMesh();
   private mermaidAnchor: { x: number; z: number; shipId: string } | null = null;
@@ -849,137 +856,6 @@ export class Game {
         material.dispose();
       }
     });
-  }
-
-  /**
-   * Clone a GLB library prop and place it. Returns null when the asset failed
-   * to load (callers keep their procedural fallback). Kept signature-stable so
-   * a later server-driven prop registry can reuse it.
-   */
-  private buildPropInstance(type: AssetName, position: THREE.Vector3, yaw: number, scale = 1): THREE.Group | null {
-    const clone = assets.clone(type);
-    if (!clone) return null;
-    clone.position.copy(position);
-    clone.rotation.y = yaw;
-    clone.scale.setScalar(scale);
-    return clone;
-  }
-
-  /** Render the SERVER's deterministic prop registry (island.props) — the same
-   *  registry PhysicsSystem collides against every tick. Before this, the
-   *  client scattered its own decorative palms/boulders while the real
-   *  colliders stayed invisible: players got shoved by nothing and walked
-   *  through every visible tree. Rendering the registry makes visuals ==
-   *  colliders, and finally shows the roster landmarks (watchtowers, standing
-   *  stones, wrecks) that were generated but never drawn. */
-  /** Inject a vertex wind-sway into an instanced foliage material: higher parts
-   *  bend more, each instance offset by its world position so a grove ripples
-   *  rather than swaying in lockstep. Applied once per shared material. */
-  private applyFoliageSway(material: THREE.Material | THREE.Material[]) {
-    if (Array.isArray(material)) {
-      for (const m of material) this.applyFoliageSway(m);
-      return;
-    }
-    const ud = material.userData as { swayApplied?: boolean };
-    if (ud.swayApplied) return;
-    ud.swayApplied = true;
-    material.onBeforeCompile = (shader) => {
-      shader.uniforms.uFoliageTime = this.foliageTime;
-      shader.uniforms.uFoliageWind = this.foliageWind;
-      shader.vertexShader = 'uniform float uFoliageTime;\nuniform vec2 uFoliageWind;\n' + shader.vertexShader;
-      shader.vertexShader = shader.vertexShader.replace(
-        '#include <begin_vertex>',
-        `#include <begin_vertex>
-         // Guarded: these materials are SHARED with non-instanced clones of the
-         // same GLB (assets.clone → harvest promote/topple actors). three.js only
-         // declares instanceMatrix under USE_INSTANCING, so an unguarded read
-         // fails shader compilation and the clone silently renders NOTHING —
-         // the "tree vanishes while chopping" bug.
-         #ifdef USE_INSTANCING
-         float swayH = max(0.0, transformed.y - 0.6) * 0.06;   // bend the crown, not the trunk base
-         vec3 iPos = vec3(instanceMatrix[3].x, instanceMatrix[3].y, instanceMatrix[3].z);
-         float ph = iPos.x * 0.13 + iPos.z * 0.11;
-         float s = sin(uFoliageTime * 1.5 + ph) + 0.35 * sin(uFoliageTime * 3.2 + ph * 1.7);
-         transformed.x += swayH * uFoliageWind.x * s;
-         transformed.z += swayH * uFoliageWind.y * s;
-         #endif`,
-      );
-    };
-    material.needsUpdate = true;
-  }
-
-  private buildServerProps(island: Island, group: THREE.Group, lowDetail: boolean) {
-    const props = island.props ?? [];
-    if (props.length === 0) return;
-    const propSlots = new Map<number, { inst: THREE.InstancedMesh; index: number }>();
-    this.islandPropInstances.set(island.id, propSlots);
-    const instancedTypes: ReadonlySet<string> = new Set([
-      'palm_a', 'palm_b', 'palm_c', 'palm_tall', 'palm_ground',
-      'boulder_a', 'boulder_b', 'boulder_c', 'barrel', 'crate',
-      'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
-      'bone_pile', 'driftwood_log', 'grave_marker',
-    ]);
-    const buckets = new Map<IslandPropType, IslandProp[]>();
-    for (const prop of props) {
-      // Dock modules are collider-only entries; the dock is drawn from island.dock.
-      if (prop.type === 'dock_mid' || prop.type === 'dock_end') continue;
-      const list = buckets.get(prop.type);
-      if (list) list.push(prop);
-      else buckets.set(prop.type, [prop]);
-    }
-    const mat4 = new THREE.Matrix4();
-    const pos = new THREE.Vector3();
-    const quat = new THREE.Quaternion();
-    const euler = new THREE.Euler();
-    const scl = new THREE.Vector3();
-    for (const [type, list] of buckets) {
-      const merged = instancedTypes.has(type) ? assets.mergedGeometry(type as AssetName) : null;
-      if (merged) {
-        if (SWAYING_FOLIAGE.has(type)) this.applyFoliageSway(merged.material);
-        const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
-        list.forEach((prop, i) => {
-          pos.set(prop.x - island.position.x, getPropGroundY(island, prop), prop.z - island.position.z);
-          euler.set(0, prop.yaw, 0);
-          quat.setFromEuler(euler);
-          scl.setScalar(prop.scale);
-          mat4.compose(pos, quat, scl);
-          inst.setMatrixAt(i, mat4);
-          if (prop.id !== undefined) propSlots.set(prop.id, { inst, index: i });
-        });
-        inst.castShadow = !lowDetail;
-        inst.receiveShadow = true;
-        inst.instanceMatrix.needsUpdate = true;
-        group.add(inst);
-        continue;
-      }
-      for (const prop of list) {
-        const localPos = new THREE.Vector3(
-          prop.x - island.position.x,
-          getPropGroundY(island, prop),
-          prop.z - island.position.z,
-        );
-        const node = this.buildPropInstance(prop.type as AssetName, localPos, prop.yaw, prop.scale);
-        if (!node) continue;
-        node.traverse((obj) => {
-          if (obj instanceof THREE.Mesh) {
-            obj.castShadow = !lowDetail;
-            obj.receiveShadow = true;
-          }
-        });
-        group.add(node);
-        if (prop.type === 'campfire') {
-          this.registerLanternEmitter(group, localPos.x, localPos.y + 0.4, localPos.z, 'campfire');
-        } else if (prop.type === 'lantern_post') {
-          this.registerLanternEmitter(group, localPos.x, localPos.y + 2.1, localPos.z, 'lantern');
-        } else if (prop.type === 'widow_memorial') {
-          // The widow's kept flame — must read from the sea at night.
-          this.registerLanternEmitter(group, localPos.x, localPos.y + 3.0, localPos.z, 'lantern');
-        } else if (prop.type === 'mermaid_shrine') {
-          // Offering candles at the throne's base.
-          this.registerLanternEmitter(group, localPos.x, localPos.y + 0.7, localPos.z, 'campfire');
-        }
-      }
-    }
   }
 
   // ── Harvest destruction: promote-on-chop + real breakdown ─────────────────
@@ -2294,7 +2170,6 @@ export class Game {
       }
     }
   }
-
 
   private buildIsland(island: Island) {
     const group = new THREE.Group();
