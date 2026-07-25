@@ -8,13 +8,29 @@
 //   4. floodingRate is the NET bilge trend — negative while bailers are winning
 //   5. cannonball ammo selection falls back to firebomb/chainshot when empty
 //   6. bots bail under player-like constraints (aboard, off-station, capped)
-//   7. storm hull damage routes through damageHullSection → holes + flooding
+//   7. storm damage stoves REAL breaches into the seaward face → holes + flooding
 //   8. ship_damage broadcasts reach every client, not just the attacker
-import { PhysicsSystem, updateShipFlooding, evaluateSectionFlood } from '../src/server/systems/PhysicsSystem.ts';
+//   9. keg blasts cluster breaches on the face the barrel was lashed to
+//  10. a saturated hull is never immune — the cap re-opens a patched breach
+//  11. the hole list fits the wire budget even with every hull at the cap
+import { PhysicsSystem, updateShipFlooding, evaluateHoleFlood } from '../src/server/systems/PhysicsSystem.ts';
 import { WeaponSystem } from '../src/server/systems/WeaponSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, PLAYER } from '../src/shared/constants/index.ts';
 import { gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
+import { countOpenHoles, toShipLocalPoint } from '../src/shared/interactions.ts';
+import { buildHotSnapshot, buildWireSnapshot } from '../src/server/core/snapshot.ts';
+
+/** Which hull face a hull-local breach point lies on. Beam-normalised: a hull
+ *  is far longer than it is wide, so a point at the half-beam 3.6 m aft is on
+ *  the STARBOARD side, not the stern. */
+function holeFace(hole, stats) {
+  const bx = Math.abs(hole.x) / (stats.width * 0.5);
+  const bz = Math.abs(hole.z) / (stats.length * 0.5);
+  return bz >= bx
+    ? (hole.z >= 0 ? 'bow' : 'stern')
+    : (hole.x >= 0 ? 'starboard' : 'port');
+}
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -43,8 +59,8 @@ function makeShip(type = 'sloop', overrides = {}) {
     sailAngle: 0,
     anchored: false,
     anchorRaiseProgress: 0,
-    holes: { bow: 0, stern: 0, port: 0, starboard: 0 },
-    hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
+    holes: [],
+    nextHoleId: 1,
     maxHull: stats.maxHull,
     onFire: false,
     fireTimer: 0,
@@ -155,13 +171,29 @@ console.log('1. Waterline shots hole hulls (ship test beats the water kill)');
   physics.update(DT, 0, [ship], [], [proj], [], [], null);
 
   expect('below-surface ball inside the hull registers the hit', proj.alive === false);
-  expect('the waterline shot holes the hull section (starboard)',
-    ship.hull.starboard < 1, `hull=${JSON.stringify(ship.hull)}`);
+  expect('the waterline shot opens exactly ONE breach', ship.holes.length === 1,
+    JSON.stringify(ship.holes));
+  const breach = ship.holes[0];
+  expect('the breach is on the struck (starboard) face', holeFace(breach, SHIP_STATS.sloop) === 'starboard',
+    `${holeFace(breach, SHIP_STATS.sloop)} at (${breach.x.toFixed(2)}, ${breach.z.toFixed(2)})`);
+  // The whole point of the rewrite: the hole is AT the ball, not at a canonical
+  // section decal point.
+  const wantLocal = toShipLocalPoint({ x: 0.5, z: 0 }, ship);
+  expect('the breach lands within 10 cm of the impact point',
+    Math.hypot(breach.x - wantLocal.x, breach.z - wantLocal.z) < 0.1,
+    `want (${wantLocal.x.toFixed(2)}, ${wantLocal.z.toFixed(2)}) got (${breach.x.toFixed(2)}, ${breach.z.toFixed(2)})`);
+  // Height comes from the ball too: this one struck BELOW the design waterline,
+  // so the breach sits below y=0 — not snapped to a canonical decal band.
+  expect('the breach height is the ball\'s height, below the waterline',
+    breach.y < -0.2 && breach.y > -0.6, `y=${breach.y.toFixed(3)}`);
   const events = physics.flushCombatEvents();
   const hit = events.find((e) => e.type === 'ship_hit');
   expect('ship_hit event emitted for the waterline shot',
     !!hit && hit.targetId === ship.id && hit.section === 'starboard',
     JSON.stringify(events));
+  expect('ship_hit carries the hull-local breach so clients decal it instantly',
+    !!hit && hit.holes.length === 1 && hit.holes[0].id === breach.id,
+    JSON.stringify(hit?.holes));
 
   // Control: the water kill still applies when no hull occupies the splash.
   const splash = makeProjectile({
@@ -196,9 +228,7 @@ console.log('\n2. Chainshot shreds rigging ABOVE the hull band; never holes hull
     ship.chainshottedUntil === 32, `chainshottedUntil=${ship.chainshottedUntil}`);
   expect('chainshot tears the canvas', ship.sailIntegrity < 1 && ship.sailHeight < 1,
     `integrity=${ship.sailIntegrity} height=${ship.sailHeight}`);
-  expect('chainshot opens NO hull holes',
-    ship.hull.bow === 1 && ship.hull.stern === 1 && ship.hull.port === 1 && ship.hull.starboard === 1,
-    JSON.stringify(ship.hull));
+  expect('chainshot opens NO hull breaches', ship.holes.length === 0, JSON.stringify(ship.holes));
   const chainHit = physics.flushCombatEvents().find((e) => e.type === 'ship_hit');
   expect('rigging hit reports 0 hull damage', !!chainHit && chainHit.damage === 0,
     `damage=${chainHit?.damage}`);
@@ -210,8 +240,7 @@ console.log('\n2. Chainshot shreds rigging ABOVE the hull band; never holes hull
   const ball = makeProjectile({ position: { x: 0.5, y: riggingY, z: 1 } });
   physics.update(DT, 2, [ship2], [], [ball], [], [], null);
   expect('a cannonball at mast height passes over the hull band', ball.alive === true);
-  expect('...leaving the hull untouched',
-    ship2.hull.bow === 1 && ship2.hull.stern === 1 && ship2.hull.port === 1 && ship2.hull.starboard === 1);
+  expect('...leaving the planking untouched', ship2.holes.length === 0);
   physics.flushCombatEvents();
 }
 
@@ -237,9 +266,12 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
   shipB.rotation = 0;
   shipB.velocity = { x: 0, y: 0, z: 0 };
   shipB.anchored = false;
-  // Lateral sections pre-holed to the brink so the slam maxes one out.
-  shipB.holes = { bow: 0, stern: 0, port: 2, starboard: 2 };
-  match.physics.syncHullFromHoles(shipB);
+  // Pre-holed along both rails so the slam pushes her over the edge.
+  shipB.holes = [];
+  shipB.nextHoleId = 1;
+  match.physics.openHoleAt(shipB, { x: SHIP_STATS[shipB.type].width * 0.5, y: 0.2, z: 0 }, 2, 'cannon');
+  match.physics.openHoleAt(shipB, { x: -SHIP_STATS[shipB.type].width * 0.5, y: 0.2, z: 0 }, 2, 'cannon');
+  const holesBeforeRam = shipB.holes.length;
   shipA.position = { x: -3, y: 0, z: 0 };
   shipA.rotation = 0;
   shipA.velocity = { x: 8, y: 0, z: 0 };
@@ -259,9 +291,14 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
   const credit = match.shipLastDamagedByPlayer.get(shipB.id);
   expect('ram damage banks sink credit for the rammer\'s helmsman',
     !!credit && credit.attackerId === attacker.id, JSON.stringify(credit ?? null));
-  expect('the ram itself broke a hull section',
-    Math.min(shipB.hull.bow, shipB.hull.stern, shipB.hull.port, shipB.hull.starboard) <= 0,
-    JSON.stringify(shipB.hull));
+  expect('the ram itself stove fresh planking in',
+    countOpenHoles(shipB) > holesBeforeRam,
+    `before=${holesBeforeRam} after=${countOpenHoles(shipB)}`);
+  const ramBreaches = shipB.holes.slice(holesBeforeRam);
+  const bStats = SHIP_STATS[shipB.type];
+  expect('the ram breach lands on the beam the rammer actually struck',
+    ramBreaches.length > 0 && ramBreaches.every((h) => holeFace(h, bStats) === 'port'),
+    JSON.stringify(ramBreaches.map((h) => [holeFace(h, bStats), +h.x.toFixed(2), +h.z.toFixed(2)])));
 
   const killsBefore = attacker.kills;
   const goldBefore = attacker.gold;
@@ -312,8 +349,9 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   ship.velocity = { x: 0, y: 0, z: 0 };
   ship.anchored = true;
   ship.inventory = ship.inventory.filter((s) => s.item !== 'wood_plank');
-  ship.holes.port = 1;
-  match.physics.syncHullFromHoles(ship);
+  ship.holes = [];
+  ship.nextHoleId = 1;
+  match.physics.openHoleAt(ship, { x: -SHIP_STATS[ship.type].width * 0.5, y: 0.05, z: 0 }, 1, 'cannon');
   player.state = 'alive';
   player.onShipId = ship.id;
   player.position = {
@@ -337,10 +375,22 @@ console.log('\n4. floodingRate is the NET trend — negative while a bailer is w
   }
 
   // Control: nobody bailing — the gauge trend must read RISING (+ingress).
+  // Sample the published rate across the window rather than one tick: the hull
+  // is riding a live Gerstner sea, so the breach's depth (and therefore its
+  // instantaneous rate) breathes with the swell. The TREND is the claim.
   const levelBeforeControl = ship.waterLevel;
-  for (let i = 0; i < 30; i++) { player.health = 100; if (bot) bot.health = 100; match.tick(); }
-  expect('untended hole: replicated floodingRate is positive',
-    ship.floodingRate > 0.005, `rate=${ship.floodingRate}`);
+  let rateSum = 0;
+  let risingTicks = 0;
+  for (let i = 0; i < 30; i++) {
+    player.health = 100; if (bot) bot.health = 100;
+    match.tick();
+    rateSum += ship.floodingRate;
+    if (ship.floodingRate > 0) risingTicks += 1;
+  }
+  expect('untended hole: replicated floodingRate reads RISING across the window',
+    rateSum / 30 > 0.005, `meanRate=${(rateSum / 30).toFixed(5)}`);
+  expect('untended hole: the gauge arrow points up on nearly every tick',
+    risingTicks >= 27, `${risingTicks}/30 ticks rising`);
   expect('untended hole: water actually rises', ship.waterLevel > levelBeforeControl + 0.0015,
     `water ${levelBeforeControl.toFixed(4)} → ${ship.waterLevel.toFixed(4)}`);
 
@@ -429,6 +479,11 @@ console.log('\n6. Bots bail under player-like constraints');
   const ship = st.ships.find((s) => s.id === b0.shipId);
   for (const b of bots) { b.atHelm = false; b.atCannon = false; b.atSails = false; b.atCrowNest = false; }
 
+  // No breaches for the bailing sub-tests: with an open hole a bot abandons the
+  // bucket to walk to it (patch-before-bail priority), which is its own test below.
+  ship.holes = [];
+  ship.nextHoleId = 1;
+
   // Not aboard → no bailing (the old code let any bot bail from anywhere).
   ship.waterLevel = 0.6;
   b0.onShipId = null;
@@ -470,6 +525,39 @@ console.log('\n6. Bots bail under player-like constraints');
   expect('drain equals exactly two buckets',
     Math.abs(ship.waterLevel - (0.6 - 2 * FLOODING.BAIL_RATE * DT)) < 1e-9,
     `water=${ship.waterLevel}`);
+
+  // Per-hole damage control: a bot abandons the bucket, walks to the rail above
+  // ONE specific breach, and planks THAT id.
+  for (const b of bots) { b.bailing = false; b.onShipId = ship.id; b.shipId = ship.id; }
+  ship.holes = [];
+  ship.nextHoleId = 1;
+  ship.waterLevel = 0.6;
+  ship.inventory = [...ship.inventory.filter((e) => e.item !== 'wood_plank'), { item: 'wood_plank', qty: 6 }];
+  const stats6 = SHIP_STATS[ship.type];
+  match.physics.openHoleAt(ship, { x: stats6.width * 0.5, y: 0.2, z: stats6.length * 0.3 }, 1, 'cannon');
+  const target = ship.holes[0];
+  // Park the crew amidships, nowhere near the breach.
+  for (const b of bots) {
+    b.position = { x: ship.position.x, y: ship.position.y + stats6.height + 0.3, z: ship.position.z };
+  }
+  const startDist = Math.hypot(
+    toShipLocalPoint(b0.position, ship).x - target.x,
+    toShipLocalPoint(b0.position, ship).z - target.z,
+  );
+  let patched = false;
+  for (let i = 0; i < 900 && !patched; i++) {
+    match.updateBotFlooding(DT);
+    patched = ship.holes[0].patched === true;
+  }
+  const endLocal = toShipLocalPoint(b0.position, ship);
+  expect('a bot walks to the rail above the breach', 
+    Math.hypot(endLocal.x - target.x, endLocal.z - target.z) < startDist,
+    `start=${startDist.toFixed(2)}m end=${Math.hypot(endLocal.x - target.x, endLocal.z - target.z).toFixed(2)}m`);
+  expect('...and planks THAT specific breach id', patched === true,
+    JSON.stringify(ship.holes));
+  expect('planking it consumed a plank',
+    (ship.inventory.find((e) => e.item === 'wood_plank')?.qty ?? 0) < 6);
+  expect('the patched breach stops leaking', evaluateHoleFlood(ship, 0).length === 0);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -515,22 +603,27 @@ console.log('\n7. Storm damage punches holes (damageHullSection) instead of melt
   testShip.anchored = true;
   testShip.inventory = testShip.inventory.filter((s) => s.item !== 'wood_plank');
 
-  const sections = ['bow', 'stern', 'port', 'starboard'];
   let ticks = 0;
   for (; ticks < 900; ticks++) {
     b0.health = 100;
     b1.health = 100;
     match.tick();
-    if (Math.min(...sections.map((s) => testShip.hull[s])) <= 0.45) break;
+    if (countOpenHoles(testShip) >= 2) break;
   }
-  const hull = sections.map((s) => testShip.hull[s]).sort((a, b) => a - b);
-  expect('the storm holes a hull section (≤ hole threshold)',
-    hull[0] <= FLOODING.HOLE_THRESHOLD, `hull=${JSON.stringify(testShip.hull)} after ${ticks} ticks`);
-  expect('the seaward (bow) face takes the brunt',
-    testShip.hull.bow === hull[0], `hull=${JSON.stringify(testShip.hull)}`);
-  expect('damage is per-section (seaward face battered, rest glancing) — not lockstep melt',
-    hull[1] > 0.8, `hull=${JSON.stringify(testShip.hull)}`);
-  expect('storm damage routes through damageHullSection (repair delay armed)',
+  const stormHoles = testShip.holes.filter((h) => !h.patched);
+  const stormStats = SHIP_STATS[testShip.type];
+  expect('the storm stoves real planking in', stormHoles.length >= 1,
+    `holes=${JSON.stringify(testShip.holes)} after ${ticks} ticks`);
+  expect('every sea breaks through the SEAWARD (bow) face',
+    stormHoles.length > 0 && stormHoles.every((h) => holeFace(h, stormStats) === 'bow'),
+    JSON.stringify(stormHoles.map((h) => [holeFace(h, stormStats), +h.x.toFixed(2), +h.z.toFixed(2)])));
+  expect('breaking seas land in the waterline band, not at a fixed decal point',
+    stormHoles.every((h) => h.y >= FLOODING.HOLE_BAND_Y.min && h.y <= FLOODING.HOLE_BAND_Y.max),
+    JSON.stringify(stormHoles.map((h) => +h.y.toFixed(3))));
+  expect('two seas do not break through the SAME plank (they spread along the face)',
+    stormHoles.length < 2 || stormHoles.some((h) => Math.abs(h.x - stormHoles[0].x) > 0.05),
+    JSON.stringify(stormHoles.map((h) => +h.x.toFixed(3))));
+  expect('storm damage routes through openHoleAt (repair delay armed)',
     testShip.repairCooldown > 0, `repairCooldown=${testShip.repairCooldown}`);
   expect('the battered ship is still afloat (SoT fight, not silent deletion)',
     testShip.sinking === false && testShip.alive === true);
@@ -547,12 +640,9 @@ console.log('\n7. Storm damage punches holes (damageHullSection) instead of melt
   });
   testShip.position = { x: calmSpot.x, y: 0, z: calmSpot.z };
   testShip.velocity = { x: 0, y: 0, z: 0 };
-  // Max out the storm-holed section so it gushes hard once submerged, then let
-  // the calm-water flood loop below prove the hole is REAL (holes + water).
-  const stormSections = ['bow', 'stern', 'port', 'starboard'];
-  const stormHoled = stormSections.find((sec) => testShip.holes[sec] > 0) ?? 'bow';
-  testShip.holes[stormHoled] = FLOODING.MAX_HOLES_PER_SECTION;
-  match.physics.syncHullFromHoles(testShip);
+  // Drop the storm breaches to the waterline so they gush deterministically at
+  // the static float line, proving the hole is REAL (holes + water), not hp loss.
+  for (const h of testShip.holes) h.y = 0;
   const waterBefore = testShip.waterLevel ?? 0;
   for (let i = 0; i < 600; i++) {
     b0.health = 100;
@@ -608,6 +698,133 @@ console.log('\n8. ship_damage broadcasts reach every client (not just the attack
     attackerMsgs.map((m) => m.type).join(','));
   expect('the attacker also sees the world broadcast',
     attackerMsgs.filter((m) => m.type === 'ship_damage').length === 1);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\n9. A keg blast clusters breaches on the face it was lashed to');
+
+{
+  const match = new Match({ matchId: 'combat-keg-holes', botCount: 2 });
+  const st = match.state;
+  st.phase = 'playing';
+  const ship = st.ships[0];
+  const stats = SHIP_STATS[ship.type];
+  ship.holes = [];
+  ship.nextHoleId = 1;
+  ship.onFire = false;
+
+  // Lash a keg to the starboard rail, well aft of amidships.
+  const kegLocal = { x: stats.width * 0.4, z: -stats.length * 0.3 };
+  const kegWorld = match.toShipWorld(kegLocal.x, kegLocal.z, ship);
+  st.kegs.push({
+    id: 'keg-test', shipId: ship.id, plantedById: st.players[0].id,
+    section: 'starboard', position: { x: kegWorld.x, y: ship.position.y + stats.height, z: kegWorld.z },
+    localPosition: { x: kegLocal.x, y: stats.height, z: kegLocal.z },
+    timer: 0.001, mega: false,
+  });
+  match.updateKegs(1);
+
+  const holes = ship.holes.filter((h) => !h.patched);
+  const byFace = { bow: 0, stern: 0, port: 0, starboard: 0 };
+  for (const h of holes) byFace[holeFace(h, stats)] += 1;
+  expect('the blast breaches every face of the hull', 
+    Object.values(byFace).every((n) => n > 0), JSON.stringify(byFace));
+  expect('the face the barrel sat on is stove in hardest',
+    byFace.starboard > byFace.port && byFace.starboard > byFace.bow,
+    JSON.stringify(byFace));
+  const primary = holes.filter((h) => holeFace(h, stats) === 'starboard');
+  expect('primary-face breaches cluster within ~1.5 m of where the keg sat',
+    primary.every((h) => Math.hypot(h.x - kegLocal.x, h.z - kegLocal.z) < 1.5),
+    JSON.stringify(primary.map((h) => [+h.x.toFixed(2), +h.z.toFixed(2)])));
+  expect('every keg breach rides the waterline band',
+    holes.every((h) => h.y >= FLOODING.HOLE_BAND_Y.min && h.y <= FLOODING.HOLE_BAND_Y.max),
+    JSON.stringify(holes.map((h) => +h.y.toFixed(3))));
+  expect('the blast also sets her alight', ship.onFire === true);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\n10. A saturated hull is NEVER immune (the old 3-per-section bug)');
+
+{
+  const physics = new PhysicsSystem();
+  const ship = makeShip('sloop');
+  const stats = SHIP_STATS.sloop;
+  // Empty a whole broadside into one flank.
+  for (let i = 0; i < FLOODING.MAX_HOLES_PER_SHIP + 6; i++) {
+    physics.openHoleAt(ship, { x: stats.width * 0.5, y: 0.2, z: (i % 7) - 3 }, 1, 'cannon');
+  }
+  expect('the list never grows past MAX_HOLES_PER_SHIP',
+    ship.holes.length === FLOODING.MAX_HOLES_PER_SHIP, `holes=${ship.holes.length}`);
+  expect('a saturated flank keeps taking fire (all slots open, none swallowed)',
+    countOpenHoles(ship) === FLOODING.MAX_HOLES_PER_SHIP);
+
+  // Plank her up completely, then keep shooting: the plank comes off.
+  for (const h of ship.holes) h.patched = true;
+  expect('a fully planked hull leaks nothing', countOpenHoles(ship) === 0);
+  physics.openHoleAt(ship, { x: stats.width * 0.5, y: 0.2, z: 0 }, 1, 'cannon');
+  expect('a hit on a saturated, fully-patched hull RE-OPENS a breach',
+    countOpenHoles(ship) === 1 && ship.holes.length === FLOODING.MAX_HOLES_PER_SHIP,
+    `open=${countOpenHoles(ship)} total=${ship.holes.length}`);
+  expect('the re-opened breach moved to where the new ball struck',
+    ship.holes.some((h) => !h.patched && Math.abs(h.z) < 0.01),
+    JSON.stringify(ship.holes.filter((h) => !h.patched)));
+
+  // Charged cannons still add their extra hole; a super shot still caves in 3.
+  const charged = makeShip('sloop');
+  physics.onProjectileHitShip(makeProjectile({
+    position: { x: 2, y: charged.position.y + 0.2, z: 0 },
+    damage: SHIP.CANNON_DAMAGE_HULL * 1.5,
+  }), charged, 0);
+  expect('charged_cannons still punch more than one breach', charged.holes.length > 1,
+    `holes=${charged.holes.length}`);
+  const superShip = makeShip('sloop');
+  const superProj = makeProjectile({ position: { x: 2, y: superShip.position.y + 0.2, z: 0 } });
+  superProj.special = 'super_cannonball';
+  physics.onProjectileHitShip(superProj, superShip, 0);
+  expect('a super cannonball caves in three', superShip.holes.length === 3,
+    `holes=${superShip.holes.length}`);
+  expect('sibling breaches scatter instead of stacking on one point',
+    new Set(superShip.holes.map((h) => `${h.x.toFixed(2)},${h.z.toFixed(2)}`)).size === 3,
+    JSON.stringify(superShip.holes.map((h) => [+h.x.toFixed(2), +h.z.toFixed(2)])));
+  physics.flushCombatEvents();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\n11. The hole list fits the wire, even with every hull at the cap');
+
+{
+  const match = new Match({ matchId: 'combat-hole-wire', botCount: 9 });
+  for (let i = 0; i < 250; i++) match.tick(1 / 62.5);
+  const clean = JSON.stringify(buildWireSnapshot(match.buildSnapshot(false), false)).length;
+
+  // Worst case the protocol can ever see: every alive hull carrying its full
+  // MAX_HOLES_PER_SHIP, and every one of them PATCHED (the longest encoding).
+  for (const ship of match.state.ships) {
+    ship.holes = [];
+    ship.nextHoleId = 1;
+    match.physics.openHoleAt(ship, { x: 2.4, y: 0.15, z: 0 }, FLOODING.MAX_HOLES_PER_SHIP, 'cannon');
+  }
+  const riddled = JSON.stringify(buildWireSnapshot(match.buildSnapshot(false), false));
+  for (const ship of match.state.ships) for (const h of ship.holes) h.patched = true;
+  const planked = JSON.stringify(buildWireSnapshot(match.buildSnapshot(false), false));
+  const hot = JSON.stringify(buildHotSnapshot(match.state, match.t));
+  const totalHoles = match.state.ships.reduce((n, s) => n + s.holes.length, 0);
+  console.log(`  sizes: clean=${(clean / 1024).toFixed(1)}KB riddled=${(riddled.length / 1024).toFixed(1)}KB planked=${(planked.length / 1024).toFixed(1)}KB (${totalHoles} holes) hot=${(hot.length / 1024).toFixed(1)}KB`);
+
+  expect('every hull at the cap still fits the 35KB full-snapshot guard',
+    riddled.length < 35 * 1024, `${riddled.length}B`);
+  expect('...and so does the pricier all-planked encoding',
+    planked.length < 35 * 1024, `${planked.length}B`);
+  expect('the hole list is what grew, and it is small',
+    riddled.length > clean && riddled.length - clean < 4 * 1024,
+    `+${riddled.length - clean}B for ${totalHoles} holes`);
+  expect('breaches do NOT ride the 31Hz hot channel (ship_damage covers latency)',
+    !hot.includes('"holes"') && hot.length < 8 * 1024, `${hot.length}B`);
+  expect('the server-internal hole counter never ships', !riddled.includes('nextHoleId'));
+  expect('the retired per-section hull bars are gone from the wire',
+    !/"hull":\{/.test(riddled));
+  expect('an open breach ships id + point and nothing else',
+    /\{"id":\d+,"x":-?[\d.]+,"y":-?[\d.]+,"z":-?[\d.]+\}/.test(riddled));
 }
 
 if (failures > 0) {

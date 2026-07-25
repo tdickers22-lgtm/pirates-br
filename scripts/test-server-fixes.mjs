@@ -4,7 +4,7 @@
 import { Match } from '../src/server/core/Match.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import { WeaponSystem } from '../src/server/systems/WeaponSystem.ts';
-import { SHIP, WEAPONS } from '../src/shared/constants/index.ts';
+import { SHIP, SHIP_STATS, WEAPONS } from '../src/shared/constants/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -60,9 +60,11 @@ expect('undefused keg still detonates exactly once (control)', explosions === 1,
 delete match.explodeKeg;
 state.kegs.length = 0;
 
-// ── 2. Hull-section attribution at rotations 0/90/180/270 ────
-console.log('\nHull-section attribution for rotated ships');
-const SECTIONS = ['bow', 'stern', 'port', 'starboard'];
+// ── 2. Breach placement at rotations 0/90/180/270 ────
+// The ball must open the planking at the point it struck, in the ship's own
+// frame, at EVERY heading — the rotation transform is the whole reason a
+// waterline shot lands where you aimed instead of on a canonical face.
+console.log('\nBreach placement for rotated ships');
 
 function makeShip(rotation) {
   return {
@@ -78,7 +80,8 @@ function makeShip(rotation) {
     sailAngle: 0,
     anchored: true,
     anchorRaiseProgress: 0,
-    hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
+    holes: [],
+    nextHoleId: 1,
     maxHull: 600,
     onFire: false,
     fireTimer: 0,
@@ -100,7 +103,18 @@ function makeShip(rotation) {
   };
 }
 
-function primarySectionHit(rotation, worldX, worldZ) {
+/** Which hull face a hull-local breach point lies on. Beam-normalised: a hull
+ *  is far longer than it is wide, so a point at the half-beam 3.6 m aft is on
+ *  the STARBOARD side, not the stern. */
+function holeFace(hole, stats) {
+  const bx = Math.abs(hole.x) / (stats.width * 0.5);
+  const bz = Math.abs(hole.z) / (stats.length * 0.5);
+  return bz >= bx
+    ? (hole.z >= 0 ? 'bow' : 'stern')
+    : (hole.x >= 0 ? 'starboard' : 'port');
+}
+
+function breachFromHit(rotation, worldX, worldZ) {
   const physics = new PhysicsSystem();
   const ship = makeShip(rotation);
   physics.onProjectileHitShip({
@@ -118,7 +132,28 @@ function primarySectionHit(rotation, worldX, worldZ) {
     visualOnly: false,
     showImpact: true,
   }, ship, 0);
-  return SECTIONS.reduce((worst, s) => (ship.hull[s] < ship.hull[worst] ? s : worst), 'bow');
+  return ship.holes[0] ?? null;
+}
+
+/** The impact point resolved into the ship frame by hand — the answer the
+ *  breach must match, independent of the code under test. */
+function expectedLocal(rotation, worldX, worldZ) {
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  return { x: worldX * cos - worldZ * sin, z: worldX * sin + worldZ * cos };
+}
+
+function checkBreach(label, rotation, worldX, worldZ, face) {
+  const stats = SHIP_STATS.sloop;
+  const hole = breachFromHit(rotation, worldX, worldZ);
+  const want = expectedLocal(rotation, worldX, worldZ);
+  expect(`${label} opens a breach`, !!hole);
+  if (!hole) return;
+  expect(`${label} lands on the ${face} face`, holeFace(hole, stats) === face,
+    `got ${holeFace(hole, stats)} at (${hole.x.toFixed(2)}, ${hole.z.toFixed(2)})`);
+  expect(`${label} lands at the exact hull-local impact point`,
+    Math.hypot(hole.x - want.x, hole.z - want.z) < 0.01,
+    `want (${want.x.toFixed(2)}, ${want.z.toFixed(2)}) got (${hole.x.toFixed(2)}, ${hole.z.toFixed(2)})`);
 }
 
 for (const rotation of [0, Math.PI * 0.5, Math.PI, Math.PI * 1.5]) {
@@ -127,10 +162,10 @@ for (const rotation of [0, Math.PI * 0.5, Math.PI, Math.PI * 1.5]) {
   const fz = Math.cos(rotation); // bow direction in world space
   const sx = Math.cos(rotation);
   const sz = -Math.sin(rotation); // starboard direction in world space
-  expect(`bow hit attributed at ${deg}°`, primarySectionHit(rotation, fx * 5, fz * 5) === 'bow');
-  expect(`stern hit attributed at ${deg}°`, primarySectionHit(rotation, -fx * 5, -fz * 5) === 'stern');
-  expect(`starboard hit attributed at ${deg}°`, primarySectionHit(rotation, sx * 2, sz * 2) === 'starboard');
-  expect(`port hit attributed at ${deg}°`, primarySectionHit(rotation, -sx * 2, -sz * 2) === 'port');
+  checkBreach(`bow hit at ${deg}°`, rotation, fx * 5, fz * 5, 'bow');
+  checkBreach(`stern hit at ${deg}°`, rotation, -fx * 5, -fz * 5, 'stern');
+  checkBreach(`starboard hit at ${deg}°`, rotation, sx * 2, sz * 2, 'starboard');
+  checkBreach(`port hit at ${deg}°`, rotation, -sx * 2, -sz * 2, 'port');
 }
 
 // ── 3. Cannonball vs player damage ───────────────────────────

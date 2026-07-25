@@ -57,16 +57,21 @@ await freeLook(
 );
 await wait(700); await shot('ship-station-tags');
 
-// ── 2. Hole markers + deck repair chips (client-forced hull state, reapplied
-//       every 30ms so the 10Hz snapshots can't scrub it) ──
+// ── 2. Hole ENTITIES + plank patches (client-forced breach list, reapplied
+//       every 30ms so the 10Hz snapshots can't scrub it). Points are hull-local
+//       metres: +x starboard, +z bow, y = 0 the design waterline. ──
 await page.evaluate(() => {
   const g = window.__piratesBR;
   const me = g.state.players.find((p) => p.id === g.localPlayerId);
+  window.__holeSet = [
+    { id: 901, x: -2.5, y: 0.10, z: 1.4, patched: false },
+    { id: 902, x: -2.5, y: 0.32, z: -0.9, patched: false },
+    { id: 903, x: 0.6, y: 0.22, z: 5.4, patched: false },
+  ];
   window.__holeForce = setInterval(() => {
     const ship = g.state.ships.find((s) => s.id === me?.shipId) ?? g.state.ships[0];
     if (!ship) return;
-    ship.holes.port = 2; ship.hull.port = 1 - 2 / 3;
-    ship.holes.bow = 1; ship.hull.bow = 1 - 1 / 3;
+    ship.holes = window.__holeSet.map((h) => ({ ...h }));
   }, 30);
 });
 await wait(900);
@@ -75,17 +80,11 @@ await freeLook(
   [park.ship.x, 0.6, park.ship.z],
 );
 await wait(700); await shot('hole-markers-port');
-// Repair one hole (2 → 1) so a plank patch spawns, then look again.
+// Plank ONE of the two port breaches so crossed planks spawn at THAT point
+// while its neighbour keeps gaping — the exact case the old count-diffing
+// renderer got wrong (a plank floating over a still-open hole).
 await page.evaluate(() => {
-  const g = window.__piratesBR;
-  const me = g.state.players.find((p) => p.id === g.localPlayerId);
-  clearInterval(window.__holeForce);
-  window.__holeForce = setInterval(() => {
-    const ship = g.state.ships.find((s) => s.id === me?.shipId) ?? g.state.ships[0];
-    if (!ship) return;
-    ship.holes.port = 1; ship.hull.port = 1 - 1 / 3;
-    ship.holes.bow = 0; ship.hull.bow = 1;
-  }, 30);
+  window.__holeSet[0].patched = true;
 });
 await wait(900); await shot('hole-patched-port');
 await freeLook(

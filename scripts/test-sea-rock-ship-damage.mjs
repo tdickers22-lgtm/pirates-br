@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
+import { FLOODING, SHIP_STATS } from '../src/shared/constants/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -19,7 +20,8 @@ function makeShip(velocity) {
     rotation: 0,
     velocity: { ...velocity },
     angularVelocity: 0,
-    hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
+    holes: [],
+    nextHoleId: 1,
     maxHull: 600,
     repairCooldown: 0,
     autoRepairProgress: 0,
@@ -45,16 +47,38 @@ function makeRock(x, z) {
   };
 }
 
-function runImpact({ label, section, rock, velocity }) {
+/** Which hull face a hull-local breach point lies on. Beam-normalised: a hull
+ *  is far longer than it is wide, so a point at the half-beam 3.6 m aft is on
+ *  the STARBOARD side, not the stern. */
+function holeFace(hole, stats) {
+  const bx = Math.abs(hole.x) / (stats.width * 0.5);
+  const bz = Math.abs(hole.z) / (stats.length * 0.5);
+  return bz >= bx
+    ? (hole.z >= 0 ? 'bow' : 'stern')
+    : (hole.x >= 0 ? 'starboard' : 'port');
+}
+
+function runImpact({ label, section, rock, velocity, expectPoint }) {
   const physics = new PhysicsSystem();
   const ship = makeShip(velocity);
+  const stats = SHIP_STATS.sloop;
   physics.pushShipOutOfSeaRock(ship, rock);
 
-  expect(`${label}: damages ${section}`, ship.hull[section] < 0.99, `${section}=${ship.hull[section]}`);
-  for (const other of ['bow', 'stern', 'port', 'starboard']) {
-    if (other === section) continue;
-    expect(`${label}: leaves ${other} untouched`, ship.hull[other] === 1, `${other}=${ship.hull[other]}`);
-  }
+  const open = ship.holes.filter((h) => !h.patched);
+  expect(`${label}: tears the planking open`, open.length >= 1, `holes=${JSON.stringify(ship.holes)}`);
+  // The rock bites at the hull SAMPLE that struck it — the breach point itself
+  // must land on the struck face, not merely be tagged with a section name.
+  expect(`${label}: every breach lands on the ${section} face`,
+    open.length > 0 && open.every((h) => holeFace(h, stats) === section),
+    JSON.stringify(open.map((h) => [holeFace(h, stats), +h.x.toFixed(2), +h.z.toFixed(2)])));
+  expect(`${label}: breach sits within a metre of the contact point`,
+    open.every((h) => Math.hypot(h.x - expectPoint.x, h.z - expectPoint.z) < 1.0),
+    `expected ~${JSON.stringify(expectPoint)} got ${JSON.stringify(open.map((h) => [+h.x.toFixed(2), +h.z.toFixed(2)]))}`);
+  expect(`${label}: breach rides the waterline band`,
+    open.every((h) => h.y >= FLOODING.HOLE_BAND_Y.min - 1e-9 && h.y <= FLOODING.HOLE_BAND_Y.max + 1e-9),
+    JSON.stringify(open.map((h) => +h.y.toFixed(3))));
+  expect(`${label}: a fresh hit re-arms the field-repair cooldown`,
+    ship.repairCooldown > 0, `cooldown=${ship.repairCooldown}`);
 }
 
 console.log('Sea rock ship hull-section damage');
@@ -64,6 +88,7 @@ runImpact({
   section: 'bow',
   rock: makeRock(0, 7.2),
   velocity: { x: 0, y: 0, z: 6 },
+  expectPoint: { x: 0, z: 5.6 },
 });
 
 runImpact({
@@ -71,6 +96,7 @@ runImpact({
   section: 'stern',
   rock: makeRock(0, -6.35),
   velocity: { x: 0, y: 0, z: -6 },
+  expectPoint: { x: 0, z: -5.6 },
 });
 
 runImpact({
@@ -78,6 +104,7 @@ runImpact({
   section: 'starboard',
   rock: makeRock(3.15, 0),
   velocity: { x: 6, y: 0, z: 0 },
+  expectPoint: { x: 2.6, z: 0 },
 });
 
 runImpact({
@@ -85,13 +112,15 @@ runImpact({
   section: 'port',
   rock: makeRock(-3.15, 0),
   velocity: { x: -6, y: 0, z: 0 },
+  expectPoint: { x: -2.6, z: 0 },
 });
 
 {
   const physics = new PhysicsSystem();
   const ship = makeShip({ x: 0, y: 0, z: 1.7 });
   physics.pushShipOutOfSeaRock(ship, makeRock(0, 7.2));
-  expect('Soft rock bump below damage threshold does not hurt hull', ship.hull.bow === 1, `bow=${ship.hull.bow}`);
+  expect('Soft rock bump below damage threshold opens no breach', ship.holes.length === 0,
+    JSON.stringify(ship.holes));
 }
 
 if (failures > 0) {

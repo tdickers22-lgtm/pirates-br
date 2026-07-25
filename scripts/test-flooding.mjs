@@ -1,16 +1,18 @@
 #!/usr/bin/env node
-// SoT naval damage loop, PURELY hole-based: ingress from open holes below the
-// waterline, weight of water (speed/rudder/freeboard), bailing vs holes, passive
-// pump, sink-by-flood, fire dousing, and chainshot (rigging-only, no hull holes).
+// SoT naval damage loop, PURELY hole-based and now per-ENTITY: every breach is
+// a point in the hull-local frame, it leaks only while that point sits under
+// the live surface, ingress scales with how deep it sits, a plank shuts ONE of
+// them, and water — never a hull-HP pool — is what sinks the ship.
 import {
   PhysicsSystem,
   applyShipRudderSteering,
-  evaluateSectionFlood,
+  evaluateHoleFlood,
   shipIngressRate,
   updateShipFlooding,
 } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared/constants/index.ts';
+import { countOpenHoles } from '../src/shared/interactions.ts';
 import { angleWrap, sampleWind } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -24,6 +26,13 @@ function expect(label, condition, detail = '') {
 }
 
 const DT = 1 / 60;
+
+/** A breach entity at an exact hull-local point (+x starboard, +z bow, y = 0
+ *  IS the design waterline). */
+let holeSeq = 0;
+function hole(x, y, z, patched = false) {
+  return { id: ++holeSeq, x, y, z, patched };
+}
 
 function makeShip(type = 'sloop', overrides = {}) {
   const stats = SHIP_STATS[type];
@@ -40,8 +49,8 @@ function makeShip(type = 'sloop', overrides = {}) {
     sailAngle: 0,
     anchored: false,
     anchorRaiseProgress: 0,
-    holes: { bow: 0, stern: 0, port: 0, starboard: 0 },
-    hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
+    holes: [],
+    nextHoleId: 1,
     maxHull: stats.maxHull,
     onFire: false,
     fireTimer: 0,
@@ -68,31 +77,32 @@ function makeShip(type = 'sloop', overrides = {}) {
   };
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-console.log('Ingress: two open holes (port + starboard) sink an untended ship');
+/** Two breaches on the waterline, one per rail — the canonical "shot at the
+ *  waterline from both sides" state the ingress balance is tuned around. */
+function waterlineHoles(type) {
+  const stats = SHIP_STATS[type];
+  return [hole(stats.width * 0.5, 0, 0), hole(-stats.width * 0.5, 0, 0)];
+}
 
-/** Untended fill time (seconds) for a level ship with two lateral holes. */
+// ────────────────────────────────────────────────────────────────────────────
+console.log('Ingress: two waterline breaches sink an untended ship');
+
+/** Untended fill time (seconds) for a level ship with two lateral breaches. */
 function untendedFillTime(type) {
-  const ship = makeShip(type, {
-    position: { x: 0, y: -0.2, z: 0 }, // sitting a touch low: lateral holes below the line
-    holes: { bow: 0, stern: 0, port: 1, starboard: 1 },
-  });
-  const flooding = evaluateSectionFlood(ship, 0).filter((s) => s.flooding).map((s) => s.section);
+  const ship = makeShip(type, { holes: waterlineHoles(type) });
+  const flooding = evaluateHoleFlood(ship, 0).filter((h) => h.flooding);
   let t = 0;
   for (let i = 0; i < 200 * 60 && (ship.waterLevel ?? 0) < 1; i++) {
     updateShipFlooding(ship, 0, DT);
     t += DT;
   }
-  return { t, floodingSections: flooding };
+  return { t, flooding };
 }
 
 {
   const sloop = untendedFillTime('sloop');
-  expect('exactly the two holed sections flood (bow/stern intact stay dry)',
-    sloop.floodingSections.length === 2
-    && sloop.floodingSections.includes('port')
-    && sloop.floodingSections.includes('starboard'),
-    `flooding=${JSON.stringify(sloop.floodingSections)}`);
+  expect('both waterline breaches take on water',
+    sloop.flooding.length === 2, `flooding=${sloop.flooding.length}`);
   expect('sloop: two open holes founder it in ~55–80 s untended',
     sloop.t >= 55 && sloop.t <= 80, `t=${sloop.t.toFixed(1)}s`);
 
@@ -107,56 +117,83 @@ function untendedFillTime(type) {
 console.log('\nMore holes flood faster; a reinforced hull seeps slower');
 
 {
-  const two = makeShip('sloop', { position: { x: 0, y: -0.3, z: 0 }, holes: { bow: 0, stern: 0, port: 1, starboard: 1 } });
-  const three = makeShip('sloop', { position: { x: 0, y: -0.3, z: 0 }, holes: { bow: 1, stern: 0, port: 1, starboard: 1 } });
+  const two = makeShip('sloop', { holes: waterlineHoles('sloop') });
+  const three = makeShip('sloop', { holes: [...waterlineHoles('sloop'), hole(0, 0, 4)] });
   expect('three open holes gush faster than two', shipIngressRate(three, 0) > shipIngressRate(two, 0),
     `two=${shipIngressRate(two, 0).toFixed(4)} three=${shipIngressRate(three, 0).toFixed(4)}`);
   const reinforced = makeShip('sloop', {
-    position: { x: 0, y: -0.3, z: 0 },
-    holes: { bow: 0, stern: 0, port: 1, starboard: 1 },
+    holes: waterlineHoles('sloop'),
     upgrades: [{ type: 'hull_reinforcement' }],
   });
   expect('a reinforced hull floods slower than a standard one',
     shipIngressRate(reinforced, 0) < shipIngressRate(two, 0),
     `std=${shipIngressRate(two, 0).toFixed(4)} reinforced=${shipIngressRate(reinforced, 0).toFixed(4)}`);
-  const expectedReinforced = FLOODING.INGRESS_PER_HOLE * 2 * FLOODING.INGRESS_CLASS_SCALE.sloop * SHIP_UPGRADES.HULL_INGRESS_MULT;
-  expect('reinforced ingress = base × HULL_INGRESS_MULT',
-    Math.abs(shipIngressRate(reinforced, 0) - expectedReinforced) < 1e-9,
+  expect('hull_reinforcement stays exactly an ingress multiplier',
+    Math.abs(shipIngressRate(reinforced, 0) - shipIngressRate(two, 0) * SHIP_UPGRADES.HULL_INGRESS_MULT) < 1e-12,
     `rate=${shipIngressRate(reinforced, 0)}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\nHeeled ship: the raised windward hole does NOT flood');
+console.log('\nIngress scales with how DEEP a breach sits (the doom spiral)');
+
+{
+  const ship = makeShip('sloop', { holes: [hole(2.5, 0, 0)] });
+  const atLine = shipIngressRate(ship, 0);
+  const shallow = evaluateHoleFlood(ship, 0)[0];
+  ship.position.y = -0.9; // the bilge has settled her: same breach, well under
+  const deep = evaluateHoleFlood(ship, 0)[0];
+  const submerged = shipIngressRate(ship, 0);
+  expect('a breach ON the waterline leaks the reference rate',
+    Math.abs(atLine - FLOODING.INGRESS_PER_HOLE * shallow.rateFactor * FLOODING.INGRESS_CLASS_SCALE.sloop) < 1e-12);
+  expect('the SAME breach dragged under leaks strictly harder',
+    submerged > atLine * 1.3, `line=${atLine.toFixed(5)} deep=${submerged.toFixed(5)}`);
+  expect('the depth factor is capped so a swamped hull cannot gush infinitely',
+    deep.rateFactor === FLOODING.HOLE_DEPTH_MAX_FACTOR, `factor=${deep.rateFactor}`);
+  expect('depth reads as metres below the live surface',
+    deep.depth > shallow.depth + 0.85, `shallow=${shallow.depth.toFixed(3)} deep=${deep.depth.toFixed(3)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nHeeled ship: the raised windward breach does NOT flood');
 
 {
   // Heel to starboard (positive roll lifts the +x rail). Both rails are holed.
-  const ship = makeShip('sloop', {
-    position: { x: 0, y: 0, z: 0 },
-    roll: 0.35,
-    holes: { bow: 0, stern: 0, port: 1, starboard: 1 },
-  });
-  const flooding = evaluateSectionFlood(ship, 0);
-  const stbd = flooding.find((s) => s.section === 'starboard');
-  const port = flooding.find((s) => s.section === 'port');
-  expect('windward (raised starboard) hole stays above the waterline — no flood',
-    stbd.holes > 0 && !stbd.submerged && !stbd.flooding);
-  expect('leeward (dipped port) hole floods',
-    port.holes > 0 && port.submerged && port.flooding);
-  const expectedLowSideRate = FLOODING.INGRESS_PER_HOLE * port.holes * FLOODING.INGRESS_CLASS_SCALE.sloop;
-  expect('heeled ship only takes water on the low side',
-    Math.abs(shipIngressRate(ship, 0) - expectedLowSideRate) < 1e-9,
+  const ship = makeShip('sloop', { roll: 0.35, holes: waterlineHoles('sloop') });
+  const flood = evaluateHoleFlood(ship, 0);
+  const stbd = flood.find((h) => h.hole.x > 0);
+  const port = flood.find((h) => h.hole.x < 0);
+  expect('windward (raised starboard) breach stays above the waterline — no flood',
+    !stbd.flooding && stbd.rateFactor === 0, `depth=${stbd.depth.toFixed(3)}`);
+  expect('leeward (dipped port) breach floods', port.flooding && port.rateFactor > 0);
+  const expectedLowSideRate = FLOODING.INGRESS_PER_HOLE * port.rateFactor * FLOODING.INGRESS_CLASS_SCALE.sloop;
+  expect('a heeled ship only takes water on the low side',
+    Math.abs(shipIngressRate(ship, 0) - expectedLowSideRate) < 1e-12,
     `rate=${shipIngressRate(ship, 0)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nA breach high on the topside is dry in calm water, wet in a storm');
+
+{
+  const ship = makeShip('sloop', { holes: [hole(2.5, 1.4, 0)] });
+  expect('a breach 1.4 m up the topside does not leak in a calm sea',
+    shipIngressRate(ship, 0) === 0, `rate=${shipIngressRate(ship, 0)}`);
+  let stormRate = 0;
+  // Storm seas break over her: somewhere in the wave cycle the breach goes under.
+  for (let i = 0; i < 400; i++) stormRate = Math.max(stormRate, shipIngressRate(ship, i * 0.05, 1));
+  expect('storm seas wash over it and it starts taking water', stormRate > 0,
+    `bestStormRate=${stormRate}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 console.log('\nBailing vs holes');
 
-/** Simulate N seconds: bail `bailers` players, then physics ingress each tick. */
+/** Simulate N seconds: `bailers` players bail, then physics ingress each tick. */
 function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
-  const holed = ['port', 'starboard', 'bow', 'stern'];
-  const shipHoles = { bow: 0, stern: 0, port: 0, starboard: 0 };
-  for (let i = 0; i < holes; i++) shipHoles[holed[i]] = 1;
-  const ship = makeShip('sloop', { position: { x: 0, y: -0.3, z: 0 }, holes: shipHoles, waterLevel: start });
+  const spots = [[2.5, 0, 0], [-2.5, 0, 0], [0, 0, 4.8], [0, 0, -4.8]];
+  const shipHoles = [];
+  for (let i = 0; i < holes; i++) shipHoles.push(hole(...spots[i % spots.length]));
+  const ship = makeShip('sloop', { holes: shipHoles, waterLevel: start });
   for (let i = 0; i < seconds * 60; i++) {
     // Bailers act first (mirrors Match applying input before physics).
     ship.waterLevel = Math.max(0, ship.waterLevel - bailers * FLOODING.BAIL_RATE * DT);
@@ -166,7 +203,7 @@ function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
 }
 
 {
-  expect('one bailer bails faster than one open hole floods',
+  expect('one bailer bails faster than one waterline hole floods',
     FLOODING.BAIL_RATE > FLOODING.INGRESS_PER_HOLE,
     `bail=${FLOODING.BAIL_RATE} perHole=${FLOODING.INGRESS_PER_HOLE}`);
   const oneVsOne = simulateBail({ holes: 1, bailers: 1, seconds: 20 });
@@ -180,19 +217,29 @@ function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\nPatch every hole stops ingress; passive pump recovers a patched hull');
+console.log('\nPatching ONE breach stops THAT breach; a whole hull pumps dry');
 
 {
-  const ship = makeShip('sloop', {
-    position: { x: 0, y: -0.3, z: 0 },
-    holes: { bow: 0, stern: 0, port: 1, starboard: 1 },
-    waterLevel: 0.5,
-  });
-  expect('holed hull is taking on water', shipIngressRate(ship, 0) > 0);
-  // Plank every hole.
-  ship.holes.port = 0;
-  ship.holes.starboard = 0;
-  expect('patched hull has zero ingress', shipIngressRate(ship, 0) === 0);
+  const physics = new PhysicsSystem();
+  const ship = makeShip('sloop', { holes: waterlineHoles('sloop'), waterLevel: 0.5 });
+  const [stbd, port] = ship.holes;
+  const both = shipIngressRate(ship, 0);
+  const stbdShare = evaluateHoleFlood(ship, 0).find((h) => h.hole.id === stbd.id).rateFactor
+    * FLOODING.INGRESS_PER_HOLE * FLOODING.INGRESS_CLASS_SCALE.sloop;
+  expect('holed hull is taking on water', both > 0);
+
+  expect('patching an id that is not open reports failure', physics.patchHole(ship, 99999) === false);
+  expect('a plank shuts the breach you were standing at', physics.patchHole(ship, stbd.id) === true);
+  expect('the patched entity SURVIVES (the crossed planks render at its point)',
+    ship.holes.length === 2 && ship.holes.find((h) => h.id === stbd.id).patched === true);
+  expect('a patched breach NEVER leaks again',
+    evaluateHoleFlood(ship, 0).every((h) => h.hole.id !== stbd.id));
+  expect('ingress drops by exactly that breach\'s share, not by half a section',
+    Math.abs(shipIngressRate(ship, 0) - (both - stbdShare)) < 1e-12,
+    `both=${both} after=${shipIngressRate(ship, 0)} share=${stbdShare}`);
+
+  physics.patchHole(ship, port.id);
+  expect('every breach patched -> zero ingress', shipIngressRate(ship, 0) === 0);
   const before = ship.waterLevel;
   const expectedPump = FLOODING.BAIL_RATE * FLOODING.PASSIVE_PUMP_FACTOR;
   for (let i = 0; i < 5 * 60; i++) updateShipFlooding(ship, 0, DT);
@@ -237,6 +284,31 @@ function steadySpeedAtWater(waterLevel) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+console.log('\nA torn hull also drags: open breaches cost speed on top of the water');
+
+{
+  const physics = new PhysicsSystem();
+  const run = (holes) => {
+    const ship = makeShip('sloop', { sailHeight: 1, holes });
+    let t = 0;
+    for (let i = 0; i < 20 * 60; i++) {
+      t += DT;
+      const wind = sampleWind(t);
+      ship.rotation = angleWrap(wind.direction + Math.PI - Math.PI / 2);
+      ship.angularVelocity = 0;
+      ship.sailAngle = Math.sin(angleWrap(wind.direction - ship.rotation)) * SHIP.MAX_SAIL_ANGLE * 0.92;
+      ship.waterLevel = 0;
+      physics.update(DT, t, [ship], [], [], [], []);
+    }
+    return Math.hypot(ship.velocity.x, ship.velocity.z);
+  };
+  const whole = run([]);
+  const torn = run(Array.from({ length: 6 }, (_, i) => hole(2.5, 0.2, i - 3)));
+  expect('a riddled hull makes less way than a sound one', torn < whole,
+    `whole=${whole.toFixed(2)} torn=${torn.toFixed(2)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 console.log('\nWeight of water dulls the rudder ~40%');
 
 function turnedWithWater(waterLevel) {
@@ -263,12 +335,12 @@ function turnedWithWater(waterLevel) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\nA submerged open hole douses a deck fire');
+console.log('\nA submerged open breach douses a deck fire');
 
 {
   const ship = makeShip('sloop', {
     position: { x: 0, y: -0.3, z: 0 },
-    holes: { bow: 0, stern: 0, port: 1, starboard: 0 },
+    holes: [hole(-2.5, 0, 0)],
     onFire: true,
     fireTimer: SHIP.FIRE_DURATION,
     fireDamageAccum: 0.4,
@@ -277,6 +349,28 @@ console.log('\nA submerged open hole douses a deck fire');
   updateShipFlooding(ship, 0, DT);
   expect('submersion extinguishes the fire',
     ship.onFire === false && ship.fireTimer === 0 && ship.fireDamageAccum === 0);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nFire chars HIGH and burns DOWN — a firebomb is a real threat now');
+
+{
+  const physics = new PhysicsSystem();
+  const ship = makeShip('sloop', { onFire: true, fireTimer: SHIP.FIRE_DURATION });
+  // Six seconds in: the first char exists, high and DRY.
+  for (let i = 0; i < Math.round(6.5 / DT); i++) physics.update(DT, i * DT, [ship], [], [], [], []);
+  expect('the blaze chars its first breach within ~6 s', ship.holes.length >= 1, `holes=${ship.holes.length}`);
+  expect('that char starts high on the topside, above the calm waterline',
+    ship.holes[0].y > FLOODING.HOLE_BAND_Y.max, `y=${ship.holes[0].y.toFixed(2)}`);
+  expect('a dry char does not flood, so it cannot self-douse the fire',
+    ship.onFire === true && (ship.waterLevel ?? 0) === 0,
+    `onFire=${ship.onFire} water=${ship.waterLevel}`);
+  const firstY = ship.holes[0].y;
+  for (let i = 0; i < Math.round(6 / DT); i++) physics.update(DT, (6.5 + i * DT), [ship], [], [], [], []);
+  expect('the flames burn that char DOWNWARD toward the sea',
+    ship.holes[0].y < firstY - 0.2, `${firstY.toFixed(2)} -> ${ship.holes[0].y.toFixed(2)}`);
+  expect('an untended blaze stacks more than one breach (the old model stopped at 1)',
+    ship.holes.length >= 2, `holes=${ship.holes.length}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -310,6 +404,8 @@ console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (s
     attacker.gold - goldBefore === PLAYER.SHIP_SINK_GOLD && attacker.kills === 0,
     `goldΔ=${attacker.gold - goldBefore} kills=${attacker.kills}`);
   expect('sink flow still drops treasure', victimShip.treasureChestIds.length === 0, `chests=${chestsBefore}`);
+  expect('a foundering hull is visibly riddled (breaches all round her)',
+    countOpenHoles(victimShip) >= 8, `open=${countOpenHoles(victimShip)}`);
 
   // Holes, not hp, decide: a fully-holed hull sitting dry does NOT insta-sink —
   // only the rising water sinks it, giving the crew a real bail/patch fight.
@@ -317,18 +413,16 @@ console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (s
   hpVictim.position.y = -1.5; // sitting low: every hole is well below the waterline
   hpVictim.pitch = 0;
   hpVictim.roll = 0;
-  hpVictim.holes = {
-    bow: FLOODING.MAX_HOLES_PER_SECTION,
-    stern: FLOODING.MAX_HOLES_PER_SECTION,
-    port: FLOODING.MAX_HOLES_PER_SECTION,
-    starboard: FLOODING.MAX_HOLES_PER_SECTION,
-  };
+  hpVictim.holes = [];
+  hpVictim.nextHoleId = 1;
+  match.physics.openHoleAt(hpVictim, { x: 2.4, y: 0.15, z: 0 }, FLOODING.MAX_HOLES_PER_SHIP, 'cannon');
   hpVictim.waterLevel = 0;
   match.evaluateShipSinking(hpVictim);
   expect('a fully-holed but dry hull does NOT insta-sink (water decides)', hpVictim.sinking !== true);
-  const wreckedFlood = evaluateSectionFlood(hpVictim, 0);
-  expect('every open, submerged hole is gushing',
-    wreckedFlood.every((sec) => sec.flooding), JSON.stringify(wreckedFlood.map((s) => [s.section, s.holes, s.flooding])));
+  const wreckedFlood = evaluateHoleFlood(hpVictim, 0);
+  expect('every open, submerged breach is gushing',
+    wreckedFlood.length === FLOODING.MAX_HOLES_PER_SHIP && wreckedFlood.every((h) => h.flooding),
+    JSON.stringify(wreckedFlood.map((h) => [h.hole.id, +h.depth.toFixed(2), h.flooding])));
   let wreckT = 0;
   for (let i = 0; i < 90 * 60 && (hpVictim.waterLevel ?? 0) < 1; i++) {
     updateShipFlooding(hpVictim, 0, DT);
@@ -361,8 +455,7 @@ console.log('\nChainshot is a rigging weapon: no hull holes, sets chainshottedUn
     showImpact: true,
   }, ship, 5);
 
-  const noHoles = ship.holes.bow === 0 && ship.holes.stern === 0 && ship.holes.port === 0 && ship.holes.starboard === 0;
-  expect('chainshot opens NO hull holes', noHoles, JSON.stringify(ship.holes));
+  expect('chainshot opens NO hull breaches', ship.holes.length === 0, JSON.stringify(ship.holes));
   expect('chainshot sets chainshottedUntil = t + 30 (sim seconds)', ship.chainshottedUntil === 35,
     `chainshottedUntil=${ship.chainshottedUntil}`);
   expect('chainshot tears the rigging (sailIntegrity down)', ship.sailIntegrity < 1, `integrity=${ship.sailIntegrity}`);
@@ -370,17 +463,23 @@ console.log('\nChainshot is a rigging weapon: no hull holes, sets chainshottedUn
   const chainEvent = physics.flushCombatEvents().find((e) => e.type === 'ship_hit');
   expect('chainshot ship_hit reports 0 hull damage', !!chainEvent && chainEvent.damage === 0,
     `damage=${chainEvent?.damage}`);
+  expect('chainshot ship_hit carries an empty breach list', chainEvent.holes.length === 0);
 
-  // Control: a cannonball DOES open a hole (chainshot guard is type-specific).
+  // Control: a cannonball DOES open a breach, at the point it struck.
   const ball = makeShip('sloop');
   physics.onProjectileHitShip({
     id: 'ball-1', type: 'cannonball', ownerId: 'attacker', ownerShipId: 'other',
-    position: { x: 0, y: 1, z: 5 }, velocity: { x: 0, y: 0, z: 0 },
+    position: { x: 0.4, y: 0.22, z: 5 }, velocity: { x: 0, y: 0, z: 0 },
     alive: true, age: 0, maxAge: 8, damage: SHIP.CANNON_DAMAGE_HULL,
     knockback: 0, visualOnly: false, showImpact: true,
   }, ball, 5);
-  expect('cannonball punches exactly one hole (control)', ball.holes.bow === 1, `bow holes=${ball.holes.bow}`);
-  expect('the punched hole lowers the derived integrity', ball.hull.bow < 1, `bow=${ball.hull.bow}`);
+  expect('cannonball punches exactly one breach (control)', ball.holes.length === 1,
+    JSON.stringify(ball.holes));
+  const punched = ball.holes[0];
+  expect('the breach sits at the exact hull-local impact point',
+    Math.hypot(punched.x - 0.4, punched.y - 0.22, punched.z - 5) < 0.01,
+    JSON.stringify(punched));
+  expect('the breach is tagged with what made it', punched.source === 'cannon');
 }
 
 if (failures > 0) {

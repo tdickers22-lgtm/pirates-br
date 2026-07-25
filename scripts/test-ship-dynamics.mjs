@@ -6,7 +6,7 @@ import {
   applyShipRudderSteering,
   computeSailPolar,
 } from '../src/server/systems/PhysicsSystem.ts';
-import { SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
+import { FLOODING, SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import {
   angleWrap,
   gerstnerHeight,
@@ -42,7 +42,8 @@ function makeShip(type = 'sloop', overrides = {}) {
     sailAngle: 0,
     anchored: false,
     anchorRaiseProgress: 0,
-    hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
+    holes: [],
+    nextHoleId: 1,
     maxHull: stats.maxHull,
     onFire: false,
     fireTimer: 0,
@@ -184,10 +185,8 @@ console.log('\nShip-ship collision (oriented hulls)');
   b.position.x = 11;
   for (let i = 0; i < 60; i++) physics.update(DT, i * DT, [a, b], [], [], [], []);
   const gap = Math.abs(b.position.x - a.position.x);
-  const intactA = a.hull.bow === 1 && a.hull.stern === 1 && a.hull.port === 1 && a.hull.starboard === 1;
-  const intactB = b.hull.bow === 1 && b.hull.stern === 1 && b.hull.port === 1 && b.hull.starboard === 1;
   expect('parallel galleons at 11m centers do not collide', Math.abs(gap - 11) < 0.25, `gap=${gap.toFixed(2)}`);
-  expect('rail-to-rail hulls stay undamaged', intactA && intactB);
+  expect('rail-to-rail hulls stay undamaged', a.holes.length === 0 && b.holes.length === 0);
 }
 
 function runConvergence(setup) {
@@ -198,7 +197,7 @@ function runConvergence(setup) {
     driveA(a);
     driveB(b);
     physics.update(DT, i * DT, [a, b], [], [], [], []);
-    const damaged = Object.values(a.hull).some(v => v < 1) || Object.values(b.hull).some(v => v < 1);
+    const damaged = a.holes.length > 0 || b.holes.length > 0;
     if (damaged) {
       contact = {
         omegaA: a.angularVelocity,
@@ -224,11 +223,17 @@ function runConvergence(setup) {
   });
   expect('converging bows actually collide', contact !== null);
   if (contact) {
-    expect('bow sections damaged on both ships', a.hull.bow < 1 && b.hull.bow < 1,
-      `a.bow=${a.hull.bow.toFixed(3)} b.bow=${b.hull.bow.toFixed(3)}`);
-    expect('bow takes the brunt (not the sides)',
-      a.hull.bow < a.hull.port && a.hull.bow < a.hull.starboard
-      && b.hull.bow < b.hull.port && b.hull.bow < b.hull.starboard);
+    // Ram breaches land at the CONTACT POINT resolved into each hull's own
+    // frame — so a bow-to-bow ram must stove in timber forward on both, not
+    // merely decrement a section counter named 'bow'.
+    expect('both ships are stove in', a.holes.length > 0 && b.holes.length > 0,
+      `a=${a.holes.length} b=${b.holes.length}`);
+    const fwd = (ship) => ship.holes.every((h) => h.z > SHIP_STATS.sloop.length * 0.25);
+    expect('every breach is forward on both hulls (the bows met, not the sides)',
+      fwd(a) && fwd(b),
+      `a=${JSON.stringify(a.holes.map(h => +h.z.toFixed(2)))} b=${JSON.stringify(b.holes.map(h => +h.z.toFixed(2)))}`);
+    expect('ram breaches ride the waterline band',
+      [...a.holes, ...b.holes].every((h) => h.y >= FLOODING.HOLE_BAND_Y.min && h.y <= FLOODING.HOLE_BAND_Y.max));
     expect('off-center ram torques both hulls',
       Math.abs(contact.omegaA) > 0.002 && Math.abs(contact.omegaB) > 0.002,
       `ωA=${contact.omegaA.toFixed(4)} ωB=${contact.omegaB.toFixed(4)}`);
@@ -250,13 +255,14 @@ function runConvergence(setup) {
   });
   expect('T-bone collision resolves', contact !== null);
   if (contact) {
-    expect('rammer takes bow damage', a.hull.bow < 1, `a.bow=${a.hull.bow.toFixed(3)}`);
-    expect('victim takes starboard (facing) damage, far side spared',
-      b.hull.starboard < 1 && b.hull.port > b.hull.starboard,
-      `b.starboard=${b.hull.starboard.toFixed(3)} b.port=${b.hull.port.toFixed(3)}`);
-    expect('T-boned victim hurts more than the rammer',
-      (1 - b.hull.starboard) > (1 - a.hull.bow),
-      `victim=${(1 - b.hull.starboard).toFixed(3)} rammer=${(1 - a.hull.bow).toFixed(3)}`);
+    expect('rammer is stove in forward',
+      a.holes.length > 0 && a.holes.every((h) => h.z > SHIP_STATS.sloop.length * 0.25),
+      JSON.stringify(a.holes.map(h => [+h.x.toFixed(2), +h.z.toFixed(2)])));
+    expect('victim is stove in on the struck BEAM, far rail spared',
+      b.holes.length > 0 && b.holes.every((h) => h.x > SHIP_STATS.sloop.width * 0.25),
+      JSON.stringify(b.holes.map(h => [+h.x.toFixed(2), +h.z.toFixed(2)])));
+    expect('T-boned victim loses more planking than the rammer',
+      b.holes.length > a.holes.length, `victim=${b.holes.length} rammer=${a.holes.length}`);
   }
 }
 
@@ -319,10 +325,14 @@ function makeIsland(profileOverrides = {}) {
     ship.position = { x: shallowX, y: 0, z: 0 };
     ship.velocity = { x: -6, y: 0, z: 0 };
     physics.pushShipOutOfIsland(ship, island);
-    const damaged = Object.values(ship.hull).some(v => v < 1);
-    expect('grounding at speed scrapes the hull', damaged,
-      JSON.stringify(ship.hull));
-    expect('bow section takes the beaching scrape', ship.hull.bow < 1, JSON.stringify(ship.hull));
+    expect('grounding at speed scrapes the hull', ship.holes.length > 0,
+      JSON.stringify(ship.holes));
+    expect('the bow takes the beaching scrape, at the sample that touched bottom',
+      ship.holes.every((h) => h.z > SHIP_STATS.sloop.length * 0.2),
+      JSON.stringify(ship.holes.map(h => +h.z.toFixed(2))));
+    expect('a grounding breach is near the KEEL, so it is always underwater',
+      ship.holes.every((h) => h.y <= 0.13),
+      JSON.stringify(ship.holes.map(h => +h.y.toFixed(3))));
     expect('ship is pushed back toward deep water', ship.position.x > shallowX && ship.velocity.x > 0,
       `x=${ship.position.x.toFixed(2)} (from ${shallowX}) vx=${ship.velocity.x.toFixed(2)}`);
   }
@@ -354,10 +364,9 @@ function makeIsland(profileOverrides = {}) {
     ship.velocity = { x: -6, y: 0, z: 0 };
     const beforeX = ship.position.x;
     physics.pushShipOutOfIsland(ship, island);
-    const intact = Object.values(ship.hull).every(v => v === 1);
     expect('deep inlet approach passes without grounding',
-      intact && ship.position.x === beforeX && ship.velocity.x === -6,
-      `x=${ship.position.x} vx=${ship.velocity.x} hull=${JSON.stringify(ship.hull)}`);
+      ship.holes.length === 0 && ship.position.x === beforeX && ship.velocity.x === -6,
+      `x=${ship.position.x} vx=${ship.velocity.x} holes=${JSON.stringify(ship.holes)}`);
   }
 }
 
