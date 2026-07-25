@@ -73,7 +73,6 @@ function makePlayer(position, overrides = {}) {
     swimTimer: 0,
     atCannon: false,
     atHelm: false,
-    atSails: false,
     sailControlMode: null,
     atCrowNest: false,
     blocking: false,

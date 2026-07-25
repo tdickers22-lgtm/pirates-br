@@ -67,7 +67,7 @@ function frame(overrides) {
 function placeOnIslandAt(island, x, z) {
   player.state = 'alive';
   player.onShipId = null;
-  player.atCannon = false; player.atHelm = false; player.atSails = false; player.atCrowNest = false;
+  player.atCannon = false; player.atHelm = false; player.atCrowNest = false;
   player.mastClimb = null;
   player.carryingChestId = null;
   player.position = { x, y: getIslandSurfaceY(island, x, z), z };

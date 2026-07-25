@@ -74,7 +74,7 @@ export class InteractionPrompts {
     const lookInteraction = this.getLookInteraction(player, ship, nearbyCannon, repairHole);
     // Mid-mast-climb, X means "let go" (server-owned) — don't let a stray
     // chest/door candidate claim the press.
-    const canPickInteractKind = !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
+    const canPickInteractKind = !player.atCannon && !player.atHelm && !player.atCrowNest
       && player.mastClimb === null
       && player.state !== 'respawning' && player.state !== 'eliminated';
     return canPickInteractKind && lookInteraction ? lookInteraction.kind : null;

@@ -838,7 +838,6 @@ export class PhysicsSystem {
           && player.shipBoundaryGraceTimer <= 0
           && !player.atHelm
           && !player.atCannon
-          && !player.atSails
           && !player.atCrowNest
         ) {
           const deckClamp = this.clampDeckPosition(local, stats);
@@ -856,7 +855,6 @@ export class PhysicsSystem {
           player.position.y >= deckY - 0.25
           && !player.atHelm
           && !player.atCannon
-          && !player.atSails
           && !player.atCrowNest
         ) {
           const obstacleClamp = this.resolveShipDeckObstacleCollision(local, stats);

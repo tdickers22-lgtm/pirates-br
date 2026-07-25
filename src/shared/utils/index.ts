@@ -59,11 +59,6 @@ export function dist2D(ax: number, az: number, bx: number, bz: number): number {
   return Math.sqrt(dx * dx + dz * dz);
 }
 
-export function dist3D(a: Vec3, b: Vec3): number {
-  const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
 export function buildSeaRockColliders(radius: number, height: number, rotation: number, variant: SeaRock['variant']): {
   boundsRadius: number;
   colliders: SeaRockCollider[];
@@ -179,36 +174,6 @@ export function normalize2D(v: Vec2): Vec2 {
   return { x: v.x / len, y: v.y / len };
 }
 
-export function normalize3D(v: Vec3): Vec3 {
-  const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-  if (len < 0.0001) return { x: 0, y: 0, z: 0 };
-  return { x: v.x / len, y: v.y / len, z: v.z / len };
-}
-
-export function dot3D(a: Vec3, b: Vec3): number {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-export function cross3D(a: Vec3, b: Vec3): Vec3 {
-  return {
-    x: a.y * b.z - a.z * b.y,
-    y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x,
-  };
-}
-
-export function add3D(a: Vec3, b: Vec3): Vec3 {
-  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
-}
-
-export function scale3D(v: Vec3, s: number): Vec3 {
-  return { x: v.x * s, y: v.y * s, z: v.z * s };
-}
-
-export function len3D(v: Vec3): number {
-  return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
 export function randRange(lo: number, hi: number): number {
   return lo + Math.random() * (hi - lo);
 }
@@ -229,16 +194,6 @@ export function angleWrap(a: number): number {
 
 export function degreesToRad(d: number): number {
   return d * Math.PI / 180;
-}
-
-export function weightedRandom<T>(items: Array<{ weight: number } & T>): T {
-  const totalWeight = items.reduce((s, i) => s + i.weight, 0);
-  let r = Math.random() * totalWeight;
-  for (const item of items) {
-    r -= item.weight;
-    if (r <= 0) return item;
-  }
-  return items[items.length - 1];
 }
 
 /**
@@ -976,16 +931,6 @@ export function getBraceStationLocals(stats: { length: number; width: number; ma
 /** Legacy single-point accessor — resolves to the starboard rope station. */
 export function getSailStationLocal(stats: { length: number; mastCount: number; width: number }): { x: number; z: number } {
   return getSailRopeStationLocals(stats)[0];
-}
-
-/** Back-compat: old hoist callers now resolve to the shared sail ring. */
-export function getSailHoistStationLocal(stats: { length: number; mastCount: number; width: number }): { x: number; z: number } {
-  return getSailStationLocal(stats);
-}
-
-/** Back-compat: old angle callers now resolve to the shared sail ring. */
-export function getSailAngleStationLocal(stats: { length: number; mastCount: number; width: number }): { x: number; z: number } {
-  return getSailStationLocal(stats);
 }
 
 export interface ShipCompanionwayConfig {

@@ -394,7 +394,7 @@ export class HudController {
       this.view.ui.islandBanner.classList.remove('visible');
     }
 
-    const weapon = player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
+    const weapon = player.atHelm ? null : player.weapons[player.activeSlot];
     if (player.atCannon && ship) {
       const cb = this.view.getInventoryQty(ship, 'cannonball');
       this.view.ui.ammoCurrent.textContent =
@@ -461,11 +461,6 @@ export class HudController {
       } else {
         this.view.ui.contextLabel.textContent = 'At the wheel';
       }
-    } else if (player.atSails) {
-      this.view.ui.interactPrompt.style.display = 'block';
-      this.view.ui.interactPrompt.textContent = '';
-      this.view.ui.contextLabel.style.display = 'block';
-      this.view.ui.contextLabel.textContent = '';
     } else if (player.atCrowNest) {
       this.view.ui.interactPrompt.style.display = 'block';
       this.view.ui.interactPrompt.textContent = '[X] Climb Down';

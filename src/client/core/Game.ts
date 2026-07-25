@@ -3,11 +3,10 @@ import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPO
 import type {
   GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex,
-  getSailControlLocal,
   toShipLocalPoint,
   countOpenHoles,
   findRepairableHole as sharedFindRepairableHole,
@@ -205,8 +204,6 @@ export class Game {
   });
   // Used by ambient render & end-of-round flow + gameplay-key gating.
   private inMatch = false;
-  // @ts-expect-error reserved for showing the leaderboard until user dismisses it
-  private endmatchPending = false;
   private readonly ui: UiRefs = buildUiRefs();
 
   private localPlayerId: string | null = null;
@@ -321,8 +318,6 @@ export class Game {
   private readonly prevPlayerHealth = new Map<string, number>();
   private readonly prevPlayerStateById = new Map<string, Player['state']>();
   private readonly prevPlayerFallSpeed = new Map<string, number>();
-  /** Per-ship sail-height history — drives the halyard haul animation. */
-  private readonly prevShipSailHeight = new Map<string, number>();
   /** kill_event details, consumed by the next death edge for that victim. */
   private readonly deathCauseHints = new Map<string, { killerId: string | null; headshot: boolean }>();
   /** Weapons flung out of dead hands, tumbling until they fade. */
@@ -775,7 +770,6 @@ export class Game {
       this.renderCrewFoundCard();
     }
     this.inMatch = true;
-    this.endmatchPending = false;
     this.menu.setLastMatchPartyCode(payload?.partyCode ?? null);
     this.scheduleJoinAssignmentWatchdog();
     this.bindReturnToMenuButtons();
@@ -1070,7 +1064,6 @@ export class Game {
 
   private onReturnToMenuFromEnd(): void {
     this.inMatch = false;
-    this.endmatchPending = false;
     this.ui.deathScreen.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
     this.ui.winScreen.classList.remove('visible');
@@ -1314,7 +1307,6 @@ export class Game {
   private goBackToMenuFromMatch(): void {
     this.network.returnToMenu();
     this.inMatch = false;
-    this.endmatchPending = false;
     this.ui.deathScreen.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
     this.ui.winScreen.classList.remove('visible');
@@ -1465,7 +1457,6 @@ export class Game {
         reason: string;
         humans: Array<{ playerId: string; name: string; kills: number; deaths: number; gold: number; placement: number; isWinner: boolean }>;
       };
-      this.endmatchPending = true;
       const youId = this.localPlayerId;
       const youRow = result.humans.find((r) => r.playerId === youId);
       const won = !!result.winnerId && result.winnerId === youId;
@@ -2407,7 +2398,6 @@ export class Game {
           `onShip ${player.onShipId ? 'yes' : 'no'}`,
           `helm ${player.atHelm ? 'Y' : 'n'}`,
           `cannon ${player.atCannon ? player.cannonIndex : 'n'}`,
-          `sails ${player.atSails ? 'Y' : 'n'}`,
           `weapon ${activeWeapon?.weaponId ?? 'none'}`,
         ].join(' | ')
       : 'player none';
@@ -2835,7 +2825,7 @@ export class Game {
     // Lag compensation: extrapolate from last snapshot velocity only.
     // Do NOT add a second "input × speed × window" step on land or on ships — server velocity already
     // matches movement input each tick; duplicating it here caused rubber-banding (shuffle back/forth).
-    if (isLocal && !player.atHelm && !player.atCannon && !player.atSails) {
+    if (isLocal && !player.atHelm && !player.atCannon) {
       // On deck the server already couples you to the ship; full velocity×age extrapolation reads as double-counted lag.
       const deckDamp = player.onShipId ? 0.48 : 1;
       predictedX += player.velocity.x * snapshotAge * deckDamp;
@@ -3097,19 +3087,8 @@ export class Game {
         mesh.userData.deathTimer = Math.min((mesh.userData.deathTimer ?? 0) + dt, SKELETON_CORPSE_LIFETIME);
       }
       this.updatePlayerFlinch(mesh, player, isLocal);
-      // Station work signals the animator reads: a decaying cannon-recoil kick
-      // and whether this ship's sail is actually being hauled right now.
+      // Station work signal the animator reads: a decaying cannon-recoil kick.
       mesh.userData.cannonRecoil = Math.max(0, (mesh.userData.cannonRecoil ?? 0) - dt * 3.4);
-      if (player.atSails && ship) {
-        const prevSail = this.prevShipSailHeight.get(ship.id);
-        this.prevShipSailHeight.set(ship.id, ship.sailHeight);
-        const hauling = prevSail !== undefined && Math.abs(ship.sailHeight - prevSail) > 0.0004;
-        mesh.userData.sailWork = hauling
-          ? 1
-          : Math.max(0, (mesh.userData.sailWork ?? 0) - dt * 2.2);
-      } else {
-        mesh.userData.sailWork = 0;
-      }
 
       // Skeleton remains linger and sink/fade instead of popping out of
       // existence 1.5s after the (good) bone-scatter kill.
@@ -4306,7 +4285,7 @@ export class Game {
     if (!player) return;
 
     const trackedShip = player.onShipId ? this.getTrackedShip() : null;
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm ? null : player.weapons[player.activeSlot];
     const swimming = player.state === 'swimming';
     const firearmEquipped = !!activeWeapon && !WEAPONS[activeWeapon.weaponId].melee;
     const aiming = this.input.isAiming();
@@ -4377,25 +4356,6 @@ export class Game {
         stats.height + 1.55,
       );
       targetFov = 78;
-    } else if (player.atSails && trackedShip) {
-      const stats = SHIP_STATS[trackedShip.type];
-      const station = getSailControlLocal(stats);
-      const stationWorld = this.getShipWorldPoint(trackedShip, station.x, station.z, stats.height + 0.82);
-      const sailTarget = this.getShipWorldPoint(
-        trackedShip,
-        0,
-        getMainMastLocalZ(stats),
-        stats.height + stats.height * 1.95,
-      );
-      const aftBias = this.getShipWorldPoint(
-        trackedShip,
-        0,
-        station.z - stats.length * 0.11,
-        stats.height + 0.86,
-      );
-      desired = stationWorld.lerp(aftBias, 0.22);
-      lookTarget = sailTarget;
-      targetFov = 76;
     } else {
       const yaw = player.atHelm && trackedShip ? trackedShip.rotation : this.input.getYaw();
       const pitch = this.input.getPitch();
@@ -4430,9 +4390,9 @@ export class Game {
     }
 
     const onIslandFoot = !player.onShipId && player.state === 'alive' && !swimming
-      && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest;
+      && !player.atCannon && !player.atHelm && !player.atCrowNest;
     let followHz = 158;
-    if (player.atCannon || player.atHelm || player.atSails) followHz = 70;
+    if (player.atCannon || player.atHelm) followHz = 70;
     else if (onIslandFoot) followHz = 178;
     else if (swimming) followHz = 162;
     else if (player.onShipId) followHz = 165;
@@ -4967,7 +4927,7 @@ export class Game {
     }
 
     // Cutlass swing — when the active melee weapon enters its reload window we just swung.
-    if (player && !player.atCannon && !player.atHelm && !player.atSails) {
+    if (player && !player.atCannon && !player.atHelm) {
       const active = player.weapons[player.activeSlot];
       const isMelee = active && WEAPONS[active.weaponId]?.melee;
       const reloading = !!(active && active.reloading);
@@ -5014,7 +4974,7 @@ export class Game {
       if (!isLocal && distance > 46) continue;
       seen.add(player.id);
       const grounded = player.state === 'alive'
-        && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
+        && !player.atCannon && !player.atHelm && !player.atCrowNest
         && player.mastClimb === null
         && !player.cannonBallistic
         && Math.abs(player.velocity.y ?? 0) < 2.2;

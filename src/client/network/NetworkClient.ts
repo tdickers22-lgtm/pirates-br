@@ -9,9 +9,6 @@ export class NetworkClient {
   private ws!: WebSocket;
   private connected = false;
   public clientId: string | null = null;
-  public playerId: string | null = null;
-  public shipId: string | null = null;
-  public matchId: string | null = null;
 
   // Game-scoped events
   public onSnapshot: ((state: GameState) => void) | null = null;
@@ -85,7 +82,7 @@ export class NetworkClient {
 
   /** True once the join handshake for the current match has completed. */
   isJoined(): boolean {
-    return this.joined && this.playerId !== null;
+    return this.joined;
   }
 
   async connect(url: string): Promise<void> {
@@ -109,9 +106,6 @@ export class NetworkClient {
       this.ws.onclose = (e) => {
         this.connected = false;
         this.joined = false;
-        this.playerId = null;
-        this.shipId = null;
-        this.matchId = null;
         this.pendingSnapshot = null;
         this.snapshotFlushQueued = false;
         this.onConnectionClosed?.();
@@ -133,10 +127,7 @@ export class NetworkClient {
         break;
       }
       case 'join': {
-        const p = msg.payload as { playerId: string; shipId: string; snapshot: GameState; matchId?: string };
-        this.playerId = p.playerId;
-        this.shipId = p.shipId;
-        this.matchId = p.matchId ?? null;
+        const p = msg.payload as { playerId: string; shipId: string; snapshot: GameState };
         // Handshake complete — the match channel is open from here.
         this.joined = true;
         this.onJoin?.(p.playerId, p.shipId, p.snapshot);
@@ -226,8 +217,6 @@ export class NetworkClient {
     if (!this.joined) return;
     this.send({ type: 'trade_action', ts: Date.now(), payload: action });
   }
-  /** Ping is connection-scoped (the lobby answers it), so it needs no join. */
-  sendPing() { this.send({ type: 'ping', ts: Date.now(), payload: { t: Date.now() } }); }
   /** Dev-only (honoured solo): ask the server to make bots ignore you + your ship. */
   sendDevBotPeace(enabled: boolean) {
     if (!this.joined) return;
@@ -261,9 +250,6 @@ export class NetworkClient {
   /** Forget the current match: no match-scoped send may leave until the next join. */
   private clearMatchSession(): void {
     this.joined = false;
-    this.playerId = null;
-    this.shipId = null;
-    this.matchId = null;
   }
 
   private send(msg: NetMsg): boolean {

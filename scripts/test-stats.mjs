@@ -229,7 +229,7 @@ function frame(overrides) {
   attacker.state = 'alive';
   attacker.health = 100;
   attacker.onShipId = null;
-  attacker.atCannon = false; attacker.atHelm = false; attacker.atSails = false; attacker.atCrowNest = false;
+  attacker.atCannon = false; attacker.atHelm = false; attacker.atCrowNest = false;
   attacker.mastClimb = null;
   attacker.carryingChestId = null;
   attacker.position = { x: prop.x + 1.2, y: getIslandSurfaceY(island, prop.x + 1.2, prop.z), z: prop.z };

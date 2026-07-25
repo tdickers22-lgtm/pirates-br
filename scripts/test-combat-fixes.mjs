@@ -477,7 +477,7 @@ console.log('\n6. Bots bail under player-like constraints');
   const bots = st.players.filter((p) => p.isBot);
   const [b0, b1, b2] = bots;
   const ship = st.ships.find((s) => s.id === b0.shipId);
-  for (const b of bots) { b.atHelm = false; b.atCannon = false; b.atSails = false; b.atCrowNest = false; }
+  for (const b of bots) { b.atHelm = false; b.atCannon = false; b.atCrowNest = false; }
 
   // No breaches for the bailing sub-tests: with an open hole a bot abandons the
   // bucket to walk to it (patch-before-bail priority), which is its own test below.

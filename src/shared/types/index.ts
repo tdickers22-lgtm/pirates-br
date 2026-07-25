@@ -186,7 +186,6 @@ export interface Player {
   swimTimer: number;   // seconds in open water
   atCannon: boolean;
   atHelm: boolean;
-  atSails: boolean;
   /** Climbing / stationed in the main mast crow's nest */
   atCrowNest: boolean;
   /** Cutlass guard is held; frontal melee damage is mostly blocked. */

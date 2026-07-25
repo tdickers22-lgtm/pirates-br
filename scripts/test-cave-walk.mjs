@@ -18,7 +18,7 @@ function makePlayer(position, overrides = {}) {
     reloading: false, reloadTimer: 0, knockbackVelocity: { x: 0, y: 0, z: 0 },
     isBot: false, kills: 0, playerKillStreak: 0, superCannonballs: 0, megaKegs: 0,
     tsunamiCharges: 0, gold: 0, carryingChestId: null, treasureMapIslandId: null,
-    swimTimer: 0, atCannon: false, atHelm: false, atSails: false, sailControlMode: null,
+    swimTimer: 0, atCannon: false, atHelm: false, sailControlMode: null,
     atCrowNest: false, blocking: false, cutlassCharge: 0, cannonIndex: 0,
     nearChestId: null, nearShipId: null, onShipId: null, respawnTimer: 0,
     respawnProtectionTimer: 0, shipBoundaryGraceTimer: 0, lastDamagedById: null,

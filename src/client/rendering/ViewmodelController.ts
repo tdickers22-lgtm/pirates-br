@@ -675,7 +675,7 @@ export class ViewmodelController {
     const rightHand = mesh.getObjectByName('right-hand');
     if (!rightHand) return;
 
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm ? null : player.weapons[player.activeSlot];
     const currentId = activeWeapon?.weaponId ?? null;
     const existing = rightHand.getObjectByName('held-weapon') as THREE.Group | null;
     const useLocalSwimViewmodel = player.id === this.view.localPlayerId;
@@ -811,7 +811,7 @@ export class ViewmodelController {
       this.localViewPocketKind = null;
       return false;
     }
-    if (player.atCannon || player.atHelm || player.atSails) {
+    if (player.atCannon || player.atHelm) {
       this.localViewPocketRoot.visible = false;
       this.localViewPocketKind = null;
       return false;
@@ -1160,7 +1160,7 @@ export class ViewmodelController {
 
   syncLocalViewWeapon() {
     const localPlayer = this.view.getLocalPlayer();
-    const firearmSlot = localPlayer?.atCannon || localPlayer?.atHelm || localPlayer?.atSails
+    const firearmSlot = localPlayer?.atCannon || localPlayer?.atHelm
       ? null
       : localPlayer?.weapons[localPlayer.activeSlot] ?? null;
     const swimAiming = !!firearmSlot && !WEAPONS[firearmSlot.weaponId].melee
@@ -1198,7 +1198,7 @@ export class ViewmodelController {
     }
 
     const player = this.view.getLocalPlayer();
-    const activeWeapon = player?.atCannon || player?.atHelm || player?.atSails ? null : player?.weapons[player.activeSlot] ?? null;
+    const activeWeapon = player?.atCannon || player?.atHelm ? null : player?.weapons[player.activeSlot] ?? null;
     if (!player || !activeWeapon || activeWeapon.weaponId === 'ship_cannon' || player.state === 'eliminated' || player.state === 'respawning') {
       this.localViewWeaponRoot.visible = false;
       this.localViewWeaponAmmoSignature = '';

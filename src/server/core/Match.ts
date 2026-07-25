@@ -36,7 +36,6 @@ import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycas
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition,
-  getSailControlLocal as getSharedSailControlLocal,
   isNearAmmoCrate as isSharedNearAmmoCrate,
   isNearAnchor as isSharedNearAnchor,
   isNearCrowNestLadder as isSharedNearCrowNestLadder,
@@ -494,7 +493,6 @@ export class Match {
       swimTimer: 0,
       atCannon: false,
       atHelm: false,
-      atSails: false,
       atCrowNest: false,
       blocking: false,
       bailing: false,
@@ -926,7 +924,6 @@ export class Match {
   private clearStationFlags(player: Player) {
     player.atCannon = false;
     player.atHelm = false;
-    player.atSails = false;
     player.atCrowNest = false;
     player.mastClimb = null;
     player.blocking = false;
@@ -936,7 +933,7 @@ export class Match {
 
   private isStationOccupied(
     ship: Ship,
-    station: 'helm' | 'sails' | 'crow' | 'cannon',
+    station: 'helm' | 'crow' | 'cannon',
     playerId: string,
     cannonIndex: number | null = null,
   ) {
@@ -946,8 +943,6 @@ export class Match {
       switch (station) {
         case 'helm':
           return other.atHelm;
-        case 'sails':
-          return other.atSails;
         case 'crow':
           // The ladder is single-file too — a climber en route reserves the nest.
           return other.atCrowNest || other.mastClimb !== null;
@@ -1293,7 +1288,7 @@ export class Match {
     // Crouch is a plain hold — meaningless in water, on ladders or at stations.
     player.crouching = !!input.crouch
       && player.state === 'alive'
-      && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
+      && !player.atCannon && !player.atHelm && !player.atCrowNest
       && player.mastClimb === null;
 
     // Weapon switch — edge-triggered so a held slot key doesn't keep "switching" each tick.
@@ -1359,7 +1354,7 @@ export class Match {
     if (
       input.interactHeld
       && input.interactIntent === 'revive'
-      && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
+      && !player.atCannon && !player.atHelm && !player.atCrowNest
     ) {
       const target = this.findReviveTarget(player);
       if (target) this.reviveActionsThisTick.set(target.id, player.id);
@@ -1376,7 +1371,6 @@ export class Match {
       && !player.carryingChestId
       && !player.atCannon
       && !player.atHelm
-      && !player.atSails
       && !player.atCrowNest
       && this.consumeOneShot(client, 'special', input.seq)
     ) {
@@ -1386,7 +1380,7 @@ export class Match {
 
     const canPlaceNormalKeg = player.kegs > 0 && player.kegCooldown <= 0;
     const canPlaceMegaKeg = player.megaKegs > 0;
-    if (input.placeKeg && (canPlaceMegaKeg || canPlaceNormalKeg) && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest && this.consumeOneShot(client, 'placeKeg', input.seq)) {
+    if (input.placeKeg && (canPlaceMegaKeg || canPlaceNormalKeg) && !player.atCannon && !player.atHelm && !player.atCrowNest && this.consumeOneShot(client, 'placeKeg', input.seq)) {
       const kegPlacement = this.getKegPlacement(player, ship ?? null);
       if (kegPlacement) {
         const useMegaKeg = player.megaKegs > 0;
@@ -1444,7 +1438,6 @@ export class Match {
     if (input.interact && this.consumeOneShot(client, 'interact', input.seq)) {
       if (player.atCannon) { player.atCannon = false; return; }
       if (player.atHelm)   { player.atHelm   = false; return; }
-      if (player.atSails)  { player.atSails = false; return; }
       if (player.atCrowNest) {
         // [X] at the nest remounts the ladder — climbing down is manual now,
         // no instant deck teleport.
@@ -1619,7 +1612,6 @@ export class Match {
         && input.interactHeld
         && !player.atCannon
         && !player.atHelm
-        && !player.atSails
         && !player.atCrowNest
         && this.isNearAnchor(player, ship)
       ) {
@@ -1643,7 +1635,6 @@ export class Match {
         ((input.interact && input.interactIntent === 'bail') || input.useItem)
         && !player.atCannon
         && !player.atHelm
-        && !player.atSails
         && !player.atCrowNest
         && player.equippedTool === 'bucket'
         && player.bailScoopProgress <= 0.05
@@ -1697,7 +1688,7 @@ export class Match {
       // onlookers see the swing too). Replaces the old instant one-press patch.
       const mendingHull = input.interactHeld
         && input.interactIntent === 'repair'
-        && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest;
+        && !player.atCannon && !player.atHelm && !player.atCrowNest;
       const hullRepairTarget = mendingHull ? this.getRepairableHole(player, ship) : null;
       if (hullRepairTarget && this.getRepairPlankCount(player, ship) > 0) {
         player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / SHIP.HULL_REPAIR_SWING_TIME);
@@ -1748,10 +1739,6 @@ export class Match {
       this.snapPlayerToHelm(player, ship);
       player.velocity.x = 0;
       player.velocity.z = 0;
-    } else if (player.atSails && ship) {
-      this.snapPlayerToSails(player, ship);
-      player.velocity.x = 0;
-      player.velocity.z = 0;
     } else if (player.atCannon && ship) {
       const aim = this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch);
       player.rotation.x = aim.yaw;
@@ -1772,9 +1759,9 @@ export class Match {
       const yaw = input.yaw;
       // The crow's nest is deliberately NOT in this list: PhysicsSystem treats the
       // basket as a walkable FLOOR (gravity + velocity.y run, the WASD clamp keeps
-      // the lookout on the disc), so a lookout can hop like anywhere else. Helm and
-      // sails still block — those pin the body to a station.
-      const jumpBlocked = !!ship && (player.atHelm || player.atSails);
+      // the lookout on the disc), so a lookout can hop like anywhere else. The helm
+      // still blocks — it pins the body to a station.
+      const jumpBlocked = !!ship && player.atHelm;
       const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
       const moveZ = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
       if (player.state === 'swimming') {
@@ -1921,7 +1908,7 @@ export class Match {
   private updateCutlassAttack(player: Player, input: PlayerInput, dt: number): boolean {
     const activeWeapon = player.weapons[player.activeSlot];
     const isCutlass = !!activeWeapon && activeWeapon.weaponId === 'cutlass';
-    if (!isCutlass || player.carryingChestId || player.atCannon || player.atHelm || player.atSails || player.blocking) {
+    if (!isCutlass || player.carryingChestId || player.atCannon || player.atHelm || player.blocking) {
       this.cutlassChargeByPlayer.delete(player.id);
       this.cutlassFireHeldByPlayer.set(player.id, !!input.fire && isCutlass);
       player.cutlassCharge = 0;
@@ -2053,7 +2040,6 @@ export class Match {
       && !player.carryingChestId
       && !player.atCannon
       && !player.atHelm
-      && !player.atSails
       && player.state !== 'swimming';
   }
 
@@ -2870,7 +2856,7 @@ export class Match {
         continue;
       }
       // Station crew keep fighting/steering — they can't bail or patch, same as humans.
-      if (player.atCannon || player.atHelm || player.atSails || player.atCrowNest) {
+      if (player.atCannon || player.atHelm || player.atCrowNest) {
         if (player.bailing) player.bailing = false;
         continue;
       }
@@ -3149,10 +3135,6 @@ export class Match {
       return deckY + (holdFloor - deckY) * descent;
     }
     return position.y < deckY - 0.25 ? holdFloor : deckY;
-  }
-
-  private getSailControlLocal(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {
-    return getSharedSailControlLocal(stats);
   }
 
   private resolveFirearmHits(shooter: Player, traces: HitscanTrace[]) {
@@ -4648,7 +4630,7 @@ export class Match {
       if (!bot.isBot || bot.health <= 0) continue;
       if (bot.state === 'eliminated' || bot.state === 'respawning' || bot.state === 'downed') continue;
       if (this.skeletonHomes.has(bot.id)) continue; // skeleton melee already mauls downed players
-      if (bot.atCannon || bot.atHelm || bot.atSails || bot.atCrowNest) continue;
+      if (bot.atCannon || bot.atHelm || bot.atCrowNest) continue;
 
       // 1. Medic: revive a downed crewmate when the coast is clear.
       const downedMate = this.state.players.find((mate) =>
@@ -5578,15 +5560,6 @@ export class Match {
     player.position.y = ship.position.y + stats.height + 0.1 + getShipDeckRaiseAt(local, stats);
   }
 
-  private snapPlayerToSails(player: Player, ship: Ship) {
-    const stats = SHIP_STATS[ship.type];
-    const local = this.getSailControlLocal(stats);
-    const world = this.toShipWorld(local.x, local.z, ship);
-    player.position.x = world.x;
-    player.position.z = world.z;
-    player.position.y = ship.position.y + stats.height + 0.1;
-  }
-
   private isNearCrowNestLadder(player: Player, ship: Ship): boolean {
     return isSharedNearCrowNestLadder(player, ship);
   }
@@ -5801,7 +5774,7 @@ export class Match {
   }
 
   private armShipExitGrace(player: Player, ship: Ship, input: PlayerInput) {
-    if (!input.jumpPressed || player.atHelm || player.atCannon || player.atSails || player.atCrowNest || player.onShipId !== ship.id) return;
+    if (!input.jumpPressed || player.atHelm || player.atCannon || player.atCrowNest || player.onShipId !== ship.id) return;
 
     const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     const moveZ = (input.forward ? 1 : 0) - (input.back ? 1 : 0);

@@ -682,7 +682,6 @@ export class BotSystem {
       player.state = 'alive';
       player.atCannon = false;
       player.atHelm = false;
-      player.atSails = false;
       player.atCrowNest = false;
       player.position.x = ship.position.x + (dx / len) * (stats.width * 0.5 + 1.6);
       player.position.z = ship.position.z + (dz / len) * (stats.width * 0.5 + 1.6);

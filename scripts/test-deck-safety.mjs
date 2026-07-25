@@ -140,7 +140,7 @@ console.log("\ncrow's nest jump:");
       player.state = 'alive';
       player.onShipId = ship.id;
       player.atCrowNest = true;
-      player.atHelm = false; player.atSails = false; player.atCannon = false;
+      player.atHelm = false; player.atCannon = false;
       player.mastClimb = null;
       player.position = { x: 0, y: nestY(), z: mastZ };
       player.velocity = { x: 0, y: 0, z: 0 };

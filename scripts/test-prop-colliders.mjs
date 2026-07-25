@@ -106,7 +106,6 @@ function makePlayer(position) {
     carryingChestId: null,
     atCannon: false,
     atHelm: false,
-    atSails: false,
     atCrowNest: false,
     mastClimb: null,
     cannonBallistic: false,

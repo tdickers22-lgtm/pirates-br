@@ -98,7 +98,6 @@ function makeSwimmingPlayer(position) {
     swimTimer: 3,
     atCannon: false,
     atHelm: false,
-    atSails: false,
     sailControlMode: null,
     atCrowNest: false,
     blocking: false,

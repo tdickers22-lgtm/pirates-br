@@ -98,7 +98,7 @@ export class PlayerAnimator {
   readonly cutlassSwingKind = new Map<string, 'lunge' | 'swing'>();
 
   getCutlassSwingProgress(player: Player) {
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm ? null : player.weapons[player.activeSlot];
     if (!activeWeapon || activeWeapon.weaponId !== 'cutlass' || !activeWeapon.reloading) {
       this.cutlassSwingKind.delete(player.id);
       return 0;
@@ -142,7 +142,7 @@ export class PlayerAnimator {
 
     const swimming = player.state === 'swimming';
     const downed = player.state === 'downed';
-    const atStation = player.atCannon || player.atHelm || player.atSails || player.atCrowNest || player.mastClimb !== null;
+    const atStation = player.atCannon || player.atHelm || player.atCrowNest || player.mastClimb !== null;
     const moveSpeed = Math.hypot(player.velocity.x, player.velocity.z);
     const moveRatio = Math.min(
       1,
@@ -169,7 +169,7 @@ export class PlayerAnimator {
     const walkLift = Math.cos(phase * 2) * 0.05 * moveRatio;
     const idleBreath = Math.sin(this.view.ocean.getTime() * 1.35) * 0.012 * (1 - moveRatio);
     const idleBob = deckSway + Math.sin(this.view.ocean.getTime() * 2.1 + phase) * 0.018 + idleBreath;
-    const activeWeapon = player.atCannon || player.atHelm || player.atSails ? null : player.weapons[player.activeSlot];
+    const activeWeapon = player.atCannon || player.atHelm ? null : player.weapons[player.activeSlot];
     const cutlassReady = activeWeapon?.weaponId === 'cutlass';
     const cutlassSwing = cutlassReady ? this.view.getCutlassSwingProgress(player) : 0;
     // Remote swing-start edge → pooled world-space slash arc at the sword hand.
@@ -287,20 +287,6 @@ export class PlayerAnimator {
       rightArmPivot.rotation.set(-1.15 - haulPhase * 0.26 * haul, 0, 0.48 + spin * 0.22 * haul);
       leftLegPivot.rotation.set(0.14, 0, 0.05);
       rightLegPivot.rotation.set(-0.08, 0, -0.05);
-    } else if (player.atSails) {
-      // Halyard haul: a 1.1s reach→pull loop while the sail is actually moving,
-      // static grip otherwise.
-      const sailWork = mesh.userData.sailWork as number | undefined ?? 0;
-      const cycle = (this.view.ocean.getTime() % 1.1) / 1.1;
-      const reach = THREE.MathUtils.smoothstep(cycle, 0, 0.45);
-      const pull = THREE.MathUtils.smoothstep(cycle, 0.45, 0.68);
-      const haulPose = (reach - pull) * sailWork;
-      torso.rotation.x = 0.08 + pull * 0.15 * sailWork;
-      torso.rotation.z = -0.06;
-      leftArmPivot.rotation.set(-0.74 - haulPose * 1.15, 0.12, -0.34);
-      rightArmPivot.rotation.set(-0.96 - haulPose * 1.05, -0.06, 0.28);
-      leftLegPivot.rotation.set(0.1 + pull * 0.12 * sailWork, 0, 0.02);
-      rightLegPivot.rotation.set(-0.06, 0, -0.02);
     } else if (player.atCrowNest) {
       torso.rotation.x = 0.02;
       torso.rotation.z = 0.04;
@@ -451,7 +437,7 @@ export class PlayerAnimator {
       rightLegPivot.rotation.x = -0.75 - walkSwing * 0.4;
     }
 
-    if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon && !player.atSails
+    if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon
       && this.cutlassSwingKind.get(player.id) === 'lunge' && cutlassSwing > 0) {
       // DASH STAB: full-extension fencer's thrust — body lunges forward, sword
       // arm rams horizontal, trailing arm flung back, legs in a deep stride.
@@ -469,7 +455,7 @@ export class PlayerAnimator {
       leftArmPivot.rotation.z = 0.32 + ext * 0.35;
       leftLegPivot.rotation.x -= ext * 0.55;
       rightLegPivot.rotation.x += ext * 0.68;
-    } else if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon && !player.atSails) {
+    } else if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon) {
       const windup = THREE.MathUtils.smoothstep(cutlassSwing, 0.02, 0.26);
       const strike = THREE.MathUtils.smoothstep(cutlassSwing, 0.18, 0.58);
       const recover = THREE.MathUtils.smoothstep(cutlassSwing, 0.62, 1);
