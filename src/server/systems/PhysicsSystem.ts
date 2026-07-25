@@ -1,6 +1,7 @@
 import type { Ship, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER } from '../../shared/constants/index.js';
-import { toShipLocalPoint, toShipWorldPoint } from '../../shared/interactions.js';
+import type { GangwayPlan } from '../../shared/interactions.js';
+import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY } from '../../shared/interactions.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
@@ -65,8 +66,11 @@ const HULL_CONTACT_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
 ];
 
 /** Walkable crow's-nest basket: ship-local disc radius around the mast the
- *  lookout can pace (matches the client nest geometry, minus a rail margin). */
-const CROW_NEST_WALK_RADIUS = 0.55;
+ *  lookout can pace. Mirrors the client nest geometry (ShipRenderer builds the
+ *  floor at r = 1.0 with the rail hoop at r = 1.06), minus a body margin so the
+ *  lookout stops at the rail instead of clipping through it. The old 0.55 left
+ *  a 1.1 m disc that read as standing on a dinner plate. */
+const CROW_NEST_WALK_RADIUS = 0.9;
 
 // ── On-foot locomotion tuning (terrain v2) ───────────────────────────────────
 const LOCO = {
@@ -545,6 +549,16 @@ export class PhysicsSystem {
   private updatePlayers(dt: number, t: number, players: Player[], ships: Ship[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     // Frame-rate-independent decay preserving the previous 0.9-per-16ms feel.
     const knockbackDamp = Math.pow(0.9, dt / 0.016);
+    // Boarding planks are ship×dock geometry, not per-player — resolve them once
+    // per tick (typically zero or one) instead of 14 docks × 10 hulls per walker.
+    const gangwayPlans: GangwayPlan[] = [];
+    for (const island of islands) {
+      if (!island.dock) continue;
+      for (const ship of ships) {
+        const plan = getShipGangwayPlan(ship, island.dock);
+        if (plan) gangwayPlans.push(plan);
+      }
+    }
     const playerBoundary = WORLD.HALF - WORLD.PLAYER_MARGIN;
     for (const player of players) {
       if (player.respawnProtectionTimer > 0) {
@@ -762,9 +776,10 @@ export class PhysicsSystem {
 
         const floorY = this.getShipFloorY(player.position, onShip, local);
 
-        // Gravity (crow's nest: walkable basket — Y pinned to the mast top,
-        // WASD movement kept but clamped to the nest disc around the mast so
-        // the lookout can pace the rim without stepping into thin air).
+        // Gravity (crow's nest: walkable basket — the nest deck is a FLOOR, not
+        // a Y pin, so a jump reads as a jump: gravity + velocity.y run normally
+        // and land back on the basket. WASD stays clamped to the nest disc
+        // (airborne too) so a hop can't drift the lookout into thin air.
         if (player.atCrowNest) {
           const mastZ = getMainMastLocalZ(stats);
           const offX = local.x;
@@ -777,8 +792,13 @@ export class PhysicsSystem {
             player.position.z = world.z;
             local = this.toShipLocal(player.position, onShip);
           }
-          player.position.y = onShip.position.y + getCrowNestStandingY(stats);
-          player.velocity.y = 0;
+          const nestFloorY = onShip.position.y + getCrowNestStandingY(stats);
+          player.velocity.y += PHYSICS.GRAVITY * dt;
+          player.position.y += player.velocity.y * dt;
+          if (player.position.y <= nestFloorY) {
+            player.position.y = nestFloorY;
+            player.velocity.y = 0;
+          }
         } else {
           player.velocity.y += PHYSICS.GRAVITY * dt;
           player.position.y += player.velocity.y * dt;
@@ -867,8 +887,20 @@ export class PhysicsSystem {
             }
           }
         }
-        const groundY = Math.max(islandFloor, dockFloor, bridgeFloor);
-        const standingOnDock = onDock !== null && dockFloor >= islandFloor;
+        // Boarding gangway: a berthed ship's plank is a real standing surface
+        // between the dock edge and its bulwark, so walking aboard a galleon is
+        // a stroll up the plank instead of a 2 m freeboard climb. Same shared
+        // geometry the client draws (getShipGangwayPlan), gated on being at
+        // plank level so nobody gets teleported up from the water beneath it.
+        let gangwayFloor = -Infinity;
+        for (const plan of gangwayPlans) {
+          const plankY = getGangwayFloorY(plan, player.position.x, player.position.z);
+          if (plankY !== null && player.position.y > plankY - 1.1) {
+            gangwayFloor = Math.max(gangwayFloor, plankY);
+          }
+        }
+        const groundY = Math.max(islandFloor, dockFloor, bridgeFloor, gangwayFloor);
+        const standingOnDock = (onDock !== null && dockFloor >= islandFloor) || gangwayFloor > islandFloor;
 
         // ── Water entry: submerged island ground makes the player swim ──
         // depth = local wave surface − standing ground. Beaches dipping under the

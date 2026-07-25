@@ -19,7 +19,7 @@ export const ASSET_NAMES = [
   'barrel', 'keg', 'chest_closed', 'chest_open', 'crate', 'campfire',
   'dock_mid', 'dock_end',
   'watchtower', 'shipwreck', 'standing_stones', 'lantern_post', 'fort', 'tavern', 'stall',
-  'tent_a', 'bedroll', 'rock_arch',
+  'tent_a', 'tent_b', 'tent_c', 'bedroll', 'rock_arch', 'crag',
   'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
   // Story scenes + story scatter (docs/ISLAND_STORY_BIBLE.md)
   'smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton',

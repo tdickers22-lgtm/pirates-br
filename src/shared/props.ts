@@ -105,8 +105,33 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   fort: { shape: 'capsule', radius: 2.8, height: 8.4, subColliders: FORT_STRUCTURE },
   shipwreck: { shape: 'sphere', radius: 2.6, height: 3.2 },
   standing_stones: { shape: 'none', radius: 0, height: 3.35, subColliders: STANDING_STONE_RING },
+  // Tent canvas cores. Each variant blocks only its own occupied mass — the
+  // measured p70 XZ radius of the geometry above ankle height — while
+  // SPACING_OVERRIDES reserves the full guy-rope/peg footprint so scatter
+  // never grows through a tent's ropes.
   tent_a: { shape: 'sphere', radius: 1.3, height: 1.6 },
+  // Lean-to: one canted slope, so the mass is shallower and lower than the
+  // A-frame but the driftwood windbreak runs its whole 4.8 m length.
+  tent_b: { shape: 'sphere', radius: 1.15, height: 1.5 },
+  // Bell tent: round footprint round a centre pole — narrow but tall.
+  tent_c: { shape: 'sphere', radius: 1.0, height: 2.3 },
   bedroll: { shape: 'none', radius: 0, height: 0.2 },
+  // Exposed bedrock: three blade masses on one ridge line (MEASURED centres of
+  // crag.glb, radius = mean of each blade's XZ half-extents above ground).
+  // shape 'none' keeps the gaps between blades walkable — weaving through an
+  // outcrop is the whole point of putting one on a flank — while every blade
+  // is genuinely solid. Replaces the deleted client-only decoration, which
+  // players walked straight through.
+  crag: {
+    shape: 'none',
+    radius: 0,
+    height: 3.4,
+    subColliders: [
+      { dx: -1.02, dz: 0.00, radius: 0.52, height: 2.27 },
+      { dx: 0.04, dz: -0.31, radius: 0.70, height: 3.40 },
+      { dx: 1.12, dz: -0.12, radius: 0.52, height: 3.36 },
+    ],
+  },
   // Two solid rock legs (measured GLB centres, ~1.0 m mean half-extent) block;
   // the span overhead stays a genuine walk-under (no centre collider).
   rock_arch: {
@@ -176,6 +201,19 @@ const SPACING_OVERRIDES: Partial<Record<IslandPropType, number>> = {
   standing_stones: 3.6,
   shipwreck: 5.2,
   fort: 8.5,
+  // Tents: the canvas collider is the sleeping mass, but guy ropes and pegs
+  // reach much further (MEASURED max XZ radius of each GLB). Without these the
+  // scatter grew ferns through the ropes and parked the neighbouring camp
+  // clutter half a metre off the canvas — the "copy-pasted kit" read.
+  tent_a: 2.25,
+  // The lean-to's 4.8 m windbreak is a LINE, not a disc — reserving its full
+  // half-length as a circle would push the whole camp apart, so this covers
+  // the canvas and the near guy ropes.
+  tent_b: 2.15,
+  tent_c: 1.75,
+  // Blade cluster reaches 1.62 m from the origin; keep a little air round it so
+  // flora never sprouts out of solid bedrock.
+  crag: 2.0,
   // Story vignettes reserve their whole visual footprint (walk-in scenes have
   // small or no hard collider, but scatter must stay out of the tableau).
   smuggler_cache: 5.0,
@@ -271,7 +309,14 @@ export function resolvePropCollision(
     if (!subs || subs.length === 0) continue;
     const cos = Math.cos(prop.yaw);
     const sin = Math.sin(prop.yaw);
-    for (let pass = 0; pass < 2; pass++) {
+    // Two passes clear a wall/ring where neighbouring masses barely touch. A
+    // crag's three blades OVERLAP (it is one ridge of rock, not a fence), so a
+    // walker shoved out of the middle blade can land inside BOTH neighbours
+    // and two passes run out with him 0.35 m inside the stone. Bound the
+    // relaxation by the number of masses instead (capped, and it exits early
+    // the moment nothing overlaps).
+    const passes = Math.min(4, Math.max(2, subs.length));
+    for (let pass = 0; pass < passes; pass++) {
       let best: { cx: number; cz: number; r: number; d: number; pen: number } | null = null;
       for (const sub of subs) {
         if (pos.y > baseY + sub.height * prop.scale + 0.2) continue;
@@ -304,7 +349,7 @@ export function resolvePropCollision(
  *  so cover reads exactly as the silhouette suggests without killing the arcade
  *  feel of firing through a palm grove. */
 export const SHOT_BLOCKING_PROPS: ReadonlySet<IslandPropType> = new Set<IslandPropType>([
-  'boulder_a', 'boulder_b', 'boulder_c',
+  'boulder_a', 'boulder_b', 'boulder_c', 'crag',
   'watchtower', 'fort', 'standing_stones', 'rock_arch',
   'shipwreck', 'wrecker_tower', 'crow_roost', 'mine_head',
   'skull_totem', 'kraken_wreck', 'widow_memorial',
@@ -397,7 +442,12 @@ export function getPropGroundY(island: Island, prop: IslandProp): number {
   const col = PROP_COLLIDERS[prop.type];
   const footprint = col && col.shape !== 'none'
     ? col.radius * prop.scale
-    : (SPACING_OVERRIDES[prop.type] ?? 0) * prop.scale * 0.45;
+    // A crag's outer blades stand at its FULL bounds radius, so the
+    // spacing-derived 0.45 sample ring (0.9 m) missed the ground the downhill
+    // blade actually lands on and left it hanging over the flank.
+    : prop.type === 'crag'
+      ? getPropBoundsRadius(prop.type, prop.scale)
+      : (SPACING_OVERRIDES[prop.type] ?? 0) * prop.scale * 0.45;
   const center = getIslandSurfaceY(island, prop.x, prop.z);
   let ground = center;
   if (footprint > 0.2) {
@@ -406,8 +456,18 @@ export function getPropGroundY(island: Island, prop: IslandProp): number {
     }
     // Tents may bed deeper into a hillside (canvas skirts hide it); other
     // built props keep the tight cap so a steep edge can't drown a vignette.
-    const sinkCap = prop.type === 'tent_a' ? 0.65 : 0.35;
-    if (!prop.type.startsWith('boulder_')) ground = Math.max(ground, center - sinkCap);
+    const sinkCap = prop.type.startsWith('tent_') ? 0.65 : 0.35;
+    // Loose rock sinks UNCAPPED: boulders half-bury, and a crag is bedrock
+    // pushing OUT of the flank — its authored skirt+root run 1.55 m below the
+    // origin precisely so it can bite into a steep slope with no daylight
+    // under the downhill blade.
+    if (!prop.type.startsWith('boulder_') && prop.type !== 'crag') {
+      ground = Math.max(ground, center - sinkCap);
+    }
   }
-  return ground - 0.07;
+  // Crags take a deeper bite than the 7 cm everything else gets: the rendered
+  // terrain mesh interpolates BELOW the analytic surface across a convex
+  // ridge, which is exactly where crags are placed, so a flush seat still
+  // reads as a hovering rock.
+  return ground - (prop.type === 'crag' ? 0.45 : 0.07);
 }

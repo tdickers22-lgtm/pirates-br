@@ -127,6 +127,175 @@ export class IslandBuilder {
     return mat;
   }
 
+  /**
+   * FRAGMENT-SCALE ground detail for the island terrain material.
+   *
+   * The terrain mesh carries vertices 4-8m apart, so 100% of its read used to
+   * come from per-vertex colour: at 2m every biome collapsed into one flat
+   * airbrushed smear ("vinyl"), and the cliff plinths rendered as featureless
+   * whale-backs. This injects a world-space procedural detail pass that runs
+   * per PIXEL — a handful of ALU ops, no textures, no extra lights, no geometry
+   * and no contact with `getIslandSurfaceY` (purely a colour/roughness edit):
+   *
+   *  • 3 octaves of value noise (~1.8m mottle, ~0.5m patches, ~0.09m grain)
+   *    keyed per material class from `aMat` (sand / grass / rock / ash), so
+   *    sand speckles + ripples, grass patches, rock grains and ash chars.
+   *  • Slope-gated sedimentary STRATA on steep faces — the whale-back killer.
+   *  • A wet-sand band that breathes with the swell, plus an underwater floor
+   *    tint and caustic mottle so the walk-in slope reads through the water.
+   *  • Volcanic: hairline magma cracks evaluated per-pixel (the per-vertex
+   *    field smeared them into ~10m glow bars) with the glow confined to the
+   *    crack core, and a molten caldera pool from `aSummit`.
+   */
+  private applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: boolean) {
+    const pulse = this.ctx.magmaPulseUniform;
+    const time = this.ctx.foliageTime;
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uTerrTime = time;
+      if (volcanic) shader.uniforms.uMagmaPulse = pulse;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          '#include <common>\n'
+          + 'attribute float aMat;\n'
+          + 'varying vec3 vTerrWorld;\n'
+          + 'varying float vTerrMat;\n'
+          + 'varying float vTerrSlope;\n'
+          + (volcanic ? 'attribute float aMagma;\nattribute float aSummit;\nvarying float vMagmaGate;\nvarying float vSummit;\n' : ''),
+        )
+        .replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n'
+          + 'vTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n'
+          + 'vTerrMat = aMat;\n'
+          + 'vTerrSlope = clamp(1.0 - normalize(objectNormal).y, 0.0, 1.0);\n'
+          + (volcanic ? 'vMagmaGate = aMagma;\nvSummit = aSummit;\n' : ''),
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          '#include <common>\n'
+          + 'uniform float uTerrTime;\n'
+          + 'varying vec3 vTerrWorld;\n'
+          + 'varying float vTerrMat;\n'
+          + 'varying float vTerrSlope;\n'
+          + (volcanic ? 'uniform float uMagmaPulse;\nvarying float vMagmaGate;\nvarying float vSummit;\n' : '')
+          + 'float tHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n'
+          + 'float tNoise(vec2 p) {\n'
+          + '  vec2 i = floor(p); vec2 f = fract(p);\n'
+          + '  vec2 u = f * f * (3.0 - 2.0 * f);\n'
+          + '  float a = tHash(i), b = tHash(i + vec2(1.0, 0.0));\n'
+          + '  float c = tHash(i + vec2(0.0, 1.0)), d = tHash(i + vec2(1.0, 1.0));\n'
+          + '  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n'
+          + '}\n',
+        )
+        // Detail runs AFTER the vertex colour is folded into diffuseColor.
+        .replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n'
+          + 'vec2 tP = vTerrWorld.xz;\n'
+          // Each octave samples a ROTATED lattice. A value-noise grid shares the
+          // world axes, and three co-aligned octaves stack their cell edges into
+          // a visible checkerboard on flat ground (caught in verification).
+          + 'mat2 tR1 = mat2(0.87, -0.50, 0.50, 0.87);\n'
+          + 'mat2 tR2 = mat2(0.36, 0.93, -0.93, 0.36);\n'
+          + 'float nMid = tNoise(tP * 0.55);\n'                    // ~1.8m mottle
+          + 'float nFine = tNoise(tR1 * tP * 2.1);\n'              // ~0.5m patches
+          + 'float nGrain = tNoise(tR2 * tP * 8.5);\n'             // ~0.12m grain
+          // Tent weights over the 0..3 material axis: adjacent classes crossfade.
+          + 'float mC = clamp(vTerrMat, 0.0, 3.0);\n'
+          + 'float wSand = max(0.0, 1.0 - abs(mC - 0.0));\n'
+          + 'float wGrass = max(0.0, 1.0 - abs(mC - 1.0));\n'
+          + 'float wRock = max(0.0, 1.0 - abs(mC - 2.0));\n'
+          + 'float wAsh = max(0.0, 1.0 - abs(mC - 3.0));\n'
+          // Sand: fine grain speckle + shallow wind/tide ripple bands.
+          + 'float ripple = sin(dot(tP, vec2(0.86, 0.51)) * 4.4 + nMid * 4.0);\n'
+          + 'float dSand = (nGrain - 0.5) * 0.34 + (nFine - 0.5) * 0.12 + ripple * 0.06;\n'
+          // Grass: broad patchiness (blade clumps), light grain.
+          + 'float dGrass = (nMid - 0.5) * 0.34 + (nFine - 0.5) * 0.28 + (nGrain - 0.5) * 0.18;\n'
+          // Rock: crystalline grain + a touch of mottle.
+          + 'float dRock = (nFine - 0.5) * 0.34 + (nGrain - 0.5) * 0.28 + (nMid - 0.5) * 0.16;\n'
+          // Ash: high-contrast char/clinker.
+          + 'float dAsh = (nFine - 0.5) * 0.44 + (nGrain - 0.5) * 0.36;\n'
+          + 'float detail = dSand * wSand + dGrass * wGrass + dRock * wRock + dAsh * wAsh;\n'
+          // Sedimentary STRATA on steep faces — horizontal bands that follow the
+          // rock face without moving a single vertex. The cliff/whale-back fix.
+          // Heavily noise-warped and shallow: an un-warped low-frequency band
+          // reads as zebra stripes painted across a big cone (seen in review).
+          + 'float steep = smoothstep(0.34, 0.62, vTerrSlope);\n'
+          + 'float strataW = sin(vTerrWorld.y * 2.5 + nMid * 6.5 + nFine * 2.4);\n'
+          + 'float strata = smoothstep(-0.40, 0.35, strataW) - 0.5;\n'
+          // ...and only on ROCK/ASH ground: contour bands running across a green
+          // grass spire read as topographic lines, not sedimentary layers.
+          + 'float strataMat = clamp(wRock + wAsh + wSand * 0.3, 0.0, 1.0);\n'
+          + 'detail += strata * 0.17 * steep * strataMat;\n'
+          + 'diffuseColor.rgb *= clamp(1.0 + detail, 0.35, 1.9);\n'
+          // Hue character: sun-bleached sand warms, grass patches yellow off,
+          // strata bands run ochre, ash cools toward blue-grey clinker.
+          + 'diffuseColor.rgb += vec3(0.030, 0.018, -0.012) * (nGrain - 0.5) * wSand;\n'
+          + 'diffuseColor.rgb += vec3(0.045, 0.038, -0.030) * (nMid - 0.5) * wGrass;\n'
+          + 'diffuseColor.rgb += vec3(0.032, 0.019, 0.003) * strata * steep * strataMat;\n'
+          + 'diffuseColor.rgb += vec3(-0.012, -0.006, 0.014) * (nFine - 0.5) * wAsh;\n'
+          // ── Shore: wet-sand band whose upper edge breathes with the swell ──
+          + 'float wetLine = 1.05 + 0.30 * sin(uTerrTime * 0.55) + 0.12 * sin(uTerrTime * 0.23 + 1.7);\n'
+          + 'float wet = smoothstep(wetLine + 0.45, wetLine - 0.65, vTerrWorld.y);\n'
+          + 'diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.58, 0.63, 0.69), wet * 0.88);\n'
+          // ── Submerged floor: keep the terrain read going under the water ──
+          + 'float subm = smoothstep(-0.15, -2.6, vTerrWorld.y);\n'
+          + 'float caustic = sin(vTerrWorld.x * 1.15 + uTerrTime * 0.7) * sin(vTerrWorld.z * 0.97 - uTerrTime * 0.55);\n'
+          + 'diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb, vec3(0.10, 0.30, 0.33), 0.55), subm);\n'
+          + 'diffuseColor.rgb *= 1.0 + caustic * 0.16 * (1.0 - subm) * step(vTerrWorld.y, 0.6) + caustic * 0.10 * subm;\n'
+          + (volcanic
+            ? // Hairline magma cracks, per pixel. Two crossed sine fields sharpened
+              // HARD so only the crack CORE lights; the flanks stay charred basalt.
+              'float vein = 0.0;\n'
+              + 'if (vMagmaGate > 0.004) {\n'
+              + '  float c1 = sin(vTerrWorld.x * 0.224 + sin(vTerrWorld.z * 0.112) * 2.2);\n'
+              + '  float c2 = sin(vTerrWorld.z * 0.208 - sin(vTerrWorld.x * 0.098) * 2.0);\n'
+              + '  float c3 = sin(vTerrWorld.x * 0.496 - sin(vTerrWorld.z * 0.432) * 1.6);\n'
+              + '  float c4 = sin(vTerrWorld.z * 0.464 + sin(vTerrWorld.x * 0.528) * 1.5);\n'
+              + '  float coarse = pow(max(0.0, 1.0 - min(abs(c1), abs(c2))), 46.0);\n'
+              + '  float fine = pow(max(0.0, 1.0 - min(abs(c3), abs(c4))), 58.0) * 0.7;\n'
+              // Cracks are INTERMITTENT: an unbroken glowing line running the
+              // length of an island reads as a racing stripe, not fractured rock.
+              + '  float breakUp = smoothstep(0.30, 0.72, nMid * 0.6 + nFine * 0.4);\n'
+              // ...and only the genuinely elevated cone cracks open; the shore
+              // flank stays cold basalt (which the ash tint already sells).
+              + '  float lift = smoothstep(9.0, 22.0, vTerrWorld.y);\n'
+              + '  vein = min(1.0, coarse + fine) * vMagmaGate * breakUp * lift;\n'
+              + '  diffuseColor.rgb *= 1.0 - vein * 0.55;\n'   // hot rim: rock darkens at the crack
+              + '}\n'
+            : ''),
+        )
+        // Wet rock/sand gains a specular sheen (roughness drops); the same band
+        // that darkens the albedo lifts the highlight, which is what actually
+        // sells "the tide just went out" at eye level.
+        .replace(
+          '#include <roughnessmap_fragment>',
+          '#include <roughnessmap_fragment>\n'
+          + 'roughnessFactor = mix(roughnessFactor, 0.30, clamp(wet * 0.9 + subm * 0.7, 0.0, 1.0));\n',
+        );
+      if (volcanic) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <emissivemap_fragment>',
+          '#include <emissivemap_fragment>\n'
+          + 'float veinCore = pow(vein, 2.4);\n'
+          + 'if (veinCore > 0.002) {\n'
+          + '  vec3 mc = mix(vec3(0.95, 0.16, 0.02), vec3(1.0, 0.72, 0.16), clamp(veinCore * 1.6, 0.0, 1.0));\n'
+          + '  totalEmissiveRadiance += mc * veinCore * uMagmaPulse * 1.1;\n'
+          + '}\n'
+          + 'if (vSummit > 0.004) {\n'
+          + '  float pool = vSummit * (0.75 + 0.25 * (nMid - 0.5) * 2.0);\n'
+          + '  totalEmissiveRadiance += mix(vec3(0.95, 0.22, 0.03), vec3(1.0, 0.75, 0.20), clamp(pool * 1.6, 0.0, 1.0)) * pool * uMagmaPulse * 1.4;\n'
+          + '}\n',
+        );
+      }
+    };
+    // One program per variant — not one per island — so shader compilation
+    // doesn't churn across 14 island builds.
+    material.customProgramCacheKey = () => (volcanic ? 'pirates-terrain-detail-volcanic' : 'pirates-terrain-detail');
+  }
+
   buildSeaRockMesh(rock: SeaRock) {
     const group = new THREE.Group();
     group.name = `sea-rock-${rock.id}`;
@@ -264,6 +433,62 @@ export class IslandBuilder {
     material.needsUpdate = true;
   }
 
+  /** Story-scene ground pads (`Sand_Pad` / `Grave_Dirt` in the scene GLBs) were
+   *  stamping hard white or dark ellipses onto the terrain — "paint splats" in
+   *  the tour audit. Give each pad its own material tinted 55% toward the host
+   *  island's ground palette, mottled with the same world-space noise the
+   *  terrain uses, and eroded at the rim by an alpha-tested noise threshold so
+   *  the edge crumbles into the ground instead of ending on a clean arc.
+   *  (`discard` rather than blending: a transparent ground decal sorts badly
+   *  against every prop standing on it.) */
+  private blendStoryPad(mesh: THREE.Mesh, island: Island) {
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    if (!mats.some((m) => m && (m.name === 'Sand_Pad' || m.name === 'Grave_Dirt'))) return;
+    if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+    const padR = Math.max(0.5, mesh.geometry.boundingSphere?.radius ?? 1);
+    const palette = BIOME_PALETTES[island.profile.biome ?? 'lush'];
+    // Sand-DOMINANT blend: the audit flagged both failure modes (stark white
+    // discs AND dark olive stains), so the pad must land lighter than the turf,
+    // never darker.
+    const ground = new THREE.Color(palette.sand).lerp(new THREE.Color(palette.grass), 0.3);
+    const dressed = mats.map((m) => {
+      if (!m || (m.name !== 'Sand_Pad' && m.name !== 'Grave_Dirt') || !(m instanceof THREE.MeshStandardMaterial)) return m;
+      const clone = m.clone();
+      clone.color.lerp(ground, 0.55);
+      clone.onBeforeCompile = (shader) => {
+        shader.uniforms.uPadR = { value: padR };
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', '#include <common>\nvarying vec3 vPadWorld;\nvarying vec2 vPadLocal;')
+          .replace(
+            '#include <begin_vertex>',
+            '#include <begin_vertex>\nvPadLocal = transformed.xz;\nvPadWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+          );
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            '#include <common>',
+            '#include <common>\nuniform float uPadR;\nvarying vec3 vPadWorld;\nvarying vec2 vPadLocal;\n'
+            + 'float pHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n'
+            + 'float pNoise(vec2 p) {\n'
+            + '  vec2 i = floor(p); vec2 f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);\n'
+            + '  return mix(mix(pHash(i), pHash(i + vec2(1.0, 0.0)), u.x),\n'
+            + '             mix(pHash(i + vec2(0.0, 1.0)), pHash(i + vec2(1.0, 1.0)), u.x), u.y);\n'
+            + '}\n',
+          )
+          .replace(
+            '#include <color_fragment>',
+            '#include <color_fragment>\n'
+            + 'float padN = pNoise(vPadWorld.xz * 1.6) * 0.6 + pNoise(vPadWorld.xz * 5.5) * 0.4;\n'
+            + 'float padEdge = length(vPadLocal) / uPadR;\n'
+            + 'if (padEdge > 0.55 && padN < smoothstep(0.58, 1.0, padEdge) * 0.9) discard;\n'
+            + 'diffuseColor.rgb *= 0.86 + padN * 0.30;\n',
+          );
+      };
+      clone.customProgramCacheKey = () => 'pirates-story-pad';
+      return clone;
+    });
+    mesh.material = Array.isArray(mesh.material) ? dressed as THREE.Material[] : dressed[0] as THREE.Material;
+  }
+
   buildServerProps(island: Island, group: THREE.Group, lowDetail: boolean) {
     const props = island.props ?? [];
     if (props.length === 0) return;
@@ -320,6 +545,7 @@ export class IslandBuilder {
           if (obj instanceof THREE.Mesh) {
             obj.castShadow = !lowDetail;
             obj.receiveShadow = true;
+            this.blendStoryPad(obj, island);
           }
         });
         group.add(node);
@@ -578,7 +804,17 @@ export class IslandBuilder {
     // through cracks in the rock (per-vertex aMagma → emissive in the shader).
     const isVolcanic = (island.profile.biome ?? 'lush') === 'volcanic';
     const ashCharcoal = new THREE.Color(0x2b2621);
+    /** Vein GATE (smooth, interpolates cleanly) — the crack field itself is
+     *  evaluated per-PIXEL in the fragment shader, so veins read as hairline
+     *  cracks instead of the 10m airbrushed smears per-vertex storage produced. */
     const terrainMagma: number[] = [];
+    /** Caldera core glow (the molten tip), kept separate from the vein gate so
+     *  the summit stays a solid pool rather than a cracked field. */
+    const terrainSummit: number[] = [];
+    /** Fragment-detail material class per vertex: 0=sand, 1=grass, 2=rock, 3=ash.
+     *  Interpolates between neighbours, and the shader blends the two adjacent
+     *  grain characters, so transitions stay smooth. */
+    const terrainMatClass: number[] = [];
     // Snow on tall NON-volcanic mountains: whiten the summit above the snow line
     // as part of the terrain itself (no floating cone). Volcanoes stay bare rock.
     // A tall mountain reads as craggy grey STONE with grass lower down — snow is
@@ -694,6 +930,18 @@ export class IslandBuilder {
       4,
       r * (0.10 + profileForColor.heightProfile * 0.25 + (profileForColor.peakBoost ?? 0) * 0.15),
     );
+    // peakEst OVER-estimates relief on twin/secondary-hill styles, so the
+    // volcanic scorch + vein gates (which key on the top half of the cone) never
+    // fired on low volcanic isles — island 8 rendered as a generic lush dome
+    // despite its smoke column. Measure the REAL relief from the vertices we
+    // just generated and gate the volcanic identity on that. Deliberately kept
+    // separate from `peakEst`: the grass/rock/peak masks are tuned against the
+    // estimate and swapping them wholesale re-greys every lush island.
+    let realPeakY = -Infinity;
+    for (let i = 1; i < terrainPositions.length; i += 3) {
+      if (terrainPositions[i] > realPeakY) realPeakY = terrainPositions[i];
+    }
+    const realRelief = Math.max(4, realPeakY - (5.15 + r * 0.0085));
     // Bright white-sand shelves (atoll/crescent lagoons) sit at ~sea level, so
     // pull their wet/submerged tints hard toward lagoon turquoise — otherwise the
     // barely-emergent floor stays a blinding white plate from above (audit P1).
@@ -716,6 +964,14 @@ export class IslandBuilder {
     };
     const groundFbm = (x: number, z: number): number =>
       vNoise(x * 0.045, z * 0.045) * 0.55 + vNoise(x * 0.14, z * 0.14) * 0.3 + vNoise(x * 0.46, z * 0.46) * 0.15;
+    // Geyser mouths scorch the ground around them (works on ANY biome — a vent
+    // on a grass island still burns a char ring), so the vent geometry sits in
+    // ash instead of on untouched turf.
+    const ventScorch = (island.geysers ?? []).map((g) => ({
+      x: g.x - island.position.x,
+      z: g.z - island.position.z,
+      r: Math.max(1.5, g.radius) * 3.2,
+    }));
     for (let ring = 0; ring <= totalRings; ring++) {
       const distRatio = ringDistRatio(ring);
       for (let segment = 0; segment <= angularSegments; segment++) {
@@ -727,6 +983,9 @@ export class IslandBuilder {
         const slope = THREE.MathUtils.clamp(1 - terrainNormals.getY(index), 0, 1);
 
         const heightNorm = THREE.MathUtils.clamp((pointY - seaBase) / peakEst, 0, 1);
+        /** Same band, measured against the island's ACTUAL relief — used only by
+         *  the volcanic ash/vein gates (see realRelief). */
+        const reliefNorm = THREE.MathUtils.clamp((pointY - seaBase) / realRelief, 0, 1);
         const shoreMask = THREE.MathUtils.smoothstep(distRatio, 0.72, 0.99);
         // Grass is the DEFAULT interior ground: any land above the waterline is
         // green (the distRatio gate alone keeps a sand berm at the shore), so
@@ -797,39 +1056,47 @@ export class IslandBuilder {
           terrainColor.lerp(new THREE.Color(0x54b8bd), lagoon * 0.55);
         }
 
-        // ── Volcanic: char the upper cone to ash, seep magma through cracks ──
-        let magma = 0;
+        // ── Volcanic: char the cone to ash; the magma CRACK FIELD itself is
+        // evaluated per-pixel in the fragment shader (a per-vertex field on
+        // 4-8m vertices smeared every hairline vein into a ~10m glow bar).
+        // Here we only store the smooth GATE that says "how molten is this
+        // region", which interpolates cleanly.
+        let magmaGate = 0;
+        let summitGlow = 0;
+        let ashAmount = 0;
         if (isVolcanic) {
-          const wx = terrainPositions[index * 3 + 0] + island.position.x;
-          const wz = terrainPositions[index * 3 + 2] + island.position.z;
-          // Two rotated sine fields cross into a marbled network; sharpen to
-          // thin veins so it reads as cracks, not a wash. Concentrate the glow
-          // up the cone (and hottest at the caldera) where the rock is charred.
-          // A coarse crack network plus a finer overlay, sharpened to thin veins.
-          const c1 = Math.sin(wx * 0.14 + Math.sin(wz * 0.07) * 2.2);
-          const c2 = Math.sin(wz * 0.13 - Math.sin(wx * 0.061) * 2.0);
-          const c3 = Math.sin(wx * 0.31 - Math.sin(wz * 0.27) * 1.6);
-          const c4 = Math.sin(wz * 0.29 + Math.sin(wx * 0.33) * 1.5);
-          // Sharpen HARD (high exponents) so only the hairline centre of each
-          // crack glows — the flank stays dark charred rock, not a molten coat.
-          const coarse = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c1), Math.abs(c2))), 13);
-          const fine = Math.pow(Math.max(0, 1 - Math.min(Math.abs(c3), Math.abs(c4))), 16) * 0.5;
-          const vein = Math.min(1, coarse + fine);
           // Veins run across the whole upper cone — a volcano's flanks are ALL
           // slope, so don't suppress by steepness; just keep them off the beach.
-          const heightGate = THREE.MathUtils.smoothstep(heightNorm, 0.14, 0.66);
+          magmaGate = THREE.MathUtils.smoothstep(reliefNorm, 0.14, 0.66) * (1 - shoreMask);
           // Just the very tip glows molten (the caldera itself), painted into the
           // terrain so the crater reads as part of the peak — not a floating disc.
-          const summitGlow = THREE.MathUtils.smoothstep(heightNorm, 0.9, 0.995) * 0.55 * (1 - shoreMask);
-          magma = Math.min(1, vein * heightGate * (1 - shoreMask) + summitGlow);
+          summitGlow = THREE.MathUtils.smoothstep(reliefNorm, 0.9, 0.995) * 0.55 * (1 - shoreMask);
           // Scorch the high ground to ashen charcoal so the thin veins glow against
-          // dark rock (deeper char now that the flanks aren't washed molten).
-          const scorch = THREE.MathUtils.smoothstep(heightNorm, 0.12, 0.6) * (1 - shoreMask);
-          terrainColor.lerp(ashCharcoal, scorch * 0.95);
-          // Darken the rock right at a vein so the emissive pops (hot rim).
-          if (magma > 0.02) terrainColor.multiplyScalar(1 - magma * 0.5);
+          // dark rock. Every volcanic island now earns a basalt/ash floor down to
+          // the shore band, not just the one tall cone.
+          const scorch = THREE.MathUtils.smoothstep(reliefNorm, 0.05, 0.45) * (1 - shoreMask);
+          const basalt = (1 - shoreMask) * 0.32;              // dark volcanic soil everywhere inland
+          // Capped below 1: at a full lerp the ground goes flat near-black and
+          // the whole biome palette (and the ash grain) disappears.
+          ashAmount = Math.min(0.86, scorch * 0.95 + basalt);
+          terrainColor.lerp(ashCharcoal, ashAmount);
         }
-        terrainMagma.push(magma);
+        // Vent char ring (any biome): ash halo so the geyser rim reads as burnt.
+        if (ventScorch.length) {
+          const lx = terrainPositions[index * 3 + 0];
+          const lz = terrainPositions[index * 3 + 2];
+          let burn = 0;
+          for (const v of ventScorch) {
+            const d = Math.hypot(lx - v.x, lz - v.z);
+            burn = Math.max(burn, 1 - THREE.MathUtils.smoothstep(d, v.r * 0.35, v.r));
+          }
+          if (burn > 0.01) {
+            terrainColor.lerp(ashCharcoal, burn * 0.85);
+            ashAmount = Math.max(ashAmount, burn);
+          }
+        }
+        terrainMagma.push(magmaGate);
+        terrainSummit.push(summitGlow);
 
         // ── Snow line: the summit of a tall mountain whitens (terrain-hugging,
         // heavier on flatter shelves where snow settles, thinner on sheer faces). ──
@@ -861,35 +1128,29 @@ export class IslandBuilder {
           THREE.MathUtils.clamp(terrainColor.g * bright, 0, 1),
           THREE.MathUtils.clamp(terrainColor.b * bright - warm * 0.6, 0, 1),
         );
+
+        // ── Fragment-detail material class (0 sand / 1 grass / 2 rock / 3 ash).
+        // Weighted average rather than an argmax so a beach→grass boundary
+        // crossfades its GRAIN too, not just its colour.
+        const wSand = 0.35 + sandiness * 1.6 + shoreMask * 0.5;
+        const wGrass = grassMask * 2.2 + jungleMask * 1.2;
+        const wRock = slopeRockMask * 2.4 + rockMask * 1.6 + shoreMask * rockyCoast * 1.4
+          + (cutDepth > 0.3 ? 2.5 : 0)
+          + (isMountainColor ? THREE.MathUtils.smoothstep(heightNorm, 0.4, 0.8) * 1.6 : 0);
+        const wAsh = ashAmount * 3.2;
+        const wSum = wSand + wGrass + wRock + wAsh;
+        terrainMatClass.push(wSum > 0.0001 ? (wGrass + wRock * 2 + wAsh * 3) / wSum : 1);
       }
     }
     terrainGeometry.setAttribute('color', new THREE.Float32BufferAttribute(terrainColors, 3));
 
     const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98, side: THREE.DoubleSide });
+    terrainGeometry.setAttribute('aMat', new THREE.Float32BufferAttribute(terrainMatClass, 1));
     if (isVolcanic) {
       terrainGeometry.setAttribute('aMagma', new THREE.Float32BufferAttribute(terrainMagma, 1));
-      // Inject a per-vertex emissive magma term, flickered by the shared pulse
-      // uniform, so lava genuinely glows through the cracks in the rock.
-      const pulse = this.ctx.magmaPulseUniform;
-      terrainMat.onBeforeCompile = (shader) => {
-        shader.uniforms.uMagmaPulse = pulse;
-        shader.vertexShader = shader.vertexShader
-          .replace('#include <common>', '#include <common>\nattribute float aMagma;\nvarying float vMagma;')
-          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvMagma = aMagma;');
-        shader.fragmentShader = shader.fragmentShader
-          .replace('#include <common>', '#include <common>\nuniform float uMagmaPulse;\nvarying float vMagma;')
-          .replace(
-            '#include <emissivemap_fragment>',
-            '#include <emissivemap_fragment>\n'
-            + 'if (vMagma > 0.001) {\n'
-            + '  float g = vMagma * uMagmaPulse;\n'
-            + '  vec3 mc = mix(vec3(0.95, 0.16, 0.02), vec3(1.0, 0.72, 0.16), clamp(vMagma * 1.4, 0.0, 1.0));\n'
-            + '  totalEmissiveRadiance += mc * g * 1.05;\n'
-            + '}',
-          );
-      };
-      terrainMat.customProgramCacheKey = () => 'pirates-volcanic-magma';
+      terrainGeometry.setAttribute('aSummit', new THREE.Float32BufferAttribute(terrainSummit, 1));
     }
+    this.applyTerrainDetail(terrainMat, isVolcanic);
     const terrain = new THREE.Mesh(terrainGeometry, terrainMat);
     terrain.name = 'island-terrain';
     // The DoubleSide heightfield casting onto ITSELF produced a heavy self-shadow
@@ -1726,11 +1987,13 @@ export class IslandBuilder {
         for (let b = 0; b < stalkCount; b++) {
           const bh = 3.2 + rng(g * 269 + b) * 2.8;
           const bamboo = new THREE.Mesh(bambooGeo, bambooMat);
-          bamboo.position.set(
-            clusterCenter.x + (rng(b * 271 + g) - 0.5) * 1.4,
-            bh * 0.5 + clusterCenter.y,
-            clusterCenter.z + (rng(b * 277 + g) - 0.5) * 1.4,
-          );
+          // AUDIT P2: every stalk in a cluster shared the CENTRE's ground height,
+          // so on a slope the outer stalks hung 0.3-0.6m in the air with their
+          // bases cut off. Seat each stalk on its own sample (sunk 0.15m).
+          const bx = clusterCenter.x + (rng(b * 271 + g) - 0.5) * 1.4;
+          const bz = clusterCenter.z + (rng(b * 277 + g) - 0.5) * 1.4;
+          const by = getIslandSurfaceY(island, bx + island.position.x, bz + island.position.z) - 0.15;
+          bamboo.position.set(bx, bh * 0.5 + by, bz);
           bamboo.rotation.set(
             (rng(b * 279 + g) - 0.5) * 0.1,
             rng(b * 281 + g) * Math.PI * 2,
@@ -2006,24 +2269,81 @@ export class IslandBuilder {
         const gx = geyser.x - island.position.x;
         const gz = geyser.z - island.position.z;
         const gy = geyser.y;
-        // Vent: a charred rock ring around a glowing hot throat.
-        const ventRing = new THREE.Mesh(
-          new THREE.RingGeometry(geyser.radius * 0.55, geyser.radius * 1.05, 18),
-          new THREE.MeshStandardMaterial({ color: 0x1f1a16, roughness: 1, side: THREE.DoubleSide, emissive: 0x832a08, emissiveIntensity: 0.7 }),
-        );
-        ventRing.rotation.x = -Math.PI * 0.5;
-        ventRing.position.set(gx, gy + 0.05, gz);
-        group.add(ventRing);
+        // ── Vent: a real cracked-stone rim around a recessed dark throat ──
+        // (was a flat orange RingGeometry decal + emissive disc lying on the
+        // grass — the open backlog defect: "geyser vents are painted circles").
+        const ventR = Math.max(0.9, geyser.radius);
+        const ventRock = new THREE.MeshStandardMaterial({
+          color: paletteRock.clone().multiplyScalar(0.42).getHex(), roughness: 1, flatShading: true,
+        });
+        const rimChunks = lowDetail ? 7 : 11;
+        const rimMesh = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0), ventRock, rimChunks);
+        rimMesh.name = 'geyser-rim';
+        const rimM = new THREE.Matrix4();
+        const rimP = new THREE.Vector3();
+        const rimQ = new THREE.Quaternion();
+        const rimE = new THREE.Euler();
+        const rimS = new THREE.Vector3();
+        for (let c = 0; c < rimChunks; c++) {
+          const a = (c / rimChunks) * Math.PI * 2 + rng(c * 61 + 5) * 0.35;
+          const rr = ventR * (0.92 + rng(c * 67 + 11) * 0.30);
+          const cx = gx + Math.cos(a) * rr;
+          const cz = gz + Math.sin(a) * rr;
+          const cy = getIslandSurfaceY(island, cx + island.position.x, cz + island.position.z);
+          const s = ventR * (0.24 + rng(c * 71 + 3) * 0.24);
+          rimS.set(s * (0.8 + rng(c * 73) * 0.7), s * (0.7 + rng(c * 79) * 0.9), s * (0.8 + rng(c * 83) * 0.6));
+          // Rim stones lean OUTWARD, as if shouldered up by the vent.
+          rimP.set(cx, cy + s * 0.22, cz);
+          rimE.set((rng(c * 89) - 0.5) * 0.5, a, 0.22 + rng(c * 97) * 0.3);
+          rimQ.setFromEuler(rimE);
+          rimMesh.setMatrixAt(c, rimM.compose(rimP, rimQ, rimS));
+        }
+        rimMesh.instanceMatrix.needsUpdate = true;
+        rimMesh.castShadow = !lowDetail;
+        rimMesh.receiveShadow = true;
+        group.add(rimMesh);
+        // Recessed throat: a dark cone sunk into the ground, with a small
+        // molten core disc at the bottom — depth instead of a painted circle.
+        const throatDepth = Math.max(0.7, ventR * 0.9);
         const throat = new THREE.Mesh(
-          new THREE.CircleGeometry(geyser.radius * 0.55, 16),
-          new THREE.MeshBasicMaterial({ color: 0xff6a24, transparent: true, opacity: 0.85, side: THREE.DoubleSide }),
+          new THREE.ConeGeometry(ventR * 0.72, throatDepth, 14, 1, true),
+          new THREE.MeshStandardMaterial({
+            color: 0x140f0c, roughness: 1, side: THREE.DoubleSide, emissive: 0x3a1204, emissiveIntensity: 0.35,
+          }),
         );
-        throat.rotation.x = -Math.PI * 0.5;
-        throat.position.set(gx, gy + 0.06, gz);
+        throat.position.set(gx, gy - throatDepth * 0.42, gz);
         group.add(throat);
+        const ventCore = new THREE.Mesh(
+          new THREE.CircleGeometry(ventR * 0.34, 12),
+          new THREE.MeshStandardMaterial({
+            color: 0x1a0d06, roughness: 0.85, emissive: 0xff5a18, emissiveIntensity: 1.4,
+          }),
+        );
+        ventCore.rotation.x = -Math.PI * 0.5;
+        ventCore.position.set(gx, gy - throatDepth * 0.86, gz);
+        group.add(ventCore);
+        // Idle steam: a permanent lazy wisp so a dormant vent still reads as
+        // ALIVE from a distance (the old vent was invisible when not erupting).
+        const idleCount = lowDetail ? 5 : 9;
+        const idlePos = new Float32Array(idleCount * 3);
+        const idlePhase = new Float32Array(idleCount);
+        const idleAng = new Float32Array(idleCount);
+        for (let i = 0; i < idleCount; i++) {
+          idlePhase[i] = rng(i * 131 + 9);
+          idleAng[i] = rng(i * 137 + 13) * Math.PI * 2;
+          idlePos[i * 3] = gx; idlePos[i * 3 + 1] = gy; idlePos[i * 3 + 2] = gz;
+        }
+        const idleGeo = new THREE.BufferGeometry();
+        idleGeo.setAttribute('position', new THREE.BufferAttribute(idlePos, 3));
+        const idleMat = new THREE.PointsMaterial({
+          size: ventR * 1.05, map: particleTex, color: 0xbfcdd2, transparent: true, opacity: 0.17, depthWrite: false,
+        });
+        const idleSteam = new THREE.Points(idleGeo, idleMat);
+        idleSteam.frustumCulled = false;
+        group.add(idleSteam);
 
         // Plume: a steam/water column that rises only while erupting.
-        const plumeCount = lowDetail ? 22 : 46;
+        const plumeCount = lowDetail ? 40 : 130;
         const plumeH = Math.max(9, geyser.power * 0.7);
         const pos = new Float32Array(plumeCount * 3);
         const phase = new Float32Array(plumeCount);
@@ -2037,25 +2357,52 @@ export class IslandBuilder {
         }
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-        const mat = new THREE.PointsMaterial({ size: 0.9, map: particleTex, color: 0xd8ecf4, transparent: true, opacity: 0, depthWrite: false });
+        const mat = new THREE.PointsMaterial({ size: 1.35, map: particleTex, color: 0xeaf6fb, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
         const plume = new THREE.Points(geo, mat);
         plume.frustumCulled = false;
         group.add(plume);
+        // Ground splash: a low mist ring that punches out at the base of a jet.
+        const splashMat = new THREE.MeshStandardMaterial({
+          color: 0xdfeff5, roughness: 1, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
+        });
+        const splash = new THREE.Mesh(new THREE.RingGeometry(ventR * 0.95, ventR * 1.7, 20), splashMat);
+        // Lie the splash collar ON the local slope: a horizontal ring on rolling
+        // ground sliced through the hill and read as a big white lens.
+        const ventSeat = seatDecor(gx, gz, ventR * 1.6, 0.5);
+        splash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), ventSeat.normal);
+        splash.position.set(gx, gy + 0.16, gz);
+        splash.renderOrder = 2;
+        group.add(splash);
         this.ctx.pushVolcanicFx((_dt, wt, cam) => {
-          if (cam.distanceTo(islandCenter) > cullRadius) { plume.visible = false; return; }
+          const far = cam.distanceTo(islandCenter) > cullRadius;
+          idleSteam.visible = !far;
+          if (far) { plume.visible = false; splash.visible = false; return; }
           const level = geyserEruptionLevel(geyser, wt);
-          if (level <= 0.01) { plume.visible = false; throat.scale.setScalar(1); return; }
+          // Idle wisps: always drifting, fading out as the real jet takes over.
+          idleMat.opacity = 0.17 * (1 - Math.min(1, level * 2.5));
+          for (let i = 0; i < idleCount; i++) {
+            const f = (idlePhase[i] + wt * 0.11) % 1;
+            idlePos[i * 3] = gx + Math.cos(idleAng[i] + f * 1.6) * ventR * (0.25 + f * 0.9);
+            idlePos[i * 3 + 1] = gy + 0.25 + f * (2.6 + ventR);
+            idlePos[i * 3 + 2] = gz + Math.sin(idleAng[i] + f * 1.6) * ventR * (0.25 + f * 0.9);
+          }
+          idleGeo.attributes.position.needsUpdate = true;
+          if (level <= 0.01) { plume.visible = false; splash.visible = false; ventCore.scale.setScalar(1); return; }
           plume.visible = true;
-          mat.opacity = 0.8 * level;
-          throat.scale.setScalar(1 + level * 0.5);
+          splash.visible = true;
+          mat.opacity = 0.85 * level;
+          splashMat.opacity = 0.26 * level;
+          splash.scale.setScalar(0.7 + level * 0.8);
+          ventCore.scale.setScalar(1 + level * 0.4);
           const h = plumeH * level;
           for (let i = 0; i < plumeCount; i++) {
-            const f = (phase[i] + wt * 0.9) % 1; // rise up the column, looping
-            const y = f * h;
-            const spread = geyser.radius * (0.4 + f * 1.1);
-            pos[i * 3] = gx + Math.cos(ang[i]) * spread;
-            pos[i * 3 + 1] = gy + y;
-            pos[i * 3 + 2] = gz + Math.sin(ang[i]) * spread;
+            const f = (phase[i] + wt * 0.85) % 1; // rise up the column, looping
+            // Tight at the throat, blooming into a mushroom head near the top —
+            // a jet, not the old evenly-scattered cloud of fat dots.
+            const spread = geyser.radius * (0.12 + Math.pow(f, 2.4) * 1.9);
+            pos[i * 3] = gx + Math.cos(ang[i] + f * 2.2) * spread;
+            pos[i * 3 + 1] = gy + f * h;
+            pos[i * 3 + 2] = gz + Math.sin(ang[i] + f * 2.2) * spread;
           }
           geo.attributes.position.needsUpdate = true;
         });
@@ -2076,15 +2423,34 @@ export class IslandBuilder {
       // the ribbon hangs ~vertically off it. The old fixed 0.3→0.94 span was a
       // 30m+ mostly-horizontal reach that drew the fall as a flat white bar lying
       // across the island (worst on low plateaus).
+      // AUDIT REGRESSION (floating-props P1): zero waterfalls existed scene-wide.
+      // The old scan started at d=0.32 with a steepness ratio of 0.6, but the
+      // post-relief mountain spires are steepest NEAR THE PEAK (small distRatio)
+      // and their grade rarely exceeds 0.45 over a 0.12 span. Consciously
+      // loosened: scan from d=0.06 and accept ratio > 0.32, keeping the drop>4
+      // gate below so only a genuine cascade spawns. Also sweeps a few headings
+      // around the nominal angle and keeps the best — one fixed bearing could
+      // land on the island's gentle flank and find nothing.
       let lip = surfacePoint(0.3, fallAngle);
       let toe = surfacePoint(0.42, fallAngle);
-      let bestDrop = -1;
-      for (let d = 0.32; d <= 0.86; d += 0.05) {
-        const hi = surfacePoint(d, fallAngle);
-        const lo = surfacePoint(d + 0.12, fallAngle);
-        const dr = hi.y - lo.y;
-        const horiz = Math.hypot(lo.x - hi.x, lo.z - hi.z);
-        if (dr > bestDrop && dr / Math.max(0.1, horiz) > 0.6) { bestDrop = dr; lip = hi; toe = lo; }
+      // Two passes: take a genuinely sheer face if one exists, and only fall
+      // back to the loosened threshold when the island has none (otherwise a
+      // 20-degree grass slope wins the search and the "cascade" is a stream).
+      for (const minRatio of [0.75, 0.32]) {
+        let bestScore = -1;
+        for (let a = -3; a <= 3; a++) {
+          const scanAngle = fallAngle + a * 0.16;
+          for (let d = 0.06; d <= 0.86; d += 0.04) {
+            const hi = surfacePoint(d, scanAngle);
+            const lo = surfacePoint(d + 0.12, scanAngle);
+            const dr = hi.y - lo.y;
+            const horiz = Math.hypot(lo.x - hi.x, lo.z - hi.z);
+            const ratio = dr / Math.max(0.1, horiz);
+            const score = dr * ratio;
+            if (ratio > minRatio && score > bestScore) { bestScore = score; lip = hi; toe = lo; }
+          }
+        }
+        if (bestScore > 0 && lip.y - toe.y > 4) break;
       }
       // The sheet falls vertically from the lip, landing near the cliff base
       // (only a little outward), so it reads as a plunging cascade.
@@ -2102,62 +2468,138 @@ export class IslandBuilder {
           emissiveIntensity: 0.06, // falls catch the sky, they don't self-glow at night
           roughness: 0.4,
           transparent: true,
-          opacity: 0.78,
+          opacity: 0.62,
           side: THREE.DoubleSide,
+          depthWrite: false,
         });
-        // Vertical ribbons drawn with explicit corner geometry — guarantees the
-        // ribbons hang directly between the upper sample and the lower sample.
-        const ribbons = lowDetail ? 2 : 4;
+        // Ribbons that HUG the rock face: at each height step, march outward
+        // along the fall heading until the terrain drops below that height, and
+        // stand the sheet a few centimetres proud of the face. A single flat
+        // quad from lip to toe hangs in open air whenever the face is concave.
+        const ribbons = lowDetail ? 2 : 3;
+        const vSteps = lowDetail ? 5 : 10;
         const dxFall = lower.x - upper.x;
         const dzFall = lower.z - upper.z;
         const horizFall = Math.hypot(dxFall, dzFall);
-        const wAxisX = horizFall > 0.001 ? -dzFall / horizFall : 1;
-        const wAxisZ = horizFall > 0.001 ? dxFall / horizFall : 0;
+        const dirX = horizFall > 0.001 ? dxFall / horizFall : 1;
+        const dirZ = horizFall > 0.001 ? dzFall / horizFall : 0;
+        const wAxisX = -dirZ;
+        const wAxisZ = dirX;
+        /** Horizontal reach at which the rock face has fallen to height `y`.
+         *  Finely marched and MONOTONIC — a coarse march made the sheet
+         *  zig-zag across the slope in visible sawtooth steps. */
+        const marchSteps = 48;
+        const maxS = Math.max(6, horizFall * 2.4);
+        const profileY: number[] = [];
+        for (let k = 0; k <= marchSteps; k++) {
+          const cand = (k / marchSteps) * maxS;
+          profileY.push(getIslandSurfaceY(
+            island,
+            upper.x + dirX * cand + island.position.x,
+            upper.z + dirZ * cand + island.position.z,
+          ));
+        }
+        const faceReach = (y: number): number => {
+          for (let k = 1; k <= marchSteps; k++) {
+            if (profileY[k] <= y) {
+              const span = Math.max(1e-4, profileY[k - 1] - profileY[k]);
+              const frac = THREE.MathUtils.clamp((profileY[k - 1] - y) / span, 0, 1);
+              return ((k - 1 + frac) / marchSteps) * maxS;
+            }
+          }
+          return maxS;
+        };
+        const toeReach = faceReach(lower.y);
+        // All ribbons of one fall live in a single geometry — 4 separate meshes
+        // per cascade was 4 draw calls for one visual object.
+        const corners: number[] = [];
+        const idx: number[] = [];
         for (let rib = 0; rib < ribbons; rib++) {
           const t = rib / Math.max(1, ribbons - 1);
-          const offset = (t - 0.5) * 1.0;
-          const ax = upper.x + wAxisX * offset;
-          const az = upper.z + wAxisZ * offset;
-          const bx = lower.x + wAxisX * offset;
-          const bz = lower.z + wAxisZ * offset;
-          const ribbonW = 1.25 + rng(rib * 711) * 0.9;
-          const corners = [
-            ax + wAxisX * ribbonW * 0.5, upper.y, az + wAxisZ * ribbonW * 0.5,
-            ax - wAxisX * ribbonW * 0.5, upper.y, az - wAxisZ * ribbonW * 0.5,
-            bx + wAxisX * ribbonW * 0.5, lower.y, bz + wAxisZ * ribbonW * 0.5,
-            bx - wAxisX * ribbonW * 0.5, lower.y, bz - wAxisZ * ribbonW * 0.5,
-          ];
-          const ribbonGeo = new THREE.BufferGeometry();
-          ribbonGeo.setAttribute('position', new THREE.Float32BufferAttribute(corners, 3));
-          ribbonGeo.setIndex([0, 2, 1, 1, 2, 3]);
-          ribbonGeo.computeVertexNormals();
-          const ribbon = new THREE.Mesh(ribbonGeo, fallMat);
-          ribbon.position.set(0, 0, 0);
-          group.add(ribbon);
-        }
-        // Foam pool at the base
-        const pool = new THREE.Mesh(
-          new THREE.CircleGeometry(2.0, 18),
-          new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, side: THREE.DoubleSide }),
-        );
-        pool.rotation.x = -Math.PI * 0.5;
-        pool.position.set(lower.x, lower.y + 0.05, lower.z);
-        group.add(pool);
-        // Mist particles (simple white spheres with low opacity)
-        if (!lowDetail) {
-          for (let m = 0; m < 5; m++) {
-            const mist = new THREE.Mesh(
-              new THREE.SphereGeometry(0.6 + rng(m * 713) * 0.4, 6, 4),
-              new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.2 }),
-            );
-            mist.position.set(
-              lower.x + (rng(m * 717) - 0.5) * 1.4,
-              lower.y + 0.4 + rng(m * 721) * 1.2,
-              lower.z + (rng(m * 723) - 0.5) * 1.4,
-            );
-            group.add(mist);
+          const lateral = (t - 0.5) * 3.6;
+          const ribbonW = 1.0 + rng(rib * 711) * 0.55;
+          const ribBase = corners.length / 3;
+          for (let v = 0; v <= vSteps; v++) {
+            const f = v / vSteps;
+            const y = upper.y - drop * f;
+            // Stand the sheet on the rock FACE, lifted clear of it: the sheet
+            // sits at the horizontal reach where the ground is at height `y`,
+            // then floats 0.7m above that. On a sheer face faceReach() barely
+            // moves with height, so the sheet is vertical (a plunging cascade);
+            // on a graded face it becomes a chute hugging the slope. Dropping
+            // straight down from the lip instead buried 80% of the sheet inside
+            // the hill on every non-overhanging face (seen in verification).
+            const reach = faceReach(y) + 0.35;
+            const cx = upper.x + dirX * reach + wAxisX * lateral;
+            const cz = upper.z + dirZ * reach + wAxisZ * lateral;
+            const sheetY = y + 0.45;
+            // Width wobbles down the drop so the chute reads as moving water
+            // rather than a straight-edged plastic strip.
+            const wob = 1 + Math.sin(f * 7.5 + rib * 2.1) * 0.22 + Math.sin(f * 17.0 + rib) * 0.1;
+            const halfW = ribbonW * (0.6 + f * 0.4) * wob * 0.5;   // widens as it falls
+            corners.push(cx + wAxisX * halfW, sheetY, cz + wAxisZ * halfW);
+            corners.push(cx - wAxisX * halfW, sheetY, cz - wAxisZ * halfW);
+            if (v > 0) {
+              const a0 = ribBase + (v - 1) * 2;
+              idx.push(a0, a0 + 2, a0 + 1, a0 + 1, a0 + 2, a0 + 3);
+            }
           }
         }
+        {
+          const ribbonGeo = new THREE.BufferGeometry();
+          ribbonGeo.setAttribute('position', new THREE.Float32BufferAttribute(corners, 3));
+          ribbonGeo.setIndex(idx);
+          ribbonGeo.computeVertexNormals();
+          const ribbon = new THREE.Mesh(ribbonGeo, fallMat);
+          ribbon.name = 'waterfall-ribbon';
+          group.add(ribbon);
+        }
+        // Plunge pool where the sheet lands (lit, NOT self-glowing: a Basic
+        // material renders full white at midnight and made the pool a lamp).
+        const poolReach = toeReach + 1.2;
+        const poolX = upper.x + dirX * poolReach;
+        const poolZ = upper.z + dirZ * poolReach;
+        const poolY = getIslandSurfaceY(island, poolX + island.position.x, poolZ + island.position.z);
+        const poolSeat = seatDecor(poolX, poolZ, 1.6, 0.5);
+        const pool = new THREE.Mesh(
+          new THREE.CircleGeometry(1.5, 18),
+          new THREE.MeshStandardMaterial({
+            color: 0xdff1f8, roughness: 0.2, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false,
+          }),
+        );
+        // Lie the pool ON the slope: a flat disc dropped on a hillside cuts a
+        // hard white ellipse half-buried in the rock.
+        pool.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), poolSeat.normal);
+        pool.position.set(poolX, poolY + 0.07, poolZ);
+        pool.renderOrder = 2;
+        group.add(pool);
+        // Mist billowing off the plunge point.
+        if (!lowDetail) {
+          // Soft alpha sprites, not shaded spheres: overlapping low-poly balls
+          // stacked their alpha into hard white blobs at the fall's base.
+          const mistCount = 14;
+          const mistPos = new Float32Array(mistCount * 3);
+          for (let m = 0; m < mistCount; m++) {
+            mistPos[m * 3] = poolX + (rng(m * 717) - 0.5) * 3.0;
+            mistPos[m * 3 + 1] = poolY + 0.3 + rng(m * 721) * 2.6;
+            mistPos[m * 3 + 2] = poolZ + (rng(m * 723) - 0.5) * 3.0;
+          }
+          const mistGeo = new THREE.BufferGeometry();
+          mistGeo.setAttribute('position', new THREE.BufferAttribute(mistPos, 3));
+          const mist = new THREE.Points(mistGeo, new THREE.PointsMaterial({
+            size: 2.6,
+            map: this.ctx.getSoftParticleTexture(),
+            color: 0xccdde5,
+            transparent: true,
+            opacity: 0.17,
+            depthWrite: false,
+          }));
+          mist.frustumCulled = false;
+          group.add(mist);
+        }
+        lower.x = poolX;
+        lower.z = poolZ;
+        lower.y = poolY;
         // Add a stream channel — darker dirt strip from base toward the shore
         const streamSteps = 6;
         const streamMat = new THREE.MeshStandardMaterial({ color: 0x4a6478, roughness: 0.6, emissive: 0x224050, emissiveIntensity: 0.2 });
@@ -2445,61 +2887,168 @@ export class IslandBuilder {
       }
     }
 
-    // ── Exposed bedrock CRAGS on the upper flanks of mountains/rocky isles ──
-    // Big angular rock masses that emerge from the slope so a tall island reads
-    // as a rugged, cave-riddled massif instead of a smooth green cone. Purely
-    // decorative client geometry sitting on the shared surface (no collision /
-    // determinism impact), seeded so it's stable across frames.
-    if (!lowDetail && (island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky')) {
-      const cragRockCol = paletteRock.clone().multiplyScalar(0.7).lerp(new THREE.Color(0x2b2620), 0.15);
-      const cragMat = new THREE.MeshStandardMaterial({ color: cragRockCol.getHex(), roughness: 1, flatShading: true });
-      const isMtn = island.profile.terrainStyle === 'mountain';
-      const cragCount = scaledCount(Math.round(r / (isMtn ? 12 : 18)) + 4, 3);
-      for (let i = 0; i < cragCount; i++) {
-        const angle = rng(i * 733 + 31) * Math.PI * 2;
-        // Bias toward the upper/mid flanks where bare rock shows through.
-        const distRatio = 0.1 + rng(i * 739 + 3) * (isMtn ? 0.42 : 0.5);
+    // NOTE: the client-only bedrock CRAG mass generator that used to live here
+    // was removed — crags are now authored props in the SERVER registry and
+    // render automatically through buildServerProps(). Rebuilding them here as
+    // well produced doubled, mismatched outcrops on every mountain/rocky isle.
+
+    // ── Pebbles + rock chips: one InstancedMesh of ankle-height stones ──
+    // The ground had NOTHING between 8m props and painted colour; a scatter of
+    // sub-20cm stones gives the eye real scale reference at 2m. Zero colliders,
+    // one draw call, culled with the rest of the island group.
+    if (!lowDetail) {
+      const pebbleCount = Math.min(1400, Math.round(r * (visualDetail < 0.85 ? 2.4 : 4.2)));
+      const pebbleGeo = new THREE.DodecahedronGeometry(1, 0);
+      const pebbleMat = new THREE.MeshStandardMaterial({ roughness: 1, flatShading: true, vertexColors: false });
+      const pebbles = new THREE.InstancedMesh(pebbleGeo, pebbleMat, pebbleCount);
+      const pMat4 = new THREE.Matrix4();
+      const pPos = new THREE.Vector3();
+      const pQuat = new THREE.Quaternion();
+      const pEuler = new THREE.Euler();
+      const pScale = new THREE.Vector3();
+      const pColor = new THREE.Color();
+      let placed = 0;
+      for (let i = 0; i < pebbleCount * 2 && placed < pebbleCount; i++) {
+        const angle = rng(i * 907 + 31) * Math.PI * 2;
+        // Weight toward the mid/upper flanks and the rocky shore band.
+        const distRatio = rng(i * 911 + 7) < 0.72
+          ? 0.12 + rng(i * 919 + 3) * 0.62
+          : 0.9 + rng(i * 929 + 5) * 0.12;
+        const p = surfacePoint(distRatio, angle, 0);
+        if (!isSolidDecorPoint(p, 4.4, -0.1)) continue;
+        const s = 0.05 + rng(i * 937) * 0.14;
+        pPos.set(p.x, p.y - s * 0.35, p.z);
+        pEuler.set(rng(i * 941) * Math.PI, rng(i * 947) * Math.PI, rng(i * 953) * Math.PI);
+        pQuat.setFromEuler(pEuler);
+        pScale.set(s * (0.8 + rng(i * 967) * 0.7), s * (0.5 + rng(i * 971) * 0.5), s * (0.8 + rng(i * 977) * 0.6));
+        pMat4.compose(pPos, pQuat, pScale);
+        pebbles.setMatrixAt(placed, pMat4);
+        pColor.copy(paletteRock).multiplyScalar(0.72 + rng(i * 983) * 0.5);
+        pebbles.setColorAt(placed, pColor);
+        placed++;
+      }
+      if (placed === 0) {
+        pebbles.geometry.dispose();
+        pebbleMat.dispose();
+      } else {
+        pebbles.count = placed;
+        pebbles.instanceMatrix.needsUpdate = true;
+        if (pebbles.instanceColor) pebbles.instanceColor.needsUpdate = true;
+        pebbles.castShadow = false;
+        pebbles.receiveShadow = true;
+        group.add(pebbles);
+      }
+    }
+
+    // ── Interior dressing: the biggest islands read as empty green domes with
+    // a handful of props on them (audit: Castaway Reach / Rumrunner Key /
+    // Gallows Sands mids). Fill the dead band between the shore ring and the
+    // peak with boulder clusters, fallen trunks and low scrub beds. Client
+    // decor only — the server registry and its RNG are untouched.
+    if (!lowDetail && r > 36) {
+      // Gate at r>36 (not 58): the audit's three barren interiors were Castaway
+      // Reach (r=88) but also Rumrunner Key (42) and Gallows Sands (38).
+      const interiorSites = scaledCount(Math.round((r - 28) / 4.5), 2);
+      const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b563a, roughness: 1 });
+      // Instanced buckets: this dressing runs on the biggest islands, and one
+      // draw call per stone would have added ~50 calls per island. Boulders
+      // reuse the shared decor geo; scrub reuses the real `bush` GLB (an
+      // untextured icosphere read as a green gem in review).
+      const bushAsset = assets.mergedGeometry('bush');
+      const logAsset = assets.mergedGeometry('driftwood_log');
+      const logObj = new THREE.Object3D();
+      const stoneXf: THREE.Matrix4[] = [];
+      const bushXf: THREE.Matrix4[] = [];
+      const logXf: THREE.Matrix4[] = [];
+      const xfPos = new THREE.Vector3();
+      const xfQuat = new THREE.Quaternion();
+      const xfEuler = new THREE.Euler();
+      const xfScale = new THREE.Vector3();
+      for (let i = 0; i < interiorSites; i++) {
+        // Golden-angle spiral so sites spread over the whole interior instead of
+        // clumping the way a plain random pair does.
+        const angle = i * 2.399963 + rng(i * 601 + 13) * 0.8;
+        const distRatio = 0.18 + ((i * 0.37) % 1) * 0.42 + (rng(i * 607 + 3) - 0.5) * 0.08;
         const base = surfacePoint(distRatio, angle, 0);
-        if (base.y < 9 || !isSolidDecorPoint(base, 8, -0.3)) continue;
-        const crag = new THREE.Group();
-        const slabs = 2 + Math.floor(rng(i * 747) * 3);
-        const bigness = 1.3 + rng(i * 751) * (isMtn ? 2.1 : 1.2) + base.y * 0.03;
-        // Seat at the footprint's LOWEST ground sample and lean the whole mass
-        // into the slope — single-sample placement left the downhill slabs
-        // hanging in the air on every steep flank.
-        const seat = seatDecor(base.x, base.z, bigness * 1.2, 0.5);
-        crag.position.copy(base);
-        crag.position.y -= seat.drop;
-        // Face the outcrop's long axis downslope (away from the island centre,
-        // which sits at the local origin for decorative surface geometry),
-        // partially tilted to the terrain normal.
-        const cragYaw = Math.atan2(base.x, base.z) + (rng(i * 743) - 0.5) * 0.8;
-        const yawQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), cragYaw);
-        const tiltQuat = new THREE.Quaternion().slerp(
-          new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), seat.normal),
-          0.6,
-        );
-        crag.quaternion.copy(tiltQuat).multiply(yawQuat);
-        for (let s = 0; s < slabs; s++) {
-          const slab = new THREE.Mesh(boulderGeo, cragMat);
-          // Jagged non-uniform slab: tall and blade-like, tilted, partly buried.
-          const w = bigness * (0.5 + rng(s * 61 + i) * 0.6);
-          const h = bigness * (0.9 + rng(s * 67 + i) * 1.5);
-          const d = bigness * (0.4 + rng(s * 71 + i) * 0.5);
-          slab.scale.set(w, h, d);
-          slab.position.set(
-            (rng(s * 73 + i) - 0.5) * bigness * 1.4,
-            // Extra quarter-height sink: on steep slopes even seated slabs
-            // showed daylight under their downhill edge.
-            h * 0.25 - bigness * 0.55,
-            (rng(s * 79 + i) - 0.5) * bigness * 1.4,
-          );
-          slab.rotation.set((rng(s * 83 + i) - 0.5) * 0.6, rng(s * 89 + i) * Math.PI, (rng(s * 97 + i) - 0.5) * 0.7);
-          slab.castShadow = true;
-          slab.receiveShadow = true;
-          crag.add(slab);
+        if (base.y < 6 || !isSolidDecorPoint(base, 6, -0.25)) continue;
+        const kind = rng(i * 613 + 5);
+        if (kind < 0.42) {
+          // Boulder cluster: 2-4 stones half-buried, leaning into the slope.
+          const stones = 2 + Math.floor(rng(i * 617) * 3);
+          for (let s = 0; s < stones; s++) {
+            const ox = (rng(s * 619 + i) - 0.5) * 3.4;
+            const oz = (rng(s * 631 + i) - 0.5) * 3.4;
+            const sc = 0.5 + rng(s * 641 + i) * 1.5;
+            const seat = seatDecor(base.x + ox, base.z + oz, sc, 0.6);
+            xfPos.set(base.x + ox, seat.groundY - seat.drop - sc * 0.34, base.z + oz);
+            xfEuler.set((rng(s * 659 + i) - 0.5) * 0.7, rng(s * 661 + i) * Math.PI, (rng(s * 673 + i) - 0.5) * 0.7);
+            xfQuat.setFromEuler(xfEuler);
+            xfScale.set(sc * (0.8 + rng(s * 643 + i) * 0.6), sc * (0.6 + rng(s * 647 + i) * 0.5), sc * (0.8 + rng(s * 653 + i) * 0.6));
+            stoneXf.push(new THREE.Matrix4().compose(xfPos, xfQuat, xfScale));
+          }
+        } else if (kind < 0.68) {
+          // Fallen trunk lying along the contour. Prefer the authored log GLB:
+          // a 7-sided procedural cylinder read as a dark rectangular plank from
+          // any distance (caught in verification).
+          const trunkScale = 1.5 + rng(i * 677) * 1.4;
+          const seat = seatDecor(base.x, base.z, trunkScale * 1.2, 0.5);
+          const logY = seat.groundY - seat.drop;
+          if (logAsset) {
+            logObj.position.set(base.x, logY - 0.06, base.z);
+            logObj.rotation.set(0, rng(i * 691) * Math.PI * 2, (rng(i * 701) - 0.5) * 0.2);
+            logObj.scale.setScalar(trunkScale);
+            logObj.updateMatrix();
+            logXf.push(logObj.matrix.clone());
+          } else {
+            const trunkLen = 2.6 + rng(i * 677) * 3.4;
+            const trunkR = 0.22 + rng(i * 683) * 0.18;
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(trunkR * 0.8, trunkR, trunkLen, 9), trunkMat);
+            trunk.position.set(base.x, logY + trunkR * 0.55, base.z);
+            trunk.rotation.set(Math.PI * 0.5, rng(i * 691) * Math.PI * 2, (rng(i * 701) - 0.5) * 0.25);
+            trunk.castShadow = true;
+            trunk.receiveShadow = true;
+            group.add(trunk);
+          }
+        } else {
+          // Low scrub bed — a knot of 3-6 squat bushes.
+          const bushes = 3 + Math.floor(rng(i * 709) * 4);
+          for (let b = 0; b < bushes; b++) {
+            const ox = (rng(b * 719 + i) - 0.5) * 4.2;
+            const oz = (rng(b * 727 + i) - 0.5) * 4.2;
+            const sc = 0.6 + rng(b * 733 + i) * 0.7;
+            const gy = getIslandSurfaceY(island, base.x + ox + island.position.x, base.z + oz + island.position.z);
+            xfPos.set(base.x + ox, gy - 0.08, base.z + oz);
+            xfEuler.set(0, rng(b * 739 + i) * Math.PI * 2, 0);
+            xfQuat.setFromEuler(xfEuler);
+            xfScale.set(sc, sc * (0.8 + rng(b * 743 + i) * 0.4), sc);
+            bushXf.push(new THREE.Matrix4().compose(xfPos, xfQuat, xfScale));
+          }
         }
-        group.add(crag);
+      }
+      if (stoneXf.length) {
+        const stoneInst = new THREE.InstancedMesh(boulderGeo, boulderMat, stoneXf.length);
+        stoneXf.forEach((m, k) => stoneInst.setMatrixAt(k, m));
+        stoneInst.instanceMatrix.needsUpdate = true;
+        stoneInst.castShadow = true;
+        stoneInst.receiveShadow = true;
+        group.add(stoneInst);
+      }
+      if (logXf.length && logAsset) {
+        const logInst = new THREE.InstancedMesh(logAsset.geometry, logAsset.material, logXf.length);
+        logXf.forEach((m, k) => logInst.setMatrixAt(k, m));
+        logInst.instanceMatrix.needsUpdate = true;
+        logInst.castShadow = true;
+        logInst.receiveShadow = true;
+        group.add(logInst);
+      }
+      if (bushXf.length && bushAsset) {
+        this.applyFoliageSway(bushAsset.material);
+        const bushInst = new THREE.InstancedMesh(bushAsset.geometry, bushAsset.material, bushXf.length);
+        bushXf.forEach((m, k) => bushInst.setMatrixAt(k, m));
+        bushInst.instanceMatrix.needsUpdate = true;
+        bushInst.castShadow = false;
+        bushInst.receiveShadow = true;
+        group.add(bushInst);
       }
     }
 
@@ -2858,42 +3407,70 @@ export class IslandBuilder {
           // Perpendicular horizontal direction (for ladder width)
           const perpX = Math.cos(yaw); // = dz/horiz
           const perpZ = -Math.sin(yaw); // = -dx/horiz
-          const ladderRopeMat = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
-          // Two parallel ropes drawn from top → bottom in world coords
+          // AUDIT P0 (floating-props): this was a dead-straight chord from a
+          // terrace to the beach, so 82 of 114 rungs hung up to 3.1m in open air
+          // over Crow's Perch while 27 more were buried in the hill. The ladder
+          // now DRAPES: every rung and both rope polylines are sampled against
+          // the shared terrain, so it lies on a sheer face like a hanging ladder
+          // and follows a broken slope like a laid rope run.
+          const rungCount = Math.max(8, Math.round(len / 0.5));
+          /** Draped centreline sample: the terrain surface, never the chord. */
+          const drapePoint = (t: number) => {
+            const px = top.x + dx * t;
+            const pz = top.z + dz * t;
+            const gy = getIslandSurfaceY(island, px + island.position.x, pz + island.position.z);
+            return { x: px, y: gy, z: pz };
+          };
+          const ropeMat = new THREE.LineBasicMaterial({ color: 0xc8b27a });
+          // Two parallel rope polylines through the SAME sampled points, so the
+          // rails follow every terrace and lip the rungs sit on.
           for (const sx of [-1, 1] as const) {
             const ox = perpX * sx * 0.22;
             const oz = perpZ * sx * 0.22;
-            const ropePts = [
-              top.x + ox, top.y, top.z + oz,
-              bottom.x + ox, bottom.y, bottom.z + oz,
-            ];
+            const ropePts: number[] = [];
+            const ropeSteps = Math.max(6, Math.round(len / 1.0));
+            for (let s = 0; s <= ropeSteps; s++) {
+              const p = drapePoint(s / ropeSteps);
+              ropePts.push(p.x + ox, p.y + 0.19, p.z + oz);
+            }
             const ropeGeo = new THREE.BufferGeometry();
             ropeGeo.setAttribute('position', new THREE.Float32BufferAttribute(ropePts, 3));
-            const rope = new THREE.Line(ropeGeo, new THREE.LineBasicMaterial({ color: 0xc8b27a, linewidth: 2 }));
-            group.add(rope);
+            group.add(new THREE.Line(ropeGeo, ropeMat));
           }
-          // Rungs spaced along the descent
-          const rungCount = Math.max(8, Math.floor(len / 0.45));
+          // Rungs: seated on the surface (<=0.25m clearance) and pitched to the
+          // local grade so they lie flat on the rock rather than stepping.
           const rungMat2 = new THREE.MeshStandardMaterial({ color: 0x6e4c25, roughness: 0.95 });
+          const rungGeo = new THREE.BoxGeometry(0.5, 0.045, 0.06);
+          const rungs = new THREE.InstancedMesh(rungGeo, rungMat2, rungCount);
+          rungs.name = 'ladder-rung';
+          const rungObj = new THREE.Object3D();
           for (let r2 = 0; r2 < rungCount; r2++) {
             const t = (r2 + 0.5) / rungCount;
-            const rung = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.04, 0.05), rungMat2);
-            rung.position.set(top.x + dx * t, top.y - dropY * t, top.z + dz * t);
-            rung.rotation.y = yaw;
-            group.add(rung);
+            const here = drapePoint(t);
+            const ahead = drapePoint(Math.min(1, t + 0.5 / rungCount));
+            const behind = drapePoint(Math.max(0, t - 0.5 / rungCount));
+            const runDist = Math.max(0.05, Math.hypot(ahead.x - behind.x, ahead.z - behind.z));
+            const pitch = Math.atan2(behind.y - ahead.y, runDist);
+            rungObj.position.set(here.x, here.y + 0.14, here.z);
+            rungObj.rotation.set(0, yaw, 0);
+            rungObj.rotateX(-pitch);
+            rungObj.scale.setScalar(1);
+            rungObj.updateMatrix();
+            rungs.setMatrixAt(r2, rungObj.matrix);
           }
-          // Anchor stakes at the top of the cliff
+          rungs.instanceMatrix.needsUpdate = true;
+          group.add(rungs);
+          // Anchor stakes at the top of the run
           const anchorStakeMat = new THREE.MeshStandardMaterial({ color: 0x3d2614, roughness: 1 });
+          const head = drapePoint(0);
           for (const sx of [-1, 1] as const) {
             const ox = perpX * sx * 0.3;
             const oz = perpZ * sx * 0.3;
             const stake = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.6, 5), anchorStakeMat);
-            stake.position.set(top.x + ox, top.y + 0.1, top.z + oz);
+            stake.position.set(head.x + ox, head.y + 0.1, head.z + oz);
             stake.castShadow = true;
             group.add(stake);
           }
-          // Ladder ropes use Line which uses ladderRopeMat-like color; suppress unused warning
-          void ladderRopeMat;
         }
       }
     }
@@ -2988,6 +3565,17 @@ export class IslandBuilder {
         const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6c5e4a, roughness: 1 });
         const trailWidth = 1.6;
         const stepLen = 1.6;
+        // Every tile and kerb stone used to be its own Mesh — ~500 draw calls
+        // scene-wide for the path network alone. Collect transforms and emit two
+        // InstancedMeshes per island instead (unit box + shared decor boulder).
+        const tileXf: THREE.Matrix4[] = [];
+        const kerbXf: THREE.Matrix4[] = [];
+        const trM = new THREE.Matrix4();
+        const trP = new THREE.Vector3();
+        const trQ = new THREE.Quaternion();
+        const trE = new THREE.Euler();
+        const trS = new THREE.Vector3();
+        const trObj = new THREE.Object3D();
 
         for (let w = 0; w < ordered.length - 1; w++) {
           const a = ordered[w];
@@ -3007,25 +3595,64 @@ export class IslandBuilder {
             const pz = a.z + dz * t - Math.sin(yaw) * offset;
             const py = getIslandSurfaceY(island, px, pz);
             if (py < 5.4) continue;
-            const seg = new THREE.Mesh(new THREE.BoxGeometry(trailWidth + (rng(s * 17 + w * 13) - 0.5) * 0.3, 0.08, stepLen + 0.05), trailMat);
-            seg.position.set(px - island.position.x, py + 0.05, pz - island.position.z);
-            seg.rotation.y = yaw + (rng(s * 19 + w * 23) - 0.5) * 0.06;
-            seg.receiveShadow = true;
-            group.add(seg);
+            // AUDIT P1/P2: each tile was a 0.08m slab dropped flat at ONE centre
+            // sample, so on any grade its downhill edge cantilevered into open
+            // air and the run read as a jagged staircase of floating pavers.
+            // Now: sampled at the four corners, pitched into the local slope,
+            // thickened into a stone kerb and sunk so the downhill edge is
+            // swallowed by the ground (the thickness IS the downhill skirt).
+            const halfW = (trailWidth + (rng(s * 17 + w * 13) - 0.5) * 0.3) * 0.5;
+            const halfL = (stepLen + 0.05) * 0.5;
+            const tYaw = yaw + (rng(s * 19 + w * 23) - 0.5) * 0.06;
+            const fwdX = Math.sin(tYaw), fwdZ = Math.cos(tYaw);
+            const sideX = Math.cos(tYaw), sideZ = -Math.sin(tYaw);
+            const cornerY = (fs: number, ss: number) => getIslandSurfaceY(
+              island,
+              px + fwdX * halfL * fs + sideX * halfW * ss,
+              pz + fwdZ * halfL * fs + sideZ * halfW * ss,
+            );
+            const yFf = cornerY(1, 0), yBb = cornerY(-1, 0);
+            const yLl = cornerY(0, 1), yRr = cornerY(0, -1);
+            const minCorner = Math.min(py, yFf, yBb, yLl, yRr);
+            const tileThick = 0.26;
+            // Slope basis from the corner samples: pitch along the path, roll across it.
+            const pitch = Math.atan2(yBb - yFf, halfL * 2);
+            const roll = Math.atan2(yLl - yRr, halfW * 2);
+            trObj.position.set(px - island.position.x, minCorner + 0.02, pz - island.position.z);
+            trObj.rotation.set(0, tYaw, 0);
+            trObj.rotateX(pitch);
+            trObj.rotateZ(roll);
+            trObj.scale.set(halfW * 2, tileThick, halfL * 2);
+            trObj.updateMatrix();
+            tileXf.push(trObj.matrix.clone());
             // Occasional border stones
             if (!lowDetail && rng(s * 29 + w * 31) > 0.78) {
               const side = rng(s * 33 + w * 41) > 0.5 ? 1 : -1;
-              const stone = new THREE.Mesh(boulderGeo, stoneMat);
               const stx = px + Math.cos(yaw) * side * (trailWidth * 0.55 + 0.2);
               const stz = pz - Math.sin(yaw) * side * (trailWidth * 0.55 + 0.2);
               const sty = getIslandSurfaceY(island, stx, stz);
-              stone.position.set(stx - island.position.x, sty + 0.16, stz - island.position.z);
-              stone.scale.setScalar(0.18 + rng(s * 47 + w * 53) * 0.18);
-              stone.rotation.set(rng(s * 51) * Math.PI, rng(s * 57) * Math.PI, rng(s * 61) * Math.PI);
-              stone.castShadow = true;
-              group.add(stone);
+              trP.set(stx - island.position.x, sty + 0.16, stz - island.position.z);
+              trE.set(rng(s * 51) * Math.PI, rng(s * 57) * Math.PI, rng(s * 61) * Math.PI);
+              trQ.setFromEuler(trE);
+              trS.setScalar(0.18 + rng(s * 47 + w * 53) * 0.18);
+              kerbXf.push(trM.clone().compose(trP, trQ, trS));
             }
           }
+        }
+        if (tileXf.length) {
+          const tiles = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), trailMat, tileXf.length);
+          tiles.name = 'trail-tile';
+          tileXf.forEach((m, k) => tiles.setMatrixAt(k, m));
+          tiles.instanceMatrix.needsUpdate = true;
+          tiles.receiveShadow = true;
+          group.add(tiles);
+        }
+        if (kerbXf.length) {
+          const kerbs = new THREE.InstancedMesh(boulderGeo, stoneMat, kerbXf.length);
+          kerbXf.forEach((m, k) => kerbs.setMatrixAt(k, m));
+          kerbs.instanceMatrix.needsUpdate = true;
+          kerbs.castShadow = true;
+          group.add(kerbs);
         }
 
         // Trailhead post at the dock side
@@ -3068,16 +3695,24 @@ export class IslandBuilder {
           rng(i * 421) > 0.4 ? reefMatDark : reefMatWet,
         );
         const stickOut = (rng(i * 431) - 0.3) * 1.6; // some submerged, some breaking
-        reef.position.set(fx, seaY + stickOut, fz);
         const scale = 0.7 + rng(i * 433) * 1.4;
         reef.scale.set(scale * (0.7 + rng(i * 437) * 0.6), scale * (0.6 + rng(i * 441) * 1.2), scale * (0.7 + rng(i * 443) * 0.6));
+        // AUDIT P2: these were pinned to a fixed sea offset regardless of what
+        // was (or wasn't) under them, so rocks over a sub-sea shelf hung in mid
+        // air above the water with their foam ring painted on the sea below.
+        // Seat on the seabed where it's shallow enough to reach, and always
+        // keep the base at least ~0.2m under the waterline so nothing floats.
+        const reefHalfH = 0.6 * reef.scale.y;   // both source geos are 1.2 tall
+        const bedY = getIslandSurfaceY(island, fx + island.position.x, fz + island.position.z);
+        const seated = bedY > -0.6 ? bedY + reefHalfH * 0.55 : seaY + stickOut;
+        reef.position.set(fx, Math.min(seated, reefHalfH - 0.2), fz);
         reef.rotation.set(rng(i * 447) * 0.6, rng(i * 449) * Math.PI * 2, (rng(i * 451) - 0.5) * 0.6);
         reef.castShadow = false;
         reef.receiveShadow = true;
         group.add(reef);
 
         // Add a small splash collar of foam (a flat ring sliver) for ones poking above water
-        if (stickOut > 0.05 && !lowDetail) {
+        if (reef.position.y + reefHalfH > 0.12 && !lowDetail) {
           const foam = new THREE.Mesh(
             new THREE.RingGeometry(scale * 0.55, scale * 0.95, 12),
             new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false }),

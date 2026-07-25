@@ -178,9 +178,16 @@ export class LobbyServer {
     // opcode, invalid close code, invalid UTF-8, junk bytes, oversized frame) as
     // an unhandled 'error' — which exits the process and kills EVERY live match.
     // Verified: 6/7 hostile frames took the server down before this handler.
+    // Note what this handler is NOT: it never fires for an unexpected or
+    // out-of-order APPLICATION message (those are routed and dropped). It fires
+    // when the byte stream itself stopped being a valid WebSocket, at which
+    // point the connection is unrecoverable and closing is the only move. Log
+    // the ws code AND message — "WS_ERR_UNEXPECTED_RSV_1 / RSV1 must be clear"
+    // on every socket means something between the two ends is corrupting
+    // frames, which is a very different bug from anything in this file.
     ws.on('error', (err) => {
-      const code = (err as NodeJS.ErrnoException).code ?? err.message;
-      console.error(`[Lobby] ws error ${session.id.slice(0, 6)}: ${code}`);
+      const code = (err as NodeJS.ErrnoException).code;
+      console.error(`[Lobby] ws error ${session.id.slice(0, 6)}: ${code ? `${code} — ` : ''}${err.message}`);
       try { ws.close(1002, 'protocol error'); } catch {}
     });
     ws.on('pong', () => { session.lastSeenAt = Date.now(); });
@@ -269,11 +276,22 @@ export class LobbyServer {
         return this.send(session.ws, { type: 'pong', ts: Date.now(), payload: msg.payload });
     }
 
-    // In-match messages — forward to the match
-    if ((session.state === 'in_match' || session.state === 'match_ended') && session.matchId && session.matchPlayerId) {
-      const match = this.matches.get(session.matchId);
-      if (match) match.handleClientMessage(session.matchPlayerId, msg);
+    // Everything else is match-scoped (player_input, trade_action, dev_*) and is
+    // forwarded to the match this client belongs to.
+    const inMatch = (session.state === 'in_match' || session.state === 'match_ended')
+      && !!session.matchId && !!session.matchPlayerId;
+    if (!inMatch) {
+      // No match to forward to — DROP the message and keep the socket. This is a
+      // normal race, not an attack: a client's frame loop can emit a
+      // player_input in the gap between 'welcome' and the join handshake, and a
+      // match teardown can cross inputs already in flight. Killing the socket
+      // over a benign, unaddressable frame would cost the player their whole
+      // session (and, from the menu, would make the game unreachable). Genuinely
+      // malformed frames are still rejected upstream in the 'message' handler.
+      return;
     }
+    const match = this.matches.get(session.matchId!);
+    if (match) match.handleClientMessage(session.matchPlayerId!, msg);
   }
 
   // ─── Lobby handlers ──────────────────────────────────────────

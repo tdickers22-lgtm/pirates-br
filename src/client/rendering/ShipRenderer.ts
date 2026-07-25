@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
+import type { IslandDock, Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
 import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
-import { getAmmoCrateLocal, getCannonDeckLocalPosition } from '../../shared/interactions.js';
+import { getAmmoCrateLocal, getCannonDeckLocalPosition, getShipGangwayPlan } from '../../shared/interactions.js';
 import type { RenderQuality } from './Renderer.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
@@ -255,9 +255,13 @@ function sprayTexture(): THREE.CanvasTexture {
 //
 // The hull is lofted from 9 cross-section stations, each with 7 vertical slots
 // per side: sheer (deck edge) → tumblehome → wale (max beam) → topside →
-// waterline → rounded bilge → keel. The SHEER half-widths are numerically
-// identical to the walkable-deck station table in PhysicsSystem.getDeckHalfWidth
-// (that is the gameplay contract: the visible deck edge IS the walkable edge).
+// waterline → rounded bilge → keel. The SHEER half-widths are NOT the walkable
+// deck line: pirates are clamped to the BULWARK INNER FACE (shared
+// getShipDeckWalkHalfWidth, ~0.42·W amidships), which is deliberately inboard
+// of the loft sheer (~0.56·W) so nobody stands out on the covering board. The
+// standing contract is one-directional: the loft sheer must stay OUTBOARD of
+// the walk taper at every station, so the walk clamp never puts a pirate past
+// a rendered line. (Verified station by station where LOFT_STATIONS is defined.)
 // Everything below the sheer is free visual shape: gentle tumblehome above the
 // wale, a flared V bow with a forward-raked stem, a mildly raked underwater
 // stern, and real DRAFT — the keel sits ~0.8-1.2m below the waterline so hulls
@@ -287,10 +291,14 @@ const HULL_SHAPES: Record<ShipType, { bulge: number; draftF: number }> = {
   galleon: { bulge: 1.10, draftF: 0.35 },      // draft ≈ 1.23m
 };
 
-/** Loft stations. `dh` (sheer half-width fraction of W) at the six knot rows
- *  MUST stay identical to PhysicsSystem.getDeckHalfWidth's table — intermediate
- *  rows are exact linear interpolations of that table, so the walkable footprint
- *  is preserved everywhere. ztF/zbF give the stem/stern rake (z at sheer vs keel). */
+/** Loft stations. `dh` (sheer half-width, fraction of W) draws the covering
+ *  board — the visible deck edge. It must stay OUTBOARD of the shared walk
+ *  taper getShipDeckWalkHalfWidth (stations −0.5:0.23, −0.36:0.38, −0.08:0.42,
+ *  0.22:0.40, 0.42:0.30, 0.5:0.05 · W) at every z, so the deck clamp can never
+ *  strand a pirate past a rendered line. Checked at the knots and the crossings:
+ *  the tightest margins are the forward quarter (z 0.42 → 0.32 vs 0.30 W) and
+ *  the stem (z 0.5 → 0.055 vs 0.05 W); everything else clears by ≥0.02 W.
+ *  ztF/zbF give the stem/stern rake (z at sheer vs keel). */
 const LOFT_STATIONS = [
   { zf: -0.50, dh: 0.300, sheer: 0.95,  keel01: 0.32, wlF: 0.62, bilgeF: 0.34, mid: 0.15, ztF: -0.505, zbF: -0.415 },
   { zf: -0.36, dh: 0.500, sheer: 0.98,  keel01: 0.74, wlF: 0.76, bilgeF: 0.48, mid: 0.75, ztF: -0.360, zbF: -0.350 },
@@ -298,8 +306,11 @@ const LOFT_STATIONS = [
   { zf: -0.08, dh: 0.560, sheer: 1.00,  keel01: 1.00, wlF: 0.82, bilgeF: 0.54, mid: 1.00, ztF: -0.080, zbF: -0.080 },
   { zf:  0.07, dh: 0.520, sheer: 0.995, keel01: 1.00, wlF: 0.80, bilgeF: 0.52, mid: 1.00, ztF:  0.070, zbF:  0.070 },
   { zf:  0.22, dh: 0.480, sheer: 0.99,  keel01: 0.92, wlF: 0.74, bilgeF: 0.46, mid: 0.90, ztF:  0.220, zbF:  0.220 },
-  { zf:  0.32, dh: 0.370, sheer: 1.015, keel01: 0.78, wlF: 0.62, bilgeF: 0.36, mid: 0.60, ztF:  0.325, zbF:  0.310 },
-  { zf:  0.42, dh: 0.260, sheer: 1.04,  keel01: 0.55, wlF: 0.46, bilgeF: 0.24, mid: 0.30, ztF:  0.445, zbF:  0.405 },
+  // Forward quarter widened (0.370→0.390, 0.260→0.320): the walk taper runs
+  // 0.35 W / 0.30 W here, so the old sheer left the clamp up to 0.04 W (0.4 m on
+  // a galleon) OUTBOARD of the drawn deck edge — an invisible rail at the bow.
+  { zf:  0.32, dh: 0.390, sheer: 1.015, keel01: 0.78, wlF: 0.62, bilgeF: 0.36, mid: 0.60, ztF:  0.325, zbF:  0.310 },
+  { zf:  0.42, dh: 0.320, sheer: 1.04,  keel01: 0.55, wlF: 0.46, bilgeF: 0.24, mid: 0.30, ztF:  0.445, zbF:  0.405 },
   { zf:  0.50, dh: 0.055, sheer: 1.08,  keel01: 0.18, wlF: 0.30, bilgeF: 0.14, mid: 0.00, ztF:  0.530, zbF:  0.415 },
 ];
 
@@ -388,6 +399,107 @@ function hullSurfacePointAt(profile: HullProfile, z: number, y: number): { x: nu
   let ny = sa.ny + (sb.ny - sa.ny) * t;
   const len = Math.hypot(nx, ny) || 1;
   return { x: sa.x + (sb.x - sa.x) * t, nx: nx / len, ny: ny / len };
+}
+
+/** Waterline contact collar: a flat ribbon hugging the hull's own waterline
+ *  outline (the loft's y = 0 slot) and fanning outward `width` metres.
+ *  Textured with a soft inner-bright / outer-transparent ramp, this is the
+ *  wet-edge foam that tells the eye the hull is IN the water. Without it a
+ *  correctly-drafted hull still reads as pasted on top of the surface: the
+ *  ocean simply clips the shell with a hard silhouette and the hull's own
+ *  shadow underneath sells "air gap" (the floating-props P1 read).
+ *  UV: u runs bow→stern→bow (foam scroll), v = 0 at the hull, 1 at the fringe. */
+function makeWaterlineFoamGeometry(profile: HullProfile, width: number): THREE.BufferGeometry {
+  const sts = profile.stations;
+  const SEG = 12; // samples per station gap, per side
+  const ring: Array<{ x: number; z: number }> = [];
+  // Starboard bow→stern, then port stern→bow: one closed loop.
+  for (let side = 0 as 0 | 1; side <= 1; side++) {
+    const forward = side === 0;
+    for (let i = 0; i < sts.length - 1; i++) {
+      const a = forward ? sts[sts.length - 1 - i] : sts[i];
+      const b = forward ? sts[sts.length - 2 - i] : sts[i + 1];
+      const sa = stationSurfaceAt(a, 0);
+      const sb = stationSurfaceAt(b, 0);
+      for (let s = 0; s < SEG; s++) {
+        const t = s / SEG;
+        const sx = side === 0 ? 1 : -1;
+        ring.push({
+          x: sx * (sa.x + (sb.x - sa.x) * t),
+          z: sa.z + (sb.z - sa.z) * t,
+        });
+      }
+    }
+  }
+  const n = ring.length;
+  const verts: number[] = [];
+  const uvs: number[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = ring[i];
+    const prev = ring[(i - 1 + n) % n];
+    const next = ring[(i + 1) % n];
+    let tx = next.x - prev.x;
+    let tz = next.z - prev.z;
+    const tl = Math.hypot(tx, tz) || 1;
+    tx /= tl; tz /= tl;
+    // Outward normal of a counter-clockwise loop in XZ.
+    let nx = tz, nz = -tx;
+    if (nx * p.x + nz * p.z < 0) { nx = -nx; nz = -nz; }
+    const u = (i / n) * 6;
+    verts.push(p.x, 0.035, p.z);
+    uvs.push(u, 0);
+    verts.push(p.x + nx * width, 0.005, p.z + nz * width);
+    uvs.push(u, 1);
+  }
+  for (let i = 0; i < n; i++) {
+    const a = i * 2, b = a + 1;
+    const c = ((i + 1) % n) * 2, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  // Ship-local XZ per vertex + its rest height above the waterline plane: the
+  // renderer re-lifts every vertex onto the LOCAL Gerstner surface each frame,
+  // so the collar rides the same swell the ocean draws instead of being buried
+  // by the first wave crest that rolls past the hull.
+  const baseXZ = new Float32Array(verts.length / 3 * 2);
+  const rest = new Float32Array(verts.length / 3);
+  for (let i = 0; i < verts.length / 3; i++) {
+    baseXZ[i * 2] = verts[i * 3];
+    baseXZ[i * 2 + 1] = verts[i * 3 + 2];
+    rest[i] = verts[i * 3 + 1];
+  }
+  geo.userData.baseXZ = baseXZ;
+  geo.userData.rest = rest;
+  return geo;
+}
+
+/** Soft foam ramp: bright wet edge against the planking, feathering out into
+ *  clear water, with a little streaky noise so it is not a clean airbrush. */
+function makeWaterlineFoamTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, 128, 64);
+  for (let y = 0; y < 64; y++) {
+    const v = y / 63;
+    // Bright band right at the hull, decaying to nothing at the fringe.
+    const a = Math.pow(1 - v, 2.1) * 0.92;
+    for (let x = 0; x < 128; x++) {
+      const streak = 0.72 + 0.28 * Math.sin(x * 0.31 + y * 0.11) * Math.sin(x * 0.07 + 1.7);
+      ctx.fillStyle = `rgba(255,255,255,${Math.max(0, a * streak).toFixed(3)})`;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  return tex;
 }
 
 /** The lofted hull shell. Open at the top (deck slabs are separate so the
@@ -592,6 +704,62 @@ function makeCylinderBetween(
   }
   mesh.castShadow = true;
   return mesh;
+}
+
+/** A coiled rope flaked down on the deck: an irregular flattened spiral of 2-3
+ *  overlapping turns with a loose tail, instead of the perfect torus that read
+ *  as a rubber donut in the deck audit. Deterministic from `seed` so a given
+ *  station coils the same way on every client. Returns a group centred on the
+ *  coil, sitting on y = 0 (its own thickness is the standing height). */
+function makeRopeCoil(
+  material: THREE.Material,
+  outerRadius: number,
+  thickness: number,
+  seed = 0,
+  turns = 2.6,
+): THREE.Group {
+  const g = new THREE.Group();
+  const rnd = (i: number) => {
+    const s = Math.sin((seed + 1) * 12.9898 + i * 78.233) * 43758.5453;
+    return s - Math.floor(s);
+  };
+  // Flaked coil: the rope spirals inward and settles, so each turn sits a
+  // little lower and a little tighter than the one outside it.
+  const points: THREE.Vector3[] = [];
+  const steps = Math.max(18, Math.round(turns * 14));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const a = t * turns * Math.PI * 2;
+    // Slight ovality + per-coil wobble kills the machined-circle read.
+    const wob = 1 + (rnd(i * 0.37) - 0.5) * 0.13;
+    const r = outerRadius * (1 - 0.34 * t) * wob;
+    points.push(new THREE.Vector3(
+      Math.cos(a) * r * 1.06,
+      thickness * (0.55 + 0.42 * (1 - t)) + Math.sin(a * 2 + seed) * thickness * 0.1,
+      Math.sin(a) * r * 0.94,
+    ));
+  }
+  // Loose tail flaked off to one side and dropped flat on the deck.
+  const tailA = turns * Math.PI * 2;
+  const tailR = outerRadius * 0.66;
+  points.push(new THREE.Vector3(
+    Math.cos(tailA) * tailR + outerRadius * 0.55,
+    thickness * 0.5,
+    Math.sin(tailA) * tailR + outerRadius * (rnd(9) - 0.5) * 0.9,
+  ));
+  points.push(new THREE.Vector3(
+    Math.cos(tailA) * tailR + outerRadius * 1.35,
+    thickness * 0.42,
+    Math.sin(tailA) * tailR + outerRadius * (rnd(11) - 0.5) * 1.4,
+  ));
+  const curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.35);
+  const tube = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, Math.max(24, steps + 6), thickness * 0.5, 6, false),
+    material,
+  );
+  tube.castShadow = true;
+  g.add(tube);
+  return g;
 }
 
 function makeBarrel(
@@ -1100,6 +1268,8 @@ interface ShipMeshGroup {
   /** vec4 (xyz = hull-local hole center, w = radius) driving the hull's
    *  fragment-discard breaches; slot radius 0 = inactive. */
   hullHoleUniform: { value: THREE.Vector4[] };
+  /** Waterline contact collar (wet-edge foam hugging the hull's own waterline). */
+  waterlineFoam: THREE.Mesh;
 }
 
 export class ShipRenderer {
@@ -1110,6 +1280,8 @@ export class ShipRenderer {
   private deckTex!: THREE.CanvasTexture;
   private sailTex!: THREE.CanvasTexture;
   private foamTex!: THREE.CanvasTexture;
+  /** Waterline contact ramp (bright at the planking, clear at the fringe). */
+  private waterlineFoamTex!: THREE.CanvasTexture;
   private sprayTex!: THREE.CanvasTexture;
   private readonly teamSailTex = new Map<number, THREE.CanvasTexture>();
   private readonly teamHullTex = new Map<number, THREE.CanvasTexture>();
@@ -1134,6 +1306,13 @@ export class ShipRenderer {
   private nightFactor = 0;
   /** Frame counter for throttling per-vertex work (sail-cloth normals). */
   private frameIndex = 0;
+  /** Island docks, for boarding gangways. Game feeds these from the snapshot;
+   *  empty = no berths known, so no planks are drawn. */
+  private docks: IslandDock[] = [];
+  /** Pooled boarding planks (scene-level: a plank bridges ship and dock, so it
+   *  must not inherit the hull's pitch/roll). */
+  private gangwayPlanks: THREE.Group[] = [];
+  private gangwayMat!: THREE.MeshStandardMaterial;
 
   init(scene: THREE.Scene, quality: RenderQuality = 'balanced') {
     this.scene = scene;
@@ -1142,7 +1321,14 @@ export class ShipRenderer {
     this.deckTex     = woodTexture(256, 256, 'deck');
     this.sailTex     = sailTexture();
     this.foamTex     = foamTexture();
+    this.waterlineFoamTex = makeWaterlineFoamTexture();
     this.sprayTex    = sprayTexture();
+  }
+
+  /** Island docks (from the replicated island list) — the berths a ship can
+   *  drop a boarding plank to. Call once per snapshot; cheap (a reference). */
+  setDocks(docks: IslandDock[]) {
+    this.docks = docks;
   }
 
   /** Optional wind override for sail cloth + pennants. Defaults to sampleWind(t). */
@@ -1404,6 +1590,27 @@ export class ShipRenderer {
     hull.castShadow = true;
     hull.receiveShadow = true;
     group.add(hull);
+
+    // Waterline contact collar — the wet foam edge where the sea meets the
+    // planking. The hull's DRAFT is already correct (the loft's y = 0 slot is
+    // the design waterline and the render root rides the shared Gerstner
+    // surface within ~0.05 m), but with no contact treatment the ocean just
+    // clipped the shell with a hard silhouette and the hull's own shadow read
+    // as an air gap under the keel. This collar is what makes it sit IN the sea.
+    const waterlineFoam = new THREE.Mesh(
+      makeWaterlineFoamGeometry(profile, Math.max(0.55, W * 0.16)),
+      new THREE.MeshBasicMaterial({
+        map: this.waterlineFoamTex,
+        transparent: true,
+        opacity: 0.5,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      }),
+    );
+    waterlineFoam.name = 'waterline-foam';
+    waterlineFoam.renderOrder = 2;
+    group.add(waterlineFoam);
 
     const holeMat = new THREE.MeshStandardMaterial({
       color: 0x07080a,
@@ -1967,6 +2174,37 @@ export class ShipRenderer {
     );
     bowBreastwork.position.set(0, H + bulwarkH * 0.5, L * 0.36);
     group.add(bowBreastwork);
+    // Forward-quarter bulwark: the straight side run stops at z = 0.39·L while
+    // the walk clamp reaches 0.46·L, so the last ~0.3 m of bow deck used to be
+    // fenced by an invisible rail. Two short angled segments per side carry the
+    // rail from the bulwark end in to the stem, staying OUTBOARD of the walk
+    // taper (0.325·W at 0.39·L → 0.175·W at 0.46·L) the whole way.
+    for (const sx of [-1, 1] as const) {
+      const bowRun: Array<[number, number]> = [
+        [W * 0.44, L * 0.39],
+        [W * 0.345, L * 0.435],
+        [W * 0.155, L * 0.472],
+      ];
+      for (let i = 0; i < bowRun.length - 1; i++) {
+        const [x0, z0] = bowRun[i];
+        const [x1, z1] = bowRun[i + 1];
+        const dx = (x1 - x0) * sx;
+        const dz = z1 - z0;
+        const segLen = Math.hypot(dx, dz);
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(0.14, bulwarkH, segLen + 0.06), deckMat);
+        seg.position.set(sx * (x0 + x1) * 0.5, H + bulwarkH * 0.5, (z0 + z1) * 0.5);
+        seg.rotation.y = Math.atan2(dx, dz);
+        seg.castShadow = true;
+        seg.receiveShadow = true;
+        group.add(seg);
+        // Cap rail along the same run so the bow reads as one continuous rail.
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, segLen + 0.06), darkMat);
+        cap.position.set(sx * (x0 + x1) * 0.5, H + bulwarkH + 0.05, (z0 + z1) * 0.5);
+        cap.rotation.y = seg.rotation.y;
+        cap.castShadow = true;
+        group.add(cap);
+      }
+    }
     for (const sx of [-1, 1]) {
       const quarterBulwark = new THREE.Mesh(
         new THREE.BoxGeometry(0.14, bulwarkH, L * 0.18),
@@ -1977,11 +2215,14 @@ export class ShipRenderer {
     }
 
     for (const sx of [-1, 1] as const) {
+      // Ends at z = 0.39·L where the angled bow cap rail above picks it up —
+      // the old 0.86·L run carried a straight rail out to 0.43·L, well outboard
+      // of the hull's own sheer there (a rail hanging over open water).
       const capRail = new THREE.Mesh(
-        new THREE.BoxGeometry(0.2, 0.1, L * 0.86),
+        new THREE.BoxGeometry(0.2, 0.1, L * 0.82),
         darkMat,
       );
-      capRail.position.set(sx * W * 0.48, H + bulwarkH + 0.05, 0);
+      capRail.position.set(sx * W * 0.48, H + bulwarkH + 0.05, -L * 0.02);
       capRail.castShadow = true;
       group.add(capRail);
     }
@@ -2324,10 +2565,10 @@ export class ShipRenderer {
       group.add(makeCylinderBetween(beamPt, drumPt, 0.03, metalMat, 6));
     }
 
-    // Rope coil near anchor
-    const ropeCoil = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.065, 6, 12), ropeCoilMat);
-    ropeCoil.rotation.x = Math.PI * 0.5;
-    ropeCoil.position.set(-0.24, H + 0.16, L * 0.38);
+    // Rope coil flaked down beside the anchor capstan
+    const ropeCoil = makeRopeCoil(ropeCoilMat, 0.3, 0.062, 3, 2.7);
+    ropeCoil.position.set(-0.24, H + 0.1, L * 0.38);
+    ropeCoil.rotation.y = 0.6;
     group.add(ropeCoil);
 
     // ── Masts ────────────────────────────────────────────────
@@ -2385,17 +2626,36 @@ export class ShipRenderer {
       // Keep in sync with getCrowNestStandingY (the standing spot).
       if (m === 0 && mastH > 6) {
         const nestY = H + mastH * 0.86;
-        // Floor is wide enough for the server's 0.55m walkable disc; named so
-        // the client can resolve it (kept out of the static merge).
-        const nestFloor = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.5, 0.14, 8), darkMat);
+        // A genuine lookout platform, not a dinner plate: floor r = 1.0 carries
+        // the server's 0.9 m walkable disc (PhysicsSystem CROW_NEST_WALK_RADIUS)
+        // with the rail hoop just outboard at 1.06, so a pacing lookout stops at
+        // the rail instead of at thin air. Named so the client can resolve it
+        // (kept out of the static merge).
+        const nestFloor = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 0.62, 0.16, 12), darkMat);
         nestFloor.name = 'nest-floor';
         nestFloor.position.set(0, nestY, mastZ);
+        nestFloor.castShadow = true;
+        nestFloor.receiveShadow = true;
         group.add(nestFloor);
         nestFloorMesh = nestFloor;
-        const nestRail = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.05, 6, 12), darkMat);
+        // Staved basket: uprights + two hoops read as cooperage from the deck
+        // and give the rim a real thickness to stand against.
+        const nestRail = new THREE.Mesh(new THREE.TorusGeometry(1.06, 0.055, 6, 18), darkMat);
         nestRail.rotation.x = Math.PI * 0.5;
-        nestRail.position.set(0, nestY + 0.45, mastZ);
+        nestRail.position.set(0, nestY + 0.52, mastZ);
         group.add(nestRail);
+        const nestMidHoop = new THREE.Mesh(new THREE.TorusGeometry(1.03, 0.04, 6, 18), darkMat);
+        nestMidHoop.rotation.x = Math.PI * 0.5;
+        nestMidHoop.position.set(0, nestY + 0.26, mastZ);
+        group.add(nestMidHoop);
+        const staveCount = 12;
+        for (let s = 0; s < staveCount; s++) {
+          const a = (s / staveCount) * Math.PI * 2;
+          const stave = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.6, 0.05), darkMat);
+          stave.position.set(Math.sin(a) * 1.02, nestY + 0.3, mastZ + Math.cos(a) * 1.02);
+          stave.rotation.y = a;
+          group.add(stave);
+        }
       }
 
       // Boom / yardarm — lives inside a trim pivot together with its sail and
@@ -2484,20 +2744,56 @@ export class ShipRenderer {
       // thin rod — an anchored ship must read as "sails stowed", not
       // dismasted. Slight vertical sag + gasket lashings sell the bundle.
       const furledGroup = new THREE.Group();
-      const furled = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.34, 0.4, yardW * 0.88, 10),
-        sailMat.clone(),
-      );
+      // The bundle is a LATHE along the yard whose radius bulges between the
+      // gaskets and pinches under them, and whose axis sags in a shallow
+      // catenary — canvas gathered and strapped, not a length of white pipe.
+      const gasketCount = 5;
+      const bundleLen = yardW * 0.9;
+      const bundleSegs = 40;
+      const bundleGeo = new THREE.CylinderGeometry(1, 1, bundleLen, 12, bundleSegs, true);
+      {
+        // The mesh is rotated z=+90° below, so the cylinder's LOCAL +Y runs out
+        // along the yard and LOCAL −X points DOWN in ship space — that is the
+        // axis the bundle sags along.
+        const pos = bundleGeo.attributes.position as THREE.BufferAttribute;
+        const sag = 0.15;
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+          const u = y / bundleLen + 0.5;               // 0..1 along the yard
+          // Pinch hard under each gasket, swell in the bays between them.
+          const lash = Math.abs(Math.sin(u * Math.PI * gasketCount));
+          const taper = 0.74 + 0.26 * Math.sin(Math.PI * Math.min(1, Math.max(0, u)));
+          const r = (0.28 + 0.15 * lash) * taper;
+          // Catenary over the whole yard + a droop in each bay between gaskets.
+          const droop = sag * (1 - Math.pow(2 * u - 1, 2)) + 0.06 * lash;
+          pos.setX(i, x * r - droop);
+          pos.setZ(i, z * r);
+        }
+        bundleGeo.computeVertexNormals();
+      }
+      const bundleMat = sailMat.clone();
+      // Stowed canvas is weathered and shaded, not showroom white — the audit
+      // read the old bundles as bright white tubes on the yard.
+      bundleMat.color.set(0xd9cda6);
+      bundleMat.roughness = 0.95;
+      const furled = new THREE.Mesh(bundleGeo, bundleMat);
       furled.rotation.z = Math.PI * 0.5;
       furled.castShadow = true;
       furledGroup.add(furled);
       // Rope gaskets lashing the bundle to the yard at intervals
       const gasketMat = new THREE.MeshStandardMaterial({ color: 0x6b5836, roughness: 1 });
       for (let g = -2; g <= 2; g++) {
-        const gasket = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.032, 5, 10), gasketMat);
+        const gu = (g + 2) / (gasketCount - 1);
+        const gasketY = -0.15 * (1 - Math.pow(2 * gu - 1, 2));
+        const gasket = new THREE.Mesh(new THREE.TorusGeometry(0.27, 0.034, 5, 12), gasketMat);
         gasket.rotation.y = Math.PI * 0.5;
-        gasket.position.x = g * yardW * 0.17;
+        gasket.position.set(g * bundleLen * 0.245, gasketY, 0);
         furledGroup.add(gasket);
+        // Gasket tail hanging off the bundle — the giveaway that it is lashed.
+        const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.013, 0.36, 5), gasketMat);
+        tail.position.set(gasket.position.x + 0.04, gasketY - 0.36, 0.02);
+        tail.rotation.z = 0.16 * (g % 2 === 0 ? 1 : -1);
+        furledGroup.add(tail);
       }
       furledGroup.position.set(0, -mastH * 0.045, -0.04);
       furledGroup.userData.phaseSeed = mastZ;
@@ -2567,12 +2863,14 @@ export class ShipRenderer {
           pin.position.set(rackX + pinOff, H + 0.68, ropeStation.z);
           group.add(pin);
         }
-        const coil = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.075, 8, 16), ropeStationMat);
-        coil.rotation.y = Math.PI * 0.5;
+        // Halyard hanks hung on the pin rail — irregular flaked coils with a
+        // tail, not machined donuts (deck-dressing audit).
+        const coil = makeRopeCoil(ropeStationMat, 0.21, 0.07, ropeStation.z * 7 + 1, 2.4);
+        coil.rotation.z = Math.PI * 0.5;
         coil.position.set(rackX, H + 0.5, ropeStation.z + 0.02);
         group.add(coil);
-        const coil2 = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.06, 8, 14), ropeStationMat);
-        coil2.rotation.y = Math.PI * 0.5;
+        const coil2 = makeRopeCoil(ropeStationMat, 0.17, 0.055, ropeStation.z * 5 + 4, 2.1);
+        coil2.rotation.z = Math.PI * 0.5;
         coil2.position.set(rackX + 0.02, H + 0.46, ropeStation.z - 0.12);
         group.add(coil2);
         // The stations sit abeam the mainmast, so the halyard runs from the
@@ -2593,8 +2891,8 @@ export class ShipRenderer {
         cleat.position.set(bx, H + 0.74, brace.z);
         cleat.castShadow = true;
         group.add(cleat);
-        const braceCoil = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.065, 8, 14), ropeStationMat);
-        braceCoil.rotation.y = Math.PI * 0.5;
+        const braceCoil = makeRopeCoil(ropeStationMat, 0.18, 0.06, brace.z * 3 + 2, 2.3);
+        braceCoil.rotation.z = Math.PI * 0.5;
         braceCoil.position.set(bx, H + 0.48, brace.z);
         group.add(braceCoil);
         ropeSegmentPts.push(
@@ -3023,10 +3321,10 @@ export class ShipRenderer {
       group.add(barrel);
     }
 
-    // Rope coil near stern
-    const sternRope = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.055, 6, 10), ropeCoilMat);
-    sternRope.rotation.x = Math.PI * 0.5;
-    sternRope.position.set(W * 0.3, H + 0.155, -L * 0.26);
+    // Mooring line flaked down near the stern quarter
+    const sternRope = makeRopeCoil(ropeCoilMat, 0.24, 0.052, 7, 2.9);
+    sternRope.position.set(W * 0.3, H + 0.1, -L * 0.26);
+    sternRope.rotation.y = -1.1;
     group.add(sternRope);
 
     // ── Lanterns ─────────────────────────────────────────────
@@ -3164,6 +3462,7 @@ export class ShipRenderer {
       ...supplyBarrels,
       ...cannonGroups.map((cannon) => cannon.root),
       ...(nestFloorMesh ? [nestFloorMesh] : []),
+      waterlineFoam,
       wheelGroup,
       compassNeedle,
       anchor,
@@ -3220,6 +3519,7 @@ export class ShipRenderer {
       holdWaterBase,
       wake,
       hullHoleUniform,
+      waterlineFoam,
     });
 
     return group;
@@ -3437,6 +3737,45 @@ export class ShipRenderer {
       }
       const targetRotation = ship.rotation + ship.angularVelocity * extrapolation;
       mesh.root.rotation.y += angleWrap(targetRotation - mesh.root.rotation.y) * rotationAlpha;
+
+      // Waterline contact collar: always on (a hull at anchor still has a wet
+      // edge — that is the whole point), brightening as the ship makes way.
+      {
+        const foamMat = mesh.waterlineFoam.material as THREE.MeshBasicMaterial;
+        const speed01 = THREE.MathUtils.clamp(Math.hypot(ship.velocity.x, ship.velocity.z) / 8, 0, 1);
+        const breathe = 0.9 + 0.1 * Math.sin(t * 1.7 + ship.position.x * 0.05);
+        mesh.waterlineFoam.visible = detailNear && !ship.sinking;
+        foamMat.opacity = (0.52 + 0.34 * speed01 + 0.14 * storm01) * breathe;
+        // Cancel the hull's pitch/roll (previous frame's settled value — one
+        // frame of lag is invisible) so the wet edge stays glued to the sea
+        // instead of riding the ship's attitude out of the water.
+        mesh.waterlineFoam.rotation.set(-mesh.root.rotation.x, 0, -mesh.root.rotation.z);
+        if (foamMat.map) {
+          foamMat.map.offset.x = (t * (0.03 + speed01 * 0.12)) % 1;
+        }
+        // Lift every collar vertex onto the LOCAL wave surface (world Gerstner
+        // minus the hull's own heave). Without this the ribbon is a flat disc at
+        // the hull's mean waterline and the very next crest buries it, which is
+        // exactly how a correctly-drafted hull ends up reading as floating.
+        if (mesh.waterlineFoam.visible) {
+          const geo = mesh.waterlineFoam.geometry;
+          const baseXZ = geo.userData.baseXZ as Float32Array | undefined;
+          const rest = geo.userData.rest as Float32Array | undefined;
+          const posAttr = geo.attributes.position as THREE.BufferAttribute;
+          if (baseXZ && rest) {
+            const cy = Math.cos(mesh.root.rotation.y);
+            const sy = Math.sin(mesh.root.rotation.y);
+            for (let i = 0; i < posAttr.count; i++) {
+              const lx = baseXZ[i * 2];
+              const lz = baseXZ[i * 2 + 1];
+              const wx = mesh.root.position.x + lx * cy + lz * sy;
+              const wz = mesh.root.position.z - lx * sy + lz * cy;
+              posAttr.setY(i, gerstnerHeight(wx, wz, waveT, WAVE_PARAMS, storm01) - mesh.root.position.y + rest[i]);
+            }
+            posAttr.needsUpdate = true;
+          }
+        }
+      }
       for (const sail of mesh.proxySails) {
         sail.visible = !detailNear && ship.sailHeight > 0.06;
         sail.rotation.y = THREE.MathUtils.lerp(sail.rotation.y, ship.sailAngle * 0.6, 1 - Math.exp(-8 * dt));
@@ -3748,6 +4087,8 @@ export class ShipRenderer {
         (mesh.fireParticles.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
       }
     }
+
+    this.syncGangways(ships);
   }
 
   private createShipWake(): ShipWake {
@@ -3825,6 +4166,71 @@ export class ShipRenderer {
 
     group.visible = false;
     return { group, ribbon, positions, material, spray, sprayCursor: 0, sprayTimer: 0, scroll: 0 };
+  }
+
+  /** Boarding planks: a berthed hull drops a gangway to the dock deck, so
+   *  stepping aboard a galleon is a walk up a plank instead of a 2 m climb.
+   *  Geometry comes from the SHARED getShipGangwayPlan — the same call the
+   *  server's walkable strip uses, so the plank you see is the plank you walk.
+   *  Scene-level and pooled: planks bridge two bodies, so they must not inherit
+   *  the hull's pitch/roll, and berths come and go as ships anchor. */
+  private syncGangways(ships: Ship[]) {
+    if (this.docks.length === 0 && this.gangwayPlanks.length === 0) return;
+    let used = 0;
+    for (const dock of this.docks) {
+      for (const ship of ships) {
+        const plan = getShipGangwayPlan(ship, dock);
+        if (!plan) continue;
+        const plank = this.getGangwayPlank(used++);
+        const dx = plan.dockEnd.x - plan.shipEnd.x;
+        const dz = plan.dockEnd.z - plan.shipEnd.z;
+        const dy = plan.dockEnd.y - plan.shipEnd.y;
+        const run = Math.hypot(dx, dz);
+        const len = Math.hypot(run, dy);
+        plank.visible = true;
+        plank.position.set(
+          (plan.shipEnd.x + plan.dockEnd.x) * 0.5,
+          (plan.shipEnd.y + plan.dockEnd.y) * 0.5,
+          (plan.shipEnd.z + plan.dockEnd.z) * 0.5,
+        );
+        plank.rotation.set(0, Math.atan2(dx, dz), 0);
+        // Tilt along the run so both ends land on their decks.
+        plank.rotation.x = -Math.atan2(dy, Math.max(0.001, run));
+        plank.scale.set(plan.halfWidth / 0.55, 1, len);
+      }
+    }
+    for (let i = used; i < this.gangwayPlanks.length; i++) this.gangwayPlanks[i].visible = false;
+  }
+
+  /** One pooled plank: a 1 m-long unit board (scaled to the span) with cleats
+   *  and a rope side-line, so it reads as ship's gear rather than a ramp decal. */
+  private getGangwayPlank(index: number): THREE.Group {
+    const existing = this.gangwayPlanks[index];
+    if (existing) return existing;
+    if (!this.gangwayMat) {
+      this.gangwayMat = new THREE.MeshStandardMaterial({ map: this.deckTex, roughness: 0.95, metalness: 0 });
+    }
+    const g = new THREE.Group();
+    const board = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.09, 1), this.gangwayMat);
+    board.receiveShadow = true;
+    board.castShadow = true;
+    g.add(board);
+    // Anti-slip cleats across the plank (at unit-Z fractions, so they stay
+    // evenly spaced whatever span the plank is scaled to).
+    const cleatMat = new THREE.MeshStandardMaterial({ color: 0x3a2a16, roughness: 1 });
+    for (let i = 0; i < 5; i++) {
+      const cleat = new THREE.Mesh(new THREE.BoxGeometry(1.06, 0.035, 0.045), cleatMat);
+      cleat.position.set(0, 0.06, -0.4 + i * 0.2);
+      g.add(cleat);
+    }
+    for (const sx of [-1, 1] as const) {
+      const edge = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.07, 1), cleatMat);
+      edge.position.set(sx * 0.56, 0.02, 0);
+      g.add(edge);
+    }
+    this.scene.add(g);
+    this.gangwayPlanks[index] = g;
+    return g;
   }
 
   private updateWake(

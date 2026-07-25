@@ -1,7 +1,7 @@
 import { SHIP_STATS } from './constants/index.js';
-import type { Player, Ship, Vec3 } from './types/index.js';
+import type { IslandDock, Player, Ship, Vec3 } from './types/index.js';
 import {
-  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckWalkHalfWidth } from './utils/index.js';
+  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckWalkHalfWidth, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
 
 type ShipStats = (typeof SHIP_STATS)[keyof typeof SHIP_STATS];
 type ShipLocalPoint = { x: number; z: number };
@@ -137,6 +137,103 @@ export function isNearAmmoCrate(player: PlayerLike, ship: ShipLike): boolean {
   const local = toShipLocalPoint(player.position, ship);
   const crate = getAmmoCrateLocal(SHIP_STATS[ship.type]);
   return Math.abs(local.x - crate.x) < 1.0 && Math.abs(local.z - crate.z) < 1.0;
+}
+
+// ── Boarding gangway ─────────────────────────────────────────────────────────
+// A berthed ship drops a boarding plank from its bulwark to the dock deck, so
+// stepping aboard a galleon is a walk up a plank instead of a 2 m freeboard
+// climb. One shared geometry source: ShipRenderer draws exactly this plank and
+// PhysicsSystem makes exactly this plank walkable.
+
+/** Longest gap the plank will span, rail to dock edge (metres). */
+export const GANGWAY_MAX_GAP = 3.0;
+/** Half-width of the walkable/rendered plank. */
+export const GANGWAY_HALF_WIDTH = 0.55;
+/** Walkable top of a dock deck above the dock's own origin (matches the
+ *  server's dock floor: dock.position.y + 0.14). */
+const DOCK_DECK_RISE = 0.14;
+/** How far the plank's outboard end rests ON the dock, past the dock edge. */
+const GANGWAY_DOCK_BITE = 0.6;
+
+export interface GangwayPlan {
+  /** Inboard end (ship rail), world XZ + walkable Y. */
+  shipEnd: Vec3;
+  /** Outboard end resting on the dock deck, world XZ + walkable Y. */
+  dockEnd: Vec3;
+  halfWidth: number;
+  /** Which bulwark it hangs from: -1 = port, +1 = starboard. */
+  side: -1 | 1;
+  /** Ship-local XZ of the inboard end (for drawing in ship space). */
+  shipLocal: ShipLocalPoint;
+  /** Inboard-end height in SHIP-LOCAL Y (deck standing plane). */
+  shipLocalY: number;
+}
+
+/** The boarding plank for a ship berthed alongside a dock, or null when the
+ *  ship is under way, too far off, or lying across the dock's end.
+ *  Pure geometry — deterministic on client and server from replicated state. */
+export function getShipGangwayPlan(
+  ship: Pick<Ship, 'position' | 'rotation' | 'type'> & { anchored?: boolean; alive?: boolean; sinking?: boolean },
+  dock: IslandDock,
+): GangwayPlan | null {
+  if (ship.alive === false || ship.sinking) return null;
+  if (ship.anchored === false) return null;
+  const stats = SHIP_STATS[ship.type];
+
+  // Nearest point of the dock rectangle to the ship centre, in dock-local space.
+  const shipInDock = toDockLocalPoint(dock, ship.position.x, ship.position.z);
+  const halfX = dock.width * 0.5;
+  const halfZ = dock.length * 0.5;
+  // Only berth ALONGSIDE (a plank off the dock's short end would cross the
+  // swim ladder and the shore ramp), so the attach point must be on a long edge.
+  if (Math.abs(shipInDock.x) < halfX * 0.5) return null;
+  const attachLocalX = Math.sign(shipInDock.x) * halfX;
+  const attachLocalZ = Math.max(-halfZ + GANGWAY_DOCK_BITE, Math.min(halfZ - GANGWAY_DOCK_BITE, shipInDock.z));
+  const dockEdge = dockLocalToWorld(dock, attachLocalX, DOCK_DECK_RISE, attachLocalZ);
+  // Bite back onto the deck so the plank rests on planking, not on the edge.
+  const dockRest = dockLocalToWorld(
+    dock,
+    attachLocalX - Math.sign(shipInDock.x) * GANGWAY_DOCK_BITE,
+    DOCK_DECK_RISE,
+    attachLocalZ,
+  );
+
+  // Where that lands on the ship: pick the rail on the dock-facing side.
+  const local = toShipLocalPoint(dockEdge, ship);
+  const side: -1 | 1 = local.x >= 0 ? 1 : -1;
+  const railZ = Math.max(-stats.length * 0.34, Math.min(stats.length * 0.34, local.z));
+  // The inboard end rests ON the cap rail (0.44 m above the standing deck) and
+  // just outboard of the walk clamp, so the plank visibly crosses the bulwark
+  // instead of vanishing into the planking; boarders step down onto the deck.
+  const railX = side * (getShipDeckWalkHalfWidth(stats, railZ) + 0.42);
+  const shipEndXZ = toShipWorldPoint({ x: railX, z: railZ }, ship);
+
+  const gap = Math.hypot(dockRest.x - shipEndXZ.x, dockRest.z - shipEndXZ.z);
+  if (gap > GANGWAY_MAX_GAP + GANGWAY_DOCK_BITE || gap < 0.35) return null;
+
+  return {
+    shipEnd: { x: shipEndXZ.x, y: ship.position.y + stats.height + 0.44, z: shipEndXZ.z },
+    dockEnd: { x: dockRest.x, y: dock.position.y + DOCK_DECK_RISE, z: dockRest.z },
+    halfWidth: GANGWAY_HALF_WIDTH,
+    side,
+    shipLocal: { x: railX, z: railZ },
+    shipLocalY: stats.height + 0.44,
+  };
+}
+
+/** Walkable plank height under (x, z), or null when the point is off the plank.
+ *  Shared so the renderer's plank and the server's floor can never disagree. */
+export function getGangwayFloorY(plan: GangwayPlan, x: number, z: number): number | null {
+  const ax = plan.shipEnd.x, az = plan.shipEnd.z;
+  const bx = plan.dockEnd.x, bz = plan.dockEnd.z;
+  const dx = bx - ax, dz = bz - az;
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq < 1e-6) return null;
+  const t = ((x - ax) * dx + (z - az) * dz) / lenSq;
+  if (t < 0 || t > 1) return null;
+  const px = ax + dx * t, pz = az + dz * t;
+  if (Math.hypot(x - px, z - pz) > plan.halfWidth) return null;
+  return plan.shipEnd.y + (plan.dockEnd.y - plan.shipEnd.y) * t;
 }
 
 export function isNearCrowNestLadder(player: PlayerLike, ship: ShipLike): boolean {

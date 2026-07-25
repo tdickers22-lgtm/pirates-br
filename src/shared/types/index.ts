@@ -281,7 +281,10 @@ export type IslandPropType =
   | 'boulder_a' | 'boulder_b' | 'boulder_c'
   | 'barrel' | 'crate' | 'campfire' | 'lantern_post'
   | 'watchtower' | 'shipwreck' | 'standing_stones' | 'fort'
-  | 'tent_a' | 'bedroll' | 'rock_arch'
+  | 'tent_a' | 'tent_b' | 'tent_c' | 'bedroll' | 'rock_arch'
+  // Exposed bedrock outcrop on mountain/rocky flanks. Was client-only
+  // decoration with no collision; now a registry prop so it blocks.
+  | 'crag'
   | 'bush' | 'bush_berry' | 'flower_bush' | 'fern_plant' | 'flower_patch' | 'wildflowers'
   | 'dock_mid' | 'dock_end'
   // Story scenes — one hero vignette per roster island (docs/ISLAND_STORY_BIBLE.md)

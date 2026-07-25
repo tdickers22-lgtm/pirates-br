@@ -264,6 +264,33 @@ const PATCH_MIX: Record<IslandBiome, PatchFlora[]> = {
   bone: THICKET_MIX,
 };
 
+// ── Camp variants ───────────────────────────────────────────────────────────
+// Every island used to get the SAME tent_a + fire + bedroll + lantern + crate
+// kit at the SAME radii, which read as procedural spam the moment you'd seen
+// two islands (audit P2). Three authored tent silhouettes pitched at different
+// stand-offs, with the bedroll on a different side and a looser or tighter
+// clutter ring, gives each camp its own read at a glance.
+interface CampVariant {
+  tent: IslandPropType;
+  /** Stand-off band from the hearth, in metres. */
+  tentDist: [number, number];
+  /** Constant added to "face the fire" — how the pitch is squared to the camp. */
+  tentYawBias: number;
+  /** Where the bedroll lies relative to the tent's bearing (radians). */
+  bedOffset: number;
+  /** Extra metres the crate/barrel ring may drift outward. */
+  clutterSpread: number;
+}
+const CAMP_VARIANTS: CampVariant[] = [
+  // A-frame, squared to the fire, tight kit: the "set up properly" camp.
+  { tent: 'tent_a', tentDist: [2.9, 3.4], tentYawBias: Math.PI * 0.5, bedOffset: 0.9, clutterSpread: 0.3 },
+  // Lean-to: open face turned to the hearth, gear strewn wide — a wreckers'
+  // bivouac thrown together from driftwood.
+  { tent: 'tent_b', tentDist: [3.2, 4.0], tentYawBias: Math.PI, bedOffset: -0.7, clutterSpread: 1.1 },
+  // Bell tent: pitched close and off-axis, stores stacked against the canvas.
+  { tent: 'tent_c', tentDist: [2.5, 3.1], tentYawBias: Math.PI * 0.25, bedOffset: 1.6, clutterSpread: 0.6 },
+];
+
 interface CampSite { x: number; z: number; y: number }
 interface LandmarkSite { type: LandmarkType; x: number; z: number; yaw: number }
 
@@ -316,7 +343,7 @@ export class MapGenerator {
       island.chests = this.generateChests(island, islandRng);
       island.barrels = this.generateBarrels(island, islandRng);
       island.npcs = this.generateStoryNpcs(island, islands.length, islandRng);
-      island.props = this.generateProps(island, entry, islandRng, camps, landmarks);
+      island.props = this.generateProps(island, entry, islandRng, camps, landmarks, islands.length);
       island.bridges = this.generateBridges(island);
       island.geysers = this.generateGeysers(island, islandRng);
       islands.push(island);
@@ -1366,6 +1393,7 @@ export class MapGenerator {
     rng: Rng,
     camps: CampSite[],
     landmarks: LandmarkSite[],
+    islandIndex: number,
   ): IslandProp[] {
     const props: IslandProp[] = [];
     const blockers: Array<{ x: number; z: number; r: number }> = [];
@@ -1413,13 +1441,34 @@ export class MapGenerator {
     }
 
     // 2. Camp props on their stamped flats (campfire + lantern + crates).
+    // Camp DRESSING (which tent, how it is pitched, how loose the ring is) is
+    // drawn from a SEPARATE stream so varying it never reshuffles the long-
+    // tuned draws islandRng feeds — same pattern as the story scenes.
+    // Before this every island got the identical tent_a + fire + lantern +
+    // bedroll + crate kit at the identical radii: "procedural spam once you've
+    // seen two islands" (audit P2).
+    const campRng = mulberry32((entry.seed ^ 0x33b1f00d) >>> 0);
+    // Neighbouring islands must not share a silhouette, so the variant WALKS
+    // the roster rather than rolling free — a free roll gave 7 of 12 camps the
+    // same tent. Roster order picks the island's first variant, then a stride
+    // coprime with the count steps each further camp on the same island.
+    let campVariantSeq = islandIndex;
     for (const camp of camps) {
       const theta = ra(rng);
       addProp('campfire', camp.x, camp.z, ra(rng), 1);
+      const variant = CAMP_VARIANTS[campVariantSeq % CAMP_VARIANTS.length];
+      campVariantSeq += 2; // stride 2 over 3 variants ⇒ every camp differs from the last
       // Tent faces the fire from ~3m; bedroll tucked at the tent mouth.
-      const tentAngle = theta + Math.PI * 0.72;
-      const tentX = camp.x + Math.cos(tentAngle) * 3.1;
-      const tentZ = camp.z + Math.sin(tentAngle) * 3.1;
+      const tentAngle = theta + Math.PI * 0.72 + rr(campRng, -0.55, 0.55);
+      // Stand-off is the variant's authored band, floored by the two props'
+      // own spacing radii (at the largest scale the tent can roll) so a wide
+      // guy-rope footprint can never end up laid over the hearth.
+      const tentDist = Math.max(
+        rr(campRng, variant.tentDist[0], variant.tentDist[1]),
+        getPropSpacingRadius('campfire', 1) + getPropSpacingRadius(variant.tent, 1.1) + 0.1,
+      );
+      const tentX = camp.x + Math.cos(tentAngle) * tentDist;
+      const tentZ = camp.z + Math.sin(tentAngle) * tentDist;
       // A tent's base can't drape a drop-off: if the terrain under its ~1.3m
       // footprint falls away more than 1.2m, skip the canvas (the camp keeps
       // its fire). Consume the scale roll REGARDLESS so the rng stream — and
@@ -1433,17 +1482,77 @@ export class MapGenerator {
         tentHi = Math.max(tentHi, ty);
       }
       if (tentHi - tentLo <= 1.2) {
-        addProp('tent_a', tentX, tentZ, Math.atan2(camp.x - tentX, camp.z - tentZ) + Math.PI * 0.5, tentScale);
+        // Face the fire, then break the dead-on symmetry: a real pitch is
+        // never squared to the hearth.
+        const tentYaw = Math.atan2(camp.x - tentX, camp.z - tentZ)
+          + variant.tentYawBias + rr(campRng, -0.4, 0.4);
+        addProp(variant.tent, tentX, tentZ, tentYaw, tentScale);
       }
-      addProp('bedroll', camp.x + Math.cos(tentAngle + 0.9) * 1.9, camp.z + Math.sin(tentAngle + 0.9) * 1.9, ra(rng), 1);
-      addProp('lantern_post', camp.x + Math.cos(theta) * 1.7, camp.z + Math.sin(theta) * 1.7, ra(rng), 1);
+      const bedAngle = tentAngle + variant.bedOffset;
+      const bedDist = rr(campRng, 1.7, 2.4);
+      addProp('bedroll', camp.x + Math.cos(bedAngle) * bedDist, camp.z + Math.sin(bedAngle) * bedDist, ra(rng), 1);
+      const lanternAngle = theta + rr(campRng, -0.5, 0.5);
+      const lanternDist = rr(campRng, 1.6, 2.3);
+      addProp('lantern_post', camp.x + Math.cos(lanternAngle) * lanternDist, camp.z + Math.sin(lanternAngle) * lanternDist, ra(rng), 1);
       const clutter = ri(rng, 1, 3);
       for (let i = 0; i < clutter; i++) {
         // Clutter keeps to the arc opposite the tent so nothing spawns
         // inside the canvas (tent sits at theta + ~2.26 rad).
-        const a = theta + 3.5 + i * 0.85; // arc clear of tent (+2.26) and lantern (+0), wide enough between neighbours
-        const d = rr(rng, 1.8, 2.3);
-        addProp(rng() < 0.5 ? 'crate' : 'barrel', camp.x + Math.cos(a) * d, camp.z + Math.sin(a) * d, ra(rng), rr(rng, 0.9, 1.1));
+        const a = theta + 3.5 + i * 0.85 + rr(campRng, -0.25, 0.25);
+        const d = rr(rng, 1.8, 2.3) + rr(campRng, 0, variant.clutterSpread);
+        const type = rng() < 0.5 ? 'crate' : 'barrel';
+        const yaw = ra(rng);
+        const scale = rr(rng, 0.9, 1.1);
+        // The jitter that breaks the copy-pasted ring can also collide two
+        // barrels: the old fixed 0.85-rad arc guaranteed the gap, the jittered
+        // one does not. Fall back to the un-jittered slot, then give up —
+        // a missing crate beats two crates fused at 1.0 m.
+        const spacing = getPropSpacingRadius(type, scale);
+        const cx = camp.x + Math.cos(a) * d;
+        const cz = camp.z + Math.sin(a) * d;
+        if (clearOf(cx, cz, spacing)) {
+          addProp(type, cx, cz, yaw, scale);
+          continue;
+        }
+        const fx = camp.x + Math.cos(theta + 3.5 + i * 0.85) * 2.05;
+        const fz = camp.z + Math.sin(theta + 3.5 + i * 0.85) * 2.05;
+        if (clearOf(fx, fz, spacing)) addProp(type, fx, fz, yaw, scale);
+      }
+    }
+
+    // 2a. Exposed bedrock CRAGS on the upper flanks of mountain/rocky isles —
+    // big angular outcrops so a tall island reads as a rugged massif, not a
+    // smooth green cone. This was client-only decoration with NO collision
+    // (players walked through the rock); as a registry prop it renders from
+    // island.props and blocks with the compound collider in shared/props.ts.
+    // Its own rng stream keeps every existing placement bit-identical.
+    if (entry.style === 'mountain' || entry.style === 'rocky') {
+      const cragRng = mulberry32((entry.seed ^ 0x7c9a11e5) >>> 0);
+      const isMtn = entry.style === 'mountain';
+      // Density matches the deleted builder: r/12 + 4 on mountains, r/18 + 4
+      // on rocky isles.
+      const cragTarget = Math.round(island.radius / (isMtn ? 12 : 18)) + 4;
+      let cragAttempts = cragTarget * 12;
+      let cragsPlaced = 0;
+      while (cragsPlaced < cragTarget && cragAttempts-- > 0) {
+        const angle = ra(cragRng);
+        // Biased to the upper/mid flanks where bare rock shows through.
+        const distRatio = 0.12 + cragRng() * (isMtn ? 0.42 : 0.5);
+        const pos = getIslandSurfacePoint(island, distRatio, angle, 0);
+        // The old builder only drew above y=9; keep that so crags stay a
+        // highland read and never litter the beach.
+        if (pos.y < 9) continue;
+        // Bigger outcrops the higher up the massif you get.
+        const scale = 0.85 + cragRng() * (isMtn ? 0.85 : 0.5) + Math.min(0.35, pos.y * 0.006);
+        const spacing = getPropSpacingRadius('crag', scale);
+        if (this.nearCave(island, pos.x, pos.z, 2.2 + spacing)) continue;
+        if (this.nearStamp(island, pos.x, pos.z, spacing + 0.6)) continue;
+        if (island.dock && this.nearDockLine(island.dock, pos.x, pos.z, spacing + 1.6)) continue;
+        if (!clearOf(pos.x, pos.z, spacing)) continue;
+        // Long axis across the slope, so the blades read as strata pushed out
+        // of the hillside rather than fins pointing at the player.
+        addProp('crag', pos.x, pos.z, angle + Math.PI * 0.5 + rr(cragRng, -0.45, 0.45), scale);
+        cragsPlaced++;
       }
     }
 

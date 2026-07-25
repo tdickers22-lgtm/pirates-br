@@ -920,9 +920,24 @@ export class CombatFx {
     const type = projectile.type;
 
     if (type === 'bullet') {
+      // THIRD-PERSON muzzle read: a 0.08s pinprick was invisible in play, so a
+      // shot from another pirate registered as a silent tracer. Two stacked
+      // flames (hot core + wider bloom) plus a short point light make the
+      // muzzle pop from across the deck; the first-person flash is separate
+      // (ViewmodelController.triggerMuzzleFlash).
+      const shotgun = projectile.weaponId === 'blunderbuss';
       this.flame.emit(
-        position.x + dirX * 0.3, position.y + dirY * 0.3, position.z + dirZ * 0.3,
-        0, 0, 0, 0.08, 0.5, 1, 0.9, 0, palette.flash, 0, 0, 0,
+        position.x + dirX * 0.28, position.y + dirY * 0.28, position.z + dirZ * 0.28,
+        0, 0, 0, 0.11, shotgun ? 0.85 : 0.6, shotgun ? 1.9 : 1.35, 0.95, 0, 0xfff3d2, 0, 0, 0,
+      );
+      this.flame.emit(
+        position.x + dirX * 0.45, position.y + dirY * 0.45, position.z + dirZ * 0.45,
+        dirX * 1.2, dirY * 1.2, dirZ * 1.2,
+        0.14, shotgun ? 1.25 : 0.9, shotgun ? 2.6 : 1.9, 0.75, 0, palette.flash, 0, 0, 0,
+      );
+      this.lights?.request(
+        position.x + dirX * 0.4, position.y + dirY * 0.4, position.z + dirZ * 0.4,
+        palette.flash, shotgun ? 2.2 : 1.5, 0.1, 22,
       );
       for (let index = 0; index < 2; index++) {
         this.sparks.emit(

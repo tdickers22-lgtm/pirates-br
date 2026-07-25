@@ -55,10 +55,11 @@ moved less than 2.6%) so placement stamps and colliders stay valid.
 | stall.glb | Sagging canopy market stand | |
 | fort.glb | Stone stronghold + carved skull + banner (`TeamTint`) | |
 | tent_a.glb bedroll.glb | Saggy patched canvas, guy ropes | A-frame |
-| tent_b.glb | Lean-to half-shelter: one canted slope on a forked-stake ridge, driftwood windbreak, torn hem, bedroll | 2.43×2.02×4.79, 3.0k tris — **not yet wired** |
-| tent_c.glb | Bell/sail tent: salvaged topsail round a centre pole, rolled-back door flap, smoke vent, peg ring, keg | 2.98×2.49×2.89, 2.5k tris — **not yet wired** |
+| tent_b.glb | Lean-to half-shelter: one canted slope on a forked-stake ridge, driftwood windbreak, torn hem, bedroll | 2.43×2.02×4.79, 3.0k tris — camp variant 2 |
+| tent_c.glb | Bell/sail tent: salvaged topsail round a centre pole, rolled-back door flap, smoke vent, peg ring, keg | 2.98×2.49×2.89, 2.5k tris — camp variant 3 |
 | rowboat.glb | Weathered clinker tender: lapstrake planking, sawn frames, thwarts, sprung plank, shipped + snapped oars, painter coil, tribute offerings in the bilge | 1.12×0.98×2.65, 3.4k tris — **not yet wired** |
 | signal_pyre.glb | Unlit beacon: crib-stacked logs, brush bundles, open tar barrel w/ iron hoops + tar runs, pitch bucket, discarded lid | 2.44×2.13×1.60, 2.5k tris — **not yet wired** |
+| crag.glb | Exposed bedrock outcrop: 3 leaning blades on one ridge line, dark crevices, rubble skirt + buried root | 3.12×4.95×2.00 (origin at the visible ground line, 1.55 below it is root), 1.3k tris. Replaces the deleted client-only crag decoration — now a collidable registry prop (`MapGenerator` scatters it on mountain/rocky flanks above y=9) |
 | rock_arch.glb | Natural rock arch | walk-through |
 | bush / bush_berry / flower_bush / fern_plant / flower_patch / wildflowers .glb | Instanced flora (≤3k tris each) | swaying set |
 

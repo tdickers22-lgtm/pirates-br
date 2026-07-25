@@ -1,10 +1,9 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, IslandTavern, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
+  GameState, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
 import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
-import { PROP_COLLIDERS } from '../../shared/props.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
@@ -31,10 +30,6 @@ import {
   gerstnerHeight,
   WAVE_PARAMS,
   intersectRaySeaRock,
-  toTavernLocal,
-  getTavernWallSegments,
-  getTavernWallBand,
-  getTavernBoundsRadius,
 } from '../../shared/utils/index.js';
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
 import {
@@ -3386,39 +3381,16 @@ export class Match {
    *  Cover that reads as solid has to stop bullets — snipers used to shoot clean
    *  through a 2.6m boulder or a fort wall. Thin capsules (palms, posts, lanterns,
    *  crates) are deliberately NOT occluders: they are see-through-ish dressing and
-   *  blocking on them would feel arbitrary. */
+   *  blocking on them would feel arbitrary.
+   *
+   *  ONE implementation, shared with the cannonball path and with the on-foot
+   *  colliders (PhysicsSystem.firstStructureHit → intersectRayIslandProps over
+   *  SHOT_BLOCKING_PROPS + the shared tavern shell). This used to be a private
+   *  re-derivation with its own prop rule (any collider wider than a metre) and
+   *  its own copy of the tavern ray test, so a cannonball and a musket ball
+   *  disagreed about what counted as cover. */
   private intersectRayIslandStructures(origin: Vec3, direction: Vec3, maxDistance: number): number | null {
-    let best: number | null = null;
-    for (const island of this.state.islands) {
-      // Broadphase: skip islands whose whole footprint is off the ray.
-      const reach = island.radius + 60;
-      const toCenterX = island.position.x - origin.x;
-      const toCenterZ = island.position.z - origin.z;
-      const alongRay = clamp(toCenterX * direction.x + toCenterZ * direction.z, 0, maxDistance);
-      const perpX = toCenterX - direction.x * alongRay;
-      const perpZ = toCenterZ - direction.z * alongRay;
-      if (perpX * perpX + perpZ * perpZ > reach * reach) continue;
-
-      if (island.tavern && rayPassesNear(origin, direction, maxDistance, island.tavern.position, getTavernBoundsRadius(island.tavern))) {
-        const hit = intersectRayTavern(origin, direction, maxDistance, island.tavern);
-        if (hit !== null && (best === null || hit < best)) best = hit;
-      }
-      for (const prop of island.props ?? []) {
-        const collider = PROP_COLLIDERS[prop.type];
-        if (!collider || collider.shape === 'none') continue;
-        const scale = prop.scale ?? 1;
-        const radius = collider.radius * scale;
-        if (radius < PROP_OCCLUDER_MIN_RADIUS) continue; // palms/posts/crates stay shootable-through
-        const baseY = getIslandSurfaceY(island, prop.x, prop.z);
-        const hit = intersectRayVerticalCylinder(
-          origin, direction, maxDistance,
-          prop.x, prop.z, radius * 0.9,
-          baseY, baseY + collider.height * scale,
-        );
-        if (hit !== null && (best === null || hit < best)) best = hit;
-      }
-    }
-    return best;
+    return this.physics.firstStructureHit(origin, direction, maxDistance, this.state.islands);
   }
 
   private findClosestFirearmHit(
@@ -5844,85 +5816,3 @@ export class Match {
 
 }
 
-/** Props with a blocking radius below this stay shoot-through (palms, lantern
- *  posts, barrels, crates, grave markers) — only masses that read as hard cover
- *  stop a bullet. */
-const PROP_OCCLUDER_MIN_RADIUS = 1.0;
-/** Cheap broadphase: does the ray's XZ segment pass within `radius` of a point? */
-function rayPassesNear(origin: Vec3, direction: Vec3, maxDistance: number, point: Vec3, radius: number): boolean {
-  const dx = point.x - origin.x;
-  const dz = point.z - origin.z;
-  const along = clamp(dx * direction.x + dz * direction.z, 0, maxDistance);
-  const px = dx - direction.x * along;
-  const pz = dz - direction.z * along;
-  return px * px + pz * pz <= radius * radius;
-}
-
-/**
- * Ray vs an axis-aligned vertical cylinder (XZ circle × [minY, maxY]).
- * Returns the entry distance, or null when the ray misses / the hit is outside
- * the height band. Used for prop occluders — cheap and stable at grazing angles.
- */
-function intersectRayVerticalCylinder(
-  origin: Vec3, direction: Vec3, maxDistance: number,
-  cx: number, cz: number, radius: number,
-  minY: number, maxY: number,
-): number | null {
-  const ox = origin.x - cx;
-  const oz = origin.z - cz;
-  const a = direction.x * direction.x + direction.z * direction.z;
-  if (a < 1e-8) return null; // straight up/down: never blocked by a prop side
-  const b = 2 * (ox * direction.x + oz * direction.z);
-  const c = ox * ox + oz * oz - radius * radius;
-  const disc = b * b - 4 * a * c;
-  if (disc < 0) return null;
-  const sq = Math.sqrt(disc);
-  for (const t of [(-b - sq) / (2 * a), (-b + sq) / (2 * a)]) {
-    if (t < 0 || t > maxDistance) continue;
-    const y = origin.y + direction.y * t;
-    if (y >= minY && y <= maxY) return t;
-  }
-  return null;
-}
-
-/**
- * Ray vs the tavern shell — the wall AABBs from getTavernWallSegments (the same
- * SINGLE TRUTH PhysicsSystem walks into), so the building is as solid to a musket
- * ball as it is to a boot. Bullets used to pass straight through the only
- * structure on the island a player can stand inside; the doorway gap stays open.
- */
-function intersectRayTavern(origin: Vec3, direction: Vec3, maxDistance: number, tavern: IslandTavern): number | null {
-  const local = toTavernLocal(tavern, origin.x, origin.z);
-  const cos = Math.cos(tavern.rotation);
-  const sin = Math.sin(tavern.rotation);
-  const dx = direction.x * cos - direction.z * sin;
-  const dz = direction.x * sin + direction.z * cos;
-  const band = getTavernWallBand(tavern);
-
-  let best: number | null = null;
-  for (const seg of getTavernWallSegments(tavern)) {
-    // 2D slab test in tavern-local space, then gate on the wall's height band.
-    let tEnter = 0;
-    let tExit = maxDistance;
-    let missed = false;
-    for (const axis of [
-      { o: local.x, d: dx, min: seg.minX, max: seg.maxX },
-      { o: local.z, d: dz, min: seg.minZ, max: seg.maxZ },
-    ]) {
-      if (Math.abs(axis.d) < 1e-8) {
-        if (axis.o < axis.min || axis.o > axis.max) { missed = true; break; }
-        continue;
-      }
-      const t0 = (axis.min - axis.o) / axis.d;
-      const t1 = (axis.max - axis.o) / axis.d;
-      tEnter = Math.max(tEnter, Math.min(t0, t1));
-      tExit = Math.min(tExit, Math.max(t0, t1));
-      if (tEnter > tExit) { missed = true; break; }
-    }
-    if (missed || tEnter > maxDistance) continue;
-    const y = origin.y + direction.y * tEnter;
-    if (y < band.minY || y > band.maxY) continue;
-    if (best === null || tEnter < best) best = tEnter;
-  }
-  return best;
-}

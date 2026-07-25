@@ -31,6 +31,70 @@ export function applyPlayerTeamColor(mesh: THREE.Group, color: number) {
   userData.teamColor = color;
 }
 
+/** Shared first-person palette so hands, sleeves and cuffs match the avatar. */
+export const VIEW_HAND_PALETTE = {
+  skin: 0xd0a074,
+  skinShade: 0xb98a5f,
+  coat: 0x5e3626,
+  cuff: 0xccbfa4,
+} as const;
+
+/**
+ * A first-person forearm + gripping fist, built to be parented into the
+ * viewmodel roots so it inherits every bob / recoil / swing pose for free.
+ *
+ * Local frame: the grip point is the ORIGIN, the fingers curl under it, and the
+ * forearm runs back toward the camera along +Z, leaving frame behind the wrist.
+ * Kept deliberately slim — an oversized forearm reads as a red log across the
+ * lower third rather than an arm.
+ *
+ * @param side −1 = left hand, +1 = right hand (mirrors the thumb).
+ */
+export function makeViewHand(side: 1 | -1): THREE.Group {
+  const group = new THREE.Group();
+  const skinMat = new THREE.MeshStandardMaterial({ color: VIEW_HAND_PALETTE.skin, roughness: 0.86 });
+  // Fingers are a shade darker so the fist doesn't read as one skin-coloured blob.
+  const fingerMat = new THREE.MeshStandardMaterial({ color: VIEW_HAND_PALETTE.skinShade, roughness: 0.88 });
+  const coatMat = new THREE.MeshStandardMaterial({ color: VIEW_HAND_PALETTE.coat, roughness: 0.94 });
+  const cuffMat = new THREE.MeshStandardMaterial({ color: VIEW_HAND_PALETTE.cuff, roughness: 0.9 });
+
+  // Back of the hand, wrapped over whatever sits at the origin.
+  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.072, 0.05, 0.092), skinMat);
+  palm.position.set(0, 0.036, 0.008);
+  group.add(palm);
+
+  // Four curled fingers closing under the grip.
+  for (let f = 0; f < 4; f++) {
+    const finger = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.044, 0.019), fingerMat);
+    finger.position.set(0.001, -0.004, 0.036 - f * 0.023);
+    finger.rotation.x = -0.3 + f * 0.05;
+    group.add(finger);
+    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.024, 0.022, 0.024), fingerMat);
+    tip.position.set(0.001, -0.028, 0.028 - f * 0.023);
+    group.add(tip);
+  }
+
+  // Thumb laid over the fingers on the inboard side.
+  const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.026, 0.06), skinMat);
+  thumb.position.set(side * -0.04, 0.016, 0.006);
+  thumb.rotation.z = side * 0.5;
+  group.add(thumb);
+
+  // Cuff + sleeve running back out of frame behind the wrist.
+  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.045, 0.038, 10), cuffMat);
+  cuff.rotation.x = Math.PI * 0.5;
+  cuff.position.set(0, 0.032, 0.082);
+  group.add(cuff);
+
+  const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.055, 0.32, 10), coatMat);
+  forearm.rotation.x = Math.PI * 0.5;
+  forearm.position.set(0, 0.026, 0.25);
+  group.add(forearm);
+
+  group.name = side < 0 ? 'view-hand-left' : 'view-hand-right';
+  return group;
+}
+
 export function makePlayerMesh(
   color: number,
   variant: 'pirate' | 'skeleton' = 'pirate',
@@ -238,6 +302,13 @@ export function makePlayerMesh(
   group.add(head);
 
   if (isSkeleton) {
+    // Cervical stack: without it the skull floated a clear 0.2m above the
+    // ribcage and read as decapitated-but-hovering at close range.
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, 0.26, 6), boneDarkMat);
+    neck.position.set(0, 1.63, 0);
+    neck.castShadow = true;
+    group.add(neck);
+
     const spine = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.56, 6), boneDarkMat);
     spine.position.set(0, 1.22, -0.02);
     spine.castShadow = true;

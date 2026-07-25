@@ -10,29 +10,76 @@ export function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.
   const darkMat = new THREE.MeshStandardMaterial({ color: 0x26201a, roughness: 0.95 });
 
   if (weaponId === 'cutlass') {
-    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.9, 0.03), steelMat);
-    blade.position.set(0, 0.5, 0);
-    blade.castShadow = true;
-    group.add(blade);
+    // Real steel, not a white slab: darker base metal with a bright ground
+    // edge and a dark fuller down the flat, built as three slightly swept
+    // segments so the blade curves like a cutlass instead of reading as a
+    // featureless plank.
+    const bladeMat = new THREE.MeshStandardMaterial({ color: 0x8e9aa6, roughness: 0.34, metalness: 0.88 });
+    const edgeMat = new THREE.MeshStandardMaterial({
+      color: 0xe4ecf2, roughness: 0.16, metalness: 0.95, emissive: 0x22303a, emissiveIntensity: 0.35,
+    });
+    const fullerMat = new THREE.MeshStandardMaterial({ color: 0x59636d, roughness: 0.55, metalness: 0.7 });
 
-    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.16, 5), steelMat);
-    tip.position.set(0, 1.02, 0);
+    const bladeRoot = new THREE.Group();
+    bladeRoot.position.y = 0.08;
+    group.add(bladeRoot);
+    const segments = [
+      { y: 0.15, len: 0.32, w: 0.058, tilt: 0.0, x: 0 },
+      { y: 0.46, len: 0.32, w: 0.052, tilt: 0.05, x: 0.012 },
+      { y: 0.76, len: 0.3, w: 0.044, tilt: 0.11, x: 0.038 },
+    ];
+    for (const seg of segments) {
+      const part = new THREE.Mesh(new THREE.BoxGeometry(seg.w, seg.len, 0.022), bladeMat);
+      part.position.set(seg.x, seg.y, 0);
+      part.rotation.z = -seg.tilt;
+      part.castShadow = true;
+      bladeRoot.add(part);
+      // Ground edge strip along the cutting side.
+      const edge = new THREE.Mesh(new THREE.BoxGeometry(0.012, seg.len, 0.026), edgeMat);
+      edge.position.set(seg.x + seg.w * 0.46, seg.y, 0);
+      edge.rotation.z = -seg.tilt;
+      bladeRoot.add(edge);
+      // Fuller groove down the flat.
+      const fuller = new THREE.Mesh(new THREE.BoxGeometry(0.016, seg.len * 0.92, 0.03), fullerMat);
+      fuller.position.set(seg.x - seg.w * 0.1, seg.y, 0);
+      fuller.rotation.z = -seg.tilt;
+      bladeRoot.add(fuller);
+    }
+
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.032, 0.16, 5), edgeMat);
+    tip.position.set(0.062, 0.98, 0);
+    tip.rotation.z = -0.14;
     tip.castShadow = true;
-    group.add(tip);
+    bladeRoot.add(tip);
 
-    const guard = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.025, 6, 12), brassMat);
-    guard.rotation.x = Math.PI * 0.5;
-    guard.position.y = 0.06;
+    // Knuckle bow, not a giant gold donut: a half torus sweeping from the
+    // guard down to the pommel on the knuckle side.
+    const guard = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.028, 0.05), brassMat);
+    guard.position.y = 0.055;
     guard.castShadow = true;
     group.add(guard);
 
-    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 0.28, 8), darkMat);
-    grip.position.y = -0.13;
+    const knuckleBow = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.014, 6, 14, Math.PI * 1.05), brassMat);
+    knuckleBow.rotation.y = Math.PI * 0.5;
+    knuckleBow.rotation.z = -Math.PI * 0.5;
+    knuckleBow.position.set(-0.06, -0.09, 0);
+    knuckleBow.castShadow = true;
+    group.add(knuckleBow);
+
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.038, 0.26, 8), darkMat);
+    grip.position.y = -0.11;
     grip.castShadow = true;
     group.add(grip);
 
-    const pommel = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), brassMat);
-    pommel.position.y = -0.3;
+    for (const y of [-0.04, -0.11, -0.18]) {
+      const wrap = new THREE.Mesh(new THREE.TorusGeometry(0.033, 0.006, 5, 10), brassMat);
+      wrap.rotation.x = Math.PI * 0.5;
+      wrap.position.y = y;
+      group.add(wrap);
+    }
+
+    const pommel = new THREE.Mesh(new THREE.SphereGeometry(0.038, 8, 8), brassMat);
+    pommel.position.y = -0.26;
     pommel.castShadow = true;
     group.add(pommel);
     return group;

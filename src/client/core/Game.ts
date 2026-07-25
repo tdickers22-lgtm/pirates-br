@@ -24,7 +24,10 @@ import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { HudController, type HudView } from '../ui/HudController.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
-import { PlayerAnimator, type PlayerAnimatorView } from '../rendering/PlayerAnimator.js';
+import {
+  CORPSE_FADE_START, CORPSE_LIFETIME, PlayerAnimator,
+  type CorpseState, type DeathCause, type PlayerAnimatorView,
+} from '../rendering/PlayerAnimator.js';
 import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelController.js';
 import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
 import { EnvironmentFx, ZERO_SCALE_MAT4, type EnvironmentFxView } from '../rendering/EnvironmentFx.js';
@@ -36,6 +39,10 @@ import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
+/** Skeleton remains linger (and sink/fade) instead of popping after 1.5s. */
+const SKELETON_CORPSE_LIFETIME = 6.5;
+/** A dropped weapon tumbles, lands and fades over this many seconds. */
+const DROPPED_WEAPON_LIFETIME = 6;
 
 function installGeometryNaNGuard() {
   const proto = THREE.BufferGeometry.prototype as THREE.BufferGeometry & {
@@ -303,6 +310,30 @@ export class Game {
   private tavernDoors: Array<{ islandId: string; node: THREE.Object3D; open: boolean }> = [];
   /** bucketFilled edge-detector per player — bail FX fire on the transitions. */
   private readonly prevBucketFilled = new Map<string, boolean>();
+  // ── Death presentation ────────────────────────────────────────────────────
+  /** Per-player health/state/fall history driving flinches and death causes. */
+  private readonly prevPlayerHealth = new Map<string, number>();
+  private readonly prevPlayerStateById = new Map<string, Player['state']>();
+  private readonly prevPlayerFallSpeed = new Map<string, number>();
+  /** Per-ship sail-height history — drives the halyard haul animation. */
+  private readonly prevShipSailHeight = new Map<string, number>();
+  /** kill_event details, consumed by the next death edge for that victim. */
+  private readonly deathCauseHints = new Map<string, { killerId: string | null; headshot: boolean }>();
+  /** Weapons flung out of dead hands, tumbling until they fade. */
+  private readonly droppedWeapons: Array<{
+    mesh: THREE.Group;
+    velocity: THREE.Vector3;
+    spin: THREE.Vector3;
+    age: number;
+    restY: number;
+  }> = [];
+  /** Where the local pirate died — the death camera stays there, not with the
+   *  respawn-teleported server position. */
+  private localDeathAnchor: { pos: THREE.Vector3; cause: DeathCause; tilt: number } | null = null;
+  /** 0→1 ease into the death camera (drop to the ground + roll + desaturate). */
+  private localDeathBlend = 0;
+  /** Greyed-out vignette overlay owned by the death camera (built lazily). */
+  private deathOverlay: HTMLDivElement | null = null;
   private prevCutlassSwingProgress = 0;
   /** 0..1 FOV punch on the cutlass dash, decays fast (rush feel). */
   private cutlassDashKick = 0;
@@ -867,12 +898,22 @@ export class Game {
     this.ui.crosshair.className = '';
     this.ui.crosshair.style.removeProperty('--shotgun-spread');
     this.ui.islandBanner.classList.remove('visible');
-    this.viewmodel.localViewWeaponRoot.visible = false;
-    this.disposeSceneObject(this.viewmodel.localViewWeaponRoot);
-    this.viewmodel.localViewWeaponRoot.clear();
-    this.viewmodel.localViewPocketRoot.visible = false;
-    this.disposeSceneObject(this.viewmodel.localViewPocketRoot);
-    this.viewmodel.localViewPocketRoot.clear();
+    // Drops the held meshes but keeps the muzzle-flash rig and the first-person
+    // hands, which are permanent children of the viewmodel roots (disposing the
+    // whole root used to kill every muzzle flash for the rest of the session).
+    this.viewmodel.resetForMatch();
+    for (const drop of this.droppedWeapons) {
+      this.renderer.scene.remove(drop.mesh);
+      this.disposeSceneObject(drop.mesh);
+    }
+    this.droppedWeapons.length = 0;
+    this.prevPlayerHealth.clear();
+    this.prevPlayerStateById.clear();
+    this.prevPlayerFallSpeed.clear();
+    this.deathCauseHints.clear();
+    this.localDeathAnchor = null;
+    this.localDeathBlend = 0;
+    this.updateDeathOverlay(0);
 
     for (const indicator of this.floatingDamageIndicators) {
       indicator.element.remove();
@@ -1242,6 +1283,7 @@ export class Game {
 
     this.network.onKillEvent = (payload) => {
       const event = payload as {
+        victimId?: string;
         killerId?: string | null;
         victimName?: string;
         killerName?: string | null;
@@ -1255,6 +1297,18 @@ export class Game {
         killerStreak?: number;
         streakReward?: { type?: string; label?: string } | null;
       };
+      // Stash the kill details for the death-animation edge in syncPlayers —
+      // it picks the crumple (headshot goes limp, a blade kill spins) from here.
+      if (event.victimId && !event.shipSink) {
+        this.deathCauseHints.set(event.victimId, {
+          killerId: event.killerId ?? null,
+          headshot: !!event.headshot,
+        });
+      }
+      // YOU dropped someone: the dry confirm stab on top of the kill feed.
+      if (event.killerId && event.killerId === this.localPlayerId && !event.shipSink) {
+        this.audio.playKillConfirm();
+      }
       if (event.killerName && event.victimName) {
         const details = [
           event.headshot ? 'headshot' : '',
@@ -2345,6 +2399,7 @@ export class Game {
       this.slowSceneTimer = 0.1;
     }
     this.syncPlayers(dt);
+    this.updateDroppedWeapons(dt);
     this.syncProjectiles(dt);
     this.updateCamera();
     this.updateWaterEnvironment();
@@ -2683,24 +2738,89 @@ export class Game {
           : player.rotation.x;
       const isSkeleton = mesh.userData.animation?.variant === 'skeleton';
       const lastState = mesh.userData.lastState as Player['state'] | undefined;
-      if (isSkeleton && lastState !== 'eliminated' && player.state === 'eliminated') {
+      const isDead = player.state === 'eliminated' || player.state === 'respawning';
+      const wasDead = lastState === 'eliminated' || lastState === 'respawning';
+      if (isSkeleton && !wasDead && isDead) {
         mesh.userData.deathTimer = 0;
         mesh.userData.deathSpin = Math.random() > 0.5 ? 1 : -1;
       }
+      // ── Pirate death: keep the body in the world and CRUMPLE it. The mesh
+      // used to vanish the same frame the server flipped the state; now a
+      // corpse record pins it where it fell, plays a staged collapse and fades
+      // out ~8s later (see PlayerAnimator.animateCorpse).
+      if (!isSkeleton) {
+        const corpse = mesh.userData.corpse as CorpseState | undefined;
+        if (isDead && !corpse) {
+          this.beginPirateDeath(mesh, player, isLocal);
+        } else if (!isDead && corpse) {
+          this.clearPirateDeath(mesh);
+        }
+      }
       mesh.userData.lastState = player.state;
-      if (isSkeleton && player.state === 'eliminated') {
-        mesh.userData.deathTimer = Math.min((mesh.userData.deathTimer ?? 0) + dt, 1.8);
+      if (isSkeleton && isDead) {
+        mesh.userData.deathTimer = Math.min((mesh.userData.deathTimer ?? 0) + dt, SKELETON_CORPSE_LIFETIME);
+      }
+      this.updatePlayerFlinch(mesh, player, isLocal);
+      // Station work signals the animator reads: a decaying cannon-recoil kick
+      // and whether this ship's sail is actually being hauled right now.
+      mesh.userData.cannonRecoil = Math.max(0, (mesh.userData.cannonRecoil ?? 0) - dt * 3.4);
+      if (player.atSails && ship) {
+        const prevSail = this.prevShipSailHeight.get(ship.id);
+        this.prevShipSailHeight.set(ship.id, ship.sailHeight);
+        const hauling = prevSail !== undefined && Math.abs(ship.sailHeight - prevSail) > 0.0004;
+        mesh.userData.sailWork = hauling
+          ? 1
+          : Math.max(0, (mesh.userData.sailWork ?? 0) - dt * 2.2);
+      } else {
+        mesh.userData.sailWork = 0;
       }
 
-      const skeletonDeathVisible = isSkeleton && player.state === 'eliminated' && (mesh.userData.deathTimer ?? 0) < 1.55;
-      mesh.visible = !isLocal && !useLocalSwimViewmodel && (skeletonDeathVisible || (player.state !== 'eliminated' && player.state !== 'respawning'));
+      // Skeleton remains linger and sink/fade instead of popping out of
+      // existence 1.5s after the (good) bone-scatter kill.
+      const skeletonDeathTime = (mesh.userData.deathTimer ?? 0) as number;
+      const skeletonDeathVisible = isSkeleton && isDead && skeletonDeathTime < SKELETON_CORPSE_LIFETIME;
+      const corpseState = mesh.userData.corpse as CorpseState | undefined;
+      const pirateCorpseVisible = !!corpseState && corpseState.t < CORPSE_LIFETIME;
+      mesh.visible = !isLocal && !useLocalSwimViewmodel
+        && (skeletonDeathVisible || pirateCorpseVisible || !isDead);
+      if (skeletonDeathVisible) {
+        this.applyCorpseFade(mesh, skeletonDeathTime, SKELETON_CORPSE_LIFETIME - 1.6, SKELETON_CORPSE_LIFETIME);
+      } else if (pirateCorpseVisible) {
+        this.applyCorpseFade(mesh, corpseState!.t, CORPSE_FADE_START, CORPSE_LIFETIME);
+      }
       if (!mesh.userData.initialized) {
         mesh.position.copy(targetPos);
         mesh.rotation.y = targetYaw;
         mesh.rotation.x = 0;
         mesh.rotation.z = 0;
         mesh.userData.initialized = true;
+      } else if (corpseState) {
+        // A corpse never slides toward the server's respawn position — the
+        // animator owns its transform from the frame it dropped. Bodies that
+        // fell on a deck ride the hull.
+        if (corpseState.shipId) {
+          const corpseShip = this.shipsById.get(corpseState.shipId);
+          if (corpseShip) {
+            corpseState.basePos.copy(this.getShipWorldPoint(
+              corpseShip,
+              corpseState.shipLocalX ?? 0,
+              corpseState.shipLocalZ ?? 0,
+              corpseState.shipLocalY ?? 0,
+            ));
+            corpseState.baseYaw = (corpseState.shipYaw ?? 0) + corpseShip.rotation;
+          }
+        }
+        this.anim.animateCorpse(mesh, corpseState, dt);
+        this.viewmodel.syncHeldWeapon(mesh, player);
+        continue;
       } else {
+        if (player.state === 'swimming') {
+          // The prone swim pose extends the body FORWARD of its foot pivot —
+          // pull the pivot back along the facing so the torso still sits over
+          // the tracked position instead of a body-length ahead of it.
+          targetPos.x -= Math.sin(targetYaw) * 0.62;
+          targetPos.z -= Math.cos(targetYaw) * 0.62;
+        }
         if (mesh.position.distanceToSquared(targetPos) > (isLocal ? 20 * 20 : 34 * 34)) {
           mesh.position.copy(targetPos);
         } else {
@@ -2709,18 +2829,14 @@ export class Game {
         mesh.rotation.y += angleWrap(targetYaw - mesh.rotation.y) * (isLocal ? 1 : rotationAlpha);
       }
 
-      // Downed pirates read prone at a glance: tipped onto their side, sunk to
-      // ground level, with a slow pained sway while they crawl/bleed out.
+      // Downed pirates read prone at a glance: face-DOWN on the deck (not
+      // tipped on their side playing the standing walk cycle) and sunk to
+      // ground level, with the crawl handled by animatePlayerMesh.
       const downedLean = mesh.userData.downedLean as number | undefined ?? 0;
       const downedTarget = player.state === 'downed' ? 1 : 0;
-      const nextLean = downedLean + (downedTarget - downedLean) * Math.min(1, dt * 6);
+      const nextLean = downedLean + (downedTarget - downedLean) * Math.min(1, dt * 4);
       mesh.userData.downedLean = nextLean;
-      if (nextLean > 0.002) {
-        mesh.rotation.z = (Math.PI * 0.42 + Math.sin(this.ocean.getTime() * 1.7) * 0.05) * nextLean;
-        mesh.position.y -= 0.55 * nextLean;
-      } else if (mesh.rotation.z !== 0 && player.state !== 'eliminated') {
-        mesh.rotation.z = 0;
-      }
+      if (nextLean > 0.002) mesh.position.y -= 0.14 * nextLean;
 
       const healthBar = mesh.userData.healthBar as {
         root: THREE.Group;
@@ -2779,15 +2895,23 @@ export class Game {
       if (leftArmPivot) leftArmPivot.visible = !hideForLocalAim;
 
       if (player.state === 'swimming') {
-        const swimBodyPitch = THREE.MathUtils.clamp(-Math.PI * 0.56 + player.rotation.y * 0.7, -1.18, -0.18);
-        mesh.rotation.x += (swimBodyPitch - mesh.rotation.x) * Math.min(1, dt * 14);
+        // PRONE swimmer: +rotation.x pitches the body face-DOWN with the head
+        // leading, which is what a front crawl looks like. The old negative
+        // pitch laid the pirate on his back, floating feet-first like a corpse.
+        const swimBodyPitch = THREE.MathUtils.clamp(Math.PI * 0.4 - player.rotation.y * 0.45, 0.75, 1.5);
+        mesh.rotation.x += (swimBodyPitch - mesh.rotation.x) * Math.min(1, dt * 10);
         mesh.rotation.z += (0 - mesh.rotation.z) * Math.min(1, dt * 10);
       } else if (skeletonDeathVisible) {
-        const deathProgress = Math.min(1, (mesh.userData.deathTimer ?? 0) / 0.75);
         const deathSpin = mesh.userData.deathSpin ?? 1;
         mesh.rotation.x += (-0.95 - mesh.rotation.x) * Math.min(1, dt * 12);
         mesh.rotation.z += (deathSpin * 0.85 - mesh.rotation.z) * Math.min(1, dt * 10);
-        mesh.position.y -= deathProgress * dt * 0.35;
+        // Sink for the first second and a half only, then the pile rests.
+        if (skeletonDeathTime < 1.5) mesh.position.y -= dt * 0.3;
+      } else if (nextLean > 0.002) {
+        // Downed: rolled face-down, with a faint pained sway.
+        const proneTarget = Math.PI * 0.46 * nextLean;
+        mesh.rotation.x += (proneTarget - mesh.rotation.x) * Math.min(1, dt * 8);
+        mesh.rotation.z = Math.sin(this.ocean.getTime() * 1.7) * 0.06 * nextLean;
       } else {
         mesh.rotation.x += (0 - mesh.rotation.x) * Math.min(1, dt * 12);
         mesh.rotation.z += (0 - mesh.rotation.z) * Math.min(1, dt * 10);
@@ -2799,6 +2923,203 @@ export class Game {
         this.anim.animatePlayerMesh(mesh, player, ship, dt);
       }
       this.viewmodel.syncHeldWeapon(mesh, player);
+    }
+  }
+
+  /**
+   * Death edge for a (non-skeleton) pirate: pin the body where it fell, pick a
+   * crumple flavour from what we know about the kill, fling the held weapon out
+   * of the dead hand, and — if this was YOU — start the death camera.
+   */
+  private beginPirateDeath(mesh: THREE.Group, player: Player, isLocal: boolean) {
+    const cause = this.resolveDeathCause(player);
+    const side = Math.random() > 0.5 ? 1 : -1;
+    const corpse: CorpseState = {
+      t: 0,
+      cause,
+      side,
+      spin: cause === 'cutlass' ? side * (1.1 + Math.random() * 0.6) : (Math.random() - 0.5) * 0.4,
+      basePos: mesh.position.clone(),
+      baseYaw: mesh.rotation.y,
+      weaponDropped: false,
+    };
+    // Dying aboard a ship anchors the corpse to the HULL, not to a world point:
+    // an 8s corpse on a sailing deck would otherwise be left behind in mid-air.
+    const deathShip = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+    if (deathShip) {
+      const local = toShipLocalPoint(mesh.position, deathShip);
+      corpse.shipId = deathShip.id;
+      corpse.shipLocalX = local.x;
+      corpse.shipLocalZ = local.z;
+      corpse.shipLocalY = mesh.position.y - deathShip.position.y;
+      corpse.shipYaw = mesh.rotation.y - deathShip.rotation;
+    }
+    mesh.userData.corpse = corpse;
+    mesh.userData.flinch = undefined;
+    // A corpse carries no floating UI.
+    const healthBar = mesh.userData.healthBar as { root: THREE.Group } | undefined;
+    if (healthBar) healthBar.root.visible = false;
+    const plate = mesh.getObjectByName('nameplate');
+    if (plate) plate.visible = false;
+    this.dropHeldWeapon(mesh, corpse);
+    if (isLocal) {
+      this.localDeathAnchor = {
+        pos: mesh.position.clone(),
+        cause,
+        tilt: side * (0.42 + Math.random() * 0.2),
+      };
+      this.localDeathBlend = 0;
+      this.audio.playDeathSting();
+    }
+  }
+
+  /** Respawn / revive: wipe the corpse record and restore the body's materials. */
+  private clearPirateDeath(mesh: THREE.Group) {
+    mesh.userData.corpse = undefined;
+    mesh.userData.initialized = false;
+    mesh.rotation.set(0, mesh.rotation.y, 0);
+    this.setMeshOpacity(mesh, 1);
+  }
+
+  /**
+   * Infer what killed a pirate from the last snapshot we have of them plus the
+   * kill_event that just landed. No new protocol: headshots come from the
+   * event, blades from the killer's active weapon, blasts from the knockback
+   * they are carrying, drowning/falls from their own motion.
+   */
+  private resolveDeathCause(player: Player): DeathCause {
+    const hint = this.deathCauseHints.get(player.id);
+    this.deathCauseHints.delete(player.id);
+    if (hint?.headshot) return 'headshot';
+    if (player.state === 'swimming' || this.prevPlayerStateById.get(player.id) === 'swimming') return 'drown';
+    const knockback = Math.hypot(
+      player.knockbackVelocity?.x ?? 0,
+      player.knockbackVelocity?.y ?? 0,
+      player.knockbackVelocity?.z ?? 0,
+    );
+    if (knockback > 5.5) return 'explosion';
+    if (hint?.killerId) {
+      const killer = this.playersById.get(hint.killerId);
+      const killerWeapon = killer?.weapons[killer.activeSlot]?.weaponId;
+      if (killerWeapon === 'cutlass') return 'cutlass';
+      if (killerWeapon) return 'shot';
+    }
+    if ((this.prevPlayerFallSpeed.get(player.id) ?? 0) > 11) return 'fall';
+    return hint ? 'shot' : 'generic';
+  }
+
+  /** Fling the dead pirate's weapon out of their hand and let it tumble away. */
+  private dropHeldWeapon(mesh: THREE.Group, corpse: CorpseState) {
+    if (corpse.weaponDropped) return;
+    corpse.weaponDropped = true;
+    const hand = mesh.getObjectByName('right-hand');
+    const weapon = hand?.getObjectByName('held-weapon') as THREE.Group | null;
+    if (!weapon) return;
+    weapon.getWorldPosition(this.tempRenderPos);
+    const worldQuat = new THREE.Quaternion();
+    weapon.getWorldQuaternion(worldQuat);
+    weapon.removeFromParent();
+    weapon.position.copy(this.tempRenderPos);
+    weapon.quaternion.copy(worldQuat);
+    weapon.scale.setScalar(1);
+    this.renderer.scene.add(weapon);
+    const angle = Math.random() * Math.PI * 2;
+    this.droppedWeapons.push({
+      mesh: weapon,
+      velocity: new THREE.Vector3(Math.cos(angle) * 1.6, 1.4, Math.sin(angle) * 1.6),
+      spin: new THREE.Vector3((Math.random() - 0.5) * 9, (Math.random() - 0.5) * 9, (Math.random() - 0.5) * 9),
+      age: 0,
+      restY: this.tempRenderPos.y - 1.0,
+    });
+  }
+
+  /** Ballistic tumble → rest → fade for weapons knocked out of dead hands. */
+  private updateDroppedWeapons(dt: number) {
+    for (let index = this.droppedWeapons.length - 1; index >= 0; index--) {
+      const drop = this.droppedWeapons[index];
+      drop.age += dt;
+      if (drop.age >= DROPPED_WEAPON_LIFETIME) {
+        this.renderer.scene.remove(drop.mesh);
+        this.disposeSceneObject(drop.mesh);
+        this.droppedWeapons.splice(index, 1);
+        continue;
+      }
+      if (drop.mesh.position.y > drop.restY) {
+        drop.velocity.y -= 16 * dt;
+        drop.mesh.position.addScaledVector(drop.velocity, dt);
+        drop.mesh.rotation.x += drop.spin.x * dt;
+        drop.mesh.rotation.y += drop.spin.y * dt;
+        drop.mesh.rotation.z += drop.spin.z * dt;
+        if (drop.mesh.position.y <= drop.restY) {
+          // Landed: flop flat and stop.
+          drop.mesh.position.y = drop.restY;
+          drop.mesh.rotation.set(Math.PI * 0.5, drop.mesh.rotation.y, 0);
+          drop.spin.set(0, 0, 0);
+          drop.velocity.set(0, 0, 0);
+        }
+      }
+      const fadeStart = DROPPED_WEAPON_LIFETIME - 1.4;
+      if (drop.age > fadeStart) {
+        this.setMeshOpacity(drop.mesh, 1 - (drop.age - fadeStart) / 1.4);
+      }
+    }
+  }
+
+  /** Corpse dissolve: sink a touch, then fade the whole body out. */
+  private applyCorpseFade(mesh: THREE.Group, age: number, fadeStart: number, lifetime: number) {
+    if (age <= fadeStart) {
+      if (mesh.userData.corpseFaded) {
+        this.setMeshOpacity(mesh, 1);
+        mesh.userData.corpseFaded = false;
+      }
+      return;
+    }
+    const k = THREE.MathUtils.clamp((age - fadeStart) / Math.max(0.001, lifetime - fadeStart), 0, 1);
+    mesh.userData.corpseFaded = true;
+    mesh.position.y -= k * k * 0.004;
+    this.setMeshOpacity(mesh, 1 - k);
+  }
+
+  /** Player meshes own their materials (makePlayerMesh builds a fresh set per
+   *  avatar), so fading one body never touches another's. */
+  private setMeshOpacity(root: THREE.Object3D, opacity: number) {
+    const clamped = THREE.MathUtils.clamp(opacity, 0, 1);
+    root.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (clamped >= 1 && !material.transparent) continue;
+        material.transparent = clamped < 1;
+        material.opacity = clamped;
+        material.depthWrite = clamped > 0.85;
+      }
+    });
+  }
+
+  /**
+   * Seed a directional flinch whenever a pirate loses health, so bodies react
+   * to being shot instead of only their health bar moving. Also tracks the
+   * per-player fall speed used to classify fall deaths.
+   */
+  private updatePlayerFlinch(mesh: THREE.Group, player: Player, isLocal: boolean) {
+    const prevHealth = this.prevPlayerHealth.get(player.id);
+    this.prevPlayerHealth.set(player.id, player.health);
+    this.prevPlayerStateById.set(player.id, player.state);
+    const fall = Math.max(0, -(player.velocity.y ?? 0));
+    this.prevPlayerFallSpeed.set(
+      player.id,
+      fall > 1 ? fall : (this.prevPlayerFallSpeed.get(player.id) ?? 0) * 0.9,
+    );
+    if (prevHealth === undefined) return;
+    const drop = prevHealth - player.health;
+    if (drop < 5 || player.state === 'eliminated' || player.state === 'respawning') return;
+    mesh.userData.flinch = {
+      t: 0,
+      mag: THREE.MathUtils.clamp(drop / 40, 0.3, 1),
+      yaw: (Math.random() - 0.5) * 0.8,
+    };
+    if (isLocal) {
+      this.cameraShake = Math.min(1, this.cameraShake + THREE.MathUtils.clamp(drop / 90, 0.05, 0.3));
     }
   }
 
@@ -2843,6 +3164,11 @@ export class Game {
         mesh.userData.projectileType = projectile.type;
         mesh.userData.showImpact = projectile.showImpact;
         this.combatFx.emitLaunch(projectile, this.renderer.camera.position, projectile.ownerId === this.localPlayerId);
+        // The gunner who pulled the lanyard flinches with the piece.
+        if (projectile.ownerId && projectile.type !== 'bullet') {
+          const gunnerMesh = this.playerMeshes.get(projectile.ownerId);
+          if (gunnerMesh) gunnerMesh.userData.cannonRecoil = 1;
+        }
         // Own-ship broadside just fired — brief FOV pop + a touch of shake.
         if (projectile.ownerShipId && projectile.ownerShipId === this.localShipId && projectile.type !== 'bullet') {
           this.cameraShakeCannon = 1;
@@ -3141,16 +3467,40 @@ export class Game {
         : Math.sin(t * 10 + animal.position.x * 0.07) * 0.01;
 
       const parts = mesh.userData.parts as Record<string, THREE.Object3D | undefined> | undefined;
+      // Gate the gait on ACTUAL movement. Riding the global clock made standing
+      // chickens flap at 11Hz and idle pigs march on the spot; a grounded gull
+      // is not a hovering one. Derived from the position delta because the
+      // wildlife snapshot carries no velocity.
+      const prevPos = mesh.userData.prevPos as { x: number; z: number } | undefined;
+      const stepped = prevPos
+        ? Math.hypot(animal.position.x - prevPos.x, animal.position.z - prevPos.z) / Math.max(dt, 0.001)
+        : 0;
+      mesh.userData.prevPos = { x: animal.position.x, z: animal.position.z };
+      const speedEma = ((mesh.userData.speedEma as number | undefined) ?? 0) * 0.82 + stepped * 0.18;
+      mesh.userData.speedEma = speedEma;
+      // A gull on the wing keeps full wingbeat; a grounded one tucks and pecks.
+      const flying = animal.type === 'gull' && speedEma > 0.35;
+      const move01 = flying ? 1 : THREE.MathUtils.clamp(speedEma / 1.2, 0, 1);
       const phase = t * (animal.type === 'gull' ? 9.5 : animal.type === 'chicken' ? 11 : animal.type === 'crab' ? 14 : 6.5)
         + animal.position.x * 0.04
         + animal.position.z * 0.03;
-      if (parts?.leftWing) parts.leftWing.rotation.z = 0.35 + Math.sin(phase) * 0.55;
-      if (parts?.rightWing) parts.rightWing.rotation.z = -0.35 - Math.sin(phase) * 0.55;
-      if (parts?.head) parts.head.rotation.y = Math.sin(phase * 0.55) * 0.22;
-      if (parts?.body) parts.body.rotation.z = Math.sin(phase) * (animal.type === 'crab' ? 0.035 : 0.02);
+      // Idle animals get characterful ticks instead: a peck / snout-root / claw
+      // raise on a per-animal random timer, so standing still still reads alive.
+      const idleSeed = (mesh.userData.idleSeed as number | undefined)
+        ?? (mesh.userData.idleSeed = 2 + Math.random() * 3);
+      const idleCycle = (t + idleSeed * 7) % (2.6 + idleSeed);
+      const tick = idleCycle < 0.42 ? Math.sin((idleCycle / 0.42) * Math.PI) * (1 - move01) : 0;
+      if (parts?.leftWing) parts.leftWing.rotation.z = 0.35 + Math.sin(phase) * 0.55 * move01 - tick * 0.3;
+      if (parts?.rightWing) parts.rightWing.rotation.z = -0.35 - Math.sin(phase) * 0.55 * move01 + tick * 0.3;
+      if (parts?.head) {
+        parts.head.rotation.y = Math.sin(phase * 0.55) * 0.22 * move01;
+        // Peck / root at the ground while idle.
+        parts.head.rotation.x = tick * (animal.type === 'chicken' ? 0.7 : 0.4);
+      }
+      if (parts?.body) parts.body.rotation.z = Math.sin(phase) * (animal.type === 'crab' ? 0.035 : 0.02) * move01;
       for (let leg = 0; leg < 6; leg++) {
         const limb = parts?.[`leg${leg}`];
-        if (limb) limb.rotation.z = (leg % 2 === 0 ? 1 : -1) * (0.18 + Math.sin(phase + leg) * 0.16);
+        if (limb) limb.rotation.z = (leg % 2 === 0 ? 1 : -1) * (0.18 + Math.sin(phase + leg) * 0.16 * move01);
       }
     }
 
@@ -3718,7 +4068,24 @@ export class Game {
         Math.sin(pitch),
         Math.cos(yaw) * Math.cos(pitch),
       ).normalize();
-      const eyePos = this.getPlayerRenderPosition(player, 0.02).add(new THREE.Vector3(0, swimming ? PLAYER.HEIGHT * 0.56 : player.crouching ? PLAYER.HEIGHT * 0.55 : PLAYER.HEIGHT * 0.84, 0));
+      // ── Eye height. A downed pirate's eyes are 30cm off the deck, and a dead
+      // one's stay at the spot they fell instead of standing bolt upright while
+      // a respawn chip counts down.
+      const dead = player.state === 'respawning' || player.state === 'eliminated';
+      const downed = player.state === 'downed';
+      let eyeHeight = swimming
+        ? PLAYER.HEIGHT * 0.56
+        : player.crouching ? PLAYER.HEIGHT * 0.55 : PLAYER.HEIGHT * 0.84;
+      if (downed) {
+        eyeHeight = THREE.MathUtils.lerp(eyeHeight, 0.3, this.localDeathBlend)
+          + Math.sin(this.ocean.getTime() * 0.9) * 0.02 * this.localDeathBlend;
+      } else if (dead) {
+        eyeHeight = THREE.MathUtils.lerp(PLAYER.HEIGHT * 0.84, 0.34, this.localDeathBlend);
+      }
+      const basePos = dead && this.localDeathAnchor
+        ? this.localDeathAnchor.pos.clone()
+        : this.getPlayerRenderPosition(player, 0.02);
+      const eyePos = basePos.add(new THREE.Vector3(0, eyeHeight, 0));
       desired = eyePos;
       lookTarget = eyePos
         .clone()
@@ -3759,6 +4126,26 @@ export class Game {
       camera.updateProjectionMatrix();
     }
 
+    // ── Death / downed camera: the view drops toward the ground, rolls onto
+    // its side and the world desaturates behind a vignette. Pairs with the
+    // corpse crumple so dying reads as an event, not a HUD chip.
+    const dying = player.state === 'respawning' || player.state === 'eliminated';
+    const downedNow = player.state === 'downed';
+    const deathBlendTarget = dying ? 1 : downedNow ? 1 : 0;
+    const deathBlendRate = dying ? 1 / 0.55 : downedNow ? 1 / 0.4 : -1 / 0.35;
+    this.localDeathBlend = THREE.MathUtils.clamp(
+      deathBlendTarget > 0
+        ? this.localDeathBlend + this.frameDt * Math.abs(deathBlendRate)
+        : this.localDeathBlend + this.frameDt * deathBlendRate,
+      0, 1,
+    );
+    if (!dying && this.localDeathAnchor && this.localDeathBlend <= 0.001) this.localDeathAnchor = null;
+    if (this.localDeathBlend > 0.001) {
+      const tilt = this.localDeathAnchor?.tilt ?? 0.45;
+      camera.rotateZ((dying ? tilt : tilt * 0.9) * this.localDeathBlend);
+    }
+    this.updateDeathOverlay(dying ? this.localDeathBlend : downedNow ? this.localDeathBlend * 0.45 : 0);
+
     // ── Deck roll coupling: lean the view with the hull heel, clamped to ±0.06 rad.
     let rollTarget = 0;
     if (onDeck && trackedShip) {
@@ -3782,6 +4169,29 @@ export class Game {
         .applyQuaternion(camera.quaternion);
       camera.position.add(this.tempShakeVec);
     }
+  }
+
+  /**
+   * Desaturating death vignette. Built on demand so nothing changes for a
+   * player who never dies, and kept below the death/win screens (z 500).
+   */
+  private updateDeathOverlay(strength: number) {
+    if (!this.deathOverlay) {
+      if (strength <= 0.001) return;
+      const overlay = document.createElement('div');
+      overlay.id = 'death-vignette';
+      overlay.style.cssText = [
+        'position:fixed', 'inset:0', 'pointer-events:none', 'z-index:92',
+        'opacity:0', 'transition:opacity 0.12s linear',
+        'background:radial-gradient(ellipse at center, rgba(20,6,6,0.25) 25%, rgba(6,3,4,0.94) 100%)',
+      ].join(';');
+      document.body.appendChild(overlay);
+      this.deathOverlay = overlay;
+    }
+    const overlay = this.deathOverlay;
+    const k = THREE.MathUtils.clamp(strength, 0, 1);
+    overlay.style.opacity = k.toFixed(3);
+    overlay.style.backdropFilter = k > 0.01 ? `grayscale(${(k * 0.85).toFixed(2)}) contrast(${(1 + k * 0.15).toFixed(2)})` : 'none';
   }
 
   private updateWaterEnvironment() {
