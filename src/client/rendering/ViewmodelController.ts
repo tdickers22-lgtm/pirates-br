@@ -425,28 +425,49 @@ export class ViewmodelController {
     const rig = new THREE.Group();
     this.capstanRig = rig;
     this.localViewHandsRoot.add(rig);
-    const sleeveMat = new THREE.MeshStandardMaterial({ color: 0x7a3f2a, roughness: 0.92 });
-    const skinMat = new THREE.MeshStandardMaterial({ color: 0xc98d5f, roughness: 0.85 });
-    const barMat = new THREE.MeshStandardMaterial({ color: 0x4a331e, roughness: 0.9 });
+    // These are FIRST-PERSON hands, and they are drawn straight into the world
+    // scene on the camera. You crank a capstan standing on top of it, so the
+    // drum sits centimetres from the eye — nearer than the bar, nearer than the
+    // fists — and the depth test buried the whole rig inside it every single
+    // time. (Measured: the gate fired, the rig was visible, the anchor was
+    // rising, and the screen was pure capstan.) A viewmodel does not participate
+    // in world depth: draw it last, over everything.
+    const vmMat = (color: number, roughness: number) => new THREE.MeshStandardMaterial({
+      color, roughness, depthTest: false, depthWrite: false,
+    });
+    const sleeveMat = vmMat(0x7a3f2a, 0.92);
+    const skinMat = vmMat(0xc98d5f, 0.85);
+    const barMat = vmMat(0x4a331e, 0.9);
+    const parts: THREE.Mesh[] = [];
     const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.9, 8), barMat);
     bar.rotation.z = Math.PI * 0.5;
-    bar.position.set(0, -0.32, -0.62);
-    rig.add(bar);
+    // Carried a touch higher than a natural crank height: the pirate is looking
+    // DOWN at the drum he is walking round, and at the old height the bar and
+    // fists rode the bottom edge of the frame (ndc y ≈ −0.7) and cropped away
+    // the moment he tipped his head.
+    bar.position.set(0, -0.2, -0.62);
+    parts.push(bar);
     for (const side of [-1, 1] as const) {
       const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.42, 8), sleeveMat);
-      forearm.position.set(side * 0.24, -0.42, -0.44);
+      forearm.position.set(side * 0.24, -0.3, -0.44);
       forearm.rotation.x = -1.05;
       forearm.rotation.z = side * 0.18;
-      rig.add(forearm);
+      parts.push(forearm);
       const hand = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.075, 0.13), skinMat);
-      hand.position.set(side * 0.22, -0.325, -0.6);
-      rig.add(hand);
+      hand.position.set(side * 0.22, -0.205, -0.6);
+      parts.push(hand);
       for (let f = 0; f < 3; f++) {
         const finger = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.05, 0.024), skinMat);
-        finger.position.set(side * 0.22 - 0.026 + f * 0.026, -0.29, -0.655);
+        finger.position.set(side * 0.22 - 0.026 + f * 0.026, -0.17, -0.655);
         finger.rotation.x = 0.7;
-        rig.add(finger);
+        parts.push(finger);
       }
+    }
+    // renderOrder is per-object in three (a group's does not propagate), and the
+    // bar has to draw under the fists gripping it.
+    for (const part of parts) {
+      part.renderOrder = part === bar ? 996 : 997;
+      rig.add(part);
     }
   }
 
@@ -1420,7 +1441,11 @@ export class ViewmodelController {
                   [0.05 - 0.15 * sSide, -0.32, -0.6, -0.7, 0.15 * sSide, 1.05 * sSide], cut,
                 ),
                 // Follow-through stays inboard instead of exiting the frame.
-                [0.05 - 0.2 * sSide, -0.45, -0.55, -0.6, 0.2 * sSide, 1.5 * sSide], through,
+                // It didn't: at p≈0.55 the 1.5 rad roll laid the blade flat and
+                // swung guard, fist and forearm clean off the edge, so the
+                // exit — half the swing's readable duration — was an EMPTY
+                // screen. Pulled in and up so the guard is always in shot.
+                [0.03 - 0.11 * sSide, -0.3, -0.52, -0.5, 0.15 * sSide, 1.08 * sSide], through,
               ),
               REST, recover,
             );
