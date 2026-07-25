@@ -172,6 +172,17 @@ const FULL_WORLD_SNAPSHOT_TICKS = FULL_SNAPSHOT_TICKS * 200;
 const MAX_VOLATILE_BUFFERED_BYTES = 512 * 1024;
 /** End-screen clients keep receiving a slow full snapshot so spectate views stay live. */
 const ENDED_SNAPSHOT_TICKS = SNAPSHOT_RATE * 15;
+
+/** Optional fixed match seed (PIRATES_BR_MAP_SEED). Unset ⇒ a fresh random
+ *  world roll per match, exactly as before. Set ⇒ ship spawns, sea rocks and
+ *  loot rolls repeat, which is what makes a two-build perf A/B comparable. */
+function matchSeedFromEnv(): number | undefined {
+  const raw = process.env.PIRATES_BR_MAP_SEED;
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed >>> 0 : undefined;
+}
+
 const CUTLASS_CHARGE_TIME = 0.72;
 const CUTLASS_CHARGE_MIN_TAP = 0.02;
 const CUTLASS_LUNGE_COOLDOWN = 1.05;
@@ -270,7 +281,10 @@ export class Match {
   private bots = new BotSystem();
   /** Dev-only (solo): when true, bots ignore human players + their ships. */
   private botPeace = false;
-  private mapGen = new MapGenerator();
+  /** PIRATES_BR_MAP_SEED pins the match RNG (ship spawns, sea rocks, loot rolls).
+   *  The islands themselves are already fixed per-entry seeds; this exists so a
+   *  perf A/B can measure two builds against a bit-identical match. */
+  private mapGen = new MapGenerator(matchSeedFromEnv());
   private skeletonHomes: Map<string, string> = new Map();
   private skeletonWaveTimers: Map<string, number> = new Map();
   private skeletonSpawnedAt: Map<string, number> = new Map();
