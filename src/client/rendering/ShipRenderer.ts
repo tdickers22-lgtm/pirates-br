@@ -1003,6 +1003,97 @@ function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<THREE.Obj
   }
 }
 
+/** Masthead flag: hoist→fly and head→foot, in metres (roughly a 2:1 ensign). */
+const FLAG_FLY = 0.85;
+const FLAG_DROP = 0.44;
+
+/** Wave uniforms shared by a flag's cloth and its blazon so the skull rides the
+ *  same ripple instead of hovering rigidly in front of a moving sheet. */
+interface FlagUniforms {
+  uFlagTime: { value: number };
+  /** x = ripple amplitude in metres, y = per-ship phase offset in radians. */
+  uFlagWave: { value: THREE.Vector2 };
+}
+
+interface ShipFlag {
+  /** Yawed to the wind each frame; the flag hangs off its +X axis. */
+  pivot: THREE.Group;
+  uniforms: FlagUniforms;
+}
+
+/** Deterministic 0..2π phase from a ship id, so a fleet at anchor doesn't
+ *  flutter in lockstep like one animation played on every hull. */
+function flagPhaseFromId(id: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) / 4294967296) * Math.PI * 2;
+}
+
+/**
+ * Cheap cloth ripple, entirely in the vertex shader: a travelling sine along
+ * the fly whose amplitude ramps quadratically from the hoist (pinned to the
+ * halyard, so it never detaches from the mast) out to the free end. Costs no
+ * per-frame CPU geometry work — only the two meshes it keeps out of the static
+ * hull merge.
+ *
+ * `bendNormals` re-aims the surface normal from the analytic slope of the main
+ * wave, so the cloth catches light as it undulates. The blazon skips it: those
+ * are little spheres and boxes riding along, and rotating their normals by the
+ * cloth's slope would just make them shade wrong.
+ */
+function applyFlagWave(material: THREE.Material, uniforms: FlagUniforms, bendNormals: boolean) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uFlagTime = uniforms.uFlagTime;
+    shader.uniforms.uFlagWave = uniforms.uFlagWave;
+    const preamble = `
+      uniform float uFlagTime;
+      uniform vec2 uFlagWave;
+      // Hoist (x=0) is pinned; the fly end (x=FLAG_FLY) swings the most.
+      float flagAmp(vec3 p) {
+        float hoist = clamp(p.x / ${FLAG_FLY.toFixed(3)}, 0.0, 1.0);
+        return uFlagWave.x * hoist * hoist;
+      }
+      float flagWaveZ(vec3 p) {
+        float a = flagAmp(p);
+        return sin(p.x * 9.0 - uFlagTime * 7.0 + uFlagWave.y) * a
+             + sin(p.y * 6.0 - uFlagTime * 4.3 + uFlagWave.y * 1.7) * a * 0.35;
+      }
+    `;
+    shader.vertexShader = preamble + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      `
+      vec3 transformed = vec3( position );
+      transformed.z += flagWaveZ( position );
+      // A rippling flag is a little shorter end-to-end than a flat one, and the
+      // free end lifts on the gust.
+      float flagH = clamp( position.x / ${FLAG_FLY.toFixed(3)}, 0.0, 1.0 );
+      transformed.x -= uFlagWave.x * flagH * flagH * 0.55;
+      transformed.y += cos( position.x * 7.0 - uFlagTime * 6.0 + uFlagWave.y ) * flagAmp( position ) * 0.3;
+      `,
+    );
+    if (bendNormals) {
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <beginnormal_vertex>',
+        `
+        vec3 objectNormal = vec3( normal );
+        // d(waveZ)/dx of the dominant term — the cloth plane's own normal is +Z,
+        // so tilting by the slope is a single component tweak.
+        objectNormal = normalize( objectNormal + vec3(
+          -cos( position.x * 9.0 - uFlagTime * 7.0 + uFlagWave.y ) * 9.0 * flagAmp( position ),
+          0.0, 0.0 ) );
+        `,
+      );
+    }
+  };
+  // Both variants patch the same program source, so they must not share a
+  // compiled-shader cache slot with each other or with a plain standard material.
+  material.customProgramCacheKey = () => (bendNormals ? 'flag-wave-cloth' : 'flag-wave-blazon');
+}
+
 interface StairwellHole {
   cx: number;
   cz: number;
@@ -1244,6 +1335,8 @@ interface ShipMeshGroup {
   sails: THREE.Mesh[];
   furledSails: THREE.Mesh[];
   pennants: THREE.Mesh[];
+  /** Masthead team flag — own pivot + vertex-wave uniforms (not merged). */
+  flag: ShipFlag;
   upgradePennants: Record<ShipUpgradeType, THREE.Mesh>;
   upgradeVisuals: Record<ShipUpgradeType, THREE.Object3D[]>;
   fireParticles: THREE.Points | null;
@@ -3364,7 +3457,36 @@ export class ShipRenderer {
     const lanterns: THREE.PointLight[] = [nightLight];
 
     // ── Flag ─────────────────────────────────────────────────
-    const flagGeo = new THREE.PlaneGeometry(0.85, 0.52);
+    // The colours here ARE the team identity at range, so the flag gets its own
+    // pivot (yawed to the wind each frame) and its own two meshes held OUT of
+    // the static hull merge. Merged in, it was a rigid painted board nailed to
+    // the masthead of a ship that pitches and rolls under it.
+    // Height: on a staff at the TRUCK, above the mast cap. It used to sit at
+    // H + height*3, which on every hull is inside the crow's-nest basket — the
+    // cloth passed straight through the floor and staves. Above the cap it is
+    // clear of the nest, clear of the masthead pennant, and readable at range.
+    const mainMastH = H * (stats.mastCount === 1 ? 3.6 : 3.1);
+    const mastCapY = H + mainMastH;
+    const ensignStaff = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.032, 0.042, 0.9, 6),
+      darkMat,
+    );
+    ensignStaff.position.set(0, mastCapY + 0.45, mastStartZ);
+    group.add(ensignStaff);
+
+    const flagPivot = new THREE.Group();
+    flagPivot.position.set(0, mastCapY + 0.52, mastStartZ);
+    group.add(flagPivot);
+    const flagUniforms: FlagUniforms = {
+      uFlagTime: { value: 0 },
+      uFlagWave: { value: new THREE.Vector2(0.02, flagPhaseFromId(ship.id)) },
+    };
+    const flag: ShipFlag = { pivot: flagPivot, uniforms: flagUniforms };
+
+    // Cloth: segmented along the fly so the vertex wave has something to bend,
+    // with the hoist at local x = 0 (the halyard the shader pins).
+    const flagGeo = new THREE.PlaneGeometry(FLAG_FLY, FLAG_DROP, 14, 4);
+    flagGeo.translate(FLAG_FLY * 0.5 + 0.06, 0, 0);
     const flagMat = new THREE.MeshStandardMaterial({
       color: ship.teamColor,
       emissive: ship.teamColor,
@@ -3372,31 +3494,38 @@ export class ShipRenderer {
       side: THREE.DoubleSide,
       roughness: 0.8,
     });
-    const flag = new THREE.Mesh(flagGeo, flagMat);
-    const topMast = H + SHIP_STATS[ship.type].height * 3;
-    flag.position.set(0.42, topMast, mastStartZ);
-    group.add(flag);
+    applyFlagWave(flagMat, flagUniforms, true);
+    const flagCloth = new THREE.Mesh(flagGeo, flagMat);
+    flagPivot.add(flagCloth);
 
-    // Skull and crossbones on flag (very small detail meshes)
+    // Skull and crossbones, baked into ONE blazon mesh in flag-local space so it
+    // rides the same ripple as the cloth. (Separate meshes would either be eaten
+    // by the hull merge or float rigidly in front of a moving sheet.)
     const skullMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, side: THREE.DoubleSide });
-    const skull = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 6), skullMat);
-    skull.position.set(0.44, topMast + 0.04, mastStartZ);
-    group.add(skull);
+    applyFlagWave(skullMat, flagUniforms, false);
+    const blazonCx = FLAG_FLY * 0.5 + 0.06;
+    const blazonGeos: THREE.BufferGeometry[] = [
+      new THREE.SphereGeometry(0.08, 6, 6).translate(blazonCx, 0.04, 0),
+    ];
     for (const boneAngle of [-0.62, 0.62]) {
-      const bone = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.035, 0.035), skullMat);
-      bone.position.set(0.44, topMast - 0.07, mastStartZ + 0.002);
-      bone.rotation.z = boneAngle;
-      group.add(bone);
+      blazonGeos.push(
+        new THREE.BoxGeometry(0.34, 0.035, 0.035)
+          .rotateZ(boneAngle)
+          .translate(blazonCx, -0.07, 0.002),
+      );
       for (const end of [-1, 1] as const) {
-        const knob = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 5), skullMat);
-        knob.position.set(
-          0.44 + Math.cos(boneAngle) * end * 0.17,
-          topMast - 0.07 + Math.sin(boneAngle) * end * 0.17,
-          mastStartZ + 0.004,
+        blazonGeos.push(
+          new THREE.SphereGeometry(0.035, 6, 5).translate(
+            blazonCx + Math.cos(boneAngle) * end * 0.17,
+            -0.07 + Math.sin(boneAngle) * end * 0.17,
+            0.004,
+          ),
         );
-        group.add(knob);
       }
     }
+    const blazonGeo = mergeGeometries(blazonGeos, false);
+    for (const geo of blazonGeos) geo.dispose();
+    if (blazonGeo) flagPivot.add(new THREE.Mesh(blazonGeo, skullMat));
 
     const upgradePennants = {
       hull_reinforcement: new THREE.Mesh(
@@ -3430,10 +3559,13 @@ export class ShipRenderer {
         }),
       ),
     } satisfies Record<ShipUpgradeType, THREE.Mesh>;
+    // Upgrade pennants keep their long-standing spot on the mast, well below the
+    // nest (the team flag moved to the truck; these did not).
+    const upgradePennantY = H + stats.height * 3;
     const upgradePennantEntries = [
-      { type: 'hull_reinforcement' as const, x: 0.34, y: topMast - 0.72, z: mastStartZ + 0.12 },
-      { type: 'charged_cannons' as const, x: 0.34, y: topMast - 0.98, z: mastStartZ + 0.02 },
-      { type: 'swift_sails' as const, x: 0.34, y: topMast - 1.24, z: mastStartZ - 0.08 },
+      { type: 'hull_reinforcement' as const, x: 0.34, y: upgradePennantY - 0.72, z: mastStartZ + 0.12 },
+      { type: 'charged_cannons' as const, x: 0.34, y: upgradePennantY - 0.98, z: mastStartZ + 0.02 },
+      { type: 'swift_sails' as const, x: 0.34, y: upgradePennantY - 1.24, z: mastStartZ - 0.08 },
     ];
     for (const { type, x, y, z } of upgradePennantEntries) {
       const pennant = upgradePennants[type];
@@ -3462,6 +3594,7 @@ export class ShipRenderer {
       ...supplyBarrels,
       ...cannonGroups.map((cannon) => cannon.root),
       ...(nestFloorMesh ? [nestFloorMesh] : []),
+      flagPivot,
       waterlineFoam,
       wheelGroup,
       compassNeedle,
@@ -3501,6 +3634,7 @@ export class ShipRenderer {
       sails,
       furledSails,
       pennants,
+      flag,
       upgradePennants,
       upgradeVisuals,
       fireParticles: null,
@@ -3900,6 +4034,18 @@ export class ShipRenderer {
       }
 
       const localWind = angleWrap(wind.direction - ship.rotation);
+
+      // Masthead flag: stream downwind off the pivot's +X, and ripple harder the
+      // faster you sail and the worse the weather. Phase is per-ship (id hash),
+      // so a fleet never flutters in unison.
+      mesh.flag.pivot.rotation.y = Math.PI * 0.5 + localWind;
+      const flagSpeed01 = Math.min(1, Math.hypot(ship.velocity.x, ship.velocity.z) / 9);
+      mesh.flag.uniforms.uFlagTime.value = t;
+      // Even becalmed at anchor the cloth breathes (0.012 m) — a dead-still flag
+      // is what made it read as a painted board.
+      mesh.flag.uniforms.uFlagWave.value.x =
+        0.012 + wind.strength * 0.032 + flagSpeed01 * 0.030 + storm01 * 0.055;
+
       for (const pennant of mesh.pennants) {
         pennant.rotation.y = Math.PI * 0.5 + localWind;
         pennant.rotation.z = Math.sin(t * 8 + pennant.position.z * 0.14) * 0.12;

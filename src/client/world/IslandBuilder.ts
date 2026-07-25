@@ -84,6 +84,37 @@ const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
   'fern_plant', 'bush', 'bush_berry', 'flower_bush', 'wildflowers', 'flower_patch',
 ]);
 
+/**
+ * Instance-scale rails for the scattered ground cover, per type.
+ *
+ * Scatter scales used to be free-running `base + rand * span` draws (and, for
+ * grass height, TWO of those multiplied together). Compounded draws have a much
+ * longer tail than they look on the page: grass blades ran 0.55x..2.39x, a 4.3x
+ * spread, so two blades in the SAME tuft could differ more than fourfold — the
+ * outliers read as stray giant cards standing over the lawn. Every scatter draws
+ * inside (and is clamped to) its rails, which keeps any two instances of a type
+ * within ~2.2x of each other while leaving the median size where it was.
+ */
+const FLORA_SCALE = {
+  grass: { min: 0.78, max: 1.52 },
+  /** Composed height (uniform scale × height factor) — its own, slightly wider rail. */
+  grassHeight: { min: 0.80, max: 1.75 },
+  fern: { min: 0.68, max: 1.38 },
+  shell: { min: 0.78, max: 1.55 },
+} as const;
+
+type FloraScaleRange = { readonly min: number; readonly max: number };
+
+/** Map a 0..1 deterministic draw onto a type's scale rail. */
+function floraScale(rand01: number, range: FloraScaleRange): number {
+  return range.min + rand01 * (range.max - range.min);
+}
+
+/** Hold a composed (multiplied) scale to its type's rail. */
+function clampFloraScale(value: number, range: FloraScaleRange): number {
+  return value < range.min ? range.min : value > range.max ? range.max : value;
+}
+
 export class IslandBuilder {
   constructor(private readonly ctx: IslandBuilderCtx) {}
 
@@ -1277,8 +1308,12 @@ export class IslandBuilder {
           gP.set(sample.x + jx, sample.y - 0.06, sample.z + jz);
           gE.set((rng(i * 13 + c) - 0.5) * 0.3, rng(i * 17 + c * 5) * Math.PI, (rng(i * 19 + c) - 0.5) * 0.3);
           gQ.setFromEuler(gE);
-          const sc = 0.65 + rng(i * 23 + c * 3) * 1.0;
-          gS.set(sc, sc * (0.85 + rng(i * 29 + c) * 0.6), sc);
+          // Height used to compound TWO independent draws (uniform scale ×
+          // height factor), which multiplied out to 0.55x..2.39x — a 4.3x spread,
+          // so blades in one tuft could differ more than fourfold. Draw the
+          // uniform scale on its rails, then clamp the composed height to its own.
+          const sc = floraScale(rng(i * 23 + c * 3), FLORA_SCALE.grass);
+          gS.set(sc, clampFloraScale(sc * (0.92 + rng(i * 29 + c) * 0.36), FLORA_SCALE.grassHeight), sc);
           gM.compose(gP, gQ, gS);
           grass.setMatrixAt(placed, gM);
           gColor.copy(paletteGrass).lerp(paletteFoliage, rng(i * 31 + c) * 0.6).multiplyScalar(1.0 + rng(i * 37 + c) * 0.4);
@@ -1329,7 +1364,7 @@ export class IslandBuilder {
           gP.set(sample.x + (rng(i * 47) - 0.5) * 0.7, sample.y - 0.09, sample.z + (rng(i * 59) - 0.5) * 0.7);
           gE.set((rng(i * 47) - 0.5) * 0.24, rng(i * 53) * Math.PI * 2, (rng(i * 59) - 0.5) * 0.24);
           gQ.setFromEuler(gE);
-          const sc = 0.55 + rng(i * 61) * 0.85;
+          const sc = floraScale(rng(i * 61), FLORA_SCALE.fern);
           gS.set(sc, sc, sc);
           gM.compose(gP, gQ, gS);
           ferns.setMatrixAt(fernsPlaced, gM);
@@ -1365,7 +1400,7 @@ export class IslandBuilder {
         gP.set(sample.x, sample.y + 0.015, sample.z);
         gE.set(0, rng(i * 79) * Math.PI * 2, 0);
         gQ.setFromEuler(gE);
-        const sc = 0.6 + rng(i * 83) * 1.1;
+        const sc = floraScale(rng(i * 83), FLORA_SCALE.shell);
         gS.set(sc, sc, sc);
         gM.compose(gP, gQ, gS);
         shells.setMatrixAt(shellsPlaced, gM);
