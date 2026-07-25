@@ -7,7 +7,10 @@ origin — the browser connects to `wss://<host>/ws` automatically over HTTPS.
 **Requirements for the host:**
 - Node 20+ (or Docker)
 - **WebSocket support** (Fly, Render, Railway, Heroku, Fly, a VPS — all fine)
-- Reads the `PORT` env var (the server already does; defaults to 8080)
+- Reads the `PORT` env var (the server already does; defaults to 8090 — local content
+  filters routinely intercept 8080 and corrupt the WebSocket handshake, so the dev
+  default lives off it. The Dockerfile pins `PORT=8080`, so container deploys are
+  unchanged.)
 - Health check path: `GET /health` → `200 {"ok":true,...}`
 
 Stats (`data/stats.json`) are written at runtime and are **ephemeral** unless you mount a

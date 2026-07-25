@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  GameState, HotSnapshotPayload, InteractIntent, Island, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
+  GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
@@ -39,6 +39,10 @@ import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
+/** Port the game server listens on by default (src/server/index.ts DEFAULT_PORT).
+ *  Kept off 8080: local content filters commonly intercept that port and corrupt
+ *  the WebSocket handshake. Only used to hop off a dev server (Vite on :3000). */
+const GAME_SERVER_PORT = '8090';
 /** Skeleton remains linger (and sink/fade) instead of popping after 1.5s. */
 const SKELETON_CORPSE_LIFETIME = 6.5;
 /** A dropped weapon tumbles, lands and fades over this many seconds. */
@@ -269,7 +273,6 @@ export class Game {
   private previousLocalState: Player['state'] | null = null;
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
-  private islandArrivalAudioCtx: AudioContext | null = null;
   private stormWeatherIntensity = 0;
   private storyCutscene: StoryCutsceneRefs | null = null;
   private storyCutsceneNpcId: string | null = null;
@@ -747,7 +750,7 @@ export class Game {
       this.network.disconnect();
       this.setLoading(
         0,
-        `Cannot reach game server at ${socketUrl}. Make sure 'npm run dev' is running (server on :8080), then refresh.`,
+        `Cannot reach game server at ${socketUrl}. Make sure 'npm run dev' is running (server on :${GAME_SERVER_PORT}), then refresh.`,
       );
       return false;
     }
@@ -2326,6 +2329,10 @@ export class Game {
     this.shipRenderer.setNightFactor(nightFactor);
     this.envFx.updateLanterns(nightFactor, this.renderer.camera.position, this.ocean.getTime());
     const snapshotAge = Math.min(0.22, (performance.now() - this.lastSnapshotAt) / 1000);
+    // Berths the renderer may drop a boarding plank to. The gangway PHYSICS is
+    // already server-side (getShipGangwayPlan / getGangwayFloorY); without this
+    // the plank you walk on is invisible.
+    this.shipRenderer.setDocks(this.state.islands.map((i) => i.dock).filter(Boolean) as IslandDock[]);
     this.shipRenderer.update(
       this.state.ships,
       this.state.players,
@@ -4897,10 +4904,11 @@ export class Game {
     const host = window.location.hostname;
     const port = window.location.port;
     const isLocalhost = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
-    // Any localhost port other than the game server's own (8080) is a dev server (Vite, etc.).
-    // Connect directly to 8080 instead of relying on a proxy — works for 3000/3003/5173/etc.
-    if (isLocalhost && port && port !== '8080') {
-      return `${protocol}://${host}:8080/ws`;
+    // Any localhost port other than the game server's own is a dev server (Vite, etc.).
+    // Connect directly to the game port instead of relying on a proxy — works for
+    // 3000/3003/5173/etc.
+    if (isLocalhost && port && port !== GAME_SERVER_PORT) {
+      return `${protocol}://${host}:${GAME_SERVER_PORT}/ws`;
     }
     return `${protocol}://${window.location.host}/ws`;
   }
@@ -5191,32 +5199,11 @@ export class Game {
     this.islandBannerHideAt = performance.now() + 4500;
   }
 
+  /** Land-ho fanfare. Routed through SoundEngine so it rides the master bus
+   *  (volume slider, mute, compressor, ducking) instead of a private
+   *  AudioContext bolted straight onto ctx.destination. */
   private playIslandArrivalFanfare() {
-    try {
-      const win = window as unknown as { webkitAudioContext?: typeof AudioContext };
-      const Ctx = window.AudioContext || win.webkitAudioContext;
-      if (!Ctx) return;
-      const ctx = this.islandArrivalAudioCtx ?? new Ctx();
-      this.islandArrivalAudioCtx = ctx;
-      if (ctx.state === 'suspended') void ctx.resume();
-      const now = ctx.currentTime;
-      const notes = [523.25, 659.25, 783.99, 987.77];
-      notes.forEach((freq, i) => {
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        o.type = 'triangle';
-        o.frequency.value = freq;
-        g.gain.setValueAtTime(0, now + i * 0.11);
-        g.gain.linearRampToValueAtTime(0.065, now + i * 0.11 + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.11 + 0.38);
-        o.connect(g);
-        g.connect(ctx.destination);
-        o.start(now + i * 0.11);
-        o.stop(now + i * 0.11 + 0.42);
-      });
-    } catch {
-      /* Web Audio optional */
-    }
+    this.audio.playIslandDiscovery();
   }
 
   private findRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null {

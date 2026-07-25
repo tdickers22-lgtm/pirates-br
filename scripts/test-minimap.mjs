@@ -4,7 +4,7 @@ import process from 'node:process';
 import { chromium } from 'playwright';
 
 const ROOT_URL = process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000/';
-const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? 'http://127.0.0.1:8080/health';
+const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? 'http://127.0.0.1:8090/health';
 const GAME_URL = `${ROOT_URL.replace(/\/$/, '')}/?debug&quality=low`;
 const READY_TIMEOUT_MS = 35_000;
 

@@ -9,7 +9,12 @@
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP_STATS } from '../src/shared/constants/index.ts';
 import { getCannonDeckLocalPosition } from '../src/shared/interactions.ts';
-import { getShipCompanionwayConfig, getShipDeckWalkHalfWidth } from '../src/shared/utils/index.ts';
+import {
+  getCrowNestStandingY,
+  getMainMastLocalZ,
+  getShipCompanionwayConfig,
+  getShipDeckWalkHalfWidth,
+} from '../src/shared/utils/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -91,6 +96,88 @@ for (const type of Object.keys(SHIP_STATS)) {
     const standFloor = floorAt(stand.x, stand.z);
     expect(`cannon${index} stand is solid deck`, standFloor >= liveDeckY - 0.3 && standFloor <= liveDeckY + 1.6,
       `floor=${standFloor.toFixed(2)} deckY=${liveDeckY.toFixed(2)}`);
+  }
+}
+
+// ── 3. The crow's nest is a walkable FLOOR: Space works up there ──
+// PhysicsSystem already treats the basket as a floor (gravity + velocity.y run,
+// WASD clamped to the disc). Match owns the other half: the nest must not be in
+// `jumpBlocked`, and `grounded` must measure against the BASKET, not the deck
+// ~15m below (getShipFloorY would report the lookout permanently airborne).
+console.log("\ncrow's nest jump:");
+{
+  const makeFakeWs = () => ({ readyState: 1, bufferedAmount: 0, send() {}, close() {} });
+  const makeInput = (seq, overrides = {}) => ({
+    seq, ts: 0,
+    forward: false, back: false, left: false, right: false,
+    jump: false, jumpPressed: false, fire: false, useItem: false, aim: false,
+    interact: false, interactHeld: false,
+    anchor: false, sailRaise: false, sailLower: false, sailLeft: false, sailRight: false,
+    trade: false, reload: false, placeKeg: false, dropChest: false, specialAttack: false,
+    slot: null, cannonAmmo: null, yaw: 0, pitch: 0,
+    wheelIndex: null, useWheelItem: false, barrelTakeAll: false,
+    interactIntent: null,
+    ...overrides,
+  });
+
+  for (const type of Object.keys(SHIP_STATS)) {
+    const match = new Match({ matchId: `nest-${type}`, botCount: 0 });
+    match.state.phase = 'playing';
+    const joined = match.addHumanClient(makeFakeWs(), 'Lookout');
+    const client = match.clients.get(joined.playerId);
+    const player = match.state.players.find((p) => p.id === joined.playerId);
+    const ship = match.state.ships.find((s) => s.id === joined.shipId);
+    ship.type = type;
+    const stats = SHIP_STATS[type];
+    ship.position = { x: 0, y: 0, z: 0 };
+    ship.rotation = 0;
+    ship.velocity = { x: 0, y: 0, z: 0 };
+    ship.anchored = true;
+
+    const mastZ = getMainMastLocalZ(stats);
+    const nestY = () => ship.position.y + getCrowNestStandingY(stats);
+    const standInNest = () => {
+      player.state = 'alive';
+      player.onShipId = ship.id;
+      player.atCrowNest = true;
+      player.atHelm = false; player.atSails = false; player.atCannon = false;
+      player.mastClimb = null;
+      player.position = { x: 0, y: nestY(), z: mastZ };
+      player.velocity = { x: 0, y: 0, z: 0 };
+      player.knockbackVelocity = { x: 0, y: 0, z: 0 };
+    };
+
+    // Settle the hull to its floating draft first so nestY() is the live height.
+    standInNest();
+    for (let i = 0; i < 60; i++) {
+      match.physics.update(DT, match.t + i * DT, [ship], [player], [], [], [], null);
+    }
+    standInNest();
+
+    let seq = 1;
+    match.applyInput(client, makeInput(seq++, { jump: true, jumpPressed: true }), DT);
+    expect(`${type}: Space at the nest gives upward velocity`, player.velocity.y > 1,
+      `vy=${player.velocity.y.toFixed(3)} (nestY=${nestY().toFixed(2)}, y=${player.position.y.toFixed(2)})`);
+
+    // …and the hop is a real arc that lands back on the basket.
+    let apex = player.position.y;
+    for (let i = 0; i < 240; i++) {
+      match.physics.update(DT, match.t + i * DT, [ship], [player], [], [], [], null);
+      if (player.position.y > apex) apex = player.position.y;
+    }
+    expect(`${type}: the hop actually leaves the basket`, apex > nestY() + 0.25,
+      `apex-nestY=${(apex - nestY()).toFixed(3)}`);
+    expect(`${type}: the lookout lands back on the basket`, Math.abs(player.position.y - nestY()) < 0.05,
+      `y-nestY=${(player.position.y - nestY()).toFixed(4)}`);
+
+    // The helm still blocks jumping — dropping atCrowNest from jumpBlocked must
+    // not have opened the pinned stations.
+    player.atCrowNest = false;
+    player.atHelm = true;
+    player.velocity = { x: 0, y: 0, z: 0 };
+    match.applyInput(client, makeInput(seq++, { jump: true, jumpPressed: true }), DT);
+    expect(`${type}: the helm still blocks jumping`, player.velocity.y === 0,
+      `vy=${player.velocity.y.toFixed(3)}`);
   }
 }
 

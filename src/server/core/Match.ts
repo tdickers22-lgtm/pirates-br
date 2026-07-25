@@ -27,6 +27,7 @@ import {
   clamp,
   getShipCompanionwayConfig,
   getShipDeckRaiseAt,
+  getCrowNestStandingY,
   gerstnerHeight,
   WAVE_PARAMS,
   intersectRaySeaRock,
@@ -1767,7 +1768,11 @@ export class Match {
 
       // On-foot / swim movement
       const yaw = input.yaw;
-      const jumpBlocked = !!ship && (player.atHelm || player.atSails || player.atCrowNest);
+      // The crow's nest is deliberately NOT in this list: PhysicsSystem treats the
+      // basket as a walkable FLOOR (gravity + velocity.y run, the WASD clamp keeps
+      // the lookout on the disc), so a lookout can hop like anywhere else. Helm and
+      // sails still block — those pin the body to a station.
+      const jumpBlocked = !!ship && (player.atHelm || player.atSails);
       const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
       const moveZ = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
       if (player.state === 'swimming') {
@@ -1840,7 +1845,13 @@ export class Match {
 
         const verticalReady = player.velocity.y <= 0.2;
         let grounded = false;
-        if (ship && player.onShipId === ship.id) {
+        if (ship && player.onShipId === ship.id && player.atCrowNest) {
+          // A lookout stands on the nest basket, not the deck — getShipFloorY would
+          // report the deck ~15m below and read the lookout as airborne, so Space
+          // did nothing up there. Ground against the basket floor instead.
+          const nestFloorY = ship.position.y + getCrowNestStandingY(SHIP_STATS[ship.type]);
+          grounded = verticalReady && Math.abs(player.position.y - nestFloorY) < 0.24;
+        } else if (ship && player.onShipId === ship.id) {
           const floorY = this.getShipFloorY(player.position, ship);
           grounded = verticalReady && Math.abs(player.position.y - floorY) < 0.24;
         } else {
