@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { HARVEST, PLAYER, SHIP_STATS, STORM_PHASES } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandProp, IslandPropType, Player, Ship } from '../../shared/types/index.js';
-import { isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
+import { dist2D, isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import type { AssetName } from '../assets/AssetLibrary.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
@@ -35,7 +35,6 @@ export type EnvironmentFxView = {
   storyCutscene: StoryCutsceneRefs | null;
   buildPropInstance(type: AssetName, position: THREE.Vector3, yaw: number, scale?: number): THREE.Group | null;
   disposeSceneObject(root: THREE.Object3D): void;
-  distance2D(ax: number, az: number, bx: number, bz: number): number;
   getLocalPlayer(): Player | null;
   getTrackedShip(): Ship | null;
 };
@@ -121,7 +120,7 @@ export class EnvironmentFx {
       if (!isPointInsideIslandFootprint(isl, player.position.x, player.position.z, 8)) continue;
       for (const prop of isl.props) {
         if (!prop.type.startsWith('palm_') && !prop.type.startsWith('boulder_')) continue;
-        const d = this.view.distance2D(player.position.x, player.position.z, prop.x, prop.z);
+        const d = dist2D(player.position.x, player.position.z, prop.x, prop.z);
         if (d < bestD) {
           bestD = d;
           bestProp = prop;
@@ -666,7 +665,7 @@ export class EnvironmentFx {
     if (!this.view.state) return 0;
     const player = this.view.getLocalPlayer();
     if (!player) return 0;
-    const dist = this.view.distance2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ);
+    const dist = dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ);
 
     const safeRadius = Math.max(1, this.view.state.storm.safeRadius);
     const phase = this.view.state.storm.phase;
@@ -690,7 +689,7 @@ export class EnvironmentFx {
     const player = this.view.getLocalPlayer();
     if (!player) return 0;
 
-    const dist = this.view.distance2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ);
+    const dist = dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ);
     const safeRadius = Math.max(1, this.view.state.storm.safeRadius);
     const phase = this.view.state.storm.phase;
     const maxPhase = Math.max(1, STORM_PHASES.length);
@@ -831,7 +830,7 @@ export class EnvironmentFx {
     const phase = this.view.state.storm.phase;
     const player = this.view.getLocalPlayer();
     const playerDist = player
-      ? this.view.distance2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ)
+      ? dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ)
       : 0;
     const outsideStorm = !!player
       && playerDist > this.view.state.storm.safeRadius;
@@ -889,7 +888,7 @@ export class EnvironmentFx {
       // Thunder boom matched to the actual strike distance.
       const localPlayerForThunder = this.view.getLocalPlayer();
       if (localPlayerForThunder) {
-        this.view.audio.playThunder(this.view.distance2D(localPlayerForThunder.position.x, localPlayerForThunder.position.z, lx, lz));
+        this.view.audio.playThunder(dist2D(localPlayerForThunder.position.x, localPlayerForThunder.position.z, lx, lz));
       }
 
       this.stormLightningFlashOpacity = Math.max(

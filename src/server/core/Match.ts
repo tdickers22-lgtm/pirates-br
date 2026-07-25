@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, HullSections, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
+  GameState, HullSections, InteractIntent, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
 import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
@@ -25,8 +25,8 @@ import {
   dist2D,
   angleWrap,
   clamp,
-  getShipCompanionwayConfig,
   getShipDeckRaiseAt,
+  getShipDeckY,
   getCrowNestStandingY,
   gerstnerHeight,
   WAVE_PARAMS,
@@ -35,6 +35,14 @@ import {
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
+  findMermaidReturnShip,
+  findNearbyGoldHoarder,
+  findNearbyKeg,
+  findNearbyUpgradeStation,
+  getConstrainedCannonAim,
+  getHelmControlLocal,
+  getRepairPlankCount,
+  getShipFloorYAt,
   getCannonDeckLocalPosition as getSharedCannonDeckLocalPosition,
   isNearAmmoCrate as isSharedNearAmmoCrate,
   isNearAnchor as isSharedNearAnchor,
@@ -979,7 +987,7 @@ export class Match {
     this.clearStationFlags(player);
     player.atCannon = true;
     player.cannonIndex = cannonIndex;
-    const aim = this.getCannonAim(ship, cannonIndex, yaw, pitch);
+    const aim = getConstrainedCannonAim(ship, cannonIndex, yaw, pitch);
     player.rotation.x = aim.yaw;
     player.rotation.y = aim.pitch;
     this.snapPlayerToCannon(player, ship, cannonIndex);
@@ -1275,7 +1283,7 @@ export class Match {
     }
 
     const cannonAim = ship && player.atCannon
-      ? this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch)
+      ? getConstrainedCannonAim(ship, player.cannonIndex, input.yaw, input.pitch)
       : null;
 
     const prevJumpHeld = this.lastJumpHeldByPlayer.get(client.playerId) ?? false;
@@ -1361,7 +1369,7 @@ export class Match {
     }
 
     if (ship && player.atCannon && jumpEdge && this.consumeOneShot(client, 'jump', input.seq)) {
-      this.launchPlayerFromCannon(player, ship, cannonAim ?? this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch));
+      this.launchPlayerFromCannon(player, ship, cannonAim ?? getConstrainedCannonAim(ship, player.cannonIndex, input.yaw, input.pitch));
       return;
     }
 
@@ -1481,7 +1489,7 @@ export class Match {
       if (this.handleGoldHoarderInteraction(player)) return;
 
       const homeShip = this.getAliveShip(player.shipId);
-      const upgradeStation = this.getNearbyUpgradeStation(player);
+      const upgradeStation = findNearbyUpgradeStation(this.state.islands, player);
       if (
         upgradeStation
         && homeShip
@@ -1667,7 +1675,7 @@ export class Match {
         // Sail repair draws planks from the SAME source hull repair does —
         // your pocket first, then ship stores (was ship-only, so you couldn't
         // mend canvas with planks in your pocket).
-        if (this.getRepairPlankCount(player, ship) > 0) {
+        if (getRepairPlankCount(player, ship) > 0) {
           ship.sailRepairWoodTimer += dt;
           while (ship.sailRepairWoodTimer >= SHIP.SAIL_REPAIR_WOOD_INTERVAL && ship.sailIntegrity < 1) {
             if (!this.consumeRepairPlank(player, ship)) break;
@@ -1690,7 +1698,7 @@ export class Match {
         && input.interactIntent === 'repair'
         && !player.atCannon && !player.atHelm && !player.atCrowNest;
       const hullRepairTarget = mendingHull ? this.getRepairableHole(player, ship) : null;
-      if (hullRepairTarget && this.getRepairPlankCount(player, ship) > 0) {
+      if (hullRepairTarget && getRepairPlankCount(player, ship) > 0) {
         player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / SHIP.HULL_REPAIR_SWING_TIME);
         if (player.hullRepairProgress >= 1) {
           player.hullRepairProgress = 0;
@@ -1740,7 +1748,7 @@ export class Match {
       player.velocity.x = 0;
       player.velocity.z = 0;
     } else if (player.atCannon && ship) {
-      const aim = this.getCannonAim(ship, player.cannonIndex, input.yaw, input.pitch);
+      const aim = getConstrainedCannonAim(ship, player.cannonIndex, input.yaw, input.pitch);
       player.rotation.x = aim.yaw;
       player.rotation.y = aim.pitch;
       this.snapPlayerToCannon(player, ship, player.cannonIndex);
@@ -1841,7 +1849,7 @@ export class Match {
           const nestFloorY = ship.position.y + getCrowNestStandingY(SHIP_STATS[ship.type]);
           grounded = verticalReady && Math.abs(player.position.y - nestFloorY) < 0.24;
         } else if (ship && player.onShipId === ship.id) {
-          const floorY = this.getShipFloorY(player.position, ship);
+          const floorY = getShipFloorYAt(player.position, ship);
           grounded = verticalReady && Math.abs(player.position.y - floorY) < 0.24;
         } else {
           for (const island of this.state.islands) {
@@ -2447,22 +2455,8 @@ export class Match {
     }
   }
 
-  private getNearbyGoldHoarder(player: Player): { npc: IslandNpc; island: Island } | null {
-    let closest: { npc: IslandNpc; island: Island; distance: number } | null = null;
-    for (const island of this.state.islands) {
-      for (const npc of island.npcs ?? []) {
-        if (npc.role !== 'gold_hoarder') continue;
-        const distance = dist2D(player.position.x, player.position.z, npc.position.x, npc.position.z);
-        if (distance < PLAYER.INTERACT_RANGE + 0.8 && (!closest || distance < closest.distance)) {
-          closest = { npc, island, distance };
-        }
-      }
-    }
-    return closest ? { npc: closest.npc, island: closest.island } : null;
-  }
-
   private handleGoldHoarderInteraction(player: Player): boolean {
-    const hoarder = this.getNearbyGoldHoarder(player);
+    const hoarder = findNearbyGoldHoarder(this.state.islands, player);
     if (!hoarder) return false;
     if (player.carryingChestId) {
       return this.sellCarriedChest(player, hoarder.island);
@@ -2868,7 +2862,7 @@ export class Match {
       // Priority 1: walk to the rail directly above that breach and plank it
       // (throttled, consumes planks — the SAME findRepairableHole reach rule
       // humans get).
-      if (targetHole && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t && this.getRepairPlankCount(player, ship) > 0) {
+      if (targetHole && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t && getRepairPlankCount(player, ship) > 0) {
         if (this.getRepairableHole(player, ship)?.id === targetHole.id) {
           if (this.consumeRepairPlank(player, ship)) {
             this.physics.patchHole(ship, targetHole.id);
@@ -2951,23 +2945,15 @@ export class Match {
     }
   }
 
+  /** Kegs riding a hull only carry a hull-local position — freshen the world
+   *  transforms of every candidate before the shared proximity scan reads them. */
   private getNearbyKeg(player: Player, ship: Ship | null = null) {
-    let closest: ShipKeg | null = null;
-    let closestDistance: number = SHIP.KEG_DIFFUSE_RANGE;
     for (const keg of this.state.kegs) {
       if (ship && keg.shipId && keg.shipId !== ship.id) continue;
       if (keg.timer <= 0) continue;
       this.syncKegPosition(keg);
-      const dx = player.position.x - keg.position.x;
-      const dy = player.position.y - keg.position.y;
-      const dz = player.position.z - keg.position.z;
-      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closest = keg;
-      }
     }
-    return closest;
+    return findNearbyKeg(this.state.kegs, player, ship);
   }
 
   private diffuseKeg(keg: ShipKeg) {
@@ -2975,17 +2961,6 @@ export class Match {
     // in the same tick's updateKegs pass.
     keg.defused = true;
     keg.timer = 0;
-  }
-
-  private getNearbyUpgradeStation(player: Player) {
-    for (const island of this.state.islands) {
-      for (const station of island.upgradeStations) {
-        const dx = player.position.x - station.position.x;
-        const dz = player.position.z - station.position.z;
-        if (Math.sqrt(dx * dx + dz * dz) < PLAYER.INTERACT_RANGE) return station;
-      }
-    }
-    return null;
   }
 
   private applyShipUpgrade(ship: Ship, type: ShipUpgrade['type']) {
@@ -3103,38 +3078,8 @@ export class Match {
     return ship;
   }
 
-  private getCannonAim(ship: Ship, cannonIndex: number, yaw: number, pitch: number) {
-    const stats = SHIP_STATS[ship.type];
-    const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-    const broadsideYaw = ship.rotation + (cannonIndex < cannonsPerSide ? Math.PI * 0.5 : -Math.PI * 0.5);
-    return {
-      yaw: broadsideYaw + Math.max(-SHIP.CANNON_YAW_ARC, Math.min(SHIP.CANNON_YAW_ARC, angleWrap(yaw - broadsideYaw))),
-      pitch: Math.max(SHIP.CANNON_PITCH_MIN, Math.min(SHIP.CANNON_PITCH_MAX, pitch)),
-    };
-  }
-
   private getCannonMuzzlePosition(ship: Ship, cannonIndex: number, yaw: number, pitch: number) {
     return this.weapons.getCannonMuzzlePosition(ship, cannonIndex, yaw, pitch);
-  }
-
-  private getShipFloorY(position: Vec3, ship: Ship) {
-    const stats = SHIP_STATS[ship.type];
-    const deckY = ship.position.y + stats.height + 0.1;
-    const holdFloor = ship.position.y + 0.35;
-    const local = this.toShipLocal(position, ship);
-    const stair = getShipCompanionwayConfig(stats);
-    if (
-      Math.abs(local.x - stair.cx) <= stair.stairHalfWidth
-      && local.z <= stair.stairFrontZ
-      && local.z >= stair.stairBackZ
-    ) {
-      const descent = Math.max(
-        0,
-        Math.min(1, (stair.stairFrontZ - local.z) / Math.max(0.001, stair.stairFrontZ - stair.stairBackZ)),
-      );
-      return deckY + (holdFloor - deckY) * descent;
-    }
-    return position.y < deckY - 0.25 ? holdFloor : deckY;
   }
 
   private resolveFirearmHits(shooter: Player, traces: HitscanTrace[]) {
@@ -3742,16 +3687,8 @@ export class Match {
     return false;
   }
 
-  private getMermaidReturnShip(player: Player): Ship | null {
-    if (player.state !== 'swimming' || !player.shipId) return null;
-    const homeShip = this.getAliveShip(player.shipId);
-    if (!homeShip || homeShip.sinking) return null;
-    const distance = dist2D(player.position.x, player.position.z, homeShip.position.x, homeShip.position.z);
-    return distance >= 45 ? homeShip : null;
-  }
-
   private returnPlayerByMermaid(player: Player): boolean {
-    const homeShip = this.getMermaidReturnShip(player);
+    const homeShip = findMermaidReturnShip(this.state.ships, player);
     if (!homeShip) return false;
     this.dropCarriedChest(player);
     const deckPosition = this.getRespawnDeckPosition(homeShip);
@@ -3841,7 +3778,7 @@ export class Match {
       }
       case 'upgrade': {
         const homeShip = this.getAliveShip(player.shipId);
-        const upgradeStation = this.getNearbyUpgradeStation(player);
+        const upgradeStation = findNearbyUpgradeStation(this.state.islands, player);
         if (
           !upgradeStation
           || !homeShip
@@ -5551,13 +5488,13 @@ export class Match {
 
   private snapPlayerToHelm(player: Player, ship: Ship) {
     const stats = SHIP_STATS[ship.type];
-    const local = { x: 0, z: -stats.length * 0.37 };
+    const local = getHelmControlLocal(stats);
     const cos = Math.cos(ship.rotation);
     const sin = Math.sin(ship.rotation);
     player.position.x = ship.position.x + local.x * cos + local.z * sin;
     player.position.z = ship.position.z + local.z * cos - local.x * sin;
     // Stand ON the raised quarterdeck dais, not sunk into it.
-    player.position.y = ship.position.y + stats.height + 0.1 + getShipDeckRaiseAt(local, stats);
+    player.position.y = getShipDeckY(ship.position.y, stats) + getShipDeckRaiseAt(local, stats);
   }
 
   private isNearCrowNestLadder(player: Player, ship: Ship): boolean {
@@ -5587,11 +5524,6 @@ export class Match {
       );
       this.physics.openHoleAt(ship, point, 1, 'cannon');
     }
-  }
-
-  private getRepairPlankCount(player: Player, ship: Ship) {
-    const shipPlanks = ship.inventory.find(entry => entry.item === 'wood_plank')?.qty ?? 0;
-    return player.pocketWood + shipPlanks;
   }
 
   private consumeRepairPlank(player: Player, ship: Ship): boolean {
@@ -5638,7 +5570,7 @@ export class Match {
     const sin = Math.sin(ship.rotation);
     player.position.x = ship.position.x + local.x * cos + local.z * sin;
     player.position.z = ship.position.z + local.z * cos - local.x * sin;
-    player.position.y = ship.position.y + SHIP_STATS[ship.type].height + 0.1;
+    player.position.y = getShipDeckY(ship.position.y, SHIP_STATS[ship.type]);
   }
 
   private getCannonDeckPosition(ship: Ship, cannonIndex: number): { x: number; z: number } {

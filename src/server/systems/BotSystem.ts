@@ -6,7 +6,7 @@ import {
 } from '../../shared/constants/index.js';
 import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
-import { countOpenHoles } from '../../shared/interactions.js';
+import { countOpenHoles, getCannonBroadsideYaw } from '../../shared/interactions.js';
 import { applyShipRudderSteering } from './PhysicsSystem.js';
 import type { WeaponSystem } from './WeaponSystem.js';
 
@@ -337,7 +337,7 @@ export class BotSystem {
           if (this.hasCannonLineOfSight(ship, target, islands)) {
             for (let cidx = 0; cidx < ship.cannonCooldowns.length && !fired; cidx++) {
               if (ship.cannonCooldowns[cidx] > 0) continue;
-              const broadsideYaw = weaponSystem.getCannonBroadsideYaw(ship, cidx);
+              const broadsideYaw = getCannonBroadsideYaw(ship, cidx);
               if (Math.abs(angleWrap(bot.aimYaw - broadsideYaw)) > SHIP.CANNON_YAW_ARC) continue;
               player.atCannon = true;
               player.cannonIndex = cidx;

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PostFx } from './PostFx.js';
+import { clamp, smoothstep } from '../../shared/utils/index.js';
 
 export type RenderQuality = 'low' | 'balanced' | 'high';
 
@@ -657,15 +658,6 @@ export class Renderer {
     this.renderer?.setPixelRatio(this.currentPixelRatio);
     this.postFx?.setPixelRatio(this.currentPixelRatio);
   }
-}
-
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-function smoothstep(edge0: number, edge1: number, value: number) {
-  const t = clamp((value - edge0) / Math.max(0.00001, edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
 }
 
 function positiveModulo(value: number, divisor: number) {

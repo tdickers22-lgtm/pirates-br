@@ -8,12 +8,15 @@
 //     open deck stay at deck level.
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP_STATS } from '../src/shared/constants/index.ts';
-import { getCannonDeckLocalPosition } from '../src/shared/interactions.ts';
+import { getCannonDeckLocalPosition, getHelmControlLocal, getShipFloorYAt } from '../src/shared/interactions.ts';
 import {
   getCrowNestStandingY,
   getMainMastLocalZ,
   getShipCompanionwayConfig,
+  getShipDeckRaiseAt,
   getShipDeckWalkHalfWidth,
+  getShipDeckY,
+  getShipHoldFloorY,
 } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -76,9 +79,9 @@ for (const type of Object.keys(SHIP_STATS)) {
   // ── 2. Stairwell floor ──
   // The ship has settled to its floating draft during the physics steps above —
   // measure against the LIVE deck height, not the pre-float constant.
-  const liveDeckY = ship.position.y + stats.height + 0.1;
+  const liveDeckY = getShipDeckY(ship.position.y, stats);
   const cw = getShipCompanionwayConfig(stats);
-  const floorAt = (lx, lz) => match.physics.getShipFloorY(
+  const floorAt = (lx, lz) => getShipFloorYAt(
     { x: ship.position.x + lx, y: liveDeckY, z: ship.position.z + lz }, ship);
   const centerFloor = floorAt(cw.cx, cw.cz);
   expect('stairwell centre descends (no glass floor)', centerFloor < liveDeckY - 0.5,
@@ -97,13 +100,30 @@ for (const type of Object.keys(SHIP_STATS)) {
     expect(`cannon${index} stand is solid deck`, standFloor >= liveDeckY - 0.3 && standFloor <= liveDeckY + 1.6,
       `floor=${standFloor.toFixed(2)} deckY=${liveDeckY.toFixed(2)}`);
   }
+
+  // ── 2b. ONE canonical floor function ──
+  // Match used to keep its own getShipFloorY that returned the bare deck: it had
+  // silently lost the quarterdeck dais and the hold footprint, so held-interact
+  // context on the raised helm platform measured a floor ~0.45 m too low. Both
+  // callers now read shared getShipFloorYAt — pin the two clauses that diverged.
+  const helm = getHelmControlLocal(stats);
+  const helmFloor = floorAt(helm.x, helm.z);
+  const helmRaise = getShipDeckRaiseAt(helm, stats);
+  expect('helm stand sits ON the quarterdeck dais', helmRaise > 0.1 && Math.abs(helmFloor - (liveDeckY + helmRaise)) < 1e-6,
+    `floor=${helmFloor.toFixed(3)} deckY=${liveDeckY.toFixed(3)} raise=${helmRaise.toFixed(3)}`);
+  // Below the deck line and inside the hold footprint → the hold floor, not the deck.
+  const holdY = getShipHoldFloorY(ship.position.y);
+  const belowDeck = getShipFloorYAt(
+    { x: ship.position.x, y: liveDeckY - 1.2, z: ship.position.z + cw.stairBackZ - 1 }, ship);
+  expect('under the deck, amidships, the floor is the HOLD', Math.abs(belowDeck - holdY) < 1e-6,
+    `floor=${belowDeck.toFixed(3)} holdY=${holdY.toFixed(3)}`);
 }
 
 // ── 3. The crow's nest is a walkable FLOOR: Space works up there ──
 // PhysicsSystem already treats the basket as a floor (gravity + velocity.y run,
 // WASD clamped to the disc). Match owns the other half: the nest must not be in
 // `jumpBlocked`, and `grounded` must measure against the BASKET, not the deck
-// ~15m below (getShipFloorY would report the lookout permanently airborne).
+// ~15m below (getShipFloorYAt would report the lookout permanently airborne).
 console.log("\ncrow's nest jump:");
 {
   const makeFakeWs = () => ({ readyState: 1, bufferedAmount: 0, send() {}, close() {} });

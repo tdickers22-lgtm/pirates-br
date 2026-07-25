@@ -124,6 +124,13 @@ export const SHIP_STATS: Record<ShipType, {
 };
 
 export const SHIP = {
+  /** Standing surface of the weather deck, above the hull top: shipY + height +
+   *  this. The quarterdeck dais is added on top by getShipDeckRaiseAt. */
+  DECK_STAND_OFFSET: 0.1,
+  /** Cargo-hold floor above the ship origin — one step above the keel line. */
+  HOLD_FLOOR_OFFSET: 0.35,
+  /** Helm stand point, aft along the hull as a fraction of length (local −z). */
+  HELM_LOCAL_Z_F: 0.37,
   HULL_SECTION_RATIO: 0.25,   // each section is 1/4 of total
   SINK_TIME: 20,              // seconds — the founder is a scene, not a pop
   REPAIR_HP: 100,

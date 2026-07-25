@@ -1,12 +1,17 @@
-import { FLOODING, SHIP_STATS } from './constants/index.js';
-import type { IslandDock, Player, Ship, ShipHole, Vec3 } from './types/index.js';
+import { FLOODING, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
+import type { Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
 import {
-  getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckWalkHalfWidth, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
+  angleWrap, clamp, dist2D, getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckRaiseAt, getShipDeckWalkHalfWidth, getShipDeckY, getShipHoldFloorY, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
 
 type ShipStats = (typeof SHIP_STATS)[keyof typeof SHIP_STATS];
 type ShipLocalPoint = { x: number; z: number };
 type ShipLike = Pick<Ship, 'position' | 'rotation' | 'type' | 'id'>;
 type PlayerLike = Pick<Player, 'position' | 'onShipId'>;
+
+/** The gold hoarder's table is wide — reach him from anywhere around it. */
+const GOLD_HOARDER_REACH_BONUS = 0.8;
+/** Swim out at least this far before the mermaid will carry you home. */
+const MERMAID_RETURN_MIN_DISTANCE = 45;
 
 export function toShipLocalPoint(position: { x: number; z: number }, ship: Pick<Ship, 'position' | 'rotation'>): ShipLocalPoint {
   const dx = position.x - ship.position.x;
@@ -96,8 +101,93 @@ export function getAnchorControlLocal(stats: Pick<ShipStats, 'length'>): ShipLoc
   };
 }
 
+export function getHelmControlLocal(stats: Pick<ShipStats, 'length'>): ShipLocalPoint {
+  return {
+    x: 0,
+    z: -stats.length * SHIP.HELM_LOCAL_Z_F,
+  };
+}
+
 export function getSailControlLocal(stats: Pick<ShipStats, 'length' | 'mastCount' | 'width'>): ShipLocalPoint {
   return getSailStationLocal(stats);
+}
+
+/** Half-width of the walkable CARGO HOLD at a hull-local z (tapers at the ends). */
+export function getShipHoldHalfWidth(stats: Pick<ShipStats, 'width' | 'length'>, localZ: number, margin = 0): number {
+  const normalized = clamp(Math.abs(localZ) / Math.max(0.001, stats.length * 0.34), 0, 1);
+  const endTaper = normalized > 0.58 ? (normalized - 0.58) / 0.42 : 0;
+  return stats.width * (0.38 - endTaper * 0.11) + margin;
+}
+
+export function isInsideShipHoldFootprint(local: ShipLocalPoint, stats: Pick<ShipStats, 'width' | 'length'>, margin = 0): boolean {
+  if (Math.abs(local.z) > stats.length * 0.34 + margin) return false;
+  return Math.abs(local.x) <= getShipHoldHalfWidth(stats, local.z, margin);
+}
+
+/**
+ * CANONICAL standing height aboard a hull: hold floor, companionway ramp,
+ * weather deck, or the raised quarterdeck dais — whichever the point is over.
+ * Physics resolves the walker against this and Match reads it for held-interact
+ * context, so the two can never disagree about where the floor is.
+ */
+export function getShipFloorYAt(
+  position: Vec3,
+  ship: Pick<Ship, 'position' | 'rotation' | 'type'>,
+  providedLocal?: ShipLocalPoint,
+): number {
+  const stats = SHIP_STATS[ship.type];
+  const deckY = getShipDeckY(ship.position.y, stats);
+  const holdFloor = getShipHoldFloorY(ship.position.y);
+  const local = providedLocal ?? toShipLocalPoint(position, ship);
+  const stair = getShipCompanionwayConfig(stats);
+  if (
+    Math.abs(local.x - stair.cx) <= stair.stairHalfWidth
+    && local.z <= stair.stairFrontZ
+    && local.z >= stair.stairBackZ
+  ) {
+    // The whole stairwell footprint is open air — the floor there is always the
+    // stair ramp, never a deck-level lid. Walking onto the hole from ANY side
+    // drops you onto the steps; the coaming colliders around the sides/back are
+    // what stop accidental entry, not a phantom floor.
+    const descent = clamp((stair.stairFrontZ - local.z) / Math.max(0.001, stair.stairFrontZ - stair.stairBackZ), 0, 1);
+    return deckY + (holdFloor - deckY) * descent;
+  }
+  if (isInsideShipHoldFootprint(local, stats, 0.08) && position.y < deckY - 0.25) {
+    return holdFloor;
+  }
+  // Stern quarterdeck dais — a genuinely raised helm platform (ramps up over its
+  // front step). 0 everywhere off the dais, so the rest of the deck is unchanged.
+  return deckY + getShipDeckRaiseAt(local, stats);
+}
+
+/** Which rail a gun sits on: +1 starboard (first half of the indices), −1 port. */
+export function getCannonSide(stats: Pick<ShipStats, 'cannonCount'>, cannonIndex: number): 1 | -1 {
+  return cannonIndex < Math.max(1, stats.cannonCount / 2) ? 1 : -1;
+}
+
+/** World yaw this cannon's broadside faces — bot gunnery and the aim clamp
+ *  share it so "which rail can hit the target" is a single truth. */
+export function getCannonBroadsideYaw(ship: Pick<Ship, 'rotation' | 'type'>, cannonIndex: number): number {
+  return ship.rotation + getCannonSide(SHIP_STATS[ship.type], cannonIndex) * Math.PI * 0.5;
+}
+
+/**
+ * CANONICAL cannon aim: a gun swings inside CANNON_YAW_ARC of its own broadside
+ * and elevates between CANNON_PITCH_MIN/MAX. Server authority (Match, the firing
+ * solution in WeaponSystem) and the client's viewmodel prediction all call this,
+ * so the barrel a gunner sees is the barrel the shot leaves.
+ */
+export function getConstrainedCannonAim(
+  ship: Pick<Ship, 'rotation' | 'type'>,
+  cannonIndex: number,
+  yaw: number,
+  pitch: number,
+): { yaw: number; pitch: number } {
+  const broadsideYaw = getCannonBroadsideYaw(ship, cannonIndex);
+  return {
+    yaw: broadsideYaw + clamp(angleWrap(yaw - broadsideYaw), -SHIP.CANNON_YAW_ARC, SHIP.CANNON_YAW_ARC),
+    pitch: clamp(pitch, SHIP.CANNON_PITCH_MIN, SHIP.CANNON_PITCH_MAX),
+  };
 }
 
 export function getCannonDeckLocalPosition(stats: Pick<ShipStats, 'cannonCount' | 'length' | 'width'>, cannonIndex: number): ShipLocalPoint {
@@ -152,7 +242,8 @@ export function findNearbyCannonIndex(player: PlayerLike, ship: ShipLike): numbe
 export function isNearHelm(player: PlayerLike, ship: ShipLike): boolean {
   if (player.onShipId !== ship.id) return false;
   const local = toShipLocalPoint(player.position, ship);
-  return Math.abs(local.x) < 1.2 && Math.abs(local.z + SHIP_STATS[ship.type].length * 0.37) < 1.45;
+  const helm = getHelmControlLocal(SHIP_STATS[ship.type]);
+  return Math.abs(local.x - helm.x) < 1.2 && Math.abs(local.z - helm.z) < 1.45;
 }
 
 export function isNearSailStation(player: PlayerLike, ship: ShipLike): boolean {
@@ -302,10 +393,100 @@ export function isNearCrowNestLadder(player: PlayerLike, ship: ShipLike): boolea
   const stats = SHIP_STATS[ship.type];
   const local = toShipLocalPoint(player.position, ship);
   const { mastZ, maxAbsX, maxAbsZ } = getCrowNestLadderInteractionBounds(stats);
-  const deckY = ship.position.y + stats.height + 0.1;
+  const deckY = getShipDeckY(ship.position.y, stats);
   const y = (player.position as Vec3).y;
   return Math.abs(local.x) < maxAbsX
     && Math.abs(local.z - mastZ) < maxAbsZ
     && y >= deckY - 0.35
     && y < deckY + stats.height * 4.2;
+}
+
+// ── World proximity (CANONICAL) ──────────────────────────────────────────────
+// The server decides whether an interaction happens; the client only decides
+// whether to OFFER it. Both questions are the same geometry, so they live here:
+// a prompt can never appear for something the server would refuse, and never be
+// missing for something it would accept.
+
+/** Nearest upgrade station within arm's reach, or null. */
+export function findNearbyUpgradeStation(
+  islands: ReadonlyArray<Pick<Island, 'upgradeStations'>>,
+  player: Pick<Player, 'position'>,
+): UpgradeStation | null {
+  let closest: UpgradeStation | null = null;
+  let closestDistance: number = PLAYER.INTERACT_RANGE;
+  for (const island of islands) {
+    for (const station of island.upgradeStations ?? []) {
+      const distance = dist2D(player.position.x, player.position.z, station.position.x, station.position.z);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closest = station;
+      }
+    }
+  }
+  return closest;
+}
+
+/** The gold hoarder you can sell to right now. The band is a shade wider than a
+ *  plain interact so the trader is reachable from around his table. */
+export function findNearbyGoldHoarder<I extends Pick<Island, 'npcs'>>(
+  islands: ReadonlyArray<I>,
+  player: Pick<Player, 'position'>,
+): { npc: IslandNpc; island: I } | null {
+  let closest: { npc: IslandNpc; island: I; distance: number } | null = null;
+  for (const island of islands) {
+    for (const npc of island.npcs ?? []) {
+      if (npc.role !== 'gold_hoarder') continue;
+      const distance = dist2D(player.position.x, player.position.z, npc.position.x, npc.position.z);
+      if (distance < PLAYER.INTERACT_RANGE + GOLD_HOARDER_REACH_BONUS && (!closest || distance < closest.distance)) {
+        closest = { npc, island, distance };
+      }
+    }
+  }
+  return closest ? { npc: closest.npc, island: closest.island } : null;
+}
+
+/** A stranded swimmer's own ship, once she is far enough out for the mermaid to
+ *  be the only way home. */
+export function findMermaidReturnShip<S extends Pick<Ship, 'id' | 'alive' | 'sinking' | 'position'>>(
+  ships: ReadonlyArray<S>,
+  player: Pick<Player, 'state' | 'shipId' | 'position'>,
+): S | null {
+  if (player.state !== 'swimming' || !player.shipId) return null;
+  const homeShip = ships.find((ship) => ship.id === player.shipId && ship.alive && !ship.sinking) ?? null;
+  if (!homeShip) return null;
+  const distance = dist2D(player.position.x, player.position.z, homeShip.position.x, homeShip.position.z);
+  return distance >= MERMAID_RETURN_MIN_DISTANCE ? homeShip : null;
+}
+
+/** Planks available for a hull patch: pocket first, then the ship's stores. */
+export function getRepairPlankCount(
+  player: Pick<Player, 'pocketWood'>,
+  ship: Pick<Ship, 'inventory'> | null,
+): number {
+  const shipPlanks = ship?.inventory.find((entry) => entry.item === 'wood_plank')?.qty ?? 0;
+  return player.pocketWood + shipPlanks;
+}
+
+/** Nearest live keg whose fuse you could cut. Kegs riding a hull must already
+ *  have their world position synced by the caller. */
+export function findNearbyKeg(
+  kegs: ReadonlyArray<ShipKeg>,
+  player: Pick<Player, 'position'>,
+  ship: Pick<Ship, 'id'> | null = null,
+): ShipKeg | null {
+  let closest: ShipKeg | null = null;
+  let closestDistance: number = SHIP.KEG_DIFFUSE_RANGE;
+  for (const keg of kegs) {
+    if (ship && keg.shipId && keg.shipId !== ship.id) continue;
+    if (keg.timer <= 0) continue;
+    const dx = player.position.x - keg.position.x;
+    const dy = player.position.y - keg.position.y;
+    const dz = player.position.z - keg.position.z;
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closest = keg;
+    }
+  }
+  return closest;
 }

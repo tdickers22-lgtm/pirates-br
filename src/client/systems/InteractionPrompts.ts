@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipHole, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
-import { getBraceStationLocals, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
+import { dist2D, getBraceStationLocals, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
 import {
   findNearbyCannonIndex,
   getAmmoCrateLocal,
@@ -33,7 +33,6 @@ export type InteractionView = {
   pendingInteractFromUi: boolean;
   pendingLaunchFromUi: boolean;
   createMermaidAnchor(player: Player, ship: Ship): { x: number; z: number; shipId: string };
-  distance2D(ax: number, az: number, bx: number, bz: number): number;
   findChestById(chestId: string): TreasureChest | null;
   findHarvestTarget(player: Player): { prop: IslandProp; island: Island } | null;
   findNearbyKeg(player: Player, ship?: Ship | null): ShipKeg | null;
@@ -103,7 +102,7 @@ export class InteractionPrompts {
       for (const other of this.view.state.players) {
         if (other.id === player.id || other.state !== 'downed') continue;
         if (other.shipId !== player.shipId) continue;
-        const d2 = this.view.distance2D(player.position.x, player.position.z, other.position.x, other.position.z);
+        const d2 = dist2D(player.position.x, player.position.z, other.position.x, other.position.z);
         if (d2 > 3.2 || Math.abs(other.position.y - player.position.y) > 2.2) continue;
         this.pushInteractionCandidate(
           candidates,

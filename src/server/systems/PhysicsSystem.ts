@@ -1,7 +1,7 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER } from '../../shared/constants/index.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
-import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, countOpenHoles } from '../../shared/interactions.js';
+import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles } from '../../shared/interactions.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
@@ -21,8 +21,9 @@ import {
   getCrowNestStandingY,
   getMainMastLocalZ,
   getShipCompanionwayConfig,
-  getShipDeckRaiseAt,
   getShipDeckWalkHalfWidth,
+  getShipDeckY,
+  getShipHoldFloorY,
   getSeaRockBoundsRadius,
   getSeaRockColliders,
   intersectRaySeaRock,
@@ -654,7 +655,7 @@ export class PhysicsSystem {
             if (!ship.alive) continue;
             const stats = SHIP_STATS[ship.type];
             const local = this.toShipLocal(player.position, ship);
-            const deckY = ship.position.y + stats.height + 0.1;
+            const deckY = getShipDeckY(ship.position.y, stats);
             if (
               this.isInsideShipDeckFootprint(local, stats, 0.32)
               && player.position.y <= deckY + 0.42
@@ -668,7 +669,7 @@ export class PhysicsSystem {
         if (landedShip) {
           const stats = SHIP_STATS[landedShip.type];
           player.onShipId = landedShip.id;
-          player.position.y = landedShip.position.y + stats.height + 0.1;
+          player.position.y = getShipDeckY(landedShip.position.y, stats);
           player.velocity.y = 0;
           player.cannonFlightTimer = 0;
           player.cannonBallistic = false;
@@ -759,7 +760,7 @@ export class PhysicsSystem {
           if (!downed) player.state = 'alive';
           continue;
         }
-        const deckY = onShip.position.y + stats.height + 0.1;
+        const deckY = getShipDeckY(onShip.position.y, stats);
         const localBeforeCarry = this.toShipLocal(player.position, onShip);
 
         // Passengers need to inherit both ship translation and turn so the hold feels welded to the hull.
@@ -798,7 +799,7 @@ export class PhysicsSystem {
           }
         }
 
-        const floorY = this.getShipFloorY(player.position, onShip, local);
+        const floorY = getShipFloorYAt(player.position, onShip, local);
 
         // Gravity (crow's nest: walkable basket — the nest deck is a FLOOR, not
         // a Y pin, so a jump reads as a jump: gravity + velocity.y run normally
@@ -1787,12 +1788,12 @@ export class PhysicsSystem {
       if (!ship) return null;
       const stats = SHIP_STATS[ship.type];
       const local = this.toShipLocal(player.position, ship);
-      const deckY = ship.position.y + stats.height + 0.1;
-      const holdFloor = ship.position.y + 0.35;
+      const deckY = getShipDeckY(ship.position.y, stats);
+      const holdFloor = getShipHoldFloorY(ship.position.y);
       const aboveDeckLine = player.position.y > ship.position.y + stats.height * 0.35;
       const withinDeckXZ = this.isInsideShipDeckFootprint(local, stats, 0.2);
       if (aboveDeckLine && withinDeckXZ) return ship;
-      const withinHullXZ = this.isInsideShipHoldFootprint(local, stats, 0.18);
+      const withinHullXZ = isInsideShipHoldFootprint(local, stats, 0.18);
       const inHoldY = player.position.y >= holdFloor - 0.6 && player.position.y < deckY - 0.2;
       if (withinHullXZ && inHoldY) return ship;
       return null;
@@ -1807,7 +1808,7 @@ export class PhysicsSystem {
       if (!ship.alive) continue;
       const stats = SHIP_STATS[ship.type];
       const local = this.toShipLocal(player.position, ship);
-      const deckY = ship.position.y + stats.height + 0.1;
+      const deckY = getShipDeckY(ship.position.y, stats);
       const aboveDeckLine = player.position.y > ship.position.y + stats.height * 0.25;
       const withinDeckXZ = this.isInsideShipDeckFootprint(local, stats, 0.3);
       if (aboveDeckLine && withinDeckXZ && player.position.y <= deckY + 1.8) return ship;
@@ -2598,51 +2599,9 @@ export class PhysicsSystem {
     return Math.abs(local.x) <= stats.width * 0.75 && Math.abs(local.z) <= stats.length * 0.42;
   }
 
-  private getShipFloorY(position: Vec3, ship: Ship, providedLocal?: { x: number; z: number }) {
-    const stats = SHIP_STATS[ship.type];
-    const deckY = ship.position.y + stats.height + 0.1;
-    const holdFloor = ship.position.y + 0.35;
-    const local = providedLocal ?? this.toShipLocal(position, ship);
-    const stair = this.getShipStairConfig(stats);
-    if (
-      Math.abs(local.x - stair.x) <= stair.halfWidth
-      && local.z <= stair.frontZ
-      && local.z >= stair.backZ
-    ) {
-      // The whole stairwell footprint is open air — the floor there is always the
-      // stair ramp, never a deck-level lid. Walking onto the hole from ANY side
-      // drops you onto the steps; the coaming colliders around the sides/back are
-      // what stop accidental entry, not a phantom floor.
-      const descent = clamp((stair.frontZ - local.z) / Math.max(0.001, stair.frontZ - stair.backZ), 0, 1);
-      return deckY + (holdFloor - deckY) * descent;
-    }
-    if (this.isInsideShipHoldFootprint(local, stats, 0.08) && position.y < deckY - 0.25) {
-      return holdFloor;
-    }
-    // Stern quarterdeck dais — a genuinely raised helm platform (ramps up over its
-    // front step). 0 everywhere off the dais, so the rest of the deck is unchanged.
-    return deckY + getShipDeckRaiseAt(local, stats);
-  }
-
-  private getShipStairConfig(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {
-    const companionway = getShipCompanionwayConfig(stats);
-    return {
-      x: companionway.cx,
-      halfWidth: companionway.stairHalfWidth,
-      frontZ: companionway.stairFrontZ,
-      backZ: companionway.stairBackZ,
-    };
-  }
-
   private isInsideShipDeckFootprint(local: { x: number; z: number }, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], margin = 0) {
     if (Math.abs(local.z) > stats.length * 0.48 + margin) return false;
     const halfWidth = this.getDeckHalfWidth(stats, local.z, margin);
-    return Math.abs(local.x) <= halfWidth;
-  }
-
-  private isInsideShipHoldFootprint(local: { x: number; z: number }, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], margin = 0) {
-    if (Math.abs(local.z) > stats.length * 0.34 + margin) return false;
-    const halfWidth = this.getHoldHalfWidth(stats, local.z, margin);
     return Math.abs(local.x) <= halfWidth;
   }
 
@@ -2715,17 +2674,11 @@ export class PhysicsSystem {
 
   private clampHoldPosition(local: { x: number; z: number }, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]) {
     const z = clamp(local.z, -stats.length * 0.32, stats.length * 0.32);
-    const halfWidth = this.getHoldHalfWidth(stats, z);
+    const halfWidth = getShipHoldHalfWidth(stats, z);
     return {
       x: clamp(local.x, -halfWidth, halfWidth),
       z,
     };
-  }
-
-  private getHoldHalfWidth(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], localZ: number, margin = 0) {
-    const normalized = clamp(Math.abs(localZ) / Math.max(0.001, stats.length * 0.34), 0, 1);
-    const endTaper = normalized > 0.58 ? (normalized - 0.58) / 0.42 : 0;
-    return stats.width * (0.38 - endTaper * 0.11) + margin;
   }
 
   private getDeckHalfWidth(stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], localZ: number, margin = 0) {
@@ -2735,5 +2688,4 @@ export class PhysicsSystem {
     // shared getShipDeckWalkHalfWidth so station placement uses the same line.
     return Math.max(PLAYER.RADIUS + 0.08, getShipDeckWalkHalfWidth(stats, localZ, margin));
   }
-
 }

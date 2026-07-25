@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { ECONOMY, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { countOpenHoles } from '../../shared/interactions.js';
-import { angleWrap, isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
+import { angleWrap, dist2D, isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
 import type { ClientInteractKind, FloatingDamageIndicator } from '../core/Game.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from '../rendering/OceanRenderer.js';
@@ -41,7 +41,6 @@ export type HudView = {
   /** True until the player first boards their own hull — drives the first
    *  objective line ("board your ship") and the world/minimap marker. */
   readonly ownShipObjectiveActive: boolean;
-  distance2D(ax: number, az: number, bx: number, bz: number): number;
   findNearbyCannonIndex(player: Player, ship: Ship): number | null;
   findRepairableHole(player: Player, ship: Ship): ShipHole | null;
   flashIslandBanner(name: string): void;
@@ -218,7 +217,7 @@ export class HudController {
         ? `Storm moving now · closes in ${stormClock}`
         : `Next storm shift in ${stormClock}`;
 
-    const outsideStorm = this.view.distance2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ) > this.view.state.storm.safeRadius;
+    const outsideStorm = dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ) > this.view.state.storm.safeRadius;
     // "Critical" is now the flood, not a hull-HP average: she is going down
     // when the bilge is winning, or when she is carrying more leaks than any
     // crew can plank ahead of the water.
@@ -602,7 +601,7 @@ export class HudController {
       && !!own
       && !own.sinking
       && (own.waterLevel ?? 0) > 0.02
-      && this.view.distance2D(player.position.x, player.position.z, own.position.x, own.position.z) < 80;
+      && dist2D(player.position.x, player.position.z, own.position.x, own.position.z) < 80;
     const ship = aboard ?? (overboard ? own : null);
     this.view.ui.waterGaugeTitle.textContent = overboard ? 'Your Ship' : 'Bilge';
     const level = ship ? THREE.MathUtils.clamp(ship.waterLevel ?? 0, 0, 1) : 0;
@@ -646,7 +645,7 @@ export class HudController {
     const nearOwnShip = !!ship
       && player.shipId === ship.id
       && player.state === 'alive'
-      && this.view.distance2D(player.position.x, player.position.z, ship.position.x, ship.position.z) < 58;
+      && dist2D(player.position.x, player.position.z, ship.position.x, ship.position.z) < 58;
     const visible = !!ship
       && player.state !== 'swimming'
       && player.state !== 'eliminated'

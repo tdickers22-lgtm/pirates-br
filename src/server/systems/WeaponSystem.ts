@@ -2,7 +2,7 @@ import { v4 as uuid } from 'uuid';
 import type { Player, Ship, Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
 import { WEAPONS, SHIP, SHIP_STATS, PLAYER, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { angleWrap, degreesToRad } from '../../shared/utils/index.js';
-import { getCannonDeckLocalPosition } from '../../shared/interactions.js';
+import { getCannonDeckLocalPosition, getConstrainedCannonAim } from '../../shared/interactions.js';
 
 export interface HitscanTrace {
   origin: Vec3;
@@ -265,7 +265,7 @@ export class WeaponSystem {
     }
     ship.cannonCooldowns[cannonIndex] = SHIP.CANNON_RELOAD;
 
-    const constrained = this.getConstrainedCannonAim(ship, cannonIndex, yaw, pitch);
+    const constrained = getConstrainedCannonAim(ship, cannonIndex, yaw, pitch);
     yaw = constrained.yaw;
     pitch = constrained.pitch;
 
@@ -417,21 +417,6 @@ export class WeaponSystem {
       x: baseX + Math.sin(yaw) * Math.cos(pitch) * 0.82,
       y: baseY + Math.sin(pitch) * 0.4,
       z: baseZ + Math.cos(yaw) * Math.cos(pitch) * 0.82,
-    };
-  }
-
-  /** World yaw this cannon's broadside faces — bot gunnery and the aim clamp
-   *  below share it so "which rail can hit the target" is a single truth. */
-  getCannonBroadsideYaw(ship: Ship, cannonIndex: number): number {
-    const cannonsPerSide = Math.max(1, SHIP_STATS[ship.type].cannonCount / 2);
-    return ship.rotation + (cannonIndex < cannonsPerSide ? Math.PI * 0.5 : -Math.PI * 0.5);
-  }
-
-  private getConstrainedCannonAim(ship: Ship, cannonIndex: number, yaw: number, pitch: number) {
-    const broadsideYaw = this.getCannonBroadsideYaw(ship, cannonIndex);
-    return {
-      yaw: broadsideYaw + Math.max(-SHIP.CANNON_YAW_ARC, Math.min(SHIP.CANNON_YAW_ARC, angleWrap(yaw - broadsideYaw))),
-      pitch: Math.max(SHIP.CANNON_PITCH_MIN, Math.min(SHIP.CANNON_PITCH_MAX, pitch)),
     };
   }
 }

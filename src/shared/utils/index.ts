@@ -1002,6 +1002,17 @@ export function getShipQuarterdeckConfig(stats: { width: number; length: number 
   };
 }
 
+/** Standing surface of the FLAT weather deck. Every "how high is the deck here"
+ *  question starts here and adds getShipDeckRaiseAt for the quarterdeck dais. */
+export function getShipDeckY(shipY: number, stats: { height: number }): number {
+  return shipY + stats.height + SHIP.DECK_STAND_OFFSET;
+}
+
+/** Standing surface of the cargo hold, below the companionway. */
+export function getShipHoldFloorY(shipY: number): number {
+  return shipY + SHIP.HOLD_FLOOR_OFFSET;
+}
+
 /** Raised standing height at a ship-local point relative to the flat deck: the
  *  quarterdeck dais lifts the stern, ramping up over its front step so a walker
  *  steps up smoothly. Returns 0 anywhere off the dais. */
@@ -1174,7 +1185,7 @@ export function getSwimHullVerticalBand(
   const draftF = type ? SHIP.HULL_DRAFT_F[type] : SHIP.HULL_DRAFT_F_FALLBACK;
   return {
     keelY: shipY - stats.height * draftF - 0.15,
-    deckY: shipY + stats.height + 0.1,
+    deckY: getShipDeckY(shipY, stats),
   };
 }
 

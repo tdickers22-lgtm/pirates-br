@@ -1,12 +1,19 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
+  GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { dist2D, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex,
+  findMermaidReturnShip,
+  findNearbyGoldHoarder,
+  findNearbyKeg,
+  findNearbyUpgradeStation,
+  getCannonSide,
+  getConstrainedCannonAim,
+  getRepairPlankCount,
   toShipLocalPoint,
   countOpenHoles,
   findRepairableHole as sharedFindRepairableHole,
@@ -400,7 +407,6 @@ export class Game {
       set storyCutscene(v) { self.storyCutscene = v; },
       buildPropInstance: (type, position, yaw, scale) => this.buildPropInstance(type, position, yaw, scale),
       disposeSceneObject: (root) => this.disposeSceneObject(root),
-      distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
       getLocalPlayer: () => this.getLocalPlayer(),
       getTrackedShip: () => this.getTrackedShip(),
     };
@@ -426,20 +432,19 @@ export class Game {
       get pendingLaunchFromUi() { return self.pendingLaunchFromUi; },
       set pendingLaunchFromUi(v) { self.pendingLaunchFromUi = v; },
       createMermaidAnchor: (player, ship) => this.createMermaidAnchor(player, ship),
-      distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
       findChestById: (chestId) => this.findChestById(chestId),
       findHarvestTarget: (player) => this.envFx.findHarvestTarget(player),
-      findNearbyKeg: (player, ship) => this.findNearbyKeg(player, ship),
+      findNearbyKeg: (player, ship) => (this.state ? findNearbyKeg(this.state.kegs, player, ship ?? null) : null),
       findRepairableHole: (player, ship) => this.findRepairableHole(player, ship),
       getBarrelWorldPoint: (barrelId) => this.getBarrelWorldPoint(barrelId),
       getChestWorldPoint: (chestId) => this.getChestWorldPoint(chestId),
       getInventoryQty: (ship, item) => this.getInventoryQty(ship, item),
       getLocalPlayer: () => this.getLocalPlayer(),
       getLookDirection: (player) => this.getLookDirection(player),
-      getMermaidReturnShip: (player) => this.getMermaidReturnShip(player),
-      getNearbyGoldHoarder: (player) => this.getNearbyGoldHoarder(player),
-      getNearbyUpgradeStation: (player) => this.getNearbyUpgradeStation(player),
-      getRepairPlankCount: (player, ship) => this.getRepairPlankCount(player, ship),
+      getMermaidReturnShip: (player) => (this.state ? findMermaidReturnShip(this.state.ships, player) : null),
+      getNearbyGoldHoarder: (player) => (this.state ? findNearbyGoldHoarder(this.state.islands, player) : null),
+      getNearbyUpgradeStation: (player) => (this.state ? findNearbyUpgradeStation(this.state.islands, player) : null),
+      getRepairPlankCount: (player, ship) => getRepairPlankCount(player, ship),
       getHoleRepairWorldPoint: (ship, hole) => this.getHoleRepairWorldPoint(ship, hole),
       getShipWorldPoint: (ship, localX, localZ, worldY) => this.getShipWorldPoint(ship, localX, localZ, worldY),
       getTavernDoorWorldPoint: (door, out) => this.getTavernDoorWorldPoint(door, out),
@@ -569,7 +574,6 @@ export class Game {
       get ownShipObjectiveActive() { return self.ownShipObjectiveActive; },
       get visibleInteractKind() { return self.visibleInteractKind; },
       set visibleInteractKind(v) { self.visibleInteractKind = v; },
-      distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
       findNearbyCannonIndex: (player, ship) => findNearbyCannonIndex(player, ship),
       findRepairableHole: (player, ship) => this.findRepairableHole(player, ship),
       flashIslandBanner: (name) => this.flashIslandBanner(name),
@@ -2069,8 +2073,8 @@ export class Game {
       // Nearest islands first so the spawn area appears immediately.
       const cam = this.renderer.camera.position;
       this.pendingIslandBuilds.sort((a, b) =>
-        this.distance2D(cam.x, cam.z, a.position.x, a.position.z)
-        - this.distance2D(cam.x, cam.z, b.position.x, b.position.z));
+        dist2D(cam.x, cam.z, a.position.x, a.position.z)
+        - dist2D(cam.x, cam.z, b.position.x, b.position.z));
       // Elliptical footprints: foam/shallows/damping land at the real
       // waterline (the old circle-of-roster-radius buried the foam band tens
       // of meters inside the beach).
@@ -2299,7 +2303,7 @@ export class Game {
           nearestIsland: (() => {
             let best: { id: string; d: number } | null = null;
             for (const island of this.state?.islands ?? []) {
-              const d = this.distance2D(player?.position.x ?? 0, player?.position.z ?? 0, island.position.x, island.position.z);
+              const d = dist2D(player?.position.x ?? 0, player?.position.z ?? 0, island.position.x, island.position.z);
               if (!best || d < best.d) best = { id: island.id, d: Math.round(d) };
             }
             return best;
@@ -2441,7 +2445,7 @@ export class Game {
     for (const island of this.state.islands) {
       const group = this.islandMeshes.get(island.id);
       if (!group) continue;
-      const dist = this.distance2D(cam.x, cam.z, island.position.x, island.position.z);
+      const dist = dist2D(cam.x, cam.z, island.position.x, island.position.z);
       const detailRoot = group.userData.detailRoot as THREE.Object3D | undefined;
       const proxyRoot = group.userData.proxyRoot as THREE.Object3D | undefined;
       if (detailRoot && proxyRoot) {
@@ -2466,7 +2470,7 @@ export class Game {
         if (caveGroups) {
           for (const caveGroup of caveGroups) {
             const e = caveGroup.userData.caveEntranceWorld as { x: number; y: number; z: number };
-            const cd = this.distance2D(cam.x, cam.z, e.x, e.z);
+            const cd = dist2D(cam.x, cam.z, e.x, e.z);
             caveGroup.visible = showDetail && cd < 45;
           }
         }
@@ -2477,7 +2481,7 @@ export class Game {
           for (const glow of mouthGlows) {
             // 90m: the beckoning mouth glow must read from the approach, not
             // pop in at the threshold like the 55m chest/station budget.
-            glow.light.visible = showDetail && this.distance2D(cam.x, cam.z, glow.x, glow.z) < 90;
+            glow.light.visible = showDetail && dist2D(cam.x, cam.z, glow.x, glow.z) < 90;
           }
         }
       }
@@ -2485,7 +2489,7 @@ export class Game {
       for (const chest of island.chests) {
         const record = this.chestMeshes.get(chest.id);
         if (!record) continue;
-        const chestDist = this.distance2D(cam.x, cam.z, chest.position.x, chest.position.z);
+        const chestDist = dist2D(cam.x, cam.z, chest.position.x, chest.position.z);
         const carriedByLocal = chest.carriedByPlayerId === this.localPlayerId;
         record.root.visible = chestDist < lootRadius && !chest.opened && !carriedByLocal;
         const chestLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
@@ -2495,14 +2499,14 @@ export class Game {
       for (const barrel of island.barrels) {
         const root = this.barrelMeshes.get(barrel.id);
         if (!root) continue;
-        const barrelDist = this.distance2D(cam.x, cam.z, barrel.position.x, barrel.position.z);
+        const barrelDist = dist2D(cam.x, cam.z, barrel.position.x, barrel.position.z);
         root.visible = barrelDist < lootRadius && (!barrel.opened || barrel.loot.length > 0);
       }
 
       for (const station of island.upgradeStations) {
         const record = this.upgradeStationMeshes.get(station.id);
         if (!record) continue;
-        const stationDist = this.distance2D(cam.x, cam.z, station.position.x, station.position.z);
+        const stationDist = dist2D(cam.x, cam.z, station.position.x, station.position.z);
         record.root.visible = stationDist < upgradeRadius;
         const stationLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (stationLight) stationLight.visible = record.root.visible && stationDist < 55;
@@ -2511,7 +2515,7 @@ export class Game {
       for (const npc of island.npcs ?? []) {
         const record = this.npcMeshes.get(npc.id);
         if (!record) continue;
-        const npcDist = this.distance2D(cam.x, cam.z, npc.position.x, npc.position.z);
+        const npcDist = dist2D(cam.x, cam.z, npc.position.x, npc.position.z);
         record.root.visible = npcDist < npcRadius;
         const npcLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (npcLight) npcLight.visible = record.root.visible && npcDist < 55;
@@ -2521,7 +2525,7 @@ export class Game {
     for (const animal of this.state.wildlife ?? []) {
       const mesh = this.wildlifeMeshes.get(animal.id);
       if (!mesh) continue;
-      const dist = this.distance2D(cam.x, cam.z, animal.position.x, animal.position.z);
+      const dist = dist2D(cam.x, cam.z, animal.position.x, animal.position.z);
       // health is server-only (dead animals never reach the wire) — default alive.
       mesh.visible = (animal.health ?? 1) > 0 && dist < (animal.type === 'gull' ? wildlifeRadius * 1.35 : wildlifeRadius);
     }
@@ -2529,7 +2533,7 @@ export class Game {
     for (const rock of this.state.seaRocks ?? []) {
       const mesh = this.seaRockMeshes.get(rock.id);
       if (!mesh) continue;
-      const dist = this.distance2D(cam.x, cam.z, rock.position.x, rock.position.z);
+      const dist = dist2D(cam.x, cam.z, rock.position.x, rock.position.z);
       mesh.visible = dist < seaRockRadius;
     }
   }
@@ -2583,7 +2587,7 @@ export class Game {
 
   private updateMermaid(now: number): void {
     const player = this.getLocalPlayer();
-    const ship = player ? this.getMermaidReturnShip(player) : null;
+    const ship = player && this.state ? findMermaidReturnShip(this.state.ships, player) : null;
     if (!player || !ship) {
       this.mermaidAnchor = null;
       if (this.mermaidGroup.visible) this.mermaidGroup.visible = false;
@@ -2592,7 +2596,7 @@ export class Game {
     if (
       !this.mermaidAnchor
       || this.mermaidAnchor.shipId !== ship.id
-      || this.distance2D(player.position.x, player.position.z, this.mermaidAnchor.x, this.mermaidAnchor.z) > 62
+      || dist2D(player.position.x, player.position.z, this.mermaidAnchor.x, this.mermaidAnchor.z) > 62
     ) {
       this.mermaidAnchor = this.createMermaidAnchor(player, ship);
     }
@@ -3025,7 +3029,7 @@ export class Game {
       // Nameplate: shown for living opponents within ~85m, hidden when downed/gone.
       const plate = mesh.getObjectByName('nameplate');
       if (plate) {
-        const ndist = this.distance2D(this.renderer.camera.position.x, this.renderer.camera.position.z, player.position.x, player.position.z);
+        const ndist = dist2D(this.renderer.camera.position.x, this.renderer.camera.position.z, player.position.x, player.position.z);
         plate.visible = !isLocal && player.state === 'alive' && ndist < 85;
       }
       const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
@@ -3454,7 +3458,7 @@ export class Game {
           // Chainshot that dies above the water almost certainly caught rigging —
           // tear canvas audibly (visual scraps come from emitImpact's chainshot case).
           if (projectileType === 'chainshot' && mesh.position.y > 0.9) {
-            const d = this.distance2D(
+            const d = dist2D(
               this.renderer.camera.position.x, this.renderer.camera.position.z,
               mesh.position.x, mesh.position.z,
             );
@@ -3510,7 +3514,7 @@ export class Game {
         const nowT = this.ocean.getTime();
         const last = this.lastChainshotWhirrAt.get(projectile.id) ?? -1;
         if (nowT - last > 0.5) {
-          const d = this.distance2D(
+          const d = dist2D(
             this.renderer.camera.position.x, this.renderer.camera.position.z,
             projectile.position.x, projectile.position.z,
           );
@@ -4310,7 +4314,7 @@ export class Game {
     let targetFov = spyglassActive ? 6 : scopedFov ?? (aimingFirearm ? 64 : swimming ? 78 : 74);
 
     if (player.atCannon && trackedShip) {
-      const aim = this.getCannonAim(trackedShip, player.cannonIndex, this.input.getYaw(), this.input.getPitch());
+      const aim = getConstrainedCannonAim(trackedShip, player.cannonIndex, this.input.getYaw(), this.input.getPitch());
       const forward = new THREE.Vector3(
         Math.sin(aim.yaw) * Math.cos(aim.pitch),
         Math.sin(aim.pitch),
@@ -4319,7 +4323,7 @@ export class Game {
       const cannonWorld = this.shipRenderer.getCannonWorldPos(trackedShip.id, player.cannonIndex)
         ?? this.getShipWorldPoint(
           trackedShip,
-          this.getCannonSide(player.cannonIndex, trackedShip) * (SHIP_STATS[trackedShip.type].width * 0.52),
+          getCannonSide(SHIP_STATS[trackedShip.type], player.cannonIndex) * (SHIP_STATS[trackedShip.type].width * 0.52),
           0,
           SHIP_STATS[trackedShip.type].height + 0.18,
         );
@@ -5079,7 +5083,7 @@ export class Game {
     // Shore proximity — closest island edge to the listener drives breaker ambience.
     let nearestEdge = Infinity;
     for (const island of this.state.islands) {
-      const edge = this.distance2D(cam.x, cam.z, island.position.x, island.position.z) - island.radius;
+      const edge = dist2D(cam.x, cam.z, island.position.x, island.position.z) - island.radius;
       if (edge < nearestEdge) nearestEdge = edge;
     }
     const nearShore01 = Number.isFinite(nearestEdge)
@@ -5197,7 +5201,7 @@ export class Game {
     let bestDist = maxDist;
     for (const ship of this.state.ships) {
       if (!ship.alive || (ship.waterLevel ?? 0) <= 0.02) continue;
-      const d = this.distance2D(pos.x, pos.z, ship.position.x, ship.position.z);
+      const d = dist2D(pos.x, pos.z, ship.position.x, ship.position.z);
       if (d < bestDist) {
         bestDist = d;
         best = ship;
@@ -5354,19 +5358,9 @@ export class Game {
     ) ?? null;
   }
 
-  private distance2D(ax: number, az: number, bx: number, bz: number) {
-    const dx = ax - bx;
-    const dz = az - bz;
-    return Math.sqrt(dx * dx + dz * dz);
-  }
-
   private getInventoryQty(ship: Ship | null, item: ItemStack['item']) {
     if (!ship) return 0;
     return ship.inventory.find((entry) => entry.item === item)?.qty ?? 0;
-  }
-
-  private getRepairPlankCount(player: Player, ship: Ship | null) {
-    return player.pocketWood + this.getInventoryQty(ship, 'wood_plank');
   }
 
   private formatTradeItem(entry: ItemStack) {
@@ -5451,92 +5445,19 @@ export class Game {
     );
   }
 
-  private getCannonSide(cannonIndex: number, ship: Ship) {
-    return cannonIndex < Math.max(1, SHIP_STATS[ship.type].cannonCount / 2) ? 1 : -1;
-  }
-
-  private getCannonAim(ship: Ship, cannonIndex: number, yaw: number, pitch: number) {
-    const broadsideYaw = ship.rotation + (this.getCannonSide(cannonIndex, ship) > 0 ? Math.PI * 0.5 : -Math.PI * 0.5);
-    return {
-      yaw: broadsideYaw + THREE.MathUtils.clamp(angleWrap(yaw - broadsideYaw), -SHIP.CANNON_YAW_ARC, SHIP.CANNON_YAW_ARC),
-      pitch: THREE.MathUtils.clamp(pitch, SHIP.CANNON_PITCH_MIN, SHIP.CANNON_PITCH_MAX),
-    };
-  }
-
-  private findNearbyKeg(player: Player, ship: Ship | null = null): ShipKeg | null {
-    if (!this.state) return null;
-    let closest: ShipKeg | null = null;
-    let closestDistance: number = SHIP.KEG_DIFFUSE_RANGE;
-    for (const keg of this.state.kegs) {
-      if (ship && keg.shipId && keg.shipId !== ship.id) continue;
-      if (keg.timer <= 0) continue;
-      const dx = player.position.x - keg.position.x;
-      const dy = player.position.y - keg.position.y;
-      const dz = player.position.z - keg.position.z;
-      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closest = keg;
-      }
-    }
-    return closest;
-  }
-
-  private getNearbyUpgradeStation(player: Player): UpgradeStation | null {
-    if (!this.state) return null;
-    let closest: UpgradeStation | null = null;
-    let closestDistance: number = PLAYER.INTERACT_RANGE;
-    for (const island of this.state.islands) {
-      for (const station of island.upgradeStations) {
-        const dx = player.position.x - station.position.x;
-        const dz = player.position.z - station.position.z;
-        const distance = Math.sqrt(dx * dx + dz * dz);
-        if (distance < closestDistance) {
-          closestDistance = distance;
-          closest = station;
-        }
-      }
-    }
-    return closest;
-  }
-
-  private getNearbyGoldHoarder(player: Player): { npc: IslandNpc; island: Island } | null {
-    if (!this.state) return null;
-    let closest: { npc: IslandNpc; island: Island; distance: number } | null = null;
-    for (const island of this.state.islands) {
-      for (const npc of island.npcs) {
-        if (npc.role !== 'gold_hoarder') continue;
-        const distance = this.distance2D(player.position.x, player.position.z, npc.position.x, npc.position.z);
-        if (distance < PLAYER.INTERACT_RANGE + 0.85 && (!closest || distance < closest.distance)) {
-          closest = { npc, island, distance };
-        }
-      }
-    }
-    return closest ? { npc: closest.npc, island: closest.island } : null;
-  }
-
   private getClosestGoldHoarder(player: Player): { npc: IslandNpc; island: Island; distance: number } | null {
     if (!this.state) return null;
     let closest: { npc: IslandNpc; island: Island; distance: number } | null = null;
     for (const island of this.state.islands) {
       for (const npc of island.npcs) {
         if (npc.role !== 'gold_hoarder') continue;
-        const distance = this.distance2D(player.position.x, player.position.z, npc.position.x, npc.position.z);
+        const distance = dist2D(player.position.x, player.position.z, npc.position.x, npc.position.z);
         if (!closest || distance < closest.distance) {
           closest = { npc, island, distance };
         }
       }
     }
     return closest;
-  }
-
-  private getMermaidReturnShip(player: Player): Ship | null {
-    if (!this.state || player.state !== 'swimming' || !player.shipId) return null;
-    const homeShip = this.state.ships.find((ship) => ship.id === player.shipId && ship.alive && !ship.sinking) ?? null;
-    if (!homeShip) return null;
-    return this.distance2D(player.position.x, player.position.z, homeShip.position.x, homeShip.position.z) >= 45
-      ? homeShip
-      : null;
   }
 
   private findChestById(chestId: string): TreasureChest | null {
