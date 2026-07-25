@@ -1592,10 +1592,16 @@ export class PhysicsSystem {
       // point, siblings scatter around it along the hull.
       const spread = i === 0 ? 0 : 0.35;
       const angle = i * 2.399963; // golden-angle fan — no two siblings overlap
+      // Clamp onto the hull itself: contact points from collision SAMPLES carry
+      // the sample radius and can sit a little proud of the skin, and a breach
+      // outside the planking would flood-test (and render) off the hull.
       const point = {
-        x: clamp(local.x + Math.cos(angle) * spread, -stats.width * 0.62, stats.width * 0.62),
-        y: clamp(local.y + (i === 0 ? 0 : Math.sin(angle) * 0.12), -stats.height * 0.35, maxY),
-        z: clamp(local.z + Math.sin(angle) * spread, -stats.length * 0.52, stats.length * 0.52),
+        x: clamp(local.x + Math.cos(angle) * spread, -stats.width * 0.52, stats.width * 0.52),
+        // Siblings scatter DOWNWARD only: torn planking splits toward the sea,
+        // and it keeps a keel scrape a keel scrape instead of walking a
+        // grounding breach up above the waterline.
+        y: clamp(local.y - (i === 0 ? 0 : Math.abs(Math.sin(angle)) * 0.12), -stats.height * 0.35, maxY),
+        z: clamp(local.z + Math.sin(angle) * spread, -stats.length * 0.5, stats.length * 0.5),
       };
       opened.push(this.placeHole(ship, point, source));
     }
