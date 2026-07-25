@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WAVE_PARAMS, STORM_WAVE_PARAMS, getOceanRoughness } from '../../shared/utils/index.js';
+import { WAVE_PARAMS, STORM_WAVE_PARAMS, getOceanRoughness, gerstnerHeight } from '../../shared/utils/index.js';
 import type { RenderQuality } from './Renderer.js';
 
 const MAX_ISLANDS = 16;
@@ -132,6 +132,10 @@ const OCEAN_FRAG = /* glsl */`
   uniform vec2  u_stormCenter;
   uniform float u_stormSafeRadius;
   uniform float u_stormPhase01;
+  // Lightning response: 0..1 strike envelope + the horizontal direction from the
+  // camera toward the bolt, so the sea glints along the strike azimuth.
+  uniform float u_boltFlash;
+  uniform vec2  u_boltDir;
 
   varying vec3  v_worldPos;
   varying float v_height;
@@ -295,6 +299,22 @@ const OCEAN_FRAG = /* glsl */`
     color = mix(color, color * vec3(1.12, 0.82, 0.68), u_twilightFactor * 0.6);
     color *= mix(1.0, 0.66, u_twilightFactor);
 
+    // ── Lightning glint band: a strike lights the water it faces. Crest foam
+    //    catches it hardest, plus a hard specular lobe from the bolt's own
+    //    (steeply raked) direction, so the flash reads as a band racing across
+    //    the swell toward the strike rather than a flat screen-wide brighten ──
+    if (u_boltFlash > 0.001) {
+      vec2 toPix = wp - u_cameraPos.xz;
+      float toLen = max(1.0, length(toPix));
+      float align = max(0.0, dot(toPix / toLen, u_boltDir));
+      float band = pow(align, 3.0) * (0.30 + 0.70 * smoothstep(-0.1, 0.55, hn));
+      vec3 boltL = normalize(vec3(u_boltDir.x, 0.55, u_boltDir.y));
+      vec3 boltH = normalize(boltL + V);
+      float boltSpec = pow(max(0.0, dot(N, boltH)), 90.0) * 1.4;
+      color += vec3(0.60, 0.72, 1.00) * u_boltFlash
+             * (band * (0.09 + foam * 0.90) + boltSpec * (0.25 + 0.75 * align));
+    }
+
     // Storm: darker, desaturated water under gray skies
     vec3 stormTint = mix(vec3(1.0), vec3(0.42, 0.48, 0.55), u_stormIntensity);
     color *= stormTint;
@@ -441,6 +461,9 @@ export class OceanRenderer {
         u_stormCenter:     { value: new THREE.Vector2() },
         u_stormSafeRadius: { value: -1 },
         u_stormPhase01:    { value: 0 },
+        // Lightning strike response (see setLightningFlash).
+        u_boltFlash: { value: 0 },
+        u_boltDir:   { value: new THREE.Vector2(0, 1) },
       },
       side: THREE.DoubleSide,
     });
@@ -563,6 +586,41 @@ export class OceanRenderer {
   setStormIntensity(intensity: number) {
     const t = Math.max(0, Math.min(1, intensity));
     this.material.uniforms.u_stormIntensity.value = t;
+  }
+
+  /** Lightning response: `strength` is the strike's 0..1 brightness envelope,
+   *  `dirX/dirZ` the (unnormalized) horizontal direction from the camera toward
+   *  the bolt. Drives the glint band in the fragment shader. */
+  setLightningFlash(strength: number, dirX: number, dirZ: number) {
+    if (!this.material) return;
+    this.material.uniforms.u_boltFlash.value = Math.max(0, Math.min(1, strength));
+    const len = Math.hypot(dirX, dirZ);
+    if (len > 1e-4) (this.material.uniforms.u_boltDir.value as THREE.Vector2).set(dirX / len, dirZ / len);
+  }
+
+  /** CPU mirror of the shader's stormWaveIntensity() using the LIVE uniforms —
+   *  so callers (rain splashes) agree with the sea actually being drawn, which
+   *  is not always the replicated storm (see ?stormdemo's parked ring). */
+  getStormSeaIntensity(x: number, z: number): number {
+    if (!this.material) return 0;
+    const u = this.material.uniforms;
+    const safeRadius = u.u_stormSafeRadius.value as number;
+    if (safeRadius < -0.5) return 0;
+    const center = u.u_stormCenter.value as THREE.Vector2;
+    const phase01 = u.u_stormPhase01.value as number;
+    const distOutside = Math.hypot(x - center.x, z - center.y) - safeRadius;
+    // smoothstep(-140, 40, distOutside)
+    const e = Math.max(0, Math.min(1, (distOutside + 140) / 180));
+    const edge = e * e * (3 - 2 * e);
+    const ambient = phase01 * 0.38;
+    return Math.max(0, Math.min(1, Math.max(edge * (0.55 + phase01 * 0.45), ambient)));
+  }
+
+  /** Height of the drawn water surface at (x, z) — the same shared Gerstner
+   *  field the vertex shader displaces to, evaluated against the live storm
+   *  sea-state. Rain impacts land exactly on the visible swell. */
+  getSurfaceY(x: number, z: number): number {
+    return gerstnerHeight(x, z, this.time, WAVE_PARAMS, this.getStormSeaIntensity(x, z));
   }
 
   setSunDirection(direction: THREE.Vector3) {

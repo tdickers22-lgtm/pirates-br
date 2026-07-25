@@ -6,7 +6,16 @@
 import * as THREE from 'three';
 import { HARVEST, PLAYER, SHIP_STATS, STORM_PHASES } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandProp, IslandPropType, Player, Ship } from '../../shared/types/index.js';
-import { dist2D, isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
+import {
+  dist2D,
+  getIslandMaxRadius,
+  getIslandSurfaceY,
+  getShipDeckRaiseAt,
+  getShipDeckY,
+  isInsideCaveInterior,
+  isPointInsideIslandFootprint,
+  sampleWind,
+} from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import type { AssetName } from '../assets/AssetLibrary.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
@@ -36,6 +45,75 @@ export type EnvironmentFxView = {
   getLocalPlayer(): Player | null;
   getTrackedShip(): Ship | null;
 };
+
+/** One camera-relative rain shell. Near shells are sparse with long fast
+ *  streaks, far shells dense with short slow ones; overlapping them is what
+ *  gives the downpour depth instead of reading as one flat sheet. */
+type RainShell = {
+  lines: THREE.LineSegments;
+  material: THREE.LineBasicMaterial;
+  geo: THREE.BufferGeometry;
+  /** Head + tail vertex per drop (6 floats). */
+  pos: Float32Array;
+  /** Per-drop [0,1) hash: gust-band density gate and per-drop length jitter. */
+  hash: Float32Array;
+  drops: number;
+  /** Spawn-disc radius and spawn height above the camera. */
+  radius: number;
+  ceiling: number;
+  /** Streak length and fall-speed multipliers. */
+  streak: number;
+  speed: number;
+  opacity: number;
+  /** Offsets this shell's gust waves so the layers don't march in lockstep. */
+  gustPhase: number;
+};
+
+/** Impact FX pool: flat expanding splash rings plus the bounce droplets that
+ *  kick off them. Both are single InstancedMeshes — two draws for every
+ *  impact in the world. Rings tagged `onShip` ride the ship frame. */
+type SplashPool = {
+  rings: THREE.InstancedMesh;
+  droplets: THREE.InstancedMesh;
+  ringCount: number;
+  dropletCount: number;
+  /** Rings: x, y, z, age (4 floats). Ship-borne rings store hull-local x/z. */
+  ring: Float32Array;
+  ringLife: Float32Array;
+  ringSize: Float32Array;
+  ringOnShip: Uint8Array;
+  ringCursor: number;
+  /** Droplets: x, y, z, vx, vy, vz, age (7 floats). */
+  droplet: Float32Array;
+  dropletLife: Float32Array;
+  dropletSize: Float32Array;
+  dropletCursor: number;
+};
+
+// Rain shell presets, near → far. Quality tiers pick a subset (see RAIN_TIERS).
+const RAIN_SHELL_SPECS = [
+  { radius: 13, ceiling: 16, drops: 760, streak: 2.40, speed: 1.30, opacity: 0.52, gustPhase: 0 },
+  { radius: 32, ceiling: 24, drops: 1320, streak: 1.25, speed: 1.00, opacity: 0.40, gustPhase: 1.9 },
+  { radius: 68, ceiling: 34, drops: 1500, streak: 0.66, speed: 0.86, opacity: 0.26, gustPhase: 3.7 },
+] as const;
+
+/** Which shells (and what fraction of their drop budget) each tier gets. */
+const RAIN_TIERS: Record<'low' | 'balanced' | 'high', { shells: number[]; scale: number }> = {
+  low: { shells: [1], scale: 0.5 },
+  balanced: { shells: [0, 2], scale: 0.75 },
+  high: { shells: [0, 1, 2], scale: 1 },
+};
+
+// Travelling gust bands are baked into an along-wind lookup table once per
+// frame per shell, so the per-drop inner loop costs a table index and a few
+// multiplies — no trig, no allocation, however hard it is raining.
+const RAIN_BANDS = 64;
+const RAIN_BAND_METRES = 6;
+const RAIN_BAND_SPAN = RAIN_BANDS * RAIN_BAND_METRES;
+const RAIN_INV_BAND = 1 / RAIN_BAND_METRES;
+// Band wavelengths must divide the LUT span exactly or the wrap seam shows.
+const RAIN_GUST_K1 = (Math.PI * 2 * 6) / RAIN_BAND_SPAN; // ~64m squall bands
+const RAIN_GUST_K2 = (Math.PI * 2) / RAIN_BAND_SPAN;     // ~384m slow swell
 
 export class EnvironmentFx {
   constructor(private readonly view: EnvironmentFxView) {}
@@ -701,48 +779,450 @@ export class EnvironmentFx {
     return Math.min(1, 0.34 + stormDepth * 0.42 + (phase / maxPhase) * 0.2 + shrinkBoost) * outsideBlend;
   }
 
-  /** World-space rain: wind-blown line-segment drops falling around the
-   *  camera (replaces the old screen-space canvas overlay — rain now exists
-   *  in the world, slants with the wind, and reads correctly in motion). */
-  rain3D: {
-    lines: THREE.LineSegments;
-    material: THREE.LineBasicMaterial;
-    geo: THREE.BufferGeometry;
-    pos: Float32Array;
-    drops: number;
-  } | null = null;
+  // ── Storm rain ────────────────────────────────────────────────────────────
+  // World-space, depth-layered rain: 1–3 camera-relative shells of line-segment
+  // drops, all sharing one wind field with travelling gust bands, plus an
+  // instanced splash pool where those streaks meet sea / deck / terrain, a haze
+  // curtain that thickens the distance, and cover occlusion so caves and the
+  // hold stay dry. Nothing in the loop allocates.
 
-  ensureRain3D() {
-    if (this.rain3D) return this.rain3D;
-    const drops = 1600;
-    const pos = new Float32Array(drops * 2 * 3);
-    // Seed deterministically around the origin; first update recenters on camera.
-    for (let i = 0; i < drops; i++) {
-      const o = i * 6;
-      const a = (i * 2.399963) % (Math.PI * 2); // golden-angle spiral: even disc coverage
-      const rad = 30 * Math.sqrt(((i * 7919) % 1000) / 1000);
-      pos[o] = Math.cos(a) * rad;
-      pos[o + 1] = ((i * 37) % 240) / 10 - 4;
-      pos[o + 2] = Math.sin(a) * rad;
-      pos[o + 3] = pos[o];
-      pos[o + 4] = pos[o + 1] - 0.5;
-      pos[o + 5] = pos[o + 2];
+  private rainShells: RainShell[] | null = null;
+  private rainHaze: THREE.Mesh | null = null;
+  private splash: SplashPool | null = null;
+  /** 0 = out in the weather, 1 = fully sheltered. Eased, so walking into a cave
+   *  mouth fades the rain out instead of cutting it. */
+  private rainCover = 0;
+  private splashAccum = 0;
+  // Per-frame gust LUT (recomputed per shell): drift velocity, streak vector and
+  // the density gate for each along-wind band.
+  private readonly bandWindX = new Float32Array(RAIN_BANDS);
+  private readonly bandWindZ = new Float32Array(RAIN_BANDS);
+  private readonly bandStreakX = new Float32Array(RAIN_BANDS);
+  private readonly bandStreakY = new Float32Array(RAIN_BANDS);
+  private readonly bandStreakZ = new Float32Array(RAIN_BANDS);
+  private readonly bandGate = new Float32Array(RAIN_BANDS);
+  private readonly rainVec = new THREE.Vector3();
+  private readonly rainScale = new THREE.Vector3(1, 1, 1);
+  private readonly rainMat4 = new THREE.Matrix4();
+  private readonly rainFlatQuat = new THREE.Quaternion();
+  private readonly rainColor = new THREE.Color();
+  private readonly rainShipLocal = { x: 0, z: 0 };
+  /** Scratch for sampleImpactSurface — avoids a per-splash object. */
+  private impactY = 0;
+  private impactOnShip = false;
+  private readonly rainShipQuat = new THREE.Quaternion();
+  /** Cached RENDERED hull group (`ship_<id>`). Deck splashes are stored in this
+   *  node's local space, so they ride the real heave/pitch/roll the hull is
+   *  drawn with — the replicated ship.position lags it by up to a couple of
+   *  metres of client heave. */
+  private deckShipNode: THREE.Object3D | null = null;
+  private deckShipId = '';
+
+  /** Rendered hull node for the ship the local player is riding, or null. */
+  private getDeckShipNode(): THREE.Object3D | null {
+    const ship = this.view.getTrackedShip();
+    if (!ship || ship.sinking) {
+      this.deckShipNode = null;
+      this.deckShipId = '';
+      return null;
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
-    const material = new THREE.LineBasicMaterial({
-      color: 0xcfe0f4,
+    if (this.deckShipId !== ship.id || !this.deckShipNode || !this.deckShipNode.parent) {
+      this.deckShipNode = this.view.renderer.scene.getObjectByName(`ship_${ship.id}`) ?? null;
+      this.deckShipId = this.deckShipNode ? ship.id : '';
+    }
+    return this.deckShipNode;
+  }
+
+  private makeSplashRingTexture(): THREE.CanvasTexture {
+    const size = 64;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    g.addColorStop(0.00, 'rgba(214,234,255,0.30)');
+    g.addColorStop(0.46, 'rgba(214,234,255,0.05)');
+    g.addColorStop(0.74, 'rgba(232,244,255,0.85)');
+    g.addColorStop(0.90, 'rgba(232,244,255,0.30)');
+    g.addColorStop(1.00, 'rgba(232,244,255,0.00)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  private makeSplashDropletTexture(): THREE.CanvasTexture {
+    const size = 32;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    g.addColorStop(0.0, 'rgba(240,248,255,0.95)');
+    g.addColorStop(0.5, 'rgba(214,234,255,0.45)');
+    g.addColorStop(1.0, 'rgba(214,234,255,0.00)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  private makeRainHazeTexture(): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 4;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d')!;
+    const g = ctx.createLinearGradient(0, 0, 0, 128);
+    g.addColorStop(0.00, 'rgba(178,193,208,0.00)');
+    g.addColorStop(0.34, 'rgba(178,193,208,0.55)');
+    g.addColorStop(0.78, 'rgba(190,204,218,0.95)');
+    g.addColorStop(1.00, 'rgba(196,210,224,0.20)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 4, 128);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.repeat.set(6, 1);
+    return tex;
+  }
+
+  private ensureRainShells(): RainShell[] {
+    if (this.rainShells) return this.rainShells;
+    const tier = RAIN_TIERS[this.view.renderer.getQuality()];
+    const shells: RainShell[] = [];
+    for (const specIndex of tier.shells) {
+      const spec = RAIN_SHELL_SPECS[specIndex];
+      const drops = Math.max(48, Math.round(spec.drops * tier.scale));
+      const pos = new Float32Array(drops * 6);
+      const colors = new Float32Array(drops * 8);
+      const hash = new Float32Array(drops);
+      for (let i = 0; i < drops; i++) {
+        // Golden-angle spiral seeding: even disc coverage without clumping.
+        const a = (i * 2.399963) % (Math.PI * 2);
+        const rad = spec.radius * Math.sqrt(((i * 7919) % 1024) / 1024);
+        const o = i * 6;
+        pos[o] = Math.cos(a) * rad;
+        pos[o + 1] = ((i * 37) % 240) / 240 * spec.ceiling * 2 - spec.ceiling * 0.5;
+        pos[o + 2] = Math.sin(a) * rad;
+        pos[o + 3] = pos[o];
+        pos[o + 4] = pos[o + 1] + 0.4;
+        pos[o + 5] = pos[o + 2];
+        const h = ((i * 2654435761) % 1024) / 1024;
+        hash[i] = h;
+        // Head bright, tail nearly gone: the alpha taper along the segment IS
+        // the motion blur — a falling drop smears out behind its leading edge.
+        const bright = 0.72 + h * 0.5;
+        const c = i * 8;
+        colors[c] = 0.86; colors[c + 1] = 0.92; colors[c + 2] = 1.0; colors[c + 3] = bright;
+        colors[c + 4] = 0.74; colors[c + 5] = 0.84; colors[c + 6] = 1.0; colors[c + 7] = bright * 0.12;
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+      const material = new THREE.LineBasicMaterial({
+        color: 0xcfe0f4,
+        vertexColors: true,
+        transparent: true,
+        opacity: spec.opacity,
+        depthWrite: false,
+      });
+      const lines = new THREE.LineSegments(geo, material);
+      lines.frustumCulled = false;
+      lines.renderOrder = 8;
+      lines.visible = false;
+      this.view.renderer.scene.add(lines);
+      shells.push({
+        lines, material, geo, pos, hash, drops,
+        radius: spec.radius,
+        ceiling: spec.ceiling,
+        streak: spec.streak,
+        speed: spec.speed,
+        opacity: spec.opacity,
+        gustPhase: spec.gustPhase,
+      });
+    }
+
+    // Haze curtain: a soft depth-tested veil at mid range so distance reads wet.
+    const hazeGeo = new THREE.CylinderGeometry(96, 96, 130, 24, 1, true);
+    const haze = new THREE.Mesh(hazeGeo, new THREE.MeshBasicMaterial({
+      map: this.makeRainHazeTexture(),
+      color: 0xb9c8d6,
       transparent: true,
-      opacity: 0.3,
+      opacity: 0,
       depthWrite: false,
-    });
-    const lines = new THREE.LineSegments(geo, material);
-    lines.frustumCulled = false;
-    lines.renderOrder = 8;
-    lines.visible = false;
-    this.view.renderer.scene.add(lines);
-    this.rain3D = { lines, material, geo, pos, drops };
-    return this.rain3D;
+      side: THREE.BackSide,
+      fog: false,
+    }));
+    haze.renderOrder = 7;
+    haze.frustumCulled = false;
+    haze.visible = false;
+    this.view.renderer.scene.add(haze);
+    this.rainHaze = haze;
+
+    this.rainShells = shells;
+    this.ensureSplashPool();
+    return shells;
+  }
+
+  private ensureSplashPool(): SplashPool {
+    if (this.splash) return this.splash;
+    const quality = this.view.renderer.getQuality();
+    const ringCount = quality === 'low' ? 28 : quality === 'balanced' ? 90 : 150;
+    const dropletCount = quality === 'low' ? 0 : quality === 'balanced' ? 140 : 260;
+
+    const ringGeo = new THREE.PlaneGeometry(1, 1);
+    ringGeo.rotateX(-Math.PI / 2); // rings lie flat on whatever they landed on
+    const rings = new THREE.InstancedMesh(ringGeo, new THREE.MeshBasicMaterial({
+      map: this.makeSplashRingTexture(),
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+    }), ringCount);
+    rings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    rings.frustumCulled = false;
+    rings.renderOrder = 9;
+    rings.visible = false;
+    this.view.renderer.scene.add(rings);
+
+    const droplets = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({
+      map: this.makeSplashDropletTexture(),
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+    }), Math.max(1, dropletCount));
+    droplets.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    droplets.frustumCulled = false;
+    droplets.renderOrder = 9;
+    droplets.visible = false;
+    this.view.renderer.scene.add(droplets);
+
+    for (let i = 0; i < ringCount; i++) rings.setMatrixAt(i, ZERO_SCALE_MAT4);
+    for (let i = 0; i < dropletCount; i++) droplets.setMatrixAt(i, ZERO_SCALE_MAT4);
+
+    this.splash = {
+      rings, droplets, ringCount, dropletCount,
+      ring: new Float32Array(ringCount * 4),
+      ringLife: new Float32Array(ringCount),
+      ringSize: new Float32Array(ringCount),
+      ringOnShip: new Uint8Array(ringCount),
+      ringCursor: 0,
+      droplet: new Float32Array(Math.max(1, dropletCount) * 7),
+      dropletLife: new Float32Array(Math.max(1, dropletCount)),
+      dropletSize: new Float32Array(Math.max(1, dropletCount)),
+      dropletCursor: 0,
+    };
+    return this.splash;
+  }
+
+  /** Cover test for the camera: inside a cave interior, or below decks under
+   *  the weather deck. Returns the target, not the eased value. */
+  private computeRainCoverTarget(): number {
+    const cam = this.view.renderer.camera.position;
+    const state = this.view.state;
+    if (state) {
+      for (const island of state.islands) {
+        if (!island.caves || island.caves.length === 0) continue;
+        if (dist2D(cam.x, cam.z, island.position.x, island.position.z) > getIslandMaxRadius(island)) continue;
+        if (isInsideCaveInterior(island, cam.x, cam.y, cam.z)) return 1;
+      }
+    }
+    const ship = this.view.getTrackedShip();
+    const player = this.view.getLocalPlayer();
+    if (ship && player?.onShipId === ship.id) {
+      const stats = SHIP_STATS[ship.type];
+      const dx = cam.x - ship.position.x;
+      const dz = cam.z - ship.position.z;
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      const lx = dx * cos - dz * sin;
+      const lz = dx * sin + dz * cos;
+      if (Math.abs(lx) < stats.width * 0.52 && Math.abs(lz) < stats.length * 0.48
+        && cam.y < getShipDeckY(ship.position.y, stats) - 0.55) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+
+  /** Where does a drop falling at (x, z) actually land? Deck beats terrain
+   *  beats sea. Writes impactY / impactOnShip; returns false when the surface is
+   *  too far above or below the camera to be worth a splash. */
+  private sampleImpactSurface(x: number, z: number, camY: number): boolean {
+    this.impactOnShip = false;
+    const ship = this.view.getTrackedShip();
+    const node = this.getDeckShipNode();
+    if (ship && node) {
+      const stats = SHIP_STATS[ship.type];
+      // Hull-local XZ from the DRAWN transform (yaw dominates; the few degrees
+      // of pitch/roll shift the footprint test by centimetres).
+      const dx = x - node.position.x;
+      const dz = z - node.position.z;
+      const cos = Math.cos(node.rotation.y);
+      const sin = Math.sin(node.rotation.y);
+      const lx = dx * cos - dz * sin;
+      const lz = dx * sin + dz * cos;
+      if (Math.abs(lx) < stats.width * 0.46 && Math.abs(lz) < stats.length * 0.44) {
+        this.rainShipLocal.x = lx;
+        this.rainShipLocal.z = lz;
+        // Hull-LOCAL standing plane: the deck slabs' top face (see ShipRenderer).
+        this.impactY = getShipDeckY(0, stats) + getShipDeckRaiseAt(this.rainShipLocal, stats);
+        this.impactOnShip = true;
+        return Math.abs(node.position.y + this.impactY - camY) < 26;
+      }
+    }
+    const seaY = this.view.ocean.getSurfaceY(x, z);
+    const state = this.view.state;
+    if (state) {
+      for (const island of state.islands) {
+        if (dist2D(x, z, island.position.x, island.position.z) > getIslandMaxRadius(island)) continue;
+        const groundY = getIslandSurfaceY(island, x, z);
+        if (groundY > seaY + 0.05) {
+          this.impactY = groundY;
+          return Math.abs(groundY - camY) < 26;
+        }
+      }
+    }
+    this.impactY = seaY;
+    return Math.abs(seaY - camY) < 26;
+  }
+
+  private spawnSplash(x: number, z: number, camY: number) {
+    const pool = this.splash;
+    if (!pool || !this.sampleImpactSurface(x, z, camY)) return;
+    const onShip = this.impactOnShip;
+    const node = onShip ? this.deckShipNode : null;
+    // World height of the impact — hull-local for deck hits, absolute otherwise.
+    const y = node ? node.position.y + this.impactY : this.impactY;
+
+    const r = pool.ringCursor;
+    pool.ringCursor = (r + 1) % pool.ringCount;
+    const ro = r * 4;
+    if (onShip) {
+      // Deck rings live in HULL-LOCAL space so they ride heave, pitch and roll.
+      pool.ring[ro] = this.rainShipLocal.x;
+      pool.ring[ro + 1] = this.impactY;
+      pool.ring[ro + 2] = this.rainShipLocal.z;
+    } else {
+      pool.ring[ro] = x;
+      pool.ring[ro + 1] = y;
+      pool.ring[ro + 2] = z;
+    }
+    pool.ring[ro + 3] = 0;
+    pool.ringLife[r] = 0.30 + Math.random() * 0.16;
+    pool.ringSize[r] = onShip ? 0.14 + Math.random() * 0.13 : 0.20 + Math.random() * 0.20;
+    pool.ringOnShip[r] = onShip ? 1 : 0;
+
+    if (pool.dropletCount === 0) return;
+    const bounces = 2 + (Math.random() < 0.45 ? 1 : 0);
+    for (let b = 0; b < bounces; b++) {
+      const d = pool.dropletCursor;
+      pool.dropletCursor = (d + 1) % pool.dropletCount;
+      const dof = d * 7;
+      const theta = Math.random() * Math.PI * 2;
+      const lateral = 0.5 + Math.random() * 1.1;
+      pool.droplet[dof] = x;
+      pool.droplet[dof + 1] = y + 0.03;
+      pool.droplet[dof + 2] = z;
+      pool.droplet[dof + 3] = Math.cos(theta) * lateral;
+      pool.droplet[dof + 4] = 1.7 + Math.random() * 1.9;
+      pool.droplet[dof + 5] = Math.sin(theta) * lateral;
+      pool.droplet[dof + 6] = 0;
+      pool.dropletLife[d] = 0.28 + Math.random() * 0.2;
+      pool.dropletSize[d] = 0.035 + Math.random() * 0.04;
+    }
+  }
+
+  private updateSplashes(dt: number) {
+    const pool = this.splash;
+    if (!pool) return;
+    let anyRing = false;
+    const node = this.deckShipNode;
+    if (node) {
+      node.updateWorldMatrix(false, false);
+      node.getWorldQuaternion(this.rainShipQuat);
+    }
+
+    for (let i = 0; i < pool.ringCount; i++) {
+      const life = pool.ringLife[i];
+      if (life <= 0) continue;
+      const o = i * 4;
+      const age = pool.ring[o + 3] + dt;
+      if (age >= life) {
+        pool.ringLife[i] = 0;
+        pool.rings.setMatrixAt(i, ZERO_SCALE_MAT4);
+        continue;
+      }
+      pool.ring[o + 3] = age;
+      const t = age / life;
+      let flat = true;
+      if (pool.ringOnShip[i] === 1) {
+        if (!node) {
+          pool.ringLife[i] = 0;
+          pool.rings.setMatrixAt(i, ZERO_SCALE_MAT4);
+          continue;
+        }
+        this.rainVec.set(pool.ring[o], pool.ring[o + 1] + 0.03, pool.ring[o + 2])
+          .applyMatrix4(node.matrixWorld);
+        flat = false; // ring lies in the DECK plane, tilting with the hull
+      } else {
+        this.rainVec.set(pool.ring[o], pool.ring[o + 1] + 0.02, pool.ring[o + 2]);
+      }
+      // Ring expands fast then eases. It is additive, so per-instance colour
+      // brightness IS its fade — no per-instance alpha channel needed.
+      const grow = pool.ringSize[i] * (0.18 + t * (1.6 - t * 0.55));
+      const fade = (1 - t) * (1 - t);
+      this.rainScale.set(grow, grow, grow);
+      this.rainMat4.compose(this.rainVec, flat ? this.rainFlatQuat : this.rainShipQuat, this.rainScale);
+      pool.rings.setMatrixAt(i, this.rainMat4);
+      this.rainColor.setScalar(0.35 + fade * 0.75);
+      pool.rings.setColorAt(i, this.rainColor);
+      anyRing = true;
+    }
+    pool.rings.instanceMatrix.needsUpdate = true;
+    if (pool.rings.instanceColor) pool.rings.instanceColor.needsUpdate = true;
+    pool.rings.visible = anyRing;
+
+    if (pool.dropletCount === 0) return;
+    let anyDroplet = false;
+    const camQuat = this.view.renderer.camera.quaternion;
+    for (let i = 0; i < pool.dropletCount; i++) {
+      const life = pool.dropletLife[i];
+      if (life <= 0) continue;
+      const o = i * 7;
+      const age = pool.droplet[o + 6] + dt;
+      if (age >= life) {
+        pool.dropletLife[i] = 0;
+        pool.droplets.setMatrixAt(i, ZERO_SCALE_MAT4);
+        continue;
+      }
+      pool.droplet[o + 6] = age;
+      pool.droplet[o + 4] -= 11 * dt; // ballistic arc
+      pool.droplet[o] += pool.droplet[o + 3] * dt;
+      pool.droplet[o + 1] += pool.droplet[o + 4] * dt;
+      pool.droplet[o + 2] += pool.droplet[o + 5] * dt;
+      const tt = age / life;
+      const shrink = pool.dropletSize[i] * (1 - tt * 0.55);
+      this.rainVec.set(pool.droplet[o], pool.droplet[o + 1], pool.droplet[o + 2]);
+      this.rainScale.set(shrink, shrink, shrink);
+      this.rainMat4.compose(this.rainVec, camQuat, this.rainScale);
+      pool.droplets.setMatrixAt(i, this.rainMat4);
+      this.rainColor.setScalar(0.5 + (1 - tt) * 0.7);
+      pool.droplets.setColorAt(i, this.rainColor);
+      anyDroplet = true;
+    }
+    pool.droplets.instanceMatrix.needsUpdate = true;
+    if (pool.droplets.instanceColor) pool.droplets.instanceColor.needsUpdate = true;
+    pool.droplets.visible = anyDroplet;
+  }
+
+  /** Eased shelter factor (0 = out in it, 1 = fully covered). Probe hook for the
+   *  headless cave/below-deck occlusion shots. */
+  debugRainCover(): number {
+    return this.rainCover;
   }
 
   updateStormRain3D(dt: number, intensity: number) {
@@ -751,56 +1231,129 @@ export class EnvironmentFx {
       this.stormRainCtx.clearRect(0, 0, this.stormRainCanvas.width, this.stormRainCanvas.height);
       this.stormRainCanvas.width = 0;
     }
+
+    // Ease the cover state either way so a cave mouth fades rather than cuts.
+    const coverTarget = intensity > 0.001 ? this.computeRainCoverTarget() : 0;
+    this.rainCover += (coverTarget - this.rainCover) * Math.min(1, dt * 4.5);
+    const cover = this.rainCover;
+    // Rain audio ramps LINEARLY with rain01 (SoundEngine.setRain) — the visual
+    // density, opacity and mist follow the same curve so eyes and ears agree.
+    const wet = intensity * (1 - cover);
+    this.view.renderer.setRainMist(wet * 0.8);
+
     if (intensity <= 0.001) {
-      if (this.rain3D) this.rain3D.lines.visible = false;
+      if (this.rainShells) for (const shell of this.rainShells) shell.lines.visible = false;
+      if (this.rainHaze) this.rainHaze.visible = false;
+      if (this.splash) {
+        this.splash.rings.visible = false;
+        this.splash.droplets.visible = false;
+      }
       return;
     }
-    const rain = this.ensureRain3D();
-    rain.lines.visible = true;
+
+    const shells = this.ensureRainShells();
     const cam = this.view.renderer.camera.position;
     const t = this.view.ocean.getTime();
     const wind = sampleWind(t);
-    const gust = Math.sin(t * 2.7) * 0.5 + Math.sin(t * 6.3 + 1.4) * 0.3;
-    const windSpeed = (6 + intensity * 12) * wind.strength + gust * intensity * 3;
-    const windX = Math.sin(wind.direction) * windSpeed;
-    const windZ = Math.cos(wind.direction) * windSpeed;
-    const fallSpeed = 21 + intensity * 11;
-    const active = Math.max(24, Math.floor(rain.drops * (0.22 + intensity * 0.78)));
-    const streak = 0.55 + intensity * 0.8;
-    // Normalized fall direction × streak length for the trailing vertex.
-    const vLen = Math.hypot(windX, windZ, fallSpeed);
-    const sx = (windX / vLen) * streak;
-    const sy = (fallSpeed / vLen) * streak;
-    const sz = (windZ / vLen) * streak;
-    const pos = rain.pos;
-    const spawnRadius = 32;
-    for (let i = 0; i < active; i++) {
-      const o = i * 6;
-      let x = pos[o] + windX * dt * 0.85;
-      let y = pos[o + 1] - fallSpeed * dt;
-      let z = pos[o + 2] + windZ * dt * 0.85;
-      // Recycle drops that fell below the camera or drifted out of the volume.
-      const dx = x - cam.x;
-      const dz = z - cam.z;
-      if (y < cam.y - 8 || dx * dx + dz * dz > spawnRadius * spawnRadius * 1.9) {
-        const a = Math.random() * Math.PI * 2;
-        const rad = spawnRadius * Math.sqrt(Math.random());
-        // Bias the spawn upwind so the slanted fall carries drops across the view.
-        x = cam.x + Math.cos(a) * rad - (windX / Math.max(1, windSpeed)) * 8;
-        z = cam.z + Math.sin(a) * rad - (windZ / Math.max(1, windSpeed)) * 8;
-        y = cam.y + 12 + Math.random() * 14;
-      }
-      pos[o] = x;
-      pos[o + 1] = y;
-      pos[o + 2] = z;
-      pos[o + 3] = x - sx;
-      pos[o + 4] = y + sy;
-      pos[o + 5] = z - sz;
-    }
-    rain.geo.setDrawRange(0, active * 2);
-    (rain.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    const dirX = Math.sin(wind.direction);
+    const dirZ = Math.cos(wind.direction);
+    const windSpeed = (6 + intensity * 13) * wind.strength;
     const nightFactor = this.view.renderer.getAtmosphere().nightFactor ?? 0;
-    rain.material.opacity = (0.13 + intensity * 0.2) * (1 - nightFactor * 0.35);
+    const visible = 1 - cover;
+
+    for (const shell of shells) {
+      const fallSpeed = (20 + intensity * 12) * shell.speed;
+      const streakLen = shell.streak * (0.5 + intensity * 0.75);
+      // Bake this shell's travelling gust bands into the along-wind LUT.
+      const scroll1 = t * 1.55 + shell.gustPhase;
+      const scroll2 = t * 0.62 + shell.gustPhase * 1.7;
+      for (let b = 0; b < RAIN_BANDS; b++) {
+        const along = b * RAIN_BAND_METRES;
+        const g1 = 0.5 + 0.5 * Math.sin(along * RAIN_GUST_K1 - scroll1);
+        const g2 = 0.5 + 0.5 * Math.sin(along * RAIN_GUST_K2 - scroll2);
+        const g = g1 * 0.62 + g2 * 0.38;
+        // Gusts shear the fall: hard bands blow the streaks over and pack them
+        // tighter; lulls between them stand the rain back up and thin it out.
+        const gustSpeed = windSpeed * (0.28 + 1.65 * g);
+        const wx = dirX * gustSpeed;
+        const wz = dirZ * gustSpeed;
+        const len = Math.hypot(wx, wz, fallSpeed);
+        const sLen = streakLen * (0.55 + 1.0 * g);
+        this.bandWindX[b] = wx;
+        this.bandWindZ[b] = wz;
+        this.bandStreakX[b] = (wx / len) * sLen;
+        this.bandStreakY[b] = (fallSpeed / len) * sLen;
+        this.bandStreakZ[b] = (wz / len) * sLen;
+        this.bandGate[b] = 0.10 + 0.90 * g;
+      }
+
+      const pos = shell.pos;
+      const hash = shell.hash;
+      const active = Math.max(24, Math.floor(shell.drops * (0.28 + intensity * 0.72)));
+      const radiusSq = shell.radius * shell.radius * 1.85;
+      const floorY = cam.y - shell.ceiling * 0.55;
+      const spawnDrift = shell.radius * 0.28;
+      for (let i = 0; i < active; i++) {
+        const o = i * 6;
+        let x = pos[o];
+        let y = pos[o + 1];
+        let z = pos[o + 2];
+        const band = (((x * dirX + z * dirZ) * RAIN_INV_BAND) | 0) & (RAIN_BANDS - 1);
+        x += this.bandWindX[band] * dt;
+        y -= fallSpeed * dt;
+        z += this.bandWindZ[band] * dt;
+        const dx = x - cam.x;
+        const dz = z - cam.z;
+        if (y < floorY || dx * dx + dz * dz > radiusSq) {
+          const a = Math.random() * Math.PI * 2;
+          const rad = shell.radius * Math.sqrt(Math.random());
+          // Bias upwind so the slanted fall carries drops across the view.
+          x = cam.x + Math.cos(a) * rad - dirX * spawnDrift;
+          z = cam.z + Math.sin(a) * rad - dirZ * spawnDrift;
+          y = cam.y + shell.ceiling * (0.55 + Math.random() * 0.45);
+        }
+        pos[o] = x;
+        pos[o + 1] = y;
+        pos[o + 2] = z;
+        if (hash[i] < this.bandGate[band]) {
+          const jitter = 0.72 + hash[i] * 0.6;
+          pos[o + 3] = x - this.bandStreakX[band] * jitter;
+          pos[o + 4] = y + this.bandStreakY[band] * jitter;
+          pos[o + 5] = z - this.bandStreakZ[band] * jitter;
+        } else {
+          // Thinned out by the gust band: collapse to a degenerate segment.
+          pos[o + 3] = x;
+          pos[o + 4] = y;
+          pos[o + 5] = z;
+        }
+      }
+      shell.geo.setDrawRange(0, active * 2);
+      (shell.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+      shell.material.opacity = shell.opacity * (0.34 + intensity * 0.66) * (1 - nightFactor * 0.32) * visible;
+      shell.lines.visible = shell.material.opacity > 0.004;
+    }
+
+    // Impact feedback: seed splashes from the live drop xz of the two nearest
+    // shells, so rings land where you can actually see streaks come down.
+    const effectScale = this.view.renderer.getEffectScale();
+    this.splashAccum += 130 * intensity * effectScale * visible * dt;
+    let spawns = Math.min(14, Math.floor(this.splashAccum));
+    this.splashAccum -= spawns;
+    while (spawns-- > 0) {
+      const shell = shells[Math.random() < 0.55 || shells.length === 1 ? 0 : 1];
+      const o = ((Math.random() * shell.drops) | 0) * 6;
+      this.spawnSplash(shell.pos[o], shell.pos[o + 2], cam.y);
+    }
+    this.updateSplashes(dt);
+
+    if (this.rainHaze) {
+      const haze = this.rainHaze;
+      haze.position.set(cam.x, cam.y - 18, cam.z);
+      haze.rotation.y = t * 0.012;
+      const mat = haze.material as THREE.MeshBasicMaterial;
+      mat.opacity = 0.19 * wet * (1 - nightFactor * 0.4);
+      haze.visible = mat.opacity > 0.004;
+    }
   }
 
   updateStormLightningFlash(dt: number) {

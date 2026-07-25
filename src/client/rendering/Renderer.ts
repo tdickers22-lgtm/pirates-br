@@ -23,6 +23,10 @@ const SKY_FRAG = /* glsl */`
   uniform vec3 u_sunDir;
   uniform float u_stormIntensity;
   uniform float u_underwaterIntensity;
+  // Lightning: 0..1 strike envelope + the world direction toward the bolt, so
+  // the cloud deck lights from inside and the flash has an azimuth.
+  uniform float u_lightningFlash;
+  uniform vec3 u_lightningDir;
   uniform float u_dayAmount;
   uniform float u_twilightAmount;
   uniform float u_nightAmount;
@@ -106,6 +110,19 @@ const SKY_FRAG = /* glsl */`
     float cloudAlpha = cloud * mix(0.85, 0.97, u_stormIntensity);
     sky = mix(sky, mix(cloudShade, cloudLit, litEdge), cloudAlpha);
 
+    // ── Lightning illumination: the strike lights the CLOUD DECK from inside
+    //    (bellies flare, clear sky only lifts) and is brightest toward the
+    //    bolt's azimuth, so the flash has a direction you can read ──────────
+    float boltLobe = 0.0;
+    if (u_lightningFlash > 0.001) {
+      float boltAz = dot(normalize(vec3(d.x, 0.0001, d.z)), u_lightningDir);
+      boltLobe = (0.20 + 0.80 * pow(max(0.0, boltAz), 2.0))
+               * (1.0 - smoothstep(0.05, 0.85, d.y) * 0.55);
+      float boltGlow = u_lightningFlash * boltLobe;
+      sky += vec3(0.60, 0.70, 0.92) * boltGlow * (0.20 + cloudAlpha * 1.70);
+      sky = mix(sky, vec3(0.74, 0.82, 0.99), boltGlow * cloudAlpha * 0.38);
+    }
+
     // Storm scud: fast low dark wisps racing along the horizon band
     float scud = smoothstep(0.48, 0.92, fbm2(cuv * 2.4 + vec2(u_time * 0.055, u_time * 0.020) + 31.7));
     float scudBand = smoothstep(-0.02, 0.06, d.y) * (1.0 - smoothstep(0.16, 0.52, d.y));
@@ -156,6 +173,8 @@ const SKY_FRAG = /* glsl */`
     sky += vec3(1.0, 0.86, 0.42) * (sunDisk * 3.2 + corona * 0.30) * sunVis * cloudOcclusion * notUnder;
     sky += vec3(0.55, 0.68, 1.00) * moonDisk * 1.5 * cloudOcclusion * notUnder;
     sky += vec3(0.80, 0.88, 1.10) * starField * starVis * 0.9 * notUnder;
+    // Emissive in linear so bloom blooms off the lit cloud belly.
+    sky += vec3(0.55, 0.66, 0.95) * u_lightningFlash * boltLobe * 0.6 * notUnder;
 
     gl_FragColor = vec4(sky, 1.0);
     #include <tonemapping_fragment>
@@ -245,6 +264,11 @@ export class Renderer {
     nightFactor: 0,
     twilightFactor: 0,
   };
+  /** 0..1 falling-rain density from EnvironmentFx. Rain is not just streaks: a
+   *  downpour thickens the air, so it adds fog density and pulls the fog toward
+   *  a wet slate grey on top of whatever the storm/day cycle already asked for. */
+  private rainMist = 0;
+  private readonly fogRainColor = new THREE.Color(0x54606b);
   private perfTimer = 0;
   private perfFrameCount = 0;
   private perfFrameTime = 0;
@@ -291,6 +315,8 @@ export class Renderer {
         u_sunDir: { value: this.sunDir.clone() },
         u_stormIntensity: { value: 0 },
         u_underwaterIntensity: { value: 0 },
+        u_lightningFlash: { value: 0 },
+        u_lightningDir: { value: new THREE.Vector3(0, 0, 1) },
         u_dayAmount: { value: 1 },
         u_twilightAmount: { value: 0 },
         u_nightAmount: { value: 0 },
@@ -435,6 +461,26 @@ export class Renderer {
     }
   }
 
+  /** 0 = dry, 1 = full downpour. Couples falling-rain density into the
+   *  atmosphere so distance reads WET, not merely dark. */
+  setRainMist(amount: number) {
+    const next = clamp(amount, 0, 1);
+    if (Math.abs(next - this.rainMist) < 0.004) return;
+    this.rainMist = next;
+    // Force updateStormWeather's early-out to re-derive the fog next call.
+    this.lastStormWeather = -1;
+  }
+
+  /** Strike lighting for the sky dome / cloud deck. `strength` is the bolt's
+   *  0..1 brightness envelope; `dirX/dirZ` point from the camera toward it. */
+  setLightningFlash(strength: number, dirX: number, dirZ: number) {
+    this.skyMaterial.uniforms.u_lightningFlash.value = clamp(strength, 0, 1);
+    const len = Math.hypot(dirX, dirZ);
+    if (len > 1e-4) {
+      (this.skyMaterial.uniforms.u_lightningDir.value as THREE.Vector3).set(dirX / len, 0, dirZ / len);
+    }
+  }
+
   /** 0 = clear weather, 1 = full storm (gray sky, fog, dim lights). */
   updateStormWeather(intensity: number) {
     const t = clamp(intensity, 0, 1);
@@ -446,7 +492,8 @@ export class Renderer {
     const fog = this.scene.fog as THREE.FogExp2;
     this.getCycleColor(this.tempFogColor, this.fogDayColor, this.fogTwilightColor, this.fogNightColor);
     fog.color.copy(this.tempFogColor).lerp(this.fogStormColor, t);
-    fog.density = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, t);
+    fog.color.lerp(this.fogRainColor, this.rainMist * 0.4);
+    fog.density = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, t) * (1 + this.rainMist * 0.62);
 
     this.sun.intensity = THREE.MathUtils.lerp(this.getCycleSunIntensity(), 0.42, t);
     this.ambientLight.intensity = THREE.MathUtils.lerp(this.getCycleAmbientIntensity(), 0.36, t);
@@ -471,9 +518,10 @@ export class Renderer {
     const fog = this.scene.fog as THREE.FogExp2;
     this.getCycleColor(this.tempFogColor, this.fogDayColor, this.fogTwilightColor, this.fogNightColor);
     this.tempFogColor.lerp(this.fogStormColor, storm);
+    this.tempFogColor.lerp(this.fogRainColor, this.rainMist * 0.4);
     this.tempUnderwaterFogColor.copy(this.fogUnderwaterNearColor).lerp(this.fogUnderwaterDeepColor, deep);
     fog.color.copy(this.tempFogColor).lerp(this.tempUnderwaterFogColor, underwater);
-    const weatherFog = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, storm);
+    const weatherFog = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, storm) * (1 + this.rainMist * 0.62);
     const waterFog = THREE.MathUtils.lerp(0.0058, 0.011, deep); // gentler falloff so silhouettes survive at depth
     fog.density = THREE.MathUtils.lerp(weatherFog, waterFog, underwater);
 
