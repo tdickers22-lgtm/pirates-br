@@ -16,9 +16,7 @@ import type { CombatFx } from './CombatFx.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
-
-/** Zero-scale matrix used to collapse a removed prop's InstancedMesh slot. */
-export const ZERO_SCALE_MAT4 = new THREE.Matrix4().makeScale(0, 0, 0);
+import { ZERO_SCALE_MAT4 } from './three-util.js';
 
 export type EnvironmentFxView = {
   readonly audio: SoundEngine;

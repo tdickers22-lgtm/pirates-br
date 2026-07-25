@@ -38,7 +38,8 @@ import {
 } from '../rendering/PlayerAnimator.js';
 import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelController.js';
 import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
-import { EnvironmentFx, ZERO_SCALE_MAT4, type EnvironmentFxView } from '../rendering/EnvironmentFx.js';
+import { EnvironmentFx, type EnvironmentFxView } from '../rendering/EnvironmentFx.js';
+import { ZERO_SCALE_MAT4 } from '../rendering/three-util.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { makeStormTexture } from '../rendering/factories/TextureFactory.js';
@@ -284,7 +285,6 @@ export class Game {
   private storyCutscene: StoryCutsceneRefs | null = null;
   private storyCutsceneNpcId: string | null = null;
   private storyCutsceneHideAt = 0;
-  /** Matches the HUD [X] prompt — server must perform this action only. */
   private spyglassActive = false;
   // 'door' is a CLIENT-ONLY interaction kind (tavern doors are cosmetic and
   // collision-less) — it must never be sent as a server interactIntent.
@@ -900,7 +900,7 @@ export class Game {
       this.ui.matchStartCount.classList.add('tick');
       // Dry chrome tick for the long count; the last three escalate to the
       // rising beacon pip so the final seconds feel like the last seconds.
-      if (seconds <= 3) this.audio.playRespawnBeacon(0);
+      if (seconds <= 3) this.audio.playCountdownPip();
       else this.audio.playUiClick();
     }
   }

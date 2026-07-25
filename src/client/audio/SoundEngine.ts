@@ -892,6 +892,19 @@ export class SoundEngine {
     this.playTone(now + 0.12, 540, 720, 0.3, 0.12 * g, 'triangle', 0.03, dest);
   }
 
+  /** Final-seconds pip of the match countdown: a hard dry tick with a rising
+   *  two-note tail, so the last three numbers read as the last three numbers.
+   *  Deliberately NOT the respawn beacon — this is UI chrome, not a world event,
+   *  so it never spatialises and never fades with distance. */
+  playCountdownPip(): void {
+    this.unlock();
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.playNoise(now, 0.035, 3200, 1.4, 0.09, 'highpass', undefined, 0);
+    this.playTone(now, 520, 620, 0.09, 0.16, 'triangle', 0, undefined, 0);
+    this.playTone(now + 0.05, 780, 900, 0.13, 0.12, 'sine', 0.01, undefined, 0);
+  }
+
   /** Two-note confirm that YOUR shot landed on an enemy hull. Mostly dry chrome. */
   playShipHitConfirm(distance = 0): void {
     this.unlock();

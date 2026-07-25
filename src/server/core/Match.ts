@@ -4388,9 +4388,21 @@ export class Match {
     }
   }
 
-  /** Crewmates = players sharing the same home ship (player.shipId). Anyone
-   *  not eliminated counts — a downed or respawning mate can still come back
-   *  and revive you, so the squad isn't wiped yet. */
+  /**
+   * Crewmates = players sharing the same home ship (player.shipId). Anyone not
+   * eliminated counts — a downed or respawning mate can still come back and
+   * revive you, so the squad isn't wiped yet.
+   *
+   * SOLO RETURNS FALSE BY DESIGN. Solo queue hands every human and every bot
+   * their own hull, so no two players ever share a shipId and this is always
+   * false: a solo pirate at 0 hp dies outright (the else-branch in
+   * resolveHealthDeaths) and never enters DBNO. That is the intended solo
+   * rule — there is nobody to crawl toward. The whole downed/revive/bleed-out
+   * path below activates for DUOS and larger crews, where a shared shipId is
+   * what makes a mate worth crawling to. Do not "fix" this by loosening the
+   * crew test to proximity: it would let two strangers who happen to be near
+   * each other keep one another alive.
+   */
   private hasLivingCrewmate(player: Player): boolean {
     if (!player.shipId) return false;
     return this.state.players.some((mate) =>
