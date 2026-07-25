@@ -15,14 +15,8 @@ export type UiRefs = {
   killCount: HTMLDivElement;
   healthFill: HTMLDivElement;
   armorFill: HTMLDivElement;
-  hullBow: HTMLDivElement;
-  hullStern: HTMLDivElement;
-  hullPort: HTMLDivElement;
-  hullStarboard: HTMLDivElement;
-  hullBowTxt: HTMLSpanElement;
-  hullSternTxt: HTMLSpanElement;
-  hullPortTxt: HTMLSpanElement;
-  hullStarboardTxt: HTMLSpanElement;
+  /** One-line breach readout that replaced the four hull-section bars. */
+  shipLeaks: HTMLDivElement;
   sailStatus: HTMLDivElement;
   shipStatus: HTMLDivElement;
   shipUpgrades: HTMLDivElement;
@@ -41,6 +35,7 @@ export type UiRefs = {
   interactPrompt: HTMLDivElement;
   contextLabel: HTMLDivElement;
   waterGauge: HTMLDivElement;
+  waterGaugeTitle: HTMLDivElement;
   waterGaugeFill: HTMLDivElement;
   waterGaugeTrend: HTMLSpanElement;
   waterGaugePct: HTMLSpanElement;
@@ -106,14 +101,7 @@ export function buildUiRefs(): UiRefs {
     killCount: requireElement('kill-count'),
     healthFill: requireElement('health-fill'),
     armorFill: requireElement('armor-fill'),
-    hullBow: requireElement('hull-bow'),
-    hullStern: requireElement('hull-stern'),
-    hullPort: requireElement('hull-port'),
-    hullStarboard: requireElement('hull-starboard'),
-    hullBowTxt: requireElement('hull-bow-txt'),
-    hullSternTxt: requireElement('hull-stern-txt'),
-    hullPortTxt: requireElement('hull-port-txt'),
-    hullStarboardTxt: requireElement('hull-starboard-txt'),
+    shipLeaks: requireElement('ship-leaks'),
     sailStatus: requireElement('sail-status'),
     shipStatus: requireElement('ship-status'),
     shipUpgrades: requireElement('ship-upgrades'),
@@ -132,6 +120,7 @@ export function buildUiRefs(): UiRefs {
     interactPrompt: requireElement('interact-prompt'),
     contextLabel: requireElement('context-label'),
     waterGauge: requireElement('water-gauge'),
+    waterGaugeTitle: requireElement('wg-title'),
     waterGaugeFill: requireElement('wg-fill'),
     waterGaugeTrend: requireElement('wg-trend'),
     waterGaugePct: requireElement('wg-pct'),

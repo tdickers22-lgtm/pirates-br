@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { IslandDock, Player, Ship, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
+import type { IslandDock, Player, Ship, ShipHole, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
 import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
 import { getAmmoCrateLocal, getCannonDeckLocalPosition, getShipGangwayPlan } from '../../shared/interactions.js';
@@ -275,6 +275,10 @@ interface HullProfileStation {
   /** Starboard half-section, sheer(0) → keel(last). x >= 0. */
   slots: Array<{ x: number; y: number; z: number }>;
 }
+
+/** Decal forward axis: hole groups are built facing +Z and rotated onto the
+ *  hull's outward surface normal. */
+const HULL_Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 interface HullProfile {
   W: number;
@@ -1401,6 +1405,21 @@ interface ShipWake {
 const WAKE_ROWS = 9;
 const WAKE_COLS = 3;
 
+/** One rendered breach: the torn-planking decal group on the hull surface, its
+ *  pulsing "plank me" halo, the gush anchor Game.ts hangs water jets on, the
+ *  optional deck-side inner decal, and the crossed planks once it is patched. */
+interface HoleVis {
+  group: THREE.Group;
+  marker: THREE.Mesh;
+  gush: THREE.Object3D;
+  inner: THREE.Group | null;
+  patch: THREE.Group | null;
+  /** Hull-local surface point the shader discards around. */
+  point: THREE.Vector3;
+  normal: THREE.Vector3;
+  patched: boolean;
+}
+
 interface ShipMeshGroup {
   root: THREE.Group;
   detailRoot: THREE.Group;
@@ -1414,7 +1433,12 @@ interface ShipMeshGroup {
   upgradePennants: Record<ShipUpgradeType, THREE.Mesh>;
   upgradeVisuals: Record<ShipUpgradeType, THREE.Object3D[]>;
   fireParticles: THREE.Points | null;
-  hullHoles: Record<'bow' | 'stern' | 'port' | 'starboard', THREE.Group>;
+  /** Lofted section table — lets update() project a freshly-arrived breach
+   *  onto the REAL planking surface instead of a box approximation. */
+  hullProfile: HullProfile;
+  /** Live breach decals keyed by ShipHole.id. Built on demand as holes arrive
+   *  on the wire, disposed when the entity leaves the list. */
+  holeVis: Map<number, HoleVis>;
   /** Yard+sail+furled-roll pivots, one per square-rigged mast (rotated to trim). */
   trimPivots: THREE.Group[];
   cannonMeshes: CannonMeshGroup[];
@@ -1433,7 +1457,8 @@ interface ShipMeshGroup {
   holdWaterBase: Float32Array | null;
   wake: ShipWake;
   /** vec4 (xyz = hull-local hole center, w = radius) driving the hull's
-   *  fragment-discard breaches; slot radius 0 = inactive. */
+   *  fragment-discard breaches, one slot per UNPATCHED hole; radius 0 =
+   *  inactive. MAX_HOLES_PER_SHIP slots — the server can never exceed it. */
   hullHoleUniform: { value: THREE.Vector4[] };
   /** Waterline contact collar (wet-edge foam hugging the hull's own waterline). */
   waterlineFoam: THREE.Mesh;
@@ -1466,6 +1491,25 @@ export class ShipRenderer {
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
   });
+  /** Shared breach-decal materials. Holes are spawned at runtime now (one per
+   *  ShipHole entity, wherever the shot landed), so these live on the renderer
+   *  instead of being rebuilt inside every hull. */
+  private readonly holeMat = new THREE.MeshStandardMaterial({
+    color: 0x07080a, roughness: 1, metalness: 0,
+    emissive: 0x06243a, emissiveIntensity: 0.35,
+    side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+  });
+  private readonly holeRimMat = new THREE.MeshStandardMaterial({
+    color: 0x20120a, roughness: 0.95, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+  });
+  private readonly splinterMat = new THREE.MeshStandardMaterial({
+    color: 0x140b05, roughness: 1, side: THREE.DoubleSide,
+  });
+  /** Reused splinter-shard geometry, scaled per decal (all breaches render at
+   *  HOLE_VISUAL_RADIUS — depth of damage reads as MORE holes, not bigger ones). */
+  private holeDecalGeo: { opening: THREE.CircleGeometry; rim: THREE.RingGeometry; shards: THREE.BufferGeometry | null; marker: THREE.RingGeometry } | null = null;
   private readonly cannonOperators = new Map<string, Player>();
   private windOverride: { direction: number; strength: number } | null = null;
   private readonly waveMotion = { pitch: 0, roll: 0, surfaceY: 0 };
@@ -1743,15 +1787,16 @@ export class ShipRenderer {
     // identity in the ship group, so `position` IS hull-local). The material
     // is DoubleSide, so looking through an opening shows the far interior
     // wall instead of vanished backfaces.
-    const hullHoleUniform = { value: Array.from({ length: 6 }, () => new THREE.Vector4(0, 0, 0, 0)) };
+    const holeSlots = FLOODING.MAX_HOLES_PER_SHIP;
+    const hullHoleUniform = { value: Array.from({ length: holeSlots }, () => new THREE.Vector4(0, 0, 0, 0)) };
     hullMat.onBeforeCompile = (shader) => {
       shader.uniforms.uHoles = hullHoleUniform;
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vHullPos;')
         .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHullPos = position;');
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vHullPos;\nuniform vec4 uHoles[6];')
-        .replace('#include <map_fragment>', 'for (int i = 0; i < 6; i++) { if (uHoles[i].w > 0.0 && distance(vHullPos, uHoles[i].xyz) < uHoles[i].w) discard; }\n#include <map_fragment>');
+        .replace('#include <common>', `#include <common>\nvarying vec3 vHullPos;\nuniform vec4 uHoles[${holeSlots}];`)
+        .replace('#include <map_fragment>', `for (int i = 0; i < ${holeSlots}; i++) { if (uHoles[i].w > 0.0 && distance(vHullPos, uHoles[i].xyz) < uHoles[i].w) discard; }\n#include <map_fragment>`);
     };
     const hull = new THREE.Mesh(hullGeo, hullMat);
     hull.castShadow = true;
@@ -1779,186 +1824,10 @@ export class ShipRenderer {
     waterlineFoam.renderOrder = 2;
     group.add(waterlineFoam);
 
-    const holeMat = new THREE.MeshStandardMaterial({
-      color: 0x07080a,
-      roughness: 1,
-      metalness: 0,
-      emissive: 0x06243a,
-      emissiveIntensity: 0.35,
-      side: THREE.DoubleSide,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    });
-    const holeRimMat = new THREE.MeshStandardMaterial({
-      color: 0x20120a,
-      roughness: 0.95,
-      side: THREE.DoubleSide,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    });
-    const splinterMat = new THREE.MeshStandardMaterial({ color: 0x140b05, roughness: 1, side: THREE.DoubleSide });
-    // Pulsing "repair here" halo around each hole. depthTest STAYS ON — the
-    // retired station beacons taught us depthTest:false glows through hulls
-    // and sniper scopes; this ring only reads when the hull face is in view.
-    const holeMarkerMat = this.holeMarkerMat;
-    // One punched-splinter decal facing local +Z (oriented via quaternion below).
-    const makeHoleDecal = (radius: number) => {
-      const decal = new THREE.Group();
-      const opening = new THREE.Mesh(new THREE.CircleGeometry(radius, 16), holeMat);
-      opening.name = 'hole-opening';
-      decal.add(opening);
-      const rim = new THREE.Mesh(new THREE.RingGeometry(radius * 1.05, radius * 1.3, 16), holeRimMat);
-      decal.add(rim);
-      // Splintered plank shards jutting from the rim — merged into one mesh so a
-      // blown-through hole reads as jagged torn timber, not a clean drilled circle.
-      const shardGeos: THREE.BufferGeometry[] = [];
-      const shardCount = 7;
-      for (let k = 0; k < shardCount; k++) {
-        const a = (k / shardCount) * Math.PI * 2 + 0.3;
-        const len = (0.14 + (k % 3) * 0.06) * (radius / 0.4);
-        const cone = new THREE.ConeGeometry(0.05 * (radius / 0.4), len, 4);
-        const rq = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, a - Math.PI * 0.5));
-        const pos = new THREE.Vector3(
-          Math.cos(a) * (radius * 1.1 + len * 0.5),
-          Math.sin(a) * (radius * 1.1 + len * 0.5),
-          (k % 2 ? 0.03 : -0.02),
-        );
-        cone.applyMatrix4(new THREE.Matrix4().compose(pos, rq, new THREE.Vector3(1, 1, 0.5)));
-        shardGeos.push(cone);
-      }
-      const shardsMerged = mergeGeometries(shardGeos, false);
-      for (const sg of shardGeos) sg.dispose();
-      if (shardsMerged) decal.add(new THREE.Mesh(shardsMerged, splinterMat));
-      return decal;
-    };
-    const Z_AXIS = new THREE.Vector3(0, 0, 1);
-    // Hole group projected onto the REAL loft surface: position + outward normal
-    // come from the profile query, so decals hug the planking instead of floating
-    // beside a box approximation. Each carries an empty gush-anchor Object3D that
-    // Game.ts can hang water-jet FX on (see getHoleAnchors()).
-    const innerBreachDecals: THREE.Group[] = [];
-    const addHole = (
-      position: THREE.Vector3,
-      normal: THREE.Vector3,
-      radius: number,
-      belowWaterline: boolean,
-      extraDecal?: { offset: THREE.Vector3; normal: THREE.Vector3 },
-      innerDecal?: { position: THREE.Vector3; normal: THREE.Vector3 },
-    ) => {
-      const hm = new THREE.Group();
-      hm.position.copy(position);
-      hm.visible = false;
-      const n = normal.clone().normalize();
-      const decal = makeHoleDecal(radius);
-      decal.quaternion.setFromUnitVectors(Z_AXIS, n);
-      hm.add(decal);
-      if (extraDecal) {
-        const second = makeHoleDecal(radius);
-        second.position.copy(extraDecal.offset);
-        second.quaternion.setFromUnitVectors(Z_AXIS, extraDecal.normal.clone().normalize());
-        hm.add(second);
-      }
-      const gush = new THREE.Object3D();
-      gush.name = 'hole-gush-anchor';
-      gush.position.copy(n).multiplyScalar(0.12);
-      gush.quaternion.setFromUnitVectors(Z_AXIS, n);
-      hm.add(gush);
-      const marker = new THREE.Mesh(
-        new THREE.RingGeometry(radius * 1.45, radius * 1.8, 24),
-        holeMarkerMat,
-      );
-      marker.name = 'hole-marker';
-      marker.position.copy(n).multiplyScalar(0.06);
-      marker.quaternion.setFromUnitVectors(Z_AXIS, n);
-      hm.add(marker);
-      hm.userData.marker = marker;
-      hm.userData.gushAnchor = gush;
-      hm.userData.belowWaterline = belowWaterline;
-      hm.userData.floodActive = false;
-      // Shader-hole points + plank-patch anchor (hull-local pos, decal quat).
-      hm.userData.shaderPoints = extraDecal
-        ? [position.clone(), position.clone().add(extraDecal.offset)]
-        : [position.clone()];
-      hm.userData.patchQuat = decal.quaternion.clone();
-      hm.userData.patchNormal = n.clone();
-      if (innerDecal) {
-        // Inner breach on the inboard bulwark/rail face: a holed section shows
-        // torn planking FROM ON DECK, not only from the water. Kept as its own
-        // group (not a child of hm) so the outer group's scale ramp doesn't
-        // drag it along its offset — update() drives visible + scale directly.
-        const inner = new THREE.Group();
-        inner.position.copy(innerDecal.position);
-        inner.visible = false;
-        const innerFace = makeHoleDecal(radius * 0.7);
-        innerFace.quaternion.setFromUnitVectors(Z_AXIS, innerDecal.normal.clone().normalize());
-        inner.add(innerFace);
-        group.add(inner);
-        innerBreachDecals.push(inner);
-        hm.userData.innerDecal = inner;
-      }
-      group.add(hm);
-      return hm;
-    };
-    // Side holes ride the waterline band (matches server flood tests + leak FX
-    // at local y≈0.16); bow holes sit on the flared cheeks; stern on the transom.
-    // Side holes straddle the waterline band (server flood tests pass there and
-    // hull-leak FX stream nearby); bow holes sit on the flared cheeks; the stern
-    // hole rides the raked transom cap of the loft itself.
-    const holeY = 0.28;
-    const sideSurf = hullSurfacePointAt(profile, -L * 0.04, holeY);
-    const bowSurf = hullSurfacePointAt(profile, L * 0.40, H * 0.30);
-    const bowN = new THREE.Vector3(bowSurf.nx * 0.8, bowSurf.ny * 0.25, 0.62).normalize();
-    const bowCheekX = bowSurf.x + bowSurf.nx * 0.03;
+    // Breaches are NOT built here any more. A hole is an ENTITY at whatever
+    // point the shot landed, so its decal is created on demand in update()
+    // (see buildHoleVis) from the shared materials on this renderer.
     const sternStation = profile.stations[0];
-    const sternSurf = stationSurfaceAt(sternStation, H * 0.24);
-    const sternN = new THREE.Vector3(
-      0,
-      sternStation.slots[0].z - sternStation.slots[sternStation.slots.length - 1].z,
-      -(sternStation.sheerY - sternStation.keelY),
-    ).normalize();
-    // Inner breach mounts — where each section's torn planking shows FROM ON
-    // DECK: bow → inboard face of the bow breastwork (box at z=L*0.36, 0.16
-    // thick, so the face sits at L*0.36-0.08); sides → inboard bulwark faces;
-    // stern → flat on the poop-castle top behind the helm (every vertical
-    // stern face is buried under the quarterdeck dais / castle box overlap).
-    const hullHoles = {
-      // Bow breach: mirrored decals on both flared cheeks (the stem itself is
-      // too narrow to carry a readable hole), anchored on the starboard cheek.
-      bow: addHole(
-        new THREE.Vector3(bowCheekX, H * 0.30, L * 0.40),
-        new THREE.Vector3(bowN.x, bowN.y, bowN.z),
-        0.3,
-        false,
-        { offset: new THREE.Vector3(-2 * bowCheekX, 0, 0), normal: new THREE.Vector3(-bowN.x, bowN.y, bowN.z) },
-        { position: new THREE.Vector3(0, H + 0.17, L * 0.36 - 0.11), normal: new THREE.Vector3(0, 0, -1) },
-      ),
-      stern: addHole(
-        new THREE.Vector3(0, H * 0.24, sternSurf.z).addScaledVector(sternN, 0.05),
-        sternN.clone(),
-        0.38,
-        false,
-        undefined,
-        { position: new THREE.Vector3(0, H + H * 0.28 + 0.03, -L * 0.37), normal: new THREE.Vector3(0, 1, 0) },
-      ),
-      port: addHole(
-        new THREE.Vector3(-sideSurf.x - sideSurf.nx * 0.03, holeY, -L * 0.04),
-        new THREE.Vector3(-sideSurf.nx, sideSurf.ny, 0),
-        0.4,
-        true,
-        undefined,
-        { position: new THREE.Vector3(-(W * 0.44 - 0.1), H + 0.17, -L * 0.04), normal: new THREE.Vector3(1, 0, 0) },
-      ),
-      starboard: addHole(
-        new THREE.Vector3(sideSurf.x + sideSurf.nx * 0.03, holeY, -L * 0.04),
-        new THREE.Vector3(sideSurf.nx, sideSurf.ny, 0),
-        0.4,
-        true,
-        undefined,
-        { position: new THREE.Vector3(W * 0.44 - 0.1, H + 0.17, -L * 0.04), normal: new THREE.Vector3(-1, 0, 0) },
-      ),
-    };
 
     // Wales + boot-top: proud strakes that FOLLOW the loft (no more straight
     // boxes floating off the tapered bow/stern). Sheer strake under the cap
@@ -3336,7 +3205,7 @@ export class ShipRenderer {
         group.add(gunportFrame);
         const gunportOpening = new THREE.Mesh(
           new THREE.BoxGeometry(0.095, 0.46, 0.62),
-          holeMat,
+          this.holeMat,
         );
         gunportOpening.position.set(sideSign * (portSurf.x + 0.058), H * 0.59, cz);
         gunportOpening.rotation.z = gunportFrame.rotation.z;
@@ -3637,8 +3506,6 @@ export class ShipRenderer {
       ...trimPivots,
       ...Object.values(upgradePennants),
       ...Object.values(upgradeVisuals).flat(),
-      ...Object.values(hullHoles),
-      ...innerBreachDecals,
       ...supplyBarrels,
       ...cannonGroups.map((cannon) => cannon.root),
       ...(nestFloorMesh ? [nestFloorMesh] : []),
@@ -3686,7 +3553,8 @@ export class ShipRenderer {
       upgradePennants,
       upgradeVisuals,
       fireParticles: null,
-      hullHoles,
+      hullProfile: profile,
+      holeVis: new Map<number, HoleVis>(),
       trimPivots,
       cannonMeshes: cannonGroups,
       lanterns,
@@ -3707,29 +3575,153 @@ export class ShipRenderer {
     return group;
   }
 
-  /** A crossed pair of rough planks nailed over a repaired breach — mounted
-   *  on the hole group so it rides the hull; slight per-patch jitter so
-   *  stacked repairs read as separate boards. */
-  private addPlankPatch(holeGroup: THREE.Group, index: number) {
-    const quat = holeGroup.userData.patchQuat as THREE.Quaternion | undefined;
-    const n = holeGroup.userData.patchNormal as THREE.Vector3 | undefined;
-    if (!quat || !n) return;
+  /** Lazily built, shared across every breach on every hull. */
+  private getHoleDecalGeo() {
+    if (this.holeDecalGeo) return this.holeDecalGeo;
+    const r = FLOODING.HOLE_VISUAL_RADIUS;
+    // Splintered plank shards jutting from the rim — merged into one mesh so a
+    // blown-through hole reads as jagged torn timber, not a drilled circle.
+    const shardGeos: THREE.BufferGeometry[] = [];
+    const shardCount = 7;
+    for (let k = 0; k < shardCount; k++) {
+      const a = (k / shardCount) * Math.PI * 2 + 0.3;
+      const len = (0.14 + (k % 3) * 0.06) * (r / 0.4);
+      const cone = new THREE.ConeGeometry(0.05 * (r / 0.4), len, 4);
+      const rq = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, a - Math.PI * 0.5));
+      const pos = new THREE.Vector3(
+        Math.cos(a) * (r * 1.1 + len * 0.5),
+        Math.sin(a) * (r * 1.1 + len * 0.5),
+        (k % 2 ? 0.03 : -0.02),
+      );
+      cone.applyMatrix4(new THREE.Matrix4().compose(pos, rq, new THREE.Vector3(1, 1, 0.5)));
+      shardGeos.push(cone);
+    }
+    const shards = mergeGeometries(shardGeos, false);
+    for (const sg of shardGeos) sg.dispose();
+    this.holeDecalGeo = {
+      opening: new THREE.CircleGeometry(r, 16),
+      rim: new THREE.RingGeometry(r * 1.05, r * 1.3, 16),
+      shards,
+      marker: new THREE.RingGeometry(r * 1.45, r * 1.8, 24),
+    };
+    return this.holeDecalGeo;
+  }
+
+  /**
+   * Project a hull-local breach point onto the REAL lofted planking and return
+   * the surface point + outward normal. Side hits query the station table at
+   * the hole's own height and length; hits past the ends ride the raked stem or
+   * transom instead (where the sections have pinched to nothing).
+   */
+  private hullBreachSurface(profile: HullProfile, hole: { x: number; y: number; z: number }) {
+    const sts = profile.stations;
+    const sternZ = sts[0].baseZ;
+    const bowZ = sts[sts.length - 1].baseZ;
+    const y = THREE.MathUtils.clamp(hole.y, -profile.draft * 0.85, profile.H * 0.95);
+    if (hole.z <= sternZ + 0.25 || hole.z >= bowZ - 0.25) {
+      // End cap: the transom / stem face. Sit the decal on the raked surface and
+      // face it fore-and-aft, tilted with the rake so it hugs the timber.
+      const bow = hole.z >= 0;
+      const st = bow ? sts[sts.length - 1] : sts[0];
+      const surf = stationSurfaceAt(st, y);
+      const sign = bow ? 1 : -1;
+      const rake = (st.slots[0].z - st.slots[st.slots.length - 1].z);
+      const normal = new THREE.Vector3(0, rake * sign * 0.35, sign * (st.sheerY - st.keelY)).normalize();
+      return {
+        point: new THREE.Vector3(
+          THREE.MathUtils.clamp(hole.x, -surf.x * 0.7, surf.x * 0.7),
+          y,
+          surf.z,
+        ),
+        normal,
+      };
+    }
+    const surf = hullSurfacePointAt(profile, hole.z, y);
+    const sign = hole.x >= 0 ? 1 : -1;
+    return {
+      point: new THREE.Vector3(sign * surf.x, y, hole.z),
+      normal: new THREE.Vector3(sign * surf.nx, surf.ny, 0).normalize(),
+    };
+  }
+
+  /** Build the decal group for one breach, hugging the planking at its exact
+   *  point. Returns the HoleVis the update loop drives. */
+  private buildHoleVis(mesh: ShipMeshGroup, stats: (typeof SHIP_STATS)[ShipType], hole: ShipHole): HoleVis {
+    const geo = this.getHoleDecalGeo();
+    const { point, normal } = this.hullBreachSurface(mesh.hullProfile, hole);
+    const group = new THREE.Group();
+    group.position.copy(point);
+    const quat = new THREE.Quaternion().setFromUnitVectors(HULL_Z_AXIS, normal);
+
+    const decal = new THREE.Group();
+    decal.add(new THREE.Mesh(geo.opening, this.holeMat));
+    decal.add(new THREE.Mesh(geo.rim, this.holeRimMat));
+    if (geo.shards) decal.add(new THREE.Mesh(geo.shards, this.splinterMat));
+    decal.quaternion.copy(quat);
+    group.add(decal);
+
+    const gush = new THREE.Object3D();
+    gush.name = 'hole-gush-anchor';
+    gush.position.copy(normal).multiplyScalar(0.12);
+    gush.quaternion.copy(quat);
+    group.add(gush);
+
+    const marker = new THREE.Mesh(geo.marker, this.holeMarkerMat);
+    marker.name = 'hole-marker';
+    marker.position.copy(normal).multiplyScalar(0.06);
+    marker.quaternion.copy(quat);
+    group.add(marker);
+    mesh.root.add(group);
+
+    // Deck-side torn planking, but ONLY for breaches high enough on the
+    // topside to actually show from inside the rail — a waterline hole is
+    // below the deck, so an inner decal there was always a lie.
+    let inner: THREE.Group | null = null;
+    if (hole.y > stats.height * 0.5) {
+      inner = new THREE.Group();
+      inner.position.set(
+        point.x - Math.sign(point.x || 1) * 0.12,
+        stats.height + 0.17,
+        THREE.MathUtils.clamp(point.z, -stats.length * 0.36, stats.length * 0.36),
+      );
+      const innerFace = new THREE.Group();
+      innerFace.add(new THREE.Mesh(geo.opening, this.holeMat));
+      innerFace.add(new THREE.Mesh(geo.rim, this.holeRimMat));
+      innerFace.scale.setScalar(0.7);
+      innerFace.quaternion.setFromUnitVectors(
+        HULL_Z_AXIS, new THREE.Vector3(-Math.sign(point.x || 1), 0, 0),
+      );
+      inner.add(innerFace);
+      mesh.root.add(inner);
+    }
+
+    return { group, marker, gush, inner, patch: null, point, normal, patched: false };
+  }
+
+  private disposeHoleVis(mesh: ShipMeshGroup, vis: HoleVis) {
+    mesh.root.remove(vis.group);
+    if (vis.inner) mesh.root.remove(vis.inner);
+    if (vis.patch) mesh.root.remove(vis.patch);
+  }
+
+  /** A crossed pair of rough planks nailed over a repaired breach, flush at the
+   *  breach's own point and quaternion — patch and hole are the same entity now,
+   *  so a plank can never float over a still-open hole. */
+  private addPlankPatch(mesh: ShipMeshGroup, vis: HoleVis, seed: number) {
     const patch = new THREE.Group();
     const mat = new THREE.MeshStandardMaterial({ map: this.darkWoodTex, roughness: 0.95 });
     for (let i = 0; i < 2; i++) {
       const plank = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.15, 0.035), mat);
-      plank.rotation.z = (i === 0 ? 0.5 : -0.45) + (index - 1) * 0.16;
+      plank.rotation.z = (i === 0 ? 0.5 : -0.45) + ((seed % 3) - 1) * 0.16;
       plank.position.z = 0.02 + i * 0.035;
       plank.castShadow = true;
       patch.add(plank);
     }
-    patch.quaternion.copy(quat);
-    // Parent to the SHIP group, not the hole group: the hole group scales
-    // with the damage ramp and goes INVISIBLE once the section is healed —
-    // exactly when the patch must remain showing.
-    patch.position.copy(holeGroup.position).addScaledVector(n, 0.05 + index * 0.015);
-    (holeGroup.parent ?? holeGroup).add(patch);
+    patch.quaternion.setFromUnitVectors(HULL_Z_AXIS, vis.normal);
+    patch.position.copy(vis.point).addScaledVector(vis.normal, 0.05);
     patch.userData.isPlankPatch = true;
+    mesh.root.add(patch);
+    vis.patch = patch;
   }
 
   private addSwiftSailTrim(
@@ -3898,9 +3890,16 @@ export class ShipRenderer {
       // Flood attitude: settle deeper as the bilge fills and list toward the
       // most-damaged side (up to ~7°) so a breached flank reads at a glance.
       const floodGate = ship.sinking ? 0 : Math.min(1, waterLevel * 2.2);
-      const dmg = ship.hull;
-      const floodRoll = ((1 - THREE.MathUtils.clamp(dmg.port, 0, 1)) - (1 - THREE.MathUtils.clamp(dmg.starboard, 0, 1))) * 0.122 * floodGate;
-      const floodPitch = ((1 - THREE.MathUtils.clamp(dmg.bow, 0, 1)) - (1 - THREE.MathUtils.clamp(dmg.stern, 0, 1))) * 0.06 * floodGate;
+      // List toward the breached side: which way she lies now comes straight
+      // from where the open holes actually are, not a section average.
+      let holePort = 0, holeStbd = 0, holeBow = 0, holeStern = 0;
+      for (const hole of ship.holes ?? []) {
+        if (hole.patched) continue;
+        if (hole.x < 0) holePort += 1; else holeStbd += 1;
+        if (hole.z > 0) holeBow += 1; else holeStern += 1;
+      }
+      const floodRoll = THREE.MathUtils.clamp((holePort - holeStbd) / 3, -1, 1) * 0.122 * floodGate;
+      const floodPitch = THREE.MathUtils.clamp((holeBow - holeStern) / 3, -1, 1) * 0.06 * floodGate;
       // Visual extra on top of the server's FREEBOARD_DROP (0.8·wl, already in
       // heave): total settle tops out at ~45% of freeboard at full flood.
       const floodSettle = ship.sinking ? 0 : waterLevel * waterLevel * Math.max(0, stats.height * 0.45 - 0.8);
@@ -4146,78 +4145,62 @@ export class ShipRenderer {
       // Animated foam wake ribbon + bow spray, tracking the Gerstner surface
       this.updateWake(mesh, ship, stats, waveT, dt, true, storm01);
 
-      const hullSections = ['bow', 'stern', 'port', 'starboard'] as const;
       // Shared pulse for every hole halo (one material, breathing in sync).
       this.holeMarkerMat.opacity = 0.28 + 0.24 * (0.5 + 0.5 * Math.sin(t * 3.4));
-      // Drive the REAL see-through breaches + plank patches. Repairs are
-      // observed as per-section hole-count DECREASES; a multi-section drop or
-      // a founder is a reset/respawn, not carpentry — no patches for those.
-      const patchState = (mesh.root.userData.patchState ??= {
-        prev: { bow: 0, stern: 0, port: 0, starboard: 0 } as Record<'bow' | 'stern' | 'port' | 'starboard', number>,
-        planks: { bow: 0, stern: 0, port: 0, starboard: 0 } as Record<'bow' | 'stern' | 'port' | 'starboard', number>,
-        init: false,
-      });
-      const curHoles = {
-        bow: ship.holes?.bow ?? 0,
-        stern: ship.holes?.stern ?? 0,
-        port: ship.holes?.port ?? 0,
-        starboard: ship.holes?.starboard ?? 0,
-      };
-      const totalDrop = (patchState.prev.bow - curHoles.bow) + (patchState.prev.stern - curHoles.stern)
-        + (patchState.prev.port - curHoles.port) + (patchState.prev.starboard - curHoles.starboard);
-      const resetLike = !patchState.init || ship.sinking || totalDrop > 1;
-      let holeSlot = 0;
-      for (const s of hullSections) {
-        const hp = ship.hull[s];
-        const hole = mesh.hullHoles[s];
-        hole.visible = hp < 0.92;
-        // Shader holes: one uniform slot per surface point, radius grows with
-        // the section's open-hole count. The old dark "opening" discs retire —
-        // the hull now genuinely opens.
-        const points = (hole.userData.shaderPoints as THREE.Vector3[] | undefined) ?? [];
-        const holeRadius = curHoles[s] > 0 ? 0.2 + 0.09 * (curHoles[s] - 1) : 0;
-        for (const point of points) {
-          if (holeSlot < 6) {
-            mesh.hullHoleUniform.value[holeSlot].set(point.x, point.y, point.z, holeRadius);
-            holeSlot++;
+      // Breaches are ENTITIES: diff the wire list against the decals we already
+      // built, keyed by ShipHole.id. A new id spawns a decal exactly where the
+      // shot landed; a patched flip swaps it for crossed planks at the SAME
+      // point; a vanished id disposes. No count heuristics, so a re-punched
+      // spot can never end up with a plank floating over an open hole.
+      {
+        const holes = ship.holes ?? [];
+        let holeSlot = 0;
+        for (const hole of holes) {
+          let vis = mesh.holeVis.get(hole.id);
+          if (!vis) {
+            vis = this.buildHoleVis(mesh, stats, hole);
+            mesh.holeVis.set(hole.id, vis);
+          }
+          if (hole.patched !== vis.patched) {
+            vis.patched = !!hole.patched;
+            if (vis.patched) {
+              // Carpentry shows: planks go on, the wound stops reading as open.
+              if (!vis.patch) this.addPlankPatch(mesh, vis, hole.id);
+            } else if (vis.patch) {
+              // The cap recycled this slot — the plank was blown back off.
+              mesh.root.remove(vis.patch);
+              vis.patch = null;
+            }
+          }
+          const open = !vis.patched;
+          vis.group.visible = open;
+          vis.marker.visible = open && !ship.sinking;
+          if (vis.inner) vis.inner.visible = open;
+          if (open && holeSlot < mesh.hullHoleUniform.value.length) {
+            // One shader slot per OPEN breach, all at the same radius: damage
+            // depth reads as more holes, never as one growing disc.
+            mesh.hullHoleUniform.value[holeSlot].set(
+              vis.point.x, vis.point.y, vis.point.z, FLOODING.HOLE_VISUAL_RADIUS,
+            );
+            holeSlot += 1;
           }
         }
-        hole.traverse((o) => { if (o.name === 'hole-opening') o.visible = false; });
-        // Plank patches: carpentry shows. One crossed-plank patch per repaired
-        // hole, mounted flush at the breach point, persisting for the match.
-        if (!resetLike && curHoles[s] < patchState.prev[s] && patchState.planks[s] < 3) {
-          const repaired = patchState.prev[s] - curHoles[s];
-          for (let r = 0; r < repaired && patchState.planks[s] < 3; r++) {
-            this.addPlankPatch(hole, patchState.planks[s]);
-            patchState.planks[s]++;
+        if (mesh.holeVis.size !== holes.length) {
+          const live = new Set(holes.map((h) => h.id));
+          for (const [id, vis] of mesh.holeVis) {
+            if (live.has(id)) continue;
+            this.disposeHoleVis(mesh, vis);
+            mesh.holeVis.delete(id);
           }
         }
-        patchState.prev[s] = curHoles[s];
-        // A section actually floods below the hole threshold — that's when the
-        // gush anchor (see getHoleAnchors) should carry water-jet FX.
-        hole.userData.floodActive = hp <= FLOODING.HOLE_THRESHOLD;
-        // Damage must READ: a fresh hit shows a clear crack, a holed section
-        // (hp ≤ 0.5, actively flooding) is a gaping breach.
-        const sc = THREE.MathUtils.clamp((1 - hp) * 3.2, 0.4, 2.1);
-        hole.scale.setScalar(sc);
-        // Inner breach (deck-side torn planking) follows the same gate + ramp.
-        const inner = hole.userData.innerDecal as THREE.Group | undefined;
-        if (inner) {
-          inner.visible = hole.visible;
-          inner.scale.setScalar(sc);
+        const markerPulse = 1 + 0.09 * Math.sin(t * 3.4 + 1.2);
+        for (const vis of mesh.holeVis.values()) {
+          if (vis.marker.visible) vis.marker.scale.setScalar(markerPulse);
         }
-        // The halo only pulses while there's something to patch — a foundering
-        // wreck is past saving, so it goes dark there.
-        const marker = hole.userData.marker as THREE.Mesh | undefined;
-        if (marker) {
-          marker.visible = hole.visible && !ship.sinking;
-          const mp = 1 + 0.09 * Math.sin(t * 3.4 + 1.2);
-          marker.scale.setScalar(mp);
+        for (; holeSlot < mesh.hullHoleUniform.value.length; holeSlot++) {
+          mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
         }
       }
-      patchState.init = true;
-      // Unused slots off.
-      for (; holeSlot < 6; holeSlot++) mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
 
       // Water-in-hull: a dark plane rises with the flood level, visible from above
       // through the open companionway / hatch grating. `waterLevel` is a naval-track
@@ -4645,36 +4628,17 @@ export class ShipRenderer {
     return this.shipMeshes.get(shipId)?.root ?? null;
   }
 
-  /** Hole-decal FX attach points on the REAL hull surface. Each hull section
-   *  exposes an empty Object3D (child of the rendered ship, so world transform
-   *  follows heave/pitch/roll) oriented outward along the surface normal.
-   *  `belowWaterline` marks holes on the waterline band (water-gush candidates);
-   *  `active` is true while the section is holed below the flood threshold.
-   *  Game.ts can hang gush/leak particle FX on these via getWorldPosition(). */
-  getHoleAnchors(shipId: string): Array<{
-    section: 'bow' | 'stern' | 'port' | 'starboard';
-    anchor: THREE.Object3D;
-    belowWaterline: boolean;
-    active: boolean;
-  }> {
+  /** Per-BREACH FX attach points on the REAL planking. Each open hole exposes
+   *  an empty Object3D (child of the rendered ship, so its world transform
+   *  follows heave/pitch/roll/list) oriented outward along the surface normal.
+   *  Game.ts gates each one on the LIVE wave surface before jetting water, so
+   *  a breach only gushes while it is genuinely under. */
+  getHoleAnchors(shipId: string): Array<{ id: number; anchor: THREE.Object3D; active: boolean }> {
     const mesh = this.shipMeshes.get(shipId);
     if (!mesh) return [];
-    const out: Array<{
-      section: 'bow' | 'stern' | 'port' | 'starboard';
-      anchor: THREE.Object3D;
-      belowWaterline: boolean;
-      active: boolean;
-    }> = [];
-    for (const section of ['bow', 'stern', 'port', 'starboard'] as const) {
-      const hole = mesh.hullHoles[section];
-      const anchor = hole.userData.gushAnchor as THREE.Object3D | undefined;
-      if (!anchor) continue;
-      out.push({
-        section,
-        anchor,
-        belowWaterline: !!hole.userData.belowWaterline,
-        active: !!hole.userData.floodActive && hole.visible,
-      });
+    const out: Array<{ id: number; anchor: THREE.Object3D; active: boolean }> = [];
+    for (const [id, vis] of mesh.holeVis) {
+      out.push({ id, anchor: vis.gush, active: !vis.patched });
     }
     return out;
   }

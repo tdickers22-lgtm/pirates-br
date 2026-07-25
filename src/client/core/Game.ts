@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
+  GameState, HotSnapshotPayload, InteractIntent, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipKeg, ShipUpgradeType, TradeSession, TreasureChest, UpgradeStation, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, getMainMastLocalZ, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
@@ -9,6 +9,8 @@ import {
   findNearbyCannonIndex,
   getSailControlLocal,
   toShipLocalPoint,
+  countOpenHoles,
+  findRepairableHole as sharedFindRepairableHole,
 } from '../../shared/interactions.js';
 import { Renderer } from '../rendering/Renderer.js';
 import { OceanRenderer } from '../rendering/OceanRenderer.js';
@@ -432,7 +434,7 @@ export class Game {
       findChestById: (chestId) => this.findChestById(chestId),
       findHarvestTarget: (player) => this.envFx.findHarvestTarget(player),
       findNearbyKeg: (player, ship) => this.findNearbyKeg(player, ship),
-      findRepairableHullSection: (player, ship) => this.findRepairableHullSection(player, ship),
+      findRepairableHole: (player, ship) => this.findRepairableHole(player, ship),
       getBarrelWorldPoint: (barrelId) => this.getBarrelWorldPoint(barrelId),
       getChestWorldPoint: (chestId) => this.getChestWorldPoint(chestId),
       getInventoryQty: (ship, item) => this.getInventoryQty(ship, item),
@@ -442,7 +444,7 @@ export class Game {
       getNearbyGoldHoarder: (player) => this.getNearbyGoldHoarder(player),
       getNearbyUpgradeStation: (player) => this.getNearbyUpgradeStation(player),
       getRepairPlankCount: (player, ship) => this.getRepairPlankCount(player, ship),
-      getRepairWorldPoint: (ship, section) => this.getRepairWorldPoint(ship, section),
+      getHoleRepairWorldPoint: (ship, hole) => this.getHoleRepairWorldPoint(ship, hole),
       getShipWorldPoint: (ship, localX, localZ, worldY) => this.getShipWorldPoint(ship, localX, localZ, worldY),
       getTavernDoorWorldPoint: (door, out) => this.getTavernDoorWorldPoint(door, out),
       getTrackedShip: () => this.getTrackedShip(),
@@ -570,7 +572,7 @@ export class Game {
       set visibleInteractKind(v) { self.visibleInteractKind = v; },
       distance2D: (ax, az, bx, bz) => this.distance2D(ax, az, bx, bz),
       findNearbyCannonIndex: (player, ship) => findNearbyCannonIndex(player, ship),
-      findRepairableHullSection: (player, ship) => this.findRepairableHullSection(player, ship),
+      findRepairableHole: (player, ship) => this.findRepairableHole(player, ship),
       flashIslandBanner: (name) => this.flashIslandBanner(name),
       formatCompassHeading: (angle) => this.formatCompassHeading(angle),
       formatStormTimer: (seconds) => this.formatStormTimer(seconds),
@@ -578,7 +580,7 @@ export class Game {
       getClosestGoldHoarder: (player) => this.getClosestGoldHoarder(player),
       getInventoryQty: (ship, item) => this.getInventoryQty(ship, item),
       getLocalPlayer: () => this.getLocalPlayer(),
-      getLookInteraction: (player, ship, cannon, section) => this.interactions.getLookInteraction(player, ship, cannon, section),
+      getLookInteraction: (player, ship, cannon, hole) => this.interactions.getLookInteraction(player, ship, cannon, hole),
       getPocketWheelCount: (player, slot) => this.getPocketWheelCount(player, slot),
       getStormTimerSeconds: () => this.getStormTimerSeconds(),
       getTrackedShip: () => this.getTrackedShip(),
@@ -1264,7 +1266,32 @@ export class Game {
       // Broadcast to everyone in range: victims and bystanders see the hit
       // splinter where the ball actually struck ('ship_hit' stays the
       // attacker-only confirm with hitmarker + sound).
-      const hit = payload as { attackerId?: string | null; position?: { x: number; y: number; z: number }; projectileType?: string };
+      const hit = payload as {
+        targetId?: string;
+        attackerId?: string | null;
+        position?: { x: number; y: number; z: number };
+        projectileType?: string;
+        holes?: Array<{ id: number; x: number; y: number; z: number }>;
+      };
+      // Instant breach: upsert the hull-local points the server just punched
+      // into our own copy of the ship so ShipRenderer's id-diff spawns the
+      // decal on THIS frame instead of up to 100ms later on the next full
+      // snapshot. The snapshot then reconciles — the upsert is id-keyed and
+      // idempotent, so a double-apply is a no-op. Runs for the attacker too
+      // (they get the earliest possible decal on the hull they just holed).
+      const target = hit.targetId ? this.shipsById.get(hit.targetId) : null;
+      if (target && hit.holes?.length) {
+        if (!Array.isArray(target.holes)) target.holes = [];
+        for (const fresh of hit.holes) {
+          const existing = target.holes.find((h) => h.id === fresh.id);
+          if (existing) {
+            existing.x = fresh.x; existing.y = fresh.y; existing.z = fresh.z;
+            existing.patched = false;
+          } else {
+            target.holes.push({ ...fresh, patched: false });
+          }
+        }
+      }
       if (!hit.position || hit.attackerId === this.localPlayerId) return;
       this.combatFx.emitShipHitConfirm(hit.position, this.renderer.camera.position);
       // Physical wood-smash layer (the confirm chime alone reads as a UI blip).
@@ -2055,9 +2082,7 @@ export class Game {
     const player = this.getLocalPlayer();
     const ship = this.getTrackedShip();
     const activeWeapon = player?.weapons[player.activeSlot] ?? null;
-    const averageHull = ship
-      ? (ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard) * 25
-      : null;
+    const openLeaks = ship ? countOpenHoles(ship) : null;
     const prompt = (this.ui.interactPrompt.textContent ?? '')
       .trim()
       .replace(/\s+/g, ' ')
@@ -2089,7 +2114,7 @@ export class Game {
     const shipLine = ship
       ? [
           `ship ${ship.type}`,
-          `hull ${Math.round(averageHull ?? 0)}%`,
+          `leaks ${openLeaks ?? 0}`,
           `sail ${Math.round(ship.sailHeight * 100)}%`,
           `anchor ${ship.anchored ? `down ${Math.round((ship.anchorRaiseProgress ?? 0) * 100)}%` : 'up'}`,
           `speed ${Math.hypot(ship.velocity.x, ship.velocity.z).toFixed(1)}`,
@@ -2206,7 +2231,8 @@ export class Game {
       const mesh = this.wildlifeMeshes.get(animal.id);
       if (!mesh) continue;
       const dist = this.distance2D(cam.x, cam.z, animal.position.x, animal.position.z);
-      mesh.visible = animal.health > 0 && dist < (animal.type === 'gull' ? wildlifeRadius * 1.35 : wildlifeRadius);
+      // health is server-only (dead animals never reach the wire) — default alive.
+      mesh.visible = (animal.health ?? 1) > 0 && dist < (animal.type === 'gull' ? wildlifeRadius * 1.35 : wildlifeRadius);
     }
 
     for (const rock of this.state.seaRocks ?? []) {
@@ -3450,7 +3476,7 @@ export class Game {
     const seen = new Set<string>();
     const t = this.ocean.getTime();
     for (const animal of this.state.wildlife ?? []) {
-      if (animal.health <= 0) continue;
+      if ((animal.health ?? 1) <= 0) continue;
       seen.add(animal.id);
       let mesh = this.wildlifeMeshes.get(animal.id);
       let created = false;
@@ -4296,18 +4322,18 @@ export class Game {
     this.previousKnockback = knockbackMagnitude;
     this.previousHealth = player.health;
 
-    // Own-ship hull damage: shake the camera (scaled by the hit). No direction
-    // arrow for ship hits — the shake + hull HUD + hole markers carry it; the
-    // red arc stays reserved for the player's own body being shot.
+    // Own-ship hull damage: shake the camera once per FRESH breach. No
+    // direction arrow for ship hits — the shake + leak readout + hole markers
+    // carry it; the red arc stays reserved for the player's own body.
     const localShip = this.localShipId ? this.shipsById.get(this.localShipId) ?? null : null;
     if (localShip) {
-      const total = localShip.hull.bow + localShip.hull.stern + localShip.hull.port + localShip.hull.starboard;
+      const total = countOpenHoles(localShip);
       if (localShip.id !== this.prevOwnShipId) {
         this.prevOwnShipId = localShip.id;
       } else {
-        const drop = this.prevOwnHullTotal - total;
-        if (drop > 0.01) {
-          this.cameraShake = Math.min(1, this.cameraShake + THREE.MathUtils.clamp(drop * 1.6, 0.12, 0.8));
+        const fresh = total - this.prevOwnHullTotal;
+        if (fresh > 0) {
+          this.cameraShake = Math.min(1, this.cameraShake + THREE.MathUtils.clamp(fresh * 0.22, 0.12, 0.8));
         }
       }
       this.prevOwnHullTotal = total;
@@ -4701,9 +4727,10 @@ export class Game {
         this.audio.updateFlooding(level);
       }
       if (t - this.lastHullLeakAt > 0.4) {
-        this.emitHullLeaks(floodShip);
-        // Pressure jets from holes punched below the waterline: the anchors
-        // ride the lofted hull (heave/pitch/roll/list), +Z = outward normal.
+        // Pressure jets, one per OPEN breach: the anchors ride the lofted hull
+        // (heave/pitch/roll/list) at the exact point the shot landed, +Z =
+        // outward normal. This is the only hull-leak FX path — the old fixed
+        // per-section spray points are gone with the section model.
         if (!floodShip.sinking) {
           for (const hole of this.shipRenderer.getHoleAnchors(floodShip.id)) {
             if (!hole.active) continue;
@@ -4781,29 +4808,6 @@ export class Game {
       }
     }
     return best;
-  }
-
-  /** Streaming water at holed hull sections sitting near/below the waterline. */
-  private emitHullLeaks(ship: Ship) {
-    const stats = SHIP_STATS[ship.type];
-    const sections: Array<[keyof Ship['hull'], number, number]> = [
-      ['bow', 0, stats.length * 0.42],
-      ['stern', 0, -stats.length * 0.42],
-      ['port', -stats.width * 0.5, 0],
-      ['starboard', stats.width * 0.5, 0],
-    ];
-    for (const [section, lx, lz] of sections) {
-      // Spray from ANY breached section (hull < 1 == at least one hole), matching
-      // the server which floods on any submerged hole — not only once a section is
-      // half-gone. So a single fresh hole visibly weeps where it was punched.
-      if (ship.hull[section] > 0.995) continue;
-      const point = this.getShipWorldPoint(ship, lx, lz, 0.16);
-      this.combatFx.emitHullLeak(
-        { x: point.x, y: point.y, z: point.z },
-        point.x - ship.position.x,
-        point.z - ship.position.z,
-      );
-    }
   }
 
   /** Supply-wheel slot layout: 0 scope · 1 compass · 2 bucket · 3 planks ·
@@ -5036,19 +5040,19 @@ export class Game {
     );
   }
 
-  private getRepairWorldPoint(ship: Ship, section: keyof Ship['hull']) {
+  /** Prompt anchor for planking a breach: the spot on the RAIL directly above
+   *  it. The hole itself sits at the waterline, metres below the deck and
+   *  behind the planking, so anchoring the prompt there would ask a pirate to
+   *  look through his own feet. Same (x, z) as the hole — the prompt points at
+   *  the right piece of rail, and the reach test is planar anyway. */
+  private getHoleRepairWorldPoint(ship: Ship, hole: ShipHole) {
     const stats = SHIP_STATS[ship.type];
-    switch (section) {
-      case 'bow':
-        return this.getShipWorldPoint(ship, 0, stats.length * 0.44, stats.height + 0.4);
-      case 'stern':
-        return this.getShipWorldPoint(ship, 0, -stats.length * 0.42, stats.height + 0.4);
-      case 'port':
-        return this.getShipWorldPoint(ship, -stats.width * 0.54, 0, stats.height + 0.4);
-      case 'starboard':
-      default:
-        return this.getShipWorldPoint(ship, stats.width * 0.54, 0, stats.height + 0.4);
-    }
+    return this.getShipWorldPoint(
+      ship,
+      THREE.MathUtils.clamp(hole.x * 1.08, -stats.width * 0.54, stats.width * 0.54),
+      THREE.MathUtils.clamp(hole.z * 1.04, -stats.length * 0.46, stats.length * 0.46),
+      stats.height + 0.4,
+    );
   }
 
   private getCannonSide(cannonIndex: number, ship: Ship) {
@@ -5206,17 +5210,10 @@ export class Game {
     this.audio.playIslandDiscovery();
   }
 
-  private findRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null {
-    const local = toShipLocalPoint(player.position, ship);
-    const candidate: keyof Ship['hull'] =
-      Math.abs(local.x) > Math.abs(local.z)
-        ? (local.x >= 0 ? 'starboard' : 'port')
-        : (local.z >= 0 ? 'bow' : 'stern');
-    const closeEnough =
-      candidate === 'bow' || candidate === 'stern'
-        ? Math.abs(local.z) > SHIP_STATS[ship.type].length * 0.34
-        : Math.abs(local.x) > SHIP_STATS[ship.type].width * 0.38;
-    return closeEnough && ship.hull[candidate] < 0.98 ? candidate : null;
+  /** The breach under this pirate's boots, via the SHARED reach rule the server
+   *  validates with — so the [X] prompt can never offer a patch Match refuses. */
+  private findRepairableHole(player: Player, ship: Ship): ShipHole | null {
+    return sharedFindRepairableHole(player.position, ship);
   }
 
   private setupStoryCutsceneOverlay() {

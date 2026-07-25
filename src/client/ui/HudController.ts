@@ -5,7 +5,8 @@
  */
 import * as THREE from 'three';
 import { ECONOMY, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
-import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
+import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
+import { countOpenHoles } from '../../shared/interactions.js';
 import { angleWrap, isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
 import type { ClientInteractKind, FloatingDamageIndicator } from '../core/Game.js';
 import type { InputManager } from '../input/InputManager.js';
@@ -37,7 +38,7 @@ export type HudView = {
   visibleInteractKind: ClientInteractKind | null;
   distance2D(ax: number, az: number, bx: number, bz: number): number;
   findNearbyCannonIndex(player: Player, ship: Ship): number | null;
-  findRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null;
+  findRepairableHole(player: Player, ship: Ship): ShipHole | null;
   flashIslandBanner(name: string): void;
   formatCompassHeading(angle: number): string;
   formatStormTimer(seconds: number): string;
@@ -49,7 +50,7 @@ export type HudView = {
     player: Player,
     ship: Ship | null,
     nearbyCannon: number | null,
-    repairSection: keyof Ship['hull'] | null,
+    repairHole: ShipHole | null,
   ): { prompt: string; label: string; kind: ClientInteractKind } | null;
   getPocketWheelCount(player: Player, slot: number): number;
   getStormTimerSeconds(): number;
@@ -152,10 +153,11 @@ export class HudController {
         : `Next storm shift in ${timerSeconds}s`;
 
     const outsideStorm = this.view.distance2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ) > this.view.state.storm.safeRadius;
-    const avgHull = ship
-      ? (ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard) / 4
-      : 1;
-    const shipCritical = !!ship && (ship.sinking || avgHull < 0.2);
+    // "Critical" is now the flood, not a hull-HP average: she is going down
+    // when the bilge is winning, or when she is carrying more leaks than any
+    // crew can plank ahead of the water.
+    const openLeaks = ship ? countOpenHoles(ship) : 0;
+    const shipCritical = !!ship && (ship.sinking || (ship.waterLevel ?? 0) > 0.7 || openLeaks >= 6);
     const shipOnFire = !!ship && ship.onFire && !ship.sinking;
     // DOWNED lives on its OWN banner so a fire/storm/critical warning can
     // show at the same time — the old shared element silently swallowed one.
@@ -184,10 +186,14 @@ export class HudController {
     this.view.ui.armorFill.style.width = `${Math.max(0, Math.min(100, ((player.armor ?? 0) / PLAYER.MAX_ARMOR) * 100))}%`;
 
     if (ship) {
-      this.setHull(this.view.ui.hullBow, this.view.ui.hullBowTxt, ship.hull.bow);
-      this.setHull(this.view.ui.hullStern, this.view.ui.hullSternTxt, ship.hull.stern);
-      this.setHull(this.view.ui.hullPort, this.view.ui.hullPortTxt, ship.hull.port);
-      this.setHull(this.view.ui.hullStarboard, this.view.ui.hullStarboardTxt, ship.hull.starboard);
+      // The four section bars are gone with the section model. What a captain
+      // needs is the count of open planking and the bilge gauge beside it.
+      this.view.ui.shipLeaks.textContent = openLeaks > 0
+        ? `${openLeaks} LEAK${openLeaks === 1 ? '' : 'S'} — hold [X] at a breach`
+        : 'Hull sound';
+      this.view.ui.shipLeaks.style.color = openLeaks >= 4
+        ? '#ff8a6a'
+        : openLeaks > 0 ? '#ffb37a' : '#7fe0a0';
       const wind = sampleWind(this.view.ocean.getTime());
       const signedRelative = angleWrap(wind.direction - ship.rotation);
       // 0.92 matches PhysicsSystem's desired-trim constant + the sail-cloth luff
@@ -355,8 +361,8 @@ export class HudController {
     }
 
     const nearbyCannon = ship ? this.view.findNearbyCannonIndex(player, ship) : null;
-    const repairSection = ship ? this.view.findRepairableHullSection(player, ship) : null;
-    const lookInteraction = this.view.getLookInteraction(player, ship, nearbyCannon, repairSection);
+    const repairHole = ship ? this.view.findRepairableHole(player, ship) : null;
+    const lookInteraction = this.view.getLookInteraction(player, ship, nearbyCannon, repairHole);
     this.view.visibleInteractKind = null;
 
     if (player.state === 'respawning') {
@@ -513,16 +519,21 @@ export class HudController {
     }
   }
 
-  private setHull(fill: HTMLDivElement, label: HTMLElement, value: number) {
-    const percent = Math.round(value * 100);
-    fill.style.width = `${percent}%`;
-    label.textContent = `${percent}%`;
-  }
-
   /** Bilge water gauge — vertical ship-silhouette fill, trend arrow, red alarm > 75%.
-   *  Visible only while the local player stands on a ship that's taking on water. */
+   *  Shows for the deck you are standing on, and ALSO for your own hull while
+   *  you are in the water beside her: the moment that mattered most (swimming
+   *  back to a flooding ship) used to be the one moment the gauge went blank,
+   *  even though the flooding audio was already playing. */
   private updateWaterGauge(player: Player) {
-    const ship = player.onShipId ? this.view.shipsById.get(player.onShipId) ?? null : null;
+    const aboard = player.onShipId ? this.view.shipsById.get(player.onShipId) ?? null : null;
+    const own = player.shipId ? this.view.shipsById.get(player.shipId) ?? null : null;
+    const overboard = !aboard
+      && !!own
+      && !own.sinking
+      && (own.waterLevel ?? 0) > 0.02
+      && this.view.distance2D(player.position.x, player.position.z, own.position.x, own.position.z) < 80;
+    const ship = aboard ?? (overboard ? own : null);
+    this.view.ui.waterGaugeTitle.textContent = overboard ? 'Your Ship' : 'Bilge';
     const level = ship ? THREE.MathUtils.clamp(ship.waterLevel ?? 0, 0, 1) : 0;
     const show = !!ship
       && level > 0.02

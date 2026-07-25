@@ -5,7 +5,7 @@
  */
 import * as THREE from 'three';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
-import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
+import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipHole, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
 import { getBraceStationLocals, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
 import {
   findNearbyCannonIndex,
@@ -37,7 +37,7 @@ export type InteractionView = {
   findChestById(chestId: string): TreasureChest | null;
   findHarvestTarget(player: Player): { prop: IslandProp; island: Island } | null;
   findNearbyKeg(player: Player, ship?: Ship | null): ShipKeg | null;
-  findRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null;
+  findRepairableHole(player: Player, ship: Ship): ShipHole | null;
   getBarrelWorldPoint(barrelId: string): THREE.Vector3 | null;
   getChestWorldPoint(chestId: string): THREE.Vector3 | null;
   getInventoryQty(ship: Ship | null, item: ItemStack['item']): number;
@@ -47,7 +47,7 @@ export type InteractionView = {
   getNearbyGoldHoarder(player: Player): { npc: IslandNpc; island: Island } | null;
   getNearbyUpgradeStation(player: Player): UpgradeStation | null;
   getRepairPlankCount(player: Player, ship: Ship | null): number;
-  getRepairWorldPoint(ship: Ship, section: keyof Ship['hull']): THREE.Vector3;
+  getHoleRepairWorldPoint(ship: Ship, hole: ShipHole): THREE.Vector3;
   getShipWorldPoint(ship: Ship, localX: number, localZ: number, worldY: number): THREE.Vector3;
   getTavernDoorWorldPoint(door: { node: THREE.Object3D }, out: THREE.Vector3): THREE.Vector3;
   getTrackedShip(): Ship | null;
@@ -70,8 +70,8 @@ export class InteractionPrompts {
     if (!player) return null;
     const ship = this.view.getTrackedShip();
     const nearbyCannon = ship ? findNearbyCannonIndex(player, ship) : null;
-    const repairSection = ship ? this.view.findRepairableHullSection(player, ship) : null;
-    const lookInteraction = this.getLookInteraction(player, ship, nearbyCannon, repairSection);
+    const repairHole = ship ? this.view.findRepairableHole(player, ship) : null;
+    const lookInteraction = this.getLookInteraction(player, ship, nearbyCannon, repairHole);
     // Mid-mast-climb, X means "let go" (server-owned) — don't let a stray
     // chest/door candidate claim the press.
     const canPickInteractKind = !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest
@@ -85,7 +85,7 @@ export class InteractionPrompts {
     player: Player,
     ship: Ship | null,
     nearbyCannon: number | null,
-    repairSection: keyof Ship['hull'] | null,
+    repairHole: ShipHole | null,
   ): { prompt: string; label: string; kind: ClientInteractKind } | null {
     const candidates: Array<{ prompt: string; label: string; score: number; kind: ClientInteractKind }> = [];
     // A FOUNDERING ship offers no work: every station/repair/board prompt on
@@ -95,7 +95,7 @@ export class InteractionPrompts {
     if (ship?.sinking) {
       ship = null;
       nearbyCannon = null;
-      repairSection = null;
+      repairHole = null;
     }
 
     // Downed crewmate nearby → hold to revive (server drains reviveProgress).
@@ -425,8 +425,9 @@ export class InteractionPrompts {
         );
       }
 
-      if (repairSection) {
-        const repairPoint = this.view.getRepairWorldPoint(ship, repairSection);
+      // ONE breach, the one under your boots — not a whole quarter of the hull.
+      if (repairHole) {
+        const repairPoint = this.view.getHoleRepairWorldPoint(ship, repairHole);
         const plankCount = this.view.getRepairPlankCount(player, ship);
         this.pushInteractionCandidate(
           candidates,
@@ -434,9 +435,7 @@ export class InteractionPrompts {
           repairPoint,
           4.5,
           0.52,
-          plankCount > 0
-            ? `[X] Repair ${repairSection[0].toUpperCase()}${repairSection.slice(1)}`
-            : `⚠ Damaged ${repairSection[0].toUpperCase()}${repairSection.slice(1)}`,
+          plankCount > 0 ? '[X] Hold — Plank This Leak' : '⚠ Leak here',
           plankCount > 0
             ? `${plankCount} plank${plankCount === 1 ? '' : 's'} ready`
             : 'No planks ready',

@@ -548,15 +548,10 @@
     #ship-status.flooding h3 { color: #7fc4ec; }
     #ship-status.flooding-critical { border-color: rgba(255, 92, 72, 0.6); box-shadow: inset 0 -18px 22px -18px rgba(210, 70, 50, 0.6); }
     #ship-status.flooding-critical h3 { color: #ff9a72; }
-    .hull-section { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
-    .hull-section span { font-size: 0.6rem; color: #9aa8b8; width: 52px; }
-    .hull-bar-outer {
-      flex: 1; height: 6px;
-      background: rgba(4, 10, 20, 0.72);
-      border: 1px solid rgba(201, 168, 76, 0.2);
-      border-radius: 999px; overflow: hidden;
+    #ship-leaks {
+      font-size: 0.62rem; letter-spacing: 0.05em; color: #7fe0a0;
+      margin: 2px 0 4px; transition: color 0.3s ease;
     }
-    .hull-bar-inner { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #8B4513, #CD853F); transition: width 0.3s ease; }
 
     /* ── Bilge water gauge (shown only when the local ship is taking on water) ── */
     #water-gauge {
@@ -1439,17 +1434,9 @@
       .ship-stat-row {
         display: none;
       }
-      .hull-section {
-        gap: 4px;
-        margin: 2px 0;
-      }
-      .hull-section span {
-        width: 32px;
-        font-size: 0.48rem;
-      }
-      .hull-section span[id$="-txt"] {
-        width: 24px !important;
-        font-size: 0.5rem !important;
+      #ship-leaks {
+        font-size: 0.5rem;
+        margin: 1px 0 3px;
       }
       #sail-status {
         font-size: 0.55rem !important;
@@ -1912,26 +1899,9 @@
       <div id="br-progress-feed">Crew progression —</div>
       <div id="ship-status">
         <h3>⚓ Ship Hull</h3>
-        <div class="hull-section">
-          <span>Bow</span>
-          <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-bow" style="width:100%"></div></div>
-          <span id="hull-bow-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#c9b98a">100%</span>
-        </div>
-        <div class="hull-section">
-          <span>Stern</span>
-          <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-stern" style="width:100%"></div></div>
-          <span id="hull-stern-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#c9b98a">100%</span>
-        </div>
-        <div class="hull-section">
-          <span>Port</span>
-          <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-port" style="width:100%"></div></div>
-          <span id="hull-port-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#c9b98a">100%</span>
-        </div>
-        <div class="hull-section">
-          <span>Starboard</span>
-          <div class="hull-bar-outer"><div class="hull-bar-inner" id="hull-starboard" style="width:100%"></div></div>
-          <span id="hull-starboard-txt" style="width:30px;text-align:right;font-size:0.65rem;color:#c9b98a">100%</span>
-        </div>
+        <!-- Damage is holes in the planking, not four abstract section bars:
+             the count of open leaks plus the bilge gauge IS the damage HUD. -->
+        <div id="ship-leaks">Hull sound</div>
         <div style="margin-top:8px;font-size:0.65rem;color:#c9a84c" id="sail-status">Sails: Raised</div>
         <div id="ship-upgrades"></div>
       </div>
@@ -1994,7 +1964,7 @@
     </div>
 
     <div id="water-gauge">
-      <div class="wg-title">Bilge</div>
+      <div class="wg-title" id="wg-title">Bilge</div>
       <div class="wg-hull">
         <div id="wg-fill"></div>
         <svg class="wg-hull-frame" viewBox="0 0 72 120" preserveAspectRatio="none" aria-hidden="true">
