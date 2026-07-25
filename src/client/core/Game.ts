@@ -1044,7 +1044,17 @@ export class Game {
     this.wheelWasOpen = open;
   }
 
+  /** Wires every server message. Split by topic so each registrar stays
+   *  readable; the handler bodies themselves are unchanged. */
   private bindNetworkEvents() {
+    this.bindSessionNetworkEvents();
+    this.bindCombatNetworkEvents();
+    this.bindLootNetworkEvents();
+    this.bindTradeNetworkEvents();
+  }
+
+  /** Join / snapshot flow and match lifecycle. */
+  private bindSessionNetworkEvents() {
     this.network.onJoin = (playerId, shipId, snapshot) => {
       this.clearJoinAssignmentWatchdog();
       this.localPlayerId = playerId;
@@ -1066,6 +1076,79 @@ export class Game {
       }, 650);
     };
 
+    this.network.onHotSnapshot = (hot) => {
+      this.applyHotSnapshot(hot);
+    };
+
+    this.network.onSnapshot = (snapshot) => {
+      this.applySnapshot(snapshot);
+    };
+
+    this.network.onPlayerSpawned = (payload) => {
+      const event = payload as { playerId?: string; mermaid?: boolean };
+      if (event.playerId === this.localPlayerId) {
+        this.ui.deathScreen.style.display = 'none';
+        if (event.mermaid) {
+          this.mermaidAnchor = null;
+          if (this.mermaidGroup.visible) this.mermaidGroup.visible = false;
+          this.pushFeed('The mermaid returned you to your ship.', '#8bc2d7');
+        }
+      }
+    };
+
+    this.network.onGameOver = (payload) => {
+      const result = payload as { died?: boolean; winnerId?: string | null; kills?: number; gold?: number; reason?: string; targetGold?: number };
+      const player = this.getLocalPlayer();
+      if (result.died) {
+        this.audio.playDefeat();
+        this.returnToLobbyAfterLoss(result.kills ?? player?.kills ?? 0, result.gold ?? player?.gold ?? 0, 'Crew lost');
+      } else if (result.winnerId && result.winnerId === this.localPlayerId) {
+        this.audio.playVictory();
+        this.hud.showVictory(player?.kills ?? 0, result.gold ?? player?.gold ?? 0);
+      } else {
+        this.audio.playDefeat();
+        const reason = result.reason === 'gold'
+          ? `Enemy reached ${result.targetGold ?? ECONOMY.GOLD_WIN_TARGET} gold`
+          : 'Crew lost';
+        this.returnToLobbyAfterLoss(player?.kills ?? 0, player?.gold ?? 0, reason);
+      }
+    };
+
+    this.network.onMatchEnded = (payload) => {
+      const result = payload as {
+        winnerId: string | null;
+        winnerName: string | null;
+        reason: string;
+        humans: Array<{ playerId: string; name: string; kills: number; deaths: number; gold: number; placement: number; isWinner: boolean }>;
+      };
+      this.endmatchPending = true;
+      const youId = this.localPlayerId;
+      const youRow = result.humans.find((r) => r.playerId === youId);
+      const won = !!result.winnerId && result.winnerId === youId;
+      const subtitle = result.reason === 'gold'
+        ? `${result.winnerName ?? 'A pirate'} amassed enough gold`
+        : result.reason === 'last_ship'
+          ? 'Last crew afloat takes the seas'
+          : 'The voyage ended';
+      this.menu.showEndmatch({
+        isWinner: won,
+        title: won ? 'VICTORY' : (youRow?.deaths ? 'DEFEATED' : 'VOYAGE ENDED'),
+        subtitle,
+        rows: result.humans.map((r) => ({
+          placement: r.placement,
+          name: r.name,
+          kills: r.kills,
+          deaths: r.deaths,
+          gold: r.gold,
+          you: r.playerId === youId,
+          winner: r.isWinner,
+        })),
+      });
+    };
+  }
+
+  /** Damage, downs, kills and explosions. */
+  private bindCombatNetworkEvents() {
     this.network.onPlayerDowned = (payload) => {
       const isMe = payload.playerId === this.localPlayerId;
       const byWho = payload.attackerName ? ` by ${payload.attackerName}` : '';
@@ -1074,6 +1157,7 @@ export class Game {
         isMe ? '#ff8a7a' : '#e0b090',
       );
     };
+
     this.network.onReviveComplete = (payload) => {
       const isMe = payload.playerId === this.localPlayerId;
       const byWho = payload.reviverName ? ` by ${payload.reviverName}` : '';
@@ -1081,12 +1165,6 @@ export class Game {
         isMe ? `You were revived${byWho}!` : `${payload.playerName} was revived${byWho}`,
         '#7ce38b',
       );
-    };
-    this.network.onHotSnapshot = (hot) => {
-      this.applyHotSnapshot(hot);
-    };
-    this.network.onSnapshot = (snapshot) => {
-      this.applySnapshot(snapshot);
     };
 
     this.network.onPlayerHit = (payload) => {
@@ -1211,7 +1289,10 @@ export class Game {
         }
       }
     };
+  }
 
+  /** Chests, barrels, harvest, upgrades and shop flow. */
+  private bindLootNetworkEvents() {
     this.network.onChestOpened = (payload) => {
       const event = payload as { action?: string; value?: number; loot?: Array<{ item: string; qty: number }> };
       if (event.action === 'pickup') {
@@ -1382,13 +1463,18 @@ export class Game {
       this.pushFeed('Ammo chest — every firearm topped up.', '#9fd18a');
       this.audio.playRepairSequence();
     };
+  }
 
+  /** Ship-to-ship parley/trade session. */
+  private bindTradeNetworkEvents() {
     this.network.onTradeRequest = () => {
       this.pushFeed('Parley signaled between nearby ships.', '#8bc2d7');
     };
+
     this.network.onTradeUpdate = () => {
       if (this.state) this.syncTradeUi(this.state);
     };
+
     this.network.onTradeResult = (payload) => {
       const result = payload as { type?: string };
       const label =
@@ -1398,68 +1484,6 @@ export class Game {
         'Trade cancelled.';
       this.pushFeed(label, '#8bc2d7');
       if (this.state) this.syncTradeUi(this.state);
-    };
-
-    this.network.onGameOver = (payload) => {
-      const result = payload as { died?: boolean; winnerId?: string | null; kills?: number; gold?: number; reason?: string; targetGold?: number };
-      const player = this.getLocalPlayer();
-      if (result.died) {
-        this.audio.playDefeat();
-        this.returnToLobbyAfterLoss(result.kills ?? player?.kills ?? 0, result.gold ?? player?.gold ?? 0, 'Crew lost');
-      } else if (result.winnerId && result.winnerId === this.localPlayerId) {
-        this.audio.playVictory();
-        this.hud.showVictory(player?.kills ?? 0, result.gold ?? player?.gold ?? 0);
-      } else {
-        this.audio.playDefeat();
-        const reason = result.reason === 'gold'
-          ? `Enemy reached ${result.targetGold ?? ECONOMY.GOLD_WIN_TARGET} gold`
-          : 'Crew lost';
-        this.returnToLobbyAfterLoss(player?.kills ?? 0, player?.gold ?? 0, reason);
-      }
-    };
-
-    this.network.onPlayerSpawned = (payload) => {
-      const event = payload as { playerId?: string; mermaid?: boolean };
-      if (event.playerId === this.localPlayerId) {
-        this.ui.deathScreen.style.display = 'none';
-        if (event.mermaid) {
-          this.mermaidAnchor = null;
-          if (this.mermaidGroup.visible) this.mermaidGroup.visible = false;
-          this.pushFeed('The mermaid returned you to your ship.', '#8bc2d7');
-        }
-      }
-    };
-
-    this.network.onMatchEnded = (payload) => {
-      const result = payload as {
-        winnerId: string | null;
-        winnerName: string | null;
-        reason: string;
-        humans: Array<{ playerId: string; name: string; kills: number; deaths: number; gold: number; placement: number; isWinner: boolean }>;
-      };
-      this.endmatchPending = true;
-      const youId = this.localPlayerId;
-      const youRow = result.humans.find((r) => r.playerId === youId);
-      const won = !!result.winnerId && result.winnerId === youId;
-      const subtitle = result.reason === 'gold'
-        ? `${result.winnerName ?? 'A pirate'} amassed enough gold`
-        : result.reason === 'last_ship'
-          ? 'Last crew afloat takes the seas'
-          : 'The voyage ended';
-      this.menu.showEndmatch({
-        isWinner: won,
-        title: won ? 'VICTORY' : (youRow?.deaths ? 'DEFEATED' : 'VOYAGE ENDED'),
-        subtitle,
-        rows: result.humans.map((r) => ({
-          placement: r.placement,
-          name: r.name,
-          kills: r.kills,
-          deaths: r.deaths,
-          gold: r.gold,
-          you: r.playerId === youId,
-          winner: r.isWinner,
-        })),
-      });
     };
   }
 
