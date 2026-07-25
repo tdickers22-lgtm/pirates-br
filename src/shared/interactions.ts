@@ -1,5 +1,5 @@
-import { SHIP_STATS } from './constants/index.js';
-import type { IslandDock, Player, Ship, Vec3 } from './types/index.js';
+import { FLOODING, SHIP_STATS } from './constants/index.js';
+import type { IslandDock, Player, Ship, ShipHole, Vec3 } from './types/index.js';
 import {
   getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckWalkHalfWidth, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
 
@@ -25,6 +25,67 @@ export function toShipWorldPoint(local: ShipLocalPoint, ship: Pick<Ship, 'positi
   return {
     x: ship.position.x + local.x * cos + local.z * sin,
     z: ship.position.z + local.z * cos - local.x * sin,
+  };
+}
+
+// ── Hull breaches ────────────────────────────────────────────────────────────
+// Holes are POINT ENTITIES in the hull-local frame (see ShipHole). These three
+// helpers are the SHARED truth for "how many leaks are open", "which hole can
+// this pirate plank" and "where is that hole in the world" — the server
+// validates the repair with findRepairableHole and the client prompt calls the
+// exact same function, so the [X] prompt can never offer a patch the server
+// then refuses.
+
+/** Breaches still letting water in (patched entities stay in the list so the
+ *  crossed-plank repair keeps rendering at the spot). */
+export function openHoles(ship: Pick<Ship, 'holes'>): ShipHole[] {
+  return (ship.holes ?? []).filter((hole) => !hole.patched);
+}
+
+export function countOpenHoles(ship: Pick<Ship, 'holes'>): number {
+  let n = 0;
+  for (const hole of ship.holes ?? []) if (!hole.patched) n += 1;
+  return n;
+}
+
+/**
+ * The unpatched hole this pirate is standing at, or null. Planar hull-local
+ * reach only (HOLE_REPAIR_REACH): a breach is worked from the rail/deck
+ * directly above it, so height never gates the swing. Nearest hole wins.
+ */
+export function findRepairableHole(
+  position: { x: number; z: number },
+  ship: Pick<Ship, 'position' | 'rotation' | 'holes'>,
+): ShipHole | null {
+  const local = toShipLocalPoint(position, ship);
+  const reachSq = FLOODING.HOLE_REPAIR_REACH * FLOODING.HOLE_REPAIR_REACH;
+  let best: ShipHole | null = null;
+  let bestSq = Infinity;
+  for (const hole of ship.holes ?? []) {
+    if (hole.patched) continue;
+    const dx = hole.x - local.x;
+    const dz = hole.z - local.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 <= reachSq && d2 < bestSq) {
+      bestSq = d2;
+      best = hole;
+    }
+  }
+  return best;
+}
+
+/** World-space point of a hull-local breach (heel/pitch are the renderer's
+ *  business — this is the flat-hull transform the server flood test uses). */
+export function holeWorldPoint(
+  ship: Pick<Ship, 'position' | 'rotation'>,
+  hole: { x: number; y: number; z: number },
+): Vec3 {
+  const cos = Math.cos(ship.rotation);
+  const sin = Math.sin(ship.rotation);
+  return {
+    x: ship.position.x + hole.x * cos + hole.z * sin,
+    y: ship.position.y + hole.y,
+    z: ship.position.z + hole.z * cos - hole.x * sin,
   };
 }
 

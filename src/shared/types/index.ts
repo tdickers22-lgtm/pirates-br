@@ -15,6 +15,30 @@ export interface HullSections {
   starboard: number;
 }
 
+/** What punched a hole — drives visual flavour and the fire burn-down rule. */
+export type ShipHoleSource = 'cannon' | 'ram' | 'rock' | 'ground' | 'storm' | 'fire' | 'keg';
+
+/**
+ * ONE breach in the planking, at the exact point the damage landed.
+ *
+ * Coordinates are HULL-LOCAL metres in the canonical ship frame — +x starboard,
+ * +z bow, y up from the hull origin, where y = 0 IS the design waterline (the
+ * same frame the client's lofted hull mesh and its discard shader use, so a
+ * server hole point renders exactly where the ball struck).
+ *
+ * A hole leaks whenever it sits at/below the LIVE wave surface (heel, pitch and
+ * bilge settle included); planking it over sets `patched` and the entity stays
+ * so the crossed-plank repair renders at the same spot.
+ */
+export interface ShipHole {
+  id: number;
+  x: number;
+  y: number;
+  z: number;
+  patched: boolean;
+  source?: ShipHoleSource;
+}
+
 export interface ShipKeg {
   id: string;
   shipId: string | null;
@@ -71,12 +95,13 @@ export interface Ship {
   sailAngle: number;      // radians, negative = port, positive = starboard
   anchored: boolean;
   anchorRaiseProgress: number; // 0-1 while the capstan is being turned
-  /** Open holes per hull section (integer counts, 0..MAX_HOLES_PER_SECTION) —
-   *  the AUTHORITATIVE damage state. Cannonballs punch holes; planks patch them. */
-  holes: HullSections;
-  /** Derived per-section integrity (0..1) computed from `holes`, kept purely for
-   *  the HUD gauges and damage visuals. Damage/flood/sink all key off `holes`. */
-  hull: HullSections;
+  /** Every breach in the planking as a POINT ENTITY at the exact spot the
+   *  damage landed (hull-local metres) — the AUTHORITATIVE damage state.
+   *  Cannonballs, rams, rocks, kegs, storm seas and fire punch them; a plank
+   *  patches ONE of them. There is no hull-HP pool and no per-section bucket. */
+  holes: ShipHole[];
+  /** Monotonic hole-id source. Server-internal — stripped from the wire. */
+  nextHoleId: number;
   /** Legacy hull-class number kept for display; no longer scales any damage. */
   maxHull: number;
   onFire: boolean;

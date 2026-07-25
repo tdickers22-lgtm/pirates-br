@@ -6,6 +6,7 @@ import {
 } from '../../shared/constants/index.js';
 import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
+import { countOpenHoles } from '../../shared/interactions.js';
 import { applyShipRudderSteering } from './PhysicsSystem.js';
 import type { WeaponSystem } from './WeaponSystem.js';
 
@@ -56,8 +57,10 @@ const FIREARM_AIM_HEIGHT = 1.4;
 /** How long a bot stays willing to fight back after taking hull damage. */
 const BOT_RETALIATE_SECONDS = 45;
 
+/** Rough "how sound is she" scalar (4 = whole, 0 = riddled) derived from open
+ *  breaches — bots watch it drop to know they are being shot at. */
 function hullTotal(ship: Ship): number {
-  return ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard;
+  return Math.max(0, 4 - countOpenHoles(ship) * 0.5);
 }
 
 export class BotSystem {
@@ -162,7 +165,7 @@ export class BotSystem {
       return;
     }
 
-    const avgHull = (ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard) / 4;
+    const avgHull = hullTotal(ship) / 4;
     if (avgHull < 0.2 && bot.behavior !== 'flee') {
       bot.behavior = 'flee';
       bot.stateTimer = 15;

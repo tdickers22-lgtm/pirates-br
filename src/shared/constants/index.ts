@@ -203,26 +203,58 @@ export const SHIP = {
 } as const;
 
 // ── Flooding / bailing (SoT-style, PURELY hole-based naval damage loop) ──
-// There is no hull-HP pool. Each cannonball (keg blast, ram, rock, storm, fire)
-// punches a discrete HOLE into a hull section (ship.holes[section], an integer
-// count capped at MAX_HOLES_PER_SECTION). Any hole sitting at/below the local
-// wave surface takes on water; ingress scales with the number of open,
-// submerged holes. waterLevel is a normalized 0..1 bilge fill and the ship
-// founders ONLY when it reaches 1. Planks patch holes (one per plank); a
-// bucket bails water; a passive bilge pump slowly recovers a fully-patched hull.
+// There is no hull-HP pool and no per-section bucket. Each cannonball (keg
+// blast, ram, rock, grounding, storm sea, fire burn-through) punches a discrete
+// HOLE ENTITY at the exact hull-local point the damage landed. Any hole sitting
+// at/below the LIVE wave surface (heel/pitch/settle included) takes on water;
+// ingress scales with how many open holes are under AND how deep each one sits.
+// waterLevel is a normalized 0..1 bilge fill and the ship founders ONLY when it
+// reaches 1. A plank patches ONE hole (the one you are standing at); a bucket
+// bails water; a passive bilge pump slowly recovers a fully-patched hull.
 export const FLOODING = {
-  /** Max open holes a single hull section can hold (a cannonball opens one). */
-  MAX_HOLES_PER_SECTION: 3,
-  /** Derived-integrity threshold the client damage decals treat as "gushing"
-   *  (hull ≤ this ⇔ the section carries ≥ half its holes). Display only. */
-  HOLE_THRESHOLD: 0.5,
+  /** Hard cap on hole ENTITIES a single hull carries. This one number is BOTH
+   *  the hull shader's discard-slot count and the 10 Hz wire budget: 9 hulls all
+   *  simultaneously at the cap is ~3.8 KB of full snapshot, which is what keeps
+   *  a fleet-wide gunfight under the 35 KB guard (test-snapshot-size pins it).
+   *  Eight unpatched breaches already flood a dry sloop in ~17 s against two
+   *  bailers, so the cap is a wire limit, never a mercy: damage on a saturated
+   *  hull RE-OPENS the nearest patched hole rather than no-oping, so a hull can
+   *  never become immune by being shot enough (the old 3-per-section bug). */
+  MAX_HOLES_PER_SHIP: 8,
+  /** Hull-local Y band (metres above the design waterline) synthetic breach
+   *  points are placed in — rams, rocks, storm seas and keg blasts land here. */
+  HOLE_BAND_Y: { min: 0.10, max: 0.45 },
+  /** Rendered breach radius (metres) — damage depth reads as MORE holes, not
+   *  as one growing disc. */
+  HOLE_VISUAL_RADIUS: 0.26,
+  /** Planar hull-local distance a pirate can reach a hole from to plank it.
+   *  Server truth; the client prompt mirrors it exactly. */
+  HOLE_REPAIR_REACH: 2.2,
+  /** Hull-local Y a deck fire chars its first hole at — ABOVE the calm
+   *  waterline on purpose: a burning ship accumulates dry holes that only start
+   *  flooding once the flames burn them DOWN to the sea (see FIRE_BURN_DOWN_RATE)
+   *  or storm seas wash over them. Fire is a real threat, not a one-hole douse. */
+  FIRE_HOLE_START_Y: 1.05,
+  /** Metres/sec an untended fire burns each of its own holes DOWNWARD through
+   *  the planking. ~0.06 m/s takes a fresh char from 1.05 m to the waterline in
+   *  ~16 s — the length of an untended blaze. */
+  FIRE_BURN_DOWN_RATE: 0.06,
   /** Water-level/sec that ONE open, submerged hole lets in (sloop reference).
    *  One bailer (BAIL_RATE 0.014) beats a single hole but loses to two, so a
    *  gushing hull must be planked, not just bailed. ~67 s to founder a sloop on
    *  two open holes, faster with more; a reinforced hull seeps slower still. */
   INGRESS_PER_HOLE: 0.0075,
-  /** Legacy per-section base (kept for any callers that predate the hole model). */
-  SECTION_INGRESS: 0.0085,
+  /** Ingress scales with how DEEP a hole sits under the live surface:
+   *  factor = clamp(1 + depthMetres, MIN, MAX), depth = surfaceY − holeWorldY.
+   *  A hole exactly ON the waterline (depth 0) is the INGRESS_PER_HOLE
+   *  reference; one washed by wave crests only (depth −0.3 … 0) weeps at
+   *  0.7–1×; one dragged half a metre under by the settling bilge gushes at
+   *  the 1.5× cap — that is the doom spiral, in one line. The bail-race
+   *  relations hold across the whole range (one bailer beats one hole even at
+   *  max depth: 0.014 > 0.01125; two holes beat one bailer even at min:
+   *  0.0105 ≈ 0.014 only until the hull settles). */
+  HOLE_DEPTH_MIN_FACTOR: 0.7,
+  HOLE_DEPTH_MAX_FACTOR: 1.5,
   /** Per hull-class scale on ingress — bigger hull, slower to fill.
    *  sloop 50 s / brigantine ~60 s / galleon ~71 s to fill on 2 open sections. */
   INGRESS_CLASS_SCALE: { sloop: 1.0, brigantine: 0.84, galleon: 0.70 } as Record<ShipType, number>,
@@ -241,10 +273,8 @@ export const FLOODING = {
   PASSIVE_PUMP_FACTOR: 0.25,
   /** Bots start bailing once standing water exceeds this. */
   BOT_BAIL_THRESHOLD: 0.35,
-  /** Longitudinal position of the bow/stern flood test point (fraction of length). */
-  SECTION_LON: 0.42,
-  /** A holed section floods when its waterline hole sits within this many metres
-   *  above the local surface (holes are punched near/below the static float line). */
+  /** A hole starts weeping while it sits within this many metres ABOVE the local
+   *  surface (wave wash over a near-waterline breach); anything lower floods. */
   HOLE_WATERLINE_DEPTH: 0.30,
   /** Full bilge lowers the buoyancy/heave target this many metres (freeboard loss →
    *  more sections dip under → the doom spiral). */

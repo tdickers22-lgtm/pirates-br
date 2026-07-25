@@ -1,12 +1,14 @@
-import type { StormState, Ship, Player, HullSections, Island } from '../../shared/types/index.js';
+import type { StormState, Ship, Player, Island } from '../../shared/types/index.js';
 import { STORM_PHASES, WORLD, FLOODING } from '../../shared/constants/index.js';
 import { dist2D, lerp, getIslandSurfaceY } from '../../shared/utils/index.js';
+import { SHIP_STATS } from '../../shared/constants/index.js';
 
 export interface StormDamageHooks {
-  /** Route storm damage through PhysicsSystem.openHole so the tempest punches
-   *  real holes into the seaward face that then flood — the SoT damage loop —
-   *  instead of an abstract HP drain. */
-  openHole?: (ship: Ship, section: keyof HullSections, count: number) => void;
+  /** Route storm damage through PhysicsSystem.openHoleAt so the tempest stoves
+   *  REAL breaches into the seaward planking — at a point on that face, not an
+   *  abstract section counter — which then flood. Required: the storm has no
+   *  business inventing its own damage model. */
+  openHoleAt: (ship: Ship, local: { x: number; y: number; z: number }, count: number) => void;
 }
 
 /** Accumulated storm damage (per outside-ring second, phase-scaled) that stoves
@@ -25,6 +27,8 @@ const RING_CENTER_TRIES = 12;
 export class StormSystem {
   /** Per-ship storm-damage accumulation toward the next punched hole. */
   private shipStormAccum = new Map<string, number>();
+  /** Deterministic LCG for where along the seaward face a sea breaks through. */
+  private stormHolePhase = 0x51f3c7;
   /** Islands, for keeping the late rings off dry land (Old Maw Caldera sits at
    *  the world origin, which is exactly where the ring converges). */
   private islands: Island[] = [];
@@ -56,7 +60,7 @@ export class StormSystem {
     };
   }
 
-  update(dt: number, storm: StormState, ships: Ship[], players: Player[], hooks?: StormDamageHooks): void {
+  update(dt: number, storm: StormState, ships: Ship[], players: Player[], hooks: StormDamageHooks): void {
     if (storm.shrinking) {
       storm.shrinkProgress += dt / storm.shrinkDuration;
       if (storm.shrinkProgress >= 1) {
@@ -112,10 +116,6 @@ export class StormSystem {
     // Apply damage to entities outside safe zone (scaled excess ramps gently)
     const dmg = storm.damagePerSec * dt;
 
-    const open = hooks?.openHole
-      ?? ((target: Ship, section: keyof HullSections, count: number) => {
-        target.holes[section] = Math.min(FLOODING.MAX_HOLES_PER_SECTION, target.holes[section] + count);
-      });
     for (const ship of ships) {
       if (!ship.alive || ship.sinking) {
         this.shipStormAccum.delete(ship.id);
@@ -140,14 +140,22 @@ export class StormSystem {
       const sinR = Math.sin(ship.rotation);
       const lx = dxN * cosR - dzN * sinR;
       const lz = dxN * sinR + dzN * cosR;
-      const seaward: keyof HullSections = Math.abs(lz) >= Math.abs(lx)
-        ? (lz >= 0 ? 'bow' : 'stern')
-        : (lx >= 0 ? 'starboard' : 'port');
       const accum = (this.shipStormAccum.get(ship.id) ?? 0) + scaled;
       if (accum >= STORM_HOLE_DAMAGE) {
         const holes = Math.floor(accum / STORM_HOLE_DAMAGE);
         this.shipStormAccum.set(ship.id, accum - holes * STORM_HOLE_DAMAGE);
-        open(ship, seaward, holes);
+        // A breaking sea stoves a plank on the face turned AWAY from shelter,
+        // somewhere along that face inside the waterline band.
+        const stats = SHIP_STATS[ship.type];
+        const beam = Math.abs(lx) > Math.abs(lz);
+        const spread = (this.stormHolePhase = (this.stormHolePhase * 1103515245 + 12345) & 0x7fffffff)
+          / 0x7fffffff - 0.5;
+        const bandY = FLOODING.HOLE_BAND_Y.min
+          + (FLOODING.HOLE_BAND_Y.max - FLOODING.HOLE_BAND_Y.min) * ((spread + 0.5) * 0.999);
+        hooks.openHoleAt(ship, beam
+          ? { x: Math.sign(lx || 1) * stats.width * 0.5, y: bandY, z: spread * stats.length * 0.6 }
+          : { x: spread * stats.width * 0.6, y: bandY, z: Math.sign(lz || 1) * stats.length * 0.42 },
+          holes);
       } else {
         this.shipStormAccum.set(ship.id, accum);
       }

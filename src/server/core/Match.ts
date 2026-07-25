@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, Player, Projectile, SeaRock, Ship, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
+  GameState, HullSections, InteractIntent, Island, IslandDock, IslandNpc, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
 import { SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
@@ -45,6 +45,8 @@ import {
   findBraceStationDir,
   toShipLocalPoint,
   toShipWorldPoint,
+  countOpenHoles,
+  findRepairableHole,
 } from '../../shared/interactions.js';
 
 // Weathered banner dyes — team identity without the LED-strip look.
@@ -1124,7 +1126,7 @@ export class Match {
     // Storm — routes through openHole so the tempest punches real holes into
     // the seaward face (holes + flooding), the SoT damage loop.
     this.storm.update(dt, this.state.storm, this.state.ships, this.state.players, {
-      openHole: (ship, section, count) => this.physics.openHole(ship, section, count),
+      openHoleAt: (ship, local, count) => { this.physics.openHoleAt(ship, local, count, 'storm'); },
     });
     this.syncTreasureChests();
     this.updateKegs(dt);
@@ -1518,7 +1520,7 @@ export class Match {
         // Hull repair is now a HOLD (the hammer-swing block below patches one hole
         // per ~0.9s plank), so a bare press at a breach is consumed here rather than
         // falling through to another interaction.
-        if (this.getRepairableHullSection(player, ship)) return;
+        if (this.getRepairableHole(player, ship)) return;
 
         if (player.carryingChestId && this.tryStowCarriedChest(player, ship)) return;
 
@@ -1696,13 +1698,13 @@ export class Match {
       const mendingHull = input.interactHeld
         && input.interactIntent === 'repair'
         && !player.atCannon && !player.atHelm && !player.atSails && !player.atCrowNest;
-      const hullRepairTarget = mendingHull ? this.getRepairableHullSection(player, ship) : null;
+      const hullRepairTarget = mendingHull ? this.getRepairableHole(player, ship) : null;
       if (hullRepairTarget && this.getRepairPlankCount(player, ship) > 0) {
         player.hullRepairProgress = Math.min(1, player.hullRepairProgress + dt / SHIP.HULL_REPAIR_SWING_TIME);
         if (player.hullRepairProgress >= 1) {
           player.hullRepairProgress = 0;
           if (this.consumeRepairPlank(player, ship)) {
-            this.physics.repairHullSection(ship, hullRepairTarget);
+            this.physics.patchHole(ship, hullRepairTarget.id);
             if (ship.onFire) {
               ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
               if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
@@ -2643,14 +2645,21 @@ export class Match {
 
     for (const hit of this.getKegShipHits(keg)) {
       this.markShipDamagedByPlayer(hit.ship.id, keg.plantedById);
-      // A keg blast caves the hull in: the detonation section is stove wide
-      // open, the rest take a hole each. A MEGA keg riddles the whole hull.
+      // A keg blast caves the hull in RADIALLY from where the barrel sat: the
+      // face it was lashed to is stove wide open in a tight cluster, the other
+      // three faces spring a plank each. A MEGA keg riddles the whole hull.
+      const kegLocal = this.toShipLocal(keg.position, hit.ship);
+      const bandY = (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5;
       for (const section of this.getHullSections()) {
         const isPrimary = section === hit.section;
-        const holes = keg.mega
-          ? (isPrimary ? FLOODING.MAX_HOLES_PER_SECTION : 2)
-          : (isPrimary ? 2 : 1);
-        this.physics.openHole(hit.ship, section, holes);
+        const holes = keg.mega ? (isPrimary ? 3 : 2) : (isPrimary ? 2 : 1);
+        // Primary face: cluster on the blast point itself. Other faces: the
+        // shock finds their centre.
+        const aim = isPrimary
+          ? { x: kegLocal.x, z: kegLocal.z }
+          : this.getSectionAimLocal(hit.ship, section);
+        const point = this.physics.hullFacePoint(hit.ship, aim, bandY, isPrimary ? 0.8 : 2.2);
+        this.physics.openHoleAt(hit.ship, point, holes, 'keg');
       }
       hit.ship.onFire = true;
       hit.ship.fireTimer = Math.max(hit.ship.fireTimer, SHIP.FIRE_DURATION);
@@ -2720,13 +2729,13 @@ export class Match {
     keg.timer = 0;
   }
 
-  private getKegShipHits(keg: ShipKeg): Array<{ ship: Ship; section: keyof Ship['hull'] }> {
+  private getKegShipHits(keg: ShipKeg): Array<{ ship: Ship; section: keyof HullSections }> {
     if (keg.shipId) {
       const attachedShip = this.getAliveShip(keg.shipId);
       return attachedShip ? [{ ship: attachedShip, section: keg.section }] : [];
     }
 
-    const hits: Array<{ ship: Ship; section: keyof Ship['hull'] }> = [];
+    const hits: Array<{ ship: Ship; section: keyof HullSections }> = [];
     for (const ship of this.state.ships) {
       if (!ship.alive || ship.sinking) continue;
       const stats = SHIP_STATS[ship.type];
@@ -2739,13 +2748,13 @@ export class Match {
     return hits;
   }
 
-  private getHullSectionFromLocal(local: { x: number; z: number }): keyof Ship['hull'] {
+  private getHullSectionFromLocal(local: { x: number; z: number }): keyof HullSections {
     return Math.abs(local.x) > Math.abs(local.z)
       ? (local.x >= 0 ? 'starboard' : 'port')
       : (local.z >= 0 ? 'bow' : 'stern');
   }
 
-  private getHullSections(): Array<keyof Ship['hull']> {
+  private getHullSections(): Array<keyof HullSections> {
     return ['bow', 'stern', 'port', 'starboard'];
   }
 
@@ -2866,19 +2875,21 @@ export class Match {
         continue;
       }
       const water = ship.waterLevel ?? 0;
-      const holedSection = this.getWeakestHoledSection(ship);
+      // Deepest breach first — the one actually letting water in hardest — with
+      // hole id as the tie-break so a bot never dithers between two equals.
+      const targetHole = this.getBotRepairTargetHole(ship);
 
-      // Priority 1: get to the holed section's rail and plug it (throttled,
-      // consumes planks — same proximity rule getRepairableHullSection applies
-      // to humans).
-      if (holedSection && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t && this.getRepairPlankCount(player, ship) > 0) {
-        if (this.getRepairableHullSection(player, ship) === holedSection) {
+      // Priority 1: walk to the rail directly above that breach and plank it
+      // (throttled, consumes planks — the SAME findRepairableHole reach rule
+      // humans get).
+      if (targetHole && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t && this.getRepairPlankCount(player, ship) > 0) {
+        if (this.getRepairableHole(player, ship)?.id === targetHole.id) {
           if (this.consumeRepairPlank(player, ship)) {
-            this.physics.repairHullSection(ship, holedSection);
+            this.physics.patchHole(ship, targetHole.id);
             this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL);
           }
         } else {
-          const rail = this.getSectionRailLocal(ship, holedSection);
+          const rail = this.getHoleRailLocal(ship, targetHole);
           const world = this.toShipWorld(rail.x, rail.z, ship);
           this.stepBotToward(player, { x: world.x, y: player.position.y, z: world.z }, dt);
           if (player.bailing) player.bailing = false;
@@ -2898,20 +2909,40 @@ export class Match {
     }
   }
 
-  /** Ship-local standing point at a hull section's repair rail. */
-  private getSectionRailLocal(ship: Ship, section: keyof Ship['hull']): { x: number; z: number } {
+  /** Ship-local aim point at the centre of a hull section's face — the
+   *  direction a keg blast or storm sea comes from when all we know is a
+   *  section, not a surface point. */
+  private getSectionAimLocal(ship: Ship, section: keyof HullSections): { x: number; z: number } {
     const stats = SHIP_STATS[ship.type];
     switch (section) {
-      case 'bow': return { x: 0, z: stats.length * 0.38 };
-      case 'stern': return { x: 0, z: -stats.length * 0.38 };
-      case 'starboard': return { x: stats.width * 0.42, z: 0 };
-      case 'port': return { x: -stats.width * 0.42, z: 0 };
+      case 'bow': return { x: 0, z: stats.length };
+      case 'stern': return { x: 0, z: -stats.length };
+      case 'starboard': return { x: stats.width, z: 0 };
+      case 'port': return { x: -stats.width, z: 0 };
     }
   }
 
-  /** Most-holed section (the one to plank first), or null if the hull is whole. */
-  private getWeakestHoledSection(ship: Ship): keyof Ship['hull'] | null {
-    return this.getWeakestHullSection(ship);
+  /** Ship-local standing point on the DECK directly above a breach — the spot
+   *  a carpenter walks to before swinging. Clamped inside the walkable rail. */
+  private getHoleRailLocal(ship: Ship, hole: ShipHole): { x: number; z: number } {
+    const stats = SHIP_STATS[ship.type];
+    return {
+      x: clamp(hole.x, -stats.width * 0.42, stats.width * 0.42),
+      z: clamp(hole.z, -stats.length * 0.38, stats.length * 0.38),
+    };
+  }
+
+  /** The breach a damage-control bot (or the anchored auto-carpenter) plugs
+   *  first: the deepest-sitting open hole, tie-broken by age. */
+  private getBotRepairTargetHole(ship: Ship): ShipHole | null {
+    let best: ShipHole | null = null;
+    for (const hole of ship.holes ?? []) {
+      if (hole.patched) continue;
+      if (!best || hole.y < best.y - 1e-6 || (Math.abs(hole.y - best.y) <= 1e-6 && hole.id < best.id)) {
+        best = hole;
+      }
+    }
+    return best;
   }
 
   private updateFieldRepairs(dt: number) {
@@ -2919,9 +2950,9 @@ export class Match {
       if (!ship.alive || ship.sinking) continue;
 
       ship.repairCooldown = Math.max(0, ship.repairCooldown - dt);
-      const weakestSection = this.getWeakestHullSection(ship);
+      const target = this.getBotRepairTargetHole(ship);
       const plankStack = ship.inventory.find((entry) => entry.item === 'wood_plank' && entry.qty > 0);
-      if (!ship.anchored || ship.onFire || ship.repairCooldown > 0 || !weakestSection || !plankStack) {
+      if (!ship.anchored || ship.onFire || ship.repairCooldown > 0 || !target || !plankStack) {
         ship.autoRepairProgress = 0;
         continue;
       }
@@ -2930,22 +2961,8 @@ export class Match {
       if (ship.autoRepairProgress < SHIP.FIELD_REPAIR_INTERVAL) continue;
       ship.autoRepairProgress = 0;
       if (!this.consumeShipItem(ship, 'wood_plank', 1)) continue;
-      this.physics.repairHullSection(ship, weakestSection);
+      this.physics.patchHole(ship, target.id);
     }
-  }
-
-  /** The section with the most open holes (repair/bail target), or null if the
-   *  hull has no holes at all. */
-  private getWeakestHullSection(ship: Ship): keyof Ship['hull'] | null {
-    let worst: keyof Ship['hull'] | null = null;
-    let worstHoles = 0;
-    for (const section of ['bow', 'stern', 'port', 'starboard'] as Array<keyof Ship['hull']>) {
-      if (ship.holes[section] > worstHoles) {
-        worstHoles = ship.holes[section];
-        worst = section;
-      }
-    }
-    return worst;
   }
 
   private getNearbyKeg(player: Player, ship: Ship | null = null) {
@@ -3050,7 +3067,7 @@ export class Match {
 
     return {
       shipId: null,
-      section: 'bow' as keyof Ship['hull'],
+      section: 'bow' as keyof HullSections,
       localPosition: null,
       position: {
         x: placeX,
@@ -3873,9 +3890,9 @@ export class Match {
       }
       case 'repair': {
         if (!ship || player.onShipId !== ship.id) return false;
-        const repairSection = this.getRepairableHullSection(player, ship);
-        if (!repairSection || !this.consumeRepairPlank(player, ship)) return false;
-        this.physics.repairHullSection(ship, repairSection);
+        const repairHole = this.getRepairableHole(player, ship);
+        if (!repairHole || !this.consumeRepairPlank(player, ship)) return false;
+        this.physics.patchHole(ship, repairHole.id);
         if (ship.onFire) {
           ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
           if (ship.fireTimer <= 0) { ship.onFire = false; ship.fireTimer = 0; ship.fireDamageAccum = 0; }
@@ -4205,12 +4222,9 @@ export class Match {
     ship.velocity.z *= 0.3;
     ship.angularVelocity *= 0.35;
     ship.sinkProgress = Math.max(ship.sinkProgress, rapid ? 0.22 : 0);
-    // A foundering ship is riddled — max out its holes so it renders wrecked.
-    ship.holes.bow = FLOODING.MAX_HOLES_PER_SECTION;
-    ship.holes.stern = FLOODING.MAX_HOLES_PER_SECTION;
-    ship.holes.port = FLOODING.MAX_HOLES_PER_SECTION;
-    ship.holes.starboard = FLOODING.MAX_HOLES_PER_SECTION;
-    this.physics.syncHullFromHoles(ship);
+    // A foundering ship is riddled — spring waterline planks all round her
+    // until at least eight breaches gape, so she visibly reads as a wreck.
+    this.riddleWreck(ship);
 
     // Sinking a crew's ship does NOT eliminate them — they splash out and keep
     // fighting; they just have no home ship left to respawn on. The sinker
@@ -4942,7 +4956,10 @@ export class Match {
         });
         // Victims and bystanders get a slim broadcast so every client can
         // render impact FX / hole decals at the hit point (the attacker-only
-        // ship_hit above stays the hit-confirm channel).
+        // ship_hit above stays the hit-confirm channel). `holes` carries the
+        // hull-local breach points this ball just opened so the decal appears
+        // the SAME frame as the splinters instead of waiting up to 100 ms for
+        // the next full snapshot; the snapshot then reconciles by id.
         this.broadcast({
           type: 'ship_damage',
           ts: Date.now(),
@@ -4954,6 +4971,7 @@ export class Match {
             damage: event.damage,
             remainingSection: event.remainingSection,
             projectileType: event.projectileType,
+            holes: event.holes,
           },
         });
       }
@@ -5039,7 +5057,7 @@ export class Match {
       targetId: string;
       damage: number;
       position: Vec3;
-      section: keyof Ship['hull'];
+      section: keyof HullSections;
       remainingSection: number;
       remainingHull?: number;
       shipHealthMilestone?: 'half' | 'critical' | null;
@@ -5573,22 +5591,29 @@ export class Match {
     return isSharedNearCrowNestLadder(player, ship);
   }
 
-  private getRepairableHullSection(player: Player, ship: Ship): keyof Ship['hull'] | null {
-    if (this.getRepairPlankCount(player, ship) <= 0) return null;
+  /** The specific breach this pirate can plank right now — server truth. The
+   *  client prompt calls the same shared findRepairableHole, so [X] can never
+   *  offer a patch the server then refuses. Planks are NOT required to see the
+   *  breach (the prompt reads "no planks ready"); the callers gate on stock. */
+  private getRepairableHole(player: Player, ship: Ship): ShipHole | null {
+    return findRepairableHole(player.position, ship);
+  }
 
-    const local = this.toShipLocal(player.position, ship);
-    const candidate: keyof Ship['hull'] =
-      Math.abs(local.x) > Math.abs(local.z)
-        ? (local.x >= 0 ? 'starboard' : 'port')
-        : (local.z >= 0 ? 'bow' : 'stern');
-
-    const closeEnough =
-      candidate === 'bow' || candidate === 'stern'
-        ? Math.abs(local.z) > SHIP_STATS[ship.type].length * 0.34
-        : Math.abs(local.x) > SHIP_STATS[ship.type].width * 0.38;
-
-    if (!closeEnough) return null;
-    return ship.holes[candidate] > 0 ? candidate : null;
+  /** Spring waterline planks all round a foundering hull until she reads as a
+   *  wreck (at least 8 open breaches, spread across every face). */
+  private riddleWreck(ship: Ship) {
+    const stats = SHIP_STATS[ship.type];
+    const faces: Array<{ x: number; z: number }> = [
+      { x: stats.width, z: 0 }, { x: -stats.width, z: 0 },
+      { x: 0, z: stats.length }, { x: 0, z: -stats.length },
+    ];
+    for (let i = 0; countOpenHoles(ship) < 8 && i < 16; i += 1) {
+      const face = faces[i % faces.length];
+      const point = this.physics.hullFacePoint(
+        ship, face, FLOODING.HOLE_BAND_Y.min + (i % 3) * 0.12, stats.length * 0.6,
+      );
+      this.physics.openHoleAt(ship, point, 1, 'cannon');
+    }
   }
 
   private getRepairPlankCount(player: Player, ship: Ship) {
@@ -5698,14 +5723,11 @@ export class Match {
     ship.sinkProgress = 0;
     ship.repairCooldown = 0;
     ship.autoRepairProgress = 0;
-    // A reset/respawned ship is seaworthy again — patch every hole (any open
-    // hole would keep flooding it under the new model).
-    ship.holes.bow = 0;
-    ship.holes.stern = 0;
-    ship.holes.port = 0;
-    ship.holes.starboard = 0;
+    // A reset/respawned ship is seaworthy again — fresh planking, no breaches
+    // at all (any open hole would keep flooding her under the hole model).
+    ship.holes = [];
+    ship.nextHoleId = 1;
     ship.waterLevel = 0;
-    this.physics.syncHullFromHoles(ship);
   }
 
   /** Depth-verified side-berth for THIS ship type, in the canonical dock frame

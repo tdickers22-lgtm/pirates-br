@@ -3,6 +3,7 @@ import type {
   HotSnapshotPayload,
   Island,
   Player,
+  Ship,
   WildlifeAnimal,
 } from '../../shared/types/index.js';
 
@@ -67,15 +68,39 @@ function stripPlayerInternals(player: Player): Player {
   return wire as unknown as Player;
 }
 
+/**
+ * Ship wire trim. `nextHoleId` is a server-internal counter and never ships.
+ *
+ * The hole ENTITIES do ride the full snapshot (the client id-diffs them into
+ * decals), so they are trimmed hard — a fleet in a running gunfight is the
+ * worst case this whole protocol exists to survive:
+ *   · `source` is server flavour (fire chars burn downward) — dropped.
+ *   · `patched` only ships when TRUE; absent reads as an open breach.
+ *   · coordinates quantize to 2 dp (1 cm) with quantizeDeep, far finer than
+ *     the HOLE_VISUAL_RADIUS 0.26 m decal needs.
+ * That is ~31 B for an open breach against ~70 B for the raw entity.
+ */
+function stripShipInternals(ship: Ship): Ship {
+  const { nextHoleId: _nextHoleId, holes, ...wire } = ship;
+  return {
+    ...wire,
+    holes: holes.map((hole) => (hole.patched
+      ? { id: hole.id, x: hole.x, y: hole.y, z: hole.z, patched: true }
+      : { id: hole.id, x: hole.x, y: hole.y, z: hole.z })),
+  } as unknown as Ship;
+}
+
 /** Wildlife wire trim: drop server AI internals (spawnPosition, wander state,
- *  velocity, islandId) — the client only reads id/type/position/rotation/health. */
+ *  velocity, islandId) — the client only reads id/type/position/rotation.
+ *  `health` is server-only too: dead animals are culled from state.wildlife
+ *  before the snapshot is built, so anything on the wire is by definition
+ *  alive, and 70 birds x "health":24 was 0.8 KB of every 10 Hz full. */
 function trimWildlife(animal: WildlifeAnimal): WildlifeAnimal {
   return {
     id: animal.id,
     type: animal.type,
     position: quantizeDeep(animal.position, 2),
     rotation: roundTo(animal.rotation, 3),
-    health: roundTo(animal.health, 2),
   } as WildlifeAnimal;
 }
 
@@ -105,7 +130,7 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
     ...snap,
     serverTime: roundTo(snap.serverTime, 3),
     storm: quantizeDeep(snap.storm, 2),
-    ships: snap.ships.map((ship) => quantizeDeep(ship, 2)),
+    ships: snap.ships.map((ship) => quantizeDeep(stripShipInternals(ship), 2)),
     players: snap.players.map((player) => quantizeDeep(stripPlayerInternals(player), 2)),
     projectiles: snap.projectiles.map((proj) => quantizeDeep(proj, 2)),
     kegs: snap.kegs.map((keg) => quantizeDeep(keg, 2)),

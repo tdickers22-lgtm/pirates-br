@@ -1718,7 +1718,10 @@ export class MapGenerator {
         if (groundOnly < (type === 'crab' ? 0.45 : 0.9)) continue;
         if (this.nearCave(island, pos.x, pos.z, 0.5)) continue;
         animals.push({
-          id: uuid(),
+          // Short deterministic key, not a UUID: 70 animals x 36 wasted bytes
+          // was 2.5 KB of every 10 Hz full snapshot spent on decoration ids.
+          // The client only ever uses this as an opaque map key.
+          id: `w${animals.length}`,
           islandId: island.id,
           type,
           position: { ...pos },
@@ -1856,8 +1859,8 @@ export class MapGenerator {
       sailAngle: 0,
       anchored: false,
       anchorRaiseProgress: 0,
-      holes: { bow: 0, stern: 0, port: 0, starboard: 0 },
-      hull: { bow: 1, stern: 1, port: 1, starboard: 1 },
+      holes: [],
+      nextHoleId: 1,
       maxHull: stats.maxHull,
       onFire: false,
       fireTimer: 0,

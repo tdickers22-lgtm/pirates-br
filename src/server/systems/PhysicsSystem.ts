@@ -1,7 +1,7 @@
-import type { Ship, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
+import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER } from '../../shared/constants/index.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
-import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY } from '../../shared/interactions.js';
+import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, countOpenHoles } from '../../shared/interactions.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
@@ -189,61 +189,57 @@ export function stormSeaState(
 }
 
 // ── Flooding model ───────────────────────────────────────────────────────────
-/** Canonical ship-local flood test point for each hull section (+z bow,
- *  +x starboard — matches toShipLocalPoint/toShipWorldPoint). */
-function sectionFloodLocal(
-  stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS],
-  section: keyof HullSections,
-): { x: number; z: number } {
-  switch (section) {
-    case 'bow': return { x: 0, z: stats.length * FLOODING.SECTION_LON };
-    case 'stern': return { x: 0, z: -stats.length * FLOODING.SECTION_LON };
-    case 'starboard': return { x: stats.width * 0.5, z: 0 };
-    case 'port': return { x: -stats.width * 0.5, z: 0 };
-  }
-}
-
 /**
- * Per-section flood evaluation. A section takes on water when it has at least
- * one open hole AND that hole sits at/below the local Gerstner surface. The
- * hole's world Y includes ship heave (via position.y), pitch and roll, so holes
- * on the raised windward rail of a heeled ship stay dry — aim below the line.
+ * Per-HOLE flood evaluation. Every unpatched breach is tested at its own
+ * hull-local point: the hole's world Y carries ship heave (position.y), pitch
+ * and roll, so a breach on the raised windward rail of a heeled ship stays dry
+ * while its opposite number gushes. `depth` is metres below the LIVE Gerstner
+ * surface (negative = still above it), and the leak rate scales with it, so a
+ * settling hull drags its own holes deeper and floods faster — the doom spiral.
  */
-export function evaluateSectionFlood(
+export function evaluateHoleFlood(
   ship: Ship,
   t: number,
   storm = 0,
-): Array<{ section: keyof HullSections; holes: number; submerged: boolean; flooding: boolean }> {
-  const stats = SHIP_STATS[ship.type];
+): Array<{ hole: ShipHole; depth: number; flooding: boolean; rateFactor: number }> {
   const sinR = Math.sin(ship.rotation);
   const cosR = Math.cos(ship.rotation);
-  const pitch = ship.pitch ?? 0;
-  const roll = ship.roll ?? 0;
-  const sections: Array<keyof HullSections> = ['bow', 'stern', 'port', 'starboard'];
-  return sections.map((section) => {
-    const local = sectionFloodLocal(stats, section);
-    const worldX = ship.position.x + local.x * cosR + local.z * sinR;
-    const worldZ = ship.position.z + local.z * cosR - local.x * sinR;
+  const sinPitch = Math.sin(ship.pitch ?? 0);
+  const sinRoll = Math.sin(ship.roll ?? 0);
+  const out: Array<{ hole: ShipHole; depth: number; flooding: boolean; rateFactor: number }> = [];
+  for (const hole of ship.holes ?? []) {
+    if (hole.patched) continue;
+    const worldX = ship.position.x + hole.x * cosR + hole.z * sinR;
+    const worldZ = ship.position.z + hole.z * cosR - hole.x * sinR;
     // Positive roll lifts starboard (+x); positive pitch dips the bow (+z).
-    const holeY = ship.position.y + local.x * Math.sin(roll) - local.z * Math.sin(pitch);
+    const holeY = ship.position.y + hole.y + hole.x * sinRoll - hole.z * sinPitch;
     // Storm seas break over holes that calm water would leave dry.
-    const waterlineY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
-    const submerged = holeY - waterlineY < FLOODING.HOLE_WATERLINE_DEPTH;
-    const holes = ship.holes ? ship.holes[section] : 0;
-    return { section, holes, submerged, flooding: holes > 0 && submerged };
-  });
+    const surfaceY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
+    const depth = surfaceY - holeY;
+    const flooding = depth > -FLOODING.HOLE_WATERLINE_DEPTH;
+    out.push({
+      hole,
+      depth,
+      flooding,
+      rateFactor: flooding
+        ? clamp(1 + depth, FLOODING.HOLE_DEPTH_MIN_FACTOR, FLOODING.HOLE_DEPTH_MAX_FACTOR)
+        : 0,
+    });
+  }
+  return out;
 }
 
-/** Total ingress (water-level/sec) from every open, submerged hole. Each hole
- *  leaks INGRESS_PER_HOLE; a reinforced hull seeps slower (HULL_INGRESS_MULT). */
+/** Total ingress (water-level/sec) from every open, submerged hole. A hole
+ *  sitting exactly on the waterline leaks INGRESS_PER_HOLE; deeper gushes up to
+ *  1.5×. A reinforced hull seeps slower (HULL_INGRESS_MULT). */
 export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
   const classScale = FLOODING.INGRESS_CLASS_SCALE[ship.type] ?? 1;
   const reinforced = ship.upgrades.some((u) => u.type === 'hull_reinforcement')
     ? SHIP_UPGRADES.HULL_INGRESS_MULT
     : 1;
   let total = 0;
-  for (const s of evaluateSectionFlood(ship, t, storm)) {
-    if (s.flooding) total += FLOODING.INGRESS_PER_HOLE * s.holes;
+  for (const h of evaluateHoleFlood(ship, t, storm)) {
+    if (h.flooding) total += FLOODING.INGRESS_PER_HOLE * h.rateFactor;
   }
   return total * classScale * reinforced;
 }
@@ -293,10 +289,14 @@ export type PhysicsCombatEvent =
       damage: number;
       position: Vec3;
       projectileType: Projectile['type'];
-      section: keyof Ship['hull'];
+      section: keyof HullSections;
       remainingSection: number;
       remainingHull: number;
       milestone: 'half' | 'critical' | null;
+      /** The breaches this ball opened, hull-local — rides ship_damage so every
+       *  client spawns the decal the same frame instead of waiting for the
+       *  next 10 Hz full snapshot. */
+      holes: Array<{ id: number; x: number; y: number; z: number }>;
     }
   | {
       /** Ram damage credit — banked for ship-sink attribution (no client toast). */
@@ -402,12 +402,10 @@ export class PhysicsSystem {
       const sinR = Math.sin(ship.rotation);
       const currentFwd = sinR * ship.velocity.x + cosR * ship.velocity.z;
       const currentLat = cosR * ship.velocity.x - sinR * ship.velocity.z;
-      const floodedSections =
-        Number(ship.hull.bow < 0.5) +
-        Number(ship.hull.stern < 0.5) +
-        Number(ship.hull.port < 0.5) +
-        Number(ship.hull.starboard < 0.5);
-      const floodPenalty = Math.max(0.48, 1 - floodedSections * SHIP.FLOOD_SPEED_PENALTY);
+      // Drag of a torn hull: every two open breaches cost what one wrecked
+      // section used to (same 4-step ceiling at 8 holes as the old model).
+      const breachDrag = Math.min(4, countOpenHoles(ship) / 2);
+      const floodPenalty = Math.max(0.48, 1 - breachDrag * SHIP.FLOOD_SPEED_PENALTY);
       const signedRelative = angleWrap(wind.direction - ship.rotation);
       const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
       const trimError = Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE;
@@ -520,17 +518,43 @@ export class PhysicsSystem {
 
       if (ship.onFire) {
         ship.fireTimer = Math.max(0, ship.fireTimer - dt);
-        // A deck fire burns THROUGH the hull, charring a fresh hole every
-        // FIRE_HOLE_INTERVAL seconds into the least-holed section, so an
-        // untended blaze spreads leaks around the ship until it floods.
+        // A deck fire chars through the planking HIGH on the topside
+        // (FIRE_HOLE_START_Y, well above the calm waterline) and then keeps
+        // burning each of its own chars DOWNWARD toward the sea. So a firebomb
+        // is not a one-hole-then-douse dud any more: an untended blaze stacks
+        // several dry breaches, and the moment the first one reaches the water
+        // it both floods AND drowns the fire. Storm seas or a settling bilge
+        // can reach them early.
         ship.fireDamageAccum += dt;
         if (ship.fireDamageAccum >= SHIP.FIRE_HOLE_INTERVAL) {
           ship.fireDamageAccum -= SHIP.FIRE_HOLE_INTERVAL;
-          const sections = ['bow', 'stern', 'port', 'starboard'] as const;
-          const target = sections.reduce((least, section) => (
-            ship.holes[section] < ship.holes[least] ? section : least
-          ), sections[0]);
-          this.openHole(ship, target, 1);
+          // Char the face carrying the fewest breaches so the fire spreads round
+          // the ship instead of gnawing one plank.
+          const faces: Array<{ x: number; z: number }> = [
+            { x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 },
+          ];
+          let bestFace = faces[0];
+          let bestCount = Infinity;
+          for (const face of faces) {
+            let n = 0;
+            for (const hole of ship.holes) {
+              if (hole.patched) continue;
+              if (face.x !== 0 ? Math.sign(hole.x) === face.x : Math.sign(hole.z) === face.z) n += 1;
+            }
+            if (n < bestCount) { bestCount = n; bestFace = face; }
+          }
+          const point = this.hullFacePoint(
+            ship,
+            { x: bestFace.x * stats.width, z: bestFace.z * stats.length },
+            Math.min(FLOODING.FIRE_HOLE_START_Y, stats.height * 0.62),
+            stats.length * 0.5,
+          );
+          this.openHoleAt(ship, point, 1, 'fire');
+        }
+        // Burn-down: the flames eat each char lower through the hull.
+        for (const hole of ship.holes) {
+          if (hole.patched || hole.source !== 'fire') continue;
+          hole.y = Math.max(FLOODING.HOLE_BAND_Y.min, hole.y - FLOODING.FIRE_BURN_DOWN_RATE * dt);
         }
         if (ship.fireTimer <= 0) {
           ship.onFire = false;
@@ -1435,13 +1459,17 @@ export class PhysicsSystem {
   private onProjectileHitShip(proj: Projectile, ship: Ship, t: number) {
     if (proj.type === 'bullet') return;
 
-    // Canonical ship-local frame (+z bow, +x starboard) — correct at every heading.
+    // Canonical ship-local frame (+z bow, +x starboard) — correct at every
+    // heading. This is the EXACT point the ball struck, in the same frame the
+    // hull loft and its discard shader use, so the breach opens where you shot.
     const local = this.toShipLocal(proj.position, ship);
-    const section: keyof typeof ship.hull = this.impactHullSection(local);
+    const localY = proj.position.y - ship.position.y;
+    const section: keyof HullSections = this.impactHullSection(local);
 
-    const beforeHull = this.getAverageHull(ship);
+    const beforeHull = this.getHullIntegrity(ship);
     // Chainshot is a rigging weapon — it shreds canvas and fouls the helm but
     // never opens a hull hole, so it punches nothing (see below).
+    let holes: ShipHole[] = [];
     if (proj.type !== 'chainshot') {
       // Discrete holes: one per ball, +CHARGED_EXTRA_HOLES for a Heavy Shot ship,
       // and a super cannonball caves in three. No HP pool — the ball punches the
@@ -1449,9 +1477,9 @@ export class PhysicsSystem {
       const superShot = proj.special === 'super_cannonball';
       const charged = proj.damage > SHIP.CANNON_DAMAGE_HULL * 1.15;
       const holeCount = superShot ? 3 : (charged ? 1 + SHIP_UPGRADES.CHARGED_EXTRA_HOLES : 1);
-      this.openHole(ship, section, holeCount);
+      holes = this.openHoleAt(ship, { x: local.x, y: localY, z: local.z }, holeCount, 'cannon');
     }
-    const remainingHull = this.getAverageHull(ship);
+    const remainingHull = this.getHullIntegrity(ship);
     const milestone = beforeHull > 0.5 && remainingHull <= 0.5
       ? 'half'
       : beforeHull > 0.25 && remainingHull <= 0.25
@@ -1466,9 +1494,10 @@ export class PhysicsSystem {
       position: { ...proj.position },
       projectileType: proj.type,
       section,
-      remainingSection: ship.hull[section],
+      remainingSection: remainingHull,
       remainingHull,
       milestone,
+      holes: holes.map((h) => ({ id: h.id, x: h.x, y: h.y, z: h.z })),
     });
 
     if (proj.type === 'firebomb') {
@@ -1531,34 +1560,99 @@ export class PhysicsSystem {
     }
   }
 
-  /** Recompute the derived per-section integrity (0..1) from the open-hole
-   *  counts — the HUD gauges and damage decals read this; `holes` is the truth. */
-  syncHullFromHoles(ship: Ship) {
-    if (!ship.holes) ship.holes = { bow: 0, stern: 0, port: 0, starboard: 0 };
-    const max = FLOODING.MAX_HOLES_PER_SECTION;
-    ship.hull.bow = clamp(1 - ship.holes.bow / max, 0, 1);
-    ship.hull.stern = clamp(1 - ship.holes.stern / max, 0, 1);
-    ship.hull.port = clamp(1 - ship.holes.port / max, 0, 1);
-    ship.hull.starboard = clamp(1 - ship.holes.starboard / max, 0, 1);
-  }
-
-  /** Punch `count` holes into a hull section (capped per section). Below the
-   *  waterline these flood — the ONLY way to sink a ship. Re-arms the repair
-   *  cooldown so the passive field-repair can't instantly patch a fresh hit. */
-  openHole(ship: Ship, section: keyof Ship['holes'], count = 1) {
-    if (count <= 0) return;
-    if (!ship.holes) ship.holes = { bow: 0, stern: 0, port: 0, starboard: 0 };
-    ship.holes[section] = Math.min(FLOODING.MAX_HOLES_PER_SECTION, ship.holes[section] + count);
-    this.syncHullFromHoles(ship);
+  /**
+   * Punch `count` breaches into the planking at an EXACT hull-local point —
+   * the single entry point for every damage source (cannon, ram, rock,
+   * grounding, keg, storm, fire). Extra holes from the same hit are jittered
+   * ±0.35 m along the hull so a broadside reads as a cluster of separate
+   * wounds rather than one stacked disc.
+   *
+   * A hull already carrying MAX_HOLES_PER_SHIP entities does NOT go immune:
+   * the hit RE-OPENS the patched hole nearest the impact (the plank is blown
+   * off), so sustained fire keeps degrading a heavily-repaired hull. Only if
+   * every slot is an open hole does the shot land on an existing wound.
+   *
+   * Re-arms the field-repair cooldown so anchored auto-carpentry can't
+   * instantly undo a fresh hit. Returns the entities that changed, for the
+   * ship_damage wire event that spawns client decals the same frame.
+   */
+  openHoleAt(
+    ship: Ship,
+    local: { x: number; y: number; z: number },
+    count = 1,
+    source?: ShipHoleSource,
+  ): ShipHole[] {
+    if (count <= 0) return [];
+    if (!Array.isArray(ship.holes)) ship.holes = [];
+    const stats = SHIP_STATS[ship.type];
+    const maxY = Math.max(FLOODING.HOLE_BAND_Y.max, stats.height * 0.6);
+    const opened: ShipHole[] = [];
+    for (let i = 0; i < count; i += 1) {
+      // Deterministic-ish spread: first hole lands exactly on the contact
+      // point, siblings scatter around it along the hull.
+      const spread = i === 0 ? 0 : 0.35;
+      const angle = i * 2.399963; // golden-angle fan — no two siblings overlap
+      const point = {
+        x: clamp(local.x + Math.cos(angle) * spread, -stats.width * 0.62, stats.width * 0.62),
+        y: clamp(local.y + (i === 0 ? 0 : Math.sin(angle) * 0.12), -stats.height * 0.35, maxY),
+        z: clamp(local.z + Math.sin(angle) * spread, -stats.length * 0.52, stats.length * 0.52),
+      };
+      opened.push(this.placeHole(ship, point, source));
+    }
     ship.repairCooldown = Math.max(ship.repairCooldown, SHIP.FIELD_REPAIR_DELAY);
     ship.autoRepairProgress = 0;
+    return opened;
   }
 
-  /** Patch `count` holes in a section (one plank per hole). */
-  patchHole(ship: Ship, section: keyof Ship['holes'], count = 1) {
-    if (!ship.holes) ship.holes = { bow: 0, stern: 0, port: 0, starboard: 0 };
-    ship.holes[section] = Math.max(0, ship.holes[section] - count);
-    this.syncHullFromHoles(ship);
+  /** Insert one breach entity, recycling the nearest patched slot when the hull
+   *  is at its wire/shader cap. */
+  private placeHole(ship: Ship, point: { x: number; y: number; z: number }, source?: ShipHoleSource): ShipHole {
+    if (ship.holes.length < FLOODING.MAX_HOLES_PER_SHIP) {
+      const hole: ShipHole = {
+        id: ship.nextHoleId ?? (ship.nextHoleId = 1),
+        x: point.x,
+        y: point.y,
+        z: point.z,
+        patched: false,
+        ...(source ? { source } : {}),
+      };
+      ship.nextHoleId = hole.id + 1;
+      ship.holes.push(hole);
+      return hole;
+    }
+    // Saturated hull: blow the plank off the nearest patched breach.
+    let victim: ShipHole | null = null;
+    let bestSq = Infinity;
+    for (const hole of ship.holes) {
+      if (!hole.patched) continue;
+      const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
+      if (d2 < bestSq) { bestSq = d2; victim = hole; }
+    }
+    // Every slot already an OPEN hole — the shot lands in an existing wound.
+    if (!victim) {
+      let nearest = ship.holes[0];
+      let nearestSq = Infinity;
+      for (const hole of ship.holes) {
+        const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
+        if (d2 < nearestSq) { nearestSq = d2; nearest = hole; }
+      }
+      return nearest;
+    }
+    victim.patched = false;
+    victim.x = point.x;
+    victim.y = point.y;
+    victim.z = point.z;
+    if (source) victim.source = source;
+    return victim;
+  }
+
+  /** Plank ONE breach shut (one plank per hole). The entity stays in the list so
+   *  the crossed-plank repair keeps rendering at the spot. */
+  patchHole(ship: Ship, holeId: number): boolean {
+    const hole = (ship.holes ?? []).find((h) => h.id === holeId && !h.patched);
+    if (!hole) return false;
+    hole.patched = true;
+    return true;
   }
 
   /** Rotate a world-space direction into a ship's local frame. +z = forward, +x = starboard.
@@ -1587,14 +1681,35 @@ export class PhysicsSystem {
       : (localImpact.x >= 0 ? 'starboard' : 'port');
   }
 
-  private getAverageHull(ship: Ship) {
-    return (ship.hull.bow + ship.hull.stern + ship.hull.port + ship.hull.starboard) / 4;
+  /** Feed/HUD-only "how wrecked is she" scalar, 1 → whole, 0 → riddled. Eight
+   *  open breaches reads as a total loss; nothing keys damage off this. */
+  private getHullIntegrity(ship: Ship) {
+    return clamp(1 - countOpenHoles(ship) / 8, 0, 1);
   }
 
-  /** Back-compat shim: a repair action patches one hole in the section. */
-  repairHullSection(ship: Ship, section: keyof Ship['holes']) {
-    this.patchHole(ship, section, 1);
+  /** Hull-local point on the face nearest `local`, at the waterline band —
+   *  used by damage sources that only know a direction/section, not a surface
+   *  point (storm seas, keg faces, fire burn-through). */
+  hullFacePoint(ship: Ship, local: { x: number; z: number }, y: number, spread = 0.6): { x: number; y: number; z: number } {
+    const stats = SHIP_STATS[ship.type];
+    const jitter = (this.holeJitter = (this.holeJitter * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5;
+    if (Math.abs(local.x) >= Math.abs(local.z) * (stats.width / stats.length)) {
+      return {
+        x: Math.sign(local.x || 1) * stats.width * 0.5,
+        y,
+        z: clamp(local.z + jitter * spread, -stats.length * 0.44, stats.length * 0.44),
+      };
+    }
+    return {
+      x: clamp(local.x + jitter * spread, -stats.width * 0.44, stats.width * 0.44),
+      y,
+      z: Math.sign(local.z || 1) * stats.length * 0.42,
+    };
   }
+
+  /** LCG state for hull-face jitter — deterministic per server process so a
+   *  replayed sim lands the same breach points. */
+  private holeJitter = 0x2f6e2b1;
 
   /** Block passing through the full hull — swimmers AND walkers whose feet are
    *  below the deck rail (docked-ship walk-through). Boarding still happens via
@@ -2059,16 +2174,18 @@ export class PhysicsSystem {
       const otherImpact = this.rotateWorldToShipLocal(nx, nz, other.rotation);
       const shipFactor = this.tboneDamageFactor(shipImpact);
       const otherFactor = this.tboneDamageFactor(otherImpact);
-      // Impacted section from the actual contact point via the canonical transform.
-      const shipSection = this.impactHullSection(this.toShipLocal({ x: cx, y: 0, z: cz }, ship));
-      const otherSection = this.impactHullSection(this.toShipLocal({ x: cx, y: 0, z: cz }, other));
+      // The REAL contact point, resolved into each hull's own frame — the
+      // rammer is stove in at the bow, the victim amidships on the struck beam.
+      const shipLocal = this.toShipLocal({ x: cx, y: 0, z: cz }, ship);
+      const otherLocal = this.toShipLocal({ x: cx, y: 0, z: cz }, other);
+      const bandY = (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5;
       // Discrete holes: a bow-on ram stoves in one plank; a broadside T-bone
       // (high factor) caves in two; a very hard slam adds a third. The T-boned
       // victim therefore always loses more planks than the rammer.
       const ramHoles = (factor: number) =>
         1 + (factor > 1.4 ? 1 : 0) + (baseDmg * factor > 90 ? 1 : 0);
-      this.openHole(ship, shipSection, ramHoles(shipFactor));
-      this.openHole(other, otherSection, ramHoles(otherFactor));
+      this.openHoleAt(ship, { x: shipLocal.x, y: bandY, z: shipLocal.z }, ramHoles(shipFactor), 'ram');
+      this.openHoleAt(other, { x: otherLocal.x, y: bandY, z: otherLocal.z }, ramHoles(otherFactor), 'ram');
 
       // Ram kill credit: each hull's damage is banked to the OTHER hull's
       // helmsman (or its owner), so ramming a ship to death now credits the
@@ -2158,9 +2275,11 @@ export class PhysicsSystem {
       const rz = deepest.z - ship.position.z;
       ship.angularVelocity += clamp((rz * nx - rx * nz) * impactSpeed * 0.004, -0.12, 0.12);
       if (impactSpeed > 2.0) {
-        const section = this.impactHullSection(this.rotateWorldToShipLocal(-nx, -nz, ship.rotation));
-        // Running aground stoves a hole in the keel — hard groundings punch two.
-        this.openHole(ship, section, impactSpeed > 5 ? 2 : 1);
+        // Running aground stoves the KEEL in, at the hull sample that actually
+        // touched the seabed. y = 0.12 is near the keel, so a grounding breach
+        // is always underwater — grounding is the harshest damage in the game.
+        const local = this.toShipLocal({ x: deepest.x, y: 0, z: deepest.z }, ship);
+        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, impactSpeed > 5 ? 2 : 1, 'ground');
         this.combatEvents.push({
           type: 'ship_impact', kind: 'ground', position: { x: deepest.x, y: 0, z: deepest.z }, speed: impactSpeed,
         });
@@ -2229,8 +2348,8 @@ export class PhysicsSystem {
         -0.12, 0.12,
       );
       if (impactSpeed > 2.0) {
-        const section = this.impactHullSection(this.rotateWorldToShipLocal(-nx, -nz, ship.rotation));
-        this.openHole(ship, section, impactSpeed > 5 ? 2 : 1);
+        const local = this.toShipLocal({ x: deepest.sampleX, y: 0, z: deepest.sampleZ }, ship);
+        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, impactSpeed > 5 ? 2 : 1, 'ground');
         this.combatEvents.push({
           type: 'ship_impact', kind: 'ground', position: { x: deepest.sampleX, y: 0, z: deepest.sampleZ }, speed: impactSpeed,
         });
@@ -2291,8 +2410,15 @@ export class PhysicsSystem {
         - (deepest.sampleX - ship.position.x) * deepest.nz * 0.012;
 
       if (impactSpeed > 2.2) {
-        // Striking a sea rock tears the hull open — a fast strike punches two holes.
-        this.openHole(ship, deepest.section, impactSpeed > 5 ? 2 : 1);
+        // Striking a sea rock tears the hull open AT THE SAMPLE that struck it —
+        // a fast strike punches two. Rock bites sit at the waterline band.
+        const local = this.toShipLocal({ x: deepest.sampleX, y: 0, z: deepest.sampleZ }, ship);
+        this.openHoleAt(
+          ship,
+          { x: local.x, y: (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5, z: local.z },
+          impactSpeed > 5 ? 2 : 1,
+          'rock',
+        );
         this.combatEvents.push({
           type: 'ship_impact', kind: 'rock', position: { x: deepest.sampleX, y: 0, z: deepest.sampleZ }, speed: impactSpeed,
         });
