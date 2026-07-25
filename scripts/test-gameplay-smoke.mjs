@@ -124,7 +124,15 @@ async function main() {
   }
 
   const browserEvents = [];
-  const browser = await chromium.launch({ headless: true });
+  // Same GPU-headless args every other browser script in this repo uses
+  // (scripts/screenshot-tour.mjs). Without them Chromium falls back to
+  // SwiftShader, where the join freezes the main thread for ~48s instead of the
+  // measured 2.2s — so the smoke test was grading a software rasteriser rather
+  // than the renderer players actually run, and its fps number meant nothing.
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'],
+  });
   try {
     const page = await browser.newPage({
       viewport: { width: 1280, height: 720 },
@@ -142,11 +150,15 @@ async function main() {
     await page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#menu-solo-btn', { timeout: 12_000 });
     await page.fill('#menu-name-input', `Smoke${Math.floor(Math.random() * 9000 + 1000)}`);
-    await page.click('#menu-solo-btn');
+    // noWaitAfter: the synchronous world build freezes the main thread long
+    // enough that Playwright's post-click wait can time out even though the
+    // click landed and the join succeeded.
+    await page.click('#menu-solo-btn', { noWaitAfter: true });
+    // Budget: 8s countdown + world build + the horn, with room for a cold cache.
     await page.waitForFunction(() => {
       const game = window.__piratesBR;
       return !!game?.state && game.state.phase === 'playing' && game.state.players?.length >= 10;
-    }, { timeout: 18_000 });
+    }, { timeout: 45_000 });
 
     await page.waitForTimeout(2500);
     const fps = await measureFps(page);

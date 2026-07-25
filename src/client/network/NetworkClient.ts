@@ -71,6 +71,23 @@ export class NetworkClient {
    */
   private joined = false;
 
+  /**
+   * App-level heartbeat. The server drops a socket that has gone silent past its
+   * budget, and a client is legitimately silent for long stretches: the whole
+   * menu, the party panel, the matchmaking queue and the pre-horn countdown all
+   * put nothing on the wire (only a live match streams player_input). The
+   * browser's automatic pong answers the server's ws ping, but only while the
+   * page is actually pumping its socket — so this timer is the belt to that
+   * brace, and it is the thing that keeps a menu-idling player connected.
+   *
+   * It also measures round-trip latency: the server echoes the ping payload
+   * back as `pong`, which is where `latencyMs` comes from.
+   */
+  private static readonly HEARTBEAT_INTERVAL_MS = 3_000;
+  private heartbeatTimer: number | null = null;
+  private lastPingSentAt = 0;
+  private latencyMs: number | null = null;
+
   isConnected(): boolean {
     return this.connected && this.ws?.readyState === WebSocket.OPEN;
   }
@@ -85,6 +102,7 @@ export class NetworkClient {
       this.ws = new WebSocket(url);
       this.ws.onopen = () => {
         this.connected = true;
+        this.startHeartbeat();
         resolve();
       };
       this.ws.onerror = (e) => reject(e);
@@ -101,6 +119,8 @@ export class NetworkClient {
       this.ws.onclose = (e) => {
         this.connected = false;
         this.joined = false;
+        this.stopHeartbeat();
+        this.latencyMs = null;
         this.pendingSnapshot = null;
         this.snapshotFlushQueued = false;
         this.onConnectionClosed?.();
@@ -171,7 +191,53 @@ export class NetworkClient {
         this.onMatchStart?.(msg.payload as MatchStartPayload);
         break;
       case 'stats_update': this.onStatsUpdate?.(msg.payload as PlayerStatsRecord); break;
+      case 'pong': this.notePong(msg.payload); break;
     }
+  }
+
+  // ─── Heartbeat ───────────────────────────────────────────────
+  /** Round-trip time of the last answered heartbeat, or null before the first. */
+  getLatencyMs(): number | null {
+    return this.latencyMs;
+  }
+
+  /** One heartbeat beat: keeps the server's liveness sweep happy and times the RTT. */
+  sendPing(): void {
+    const sentAt = Date.now();
+    if (this.send({ type: 'ping', ts: sentAt, payload: { t: sentAt } })) {
+      this.lastPingSentAt = sentAt;
+    }
+  }
+
+  private notePong(payload: unknown): void {
+    // The server echoes our payload, so the send time rides along and a pong
+    // that overtakes a later ping still measures its OWN round trip.
+    const echoed = (payload as { t?: unknown } | null)?.t;
+    const sentAt = typeof echoed === 'number' && Number.isFinite(echoed) ? echoed : this.lastPingSentAt;
+    if (!sentAt) return;
+    const rtt = Date.now() - sentAt;
+    // A clock that jumped mid-flight would otherwise post an absurd latency.
+    if (rtt >= 0 && rtt < 60_000) this.latencyMs = rtt;
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    // Beat once immediately: a client that opens the socket and then sits on the
+    // name field should be counted as alive from the first second, not the third.
+    this.sendPing();
+    this.heartbeatTimer = window.setInterval(() => {
+      if (!this.isConnected()) {
+        this.stopHeartbeat();
+        return;
+      }
+      this.sendPing();
+    }, NetworkClient.HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer === null) return;
+    window.clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 
   private queueSnapshot(snapshot: GameState) {
@@ -258,6 +324,9 @@ export class NetworkClient {
   }
 
   disconnect() {
+    // Stop the timer even if there is no socket to close — connect() can reject
+    // before ever assigning one, and a stray interval would outlive the client.
+    this.stopHeartbeat();
     if (!this.ws) return;
     this.connected = false;
     this.clearMatchSession();

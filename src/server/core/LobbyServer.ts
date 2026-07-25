@@ -30,9 +30,28 @@ const MAX_INBOUND_MESSAGE_BYTES = 64 * 1024;
 /** Belt on top of maxPayload: a frame that decodes but is absurd never reaches JSON.parse. */
 const MAX_DECODED_MESSAGE_BYTES = 32 * 1024;
 /** App-level heartbeat: ping every HEARTBEAT_INTERVAL_MS, drop a socket that has
- *  not answered (pong / any message) within HEARTBEAT_TIMEOUT_MS. */
+ *  not answered (pong / any message) within its silence budget. */
 const HEARTBEAT_INTERVAL_MS = 5_000;
-const HEARTBEAT_TIMEOUT_MS = 10_000;
+/** Silence budget for a client that is expected to be talking. The client sends
+ *  its own `ping` every ~3s (NetworkClient's heartbeat) on top of the pongs the
+ *  browser answers automatically, so 15s is five missed beats — one dropped
+ *  ping, or one long GC pause, is never fatal. */
+const HEARTBEAT_TIMEOUT_MS = 15_000;
+/** Loading into a match is the heaviest thing a client ever does: off the join
+ *  snapshot it builds the whole world on its main thread, in bursts that keep
+ *  coming as islands stream in. A pinned main thread answers neither our ws ping
+ *  nor its own heartbeat timer, so a joining client is silent for exactly as
+ *  long as its worst freeze — measured at 2.2s on GPU-headless Chromium, and
+ *  tens of seconds once a machine falls back to software rasterising.
+ *  scripts/screenshot-tour.mjs documents the same freeze from the other side
+ *  (its click needs noWaitAfter to survive it). For MATCH_BUILD_WINDOW_MS after
+ *  the join the silence budget is therefore MATCH_BUILD_GRACE_MS, which buys a
+ *  slow machine an order of magnitude over the measured freeze without letting a
+ *  joiner that really did die stand in the match for more than half a minute.
+ *  A window, not a latch cleared by the first frame the client manages to send:
+ *  the freezes come in bursts with live stretches between them. */
+const MATCH_BUILD_WINDOW_MS = 45_000;
+const MATCH_BUILD_GRACE_MS = 30_000;
 
 const PROJECT_ROOT = join(fileURLToPath(new URL('../../..', import.meta.url)));
 const CLIENT_DIST_ROOT = join(PROJECT_ROOT, 'dist/client');
@@ -64,6 +83,10 @@ interface ClientSession {
   /** Wall time of the last byte received from this socket (pong counts) — the
    *  heartbeat sweep drops sockets that go silent so their player leaves the match. */
   lastSeenAt: number;
+  /** Wall time this client was placed into its current match — opens the
+   *  world-build window, where silence is expected rather than suspicious.
+   *  Cleared when the client leaves the match. See MATCH_BUILD_WINDOW_MS. */
+  matchJoinedAt?: number;
   /** Set by onDisconnect so the heartbeat sweep and a later 'close' can't tear
    *  the same session down twice. */
   disposed?: boolean;
@@ -144,6 +167,10 @@ export class LobbyServer {
     this.clients.set(clientId, session);
 
     ws.on('message', (data, isBinary) => {
+      // EVERY inbound frame counts as liveness — whatever its type, whether it
+      // is pre-join (`set_name`) or match-scoped (`player_input`), whether it
+      // parses at all. Refreshed here, ahead of every size check, JSON.parse and
+      // route, so no message type can ever be forgotten on the way in.
       session.lastSeenAt = Date.now();
       // Frame decode itself must be contained: a hostile payload that throws in
       // Buffer/JSON handling would otherwise escape the 'message' emit.
@@ -224,17 +251,26 @@ export class LobbyServer {
 
   /**
    * Liveness: ping every socket, and terminate any that has produced no traffic
-   * (message OR pong) for HEARTBEAT_TIMEOUT_MS. Without this a half-open socket
+   * (message OR pong) past its silence budget. Without this a half-open socket
    * (laptop lid, dropped wifi) keeps its player standing in the match forever —
    * ws 'close' never fires on a silently dead TCP connection. terminate() fires
    * 'close', so onDisconnect does the actual player cleanup.
+   *
+   * The budget is per-session, not global: a client mid-world-build is silent
+   * for a legitimate reason and gets MATCH_BUILD_GRACE_MS, everyone else (menu,
+   * party, queue, live match) is held to HEARTBEAT_TIMEOUT_MS because they all
+   * have the client heartbeat running and should never be quiet that long.
    */
   private sweepDeadSockets(): void {
     const now = Date.now();
     for (const session of Array.from(this.clients.values())) {
       if (session.ws.readyState !== WebSocket.OPEN) continue;
-      if (now - session.lastSeenAt > HEARTBEAT_TIMEOUT_MS) {
-        console.log(`[Lobby] dropping silent client ${session.id.slice(0, 6)} (${now - session.lastSeenAt}ms)`);
+      const loading = session.matchJoinedAt !== undefined
+        && now - session.matchJoinedAt < MATCH_BUILD_WINDOW_MS;
+      const budget = loading ? MATCH_BUILD_GRACE_MS : HEARTBEAT_TIMEOUT_MS;
+      const silentFor = now - session.lastSeenAt;
+      if (silentFor > budget) {
+        console.log(`[Lobby] dropping silent client ${session.id.slice(0, 6)} (${silentFor}ms > ${budget}ms, state=${session.state})`);
         try { session.ws.terminate(); } catch {}
         // terminate() is not guaranteed to emit 'close' on an already-broken
         // socket in every Node version — clean up explicitly (onDisconnect is
@@ -449,6 +485,7 @@ export class LobbyServer {
     session.state = 'menu';
     session.matchId = undefined;
     session.matchPlayerId = undefined;
+    session.matchJoinedAt = undefined;
     session.endedMatchSince = undefined;
     // Returning to main menu also exits the persistent party.
     if (session.partyCode) this.removeFromParty(session, true);
@@ -470,6 +507,7 @@ export class LobbyServer {
     this.clientToMatch.delete(session.id);
     session.matchId = undefined;
     session.matchPlayerId = undefined;
+    session.matchJoinedAt = undefined;
     session.endedMatchSince = undefined;
 
     const code = session.partyCode;
@@ -639,6 +677,9 @@ export class LobbyServer {
     // local round state on match_start, which would otherwise wipe
     // localPlayerId and unanchor the camera/input.
     const pending = match.createHumanClient(session.ws, session.name);
+    // Open the world-build window BEFORE the join snapshot goes out — that
+    // snapshot is what pins the client's main thread.
+    session.matchJoinedAt = Date.now();
     const startMsg: MatchStartPayload = {
       matchId: match.id,
       source,
@@ -720,6 +761,7 @@ export class LobbyServer {
             session.state = 'menu';
             session.matchId = undefined;
             session.matchPlayerId = undefined;
+            session.matchJoinedAt = undefined;
             session.endedMatchSince = undefined;
             this.clientToMatch.delete(session.id);
           }

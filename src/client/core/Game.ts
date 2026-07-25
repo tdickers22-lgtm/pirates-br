@@ -2378,6 +2378,9 @@ export class Game {
       .replace(/\s+/g, ' ')
       .slice(0, 80);
     const snapshotAgeMs = performance.now() - this.lastSnapshotAt;
+    // Heartbeat round trip: a rising rtt (or '--') is the first sign the socket
+    // is in trouble, well before the server's liveness sweep gives up on us.
+    const rtt = this.network.getLatencyMs();
 
     const stateLine = this.state
       ? [
@@ -2417,7 +2420,7 @@ export class Game {
       stateLine,
       playerLine,
       shipLine,
-      `snapshot ${Math.round(snapshotAgeMs)}ms | interact ${this.visibleInteractKind ?? this.lastInteractKind ?? 'none'} | prompt ${prompt || 'none'}`,
+      `snapshot ${Math.round(snapshotAgeMs)}ms | rtt ${rtt === null ? '--' : `${rtt}ms`} | interact ${this.visibleInteractKind ?? this.lastInteractKind ?? 'none'} | prompt ${prompt || 'none'}`,
     ].join('\n');
   }
 
