@@ -15,6 +15,25 @@ export class ClientState {
   /** EMA-smoothed offset mapping performance.now()/1000 onto server sim seconds. */
   serverTimeOffset: number | null = null;
   lastSnapshotAt = performance.now();
+  /**
+   * Highest `seq` applied so far, across BOTH full and hot snapshots (the
+   * server bumps one shared counter for each — see Match.snapshotSeq). The
+   * wire is unordered enough that a hot can overtake the full it was built
+   * from; applying the older one afterwards rewinds every transform for a
+   * frame. Reset to -1 per match, because the server's counter restarts too.
+   */
+  lastAppliedSeq = -1;
+
+  /**
+   * Gate for an incoming snapshot: false means it was overtaken and must be
+   * dropped. Payloads without a `seq` (older servers) always pass.
+   */
+  acceptSeq(seq: number | undefined): boolean {
+    if (seq === undefined) return true;
+    if (seq < this.lastAppliedSeq) return false;
+    this.lastAppliedSeq = seq;
+    return true;
+  }
 
   /** Merge a 31Hz 'state_hot' transform update into the last full snapshot.
    *  Hot payloads carry only moving-entity transforms (plus storm), so ships,
@@ -23,6 +42,7 @@ export class ClientState {
   applyHotSnapshot(hot: HotSnapshotPayload) {
     const state = this.state;
     if (!state) return; // need one full snapshot first
+    if (!this.acceptSeq(hot.seq)) return; // overtaken by a newer full/hot
     if (hot.tick < state.tick) return; // stale hot arriving after a newer full
     state.tick = hot.tick;
     state.serverTime = hot.serverTime;

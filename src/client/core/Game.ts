@@ -791,6 +791,8 @@ export class Game {
   }
 
   private resetLocalRoundState() {
+    // The server's snapshot counter restarts per match — so must ours.
+    this.clientState.lastAppliedSeq = -1;
     this.clearJoinAssignmentWatchdog();
     this.state = null;
     this.localPlayerId = null;
@@ -1600,6 +1602,9 @@ export class Game {
   }
 
   private applySnapshot(snapshot: GameState) {
+    // Dropped when a newer hot/full snapshot already landed — applying the
+    // overtaken one would rewind every transform for a frame.
+    if (!this.clientState.acceptSeq(snapshot.seq)) return;
     const hasFreshIslandState = snapshot.islands.length > 0 || !this.state;
     // Static world (islands + seaRocks) rides only every 4th full snapshot on
     // the wire — preserve the previous copies on the ticks that omit them.
