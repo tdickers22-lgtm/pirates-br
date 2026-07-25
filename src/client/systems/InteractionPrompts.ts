@@ -242,10 +242,14 @@ export class InteractionPrompts {
         const dz = player.position.z - dock.position.z;
         const cos = Math.cos(dock.rotation);
         const sin = Math.sin(dock.rotation);
-        const localX = dx * cos + dz * sin;
-        const localZ = -dx * sin + dz * cos;
+        // Canonical dock frame (shared toDockLocalPoint / Match.tryClimb…):
+        // +local-z is SEAWARD, so the swim-up band is a POSITIVE z window.
+        // The old mirrored frame put the prompt on the landward side, where
+        // the server would never grant the climb.
+        const localX = dx * cos - dz * sin;
+        const localZ = dx * sin + dz * cos;
         if (Math.abs(localX) > dock.width * 0.42) continue;
-        if (localZ > -dock.length * 0.08 || localZ < -dock.length * 0.58) continue;
+        if (localZ < dock.length * 0.08 || localZ > dock.length * 0.58) continue;
         const ladderPoint = getIslandDockSwimLadderPoint(dock);
         this.pushInteractionCandidate(
           candidates,

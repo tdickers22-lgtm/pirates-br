@@ -1189,13 +1189,15 @@ export class IslandBuilder {
       shorePlatform.receiveShadow = true;
       dock.add(shorePlatform);
 
-      const ladderZ = -dockL * 0.46;
+      // Seaward tip (+z in dock-local space) — matches DOCK_LADDER_LOCAL_Z_FRAC
+      // on the server and getIslandDockSwimLadderPoint in shared/utils.
+      const ladderZ = dockL * 0.44;
       const railMat = new THREE.MeshStandardMaterial({ color: 0x4a3018, roughness: 0.95 });
       const rungMat = new THREE.MeshStandardMaterial({ color: 0x6a4828, roughness: 0.92 });
       const side = dockW * 0.22;
       for (const sx of [-side, side] as const) {
         const rail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.35, 0.1), railMat);
-        rail.position.set(sx, 0.72, ladderZ + 0.12);
+        rail.position.set(sx, 0.72, ladderZ - 0.12);
         rail.castShadow = true;
         dock.add(rail);
       }
@@ -1203,7 +1205,7 @@ export class IslandBuilder {
         const rungCount = 8;
         for (let r = 0; r < rungCount; r++) {
           const rung = new THREE.Mesh(new THREE.BoxGeometry(side * 2.1, 0.07, 0.12), rungMat);
-          rung.position.set(0, 0.18 + r * 0.14, ladderZ + r * 0.04);
+          rung.position.set(0, 0.18 + r * 0.14, ladderZ - r * 0.04);
           rung.castShadow = true;
           dock.add(rung);
         }
@@ -1328,8 +1330,9 @@ export class IslandBuilder {
         shell.traverse((o) => { if (o instanceof THREE.Mesh) { o.castShadow = true; o.receiveShadow = true; } });
         tavern.add(shell);
         // The GLB keeps the door leaf as its own node with the origin ON the
-        // hinge axis — register it so [X] can swing it (client-local; the
-        // tavern has no collision so no server round-trip is needed).
+        // hinge axis — register it so [X] can swing it. The tavern DOES have a
+        // server collider (walls plus a 1.7 m doorway gap); only the door LEAF
+        // swing is cosmetic and client-only, so it needs no server round-trip.
         const doorNode = shell.getObjectByName('door');
         if (doorNode) {
           this.ctx.setTavernDoor(island.id, doorNode);
