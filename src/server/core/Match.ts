@@ -226,7 +226,7 @@ function berthShiftLadder(dockLength: number): number[] {
 const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<InteractIntent>([
   'barrel', 'chest', 'board', 'dock', 'mermaid', 'keg_diffuse', 'upgrade',
   'gold_hoarder', 'stow_chest', 'helm', 'sails', 'brace',
-  'crow', 'anchor', 'repair', 'bail', 'revive', 'cannon',
+  'crow', 'anchor', 'repair', 'bail', 'revive', 'cannon', 'ammo',
 ]);
 
 export class Match {
