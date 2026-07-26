@@ -16,6 +16,8 @@ import {
   getIslandSurfaceY,
   getCaveCeilingY,
   getCaveFloorY,
+  resolveCaveWallCollision,
+  CAVE_WALL_PAD,
   isPointInsideIslandFootprint,
   sampleWind,
   getCrowNestStandingY,
@@ -100,6 +102,14 @@ const LOCO = {
   SLOPE_MAX_STEP: 1.0,
   /** Head clearance kept under a cave ceiling. */
   CAVE_HEAD_CLEARANCE: 0.1,
+  /** A single-tick step longer than this is a warp/respawn, not a walk — the
+   *  cave-wall pushout stands down rather than dragging a teleported body back
+   *  underground. */
+  CAVE_WALL_MAX_STEP: 2.0,
+  /** Cap on a single cave-wall correction. A body needing more than this is not
+   *  really in the hollow the solver picked (knockback through rock, a warp
+   *  landing); yanking it a stride sideways would look worse than letting go. */
+  CAVE_WALL_MAX_PUSH: 1.6,
   /** Broad-phase pad added to an island's max radius for prop-collision culling. */
   PROP_BROADPHASE_PAD: 6,
   /** Fall-damage curve on hard ground: harmless below FALL_SAFE_SPEED (m/s of
@@ -325,6 +335,11 @@ export class PhysicsSystem {
    *  point for steep-slope blocking. Keyed by id so it governs bot body-walk
    *  (BotSystem moves position directly, not velocity) exactly like human input. */
   private playerPrevXZ = new Map<string, { x: number; z: number }>();
+  /** Players whose body was inside a cave hollow at the end of the previous
+   *  tick. Cave walls only push a body that is ALREADY underground: entering a
+   *  mouth (or dropping through one) must never be deflected, and a walker on
+   *  the hillside above a tunnel is not in the cave at all. */
+  private playerInCave = new Set<string>();
   /** Seconds of remaining geyser-launch immunity per player, so one eruption
    *  launches a pirate once instead of trampolining them to death. */
   private playerGeyserCooldown = new Map<string, number>();
@@ -739,6 +754,7 @@ export class PhysicsSystem {
       const onShip = this.findPlayerShip(player, ships);
       if (onShip) {
         player.onShipId = onShip.id;
+        this.playerInCave.delete(player.id);
 
         const stats = SHIP_STATS[onShip.type];
 
@@ -886,6 +902,7 @@ export class PhysicsSystem {
         // swimmers via capsule/sphere pushout; steep faces block a walking ascent.
         this.resolvePlayerPropCollision(player, islands);
         this.resolvePlayerTavernCollision(player, islands);
+        this.resolveCaveWallBlock(player, onIsland);
         this.resolveSlopeBlock(player, onIsland);
 
         const onDock = this.findPlayerDock(player, islands);
@@ -897,6 +914,9 @@ export class PhysicsSystem {
           : { floorY: -Infinity, ceilingY: null as number | null, inCave: false };
         const islandFloor = stand.floorY;
         const ceilingY = stand.ceilingY;
+        // Hysteresis source for next tick's cave-wall pushout (see resolveCaveWallBlock).
+        if (stand.inCave) this.playerInCave.add(player.id);
+        else this.playerInCave.delete(player.id);
         const dockFloor = onDock ? onDock.position.y + 0.14 : -Infinity;
         // Rope-bridge deck: a real standing surface, but only when the player
         // is at deck level (within a step) — walking through the saddle UNDER
@@ -1281,10 +1301,15 @@ export class PhysicsSystem {
     }
 
     // Forget footing for players who left the match so the map can't grow unbounded.
-    if (this.playerPrevXZ.size > players.length || this.playerGeyserCooldown.size > players.length) {
+    if (this.playerPrevXZ.size > players.length
+      || this.playerInCave.size > players.length
+      || this.playerGeyserCooldown.size > players.length) {
       const live = new Set(players.map((p) => p.id));
       for (const id of this.playerPrevXZ.keys()) {
         if (!live.has(id)) this.playerPrevXZ.delete(id);
+      }
+      for (const id of this.playerInCave) {
+        if (!live.has(id)) this.playerInCave.delete(id);
       }
       for (const id of this.playerGeyserCooldown.keys()) {
         if (!live.has(id)) this.playerGeyserCooldown.delete(id);
@@ -1954,6 +1979,52 @@ export class PhysicsSystem {
   }
 
   /**
+   * Cave walls are SOLID. Before this existed a cave's "wall" was purely
+   * implicit — one step past the ceiling box and getCaveCeilingY returned null,
+   * the standing floor silently reverted to the natural hillside 10-50 m
+   * overhead, and the landing snap fired the pirate out through the mountain.
+   * Every interior wall of every segment was a teleporter (walking OR jumping).
+   *
+   * So: a body already inside the hollow is kept inside it, a body-radius clear
+   * of the rock, by the shared union pushout. Mouth segments stay open outward
+   * so walking back out into daylight is never deflected, and the hysteresis on
+   * `playerInCave` means a pirate approaching or dropping into a mouth is never
+   * grabbed by a wall they haven't crossed yet.
+   */
+  private resolveCaveWallBlock(player: Player, island: Island | null) {
+    if (!island || !island.caves || island.caves.length === 0) return;
+    if (!this.playerInCave.has(player.id)) return;
+    const prev = this.playerPrevXZ.get(player.id);
+    if (prev) {
+      const step = Math.hypot(player.position.x - prev.x, player.position.z - prev.z);
+      if (step > LOCO.CAVE_WALL_MAX_STEP) return;
+    }
+    const res = resolveCaveWallCollision(island, player.position.x, player.position.z, CAVE_WALL_PAD);
+    if (!res.pushed) return;
+    const pushX = res.x - player.position.x;
+    const pushZ = res.z - player.position.z;
+    const pl = Math.hypot(pushX, pushZ);
+    if (pl > LOCO.CAVE_WALL_MAX_PUSH) return;
+    player.position.x = res.x;
+    player.position.z = res.z;
+    if (pl <= 1e-4) return;
+    // Cancel only the into-rock component so a pirate slides along the wall
+    // instead of buzzing against it (same contract as the prop/tavern pushouts).
+    const nx = pushX / pl;
+    const nz = pushZ / pl;
+    const into = player.velocity.x * nx + player.velocity.z * nz;
+    if (into < 0) {
+      player.velocity.x -= into * nx;
+      player.velocity.z -= into * nz;
+    }
+    const knockInto = player.knockbackVelocity.x * nx + player.knockbackVelocity.z * nz;
+    if (knockInto < 0) {
+      player.knockbackVelocity.x -= knockInto * nx;
+      player.knockbackVelocity.z -= knockInto * nz;
+    }
+  }
+
+  /**
    * Steep terrain is unwalkable: if a grounded walker is climbing INTO a face
    * steeper than LOCO.SLOPE_MAX, revert this tick's footing (block) but keep any
    * sideways momentum so the pirate slides along the cliff base instead of
@@ -1968,6 +2039,14 @@ export class PhysicsSystem {
    */
   private resolveSlopeBlock(player: Player, island: Island | null) {
     if (!island || player.state !== 'alive') return;
+    // Underground the cave WALL owns lateral blocking (resolveCaveWallBlock).
+    // Leaving the slope gate armed in here made every cave wall block twice: the
+    // probe a metre ahead sampled solid rock as "natural hillside 30 m up",
+    // read a cliff, and reverted the whole step — bricking the pirate a metre
+    // short of the wall with no slide along it. Cave floors are gentle by
+    // construction (entrance ramps are gradient-capped, veins descend ≤1.5 m
+    // over ≥4 m, chambers are flat), so there is no cliff in here to gate.
+    if (this.playerInCave.has(player.id)) return;
     const prev = this.playerPrevXZ.get(player.id);
     if (!prev) return;
     const stepX = player.position.x - prev.x;

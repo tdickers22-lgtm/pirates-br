@@ -1,5 +1,5 @@
 import { createNoise2D } from 'simplex-noise';
-import type { Island, IslandDock, IslandGeyser, IslandTavern, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
+import type { Island, IslandCave, IslandDock, IslandGeyser, IslandTavern, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
 import { SHIP, SHIP_STATS, PLAYER } from '../constants/index.js';
 
 export function lerp(a: number, b: number, t: number): number {
@@ -406,54 +406,237 @@ export function getIslandCoastType(island: Island, angle: number): 'beach' | 'ro
 }
 
 interface IslandSurfaceOptions {
-  /** Opt in to carving cave tunnel trenches into the returned height (used for
-   *  cave-interior mesh building / in-cave locomotion). Default OFF: walking
-   *  ABOVE a cave stands on the natural hillside, not in the trench. */
-  carveCaves?: boolean;
+  /** Skip the cave-MOUTH trench cut (see carveCaveMouthAt). Internal: only the
+   *  carve itself, which needs the uncut hillside to cut FROM, passes this.
+   *  Everything else — physics footing, the terrain mesh, prop seating — must
+   *  see the same carved ground, or the mouth grows an invisible step. */
+  skipMouthCarve?: boolean;
 }
 
-/** Carve mask/floor of the deepest-overlapping cave at (x, z), or null. */
-function getCaveCarve(island: Island, x: number, z: number): { mask: number; floorY: number } | null {
-  if (!island.caves || island.caves.length === 0) return null;
-  let bestMask = 0;
-  let bestFloorY = 0;
-  for (const cave of island.caves) {
-    const cLen = (cave as { length?: number }).length ?? 10;
-    const cRadius = (cave as { interiorRadius?: number }).interiorRadius ?? 3.0;
-    const cFloorY = (cave as { floorY?: number }).floorY ?? cave.position.y - 0.4;
-    const cFloorEnd = (cave as { floorYEnd?: number }).floorYEnd ?? cFloorY;
-    const dx = x - cave.position.x;
-    const dz = z - cave.position.z;
-    const cosR = Math.cos(cave.rotation);
-    const sinR = Math.sin(cave.rotation);
-    // Cave-local: +z points OUTWARD from the island (entrance side); tunnel goes to -z
-    const lx = dx * cosR - dz * sinR;
-    const lz = dx * sinR + dz * cosR;
-    // Floor ramps from cFloorY (mouth) to cFloorEnd (far end) so the cave can
-    // DESCEND deep into the mountain rather than sit under a thin roof.
-    const along = cLen > 0 ? clamp(-lz / cLen, 0, 1) : 0;
-    const floorAt = cFloorY + (cFloorEnd - cFloorY) * along;
-    const lateralPad = 0.7;
-    const longPad = 1.0;
-    const latFalloff = Math.abs(lx) <= cRadius
-      ? 1
-      : Math.abs(lx) <= cRadius + lateralPad
-        ? 1 - (Math.abs(lx) - cRadius) / lateralPad
-        : 0;
-    const longFalloff = lz <= 0 && lz >= -cLen
-      ? 1
-      : lz > 0 && lz <= longPad
-        ? 1 - lz / longPad
-        : lz < -cLen && lz >= -(cLen + longPad)
-          ? 1 - (-cLen - lz) / longPad
-          : 0;
-    const mask = latFalloff * longFalloff;
-    if (mask > bestMask) {
-      bestMask = mask;
-      bestFloorY = floorAt;
+// ── Cave interior: ONE canonical hollow volume ──────────────────────────────
+// A cave system is the UNION of oriented segment boxes. Everything that has to
+// agree about where the rock is — the standing floor, the ceiling, the wall
+// pushout, the client's tube meshes — derives from the SAME hard region:
+//
+//     |lx| <= interiorRadius,  -length <= lz <= CAVE_NEAR_OVERHANG
+//
+// The half-open near overhang is what makes the union CONTIGUOUS: a child
+// segment starts exactly at its parent's far wall, so without an overlap band
+// the two boxes would meet on a plane and a body-radius pad on each side would
+// wall the passage shut. 1.2 m of overlap leaves room for both pads.
+//
+// Historical bug this replaces: the standing floor used to be a FEATHERED blend
+// `natural*(1-mask) + floorY*mask` whose mask fell off across a 1 m long pad and
+// a 0.7 m lateral pad — pads that sit INSIDE the ceiling box. Walking through a
+// junction therefore mixed 20-40 m of mountainside into the cave floor and
+// stepped the footing by up to 14 m between two 25 cm-apart samples. Inside the
+// hard region the floor is now the cave floor, full stop. The only place rock
+// and hillside still blend is the MOUTH trench below, which is a cut in the
+// terrain rather than a hollow inside it.
+
+/** Interior extends this far PAST a segment's near plane so adjacent segments
+ *  share a real overlap band rather than meeting on a plane. */
+export const CAVE_NEAR_OVERHANG = 1.2;
+/** Body clearance kept between a walker's centre and a cave's rock wall. */
+export const CAVE_WALL_PAD = 0.35;
+
+/** Cave-local frame of a segment: +z points OUTWARD (entrance side), the tunnel
+ *  runs to -z. `depth` is the distance to the nearest wall of this segment's
+ *  hard box — positive inside, negative outside. Mouth segments have no near
+ *  wall (you can walk straight out), so their near plane never bounds `depth`. */
+function caveSegLocal(cave: IslandCave, x: number, z: number) {
+  const cLen = cave.length ?? 10;
+  const cRadius = cave.interiorRadius ?? 3.0;
+  const cFloorY = cave.floorY ?? cave.position.y - 0.4;
+  const cFloorEnd = cave.floorYEnd ?? cFloorY;
+  const dx = x - cave.position.x;
+  const dz = z - cave.position.z;
+  const cosR = Math.cos(cave.rotation);
+  const sinR = Math.sin(cave.rotation);
+  const lx = dx * cosR - dz * sinR;
+  const lz = dx * sinR + dz * cosR;
+  // Floor ramps from cFloorY (near end) to cFloorEnd (far end) so the cave can
+  // DESCEND deep into the mountain rather than sit under a thin roof.
+  const along = cLen > 0 ? clamp(-lz / cLen, 0, 1) : 0;
+  const floorAt = cFloorY + (cFloorEnd - cFloorY) * along;
+  const openNear = cave.hasMouth === true;
+  const sideDepth = Math.min(cRadius - Math.abs(lx), lz + cLen);
+  // Membership always stops at the near plane (otherwise a mouth's "interior"
+  // would stretch out over the whole beach in front of it); the wall pushout
+  // ignores it for mouths so walking out of a cave is never blocked.
+  const depth = Math.min(sideDepth, CAVE_NEAR_OVERHANG - lz);
+  const wallDepth = openNear ? sideDepth : depth;
+  return { lx, lz, cLen, cRadius, floorAt, ceilAt: floorAt + cave.height, depth, wallDepth, openNear, cosR, sinR };
+}
+
+export interface CaveInterior {
+  /** Walkable cave floor — the pure carved floor, never mixed with hillside. */
+  floorY: number;
+  /** Highest covering segment's ceiling (the union's headroom). */
+  ceilingY: number;
+  /** Distance to the nearest rock wall (metres, > 0 inside). */
+  wallDist: number;
+}
+
+/** The cave hollow at (x, z), or null outside every segment's hard box.
+ *  Where segments overlap the floor is blended by squared wall-distance, so a
+ *  junction reads as one smoothly-graded room instead of stepping between the
+ *  two segment floors at whichever boundary happened to win an argmax. */
+export function getCaveInteriorAt(island: Island, x: number, z: number): CaveInterior | null {
+  const caves = island.caves;
+  if (!caves || caves.length === 0) return null;
+  let wSum = 0;
+  let fSum = 0;
+  let best = -Infinity;
+  let bestFloor = 0;
+  let ceiling = -Infinity;
+  for (const cave of caves) {
+    const s = caveSegLocal(cave, x, z);
+    if (s.depth <= 0) continue;
+    // Mouth segments are unbounded outward; cap their weight so the open air in
+    // front of a mouth can't out-vote the tunnel it belongs to.
+    const d = Math.min(s.depth, s.cRadius);
+    const w = d * d;
+    wSum += w;
+    fSum += w * s.floorAt;
+    if (s.depth > best) { best = s.depth; bestFloor = s.floorAt; }
+    if (s.ceilAt > ceiling) ceiling = s.ceilAt;
+  }
+  if (best === -Infinity) return null;
+  return {
+    floorY: wSum > 1e-9 ? fSum / wSum : bestFloor,
+    ceilingY: ceiling,
+    wallDist: best,
+  };
+}
+
+// ── The cave MOUTH trench: ONE carve, shared by the mesh and the ground ─────
+// A mouth is a real gash in the hillside: the terrain drops to the cave floor
+// through the doorway and up the two gully walls flanking it. This carve used
+// to live only in the CLIENT (island/CaveBuilder's makeCaveMouthCarver) while
+// the server stood players on the UNcarved hillside, so every mouth had a
+// 2-4 m invisible step: walking out of a cave popped you up onto a rim that
+// isn't drawn, and shallow-angle exits bricked against a gully wall that isn't
+// there either. It is shared, and unconditional, so the drawn ground and the
+// walked ground are the same surface.
+
+/** Lateral reach of the gully cut, as a multiple of the tunnel radius. The
+ *  client's throat collar is sized off this so the collar always wraps PAST
+ *  the cut edge — the sliver between them was a sky hole. */
+export const CAVE_MOUTH_TRENCH_K = 1.5;
+/** Outward fade of the gully walls beyond CAVE_MOUTH_TRENCH_K·radius. */
+export const CAVE_MOUTH_TRENCH_FADE = 1.9;
+
+/** Trench-carved ground at (x, z) given the natural surface `y` there, plus how
+ *  deep the cut is (drives the client's rock recolor and decor rejection).
+ *
+ *  The cut MUST stay a smooth function of (lz, lx) only: an earlier per-vertex
+ *  "already roofed → skip" gate made neighbouring terrain vertices diverge by
+ *  metres and sliced diagonal faces across the passage. */
+function carveCaveMouthAt(island: Island, x: number, z: number, y: number): { y: number; carved: number } {
+  const caves = island.caves;
+  if (!caves || caves.length === 0) return { y, carved: 0 };
+  let out = y;
+  let carved = 0;
+  for (const cave of caves) {
+    if (!cave.hasMouth) continue; // only real surface mouths open the hillside
+    if (out <= cave.floorY) continue;
+    const s = caveSegLocal(cave, x, z);
+    const ax = Math.abs(s.lx);
+    // Cheap bbox reject — most of an island is nowhere near a mouth.
+    if (ax > s.cRadius * CAVE_MOUTH_TRENCH_K + CAVE_MOUTH_TRENCH_FADE) continue;
+    if (s.lz > CAVE_MOUTH_TRENCH_FADE + 2.5 || s.lz < -s.cLen - 1) continue;
+    const ceilAt = s.ceilAt;
+    // Any terrain skimming the passage volume gets flagged so the color pass
+    // paints it CAVE ROCK and decor skips it — near the mouth the hillside
+    // legitimately crosses the arch's upper region, and those shelves must not
+    // read as floating grass.
+    const inStrip = ax < s.cRadius * 1.6 && s.lz < 1.2;
+    if (inStrip && out < ceilAt + 1.2) carved = Math.max(carved, 0.35);
+    // Gully walls fade OUTSIDE the tube's widest wall radius so partially-cut
+    // vertices land on the open-air trench sides, never inside the rock shell.
+    const latK = smoothstep(s.cRadius * CAVE_MOUTH_TRENCH_K, s.cRadius * CAVE_MOUTH_TRENCH_K + CAVE_MOUTH_TRENCH_FADE, ax);
+    // Approach gully outward of the mouth plane (fades by lz ≈ 4.4).
+    const outerK = smoothstep(1.6, 4.4, s.lz);
+    // DOORWAY-ONLY cut: open the sky above just the first ~2.6 m. The
+    // carved→natural transition wall this creates is short, lands above head
+    // height, and is wrapped by the rock collar — it reads as the doorway's
+    // inner lintel.
+    const depthCapK = smoothstep(1.4, 2.6, -s.lz);
+    const keep = Math.max(latK, outerK, depthCapK);
+    const target = s.floorAt + (out - s.floorAt) * keep;
+    if (target < out) {
+      carved = Math.max(carved, out - target);
+      out = target;
     }
   }
-  return bestMask > 0 ? { mask: bestMask, floorY: bestFloorY } : null;
+  return { y: out, carved };
+}
+
+/** Is (x, z) anywhere near a mouth's cut at all? Pure trig, no heightfield —
+ *  callers that already hold a surface height use it to skip the (comparatively
+ *  expensive) re-sample below for the ~99% of an island that no mouth touches. */
+export function isNearCaveMouthCut(island: Island, x: number, z: number): boolean {
+  const caves = island.caves;
+  if (!caves || caves.length === 0) return false;
+  for (const cave of caves) {
+    if (!cave.hasMouth) continue;
+    const s = caveSegLocal(cave, x, z);
+    if (Math.abs(s.lx) > s.cRadius * CAVE_MOUTH_TRENCH_K + CAVE_MOUTH_TRENCH_FADE) continue;
+    if (s.lz > CAVE_MOUTH_TRENCH_FADE + 2.5 || s.lz < -s.cLen - 1) continue;
+    return true;
+  }
+  return false;
+}
+
+/** The mouth trench at (x, z): the carved ground and the cut depth. Same
+ *  surface `getIslandSurfaceY` returns — this form just also reports the depth,
+ *  for the terrain color pass and decor rejection. */
+export function getCaveMouthCarve(island: Island, x: number, z: number): { y: number; carved: number } {
+  if (!island.caves || island.caves.length === 0) return { y: getIslandSurfaceY(island, x, z), carved: 0 };
+  return carveCaveMouthAt(island, x, z, getIslandSurfaceY(island, x, z, { skipMouthCarve: true }));
+}
+
+/**
+ * Push (x, z) back inside the cave union, keeping `pad` metres of body
+ * clearance from the rock. Cave walls used to be PURELY IMPLICIT — step out of
+ * the ceiling box and the standing floor silently became the natural hillside
+ * 10-50 m overhead, so every interior wall in the game was a teleporter. This
+ * is the wall.
+ *
+ * Only meaningful for a body already inside the union (callers gate on that):
+ * it projects onto the deepest-covering segment's box, which is the nearest
+ * interior point for any sane single-tick step. A mouth segment's near plane is
+ * open, so walking out of a cave is never blocked.
+ */
+export function resolveCaveWallCollision(
+  island: Island,
+  x: number,
+  z: number,
+  pad: number = CAVE_WALL_PAD,
+): { x: number; z: number; pushed: boolean } {
+  const caves = island.caves;
+  if (!caves || caves.length === 0) return { x, z, pushed: false };
+  let best: ReturnType<typeof caveSegLocal> | null = null;
+  let bestCave: IslandCave | null = null;
+  for (const cave of caves) {
+    const s = caveSegLocal(cave, x, z);
+    // A segment narrower than the body can't hold it — never project into one.
+    if (s.cRadius <= pad) continue;
+    if (!best || s.wallDepth > best.wallDepth) { best = s; bestCave = cave; }
+  }
+  if (!best || !bestCave || best.wallDepth >= pad) return { x, z, pushed: false };
+  const limit = best.cRadius - pad;
+  const lx = clamp(best.lx, -limit, limit);
+  let lz = Math.max(best.lz, -best.cLen + pad);
+  if (!best.openNear) lz = Math.min(lz, CAVE_NEAR_OVERHANG - pad);
+  if (lx === best.lx && lz === best.lz) return { x, z, pushed: false };
+  // local → world (inverse of the yaw in caveSegLocal)
+  return {
+    x: bestCave.position.x + lx * best.cosR + lz * best.sinR,
+    z: bestCave.position.z - lx * best.sinR + lz * best.cosR,
+    pushed: true,
+  };
 }
 
 export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: IslandSurfaceOptions): number {
@@ -682,57 +865,30 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     }
   }
 
-  // ── Cave trench carve is OPT-IN (see IslandSurfaceOptions) ──
-  if (opts?.carveCaves) {
-    const carve = getCaveCarve(island, x, z);
-    if (carve) surfaceY = surfaceY * (1 - carve.mask) + carve.floorY * carve.mask;
-  }
-
   // The floor relaxes toward the rim so beach/cliff shores may dip below the
   // waterline; interior floors (incl. archipelago saddles) are unchanged.
   const effFloor = lerp(floor, -6.5, smoothstep(0.9, 1.02, distRatio));
-  return Math.max(effFloor, surfaceY);
+  const groundY = Math.max(effFloor, surfaceY);
+  // ── The cave-mouth trench is part of the GROUND, not a client decoration ──
+  if (opts?.skipMouthCarve || !island.caves || island.caves.length === 0) return groundY;
+  return carveCaveMouthAt(island, x, z, groundY).y;
 }
 
-/** Carved cave-tunnel floor height at (x, z), or null outside every cave
- *  footprint. In-cave locomotion (later physics track) walks on this while
- *  getIslandSurfaceY keeps returning the natural hillside above the tunnel. */
+/** Carved cave-tunnel floor height at (x, z), or null outside the cave union.
+ *  In-cave locomotion walks on this while getIslandSurfaceY keeps returning the
+ *  natural hillside above the tunnel. Inside the union this is the PURE cave
+ *  floor: no hillside is ever mixed in (see getCaveInteriorAt). */
 export function getCaveFloorY(island: Island, x: number, z: number): number | null {
-  const carve = getCaveCarve(island, x, z);
-  if (!carve) return null;
-  const natural = getIslandSurfaceY(island, x, z);
-  return natural * (1 - carve.mask) + carve.floorY * carve.mask;
+  return getCaveInteriorAt(island, x, z)?.floorY ?? null;
 }
 
-/** Interior ceiling height above (x, z), or null outside every cave's interior
- *  box. The physics track clamps in-cave player Y below this. */
+/** Interior ceiling height above (x, z), or null outside the cave union. The
+ *  physics track clamps in-cave player Y below this. Open space is the UNION of
+ *  segment boxes, so the ceiling is the HIGHEST covering segment: keeping the
+ *  lowest meant a side-vein overlapping a tall chamber slammed an invisible 2 m
+ *  lid onto the open room and jumping in caves bonked on nothing. */
 export function getCaveCeilingY(island: Island, x: number, z: number): number | null {
-  if (!island.caves || island.caves.length === 0) return null;
-  let best: number | null = null;
-  for (const cave of island.caves) {
-    const cLen = cave.length ?? 10;
-    const cRadius = cave.interiorRadius ?? 3.0;
-    const dx = x - cave.position.x;
-    const dz = z - cave.position.z;
-    const cosR = Math.cos(cave.rotation);
-    const sinR = Math.sin(cave.rotation);
-    const lx = dx * cosR - dz * sinR;
-    const lz = dx * sinR + dz * cosR;
-    if (Math.abs(lx) <= cRadius && lz <= 0.6 && lz >= -cLen) {
-      // Ceiling ramps down with the descending floor (keeps constant headroom).
-      const f0 = cave.floorY ?? cave.position.y - 0.4;
-      const fEnd = (cave as { floorYEnd?: number }).floorYEnd ?? f0;
-      const along = cLen > 0 ? clamp(-lz / cLen, 0, 1) : 0;
-      const floorAt = f0 + (fEnd - f0) * along;
-      const ceil = floorAt + cave.height;
-      // Open space is the UNION of segment boxes — the ceiling at a point is
-      // the HIGHEST covering segment. Keeping the lowest meant a side-vein
-      // overlapping a tall chamber slammed an invisible 2m lid onto the open
-      // room: jumping in caves bonked on nothing.
-      if (best === null || ceil > best) best = ceil;
-    }
-  }
-  return best;
+  return getCaveInteriorAt(island, x, z)?.ceilingY ?? null;
 }
 
 /**

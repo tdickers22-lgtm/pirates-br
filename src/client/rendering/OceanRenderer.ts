@@ -514,6 +514,16 @@ export class OceanRenderer {
     }
   }
 
+  /** Hide the sea while the camera is under a cave roof. The ocean is one
+   *  island-agnostic sheet with no holes punched for land, so wave crests
+   *  (calm seas reach +1.6m, storms far more) render straight through the floor
+   *  of any deep gallery — you stand in a lantern-lit cavern with the open sea
+   *  lapping at your ankles. Underground there is never legitimately sea in
+   *  frame, so the whole grid stands down. */
+  setSuppressed(suppressed: boolean) {
+    if (this.group) this.group.visible = !suppressed;
+  }
+
   getTime() { return this.time; }
 
   /** Snap the wave clock to server time; update(dt) keeps extrapolating between syncs. */

@@ -627,6 +627,14 @@ export class MapGenerator {
     // walkers into the swim branch (submergeDepth keys off the standing floor),
     // which then ejects them through the roof via swimSeabedY. Deep networks get
     // their verticality from descending toward this waterline, never past it.
+    // It stays at 1.0 even though a calm CREST reaches +1.62m (1.01m of summed
+    // amplitude × 1.6 peak roughness): raising the bar to clear the crest lifts
+    // every ceiling with it, and the roof check then strangles the networks on
+    // the lower isles (skull-cove fell from 10 segments to 4). The sea rendering
+    // through a deep gallery's floor is handled where it belongs — the ocean
+    // sheet stands down while the camera is under a cave roof (Game
+    // .updateOceanCaveSuppression) — and floors this deep are always far enough
+    // in for that predicate to have turned on.
     const CAVE_MIN_FLOOR = 1.0;
     // Natural surface stays ≥ `clear` above the tube's (ramping) ceiling along a
     // ray → the roof holds. The ceiling follows the floor ramp f0→f1 (+h), so a
@@ -734,16 +742,26 @@ export class MapGenerator {
           const fE = (c as { floorYEnd?: number }).floorYEnd ?? c.floorY;
           return c.floorY + (fE - c.floorY) * along;
         };
-        const overlapClash = (sx: number, sz: number, dX: number, dZ: number, len: number, f0: number, f1: number): boolean => {
-          for (let s = 0.12; s <= 1.001; s += 0.19) {
-            const px = sx + dX * len * s, pz = sz + dZ * len * s;
+        const overlapClash = (sx: number, sz: number, dX: number, dZ: number, len: number, f0: number, f1: number, rad: number): boolean => {
+          // Sweep the new passage's whole FOOTPRINT, not just its centre line: two
+          // galleries whose boxes merely graze each other at a corner still merge
+          // into one walkable union, and where their floors differ the union's
+          // blended floor STEPS by the difference over a single cell — the "hole
+          // in the floor" players fall through at chamber corners. The centre-line
+          // test missed every one of those (the clash is a body-width off-axis).
+          const nX = -dZ, nZ = dX;
+          for (let s = 0.1; s <= 1.001; s += 0.1) {
             const newFloor = f0 + (f1 - f0) * s;
-            for (const c of sys) {
-              const cf = segFloorAt(c, px, pz);
-              // Overlapping galleries must share a level (the ceiling helper reports
-              // the globally-lowest roof, so a deeper crosser would collapse the
-              // reported headroom). Connected passages meet at equal floors → fine.
-              if (cf !== null && Math.abs(cf - newFloor) > 0.5) return true;
+            for (const lat of [-1, -0.5, 0, 0.5, 1] as const) {
+              const px = sx + dX * len * s + nX * rad * lat;
+              const pz = sz + dZ * len * s + nZ * rad * lat;
+              for (const c of sys) {
+                const cf = segFloorAt(c, px, pz);
+                // Overlapping galleries must share a level (the ceiling helper reports
+                // the globally-lowest roof, so a deeper crosser would collapse the
+                // reported headroom). Connected passages meet at equal floors → fine.
+                if (cf !== null && Math.abs(cf - newFloor) > 0.5) return true;
+              }
             }
           }
           return false;
@@ -759,14 +777,14 @@ export class MapGenerator {
           // tolerance while the network still steps down through several levels.
           const floorEnd = Math.max(floor - rng() * 1.5, CAVE_MIN_FLOOR);
           const ex = sx + dX * len, ez = sz + dZ * len;
-          if (overlapClash(sx, sz, dX, dZ, len, floor, floorEnd)) return;
+          if (overlapClash(sx, sz, dX, dZ, len, floor, floorEnd, rad)) return;
           const passage = seg(sx, sz, dRot, rad, len, floor, height, { floorEnd });
           sys.push(passage);
           const roll = rng();
           if (sys.length >= MAX_SEGS || depth <= 1 || roll < 0.22) {
             // Terminate this vein in a chamber (treasure room) or a plain dead-end.
             const cRad = rr(rng, 3.6, 5.0), cLen = rr(rng, 4, 6), cH = rr(rng, 4.4, 5.8);
-            if (!overlapClash(ex, ez, dX, dZ, cLen, floorEnd, floorEnd) && roofed(ex, ez, dX, dZ, cLen, floorEnd, floorEnd, cH, 2)) {
+            if (!overlapClash(ex, ez, dX, dZ, cLen, floorEnd, floorEnd, cRad) && roofed(ex, ez, dX, dZ, cLen, floorEnd, floorEnd, cH, 2)) {
               sys.push(seg(ex, ez, dRot, cRad, cLen, floorEnd, cH, { back: true }));
             } else {
               passage.hasBackWall = true;

@@ -2235,6 +2235,7 @@ export class Game {
     }
     this.ocean.update(dt, this.renderer.camera.position);
     this.ocean.setAtmosphere(this.renderer.getAtmosphere());
+    this.updateOceanCaveSuppression();
     this.updateScene(dt);
     // Shared match clock (same value the server passes to the physics/geyser
     // timing) drives the volcanic magma flicker + geyser plumes in lockstep.
@@ -5149,6 +5150,11 @@ export class Game {
     return ground > relief * 0.72 ? 'stone' : 'grass';
   }
 
+  /** Highest y a wave crest can reach, plus a margin: 1.01m of summed calm
+   *  amplitude × the 1.6 roughness peak = 1.62m (storms heave higher still).
+   *  Cave floor below this ⇒ the sea would render through it. */
+  private static readonly CAVE_SEA_REACH_Y = 2.6;
+
   // ── Listener space: underwater muffle + cave reverb ───────────────────
   private cameraSubmergeDepth = 0;
   private stormRainIntensity = 0;
@@ -5173,6 +5179,26 @@ export class Game {
       this.prevInCaveForAudio = inCave;
       this.audio.setReverbSpace(inCave ? 'cave' : 'outdoor');
     }
+  }
+
+  /** The sea is one sheet with no holes cut for land, and the deepest cave
+   *  floors bottom out at y=1 — under the +1.62m crest a calm swell reaches. So
+   *  in a deep gallery the ocean renders straight through the stone floor and
+   *  you stand in a lantern-lit cavern with surf around your ankles.
+   *
+   *  The sheet stands down exactly where that can happen: camera under a cave
+   *  roof AND on floor the sea could reach. Higher up the entrance ramp (where
+   *  a pirate CAN still see daylight and open water out of the mouth) the floor
+   *  is metres above any crest, so the sea keeps drawing and nothing pops. */
+  private updateOceanCaveSuppression(): void {
+    const cam = this.renderer.camera.position;
+    const island = this.state ? this.getNearestIsland(cam.x, cam.z) : null;
+    let suppress = false;
+    if (island && isInsideCaveInterior(island, cam.x, cam.y, cam.z)) {
+      const floorY = getCaveFloorY(island, cam.x, cam.z);
+      suppress = floorY !== null && floorY < Game.CAVE_SEA_REACH_Y;
+    }
+    this.ocean.setSuppressed(suppress);
   }
 
   /**

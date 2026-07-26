@@ -284,9 +284,7 @@ const insideX = cavePos.x - 3 * Math.sin(caveRotation);
 const insideZ = cavePos.z - 3 * Math.cos(caveRotation);
 const naturalAbove = getIslandSurfaceY(caveIsland, insideX, insideZ);
 const naturalRef = getIslandSurfaceY(noCaveIsland, insideX, insideZ);
-expect('Walking above a cave stands on the NATURAL hillside (no default carve)', naturalAbove === naturalRef, `above=${naturalAbove.toFixed(2)} ref=${naturalRef.toFixed(2)}`);
-const carvedY = getIslandSurfaceY(caveIsland, insideX, insideZ, { carveCaves: true });
-expect('Opt-in carveCaves hollows the tunnel down to the cave floor', Math.abs(carvedY - cave.floorY) < 0.05, `y=${carvedY.toFixed(2)} floorY=${cave.floorY.toFixed(2)}`);
+expect('Walking above a roofed tunnel stands on the NATURAL hillside (no default carve)', naturalAbove === naturalRef, `above=${naturalAbove.toFixed(2)} ref=${naturalRef.toFixed(2)}`);
 const floorInside = getCaveFloorY(caveIsland, insideX, insideZ);
 expect('getCaveFloorY returns the carved floor inside the tunnel', floorInside !== null && Math.abs(floorInside - cave.floorY) < 0.05, `floor=${floorInside}`);
 expect('getCaveFloorY returns null outside every cave', getCaveFloorY(caveIsland, cavePos.x + 60, cavePos.z + 60) === null);
@@ -294,6 +292,24 @@ const ceilInside = getCaveCeilingY(caveIsland, insideX, insideZ);
 expect('getCaveCeilingY returns the interior ceiling inside the tunnel', ceilInside === cave.ceilingY, `ceil=${ceilInside}`);
 expect('getCaveCeilingY returns null outside every cave', getCaveCeilingY(caveIsland, cavePos.x + 60, cavePos.z + 60) === null);
 expect('Cave ceiling sits height above floor', ceilInside !== null && Math.abs(ceilInside - cave.floorY - cave.height) < 1e-9);
+
+// ── The mouth trench is part of the shared GROUND, not a client decoration ──
+// A cave with a real surface mouth gashes the hillside open at its doorway, and
+// getIslandSurfaceY returns that cut ground to EVERYONE — the terrain mesh draws
+// it, the physics stands the pirate on it. When only the client cut it, every
+// mouth had an invisible 2-4m step: walking out popped you onto a rim that isn't
+// drawn, and shallow exits bricked against a gully wall that isn't there.
+const mouthIsland = makeIsland();
+mouthIsland.caves = [{ ...cave, hasMouth: true }];
+const doorwayY = getIslandSurfaceY(mouthIsland, cavePos.x, cavePos.z);
+expect('The mouth doorway is cut down to the cave floor', Math.abs(doorwayY - cave.floorY) < 0.05,
+  `y=${doorwayY.toFixed(2)} floorY=${cave.floorY.toFixed(2)}`);
+const deepRoofY = getIslandSurfaceY(mouthIsland, insideX, insideZ);
+expect('...and the cut stops at the doorway — past it the tunnel keeps a natural rock roof',
+  Math.abs(deepRoofY - naturalRef) < 1e-9, `y=${deepRoofY.toFixed(2)} natural=${naturalRef.toFixed(2)}`);
+const farFromMouthY = getIslandSurfaceY(mouthIsland, cavePos.x + 60, cavePos.z + 60);
+expect('...and the rest of the island is untouched by it',
+  farFromMouthY === getIslandSurfaceY(noCaveIsland, cavePos.x + 60, cavePos.z + 60));
 
 if (failures > 0) {
   console.error(`\n${failures} terrain contract check(s) failed`);
