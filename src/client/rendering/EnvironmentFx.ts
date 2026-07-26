@@ -145,6 +145,8 @@ export class EnvironmentFx {
   /** Per-frame FX closures for volcanic islands (ash drift, embers, smoke,
    *  caldera lava, erupting geyser plumes). Cleared with the island meshes. */
   volcanicFx: Array<(dt: number, worldTime: number, camera: THREE.Vector3) => void> = [];
+  /** Waterfall emitters per island (world space), replaced on every rebuild. */
+  private readonly waterfallSites = new Map<string, { x: number; y: number; z: number; scale: number }[]>();
   lightningFlash: THREE.PointLight | null = null;
   lightningTimer = 4 + Math.random() * 6;
   stormRainCanvas: HTMLCanvasElement | null = null;
@@ -649,6 +651,34 @@ export class EnvironmentFx {
     this.assignedCampfires.length = 0;
     for (const light of this.lanternLightPool) { light.visible = false; light.intensity = 0; }
     for (const light of this.campfireLightPool) { light.visible = false; light.intensity = 0; }
+  }
+
+  /** Island builder seam: hand over every fall this island grew (replaces the
+   *  island's previous set, so a rebuild never doubles them up). */
+  registerWaterfalls(islandId: string, sites: { x: number; y: number; z: number; scale: number }[]) {
+    if (sites.length === 0) this.waterfallSites.delete(islandId);
+    else this.waterfallSites.set(islandId, sites);
+  }
+
+  /** Feed the audio bed with the nearest fall. Cheap: a few dozen distance
+   *  checks over emitters that never move. */
+  updateWaterfallBed(cameraPos: THREE.Vector3) {
+    if (this.waterfallSites.size === 0) {
+      this.view.audio.setWaterfallBed(null);
+      return;
+    }
+    let bestD = Infinity;
+    let bestScale = 1;
+    for (const sites of this.waterfallSites.values()) {
+      for (const site of sites) {
+        const dx = site.x - cameraPos.x;
+        const dy = site.y - cameraPos.y;
+        const dz = site.z - cameraPos.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < bestD) { bestD = d; bestScale = site.scale; }
+      }
+    }
+    this.view.audio.setWaterfallBed(bestD <= 130 ? bestD : null, bestScale);
   }
 
   updateVolcanicFx(dt: number, worldTime: number) {

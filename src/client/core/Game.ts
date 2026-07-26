@@ -384,6 +384,7 @@ export class Game {
     npcMeshes: this.npcMeshes,
     magmaPulseUniform: this.magmaPulseUniform,
     pushVolcanicFx: (fx) => { this.envFx.volcanicFx.push(fx); },
+    registerWaterfalls: (islandId, sites) => { this.envFx.registerWaterfalls(islandId, sites); },
     setTavernDoor: (islandId, node) => {
       this.tavernDoors = this.tavernDoors.filter((entry) => entry.islandId !== islandId);
       this.tavernDoors.push({ islandId, node, open: false });
@@ -2242,6 +2243,7 @@ export class Game {
       : performance.now() / 1000;
     this.envFx.updateVolcanicFx(dt, worldTime);
     this.updateTavernDoors(dt);
+    this.envFx.updateWaterfallBed(this.renderer.camera.position);
     // Drive the palm/foliage sway: advance its clock and gust the wind strength.
     this.foliageTime.value = worldTime;
     const gust = 0.75 + 0.35 * Math.sin(worldTime * 0.27) + 0.15 * Math.sin(worldTime * 0.11);

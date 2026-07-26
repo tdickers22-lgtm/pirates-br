@@ -59,6 +59,9 @@ export type IslandBuilderCtx = {
   readonly npcMeshes: Map<string, NpcMeshRecord>;
   readonly magmaPulseUniform: { value: number };
   pushVolcanicFx(fx: (dt: number, worldTime: number, camera: THREE.Vector3) => void): void;
+  /** Every waterfall this island grew, in world space, for the audio bed.
+   *  Replaces the island's previous set (rebuild-safe). */
+  registerWaterfalls(islandId: string, sites: { x: number; y: number; z: number; scale: number }[]): void;
   /** Replaces any door already registered for this island (rebuild-safe). */
   setTavernDoor(islandId: string, node: THREE.Object3D): void;
   getSoftParticleTexture(): THREE.Texture;

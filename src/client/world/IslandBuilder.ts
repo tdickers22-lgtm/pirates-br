@@ -27,7 +27,8 @@ import { buildDock, buildDockClutter, buildTavern } from './island/DockBuilder.j
 import { applyFoliageSway, buildGroundCover, buildPropInstance, buildServerProps, buildStoryNpcMesh } from './island/PropScatterer.js';
 import { buildBeachDecor, buildCairns, buildInteriorDressing, buildPebbles, buildRockAndDriftDecor, buildTreesAndStrays, buildVinesAndStakes } from './island/DecorScatter.js';
 import { buildBridges, buildLookoutPost, buildPirateCamp, buildRopeLadder, buildRuin, buildSecondaryWreck, buildStoneIdols, buildTrails } from './island/Landmarks.js';
-import { buildCliffStrata, buildPeakMist, buildReefRing, buildRockSpires, buildTerraces, buildWaterfalls } from './island/TerrainFeatures.js';
+import { buildCliffStrata, buildPeakMist, buildReefRing, buildRockSpires, buildTerraces } from './island/TerrainFeatures.js';
+import { buildWaterfalls } from './island/WaterfallBuilder.js';
 import { buildVolcanicFx } from './island/VolcanicFx.js';
 import { buildProxyTerrainMesh, buildTerrainMesh } from './island/TerrainMeshBuilder.js';
 import { freezeStaticSubtree } from '../rendering/three-util.js';

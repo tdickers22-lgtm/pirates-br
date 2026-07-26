@@ -142,6 +142,8 @@ export class SoundEngine {
   private flooding: RichLoopVoice | null = null;
   // Per-burning-ship fire crackle loops (capped at 2; oldest is stolen)
   private readonly fires = new Map<string, LoopVoice>();
+  // Nearest-waterfall bed (single voice; the environment picks the fall)
+  private waterfallBed: RichLoopVoice | null = null;
 
   // ── Listener pose (drives stereo panning) ──────────────────────────
   private readonly listenerPos = new THREE.Vector3();
@@ -1767,6 +1769,38 @@ export class SoundEngine {
       try { f.source.stop(); } catch { /* ignore */ }
       try { f.lfo?.stop(); } catch { /* ignore */ }
     }, 800);
+  }
+
+  // ── Waterfall bed (single voice, follows the NEAREST fall) ───────
+  /**
+   * Distance-gated white water. One voice for the whole world: the environment
+   * pass picks the closest fall each frame and hands its distance here, which
+   * is all a broadband hiss needs — a per-fall voice would spend eight
+   * oscillators on a sound you can only hear one of at a time.
+   *
+   * @param distance metres to the nearest fall, or null when none is in range.
+   * @param scale 0..1 for how big that fall is (drives cutoff + level).
+   */
+  setWaterfallBed(distance: number | null, scale = 1): void {
+    const ctx = this.ctx;
+    if (distance === null || distance > 130) {
+      if (this.waterfallBed && ctx) this.ramp(this.waterfallBed.gain.gain, 0, 0.7);
+      return;
+    }
+    this.unlock();
+    const bed = this.busBed;
+    if (!this.ctx || !bed || !this.noise) return;
+    if (!this.waterfallBed) {
+      const v = this.makeNoiseLoop('lowpass', 1500, 0.5, bed);
+      // Slow surge, so the hiss breathes instead of sitting flat under the mix.
+      const surge = this.addGainTremolo(v.gain, 0.13, 0.02);
+      this.waterfallBed = { ...v, lfo: surge.lfo, lfoGain: surge.lfoGain };
+    }
+    const g = 1 / (1 + distance / 26);
+    const size = THREE.MathUtils.clamp(scale, 0.3, 1.6);
+    this.ramp(this.waterfallBed.gain.gain, 0.115 * g * size, 0.5);
+    this.ramp(this.waterfallBed.filter.frequency, 700 + 1500 * g, 0.5);
+    if (this.waterfallBed.lfoGain) this.ramp(this.waterfallBed.lfoGain.gain, 0.03 * g, 0.5);
   }
 
   // ── Interior flooding slosh (single instance) ────────────────────
