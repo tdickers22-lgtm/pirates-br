@@ -82,14 +82,29 @@ export class NetworkClient {
    *
    * It also measures round-trip latency: the server echoes the ping payload
    * back as `pong`, which is where `latencyMs` comes from.
+   *
+   * THIS TIMER IS THE FALLBACK PATH ONLY. When the socket lives in the worker
+   * (see socket.worker.ts) the worker owns the beat, because a main thread pinned
+   * by a world build cannot fire a timer OR drain the socket — and a socket the
+   * renderer stops draining stops answering the server's ws ping too. This timer
+   * runs only when the worker could not be created at all.
    */
   private static readonly HEARTBEAT_INTERVAL_MS = 3_000;
   private heartbeatTimer: number | null = null;
   private lastPingSentAt = 0;
   private latencyMs: number | null = null;
 
+  /**
+   * The socket, off the main thread. Null only if Worker construction failed, in
+   * which case everything below falls back to a main-thread `this.ws` that
+   * behaves exactly as it did before the worker existed.
+   */
+  private worker: Worker | null = null;
+  /** Open/closed as reported by whichever transport is in play. */
+  private transportOpen = false;
+
   isConnected(): boolean {
-    return this.connected && this.ws?.readyState === WebSocket.OPEN;
+    return this.connected && this.transportOpen;
   }
 
   /** True once the join handshake for the current match has completed. */
@@ -98,39 +113,111 @@ export class NetworkClient {
   }
 
   async connect(url: string): Promise<void> {
+    const worker = this.spawnWorker();
+    return worker ? this.connectViaWorker(worker, url) : this.connectDirect(url);
+  }
+
+  /** Build the socket worker, or null on any environment that refuses one. */
+  private spawnWorker(): Worker | null {
+    try {
+      return new Worker(new URL('./socket.worker.ts', import.meta.url), {
+        type: 'module',
+        name: 'pirates-socket',
+      });
+    } catch (err) {
+      // Not fatal — the direct path below is the pre-worker behaviour, which
+      // works fine for anyone whose main thread never stalls past the budget.
+      console.warn('[Net] socket worker unavailable, using main-thread socket:', err);
+      return null;
+    }
+  }
+
+  private connectViaWorker(worker: Worker, url: string): Promise<void> {
+    this.worker = worker;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      worker.onmessage = (e: MessageEvent<
+        | { k: 'open' }
+        | { k: 'msg'; data: string; n: number }
+        | { k: 'closed'; code: number; reason: string }
+        | { k: 'failed' }
+      >) => {
+        const m = e.data;
+        switch (m.k) {
+          case 'open':
+            this.connected = true;
+            this.transportOpen = true;
+            // No startHeartbeat() here: the worker is already beating, and a
+            // second beat from a thread that can stall is worse than none.
+            if (!settled) { settled = true; resolve(); }
+            break;
+          case 'msg':
+            // ACK FIRST, unconditionally. This is the worker's only signal that
+            // we are keeping up; skipping it on a throwing frame would wedge its
+            // coalescing slots shut for the rest of the session.
+            worker.postMessage({ k: 'ack', n: m.n });
+            this.ingest(m.data);
+            break;
+          case 'closed':
+            this.noteClosed(m.code, m.reason);
+            if (!settled) { settled = true; reject(new Error(`socket closed (${m.code})`)); }
+            break;
+          case 'failed':
+            this.transportOpen = false;
+            if (!settled) { settled = true; reject(new Error('socket failed to open')); }
+            break;
+        }
+      };
+      worker.onerror = (err) => {
+        console.error('[Net] socket worker error:', err.message);
+        if (!settled) { settled = true; reject(new Error(err.message || 'socket worker error')); }
+      };
+      worker.postMessage({ k: 'open', url });
+    });
+  }
+
+  /** Pre-worker path, kept byte-for-byte in behaviour for environments without workers. */
+  private connectDirect(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(url);
       this.ws.onopen = () => {
         this.connected = true;
+        this.transportOpen = true;
         this.startHeartbeat();
         resolve();
       };
       this.ws.onerror = (e) => reject(e);
-      this.ws.onmessage = (e) => {
-        try {
-          const msg: NetMsg = JSON.parse(e.data);
-          this.handleMsg(msg);
-        } catch (err) {
-          // Swallowing silently turned any join-time build throw into an
-          // undiagnosable stuck loading screen — always leave a trace.
-          console.error('[Net] error handling server message:', err);
-        }
-      };
-      this.ws.onclose = (e) => {
-        this.connected = false;
-        this.joined = false;
-        this.stopHeartbeat();
-        this.latencyMs = null;
-        this.pendingSnapshot = null;
-        this.snapshotFlushQueued = false;
-        this.onConnectionClosed?.();
-        // Always print the close code: a bare "Disconnected" hides WHY (1002 =
-        // the socket's byte stream was rejected as a protocol violation, 1006 =
-        // the server vanished, 1000 = a clean goodbye) and turns a five-second
-        // diagnosis into an afternoon of guessing.
-        console.warn(`[Net] Disconnected (code ${e.code}${e.reason ? `: ${e.reason}` : ''})`);
-      };
+      this.ws.onmessage = (e) => this.ingest(e.data as string);
+      this.ws.onclose = (e) => this.noteClosed(e.code, e.reason);
     });
+  }
+
+  /** Parse + route one server frame. Identical for both transports. */
+  private ingest(raw: string): void {
+    try {
+      const msg: NetMsg = JSON.parse(raw);
+      this.handleMsg(msg);
+    } catch (err) {
+      // Swallowing silently turned any join-time build throw into an
+      // undiagnosable stuck loading screen — always leave a trace.
+      console.error('[Net] error handling server message:', err);
+    }
+  }
+
+  private noteClosed(code: number, reason: string): void {
+    this.connected = false;
+    this.transportOpen = false;
+    this.joined = false;
+    this.stopHeartbeat();
+    this.latencyMs = null;
+    this.pendingSnapshot = null;
+    this.snapshotFlushQueued = false;
+    this.onConnectionClosed?.();
+    // Always print the close code: a bare "Disconnected" hides WHY (1002 =
+    // the socket's byte stream was rejected as a protocol violation, 1006 =
+    // the server vanished, 1000 = a clean goodbye) and turns a five-second
+    // diagnosis into an afternoon of guessing.
+    console.warn(`[Net] Disconnected (code ${code}${reason ? `: ${reason}` : ''})`);
   }
 
   private handleMsg(msg: NetMsg) {
@@ -316,7 +403,9 @@ export class NetworkClient {
   private send(msg: NetMsg): boolean {
     if (!this.isConnected()) return false;
     try {
-      this.ws.send(JSON.stringify(msg));
+      const data = JSON.stringify(msg);
+      if (this.worker) this.worker.postMessage({ k: 'send', data });
+      else this.ws.send(data);
       return true;
     } catch {
       return false;
@@ -327,9 +416,20 @@ export class NetworkClient {
     // Stop the timer even if there is no socket to close — connect() can reject
     // before ever assigning one, and a stray interval would outlive the client.
     this.stopHeartbeat();
-    if (!this.ws) return;
     this.connected = false;
+    this.transportOpen = false;
     this.clearMatchSession();
+    if (this.worker) {
+      // Ask for a clean close, THEN terminate: a bare terminate() drops the
+      // socket without a close frame and the server has to wait out the silence
+      // budget before it notices the player left.
+      try { this.worker.postMessage({ k: 'close' }); } catch {}
+      const worker = this.worker;
+      this.worker = null;
+      window.setTimeout(() => worker.terminate(), 250);
+      return;
+    }
+    if (!this.ws) return;
     this.ws.close();
   }
 }

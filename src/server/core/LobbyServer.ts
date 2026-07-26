@@ -57,9 +57,19 @@ const HEARTBEAT_TIMEOUT_MS = 15_000;
  *  slow machine an order of magnitude over the measured freeze without letting a
  *  joiner that really did die stand in the match for more than half a minute.
  *  A window, not a latch cleared by the first frame the client manages to send:
- *  the freezes come in bursts with live stretches between them. */
-const MATCH_BUILD_WINDOW_MS = 45_000;
-const MATCH_BUILD_GRACE_MS = 30_000;
+ *  the freezes come in bursts with live stretches between them.
+ *
+ *  The client now owns its socket in a Web Worker (src/client/network/
+ *  socket.worker.ts), so a pinned main thread no longer goes silent at all — this
+ *  grace is the belt to that brace, for an old cached bundle or an environment
+ *  that refused the worker. Measured worst joins: 5.9s prod, 10.4s dev, 63.6s dev
+ *  under heavy contention. The window and the grace are sized past that last
+ *  number on purpose: overshooting only lets a joiner that really did die stand
+ *  in the match a little longer before the sweep trims it, while undershooting
+ *  costs a live player their whole session with no way back but a reload. The
+ *  asymmetry is total, so err long. */
+const MATCH_BUILD_WINDOW_MS = 90_000;
+const MATCH_BUILD_GRACE_MS = 75_000;
 
 const PROJECT_ROOT = join(fileURLToPath(new URL('../../..', import.meta.url)));
 const CLIENT_DIST_ROOT = join(PROJECT_ROOT, 'dist/client');
@@ -825,11 +835,22 @@ export class LobbyServer {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-cache',
       });
+      // simLag / droppedTicks are the whole point of this endpoint under load:
+      // the sim degrades by silently dropping ticks, so a host that has quietly
+      // fallen into slow motion is otherwise indistinguishable from a healthy
+      // one from out here. worstSimLagSec is the number to alert on.
+      const sims = Array.from(this.matches.values()).map((m) => ({
+        simLagSec: Number(m.simLagSeconds().toFixed(2)),
+        droppedTicks: m.droppedTickCount(),
+      }));
       res.end(JSON.stringify({
         ok: true,
         clients: this.clients.size,
         matches: this.matches.size,
         queue: this.queue.length,
+        worstSimLagSec: sims.reduce((worst, s) => Math.max(worst, s.simLagSec), 0),
+        droppedTicks: sims.reduce((sum, s) => sum + s.droppedTicks, 0),
+        sims,
       }));
       return;
     }
