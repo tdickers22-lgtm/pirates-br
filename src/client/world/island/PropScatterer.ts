@@ -10,6 +10,7 @@ import type { Island, IslandNpc, IslandProp, IslandPropType } from '../../../sha
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import { BIOME_PALETTES, getPropGroundY } from '../../../shared/props.js';
 import { makeFernFrondTexture, makeGrassBladeTexture } from '../../rendering/factories/TextureFactory.js';
+import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { makePlayerMesh } from '../../rendering/factories/PlayerMeshFactory.js';
 import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.js';
 import type { TerrainBuild } from './TerrainMeshBuilder.js';
@@ -521,6 +522,7 @@ export function buildStoryNpcMesh(npc: IslandNpc, host: IslandBuilderCtx): NpcMe
   light.position.set(0.36, 1.45, -0.18);
   light.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
   root.userData.decorLight = host.renderer.getQuality() === 'low' ? null : light;
+  registerBudgetLight(light);
   root.add(light);
   const lantern = new THREE.Mesh(
     new THREE.BoxGeometry(0.18, 0.26, 0.18),

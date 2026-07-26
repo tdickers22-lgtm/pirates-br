@@ -40,6 +40,7 @@ import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelC
 import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
 import { EnvironmentFx, type EnvironmentFxView } from '../rendering/EnvironmentFx.js';
 import { ZERO_SCALE_MAT4 } from '../rendering/three-util.js';
+import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { makeStormTexture } from '../rendering/factories/TextureFactory.js';
@@ -672,6 +673,7 @@ export class Game {
     // Held-lamp light rides with the view (off until the lantern is equipped),
     // offset to the held hand so it washes the world around the player.
     this.heldLampLight.position.set(0.35, -0.1, -0.5);
+    registerBudgetLight(this.heldLampLight);
     this.renderer.camera.add(this.heldLampLight);
     this.ocean.init(this.renderer.scene, this.renderer.getQuality());
     this.setLoading(56, 'Stirring the deep...');
@@ -3593,6 +3595,7 @@ export class Game {
 
         const fuse = new THREE.PointLight(mega ? 0xff3226 : 0xff7a26, mega ? 2.2 : 1.2, mega ? 6.5 : 3.5);
         fuse.position.set(0.04, 0.48, 0);
+        registerBudgetLight(fuse);
         root.add(fuse);
         root.scale.setScalar(mega ? 1.55 : 1);
 

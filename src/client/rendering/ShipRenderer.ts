@@ -5,6 +5,7 @@ import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
 import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
 import { getAmmoCrateLocal, getCannonDeckLocalPosition, getShipGangwayPlan } from '../../shared/interactions.js';
 import type { RenderQuality } from './Renderer.js';
+import { registerBudgetLight } from './LightBudget.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
  *  intensity, or the replicated storm ring so the renderer can evaluate the
@@ -1367,6 +1368,7 @@ function makeShipInterior(
   const holdLight = new THREE.PointLight(0xFFB060, 1.4, Math.max(W, L) * 1.6, 1.4);
   holdLight.position.set(0, H * 0.55, 0);
   holdLight.visible = false;
+  registerBudgetLight(holdLight);
   g.add(holdLight);
 
   // Brighten the hold floor so it doesn't look like a flat brown tarp from above.
@@ -3399,6 +3401,7 @@ export class ShipRenderer {
     const nightLight = new THREE.PointLight(0xffb060, 0, 9, 1.6);
     nightLight.position.copy(sternLanternPos);
     nightLight.visible = false;
+    registerBudgetLight(nightLight);
     group.add(nightLight);
     const lanterns: THREE.PointLight[] = [nightLight];
 

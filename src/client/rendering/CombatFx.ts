@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
 import { getSharedSoundEngine, type GunshotKind, type SoundEngine } from '../audio/SoundEngine.js';
+import { registerBudgetLight } from './LightBudget.js';
 
 // Fallback sea surface height; Game feeds the live Gerstner surface via
 // setWaterSurfaceY each frame so splash-vs-hull classification tracks swells
@@ -787,6 +788,7 @@ class LightPool {
   constructor(group: THREE.Group, capacity: number) {
     for (let index = 0; index < capacity; index++) {
       const light = new THREE.PointLight(0xffffff, 0, 10);
+      registerBudgetLight(light);
       group.add(light);
       this.slots.push({ light, age: 0, life: 0, peak: 0 });
     }

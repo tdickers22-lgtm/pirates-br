@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import type { Island } from '../../../shared/types/index.js';
 import { applyCaveTubeColors, cullCaveTubeAgainstNeighbors, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
+import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import type { CaveMouthCarve, IslandBuildCtx } from './context.js';
 
 /** Build the island's cave-mouth carve function. The terrain mesh lowers its
@@ -185,6 +186,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
         const mouthGlow = new THREE.PointLight(0xffa24d, 4.4, cR * 5.5, 1.0);
         mouthGlow.position.set(0, floorLocalY + ch * 0.42, -1.4);
         mouthGlow.visible = false;
+        registerBudgetLight(mouthGlow);
         exterior.add(mouthGlow);
         (group.userData.caveMouthGlows ??= []).push({ light: mouthGlow, x: cave.position.x, z: cave.position.z });
         // Ember glow disc just inside the throat — an always-on additive
@@ -290,6 +292,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
         caveTorchBudget--;
         const torchLight = new THREE.PointLight(0xffb060, 4.4, cLen + cR * 3.0, 1.4);
         torchLight.position.copy(flame.position);
+        registerBudgetLight(torchLight);
         caveGroup.add(torchLight);
       }
       // Sparse glowing crystals deeper in — cool blue emissive clusters with a
@@ -312,6 +315,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
             caveGlowBudget--;
             const glow = new THREE.PointLight(0x5fbfff, 1.1, 6.5, 1.8);
             glow.position.set(cx, cy, cz);
+            registerBudgetLight(glow);
             caveGroup.add(glow);
           }
         }

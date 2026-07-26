@@ -1,6 +1,7 @@
 /** Held-weapon and pocket-item meshes plus the shared viewmodel material tweak. */
 import * as THREE from 'three';
 import type { WeaponInstance } from '../../../shared/types/index.js';
+import { registerBudgetLight } from '../LightBudget.js';
 
 export function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
   const group = new THREE.Group();
@@ -402,6 +403,7 @@ export function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
 
     const sparkLight = new THREE.PointLight(0xff8a2a, 0.75, 0.7);
     sparkLight.position.copy(spark.position);
+    registerBudgetLight(sparkLight);
     group.add(sparkLight);
 
     for (const side of [-1, 1]) {
@@ -523,6 +525,7 @@ export function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
 
     const glow = new THREE.PointLight(0xffd278, 0.55, 1.4, 1.5);
     glow.position.set(0, 0.06, 0.2);
+    registerBudgetLight(glow);
     group.add(glow);
 
     // Forearms gripping the chest from below — sells the carry pose in first-person.

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PostFx } from './PostFx.js';
+import { initLightBudget, updateLightBudget } from './LightBudget.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 
 export type RenderQuality = 'low' | 'balanced' | 'high';
@@ -283,6 +284,7 @@ export class Renderer {
     this.scene = new THREE.Scene();
     this.scene.background = null;
     this.scene.fog = new THREE.FogExp2(this.fogDayColor.getHex(), 0.0015);
+    initLightBudget(this.scene, this.quality);
 
     this.camera = new THREE.PerspectiveCamera(
       70, window.innerWidth / window.innerHeight, 0.05, 3000,
@@ -555,6 +557,10 @@ export class Renderer {
   }
 
   render() {
+    // Hand this frame's few brightest torches/lanterns to the fixed light pool
+    // BEFORE anything is drawn (see LightBudget: the pool size never changes,
+    // so no material ever re-links because a torch came into view).
+    updateLightBudget(this.camera.position);
     // Sky dome follows camera so it always fills the background
     this.skyMesh.position.copy(this.camera.position);
     const sunPos = this.camera.position.clone().addScaledVector(this.sunDir, 2050);

@@ -12,6 +12,7 @@ import type { InputManager } from '../input/InputManager.js';
 import type { MapRenderer } from '../ui/MapRenderer.js';
 import { applyViewmodelMaterialSettings, makeHeldWeaponMesh, makePocketPreviewMesh, type PocketPreviewKind } from './factories/WeaponMeshFactory.js';
 import { makeViewHand } from './factories/PlayerMeshFactory.js';
+import { registerBudgetLight } from './LightBudget.js';
 import { CUTLASS_VIEW_CHARGE_TIME } from './PlayerAnimator.js';
 import type { CombatFx } from './CombatFx.js';
 import type { OceanRenderer } from './OceanRenderer.js';
@@ -143,6 +144,7 @@ export class ViewmodelController {
     this.muzzleFlash.visible = false;
     this.localViewWeaponRoot.add(this.muzzleFlash);
     this.muzzleGlow = new THREE.PointLight(0xffb347, 0, 6, 2);
+    registerBudgetLight(this.muzzleGlow);
     this.localViewWeaponRoot.add(this.muzzleGlow);
     const smokeTex = tex('rgba(180,180,180,0.6)', 'rgba(120,120,120,0.25)');
     for (let i = 0; i < 4; i++) {

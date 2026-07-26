@@ -9,6 +9,7 @@
  */
 import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
+import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { makeUpgradeSignTexture } from '../../rendering/factories/TextureFactory.js';
 import { makeUpgradeStationProp } from '../../rendering/factories/MiscMeshFactory.js';
 import type { IslandBuildCtx } from './context.js';
@@ -57,6 +58,7 @@ export function buildChestMeshes(ctx: IslandBuildCtx) {
     glow.position.set(0, 1.2, 0);
     glow.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
     chestGroup.userData.decorLight = lowDetail ? null : glow;
+    registerBudgetLight(glow);
     chestGroup.add(glow);
 
     let mound: THREE.Mesh | null = null;
@@ -194,6 +196,7 @@ export function buildUpgradeStationMeshes(ctx: IslandBuildCtx) {
     light.position.set(0, 1.06, 0);
     light.visible = false; // gated to ~55m by updateEnvironmentLod (light budget)
     stationGroup.userData.decorLight = lowDetail ? null : light;
+    registerBudgetLight(light);
     stationGroup.add(light);
 
     const stationProp = makeUpgradeStationProp(station.type, meta.hex);

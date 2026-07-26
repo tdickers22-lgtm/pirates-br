@@ -24,6 +24,7 @@ import type { InputManager } from '../input/InputManager.js';
 import type { CombatFx } from './CombatFx.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
+import { registerBudgetLight } from './LightBudget.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
 import { ZERO_SCALE_MAT4 } from './three-util.js';
 
@@ -459,12 +460,14 @@ export class EnvironmentFx {
     for (let i = 0; i < 6; i++) {
       const light = new THREE.PointLight(0xffb257, 0, 24, 1.6);
       light.visible = false;
+      registerBudgetLight(light);
       this.lanternRoot.add(light);
       this.lanternLightPool.push(light);
     }
     for (let i = 0; i < 4; i++) {
       const light = new THREE.PointLight(0xff7a30, 0, 21, 1.5);
       light.visible = false;
+      registerBudgetLight(light);
       this.lanternRoot.add(light);
       this.campfireLightPool.push(light);
     }
@@ -1710,6 +1713,7 @@ export class EnvironmentFx {
       // Pooled flash light (allocating one per strike forced shader churn).
       if (!this.lightningLightPool) {
         this.lightningLightPool = new THREE.PointLight(0x9fc4e6, 0, 300);
+        registerBudgetLight(this.lightningLightPool);
         this.view.renderer.scene.add(this.lightningLightPool);
       }
       const flash = this.lightningLightPool;
