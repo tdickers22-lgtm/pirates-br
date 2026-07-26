@@ -58,6 +58,18 @@ let assigned: Emitter[] = [];
 
 const scratchWorld = new THREE.Vector3();
 
+/** World position straight off the cached matrix.
+ *
+ *  Deliberately NOT `getWorldPosition`, which walks and re-multiplies the whole
+ *  ancestor chain per call — with a few hundred registered emitters that is the
+ *  most expensive thing in the frame, to place lights that moved by inches. The
+ *  budget runs at the top of render(), so these matrices are one frame old; a
+ *  torch a frame behind its parent's transform is not a thing anyone can see. */
+function worldPositionOf(object: THREE.Object3D, out: THREE.Vector3): THREE.Vector3 {
+  const e = object.matrixWorld.elements;
+  return out.set(e[12], e[13], e[14]);
+}
+
 /** Allocate the pool. Safe to call once per renderer; later calls re-tier it. */
 export function initLightBudget(target: THREE.Scene, tier: LightBudgetTier): void {
   if (scene && scene !== target) clearLightBudget();
@@ -157,7 +169,7 @@ export function updateLightBudget(cameraPos: THREE.Vector3): void {
     }
     if (!branchVisible || light.intensity <= 0.001) continue;
 
-    light.getWorldPosition(scratchWorld);
+    worldPositionOf(light, scratchWorld);
     const distance = scratchWorld.distanceTo(cameraPos);
     if (distance > MAX_CONSIDER_DISTANCE) continue;
     const range = light.distance > 0 ? light.distance : 60;
@@ -190,7 +202,7 @@ export function updateLightBudget(cameraPos: THREE.Vector3): void {
       continue;
     }
     const light = emitter.light;
-    light.getWorldPosition(scratchWorld);
+    worldPositionOf(light, scratchWorld);
     slot.position.copy(scratchWorld);
     slot.color.copy(light.color);
     slot.intensity = light.intensity;
