@@ -325,6 +325,10 @@ export class Match {
   private skeletonDefeatedAt: Map<string, number> = new Map();
   private cutlassChargeByPlayer = new Map<string, number>();
   private cutlassFireHeldByPlayer = new Map<string, boolean>();
+  /** Sim time each pirate last had a genuine reason to hold their guard up. A
+   *  raised sword rides out input jitter for PLAYER.GUARD_HOLD_GRACE off this
+   *  (see updateBlockingState) instead of blinking off for a tick. */
+  private guardHeldAt = new Map<string, number>();
   private skeletonNameIndex = 1;
   private shipLastDamagedByPlayer = new Map<string, { attackerId: string; at: number }>();
   /** Per-player: previous frame had jump key held — used for reliable cannon self-launch edge detection. */
@@ -887,6 +891,8 @@ export class Match {
       && !removedShipIds.has(session.targetShipId)
     ));
     this.lastJumpHeldByPlayer.delete(playerId);
+    this.boardLatchUntil.delete(playerId);
+    this.deckAutoBoardTimer.delete(playerId);
     this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
     this.rebuildEntityIndexes();
 
@@ -2151,17 +2157,47 @@ export class Match {
     }
   }
 
+  /**
+   * A held guard STAYS held.
+   *
+   * This used to be one flat conjunction re-evaluated every tick, which made the
+   * parry as fragile as the noisiest term in it. Measured against the real Match:
+   * a single input packet arriving without the aim bit — one coalesced or dropped
+   * frame under snapshot load, or a pointer-lock blip clearing the button set —
+   * lowered the guard for a whole 62.5 Hz tick while RMB was never released, and
+   * a wave flipping a shoreline walker to 'swimming' for one tick did the same
+   * with no cause the player could possibly see. Either way a skeleton swing
+   * landed in full through a raised sword.
+   *
+   * So the terms are split by intent. Deliberate ends to a guard — you swung
+   * (fire, or the swing-recovery timer), you sheathed the cutlass, your hands
+   * filled with a chest, you took a station — drop it the same tick they always
+   * did. Transient ones only drop it once the stance has gone unfed for
+   * PLAYER.GUARD_HOLD_GRACE, so input jitter can't open you up.
+   */
   private updateBlockingState(player: Player, input: PlayerInput) {
     const activeWeapon = player.weapons[player.activeSlot];
-    player.blocking = !!activeWeapon
-      && activeWeapon.weaponId === 'cutlass'
-      && !activeWeapon.reloading
-      && input.aim
-      && !input.fire
-      && !player.carryingChestId
-      && !player.atCannon
-      && !player.atHelm
-      && player.state !== 'swimming';
+    const guardDropped = !activeWeapon
+      || activeWeapon.weaponId !== 'cutlass'
+      || activeWeapon.reloading
+      || !!input.fire
+      || !!player.carryingChestId
+      || player.atCannon
+      || player.atHelm;
+    if (guardDropped) {
+      player.blocking = false;
+      this.guardHeldAt.delete(player.id);
+      return;
+    }
+    if (input.aim && player.state !== 'swimming') {
+      this.guardHeldAt.set(player.id, this.t);
+      player.blocking = true;
+      return;
+    }
+    const heldAt = this.guardHeldAt.get(player.id);
+    if (player.blocking && heldAt !== undefined && this.t - heldAt <= PLAYER.GUARD_HOLD_GRACE) return;
+    player.blocking = false;
+    this.guardHeldAt.delete(player.id);
   }
 
   private getCutlassBlockScale(target: Player, attacker: Player, guardBreak = false): number {
