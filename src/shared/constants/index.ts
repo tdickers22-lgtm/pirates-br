@@ -38,6 +38,15 @@ export const PLAYER = {
   RESPAWN_HEALTH: 50,
   RESPAWN_PROTECTION_TIME: 3.5,
   SHIP_EXIT_GRACE_TIME: 0.6,
+  /** A raised cutlass guard is a HELD stance, so it survives this long without a
+   *  fresh reason to hold it. Measured: one input packet arriving without the aim
+   *  bit (a coalesced/dropped frame under snapshot load, or a pointer-lock blip
+   *  clearing the button set) dropped the guard for a whole 62.5 Hz tick — long
+   *  enough for a skeleton swing to land in full while RMB was never released —
+   *  and a wave flipping a shoreline walker to 'swimming' for one tick did the
+   *  same with no visible cause at all. Deliberate ends to a guard (swinging,
+   *  sheathing, hoisting a chest, taking a station) still drop it instantly. */
+  GUARD_HOLD_GRACE: 0.25,
   BANANA_HEAL: 25,
   KILL_GOLD_REWARD: 275,
   /** Bounty for foundering an enemy ship — the crew is not eliminated by the
@@ -163,6 +172,25 @@ export const SHIP = {
   /** Grounding tests the keel plus this safety bite, so a scrape registers just
    *  before the visible keel would clip the seabed. */
   GROUND_KEEL_SAFETY: 0.25,
+  /** Impact speed (m/s, measured along the escape normal) below which a scrape
+   *  is only a bump: pushback and a yaw kick, no stove planking. */
+  GROUND_HOLE_MIN_IMPACT: 2.0,
+  /** Seconds of no keel contact before the next scrape counts as a NEW grounding
+   *  EVENT. Grounding is resolved every tick while a hull sits on a bar, so
+   *  without an event ledger one beaching machine-guns 60 breaches a second. */
+  GROUND_EVENT_RESET_SEC: 5,
+  /** Minimum seconds between breaches WITHIN one grounding event — the hull
+   *  tears plank by plank as she grinds, not all at once. */
+  GROUND_HOLE_INTERVAL: 1.1,
+  /** Hard ceiling on fresh breaches ONE grounding event may open, exactly the
+   *  reasoning behind KEG_MAX_HOLES_PER_BLAST: a single scrape used to saturate
+   *  the 8-hole cap in one tick, which is not damage, it is a scuttling with no
+   *  counterplay. A gentle nudge costs GROUND_MIN, full sail into a reef costs
+   *  GROUND_MAX, and everything between is lerped by impact speed. */
+  GROUND_MAX_HOLES_PER_EVENT_MIN: 2,
+  GROUND_MAX_HOLES_PER_EVENT_MAX: 4,
+  /** Impact speed at which the per-event cap reaches its maximum. */
+  GROUND_FULL_IMPACT_SPEED: 6,
   ANCHOR_BRAKE: 4.8,
   ANCHOR_RAISE_TIME: 3.2,
   FIRE_DURATION: 18,
@@ -615,6 +643,23 @@ export const BOT_ENGAGE_SHRINK_MULT = 1.2;
 export const BOT_MAX_HUNTERS_BY_PHASE = [2, 3, 4, 5, 6, 8, 10];
 /** During early peace a bot only answers ships that shot at it inside this range. */
 export const BOT_DEFEND_RANGE = 260;
+
+// ── Environmental peace (the lobby must not empty itself) ─────
+/** Nobody's hull is torn open by the WORLD — storm seas, keel scrapes, reef
+ *  bites — while she lies tied up in her own berth during these opening storm
+ *  phases. Measured before this rail: a never-sailed anchored sloop carried 2
+ *  breaches by t=82 s and 3 by t=100 s of a zero-kill lobby, and one or two bot
+ *  crews foundered offscreen inside the first 90 s of every match. A berth is
+ *  shelter; the sea starts collecting once the ring means something. */
+export const BERTH_ENV_SAFE_MAX_PHASE = 1;
+/** How close to a dock's berth a hull must lie (metres, planar) to count as
+ *  moored there. Matches the berth-occupancy radius the join planner uses. */
+export const BERTH_ENV_SAFE_RADIUS = 42;
+/** Bot crews take NO grounding breaches before the early-peace window lifts —
+ *  they still bounce off, lose way and get shoved back toward deep water, they
+ *  just don't drown for it. A bot helm running a shoal at t=40 s is a pathing
+ *  miss the player never sees, and it was quietly deleting 10% of the lobby. */
+export const BOT_GROUNDING_FORGIVENESS_SECONDS = BOT_EARLY_PEACE_SECONDS;
 
 // ── Bot seamanship ───────────────────────────────────────────
 /** How far ahead a bot helm probes for land / sea rocks along its heading.

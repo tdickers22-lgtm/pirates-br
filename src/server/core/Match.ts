@@ -2194,8 +2194,15 @@ export class Match {
       player.blocking = true;
       return;
     }
+    // Deliberately NOT gated on player.blocking: an on-foot pirate runs through
+    // clearStationFlags (which zeroes the flag) every tick before this method is
+    // reached, so the timestamp — set only while the stance was genuinely fed,
+    // wiped by every deliberate drop above — is the only honest memory of it.
     const heldAt = this.guardHeldAt.get(player.id);
-    if (player.blocking && heldAt !== undefined && this.t - heldAt <= PLAYER.GUARD_HOLD_GRACE) return;
+    if (heldAt !== undefined && this.t - heldAt <= PLAYER.GUARD_HOLD_GRACE) {
+      player.blocking = true;
+      return;
+    }
     player.blocking = false;
     this.guardHeldAt.delete(player.id);
   }

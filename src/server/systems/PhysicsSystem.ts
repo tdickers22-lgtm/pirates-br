@@ -1,5 +1,5 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
-import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER } from '../../shared/constants/index.js';
+import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS } from '../../shared/constants/index.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles } from '../../shared/interactions.js';
 import {
@@ -343,6 +343,24 @@ export class PhysicsSystem {
   /** Seconds of remaining geyser-launch immunity per player, so one eruption
    *  launches a pirate once instead of trampolining them to death. */
   private playerGeyserCooldown = new Map<string, number>();
+  /** Per-ship grounding-EVENT ledger. Grounding is re-resolved every tick while
+   *  a keel sits on a bar, so without this one beaching opened a breach 60×
+   *  a second and saturated the 8-hole cap instantly — a scuttling, not damage
+   *  (the same reasoning that capped a keg at KEG_MAX_HOLES_PER_BLAST). One
+   *  event = one continuous contact; it expires after GROUND_EVENT_RESET_SEC of
+   *  clear water. */
+  private groundEvents = new Map<string, {
+    lastContactAt: number;
+    lastHoleAt: number;
+    holes: number;
+    cap: number;
+  }>();
+  /** Hulls tied up in their OWN berth during the opening storm phases: the world
+   *  (seabed, reef, tempest) may not tear them open. Rebuilt every updateShips. */
+  private berthShelteredShipIds = new Set<string>();
+  /** Bot crews inside the early-peace window: forgiven their GROUNDING breaches
+   *  only — the storm still collects on a bot that lingers outside the ring. */
+  private groundForgivenShipIds = new Set<string>();
 
   update(
     dt: number,
@@ -363,8 +381,119 @@ export class PhysicsSystem {
     return this.combatEvents.splice(0);
   }
 
+  /**
+   * Hulls the world is not allowed to stove in this tick.
+   *
+   * Two rails, both measured against a lobby that was emptying itself offscreen:
+   *  • BERTH SHELTER. A ship lying in a dock berth with her anchor down during
+   *    the opening storm phases is sheltered from EVERY environmental source.
+   *    She never sailed and nobody fought her; the opening ring is 950 m in a
+   *    1000 m world, so outer docks sat outside it and the tempest was stoving
+   *    breaches into hulls nobody was even aboard (2 leaks by t=82 s).
+   *  • BOT GROUNDING FORGIVENESS. A bot crew inside the early-peace window takes
+   *    no keel/reef breaches. Bot helms miss shoals; that is a pathing miss the
+   *    player never witnesses, and it was sinking 1-2 crews in the first 90 s of
+   *    every match. They still bounce, lose way and get shoved back to deep
+   *    water — and the storm still collects on them if they linger outside.
+   */
+  private rebuildEnvSafeShips(t: number, ships: Ship[], players: Player[], islands: Island[], storm: StormState | null) {
+    this.berthShelteredShipIds.clear();
+    this.groundForgivenShipIds.clear();
+    const berthShelter = !storm || storm.phase <= BERTH_ENV_SAFE_MAX_PHASE;
+    const botForgiveness = t < BOT_GROUNDING_FORGIVENESS_SECONDS;
+    if (!berthShelter && !botForgiveness) return;
+
+    // A human aboard forfeits the bot rail — a captured hull is a real crew's
+    // problem, and the peace window must never make a player's ship unsinkable.
+    const humanAboard = new Set<string>();
+    const botById = new Map<string, boolean>();
+    for (const player of players) {
+      botById.set(player.id, player.isBot);
+      if (!player.isBot && player.onShipId) humanAboard.add(player.onShipId);
+    }
+
+    for (const ship of ships) {
+      if (!ship.alive || ship.sinking) continue;
+      if (humanAboard.has(ship.id)) continue;
+      if (botForgiveness && botById.get(ship.ownerId) === true) {
+        this.groundForgivenShipIds.add(ship.id);
+      }
+      if (!berthShelter || !ship.anchored) continue;
+      for (const island of islands) {
+        const dock = island.dock;
+        if (!dock) continue;
+        const dx = ship.position.x - dock.berthPosition.x;
+        const dz = ship.position.z - dock.berthPosition.z;
+        if (dx * dx + dz * dz <= BERTH_ENV_SAFE_RADIUS * BERTH_ENV_SAFE_RADIUS) {
+          this.berthShelteredShipIds.add(ship.id);
+          break;
+        }
+      }
+    }
+  }
+
+  /** True while this hull lies sheltered in her own berth and the WORLD may not
+   *  open fresh breaches in her (see rebuildEnvSafeShips). StormSystem asks the
+   *  same question through this hook, so tempest, seabed and reef all agree. */
+  isEnvironmentallySheltered(shipId: string): boolean {
+    return this.berthShelteredShipIds.has(shipId);
+  }
+
+  /**
+   * How many breaches THIS scrape may open, given the grounding event this hull
+   * is currently inside. Call it on every keel/pier/reef contact, even a gentle
+   * one: sub-threshold bumps still refresh the event so a hull grinding along a
+   * bar can't reset her ledger between scrapes and bleed holes forever.
+   *
+   * The cap is speed-scaled exactly like a keg blast is count-capped — a nudge
+   * costs GROUND_MAX_HOLES_PER_EVENT_MIN planks, full sail into a reef costs
+   * GROUND_MAX_HOLES_PER_EVENT_MAX — and breaches inside one event are spaced
+   * GROUND_HOLE_INTERVAL apart so she tears plank by plank as she grinds.
+   */
+  private takeGroundingBreachBudget(
+    ship: Ship,
+    t: number,
+    impactSpeed: number,
+    wanted: number,
+    kind: 'ground' | 'rock' = 'ground',
+  ): number {
+    // Seabed and reef keep SEPARATE ledgers: bouncing off a rock two seconds
+    // after scraping a bar is a second accident, not the same one.
+    const key = `${ship.id}:${kind}`;
+    const existing = this.groundEvents.get(key);
+    const speedFrac = clamp(
+      (impactSpeed - SHIP.GROUND_HOLE_MIN_IMPACT)
+        / Math.max(0.001, SHIP.GROUND_FULL_IMPACT_SPEED - SHIP.GROUND_HOLE_MIN_IMPACT),
+      0, 1,
+    );
+    const cap = Math.round(
+      SHIP.GROUND_MAX_HOLES_PER_EVENT_MIN
+      + (SHIP.GROUND_MAX_HOLES_PER_EVENT_MAX - SHIP.GROUND_MAX_HOLES_PER_EVENT_MIN) * speedFrac,
+    );
+    let event = existing;
+    if (!event || t - event.lastContactAt > SHIP.GROUND_EVENT_RESET_SEC) {
+      event = { lastContactAt: t, lastHoleAt: -Infinity, holes: 0, cap };
+      this.groundEvents.set(key, event);
+    } else {
+      // A harder second bite inside the same event raises the ceiling — sailing
+      // ON at speed after a graze still costs you.
+      event.cap = Math.max(event.cap, cap);
+    }
+    event.lastContactAt = t;
+
+    if (impactSpeed <= SHIP.GROUND_HOLE_MIN_IMPACT) return 0;
+    if (this.berthShelteredShipIds.has(ship.id) || this.groundForgivenShipIds.has(ship.id)) return 0;
+    if (t - event.lastHoleAt < SHIP.GROUND_HOLE_INTERVAL) return 0;
+    const budget = Math.min(wanted, event.cap - event.holes);
+    if (budget <= 0) return 0;
+    event.holes += budget;
+    event.lastHoleAt = t;
+    return budget;
+  }
+
   private updateShips(dt: number, t: number, ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
     const wind = sampleWind(t);
+    this.rebuildEnvSafeShips(t, ships, players, islands, storm);
     const helmedShipIds = new Set<string>();
     const helmsmanByShip = new Map<string, string>();
     for (const player of players) {
@@ -395,6 +524,8 @@ export class PhysicsSystem {
         if (ship.sinkProgress >= 1) {
           ship.alive = false;
           this.shipDynamics.delete(ship.id);
+          this.groundEvents.delete(`${ship.id}:ground`);
+          this.groundEvents.delete(`${ship.id}:rock`);
         }
         continue;
       }
@@ -508,11 +639,11 @@ export class PhysicsSystem {
 
       // Ship-island collision
       for (const island of islands) {
-        this.pushShipOutOfIsland(ship, island);
-        if (island.dock) this.pushShipOutOfDock(ship, island.dock);
+        this.pushShipOutOfIsland(ship, island, t);
+        if (island.dock) this.pushShipOutOfDock(ship, island.dock, t);
       }
       for (const rock of seaRocks) {
-        this.pushShipOutOfSeaRock(ship, rock);
+        this.pushShipOutOfSeaRock(ship, rock, t);
       }
 
       // Ship-ship collision — oriented capsule-chain hulls, resolved pairwise once.
@@ -2323,7 +2454,7 @@ export class PhysicsSystem {
    * deep inlets and coves stay honestly sailable because the heightfield
    * itself sits below the keel there.
    */
-  private pushShipOutOfIsland(ship: Ship, island: Island) {
+  private pushShipOutOfIsland(ship: Ship, island: Island, t = 0) {
     const stats = SHIP_STATS[ship.type];
     const broadphase = getIslandMaxRadius(island) + stats.length * 0.6;
     const dxI = ship.position.x - island.position.x;
@@ -2376,12 +2507,16 @@ export class PhysicsSystem {
       const rx = deepest.x - ship.position.x;
       const rz = deepest.z - ship.position.z;
       ship.angularVelocity += clamp((rz * nx - rx * nz) * impactSpeed * 0.004, -0.12, 0.12);
-      if (impactSpeed > 2.0) {
-        // Running aground stoves the KEEL in, at the hull sample that actually
-        // touched the seabed. y = 0.12 is near the keel, so a grounding breach
-        // is always underwater — grounding is the harshest damage in the game.
+      // Running aground stoves the KEEL in, at the hull sample that actually
+      // touched the seabed. y = 0.12 is near the keel, so a grounding breach
+      // is always underwater — grounding is the harshest damage in the game.
+      // The event ledger decides how much of that a single beaching may cost.
+      const breaches = this.takeGroundingBreachBudget(ship, t, impactSpeed, impactSpeed > 5 ? 2 : 1);
+      if (breaches > 0) {
         const local = this.toShipLocal({ x: deepest.x, y: 0, z: deepest.z }, ship);
-        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, impactSpeed > 5 ? 2 : 1, 'ground');
+        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, breaches, 'ground');
+      }
+      if (impactSpeed > SHIP.GROUND_HOLE_MIN_IMPACT) {
         this.combatEvents.push({
           type: 'ship_impact', kind: 'ground', position: { x: deepest.x, y: 0, z: deepest.z }, speed: impactSpeed,
         });
@@ -2396,7 +2531,7 @@ export class PhysicsSystem {
    * resolved along the least-penetration axis with the sea-rock pushback feel.
    * Berths sit a full beam clear of the box, so moored ships never fight it.
    */
-  private pushShipOutOfDock(ship: Ship, dock: NonNullable<Island['dock']>) {
+  private pushShipOutOfDock(ship: Ship, dock: NonNullable<Island['dock']>, t = 0) {
     const stats = SHIP_STATS[ship.type];
     const dxD = ship.position.x - dock.position.x;
     const dzD = ship.position.z - dock.position.z;
@@ -2449,9 +2584,12 @@ export class PhysicsSystem {
         ((deepest.sampleZ - ship.position.z) * nx - (deepest.sampleX - ship.position.x) * nz) * impactSpeed * 0.004,
         -0.12, 0.12,
       );
-      if (impactSpeed > 2.0) {
+      const breaches = this.takeGroundingBreachBudget(ship, t, impactSpeed, impactSpeed > 5 ? 2 : 1);
+      if (breaches > 0) {
         const local = this.toShipLocal({ x: deepest.sampleX, y: 0, z: deepest.sampleZ }, ship);
-        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, impactSpeed > 5 ? 2 : 1, 'ground');
+        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, breaches, 'ground');
+      }
+      if (impactSpeed > SHIP.GROUND_HOLE_MIN_IMPACT) {
         this.combatEvents.push({
           type: 'ship_impact', kind: 'ground', position: { x: deepest.sampleX, y: 0, z: deepest.sampleZ }, speed: impactSpeed,
         });
@@ -2459,7 +2597,7 @@ export class PhysicsSystem {
     }
   }
 
-  private pushShipOutOfSeaRock(ship: Ship, rock: SeaRock) {
+  private pushShipOutOfSeaRock(ship: Ship, rock: SeaRock, t = 0) {
     const samples = this.getShipCollisionSamples(ship);
     let deepest: {
       nx: number;
@@ -2513,14 +2651,19 @@ export class PhysicsSystem {
 
       if (impactSpeed > 2.2) {
         // Striking a sea rock tears the hull open AT THE SAMPLE that struck it —
-        // a fast strike punches two. Rock bites sit at the waterline band.
-        const local = this.toShipLocal({ x: deepest.sampleX, y: 0, z: deepest.sampleZ }, ship);
-        this.openHoleAt(
-          ship,
-          { x: local.x, y: (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5, z: local.z },
-          impactSpeed > 5 ? 2 : 1,
-          'rock',
-        );
+        // a fast strike punches two. Rock bites sit at the waterline band. The
+        // event ledger keeps a hull PINNED against a reef from bleeding a fresh
+        // breach every tick until she saturates.
+        const breaches = this.takeGroundingBreachBudget(ship, t, impactSpeed, impactSpeed > 5 ? 2 : 1, 'rock');
+        if (breaches > 0) {
+          const local = this.toShipLocal({ x: deepest.sampleX, y: 0, z: deepest.sampleZ }, ship);
+          this.openHoleAt(
+            ship,
+            { x: local.x, y: (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5, z: local.z },
+            breaches,
+            'rock',
+          );
+        }
         this.combatEvents.push({
           type: 'ship_impact', kind: 'rock', position: { x: deepest.sampleX, y: 0, z: deepest.sampleZ }, speed: impactSpeed,
         });

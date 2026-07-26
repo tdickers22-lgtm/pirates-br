@@ -9,6 +9,10 @@ interface StormDamageHooks {
    *  abstract section counter — which then flood. Required: the storm has no
    *  business inventing its own damage model. */
   openHoleAt: (ship: Ship, local: { x: number; y: number; z: number }, count: number) => void;
+  /** True while the WORLD may not stove this hull in — she's tied up in her own
+   *  berth during the opening storm phases. PhysicsSystem owns the answer so
+   *  every environmental source (seabed, reef, tempest) agrees on shelter. */
+  isSheltered?: (shipId: string) => boolean;
 }
 
 /** Accumulated storm damage (per outside-ring second, phase-scaled) that stoves
@@ -123,6 +127,14 @@ export class StormSystem {
       }
       const d = dist2D(ship.position.x, ship.position.z, storm.centerX, storm.centerZ);
       if (d <= storm.safeRadius) {
+        this.shipStormAccum.delete(ship.id);
+        continue;
+      }
+      // A hull moored in her berth during the opening phases is under shelter:
+      // the ring starts at 950 m in a 1000 m world, so half the outer docks sat
+      // OUTSIDE the very first circle and quietly took a breach a minute while
+      // nobody was even aboard. The storm collects on her once phase 2 lands.
+      if (hooks.isSheltered?.(ship.id)) {
         this.shipStormAccum.delete(ship.id);
         continue;
       }
