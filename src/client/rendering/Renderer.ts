@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { PostFx } from './PostFx.js';
 import { initLightBudget, updateLightBudget } from './LightBudget.js';
+import { freezeStaticParent } from './three-util.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 
 export type RenderQuality = 'low' | 'balanced' | 'high';
@@ -299,6 +300,11 @@ export class Renderer {
 
   init() {
     this.scene = new THREE.Scene();
+    // The scene root never moves. That matters for more than tidiness: three
+    // re-composes a node's local matrix every frame when matrixAutoUpdate is
+    // on, and a re-composed matrix FORCES the world-matrix walk through every
+    // descendant — which would defeat every freezeStaticSubtree() below it.
+    freezeStaticParent(this.scene);
     this.scene.background = null;
     this.scene.fog = new THREE.FogExp2(this.fogDayColor.getHex(), 0.0015);
     initLightBudget(this.scene, this.quality);

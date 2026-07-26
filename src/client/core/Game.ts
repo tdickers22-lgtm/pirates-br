@@ -39,7 +39,7 @@ import {
 import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelController.js';
 import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
 import { EnvironmentFx, type EnvironmentFxView } from '../rendering/EnvironmentFx.js';
-import { ZERO_SCALE_MAT4 } from '../rendering/three-util.js';
+import { freezeStaticParent, freezeStaticSubtree, ZERO_SCALE_MAT4 } from '../rendering/three-util.js';
 import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
@@ -686,6 +686,10 @@ export class Game {
     this.combatFx.init(this.renderer.scene);
     this.envFx.initLanternSystem();
     this.renderer.scene.add(this.environment);
+    // Static container: islands, sea rocks, chests and wildlife all live under
+    // it and it never moves itself. Holding still here is what lets the frozen
+    // island subtrees actually be skipped (a dirty ancestor forces the walk).
+    freezeStaticParent(this.environment);
     this.renderer.scene.add(this.envFx.windWisps);
     this.renderer.scene.add(this.mermaidGroup);
     this.mermaidGroup.visible = false;
@@ -2173,6 +2177,8 @@ export class Game {
       try {
         const mesh = this.islands.buildSeaRockMesh(rock);
         this.environment.add(mesh);
+        // Scenery, bolted to the seabed: off the per-frame world-matrix walk.
+        freezeStaticSubtree(mesh);
         this.seaRockMeshes.set(rock.id, mesh);
       } catch (err) {
         console.error(`[World] failed to build sea rock ${rock.id}:`, err);
@@ -2562,6 +2568,7 @@ export class Game {
         const chestDist = dist2D(cam.x, cam.z, chest.position.x, chest.position.z);
         const carriedByLocal = chest.carriedByPlayerId === this.localPlayerId;
         record.root.visible = chestDist < lootRadius && !chest.opened && !carriedByLocal;
+        record.root.matrixWorldAutoUpdate = record.root.visible;
         const chestLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (chestLight) chestLight.visible = record.root.visible && chestDist < 55;
       }
@@ -2571,6 +2578,7 @@ export class Game {
         if (!root) continue;
         const barrelDist = dist2D(cam.x, cam.z, barrel.position.x, barrel.position.z);
         root.visible = barrelDist < lootRadius && (!barrel.opened || barrel.loot.length > 0);
+        root.matrixWorldAutoUpdate = root.visible;
       }
 
       for (const station of island.upgradeStations) {
@@ -2578,6 +2586,7 @@ export class Game {
         if (!record) continue;
         const stationDist = dist2D(cam.x, cam.z, station.position.x, station.position.z);
         record.root.visible = stationDist < upgradeRadius;
+        record.root.matrixWorldAutoUpdate = record.root.visible;
         const stationLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (stationLight) stationLight.visible = record.root.visible && stationDist < 55;
       }
@@ -2587,6 +2596,7 @@ export class Game {
         if (!record) continue;
         const npcDist = dist2D(cam.x, cam.z, npc.position.x, npc.position.z);
         record.root.visible = npcDist < npcRadius;
+        record.root.matrixWorldAutoUpdate = record.root.visible;
         const npcLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (npcLight) npcLight.visible = record.root.visible && npcDist < 55;
       }
@@ -2598,6 +2608,11 @@ export class Game {
       const dist = dist2D(cam.x, cam.z, animal.position.x, animal.position.z);
       // health is server-only (dead animals never reach the wire) — default alive.
       mesh.visible = (animal.health ?? 1) > 0 && dist < (animal.type === 'gull' ? wildlifeRadius * 1.35 : wildlifeRadius);
+      // A crab out of sight still has ~40 rigged nodes, and three refreshes the
+      // world matrix of every one of them whether or not it is drawn. Culled
+      // animals leave the walk; they rejoin it the frame they come back, before
+      // the render that needs them.
+      mesh.matrixWorldAutoUpdate = mesh.visible;
     }
 
     for (const rock of this.state.seaRocks ?? []) {

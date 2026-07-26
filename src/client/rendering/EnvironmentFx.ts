@@ -26,7 +26,7 @@ import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
-import { ZERO_SCALE_MAT4 } from './three-util.js';
+import { refreshFrozenChild, ZERO_SCALE_MAT4 } from './three-util.js';
 
 export type EnvironmentFxView = {
   readonly audio: SoundEngine;
@@ -405,6 +405,10 @@ export class EnvironmentFx {
         node.rotation.z = 0;
         node.position.copy(promoted.basePos);
       }
+      // The clone stands INSIDE the island's frozen static subtree (it takes the
+      // instanced prop's slot, in the instanced prop's parent), so nothing walks
+      // it for us — it refreshes its own world matrix.
+      refreshFrozenChild(node);
     }
 
     // Palm topple playback: ease-in fall (gravity feel) → damped bounce at
@@ -443,6 +447,7 @@ export class EnvironmentFx {
       this.tempHarvestVec.set(0, 1, 0);
       this.tempHarvestQuatB.setFromAxisAngle(this.tempHarvestVec, fall.baseYaw);
       node.quaternion.multiplyQuaternions(this.tempHarvestQuatA, this.tempHarvestQuatB);
+      let gone = false;
       if (fall.age >= TOPPLE + BOUNCE) {
         const sinkT = Math.min(1, (fall.age - TOPPLE - BOUNCE) / SINK);
         if (!fall.fadeMats) fall.fadeMats = this.makeHarvestNodeFadable(node);
@@ -452,8 +457,12 @@ export class EnvironmentFx {
           node.removeFromParent();
           this.view.disposeSceneObject(node);
           this.harvestFalls.splice(index, 1);
+          gone = true;
         }
       }
+      // Same as the promoted clone: a falling palm lives inside the island's
+      // frozen static subtree, so it pushes its own world matrix.
+      if (!gone) refreshFrozenChild(node);
     }
   }
 

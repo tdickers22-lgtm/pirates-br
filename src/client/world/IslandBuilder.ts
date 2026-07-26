@@ -30,6 +30,7 @@ import { buildBridges, buildLookoutPost, buildPirateCamp, buildRopeLadder, build
 import { buildCliffStrata, buildPeakMist, buildReefRing, buildRockSpires, buildTerraces, buildWaterfalls } from './island/TerrainFeatures.js';
 import { buildVolcanicFx } from './island/VolcanicFx.js';
 import { buildProxyTerrainMesh, buildTerrainMesh } from './island/TerrainMeshBuilder.js';
+import { freezeStaticSubtree } from '../rendering/three-util.js';
 
 export type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from './island/context.js';
 
@@ -460,6 +461,18 @@ export class IslandBuilder {
 
     this.ctx.environment.add(group);
     this.ctx.islandMeshes.set(island.id, group);
+
+    // An island is scenery: placed once, never moved again, and nothing inside
+    // it moves either — the palm sway is in the vertex shader, and the two FX
+    // nodes that DO animate (a geyser's splash collar and vent core, a felled
+    // palm) push their own world matrix through refreshFrozenChild.
+    //
+    // Freezing the group takes ~300–650 nodes per island off three's per-frame
+    // world-matrix walk; twelve islands is ~6,800 of them, and profiling put
+    // that walk at ~30% of frame CPU. Chests, barrels, stations, NPCs and
+    // wildlife are parented to `environment`, not to this group, so they are
+    // untouched by the freeze.
+    freezeStaticSubtree(group);
 
     buildChestMeshes(ctx);
 

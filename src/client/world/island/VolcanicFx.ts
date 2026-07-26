@@ -9,6 +9,7 @@
  */
 import * as THREE from 'three';
 import { geyserEruptionLevel, getIslandSurfaceY } from '../../../shared/utils/index.js';
+import { refreshFrozenChild } from '../../rendering/three-util.js';
 import type { IslandBuildCtx } from './context.js';
 
 /** Caldera lava, ashfall, embers, smoke and geyser plumes. */
@@ -279,13 +280,24 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
           idlePos[i * 3 + 2] = gz + Math.sin(idleAng[i] + f * 1.6) * ventR * (0.25 + f * 0.9);
         }
         idleGeo.attributes.position.needsUpdate = true;
-        if (level <= 0.01) { plume.visible = false; splash.visible = false; ventCore.scale.setScalar(1); return; }
+        // The island's static roots are frozen out of three's world-matrix walk
+        // (freezeStaticSubtree), so these two — the only nodes in here whose
+        // TRANSFORM moves — refresh themselves after each write.
+        if (level <= 0.01) {
+          plume.visible = false;
+          splash.visible = false;
+          ventCore.scale.setScalar(1);
+          refreshFrozenChild(ventCore);
+          return;
+        }
         plume.visible = true;
         splash.visible = true;
         mat.opacity = 0.85 * level;
         splashMat.opacity = 0.26 * level;
         splash.scale.setScalar(0.7 + level * 0.8);
         ventCore.scale.setScalar(1 + level * 0.4);
+        refreshFrozenChild(splash);
+        refreshFrozenChild(ventCore);
         const h = plumeH * level;
         for (let i = 0; i < plumeCount; i++) {
           const f = (phase[i] + wt * 0.85) % 1; // rise up the column, looping
