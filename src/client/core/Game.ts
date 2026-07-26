@@ -1272,8 +1272,11 @@ export class Game {
     this.envFx.harvestFalls.length = 0;
     this.envFx.prevHarvestChopCycle = 1;
     // Islands still queued from the previous match must not drain into the
-    // next one as untracked ghost terrain.
+    // next one as untracked ghost terrain. The same goes for sea rocks: their
+    // mesh map is cleared just below, so a leftover rock would sail straight
+    // past the already-built check and put last match's reef in this one's sea.
     this.pendingIslandBuilds.length = 0;
+    this.pendingSeaRockBuilds.length = 0;
     this.envFx.volcanicFx = [];
     // disposeSceneObject() disposes this shared particle texture along with the
     // volcanic point clouds (it isn't an AssetLibrary-owned resource), so drop
