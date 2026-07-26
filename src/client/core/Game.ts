@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  CrewEliminatedPayload, GameState, HotSnapshotPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
+  CrewEliminatedPayload, GameState, HotSnapshotPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { dist2D, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
@@ -878,6 +878,9 @@ export class Game {
    * then counts down off the local deadline — one number per real second, in
    * order, whatever the network and the world build are doing.
    */
+  /** Last world-build backlog painted onto the countdown hint (-1 = unpainted). */
+  private startSeqLastBacklog = -1;
+
   private updateStartSequenceFrame(): void {
     if (this.startSeqDeadlineMs === 0 || this.startSeqPhase === 'horn') return;
     const now = performance.now();
@@ -887,10 +890,20 @@ export class Game {
       this.startSeqLastCount = -1;
       this.ui.matchStartSeq.classList.remove('horn');
       this.ui.matchStartIsland.textContent = '';
-      this.ui.matchStartHint.textContent = 'Helm locked — the horn sets you loose';
+      this.startSeqLastBacklog = -1;
       this.showStartSequence();
     }
     this.ui.matchStartCrews.textContent = String(this.startSeqCrews);
+    // Say what the wait is FOR while the world streams in. The islands build
+    // one per frame and each one holds until its shaders link, so on a slow
+    // machine this line is the difference between "loading" and "frozen".
+    const backlog = this.getWorldBuildBacklog();
+    if (backlog !== this.startSeqLastBacklog) {
+      this.startSeqLastBacklog = backlog;
+      this.ui.matchStartHint.textContent = backlog > 0
+        ? `Charting the isles… ${backlog} to go`
+        : 'Helm locked — the horn sets you loose';
+    }
     const player = this.getLocalPlayer();
     const island = player ? this.getNearestIsland(player.position.x, player.position.z) : null;
     // Only overwrite once the spawn island is known — a blank card beats a
@@ -2093,22 +2106,33 @@ export class Game {
         rx: i.radius * i.profile.footprintX,
         rz: i.radius * i.profile.footprintZ,
       })));
-      // Build the two closest synchronously so the player never sees a bare
-      // horizon at spawn; the rest stream in over the next frames.
-      this.drainIslandBuildQueue(2);
+      // Build the closest one now so the spawn area is there; the rest stream
+      // in over the next frames, one per frame, each drawn a frame after it is
+      // built (see drainIslandBuildQueue).
+      this.drainIslandBuildQueue(1);
     }
     for (const rock of state.seaRocks ?? []) {
-      if (!this.seaRockMeshes.has(rock.id)) {
-        const mesh = this.islands.buildSeaRockMesh(rock);
-        this.environment.add(mesh);
-        this.seaRockMeshes.set(rock.id, mesh);
+      if (!this.seaRockMeshes.has(rock.id)
+        && !this.pendingSeaRockBuilds.some((queued) => queued.id === rock.id)) {
+        this.pendingSeaRockBuilds.push(rock);
       }
     }
   }
 
   /** Build up to `count` queued islands (called once per frame from the main
-   *  loop with count=1, and from ensureWorldMeshes for the spawn area). */
+   *  loop with count=1, and from ensureWorldMeshes for the spawn area).
+   *
+   *  A newly built island is held HIDDEN for one frame and revealed by the NEXT
+   *  drain. Geometry cost and first-draw cost are different bills: three links
+   *  a material the first time it is actually drawn, so two islands appearing
+   *  together put both their program sets into a single draw call. Splitting
+   *  build-frame from reveal-frame means at most one island's worth of shaders
+   *  ever compiles per frame. */
   drainIslandBuildQueue(count = 1) {
+    if (this.islandAwaitingReveal) {
+      this.islandAwaitingReveal.visible = true;
+      this.islandAwaitingReveal = null;
+    }
     for (let i = 0; i < count && this.pendingIslandBuilds.length > 0; i++) {
       const island = this.pendingIslandBuilds.shift()!;
       if (this.islandMeshes.has(island.id)) continue;
@@ -2117,8 +2141,41 @@ export class Game {
       // kills the render loop outright (frozen canvas, no error surface).
       try {
         this.islands.buildIsland(island);
+        const group = this.islandMeshes.get(island.id);
+        if (group && !this.islandAwaitingReveal) {
+          group.visible = false;
+          this.islandAwaitingReveal = group;
+        }
       } catch (err) {
         console.error(`[World] failed to build island ${island.id}:`, err);
+      }
+    }
+  }
+
+  /** Island built this frame, drawn for the first time on the next one. */
+  private islandAwaitingReveal: THREE.Object3D | null = null;
+  /** Sea rocks still to be built, spread out for the same reason as islands. */
+  private pendingSeaRockBuilds: SeaRock[] = [];
+
+  /** How much of the world is still arriving: 0 = nothing left to stream. */
+  getWorldBuildBacklog(): number {
+    return this.pendingIslandBuilds.length
+      + (this.islandAwaitingReveal ? 1 : 0)
+      + (this.pendingSeaRockBuilds.length > 0 ? 1 : 0);
+  }
+
+  /** Build a few queued sea rocks. Thirty-six of them landing on the same frame
+   *  as the spawn island stacked their first draws onto that one freeze. */
+  private drainSeaRockBuildQueue(count = 6) {
+    for (let i = 0; i < count && this.pendingSeaRockBuilds.length > 0; i++) {
+      const rock = this.pendingSeaRockBuilds.shift()!;
+      if (this.seaRockMeshes.has(rock.id)) continue;
+      try {
+        const mesh = this.islands.buildSeaRockMesh(rock);
+        this.environment.add(mesh);
+        this.seaRockMeshes.set(rock.id, mesh);
+      } catch (err) {
+        console.error(`[World] failed to build sea rock ${rock.id}:`, err);
       }
     }
   }
@@ -2295,6 +2352,7 @@ export class Game {
     // Stream one queued island build per frame (join used to build all 10
     // synchronously and freeze the tab for seconds).
     this.drainIslandBuildQueue(1);
+    this.drainSeaRockBuildQueue(6);
     this.renderer.updatePerformance(dt);
     this.renderer.render();
     if (this.bugSnapRequested) {
