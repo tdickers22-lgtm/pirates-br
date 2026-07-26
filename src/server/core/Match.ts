@@ -183,6 +183,23 @@ function matchSeedFromEnv(): number | undefined {
   return Number.isFinite(parsed) ? parsed >>> 0 : undefined;
 }
 
+/** Coin-flips taken while players JOIN (which free dock a newcomer moors at).
+ *  Unseeded this is plain Math.random. Under PIRATES_BR_MAP_SEED it becomes a
+ *  private, stream-independent generator: the Nth join always lands on the same
+ *  dock, no matter how many draws world generation happened to take. */
+function makeJoinRng(): () => number {
+  const seed = matchSeedFromEnv();
+  if (seed === undefined) return Math.random;
+  let s = (seed ^ 0x5f356495) >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 const CUTLASS_CHARGE_TIME = 0.72;
 const CUTLASS_CHARGE_MIN_TAP = 0.02;
 const CUTLASS_LUNGE_COOLDOWN = 1.05;
@@ -285,6 +302,7 @@ export class Match {
    *  The islands themselves are already fixed per-entry seeds; this exists so a
    *  perf A/B can measure two builds against a bit-identical match. */
   private mapGen = new MapGenerator(matchSeedFromEnv());
+  private readonly joinRng = makeJoinRng();
   private skeletonHomes: Map<string, string> = new Map();
   private skeletonWaveTimers: Map<string, number> = new Map();
   private skeletonSpawnedAt: Map<string, number> = new Map();
@@ -611,7 +629,7 @@ export class Match {
     }
 
     return candidates.length > 0
-      ? candidates[Math.floor(Math.random() * candidates.length)]
+      ? candidates[Math.floor(this.joinRng() * candidates.length)]
       : null;
   }
 
