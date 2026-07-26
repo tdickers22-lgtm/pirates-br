@@ -8,6 +8,15 @@ export type RenderQuality = 'low' | 'balanced' | 'high';
 const DAY_NIGHT_CYCLE_SECONDS = 960; // slower cycle: dusk is a scene, not a flash
 const DAY_NIGHT_START_OFFSET = 0.47;
 
+/** Below this, with resolution already on the floor, the startup tier is simply
+ *  wrong for this machine and the runtime ladder starts giving quality back.
+ *  Set well under the 47fps the resolution scaler chases: this rung is for a
+ *  machine that cannot cope at all, not one having a rough few seconds. */
+const DISTRESS_FPS = 28;
+/** Seconds under DISTRESS_FPS, at the floor, before a rung is spent. Long on
+ *  purpose — the cost of escalating too eagerly is a visibly softer image. */
+const DISTRESS_DWELL_SECONDS = 6.9;
+
 const SKY_VERT = /* glsl */`
   varying vec3 v_dir;
   void main() {
@@ -255,6 +264,7 @@ export class Renderer {
     ? 0.62
     : Math.min(window.devicePixelRatio || 1, this.quality === 'balanced' ? 1.5 : 1.75);
   private currentPixelRatio = 1;
+  private readonly baseShadowMapSize = this.quality === 'high' ? 4096 : 2048;
   private postFx: PostFx | null = null;
   private readonly shadowFocus = new THREE.Vector3();
   private readonly shadowBasis = new THREE.Matrix4();
@@ -278,6 +288,13 @@ export class Renderer {
   private perfFrameTime = 0;
   private smoothFrameTime = 1 / 60;
   private recoverTimer = 0;
+  /** Runtime quality ladder BELOW the startup tier: 0 = untouched, 2 = spent.
+   *  The tier itself is a one-shot guess off core count, so this is the only
+   *  thing standing between a bad guess (or a thermally throttled Mac) and a
+   *  session pinned at 13fps. */
+  private distressLevel = 0;
+  private distressTimer = 0;
+  private distressRecoverTimer = 0;
   private lastStormWeather = -1;
 
   init() {
@@ -372,7 +389,7 @@ export class Renderer {
     this.sun.position.copy(sunWorldDir);
     this.sun.castShadow = this.quality !== 'low';
     // Larger frustum (see SHADOW_HALF_EXTENT) needs more texels to stay crisp.
-    const shadowMapSize = this.quality === 'high' ? 4096 : 2048;
+    const shadowMapSize = this.baseShadowMapSize;
     this.sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     this.sun.shadow.camera.near = 30;
     this.sun.shadow.camera.far = SHADOW_LIGHT_DISTANCE + 230;
@@ -447,8 +464,23 @@ export class Renderer {
 
     if (avgFps < 47 || this.smoothFrameTime > 1 / 42) {
       this.recoverTimer = 0;
-      if (this.currentPixelRatio > this.minPixelRatio + 0.01) {
-        this.applyPixelRatio(Math.max(this.minPixelRatio, this.currentPixelRatio - 0.08));
+      if (this.currentPixelRatio > this.pixelRatioFloor() + 0.01) {
+        this.applyPixelRatio(Math.max(this.pixelRatioFloor(), this.currentPixelRatio - 0.08));
+        this.distressTimer = 0;
+        return;
+      }
+      // Already scraping the floor and STILL missing frames. The tier was a
+      // one-shot guess off core count at startup, so a machine that guessed
+      // wrong — or a fast one that has since thermally throttled — used to sit
+      // at 13fps forever with nothing left to give. Escalate a step.
+      if (avgFps < DISTRESS_FPS) {
+        this.distressTimer += 1.15;
+        if (this.distressTimer > DISTRESS_DWELL_SECONDS) {
+          this.distressTimer = 0;
+          this.escalateDistress();
+        }
+      } else {
+        this.distressTimer = Math.max(0, this.distressTimer - 1.15);
       }
       return;
     }
@@ -457,13 +489,68 @@ export class Renderer {
     // happened, so quality only ratcheted down over a session).
     if (avgFps > 55.5 && this.smoothFrameTime < 1 / 50) {
       this.recoverTimer += 1.15;
-      if (this.recoverTimer > 4 && this.currentPixelRatio < this.maxPixelRatio - 0.01) {
-        this.applyPixelRatio(Math.min(this.maxPixelRatio, this.currentPixelRatio + 0.06));
-        this.recoverTimer = 0;
+      if (this.recoverTimer > 4) {
+        if (this.currentPixelRatio < this.maxPixelRatio - 0.01) {
+          this.applyPixelRatio(Math.min(this.maxPixelRatio, this.currentPixelRatio + 0.06));
+          this.recoverTimer = 0;
+        } else if (this.distressLevel > 0) {
+          // Only hand quality back once resolution is already all the way up
+          // AND has held there — the long dwell is what stops the ladder from
+          // hunting between "shadows off" and "shadows on" every few seconds.
+          this.distressRecoverTimer += 1.15;
+          if (this.distressRecoverTimer > 12) {
+            this.distressRecoverTimer = 0;
+            this.relieveDistress();
+          }
+        }
       }
     } else {
       this.recoverTimer = Math.max(0, this.recoverTimer - 1.15);
+      this.distressRecoverTimer = Math.max(0, this.distressRecoverTimer - 1.15);
     }
+  }
+
+  /** How far the resolution scaler may drop right now. Each distress step
+   *  unlocks more headroom below the tier's nominal floor. */
+  private pixelRatioFloor(): number {
+    return this.minPixelRatio * (this.distressLevel >= 2 ? 0.75 : 1);
+  }
+
+  /**
+   * One rung DOWN the runtime ladder. The rungs are deliberately things that do
+   * NOT change any shader program key — a smaller shadow map is a reallocation,
+   * whereas switching shadows off entirely re-links every material in the scene
+   * and would cost a multi-second freeze at exactly the worst moment.
+   */
+  private escalateDistress() {
+    if (this.distressLevel >= 2) return;
+    this.distressLevel++;
+    this.distressRecoverTimer = 0;
+    if (this.distressLevel === 1) this.applyShadowMapSize(Math.max(1024, this.baseShadowMapSize / 2));
+    if (this.distressLevel === 2) this.applyPixelRatio(this.pixelRatioFloor());
+  }
+
+  /** One rung back UP, in the reverse order it was given away. */
+  private relieveDistress() {
+    if (this.distressLevel <= 0) return;
+    this.distressLevel--;
+    // Re-clamp: the floor just rose under whatever ratio we were running at.
+    this.applyPixelRatio(this.currentPixelRatio);
+    if (this.distressLevel === 0) this.applyShadowMapSize(this.baseShadowMapSize);
+  }
+
+  private applyShadowMapSize(size: number) {
+    if (!this.sun.castShadow || this.sun.shadow.mapSize.x === size) return;
+    this.sun.shadow.mapSize.set(size, size);
+    // Force reallocation at the new size; the depth material is untouched, so
+    // nothing recompiles.
+    this.sun.shadow.map?.dispose();
+    this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
+  }
+
+  /** 0 = nothing given away, 2 = every runtime rung spent. Diagnostics/tests. */
+  getDistressLevel(): number {
+    return this.distressLevel;
   }
 
   /** 0 = dry, 1 = full downpour. Couples falling-rain density into the
@@ -711,7 +798,9 @@ export class Renderer {
   private applyPixelRatio(target: number) {
     const deviceRatio = window.devicePixelRatio || 1;
     const viewportCap = window.innerWidth < 900 ? Math.min(this.maxPixelRatio, 0.72) : this.maxPixelRatio;
-    this.currentPixelRatio = clamp(Math.min(deviceRatio, target, viewportCap), this.minPixelRatio, this.maxPixelRatio);
+    // The floor moves with the distress ladder, so a machine that cannot hold
+    // frames at the tier's nominal minimum is allowed to go lower still.
+    this.currentPixelRatio = clamp(Math.min(deviceRatio, target, viewportCap), this.pixelRatioFloor(), this.maxPixelRatio);
     this.renderer?.setPixelRatio(this.currentPixelRatio);
     this.postFx?.setPixelRatio(this.currentPixelRatio);
   }

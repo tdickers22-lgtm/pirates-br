@@ -44,6 +44,14 @@ export type TerrainBuild = {
 function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: boolean, host: IslandBuilderCtx) {
   const pulse = host.magmaPulseUniform;
   const time = host.foliageTime;
+  // Octave ladder. Every octave is a fresh value-noise fetch — four hashes,
+  // each a sin() — evaluated per pixel across every scrap of visible ground, so
+  // this is the single biggest fragment cost the terrain has. A fanless laptop
+  // gets ONE: the ~1.8m mottle, the octave that carries the biome read, with
+  // the finer bands aliasing into it. The identity survives (ground is still
+  // mottled, strata still band the cliffs) — it is just coarser.
+  const octaves = host.renderer.getQuality() === 'low' ? 1
+    : host.renderer.getQuality() === 'balanced' ? 2 : 3;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTerrTime = time;
     if (volcanic) shader.uniforms.uMagmaPulse = pulse;
@@ -94,8 +102,12 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         + 'mat2 tR1 = mat2(0.87, -0.50, 0.50, 0.87);\n'
         + 'mat2 tR2 = mat2(0.36, 0.93, -0.93, 0.36);\n'
         + 'float nMid = tNoise(tP * 0.55);\n'                    // ~1.8m mottle
-        + 'float nFine = tNoise(tR1 * tP * 2.1);\n'              // ~0.5m patches
-        + 'float nGrain = tNoise(tR2 * tP * 8.5);\n'             // ~0.12m grain
+        + (octaves >= 2
+          ? 'float nFine = tNoise(tR1 * tP * 2.1);\n'            // ~0.5m patches
+          : 'float nFine = nMid;\n')
+        + (octaves >= 3
+          ? 'float nGrain = tNoise(tR2 * tP * 8.5);\n'           // ~0.12m grain
+          : 'float nGrain = nFine;\n')
         // Tent weights over the 0..3 material axis: adjacent classes crossfade.
         + 'float mC = clamp(vTerrMat, 0.0, 3.0);\n'
         + 'float wSand = max(0.0, 1.0 - abs(mC - 0.0));\n'

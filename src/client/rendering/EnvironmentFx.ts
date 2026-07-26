@@ -98,6 +98,13 @@ const RAIN_SHELL_SPECS = [
   { radius: 68, ceiling: 34, drops: 1500, streak: 0.66, speed: 0.86, opacity: 0.26, gustPhase: 3.7 },
 ] as const;
 
+/** Per-shell hard cap on simultaneously integrated drops, per tier. */
+const RAIN_ACTIVE_CEILING: Record<'low' | 'balanced' | 'high', number> = {
+  low: 260,
+  balanced: 900,
+  high: 1600,
+};
+
 /** Which shells (and what fraction of their drop budget) each tier gets. */
 const RAIN_TIERS: Record<'low' | 'balanced' | 'high', { shells: number[]; scale: number }> = {
   low: { shells: [1], scale: 0.5 },
@@ -723,7 +730,21 @@ export class EnvironmentFx {
     }
   }
 
+  /** The bolt's directional pulse — everything in the scene flash-lit from the
+   *  strike's bearing. Allocated HERE, at startup, and never removed: the
+   *  directional-light count is baked into every shader program, so building it
+   *  on the first strike re-linked the whole scene mid-storm (measured as a
+   *  ~150ms hitch on the first bolt). The bottom tier never gets one — the sky
+   *  flash, the ribbon and the screen pulse carry the strike without it. */
+  private setupLightningPulse() {
+    if (this.boltLight || this.view.renderer.getQuality() === 'low') return;
+    this.boltLight = new THREE.DirectionalLight(0xc3daff, 0);
+    this.view.renderer.scene.add(this.boltLight);
+    this.view.renderer.scene.add(this.boltLight.target);
+  }
+
   setupStormWeatherOverlay() {
+    this.setupLightningPulse();
     const wrap = document.createElement('div');
     wrap.id = 'storm-weather-overlay';
     wrap.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:50;overflow:hidden;';
@@ -1300,7 +1321,14 @@ export class EnvironmentFx {
 
       const pos = shell.pos;
       const hash = shell.hash;
-      const active = Math.max(24, Math.floor(shell.drops * (0.28 + intensity * 0.72)));
+      // Hard ceiling per tier on top of the density curve. Every active drop is
+      // a CPU-integrated line segment plus a re-upload of its two vertices, so
+      // a full downpour on a fanless laptop was the storm's whole cost; the
+      // floor keeps rain visibly falling, the ceiling keeps it affordable.
+      const active = Math.min(
+        RAIN_ACTIVE_CEILING[this.view.renderer.getQuality()],
+        Math.max(24, Math.floor(shell.drops * (0.28 + intensity * 0.72))),
+      );
       const radiusSq = shell.radius * shell.radius * 1.85;
       const floorY = cam.y - shell.ceiling * 0.55;
       const spawnDrift = shell.radius * 0.28;
@@ -1711,16 +1739,22 @@ export class EnvironmentFx {
       }
 
       // Pooled flash light (allocating one per strike forced shader churn).
-      if (!this.lightningLightPool) {
-        this.lightningLightPool = new THREE.PointLight(0x9fc4e6, 0, 300);
-        registerBudgetLight(this.lightningLightPool);
-        this.view.renderer.scene.add(this.lightningLightPool);
+      // A 300m-radius point light re-lights every fragment of every island,
+      // hull and wave in reach for the length of the strike; on the bottom tier
+      // the sky flash, the bolt ribbon and the screen pulse carry the moment on
+      // their own, so the world-lighting pass is the part that gets dropped.
+      if (this.view.renderer.getQuality() !== 'low') {
+        if (!this.lightningLightPool) {
+          this.lightningLightPool = new THREE.PointLight(0x9fc4e6, 0, 300);
+          registerBudgetLight(this.lightningLightPool);
+          this.view.renderer.scene.add(this.lightningLightPool);
+        }
+        const flash = this.lightningLightPool;
+        flash.intensity = 42 + phase * 8;
+        flash.distance = Math.max(300, stormR * 0.9);
+        flash.position.set(lx, 85 + Math.random() * 50, lz);
+        this.lightningFlash = flash;
       }
-      const flash = this.lightningLightPool;
-      flash.intensity = 42 + phase * 8;
-      flash.distance = Math.max(300, stormR * 0.9);
-      flash.position.set(lx, 85 + Math.random() * 50, lz);
-      this.lightningFlash = flash;
 
       // Branched ribbon channel: cloud base down to the sea.
       this.ensureBoltMeshes();
@@ -1732,15 +1766,6 @@ export class EnvironmentFx {
       const blen = Math.hypot(bdx, bdz) || 1;
       this.boltDirX = bdx / blen;
       this.boltDirZ = bdz / blen;
-      // Directional pulse: everything in the scene flash-lit from the bolt's
-      // bearing. Built once on first strike so the shader recompile is paid
-      // one time, and never on the low tier.
-      if (!this.boltLight && this.view.renderer.getQuality() !== 'low') {
-        this.boltLight = new THREE.DirectionalLight(0xc3daff, 0);
-        this.view.renderer.scene.add(this.boltLight);
-        this.view.renderer.scene.add(this.boltLight.target);
-      }
-
       // Thunder boom matched to the actual strike distance.
       const localPlayerForThunder = this.view.getLocalPlayer();
       if (localPlayerForThunder) {
