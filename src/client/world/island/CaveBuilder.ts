@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import type { Island } from '../../../shared/types/index.js';
 import { CAVE_MOUTH_TRENCH_K, getCaveMouthCarve, isNearCaveMouthCut } from '../../../shared/utils/index.js';
-import { applyCaveTubeColors, cullCaveTubeAgainstNeighbors, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
+import { applyCaveTubeColors, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import type { CaveMouthCarve, IslandBuildCtx } from './context.js';
 
@@ -162,18 +162,16 @@ export function buildCaves(ctx: IslandBuildCtx) {
       //    floor/wall/ceiling slabs that left black gaps. Dead-ends get a
       //    fan-capped back; mouths/junctions stay open so segments connect. ──
       const floorEndLocalY = ((cave as { floorYEnd?: number }).floorYEnd ?? cave.floorY) - cave.position.y;
-      // Overshoot the tube 1.2m past its nominal end so its open rim lands
-      // INSIDE the connecting segment's walls: butt-joined open rims meeting
-      // at an angle left wedge gaps at every junction (bright slits of sky
-      // where a sightline threaded between the two rims). The floor ramp
-      // continues at the same gradient — the overshoot buries harmlessly
-      // under the neighbour's floor.
-      const tubeLen = cLen + 1.2;
-      const tubeFloorEnd = cLen > 0 ? floorEndLocalY + (floorEndLocalY - floorLocalY) * (1.2 / cLen) : floorEndLocalY;
-      const tubeGeo = makeCaveTubeGeometry(cR, tubeLen, floorLocalY, ceilingLocalY, cw * 7.3 + cLen * 2.1 + cR, cave.hasBackWall ?? true, tubeFloorEnd);
+      // The tube overshoots BOTH planes so its open rims bury inside the
+      // segments they join (see caveTubeParams).
+      const tp = caveTubeParams(cave);
+      const tubeGeo = makeCaveTubeGeometry(tp.cR, tp.tubeLen, tp.floorLocalY, tp.ceilingLocalY, tp.seed, tp.capBack, tp.tubeFloorEnd, tp.frontOvershoot);
       // Junction fix: drop wall triangles standing inside a NEIGHBOUR's open
       // interior (physics walks the union — those walls were fake).
       cullCaveTubeAgainstNeighbors(tubeGeo, cave, island);
+      // …then seal what's left over at a joint where the neighbour is SMALLER:
+      // the big rim's uncovered annulus was a window onto the island exterior.
+      capCaveTubeRims(tubeGeo, cave, island);
       applyCaveTubeColors(tubeGeo, isMouth);
       const tube = new THREE.Mesh(tubeGeo, caveRockMat);
       tube.receiveShadow = true;

@@ -15,9 +15,12 @@
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import {
-  CAVE_WALL_PAD, getCaveInteriorAt, getIslandSurfaceY, getCaveCeilingY, getCaveFloorY, isInsideCaveInterior,
+  CAVE_MOUTH_TRENCH_FADE, CAVE_MOUTH_TRENCH_K, CAVE_NEAR_OVERHANG, CAVE_WALL_PAD,
+  getCaveInteriorAt, getIslandSurfaceY, getCaveCeilingY, getCaveFloorY, isInsideCaveInterior,
 } from '../src/shared/utils/index.ts';
-import { CAVE_SHELL_MARGIN, makeCaveTubeGeometry } from '../src/client/rendering/factories/CaveGeometry.ts';
+import {
+  CAVE_SHELL_MARGIN, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors, makeCaveTubeGeometry,
+} from '../src/client/rendering/factories/CaveGeometry.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 
 const islands = new MapGenerator(12345).generateIslands();
@@ -305,10 +308,9 @@ for (const island of islands) {
     const cLen = c.length ?? 10;
     const floorLocal = c.floorY - c.position.y;
     const floorEndLocal = (c.floorYEnd ?? c.floorY) - c.position.y;
+    const tp = caveTubeParams(c);
     const geo = makeCaveTubeGeometry(
-      cR, cLen + 1.2, floorLocal, floorLocal + c.height,
-      c.width * 7.3 + cLen * 2.1 + cR, c.hasBackWall ?? true,
-      cLen > 0 ? floorEndLocal + (floorEndLocal - floorLocal) * (1.2 / cLen) : floorEndLocal,
+      tp.cR, tp.tubeLen, tp.floorLocalY, tp.ceilingLocalY, tp.seed, tp.capBack, tp.tubeFloorEnd, tp.frontOvershoot,
     );
     const pos = geo.getAttribute('position');
     const floorAttr = geo.getAttribute('aFloor');
@@ -347,6 +349,147 @@ expect('no tube wall/ceiling vertex or edge cuts into the walkable box',
   shellIntrusions === 0, `${shellIntrusions} intrusions, worst ${shellWorst.toFixed(2)}m at ${shellWorstAt}`);
 expect('and the shell keeps a real slab of rock outside it', CAVE_SHELL_MARGIN >= 0.35,
   `CAVE_SHELL_MARGIN=${CAVE_SHELL_MARGIN}`);
+
+console.log('\n── caves are solid: no eye underground sees daylight through the rock ──');
+// The shell being in the right PLACE is not the same as the shell being CLOSED.
+// Every segment draws walls but no end faces, which is fine while the segment it
+// joins is at least as big — the open rim buries inside its neighbour. Where the
+// bore steps DOWN across a joint (skull-cove's 5.7m-radius, 5m-tall junction
+// chamber meeting the 3.3m-radius, 2.8m-tall tunnel that feeds it) the annulus
+// between the two rims was drawn by nobody, and from anywhere in the big room an
+// eye looking at the joint saw the island exterior through 5-10m of "rock".
+// So: rebuild the real drawn shell (loft → neighbour cull → rim caps) and shoot
+// rays out of every walkable eye position that has a real mountain overhead. A
+// ray that reaches open air without crossing rock is a window.
+const rayTri = (o, d, t) => {
+  const e1 = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
+  const e2 = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
+  const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
+  const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+  if (Math.abs(det) < 1e-9) return -1;
+  const inv = 1 / det;
+  const s = [o[0] - t[0][0], o[1] - t[0][1], o[2] - t[0][2]];
+  const u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * inv;
+  if (u < -1e-6 || u > 1 + 1e-6) return -1;
+  const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]];
+  const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) * inv;
+  if (v < -1e-6 || u + v > 1 + 1e-6) return -1;
+  const hit = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv;
+  return hit > 0.02 ? hit : -1;
+};
+const RAY_DIRS = [];
+for (let yi = 0; yi < 36; yi++) {
+  const yaw = (yi / 36) * Math.PI * 2;
+  // Upward only: a ray angled DOWN can never reach the sky from under a hill.
+  for (const pitch of [0, 0.2, 0.4, 0.58]) {
+    RAY_DIRS.push([Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)]);
+  }
+}
+let windows = 0, windowAt = '';
+for (const island of islands) {
+  const caves = island.caves ?? [];
+  if (caves.length === 0) continue;
+  // The DRAWN shell, in world space: exactly the pipeline CaveBuilder runs.
+  const CELL = 4;
+  const grid = new Map();
+  for (const [si, c] of caves.entries()) {
+    const tp = caveTubeParams(c);
+    const geo = makeCaveTubeGeometry(tp.cR, tp.tubeLen, tp.floorLocalY, tp.ceilingLocalY, tp.seed, tp.capBack, tp.tubeFloorEnd, tp.frontOvershoot);
+    cullCaveTubeAgainstNeighbors(geo, c, island);
+    capCaveTubeRims(geo, c, island);
+    const cs = Math.cos(c.rotation), sn = Math.sin(c.rotation);
+    const idx = geo.getIndex(), pos = geo.getAttribute('position');
+    for (let t = 0; t < idx.count; t += 3) {
+      const tri = [];
+      for (let k = 0; k < 3; k++) {
+        const i = idx.getX(t + k);
+        const lx = pos.getX(i), ly = pos.getY(i), lz = pos.getZ(i);
+        tri.push([c.position.x + lx * cs + lz * sn, c.position.y + ly, c.position.z - lx * sn + lz * cs]);
+      }
+      tri.seg = si;
+      const i0 = Math.floor(Math.min(tri[0][0], tri[1][0], tri[2][0]) / CELL);
+      const i1 = Math.floor(Math.max(tri[0][0], tri[1][0], tri[2][0]) / CELL);
+      const j0 = Math.floor(Math.min(tri[0][2], tri[1][2], tri[2][2]) / CELL);
+      const j1 = Math.floor(Math.max(tri[0][2], tri[1][2], tri[2][2]) / CELL);
+      for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+        const key = `${i},${j}`;
+        const arr = grid.get(key);
+        if (arr) arr.push(tri); else grid.set(key, [tri]);
+      }
+    }
+  }
+  // Conservative heightfield: each cell reports the HIGHEST natural ground of
+  // its corners, so "the ray broke into open air" is never claimed early.
+  const HS = 1.5, HR = island.radius + 40, HN = Math.ceil((2 * HR) / HS) + 1;
+  const hf = new Float32Array(HN * HN);
+  for (let i = 0; i < HN; i++) for (let j = 0; j < HN; j++) {
+    hf[i * HN + j] = getIslandSurfaceY(island, island.position.x - HR + i * HS, island.position.z - HR + j * HS);
+  }
+  const surfaceMax = (x, z) => {
+    const i = Math.floor((x - (island.position.x - HR)) / HS), j = Math.floor((z - (island.position.z - HR)) / HS);
+    if (i < 0 || j < 0 || i + 1 >= HN || j + 1 >= HN) return -50;
+    return Math.max(hf[i * HN + j], hf[(i + 1) * HN + j], hf[i * HN + j + 1], hf[(i + 1) * HN + j + 1]);
+  };
+  const mouths = caves.filter((c) => c.hasMouth);
+  // A sightline that leaves through a MOUTH is the cave working: the trench is
+  // carved open sky by design, out to CAVE_MOUTH_TRENCH_K·radius of gully.
+  const throughAMouth = (px, py, pz) => mouths.some((m) => {
+    const cs = Math.cos(m.rotation), sn = Math.sin(m.rotation);
+    const lx = (px - m.position.x) * cs - (pz - m.position.z) * sn;
+    const lz = (px - m.position.x) * sn + (pz - m.position.z) * cs;
+    return Math.abs(lx) < (m.interiorRadius ?? 3) * CAVE_MOUTH_TRENCH_K * CAVE_MOUTH_TRENCH_FADE
+      && lz < CAVE_NEAR_OVERHANG + 1.2 && lz > -(m.length ?? 10)
+      && py > m.floorY - 1 && py < m.floorY + m.height + 1.5;
+  });
+  for (const [si, c] of caves.entries()) {
+    if (c.hasMouth) continue;                       // mouths are open by design
+    const inX = -Math.sin(c.rotation), inZ = -Math.cos(c.rotation);
+    const nX = -inZ, nZ = inX;
+    const R = (c.interiorRadius ?? 3) - CAVE_WALL_PAD;
+    for (const along of [0.12, 0.37, 0.62, 0.87]) {
+      for (const lat of [-1, -0.5, 0, 0.5, 1]) {
+        const x = c.position.x + inX * c.length * along + nX * R * lat;
+        const z = c.position.z + inZ * c.length * along + nZ * R * lat;
+        const it = getCaveInteriorAt(island, x, z);
+        if (!it || it.wallDist < CAVE_WALL_PAD || it.ceilingY - it.floorY < 2) continue;
+        const eye = Math.min(it.floorY + 1.6, it.ceilingY - 0.3);
+        // Only stations with a real mountain overhead — near a mouth the sky is
+        // supposed to be there.
+        if (getIslandSurfaceY(island, x, z) < eye + 3) continue;
+        for (const d of RAY_DIRS) {
+          // How far until the ray breaks into open air.
+          let air = Infinity;
+          for (let t = 0.5; t <= 120; t += 0.5) {
+            if (eye + d[1] * t > surfaceMax(x + d[0] * t, z + d[2] * t) + 0.05) { air = t; break; }
+          }
+          if (!Number.isFinite(air)) continue;
+          if (throughAMouth(x + d[0] * air, eye + d[1] * air, z + d[2] * air)) continue;
+          // …otherwise the rock must stop it first.
+          let best = Infinity;
+          const seen = new Set();
+          for (let t = 0; t <= air && t <= best; t += CELL * 0.4) {
+            const gi = Math.floor((x + d[0] * t) / CELL), gj = Math.floor((z + d[2] * t) / CELL);
+            for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+              const key = `${gi + di},${gj + dj}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              for (const tri of grid.get(key) ?? []) {
+                const h = rayTri([x, eye, z], d, tri);
+                if (h > 0 && h < best) best = h;
+              }
+            }
+          }
+          if (best >= air) {
+            windows++;
+            if (!windowAt) windowAt = `${island.id} seg${si} eye (${x.toFixed(2)}, ${eye.toFixed(2)}, ${z.toFixed(2)}) heading (${d.map((v) => v.toFixed(2)).join(', ')})`;
+          }
+        }
+      }
+    }
+  }
+}
+expect('no walkable eye under the mountain can see the sky through a cave wall',
+  windows <= 0, `${windows} sightlines, first at ${windowAt}`);
 
 console.log(failures === 0 ? '\nALL CAVE WALK TESTS PASSED' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);
