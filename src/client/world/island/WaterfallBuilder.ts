@@ -603,7 +603,12 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   rimFrom = impact.s;
   {
     const startS = basePool.s + basePool.rAlong * 0.7;
-    const startY = Math.max(0.95, T(startS) + RIDE_LIFT * 0.8);
+    // Water leaves a pool AT THE POOL'S SURFACE. Starting the outflow on the
+    // GROUND under the rim instead dropped it by however far the hillside had
+    // already fallen away — on a sea cliff that is metres, and the runout then
+    // rendered as an isolated white shard hanging in air below the fall (the
+    // artefact on 4 of the map's 6 falls; measured gaps 1.4-8.3 m).
+    const startY = Math.max(0.6, baseY - 0.05);
     const reachesSea = T(Math.min(sMax, startS + 26)) < 1.1;
     // Into the sea: carry the sheet just under the waterline so the ocean takes
     // it, rather than fading it out in mid-air over the shallows.
@@ -618,7 +623,19 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       const y = startY - fallH * t;
       const sBal = startS + exitV * Math.sqrt((2 * fallH * t) / GRAVITY);
       const sFace = faceS(y - RIDE_LIFT * 0.8, startS) + FACE_CLEARANCE;
-      const s = Math.min(Math.max(sBal, Math.min(sFace, sMax)), sMax, prevS + 1.4, reachesSea ? sMax : sShore);
+      // Track the face while there IS a face — but below the waterline the
+      // "face" is the submerged shelf, which keeps sloping away for tens of
+      // metres, and chasing it walked the sheet out over open sea as a hose.
+      // At the surface the ocean takes the water, so the sheet holds station.
+      const above = y > 1.0;
+      const chase = above ? Math.min(sFace, sMax) : prevS;
+      // …and even against a real wall it never stands more than a metre clear:
+      // off a sea cliff the ballistic term keeps advancing while the face does
+      // not, and the outflow arced off the plinth into open air.
+      const s = Math.min(
+        Math.max(sBal, chase),
+        sMax, prevS + 1.4, above ? sFace + 1.0 : prevS + 0.4, reachesSea ? sMax : sShore,
+      );
       prevS = s;
       if (s > startS + 26) break;
       const contact = sFace <= sBal + 0.05;
@@ -628,6 +645,77 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
     }
   }
   if (runout.length > 1) sections.push(runout);
+
+  // ── the chain has to be CONTINUOUS ──────────────────────────────────────
+  // Spill, plunge, chute and runout are each solved on their own terms, and
+  // any disagreement between where one ends and the next begins renders as a
+  // hole with a detached white fragment under it. Two rules close that:
+  //   · every section starts EXACTLY where the previous one ended (the shared
+  //     cross-section is repeated, and any remaining distance is bridged with
+  //     real points rather than left as a jump);
+  //   · the chain ENDS on something — rock, or under the waterline. A tail
+  //     still hanging in air is walked down until it meets one of them.
+  for (let m = 1; m < sections.length; m++) {
+    const prev = sections[m - 1];
+    const next = sections[m];
+    const head = prev[prev.length - 1];
+    const start = next[0];
+    const gap = Math.hypot(start.s - head.s, start.y - head.y, start.lat - head.lat);
+    // Only ever bridge DOWNSTREAM and DOWNHILL: a link that ran backwards or
+    // uphill would fold the swept strip on itself.
+    if (gap <= 0.35 || start.s < head.s - 0.05 || start.y > head.y + 0.05) continue;
+    const steps = Math.min(30, Math.max(1, Math.ceil(gap / 0.7)));
+    const bridge: WPoint[] = [head];
+    for (let k = 1; k < steps; k++) {
+      const t = k / steps;
+      const s = head.s + (start.s - head.s) * t;
+      const y = head.y + (start.y - head.y) * t;
+      bridge.push({
+        s,
+        y,
+        halfW: head.halfW + (start.halfW - head.halfW) * t,
+        aer: Math.max(head.aer, start.aer),
+        alpha: Math.min(head.alpha, start.alpha),
+        vm: head.vm + (start.vm - head.vm) * t,
+        rim: start.rim,
+        // Riding rock only where the bridge genuinely hugs it; over a cliff the
+        // link is a free plunge and must not grow a trough hanging in air.
+        contact: y - T(s) < RIDE_LIFT + 0.6,
+        lat: head.lat + (start.lat - head.lat) * t,
+      });
+    }
+    next.unshift(...bridge);
+  }
+  // Only the OUTFLOW may be walked down like this: every other section ends in
+  // a pool, which is its anchor, and dragging one of those to the ground would
+  // pull the sheet straight through the pool it feeds.
+  if (runout.length > 1) {
+    const tail = sections[sections.length - 1];
+    let p = tail[tail.length - 1];
+    for (let guard = 0; guard < 40; guard++) {
+      // Anchored once the sheet is riding the rock again, or once it is under
+      // the waterline and the ocean takes it.
+      if (p.y <= Math.max(T(p.s) + RIDE_LIFT + 0.4, 0.3)) break;
+      const y = p.y - 0.62;
+      // Follows the wall down rather than walking out from it on a fixed slope:
+      // on the coastal plinth the face stands at one arc position for its whole
+      // height, so this drops the tail vertically into the sea.
+      const s = THREE.MathUtils.clamp(faceS(y, sCrest) + FACE_CLEARANCE, p.s, Math.min(sMax, p.s + 0.3));
+      p = {
+        s,
+        y,
+        halfW: p.halfW * 0.96,
+        aer: Math.min(1, p.aer + 0.05),
+        alpha: p.alpha,
+        vm: p.vm + 0.69,
+        rim: p.rim + 0.69,
+        contact: false,
+        lat: p.lat,
+      };
+      tail.push(p);
+      if (s >= sMax - 1e-3) break;
+    }
+  }
 
   // ── sweep the sheets ────────────────────────────────────────────────────
   const water = new WaterSink();
@@ -827,16 +915,93 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       prev = cols;
     }
   };
-  sections.forEach((section, k) => {
-    // Only the stretches that actually ride the rock get a channel; a plunge
-    // hangs in air by definition.
-    let run: WPoint[] = [];
-    for (const p of section) {
-      if (p.contact) run.push(p);
-      else { if (run.length > 1) pushTrough(run, k); run = []; }
+  /** The same sculpted-rock idiom, stood up on a FACE instead of laid along a
+   *  bed: a recessed channel between two proud buttresses, framing a sheet
+   *  pinned against a sheer wall.
+   *
+   *  This exists for the coastal skirt. The shore plinth is one smeared plane
+   *  of sand at terrain-mesh resolution, so the two Widow's Watch shore falls
+   *  poured down a blurry bare wall with nothing to say where the water was —
+   *  and the bed trough, which seats its columns on the ground under each path
+   *  point, collapses to a sliver there because a vertical wall gives every
+   *  point of the descent the same xz. Rows go by HEIGHT instead: faceS finds
+   *  where the wall stands at each one. */
+  const pushFaceChute = (yTop: number, yBot: number, sFrom: number, hw: number, tag: number) => {
+    const rows = Math.max(3, Math.min(18, Math.round((yTop - yBot) / 0.75)));
+    // Outboard buried in the wall · buttress standing proud · bed cut back in,
+    // measured along the descent axis (+s is out of the hill, into open air).
+    const lat = [-2.3, -1.5, -1.05, 0, 1.05, 1.5, 2.3];
+    const proud = [-0.7, 0.5, 0.12, -0.45, 0.12, 0.5, -0.7];
+    let prev: number[] | null = null;
+    for (let k = 0; k <= rows; k++) {
+      const y = yTop - (yTop - yBot) * (k / rows);
+      const s = faceS(y, sFrom);
+      const j = rng(seed + tag * 71 + k * 19);
+      const cols: number[] = [];
+      for (let c = 0; c < lat.length; c++) {
+        const abs = Math.abs(lat[c]);
+        const off = lat[c] * hw * (0.92 + j * 0.22);
+        const sv = s + proud[c] * (0.8 + j * 0.5);
+        const vx = px(sv) + ax * off;
+        const vz = pz(sv) + az * off;
+        // The lip of each buttress is stepped, so the band reads as broken
+        // strata rather than two smooth rails down the cliff.
+        const vy = y - (abs > 1.9 ? 0.3 + j * 0.4 : j * 0.22);
+        cols.push(rock.vert(vx, vy, vz, rockColor(vy, abs < 1.2 ? vy : vy + 1.5, j)));
+      }
+      if (prev) for (let c = 0; c < cols.length - 1; c++) rock.quad(prev[c], prev[c + 1], cols[c + 1], cols[c]);
+      prev = cols;
     }
-    if (run.length > 1) pushTrough(run, k);
-  });
+  };
+  /** How many face chutes this fall grew — reported on the site so a tour probe
+   *  can tell "the shore fall is framed in rock" from "it is not". */
+  let faceChutes = 0;
+  {
+    // Which rock a stretch of the descent gets is decided by the WALL behind it,
+    // not by the sheet: how far along the descent the face travels while the
+    // stretch gives up its height. The coastal plinth grades past 3 (it drops
+    // its whole height inside one terrain sample); an inland flank sits under
+    // 1.5, and scoring the sheet instead — a ballistic plunge is steep by
+    // construction — put a rock slab on the open flank of Crow's Perch, beside
+    // its fall. Sheer stretches get the face chute; the rest keep the bed
+    // trough wherever they actually ride the rock.
+    /** Follow the wall UP from a height for as long as it stays sheer. A chute
+     *  should frame the whole plinth, not the slice of it the path solver
+     *  happened to split off. */
+    const sheerTop = (y0: number): number => {
+      let y = y0;
+      for (let k = 0; k < 12; k++) {
+        if (faceS(y, sCrest) - faceS(y + 0.9, sCrest) > 0.6) break;
+        y += 0.9;
+      }
+      return y;
+    };
+    let run: WPoint[] = [];
+    let tag = 20;
+    const flush = () => {
+      if (run.length > 1) {
+        const yTop = run[0].y;
+        const yBot = run[run.length - 1].y;
+        const sTop = faceS(yTop, sCrest);
+        const faceGrade = (yTop - yBot) / Math.max(0.25, faceS(yBot, sTop) - sTop);
+        if (yTop - yBot > 2.2 && faceGrade > 2.5) {
+          pushFaceChute(sheerTop(yTop) + 0.4, Math.max(yBot - 0.5, -1.4), Math.max(sMin, sTop - 3), chanW, tag);
+          faceChutes++;
+        } else if (run[0].contact) {
+          pushTrough(run, tag);
+        }
+        tag++;
+      }
+      run = [];
+    };
+    for (const section of sections) {
+      for (const p of section) {
+        if (run.length > 0 && p.contact !== run[0].contact) flush();
+        run.push(p);
+      }
+      flush();
+    }
+  }
 
   // ── boulders (merged, so the whole outcrop stays one draw call) ─────────
   const boulderSrc = ctx.boulderGeo.getAttribute('position') as THREE.BufferAttribute;
@@ -996,6 +1161,7 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   site.userData.dir = { x: dirX, z: dirZ };
   site.userData.drop = drop;
   site.userData.steps = dams.length;
+  site.userData.faceChutes = faceChutes;
   return site;
 }
 

@@ -270,12 +270,29 @@ const OCEAN_FRAG = /* glsl */`
     float lapNoise = noise(wp * 0.3 + u_time * vec2(0.05, -0.04));
     float shoreBand = (1.0 - smoothstep(2.0, 11.0, sd)) * smoothstep(0.5, 0.9, lap * (0.55 + 0.45 * lapNoise));
     float waterline = 1.0 - smoothstep(0.0, 2.2, sd);
-    float shoreFoam = max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55);
+    // Shore foam is a lapping FILM over lit sand, never an opaque plate. Both
+    // ramps above are one-sided in sd, and sd measures the footprint
+    // ELLIPSE — so every lagoon, bay and concave coast (the Castaway Reach
+    // berth sits 15 m inside its island's ellipse) held them pinned at full
+    // strength across acres of open water: a moored ship read as grounded on
+    // snow and the atoll's reef slabs as pancakes floating on it. Capping what
+    // the shore band may contribute keeps the surf line and gives the shelf
+    // back its turquoise.
+    float shoreFoam = min(max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55), 0.4);
     foam = clamp(foam + shoreFoam, 0.0, 1.0);
 
     vec3 foamCol = vec3(0.88, 0.93, 1.0) * mix(1.0, 0.45, u_nightFactor)
                  * mix(vec3(1.0), vec3(1.0, 0.82, 0.66), u_twilightFactor * 0.7);
-    vec3 color = mix(base, foamCol, foam);
+    // …and what shore foam it does lay down is tinted toward the shallow water
+    // it floats on rather than paper white, so a 30 cm shelf reads as bright
+    // warm turquoise with the sand showing through it. Crest whitecaps out at
+    // sea are untouched and keep the full white.
+    vec3 shoreFilm = (shallowCol * 1.10 + vec3(0.12, 0.09, 0.04))
+                   * mix(1.0, 0.45, u_nightFactor)
+                   * mix(vec3(1.0), vec3(1.0, 0.82, 0.66), u_twilightFactor * 0.7);
+    vec3 shoreFoamCol = mix(shoreFilm, foamCol, 0.22);
+    float shoreShare = foam > 0.0001 ? clamp(shoreFoam / foam, 0.0, 1.0) : 0.0;
+    vec3 color = mix(base, mix(foamCol, shoreFoamCol, shoreShare), foam);
 
     // ── Storm spray: wind-torn white haze over the wave tops, present even
     //    where the crest-foam noise breaks up ─────────────────────────────

@@ -5,11 +5,45 @@
  * everything that makes the hollow READ as a cave is built here.
  */
 import * as THREE from 'three';
-import type { Island } from '../../../shared/types/index.js';
-import { CAVE_MOUTH_TRENCH_K, getCaveMouthCarve, isNearCaveMouthCut } from '../../../shared/utils/index.js';
-import { applyCaveTubeColors, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
+import type { Island, IslandCave } from '../../../shared/types/index.js';
+import { CAVE_MOUTH_TRENCH_K, getCaveMouthCarve, getIslandSurfaceY, isNearCaveMouthCut } from '../../../shared/utils/index.js';
+import { applyCaveTubeColors, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors, insideCaveShellVolume, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import type { CaveMouthCarve, IslandBuildCtx } from './context.js';
+
+/** Metres of natural hillside that must stand over a piece of INTERIOR cave
+ *  dressing. A segment's box is generated to fit the walkable warren, not the
+ *  rock available to hide it: wherever the hill is thin the box (and the tube
+ *  lofted around it) breaks the surface, and props placed from segment-LOCAL
+ *  coordinates alone came out with it — glowing crystals, a lit torch and the
+ *  treasure crate hanging in open air on a walkable summit (Skull Cove, ~x728
+ *  z-71, reproduced on two seeds). */
+const CAVE_DECOR_MIN_BURIAL = 1.5;
+
+/** The gate every interior prop passes before it is added.
+ *
+ * A prop may only exist where the cave REALLY is, which is two conditions, not
+ * one:
+ *  (a) inside the rock shell some segment DRAWS — `insideCaveShellVolume` is
+ *      the truth here (it is the volume bounded by the lofted tube, so "true"
+ *      means an eye at that point is looking at cave rock, not at the island);
+ *  (b) at least CAVE_DECOR_MIN_BURIAL below the NATURAL hillside, sampled at
+ *      the prop's own xz. The mouth trench is skipped deliberately: the trench
+ *      is open by design and the throat collar draws rock around it, so the
+ *      carved ground there is not evidence the prop is exposed.
+ */
+function makeCaveDecorGate(island: Island, cave: IslandCave) {
+  const cosCave = Math.cos(cave.rotation);
+  const sinCave = Math.sin(cave.rotation);
+  const caves = island.caves ?? [cave];
+  return (lx: number, ly: number, lz: number): boolean => {
+    const wx = cave.position.x + lx * cosCave + lz * sinCave;
+    const wy = cave.position.y + ly;
+    const wz = cave.position.z - lx * sinCave + lz * cosCave;
+    if (!caves.some((other) => insideCaveShellVolume(other, wx, wy, wz))) return false;
+    return wy <= getIslandSurfaceY(island, wx, wz, { skipMouthCarve: true }) - CAVE_DECOR_MIN_BURIAL;
+  };
+}
 
 /** Build the island's cave-mouth carve lookup. The mouth trench is carved by
  *  the SHARED heightfield (getIslandSurfaceY already returns the cut ground, so
@@ -60,6 +94,10 @@ export function buildCaves(ctx: IslandBuildCtx) {
     // segments (mouth + junction + main veins come first in island.caves).
     let caveTorchBudget = lowDetail ? 6 : 12;
     let caveGlowBudget = lowDetail ? 2 : 6;
+    /** Props the placement gate refused to build anywhere in this island's
+     *  warren (see makeCaveDecorGate). Reported on group.userData so a tour
+     *  probe can sweep every island, not just the one that was caught. */
+    let rejectedDecor = 0;
 
     for (const cave of island.caves) {
       const caveGroup = new THREE.Group();
@@ -73,7 +111,6 @@ export function buildCaves(ctx: IslandBuildCtx) {
       // Floor sits at the SAME depth physics stands you on (cave.floorY), so
       // your feet meet the visible slab instead of floating ~0.6-1.3m above it.
       const floorLocalY = cave.floorY - cave.position.y;
-      const ceilingLocalY = floorLocalY + ch;
       // Cave tunnel runs from local z=0 (entrance) to z=-cLen (back)
 
       // ── The mouth is an OPENING IN THE MOUNTAIN'S OWN ROCK — not a foreign
@@ -208,6 +245,33 @@ export function buildCaves(ctx: IslandBuildCtx) {
         exterior.add(collar);
       }
 
+      // ── Where interior dressing is ALLOWED to stand ───────────────────────
+      // Everything below is placed in segment-local coordinates, and a segment
+      // is generated to fit the walkable warren rather than the rock available
+      // to bury it. `siteDecor` slides a prop DEEPER along its own tunnel until
+      // the gate accepts it (deeper is always more overburden — the floor ramps
+      // into the hill) and reports failure when the whole segment is too thin.
+      const decorOk = makeCaveDecorGate(island, cave);
+      /** Floor height at a local z, following the segment's own ramp — the same
+       *  ramp the tube loft and the physics floor use. Props pinned to the NEAR
+       *  floor alone sank through (or hovered over) the floor deeper in. */
+      const floorAtZ = (lz: number) => floorLocalY
+        + (floorEndLocalY - floorLocalY) * THREE.MathUtils.clamp(-lz / Math.max(1e-3, cLen), 0, 1);
+      /** Resolve a prop's seat: keep its offset from the floor (or from the
+       *  ceiling), walk it deeper until the gate passes, and hand back the
+       *  accepted local y/z — or null, which means "do not build this one". */
+      const siteDecor = (lx: number, lz: number, offset: number, fromCeiling = false): { y: number; z: number } | null => {
+        const step = cLen / 10;
+        for (let k = 0; k < 10; k++) {
+          const z = lz - k * step;
+          if (z < -cLen + 0.3) break;
+          const y = floorAtZ(z) + (fromCeiling ? ch : 0) + offset;
+          if (decorOk(lx, y, z)) return { y, z };
+        }
+        rejectedDecor++;
+        return null;
+      };
+
       // ── Stalactite + stalagmite accents ──
       const stoneAccentMat = new THREE.MeshStandardMaterial({ color: caveRockCol.clone().multiplyScalar(1.35).getHex(), roughness: 1, flatShading: true });
       const accentCount = lowDetail ? 3 : 6;
@@ -216,41 +280,43 @@ export function buildCaves(ctx: IslandBuildCtx) {
         const lx = (rng(s * 403) - 0.5) * cR * 1.4;
         const stalH = 0.4 + rng(s * 407) * 0.7;
         const fromCeiling = rng(s * 409) > 0.5;
+        const seat = siteDecor(lx, lz, fromCeiling ? -stalH * 0.5 : stalH * 0.5, fromCeiling);
+        if (!seat) continue;
         const stal = new THREE.Mesh(
           new THREE.ConeGeometry(0.16 + rng(s * 411) * 0.12, stalH, 5),
           stoneAccentMat,
         );
-        if (fromCeiling) {
-          stal.position.set(lx, ceilingLocalY - stalH * 0.5, lz);
-          stal.rotation.x = Math.PI;
-        } else {
-          stal.position.set(lx, floorLocalY + stalH * 0.5, lz);
-        }
+        stal.position.set(lx, seat.y, seat.z);
+        if (fromCeiling) stal.rotation.x = Math.PI;
         caveGroup.add(stal);
       }
 
       // ── Torch sconce on the side wall + warm point light so the inside isn't pitch-black ──
       const torchSide = rng(cw * 7) > 0.5 ? 1 : -1;
-      const torchZ = -cLen * 0.55;
-      const torchMount = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), torchMat);
-      torchMount.position.set(torchSide * (cR - 0.1), floorLocalY + ch * 0.65, torchZ);
-      caveGroup.add(torchMount);
-      const torchStaff = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.55, 5), torchMat);
-      torchStaff.rotation.z = -torchSide * 0.45;
-      torchStaff.position.set(torchSide * (cR - 0.18), floorLocalY + ch * 0.78, torchZ);
-      caveGroup.add(torchStaff);
-      const flame = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), flameMat);
-      flame.position.set(torchSide * (cR - 0.34), floorLocalY + ch * 0.95, torchZ);
-      caveGroup.add(flame);
-      // Underground is dark regardless of day/night, so caves get their OWN
-      // always-on warm torch light (parented to the group → only lit when the
-      // cave is in view range, so no global light-budget blowout).
-      if (caveTorchBudget > 0) {
-        caveTorchBudget--;
-        const torchLight = new THREE.PointLight(0xffb060, 4.4, cLen + cR * 3.0, 1.4);
-        torchLight.position.copy(flame.position);
-        registerBudgetLight(torchLight);
-        caveGroup.add(torchLight);
+      const torchSeat = siteDecor(torchSide * (cR - 0.1), -cLen * 0.55, ch * 0.65);
+      if (torchSeat) {
+        const torchZ = torchSeat.z;
+        const torchBaseY = torchSeat.y - ch * 0.65;
+        const torchMount = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), torchMat);
+        torchMount.position.set(torchSide * (cR - 0.1), torchSeat.y, torchZ);
+        caveGroup.add(torchMount);
+        const torchStaff = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.55, 5), torchMat);
+        torchStaff.rotation.z = -torchSide * 0.45;
+        torchStaff.position.set(torchSide * (cR - 0.18), torchBaseY + ch * 0.78, torchZ);
+        caveGroup.add(torchStaff);
+        const flame = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), flameMat);
+        flame.position.set(torchSide * (cR - 0.34), torchBaseY + ch * 0.95, torchZ);
+        caveGroup.add(flame);
+        // Underground is dark regardless of day/night, so caves get their OWN
+        // always-on warm torch light (parented to the group → only lit when the
+        // cave is in view range, so no global light-budget blowout).
+        if (caveTorchBudget > 0) {
+          caveTorchBudget--;
+          const torchLight = new THREE.PointLight(0xffb060, 4.4, cLen + cR * 3.0, 1.4);
+          torchLight.position.copy(flame.position);
+          registerBudgetLight(torchLight);
+          caveGroup.add(torchLight);
+        }
       }
       // Sparse glowing crystals deeper in — cool blue emissive clusters with a
       // faint light each, so the tunnel reads as lit but moody, not a flat box.
@@ -261,17 +327,19 @@ export function buildCaves(ctx: IslandBuildCtx) {
           const cz = -cLen * (0.4 + c * 0.28) - rng(c * 91) * 1.2;
           const cx = (rng(c * 93) - 0.5) * cR * 1.5;
           const onCeil = rng(c * 95) > 0.6;
-          const cy = onCeil ? ceilingLocalY - 0.3 : floorLocalY + 0.1;
+          const seat = siteDecor(cx, cz, onCeil ? -0.3 : 0.1, onCeil);
+          if (!seat) continue;
+          const cy = seat.y;
           for (let s = 0; s < 3; s++) {
             const shard = new THREE.Mesh(new THREE.ConeGeometry(0.06 + rng(c * 97 + s) * 0.05, 0.3 + rng(c * 99 + s) * 0.4, 5), crystalMat);
-            shard.position.set(cx + (rng(s * 13) - 0.5) * 0.4, cy + (onCeil ? -0.15 : 0.15), cz + (rng(s * 17) - 0.5) * 0.4);
+            shard.position.set(cx + (rng(s * 13) - 0.5) * 0.4, cy + (onCeil ? -0.15 : 0.15), seat.z + (rng(s * 17) - 0.5) * 0.4);
             shard.rotation.set(rng(s * 19) * 0.6 - 0.3 + (onCeil ? Math.PI : 0), rng(s * 21) * Math.PI, rng(s * 23) * 0.6 - 0.3);
             caveGroup.add(shard);
           }
           if (caveGlowBudget > 0) {
             caveGlowBudget--;
             const glow = new THREE.PointLight(0x5fbfff, 1.1, 6.5, 1.8);
-            glow.position.set(cx, cy, cz);
+            glow.position.set(cx, cy, seat.z);
             registerBudgetLight(glow);
             caveGroup.add(glow);
           }
@@ -281,18 +349,21 @@ export function buildCaves(ctx: IslandBuildCtx) {
       // ── Treasure chest tucked at the back of the cave (visual only — gameplay
       //     chests still spawn from server). Only in the dead-end treasure room. ──
       if ((cave.hasBackWall ?? true) && rng(cw * 11) > 0.35 && !lowDetail) {
-        const goldChestMat = new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 });
-        const goldLidMat = new THREE.MeshStandardMaterial({ color: 0xc9a84c, roughness: 0.5, metalness: 0.6 });
-        const treasure = new THREE.Group();
-        treasure.position.set(0, floorLocalY + 0.35, -cLen + 1.0);
-        treasure.rotation.y = (rng(cw * 13) - 0.5) * 0.6;
-        const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.55, 0.7), goldChestMat);
-        body.position.y = 0;
-        treasure.add(body);
-        const lid = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.18, 0.74), goldLidMat);
-        lid.position.y = 0.32;
-        treasure.add(lid);
-        caveGroup.add(treasure);
+        const chestSeat = siteDecor(0, -cLen + 1.0, 0.35);
+        if (chestSeat) {
+          const goldChestMat = new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 });
+          const goldLidMat = new THREE.MeshStandardMaterial({ color: 0xc9a84c, roughness: 0.5, metalness: 0.6 });
+          const treasure = new THREE.Group();
+          treasure.position.set(0, chestSeat.y, chestSeat.z);
+          treasure.rotation.y = (rng(cw * 13) - 0.5) * 0.6;
+          const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.55, 0.7), goldChestMat);
+          body.position.y = 0;
+          treasure.add(body);
+          const lid = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.18, 0.74), goldLidMat);
+          lid.position.y = 0.32;
+          treasure.add(lid);
+          caveGroup.add(treasure);
+        }
       }
 
       // Cave interiors are boxy meshes carved into a steep hillside — their
@@ -309,5 +380,6 @@ export function buildCaves(ctx: IslandBuildCtx) {
       (group.userData.caveGroups ??= []).push(caveGroup);
       group.add(caveGroup);
     }
+    group.userData.caveDecorRejects = rejectedDecor;
   }
 }

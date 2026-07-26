@@ -144,13 +144,13 @@ export function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, c
   return geo;
 }
 
-/** Is (wx, wy, wz) inside the ROCK SHELL VOLUME another segment's tube draws —
+/** Is (wx, wy, wz) inside the ROCK SHELL VOLUME a segment's tube draws —
  *  i.e. would a sightline through this point have to pass through that tube's
  *  surface to escape? Deliberately CONSERVATIVE: the nominal superellipse (no
  *  meander, no rock jitter, no widening) is a strict subset of every ring the
  *  loft actually emits, because all three of those displacements are
  *  outward-only. So "true" always means genuinely covered. */
-function insideCaveShellVolume(other: IslandCave, wx: number, wy: number, wz: number): boolean {
+export function insideCaveShellVolume(other: IslandCave, wx: number, wy: number, wz: number): boolean {
   const oLen = other.length ?? 10;
   const oR = other.interiorRadius ?? 3.0;
   const oH = other.height;
