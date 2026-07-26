@@ -50,6 +50,10 @@ import {
   isNearHelm as isSharedNearHelm,
   isNearSailStation as isSharedNearSailStation,
   findBraceStationDir,
+  isStandingOnShipDeck,
+  isSwimBoardingOwnHull,
+  SHIP_BOARD_LADDER_REACH,
+  SHIP_BOARD_LATCH_REACH,
   toShipLocalPoint,
   toShipWorldPoint,
   countOpenHoles,
@@ -222,6 +226,18 @@ const ONE_SHOT_MIN_INTERVAL: Partial<Record<OneShotAction, number>> = {
   trade: 0.3,
   barrelTakeAll: 0.3,
 };
+/** How long a queued climb stays live after [X] at a ladder. A press is an
+ *  INTENTION, not a single-frame assertion: nearShipId is recomputed every
+ *  physics tick, so validating one instantaneous press ate 8 presses in a row
+ *  ("14 seconds of dead X at a visible Climb Ladder prompt"). */
+const BOARD_LATCH_TIME = 2.0;
+/** Feet on your own deck for this long with the server still calling you
+ *  un-boarded (walking up the dock gangway) → you are aboard. */
+const DECK_AUTO_BOARD_TIME = 0.5;
+/** Weighing anchor from the HELM (W at the wheel) takes this much longer than
+ *  manning the bow capstan yourself — the capstan stays the proper way, the
+ *  helm is the no-soft-lock way. */
+const HELM_ANCHOR_RAISE_FACTOR = 1.35;
 /** Dock-local z of the swim-up ladder as a fraction of dock length — the SEAWARD
  *  end. Must stay in step with getIslandDockSwimLadderPoint in shared/utils
  *  (the client prompt anchors on that point; this gate must accept where it is). */
@@ -335,6 +351,12 @@ export class Match {
   /** Axe-swing accumulation per player — resets when the target prop changes
    *  or the swing stops (progress is per-prop, not a global charge). */
   private harvestProgressByPlayer = new Map<string, { islandId: string; propId: number; t: number }>();
+  /** QUEUED CLIMB per player: sim time until which a [X] at a ladder keeps
+   *  trying to put her aboard (see BOARD_LATCH_TIME). */
+  private boardLatchUntil = new Map<string, number>();
+  /** How long each player's feet have rested on her own deck while the server
+   *  still had her un-boarded (gangway walk-on → auto-board). */
+  private deckAutoBoardTimer = new Map<string, number>();
 
   constructor(opts: MatchOptions) {
     this.id = opts.matchId;
@@ -358,6 +380,7 @@ export class Match {
       this.lastCountdownBroadcast = -1;
     } else {
       this.state.phase = 'playing';
+      this.playingSinceWallMs = Date.now();
     }
     this.lastTickWallMs = performance.now();
     this.tickBacklogSec = 0;
@@ -392,6 +415,7 @@ export class Match {
     }
     if (this.countdownRemaining > 0) return;
     this.state.phase = 'playing';
+    this.playingSinceWallMs = Date.now();
     this.state.countdownRemaining = 0;
     this.broadcast({
       type: 'match_horn',
@@ -404,6 +428,12 @@ export class Match {
    * Fixed-step sim driven by a wall-clock accumulator. setInterval fires late
    * under load, so we run enough fixed-dt steps per callback for sim time to
    * track wall time, capped at MAX_CATCHUP_TICKS to avoid a death spiral.
+   *
+   * Dropping the surplus backlog is the right call — grinding it out is the death
+   * spiral — but it is also the mechanism that turns CPU starvation into SILENT
+   * slow motion. Every dropped tick is a second of match that will never be
+   * simulated, and nothing used to say so: an observed match ran at ~7% real time
+   * with a clean log. So count what we throw away and say it out loud.
    */
   private runTicks() {
     const now = performance.now();
@@ -418,9 +448,48 @@ export class Match {
     }
     // After an extreme stall, drop the surplus backlog instead of grinding through it.
     if (this.tickBacklogSec > step * MAX_CATCHUP_TICKS) {
+      const dropped = Math.floor((this.tickBacklogSec - step * MAX_CATCHUP_TICKS) / step);
       this.tickBacklogSec = step * MAX_CATCHUP_TICKS;
+      this.noteDroppedTicks(dropped);
     }
   }
+
+  /** Ticks this match owed and will never run — the sim-dilation counter. */
+  private droppedTicks = 0;
+  /** Wall ms of the last dilation warning, so a starved host logs once a second
+   *  instead of sixty times a second (which would itself cost sim time). */
+  private lastDeficitWarnAt = 0;
+
+  private noteDroppedTicks(dropped: number): void {
+    if (dropped <= 0) return;
+    this.droppedTicks += dropped;
+    const now = Date.now();
+    if (now - this.lastDeficitWarnAt < 1000) return;
+    this.lastDeficitWarnAt = now;
+    const behind = (this.droppedTicks * SERVER_TICK_MS) / 1000;
+    console.warn(
+      `[Match ${this.id.slice(0, 6)}] SIM DILATION — dropped ${dropped} tick(s) this callback,`
+      + ` ${this.droppedTicks} total (${behind.toFixed(1)}s of match never simulated);`
+      + ` sim clock ${this.simLagSeconds().toFixed(1)}s behind wall`,
+    );
+  }
+
+  /**
+   * How far the sim clock has fallen behind the wall clock since the horn.
+   * Nonzero means players are living in slow motion — the single number that
+   * makes an overloaded host visible from outside the process.
+   */
+  simLagSeconds(): number {
+    if (this.playingSinceWallMs === null) return 0;
+    const wallElapsed = (Date.now() - this.playingSinceWallMs) / 1000;
+    return Math.max(0, wallElapsed - this.t);
+  }
+
+  /** Total ticks dropped by the catch-up cap over this match's life. */
+  droppedTickCount(): number { return this.droppedTicks; }
+
+  /** Wall ms at which the sim went live, or null while still counting down. */
+  private playingSinceWallMs: number | null = null;
 
   stop(): void {
     if (this.tickInterval) {
@@ -1154,6 +1223,9 @@ export class Match {
     // the seaward face (holes + flooding), the SoT damage loop.
     this.storm.update(dt, this.state.storm, this.state.ships, this.state.players, {
       openHoleAt: (ship, local, count) => { this.physics.openHoleAt(ship, local, count, 'storm'); },
+      // Physics already worked out who is sheltered this tick (it runs first) —
+      // one answer for seabed, reef and tempest alike.
+      isSheltered: (shipId) => this.physics.isEnvironmentallySheltered(shipId),
     });
     this.syncTreasureChests();
     this.updateKegs(dt);
@@ -1381,6 +1453,10 @@ export class Match {
 
     this.updateBlockingState(player, input);
 
+    // Queued climb + gangway walk-on. Runs before the [X] dispatch so a latched
+    // press can complete on the very tick the geometry allows it.
+    this.updateBoardingLatch(player, dt);
+
     // Revive a downed crewmate: hold interact (~4 s) next to the body with the
     // revive action selected. Contributions are resolved in updateDownedAndRevives.
     if (
@@ -1508,7 +1584,7 @@ export class Match {
         return;
       }
 
-      if (this.tryBoardFromLadder(player)) return;
+      if (this.requestBoard(player)) return;
 
       if (this.handleGoldHoarderInteraction(player)) return;
 
@@ -1743,6 +1819,19 @@ export class Match {
         let steerInput = 0;
         if (input.left) steerInput -= 1;
         if (input.right) steerInput += 1;
+        // ── WEIGH ANCHOR FROM THE WHEEL ──────────────────────────────────────
+        // A solo captain at the helm with the anchor down held W, watched the
+        // canvas fall and the ship sit there, and had no way to learn why: the
+        // capstan is at the BOW and [X] at the helm means "leave the helm".
+        // So W at the wheel calls her crew to the capstan first — a shade slower
+        // than manning it yourself, then the same W makes sail.
+        if (ship.anchored && input.forward) {
+          ship.anchorRaiseProgress = Math.min(1, ship.anchorRaiseProgress + dt / (SHIP.ANCHOR_RAISE_TIME * HELM_ANCHOR_RAISE_FACTOR));
+          if (ship.anchorRaiseProgress >= 1) {
+            ship.anchored = false;
+            ship.anchorRaiseProgress = 1;
+          }
+        }
         // Slower than the rope stations — the helm trim is a convenience, the
         // rigging (with crew) is the fast way to make or shorten sail.
         if (input.forward) ship.sailHeight = Math.min(ship.sailIntegrity, ship.sailHeight + 0.22 * dt);
@@ -3743,9 +3832,33 @@ export class Match {
     return true;
   }
 
-  private tryBoardFromLadder(player: Player): boolean {
-    if (!player.nearShipId || (player.state !== 'swimming' && player.onShipId !== null)) return false;
-    const targetShip = this.getAliveShip(player.nearShipId);
+  /**
+   * The hull this pirate may climb right now, or null. `reach` is the ladder
+   * band; her OWN hull also answers anywhere along it (bow, stern, far rail) so
+   * a swimmer can't circle her ship forever hunting for rungs.
+   *
+   * Deliberately NOT gated on player.nearShipId: that flag is recomputed every
+   * physics tick, and a press landing on the wrong tick is what made boarding
+   * feel broken. The geometry is re-checked here, which is the real authority.
+   */
+  private findBoardableShip(player: Player, reach: number): Ship | null {
+    if (player.state !== 'swimming' && player.onShipId !== null) return null;
+    if (player.state !== 'swimming' && player.state !== 'alive') return null;
+    const ownShip = this.getAliveShip(player.shipId);
+    if (ownShip && !ownShip.sinking && isSwimBoardingOwnHull(player, ownShip)) return ownShip;
+    let best: { ship: Ship; distance: number } | null = null;
+    for (const ship of this.state.ships) {
+      if (!ship.alive || ship.sinking) continue;
+      if (ship.id === player.onShipId) continue;
+      const ladder = getNearestShipBoardingLadder(ship, player.position);
+      if (!ladder || ladder.distance > reach) continue;
+      if (!best || ladder.distance < best.distance) best = { ship, distance: ladder.distance };
+    }
+    return best?.ship ?? null;
+  }
+
+  private tryBoardFromLadder(player: Player, reach: number = SHIP_BOARD_LADDER_REACH): boolean {
+    const targetShip = this.findBoardableShip(player, reach);
     if (!targetShip) return false;
     const ladder = getNearestShipBoardingLadder(targetShip, player.position);
     if (!ladder) return false;
@@ -3766,7 +3879,64 @@ export class Match {
     player.cannonFlightTimer = 0;
     player.cannonBallistic = false;
     if (!targetShip.crewIds.includes(player.id)) targetShip.crewIds.push(player.id);
+    this.boardLatchUntil.delete(player.id);
+    this.deckAutoBoardTimer.delete(player.id);
     return true;
+  }
+
+  /**
+   * [X] at a ladder = "I am climbing". If the instant grant fails, QUEUE it:
+   * for BOARD_LATCH_TIME the server keeps trying with a slightly wider ladder
+   * reach, so a press that lands between two physics ticks (or half a metre off
+   * the rungs on a swell) still puts her aboard instead of vanishing.
+   * Returns true when the climb happened this very press.
+   */
+  private requestBoard(player: Player): boolean {
+    if (this.tryBoardFromLadder(player)) return true;
+    // Only queue it if a climb is plausible from here — otherwise the latch
+    // would silently board her the moment she drifted past any hull.
+    if (this.findBoardableShip(player, SHIP_BOARD_LATCH_REACH)) {
+      this.boardLatchUntil.set(player.id, this.t + BOARD_LATCH_TIME);
+    }
+    return false;
+  }
+
+  /** Runs every tick per player: retries a queued climb, and auto-boards a
+   *  pirate whose feet are already on her own deck (the dock gangway walk-on,
+   *  which used to leave her logically ashore with a Climb Ladder prompt). */
+  private updateBoardingLatch(player: Player, dt: number) {
+    const latchUntil = this.boardLatchUntil.get(player.id);
+    if (latchUntil !== undefined) {
+      if (player.onShipId !== null && player.state !== 'swimming') {
+        this.boardLatchUntil.delete(player.id);
+      } else if (this.t > latchUntil) {
+        this.boardLatchUntil.delete(player.id);
+      } else if (this.tryBoardFromLadder(player, SHIP_BOARD_LATCH_REACH)) {
+        return;
+      }
+    }
+
+    // ── Gangway walk-on: standing on your own planking IS being aboard ──
+    if (player.onShipId !== null || player.state !== 'alive') {
+      this.deckAutoBoardTimer.delete(player.id);
+      return;
+    }
+    const ownShip = this.getAliveShip(player.shipId);
+    if (!ownShip || ownShip.sinking || !isStandingOnShipDeck(player, ownShip)) {
+      this.deckAutoBoardTimer.delete(player.id);
+      return;
+    }
+    const held = (this.deckAutoBoardTimer.get(player.id) ?? 0) + dt;
+    if (held < DECK_AUTO_BOARD_TIME) {
+      this.deckAutoBoardTimer.set(player.id, held);
+      return;
+    }
+    this.deckAutoBoardTimer.delete(player.id);
+    this.boardLatchUntil.delete(player.id);
+    player.onShipId = ownShip.id;
+    player.state = 'alive';
+    player.shipBoundaryGraceTimer = 0;
+    if (!ownShip.crewIds.includes(player.id)) ownShip.crewIds.push(player.id);
   }
 
   /** Resolves [X] to the action the client HUD selected; each branch validates range / state. */
@@ -3799,7 +3969,7 @@ export class Match {
       case 'gold_hoarder':
         return this.handleGoldHoarderInteraction(player);
       case 'board':
-        return this.tryBoardFromLadder(player);
+        return this.requestBoard(player);
       case 'dock':
         return this.tryClimbIslandDockFromWater(player);
       case 'mermaid':

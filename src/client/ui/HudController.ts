@@ -101,6 +101,195 @@ export class HudController {
       this.crewPulseTimer = null;
     }
     this.view.ui.playerCount.classList.remove('crew-pulse');
+    this.resetRespawnCountdown();
+    this.clearFeed();
+    this.resetSimRateTracking();
+    this.setOverloadChip(false);
+  }
+
+  // ─── Server-load chip ────────────────────────────────────────
+  /**
+   * A loaded host does not slow down honestly — it slows down INVISIBLY. The sim
+   * runs a bounded number of catch-up steps per timer callback and drops the rest
+   * of the backlog, so CPU starvation turns into slow motion with no warning
+   * anywhere: an observed match ran at ~7% real time and looked, from inside,
+   * like a game where everything had simply become very heavy.
+   *
+   * The tell is already on the wire. Every snapshot carries `serverTime`, so if
+   * the sim clock advances slower than the client's wall clock, the sim is
+   * dilating — no new message type, no new payload field, just reading what was
+   * always there. A client-side main-thread stall does NOT trip it: while the
+   * client is frozen `serverTime` keeps arriving and jumps forward by the length
+   * of the freeze, so the ratio comes back at ~1 rather than below it.
+   */
+  private static readonly SIM_RATE_WINDOW_SEC = 5;
+  /** Deficit (seconds of sim time owed) that counts as overloaded, and the
+   *  quieter level it has to fall back under before the chip goes away. */
+  private static readonly SIM_DEFICIT_TRIP_SEC = 1;
+  private static readonly SIM_DEFICIT_CLEAR_SEC = 0.4;
+  /** Hold the trip condition this long before saying it out loud — one frame of
+   *  bad arithmetic on the way out of a stall must never flash the chip. */
+  private static readonly SIM_TRIP_DWELL_MS = 1_500;
+
+  private simRateSamples: Array<{ server: number; wall: number }> = [];
+  private lastSampledServerTime = -1;
+  private simTripSince = 0;
+  private overloadChip: HTMLDivElement | null = null;
+  private overloadShown = false;
+
+  /**
+   * Clear the sampler WHOLE. lastSampledServerTime has to go back to -1 with the
+   * samples: it is the "have I already counted this reading" gate, so leaving it
+   * behind on a reset means the very next reading looks like a duplicate, no
+   * sample is ever taken again, and the detector goes silently blind. Found
+   * exactly that way — the chip stopped being able to re-arm after a reset.
+   */
+  private resetSimRateTracking(): void {
+    this.simRateSamples.length = 0;
+    this.lastSampledServerTime = -1;
+    this.simTripSince = 0;
+  }
+
+  private updateServerLoadChip(): void {
+    const state = this.view.state;
+    const now = performance.now() / 1000;
+    // Only the live sim advances serverTime; during the staged start it is 0 by
+    // design and would read as an infinite deficit.
+    if (!state || state.phase !== 'playing' || !Number.isFinite(state.serverTime)) {
+      this.resetSimRateTracking();
+      this.setOverloadChip(false);
+      return;
+    }
+    if (state.serverTime !== this.lastSampledServerTime) {
+      this.lastSampledServerTime = state.serverTime;
+      this.simRateSamples.push({ server: state.serverTime, wall: now });
+    }
+    while (this.simRateSamples.length > 2
+      && now - this.simRateSamples[0].wall > HudController.SIM_RATE_WINDOW_SEC) {
+      this.simRateSamples.shift();
+    }
+    const first = this.simRateSamples[0];
+    const last = this.simRateSamples[this.simRateSamples.length - 1];
+    if (!first || !last) return;
+    // Measure against NOW, not against the newest sample: a server that has gone
+    // quiet altogether owes exactly as much sim time as one that is crawling.
+    const wallSpan = now - first.wall;
+    if (wallSpan < HudController.SIM_RATE_WINDOW_SEC * 0.5) return;
+    const deficit = wallSpan - (last.server - first.server);
+
+    if (deficit >= HudController.SIM_DEFICIT_TRIP_SEC) {
+      if (this.simTripSince === 0) this.simTripSince = performance.now();
+      if (performance.now() - this.simTripSince >= HudController.SIM_TRIP_DWELL_MS) {
+        this.setOverloadChip(true, deficit);
+      }
+    } else if (deficit <= HudController.SIM_DEFICIT_CLEAR_SEC) {
+      this.simTripSince = 0;
+      this.setOverloadChip(false);
+    }
+  }
+
+  private setOverloadChip(on: boolean, deficitSec = 0): void {
+    if (!on) {
+      if (this.overloadChip) this.overloadChip.style.display = 'none';
+      this.overloadShown = false;
+      return;
+    }
+    if (!this.overloadChip) {
+      const chip = document.createElement('div');
+      chip.id = 'server-load-chip';
+      chip.style.cssText = [
+        // Below the storm clock, in the top-centre status stack where the eye
+        // already goes for "what is happening to me right now" — and clear of the
+        // compass bezel, which owns the very top of the screen.
+        'position:fixed', 'top:88px', 'left:50%', 'transform:translateX(-50%)',
+        'z-index:60', 'pointer-events:none',
+        'padding:3px 10px', 'border-radius:999px',
+        'background:rgba(58,20,12,0.86)', 'border:1px solid rgba(255,138,106,0.5)',
+        'color:#ffb37a', 'font-size:0.6rem', 'letter-spacing:0.14em',
+        'text-transform:uppercase', 'white-space:nowrap',
+        'text-shadow:0 2px 6px rgba(0,0,0,0.6)',
+      ].join(';');
+      document.body.appendChild(chip);
+      this.overloadChip = chip;
+    }
+    // Repaint the number only when the whole second changes — this runs per frame.
+    const behind = Math.max(1, Math.round(deficitSec));
+    const label = `⚠ Server overloaded — sim ${behind}s behind`;
+    if (!this.overloadShown || this.overloadChip.textContent !== label) {
+      this.overloadChip.textContent = label;
+    }
+    this.overloadChip.style.display = 'block';
+    this.overloadShown = true;
+  }
+
+  // ─── Respawn countdown ───────────────────────────────────────
+  /**
+   * The respawn count is painted off a LOCAL DEADLINE armed from the server's
+   * timer, not off the raw `player.respawnTimer` in the last snapshot.
+   *
+   * Painting the raw field meant the number could only move when a full snapshot
+   * landed and was processed, and both halves of that stall: island streaming
+   * pins the main thread in bursts, and a loaded host dilates the sim itself.
+   * Observed: "Respawning in 20" held for 60+ seconds, then a silent elimination
+   * with the same stale digits still on screen. The staged match start already
+   * hit exactly this and already solved it this way (see
+   * Game.onMatchCountdownTick) — one number per real second, in order, whatever
+   * the network is doing.
+   *
+   * Monotonic, like the start countdown: the deadline is only ever pulled
+   * EARLIER. A snapshot burst that arrives out of order would otherwise walk the
+   * count backwards. A LATER server timer means a fresh death, which
+   * resetRespawnCountdown handles by disarming when the player stops respawning.
+   */
+  private respawnDeadlineMs = 0;
+  /** Last respawnTimer the server sent — a change is a fresh reading to anchor on. */
+  private respawnServerTimer = -1;
+
+  private resetRespawnCountdown(): void {
+    this.respawnDeadlineMs = 0;
+    this.respawnServerTimer = -1;
+  }
+
+  /**
+   * True when the server has deliberately PAUSED this respawn: it holds the timer
+   * while the home ship is outside the storm ring (Match.updateRespawns). Same
+   * geometry as the server's isShipInStormSafeZone, so the HUD says "held" for
+   * the same reason the timer is not moving instead of pretending to count.
+   */
+  private isRespawnHeld(player: Player): boolean {
+    const home = this.view.shipsById.get(player.shipId ?? '');
+    if (!home) return false;
+    if (!home.alive || home.sinking) return true;
+    const storm = this.view.state?.storm;
+    if (!storm) return false;
+    return dist2D(home.position.x, home.position.z, storm.centerX, storm.centerZ) > storm.safeRadius - 5;
+  }
+
+  private respawnCountdownText(player: Player): { prompt: string; label: string } {
+    const now = performance.now();
+    const serverSeconds = Math.max(0, player.respawnTimer);
+    if (serverSeconds !== this.respawnServerTimer) {
+      this.respawnServerTimer = serverSeconds;
+      const candidate = now + serverSeconds * 1000;
+      this.respawnDeadlineMs = this.respawnDeadlineMs === 0
+        ? candidate
+        : Math.min(this.respawnDeadlineMs, candidate);
+    }
+
+    const held = this.isRespawnHeld(player);
+    if (held) {
+      return {
+        prompt: 'Respawn held — your ship is in the storm',
+        label: 'The count resumes the moment your hull is back inside the ring',
+      };
+    }
+    const remaining = Math.ceil((this.respawnDeadlineMs - now) / 1000);
+    if (remaining <= 0) {
+      // The local clock ran out but the server has not spawned us yet — say so
+      // honestly rather than freezing on a number that stopped meaning anything.
+      return { prompt: 'Respawning…', label: 'Waiting on the ship' };
+    }
+    return { prompt: `Respawning in ${remaining}`, label: 'Returning to your ship' };
   }
 
   /** Flash the CREWS AFLOAT chip — the counter used to drop 10 → 7 → 5 in total silence. */
@@ -199,6 +388,7 @@ export class HudController {
     if (!player) return;
 
     this.updateBarrelPanel(player, ship);
+    this.updateServerLoadChip();
 
     const timerSeconds = this.view.getStormTimerSeconds();
     const lastPhase = this.view.state.storm.phase >= STORM_PHASES.length - 1;
@@ -438,11 +628,23 @@ export class HudController {
     const lookInteraction = this.view.getLookInteraction(player, ship, nearbyCannon, repairHole);
     this.view.visibleInteractKind = null;
 
-    if (player.state === 'respawning') {
+    if (player.state !== 'respawning') this.resetRespawnCountdown();
+
+    // Eliminated is checked FIRST and owns the centre outright. It used to fall
+    // through this chain, so the last thing painted before the kill — usually a
+    // respawn count the player was still reading — sat there unchanged while they
+    // were silently out of the match.
+    if (player.state === 'eliminated') {
       this.view.ui.interactPrompt.style.display = 'block';
-      this.view.ui.interactPrompt.textContent = `Respawning in ${Math.max(1, Math.ceil(player.respawnTimer))}`;
+      this.view.ui.interactPrompt.textContent = 'Crew eliminated — spectating';
       this.view.ui.contextLabel.style.display = 'block';
-      this.view.ui.contextLabel.textContent = 'Returning to your ship';
+      this.view.ui.contextLabel.textContent = 'Your ship is gone — there is no respawn from here';
+    } else if (player.state === 'respawning') {
+      const countdown = this.respawnCountdownText(player);
+      this.view.ui.interactPrompt.style.display = 'block';
+      this.view.ui.interactPrompt.textContent = countdown.prompt;
+      this.view.ui.contextLabel.style.display = 'block';
+      this.view.ui.contextLabel.textContent = countdown.label;
     } else if (player.atCannon) {
       this.view.ui.interactPrompt.style.display = 'block';
       this.view.ui.interactPrompt.textContent = '[X] Leave Cannon · [SPACE] Launch Yourself';
@@ -455,8 +657,16 @@ export class HudController {
       this.view.ui.interactPrompt.style.display = 'block';
       this.view.ui.interactPrompt.textContent = '[X] Leave Helm';
       this.view.ui.contextLabel.style.display = 'block';
-      if (ship) {
-        this.view.ui.contextLabel.textContent = `${ship.anchored ? 'Anchored' : 'At the wheel'} · A/D steer · compass on starboard side`;
+      if (ship?.anchored) {
+        // The dead end that ate a whole playtest: W at the wheel drops canvas,
+        // the ship doesn't move, and the only anchor hint lives in a far-right
+        // panel while [X] here means "leave the helm". Say it where she's
+        // looking, and name the key that actually works from this station.
+        const raised = Math.round((ship.anchorRaiseProgress ?? 0) * 100);
+        this.view.ui.contextLabel.textContent =
+          `ANCHOR DOWN — hold [W] to weigh anchor (${raised}%) · or [X] off the wheel and hold [X] at the bow capstan`;
+      } else if (ship) {
+        this.view.ui.contextLabel.textContent = 'At the wheel · A/D steer · W/S make and shorten sail · compass on starboard side';
       } else {
         this.view.ui.contextLabel.textContent = 'At the wheel';
       }
@@ -484,6 +694,10 @@ export class HudController {
       this.view.ui.contextLabel.textContent = 'Carrying treasure · sell at Gold Hoarder or stow on ship';
     } else {
       this.view.ui.interactPrompt.style.display = 'none';
+      // Hidden is not enough: the element KEPT its last text, so anything that
+      // reads it (the debug bar, a QA probe, a screen reader) reported a prompt
+      // that was not on offer — "[X] Open Chest" following a swimmer out to sea.
+      this.view.ui.interactPrompt.textContent = '';
       // No busywork hints while bleeding out — the DOWNED banner is the guidance.
       const ambientLabel = player.state === 'downed'
         ? ''
@@ -841,22 +1055,117 @@ export class HudController {
     return 'Objective: raid ships, sell treasure, and stay ahead of the storm';
   }
 
+  // ─── Event feed ──────────────────────────────────────────────
+  /** How long a line sits before it fades, and the fade itself. */
+  private static readonly FEED_HOLD_MS = 3_000;
+  private static readonly FEED_FADE_MS = 300;
+  /** Live lines keyed by their exact text, so a repeat can find its own row. */
+  private feedRows = new Map<string, {
+    el: HTMLDivElement;
+    countEl: HTMLSpanElement | null;
+    count: number;
+    fadeTimer: number;
+    dropTimer: number;
+  }>();
+
+  private clearFeed(): void {
+    for (const row of this.feedRows.values()) {
+      window.clearTimeout(row.fadeTimer);
+      window.clearTimeout(row.dropTimer);
+      row.el.remove();
+    }
+    this.feedRows.clear();
+  }
+
+  /**
+   * One line in the event feed.
+   *
+   * Repeats COALESCE into a ×N counter instead of stacking. Stowing a haul of
+   * chests fired five byte-identical "Chest stowed aboard: base 690 gold before…"
+   * lines at once, which filled the whole panel with the same sentence — and
+   * because every one of them was clipped at the same word, the panel managed to
+   * be both entirely full and entirely uninformative.
+   *
+   * And the lines WRAP. The panel's stylesheet rule is `white-space: nowrap` with
+   * an ellipsis, so any message longer than a narrow column lost its payload —
+   * the gold number in that very line is past the cut. Wrapping is set here,
+   * inline, beside the other per-line styling this method already owns.
+   */
   pushFeed(message: string, color = '#e7e1d4') {
+    const existing = this.feedRows.get(message);
+    if (existing) {
+      existing.count += 1;
+      if (existing.countEl) existing.countEl.textContent = ` ×${existing.count}`;
+      // Repeats restart the dwell and lift the line back to the top: the newest
+      // event belongs where the eye already is.
+      existing.el.style.opacity = '1';
+      existing.el.style.transform = '';
+      this.view.ui.killFeed.prepend(existing.el);
+      window.clearTimeout(existing.fadeTimer);
+      window.clearTimeout(existing.dropTimer);
+      this.armFeedExpiry(message, existing);
+      return;
+    }
+
     const item = document.createElement('div');
-    item.textContent = message;
+    const text = document.createElement('span');
+    text.textContent = message;
+    item.appendChild(text);
+    const countEl = document.createElement('span');
+    countEl.style.opacity = '0.8';
+    countEl.style.fontWeight = '700';
+    item.appendChild(countEl);
     item.style.color = color;
     item.style.marginBottom = '8px';
     item.style.textShadow = '0 2px 6px rgba(0, 0, 0, 0.55)';
+    // Beat the panel's nowrap/ellipsis rule — a truncated payline is a line that
+    // cost a slot and said nothing.
+    item.style.whiteSpace = 'normal';
+    item.style.overflow = 'visible';
+    item.style.textOverflow = 'clip';
+    item.style.overflowWrap = 'anywhere';
+    item.style.lineHeight = '1.25';
+    item.style.textAlign = 'right';
     this.view.ui.killFeed.prepend(item);
+
+    const row = { el: item, countEl, count: 1, fadeTimer: 0, dropTimer: 0 };
+    this.feedRows.set(message, row);
+    this.armFeedExpiry(message, row);
+
     while (this.view.ui.killFeed.childElementCount > 5) {
-      this.view.ui.killFeed.lastElementChild?.remove();
+      const oldest = this.view.ui.killFeed.lastElementChild;
+      if (!oldest) break;
+      this.dropFeedElement(oldest);
     }
-    window.setTimeout(() => {
-      item.style.opacity = '0';
-      item.style.transform = 'translateY(-6px)';
-      item.style.transition = 'opacity 200ms ease, transform 200ms ease';
-    }, 3000);
-    window.setTimeout(() => item.remove(), 3300);
+  }
+
+  private armFeedExpiry(
+    message: string,
+    row: { el: HTMLDivElement; fadeTimer: number; dropTimer: number },
+  ): void {
+    row.fadeTimer = window.setTimeout(() => {
+      row.el.style.opacity = '0';
+      row.el.style.transform = 'translateY(-6px)';
+      row.el.style.transition = `opacity ${HudController.FEED_FADE_MS}ms ease, transform ${HudController.FEED_FADE_MS}ms ease`;
+    }, HudController.FEED_HOLD_MS);
+    row.dropTimer = window.setTimeout(() => {
+      // Forget the key too, or the next identical event would bump a ×N counter
+      // on a row that is no longer on screen.
+      if (this.feedRows.get(message) === row) this.feedRows.delete(message);
+      row.el.remove();
+    }, HudController.FEED_HOLD_MS + HudController.FEED_FADE_MS);
+  }
+
+  /** Evict one element from the feed, cancelling whatever timers it still owns. */
+  private dropFeedElement(el: Element): void {
+    for (const [key, row] of this.feedRows) {
+      if (row.el !== el) continue;
+      window.clearTimeout(row.fadeTimer);
+      window.clearTimeout(row.dropTimer);
+      this.feedRows.delete(key);
+      break;
+    }
+    el.remove();
   }
 
   showVictory(kills: number, gold: number) {

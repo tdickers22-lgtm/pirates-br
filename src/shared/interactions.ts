@@ -1,7 +1,7 @@
 import { FLOODING, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
 import type { Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
 import {
-  angleWrap, clamp, dist2D, getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckRaiseAt, getShipDeckWalkHalfWidth, getShipDeckY, getShipHoldFloorY, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
+  angleWrap, clamp, dist2D, getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckRaiseAt, getShipDeckWalkHalfWidth, getShipDeckY, getShipHoldFloorY, isInsideSwimHullFootprint, getSwimHullVerticalT, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
 
 type ShipStats = (typeof SHIP_STATS)[keyof typeof SHIP_STATS];
 type ShipLocalPoint = { x: number; z: number };
@@ -377,6 +377,57 @@ export function isNearCrowNestLadder(player: PlayerLike, ship: ShipLike): boolea
     && Math.abs(local.z - mastZ) < maxAbsZ
     && y >= deckY - 0.35
     && y < deckY + stats.height * 4.2;
+}
+
+// ── Boarding reach (CANONICAL) ───────────────────────────────────────────────
+// One truth for "can this pirate climb aboard from here", used by the client
+// prompt, the server's [X] grant and the server's queued-climb latch. A press
+// that shows a prompt must always be honoured, so the prompt band and the grant
+// band are the same numbers.
+
+/** Ladder reach for an instantaneous [X] press (swimmer or islander). */
+export const SHIP_BOARD_LADDER_REACH = 3.6;
+/** Ladder reach while a queued climb is still live (see the board latch): a
+ *  press is an INTENTION, so drifting a metre off the rungs mid-swell must not
+ *  silently eat it. */
+export const SHIP_BOARD_LATCH_REACH = 4.6;
+/** How far out from her OWN hull a swimmer counts as "at the ship". The two
+ *  side ladders stay the visual, but a pirate who has already reached her own
+ *  hull must never have to circle it hunting for rungs — the old ladder-only
+ *  attach left a dead zone along the bow, stern and the far rail. */
+export const OWN_HULL_SWIM_BOARD_MARGIN = 1.9;
+
+/** A swimmer hugging her own hull anywhere around it (bow, stern, either rail). */
+export function isSwimBoardingOwnHull(
+  player: Pick<Player, 'position' | 'state' | 'shipId'>,
+  ship: ShipLike,
+): boolean {
+  if (player.state !== 'swimming') return false;
+  if (player.shipId !== ship.id) return false;
+  const stats = SHIP_STATS[ship.type];
+  const local = toShipLocalPoint(player.position, ship);
+  const verticalT = getSwimHullVerticalT(player.position.y, ship.position.y, stats, ship.type);
+  return isInsideSwimHullFootprint(stats, local.x, local.z, OWN_HULL_SWIM_BOARD_MARGIN, verticalT);
+}
+
+/**
+ * True when the pirate's feet are resting on this hull's walkable deck (weather
+ * deck, quarterdeck dais or the hold below) even though the server has not
+ * logged her as aboard. Walking up the dock gangway does exactly that, and the
+ * server uses this to auto-board her instead of leaving her standing on her own
+ * ship with a "Climb Ladder" prompt.
+ */
+export function isStandingOnShipDeck(
+  player: Pick<Player, 'position'>,
+  ship: Pick<Ship, 'position' | 'rotation' | 'type'>,
+  tolerance = 0.6,
+): boolean {
+  const stats = SHIP_STATS[ship.type];
+  const local = toShipLocalPoint(player.position, ship);
+  if (Math.abs(local.z) > stats.length * 0.34 + 0.1) return false;
+  if (Math.abs(local.x) > getShipDeckWalkHalfWidth(stats, local.z, 0.1)) return false;
+  const floorY = getShipFloorYAt(player.position as Vec3, ship, local);
+  return player.position.y >= floorY - tolerance && player.position.y <= floorY + tolerance + 0.9;
 }
 
 // ── World proximity (CANONICAL) ──────────────────────────────────────────────

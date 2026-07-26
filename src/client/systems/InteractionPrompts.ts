@@ -2,6 +2,19 @@
  * The look-at interaction arbiter: scores every candidate prompt (helm, sails,
  * cannons, ladders, chests, kegs, doors, harvest…), resolves which one the HUD
  * shows, and wires the clickable prompt element.
+ *
+ * THREE RULES the arbiter must never break (each one was a live bug):
+ *  1. HANDS-ON WINS. A station inside arm's reach that you are looking at beats
+ *     anything further away. The old pure-look score (dot − distance·0.035) was
+ *     effectively "highest dot wins", so standing 1.2 m from the wheel and
+ *     LOOKING AT IT offered the brace rail 2 m off — [X] braced the yard while
+ *     the HUD read "[X] Take Helm".
+ *  2. ONE ARBITRATION PER FRAME. The HUD prompt and the input packet's
+ *     interactIntent are two separate calls; when they re-scored independently
+ *     they could disagree, so the press did something the screen never offered.
+ *     Both now read the same memoized winner.
+ *  3. STICKY WINNER. A challenger has to beat the standing winner by a margin,
+ *     so two near-tied candidates can't alternate every frame.
  */
 import * as THREE from 'three';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
@@ -18,10 +31,36 @@ import {
   isNearCrowNestLadder,
   isNearHelm,
   isNearSailStation,
+  isSwimBoardingOwnHull,
+  SHIP_BOARD_LADDER_REACH,
   toShipLocalPoint,
 } from '../../shared/interactions.js';
 import type { ClientInteractKind } from '../core/Game.js';
 import type { UiRefs } from '../ui/UiRefs.js';
+
+/** Eye→station distance inside which you are HANDS ON the thing: it owns [X]. */
+const HANDS_ON_REACH = 1.6;
+/** Priority classes. Higher always beats lower, whatever the look score. */
+const TIER_AMBIENT = 0;
+const TIER_LOOK = 1;
+const TIER_HANDS_ON = 2;
+/** Margin a challenger must beat the standing winner by, per tier (tier 1 is in
+ *  dot units, tier 2 in metres) — the anti-flicker hysteresis. */
+const SWITCH_MARGIN: Record<number, number> = { [TIER_AMBIENT]: 0.05, [TIER_LOOK]: 0.09, [TIER_HANDS_ON]: 0.16 };
+/** Memo window for one arbitration. Long enough that the HUD pass and the input
+ *  pass of the SAME frame always agree, short enough to feel instant. */
+const ARBITER_MEMO_MS = 40;
+
+type InteractionCandidate = {
+  prompt: string;
+  label: string;
+  score: number;
+  kind: ClientInteractKind;
+  tier: number;
+  distance: number;
+};
+
+export type ResolvedInteraction = { prompt: string; label: string; kind: ClientInteractKind };
 
 export type InteractionView = {
   readonly ui: UiRefs;
@@ -64,6 +103,11 @@ export type InteractionView = {
 export class InteractionPrompts {
   constructor(private readonly view: InteractionView) {}
 
+  /** The winner that is currently on screen — hysteresis anchor (rule 3). */
+  private sticky: { kind: ClientInteractKind; tier: number } | null = null;
+  /** One arbitration per frame, shared by the HUD and the input packet (rule 2). */
+  private memo: { at: number; key: string; result: ResolvedInteraction | null } | null = null;
+
   resolveCurrentInteractKind(): ClientInteractKind | null {
     if (!this.view.state) return null;
     const player = this.view.getLocalPlayer();
@@ -81,13 +125,34 @@ export class InteractionPrompts {
   }
 
 
+  /**
+   * The [X] offer for this frame. Memoized (rule 2): the HUD pass and the input
+   * pass must never arbitrate independently, or the prompt on screen and the
+   * intent on the wire can name two different stations.
+   */
   getLookInteraction(
     player: Player,
     ship: Ship | null,
     nearbyCannon: number | null,
     repairHole: ShipHole | null,
-  ): { prompt: string; label: string; kind: ClientInteractKind } | null {
-    const candidates: Array<{ prompt: string; label: string; score: number; kind: ClientInteractKind }> = [];
+  ): ResolvedInteraction | null {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const key = `${player.id}|${ship?.id ?? '-'}|${nearbyCannon ?? '-'}|${repairHole?.id ?? '-'}`;
+    if (this.memo && this.memo.key === key && now - this.memo.at < ARBITER_MEMO_MS) {
+      return this.memo.result;
+    }
+    const result = this.arbitrate(player, ship, nearbyCannon, repairHole);
+    this.memo = { at: now, key, result };
+    return result;
+  }
+
+  private arbitrate(
+    player: Player,
+    ship: Ship | null,
+    nearbyCannon: number | null,
+    repairHole: ShipHole | null,
+  ): ResolvedInteraction | null {
+    const candidates: InteractionCandidate[] = [];
     // A FOUNDERING ship offers no work: every station/repair/board prompt on
     // it is a lie (the server refuses, the crew has splashed out) — pressing
     // a stale "[X] Use Cannon" on a sinking deck read as "X threw me in the
@@ -177,7 +242,15 @@ export class InteractionPrompts {
     if (player.nearChestId && !player.carryingChestId) {
       const chestPos = this.view.getChestWorldPoint(player.nearChestId);
       const chest = this.view.findChestById(player.nearChestId);
-      if (chestPos && chest && chest.carriedByPlayerId !== player.id) {
+      // RANGE-GATE the chest against the chest's OWN position, not just the
+      // render point: a stale nearChestId (the id survives on the wire while a
+      // snapshot is in flight, and it rode respawns) used to keep "[X] Open
+      // Chest" glued to the screen out in open water, where the server refuses.
+      const chestInReach = !!chest
+        && !chest.opened
+        && dist2D(player.position.x, player.position.z, chest.position.x, chest.position.z)
+          <= PLAYER.INTERACT_RANGE + 0.7;
+      if (chestPos && chest && chestInReach && chest.carriedByPlayerId !== player.id) {
         const digging = chest.buried && chest.digProgress < 1;
         const prompt = digging
           ? (player.hasShovel ? '[Hold X] Dig' : 'Find a shovel')
@@ -195,16 +268,38 @@ export class InteractionPrompts {
       }
     }
 
-    if (!player.onShipId && player.nearShipId && this.view.state) {
-      const targetShip = this.view.state.ships.find((candidate) => candidate.id === player.nearShipId && candidate.alive);
+    if (!player.onShipId && this.view.state) {
+      // Own hull first: a swimmer touching her own ship ANYWHERE (bow, stern,
+      // either rail) can climb aboard — the ladder-only attach left a dead band
+      // where you could circle your own hull forever with no prompt at all.
+      const ownShip = player.shipId
+        ? this.view.state.ships.find((candidate) => candidate.id === player.shipId && candidate.alive && !candidate.sinking) ?? null
+        : null;
+      const huggingOwnHull = !!ownShip && isSwimBoardingOwnHull(player, ownShip);
+      const targetShip = huggingOwnHull
+        ? ownShip
+        : (player.nearShipId
+          ? this.view.state.ships.find((candidate) => candidate.id === player.nearShipId && candidate.alive) ?? null
+          : null);
       if (targetShip) {
         const ladder = getNearestShipBoardingLadder(targetShip, player.position);
-        // Mirror the server's acceptance (PhysicsSystem nearShipId gate):
-        // swimmers board within 3.5m of the LADDER point, islanders within
-        // 3.0m. The old deck-height candidate showed [X] in spots where
-        // tryBoardFromLadder refused — pressing did nothing.
-        const maxLadderDist = player.state === 'swimming' ? 3.5 : 3.0;
-        if (ladder && ladder.distance <= maxLadderDist) {
+        if (huggingOwnHull) {
+          // You have a hand on your own planking: the offer stands whatever you
+          // are facing (the rungs may be behind your head) but yields to
+          // anything actually within reach, like a floating chest.
+          candidates.push({
+            prompt: '[X] Climb Aboard',
+            label: 'Haul yourself up the side of your ship',
+            kind: 'board',
+            tier: TIER_HANDS_ON,
+            distance: 0.9,
+            score: -0.9,
+          });
+        } else if (ladder && ladder.distance <= SHIP_BOARD_LADDER_REACH) {
+          // Mirror the server's acceptance (SHIP_BOARD_LADDER_REACH, shared):
+          // the prompt band and the grant band are one number, so a press that
+          // shows a prompt is always honoured (and the server LATCHES it for
+          // ~2s so a press between two physics ticks is never swallowed).
           const boardPoint = new THREE.Vector3(ladder.x, targetShip.position.y + SHIP_STATS[targetShip.type].height * 0.4, ladder.z);
           this.pushInteractionCandidate(candidates, player, boardPoint, 7.0, 0.35, '[X] Climb Ladder', 'Board from the side ladder', 'board');
         }
@@ -298,7 +393,8 @@ export class InteractionPrompts {
           prompt = '[X] Fill the bucket from the bilge';
           label = `Bilge flooding ${pct}% · scoop a bucketful out`;
         }
-        candidates.push({ prompt, label, score: -0.5, kind: 'bail' });
+        // Ambient (no geometry of its own): only ever the fallback offer.
+        candidates.push({ prompt, label, score: -0.5, kind: 'bail', tier: TIER_AMBIENT, distance: 0 });
       }
 
       if (player.carryingChestId && player.onShipId === ship.id) {
@@ -501,12 +597,29 @@ export class InteractionPrompts {
       }
     }
 
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0] ?? null;
+    // Rule 1: reach beats look. Tier first, then the tier's own score.
+    candidates.sort((a, b) => (b.tier - a.tier) || (b.score - a.score));
+    let winner = candidates[0] ?? null;
+
+    // Rule 3: the standing winner keeps the prompt unless a challenger in the
+    // same tier clears the margin. Promotion to a higher tier is always instant
+    // (you just put your hands on something).
+    if (winner && this.sticky && this.sticky.kind !== winner.kind) {
+      const incumbent = candidates.find((candidate) => candidate.kind === this.sticky!.kind);
+      if (
+        incumbent
+        && incumbent.tier === winner.tier
+        && winner.score - incumbent.score < (SWITCH_MARGIN[winner.tier] ?? 0.09)
+      ) {
+        winner = incumbent;
+      }
+    }
+    this.sticky = winner ? { kind: winner.kind, tier: winner.tier } : null;
+    return winner ? { prompt: winner.prompt, label: winner.label, kind: winner.kind } : null;
   }
 
   pushInteractionCandidate(
-    candidates: Array<{ prompt: string; label: string; score: number; kind: ClientInteractKind }>,
+    candidates: InteractionCandidate[],
     player: Player,
     point: THREE.Vector3,
     maxDistance: number,
@@ -524,7 +637,19 @@ export class InteractionPrompts {
     const dot = toPoint.normalize().dot(lookDir);
     if (dot < minDot) return;
 
-    candidates.push({ prompt, label, score: dot - distance * 0.035, kind });
+    // Hands-on candidates rank by DISTANCE (look only breaks ties): whatever
+    // your hands are on is what [X] does. Everything further away keeps the
+    // classic look-dominated score so a chest/tree/door across the deck still
+    // needs to be aimed at.
+    const handsOn = distance <= HANDS_ON_REACH;
+    candidates.push({
+      prompt,
+      label,
+      kind,
+      distance,
+      tier: handsOn ? TIER_HANDS_ON : TIER_LOOK,
+      score: handsOn ? dot * 0.3 - distance : dot - distance * 0.035,
+    });
   }
 
   bindInteractPromptClick() {
