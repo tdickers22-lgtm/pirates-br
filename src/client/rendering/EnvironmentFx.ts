@@ -17,6 +17,7 @@ import {
   sampleWind,
 } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
+import { propBaseLift } from '../world/island/PropScatterer.js';
 import type { AssetName } from '../assets/AssetLibrary.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { LanternEmitter, StoryCutsceneRefs, WindWispRecord } from '../core/Game.js';
@@ -137,8 +138,9 @@ const RAIN_GUST_K2 = (Math.PI * 2) / RAIN_BAND_SPAN;     // ~384m slow swell
 // vertical veil with a straight rim, no cloud, no rain, no gradient. Read from
 // a deck it was an edge in the sky rather than weather, and at night it was a
 // hard-edged hole where the stars stopped — a fresh player assumed the renderer
-// had broken. This shell stands just outside it and gives the boundary an
-// identity: a ragged cloud BANK whose underside hangs at ~40% of the shell
+// had broken. That cylinder is GONE; this shell replaced it outright (nothing
+// else is drawn at the ring any more) and gives the boundary an identity:
+// a ragged cloud BANK whose underside hangs at ~40% of the shell
 // height, a rain CURTAIN scrolling out of that bank down to the water, and a
 // desaturating sea-level MIST band, all dissolving into the scene fog with
 // range so the far side of the ring is haze rather than a crisp second wall.
@@ -385,14 +387,23 @@ export class EnvironmentFx {
   }
 
   /** Live clone of an instanced prop at its exact registry transform, parented
-   *  into the island group (same space the InstancedMesh slots live in). */
+   *  into the island group (same space the InstancedMesh slots live in).
+   *
+   *  `propBaseLift` is the SAME sink the scatterer applies to the instance: a
+   *  boulder GLB is authored with its lowest vertex up to half a metre above its
+   *  origin, so a clone seated on the raw ground height stood taller than the
+   *  instance it replaced — the rock visibly hopped on the first axe strike. */
   buildHarvestClone(island: Island, prop: IslandProp): THREE.Object3D | null {
     const slot = prop.id !== undefined ? this.view.islandPropInstances.get(island.id)?.get(prop.id) : undefined;
     const parent = slot?.inst.parent ?? this.view.islandMeshes.get(island.id);
     if (!parent) return null;
     const node = this.view.buildPropInstance(
       prop.type as AssetName,
-      new THREE.Vector3(prop.x - island.position.x, getPropGroundY(island, prop), prop.z - island.position.z),
+      new THREE.Vector3(
+        prop.x - island.position.x,
+        getPropGroundY(island, prop) - propBaseLift(prop.type, prop.scale),
+        prop.z - island.position.z,
+      ),
       prop.yaw,
       prop.scale,
     );
@@ -1498,7 +1509,9 @@ export class EnvironmentFx {
       fog: false,
     });
     const mesh = new THREE.Mesh(geo, mat);
-    // After the legacy wall/halo so the front paints over their flat veil.
+    // The front IS the ring now — the flat textured wall/halo cylinders it used
+    // to paint over are gone. This order only has to keep it under the near-field
+    // rain (lines/haze/rings at 7-9), which falls in front of the bank.
     mesh.renderOrder = 3;
     mesh.frustumCulled = false;
     mesh.visible = false;
@@ -1537,8 +1550,9 @@ export class EnvironmentFx {
     const radius = Math.max(16, storm.safeRadius);
     const mesh = this.ensureStormFront();
     const mat = this.stormFrontMat!;
-    // Sits a hair OUTSIDE the legacy wall so the two composite instead of
-    // z-fighting, and low enough that storm troughs can't open a gap under it.
+    // Sits a hair OUTSIDE the safe radius — the boundary you are judged against
+    // stays a hair inside the weather you can see — and low enough that storm
+    // troughs can't open a gap under it.
     mesh.position.set(storm.centerX, FRONT_HEIGHT * 0.5 - FRONT_BASE_DROP, storm.centerZ);
     mesh.scale.set(radius * 1.006, 1, radius * 1.006);
     const atmosphere = this.view.renderer.getAtmosphere();

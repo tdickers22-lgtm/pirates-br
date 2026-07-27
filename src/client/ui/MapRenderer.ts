@@ -45,6 +45,12 @@ const CHART_LOD_ZOOM = 2.5;
 const CHART_LOD_BUDGET_MS = 4;
 /** How many hi-res island charts to keep before evicting the oldest. */
 const CHART_LOD_KEEP = 6;
+/** Base island bitmaps rasterized per drawn frame. The whole Reach — fourteen
+ *  islands, each a grid of surface samples — used to be rasterized on the ONE
+ *  frame the minimap first drew, a hitch landing right on top of the join. Two
+ *  a frame spreads it over a handful of frames on a map nobody is reading yet;
+ *  an island with no bitmap yet simply waits its turn. */
+const CHART_BASE_BUILDS_PER_FRAME = 2;
 
 export type MapView = {
   readonly ui: UiRefs;
@@ -75,6 +81,8 @@ export class MapRenderer {
    *  CHART_LOD_ZOOM so the land stops being a blocky upscaled smear. */
   private readonly islandChartLodCache = new Map<string, ChartBitmap>();
   private readonly islandChartLodInFlight = new Map<string, ChartLod>();
+  /** Base rasterizations spent on the frame being drawn (see the constant). */
+  private chartBuildsThisFrame = 0;
   private treasureChartSignature = '';
 
   /** Where the fullscreen chart is centred, in world units. `null` follows the
@@ -207,17 +215,21 @@ export class MapRenderer {
 
   drawMaps() {
     if (!this.view.state) return;
+    // One frame, one rasterization budget — the fullscreen pass below draws the
+    // same islands and shares it rather than doubling it.
+    this.chartBuildsThisFrame = 0;
     const minimapCtx = this.view.ui.minimapCanvas.getContext('2d');
     if (minimapCtx) {
       this.renderBattleMap(minimapCtx, this.view.ui.minimapCanvas.width, this.view.ui.minimapCanvas.height, false);
     }
-    if (this.mapOpen) this.drawFullMap();
+    if (this.mapOpen) this.drawFullMap(true);
   }
 
   /** The opened map redraws every frame while it's up, so your arrow and the
    *  other ships track live as you move/turn (the minimap stays throttled). */
-  drawFullMap() {
+  drawFullMap(shareFrameBudget = false) {
     if (!this.view.state || !this.mapOpen) return;
+    if (!shareFrameBudget) this.chartBuildsThisFrame = 0;
     const mapCtx = this.view.ui.mapCanvas.getContext('2d');
     if (mapCtx) {
       this.renderBattleMap(mapCtx, this.view.ui.mapCanvas.width, this.view.ui.mapCanvas.height, true);
@@ -1212,12 +1224,18 @@ export class MapRenderer {
   }
 
   /** Best chart bitmap available at this zoom — the sharp LOD once it exists,
-   *  the base one meanwhile, so the chart never blanks while it sharpens. */
-  private pickChartBitmap(island: Island, zoom: number): ChartBitmap {
+   *  the base one meanwhile, so the chart never blanks while it sharpens.
+   *  Null means "not rasterized yet and this frame's budget is spent": the
+   *  island is skipped and drawn on one of the next few frames instead. */
+  private pickChartBitmap(island: Island, zoom: number): ChartBitmap | null {
     if (zoom > CHART_LOD_ZOOM) {
       const lod = this.islandChartLodCache.get(island.id);
       if (lod) return lod;
     }
+    const cached = this.islandChartCache.get(island.id);
+    if (cached) return cached;
+    if (this.chartBuildsThisFrame >= CHART_BASE_BUILDS_PER_FRAME) return null;
+    this.chartBuildsThisFrame += 1;
     return this.getIslandChartBitmap(island);
   }
 
@@ -1319,8 +1337,12 @@ export class MapRenderer {
   ) {
     // Draw the island's TRUE above-water shape from a cached land-mask bitmap
     // (archipelago islets separate, crescent bays open, twin saddles) instead of
-    // a single smooth footprint ring.
-    this.stampChartBitmap(ctx, this.pickChartBitmap(island, fullscreen ? this.mapZoom : 1), island, centerX, centerY, scale);
+    // a single smooth footprint ring. An island whose bitmap has not been
+    // rasterized yet takes no marks at all this frame — a dock and a station
+    // floating on bare water read as a bug; a moment's wait does not.
+    const bitmap = this.pickChartBitmap(island, fullscreen ? this.mapZoom : 1);
+    if (!bitmap) return;
+    this.stampChartBitmap(ctx, bitmap, island, centerX, centerY, scale);
 
     if (island.dock) {
       const dock = island.dock;

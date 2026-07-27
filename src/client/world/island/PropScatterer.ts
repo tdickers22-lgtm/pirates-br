@@ -189,8 +189,13 @@ function propShadowRadius(type: string, scale: number): number {
  * biggest rocks in the world floated by half a metre no matter how perfectly
  * the ground was sampled — the other half of the P1 dockside boulder. Sink the
  * visual by its own offset; every other prop measures 0 here and is untouched.
+ *
+ * Exported because the scatterer is not the only place a prop is seated: the
+ * harvest promotion swaps an instanced boulder for a live GLB clone, and a
+ * clone dropped straight on `getPropGroundY` would pop UP by exactly this much
+ * the moment the axe first bit. Every seat helper must subtract the same lift.
  */
-function propBaseLift(type: string, scale: number): number {
+export function propBaseLift(type: string, scale: number): number {
   const bounds = assets.bounds(type as AssetName);
   return bounds ? Math.max(0, bounds.min.y) * scale : 0;
 }

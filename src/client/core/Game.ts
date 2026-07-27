@@ -1745,8 +1745,12 @@ export class Game {
     };
 
     this.network.onGameOver = (payload) => {
-      const result = payload as { died?: boolean; winnerId?: string | null; kills?: number; gold?: number; reason?: string; targetGold?: number };
+      const result = payload as { died?: boolean; winnerId?: string | null; kills?: number; gold?: number; reason?: string; targetGold?: number; cause?: string };
       const player = this.getLocalPlayer();
+      // Match.ts already knows what finished you (ship_sunk / storm / drowned /
+      // killed); hand it over so the death screen names the real cause instead
+      // of falling back to the client's read of the frame before the flip.
+      this.hud.noteEliminationCause(result.cause ?? null);
       if (result.died) {
         this.audio.playDefeat();
         this.returnToLobbyAfterLoss(result.kills ?? player?.kills ?? 0, result.gold ?? player?.gold ?? 0, 'Crew lost');
