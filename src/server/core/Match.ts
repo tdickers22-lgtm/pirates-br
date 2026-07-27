@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -235,9 +235,41 @@ const CUTLASS_LUNGE_DAMAGE = 50;
 const CUTLASS_LUNGE_IMPULSE = 40;
 /** Kill credit for prior damage expires after this long (storm/drown deaths). */
 const KILL_CREDIT_WINDOW_SECONDS = 90;
-/** What finished a crew, threaded to the client on `game_over` so the death
- *  screen can name the real cause instead of always saying SHIP SUNK. */
-type EliminationCause = 'ship_sunk' | 'storm' | 'drowned' | 'killed';
+/**
+ * What actually took the last of a pirate's health.
+ *
+ * Read off the world at the moment the damage lands, NOT off the pirate's
+ * position at the moment they die: those are different questions and the
+ * second one lies. A pirate mauled by a shark in the shallows, or shredded by
+ * the tempest and then swimming back inside the ring to bleed out, is not a
+ * drowning — but "where were you standing when you hit zero" calls both of them
+ * one. The death screen is the one screen a losing player reads, so it gets the
+ * real answer.
+ */
+type DamageSource =
+  | 'storm' | 'shark' | 'drowned' | 'fall' | 'fire'
+  | 'cannon' | 'gunshot' | 'blade' | 'explosion';
+/** What finished a crew, threaded to the client on `game_over` (elimination)
+ *  and on `kill_event` (a respawn still gets told what got it). */
+type EliminationCause = DamageSource | 'ship_sunk' | 'killed';
+/** A damage tag older than this is stale evidence — the world moved on, so the
+ *  positional reading is the better answer. Deaths land within a tick or two of
+ *  the blow that caused them; this is deliberately generous to bleed-out. */
+const DAMAGE_SOURCE_WINDOW_SECONDS = 12;
+/**
+ * Which hull a crew of `size` is handed at the dock.
+ *
+ * SHIP_STATS is written for crews: a Cutter's two guns and 0.7 turn rate are one
+ * pair of hands' worth of ship, a Man-o'-War's eight guns and 0.25 turn rate
+ * assume four. The world still rolls all three classes for its bot crews and its
+ * silhouettes — this decides only what a JOINING crew sails, and today every
+ * human joins alone. When crews start sharing a hull, pass the real crew size.
+ */
+function hullForCrewSize(size: number): 'sloop' | 'brigantine' | 'galleon' {
+  if (size <= 1) return 'sloop';
+  if (size <= 3) return 'brigantine';
+  return 'galleon';
+}
 /** Mast ladder climb rate — fraction of the full ladder per second (W up, S
  *  down). ~1.8s deck→nest on a sloop keeps the nest a commitment, not a snap. */
 const MAST_CLIMB_RATE = 0.55;
@@ -330,6 +362,10 @@ export class Match {
   private matchStatDeltas = new Map<string, PlayerMatchDeltas>();
   /** Order of elimination — earliest first. Used for placement on match end. */
   private eliminationOrder: string[] = [];
+  /** Sim time each held respawn started holding (home hull outside the ring).
+   *  Cleared the moment the hold lifts — a hold that keeps starting over is a
+   *  crew sailing in and out of the wall, not a marooned solo. */
+  private respawnHoldSince = new Map<string, number>();
 
   // ── Hold cargo / bounty / sunken spoils (see shared/cargo.ts) ──────────
   /** Monotonic source for the short spoil ids that ride the wire ('sp7'). */
@@ -383,6 +419,13 @@ export class Match {
   /** Who downed each DBNO player — bleed-out/finish credit survives env damage
    *  (drowning/fire) that clears lastDamagedById. */
   private downedByPlayer = new Map<string, { attackerId: string | null; at: number; headshot: boolean }>();
+  /** playerId → what last took health off them, and when (sim seconds). This is
+   *  the death screen's evidence: see DamageSource. */
+  private lastDamageSourceById = new Map<string, { source: DamageSource; at: number }>();
+  /** Scratch: health per player at the start of a subsystem call, so a loss can
+   *  be attributed to the system that caused it without every other system
+   *  having to grow a reporting channel. */
+  private readonly healthWitness = new Map<string, number>();
   /** downedPlayerId → reviverId contributions gathered this tick (humans via
    *  held interact intent, bots via updateBotDbno). */
   private reviveActionsThisTick = new Map<string, string>();
@@ -597,7 +640,11 @@ export class Match {
     const ships: Ship[] = [];
     const players: Player[] = [];
 
-    // Create bot ships
+    // Create bot ships. Their captains are named from the Reach's own roster
+    // (MapGenerator.generateBotCrewNames) — the world has a barkeep, a
+    // gravedigger and a Tallyman with full names on every isle, and the crews
+    // you actually fight were Pirate_1 … Pirate_9.
+    const crewNames = this.mapGen.generateBotCrewNames(Math.min(botCount, spawns.length));
     for (let i = 0; i < Math.min(botCount, spawns.length); i++) {
       const spawn = spawns[i];
       const botId = uuid();
@@ -605,7 +652,7 @@ export class Match {
       const ship = this.mapGen.buildShip(shipId, botId, spawn, TEAM_COLORS[i % TEAM_COLORS.length]);
       ships.push(ship);
 
-      const bot = this.createPlayer(botId, `Pirate_${i + 1}`, shipId, true);
+      const bot = this.createPlayer(botId, crewNames[i] ?? `Pirate_${i + 1}`, shipId, true);
       bot.position = this.getRespawnDeckPosition(ship);
       bot.rotation.x = ship.rotation;
       bot.rotation.y = 0;
@@ -831,11 +878,17 @@ export class Match {
     const displayName = (name || '').trim().slice(0, 24) || 'Pirate';
 
     const spawns = this.mapGen.generateShipSpawns(this.state.islands);
-    const spawn = this.pickHumanSpawn(spawns) ?? {
+    const berth = this.pickHumanSpawn(spawns) ?? {
       position: { x: randRange(-600, 600), y: 0, z: randRange(-600, 600) },
       rotation: randAngle(),
       type: 'sloop' as const,
     };
+    // HULLS ARE CREW-SCALED. The spawn table rolls sloop/brigantine/galleon for
+    // the world's variety, and a lone player drawing a Man-o'-War inherits eight
+    // guns nobody can man, three masts to haul alone and the worst turn rate in
+    // the Reach — the ship is balanced around a crew that does not exist. One
+    // pirate sails a Cutter; the ladder is here for the day crews share a hull.
+    const spawn = { ...berth, type: hullForCrewSize(1) };
 
     const shipId = uuid();
     const ship = this.mapGen.buildShip(shipId, playerId, spawn, this.getNextTeamColor());
@@ -1202,6 +1255,16 @@ export class Match {
     this.t += dt;
     this.tickCount++;
     this.state.tick++;
+    // ONE SUNSET PER MATCH. The sky used to run a free 16-minute cycle off the
+    // client's own render clock, so a match that opens at noon is in pitch dark
+    // four minutes later — new players learned the stations in night rain while
+    // the storm was still in its grace period. The server publishes how far
+    // through the storm arc this match is (0 at the horn, 1 at the final ring)
+    // and the renderer hangs the sun on THAT: mid-morning at the horn, dusk with
+    // the late phases. Display only — nothing in the sim reads it.
+    this.state.matchProgress = Math.round(
+      Math.max(0, Math.min(1, this.t / STORM_ARC_SECONDS)) * 1e4,
+    ) / 1e4;
 
     if (this.state.phase === 'ended') {
       // Keep end-screen clients live at a slow cadence so spectate/placement
@@ -1300,6 +1363,7 @@ export class Match {
     // Physics — storm state rides along so every wave sample (buoyancy,
     // attitude, flooding waterlines, swimmers, projectiles) sees storm seas.
     this.syncTreasureChests();
+    this.beginHealthWitness();
     this.physics.update(
       dt, this.t,
       this.state.ships,
@@ -1309,7 +1373,10 @@ export class Match {
       this.state.seaRocks,
       this.state.storm,
     );
+    // The relay runs FIRST so bullets and cannonballs name themselves; whatever
+    // health is still missing after it was drowning, fire or the ground.
     this.relayPendingCombatEvents();
+    this.endHealthWitness((player) => this.resolvePhysicsDamageSource(player));
     this.syncTreasureChests();
 
     // Publish the net bilge trend (ingress − bailing) for the client gauge.
@@ -1328,12 +1395,17 @@ export class Match {
 
     // Storm — routes through openHole so the tempest punches real holes into
     // the seaward face (holes + flooding), the SoT damage loop.
+    this.beginHealthWitness();
     this.storm.update(dt, this.state.storm, this.state.ships, this.state.players, {
       openHoleAt: (ship, local, count) => { this.physics.openHoleAt(ship, local, count, 'storm'); },
       // Physics already worked out who is sheltered this tick (it runs first) —
       // one answer for seabed, reef and tempest alike.
       isSheltered: (shipId) => this.physics.isEnvironmentallySheltered(shipId),
     });
+    // Nothing else in that call can take health off a pirate, so every loss
+    // across it is the tempest — including the one that swims back inside the
+    // ring afterwards and used to be filed as a drowning.
+    this.endHealthWitness(() => 'storm');
     // Runs immediately after the storm, because the whole event is keyed to the
     // ring: she rises at the announced next centre and the tempest takes her back.
     this.updateWreckEvent();
@@ -2319,6 +2391,7 @@ export class Match {
       target.lastDamagedById = player.id;
       target.lastDamagedAt = this.t;
       target.lastDamageWasHeadshot = false;
+      this.noteDamageSource(target.id, 'blade');
       target.health -= this.absorbWithArmor(target, damage);
       this.awardPlayerHitGold(player.id, damage);
       this.notifyPlayerHit(player.id, {
@@ -3032,6 +3105,7 @@ export class Match {
       player.lastDamagedById = attacker?.id ?? null;
       player.lastDamagedAt = attacker ? this.t : null;
       player.lastDamageWasHeadshot = false;
+      this.noteDamageSource(player.id, 'explosion');
       player.health -= this.absorbWithArmor(player, damage);
       if (attacker) {
         this.notifyPlayerHit(attacker.id, {
@@ -3609,6 +3683,7 @@ export class Match {
         hit.player.lastDamagedById = shooter.id;
         hit.player.lastDamagedAt = this.t;
         hit.player.lastDamageWasHeadshot = hit.headshot || preserveCritical;
+        this.noteDamageSource(hit.player.id, WEAPONS[trace.weaponId].melee ? 'blade' : 'gunshot');
         hit.player.health -= this.absorbWithArmor(hit.player, damage);
         const existing = hitFeedback.get(hit.player.id);
         if (existing) {
@@ -4561,6 +4636,7 @@ export class Match {
       // one bite max, then straight into the vulnerable recover drift.
       if (s.attackState === 'lunge') {
         if (target && dist2D(target.position.x, target.position.z, s.position.x, s.position.z) < SHARK.LUNGE_HIT_RADIUS) {
+          this.noteDamageSource(target.id, 'shark');
           target.health -= this.absorbWithArmor(target, SHARK.BITE_DAMAGE);
           target.lastDamagedById = null;
           target.lastDamagedAt = null;
@@ -4760,15 +4836,18 @@ export class Match {
     killer.playerKillStreak += 1;
     const delta = this.statsDelta(killer.id);
     if (killer.playerKillStreak > delta.bestKillStreak) delta.bestKillStreak = killer.playerKillStreak;
-    if (killer.playerKillStreak === 5) {
+    // Thresholds live in KILL_STREAK_TIERS — the server, the badge, the feed and
+    // the legend all read the same ladder (the old 5/10/20 was typed five times,
+    // and its top rung was unreachable in a MATCH_TOTAL_SHIPS lobby).
+    if (killer.playerKillStreak === KILL_STREAK_TIERS.super_cannonball) {
       killer.superCannonballs += 1;
       return { type: 'super_cannonball', label: 'Super cannonball ready' };
     }
-    if (killer.playerKillStreak === 10) {
+    if (killer.playerKillStreak === KILL_STREAK_TIERS.mega_keg) {
       killer.megaKegs += 1;
       return { type: 'mega_keg', label: 'Mega keg ready' };
     }
-    if (killer.playerKillStreak === 20) {
+    if (killer.playerKillStreak === KILL_STREAK_TIERS.tsunami) {
       killer.tsunamiCharges += 1;
       return { type: 'tsunami', label: 'Tsunami ready' };
     }
@@ -4779,17 +4858,29 @@ export class Match {
     streakReward: { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null;
     killGold: number;
   } {
+    // THE DEAD DO NOT GET PAID. Every gold path ran off "whoever last damaged
+    // this pirate", and an island skeleton is a Player like any other — so a
+    // skeleton that cut a pirate down banked the full 275 g kill bounty and rode
+    // it onto the gold leaderboard, in a race it is not even running. A skeleton
+    // is scenery with a cutlass: it kills, it is killed for gold, it earns none.
+    if (this.isSkeletonPlayer(killer)) return { streakReward: null, killGold: 0 };
     killer.kills += 1;
     let streakReward: { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null = null;
     if (killer.shipId && victim.shipId && killer.shipId !== victim.shipId) {
       streakReward = this.awardPlayerKillStreak(killer);
     }
-    const isSkeleton = victim.isBot && this.skeletonHomes.has(victim.id);
+    const isSkeleton = this.isSkeletonPlayer(victim);
     if (isSkeleton) this.statsDelta(killer.id).skeletonsKilled += 1;
     const killGold = isSkeleton ? PLAYER.SKELETON_KILL_GOLD : PLAYER.KILL_GOLD_REWARD;
     killer.gold += killGold;
     this.checkWinCondition();
     return { streakReward, killGold };
+  }
+
+  /** An island skeleton: a bot with no ship, spawned by an island wave. The one
+   *  authoritative test — `skeletonHomes` is what spawns and forgets them. */
+  private isSkeletonPlayer(player: Player): boolean {
+    return player.isBot && this.skeletonHomes.has(player.id);
   }
 
   /** Iron Cuirass: COMBAT damage (guns, blades, cannon, kegs, shark bites)
@@ -4865,16 +4956,85 @@ export class Match {
     this.downedByPlayer.delete(player.id);
   }
 
+  // ── The damage witness ────────────────────────────────────────────────────
+  // Tag WHO/WHAT is taking health off a pirate as it happens. Combat inside this
+  // file tags itself directly; the two subsystems that own environmental
+  // attrition (PhysicsSystem: drown/fire/fall/projectiles, StormSystem: the
+  // tempest) are witnessed from out here by snapshotting health across their
+  // update call, so neither of them has to grow a reporting channel.
+
+  /** Remember what just bit this pirate. Latest wins — the LAST blow names the death. */
+  private noteDamageSource(playerId: string, source: DamageSource): void {
+    this.lastDamageSourceById.set(playerId, { source, at: this.t });
+  }
+
+  /** Freshest damage tag for this pirate, or null once the evidence goes stale. */
+  private recentDamageSource(playerId: string): DamageSource | null {
+    const tag = this.lastDamageSourceById.get(playerId);
+    if (!tag) return null;
+    if (this.t - tag.at > DAMAGE_SOURCE_WINDOW_SECONDS) return null;
+    return tag.source;
+  }
+
+  /** Snapshot every living pirate's health into the witness scratch map. */
+  private beginHealthWitness(): void {
+    this.healthWitness.clear();
+    for (const player of this.state.players) {
+      if (player.state === 'eliminated') continue;
+      this.healthWitness.set(player.id, player.health);
+    }
+  }
+
+  /** Anyone who lost health since beginHealthWitness gets tagged by `resolve`. */
+  private endHealthWitness(resolve: (player: Player) => DamageSource | null): void {
+    for (const player of this.state.players) {
+      const before = this.healthWitness.get(player.id);
+      if (before === undefined || player.health >= before - 1e-6) continue;
+      const source = resolve(player);
+      if (source) this.noteDamageSource(player.id, source);
+    }
+  }
+
+  /**
+   * Physics owns four unrelated ways to lose health in one call. Read the state
+   * it left behind: a pirate under longer than DROWN_TIME is drowning, one
+   * standing on a burning deck is burning, and anything else that hit them
+   * inside a physics step was the ground coming up. Projectile hits are tagged
+   * precisely (bullet vs cannon) in relayPendingCombatEvents, which runs first.
+   */
+  private resolvePhysicsDamageSource(player: Player): DamageSource | null {
+    if (this.recentDamageSource(player.id) && this.lastDamageSourceById.get(player.id)!.at === this.t) {
+      // Already named this tick by the combat-event relay — don't overwrite a
+      // cannonball with "fall" just because physics is what moved the number.
+      return null;
+    }
+    if (player.state === 'swimming' && (player.swimTimer ?? 0) > PLAYER.DROWN_TIME) return 'drowned';
+    const deck = player.onShipId ? this.shipsById.get(player.onShipId) : null;
+    if (deck?.onFire) return 'fire';
+    return 'fall';
+  }
+
   /**
    * What actually finished this pirate, for the death screen's title.
    *
    * Called at the instant of elimination and never after: `applyEliminatedPlayerFields`
-   * clears the state and position this reads from. A credited killer wins over
-   * everything (a pirate shot into the water is a kill, not a drowning);
-   * otherwise the environment that was doing the damage names itself.
+   * clears the state and position this reads from.
+   *
+   * The tagged source is the truth when it is fresh. Only when nothing tagged
+   * them (a pirate who was already at zero when the match found them) does this
+   * fall back to the old positional guess — which is the reading that told
+   * storm and shark deaths alike they had DROWNED.
    */
   private eliminationCause(player: Player, killer: Player | null): EliminationCause {
-    if (killer) return 'killed';
+    const source = this.recentDamageSource(player.id);
+    if (killer) {
+      // A credited killer still wins the ATTRIBUTION (it is a kill, not a
+      // drowning) — but the weapon names itself when the last blow was theirs.
+      return source === 'blade' || source === 'gunshot' || source === 'cannon' || source === 'explosion'
+        ? source
+        : 'killed';
+    }
+    if (source) return source;
     if (this.storm.isOutside(player.position.x, player.position.z, this.state.storm)) return 'storm';
     if (player.state === 'swimming') return 'drowned';
     return 'killed';
@@ -5079,6 +5239,7 @@ export class Match {
     player.lastDamagedById = null;
     player.lastDamagedAt = null;
     player.lastDamageWasHeadshot = false;
+    this.lastDamageSourceById.delete(player.id);
     this.broadcast({
       type: 'revive_complete',
       ts: Date.now(),
@@ -5148,6 +5309,7 @@ export class Match {
             downedEnemy.lastDamagedById = bot.id;
             downedEnemy.lastDamagedAt = this.t;
             downedEnemy.lastDamageWasHeadshot = false;
+            this.noteDamageSource(downedEnemy.id, 'blade');
             downedEnemy.health -= this.absorbWithArmor(downedEnemy, WEAPONS.cutlass.damage);
             this.botFinishCooldownAt.set(bot.id, this.t + WEAPONS.cutlass.reloadTime * 1.6);
           }
@@ -5197,8 +5359,12 @@ export class Match {
       const credit = this.creditPlayerKill(killer, player);
       streakReward = credit.streakReward;
       killGold = credit.killGold;
-      if (headshot) killer.gold += PLAYER.HEADSHOT_GOLD_BONUS;
-      if (boardingKill) {
+      // A skeleton is still NAMED as the killer (the feed and the death card
+      // owe you that) — it simply collects nothing for it: no bounty, no
+      // headshot purse, no boarding plunder.
+      const paidKiller = !this.isSkeletonPlayer(killer);
+      if (headshot && paidKiller) killer.gold += PLAYER.HEADSHOT_GOLD_BONUS;
+      if (boardingKill && paidKiller) {
         const previousHealth = killer.health;
         // Cutting down a pirate with a LADEN hold is worth what the hold is
         // worth: the cap scales from the old flat 180 up to STEAL_LADEN_MULT×
@@ -5227,7 +5393,11 @@ export class Match {
     // punctures decide the ship's fate naturally.
     const homeShip = this.getAliveShip(player.shipId);
     const canRespawn = !!homeShip;
-    let eliminationCause: EliminationCause = 'killed';
+    // Read WHY here, ONCE, for both exits. A respawning pirate deserves the
+    // same answer an eliminated one gets — "Respawning in 8" told you the wait
+    // and never what put you in it — and the reading has to happen before the
+    // state below clears the evidence it stands on.
+    const eliminationCause: EliminationCause = this.eliminationCause(player, killer);
 
     if (canRespawn) {
       player.state = 'respawning';
@@ -5251,10 +5421,6 @@ export class Match {
       player.reviveProgress = 0;
       this.downedByPlayer.delete(player.id);
     } else {
-      // Read WHY before the elimination erases the evidence (state, position and
-      // the home ship all get cleared below) — the death screen used to claim
-      // "SHIP SUNK" for storm deaths, drownings and cutlass kills alike.
-      eliminationCause = this.eliminationCause(player, killer);
       player.state = 'eliminated';
       this.recordElimination(player);
       this.applyEliminatedPlayerFields(player);
@@ -5282,6 +5448,9 @@ export class Match {
         killerId: killer?.id ?? null,
         killerName: killer?.name ?? null,
         respawning: player.state === 'respawning',
+        /** What took the last of their health — the death screen's title, and
+         *  the line the respawn blackout now names the wait WITH. */
+        cause: eliminationCause,
         headshot,
         boardingKill,
         /** True when the victim bled out / was finished from the downed state. */
@@ -5503,6 +5672,8 @@ export class Match {
       for (const player of this.state.players) {
         if (player.state === 'eliminated' || player.state === 'respawning' || player.state === 'downed') continue;
         if (player.health <= 0) continue;
+        if (this.isSkeletonPlayer(player)) continue; // the dead do not go diving for coin
+
         const dx = player.position.x - spoil.position.x;
         const dy = player.position.y - spoil.position.y;
         const dz = player.position.z - spoil.position.z;
@@ -5531,9 +5702,15 @@ export class Match {
   private checkWinCondition() {
     if (this.state.phase !== 'playing') return;
 
+    // A RACE WITH ONE RUNNER IS NOT A RACE. Bot crews loot, bank, carry
+    // bounties and get hunted for them — and then could not cross the finish
+    // line, because the gold win only ever looked at humans. Any crew that
+    // reaches the target takes the match, exactly as the bounty horn has been
+    // promising the whole way in. Skeletons are the one exception: island
+    // scenery does not run the race (and now earns nothing to run it with).
     const goldWinner = this.state.players.find((player) =>
-      !player.isBot
-      && player.state !== 'eliminated'
+      player.state !== 'eliminated'
+      && !this.isSkeletonPlayer(player)
       && player.gold >= ECONOMY.GOLD_WIN_TARGET
     );
     if (goldWinner) {
@@ -5605,6 +5782,9 @@ export class Match {
       if (event.type === 'player_hit') {
         this.awardPlayerHitGold(event.attackerId, event.damage);
         const attacker = this.getPlayer(event.attackerId);
+        // Name the round that landed BEFORE the physics witness closes, so a
+        // cannonball through the chest is never filed as a fall.
+        this.noteDamageSource(event.targetId, event.projectileType === 'bullet' ? 'gunshot' : 'cannon');
         this.notifyPlayerHit(event.attackerId, {
           targetId: event.targetId,
           damage: event.damage,
@@ -5681,6 +5861,8 @@ export class Match {
     if (!attackerId || damage <= 0) return;
     const attacker = this.getPlayer(attackerId);
     if (!attacker || attacker.state === 'eliminated') return;
+    // Skeletons draw no pay for landing a blow either (see creditPlayerKill).
+    if (this.isSkeletonPlayer(attacker)) return;
     const raw = Math.round(damage * ECONOMY.PLAYER_HIT_GOLD_RATIO);
     const award = Math.max(
       ECONOMY.PLAYER_HIT_GOLD_MIN,
@@ -6105,6 +6287,7 @@ export class Match {
               target.lastDamageWasHeadshot = false;
               // 65% weapon damage — skeletons are a real threat now
               const damage = hit.damage * 0.65 * blockScale;
+              this.noteDamageSource(target.id, 'blade');
               target.health -= this.absorbWithArmor(target, damage);
               this.notifyIncomingPlayerHit(target.id, {
                 attackerId: skeleton.id,
@@ -6484,6 +6667,7 @@ export class Match {
             });
           }
         }
+        this.respawnHoldSince.delete(player.id);
         continue;
       }
 
@@ -6492,8 +6676,28 @@ export class Match {
         // instead of the old instant crew-wide elimination + force-sink.
         // The storm's hull punctures sink the ship (handled above via the
         // homeShip-gone branch) or the crew sails it back to safety.
+        //
+        // THAT IS ONLY HONEST WHILE SOMEONE CAN STILL SAIL HER. With no living
+        // crewmate the hold is a promise nobody is coming to keep: a solo sat
+        // on a near-black screen reading "Respawn held" for the two or three
+        // minutes it took an empty, anchored hull to founder, and then died of
+        // it. After a short grace the tide takes over — see towDerelictToSafety.
+        const heldSince = this.respawnHoldSince.get(player.id) ?? this.t;
+        this.respawnHoldSince.set(player.id, heldSince);
+        if (
+          this.t - heldSince >= RESPAWN_HOLD_GRACE_SECONDS
+          && !this.hasSailorForHull(homeShip, player)
+          && this.towDerelictToSafety(homeShip)
+        ) {
+          // A REAL countdown from here: the hull is inside the ring, so the
+          // next tick falls through to the ordinary respawn clock and the HUD
+          // counts down instead of holding.
+          this.respawnHoldSince.delete(player.id);
+          player.respawnTimer = PLAYER.RESPAWN_TIME;
+        }
         continue;
       }
+      this.respawnHoldSince.delete(player.id);
 
       player.respawnTimer -= dt;
       if (player.respawnTimer > 0) continue;
@@ -6511,6 +6715,8 @@ export class Match {
       player.lastDamagedById = null;
       player.lastDamagedAt = null;
       player.lastDamageWasHeadshot = false;
+      // A new life carries no wound: the last death's cause must not name the next one.
+      this.lastDamageSourceById.delete(player.id);
       player.respawnTimer = 0;
       player.swimTimer = 0;
       player.cannonFlightTimer = 0;
@@ -6664,6 +6870,103 @@ export class Match {
       protectionTime: PLAYER.RESPAWN_PROTECTION_TIME + 1.5,
       dock: null,
     };
+  }
+
+  /** Is anyone still able to sail this hull back inside the ring? A mate who is
+   *  merely DOWNED counts — he can be picked up. A mate who is himself waiting
+   *  on the same held respawn does not: two dead men cannot rescue each other,
+   *  which is exactly the deadlock this answers. Anyone standing on her deck
+   *  counts too, even an enemy: a boarded hull is somebody's problem, and the
+   *  tide does not move a ship out from under a living pirate. */
+  private hasSailorForHull(ship: Ship, exclude: Player): boolean {
+    for (const other of this.state.players) {
+      if (other.id === exclude.id) continue;
+      if (other.state === 'eliminated' || other.state === 'respawning') continue;
+      if (other.health <= 0) continue;
+      if (other.shipId === ship.id || other.onShipId === ship.id) return true;
+    }
+    return false;
+  }
+
+  /**
+   * THE TIDE TAKES AN ABANDONED HULL IN.
+   *
+   * A derelict — nobody alive aboard, nobody alive who calls her home — lying
+   * outside the ring is a two-to-three minute black screen for the pirate whose
+   * respawn she holds, ending in an elimination he could not have prevented.
+   * So she is warped to shelter: an unoccupied in-ring berth if there is one,
+   * otherwise open water well inside the wall. She comes in seaworthy (the same
+   * refit any dock respawn gets) and she comes in ANCHORED — the crew gets
+   * their ship back where they can reach it, not a free escape from a fight.
+   *
+   * Returns false when there is nowhere safe to put her; the hold simply
+   * continues and we try again next tick.
+   */
+  private towDerelictToSafety(ship: Ship): boolean {
+    if (!ship.alive || ship.sinking) return false;
+    const dock = this.pickSafeSpawnDock();
+    if (dock) {
+      this.parkShipAtDock(ship, dock);
+      return true;
+    }
+    const berth = this.findOpenWaterInsideRing(ship);
+    if (!berth) return false;
+    ship.position.x = berth.x;
+    ship.position.z = berth.z;
+    ship.position.y = 0.05;
+    ship.rotation = Math.atan2(
+      this.state.storm.centerX - berth.x,
+      this.state.storm.centerZ - berth.z,
+    );
+    ship.velocity = { x: 0, y: 0, z: 0 };
+    ship.angularVelocity = 0;
+    ship.anchored = true;
+    ship.anchorRaiseProgress = 0;
+    ship.sailHeight = 0;
+    ship.sailAngle = 0;
+    ship.onFire = false;
+    ship.fireTimer = 0;
+    ship.fireDamageAccum = 0;
+    ship.sailIntegrity = 1;
+    ship.holes = [];
+    ship.nextHoleId = 1;
+    ship.waterLevel = 0;
+    return true;
+  }
+
+  /** A clear patch of water comfortably inside the ring, hunted along the line
+   *  from the derelict toward the storm centre (she is towed IN, not teleported
+   *  across the map) and then around it. Null when the ring is all land. */
+  private findOpenWaterInsideRing(ship: Ship): { x: number; z: number } | null {
+    const { centerX, centerZ, safeRadius } = this.state.storm;
+    const dx = ship.position.x - centerX;
+    const dz = ship.position.z - centerZ;
+    const bearing = Math.atan2(dx, dz);
+    const stats = SHIP_STATS[ship.type];
+    const clearance = stats.length * 0.6 + 12;
+    for (const reach of [0.62, 0.45, 0.28, 0.1]) {
+      for (const sweep of [0, 0.5, -0.5, 1.1, -1.1, 2.0, -2.0, Math.PI]) {
+        const angle = bearing + sweep;
+        const x = centerX + Math.sin(angle) * safeRadius * reach;
+        const z = centerZ + Math.cos(angle) * safeRadius * reach;
+        let clear = true;
+        for (const island of this.state.islands) {
+          if (dist2D(x, z, island.position.x, island.position.z) < getIslandMaxRadius(island) + clearance) {
+            clear = false;
+            break;
+          }
+        }
+        if (!clear) continue;
+        for (const rock of this.state.seaRocks) {
+          if (dist2D(x, z, rock.position.x, rock.position.z) < (rock.radius ?? 8) + clearance) {
+            clear = false;
+            break;
+          }
+        }
+        if (clear) return { x, z };
+      }
+    }
+    return null;
   }
 
   private parkShipAtDock(ship: Ship, dock: IslandDock) {

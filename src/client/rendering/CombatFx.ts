@@ -896,6 +896,7 @@ export class CombatFx {
     this.lights?.update(dt);
     this.fxClock += dt;
     this.updateHurtOverlay(dt);
+    this.updateAttritionOverlay(dt);
   }
 
   // ── Incoming damage: "who is shooting me, and from where" ─────────────────
@@ -919,6 +920,9 @@ export class CombatFx {
   private ensureHurtOverlay() {
     if (this.hurtOverlay) return this.hurtOverlay;
     const root = document.createElement('div');
+    // Named so a probe can read the thing a player is meant to SEE. The audit
+    // could only report "no vignette" because there was nothing to query.
+    root.id = 'hurt-vignette';
     // Under the HUD chrome (z 95+) but over the canvas, and never clickable.
     root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:92;opacity:0;overflow:hidden';
     const ring = document.createElement('div');
@@ -1004,6 +1008,185 @@ export class CombatFx {
     if (this.hurtBearing !== null) {
       overlay.wedge.style.transform = `rotate(${this.hurtBearing}rad)`;
     }
+  }
+
+  // ── ATTRITION: dying slowly, and knowing it ───────────────────────────────
+  //
+  // THE DEFECT THIS OWNS. At the wheel in the storm, health went 100 → 74 → 0
+  // with no vignette, no pulse, no sound — one small caption was the entire
+  // notice that the weather was killing you. The frame-by-frame damage watch
+  // (ViewmodelController) DID exist, but it drops any loss under half a point:
+  // the tempest bills 0.6–12 hp per SECOND and full snapshots land at ~10 Hz,
+  // so every storm phase but the last two arrives in chips of 0.06–0.4 hp and
+  // every single one of them was thrown away. Same for a burning deck and for
+  // drowning. Chip damage is exactly the damage that needs announcing — it is
+  // the kind you can still walk out of.
+  //
+  // So: accumulate the chips instead of discarding them, and while they keep
+  // coming raise a separate ESCALATING attrition read — a red vignette that
+  // breathes with a heartbeat, plus a flash on the health bar itself — that
+  // decays the moment you get out of it.
+
+  /** Last seen local vitals, for the loss edge. Null = nothing sampled yet. */
+  private vitalsHealth: number | null = null;
+  private vitalsArmor = 0;
+  private vitalsSwimming = false;
+  /** Sub-threshold chips banked until they add up to something worth a flash. */
+  private chipAccum = 0;
+  /** 0..1 how long damage has been landing CONTINUOUSLY (the escalation). */
+  private attrition = 0;
+  private lastVitalsLossAt = -99;
+  /** 0..1 how badly hurt you are, mixed into the vignette strength. */
+  private attritionWound = 0;
+  private heartbeatAt = -99;
+  private attritionOverlay: HTMLDivElement | null = null;
+  /** Brief blue-white wash when you go into the water (see the splash cue). */
+  private splashFlash = 0;
+  private splashOverlay: HTMLDivElement | null = null;
+  private healthBarFlash = 0;
+
+  /**
+   * Fed the local player once per frame by Game.
+   *
+   * Deliberately its own watch rather than a hook off the `hit` message: storm,
+   * fire, drowning, falls, sharks and armour-absorbed hits all move these two
+   * numbers and only some of them ship a hit payload.
+   */
+  watchLocalVitals(
+    player: { health?: number; armor?: number; state?: string } | null,
+    dt: number,
+    cameraPos?: THREE.Vector3,
+    cameraQuat?: THREE.Quaternion,
+  ): void {
+    if (!player || player.state === 'eliminated' || player.state === 'respawning') {
+      // A respawn refills both bars — never read that as a 100-point wound.
+      this.vitalsHealth = null;
+      this.vitalsSwimming = false;
+      this.chipAccum = 0;
+      this.attrition = Math.max(0, this.attrition - dt * 2);
+      return;
+    }
+    const health = player.health ?? 0;
+    const armor = player.armor ?? 0;
+    const swimming = player.state === 'swimming';
+
+    // ── Walking off the deck. State flips to swimming and, until now, NOTHING
+    // told you: no splash, no wash, no sound. You found out by noticing the
+    // ship was above you.
+    if (swimming && !this.vitalsSwimming && this.vitalsHealth !== null) {
+      this.splashFlash = Math.max(this.splashFlash, 1);
+      this.audio?.playSwimSplash(1);
+    }
+    this.vitalsSwimming = swimming;
+
+    if (this.vitalsHealth === null) {
+      this.vitalsHealth = health;
+      this.vitalsArmor = armor;
+      return;
+    }
+    const lost = Math.max(0, this.vitalsHealth - health) + Math.max(0, this.vitalsArmor - armor);
+    this.vitalsHealth = health;
+    this.vitalsArmor = armor;
+    this.attritionWound = THREE.MathUtils.clamp(1 - health / 100, 0, 1);
+
+    if (lost > 0) {
+      this.lastVitalsLossAt = this.fxClock;
+      this.healthBarFlash = Math.min(1, this.healthBarFlash + Math.max(0.35, Math.min(1, lost / 25)));
+      this.chipAccum += lost;
+      // A real bite lands its own directional flash immediately; chips have to
+      // add up first, so a 0.06 hp storm tick can't spam the vignette.
+      if (lost >= 3 || this.chipAccum >= 1.2) {
+        const severity = THREE.MathUtils.clamp(Math.max(lost, this.chipAccum) / 45, 0.18, 1);
+        this.chipAccum = 0;
+        this.flashIncomingDamage(severity, cameraPos, cameraQuat);
+      }
+    }
+
+    // Escalation: ~2.5s of unbroken damage reaches full pressure; a second
+    // clear of it and the read is gone.
+    const takingDamage = this.fxClock - this.lastVitalsLossAt < 0.45;
+    this.attrition = THREE.MathUtils.clamp(
+      this.attrition + dt * (takingDamage ? 1 / 2.5 : -1 / 0.9),
+      0, 1,
+    );
+  }
+
+  /** The escalating attrition vignette + heartbeat + health-bar flash. */
+  private updateAttritionOverlay(dt: number) {
+    // Health bar: a decaying glow on the whole vitals block, so the number you
+    // are meant to be watching announces itself when it moves.
+    if (this.healthBarFlash > 0.0001) {
+      this.healthBarFlash = Math.max(0, this.healthBarFlash - dt * 2.2);
+      const wrap = document.getElementById('health-bar-wrap');
+      if (wrap) {
+        const k = this.healthBarFlash;
+        wrap.style.filter = k > 0.01 ? `drop-shadow(0 0 ${(10 * k).toFixed(1)}px rgba(231,76,60,${(0.9 * k).toFixed(2)}))` : '';
+        wrap.style.transform = k > 0.01 ? `scale(${(1 + 0.035 * k).toFixed(3)})` : '';
+      }
+    }
+
+    if (this.splashFlash > 0.0001) {
+      this.splashFlash = Math.max(0, this.splashFlash - dt * 2.4);
+      const overlay = this.ensureSplashOverlay();
+      overlay.style.opacity = (this.splashFlash * 0.55).toFixed(3);
+    } else if (this.splashOverlay && this.splashOverlay.style.opacity !== '0') {
+      this.splashOverlay.style.opacity = '0';
+    }
+
+    if (this.attrition <= 0.02) {
+      if (this.attritionOverlay && this.attritionOverlay.style.opacity !== '0') {
+        this.attritionOverlay.style.opacity = '0';
+      }
+      return;
+    }
+    // Strength: how long it has been going on, plus how little is left of you.
+    const pressure = THREE.MathUtils.clamp(this.attrition * (0.55 + 0.65 * this.attritionWound), 0, 1);
+    // Heartbeat, quickening as the pressure climbs: 1.15s → 0.5s between beats.
+    const interval = 1.15 - 0.65 * pressure;
+    const beatPhase = THREE.MathUtils.clamp((this.fxClock - this.heartbeatAt) / interval, 0, 1);
+    if (this.fxClock - this.heartbeatAt >= interval) {
+      this.heartbeatAt = this.fxClock;
+      // Reuse the body-thud voice at low intensity: a 78→40 Hz sine thump is a
+      // heartbeat. Lub, then dub a sixth of a second later.
+      const beat = 0.3 + 0.3 * pressure;
+      this.audio?.playBodyThud(beat, 0);
+      window.setTimeout(() => this.audio?.playBodyThud(beat * 0.72, 0), 165);
+    }
+    // The vignette breathes ON the beat rather than on a free-running sine.
+    const swell = Math.exp(-beatPhase * 5) * 0.35;
+    const overlay = this.ensureAttritionOverlay();
+    overlay.style.opacity = THREE.MathUtils.clamp(pressure * (0.5 + swell), 0, 0.92).toFixed(3);
+  }
+
+  private ensureAttritionOverlay(): HTMLDivElement {
+    if (this.attritionOverlay) return this.attritionOverlay;
+    const overlay = document.createElement('div');
+    overlay.id = 'attrition-vignette';
+    // Under the HUD chrome, over the canvas, never clickable — same band as the
+    // hit vignette, and deliberately a WIDER, softer ellipse so the two read as
+    // different things (a hit stings the edge; attrition closes in).
+    overlay.style.cssText = [
+      'position:fixed', 'inset:0', 'pointer-events:none', 'z-index:91', 'opacity:0',
+      'transition:opacity 0.09s linear',
+      'background:radial-gradient(ellipse at center, rgba(90,6,6,0) 18%, rgba(120,10,8,0.42) 62%, rgba(150,14,10,0.9) 100%)',
+    ].join(';');
+    document.body.appendChild(overlay);
+    this.attritionOverlay = overlay;
+    return overlay;
+  }
+
+  private ensureSplashOverlay(): HTMLDivElement {
+    if (this.splashOverlay) return this.splashOverlay;
+    const overlay = document.createElement('div');
+    overlay.id = 'water-entry-flash';
+    overlay.style.cssText = [
+      'position:fixed', 'inset:0', 'pointer-events:none', 'z-index:91', 'opacity:0',
+      'transition:opacity 0.08s linear',
+      'background:radial-gradient(ellipse at center, rgba(120,190,220,0.10) 30%, rgba(28,86,120,0.72) 100%)',
+    ].join(';');
+    document.body.appendChild(overlay);
+    this.splashOverlay = overlay;
+    return overlay;
   }
 
   /** Fire a firearm's shot sound on the LOCAL predicted press edge (Game.ts), so

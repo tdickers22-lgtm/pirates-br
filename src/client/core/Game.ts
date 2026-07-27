@@ -18,7 +18,7 @@ import {
   countOpenHoles,
   findRepairableHole as sharedFindRepairableHole,
 } from '../../shared/interactions.js';
-import { Renderer } from '../rendering/Renderer.js';
+import { Renderer, dayNightSecondsForMatchProgress } from '../rendering/Renderer.js';
 import { OceanRenderer } from '../rendering/OceanRenderer.js';
 import { ShipRenderer } from '../rendering/ShipRenderer.js';
 import { SpoilsRenderer } from '../rendering/SpoilsRenderer.js';
@@ -511,6 +511,22 @@ export class Game {
   private localDeathBlend = 0;
   /** Greyed-out vignette overlay owned by the death camera (built lazily). */
   private deathOverlay: HTMLDivElement | null = null;
+  // ── Spectate rig: where the camera goes once you are OUT of the match ──────
+  // The death camera parks the eye 34cm above the spot you fell. On a deck that
+  // is a corpse's-eye view; in the water it is underneath the swell, which is
+  // why every observed elimination was a black screen. These lift it clear.
+  /** 0→1 blend from the corpse's eye into the raised spectate framing. */
+  private spectateLift = 0;
+  /** Slow drift added to the spectate yaw so the held frame is not dead still. */
+  private spectateOrbit = 0;
+  /** Fill light that only exists while spectating — a night elimination is
+   *  otherwise unlit and unreadable however high the camera climbs. */
+  private spectateLight: THREE.HemisphereLight | null = null;
+  private static readonly SPECTATE_RISE_SECONDS = 2.4;
+  /** Metres back from the body, up from it, and above whatever is underneath. */
+  private static readonly SPECTATE_RADIUS = 9.5;
+  private static readonly SPECTATE_HEIGHT = 7.2;
+  private static readonly SPECTATE_CLEARANCE = 4.2;
   private prevCutlassSwingProgress = 0;
   /** 0..1 FOV punch on the cutlass dash, decays fast (rush feel). */
   private cutlassDashKick = 0;
@@ -1318,6 +1334,7 @@ export class Game {
     this.inMatch = false;
     this.ui.deathScreen.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
+    document.body.classList.remove('showing-death-screen');
     this.ui.winScreen.classList.remove('visible');
     this.ui.winScreen.style.display = 'none';
     document.getElementById('hud')?.classList.remove('visible');
@@ -1431,6 +1448,7 @@ export class Game {
 
     document.getElementById('hud')?.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
+    document.body.classList.remove('showing-death-screen');
     this.ui.winScreen.style.display = 'none';
     this.ui.tradeUi.style.display = 'none';
     this.ui.mapOverlay.classList.remove('visible');
@@ -1570,6 +1588,9 @@ export class Game {
     this.ui.deathStats.innerHTML = `<div>${reason}</div><div>Kills: ${kills}</div><div>Gold: ${gold}</div>`;
     this.ui.deathScreen.classList.add('visible');
     this.ui.deathScreen.style.display = 'flex';
+    // Drops the live HUD (legend card, minimap, feed, prompts) behind the
+    // screen — it was printing straight through the copy in every audit shot.
+    document.body.classList.add('showing-death-screen');
   }
 
   private goBackToMenuFromMatch(): void {
@@ -1577,6 +1598,7 @@ export class Game {
     this.inMatch = false;
     this.ui.deathScreen.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
+    document.body.classList.remove('showing-death-screen');
     this.ui.winScreen.classList.remove('visible');
     this.ui.winScreen.style.display = 'none';
     document.getElementById('hud')?.classList.remove('visible');
@@ -1739,6 +1761,8 @@ export class Game {
       const event = payload as { playerId?: string; mermaid?: boolean };
       if (event.playerId === this.localPlayerId) {
         this.ui.deathScreen.style.display = 'none';
+        // The HUD comes back with the pirate (see body.showing-death-screen).
+        document.body.classList.remove('showing-death-screen');
         if (event.mermaid) {
           this.mermaidAnchor = null;
           if (this.mermaidGroup.visible) this.mermaidGroup.visible = false;
@@ -1750,10 +1774,17 @@ export class Game {
     this.network.onGameOver = (payload) => {
       const result = payload as { died?: boolean; winnerId?: string | null; kills?: number; gold?: number; reason?: string; targetGold?: number; cause?: string };
       const player = this.getLocalPlayer();
-      // Match.ts already knows what finished you (ship_sunk / storm / drowned /
-      // killed); hand it over so the death screen names the real cause instead
-      // of falling back to the client's read of the frame before the flip.
-      this.hud.noteEliminationCause(result.cause ?? null);
+      // Match.ts already knows what took the last of your health (storm, shark,
+      // drowning, fall, fire, cannon, shot, blade, keg…); hand it over so the
+      // death screen names the real cause instead of falling back to the
+      // client's read of the frame before the flip.
+      //
+      // ONLY when there is one to hand over. `game_over` also fires when some
+      // OTHER crew wins, carrying no cause — and clearing on that message threw
+      // away the cause a `kill_event` had already established for a pirate who
+      // was eliminated minutes earlier. A new life is where the tag is dropped
+      // (see the respawn edge in syncPlayers).
+      if (result.cause) this.hud.noteEliminationCause(result.cause);
       if (result.died) {
         this.audio.playDefeat();
         this.returnToLobbyAfterLoss(result.kills ?? player?.kills ?? 0, result.gold ?? player?.gold ?? 0, 'Crew lost');
@@ -1935,7 +1966,14 @@ export class Game {
         headshotGold?: number;
         killerStreak?: number;
         streakReward?: { type?: string; label?: string } | null;
+        cause?: string;
       };
+      // WHAT KILLED YOU, on every death and not just the last one. game_over
+      // only fires on elimination, so a respawning pirate's blackout had no
+      // cause to name; the kill event carries the server's reading for both.
+      if (event.victimId && event.victimId === this.localPlayerId && !event.shipSink) {
+        this.hud.noteEliminationCause(event.cause ?? null);
+      }
       // Stash the kill details for the death-animation edge in syncPlayers —
       // it picks the crumple (headshot goes limp, a blade kill spins) from here.
       if (event.victimId && !event.shipSink) {
@@ -2374,6 +2412,9 @@ export class Game {
     const localPlayer = this.getLocalPlayer();
     if (localPlayer && previousLocalState === 'respawning' && localPlayer.state === 'alive') {
       this.combatFx.emitRespawn(localPlayer.position, this.renderer.camera.position);
+      // A new life owes nothing to the last one: drop the death cause so the
+      // NEXT blackout can't be labelled with the last blow.
+      this.hud.noteEliminationCause(null);
     }
     this.previousLocalState = localPlayer?.state ?? null;
   }
@@ -3099,6 +3140,15 @@ export class Game {
     const stormW = this.stormWeatherIntensity;
     const haloMat = this.stormHalo.material as THREE.MeshBasicMaterial;
     haloMat.opacity = 0.08 + stormW * 0.16;
+    // Feed the local vitals watch BEFORE the fx update consumes them: storm,
+    // fire and drowning bill in fractions of a point per snapshot, and nothing
+    // in the client was announcing that kind of damage at all.
+    this.combatFx.watchLocalVitals(
+      this.getLocalPlayer(),
+      dt,
+      this.renderer.camera.position,
+      this.renderer.camera.quaternion,
+    );
     this.combatFx.update(dt);
     this.envFx.updateHarvestDestruction(dt);
     this.syncKegs(dt);
@@ -4801,6 +4851,15 @@ export class Game {
     const trackedShip = player.onShipId ? this.getTrackedShip() : null;
     const activeWeapon = player.atCannon || player.atHelm ? null : player.weapons[player.activeSlot];
     const swimming = player.state === 'swimming';
+    // Spectating (eliminated, not respawning): drive the lift blend + its slow
+    // orbit here, before the framing below reads them.
+    this.spectateLift = THREE.MathUtils.clamp(
+      this.spectateLift
+        + this.frameDt * (player.state === 'eliminated' ? 1 / Game.SPECTATE_RISE_SECONDS : -1 / 0.4),
+      0, 1,
+    );
+    this.spectateOrbit = this.spectateLift > 0.001 ? this.spectateOrbit + this.frameDt * 0.05 : 0;
+    this.updateSpectateLight();
     const firearmEquipped = !!activeWeapon && !WEAPONS[activeWeapon.weaponId].melee;
     const aiming = this.input.isAiming();
     const firing = this.input.isFiring();
@@ -4901,6 +4960,34 @@ export class Game {
         .clone()
         .addScaledVector(forward, scopedFov ? 64 : aimingFirearm ? 28 : swimming ? 18 : 14)
         .add(new THREE.Vector3(0, swimming ? -0.04 : scopedFov ? 0.05 : 0, 0));
+      // ── SPECTATE LIFT ──────────────────────────────────────────────────────
+      // Eliminated, the eye stayed 34 cm above the spot you fell — which for
+      // three deaths out of four is UNDER the swell, and the death screen was a
+      // near-black void: no wreck, no storm, no island, nothing to read. Once
+      // you are out of the match the camera climbs out of the water and swings
+      // back off your body, so the last thing you see is the scene that got you.
+      if (this.spectateLift > 0.001) {
+        const anchor = this.localDeathAnchor?.pos ?? this.getPlayerRenderPosition(player, 0.02);
+        const seaY = gerstnerHeight(
+          anchor.x, anchor.z, this.ocean.getTime(), WAVE_PARAMS,
+          getStormWaveIntensity(this.state?.storm, anchor.x, anchor.z),
+        );
+        // Drift the view slowly around the body so the frame is alive; the
+        // mouse still steers it (getYaw) for anyone who wants to look.
+        const orbitYaw = this.input.getYaw() + this.spectateOrbit;
+        const back = new THREE.Vector3(-Math.sin(orbitYaw), 0, -Math.cos(orbitYaw));
+        const lifted = anchor.clone()
+          .addScaledVector(back, Game.SPECTATE_RADIUS)
+          .add(new THREE.Vector3(0, Game.SPECTATE_HEIGHT, 0));
+        // Never below the swell (or the ground it is standing on) — clearing the
+        // waterline is the whole point.
+        const floor = Math.max(seaY, this.sampleGroundY(lifted.x, lifted.z)) + Game.SPECTATE_CLEARANCE;
+        lifted.y = Math.max(lifted.y, floor);
+        // Ease so the lift reads as the soul leaving, not a teleport.
+        const k = this.spectateLift * this.spectateLift * (3 - 2 * this.spectateLift);
+        desired = eyePos.clone().lerp(lifted, k);
+        lookTarget = lookTarget.lerp(anchor.clone().add(new THREE.Vector3(0, 0.7, 0)), k);
+      }
     }
 
     const onIslandFoot = !player.onShipId && player.state === 'alive' && !swimming
@@ -4951,10 +5038,19 @@ export class Game {
     );
     if (!dying && this.localDeathAnchor && this.localDeathBlend <= 0.001) this.localDeathAnchor = null;
     if (this.localDeathBlend > 0.001) {
-      const tilt = this.localDeathAnchor?.tilt ?? 0.45;
+      // The corpse-roll tilt belongs to the body. Once the spectate camera has
+      // climbed off it, level out — a horizon on its side reads as a bug.
+      const tilt = (this.localDeathAnchor?.tilt ?? 0.45) * (1 - this.spectateLift);
       camera.rotateZ((dying ? tilt : tilt * 0.9) * this.localDeathBlend);
     }
-    this.updateDeathOverlay(dying ? this.localDeathBlend : downedNow ? this.localDeathBlend * 0.45 : 0);
+    // The vignette that sells the moment of dying is what BLINDS the spectator
+    // ten seconds later: at full strength it is a 94%-black ellipse with a
+    // grayscale filter behind it. Ease it back as the spectate camera rises.
+    this.updateDeathOverlay(
+      dying ? this.localDeathBlend * (1 - 0.72 * this.spectateLift)
+        : downedNow ? this.localDeathBlend * 0.45
+        : 0,
+    );
 
     // ── Deck roll coupling: lean the view with the hull heel, clamped to ±0.06 rad.
     let rollTarget = 0;
@@ -4979,6 +5075,26 @@ export class Game {
         .applyQuaternion(camera.quaternion);
       camera.position.add(this.tempShakeVec);
     }
+  }
+
+  /**
+   * A soft hemisphere fill that exists only while you are spectating your own
+   * death. Raising the camera fixes a view of nothing at noon; at dusk or in
+   * the storm's shadow the scene is genuinely unlit and the wreck still reads
+   * as black-on-black. Built lazily (a player who never dies never pays), and
+   * it is a HEMISPHERE light, so the point-light budget is untouched.
+   */
+  private updateSpectateLight() {
+    if (this.spectateLift <= 0.001) {
+      if (this.spectateLight) this.spectateLight.visible = false;
+      return;
+    }
+    if (!this.spectateLight) {
+      this.spectateLight = new THREE.HemisphereLight(0xbcd2ee, 0x243040, 0);
+      this.renderer.scene.add(this.spectateLight);
+    }
+    this.spectateLight.visible = true;
+    this.spectateLight.intensity = 0.85 * this.spectateLift;
   }
 
   /**
@@ -5016,7 +5132,14 @@ export class Game {
     this.renderer.updateWaterEnvironment(
       depthBelowSurface,
       this.stormWeatherIntensity,
-      this.dayNightOverrideSec ?? this.ocean.getTime(),
+      // The sky rides MATCH PROGRESS (one sunset, arriving with the late storm
+      // phases) whenever the server is publishing it; the free-running ocean
+      // clock is the fallback for the menu/loading world, and the debug
+      // override still wins over both. See Renderer's MATCH_DAY_CYCLE_*.
+      this.dayNightOverrideSec
+        ?? (this.state?.matchProgress !== undefined
+          ? dayNightSecondsForMatchProgress(this.state.matchProgress)
+          : this.ocean.getTime()),
     );
     this.ocean.setSunDirection(this.renderer.getSunDirection());
     this.ocean.setUnderwaterDepth(depthBelowSurface);

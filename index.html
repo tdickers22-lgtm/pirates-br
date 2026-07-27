@@ -1184,16 +1184,63 @@
     }
     #death-screen.visible { display: flex; }
     #win-screen.visible { display: flex; }
+    /* THE ELIMINATION SCREEN IS A CARD, NOT A BLACKOUT.
+       It used to be a 0.88 sheet of black laid over everything, with five loose
+       children stacked by margins on top of the still-lit HUD: every audit shot
+       had the ship's-orders legend and the whole HUD printing straight through
+       the copy, and RETURN TO PORT landing on top of a line of it. Now the wash
+       is a soft vignette (you can still watch the sea take your wreck), the copy
+       lives in one bounded column where every row owns its own line, and the HUD
+       behind it is hidden outright (body.showing-death-screen, below). */
+    #death-screen {
+      background: radial-gradient(ellipse at center, rgba(6,10,18,0.52) 0%, rgba(2,5,10,0.86) 100%);
+      backdrop-filter: blur(1.5px);
+    }
+    #death-panel {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 14px; max-width: min(680px, 88vw); padding: 30px 34px 26px;
+      border: 1px solid rgba(201,168,76,0.28); border-radius: 12px;
+      background: linear-gradient(180deg, rgba(8,14,24,0.93), rgba(4,8,14,0.95));
+      box-shadow: 0 26px 70px rgba(0,0,0,0.6);
+      max-height: 88vh; overflow-y: auto;
+    }
     /* The title is a sentence now ("YOUR CREW WAS ELIMINATED"), not two words —
        it has to fold on a narrow window instead of running off both edges. */
     #death-screen h1 {
-      font-size: clamp(1.5rem, 4.1vw, 3rem); color: #e74c3c; letter-spacing: 0.3em;
-      text-shadow: 0 0 40px #e74c3c88; text-align: center; padding: 0 24px; line-height: 1.25;
+      margin: 0;
+      font-size: clamp(1.4rem, 3.6vw, 2.6rem); color: #e74c3c; letter-spacing: 0.3em;
+      text-shadow: 0 0 40px #e74c3c88; text-align: center; line-height: 1.25;
     }
     #death-cause {
-      margin-top: 14px; max-width: 620px; padding: 0 24px; text-align: center;
+      margin: 0; max-width: 560px; text-align: center;
       font-size: 0.86rem; line-height: 1.7; color: #d3b58a; letter-spacing: 0.06em;
     }
+    #death-panel .end-stats { margin: 0; }
+    #death-wait {
+      font-size: 0.66rem; color: #7f92a8; letter-spacing: 0.18em; text-transform: uppercase;
+      text-align: center;
+    }
+    /* The button gets its own row, with a rule above it — nothing can ever print
+       on top of it again, whatever length the cause line runs to. */
+    #death-actions {
+      width: 100%; display: flex; justify-content: center;
+      padding-top: 16px; border-top: 1px solid rgba(201,168,76,0.18);
+    }
+    #death-actions .restart-btn { margin-top: 0; }
+    /* Nothing from the live HUD (legend card, minimap, feed, prompts) is allowed
+       behind the elimination screen — it read as text collision in every shot.
+       The first-voyage card tour goes too: it sits at z 960, ABOVE the death
+       screen's 500, so a pirate who died with the tour still open read "SAIL —
+       take the wheel and steer with A/D" over the news that she was dead. */
+    body.showing-death-screen #hud,
+    body.showing-death-screen #onboard-cards,
+    body.showing-death-screen #map-overlay,
+    /* Two more HUD layers live on <body> rather than inside #hud, so hiding the
+       HUD alone left them showing through the wash: the sim-overload chip and
+       the story cutscene banner. The weather (storm rain, lightning) stays —
+       that IS the scene you are being shown. */
+    body.showing-death-screen #server-load-chip,
+    body.showing-death-screen #story-cutscene-overlay { display: none !important; }
     #win-screen h1 { font-size: 3rem; color: #c9a84c; letter-spacing: 0.3em; text-shadow: 0 0 40px #c9a84c88; }
     .end-stats { margin-top: 20px; font-size: 0.9rem; color: #889; text-align: center; line-height: 2; }
     .restart-btn {
@@ -1278,13 +1325,28 @@
       pointer-events: none;
     }
     #map-overlay.visible { display: flex; }
+    /* Chart + glyph key ride one column: the key sits UNDER the chart so it
+       never covers water, and the square panel shrinks to make room for it. */
+    #map-stack {
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+    }
+    #map-key {
+      width: min(86vw, 72vh, 900px);
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(201, 168, 76, 0.28);
+      background: linear-gradient(180deg, rgba(8, 19, 38, 0.94), rgba(5, 12, 24, 0.94));
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+    }
+    #map-key-canvas { width: 100%; height: auto; display: block; }
     /* radius kept small enough that the storm chip Game.ts draws at canvas (8,8) survives the corner */
     #map-panel {
       position: relative;
       /* Square, and bounded by the SHORT side of the window: at 900px wide on an
          800px-tall screen the panel used to run off the bottom of the display,
-         taking the help line with it — the one line that says the chart pans. */
-      width: min(86vw, 86vh, 900px);
+         taking the help line with it — the one line that says the chart pans.
+         72vh (not 86) leaves the glyph key its band underneath. */
+      width: min(86vw, 72vh, 900px);
       aspect-ratio: 1;
       border-radius: 16px;
       overflow: hidden;
@@ -1331,6 +1393,70 @@
       z-index: 1;
     }
 
+    /* ── First voyage: three cards, sail · fight · win ──────────────────
+       The old onboarding was the whole SHIP'S ORDERS card dumped once per
+       browser, forever, at the exact second the starting horn went. These sit
+       above the menu (z 900) AND the HUD so both can open them, and they are
+       re-openable from How to Play and from the [L] card's footer. */
+    #onboard-cards {
+      position: fixed; inset: 0; z-index: 960;
+      display: none; align-items: center; justify-content: center;
+      background: radial-gradient(ellipse at center, rgba(5, 12, 22, 0.62), rgba(1, 4, 9, 0.88));
+      backdrop-filter: blur(2px);
+      pointer-events: auto;
+    }
+    #onboard-cards.visible { display: flex; animation: menuFadeIn 0.3s ease; }
+    #oc-panel {
+      width: min(560px, calc(100vw - 40px));
+      padding: 26px 30px 22px;
+      text-align: center;
+      border-radius: 14px;
+      border: 1px solid rgba(201, 168, 76, 0.34);
+      background: linear-gradient(180deg, rgba(8, 19, 36, 0.97), rgba(4, 10, 20, 0.97));
+      box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55);
+      font-family: Georgia, serif;
+    }
+    #oc-kicker {
+      font-size: 0.6rem; letter-spacing: 0.26em; text-transform: uppercase; color: #7f92a8;
+    }
+    #oc-glyph { font-size: 2.1rem; margin: 10px 0 2px; }
+    #oc-title {
+      font-size: 1.15rem; letter-spacing: 0.3em; text-transform: uppercase; color: #c9a84c;
+      margin-bottom: 12px;
+    }
+    #oc-body p {
+      color: #ddd2b8; font-size: 0.92rem; line-height: 1.65; margin: 0 0 10px;
+      text-align: left;
+    }
+    #oc-body b { color: #f4e2b2; }
+    #oc-dots { display: flex; gap: 7px; justify-content: center; margin: 14px 0 16px; }
+    .oc-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: rgba(201, 168, 76, 0.26);
+    }
+    .oc-dot.on { background: #c9a84c; box-shadow: 0 0 10px rgba(201, 168, 76, 0.6); }
+    #oc-actions { display: flex; gap: 10px; justify-content: center; }
+    .oc-btn {
+      padding: 9px 22px; border-radius: 6px; cursor: pointer;
+      font-family: Georgia, serif; font-size: 0.78rem; letter-spacing: 0.18em; text-transform: uppercase;
+      background: transparent; border: 1px solid rgba(201, 168, 76, 0.4); color: #c9a84c;
+      transition: background 0.2s;
+    }
+    .oc-btn:hover { background: rgba(201, 168, 76, 0.16); }
+    .oc-btn.primary { background: rgba(201, 168, 76, 0.2); color: #f4e2b2; }
+
+    /* The legend's own door back to the cards. #controls-hint is
+       pointer-events:none (it must never eat a click meant for the sea), so the
+       button re-arms them for itself alone. */
+    .legend-foot { text-align: center; margin-top: 10px; }
+    #legend-howto-btn {
+      pointer-events: auto; cursor: pointer;
+      padding: 5px 14px; border-radius: 6px;
+      background: rgba(201, 168, 76, 0.12); border: 1px solid rgba(201, 168, 76, 0.4);
+      color: #e8d5a3; font-family: Georgia, serif; font-size: 0.72rem; letter-spacing: 0.12em;
+    }
+    #legend-howto-btn:hover { background: rgba(201, 168, 76, 0.24); }
+
     /* Pointer-lock hint shown while unlocked.
        Sits below the compass block — never over the bottom pocket/keg bar. */
     #pointer-lock-hint {
@@ -1374,6 +1500,28 @@
     #controls-hint .legend-title {
       font-weight: 700; color: #d6b25e; letter-spacing: 0.14em;
       text-align: center; margin-bottom: 6px;
+    }
+    /* DOCKED — the card stops being a curtain. After ten seconds the orders
+       shrink to a left-hand panel: a slow reader keeps every word, and the sea,
+       the horizon and the crosshair all come back. */
+    #controls-hint.docked {
+      top: 50%; left: 14px; transform: translate(0, -50%);
+      /* The card is pointer-events:none, so a scrollbar here is a LIE — nothing
+         below the crop can ever be reached. 9.5px/1.5 puts the whole of the
+         orders (539px at the full size, 449 here) inside 78vh on every window
+         this game is played in, so the storm line and the How-to-Play door at
+         the foot survive the shrink. overflow stays as a last-ditch guard. */
+      max-width: 30vw; max-height: 78vh; overflow-y: auto;
+      padding: 10px 14px; border-radius: 8px;
+      background: rgba(8, 12, 20, 0.74);
+      font-size: 9.5px; line-height: 1.5;
+      white-space: normal;
+    }
+    #controls-hint.docked .legend-title {
+      font-size: 9px; letter-spacing: 0.1em; text-align: left; margin-bottom: 4px;
+    }
+    @media (max-width: 1100px) {
+      #controls-hint.docked { max-width: 42vw; font-size: 9px; line-height: 1.45; }
     }
 
     #island-banner {
@@ -2012,6 +2160,9 @@
       <div id="howto-controls">Controls load with the game.</div>
       <div class="menu-row">
         <button class="menu-btn primary" id="howto-back-btn">Back</button>
+        <!-- The three-card tour, on demand. It opens itself once on a first-ever
+             voyage; this is how anyone gets back to it. -->
+        <button class="menu-btn" id="howto-cards-btn">▶ The three cards</button>
       </div>
     </div>
 
@@ -2034,11 +2185,11 @@
       </div>
       <div id="settings-controls-block" style="font-size:0.74rem;color:#7f92a8;line-height:1.6;letter-spacing:0.04em;margin-top:6px;">
         <div><strong style="color:#9ec0e5;">Controls</strong></div>
-        WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; C · Crouch &nbsp;|&nbsp; X · Interact<br>
-        1–4 · Weapons &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; R · Reload<br>
-        LMB · Fire &nbsp;|&nbsp; SHIFT/RMB · Aim &nbsp;|&nbsp; E · Special &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; G · Keg<br>
-        Hold I · Supply Wheel (then 1–9) &nbsp;|&nbsp; B · Drop Chest &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; L · Controls<br>
-        At Helm: A/D · Steer &nbsp;|&nbsp; W/S · Raise/Lower Sails &nbsp;|&nbsp; Q/F · Trim (angle) Sails
+        WASD · Move &nbsp;|&nbsp; SPACE · Jump / Swim up &nbsp;|&nbsp; Z · Swim down &nbsp;|&nbsp; C · Crouch &nbsp;|&nbsp; X · Interact<br>
+        1–4 · Weapons &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; P · Spyglass<br>
+        LMB · Fire &nbsp;|&nbsp; SHIFT/RMB · Aim (guard, with a cutlass) &nbsp;|&nbsp; E · Special &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; G · Keg<br>
+        Hold I · Supply Wheel (1–9 · Q flips to charts) &nbsp;|&nbsp; B · Drop Chest &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; L · Controls &nbsp;|&nbsp; F8 · Bug report<br>
+        At Helm: A/D · Steer &nbsp;|&nbsp; W/S · Sails out / in &nbsp;|&nbsp; Q/F · Angle the sails &nbsp;|&nbsp; Hold W · Weigh anchor
       </div>
       <div class="menu-row">
         <button class="menu-btn primary" id="settings-back-btn">Back</button>
@@ -2315,15 +2466,24 @@
         <span class="legend-win"><strong style="color:#f0dda9;">To win:</strong> bank <strong>9,000 gold</strong> — or be the <strong>last crew afloat</strong>. Either one takes the seas.
         <br>Gold comes from treasure: dig chests with the shovel, carry them to a Tallyman, and sell.
         <br>
-        <br></span>WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; X · Interact — walk up and look at a thing, one prompt shows
+        <br></span>WASD · Move &nbsp;|&nbsp; SPACE · Jump / Swim up &nbsp;|&nbsp; Z · Swim down &nbsp;|&nbsp; C · Crouch
+        <br>X · Interact — walk up and look at a thing, one prompt shows &nbsp;|&nbsp; B · Drop a carried chest
         <br>Look for the gold station tags aboard: ⚓ Capstan at the bow · Hold X raises the anchor
         <br>⛵ Rope stations at the mast rails · Hold X drops / raises the sails (crewmates on the rope haul faster)
-        <br>Helm: A/D · Steer &nbsp;·&nbsp; W/S · Sails up / down &nbsp;·&nbsp; Q/F · Angle the sails &nbsp;|&nbsp; Crow's nest · ladder up the mainmast
-        <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Powder Keg &nbsp;|&nbsp; Hold I · Supply wheel &amp; tools
-        <br>LMB · Fire &nbsp;|&nbsp; SHIFT or RMB · Aim &nbsp;|&nbsp; P · Spyglass &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; F8 · Bug report
+        <br>Helm: A/D · Steer &nbsp;·&nbsp; W/S · Sails out / in &nbsp;·&nbsp; Q/F · Angle the sails &nbsp;·&nbsp; Hold W · Weigh anchor &nbsp;|&nbsp; Crow's nest · ladder up the mainmast
+        <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; E · Special attack &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Hold for powder keg, release to place
+        <br>Hold I · Supply wheel &amp; tools (1–9 to take one · Q flips to your charts)
+        <br>LMB · Fire &nbsp;|&nbsp; SHIFT or RMB · Aim — with a cutlass drawn it raises your guard instead
+        <br>P · Spyglass &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; M · Map (Esc closes) &nbsp;|&nbsp; L · This card &nbsp;|&nbsp; F8 · Bug report
         <br>
-        <br><strong style="color:#f0dda9;">Kill streak rewards:</strong> 5 kills · super cannonball &nbsp;·&nbsp; 10 · mega keg &nbsp;·&nbsp; 20 · tsunami [E]
+        <br><strong style="color:#f0dda9;">Kill streak rewards:</strong> 4 kills · super cannonball &nbsp;·&nbsp; 8 · mega keg &nbsp;·&nbsp; 14 · tsunami [E]
         <br>The storm ring shrinks all match. Outside it your hull takes breaches and your crew bleeds.
+      </div>
+      <!-- The tour is re-openable FOREVER, and this is the door a lost player
+           finds mid-voyage. It sits outside #legend-body so the menu's clone of
+           the card does not carry a duplicate id. -->
+      <div class="legend-foot">
+        <button id="legend-howto-btn" type="button">📖 How to Play — the three cards</button>
       </div>
     </div>
 
@@ -2348,15 +2508,38 @@
   </div>
 
   <div id="map-overlay">
-    <div id="map-panel">
-      <div id="map-meta">
-        <div id="map-title">The Shattered Reach</div>
-        <div id="map-subtitle">M or Esc to close</div>
+    <div id="map-stack">
+      <div id="map-panel">
+        <div id="map-meta">
+          <div id="map-title">The Shattered Reach</div>
+          <div id="map-subtitle">M or Esc to close</div>
+        </div>
+        <canvas id="map-canvas" width="1024" height="1024"></canvas>
+        <!-- The chart pans, zooms and centres on a click; the line that used to
+             sit here only named two colours the legend already carries. -->
+        <div id="map-help">Drag to pan · Scroll to zoom · Click an isle or label to centre · [M]/[Esc] closes</div>
       </div>
-      <canvas id="map-canvas" width="1024" height="1024"></canvas>
-      <!-- The chart pans, zooms and centres on a click; the line that used to
-           sit here only named two colours the legend already carries. -->
-      <div id="map-help">Drag to pan · Scroll to zoom · Click an isle or label to centre · [M]/[Esc] closes</div>
+      <!-- The chart's glyph key. Painted by MapRenderer.drawGlyphKey with the
+           SAME vector marks the chart itself draws, so the key can never show
+           art the map does not. -->
+      <div id="map-key"><canvas id="map-key-canvas" width="1800" height="220"></canvas></div>
+    </div>
+  </div>
+
+  <!-- FIRST VOYAGE, IN THREE CARDS (src/client/ui/OnboardingCards.ts).
+       Replaces the fourteen-line legend dump that used to be a new pirate's
+       one and only lesson. Above the menu AND the HUD: it is opened from both. -->
+  <div id="onboard-cards">
+    <div id="oc-panel" role="dialog" aria-label="How to play">
+      <div id="oc-kicker">One of three</div>
+      <div id="oc-glyph">⛵</div>
+      <h3 id="oc-title">Sail</h3>
+      <div id="oc-body"></div>
+      <div id="oc-dots"></div>
+      <div id="oc-actions">
+        <button class="oc-btn" id="oc-skip" type="button">Skip</button>
+        <button class="oc-btn primary" id="oc-next" type="button">Next</button>
+      </div>
     </div>
   </div>
 
@@ -2384,15 +2567,20 @@
 
   <!-- Death screen (in-match: shows while waiting for the round to finish) -->
   <div id="death-screen">
-    <!-- The title was hardcoded SHIP SUNK for every death — storm, drowning, a
-         cutlass on someone else's deck. HudController writes the real cause. -->
-    <h1 id="death-title">SHIP SUNK</h1>
-    <div id="death-cause">—</div>
-    <div class="end-stats" id="death-stats"></div>
-    <div style="margin-top:14px;font-size:0.7rem;color:#7f92a8;letter-spacing:0.18em;text-transform:uppercase;">
-      Waiting for the voyage to end…
+    <!-- One bounded column, one row per thing. The old markup stacked five
+         loose children by margin over a transparent black sheet, so the button
+         printed on top of the copy and the HUD printed through all of it. -->
+    <div id="death-panel">
+      <!-- The title was hardcoded SHIP SUNK for every death — storm, drowning, a
+           cutlass on someone else's deck. HudController writes the real cause. -->
+      <h1 id="death-title">SHIP SUNK</h1>
+      <div id="death-cause">—</div>
+      <div class="end-stats" id="death-stats"></div>
+      <div id="death-wait">Waiting for the voyage to end…</div>
+      <div id="death-actions">
+        <button class="restart-btn" id="death-return-btn">RETURN TO PORT</button>
+      </div>
     </div>
-    <button class="restart-btn" id="death-return-btn">RETURN TO PORT</button>
   </div>
 
   <!-- Win screen -->
