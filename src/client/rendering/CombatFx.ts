@@ -894,6 +894,116 @@ export class CombatFx {
     this.debris?.update(dt);
     this.fragments?.update(dt);
     this.lights?.update(dt);
+    this.fxClock += dt;
+    this.updateHurtOverlay(dt);
+  }
+
+  // ── Incoming damage: "who is shooting me, and from where" ─────────────────
+  // A 160ms opacity blip on one DOM div was the entire feedback for being shot,
+  // and nothing at all fired when armour ate the hit — the audited symptom was
+  // losing 50 HP with no visible cause, no direction and no vignette. This owns
+  // a longer, directional read: a red edge vignette that decays over ~0.9s plus
+  // a bright smear pinned to the screen edge the shot came from.
+
+  /** Seconds since init; only used to age the shot log and the hit cue. */
+  private fxClock = 0;
+  /** Enemy shots seen in the last few seconds, so a hit can be traced back to
+   *  the muzzle that fired it without the server having to tell us. */
+  private readonly enemyShots: Array<{ x: number; y: number; z: number; dx: number; dy: number; dz: number; at: number }> = [];
+  private hurtOverlay: { root: HTMLDivElement; ring: HTMLDivElement; wedge: HTMLDivElement } | null = null;
+  private hurtFlash = 0;
+  /** Screen bearing of the hit (0 = dead ahead, +right), null = unknown source. */
+  private hurtBearing: number | null = null;
+  private lastHurtCueAt = -99;
+
+  private ensureHurtOverlay() {
+    if (this.hurtOverlay) return this.hurtOverlay;
+    const root = document.createElement('div');
+    // Under the HUD chrome (z 95+) but over the canvas, and never clickable.
+    root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:92;opacity:0;overflow:hidden';
+    const ring = document.createElement('div');
+    ring.style.cssText = 'position:absolute;inset:0;'
+      + 'background:radial-gradient(ellipse at center, rgba(0,0,0,0) 34%, rgba(150,16,10,0.30) 72%, rgba(196,26,16,0.72) 100%)';
+    const wedge = document.createElement('div');
+    // A soft glow parked just off the screen edge; rotating the whole element
+    // about the screen centre walks it round the frame to face the shooter.
+    wedge.style.cssText = 'position:absolute;left:50%;top:50%;width:120vmax;height:120vmax;'
+      + 'margin:-60vmax 0 0 -60vmax;'
+      + 'background:radial-gradient(ellipse 42% 26% at 50% 2%, rgba(255,108,72,0.92) 0%, rgba(226,48,28,0.45) 38%, rgba(0,0,0,0) 72%)';
+    root.append(ring, wedge);
+    document.body.appendChild(root);
+    this.hurtOverlay = { root, ring, wedge };
+    return this.hurtOverlay;
+  }
+
+  /**
+   * Called on ANY loss of health or armour (ViewmodelController watches the
+   * local player every frame, so storm, drowning, fall, fire, shark, keg and
+   * bullet all land here — not just the damage kinds that ship a hit message).
+   *
+   * @param severity 0..1, scaled from the size of the bite taken out of you.
+   * @param cameraPos/cameraQuat used to resolve the direction of the last enemy
+   *        shot that passed close to you into a screen bearing.
+   */
+  flashIncomingDamage(severity: number, cameraPos?: THREE.Vector3, cameraQuat?: THREE.Quaternion) {
+    const punch = THREE.MathUtils.clamp(0.45 + severity * 0.75, 0.45, 1.2);
+    this.hurtFlash = Math.min(1.25, Math.max(this.hurtFlash, punch));
+    this.hurtBearing = cameraPos && cameraQuat ? this.resolveHitBearing(cameraPos, cameraQuat) : null;
+    // AUDIO CUE. playPlayerHurt was previously only reachable from the `hit`
+    // message path in Game.ts, so every damage source that does not ship a hit
+    // payload — storm, drowning, falls, fire, shark, your own keg — took health
+    // off you in total silence. It is deliberately not the throttled generic
+    // impact sound: a grunt plus a body slap is the tell that the hit landed on
+    // YOU rather than somewhere nearby.
+    if (this.fxClock - this.lastHurtCueAt > 0.22) {
+      this.lastHurtCueAt = this.fxClock;
+      this.audio?.playPlayerHurt(Math.round(8 + severity * 42));
+      if (severity > 0.45) this.audio?.playProjectileImpact('bullet', 0);
+    }
+    this.updateHurtOverlay(0);
+  }
+
+  /** Closest recent enemy shot line to the camera → screen bearing, or null. */
+  private resolveHitBearing(cameraPos: THREE.Vector3, cameraQuat: THREE.Quaternion): number | null {
+    let best: { x: number; y: number; z: number } | null = null;
+    let bestMiss = Infinity;
+    for (const shot of this.enemyShots) {
+      if (this.fxClock - shot.at > 2.5) continue;
+      const ox = cameraPos.x - shot.x;
+      const oy = cameraPos.y - shot.y;
+      const oz = cameraPos.z - shot.z;
+      const along = ox * shot.dx + oy * shot.dy + oz * shot.dz;
+      if (along <= 0) continue; // fired away from us
+      // Perpendicular miss distance of the shot line from the head.
+      const miss = Math.hypot(ox - shot.dx * along, oy - shot.dy * along, oz - shot.dz * along);
+      if (miss < bestMiss) {
+        bestMiss = miss;
+        best = shot;
+      }
+    }
+    if (!best || bestMiss > 4.5) return null;
+    scratchVecA.set(best.x - cameraPos.x, best.y - cameraPos.y, best.z - cameraPos.z);
+    scratchQuat.copy(cameraQuat).invert();
+    scratchVecA.applyQuaternion(scratchQuat);
+    // Camera space: −z is forward, +x is right. Bearing 0 puts the smear at the
+    // top of the frame (shooter ahead), +π/2 on the right-hand edge.
+    return Math.atan2(scratchVecA.x, -scratchVecA.z);
+  }
+
+  private updateHurtOverlay(dt: number) {
+    if (this.hurtFlash <= 0.0001) {
+      if (this.hurtOverlay && this.hurtOverlay.root.style.opacity !== '0') this.hurtOverlay.root.style.opacity = '0';
+      return;
+    }
+    const overlay = this.ensureHurtOverlay();
+    // ~0.9s to fade out from a full-strength hit; a fast hit re-arms it.
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.15);
+    const a = THREE.MathUtils.clamp(this.hurtFlash, 0, 1);
+    overlay.root.style.opacity = String(a.toFixed(3));
+    overlay.wedge.style.opacity = this.hurtBearing === null ? '0' : '1';
+    if (this.hurtBearing !== null) {
+      overlay.wedge.style.transform = `rotate(${this.hurtBearing}rad)`;
+    }
   }
 
   /** Fire a firearm's shot sound on the LOCAL predicted press edge (Game.ts), so
@@ -910,6 +1020,21 @@ export class CombatFx {
       this.playShotSound(projectile.type, projectile.position, cameraPos, isLocalSource, projectile.weaponId);
     }
     if (!isLocalSource) this.maybeWhistle(projectile, cameraPos);
+
+    {
+      // Log every ENEMY shot: when damage lands a moment later, the shot whose
+      // line passed nearest your head is who shot you — that is how the damage
+      // vignette knows which way to point without any new server field.
+      const v = projectile.velocity;
+      const s = Math.hypot(v.x, v.y, v.z) || 1;
+      if (!isLocalSource) {
+        this.enemyShots.push({
+          x: projectile.position.x, y: projectile.position.y, z: projectile.position.z,
+          dx: v.x / s, dy: v.y / s, dz: v.z / s, at: this.fxClock,
+        });
+        if (this.enemyShots.length > 12) this.enemyShots.shift();
+      }
+    }
     if (!this.flame || !this.smoke || !this.sparks || !this.droplets || !this.lights) return;
 
     const position = projectile.position;

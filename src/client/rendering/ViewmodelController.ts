@@ -246,29 +246,42 @@ export class ViewmodelController {
   /** Swim-stroke clock for the first-person crawl arms. */
   private swimStrokePhase = 0;
 
+  /**
+   * A gripping fist has to paint OVER the thing it is gripping. Everything in a
+   * viewmodel runs depthTest off at renderOrder 999, so with equal orders the
+   * draw sequence is arbitrary — and it lost: measured with NDC projection, the
+   * axe, shovel and cutlass fists were visible, on-screen and completely buried
+   * inside the haft/knuckle-bow they were holding. That is the whole "hand-less
+   * floating prop" read. Hands draw last, always.
+   */
+  private static readonly HAND_RENDER_ORDER = 1004;
+
+  private makeHand(side: 1 | -1, parent: THREE.Group): THREE.Group {
+    const hand = makeViewHand(side);
+    applyViewmodelMaterialSettings(hand);
+    hand.traverse((object) => {
+      if ((object as THREE.Mesh).isMesh) object.renderOrder = ViewmodelController.HAND_RENDER_ORDER;
+    });
+    hand.visible = false;
+    parent.add(hand);
+    return hand;
+  }
+
   private ensureWeaponHands() {
     if (this.weaponHands) return this.weaponHands;
-    const left = makeViewHand(-1);
-    const right = makeViewHand(1);
-    for (const hand of [left, right]) {
-      applyViewmodelMaterialSettings(hand);
-      hand.visible = false;
-      this.localViewWeaponRoot.add(hand);
-    }
-    this.weaponHands = { left, right };
+    this.weaponHands = {
+      left: this.makeHand(-1, this.localViewWeaponRoot),
+      right: this.makeHand(1, this.localViewWeaponRoot),
+    };
     return this.weaponHands;
   }
 
   private ensurePocketHands() {
     if (this.pocketHands) return this.pocketHands;
-    const left = makeViewHand(-1);
-    const right = makeViewHand(1);
-    for (const hand of [left, right]) {
-      applyViewmodelMaterialSettings(hand);
-      hand.visible = false;
-      this.localViewPocketRoot.add(hand);
-    }
-    this.pocketHands = { left, right };
+    this.pocketHands = {
+      left: this.makeHand(-1, this.localViewPocketRoot),
+      right: this.makeHand(1, this.localViewPocketRoot),
+    };
     return this.pocketHands;
   }
 
@@ -291,7 +304,11 @@ export class ViewmodelController {
     }
   }
 
-  /** Grip transforms per weapon (root space — see the note above). */
+  /** Grip transforms per weapon (root space — see the note above).
+   *  SCREEN RULE: every grip below is verified by projecting the palm to NDC
+   *  (scripts/viewmodel-hands-probe.mjs). A fist whose palm sits below
+   *  ndc.y ≈ −0.9 is off the bottom of the frame and the weapon reads as a
+   *  floating prop again, no matter that `visible` is true. */
   private weaponGrips(weaponId: WeaponId): { left: HandGrip | null; right: HandGrip | null } {
     switch (weaponId) {
       // Forearms are pitched steeply DOWN (rot.x ≈ 1) so they exit through the
@@ -300,28 +317,31 @@ export class ViewmodelController {
       case 'blunderbuss':
         return {
           // Trigger hand at the small of the stock, support hand under the fore-end.
-          right: { pos: [0.015, -0.13, 0.05], rot: [1.0, 0.2, 0.12] },
-          left: { pos: [-0.01, -0.075, -0.235], rot: [1.05, -0.36, -0.16] },
+          right: { pos: [0.015, -0.11, 0.035], rot: [1.0, 0.2, 0.12], scale: 1.12 },
+          left: { pos: [-0.01, -0.07, -0.235], rot: [1.05, -0.36, -0.16], scale: 1.12 },
         };
       case 'eye_of_reach':
         return {
-          right: { pos: [0.015, -0.12, 0.045], rot: [1.0, 0.2, 0.12] },
-          left: { pos: [-0.01, -0.055, -0.3], rot: [1.05, -0.36, -0.16] },
+          right: { pos: [0.015, -0.1, 0.03], rot: [1.0, 0.2, 0.12], scale: 1.12 },
+          left: { pos: [-0.01, -0.05, -0.3], rot: [1.05, -0.36, -0.16], scale: 1.12 },
         };
       case 'flintknock':
         return {
-          right: { pos: [0.01, -0.11, 0.055], rot: [0.95, 0.18, 0.12] },
+          right: { pos: [0.01, -0.1, 0.04], rot: [0.95, 0.18, 0.12], scale: 1.12 },
           left: null,
         };
       case 'cutlass':
+        // Lifted off the pommel and onto the grip proper: at −0.13 the fist rode
+        // the bottom edge (palm ndc.y ≈ −0.8 at rest, off-frame on the dash
+        // windup) and the sword read as a blade with nothing behind it.
         return {
-          right: { pos: [0.005, -0.13, 0.02], rot: [0.9, 0.14, 0.1] },
+          right: { pos: [0.005, -0.05, 0.015], rot: [0.9, 0.14, 0.1], scale: 1.16 },
           left: null,
         };
       default:
         return {
-          right: { pos: [0.01, -0.11, 0.04], rot: [0.95, 0.18, 0.12] },
-          left: { pos: [-0.01, -0.05, -0.28], rot: [1.05, -0.36, -0.16] },
+          right: { pos: [0.01, -0.1, 0.03], rot: [0.95, 0.18, 0.12], scale: 1.12 },
+          left: { pos: [-0.01, -0.05, -0.28], rot: [1.05, -0.36, -0.16], scale: 1.12 },
         };
     }
   }
@@ -334,31 +354,36 @@ export class ViewmodelController {
       case 'powder_keg':
         return { left: null, right: null };
       case 'bucket':
-        return { right: { pos: [0.0, 0.16, 0.0], rot: [0.5, 0.12, 0.1] }, left: null };
+        return { right: { pos: [0.0, 0.16, 0.0], rot: [0.5, 0.12, 0.1], scale: 1.25 }, left: null };
       case 'lantern':
-        return { right: { pos: [0.0, 0.33, 0.0], rot: [0.45, 0.1, 0.08] }, left: null };
+        return { right: { pos: [0.0, 0.33, 0.0], rot: [0.45, 0.1, 0.08], scale: 1.25 }, left: null };
       case 'compass':
-        return { right: { pos: [0.02, -0.11, 0.02], rot: [0.15, 0.1, 0.1] }, left: null };
+        return { right: { pos: [0.02, -0.07, 0.02], rot: [0.15, 0.1, 0.1], scale: 1.15 }, left: null };
       case 'spyglass':
-        return { right: { pos: [0.0, -0.07, 0.03], rot: [0.42, 0.1, 0.1] }, left: null };
+        return { right: { pos: [0.0, -0.07, 0.03], rot: [0.42, 0.1, 0.1], scale: 1.15 }, left: null };
+      // LONG TOOLS: the rear fist used to sit far down the haft toward the lens
+      // (root z +0.30/+0.34), which threw the palm to ndc.y −1.5/−1.7 — clean
+      // off the bottom of the frame. Both fists now ride the middle of the
+      // shaft, a hand's width apart, and are sized up to match a 1.7–1.8×
+      // tool (a default-scale fist vanishes inside a haft that thick).
       case 'shovel':
         return {
-          right: { pos: [0.0, 0.0, 0.34], rot: [0.5, 0.16, 0.1] },
-          left: { pos: [0.0, 0.0, -0.09], rot: [0.62, -0.36, -0.14] },
+          right: { pos: [0.0, 0.0, 0.14], rot: [0.5, 0.16, 0.1], scale: 1.5 },
+          left: { pos: [0.0, 0.0, -0.1], rot: [0.62, -0.36, -0.14], scale: 1.5 },
         };
       case 'axe':
         return {
-          right: { pos: [0.0, 0.0, 0.3], rot: [0.5, 0.16, 0.1] },
-          left: { pos: [0.0, 0.0, 0.02], rot: [0.6, -0.32, -0.12] },
+          right: { pos: [0.0, 0.0, 0.13], rot: [0.5, 0.16, 0.1], scale: 1.5 },
+          left: { pos: [0.0, 0.0, -0.05], rot: [0.6, -0.32, -0.12], scale: 1.5 },
         };
       case 'wood':
         return {
-          right: { pos: [0.14, -0.05, 0.1], rot: [0.5, 0.2, 0.12] },
-          left: { pos: [-0.14, -0.05, 0.1], rot: [0.5, -0.2, -0.12] },
+          right: { pos: [0.14, -0.05, 0.1], rot: [0.5, 0.2, 0.12], scale: 1.2 },
+          left: { pos: [-0.14, -0.05, 0.1], rot: [0.5, -0.2, -0.12], scale: 1.2 },
         };
       default:
         // Food and everything else: one cupped hand under the item.
-        return { right: { pos: [0.02, -0.1, 0.03], rot: [0.28, 0.12, 0.1] }, left: null };
+        return { right: { pos: [0.02, -0.08, 0.03], rot: [0.28, 0.12, 0.1], scale: 1.2 }, left: null };
     }
   }
 
@@ -370,13 +395,7 @@ export class ViewmodelController {
   private updateSwimHands(moveAmount: number, dt: number) {
     if (!this.swimRig) {
       const rig = new THREE.Group();
-      const left = makeViewHand(-1);
-      const right = makeViewHand(1);
-      for (const hand of [left, right]) {
-        applyViewmodelMaterialSettings(hand);
-        rig.add(hand);
-      }
-      this.swimHands = { left, right };
+      this.swimHands = { left: this.makeHand(-1, rig), right: this.makeHand(1, rig) };
       this.swimRig = rig;
       this.localViewHandsRoot.add(rig);
     }
@@ -434,44 +453,43 @@ export class ViewmodelController {
     // time. (Measured: the gate fired, the rig was visible, the anchor was
     // rising, and the screen was pure capstan.) A viewmodel does not participate
     // in world depth: draw it last, over everything.
-    const vmMat = (color: number, roughness: number) => new THREE.MeshStandardMaterial({
-      color, roughness, depthTest: false, depthWrite: false,
+    const barMat = new THREE.MeshStandardMaterial({
+      color: 0x4a331e, roughness: 0.9, depthTest: false, depthWrite: false,
     });
-    const sleeveMat = vmMat(0x7a3f2a, 0.92);
-    const skinMat = vmMat(0xc98d5f, 0.85);
-    const barMat = vmMat(0x4a331e, 0.9);
-    const parts: THREE.Mesh[] = [];
-    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.9, 8), barMat);
+    // THE SPOKE BAR: a proper capstan bar, thick enough to be gripped rather
+    // than a wire, laid across the lower-middle frame.
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.3, 10), barMat);
     bar.rotation.z = Math.PI * 0.5;
-    // Carried a touch higher than a natural crank height: the pirate is looking
-    // DOWN at the drum he is walking round, and at the old height the bar and
-    // fists rode the bottom edge of the frame (ndc y ≈ −0.7) and cropped away
-    // the moment he tipped his head.
-    bar.position.set(0, -0.2, -0.62);
-    parts.push(bar);
-    for (const side of [-1, 1] as const) {
-      const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.42, 8), sleeveMat);
-      forearm.position.set(side * 0.24, -0.3, -0.44);
-      forearm.rotation.x = -1.05;
-      forearm.rotation.z = side * 0.18;
-      parts.push(forearm);
-      const hand = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.075, 0.13), skinMat);
-      hand.position.set(side * 0.22, -0.205, -0.6);
-      parts.push(hand);
-      for (let f = 0; f < 3; f++) {
-        const finger = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.05, 0.024), skinMat);
-        finger.position.set(side * 0.22 - 0.026 + f * 0.026, -0.17, -0.655);
-        finger.rotation.x = 0.7;
-        parts.push(finger);
-      }
+    bar.position.set(0, -0.255, -0.62);
+    bar.renderOrder = 996;
+    rig.add(bar);
+    // THE HANDS. The old rig hand-built two flat skin-coloured boxes with three
+    // stubby fingers, and against a capstan drum that fills the frame they read
+    // as pale tiles lying on the deck — the "diagnosed, improved, unresolved"
+    // symptom. These are the SAME forearm+fist+sleeve+curled-fingers rig every
+    // other viewmodel uses (makeViewHand), scaled up 1.55 and set on the bar a
+    // shoulder-width apart, so they land at ndc [±0.36, −0.51]: two chunky
+    // gripping fists in the lower-middle frame, sleeves running back out of
+    // shot past the lens. Consistency with the weapon hands is the point — the
+    // player already knows what his own fists look like.
+    const gripHands = { left: this.makeHand(-1, rig), right: this.makeHand(1, rig) };
+    for (const key of ['left', 'right'] as const) {
+      const side = key === 'left' ? -1 : 1;
+      const hand = gripHands[key];
+      hand.visible = true;
+      hand.scale.setScalar(1.55);
+      // Palm on top of the bar, knuckles forward, forearm angled down-back so it
+      // exits through the bottom of the frame instead of running at the lens.
+      hand.position.set(side * 0.3, -0.24, -0.62);
+      hand.rotation.set(0.62, side * 0.22, side * 0.12);
+      // makeHand already stamps HAND_RENDER_ORDER (1004) on every mesh, which is
+      // above the bar's 996 — the fists paint over the thing they are holding.
     }
-    // renderOrder is per-object in three (a group's does not propagate), and the
-    // bar has to draw under the fists gripping it.
-    for (const part of parts) {
-      part.renderOrder = part === bar ? 996 : 997;
-      rig.add(part);
-    }
+    this.capstanGripHands = gripHands;
   }
+
+  /** Kept so the crank cycle can wring the fists on the bar per push. */
+  private capstanGripHands: { left: THREE.Group; right: THREE.Group } | null = null;
 
   /** Show working hands on the capstan bar while the anchor hold runs. */
   updateCapstanHands() {
@@ -492,6 +510,10 @@ export class ViewmodelController {
     this.localViewHandsRoot.visible = !!cranking || !!this.swimRig?.visible;
     if (cranking) {
       this.localViewWeaponRoot.visible = false;
+      // Both hands are on the bar — you cannot also be holding a shovel. (The
+      // pocket viewmodel used to stay up, so the audit shot of the crank showed
+      // a tool floating over the drum next to the crank hands.)
+      this.localViewPocketRoot.visible = false;
       const t = this.view.ocean.getTime();
       // PUSH-WALK cycle, not a floating bar: sweep the bar+hands ~70° LEFT
       // around a vertical axis ~0.8m ahead (walking a capstan spoke around),
@@ -521,6 +543,28 @@ export class ViewmodelController {
         dip,
         PIVOT_Z - PIVOT_Z * Math.cos(theta),
       );
+      // Per-push WRING on the bar: the fists roll and squeeze forward as he
+      // leans into the spoke, then open and re-set on the regrip. Without this
+      // the pair is a static decal riding a rotating group, which is most of why
+      // they never read as hands doing work.
+      if (this.capstanGripHands) {
+        const heave = cycle < PUSH ? Math.sin((cycle / PUSH) * Math.PI) : 0;
+        const open = cycle < PUSH ? 0 : Math.sin(((cycle - PUSH) / REGRIP) * Math.PI);
+        for (const key of ['left', 'right'] as const) {
+          const side = key === 'left' ? -1 : 1;
+          const hand = this.capstanGripHands[key];
+          hand.position.set(
+            side * (0.3 - heave * 0.015),
+            -0.24 - open * 0.07,
+            -0.62 - heave * 0.035,
+          );
+          hand.rotation.set(
+            0.62 + heave * 0.16 - open * 0.3,
+            side * (0.22 + heave * 0.06),
+            side * (0.12 + heave * 0.1),
+          );
+        }
+      }
     }
   }
 
@@ -590,7 +634,8 @@ export class ViewmodelController {
     for (let i = 0; i < 2; i++) {
       const mat = makeMat();
       const mesh = new THREE.Mesh(arcGeo, mat);
-      mesh.position.set(0, -0.04, -0.9);
+      // Centred on the crosshair band the blade now crosses, not below it.
+      mesh.position.set(0, -0.02, -0.86);
       mesh.renderOrder = 998;
       mesh.visible = false;
       this.view.renderer.camera.add(mesh);
@@ -613,7 +658,11 @@ export class ViewmodelController {
     const r = this.slashRibbons[this.slashRibbonCursor];
     this.slashRibbonCursor = (this.slashRibbonCursor + 1) % this.slashRibbons.length;
     r.age = 0;
-    r.life = 0.16;
+    // The ribbon is spawned on the swing's rising edge but the blade does not
+    // cross the screen until p≈0.2–0.56 of a 0.55s swing (110–310ms) — a 0.16s
+    // trail was already gone before the cut, which is why the slash read as
+    // untrailed. 0.34s brightest at 0.17s = the whip frame.
+    r.life = 0.34;
     r.side = side;
     r.mesh.visible = true;
   }
@@ -661,11 +710,18 @@ export class ViewmodelController {
         r.mat.opacity = 0;
         continue;
       }
-      const grow = 1 + p * 0.18;
-      // Mirror the CUT keyframes: head lands lower-opposite of the cock side.
+      const grow = 0.92 + p * 0.62;
+      // The ribbon SWEEPS with the blade instead of flashing in place: it rides
+      // the same anticipation→follow-through rotation, so the eye is given the
+      // arc the sword took even on a frame where the blade itself is a thin
+      // edge-on line. The sweep is 2.6rad to match the blade's new 2.7rad roll
+      // (cock −0.85 → follow-through +1.85); the old 1.75 under-swept it and the
+      // ribbon and the steel visibly disagreed about where the cut went.
       r.mesh.scale.set(r.side * grow, -grow, 1);
-      r.mesh.rotation.z = THREE.MathUtils.degToRad(-20) * r.side;
-      r.mat.opacity = 0.85 * (1 - p);
+      r.mesh.rotation.z = (0.95 - 2.6 * p) * r.side;
+      // Peak mid-swing rather than at the wind-up (a linear fade from full made
+      // the brightest frame the one where nothing had moved yet).
+      r.mat.opacity = 0.98 * Math.sin(Math.min(1, p) * Math.PI) ** 0.6;
     }
     const s = this.slashStreak;
     if (s && s.mesh.visible) {
@@ -753,8 +809,11 @@ export class ViewmodelController {
             weaponMesh.rotation.set(-0.06 - ext * 1.35, 0.1, -0.62 + ext * 0.5);
             break;
           }
-          const slashArc = Math.sin(THREE.MathUtils.clamp((swingProgress - 0.18) / 0.42, 0, 1) * Math.PI);
-          const recover = THREE.MathUtils.smoothstep(swingProgress, 0.6, 1);
+          // Same beat as the first-person arc (cut 0.20 → follow-through 0.56)
+          // so a swing you watch someone else make and a swing you make yourself
+          // are the same swing.
+          const slashArc = Math.sin(THREE.MathUtils.clamp((swingProgress - 0.2) / 0.36, 0, 1) * Math.PI);
+          const recover = THREE.MathUtils.smoothstep(swingProgress, 0.56, 1);
           weaponMesh.position.set(
             0.04 + slashArc * 0.12,
             0.02 + swingProgress * 0.05,
@@ -1013,7 +1072,12 @@ export class ViewmodelController {
         const bob = Math.sin(time * (3.1 + moveAmount * 2.4)) * (0.006 + moveAmount * 0.02);
         const sway = Math.sin(time * (1.8 + moveAmount * 1.1)) * (0.006 + moveAmount * 0.014);
         const cfg = tool === 'compass'
-          ? { p: [0.2 + sway * 0.5, -0.19 + bob, -0.38], r: [-0.88 + bob, 0.16 + sway * 0.3, 0.08] }
+          // At z −0.38 the compass face was 38cm from the eye: it swallowed the
+          // lower-right quarter of the frame and threw its own holding fist to
+          // ndc [0.50, −0.70], in the corner behind the HUD tiles. Held at arm's
+          // length instead the fist reads at [0.28, −0.43] and the card is still
+          // easily large enough to take a bearing off.
+          ? { p: [0.16 + sway * 0.5, -0.13 + bob, -0.56], r: [-0.88 + bob, 0.16 + sway * 0.3, 0.08] }
           : tool === 'bucket'
             ? (() => {
               // The SCOOP→HEAVE cycle must READ: bailScoopProgress runs 1→0
@@ -1058,10 +1122,12 @@ export class ViewmodelController {
                     const recover = THREE.MathUtils.smoothstep(cycle, 0.66, 1);
                     const arc = 1 - recover;
                     return {
+                      // Same rest anchor as below (0.26 / −0.20 / −0.80) so the
+                      // chop swings away from a pose whose fists are in frame.
                       p: [
-                        0.3 + (raise * 0.14 - strike * 0.4) * arc,
-                        -0.24 + (raise * 0.16 - strike * 0.26) * arc,
-                        -0.62 - strike * 0.14 * arc,
+                        0.26 + (raise * 0.14 - strike * 0.4) * arc,
+                        -0.2 + (raise * 0.16 - strike * 0.26) * arc,
+                        -0.8 - strike * 0.14 * arc,
                       ],
                       r: [
                         0.5 + (raise * 0.9 - strike * 2.4) * arc,
@@ -1072,12 +1138,23 @@ export class ViewmodelController {
                   }
                   // Rest: head UP at the far end, hand low on the haft, pulled
                   // back so the blade clears the trunk you're stood against.
-                  return { p: [0.3 + sway * 0.4, -0.24 + bob, -0.62], r: [0.5 + bob, 0.15 + sway * 0.2, -0.15] };
+                  // FRAMING (this is the audited "axe floats with zero hands"):
+                  // at z −0.62 the rear fist projected to ndc [0.47, −0.79] —
+                  // the extreme bottom-right corner, behind the ship-hull and
+                  // weapon-slot HUD tiles — while the head swept across mid
+                  // screen, so the axe read as a prop with nothing holding it.
+                  // Pushed 0.18 further out and lifted 0.04: fists now land at
+                  // [0.30, −0.51] and [0.22, −0.28], on clear frame.
+                  return { p: [0.26 + sway * 0.4, -0.2 + bob, -0.8], r: [0.5 + bob, 0.15 + sway * 0.2, -0.15] };
                 })()
               // Shovel is long — lay it DIAGONALLY across the lower-right (blade
               // low, handle up-left) via a roll about the view axis, so the whole
               // tool stays in the frame plane instead of receding down-forward.
-              : { p: [0.22 + sway * 0.4, -0.34 + bob, -0.54], r: [-0.2 + bob, 0.3 + sway * 0.2, 0.8] }; // shovel
+              // At z −0.54 the rear fist was only 0.41m from the eye, which threw
+              // its palm to ndc.y −1.02 — literally off the bottom of the frame,
+              // measured. 0.24 further out and 0.06 up puts both fists on the
+              // haft in shot ([0.28, −0.52] and [0.15, −0.40]).
+              : { p: [0.2 + sway * 0.4, -0.28 + bob, -0.78], r: [-0.2 + bob, 0.3 + sway * 0.2, 0.8] }; // shovel
         this.localViewPocketRoot.visible = true;
         this.localViewPocketRoot.position.set(cfg.p[0], cfg.p[1], cfg.p[2]);
         this.localViewPocketRoot.rotation.set(cfg.r[0], cfg.r[1], cfg.r[2]);
@@ -1167,22 +1244,119 @@ export class ViewmodelController {
     // Overshoot on the way home sells the snap-up.
     const overshoot = Math.sin(THREE.MathUtils.clamp((p - 0.72) / 0.28, 0, 1) * Math.PI) * 0.9;
     const bolt = weaponId === 'eye_of_reach' ? 1 : 0;
+    if (weaponId === 'blunderbuss') {
+      // SILHOUETTE RULE (this IS the audited "diagonal stack of gold spheres"
+      // frame, and the previous attempt did not fix it — measured, the old keys
+      // put the breech at camera z −0.55 and the muzzle at −1.56, so the gun
+      // ran almost straight down the view axis: 1m of foreshortened barrel with
+      // its bands turning into a diagonal row of gold ellipses, and the trigger
+      // fist thrown to ndc.y −1.02, clean off the bottom of the frame.
+      //
+      // BROADSIDE means BROADSIDE: yaw the whole gun ~75° (total ry ≈ 1.30) and
+      // push it 0.18 further out, so both ends sit at a comparable depth
+      // (muzzle z −1.25, breech −0.93) and the reload silhouette is a gun lying
+      // across the lower-middle frame — muzzle screen-left at ndc [−0.48,−0.28],
+      // breech screen-right at [0.27,−0.42], support fist on the fore-end at
+      // [−0.09,−0.47] and trigger fist at [0.10,−0.54].
+      return {
+        pose: [
+          hold * -0.22 + ram * 0.03,
+          hold * -0.02 - ram * 0.03,
+          hold * -0.18 - ram * 0.04,
+          hold * 0.15 - ram * 0.1 - overshoot * 0.08,
+          hold * 1.16 + ram * 0.06,
+          hold * 0.18 + ram * 0.05 + overshoot * 0.1,
+        ],
+        ram,
+        pulseIndex,
+      };
+    }
+    if (weaponId === 'flintknock') {
+      // A pistol is primed UP at eye level, not dropped to the hip: the shared
+      // keys shoved it 0.18 nearer the lens and 0.13 down, which put the whole
+      // gun (and its fist) below the frame at ndc.y −1.8.
+      return {
+        pose: [
+          hold * -0.04 + ram * 0.02,
+          hold * 0.06 - ram * 0.04,
+          hold * 0.04 + ram * 0.04,
+          hold * 0.3 - ram * 0.14,
+          hold * -0.15,
+          hold * 0.55 + ram * 0.06 + overshoot * 0.12,
+        ],
+        ram,
+        pulseIndex,
+      };
+    }
+    // Long arms (Eye of Reach + fallback): the old keys dropped the gun 0.13 and
+    // rolled it 1.1rad, which swung the trigger fist down to ndc.y −0.89 —
+    // riding the bottom edge, and under the weapon-slot HUD tiles that live at
+    // ndc.y −0.82…−0.97. Half the roll, a third of the drop, and a small push
+    // AWAY from the lens keeps both fists at ndc.y ≈ −0.5 through the whole
+    // choreography while the lock plate still comes up to the eye.
     return {
       pose: [
         hold * -0.06 + ram * 0.02,
-        hold * -0.13 - ram * 0.05,
-        hold * 0.18 + ram * 0.05,
+        hold * -0.04 - ram * 0.04,
+        hold * 0.06 + ram * 0.05,
         hold * (0.5 + bolt * 0.1) - ram * 0.12 - overshoot * 0.12,
         hold * -0.28 + bolt * hold * 0.2,
-        hold * (0.6 + bolt * 0.5) + ram * 0.06 + overshoot * 0.1,
+        hold * (0.5 + bolt * 0.35) + ram * 0.06 + overshoot * 0.1,
       ],
       ram,
       pulseIndex,
     };
   }
 
+  // ── Incoming damage watch ─────────────────────────────────────────────────
+  /** Last seen local health/armour, for the "something just hit me" edge. */
+  private prevWatchedHealth: number | null = null;
+  private prevWatchedArmor = 0;
+
+  /**
+   * Fire the incoming-damage read on ANY loss of health or armour.
+   *
+   * CombatFx.flashIncomingDamage (directional edge vignette + hit cue) already
+   * existed and was documented as being driven from here — but nothing in the
+   * whole client ever called it, which is why the auditor lost 50 HP with no
+   * cause, no direction and no vignette. Watching the local player every frame
+   * (rather than hanging off the `hit` message) is deliberate: storm, drowning,
+   * fall, fire, shark, keg, cannon and bullet all move these two numbers, and
+   * only some of them ship a hit payload. Armour is included so a hit that
+   * armour ate is still unmistakably a hit.
+   */
+  private watchIncomingDamage(player: Player | null) {
+    if (!player || player.state === 'eliminated' || player.state === 'respawning') {
+      // A respawn refills both bars; don't read that as a 100-point wound.
+      this.prevWatchedHealth = null;
+      return;
+    }
+    const health = player.health ?? 0;
+    const armor = player.armor ?? 0;
+    if (this.prevWatchedHealth === null) {
+      this.prevWatchedHealth = health;
+      this.prevWatchedArmor = armor;
+      return;
+    }
+    const lost = Math.max(0, this.prevWatchedHealth - health) + Math.max(0, this.prevWatchedArmor - armor);
+    this.prevWatchedHealth = health;
+    this.prevWatchedArmor = armor;
+    if (lost < 0.5) return;
+    const camera = this.view.renderer.camera;
+    // A chip of storm damage still registers; a blunderbuss to the chest fills
+    // the frame. 45 is roughly "half your health in one bite".
+    this.view.combatFx.flashIncomingDamage(
+      THREE.MathUtils.clamp(lost / 45, 0.18, 1),
+      camera.position,
+      camera.quaternion,
+    );
+  }
+
   syncLocalViewWeapon() {
     const localPlayer = this.view.getLocalPlayer();
+    // Runs before every early return below — being shot must register whether
+    // you are swimming, at the helm, holding a chest or scoped in.
+    this.watchIncomingDamage(localPlayer);
     const firearmSlot = localPlayer?.atCannon || localPlayer?.atHelm
       ? null
       : localPlayer?.weapons[localPlayer.activeSlot] ?? null;
@@ -1406,75 +1580,101 @@ export class ViewmodelController {
             const pose = mixPose(
               mixPose(
                 mixPose(
-                  mixPose([...REST], [0.45, -0.35, -0.45, -0.55, -0.35, -0.55], windup),
+                  // Windup was pulled UP and forward: at y −0.35 / z −0.45 the
+                  // hilt projected to ndc.y −1.09 — the fist and guard were
+                  // under the frame and the blade looked detached, floating in
+                  // mid-screen, which is exactly how the charge-dash read.
+                  mixPose([...REST], [0.42, -0.2, -0.62, -0.55, -0.35, -0.55], windup),
                   // Thrust keys are kept ~0.35rad OFF the view axis: dead-on
                   // (rot.x −1.62) foreshortened the blade into a nub inside a
                   // giant gold guard — the "holding a donut" frame.
-                  [0.22, -0.22, -0.8, -1.24, 0.3, -0.08], stab,
+                  [0.2, -0.16, -0.88, -1.24, 0.3, -0.08], stab,
                 ),
-                [0.24, -0.25, -0.74, -1.18, 0.32, -0.16], carry,
+                [0.22, -0.18, -0.82, -1.18, 0.32, -0.16], carry,
               ),
               REST, recover,
             );
             this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
             this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.6);
           } else if (cooldownProgress > 0.001) {
-            // SLASH: cock high on one side, tip driven FORWARD through a
-            // cross-screen arc (roll carries the sweep), follow through low
-            // on the other side, ease home. Alternates diagonals.
+            // SLASH — ANTICIPATION → WHIP → FOLLOW-THROUGH → RECOVERY.
+            //
+            // THE BUG THESE KEYS FIX (measured, not guessed): the old arc only
+            // ever rolled the blade from −0.85 to +1.24 rad, so it passed
+            // through VERTICAL — i.e. through the rest pose — at exactly the
+            // middle of the swing. Projected: at p = 0.32 the tip sat at ndc
+            // [0.05, 0.51] and at rest it sits at [0.05, 0.50]. The one frame
+            // the eye actually samples was pixel-identical to "idle". That is
+            // the whole "rest and mid-slash look the same" report.
+            //
+            // Now the blade LIES FLAT ACROSS THE SCREEN at the cut (roll 1.45,
+            // tip ndc ≈ [−0.83, 0.16] with the hilt still at [0.30, −0.20] —
+            // a horizontal blade through the crosshair, nothing like rest) and
+            // the whip window is 77ms wide, so barely one frame is spent
+            // anywhere near vertical. Every key is projected offline: hilt /
+            // guard / mid-blade / tip all stay inside the frame for the whole
+            // 0.55s on BOTH diagonals, and the follow-through still holds the
+            // blade in shot at p = 0.55 (tip [−0.73, −0.59], hilt [0.18,
+            // −0.08]) — the open item from 6586c3b, now frame-verified.
             const sSide = this.cutlassSlashSide;
             const p = cooldownProgress;
-            const cock = THREE.MathUtils.smoothstep(p, 0, 0.14);
-            const cut = THREE.MathUtils.smoothstep(p, 0.14, 0.4);
-            const through = THREE.MathUtils.smoothstep(p, 0.4, 0.58);
+            const cock = THREE.MathUtils.smoothstep(p, 0, 0.2);
+            const cut = THREE.MathUtils.smoothstep(p, 0.2, 0.34);
+            const through = THREE.MathUtils.smoothstep(p, 0.34, 0.56);
             const recover = THREE.MathUtils.smoothstep(p, 0.62, 1);
-            // Roll-dominant arc: the blade lies BACK on the cock side, sweeps
-            // visibly ACROSS the screen at the cut (tip strongly lateral, only
-            // moderately forward), and finishes low on the far side. Pitch-
-            // dominant keys foreshorten the blade into an unreadable smudge.
+            // Roll-dominant, and MIRRORED about the view axis per diagonal —
+            // a partial mirror (the old `0.24 + 0.1·side`) left the off-side
+            // swing's tip at ndc.x +1.22, off the right-hand edge.
             const pose = mixPose(
               mixPose(
                 mixPose(
-                  // Cock is CLAMPED so most of the blade stays in frame — the
-                  // old −1.15 roll threw it off the top-right corner, and with
-                  // a 0.55s swing the eye mostly catches cock and follow-
-                  // through, so the whole slash read as a one-frame flicker.
-                  mixPose([...REST], [0.22 + 0.18 * sSide, -0.1, -0.62, -0.72, -0.2 * sSide, -0.8 * sSide], cock),
-                  [0.05 - 0.15 * sSide, -0.32, -0.6, -0.7, 0.15 * sSide, 1.05 * sSide], cut,
+                  // ANTICIPATION: hilt lifts to ndc [0.34, −0.30] and the blade
+                  // lays right back over the shoulder (tip [0.77, 0.60]) — a
+                  // wind-up you can read in a single frame.
+                  mixPose([...REST], [0.31 * sSide, -0.15, -0.68, -0.75, -0.3 * sSide, -0.85 * sSide], cock),
+                  // WHIP: blade horizontal across the crosshair.
+                  [0.29 * sSide, -0.11, -0.72, -0.3, 0.25 * sSide, 1.45 * sSide], cut,
                 ),
-                // Follow-through stays inboard instead of exiting the frame.
-                // It didn't: at p≈0.55 the 1.5 rad roll laid the blade flat and
-                // swung guard, fist and forearm clean off the edge, so the
-                // exit — half the swing's readable duration — was an EMPTY
-                // screen. Pulled in and up so the guard is always in shot.
-                [0.03 - 0.11 * sSide, -0.3, -0.52, -0.5, 0.15 * sSide, 1.08 * sSide], through,
+                // FOLLOW-THROUGH: rolled past horizontal and pushed forward to
+                // z −0.92, finishing down-across the far side of the frame.
+                [0.22 * sSide, -0.06, -0.92, -0.1, 0.3 * sSide, 1.85 * sSide], through,
               ),
               REST, recover,
             );
             this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
             this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.8);
           } else {
-            // Rest / charge wind-up: cocks deeper low-right as the charge builds.
+            // Rest / charge wind-up. The old charge keys cocked the sword DOWN
+            // and 0.10 nearer the lens, which walked the gripping fist to ndc
+            // [0.56, −0.82] — off the bottom AND directly behind the weapon-slot
+            // HUD tiles (ndc.y −0.82…−0.97). With no fist in shot the blade read
+            // as a gold shape detached in mid-screen, which is exactly the
+            // "cutlass detaches during the charge dash" report. A real windup
+            // lifts the sword anyway: hilt now settles at ndc [0.46, −0.44] with
+            // the tip at [0.43, 0.72] — the whole weapon and its fist in frame.
             this.localViewWeaponRoot.position.set(
-              REST[0] + charge * 0.08 + sway * 0.24 + travelSwing * 0.42,
-              REST[1] - charge * 0.06 + chargeReadyPulse + bob * 0.75,
-              REST[2] + charge * 0.1,
+              REST[0] + charge * 0.06 + sway * 0.24 + travelSwing * 0.42,
+              REST[1] + charge * 0.05 + chargeReadyPulse + bob * 0.75,
+              REST[2] + charge * 0.02,
             );
             this.localViewWeaponRoot.rotation.set(
-              REST[3] + charge * 0.12,
-              REST[4] - charge * 0.25,
-              REST[5] - charge * 0.68 - strafeTilt * 1.4,
+              REST[3] + charge * 0.02,
+              REST[4] - charge * 0.3,
+              REST[5] - charge * 0.55 - strafeTilt * 1.4,
             );
           }
         }
         break;
       default:
         // Flintknock + fallback: readable lower-right presence, barrel angled
-        // toward the crosshair so the muzzle flash lands on screen.
+        // toward the crosshair so the muzzle flash lands on screen. Carried a
+        // touch higher and further out than before — the pistol was posed so
+        // low and so near the lens that its own gripping fist projected to
+        // ndc.y −0.89 at rest and −1.83 mid-reload (clean off the bottom).
         this.localViewWeaponRoot.position.set(
           THREE.MathUtils.lerp(0.24, 0.085, aimBlend) + sway * 0.64 + travelSwing * 0.38 + rlX,
-          THREE.MathUtils.lerp(-0.22, -0.17, aimBlend) + bob - recoilLift * 0.62 + rlY,
-          THREE.MathUtils.lerp(-0.56, -0.42, aimBlend) - recoilBack * 0.8 + rlZ,
+          THREE.MathUtils.lerp(-0.15, -0.12, aimBlend) + bob - recoilLift * 0.62 + rlY,
+          THREE.MathUtils.lerp(-0.62, -0.5, aimBlend) - recoilBack * 0.8 + rlZ,
         );
         this.localViewWeaponRoot.rotation.set(
           -0.16 - aimBlend * 0.07 - recoilLift + rlRX,
