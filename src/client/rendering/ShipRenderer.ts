@@ -3396,9 +3396,15 @@ export class ShipRenderer {
       group.add(fixture);
     }
 
-    // ONE warm PointLight per ship, ~9 m reach. Off by day; at night only the
-    // nearest handful of ships light it (see update()).
-    const nightLight = new THREE.PointLight(0xffb060, 0, 9, 1.6);
+    // ONE warm PointLight per ship. Off by day; at night only the nearest
+    // handful of ships light it (see update()).
+    //
+    // Reach and falloff are set so it actually lights the DECK YOU STAND ON: at
+    // 9m from the stern with decay 1.6 it died before midships, so a night watch
+    // was a black stage with a floating '[X] Take Helm' prompt on it. 21m of
+    // gentler falloff washes the whole planking of every hull class, which is
+    // what the lantern pool is for.
+    const nightLight = new THREE.PointLight(0xffb060, 0, 21, 1.25);
     nightLight.position.copy(sternLanternPos);
     nightLight.visible = false;
     registerBudgetLight(nightLight);
@@ -3775,6 +3781,12 @@ export class ShipRenderer {
       depthWrite: false,
     });
 
+    // Trim is PAINT ON CANVAS: every stripe is clamped inside the sail's own
+    // quad, rotation included. The stay-sail stripes were authored at y = 0.48h
+    // with a 0.78h height, so most of the plane hung outside the sail — and once
+    // the boom swung in a storm those loose panels raked down through the hull and
+    // into the ocean as two bright yellow/blue slabs. Clamped, a stripe can never
+    // leave the sail it is painted on, whatever the rig is doing.
     const addStripe = (
       w: number,
       h: number,
@@ -3783,8 +3795,18 @@ export class ShipRenderer {
       rotZ = 0,
       material: THREE.Material = trimMat,
     ) => {
+      const cos = Math.abs(Math.cos(rotZ));
+      const sin = Math.abs(Math.sin(rotZ));
+      const halfX = (w * cos + h * sin) * 0.5;
+      const halfY = (w * sin + h * cos) * 0.5;
+      const slackX = Math.max(0, width * 0.5 - halfX);
+      const slackY = Math.max(0, height * 0.5 - halfY);
       const stripe = new THREE.Mesh(new THREE.PlaneGeometry(w, h), material);
-      stripe.position.set(x, y, 0.035);
+      stripe.position.set(
+        THREE.MathUtils.clamp(x, -slackX, slackX),
+        THREE.MathUtils.clamp(y, -slackY, slackY),
+        0.035,
+      );
       stripe.rotation.z = rotZ;
       stripe.renderOrder = 4;
       trimGroup.add(stripe);
@@ -4162,7 +4184,10 @@ export class ShipRenderer {
         if (wantLight) {
           const seed = ship.id.charCodeAt(0) * 1.37 + ship.id.charCodeAt(ship.id.length - 1) * 0.53;
           const flicker = 0.8 + 0.2 * this.flickerNoise(t * 9 + seed);
-          mesh.nightLight.intensity = this.nightFactor * 1.8 * flicker;
+          // Your own deck has to be readable at night, so the crew's hull gets a
+          // brighter lantern than the silhouettes on the horizon do.
+          const own = !!localPlayerId && ship.crewIds.includes(localPlayerId);
+          mesh.nightLight.intensity = this.nightFactor * (own ? 4.2 : 2.6) * flicker;
         } else {
           mesh.nightLight.intensity = 0;
         }

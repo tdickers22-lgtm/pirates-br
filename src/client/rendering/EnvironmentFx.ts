@@ -56,6 +56,8 @@ type RainShell = {
   geo: THREE.BufferGeometry;
   /** Head + tail vertex per drop (6 floats). */
   pos: Float32Array;
+  /** Head + tail RGBA per drop (8 floats); the alphas carry the range fade. */
+  colorArr: Float32Array;
   /** Per-drop [0,1) hash: gust-band density gate and per-drop length jitter. */
   hash: Float32Array;
   drops: number;
@@ -112,6 +114,13 @@ const RAIN_TIERS: Record<'low' | 'balanced' | 'high', { shells: number[]; scale:
   high: { shells: [0, 1, 2], scale: 1 },
 };
 
+// Rain streaks fade out with range from the eye: full strength close in, gone
+// by ~120m, so the downpour reads as depth-layered weather instead of a decal
+// stuck to the screen over a distant horizon.
+const RAIN_FADE_NEAR = 30;
+const RAIN_FADE_FAR = 120;
+const RAIN_FADE_INV_SPAN = 1 / (RAIN_FADE_FAR - RAIN_FADE_NEAR);
+
 // Travelling gust bands are baked into an along-wind lookup table once per
 // frame per shell, so the per-drop inner loop costs a table index and a few
 // multiplies — no trig, no allocation, however hard it is raining.
@@ -122,6 +131,158 @@ const RAIN_INV_BAND = 1 / RAIN_BAND_METRES;
 // Band wavelengths must divide the LUT span exactly or the wrap seam shows.
 const RAIN_GUST_K1 = (Math.PI * 2 * 6) / RAIN_BAND_SPAN; // ~64m squall bands
 const RAIN_GUST_K2 = (Math.PI * 2) / RAIN_BAND_SPAN;     // ~384m slow swell
+
+// ── Storm front (the weather that LIVES at the ring boundary) ───────────────
+// The safe-zone boundary used to be one translucent slate cylinder: a flat
+// vertical veil with a straight rim, no cloud, no rain, no gradient. Read from
+// a deck it was an edge in the sky rather than weather, and at night it was a
+// hard-edged hole where the stars stopped — a fresh player assumed the renderer
+// had broken. This shell stands just outside it and gives the boundary an
+// identity: a ragged cloud BANK whose underside hangs at ~40% of the shell
+// height, a rain CURTAIN scrolling out of that bank down to the water, and a
+// desaturating sea-level MIST band, all dissolving into the scene fog with
+// range so the far side of the ring is haze rather than a crisp second wall.
+const FRONT_HEIGHT = 320;
+/** How far the shell's base sits BELOW the waterline; the curtain has to start
+ *  under the swell or storm troughs open a gap under the rain. */
+const FRONT_BASE_DROP = 26;
+
+const STORM_FRONT_VERT = /* glsl */`
+  varying vec3 v_world;
+  varying float v_h;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    v_world = wp.xyz;
+    v_h = uv.y;
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+
+const STORM_FRONT_FRAG = /* glsl */`
+  uniform vec3  u_cam;
+  uniform float u_time;
+  uniform float u_intensity;
+  uniform float u_night;
+  uniform vec3  u_horizon;
+  uniform vec3  u_fog;
+  uniform float u_flash;
+  uniform vec2  u_flashDir;
+  varying vec3  v_world;
+  varying float v_h;
+
+  float fHash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+  }
+
+  float fNoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(fHash(i), fHash(i + vec2(1.0, 0.0)), f.x),
+      mix(fHash(i + vec2(0.0, 1.0)), fHash(i + vec2(1.0, 1.0)), f.x),
+      f.y);
+  }
+
+  float fFbm(vec2 p) {
+    return fNoise(p) * 0.58 + fNoise(p * 2.07 + 17.3) * 0.28 + fNoise(p * 4.11 + 5.7) * 0.14;
+  }
+
+  void main() {
+    // Noise is sampled in WORLD xz, so it wraps around the ring by construction
+    // — a uv.x-based pattern would leave a seam down one bearing of the wall.
+    vec2 fp = v_world.xz;
+    float y = v_world.y;
+    float d = max(1.0, length(u_cam.xz - fp));
+    float lobe = fFbm(fp * 0.0060 + u_time * vec2(0.0040, 0.0026));   // ~170m cloud lobes
+    // The bottom tier pays for ONE noise field: the front is a full-screen
+    // transparent surface when you are up against it, and three fbm fetches per
+    // pixel of it is the whole frame budget on a fanless laptop. The bank keeps
+    // its ragged silhouette; only the finer bulges and the curtain's column
+    // breakup are dropped.
+#ifdef FRONT_CHEAP
+    float lobe2 = 1.0 - lobe;
+#else
+    float lobe2 = fFbm(fp * 0.0185 - u_time * vec2(0.0090, 0.0055));  // ~55m bulges
+#endif
+
+    // The bank's height above the water is chosen from the RANGE of the piece of
+    // wall being drawn. One fixed profile cannot work at both ends: a cloud deck
+    // that sits right for a squall line 900m off is 40° overhead when you sail up
+    // to it (so the whole bank leaves the frame and you see nothing but haze),
+    // and one that reads from 60m is a sliver on the horizon. Ramping the deck
+    // down as you close keeps a legible bank + curtain at every range.
+    float baseY = mix(26.0, 105.0, smoothstep(70.0, 760.0, d));
+    float topY = baseY * 2.4 + 42.0;
+
+    // Ragged underside AND ragged top: no straight cut anywhere on the silhouette.
+    float bBase = baseY * (0.74 + lobe * 0.52);
+    float bTop = topY * (0.80 + lobe2 * 0.42);
+    float bank = smoothstep(bBase - baseY * 0.36, bBase + baseY * 0.30, y)
+               * (1.0 - smoothstep(bTop - topY * 0.12, bTop + topY * 0.55, y));
+
+    // Rain curtain: scrolling columns hanging out of the bank to the water.
+#ifdef FRONT_CHEAP
+    float colN = 0.30 + 0.40 * lobe;
+#else
+    float colN = fFbm(vec2(dot(fp, vec2(0.052, 0.047)), y * 0.055 - u_time * 0.55));
+#endif
+    float curtain = (1.0 - smoothstep(bBase * 0.55, bBase * 1.20, y))
+                  * smoothstep(-3.0, 6.0, y)
+                  * (0.26 + 0.74 * smoothstep(0.28, 0.72, colN));
+
+    // Sea-level mist: the desaturation gradient you sail into before the wall.
+    float mist = (1.0 - smoothstep(1.0, baseY * 0.55, y)) * (0.44 + 0.36 * lobe2);
+
+    // Colours are DERIVED from the sky's own horizon tint, so the front is grey
+    // slate at noon, bruised plum at dusk, and moonlit blue at night without a
+    // second palette to keep in sync. The uniforms arrive in three's LINEAR
+    // working space, so these scales are linear too — display-referred numbers
+    // here rendered the bank as a pale white saucer parked over the sea.
+    vec3 grey = vec3(dot(u_horizon, vec3(0.299, 0.587, 0.114)));
+    vec3 cloudCol = mix(u_horizon, grey, 0.55) * mix(0.055, 0.20, u_night);
+    vec3 rainCol  = mix(u_horizon, grey, 0.35) * mix(0.160, 0.85, u_night);
+    vec3 mistCol  = mix(u_horizon, grey, 0.22) * mix(0.260, 0.75, u_night);
+
+    float wBank = bank * 0.88;
+    float wRain = curtain * 0.55;
+    float wMist = mist * 0.26;
+    float wSum = wBank + wRain + wMist;
+    vec3 col = (cloudCol * wBank + rainCol * wRain + mistCol * wMist) / max(0.0001, wSum);
+
+    // Lit fringe along the top of the bank — the edge of a cloud catches the sky,
+    // which is exactly what a hard black rim does not do.
+    float rim = smoothstep(bTop - topY * 0.18, bTop + topY * 0.03, y)
+              * (1.0 - smoothstep(bTop + topY * 0.02, bTop + topY * 0.30, y));
+    col += mix(u_horizon, grey, 0.2) * rim * mix(0.060, 0.035, u_night);
+
+    float a = clamp(wSum, 0.0, 1.0);
+
+    // Lightning lights the bank from inside, brightest toward the bolt's bearing.
+    if (u_flash > 0.001) {
+      vec2 toFrag = fp - u_cam.xz;
+      float align = max(0.0, dot(toFrag / max(1.0, length(toFrag)), u_flashDir));
+      float lobeF = 0.10 + 0.90 * align * align;
+      col += vec3(0.55, 0.66, 0.95) * u_flash * lobeF * (0.22 + 0.78 * bank);
+      a = clamp(a + u_flash * lobeF * bank * 0.22, 0.0, 1.0);
+    }
+
+    // Range dissolve: the far side of a 900m ring must read as haze, never as a
+    // second crisp wall standing behind the near one.
+    float fogAmt = 1.0 - exp(-d * 0.0013);
+    col = mix(col, u_fog, fogAmt * 0.85);
+    a *= 1.0 - fogAmt * 0.35;
+    // Deep inside the safe zone the ring is DISTANT weather, not something that
+    // may lay a veil across half a fair sky: past ~400m the front thins to a
+    // horizon-band haze, and the far side of the ring never reads as a second
+    // wall standing behind the near one.
+    a *= 1.0 - smoothstep(380.0, 1500.0, d) * 0.78;
+    a *= u_intensity;
+    if (a < 0.004) discard;
+    gl_FragColor = vec4(col, a);
+  }
+`;
 
 // Lightning channel budget: one main stroke plus 2–4 forks, all in a single
 // pooled ribbon (2 draws — core + glow) that lives for one strike.
@@ -842,10 +1003,21 @@ export class EnvironmentFx {
     // Rain builds across the wall band instead of popping on at the boundary.
     const distOutside = dist - safeRadius;
     const outsideBlend = THREE.MathUtils.smoothstep(distOutside, -25, 35);
-    if (outsideBlend <= 0.001) return 0;
     const stormDepth = THREE.MathUtils.clamp(distOutside / 220, 0, 1);
     const shrinkBoost = this.view.state.storm.shrinking ? 0.08 : 0;
-    return Math.min(1, 0.34 + stormDepth * 0.42 + (phase / maxPhase) * 0.2 + shrinkBoost) * outsideBlend;
+    const fromPlayer = outsideBlend <= 0.001
+      ? 0
+      : Math.min(1, 0.34 + stormDepth * 0.42 + (phase / maxPhase) * 0.2 + shrinkBoost) * outsideBlend;
+
+    // Weather AT the wall. Sailing up to the boundary from the safe side used to
+    // put you a few metres from a squall line in dead-still air with a dry deck:
+    // the rain only existed once you had crossed. The squall reaches inboard of
+    // its own edge, so the drops (and the rain audio, which rides the same
+    // number) fade in over the last ~150m of the approach.
+    const wallDist = this.cameraDistanceToStormWall();
+    const nearWall = wallDist < 0 ? 0 : 1 - THREE.MathUtils.smoothstep(wallDist, 30, 165);
+    const wallFloor = nearWall * (0.30 + (phase / maxPhase) * 0.16);
+    return Math.max(fromPlayer, wallFloor);
   }
 
   // ── Storm rain ────────────────────────────────────────────────────────────
@@ -1003,7 +1175,7 @@ export class EnvironmentFx {
       lines.visible = false;
       this.view.renderer.scene.add(lines);
       shells.push({
-        lines, material, geo, pos, hash, drops,
+        lines, material, geo, pos, colorArr: colors, hash, drops,
         radius: spec.radius,
         ceiling: spec.ceiling,
         streak: spec.streak,
@@ -1296,7 +1468,100 @@ export class EnvironmentFx {
     return this.rainCover;
   }
 
+  // ── Storm front ───────────────────────────────────────────────────────────
+  private stormFront: THREE.Mesh | null = null;
+  private stormFrontMat: THREE.ShaderMaterial | null = null;
+
+  /** Built on first use rather than at boot: the shell only ever exists in a
+   *  match, and building it lazily keeps it off the loading path. */
+  private ensureStormFront(): THREE.Mesh {
+    if (this.stormFront) return this.stormFront;
+    const cheap = this.view.renderer.getQuality() === 'low';
+    const geo = new THREE.CylinderGeometry(1, 1, FRONT_HEIGHT, cheap ? 64 : 128, 1, true);
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: STORM_FRONT_VERT,
+      fragmentShader: STORM_FRONT_FRAG,
+      defines: cheap ? { FRONT_CHEAP: '' } : {},
+      uniforms: {
+        u_cam: { value: new THREE.Vector3() },
+        u_time: { value: 0 },
+        u_intensity: { value: 0 },
+        u_night: { value: 0 },
+        u_horizon: { value: new THREE.Color(0xc7e6fa) },
+        u_fog: { value: new THREE.Color(0x7ba3bd) },
+        u_flash: { value: 0 },
+        u_flashDir: { value: new THREE.Vector2(0, 1) },
+      },
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      fog: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    // After the legacy wall/halo so the front paints over their flat veil.
+    mesh.renderOrder = 3;
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    this.view.renderer.scene.add(mesh);
+    this.stormFront = mesh;
+    this.stormFrontMat = mat;
+    return mesh;
+  }
+
+  /** How developed the front is: always present (the ring is always there), but
+   *  it thickens with the phase and while the ring is actively closing. */
+  private computeStormFrontIntensity(): number {
+    if (!this.view.state) return 0;
+    const storm = this.view.state.storm;
+    const maxPhase = Math.max(1, STORM_PHASES.length - 1);
+    const phase01 = THREE.MathUtils.clamp(storm.phase / maxPhase, 0, 1);
+    return Math.min(1, 0.62 + phase01 * 0.32 + (storm.shrinking ? 0.06 : 0));
+  }
+
+  /** Distance from the camera to the ring wall (positive either side), or -1
+   *  when there is no ring. Used by the rain floor at the boundary. */
+  private cameraDistanceToStormWall(): number {
+    if (!this.view.state) return -1;
+    const storm = this.view.state.storm;
+    const cam = this.view.renderer.camera.position;
+    const radius = Math.max(1, storm.safeRadius);
+    return Math.abs(dist2D(cam.x, cam.z, storm.centerX, storm.centerZ) - radius);
+  }
+
+  private updateStormFront() {
+    if (!this.view.state) {
+      if (this.stormFront) this.stormFront.visible = false;
+      return;
+    }
+    const storm = this.view.state.storm;
+    const radius = Math.max(16, storm.safeRadius);
+    const mesh = this.ensureStormFront();
+    const mat = this.stormFrontMat!;
+    // Sits a hair OUTSIDE the legacy wall so the two composite instead of
+    // z-fighting, and low enough that storm troughs can't open a gap under it.
+    mesh.position.set(storm.centerX, FRONT_HEIGHT * 0.5 - FRONT_BASE_DROP, storm.centerZ);
+    mesh.scale.set(radius * 1.006, 1, radius * 1.006);
+    const atmosphere = this.view.renderer.getAtmosphere();
+    const u = mat.uniforms;
+    u.u_cam.value.copy(this.view.renderer.camera.position);
+    u.u_time.value = this.view.ocean.getTime();
+    u.u_intensity.value = this.computeStormFrontIntensity();
+    u.u_night.value = atmosphere.nightFactor;
+    (u.u_horizon.value as THREE.Color).copy(atmosphere.horizonColor);
+    (u.u_fog.value as THREE.Color).copy(atmosphere.fogColor);
+    // The strike lights the bank from inside — same envelope the sky dome and
+    // the sea glint already run off, so all three flash on the same frame.
+    u.u_flash.value = this.boltEnvelope(this.boltAge);
+    (u.u_flashDir.value as THREE.Vector2).set(this.boltDirX, this.boltDirZ);
+    mesh.visible = u.u_intensity.value > 0.01;
+  }
+
   updateStormRain3D(dt: number, intensity: number) {
+    // The boundary's cloud bank / rain curtain is weather that exists whether or
+    // not the LOCAL player is standing in the rain, so it is driven here (the one
+    // weather hook that runs every frame) ahead of the density early-out below.
+    this.updateStormFront();
+
     // Clear the legacy canvas overlay once (kept in the DOM for compatibility).
     if (this.stormRainCanvas && this.stormRainCtx && this.stormRainCanvas.width > 0) {
       this.stormRainCtx.clearRect(0, 0, this.stormRainCanvas.width, this.stormRainCanvas.height);
@@ -1360,6 +1625,12 @@ export class EnvironmentFx {
 
       const pos = shell.pos;
       const hash = shell.hash;
+      // Per-drop distance fade. Every streak used to be drawn at the same alpha
+      // whatever its range, so a downpour read as a screen decal pasted over a
+      // 300m horizon rather than as weather falling through the world. Fading
+      // the far half of each shell out gives the curtain depth and stops the
+      // outermost shell ending on a visible edge.
+      const colors = shell.colorArr;
       // Hard ceiling per tier on top of the density curve. Every active drop is
       // a CPU-integrated line segment plus a re-upload of its two vertices, so
       // a full downpour on a fanless laptop was the storm's whole cost; the
@@ -1404,9 +1675,18 @@ export class EnvironmentFx {
           pos[o + 4] = y;
           pos[o + 5] = z;
         }
+        const dy = y - cam.y;
+        const dropDist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const range = 1 - (dropDist - RAIN_FADE_NEAR) * RAIN_FADE_INV_SPAN;
+        const fade = range > 1 ? 1 : range < 0 ? 0 : range;
+        const bright = (0.72 + hash[i] * 0.5) * fade;
+        const c = i * 8;
+        colors[c + 3] = bright;
+        colors[c + 7] = bright * 0.12;
       }
       shell.geo.setDrawRange(0, active * 2);
       (shell.geo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+      (shell.geo.getAttribute('color') as THREE.BufferAttribute).needsUpdate = true;
       shell.material.opacity = shell.opacity * (0.34 + intensity * 0.66) * (1 - nightFactor * 0.32) * visible;
       shell.lines.visible = shell.material.opacity > 0.004;
     }

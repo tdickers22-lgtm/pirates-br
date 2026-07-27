@@ -228,10 +228,17 @@ export class Renderer {
   private sunGlow!: THREE.Mesh;
   private readonly sunDir = new THREE.Vector3(0.2, 0.92, -0.34).normalize();
   private readonly activeLightDir = new THREE.Vector3();
-  private readonly fogDayColor = new THREE.Color(0x9bbfd4);
-  private readonly fogTwilightColor = new THREE.Color(0xc0968a);
-  private readonly fogNightColor = new THREE.Color(0x35506d);
-  private readonly fogStormColor = new THREE.Color(0x5a6a78);
+  // Distance fog is deliberately DARKER than the sky it sits under. A fog tint
+  // that matched the horizon washed every island to a white ghost by ~500m and
+  // killed navigate-by-silhouette: only Old Maw (dark volcanic rock) survived.
+  // Keeping the haze a few stops under the sky keeps mountain profiles readable
+  // out to 800m while still reading as atmosphere.
+  private readonly fogDayColor = new THREE.Color(0x7ba3bd);
+  private readonly fogTwilightColor = new THREE.Color(0x94737a);
+  private readonly fogNightColor = new THREE.Color(0x23374e);
+  private readonly fogStormColor = new THREE.Color(0x4a5764);
+  private readonly underwaterFillColor = new THREE.Color(0x63c6d6);
+  private readonly underwaterFloorColor = new THREE.Color(0x2f7f8c);
   private readonly fogUnderwaterNearColor = new THREE.Color(0x1a6f86);
   private readonly fogUnderwaterDeepColor = new THREE.Color(0x0a3a4a); // murky teal, not a black void
   private readonly tempFogColor = new THREE.Color();
@@ -362,12 +369,17 @@ export class Renderer {
 
     // ── Sun ─────────────────────────────────────────────────────
     const sunWorldDir = this.sunDir.clone().multiplyScalar(400);
+    // depthTest STAYS ON for both. With it off, the twilight glow corona — a
+    // 124m additive disc parked 2km out, tinted hot pink by the dusk horizon
+    // colour — painted straight over whatever island stood between you and the
+    // sunset: a huge translucent pink plate hovering over the dock island.
+    // Depth-tested, the sun sets behind the land like it should.
     const sunDiscMat = new THREE.MeshBasicMaterial({
       color: 0xffd36a,
       transparent: true,
       opacity: 0.92,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       fog: false,
       side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
@@ -377,12 +389,12 @@ export class Renderer {
       transparent: true,
       opacity: 0.24,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       fog: false,
       side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
     });
-    this.sunGlow = new THREE.Mesh(new THREE.CircleGeometry(124, 40), sunGlowMat);
+    this.sunGlow = new THREE.Mesh(new THREE.CircleGeometry(96, 40), sunGlowMat);
     this.sunDisc = new THREE.Mesh(new THREE.CircleGeometry(28, 40), sunDiscMat);
     this.sunGlow.renderOrder = -0.5;
     this.sunDisc.renderOrder = -0.45;
@@ -593,13 +605,13 @@ export class Renderer {
     fog.color.lerp(this.fogRainColor, this.rainMist * 0.4);
     fog.density = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, t) * (1 + this.rainMist * 0.62);
 
-    this.sun.intensity = THREE.MathUtils.lerp(this.getCycleSunIntensity(), 0.42, t);
-    this.ambientLight.intensity = THREE.MathUtils.lerp(this.getCycleAmbientIntensity(), 0.36, t);
-    this.hemisphereLight.intensity = THREE.MathUtils.lerp(this.getCycleHemisphereIntensity(), 0.28, t);
-    this.horizonFill.intensity = THREE.MathUtils.lerp(this.getCycleHorizonIntensity(), 0.08, t);
+    this.sun.intensity = THREE.MathUtils.lerp(this.getCycleSunIntensity(), this.getStormSunIntensity(), t);
+    this.ambientLight.intensity = THREE.MathUtils.lerp(this.getCycleAmbientIntensity(), this.getStormAmbientIntensity(), t);
+    this.hemisphereLight.intensity = THREE.MathUtils.lerp(this.getCycleHemisphereIntensity(), this.getStormHemisphereIntensity(), t);
+    this.horizonFill.intensity = THREE.MathUtils.lerp(this.getCycleHorizonIntensity(), this.getStormHorizonIntensity(), t);
     this.setSunDiscWeather(t, 0);
 
-    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(this.getCycleExposure(), 0.78, t);
+    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(this.getCycleExposure(), this.getStormExposure(), t);
   }
 
   updateWaterEnvironment(depthBelowSurface: number, stormIntensity: number, elapsedSeconds = 0) {
@@ -628,18 +640,30 @@ export class Renderer {
     this.getCycleColor(this.hemisphereLight.color, this.hemiSkyDayColor, this.hemiSkyTwilightColor, this.hemiSkyNightColor);
     this.getCycleColor(this.hemisphereLight.groundColor, this.hemiGroundDayColor, this.hemiGroundTwilightColor, this.hemiGroundNightColor);
     this.getCycleColor(this.horizonFill.color, this.horizonDayColor, this.horizonTwilightColor, this.horizonNightColor);
+    // Submerged fill is TEAL, not grey: the fill light is standing in for light
+    // that has already travelled through metres of water, so island slopes and
+    // sea rocks below the waterline take a depth ramp instead of going to ink.
+    if (underwater > 0.001) {
+      this.ambientLight.color.lerp(this.underwaterFillColor, underwater * 0.8);
+      this.hemisphereLight.color.lerp(this.underwaterFillColor, underwater * 0.8);
+      this.hemisphereLight.groundColor.lerp(this.underwaterFloorColor, underwater * 0.85);
+    }
 
-    const sunBase = THREE.MathUtils.lerp(this.getCycleSunIntensity(), 0.42, storm);
-    const ambientBase = THREE.MathUtils.lerp(this.getCycleAmbientIntensity(), 0.36, storm);
-    const hemisphereBase = THREE.MathUtils.lerp(this.getCycleHemisphereIntensity(), 0.28, storm);
-    const horizonBase = THREE.MathUtils.lerp(this.getCycleHorizonIntensity(), 0.08, storm);
+    const sunBase = THREE.MathUtils.lerp(this.getCycleSunIntensity(), this.getStormSunIntensity(), storm);
+    const ambientBase = THREE.MathUtils.lerp(this.getCycleAmbientIntensity(), this.getStormAmbientIntensity(), storm);
+    const hemisphereBase = THREE.MathUtils.lerp(this.getCycleHemisphereIntensity(), this.getStormHemisphereIntensity(), storm);
+    const horizonBase = THREE.MathUtils.lerp(this.getCycleHorizonIntensity(), this.getStormHorizonIntensity(), storm);
     this.sun.intensity = THREE.MathUtils.lerp(sunBase, THREE.MathUtils.lerp(0.22, 0.08, deep), underwater);
-    this.ambientLight.intensity = THREE.MathUtils.lerp(ambientBase, THREE.MathUtils.lerp(0.82, 0.45, deep), underwater);
-    this.hemisphereLight.intensity = THREE.MathUtils.lerp(hemisphereBase, THREE.MathUtils.lerp(0.64, 0.36, deep), underwater);
+    // Below the surface the only thing shaping the sea floor and the island
+    // slopes is fill light — the sun is all but gone and no lantern reaches. The
+    // floors here are what stop a submerged shelf resolving to a black hole in
+    // the water; they are raised WITH the murky-teal fog, so depth still reads.
+    this.ambientLight.intensity = THREE.MathUtils.lerp(ambientBase, THREE.MathUtils.lerp(1.05, 0.72, deep), underwater);
+    this.hemisphereLight.intensity = THREE.MathUtils.lerp(hemisphereBase, THREE.MathUtils.lerp(0.92, 0.62, deep), underwater);
     this.horizonFill.intensity = THREE.MathUtils.lerp(horizonBase, THREE.MathUtils.lerp(0.04, 0.015, deep), underwater);
     this.renderer.toneMappingExposure = THREE.MathUtils.lerp(
-      THREE.MathUtils.lerp(this.getCycleExposure(), 0.78, storm),
-      THREE.MathUtils.lerp(0.94, 0.68, deep),
+      THREE.MathUtils.lerp(this.getCycleExposure(), this.getStormExposure(), storm),
+      THREE.MathUtils.lerp(0.98, 0.76, deep),
       underwater,
     );
     this.setSunDiscWeather(storm, underwater);
@@ -772,7 +796,11 @@ export class Renderer {
   }
 
   private getCycleSunIntensity() {
-    return this.dayAmount * 2.65 + this.twilightAmount * 1.55 + this.nightAmount * 0.34;
+    // The night term is MOONLIGHT (activeLightDir flips to the anti-sun once the
+    // sun is down). It is the only directional light after dark, so it has to be
+    // strong enough to shape a hull/cliff into a silhouette — a Sea-of-Thieves
+    // night is blue and legible, not an unlit black screen.
+    return this.dayAmount * 2.65 + this.twilightAmount * 1.55 + this.nightAmount * 0.62;
   }
 
   private getCycleAmbientIntensity() {
@@ -780,25 +808,39 @@ export class Renderer {
     // black — the shaded side of an island should still show its biome tone.
     // Twilight fill is kept LOWER than day: the low dusk sun must still shape the
     // terrain (directional warm light + long shadows), so fill can't out-power it.
-    return this.dayAmount * 0.9 + this.twilightAmount * 0.58 + this.nightAmount * 0.64;
+    return this.dayAmount * 0.9 + this.twilightAmount * 0.58 + this.nightAmount * 0.78;
   }
 
   private getCycleHemisphereIntensity() {
     // Sky/ground fill is the main lever that keeps steep terrain readable; it is
     // normal-oriented so it lifts shaded faces without flattening lit ones.
-    return this.dayAmount * 1.34 + this.twilightAmount * 0.78 + this.nightAmount * 0.66;
+    return this.dayAmount * 1.34 + this.twilightAmount * 0.78 + this.nightAmount * 0.86;
   }
 
   private getCycleHorizonIntensity() {
     return this.dayAmount * 0.3 + this.twilightAmount * 0.42 + this.nightAmount * 0.16;
   }
 
+  // ── Storm light targets ───────────────────────────────────────────────────
+  // A storm dims the world toward these; they used to be flat constants, which
+  // meant a storm AT NIGHT stacked its dimming on top of an already-dark cycle
+  // and drove the whole frame to black (only the HUD survived). The floors now
+  // rise with nightAmount, so a night storm is a dark BLUE squall you can still
+  // read a deck and a coastline through.
+  private getStormSunIntensity() { return 0.42 + this.nightAmount * 0.16; }
+  private getStormAmbientIntensity() { return 0.36 + this.nightAmount * 0.40; }
+  private getStormHemisphereIntensity() { return 0.28 + this.nightAmount * 0.50; }
+  private getStormHorizonIntensity() { return 0.08 + this.nightAmount * 0.06; }
+  private getStormExposure() { return 0.78 + this.nightAmount * 0.22; }
+
   private getCycleExposure() {
     return this.dayAmount * 1.06 + this.twilightAmount * 1.12 + this.nightAmount * 1.08;
   }
 
   private getCycleFogDensity() {
-    return this.dayAmount * 0.00135 + this.twilightAmount * 0.00175 + this.nightAmount * 0.0019;
+    // Thinned a notch across the cycle: combined with the darker fog tint above,
+    // an 800m island still reads as a shape instead of dissolving into haze.
+    return this.dayAmount * 0.00112 + this.twilightAmount * 0.00146 + this.nightAmount * 0.00158;
   }
 
   private applyPixelRatio(target: number) {

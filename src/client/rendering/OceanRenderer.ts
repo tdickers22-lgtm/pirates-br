@@ -187,10 +187,21 @@ const OCEAN_FRAG = /* glsl */`
     vec3 V = normalize(u_cameraPos - v_worldPos);
     vec3 L = normalize(u_sunDir);
 
+    // How far the EYE sits above this patch of surface. Swimming or wading, the
+    // whole visible sea is at grazing incidence, and both the shallow tint and
+    // the ripple-detail range have to know about it.
+    float eyeAbove = max(0.0, u_cameraPos.y - v_worldPos.y);
+    float lowEye = 1.0 - smoothstep(0.10, 0.55, eyeAbove);
+
     // ── Fine ripple detail normals: fade with distance (specular AA),
     //    flatten on gentle days, churn harder inside the storm ──────────
     float calm = clamp((u_roughness - 0.55) / 1.05, 0.0, 1.0);
-    float detailFade = 1.0 - smoothstep(40.0, 560.0, camDist);
+    // From eye level the surface stretches away in extreme perspective, so the
+    // usual 40m detail horizon put the flat, normal-free half of the ocean
+    // directly across the middle of the frame — the flat cyan sheet. Standing in
+    // the water pushes the ripple normals out with the horizon.
+    float wading = 1.0 - smoothstep(0.25, 2.20, eyeAbove);
+    float detailFade = 1.0 - smoothstep(40.0 + 120.0 * wading, 560.0 + 520.0 * wading, camDist);
     if (detailFade > 0.001) {
       float e  = 0.85;
       float h0 = rippleField(wp);
@@ -214,10 +225,24 @@ const OCEAN_FRAG = /* glsl */`
     // ── Shore shallows: turquoise ramp toward the beach ─────────────────
     float sd = shoreDist(wp);
     float shallowMask = 1.0 - smoothstep(4.0, 52.0, sd);
+    // The sand-depth tint is a TOP-DOWN read: at 20cm of eye height there is no
+    // sand path through the water to see, so lowEye (computed above) fades it out
+    // and the reflected sky takes over instead.
     // Richer, slightly deeper turquoise so shallows read as tropical water, not a
     // pale wash that the specular then blows to white.
     vec3 shallowCol = mix(vec3(0.04, 0.40, 0.50), vec3(0.10, 0.62, 0.62), 1.0 - smoothstep(0.0, 14.0, sd));
-    base = mix(base, shallowCol, shallowMask * 0.9 * (1.0 - u_stormIntensity * 0.55) * (1.0 - u_twilightFactor * 0.42));
+    // The shallow ramp is SUNLIGHT scattering off white sand: it needs a sun to
+    // exist. Ungated, a lagoon glowed radioactive cyan under a moonless sky with
+    // no light source anywhere in frame. At night it collapses to a dim moonlit
+    // blue-teal that the moon path and lantern pools can still play over.
+    float shoreLight = 1.0 - u_nightFactor * 0.82;
+    shallowCol = mix(shallowCol, vec3(0.020, 0.085, 0.145), u_nightFactor * 0.85);
+    float shallowMix = shallowMask * 0.9
+      * (1.0 - u_stormIntensity * 0.55)
+      * (1.0 - u_twilightFactor * 0.42)
+      * shoreLight
+      * mix(1.0, 0.24, lowEye);
+    base = mix(base, shallowCol, shallowMix);
 
     // ── Fresnel reflectance toward sky/horizon ──────────────────────────
     float NdotV   = max(0.0, dot(N, V));
@@ -229,6 +254,32 @@ const OCEAN_FRAG = /* glsl */`
     vec3 reflCol = mix(vec3(0.38, 0.54, 0.82), u_horizonColor, 0.42);
     reflCol = mix(reflCol, vec3(1.0, 0.55, 0.30), sunPath * sunLow * 0.6);
     base = mix(base, reflCol, fresnel * 0.42);
+
+    // ── Grazing incidence: water seen almost edge-on is a MIRROR ────────
+    // Near-eye-level over a white-sand shelf the old shader still served the
+    // top-down shallow tint at full strength, so the last few metres of lagoon
+    // read as one opaque cyan/grey sheet with no surface in it. At grazing
+    // angles the shallow body colour hands over to the sky it reflects, and
+    // because the blend rides the per-pixel ripple normal the sheet breaks back
+    // up into moving water.
+    // The sky it reflects is looked up through the REFLECTED ray, not taken as a
+    // constant: neighbouring ripples point at different parts of the dome (a wave
+    // face tilted toward the eye reflects the deeper blue overhead, its back
+    // reflects the pale horizon), so the mirror term carries the surface texture
+    // instead of erasing it. A flat lerp to one horizon colour was still a sheet
+    // — just a paler one.
+    vec3 R = reflect(-V, N);
+    float rUp = clamp(R.y, 0.0, 1.0);
+    vec3 zenithCol = u_horizonColor * vec3(0.46, 0.62, 0.95);
+    // The lookup band is deliberately NARROW: at eye level every reflected ray
+    // leaves the surface within a few degrees of the horizon, so a wide ramp
+    // reads back the same horizon colour for every ripple and the sheet stays
+    // flat. Across 0..0.09 of R.y the ripples separate into visible bands.
+    vec3 skyRefl = mix(u_horizonColor, zenithCol, smoothstep(0.004, 0.090, rUp));
+    float graze = smoothstep(0.30, 0.015, NdotV);
+    vec3 grazeCol = mix(skyRefl, base, 0.34);
+    grazeCol = mix(grazeCol, grazeCol * vec3(0.32, 0.44, 0.60), u_nightFactor * 0.7);
+    base = mix(base, grazeCol, graze * (0.30 + 0.42 * shallowMask) * (0.35 + 0.65 * lowEye));
 
     // ── Diffuse sun ─────────────────────────────────────────────────────
     float diff = max(0.0, dot(N, L));
@@ -308,8 +359,11 @@ const OCEAN_FRAG = /* glsl */`
     // shallows so tropical water keeps its turquoise instead of blowing out.
     color += specCol * (1.0 - shallowMask * 0.82);
 
-    // Night: dim the water body (fog/horizon colors arrive pre-dimmed)
-    color *= mix(1.0, 0.42, u_nightFactor * (1.0 - foam * 0.4) * (1.0 - shallowMask * 0.4));
+    // Night: dim the water body (fog/horizon colors arrive pre-dimmed). The
+    // shallows used to be handed a big exemption from this, which is half of why
+    // a night lagoon glowed like a light source; they now dim nearly as far as
+    // open water and get their brightness back only from foam and moonlight.
+    color *= mix(1.0, 0.42, u_nightFactor * (1.0 - foam * 0.4) * (1.0 - shallowMask * 0.12));
 
     // Twilight: the sea takes the warm, dimmed cast of the sunset sky instead of
     // staying daytime cyan under a peach/indigo horizon.
@@ -498,11 +552,16 @@ export class OceanRenderer {
     // T-junction cracks at LOD seams. Front side only so it never occludes
     // the surface when the camera is underwater looking up. Sits below the
     // deepest storm trough (~-5.6m at storm=1) so it never pokes through.
+    //
+    // It is also the only thing a swimmer sees under the horizon, so its colour
+    // is the seafloor read: near-black navy made every dive look like falling
+    // into a hole. A murky teal (the same family as the underwater fog) reads as
+    // deep water instead, and can never resolve to pure black.
     const underGeo = new THREE.PlaneGeometry(2400, 2400, 1, 1);
     underGeo.rotateX(-Math.PI / 2);
     const underlayer = new THREE.Mesh(
       underGeo,
-      new THREE.MeshBasicMaterial({ color: 0x04182b }),
+      new THREE.MeshBasicMaterial({ color: 0x0b3c4c }),
     );
     underlayer.position.y = -6.5;
     this.group.add(underlayer);
