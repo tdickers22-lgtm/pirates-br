@@ -224,6 +224,37 @@ export function isNearHelm(player: PlayerLike, ship: ShipLike): boolean {
   return Math.abs(local.x - helm.x) < 1.2 && Math.abs(local.z - helm.z) < 1.45;
 }
 
+/**
+ * THE HELM CONE. Planar radius around the wheel inside which a pirate is
+ * STANDING AT THE STATION, not merely near it.
+ *
+ * 1.6 m fits inside the quarterdeck dais on all three hulls and still clears
+ * every other stand point by a margin — the closest neighbour anywhere in the
+ * fleet is the brigantine's after gun at 2.53 m, then the brace rails at
+ * 2.62 / 3.01 / 3.14 m and the ammo chest at 2.54 / 3.82 / 5.74 m. So the cone
+ * can never swallow another verb's own station.
+ */
+export const HELM_STAND_CONE = 1.6;
+
+/**
+ * Boots on the helm station. This is the geometry the prompt arbiter needs that
+ * `isNearHelm` could not give it: the wheel's grab point sits ~0.9 m BELOW eye
+ * level, so a newcomer who walks onto the quarterdeck staring out over the bow
+ * has a look-dot near zero on the very thing she is standing on. Distance from
+ * the station — not gaze — is what says "your hands are on this".
+ */
+export function isStandingAtHelm(player: PlayerLike, ship: ShipLike): boolean {
+  if (player.onShipId !== ship.id) return false;
+  const stats = SHIP_STATS[ship.type];
+  const local = toShipLocalPoint(player.position, ship);
+  const helm = getHelmControlLocal(stats);
+  if (Math.hypot(local.x - helm.x, local.z - helm.z) > HELM_STAND_CONE) return false;
+  // Deck level only — never claimed from the hold below or from the rigging above.
+  const deckY = getShipDeckY(ship.position.y, stats);
+  const y = (player.position as Vec3).y;
+  return y >= deckY - 0.6 && y <= deckY + 2.4;
+}
+
 export function isNearSailStation(player: PlayerLike, ship: ShipLike): boolean {
   if (player.onShipId !== ship.id) return false;
   const stats = SHIP_STATS[ship.type];
@@ -397,6 +428,17 @@ export const SHIP_BOARD_LATCH_REACH = 4.6;
  *  attach left a dead zone along the bow, stern and the far rail. */
 export const OWN_HULL_SWIM_BOARD_MARGIN = 1.9;
 
+/** How close to her OWN hull a pirate ON FOOT (beach, sandbar, dock planking)
+ *  counts as "pressed against the side". Tighter than the swimmer's margin: a
+ *  walker can put her shoulder on the planking, so the offer means exactly
+ *  that, and never "somewhere on the same stretch of sand". */
+export const OWN_HULL_SHORE_BOARD_MARGIN = 0.9;
+/** Vertical band a shore-side boarder must stand in — waterline to a step over
+ *  the cap rail. Without it a pirate on a clifftop above the bay would be
+ *  offered a climb she cannot possibly make. */
+const SHORE_BOARD_MAX_RISE = 1.4;
+const SHORE_BOARD_MAX_DROP = 2.5;
+
 /** A swimmer hugging her own hull anywhere around it (bow, stern, either rail). */
 export function isSwimBoardingOwnHull(
   player: Pick<Player, 'position' | 'state' | 'shipId'>,
@@ -408,6 +450,31 @@ export function isSwimBoardingOwnHull(
   const local = toShipLocalPoint(player.position, ship);
   const verticalT = getSwimHullVerticalT(player.position.y, ship.position.y, stats, ship.type);
   return isInsideSwimHullFootprint(stats, local.x, local.z, OWN_HULL_SWIM_BOARD_MARGIN, verticalT);
+}
+
+/**
+ * CANONICAL "I have a hand on my own ship". Swimming OR on foot.
+ *
+ * The swim-only predicate left a silent dead zone that read as a broken game:
+ * a pirate standing on the sand with her shoulder against her own hull got NO
+ * prompt in any direction — the side ladders hang over water, so the ladder
+ * band never reached her, and the own-hull offer refused her for not being wet.
+ * Client prompt and server grant both call this, so the offer and the grant are
+ * still one number.
+ */
+export function isBoardingOwnHull(
+  player: Pick<Player, 'position' | 'state' | 'shipId'>,
+  ship: ShipLike,
+): boolean {
+  if (player.shipId !== ship.id) return false;
+  if (player.state === 'swimming') return isSwimBoardingOwnHull(player, ship);
+  if (player.state !== 'alive') return false;
+  const stats = SHIP_STATS[ship.type];
+  const deckY = getShipDeckY(ship.position.y, stats);
+  const y = player.position.y;
+  if (y > deckY + SHORE_BOARD_MAX_RISE || y < ship.position.y - SHORE_BOARD_MAX_DROP) return false;
+  const local = toShipLocalPoint(player.position, ship);
+  return isInsideSwimHullFootprint(stats, local.x, local.z, OWN_HULL_SHORE_BOARD_MARGIN, 0);
 }
 
 /**

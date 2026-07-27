@@ -13,7 +13,10 @@ import { InteractionPrompts } from '../src/client/systems/InteractionPrompts.ts'
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import {
+  getAmmoCrateLocal,
+  getHelmControlLocal,
   getShipFloorYAt,
+  isBoardingOwnHull,
   isStandingOnShipDeck,
   isSwimBoardingOwnHull,
   toShipWorldPoint,
@@ -95,9 +98,35 @@ function makeArbiter(shipType) {
     player.rotation.x = Math.atan2(dx, dz);
     player.rotation.y = Math.atan2(ship.position.y + worldY - eyeY, Math.hypot(dx, dz));
   };
+  /** Aim relative to the BOW: dyaw 0 looks forward over the stem, −π/2 to port. */
+  const gaze = (dyaw, pitch) => {
+    player.rotation.x = ship.rotation + dyaw;
+    player.rotation.y = pitch;
+  };
   const resolve = () => prompts.getLookInteraction(player, ship, null, null);
-  return { ship, stats, player, prompts, standAt, lookAt, resolve };
+  return { ship, stats, player, prompts, standAt, lookAt, gaze, resolve };
 }
+
+/** Where a newcomer's boots actually land on the quarterdeck: dead on the wheel
+ *  and a step off it in every direction. All eight are inside HELM_STAND_CONE
+ *  and on the dais on all three hulls. */
+const HELM_STAND_POINTS = [
+  ['dead on the wheel', 0, 0],
+  ['a step forward of it', 0, 0.6],
+  ['a step abaft it', 0, -0.55],
+  ['to starboard of it', 0.9, 0],
+  ['to port of it', -0.9, 0],
+  ['off the starboard quarter', 0.8, 0.5],
+  ['off the port quarter', -0.8, -0.4],
+  ['at the corner of the dais', 1.2, 0.6],
+];
+/** The three things a player who has never sailed anything actually does with
+ *  the mouse when she walks up: nothing, look at her boots, look over the rail. */
+const HELM_GAZES = [
+  ['gazing forward over the bow', 0, 0],
+  ['gazing down at the deck', 0, -1.0],
+  ['gazing off to port', -Math.PI / 2, 0],
+];
 
 for (const type of ['sloop', 'brigantine', 'galleon']) {
   const rig = makeArbiter(type);
@@ -142,6 +171,62 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
     previous = kind;
   }
   expect(`${type}: jittering the look at the wheel never flips the offer`, flips === 0, `${flips} flips`);
+
+  // ── THE HELM CONE ────────────────────────────────────────────────────────
+  // A newcomer walks onto the quarterdeck and never once looks UP at the wheel.
+  // Standing dead on it she used to be offered the brace rails, the ammo chest
+  // or nothing at all, because the wheel's grab point sits below her eyeline and
+  // the look gate threw it out. Boots on the station is the whole test.
+  const helmLocal = getHelmControlLocal(rig.stats);
+  for (const [gazeName, dyaw, pitch] of HELM_GAZES) {
+    const wrong = [];
+    for (const [where, dx, dz] of HELM_STAND_POINTS) {
+      rig.standAt(helmLocal.x + dx, helmLocal.z + dz);
+      rig.gaze(dyaw, pitch);
+      await sleep(45);
+      const offer = rig.resolve();
+      if (offer?.kind !== 'helm') wrong.push(`${where} → ${offer?.kind ?? 'nothing'} ("${offer?.prompt ?? ''}")`);
+    }
+    expect(`${type}: all 8 stand-points on the dais, ${gazeName} → [X] takes the helm`,
+      wrong.length === 0, wrong.join('\n     '));
+  }
+
+  // The cone is not a black hole: the ammo chest still owns [X] from its own
+  // stand point, exactly as the brace rail does above.
+  const crate = getAmmoCrateLocal(rig.stats);
+  rig.standAt(crate.x, crate.z);
+  rig.lookAt(crate.x, crate.z, rig.stats.height + 0.5);
+  await sleep(45);
+  const atCrate = rig.resolve();
+  expect(`${type}: at the ammo chest looking at it → [X] refills firearms`,
+    atCrate?.kind === 'ammo', `got ${atCrate?.kind ?? 'nothing'} — "${atCrate?.prompt ?? ''}"`);
+
+  // ── Ashore against your own planking ─────────────────────────────────────
+  // The swim-board offer was the ONLY own-hull offer, so a pirate standing on
+  // the sand with her shoulder on her own hull got no prompt in any direction.
+  {
+    const beach = toShipWorldPoint({ x: rig.stats.width * 0.62, z: 0 }, rig.ship);
+    rig.player.onShipId = null;
+    rig.player.state = 'alive';
+    rig.player.position.x = beach.x;
+    rig.player.position.z = beach.z;
+    rig.player.position.y = rig.ship.position.y + 0.3;
+    rig.player.nearShipId = null;
+    expect(`${type}: the shared predicate sees her hand on her own hull from land`,
+      isBoardingOwnHull(rig.player, rig.ship), `local x=${(rig.stats.width * 0.62).toFixed(2)}`);
+    // Facing INLAND, away from the ship — the offer must not need the rungs in view.
+    rig.gaze(Math.PI, 0);
+    await sleep(45);
+    const ashore = rig.resolve();
+    expect(`${type}: standing on land against her own hull → [X] climbs aboard`,
+      ashore?.kind === 'board', `got ${ashore?.kind ?? 'nothing'} — "${ashore?.prompt ?? ''}"`);
+    // And a pirate on a clifftop well above the masthead gets nothing.
+    rig.player.position.y = rig.ship.position.y + rig.stats.height + 9;
+    expect(`${type}: from a clifftop high over the same spot, no climb is offered`,
+      !isBoardingOwnHull(rig.player, rig.ship));
+    rig.player.onShipId = rig.ship.id;
+    rig.player.state = 'alive';
+  }
 }
 
 // ── Boarding: the press is an intention (server) ───────────────────────────
@@ -229,6 +314,24 @@ const pressBoard = () => {
     pressBoard();
     expect(`[X] at the ${name} climbs aboard`, player.onShipId === ship.id, `onShip=${player.onShipId}`);
   }
+}
+
+// ON FOOT against her own hull: the offer the HUD now makes must be granted.
+{
+  const beach = toShipWorldPoint({ x: stats.width * 0.62, z: 0 }, ship);
+  player.onShipId = null;
+  player.state = 'alive';
+  player.atHelm = false;
+  player.position.x = beach.x;
+  player.position.z = beach.z;
+  player.position.y = ship.position.y + 0.3;
+  player.nearShipId = null;
+  match['boardLatchUntil'].delete(player.id);
+  expect('a pirate ashore against her own hull is boardable',
+    isBoardingOwnHull(player, ship));
+  pressBoard();
+  expect('[X] on land beside her own hull climbs aboard', player.onShipId === ship.id,
+    `onShip=${player.onShipId} state=${player.state}`);
 }
 
 // Gangway walk-on: feet on your own deck IS being aboard.

@@ -17,6 +17,8 @@ import {
   getAmmoCrateLocal,
   getAnchorControlLocal,
   getCannonDeckLocalPosition,
+  getHelmControlLocal,
+  HELM_STAND_CONE,
   isNearAmmoCrate,
   isNearAnchor,
   isNearCrowNestLadder,
@@ -128,6 +130,21 @@ for (const [type, stats] of Object.entries(SHIP_STATS)) {
   // 5. Stairwell still walkable.
   expect('stairwell walkable width', cw.stairHalfWidth * 2 >= PLAYER.RADIUS * 2 + 0.5,
     `width ${(cw.stairHalfWidth * 2).toFixed(2)}`);
+
+  // 6. THE HELM CONE OWES THE REST OF THE DECK ITS SPACE.
+  // Boots inside HELM_STAND_CONE of the wheel take [X] whatever the crosshair
+  // is resting on (InteractionPrompts rule 4) — that is what lets a newcomer
+  // standing on the dais staring forward take the helm at all. The price is
+  // that no OTHER station may stand inside the cone, or the wheel would eat a
+  // verb a pirate walked to deliberately. Anyone who moves a station toward the
+  // quarterdeck fails here instead of silently losing its prompt.
+  const helmLocal = getHelmControlLocal(stats);
+  for (const st of stations) {
+    if (st.action === 'helm') continue;
+    const d = Math.hypot(st.x - helmLocal.x, st.z - helmLocal.z);
+    expect(`${st.name}: stand point outside the helm cone (${HELM_STAND_CONE}m)`,
+      d > HELM_STAND_CONE, `d=${d.toFixed(2)}`);
+  }
 }
 
 console.log(failures === 0 ? '\nAll station spacing assertions passed' : `\n${failures} FAILURES`);

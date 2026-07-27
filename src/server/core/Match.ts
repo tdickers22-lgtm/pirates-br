@@ -59,8 +59,8 @@ import {
   isNearHelm as isSharedNearHelm,
   isNearSailStation as isSharedNearSailStation,
   findBraceStationDir,
+  isBoardingOwnHull,
   isStandingOnShipDeck,
-  isSwimBoardingOwnHull,
   SHIP_BOARD_LADDER_REACH,
   SHIP_BOARD_LATCH_REACH,
   toShipLocalPoint,
@@ -4092,7 +4092,10 @@ export class Match {
   /**
    * The hull this pirate may climb right now, or null. `reach` is the ladder
    * band; her OWN hull also answers anywhere along it (bow, stern, far rail) so
-   * a swimmer can't circle her ship forever hunting for rungs.
+   * a swimmer can't circle her ship forever hunting for rungs — and, ON FOOT,
+   * so a pirate pressed against her own planking on the sand is granted the
+   * climb the HUD offered her (isBoardingOwnHull is the shared predicate the
+   * client prompt reads, so the offer and the grant stay one number).
    *
    * Deliberately NOT gated on player.nearShipId: that flag is recomputed every
    * physics tick, and a press landing on the wrong tick is what made boarding
@@ -4102,7 +4105,7 @@ export class Match {
     if (player.state !== 'swimming' && player.onShipId !== null) return null;
     if (player.state !== 'swimming' && player.state !== 'alive') return null;
     const ownShip = this.getAliveShip(player.shipId);
-    if (ownShip && !ownShip.sinking && isSwimBoardingOwnHull(player, ownShip)) return ownShip;
+    if (ownShip && !ownShip.sinking && isBoardingOwnHull(player, ownShip)) return ownShip;
     let best: { ship: Ship; distance: number } | null = null;
     for (const ship of this.state.ships) {
       if (!ship.alive || ship.sinking) continue;

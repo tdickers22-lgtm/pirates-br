@@ -15,6 +15,15 @@
  *     Both now read the same memoized winner.
  *  3. STICKY WINNER. A challenger has to beat the standing winner by a margin,
  *     so two near-tied candidates can't alternate every frame.
+ *  4. THE STATION YOU ARE STANDING ON WINS. Rules 1–3 all measure "hands on"
+ *     through the LOOK cone, and the wheel is the one station whose grab point
+ *     sits below eye level — a newcomer who walks onto the quarterdeck staring
+ *     forward scored the helm at dot≈0 and had it dropped by the dot gate, so
+ *     [X] read "Brace the Yard" (or nothing) while she stood ON the wheel.
+ *     Inside HELM_STAND_CONE the helm takes the press whatever the crosshair
+ *     is resting on; only an urgent thing genuinely under the crosshair and
+ *     inside arm's reach (a lit keg, a downed crewmate, a chest, a leak) can
+ *     take it back. No sailing station ever can.
  */
 import * as THREE from 'three';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
@@ -27,12 +36,13 @@ import {
   getAnchorControlLocal,
   getCannonDeckLocalPosition,
   getHelmControlLocal,
+  isBoardingOwnHull,
   isNearAmmoCrate,
   isNearAnchor,
   isNearCrowNestLadder,
   isNearHelm,
   isNearSailStation,
-  isSwimBoardingOwnHull,
+  isStandingAtHelm,
   SHIP_BOARD_LADDER_REACH,
   toShipLocalPoint,
 } from '../../shared/interactions.js';
@@ -51,6 +61,16 @@ const SWITCH_MARGIN: Record<number, number> = { [TIER_AMBIENT]: 0.05, [TIER_LOOK
 /** Memo window for one arbitration. Long enough that the HUD pass and the input
  *  pass of the SAME frame always agree, short enough to feel instant. */
 const ARBITER_MEMO_MS = 40;
+/** How squarely a candidate must sit under the crosshair to take [X] back off
+ *  the wheel from a captain standing on the helm station (rule 4). */
+const HELM_CONE_YIELD_DOT = 0.7;
+/** …and the only things allowed to do it. Every one of these is URGENT and
+ *  physically at your boots; the sailing stations (brace, sails, ammo chest,
+ *  anchor, cannons) are deliberately absent — from the dais the wheel is what a
+ *  new captain came for, and none of them may outrank it. */
+const HELM_CONE_YIELDS_TO: ReadonlySet<ClientInteractKind> = new Set<ClientInteractKind>([
+  'keg_diffuse', 'revive', 'chest', 'stow_chest', 'repair', 'barrel',
+]);
 
 type InteractionCandidate = {
   prompt: string;
@@ -59,6 +79,10 @@ type InteractionCandidate = {
   kind: ClientInteractKind;
   tier: number;
   distance: number;
+  /** Cosine between the look ray and the ray to this candidate. */
+  dot: number;
+  /** Set on the helm when the pirate's boots are ON the station (rule 4). */
+  stationLock?: boolean;
 };
 
 export type ResolvedInteraction = { prompt: string; label: string; kind: ClientInteractKind };
@@ -270,13 +294,16 @@ export class InteractionPrompts {
     }
 
     if (!player.onShipId && this.view.state) {
-      // Own hull first: a swimmer touching her own ship ANYWHERE (bow, stern,
+      // Own hull first: a pirate touching her own ship ANYWHERE (bow, stern,
       // either rail) can climb aboard — the ladder-only attach left a dead band
       // where you could circle your own hull forever with no prompt at all.
+      // ON FOOT counts too: the side ladders hang over water, so a pirate
+      // standing on the sand with her shoulder against her own planking used to
+      // get no prompt in any direction at all.
       const ownShip = player.shipId
         ? this.view.state.ships.find((candidate) => candidate.id === player.shipId && candidate.alive && !candidate.sinking) ?? null
         : null;
-      const huggingOwnHull = !!ownShip && isSwimBoardingOwnHull(player, ownShip);
+      const huggingOwnHull = !!ownShip && isBoardingOwnHull(player, ownShip);
       const targetShip = huggingOwnHull
         ? ownShip
         : (player.nearShipId
@@ -290,10 +317,13 @@ export class InteractionPrompts {
           // anything actually within reach, like a floating chest.
           candidates.push({
             prompt: '[X] Climb Aboard',
-            label: 'Haul yourself up the side of your ship',
+            label: player.state === 'swimming'
+              ? 'Haul yourself up the side of your ship'
+              : 'Climb the side of your ship from here',
             kind: 'board',
             tier: TIER_HANDS_ON,
             distance: 0.9,
+            dot: 1,
             score: -0.9,
           });
         } else if (ladder && ladder.distance <= SHIP_BOARD_LADDER_REACH) {
@@ -395,7 +425,7 @@ export class InteractionPrompts {
           label = `Bilge flooding ${pct}% · scoop a bucketful out`;
         }
         // Ambient (no geometry of its own): only ever the fallback offer.
-        candidates.push({ prompt, label, score: -0.5, kind: 'bail', tier: TIER_AMBIENT, distance: 0 });
+        candidates.push({ prompt, label, score: -0.5, kind: 'bail', tier: TIER_AMBIENT, distance: 0, dot: 0 });
       }
 
       if (player.carryingChestId && player.onShipId === ship.id) {
@@ -440,10 +470,38 @@ export class InteractionPrompts {
         );
       }
 
-      if (isNearHelm(player, ship)) {
+      // The cone is a RADIUS and isNearHelm is a box, so the two disagree at the
+      // box's corners — take the union, or standing 1.2 m off the wheel on the
+      // diagonal would drop the helm out of the running entirely.
+      const standingAtHelm = isStandingAtHelm(player, ship);
+      if (standingAtHelm || isNearHelm(player, ship)) {
         const helm = getHelmControlLocal(SHIP_STATS[ship.type]);
         const helmPoint = this.view.getShipWorldPoint(ship, helm.x, helm.z, SHIP_STATS[ship.type].height + 0.95);
-        this.pushInteractionCandidate(candidates, player, helmPoint, 4.2, 0.2, '[X] Take Helm', 'A/D or arrows turn · W/S trims sails', 'helm');
+        const helmPrompt = '[X] Take Helm';
+        const helmLabel = 'A/D or arrows turn · W/S trims sails';
+        if (standingAtHelm) {
+          // RULE 4. Feet on the station: skip the dot gate entirely. The wheel's
+          // grab point is ~0.9 m BELOW eye height, so standing on it and looking
+          // out over the bow scores dot≈0 — under the 0.2 gate the helm was not
+          // even a candidate, and the press went to whatever else was on deck.
+          const eyePos = new THREE.Vector3(player.position.x, player.position.y + PLAYER.HEIGHT * 0.72, player.position.z);
+          const toHelm = helmPoint.clone().sub(eyePos);
+          const helmDistance = toHelm.length();
+          candidates.push({
+            prompt: helmPrompt,
+            label: helmLabel,
+            kind: 'helm',
+            distance: helmDistance,
+            dot: helmDistance > 1e-4 ? toHelm.normalize().dot(this.view.getLookDirection(player)) : 1,
+            tier: TIER_HANDS_ON,
+            // Scored as if fully gazed at — the hands-on tier ranks by nearness,
+            // and nothing on the dais is nearer than the thing under your boots.
+            score: 0.3 - helmDistance,
+            stationLock: true,
+          });
+        } else {
+          this.pushInteractionCandidate(candidates, player, helmPoint, 4.2, 0.2, helmPrompt, helmLabel, 'helm');
+        }
       }
 
       if (isNearSailStation(player, ship)) {
@@ -615,6 +673,18 @@ export class InteractionPrompts {
         winner = incumbent;
       }
     }
+
+    // Rule 4, and it is the LAST WORD — after the sticky pass, so a stale
+    // incumbent can't hold the prompt while the captain stands on the wheel.
+    // It depends only on where her boots are, so it can never flicker.
+    const helmLock = candidates.find((candidate) => candidate.stationLock && candidate.kind === 'helm');
+    if (helmLock && winner && winner.kind !== 'helm') {
+      const urgentAndUnderTheCrosshair = HELM_CONE_YIELDS_TO.has(winner.kind)
+        && winner.distance <= HANDS_ON_REACH
+        && winner.dot >= HELM_CONE_YIELD_DOT;
+      if (!urgentAndUnderTheCrosshair) winner = helmLock;
+    }
+
     this.sticky = winner ? { kind: winner.kind, tier: winner.tier } : null;
     return winner ? { prompt: winner.prompt, label: winner.label, kind: winner.kind } : null;
   }
@@ -648,6 +718,7 @@ export class InteractionPrompts {
       label,
       kind,
       distance,
+      dot,
       tier: handsOn ? TIER_HANDS_ON : TIER_LOOK,
       score: handsOn ? dot * 0.3 - distance : dot - distance * 0.035,
     });
