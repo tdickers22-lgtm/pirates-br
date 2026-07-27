@@ -146,3 +146,72 @@ every pirate story, not to any one of them.
 - Scatter instanced (bushes/ferns/flowers/shells): ≤1.5k tris
 - All: bevel-caught edges, baked vertex AO in crevices, top-down hue gradient,
   asymmetry + wear (chips, sag, lean), silhouette-first composition.
+
+## Appendix — What the player actually hears (delivery layer)
+
+The beats above are the brief. These are the SHIPPED lines, and where they live.
+Change them here and in code together; `scripts/test-story-delivery.mjs` fails
+if an island loses its beat, its speaker, or its unique name.
+
+### Vignette discovery — walking into a scene announces it
+
+Footprint entry fires the island-banner + discovery sting once per scene per
+match, with a feed line that keeps the find after the banner fades. Table:
+`STORY_VIGNETTES` in `src/client/core/Game.ts`.
+
+| Scene | Banner title | Beat |
+| --- | --- | --- |
+| `smuggler_cache` | The Smuggler's Cache | The tavern is the front. This is the business. |
+| `skull_totem` | The Warning Stone | They cut it facing the water, so you would read it before you landed. |
+| `wrecker_tower` | The Wrecker's Tower | The light was never meant to save you. |
+| `whale_skeleton` | The Leviathan's Rest | Even leviathans wash up here. You will not do better. |
+| `gibbet_cage` | The Gibbet | The Black Fin leave their rag on the frame, so you know who to thank. |
+| `rum_still` | The Runner's Still | Business is booming. The quality is a rumour. |
+| `crow_roost` | The Unlit Pyre | The watch had one job. The crows had another. |
+| `mermaid_shrine` | The Siren's Toll | The offerings are not thanks. She is owed. |
+| `castaway_camp` | The Last Camp | He counted every day. The raft is still three planks short. |
+| `kraken_wreck` | What the Kraken Left | It did not sink her. It held her until she stopped moving. |
+| `dig_site` | The Empty Chest | A Black Fin pennant marks the dig. The crew that opened it didn't all leave. |
+| `gallows` | The Gallows | The tide brings everyone to justice eventually. |
+| `parley_table` | The Parley Table | Leave your steel at the barrel. Nobody has died here. Yet. |
+| `mine_head` | The Obsidian Cut | They dug black glass out of a living mountain. The mountain kept it. |
+| `widow_memorial` | The Widow's Lantern | She lit it every night for a ship that never came. It still burns. |
+
+### The cast — one authored voice per island
+
+Every roster island has a speaker; no name repeats anywhere in the Reach.
+Lore lines are `ISLAND_CAST` in `src/server/world/MapGenerator.ts` (roster
+order, zero rng draws — the fixed world gets a fixed cast). A speaker opens
+with their island's lore; later visits rotate in the tutorial lines their ROLE
+teaches (`NPC_ROLE_TIPS` in `src/client/core/Game.ts`), so the game still
+explains storms, repair, charts and trade without fourteen mouths reciting it.
+
+| Island | Speaker (role) | Also ashore |
+| --- | --- | --- |
+| Smuggler's Rest | Ines the Fence (stranger) | Tavernkeeper Bess · Gold Hoarder Darius |
+| Skull Cove | Bone-Reader Ovid (oracle) | Gold Hoarder Nessa Trell |
+| The Crooked Atoll | Salvager Kellan Drage (shipwright) | Gold Hoarder Piet Ostrow |
+| Dead Man Shoals | Moraine the Bone-Reader (oracle) | — |
+| Rumrunner Key | Sable Tam (stranger) | — |
+| Crow's Perch | Hesper Vane, Last of the Watch (stranger) | — |
+| Mermaid's Folly | Shrinekeeper Calla Wren (oracle) | Gold Hoarder Lira Sarn |
+| Castaway Reach | Maeve the Shipwright (shipwright) | Tavernkeeper Corin Ladd |
+| Kraken Tooth | Harpooner Silas Threnn (shipwright) | — |
+| Booty Bay | Jessamy Crook (stranger) | Tavernkeeper Ruby Vann |
+| Gallows Sands | Gravedigger Ambrose Quill (oracle) | — |
+| Parley Point | Ondine Bask, Keeper of the Truce (stranger) | Tavernkeeper Ansel Poe |
+| Old Maw Caldera | Pitboss Garrow Finch (shipwright) | Gold Hoarder Halvard Bex |
+| Widow's Watch | Old Salt Iona (oracle) | — |
+
+The **Black Fin** thread is spoken aloud three times a player can stand in
+front of: Kellan Drage on the brand burned into the wreckers' crates, Moraine
+on what the Black Fin hang at Dead Man Shoals, and Jessamy Crook on the pennant
+staked over the deepest pit at Booty Bay — plus the gibbet and dig vignettes.
+
+### The widow's lantern is a landmark
+
+§14 promised a light visible from the sea; the ordinary lantern glow dissolves
+past ~60 m. `buildStoryBeacons`/`updateStoryBeacons` in `src/client/core/Game.ts`
+give her lamp the stern-lantern treatment — an amber core plus a soft halo whose
+screen size is held up with distance — so from 300 m of black water she reads as
+a beacon you can steer by, in HER amber, never the watchtower's white.
