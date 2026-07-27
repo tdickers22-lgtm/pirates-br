@@ -35,6 +35,15 @@ import { ZERO_SCALE_MAT4 } from '../../rendering/three-util.js';
 import type { IslandBuildCtx } from './context.js';
 
 const GRAVITY = 9.81;
+/** Base mesh for every rock the fall strews about.
+ *
+ * The shared decor `boulderGeo` is a subdivision-0 dodecahedron: twelve faces,
+ * and once it is squashed on two axes it silhouettes as a grey CUBE — the
+ * "angular shards / floating debris" the audit read around the column. One
+ * subdivision of an icosahedron (80 faces) plus the per-vertex radial jitter
+ * pushBoulder applies gives a genuinely broken-stone outline for 44 more
+ * triangles, and it still merges into the fall's single rock draw call. */
+const FALL_BOULDER_GEO = new THREE.IcosahedronGeometry(0.9, 1);
 /** How far the sheet stands off the rock face once it lands back on it. */
 const FACE_CLEARANCE = 0.34;
 /** Water surface height above the terrain wherever the stream rides the rock;
@@ -529,7 +538,7 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       const t = k / 3;
       const s = dam.s - 0.5 + (dam.w + 0.5) * t;
       const y = level - 0.06 * t - 0.18 * t * t;
-      spill.push(point(s, y, chanW * (0.92 - 0.28 * t), 0.22 + 0.3 * t, true));
+      spill.push(point(s, y, chanW * (0.88 - 0.20 * t), 0.30 + 0.22 * t, true));
     }
 
     // Plunge: leave the lip on an arc, fall until the rock comes back up to
@@ -555,9 +564,12 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       const contact = sFace <= sBal + 0.05;
       // Aeration climbs as the sheet breaks up on the way down, and spikes at
       // the impact.
-      const aer = THREE.MathUtils.clamp(0.16 + t * t * 0.62 + (t > 0.86 ? 0.3 : 0), 0, 1);
-      const wob = 1 + Math.sin(t * 9.5 + fallIndex * 2.1) * 0.09;
-      plunge.push(point(s, y, chanW * (0.66 + 0.5 * t) * wob, aer, contact));
+      // Aeration starts where the spill left off (0.52) rather than snapping
+      // back to 0.16 — that discontinuity was the visible brightness step at the
+      // lip, and the sheet is a single welded strip now, so it shows.
+      const aer = THREE.MathUtils.clamp(0.50 + t * t * 0.40 + (t > 0.86 ? 0.1 : 0), 0, 1);
+      const wob = 1 + Math.sin(t * 9.5 + fallIndex * 2.1) * 0.045;
+      plunge.push(point(s, y, chanW * (0.68 + 0.34 * t) * wob, aer, contact));
       landS = s;
     }
     sections.push(spill.concat(plunge));
@@ -576,9 +588,9 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       if (backNext > landS + 0.7) {
         const chute: WPoint[] = [];
         for (let s = landS; s <= backNext; s += 0.85) {
-          chute.push(point(s, T(s) + RIDE_LIFT, chanW * 0.95, 0.45, true, 1, meander(s) * 0.5));
+          chute.push(point(s, T(s) + RIDE_LIFT, chanW * 0.98, 0.58, true, 1, meander(s) * 0.5));
         }
-        chute.push(point(backNext, T(backNext) + RIDE_LIFT, chanW * 0.95, 0.45, true, 1, meander(backNext) * 0.5));
+        chute.push(point(backNext, T(backNext) + RIDE_LIFT, chanW * 0.98, 0.58, true, 1, meander(backNext) * 0.5));
         sections.push(chute);
       }
     }
@@ -591,8 +603,12 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
     s: impact.s + chanW * 0.9,
     y: baseY,
     rAlong: Math.min(chanW * 1.6, Math.max(1.2, (T(impact.s) - T(impact.s + chanW * 3)) > 2.2 ? chanW * 0.9 : chanW * 1.6)),
-    rAcross: fitLateral(impact.s + chanW * 0.9, baseY, chanW * 1.7, 1.6),
-    aer: 0.85,
+    rAcross: fitLateral(impact.s + chanW * 0.9, baseY, chanW * 1.9, 1.6),
+    // Deliberately NOT full aeration: at 0.85 the shader foamed the entire disc
+    // and the pool photographed as an opaque white paper cutout lying on the
+    // grass. The whitewater belongs to the froth ring at the impact; the pond
+    // itself should read as still, deep, blue-green water.
+    aer: 0.55,
     impactS: impact.s,
   };
   pools.push(basePool);
@@ -717,7 +733,54 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
     }
   }
 
-  // ── sweep the sheets ────────────────────────────────────────────────────
+  // ── weld the chain into ONE strip ───────────────────────────────────────
+  // Spill, plunge, chute and runout were swept as SEPARATE strips sharing only
+  // a bridged endpoint. Every joint therefore showed both a width jog (each
+  // section authored its own halfW) and a brightness step (each authored its own
+  // aeration), and the two strips' lane-depth normals disagreed across the seam:
+  // the "ribbon segments misaligned mid-fall" read. One welded polyline, swept
+  // once per lane with a single scrolling UV (`vm` is already cumulative over
+  // the whole descent), cannot show a seam — there isn't one.
+  const path: WPoint[] = [];
+  for (const section of sections) {
+    for (const p of section) {
+      const prev = path[path.length - 1];
+      if (prev) {
+        // The chain only ever runs downstream and downhill. A section that opens
+        // slightly behind/above the one before it (the next dam's spill starts
+        // at its crest, which sits ~0.3m above the chute that fed it) would fold
+        // the swept strip back on itself.
+        p.s = Math.max(p.s, prev.s);
+        p.y = Math.min(p.y, prev.y);
+        p.vm = Math.max(p.vm, prev.vm);
+        if (p.s - prev.s < 0.04 && prev.y - p.y < 0.04) continue;   // coincident
+      }
+      path.push(p);
+    }
+  }
+  // Low-pass the width and the aeration along the welded path: what is left of
+  // the old per-section steps dissolves over a couple of metres, which is what
+  // turns the chain into one continuously tapered sheet.
+  if (path.length > 2) {
+    for (let pass = 0; pass < 3; pass++) {
+      const hw = path.map((p) => p.halfW);
+      const ae = path.map((p) => p.aer);
+      for (let i = 0; i < path.length; i++) {
+        let sw = 0; let sa = 0; let wsum = 0;
+        for (let k = -2; k <= 2; k++) {
+          const j = THREE.MathUtils.clamp(i + k, 0, path.length - 1);
+          const wk = 1 / (1 + Math.abs(k));
+          sw += hw[j] * wk;
+          sa += ae[j] * wk;
+          wsum += wk;
+        }
+        path[i].halfW = sw / wsum;
+        path[i].aer = sa / wsum;
+      }
+    }
+  }
+
+  // ── sweep the sheet ─────────────────────────────────────────────────────
   const water = new WaterSink();
   const lanes = lowDetail
     ? [{ lat: 0, wide: 1, depth: 0, aer: 0, phase: 0 }, { lat: -0.2, wide: 0.6, depth: 0.14, aer: 0.2, phase: 3.7 }]
@@ -729,15 +792,14 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   const tan = new THREE.Vector3();
   const across = new THREE.Vector3(ax, 0, az);
   const nrm = new THREE.Vector3();
-  for (const section of sections) {
-    if (section.length < 2) continue;
+  if (path.length >= 2) {
     for (const lane of lanes) {
       let prevA = -1;
       let prevB = -1;
-      for (let k = 0; k < section.length; k++) {
-        const p = section[k];
-        const q = section[Math.min(section.length - 1, k + 1)];
-        const r = section[Math.max(0, k - 1)];
+      for (let k = 0; k < path.length; k++) {
+        const p = path[k];
+        const q = path[Math.min(path.length - 1, k + 1)];
+        const r = path[Math.max(0, k - 1)];
         tan.set(dirX * (q.s - r.s), q.y - r.y, dirZ * (q.s - r.s));
         if (tan.lengthSq() < 1e-6) tan.set(dirX, 0, dirZ);
         tan.normalize();
@@ -758,19 +820,23 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   }
 
   // ── pools ───────────────────────────────────────────────────────────────
-  for (const pool of pools) {
-    const segs = lowDetail ? 14 : 22;
+  /** Sweep one ring of the pool disc. `u` is the shader's silhouette
+   *  coordinate: at |u| = 1 the noise-eaten edge dissolves the surface
+   *  completely, which is right for the LATERAL edge of a falling sheet and
+   *  quite wrong for a pond — it made every plunge pool fade to nothing before
+   *  its rim, so the fall visibly ended on bare grass. Rings inside the pool
+   *  carry a low u and only the outermost one fades. */
+  const poolRing = (
+    pool: Pool, radius: number, u: number, aer: number, alpha: number, segs: number,
+  ): number[] => {
     const cx = px(pool.s);
     const cz = pz(pool.s);
-    const centre = water.vert(cx, pool.y, cz, 0, pool.s - pool.impactS, pool.aer, 1,
-      Math.abs(pool.s - pool.impactS), pool.rAcross, 1);
-    let first = -1;
-    let prev = -1;
+    const out: number[] = [];
     for (let k = 0; k <= segs; k++) {
       const th = (k / segs) * Math.PI * 2;
       const wob = 0.88 + 0.16 * Math.sin(th * 3 + fallIndex) + 0.08 * Math.sin(th * 5 + 1.3);
-      const along = Math.cos(th) * pool.rAlong * wob;
-      const side = Math.sin(th) * pool.rAcross * wob;
+      const along = Math.cos(th) * pool.rAlong * radius * wob;
+      const side = Math.sin(th) * pool.rAcross * radius * wob;
       const vx = cx + dirX * along + ax * side;
       const vz = cz + dirZ * along + az * side;
       // Pools sit ON the rock; drop the rim to the ground where the ground is
@@ -778,26 +844,85 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       const gy = groundAt(vx, vz);
       const vy = Math.max(pool.y - 0.5, Math.min(pool.y, gy + 0.9));
       const rim = Math.hypot(pool.s + along - pool.impactS, side);
-      const idx = water.vert(vx, vy, vz, 1, (pool.s + along) - pool.impactS, pool.aer, 1, rim, pool.rAcross, 1);
-      if (prev >= 0) water.tri(centre, prev, idx);
-      else first = idx;
-      prev = idx;
+      out.push(water.vert(vx, vy, vz, u, (pool.s + along) - pool.impactS, aer, 1, rim, pool.rAcross, alpha));
     }
-    if (prev >= 0 && first >= 0) water.tri(centre, prev, first);
+    return out;
+  };
+  for (const pool of pools) {
+    const segs = lowDetail ? 14 : 22;
+    const cx = px(pool.s);
+    const cz = pz(pool.s);
+    const centre = water.vert(cx, pool.y, cz, 0, pool.s - pool.impactS, pool.aer, 1,
+      Math.abs(pool.s - pool.impactS), pool.rAcross, 1);
+    // Three rings: a solid body, a foam-charged collar and a soft dissolving
+    // lip. The foam ring is what reads as "the water hit something here".
+    const body = poolRing(pool, 0.62, 0.18, pool.aer, 1, segs);
+    const collar = poolRing(pool, 0.90, 0.46, Math.min(1, pool.aer + 0.15), 1, segs);
+    const lip = poolRing(pool, 1.0, 0.94, Math.min(1, pool.aer + 0.25), 1, segs);
+    for (let k = 0; k < segs; k++) {
+      water.tri(centre, body[k], body[k + 1]);
+      water.quad(body[k], collar[k], collar[k + 1], body[k + 1]);
+      water.quad(collar[k], lip[k], lip[k + 1], collar[k + 1]);
+    }
+  }
+
+  // ── the impact: a froth ring blowing out of the plunge ──────────────────
+  // The base of the fall had nothing but the pool disc under it. A low
+  // annulus of maximally-aerated still water, sitting a hand's width above the
+  // pool and centred on the impact rather than the pond, gives the collision a
+  // white boil with the shader's ripple rings running out of it.
+  {
+    const segs = lowDetail ? 14 : 26;
+    const cxI = px(impact.s);
+    const czI = pz(impact.s);
+    const outer = chanW * (lowDetail ? 1.4 : 1.75);
+    // Three concentric rings, u climbing to 1 at the lip so the shader's
+    // noise-eaten silhouette dissolves the outside edge. A two-ring version with
+    // a hard 0.85 lip and a ±0.32 radial wobble drew a white ORIGAMI STAR
+    // sitting on the grass (verification pass 3).
+    const bands = [
+      { r: 0.34, u: 0.10, aer: 1.0, rim: 0.15 },
+      { r: 0.70, u: 0.44, aer: 1.0, rim: 0.9 },
+      { r: 1.00, u: 1.00, aer: 0.85, rim: 2.0 },
+    ];
+    let prev: number[] | null = null;
+    for (let k = 0; k <= segs; k++) {
+      const th = (k / segs) * Math.PI * 2;
+      const wob = 0.94 + 0.07 * Math.sin(th * 3 + fallIndex * 1.7) + 0.04 * Math.sin(th * 7 + 2.1);
+      const co = Math.cos(th);
+      const si = Math.sin(th);
+      const cols = bands.map((band) => {
+        const r = outer * band.r * wob;
+        const vx = cxI + dirX * co * r + ax * si * r;
+        const vz = czI + dirZ * co * r + az * si * r;
+        // Rides just over the pool, and sinks with the ground where the ground
+        // falls away, so the boil never cantilevers off the slope.
+        const vy = Math.min(baseY + 0.12, groundAt(vx, vz) + 0.75);
+        // aFlowB.x is "metres from the impact", and the shader turns anything
+        // under 2.4 into whitewater: normalise the ring onto that scale so a
+        // big fall's wide boil is as white as a small one's.
+        return water.vert(vx, vy, vz, band.u, th * 2.2 + r, band.aer, 1, band.rim, outer, 1);
+      });
+      if (prev) for (let c = 0; c < cols.length - 1; c++) water.quad(prev[c], cols[c], cols[c + 1], prev[c + 1]);
+      prev = cols;
+    }
   }
 
   // ── rock: shelves, the trough the stream runs in, bank boulders ─────────
   const rock = new RockSink();
-  const wetRock = paletteRock.clone().multiplyScalar(0.78).lerp(new THREE.Color(0x46666c), 0.28);
-  const dryRock = cliffColor.clone().multiplyScalar(1.04);
+  const wetRock = paletteRock.clone().multiplyScalar(0.72).lerp(new THREE.Color(0x3f5f66), 0.30);
+  // Pulled back from ×1.04: at full cliff brightness every shelf and bank stone
+  // read as a pale chip against the island's olive flank, which is half of why
+  // they photographed as debris rather than as the hillside's own rock.
+  const dryRock = cliffColor.clone().multiplyScalar(0.84);
   const rockColor = (y: number, waterY: number, jitter: number): THREE.Color => {
     // Strata banding on the same ~2.5m pitch the terrain shader uses, so these
     // outcrops read as the island's own stone…
     const band = 0.88 + 0.12 * Math.sin(y * 2.35 + jitter * 3.1);
     // …and the wet darkening is a BAND at the waterline. Darkening everything
     // below the crest turned every shelf into a black plate on a tan hillside.
-    const wet = THREE.MathUtils.clamp(1 - Math.abs(y - waterY) / 0.9, 0, 1);
-    return dryRock.clone().lerp(wetRock, wet * 0.65).multiplyScalar(band * (0.94 + jitter * 0.14));
+    const wet = THREE.MathUtils.clamp(1 - Math.abs(y - waterY) / 1.4, 0, 1);
+    return dryRock.clone().lerp(wetRock, wet * 0.85).multiplyScalar(band * (0.9 + jitter * 0.2));
   };
 
   /** A shelf: a notched rock spillway standing proud of the hillside, its
@@ -808,7 +933,9 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
     const halfW = fitLateral(dam.s, dam.crest, chanW * (dam.lip ? 1.5 : 1.3) + 0.5, 1.4);
     const back = dam.s - (1.0 + chanW * 0.5);
     const front = dam.s + dam.w;
-    const nA = 4;
+    // Six rows across the spillway rather than four: at nA=4 the shelf top was
+    // a handful of big quads, and a big quad on a hillside is a PLATE.
+    const nA = 6;
     const nX = 7;
     const top: number[][] = [];
     for (let ia = 0; ia <= nA; ia++) {
@@ -822,7 +949,11 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
         // Notch: the middle of the shelf is cut down below the water line so
         // the fall pours THROUGH the rock rather than over a flat table.
         const notch = 1 - THREE.MathUtils.smoothstep(Math.abs(xf), 0.30, 0.62);
-        const shoulder = 0.26 + j * 0.42 + Math.abs(xf) * 0.30;
+        // Deeper per-vertex roughness on the shoulders: a smooth ramp of them
+        // silhouettes as one flat table, and a table beside a waterfall reads as
+        // debris rather than as the rock the water pours over.
+        const shoulder = 0.20 + j * 0.72 + Math.abs(xf) * 0.34
+          + Math.sin(ia * 2.1 + ix * 1.7 + index) * 0.16;
         const y = dam.crest + shoulder * (1 - notch) - 0.34 * notch;
         // The downstream edge is pushed out past its own footprint: that
         // overhang is what stops the sheet reading as a strip draped on soil.
@@ -831,10 +962,14 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
         const vx = px(sx) + ax * xf * halfW * (0.94 + j * 0.12);
         const vz = pz(sx) + az * xf * halfW * (0.94 + j * 0.12);
         // Outboard of the channel the shelf sinks back into the hillside
-        // instead of cantilevering over it as a slab.
+        // instead of cantilevering over it as a slab. It used to stop 0.45-0.8m
+        // ABOVE its own ground, which on a cone flank is a grey plate hovering
+        // over the grass — the "floating debris" the fall was ringed with.
+        // Outboard now finishes BELOW the ground and the eye only ever sees the
+        // spillway itself.
         const g = groundAt(vx, vz);
-        const outboard = THREE.MathUtils.smoothstep(Math.abs(xf), 0.34, 0.92);
-        const vy = THREE.MathUtils.lerp(y, Math.min(y, g + 0.45 + j * 0.35), outboard);
+        const outboard = THREE.MathUtils.smoothstep(Math.abs(xf), 0.30, 0.86);
+        const vy = THREE.MathUtils.lerp(y, Math.min(y, g - 0.12 - j * 0.22), outboard);
         row.push(rock.vert(vx, vy, vz, rockColor(vy, dam.crest, j)));
       }
       top.push(row);
@@ -861,9 +996,10 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       const waistZ = pz(node.s) + az * lat * 0.86;
       const ground = groundAt(waistX, waistZ);
       // How far this part of the skirt may stand proud of its own ground: a lot
-      // at the spill (that overhang is the point), almost nothing outboard —
-      // an unclamped waist silhouetted as a black fin off the summit ridge.
-      const lift = THREE.MathUtils.lerp(1.8, 0.5, THREE.MathUtils.smoothstep(Math.abs(node.xf), 0.45, 0.95));
+      // at the spill (that overhang is the point), NOTHING outboard — an
+      // unclamped waist silhouetted as a black fin off the summit ridge, and
+      // even the old 0.5m allowance read as a shard from downhill.
+      const lift = THREE.MathUtils.lerp(1.8, -0.12, THREE.MathUtils.smoothstep(Math.abs(node.xf), 0.40, 0.90));
       const waistY = THREE.MathUtils.clamp(
         THREE.MathUtils.lerp(dam.crest, ground, 0.6) - 0.1 * j,
         ground - 0.15,
@@ -894,7 +1030,11 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       const p = run[k];
       const j = rng(seed + tag * 97 + k * 13);
       const hw = Math.max(0.55, p.halfW);
-      const fit = fitLateral(p.s, p.y, hw * 1.70, 1.5) / (hw * 1.70);
+      // Tolerance pulled in from 1.5m to 0.6m: the bank columns are seated on
+      // the water line, so a metre and a half of licence let the rim stand that
+      // far off its own ground on a flank — a grey rail hanging beside the
+      // stream. Under 0.6 the trough simply narrows instead.
+      const fit = fitLateral(p.s, p.y, hw * 1.70, 0.6) / (hw * 1.70);
       const cols: number[] = [];
       const lat = [-1.70, -1.24, -0.98, 0, 0.98, 1.24, 1.70];
       for (let c = 0; c < lat.length; c++) {
@@ -903,8 +1043,13 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
         const vx = px(p.s) + ax * l;
         const vz = pz(p.s) + az * l;
         const g = groundAt(vx, vz);
-        // outer skirt buried · bank rim just clear of the water · bed below it
-        const rimY = THREE.MathUtils.clamp(g + 0.40 + j * 0.30, p.y + 0.06, p.y + 0.85);
+        // outer skirt buried · bank rim just clear of the water · bed below it.
+        // The rim is allowed to sit below the water line when the ground under
+        // it does: a bank that floats is a worse lie than a bank the stream
+        // spills over.
+        const rimY = THREE.MathUtils.clamp(
+          g + 0.40 + j * 0.30, Math.min(p.y + 0.06, g + 0.55), p.y + 0.85,
+        );
         const y = abs > 1.5 ? Math.min(g - 0.25, rimY - 0.55)
           : abs > 1.2 ? rimY
             : abs > 0.5 ? p.y - 0.26 - j * 0.10
@@ -994,29 +1139,37 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       }
       run = [];
     };
-    for (const section of sections) {
-      for (const p of section) {
-        if (run.length > 0 && p.contact !== run[0].contact) flush();
-        run.push(p);
-      }
-      flush();
+    for (const p of path) {
+      if (run.length > 0 && p.contact !== run[0].contact) flush();
+      run.push(p);
     }
+    flush();
   }
 
   // ── boulders (merged, so the whole outcrop stays one draw call) ─────────
-  const boulderSrc = ctx.boulderGeo.getAttribute('position') as THREE.BufferAttribute;
+  const boulderSrc = FALL_BOULDER_GEO.getAttribute('position') as THREE.BufferAttribute;
   const bm4 = new THREE.Matrix4();
   const bv3 = new THREE.Vector3();
+  /** Deterministic 0..1 from a boulder id and a vertex index. */
+  const bhash = (a: number, b: number) => {
+    const v = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453;
+    return v - Math.floor(v);
+  };
   const pushBoulder = (bx: number, bz: number, by: number, sc: number, k: number) => {
     bm4.compose(
       new THREE.Vector3(bx, by, bz),
       new THREE.Quaternion().setFromEuler(new THREE.Euler(rnd(k) * 3.1, rnd(k + 1) * 6.2, rnd(k + 2) * 3.1)),
-      new THREE.Vector3(sc * (0.8 + rnd(k + 3) * 0.5), sc * (0.6 + rnd(k + 4) * 0.5), sc * (0.8 + rnd(k + 5) * 0.6)),
+      new THREE.Vector3(sc * (0.85 + rnd(k + 3) * 0.4), sc * (0.7 + rnd(k + 4) * 0.4), sc * (0.85 + rnd(k + 5) * 0.45)),
     );
     const base = rock.pos.length / 3;
     for (let vi = 0; vi < boulderSrc.count; vi++) {
-      bv3.fromBufferAttribute(boulderSrc, vi).applyMatrix4(bm4);
-      rock.vert(bv3.x, bv3.y, bv3.z, rockColor(bv3.y, by + sc * 0.4, rnd(k + 6)));
+      bv3.fromBufferAttribute(boulderSrc, vi);
+      // Radial jitter keyed on the SHARED vertex position, so the three copies
+      // of a shared corner still land on the same point and the rock stays
+      // closed. A smooth sphere reads as a pebble; a broken one reads as stone.
+      const key = Math.round(bv3.x * 97) * 131 + Math.round(bv3.y * 97) * 17 + Math.round(bv3.z * 97);
+      bv3.multiplyScalar(0.76 + bhash(k, key) * 0.44).applyMatrix4(bm4);
+      rock.vert(bv3.x, bv3.y, bv3.z, rockColor(bv3.y, by + sc * 0.5, rnd(k + 6)));
     }
     for (let vi = 0; vi < boulderSrc.count; vi += 3) rock.idx.push(base + vi, base + vi + 1, base + vi + 2);
   };
@@ -1044,8 +1197,76 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       pushBoulder(bx, bz, Math.min(g, pool.y - 0.1) + sc * 0.25, sc, seed + tag * 900 + k * 17);
     }
   };
+  /** A stone BOWL under a pool: a bed dished below the water line, a rim just
+   *  clear of it, and a skirt buried in the ground outside.
+   *
+   *  Without it the plunge pool was a flat sheet of water lying on a grass
+   *  hillside — nothing said the fall had cut anything, which is most of why
+   *  "the fall ends with no splash-pool read". */
+  const pushPoolBasin = (pool: Pool, tag: number) => {
+    const segs = lowDetail ? 12 : 18;
+    const cx = px(pool.s);
+    const cz = pz(pool.s);
+    const bedIdx: number[] = [];
+    let prev: number[] | null = null;
+    for (let k = 0; k <= segs; k++) {
+      const th = (k / segs) * Math.PI * 2;
+      const j = rng(seed + tag * 271 + k * 19);
+      const wob = 0.9 + 0.14 * Math.sin(th * 3 + fallIndex) + 0.07 * Math.sin(th * 5 + 1.3);
+      const cols: number[] = [];
+      for (const ring of [0.55, 1.02, 1.42] as const) {
+        const along = Math.cos(th) * pool.rAlong * ring * wob;
+        const side = Math.sin(th) * pool.rAcross * ring * wob;
+        const vx = cx + dirX * along + ax * side;
+        const vz = cz + dirZ * along + az * side;
+        const g = groundAt(vx, vz);
+        // bed scooped under the water · rim a hand clear of it · skirt buried
+        const y = ring < 0.6 ? pool.y - 0.95 - j * 0.3
+          : ring < 1.1 ? Math.min(g + 0.42 + j * 0.3, pool.y + 0.34)
+            : Math.min(g - 0.3, pool.y - 0.2);
+        // Wet-shaded against the BED, not the surface: keying the whole bowl to
+        // the water line painted the rim as black as the bottom and the basin
+        // read as a hole punched in the hill.
+        cols.push(rock.vert(vx, y, vz, rockColor(y, pool.y - 0.85, j)));
+      }
+      bedIdx.push(cols[0]);
+      if (prev) for (let c = 0; c < cols.length - 1; c++) rock.quad(prev[c], prev[c + 1], cols[c + 1], cols[c]);
+      prev = cols;
+    }
+    // Close the bed with a fan so the bowl has a floor, not a hole.
+    const floorC = rock.vert(cx, pool.y - 1.25, cz, rockColor(pool.y - 1.25, pool.y - 0.85, 0.4));
+    for (let k = 0; k < bedIdx.length - 1; k++) rock.idx.push(floorC, bedIdx[k + 1], bedIdx[k]);
+  };
+  pushPoolBasin(pools[pools.length - 1], 3);
+
   pushPoolRocks(pools[0], false, 1);
   pushPoolRocks(pools[pools.length - 1], true, 2);
+
+  // Broken stone straddling every shelf. The shelf's own outboard skirt is now
+  // buried (it used to end as a plate hovering over the grass), so the step
+  // needs something to explain it from the side: real boulders, each seated
+  // with the shared decor seater and sunk, are both truer and impossible to
+  // read as a floating shard.
+  for (let d = 0; d < dams.length; d++) {
+    const dam = dams[d];
+    const count = lowDetail ? 1 : 3;
+    for (let k = 0; k < count; k++) {
+      const j = rng(seed + d * 311 + k * 43);
+      const side = k % 2 === 0 ? 1 : -1;
+      const lat = side * chanW * (1.15 + j * 0.9);
+      const s0 = dam.s - 0.4 + j * (dam.w + 1.0);
+      const bx = px(s0) + ax * lat;
+      const bz = pz(s0) + az * lat;
+      // Big enough to read as a boulder rather than a pebble; anything smaller
+      // than about a metre is a grey chip at any useful viewing distance.
+      const sc = (0.85 + j * 0.85) * THREE.MathUtils.clamp(chanW / 2.0, 0.75, 1.4);
+      const seat = ctx.seatDecor(bx, bz, sc, 0.8);
+      // Same gate the bank stones use: nothing perched on a face too steep to
+      // hold it, and nothing standing in the surf.
+      if (seat.normal.y < 0.7 || seat.groundY < 0.7) continue;
+      pushBoulder(bx, bz, seat.groundY - seat.drop - sc * 0.42, sc, seed + 5000 + d * 91 + k * 29);
+    }
+  }
 
   // Bank boulders strewn along the channel.
   if (!lowDetail) {
@@ -1085,13 +1306,18 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   for (let k = 0; k < impacts.length - 1; k++) {
     emit(impacts[k].s, impacts[k].y, Math.max(3, Math.round(10 * mistScale * impacts[k].strength)), chanW * 1.3, 2.6);
   }
-  emit(impact.s, baseY, Math.max(6, Math.round(24 * mistScale)), chanW * 1.9, 4.2);
-  // A veil clinging to the tallest sheet, so a long fall is misty all the way
-  // down rather than only at the bottom.
+  // The plunge pool: this is where the fall LANDS, and it used to get the same
+  // handful of puffs as a mid-cascade step — the tail of the sheet simply ran
+  // out onto grass with nothing to say water had hit anything. A dense low
+  // billow plus a taller column now sits on the impact.
+  emit(impact.s, baseY, Math.max(10, Math.round(40 * mistScale)), chanW * 2.5, 3.0);
+  emit(impact.s, baseY + 0.4, Math.max(6, Math.round(18 * mistScale)), chanW * 1.4, 6.0);
+  // A veil clinging to the sheet, so a long fall is misty all the way down
+  // rather than only at the bottom.
   if (!lowDetail && drop > 8) {
-    const tall = sections[0];
-    for (let k = 2; k < tall.length; k += 2) {
-      const p = tall[k];
+    for (let k = 2; k < path.length; k += 2) {
+      const p = path[k];
+      if (p.y < baseY + 0.6) break;
       emit(p.s, p.y, 1, chanW * 1.1, 2.0);
     }
   }
@@ -1103,7 +1329,7 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   // matrix) rather than leaving grass growing in whitewater.
   {
     const lane: { s: number; lat: number; hw: number }[] = [];
-    for (const section of sections) for (const p of section) lane.push({ s: p.s, lat: p.lat, hw: p.halfW });
+    for (const p of path) lane.push({ s: p.s, lat: p.lat, hw: p.halfW });
     for (const pool of pools) lane.push({ s: pool.s, lat: 0, hw: Math.max(pool.rAcross, pool.rAlong) });
     lane.sort((a, b) => a.s - b.s);
     const first = lane[0];
