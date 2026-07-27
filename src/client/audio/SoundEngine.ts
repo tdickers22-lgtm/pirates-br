@@ -77,6 +77,239 @@ const KIND_LIMITS: Record<string, [number, number]> = {
 const VOICE_BUDGET = 320;
 const VOICE_WINDOW_MS = 120;
 
+/** Seconds the music scheduler batches ahead of the clock. */
+const MUSIC_LOOKAHEAD = 1.2;
+/**
+ * Music bus level per context. The menu is the loudest the score ever gets and
+ * even that lands around −20 dBFS — roughly a UI click, an order of magnitude
+ * under a broadside. At sea it's quieter still, because out there the music is
+ * competing with a world that has something to say.
+ */
+const MUSIC_MENU_LEVEL = 0.52;
+const MUSIC_WORLD_LEVEL = 0.34;
+/** Metres at which the tavern jig fades to nothing. */
+const TAVERN_MUSIC_RANGE = 26;
+
+// ══ Procedural shanty grammar ══════════════════════════════════════
+// Everything below the divider is PURE — no AudioContext, no engine state — so
+// the tune generator can be exercised by a logic suite without a browser.
+
+/**
+ * Which musical world the mix is in.
+ * - `menu`  — the wistful concertina air, looping with a freshly-generated melody.
+ * - `world` — nothing plays continuously. Only the tavern jig (spatialized from
+ *   the building) and the rare sailing whistle surface, and both duck away.
+ * - `none`  — every melodic voice fades out.
+ */
+export type MusicContext = 'none' | 'menu' | 'world';
+
+/**
+ * The three modes a sea tune actually lives in, as semitones from the tonic.
+ * Dorian is the wistful one (minor with a RAISED sixth — "Drunken Sailor",
+ * "Scarborough Fair"), mixolydian the cheerful one (major with a FLAT seventh)
+ * that jigs are built out of, aeolian the plain minor a sting falls back to.
+ * None of them has a leading tone, which is precisely why they sound old
+ * instead of classical: there is no half-step shove into the tonic.
+ */
+export const SHANTY_MODES = {
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  mixolydian: [0, 2, 4, 5, 7, 9, 10],
+  aeolian: [0, 2, 3, 5, 7, 8, 10],
+} as const;
+
+export type ShantyMode = keyof typeof SHANTY_MODES;
+
+/** One melodic event, measured in BEATS (an eighth note in 6/8) from bar 1. */
+export interface ShantyNote {
+  /** Onset in beats. Negative for the pickup notes that lean into bar 1. */
+  beat: number;
+  /** Length in beats. */
+  beats: number;
+  /** Scale-step index from the tonic; 7 is the octave, -1 the subtonic below. */
+  degree: number;
+  /** 0..1 metric weight — downbeats push, off-beats and pickups lean back. */
+  accent: number;
+}
+
+/** A generated tune: melody, the chord floor under it, and how to read both. */
+export interface ShantyPhrase {
+  /** Sorted by onset. Pickup notes (beat < 0) come first. */
+  notes: ShantyNote[];
+  bars: number;
+  beatsPerBar: number;
+  mode: ShantyMode;
+  /** MIDI note the degrees are measured from. */
+  rootMidi: number;
+  /** Scale-step index of the chord root under each bar. */
+  chords: number[];
+  /** Beats of anacrusis before bar 1 (the pickup notes' span). */
+  pickupBeats: number;
+}
+
+export interface ShantyOptions {
+  mode?: ShantyMode;
+  bars?: number;
+  beatsPerBar?: number;
+  rootMidi?: number;
+  /** `air` favours long values and a slow arc; `jig` favours running eighths. */
+  style?: 'air' | 'jig';
+  pickup?: number;
+}
+
+/**
+ * Bar-length rhythm vocabularies, in eighth-note beats summing to 6 (i.e. 6/8).
+ * A jig is mostly running eighths broken by a dotted quarter; an air breathes in
+ * halves and dotted quarters. Drawing whole BARS (rather than note-by-note) is
+ * what keeps generated tunes metric instead of arrhythmic mush.
+ */
+const JIG_BARS: ReadonlyArray<readonly number[]> = [
+  [1, 1, 1, 1, 1, 1], [1, 1, 1, 3], [3, 1, 1, 1], [2, 1, 3], [3, 3],
+  [1, 1, 1, 1, 2], [2, 2, 2], [1, 2, 3], [2, 1, 1, 1, 1], [1, 1, 1, 2, 1],
+];
+const AIR_BARS: ReadonlyArray<readonly number[]> = [
+  [3, 3], [6], [4, 2], [2, 4], [2, 2, 2], [3, 2, 1], [1, 2, 3], [2, 1, 3],
+  [4, 1, 1], [3, 1, 2],
+];
+
+/**
+ * Melodic step weights. Folk melody is overwhelmingly stepwise; the ±3/±4 leaps
+ * are seasoning, and the single 0 lets a note repeat (which is what makes a
+ * phrase feel sung rather than scale-run).
+ */
+const MELODY_STEPS = [-3, -2, -1, -1, -1, 0, 1, 1, 1, 2, 3, 4];
+
+/** i – VII – IV – i: the entire harmonic language of modal folk, as scale steps. */
+const CHORD_CYCLE = [0, 0, 6, 6, 3, 3, 4, 0];
+
+/** Deterministic 32-bit PRNG — same seed, same tune, forever. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** MIDI note number → Hz. */
+export function midiToFreq(midi: number): number {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+/**
+ * Scale-step index → MIDI, wrapping octaves correctly for negative degrees.
+ * Degree 7 is the octave above the tonic, -1 the subtonic below it.
+ */
+export function degreeToMidi(rootMidi: number, degree: number, mode: ShantyMode): number {
+  const scale = SHANTY_MODES[mode];
+  const octave = Math.floor(degree / scale.length);
+  const step = degree - octave * scale.length;
+  return rootMidi + octave * 12 + scale[step];
+}
+
+/**
+ * Generate one tune from a seed.
+ *
+ * The grammar works on BAR PAIRS in the oldest shape there is — A A′ B A″ —
+ * because that (not note-level Markov noise) is what makes a melody sound
+ * remembered. A is invented; A′ re-uses A's rhythm with a re-walked contour; B
+ * is a fresh contrasting pair pitched higher; A″ returns to A and is rewritten
+ * into a cadence that lands on the tonic on a long note. Pickup notes lean into
+ * bar 1 from below, and every bar's first note is pulled onto a tone of that
+ * bar's chord so the melody and the drone agree.
+ */
+export function generateShantyPhrase(seed: number, opts: ShantyOptions = {}): ShantyPhrase {
+  const rng = mulberry32(seed >>> 0);
+  const style = opts.style ?? 'air';
+  const bars = Math.max(2, Math.round(opts.bars ?? 8));
+  const beatsPerBar = Math.max(2, Math.round(opts.beatsPerBar ?? 6));
+  const mode = opts.mode ?? (style === 'jig' ? 'mixolydian' : 'dorian');
+  const rootMidi = opts.rootMidi ?? 62;
+  const vocab = style === 'jig' ? JIG_BARS : AIR_BARS;
+  const pickupBeats = Math.max(0, Math.round(opts.pickup ?? (style === 'air' ? 2 : 1)));
+
+  const chords: number[] = [];
+  for (let b = 0; b < bars; b++) chords.push(CHORD_CYCLE[b % CHORD_CYCLE.length]);
+
+  const pick = <T,>(list: ReadonlyArray<T>): T => list[Math.min(list.length - 1, Math.floor(rng() * list.length))];
+
+  /** Fit a bar-vocabulary entry to this bar length (scale/trim/pad the last value). */
+  const fitRhythm = (source: readonly number[]): number[] => {
+    const out = source.slice();
+    let total = out.reduce((s, v) => s + v, 0);
+    while (total > beatsPerBar && out.length > 1) { total -= out.pop() as number; }
+    if (total < beatsPerBar) out[out.length - 1] += beatsPerBar - total;
+    return out;
+  };
+
+  const pairCount = Math.ceil(bars / 2);
+  /** Rhythm for every bar, laid out pair by pair (A A′ B A″ re-uses rhythms). */
+  const rhythms: number[][] = [];
+  for (let p = 0; p < pairCount; p++) {
+    const isReturn = p > 0 && p % 2 === 1;             // A′ / A″ re-use A's feet
+    for (let i = 0; i < 2; i++) {
+      const bar = p * 2 + i;
+      if (bar >= bars) break;
+      if (isReturn && rhythms[i]) rhythms.push(rhythms[i].slice());
+      else rhythms.push(fitRhythm(pick(vocab)));
+    }
+  }
+
+  // Contrasting middle pair sits a third higher — the "B" lift.
+  const lift = (bar: number): number => (pairCount > 2 && Math.floor(bar / 2) === pairCount - 2 ? 2 : 0);
+
+  const notes: ShantyNote[] = [];
+  let cursor = 0;
+  let firstDegree = 0;
+  for (let bar = 0; bar < bars; bar++) {
+    const rhythm = rhythms[bar] ?? fitRhythm(pick(vocab));
+    const chord = chords[bar];
+    const isLastBar = bar === bars - 1;
+    let beatInBar = 0;
+    for (let i = 0; i < rhythm.length; i++) {
+      const beats = rhythm[i];
+      if (i === 0) {
+        // Land the downbeat on a tone of this bar's chord (root or its third).
+        const target = chord + (rng() < 0.35 ? 2 : 0) + lift(bar);
+        // Move to the nearest octave-equivalent of the target so the line
+        // doesn't jump an octave every bar.
+        let candidate = target;
+        while (candidate - cursor > 3.5) candidate -= 7;
+        while (cursor - candidate > 3.5) candidate += 7;
+        cursor = rng() < 0.75 ? candidate : cursor + pick(MELODY_STEPS);
+      } else {
+        cursor += pick(MELODY_STEPS);
+      }
+      cursor = Math.max(-3, Math.min(10, cursor));
+      if (isLastBar && i === rhythm.length - 1) cursor = 0;                 // cadence: home
+      else if (isLastBar && i === rhythm.length - 2) cursor = rng() < 0.5 ? 1 : -1; // approach it
+      const beat = bar * beatsPerBar + beatInBar;
+      const accent = beatInBar === 0 ? 1 : (beatInBar * 2 === beatsPerBar ? 0.75 : 0.5);
+      notes.push({ beat, beats, degree: cursor, accent });
+      if (bar === 0 && i === 0) firstDegree = cursor;
+      beatInBar += beats;
+    }
+  }
+
+  // Anacrusis: one or two rising notes stolen from the bar before, aimed at the
+  // first melody note from underneath. A tune that starts flat on the downbeat
+  // sounds typed; a pickup sounds breathed in.
+  const pickupNotes: ShantyNote[] = [];
+  for (let i = 0; i < pickupBeats; i++) {
+    const away = pickupBeats - i;   // beats before the downbeat
+    pickupNotes.push({
+      beat: -away,
+      beats: 1,
+      degree: Math.max(-3, firstDegree - away * 2),
+      accent: 0.4,
+    });
+  }
+  notes.unshift(...pickupNotes);
+
+  return { notes, bars, beatsPerBar, mode, rootMidi, chords, pickupBeats };
+}
+
 /** Shared engine instance — see {@link getSharedSoundEngine}. */
 let sharedEngine: SoundEngine | null = null;
 
@@ -144,6 +377,35 @@ export class SoundEngine {
   private readonly fires = new Map<string, LoopVoice>();
   // Nearest-waterfall bed (single voice; the environment picks the fall)
   private waterfallBed: RichLoopVoice | null = null;
+
+  // ── Music (see the "Procedural shanty" section) ────────────────────
+  /** Music sums here BEFORE the duck, so one gain sets the whole score's level. */
+  private busMusic: GainNode | null = null;
+  /** Sidechain node — combat and weather push the music down through this. */
+  private musicDuck: GainNode | null = null;
+  private musicSend: GainNode | null = null;
+  /** Spatial chain for the tavern jig: distance lowpass → pan → level → busMusic. */
+  private tavernChain: { input: BiquadFilterNode; panner: StereoPannerNode; gain: GainNode } | null = null;
+  /** Fireplace bed inside the tavern (ambience, not music — it rides busBed). */
+  private tavernHearth: LoopVoice | null = null;
+  private musicContext: MusicContext = 'none';
+  private musicTimer: number | null = null;
+  /** Per-session tune seed — two sessions never hear the identical melody. */
+  private musicSeed = (Math.random() * 0x7fffffff) | 0;
+  private menuLoopIndex = 0;
+  private menuNextLoopAt = 0;
+  private tavernLoopIndex = 0;
+  private tavernNextLoopAt = 0;
+  private sailLoopIndex = 0;
+  private sailNextAt = 0;
+  private nextHearthPopAt = 0;
+  /** ctx.currentTime past which combat still counts as hot (motif stays away). */
+  private combatHeatUntil = 0;
+  private tavernDistance: number | null = null;
+  private tavernPos: SoundPos | null = null;
+  private stormLevel = 0;
+  private nearShore01 = 0;
+  private underway01 = 0;
 
   // ── Listener pose (drives stereo panning) ──────────────────────────
   private readonly listenerPos = new THREE.Vector3();
@@ -237,9 +499,31 @@ export class SoundEngine {
       this.busBed.gain.value = 1;
       this.busBed.connect(this.worldFilter);
 
+      // Music bus. It sits BEHIND the world (post-worldFilter, so it muffles
+      // when you go under) and behind its own duck node, which combat and
+      // weather pull down. Music is flavour: it never fights the mix.
+      this.busMusic = ctx.createGain();
+      this.busMusic.gain.value = 0;
+      this.musicDuck = ctx.createGain();
+      this.musicDuck.gain.value = 1;
+      this.busMusic.connect(this.musicDuck);
+      this.musicDuck.connect(this.worldFilter);
+      // One generous send for the whole score — a concertina in a taproom, not
+      // in a laboratory. Tapped post-duck so a ducked tune loses its tail too.
+      this.musicSend = ctx.createGain();
+      this.musicSend.gain.value = 0.34;
+      this.musicDuck.connect(this.musicSend);
+      this.musicSend.connect(this.busReverb);
+      // Notes routed straight at the music bus must not add a second send.
+      this.ownSendNodes.add(this.busMusic);
+
       this.noise = this.createNoiseBuffer(ctx);
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume();
+    // First gesture just landed (or the context was already live) — arm the
+    // score. Nothing is SCHEDULED until the context actually reports 'running',
+    // so a suspended context can never bank up a batch that dumps at once.
+    if (this.musicContext !== 'none') this.startMusicTimer();
   }
 
   setVolume(volume: number): void {
@@ -595,6 +879,7 @@ export class SoundEngine {
   playPlayerHurt(damage: number): void {
     this.unlock();
     if (!this.ctx || !this.busDry) return;
+    this.markCombat();
     const now = this.ctx.currentTime;
     const intensity = THREE.MathUtils.clamp(damage / 50, 0.2, 1);
     const voice = this.makeFormantDest(480, 5, 1150, 6, 0.45, 0.18);
@@ -725,6 +1010,7 @@ export class SoundEngine {
     this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('gunshot')) return;
+    this.markCombat();
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.2);
     const v = g;
@@ -1914,6 +2200,8 @@ export class SoundEngine {
     // Luffing adds irregular canvas flap.
     this.setCanvasFlap(state.luffing ? THREE.MathUtils.clamp(0.4 + speed * 0.5, 0, 1) : 0);
     this.aboardShip = state.aboard ?? (speed > 0.02 || heel > 0.02);
+    // "Under way" for the idle whistle: aboard AND actually making way.
+    this.underway01 = this.aboardShip ? speed : 0;
   }
 
   private setCanvasFlap(amount: number): void {
@@ -1948,6 +2236,10 @@ export class SoundEngine {
     const storm = THREE.MathUtils.clamp(a.storminess, 0, 1);
     const shore = THREE.MathUtils.clamp(a.nearShore01, 0, 1);
     const rain = THREE.MathUtils.clamp(a.rain01 ?? storm * 0.85, 0, 1);
+    // The score reads the weather from here: a gale swallows the music, and a
+    // whistle only surfaces out in open water, not in the surf line.
+    this.stormLevel = storm;
+    this.nearShore01 = shore;
     // Bed 1: storm wind.
     this.setWindIntensity(storm);
     // Bed 2: ocean wave bed — gentler "lap" at night, swells in a storm.
@@ -2162,6 +2454,46 @@ export class SoundEngine {
     this.playNoise(at, 0.2, 3000, 2, 0.008, 'bandpass', dest);
   }
 
+  /** THE GILDED WRECK'S BELL — three tolls off a drowned ship's bell, rolling in
+   *  over the water from wherever she rose. A bell is the one sound that carries
+   *  through weather and gunfire and still means "look at the chart".
+   *
+   *  Built as a bell, not a chime: a struck bell has inharmonic partials (the
+   *  hum an octave under the strike note, the minor third, the fifth and the
+   *  nominal), a bright strike transient, and a very long decay. Distance rolls
+   *  the top off and pushes the tolls further apart. */
+  playWreckBell(distance = 400): void {
+    this.unlock();
+    if (!this.ctx || !this.busDry) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const d = THREE.MathUtils.clamp(distance, 20, 1400);
+    const gain = 0.5 / (1 + d / 460);
+    const far = ctx.createBiquadFilter();
+    far.type = 'lowpass';
+    // Distant tolls lose their strike edge long before they lose their hum.
+    far.frequency.value = 2600 - (d / 1400) * 1750;
+    far.Q.value = 0.4;
+    this.connectGroup(far, null, 0.55);
+    const strike = 262;                    // the nominal — a heavy ship's bell
+    const partials: Array<[number, number, number]> = [
+      [strike * 0.5, 3.6, 0.55],           // hum
+      [strike, 2.6, 0.7],                  // nominal
+      [strike * 1.19, 1.9, 0.32],          // minor third — what makes it a BELL
+      [strike * 1.5, 1.5, 0.22],           // fifth
+      [strike * 2.02, 1.1, 0.16],          // slightly sharp octave
+    ];
+    for (let toll = 0; toll < 3; toll++) {
+      const at = now + toll * (1.45 + (d / 1400) * 0.35);
+      const swing = toll === 1 ? 1 : 0.86;  // the middle pull is the strongest
+      for (const [freq, length, level] of partials) {
+        this.playTone(at, freq, freq * 0.998, length, gain * level * swing, 'sine', 0.004, far);
+      }
+      // The clapper on the shoulder of the bell.
+      this.playNoise(at, 0.06, 3200, 1.4, gain * 0.3 * swing, 'bandpass', far);
+    }
+  }
+
   /** One thunder crack + rolling rumble. distance in metres varies delay, brightness, and length. */
   playThunder(distance = 300): void {
     this.unlock();
@@ -2232,6 +2564,508 @@ export class SoundEngine {
     this.playNoise(now, 0.02, 6000, 1.6, 0.04, 'highpass', undefined, 0);
   }
 
+  // ══ Music ════════════════════════════════════════════════════════
+  // A pirate game with no tune is a pirate game with no flag. Everything here
+  // is generated: a seeded phrase grammar writes the melody, the same synth
+  // primitives the cannons use play it, and the whole score rides one bus that
+  // sits UNDER the ambience and gets out of the way when anything happens.
+
+  /**
+   * Switch musical worlds. Safe to call before the first user gesture — nothing
+   * is scheduled until the AudioContext actually reports `running`, which the
+   * existing unlock path (body pointerdown/keydown → {@link unlock}) delivers.
+   */
+  setMusicContext(context: MusicContext): void {
+    if (this.musicContext === context) return;
+    this.musicContext = context;
+    // Every phrase clock resets: a new context starts on its own downbeat
+    // instead of inheriting a mark from the one that just ended.
+    this.menuNextLoopAt = 0;
+    this.tavernNextLoopAt = 0;
+    this.sailNextAt = 0;
+    this.nextHearthPopAt = 0;
+    if (context === 'none') {
+      if (this.busMusic && this.ctx) this.ramp(this.busMusic.gain, 0, 0.6);
+      this.stopMusicTimer();
+      return;
+    }
+    // Deliberately NOT calling unlock() here: constructing an AudioContext
+    // before a gesture just makes a suspended one Chrome complains about. The
+    // timer arms itself from unlock() the moment a real gesture arrives.
+    if (this.ctx) this.startMusicTimer();
+  }
+
+  /** The music world currently selected (for tests and for the HUD's mute UI). */
+  getMusicContext(): MusicContext {
+    return this.musicContext;
+  }
+
+  /**
+   * Point the tavern jig at a building. The tune comes from the DOOR, not from
+   * your head: distance sets level and how much timber it's coming through,
+   * bearing sets the pan, and stepping inside opens it up and lights the
+   * fireplace bed.
+   * @param distance metres from listener to tavern, or null when none is in reach.
+   */
+  setTavernSource(distance: number | null, pos?: SoundPos | null): void {
+    this.tavernDistance = distance === null || !Number.isFinite(distance) ? null : Math.max(0, distance);
+    this.tavernPos = pos ?? null;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const d = this.tavernDistance;
+    if (d === null || d > TAVERN_MUSIC_RANGE + 8) {
+      if (this.tavernChain) this.ramp(this.tavernChain.gain.gain, 0, 0.7);
+      if (this.tavernHearth) this.ramp(this.tavernHearth.gain.gain, 0, 0.7);
+      return;
+    }
+    const bus = this.busMusic;
+    if (!bus) return;
+    if (!this.tavernChain) {
+      const input = ctx.createBiquadFilter();
+      input.type = 'lowpass';
+      input.frequency.value = 1400;
+      input.Q.value = 0.5;
+      const panner = ctx.createStereoPanner();
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      input.connect(panner);
+      panner.connect(gain);
+      gain.connect(bus);
+      // The music bus already sends to the reverb — a per-note send would double it.
+      this.ownSendNodes.add(input);
+      this.tavernChain = { input, panner, gain };
+    }
+    const inside = this.tavernInside01();
+    // Inverse-distance like every other source in the engine, then a short fade
+    // to nothing at the edge of the range. A pure linear falloff made the jig
+    // −60 dB by 20 m, which is not "you can hear it from the beach".
+    const fade = THREE.MathUtils.clamp((TAVERN_MUSIC_RANGE + 2 - d) / 8, 0, 1);
+    const near = THREE.MathUtils.clamp(1 - d / TAVERN_MUSIC_RANGE, 0, 1);
+    this.ramp(this.tavernChain.gain.gain, (1 / (1 + d / 9)) * fade * fade, 0.5);
+    // Outside you hear a band through oak; inside the top end comes back.
+    this.ramp(this.tavernChain.input.frequency, 620 + 1200 * near * near + 5400 * inside, 0.5);
+    // Bearing pans the band — but once you're THROUGH the door the room is
+    // around you, so the pan collapses to centre instead of pinning the fiddle
+    // to one ear while you stand in the middle of it.
+    this.ramp(this.tavernChain.panner.pan, this.panFor(this.tavernPos) * (1 - inside), 0.25);
+    // Hearth is AMBIENCE, not music: it rides busBed so a broadside ducks it
+    // with the rest of the room.
+    if (inside > 0.02 && this.busBed && this.noise) {
+      if (!this.tavernHearth) {
+        const v = this.makeNoiseLoop('bandpass', 560, 1.0, this.busBed);
+        const trem = this.addGainTremolo(v.gain, 5.5, 0.05);
+        this.tavernHearth = { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain };
+      }
+      this.ramp(this.tavernHearth.gain.gain, 0.085 * inside, 0.6);
+      this.ramp(this.tavernHearth.filter.frequency, 460 + 260 * inside, 0.6);
+    } else if (this.tavernHearth) {
+      this.ramp(this.tavernHearth.gain.gain, 0, 0.6);
+    }
+  }
+
+  /** 1 in the taproom, 0 a few metres off the porch. */
+  private tavernInside01(): number {
+    const d = this.tavernDistance;
+    if (d === null) return 0;
+    return THREE.MathUtils.clamp(1 - (d - 3) / 4, 0, 1);
+  }
+
+  /**
+   * Two-bar minor sting for a bounty claimed / a wreck sighted. Nothing on the
+   * wire carries those moments yet (no `bounty_*` / `wreck_*` message types
+   * exist at time of writing) — this is the hook they plug into.
+   */
+  playEventSting(kind: 'bounty' | 'wreck' = 'bounty'): void {
+    this.unlock();
+    const ctx = this.ctx;
+    if (!ctx || !this.busDry) return;
+    const now = ctx.currentTime;
+    const beat = 0.32;
+    const root = kind === 'wreck' ? 43 : 45;   // G2 / A2
+    // Both figures FALL and neither resolves upward: a bounty is blood money
+    // and a wreck is somebody's grave.
+    const figure: ReadonlyArray<readonly [number, number, number]> = kind === 'wreck'
+      ? [[0, 0, 1], [2, -2, 0.8], [4, -3, 0.9], [6, -7, 1]]
+      : [[0, 4, 0.9], [1, 2, 0.7], [2, 0, 1], [5, -3, 0.95]];
+    for (const [b, degree, weight] of figure) {
+      const at = now + b * beat;
+      this.brassNote(at, midiToFreq(degreeToMidi(root + 24, degree, 'aeolian')), beat * 1.7, 0.2 * weight, 0.42);
+      const low = midiToFreq(degreeToMidi(root, degree, 'aeolian'));
+      this.playTone(at, low, low, beat * 1.9, 0.14 * weight, 'triangle', 0.05);
+    }
+    // Dark toll over a low swell.
+    this.metalClang(now, midiToFreq(root + 24), 0.4, undefined, 2.4);
+    this.playNoise(now, 0.6, 300, 0.5, 0.1, 'lowpass');
+    this.duckMusic(0.08, 1.6, 1.6);
+  }
+
+  // ── Scheduler ────────────────────────────────────────────────────
+  private startMusicTimer(): void {
+    if (this.musicTimer !== null || typeof window === 'undefined') return;
+    this.musicTimer = window.setInterval(() => this.tickMusic(), 200);
+  }
+
+  private stopMusicTimer(): void {
+    if (this.musicTimer === null || typeof window === 'undefined') return;
+    window.clearInterval(this.musicTimer);
+    this.musicTimer = null;
+  }
+
+  /**
+   * Batch the next phrase ~1.2 s ahead so nothing depends on frame timing.
+   * Driven by an internal 200 ms timer, because the MENU has no game loop to
+   * ride; also callable directly, which is how the offline render harness pumps
+   * a whole tune into an OfflineAudioContext.
+   */
+  tickMusic(): void {
+    const ctx = this.ctx;
+    const bus = this.busMusic;
+    if (!ctx || !bus || this.musicContext === 'none') return;
+    // Pre-gesture, or a suspended tab: schedule NOTHING. currentTime is frozen
+    // there, so anything queued would fire in one lump the instant it resumes.
+    if (ctx.state !== 'running') return;
+    const now = ctx.currentTime;
+    // A backgrounded tab freezes the timer, not the clock. Re-arm a mark that
+    // fell far behind rather than firing a burst of catch-up phrases.
+    const rearm = (mark: number): number => (mark !== 0 && now - mark > 4 ? 0 : mark);
+    this.menuNextLoopAt = rearm(this.menuNextLoopAt);
+    this.tavernNextLoopAt = rearm(this.tavernNextLoopAt);
+    this.sailNextAt = rearm(this.sailNextAt);
+    // Level. The menu is the loudest music ever gets and even that sits under
+    // the SFX; at sea a storm swallows the score outright.
+    const base = this.musicContext === 'menu' ? MUSIC_MENU_LEVEL : MUSIC_WORLD_LEVEL;
+    this.ramp(bus.gain, base * (1 - THREE.MathUtils.clamp(this.stormLevel, 0, 1) * 0.9), 0.9);
+    if (this.musicContext === 'menu') this.tickMenuMusic(now);
+    else this.tickWorldMusic(now);
+  }
+
+  private tickMenuMusic(now: number): void {
+    if (this.menuNextLoopAt === 0) this.menuNextLoopAt = now + 0.35;
+    if (now < this.menuNextLoopAt - MUSIC_LOOKAHEAD) return;
+    this.scheduleMenuAir(this.menuNextLoopAt);
+  }
+
+  private tickWorldMusic(now: number): void {
+    const nearTavern = this.tavernDistance !== null && this.tavernDistance <= TAVERN_MUSIC_RANGE;
+    if (nearTavern && this.tavernChain) {
+      if (this.tavernNextLoopAt === 0) this.tavernNextLoopAt = now + 0.4;
+      if (now >= this.tavernNextLoopAt - MUSIC_LOOKAHEAD) this.scheduleTavernJig(this.tavernNextLoopAt);
+    } else {
+      this.tavernNextLoopAt = 0;
+    }
+    // Fireplace spits, inside only.
+    const inside = this.tavernInside01();
+    if (inside > 0.35 && this.busBed) {
+      if (this.nextHearthPopAt < now) this.nextHearthPopAt = now + 0.2;
+      while (this.nextHearthPopAt < now + 1) {
+        this.playNoise(
+          this.nextHearthPopAt, 0.03 + Math.random() * 0.05, 900 + Math.random() * 1500, 1.7,
+          (0.018 + Math.random() * 0.026) * inside, 'bandpass', this.busBed, 0.08,
+        );
+        this.nextHearthPopAt += 0.35 + Math.random() * 1.5;
+      }
+    } else {
+      this.nextHearthPopAt = 0;
+    }
+    // The idle whistle. Never while anything is happening, never near the
+    // tavern (the jig owns that mix), and never twice inside half a minute.
+    const calm = now >= this.combatHeatUntil && this.stormLevel < 0.45;
+    const underWay = this.underway01 > 0.35 && this.nearShore01 < 0.55;
+    if (!calm || nearTavern) { this.sailNextAt = 0; return; }
+    if (!underWay) return;
+    if (this.sailNextAt === 0) { this.sailNextAt = now + 18 + Math.random() * 30; return; }
+    if (now < this.sailNextAt) return;
+    this.scheduleSailingMotif(now + 0.2);
+    this.sailNextAt = now + 30 + Math.random() * 60;
+  }
+
+  // ── Phrase scheduling ────────────────────────────────────────────
+  /** The menu air: 8 bars of wistful concertina over a bellows drone. */
+  private scheduleMenuAir(at: number): void {
+    const bus = this.busMusic;
+    if (!bus) return;
+    const index = this.menuLoopIndex++;
+    // Fresh melody every pass over the SAME harmonic floor and register, so the
+    // loop is recognisably one tune without ever being the same 15 seconds.
+    const phrase = generateShantyPhrase((this.musicSeed ^ Math.imul(index + 1, 0x9e3779b1)) | 0, {
+      style: 'air',
+      mode: index % 2 === 0 ? 'dorian' : 'mixolydian',
+      bars: 8,
+      rootMidi: 62,                    // D — where a concertina lives
+      pickup: index === 0 ? 0 : 2,     // the first pass has no bar before it to lean on
+    });
+    const beatSec = 0.30;              // dotted quarter ≈ 67 bpm
+    this.scheduleMelody(phrase, at, beatSec, bus, 'concertina', 0.26);
+    this.scheduleAirBacking(phrase, at, beatSec, bus, 0.075);
+    // Two beats of breath between passes: a tune, not a carousel.
+    this.menuNextLoopAt = at + phrase.bars * phrase.beatsPerBar * beatSec + beatSec * 2;
+  }
+
+  /** The tavern jig: same grammar, twice the tempo, fiddle + bodhrán + bass. */
+  private scheduleTavernJig(at: number): void {
+    const chain = this.tavernChain;
+    if (!chain) return;
+    const index = this.tavernLoopIndex++;
+    const phrase = generateShantyPhrase(Math.imul(this.musicSeed, 31) + Math.imul(index + 1, 0x85ebca6b), {
+      style: 'jig',
+      mode: index % 3 === 2 ? 'dorian' : 'mixolydian',
+      bars: 8,
+      rootMidi: 67,                    // G — fiddle/whistle country
+      pickup: index === 0 ? 0 : 1,
+    });
+    const beatSec = 0.152;             // dotted quarter ≈ 132 bpm
+    this.scheduleMelody(phrase, at, beatSec, chain.input, 'fiddle', 0.2);
+    this.scheduleJigBacking(phrase, at, beatSec, chain.input, 0.15);
+    this.tavernNextLoopAt = at + phrase.bars * phrase.beatsPerBar * beatSec + beatSec * 3;
+  }
+
+  /**
+   * A crewmate idly whistling: two bars, once, then nothing for half a minute
+   * or more. The moment it loops it stops being a person and becomes a
+   * soundtrack — so it never loops.
+   */
+  private scheduleSailingMotif(at: number): void {
+    const bus = this.busMusic;
+    if (!bus) return;
+    const index = this.sailLoopIndex++;
+    const phrase = generateShantyPhrase(Math.imul(this.musicSeed, 17) + Math.imul(index + 1, 0xc2b2ae35), {
+      style: 'air', mode: 'dorian', bars: 2, rootMidi: 74, pickup: 1,
+    });
+    this.scheduleMelody(phrase, at, 0.34, bus, 'whistle', 0.13, true);
+  }
+
+  /** Lay a generated phrase onto the timeline with one melodic voice. */
+  private scheduleMelody(
+    phrase: ShantyPhrase,
+    at: number,
+    beatSec: number,
+    dest: AudioNode,
+    voice: 'concertina' | 'whistle' | 'fiddle',
+    level: number,
+    skipPickup = false,
+  ): void {
+    const floor = (this.ctx?.currentTime ?? 0) - 0.02;
+    for (const note of phrase.notes) {
+      if (skipPickup && note.beat < 0) continue;
+      const when = at + note.beat * beatSec;
+      if (when < floor) continue;                       // a pickup that fell before "now"
+      const freq = midiToFreq(degreeToMidi(phrase.rootMidi, note.degree, phrase.mode));
+      const duration = note.beats * beatSec * (voice === 'fiddle' ? 0.84 : 0.94);
+      const volume = level * (0.6 + 0.4 * note.accent);
+      if (voice === 'concertina') this.concertinaNote(when, freq, duration, volume, dest);
+      else if (voice === 'whistle') this.tinWhistleNote(when, freq, duration, volume, dest);
+      else this.fiddleNote(when, freq, duration, volume, dest);
+    }
+  }
+
+  /** Menu backing: a bellows chord every two bars over a tonic drone. */
+  private scheduleAirBacking(phrase: ShantyPhrase, at: number, beatSec: number, dest: AudioNode, level: number): void {
+    const barSec = phrase.beatsPerBar * beatSec;
+    for (let bar = 0; bar < phrase.bars; bar += 2) {
+      const root = phrase.chords[bar];
+      const when = at + bar * barSec;
+      for (const [step, weight] of [[0, 1], [2, 0.6], [4, 0.7]] as const) {
+        const freq = midiToFreq(degreeToMidi(phrase.rootMidi - 12, root + step, phrase.mode));
+        this.concertinaNote(when, freq, barSec * 2 * 0.92, level * weight, dest, true);
+      }
+    }
+    // The bellows never fully close: one tonic drone under the whole pass.
+    this.reedVoice({
+      when: at,
+      freq: midiToFreq(degreeToMidi(phrase.rootMidi - 24, 0, phrase.mode)),
+      duration: phrase.bars * barSec,
+      volume: level * 0.9,
+      type: 'triangle',
+      detuneCents: [-6, 6],
+      attack: 1.2,
+      release: 2.2,
+      vibRate: 0.22,
+      vibCents: 4,
+      vibDelay: 2,
+      cutoffFrom: 300,
+      cutoffTo: 620,
+      q: 0.6,
+      dest,
+    });
+  }
+
+  /** Jig backing: bodhrán on the two dotted-quarter pulses, bass on the chord. */
+  private scheduleJigBacking(phrase: ShantyPhrase, at: number, beatSec: number, dest: AudioNode, level: number): void {
+    const half = phrase.beatsPerBar / 2;
+    for (let bar = 0; bar < phrase.bars; bar++) {
+      const barAt = at + bar * phrase.beatsPerBar * beatSec;
+      const root = phrase.chords[bar];
+      const bassA = midiToFreq(degreeToMidi(phrase.rootMidi - 24, root, phrase.mode));
+      const bassB = midiToFreq(degreeToMidi(phrase.rootMidi - 24, root + 4, phrase.mode));
+      this.pluckNote(barAt, bassA, beatSec * half * 0.9, level, dest);
+      this.pluckNote(barAt + beatSec * half, bassB, beatSec * half * 0.9, level * 0.78, dest);
+      this.bodhranHit(barAt, level * 1.15, dest, true);
+      this.bodhranHit(barAt + beatSec * half, level * 0.7, dest, false);
+      if (bar % 2 === 1) this.bodhranHit(barAt + beatSec * (half + 1.5), level * 0.42, dest, false);
+    }
+  }
+
+  // ── Melodic voices ───────────────────────────────────────────────
+  /**
+   * One sustained melodic note: a small DETUNED oscillator stack under a shared,
+   * fade-in vibrato LFO, through its own opening lowpass and a bellows-shaped
+   * envelope. The detune makes the partials beat, the vibrato makes the pitch
+   * breathe, and the droop across the sustain is what separates an instrument
+   * being played from an organ stop being held.
+   */
+  private reedVoice(p: {
+    when: number; freq: number; duration: number; volume: number;
+    type: OscillatorType; detuneCents: number[];
+    attack: number; release: number;
+    vibRate: number; vibCents: number; vibDelay: number;
+    cutoffFrom: number; cutoffTo: number; q: number;
+    dest: AudioNode;
+    /** Breath/bow hiss level, relative to the note. */
+    noise?: number;
+    /** Octave-up sine level, relative to the note (a whistle's sheen). */
+    harmonic?: number;
+  }): void {
+    const ctx = this.ctx;
+    if (!ctx || p.duration <= 0.02 || p.volume <= 0.0005) return;
+    const nyq = ctx.sampleRate * 0.5 - 200;
+    const end = p.when + p.duration;
+    const attack = Math.max(0.004, Math.min(p.attack, p.duration * 0.45));
+    const release = Math.min(p.release, p.duration * 0.45);
+    const peak = Math.max(0.0002, p.volume);
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = p.q;
+    lp.frequency.setValueAtTime(THREE.MathUtils.clamp(p.cutoffFrom, 60, nyq), p.when);
+    lp.frequency.exponentialRampToValueAtTime(
+      THREE.MathUtils.clamp(p.cutoffTo, 60, nyq),
+      p.when + Math.max(0.02, Math.min(p.duration * 0.7, attack + 0.25)),
+    );
+
+    const amp = ctx.createGain();
+    const sustainAt = Math.min(Math.max(p.when + attack + 0.005, end - release), end - 0.004);
+    amp.gain.setValueAtTime(0.0001, p.when);
+    amp.gain.exponentialRampToValueAtTime(peak, p.when + attack);
+    amp.gain.exponentialRampToValueAtTime(peak * 0.72, sustainAt);
+    amp.gain.exponentialRampToValueAtTime(0.0001, end);
+    lp.connect(amp);
+    amp.connect(p.dest);
+
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = p.vibRate;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.setValueAtTime(0, p.when);
+    lfoGain.gain.linearRampToValueAtTime(p.vibCents, p.when + Math.min(Math.max(p.vibDelay, 0.02), p.duration));
+    lfo.connect(lfoGain);
+    lfo.start(p.when);
+    lfo.stop(end + 0.05);
+
+    const stack = ctx.createGain();
+    stack.gain.value = 1 / Math.max(1, p.detuneCents.length);
+    stack.connect(lp);
+    for (const cents of p.detuneCents) {
+      const osc = ctx.createOscillator();
+      osc.type = p.type;
+      osc.frequency.value = Math.min(p.freq, nyq);
+      osc.detune.value = cents;
+      lfoGain.connect(osc.detune);
+      osc.connect(stack);
+      osc.start(p.when);
+      osc.stop(end + 0.05);
+    }
+    if (p.harmonic) {
+      const octave = Math.min(p.freq * 2, nyq);
+      this.playTone(p.when, octave, octave, p.duration, peak * p.harmonic, 'sine', attack, p.dest, 0);
+    }
+    if (p.noise) {
+      this.playNoise(p.when, p.duration, Math.min(p.freq * 2.2, nyq), 3.5, peak * p.noise * 0.32, 'bandpass', p.dest, 0);
+    }
+  }
+
+  /** Free-reed squeezebox. `pad` is the held bellows chord under the melody. */
+  private concertinaNote(when: number, freq: number, duration: number, volume: number, dest: AudioNode, pad = false): void {
+    this.reedVoice({
+      when, freq, duration, volume,
+      type: 'sawtooth',
+      detuneCents: pad ? [-11, 0, 11] : [-9, 0, 4, 9],
+      attack: pad ? 0.18 : 0.055,
+      release: pad ? 0.4 : 0.14,
+      vibRate: 5.1, vibCents: pad ? 5 : 12, vibDelay: 0.24,
+      cutoffFrom: freq * 1.6 + 200,
+      cutoffTo: freq * (pad ? 2.4 : 4.2) + 400,
+      q: 0.9,
+      dest,
+    });
+  }
+
+  /** Tin whistle: nearly a sine, with breath across it and an octave sheen. */
+  private tinWhistleNote(when: number, freq: number, duration: number, volume: number, dest: AudioNode): void {
+    this.reedVoice({
+      when, freq, duration, volume,
+      type: 'triangle',
+      detuneCents: [-4, 4],
+      attack: 0.03, release: 0.09,
+      vibRate: 5.7, vibCents: 17, vibDelay: 0.16,
+      cutoffFrom: freq * 4, cutoffTo: freq * 7, q: 0.7,
+      dest, noise: 0.5, harmonic: 0.18,
+    });
+  }
+
+  /** Fiddle: fast bite, tight vibrato, a little bow hiss. */
+  private fiddleNote(when: number, freq: number, duration: number, volume: number, dest: AudioNode): void {
+    this.reedVoice({
+      when, freq, duration, volume,
+      type: 'sawtooth',
+      detuneCents: [-6, 6],
+      attack: 0.018, release: 0.06,
+      vibRate: 6.2, vibCents: 9, vibDelay: 0.1,
+      cutoffFrom: freq * 2.4 + 300, cutoffTo: freq * 5 + 600, q: 1.4,
+      dest, noise: 0.22,
+    });
+  }
+
+  /** Plucked bass note under the jig. */
+  private pluckNote(when: number, freq: number, duration: number, volume: number, dest: AudioNode): void {
+    this.playTone(when, freq, freq * 0.996, duration, volume, 'triangle', 0.006, dest);
+    this.playTone(when, freq * 2, freq * 1.99, duration * 0.45, volume * 0.3, 'sine', 0.004, dest);
+    this.playNoise(when, 0.02, 2600, 1.2, volume * 0.32, 'bandpass', dest);
+  }
+
+  /** Goatskin frame drum — deep on the pulse, lighter on the off. */
+  private bodhranHit(when: number, volume: number, dest: AudioNode, deep: boolean): void {
+    const f = deep ? 108 : 152;
+    this.playTone(when, f, f * 0.52, deep ? 0.17 : 0.11, volume, 'sine', 0.003, dest);
+    this.playNoise(when, deep ? 0.07 : 0.05, deep ? 420 : 900, 0.8, volume * 0.5, 'bandpass', dest);
+  }
+
+  /**
+   * Push the whole score down under a bang. Deeper and slower to recover than
+   * {@link duckBeds}: ambience is the world and should only dip, music is
+   * flavour and should get right out of the way.
+   */
+  private duckMusic(depth = 0.12, hold = 0.9, recover = 1.4): void {
+    const ctx = this.ctx;
+    const duck = this.musicDuck;
+    if (!ctx || !duck) return;
+    const now = ctx.currentTime;
+    const g = duck.gain;
+    // A second bang must never RAISE a duck that's already in place.
+    const target = Math.max(0.0001, Math.min(depth, g.value));
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(Math.max(0.0001, g.value), now);
+    g.linearRampToValueAtTime(target, now + 0.05);
+    g.setValueAtTime(target, now + hold);
+    g.linearRampToValueAtTime(1, now + hold + recover);
+  }
+
+  /** Lead is in the air: the idle whistling keeps away for a while. */
+  private markCombat(seconds = 8): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    this.combatHeatUntil = Math.max(this.combatHeatUntil, ctx.currentTime + seconds);
+  }
+
   // ── Loop / mix helpers ───────────────────────────────────────────
   private makeNoiseLoop(type: BiquadFilterType, freq: number, q: number, dest: AudioNode): LoopVoice {
     const ctx = this.ctx as AudioContext;
@@ -2284,6 +3118,10 @@ export class SoundEngine {
     g.linearRampToValueAtTime(depth, now + 0.03);
     g.setValueAtTime(depth, now + hold);
     g.linearRampToValueAtTime(1, now + hold + recover);
+    // Anything loud enough to duck the world ducks the MUSIC harder and marks
+    // the fight, so the idle whistling stays out of a firefight entirely.
+    this.duckMusic(0.1, hold + 0.4, recover + 1.2);
+    this.markCombat();
   }
 
   // ── Voice management ─────────────────────────────────────────────

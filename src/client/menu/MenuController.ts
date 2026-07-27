@@ -218,6 +218,9 @@ export class MenuController {
     this.screen.classList.add('visible');
     this.endmatchScreen.classList.remove('visible');
     this.showPanel('main');
+    // The menu is no longer silent: the concertina air arms itself here and
+    // starts on the first gesture (SoundEngine defers until the context runs).
+    this.audio.setMusicContext('menu');
     this.refreshButtonStates();
   }
 

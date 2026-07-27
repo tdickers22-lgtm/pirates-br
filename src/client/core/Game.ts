@@ -803,6 +803,9 @@ export class Game {
     // No fanfare here: the horn now blows at the horn (match_horn), not during
     // the sub-second load where nobody was there to hear it.
     this.audio.unlock();
+    // Menu air off, world score on: at sea nothing plays continuously — only
+    // the tavern jig and the odd whistled phrase surface.
+    this.audio.setMusicContext('world');
   }
 
   // ── Staged match start ────────────────────────────────────────────────
@@ -5254,12 +5257,21 @@ export class Game {
     const nightFactor = THREE.MathUtils.clamp(atmo.nightFactor, 0, 1);
     const storminess = THREE.MathUtils.clamp(this.stormWeatherIntensity, 0, 1);
 
-    // Shore proximity — closest island edge to the listener drives breaker ambience.
+    // Shore proximity — closest island edge to the listener drives breaker
+    // ambience. The same sweep finds the nearest tavern, which is where the jig
+    // is playing from (SoundEngine does the falloff, panning and wall muffle).
     let nearestEdge = Infinity;
+    let tavernDist = Infinity;
+    let tavernPos: { x: number; y: number; z: number } | null = null;
     for (const island of this.state.islands) {
       const edge = dist2D(cam.x, cam.z, island.position.x, island.position.z) - island.radius;
       if (edge < nearestEdge) nearestEdge = edge;
+      if (island.tavern) {
+        const d = dist2D(cam.x, cam.z, island.tavern.position.x, island.tavern.position.z);
+        if (d < tavernDist) { tavernDist = d; tavernPos = island.tavern.position; }
+      }
     }
+    this.audio.setTavernSource(tavernPos ? tavernDist : null, tavernPos);
     const nearShore01 = Number.isFinite(nearestEdge)
       ? THREE.MathUtils.clamp(1 - THREE.MathUtils.clamp(nearestEdge / 70, 0, 1), 0, 1)
       : 0;
