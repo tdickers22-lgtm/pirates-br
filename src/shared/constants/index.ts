@@ -729,15 +729,22 @@ export const BOT_KEEL_CLEARANCE = 1.4;
  *  wreck gives the whole lobby ONE place worth sailing to, at the exact spot
  *  they must sail to anyway, with loot worth fighting over when they arrive. */
 export const WRECK_EVENT = {
-  /** Zero-indexed storm phase whose START raises her. The wreck must land INSIDE
-   *  the drought, not after it: index 1 is the second circle, reached at ~235 s,
-   *  which puts the fight it starts squarely across the dead 235-395 s window
-   *  the audit measured. (Index 2 — the HUD's "STORM PHASE 3" — begins at
-   *  ~395 s, i.e. after the 360 s mark the audit is scored on.) */
-  SPAWN_PHASE: 1,
-  /** She is claimed this many seconds after rising. Sized to the phase she
-   *  spawns in (wait + shrink) so "lootable for the phase" is literal. */
-  LOOT_SECONDS: 160,
+  /** Zero-indexed storm phase whose FIRST SHRINK raises her — she comes up the
+   *  moment the ring starts to move, which is also the second the early-peace
+   *  window lifts (BOT_EARLY_PEACE_SECONDS). One horn: the peace is over and
+   *  there is somewhere to be.
+   *
+   *  This is deliberately EARLIER than the audit's "phase 3". A crew 600 m out
+   *  needs ~90 s to reach her and another minute to lose a gunfight, so a wreck
+   *  that rises at the third circle (~395 s) cannot move a number scored at
+   *  360 s — it just relocates the drought. Rising with the first shrink (~150 s)
+   *  puts the convergence at ~240 s and the killing across 260-360 s, which is
+   *  the hole the audit actually measured, and it leaves the 150 s mark (the
+   *  "early peace is intact" number) untouched because she is only just up. */
+  SPAWN_PHASE: 0,
+  /** She is claimed this many seconds after rising — long enough to sail to her
+   *  from the far side of the ring, fight over her, and get the cargo home. */
+  LOOT_SECONDS: 170,
   /** Treasure chests aboard — carry them home and bank them. */
   CHESTS: 3,
   /** Gold value band per chest. Richer than an island chest (ECONOMY.CHEST_*)
@@ -753,8 +760,9 @@ export const WRECK_EVENT = {
   /** How far out the gold beacon column is meant to read, metres. The client
    *  sizes the shaft so the wreck is legible at this range. */
   BEACON_RANGE: 320,
-  /** Bots inside this radius break off patrol and converge on her. */
-  LURE_RADIUS: 620,
+  /** Bots inside this radius break off patrol and converge on her. Wide on
+   *  purpose: at ~7 m/s a crew 750 m out still makes her with time to fight. */
+  LURE_RADIUS: 780,
 } as const;
 
 /** Loot table for the wreck's supply barrels: no fruit, no planks — this is the
@@ -786,7 +794,7 @@ export const SEA_POI = {
   /** Supply barrels lashed to the gull-circled flotsam. */
   FLOTSAM_BARRELS: 1,
   /** Gulls circling a site — the visual signpost you read from a mile off. */
-  GULLS: 5,
+  GULLS: 7,
   /** Radius of the gull circle, metres. */
-  GULL_RADIUS: 11,
+  GULL_RADIUS: 15,
 } as const;

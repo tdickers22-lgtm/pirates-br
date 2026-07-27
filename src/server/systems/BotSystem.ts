@@ -213,10 +213,16 @@ export class BotSystem {
     const lure = this.eventLure;
     if (!lure) return null;
     const d = dist2D(ship.position.x, ship.position.z, lure.x, lure.z);
-    // Already there: stop steering at it or the crew circles the hulk forever
-    // instead of fighting whoever else turned up.
-    if (d < 90 || d > lure.radius) return null;
-    return Math.atan2(lure.x - ship.position.x, lure.z - ship.position.z);
+    if (d > lure.radius) return null;
+    const toward = Math.atan2(lure.x - ship.position.x, lure.z - ship.position.z);
+    // ON STATION. Steering straight at a mark you are already on top of sails
+    // you past it and out the other side, and the first build did exactly that:
+    // crews arrived, lost the bearing, and took the next patrol heading back
+    // toward the ring centre — the fight never got a chance to start. Inside the
+    // brawl radius they STAND OFF AND CIRCLE instead, which keeps hulls in
+    // gun range of each other for as long as the wreck is up.
+    if (d < BOT_LURE_BRAWL_RADIUS * 0.45) return angleWrap(toward + Math.PI * 0.5);
+    return toward;
   }
 
   /** How many bot crews are currently hunting a ship (bounded by the lobby size,

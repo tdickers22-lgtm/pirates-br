@@ -23,6 +23,7 @@ import { TradingSystem } from '../systems/TradingSystem.js';
 import { BotSystem } from '../systems/BotSystem.js';
 import {
   getNearestShipBoardingLadder,
+  getIslandMaxRadius,
   getIslandSurfacePoint,
   getIslandSurfaceY,
   isPointInsideIslandFootprint,
@@ -6151,7 +6152,12 @@ export class Match {
         if (this.t >= forcedAt) this.raiseGildedWreck();
         return;
       }
-      if (this.state.storm.phase < WRECK_EVENT.SPAWN_PHASE) return;
+      // The ring starting to MOVE is the cue, not the clock: the announced next
+      // centre is real from that instant, and it is the moment the whole lobby
+      // is told to go somewhere.
+      const storm = this.state.storm;
+      if (storm.phase < WRECK_EVENT.SPAWN_PHASE) return;
+      if (storm.phase === WRECK_EVENT.SPAWN_PHASE && !storm.shrinking) return;
       this.raiseGildedWreck();
       return;
     }
@@ -6252,19 +6258,35 @@ export class Match {
    *  not the read. Deterministic outward spiral; the ring centre itself is
    *  untouched, only the wreck moves. */
   private findWreckWater(x: number, z: number): { x: number; z: number } {
-    const dry = (px: number, pz: number) => this.state.islands.some((island) =>
-      getIslandSurfaceY(island, px, pz) > -2.2);
-    if (!dry(x, z)) return { x, z };
-    for (let ring = 1; ring <= 10; ring++) {
-      const reach = ring * 26;
-      for (let step = 0; step < 12; step++) {
-        const angle = (step / 12) * Math.PI * 2 + ring * 0.37;
-        const px = clamp(x + Math.cos(angle) * reach, -WORLD.HALF + 60, WORLD.HALF - 60);
-        const pz = clamp(z + Math.sin(angle) * reach, -WORLD.HALF + 60, WORLD.HALF - 60);
-        if (!dry(px, pz)) return { x: px, z: pz };
+    // Not merely "not aground": she needs SEA ROOM. A wreck tucked against a
+    // headland is a wreck half the fleet arrives at with the island between them
+    // and her, and a beacon that reads as a lighthouse. This is the same
+    // clearance a ship needs to fight in.
+    const clearance = (px: number, pz: number) => {
+      let worst = Infinity;
+      for (const island of this.state.islands) {
+        const d = dist2D(px, pz, island.position.x, island.position.z) - getIslandMaxRadius(island);
+        if (d < worst) worst = d;
+      }
+      return worst;
+    };
+    const NEED = 80;
+    if (clearance(x, z) >= NEED) return { x, z };
+    // Deterministic outward spiral, keeping the BEST water found so far so a
+    // crowded corner of the Reach still gets the deepest spot in reach.
+    let best = { x, z, clear: clearance(x, z) };
+    for (let ring = 1; ring <= 12; ring++) {
+      const reach = ring * 28;
+      for (let step = 0; step < 16; step++) {
+        const angle = (step / 16) * Math.PI * 2 + ring * 0.37;
+        const px = clamp(x + Math.cos(angle) * reach, -WORLD.HALF + 90, WORLD.HALF - 90);
+        const pz = clamp(z + Math.sin(angle) * reach, -WORLD.HALF + 90, WORLD.HALF - 90);
+        const clear = clearance(px, pz);
+        if (clear >= NEED) return { x: px, z: pz };
+        if (clear > best.clear) best = { x: px, z: pz, clear };
       }
     }
-    return { x, z };
+    return { x: best.x, z: best.z };
   }
 
   private nearestIsland(x: number, z: number): Island | null {

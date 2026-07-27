@@ -179,8 +179,13 @@ export class SeaEventRenderer {
     // After dark the rim comes up on every spar — you find her by the green
     // before you can make out the hull at all.
     const ghost = Math.pow(Math.max(0, Math.min(1, nightFactor)), 0.7);
+    // A RIM, not a wash. Early builds lit the sail canvas at full ghost and she
+    // read as a floating mint bedsheet: the green belongs on the thin things
+    // (spars, yards), where it draws her rigging as a line drawing in the dark.
+    const breathe = 1 + 0.16 * Math.sin(worldTime * 0.9);
     for (const material of wreck.ghostMaterials) {
-      material.emissiveIntensity = ghost * (0.26 + 0.09 * Math.sin(worldTime * 0.9 + material.id));
+      const strength = material.userData.ghostRim ?? 0.1;
+      material.emissiveIntensity = ghost * strength * breathe;
     }
 
     // The beacon breathes, and it gets brighter the further away you are —
@@ -246,13 +251,16 @@ export class SeaEventRenderer {
     if (this.gullGeometry) return this.gullGeometry;
     // A gull at 200 m is two strokes of white and nothing else. Two thin swept
     // wings and a body — cheap enough to instance five per site.
+    // Sized for the JOB, not for anatomy. A real gull at 300 m is invisible, and
+    // an invisible signpost is not a signpost — these are wingspan ~1.8 m so the
+    // turning specks are still legible from the far side of a dead-water void.
     const parts: THREE.BufferGeometry[] = [];
-    const body = new THREE.ConeGeometry(0.09, 0.5, 4);
+    const body = new THREE.ConeGeometry(0.16, 0.95, 4);
     body.rotateX(Math.PI * 0.5);
     parts.push(body);
     for (const side of [-1, 1]) {
-      const wing = new THREE.BoxGeometry(0.62, 0.02, 0.16);
-      wing.translate(side * 0.34, 0.03, -0.02);
+      const wing = new THREE.BoxGeometry(1.15, 0.04, 0.3);
+      wing.translate(side * 0.62, 0.05, -0.04);
       wing.rotateZ(side * -0.22);
       parts.push(wing);
     }
@@ -460,6 +468,9 @@ export class SeaEventRenderer {
     const L = WRECK_EVENT.HULL_HALF_LENGTH;
     const B = WRECK_EVENT.HULL_HALF_BEAM;
 
+    // Everything that takes the ghost rim after dark, collected as it is built.
+    const ghostMaterials: THREE.MeshStandardMaterial[] = [];
+
     // ── Hull: a heavy galleon carcass, awash to her gunports ──
     const hullParts: THREE.BufferGeometry[] = [];
     const hull = new THREE.CylinderGeometry(B, B * 0.55, L * 2, 9, 1, false);
@@ -488,7 +499,15 @@ export class SeaEventRenderer {
       hullParts.push(rib);
     }
     const hullGeo = mergeGeometries(hullParts, false)!;
-    const hullMesh = new THREE.Mesh(hullGeo, this.getTimber());
+    // Her own timber, not the shared hulk material: she takes a faint ghost rim
+    // after dark, and a little more light than a dead hulk so she is still a
+    // SHIP at night rather than a hole in the sea.
+    const hullMaterial = new THREE.MeshStandardMaterial({
+      ...TIMBER, color: 0x5a4733, emissive: GHOST, emissiveIntensity: 0,
+    });
+    hullMaterial.userData.ghostRim = 0.09;
+    ghostMaterials.push(hullMaterial);
+    const hullMesh = new THREE.Mesh(hullGeo, hullMaterial);
     root.add(hullMesh);
 
     // ── Gilding: the reason anyone crosses open water for her ──
@@ -517,11 +536,11 @@ export class SeaEventRenderer {
     root.add(giltMesh);
 
     // ── Rigging: the canted mast that reads before anything else ──
-    const ghostMaterials: THREE.MeshStandardMaterial[] = [];
     const rigMaterial = new THREE.MeshStandardMaterial({
       color: 0x3d3025, roughness: 0.96, metalness: 0,
       emissive: GHOST, emissiveIntensity: 0,
     });
+    rigMaterial.userData.ghostRim = 0.42;
     ghostMaterials.push(rigMaterial);
     const rigParts: THREE.BufferGeometry[] = [];
     const main = new THREE.CylinderGeometry(0.34, 0.6, 26, 7);
@@ -547,10 +566,11 @@ export class SeaEventRenderer {
     // Torn mainsail still bent to the lower yard — the ghost part of the ghost
     // ship, and the biggest single surface for the green to land on.
     const sailMaterial = new THREE.MeshStandardMaterial({
-      color: 0x9a9585, roughness: 1, metalness: 0, side: THREE.DoubleSide,
-      transparent: true, opacity: 0.6,
+      color: 0xa8a292, roughness: 1, metalness: 0, side: THREE.DoubleSide,
+      transparent: true, opacity: 0.5, depthWrite: false,
       emissive: GHOST, emissiveIntensity: 0,
     });
+    sailMaterial.userData.ghostRim = 0.1;
     ghostMaterials.push(sailMaterial);
     // Three ragged panels hanging off the lower yard rather than one slab —
     // canvas that has been in the weather for two hundred years has gaps in it,
@@ -616,7 +636,8 @@ export class SeaEventRenderer {
       const speed = 0.34 + (i % 4) * 0.055;
       const angle = worldTime * speed + phase + (i / count) * Math.PI * 2;
       const r = radius * lane;
-      const y = 7 + (i % 4) * 2.6 + Math.sin(worldTime * 0.9 + i) * 0.9;
+      // Held well up: birds against the sky read, birds against the sea do not.
+      const y = 13 + (i % 4) * 3.4 + Math.sin(worldTime * 0.9 + i) * 1.2;
       this.tmpPos.set(Math.cos(angle) * r, y, Math.sin(angle) * r);
       // Nose along the tangent, banked into the turn.
       this.tmpQuat.setFromEuler(new THREE.Euler(0, -angle + Math.PI * 0.5, 0.35, 'YXZ'));

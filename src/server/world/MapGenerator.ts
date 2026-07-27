@@ -344,7 +344,12 @@ const STORY_COASTAL: Partial<Record<LandmarkType, StoryCoastalSpec>> = {
   // Wide scenes need pads that clear a camp's furniture ring (~5m), not just
   // the camp stamp centre.
   whale_skeleton: { bandLo: 0.45, bandHi: 2.0, stampRadius: 7, pad: 8 },
-  kraken_wreck: { bandLo: 0.6, bandHi: 2.6, stampRadius: 7.5, pad: 8 },
+  // The tableau is 1.8x the size the collider used to claim (see
+  // PROP_COLLIDERS.kraken_wreck): a 7.5 m pad left her 7.2 m blocking footprint
+  // hanging 0.86 m over the slope at its outer edge — the live-floater audit
+  // caught it the moment the collider told the truth. The flat she lies on has
+  // to be as wide as she is.
+  kraken_wreck: { bandLo: 0.6, bandHi: 2.6, stampRadius: 10.5, pad: 9 },
   wrecker_tower: { bandLo: 0.7, bandHi: 2.2, stampRadius: 5.5, pad: 4.5 },
   castaway_camp: { bandLo: 0.7, bandHi: 2.2, stampRadius: 6, pad: 4.5 },
   mermaid_shrine: { bandLo: 0.4, bandHi: 1.5, stampRadius: 5, pad: 4.5 },
