@@ -105,6 +105,33 @@
       color: #c9a84c;
       margin-bottom: 4px;
     }
+    /* How to Play needs room for the cloned controls card. */
+    #menu-panel-howto {
+      width: min(820px, calc(100vw - 32px));
+      max-height: calc(100vh - 180px);
+      overflow-y: auto;
+      text-align: left;
+    }
+    #howto-win {
+      display: flex; flex-direction: column; gap: 8px;
+      padding: 12px 14px; border-radius: 10px;
+      background: rgba(201, 168, 76, 0.09);
+      border: 1px solid rgba(201, 168, 76, 0.3);
+    }
+    .howto-win-title {
+      font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase; color: #c9a84c;
+    }
+    .howto-win-row { display: flex; gap: 10px; align-items: baseline; font-size: 0.86rem; color: #e8dcc0; line-height: 1.6; }
+    .howto-win-row strong { color: #f4e2b2; }
+    .howto-win-key { flex: 0 0 auto; font-size: 1rem; }
+    #howto-controls {
+      color: #cdc2a8; font: 500 13px/1.85 'Georgia', serif; letter-spacing: 0.03em;
+      /* The legend card is nowrap in-match (it is centred on a wide screen);
+         here it must fold instead of running off the panel. */
+      white-space: normal;
+    }
+    #howto-controls strong { color: #f0dda9; }
+
     .menu-row { display: flex; gap: 10px; align-items: center; }
     .menu-row > * { flex: 1 1 auto; min-width: 0; }
     .menu-row .menu-btn { flex: 0 0 auto; }
@@ -394,7 +421,7 @@
       pointer-events: none;
     }
     #hud-top-left { justify-self: start; display: flex; flex-direction: column; gap: 8px; }
-    #hud-top-center { justify-self: center; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    #hud-top-center { position: relative; justify-self: center; display: flex; flex-direction: column; align-items: center; gap: 6px; }
     #hud-top-right { justify-self: end; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 
     #hud-right-tactical {
@@ -533,6 +560,36 @@
       position: absolute; top: 0; left: 50%; transform: translateX(-50%);
       border-left: 4px solid transparent; border-right: 4px solid transparent;
       border-top: 5px solid #f7e6b8;
+    }
+
+    /* Wind vane — beside the compass bezel, out of the document flow so the
+       storm clock never shifts down onto the server-load chip at top:88px. */
+    #wind-vane {
+      position: absolute; left: calc(50% + 116px); top: 16px;
+      transform: translateY(-50%);
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 10px 3px 8px; border-radius: 999px;
+      background: rgba(10, 24, 44, 0.78);
+      border: 1px solid rgba(201, 168, 76, 0.34);
+      white-space: nowrap; pointer-events: none;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+    }
+    #wind-vane-arrow {
+      display: inline-block; font-size: 0.86rem; line-height: 1; color: #9ed3ff;
+      /* HudController writes the rotation; the transition keeps a veering
+         breeze from snapping between frames. */
+      transition: transform 220ms ease-out;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+    }
+    #wind-vane-text {
+      font-size: 0.55rem; letter-spacing: 0.12em; text-transform: uppercase; color: #cbb079;
+    }
+    @media (max-width: 1180px) {
+      #wind-vane-text { display: none; }
+      #wind-vane { padding: 3px 7px; }
+    }
+    @media (max-width: 900px) {
+      #wind-vane { display: none; }
     }
 
     /* Player health */
@@ -1137,7 +1194,16 @@
     }
     #death-screen.visible { display: flex; }
     #win-screen.visible { display: flex; }
-    #death-screen h1 { font-size: 3rem; color: #e74c3c; letter-spacing: 0.3em; text-shadow: 0 0 40px #e74c3c88; }
+    /* The title is a sentence now ("YOUR CREW WAS ELIMINATED"), not two words —
+       it has to fold on a narrow window instead of running off both edges. */
+    #death-screen h1 {
+      font-size: clamp(1.5rem, 4.1vw, 3rem); color: #e74c3c; letter-spacing: 0.3em;
+      text-shadow: 0 0 40px #e74c3c88; text-align: center; padding: 0 24px; line-height: 1.25;
+    }
+    #death-cause {
+      margin-top: 14px; max-width: 620px; padding: 0 24px; text-align: center;
+      font-size: 0.86rem; line-height: 1.7; color: #d3b58a; letter-spacing: 0.06em;
+    }
     #win-screen h1 { font-size: 3rem; color: #c9a84c; letter-spacing: 0.3em; text-shadow: 0 0 40px #c9a84c88; }
     .end-stats { margin-top: 20px; font-size: 0.9rem; color: #889; text-align: center; line-height: 2; }
     .restart-btn {
@@ -1164,6 +1230,9 @@
     }
     #minimap-head {
       display: flex; align-items: center; justify-content: space-between;
+      /* The [L] chip can outgrow the 176px map column. Wrap the CHIPS onto a
+         second line rather than letting "Battle Map" break across two. */
+      flex-wrap: wrap; row-gap: 4px;
       padding: 7px 10px; border-radius: 10px;
       background: rgba(4, 14, 28, 0.78);
       border: 1px solid rgba(126, 172, 220, 0.22);
@@ -1171,9 +1240,17 @@
     }
     #minimap-title {
       font-size: 0.62rem; color: #d9e9ff; letter-spacing: 0.12em; text-transform: uppercase;
+      white-space: nowrap;
     }
     #minimap-toggle {
       font-size: 0.58rem; color: #8fb6df; letter-spacing: 0.12em; text-transform: uppercase;
+    }
+    #minimap-head-chips { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+    #controls-toggle {
+      font-size: 0.54rem; color: #f0dda9; letter-spacing: 0.1em; text-transform: uppercase;
+      padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+      background: rgba(201, 168, 76, 0.14);
+      border: 1px solid rgba(201, 168, 76, 0.42);
     }
     /* radius must stay <= 10px: Game.ts draws the storm timer chip at canvas (8,8),
        larger rounded corners shave its top-left corner */
@@ -1594,6 +1671,10 @@
       #minimap-toggle {
         font-size: 0.5rem;
       }
+      /* No room for the word at this width — the key still shows. */
+      #minimap-head-chips { gap: 4px; }
+      #controls-toggle { font-size: 0.44rem; padding: 1px 4px; }
+      #controls-toggle .ct-word { display: none; }
       #minimap {
         width: 118px;
         height: 118px;
@@ -1873,6 +1954,7 @@
         <button class="menu-btn primary" id="menu-join-confirm-btn">Join</button>
       </div>
       <div class="menu-row" style="justify-content:center;">
+        <button class="menu-btn" id="menu-howto-btn">📖 How to Play</button>
         <button class="menu-btn" id="menu-stats-btn" style="display:none;">☠ Stats</button>
         <button class="menu-btn" id="menu-settings-btn">⚙ Settings</button>
       </div>
@@ -1918,6 +2000,22 @@
       <div id="queue-detail-line">— / — pirates</div>
       <div class="menu-row" style="justify-content:center;">
         <button class="menu-btn danger" id="queue-cancel-btn">Cancel</button>
+      </div>
+    </div>
+
+    <!-- How to Play — the game never once stated its own win condition. The
+         controls block is CLONED from the in-match legend (#legend-body) at
+         boot, so the menu and the [L] card can never disagree. -->
+    <div class="menu-panel" id="menu-panel-howto">
+      <h2>How to Play</h2>
+      <div id="howto-win">
+        <div class="howto-win-title">Two ways to take the seas</div>
+        <div class="howto-win-row"><span class="howto-win-key">💰</span><span>Bank <strong>9,000 gold</strong> — dig treasure, sell it to a Gold Hoarder.</span></div>
+        <div class="howto-win-row"><span class="howto-win-key">☠</span><span>Or be the <strong>last crew afloat</strong> when every other hull is down.</span></div>
+      </div>
+      <div id="howto-controls">Controls load with the game.</div>
+      <div class="menu-row">
+        <button class="menu-btn primary" id="howto-back-btn">Back</button>
       </div>
     </div>
 
@@ -2001,6 +2099,14 @@
           <div id="compass-tape"></div>
           <div id="compass-center"></div>
         </div>
+        <!-- Wind vane: absolutely parked BESIDE the compass bezel so it never
+             reflows the storm clock underneath it. The arrow streams downwind
+             (the way the wind is pushing you); the word says where the wind
+             sits relative to your own bow. -->
+        <div id="wind-vane" title="Wind">
+          <span id="wind-vane-arrow">↑</span>
+          <span id="wind-vane-text">—</span>
+        </div>
         <div id="storm-info">
           <div id="storm-phase">STORM PHASE 1</div>
           <div id="storm-timer">3:00</div>
@@ -2026,7 +2132,13 @@
       <div id="minimap-shell">
         <div id="minimap-head">
           <div id="minimap-title">Battle Map</div>
-          <div id="minimap-toggle">M</div>
+          <!-- The controls legend was reachable only by a key nobody was ever
+               told about. It gets a chip beside the map's, in the one header a
+               new pirate already reads. -->
+          <div id="minimap-head-chips">
+            <div id="controls-toggle">[L]<span class="ct-word"> Controls</span></div>
+            <div id="minimap-toggle">M</div>
+          </div>
         </div>
         <div id="minimap"><canvas id="minimap-canvas" width="176" height="176"></canvas></div>
       </div>
@@ -2196,14 +2308,27 @@
       </div>
     </div>
 
+    <!-- The legend BODY is the single source of truth for "how do I play this":
+         the menu's How to Play panel clones this element's markup at boot
+         (MenuController.mirrorLegendIntoHowto) so the two can never drift. -->
     <div id="controls-hint">
       <div class="legend-title">SHIP'S ORDERS — [L] to close</div>
-      WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; X · Interact — walk up and look at a thing, one prompt shows
-      <br>Look for the gold station tags aboard: ⚓ Capstan at the bow · Hold X raises the anchor
-      <br>⛵ Rope stations at the mast rails · Hold X drops / raises the sails (crewmates on the rope haul faster)
-      <br>Helm: A/D · Steer &nbsp;·&nbsp; W/S · Sails up / down &nbsp;·&nbsp; Q/F · Angle the sails &nbsp;|&nbsp; Crow's nest · ladder up the mainmast
-      <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Powder Keg &nbsp;|&nbsp; Hold I · Supply wheel &amp; tools
-      <br>LMB · Fire &nbsp;|&nbsp; SHIFT or RMB · Aim &nbsp;|&nbsp; P · Spyglass &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; F8 · Bug report
+      <div id="legend-body">
+        <!-- .legend-win is stripped from the menu's copy: How to Play states the
+             win condition in its own banner and would say it twice. -->
+        <span class="legend-win"><strong style="color:#f0dda9;">To win:</strong> bank <strong>9,000 gold</strong> — or be the <strong>last crew afloat</strong>. Either one takes the seas.
+        <br>Gold comes from treasure: dig chests with the shovel, carry them to a Gold Hoarder, and sell.
+        <br>
+        <br></span>WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; X · Interact — walk up and look at a thing, one prompt shows
+        <br>Look for the gold station tags aboard: ⚓ Capstan at the bow · Hold X raises the anchor
+        <br>⛵ Rope stations at the mast rails · Hold X drops / raises the sails (crewmates on the rope haul faster)
+        <br>Helm: A/D · Steer &nbsp;·&nbsp; W/S · Sails up / down &nbsp;·&nbsp; Q/F · Angle the sails &nbsp;|&nbsp; Crow's nest · ladder up the mainmast
+        <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Powder Keg &nbsp;|&nbsp; Hold I · Supply wheel &amp; tools
+        <br>LMB · Fire &nbsp;|&nbsp; SHIFT or RMB · Aim &nbsp;|&nbsp; P · Spyglass &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; F8 · Bug report
+        <br>
+        <br><strong style="color:#f0dda9;">Kill streak rewards:</strong> 5 kills · super cannonball &nbsp;·&nbsp; 10 · mega keg &nbsp;·&nbsp; 20 · tsunami [E]
+        <br>The storm ring shrinks all match. Outside it your hull takes breaches and your crew bleeds.
+      </div>
     </div>
 
     <div id="downed-banner">DOWNED</div>
@@ -2261,7 +2386,10 @@
 
   <!-- Death screen (in-match: shows while waiting for the round to finish) -->
   <div id="death-screen">
-    <h1>SHIP SUNK</h1>
+    <!-- The title was hardcoded SHIP SUNK for every death — storm, drowning, a
+         cutlass on someone else's deck. HudController writes the real cause. -->
+    <h1 id="death-title">SHIP SUNK</h1>
+    <div id="death-cause">—</div>
     <div class="end-stats" id="death-stats"></div>
     <div style="margin-top:14px;font-size:0.7rem;color:#7f92a8;letter-spacing:0.18em;text-transform:uppercase;">
       Waiting for the voyage to end…

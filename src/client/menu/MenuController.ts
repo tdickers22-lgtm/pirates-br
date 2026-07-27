@@ -9,7 +9,7 @@ import type { InputManager } from '../input/InputManager.js';
 const STORAGE_KEY = 'piratesBR.name';
 const SETTINGS_KEY = 'piratesBR.settings';
 
-type MenuPanel = 'main' | 'lobby' | 'queue' | 'settings';
+type MenuPanel = 'main' | 'lobby' | 'queue' | 'settings' | 'howto';
 
 interface PersistedSettings {
   volume: number;       // 0–1
@@ -44,6 +44,10 @@ export class MenuController {
   private panelLobby!: HTMLElement;
   private panelQueue!: HTMLElement;
   private panelSettings!: HTMLElement;
+  private panelHowto!: HTMLElement;
+  private howtoBtn!: HTMLButtonElement;
+  private howtoBackBtn!: HTMLButtonElement;
+  private howtoControls!: HTMLElement;
   private settingsBtn!: HTMLButtonElement;
   private settingsBackBtn!: HTMLButtonElement;
   private settingsVolumeSlider!: HTMLInputElement;
@@ -154,6 +158,11 @@ export class MenuController {
     this.queueCancelBtn = this.must<HTMLButtonElement>('queue-cancel-btn');
 
     this.panelSettings = this.must('menu-panel-settings');
+    this.panelHowto = this.must('menu-panel-howto');
+    this.howtoBtn = this.must<HTMLButtonElement>('menu-howto-btn');
+    this.howtoBackBtn = this.must<HTMLButtonElement>('howto-back-btn');
+    this.howtoControls = this.must('howto-controls');
+    this.mirrorLegendIntoHowto();
     this.settingsBtn = this.must<HTMLButtonElement>('menu-settings-btn');
     this.settingsBackBtn = this.must<HTMLButtonElement>('settings-back-btn');
     this.settingsVolumeSlider = this.must<HTMLInputElement>('settings-volume');
@@ -398,6 +407,10 @@ export class MenuController {
       if (e.key === 'Escape' && this.statsBackdrop.classList.contains('visible')) this.closeStatsPanel();
     });
 
+    // How to Play
+    this.howtoBtn.addEventListener('click', () => this.showPanel('howto'));
+    this.howtoBackBtn.addEventListener('click', () => this.showPanel('main'));
+
     // Settings
     this.settingsBtn.addEventListener('click', () => this.showPanel('settings'));
     this.settingsBackBtn.addEventListener('click', () => this.showPanel('main'));
@@ -521,6 +534,25 @@ export class MenuController {
     this.panelLobby.classList.toggle('visible', which === 'lobby');
     this.panelQueue.classList.toggle('visible', which === 'queue');
     this.panelSettings.classList.toggle('visible', which === 'settings');
+    this.panelHowto.classList.toggle('visible', which === 'howto');
+  }
+
+  /**
+   * Copy the in-match legend's body into the How to Play panel.
+   *
+   * ONE source of truth, on purpose: a second hand-written controls list is a
+   * list that goes stale the first time a key moves. The legend card
+   * (#legend-body) is the canonical one — it is what [L] shows mid-voyage — and
+   * the menu simply mirrors its markup.
+   */
+  private mirrorLegendIntoHowto(): void {
+    const legendBody = document.getElementById('legend-body');
+    if (!legendBody) return;
+    const clone = legendBody.cloneNode(true) as HTMLElement;
+    // The panel states the win condition in its own banner above — the legend's
+    // copy of it would be the same sentence twice on one screen.
+    for (const dupe of clone.querySelectorAll('.legend-win')) dupe.remove();
+    this.howtoControls.innerHTML = clone.innerHTML;
   }
 
   private loadSettings(): PersistedSettings {

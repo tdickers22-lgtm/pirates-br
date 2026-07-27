@@ -96,6 +96,10 @@ export class HudController {
     this.islandPresenceSeeded = false;
     this.brProgressSignature = '';
     this.goldLeaderboardSignature = '';
+    this.lastStreakSeen = -1;
+    this.serverEliminationCause = null;
+    this.deathCopySignature = '';
+    this.preDeathContext = { outsideStorm: false, swimming: false, respawning: false, shipGone: false };
     if (this.crewPulseTimer !== null) {
       window.clearTimeout(this.crewPulseTimer);
       this.crewPulseTimer = null;
@@ -408,6 +412,8 @@ export class HudController {
         : `Next storm shift in ${stormClock}`;
 
     const outsideStorm = dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ) > this.view.state.storm.safeRadius;
+    this.sampleDeathContext(player, outsideStorm);
+    this.maybeAutoOpenLegend();
     // "Critical" is now the flood, not a hull-HP average: she is going down
     // when the bilge is winning, or when she is carrying more leaks than any
     // crew can plank ahead of the water.
@@ -441,10 +447,15 @@ export class HudController {
     this.view.ui.armorFill.style.width = `${Math.max(0, Math.min(100, ((player.armor ?? 0) / PLAYER.MAX_ARMOR) * 100))}%`;
 
     if (ship) {
+      // ORDERS ONLY WHEN THEY CAN BE OBEYED. Every "hold [X] at …" clause below
+      // is gated on actually standing on this hull: ashore, [X] digs, chops and
+      // opens chests, so a panel telling a pirate on a beach to "hold [X] at the
+      // capstan" was naming a key that does something else entirely.
+      const aboard = player.onShipId === ship.id;
       // The four section bars are gone with the section model. What a captain
       // needs is the count of open planking and the bilge gauge beside it.
       this.view.ui.shipLeaks.textContent = openLeaks > 0
-        ? `${openLeaks} LEAK${openLeaks === 1 ? '' : 'S'} — hold [X] at a breach`
+        ? `${openLeaks} LEAK${openLeaks === 1 ? '' : 'S'}${aboard ? ' — hold [X] at a breach' : ' — she is taking water'}`
         : 'Hull sound';
       this.view.ui.shipLeaks.style.color = openLeaks >= 4
         ? '#ff8a6a'
@@ -456,28 +467,42 @@ export class HudController {
       const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
       const trimCatch = 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE);
       const trimDelta = angleWrap(desiredTrim - ship.sailAngle);
-      const trimSide = ship.sailAngle < -0.06 ? 'Port' : ship.sailAngle > 0.06 ? 'Starboard' : 'Centered';
-      const windSide = signedRelative < -0.22 ? 'from port' : signedRelative > 0.22 ? 'from starboard' : Math.cos(signedRelative) >= 0 ? 'dead ahead' : 'from astern';
-      const windHeading = this.view.formatCompassHeading(wind.direction);
-      const windArrow = signedRelative < -0.22 ? '<-' : signedRelative > 0.22 ? '->' : Math.cos(signedRelative) >= 0 ? '^' : 'v';
-      const windDegrees = Math.round(Math.abs(THREE.MathUtils.radToDeg(signedRelative)));
+      const trimSide = ship.sailAngle < -0.06 ? 'port' : ship.sailAngle > 0.06 ? 'starboard' : 'centered';
       const trimHint = Math.abs(trimDelta) < 0.08
         ? 'Trim set'
         : trimDelta > 0
           ? 'Trim Right [F]'
           : 'Trim Left [Q]';
-      const rig =
-        ship.sailIntegrity < 0.99
-          ? ` · Rigging ${Math.round(ship.sailIntegrity * 100)}% (hold [X] at sails + planks)`
-          : '';
-      const windLine = `Wind ${windHeading} ${windArrow} ${windDegrees}deg ${windSide}`;
-      this.view.ui.sailStatus.textContent = ship.anchored
+      const rig = ship.sailIntegrity < 0.99
+        ? ` · Rigging ${Math.round(ship.sailIntegrity * 100)}%${aboard ? ' (hold [X] at sails + planks)' : ''}`
+        : '';
+      // PLAIN ENGLISH. "Wind NW -> 138deg from starboard" is a bearing, a delta
+      // and an ASCII arrow, and it told a new captain nothing they could steer
+      // by. One clause, one fact: where the wind is sitting on this hull.
+      const windLine = `Wind ${this.windBearingPhrase(signedRelative)}`;
+      this.updateWindVane(signedRelative, windLine);
+      const sailPct = Math.round(ship.sailHeight * 100);
+      const canvas = sailPct < 5 ? 'Sails furled' : `Sails ${sailPct}%`;
+      if (!aboard) {
+        // Ashore: STATE, never orders.
+        this.view.ui.sailStatus.textContent =
+          `${ship.anchored ? 'Anchored' : 'Under way'} · ${canvas}${rig} · ${windLine}`;
+      } else if (ship.anchored) {
         // The helm can weigh the anchor too now (hold [W] at the wheel), so the
         // panel must not send a lone captain forward to the bow capstan.
-        ? `Anchored · hold [X] at the capstan or [W] at the helm · ${windLine}`
-        : `Sails ${Math.round(ship.sailHeight * 100)}%${rig} · Trim ${trimSide} · Catch ${Math.round(trimCatch * 100)}% · ${trimHint} · ${windLine}`;
+        this.view.ui.sailStatus.textContent =
+          `Anchored · hold [X] at the capstan or [W] at the helm · ${windLine}`;
+      } else {
+        // Numeric trim is a HELM readout: it only means anything to the hand on
+        // the wheel, and off the wheel it was just more arithmetic on screen.
+        const trim = player.atHelm
+          ? ` · Trim ${trimSide} · Catch ${Math.round(trimCatch * 100)}% · ${trimHint}`
+          : '';
+        this.view.ui.sailStatus.textContent = `${canvas}${rig}${trim} · ${windLine}`;
+      }
     } else {
       this.view.ui.sailStatus.textContent = 'No tracked ship';
+      this.updateWindVane(null, '');
     }
     this.renderShipUpgrades(ship);
     this.renderShipInventory(ship, player);
@@ -496,7 +521,8 @@ export class HudController {
       ? this.view.state.islands.find((island) => island.id === player.treasureMapIslandId) ?? null
       : null;
     const closestHoarder = this.view.getClosestGoldHoarder(player);
-    const powerLine = this.getSpecialSummary(player);
+    this.announcePowerThresholds(player);
+    const powerLine = this.getPowerBadge(player);
     const objectiveLine = this.getObjectiveSummary(player, ship, {
       chestsInHold,
       mappedIsland,
@@ -529,9 +555,9 @@ export class HudController {
     ];
     if (mappedIsland) stripParts.push(`Chart: ${mappedIsland.name}`);
     if (closestHoarder && (mappedIsland || pk.carryingChestId)) stripParts.push(`Gold Hoarder: ${closestHoarder.island.name}`);
-    if (pk.playerKillStreak > 0) stripParts.push(`Streak ${pk.playerKillStreak}`);
-    const specialSummary = this.getSpecialSummary(pk);
-    if (specialSummary) stripParts.push(specialSummary);
+    // ONE compact badge — the streak count and the powers table used to be two
+    // separate entries here, and the same table again in the progress feed.
+    stripParts.push(powerLine);
     const pocketText = stripParts.join(' | ');
     if (pocketText !== this.pocketStripSignature) {
       this.view.ui.pocketStrip.textContent = pocketText;
@@ -640,7 +666,8 @@ export class HudController {
       this.view.ui.interactPrompt.style.display = 'block';
       this.view.ui.interactPrompt.textContent = 'Crew eliminated — spectating';
       this.view.ui.contextLabel.style.display = 'block';
-      this.view.ui.contextLabel.textContent = 'Your ship is gone — there is no respawn from here';
+      // Wave 1 gave this line; it now names the cause instead of assuming one.
+      this.view.ui.contextLabel.textContent = HudController.DEATH_COPY[this.resolveDeathCause()].spectate;
     } else if (player.state === 'respawning') {
       const countdown = this.respawnCountdownText(player);
       this.view.ui.interactPrompt.style.display = 'block';
@@ -722,13 +749,145 @@ export class HudController {
       if (this.view.state.winnerId === this.view.localPlayerId) {
         this.showVictory(player.kills, player.gold);
       } else {
-        this.view.returnToLobbyAfterLoss(player.kills, player.gold, 'Crew lost');
+        // Being eliminated still outranks "the voyage ended" — the pirate wants
+        // to know what killed THEM, not that a clock ran out somewhere.
+        const reason = player.state === 'eliminated'
+          ? this.paintDeathScreen(this.resolveDeathCause())
+          : this.paintDeathScreen('outlasted');
+        this.view.returnToLobbyAfterLoss(player.kills, player.gold, reason);
       }
     } else if (player.state === 'eliminated') {
-      this.view.returnToLobbyAfterLoss(player.kills, player.gold, 'Crew lost');
+      this.view.returnToLobbyAfterLoss(player.kills, player.gold, this.paintDeathScreen(this.resolveDeathCause()));
     } else if (player.state === 'respawning') {
       this.view.ui.deathScreen.style.display = 'none';
     }
+  }
+
+  // ─── Why you died ────────────────────────────────────────────
+  /**
+   * The death screen hardcoded "SHIP SUNK — Crew lost" for every death there is:
+   * a cutlass on someone else's deck, drowning in open water, the storm eating a
+   * pirate who never found their ship. It named a cause that was frequently just
+   * false, and the one screen a losing player reads was the one screen that
+   * refused to tell them anything.
+   *
+   * The cause is resolved from the world as it stood the FRAME BEFORE the state
+   * flipped to eliminated — once you are eliminated the evidence is gone (health
+   * zeroed, ship dropped, position frozen) — and a server-supplied cause, when
+   * one is threaded in, always wins over the local reading.
+   */
+  private static readonly DEATH_COPY: Record<
+    'ship_sunk' | 'storm' | 'drowned' | 'killed' | 'outlasted',
+    { title: string; cause: string; reason: string; spectate: string }
+  > = {
+    ship_sunk: {
+      title: 'SHIP SUNK',
+      cause: 'Your hull went down with your crew aboard. With no ship left afloat there is no berth to respawn to.',
+      reason: 'Ship sunk',
+      spectate: 'Your ship went down — there is no respawn from here',
+    },
+    storm: {
+      title: 'TAKEN BY THE STORM',
+      cause: 'The tempest caught you outside the ring. The safe circle shrinks all match — watch it on the battle map [M].',
+      reason: 'Lost to the storm',
+      spectate: 'The storm took you outside the ring — there is no respawn from here',
+    },
+    drowned: {
+      title: 'DROWNED',
+      cause: 'You went under in open water with no hull left to climb back onto.',
+      reason: 'Drowned',
+      spectate: 'You went under with no ship to swim back to — no respawn from here',
+    },
+    killed: {
+      title: 'YOUR CREW WAS ELIMINATED',
+      cause: 'You were cut down with your ship already gone — nothing left to respawn onto.',
+      reason: 'Crew eliminated',
+      spectate: 'Your crew is out and your ship is gone — no respawn from here',
+    },
+    outlasted: {
+      title: 'ANOTHER CREW TOOK THE SEAS',
+      cause: 'The voyage ended with someone else on top of the board.',
+      reason: 'Outlasted',
+      spectate: 'The voyage is over',
+    },
+  };
+
+  /** A cause handed down by the server, when the message flow supplies one. */
+  private serverEliminationCause: string | null = null;
+  /** The world as it stood while the player was still in the fight. */
+  private preDeathContext = { outsideStorm: false, swimming: false, respawning: false, shipGone: false };
+  private deathCopySignature = '';
+
+  /** Server-authoritative cause from the elimination event (Match.ts sends it on
+   *  `game_over` with `died: true`). Null clears back to the local reading. */
+  noteEliminationCause(cause: string | null): void {
+    this.serverEliminationCause = cause;
+  }
+
+  /** Sampled every frame the player is still in the match. */
+  private sampleDeathContext(player: Player, outsideStorm: boolean): void {
+    if (player.state === 'eliminated') return;
+    const own = player.shipId ? this.view.shipsById.get(player.shipId) ?? null : null;
+    this.preDeathContext = {
+      outsideStorm,
+      swimming: player.state === 'swimming',
+      respawning: player.state === 'respawning',
+      shipGone: !own || own.alive === false || !!own.sinking,
+    };
+  }
+
+  private resolveDeathCause(): 'ship_sunk' | 'storm' | 'drowned' | 'killed' {
+    const server = this.serverEliminationCause;
+    if (server === 'ship_sunk' || server === 'storm' || server === 'drowned' || server === 'killed') {
+      return server;
+    }
+    const before = this.preDeathContext;
+    // Waiting to respawn when the hull went out from under you: that IS the
+    // ship sinking, and it is the only elimination the old title ever got right.
+    if (before.respawning && before.shipGone) return 'ship_sunk';
+    if (before.outsideStorm) return 'storm';
+    if (before.swimming) return 'drowned';
+    return 'killed';
+  }
+
+  /** Paint the title + cause line; returns the short reason for the stats block. */
+  private paintDeathScreen(kind: keyof typeof HudController.DEATH_COPY): string {
+    const copy = HudController.DEATH_COPY[kind];
+    // This runs every frame while the screen is up — only touch the DOM on change.
+    if (this.deathCopySignature !== kind) {
+      this.deathCopySignature = kind;
+      const title = document.getElementById('death-title');
+      const cause = document.getElementById('death-cause');
+      if (title) title.textContent = copy.title;
+      if (cause) cause.textContent = copy.cause;
+    }
+    return copy.reason;
+  }
+
+  // ─── First voyage ────────────────────────────────────────────
+  /** Set once a pirate has been shown the controls card. Sits beside
+   *  `piratesBR.name` / `piratesBR.settings` in localStorage. */
+  private static readonly SEEN_CONTROLS_KEY = 'piratesBR.seenControls';
+  private legendAutoOpenChecked = false;
+
+  /**
+   * [L] was never advertised anywhere, so on a first voyage the controls card
+   * simply did not exist as far as the player was concerned. Show it once, ever,
+   * and only after the start ceremony has let go of the screen centre — the
+   * legend parks in exactly the same place as the countdown and the supply wheel.
+   */
+  private maybeAutoOpenLegend(): void {
+    if (this.legendAutoOpenChecked) return;
+    if (this.view.state?.phase !== 'playing') return;
+    if (this.view.startCeremonyActive) return;
+    if (this.view.input.isSupplyWheelOpen()) return;
+    this.legendAutoOpenChecked = true;
+    let seen = false;
+    try { seen = localStorage.getItem(HudController.SEEN_CONTROLS_KEY) === '1'; } catch { /* private mode */ }
+    if (seen) return;
+    try { localStorage.setItem(HudController.SEEN_CONTROLS_KEY, '1'); } catch { /* private mode */ }
+    const legend = document.getElementById('controls-hint');
+    if (legend) legend.style.display = 'block';
   }
 
   private updateWeaponHud(activeSlot: number, activeWeapon: WeaponInstance | null, loadout: Array<WeaponInstance | null>) {
@@ -1006,23 +1165,112 @@ export class HudController {
     return player.megaKegs > 0 ? `Mega ${player.megaKegs} ready · ${normal}` : normal;
   }
 
-  private getSpecialSummary(player: Player) {
-    const parts: string[] = [];
-    if (player.superCannonballs > 0) parts.push(`Super cannonball x${player.superCannonballs} (use cannonball at cannon)`);
-    if (player.megaKegs > 0) parts.push(`Mega keg x${player.megaKegs} (hold G, click/place)`);
-    if (player.tsunamiCharges > 0) parts.push(`Tsunami x${player.tsunamiCharges} [E]`);
-    if (parts.length > 0) return `Powers READY: ${parts.join(' · ')}`;
+  // ─── Wind, in words ──────────────────────────────────────────
+  /**
+   * Where the wind sits relative to a hull's bow, said the way a sailor says it.
+   *
+   * The old line was "Wind NW -> 138deg from starboard": a compass bearing, a
+   * relative angle and an ASCII arrow, three numbers deep, printed twice on
+   * screen. None of it told a captain what to do with the wheel. The sectors are
+   * the classic points of sail, so the words line up with the speed the physics
+   * actually gives (bow = crawl, beam/quarter = fast).
+   */
+  private windBearingPhrase(relative: number): string {
+    const wrapped = angleWrap(relative);
+    const deg = Math.abs(THREE.MathUtils.radToDeg(wrapped));
+    // Negative relative bearing = the wind is off to port (matches the server's
+    // desired-trim sign convention in PhysicsSystem).
+    const side = wrapped < 0 ? 'port' : 'starboard';
+    if (deg <= 22) return 'dead ahead';
+    if (deg >= 158) return 'astern';
+    if (deg < 67) return `on the ${side} bow`;
+    if (deg <= 112) return `on the ${side} beam`;
+    return `on the ${side} quarter`;
+  }
+
+  private windVane: { root: HTMLElement; arrow: HTMLElement; text: HTMLElement } | null = null;
+  private windVaneSignature = '';
+
+  /**
+   * The vane beside the compass bezel. The arrow streams DOWNWIND — the way the
+   * wind is shoving the hull — which is the direction a real masthead pennant
+   * points, so it reads without a legend. `relative` is bow-relative, matching
+   * the sail panel's sentence exactly (one frame, one story).
+   */
+  private updateWindVane(relative: number | null, sentence: string): void {
+    if (!this.windVane) {
+      const root = document.getElementById('wind-vane');
+      const arrow = document.getElementById('wind-vane-arrow');
+      const text = document.getElementById('wind-vane-text');
+      if (!root || !arrow || !text) return;
+      this.windVane = { root, arrow, text };
+    }
+    const vane = this.windVane;
+    if (relative === null) {
+      vane.root.style.display = 'none';
+      this.windVaneSignature = '';
+      return;
+    }
+    vane.root.style.display = '';
+    const phrase = this.windBearingPhrase(relative);
+    // Repaint on whole-degree changes only — this runs every frame.
+    const degrees = Math.round(THREE.MathUtils.radToDeg(angleWrap(relative)));
+    const signature = `${degrees}:${phrase}`;
+    if (signature === this.windVaneSignature) return;
+    this.windVaneSignature = signature;
+    vane.arrow.style.transform = `rotate(${degrees + 180}deg)`;
+    vane.text.textContent = phrase.replace('on the ', '');
+    vane.root.title = sentence;
+  }
+
+  // ─── Kill-streak powers ──────────────────────────────────────
+  /** The whole reward ladder, said once — in the legend, and in the feed at the
+   *  moment a threshold actually lands. It is NOT status text. */
+  private static readonly POWER_TABLE =
+    'Kill-streak powers: 5 kills · super cannonball  ·  10 · mega keg  ·  20 · tsunami [E]';
+
+  /** Streak seen on the previous HUD pass; −1 means "not seeded yet". */
+  private lastStreakSeen = -1;
+
+  /**
+   * The full powers table used to print in BOTH always-on strips from the first
+   * second of the match — a rules dump aimed at a player with zero kills who had
+   * not yet found their own ship. The badge carries the state; the table now
+   * speaks exactly once, when a threshold is genuinely crossed.
+   */
+  private announcePowerThresholds(player: Player): void {
+    const streak = player.playerKillStreak;
+    if (this.lastStreakSeen < 0) {
+      this.lastStreakSeen = streak;
+      return;
+    }
+    if (streak > this.lastStreakSeen) {
+      for (const threshold of [5, 10, 20]) {
+        if (this.lastStreakSeen < threshold && streak >= threshold) {
+          this.pushFeed(HudController.POWER_TABLE, '#7fe7ff');
+          break;
+        }
+      }
+    }
+    this.lastStreakSeen = streak;
+  }
+
+  /** Compact powers badge for the always-on strips: one glance, no rules. */
+  private getPowerBadge(player: Player) {
+    const ready: string[] = [];
+    if (player.superCannonballs > 0) ready.push(`Super ×${player.superCannonballs}`);
+    if (player.megaKegs > 0) ready.push(`Mega keg ×${player.megaKegs}`);
+    if (player.tsunamiCharges > 0) ready.push(`Tsunami ×${player.tsunamiCharges}`);
+    if (ready.length > 0) return `⚡ ${ready.join(' · ')} READY`;
 
     const next = player.playerKillStreak < 5
-      ? { count: 5, reward: 'super cannonball' }
+      ? 5
       : player.playerKillStreak < 10
-        ? { count: 10, reward: 'mega keg' }
-        : player.playerKillStreak < 20
-          ? { count: 20, reward: 'tsunami' }
-          : null;
+        ? 10
+        : player.playerKillStreak < 20 ? 20 : null;
     return next
-      ? `Powers: streak ${player.playerKillStreak}/${next.count} for ${next.reward} (5 super cannonball, 10 mega keg, 20 tsunami)`
-      : `Powers: streak ${player.playerKillStreak} · all rewards unlocked at 5/10/20`;
+      ? `Streak ${player.playerKillStreak}/${next} ⚡`
+      : `Streak ${player.playerKillStreak} ⚡`;
   }
 
   private getObjectiveSummary(

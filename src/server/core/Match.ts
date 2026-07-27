@@ -214,6 +214,9 @@ const CUTLASS_LUNGE_DAMAGE = 50;
 const CUTLASS_LUNGE_IMPULSE = 40;
 /** Kill credit for prior damage expires after this long (storm/drown deaths). */
 const KILL_CREDIT_WINDOW_SECONDS = 90;
+/** What finished a crew, threaded to the client on `game_over` so the death
+ *  screen can name the real cause instead of always saying SHIP SUNK. */
+type EliminationCause = 'ship_sunk' | 'storm' | 'drowned' | 'killed';
 /** Mast ladder climb rate — fraction of the full ladder per second (W up, S
  *  down). ~1.8s deck→nest on a sloop keeps the nest a commitment, not a snap. */
 const MAST_CLIMB_RATE = 0.55;
@@ -421,11 +424,32 @@ export class Match {
     this.state.phase = 'playing';
     this.playingSinceWallMs = Date.now();
     this.state.countdownRemaining = 0;
+    this.preHoistSailsAtHorn();
     this.broadcast({
       type: 'match_horn',
       ts: Date.now(),
       payload: { crews: this.state.shipsAlive },
     });
+  }
+
+  /**
+   * The horn drops canvas on every berthed hull — the ANCHOR STAYS DOWN.
+   *
+   * Cold start was: board, find the capstan, weigh anchor, then stand at the
+   * halyard for another haul before the ship so much as drifts. Half of that is
+   * pure setup nobody chose. Sails at half is the state a ship is left in at a
+   * berth anyway; with the anchor down PhysicsSystem pins targetSpeed at 0, so
+   * she does not move a metre until the captain says so.
+   *
+   * The anchor is deliberately NOT touched: `getShipGangwayPlan` returns null
+   * for an unanchored ship, so raising it here would delete the dock gangway
+   * out from under a player who is walking down it.
+   */
+  private preHoistSailsAtHorn(): void {
+    for (const ship of this.state.ships) {
+      if (!ship.alive || ship.sinking) continue;
+      ship.sailHeight = Math.max(ship.sailHeight, Math.min(0.5, ship.sailIntegrity));
+    }
   }
 
   /**
@@ -4604,6 +4628,21 @@ export class Match {
     this.downedByPlayer.delete(player.id);
   }
 
+  /**
+   * What actually finished this pirate, for the death screen's title.
+   *
+   * Called at the instant of elimination and never after: `applyEliminatedPlayerFields`
+   * clears the state and position this reads from. A credited killer wins over
+   * everything (a pirate shot into the water is a kill, not a drowning);
+   * otherwise the environment that was doing the damage names itself.
+   */
+  private eliminationCause(player: Player, killer: Player | null): EliminationCause {
+    if (killer) return 'killed';
+    if (this.storm.isOutside(player.position.x, player.position.z, this.state.storm)) return 'storm';
+    if (player.state === 'swimming') return 'drowned';
+    return 'killed';
+  }
+
   private recordElimination(p: Player) {
     if (this.eliminationOrder.includes(p.id)) return;
     this.eliminationOrder.push(p.id);
@@ -4947,6 +4986,7 @@ export class Match {
     // punctures decide the ship's fate naturally.
     const homeShip = this.getAliveShip(player.shipId);
     const canRespawn = !!homeShip;
+    let eliminationCause: EliminationCause = 'killed';
 
     if (canRespawn) {
       player.state = 'respawning';
@@ -4970,6 +5010,10 @@ export class Match {
       player.reviveProgress = 0;
       this.downedByPlayer.delete(player.id);
     } else {
+      // Read WHY before the elimination erases the evidence (state, position and
+      // the home ship all get cleared below) — the death screen used to claim
+      // "SHIP SUNK" for storm deaths, drownings and cutlass kills alike.
+      eliminationCause = this.eliminationCause(player, killer);
       player.state = 'eliminated';
       this.recordElimination(player);
       this.applyEliminatedPlayerFields(player);
@@ -4983,7 +5027,7 @@ export class Match {
         this.send(client.ws, {
           type: 'game_over',
           ts: Date.now(),
-          payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold },
+          payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold, cause: eliminationCause },
         });
       }
     }
@@ -5680,7 +5724,9 @@ export class Match {
             this.send(client.ws, {
               type: 'game_over',
               ts: Date.now(),
-              payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold },
+              // Waiting to respawn when the hull went out from under you: the one
+              // elimination that genuinely IS the ship going down.
+              payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold, cause: 'ship_sunk' },
             });
           }
         }
