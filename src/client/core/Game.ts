@@ -43,7 +43,6 @@ import { freezeStaticParent, freezeStaticSubtree, ZERO_SCALE_MAT4 } from '../ren
 import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
-import { makeStormTexture } from '../rendering/factories/TextureFactory.js';
 import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
 
@@ -268,7 +267,6 @@ export class Game {
   private windWispTimer = 0;
   private rainOverlayTimer = 0;
   private lastSentInputSignature = '';
-  private previousHealth: number = PLAYER.MAX_HEALTH;
   private previousKnockback = 0;
   private activeTradeSessionId: string | null = null;
   private localTradeOffer: ItemStack[] = [];
@@ -300,9 +298,6 @@ export class Game {
   private pendingInteractFromUi = false;
   private pendingLaunchFromUi = false;
   private readonly stormRingPositions = new Float32Array(96 * 3);
-  private readonly stormWallColorClear = new THREE.Color(0x395270);
-  private readonly stormWallColorStorm = new THREE.Color(0x202a3f);
-  private readonly stormWallTexture = makeStormTexture();
   private readonly tempProjectilePos = new THREE.Vector3();
   private readonly tempKegPos = new THREE.Vector3();
   private readonly tempSharkPos = new THREE.Vector3();
@@ -620,17 +615,9 @@ export class Game {
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({ color: 0x587ca5, transparent: true, opacity: 0.58 }),
   );
-  private readonly stormWall = new THREE.Mesh(
-    new THREE.CylinderGeometry(1, 1, 120, 72, 1, true),
-    new THREE.MeshBasicMaterial({
-      map: this.stormWallTexture,
-      color: 0x395270,
-      transparent: true,
-      opacity: 0.32,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
-  );
+  // (The old fogged MeshBasicMaterial storm-wall cylinder lived here. EnvironmentFx
+  // owns the weather at the ring now, and the legacy wall was laying a faint pale
+  // veil across everything at range from under it.)
   private readonly stormHalo = new THREE.Mesh(
     new THREE.TorusGeometry(1, 0.05, 8, 64),
     new THREE.MeshBasicMaterial({
@@ -695,15 +682,11 @@ export class Game {
     this.renderer.scene.add(this.mermaidGroup);
     this.mermaidGroup.visible = false;
     this.renderer.scene.add(this.stormRing);
-    this.renderer.scene.add(this.stormWall);
     this.renderer.scene.add(this.stormHalo);
     this.envFx.initWindWisps();
     this.stormRing.geometry.setAttribute('position', new THREE.BufferAttribute(this.stormRingPositions, 3));
     this.stormRing.position.y = 0.55;
     this.stormRing.frustumCulled = false;
-    this.stormWall.position.y = 44;
-    this.stormWall.renderOrder = 1;
-    this.stormWall.frustumCulled = false;
     this.stormHalo.rotation.x = Math.PI * 0.5;
     this.stormHalo.renderOrder = 2;
     this.stormHalo.frustumCulled = false;
@@ -712,13 +695,13 @@ export class Game {
 
     this.input.init(this.renderer.renderer.domElement);
     this.bindSupplyWheelActions();
-    // Scroll to zoom the opened map (pans to keep the player centred). Bound on
-    // window so it catches regardless of the overlay's pointer-events.
+    // Scroll to zoom the opened map, anchored on the cursor — point at a distant
+    // island and scroll and it comes to you. Bound on window so it catches
+    // regardless of the overlay's pointer-events.
     window.addEventListener('wheel', (e) => {
       if (!this.map.mapOpen) return;
       e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
-      this.map.mapZoom = Math.max(1, Math.min(7, this.map.mapZoom * factor));
+      this.map.zoomAtClient(e.deltaY < 0 ? 1.18 : 1 / 1.18, e.clientX, e.clientY);
     }, { passive: false });
     document.body.addEventListener('pointerdown', () => {
       this.combatFx.unlockAudio();
@@ -1156,7 +1139,6 @@ export class Game {
     this.livePlayerIds.clear();
     this.liveProjectileIds.clear();
     this.liveKegIds.clear();
-    this.previousHealth = PLAYER.MAX_HEALTH;
     this.previousKnockback = 0;
     this.previousLocalState = null;
     this.prevIsInsideIsland = null;
@@ -1364,6 +1346,50 @@ export class Game {
         this.toggleMap(false);
       }
     });
+
+    // Drag to pan the opened chart; a click that didn't drag centres whatever
+    // island (or island label) it landed on. Without this the chart was welded
+    // to the player and half the Reach could never be looked at.
+    const canvas = this.ui.mapCanvas;
+    let dragPointer: number | null = null;
+    let dragX = 0;
+    let dragY = 0;
+    let dragTravel = 0;
+    canvas.addEventListener('pointerdown', (event) => {
+      if (!this.map.mapOpen || event.button !== 0) return;
+      event.preventDefault();
+      dragPointer = event.pointerId;
+      dragX = event.clientX;
+      dragY = event.clientY;
+      dragTravel = 0;
+      canvas.setPointerCapture?.(event.pointerId);
+      canvas.style.cursor = 'grabbing';
+    });
+    canvas.addEventListener('pointermove', (event) => {
+      if (dragPointer !== event.pointerId || !this.map.mapOpen) return;
+      const dx = event.clientX - dragX;
+      const dy = event.clientY - dragY;
+      dragX = event.clientX;
+      dragY = event.clientY;
+      dragTravel += Math.hypot(dx, dy);
+      this.map.panByClient(dx, dy);
+      this.map.drawFullMap();
+    });
+    const endMapDrag = (event: PointerEvent) => {
+      if (dragPointer !== event.pointerId) return;
+      dragPointer = null;
+      canvas.releasePointerCapture?.(event.pointerId);
+      canvas.style.cursor = 'grab';
+      // Under ~5px of travel is a click, not a drag.
+      if (dragTravel < 5 && this.map.mapOpen) {
+        if (this.map.focusIslandAtClient(event.clientX, event.clientY)) {
+          this.audio.playUiClick();
+          this.map.drawFullMap();
+        }
+      }
+    };
+    canvas.addEventListener('pointerup', endMapDrag);
+    canvas.addEventListener('pointercancel', endMapDrag);
   }
 
   private bindSupplyWheelActions() {
@@ -1425,7 +1451,6 @@ export class Game {
       this.clearJoinAssignmentWatchdog();
       this.localPlayerId = playerId;
       this.localShipId = shipId;
-      this.previousHealth = PLAYER.MAX_HEALTH;
       this.applySnapshot(snapshot);
       // Dev: ?peace makes solo bots leave you (and your ship) alone from the start.
       if (new URLSearchParams(window.location.search).has('peace')) {
@@ -1563,8 +1588,9 @@ export class Game {
         if ((hitPayload.damage ?? 0) <= 0) return;
       }
       if (hitPayload.incoming) {
+        // The grunt is CombatFx's (it hears storm/drown/fall/fire too) — playing
+        // it here as well doubled it up on every bullet.
         this.handleIncomingHit(hitPayload);
-        this.audio.playPlayerHurt(hitPayload.damage ?? 10);
       } else {
         this.handleCombatHit(hitPayload);
         if (hitPayload.kill) {
@@ -1988,17 +2014,9 @@ export class Game {
     const attacker = payload.attackerName?.trim() || 'Enemy';
     const critical = payload.headshot ? ' headshot' : '';
     this.pushFeed(`Hit by ${attacker}${critical} - ${damage} (${weaponLabel})`, payload.headshot ? '#ff8f6d' : '#ffb37a');
-    if (payload.sourcePosition) this.spawnIncomingDamageDirection(payload.sourcePosition);
-  }
-
-  private spawnIncomingDamageDirection(sourcePosition: { x: number; y: number; z: number }) {
-    this.tempHudVector.set(sourcePosition.x, sourcePosition.y, sourcePosition.z).project(this.renderer.camera);
-    const angle = Math.atan2(this.tempHudVector.x, -this.tempHudVector.y);
-    const element = document.createElement('div');
-    element.className = 'incoming-damage-arrow';
-    element.style.setProperty('--hit-angle', `${angle}rad`);
-    this.ui.damageIndicatorLayer.appendChild(element);
-    window.setTimeout(() => element.remove(), 760);
+    // No direction arrow here: CombatFx's hurt wedge already smears the edge of
+    // the frame the shot came from, and it fires on EVERY loss of health rather
+    // than only on the hits that happen to carry a sourcePosition.
   }
 
   private spawnFloatingDamageIndicator(
@@ -2762,11 +2780,9 @@ export class Game {
     this.syncSharks(dt);
     this.syncWildlife(dt);
     this.updateEnvironmentLod();
-    // Per-frame so the wall/ring track the shrink smoothly instead of stepping
+    // Per-frame so the ring/halo track the shrink smoothly instead of stepping
     // only when snapshots arrive.
     this.updateStormRing();
-    this.stormWall.rotation.y = this.ocean.getTime() * 0.035;
-    this.stormWallTexture.offset.x = this.ocean.getTime() * 0.018;
     this.stormHalo.rotation.z = this.ocean.getTime() * 0.12;
     this.stormWeatherIntensity = this.envFx.computeStormWeatherIntensity();
     // (renderer storm weather is applied via updateWaterEnvironment below —
@@ -2804,9 +2820,6 @@ export class Game {
     this.envFx.updateStormRain3D(dt, this.stormRainIntensity);
     this.envFx.updateStormLightningFlash(dt);
     const stormW = this.stormWeatherIntensity;
-    const wallMat = this.stormWall.material as THREE.MeshBasicMaterial;
-    wallMat.opacity = 0.18 + stormW * 0.28;
-    wallMat.color.copy(this.stormWallColorClear).lerp(this.stormWallColorStorm, stormW);
     const haloMat = this.stormHalo.material as THREE.MeshBasicMaterial;
     haloMat.opacity = 0.08 + stormW * 0.16;
     this.combatFx.update(dt);
@@ -4338,10 +4351,6 @@ export class Game {
     positionAttr.needsUpdate = true;
     this.stormRing.material.opacity = 0.42 + Math.sin(this.ocean.getTime() * 3.6) * 0.08;
 
-    this.stormWall.position.set(this.state.storm.centerX, 44, this.state.storm.centerZ);
-    this.stormWall.scale.set(safeRadius, 1, safeRadius);
-    this.stormWall.visible = true;
-
     this.stormHalo.position.set(this.state.storm.centerX, 9, this.state.storm.centerZ);
     this.stormHalo.scale.set(safeRadius, safeRadius, 1);
     this.stormHalo.visible = true;
@@ -4679,13 +4688,9 @@ export class Game {
     const player = this.playersById.get(this.localPlayerId);
     if (!player) return;
 
-    if (player.health < this.previousHealth) {
-      this.ui.damageVignette.style.opacity = '1';
-      window.setTimeout(() => {
-        this.ui.damageVignette.style.opacity = '0';
-      }, 160);
-    }
-
+    // (The 160ms full-screen vignette blip that lived here is gone: CombatFx's
+    // directional hurt overlay is the same cue, but it decays over ~0.9s and
+    // tells you WHERE it came from.)
     const knockbackMagnitude = Math.hypot(
       player.knockbackVelocity.x,
       player.knockbackVelocity.y,
@@ -4699,7 +4704,6 @@ export class Game {
     }
 
     this.previousKnockback = knockbackMagnitude;
-    this.previousHealth = player.health;
 
     // Own-ship hull damage: shake the camera once per FRESH breach. No
     // direction arrow for ship hits — the shake + leak readout + hole markers
@@ -5425,10 +5429,19 @@ export class Game {
     // a redundant second map over the top-right of the fullscreen view).
     const minimapShell = document.getElementById('minimap-shell');
     if (minimapShell) minimapShell.style.visibility = next ? 'hidden' : '';
+    // The chart takes the mouse while it's up: the overlay is pointer-transparent
+    // by default so the HUD stays clickable, and the pointer has to leave lock
+    // or there is no cursor to drag a chart with (same deal as the supply wheel).
+    this.ui.mapOverlay.style.pointerEvents = next ? 'auto' : '';
+    this.ui.mapCanvas.style.cursor = next ? 'grab' : '';
     if (next) {
-      this.map.mapZoom = 1; // always open at the whole-world view; scroll to zoom in
+      this.map.resetChartView(); // always open at the whole-world view, centred on you
       this.ui.scopeOverlay.style.display = 'none';
+      if (this.input.isLocked()) document.exitPointerLock?.();
       this.map.drawMaps();
+    } else if (this.inMatch && !this.input.isLocked()) {
+      // Give the helm back its mouse the moment the chart is folded away.
+      this.renderer.renderer.domElement.requestPointerLock?.()?.catch?.(() => {});
     }
   }
 

@@ -7,11 +7,43 @@
 import * as THREE from 'three';
 import { WORLD } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandNpc, Player, Ship, TreasureChest } from '../../shared/types/index.js';
-import { getIslandMaxRadius, getIslandSurfacePoint, getIslandSurfaceY } from '../../shared/utils/index.js';
+import { getIslandMaxRadius, getIslandSurfaceY } from '../../shared/utils/index.js';
 import { BIOME_PALETTES } from '../../shared/props.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { Renderer } from '../rendering/Renderer.js';
 import type { UiRefs } from './UiRefs.js';
+
+/** A rasterized island land-shape, halo baked in, ready to stamp on a chart. */
+type ChartBitmap = {
+  /** Padded canvas — the pale shoreline halo lives in the padding. */
+  canvas: HTMLCanvasElement;
+  /** World half-size the PADDED canvas covers (use this to place it). */
+  extent: number;
+  /** World half-size the raw sample grid covered. */
+  coreExtent: number;
+  /** Sample grid resolution (unpadded). */
+  grid: number;
+  /** grid×grid land mask dilated by 2 texels — lets the hi-res pass skip sea. */
+  seaMask: Uint8Array;
+};
+
+/** A hi-res chart rasterization in flight, sampled a few rows per frame. */
+type ChartLod = {
+  extent: number;
+  grid: number;
+  /** Next grid row to sample. */
+  row: number;
+  heights: Float32Array;
+  /** The base bitmap's land mask projected onto this grid. */
+  mask: Uint8Array;
+};
+
+/** Fullscreen zoom past which the 512px chart LOD is worth rasterizing. */
+const CHART_LOD_ZOOM = 2.5;
+/** Milliseconds of island rasterization allowed per full-map frame. */
+const CHART_LOD_BUDGET_MS = 4;
+/** How many hi-res island charts to keep before evicting the oldest. */
+const CHART_LOD_KEEP = 6;
 
 export type MapView = {
   readonly ui: UiRefs;
@@ -37,8 +69,140 @@ export class MapRenderer {
   /** Cached per-island land-shape bitmaps for the chart. The world is fixed, so
    *  each island's true above-water footprint (archipelago islets, crescent bays,
    *  twin saddles) is rasterized once from getIslandSurfaceY and reused. */
-  private readonly islandChartCache = new Map<string, { canvas: HTMLCanvasElement; extent: number }>();
+  private readonly islandChartCache = new Map<string, ChartBitmap>();
+  /** 256-512px rasterizations, built lazily once the chart is zoomed past
+   *  CHART_LOD_ZOOM so the land stops being a blocky upscaled smear. */
+  private readonly islandChartLodCache = new Map<string, ChartBitmap>();
+  private readonly islandChartLodInFlight = new Map<string, ChartLod>();
   private treasureChartSignature = '';
+
+  /** Where the fullscreen chart is centred, in world units. `null` follows the
+   *  local pirate (the old behaviour); dragging or clicking a label pins it, so
+   *  a distant island can actually be inspected. Reset every time the map opens. */
+  private chartFocus: { x: number; z: number } | null = null;
+  /** Label boxes from the last fullscreen draw — click targets for centring. */
+  private labelHits: Array<{
+    id: string; name: string; x: number; y: number; w: number; h: number; worldX: number; worldZ: number;
+  }> = [];
+
+  /** Called when the map opens: whole world, centred on the pirate again. */
+  resetChartView() {
+    this.mapZoom = 1;
+    this.chartFocus = null;
+  }
+
+  /** Where the chart is looking right now (pan pin, or the pirate). */
+  private currentChartFocus(): { x: number; z: number } {
+    if (this.chartFocus) return this.chartFocus;
+    const player = this.view.getLocalPlayer();
+    const ship = this.view.getTrackedShip();
+    return {
+      x: player?.position.x ?? ship?.position.x ?? 0,
+      z: player?.position.z ?? ship?.position.z ?? 0,
+    };
+  }
+
+  /** Keep the visible window inside the Shattered Reach — you can pan to any
+   *  corner of the world but never off it into empty navy. At 1× the whole world
+   *  already fits, so this collapses to dead centre. */
+  private clampChartFocus(focus: { x: number; z: number }, width: number, height: number, scale: number) {
+    const limitX = Math.max(0, WORLD.HALF - width * 0.5 / scale);
+    const limitZ = Math.max(0, WORLD.HALF - height * 0.5 / scale);
+    return {
+      x: THREE.MathUtils.clamp(focus.x, -limitX, limitX),
+      z: THREE.MathUtils.clamp(focus.z, -limitZ, limitZ),
+    };
+  }
+
+  /** Canvas pixels per CSS pixel, and the canvas-space scale, for the open map. */
+  private chartMetrics() {
+    const canvas = this.view.ui.mapCanvas;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    return {
+      canvas,
+      rect,
+      pxPerClientX: canvas.width / rect.width,
+      pxPerClientY: canvas.height / rect.height,
+      scale: Math.min(canvas.width, canvas.height) / WORLD.SIZE * this.mapZoom,
+    };
+  }
+
+  /** Drag-to-pan. Deltas are CSS pixels of pointer travel over the chart. */
+  panByClient(dxClient: number, dyClient: number) {
+    const m = this.chartMetrics();
+    if (!m) return;
+    const focus = this.currentChartFocus();
+    this.chartFocus = this.clampChartFocus({
+      x: focus.x - dxClient * m.pxPerClientX / m.scale,
+      z: focus.z - dyClient * m.pxPerClientY / m.scale,
+    }, m.canvas.width, m.canvas.height, m.scale);
+  }
+
+  /** Scroll-zoom that keeps the water under the cursor under the cursor, so you
+   *  can pull a far island in just by pointing at it and scrolling. */
+  zoomAtClient(factor: number, clientX: number, clientY: number) {
+    const m = this.chartMetrics();
+    const previousZoom = this.mapZoom;
+    const nextZoom = THREE.MathUtils.clamp(previousZoom * factor, 1, 7);
+    if (!m) { this.mapZoom = nextZoom; return; }
+    const focus = this.clampChartFocus(this.currentChartFocus(), m.canvas.width, m.canvas.height, m.scale);
+    const px = (clientX - m.rect.left) * m.pxPerClientX - m.canvas.width * 0.5;
+    const py = (clientY - m.rect.top) * m.pxPerClientY - m.canvas.height * 0.5;
+    const worldX = focus.x + px / m.scale;
+    const worldZ = focus.z + py / m.scale;
+    this.mapZoom = nextZoom;
+    const nextScale = Math.min(m.canvas.width, m.canvas.height) / WORLD.SIZE * nextZoom;
+    this.chartFocus = this.clampChartFocus({
+      x: worldX - px / nextScale,
+      z: worldZ - py / nextScale,
+    }, m.canvas.width, m.canvas.height, nextScale);
+  }
+
+  /** Click an island (its name label or its land) to centre and open it up.
+   *  Returns true when something was hit, so a plain click on open water can
+   *  fall through to "nothing happened". */
+  focusIslandAtClient(clientX: number, clientY: number): boolean {
+    const m = this.chartMetrics();
+    if (!m || !this.view.state) return false;
+    const px = (clientX - m.rect.left) * m.pxPerClientX;
+    const py = (clientY - m.rect.top) * m.pxPerClientY;
+    let hit: { x: number; z: number } | null = null;
+    for (const label of this.labelHits) {
+      if (px >= label.x && px <= label.x + label.w && py >= label.y && py <= label.y + label.h) {
+        hit = { x: label.worldX, z: label.worldZ };
+        break;
+      }
+    }
+    if (!hit) {
+      const focus = this.clampChartFocus(this.currentChartFocus(), m.canvas.width, m.canvas.height, m.scale);
+      const worldX = focus.x + (px - m.canvas.width * 0.5) / m.scale;
+      const worldZ = focus.z + (py - m.canvas.height * 0.5) / m.scale;
+      for (const island of this.view.state.islands) {
+        const reach = getIslandMaxRadius(island) * 1.05;
+        if (Math.hypot(island.position.x - worldX, island.position.z - worldZ) <= reach) {
+          hit = { x: island.position.x, z: island.position.z };
+          break;
+        }
+      }
+    }
+    if (!hit) return false;
+    this.mapZoom = Math.max(this.mapZoom, 3.2);
+    const nextScale = Math.min(m.canvas.width, m.canvas.height) / WORLD.SIZE * this.mapZoom;
+    this.chartFocus = this.clampChartFocus(hit, m.canvas.width, m.canvas.height, nextScale);
+    return true;
+  }
+
+  /** Probe hooks (scripts/map-chart-probe.mjs) — never called in play. */
+  debugFocus() { return this.clampChartFocus(this.currentChartFocus(), this.view.ui.mapCanvas.width, this.view.ui.mapCanvas.height, Math.min(this.view.ui.mapCanvas.width, this.view.ui.mapCanvas.height) / WORLD.SIZE * this.mapZoom); }
+  debugLabelHitTargets() { return this.labelHits.map((label) => ({ ...label, x: label.x + label.w * 0.5, y: label.y + label.h * 0.5 })); }
+  debugChartBitmapSizes() {
+    const sizes: Record<string, { base: number; lod: number | null }> = {};
+    for (const [id, bmp] of this.islandChartCache) {
+      sizes[id] = { base: bmp.grid, lod: this.islandChartLodCache.get(id)?.grid ?? null };
+    }
+    return sizes;
+  }
 
   drawMaps() {
     if (!this.view.state) return;
@@ -164,42 +328,27 @@ export class MapRenderer {
     }
     ctx.restore();
 
+    const chartBitmap = this.getIslandChartBitmap(chartIsland);
     const cx = width * 0.5;
     const cy = height * 0.53;
-    const mapScale = Math.min(width, height) * 0.38 / Math.max(1, chartIsland.radius);
+    // Scale off the BITMAP's extent, not island.radius: the same land raster the
+    // battle map stamps, so the hoarder's chart and the main map agree on what
+    // this isle actually looks like (bays open, islets separate).
+    const mapScale = Math.min(width, height) * 0.42 / chartBitmap.extent;
     const toMap = (x: number, z: number) => ({
       x: cx + (x - chartIsland.position.x) * mapScale,
       y: cy + (z - chartIsland.position.z) * mapScale,
     });
 
     ctx.save();
-    ctx.fillStyle = '#8a6b36';
-    ctx.strokeStyle = 'rgba(60, 35, 12, 0.76)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    const segments = this.view.renderer.getQuality() === 'low' ? 24 : this.view.renderer.getQuality() === 'balanced' ? 32 : 42;
-    for (let segment = 0; segment <= segments; segment++) {
-      const angle = (segment / segments) * Math.PI * 2;
-      const point = getIslandSurfacePoint(chartIsland, 0.98, angle, 0);
-      const mapped = toMap(point.x, point.z);
-      if (segment === 0) ctx.moveTo(mapped.x, mapped.y);
-      else ctx.lineTo(mapped.x, mapped.y);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = 'rgba(67, 88, 35, 0.58)';
-    ctx.beginPath();
-    for (let segment = 0; segment <= segments; segment++) {
-      const angle = (segment / segments) * Math.PI * 2;
-      const point = getIslandSurfacePoint(chartIsland, 0.54, angle, 0);
-      const mapped = toMap(point.x, point.z);
-      if (segment === 0) ctx.moveTo(mapped.x, mapped.y);
-      else ctx.lineTo(mapped.x, mapped.y);
-    }
-    ctx.closePath();
-    ctx.fill();
+    this.stampChartBitmap(
+      ctx,
+      chartBitmap,
+      chartIsland,
+      cx - chartIsland.position.x * mapScale,
+      cy - chartIsland.position.z * mapScale,
+      mapScale,
+    );
 
     if (chartIsland.dock) {
       const dock = chartIsland.dock;
@@ -396,8 +545,15 @@ export class MapRenderer {
     const baseScale = Math.min(width, height) / WORLD.SIZE;
     const zoom = fullscreen ? this.mapZoom : 1;
     const scale = baseScale * zoom;
-    const focusX = zoom > 1.001 ? localX : 0;
-    const focusZ = zoom > 1.001 ? localZ : 0;
+    // The opened chart looks at its focus point — the pirate by default, or
+    // wherever they dragged/clicked to. The clamp keeps the window inside the
+    // world, which at 1× collapses to dead centre (the old whole-world fit).
+    const focus = fullscreen
+      ? this.clampChartFocus(this.currentChartFocus(), width, height, scale)
+      : { x: 0, z: 0 };
+    const focusX = focus.x;
+    const focusZ = focus.z;
+    if (fullscreen && zoom > CHART_LOD_ZOOM) this.advanceChartLods(width, height, scale, focusX, focusZ);
     const centerX = width * 0.5 - focusX * scale;
     const centerY = height * 0.5 - focusZ * scale;
     const stormX = centerX + this.view.state.storm.centerX * scale;
@@ -488,6 +644,7 @@ export class MapRenderer {
 
     // Full map: peak/volcano markers, big landmarks, and island name labels.
     if (fullscreen) {
+      const labelPlan: Array<{ island: Island; ix: number; iy: number; rPx: number }> = [];
       ctx.save();
       ctx.textAlign = 'center';
       for (const island of this.view.state.islands) {
@@ -537,15 +694,11 @@ export class MapRenderer {
           if (!cave.hasMouth) continue;
           this.drawPoiIcon(ctx, 'cave', centerX + cave.position.x * scale, centerY + cave.position.z * scale, 5.5);
         }
-        // Name label above the isle, outlined for legibility over any tint.
-        ctx.textBaseline = 'bottom';
-        ctx.font = '600 13px Georgia, serif';
-        ctx.lineWidth = 3.5;
-        ctx.strokeStyle = 'rgba(6, 14, 26, 0.9)';
-        ctx.strokeText(island.name, ix, iy - rPx - 4);
-        ctx.fillStyle = '#f4e8c6';
-        ctx.fillText(island.name, ix, iy - rPx - 4);
+        // Name labels are laid out in a second pass below — collected here so
+        // they can be nudged clear of each other and of the storm ring.
+        labelPlan.push({ island, ix, iy, rPx });
       }
+      this.drawIslandLabels(ctx, labelPlan, stormX, stormY, stormRadius);
       ctx.restore();
     }
 
@@ -620,19 +773,26 @@ export class MapRenderer {
         ctx.fillStyle = 'rgba(200, 190, 168, 0.72)';
         ctx.font = '9px Georgia, serif';
         ctx.fillText(hasGoldMap ? 'Gold Hoarder chart' : 'No treasure chart yet', ix + 8, iy + 30);
+        // The SAME land bitmap the main chart draws — the inset used to invent a
+        // generic ellipse, which contradicted the honest shape three inches away.
         const cx = ix + inset * 0.5;
-        const cy = iy + inset * 0.54;
-        ctx.fillStyle = 'rgba(110, 86, 56, 0.55)';
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, inset * 0.36, inset * 0.32, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(201, 168, 76, 0.4)';
-        ctx.stroke();
+        const cy = iy + inset * 0.56;
+        const bmp = this.getIslandChartBitmap(chart);
+        const insetScale = inset * 0.38 / bmp.extent;
+        this.stampChartBitmap(
+          ctx,
+          bmp,
+          chart,
+          cx - chart.position.x * insetScale,
+          cy - chart.position.z * insetScale,
+          insetScale,
+        );
+        // X marks land by true world projection, not a decorative offset.
         for (const c of hasGoldMap ? this.getTreasureChartChests(chart) : []) {
           if (c.opened || c.carriedByPlayerId || c.storedOnShipId || c.floating) continue;
-          const mx = cx + c.mapOffsetX * inset * 0.3;
-          const my = cy + c.mapOffsetZ * inset * 0.3;
-          this.drawTreasureX(ctx, mx, my, 8, '#7a1515');
+          const mx = cx + (c.position.x - chart.position.x) * insetScale;
+          const my = cy + (c.position.z - chart.position.z) * insetScale;
+          this.drawTreasureX(ctx, mx, my, 8, '#c02222');
         }
       }
     }
@@ -690,6 +850,98 @@ export class MapRenderer {
     ctx.restore();
   }
 
+  /**
+   * Second label pass: measure every island name, then nudge the boxes until
+   * none of them overlap another and none of them straddle the storm ring
+   * (where white-on-purple made 'Kraken Tooth' unreadable). A label that had to
+   * travel gets a hairline leader back to its isle so it stays attributable.
+   * The final boxes double as click targets for centring the chart.
+   */
+  private drawIslandLabels(
+    ctx: CanvasRenderingContext2D,
+    plan: Array<{ island: Island; ix: number; iy: number; rPx: number }>,
+    stormX: number,
+    stormY: number,
+    stormRadius: number,
+  ) {
+    ctx.font = '600 13px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const lineHeight = 15;
+    const gap = 3;
+    const ringBand = lineHeight * 1.15 + 5;
+    // Push a label's baseline off the storm ring along the shortest vertical
+    // move — the ring is a circle, so the exits are its two y-intercepts here.
+    const clearOfRing = (x: number, y: number) => {
+      const dx = x - stormX;
+      const midY = y - lineHeight * 0.5;
+      const distance = Math.hypot(dx, midY - stormY);
+      if (distance < stormRadius - ringBand || distance > stormRadius + ringBand) return y;
+      let best = y;
+      let bestTravel = Infinity;
+      for (const radius of [stormRadius - ringBand, stormRadius + ringBand]) {
+        const square = radius * radius - dx * dx;
+        if (square <= 0) continue;
+        const root = Math.sqrt(square);
+        for (const candidate of [stormY + root, stormY - root]) {
+          const travel = Math.abs(candidate + lineHeight * 0.5 - y);
+          if (travel < bestTravel) { bestTravel = travel; best = candidate + lineHeight * 0.5; }
+        }
+      }
+      return bestTravel === Infinity ? y : best;
+    };
+
+    const placed: Array<{ left: number; right: number; top: number; bottom: number }> = [];
+    this.labelHits = [];
+    const entries = plan
+      .map((entry) => ({ ...entry, w: ctx.measureText(entry.island.name).width + 8, y: entry.iy - entry.rPx - 4 }))
+      .sort((a, b) => a.y - b.y);
+    for (const entry of entries) {
+      const left = entry.ix - entry.w * 0.5;
+      const right = entry.ix + entry.w * 0.5;
+      let y = clearOfRing(entry.ix, entry.y);
+      for (let pass = 0; pass < 20; pass++) {
+        let moved = false;
+        for (const box of placed) {
+          if (right < box.left || left > box.right) continue;
+          if (y <= box.top || y - lineHeight >= box.bottom) continue;
+          y = box.top - gap;                 // stack upward, away from the isle
+          moved = true;
+        }
+        const cleared = clearOfRing(entry.ix, y);
+        if (cleared !== y) { y = cleared; moved = true; }
+        if (!moved) break;
+      }
+      placed.push({ left, right, top: y - lineHeight, bottom: y });
+      const travelled = Math.abs(y - entry.y);
+      if (travelled > 7) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(244, 232, 198, 0.34)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(entry.ix, y + 1);
+        ctx.lineTo(entry.ix, entry.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = 'rgba(6, 14, 26, 0.9)';
+      ctx.strokeText(entry.island.name, entry.ix, y);
+      ctx.fillStyle = '#f4e8c6';
+      ctx.fillText(entry.island.name, entry.ix, y);
+      this.labelHits.push({
+        id: entry.island.id,
+        name: entry.island.name,
+        x: left,
+        y: y - lineHeight,
+        w: entry.w,
+        h: lineHeight,
+        worldX: entry.island.position.x,
+        worldZ: entry.island.position.z,
+      });
+    }
+  }
+
   private drawShipMarker(
     ctx: CanvasRenderingContext2D,
     x: number,
@@ -720,46 +972,270 @@ export class MapRenderer {
    *  getIslandSurfaceY over the footprint means archipelagos draw as separate
    *  islets, crescents as a C around their bay, twins with their saddle — instead
    *  of the old single smooth footprint-ring blob. */
-  private getIslandChartBitmap(island: Island): { canvas: HTMLCanvasElement; extent: number } {
+  private getIslandChartBitmap(island: Island): ChartBitmap {
     const cached = this.islandChartCache.get(island.id);
     if (cached) return cached;
     const extent = getIslandMaxRadius(island) * 1.04;
-    const gridN = THREE.MathUtils.clamp(Math.round(extent / 1.4), 48, 150);
-    const canvas = document.createElement('canvas');
-    canvas.width = gridN;
-    canvas.height = gridN;
-    const g = canvas.getContext('2d')!;
-    const img = g.createImageData(gridN, gridN);
-    const data = img.data;
+    const grid = THREE.MathUtils.clamp(Math.round(extent / 1.4), 48, 150);
+    const heights = new Float32Array(grid * grid);
+    this.sampleChartRows(island, grid, extent, heights, 0, grid, null);
+    const entry = this.composeChartBitmap(
+      grid,
+      extent,
+      this.shadeChartPixels(island, grid, extent, heights, false),
+      this.buildDilatedMask(grid, heights),
+    );
+    this.islandChartCache.set(island.id, entry);
+    return entry;
+  }
+
+  /** Sample the true surface height over one band of an island's chart grid. */
+  private sampleChartRows(
+    island: Island,
+    grid: number,
+    extent: number,
+    heights: Float32Array,
+    fromRow: number,
+    toRow: number,
+    seaMask: Uint8Array | null,
+  ) {
+    for (let gz = fromRow; gz < toRow; gz++) {
+      for (let gx = 0; gx < grid; gx++) {
+        const index = gz * grid + gx;
+        // The hi-res pass reuses the base bitmap's dilated land mask to skip the
+        // open sea inside the bounding square — roughly half the samples, and
+        // every one of them is a full fbm terrain evaluation.
+        if (seaMask && seaMask[index] === 0) { heights[index] = -9; continue; }
+        const lx = ((gx + 0.5) / grid * 2 - 1) * extent;
+        const lz = ((gz + 0.5) / grid * 2 - 1) * extent;
+        heights[index] = getIslandSurfaceY(island, island.position.x + lx, island.position.z + lz);
+      }
+    }
+  }
+
+  /** Land mask (1 = above water) grown by 2 texels, so a coarse grid can vouch
+   *  for a finer one without ever clipping the real coastline. */
+  private buildDilatedMask(grid: number, heights: Float32Array): Uint8Array {
+    const raw = new Uint8Array(grid * grid);
+    for (let i = 0; i < raw.length; i++) raw[i] = heights[i] > 0.35 ? 1 : 0;
+    const horizontal = new Uint8Array(grid * grid);
+    for (let gz = 0; gz < grid; gz++) {
+      for (let gx = 0; gx < grid; gx++) {
+        let hit = 0;
+        for (let d = -2; d <= 2 && hit === 0; d++) {
+          const sx = gx + d;
+          if (sx >= 0 && sx < grid && raw[gz * grid + sx] === 1) hit = 1;
+        }
+        horizontal[gz * grid + gx] = hit;
+      }
+    }
+    const out = new Uint8Array(grid * grid);
+    for (let gz = 0; gz < grid; gz++) {
+      for (let gx = 0; gx < grid; gx++) {
+        let hit = 0;
+        for (let d = -2; d <= 2 && hit === 0; d++) {
+          const sz = gz + d;
+          if (sz >= 0 && sz < grid && horizontal[sz * grid + gx] === 1) hit = 1;
+        }
+        out[gz * grid + gx] = hit;
+      }
+    }
+    return out;
+  }
+
+  /** Turn a sampled height field into chart pixels: biome colour, a north-west
+   *  hillshade so relief reads at a glance, a wet-sand rim, and — on the hi-res
+   *  LOD — contour rings every few metres, so zooming in genuinely reveals the
+   *  shape of the land instead of magnifying a blob. */
+  private shadeChartPixels(
+    island: Island,
+    grid: number,
+    extent: number,
+    heights: Float32Array,
+    contours: boolean,
+  ): Uint8ClampedArray {
+    const data = new Uint8ClampedArray(grid * grid * 4);
     const palette = island.profile.palette
       ?? BIOME_PALETTES[island.profile.biome ?? 'lush'] ?? BIOME_PALETTES.lush;
     const sand = new THREE.Color(palette.sand);
     const grass = new THREE.Color(palette.grass);
     const rock = new THREE.Color(palette.rock);
     const isVolcanic = (island.profile.biome ?? 'lush') === 'volcanic';
-    const ash = new THREE.Color(0x2b2621);
+    // Cooled basalt, not soot: the old near-black ash sank volcanic isles into
+    // the navy ocean. This still reads burnt, but survives deep water under it.
+    const ash = new THREE.Color(0x5d5147);
+    const shore = new THREE.Color(0xf0e2bd);
     const col = new THREE.Color();
-    for (let gz = 0; gz < gridN; gz++) {
-      for (let gx = 0; gx < gridN; gx++) {
-        const lx = ((gx + 0.5) / gridN * 2 - 1) * extent;
-        const lz = ((gz + 0.5) / gridN * 2 - 1) * extent;
-        const y = getIslandSurfaceY(island, island.position.x + lx, island.position.z + lz);
-        const idx = (gz * gridN + gx) * 4;
+    let maxHeight = 0;
+    for (let i = 0; i < heights.length; i++) if (heights[i] > maxHeight) maxHeight = heights[i];
+    const contourStep = Math.max(2.5, maxHeight / 9);
+    const cell = 2 * extent / grid;
+    const at = (gx: number, gz: number) => {
+      const cx = gx < 0 ? 0 : gx >= grid ? grid - 1 : gx;
+      const cz = gz < 0 ? 0 : gz >= grid ? grid - 1 : gz;
+      const h = heights[cz * grid + cx];
+      return h > 0 ? h : 0;
+    };
+    for (let gz = 0; gz < grid; gz++) {
+      for (let gx = 0; gx < grid; gx++) {
+        const index = gz * grid + gx;
+        const y = heights[index];
+        const idx = index * 4;
         if (y <= 0.35) { data[idx + 3] = 0; continue; }   // below the waterline → sea shows through
         const t = THREE.MathUtils.clamp((y - 0.35) / 3.0, 0, 1); // shore sand → interior grass
         col.copy(sand).lerp(grass, t);
         if (y > 7) col.lerp(rock, THREE.MathUtils.clamp((y - 7) / 15, 0, 0.65));   // rocky heights
-        if (isVolcanic && y > 6) col.lerp(ash, THREE.MathUtils.clamp((y - 6) / 12, 0, 0.7));
-        data[idx] = Math.round(col.r * 255);
-        data[idx + 1] = Math.round(col.g * 255);
-        data[idx + 2] = Math.round(col.b * 255);
+        if (isVolcanic && y > 6) col.lerp(ash, THREE.MathUtils.clamp((y - 6) / 12, 0, 0.62));
+        // Hillshade straight off the sampled gradient, light from the north-west.
+        const dhdx = (at(gx + 1, gz) - at(gx - 1, gz)) / (2 * cell);
+        const dhdz = (at(gx, gz + 1) - at(gx, gz - 1)) / (2 * cell);
+        const inv = 1 / Math.sqrt(dhdx * dhdx + dhdz * dhdz + 1);
+        const lambert = (dhdx * 0.5345 + dhdz * 0.5345 + 0.6547) * inv;
+        col.multiplyScalar(THREE.MathUtils.clamp(0.66 + lambert * 0.48, 0.7, 1.24));
+        // Wet-sand rim — the shoreline stays the brightest line on the island.
+        if (y < 1.2) col.lerp(shore, (1.2 - y) / 1.2 * 0.42);
+        if (contours && y > 1.4) {
+          const band = Math.floor(y / contourStep);
+          if (band !== Math.floor(at(gx - 1, gz) / contourStep) || band !== Math.floor(at(gx, gz - 1) / contourStep)) {
+            col.multiplyScalar(0.74);
+          }
+        }
+        data[idx] = Math.round(THREE.MathUtils.clamp(col.r, 0, 1) * 255);
+        data[idx + 1] = Math.round(THREE.MathUtils.clamp(col.g, 0, 1) * 255);
+        data[idx + 2] = Math.round(THREE.MathUtils.clamp(col.b, 0, 1) * 255);
         data[idx + 3] = 255;
       }
     }
-    g.putImageData(img, 0, 0);
-    const entry = { canvas, extent };
-    this.islandChartCache.set(island.id, entry);
-    return entry;
+    return data;
+  }
+
+  /** Bake the pixels onto a padded canvas with a pale shoreline halo, so every
+   *  island — a volcanic cone included — separates from navy water without
+   *  costing a blur on every single frame. */
+  private composeChartBitmap(
+    grid: number,
+    extent: number,
+    data: Uint8ClampedArray,
+    seaMask: Uint8Array,
+  ): ChartBitmap {
+    const source = document.createElement('canvas');
+    source.width = grid;
+    source.height = grid;
+    const sourceCtx = source.getContext('2d')!;
+    const image = sourceCtx.createImageData(grid, grid);
+    image.data.set(data);
+    sourceCtx.putImageData(image, 0, 0);
+    const pad = Math.max(2, Math.round(grid * 0.05));
+    const padded = grid + pad * 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = padded;
+    canvas.height = padded;
+    const g = canvas.getContext('2d')!;
+    g.shadowColor = 'rgba(176, 214, 250, 0.62)';
+    g.shadowBlur = pad * 0.85;
+    g.drawImage(source, pad, pad);
+    g.shadowBlur = 0;
+    g.shadowColor = 'transparent';
+    g.drawImage(source, pad, pad);
+    return { canvas, extent: extent * padded / grid, coreExtent: extent, grid, seaMask };
+  }
+
+  /** Best chart bitmap available at this zoom — the sharp LOD once it exists,
+   *  the base one meanwhile, so the chart never blanks while it sharpens. */
+  private pickChartBitmap(island: Island, zoom: number): ChartBitmap {
+    if (zoom > CHART_LOD_ZOOM) {
+      const lod = this.islandChartLodCache.get(island.id);
+      if (lod) return lod;
+    }
+    return this.getIslandChartBitmap(island);
+  }
+
+  /** A full 512px island is ~250k terrain evaluations — far too much for one
+   *  frame. Spend a few milliseconds per frame on the islands actually on
+   *  screen, nearest first, and swap the sharp bitmap in when it finishes. */
+  private advanceChartLods(width: number, height: number, scale: number, focusX: number, focusZ: number) {
+    if (!this.view.state) return;
+    const halfW = width * 0.5 / scale;
+    const halfH = height * 0.5 / scale;
+    const pending = this.view.state.islands
+      .filter((island) => !this.islandChartLodCache.has(island.id))
+      .filter((island) => {
+        const reach = getIslandMaxRadius(island) * 1.2;
+        return Math.abs(island.position.x - focusX) < halfW + reach
+          && Math.abs(island.position.z - focusZ) < halfH + reach;
+      })
+      .sort((a, b) => (
+        Math.hypot(a.position.x - focusX, a.position.z - focusZ)
+        - Math.hypot(b.position.x - focusX, b.position.z - focusZ)
+      ));
+    let budget = CHART_LOD_BUDGET_MS;
+    for (const island of pending) {
+      if (budget <= 0.2) break;
+      const startedAt = performance.now();
+      this.advanceChartLod(island, budget);
+      budget -= performance.now() - startedAt;
+    }
+  }
+
+  private advanceChartLod(island: Island, budgetMs: number) {
+    const base = this.getIslandChartBitmap(island);
+    let lod = this.islandChartLodInFlight.get(island.id);
+    if (!lod) {
+      const grid = THREE.MathUtils.clamp(Math.round(base.coreExtent * 2.8), 256, 512);
+      const mask = new Uint8Array(grid * grid);
+      // The base mask sits on a coarser grid; project it up to this one.
+      const ratio = base.grid / grid;
+      for (let gz = 0; gz < grid; gz++) {
+        const sz = Math.min(base.grid - 1, Math.floor(gz * ratio));
+        for (let gx = 0; gx < grid; gx++) {
+          const sx = Math.min(base.grid - 1, Math.floor(gx * ratio));
+          mask[gz * grid + gx] = base.seaMask[sz * base.grid + sx];
+        }
+      }
+      lod = { extent: base.coreExtent, grid, row: 0, heights: new Float32Array(grid * grid), mask };
+      this.islandChartLodInFlight.set(island.id, lod);
+    }
+    const startedAt = performance.now();
+    while (lod.row < lod.grid) {
+      this.sampleChartRows(island, lod.grid, lod.extent, lod.heights, lod.row, lod.row + 1, lod.mask);
+      lod.row += 1;
+      if (performance.now() - startedAt >= budgetMs) return;
+    }
+    this.islandChartLodInFlight.delete(island.id);
+    this.islandChartLodCache.set(island.id, this.composeChartBitmap(
+      lod.grid,
+      lod.extent,
+      this.shadeChartPixels(island, lod.grid, lod.extent, lod.heights, true),
+      lod.mask,
+    ));
+    // Map iteration is insertion-ordered — drop the least recently built.
+    while (this.islandChartLodCache.size > CHART_LOD_KEEP) {
+      const oldest = this.islandChartLodCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.islandChartLodCache.delete(oldest);
+    }
+  }
+
+  /** Stamp an island's land bitmap centred on its true world position. */
+  private stampChartBitmap(
+    ctx: CanvasRenderingContext2D,
+    bmp: ChartBitmap,
+    island: Island,
+    centerX: number,
+    centerY: number,
+    scale: number,
+  ) {
+    const size = bmp.extent * 2 * scale;
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(
+      bmp.canvas,
+      centerX + (island.position.x - bmp.extent) * scale,
+      centerY + (island.position.z - bmp.extent) * scale,
+      size,
+      size,
+    );
+    ctx.restore();
   }
 
   private drawIslandChart(
@@ -773,18 +1249,7 @@ export class MapRenderer {
     // Draw the island's TRUE above-water shape from a cached land-mask bitmap
     // (archipelago islets separate, crescent bays open, twin saddles) instead of
     // a single smooth footprint ring.
-    const bmp = this.getIslandChartBitmap(island);
-    const size = bmp.extent * 2 * scale;
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(
-      bmp.canvas,
-      centerX + (island.position.x - bmp.extent) * scale,
-      centerY + (island.position.z - bmp.extent) * scale,
-      size,
-      size,
-    );
-    ctx.restore();
+    this.stampChartBitmap(ctx, this.pickChartBitmap(island, fullscreen ? this.mapZoom : 1), island, centerX, centerY, scale);
 
     if (island.dock) {
       const dock = island.dock;
@@ -844,7 +1309,5 @@ export class MapRenderer {
         }
       }
     }
-
-    ctx.restore();
   }
 }
