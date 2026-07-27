@@ -472,7 +472,9 @@ export class HudController {
           : '';
       const windLine = `Wind ${windHeading} ${windArrow} ${windDegrees}deg ${windSide}`;
       this.view.ui.sailStatus.textContent = ship.anchored
-        ? `Anchored · Hold [X] raise · ${windLine}`
+        // The helm can weigh the anchor too now (hold [W] at the wheel), so the
+        // panel must not send a lone captain forward to the bow capstan.
+        ? `Anchored · hold [X] at the capstan or [W] at the helm · ${windLine}`
         : `Sails ${Math.round(ship.sailHeight * 100)}%${rig} · Trim ${trimSide} · Catch ${Math.round(trimCatch * 100)}% · ${trimHint} · ${windLine}`;
     } else {
       this.view.ui.sailStatus.textContent = 'No tracked ship';

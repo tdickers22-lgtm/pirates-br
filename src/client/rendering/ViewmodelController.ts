@@ -1023,16 +1023,24 @@ export class ViewmodelController {
       const raise = THREE.MathUtils.smoothstep(cycle, 0, 0.35);
       const drive = THREE.MathUtils.clamp((cycle - 0.35) / 0.15, 0, 1) ** 2;
       const toss = THREE.MathUtils.smoothstep(cycle, 0.5, 0.85);
+      // FRAMING: measured phase-by-phase (probe pinning the cycle), the dig kept
+      // the OLD close-in anchor the rest pose was moved off of — z −0.55 puts the
+      // rear fist ~0.4m from the eye, and the beats threw it clean off the bottom
+      // of the frame twice per cycle: ndc.y −0.85 at the base of the RAISE and
+      // −1.08 at the DRIVE peak (a whole frame-height under the HUD). Re-anchored
+      // on the audited shovel rest anchor (out to z −0.76 and right of centre, the
+      // same move that fixed rest) with the three beats and their relative
+      // weights untouched, so RAISE → DRIVE → LEVER+toss still reads.
       this.localViewPocketRoot.visible = true;
       this.localViewPocketRoot.position.set(
-        -0.05 + toss * 0.16,
-        -0.34 + raise * 0.22 - drive * 0.14 + toss * 0.16,
-        -0.55 + raise * 0.05 - drive * 0.1 + toss * 0.08,
+        0.14 + toss * 0.16,
+        -0.28 + raise * 0.2 - drive * 0.12 + toss * 0.14,
+        -0.76 + raise * 0.05 - drive * 0.1 + toss * 0.08,
       );
       this.localViewPocketRoot.rotation.set(
-        -0.55 - raise * 0.45 + drive * 1.4 - toss * 0.65,
-        0.12 + raise * 0.18 - toss * 0.3,
-        -0.08 + drive * 0.05 + toss * 0.6,
+        -0.5 - raise * 0.42 + drive * 1.25 - toss * 0.6,
+        0.2 + raise * 0.18 - toss * 0.3,
+        -0.06 + drive * 0.05 + toss * 0.6,
       );
       return true;
     }
