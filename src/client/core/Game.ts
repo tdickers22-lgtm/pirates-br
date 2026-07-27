@@ -4033,7 +4033,8 @@ export class Game {
    *  up. Idempotent: anything already drawn is skipped. */
   /** The Gilded Wreck rose, or the storm took her back. One feed line, one bell
    *  toll — a bell because it has to carry over weather and gunfire and mean
-   *  "look at the chart" without a word of UI. */
+   *  "look at the chart" without a word of UI — and, under it, the score's own
+   *  two-bar figure for a grave with gold in it. */
   private announceWreckEvent(payload: { phase: 'risen' | 'claimed'; position: { x: number; y: number; z: number }; duration: number }) {
     if (payload.phase === 'claimed') {
       this.pushFeed('The sea closes over the Gilded Wreck.', '#9aa7b8');
@@ -4047,6 +4048,10 @@ export class Game {
     const camera = this.renderer.camera.position;
     const distance = Math.hypot(camera.x - payload.position.x, camera.z - payload.position.z);
     this.audio.playWreckBell(distance);
+    // The bell says WHERE; the sting says WHAT. It was written for exactly this
+    // moment and then never fired, so the bounty cry was the only event in the
+    // match the score ever answered.
+    this.audio.playEventSting('wreck');
   }
 
   private buildLateLootMeshes(islandId: string, chestIds: string[], barrelIds: string[]) {
@@ -5620,6 +5625,15 @@ export class Game {
       }
     }
     this.audio.setTavernSource(tavernPos ? tavernDist : null, tavernPos);
+    // The Gilded Wreck is the only mark in the open sea with a voice: bell,
+    // hull groan and rigging creak, out to WRECK_AMBIENCE_RANGE. She had none
+    // between the three tolls that announced her and the storm taking her back,
+    // which meant the convergence event was silent for the whole fight over it.
+    const wreck = this.state.wreck ?? null;
+    this.audio.setWreckSource(
+      wreck ? dist2D(cam.x, cam.z, wreck.position.x, wreck.position.z) : null,
+      wreck ? wreck.position : null,
+    );
     const nearShore01 = Number.isFinite(nearestEdge)
       ? THREE.MathUtils.clamp(1 - THREE.MathUtils.clamp(nearestEdge / 70, 0, 1), 0, 1)
       : 0;

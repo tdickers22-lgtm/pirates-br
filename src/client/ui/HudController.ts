@@ -343,6 +343,121 @@ export class HudController {
     }
   }
 
+  // ─── The bounty, on the compass ──────────────────────────────
+  //
+  // A bounty was raised with a horn, a feed line and a hunter's ring on the
+  // CHART — and the chart is a modal panel. So the one moment in the match that
+  // tells the whole fleet where to sail could only be acted on by a player who
+  // stopped sailing to open a map. The bearing belongs on the instrument that is
+  // already on screen: an amber pip riding the compass strip, pinned to the
+  // bezel edge with a chevron when the hunted crew is behind you, with the range
+  // under it so "turn" and "how far" are one glance.
+  //
+  // The idiom is the chart's own-ship beacon: one colour, one shape, no legend.
+
+  /** ±40° of tape is under the bezel; past that the pip pins and points. */
+  private static readonly COMPASS_HALF_ARC_DEG = 40;
+  private compassBountyMark: { root: HTMLElement; pip: HTMLElement; label: HTMLElement } | null = null;
+  private compassBountySignature = '';
+
+  /** Built in code (not markup) so the bezel keeps exactly one owner. */
+  private ensureCompassBountyMark(): { root: HTMLElement; pip: HTMLElement; label: HTMLElement } | null {
+    if (this.compassBountyMark) return this.compassBountyMark;
+    const bezel = this.view.ui.compassTape.parentElement;
+    if (!bezel) return null;
+    const root = document.createElement('div');
+    root.id = 'compass-bounty';
+    root.style.cssText = [
+      'position:absolute', 'top:0', 'left:50%', 'height:100%', 'width:0',
+      'display:none', 'pointer-events:none', 'z-index:2',
+    ].join(';');
+    const pip = document.createElement('div');
+    // A downward amber caret hung off the TOP rail, mirroring the heading caret
+    // so the two read as one instrument rather than two overlapping marks.
+    pip.style.cssText = [
+      'position:absolute', 'top:1px', 'left:50%', 'transform:translateX(-50%)',
+      'width:0', 'height:0',
+      'border-left:4px solid transparent', 'border-right:4px solid transparent',
+      'border-top:6px solid #ffb347',
+      'filter:drop-shadow(0 0 4px rgba(255, 140, 60, 0.85))',
+    ].join(';');
+    const label = document.createElement('div');
+    // A pill, not bare text: the range sits ON the moving tape, and amber
+    // letters over a cardinal mark are two things sharing one set of pixels.
+    label.style.cssText = [
+      'position:absolute', 'bottom:1px', 'left:50%', 'transform:translateX(-50%)',
+      'font:700 0.5rem monospace', 'letter-spacing:0.05em', 'color:#ffcb80',
+      'white-space:nowrap', 'padding:0 3px', 'border-radius:3px',
+      'background:rgba(24, 10, 2, 0.82)', 'text-shadow:0 1px 2px rgba(0, 0, 0, 0.95)',
+    ].join(';');
+    root.appendChild(pip);
+    root.appendChild(label);
+    bezel.appendChild(root);
+    this.compassBountyMark = { root, pip, label };
+    return this.compassBountyMark;
+  }
+
+  /**
+   * Point the amber pip at the bountied crew.
+   * @param heading the player's own heading in degrees, the same value the tape
+   *   is slid by — so the pip and the cardinal letters can never disagree.
+   */
+  private updateBountyBearing(player: Player, heading: number): void {
+    const mark = this.ensureCompassBountyMark();
+    if (!mark) return;
+    const state = this.view.state;
+    const ownShipId = this.view.getTrackedShip()?.id ?? null;
+    // Your OWN bounty is not a bearing — you are already there, and the hold
+    // panel already shouts it. Only somebody else's is steerable.
+    let target: Ship | null = null;
+    let targetRange = Infinity;
+    for (const ship of state?.ships ?? []) {
+      if (!ship.bountied || !ship.alive || ship.id === ownShipId) continue;
+      const range = dist2D(player.position.x, player.position.z, ship.position.x, ship.position.z);
+      if (range < targetRange) { target = ship; targetRange = range; }
+    }
+    if (!target) {
+      if (mark.root.style.display !== 'none') mark.root.style.display = 'none';
+      this.compassBountySignature = '';
+      return;
+    }
+    const bearing = (((Math.atan2(
+      target.position.x - player.position.x,
+      target.position.z - player.position.z,
+    ) * 180) / Math.PI) % 360 + 360) % 360;
+    // Signed offset in [-180, 180): which way to TURN, not which way is north.
+    let delta = bearing - heading;
+    delta = ((delta % 360) + 540) % 360 - 180;
+    const arc = HudController.COMPASS_HALF_ARC_DEG;
+    const offScreen = Math.abs(delta) > arc;
+    // Pinned marks stop SHORT of the rail. The bezel fades its outer ~20% into
+    // the frame, so a chevron parked at the true edge was swallowed by the very
+    // gradient that makes the tape look inset.
+    const clamped = THREE.MathUtils.clamp(delta, -arc, arc) * (offScreen ? 0.88 : 1);
+    const px = Math.round(clamped * HudController.COMPASS_PX_PER_DEG);
+    const range = targetRange >= 1000
+      ? `${(targetRange / 1000).toFixed(1)}km`
+      : `${Math.round(targetRange / 10) * 10}m`;
+    // Repaint on whole-pixel changes only — updateHud runs every frame.
+    const signature = `${px}|${offScreen ? (delta > 0 ? 'r' : 'l') : 'on'}|${range}`;
+    if (signature === this.compassBountySignature) return;
+    this.compassBountySignature = signature;
+    mark.root.style.display = 'block';
+    mark.root.style.transform = `translateX(${px}px)`;
+    // Past the bezel the caret stops lying about a bearing it cannot show and
+    // becomes a "keep turning this way" chevron.
+    mark.pip.style.borderTop = offScreen ? '6px solid transparent' : '6px solid #ffb347';
+    mark.pip.style.borderLeft = offScreen && delta > 0 ? '7px solid #ffb347' : '4px solid transparent';
+    mark.pip.style.borderRight = offScreen && delta < 0 ? '7px solid #ffb347' : '4px solid transparent';
+    mark.pip.style.borderBottom = offScreen ? '6px solid transparent' : '0';
+    // Pinned at a rail, a centred label hangs half outside the bezel and the
+    // overflow clip eats the leading digits ("00m"). Slide it back inboard.
+    mark.label.style.transform = offScreen
+      ? `translateX(calc(-50% ${delta > 0 ? '-' : '+'} 20px))`
+      : 'translateX(-50%)';
+    mark.label.textContent = range;
+  }
+
   private updateBarrelPanel(player: Player, ship: Ship | null) {
     // Close the panel as soon as the player walks away from the barrel they were
     // browsing, or after a brief grace period if no event has refreshed it.
@@ -759,6 +874,7 @@ export class HudController {
     this.view.ui.compassTape.style.transform =
       `translateX(${Math.round(-heading * HudController.COMPASS_PX_PER_DEG)}px)`;
     this.view.ui.compassTape.style.opacity = '1';
+    this.updateBountyBearing(player, heading);
 
     if (this.view.state.phase === 'ended') {
       if (this.view.state.winnerId === this.view.localPlayerId) {

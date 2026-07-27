@@ -89,6 +89,19 @@ const MUSIC_MENU_LEVEL = 0.52;
 const MUSIC_WORLD_LEVEL = 0.34;
 /** Metres at which the tavern jig fades to nothing. */
 const TAVERN_MUSIC_RANGE = 26;
+/**
+ * Metres at which the Gilded Wreck stops being audible.
+ *
+ * She is the mid-match convergence mark and she had exactly ONE sound in her
+ * life: three tolls at the instant she rose, and then silence for the whole
+ * fight over her. 120 m is deliberately further than any prop bed in the game
+ * (the tavern carries 26) because she is a SEA mark — at 120 m a sloop under
+ * sail is still fifteen seconds out, which is long enough for "I can hear her"
+ * to become "I am steering at her" without the chart.
+ */
+const WRECK_AMBIENCE_RANGE = 120;
+/** Seconds between her bell's slow tolls once you are inside that range. */
+const WRECK_TOLL_PERIOD = 11;
 
 // ══ Procedural shanty grammar ══════════════════════════════════════
 // Everything below the divider is PURE — no AudioContext, no engine state — so
@@ -403,6 +416,18 @@ export class SoundEngine {
   private combatHeatUntil = 0;
   private tavernDistance: number | null = null;
   private tavernPos: SoundPos | null = null;
+
+  // ── The Gilded Wreck's own voice ───────────────────────────────────
+  /** Spatial chain for her bed: creak/groan → distance lowpass → pan → level. */
+  private wreckChain: { input: BiquadFilterNode; panner: StereoPannerNode; gain: GainNode } | null = null;
+  /** Hull groan: the slow, low working of a hulk awash. */
+  private wreckGroan: LoopVoice | null = null;
+  /** Rigging creak: the dry, higher rope-and-timber layer over the groan. */
+  private wreckCreak: LoopVoice | null = null;
+  private wreckDistance: number | null = null;
+  private wreckPos: SoundPos | null = null;
+  /** ctx.currentTime of her next slow toll (0 = ring the moment she is heard). */
+  private nextWreckTollAt = 0;
   private stormLevel = 0;
   private nearShore01 = 0;
   private underway01 = 0;
@@ -2475,6 +2500,20 @@ export class SoundEngine {
     far.frequency.value = 2600 - (d / 1400) * 1750;
     far.Q.value = 0.4;
     this.connectGroup(far, null, 0.55);
+    for (let toll = 0; toll < 3; toll++) {
+      const at = now + toll * (1.45 + (d / 1400) * 0.35);
+      const swing = toll === 1 ? 1 : 0.86;  // the middle pull is the strongest
+      this.wreckToll(at, gain * swing, far);
+    }
+  }
+
+  /**
+   * ONE strike of her bell, scheduled at `at` through `dest`. Split out of
+   * {@link playWreckBell} so the standing proximity bed can ring the SAME bell
+   * — a second bell built out of different partials would have read as a
+   * different ship.
+   */
+  private wreckToll(at: number, level: number, dest: AudioNode): void {
     const strike = 262;                    // the nominal — a heavy ship's bell
     const partials: Array<[number, number, number]> = [
       [strike * 0.5, 3.6, 0.55],           // hum
@@ -2483,14 +2522,106 @@ export class SoundEngine {
       [strike * 1.5, 1.5, 0.22],           // fifth
       [strike * 2.02, 1.1, 0.16],          // slightly sharp octave
     ];
-    for (let toll = 0; toll < 3; toll++) {
-      const at = now + toll * (1.45 + (d / 1400) * 0.35);
-      const swing = toll === 1 ? 1 : 0.86;  // the middle pull is the strongest
-      for (const [freq, length, level] of partials) {
-        this.playTone(at, freq, freq * 0.998, length, gain * level * swing, 'sine', 0.004, far);
+    for (const [freq, length, weight] of partials) {
+      this.playTone(at, freq, freq * 0.998, length, level * weight, 'sine', 0.004, dest);
+    }
+    // The clapper on the shoulder of the bell.
+    this.playNoise(at, 0.06, 3200, 1.4, level * 0.3, 'bandpass', dest);
+  }
+
+  /**
+   * THE GILDED WRECK, HEARD RATHER THAN CHARTED.
+   *
+   * She used to make exactly one sound in her whole life — three tolls at the
+   * moment she rose — and then sat there in silence while the fleet fought over
+   * her. So she now has a standing voice inside {@link WRECK_AMBIENCE_RANGE}:
+   *
+   *  · a HULL GROAN — a very low bandpass bed with a slow tremolo on it, which
+   *    is what a flooded hull rolling on its beam ends actually sounds like;
+   *  · a RIGGING CREAK — a dry, higher layer of rope and working timber;
+   *  · her BELL, tolling once every {@link WRECK_TOLL_PERIOD} seconds, swung by
+   *    the same swell. The bell is the part that steers you: a bed is a texture,
+   *    but a bell is a bearing.
+   *
+   * Distance sets level and how much of the top end survives the crossing;
+   * bearing sets the pan. The whole thing rides busBed, so a broadside ducks her
+   * with the rest of the world's ambience instead of talking over it.
+   *
+   * @param distance metres from listener to the wreck, or null when none is up.
+   */
+  setWreckSource(distance: number | null, pos?: SoundPos | null): void {
+    this.wreckDistance = distance === null || !Number.isFinite(distance) ? null : Math.max(0, distance);
+    this.wreckPos = pos ?? null;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const d = this.wreckDistance;
+    if (d === null || d > WRECK_AMBIENCE_RANGE) {
+      if (this.wreckChain) this.ramp(this.wreckChain.gain.gain, 0, 1.4);
+      // Out of earshot. Clearing the mark means she rings the moment she comes
+      // back into range, rather than staying mute for most of a toll period.
+      this.nextWreckTollAt = 0;
+      return;
+    }
+    const bed = this.busBed;
+    if (!bed || !this.noise) return;
+    if (!this.wreckChain) {
+      const input = ctx.createBiquadFilter();
+      input.type = 'lowpass';
+      input.frequency.value = 900;
+      input.Q.value = 0.4;
+      const panner = ctx.createStereoPanner();
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      input.connect(panner);
+      panner.connect(gain);
+      gain.connect(bed);
+      // One reverb send for the whole chain, tapped after the distance filter —
+      // a far, dull wreck must send a far, dull signal to the tail as well.
+      if (this.busReverb) {
+        const send = ctx.createGain();
+        send.gain.value = 0.4;
+        gain.connect(send);
+        send.connect(this.busReverb);
       }
-      // The clapper on the shoulder of the bell.
-      this.playNoise(at, 0.06, 3200, 1.4, gain * 0.3 * swing, 'bandpass', far);
+      this.ownSendNodes.add(input);
+      this.wreckChain = { input, panner, gain };
+      this.wreckGroan = this.makeNoiseLoop('bandpass', 96, 2.6, input);
+      const groanTrem = this.addGainTremolo(this.wreckGroan.gain, 0.21, 0.35);
+      this.wreckGroan = { ...this.wreckGroan, lfo: groanTrem.lfo, lfoGain: groanTrem.lfoGain };
+      this.wreckCreak = this.makeNoiseLoop('bandpass', 720, 5.5, input);
+      const creakTrem = this.addGainTremolo(this.wreckCreak.gain, 0.34, 0.55);
+      this.wreckCreak = { ...this.wreckCreak, lfo: creakTrem.lfo, lfoGain: creakTrem.lfoGain };
+    }
+    // Inverse-distance, then a fade across the last 25 m so she does not click
+    // in and out at the edge of the range.
+    const near = THREE.MathUtils.clamp(1 - d / WRECK_AMBIENCE_RANGE, 0, 1);
+    const fade = THREE.MathUtils.clamp((WRECK_AMBIENCE_RANGE - d) / 25, 0, 1);
+    const level = (1 / (1 + d / 26)) * fade;
+    this.ramp(this.wreckChain.gain.gain, level, 0.7);
+    // Across a hundred metres of water only the groan survives; alongside her,
+    // the rope and the dry timber come back.
+    this.ramp(this.wreckChain.input.frequency, 320 + 2600 * near * near, 0.7);
+    this.ramp(this.wreckChain.panner.pan, this.panFor(this.wreckPos), 0.3);
+    if (this.wreckGroan) this.ramp(this.wreckGroan.gain.gain, 0.5, 1.2);
+    if (this.wreckCreak) this.ramp(this.wreckCreak.gain.gain, 0.12 + 0.2 * near, 1.2);
+
+    // Her bell, swung by the swell. Scheduled off the audio clock (not a frame
+    // timer), and only while the context is actually running, so a backgrounded
+    // tab never queues a burst of catch-up tolls.
+    if (ctx.state !== 'running') return;
+    const now = ctx.currentTime;
+    if (this.nextWreckTollAt === 0 || now - this.nextWreckTollAt > WRECK_TOLL_PERIOD) {
+      this.nextWreckTollAt = now + 0.35;
+    }
+    if (now >= this.nextWreckTollAt) {
+      const far = ctx.createBiquadFilter();
+      far.type = 'lowpass';
+      far.frequency.value = 900 + 2400 * near;
+      far.Q.value = 0.4;
+      this.connectGroup(far, this.wreckPos, 0.55);
+      this.wreckToll(now + 0.02, 0.34 * level, far);
+      // Never metronomic: a bell hung in a rolling hull comes round late.
+      this.nextWreckTollAt = now + WRECK_TOLL_PERIOD * (0.85 + Math.random() * 0.3);
     }
   }
 
@@ -2671,9 +2802,9 @@ export class SoundEngine {
   }
 
   /**
-   * Two-bar minor sting for a bounty claimed / a wreck sighted. Nothing on the
-   * wire carries those moments yet (no `bounty_*` / `wreck_*` message types
-   * exist at time of writing) — this is the hook they plug into.
+   * Two-bar minor sting for a bounty raised / a wreck sighted — the two moments
+   * that turn a scattered lobby into a converging one. Both are on the wire now
+   * (`bounty_raised`, `wreck_event`) and Game.ts fires this from each.
    */
   playEventSting(kind: 'bounty' | 'wreck' = 'bounty'): void {
     this.unlock();

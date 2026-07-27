@@ -283,6 +283,55 @@ expect('…and walking round it swaps the ears',
   leftSide.analysis.chanPeak[0] > leftSide.analysis.chanPeak[1] * 1.2,
   `L/R=${leftSide.analysis.chanPeak.map((v) => v.toFixed(4)).join('/')}`);
 
+// ── 2b. The Gilded Wreck has a voice ────────────────────────────────────────
+// She is the mid-match convergence mark, and until now she made exactly ONE
+// sound in her life: three tolls at the instant she rose. For the whole fight
+// over her she was silent — a beacon you could see and never hear. She now
+// carries a standing bed (hull groan + rigging creak) and tolls her own bell
+// out to 120 m, which is far enough that "I can hear her" turns into "I am
+// steering at her" without opening the chart.
+console.log('\n2b. THE GILDED WRECK — heard across the water');
+const wreckAt = (d, side) => `engine.setWreckSource(${d}, { x: ${side * d}, y: 0, z: 0 });`;
+const wreckSetup = (d, side) => `
+  engine.setMusicContext('world');
+  engine.setListenerPose({ x: 0, y: 2, z: 0 }, 0);
+  engine.setTavernSource(null);
+  ${wreckAt(d, side)}
+`;
+const wreckClose = await render({ seconds: 14, setup: wreckSetup(25, 1), during: wreckAt(25, 1) });
+console.log(`   at 25 m  ${fmt(wreckClose.analysis)}  → ${save('wreck-25m', wreckClose.wav)}`);
+const wreckFar = await render({ seconds: 14, setup: wreckSetup(100, 1), during: wreckAt(100, 1) });
+console.log(`   at 100 m ${fmt(wreckFar.analysis)}  → ${save('wreck-100m', wreckFar.wav)}`);
+const wreckGone = await render({ seconds: 14, setup: wreckSetup(240, 1), during: wreckAt(240, 1) });
+
+expect('alongside her you can hear her working', wreckClose.analysis.peak > 0.004, fmt(wreckClose.analysis));
+expect('her bell tolls rather than droning (onsets in the bed)',
+  wreckClose.analysis.onsets >= 1, `onsets=${wreckClose.analysis.onsets}`);
+expect('she is still there at 100 m, and quieter',
+  wreckFar.analysis.peak > 1e-4 && wreckFar.analysis.peak < wreckClose.analysis.peak,
+  `100m=${wreckFar.analysis.peak.toFixed(5)} 25m=${wreckClose.analysis.peak.toFixed(5)}`);
+expect('distance dulls her too', wreckFar.analysis.brightness < wreckClose.analysis.brightness,
+  `100m=${wreckFar.analysis.brightness.toFixed(4)} 25m=${wreckClose.analysis.brightness.toFixed(4)}`);
+expect('past her range she is silent', wreckGone.analysis.peak < 1e-4,
+  `peak=${wreckGone.analysis.peak.toExponential(2)}`);
+
+const wreckRight = await render({ seconds: 10, setup: wreckSetup(40, 1), during: wreckAt(40, 1) });
+const wreckLeft = await render({ seconds: 10, setup: wreckSetup(40, -1), during: wreckAt(40, -1) });
+expect('a wreck off your starboard beam is louder to starboard',
+  wreckRight.analysis.chanPeak[1] > wreckRight.analysis.chanPeak[0] * 1.15,
+  `L/R=${wreckRight.analysis.chanPeak.map((v) => v.toFixed(4)).join('/')}`);
+expect('…and she swaps ears when she is off to port',
+  wreckLeft.analysis.chanPeak[0] > wreckLeft.analysis.chanPeak[1] * 1.15,
+  `L/R=${wreckLeft.analysis.chanPeak.map((v) => v.toFixed(4)).join('/')}`);
+
+// The sting was written for two moments and wired to one. Both must sound.
+const stingBounty = await render({ seconds: 4, setup: "engine.playEventSting('bounty');" });
+const stingWreck = await render({ seconds: 4, setup: "engine.playEventSting('wreck');" });
+expect('the bounty sting sounds', stingBounty.analysis.peak > 0.01, fmt(stingBounty.analysis));
+expect('the wreck sting sounds, and is its own figure',
+  stingWreck.analysis.peak > 0.01 && Math.abs(stingWreck.analysis.rms - stingBounty.analysis.rms) > 1e-6,
+  `wreck ${fmt(stingWreck.analysis)} | bounty ${fmt(stingBounty.analysis)}`);
+
 // ── 3. The sailing whistle is sparse ────────────────────────────────────────
 console.log('\n3. SAILING MOTIF — a crewmate idly whistling');
 const sail = await render({
