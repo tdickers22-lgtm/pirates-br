@@ -26,5 +26,18 @@ expect('10Hz quantized full stays lean (<35KB)', full.length < 35 * 1024, `${ful
 expect('static-world full stays sane (<250KB, rides ~1/20s + join)', fullWithWorld.length < 250 * 1024, `${fullWithWorld.length}B`);
 expect('statics stripped from ordinary fulls', !full.includes('"caves"'), 'islands leaked into a non-world snapshot');
 
+// HEADROOM, said out loud. The static-world payload is the one budget in this
+// suite that is nearly spent, and a pass/fail line hides that: it reads exactly
+// the same at 180KB and at 249KB. Whoever adds the next island, cave system or
+// prop registry field should see the wall coming in the same output that tells
+// them they cleared it.
+const WORLD_CEILING = 250 * 1024;
+const headroom = WORLD_CEILING - fullWithWorld.length;
+console.log(
+  `  headroom: static-world full has ${(headroom / 1024).toFixed(1)}KB left under the 250KB ceiling `
+  + `(${(100 - (fullWithWorld.length / WORLD_CEILING) * 100).toFixed(1)}% free)`
+  + `${headroom < 20 * 1024 ? '  ⚠ under 20KB — the next world addition will need the protocol widened, not the ceiling raised' : ''}`,
+);
+
 if (failures > 0) { console.error(`\n${failures} wire-size assertion(s) failed.`); process.exit(1); }
 console.log('\nAll wire-size assertions passed.');

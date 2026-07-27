@@ -132,12 +132,42 @@ const report = await page.evaluate((limit) => {
   // decking, ruins — is scenery whose base may legitimately be in the air, and
   // is reported separately as unclaimed.
   const CLAIMED = /^(props?-|decor-)/;
+  // ── ELEVATED SCENERY, NAMED ────────────────────────────────────────────────
+  // "unclaimed" was a shrug: everything that wasn't a prop or decor got listed
+  // with a gap and no verdict, so the report could never reach zero and a row
+  // that mattered would have sat in that pile unread. The pile is not
+  // mysterious — it is two kinds of thing, both elevated on purpose, and both
+  // resting on rock this audit's terrain sampler cannot see. So name them, with
+  // the reason, and gate on what is left: an unclaimed tag that ISN'T in this
+  // vocabulary is a piece nobody has accounted for, and that is a finding.
+  //
+  // Adding to this list is a deliberate act. If a new structure shows up here,
+  // either it genuinely stands off the ground (say why, in one line) or it is
+  // the floater this audit exists to catch.
+  const ELEVATED_BY_DESIGN = [
+    {
+      re: /^cave-portal-rock/,
+      why: 'brow crags and jambs framing a cave mouth: they are seated on the THROAT COLLAR '
+        + '(CaveBuilder\'s minLocalY), which is the mouth\'s own rock and not part of the terrain '
+        + 'mesh — the daylight under a brow crag is the doorway it caps',
+    },
+    {
+      re: /^bridge-span/,
+      why: 'a rope bridge between two peaks is a span; its deck is over the valley by definition',
+    },
+  ];
+  const bidDesign = (tag) => ELEVATED_BY_DESIGN.find((e) => e.re.test(tag)) ?? null;
   const SKIP_MATCH = /waterfall|mist|smoke|spray|steam|ember|plume|geyser|cloud|vine|bird|glow|halo|foam|water|splash|light|particle/i;
   const DIAG = Math.SQRT1_2;
   const RING = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [DIAG, DIAG], [DIAG, -DIAG], [-DIAG, DIAG], [-DIAG, -DIAG]];
 
   const islands = g.state.islands;
-  const out = { limit, islands: [], totals: { checked: 0, floaters: 0, unclaimed: 0, indoorBlades: 0 } };
+  const out = {
+    limit,
+    islands: [],
+    totals: { checked: 0, floaters: 0, byDesign: 0, unaccounted: 0, indoorBlades: 0 },
+    vocabulary: ELEVATED_BY_DESIGN.map((e) => ({ pattern: String(e.re), why: e.why, count: 0 })),
+  };
 
   for (const island of islands) {
     const group = g.islandMeshes.get(island.id);
@@ -146,7 +176,8 @@ const report = await page.evaluate((limit) => {
     if (!terrain) continue;
     const sample = makeMeshSampler(terrain);
     const rows = [];
-    const unclaimed = [];
+    const byDesign = [];
+    const unaccounted = [];
     let checked = 0;
 
     const items = [];
@@ -252,7 +283,18 @@ const report = await page.evaluate((limit) => {
       const gap = it.minY - ground;
       if (gap > limit) {
         const row = { tag: it.tag, x: +cx.toFixed(1), z: +cz.toFixed(1), foot: +foot.toFixed(2), minY: +it.minY.toFixed(2), ground: +ground.toFixed(2), gap: +gap.toFixed(2) };
-        (CLAIMED.test(it.tag) ? rows : unclaimed).push(row);
+        if (CLAIMED.test(it.tag)) {
+          rows.push(row);
+        } else {
+          const entry = bidDesign(it.tag);
+          if (entry) {
+            const slot = out.vocabulary.find((v) => v.pattern === String(entry.re));
+            if (slot) slot.count += 1;
+            byDesign.push(row);
+          } else {
+            unaccounted.push(row);
+          }
+        }
       }
     }
     // Second contract: no ground cover inside a building's floor. Blades came
@@ -275,12 +317,17 @@ const report = await page.evaluate((limit) => {
       }
     }
     rows.sort((a, b) => b.gap - a.gap);
-    unclaimed.sort((a, b) => b.gap - a.gap);
+    byDesign.sort((a, b) => b.gap - a.gap);
+    unaccounted.sort((a, b) => b.gap - a.gap);
     out.totals.indoorBlades += indoorBlades;
     out.totals.checked += checked;
     out.totals.floaters += rows.length;
-    out.totals.unclaimed += unclaimed.length;
-    out.islands.push({ id: island.id, name: island.name, x: island.position.x, z: island.position.z, checked, rows, unclaimed, indoorBlades });
+    out.totals.byDesign += byDesign.length;
+    out.totals.unaccounted += unaccounted.length;
+    out.islands.push({
+      id: island.id, name: island.name, x: island.position.x, z: island.position.z,
+      checked, rows, byDesign, unaccounted, indoorBlades,
+    });
   }
   return out;
 }, LIMIT);
@@ -296,23 +343,36 @@ for (const isl of report.islands) {
   }
   if (isl.rows.length > 14) console.log(`   … ${isl.rows.length - 14} more`);
 }
-const worstUnclaimed = report.islands
-  .flatMap((isl) => isl.unclaimed.map((r) => ({ ...r, island: isl.name })))
-  .sort((a, b) => b.gap - a.gap)
-  .slice(0, 12);
-if (worstUnclaimed.length > 0) {
-  console.log('\nunclaimed scenery with daylight under it (structures/landmarks — informational):');
-  for (const r of worstUnclaimed) {
-    console.log(`   · ${r.island}: ${r.tag} at (${r.x}, ${r.z}) base=${r.minY} mesh=${r.ground} GAP=${r.gap}m`);
+// Anything with a gap that ISN'T claimed and ISN'T in the vocabulary: nobody
+// has said what this piece is standing on. Listed loudly, and it fails.
+const unaccounted = report.islands
+  .flatMap((isl) => isl.unaccounted.map((r) => ({ ...r, island: isl.name })))
+  .sort((a, b) => b.gap - a.gap);
+if (unaccounted.length > 0) {
+  console.log('\nUNACCOUNTED scenery with daylight under it — neither seated nor declared elevated:');
+  for (const r of unaccounted.slice(0, 20)) {
+    console.log(`   ✗ ${r.island}: ${r.tag} at (${r.x}, ${r.z}) base=${r.minY} mesh=${r.ground} GAP=${r.gap}m`);
+  }
+  if (unaccounted.length > 20) console.log(`   … ${unaccounted.length - 20} more`);
+  console.log('   → either seat it on the drawn ground, or add it to ELEVATED_BY_DESIGN with the reason it stands off.');
+}
+if (report.totals.byDesign > 0) {
+  console.log('\nelevated by design (declared, with the rock they actually rest on):');
+  for (const v of report.vocabulary) {
+    if (v.count === 0) continue;
+    console.log(`   · ${v.count.toString().padStart(3)} × ${v.pattern}`);
+    console.log(`         ${v.why}`);
   }
 }
 writeFileSync(`${OUT}/live-floaters.json`, JSON.stringify(report, null, 1));
 console.log(`\nlive floater audit: ${report.totals.checked} rendered pieces on ${report.islands.length} islands`);
 console.log(`  seated props/decor floating > ${LIMIT}m above the DRAWN ground: ${report.totals.floaters} (${printed} listed)`);
-console.log(`  unclaimed scenery with a gap: ${report.totals.unclaimed}`);
+console.log(`  scenery standing off the ground with no account of why: ${report.totals.unaccounted}`);
 console.log(`  ground-cover blades inside a tavern floor: ${report.totals.indoorBlades}`);
+console.log(`  (elevated by design, declared: ${report.totals.byDesign})`);
 console.log(`report: ${OUT}/live-floaters.json`);
 
 await browser.close();
-if (report.totals.floaters > 0 || report.totals.indoorBlades > 0) process.exit(1);
-console.log('OK: every seated prop and decor piece touches the ground it is drawn on');
+if (report.totals.floaters > 0 || report.totals.unaccounted > 0 || report.totals.indoorBlades > 0) process.exit(1);
+console.log('OK: every seated prop and decor piece touches the ground it is drawn on,'
+  + ' and every piece that stands off it says why');

@@ -68,10 +68,16 @@ async function ensureGame(page) {
   await page.waitForSelector('#menu-solo-btn', { timeout: 12_000 });
   await page.fill('#menu-name-input', `Map${Math.floor(Math.random() * 9000 + 1000)}`);
   await page.click('#menu-solo-btn');
+  // THIRD argument, not the second — as the second it is the page function's
+  // ARG and the 30s default silently replaces this budget. (Here the default
+  // was the more generous of the two, so the mistake hid as a pass; that is
+  // worse, not better: the number in the file was never the number in force.)
+  // 18s never covered a cold world build on a loaded box either, so make the
+  // budget both real and honest about what it is waiting for.
   await page.waitForFunction(() => {
     const game = window.__piratesBR;
     return !!game?.state && game.state.phase === 'playing' && game.state.ships?.length >= 10;
-  }, { timeout: 18_000 });
+  }, null, { timeout: 90_000 });
   await page.waitForTimeout(1500);
 }
 

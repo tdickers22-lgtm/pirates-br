@@ -518,24 +518,39 @@ export function buildTrails(ctx: IslandBuildCtx) {
           // Now: sampled at the four corners, pitched into the local slope,
           // thickened into a stone kerb and sunk so the downhill edge is
           // swallowed by the ground (the thickness IS the downhill skirt).
+          //
+          // …and those corner samples came off the ANALYTIC field, which is the
+          // last version of this bug rather than the fix. The trail's whole job
+          // is to hug a hillside, so it runs exactly where the polar mesh is a
+          // chord UNDER the function it was sampled from — every convex ridge
+          // the path crosses lifted the pavers off the ground the player is
+          // looking at. The kerb stones beside them were pinned to the drawn
+          // mesh two waves ago and the tiles were left behind, so on a ridge
+          // the border stones sat below their own path. Corners are now drawn
+          // ground, like everything else that claims to touch it.
           const halfW = (trailWidth + (rng(s * 17 + w * 13) - 0.5) * 0.3) * 0.5;
           const halfL = (stepLen + 0.05) * 0.5;
           const tYaw = yaw + (rng(s * 19 + w * 23) - 0.5) * 0.06;
           const fwdX = Math.sin(tYaw), fwdZ = Math.cos(tYaw);
           const sideX = Math.cos(tYaw), sideZ = -Math.sin(tYaw);
-          const cornerY = (fs: number, ss: number) => getIslandSurfaceY(
-            island,
-            px + fwdX * halfL * fs + sideX * halfW * ss,
-            pz + fwdZ * halfL * fs + sideZ * halfW * ss,
+          const localX = px - island.position.x;
+          const localZ = pz - island.position.z;
+          const cornerY = (fs: number, ss: number) => drawnGroundAt(
+            ctx,
+            localX + fwdX * halfL * fs + sideX * halfW * ss,
+            localZ + fwdZ * halfL * fs + sideZ * halfW * ss,
           );
+          // The CENTRE is drawn ground too — `py` is the analytic gate above
+          // (which tiles exist at all), never the height one is laid at.
+          const yCc = drawnGroundAt(ctx, localX, localZ);
           const yFf = cornerY(1, 0), yBb = cornerY(-1, 0);
           const yLl = cornerY(0, 1), yRr = cornerY(0, -1);
-          const minCorner = Math.min(py, yFf, yBb, yLl, yRr);
+          const minCorner = Math.min(yCc, yFf, yBb, yLl, yRr);
           const tileThick = 0.26;
           // Slope basis from the corner samples: pitch along the path, roll across it.
           const pitch = Math.atan2(yBb - yFf, halfL * 2);
           const roll = Math.atan2(yLl - yRr, halfW * 2);
-          trObj.position.set(px - island.position.x, minCorner + 0.02, pz - island.position.z);
+          trObj.position.set(localX, minCorner + 0.02, localZ);
           trObj.rotation.set(0, tYaw, 0);
           trObj.rotateX(pitch);
           trObj.rotateZ(roll);
@@ -562,7 +577,13 @@ export function buildTrails(ctx: IslandBuildCtx) {
       }
       if (tileXf.length) {
         const tiles = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), trailMat, tileXf.length);
-        tiles.name = 'trail-tile';
+        // `decor-` prefix on purpose: that is the live floater audit's CLAIMED
+        // set. A paving stone is the single most literal thing in the world
+        // that says "I am lying on the ground", and under the old bare name it
+        // was filed as unclaimed scenery whose base may legitimately be in the
+        // air — so the pavers were exempt from the one audit that could see
+        // them float. They are held to the contract now.
+        tiles.name = 'decor-trail-tile';
         tileXf.forEach((m, k) => tiles.setMatrixAt(k, m));
         tiles.instanceMatrix.needsUpdate = true;
         tiles.receiveShadow = true;

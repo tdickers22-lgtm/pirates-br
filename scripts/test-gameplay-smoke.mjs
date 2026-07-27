@@ -155,10 +155,14 @@ async function main() {
     // click landed and the join succeeded.
     await page.click('#menu-solo-btn', { noWaitAfter: true });
     // Budget: 8s countdown + world build + the horn, with room for a cold cache.
+    // The options bag is waitForFunction's THIRD argument; passed as the second
+    // it is silently the page function's ARG and the 30s default applies. This
+    // budget was written and never took effect — on a contended box the suite
+    // failed at 30s flat and blamed the join.
     await page.waitForFunction(() => {
       const game = window.__piratesBR;
       return !!game?.state && game.state.phase === 'playing' && game.state.players?.length >= 10;
-    }, { timeout: 45_000 });
+    }, null, { timeout: 45_000 });
 
     await page.waitForTimeout(2500);
     const fps = await measureFps(page);

@@ -1,10 +1,40 @@
 #!/usr/bin/env node
-// Floating-prop audit — rocks hovering over shore drops are a placement bug,
-// not a rendering one. For every wide-based prop (boulder_* and any blocking
-// collider with a broad radius, plus 'none'-shape story vignettes via their
-// spacing radius) sample the terrain at the prop's seat footprint (center + 8
-// compass points at the FULL footprint radius) and compare against the Y the
-// client actually seats the GLB at (getPropGroundY):
+// ANALYTIC seat audit — the SERVER's ground, not the player's.
+//
+// ── WHAT THIS IS NOT (read this before believing a green line here) ─────────
+// This audit does NOT and CANNOT tell you whether anything floats on screen. It
+// samples `getIslandSurfaceY`, the shared analytic heightfield. The island the
+// player looks at is a polar TRIANGLE MESH sampled from that field, and a
+// triangle is a chord: wherever the field is convex — every stamp rim, terrace
+// lip and ridge — the drawn ground runs BELOW the function. A boulder can be
+// analytically flush and visibly hanging in the air, and this file will call it
+// seated. That is the GroundTruth lesson, and 1,193 real floaters lived behind
+// a green run of exactly this script.
+//
+//   The audit that measures what the player sees is scripts/audit-live-floaters.mjs.
+//   It joins a real match, rebuilds each island's rendered surface from its own
+//   triangles, and holds every drawn piece to it. THAT one is the authority on
+//   floating. This one is not, and no longer claims to be.
+//
+// ── WHAT IT IS, AND WHY IT IS KEPT ──────────────────────────────────────────
+// The analytic field is not a bad approximation of the mesh; it is the SERVER'S
+// GROUND, and it is authoritative for everything the server does. Prop capsules,
+// harvest reach, locomotion and collision all resolve against it. A prop whose
+// seat disagrees with the analytic terrain under its own footprint is therefore
+// a real defect with real consequences the browser audit cannot attribute: a
+// collider standing in mid-air that players walk under, or a harvestable buried
+// out of reach. Those are worth a headless, deterministic, sub-second guard in
+// the logic chain — which is what this now is, honestly labelled.
+//
+// (The third option, re-pointing this file at the drawn mesh, is not available:
+// the drawn mesh only exists in a browser. That is precisely why
+// audit-live-floaters.mjs is a Playwright suite.)
+//
+// So: for every wide-based prop (boulder_* and any blocking collider with a
+// broad radius, plus 'none'-shape story vignettes via their spacing radius)
+// sample the terrain at the prop's seat footprint (center + 8 compass points at
+// the FULL footprint radius) and compare against the Y `getPropGroundY` seats
+// it at:
 //   HOVER = placedY − min(sample)  → base edge dangling over a drop
 //   BURY  = max(sample) − placedY  → prop swallowed by the high side
 // Floaters (HOVER > 0.35) fail the audit; buried props (BURY > 1.2) are
@@ -93,9 +123,13 @@ for (const island of islands) {
   }
 }
 
-console.log(`\nfloating-prop audit: ${audited} wide-based props checked, ${floaters} floater(s) (HOVER > ${HOVER_LIMIT}), ${buried} deep-buried (BURY > ${BURY_LIMIT})`);
+console.log(`\nanalytic seat audit: ${audited} wide-based props checked against the SERVER's heightfield, `
+  + `${floaters} unseated (HOVER > ${HOVER_LIMIT}), ${buried} deep-buried (BURY > ${BURY_LIMIT})`);
 if (floaters > 0) {
-  console.error('FAIL: props hover above the terrain under their footprint');
+  console.error('FAIL: props sit above the analytic terrain under their footprint — colliders and harvest reach resolve against that surface');
   process.exit(1);
 }
-console.log('OK: every wide-based prop seats on (or into) the terrain under its footprint');
+// Deliberately NOT "nothing floats": this audit cannot see the drawn mesh, and
+// a clean run here has coexisted with a thousand visible floaters before.
+console.log('OK: every wide-based prop seats on (or into) the SERVER\'s terrain under its footprint');
+console.log('    (says nothing about what the player sees — that is scripts/audit-live-floaters.mjs)');

@@ -27,6 +27,25 @@ const BUDGETS = [
   { scene: 'open-sea', label: 'open water', measured: 1718, ceiling: 2250 },
 ];
 
+/** THE GILDED WRECK gets its OWN ceiling, and it is not the dock's.
+ *
+ *  She only exists for one storm phase in the middle of a match, so she never
+ *  showed up in either scene above — and near-wreck frames were measured at
+ *  2888-2971 draws against a 2900 ceiling that was never meant to cover her.
+ *  Grading her by the dock's number is grading two different views with one
+ *  ruler: nobody looking at the wreck is also looking at a dock, a tavern and
+ *  a full island of props. Her own scene, her own budget, so a regression in
+ *  the event is attributable to the event.
+ *
+ *  Needs a wreck up: the runner hands PIRATES_WRECK_SEC to any server it starts
+ *  itself, and SKIPS this one scene (never fails) against a server that was
+ *  already running without it. */
+const WRECK_BUDGET = { label: 'the Gilded Wreck alongside', measured: 1763, ceiling: 2400 };
+/** Seconds after the horn the dev server raises her for this measurement. */
+const WRECK_RAISE_SEC = 12;
+/** How long to wait for her after the join before giving up and skipping. */
+const WRECK_WAIT_MS = 90_000;
+
 let failures = 0;
 function expect(label, condition, detail = '') {
   if (condition) {
@@ -63,9 +82,33 @@ function startNpmScript(scriptName) {
     cwd: process.cwd(),
     detached: process.platform !== 'win32',
     stdio: ['ignore', 'ignore', 'ignore'],
-    env: { ...process.env, BROWSER: 'none' },
+    // The wreck is a mid-match event: without this hook she rises at the first
+    // ring shrink, four minutes after the join, and the scene below would time
+    // out waiting for a hull that is coming but not yet.
+    env: { ...process.env, BROWSER: 'none', PIRATES_WRECK_SEC: String(WRECK_RAISE_SEC) },
   });
   return { child, scriptName };
+}
+
+/** Frame her from off her quarter and ABOVE — a boarding look down onto her
+ *  deck, her rig and the water she lies in.
+ *
+ *  Down, not level, on purpose: she rises at a different ring centre every
+ *  match, so a horizon-level shot grades whatever island happens to be behind
+ *  her that game. Measured in one world at eye level the same event cost 1214,
+ *  1526 and 2283 draws from three stands; looking down onto her it was 1752,
+ *  1763 and 1745. A budget has to measure the thing it names. */
+function planWreckScene(wreck) {
+  const bearing = (wreck.rotation ?? 0) + Math.PI * 0.42;
+  const stand = 70;
+  return {
+    x: wreck.position.x + Math.sin(bearing) * stand,
+    y: 34,
+    z: wreck.position.z + Math.cos(bearing) * stand,
+    yaw: 0,
+    pitch: -0.42,
+    aimAt: { x: wreck.position.x, z: wreck.position.z },
+  };
 }
 
 function stopDevServer(handle) {
@@ -145,7 +188,15 @@ async function main() {
     await page.goto(`${ROOT_URL.replace(/\/$/, '')}/?debug&quality=high`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#menu-solo-btn', { timeout: 40_000 });
     await page.click('#menu-solo-btn', { noWaitAfter: true });
-    await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', { timeout: 120_000 });
+    // The options bag is waitForFunction's THIRD argument. Passed as the second
+    // it is silently taken as the page-function's ARG, the 30s default applies,
+    // and a loaded box then reports "the join timed out" 90 seconds early — a
+    // lie about the game told by the instrument.
+    await page.waitForFunction(
+      () => window.__piratesBR?.state?.phase === 'playing',
+      null,
+      { timeout: 120_000 },
+    );
     // Let the streamed island/sea-rock build queues finish before counting.
     await page.waitForTimeout(9000);
     // Resolution is pinned so the budget measures geometry, not screen area.
@@ -165,6 +216,29 @@ async function main() {
         `${budget.label} stays under ${budget.ceiling} draw calls`,
         draws <= budget.ceiling,
         `measured ${draws}, ceiling ${budget.ceiling} (was ${budget.measured} when the ceiling was set)`,
+      );
+    }
+
+    // ── The Gilded Wreck ──────────────────────────────────────────────────
+    const wreck = await page
+      .waitForFunction(() => window.__piratesBR?.state?.wreck ?? null, null, { timeout: WRECK_WAIT_MS })
+      .then((handle) => handle.jsonValue())
+      .catch(() => null);
+    if (!wreck) {
+      console.log('  – wreck scene skipped: no Gilded Wreck rose '
+        + '(a server started outside this runner has no PIRATES_WRECK_SEC hook)');
+    } else {
+      await page.evaluate(PIN_PIXEL_RATIO);
+      const result = await measureScene(page, planWreckScene(wreck), { warmupMs: 3500, captureMs: 3500 });
+      const draws = Math.round(result.draws);
+      console.log(
+        `  wreck: ${draws} draws (peak ${result.peakDraws}, ${Math.round(result.tris / 1000)}k tris, `
+        + `${result.programs} programs, ${(1000 / result.medianMs).toFixed(1)} fps)`,
+      );
+      expect(
+        `${WRECK_BUDGET.label} stays under ${WRECK_BUDGET.ceiling} draw calls`,
+        draws <= WRECK_BUDGET.ceiling,
+        `measured ${draws}, ceiling ${WRECK_BUDGET.ceiling} (was ${WRECK_BUDGET.measured} when the ceiling was set)`,
       );
     }
 
