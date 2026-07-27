@@ -202,6 +202,29 @@ try {
     }
     await page.evaluate(() => { window.__piratesBR.input.mouseButtons.delete(0); });
     expect(`${name}: fists stay on screen through the swing`, worst === null, worst ? JSON.stringify(worst) : '');
+
+    // THE SLIVER. A long tool whose shaft lies on the view axis foreshortens to
+    // a few pixels behind the fists and vanishes out of its own animation. With
+    // the haft along Z the shaft's angle off the axis is acos(|cos(yaw)·cos(pitch)|),
+    // and the axe's old chop keys passed within 0.01° of dead-on twice a cycle —
+    // once mid-strike and once through the slow recovery, which is the frame the
+    // eye actually samples. Sampled densely (the bad window was ~80 ms long).
+    if (name === 'axe') {
+      await page.evaluate(() => { window.__piratesBR.input.mouseButtons.add(0); });
+      let minDeg = 180;
+      for (let f = 0; f < 40; f++) {
+        await wait(24);
+        const deg = await page.evaluate(() => {
+          const r = window.__piratesBR.viewmodel.localViewPocketRoot.rotation;
+          const along = Math.abs(Math.cos(r.y) * Math.cos(r.x));
+          return (Math.acos(Math.min(1, Math.max(-1, along))) * 180) / Math.PI;
+        });
+        if (deg < minDeg) minDeg = deg;
+      }
+      await page.evaluate(() => { window.__piratesBR.input.mouseButtons.delete(0); });
+      expect('axe: the blade never lies down the view axis (≥15° all swing)',
+        minDeg >= 15, `closest approach ${minDeg.toFixed(1)}°`);
+    }
   }
 
   // ── CUTLASS ───────────────────────────────────────────────────────────────

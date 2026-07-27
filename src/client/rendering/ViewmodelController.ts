@@ -21,6 +21,14 @@ import type { Renderer } from './Renderer.js';
 /** Seconds for a freshly drawn weapon/tool to rise into its rest pose. */
 const VIEW_DRAW_TIME = 0.3;
 
+/**
+ * Minimum angle (radians ≈ 20.6°) a long tool's shaft is allowed to sit off the
+ * view axis. Dead-on, a 1 m haft projects to a few pixels behind the fists and
+ * the tool disappears out of its own animation — the lesson the cutlass thrust
+ * and the rifle ADS both had to learn the expensive way.
+ */
+const MIN_OFF_AXIS = 0.36;
+
 /** A first-person hand attachment in viewmodel-root space. */
 type HandGrip = { pos: [number, number, number]; rot: [number, number, number]; scale?: number };
 
@@ -1129,6 +1137,33 @@ export class ViewmodelController {
                     const strike = THREE.MathUtils.clamp((cycle - 0.5) / 0.12, 0, 1) ** 1.6;
                     const recover = THREE.MathUtils.smoothstep(cycle, 0.66, 1);
                     const arc = 1 - recover;
+                    const pitch = 0.5 + (raise * 0.9 - strike * 2.4) * arc;
+                    // THE SLIVER (the cutlass-thrust lesson, again). With the
+                    // haft along Z the blade points along −Z, so its angle off
+                    // the view axis is acos(cos(yaw)·cos(pitch)) — it foreshortens
+                    // to NOTHING whenever pitch and yaw are BOTH near zero. The
+                    // old keys swept yaw from +0.45 through −0.30, so it sat at
+                    // ~0 at exactly the two moments pitch crossed the eyeline
+                    // (mid-strike, and again for ~80 ms of the slow recovery,
+                    // which is the frame the eye actually samples). Measured
+                    // there: 0.9° off axis — a sliver of steel hiding behind the
+                    // fists.
+                    //
+                    // Two changes, both needed. FIRST the yaw now OPENS with the
+                    // chop instead of crossing over, so the swing travels
+                    // diagonally across frame and the yaw never changes sign
+                    // (a sign flip under the floor below would snap).
+                    const yawKey = 0.15 + (raise * 0.3 + strike * 0.28) * arc;
+                    // SECOND, a floor that makes the guarantee unconditional:
+                    // whatever the keys ask for, hold ≥ MIN_OFF_AXIS of blade off
+                    // the eyeline. The floor is 0 at the edge of the band and
+                    // grows smoothly to its maximum at pitch = 0, so it eases in
+                    // rather than snapping — and it is inert everywhere else,
+                    // including at rest.
+                    const cosPitch = Math.abs(Math.cos(pitch));
+                    const yawFloor = cosPitch > Math.cos(MIN_OFF_AXIS)
+                      ? Math.acos(THREE.MathUtils.clamp(Math.cos(MIN_OFF_AXIS) / cosPitch, -1, 1))
+                      : 0;
                     return {
                       // Same rest anchor as below (0.26 / −0.20 / −0.80) so the
                       // chop swings away from a pose whose fists are in frame.
@@ -1138,8 +1173,10 @@ export class ViewmodelController {
                         -0.8 - strike * 0.14 * arc,
                       ],
                       r: [
-                        0.5 + (raise * 0.9 - strike * 2.4) * arc,
-                        0.15 + (raise * 0.3 - strike * 0.75) * arc,
+                        pitch,
+                        Math.max(yawKey, yawFloor),
+                        // Roll is a spin about the haft — it never moves the head,
+                        // so it is free to sell the bite of the blade.
                         -0.15 + (-raise * 0.2 + strike * 0.6) * arc,
                       ],
                     };
