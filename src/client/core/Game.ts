@@ -1137,7 +1137,10 @@ export class Game {
   private announceBounty(payload: BountyRaisedPayload): void {
     const own = payload.shipId === this.localShipId;
     const pct = Math.round((payload.gold / Math.max(1, payload.targetGold)) * 100);
-    this.audio.playMatchStartHorn();
+    // The match-start horn was a stand-in: it says "begin", not "there is a
+    // price on that hull". The score has a figure written for this — falling,
+    // unresolved, blood money.
+    this.audio.playEventSting('bounty');
     if (own) {
       this.pushFeed(
         payload.renewed

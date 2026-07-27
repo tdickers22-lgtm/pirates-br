@@ -26,6 +26,7 @@ import {
   weaponSlotName,
 } from '../src/client/ui/DisplayNames.ts';
 import { SHIP_STATS, WEAPONS } from '../src/shared/constants/index.ts';
+import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 
@@ -189,6 +190,46 @@ for (const file of walk(join(ROOT, 'src/client'))) {
 }
 expect('no client string literal or markup wears a borrowed noun',
   offences.length === 0, offences.join('\n     '));
+
+// ── The cast the SERVER authors is a rendered surface too ───────────────────
+// The source lint above walks src/client only, and the island cast is written
+// in src/server/world/MapGenerator.ts. Every one of those names goes over the
+// wire onto a nameplate, a cutscene card and a spoken line — and five of them
+// were still called "Gold Hoarder <name>" after the rename wave, which is the
+// one noun this suite exists to keep out. Scan the roster the generator
+// actually PRODUCES, so no authoring path (fixed cast or island fallback) can
+// smuggle one back in.
+{
+  const gen = new MapGenerator(20260727);
+  const islands = gen.generateIslands();
+  const rendered = [];
+  for (const island of islands) {
+    for (const npc of island.npcs ?? []) {
+      rendered.push(
+        { where: `${island.name} · npc name`, text: npc.name ?? '' },
+        { where: `${island.name} · cutscene title`, text: npc.cutsceneTitle ?? '' },
+        { where: `${island.name} · spoken line`, text: npc.line ?? '' },
+      );
+    }
+  }
+  const castOffences = [];
+  for (const { where, text } of rendered) {
+    for (const { re, why } of BANNED) {
+      if (re.test(text)) castOffences.push(`${where}: "${text.slice(0, 70)}" — ${why}`);
+    }
+  }
+  expect(`the generated cast (${rendered.length} rendered strings) wears no borrowed noun`,
+    castOffences.length === 0, castOffences.slice(0, 6).join('\n     '));
+  expect('the broker in the world is the one the display layer promises',
+    islands.some((i) => (i.npcs ?? []).some((n) => n.role === 'gold_hoarder'
+      && n.name?.includes(BROKER_NAME))),
+    (islands.flatMap((i) => (i.npcs ?? []).filter((n) => n.role === 'gold_hoarder'))
+      .map((n) => n.name).slice(0, 4).join(', ')));
+  // The ROLE is a wire id and must survive the rename — that is the whole
+  // point of a display layer.
+  expect('…while his wire role id is still gold_hoarder',
+    islands.some((i) => (i.npcs ?? []).some((n) => n.role === 'gold_hoarder')));
+}
 
 // The lint has to be able to FAIL, or it is decoration.
 expect('the lint would catch a regression',

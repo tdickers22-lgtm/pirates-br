@@ -98,6 +98,19 @@ console.log('The Gilded Wreck rises:');
       getIslandSurfaceY(island, wreck.position.x, wreck.position.z) > -2.0));
   expect('she is inside the world bounds',
     !!wreck && Math.hypot(wreck.position.x, wreck.position.z) < WORLD.HALF - 40);
+  // Not merely off the beach: a shoal inside her length would have her rise
+  // THROUGH the rock and leave her chests inside a collider that shoves a
+  // boarding party straight back out — loot nobody can reach.
+  expect('and not merged into a shoal — her length is clear of every sea rock',
+    !!wreck && !match.state.seaRocks.some((rock) =>
+      dist2D(rock.position.x, rock.position.z, wreck.position.x, wreck.position.z)
+        < rock.colliderBoundsRadius + WRECK_EVENT.HULL_HALF_LENGTH),
+    (() => {
+      const r = wreck && match.state.seaRocks
+        .map((k) => ({ k, gap: dist2D(k.position.x, k.position.z, wreck.position.x, wreck.position.z) - k.colliderBoundsRadius }))
+        .sort((a, b) => a.gap - b.gap)[0];
+      return r ? `nearest shoal edge ${r.gap.toFixed(1)}m off her centre` : 'no wreck';
+    })());
   expect('she is on a clock, one storm phase long',
     !!wreck && Math.abs(wreck.claimAt - wreck.spawnedAt - WRECK_EVENT.LOOT_SECONDS) < 1e-6);
   expect('she rises exactly once — a second phase change does not raise a second hull',
@@ -148,6 +161,18 @@ console.log('\nLooting her:');
   const host = match.state.islands.find((island) => island.id === wreck.hostIslandId);
   const chest = host.chests.find((c) => c.id === wreck.chestIds[0]);
   const barrel = host.barrels.find((b) => b.id === wreck.barrelIds[0]);
+
+  // Clear her water of hulls first. She rises at the announced ring centre,
+  // which now and then is exactly where a crew happens to be floating, and a
+  // swimmer dropped inside a hull is (correctly) shoved clear of it — measured
+  // at 2-11 m, well past INTERACT_RANGE. That is swimmer-vs-hull collision
+  // doing its job, and it has nothing to say about the chest path this section
+  // is here to pin, so sail the traffic out of her berth before boarding.
+  for (const s of match.state.ships) {
+    if (dist2D(s.position.x, s.position.z, wreck.position.x, wreck.position.z) < 90) {
+      s.position.x += 600;
+    }
+  }
 
   // Put a pirate in the water alongside her, the way a boarding party arrives.
   const pirate = match.state.players.find((p) => p.isBot);
@@ -238,14 +263,32 @@ console.log('\nCrews converge:');
       / Math.max(1, live.length);
   };
   const before = spread();
-  run(match, 60);
+  // Sail her ACTUAL loot window, not a 60 s slice of it. The lobby settles
+  // 450-700 m out and a sloop crosses that in minutes, so at t+60 s whether
+  // anyone had reached boarding water was a lottery on the starting spread
+  // (measured: 2 runs in 6 still outside 220 m at 60 s, all 6 well inside by
+  // the end of her life). She is up for LOOT_SECONDS; judge her over it.
+  const SAIL = Math.min(150, WRECK_EVENT.LOOT_SECONDS - 20);
+  // Closest APPROACH, not distance at one instant: a crew that comes alongside,
+  // takes her chests and sails on has answered the question, and should not be
+  // failed for having a bow pointed away when the clock stops.
+  let closest = Infinity;
+  for (let i = 0, steps = Math.ceil(SAIL / DT); i < steps; i++) {
+    match.tick();
+    if (i % 25) continue;                      // sample ~2.5x/s, not every tick
+    for (const s of match.state.ships) {
+      if (!s.alive) continue;
+      const d = dist2D(s.position.x, s.position.z, wreck.position.x, wreck.position.z);
+      if (d < closest) closest = d;
+    }
+  }
   const after = spread();
-  console.log(`  mean crew distance to her: ${before.toFixed(0)}m → ${after.toFixed(0)}m`);
+  console.log(`  mean crew distance to her: ${before.toFixed(0)}m → ${after.toFixed(0)}m`
+    + `  (closest approach ${closest.toFixed(0)}m)`);
   expect('the fleet closes on her rather than drifting away', after < before,
     `${before.toFixed(0)} → ${after.toFixed(0)}`);
-  expect('at least one crew is inside boarding water of her',
-    match.state.ships.some((s) => s.alive
-      && dist2D(s.position.x, s.position.z, wreck.position.x, wreck.position.z) < 220));
+  expect('at least one crew comes inside boarding water of her', closest < 220,
+    `closest approach ${closest.toFixed(0)}m over ${SAIL}s`);
   match.stop();
 }
 

@@ -6270,11 +6270,23 @@ export class Match {
       }
       return worst;
     };
+    // Sea room from the islands is not the whole of it: she is a HULL, and a
+    // shoal inside her length has her rise straight through the rock. Worse,
+    // her chests then lie inside a collider — a boarding party swimming to
+    // them is (correctly) shoved back out, so her loot is unreachable and the
+    // whole event is a decoration. Measured on ~1.7% of raises before this.
+    const foulsShoal = (px: number, pz: number) => this.state.seaRocks.some((rock) =>
+      dist2D(px, pz, rock.position.x, rock.position.z)
+        < rock.colliderBoundsRadius + WRECK_EVENT.HULL_HALF_LENGTH + 8);
     const NEED = 80;
-    if (clearance(x, z) >= NEED) return { x, z };
+    if (clearance(x, z) >= NEED && !foulsShoal(x, z)) return { x, z };
     // Deterministic outward spiral, keeping the BEST water found so far so a
-    // crowded corner of the Reach still gets the deepest spot in reach.
-    let best = { x, z, clear: clearance(x, z) };
+    // crowded corner of the Reach still gets the deepest spot in reach. Clean
+    // water is tracked separately from merely-open water so that a fouled
+    // berth is only ever the last resort.
+    let best: { x: number; z: number; clear: number } | null =
+      foulsShoal(x, z) ? null : { x, z, clear: clearance(x, z) };
+    let fallback = { x, z, clear: clearance(x, z) };
     for (let ring = 1; ring <= 12; ring++) {
       const reach = ring * 28;
       for (let step = 0; step < 16; step++) {
@@ -6282,11 +6294,13 @@ export class Match {
         const px = clamp(x + Math.cos(angle) * reach, -WORLD.HALF + 90, WORLD.HALF - 90);
         const pz = clamp(z + Math.sin(angle) * reach, -WORLD.HALF + 90, WORLD.HALF - 90);
         const clear = clearance(px, pz);
-        if (clear >= NEED) return { x: px, z: pz };
-        if (clear > best.clear) best = { x: px, z: pz, clear };
+        const fouled = foulsShoal(px, pz);
+        if (clear >= NEED && !fouled) return { x: px, z: pz };
+        if (!fouled && (!best || clear > best.clear)) best = { x: px, z: pz, clear };
+        if (clear > fallback.clear) fallback = { x: px, z: pz, clear };
       }
     }
-    return { x: best.x, z: best.z };
+    return best ? { x: best.x, z: best.z } : { x: fallback.x, z: fallback.z };
   }
 
   private nearestIsland(x: number, z: number): Island | null {

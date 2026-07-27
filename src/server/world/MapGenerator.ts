@@ -145,8 +145,8 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'I pour honest rum to dishonest men. Whatever you saw under the tarps out in the grove — you were drinking here all evening, and so was I.',
     },
     hoarder: {
-      name: 'Gold Hoarder Darius',
-      cutsceneTitle: 'The Hoarder at the Shore',
+      name: 'Tallyman Darius',
+      cutsceneTitle: 'The Tallyman at the Shore',
       line: 'Sealed chests, not loose excuses. Half the Reach launders its luck across this beach, and I pay better than the crates in the trees.',
     },
   },
@@ -159,7 +159,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'That skull was cut to face the water so you would read it before your keel touched sand. You did not read it. Nobody ever does.',
     },
     hoarder: {
-      name: 'Gold Hoarder Nessa Trell',
+      name: 'Tallyman Nessa Trell',
       cutsceneTitle: 'Coin in the Cove',
       line: 'The totem keeps the warning; I keep the scales. Bring me sealed chests and we are both honest in our way.',
     },
@@ -173,7 +173,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'See that crooked tower? On a black night someone lights it, and a ship steers for a harbour that is not there. Half the crates at its foot still wear the Black Fin brand.',
     },
     hoarder: {
-      name: 'Gold Hoarder Piet Ostrow',
+      name: 'Tallyman Piet Ostrow',
       cutsceneTitle: 'Salvage Rates',
       line: 'Everything on this reef washed up wrong side out. Sealed chests I pay for. The rest of it I have already counted twice.',
     },
@@ -214,7 +214,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'The candles are not thanks, they are payment. Men heard singing in this bay and swam for it. Leave a coin at her feet — she is owed, and she keeps accounts.',
     },
     hoarder: {
-      name: 'Gold Hoarder Lira Sarn',
+      name: 'Tallyman Lira Sarn',
       cutsceneTitle: 'The Toll Collector',
       line: 'She takes offerings, I take chests. Only one of us gives change, and only one of us is still breathing.',
     },
@@ -288,7 +288,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'We cut black glass out of a mountain that was still breathing. Eleven went in on the last shift, the beams charred, and the Maw shut its mouth. The mountain kept the obsidian, and it kept them.',
     },
     hoarder: {
-      name: 'Gold Hoarder Halvard Bex',
+      name: 'Tallyman Halvard Bex',
       cutsceneTitle: 'Black Glass and Gold',
       line: 'The mine takes; I only trade. Sealed chests for coin, and my charts point at the next mark — above ground, if you have any sense left.',
     },
@@ -1677,8 +1677,8 @@ export class MapGenerator {
       npcs.push({
         id: uuid(),
         role: 'gold_hoarder',
-        name: cast.hoarder?.name ?? `Gold Hoarder of ${island.name}`,
-        cutsceneTitle: cast.hoarder?.cutsceneTitle ?? 'The Hoarder at the Shore',
+        name: cast.hoarder?.name ?? `Tallyman of ${island.name}`,
+        cutsceneTitle: cast.hoarder?.cutsceneTitle ?? 'The Tallyman at the Shore',
         line: cast.hoarder?.line ?? 'Sealed chests, carried in hand. I pay gold, and my charts point at the next mark.',
         cue: NPC_CUES.gold_hoarder,
         position: hoarderPos,

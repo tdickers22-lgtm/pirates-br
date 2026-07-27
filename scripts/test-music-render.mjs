@@ -317,25 +317,48 @@ console.log(`   ${fmt(sail.analysis)}  → ${save('sailing-whistle-90s', sail.wa
     expect('…and it whistles for seconds, not minutes (< 20 s of 90)', sounding < 20, `sounding=${sounding.toFixed(1)}s`);
     expect('…leaving most of the passage to wind and water (> 70 s silent)',
       90 - sounding > 70, `silent=${(90 - sounding).toFixed(1)}s`);
-    // Phrases must be separated by a real gap.
-    let maxGap = 0;
-    for (let i = 1; i < secs.length; i++) maxGap = Math.max(maxGap, secs[i] - secs[i - 1]);
+    // Phrases must be separated by a real gap. Measure that between PHRASES,
+    // not between loud buckets: one two-bar whistle is ~39-40 contiguous
+    // buckets, so a bucket-level gap is ~0.1 s inside a phrase and says
+    // nothing about repeat spacing. Cluster first (a hole > 2 s starts a new
+    // phrase), then compare phrase STARTS — which is what the engine spaces
+    // (sailNextAt = now + 30 + rand*60). With a single phrase in the window
+    // there is no repeat to measure and the contract is vacuously kept.
+    const phrases = [];
+    for (const s of secs) {
+      const last = phrases[phrases.length - 1];
+      if (!last || s - last.end > 2) phrases.push({ start: s, end: s });
+      else last.end = s;
+    }
+    let minRepeatGap = Infinity;
+    for (let i = 1; i < phrases.length; i++) {
+      minRepeatGap = Math.min(minRepeatGap, phrases[i].start - phrases[i - 1].start);
+    }
     expect('…with a ≥ 25 s gap between phrases when it repeats',
-      secs.length < 40 || maxGap >= 25, `maxGap=${maxGap.toFixed(1)}s`);
+      phrases.length < 2 || minRepeatGap >= 25,
+      `phrases=${phrases.length} starts=[${phrases.map((p) => p.start.toFixed(1)).join(', ')}]`);
   }
 }
 const stormy = await render({
   seconds: 60,
   sampleRate: 22050,
   step: 0.1,
-  isolate: 'beds',
+  // 'dry', not 'beds': unhooking busDry+busBed still leaves the BEDS' reverb
+  // SEND in the buffer, and a full gale is the loudest bed the engine owns.
+  // That send alone measured 0.8e-3..2.3e-3 across runs — straddling any
+  // sensible silence threshold and flaking the check on the weather's own
+  // noise rather than on the score. Dropping busReverb too leaves the dry
+  // score and nothing else, which is exactly what "silences the score" means.
+  isolate: 'dry',
   setup: "engine.setMusicContext('world'); engine.setTavernSource(null);",
   during: `
     engine.setSailingState({ speed01: 0.9, roughness01: 0.9, heel01: 0.4, luffing: false, aboard: true });
     engine.setAmbience({ nightFactor: 0.5, storminess: 0.95, nearShore01: 0, rain01: 0.9 });
   `,
 });
-expect('a full gale silences the score entirely', Math.max(...stormy.analysis.buckets) < 0.002,
+// Genuinely nothing: the gale gate (stormLevel < 0.45) never lets a note be
+// scheduled, so this renders a mathematically empty buffer, not a quiet one.
+expect('a full gale silences the score entirely', Math.max(...stormy.analysis.buckets) < 1e-4,
   `peak bucket=${Math.max(...stormy.analysis.buckets).toExponential(2)}`);
 
 // ── 4. Mix discipline ───────────────────────────────────────────────────────

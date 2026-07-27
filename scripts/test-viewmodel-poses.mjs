@@ -303,9 +303,35 @@ try {
     await wait(120);
     return hurtOpacity();
   };
-  await bite(100, 100);
-  await wait(1600);
-  expect('no phantom vignette when nothing hit you', (await hurtOpacity()) <= 0.02, String(await hurtOpacity()));
+  // "Phantom" means the vignette came up with NOTHING taken off you. The
+  // overlay fires on any loss of health or armour from any source, and this
+  // probe is a real pirate in a real match: by the time the run reaches this
+  // section she can be in the water taking drowning ticks, or in the storm, or
+  // being chewed on. That vignette is correct, not phantom, and failing on it
+  // made this the flakiest check in the browser chain (1 run in 3 here).
+  // So: watch the pool she is actually losing, and only call it phantom when
+  // the overlay is up while her health and armour never moved.
+  const vitals = () => page.evaluate(() => {
+    const g = window.__piratesBR;
+    const me = g.state.players.find((p) => p.id === g.localPlayerId);
+    return { health: me?.health ?? -1, armor: me?.armor ?? -1 };
+  });
+  let phantom = null;
+  for (let attempt = 0; attempt < 4 && phantom === null; attempt++) {
+    await bite(100, 100);
+    const before = await vitals();
+    await wait(1600);
+    const [opacity, after] = [await hurtOpacity(), await vitals()];
+    const hurt = after.health < before.health || after.armor < before.armor;
+    // The world took a bite mid-window: nothing to judge, settle and re-sample.
+    if (opacity > 0.02 && hurt) { await wait(1200); continue; }
+    phantom = { opacity, before, after };
+  }
+  expect('no phantom vignette when nothing hit you',
+    phantom !== null && phantom.opacity <= 0.02,
+    phantom
+      ? `${phantom.opacity} (health ${phantom.before.health}→${phantom.after.health}, armour ${phantom.before.armor}→${phantom.after.armor})`
+      : 'the world hurt her on every attempt — could not get a clean window');
   expect('a 50-point wound raises the hurt vignette', (await bite(50, 100)) > 0.3, String(await hurtOpacity()));
   await wait(1600);
   expect('damage absorbed by ARMOUR still raises it', (await bite(50, 55)) > 0.2, String(await hurtOpacity()));
