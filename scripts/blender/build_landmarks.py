@@ -149,9 +149,36 @@ def build_watchtower(name="watchtower"):
         bev.append(o)
 
     # ── doorway (front, -Y) ──
+    # The doorway used to be ONE flat Char_Black slab — a featureless black
+    # rectangle painted on the base ("chalkboard sign" in the audit). Keep the
+    # dark interior, but hang a real plank door ajar in it with iron straps and
+    # a threshold, so the opening reads as a doorway and not as a hole.
     bm = bm_box(1.3, 0.7, 2.3)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, -1.78, 1.15)), verts=bm.verts)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, -1.66, 1.15)), verts=bm.verts)
     parts.append(obj_from_bmesh(f"{name}_door", bm, coll, mat("Char_Black")))
+    # threshold slab
+    o = box_beam(coll, f"{name}_sill", (-0.72, -1.92, 0.06), (0.72, -1.92, 0.06), 0.46, 0.14, dark)
+    parts.append(o); bev.append(o)
+    # plank door swung open to -X, three warped boards + two ledger braces
+    dhinge = Matrix.Translation((-0.62, -1.88, 1.10)) @ Matrix.Rotation(math.radians(52), 4, 'Z')
+    for pi in range(3):
+        bm = bm_box(0.20, 0.055, 2.02 - pi * 0.05)
+        bmesh.ops.transform(bm, matrix=dhinge @ Matrix.Translation(
+            (-0.045 - pi * 0.215, 0.0, 0.02 * pi)) @
+            Matrix.Rotation(math.radians(1.6 * pi), 4, 'Y'), verts=bm.verts)
+        o = obj_from_bmesh(f"{name}_dplank{pi}", bm, coll, wb if pi == 1 else mat("Wood_Dark"))
+        parts.append(o); bev_fine.append(o)
+    for lz in (0.66, -0.62):
+        bm = bm_box(0.60, 0.04, 0.13)
+        bmesh.ops.transform(bm, matrix=dhinge @ Matrix.Translation((-0.32, -0.05, lz)),
+                            verts=bm.verts)
+        o = obj_from_bmesh(f"{name}_dledger{lz:.2f}", bm, coll, mat("Wood_Dark"))
+        parts.append(o); bev_fine.append(o)
+    for hz in (0.72, -0.68):   # iron hinge straps
+        bm = bm_box(0.34, 0.035, 0.075)
+        bmesh.ops.transform(bm, matrix=dhinge @ Matrix.Translation((-0.13, -0.055, hz)),
+                            verts=bm.verts)
+        parts.append(obj_from_bmesh(f"{name}_dhinge{hz:.2f}", bm, coll, mat("Metal_Iron")))
     o = box_beam(coll, f"{name}_lintel", (-0.95, -1.9, 2.42), (0.95, -1.9, 2.42), 0.5, 0.42, dark)
     parts.append(o); bev.append(o)
     for sx in (-1, 1):  # jamb stones
@@ -167,6 +194,19 @@ def build_watchtower(name="watchtower"):
     bm = bm_box(0.5, 0.3, 0.68)
     bmesh.ops.transform(bm, matrix=Matrix.Translation((wx, wy, 2.35)) @ wrot, verts=bm.verts)
     parts.append(obj_from_bmesh(f"{name}_win", bm, coll, mat("Char_Black")))
+    # mullion cross + sill: without them the opening is a black rectangle with
+    # no scale cue at all
+    for mb in ((0.05, 0.72), (0.46, 0.06)):
+        bm = bm_box(mb[0], 0.10, mb[1])
+        bmesh.ops.transform(bm, matrix=Matrix.Translation((wx, wy, 2.35)) @ wrot @
+                            Matrix.Translation((0, -0.14, 0)), verts=bm.verts)
+        o = obj_from_bmesh(f"{name}_mull{mb[0]:.2f}", bm, coll, wb)
+        parts.append(o); bev_fine.append(o)
+    bm = bm_box(0.62, 0.26, 0.09)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((wx, wy, 2.35)) @ wrot @
+                        Matrix.Translation((0, -0.06, -0.40)), verts=bm.verts)
+    o = obj_from_bmesh(f"{name}_winsill", bm, coll, stone)
+    parts.append(o); bev.append(o)
     for si, sx in enumerate((-1, 1)):
         bm = bm_box(0.27, 0.05, 0.64)
         askew = Matrix.Rotation(-0.28 if si == 0 else 0.0, 4, 'Y')
@@ -694,16 +734,59 @@ def build_lantern_post(name="lantern_post"):
     # small angled knee brace under the arm
     o = box_beam(coll, f"{name}_knee", (0.06, 0, 1.95), (0.42, 0, 2.2), 0.05, 0.05, mat("Wood_Dark"))
     parts.append(o); bev.append(o)
-    bm = bm_box(0.22, 0.22, 0.3)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0.62, 0, 2.0)), verts=bm.verts)
-    o = obj_from_bmesh(f"{name}_cage", bm, coll, mat("Metal_Iron"))
+    # ── the lantern itself ──────────────────────────────────────
+    # Was a SOLID 0.22 iron box with the glass hidden INSIDE it: dark albedo
+    # times zero visible glass = a featureless black box hanging off the arm
+    # (the "black prop family" audit). Rebuilt as a real caged lantern — glass
+    # is the outer surface, the iron is four corner bars + pan + roof, so the
+    # silhouette reads as an object from any angle.
+    LX, LZ = 0.62, 2.0
+    iron, glass = mat("Metal_Iron"), mat("Lantern_Glass")
+
+    # glass body (the widest part — it is what you actually see)
+    bm = bm_box(0.19, 0.19, 0.27)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ)), verts=bm.verts)
+    o = obj_from_bmesh(f"{name}_glass", bm, coll, glass)
     parts.append(o); bev.append(o)
-    bm = bm_box(0.15, 0.15, 0.2)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0.62, 0, 2.0)), verts=bm.verts)
-    parts.append(obj_from_bmesh(f"{name}_glass", bm, coll, mat("Lantern_Glass")))
-    bm = bm_cylinder(0.05, 0.09, 0.09, segs=8)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0.62, 0, 2.2)), verts=bm.verts)
-    parts.append(obj_from_bmesh(f"{name}_cap", bm, coll, mat("Metal_Iron"), smooth=True))
+    # subtle emissive rim: thin glass bands capping the panes top and bottom,
+    # so the lantern reads as lit glass even at noon against a bright sky
+    for rz in (LZ + 0.145, LZ - 0.145):
+        bm = bm_box(0.205, 0.205, 0.022)
+        bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, rz)), verts=bm.verts)
+        parts.append(obj_from_bmesh(f"{name}_rim{rz:.2f}", bm, coll, glass))
+    # four corner bars OUTSIDE the glass
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            bm = bm_box(0.030, 0.030, 0.31)
+            bmesh.ops.transform(bm, matrix=Matrix.Translation(
+                (LX + sx * 0.098, sy * 0.098, LZ)), verts=bm.verts)
+            o = obj_from_bmesh(f"{name}_bar{sx}{sy}", bm, coll, iron)
+            parts.append(o); bev.append(o)
+    # drip pan under the glass + a soot ring
+    bm = bm_box(0.25, 0.25, 0.045)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ - 0.168)), verts=bm.verts)
+    o = obj_from_bmesh(f"{name}_pan", bm, coll, iron)
+    parts.append(o); bev.append(o)
+    bm = bm_cylinder(0.085, 0.062, 0.05, segs=8)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ - 0.215)), verts=bm.verts)
+    parts.append(obj_from_bmesh(f"{name}_base", bm, coll, iron, smooth=True))
+    # vented roof: flared plate + short chimney + hanging bail
+    bm = bm_cylinder(0.145, 0.085, 0.075, segs=4)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ + 0.19)) @
+                        Matrix.Rotation(math.radians(45), 4, 'Z'), verts=bm.verts)
+    o = obj_from_bmesh(f"{name}_roof", bm, coll, iron)
+    parts.append(o); bev.append(o)
+    bm = bm_cylinder(0.045, 0.055, 0.07, segs=8)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((LX, 0, LZ + 0.255)), verts=bm.verts)
+    parts.append(obj_from_bmesh(f"{name}_flue", bm, coll, iron, smooth=True))
+    # bail hoop up to the arm (thin torus quarter approximated with 6 links)
+    for k in range(7):
+        a = math.pi * k / 6
+        bm = bm_box(0.022, 0.022, 0.05)
+        bmesh.ops.transform(bm, matrix=Matrix.Translation(
+            (LX + 0.10 * math.cos(a), 0, LZ + 0.29 + 0.075 * math.sin(a))) @
+            Matrix.Rotation(a, 4, 'Y'), verts=bm.verts)
+        parts.append(obj_from_bmesh(f"{name}_bail{k}", bm, coll, iron))
     finish(bev, width=0.012)
     obj = join(parts, name)
     ship_and_export(coll, name, obj)

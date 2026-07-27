@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { auditAssetMaterial } from './materialAudit.js';
 
 /**
  * Preloaded GLB asset library. Assets are authored in Blender
@@ -74,6 +75,9 @@ export class AssetLibrary {
               if (m instanceof THREE.MeshStandardMaterial) {
                 // authored for lit scenes; keep flat-shaded stylized look
                 m.flatShading = true;
+                // Lift near-black albedo off the AgX toe and cap metalness
+                // while the scene ships without an envMap — see materialAudit.
+                auditAssetMaterial(m);
                 m.needsUpdate = true;
               }
             }

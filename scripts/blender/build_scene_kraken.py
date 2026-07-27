@@ -425,27 +425,32 @@ def build_kraken_wreck(name="kraken_wreck"):
     print(f"suckers placed: {si * 2}")
 
     # ── harpoons stuck in the tentacle + trailing rope ──
-    harps = [(int(NS * 0.36), Vector((0.9, -0.5, 0.8)), Vector((5.0, -2.4, 0.0))),
-             (int(NS * 0.55), Vector((-0.85, -0.5, 0.7)), Vector((-4.8, -2.6, 0.0))),
-             (int(NS * 0.88), Vector((0.25, -0.7, 0.85)), Vector((2.2, -7.4, 0.0)))]
+    # Five, and thick enough to read from the beach: at the authored scale the
+    # 3.5 cm shafts vanished into the coil and the whole "they fought back"
+    # beat with them (bible §9).
+    harps = [(int(NS * 0.30), Vector((0.9, -0.5, 0.8)), Vector((4.6, -2.4, 0.0))),
+             (int(NS * 0.44), Vector((0.35, -0.9, 0.55)), Vector((3.1, -4.3, 0.0))),
+             (int(NS * 0.55), Vector((-0.85, -0.5, 0.7)), Vector((-4.4, -2.6, 0.0))),
+             (int(NS * 0.71), Vector((-0.5, -0.75, 0.9)), Vector((-2.6, -4.6, 0.0))),
+             (int(NS * 0.88), Vector((0.25, -0.7, 0.85)), Vector((2.2, -5.6, 0.0)))]
     for hi, (idx, hdir, ground) in enumerate(harps):
         hdir = hdir.normalized()
         tip = tpts[idx] + hdir * (radii[idx] * 0.35)      # buried head
         butt = tpts[idx] + hdir * (radii[idx] * 0.35 + 1.9)
-        o = beam(coll, f"{name}_hshaft{hi}", butt, tip + hdir * 0.28, 0.035, 0.042, wd, segs=7)
+        o = beam(coll, f"{name}_hshaft{hi}", butt, tip + hdir * 0.28, 0.055, 0.065, wd, segs=7)
         parts.append(o)
-        o = beam(coll, f"{name}_hhead{hi}", tip + hdir * 0.30, tip, 0.05, 0.008,
+        o = beam(coll, f"{name}_hhead{hi}", tip + hdir * 0.34, tip, 0.082, 0.010,
                  mat("Metal_Iron"), segs=6)
         parts.append(o)
         for bs in (-1, 1):  # barbs
             bp = tip + hdir * 0.26
             perp = hdir.cross(Vector((0, 0, 1)))
             perp = perp.normalized() if perp.length > 1e-4 else Vector((1, 0, 0))
-            o = beam(coll, f"{name}_hbarb{hi}{bs}", bp, bp + (hdir * 0.14 + perp * bs * 0.09),
-                     0.022, 0.004, mat("Metal_Iron"), segs=5)
+            o = beam(coll, f"{name}_hbarb{hi}{bs}", bp, bp + (hdir * 0.19 + perp * bs * 0.14),
+                     0.034, 0.005, mat("Metal_Iron"), segs=5)
             parts.append(o)
         parts += rope_cat(coll, f"{name}_hrope{hi}", butt, Vector((ground.x, ground.y, 0.03)),
-                          rng.uniform(0.5, 0.9), r=0.026, segs=10)
+                          rng.uniform(0.5, 0.9), r=0.038, segs=10)
 
     # ── volcanic rock outcrop with sucker-SCAR ring ──
     # irregular low outcrop: tilted 8-14deg, ~40% buried, noisy edges
@@ -487,6 +492,18 @@ def build_kraken_wreck(name="kraken_wreck"):
         bmesh.ops.transform(bm, matrix=Matrix.Translation(p + scar_n * 0.02) @
                             q.to_matrix().to_4x4(), verts=bm.verts)
         parts.append(obj_from_bmesh(f"{name}_scar{j}", bm, coll, ks, smooth=True))
+    # a second, half-overlapping weal ring — one ring reads as decoration, two
+    # read as "something enormous dragged across this rock"
+    scar_c2 = SLAB_C + scar_n * 0.50 + su * 0.95 - sv * 0.55
+    for j in range(9):
+        a = 2 * math.pi * j / 9 + 0.4
+        rr = 0.115 - 0.015 * (j % 3)
+        p = scar_c2 + (su * math.cos(a) + sv * math.sin(a)) * 0.46
+        q = scar_n.to_track_quat('Z', 'Y')
+        bm = bm_cylinder(rr, rr * 0.68, 0.10, segs=8)
+        bmesh.ops.transform(bm, matrix=Matrix.Translation(p + scar_n * 0.02) @
+                            q.to_matrix().to_4x4(), verts=bm.verts)
+        parts.append(obj_from_bmesh(f"{name}_scarb{j}", bm, coll, ks, smooth=True))
 
     # ── spilled cargo barrels near the stern break ──
     def barrel(tag, pos, rot_euler, crushed=False):
@@ -536,17 +553,34 @@ def build_kraken_wreck(name="kraken_wreck"):
     parts.append(o); bev.append(o)
 
     # ── ground debris planks ──
-    for i in range(10):
+    # splintered PLANKING, not sticks: broad hull boards torn off the crush line
+    for i in range(14):
         a = rng.uniform(0, 2 * math.pi)
-        r = rng.uniform(3.0, 6.6)
-        p = Vector((math.cos(a) * r * 0.8, -abs(math.sin(a)) * r - 1.0, -0.02))
-        d = Vector((math.cos(a + 1.2), math.sin(a + 1.2), 0.02)) * rng.uniform(0.9, 1.7)
-        o = box_beam(coll, f"{name}_deb{i}", p, p + d, 0.28, 0.06,
+        r = rng.uniform(2.2, 4.6)
+        p = Vector((math.cos(a) * r * 0.8, -abs(math.sin(a)) * r - 0.9,
+                    -0.02 + rng.uniform(0.0, 0.16)))
+        d = Vector((math.cos(a + 1.2), math.sin(a + 1.2), 0.03)) * rng.uniform(1.1, 2.2)
+        o = box_beam(coll, f"{name}_deb{i}", p, p + d,
+                     rng.uniform(0.34, 0.52), rng.uniform(0.10, 0.16),
                      wb if i % 2 else wm)
         parts.append(o); bev.append(o)
 
     finish(bev, width=0.018)
     obj = join(parts, name)
+
+    # ── SHOWSTOPPER scale ────────────────────────────────────
+    # Authored at a 7.6 m hull, which on the beach read as "a 10 m pink coil
+    # with stick debris" — nothing like the island-defining landmark the story
+    # bible asks for (§9 Kraken Tooth). Scaled about the scene origin so the
+    # tentacle, hull section, harpoons, sucker rows and scar rings all grow
+    # together and keep their relative proportions.
+    SCENE_SCALE = 1.8
+    obj.scale = (SCENE_SCALE, SCENE_SCALE, SCENE_SCALE)
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
     bake_ao(coll)
     path = export_collection_vc(coll, f"{name}.glb")
     verify_glb(path)

@@ -1,4 +1,4 @@
-# driftwood_log — beach scatter prop (instanced, <=800 tris).
+# driftwood_log — beach scatter prop (instanced, <=1500 tris).
 # Bleached twisted driftwood snag: bent trunk half-sunk in the sand, exposed
 # root ball at one end, one upswept bird-perch branch. Distinct elongated
 # silhouette vs boulders. Origin at ground center. 1u = 1m.
@@ -96,7 +96,10 @@ def build_driftwood(name="driftwood_log"):
               Vector((0.10, 2.0, 0.55))]
     tpts = catmull(t_ctrl, 13)
     radii = [0.125 + 0.215 * (i / 13) ** 1.3 for i in range(14)]  # thick at root end
-    trunk = loft_tube(coll, f"{name}_trunk", tpts, radii, wb, segs=8, lobe=0.20)
+    # segs 8 + lobe 0.20 collapsed into flat facets under the client's forced
+    # flatShading — the "untextured flat boxes" the bone-island audit flagged.
+    # More segments and a gentler lobe give the snag a round, twisted read.
+    trunk = loft_tube(coll, f"{name}_trunk", tpts, radii, wb, segs=11, lobe=0.13)
     displace_noise(trunk, strength=0.08, scale=0.5, seed=2)
     apply_modifiers(trunk)
     parts.append(trunk)
@@ -108,12 +111,12 @@ def build_driftwood(name="driftwood_log"):
               Vector((0.48, -0.90, 1.60))]
     bpts = catmull(b_ctrl, 8)
     bradii = [0.115 * (1 - 0.62 * i / 8) + 0.015 for i in range(9)]
-    br = loft_tube(coll, f"{name}_branch", bpts, bradii, wb, segs=6)
+    br = loft_tube(coll, f"{name}_branch", bpts, bradii, wb, segs=9)
     parts.append(br)
     # broken stub branch (darker heartwood)
     s_ctrl = [Vector((-0.2, 0.6, 0.15)), Vector((-0.55, 0.85, 0.42))]
     st = loft_tube(coll, f"{name}_stub", catmull(s_ctrl, 3),
-                   [0.07, 0.055, 0.04, 0.012], wm, segs=6)
+                   [0.07, 0.055, 0.04, 0.012], wm, segs=8)
     parts.append(st)
 
     # root ball: radiating snapped roots at the +Y (thick) end
@@ -127,16 +130,33 @@ def build_driftwood(name="driftwood_log"):
                         root_c + d * ln], 4)
         o = loft_tube(coll, f"{name}_root{i}", rpts,
                       [0.13 * (1 - 0.62 * j / 4) + 0.018 for j in range(5)],
-                      wb if i % 3 else wm, segs=6)
+                      wb if i % 3 else wm, segs=8)
         parts.append(o)
     # root knot
-    bm = bm_icosphere(0.38, subdiv=1)
+    bm = bm_icosphere(0.38, subdiv=2)
     bmesh.ops.scale(bm, vec=Vector((1.15, 0.9, 1.1)), verts=bm.verts)
     bmesh.ops.transform(bm, matrix=Matrix.Translation(root_c), verts=bm.verts)
     kn = obj_from_bmesh(f"{name}_knot", bm, coll, wb, smooth=True)
     displace_noise(kn, strength=0.07, scale=0.4, seed=6)
     apply_modifiers(kn)
     parts.append(kn)
+
+    # snapped-off splinters at the thin end + a curled bark strip — the bible
+    # asks for a bleached SNAG, and a snag is defined by its broken ends
+    rng2 = random.Random(11)
+    tip = tpts[0]
+    for i in range(4):
+        a = 2 * math.pi * i / 4 + 0.6
+        d = Vector((math.cos(a) * 0.10, -rng2.uniform(0.35, 0.62), math.sin(a) * 0.10))
+        sp = loft_tube(coll, f"{name}_spl{i}",
+                       catmull([tip + Vector((0, 0.05, 0)), tip + d * 0.6, tip + d], 3),
+                       [0.055, 0.038, 0.022, 0.006], wb, segs=6)
+        parts.append(sp)
+    bark = loft_tube(coll, f"{name}_bark",
+                     catmull([Vector((-0.34, -1.15, 0.20)), Vector((-0.50, -0.62, 0.34)),
+                              Vector((-0.40, -0.05, 0.22))], 5),
+                     [0.075, 0.062, 0.05, 0.04, 0.03, 0.02], wm, segs=6)
+    parts.append(bark)
 
     obj = join(parts, name)
     bake_ao(coll, samples=16)

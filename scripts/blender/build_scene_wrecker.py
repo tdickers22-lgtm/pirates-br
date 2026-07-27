@@ -22,6 +22,9 @@ EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
 
 EXTRA = {
     "Bone": ((0.82, 0.78, 0.68, 1.0), 0.9, 0.0),
+    # AgX-compensated shore sand (matches _detail.AGX_OVERRIDES): the old
+    # 0.83 "Sand" tonemapped to near-white and read as a cake platter.
+    "Sand_Pad": ((0.400, 0.330, 0.208, 1.0), 0.95, 0.0),
     # dead lantern glass: cold, dark, NO emission (the point of the scene)
     "Glass_Dead": ((0.09, 0.11, 0.13, 1.0), 0.35, 0.0),
 }
@@ -96,28 +99,76 @@ def prism(coll, name, poly, thick, material, xform):
     return obj_from_bmesh(name, bm, coll, material)
 
 
-def ground_disc(coll, name, R, hfn, m_main, nr=66, ns=112, rim_z=-0.05):
+def rim_scale(a, wobble, seed):
+    """Deterministic angular noise in [1-wobble, 1] — fingers the pad rim so its
+    edge is never a clean arc (the "decal stamp" read)."""
+    s = 0.0
+    for k, (f, w) in enumerate(((3, 0.5), (7, 0.3), (13, 0.2))):
+        s += w * math.sin(a * f + seed * 1.7 + k * 2.1)
+    return 1.0 - wobble * (0.5 + 0.5 * s)
+
+
+def ground_disc(coll, name, R, hfn, m_main, nr=66, ns=112, rim_z=-0.05,
+                sink=0.55, skirt=1.6, wobble=0.20, seed=3):
+    """Scene ground pad, feathered so it can never read as a cake platter.
+
+    Three things keep the edge honest: the rim radius is angular-noise fingered
+    (no clean arc), the outer 30% SINKS `sink` below the pad surface so the
+    boundary is buried inside the terrain stamp instead of ending in mid-air,
+    and a skirt drops `skirt` further — below the waterline on shoreline
+    placements — so the pad never shows its underside over open water and no
+    vertical rim is ever exposed."""
     bm = bmesh.new()
     center = bm.verts.new((0, 0, hfn(0, 0)))
     rings = []
+    radii = [R * rim_scale(2 * math.pi * j / ns, wobble, seed) for j in range(ns)]
     for i in range(1, nr + 1):
-        r = R * i / nr
+        t = i / nr
         ring = []
         for j in range(ns):
             a = 2 * math.pi * j / ns
+            r = radii[j] * t
             x, y = r * math.cos(a), r * math.sin(a)
             z = hfn(x, y)
-            f = min(1.0, max(0.0, (r / R - 0.70) / 0.30))
+            f = min(1.0, max(0.0, (t - 0.70) / 0.30))
             f = f * f * (3 - 2 * f)
-            ring.append(bm.verts.new((x, y, z * (1 - f) + rim_z * f)))
+            ring.append(bm.verts.new((x, y, z * (1 - f) + (rim_z - sink) * f)))
+        rings.append(ring)
+    if skirt > 0:
+        ring = []
+        for j in range(ns):
+            a = 2 * math.pi * j / ns
+            r = radii[j] * 0.995
+            ring.append(bm.verts.new((r * math.cos(a), r * math.sin(a),
+                                      rim_z - sink - skirt)))
         rings.append(ring)
     for j in range(ns):
         bm.faces.new((center, rings[0][j], rings[0][(j + 1) % ns]))
-    for i in range(nr - 1):
+    for i in range(len(rings) - 1):
         for j in range(ns):
             bm.faces.new((rings[i][j], rings[i + 1][j],
                           rings[i + 1][(j + 1) % ns], rings[i][(j + 1) % ns]))
     return obj_from_bmesh(name, bm, coll, m_main, smooth=True)
+
+
+def damp_rim(obj, z_hi=-0.22, z_lo=-1.4, col=(0.72, 0.74, 0.78), amt=0.34):
+    """Vertex-blend the sunk rim + skirt toward WET sand. Run after bake_ao (it
+    multiplies the baked AO), before export. Only the pad reaches below z_hi, so
+    this is safe to run on the joined scene."""
+    me = obj.data
+    attr = me.color_attributes.get('Col')
+    if attr is None:
+        return
+    span = max(1e-4, z_hi - z_lo)
+    for i, v in enumerate(me.vertices):
+        z = v.co.z
+        if z >= z_hi:
+            continue
+        k = amt * min(1.0, (z_hi - z) / span)
+        c = attr.data[i].color
+        attr.data[i].color = (c[0] * ((1 - k) + k * col[0]),
+                              c[1] * ((1 - k) + k * col[1]),
+                              c[2] * ((1 - k) + k * col[2]), 1.0)
 
 
 def finish(objs, width=0.014, segments=1):
@@ -129,6 +180,7 @@ def finish(objs, width=0.014, segments=1):
 def ship(coll, name, parts):
     obj = join(parts, name)
     bake_ao(coll)
+    damp_rim(obj)
     path = export_collection_vc(coll, f"{name}.glb")
     verify_glb(path)
     if RENDER_DIR:
@@ -138,7 +190,7 @@ def ship(coll, name, parts):
 
 
 # ── ground: beach with ridged drag furrows from the water (-Y) ─
-R = 5.4
+R = 4.0            # <= the flat core of the 5.5 m terrain stamp (blend 0.45)
 CARGO_C = (2.05, 1.05)          # salvage stack center
 FURROWS = ((1.35, 0.35), (2.05, 0.0), (2.75, -0.4))   # (x0, phase)
 
@@ -148,10 +200,10 @@ def hfn(x, y):
         + 0.018 * math.sin(x * 3.0 - y * 2.1 + 1.0)
     # ridged drag furrows: water edge (-Y) up to the cargo stack
     for (x0, ph) in FURROWS:
-        if -5.4 < y < 1.35:
+        if -4.0 < y < 1.35:
             xc = x0 + 0.16 * math.sin(y * 0.9 + ph)
             d = abs(x - xc)
-            fade = min(1.0, (y + 5.4) / 0.8) * max(0.0, min(1.0, (1.35 - y) / 0.9))
+            fade = min(1.0, (y + 4.0) / 0.8) * max(0.0, min(1.0, (1.35 - y) / 0.9))
             ripple = 0.68 + 0.32 * math.sin(y * 7.5 + ph * 3)
             z += (-0.17 * math.exp(-(d / 0.26) ** 2) * ripple
                   + 0.11 * math.exp(-((d - 0.44) / 0.17) ** 2)) * fade
@@ -453,7 +505,10 @@ def build(name):
     parts = []
     bev_all = []
 
-    parts.append(ground_disc(coll, f"{name}_ground", R, hfn, mat("Sand")))
+    # Sand_PAD (not Sand): the client blends materials named Sand_Pad toward the
+    # host island's ground palette and erodes their rim — a pad named "Sand"
+    # skipped that pass entirely and shipped as a stark white cake platter.
+    parts.append(ground_disc(coll, f"{name}_ground", R, hfn, mat("Sand_Pad")))
     displace_noise(parts[0], strength=0.03, scale=0.5, seed=11)
     apply_modifiers(parts[0])
 
@@ -472,23 +527,23 @@ def build(name):
         bev_all += b
 
     # one crate still mid-drag, halfway up a furrow
-    fx = FURROWS[2][0] + 0.16 * math.sin(-2.1 * 0.9 + FURROWS[2][1])
-    p, b = crate(coll, f"{name}_ckdrag", (fx, -2.1, hfn(fx, -2.1) - 0.06),
+    fx = FURROWS[2][0] + 0.16 * math.sin(-1.85 * 0.9 + FURROWS[2][1])
+    p, b = crate(coll, f"{name}_ckdrag", (fx, -1.85, hfn(fx, -1.85) - 0.06),
                  math.radians(64), s=0.68, tilt=(math.radians(6), math.radians(-4)),
                  fin=True)
     parts += p
     bev_all += b
     # its drag rope trailing up toward the stack
-    parts += rope_cat(coll, f"{name}_dragrope", (fx - 0.1, -1.75, hfn(fx - 0.1, -1.75) + 0.32),
+    parts += rope_cat(coll, f"{name}_dragrope", (fx - 0.1, -1.55, hfn(fx - 0.1, -1.55) + 0.32),
                       (CARGO_C[0] + 0.2, CARGO_C[1] - 0.9, hfn(CARGO_C[0] + 0.2, CARGO_C[1] - 0.9) + 0.05),
                       sag=0.16, segs=7)
 
     # rope coils by the tower base and by the cargo
     parts += rope_coil(coll, f"{name}_coil0", -2.35, -0.55, hfn(-2.35, -0.55))
-    parts += rope_coil(coll, f"{name}_coil1", 3.05, 0.35, hfn(3.05, 0.35), loops=2, r0=0.18)
+    parts += rope_coil(coll, f"{name}_coil1", 2.85, 0.35, hfn(2.85, 0.35), loops=2, r0=0.18)
 
     # spyglass tripod aimed at the reef (-Y), stage right of the ladder
-    parts += spyglass_tripod(coll, f"{name}_spy", (-2.55, -2.05, hfn(-2.55, -2.05) - 0.02),
+    parts += spyglass_tripod(coll, f"{name}_spy", (-2.35, -1.90, hfn(-2.35, -1.90) - 0.02),
                              math.radians(6), -8)
 
     # a couple of salvaged barrels tipped by the stack

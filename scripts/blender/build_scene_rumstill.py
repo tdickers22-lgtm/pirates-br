@@ -20,7 +20,9 @@ RENDER_DIR = os.environ.get("PBR_RENDER_DIR", "")
 EXPORT_DIR = os.environ.get("PBR_EXPORT_DIR", EXPORT_DIR)
 
 EXTRA = {
-    "Sand_Pad": ((0.68, 0.60, 0.44, 1.0), 0.95, 0.0),
+    # AgX-compensated shore sand (matches _detail.AGX_OVERRIDES): the old
+    # near-0.7 pad tonemapped to near-white and read as a paint splat.
+    "Sand_Pad": ((0.400, 0.330, 0.208, 1.0), 0.95, 0.0),
     "Copper": ((0.55, 0.28, 0.15, 1.0), 0.45, 0.85),
     "Bottle_Green": ((0.10, 0.30, 0.16, 1.0), 0.35, 0.0),
     "Bone": ((0.82, 0.78, 0.68, 1.0), 0.9, 0.0),
@@ -86,6 +88,7 @@ def finish(objs, width=0.014, segments=1):
 def ship(coll, name, parts):
     obj = join(parts, name)
     bake_ao(coll)
+    damp_rim(obj)
     path = export_collection_vc(coll, f"{name}.glb")
     verify_glb(path)
     if RENDER_DIR:
@@ -95,7 +98,7 @@ def ship(coll, name, parts):
 
 
 # ── ground with scorch ring ──────────────────────────────────
-R = 4.4
+R = 3.5            # <= the flat core of the 6 m terrain stamp (blend 0.4)
 STILL = (0.0, -0.9)
 
 
@@ -107,24 +110,71 @@ def hfn(x, y):
     return z
 
 
-def ground_disc(coll, name, R, hfn, m_main, m_scorch, nr=64, ns=120, rim_z=-0.05):
+
+def rim_scale(a, wobble, seed):
+    """Deterministic angular noise in [1-wobble, 1] — fingers the pad rim so its
+    edge is never a clean arc (the "decal stamp" read)."""
+    s = 0.0
+    for k, (f, w) in enumerate(((3, 0.5), (7, 0.3), (13, 0.2))):
+        s += w * math.sin(a * f + seed * 1.7 + k * 2.1)
+    return 1.0 - wobble * (0.5 + 0.5 * s)
+
+
+def damp_rim(obj, z_hi=-0.22, z_lo=-1.4, col=(0.60, 0.64, 0.72), amt=0.6):
+    """Vertex-blend the sunk pad rim + skirt toward WET sand. Run after bake_ao
+    (it multiplies the baked AO), before export. Only the pad reaches below
+    z_hi, so this is safe to run on the joined scene."""
+    me = obj.data
+    attr = me.color_attributes.get('Col')
+    if attr is None:
+        return
+    span = max(1e-4, z_hi - z_lo)
+    for i, v in enumerate(me.vertices):
+        z = v.co.z
+        if z >= z_hi:
+            continue
+        k = amt * min(1.0, (z_hi - z) / span)
+        c = attr.data[i].color
+        attr.data[i].color = (c[0] * ((1 - k) + k * col[0]),
+                              c[1] * ((1 - k) + k * col[1]),
+                              c[2] * ((1 - k) + k * col[2]), 1.0)
+
+
+def ground_disc(coll, name, R, hfn, m_main, m_scorch, nr=64, ns=120, rim_z=-0.05,
+                sink=0.55, skirt=2.4, wobble=0.20, seed=4):
+    """Scene ground pad, feathered so it can never read as a cake platter: the
+    rim radius is angular-noise fingered (no clean arc), the outer 30% SINKS
+    `sink` below the pad surface so the boundary is buried inside the terrain
+    stamp instead of ending in mid-air, and a skirt drops `skirt` further —
+    below the waterline on shoreline placements — so the pad never shows its
+    underside and no vertical rim is ever exposed."""
     bm = bmesh.new()
     center = bm.verts.new((0, 0, hfn(0, 0)))
     rings = []
+    radii = [R * rim_scale(2 * math.pi * j / ns, wobble, seed) for j in range(ns)]
     for i in range(1, nr + 1):
-        r = R * i / nr
+        t = i / nr
         ring = []
         for j in range(ns):
             a = 2 * math.pi * j / ns
+            r = radii[j] * t
             x, y = r * math.cos(a), r * math.sin(a)
             z = hfn(x, y)
-            f = min(1.0, max(0.0, (r / R - 0.70) / 0.30))
+            f = min(1.0, max(0.0, (t - 0.70) / 0.30))
             f = f * f * (3 - 2 * f)
-            ring.append(bm.verts.new((x, y, z * (1 - f) + rim_z * f)))
+            ring.append(bm.verts.new((x, y, z * (1 - f) + (rim_z - sink) * f)))
+        rings.append(ring)
+    if skirt > 0:
+        ring = []
+        for j in range(ns):
+            a = 2 * math.pi * j / ns
+            r = radii[j] * 0.995
+            ring.append(bm.verts.new((r * math.cos(a), r * math.sin(a),
+                                      rim_z - sink - skirt)))
         rings.append(ring)
     for j in range(ns):
         bm.faces.new((center, rings[0][j], rings[0][(j + 1) % ns]))
-    for i in range(nr - 1):
+    for i in range(len(rings) - 1):
         for j in range(ns):
             bm.faces.new((rings[i][j], rings[i + 1][j],
                           rings[i + 1][(j + 1) % ns], rings[i][(j + 1) % ns]))
