@@ -1,5 +1,6 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS } from '../../shared/constants/index.js';
+import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles } from '../../shared/interactions.js';
 import {
@@ -568,9 +569,13 @@ export class PhysicsSystem {
       const speedMult = ship.upgrades.some(u => u.type === 'swift_sails') ? SHIP_UPGRADES.SWIFT_SPEED_MULT : 1;
       // Weight of water: a swamped hull is dragged down to ~0.62× top speed.
       const waterSpeedFactor = 1 - clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.SPEED_PENALTY;
+      // Weight of GOLD: a hold stacked with the crew's winnings sits deeper and
+      // sails slower (shared/cargo.ts). This is what makes the leader catchable
+      // — the gold race is only a race if the front-runner can be run down.
+      const ballast = cargoBallastFactor(ship.cargoGold ?? 0);
       const targetSpeed = ship.anchored
         ? 0
-        : stats.maxSpeed * speedMult * sailDeployment * (0.16 + trimEfficiency * 0.84) * sailPolar * wind.strength * floodPenalty * waterSpeedFactor;
+        : stats.maxSpeed * speedMult * sailDeployment * (0.16 + trimEfficiency * 0.84) * sailPolar * wind.strength * floodPenalty * waterSpeedFactor * ballast;
       const sailLoad = clamp(ship.sailHeight * clamp(ship.sailIntegrity, 0, 1), 0, 1);
       const accelRate = ship.anchored ? SHIP.ANCHOR_BRAKE * 1.28 : 1.55 + sailLoad * 1.05;
       const speedBlend = 1 - Math.exp(-accelRate * dt);
@@ -599,7 +604,7 @@ export class PhysicsSystem {
       }
 
       const speed = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.z ** 2);
-      const maxSpeed = stats.maxSpeed * speedMult * 1.08;
+      const maxSpeed = stats.maxSpeed * speedMult * 1.08 * ballast;
       if (speed > maxSpeed) {
         const scale = maxSpeed / Math.max(speed, 0.001);
         ship.velocity.x *= scale;

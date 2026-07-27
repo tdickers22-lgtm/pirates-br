@@ -107,6 +107,55 @@ export const ECONOMY = {
   ARMOR_PRICE: 1200,
 } as const;
 
+// ── Hold cargo: the gold race made PHYSICAL ──────────────────
+// The 9000g win target used to be an invisible number on a scoreboard. Past
+// SAFE_GOLD a crew's winnings stop being pocket coin and become CARGO: crates
+// and coin-spill you can SEE stacked in the hold, weight the hull carries as
+// lost top speed, plunder a boarder can cut out of you, and treasure that
+// SPILLS into the shallows when she founders. Below SAFE_GOLD nothing is ever
+// taken by the world — a bad night never zeroes a pirate.
+export const CARGO = {
+  /** Banked gold at or below this is safe pocket coin: no weight, no spill. */
+  SAFE_GOLD: 1500,
+  /** Cargo gold that reads as a completely full hold (target minus the safe
+   *  pocket) — the ballast/steal curves normalize against this. */
+  FULL_LOAD: 7500,
+  /** Top-speed penalty a completely full hold costs. The leader is catchable. */
+  MAX_BALLAST_PENALTY: 0.14,
+  /** Cargo-gold floors for hold tiers 1..4 (tier 0 = trim, an empty hold). */
+  TIER_THRESHOLDS: [1, 1500, 3400, 5400] as readonly number[],
+  /** Share of a crew's CARGO gold that spills into the shallows when she
+   *  founders. Half stays with the swimming crew — sinking is not a wipe. */
+  SPILL_FRACTION: 0.5,
+  /** Hard ceiling on what one wreck can put on the seabed. */
+  SPILL_MAX: 2400,
+  /** A spill breaks into at most this many divable pieces. */
+  SPILL_PIECES_MAX: 6,
+  /** Never split a spill into pieces smaller than this. */
+  SPILL_PIECE_MIN: 140,
+  /** Depth (m below mean sea level) the sunken cargo settles at — one held
+   *  breath down, not an abyssal dive. */
+  SPILL_DEPTH: 6,
+  /** Scatter radius (m) of the spilled pieces around the wreck mark. */
+  SPILL_SCATTER: 9,
+  /** Swim within this (3D) to scoop a piece of sunken cargo. */
+  SPILL_PICKUP_RANGE: 3.4,
+  /** Sunken cargo is claimable for this long before the tide takes it. */
+  SPILL_LIFETIME: 210,
+  /** Hard cap on live spoils in the world. This is a WIRE budget, not a design
+   *  one: the 10 Hz full snapshot is capped at 35 KB and every piece of sunken
+   *  cargo rides it. Oldest are culled first. */
+  SPILL_WORLD_MAX: 24,
+  /** Crew gold, as a share of GOLD_WIN_TARGET, that raises a map-wide bounty. */
+  BOUNTY_RATIO: 0.6,
+  /** The bounty only lifts once the crew falls back below this share —
+   *  hysteresis, so a leader hovering at the line doesn't strobe the map. */
+  BOUNTY_CLEAR_RATIO: 0.55,
+  /** Boarding steal cap multiplier against a completely full hold: a laden
+   *  leader is worth boarding, which is the counterplay to the ballast. */
+  STEAL_LADEN_MULT: 4,
+} as const;
+
 // ── Ships ────────────────────────────────────────────────────
 export const SHIP_STATS: Record<ShipType, {
   maxHull: number;
@@ -671,3 +720,73 @@ export const BOT_LOOKAHEAD_METERS = 90;
 export const BOT_OBSTACLE_MARGIN = 16;
 /** Water a bot demands under its keel before closing further on a shore. */
 export const BOT_KEEL_CLEARANCE = 1.4;
+
+// ── The Gilded Wreck (mid-match convergence event) ────────────
+/** A half-sunk ghost galleon rises at the ANNOUNCED next ring centre and stays
+ *  lootable for one storm phase before the tempest claims her. She exists to
+ *  break the mid-match drought the pacing audit found: mean 7.5 crews still
+ *  afloat at 360 s with nothing between shrinks to pull them together. The
+ *  wreck gives the whole lobby ONE place worth sailing to, at the exact spot
+ *  they must sail to anyway, with loot worth fighting over when they arrive. */
+export const WRECK_EVENT = {
+  /** Zero-indexed storm phase whose START raises her. The wreck must land INSIDE
+   *  the drought, not after it: index 1 is the second circle, reached at ~235 s,
+   *  which puts the fight it starts squarely across the dead 235-395 s window
+   *  the audit measured. (Index 2 — the HUD's "STORM PHASE 3" — begins at
+   *  ~395 s, i.e. after the 360 s mark the audit is scored on.) */
+  SPAWN_PHASE: 1,
+  /** She is claimed this many seconds after rising. Sized to the phase she
+   *  spawns in (wait + shrink) so "lootable for the phase" is literal. */
+  LOOT_SECONDS: 160,
+  /** Treasure chests aboard — carry them home and bank them. */
+  CHESTS: 3,
+  /** Gold value band per chest. Richer than an island chest (ECONOMY.CHEST_*)
+   *  because the wreck is contested by definition. */
+  CHEST_VALUE_MIN: 340,
+  CHEST_VALUE_MAX: 520,
+  /** Supply barrels aboard — the "super ammo" cache. */
+  BARRELS: 3,
+  /** Hull half-length / half-beam of the ghost galleon, metres. Drives the loot
+   *  scatter, the client silhouette and the map icon. */
+  HULL_HALF_LENGTH: 17,
+  HULL_HALF_BEAM: 5.2,
+  /** How far out the gold beacon column is meant to read, metres. The client
+   *  sizes the shaft so the wreck is legible at this range. */
+  BEACON_RANGE: 320,
+  /** Bots inside this radius break off patrol and converge on her. */
+  LURE_RADIUS: 620,
+} as const;
+
+/** Loot table for the wreck's supply barrels: no fruit, no planks — this is the
+ *  powder store. Every roll is ammunition or ordnance. */
+export const WRECK_SUPPLY_TABLE = [
+  { item: 'cannonball' as const,      weight: 20, minQty: 6, maxQty: 10 },
+  { item: 'firebomb_ball' as const,   weight: 16, minQty: 2, maxQty: 4  },
+  { item: 'chainshot' as const,       weight: 14, minQty: 2, maxQty: 4  },
+  { item: 'eye_ammo' as const,        weight: 12, minQty: 4, maxQty: 8  },
+  { item: 'blunderbuss_ammo' as const, weight: 12, minQty: 5, maxQty: 9 },
+  { item: 'flintknock_ammo' as const, weight: 12, minQty: 4, maxQty: 8  },
+  { item: 'pistol_ammo' as const,     weight: 10, minQty: 8, maxQty: 14 },
+  { item: 'gold' as const,            weight: 8,  minQty: 60, maxQty: 140 },
+];
+
+// ── Sea micro-POIs (uncharted, fixed) ─────────────────────────
+/** ~41% of the Reach's water is more than 180 m from any coast (see
+ *  scripts/test-sea-voids.mjs). These are the small hand-nothings that make a
+ *  held heading worth holding: never on the chart, always in the same place, so
+ *  a pirate who learns the sea gets paid for it. */
+export const SEA_POI = {
+  COUNT: 4,
+  /** Metres between sites — they must sit in DIFFERENT voids. */
+  SPACING: 300,
+  /** rng stream salt; keeps every existing world placement bit-identical. */
+  SEED: 0x5ea401,
+  /** Supply barrels on the floating wreck cluster. */
+  CLUSTER_BARRELS: 2,
+  /** Supply barrels lashed to the gull-circled flotsam. */
+  FLOTSAM_BARRELS: 1,
+  /** Gulls circling a site — the visual signpost you read from a mile off. */
+  GULLS: 5,
+  /** Radius of the gull circle, metres. */
+  GULL_RADIUS: 11,
+} as const;

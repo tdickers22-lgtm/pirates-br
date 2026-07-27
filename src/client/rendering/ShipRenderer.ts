@@ -3,6 +3,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import type { IslandDock, Player, Ship, ShipHole, ShipType, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
 import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
+import { cargoTier } from '../../shared/cargo.js';
 import { getAmmoCrateLocal, getCannonDeckLocalPosition, getShipGangwayPlan } from '../../shared/interactions.js';
 import type { RenderQuality } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
@@ -1378,6 +1379,103 @@ function makeShipInterior(
   return g;
 }
 
+/**
+ * THE HOLD CARGO STACK — the 9000-gold race, made a thing you can walk down to
+ * and look at.
+ *
+ * The win condition of this battle royale used to have no body: gold was a
+ * number in the corner of the HUD and the hold of the ship carrying it was as
+ * empty as everyone else's. This builds the crates, coin-spill and strongboxes
+ * that fill that hold as the crew's cargo grows (shared/cargo.ts tiers), so
+ * "who is winning" is a question you answer by looking at a ship's belly.
+ *
+ * Built as FOUR cumulative merged variants (tier 1 lots … tiers 1-4 lots), of
+ * which exactly one is ever visible: a laden hull costs two extra draw calls,
+ * an empty one costs none. Growing the stack by toggling meshes rather than
+ * spawning crates keeps this off the per-frame allocation path entirely.
+ */
+function makeHoldCargoStacks(
+  stats: { width: number; length: number; height: number },
+  crateMat: THREE.Material,
+  goldMat: THREE.Material,
+): { group: THREE.Group; tiers: THREE.Object3D[] } {
+  const W = stats.width, L = stats.length, H = stats.height;
+  const floorY = 0.41;                    // top of the hold's floor slab
+  const headroom = Math.max(0.7, H - 0.45);
+  const group = new THREE.Group();
+  group.name = 'hold-cargo';
+
+  /** One stowed lot: crates + a coin pile, at a spot clear of the stairwell. */
+  const lots: Array<() => { crates: THREE.BufferGeometry[]; gold: THREE.BufferGeometry[] }> = [];
+  const stow = (lx: number, lz: number, crateCount: number, coins: number, seed: number) => {
+    lots.push(() => {
+      const crates: THREE.BufferGeometry[] = [];
+      const gold: THREE.BufferGeometry[] = [];
+      for (let i = 0; i < crateCount; i += 1) {
+        const s = 0.42 + ((seed + i * 7) % 5) * 0.045;
+        const h = Math.min(s, headroom * 0.42);
+        const level = Math.floor(i / 2);
+        const geo = new THREE.BoxGeometry(s, h, s * 0.86);
+        geo.rotateY(((seed + i * 13) % 9 - 4) * 0.06);
+        geo.translate(
+          lx + ((i % 2) * 2 - 1) * s * 0.56,
+          Math.min(floorY + h * 0.5 + level * h * 1.02, floorY + headroom - h * 0.5),
+          lz + (((seed + i) % 3) - 1) * 0.12,
+        );
+        crates.push(geo);
+      }
+      // Coin spill: flat gold discs at the crates' feet. Cheap, and the only
+      // warm-metal thing below decks — it reads as money from the stairwell.
+      for (let i = 0; i < coins; i += 1) {
+        const r = 0.13 + ((seed + i * 3) % 4) * 0.02;
+        const geo = new THREE.CylinderGeometry(r, r * 1.12, 0.055 + (i % 3) * 0.02, 8);
+        const a = (i / Math.max(1, coins)) * Math.PI * 2 + seed;
+        geo.translate(
+          lx + Math.cos(a) * (0.32 + (i % 2) * 0.18),
+          floorY + 0.03 + (i % 2) * 0.03,
+          lz + Math.sin(a) * (0.3 + (i % 3) * 0.14),
+        );
+        gold.push(geo);
+      }
+      return { crates, gold };
+    });
+  };
+
+  // Stowage plan: aft of the stairwell first (a crew stows heavy aft), then the
+  // forward hold, then the wings. The companionway (getShipCompanionwayConfig,
+  // roughly z ∈ [-L*0.05, L*0.21] near the centreline) stays walkable at every
+  // tier — cargo may never wall a pirate off from their own ladder.
+  stow(-W * 0.16, -L * 0.24, 3, 5, 1);
+  stow(W * 0.19, -L * 0.31, 4, 6, 4);
+  stow(-W * 0.20, L * 0.30, 4, 7, 7);
+  stow(W * 0.17, L * 0.33, 5, 9, 2);
+
+  const tiers: THREE.Object3D[] = [];
+  const crateGeos: THREE.BufferGeometry[] = [];
+  const goldGeos: THREE.BufferGeometry[] = [];
+  for (const buildLot of lots) {
+    const lot = buildLot();
+    crateGeos.push(...lot.crates);
+    goldGeos.push(...lot.gold);
+    const tier = new THREE.Group();
+    const crates = mergeGeometries(crateGeos.map((g) => g.clone()), false);
+    const coins = mergeGeometries(goldGeos.map((g) => g.clone()), false);
+    if (crates) {
+      const mesh = new THREE.Mesh(crates, crateMat);
+      mesh.castShadow = true;
+      tier.add(mesh);
+    }
+    if (coins) tier.add(new THREE.Mesh(coins, goldMat));
+    tier.visible = false;
+    group.add(tier);
+    tiers.push(tier);
+  }
+  for (const geo of crateGeos) geo.dispose();
+  for (const geo of goldGeos) geo.dispose();
+
+  return { group, tiers };
+}
+
 interface CannonMeshGroup {
   root: THREE.Group;
   yawPivot: THREE.Group;
@@ -1457,6 +1555,9 @@ interface ShipMeshGroup {
   /** Dark water plane inside the hold, raised by (ship as any).waterLevel. */
   holdWater: THREE.Mesh | null;
   holdWaterBase: Float32Array | null;
+  /** Cumulative cargo-stack variants, index 0 = tier 1 … index 3 = tier 4.
+   *  Exactly one (or none) is visible; see ship.cargoGold. */
+  holdCargoTiers: THREE.Object3D[];
   wake: ShipWake;
   /** vec4 (xyz = hull-local hole center, w = radius) driving the hull's
    *  fragment-discard breaches, one slot per UNPATCHED hole; radius 0 =
@@ -2019,6 +2120,20 @@ export class ShipRenderer {
       halfZ: voidHalfZ,
     });
     group.add(interior);
+
+    // ── Hold cargo (the gold race, made physical) ─────────────
+    // Crates and coin-spill that grow with the crew's banked gold. Excluded
+    // from the static merge below (they are toggled per tier every frame) and
+    // invisible until there is actually treasure aboard.
+    const holdCargo = makeHoldCargoStacks(
+      stats,
+      new THREE.MeshStandardMaterial({ map: this.darkWoodTex, roughness: 0.88, metalness: 0.02 }),
+      new THREE.MeshStandardMaterial({
+        color: 0xE0B44A, emissive: 0x6a4a10, emissiveIntensity: 0.55,
+        roughness: 0.34, metalness: 0.72,
+      }),
+    );
+    group.add(holdCargo.group);
 
     // ── Water-in-hull plane ──────────────────────────────────
     // Dark flooding water inside the hold, visible from above through the open
@@ -3512,6 +3627,7 @@ export class ShipRenderer {
       capstanGrip ? [anchorChain, capstanGrip] : [anchorChain],
     ));
     const mergeExclude = new Set<THREE.Object3D>([
+      holdCargo.group,
       ...sails,
       ...furledSails,
       ...pennants,
@@ -3579,6 +3695,7 @@ export class ShipRenderer {
       nightLight,
       holdWater,
       holdWaterBase,
+      holdCargoTiers: holdCargo.tiers,
       wake,
       hullHoleUniform,
       waterlineFoam,
@@ -4250,6 +4367,18 @@ export class ShipRenderer {
         }
         for (; holeSlot < mesh.hullHoleUniform.value.length; holeSlot++) {
           mesh.hullHoleUniform.value[holeSlot].set(0, 0, 0, 0);
+        }
+      }
+
+      // Hold cargo: the crew's banked gold, standing up in the hold as crates and
+      // coin. One tier variant visible at a time (cumulative geometry), so the
+      // stack GROWS as they bank and empties the moment a boarder cuts it out of
+      // them. This is the only place in the game where "who is winning" is a
+      // question you answer by looking at a ship instead of reading a number.
+      if (mesh.holdCargoTiers.length > 0) {
+        const tier = ship.sinking ? 0 : cargoTier(ship.cargoGold ?? 0);
+        for (let i = 0; i < mesh.holdCargoTiers.length; i += 1) {
+          mesh.holdCargoTiers[i].visible = i === tier - 1;
         }
       }
 

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  CrewEliminatedPayload, GameState, HotSnapshotPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
+  BountyRaisedPayload, CargoSpilledPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { dist2D, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
@@ -21,6 +21,8 @@ import {
 import { Renderer } from '../rendering/Renderer.js';
 import { OceanRenderer } from '../rendering/OceanRenderer.js';
 import { ShipRenderer } from '../rendering/ShipRenderer.js';
+import { SpoilsRenderer } from '../rendering/SpoilsRenderer.js';
+import { SeaEventRenderer } from '../world/SeaEventRenderer.js';
 import { CombatFx } from '../rendering/CombatFx.js';
 import { SoundEngine, type FootstepSurface } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
@@ -28,7 +30,7 @@ import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
 import { assets, type AssetName } from '../assets/AssetLibrary.js';
 import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
-import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME_MID, weaponDisplayName } from '../ui/DisplayNames.js';
+import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MID, weaponDisplayName } from '../ui/DisplayNames.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { HudController, type HudView } from '../ui/HudController.js';
@@ -70,6 +72,130 @@ const INTERACT_INTENT_NOUN: Record<string, string> = {
   sails: 'the halyard', brace: 'the brace', crow: 'the mast ladder', anchor: 'the capstan',
   repair: 'that breach', bail: 'the bilge', revive: 'your crewmate', cannon: 'that cannon',
   ammo: 'the ammo chest',
+};
+
+/** 'the Black Fin' read attributively — "a Black Fin pennant". Derived, never
+ *  spelled out, so the display layer stays the one place the crew is named. */
+const FLEET_PENNANT_ADJ = FLEET_PENNANT.replace(/^the\s+/i, '');
+
+/**
+ * THE FIFTEEN SCENES — the authored story vignettes of the Reach.
+ *
+ * Every hero scene in docs/ISLAND_STORY_BIBLE.md is a mute prop until you walk
+ * into it. Stepping inside a scene's footprint announces it ONCE per match on
+ * the island banner: the scene's name, and the one line that says what happened
+ * here. This is the whole story delivery — no reading required, just landfall.
+ *
+ * `radius` is how far out the scene "reads" as the thing you have walked into
+ * (roughly its footprint plus an approach), in metres.
+ */
+const STORY_VIGNETTES: Partial<Record<string, { title: string; beat: string; radius: number }>> = {
+  smuggler_cache: {
+    title: "The Smuggler's Cache",
+    beat: 'The tavern is the front. This is the business.',
+    radius: 14,
+  },
+  skull_totem: {
+    title: 'The Warning Stone',
+    beat: 'They cut it facing the water, so you would read it before you landed.',
+    radius: 15,
+  },
+  wrecker_tower: {
+    title: "The Wrecker's Tower",
+    beat: 'The light was never meant to save you.',
+    radius: 16,
+  },
+  whale_skeleton: {
+    title: "The Leviathan's Rest",
+    beat: 'Even leviathans wash up here. You will not do better.',
+    radius: 18,
+  },
+  gibbet_cage: {
+    title: 'The Gibbet',
+    beat: `${FLEET_PENNANT.charAt(0).toUpperCase()}${FLEET_PENNANT.slice(1)} leave their rag on the frame, so you know who to thank.`,
+    radius: 12,
+  },
+  rum_still: {
+    title: "The Runner's Still",
+    beat: 'Business is booming. The quality is a rumour.',
+    radius: 14,
+  },
+  crow_roost: {
+    title: 'The Unlit Pyre',
+    beat: 'The watch had one job. The crows had another.',
+    radius: 16,
+  },
+  mermaid_shrine: {
+    title: "The Siren's Toll",
+    beat: 'The offerings are not thanks. She is owed.',
+    radius: 15,
+  },
+  castaway_camp: {
+    title: 'The Last Camp',
+    beat: 'He counted every day. The raft is still three planks short.',
+    radius: 16,
+  },
+  kraken_wreck: {
+    title: 'What the Kraken Left',
+    beat: 'It did not sink her. It held her until she stopped moving.',
+    radius: 19,
+  },
+  dig_site: {
+    title: 'The Empty Chest',
+    beat: `A ${FLEET_PENNANT_ADJ} pennant marks the dig. The crew that opened it didn't all leave.`,
+    radius: 17,
+  },
+  gallows: {
+    title: 'The Gallows',
+    beat: 'The tide brings everyone to justice eventually.',
+    radius: 15,
+  },
+  parley_table: {
+    title: 'The Parley Table',
+    beat: 'Leave your steel at the barrel. Nobody has died here. Yet.',
+    radius: 15,
+  },
+  mine_head: {
+    title: 'The Obsidian Cut',
+    beat: 'They dug black glass out of a living mountain. The mountain kept it.',
+    radius: 16,
+  },
+  widow_memorial: {
+    title: "The Widow's Lantern",
+    beat: 'She lit it every night for a ship that never came. It still burns.',
+    radius: 16,
+  },
+};
+
+/**
+ * The TEACHING half of an NPC.
+ *
+ * An island's speaker opens with that island's LORE (authored server-side, one
+ * voice per island). The tutorial tips they used to recite instead now rotate
+ * in on later visits, keyed by role — so the game still teaches storms, repair,
+ * charts and trade without fourteen strangers reading the same three cards.
+ */
+const NPC_ROLE_TIPS: Record<IslandNpc['role'], readonly string[]> = {
+  mysterious_stranger: [
+    'The storm is closing on the Reach. Read the clouds, keep your bow inside the blue, and never trust a quiet horizon.',
+    'When the ring tightens, sail early. Every pirate drowned by weather died arguing about the wind.',
+  ],
+  shipwright: [
+    'A sound hull wins more fights than a loud cannon. Take planks from barrels, patch the low breaches first, then raise sail.',
+    'Water finds the lowest hole. Bail while a mate patches, and never leave the helm to a rising bilge.',
+  ],
+  oracle: [
+    'X marks are never alone. Docks, forges and camps leave scratches on every honest chart.',
+    'Open the chart when land is near — the Reach draws its own detail as you close on it.',
+  ],
+  gold_hoarder: [
+    'Sealed chests, carried in hand. I pay gold, and my charts point at the next mark.',
+    "Gold buys upgrades at the island stations. Coin in a dead man's pocket buys nothing at all.",
+  ],
+  bartender: [
+    'Rest here, restock here. Fruit heals, planks mend, and rumours come free with the second mug.',
+    'Every tale told in this room started on another island. Go and collect one.',
+  ],
 };
 
 /** One short amber line for a press the server heard and refused. */
@@ -169,6 +295,14 @@ export type LanternEmitter = {
  *  and 'harvest' (the axe prompt; LMB does the work via useItem). */
 export type ClientInteractKind = InteractIntent | 'door' | 'harvest';
 
+/** A story light that has to carry across open water (the widow's lantern).
+ *  Core = the flame itself, halo = the bloom a lamp throws into night air. */
+type StoryBeacon = {
+  core: THREE.Sprite;
+  halo: THREE.Sprite;
+  worldPos: THREE.Vector3;
+};
+
 export class Game {
   /** Server world snapshot + id indexes (see core/ClientState.ts). Declared
    *  first so every accessor below can delegate to it. */
@@ -197,6 +331,12 @@ export class Game {
    *  dusk and night deterministically. Inert during normal play. */
   private dayNightOverrideSec: number | null = null;
   private readonly shipRenderer = new ShipRenderer();
+  /** Sunken cargo spilled by foundered crews — the dive-site half of the
+   *  gold race (see shared/cargo.ts, Match.spillCargoOnFounder). */
+  private readonly spoilsRenderer = new SpoilsRenderer();
+  /** The Gilded Wreck (mid-match convergence event) and the four uncharted sea
+   *  micro-POIs — see world/SeaEventRenderer.ts. */
+  private readonly seaEvents = new SeaEventRenderer();
   private readonly combatFx = new CombatFx();
   private readonly audio = new SoundEngine();
   // Edge-detect state for sound triggers (chest carry, drowning, eating, sail/anchor changes).
@@ -389,6 +529,15 @@ export class Game {
   private readonly playerMeshes = new Map<string, THREE.Group>();
   private readonly projectileMeshes = new Map<string, THREE.Mesh>();
   private readonly seenStoryNpcIds = new Set<string>();
+  /** Story scenes already announced this match, keyed `islandId:propType`. */
+  private readonly seenVignettes = new Set<string>();
+  /** How many times each NPC has spoken: 0 ⇒ lore, then the role's tips. */
+  private readonly npcTalkCount = new Map<string, number>();
+  /** NPCs the pirate is currently standing with — leaving re-arms their next line. */
+  private readonly npcInRange = new Set<string>();
+  /** Long-range beacons for story lights that must READ from open water. */
+  private readonly storyBeacons: StoryBeacon[] = [];
+  private storyBeaconsBuiltFor = '';
 
   private readonly environment = new THREE.Group();
   /** Island terrain / prop / sea-rock mesh construction (see world/IslandBuilder.ts). */
@@ -695,6 +844,11 @@ export class Game {
     await this.yieldForLoadingPaint();
 
     this.shipRenderer.init(this.renderer.scene, this.renderer.getQuality());
+    this.spoilsRenderer.init(this.renderer.scene);
+    this.seaEvents.init(this.renderer.scene, {
+      ensureLootMeshes: (islandId, chestIds, barrelIds) =>
+        this.buildLateLootMeshes(islandId, chestIds, barrelIds),
+    });
     this.setLoading(62, `Rigging the ${SHIP_CLASS_NAMES.brigantine}...`);
     await this.yieldForLoadingPaint();
 
@@ -972,6 +1126,57 @@ export class Game {
     }, 2200);
   }
 
+  // ── The gold race, made physical ──────────────────────────────────────
+  /**
+   * A crew is past 60% of the gold target. Until this existed, the leader of
+   * the match's signature race was an invisible number: nobody could point at
+   * them, sail at them, or feel the fleet turn. Now the whole sea is told, with
+   * the same deep horn that opened the match, and their hull wears a hunter's
+   * ring on every chart (MapRenderer). The cry repeats each storm phase.
+   */
+  private announceBounty(payload: BountyRaisedPayload): void {
+    const own = payload.shipId === this.localShipId;
+    const pct = Math.round((payload.gold / Math.max(1, payload.targetGold)) * 100);
+    this.audio.playMatchStartHorn();
+    if (own) {
+      this.pushFeed(
+        payload.renewed
+          ? `THE BOUNTY STANDS — ${pct}% of the run banked, and every hull knows it`
+          : `BOUNTY ON YOUR CREW — ${pct}% of the run is in your hold. Run, or fight.`,
+        '#ff8a6a',
+      );
+      return;
+    }
+    this.pushFeed(
+      payload.renewed
+        ? `BOUNTY STANDS — ${payload.crewName} still hauls ${payload.gold}g. Hunt them.`
+        : `BOUNTY RAISED — ${payload.crewName} has banked ${payload.gold}g (${pct}%). Hunt them.`,
+      '#ffb347',
+    );
+  }
+
+  /** A hold burst open as she went down: there is treasure in the water. */
+  private announceCargoSpill(payload: CargoSpilledPayload): void {
+    const own = payload.shipId === this.localShipId;
+    this.pushFeed(
+      own
+        ? `YOUR HOLD BURST — ${payload.gold}g went into the water. Dive for it.`
+        : `${payload.crewName}'s hold burst — ${payload.gold}g of cargo is in the water.`,
+      '#ffd278',
+    );
+    this.audio.playKill();
+  }
+
+  /** Coin banked off the seabed — the loudest possible confirmation of a dive. */
+  private announceSpoilClaimed(payload: SpoilClaimedPayload): void {
+    if (payload.playerId === this.localPlayerId) {
+      this.pushFeed(`Sunken cargo recovered — +${payload.gold}g`, '#ffd278');
+      this.audio.playGoldEarn();
+      return;
+    }
+    this.pushFeed(`${payload.playerName} recovered ${payload.gold}g of sunken cargo.`, '#d9c17e');
+  }
+
   // ── Crew eliminations ─────────────────────────────────────────────────
   /**
    * A crew's ship went under. CREWS AFLOAT used to fall 10 → 7 → 5 with no
@@ -1237,6 +1442,8 @@ export class Game {
     // hands, which are permanent children of the viewmodel roots (disposing the
     // whole root used to kill every muzzle flash for the rest of the session).
     this.viewmodel.resetForMatch();
+    this.spoilsRenderer.reset();
+    this.seaEvents.reset();
     for (const drop of this.droppedWeapons) {
       this.renderer.scene.remove(drop.mesh);
       this.disposeSceneObject(drop.mesh);
@@ -1306,6 +1513,18 @@ export class Game {
     this.playerMeshes.clear();
     this.projectileMeshes.clear();
     this.seenStoryNpcIds.clear();
+    // A new voyage rediscovers the Reach: scenes speak again, speakers open
+    // with their lore again, and the beacons rebuild from the fresh world.
+    this.seenVignettes.clear();
+    this.npcTalkCount.clear();
+    this.npcInRange.clear();
+    for (const beacon of this.storyBeacons) {
+      this.renderer.scene.remove(beacon.core, beacon.halo);
+      beacon.core.material.dispose();
+      beacon.halo.material.dispose();
+    }
+    this.storyBeacons.length = 0;
+    this.storyBeaconsBuiltFor = '';
   }
 
   /**
@@ -1504,6 +1723,10 @@ export class Game {
     this.network.onMatchCountdown = (payload) => this.onMatchCountdownTick(payload);
     this.network.onMatchHorn = (payload) => this.onMatchHornBlown(payload);
     this.network.onCrewEliminated = (payload) => this.announceCrewEliminated(payload);
+    this.network.onBountyRaised = (payload) => this.announceBounty(payload);
+    this.network.onCargoSpilled = (payload) => this.announceCargoSpill(payload);
+    this.network.onSpoilClaimed = (payload) => this.announceSpoilClaimed(payload);
+    this.network.onWreckEvent = (payload) => this.announceWreckEvent(payload);
 
     this.network.onSnapshot = (snapshot) => {
       this.applySnapshot(snapshot);
@@ -2101,6 +2324,7 @@ export class Game {
         ...snapshot,
         islands: snapshot.islands.length === 0 ? this.state.islands : snapshot.islands,
         seaRocks: (snapshot.seaRocks?.length ?? 0) === 0 ? this.state.seaRocks : snapshot.seaRocks,
+        seaPois: (snapshot.seaPois?.length ?? 0) === 0 ? this.state.seaPois : snapshot.seaPois,
       }
       : snapshot;
     const previousLocalState = this.getLocalPlayer()?.state ?? this.previousLocalState;
@@ -2131,6 +2355,11 @@ export class Game {
       this.ensureWorldMeshes(nextSnapshot);
       this.syncBarrels();
     }
+    // The uncharted sea (fixed micro-POIs) and the Gilded Wreck. syncWreck also
+    // notices when her chests/barrels have landed in the island copy and asks
+    // for their meshes — they arrive mid-match, long after their island built.
+    this.seaEvents.syncPois(nextSnapshot.seaPois);
+    this.seaEvents.syncWreck(nextSnapshot.wreck ?? null, nextSnapshot.islands);
     this.syncChests();
     this.updateStormRing();
     this.updateDamageFx();
@@ -2802,6 +3031,8 @@ export class Game {
     // already server-side (getShipGangwayPlan / getGangwayFloorY); without this
     // the plank you walk on is invisible.
     this.shipRenderer.setDocks(this.state.islands.map((i) => i.dock).filter(Boolean) as IslandDock[]);
+    this.spoilsRenderer.update(this.state.spoils, this.ocean.getTime());
+    this.seaEvents.update(this.ocean.getTime(), this.renderer.camera.position, nightFactor);
     this.shipRenderer.update(
       this.state.ships,
       this.state.players,
@@ -2868,8 +3099,13 @@ export class Game {
     if (this.slowSceneTimer <= 0) {
       this.updateUpgradeStations(Math.max(dt, 0.1));
       this.updateStoryNpcs(Math.max(dt, 0.1));
+      // Story delivery rides the slow tick: a scene you walk into announces
+      // itself within 100 ms, which is instant to a pirate and free to a GPU.
+      this.buildStoryBeacons();
+      this.updateVignetteDiscovery();
       this.slowSceneTimer = 0.1;
     }
+    this.updateStoryBeacons(nightFactor);
     this.syncPlayers(dt);
     this.updateDroppedWeapons(dt);
     this.syncProjectiles(dt);
@@ -3781,6 +4017,91 @@ export class Game {
     }
   }
 
+  /** Give meshes to chests/barrels that joined an island AFTER it was built.
+   *
+   *  Every other loot entity in the world is born with its island, so the island
+   *  builder is the only thing that ever makes a chest mesh. The Gilded Wreck's
+   *  cargo is filed on an island mid-match (which is exactly what buys it every
+   *  existing loot path for free), so this is the one place that has to catch
+   *  up. Idempotent: anything already drawn is skipped. */
+  /** The Gilded Wreck rose, or the storm took her back. One feed line, one bell
+   *  toll — a bell because it has to carry over weather and gunfire and mean
+   *  "look at the chart" without a word of UI. */
+  private announceWreckEvent(payload: { phase: 'risen' | 'claimed'; position: { x: number; y: number; z: number }; duration: number }) {
+    if (payload.phase === 'claimed') {
+      this.pushFeed('The sea closes over the Gilded Wreck.', '#9aa7b8');
+      return;
+    }
+    const minutes = Math.max(1, Math.round(payload.duration / 60));
+    this.pushFeed(
+      `THE GILDED WRECK rises at the next ring — gold aboard, ${minutes > 1 ? `${minutes} minutes` : 'one phase'} before the storm claims her.`,
+      '#f0c257',
+    );
+    const camera = this.renderer.camera.position;
+    const distance = Math.hypot(camera.x - payload.position.x, camera.z - payload.position.z);
+    this.audio.playWreckBell(distance);
+  }
+
+  private buildLateLootMeshes(islandId: string, chestIds: string[], barrelIds: string[]) {
+    const island = this.state?.islands.find((candidate) => candidate.id === islandId);
+    if (!island) return;
+
+    for (const chestId of chestIds) {
+      if (this.chestMeshes.has(chestId)) continue;
+      const chest = island.chests.find((candidate) => candidate.id === chestId);
+      if (!chest) continue;
+      const root = new THREE.Group();
+      root.position.set(chest.position.x, chest.position.y, chest.position.z);
+      const yaw = (chest.position.x * 7.13 + chest.position.z * 3.71) % (Math.PI * 2);
+      const glb = assets.clone('chest_closed');
+      let body: THREE.Object3D;
+      if (glb) {
+        glb.position.set(0, -0.42, 0);
+        glb.rotation.y = yaw;
+        glb.scale.setScalar(1.15);
+        root.add(glb);
+        body = glb;
+      } else {
+        body = new THREE.Mesh(
+          new THREE.BoxGeometry(1.1, 0.7, 0.75),
+          new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 }),
+        );
+        root.add(body);
+      }
+      const glow = new THREE.PointLight(0xffc75a, 1.2, 12);
+      glow.position.set(0, 1.2, 0);
+      glow.visible = false;
+      root.userData.decorLight = glow;
+      registerBudgetLight(glow);
+      root.add(glow);
+      this.environment.add(root);
+      this.chestMeshes.set(chest.id, { root, glow, chestMesh: body, lid: new THREE.Group(), mound: null });
+    }
+
+    for (const barrelId of barrelIds) {
+      if (this.barrelMeshes.has(barrelId)) continue;
+      const barrel = island.barrels.find((candidate) => candidate.id === barrelId);
+      if (!barrel) continue;
+      const root = new THREE.Group();
+      root.position.set(barrel.position.x, barrel.position.y, barrel.position.z);
+      const glb = assets.clone('barrel');
+      if (glb) {
+        glb.rotation.y = (barrel.position.x * 5.31 + barrel.position.z * 2.17) % (Math.PI * 2);
+        glb.scale.setScalar(0.88);
+        root.add(glb);
+      } else {
+        const body = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.4, 0.4, 0.72, 10),
+          new THREE.MeshStandardMaterial({ color: 0x4a3010, roughness: 0.95 }),
+        );
+        body.position.y = 0.36;
+        root.add(body);
+      }
+      this.environment.add(root);
+      this.barrelMeshes.set(barrel.id, root);
+    }
+  }
+
   private syncChests() {
     if (!this.state) return;
     const showGlow = this.renderer.getQuality() !== 'low';
@@ -4348,11 +4669,15 @@ export class Game {
           mesh.body.rotation.y += angleWrap(npc.rotation - mesh.body.rotation.y) * Math.min(1, dt * 1.4);
         }
 
+        // Walking away and coming back re-arms the speaker: the FIRST meeting
+        // is this island's lore, later ones rotate the role's teaching lines.
+        if (distance > 14 && this.npcInRange.has(npc.id)) this.npcInRange.delete(npc.id);
         if (
           distance < 7.2
-          && !this.seenStoryNpcIds.has(npc.id)
+          && !this.npcInRange.has(npc.id)
           && this.storyCutsceneNpcId !== npc.id
         ) {
+          this.npcInRange.add(npc.id);
           this.triggerStoryCutscene(npc, island);
         }
       }
@@ -4362,11 +4687,20 @@ export class Game {
   private triggerStoryCutscene(npc: IslandNpc, island: Island) {
     if (!this.storyCutscene) return;
     this.seenStoryNpcIds.add(npc.id);
+    // Rotation 0 is the island's own story (authored per island, server-side);
+    // after that the speaker falls back to the tips their role is here to
+    // teach, so the tutorial survives without every isle reciting it first.
+    const talks = this.npcTalkCount.get(npc.id) ?? 0;
+    const tips = NPC_ROLE_TIPS[npc.role] ?? [];
+    const spoken = talks === 0 || tips.length === 0
+      ? npc.line
+      : tips[Math.min(talks, tips.length) - 1];
+    this.npcTalkCount.set(npc.id, talks + 1);
     this.storyCutsceneNpcId = npc.id;
     this.storyCutsceneHideAt = performance.now() + 6200;
     this.storyCutscene.title.textContent = npc.cutsceneTitle;
     this.storyCutscene.name.textContent = `${npc.name} - ${island.name}`;
-    this.storyCutscene.line.textContent = npc.line;
+    this.storyCutscene.line.textContent = spoken;
     this.storyCutscene.cue.textContent = npc.cue;
     this.storyCutscene.root.style.opacity = '1';
     this.storyCutscene.root.style.transform = 'translateY(0)';
@@ -4417,6 +4751,13 @@ export class Game {
    *  peace, false to restore aggression. Also auto-enabled by the ?peace URL param. */
   setBotPeace(enabled = true) {
     this.network.sendDevBotPeace(enabled);
+  }
+
+  /** Dev hook (honoured solo): set your banked gold, so the hold-cargo loop can
+   *  be flown live — the crate stack below decks, the ballast in the knots, the
+   *  bounty on the chart, the spill when she founders. */
+  grantGold(gold: number) {
+    this.network.sendDevGrantGold(gold);
   }
 
   /** Dev/tour helper: world ground height at (x, z) via the shared heightfield,
@@ -5503,6 +5844,13 @@ export class Game {
     const host = window.location.hostname;
     const port = window.location.port;
     const isLocalhost = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
+    // ?server=8091 — dev-only: point this tab at a SECOND game server. Verifying
+    // a timed world event means running a server with the event forced early,
+    // and that must not mean evicting everyone off the shared one. Localhost only.
+    const override = new URLSearchParams(window.location.search).get('server');
+    if (isLocalhost && override && /^\d{2,5}$/.test(override)) {
+      return `${protocol}://${host}:${override}/ws`;
+    }
     // Any localhost port other than the game server's own is a dev server (Vite, etc.).
     // Connect directly to the game port instead of relying on a proxy — works for
     // 3000/3003/5173/etc.
@@ -5718,13 +6066,152 @@ export class Game {
   }
 
   private flashIslandBanner(name: string) {
+    // Land-ho names the ISLE and the world it belongs to: a pirate should learn
+    // he is sailing the Shattered Reach from the game, not from a design doc.
+    this.showBanner(name, `Land discovered · ${WORLD_NAME}`, 4500);
+  }
+
+  /** Shared banner paint. `sub` is the small line under the title. Returns
+   *  false when the screen centre was busy and nothing was shown. */
+  private showBanner(title: string, sub: string, holdMs: number, subStyle = ''): boolean {
     // Don't slam a discovery banner over an open wheel/legend — the next
     // island (or re-entry) will announce itself when the center is clear.
     const legend = document.getElementById('controls-hint');
-    if (this.input.isSupplyWheelOpen() || legend?.style.display === 'block') return;
-    this.ui.islandBanner.innerHTML = `<div class="ib-title">${name}</div><div class="ib-sub">Land discovered</div>`;
+    if (this.input.isSupplyWheelOpen() || legend?.style.display === 'block') return false;
+    this.ui.islandBanner.innerHTML = `<div class="ib-title">${title}</div><div class="ib-sub"${subStyle ? ` style="${subStyle}"` : ''}>${sub}</div>`;
     this.ui.islandBanner.classList.add('visible');
-    this.islandBannerHideAt = performance.now() + 4500;
+    this.islandBannerHideAt = performance.now() + holdMs;
+    return true;
+  }
+
+  /**
+   * VIGNETTE DISCOVERY — the fifteen authored scenes speak when you reach them.
+   *
+   * The gallows, the kraken's kill, the widow's cairn: each was a beautifully
+   * built mute prop. Walking inside a scene's footprint now fires the same
+   * discovery banner + sting that landfall does, with the scene's NAME and the
+   * one line that says what happened here — once per scene, per match.
+   *
+   * Cheap by construction: only islands the pirate is actually standing on are
+   * scanned, and a scene drops out of the scan the moment it has spoken.
+   */
+  private updateVignetteDiscovery() {
+    if (!this.state || this.isStartCeremonyActive()) return;
+    const player = this.getLocalPlayer();
+    // On foot only — a scene should be walked into, not sailed past.
+    if (!player || player.onShipId || player.state === 'eliminated' || player.state === 'respawning') return;
+
+    for (const island of this.state.islands) {
+      if (!island.props?.length) continue;
+      const reach = getIslandMaxRadius(island) + 30;
+      if (dist2D(player.position.x, player.position.z, island.position.x, island.position.z) > reach) continue;
+      for (const prop of island.props) {
+        const vignette = STORY_VIGNETTES[prop.type];
+        if (!vignette) continue;
+        const key = `${island.id}:${prop.type}`;
+        if (this.seenVignettes.has(key)) continue;
+        const dx = player.position.x - prop.x;
+        const dz = player.position.z - prop.z;
+        if (dx * dx + dz * dz > vignette.radius * vignette.radius) continue;
+        // A scene only counts as DISCOVERED once its beat has actually been on
+        // screen. If the centre is busy (legend, supply wheel) the moment we
+        // walk in, the revelation waits rather than being silently spent.
+        const shown = this.showBanner(
+          vignette.title,
+          vignette.beat,
+          5200,
+          // The beat is a SENTENCE, not a label: drop the wide tracking the
+          // 'Land discovered' stamp uses so it reads as the world talking.
+          'letter-spacing:0.05em;font-size:0.98rem;color:#f0dfae;max-width:44ch;margin:12px auto 0;line-height:1.5;text-transform:none;font-style:italic;text-shadow:0 2px 14px rgba(0,0,0,0.85)',
+        );
+        if (!shown) return;
+        this.seenVignettes.add(key);
+        this.playIslandArrivalFanfare();
+        // The feed keeps the find after the banner fades — a discovery log.
+        this.pushFeed(`Discovered: ${vignette.title} — ${island.name}`, '#e8c98a');
+        return; // one revelation at a time
+      }
+    }
+  }
+
+  /**
+   * WIDOW'S LANTERN — the one light in the Reach that is a landmark.
+   *
+   * The bible promises her lamp is visible from the sea at night; the island's
+   * own lantern glow is a 2 m sprite that dissolves into a smudge past ~60 m.
+   * This is the stern-lantern treatment applied to a story prop: an amber core
+   * plus a soft halo whose screen size is held up as distance grows, so from
+   * 300 m of black water she reads as a BEACON — and a warm amber one, so she
+   * is never confused with the cold white of a watchtower.
+   *
+   * Built once per match from the island data (not the island mesh), so the
+   * light survives whatever LOD does to the terrain that far out.
+   */
+  private buildStoryBeacons() {
+    if (!this.state) return;
+    const signature = this.state.islands.map((i) => i.id).join('|');
+    if (this.storyBeaconsBuiltFor === signature) return;
+    this.storyBeaconsBuiltFor = signature;
+    for (const beacon of this.storyBeacons) {
+      this.renderer.scene.remove(beacon.core, beacon.halo);
+      beacon.core.material.dispose();
+      beacon.halo.material.dispose();
+    }
+    this.storyBeacons.length = 0;
+
+    const texture = this.envFx.lanternGlowTexture;
+    if (!texture) return;
+    for (const island of this.state.islands) {
+      for (const prop of island.props ?? []) {
+        if (prop.type !== 'widow_memorial') continue;
+        // Her raised lantern: the memorial's arm height above the cairn.
+        const y = getIslandSurfaceY(island, prop.x, prop.z) + 3.15 * prop.scale;
+        const make = (color: number, opacity: number) => {
+          const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: texture,
+            color,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            transparent: true,
+            opacity,
+          }));
+          sprite.position.set(prop.x, y, prop.z);
+          sprite.renderOrder = 3;
+          sprite.visible = false;
+          this.renderer.scene.add(sprite);
+          return sprite;
+        };
+        this.storyBeacons.push({
+          halo: make(0xff9c3a, 0),
+          core: make(0xffd79a, 0),
+          worldPos: new THREE.Vector3(prop.x, y, prop.z),
+        });
+      }
+    }
+  }
+
+  /** Grow the beacon with distance so it holds a constant, unmistakable size
+   *  on screen — a flame you can steer by rather than a fading dot. */
+  private updateStoryBeacons(nightFactor: number) {
+    if (this.storyBeacons.length === 0) return;
+    const camera = this.renderer.camera.position;
+    const flicker = 0.9 + Math.sin(this.ocean.getTime() * 3.1) * 0.06 + Math.sin(this.ocean.getTime() * 7.7) * 0.04;
+    for (const beacon of this.storyBeacons) {
+      const lit = nightFactor > 0.06;
+      beacon.core.visible = lit;
+      beacon.halo.visible = lit;
+      if (!lit) continue;
+      const dist = beacon.worldPos.distanceTo(camera);
+      // Near: a lamp on a cairn. Far: a fixed mark on the horizon.
+      const coreSize = THREE.MathUtils.clamp(dist * 0.034, 1.2, 11);
+      const haloSize = coreSize * 3.4;
+      beacon.core.scale.setScalar(coreSize);
+      beacon.halo.scale.setScalar(haloSize);
+      // Brighten as she gets far away — atmosphere eats the rest.
+      const reach = THREE.MathUtils.clamp((dist - 40) / 220, 0, 1);
+      beacon.core.material.opacity = nightFactor * (0.7 + reach * 0.3) * flicker;
+      beacon.halo.material.opacity = nightFactor * (0.2 + reach * 0.34) * flicker;
+    }
   }
 
   /** Land-ho fanfare. Routed through SoundEngine so it rides the master bus

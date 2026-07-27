@@ -3,6 +3,7 @@ import type {
   NetMsg, PlayerInput, GameState, TradeActionPayload,
   WelcomePayload, LobbyUpdatePayload, QueueUpdatePayload, MatchStartPayload,
   MatchCountdownPayload, MatchHornPayload, CrewEliminatedPayload,
+  BountyRaisedPayload, CargoSpilledPayload, SpoilClaimedPayload, WreckEventPayload,
   PlayerStatsRecord,
 } from '../../shared/types/index.js';
 
@@ -45,6 +46,14 @@ export class NetworkClient {
   public onMatchHorn: ((payload: MatchHornPayload) => void) | null = null;
   /** A crew's ship went down — CREWS AFLOAT just dropped. */
   public onCrewEliminated: ((payload: CrewEliminatedPayload) => void) | null = null;
+  /** A crew crossed the gold-bounty line — hunt the treasure galleon. */
+  public onBountyRaised: ((payload: BountyRaisedPayload) => void) | null = null;
+  /** A foundering crew's cargo burst into the shallows — a dive site opened. */
+  public onCargoSpilled: ((payload: CargoSpilledPayload) => void) | null = null;
+  /** Someone swam into a piece of sunken cargo and banked it. */
+  public onSpoilClaimed: ((payload: SpoilClaimedPayload) => void) | null = null;
+  /** The Gilded Wreck rose at the announced ring centre, or the storm took her. */
+  public onWreckEvent: ((payload: WreckEventPayload) => void) | null = null;
 
   // Lobby-scoped events
   public onWelcome: ((payload: WelcomePayload) => void) | null = null;
@@ -268,6 +277,10 @@ export class NetworkClient {
       case 'match_countdown': this.onMatchCountdown?.(msg.payload as Parameters<NonNullable<typeof this.onMatchCountdown>>[0]); break;
       case 'match_horn': this.onMatchHorn?.(msg.payload as Parameters<NonNullable<typeof this.onMatchHorn>>[0]); break;
       case 'crew_eliminated': this.onCrewEliminated?.(msg.payload as Parameters<NonNullable<typeof this.onCrewEliminated>>[0]); break;
+      case 'bounty_raised': this.onBountyRaised?.(msg.payload as Parameters<NonNullable<typeof this.onBountyRaised>>[0]); break;
+      case 'cargo_spilled': this.onCargoSpilled?.(msg.payload as Parameters<NonNullable<typeof this.onCargoSpilled>>[0]); break;
+      case 'spoil_claimed': this.onSpoilClaimed?.(msg.payload as Parameters<NonNullable<typeof this.onSpoilClaimed>>[0]); break;
+      case 'wreck_event': this.onWreckEvent?.(msg.payload as Parameters<NonNullable<typeof this.onWreckEvent>>[0]); break;
       case 'player_spawned': this.onPlayerSpawned?.(msg.payload); break;
       case 'lobby_update': this.onLobbyUpdate?.(msg.payload as LobbyUpdatePayload); break;
       case 'lobby_left': this.clearMatchSession(); this.onLobbyLeft?.(); break;
@@ -372,6 +385,13 @@ export class NetworkClient {
   sendDevBotPeace(enabled: boolean) {
     if (!this.joined) return;
     this.send({ type: 'dev_bot_peace', ts: Date.now(), payload: { enabled } });
+  }
+
+  /** Dev-only (server honours it solo): set banked gold, to drive the hold-cargo
+   *  loop — crates in the hold, ballast, the bounty, the spill on founder. */
+  sendDevGrantGold(gold: number) {
+    if (!this.joined) return;
+    this.send({ type: 'dev_grant_gold', ts: Date.now(), payload: { gold } });
   }
 
   // ─── Lobby-scoped sends ──────────────────────────────────────

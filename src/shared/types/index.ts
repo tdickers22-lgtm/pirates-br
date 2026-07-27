@@ -15,8 +15,13 @@ export interface HullSections {
   starboard: number;
 }
 
-/** What punched a hole — drives visual flavour and the fire burn-down rule. */
-export type ShipHoleSource = 'cannon' | 'ram' | 'rock' | 'ground' | 'storm' | 'fire' | 'keg';
+/** What punched a hole — drives visual flavour and the fire burn-down rule.
+ *
+ *  'scuttle' is the COSMETIC riddling a foundering hull
+ *  gets so a wreck reads as a wreck — it is not gunnery, not weather and not
+ *  seamanship, and combat/pacing audits must be able to tell it apart from a
+ *  ball through the waterline (it used to masquerade as 'cannon'). */
+export type ShipHoleSource = 'cannon' | 'ram' | 'rock' | 'ground' | 'storm' | 'fire' | 'keg' | 'scuttle';
 
 /**
  * ONE breach in the planking, at the exact point the damage landed.
@@ -116,6 +121,16 @@ export interface Ship {
   /** Seconds accumulated toward next wood plank spent while repairing sails */
   sailRepairWoodTimer: number;
   gold: number;
+  /** HOLD CARGO (see shared/cargo.ts): the crew's banked gold above
+   *  CARGO.SAFE_GOLD, recomputed by Match each tick. This is the number that
+   *  stacks crates in the hold, weighs the hull down (PhysicsSystem ballast)
+   *  and spills into the shallows when she founders. Absent/0 = flying light. */
+  cargoGold?: number;
+  /** True while this crew is past CARGO.BOUNTY_RATIO of the gold target: the
+   *  leader is the hunted treasure galleon — marked on every battle map, called
+   *  out in the feed, and preferred by bot hunters. Only ever set to true;
+   *  cleared to undefined so it costs nothing on the wire when it's off. */
+  bountied?: boolean;
   treasureChestIds: string[];
   inventory: ItemStack[];
   repairCooldown: number;
@@ -517,6 +532,24 @@ export interface TreasureChest {
   mapOffsetZ: number;
 }
 
+/**
+ * Sunken cargo: a crew's spilled gold lying in the shallows over their wreck,
+ * free to whoever swims down for it. Deliberately the leanest entity on the
+ * wire — a short id, an integer purse and a position — because a busy endgame
+ * can have several wrecks bleeding at once and the full snapshot is capped.
+ */
+export interface GoldSpoil {
+  /** Short match-local id ('sp7'), not a uuid — 30+ bytes of every snapshot. */
+  id: string;
+  position: Vec3;
+  /** Gold in this piece. Whole numbers only. */
+  value: number;
+  /** The ship whose founder spilled it (feed attribution). */
+  fromShipId: string;
+  /** Sim time (seconds) the tide takes it. Server-internal; off the wire. */
+  expiresAt?: number;
+}
+
 export interface IslandBarrel {
   id: string;
   position: Vec3;
@@ -548,6 +581,47 @@ export interface SeaRockCollider {
   /** World-space vertical range relative to SeaRock.position.y. */
   minY: number;
   maxY: number;
+}
+
+// ── Sea micro-POIs + the Gilded Wreck ─────────────────────────
+/** A small uncharted thing in the open sea. Never on the chart: you find them
+ *  by sailing, and then you know where they are forever. */
+export type SeaPoiKind =
+  /** Three hulks lashed together, still afloat — supply barrels lashed to them. */
+  | 'wreck_cluster'
+  /** Gull-circled flotsam: a spar raft, one barrel, a lot of birds. */
+  | 'flotsam'
+  /** A single mast standing out of a shoal, no ship left under it. */
+  | 'shoal_mast';
+
+export interface SeaPoi {
+  id: string;
+  kind: SeaPoiKind;
+  /** Sea-level world position (y is the waterline, 0). */
+  position: Vec3;
+  rotation: number;
+  /** Visual footprint radius, metres — the client sizes the site off this. */
+  radius: number;
+  /** Barrel ids lashed to this site (the barrels themselves live on the nearest
+   *  island's `barrels` array so every existing loot path works unchanged). */
+  barrelIds: string[];
+}
+
+/** The mid-match convergence event: a half-sunk ghost galleon at the announced
+ *  next ring centre, lootable for one storm phase, then claimed by the storm. */
+export interface WreckEvent {
+  id: string;
+  position: Vec3;
+  rotation: number;
+  /** Sim seconds when she rose. */
+  spawnedAt: number;
+  /** Sim seconds when the storm takes her back down. */
+  claimAt: number;
+  /** Island whose chest/barrel arrays host her loot (server bookkeeping — the
+   *  client uses it to find the loot entities that belong to the wreck). */
+  hostIslandId: string;
+  chestIds: string[];
+  barrelIds: string[];
 }
 
 export interface SeaRock {
@@ -672,6 +746,15 @@ export interface GameState {
    *  static-world tick — pickups/stows/drops looked frozen for ~19s: ghost
    *  chests at the original pickup spot). The client merges these by id. */
   chestSync?: TreasureChest[];
+  /** Sunken cargo spilled by foundered crews, divable by anyone (see GoldSpoil). */
+  spoils?: GoldSpoil[];
+  /** The Gilded Wreck while she is above water — absent/null the rest of the
+   *  match. Rides EVERY full snapshot (she is small and short-lived), so the
+   *  beacon lights the moment she rises instead of on the next ~19 s world tick. */
+  wreck?: WreckEvent | null;
+  /** Uncharted sea micro-POIs. Fixed for the life of the world, so they ride the
+   *  same rare static-world tick islands and sea rocks do. */
+  seaPois?: SeaPoi[];
 }
 
 // ── Hot snapshot (high-rate light wire format) ────────────────
@@ -792,10 +875,24 @@ type MsgType =
   | 'match_horn'
   /** A crew is off the board (their ship went down) — HUD announce + counter pulse. */
   | 'crew_eliminated'
+  /** A crew crossed (or is still past) the gold-bounty line: horn + feed +
+   *  map marker. The hunted treasure galleon. */
+  | 'bounty_raised'
+  /** A foundering crew's cargo gold broke out into the shallows — dive for it. */
+  | 'cargo_spilled'
+  /** Somebody swam into a piece of sunken cargo and took it. */
+  | 'spoil_claimed'
+  /** The Gilded Wreck rose at the announced ring centre — or the storm took her
+   *  back. Map beacon, feed line, bell toll. */
+  | 'wreck_event'
   | 'ping'
   | 'pong'
   // dev-only (honoured solo): bots ignore this human + their ship
   | 'dev_bot_peace'
+  /** dev-only (honoured solo): set a pirate's banked gold, so the hold-cargo /
+   *  ballast / bounty / spill loop can be driven in a live browser probe
+   *  without grinding 9000 gold of chests first. */
+  | 'dev_grant_gold'
   // lobby-scoped messages (server orchestration)
   | 'welcome'
   | 'set_name'
@@ -857,6 +954,46 @@ export interface CrewEliminatedPayload {
   /** Who sank them, when the sink was credited. */
   byPlayerId: string | null;
   byName: string | null;
+}
+
+/** A crew is past CARGO.BOUNTY_RATIO of the gold target — hunt them. */
+export interface BountyRaisedPayload {
+  /** The bountied crew's hull (the map marker keys off this). */
+  shipId: string;
+  crewName: string;
+  /** Their banked gold at the moment of the cry. */
+  gold: number;
+  targetGold: number;
+  /** True for the per-storm-phase re-cry, false the first time it is raised. */
+  renewed: boolean;
+}
+
+/** A foundering hull's cargo gold spilled into the shallows over her wreck. */
+export interface CargoSpilledPayload {
+  shipId: string;
+  crewName: string;
+  /** Total gold that went into the water. */
+  gold: number;
+  /** How many divable pieces it broke into. */
+  pieces: number;
+  /** The wreck mark (dive here). */
+  position: Vec3;
+}
+
+/** The Gilded Wreck rose, or the storm claimed her back. */
+export interface WreckEventPayload {
+  phase: 'risen' | 'claimed';
+  position: Vec3;
+  /** Seconds she stays lootable (0 on 'claimed'). */
+  duration: number;
+}
+
+/** A pirate swam into a piece of sunken cargo and banked it. */
+export interface SpoilClaimedPayload {
+  playerId: string;
+  playerName: string;
+  gold: number;
+  position: Vec3;
 }
 
 export interface QueueUpdatePayload {

@@ -4,8 +4,12 @@ import type {
   Island, IslandBarrel, IslandBiome, IslandCave, IslandDock, IslandInlet, IslandNpc,
   IslandProfile, IslandProp, IslandPropType, IslandTavern, ItemType,
   TreasureChest, UpgradeStation, ShipUpgradeType, Vec3, Ship, WildlifeAnimal, WildlifeType, SeaRock,
+  SeaPoi, SeaPoiKind,
 } from '../../shared/types/index.js';
-import { BERTH, SHIP, WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS } from '../../shared/constants/index.js';
+import {
+  BERTH, SHIP, WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS,
+  SEA_POI, WRECK_EVENT, WRECK_SUPPLY_TABLE,
+} from '../../shared/constants/index.js';
 import {
   angleWrap,
   directionToYaw,
@@ -95,6 +99,211 @@ const ISLAND_ROSTER: readonly RosterEntry[] = [
   { name: "Widow's Watch", style: 'mountain', biome: 'highland', seed: 0xe51d0e7, radius: 70, coastBias: 0.35, landmarks: ['watchtower', 'standing_stones', 'widow_memorial'], hasDock: false, hasTavern: false, layout: { x: -592, z: -590, rotation: 1.7 } },
 ] as const;
 
+// ── The cast of the Shattered Reach (docs/ISLAND_STORY_BIBLE.md) ───────────
+// A hand-authored world deserves a hand-authored cast. Every speaker is keyed
+// to their island's story scene, so the beat you walk into is the beat someone
+// standing there will tell you — and no two islands share a name. Indexed by
+// ROSTER ORDER, drawn from no rng at all, so island prop/loot streams (and
+// test-world-fixed's signature) are untouched by anything in here.
+//
+// `line` is the LORE — the island's voice, spoken on first meeting. The
+// teaching lines live client-side keyed by role (Game.ts NPC_ROLE_TIPS) and
+// rotate in on later visits, so the tutorial still happens without the world
+// repeating three tips through fourteen identical mouths.
+interface CastEntry {
+  name: string;
+  cutsceneTitle: string;
+  line: string;
+}
+interface IslandCast {
+  storyteller: CastEntry & { role: 'mysterious_stranger' | 'shipwright' | 'oracle' };
+  /** Only read on islands that actually host a tavern / a hoarder. */
+  bartender?: CastEntry;
+  hoarder?: CastEntry;
+}
+
+const NPC_CUES: Record<IslandNpc['role'], string> = {
+  gold_hoarder: 'Sell carried chests here or take a treasure map.',
+  bartender: 'Tavern: rest, restock, and listen for tales.',
+  mysterious_stranger: 'Storm warnings now point to the nearest safe water.',
+  shipwright: 'Island barrels are the fastest way to restock repairs.',
+  oracle: 'Open the map near islands to inspect local details.',
+};
+
+const ISLAND_CAST: readonly IslandCast[] = [
+  // 0 — Smuggler's Rest · the tavern is the front, the grove is the business
+  {
+    storyteller: {
+      role: 'mysterious_stranger',
+      name: 'Ines the Fence',
+      cutsceneTitle: 'A Deal Under the Palms',
+      line: 'Everyone lands here for the tavern. The tavern is the doorway. Walk past it, into the trees, and you will find what Smuggler\'s Rest actually sells.',
+    },
+    bartender: {
+      name: 'Tavernkeeper Bess',
+      cutsceneTitle: 'A Mug at the Counter',
+      line: 'I pour honest rum to dishonest men. Whatever you saw under the tarps out in the grove — you were drinking here all evening, and so was I.',
+    },
+    hoarder: {
+      name: 'Gold Hoarder Darius',
+      cutsceneTitle: 'The Hoarder at the Shore',
+      line: 'Sealed chests, not loose excuses. Half the Reach launders its luck across this beach, and I pay better than the crates in the trees.',
+    },
+  },
+  // 1 — Skull Cove · trespassers were warned
+  {
+    storyteller: {
+      role: 'oracle',
+      name: 'Bone-Reader Ovid',
+      cutsceneTitle: 'The Stone That Faces the Sea',
+      line: 'That skull was cut to face the water so you would read it before your keel touched sand. You did not read it. Nobody ever does.',
+    },
+    hoarder: {
+      name: 'Gold Hoarder Nessa Trell',
+      cutsceneTitle: 'Coin in the Cove',
+      line: 'The totem keeps the warning; I keep the scales. Bring me sealed chests and we are both honest in our way.',
+    },
+  },
+  // 2 — The Crooked Atoll · the wreckers' false light
+  {
+    storyteller: {
+      role: 'shipwright',
+      name: 'Salvager Kellan Drage',
+      cutsceneTitle: 'Cargo With Another Crew\'s Brand',
+      line: 'See that crooked tower? On a black night someone lights it, and a ship steers for a harbour that is not there. Half the crates at its foot still wear the Black Fin brand.',
+    },
+    hoarder: {
+      name: 'Gold Hoarder Piet Ostrow',
+      cutsceneTitle: 'Salvage Rates',
+      line: 'Everything on this reef washed up wrong side out. Sealed chests I pay for. The rest of it I have already counted twice.',
+    },
+  },
+  // 3 — Dead Man Shoals · even leviathans wash up here
+  {
+    storyteller: {
+      role: 'oracle',
+      name: 'Moraine the Bone-Reader',
+      cutsceneTitle: 'The Ribs on the Waterline',
+      line: 'Walk in through those ribs and count what the tide left behind. If this sea can beach a leviathan it can beach you — and the Black Fin hang whatever the water does not finish.',
+    },
+  },
+  // 4 — Rumrunner Key · business booming, quality questionable
+  {
+    storyteller: {
+      role: 'mysterious_stranger',
+      name: 'Sable Tam',
+      cutsceneTitle: 'Three Fingers, No Questions',
+      line: 'Every mug in the Reach begins in that copper pot. Do not ask what goes into it. Ask why the last man to taste it is buried behind the awning.',
+    },
+  },
+  // 5 — Crow's Perch · the signal was never lit
+  {
+    storyteller: {
+      role: 'mysterious_stranger',
+      name: 'Hesper Vane, Last of the Watch',
+      cutsceneTitle: 'The Pyre Nobody Lit',
+      line: 'The pyre is still stacked, still dry, still waiting. The watch ran the night the fleet came through. The only thing keeping lookout up here now has feathers.',
+    },
+  },
+  // 6 — Mermaid's Folly · she is owed
+  {
+    storyteller: {
+      role: 'oracle',
+      name: 'Shrinekeeper Calla Wren',
+      cutsceneTitle: 'Leave Something at Her Feet',
+      line: 'The candles are not thanks, they are payment. Men heard singing in this bay and swam for it. Leave a coin at her feet — she is owed, and she keeps accounts.',
+    },
+    hoarder: {
+      name: 'Gold Hoarder Lira Sarn',
+      cutsceneTitle: 'The Toll Collector',
+      line: 'She takes offerings, I take chests. Only one of us gives change, and only one of us is still breathing.',
+    },
+  },
+  // 7 — Castaway Reach · he counted the days, the raft was never finished
+  {
+    storyteller: {
+      role: 'shipwright',
+      name: 'Maeve the Shipwright',
+      cutsceneTitle: 'The Raft That Was Never Finished',
+      line: 'Down that beach is a board with four hundred marks cut into it, and a raft three planks short lying beside the man who ran out of days. Finish your work, sailor. That is the whole of this island.',
+    },
+    bartender: {
+      name: 'Tavernkeeper Corin Ladd',
+      cutsceneTitle: 'A Mug at the Counter',
+      line: 'We named a whole reach after a man who sat under one palm until he stopped. Drink up, then go and do the opposite.',
+    },
+  },
+  // 8 — Kraken Tooth · the kraken won, and left
+  {
+    storyteller: {
+      role: 'shipwright',
+      name: 'Harpooner Silas Threnn',
+      cutsceneTitle: 'What Came Up Between the Teeth',
+      line: 'It did not sink her. It held her between the teeth of this island until she stopped moving, then it let go. Our harpoons are still in the coil. It never came back for them.',
+    },
+  },
+  // 9 — Booty Bay · the crew that dug it up didn't all leave
+  {
+    storyteller: {
+      role: 'mysterious_stranger',
+      name: 'Jessamy Crook',
+      cutsceneTitle: 'Everyone\'s Map Says Here',
+      line: 'Every chart in the Reach marks this meadow, and one of them was right. Look at the pits: an empty chest, a Black Fin pennant staked over the deepest hole, and one digger still in it with his hat over his face.',
+    },
+    bartender: {
+      name: 'Tavernkeeper Ruby Vann',
+      cutsceneTitle: 'A Mug at the Counter',
+      line: 'Diggers come in loud and go out quiet, and never the same number as arrived. Your coin spends the same either way.',
+    },
+  },
+  // 10 — Gallows Sands · the tide brings everyone to justice
+  {
+    storyteller: {
+      role: 'oracle',
+      name: 'Gravedigger Ambrose Quill',
+      cutsceneTitle: 'Boot Hill Above the Tideline',
+      line: 'Two nooses, one cage, and a fresh mound I turned this morning. Nobody sails to Gallows Sands, sailor. The tide brings them.',
+    },
+  },
+  // 11 — Parley Point · the only island where nobody died. Yet.
+  {
+    storyteller: {
+      role: 'mysterious_stranger',
+      name: 'Ondine Bask, Keeper of the Truce',
+      cutsceneTitle: 'Steel in the Barrel',
+      line: 'Captains meet at that table under a white flag, and every blade goes in the truce barrel first. In all the Shattered Reach this is the one stone nobody has bled on. Yet.',
+    },
+    bartender: {
+      name: 'Tavernkeeper Ansel Poe',
+      cutsceneTitle: 'A Mug at the Counter',
+      line: 'House rules, same as the table on the plateau: no steel, no grudges, no names. Drink, then take your quarrel back out to sea.',
+    },
+  },
+  // 12 — Old Maw Caldera · the mountain kept it
+  {
+    storyteller: {
+      role: 'shipwright',
+      name: 'Pitboss Garrow Finch',
+      cutsceneTitle: 'The Cut in the Mountain',
+      line: 'We cut black glass out of a mountain that was still breathing. Eleven went in on the last shift, the beams charred, and the Maw shut its mouth. The mountain kept the obsidian, and it kept them.',
+    },
+    hoarder: {
+      name: 'Gold Hoarder Halvard Bex',
+      cutsceneTitle: 'Black Glass and Gold',
+      line: 'The mine takes; I only trade. Sealed chests for coin, and my charts point at the next mark — above ground, if you have any sense left.',
+    },
+  },
+  // 13 — Widow's Watch · the light still burns; she doesn't
+  {
+    storyteller: {
+      role: 'oracle',
+      name: 'Old Salt Iona',
+      cutsceneTitle: 'The Light on the Cliff',
+      line: 'She climbed that cliff every night for a captain whose ship was already on the bottom. Forty years of lamp oil. The lantern still burns up there — she does not. Steer by it anyway; she would want the company.',
+    },
+  },
+] as const;
+
 // ── Story-scene placement tuning (docs/ISLAND_STORY_BIBLE.md) ───────────────
 // Inland scenes ride findLandmarkSite (flatten stamp + slope/height limits);
 // coastal scenes ride a shipwreck-style beach scan but must land DRY.
@@ -117,6 +326,16 @@ const STORY_INLAND: Partial<Record<LandmarkType, StoryInlandSpec>> = {
   // visible from open water at night.
   widow_memorial: { minY: 8, maxSlope: 0.6, dLo: 0.45, dHi: 0.75, stampRadius: 6, blend: 0.45, pad: 5.5, faceSeaward: true },
 };
+/** Story scenes you are meant to WALK INTO keep a clear approach in front of
+ *  them (authored front = game +Z at yaw 0). The scatter blocker list only
+ *  reserved a disc round the scene centre, so a boulder_b — spacing radius 2.7,
+ *  and taller than the cache's tarps — could legally land 8 m dead ahead and
+ *  wall off the only readable way in. The value is how far down the approach
+ *  (metres) the corridor is held open. */
+const STORY_FACING_CLEARANCE: Partial<Record<LandmarkType, number>> = {
+  smuggler_cache: 9.0,
+};
+
 interface StoryCoastalSpec { bandLo: number; bandHi: number; stampRadius: number; pad: number }
 // bandLo well above the swell: scene base discs are 4-13m wide, so a centre
 // sampled at ~0.4m still dips its rim underwater (audit P0: wrecker tower
@@ -1431,7 +1650,13 @@ export class MapGenerator {
   }
 
   private generateStoryNpcs(island: Island, islandIndex: number, rng: Rng): IslandNpc[] {
+    // Every roster island keeps a speaker now (the Reach used to be mute on
+    // nine of fourteen isles). The islands that ALREADY had one keep drawing
+    // their placement from the island stream in the same order, so their
+    // prop/loot layout is byte-identical; the new speakers draw from a
+    // dedicated stream (see npcRng) and never disturb it.
     const shouldSpawn = islandIndex < 3 || (island.radius > 62 && islandIndex % 4 === 0);
+    const cast = ISLAND_CAST[islandIndex % ISLAND_CAST.length];
     const npcs: IslandNpc[] = [];
 
     // Gold hoarders only on a subset of islands — every other dock-hosting island,
@@ -1447,10 +1672,10 @@ export class MapGenerator {
       npcs.push({
         id: uuid(),
         role: 'gold_hoarder',
-        name: 'Gold Hoarder Darius',
-        cutsceneTitle: 'The Hoarder at the Shore',
-        line: 'Bring me sealed chests, not loose excuses. I pay gold, and my charts point to the next mark.',
-        cue: 'Sell carried chests here or take a treasure map.',
+        name: cast.hoarder?.name ?? `Gold Hoarder of ${island.name}`,
+        cutsceneTitle: cast.hoarder?.cutsceneTitle ?? 'The Hoarder at the Shore',
+        line: cast.hoarder?.line ?? 'Sealed chests, carried in hand. I pay gold, and my charts point at the next mark.',
+        cue: NPC_CUES.gold_hoarder,
         position: hoarderPos,
         rotation: directionToYaw(island.position.x - hoarderPos.x, island.position.z - hoarderPos.z),
       });
@@ -1469,52 +1694,35 @@ export class MapGenerator {
       npcs.push({
         id: uuid(),
         role: 'bartender',
-        name: 'Tavernkeeper Bess',
-        cutsceneTitle: 'A Mug at the Counter',
-        line: 'Sit, sailor. Trade rumors keep the rum warm — drink up and the next horizon will feel a touch closer.',
-        cue: 'Tavern: rest, restock, and listen for tales.',
+        name: cast.bartender?.name ?? 'Tavernkeeper Bess',
+        cutsceneTitle: cast.bartender?.cutsceneTitle ?? 'A Mug at the Counter',
+        line: cast.bartender?.line
+          ?? 'Sit, sailor. Trade rumours keep the rum warm — drink up and the next horizon feels a touch closer.',
+        cue: NPC_CUES.bartender,
         position: barPos,
         rotation: t.rotation + Math.PI,
       });
     }
 
-    if (!shouldSpawn) return npcs;
-
-    const cast: Array<Pick<IslandNpc, 'role' | 'name' | 'cutsceneTitle' | 'line' | 'cue'>> = [
-      {
-        role: 'mysterious_stranger',
-        name: 'The Stranger',
-        cutsceneTitle: 'A Figure at the Shore',
-        line: 'The sea is closing in. Read the clouds, keep your bow inside the blue, and do not trust a quiet horizon.',
-        cue: 'Storm warnings now point to the nearest safe water.',
-      },
-      {
-        role: 'shipwright',
-        name: 'Maeve the Shipwright',
-        cutsceneTitle: 'Tools on the Tide',
-        line: 'A sound hull wins more fights than a loud cannon. Take planks from barrels, patch low sections, then raise sail.',
-        cue: 'Island barrels are the fastest way to restock repairs.',
-      },
-      {
-        role: 'oracle',
-        name: 'Old Salt Iona',
-        cutsceneTitle: 'The Map Knows',
-        line: 'X marks are never alone. Docks, forges, and camps leave scratches on every honest chart.',
-        cue: 'Open the map near islands to inspect local details.',
-      },
-    ];
-
-    const template = cast[islandIndex % cast.length];
+    // Placement stream: untouched island stream where a speaker already stood,
+    // a dedicated per-island stream everywhere else (see the note above).
+    const placeRng: Rng = shouldSpawn
+      ? rng
+      : mulberry32(((islandIndex + 1) * 0x9e3779b9 ^ 0x51ed270b) >>> 0);
     const angle = island.dock
-      ? island.dock.shoreAngle + rr(rng, -0.34, 0.34)
-      : island.profile.primaryHillAngle + rr(rng, -0.42, 0.42);
-    const distRatio = island.dock ? rr(rng, 0.6, 0.74) : rr(rng, 0.22, 0.42);
+      ? island.dock.shoreAngle + rr(placeRng, -0.34, 0.34)
+      : island.profile.primaryHillAngle + rr(placeRng, -0.42, 0.42);
+    const distRatio = island.dock ? rr(placeRng, 0.6, 0.74) : rr(placeRng, 0.22, 0.42);
     const pos = this.findDryNpcSpot(island, distRatio, angle);
     const rotation = directionToYaw(island.position.x - pos.x, island.position.z - pos.z);
 
     npcs.push({
       id: uuid(),
-      ...template,
+      role: cast.storyteller.role,
+      name: cast.storyteller.name,
+      cutsceneTitle: cast.storyteller.cutsceneTitle,
+      line: cast.storyteller.line,
+      cue: NPC_CUES[cast.storyteller.role],
       position: pos,
       rotation,
     });
@@ -1716,6 +1924,20 @@ export class MapGenerator {
     // 3. Landmark POIs.
     for (const site of landmarks) {
       addProp(site.type, site.x, site.z, site.yaw, 1);
+      // Hold the approach open in front of walk-in scenes (see
+      // STORY_FACING_CLEARANCE): a chain of phantom blockers straight down the
+      // scene's facing, so the sprinkle below can never grow a boulder into the
+      // doorway. Phantom = blocker only, no prop and no rng draw.
+      const reach = STORY_FACING_CLEARANCE[site.type as LandmarkType];
+      if (reach) {
+        const own = getPropSpacingRadius(site.type as IslandPropType, 1);
+        const fx = Math.sin(site.yaw);
+        const fz = Math.cos(site.yaw);
+        const coneR = Math.max(1.6, own * 0.5);
+        for (let d = own * 0.75; d <= reach; d += coneR * 1.2) {
+          blockers.push({ x: site.x + fx * d, z: site.z + fz * d, r: coneR });
+        }
+      }
     }
 
     // 4a. Dense flourishing patches — a few clustered groves/meadows so the
@@ -1958,15 +2180,179 @@ export class MapGenerator {
     return animals;
   }
 
+  /** UNCHARTED SEA MICRO-POIs.
+   *
+   *  41% of the Reach's sailable water is more than 180 m from any coast, and a
+   *  held heading across it buys ninety seconds of nothing (see
+   *  scripts/test-sea-voids.mjs, which already found and pinned the voids).
+   *  These are the small hand-nothings that pay a pirate for knowing the sea: a
+   *  floating wreck cluster, gull-circled flotsam, a lone mast on a shoal.
+   *
+   *  FIXED, not per-match: the sites come from findSeaVoids, which reads the
+   *  hand-authored island layout alone, and the dressing rolls from ONE salted
+   *  stream of its own — so adding them leaves every existing world placement
+   *  (islands, props, rocks, spawns) bit-identical. */
+  generateSeaPois(islands: Island[]): SeaPoi[] {
+    const sites = this.findSeaVoids(islands, [], SEA_POI.COUNT, SEA_POI.SPACING);
+    const rng = mulberry32((SEA_POI.SEED ^ 0x9e3779b9) >>> 0);
+    // Deepest void gets the hero (the wreck cluster); the lone mast wants a
+    // shoal, so it takes the third site and brings its own rock.
+    const KINDS: SeaPoiKind[] = ['wreck_cluster', 'flotsam', 'shoal_mast', 'flotsam'];
+    return sites.map((site, index) => {
+      const kind = KINDS[index % KINDS.length];
+      return {
+        // Stable, learnable, and 30 bytes lighter on the wire than a uuid.
+        id: `sea-poi-${index + 1}`,
+        kind,
+        position: { x: site.x, y: 0, z: site.z },
+        rotation: ra(rng),
+        radius: kind === 'wreck_cluster' ? 13 : kind === 'shoal_mast' ? 8 : 9,
+        barrelIds: [],
+      };
+    });
+  }
+
+  /** Lash the POIs' supply barrels onto the NEAREST island's barrel array.
+   *  They are ordinary IslandBarrels at sea-level world positions, so barrel
+   *  proximity, [X] Open, take-all, the client mesh and the wire cadence all
+   *  work with no new machinery — the island is only their filing cabinet. */
+  attachSeaPoiLoot(pois: SeaPoi[], islands: Island[]): void {
+    if (islands.length === 0) return;
+    const rng = mulberry32((SEA_POI.SEED ^ 0x1eaf5e11) >>> 0);
+    for (const poi of pois) {
+      const count = poi.kind === 'wreck_cluster'
+        ? SEA_POI.CLUSTER_BARRELS
+        : poi.kind === 'flotsam' ? SEA_POI.FLOTSAM_BARRELS : 0;
+      if (count === 0) continue;
+      let host = islands[0];
+      let hostDist = Infinity;
+      for (const island of islands) {
+        const d = Math.hypot(poi.position.x - island.position.x, poi.position.z - island.position.z);
+        if (d < hostDist) { hostDist = d; host = island; }
+      }
+      for (let i = 0; i < count; i++) {
+        const angle = poi.rotation + (i / count) * Math.PI * 2 + rr(rng, -0.3, 0.3);
+        const reach = poi.radius * rr(rng, 0.32, 0.55);
+        const barrel: IslandBarrel = {
+          id: `${poi.id}-b${i}`,
+          position: {
+            x: poi.position.x + Math.cos(angle) * reach,
+            // Riding the raft, not swimming under it.
+            y: 0.62,
+            z: poi.position.z + Math.sin(angle) * reach,
+          },
+          opened: false,
+          loot: this.rollBarrelLoot(rng),
+        };
+        host.barrels.push(barrel);
+        poi.barrelIds.push(barrel.id);
+      }
+    }
+  }
+
+  /** Cargo of the Gilded Wreck: chests worth banking and a powder store worth
+   *  fighting for, scattered along her canted deck and bobbing at her waterline.
+   *  Chests come out FLOATING — she is a hull awash, so the shared floating-chest
+   *  path (bob on the real sea, grab it from the water, swim it home) does all
+   *  the work, and nobody has to walk a deck that isn't there.
+   *
+   *  `seed` is the match seed mixed with her spawn tick, so two matches never
+   *  roll the same hoard while a single match stays replayable. */
+  buildWreckLoot(seed: number, position: Vec3, rotation: number): {
+    chests: TreasureChest[];
+    barrels: IslandBarrel[];
+  } {
+    const rng = mulberry32((seed ^ 0x9e11ec2b) >>> 0);
+    const fwd = { x: Math.sin(rotation), z: Math.cos(rotation) };
+    const right = { x: Math.cos(rotation), z: -Math.sin(rotation) };
+    const along = (t: number, side: number) => ({
+      x: position.x + fwd.x * t + right.x * side,
+      z: position.z + fwd.z * t + right.z * side,
+    });
+
+    const chests: TreasureChest[] = [];
+    for (let i = 0; i < WRECK_EVENT.CHESTS; i++) {
+      // Spread down the length of her, alternating sides of the keel line.
+      const t = (i / Math.max(1, WRECK_EVENT.CHESTS - 1) - 0.5) * WRECK_EVENT.HULL_HALF_LENGTH * 1.35;
+      const side = (i % 2 === 0 ? 1 : -1) * rr(rng, 1.2, WRECK_EVENT.HULL_HALF_BEAM * 0.8);
+      const spot = along(t, side);
+      chests.push({
+        id: `gilded-wreck-c${i}`,
+        position: { x: spot.x, y: 0.32, z: spot.z },
+        opened: false,
+        value: ri(rng, WRECK_EVENT.CHEST_VALUE_MIN, WRECK_EVENT.CHEST_VALUE_MAX),
+        carriedByPlayerId: null,
+        storedOnShipId: null,
+        floating: true,
+        buried: false,
+        digProgress: 1,
+        mapOffsetX: 0,
+        mapOffsetZ: 0,
+        loot: this.rollLoot(rng),
+      });
+    }
+
+    const barrels: IslandBarrel[] = [];
+    for (let i = 0; i < WRECK_EVENT.BARRELS; i++) {
+      const t = (i / Math.max(1, WRECK_EVENT.BARRELS - 1) - 0.5) * WRECK_EVENT.HULL_HALF_LENGTH * 1.0;
+      const side = (i % 2 === 0 ? -1 : 1) * rr(rng, 1.6, WRECK_EVENT.HULL_HALF_BEAM * 0.7);
+      const spot = along(t + rr(rng, -1.6, 1.6), side);
+      barrels.push({
+        id: `gilded-wreck-b${i}`,
+        position: { x: spot.x, y: 0.66, z: spot.z },
+        opened: false,
+        loot: this.rollWreckSupply(rng),
+      });
+    }
+    return { chests, barrels };
+  }
+
+  /** The powder store: no fruit, no planks — shot, powder and coin. */
+  private rollWreckSupply(rng: Rng) {
+    const rolls = ri(rng, 3, 4);
+    const loot = new Map<ItemType, number>();
+    for (let i = 0; i < rolls; i++) {
+      const entry = pickWeighted(rng, [...WRECK_SUPPLY_TABLE]);
+      const qty = ri(rng, entry.minQty, entry.maxQty);
+      loot.set(entry.item, (loot.get(entry.item) ?? 0) + qty);
+    }
+    return Array.from(loot.entries()).map(([item, qty]) => ({ item, qty }));
+  }
+
   generateSeaRocks(
     islands: Island[],
     spawns: Array<{ position: Vec3; rotation: number; type: (typeof SHIP_TYPES)[number] }>,
+    seaPois: SeaPoi[] = [],
   ): SeaRock[] {
     const rng = this.rng;
     const rocks: SeaRock[] = [];
     const attempts = SEA_ROCKS.COUNT * 36;
 
-    for (let attempt = 0; attempt < attempts && rocks.length < SEA_ROCKS.COUNT; attempt++) {
+    // The lone mast stands on a SHOAL, and a shoal is a real thing you can put
+    // your keel through. Seeded FIRST from a stream of its own so the site is
+    // guaranteed and fixed; the match-stream loop below then keeps its usual
+    // 45 m off it like any other rock, so no drifting rock ever lands on the POI.
+    const shoalRng = mulberry32((SEA_POI.SEED ^ 0x5401d5ea) >>> 0);
+    for (const poi of seaPois) {
+      if (poi.kind !== 'shoal_mast') continue;
+      const radius = SEA_ROCKS.MIN_RADIUS + (SEA_ROCKS.MAX_RADIUS - SEA_ROCKS.MIN_RADIUS) * 0.35;
+      // Low and mean: you read it by the mast standing out of it, not by a crag.
+      const height = SEA_ROCKS.MIN_HEIGHT * 0.85;
+      const colliderSet = buildSeaRockColliders(radius, height, poi.rotation, ri(shoalRng, 0, 2) as 0 | 1 | 2);
+      rocks.push({
+        id: `${poi.id}-shoal`,
+        position: { x: poi.position.x, y: 0, z: poi.position.z },
+        radius,
+        height,
+        rotation: poi.rotation,
+        variant: 0,
+        colliderBoundsRadius: colliderSet.boundsRadius,
+        colliders: colliderSet.colliders,
+      });
+    }
+    const shoalCount = rocks.length;
+
+    for (let attempt = 0; attempt < attempts && rocks.length - shoalCount < SEA_ROCKS.COUNT; attempt++) {
       const angle = ra(rng);
       const dist = rr(rng, 170, WORLD.HALF - 95);
       const radius = rr(rng, SEA_ROCKS.MIN_RADIUS, SEA_ROCKS.MAX_RADIUS);

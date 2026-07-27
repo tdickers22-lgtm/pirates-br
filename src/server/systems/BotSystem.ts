@@ -94,6 +94,12 @@ export function botMayFireCannons(t: number, underFireUntil: number): boolean {
   return t < underFireUntil;
 }
 
+/** Inside this radius of a live world event, crews fight each other on sight —
+ *  the hunter cap and the phase seek radius are both suspended (see the
+ *  CONTESTED WATERS note in decideBehavior). Sized to "we can see each other
+ *  across the wreck", not "we are on the same half of the map". */
+const BOT_LURE_BRAWL_RADIUS = 240;
+
 export class BotSystem {
   private bots: Map<string, BotState> = new Map();
   private pendingFirearmFires: BotFirearmShot[] = [];
@@ -101,16 +107,38 @@ export class BotSystem {
    *  or shoot at. Bots still fight each other. Set by Match each tick. */
   private peaceShipIds: Set<string> = new Set();
   private peacePlayerIds: Set<string> = new Set();
+  /** Crews past the gold-bounty line — bot hunters prefer them (see setBountiedShips). */
+  private bountiedShipIds: Set<string> = new Set();
   /** Navigation context for the current bot's steering (set per bot each tick). */
   private navIslands: Island[] = [];
   private navSeaRocks: SeaRock[] = [];
   private navSkipIslandId: string | null = null;
+
+  /** A world event worth sailing to (the Gilded Wreck). A crew inside `radius`
+   *  that has nothing better to do points its bow at it instead of drifting
+   *  vaguely toward the ring centre — which is the whole mechanism by which the
+   *  event actually pulls the lobby together rather than just decorating it.
+   *  Null the rest of the match; engage and flee always outrank it. */
+  private eventLure: { x: number; z: number; radius: number } | null = null;
+
+  setEventLure(lure: { x: number; z: number; radius: number } | null) {
+    this.eventLure = lure;
+  }
 
   /** Match calls this each tick with the human's ship + player id when bot-peace is
    *  on (empty sets otherwise), so bots ignore that ship/player as a target. */
   setPeace(shipIds: Iterable<string>, playerIds: Iterable<string>) {
     this.peaceShipIds = new Set(shipIds);
     this.peacePlayerIds = new Set(playerIds);
+  }
+
+  /** Hulls carrying a gold bounty (Match sets this every tick). A bounty is a
+   *  claim on the whole lobby's attention: it must move BOT crews too, or the
+   *  "hunted treasure galleon" is theatre only the human ever answers. It does
+   *  NOT widen the seek radius or lift the hunter cap — a bountied crew simply
+   *  wins the target contest among ships already inside engage range. */
+  setBountiedShips(shipIds: Iterable<string>) {
+    this.bountiedShipIds = new Set(shipIds);
   }
 
   registerBot(player: Player, ship: Ship, difficulty: 'easy' | 'medium' | 'hard' = 'medium') {
@@ -170,6 +198,25 @@ export class BotSystem {
       this.executeBehavior(bot, player, ship, ships, islands, storm, dt, t, weaponSystem, seaRocks);
       this.maybeFireAtBoarder(bot, player, ship, players, weaponSystem);
     }
+  }
+
+  /** Is this hull in the water the live world event has drawn everyone into? */
+  private nearLure(ship: Ship): boolean {
+    const lure = this.eventLure;
+    if (!lure) return false;
+    return dist2D(ship.position.x, ship.position.z, lure.x, lure.z) < BOT_LURE_BRAWL_RADIUS;
+  }
+
+  /** Bearing from this hull to the live world event, or null when there is no
+   *  event, the crew is already on top of it, or it is simply too far to care. */
+  private lureBearing(ship: Ship): number | null {
+    const lure = this.eventLure;
+    if (!lure) return null;
+    const d = dist2D(ship.position.x, ship.position.z, lure.x, lure.z);
+    // Already there: stop steering at it or the crew circles the hulk forever
+    // instead of fighting whoever else turned up.
+    if (d < 90 || d > lure.radius) return null;
+    return Math.atan2(lure.x - ship.position.x, lure.z - ship.position.z);
   }
 
   /** How many bot crews are currently hunting a ship (bounded by the lobby size,
@@ -235,7 +282,10 @@ export class BotSystem {
         const d = dist2D(ship.position.x, ship.position.z, other.position.x, other.position.z);
         // Score: distance, but humans get only a modest discount so bots contest players
         // without feeling like they are hard-locked from across the map.
-        const score = humanShipIds.has(other.id) ? d * 0.88 : d;
+        // A BOUNTIED hull (a crew hauling most of a win in her hold) gets a
+        // heavier discount still: everything nearby would rather have the gold.
+        const bountyDiscount = this.bountiedShipIds.has(other.id) ? 0.6 : 1;
+        const score = (humanShipIds.has(other.id) ? d * 0.88 : d) * bountyDiscount;
         if (score < nearestScore) { nearestScore = score; nearest = other; }
       }
 
@@ -275,9 +325,25 @@ export class BotSystem {
         Math.min(Math.max(0, storm.phase), BOT_MAX_HUNTERS_BY_PHASE.length - 1)
       ];
       const alreadyHunting = bot.behavior === 'engage';
-      if (nearestActualDist < engageRange && (alreadyHunting || this.countHunters() < hunterCap)) {
+      // CONTESTED WATERS. Two crews within sight of the same world event are
+      // not "patrolling near each other" — they are both there for the loot,
+      // and the whole reason the event exists is to make that meeting HAPPEN.
+      // So over the wreck the concurrency cap (which exists to stop the lobby
+      // igniting all at once across the map) does not apply, and neither does
+      // the phase seek radius. Everywhere else on the chart it still does.
+      const contested = !!nearest && this.nearLure(ship) && this.nearLure(nearest);
+      if ((contested || nearestActualDist < engageRange)
+        && (alreadyHunting || contested || this.countHunters() < hunterCap)) {
         bot.behavior = 'engage';
         bot.targetShipId = nearest?.id ?? null;
+      } else if (this.lureBearing(ship) !== null) {
+        // A world event is up and this crew is in range: sail AT it. Ranked
+        // above island looting on purpose — the wreck's whole job is to stop
+        // crews sitting on separate islands through the mid-game drought — but
+        // still below engage and flee, so it never overrides a live fight.
+        bot.behavior = 'patrol';
+        bot.targetShipId = null;
+        bot.patrolAngle = this.lureBearing(ship)! + (Math.random() - 0.5) * 0.3;
       } else if (nearIsland && nearIslandDist < 540 && Math.random() < 0.28) {
         bot.behavior = 'loot';
         bot.targetIslandId = nearIsland.id;

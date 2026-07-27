@@ -161,7 +161,12 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   crow_roost: { shape: 'capsule', radius: 2.0, height: 9.0 },
   mermaid_shrine: { shape: 'capsule', radius: 2.0, height: 2.8 },
   castaway_camp: { shape: 'capsule', radius: 0.5, height: 4.0 },
-  kraken_wreck: { shape: 'capsule', radius: 4.0, height: 4.6 },
+  // SHOWSTOPPER scale: build_scene_kraken.py applies SCENE_SCALE = 1.8 to the
+  // whole tableau before export, and the GLB grew with it (measured bounds
+  // 21.8 x 12.0 x 25.6 m) while this entry did not — the crushed bow, the coil
+  // and the harpoon thicket were all walk-through above a 4 m core. Both figures
+  // are the old authored numbers times that same 1.8.
+  kraken_wreck: { shape: 'capsule', radius: 7.2, height: 8.28 },
   dig_site: { shape: 'none', radius: 0, height: 1.0 },
   // Walk INTO the scene between the posts (cut ropes are the focal point), but
   // not THROUGH the two heavy uprights or the coffin cart.
@@ -224,7 +229,9 @@ const SPACING_OVERRIDES: Partial<Record<IslandPropType, number>> = {
   crow_roost: 5.0,
   mermaid_shrine: 5.0,
   castaway_camp: 5.5,
-  kraken_wreck: 9.0,
+  // 1.8x with the GLB (see PROP_COLLIDERS.kraken_wreck) — the tableau's visual
+  // footprint is what scatter must stay out of, and it nearly doubled.
+  kraken_wreck: 16.2,
   dig_site: 6.5,
   gallows: 6.0,
   parley_table: 5.5,

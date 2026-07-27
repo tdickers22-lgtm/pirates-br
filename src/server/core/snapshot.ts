@@ -157,6 +157,21 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
         opened: chest.opened,
         digProgress: chest.digProgress,
       } as typeof chest, 2)),
+    // Sunken cargo, trimmed to the bone. The expiry clock is server bookkeeping
+    // and `fromShipId` is a 36-char uuid the client never reads (attribution
+    // rides the one-off 'cargo_spilled' message instead) — carrying it made a
+    // full seabed cost 4.3 KB of every 10 Hz snapshot against a 35 KB cap. The
+    // key itself is omitted entirely when no wreck is bleeding, so a match with
+    // no spills pays literally nothing for the feature.
+    ...((snap.spoils?.length ?? 0) > 0
+      ? {
+        spoils: (snap.spoils ?? []).map((spoil) => ({
+          id: spoil.id,
+          position: quantizeDeep(spoil.position, 2),
+          value: Math.round(spoil.value),
+        })) as GameState['spoils'],
+      }
+      : {}),
   };
 }
 

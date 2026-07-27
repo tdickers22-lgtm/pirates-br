@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
+import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
 import { countOpenHoles } from '../../shared/interactions.js';
 import { angleWrap, dist2D, isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
 import type { ClientInteractKind, FloatingDamageIndicator } from '../core/Game.js';
@@ -99,6 +100,8 @@ export class HudController {
     this.islandPresenceSeeded = false;
     this.brProgressSignature = '';
     this.goldLeaderboardSignature = '';
+    this.holdCargoSignature = '';
+    if (this.holdCargoEl) this.holdCargoEl.style.display = 'none';
     this.lastStreakSeen = -1;
     this.serverEliminationCause = null;
     this.deathCopySignature = '';
@@ -444,6 +447,7 @@ export class HudController {
 
     this.view.ui.shipsAlive.textContent = String(this.view.state.shipsAlive);
     this.view.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
+    this.renderHoldCargo(ship);
     this.renderGoldLeaderboard(player.id);
     this.view.ui.killCount.textContent = String(player.kills);
     this.view.ui.healthFill.style.width = `${Math.max(0, player.health)}%`;
@@ -1071,6 +1075,63 @@ export class HudController {
       slice.classList.toggle('hovered', s === this.view.wheelHoverSlot);
       slice.classList.toggle('active', s === heldSlot || s === equippedSlot || s === this.view.wheelHoverSlot);
     }
+  }
+
+  // ─── Hold cargo + bounty board ───────────────────────────────
+  // The gold race is the signature mechanic of this BR and for most of its life
+  // it read as a number in a box. These two readouts are the HUD half of making
+  // it physical: what your own hull is CARRYING (and what that costs you in
+  // knots), and who out there is worth hunting.
+
+  /** Lazily built so no HTML/UiRefs change is needed — it lives beside the gold
+   *  counter and only appears once there is actually cargo in the hold. */
+  private holdCargoEl: HTMLDivElement | null = null;
+  private holdCargoSignature = '';
+
+  private ensureHoldCargoEl(): HTMLDivElement | null {
+    if (this.holdCargoEl?.isConnected) return this.holdCargoEl;
+    const host = this.view.ui.goldAmount.parentElement;
+    if (!host) return null;
+    const el = document.createElement('div');
+    el.id = 'hold-cargo';
+    el.style.cssText = [
+      'font-size:0.52rem',
+      'letter-spacing:0.07em',
+      'text-transform:uppercase',
+      'font-family:monospace',
+      'color:#d9b45e',
+      'margin-top:2px',
+      'white-space:nowrap',
+    ].join(';');
+    el.style.display = 'none';
+    host.appendChild(el);
+    this.holdCargoEl = el;
+    return el;
+  }
+
+  /**
+   * "HOLD: LADEN · −9% knots". A crew hauling most of a win is sailing a
+   * treasure galleon: the crates are in the hold, the hull is slower for it, and
+   * the pirate flying it deserves to be told in knots, not vibes.
+   */
+  private renderHoldCargo(ship: Ship | null): void {
+    const el = this.ensureHoldCargoEl();
+    if (!el) return;
+    const cargo = Math.max(0, Math.floor(ship?.cargoGold ?? 0));
+    const signature = `${cargo}|${ship?.bountied ? 1 : 0}`;
+    if (signature === this.holdCargoSignature) return;
+    this.holdCargoSignature = signature;
+    if (cargo <= 0) {
+      el.style.display = 'none';
+      return;
+    }
+    const penalty = Math.round(cargoBallastPenalty(cargo) * 100);
+    const label = cargoTierLabel(cargo).toUpperCase();
+    el.style.display = 'block';
+    el.textContent = ship?.bountied
+      ? `HOLD: ${label} · ${cargo}g · −${penalty}% · HUNTED`
+      : `HOLD: ${label} · ${cargo}g · −${penalty}% knots`;
+    el.style.color = ship?.bountied ? '#ff9d5c' : cargoTier(cargo) >= 3 ? '#ffd278' : '#d9b45e';
   }
 
   private goldLeaderboardSignature = '';

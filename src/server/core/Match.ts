@@ -1,9 +1,17 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
+  GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
-import { BERTH, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
+import {
+  boardingStealCap,
+  bountyClearGold,
+  bountyThresholdGold,
+  cargoGoldFromBanked,
+  spillFromCargo,
+  splitSpill,
+} from '../../shared/cargo.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
@@ -322,6 +330,15 @@ export class Match {
   /** Order of elimination — earliest first. Used for placement on match end. */
   private eliminationOrder: string[] = [];
 
+  // ── Hold cargo / bounty / sunken spoils (see shared/cargo.ts) ──────────
+  /** Monotonic source for the short spoil ids that ride the wire ('sp7'). */
+  private spoilSeq = 0;
+  /** Ships currently carrying a map-wide bounty. Latched with hysteresis so a
+   *  crew hovering at the 60% line does not strobe every battle map. */
+  private bountiedShipIds = new Set<string>();
+  /** Storm phase the standing bounties were last re-cried at. */
+  private bountyCriedPhase = -1;
+
   /** Called once when the match definitively ends (winner found, last ship, or abandoned). */
   onMatchEnd: ((result: MatchEndResult) => void) | null = null;
   /** Called when an in-match client's WebSocket closes — lobby uses this to clean its session. */
@@ -565,7 +582,13 @@ export class Match {
     const islandList = this.mapGen.generateIslands();
     const spawns = this.mapGen.generateShipSpawns(islandList);
     const wildlife = this.mapGen.generateWildlife(islandList);
-    const seaRocks = this.mapGen.generateSeaRocks(islandList, spawns);
+    // Uncharted sea micro-POIs: fixed sites in the biggest dead-water voids.
+    // Their barrels are filed on the nearest island (so every loot path works
+    // unchanged) and the lone mast's shoal is seeded into the rock field before
+    // the drifting rocks are drawn, so nothing ever lands on top of it.
+    const seaPois = this.mapGen.generateSeaPois(islandList);
+    this.mapGen.attachSeaPoiLoot(seaPois, islandList);
+    const seaRocks = this.mapGen.generateSeaRocks(islandList, spawns, seaPois);
 
     const ships: Ship[] = [];
     const players: Player[] = [];
@@ -612,6 +635,9 @@ export class Match {
       islands: islandList,
       tradeSessions: [],
       sharks: [],
+      spoils: [],
+      seaPois,
+      wreck: null,
       winnerId: null,
     };
     this.rebuildEntityIndexes();
@@ -1061,6 +1087,24 @@ export class Match {
         this.handleTradeAction(client.playerId, p);
         break;
       }
+      case 'dev_grant_gold': {
+        // Dev/testing convenience with the SAME solo guard as dev bot-peace: a
+        // match with more than one human never honours it, so it can't be used
+        // to hand yourself the 9000g win in a real lobby. It exists because the
+        // hold-cargo loop (ballast, bounty, spill) is otherwise only reachable
+        // after an hour of chest runs, which no live probe can afford.
+        if (this.clients.size <= 1) {
+          const requested = Number((msg.payload as { gold?: number } | null)?.gold);
+          if (Number.isFinite(requested)) {
+            const player = this.getPlayer(client.playerId);
+            if (player) {
+              player.gold = Math.max(0, Math.min(ECONOMY.GOLD_WIN_TARGET * 2, Math.floor(requested)));
+              this.updateCargoAndBounty();
+            }
+          }
+        }
+        break;
+      }
       case 'dev_bot_peace': {
         // Dev/testing convenience — only honoured when a single human is in the
         // match (solo), so it can't be abused to disable bot aggression in a real
@@ -1192,6 +1236,11 @@ export class Match {
     // Ship rotation integration + rudder decay for unhelmed ships lives in
     // PhysicsSystem.updateShips so external impulses turn every hull.
 
+    // Weigh every hold and re-read the bounty board BEFORE bots choose targets
+    // and before physics integrates — a laden hull must sail at laden speed on
+    // the very tick her cargo changed.
+    this.updateCargoAndBounty();
+
     // Dev-only bot-peace (solo testing): bots ignore the human + their ship as
     // targets while still fighting each other. Empty sets = normal aggression.
     if (this.botPeace) {
@@ -1270,6 +1319,8 @@ export class Match {
 
     this.updateSharks(dt);
     this.updateWildlife(dt);
+    // Sunken cargo: claimable by any swimmer, taken by the tide on a timer.
+    this.updateSpoils();
 
     // Storm — routes through openHole so the tempest punches real holes into
     // the seaward face (holes + flooding), the SoT damage loop.
@@ -1279,6 +1330,9 @@ export class Match {
       // one answer for seabed, reef and tempest alike.
       isSheltered: (shipId) => this.physics.isEnvironmentallySheltered(shipId),
     });
+    // Runs immediately after the storm, because the whole event is keyed to the
+    // ring: she rises at the announced next centre and the tempest takes her back.
+    this.updateWreckEvent();
     this.syncTreasureChests();
     this.updateKegs(dt);
     this.updateFieldRepairs(dt);
@@ -1319,7 +1373,14 @@ export class Match {
     if (this.tickCount % SNAPSHOT_RATE === 0) {
       if (this.tickCount % FULL_SNAPSHOT_TICKS === 0) {
         this.pruneQuestMaps();
-        const includeStaticWorld = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0;
+        // The Gilded Wreck's chests and supply barrels are ORDINARY island
+        // entities (that is what makes every loot path work unchanged) — and
+        // island entities only ride the ~19 s static-world tick. A dynamic event
+        // cannot wait 19 s to become lootable, so raising or claiming her arms
+        // one extra world tick, on the very next full snapshot.
+        const includeStaticWorld = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0
+          || this.worldResyncPending;
+        this.worldResyncPending = false;
         const snap = buildWireSnapshot(this.buildSnapshot(includeStaticWorld), includeStaticWorld);
         this.broadcastVolatile({ type: 'state_snapshot', ts: Date.now(), payload: snap }, 'full');
       } else {
@@ -4554,6 +4615,9 @@ export class Match {
     if (!ship.alive || ship.sinking) return;
 
     this.dropShipTreasure(ship);
+    // Her winnings break out of the hold and go into the shallows before she
+    // does — the wreck mark is a dive site, not just a hole in the sea.
+    this.spillCargoOnFounder(ship);
     ship.sinking = true;
     ship.anchored = true;
     ship.anchorRaiseProgress = 0;
@@ -5120,7 +5184,11 @@ export class Match {
       if (headshot) killer.gold += PLAYER.HEADSHOT_GOLD_BONUS;
       if (boardingKill) {
         const previousHealth = killer.health;
-        stolenGold = Math.min(player.gold, PLAYER.BOARDING_GOLD_STEAL_CAP);
+        // Cutting down a pirate with a LADEN hold is worth what the hold is
+        // worth: the cap scales from the old flat 180 up to STEAL_LADEN_MULT×
+        // against a full purse (shared/cargo.ts). Boarding the leader is the
+        // counterplay to the ballast that makes the leader catchable.
+        stolenGold = Math.min(player.gold, boardingStealCap(player.gold));
         if (stolenGold > 0) {
           player.gold -= stolenGold;
           killer.gold += stolenGold;
@@ -5212,6 +5280,210 @@ export class Match {
     });
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // HOLD CARGO — the 9000-gold race, made physical
+  // ══════════════════════════════════════════════════════════════════════
+  // The signature mechanic of this BR used to play as a background scoreboard:
+  // an invisible number climbing in the corner, with a 180g boarding steal as
+  // its only counterplay against a 9000g target. Everything below turns that
+  // number into matter in the world:
+  //   · a crew's gold over CARGO.SAFE_GOLD becomes CARGO — crates you can walk
+  //     down into the hold and look at, and BALLAST the hull carries as lost
+  //     top speed, so the leader can be run down;
+  //   · past CARGO.BOUNTY_RATIO of the target that crew is BOUNTIED: called out
+  //     on every battle map and re-cried each storm phase — the hunted galleon;
+  //   · when she FOUNDERS half that cargo SPILLS into the shallows over the
+  //     wreck, divable by anyone (crucially including the crew that just swam
+  //     out of her — sinking costs you the lead, it does not delete your match).
+  // Safe pocket gold is never touched by any of it.
+
+  /** A crew's banked gold: every non-eliminated pirate whose home is this hull. */
+  private crewGold(ship: Ship): number {
+    let total = 0;
+    for (const player of this.state.players) {
+      if (player.shipId !== ship.id) continue;
+      if (player.state === 'eliminated') continue;
+      total += Math.max(0, player.gold);
+    }
+    return total;
+  }
+
+  /**
+   * Recompute every hull's cargo weight and the standing bounties. Runs before
+   * bots pick targets and before physics integrates, so the ballast a laden
+   * hull carries this tick is the ballast the sim actually sails with.
+   */
+  private updateCargoAndBounty() {
+    const bountyAt = bountyThresholdGold();
+    const clearAt = bountyClearGold();
+    const raised: Ship[] = [];
+
+    for (const ship of this.state.ships) {
+      if (!ship.alive) {
+        ship.cargoGold = 0;
+        ship.bountied = undefined;
+        this.bountiedShipIds.delete(ship.id);
+        continue;
+      }
+      const gold = this.crewGold(ship);
+      ship.cargoGold = cargoGoldFromBanked(gold);
+
+      const wasBountied = this.bountiedShipIds.has(ship.id);
+      // Hysteresis: cross 60% to earn the bounty, fall under 55% to shake it.
+      const bountied = ship.sinking ? false : wasBountied ? gold >= clearAt : gold >= bountyAt;
+      if (bountied && !wasBountied) {
+        this.bountiedShipIds.add(ship.id);
+        raised.push(ship);
+      } else if (!bountied && wasBountied) {
+        this.bountiedShipIds.delete(ship.id);
+      }
+      // Only ever TRUE on the wire — an absent field reads as no bounty, which
+      // keeps the flag free on the nine hulls that don't have one.
+      ship.bountied = bountied ? true : undefined;
+    }
+
+    // Bots hunt the money. The set is handed over every tick (like bot-peace)
+    // so a bounty that lifts stops pulling hunters the same tick it clears.
+    this.bots.setBountiedShips(this.bountiedShipIds);
+
+    for (const ship of raised) this.cryBounty(ship, false);
+
+    // Re-cry the standing bounties on every storm phase: the ring tightening is
+    // exactly when the fleet needs reminding who is carrying the match.
+    if (this.state.storm.phase !== this.bountyCriedPhase) {
+      this.bountyCriedPhase = this.state.storm.phase;
+      for (const ship of this.state.ships) {
+        if (!ship.alive || !this.bountiedShipIds.has(ship.id)) continue;
+        if (raised.includes(ship)) continue;
+        this.cryBounty(ship, true);
+      }
+    }
+  }
+
+  /** One horn-and-feed call across the whole map: THAT hull is the treasure. */
+  private cryBounty(ship: Ship, renewed: boolean) {
+    const owner = this.state.players.find((p) => p.id === ship.ownerId);
+    this.broadcast({
+      type: 'bounty_raised',
+      ts: Date.now(),
+      payload: {
+        shipId: ship.id,
+        crewName: owner ? `${owner.name}'s crew` : 'A crew',
+        gold: this.crewGold(ship),
+        targetGold: ECONOMY.GOLD_WIN_TARGET,
+        renewed,
+      },
+    });
+  }
+
+  /**
+   * She's going down with a full hold — half the crew's CARGO (capped, never
+   * their safe pocket) breaks out of her and settles in the shallows over the
+   * wreck as divable sunken cargo. Every crew member gives up a share
+   * proportional to their own cargo, so nobody is ever pushed under SAFE_GOLD.
+   */
+  private spillCargoOnFounder(ship: Ship) {
+    const crew = this.state.players.filter(
+      (p) => p.shipId === ship.id && p.state !== 'eliminated' && cargoGoldFromBanked(p.gold) > 0,
+    );
+    const cargo = crew.reduce((sum, p) => sum + cargoGoldFromBanked(p.gold), 0);
+    const spill = spillFromCargo(cargo);
+    if (spill <= 0) return;
+
+    let taken = 0;
+    for (let i = 0; i < crew.length; i += 1) {
+      const player = crew[i];
+      const share = i === crew.length - 1
+        ? spill - taken
+        : Math.floor(spill * (cargoGoldFromBanked(player.gold) / cargo));
+      const loss = Math.min(share, cargoGoldFromBanked(player.gold));
+      player.gold -= loss;
+      taken += loss;
+    }
+    if (taken <= 0) return;
+
+    const pieces = splitSpill(taken);
+    for (let i = 0; i < pieces.length; i += 1) {
+      const angle = (i / pieces.length) * Math.PI * 2 + ship.rotation;
+      const radius = CARGO.SPILL_SCATTER * (0.35 + (i % 3) * 0.28);
+      this.state.spoils = this.state.spoils ?? [];
+      this.state.spoils.push({
+        id: `sp${++this.spoilSeq}`,
+        position: {
+          x: ship.position.x + Math.sin(angle) * radius,
+          y: -CARGO.SPILL_DEPTH,
+          z: ship.position.z + Math.cos(angle) * radius,
+        },
+        value: pieces[i],
+        fromShipId: ship.id,
+        expiresAt: this.t + CARGO.SPILL_LIFETIME,
+      });
+    }
+    // Wire budget: a busy endgame can have several wrecks bleeding at once.
+    const spoils = this.state.spoils ?? [];
+    if (spoils.length > CARGO.SPILL_WORLD_MAX) {
+      this.state.spoils = spoils.slice(spoils.length - CARGO.SPILL_WORLD_MAX);
+    }
+
+    const owner = this.state.players.find((p) => p.id === ship.ownerId);
+    this.broadcast({
+      type: 'cargo_spilled',
+      ts: Date.now(),
+      payload: {
+        shipId: ship.id,
+        crewName: owner ? `${owner.name}'s crew` : 'A crew',
+        gold: taken,
+        pieces: pieces.length,
+        position: { x: ship.position.x, y: -CARGO.SPILL_DEPTH, z: ship.position.z },
+      },
+    });
+  }
+
+  /**
+   * Sunken cargo: age it out, and hand it to any pirate who swims into it. No
+   * [X] and no arbiter entry on purpose — swimming through a sunken chest and
+   * feeling the coin go in is the whole verb, and diving already costs breath.
+   */
+  private updateSpoils() {
+    const spoils = this.state.spoils;
+    if (!spoils || spoils.length === 0) return;
+    const rangeSq = CARGO.SPILL_PICKUP_RANGE * CARGO.SPILL_PICKUP_RANGE;
+
+    for (let i = spoils.length - 1; i >= 0; i -= 1) {
+      const spoil = spoils[i];
+      if (spoil.expiresAt !== undefined && this.t >= spoil.expiresAt) {
+        spoils.splice(i, 1);
+        continue;
+      }
+      let claimant: Player | null = null;
+      for (const player of this.state.players) {
+        if (player.state === 'eliminated' || player.state === 'respawning' || player.state === 'downed') continue;
+        if (player.health <= 0) continue;
+        const dx = player.position.x - spoil.position.x;
+        const dy = player.position.y - spoil.position.y;
+        const dz = player.position.z - spoil.position.z;
+        if (dx * dx + dy * dy + dz * dz > rangeSq) continue;
+        claimant = player;
+        break;
+      }
+      if (!claimant) continue;
+
+      claimant.gold += spoil.value;
+      spoils.splice(i, 1);
+      this.broadcast({
+        type: 'spoil_claimed',
+        ts: Date.now(),
+        payload: {
+          playerId: claimant.id,
+          playerName: claimant.name,
+          gold: spoil.value,
+          position: { ...spoil.position },
+        },
+      });
+      this.checkWinCondition();
+    }
+  }
+
   private checkWinCondition() {
     if (this.state.phase !== 'playing') return;
 
@@ -5276,6 +5548,10 @@ export class Match {
       projectiles: this.state.projectiles.filter(p => p.alive),
       kegs: this.state.kegs.filter((keg) => keg.timer > 0 && !keg.defused),
       islands: includeStaticWorld ? this.state.islands : [],
+      // Fixed for the life of the world, so they keep the statics' cadence and
+      // cost the 10Hz full nothing. The live wreck rides EVERY full (see
+      // GameState.wreck) because a beacon that lights 19s late is not a beacon.
+      seaPois: includeStaticWorld ? this.state.seaPois : [],
       chestSync: this.state.islands.flatMap((island) => island.chests),
     };
   }
@@ -5831,6 +6107,176 @@ export class Match {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ── WORLD EVENTS: THE GILDED WRECK ───────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  //
+  // The pacing audit's P1: a mean 7.5 crews still afloat at 360 s, because
+  // between ring shrinks there is nothing in the Reach worth sailing toward.
+  // Crews sit on their loot island, the ring nudges them inward, nobody meets.
+  //
+  // So: once per match a half-sunk ghost galleon rises AT THE ANNOUNCED NEXT
+  // RING CENTRE — the one spot the whole lobby has to sail to anyway — carrying
+  // chests worth banking and a powder store worth killing for. She is on the
+  // chart for everyone at once (gold beacon), she is loud (feed line + bell),
+  // and she is on a clock: the storm takes her back at the end of the phase.
+  // Everybody arrives inside the same two minutes, in the same square kilometre,
+  // holding something the other crews want.
+  //
+  // IMPLEMENTATION NOTE — why her loot is filed on an island:
+  //   her chests and barrels are ordinary TreasureChest / IslandBarrel entities
+  //   pushed onto the NEAREST island's arrays. That is not a hack of
+  //   convenience: it means chest proximity, [X] prompts, carry/stow/sell, the
+  //   barrel take-all, the client meshes, the 10 Hz chestSync and the treasure
+  //   HUD all work on her with ZERO new machinery and zero new wire format. The
+  //   chests come out `floating`, which is a first-class state (a foundered
+  //   crew's cargo already uses it), so you swim them home exactly as you would
+  //   any chest that went into the water.
+
+  /** True once she has risen this match — she is a once-per-match event. */
+  private wreckHasRisen = false;
+  /** Arms one extra static-world snapshot on the next full tick (see tick()). */
+  private worldResyncPending = false;
+
+  /** Sim-time drive for the whole event: rise on schedule, die on schedule. */
+  private updateWreckEvent() {
+    const wreck = this.state.wreck ?? null;
+    if (!wreck) {
+      if (this.wreckHasRisen) return;
+      // Dev/live-verification hook: PIRATES_WRECK_SEC=20 raises her twenty
+      // seconds after the horn so a probe does not have to sail for four
+      // minutes to look at her. Unset in every real match.
+      const forcedAt = Number(process.env.PIRATES_WRECK_SEC ?? NaN);
+      if (Number.isFinite(forcedAt)) {
+        if (this.t >= forcedAt) this.raiseGildedWreck();
+        return;
+      }
+      if (this.state.storm.phase < WRECK_EVENT.SPAWN_PHASE) return;
+      this.raiseGildedWreck();
+      return;
+    }
+    if (this.t >= wreck.claimAt) this.claimGildedWreck(wreck);
+  }
+
+  /** Dev/test hook: raise her right now, wherever the ring is pointing.
+   *  window.__piratesBR is a client; this is the server-side twin the wreck
+   *  suite and the live probe drive. */
+  forceRaiseGildedWreck(): WreckEvent | null {
+    if (this.state.wreck) return this.state.wreck;
+    this.wreckHasRisen = false;
+    this.raiseGildedWreck();
+    return this.state.wreck ?? null;
+  }
+
+  private raiseGildedWreck() {
+    const storm = this.state.storm;
+    // The ANNOUNCED next centre — the ring the HUD is already drawing dashed.
+    const site = this.findWreckWater(storm.nextCenterX, storm.nextCenterZ);
+    // Lies across the ring's radius so her broken length reads broadside from
+    // whichever way you come in off the wall.
+    const rotation = angleWrap(Math.atan2(site.x - storm.centerX, site.z - storm.centerZ) + Math.PI * 0.5);
+
+    const host = this.nearestIsland(site.x, site.z);
+    if (!host) return;
+
+    const { chests, barrels } = this.mapGen.buildWreckLoot(
+      (this.tickCount * 2654435761) >>> 0, { x: site.x, y: 0, z: site.z }, rotation,
+    );
+    for (const chest of chests) host.chests.push(chest);
+    for (const barrel of barrels) host.barrels.push(barrel);
+
+    const wreck: WreckEvent = {
+      id: `gilded-wreck-${this.state.tick}`,
+      position: { x: site.x, y: 0, z: site.z },
+      rotation,
+      spawnedAt: this.t,
+      claimAt: this.t + WRECK_EVENT.LOOT_SECONDS,
+      hostIslandId: host.id,
+      chestIds: chests.map((c) => c.id),
+      barrelIds: barrels.map((b) => b.id),
+    };
+    this.state.wreck = wreck;
+    this.wreckHasRisen = true;
+    this.worldResyncPending = true;
+    this.syncTreasureChests();
+
+    // Bots inside LURE_RADIUS break off patrol and converge on her.
+    this.bots.setEventLure({ x: site.x, z: site.z, radius: WRECK_EVENT.LURE_RADIUS });
+
+    this.broadcast({
+      type: 'wreck_event',
+      ts: Date.now(),
+      payload: { phase: 'risen', position: { ...wreck.position }, duration: WRECK_EVENT.LOOT_SECONDS },
+    });
+  }
+
+  private claimGildedWreck(wreck: WreckEvent) {
+    const host = this.state.islands.find((island) => island.id === wreck.hostIslandId);
+    if (host) {
+      const chestIds = new Set(wreck.chestIds);
+      const barrelIds = new Set(wreck.barrelIds);
+      // Anything a crew actually got off her is THEIRS — carried, stowed, sold,
+      // or simply dragged clear of the wreck. The storm only takes back what is
+      // still lying on her when the sea closes over.
+      const stillAboard = (x: number, z: number) =>
+        dist2D(x, z, wreck.position.x, wreck.position.z) < WRECK_EVENT.HULL_HALF_LENGTH * 3.5;
+      host.chests = host.chests.filter((chest) => {
+        if (!chestIds.has(chest.id)) return true;
+        if (chest.carriedByPlayerId || chest.storedOnShipId || chest.opened) return true;
+        return !stillAboard(chest.position.x, chest.position.z);
+      });
+      host.barrels = host.barrels.filter((barrel) =>
+        !barrelIds.has(barrel.id) || !stillAboard(barrel.position.x, barrel.position.z));
+    }
+    // A pirate mid-swim holding one of her chests keeps it; nobody is left
+    // pointing at an entity that no longer exists.
+    for (const player of this.state.players) {
+      if (player.nearChestId && wreck.chestIds.includes(player.nearChestId)
+        && !this.getChestById(player.nearChestId)) player.nearChestId = null;
+      if (player.nearBarrelId && wreck.barrelIds.includes(player.nearBarrelId)) player.nearBarrelId = null;
+    }
+
+    this.state.wreck = null;
+    this.worldResyncPending = true;
+    this.bots.setEventLure(null);
+    this.broadcast({
+      type: 'wreck_event',
+      ts: Date.now(),
+      payload: { phase: 'claimed', position: { ...wreck.position }, duration: 0 },
+    });
+  }
+
+  /** Nudge a ring centre off dry land. The early rings are big enough that
+   *  StormSystem does not land-check them at all, so the announced centre can
+   *  sit squarely on Old Maw Caldera — and a galleon aground on a volcano is
+   *  not the read. Deterministic outward spiral; the ring centre itself is
+   *  untouched, only the wreck moves. */
+  private findWreckWater(x: number, z: number): { x: number; z: number } {
+    const dry = (px: number, pz: number) => this.state.islands.some((island) =>
+      getIslandSurfaceY(island, px, pz) > -2.2);
+    if (!dry(x, z)) return { x, z };
+    for (let ring = 1; ring <= 10; ring++) {
+      const reach = ring * 26;
+      for (let step = 0; step < 12; step++) {
+        const angle = (step / 12) * Math.PI * 2 + ring * 0.37;
+        const px = clamp(x + Math.cos(angle) * reach, -WORLD.HALF + 60, WORLD.HALF - 60);
+        const pz = clamp(z + Math.sin(angle) * reach, -WORLD.HALF + 60, WORLD.HALF - 60);
+        if (!dry(px, pz)) return { x: px, z: pz };
+      }
+    }
+    return { x, z };
+  }
+
+  private nearestIsland(x: number, z: number): Island | null {
+    let best: Island | null = null;
+    let bestDist = Infinity;
+    for (const island of this.state.islands) {
+      const d = dist2D(x, z, island.position.x, island.position.z);
+      if (d < bestDist) { bestDist = d; best = island; }
+    }
+    return best;
+  }
+
   private handleTradeAction(playerId: string, payload: TradeActionPayload) {
     let session = null;
 
@@ -5972,7 +6418,13 @@ export class Match {
   }
 
   /** Spring waterline planks all round a foundering hull until she reads as a
-   *  wreck (at least 8 open breaches, spread across every face). */
+   *  wreck (at least 8 open breaches, spread across every face).
+   *
+   *  These are stamped with source 'scuttle', NOT 'cannon'. They are pure
+   *  cosmetics on a hull that has ALREADY lost — tagging them as gunnery put
+   *  eight phantom cannon breaches into every audit that reads hole sources
+   *  (combat pacing, bot aggression, weapon tuning) for every ship that ever
+   *  went down, including ones the storm or a reef killed. */
   private riddleWreck(ship: Ship) {
     const stats = SHIP_STATS[ship.type];
     const faces: Array<{ x: number; z: number }> = [
@@ -5984,7 +6436,7 @@ export class Match {
       const point = this.physics.hullFacePoint(
         ship, face, FLOODING.HOLE_BAND_Y.min + (i % 3) * 0.12, stats.length * 0.6,
       );
-      this.physics.openHoleAt(ship, point, 1, 'cannon');
+      this.physics.openHoleAt(ship, point, 1, 'scuttle');
     }
   }
 

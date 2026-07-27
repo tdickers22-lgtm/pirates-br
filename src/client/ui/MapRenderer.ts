@@ -798,6 +798,43 @@ export class MapRenderer {
       }
     }
 
+    // ── THE GILDED WRECK ────────────────────────────────────────────────────
+    // The whole point of the event is that EVERY crew learns about it in the
+    // same second, so her mark is the loudest thing on the chart: a gold cross
+    // in a pulsing double ring, sat on the next ring's centre.
+    const gildedWreck = this.view.state.wreck;
+    if (gildedWreck) {
+      const wx = centerX + gildedWreck.position.x * scale;
+      const wy = centerY + gildedWreck.position.z * scale;
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 340);
+      const r = (fullscreen ? 15 : 9) + pulse * (fullscreen ? 8 : 4.5);
+      ctx.save();
+      ctx.strokeStyle = `rgba(240, 194, 87, ${0.35 + pulse * 0.5})`;
+      ctx.lineWidth = fullscreen ? 3 : 2;
+      ctx.beginPath();
+      ctx.arc(wx, wy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(wx, wy, r * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+      // A wreck mark is a cross, not a dot — it has to read at minimap size.
+      ctx.strokeStyle = '#ffe6a8';
+      ctx.lineWidth = fullscreen ? 3.4 : 2.2;
+      const arm = fullscreen ? 8 : 5;
+      ctx.beginPath();
+      ctx.moveTo(wx - arm, wy - arm); ctx.lineTo(wx + arm, wy + arm);
+      ctx.moveTo(wx + arm, wy - arm); ctx.lineTo(wx - arm, wy + arm);
+      ctx.stroke();
+      if (fullscreen) {
+        ctx.fillStyle = '#f5dfa7';
+        ctx.font = '700 13px Georgia, serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText('THE GILDED WRECK', wx, wy - r - 8);
+      }
+      ctx.restore();
+    }
+
     for (const ship of this.view.state.ships) {
       if (!ship.alive || ship.sinking) continue;
       const isOwn = ship.id === trackedShip?.id;
@@ -814,14 +851,47 @@ export class MapRenderer {
         ctx.stroke();
         ctx.restore();
       }
+      // BOUNTY PING. A crew past 60% of the gold target is the match's prize,
+      // and until now that was invisible: the leader was a number on a
+      // scoreboard nobody could point at. Their hull now wears the same
+      // pulsing ring the game uses to say "that one, over there" about your own
+      // ship — in hunter's amber — on every chart in the fleet.
+      if (ship.bountied) {
+        const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 300 + ship.position.x);
+        const baseR = fullscreen ? 22 : 13;
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 152, 66, ${0.4 + pulse * 0.5})`;
+        ctx.lineWidth = fullscreen ? 2.6 : 1.8;
+        ctx.beginPath();
+        ctx.arc(
+          centerX + ship.position.x * scale,
+          centerY + ship.position.z * scale,
+          baseR + pulse * (fullscreen ? 7 : 4),
+          0, Math.PI * 2,
+        );
+        ctx.stroke();
+        // Crossed-swords tick marks so the ring reads as a HUNT, not a beacon.
+        ctx.strokeStyle = `rgba(255, 205, 130, ${0.5 + pulse * 0.4})`;
+        ctx.lineWidth = fullscreen ? 2 : 1.4;
+        for (let k = 0; k < 4; k += 1) {
+          const a = (k / 4) * Math.PI * 2 + Math.PI * 0.25;
+          const cx0 = centerX + ship.position.x * scale;
+          const cy0 = centerY + ship.position.z * scale;
+          ctx.beginPath();
+          ctx.moveTo(cx0 + Math.cos(a) * (baseR + 2), cy0 + Math.sin(a) * (baseR + 2));
+          ctx.lineTo(cx0 + Math.cos(a) * (baseR + (fullscreen ? 9 : 6)), cy0 + Math.sin(a) * (baseR + (fullscreen ? 9 : 6)));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
       this.drawShipMarker(
         ctx,
         centerX + ship.position.x * scale,
         centerY + ship.position.z * scale,
         ship.rotation,
         fullscreen ? 12 : 7.5,
-        isOwn ? '#7fd4ff' : '#ff8f70',
-        isOwn ? 'rgba(12, 40, 60, 0.62)' : 'rgba(43, 12, 8, 0.55)',
+        ship.bountied ? '#ffb347' : isOwn ? '#7fd4ff' : '#ff8f70',
+        ship.bountied ? 'rgba(70, 30, 4, 0.7)' : isOwn ? 'rgba(12, 40, 60, 0.62)' : 'rgba(43, 12, 8, 0.55)',
       );
     }
 
