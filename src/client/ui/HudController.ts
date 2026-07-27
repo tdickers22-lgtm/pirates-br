@@ -13,6 +13,7 @@ import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from '../rendering/OceanRenderer.js';
 import type { Renderer } from '../rendering/Renderer.js';
 import type { UiRefs } from './UiRefs.js';
+import { BROKER_NAME, itemDisplayName, shipClassName, weaponSlotName } from './DisplayNames.js';
 
 /** Everything the HUD reads or writes on the Game instance. */
 export type HudView = {
@@ -83,6 +84,8 @@ export class HudController {
 
   private pocketStripSignature = '';
   private shipUpgradeSignature = '';
+  /** Last painted hull-panel heading — the class only changes on a new berth. */
+  private shipStatusTitleText = '';
   private shipInventorySignature = '';
   private brProgressSignature = '';
   /** The spawn island must NOT read as a discovery — the first HUD pass only
@@ -354,7 +357,7 @@ export class HudController {
 
     this.view.ui.barrelPanel.style.display = 'block';
 
-    const niceName = (item: string) => item.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    const niceName = (item: string) => itemDisplayName(item);
     const renderRows = (target: HTMLElement, rows: ItemStack[], emptyMsg: string) => {
       if (rows.length === 0) {
         target.innerHTML = `<div class="bp-empty">${emptyMsg}</div>`;
@@ -452,6 +455,14 @@ export class HudController {
       // opens chests, so a panel telling a pirate on a beach to "hold [X] at the
       // capstan" was naming a key that does something else entirely.
       const aboard = player.onShipId === ship.id;
+      // Name the hull class in the panel heading: a Cutter's two guns and a
+      // Man-o'-War's eight are the same three stat rows otherwise, and the
+      // class is the one thing about your ship the HUD never said out loud.
+      const hullTitle = `⚓ ${shipClassName(ship.type)} · Hull`;
+      if (this.shipStatusTitleText !== hullTitle) {
+        this.shipStatusTitleText = hullTitle;
+        this.view.ui.shipStatusTitle.textContent = hullTitle;
+      }
       // The four section bars are gone with the section model. What a captain
       // needs is the count of open planking and the bilge gauge beside it.
       this.view.ui.shipLeaks.textContent = openLeaks > 0
@@ -546,7 +557,7 @@ export class HudController {
     // always-on strips claim the same keys mean two things at once.
     const wheelHeld = this.view.input.isSupplyWheelOpen();
     const stripParts = [
-      `Pocket: ${wheelHeld ? '1 ' : ''}Banana ${pk.pocketBanana}`,
+      `Pocket: ${wheelHeld ? '1 ' : ''}Plantain ${pk.pocketBanana}`,
       `${wheelHeld ? '2 ' : ''}Plank ${pk.pocketWood}`,
       `Ore ${pk.pocketOre ?? 0}`,
       `${wheelHeld ? '3 ' : ''}Coconut ${pk.pocketCoconut}`,
@@ -554,7 +565,7 @@ export class HudController {
       `Tool: ${pk.hasShovel ? 'Shovel' : 'None'}`,
     ];
     if (mappedIsland) stripParts.push(`Chart: ${mappedIsland.name}`);
-    if (closestHoarder && (mappedIsland || pk.carryingChestId)) stripParts.push(`Gold Hoarder: ${closestHoarder.island.name}`);
+    if (closestHoarder && (mappedIsland || pk.carryingChestId)) stripParts.push(`${BROKER_NAME}: ${closestHoarder.island.name}`);
     // ONE compact badge — the streak count and the powers table used to be two
     // separate entries here, and the same table again in the progress feed.
     stripParts.push(powerLine);
@@ -720,7 +731,7 @@ export class HudController {
       this.view.ui.interactPrompt.style.display = 'block';
       this.view.ui.interactPrompt.textContent = '[B] Drop Chest';
       this.view.ui.contextLabel.style.display = 'block';
-      this.view.ui.contextLabel.textContent = 'Carrying treasure · sell at Gold Hoarder or stow on ship';
+      this.view.ui.contextLabel.textContent = `Carrying treasure · sell to the ${BROKER_NAME} or stow on ship`;
     } else {
       this.view.ui.interactPrompt.style.display = 'none';
       // Hidden is not enough: the element KEPT its last text, so anything that
@@ -788,7 +799,7 @@ export class HudController {
     },
     storm: {
       title: 'TAKEN BY THE STORM',
-      cause: 'The tempest caught you outside the ring. The safe circle shrinks all match — watch it on the battle map [M].',
+      cause: 'The tempest caught you outside the ring. The safe circle shrinks all match — watch it on the chart [M].',
       reason: 'Lost to the storm',
       spectate: 'The storm took you outside the ring — there is no respawn from here',
     },
@@ -897,7 +908,7 @@ export class HudController {
       const nameEl = slotEl.querySelector('.wname');
       const ammoEl = slotEl.querySelector('.ammo');
       if (nameEl) {
-        nameEl.textContent = weapon ? WEAPONS[weapon.weaponId].name.replace(' Pistol', '') : 'Empty';
+        nameEl.textContent = weapon ? weaponSlotName(weapon.weaponId) : 'Empty';
       }
       if (ammoEl) {
         ammoEl.textContent = weapon && WEAPONS[weapon.weaponId].ammoMax > 0
@@ -1299,7 +1310,7 @@ export class HudController {
     if (context.chestsInHold > 0 && context.closestHoarder) {
       return `Objective: deliver ${context.chestsInHold} chest${context.chestsInHold === 1 ? '' : 's'} to ${context.closestHoarder.island.name}`;
     }
-    if (context.mappedIsland) return `Objective: dig Gold Hoarder chests on ${context.mappedIsland.name}`;
+    if (context.mappedIsland) return `Objective: dig the ${BROKER_NAME}'s marks on ${context.mappedIsland.name}`;
     if (player.gold >= ECONOMY.GOLD_WIN_TARGET * 0.72) return 'Objective: protect your lead and finish the gold run';
     if (ship && ship.upgrades.length < 2) return 'Objective: claim upgrades, raid ships, and sell treasure';
     return 'Objective: raid ships, sell treasure, and stay ahead of the storm';

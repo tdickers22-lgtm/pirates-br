@@ -112,6 +112,33 @@ cliff edge (high dHi, facing open water). Beat: the light still burns; she doesn
 - `driftwood_log` — bleached snag (all beaches)
 - `grave_marker` — leaning cross/headstone (bone + highland)
 
+## Appendix — Names of the Reach (display layer)
+
+The world had original systems and borrowed vocabulary, so it read as somebody
+else's game before its own ideas landed. These are the words the player sees.
+**They are DISPLAY NAMES ONLY** — every wire id, save key, stat table key and
+test-asserted identifier keeps its original spelling (`sloop`, `eye_of_reach`,
+`banana`, `gold_hoarder`, …). The single place the new nouns live is
+`src/client/ui/DisplayNames.ts`; nothing else should ever hardcode one.
+
+| Shown to the player | Internal id (unchanged) | Where it came from |
+| --- | --- | --- |
+| **The Shattered Reach** / *The Reach* | — | the world's own name, now on the menu, the loading card, the chart header and the start ceremony |
+| **the Black Fin** | — | the brand on the wreckers' crates (§3), the rag on the gibbet (§4), the pennant at Booty Bay (§10) — now named once at the masthead in the start ceremony |
+| **Wreckers' Run** | — | the playlist name on the loading card |
+| **Tallyman** (pl. **Tallymen**) | `gold_hoarder` | the Coinwrights' broker ashore: he weighs the haul, tallies it, pays it. Tally marks are already the Reach's way of counting (Castaway Camp, §8) |
+| **the Coinwrights** | — | the guild behind the scales — the faction the Tallymen answer to |
+| **Cutter** | `sloop` | fast two-hand hull, runs the shoals |
+| **Corsair** | `brigantine` | four-hand raider |
+| **Man-o'-War** | `galleon` | eight-hand line-of-battle hull |
+| **Wrecker's Glass** | `eye_of_reach` | rifled long arm with a salvaged spyglass lashed above the barrel — first built on the Crooked Atoll to read a hull before it struck (§3) |
+| **Squall Pistol** | `flintknock` | half a charge of powder behind a fist-sized ball; it hits like weather and puts a man over the rail |
+| **Plantain** | `banana` | what a period sailor actually called the fruit; keeps the yellow-crescent art honest |
+
+Kept deliberately: **Cutlass**, **Blunderbuss**, **Flintlock Pistol**, **Powder
+Keg**, **kraken**, **mermaid** — genuine period/folklore nouns that belong to
+every pirate story, not to any one of them.
+
 ## Fidelity targets (final pass)
 - Hero story scenes (1×/world): 25k–80k tris, full bevel/AO treatment
 - One-off buildings (tavern/fort/watchtower/shipwreck): 3–6× current density

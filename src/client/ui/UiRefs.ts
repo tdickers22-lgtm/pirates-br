@@ -19,6 +19,8 @@ export type UiRefs = {
   shipLeaks: HTMLDivElement;
   sailStatus: HTMLDivElement;
   shipStatus: HTMLDivElement;
+  /** Hull-panel heading — names the hull CLASS of the ship you are tracking. */
+  shipStatusTitle: HTMLHeadingElement;
   shipUpgrades: HTMLDivElement;
   ammoCurrent: HTMLSpanElement;
   ammoReserve: HTMLSpanElement;
@@ -116,6 +118,7 @@ export function buildUiRefs(): UiRefs {
     shipLeaks: requireElement('ship-leaks'),
     sailStatus: requireElement('sail-status'),
     shipStatus: requireElement('ship-status'),
+    shipStatusTitle: requireElement('ship-status-title'),
     shipUpgrades: requireElement('ship-upgrades'),
     ammoCurrent: requireElement('ammo-current'),
     ammoReserve: requireElement('ammo-reserve'),

@@ -18,6 +18,7 @@
  */
 import * as THREE from 'three';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
+import { BROKER_NAME, BROKER_NAME_PLURAL } from '../ui/DisplayNames.js';
 import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipHole, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
 import { dist2D, getBraceStationLocals, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
 import {
@@ -231,10 +232,10 @@ export class InteractionPrompts {
             ? `[X] Buy Iron Cuirass (${ECONOMY.ARMOR_PRICE}g)`
             : '[X] Get Treasure Map',
         player.carryingChestId
-          ? `Gold Hoarder pays toward ${ECONOMY.GOLD_WIN_TARGET}`
+          ? `The ${BROKER_NAME} pays toward ${ECONOMY.GOLD_WIN_TARGET}`
           : (player.treasureMapIslandId && player.gold >= ECONOMY.ARMOR_PRICE && (player.armor ?? 0) < PLAYER.MAX_ARMOR * 0.5)
             ? `Combat plate — absorbs ${PLAYER.MAX_ARMOR} damage, lost on death`
-            : 'Gold Hoarder chart marks buried treasure',
+            : `The ${BROKER_NAME}'s chart marks buried treasure`,
         'gold_hoarder',
       );
     }
@@ -263,7 +264,7 @@ export class InteractionPrompts {
                 : '[X] Pick Up Chest';
         const label = digging
           ? `Buried treasure · ${Math.round(chest.digProgress * 100)}% dug`
-          : `Base ${chest.value} gold · Gold Hoarder pays more`;
+          : `Base ${chest.value} gold · ${BROKER_NAME_PLURAL} pay more`;
         this.pushInteractionCandidate(candidates, player, chestPos, 5.5, 0.72, prompt, label, 'chest');
       }
     }

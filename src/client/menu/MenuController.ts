@@ -633,7 +633,7 @@ export class MenuController {
     if (payload.inQueue >= payload.needed) {
       this.queueStatusLine.textContent = 'Crew complete — setting sail…';
     } else {
-      this.queueStatusLine.textContent = 'Searching the seas for fellow pirates…';
+      this.queueStatusLine.textContent = 'Searching the Reach for fellow pirates…';
     }
     this.queueDetailLine.textContent = `${payload.inQueue} / ${payload.needed} pirates · ${payload.secondsRemaining}s`;
     const pct = Math.min(100, Math.round((payload.inQueue / payload.needed) * 100));

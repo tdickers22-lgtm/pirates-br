@@ -788,10 +788,12 @@
     /* Weapons */
     #weapon-slots {
       position: static;
-      display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end;
+      /* stretch: a two-line weapon name (the Wrecker's Glass) must grow the
+         whole ROW, not overflow one tile or leave it a different height. */
+      display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: stretch;
     }
     .weapon-slot {
-      width: 58px; height: 58px;
+      width: 58px; min-height: 58px; padding: 3px 2px;
       background: linear-gradient(180deg, rgba(10, 24, 44, 0.78), rgba(4, 12, 24, 0.85));
       border: 1px solid rgba(201, 168, 76, 0.2); border-radius: 8px;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -803,7 +805,7 @@
       background: linear-gradient(180deg, rgba(201, 168, 76, 0.2), rgba(201, 168, 76, 0.06));
       box-shadow: 0 0 12px rgba(201, 168, 76, 0.26), inset 0 1px 0 rgba(240, 221, 178, 0.1);
     }
-    .weapon-slot .wname { color: #c9a84c; font-size: 0.58rem; }
+    .weapon-slot .wname { color: #c9a84c; font-size: 0.58rem; line-height: 1.12; }
     .weapon-slot .ammo { color: #e8d5a3; font-size: 0.72rem; font-weight: bold; font-family: monospace; }
 
     /* Ammo / reload */
@@ -1231,7 +1233,7 @@
     #minimap-head {
       display: flex; align-items: center; justify-content: space-between;
       /* The [L] chip can outgrow the 176px map column. Wrap the CHIPS onto a
-         second line rather than letting "Battle Map" break across two. */
+         second line rather than letting "The Reach" break across two. */
       flex-wrap: wrap; row-gap: 4px;
       padding: 7px 10px; border-radius: 10px;
       background: rgba(4, 14, 28, 0.78);
@@ -1767,7 +1769,7 @@
       }
       .weapon-slot {
         width: 48px;
-        height: 50px;
+        min-height: 50px;
         font-size: 0.46rem;
       }
       .weapon-slot .wname { font-size: 0.48rem; }
@@ -1925,8 +1927,8 @@
   <!-- Loading screen -->
   <div id="loading-screen">
     <h1>PIRATES BR</h1>
-    <div class="subtitle">A pirate battle royale on the high seas</div>
-    <div id="loading-mode">Skeleton Seas</div>
+    <div class="subtitle">A pirate battle royale in the Shattered Reach</div>
+    <div id="loading-mode">Wreckers' Run</div>
     <div id="loading-copy">Loading ship, storm, island loot, crew stores, and cannon supplies.</div>
     <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
     <div id="loading-text">Initializing...</div>
@@ -1935,7 +1937,7 @@
   <!-- Main menu / lobby / queue -->
   <div id="menu-screen">
     <h1>PIRATES BR</h1>
-    <div class="subtitle">A pirate battle royale</div>
+    <div class="subtitle">A pirate battle royale in the Shattered Reach</div>
 
     <!-- Main menu panel -->
     <div class="menu-panel" id="menu-panel-main">
@@ -1993,7 +1995,7 @@
     <!-- Queue panel (public matchmaking) -->
     <div class="menu-panel" id="menu-panel-queue">
       <h2>Hoisting Sails</h2>
-      <div id="queue-status-line">Searching the seas for fellow pirates…</div>
+      <div id="queue-status-line">Searching the Reach for fellow pirates…</div>
       <div id="queue-progress-wrap"><div id="queue-progress-bar"></div></div>
       <!-- Overwritten by MenuController on queue join (it quotes the real
            MATCH_TOTAL_SHIPS target); never hardcode a crew size here. -->
@@ -2010,7 +2012,7 @@
       <h2>How to Play</h2>
       <div id="howto-win">
         <div class="howto-win-title">Two ways to take the seas</div>
-        <div class="howto-win-row"><span class="howto-win-key">💰</span><span>Bank <strong>9,000 gold</strong> — dig treasure, sell it to a Gold Hoarder.</span></div>
+        <div class="howto-win-row"><span class="howto-win-key">💰</span><span>Bank <strong>9,000 gold</strong> — dig treasure, sell it to a Tallyman.</span></div>
         <div class="howto-win-row"><span class="howto-win-key">☠</span><span>Or be the <strong>last crew afloat</strong> when every other hull is down.</span></div>
       </div>
       <div id="howto-controls">Controls load with the game.</div>
@@ -2131,7 +2133,7 @@
     <aside id="hud-right-tactical">
       <div id="minimap-shell">
         <div id="minimap-head">
-          <div id="minimap-title">Battle Map</div>
+          <div id="minimap-title">The Reach</div>
           <!-- The controls legend was reachable only by a key nobody was ever
                told about. It gets a chip beside the map's, in the one header a
                new pirate already reads. -->
@@ -2145,7 +2147,7 @@
       <div id="kill-feed"></div>
       <div id="br-progress-feed">Crew progression —</div>
       <div id="ship-status">
-        <h3>⚓ Ship Hull</h3>
+        <h3 id="ship-status-title">⚓ Ship Hull</h3>
         <!-- Damage is holes in the planking, not four abstract section bars:
              the count of open leaks plus the bilge gauge IS the damage HUD. -->
         <div id="ship-leaks">Hull sound</div>
@@ -2155,7 +2157,7 @@
       <div id="treasure-chart">
         <canvas id="treasure-chart-canvas" width="224" height="144"></canvas>
         <div id="treasure-chart-island">No chart</div>
-        <div id="treasure-chart-route">Talk to a Gold Hoarder</div>
+        <div id="treasure-chart-route">Talk to a Tallyman</div>
       </div>
       <div id="pocket-wheel">
         <div class="pw-hint">Hold [I] — supply wheel · click a tool to equip, a supply to use · [Q] quest maps</div>
@@ -2182,7 +2184,7 @@
           <text class="wheel-label" x="78" y="25.3">PLANKS</text>
           <text class="wheel-icon" x="31.7" y="51.7">🍌</text>
           <text class="wheel-count" data-wheel-count="4" x="21.2" y="31.1">0</text>
-          <text class="wheel-label" x="48.2" y="66.3">BANANA</text>
+          <text class="wheel-label" x="48.2" y="66.3">PLANTAIN</text>
           <text class="wheel-icon" x="0" y="62">🥥</text>
           <text class="wheel-count" data-wheel-count="5" x="0" y="38">0</text>
           <text class="wheel-label" x="0" y="82">COCONUT</text>
@@ -2268,7 +2270,7 @@
             <div class="ship-inventory-item"><span class="ship-inventory-icon">●</span><span class="ship-inventory-label">Cannonballs</span><span class="ship-inventory-qty" id="inv-cannonball">0</span></div>
             <div class="ship-inventory-item"><span class="ship-inventory-icon">🔥</span><span class="ship-inventory-label">Firebombs</span><span class="ship-inventory-qty" id="inv-firebomb">0</span></div>
             <div class="ship-inventory-item"><span class="ship-inventory-icon">⛓</span><span class="ship-inventory-label">Chainshot</span><span class="ship-inventory-qty" id="inv-chainshot">0</span></div>
-            <div class="ship-inventory-item"><span class="ship-inventory-icon">🍌</span><span class="ship-inventory-label">Bananas</span><span class="ship-inventory-qty" id="inv-banana">0</span></div>
+            <div class="ship-inventory-item"><span class="ship-inventory-icon">🍌</span><span class="ship-inventory-label">Plantains</span><span class="ship-inventory-qty" id="inv-banana">0</span></div>
           </div>
         </div>
       </div>
@@ -2280,12 +2282,12 @@
             <div style="font-size:0.55rem;color:#8091a5">[ 1 ]</div>
           </div>
           <div class="weapon-slot" id="slot-1">
-            <div class="wname">Sniper Rifle</div>
+            <div class="wname">Wrecker's Glass</div>
             <div class="ammo">1/5</div>
             <div style="font-size:0.55rem;color:#8091a5">[ 2 ]</div>
           </div>
           <div class="weapon-slot" id="slot-2">
-            <div class="wname">Flintknock</div>
+            <div class="wname">Squall</div>
             <div class="ammo">1/5</div>
             <div style="font-size:0.55rem;color:#8091a5">[ 3 ]</div>
           </div>
@@ -2317,7 +2319,7 @@
         <!-- .legend-win is stripped from the menu's copy: How to Play states the
              win condition in its own banner and would say it twice. -->
         <span class="legend-win"><strong style="color:#f0dda9;">To win:</strong> bank <strong>9,000 gold</strong> — or be the <strong>last crew afloat</strong>. Either one takes the seas.
-        <br>Gold comes from treasure: dig chests with the shovel, carry them to a Gold Hoarder, and sell.
+        <br>Gold comes from treasure: dig chests with the shovel, carry them to a Tallyman, and sell.
         <br>
         <br></span>WASD · Move &nbsp;|&nbsp; SPACE · Jump / Dive &nbsp;|&nbsp; X · Interact — walk up and look at a thing, one prompt shows
         <br>Look for the gold station tags aboard: ⚓ Capstan at the bow · Hold X raises the anchor
@@ -2347,14 +2349,14 @@
       <div id="ms-island"></div>
       <div id="ms-count"></div>
       <div id="ms-banner">Set Sail!</div>
-      <div id="ms-hint">Helm locked — the horn sets you loose</div>
+      <div id="ms-hint">Helm locked — the horn looses you on the Shattered Reach</div>
     </div>
   </div>
 
   <div id="map-overlay">
     <div id="map-panel">
       <div id="map-meta">
-        <div id="map-title">Battle Map</div>
+        <div id="map-title">The Shattered Reach</div>
         <div id="map-subtitle">M or Esc to close</div>
       </div>
       <canvas id="map-canvas" width="1024" height="1024"></canvas>

@@ -28,6 +28,7 @@ import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
 import { assets, type AssetName } from '../assets/AssetLibrary.js';
 import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
+import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME_MID, weaponDisplayName } from '../ui/DisplayNames.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { HudController, type HudView } from '../ui/HudController.js';
@@ -65,7 +66,7 @@ const DROPPED_WEAPON_LIFETIME = 6;
 const INTERACT_INTENT_NOUN: Record<string, string> = {
   barrel: 'that barrel', chest: 'that chest', board: 'the ladder', dock: 'the dock',
   mermaid: 'the mermaid', keg_diffuse: 'that keg', upgrade: 'the shipwright',
-  gold_hoarder: 'the Gold Hoarder', stow_chest: 'the hold', helm: 'the wheel',
+  gold_hoarder: `the ${BROKER_NAME}`, stow_chest: 'the hold', helm: 'the wheel',
   sails: 'the halyard', brace: 'the brace', crow: 'the mast ladder', anchor: 'the capstan',
   repair: 'that breach', bail: 'the bilge', revive: 'your crewmate', cannon: 'that cannon',
   ammo: 'the ammo chest',
@@ -547,7 +548,7 @@ export class Game {
     return this.anim.getCutlassSwingProgress(player);
   }
 
-  /** Minimap / battle map / treasure chart drawing (see ui/MapRenderer.ts). */
+  /** Minimap / fullscreen chart / treasure chart drawing (see ui/MapRenderer.ts). */
   private readonly map = new MapRenderer(this.createMapView());
 
   private createMapView(): MapView {
@@ -694,7 +695,7 @@ export class Game {
     await this.yieldForLoadingPaint();
 
     this.shipRenderer.init(this.renderer.scene, this.renderer.getQuality());
-    this.setLoading(62, 'Rigging the brigantine...');
+    this.setLoading(62, `Rigging the ${SHIP_CLASS_NAMES.brigantine}...`);
     await this.yieldForLoadingPaint();
 
     this.combatFx.init(this.renderer.scene);
@@ -848,7 +849,7 @@ export class Game {
     this.ui.matchStartIsland.textContent = 'Crew Found';
     this.ui.matchStartCount.textContent = '';
     this.ui.matchStartCount.classList.remove('tick');
-    this.ui.matchStartHint.textContent = 'Boarding your ship…';
+    this.ui.matchStartHint.textContent = `Boarding your ship — ${FLEET_PENNANT} at the masthead`;
     this.showStartSequence();
   }
 
@@ -916,7 +917,7 @@ export class Game {
       this.startSeqLastBacklog = backlog;
       this.ui.matchStartHint.textContent = backlog > 0
         ? `Charting the isles… ${backlog} to go`
-        : 'Helm locked — the horn sets you loose';
+        : `Helm locked — the horn looses you on ${WORLD_NAME_MID}`;
     }
     const player = this.getLocalPlayer();
     const island = player ? this.getNearestIsland(player.position.x, player.position.z) : null;
@@ -1755,12 +1756,12 @@ export class Game {
     this.network.onChestOpened = (payload) => {
       const event = payload as { action?: string; value?: number; loot?: Array<{ item: string; qty: number }> };
       if (event.action === 'pickup') {
-        this.pushFeed(`Chest taken: base ${event.value ?? 0} gold, Hoarders pay more.`, '#d9c17e');
+        this.pushFeed(`Chest taken: base ${event.value ?? 0} gold, Tallymen pay more.`, '#d9c17e');
         // The carryingChestId edge-detector also fires for the local player; this covers other crew.
         return;
       }
       if (event.action === 'stow') {
-        this.pushFeed(`Chest stowed aboard: base ${event.value ?? 0} gold before Hoarder payout.`, '#d9c17e');
+        this.pushFeed(`Chest stowed aboard: base ${event.value ?? 0} gold before Tallyman payout.`, '#d9c17e');
         return;
       }
       if (event.action === 'drop') {
@@ -1912,7 +1913,7 @@ export class Game {
     this.network.onTreasureMap = (payload) => {
       const event = payload as { islandName?: string; chestCount?: number };
       this.pushFeed(
-        `Gold Hoarder chart: ${event.islandName ?? 'unknown island'} (${event.chestCount ?? 0} X marks).`,
+        `Tallyman's chart: ${event.islandName ?? 'unknown island'} (${event.chestCount ?? 0} X marks).`,
         '#d9c17e',
       );
       if (this.map.mapOpen) this.map.drawMaps();
@@ -2020,7 +2021,7 @@ export class Game {
       this.pushFeed(`Harvested ${cut} ×${payload.meat}.`, '#d7b48a');
     }
     const wid = payload.weaponId;
-    const weaponLabel = wid && wid in WEAPONS ? WEAPONS[wid as WeaponId].name : undefined;
+    const weaponLabel = wid && wid in WEAPONS ? weaponDisplayName(wid) : undefined;
     if (payload.position) {
       this.spawnFloatingDamageIndicator(String(damage), payload.position, {
         headshot: !!payload.headshot,
@@ -2042,7 +2043,7 @@ export class Game {
     const damage = Math.max(1, Math.round(payload.damage ?? 0));
     const wid = payload.weaponId;
     const weaponLabel = wid && wid in WEAPONS
-      ? WEAPONS[wid as WeaponId].name
+      ? weaponDisplayName(wid)
       : wid === 'powder_keg'
         ? 'Powder Keg'
         : 'attack';
@@ -4804,7 +4805,7 @@ export class Game {
       { item: 'wood_plank', qty: Math.min(2, this.getInventoryQty(ship, 'wood_plank')), label: '2 Planks' },
       { item: 'firebomb_ball', qty: Math.min(1, this.getInventoryQty(ship, 'firebomb_ball')), label: '1 Firebomb' },
       { item: 'chainshot', qty: Math.min(1, this.getInventoryQty(ship, 'chainshot')), label: '1 Chainshot' },
-      { item: 'banana', qty: Math.min(1, this.getInventoryQty(ship, 'banana')), label: '1 Banana' },
+      { item: 'banana', qty: Math.min(1, this.getInventoryQty(ship, 'banana')), label: '1 Plantain' },
     ].filter((option) => option.qty > 0);
 
     this.ui.yourTradeItems.innerHTML = '';

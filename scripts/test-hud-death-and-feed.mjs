@@ -143,7 +143,7 @@ const feed = await page.evaluate(async () => {
   const g = window.__piratesBR;
   const el = document.getElementById('kill-feed');
   g.hud.resetForMatch();
-  const msg = 'Chest stowed aboard: base 690 gold before Hoarder payout.';
+  const msg = 'Chest stowed aboard: base 690 gold before Tallyman payout.';
   for (let i = 0; i < 5; i++) g.hud.pushFeed(msg, '#d9c17e');
   await new Promise((r) => requestAnimationFrame(r));
   const coalescedRows = el.children.length;

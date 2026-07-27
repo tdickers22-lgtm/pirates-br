@@ -1,8 +1,8 @@
 /**
- * Draws every chart surface: the corner minimap, the fullscreen battle map, the
- * per-island treasure chart and the map-selection wheel. Owns the map's own UI
- * state (open flag, zoom, cached island bitmaps) and reads the world through a
- * narrow `MapView`.
+ * Draws every chart surface: the corner minimap, the fullscreen chart of the
+ * Shattered Reach, the per-island treasure chart and the map-selection wheel.
+ * Owns the map's own UI state (open flag, zoom, cached island bitmaps) and
+ * reads the world through a narrow `MapView`.
  */
 import * as THREE from 'three';
 import { WORLD } from '../../shared/constants/index.js';
@@ -12,6 +12,7 @@ import { BIOME_PALETTES } from '../../shared/props.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { Renderer } from '../rendering/Renderer.js';
 import type { UiRefs } from './UiRefs.js';
+import { BROKER_NAME } from './DisplayNames.js';
 
 /** A rasterized island land-shape, halo baked in, ready to stamp on a chart. */
 type ChartBitmap = {
@@ -236,7 +237,7 @@ export class MapRenderer {
     if (maps.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'mw-empty';
-      empty.textContent = 'No charts held — visit a Gold Hoarder for a treasure map.';
+      empty.textContent = `No charts held — visit a ${BROKER_NAME} for a treasure map.`;
       list.appendChild(empty);
       return;
     }
@@ -281,11 +282,11 @@ export class MapRenderer {
     this.view.ui.treasureChart.classList.add('visible');
     const treasureMarks = mappedIsland ? this.getTreasureChartChests(chartIsland) : [];
     const routeText = player.carryingChestId
-      ? `Return chest to Gold Hoarder at ${closestHoarder?.island.name ?? chartIsland.name}`
+      ? `Return chest to the ${BROKER_NAME} at ${closestHoarder?.island.name ?? chartIsland.name}`
       : treasureMarks.length > 0
         ? `${treasureMarks.length} buried X mark${treasureMarks.length === 1 ? '' : 's'} | shovel in pocket`
-        : `No buried marks left | return to ${closestHoarder?.island.name ?? 'Gold Hoarder'}`;
-    const islandText = mappedIsland ? `Gold Hoarder chart: ${chartIsland.name}` : 'Gold Hoarder return';
+        : `No buried marks left | return to ${closestHoarder?.island.name ?? BROKER_NAME}`;
+    const islandText = mappedIsland ? `${BROKER_NAME}'s chart: ${chartIsland.name}` : `${BROKER_NAME} return`;
     if (this.view.ui.treasureChartIsland.textContent !== islandText) this.view.ui.treasureChartIsland.textContent = islandText;
     if (this.view.ui.treasureChartRoute.textContent !== routeText) this.view.ui.treasureChartRoute.textContent = routeText;
 
@@ -332,7 +333,7 @@ export class MapRenderer {
     const cx = width * 0.5;
     const cy = height * 0.53;
     // Scale off the BITMAP's extent, not island.radius: the same land raster the
-    // battle map stamps, so the hoarder's chart and the main map agree on what
+    // chart stamps, so the Tallyman's chart and the main map agree on what
     // this isle actually looks like (bays open, islets separate).
     const mapScale = Math.min(width, height) * 0.42 / chartBitmap.extent;
     const toMap = (x: number, z: number) => ({
@@ -618,9 +619,9 @@ export class MapRenderer {
     ctx.stroke();
     ctx.restore();
 
-    // Storm countdown chip — minimap only. On the fullscreen map the "BATTLE MAP"
-    // HTML title sits in this same corner and the countdown is already the panel
-    // subtitle, so drawing the chip here just smeared over the title.
+    // Storm countdown chip — minimap only. On the fullscreen map the HTML title
+    // sits in this same corner and the countdown is already the panel subtitle,
+    // so drawing the chip here just smeared over the title.
     if (!fullscreen) {
       ctx.save();
       ctx.fillStyle = 'rgba(5, 14, 28, 0.68)';
@@ -748,7 +749,7 @@ export class MapRenderer {
       ctx.font = '600 12px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
-      ctx.fillText(`Gold Hoarder - ${closestHoarder.island.name}`, hx + 11, hy - 8);
+      ctx.fillText(`${BROKER_NAME} — ${closestHoarder.island.name}`, hx + 11, hy - 8);
       ctx.restore();
     }
 
@@ -772,7 +773,7 @@ export class MapRenderer {
         ctx.fillText(chart.name, ix + 8, iy + 16);
         ctx.fillStyle = 'rgba(200, 190, 168, 0.72)';
         ctx.font = '9px Georgia, serif';
-        ctx.fillText(hasGoldMap ? 'Gold Hoarder chart' : 'No treasure chart yet', ix + 8, iy + 30);
+        ctx.fillText(hasGoldMap ? `${BROKER_NAME}'s chart` : 'No treasure chart yet', ix + 8, iy + 30);
         // The SAME land bitmap the main chart draws — the inset used to invent a
         // generic ellipse, which contradicted the honest shape three inches away.
         const cx = ix + inset * 0.5;
