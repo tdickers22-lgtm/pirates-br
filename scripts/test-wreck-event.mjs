@@ -131,13 +131,26 @@ console.log('\nHer cargo:');
   const chests = wreck.chestIds.map((id) => host.chests.find((c) => c.id === id)).filter(Boolean);
   const barrels = wreck.barrelIds.map((id) => host.barrels.find((b) => b.id === id)).filter(Boolean);
 
-  expect(`${WRECK_EVENT.CHESTS} chests are aboard and reachable`,
-    chests.length === WRECK_EVENT.CHESTS, `${chests.length}`);
+  // THE PRIZE. Her contract changed when the pacing instrumentation showed the
+  // fleet converging on her and leaving without a fight: three equal chests
+  // split nine crews into three winners and six shrugs, and nobody contests a
+  // buffet. She now carries her ordinary chests PLUS one indivisible strongbox
+  // worth more than all of them, and it is the first id she offers.
+  const strongbox = chests.find((c) => c.id === WRECK_EVENT.STRONGBOX_ID);
+  const plain = chests.filter((c) => c.id !== WRECK_EVENT.STRONGBOX_ID);
+  expect(`${WRECK_EVENT.CHESTS} chests and the Gilded Strongbox are aboard and reachable`,
+    chests.length === WRECK_EVENT.CHESTS + 1 && !!strongbox, `${chests.length}`);
+  expect('the strongbox is the first thing she offers — the prize, not a prize',
+    wreck.chestIds[0] === WRECK_EVENT.STRONGBOX_ID, wreck.chestIds.join(','));
+  expect('and it is worth more than every other chest on her put together',
+    !!strongbox && strongbox.value === WRECK_EVENT.STRONGBOX_VALUE
+      && strongbox.value > plain.reduce((sum, c) => sum + c.value, 0),
+    `${strongbox?.value} vs ${plain.reduce((sum, c) => sum + c.value, 0)}`);
   expect(`${WRECK_EVENT.BARRELS} supply barrels are aboard`,
     barrels.length === WRECK_EVENT.BARRELS, `${barrels.length}`);
-  expect('her chests are worth banking (richer than an island chest)',
-    chests.every((c) => c.value >= WRECK_EVENT.CHEST_VALUE_MIN && c.value <= WRECK_EVENT.CHEST_VALUE_MAX),
-    chests.map((c) => c.value).join(','));
+  expect('her ordinary chests are worth banking (richer than an island chest)',
+    plain.every((c) => c.value >= WRECK_EVENT.CHEST_VALUE_MIN && c.value <= WRECK_EVENT.CHEST_VALUE_MAX),
+    plain.map((c) => c.value).join(','));
   expect('her chests are FLOATING, not buried — you swim them off her',
     chests.every((c) => c.floating && !c.buried && c.digProgress >= 1));
   expect('her cargo lies ON her, not scattered across the sea',
@@ -289,6 +302,55 @@ console.log('\nCrews converge:');
     `${before.toFixed(0)} → ${after.toFixed(0)}`);
   expect('at least one crew comes inside boarding water of her', closest < 220,
     `closest approach ${closest.toFixed(0)}m over ${SAIL}s`);
+  match.stop();
+}
+
+// ══ 5b. …and CONVERT: her deck is stripped and the prize is hunted ═════════
+//
+// Converging was never the problem. Six instrumented matches had crews closing
+// from 600 m to a 390 m mean with a 26-96 m closest approach in 6/6 — and then
+// looting nothing (four chests still on her deck at every storm claim), fighting
+// nobody, and drifting off. An event that only gathers people is scenery. This
+// pins the two links that turn the gathering into a fight: bot crews take her
+// loot, and the hull that ends up with the strongbox is cried and hunted.
+console.log('\nCrews convert:');
+{
+  const match = makeMatch('wreck-convert');
+  run(match, 25);
+  const wreck = match.forceRaiseGildedWreck();
+  const host = match.state.islands.find((island) => island.id === wreck.hostIslandId);
+
+  let everTaken = 0;
+  let prizeHull = null;
+  let huntersOnPrize = 0;
+  const SAIL = Math.min(150, WRECK_EVENT.LOOT_SECONDS - 20);
+  for (let i = 0, steps = Math.ceil(SAIL / DT); i < steps; i++) {
+    match.tick();
+    if (i % 25) continue;
+    const held = wreck.chestIds.filter((id) => {
+      const c = host.chests.find((ch) => ch.id === id);
+      return !!c && (c.carriedByPlayerId || c.storedOnShipId);
+    }).length;
+    if (held > everTaken) everTaken = held;
+    const box = host.chests.find((c) => c.id === WRECK_EVENT.STRONGBOX_ID);
+    const holderShipId = box?.storedOnShipId
+      ?? (box?.carriedByPlayerId
+        ? match.state.players.find((p) => p.id === box.carriedByPlayerId)?.shipId
+        : null);
+    if (!holderShipId) continue;
+    prizeHull = match.state.ships.find((s) => s.id === holderShipId) ?? prizeHull;
+    let hunters = 0;
+    for (const bot of match.bots.bots.values()) {
+      if (bot.shipId !== holderShipId && bot.behavior === 'engage' && bot.targetShipId === holderShipId) hunters += 1;
+    }
+    if (hunters > huntersOnPrize) huntersOnPrize = hunters;
+  }
+  console.log(`  chests off her: ${everTaken}  ·  hunters on the prize: ${huntersOnPrize}`);
+  expect('bot crews actually STRIP her — the loot moves', everTaken > 0, `${everTaken} taken`);
+  expect('and the crew holding the strongbox is cried on every chart',
+    !prizeHull || prizeHull.bountied === true, `bountied=${prizeHull?.bountied}`);
+  expect('the prize is hunted — a carried strongbox drags the fight with it',
+    !prizeHull || huntersOnPrize > 0, `${huntersOnPrize} hunters`);
   match.stop();
 }
 

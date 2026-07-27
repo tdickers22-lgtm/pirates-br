@@ -339,6 +339,9 @@ export class Match {
   private bountiedShipIds = new Set<string>();
   /** Storm phase the standing bounties were last re-cried at. */
   private bountyCriedPhase = -1;
+  /** Hull currently holding the Gilded Strongbox — tracked only so the cry goes
+   *  up on the tick it changes hands, and not on every tick after. */
+  private prizeShipId: string | null = null;
 
   /** Called once when the match definitively ends (winner found, last ship, or abandoned). */
   onMatchEnd: ((result: MatchEndResult) => void) | null = null;
@@ -3218,7 +3221,16 @@ export class Match {
         continue;
       }
       // Station crew keep fighting/steering — they can't bail or patch, same as humans.
-      if (player.atCannon || player.atHelm || player.atCrowNest) {
+      //
+      // "At a station" has to include A CREW IN A GUNFIGHT. BotSystem raises
+      // atCannon for the single tick it fires and drops it again, so a bot
+      // trading broadsides read as an idle deckhand and worked the pumps and
+      // the planks between every shot — while the human sailing alone has to
+      // leave the gun to do either. Measured over the wreck at the old rule:
+      // eight crews engaged, 25 open breaches on the water, three minutes, no
+      // sinkings. One crew, one pair of hands, both sides.
+      if (player.atCannon || player.atHelm || player.atCrowNest
+        || this.bots.isAtGuns(player.id, this.t)) {
         if (player.bailing) player.bailing = false;
         continue;
       }
@@ -5318,6 +5330,12 @@ export class Match {
     const bountyAt = bountyThresholdGold();
     const clearAt = bountyClearGold();
     const raised: Ship[] = [];
+    // THE STRONGBOX IS A BOUNTY YOU CAN CARRY. A gold bounty is earned slowly
+    // and shows on the chart; the prize off the Gilded Wreck does the same job
+    // the instant it comes over a rail, which is the whole point of putting one
+    // indivisible thing aboard her. Kept apart from the gold set so it never
+    // touches that set's hysteresis — it is a possession, not a threshold.
+    const prizeShipId = this.strongboxHolderShipId();
 
     for (const ship of this.state.ships) {
       if (!ship.alive) {
@@ -5327,7 +5345,13 @@ export class Match {
         continue;
       }
       const gold = this.crewGold(ship);
-      ship.cargoGold = cargoGoldFromBanked(gold);
+      // THE PRIZE IS BALLAST. Two thousand six hundred in gold plate is not
+      // pocket coin — it rides in the hold, it shows in the hold, and it costs
+      // her the knots the ballast curve says it costs. That is the counterplay
+      // that makes the prize hunt a CHASE somebody can win instead of a stern
+      // parade: the crew that has it is the crew that can be run down.
+      ship.cargoGold = cargoGoldFromBanked(gold)
+        + (ship.id === prizeShipId ? WRECK_EVENT.STRONGBOX_VALUE : 0);
 
       const wasBountied = this.bountiedShipIds.has(ship.id);
       // Hysteresis: cross 60% to earn the bounty, fall under 55% to shake it.
@@ -5340,12 +5364,28 @@ export class Match {
       }
       // Only ever TRUE on the wire — an absent field reads as no bounty, which
       // keeps the flag free on the nine hulls that don't have one.
-      ship.bountied = bountied ? true : undefined;
+      const holdsPrize = ship.id === prizeShipId && !ship.sinking;
+      ship.bountied = (bountied || holdsPrize) ? true : undefined;
     }
 
     // Bots hunt the money. The set is handed over every tick (like bot-peace)
     // so a bounty that lifts stops pulling hunters the same tick it clears.
     this.bots.setBountiedShips(this.bountiedShipIds);
+    // The prize is handed over separately because it hunts HARDER than gold: a
+    // strongbox holder is fair game to any crew inside PRIZE_HUNT_RANGE whether
+    // or not the phase seek radius reaches her and whether or not the hunter cap
+    // is full. Nothing else in the match lifts both rails at once.
+    this.bots.setPrizeShips(prizeShipId ? [prizeShipId] : []);
+    if (prizeShipId !== this.prizeShipId) {
+      this.prizeShipId = prizeShipId;
+      const prize = prizeShipId ? this.getShip(prizeShipId) : null;
+      // Same cry as a gold bounty: one horn, one line, every chart. She is the
+      // treasure now, and the whole lobby is told so. The strongbox rides the
+      // cry as gold she is CARRYING — a crew with an empty purse and the prize
+      // in her hold is not "banked 0g", she is worth STRONGBOX_VALUE to whoever
+      // takes her, and that is the number the fleet needs to hear.
+      if (prize && prize.alive) this.cryBounty(prize, false, WRECK_EVENT.STRONGBOX_VALUE);
+    }
 
     for (const ship of raised) this.cryBounty(ship, false);
 
@@ -5362,7 +5402,7 @@ export class Match {
   }
 
   /** One horn-and-feed call across the whole map: THAT hull is the treasure. */
-  private cryBounty(ship: Ship, renewed: boolean) {
+  private cryBounty(ship: Ship, renewed: boolean, carriedBonus = 0) {
     const owner = this.state.players.find((p) => p.id === ship.ownerId);
     this.broadcast({
       type: 'bounty_raised',
@@ -5370,7 +5410,7 @@ export class Match {
       payload: {
         shipId: ship.id,
         crewName: owner ? `${owner.name}'s crew` : 'A crew',
-        gold: this.crewGold(ship),
+        gold: this.crewGold(ship) + carriedBonus,
         targetGold: ECONOMY.GOLD_WIN_TARGET,
         renewed,
       },
@@ -5784,6 +5824,16 @@ export class Match {
     for (const player of this.state.players) {
       if (!player.isBot || player.shipId === null || player.state === 'eliminated' || player.state === 'downed') continue;
 
+      // A CREW DOES NOT KEEP HOISTING ITS OWN TREASURE BACK OUT OF THE HOLD.
+      // Chest proximity (PhysicsSystem) does not know about stowage, so a bot
+      // standing over its own hold saw the chest it had just stowed, took it,
+      // stowed it again, and did that every tick — measured live on the wreck as
+      // the same "Chest stowed aboard: base 2600 gold" feed line ×596. Harmless
+      // to the sim, ruinous to the feed, and it pinned the crew to the spot.
+      const ownStowed = player.nearChestId
+        && this.getChestById(player.nearChestId)?.chest.storedOnShipId === player.shipId;
+      if (ownStowed) player.nearChestId = null;
+
       if (player.nearChestId && !player.carryingChestId) {
         for (const island of this.state.islands) {
           const chest = island.chests.find((c) => c.id === player.nearChestId);
@@ -6188,6 +6238,11 @@ export class Match {
     const { chests, barrels } = this.mapGen.buildWreckLoot(
       (this.tickCount * 2654435761) >>> 0, { x: site.x, y: 0, z: site.z }, rotation,
     );
+    // THE PRIZE. Her ordinary chests are a buffet; this is the thing only one
+    // crew can walk away with, and it is what turns "we all arrived" into "we
+    // fought". Amidships on her canted deck, where you have to come aboard for
+    // it rather than swim past and scoop it off the scatter.
+    chests.unshift(this.buildGildedStrongbox(site, rotation));
     for (const chest of chests) host.chests.push(chest);
     for (const barrel of barrels) host.barrels.push(barrel);
 
@@ -6206,14 +6261,71 @@ export class Match {
     this.worldResyncPending = true;
     this.syncTreasureChests();
 
-    // Bots inside LURE_RADIUS break off patrol and converge on her.
-    this.bots.setEventLure({ x: site.x, z: site.z, radius: WRECK_EVENT.LURE_RADIUS });
+    // Bots inside LURE_RADIUS break off patrol and converge on her — and, once
+    // they are alongside, heave to and send a boarding party over the side for
+    // her chests. A prize nobody can pick up is scenery: the plunder list is
+    // what makes the strongbox actually MOVE, which is what makes it contested.
+    this.bots.setEventLure({
+      x: site.x, z: site.z,
+      radius: WRECK_EVENT.LURE_RADIUS,
+      hostIslandId: host.id,
+      chestIds: [...wreck.chestIds],
+    });
 
     this.broadcast({
       type: 'wreck_event',
       ts: Date.now(),
       payload: { phase: 'risen', position: { ...wreck.position }, duration: WRECK_EVENT.LOOT_SECONDS },
     });
+  }
+
+  /** The Gilded Strongbox: one chest, amidships, worth more than every other
+   *  thing aboard her combined. Only one crew leaves with it. */
+  private buildGildedStrongbox(site: { x: number; z: number }, rotation: number): TreasureChest {
+    // Just abaft the mainmast on her canted deck — inside the hull outline, so
+    // you come ABOARD for it rather than scooping it off the scatter in passing.
+    const fwd = { x: Math.sin(rotation), z: Math.cos(rotation) };
+    const right = { x: Math.cos(rotation), z: -Math.sin(rotation) };
+    const along = -WRECK_EVENT.HULL_HALF_LENGTH * 0.16;
+    const across = WRECK_EVENT.HULL_HALF_BEAM * 0.22;
+    return {
+      id: WRECK_EVENT.STRONGBOX_ID,
+      position: {
+        x: site.x + fwd.x * along + right.x * across,
+        y: 0.32,
+        z: site.z + fwd.z * along + right.z * across,
+      },
+      opened: false,
+      value: WRECK_EVENT.STRONGBOX_VALUE,
+      carriedByPlayerId: null,
+      storedOnShipId: null,
+      floating: true,
+      buried: false,
+      digProgress: 1,
+      mapOffsetX: 0,
+      mapOffsetZ: 0,
+      // Her captain's own store: shot for the guns and powder for the kegs.
+      loot: [
+        { item: 'cannonball', qty: 8 },
+        { item: 'firebomb_ball', qty: 3 },
+        { item: 'gold', qty: 180 },
+      ],
+    };
+  }
+
+  /** Which hull is carrying the Gilded Strongbox right now — stowed in her hold
+   *  or in a boarding party's arms on the way back to her. Null when it is still
+   *  on the wreck, in the water, already sold, or gone with the storm. */
+  private strongboxHolderShipId(): string | null {
+    const found = this.getChestById(WRECK_EVENT.STRONGBOX_ID);
+    if (!found || found.chest.opened) return null;
+    const chest = found.chest;
+    if (chest.storedOnShipId) return chest.storedOnShipId;
+    if (chest.carriedByPlayerId) {
+      const carrier = this.getPlayer(chest.carriedByPlayerId);
+      if (carrier && carrier.state !== 'eliminated' && carrier.shipId) return carrier.shipId;
+    }
+    return null;
   }
 
   private claimGildedWreck(wreck: WreckEvent) {

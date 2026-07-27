@@ -19,7 +19,10 @@
  *
  * BUDGET DISCIPLINE (test-perf-budget: 2900 dock / 2250 open sea):
  *  · every site merges to ONE hull mesh + ONE gull mesh, from shared materials;
- *  · the wreck is 4 draws (hull, rig, beacon shaft, beacon halo);
+ *  · the wreck is 7 draws — hull, gilding, rig, sail, beacon shaft, halo, gulls
+ *    — with her three canvas panels merged into the one sail mesh and every
+ *    static child frozen out of the per-frame world-matrix walk;
+ *  · a sea POI is 2 — one merged timber mesh and its gulls;
  *  · no PointLights at all — the glow is emissive plus additive sprites, so this
  *    never competes with the night lantern budget;
  *  · everything static is frozen out of the per-frame world-matrix walk.
@@ -388,15 +391,21 @@ export class SeaEventRenderer {
       for (const spar of this.driftSpars(3, poi.radius * 0.8)) timber.push(spar);
     }
 
-    const timberGeo = mergeGeometries(timber, false);
+    // ONE MESH PER SITE. The hulks and their standing spars are the same
+    // weathered timber on the same material, so splitting them across two
+    // meshes bought nothing but a second draw call at every POI — merge the lot
+    // and the site costs exactly one draw plus its birds.
+    const timberGeo = mergeGeometries(timber.concat(rig), false);
     if (timberGeo) {
       const mesh = new THREE.Mesh(timberGeo, this.getTimber());
       mesh.castShadow = false;
       mesh.receiveShadow = false;
+      // Nothing inside a site ever moves relative to the site itself; only the
+      // root bobs. Freeze the children out of the per-frame matrix walk.
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
       root.add(mesh);
     }
-    const rigGeo = rig.length > 0 ? mergeGeometries(rig, false) : null;
-    if (rigGeo) root.add(new THREE.Mesh(rigGeo, this.getTimber()));
 
     // THE SIGNPOST. Gulls turning over one point of empty water is what makes a
     // micro-POI findable at all — the flotsam under them is 5 m across.
@@ -508,6 +517,9 @@ export class SeaEventRenderer {
     hullMaterial.userData.ghostRim = 0.09;
     ghostMaterials.push(hullMaterial);
     const hullMesh = new THREE.Mesh(hullGeo, hullMaterial);
+    // Her carcass never moves relative to her: the roll lives on the root.
+    hullMesh.matrixAutoUpdate = false;
+    hullMesh.updateMatrix();
     root.add(hullMesh);
 
     // ── Gilding: the reason anyone crosses open water for her ──
@@ -533,6 +545,8 @@ export class SeaEventRenderer {
       giltParts.push(boss);
     }
     const giltMesh = new THREE.Mesh(mergeGeometries(giltParts, false)!, giltMaterial);
+    giltMesh.matrixAutoUpdate = false;
+    giltMesh.updateMatrix();
     root.add(giltMesh);
 
     // ── Rigging: the canted mast that reads before anything else ──
@@ -561,6 +575,8 @@ export class SeaEventRenderer {
       rigParts.push(yard);
     }
     const rigMesh = new THREE.Mesh(mergeGeometries(rigParts, false)!, rigMaterial);
+    rigMesh.matrixAutoUpdate = false;
+    rigMesh.updateMatrix();
     root.add(rigMesh);
 
     // Torn mainsail still bent to the lower yard — the ghost part of the ghost
@@ -575,17 +591,23 @@ export class SeaEventRenderer {
     // Three ragged panels hanging off the lower yard rather than one slab —
     // canvas that has been in the weather for two hundred years has gaps in it,
     // and the gaps are what stop it reading as a billboard.
-    const sailGroup = new THREE.Group();
+    // Three panels, ONE mesh: they share a material and never move relative to
+    // each other, so the group of Meshes the first build used was three draw
+    // calls for one rag of canvas. Bake the offsets into the geometry instead.
+    const sailParts: THREE.BufferGeometry[] = [];
     for (const [i, drop] of [5.6, 7.2, 4.4].entries()) {
       const panel = new THREE.PlaneGeometry(3.4, drop, 1, 1);
       panel.rotateY(Math.PI * 0.5);
-      const mesh = new THREE.Mesh(panel, sailMaterial);
-      mesh.position.set(0, -drop * 0.5 - 0.3, (i - 1) * 3.7);
-      sailGroup.add(mesh);
+      panel.translate(0, -drop * 0.5 - 0.3, (i - 1) * 3.7);
+      sailParts.push(panel);
     }
-    sailGroup.position.set(-L * 0.1 - 15.5 * 0.52, 15.5 * 0.85 + 4.2, 0);
-    sailGroup.rotation.z = -0.55;
-    root.add(sailGroup);
+    const sailGeo = mergeGeometries(sailParts, false)!;
+    const sailMesh = new THREE.Mesh(sailGeo, sailMaterial);
+    sailMesh.position.set(-L * 0.1 - 15.5 * 0.52, 15.5 * 0.85 + 4.2, 0);
+    sailMesh.rotation.z = -0.55;
+    sailMesh.matrixAutoUpdate = false;
+    sailMesh.updateMatrix();
+    root.add(sailMesh);
 
     // ── The beacon: a shaft of gold standing out of her, seen map-wide ──
     // Cone rather than cylinder so it tapers into the sky instead of ending in

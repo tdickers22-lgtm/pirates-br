@@ -1,8 +1,9 @@
-import type { Player, Ship, Island, SeaRock, StormState, Vec3, WeaponId } from '../../shared/types/index.js';
+import type { Player, Ship, Island, SeaRock, StormState, TreasureChest, Vec3, WeaponId } from '../../shared/types/index.js';
 import {
   SHIP_STATS, SHIP, PHYSICS, PLAYER,
   BOT_EARLY_PEACE_SECONDS, BOT_ENGAGE_RANGE_BY_PHASE, BOT_ENGAGE_SHRINK_MULT, BOT_DEFEND_RANGE,
   BOT_MAX_HUNTERS_BY_PHASE, BOT_LOOKAHEAD_METERS, BOT_OBSTACLE_MARGIN, BOT_KEEL_CLEARANCE,
+  WRECK_EVENT,
 } from '../../shared/constants/index.js';
 import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
@@ -10,7 +11,7 @@ import { countOpenHoles, getCannonBroadsideYaw } from '../../shared/interactions
 import { applyShipRudderSteering } from './PhysicsSystem.js';
 import type { WeaponSystem } from './WeaponSystem.js';
 
-type BotBehavior = 'patrol' | 'chase' | 'engage' | 'flee' | 'loot' | 'return';
+type BotBehavior = 'patrol' | 'chase' | 'engage' | 'flee' | 'loot' | 'plunder' | 'return';
 
 interface BotState {
   playerId: string;
@@ -31,6 +32,12 @@ interface BotState {
   shoreTimer: number;
   /** Which shore-party leg the timer budgets. */
   shoreLeg: 'toChest' | 'toShip' | null;
+  /** Chest this crew is currently boarding the Gilded Wreck for. */
+  plunderChestId: string | null;
+  /** This crew's fight was granted by a world event (contested water or the
+   *  prize), not by the ordinary seek radius — so it does not spend a slot in
+   *  BOT_MAX_HUNTERS_BY_PHASE. See countHunters. */
+  uncappedHunt: boolean;
   /** Seconds spent unintentionally off the ship (knocked overboard, stranded)
    *  outside the loot behavior — recalled aboard after a short grace. */
   overboardTimer: number;
@@ -42,6 +49,20 @@ interface BotState {
   /** Sim time until which this bot counts as "under fire" and may fight back
    *  during the early-game peace window. */
   underFireUntil: number;
+  /** Sim time this crew last actually put a ball through a port. A one-pirate
+   *  crew that is firing is AT THE GUN — see BotSystem.isAtGuns. */
+  lastFiredAt: number;
+}
+
+/** A live world event bots sail to, plus the loot they can carry off it. */
+interface EventLure {
+  x: number;
+  z: number;
+  radius: number;
+  /** Island the event's chests are filed under (see Match's world-event note). */
+  hostIslandId: string;
+  /** Her chests, in the order she offers them — the prize first. */
+  chestIds: string[];
 }
 
 interface BotFirearmShot {
@@ -97,8 +118,27 @@ export function botMayFireCannons(t: number, underFireUntil: number): boolean {
 /** Inside this radius of a live world event, crews fight each other on sight —
  *  the hunter cap and the phase seek radius are both suspended (see the
  *  CONTESTED WATERS note in decideBehavior). Sized to "we can see each other
- *  across the wreck", not "we are on the same half of the map". */
-const BOT_LURE_BRAWL_RADIUS = 240;
+ *  across the wreck", not "we are on the same half of the map".
+ *
+ *  240 m was too tight to ever fire: instrumented over six matches, the fleet
+ *  closed to a MEAN 390 m of the wreck and milled there, so on a typical tick
+ *  one crew was inside the old radius and the rest were 300-400 m out — and
+ *  "contested" needs BOTH hulls inside it. The water crews actually converge
+ *  into is what the radius has to cover. Measured both ways at RUNS=3 x2:
+ *  340 m landed 5.7/6.7 crews at 360 s, 380 m came back HIGHER (7.0/8.3) — past
+ *  a point widening it stops making fights and starts making long stern chases
+ *  nobody ever closes. Wide enough to cover her water, no wider. */
+const BOT_LURE_BRAWL_RADIUS = 340;
+/** How close a crew stands off the mark itself before it stops steering AT it
+ *  and starts circling. Tied to the hull, not to the brawl radius — a crew that
+ *  circles at 190 m never comes alongside, and a crew that never comes alongside
+ *  never takes the prize. */
+const BOT_LURE_STATION_RADIUS = 105;
+/** How long after a broadside a one-pirate bot crew still counts as manning the
+ *  gun rather than free to walk the deck with a plank (see isAtGuns). About one
+ *  reload: long enough that a running fight keeps her off the rail, short enough
+ *  that a lull hands her the repair back. */
+const BOT_GUN_CREW_SECONDS = 7;
 
 export class BotSystem {
   private bots: Map<string, BotState> = new Map();
@@ -118,11 +158,24 @@ export class BotSystem {
    *  that has nothing better to do points its bow at it instead of drifting
    *  vaguely toward the ring centre — which is the whole mechanism by which the
    *  event actually pulls the lobby together rather than just decorating it.
+   *  `chestIds` are her loot: a bot alongside heaves to and sends a party over
+   *  the side for them, so the prize actually changes hands.
    *  Null the rest of the match; engage and flee always outrank it. */
-  private eventLure: { x: number; z: number; radius: number } | null = null;
+  private eventLure: EventLure | null = null;
+  /** Hulls holding the Gilded Strongbox (see Match's cargo/bounty section). */
+  private prizeShipIds: Set<string> = new Set();
 
-  setEventLure(lure: { x: number; z: number; radius: number } | null) {
+  setEventLure(lure: EventLure | null) {
     this.eventLure = lure;
+  }
+
+  /** Crews holding the prize off a world event. Unlike a gold bounty this lifts
+   *  BOTH rails at once — the hunter cap and the phase seek radius — because an
+   *  indivisible prize is the one thing in the match every crew wants at the
+   *  same moment, and a cap that keeps six of nine crews watching is exactly
+   *  what turned the wreck into a convergence with no conversion. */
+  setPrizeShips(shipIds: Iterable<string>) {
+    this.prizeShipIds = new Set(shipIds);
   }
 
   /** Match calls this each tick with the human's ship + player id when bot-peace is
@@ -157,10 +210,13 @@ export class BotSystem {
       firearmTimer: 0.3 + Math.random() * 0.6,
       shoreTimer: 0,
       shoreLeg: null,
+      plunderChestId: null,
+      uncappedHunt: false,
       overboardTimer: 0,
       lastHullTotal: hullTotal(ship),
       lastHostileHoles: hostileHoleCount(ship),
       underFireUntil: 0,
+      lastFiredAt: -999,
     });
   }
 
@@ -221,16 +277,94 @@ export class BotSystem {
     // toward the ring centre — the fight never got a chance to start. Inside the
     // brawl radius they STAND OFF AND CIRCLE instead, which keeps hulls in
     // gun range of each other for as long as the wreck is up.
-    if (d < BOT_LURE_BRAWL_RADIUS * 0.45) return angleWrap(toward + Math.PI * 0.5);
+    if (d < BOT_LURE_STATION_RADIUS) return angleWrap(toward + Math.PI * 0.5);
     return toward;
+  }
+
+  /** The next thing off the wreck worth boarding for: her prize first, then
+   *  whatever is still lying on her deck. Null when there is no live event,
+   *  nothing left free, or her host island has already given her up. */
+  private freeEventChest(islands: Island[], self?: BotState): TreasureChest | null {
+    const lure = this.eventLure;
+    if (!lure || lure.chestIds.length === 0) return null;
+    const host = islands.find((island) => island.id === lure.hostIslandId);
+    if (!host) return null;
+    for (const id of lure.chestIds) {
+      const chest = host.chests.find((candidate) => candidate.id === id);
+      if (!chest || chest.opened) continue;
+      if (chest.carriedByPlayerId || chest.storedOnShipId) continue;
+      // One crew per chest. Nine hulls all swimming at the same strongbox is a
+      // queue, not a contest — and it leaves the rest of her deck untouched.
+      // Crews with nothing left to claim go back to their guns, which is where
+      // the fight over what HAS been claimed comes from.
+      if (self && this.chestClaimedByAnother(id, self.playerId)) continue;
+      return chest;
+    }
+    return null;
+  }
+
+  private chestClaimedByAnother(chestId: string, selfPlayerId: string): boolean {
+    for (const other of this.bots.values()) {
+      if (other.playerId === selfPlayerId) continue;
+      if (other.behavior === 'plunder' && other.plunderChestId === chestId) return true;
+    }
+    return false;
+  }
+
+  /** Is this hull hove to over a world event with a boarding party away? */
+  private shipIsPlundering(shipId: string): boolean {
+    for (const other of this.bots.values()) {
+      if (other.shipId === shipId) return other.behavior === 'plunder' && other.shoreLeg !== null;
+    }
+    return false;
+  }
+
+  /** How many bot crews have this hull as their target right now (excluding the
+   *  crew asking). Cheap: the lobby is nine hulls. */
+  private huntersOn(shipId: string, exceptPlayerId: string): number {
+    let n = 0;
+    for (const other of this.bots.values()) {
+      if (other.playerId === exceptPlayerId) continue;
+      if (other.behavior === 'engage' && other.targetShipId === shipId) n++;
+    }
+    return n;
   }
 
   /** How many bot crews are currently hunting a ship (bounded by the lobby size,
    *  so a straight recount per decision is cheaper than keeping a live tally). */
   private countHunters(): number {
     let n = 0;
-    for (const other of this.bots.values()) if (other.behavior === 'engage') n++;
+    // Fights the WORLD started do not spend the lobby's hunting budget. The cap
+    // exists so the map does not ignite all at once when the peace lifts; a
+    // brawl over the Gilded Wreck is the event doing its job. Counting those
+    // brawlers against it had the wreck STARVE the rest of the chart — the
+    // crews exempt from the cap at the mark filled every slot, and each crew
+    // elsewhere was refused a fight the phase radius had already granted it.
+    for (const other of this.bots.values()) {
+      if (other.behavior === 'engage' && !other.uncappedHunt) n++;
+    }
     return n;
+  }
+
+  /**
+   * IS THIS CREW AT THE GUNS RIGHT NOW?
+   *
+   * A bot ship carries ONE pirate, and a human sailing alone has to choose:
+   * you are at the cannon, or you are at the rail with a plank, never both in
+   * the same breath. Bots were quietly doing both — BotSystem sets atCannon for
+   * the single tick it fires and clears it again, so Match's damage-control saw
+   * an idle deckhand and planked every breach between broadsides. That is why
+   * nine crews could trade fire over the wreck for three minutes with 25 open
+   * breaches on the water and nobody going down.
+   *
+   * A crew that has fired inside this window is holding the gun. She may still
+   * work the bilge (a bucket is one hand and a few steps), but the plank has to
+   * wait for a lull — which is what makes a gunfight end in a sinking.
+   */
+  isAtGuns(playerId: string, t: number): boolean {
+    const bot = this.bots.get(playerId);
+    if (!bot) return false;
+    return t - bot.lastFiredAt < BOT_GUN_CREW_SECONDS;
   }
 
   /** Drain any personal-weapon shots generated this tick. Match resolves their hits. */
@@ -258,6 +392,22 @@ export class BotSystem {
     if (avgHull < 0.2 && bot.behavior !== 'flee') {
       bot.behavior = 'flee';
       bot.stateTimer = 15;
+      return;
+    }
+
+    // A CREW THAT HAS DECIDED TO BOARD HER, BOARDS HER. The target scan runs
+    // every six to fourteen seconds and the wreck sits in water where somebody
+    // is always in range, so re-deciding mid-approach meant every crew turned
+    // back to its guns forty metres short and her deck was still fully laden
+    // when the storm took her back — four chests untouched in every instrumented
+    // run. The commitment is what makes the loot move.
+    //
+    // A crew hove to with its hands full is also the most contested thing on the
+    // water: anchored, guns unmanned, prize walking. Fleeing still outranks this
+    // (checked above) — a sinking crew drops the box like anyone would.
+    if (bot.behavior === 'plunder' && this.eventLure
+      && (bot.shoreLeg !== null || this.freeEventChest(islands, bot))) {
+      bot.stateTimer = Math.max(bot.stateTimer, 2);
       return;
     }
 
@@ -290,8 +440,34 @@ export class BotSystem {
         // without feeling like they are hard-locked from across the map.
         // A BOUNTIED hull (a crew hauling most of a win in her hold) gets a
         // heavier discount still: everything nearby would rather have the gold.
-        const bountyDiscount = this.bountiedShipIds.has(other.id) ? 0.6 : 1;
-        const score = (humanShipIds.has(other.id) ? d * 0.88 : d) * bountyDiscount;
+        // And the crew holding the PRIZE outranks both: there is exactly one
+        // strongbox in the match, and whoever has it is the answer to "who do
+        // we shoot" for every crew that can still see her.
+        const bountyDiscount = this.prizeShipIds.has(other.id) ? 0.3
+          : this.bountiedShipIds.has(other.id) ? 0.6 : 1;
+        // BLOOD IN THE WATER. A hull already holed, or already somebody else's
+        // target, is the one a pirate finishes. Without this every crew picked
+        // its own private duel and the lobby stalemated: one pirate per hull has
+        // to choose between the gun, the plank and the bucket, so an even fight
+        // is two crews bailing at each other. Measured over the wreck — eight
+        // crews engaged, 25 open breaches on the water, three minutes, no
+        // sinkings. Focus is the whole difference between a fight and a sinking.
+        const wounded = hullTotal(other) < 3 ? 0.5 : 1;
+        // Scaled, not a flag: the second crew onto a hull is what turns a duel
+        // into a sinking, and the third is what makes it quick. One pirate per
+        // hull has to choose between the gun, the plank and the bucket, so an
+        // even fight is two crews bailing at each other — measured at 25 open
+        // breaches on the water over three minutes with nobody going down.
+        const onHer = this.huntersOn(other.id, bot.playerId);
+        const pileOn = onHer >= 2 ? 0.42 : onHer === 1 ? 0.55 : 1;
+        // HOVE TO WITH HER BOATS AWAY. A crew anchored over the wreck with its
+        // party in the water is the softest thing on the sea — no way on, no
+        // helm, no gun crew — and the moment worth attacking is exactly the
+        // moment somebody is lifting the prize off her deck. This is what makes
+        // her DECK the contested ground rather than the water around it.
+        const heaveTo = this.shipIsPlundering(other.id) ? 0.5 : 1;
+        const score = (humanShipIds.has(other.id) ? d * 0.88 : d)
+          * bountyDiscount * wounded * pileOn * heaveTo;
         if (score < nearestScore) { nearestScore = score; nearest = other; }
       }
 
@@ -337,11 +513,33 @@ export class BotSystem {
       // So over the wreck the concurrency cap (which exists to stop the lobby
       // igniting all at once across the map) does not apply, and neither does
       // the phase seek radius. Everywhere else on the chart it still does.
-      const contested = !!nearest && this.nearLure(ship) && this.nearLure(nearest);
-      if ((contested || nearestActualDist < engageRange)
-        && (alreadyHunting || contested || this.countHunters() < hunterCap)) {
+      const contested = !inEarlyWindow && !!nearest && this.nearLure(ship) && this.nearLure(nearest);
+      // THE PRIZE OUTRANKS THE RAILS. One crew is carrying the Gilded Strongbox
+      // and every other crew that can still see her wants it: that is a chase,
+      // not a skirmish, so neither the phase seek radius nor the hunter cap gets
+      // to say no. This is the link that converts the convergence — the event
+      // puts an indivisible thing in one hold and the whole lobby answers it.
+      const prizeHunt = !inEarlyWindow && !!nearest && this.prizeShipIds.has(nearest.id)
+        && nearestActualDist < WRECK_EVENT.PRIZE_HUNT_RANGE;
+      // GO AND TAKE IT. There is a chest on her deck with THIS crew's name on
+      // it (one claimant per chest), and hauling it aboard outranks picking a
+      // gunfight — the only branch in the match that outranks engaging, and it
+      // is self-limiting: her four chests can only ever draw four crews, and
+      // the other five are left free to hunt.
+      //
+      // Ranked below engage it never fired ONCE across six instrumented
+      // matches. She lies in water somebody is always in range of, so every
+      // approaching crew turned back to its guns before it got alongside and
+      // her deck was still fully laden when the storm took her back. Nothing
+      // moved, so nothing was contested, so the fleet converged and left.
+      if (this.lureBearing(ship) !== null && !!this.freeEventChest(islands, bot)) {
+        bot.behavior = 'plunder';
+        bot.targetShipId = null;
+      } else if ((contested || prizeHunt || nearestActualDist < engageRange)
+        && (alreadyHunting || contested || prizeHunt || this.countHunters() < hunterCap)) {
         bot.behavior = 'engage';
         bot.targetShipId = nearest?.id ?? null;
+        bot.uncappedHunt = contested || prizeHunt;
       } else if (this.lureBearing(ship) !== null) {
         // A world event is up and this crew is in range: sail AT it. Ranked
         // above island looting on purpose — the wreck's whole job is to stop
@@ -378,10 +576,12 @@ export class BotSystem {
     this.navIslands = islands;
     this.navSeaRocks = seaRocks;
     this.navSkipIslandId = bot.behavior === 'loot' ? bot.targetIslandId : null;
-    // Shore parties belong to the 'loot' behavior only — any other behavior
-    // with the body off the ship recalls it aboard after a short grace so a
-    // knocked-overboard bot isn't an instant teleport, yet can never strand.
-    if (bot.behavior !== 'loot' && !player.onShipId && player.state !== 'eliminated' && player.state !== 'respawning') {
+    // Shore parties belong to the 'loot' and 'plunder' behaviors only — any
+    // other behavior with the body off the ship recalls it aboard after a short
+    // grace so a knocked-overboard bot isn't an instant teleport, yet can never
+    // strand.
+    if (bot.behavior !== 'loot' && bot.behavior !== 'plunder'
+      && !player.onShipId && player.state !== 'eliminated' && player.state !== 'respawning') {
       bot.overboardTimer += dt;
       if (bot.overboardTimer >= 6) {
         this.recallCrewToShip(player, ship);
@@ -463,6 +663,7 @@ export class BotSystem {
             }
           }
           // Full cadence after a shot; quick re-check while holding fire.
+          if (fired) bot.lastFiredAt = t;
           bot.fireTimer = fired ? minDelay + Math.random() * 0.6 : 0.35;
         }
         break;
@@ -517,6 +718,43 @@ export class BotSystem {
           ship.sailAngle *= Math.pow(0.9, dt / 0.016); // frame-rate-independent decay
           this.updateShoreParty(bot, player, ship, island, dt);
         }
+        break;
+      }
+
+      // BOARDING THE GILDED WRECK. Same shape as a shore party, over water: the
+      // hull heaves to alongside, one pirate goes over the side, swims to a
+      // chest and hauls it back. Match's processBotLooting resolves the pickup
+      // and the stow through exactly the paths a human uses.
+      case 'plunder': {
+        const lure = this.eventLure;
+        if (!lure) {
+          this.endPlunder(bot, player, ship);
+          break;
+        }
+        const chest = player.carryingChestId ? null : this.freeEventChest(islands, bot);
+        if (!chest && !player.carryingChestId) {
+          // Picked clean (or somebody beat us to the last of her): stand off and
+          // keep the mark in sight — there is still a fight to be had over her.
+          this.endPlunder(bot, player, ship);
+          bot.patrolAngle = this.lureBearing(ship) ?? bot.patrolAngle;
+          break;
+        }
+        const d = dist2D(ship.position.x, ship.position.z, lure.x, lure.z);
+        if (d > WRECK_EVENT.PLUNDER_RANGE && player.onShipId) {
+          this.steerToward(ship, Math.atan2(lure.x - ship.position.x, lure.z - ship.position.z), dt, t);
+          ship.sailHeight = Math.min(ship.sailHeight + dt * 0.14, 0.42);
+          ship.anchored = false;
+          ship.anchorRaiseProgress = 0;
+          this.trimSails(ship, t, dt);
+          break;
+        }
+        // Hove to over her. Anchored, sails in, guns unmanned: this is the crew
+        // every other crew at the wreck would rather be shooting at.
+        ship.anchored = true;
+        ship.anchorRaiseProgress = 0;
+        ship.sailHeight = 0;
+        ship.sailAngle *= Math.pow(0.9, dt / 0.016);
+        this.updateWreckParty(bot, player, ship, chest, dt);
         break;
       }
 
@@ -826,6 +1064,93 @@ export class BotSystem {
       return;
     }
     this.walkBotToward(player, chest.position.x, chest.position.z, dt);
+  }
+
+  /**
+   * A boarding party on the Gilded Wreck. The shore-party shape, over open
+   * water: over the side, swim to the chest, haul it back to the rail. Match
+   * resolves the pickup (player.nearChestId) and the stow (carryingChestId at
+   * the hull) through the same code a human's hands go through, so the prize
+   * that ends up in a bot's hold is the same entity a player would have taken.
+   */
+  private updateWreckParty(
+    bot: BotState, player: Player, ship: Ship,
+    chest: TreasureChest | null, dt: number,
+  ) {
+    const stats = SHIP_STATS[ship.type];
+
+    if (player.carryingChestId) {
+      // Got her. Swim it home; Match boards + stows at the hull.
+      if (bot.shoreLeg !== 'toShip') {
+        bot.shoreLeg = 'toShip';
+        bot.shoreTimer = this.shoreLegBudget(
+          dist2D(player.position.x, player.position.z, ship.position.x, ship.position.z),
+        );
+      }
+      bot.shoreTimer -= dt;
+      if (bot.shoreTimer <= 0) {
+        player.position.x = ship.position.x;
+        player.position.y = ship.position.y + stats.height + 0.35;
+        player.position.z = ship.position.z;
+        return;
+      }
+      this.walkBotToward(player, ship.position.x, ship.position.z, dt);
+      return;
+    }
+
+    if (!chest) {
+      this.endPlunder(bot, player, ship);
+      return;
+    }
+    bot.plunderChestId = chest.id;
+
+    if (player.onShipId) {
+      const dx = chest.position.x - ship.position.x;
+      const dz = chest.position.z - ship.position.z;
+      const len = Math.hypot(dx, dz) || 1;
+      player.onShipId = null;
+      player.state = 'alive';
+      player.atCannon = false;
+      player.atHelm = false;
+      player.atCrowNest = false;
+      player.position.x = ship.position.x + (dx / len) * (stats.width * 0.5 + 1.6);
+      player.position.z = ship.position.z + (dz / len) * (stats.width * 0.5 + 1.6);
+      player.position.y = ship.position.y + 0.4;
+      player.velocity = { x: 0, y: 0, z: 0 };
+      bot.shoreLeg = 'toChest';
+      bot.shoreTimer = this.shoreLegBudget(len);
+      return;
+    }
+
+    const dChest = dist2D(player.position.x, player.position.z, chest.position.x, chest.position.z);
+    if (dChest <= 1.2) {
+      player.nearChestId = chest.id;
+      return;
+    }
+    bot.shoreTimer -= dt;
+    if (bot.shoreTimer <= 0) {
+      // Timeout fallback — the same legacy hop the island parties get. Her
+      // chests float, so the mark is at the surface, not on a hillside.
+      player.position.x = chest.position.x;
+      player.position.y = chest.position.y + 0.1;
+      player.position.z = chest.position.z;
+      player.nearChestId = chest.id;
+      bot.shoreTimer = 30;
+      return;
+    }
+    this.walkBotToward(player, chest.position.x, chest.position.z, dt);
+  }
+
+  /** Break off the boarding: get the body back aboard and hand the helm back to
+   *  the patrol/engage logic. Never leaves a bot swimming over a dead event. */
+  private endPlunder(bot: BotState, player: Player, ship: Ship) {
+    if (!player.onShipId && !player.carryingChestId) this.recallCrewToShip(player, ship);
+    this.resetShoreLeg(bot);
+    bot.plunderChestId = null;
+    bot.behavior = 'patrol';
+    bot.stateTimer = Math.min(bot.stateTimer, 2);
+    ship.anchored = false;
+    ship.anchorRaiseProgress = 0;
   }
 
   /** Generous walking-time budget for one shore-party leg before the legacy

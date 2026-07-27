@@ -685,15 +685,33 @@ export const BOT_EARLY_PEACE_SECONDS = 150;
  *  early-peace window is over. The old flat 920/780 had every bot converging
  *  across the whole map from t=0; measured, that emptied the lobby long before
  *  the ~12.5-minute ring arc could matter. Ramping the seek radius with the ring
- *  keeps early fights local and hands the endgame back to the storm. */
-export const BOT_ENGAGE_RANGE_BY_PHASE = [260, 300, 360, 440, 560, 720, 900];
+ *  keeps early fights local and hands the endgame back to the storm.
+ *
+ *  Phases 0-2 (t=150-400 s, the whole life of the Gilded Wreck) were re-opened
+ *  when the wreck instrumentation showed why the fleet CONVERGED on her without
+ *  CONVERTING: crews closed to a mean 390 m of the mark and then sat there,
+ *  because 260-300 m of seek radius does not reach across the water everyone is
+ *  milling in. Instrumented at the old numbers, the 90 s after she rose had
+ *  SIX crews within 400 m of her and ZERO of them engaged.
+ *
+ *  Index 0 costs nothing before the peace lifts: inside BOT_EARLY_PEACE_SECONDS
+ *  the seek radius is forced to 0 (or BOT_DEFEND_RANGE under fire) regardless,
+ *  so this number only ever speaks from t=150 s — which is exactly the window
+ *  the wreck is up in. */
+export const BOT_ENGAGE_RANGE_BY_PHASE = [440, 540, 570, 580, 640, 780, 900];
 /** Seek radius multiplier while the ring is actively shrinking — everyone is
  *  being funnelled together anyway, so hunting is fair game. */
 export const BOT_ENGAGE_SHRINK_MULT = 1.2;
 /** How many bot crews may be actively hunting at once, by storm phase index.
  *  Measured: without a cap every bot flipped to 'engage' the tick the peace
- *  window lifted and six of nine crews sank inside 33 s. */
-export const BOT_MAX_HUNTERS_BY_PHASE = [2, 3, 4, 5, 6, 8, 10];
+ *  window lifted and six of nine crews sank inside 33 s.
+ *
+ *  The cap is a rate limiter on the LOBBY igniting, not a ban on fighting: with
+ *  2/3 through the wreck's whole life only two or three crews were ever allowed
+ *  to hunt at once, so nine crews met over one hull and eight of them watched.
+ *  Phases 0-2 carry the wreck window, so that is where the cap opens — and it is
+ *  still a cap: half the lobby, not the lobby. */
+export const BOT_MAX_HUNTERS_BY_PHASE = [5, 7, 7, 7, 8, 8, 10];
 /** During early peace a bot only answers ships that shot at it inside this range. */
 export const BOT_DEFEND_RANGE = 260;
 
@@ -747,8 +765,16 @@ export const WRECK_EVENT = {
    *  "early peace is intact" number) untouched because she is only just up. */
   SPAWN_PHASE: 0,
   /** She is claimed this many seconds after rising — long enough to sail to her
-   *  from the far side of the ring, fight over her, and get the cargo home. */
-  LOOT_SECONDS: 170,
+   *  from the far side of the ring, fight over her, and get the cargo home.
+   *
+   *  Rising at ~150 s that puts her claim at ~340 s, and the CLAIM is part of
+   *  the design: the sea taking her back is what breaks the crews holding
+   *  station over her apart and sends the ones with her cargo running for a
+   *  Tallyman with everyone else's bows pointed at them. Stretched to 230 s
+   *  (the full storm phase) the fleet was still politely circling her at the
+   *  360 s mark with the killing all still ahead of it, and the measured curve
+   *  came back WORSE, not better. */
+  LOOT_SECONDS: 190,
   /** Treasure chests aboard — carry them home and bank them. */
   CHESTS: 3,
   /** Gold value band per chest. Richer than an island chest (ECONOMY.CHEST_*)
@@ -757,6 +783,29 @@ export const WRECK_EVENT = {
   CHEST_VALUE_MAX: 520,
   /** Supply barrels aboard — the "super ammo" cache. */
   BARRELS: 3,
+  /** THE GILDED STRONGBOX — the one thing on her that CONVERTS the convergence.
+   *
+   *  Measured before it existed: crews genuinely closed on the wreck (600 m →
+   *  390 m mean, closest approach 26-96 m in 6/6 runs) and then looted nothing,
+   *  fought nobody and drifted off — because three equal chests split nine crews
+   *  into three happy winners and six shrugs. Nobody CONTESTS a buffet.
+   *
+   *  So one strongbox, amidships, worth more than the rest of her put together,
+   *  and only one crew can have it. The moment it is aboard a hull that hull is
+   *  cried like a bounty and marked on every chart — the prize is a thing you
+   *  carry, and it drags the fight along behind it. When she founders it floats
+   *  back out of her (dropShipTreasure) and the chase starts again. */
+  STRONGBOX_VALUE: 2600,
+  /** Stable id — the strongbox is a singleton, and Match reads it back off the
+   *  chest arrays to find who is holding the prize. */
+  STRONGBOX_ID: 'gilded-wreck-strongbox',
+  /** A bot crew this close to her heaves to and sends a boarding party over the
+   *  side for her loot. Wide enough that the anchor drops before the hull is in
+   *  among the chests, which is what makes a plundering crew a sitting target. */
+  PLUNDER_RANGE: 62,
+  /** Hunt radius for the crew holding the strongbox: everyone inside this wants
+   *  it, cap or no cap, phase seek radius or no phase seek radius. */
+  PRIZE_HUNT_RANGE: 760,
   /** Hull half-length / half-beam of the ghost galleon, metres. Drives the loot
    *  scatter, the client silhouette and the map icon. */
   HULL_HALF_LENGTH: 17,
