@@ -29,3 +29,6 @@ build/
 scripts/_probe*.tmp.mjs
 scripts/_patrol_*.tmp.mjs
 data/bugsnaps/
+
+# one-off scratch probes (dot-prefixed) — never part of a suite
+scripts/.*.mjs

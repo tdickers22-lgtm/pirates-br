@@ -34,6 +34,34 @@ expect('after the window every bot is free to fire',
 // ── Deterministic: one reef scrape must not start a war ────────────────────
 console.log('\nA reef is not an act of war');
 
+/** The clearest patch of open water in the FIXED world — the deepest point of a
+ *  coarse scan, measured over the whole 95 m span the pair occupies. Bot spawns
+ *  are drawn from Math.random(), so parking the pair "wherever ship A happened
+ *  to appear" sometimes put an island on the firing line and hasCannonLineOfSight
+ *  held fire all 60 s. The islands are fixed, so this answer is not. */
+function openWaterSpot(islands, seaRocks) {
+  const clearanceAt = (x, z) => {
+    let clear = Infinity;
+    for (const isl of islands) {
+      clear = Math.min(clear, Math.hypot(isl.position.x - x, isl.position.z - z) - (isl.radius ?? 0));
+    }
+    for (const rock of seaRocks ?? []) {
+      clear = Math.min(clear, Math.hypot(rock.position.x - x, rock.position.z - z) - (rock.radius ?? 0));
+    }
+    return clear;
+  };
+  let best = { x: 0, z: 0 };
+  let bestClear = -Infinity;
+  for (let x = -700; x <= 700; x += 50) {
+    for (let z = -700; z <= 700; z += 50) {
+      // Both hulls AND the water between them have to be in the clear.
+      const clear = Math.min(clearanceAt(x, z), clearanceAt(x + 47.5, z), clearanceAt(x + 95, z));
+      if (clear > bestClear) { bestClear = clear; best = { x, z }; }
+    }
+  }
+  return best;
+}
+
 /** Park two bot hulls in broadside range and run only the bot brain, at an
  *  arbitrary sim clock. Returns how many cannon shots the pair fired. */
 function sailPair({ atTime, seconds, provoke }) {
@@ -44,19 +72,31 @@ function sailPair({ atTime, seconds, provoke }) {
   const physics = match.physics;
   const weapons = match.weapons;
 
+  const water = openWaterSpot(state.islands, state.seaRocks);
+
   // Broadside range, hove to: nothing to do but decide whether to shoot. Both
-  // stay on a's spawn water (open sea, clear line of fire, no island in the way).
+  // stay on open sea — clear line of fire, no island in the way.
+  // Heading is PINNED, not inherited from the spawn. b lies due +x of a, so the
+  // bearing between them is +pi/2; a gun only swings CANNON_YAW_ARC (75.6deg)
+  // either side of its own broadside (rotation +/- pi/2), which leaves a 16%
+  // slice of headings where the pair is bow-on and NO cannon has a firing
+  // solution. Physics never runs in this harness, so a random spawn rotation is
+  // never steered off — the "does fire" assertions flaked at exactly that 16%.
+  // rotation 0 puts each hull abeam of the other; the gate under test (whether a
+  // bot MAY fire) is untouched by which rail is pointed where.
   const pinPair = () => {
-    b.position.x = a.position.x + 95;
-    b.position.z = a.position.z;
+    a.position.x = water.x;
+    a.position.z = water.z;
+    b.position.x = water.x + 95;
+    b.position.z = water.z;
     for (const ship of [a, b]) {
       ship.position.y = 0;
       ship.velocity = { x: 0, y: 0, z: 0 };
       ship.anchored = false;
       ship.sailHeight = 0;
+      ship.rotation = 0;
     }
   };
-  b.rotation = a.rotation;
   pinPair();
   // Storm centred on them so nobody flees the ring instead of deciding.
   state.storm.centerX = a.position.x + 47; state.storm.centerZ = a.position.z;
