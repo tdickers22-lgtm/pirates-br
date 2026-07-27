@@ -8,12 +8,14 @@
 import * as THREE from 'three';
 import type { Island, IslandNpc, IslandProp, IslandPropType } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
-import { BIOME_PALETTES, getPropGroundY } from '../../../shared/props.js';
+import { BIOME_PALETTES, getPropGroundY, PROP_COLLIDERS } from '../../../shared/props.js';
 import { makeFernFrondTexture, makeGrassBladeTexture } from '../../rendering/factories/TextureFactory.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { makePlayerMesh } from '../../rendering/factories/PlayerMeshFactory.js';
 import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.js';
 import type { TerrainBuild } from './TerrainMeshBuilder.js';
+import { ensureMeshGround } from './GroundTruth.js';
+import { queueContactShadow } from './ContactShadows.js';
 
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
@@ -165,8 +167,47 @@ function blendStoryPad(mesh: THREE.Mesh, island: Island) {
  *  through every visible tree. Rendering the registry makes visuals ==
  *  colliders, and finally shows the roster landmarks (watchtowers, standing
  *  stones, wrecks) that were generated but never drawn. */
+/** Ground footprint a prop's contact shadow should cover: the GLB's real XZ
+ *  half-extent where we have it (a palm's shade is its CROWN, not its 0.38 m
+ *  trunk collider), otherwise the collider radius. */
+function propShadowRadius(type: string, scale: number): number {
+  const bounds = assets.bounds(type as AssetName);
+  if (bounds) {
+    const horiz = Math.max(-bounds.min.x, bounds.max.x, -bounds.min.z, bounds.max.z);
+    if (horiz > 0.01) return Math.min(5.5, horiz * scale * 0.82);
+  }
+  const col = PROP_COLLIDERS[type as keyof typeof PROP_COLLIDERS];
+  return col && col.shape !== 'none' ? col.radius * scale : 0;
+}
+
+/**
+ * How far a GLB's own base sits ABOVE its origin, at this scale.
+ *
+ * `getPropGroundY` seats a prop's ORIGIN on the terrain and assumes the model
+ * starts there. Three of them don't: boulder_a/b/c are authored with their
+ * lowest vertex 0.14–0.54 m up (measured from the merged geometry), so the
+ * biggest rocks in the world floated by half a metre no matter how perfectly
+ * the ground was sampled — the other half of the P1 dockside boulder. Sink the
+ * visual by its own offset; every other prop measures 0 here and is untouched.
+ */
+function propBaseLift(type: string, scale: number): number {
+  const bounds = assets.bounds(type as AssetName);
+  return bounds ? Math.max(0, bounds.min.y) * scale : 0;
+}
+
+/** Foliage lets light through; masonry and rock do not. */
+function propShadowStrength(type: string): number {
+  if (SWAYING_FOLIAGE.has(type)) return type.startsWith('palm') ? 0.72 : 0.5;
+  if (type === 'shipwreck' || type === 'whale_skeleton' || type === 'kraken_wreck') return 0.62;
+  return 0.9;
+}
+
 export function buildServerProps(ctx: IslandBuildCtx) {
   const { host, island, group, lowDetail } = ctx;
+  // Index the DRAWN terrain before anything seats on it: getPropGroundY (and
+  // every seat helper below) then measures the mesh the player sees instead of
+  // the analytic field it was sampled from. Must run after buildTerrainMesh.
+  ensureMeshGround(ctx);
   const props = island.props ?? [];
   if (props.length === 0) return;
   const propSlots = new Map<number, { inst: THREE.InstancedMesh; index: number }>();
@@ -196,14 +237,22 @@ export function buildServerProps(ctx: IslandBuildCtx) {
       if (SWAYING_FOLIAGE.has(type)) applyFoliageSway(merged.material, host);
       const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
       list.forEach((prop, i) => {
-        pos.set(prop.x - island.position.x, getPropGroundY(island, prop), prop.z - island.position.z);
+        pos.set(
+          prop.x - island.position.x,
+          getPropGroundY(island, prop) - propBaseLift(prop.type, prop.scale),
+          prop.z - island.position.z,
+        );
         euler.set(0, prop.yaw, 0);
         quat.setFromEuler(euler);
         scl.setScalar(prop.scale);
         mat4.compose(pos, quat, scl);
         inst.setMatrixAt(i, mat4);
         if (prop.id !== undefined) propSlots.set(prop.id, { inst, index: i });
+        queueContactShadow(ctx, pos.x, pos.z, propShadowRadius(prop.type, prop.scale), propShadowStrength(prop.type));
       });
+      // Named so the live floater audit can tell a piece that CLAIMS to stand
+      // on the ground from scenery that is elevated by design.
+      inst.name = `props-${type}`;
       inst.castShadow = !lowDetail;
       inst.receiveShadow = true;
       inst.instanceMatrix.needsUpdate = true;
@@ -213,11 +262,13 @@ export function buildServerProps(ctx: IslandBuildCtx) {
     for (const prop of list) {
       const localPos = new THREE.Vector3(
         prop.x - island.position.x,
-        getPropGroundY(island, prop),
+        getPropGroundY(island, prop) - propBaseLift(prop.type, prop.scale),
         prop.z - island.position.z,
       );
       const node = buildPropInstance(prop.type as AssetName, localPos, prop.yaw, prop.scale);
       if (!node) continue;
+      node.name = `prop-${prop.type}`;
+      queueContactShadow(ctx, localPos.x, localPos.z, propShadowRadius(prop.type, prop.scale), propShadowStrength(prop.type));
       node.traverse((obj) => {
         if (obj instanceof THREE.Mesh) {
           obj.castShadow = !lowDetail;
@@ -241,12 +292,95 @@ export function buildServerProps(ctx: IslandBuildCtx) {
   }
 }
 
+/**
+ * Light a foliage CARD as if it were the ground it grows out of.
+ *
+ * Grass and fern cards are vertical planes, so their real normals point
+ * sideways: at noon N·L is ~0 and every tuft renders near its ambient floor —
+ * dark, saturated stalks standing on a sunlit pale terrain, which is exactly
+ * the "grass clashes with the ground" read. Bending the shading normal toward
+ * +Y (the standard foliage trick) makes a tuft take the same lambert term as
+ * the turf under it; a little of the card normal is kept so blades still turn
+ * as they rotate. Fragment-side, so it survives the DOUBLE_SIDED normal flip
+ * that would otherwise blacken every card seen from behind.
+ */
+function liftFoliageNormals(material: THREE.MeshStandardMaterial, amount: number) {
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_begin>',
+      `#include <normal_fragment_begin>
+       normal = normalize(mix(normal, vec3(0.0, 1.0, 0.0), ${amount.toFixed(2)}));`,
+    );
+  };
+  material.customProgramCacheKey = () => `pirates-foliage-card-${amount.toFixed(2)}`;
+}
+
+/** Props with a real FLOOR — blades sprouting inside them come up through the
+ *  boards/canvas. Radius multiplier on the prop's collider radius. */
+const FLOORED_PROPS: Record<string, number> = {
+  tent_a: 1.25,
+  tent_b: 1.3,
+  tent_c: 1.3,
+  smuggler_cache: 0.9,
+  wrecker_tower: 0.85,
+  mine_head: 0.7,
+};
+
+/** Discs of building floor where ground cover must not grow (island-local). */
+function buildingFloors(ctx: IslandBuildCtx): { x: number; z: number; r: number }[] {
+  const { island } = ctx;
+  const out: { x: number; z: number; r: number }[] = [];
+  if (island.tavern) {
+    // The tavern's own shell GLB is the floor plan; fall back to the stamp-pad
+    // radius the generator flattens for it.
+    const bounds = assets.bounds('tavern');
+    const half = bounds
+      ? Math.max(-bounds.min.x, bounds.max.x, -bounds.min.z, bounds.max.z) * 0.92
+      : 4.6;
+    out.push({
+      x: island.tavern.position.x - island.position.x,
+      z: island.tavern.position.z - island.position.z,
+      r: half,
+    });
+  }
+  for (const prop of island.props ?? []) {
+    const mult = FLOORED_PROPS[prop.type];
+    if (!mult) continue;
+    const col = PROP_COLLIDERS[prop.type];
+    if (!col) continue;
+    out.push({
+      x: prop.x - island.position.x,
+      z: prop.z - island.position.z,
+      r: Math.max(0.6, col.radius * prop.scale * mult),
+    });
+  }
+  return out;
+}
+
 /** Ground cover: one InstancedMesh each of cross-plane grass tufts over the
  *  grassy interior, arched fern fronds in the shaded inner jungle band, and
  *  seashell flecks on the wet sand. Deterministic from the profile seed; culled
  *  with the micro tier past ~260m; zero colliders (ankle-high). */
 export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
   const { island, group, r, rng, lowDetail, surfacePoint, carveCaveMouth, paletteGrass, paletteFoliage } = ctx;
+  const ground = ensureMeshGround(ctx);
+  const floors = buildingFloors(ctx);
+  /** Inside a building's floor: blades grew straight through the tavern's
+   *  floorboards and out of tent canvas. */
+  const onFloor = (x: number, z: number): boolean => {
+    for (const f of floors) {
+      const dx = x - f.x;
+      const dz = z - f.z;
+      if (dx * dx + dz * dz < f.r * f.r) return true;
+    }
+    return false;
+  };
+  // Ground cover must not merely be near the ground, it must be ON the drawn
+  // ground and lying in it: tufts on the caldera's near-vertical inner wall
+  // stuck out sideways like fur, and any blade seated on the analytic field
+  // floats wherever the mesh chord dips under it.
+  const MIN_SLOPE_COS = Math.cos((50 * Math.PI) / 180);
+  const MAX_FLOAT = 0.15;
   if (!lowDetail) {
     const grassCount = Math.min(9000, Math.round(r * r * 1.05));
     const bladeGeo = new THREE.PlaneGeometry(0.52, 0.64, 1, 1);
@@ -284,6 +418,7 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       alphaTest: 0.42,
       transparent: false,
     });
+    liftFoliageNormals(grassMat, 0.85);
     const grass = new THREE.InstancedMesh(crossGeo, grassMat, grassCount);
     const gM = new THREE.Matrix4();
     const gP = new THREE.Vector3();
@@ -305,24 +440,48 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       // No tufts hovering in the cave-mouth trench (the mesh is carved open
       // below this analytic sample).
       if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
+      if (onFloor(sample.x, sample.z)) continue;
       // Place a small CLUMP of blades per seed so grass reads as tufts and
       // masses (carpeting the interior), not isolated specks (audit P1).
       const clump = 2 + Math.floor(rng(i * 3 + 1) * 3); // 2-4 blades
       for (let c = 0; c < clump && placed < grassCount; c++) {
         const jx = (rng(i * 41 + c * 7) - 0.5) * 1.15;
         const jz = (rng(i * 43 + c * 11) - 0.5) * 1.15;
-        gP.set(sample.x + jx, sample.y - 0.06, sample.z + jz);
+        // Every scale/rotation roll is drawn BEFORE any rejection below, so a
+        // rejected blade never shifts the stream for the ones after it.
+        const sc = floraScale(rng(i * 23 + c * 3), FLORA_SCALE.grass);
+        const heightScale = clampFloraScale(sc * (0.92 + rng(i * 29 + c) * 0.36), FLORA_SCALE.grassHeight);
+        const tintRoll = rng(i * 31 + c);
+        const bx = sample.x + jx;
+        const bz = sample.z + jz;
+        const hit = ground?.hit(bx, bz) ?? null;
+        if (ground) {
+          // Off the mesh, standing on a wall, or the drawn ground has fallen
+          // away from the analytic sample: no tuft.
+          if (!hit) continue;
+          if (hit.ny < MIN_SLOPE_COS) continue;
+          if (sample.y - hit.y > MAX_FLOAT) continue;
+        }
+        const baseY = hit ? hit.y : sample.y;
+        gP.set(bx, baseY - 0.06, bz);
         gE.set((rng(i * 13 + c) - 0.5) * 0.3, rng(i * 17 + c * 5) * Math.PI, (rng(i * 19 + c) - 0.5) * 0.3);
         gQ.setFromEuler(gE);
         // Height used to compound TWO independent draws (uniform scale ×
         // height factor), which multiplied out to 0.55x..2.39x — a 4.3x spread,
         // so blades in one tuft could differ more than fourfold. Draw the
         // uniform scale on its rails, then clamp the composed height to its own.
-        const sc = floraScale(rng(i * 23 + c * 3), FLORA_SCALE.grass);
-        gS.set(sc, clampFloraScale(sc * (0.92 + rng(i * 29 + c) * 0.36), FLORA_SCALE.grassHeight), sc);
+        gS.set(sc, heightScale, sc);
         gM.compose(gP, gQ, gS);
         grass.setMatrixAt(placed, gM);
-        gColor.copy(paletteGrass).lerp(paletteFoliage, rng(i * 31 + c) * 0.6).multiplyScalar(1.0 + rng(i * 37 + c) * 0.4);
+        // Tint from the TERRAIN VERTEX COLOUR under the blade (±10% value),
+        // nudged a little toward the island's foliage green. The old tint was
+        // an absolute palette lerp, so dark saturated tufts sat on the pale
+        // mint terrain of the bone/atoll isles like cut-out stickers.
+        if (ground && ground.colorAt(bx, bz, gColor)) {
+          gColor.lerp(paletteFoliage, 0.22).multiplyScalar(0.9 + tintRoll * 0.2);
+        } else {
+          gColor.copy(paletteGrass).lerp(paletteFoliage, tintRoll * 0.6).multiplyScalar(1.0 + rng(i * 37 + c) * 0.4);
+        }
         grass.setColorAt(placed, gColor);
         placed += 1;
       }
@@ -349,11 +508,9 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       }
       fpos.needsUpdate = true;
     }
-    const ferns = new THREE.InstancedMesh(
-      fernGeo,
-      new THREE.MeshStandardMaterial({ color: 0xffffff, map: makeFernFrondTexture(), roughness: 0.92, side: THREE.DoubleSide, alphaTest: 0.4 }),
-      fernCount,
-    );
+    const fernMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: makeFernFrondTexture(), roughness: 0.92, side: THREE.DoubleSide, alphaTest: 0.4 });
+    liftFoliageNormals(fernMat, 0.7);   // fronds keep more of their own form than blades
+    const ferns = new THREE.InstancedMesh(fernGeo, fernMat, fernCount);
     // Cluster ferns into leafy clumps (2-3 fronds per seed) instead of
     // isolated cards, so they read as bushes/groundcover not scattered
     // cardboard (patrol-3).
@@ -364,13 +521,22 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       const sample = surfacePoint(dRatio, angle, 0);
       if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + terrain.peakEst * 0.85) continue;
       if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
+      if (onFloor(sample.x, sample.z)) continue;
       const clump = 2 + Math.floor(rng(seed * 71) * 2);
       for (let c = 0; c < clump && fernsPlaced < fernCount; c++) {
         const i = seed * 7 + c;
-        gP.set(sample.x + (rng(i * 47) - 0.5) * 0.7, sample.y - 0.09, sample.z + (rng(i * 59) - 0.5) * 0.7);
+        const fx = sample.x + (rng(i * 47) - 0.5) * 0.7;
+        const fz = sample.z + (rng(i * 59) - 0.5) * 0.7;
+        const sc = floraScale(rng(i * 61), FLORA_SCALE.fern);
+        const fernHit = ground?.hit(fx, fz) ?? null;
+        if (ground) {
+          if (!fernHit) continue;
+          if (fernHit.ny < MIN_SLOPE_COS) continue;
+          if (sample.y - fernHit.y > MAX_FLOAT) continue;
+        }
+        gP.set(fx, (fernHit ? fernHit.y : sample.y) - 0.09, fz);
         gE.set((rng(i * 47) - 0.5) * 0.24, rng(i * 53) * Math.PI * 2, (rng(i * 59) - 0.5) * 0.24);
         gQ.setFromEuler(gE);
-        const sc = floraScale(rng(i * 61), FLORA_SCALE.fern);
         gS.set(sc, sc, sc);
         gM.compose(gP, gQ, gS);
         ferns.setMatrixAt(fernsPlaced, gM);
@@ -403,7 +569,8 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       const dRatio = 0.86 + rng(i * 73 + 5) * 0.2;
       const sample = surfacePoint(dRatio, angle, 0);
       if (sample.y < 0.06 || sample.y > 1.5) continue; // wet-to-dry sand band only
-      gP.set(sample.x, sample.y + 0.015, sample.z);
+      const shellY = ground?.heightAt(sample.x, sample.z) ?? sample.y;
+      gP.set(sample.x, shellY + 0.015, sample.z);
       gE.set(0, rng(i * 79) * Math.PI * 2, 0);
       gQ.setFromEuler(gE);
       const sc = floraScale(rng(i * 83), FLORA_SCALE.shell);

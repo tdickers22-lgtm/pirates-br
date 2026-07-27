@@ -11,6 +11,8 @@ import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { assets } from '../../assets/AssetLibrary.js';
 import type { IslandBuildCtx } from './context.js';
+import { ensureMeshGround, seatOnDrawnGround, snapToDrawnGround } from './GroundTruth.js';
+import { flushContactShadows, queueContactShadow } from './ContactShadows.js';
 
 /** Rock outcrops, driftwood logs, bamboo clusters and the beached hull GLB.
  *  (The old client-only boulder/palm scatter is gone: palms and boulders come
@@ -18,10 +20,13 @@ import type { IslandBuildCtx } from './context.js';
  *  colliders players actually hit.) */
 export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
   const {
-    island, group, r, rng, lowDetail, surfacePoint, seatDecor, isSolidDecorPoint,
+    island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
     islandSeed, islandHeading, SURFACE_ABOVE_WATER, scaledCount,
     cliffMat, driftwoodMat, bambooMat, bambooGeo, buildPropInstance,
   } = ctx;
+  // Decor is placed on the analytic heightfield but LOOKED AT on the terrain
+  // mesh; snap every piece onto the drawn ground (see GroundTruth).
+  const ground = ensureMeshGround(ctx);
 
   const outcropCount = scaledCount(Math.round(r / 18), 2);
   for (let i = 0; i < outcropCount; i++) {
@@ -40,12 +45,14 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
       ),
       cliffMat,
     );
-    outcrop.position.copy(outcropSample);
-    outcrop.position.y -= seatDecor(outcropSample.x, outcropSample.z, 0.5 * ocScale).drop;
+    const ocSeat = seatOnDrawnGround(ctx, outcropSample.x, outcropSample.z, 0.5 * ocScale, { bite: 0.1 });
+    outcrop.position.set(outcropSample.x, ocSeat.y + ocH * 0.22, outcropSample.z);
     outcrop.rotation.set(rng(i * 67) * 0.2, rng(i * 71) * Math.PI * 2, (rng(i * 73) - 0.5) * 0.28);
     outcrop.scale.setScalar(ocScale);
     outcrop.castShadow = true;
     outcrop.receiveShadow = true;
+    outcrop.name = 'decor-outcrop';
+    queueContactShadow(ctx, outcropSample.x, outcropSample.z, 0.5 * ocScale, 0.85);
     group.add(outcrop);
   }
 
@@ -55,6 +62,7 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
     const distRatio = 0.76 + rng(i * 229) * 0.16;
     const logPos = surfacePoint(distRatio, angle, 0.04);
     if (!isSolidDecorPoint(logPos, SURFACE_ABOVE_WATER, -0.2)) continue;
+    snapToDrawnGround(ground, logPos, 0.02);
     const logLen = 1.4 + rng(i * 233) * 2.2;
     const log = new THREE.Mesh(
       new THREE.CylinderGeometry(0.08 + rng(i * 239) * 0.05, 0.11, logLen, 6),
@@ -68,6 +76,8 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
     );
     log.castShadow = false;
     log.receiveShadow = true;
+    log.name = 'decor-driftwood';
+    queueContactShadow(ctx, logPos.x, logPos.z, logLen * 0.34, 0.8);
     group.add(log);
   }
 
@@ -79,6 +89,7 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
       const clusterDist = 0.12 + rng(g * 257) * 0.22;
       const clusterCenter = surfacePoint(clusterDist, clusterAngle);
       if (!isSolidDecorPoint(clusterCenter)) continue;
+      queueContactShadow(ctx, clusterCenter.x, clusterCenter.z, 1.15, 0.45);
       const stalkCount = 3 + Math.floor(rng(g * 263) * 3);
       for (let b = 0; b < stalkCount; b++) {
         const bh = 3.2 + rng(g * 269 + b) * 2.8;
@@ -88,8 +99,10 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
         // bases cut off. Seat each stalk on its own sample (sunk 0.15m).
         const bx = clusterCenter.x + (rng(b * 271 + g) - 0.5) * 1.4;
         const bz = clusterCenter.z + (rng(b * 277 + g) - 0.5) * 1.4;
-        const by = getIslandSurfaceY(island, bx + island.position.x, bz + island.position.z) - 0.15;
+        const by = (ground?.heightAt(bx, bz)
+          ?? getIslandSurfaceY(island, bx + island.position.x, bz + island.position.z)) - 0.15;
         bamboo.position.set(bx, bh * 0.5 + by, bz);
+        bamboo.name = 'decor-bamboo';
         bamboo.rotation.set(
           (rng(b * 279 + g) - 0.5) * 0.1,
           rng(b * 281 + g) * Math.PI * 2,
@@ -118,6 +131,10 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
       // Beached hull skeleton from the GLB library (interim placement — a
       // later pass moves landmarks to the server prop registry).
       wreckGlb.rotation.z = (rng(islandSeed * 19) - 0.5) * 0.2;
+      // Half-beached by design: seat the keel on the drawn sand, not the
+      // analytic one, or the hull hangs over the wet-sand chord.
+      wreckGlb.position.y = snapToDrawnGround(ground, wreckPos.clone(), -0.15).y;
+      wreckGlb.name = 'decor-beached-wreck';
       group.add(wreckGlb);
     }
   }
@@ -125,7 +142,8 @@ export function buildRockAndDriftDecor(ctx: IslandBuildCtx) {
 
 /** Beach detail: shells, starfish, seaweed clumps, tide pools. */
 export function buildBeachDecor(ctx: IslandBuildCtx) {
-  const { group, r, rng, lowDetail, surfacePoint, seatDecor, isSolidDecorPoint, scaledCount, boulderGeo, boulderMat } = ctx;
+  const { group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, scaledCount, boulderGeo, boulderMat } = ctx;
+  const ground = ensureMeshGround(ctx);
   if (!lowDetail) {
     const shellMat = new THREE.MeshStandardMaterial({ color: 0xf6e3b8, roughness: 0.6 });
     const shellMatPink = new THREE.MeshStandardMaterial({ color: 0xf2b5b0, roughness: 0.55 });
@@ -139,6 +157,7 @@ export function buildBeachDecor(ctx: IslandBuildCtx) {
       const distRatio = 0.78 + rng(i * 607) * 0.18;
       const pos = surfacePoint(distRatio, angle, 0.04);
       if (pos.y > 5.5 || !isSolidDecorPoint(pos, 0.2, -0.18)) continue; // beach only
+      snapToDrawnGround(ground, pos, 0.02);
       const pick = rng(i * 613) * 4;
       if (pick < 1) {
         // Conch shell
@@ -193,6 +212,7 @@ export function buildBeachDecor(ctx: IslandBuildCtx) {
         const distRatio = 0.84 + rng(i * 677) * 0.1;
         const pos = surfacePoint(distRatio, angle, 0.02);
         if (pos.y > 5.7 || !isSolidDecorPoint(pos, 0.2, -0.18)) continue;
+        snapToDrawnGround(ground, pos, 0);
         const pool = new THREE.Mesh(
           new THREE.CircleGeometry(0.7 + rng(i * 681) * 0.6, 14),
           tidePoolMat,
@@ -211,9 +231,10 @@ export function buildBeachDecor(ctx: IslandBuildCtx) {
           rock.scale.setScalar(rockScale);
           const rx = pos.x + Math.cos(ra) * (0.85 + rng(r2 * 687 + i) * 0.3);
           const rz = pos.z + Math.sin(ra) * (0.85 + rng(r2 * 689 + i) * 0.3);
-          const seat = seatDecor(rx, rz, rockScale * 0.9);
-          rock.position.set(rx, seat.groundY - seat.drop + rockScale * 0.45, rz);
+          const seat = seatOnDrawnGround(ctx, rx, rz, rockScale * 0.9, { bite: 0 });
+          rock.position.set(rx, seat.y + rockScale * 0.45, rz);
           rock.rotation.set(rng(r2 * 691) * Math.PI, rng(r2 * 693) * Math.PI, rng(r2 * 697) * Math.PI);
+          rock.name = 'decor-poolrock';
           group.add(rock);
         }
       }
@@ -223,7 +244,7 @@ export function buildBeachDecor(ctx: IslandBuildCtx) {
 
 /** Rock cairns scattered along higher ground. */
 export function buildCairns(ctx: IslandBuildCtx) {
-  const { group, r, rng, lowDetail, surfacePoint, seatDecor, isSolidDecorPoint, scaledCount, boulderGeo, boulderMat } = ctx;
+  const { group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, scaledCount, boulderGeo, boulderMat } = ctx;
   if (!lowDetail) {
     const cairnCount = scaledCount(2 + Math.round(r / 50), 1);
     for (let i = 0; i < cairnCount; i++) {
@@ -232,8 +253,10 @@ export function buildCairns(ctx: IslandBuildCtx) {
       const base = surfacePoint(distRatio, angle, 0);
       if (base.y < 5.6 || !isSolidDecorPoint(base, 5.6, -0.2)) continue;
       const cairn = new THREE.Group();
-      cairn.position.copy(base);
-      cairn.position.y -= seatDecor(base.x, base.z, 0.4).drop;
+      cairn.name = 'decor-cairn';
+      const cairnSeat = seatOnDrawnGround(ctx, base.x, base.z, 0.4, { bite: 0.16 });
+      cairn.position.set(base.x, cairnSeat.y, base.z);
+      queueContactShadow(ctx, base.x, base.z, 0.62, 0.85);
       const stoneCount = 3 + Math.floor(rng(i * 317) * 2);
       let yOff = 0;
       for (let s = 0; s < stoneCount; s++) {
@@ -257,6 +280,7 @@ export function buildCairns(ctx: IslandBuildCtx) {
  *  culled with the rest of the island group. */
 export function buildPebbles(ctx: IslandBuildCtx) {
   const { group, r, rng, lowDetail, visualDetail, surfacePoint, isSolidDecorPoint, paletteRock } = ctx;
+  const ground = ensureMeshGround(ctx);
   if (!lowDetail) {
     const pebbleCount = Math.min(1400, Math.round(r * (visualDetail < 0.85 ? 2.4 : 4.2)));
     const pebbleGeo = new THREE.DodecahedronGeometry(1, 0);
@@ -278,7 +302,7 @@ export function buildPebbles(ctx: IslandBuildCtx) {
       const p = surfacePoint(distRatio, angle, 0);
       if (!isSolidDecorPoint(p, 4.4, -0.1)) continue;
       const s = 0.05 + rng(i * 937) * 0.14;
-      pPos.set(p.x, p.y - s * 0.35, p.z);
+      pPos.set(p.x, (ground?.heightAt(p.x, p.z) ?? p.y) - s * 0.35, p.z);
       pEuler.set(rng(i * 941) * Math.PI, rng(i * 947) * Math.PI, rng(i * 953) * Math.PI);
       pQuat.setFromEuler(pEuler);
       pScale.set(s * (0.8 + rng(i * 967) * 0.7), s * (0.5 + rng(i * 971) * 0.5), s * (0.8 + rng(i * 977) * 0.6));
@@ -297,6 +321,7 @@ export function buildPebbles(ctx: IslandBuildCtx) {
       if (pebbles.instanceColor) pebbles.instanceColor.needsUpdate = true;
       pebbles.castShadow = false;
       pebbles.receiveShadow = true;
+      pebbles.name = 'island-pebbles';
       group.add(pebbles);
     }
   }
@@ -308,9 +333,10 @@ export function buildPebbles(ctx: IslandBuildCtx) {
  *  boulder clusters, fallen trunks and low scrub beds. */
 export function buildInteriorDressing(ctx: IslandBuildCtx) {
   const {
-    island, group, r, rng, lowDetail, surfacePoint, seatDecor, isSolidDecorPoint,
+    island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
     scaledCount, boulderGeo, boulderMat, applyFoliageSway,
   } = ctx;
+  const ground = ensureMeshGround(ctx);
   if (!lowDetail && r > 36) {
     // Gate at r>36 (not 58): the audit's three barren interiors were Castaway
     // Reach (r=88) but also Rumrunner Key (42) and Gallows Sands (38).
@@ -345,8 +371,9 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
           const ox = (rng(s * 619 + i) - 0.5) * 3.4;
           const oz = (rng(s * 631 + i) - 0.5) * 3.4;
           const sc = 0.5 + rng(s * 641 + i) * 1.5;
-          const seat = seatDecor(base.x + ox, base.z + oz, sc, 0.6);
-          xfPos.set(base.x + ox, seat.groundY - seat.drop - sc * 0.34, base.z + oz);
+          const seat = seatOnDrawnGround(ctx, base.x + ox, base.z + oz, sc, { capSink: 0.6, bite: 0 });
+          xfPos.set(base.x + ox, seat.y - sc * 0.34, base.z + oz);
+          queueContactShadow(ctx, base.x + ox, base.z + oz, sc * 0.78, 0.9);
           xfEuler.set((rng(s * 659 + i) - 0.5) * 0.7, rng(s * 661 + i) * Math.PI, (rng(s * 673 + i) - 0.5) * 0.7);
           xfQuat.setFromEuler(xfEuler);
           xfScale.set(sc * (0.8 + rng(s * 643 + i) * 0.6), sc * (0.6 + rng(s * 647 + i) * 0.5), sc * (0.8 + rng(s * 653 + i) * 0.6));
@@ -357,8 +384,9 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
         // a 7-sided procedural cylinder read as a dark rectangular plank from
         // any distance (caught in verification).
         const trunkScale = 1.5 + rng(i * 677) * 1.4;
-        const seat = seatDecor(base.x, base.z, trunkScale * 1.2, 0.5);
-        const logY = seat.groundY - seat.drop;
+        const seat = seatOnDrawnGround(ctx, base.x, base.z, trunkScale * 1.2, { capSink: 0.5, bite: 0 });
+        const logY = seat.y;
+        queueContactShadow(ctx, base.x, base.z, trunkScale * 0.85, 0.85);
         if (logAsset) {
           logObj.position.set(base.x, logY - 0.06, base.z);
           logObj.rotation.set(0, rng(i * 691) * Math.PI * 2, (rng(i * 701) - 0.5) * 0.2);
@@ -382,8 +410,10 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
           const ox = (rng(b * 719 + i) - 0.5) * 4.2;
           const oz = (rng(b * 727 + i) - 0.5) * 4.2;
           const sc = 0.6 + rng(b * 733 + i) * 0.7;
-          const gy = getIslandSurfaceY(island, base.x + ox + island.position.x, base.z + oz + island.position.z);
+          const gy = ground?.heightAt(base.x + ox, base.z + oz)
+            ?? getIslandSurfaceY(island, base.x + ox + island.position.x, base.z + oz + island.position.z);
           xfPos.set(base.x + ox, gy - 0.08, base.z + oz);
+          queueContactShadow(ctx, base.x + ox, base.z + oz, sc * 0.62, 0.45);
           xfEuler.set(0, rng(b * 739 + i) * Math.PI * 2, 0);
           xfQuat.setFromEuler(xfEuler);
           xfScale.set(sc, sc * (0.8 + rng(b * 743 + i) * 0.4), sc);
@@ -397,6 +427,7 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
       stoneInst.instanceMatrix.needsUpdate = true;
       stoneInst.castShadow = true;
       stoneInst.receiveShadow = true;
+      stoneInst.name = 'decor-interior-stones';
       group.add(stoneInst);
     }
     if (logXf.length && logAsset) {
@@ -405,6 +436,7 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
       logInst.instanceMatrix.needsUpdate = true;
       logInst.castShadow = true;
       logInst.receiveShadow = true;
+      logInst.name = 'decor-interior-logs';
       group.add(logInst);
     }
     if (bushXf.length && bushAsset) {
@@ -414,6 +446,7 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
       bushInst.instanceMatrix.needsUpdate = true;
       bushInst.castShadow = false;
       bushInst.receiveShadow = true;
+      bushInst.name = 'decor-interior-scrub';
       group.add(bushInst);
     }
   }
@@ -426,6 +459,7 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
     island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint,
     islandSeed, islandHeading, SURFACE_ABOVE_WATER, scaledCount,
   } = ctx;
+  const ground = ensureMeshGround(ctx);
   if (r > 38) {
     const bananaCount = scaledCount(Math.round(r / 36), 1);
     const bananaTrunkMat = new THREE.MeshStandardMaterial({ color: 0x6c4d2a, roughness: 1 });
@@ -439,7 +473,9 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
       if (pos.y > bananaHeightCap) continue;
       if (!isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
       const tree = new THREE.Group();
-      tree.position.copy(pos);
+      tree.name = 'decor-banana-tree';
+      tree.position.copy(snapToDrawnGround(ground, pos, -0.08));
+      queueContactShadow(ctx, pos.x, pos.z, 1.05, 0.6);
       const trunkH = 1.8 + rng(i * 359) * 1.0;
       const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, trunkH, 6), bananaTrunkMat);
       trunk.position.y = trunkH * 0.5;
@@ -477,7 +513,9 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
       const pos = surfacePoint(distRatio, angle, 0);
       if (!isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
       const tree = new THREE.Group();
-      tree.position.copy(pos);
+      tree.name = 'decor-dead-snag';
+      tree.position.copy(snapToDrawnGround(ground, pos, -0.12));
+      queueContactShadow(ctx, pos.x, pos.z, 0.72, 0.75);
       const trunkH = 2.6 + rng(i * 371) * 2.2;
       const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.22, trunkH, 5), deadMat);
       trunk.rotation.z = (rng(i * 373) - 0.5) * 0.18;
@@ -502,7 +540,8 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
     const logAngle = rng(islandSeed * 163) * Math.PI * 2;
     const pos = surfacePoint(0.32 + rng(islandSeed * 167) * 0.18, logAngle, 0);
     const log = new THREE.Group();
-    log.position.copy(pos);
+    log.name = 'decor-mossy-log';
+    log.position.copy(snapToDrawnGround(ground, pos, -0.1));
     log.rotation.y = rng(islandSeed * 173) * Math.PI * 2;
     const logMat = new THREE.MeshStandardMaterial({ color: 0x4d3a23, roughness: 1 });
     const mossMat = new THREE.MeshStandardMaterial({ color: 0x3a6b30, roughness: 0.9 });
@@ -532,7 +571,10 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
       cap.position.set(localX, 0.18, sideZ);
       log.add(cap);
     }
-    if (isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) group.add(log);
+    if (isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) {
+      queueContactShadow(ctx, pos.x, pos.z, length * 0.42, 0.85);
+      group.add(log);
+    }
   }
 
   // ── Beached dinghy — small wrecked rowboat in the dunes ──
@@ -540,7 +582,8 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
     const dinghyAngle = islandHeading + Math.PI * (rng(islandSeed * 217) > 0.5 ? 0.4 : -0.4);
     const pos = surfacePoint(0.86 + rng(islandSeed * 223) * 0.06, dinghyAngle, 0);
     const dinghy = new THREE.Group();
-    dinghy.position.copy(pos);
+    dinghy.name = 'decor-dinghy';
+    dinghy.position.copy(snapToDrawnGround(ground, pos, -0.06));
     dinghy.rotation.y = -dinghyAngle + Math.PI * 0.5 + (rng(islandSeed * 229) - 0.5) * 0.5;
     dinghy.rotation.z = (rng(islandSeed * 233) - 0.5) * 0.4;
     const hullMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
@@ -572,7 +615,10 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
     blade.position.set(0.55, 0.4, -0.95);
     blade.rotation.y = 0.4;
     dinghy.add(blade);
-    if (isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.15)) group.add(dinghy);
+    if (isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.15)) {
+      queueContactShadow(ctx, pos.x, pos.z, 1.35, 0.8);
+      group.add(dinghy);
+    }
   }
 }
 
@@ -580,6 +626,7 @@ export function buildTreesAndStrays(ctx: IslandBuildCtx) {
  *  (visual decoration, separate from the gameplay chests). */
 export function buildVinesAndStakes(ctx: IslandBuildCtx) {
   const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, SURFACE_ABOVE_WATER, scaledCount } = ctx;
+  const ground = ensureMeshGround(ctx);
   if (!lowDetail && island.profile.heightProfile > 0.3) {
     const vineMat = new THREE.MeshStandardMaterial({ color: 0x355224, roughness: 0.95, side: THREE.DoubleSide });
     const vineCount = scaledCount(Math.round(r / 14), 3);
@@ -597,6 +644,7 @@ export function buildVinesAndStakes(ctx: IslandBuildCtx) {
       if (vineLen > drop * 2) continue; // skip if vines would tunnel through ground
       // Vine ribbon
       const vine = new THREE.Mesh(new THREE.PlaneGeometry(0.16, vineLen), vineMat);
+      vine.name = 'cliff-vine';
       vine.position.set(top.x + Math.cos(va) * 0.4, top.y - vineLen * 0.5 + 0.1, top.z + Math.sin(va) * 0.4);
       vine.rotation.y = va + Math.PI * 0.5;
       vine.rotation.z = (rng(i * 957) - 0.5) * 0.18;
@@ -605,6 +653,7 @@ export function buildVinesAndStakes(ctx: IslandBuildCtx) {
       for (let l = 0; l < 4; l++) {
         const lt = (l + 0.5) / 4;
         const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.18), vineMat);
+        leaf.name = 'cliff-vine-leaf';
         leaf.position.set(
           top.x + Math.cos(va) * 0.4,
           top.y - vineLen * lt + 0.1,
@@ -627,7 +676,8 @@ export function buildVinesAndStakes(ctx: IslandBuildCtx) {
       const sp = surfacePoint(sd, sa, 0);
       if (!isSolidDecorPoint(sp, SURFACE_ABOVE_WATER, -0.2)) continue;
       const stake = new THREE.Group();
-      stake.position.copy(sp);
+      stake.name = 'decor-stake';
+      stake.position.copy(snapToDrawnGround(ground, sp, -0.05));
       stake.rotation.y = rng(i * 983 + islandSeed) * Math.PI * 2;
       // Two crossed sticks forming an X
       for (let cross = 0; cross < 2; cross++) {
@@ -644,4 +694,10 @@ export function buildVinesAndStakes(ctx: IslandBuildCtx) {
       group.add(stake);
     }
   }
+
+  // LAST client decor pass on the island: every piece that wanted a contact
+  // shadow has asked by now, so bake them into the island's single instanced
+  // decal mesh. Unconditional — a low-detail island queues nothing and this
+  // just clears the (empty) queue.
+  flushContactShadows(ctx);
 }

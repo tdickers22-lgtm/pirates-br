@@ -430,6 +430,35 @@ const FOOTPRINT_RING: ReadonlyArray<readonly [number, number]> = (() => {
   return [[1, 0], [-1, 0], [0, 1], [0, -1], [d, d], [d, -d], [-d, d], [-d, -d]];
 })();
 
+/**
+ * The DRAWN surface, when a renderer has offered one.
+ *
+ * The analytic heightfield and the triangle mesh built from it are not the same
+ * surface: a triangle is a chord, so wherever the field is convex — every
+ * structure stamp's rim, every terrace lip, every ridge — the drawn ground runs
+ * BELOW `getIslandSurfaceY`. Props seated on the function then hover over the
+ * island the player is looking at (the floating dockside boulder).
+ *
+ * The client installs a sampler over its rendered terrain (see
+ * client/world/island/GroundTruth.ts); the server never does, so server-side
+ * placement stays purely analytic and bit-deterministic.
+ */
+export type RenderedSurfaceSampler = (islandId: string, worldX: number, worldZ: number) => number | null;
+
+let renderedSurfaceSampler: RenderedSurfaceSampler | null = null;
+
+/** Install (or clear, with null) the rendered-surface sampler. Client only. */
+export function setRenderedSurfaceSampler(sampler: RenderedSurfaceSampler | null): void {
+  renderedSurfaceSampler = sampler;
+}
+
+/** Ground height a prop seats against: the drawn surface where one is
+ *  published for this island, else the analytic heightfield. */
+export function getSeatSurfaceY(island: Island, x: number, z: number): number {
+  const drawn = renderedSurfaceSampler?.(island.id, x, z);
+  return drawn === null || drawn === undefined ? getIslandSurfaceY(island, x, z) : drawn;
+}
+
 /** Convenience for placement/tests: world-space Y a prop rests at. The base
  *  seats on the LOWEST terrain sample under its FULL footprint (center + 8
  *  ring points at the collider radius) minus a small bite — narrower/sparser
@@ -448,11 +477,11 @@ export function getPropGroundY(island: Island, prop: IslandProp): number {
     : prop.type === 'crag'
       ? getPropBoundsRadius(prop.type, prop.scale)
       : (SPACING_OVERRIDES[prop.type] ?? 0) * prop.scale * 0.45;
-  const center = getIslandSurfaceY(island, prop.x, prop.z);
+  const center = getSeatSurfaceY(island, prop.x, prop.z);
   let ground = center;
   if (footprint > 0.2) {
     for (const [ox, oz] of FOOTPRINT_RING) {
-      ground = Math.min(ground, getIslandSurfaceY(island, prop.x + ox * footprint, prop.z + oz * footprint));
+      ground = Math.min(ground, getSeatSurfaceY(island, prop.x + ox * footprint, prop.z + oz * footprint));
     }
     // Tents may bed deeper into a hillside (canvas skirts hide it); other
     // built props keep the tight cap so a steep edge can't drown a vignette.
@@ -465,9 +494,8 @@ export function getPropGroundY(island: Island, prop: IslandProp): number {
       ground = Math.max(ground, center - sinkCap);
     }
   }
-  // Crags take a deeper bite than the 7 cm everything else gets: the rendered
-  // terrain mesh interpolates BELOW the analytic surface across a convex
-  // ridge, which is exactly where crags are placed, so a flush seat still
-  // reads as a hovering rock.
+  // Crags take a deeper bite than the 7 cm everything else gets: bedrock is
+  // pushing OUT of the flank, so it should read rooted even where the mesh
+  // chord under a convex ridge sits a little proud of the seat samples.
   return ground - (prop.type === 'crag' ? 0.45 : 0.07);
 }

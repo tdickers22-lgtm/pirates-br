@@ -48,6 +48,45 @@ function getSeaRockMaterial(): THREE.MeshStandardMaterial {
   return mat;
 }
 
+/**
+ * The part of a sea stack the sea is standing on.
+ *
+ * Both the GLB spires and the procedural fallback ended AT y=0: swimming past
+ * one you watched the rock stop dead in the water with open sea visible under
+ * it, and a storm trough (~2.5 m below the still line) exposed the whole flat
+ * cut as a slab hovering over the swell. A stack is a drowned mountain — give
+ * it the 4 m of drowned mountain the waterline hides, flaring outward like a
+ * real wave-cut base. It takes the shared material's submerged colour band
+ * (`_wet` keys on world Y) for free, and stays inside the collider radius so
+ * nothing new can be bumped into.
+ */
+function addSubmergedSkirt(group: THREE.Group, radius: number, lowDetail: boolean) {
+  // Top NARROWER than the spire's own base and barely above the still line, so
+  // the taper reads as the rock continuing under the swell — a wide collar at
+  // the surface just swaps one artefact (a rock cut off at y=0) for another (a
+  // slab floating on the water).
+  const top = 0.3;
+  const bottom = -4.0;
+  const height = top - bottom;
+  const skirt = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius * 0.6, radius * 0.98, height, lowDetail ? 6 : 10, 1, true),
+    getSeaRockMaterial(),
+  );
+  skirt.position.y = (top + bottom) * 0.5;
+  skirt.castShadow = false;
+  skirt.receiveShadow = false;
+  skirt.name = 'sea-rock-skirt';
+  group.add(skirt);
+  const floor = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.98, lowDetail ? 6 : 10),
+    getSeaRockMaterial(),
+  );
+  floor.rotation.x = Math.PI * 0.5;   // faces down — the open cylinder's cap
+  floor.position.y = bottom;
+  floor.name = 'sea-rock-skirt-cap';
+  group.add(floor);
+}
+
 export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
   const group = new THREE.Group();
   group.name = `sea-rock-${rock.id}`;
@@ -76,6 +115,7 @@ export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
       }
     });
     group.add(rockClone);
+    addSubmergedSkirt(group, mainColliderRadius, lowDetail);
 
     const foam = new THREE.Mesh(
       new THREE.RingGeometry(rock.radius * 0.8, rock.radius * 1.12, lowDetail ? 12 : 24),
@@ -116,6 +156,8 @@ export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
     shard.receiveShadow = !lowDetail;
     group.add(shard);
   }
+
+  addSubmergedSkirt(group, rock.radius * 0.7, lowDetail);
 
   const foam = new THREE.Mesh(
     new THREE.RingGeometry(rock.radius * 0.8, rock.radius * 1.12, lowDetail ? 12 : 24),
