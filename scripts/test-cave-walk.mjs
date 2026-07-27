@@ -156,15 +156,22 @@ console.log('\n── caves are solid: the hunter\'s escape repros ──');
 // real stance in a real gallery on seed 12345; if generation ever moves a
 // gallery out from under one, the membership assert below fails loudly rather
 // than the pin silently passing on open hillside.
+//
+// REPINNED (terrain-form wave): mountain summits became two-scale (wide massif
+// shoulder + narrow crest), which moved Widow's Watch's whole network and one
+// of Crow's Perch's side veins. The three pins below marked ✎ are the same KIND
+// of stance — a body a body-width off a gallery's lateral wall, deep in the
+// tunnel, facing that wall — re-sited in the reshaped galleries. Every other
+// pin is the hunter's original coordinate and still lands underground.
 const ESCAPE_PINS = [
   ['old-maw-caldera', 44.11, 32.90, 3.93], ['old-maw-caldera', 37.96, 46.75, 2.36],
-  ['crow-s-perch', -304.10, 241.63, 3.14], ['crow-s-perch', -332.02, 268.96, 1.18],
+  ['crow-s-perch', -304.10, 241.63, 3.14], ['crow-s-perch', -333.87, 261.14, 4.24], // ✎
   ['crow-s-perch', -298.49, 266.57, 1.96], ['crow-s-perch', -312.47, 265.68, 0.39],
   ['castaway-reach', 400.79, -392.59, 1.18], ['castaway-reach', 414.35, -373.34, 1.96],
   ['skull-cove', 709.41, -71.96, 5.89], ['skull-cove', 706.38, -60.74, 0.0],
   ['skull-cove', 690.97, -62.53, 0.0],
   ['gallows-sands', 640.38, -647.48, 5.50], ['gallows-sands', 653.95, -647.32, 2.36],
-  ['widow-s-watch', -604.63, -561.53, 0.79], ['widow-s-watch', -603.12, -550.24, 3.53],
+  ['widow-s-watch', -617.86, -561.71, 2.13], ['widow-s-watch', -611.70, -555.15, 1.02], // ✎
 ];
 let pinEscapes = 0, pinWorst = 0, pinWorstAt = '';
 for (const [id, x, z, heading] of ESCAPE_PINS) {

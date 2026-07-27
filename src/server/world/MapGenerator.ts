@@ -356,6 +356,65 @@ export class MapGenerator {
     return islands;
   }
 
+  /** How far from every coast water has to be to count as DEAD SPACE. */
+  static readonly SEA_VOID_MIN_CLEARANCE = 170;
+
+  /**
+   * The DEAD SPACE of the Reach. A large slice of sailable water (measured by
+   * test-sea-voids: ~27% of the water inside the final storm ring is >120 m
+   * from any coast, ~5% is >180 m; over the whole 2000 m square it is 38% and
+   * 15%) holds nothing but scattered rocks — you set a heading, hold it for a
+   * minute and a half, and nothing happens. This finds the deepest pockets so
+   * micro-POIs (a floating wreck with lootable barrels, a gull-circled flotsam
+   * raft, a lone mast on a shoal) can be seeded into them: landmarks you only
+   * ever find by sailing, never charted.
+   *
+   * Pure geometry, no rng, and keyed ONLY to the fixed island layout — sea
+   * rocks and ship spawns are drawn from the match stream, so folding them into
+   * the score would make the sites move between matches and stop them being
+   * learnable. (A caller that wants them respected passes them as `obstacles`;
+   * the wiring pass should instead teach generateSeaRocks to give the sites a
+   * berth, the way it already does for islands and spawns.) A coarse grid of
+   * the sailable disc is scored by clearance to the nearest COAST and to the
+   * storm wall, then the deepest cells are taken greedily with `spacing`
+   * between picks, so the sites land in DIFFERENT voids rather than four
+   * corners of one.
+   */
+  findSeaVoids(
+    islands: Island[],
+    obstacles: Array<{ position: Vec3; radius?: number }> = [],
+    count = 4,
+    spacing = 300,
+    obstacleClear = 60,
+  ): Array<{ x: number; z: number; clearance: number }> {
+    const step = 25;
+    const limit = WORLD.HALF - 120; // inside the final storm ring, off the wall
+    const cells: Array<{ x: number; z: number; clearance: number }> = [];
+    for (let x = -limit; x <= limit; x += step) {
+      for (let z = -limit; z <= limit; z += step) {
+        if (Math.hypot(x, z) > limit) continue;
+        let clearance = limit - Math.hypot(x, z); // the storm wall is an edge too
+        for (const island of islands) {
+          const d = Math.hypot(x - island.position.x, z - island.position.z) - getIslandMaxRadius(island);
+          if (d < clearance) clearance = d;
+        }
+        if (clearance < MapGenerator.SEA_VOID_MIN_CLEARANCE) continue;
+        if (obstacles.some((o) => Math.hypot(x - o.position.x, z - o.position.z) - (o.radius ?? 0) < obstacleClear)) continue;
+        cells.push({ x, z, clearance });
+      }
+    }
+    // Deepest water first, ties broken by position, so the pick is deterministic
+    // regardless of scan order.
+    cells.sort((a, b) => b.clearance - a.clearance || a.x - b.x || a.z - b.z);
+    const picks: Array<{ x: number; z: number; clearance: number }> = [];
+    for (const cell of cells) {
+      if (picks.length >= count) break;
+      if (picks.some((p) => Math.hypot(p.x - cell.x, p.z - cell.z) < spacing)) continue;
+      picks.push(cell);
+    }
+    return picks;
+  }
+
   /** Walkable rope bridge between the two main peaks on split-landmass styles.
    *  Endpoints are the actual LOCAL MAXIMA of the final heightfield (grid
    *  search around each gaussian hill center — detail noise shifts the true
@@ -1731,6 +1790,79 @@ export class MapGenerator {
       if (!clearOf(pos.x, pos.z, spacing)) continue;
       addProp(spec.type, pos.x, pos.z, ra(rng), scale);
       placed++;
+    }
+
+    // 5. INTERIOR FILL on the big isles. The base scatter's density is keyed to
+    //    RADIUS, but land AREA grows with radius squared — so the biggest
+    //    islands (Castaway Reach r=88 at 102 props over 34,000 m², Booty Bay
+    //    r=90 at 104) came out as vast empty lawns you crossed for twenty
+    //    seconds seeing nothing. This pass roughly doubles patch + scatter
+    //    density inside distRatio ~0.7, where the emptiness lives, leaving the
+    //    coastal band as authored. It draws from its OWN stream, and runs after
+    //    every existing placement, so nothing already tuned moves by a metre.
+    if (island.radius > 80) {
+      const fillRng = mulberry32((entry.seed ^ 0x51fbea27) >>> 0);
+      // 5a. Two more dense groves/thickets, held to the interior.
+      for (let p = 0; p < 2; p++) {
+        let cx = 0;
+        let cz = 0;
+        let found = false;
+        for (let tryC = 0; tryC < 30 && !found; tryC++) {
+          const pt = getIslandSurfacePoint(island, rr(fillRng, 0.18, 0.62), ra(fillRng), 0);
+          if (pt.y < 1.6) continue;
+          if (this.slopeAt(island, pt.x, pt.z) > 0.7) continue;
+          if (this.nearStamp(island, pt.x, pt.z, 5)) continue;
+          if (this.nearCave(island, pt.x, pt.z, 4)) continue;
+          if (island.dock && this.nearDockLine(island.dock, pt.x, pt.z, 6)) continue;
+          if (!clearOf(pt.x, pt.z, 3)) continue;
+          cx = pt.x;
+          cz = pt.z;
+          found = true;
+        }
+        if (!found) continue;
+        const patchR = rr(fillRng, 5, 8);
+        const fill = Math.min(14, Math.round(patchR * patchR * 0.2));
+        const localPlaced: Array<{ x: number; z: number }> = [];
+        let patchAttempts = fill * 6;
+        let placedInPatch = 0;
+        while (placedInPatch < fill && patchAttempts-- > 0) {
+          const a = ra(fillRng);
+          const rad = Math.pow(fillRng(), 1.5) * patchR;
+          const x = cx + Math.cos(a) * rad;
+          const z = cz + Math.sin(a) * rad;
+          if (getIslandSurfaceY(island, x, z) < 1.4) continue;
+          if (this.slopeAt(island, x, z) > 0.95) continue;
+          if (this.nearStamp(island, x, z, 0.6)) continue;
+          if (island.dock && this.nearDockLine(island.dock, x, z, 1.4)) continue;
+          if (!clearOf(x, z, 0.3)) continue;
+          if (localPlaced.some((q) => Math.hypot(q.x - x, q.z - z) < 0.62)) continue;
+          addProp(pickWeighted(fillRng, patchFlora).type, x, z, ra(fillRng), rr(fillRng, 0.85, 1.3));
+          localPlaced.push({ x, z });
+          placedInPatch++;
+        }
+      }
+      // 5b. Interior sprinkle — same biome mix, but every draw is pulled back
+      //     inside the island so it fills the lawn instead of crowding the
+      //     already-busy shoreline.
+      const fillTarget = Math.round(island.radius * SCATTER_DENSITY[entry.biome] * 0.72);
+      let fillPlaced = 0;
+      let fillAttempts = fillTarget * 10;
+      while (fillPlaced < fillTarget && fillAttempts-- > 0) {
+        const spec = pickWeighted(fillRng, mix);
+        const angle = ra(fillRng);
+        const distRatio = rr(fillRng, Math.max(spec.dMin, 0.12), Math.min(spec.dMax, 0.72));
+        const scale = rr(fillRng, spec.sMin, spec.sMax);
+        const pos = getIslandSurfacePoint(island, distRatio, angle, 0);
+        const spacing = getPropSpacingRadius(spec.type, scale);
+        if (pos.y < spec.minY) continue;
+        if (this.slopeAt(island, pos.x, pos.z) > spec.maxSlope) continue;
+        if (this.nearCave(island, pos.x, pos.z, 1.8 + spacing)) continue;
+        if (this.nearStamp(island, pos.x, pos.z, spacing + 0.4)) continue;
+        if (island.dock && this.nearDockLine(island.dock, pos.x, pos.z, spacing + 1.6)) continue;
+        if (!clearOf(pos.x, pos.z, spacing)) continue;
+        addProp(spec.type, pos.x, pos.z, ra(fillRng), scale);
+        fillPlaced++;
+      }
     }
 
     return props;

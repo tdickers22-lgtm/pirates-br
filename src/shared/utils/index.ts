@@ -686,25 +686,72 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // Twin/archipelago push secondary peak amplitude up so the second hill is a true peak
   const secondaryAmp = isTwin ? 2.2 : isArchipelago ? 1.8 : isMountain ? 1.35 : 1.55;
   const tertiaryAmp = isArchipelago ? 1.6 : 1.0;
-  // Mountain islands now build dramatically taller peaks — peakBoost can hit 1.6 and
-  // the multiplier is steeper, so a tall mountain genuinely dominates the skyline.
-  const mountainBoostFactor = isMountain ? 3.2 : 1.6;
-  const primaryHill = hillContribution(
+  // Mountain islands AND twin fangs build dramatically taller rock — peakBoost
+  // reaches 2.6 on a mountain and 1.5 on a twin, and the multiplier is steep, so
+  // both genuinely dominate the skyline. Twin used to sit on the gentle 1.6 path,
+  // which is why Kraken Tooth's "volcanic fangs" cleared barely 20 m.
+  const peakBoostFactor = isMountain ? 3.2 : isTwin ? 3.5 : 1.6;
+  /** Peak amplitude as a fraction of island radius (before the gaussian). */
+  const primaryPeakAmp = (0.018 + profile.heightProfile * 0.022)
+    * (1 + peakBoost * peakBoostFactor)
+    * (isTwin ? 1.8 : isArchipelago ? 1.4 : isMountain ? 1.6 : 1.32);
+  // Mountains/fangs: the CREST gaussian narrows as the peak grows — a sheer
+  // spire, not a wide rounded knoll.
+  const primaryPeakR = isMountain
+    ? Math.max(0.18, 0.3 - peakBoost * 0.04) + profile.mesaBias * 0.05
+    : isTwin
+      ? Math.max(0.19, 0.3 - peakBoost * 0.04) + profile.mesaBias * 0.05
+      : 0.34 + profile.mesaBias * 0.08 + peakBoost * 0.04;
+  // ── TWO-SCALE SUMMITS ──────────────────────────────────────────────────────
+  // A summit is a WIDE MASSIF SHOULDER carrying a NARROW CREST. A single
+  // narrowing gaussian turned every smaller mountain island into a flat lawn
+  // with a hairline needle through it (Widow's Watch, r=70: 236 m² of ground
+  // above 30 m on a 41,000 m² island) — from the sea it read as a green disc.
+  // The shoulder carries most of the mass out to ~0.6·radius so the island
+  // presents a real massif at 320 m; the crest still spires out of it.
+  const twoScaleHill = (
+    hillAngle: number,
+    hillOffset: number,
+    crestR: number,
+    amp: number,
+    shoulderR: number,
+    shoulderFrac: number,
+  ) => hillContribution(hillAngle, hillOffset, crestR, amp * (shoulderFrac > 0 ? 0.78 : 1))
+    + (shoulderFrac > 0 ? hillContribution(hillAngle, hillOffset, shoulderR, amp * shoulderFrac) : 0);
+  const massifFrac = isMountain ? 0.62 : isTwin ? 0.5 : 0;
+  const primaryHill = twoScaleHill(
     profile.primaryHillAngle,
     profile.primaryHillOffset,
-    // Mountains: the gaussian NARROWS as the peak grows — a sheer spire that
-    // dominates the skyline (reference: SoT), not a wider rounded knoll.
-    isMountain
-      ? Math.max(0.16, 0.3 - peakBoost * 0.045) + profile.mesaBias * 0.05
-      : 0.34 + profile.mesaBias * 0.08 + peakBoost * 0.04,
-    (0.018 + profile.heightProfile * 0.022) * (1 + peakBoost * mountainBoostFactor) * (isTwin || isArchipelago ? 1.4 : isMountain ? 1.6 : 1.32),
+    primaryPeakR,
+    primaryPeakAmp,
+    (isMountain ? 0.58 : 0.44) + profile.mesaBias * 0.06,
+    massifFrac,
   );
-  const secondaryHill = hillContribution(
-    profile.secondaryHillAngle,
-    profile.secondaryHillOffset,
-    0.3 + profile.secondaryHillScale * 0.1,
-    (0.01 + profile.secondaryHillScale * 0.018) * secondaryAmp,
-  );
+  // TWIN: the second FANG is a PEER of the first. It used to be built off the
+  // secondary-hill base — (0.01 + scale·0.018) · secondaryAmp, a ~3.8 m gaussian
+  // against a ~10 m primary — so Kraken Tooth's promised twin fangs rendered as
+  // one flat dark oval pancake. Now it is the primary formula, scaled by the
+  // profile's secondaryHillScale so the two fangs still differ in stature.
+  const twinFangAmp = primaryPeakAmp * clamp(profile.secondaryHillScale, 0.74, 1.0);
+  const secondaryHill = isTwin
+    ? twoScaleHill(
+      profile.secondaryHillAngle,
+      profile.secondaryHillOffset,
+      primaryPeakR,
+      twinFangAmp,
+      0.44 + profile.mesaBias * 0.06,
+      massifFrac,
+    )
+    : twoScaleHill(
+      profile.secondaryHillAngle,
+      profile.secondaryHillOffset,
+      0.3 + profile.secondaryHillScale * 0.1,
+      (0.01 + profile.secondaryHillScale * 0.018) * secondaryAmp,
+      0.52,
+      // Mountains give their second brow a shoulder too, so the massif reads as
+      // a ridge with two summits rather than a lawn with two needles.
+      isMountain ? 0.55 : 0,
+    );
   const tertiaryHill = profile.tertiaryHillScale > 0
     ? hillContribution(
       profile.tertiaryHillAngle,
@@ -720,7 +767,13 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // ── Signed coast profile: rim height depends on the per-angle coast type ──
   const coast = getIslandCoastWeights(island, angle);
   const seaLiftBase = 5.15 + island.radius * 0.0085;
-  const cliffLift = clamp(7.4 + island.radius * 0.03 * (0.7 + profile.heightProfile * 0.45), 7, 10);
+  // A CLIFF coast is a WALL you sail under, not a bank you step over. The old
+  // 7-10 m plinth stood barely 2-4 m proud of the 5.15 m interior shelf, so
+  // every "cliff" band read from a longboat as a lawn that happened to stop —
+  // the whole coastBias axis was invisible. 11-17.5 m of sheer rock (dropping
+  // to -5.5 m across distRatio 1.0→1.05, i.e. ~3 m of ground) reads as a
+  // headland at eye level and gives cliff-biased isles a real seaward face.
+  const cliffLift = clamp(11.5 + island.radius * 0.055 * (0.7 + profile.heightProfile * 0.45), 11, 17.5);
   const rockyLift = 3.3 + island.radius * 0.005;
   // Beaches hug the sea: low enough that swell laps visibly up the sand, high
   // enough that storm waves (~+2.5m peaks near the rim's wet-sand band) don't
@@ -756,9 +809,19 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     // Horseshoe: carve an open-water bay out of one side (opposite the main
     // ridge) so the land wraps as a C around a lagoon. The two arms stay land.
     const bayAngle = profile.primaryHillAngle + Math.PI;
-    const angFromBay = Math.abs(islandAngleDelta(angle, bayAngle));
+    // The wedge used to be a PURE angle test, so from above the bay's two edges
+    // were razor-straight radial cuts — a pie slice sawn out of a disc. An
+    // island-local fbm bends the boundary so the mouth MEANDERS like a real
+    // drowned valley. Sampled in island-local metres (turns rigidly with the
+    // island) and phased off the island seed, so every crescent bay differs and
+    // client mesh, server physics and prop seating still agree to the metre.
+    const bayPhase = coastPhase((profile.seed ?? 0x5eed) >>> 0, 7) * 21.7;
+    const bayWander = terrainFbm(localX * 0.011 + bayPhase, localZ * 0.011 - bayPhase, 2);
+    const angFromBay = Math.abs(islandAngleDelta(angle, bayAngle)) + bayWander * 0.36;
     const wedge = smoothstep(1.15, 0.35, angFromBay);          // 1 straight into the mouth
-    const bayRadial = smoothstep(0.16, 0.5, distRatio);        // keep a back land-bridge
+    // The back land-bridge breathes with the same field, so the head of the bay
+    // is a curved beach rather than a compass-perfect arc.
+    const bayRadial = smoothstep(0.16 + bayWander * 0.05, 0.5 + bayWander * 0.05, distRatio);
     crescentBay = wedge * bayRadial;
     floor = -3.6;
   } else if (isTwin) {
