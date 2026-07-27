@@ -53,7 +53,7 @@ export const PLAYER = {
    *  sink (they lose their respawn anchor, not the match). */
   SHIP_SINK_GOLD: 400,
   /** Iron Cuirass pool: combat damage chews through this before health.
-   *  Bought from the Gold Hoarder (pricey), lost on death — deliberately
+   *  Bought from the Tallyman (pricey), lost on death — deliberately
    *  a mid/late-game investment, not a lobby pickup. */
   MAX_ARMOR: 50,
   /** PvE skeletons pay a small bounty, not the full pirate reward. */
@@ -102,7 +102,7 @@ export const ECONOMY = {
   CHEST_VALUE_MAX: 1450,
   CHEST_SELL_MULTIPLIER: 1.65,
   HOARDER_QUEST_CHEST_BONUS: 1.3,
-  /** Iron Cuirass price at the Gold Hoarder — ~a chest-and-a-half of gold,
+  /** Iron Cuirass price at the Tallyman — ~a chest-and-a-half of gold,
    *  so armor is a real decision against the 9000g win target. */
   ARMOR_PRICE: 1200,
 } as const;
@@ -560,8 +560,10 @@ export const WEAPONS: Record<WeaponId, {
     ammoMax: 1, reserveMax: 5, range: 60, spread: 0.28, pellets: 1,
     knockback: 3, melee: false, projectileSpeed: 120, scopeFov: null,
   },
+  // The wreckers' long arm: a rifled barrel with a salvaged spyglass lashed
+  // above it, first built on the Crooked Atoll to read a hull before it struck.
   eye_of_reach: {
-    name: 'Sniper Rifle', damage: 95, reloadTime: 2.35,
+    name: "Wrecker's Glass", damage: 95, reloadTime: 2.35,
     ammoMax: 1, reserveMax: 5, range: 5000, spread: 0.01, pellets: 1,
     knockback: 4, melee: false, projectileSpeed: 220, scopeFov: 14,
   },
@@ -570,8 +572,10 @@ export const WEAPONS: Record<WeaponId, {
     ammoMax: 1, reserveMax: 5, range: 22, spread: 5.4, pellets: 7,
     knockback: 7, melee: false, projectileSpeed: 80, scopeFov: null,
   },
+  // Half a charge of powder behind a fist-sized ball — it hits like weather and
+  // puts whoever catches it over the rail. (The wire id stays `flintknock`.)
   flintknock: {
-    name: 'Flintknock Pistol', damage: 42, reloadTime: 1.65,
+    name: 'Squall Pistol', damage: 42, reloadTime: 1.65,
     ammoMax: 1, reserveMax: 5, range: 50, spread: 0.4, pellets: 1,
     knockback: 28, melee: false, projectileSpeed: 100, scopeFov: null,
   },

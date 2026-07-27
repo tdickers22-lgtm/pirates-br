@@ -18,6 +18,7 @@ import {
   BROKER_NAME,
   BROKER_NAME_PLURAL,
   FLEET_PENNANT,
+  FLEET_PENNANT_ADJ,
   SHIP_CLASS_NAMES,
   WORLD_NAME,
   itemDisplayName,
@@ -56,6 +57,14 @@ expect('un-renamed weapons still come from WEAPONS',
   `${weaponDisplayName('cutlass')} / ${weaponDisplayName('blunderbuss')}`);
 expect('an unknown weapon id degrades to a word, not a crash',
   weaponDisplayName('not_a_weapon') === 'attack');
+
+// There used to be a SECOND name per weapon: an override table in the display
+// layer shadowing WEAPONS[id].name, which left "Sniper Rifle" and "Flintknock
+// Pistol" alive in the armoury one careless `WEAPONS[id].name` from the screen.
+// One string per weapon, and the armoury owns it.
+expect('the armoury holds the ONLY name each weapon has',
+  Object.keys(WEAPONS).every((id) => weaponDisplayName(id) === WEAPONS[id].name),
+  Object.keys(WEAPONS).filter((id) => weaponDisplayName(id) !== WEAPONS[id].name).join(','));
 
 expect('the hull classes are the Reach\'s own',
   shipClassName('sloop') === 'Cutter'
@@ -174,7 +183,10 @@ function walk(dir, acc = []) {
 }
 
 const offences = [];
-for (const file of walk(join(ROOT, 'src/client'))) {
+// src/shared is walked with the client because the ARMOURY lives there: the
+// weapon names in WEAPONS[] are what the wheel, the kill feed and the legend
+// print, so a placeholder parked in a "balance constant" is a rendered string.
+for (const file of [...walk(join(ROOT, 'src/client')), ...walk(join(ROOT, 'src/shared'))]) {
   const text = stringLiterals(stripComments(readFileSync(file, 'utf8'))).join('\n');
   for (const { re, why } of BANNED) {
     const hit = text.split('\n').find((line) => re.test(line));
@@ -188,7 +200,7 @@ for (const file of walk(join(ROOT, 'src/client'))) {
     if (hit) offences.push(`index.html: ${hit.trim().slice(0, 90)} — ${why}`);
   }
 }
-expect('no client string literal or markup wears a borrowed noun',
+expect('no client/shared string literal or markup wears a borrowed noun',
   offences.length === 0, offences.join('\n     '));
 
 // ── The cast the SERVER authors is a rendered surface too ───────────────────
@@ -229,6 +241,23 @@ expect('no client string literal or markup wears a borrowed noun',
   // point of a display layer.
   expect('…while his wire role id is still gold_hoarder',
     islands.some((i) => (i.npcs ?? []).some((n) => n.role === 'gold_hoarder')));
+
+  // The pennant is the one proper noun the cast says OUT LOUD, and the server
+  // used to spell it itself — a second copy of a name the display layer owns,
+  // free to drift. The lines must still SAY it, and MapGenerator must not be
+  // where it is written.
+  const pennantLines = rendered.filter(({ text }) => text.includes(FLEET_PENNANT_ADJ));
+  expect(`the cast still names the crew out loud (${pennantLines.length} lines)`,
+    pennantLines.length >= 3, pennantLines.map((l) => l.where).join(', '));
+  const genSrc = stripComments(readFileSync(join(ROOT, 'src/server/world/MapGenerator.ts'), 'utf8'));
+  const hardcoded = stringLiterals(genSrc)
+    .filter((lit) => lit.includes(FLEET_PENNANT_ADJ) && !lit.includes('${'));
+  expect('…and the server never spells it itself',
+    hardcoded.length === 0, hardcoded.join('\n     '));
+  const brokerHardcoded = stringLiterals(genSrc)
+    .filter((lit) => lit.includes(BROKER_NAME) && !lit.includes('${'));
+  expect('…nor the broker\'s title',
+    brokerHardcoded.length === 0, brokerHardcoded.join('\n     '));
 }
 
 // The lint has to be able to FAIL, or it is decoration.

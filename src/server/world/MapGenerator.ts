@@ -10,6 +10,11 @@ import {
   BERTH, SHIP, WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS,
   SEA_POI, WRECK_EVENT, WRECK_SUPPLY_TABLE,
 } from '../../shared/constants/index.js';
+// The cast's names and spoken lines are a RENDERED SURFACE (nameplate, cutscene
+// card, banner), so every proper noun in them comes from the display layer —
+// the same module the client reads. Hardcoding "Black Fin" here is how the
+// Reach ends up with two spellings of one crew.
+import { BROKER_NAME, FLEET_PENNANT, FLEET_PENNANT_ADJ } from '../../shared/DisplayNames.js';
 import {
   angleWrap,
   directionToYaw,
@@ -145,8 +150,8 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'I pour honest rum to dishonest men. Whatever you saw under the tarps out in the grove — you were drinking here all evening, and so was I.',
     },
     hoarder: {
-      name: 'Tallyman Darius',
-      cutsceneTitle: 'The Tallyman at the Shore',
+      name: `${BROKER_NAME} Darius`,
+      cutsceneTitle: `The ${BROKER_NAME} at the Shore`,
       line: 'Sealed chests, not loose excuses. Half the Reach launders its luck across this beach, and I pay better than the crates in the trees.',
     },
   },
@@ -159,7 +164,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'That skull was cut to face the water so you would read it before your keel touched sand. You did not read it. Nobody ever does.',
     },
     hoarder: {
-      name: 'Tallyman Nessa Trell',
+      name: `${BROKER_NAME} Nessa Trell`,
       cutsceneTitle: 'Coin in the Cove',
       line: 'The totem keeps the warning; I keep the scales. Bring me sealed chests and we are both honest in our way.',
     },
@@ -170,10 +175,10 @@ const ISLAND_CAST: readonly IslandCast[] = [
       role: 'shipwright',
       name: 'Salvager Kellan Drage',
       cutsceneTitle: 'Cargo With Another Crew\'s Brand',
-      line: 'See that crooked tower? On a black night someone lights it, and a ship steers for a harbour that is not there. Half the crates at its foot still wear the Black Fin brand.',
+      line: `See that crooked tower? On a black night someone lights it, and a ship steers for a harbour that is not there. Half the crates at its foot still wear the ${FLEET_PENNANT_ADJ} brand.`,
     },
     hoarder: {
-      name: 'Tallyman Piet Ostrow',
+      name: `${BROKER_NAME} Piet Ostrow`,
       cutsceneTitle: 'Salvage Rates',
       line: 'Everything on this reef washed up wrong side out. Sealed chests I pay for. The rest of it I have already counted twice.',
     },
@@ -184,7 +189,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       role: 'oracle',
       name: 'Moraine the Bone-Reader',
       cutsceneTitle: 'The Ribs on the Waterline',
-      line: 'Walk in through those ribs and count what the tide left behind. If this sea can beach a leviathan it can beach you — and the Black Fin hang whatever the water does not finish.',
+      line: `Walk in through those ribs and count what the tide left behind. If this sea can beach a leviathan it can beach you — and ${FLEET_PENNANT} hang whatever the water does not finish.`,
     },
   },
   // 4 — Rumrunner Key · business booming, quality questionable
@@ -214,7 +219,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'The candles are not thanks, they are payment. Men heard singing in this bay and swam for it. Leave a coin at her feet — she is owed, and she keeps accounts.',
     },
     hoarder: {
-      name: 'Tallyman Lira Sarn',
+      name: `${BROKER_NAME} Lira Sarn`,
       cutsceneTitle: 'The Toll Collector',
       line: 'She takes offerings, I take chests. Only one of us gives change, and only one of us is still breathing.',
     },
@@ -248,7 +253,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       role: 'mysterious_stranger',
       name: 'Jessamy Crook',
       cutsceneTitle: 'Everyone\'s Map Says Here',
-      line: 'Every chart in the Reach marks this meadow, and one of them was right. Look at the pits: an empty chest, a Black Fin pennant staked over the deepest hole, and one digger still in it with his hat over his face.',
+      line: `Every chart in the Reach marks this meadow, and one of them was right. Look at the pits: an empty chest, a ${FLEET_PENNANT_ADJ} pennant staked over the deepest hole, and one digger still in it with his hat over his face.`,
     },
     bartender: {
       name: 'Tavernkeeper Ruby Vann',
@@ -288,7 +293,7 @@ const ISLAND_CAST: readonly IslandCast[] = [
       line: 'We cut black glass out of a mountain that was still breathing. Eleven went in on the last shift, the beams charred, and the Maw shut its mouth. The mountain kept the obsidian, and it kept them.',
     },
     hoarder: {
-      name: 'Tallyman Halvard Bex',
+      name: `${BROKER_NAME} Halvard Bex`,
       cutsceneTitle: 'Black Glass and Gold',
       line: 'The mine takes; I only trade. Sealed chests for coin, and my charts point at the next mark — above ground, if you have any sense left.',
     },
@@ -1677,8 +1682,8 @@ export class MapGenerator {
       npcs.push({
         id: uuid(),
         role: 'gold_hoarder',
-        name: cast.hoarder?.name ?? `Tallyman of ${island.name}`,
-        cutsceneTitle: cast.hoarder?.cutsceneTitle ?? 'The Tallyman at the Shore',
+        name: cast.hoarder?.name ?? `${BROKER_NAME} of ${island.name}`,
+        cutsceneTitle: cast.hoarder?.cutsceneTitle ?? `The ${BROKER_NAME} at the Shore`,
         line: cast.hoarder?.line ?? 'Sealed chests, carried in hand. I pay gold, and my charts point at the next mark.',
         cue: NPC_CUES.gold_hoarder,
         position: hoarderPos,
