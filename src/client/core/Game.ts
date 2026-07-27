@@ -61,6 +61,32 @@ const SKELETON_CORPSE_LIFETIME = 6.5;
 /** A dropped weapon tumbles, lands and fades over this many seconds. */
 const DROPPED_WEAPON_LIFETIME = 6;
 
+/** What the [X] was reaching for, in the player's own words. */
+const INTERACT_INTENT_NOUN: Record<string, string> = {
+  barrel: 'that barrel', chest: 'that chest', board: 'the ladder', dock: 'the dock',
+  mermaid: 'the mermaid', keg_diffuse: 'that keg', upgrade: 'the shipwright',
+  gold_hoarder: 'the Gold Hoarder', stow_chest: 'the hold', helm: 'the wheel',
+  sails: 'the halyard', brace: 'the brace', crow: 'the mast ladder', anchor: 'the capstan',
+  repair: 'that breach', bail: 'the bilge', revive: 'your crewmate', cannon: 'that cannon',
+  ammo: 'the ammo chest',
+};
+
+/** One short amber line for a press the server heard and refused. */
+function interactRefusalLine(intent?: string, reason?: string): string {
+  const noun = INTERACT_INTENT_NOUN[intent ?? ''] ?? 'that';
+  switch (reason) {
+    case 'out_of_reach': return `Too far from ${noun}.`;
+    case 'not_aboard': return `Get aboard first — ${noun} is out of reach.`;
+    case 'occupied': return `A crewmate already has ${noun}.`;
+    case 'materials': return 'Not enough wood and ore for that claim.';
+    case 'no_plank': return 'No plank in hand — find wood to patch her.';
+    case 'nothing_there': return `Nothing to do at ${noun}.`;
+    case 'no_ladder': return 'No rungs in reach — swim closer to the hull.';
+    case 'sinking': return "She's going down — that station is closed.";
+    default: return `Can't do that with ${noun} right now.`;
+  }
+}
+
 function installGeometryNaNGuard() {
   const proto = THREE.BufferGeometry.prototype as THREE.BufferGeometry & {
     __piratesBrNaNGuard?: boolean;
@@ -1895,6 +1921,15 @@ export class Game {
     this.network.onAmmoRefilled = () => {
       this.pushFeed('Ammo chest — every firearm topped up.', '#9fd18a');
       this.audio.playRepairSequence();
+    };
+
+    // A dead [X] used to be pure silence: right prompt, nothing happens, and the
+    // player mashes the key. The server now answers a refused press — one amber
+    // line and a dull thud, so the failure is at least legible.
+    this.network.onInteractRefused = (payload) => {
+      const refusal = payload as { intent?: string; reason?: string };
+      this.pushFeed(interactRefusalLine(refusal.intent, refusal.reason), '#e0a33c');
+      this.audio.playBodyThud(0.35);
     };
   }
 

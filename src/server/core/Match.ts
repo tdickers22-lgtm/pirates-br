@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, HullSections, InteractIntent, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
+  GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool,
 } from '../../shared/types/index.js';
 import { BERTH, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, PLAYER, POCKET, SHIP, SHARK, SHIP_STATS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING } from '../../shared/constants/index.js';
 import { MapGenerator } from '../world/MapGenerator.js';
@@ -101,6 +101,18 @@ interface ConnectedClient {
   consumedSeq: Record<OneShotAction, number>;
   /** Sim time each rate-limited one-shot was last accepted — seq dedupe alone is spoofable. */
   lastOneShotAt: Partial<Record<OneShotAction, number>>;
+  /**
+   * input.seq of the last packet a tick actually OFFERED to the sim. Inputs land
+   * in a single `lastInput` slot at 45 Hz and are read once per tick, so a packet
+   * whose seq never reached this was overwritten before anyone looked at it — its
+   * one-shot presses may be carried onto its replacement (see carryUnreadOneShots).
+   */
+  appliedInputSeq: number | null;
+  /** Wall clock (ms) of the OLDEST unread press still riding forward — bounds the
+   *  carry so a frozen sim can't fire a stale press minutes later. */
+  oneShotPendingSince: number | null;
+  /** Sim time of the last interact_refused sent — one nudge per press storm. */
+  lastRefusalAt: number;
   /** Latest full snapshot skipped while the socket was congested — flushed
    *  (newest only, older ones dropped) once the buffer drains. */
   pendingFullSnapshot: string | null;
@@ -229,6 +241,13 @@ const ONE_SHOT_MIN_INTERVAL: Partial<Record<OneShotAction, number>> = {
   trade: 0.3,
   barrelTakeAll: 0.3,
 };
+/** Ceiling (wall ms) on how long an unread one-shot press may ride forward from
+ *  packet to packet. Covers any plausible starvation gap — a stalled sim must
+ *  never wake up and fire a press the player made a lifetime ago. */
+const ONE_SHOT_CARRY_WINDOW_MS = 750;
+/** Minimum sim seconds between two `interact_refused` nudges for one player —
+ *  a mashed [X] is one dead thud, not a wall of amber. */
+const INTERACT_REFUSAL_INTERVAL = 0.7;
 /** How long a queued climb stays live after [X] at a ladder. A press is an
  *  INTENTION, not a single-frame assertion: nearShipId is recomputed every
  *  physics tick, so validating one instantaneous press ate 8 presses in a row
@@ -841,6 +860,9 @@ export class Match {
         selectMap: -1,
       },
       lastOneShotAt: {},
+      appliedInputSeq: null,
+      oneShotPendingSince: null,
+      lastRefusalAt: -Infinity,
       pendingFullSnapshot: null,
     };
     this.clients.set(playerId, client);
@@ -1027,7 +1049,7 @@ export class Match {
     switch (msg.type) {
       case 'player_input': {
         const input = this.sanitizeInput(msg.payload);
-        if (input) client.lastInput = input;
+        if (input) client.lastInput = this.carryUnreadOneShots(client, input);
         break;
       }
       case 'trade_action': {
@@ -1328,6 +1350,88 @@ export class Match {
   }
 
   /**
+   * A PRESS IS A PROMISE, NOT A SAMPLE.
+   *
+   * Inputs stream in at 45 Hz and land in one `client.lastInput` slot that the
+   * sim reads once per tick. When ticks run late (sim dilation, a dropped tick)
+   * the packet carrying `interact: true` is overwritten by the newer packets
+   * that arrive before anybody looks at it, and the press evaporates with the
+   * right prompt still glowing on screen — three dead [X] at the wheel, the
+   * fourth one works.
+   *
+   * So when the packet being REPLACED was never offered to a tick, its one-shot
+   * flags ride forward onto its replacement. Two gates keep this from becoming a
+   * press duplicator:
+   *   • `appliedInputSeq` — a packet the sim already read had its presses
+   *     offered (accepted, refused, or gated by a branch condition). Those are
+   *     spent; only a NEVER-SEEN packet may donate.
+   *   • `consumedSeq` — belt and braces against a donation whose action was
+   *     already edge-consumed at that very seq.
+   * A wall-clock ceiling bounds the carry so a stalled match can't fire a
+   * minute-old press at the horn.
+   */
+  private carryUnreadOneShots(client: ConnectedClient, next: PlayerInput): PlayerInput {
+    const prev = client.lastInput;
+    const now = Date.now();
+    if (!prev || client.appliedInputSeq === prev.seq) {
+      client.oneShotPendingSince = null;
+      return next;
+    }
+    const pendingSince = client.oneShotPendingSince ?? now;
+    if (now - pendingSince > ONE_SHOT_CARRY_WINDOW_MS) {
+      client.oneShotPendingSince = null;
+      return next;
+    }
+
+    let carried = false;
+    /** Donate a never-consumed press from the unread packet to its replacement. */
+    const carryFlag = (key: 'jumpPressed' | 'trade' | 'reload' | 'placeKeg' | 'dropChest'
+      | 'specialAttack' | 'barrelTakeAll', action: OneShotAction) => {
+      if (!prev[key] || client.consumedSeq[action] === prev.seq) return;
+      next[key] = true;
+      carried = true;
+    };
+
+    // [X] carries the intent it was aimed with — the press and what it meant are
+    // one thing; splitting them would resolve the press against a later frame's
+    // highlight (the exact "one press triggered a different station" bug).
+    if (prev.interact && client.consumedSeq.interact !== prev.seq && !next.interact) {
+      next.interact = true;
+      next.interactIntent = prev.interactIntent ?? next.interactIntent ?? null;
+      carried = true;
+    }
+    carryFlag('jumpPressed', 'jump');
+    carryFlag('trade', 'trade');
+    carryFlag('reload', 'reload');
+    carryFlag('placeKeg', 'placeKeg');
+    carryFlag('dropChest', 'dropChest');
+    carryFlag('specialAttack', 'special');
+    carryFlag('barrelTakeAll', 'barrelTakeAll');
+
+    if (prev.slot !== null && next.slot === null && client.consumedSeq.slot !== prev.seq) {
+      next.slot = prev.slot;
+      carried = true;
+    }
+    if (prev.cannonAmmo && !next.cannonAmmo && client.consumedSeq.cannonAmmo !== prev.seq) {
+      next.cannonAmmo = prev.cannonAmmo;
+      carried = true;
+    }
+    if (prev.selectMap && !next.selectMap && client.consumedSeq.selectMap !== prev.seq) {
+      next.selectMap = prev.selectMap;
+      carried = true;
+    }
+    // The wheel press is meaningless without the slice it pointed at.
+    if (prev.useWheelItem && !next.useWheelItem && client.consumedSeq.wheel !== prev.seq) {
+      next.useWheelItem = true;
+      next.wheelIndex = prev.wheelIndex ?? next.wheelIndex;
+      carried = true;
+    }
+
+    client.oneShotPendingSince = carried ? pendingSince : null;
+    return next;
+  }
+
+  /**
    * Validate and normalize a raw player_input payload. Returns null (input is
    * dropped) when any required numeric is non-finite. Enum-ish fields fall back
    * to null rather than rejecting the whole packet.
@@ -1392,10 +1496,18 @@ export class Match {
       useWheelItem: !!input.useWheelItem,
       barrelTakeAll: !!input.barrelTakeAll,
       interactIntent,
+      // Quest-map equip rode in the payload but was dropped here, so the
+      // selectMap one-shot on the other side could never fire.
+      selectMap: typeof input.selectMap === 'string' && input.selectMap.length <= 64
+        ? input.selectMap
+        : null,
     };
   }
 
   private applyInput(client: ConnectedClient, input: PlayerInput, dt: number) {
+    // Stamp BEFORE any early-out: the sim has now looked at this packet, so its
+    // presses are spent and must not be donated to the next one.
+    client.appliedInputSeq = input.seq;
     const player = this.getPlayer(client.playerId);
     if (!player || player.state === 'eliminated' || player.state === 'respawning') return;
     if (player.state === 'downed') {
@@ -1587,7 +1699,11 @@ export class Match {
       // Modern clients send the HUD-selected action. If that validation misses, do nothing:
       // falling through to the legacy chain is what made one [X] press trigger a different station.
       if (input.interactIntent) {
-        this.tryInteractIntent(player, input, ship ?? null);
+        // A refusal is an ANSWER. Silence at a glowing prompt is what made the
+        // player mash the key and then stop trusting it.
+        if (!this.tryInteractIntent(player, input, ship ?? null)) {
+          this.sendInteractRefused(client, input.interactIntent);
+        }
         return;
       }
 
@@ -3977,7 +4093,11 @@ export class Match {
       if (player.onShipId !== null && player.state !== 'swimming') {
         this.boardLatchUntil.delete(player.id);
       } else if (this.t > latchUntil) {
+        // The queued climb ran out of rope. Say so — a latch that quietly expires
+        // is exactly the silent [X] this whole path exists to kill.
         this.boardLatchUntil.delete(player.id);
+        const latchClient = this.clients.get(player.id);
+        if (latchClient) this.sendInteractRefused(latchClient, 'board', 'no_ladder');
       } else if (this.tryBoardFromLadder(player, SHIP_BOARD_LATCH_REACH)) {
         return;
       }
@@ -4006,20 +4126,47 @@ export class Match {
     if (!ownShip.crewIds.includes(player.id)) ownShip.crewIds.push(player.id);
   }
 
+  /** Why the last refused [X] was refused — set by refuse(), read by the caller
+   *  when it sends the nudge back. Single-threaded tick, single call site. */
+  private lastRefusalReason: InteractRefusalReason = 'unavailable';
+
+  /** Refuse an interaction WITH a reason. Always returns false, so it drops
+   *  straight into the existing `return false` shape of every branch. */
+  private refuse(reason: InteractRefusalReason): false {
+    this.lastRefusalReason = reason;
+    return false;
+  }
+
+  /** Answer a dead [X] — one short nudge per press storm, to the presser only. */
+  private sendInteractRefused(
+    client: ConnectedClient,
+    intent: InteractIntent,
+    reason: InteractRefusalReason = this.lastRefusalReason,
+  ) {
+    if (this.t - client.lastRefusalAt < INTERACT_REFUSAL_INTERVAL) return;
+    client.lastRefusalAt = this.t;
+    this.send(client.ws, {
+      type: 'interact_refused',
+      ts: Date.now(),
+      payload: { intent, reason } satisfies InteractRefusedPayload,
+    });
+  }
+
   /** Resolves [X] to the action the client HUD selected; each branch validates range / state. */
   private tryInteractIntent(player: Player, input: PlayerInput, ship: Ship | null): boolean {
     const intent = input.interactIntent;
     if (!intent) return false;
+    this.lastRefusalReason = 'unavailable';
 
     switch (intent) {
       case 'barrel': {
-        if (!player.nearBarrelId) return false;
+        if (!player.nearBarrelId) return this.refuse('nothing_there');
         const barrelEvent = this.islands.tryOpenBarrel(player, this.state.islands, this.state.ships);
         if (barrelEvent) {
           this.broadcast({ type: 'barrel_opened', ts: Date.now(), payload: barrelEvent });
           return true;
         }
-        return false;
+        return this.refuse('out_of_reach');
       }
       case 'chest': {
         const event = this.tryTakeChest(player);
@@ -4027,23 +4174,28 @@ export class Match {
           this.broadcast({ type: 'chest_opened', ts: Date.now(), payload: event });
           return true;
         }
-        return false;
+        return this.refuse('nothing_there');
       }
       case 'stow_chest': {
-        if (!ship || player.onShipId !== ship.id) return false;
-        return this.tryStowCarriedChest(player, ship);
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        return this.tryStowCarriedChest(player, ship) || this.refuse('out_of_reach');
       }
       case 'gold_hoarder':
-        return this.handleGoldHoarderInteraction(player);
-      case 'board':
-        return this.requestBoard(player);
+        return this.handleGoldHoarderInteraction(player) || this.refuse('out_of_reach');
+      case 'board': {
+        // A failed board is not a refusal YET — requestBoard latches the press
+        // and keeps trying; the nudge comes from the latch expiring unboarded.
+        if (this.requestBoard(player)) return true;
+        if (this.boardLatchUntil.has(player.id)) return true;
+        return this.refuse('no_ladder');
+      }
       case 'dock':
-        return this.tryClimbIslandDockFromWater(player);
+        return this.tryClimbIslandDockFromWater(player) || this.refuse('out_of_reach');
       case 'mermaid':
-        return this.returnPlayerByMermaid(player);
+        return this.returnPlayerByMermaid(player) || this.refuse('unavailable');
       case 'keg_diffuse': {
         const keg = this.getNearbyKeg(player, ship ?? null);
-        if (!keg) return false;
+        if (!keg) return this.refuse('nothing_there');
         this.diffuseKeg(keg);
         return true;
       }
@@ -4056,7 +4208,7 @@ export class Match {
           || upgradeStation.claimedByShipId === homeShip.id
           || homeShip.upgrades.some(upgrade => upgrade.type === upgradeStation.type)
         ) {
-          return false;
+          return this.refuse('out_of_reach');
         }
         // Claims cost materials (pocket + ship stores). A short press simply
         // fails — the client HUD already shows the recipe.
@@ -4065,7 +4217,7 @@ export class Match {
           this.getMaterialCount(player, homeShip, 'wood') < cost.wood
           || this.getMaterialCount(player, homeShip, 'ore') < cost.ore
         ) {
-          return false;
+          return this.refuse('materials');
         }
         this.consumeMaterial(player, homeShip, 'wood', cost.wood);
         this.consumeMaterial(player, homeShip, 'ore', cost.ore);
@@ -4079,9 +4231,10 @@ export class Match {
         return true;
       }
       case 'repair': {
-        if (!ship || player.onShipId !== ship.id) return false;
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
         const repairHole = this.getRepairableHole(player, ship);
-        if (!repairHole || !this.consumeRepairPlank(player, ship)) return false;
+        if (!repairHole) return this.refuse('nothing_there');
+        if (!this.consumeRepairPlank(player, ship)) return this.refuse('no_plank');
         this.physics.patchHole(ship, repairHole.id);
         if (ship.onFire) {
           ship.fireTimer = Math.max(0, ship.fireTimer - SHIP.FIRE_REPAIR_DOUSE_TIME);
@@ -4092,12 +4245,12 @@ export class Match {
       case 'bail': {
         // The press just confirms intent; the continuous drain runs in the
         // held-interact block (applyInput). Consume it so [X] doesn't fall through.
-        if (!ship || player.onShipId !== ship.id) return false;
-        return (ship.waterLevel ?? 0) > 0;
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        return (ship.waterLevel ?? 0) > 0 || this.refuse('nothing_there');
       }
       case 'anchor': {
-        if (!ship || player.onShipId !== ship.id) return false;
-        if (!this.isNearAnchor(player, ship)) return false;
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        if (!this.isNearAnchor(player, ship)) return this.refuse('out_of_reach');
         if (!ship.anchored) {
           ship.anchored = true;
           ship.anchorRaiseProgress = 0;
@@ -4106,42 +4259,46 @@ export class Match {
         return true;
       }
       case 'crow': {
-        if (!ship || player.onShipId !== ship.id) return false;
-        if (!this.isNearCrowNestLadder(player, ship)) return false;
-        return this.startMastClimb(player, ship);
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        if (!this.isNearCrowNestLadder(player, ship)) return this.refuse('out_of_reach');
+        // Ladder is single-file and closed on a sinking hull.
+        return this.startMastClimb(player, ship)
+          || this.refuse(ship.sinking ? 'sinking' : 'occupied');
       }
       case 'sails': {
         // No captive sail mode: the press confirms intent, the continuous
         // hold in applyInput hauls the halyard (Sea-of-Thieves style).
-        if (!ship || player.onShipId !== ship.id) return false;
-        return this.isNearSailStation(player, ship);
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        return this.isNearSailStation(player, ship) || this.refuse('out_of_reach');
       }
       case 'brace': {
         // Same pattern as the halyard: press confirms, the hold in applyInput
         // sweeps the yard toward the station's side.
-        if (!ship || player.onShipId !== ship.id) return false;
-        return findBraceStationDir(player, ship) !== 0;
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        return findBraceStationDir(player, ship) !== 0 || this.refuse('out_of_reach');
       }
       case 'revive': {
         // The press just confirms intent; the continuous revive runs off the
         // held-interact block in applyInput. Consume so [X] doesn't fall through.
-        return this.findReviveTarget(player) !== null;
+        return this.findReviveTarget(player) !== null || this.refuse('nothing_there');
       }
       case 'helm': {
-        if (!ship || player.onShipId !== ship.id) return false;
-        if (!this.isNearHelm(player, ship)) return false;
-        return this.enterHelm(player, ship);
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        if (!this.isNearHelm(player, ship)) return this.refuse('out_of_reach');
+        return this.enterHelm(player, ship)
+          || this.refuse(ship.sinking ? 'sinking' : 'occupied');
       }
       case 'cannon': {
-        if (!ship || player.onShipId !== ship.id) return false;
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
         const nearbyCannon = this.getNearbyCannonIndex(player, ship);
-        if (nearbyCannon === null) return false;
-        return this.enterCannon(player, ship, nearbyCannon, input.yaw, input.pitch);
+        if (nearbyCannon === null) return this.refuse('out_of_reach');
+        return this.enterCannon(player, ship, nearbyCannon, input.yaw, input.pitch)
+          || this.refuse(ship.sinking ? 'sinking' : 'occupied');
       }
       case 'ammo': {
         // Sea-of-Thieves ammo chest: [X] at the crate tops up every firearm.
-        if (!ship || player.onShipId !== ship.id) return false;
-        if (!isSharedNearAmmoCrate(player, ship)) return false;
+        if (!ship || player.onShipId !== ship.id) return this.refuse('not_aboard');
+        if (!isSharedNearAmmoCrate(player, ship)) return this.refuse('out_of_reach');
         let refilled = false;
         for (const weapon of player.weapons) {
           if (!weapon || WEAPONS[weapon.weaponId].melee) continue;
@@ -4158,10 +4315,10 @@ export class Match {
             this.send(client.ws, { type: 'ammo_refilled', ts: Date.now(), payload: {} });
           }
         }
-        return refilled;
+        return refilled || this.refuse('nothing_there');
       }
       default:
-        return false;
+        return this.refuse('unavailable');
     }
   }
 

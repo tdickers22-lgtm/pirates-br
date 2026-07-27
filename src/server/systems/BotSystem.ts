@@ -34,8 +34,11 @@ interface BotState {
   /** Seconds spent unintentionally off the ship (knocked overboard, stranded)
    *  outside the loot behavior — recalled aboard after a short grace. */
   overboardTimer: number;
-  /** Hull total at the last check — a drop means somebody is shooting at us. */
+  /** Hull total at the last check — kept for behaviour tuning/telemetry. */
   lastHullTotal: number;
+  /** Unpatched cannon/keg breaches at the last check. A RISE here (not any old
+   *  hull loss) is what counts as being shot at. */
+  lastHostileHoles: number;
   /** Sim time until which this bot counts as "under fire" and may fight back
    *  during the early-game peace window. */
   underFireUntil: number;
@@ -61,6 +64,34 @@ const BOT_RETALIATE_SECONDS = 45;
  *  breaches — bots watch it drop to know they are being shot at. */
 function hullTotal(ship: Ship): number {
   return Math.max(0, 4 - countOpenHoles(ship) * 0.5);
+}
+
+/** Breaches that mean SOMEBODY DID THIS TO US. A reef, a swell or a ram in the
+ *  fog is the sea's fault; only powder is an act of war. Counting every hull
+ *  loss as "under fire" is what let one grounded bot ignite the whole lobby
+ *  inside the peace window. */
+function hostileHoleCount(ship: Ship): number {
+  if (!Array.isArray(ship.holes)) return 0;
+  let n = 0;
+  for (const hole of ship.holes) {
+    if (hole.patched) continue;
+    if (hole.source === 'cannon' || hole.source === 'keg') n += 1;
+  }
+  return n;
+}
+
+/**
+ * THE PEACE HAS TO INCLUDE THE GUNS.
+ *
+ * The early-game governor gates who a bot SEEKS; this gates who it SHOOTS, off
+ * the same clock. Inside BOT_EARLY_PEACE_SECONDS a bot only opens its ports if
+ * somebody actually put powder through its planking (self-defence, not lobby-
+ * wide aggression) — otherwise the opening minutes are sailing and looting, and
+ * the storm arc still has crews left to squeeze.
+ */
+export function botMayFireCannons(t: number, underFireUntil: number): boolean {
+  if (t >= BOT_EARLY_PEACE_SECONDS) return true;
+  return t < underFireUntil;
 }
 
 export class BotSystem {
@@ -100,6 +131,7 @@ export class BotSystem {
       shoreLeg: null,
       overboardTimer: 0,
       lastHullTotal: hullTotal(ship),
+      lastHostileHoles: hostileHoleCount(ship),
       underFireUntil: 0,
     });
   }
@@ -124,11 +156,15 @@ export class BotSystem {
       bot.stateTimer -= dt;
       bot.firearmTimer -= dt;
 
-      // Taking hull damage lifts the early-game peace for this bot — it may hunt
+      // Taking POWDER lifts the early-game peace for this bot — it may hunt
       // whoever is in range for a while (self-defence, not lobby-wide aggression).
-      const hull = hullTotal(ship);
-      if (hull < bot.lastHullTotal - 0.001) bot.underFireUntil = t + BOT_RETALIATE_SECONDS;
-      bot.lastHullTotal = hull;
+      // Counting every hull loss here is what set the lobby alight: one crew
+      // scraped a reef, "retaliated" at a bystander, and that broadside made the
+      // bystander "under fire" too, three cascades deep before the first shrink.
+      const hostileHoles = hostileHoleCount(ship);
+      if (hostileHoles > bot.lastHostileHoles) bot.underFireUntil = t + BOT_RETALIATE_SECONDS;
+      bot.lastHostileHoles = hostileHoles;
+      bot.lastHullTotal = hullTotal(ship);
 
       this.decideBehavior(bot, ship, ships, islands, storm, players, t);
       this.executeBehavior(bot, player, ship, ships, islands, storm, dt, t, weaponSystem, seaRocks);
@@ -329,6 +365,13 @@ export class BotSystem {
           : bot.difficulty === 'medium' ? 2.0
           : 3.5;
         const inCannonRange = d < (bot.difficulty === 'hard' ? 270 : 245);
+        // The peace covers the guns too — an unprovoked bot shadows its neighbour
+        // with the ports shut. Timer is held just short of ready so the window
+        // lifting doesn't fire nine simultaneous broadsides.
+        if (!botMayFireCannons(t, bot.underFireUntil)) {
+          bot.fireTimer = Math.max(bot.fireTimer, 0.35);
+          break;
+        }
         if (bot.fireTimer <= 0 && inCannonRange) {
           // Side-aware gunnery: only cannons whose broadside arc actually
           // contains the firing solution shoot — the other rail holds instead

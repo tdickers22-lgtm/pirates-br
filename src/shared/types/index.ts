@@ -778,6 +778,8 @@ type MsgType =
   | 'armor_bought'
   | 'ammo_refilled'
   | 'prop_removed'
+  /** The [X] was heard and REFUSED — feedback so a dead press is never silent. */
+  | 'interact_refused'
   | 'treasure_map'
   | 'trade_request'
   | 'trade_update'
@@ -939,6 +941,33 @@ export type InteractIntent =
   | 'revive'
   | 'cannon'
   | 'ammo';
+
+/** Why an [X] the server heard could not be granted. */
+export type InteractRefusalReason =
+  /** Too far from the thing, or it moved out of reach before the press landed. */
+  | 'out_of_reach'
+  /** The verb needs you aboard and your feet are not on that deck. */
+  | 'not_aboard'
+  /** A crewmate already has that station (or that rung). */
+  | 'occupied'
+  /** Not enough wood/ore for the claim. */
+  | 'materials'
+  /** No plank in hand or in stores to patch with. */
+  | 'no_plank'
+  /** The target is gone: no chest, no barrel, no body, no breach. */
+  | 'nothing_there'
+  /** A queued climb ran out of time without a ladder ever coming in reach. */
+  | 'no_ladder'
+  /** She is going down — stations are closed. */
+  | 'sinking'
+  | 'unavailable';
+
+/** Server → client: your [X] was heard and refused. Drives one short amber feed
+ *  line plus a dull thud, so a dead press is never silent. */
+export interface InteractRefusedPayload {
+  intent: InteractIntent;
+  reason: InteractRefusalReason;
+}
 
 export interface PlayerInput {
   /** Hold C — slower, lower profile. */
