@@ -6,12 +6,31 @@
 import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import type { IslandBuildCtx } from './context.js';
+import { getMeshGround, snapToDrawnGround } from './GroundTruth.js';
+
+/**
+ * The ground THESE landmarks stand on: the drawn terrain mesh, island-local.
+ *
+ * Every structure in this file used to seat its feet on `getIslandSurfaceY` —
+ * the analytic heightfield the mesh is only a chord approximation OF. The mesh
+ * therefore runs BELOW the function wherever the field is convex, and a
+ * lookout's legs, a camp's fire ring or an idol's plinth ended up hovering
+ * over the hillside the player is actually looking at. Falls back to the
+ * analytic answer on the low-detail proxy path, where there is no mesh yet.
+ */
+function drawnGroundAt(ctx: IslandBuildCtx, localX: number, localZ: number): number {
+  const y = getMeshGround(ctx.island)?.heightAt(localX, localZ);
+  return y ?? getIslandSurfaceY(ctx.island, localX + ctx.island.position.x, localZ + ctx.island.position.z);
+}
 
 /** Lookout post — wooden tower on or near a high point. */
 export function buildLookoutPost(ctx: IslandBuildCtx) {
   const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, SURFACE_ABOVE_WATER } = ctx;
   if (!lowDetail && r > 40) {
     const lookout = new THREE.Group();
+    // A lookout platform IS elevated by design; its LEGS are not, so the whole
+    // piece is claimed by the grounding audit and the legs below must reach.
+    lookout.name = 'decor-lookout';
     const angle = island.profile.primaryHillAngle + (rng(islandSeed * 83) - 0.5) * 0.6;
     const distRatio = 0.18 + rng(islandSeed * 89) * 0.18;
     const base = surfacePoint(distRatio, angle, 0);
@@ -28,11 +47,11 @@ export function buildLookoutPost(ctx: IslandBuildCtx) {
     const sinY = Math.sin(towerYaw);
     for (const sx of [-1, 1] as const) {
       for (const sz of [-1, 1] as const) {
-        // Local (sx*0.7, sz*0.7) in lookout space → world position
-        const wx = base.x + island.position.x + (sx * legOffset * cosY + sz * legOffset * sinY);
-        const wz = base.z + island.position.z + (-sx * legOffset * sinY + sz * legOffset * cosY);
-        const wy = getIslandSurfaceY(island, wx, wz);
-        legPositions.push({ sx, sz, surfaceY: wy });
+        // Local (sx*0.7, sz*0.7) in lookout space → island-local position
+        const lx = base.x + (sx * legOffset * cosY + sz * legOffset * sinY);
+        const lz = base.z + (-sx * legOffset * sinY + sz * legOffset * cosY);
+        // …and each foot lands on the DRAWN hillside, a fingerbreadth into it.
+        legPositions.push({ sx, sz, surfaceY: drawnGroundAt(ctx, lx, lz) - 0.12 });
       }
     }
     const minSurface = Math.min(...legPositions.map((p) => p.surfaceY));
@@ -108,19 +127,23 @@ export function buildPirateCamp(ctx: IslandBuildCtx) {
   } = ctx;
   if (!lowDetail && r > 38) {
     const camp = new THREE.Group();
+    camp.name = 'decor-camp';
     const angle = island.profile.secondaryHillAngle + (rng(islandSeed * 113) - 0.5) * 0.8;
     const distRatio = 0.28 + rng(islandSeed * 127) * 0.24;
     const base = surfacePoint(distRatio, angle, 0);
+    snapToDrawnGround(getMeshGround(island), base);
     const campYaw = rng(islandSeed * 131) * Math.PI * 2;
     camp.position.copy(base);
     camp.rotation.y = campYaw;
     const cosCY = Math.cos(campYaw);
     const sinCY = Math.sin(campYaw);
     const groundOffsetAt = (lx: number, lz: number) => {
-      // Convert local camp coords back to world to sample terrain Y
-      const wx = base.x + island.position.x + (lx * cosCY + lz * sinCY);
-      const wz = base.z + island.position.z + (-lx * sinCY + lz * cosCY);
-      return getIslandSurfaceY(island, wx, wz) - base.y;
+      // Camp-local → island-local, then onto the drawn hillside.
+      return drawnGroundAt(
+        ctx,
+        base.x + (lx * cosCY + lz * sinCY),
+        base.z + (-lx * sinCY + lz * cosCY),
+      ) - base.y;
     };
     const stoneMatC = new THREE.MeshStandardMaterial({ color: 0x3d352b, roughness: 1 });
     const charredMat = new THREE.MeshStandardMaterial({ color: 0x141210, roughness: 1, emissive: 0x6b2a06, emissiveIntensity: 0.4 });
@@ -228,13 +251,15 @@ export function buildStoneIdols(ctx: IslandBuildCtx) {
     const idolEyeMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 1, emissive: 0x6b1a06, emissiveIntensity: 0.3 });
     const idolAngle = island.profile.tertiaryHillAngle + (rng(islandSeed * 311) - 0.5) * 0.6;
     const cluster = new THREE.Group();
+    cluster.name = 'decor-idols';
     const clusterCenter = surfacePoint(0.34 + rng(islandSeed * 313) * 0.18, idolAngle, 0);
+    snapToDrawnGround(getMeshGround(island), clusterCenter);
     cluster.position.copy(clusterCenter);
     cluster.rotation.y = idolAngle + Math.PI;
     for (let i = 0; i < 3; i++) {
       const ix = (i - 1) * 1.4;
       const iz = (i - 1) * 0.3 + (rng(i * 317 + islandSeed) - 0.5) * 0.4;
-      const groundY = getIslandSurfaceY(island, clusterCenter.x + island.position.x + ix, clusterCenter.z + island.position.z + iz) - clusterCenter.y;
+      const groundY = drawnGroundAt(ctx, clusterCenter.x + ix, clusterCenter.z + iz) - clusterCenter.y - 0.1;
       const idolH = 1.8 + rng(i * 319 + islandSeed) * 0.8;
       // Body block
       const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, idolH, 0.6), idolMat);
@@ -369,6 +394,7 @@ export function buildSecondaryWreck(ctx: IslandBuildCtx) {
     const wAngle = islandHeading + Math.PI * 1.45 + rng(islandSeed * 999) * 0.5;
     const wPos = surfacePoint(0.85 + rng(islandSeed * 1003) * 0.06, wAngle, 0);
     const wreck2Solid = isSolidDecorPoint(wPos, SURFACE_ABOVE_WATER, -0.15);
+    snapToDrawnGround(getMeshGround(island), wPos, -0.1);
     const wreck2Glb = wreck2Solid
       ? buildPropInstance('shipwreck', wPos, -wAngle + Math.PI * 0.4, 0.5)
       : null;
@@ -377,6 +403,7 @@ export function buildSecondaryWreck(ctx: IslandBuildCtx) {
       group.add(wreck2Glb);
     } else if (wreck2Solid) {
     const wreck2 = new THREE.Group();
+    wreck2.name = 'decor-wreck-section';
     wreck2.position.copy(wPos);
     wreck2.rotation.y = -wAngle + Math.PI * 0.4;
     wreck2.rotation.z = (rng(islandSeed * 1009) - 0.5) * 0.6;
@@ -391,7 +418,7 @@ export function buildSecondaryWreck(ctx: IslandBuildCtx) {
       const plank = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.07, 1.0 + rng(p * 1019 + islandSeed) * 0.6), sectionMat);
       const lx = (rng(p * 1021 + islandSeed) - 0.5) * 2.6;
       const lz = (rng(p * 1023 + islandSeed) - 0.5) * 2.4;
-      const lY = getIslandSurfaceY(island, wPos.x + island.position.x + lx, wPos.z + island.position.z + lz) - wPos.y;
+      const lY = drawnGroundAt(ctx, wPos.x + lx, wPos.z + lz) - wPos.y;
       plank.position.set(lx, lY + 0.05, lz);
       plank.rotation.set(0.04, rng(p * 1027 + islandSeed) * Math.PI * 2, (rng(p * 1031 + islandSeed) - 0.5) * 0.3);
       wreck2.add(plank);
@@ -520,8 +547,12 @@ export function buildTrails(ctx: IslandBuildCtx) {
             const side = rng(s * 33 + w * 41) > 0.5 ? 1 : -1;
             const stx = px + Math.cos(yaw) * side * (trailWidth * 0.55 + 0.2);
             const stz = pz - Math.sin(yaw) * side * (trailWidth * 0.55 + 0.2);
-            const sty = getIslandSurfaceY(island, stx, stz);
-            trP.set(stx - island.position.x, sty + 0.16, stz - island.position.z);
+            // Border stones lie ON the path, so they follow the drawn ground —
+            // pinned to the analytic field they perched above the trail they
+            // were supposed to be edging.
+            const stLocalX = stx - island.position.x;
+            const stLocalZ = stz - island.position.z;
+            trP.set(stLocalX, drawnGroundAt(ctx, stLocalX, stLocalZ) + 0.02, stLocalZ);
             trE.set(rng(s * 51) * Math.PI, rng(s * 57) * Math.PI, rng(s * 61) * Math.PI);
             trQ.setFromEuler(trE);
             trS.setScalar(0.18 + rng(s * 47 + w * 53) * 0.18);
@@ -539,6 +570,7 @@ export function buildTrails(ctx: IslandBuildCtx) {
       }
       if (kerbXf.length) {
         const kerbs = new THREE.InstancedMesh(boulderGeo, stoneMat, kerbXf.length);
+        kerbs.name = 'decor-trail-kerb';
         kerbXf.forEach((m, k) => kerbs.setMatrixAt(k, m));
         kerbs.instanceMatrix.needsUpdate = true;
         kerbs.castShadow = true;
@@ -580,6 +612,11 @@ export function buildBridges(ctx: IslandBuildCtx) {
     const span = Math.hypot(dx, dz);
     {
       const bridge = new THREE.Group();
+      // A rope bridge between two fangs IS suspended over a chasm: its deck is
+      // 15m of open air above the saddle, by design, and the grounding audit
+      // reports it as unclaimed scenery on purpose. Named so the report says
+      // "bridge-span" instead of "Group" and nobody has to identify it twice.
+      bridge.name = 'bridge-span';
       const midX = (a.lx + b.lx) * 0.5;
       const midZ = (a.lz + b.lz) * 0.5;
       const yaw = Math.atan2(dx, dz);
@@ -685,8 +722,12 @@ export function buildRuin(ctx: IslandBuildCtx) {
   const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, SURFACE_ABOVE_WATER, shrineMat } = ctx;
   if (!lowDetail && r > 48) {
     const ruin = new THREE.Group();
+    ruin.name = 'decor-ruin';
     const ruinAngle = island.profile.primaryHillAngle + rng(islandSeed * 17) * 0.8;
     const ruinPos = surfacePoint(0.18 + rng(islandSeed * 23) * 0.18, ruinAngle, 0.02);
+    // Shrine stones stand on the shoulder the player walks, not on the field
+    // the shoulder was sampled from — the pillars stood 4-5m proud of it.
+    snapToDrawnGround(getMeshGround(island), ruinPos, -0.14);
     ruin.position.copy(ruinPos);
     ruin.rotation.y = rng(islandSeed * 31) * Math.PI * 2;
 

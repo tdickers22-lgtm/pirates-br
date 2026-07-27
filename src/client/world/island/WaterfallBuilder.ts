@@ -1209,26 +1209,48 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
     const cz = pz(pool.s);
     const bedIdx: number[] = [];
     let prev: number[] | null = null;
+    const ringPoint = (th: number, ring: number, wob: number) => {
+      const along = Math.cos(th) * pool.rAlong * ring * wob;
+      const side = Math.sin(th) * pool.rAcross * ring * wob;
+      return { vx: cx + dirX * along + ax * side, vz: cz + dirZ * along + az * side };
+    };
     for (let k = 0; k <= segs; k++) {
       const th = (k / segs) * Math.PI * 2;
       const j = rng(seed + tag * 271 + k * 19);
       const wob = 0.9 + 0.14 * Math.sin(th * 3 + fallIndex) + 0.07 * Math.sin(th * 5 + 1.3);
-      const cols: number[] = [];
-      for (const ring of [0.55, 1.02, 1.42] as const) {
-        const along = Math.cos(th) * pool.rAlong * ring * wob;
-        const side = Math.sin(th) * pool.rAcross * ring * wob;
-        const vx = cx + dirX * along + ax * side;
-        const vz = cz + dirZ * along + az * side;
-        const g = groundAt(vx, vz);
-        // bed scooped under the water · rim a hand clear of it · skirt buried
-        const y = ring < 0.6 ? pool.y - 0.95 - j * 0.3
-          : ring < 1.1 ? Math.min(g + 0.42 + j * 0.3, pool.y + 0.34)
-            : Math.min(g - 0.3, pool.y - 0.2);
-        // Wet-shaded against the BED, not the surface: keying the whole bowl to
-        // the water line painted the rim as black as the bottom and the basin
-        // read as a hole punched in the hill.
-        cols.push(rock.vert(vx, y, vz, rockColor(y, pool.y - 0.85, j)));
-      }
+      // The water disc reaches radius 1.0 (×1.12 of wobble), so a rim drawn at
+      // 1.02 was UNDER the pool it was supposed to hold. Stone starts outside
+      // the water.
+      const pBed = ringPoint(th, 0.55, wob);
+      const pRim = ringPoint(th, 1.22, wob);
+      const pWall = ringPoint(th, 1.55, wob);
+      const pSkirt = ringPoint(th, 1.95, wob);
+      const gRim = groundAt(pRim.vx, pRim.vz);
+      const gWall = groundAt(pWall.vx, pWall.vz);
+      const gSkirt = groundAt(pSkirt.vx, pSkirt.vz);
+      // bed scooped under the water…
+      const yBed = pool.y - 0.95 - j * 0.3;
+      // …rim a hand clear of it, ALL THE WAY ROUND. The rim used to be
+      // min(its own ground + a hand, the waterline): on a steep flank the
+      // downhill half of the ring sits metres below the pool, so the basin
+      // lost its lip exactly where you stand to look at it and the plunge pool
+      // read as a sheet of water lying in mid-air off the hillside. A basin's
+      // rim is the thing HOLDING the water — it never sinks below it.
+      const yRim = THREE.MathUtils.clamp(gRim + 0.45 + j * 0.3, pool.y + 0.22, pool.y + 0.52);
+      // …then the wall the steep site needs: on flat ground it buries within a
+      // hand of the rim (exactly the old squat bowl), on a flank it stands out
+      // as the stone shoulder the pool is dammed behind.
+      const yWall = Math.min(yRim - 0.26 - j * 0.14, Math.max(gWall - 0.12, yRim - 3.4));
+      const ySkirt = Math.min(gSkirt - 0.3, yWall - 0.25);
+      // Wet-shaded against the BED, not the surface: keying the whole bowl to
+      // the water line painted the rim as black as the bottom and the basin
+      // read as a hole punched in the hill.
+      const cols = [
+        rock.vert(pBed.vx, yBed, pBed.vz, rockColor(yBed, pool.y - 0.85, j)),
+        rock.vert(pRim.vx, yRim, pRim.vz, rockColor(yRim, pool.y - 0.85, j)),
+        rock.vert(pWall.vx, yWall, pWall.vz, rockColor(yWall, pool.y - 0.85, j)),
+        rock.vert(pSkirt.vx, ySkirt, pSkirt.vz, rockColor(ySkirt, pool.y - 0.85, j)),
+      ];
       bedIdx.push(cols[0]);
       if (prev) for (let c = 0; c < cols.length - 1; c++) rock.quad(prev[c], prev[c + 1], cols[c + 1], cols[c]);
       prev = cols;

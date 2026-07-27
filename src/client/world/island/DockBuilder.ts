@@ -4,9 +4,11 @@
  * the working clutter — drying nets and crab traps — on the shore beside them.
  */
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { assets } from '../../assets/AssetLibrary.js';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import type { IslandBuildCtx } from './context.js';
+import { ensureMeshGround } from './GroundTruth.js';
 
 export function buildDock(ctx: IslandBuildCtx) {
   const { host, island, group, rng, lowDetail, scaledCount, buildPropInstance } = ctx;
@@ -14,6 +16,9 @@ export function buildDock(ctx: IslandBuildCtx) {
     const dockW = Math.max(1, Math.min(120, Number(island.dock.width) || 8));
     const dockL = Math.max(1, Math.min(200, Number(island.dock.length) || 14));
     const dock = new THREE.Group();
+    // A pier is elevated BY DESIGN — the audit only gets to enforce it once its
+    // legs actually reach the seabed, which is what the pilings below are for.
+    dock.name = 'decor-dock';
     dock.position.set(
       island.dock.position.x - island.position.x,
       island.dock.position.y,
@@ -25,6 +30,22 @@ export function buildDock(ctx: IslandBuildCtx) {
     const beamMat = new THREE.MeshStandardMaterial({ color: 0x5e3d1d, roughness: 1 });
     const ropeMat = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
     const plankMats = [0x8d6230, 0x83592d, 0x976a35].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.96 }));
+
+    // ── Pilings ──────────────────────────────────────────────────────────
+    // Every post on this pier — the GLB modules' own and the procedural
+    // fallback's — is authored standing ON the module, so it stops at the
+    // module's base: ~0.6m ABOVE the still line. From a boat the pier read as
+    // a raft of planks with its legs sawn off in mid-air, and in the shallows
+    // (where the sand shows straight through the water) there was daylight
+    // under the whole run. Each anchor below grows a pile down to the DRAWN
+    // seabed — the mesh the player looks through the water at, not the
+    // analytic field, which runs above it.
+    const meshGround = ensureMeshGround(ctx);
+    const pileAnchors: { lx: number; lz: number; topY: number; rx: number; rz: number }[] = [];
+    const cosD = Math.cos(island.dock.rotation);
+    const sinD = Math.sin(island.dock.rotation);
+    const dockLocalX = island.dock.position.x - island.position.x;
+    const dockLocalZ = island.dock.position.z - island.position.z;
 
     // GLB dock modules: walkway runs along the module's local X (6×3 mid,
     // 4×3 end, deck at +1.1); the game dock runs along local Z. Purely a
@@ -41,6 +62,22 @@ export function buildDock(ctx: IslandBuildCtx) {
       const widthScale = dockW / MODULE_W;
       // Server walk surface sits at dock.position.y + 0.14; keep the visual deck flush with it.
       const moduleY = 0.18 - DECK_H;
+      // The module's own post pairs, in module space: x along its length, the
+      // pair straddling ±(MODULE_W/2 − 0.1). rotation.y = +90° maps module x
+      // onto dock −z and module z onto dock +x, so a pile lands under a post.
+      const postPair = (centerZ: number, len: number) => {
+        for (const px of [-len * 0.5 + 0.4, 0, len * 0.5 - 0.4] as const) {
+          for (const pz of [-1, 1] as const) {
+            pileAnchors.push({
+              lx: pz * (MODULE_W * 0.5 - 0.1) * widthScale,
+              lz: centerZ - px * alongScale,
+              topY: moduleY + 0.45,     // up inside the post's wet section: no seam
+              rx: 0.145 * widthScale,
+              rz: 0.145 * alongScale,
+            });
+          }
+        }
+      };
       let cursor = -dockL * 0.5;
       for (let m = 0; m < midCount; m++) {
         const piece = assets.clone('dock_mid');
@@ -49,6 +86,7 @@ export function buildDock(ctx: IslandBuildCtx) {
         piece.scale.set(alongScale, 1, widthScale);
         piece.position.set(0, moduleY, cursor + MID_LEN * alongScale * 0.5);
         dock.add(piece);
+        postPair(piece.position.z, MID_LEN);
         cursor += MID_LEN * alongScale;
       }
       const endPiece = assets.clone('dock_end');
@@ -57,6 +95,7 @@ export function buildDock(ctx: IslandBuildCtx) {
         endPiece.scale.set(alongScale, 1, widthScale);
         endPiece.position.set(0, moduleY, cursor + END_LEN * alongScale * 0.5);
         dock.add(endPiece);
+        postPair(endPiece.position.z, END_LEN);
       }
     } else {
       const deck = new THREE.Mesh(
@@ -127,6 +166,10 @@ export function buildDock(ctx: IslandBuildCtx) {
             post.position.set(side * (island.dock.width * 0.45), postHeight * 0.45, z);
             post.castShadow = true;
             dock.add(post);
+            pileAnchors.push({
+              lx: post.position.x, lz: z,
+              topY: postHeight * 0.45 - postHeight * 0.4, rx: 0.1, rz: 0.1,
+            });
 
             if (i < 3) {
               const railLen = Math.max(0.15, dockL * 0.24);
@@ -146,6 +189,47 @@ export function buildDock(ctx: IslandBuildCtx) {
         const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.25, 0.18), beamMat);
         post.position.set(postSide * (dockW * 0.44), 0.65, dockL * 0.22);
         dock.add(post);
+        pileAnchors.push({ lx: post.position.x, lz: post.position.z, topY: 0.15, rx: 0.1, rz: 0.1 });
+      }
+    }
+
+    // …and now drive them. One merged mesh, so a pier's whole underside is a
+    // single draw call however many posts it stands on.
+    if (pileAnchors.length > 0) {
+      const pileUnit = new THREE.CylinderGeometry(1, 1.16, 1, 6);
+      const pileParts: THREE.BufferGeometry[] = [];
+      const pileMat = new THREE.MeshStandardMaterial({ color: 0x3c2814, roughness: 1 });
+      const mat4 = new THREE.Matrix4();
+      const noRot = new THREE.Quaternion();
+      for (const a of pileAnchors) {
+        const ix = dockLocalX + a.lx * cosD + a.lz * sinD;
+        const iz = dockLocalZ - a.lx * sinD + a.lz * cosD;
+        const bed = meshGround?.heightAt(ix, iz)
+          ?? getIslandSurfaceY(island, ix + island.position.x, iz + island.position.z);
+        // Dock-local, and driven a good half-metre INTO the bed so a wave
+        // trough never exposes the cut.
+        const bottom = bed - island.dock.position.y - 0.55;
+        const len = a.topY - bottom;
+        // Where the shore has already risen past the post there is nothing to
+        // drive — that end of the pier stands on sand.
+        if (len < 0.3) continue;
+        const part = pileUnit.clone();
+        part.applyMatrix4(mat4.compose(
+          new THREE.Vector3(a.lx, (a.topY + bottom) * 0.5, a.lz),
+          noRot,
+          new THREE.Vector3(a.rx, len, a.rz),
+        ));
+        pileParts.push(part);
+      }
+      pileUnit.dispose();
+      const merged = pileParts.length > 0 ? mergeGeometries(pileParts, false) : null;
+      for (const part of pileParts) part.dispose();
+      if (merged) {
+        const piles = new THREE.Mesh(merged, pileMat);
+        piles.name = 'dock-piling';
+        piles.castShadow = !lowDetail;
+        piles.receiveShadow = true;
+        dock.add(piles);
       }
     }
 

@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import type { IslandBuildCtx } from './context.js';
+import { ensureMeshGround } from './GroundTruth.js';
 
 /** Layered cliff strata — exposed rock bands wrapping high cliffs. (Skipped on
  *  mountains: the sheer spires changed the slopes those slabs were sampled
@@ -48,53 +49,94 @@ export function buildCliffStrata(ctx: IslandBuildCtx) {
   }
 }
 
-/** Reef ring — sharp dark rocks just offshore. */
+/** Reef ring — sharp dark rocks just offshore.
+ *
+ *  A reef rock is the one piece of island scenery whose ground is UNDERWATER,
+ *  and it used to be placed by picking a radius first and then asking the
+ *  ANALYTIC heightfield what was down there. Two lies compounded: the analytic
+ *  seabed runs above the drawn one (the mesh triangles are chords under it),
+ *  and past the shelf edge there is nothing under a reef rock at all — the
+ *  live audit found rocks hanging 5.5 m over the drawn seabed with their foam
+ *  ring painted on the water below them. In the shallows the sand shows
+ *  straight through the water, so that gap is not a technicality.
+ *
+ *  So the DEPTH picks the radius now, not the other way round: walk in along
+ *  the rock's own bearing until the DRAWN seabed is shallow enough that this
+ *  rock, standing on it and sunk a fifth, breaks the surface the way it was
+ *  meant to. A bearing with nothing but deep water on it grows no reef. */
 export function buildReefRing(ctx: IslandBuildCtx) {
   const { island, group, r, rng, lowDetail, scaledCount } = ctx;
+  const ground = ensureMeshGround(ctx);
   {
     const reefMatDark = new THREE.MeshStandardMaterial({ color: 0x5b5348, roughness: 1 });
     const reefMatWet = new THREE.MeshStandardMaterial({ color: 0x6d6455, roughness: 0.9 });
     const reefCount = scaledCount(Math.round(r / 8), 5);
     const reefGeoSharp = new THREE.ConeGeometry(0.7, 1.2, 5);
     const reefGeoChunk = new THREE.DodecahedronGeometry(0.6, 0);
+    const seaY = 0.05;
+    /** Drawn seabed under an island-local point, analytic only where the
+     *  terrain mesh does not reach (the low-detail proxy path). */
+    const bedAt = (lx: number, lz: number): number => ground?.heightAt(lx, lz)
+      ?? getIslandSurfaceY(island, lx + island.position.x, lz + island.position.z);
     for (let i = 0; i < reefCount; i++) {
       const angle = rng(i * 401 + 91) * Math.PI * 2;
-      const distRatio = 1.06 + rng(i * 409 + 97) * 0.22;
       const cosA = Math.cos(angle);
       const sinA = Math.sin(angle);
-      const fx = cosA * island.radius * distRatio * island.profile.footprintX;
-      const fz = sinA * island.radius * distRatio * island.profile.footprintZ;
-      const seaY = 0.05;
       const sharp = rng(i * 419) > 0.5;
+      const scale = 0.7 + rng(i * 433) * 1.4;
+      const scaleY = scale * (0.6 + rng(i * 441) * 1.2);
+      const rockH = 1.2 * scaleY;             // both source geos are 1.2 tall
+      const burial = rockH * 0.24;            // sunk, so a tilt never lifts an edge
+      // Same spread of tips as before: some rocks awash, some breaking clear.
+      const wantTop = seaY + (rng(i * 431) - 0.3) * 1.6;
+      const jitter = rng(i * 409 + 97) * 0.03;
+      let best: { fx: number; fz: number; bed: number; top: number; err: number } | null = null;
+      for (let s = 0; s <= 15; s++) {
+        const distRatio = 1.32 + jitter - s * 0.028;
+        const fx = cosA * island.radius * distRatio * island.profile.footprintX;
+        const fz = sinA * island.radius * distRatio * island.profile.footprintZ;
+        const bed = bedAt(fx, fz);
+        // Inshore of the waterline is beach, not reef — stop before the ring
+        // walks up the sand.
+        if (bed > -0.15) break;
+        const top = bed + rockH - burial;
+        const err = Math.abs(top - wantTop);
+        if (best === null || err < best.err) best = { fx, fz, bed, top, err };
+        if (top >= wantTop) break;            // shallow enough; no need to go further in
+      }
+      // Nothing on this bearing the rock could stand on and still be seen.
+      if (best === null || best.top < -1.2) continue;
       const reef = new THREE.Mesh(
         sharp ? reefGeoSharp : reefGeoChunk,
         rng(i * 421) > 0.4 ? reefMatDark : reefMatWet,
       );
-      const stickOut = (rng(i * 431) - 0.3) * 1.6; // some submerged, some breaking
-      const scale = 0.7 + rng(i * 433) * 1.4;
-      reef.scale.set(scale * (0.7 + rng(i * 437) * 0.6), scale * (0.6 + rng(i * 441) * 1.2), scale * (0.7 + rng(i * 443) * 0.6));
-      // AUDIT P2: these were pinned to a fixed sea offset regardless of what
-      // was (or wasn't) under them, so rocks over a sub-sea shelf hung in mid
-      // air above the water with their foam ring painted on the sea below.
-      // Seat on the seabed where it's shallow enough to reach, and always
-      // keep the base at least ~0.2m under the waterline so nothing floats.
-      const reefHalfH = 0.6 * reef.scale.y;   // both source geos are 1.2 tall
-      const bedY = getIslandSurfaceY(island, fx + island.position.x, fz + island.position.z);
-      const seated = bedY > -0.6 ? bedY + reefHalfH * 0.55 : seaY + stickOut;
-      reef.position.set(fx, Math.min(seated, reefHalfH - 0.2), fz);
+      // Seat on the LOWEST drawn ground under the footprint so the downhill
+      // side of a shelving seabed leaves no daylight either…
+      const seat = ground?.seat(best.fx, best.fz, Math.max(0.35, scale * 0.5));
+      const bed = seat ? Math.min(seat.lo, seat.center) : best.bed;
+      // …and then GROW to the tip the ring wanted, rather than sink below it:
+      // seating on the footprint's low corner costs up to a metre of height,
+      // and a reef whose rocks all quietly drown is not a reef.
+      const grown = Math.min(rockH * 2.2, Math.max(rockH, wantTop - bed + burial));
+      reef.scale.set(scale * (0.7 + rng(i * 437) * 0.6), grown / 1.2, scale * (0.7 + rng(i * 443) * 0.6));
+      reef.position.set(best.fx, bed - burial + grown * 0.5, best.fz);
       reef.rotation.set(rng(i * 447) * 0.6, rng(i * 449) * Math.PI * 2, (rng(i * 451) - 0.5) * 0.6);
       reef.castShadow = false;
       reef.receiveShadow = true;
+      reef.name = 'decor-reef-rock';
       group.add(reef);
 
       // Add a small splash collar of foam (a flat ring sliver) for ones poking above water
-      if (reef.position.y + reefHalfH > 0.12 && !lowDetail) {
+      if (reef.position.y + grown * 0.5 > 0.12 && !lowDetail) {
         const foam = new THREE.Mesh(
           new THREE.RingGeometry(scale * 0.55, scale * 0.95, 12),
           new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false }),
         );
         foam.rotation.x = -Math.PI * 0.5;
-        foam.position.set(fx, seaY + 0.01, fz);
+        foam.position.set(best.fx, seaY + 0.01, best.fz);
+        // Foam floats on the WATER, not on the ground — it is the one piece
+        // here the grounding audit must read as sea dressing.
+        foam.name = 'reef-foam';
         group.add(foam);
       }
     }

@@ -11,6 +11,7 @@ import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import { applyCaveTubeColors, capCaveTubeRims, CAVE_SHELL_MARGIN, caveTubeParams, cullCaveTubeAgainstNeighbors, insideCaveShellVolume, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import type { CaveMouthCarve, IslandBuildCtx } from './context.js';
+import { ensureMeshGround, type MeshGround } from './GroundTruth.js';
 
 /** The authored boulder GLBs the portal frame and the cave rubble are built
  *  from. `a` is a rounded dome, `b` an angular leaning slab, `c` a split stack —
@@ -43,16 +44,17 @@ float cvNoise(vec2 p) {
  * mouth-throat lightening from applyCaveTubeColors) still drive the base tone,
  * and the emissive is scaled by the same field at `<emissivemap_fragment>` so
  * the self-glow varies with the rock instead of washing it flat. */
-function paintCaveRock(mat: THREE.MeshStandardMaterial, cacheKey: string) {
+function paintCaveRock(mat: THREE.MeshStandardMaterial, cacheKey: string, exposed = false) {
   mat.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vCaveW;\n')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCaveW = (modelMatrix * vec4(position, 1.0)).xyz;\n');
+      .replace('#include <common>', `#include <common>\nvarying vec3 vCaveW;\n${exposed ? 'attribute float aCaveExposed;\nvarying float vCaveExp;\n' : ''}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nvCaveW = (modelMatrix * vec4(position, 1.0)).xyz;\n${exposed ? 'vCaveExp = aCaveExposed;\n' : ''}`);
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vCaveW;\nfloat cvShade;\n${CAVE_ROCK_GLSL}`)
+      .replace('#include <common>', `#include <common>\nvarying vec3 vCaveW;\nfloat cvShade;\n${exposed ? 'varying float vCaveExp;\nvec3 cvRaw;\n' : ''}${CAVE_ROCK_GLSL}`)
       .replace(
         '#include <color_fragment>',
         '#include <color_fragment>\n'
+        + (exposed ? 'cvRaw = diffuseColor.rgb;\n' : '')
         // Strata: a band pitch close to the terrain shader's, warped by noise so
         // the rings don't read as machined contours on a round tube.
         + 'float cvWarp = cvNoise(vCaveW.xz * 0.28);\n'
@@ -64,14 +66,72 @@ function paintCaveRock(mat: THREE.MeshStandardMaterial, cacheKey: string) {
         // Damp, near-black stone at the very base of the walls (where the floor
         // meets rock) and warm mineral seams in the dry upper band.
         + 'diffuseColor.rgb += vec3(0.052, 0.030, 0.009) * smoothstep(0.70, 0.97, cvM2);\n'
-        + 'diffuseColor.rgb *= 0.78 + 0.22 * smoothstep(0.0, 1.1, fract(vCaveW.y * 0.5 + 0.5) + cvM1 * 0.4);\n',
+        + 'diffuseColor.rgb *= 0.78 + 0.22 * smoothstep(0.0, 1.1, fract(vCaveW.y * 0.5 + 0.5) + cvM1 * 0.4);\n'
+        // Wherever this shell breaks OUT of the hill (see tintShellToHillside)
+        // it is no longer cave stone — it is a scrap of hillside — so it takes
+        // its vertex colour raw. Only a tenth of the cavern mottle is kept, and
+        // only so the scrap is not a dead-flat patch beside a mottled slope.
+        + (exposed ? 'diffuseColor.rgb = mix(diffuseColor.rgb, cvRaw * (0.74 + 0.34 * cvShade), vCaveExp);\n' : ''),
       )
       .replace(
         '#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\ntotalEmissiveRadiance *= 0.42 + 0.82 * cvShade;\n',
+        `#include <emissivemap_fragment>\ntotalEmissiveRadiance *= (0.42 + 0.82 * cvShade)${exposed ? ' * (1.0 - 0.94 * vCaveExp)' : ''};\n`,
       );
   };
   mat.customProgramCacheKey = () => cacheKey;
+}
+
+/**
+ * Make the part of a shell that DOES break the hillside draw as hillside.
+ *
+ * `buryShellCrown` sinks whatever it can, but where the hill over a mouth is
+ * genuinely thinner than the throat collar is tall there is nowhere left to
+ * sink to: the collar may never go below the walkable ceiling, so a strip of
+ * its crown stays above ground and photographs as a small brown plate lying on
+ * the slope over the opening. Nothing can be done about the geometry — so paint
+ * it out. Every vertex that ends up at or above the DRAWN terrain takes that
+ * terrain's own vertex colour, and (through `aCaveExposed`) drops the cavern
+ * shading and the throat's warm self-glow with it. What is left reads as the
+ * hillside it is embedded in, from the one angle it was ever visible from.
+ */
+function tintShellToHillside(
+  geo: THREE.BufferGeometry, island: Island, cave: IslandCave,
+  ground: MeshGround | null, base: THREE.Color,
+): void {
+  const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+  // The tube already carries the mouth-throat lightening (applyCaveTubeColors);
+  // keep it as the buried tone and only lerp the crown away from it.
+  const existing = geo.getAttribute('color') as THREE.BufferAttribute | undefined;
+  const colors = new Float32Array(pos.count * 3);
+  const exposure = new Float32Array(pos.count);
+  const cos = Math.cos(cave.rotation);
+  const sin = Math.sin(cave.rotation);
+  const caveLocalX = cave.position.x - island.position.x;
+  const caveLocalZ = cave.position.z - island.position.z;
+  const hill = new THREE.Color();
+  const out = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const lx = pos.getX(i);
+    const lz = pos.getZ(i);
+    const ix = caveLocalX + lx * cos + lz * sin;
+    const iz = caveLocalZ - lx * sin + lz * cos;
+    if (existing) out.setRGB(existing.getX(i), existing.getY(i), existing.getZ(i));
+    else out.copy(base);
+    let t = 0;
+    const drawn = ground?.heightAt(ix, iz);
+    if (drawn !== null && drawn !== undefined && ground?.colorAt(ix, iz, hill)) {
+      // How far this vertex stands out of the hill. Buried by more than a
+      // third of a metre and nobody can see it, so nothing changes.
+      t = THREE.MathUtils.smoothstep(cave.position.y + pos.getY(i) - drawn, -0.35, 0.45);
+      if (t > 0) out.lerp(hill, t);
+    }
+    colors[i * 3] = out.r;
+    colors[i * 3 + 1] = out.g;
+    colors[i * 3 + 2] = out.b;
+    exposure[i] = t;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute('aCaveExposed', new THREE.BufferAttribute(exposure, 1));
 }
 
 /**
@@ -188,6 +248,7 @@ export function makeCaveMouthCarver(island: Island): (worldX: number, worldZ: nu
  *  reads as a real explorable cave you can step into. */
 export function buildCaves(ctx: IslandBuildCtx) {
   const { island, group, rng, lowDetail, isVolcanic, paletteRock, cliffColor } = ctx;
+  const meshGround = ensureMeshGround(ctx);
   if (island.caves && island.caves.length > 0) {
     // Cave stone is the MOUNTAIN'S OWN rock (its palette, darkened for depth) so
     // the mouth reads as an opening carved into the rock face — not a foreign
@@ -204,7 +265,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
       color: caveRockCol.clone().multiplyScalar(0.9).getHex(), roughness: 1, flatShading: true, side: THREE.DoubleSide,
       emissive: new THREE.Color(0x30200f), emissiveIntensity: 0.7, vertexColors: true,
     });
-    paintCaveRock(caveRockMat, 'pirates-cave-tube');
+    paintCaveRock(caveRockMat, 'pirates-cave-tube', true);
     const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
     const flameMat = new THREE.MeshStandardMaterial({ color: 0xff8a20, emissive: 0xff5500, emissiveIntensity: 1.4, roughness: 0.4 });
 
@@ -306,9 +367,18 @@ export function buildCaves(ctx: IslandBuildCtx) {
           const p = toIsland(lx, lz);
           const wx = p.x + island.position.x;
           const wz = p.z + island.position.z;
-          const ground = natural
+          const analytic = natural
             ? getIslandSurfaceY(island, wx, wz, { skipMouthCarve: true })
             : getIslandSurfaceY(island, wx, wz);
+          // …and the rock face it stands on is the DRAWN one. Seating the frame
+          // on the analytic field left brow and jamb stones up to 2.6m proud of
+          // the hillside they are supposed to be growing out of. Take whichever
+          // is lower, bounded so one carved sample can't drop a jamb into the
+          // gully it is meant to flank.
+          const drawn = meshGround?.heightAt(p.x, p.z);
+          const ground = drawn === null || drawn === undefined
+            ? analytic
+            : Math.max(analytic - 2.8, Math.min(analytic, drawn));
           // The throat COLLAR is a 1.5·cR-radius tube standing proud of the
           // carved gully; where the hillside over the mouth is thinner than the
           // collar is tall, its crown is a bare brown plate hanging over the
@@ -406,6 +476,11 @@ export function buildCaves(ctx: IslandBuildCtx) {
         + (floorEndLocalY - floorLocalY) * THREE.MathUtils.clamp(-lz / Math.max(1e-3, cLen), 0, 1)
         + ch + CAVE_SHELL_MARGIN;
       buryShellCrown(tubeGeo, island, cave, shellCeilingAt, cR + CAVE_SHELL_MARGIN + 0.6);
+      // The mouth tube is lofted from the passage too, and over a thin roof its
+      // crown surfaces beside the collar's — same brown plate, same remedy.
+      // Deeper segments come out all-zeros (they are metres under the hill), so
+      // the attribute the shared material reads is simply always there.
+      tintShellToHillside(tubeGeo, island, cave, meshGround, caveRockCol);
       const tube = new THREE.Mesh(tubeGeo, caveRockMat);
       tube.name = 'cave-tube';
       tube.receiveShadow = true;
@@ -430,17 +505,24 @@ export function buildCaves(ctx: IslandBuildCtx) {
         const collarR = cR * CAVE_MOUTH_TRENCH_K + 0.5;
         // Lighter than the deep-tube stone: the collar IS the visible throat
         // from outside — at ×0.36 it read as a boulder blocking the mouth.
+        // White base + vertex colours: the collar's own stone tone is baked in
+        // per vertex so tintShellToHillside can hand the emerging crown the
+        // hillside's colour instead (see there).
         const collarMat = new THREE.MeshStandardMaterial({
-          color: paletteRock.clone().multiplyScalar(0.7).getHex(), roughness: 1, flatShading: true, side: THREE.DoubleSide,
-          emissive: new THREE.Color(0x30200f), emissiveIntensity: 0.5,
+          color: 0xffffff, roughness: 1, flatShading: true, side: THREE.DoubleSide,
+          emissive: new THREE.Color(0x30200f), emissiveIntensity: 0.5, vertexColors: true,
         });
-        paintCaveRock(collarMat, 'pirates-cave-collar');
+        paintCaveRock(collarMat, 'pirates-cave-collar', true);
         const collarGeo = makeCaveTubeGeometry(collarR, collarLen, floorLocalY - 0.02, floorLocalY + ch * 1.02, cw * 3.1 + 17, false, collarFloorEnd - 0.02);
         // The collar is the worst offender for a crown standing proud of the
         // hill — it is lofted at 1.5×cR and then inflated again by the shell
         // margin and the loft's own widenings, up to a ~16m half-width. Sink
         // whatever of it breaks the surface (see buryShellCrown).
         buryShellCrown(collarGeo, island, cave, shellCeilingAt, collarR + 0.6);
+        // …and whatever the burial could NOT reach — the hill over this mouth
+        // being thinner than the collar is tall — stops being a brown plate and
+        // becomes hillside.
+        tintShellToHillside(collarGeo, island, cave, meshGround, paletteRock.clone().multiplyScalar(0.7));
         const collar = new THREE.Mesh(collarGeo, collarMat);
         collar.name = 'cave-collar';
         collar.receiveShadow = true;
