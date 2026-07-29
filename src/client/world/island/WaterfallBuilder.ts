@@ -314,6 +314,80 @@ function makeWaterMaterial(ctx: IslandBuildCtx): THREE.MeshStandardMaterial {
   return mat;
 }
 
+/**
+ * The fall's SCULPTED ROCK — troughs, shelves, pool bowls, boulders.
+ *
+ * Two failures shared one material, and both photographed at Crow's Perch as
+ * "untextured black boxes flanking the chute":
+ *
+ *  1. BLACK. The rock is `flatShading` + `DoubleSide`, and the trough/shelf
+ *     strips are open SHEETS — half of them are wound away from wherever you
+ *     happen to stand. three's flat-shaded path takes its normal from the
+ *     screen-space derivatives of the view position and, unlike the smooth
+ *     path, never multiplies it by `gl_FrontFacing`: on a back-facing triangle
+ *     that normal points away from the eye, N·L goes negative for every light
+ *     and the face renders as unlit black. (Proved live: forcing
+ *     `flatShading = false` on the shipped mesh turned the same slabs mid-grey.
+ *     Flipping the flat normal toward the eye keeps the faceted read AND the
+ *     light.) Closed rock — every boulder here — is untouched: its front faces
+ *     already point at the viewer, so the flip is a no-op.
+ *  2. UNTEXTURED. Every other rock surface in the world grew a fragment-scale
+ *     pass in an earlier wave (`paintCaveRock`, the sea-stack strata). The
+ *     fall's rock never did, so a 4m shelf was one flat vertex-lerped tone —
+ *     which is what makes it read as a BOX rather than as stone.
+ */
+function paintFallRock(mat: THREE.MeshStandardMaterial) {
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vFallW;\n')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvFallW = (modelMatrix * vec4(position, 1.0)).xyz;\n');
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vFallW;\n' + WATER_NOISE_GLSL,
+      )
+      // Strata on the same ~2.4m pitch the terrain shader bands cliffs with, a
+      // grain octave for the chisel marks, and a damp green-black in the
+      // crevices — so a shelf beside the water reads as wet, layered stone.
+      .replace(
+        '#include <color_fragment>',
+        '#include <color_fragment>\n'
+        + 'float fkWarp = wfNoise(vFallW.xz * 0.31);\n'
+        + 'float fkBand = 0.5 + 0.5 * sin(vFallW.y * 2.35 + fkWarp * 5.0);\n'
+        + 'float fkM1 = wfNoise(vFallW.xz * 0.62 + vFallW.y * 0.28);\n'
+        + 'float fkM2 = wfNoise(vFallW.xz * 2.60 - vFallW.y * 0.85);\n'
+        + 'float fkGrain = wfNoise(vFallW.xz * 9.5 + vFallW.y * 3.1);\n'
+        + 'float fkShade = 0.70 + 0.26 * fkBand * (0.55 + 0.45 * fkM1) + 0.20 * fkM2 + 0.10 * fkGrain;\n'
+        + 'diffuseColor.rgb *= clamp(fkShade, 0.45, 1.35);\n'
+        // Mineral warmth in the dry bands, algal green in the damp shade.
+        // Kept small on purpose: at full strength the tint turned the outcrops
+        // beside a grey highland fall a distinct khaki, which is a different
+        // wrong answer from the one this pass exists to fix.
+        + 'diffuseColor.rgb += vec3(0.017, 0.011, 0.002) * smoothstep(0.62, 0.95, fkM2);\n'
+        + 'diffuseColor.rgb += vec3(-0.007, 0.010, -0.004) * smoothstep(0.70, 0.30, fkBand) * (0.4 + 0.6 * fkM1);\n',
+      )
+      // `roughnessFactor` is only declared in this chunk — the wet sheen has to
+      // be applied here, not up with the albedo.
+      .replace(
+        '#include <roughnessmap_fragment>',
+        '#include <roughnessmap_fragment>\n'
+        + 'roughnessFactor = clamp(roughnessFactor - 0.22 * smoothstep(0.55, 0.95, fkM1), 0.35, 1.0);\n',
+      )
+      // The flat-normal flip. `vViewPosition` runs from the fragment TOWARD the
+      // eye, so a normal disagreeing with it is a back face wearing an inverted
+      // derivative normal — negate it and the sheet is lit from whichever side
+      // you are standing on.
+      .replace(
+        '#include <normal_fragment_begin>',
+        '#include <normal_fragment_begin>\n'
+        + '#ifdef FLAT_SHADED\n'
+        + 'if (dot(normal, vViewPosition) < 0.0) { normal = -normal; nonPerturbedNormal = normal; }\n'
+        + '#endif\n',
+      );
+  };
+  mat.customProgramCacheKey = () => 'pirates-waterfall-rock';
+}
+
 /** Mist: soft sprites that rise, drift and fade on the shared clock. */
 function makeMistMaterial(ctx: IslandBuildCtx, size: number): THREE.PointsMaterial {
   const mat = new THREE.PointsMaterial({
@@ -842,7 +916,13 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
       // Pools sit ON the rock; drop the rim to the ground where the ground is
       // already lower, so no pool lip ever hangs in the air.
       const gy = groundAt(vx, vz);
-      const vy = Math.max(pool.y - 0.5, Math.min(pool.y, gy + 0.9));
+      // A DEAD-flat disc is what read as a "flat white splash sheet" pasted
+      // across the chute: every vertex shared one normal, so the whole pond took
+      // one lighting value and the shader's fresnel never moved. A few
+      // centimetres of swell (deterministic, so the pool is stable) is enough
+      // for the surface to catch the sun unevenly and read as water.
+      const swell = (Math.sin(th * 4 + fallIndex * 2.3) * 0.6 + Math.sin(th * 7 - 1.1) * 0.4) * 0.055 * radius;
+      const vy = Math.max(pool.y - 0.5, Math.min(pool.y, gy + 0.9)) + swell;
       const rim = Math.hypot(pool.s + along - pool.impactS, side);
       out.push(water.vert(vx, vy, vz, u, (pool.s + along) - pool.impactS, aer, 1, rim, pool.rAcross, alpha));
     }
@@ -895,9 +975,23 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
         const r = outer * band.r * wob;
         const vx = cxI + dirX * co * r + ax * si * r;
         const vz = czI + dirZ * co * r + az * si * r;
-        // Rides just over the pool, and sinks with the ground where the ground
-        // falls away, so the boil never cantilevers off the slope.
-        const vy = Math.min(baseY + 0.12, groundAt(vx, vz) + 0.75);
+        // THE FLAT WHITE SPLASH SHEET. Every vertex of this annulus used to
+        // take one height, so the boil was a dead-level white disc laid across
+        // the slope — seen from the side (which is how you meet a mid-fall step)
+        // it presented a straight bright EDGE cutting across the chute, and the
+        // shader's fresnel, having one normal to work with, never moved on it.
+        // Water landing on rock does the opposite of level: it heaps over the
+        // plunge and spills away at the rim. So: a crown that falls off with
+        // radius, plus a deterministic swell (same phase family as the pool's,
+        // so a fall's boil and its pond breathe together) — enough tilt that
+        // every facet catches the sun differently and the disc reads as churn.
+        const crown = (1 - band.r) * 0.22;
+        const swell = (Math.sin(th * 3 + fallIndex * 2.1) * 0.6 + Math.sin(th * 5 - 1.4) * 0.4)
+          * 0.055 * outer * (0.35 + band.r);
+        // Clamped AFTER the swell, not before: the boil may never climb off its
+        // own ground, which is the invariant the flat version bought its
+        // flatness with.
+        const vy = Math.min(baseY + 0.12 + crown + swell, groundAt(vx, vz) + 0.75);
         // aFlowB.x is "metres from the impact", and the shader turns anything
         // under 2.4 into whitewater: normalise the ring onto that scale so a
         // big fall's wide boil is as white as a small one's.
@@ -1445,6 +1539,7 @@ export function buildWaterfalls(ctx: IslandBuildCtx) {
         mist: makeMistMaterial(ctx, lowDetail ? 1.3 : 1.55),
       };
       mats.rock.name = 'waterfall-rock';
+      paintFallRock(mats.rock);
     }
     const site = buildFall(ctx, course, fall, mats);
     if (!site) continue;

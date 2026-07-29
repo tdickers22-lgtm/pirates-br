@@ -57,11 +57,22 @@ function paintCaveRock(mat: THREE.MeshStandardMaterial, cacheKey: string, expose
         + (exposed ? 'cvRaw = diffuseColor.rgb;\n' : '')
         // Strata: a band pitch close to the terrain shader's, warped by noise so
         // the rings don't read as machined contours on a round tube.
+        // Warped HARD, and dipping with xz: an un-warped y-only band is a set of
+        // dead-level contour lines, and on the big near-flat panels of the throat
+        // collar and the brow that is exactly how it photographed — "flat tan
+        // planes with terracing stripes" behind the portal boulders. A dip term
+        // plus a second warp octave tilts and breaks every band, so the same
+        // panel reads as bedded rock instead of a striped sheet.
         + 'float cvWarp = cvNoise(vCaveW.xz * 0.28);\n'
-        + 'float cvBand = 0.5 + 0.5 * sin(vCaveW.y * 1.85 + cvWarp * 4.0);\n'
+        + 'float cvWarp2 = cvNoise(vCaveW.xz * 0.93 + 11.0);\n'
+        + 'float cvDip = dot(vCaveW.xz, vec2(0.21, -0.15));\n'
+        + 'float cvBand = 0.5 + 0.5 * sin(vCaveW.y * 1.85 + cvDip + cvWarp * 5.2 + cvWarp2 * 2.1);\n'
         + 'float cvM1 = cvNoise(vCaveW.xz * 0.55 + vCaveW.y * 0.30);\n'
         + 'float cvM2 = cvNoise(vCaveW.xz * 2.10 - vCaveW.y * 0.75);\n'
-        + 'cvShade = 0.62 + 0.34 * cvBand * (0.55 + 0.45 * cvM1) + 0.22 * cvM2;\n'
+        // A grain octave: without it a 6m collar panel has nothing finer than a
+        // 0.5m mottle on it, which at arm's length is no texture at all.
+        + 'float cvGrit = cvNoise(vCaveW.xz * 7.4 + vCaveW.y * 2.6);\n'
+        + 'cvShade = 0.62 + 0.34 * cvBand * (0.55 + 0.45 * cvM1) + 0.22 * cvM2 + 0.10 * (cvGrit - 0.5);\n'
         + 'diffuseColor.rgb *= cvShade;\n'
         // Damp, near-black stone at the very base of the walls (where the floor
         // meets rock) and warm mineral seams in the dry upper band.
@@ -132,6 +143,44 @@ function tintShellToHillside(
   }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geo.setAttribute('aCaveExposed', new THREE.BufferAttribute(exposure, 1));
+}
+
+/**
+ * Break the LOFT RINGS of a cave shell up per vertex.
+ *
+ * A tube lofted from a passage carries one colour per ring — the throat
+ * lightening, then the hillside tint — and every ring is a clean circle. Seen
+ * from the approach, where the collar and the brow present themselves almost
+ * edge-on, those rings compress into a stack of dead-parallel light and dark
+ * lines: the "terracing stripes" the audit read on the jamb faces behind the
+ * portal boulders. No fragment shader can fix that, because the banding is IN
+ * the vertex colours the shader is modulating.
+ *
+ * So dirty the rings: a deterministic world-space hash per vertex, at a spatial
+ * scale finer than a ring is long. The throat gradient and the hillside tint
+ * both survive (this is a ±7% multiply, not a repaint); what does not survive is
+ * any two neighbouring rings agreeing on a tone, which is the whole read.
+ */
+function mottleShellColors(geo: THREE.BufferGeometry, seed: number): void {
+  const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+  const col = geo.getAttribute('color') as THREE.BufferAttribute | undefined;
+  if (!col) return;
+  const hash = (a: number, b: number, c: number): number => {
+    const v = Math.sin(a * 12.9898 + b * 78.233 + c * 37.719 + seed * 0.017) * 43758.5453;
+    return v - Math.floor(v);
+  };
+  for (let i = 0; i < pos.count; i++) {
+    // Quantised so the three copies of a shared corner land on one value and
+    // the shell stays closed.
+    const k = hash(
+      Math.round(pos.getX(i) * 3.1),
+      Math.round(pos.getY(i) * 3.7),
+      Math.round(pos.getZ(i) * 3.3),
+    );
+    const m = 0.93 + k * 0.14;
+    col.setXYZ(i, col.getX(i) * m, col.getY(i) * m, col.getZ(i) * m);
+  }
+  col.needsUpdate = true;
 }
 
 /**
@@ -426,6 +475,37 @@ export function buildCaves(ctx: IslandBuildCtx) {
             rockH * (0.6 + rng(cw * 7 + side * 13) * 0.3), 0, true, crownY - rockH * 0.55,
           );
         }
+        // JAMB FACES: the two carved walls of the gully itself.
+        //
+        // The boulder frame stands on the UNCUT rim, so it crowns the opening
+        // and leaves the faces the shared carve actually cut — the approach
+        // walls you walk between — as raw terrain: two smooth tan planes wearing
+        // the heightfield's terrace stripes, which is what a portal that had
+        // "landed" still photographed as. Nothing here can re-carve them (the
+        // cut is shared math), so COVER them: a broken revetment of stone lining
+        // each wall from the threshold out, seated on the carved floor and
+        // leaning into the rock it is facing. Sized and offset to hug the wall —
+        // the walkway between them is the same width it was, and portal rocks
+        // are never colliders, so the width test-cave-walk pins is untouched.
+        {
+          const wallLat = CAVE_MOUTH_TRENCH_K * cR;
+          const courses = lowDetail ? 2 : 4;
+          for (const side of [-1, 1] as const) {
+            for (let i = 0; i < courses; i++) {
+              const k = cw * 3 + 20 + i * 2 + (side + 1) / 2;
+              const j = rng(k * 53 + 7);
+              // Stagger the courses along the trench and alternate their reach
+              // so the revetment reads as fallen slabs, not a fence of clones.
+              const lz = 0.9 + i * (5.4 / courses) + j * 1.1;
+              const lx = side * (wallLat * (0.80 + j * 0.16) - cR * 0.06 * (i % 2));
+              placeRock(
+                k, lx, lz,
+                rockH * (0.42 + rng(k * 59) * 0.46),
+                -side * 0.10 - 0.06, false,
+              );
+            }
+          }
+        }
         // …and rubble spilled out of the throat onto the trench floor, well
         // clear of the threshold so it never crowds the camera on the way in.
         if (!lowDetail) {
@@ -481,6 +561,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
       // Deeper segments come out all-zeros (they are metres under the hill), so
       // the attribute the shared material reads is simply always there.
       tintShellToHillside(tubeGeo, island, cave, meshGround, caveRockCol);
+      mottleShellColors(tubeGeo, cw * 31 + 7);
       const tube = new THREE.Mesh(tubeGeo, caveRockMat);
       tube.name = 'cave-tube';
       tube.receiveShadow = true;
@@ -523,6 +604,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
         // being thinner than the collar is tall — stops being a brown plate and
         // becomes hillside.
         tintShellToHillside(collarGeo, island, cave, meshGround, paletteRock.clone().multiplyScalar(0.7));
+        mottleShellColors(collarGeo, cw * 47 + 13);
         const collar = new THREE.Mesh(collarGeo, collarMat);
         collar.name = 'cave-collar';
         collar.receiveShadow = true;

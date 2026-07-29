@@ -9,17 +9,109 @@ import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import type { IslandBuildCtx } from './context.js';
 import { ensureMeshGround } from './GroundTruth.js';
 
+/**
+ * THE LAST UNPAINTED ROCK FAMILY.
+ *
+ * The cave stone, the sea stacks, the boulder GLBs and (this wave) the fall's
+ * sculpted rock all grew a fragment-scale albedo pass. These three did not: the
+ * strata slabs, the spires and the spire rubble are still a solid tone on a
+ * primitive — a Box, a Cone, a Dodecahedron — with flat shading and nothing
+ * else. On the bone isles, whose pale sand throws every dark tone into relief,
+ * that reads exactly as the audit called it: untextured dark BOXES and CONES
+ * lying about the ground, and dark shark-fin triangles on the skyline.
+ *
+ * Same idiom as `paintCaveRock` / the sea-stack strata, kept generic so one
+ * program serves all three families:
+ *   · bedding planes on a ~1.6m pitch, warped and DIPPED so a boxy slab is
+ *     layered rather than striped, and the four faces of a cone disagree;
+ *   · two mottle octaves plus a grain octave, so there is something to read at
+ *     3m as well as at 30m;
+ *   · a sun-bleached upper face and lichen in the shaded bedding, which is what
+ *     actually stops a dark stone from reading as a black solid;
+ *   · a floor under the darkening, so no face of this family can go to pitch.
+ *
+ * Costs one program per cache key, no textures, no geometry, no draw calls.
+ */
+function paintFeatureRock(mat: THREE.MeshStandardMaterial, cacheKey: string, bleach = 0.30) {
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vFeatW;\nvarying vec3 vFeatN;\n')
+      .replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\n'
+        + 'vFeatW = (modelMatrix * vec4(transformed, 1.0)).xyz;\n'
+        + 'vFeatN = normalize(mat3(modelMatrix) * objectNormal);\n',
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vFeatW;\nvarying vec3 vFeatN;\n'
+        + 'float ftHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n'
+        + 'float ftNoise(vec2 p) {\n'
+        + '  vec2 i = floor(p); vec2 f = fract(p);\n'
+        + '  vec2 u = f * f * (3.0 - 2.0 * f);\n'
+        + '  float a = ftHash(i), b = ftHash(i + vec2(1.0, 0.0));\n'
+        + '  float c = ftHash(i + vec2(0.0, 1.0)), d = ftHash(i + vec2(1.0, 1.0));\n'
+        + '  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n'
+        + '}\n',
+      )
+      .replace(
+        '#include <color_fragment>',
+        '#include <color_fragment>\n'
+        + 'float ftWarp = ftNoise(vFeatW.xz * 0.42);\n'
+        + 'float ftDip = dot(vFeatW.xz, vec2(0.26, -0.19));\n'
+        + 'float ftBed = 0.5 + 0.5 * sin(vFeatW.y * 3.9 + ftDip + ftWarp * 5.6);\n'
+        + 'float ftM1 = ftNoise(vFeatW.xz * 1.15 + vFeatW.y * 0.45);\n'
+        + 'float ftM2 = ftNoise(vFeatW.xz * 4.30 - vFeatW.y * 1.30);\n'
+        + 'float ftGrit = ftNoise(vFeatW.xz * 13.0 + vFeatW.y * 5.0);\n'
+        // Centred near 1.0, not below it: this pass is meant to give the stone
+        // structure, not to sink its albedo — the family's whole failure was
+        // being too dark to read as a surface.
+        + 'float ftShade = 0.88 + 0.26 * ftBed * (0.5 + 0.5 * ftM1) + 0.18 * (ftM2 - 0.5) + 0.12 * (ftGrit - 0.5);\n'
+        + 'diffuseColor.rgb *= clamp(ftShade, 0.72, 1.45);\n'
+        // Weathering by ASPECT: the up-facing planes bleach, the undercuts hold
+        // damp shadow. On a cone this is what turns a silhouette into a rock.
+        + `diffuseColor.rgb += vec3(0.100, 0.093, 0.074) * ${bleach.toFixed(3)} * smoothstep(0.25, 0.95, vFeatN.y) * (0.45 + 0.55 * ftM1);\n`
+        + 'diffuseColor.rgb *= 1.0 - 0.16 * smoothstep(-0.15, -0.85, vFeatN.y);\n'
+        // Lichen in the shaded bedding planes, mineral warmth in the proud ones.
+        + 'diffuseColor.rgb += vec3(-0.010, 0.026, -0.012) * smoothstep(0.62, 0.16, ftBed) * ftM1;\n'
+        + 'diffuseColor.rgb += vec3(0.034, 0.021, 0.004) * smoothstep(0.60, 0.96, ftM2);\n'
+        // The floor. A stone that reaches pure black has stopped being a
+        // surface — that is the whole finding this family failed.
+        + 'diffuseColor.rgb = max(diffuseColor.rgb, vec3(0.052, 0.048, 0.042));\n',
+      )
+      // `roughnessFactor` is not declared until this chunk, so the polish on the
+      // wind-scoured faces has to be applied here rather than up with the albedo.
+      .replace(
+        '#include <roughnessmap_fragment>',
+        '#include <roughnessmap_fragment>\n'
+        + 'roughnessFactor = clamp(roughnessFactor - 0.20 * smoothstep(0.55, 0.95, ftM2), 0.42, 1.0);\n',
+      );
+  };
+  mat.customProgramCacheKey = () => cacheKey;
+}
+
 /** Layered cliff strata — exposed rock bands wrapping high cliffs. (Skipped on
  *  mountains: the sheer spires changed the slopes those slabs were sampled
  *  against, leaving them floating mid-air.) */
 export function buildCliffStrata(ctx: IslandBuildCtx) {
-  const { island, group, rng, lowDetail, surfacePoint, isSolidDecorPoint, SURFACE_ABOVE_WATER, scaledCount } = ctx;
+  const { island, group, rng, lowDetail, surfacePoint, isSolidDecorPoint, SURFACE_ABOVE_WATER, scaledCount, cliffColor } = ctx;
   if (island.profile.heightProfile > 0.35 && !lowDetail && island.profile.terrainStyle !== 'mountain') {
-    const strataMats = [
-      new THREE.MeshStandardMaterial({ color: 0x6a5d48, roughness: 1, flatShading: true }),
-      new THREE.MeshStandardMaterial({ color: 0x564b3a, roughness: 1, flatShading: true }),
-      new THREE.MeshStandardMaterial({ color: 0x46402f, roughness: 1, flatShading: true }),
-    ];
+    // These were three hard-coded browns — 0x6a5d48 / 0x564b3a / 0x46402f — the
+    // last of which sits at 0.099 luma. On the pale sand of a bone isle that is
+    // a black slab lying on a beach, which is exactly what the audit counted,
+    // and it was a foreign brown on every OTHER island too: strata are the
+    // island's own bedrock, so they take the island's own cliff tone. Three
+    // bands stepped down from it keep the layered read without any of them
+    // going near the floor.
+    const strataMats = [-0.04, -0.18, -0.30].map((step, i) => {
+      const c = cliffColor.clone().multiplyScalar(1 + step);
+      // Deeper beds run warmer, the way iron-stained rock does.
+      c.lerp(new THREE.Color(0x8a6a44), i * 0.11);
+      const m = new THREE.MeshStandardMaterial({ color: c, roughness: 1, flatShading: true });
+      paintFeatureRock(m, `pirates-strata-${i}`, 0.42);
+      return m;
+    });
     const bandCount = Math.min(4, 2 + Math.floor(island.profile.heightProfile * 4));
     for (let band = 0; band < bandCount; band++) {
       const h01 = 0.45 + (band / bandCount) * 0.4;
@@ -35,11 +127,23 @@ export function buildCliffStrata(ctx: IslandBuildCtx) {
           strataMats[band % strataMats.length],
         );
         slab.position.copy(pt);
-        slab.position.y += h01 * 0.4;
+        // BURIED, AND CANTED. The slab used to be LIFTED (up to 0.34 m) and
+        // laid almost dead level (±0.09 rad): on a cliff band that reads as a
+        // ledge, but a bone isle's strata land on near-flat sand, and a level
+        // box sitting proud of flat ground is a CRATE — which is what the audit
+        // counted them as. Bedding rock does neither: it is mostly under the
+        // ground it broke out of, and it lies at the angle the bed was tilted
+        // to. So sink it by a third of its own thickness and cant it four times
+        // as hard. Nothing here is a collider, so no walk or reach changes.
+        //
+        // h01 is the band's height up the flank, and it still earns its keep:
+        // the high beds are the freshly broken ones and stand out further, the
+        // low beds have had the whole hillside washing over them and sit deeper.
+        slab.position.y -= slabH * (0.52 - h01 * 0.30);
         slab.rotation.set(
-          (rng(band * 751 + s) - 0.5) * 0.18,
+          (rng(band * 751 + s) - 0.5) * 0.66,
           angle + Math.PI * 0.5 + (rng(band * 753 + s) - 0.5) * 0.3,
-          (rng(band * 757 + s) - 0.5) * 0.16,
+          (rng(band * 757 + s) - 0.5) * 0.58,
         );
         slab.castShadow = true;
         slab.receiveShadow = true;
@@ -70,6 +174,10 @@ export function buildReefRing(ctx: IslandBuildCtx) {
   {
     const reefMatDark = new THREE.MeshStandardMaterial({ color: 0x5b5348, roughness: 1 });
     const reefMatWet = new THREE.MeshStandardMaterial({ color: 0x6d6455, roughness: 0.9 });
+    // Same family, same treatment — a reef cone is the one rock you see from a
+    // metre away as the swim carries you past it.
+    paintFeatureRock(reefMatDark, 'pirates-reef-dark', 0.22);
+    paintFeatureRock(reefMatWet, 'pirates-reef-wet', 0.26);
     const reefCount = scaledCount(Math.round(r / 8), 5);
     const reefGeoSharp = new THREE.ConeGeometry(0.7, 1.2, 5);
     const reefGeoChunk = new THREE.DodecahedronGeometry(0.6, 0);
@@ -145,9 +253,25 @@ export function buildReefRing(ctx: IslandBuildCtx) {
 
 /** Sharp rock spires — jagged peaks for mountain/rocky islands. */
 export function buildRockSpires(ctx: IslandBuildCtx) {
-  const { island, group, rng, surfacePoint, isSolidDecorPoint, SURFACE_ABOVE_WATER, scaledCount, boulderGeo } = ctx;
+  const { island, group, rng, surfacePoint, isSolidDecorPoint, SURFACE_ABOVE_WATER, scaledCount, boulderGeo, cliffColor } = ctx;
   if (island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky') {
-    const spireMat = new THREE.MeshStandardMaterial({ color: 0x6a5f52, roughness: 1, flatShading: true });
+    // Was a hard-coded 0x6a5f52 on a cone up to 13m tall: a black shark fin on
+    // the skyline of every rocky isle, and a foreign tone beside the hillside it
+    // grows out of. Now the island's own cliff stone, plus bedding, an aspect
+    // bleach and a floor it cannot fall below.
+    // 0.86, not 1.0: at the hillside's own value a 13m spire dissolves into the
+    // slope behind it, which is the opposite failure to the one being fixed. A
+    // seventh of a stop down is stone standing on sand.
+    const spireMat = new THREE.MeshStandardMaterial({
+      color: cliffColor.clone().multiplyScalar(0.86), roughness: 1, flatShading: true,
+    });
+    paintFeatureRock(spireMat, 'pirates-spire', 0.55);
+    // Hoisted out of the per-spire loop: it used to be rebuilt for every spire,
+    // which is four materials (and four shader hookups) for one look.
+    const rubbleMat = new THREE.MeshStandardMaterial({
+      color: cliffColor.clone().multiplyScalar(0.78), roughness: 1,
+    });
+    paintFeatureRock(rubbleMat, 'pirates-spire-rubble', 0.34);
     const spireCount = scaledCount(island.profile.terrainStyle === 'mountain' ? 4 : 3, 2);
     for (let i = 0; i < spireCount; i++) {
       const angle = island.profile.ridgeAxis + (i / spireCount) * Math.PI + rng(i * 503 + 13) * 0.6;
@@ -174,7 +298,6 @@ export function buildRockSpires(ctx: IslandBuildCtx) {
 
       // Anchoring rubble pile around the spire base so the transition reads as
       // weathered rather than placed.
-      const rubbleMat = new THREE.MeshStandardMaterial({ color: 0x3e342a, roughness: 1 });
       for (let s = 0; s < 4; s++) {
         const sa = (s / 4) * Math.PI * 2 + rng(i * 543 + s) * 0.5;
         const rOff = spireR * (0.85 + rng(i * 549 + s) * 0.35);
@@ -258,6 +381,7 @@ export function buildTerraces(ctx: IslandBuildCtx) {
   const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, islandHeading, SURFACE_ABOVE_WATER } = ctx;
   if (!lowDetail) {
     const terraceMat = new THREE.MeshStandardMaterial({ color: 0xa48d62, roughness: 0.98 });
+    paintFeatureRock(terraceMat, 'pirates-terrace-ledge', 0.30);
     const terraceCount = r > 58 ? 3 : 2;
     for (let i = 0; i < terraceCount; i++) {
       const angle = island.profile.ridgeAxis + (i - 1) * 0.46 + (rng(i * 1103 + islandSeed) - 0.5) * 0.18;

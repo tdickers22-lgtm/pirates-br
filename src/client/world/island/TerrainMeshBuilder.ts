@@ -108,6 +108,23 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         + (octaves >= 3
           ? 'float nGrain = tNoise(tR2 * tP * 8.5);\n'           // ~0.12m grain
           : 'float nGrain = nFine;\n')
+        // ── NEAR-FIELD GRIT ────────────────────────────────────────────────
+        // The ladder above bottoms out at ~0.12m, and 0.12m features are ~1/3
+        // of a metre of screen at arm's length: stand still and the ground
+        // under your boots is one airbrushed smear, which is what the audit
+        // photographed. This adds the two octaves BELOW that — ~3.5cm sand
+        // grain and ~1.2cm speckle — on a distance ramp, so they exist exactly
+        // where the eye can resolve them and are gone (no shimmer, no cost that
+        // matters) by the time a pixel covers more ground than a grain does.
+        + `float near = ${octaves >= 2 ? '1.0 - smoothstep(1.6, 11.0, length(vViewPosition))' : '0.0'};\n`
+        + 'float nGrit = 0.0;\n'
+        + (octaves >= 2
+          ? 'if (near > 0.004) {\n'
+            + '  nGrit = tNoise(tR1 * tP * 29.0) - 0.5;\n'
+            + (octaves >= 3 ? '  nGrit += (tNoise(tR2 * tP * 84.0) - 0.5) * 0.55;\n' : '')
+            + '  nGrit *= near;\n'
+            + '}\n'
+          : '')
         // Tent weights over the 0..3 material axis: adjacent classes crossfade.
         + 'float mC = clamp(vTerrMat, 0.0, 3.0);\n'
         + 'float wSand = max(0.0, 1.0 - abs(mC - 0.0));\n'
@@ -124,6 +141,9 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         // Ash: high-contrast char/clinker.
         + 'float dAsh = (nFine - 0.5) * 0.44 + (nGrain - 0.5) * 0.36;\n'
         + 'float detail = dSand * wSand + dGrass * wGrass + dRock * wRock + dAsh * wAsh;\n'
+        // Grit rides on top, weighted per class: sand is nearly all grain at
+        // this scale, rock is crystalline, turf is matted and takes the least.
+        + 'detail += nGrit * (0.62 * wSand + 0.30 * wGrass + 0.54 * wRock + 0.58 * wAsh);\n'
         // Sedimentary STRATA on steep faces — horizontal bands that follow the
         // rock face without moving a single vertex. The cliff/whale-back fix.
         // Heavily noise-warped and shallow: an un-warped low-frequency band
@@ -142,6 +162,11 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         + 'diffuseColor.rgb += vec3(0.045, 0.038, -0.030) * (nMid - 0.5) * wGrass;\n'
         + 'diffuseColor.rgb += vec3(0.032, 0.019, 0.003) * strata * steep * strataMat;\n'
         + 'diffuseColor.rgb += vec3(-0.012, -0.006, 0.014) * (nFine - 0.5) * wAsh;\n'
+        // …and the near grain carries hue too: dark mineral flecks in the sand,
+        // a shell-white glint here and there. Grain that only shifts VALUE reads
+        // as film grain; grain that shifts hue reads as ground.
+        + 'diffuseColor.rgb += vec3(0.055, 0.036, -0.020) * nGrit * (wSand + wAsh);\n'
+        + 'diffuseColor.rgb += vec3(-0.020, 0.030, -0.024) * nGrit * wGrass;\n'
         // ── Shore: wet-sand band whose upper edge breathes with the swell ──
         + 'float wetLine = 1.05 + 0.30 * sin(uTerrTime * 0.55) + 0.12 * sin(uTerrTime * 0.23 + 1.7);\n'
         + 'float wet = smoothstep(wetLine + 0.45, wetLine - 0.65, vTerrWorld.y);\n'
@@ -202,6 +227,43 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
   material.customProgramCacheKey = () => (volcanic ? 'pirates-terrain-detail-volcanic' : 'pirates-terrain-detail');
 }
 
+/**
+ * COAST WOBBLE — why every island sat in a mathematically perfect turquoise disc.
+ *
+ * The terrain cap is sampled on concentric rings of the footprint ellipse, and
+ * the outermost ring is a fixed distRatio. So the shallow shelf — the pale disc
+ * you read an island's edge by from the air — ended on an exact ellipse on
+ * every island on the map, and the 2.4-6m terraces the shared heightfield cuts
+ * into a cliff coast came out as concentric arcs: the "cake steps". Neither is
+ * a heightfield fault. Both are a SAMPLING fault, and this is the sampling fix.
+ *
+ * The ring radius gains a low-order angular wobble and the vertex is then
+ * resampled from the shared field at its new place — so every drawn vertex
+ * still lies EXACTLY on `getIslandSurfaceY`, the drawn ground and the ground
+ * physics stands you on cannot drift apart, and not one line of shared math is
+ * touched. Frequencies stop at 7 because the 44-segment shore skirt and the
+ * 30-segment LOD proxy have to trace the SAME curve or a seam opens between
+ * them — which is why this is a module function all three call.
+ *
+ * Amplitude ramps in from the interior, so nothing moves under the ground the
+ * player walks on or the props are seated on, and peaks out on the shelf where
+ * the disc rim actually is.
+ */
+export function coastWobble(island: { profile: { ridgeAxis: number; primaryHillAngle: number } }, distRatio: number, angle: number): number {
+  const ramp = THREE.MathUtils.smoothstep(distRatio, 0.42, 1.06);
+  if (ramp <= 0) return distRatio;
+  const s = (island.profile.ridgeAxis + island.profile.primaryHillAngle) * 3.1;
+  const w = Math.sin(angle * 2 + s) * 0.078
+    + Math.sin(angle * 3 - s * 1.7) * 0.052
+    + Math.sin(angle * 5 + s * 0.6) * 0.032
+    + Math.sin(angle * 7 - s * 2.3) * 0.020;
+  // The rings must stay ORDERED — d(out)/d(in) > 0 — or a quad folds through
+  // its neighbour. With |w| ≤ 0.182 and the ramp spread over 0.64 of distRatio
+  // (max slope 2.34) the worst case is 1 − 0.182 − 1.06·0.182·2.34 ≈ 0.33.
+  // Raise the amplitudes or narrow the ramp and that budget is what breaks.
+  return distRatio * (1 + w * ramp);
+}
+
 export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   const {
     host, island, group, r, rng, lowDetail, visualDetail, surfacePoint, carveCaveMouth,
@@ -228,6 +290,7 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   const ringDistRatio = (ring: number): number => ring <= radialSegments
     ? (ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9))
     : 1 + ((ring - radialSegments) / shoreRings) * shoreRingSpan;
+
   const terrainColor = new THREE.Color();
   const scratchColor = new THREE.Color();
   const rockSlopeColor = paletteRock.clone().multiplyScalar(0.8);
@@ -263,12 +326,59 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
     const distRatio = ringDistRatio(ring);
     for (let segment = 0; segment <= angularSegments; segment++) {
       const angle = (segment / angularSegments) * Math.PI * 2;
-      const point = surfacePoint(distRatio, angle, 0.02);
+      const point = surfacePoint(coastWobble(island, distRatio, angle), angle, 0.02);
       const carve = carveCaveMouth(point.x + island.position.x, point.z + island.position.z, point.y);
       point.y = carve.y;
       mouthCarveDepth.push(carve.carved);
       terrainPositions.push(point.x, point.y, point.z);
     }
+  }
+
+  /**
+   * FEATHER THE TERRACE LIPS.
+   *
+   * The wobble breaks the treads' concentric geometry; this softens the risers
+   * themselves. Where a vertex sits far off the mean of its two RADIAL
+   * neighbours it is standing on the lip of a step, and a lip sampled once per
+   * ring is a hard 90° corner running the length of the coast — the other half
+   * of the "cake steps" read. Pull it a fraction toward that mean.
+   *
+   * Bounded twice over, because the drawn ground and the analytic field the
+   * player walks on must not part company: only on ground steeper than ~40°
+   * (where nothing stands and nothing is seated), and never by more than
+   * FEATHER_CAP. Underwater vertices are exempt from the slope gate — the
+   * submerged shelf is where the steps show worst from a deck — but keep the
+   * same cap.
+   */
+  {
+    const FEATHER_CAP = 0.42;
+    const stride = angularSegments + 1;
+    const smoothed = new Float32Array(terrainPositions.length / 3);
+    for (let ring = 0; ring <= totalRings; ring++) {
+      for (let segment = 0; segment <= angularSegments; segment++) {
+        const i = ring * stride + segment;
+        if (ring === 0 || ring === totalRings) { smoothed[i] = terrainPositions[i * 3 + 1]; continue; }
+        const yc = terrainPositions[i * 3 + 1];
+        const yIn = terrainPositions[(i - stride) * 3 + 1];
+        const yOut = terrainPositions[(i + stride) * 3 + 1];
+        const mean = (yIn + yOut) * 0.5;
+        // Radial run between the two neighbours, so "steep" is a real gradient
+        // rather than a height difference that depends on mesh density.
+        const dx = terrainPositions[(i + stride) * 3] - terrainPositions[(i - stride) * 3];
+        const dz = terrainPositions[(i + stride) * 3 + 2] - terrainPositions[(i - stride) * 3 + 2];
+        const run = Math.max(0.35, Math.hypot(dx, dz));
+        const grade = Math.abs(yOut - yIn) / run;
+        const gate = yc < 0.4 ? 1 : THREE.MathUtils.smoothstep(grade, 0.84, 1.5);
+        if (gate <= 0) { smoothed[i] = yc; continue; }
+        smoothed[i] = yc + THREE.MathUtils.clamp((mean - yc) * 0.5 * gate, -FEATHER_CAP, FEATHER_CAP);
+      }
+    }
+    // The angular seam vertex is a duplicate of segment 0 and must stay one
+    // point, or the coast splits along a meridian.
+    for (let ring = 0; ring <= totalRings; ring++) {
+      smoothed[ring * stride + angularSegments] = smoothed[ring * stride];
+    }
+    for (let i = 0; i < smoothed.length; i++) terrainPositions[i * 3 + 1] = smoothed[i];
   }
 
   for (let ring = 0; ring < totalRings; ring++) {
@@ -543,7 +653,9 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   const skirtTopColor = new THREE.Color(0x2c545c);
   for (let segment = 0; segment <= skirtSegments; segment++) {
     const angle = (segment / skirtSegments) * Math.PI * 2;
-    const top = surfacePoint(1 + shoreRingSpan - 0.005, angle, -0.04);
+    // Same wobble as the cap's outer ring, or the skirt hangs off a circle the
+    // terrain no longer ends on and the seam between them opens.
+    const top = surfacePoint(coastWobble(island, 1 + shoreRingSpan - 0.005, angle), angle, -0.04);
     const expand = 1.018 + (rng(segment * 313 + 11) - 0.5) * 0.02;
     const bottomY = -Math.max(4.5, r * 0.16) - rng(segment * 317 + 17) * Math.max(0.5, r * 0.022);
     skirtPositions.push(top.x, top.y, top.z);
@@ -597,7 +709,9 @@ export function buildProxyTerrainMesh(ctx: IslandBuildCtx, terrain: TerrainBuild
     const dRatio = pRingDist(ring);
     for (let seg = 0; seg <= pAng; seg++) {
       const angle = (seg / pAng) * Math.PI * 2;
-      const point = surfacePoint(dRatio, angle, 0.02);
+      // The proxy traces the SAME wobbled coast the full mesh does, or the LOD
+      // swap pops the island's whole outline in and out.
+      const point = surfacePoint(coastWobble(island, dRatio, angle), angle, 0.02);
       pPos.push(point.x, point.y, point.z);
     }
   }
