@@ -173,6 +173,30 @@ expect('the Black Fin are named out loud by the cast', blackFinLore.length >= 1,
 expect("the dig's pennant names them too",
   /pennant marks the dig/i.test(vignetteBlock) && /FLEET_PENNANT/.test(vignetteBlock));
 
+// ── The rival crews have names too ─────────────────────────────────────────
+// The world names its barkeeps, its gravediggers and its brokers, and then
+// fielded nine enemy CREWS called Pirate_1 … Pirate_9 — the one cast a player
+// actually fights. Bot captains now come out of the Reach's own roster.
+const crewNames = new MapGenerator(20260727).generateBotCrewNames(9);
+const crewNamesAgain = new MapGenerator(20260727).generateBotCrewNames(9);
+const crewNamesOtherSeed = new MapGenerator(4242).generateBotCrewNames(9);
+console.log(`\nBot crews: ${crewNames.join(' · ')}`);
+expect('every bot crew is named', crewNames.length === 9 && crewNames.every((n) => n.length > 3));
+expect('no Pirate_N survives', !crewNames.some((n) => /^Pirate_\d/.test(n)), crewNames.join(', '));
+expect('no two bot crews share a name', new Set(crewNames).size === crewNames.length, crewNames.join(', '));
+const castNames = new Set(allNpcs.map((n) => n.name));
+expect('no bot crew collides with a member of the island cast',
+  crewNames.every((n) => !castNames.has(n)),
+  crewNames.filter((n) => castNames.has(n)).join(', '));
+expect('the same match seed lands the same captains in the same berths',
+  JSON.stringify(crewNames) === JSON.stringify(crewNamesAgain));
+expect('a different seed deals a different roster',
+  JSON.stringify(crewNames) !== JSON.stringify(crewNamesOtherSeed),
+  crewNamesOtherSeed.join(', '));
+// An oversized lobby must still never repeat a name.
+const bigRoster = new MapGenerator(7).generateBotCrewNames(48);
+expect('an oversized lobby still gets 48 distinct crews', new Set(bigRoster).size === 48);
+
 // ── The widow's lantern is a landmark, not a smudge ────────────────────────
 expect("the widow's lantern gets a long-range beacon build",
   /buildStoryBeacons[\s\S]{0,2200}widow_memorial/.test(GAME_SRC));

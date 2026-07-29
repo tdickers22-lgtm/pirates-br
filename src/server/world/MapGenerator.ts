@@ -309,6 +309,30 @@ const ISLAND_CAST: readonly IslandCast[] = [
   },
 ] as const;
 
+// ── Rival crews of the Reach ────────────────────────────────────────────────
+// The AI crews used to sail as Pirate_1 … Pirate_9 through a world where every
+// barkeep, gravedigger and Tallyman has a full name and a grudge. These are the
+// captains whose hulls you actually meet out there: the kill feed, the
+// nameplates and the "…'s crew" announce lines all read them.
+//
+// Two rules hold: no name here may collide with a member of ISLAND_CAST (the
+// Reach must never carry two people with one name), and the wire identity is
+// still the player uuid — this is a DISPLAY name and nothing keys on it.
+const BOT_CREW_CAPTAINS: readonly string[] = [
+  'Redjack Mordey', 'Isolde Marrow', 'Barnaby Teal', 'Osric Bellows',
+  'Marisol Kite', 'Longshank Hale', 'Perrin Gault', 'Adela Frost',
+  'Cutter Bramwell', 'Rosalind Vex', 'Tobias Slake', 'Wexford Doyle',
+  'Ilsa Raven', 'Gideon Marl', 'Dorran Ashe', 'Petronel Quinn',
+  'Hob Ferrow', 'Amabel Stray', 'Nicodemus Pike', 'Selwyn Drear',
+] as const;
+
+/** Every proper noun the island cast already owns — the collision guard. */
+export const REACH_CAST_NAMES: readonly string[] = ISLAND_CAST.flatMap((cast) => [
+  cast.storyteller.name,
+  ...(cast.bartender ? [cast.bartender.name] : []),
+  ...(cast.hoarder ? [cast.hoarder.name] : []),
+]);
+
 // ── Story-scene placement tuning (docs/ISLAND_STORY_BIBLE.md) ───────────────
 // Inland scenes ride findLandmarkSite (flatten stamp + slope/height limits);
 // coastal scenes ride a shipwreck-style beach scan but must land DRY.
@@ -525,11 +549,38 @@ interface LandmarkSite { type: LandmarkType; x: number; z: number; yaw: number }
 
 export class MapGenerator {
   private readonly rng: Rng;
+  /** The match seed, kept so side-streams (crew names) can be derived from it
+   *  without ever drawing from `rng` — see generateBotCrewNames. */
+  private readonly seed: number;
 
   /** Same seed ⇒ bit-identical islands/props/stamps (ids excepted). */
   constructor(seed?: number) {
     const s = seed ?? ((Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0);
+    this.seed = s >>> 0;
     this.rng = mulberry32(s >>> 0);
+  }
+
+  /**
+   * Names for the AI crews, seeded per match and drawn from the Reach's own
+   * captains instead of Pirate_1 … Pirate_9.
+   *
+   * The generator is a SIDE STREAM (mulberry32 off a mixed seed) rather than
+   * `this.rng`: naming must never move the world's draw sequence, or the
+   * designed archipelago would shift the day the crew list changes length.
+   * Same seed ⇒ same captains, in the same berths, every time.
+   */
+  generateBotCrewNames(count: number): string[] {
+    const taken = new Set(REACH_CAST_NAMES);
+    const pool = BOT_CREW_CAPTAINS.filter((name) => !taken.has(name));
+    const rng = mulberry32((this.seed ^ 0x9e3779b9) >>> 0);
+    const bag = shuffled(rng, pool);
+    const names: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      // Past the pool, crews take a numbered consort ("Ilsa Raven's Second") so
+      // an oversized lobby still never repeats a name.
+      names.push(i < bag.length ? bag[i] : `${bag[i % bag.length]} II-${Math.floor(i / bag.length) + 1}`);
+    }
+    return names;
   }
 
   generateIslands(): Island[] {

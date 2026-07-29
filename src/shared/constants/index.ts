@@ -617,6 +617,16 @@ export const STORM_PHASES = [
   { waitSec:  15, shrinkSec: 15,  startRadius:  40, endRadius:  12, dmgPerSec:  12 },
 ];
 
+/** The whole storm arc in seconds — every phase's wait plus its shrink. The
+ *  match's natural length, and the denominator of GameState.matchProgress (the
+ *  one number the sky's day cycle is hung on). */
+export const STORM_ARC_SECONDS = STORM_PHASES.reduce((sum, phase) => sum + phase.waitSec + phase.shrinkSec, 0);
+
+/** Grace after a hold begins before a CREWLESS respawn converts to a tow.
+ *  Long enough that a mate who is one second from reviving still owns the
+ *  rescue, short enough that a solo never reads it as a hang. */
+export const RESPAWN_HOLD_GRACE_SECONDS = 10;
+
 // ── Loot tables ──────────────────────────────────────────────
 export const CHEST_LOOT_TABLE = [
   { item: 'gold' as const,           weight: 28, minQty: 50,  maxQty: 200 },
@@ -674,6 +684,29 @@ export const MATCH_START_COUNTDOWN_SEC = 8;
  *  this and the menu's placeholder queue line quotes it, so the two can't drift
  *  ("0 / 8 pirates" flashed on a 10-pirate queue for months). */
 export const MATCH_TOTAL_SHIPS = 10;
+
+/**
+ * Kill-streak reward ladder — the ONE place the thresholds live.
+ *
+ * They used to be typed twice in the server, twice in the HUD and once more in
+ * the legend, and the top rung was 20 kills without dying in a lobby of
+ * MATCH_TOTAL_SHIPS crews: dead content nobody in the game's history had seen.
+ * The ladder is now sized to the lobby — the first rung lands inside a single
+ * good boarding, and the top rung is a genuinely exceptional voyage rather than
+ * an impossible one.
+ */
+export const KILL_STREAK_TIERS = {
+  super_cannonball: 4,
+  mega_keg: 8,
+  tsunami: 14,
+} as const;
+
+/** The ladder in rung order, for badges, feed lines and the legend copy. */
+export const KILL_STREAK_LADDER: ReadonlyArray<{ kills: number; label: string }> = [
+  { kills: KILL_STREAK_TIERS.super_cannonball, label: 'super cannonball' },
+  { kills: KILL_STREAK_TIERS.mega_keg, label: 'mega keg' },
+  { kills: KILL_STREAK_TIERS.tsunami, label: 'tsunami [E]' },
+];
 
 // ── Early-game pacing governor ───────────────────────────────
 /** Bots do not SEEK ship-to-ship engagements for this long after the horn

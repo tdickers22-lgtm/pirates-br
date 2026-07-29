@@ -9,6 +9,32 @@ export type RenderQuality = 'low' | 'balanced' | 'high';
 const DAY_NIGHT_CYCLE_SECONDS = 960; // slower cycle: dusk is a scene, not a flash
 const DAY_NIGHT_START_OFFSET = 0.47;
 
+/**
+ * ONE SUNSET PER MATCH.
+ *
+ * updateDayNight walks a cycle in [0,1): daylight occupies the first 0.72 of it
+ * and the sun is on the horizon exactly at 0.72. Run free at 960 s a lap from an
+ * 0.47 start and the world reaches dusk four minutes after the horn — a player
+ * still finding the helm learns the stations in night rain, and the match's one
+ * dramatic light change is spent before the storm's grace period is over.
+ *
+ * So the cycle is hung on MATCH PROGRESS instead: the horn opens mid-morning
+ * (sun climbing, long shadows), noon lands around the middle phases, and the
+ * horizon goes red as the late rings close. The endpoints are chosen so the
+ * whole arc is exactly one transition — the sun never comes back up.
+ */
+const MATCH_DAY_CYCLE_START = 0.26;
+const MATCH_DAY_CYCLE_END = 0.79;
+
+/** Match progress (0..1) → the elapsed-seconds figure updateDayNight wants, so
+ *  the debug override (which speaks in seconds) and the match clock stay one
+ *  code path. Exported for the single consumption point in Game. */
+export function dayNightSecondsForMatchProgress(progress: number): number {
+  const p = clamp(progress, 0, 1);
+  const cycle = MATCH_DAY_CYCLE_START + (MATCH_DAY_CYCLE_END - MATCH_DAY_CYCLE_START) * p;
+  return (cycle - DAY_NIGHT_START_OFFSET) * DAY_NIGHT_CYCLE_SECONDS;
+}
+
 /** Below this, with resolution already on the floor, the startup tier is simply
  *  wrong for this machine and the runtime ladder starts giving quality back.
  *  Set well under the 47fps the resolution scaler chases: this rung is for a

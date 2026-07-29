@@ -729,6 +729,11 @@ export interface GameState {
   countdownRemaining?: number;
   /** Server simulation clock in seconds — clients sync the ocean wave clock to this. */
   serverTime: number;
+  /** How far this match is through the storm arc: 0 at the horn, 1 at the final
+   *  ring (STORM_ARC_SECONDS). Display only — the renderer hangs the day/night
+   *  cycle on it so a match gets ONE sunset, arriving with the late phases,
+   *  instead of a free-running 16-minute cycle that hits pitch dark at T+4:00. */
+  matchProgress?: number;
   shipsAlive: number;
   storm: StormState;
   ships: Ship[];

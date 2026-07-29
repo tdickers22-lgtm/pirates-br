@@ -63,5 +63,27 @@ expect('every island fits inside the opening storm ring', boundsOk, boundsDetail
 expect('at least one bridge island made it in', a.some(i => (i.bridges?.length ?? 0) > 0));
 expect('taverns mark the lanes (≥3 tavern islands)', a.filter(i => i.tavern !== null).length >= 3);
 
+// ── Side streams never move the world ──────────────────────────────────────
+// Naming the bot crews draws random numbers. If those draws came off the world
+// generator's own stream, adding a tenth crew would shift every island, cave
+// and prop in the designed archipelago — so crew naming runs on a private
+// generator derived from the seed, and this proves it stays private.
+console.log('Naming streams:');
+const namedFirst = new MapGenerator(12345);
+namedFirst.generateBotCrewNames(9);
+expect('naming the crews first leaves the world bit-identical',
+  worldSignature(namedFirst.generateIslands()) === worldSignature(a));
+const namedBetween = new MapGenerator(12345);
+namedBetween.generateBotCrewNames(3);
+namedBetween.generateBotCrewNames(40);
+expect('any number of naming draws leaves the world bit-identical',
+  worldSignature(namedBetween.generateIslands()) === worldSignature(a));
+const gen = new MapGenerator(777);
+const before = gen.generateIslands();
+expect('and generating the world does not move the crew list either',
+  JSON.stringify(gen.generateBotCrewNames(9))
+  === JSON.stringify(new MapGenerator(777).generateBotCrewNames(9)),
+  `${before.length} islands drawn between`);
+
 if (failures > 0) { console.error(`\n${failures} world assertion(s) failed.`); process.exit(1); }
 console.log('\nThe Shattered Reach is fixed, spaced, and in bounds.');
