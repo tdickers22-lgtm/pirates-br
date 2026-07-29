@@ -221,7 +221,15 @@ export function isNearHelm(player: PlayerLike, ship: ShipLike): boolean {
   if (player.onShipId !== ship.id) return false;
   const local = toShipLocalPoint(player.position, ship);
   const helm = getHelmControlLocal(SHIP_STATS[ship.type]);
-  return Math.abs(local.x - helm.x) < 1.2 && Math.abs(local.z - helm.z) < 1.45;
+  if (Math.abs(local.x - helm.x) < 1.2 && Math.abs(local.z - helm.z) < 1.45) return true;
+  // THE PROMPT MUST NOT OUTRUN THE GRANT. The arbiter offers "[X] Take Helm"
+  // anywhere inside the stand CONE — a radius — while the reach the server
+  // grants off was this BOX, and a radius pokes out of a box. That left a
+  // crescent of the dais on every hull (562 sampled points per hull) where the
+  // card read Take Helm and the press came back out_of_reach: a dead key, which
+  // is the precise failure the cone was added to end. Reach is the UNION of the
+  // two, so nothing that was ever grantable stops being grantable.
+  return isStandingAtHelm(player, ship);
 }
 
 /**

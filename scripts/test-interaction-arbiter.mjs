@@ -16,7 +16,10 @@ import {
   getAmmoCrateLocal,
   getHelmControlLocal,
   getShipFloorYAt,
+  HELM_STAND_CONE,
   isBoardingOwnHull,
+  isNearHelm,
+  isStandingAtHelm,
   isStandingOnShipDeck,
   isSwimBoardingOwnHull,
   toShipWorldPoint,
@@ -189,6 +192,30 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
     }
     expect(`${type}: all 8 stand-points on the dais, ${gazeName} → [X] takes the helm`,
       wrong.length === 0, wrong.join('\n     '));
+  }
+
+  // ── THE CONE MAY NEVER OUTRUN THE GRANT ──────────────────────────────────
+  // The offer is a RADIUS and the reach the server grants off was a BOX, and a
+  // radius pokes out of a box: there was a crescent of the dais on every hull
+  // where the card read "[X] Take Helm" and the press came back out_of_reach.
+  // Offering a key that does nothing is worse than offering nothing, so sweep
+  // the whole cone and demand the two predicates agree everywhere in it.
+  {
+    const lies = [];
+    for (let dx = -HELM_STAND_CONE; dx <= HELM_STAND_CONE; dx += 0.05) {
+      for (let dz = -HELM_STAND_CONE; dz <= HELM_STAND_CONE; dz += 0.05) {
+        const probe = {
+          onShipId: rig.ship.id,
+          position: toShipWorldPoint({ x: helmLocal.x + dx, z: helmLocal.z + dz }, rig.ship),
+        };
+        probe.position.y = rig.ship.position.y + rig.stats.height;
+        if (isStandingAtHelm(probe, rig.ship) && !isNearHelm(probe, rig.ship)) {
+          lies.push(`(${dx.toFixed(2)}, ${dz.toFixed(2)})`);
+        }
+      }
+    }
+    expect(`${type}: every stance the cone offers the helm from, the server will grant`,
+      lies.length === 0, `${lies.length} dead-press stances, e.g. ${lies.slice(0, 4).join(' ')}`);
   }
 
   // The cone is not a black hole: the ammo chest still owns [X] from its own
