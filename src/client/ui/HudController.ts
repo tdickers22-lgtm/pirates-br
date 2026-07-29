@@ -650,7 +650,7 @@ export class HudController {
       // PLAIN ENGLISH. "Wind NW -> 138deg from starboard" is a bearing, a delta
       // and an ASCII arrow, and it told a new captain nothing they could steer
       // by. One clause, one fact: where the wind is sitting on this hull.
-      const windLine = `Wind ${this.windBearingPhrase(signedRelative)}`;
+      const windLine = `Wind ${this.windBearingPhrase(signedRelative)}${this.windPlainGloss(signedRelative)}`;
       this.updateWindVane(signedRelative, windLine);
       const sailPct = Math.round(ship.sailHeight * 100);
       const canvas = sailPct < 5 ? 'Sails furled' : `Sails ${sailPct}% out`;
@@ -1558,6 +1558,27 @@ export class HudController {
     if (deg < 67) return `on the ${side} bow`;
     if (deg <= 112) return `on the ${side} beam`;
     return `on the ${side} quarter`;
+  }
+
+  /**
+   * The same bearing said the way a landsman would say it.
+   *
+   * "Wind on the port quarter" is correct, it is in voice, and in minute zero it
+   * is four words that mean nothing: a new captain does not know port from
+   * starboard, let alone a quarter from a beam. The nautical phrase stays — it
+   * is what the ship's panel and the vane chip are FOR — and this rides behind
+   * it on the panel only, so the flavour teaches instead of gatekeeping. Empty
+   * for 'dead ahead', which needs no translation.
+   */
+  private windPlainGloss(relative: number): string {
+    const wrapped = angleWrap(relative);
+    const deg = Math.abs(THREE.MathUtils.radToDeg(wrapped));
+    const hand = wrapped < 0 ? 'left' : 'right';
+    if (deg <= 22) return '';
+    if (deg >= 158) return ' — from behind';
+    if (deg < 67) return ` — from ahead-${hand}`;
+    if (deg <= 112) return ` — from your ${hand}`;
+    return ` — from behind-${hand}`;
   }
 
   private windVane: { root: HTMLElement; arrow: HTMLElement; text: HTMLElement } | null = null;

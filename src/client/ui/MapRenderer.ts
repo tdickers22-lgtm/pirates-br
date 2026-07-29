@@ -51,6 +51,10 @@ const CHART_LOD_KEEP = 6;
  *  a frame spreads it over a handful of frames on a map nobody is reading yet;
  *  an island with no bitmap yet simply waits its turn. */
 const CHART_BASE_BUILDS_PER_FRAME = 2;
+/** Banked gold under which a crew is still on its FIRST errand — well under one
+ *  chest's sale, so kill bounties alone never clear it. Above it the pirate has
+ *  demonstrably found the gold loop and the signpost stands down. */
+const FIRST_GOLD_CEILING = 500;
 
 export type MapView = {
   readonly ui: UiRefs;
@@ -222,13 +226,17 @@ export class MapRenderer {
     if (minimapCtx) {
       this.renderBattleMap(minimapCtx, this.view.ui.minimapCanvas.width, this.view.ui.minimapCanvas.height, false);
     }
-    if (this.mapOpen) this.drawFullMap(true);
+    if (this.mapOpen) {
+      this.drawGlyphKey();
+      this.drawFullMap(true);
+    }
   }
 
   /** The opened map redraws every frame while it's up, so your arrow and the
    *  other ships track live as you move/turn (the minimap stays throttled). */
   drawFullMap(shareFrameBudget = false) {
     if (!this.view.state || !this.mapOpen) return;
+    this.drawGlyphKey();
     if (!shareFrameBudget) this.chartBuildsThisFrame = 0;
     const mapCtx = this.view.ui.mapCanvas.getContext('2d');
     if (mapCtx) {
@@ -536,6 +544,164 @@ export class MapRenderer {
     ctx.restore();
   }
 
+  /**
+   * THE CHART'S GLYPH KEY.
+   *
+   * The battle map speaks a language of fourteen hand-drawn gold marks — a
+   * mug, a coin, a hood, a trilithon, a set of ribs — and the game never once
+   * said what any of them meant. A player could read "there is something at
+   * that headland" and nothing more, which makes a chart a decoration.
+   *
+   * The key is drawn with the SAME drawPoiIcon the chart uses, so a mark in the
+   * key is bit-identical to the mark on the water: no second set of art to
+   * drift, no emoji stand-ins. It lives under the chart in the map overlay.
+   */
+  private static readonly GLYPH_KEY: ReadonlyArray<{ kind: string; label: string }> = [
+    { kind: 'coin', label: 'Tallyman — sell chests' },
+    { kind: 'mug', label: 'Tavern' },
+    { kind: 'hammer', label: 'Shipwright / mine' },
+    { kind: 'crystal', label: 'Oracle' },
+    { kind: 'hood', label: 'Stranger / memorial' },
+    { kind: 'cave', label: 'Cave mouth' },
+    { kind: 'volcano', label: 'Volcano' },
+    { kind: 'peak', label: 'Mountain' },
+    { kind: 'fort', label: 'Fort / skull' },
+    { kind: 'tower', label: 'Watchtower' },
+    { kind: 'anchor', label: 'Shipwreck' },
+    { kind: 'stones', label: 'Standing stones' },
+    { kind: 'arch', label: 'Rock arch' },
+    { kind: 'noose', label: 'Gallows' },
+    { kind: 'ribs', label: 'Whale bones' },
+    { kind: 'tentacle', label: "Kraken's kill" },
+  ];
+
+  /** Display width the key was last laid out for — a resized window relays it. */
+  private glyphKeyWidth = 0;
+
+  /**
+   * Paint the key into #map-key-canvas.
+   *
+   * IT IS LAID OUT IN THE PIXELS A PLAYER ACTUALLY LOOKS AT. The first cut drew
+   * 17 px type into a fixed 1800-wide backing store that CSS then squeezed into
+   * a ~630 px band: every word landed on screen SIX PIXELS TALL. A key nobody
+   * can read is the same as no key, which is the defect it was written to fix.
+   * So the canvas is now sized from its own CSS box (times devicePixelRatio for
+   * crispness), the layout is done in CSS pixels, and the type is 13 px — the
+   * size the rest of the chart's furniture uses. It relays itself whenever that
+   * box changes width.
+   */
+  drawGlyphKey(force = false): void {
+    const canvas = document.getElementById('map-key-canvas') as HTMLCanvasElement | null;
+    if (!canvas) return;
+    // Inside a display:none overlay the box measures 0. Unforced, that is not a
+    // layout worth doing — wait for the frame where the chart is actually up.
+    // Forced (the suites paint it cold), fall back to what the CSS will give it.
+    const measured = Math.round(canvas.clientWidth);
+    if (measured <= 240 && !force) return;
+    const cssW = measured > 240
+      ? measured
+      : Math.round(Math.min(window.innerWidth * 0.86, window.innerHeight * 0.72, 900)) - 20;
+    if (!force && this.glyphKeyWidth === cssW) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    // Only a REAL measurement is remembered, so a cold forced paint relays the
+    // moment the overlay opens for true.
+    this.glyphKeyWidth = measured > 240 ? cssW : 0;
+
+    const entries = MapRenderer.GLYPH_KEY;
+    // Four columns need ~165 px each for the longest label at 13 px Georgia.
+    const cols = cssW >= 660 ? 4 : cssW >= 430 ? 3 : 2;
+    const rows = Math.ceil(entries.length / cols);
+    // Short windows get a tighter band so the chart above it still fits.
+    const vh = window.innerHeight;
+    const tight = vh < 760;
+    const fontPx = vh < 680 ? 10.5 : tight ? 11.5 : 13;
+    const rowH = vh < 680 ? 16 : tight ? 18 : 21;
+    const padX = 14;
+    const headY = tight ? 12 : 14;
+    const gridTop = headY + (tight ? 13 : 15);
+    const footY = gridTop + rows * rowH + (tight ? 12 : 15);
+    const cssH = Math.ceil(footY + (tight ? 12 : 14));
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const cellW = (cssW - padX * 2) / cols;
+    const iconR = tight ? 6 : 7;
+
+    ctx.fillStyle = '#c9a84c';
+    ctx.font = `700 ${fontPx}px Georgia, serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('CHART MARKS', padX, headY);
+
+    // EVERY MARK SITS ON A SCRAP OF LAND. Six of the sixteen glyphs — the
+    // shipwreck, the arch, the gallows, the whale ribs, the kraken, the cave —
+    // are drawn in the chart's near-black INK, which is how they read against a
+    // green isle and how they vanish completely against a navy panel. Half the
+    // key was blank labels. So each glyph is painted on the same sand-rimmed
+    // green disc the chart puts under it out on the water: the mark in the key
+    // is now the mark on the map, in its own habitat.
+    const landChip = (cx: number, cy: number) => {
+      ctx.save();
+      ctx.fillStyle = '#e8d5a3';
+      ctx.beginPath();
+      ctx.arc(cx, cy, iconR + 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#5fa84c';
+      ctx.beginPath();
+      ctx.arc(cx, cy, iconR + 2.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    };
+
+    entries.forEach((entry, i) => {
+      const cx = padX + (i % cols) * cellW + iconR + 5;
+      const cy = gridTop + Math.floor(i / cols) * rowH + rowH * 0.5;
+      landChip(cx, cy);
+      this.drawPoiIcon(ctx, entry.kind, cx, cy, iconR);
+      ctx.fillStyle = '#d8cbaa';
+      ctx.font = `400 ${fontPx}px Georgia, serif`;
+      ctx.fillText(entry.label, cx + iconR + 10, cy + 1);
+    });
+
+    // A hairline, then the two marks that are not POI glyphs but ARE the
+    // chart's whole point: where treasure is buried, and where it turns to gold.
+    ctx.strokeStyle = 'rgba(201, 168, 76, 0.22)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padX, footY - rowH * 0.62);
+    ctx.lineTo(cssW - padX, footY - rowH * 0.62);
+    ctx.stroke();
+
+    ctx.font = `400 ${fontPx}px Georgia, serif`;
+    const buried = 'Buried chest (your treasure chart)';
+    const buriedX = padX + iconR + 5;
+    const buriedTextX = buriedX + iconR + 10;
+    landChip(buriedX, footY);
+    this.drawTreasureX(ctx, buriedX, footY, iconR + 1, '#c02222');
+    ctx.fillStyle = '#d8cbaa';
+    ctx.fillText(buried, buriedTextX, footY + 1);
+    // Measured, not assumed: at three columns a fixed cell offset dropped the
+    // gold coin straight on top of the word "chart".
+    const goldX = Math.max(
+      padX + cellW * (cols >= 4 ? 2 : 1) + iconR + 5,
+      buriedTextX + ctx.measureText(buried).width + iconR + 22,
+    );
+    landChip(goldX, footY);
+    ctx.fillStyle = '#f0c65a';
+    ctx.strokeStyle = 'rgba(42, 24, 7, 0.92)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(goldX, footY, iconR - 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#d8cbaa';
+    ctx.fillText('Where your gold is sold', goldX + iconR + 10, footY + 1);
+  }
+
   private renderBattleMap(
     ctx: CanvasRenderingContext2D,
     width: number,
@@ -730,7 +896,49 @@ export class MapRenderer {
     }
     ctx.restore();
 
-    const closestHoarder = fullscreen && localPlayer ? this.view.getClosestGoldHoarder(localPlayer) : null;
+    const closestHoarder = localPlayer ? this.view.getClosestGoldHoarder(localPlayer) : null;
+
+    // ── FIRST GOLD ──────────────────────────────────────────────────────────
+    // The opening objective told a new pirate to "sell treasure" in WORDS, on a
+    // strip of text, while the chart in front of them carried no clue where
+    // that could possibly happen. Until a crew has begun the gold loop — no
+    // chart in hand, nothing in their arms, nothing meaningful banked — the
+    // nearest Tallyman wears a small gold mark on BOTH charts. It goes away the
+    // moment they have an errand of their own, and never comes back.
+    if (
+      localPlayer && closestHoarder
+      && !localPlayer.treasureMapIslandId
+      && !localPlayer.carryingChestId
+      && (localPlayer.questMaps?.length ?? 0) === 0
+      && localPlayer.gold < FIRST_GOLD_CEILING
+    ) {
+      const gx = centerX + closestHoarder.npc.position.x * scale;
+      const gy = centerY + closestHoarder.npc.position.z * scale;
+      // The pulse BREATHES, it does not blink. At a 0.3 alpha floor the ring
+      // composited down to nothing against the chart's dark water for a third
+      // of every cycle — a pirate glancing at the map in the wrong half-second
+      // saw no signpost at all, which is the exact defect this mark exists to
+      // fix. The floor is now high enough that the ring is always legible and
+      // the swing is what draws the eye.
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 420);
+      const r = (fullscreen ? 13 : 8) + pulse * (fullscreen ? 2 : 1.4);
+      ctx.save();
+      ctx.strokeStyle = `rgba(240, 198, 90, ${0.55 + pulse * 0.35})`;
+      ctx.lineWidth = fullscreen ? 2.4 : 1.6;
+      ctx.beginPath();
+      ctx.arc(gx, gy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      this.drawPoiIcon(ctx, 'coin', gx, gy, fullscreen ? 7 : 5);
+      if (fullscreen) {
+        ctx.fillStyle = '#f5dfa7';
+        ctx.font = '700 12px Georgia, serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(`FIRST GOLD · ${closestHoarder.island.name}`, gx, gy - r - 7);
+      }
+      ctx.restore();
+    }
+
     if (fullscreen && localPlayer && closestHoarder && (localPlayer.treasureMapIslandId || localPlayer.carryingChestId)) {
       const hx = centerX + closestHoarder.npc.position.x * scale;
       const hy = centerY + closestHoarder.npc.position.z * scale;

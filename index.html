@@ -2466,7 +2466,7 @@
         <span class="legend-win"><strong style="color:#f0dda9;">To win:</strong> bank <strong>9,000 gold</strong> — or be the <strong>last crew afloat</strong>. Either one takes the seas.
         <br>Gold comes from treasure: dig chests with the shovel, carry them to a Tallyman, and sell.
         <br>
-        <br></span>WASD · Move &nbsp;|&nbsp; SPACE · Jump / Swim up &nbsp;|&nbsp; Z · Swim down &nbsp;|&nbsp; C · Crouch
+        <br></span>WASD (or the arrow keys) · Move &nbsp;|&nbsp; SPACE · Jump / Swim up &nbsp;|&nbsp; Z · Swim down &nbsp;|&nbsp; C · Crouch
         <br>X · Interact — walk up and look at a thing, one prompt shows &nbsp;|&nbsp; B · Drop a carried chest
         <br>Look for the gold station tags aboard: ⚓ Capstan at the bow · Hold X raises the anchor
         <br>⛵ Rope stations at the mast rails · Hold X drops / raises the sails (crewmates on the rope haul faster)
@@ -2522,7 +2522,10 @@
       <!-- The chart's glyph key. Painted by MapRenderer.drawGlyphKey with the
            SAME vector marks the chart itself draws, so the key can never show
            art the map does not. -->
-      <div id="map-key"><canvas id="map-key-canvas" width="1800" height="220"></canvas></div>
+      <!-- The canvas re-sizes itself to its own CSS box at paint time (see
+           MapRenderer.drawGlyphKey); these are only the pre-paint aspect so the
+           band does not jump height on the first open. -->
+      <div id="map-key"><canvas id="map-key-canvas" width="640" height="190"></canvas></div>
     </div>
   </div>
 

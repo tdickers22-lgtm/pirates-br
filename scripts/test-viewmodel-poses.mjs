@@ -108,6 +108,33 @@ try {
   });
   const onScreen = (pts) => pts.length > 0 && pts.every(([x, y]) => Math.abs(x) < 1 && y > -0.8 && y < 1);
 
+  /**
+   * The REST pose, once it has actually arrived.
+   *
+   * Equipping raises the hands into frame over about half a second, and a fixed
+   * post-equip wait sometimes sampled them still on the way up: the same axe
+   * read y = -0.51 on eight runs and -0.69 / -0.84 on two, straddling the
+   * bottom-of-frame bound and failing the suite roughly one run in five. That is
+   * the probe catching an animation, not a pose that is off screen at rest.
+   *
+   * So: poll until two consecutive frames agree, and hand back THAT sample —
+   * which is then both what the assertion reads and what the failure prints.
+   * (They used to be two separate `await hands()` calls, so a failure reported a
+   * different frame than the one it judged, and the evidence never matched.)
+   */
+  const restHands = async (budgetMs = 2500) => {
+    let prev = await hands();
+    for (let waited = 0; waited < budgetMs; waited += 100) {
+      await wait(100);
+      const now = await hands();
+      const settled = prev.length === now.length
+        && now.every(([x, y], i) => Math.abs(x - prev[i][0]) < 0.01 && Math.abs(y - prev[i][1]) < 0.01);
+      if (settled) return now;
+      prev = now;
+    }
+    return prev;
+  };
+
   const equipSlot = async (slot) => {
     for (let i = 0; i < 14; i++) {
       const ok = await page.evaluate((s) => {
@@ -163,7 +190,8 @@ try {
     if (!id) continue;
     await pin(null, null);
     await wait(300);
-    expect(`${id}: fists on screen at rest`, onScreen(await hands()), JSON.stringify(await hands()));
+    const rest = await restHands();
+    expect(`${id}: fists on screen at rest`, onScreen(rest), JSON.stringify(rest));
     if (id === 'cutlass') continue;
     await page.evaluate(() => { window.__piratesBR.input.mouseButtons.add(0); });
     await wait(120);
@@ -192,7 +220,8 @@ try {
     }
     if (got !== name) { console.log(`  · ${name}: could not equip (got ${got}) — skipped`); continue; }
     await wait(350);
-    expect(`${name}: fists on screen at rest`, onScreen(await hands()), JSON.stringify(await hands()));
+    const rest = await restHands();
+    expect(`${name}: fists on screen at rest`, onScreen(rest), JSON.stringify(rest));
     await page.evaluate(() => { window.__piratesBR.input.mouseButtons.add(0); });
     let worst = null;
     for (let f = 0; f < 6; f++) {
@@ -303,8 +332,21 @@ try {
   await pinSwing(0, 1);
   await wait(400);
   await page.evaluate(() => { window.__piratesBR.getCutlassSwingProgress = () => 0.3; });
-  await wait(120);
-  const trail = await blade();
+  // The ribbon fades in over a frame or two and then decays, so a single sample
+  // at a fixed 120 ms lands inside its life only most of the time — this read
+  // [0, 0] on about one run in ten. Watch the ribbon for a beat and keep the
+  // BRIGHTEST frame: "a slash spawns a visible ribbon" is a claim about whether
+  // it ever appears, not about its opacity at one arbitrary millisecond.
+  let trail = null;
+  for (let i = 0; i < 12; i++) {
+    await wait(60);
+    const sample = await blade();
+    if (!sample) continue;
+    const peak = Math.max(0, ...sample.ribbons);
+    const best = trail ? Math.max(0, ...trail.ribbons) : -1;
+    if (peak > best) trail = sample;
+    if (peak > 0.25) break;
+  }
   expect('slash spawns a visible first-person trail ribbon',
     !!trail && trail.ribbons.some((op) => op > 0.25), JSON.stringify(trail?.ribbons));
   await page.evaluate(() => { delete window.__piratesBR.getCutlassSwingProgress; });
@@ -332,16 +374,54 @@ try {
   // section she can be in the water taking drowning ticks, or in the storm, or
   // being chewed on. That vignette is correct, not phantom, and failing on it
   // made this the flakiest check in the browser chain (1 run in 3 here).
-  // So: watch the pool she is actually losing, and only call it phantom when
-  // the overlay is up while her health and armour never moved.
+  //
+  // THE SETUP WAS ALSO WOUNDING HER. This window used to open with
+  // bite(100, 100) — and she has no armour, so the next snapshot corrected that
+  // 100 straight back to 0. The vitals watch reads armour loss as damage (that
+  // is the very next assertion), so the probe's own write landed a 100-point
+  // hit, raised an entirely honest vignette, and then asked whether anything
+  // had hit her. Worse, `before` was sampled 120 ms later — after the
+  // correction — so the guard above could not even see the loss it had caused,
+  // and the check failed on 2 runs in 3.
+  //
+  // So: heal WITHOUT fabricating armour she does not have, wait for the screen
+  // to actually go quiet, and only then start the window. A vignette that comes
+  // up during the quiet window with both pools flat is the real defect.
   const vitals = () => page.evaluate(() => {
     const g = window.__piratesBR;
     const me = g.state.players.find((p) => p.id === g.localPlayerId);
     return { health: me?.health ?? -1, armor: me?.armor ?? -1 };
   });
+  const healOnly = () => page.evaluate(() => {
+    const g = window.__piratesBR;
+    const me = g.state.players.find((p) => p.id === g.localPlayerId);
+    if (me) me.health = 100;
+  });
+  /** Poll until the hurt overlay has decayed to nothing. */
+  const settle = async (budgetMs) => {
+    for (let waited = 0; waited <= budgetMs; waited += 200) {
+      if ((await hurtOpacity()) <= 0.02) return true;
+      await wait(200);
+    }
+    return false;
+  };
+  // The wounds go FIRST, so that by the time the quiet window opens the overlay
+  // has genuinely been raised and is a live element on the page. Asking "is it
+  // at zero?" before anything has ever built it only proves it does not exist
+  // yet, which is not the invariant — the invariant is that it comes back DOWN
+  // and stays down.
+  expect('a 50-point wound raises the hurt vignette', (await bite(50, 100)) > 0.3, String(await hurtOpacity()));
+  await wait(1600);
+  expect('damage absorbed by ARMOUR still raises it', (await bite(50, 55)) > 0.2, String(await hurtOpacity()));
+  await wait(1600);
+  expect('a 5-point chip still registers', (await bite(45, 55)) > 0.15, String(await hurtOpacity()));
+
   let phantom = null;
   for (let attempt = 0; attempt < 4 && phantom === null; attempt++) {
-    await bite(100, 100);
+    await healOnly();
+    // The wounds above (and the world) are still fading; that is not the thing
+    // under test, so give the screen time to go quiet before the window opens.
+    if (!(await settle(8000))) { await wait(1200); continue; }
     const before = await vitals();
     await wait(1600);
     const [opacity, after] = [await hurtOpacity(), await vitals()];
@@ -350,16 +430,11 @@ try {
     if (opacity > 0.02 && hurt) { await wait(1200); continue; }
     phantom = { opacity, before, after };
   }
-  expect('no phantom vignette when nothing hit you',
-    phantom !== null && phantom.opacity <= 0.02,
+  expect('the vignette settles and stays down when nothing is hitting you',
+    phantom !== null && phantom.opacity <= 0.02 && phantom.opacity >= 0,
     phantom
       ? `${phantom.opacity} (health ${phantom.before.health}→${phantom.after.health}, armour ${phantom.before.armor}→${phantom.after.armor})`
       : 'the world hurt her on every attempt — could not get a clean window');
-  expect('a 50-point wound raises the hurt vignette', (await bite(50, 100)) > 0.3, String(await hurtOpacity()));
-  await wait(1600);
-  expect('damage absorbed by ARMOUR still raises it', (await bite(50, 55)) > 0.2, String(await hurtOpacity()));
-  await wait(1600);
-  expect('a 5-point chip still registers', (await bite(45, 55)) > 0.15, String(await hurtOpacity()));
   await page.evaluate(() => {
     const g = window.__piratesBR;
     const me = g.state.players.find((p) => p.id === g.localPlayerId);

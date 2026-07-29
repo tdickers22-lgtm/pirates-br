@@ -5,6 +5,7 @@ import { MATCH_TOTAL_SHIPS } from '../../shared/constants/index.js';
 import type { NetworkClient } from '../network/NetworkClient.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
+import { openOnboardingCards } from '../ui/OnboardingCards.js';
 
 const STORAGE_KEY = 'piratesBR.name';
 const SETTINGS_KEY = 'piratesBR.settings';
@@ -413,6 +414,9 @@ export class MenuController {
     // How to Play
     this.howtoBtn.addEventListener('click', () => this.showPanel('howto'));
     this.howtoBackBtn.addEventListener('click', () => this.showPanel('main'));
+    // …and the three-card tour, from the one screen a player reads BEFORE the
+    // horn. The cards used to be a once-per-browser event with no way back.
+    document.getElementById('howto-cards-btn')?.addEventListener('click', () => openOnboardingCards());
 
     // Settings
     this.settingsBtn.addEventListener('click', () => this.showPanel('settings'));
