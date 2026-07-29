@@ -1,5 +1,5 @@
 import type { StormState, Ship, Player, Island } from '../../shared/types/index.js';
-import { STORM_PHASES, WORLD, FLOODING } from '../../shared/constants/index.js';
+import { STORM_PHASES, STORM_DOCK_COVER_MARGIN, WORLD, FLOODING } from '../../shared/constants/index.js';
 import { dist2D, lerp, getIslandSurfaceY } from '../../shared/utils/index.js';
 import { SHIP_STATS } from '../../shared/constants/index.js';
 
@@ -36,26 +36,74 @@ export class StormSystem {
   /** Islands, for keeping the late rings off dry land (Old Maw Caldera sits at
    *  the world origin, which is exactly where the ring converges). */
   private islands: Island[] = [];
+  /** Radius the first ring settles at — STORM_PHASES[0].endRadius, widened if
+   *  this world put a spawn dock further out than the table assumed. */
+  private firstRingRadius = STORM_PHASES[0].endRadius;
 
   /** Match hands the world in once at setup — purely read-only sampling. */
   setIslands(islands: Island[]): void {
     this.islands = islands;
+    this.firstRingRadius = this.computeFirstRingRadius();
+  }
+
+  /**
+   * THE FIRST RING IS SIZED OFF THE DOCKS, NOT OFF A GUESS.
+   *
+   * Every crew starts at a berth: hull alongside the pier, pirate standing on
+   * the planking. If the opening circle closes inside that berth line, a player
+   * who is still learning the stations is taking storm damage where the game
+   * put him — the exact death the phase-1 comment ("explore, loot, get your
+   * bearings") promises he will not have. So the ring takes the furthest dock
+   * in the world — measured to BOTH the berth and the pier respawn point — adds
+   * STORM_DOCK_COVER_MARGIN, and never settles inside that.
+   *
+   * The table value wins whenever it is already generous enough, and the answer
+   * can never exceed the opening radius (a ring that "shrinks" outward would be
+   * a bug the HUD would happily draw).
+   */
+  private computeFirstRingRadius(): number {
+    const phase = STORM_PHASES[0];
+    let furthest = 0;
+    for (const island of this.islands) {
+      const dock = island.dock;
+      if (!dock) continue;
+      furthest = Math.max(
+        furthest,
+        Math.hypot(dock.berthPosition.x, dock.berthPosition.z),
+        Math.hypot(dock.respawnPoint.x, dock.respawnPoint.z),
+      );
+    }
+    if (furthest <= 0) return phase.endRadius;
+    return Math.min(
+      phase.startRadius,
+      Math.max(phase.endRadius, furthest + STORM_DOCK_COVER_MARGIN),
+    );
+  }
+
+  /** The radius the opening circle settles at in THIS world (test + Match read
+   *  it to assert the docks are covered). */
+  getFirstRingRadius(): number {
+    return this.firstRingRadius;
   }
 
   buildInitialState(): StormState {
     const phase = STORM_PHASES[0];
-    const nextCenter = this.pickNextSafeCenter(0, 0, phase.startRadius, phase.endRadius);
+    // The first circle closes ON THE WORLD, not on a corner of it: drifting the
+    // opening ring off-origin is what put outer berths outside a circle that is
+    // otherwise wide enough for all of them. Every LATER ring still drifts —
+    // that is the whole tension of the arc — but the one that closes while
+    // crews are still at their moorings stays honest and centred.
     return {
       phase: 0,
       centerX: 0,
       centerZ: 0,
-      nextCenterX: nextCenter.x,
-      nextCenterZ: nextCenter.z,
+      nextCenterX: 0,
+      nextCenterZ: 0,
       shrinkStartCenterX: 0,
       shrinkStartCenterZ: 0,
       shrinkStartRadius: phase.startRadius,
       safeRadius: phase.startRadius,
-      nextRadius: phase.endRadius,
+      nextRadius: this.firstRingRadius,
       shrinking: false,
       shrinkTimer: phase.waitSec,
       shrinkDuration: phase.shrinkSec,

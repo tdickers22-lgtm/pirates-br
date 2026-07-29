@@ -601,10 +601,20 @@ export const WEAPONS: Record<WeaponId, {
 // Each phase: wait (safe zone static), then shrink to next radius.
 // dmgPerSec tuned ~4× gentler than early builds so the ring is threatening but not instant.
 export const STORM_PHASES = [
-  // Phase 1 — explore, loot, get your bearings
-  { waitSec: 150, shrinkSec: 85,  startRadius: 950, endRadius: 680, dmgPerSec:  0.6 },
+  // Phase 1 — explore, loot, get your bearings.
+  //
+  // THE FIRST RING MUST CONTAIN EVERY SPAWN DOCK. The old 680 m end radius cut
+  // through a berth line that reaches 750 m from the origin: a solo who spawned
+  // on an outer pier was OUTSIDE the circle at ~T+3:45, bleeding at his own
+  // dock, and dead at ~T+5:00 with nobody having fired a shot at him. The phase
+  // that promises "explore, loot, get your bearings" cannot be the phase that
+  // kills you where it put you. StormSystem re-checks this against the REAL
+  // dock geometry every match (see STORM_DOCK_COVER_MARGIN) and widens the
+  // first ring if a world ever pushes a berth past this number — the constant
+  // is the design intent, the runtime check is the guarantee.
+  { waitSec: 150, shrinkSec: 85,  startRadius: 950, endRadius: 825, dmgPerSec:  0.6 },
   // Phase 2 — circle tightens, time to sail inward
-  { waitSec: 105, shrinkSec: 55,  startRadius: 680, endRadius: 480, dmgPerSec:  1.3 },
+  { waitSec: 105, shrinkSec: 55,  startRadius: 825, endRadius: 480, dmgPerSec:  1.3 },
   // Phase 3 — urgency kicks in
   { waitSec:  80, shrinkSec: 45,  startRadius: 480, endRadius: 320, dmgPerSec:  2.2 },
   // Phase 4 — getting spicy (60 s wait)
@@ -621,6 +631,14 @@ export const STORM_PHASES = [
  *  match's natural length, and the denominator of GameState.matchProgress (the
  *  one number the sky's day cycle is hung on). */
 export const STORM_ARC_SECONDS = STORM_PHASES.reduce((sum, phase) => sum + phase.waitSec + phase.shrinkSec, 0);
+
+/** Clearance the FIRST ring keeps outside the furthest spawn dock, measured
+ *  from the world origin to the berth AND to the pier's respawn point. A dock
+ *  is a place a fresh crew stands, not a place the weather is allowed to reach
+ *  in the opening phase, so the ring is sized off real geometry plus this belt:
+ *  the hull lies alongside (half a galleon's beam), the crew walks the pier,
+ *  and neither is inside the wall when phase 1 settles. */
+export const STORM_DOCK_COVER_MARGIN = 45;
 
 /** Grace after a hold begins before a CREWLESS respawn converts to a tow.
  *  Long enough that a mate who is one second from reviving still owns the
@@ -747,6 +765,33 @@ export const BOT_ENGAGE_SHRINK_MULT = 1.2;
 export const BOT_MAX_HUNTERS_BY_PHASE = [5, 7, 7, 7, 8, 8, 10];
 /** During early peace a bot only answers ships that shot at it inside this range. */
 export const BOT_DEFEND_RANGE = 260;
+
+/**
+ * THE GUNS LEARN THE WEATHER.
+ *
+ * Bot gunnery cadence (the seconds between broadsides, per difficulty) scaled by
+ * storm phase. This is the deliberate difficulty call behind the standing pacing
+ * gap: a mean 7.5 crews still afloat at 360 s against a 5–6.5 target, because the
+ * same slack medium bot that a new player needs at t=180 s is still shooting like
+ * one at t=360 s with the ring half closed.
+ *
+ * Phase 0 is untouched — the opening is the tutorial, and it stays gentle. From
+ * the first ring onward the crews sharpen, and the endgame fires ~40% faster
+ * (×0.6 on the delay) than the opening does. The multiplier rides the STORM, not
+ * the clock, so it moves with the arc a player can actually read on the chart.
+ */
+export const BOT_CANNON_CADENCE_BY_PHASE = [1.0, 0.72, 0.66, 0.62, 0.6, 0.6, 0.6, 0.6];
+/** Aim-jitter multiplier on the same schedule: a late-phase gun crew is not just
+ *  faster, it is steadier. Never below the hard-bot floor's own accuracy — this
+ *  tightens the shot, it does not make bots snipe. */
+export const BOT_CANNON_ACCURACY_BY_PHASE = [1.0, 0.82, 0.74, 0.7, 0.66, 0.66, 0.66, 0.66];
+
+/** Read either schedule at a storm phase index (clamped to the last entry). */
+export function botPhaseScale(schedule: readonly number[], phase: number): number {
+  if (schedule.length === 0) return 1;
+  const idx = Math.max(0, Math.min(schedule.length - 1, Math.floor(phase)));
+  return schedule[idx];
+}
 
 // ── Environmental peace (the lobby must not empty itself) ─────
 /** Nobody's hull is torn open by the WORLD — storm seas, keel scrapes, reef

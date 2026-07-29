@@ -3,6 +3,7 @@ import {
   SHIP_STATS, SHIP, PHYSICS, PLAYER,
   BOT_EARLY_PEACE_SECONDS, BOT_ENGAGE_RANGE_BY_PHASE, BOT_ENGAGE_SHRINK_MULT, BOT_DEFEND_RANGE,
   BOT_MAX_HUNTERS_BY_PHASE, BOT_LOOKAHEAD_METERS, BOT_OBSTACLE_MARGIN, BOT_KEEL_CLEARANCE,
+  BOT_CANNON_CADENCE_BY_PHASE, BOT_CANNON_ACCURACY_BY_PHASE, botPhaseScale,
   WRECK_EVENT,
 } from '../../shared/constants/index.js';
 import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
@@ -681,15 +682,21 @@ export class BotSystem {
         this.trimSails(ship, t, dt);
 
         // ── Aim with proper ballistic + lead prediction ───────────
-        const aim = computeCannonAim(ship, target, bot.difficulty);
+        // Gun crews sharpen as the ring closes: same difficulty, later weather.
+        const aim = computeCannonAim(ship, target, bot.difficulty,
+          botPhaseScale(BOT_CANNON_ACCURACY_BY_PHASE, storm.phase));
         bot.aimYaw = aim.yaw;
         bot.aimPitch = aim.pitch;
 
         bot.fireTimer -= dt;
-        // Fire whenever cooled down + in cannon range. Difficulty controls cadence and accuracy.
-        const minDelay = bot.difficulty === 'hard' ? 0.75
+        // Fire whenever cooled down + in cannon range. Difficulty sets the base
+        // cadence and accuracy; the STORM PHASE scales both, so the opening keeps
+        // its gentle bots and the endgame actually converts (see
+        // BOT_CANNON_CADENCE_BY_PHASE).
+        const baseDelay = bot.difficulty === 'hard' ? 0.75
           : bot.difficulty === 'medium' ? 2.0
           : 3.5;
+        const minDelay = baseDelay * botPhaseScale(BOT_CANNON_CADENCE_BY_PHASE, storm.phase);
         const inCannonRange = d < (bot.difficulty === 'hard' ? 270 : 245);
         // The peace covers the guns too — an unprovoked bot shadows its neighbour
         // with the ports shut. Timer is held just short of ready so the window
@@ -1281,6 +1288,7 @@ function computeCannonAim(
   ship: Ship,
   target: Ship,
   difficulty: 'easy' | 'medium' | 'hard',
+  jitterScale = 1,
 ): { yaw: number; pitch: number } {
   const v = SHIP.CANNON_SPEED;
   const g = CANNON_GRAVITY;
@@ -1307,12 +1315,13 @@ function computeCannonAim(
   let pitch = ballisticPitch(dist, v, g, CANNON_VY_BOOST, targetYDelta);
 
   // ── 3. Inject difficulty-tuned noise ────────────────────────
-  const yawJitter = difficulty === 'hard' ? 0.005
+  const scale = Math.max(0.1, jitterScale);
+  const yawJitter = (difficulty === 'hard' ? 0.005
     : difficulty === 'medium' ? 0.022
-    : 0.05;
-  const pitchJitter = difficulty === 'hard' ? 0.004
+    : 0.05) * scale;
+  const pitchJitter = (difficulty === 'hard' ? 0.004
     : difficulty === 'medium' ? 0.018
-    : 0.04;
+    : 0.04) * scale;
   yaw += (Math.random() - 0.5) * yawJitter * 2;
   pitch += (Math.random() - 0.5) * pitchJitter * 2;
 
