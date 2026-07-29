@@ -1366,10 +1366,23 @@ function makeShipInterior(
   holdLantern.position.set(0, H * 0.55, 0);
   g.add(holdLantern);
 
-  const holdLight = new THREE.PointLight(0xFFB060, 1.4, Math.max(W, L) * 1.6, 1.4);
+  // THE HOLD IS WINDOWLESS, so what the sun is doing outside is irrelevant to
+  // it: this lantern burns on the middle watch and it burns at noon. It was
+  // built with `visible = false` and nothing in the ship update ever turned it
+  // on, so the one light source below deck never lit anything and the hold read
+  // as a black box at every hour — you walked down the companionway into ink.
+  //
+  // Its REACH is deliberately hold-sized rather than ship-sized. The light
+  // budget ranks emitters by intensity x (1 - dist/range)^2, so a 22 m lantern
+  // on every hull in the anchorage would sit in the pool competing with the
+  // torches and braziers you can actually see; at 8.5 m it can only win a slot
+  // for someone who is standing in the hold it belongs to, which is exactly who
+  // it is for.
+  const holdLight = new THREE.PointLight(0xFFB060, 1.15, 8.5, 1.25);
   holdLight.position.set(0, H * 0.55, 0);
-  holdLight.visible = false;
+  holdLight.name = 'hold-lantern';
   registerBudgetLight(holdLight);
+  holdLight.visible = true;
   g.add(holdLight);
 
   // Brighten the hold floor so it doesn't look like a flat brown tarp from above.

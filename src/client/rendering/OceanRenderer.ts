@@ -172,9 +172,29 @@ const OCEAN_FRAG = /* glsl */`
     return n;
   }
 
+  // The sky dome authors its gradient in DISPLAY-referred values and shapes them
+  // to linear at the end (see Renderer's SKY_FRAG) so ACES + sRGB lands back on
+  // what was authored. The ocean does not: its palette is tuned directly in
+  // linear. Feeding a sky swatch straight into the water therefore lands ~1.7x
+  // too bright — which is what turned the far sea into a flat white plate with a
+  // hard rim wherever the horizon lifted into frame. This is the sky's exact
+  // shaping curve, applied only where the water is supposed to BE the sky.
+  vec3 skyShape(vec3 c) {
+    vec3 d = pow(max(c, vec3(0.0)), vec3(0.4545));
+    return d * d * d * 0.55 + d * 0.06;
+  }
+
   void main() {
     vec2  wp = v_worldPos.xz;
     float camDist = distance(u_cameraPos.xz, wp);
+    // camDist is HORIZONTAL — the wave field's per-component fade is matched to
+    // the shared gerstnerHeight() the physics samples, and that has to stay a
+    // function of ground distance or a ship 300 m below the crow's nest floats
+    // on water drawn flat. Every SHADING fade below uses the true eye distance
+    // instead: from altitude a patch 100 m out horizontally is 400 m away and a
+    // few pixels wide, and running ripple normals, whitecap breakup and a tight
+    // specular lobe at that footprint is precisely the far-ocean moiré.
+    float viewDist = distance(u_cameraPos, v_worldPos);
 
     // Analytic per-pixel normal: displacement is vertical-only, so xz is
     // undistorted and the derivative field matches the drawn surface exactly.
@@ -193,6 +213,18 @@ const OCEAN_FRAG = /* glsl */`
     float eyeAbove = max(0.0, u_cameraPos.y - v_worldPos.y);
     float lowEye = 1.0 - smoothstep(0.10, 0.55, eyeAbove);
 
+    // How STEEPLY this patch is being looked at: eye height over ground run.
+    // Everything the shoreline SDF paints — the turquoise sand shelf, the film
+    // of lap foam — is a top-down read of the seabed, and eye height alone does
+    // not say whether you are looking DOWN into it. From a deck 6 m up, water
+    // 200 m ahead is at 1.7 degrees, yet it was served the full overhead sand
+    // tint: that is the flat pale ellipse that sat ahead of the bow, brightest
+    // at night against dark water, wearing the exact shape of the island
+    // footprint that seeded it. Below ~2 degrees the shelf hands over to the
+    // reflected sky; look down into the lagoon and it comes straight back.
+    float sightPitch = eyeAbove / max(1.0, camDist);
+    float topDown = smoothstep(0.03, 0.30, sightPitch);
+
     // ── Fine ripple detail normals: fade with distance (specular AA),
     //    flatten on gentle days, churn harder inside the storm ──────────
     float calm = clamp((u_roughness - 0.55) / 1.05, 0.0, 1.0);
@@ -201,7 +233,7 @@ const OCEAN_FRAG = /* glsl */`
     // directly across the middle of the frame — the flat cyan sheet. Standing in
     // the water pushes the ripple normals out with the horizon.
     float wading = 1.0 - smoothstep(0.25, 2.20, eyeAbove);
-    float detailFade = 1.0 - smoothstep(40.0 + 120.0 * wading, 560.0 + 520.0 * wading, camDist);
+    float detailFade = 1.0 - smoothstep(40.0 + 120.0 * wading, 560.0 + 520.0 * wading, viewDist);
     if (detailFade > 0.001) {
       float e  = 0.85;
       float h0 = rippleField(wp);
@@ -237,11 +269,16 @@ const OCEAN_FRAG = /* glsl */`
     // blue-teal that the moon path and lantern pools can still play over.
     float shoreLight = 1.0 - u_nightFactor * 0.82;
     shallowCol = mix(shallowCol, vec3(0.020, 0.085, 0.145), u_nightFactor * 0.85);
+    // A squall does not leave the lagoon tropical. Under storm cloud the sand
+    // shelf loses the sun that scatters off it: the turquoise greys out and
+    // darkens toward the slate the open water is already taking.
+    float shallowGrey = dot(shallowCol, vec3(0.299, 0.587, 0.114));
+    shallowCol = mix(shallowCol, vec3(shallowGrey) * 0.62, u_stormIntensity * 0.85);
     float shallowMix = shallowMask * 0.9
       * (1.0 - u_stormIntensity * 0.55)
       * (1.0 - u_twilightFactor * 0.42)
       * shoreLight
-      * mix(1.0, 0.24, lowEye);
+      * mix(0.16, 1.0, topDown);
     base = mix(base, shallowCol, shallowMix);
 
     // ── Fresnel reflectance toward sky/horizon ──────────────────────────
@@ -289,7 +326,7 @@ const OCEAN_FRAG = /* glsl */`
     //    drops with it, and the HDR result is clamped — no firefly noise ─
     vec3  H = normalize(L + V);
     float NdotH = max(0.0, dot(N, H));
-    float lobeWiden = max(smoothstep(90.0, 1400.0, camDist), u_stormIntensity * 0.5);
+    float lobeWiden = max(smoothstep(90.0, 1400.0, viewDist), u_stormIntensity * 0.5);
     // Keep a higher shininess floor at low sun so the sunset reflection stays a
     // fine shimmering glitter path, not big hard red paint-splat blobs.
     float shininess = mix(310.0, mix(46.0, 130.0, sunLow), lobeWiden);
@@ -304,7 +341,7 @@ const OCEAN_FRAG = /* glsl */`
     //    grows dramatically as the sea state rises ─────────────────────────
     // Whitecap coverage thins with distance in a storm — full-strength crest
     // foam at every range merged into a horizon-wide ice sheet (patrol-1).
-    float stormFoamFade = 1.0 - smoothstep(220.0, 1400.0, camDist) * max(u_stormIntensity, stormSea) * 0.8;
+    float stormFoamFade = 1.0 - smoothstep(220.0, 1400.0, viewDist) * max(u_stormIntensity, stormSea) * 0.8;
     // Only the STEEPEST crests break into whitecaps on a calm/moderate sea, so
     // open water reads as clear blue with sparse foam — not a dense grid of
     // whitecaps on every wave. Storms still lower the threshold for full coverage.
@@ -316,7 +353,12 @@ const OCEAN_FRAG = /* glsl */`
     float breakup = mix(0.32, smoothstep(0.30 - 0.14 * stormSea, 0.66, foamN), detailFade * 0.9 + 0.1);
     float foam = clamp(crest * breakup * 1.15, 0.0, 1.0);
 
-    float shoreDetail = 1.0 - smoothstep(260.0, 900.0, camDist);
+    float shoreDetail = 1.0 - smoothstep(260.0, 900.0, viewDist);
+    // The lap-film term below is one-sided in sd and so has no far edge of its
+    // own; unfaded it drew a hard bright collar around every island footprint
+    // out to the horizon. Surf is a metre-scale feature — past a couple of
+    // hundred metres it is below a pixel and has no business being opaque.
+    float shoreRange = 1.0 - smoothstep(110.0, 460.0, viewDist);
     float lap = sin(sd * 0.5 - u_time * 1.3) * 0.5 + 0.5;
     float lapNoise = noise(wp * 0.3 + u_time * vec2(0.05, -0.04));
     float shoreBand = (1.0 - smoothstep(2.0, 11.0, sd)) * smoothstep(0.5, 0.9, lap * (0.55 + 0.45 * lapNoise));
@@ -329,7 +371,7 @@ const OCEAN_FRAG = /* glsl */`
     // snow and the atoll's reef slabs as pancakes floating on it. Capping what
     // the shore band may contribute keeps the surf line and gives the shelf
     // back its turquoise.
-    float shoreFoam = min(max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55), 0.4);
+    float shoreFoam = min(max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55), 0.4) * shoreRange;
     foam = clamp(foam + shoreFoam, 0.0, 1.0);
 
     vec3 foamCol = vec3(0.88, 0.93, 1.0) * mix(1.0, 0.45, u_nightFactor)
@@ -394,10 +436,15 @@ const OCEAN_FRAG = /* glsl */`
     // ── Aerial perspective + horizon dissolve: far water sinks into the
     //    fog color, then fully into the sky's horizon tint ───────────────
     float underwater = smoothstep(0.08, 1.8, u_underwaterDepth);
-    float fogAmt     = (1.0 - exp(-camDist * mix(0.00042, 0.0017, u_stormIntensity))) * (1.0 - underwater);
-    float horizonAmt = smoothstep(1250.0, 3000.0, camDist) * (1.0 - underwater);
+    float fogAmt     = (1.0 - exp(-viewDist * mix(0.00042, 0.0017, u_stormIntensity))) * (1.0 - underwater);
+    // Started earlier and finished before the grid's own 3264 m rim so the last
+    // ring is already pure sky by the time it runs out of geometry.
+    float horizonAmt = smoothstep(900.0, 2900.0, viewDist) * (1.0 - underwater);
     vec3 fogCol     = mix(u_fogColor, vec3(0.46, 0.51, 0.56), u_stormIntensity * 0.8);
-    vec3 horizonCol = mix(u_horizonColor, vec3(0.44, 0.47, 0.51), u_stormIntensity * 0.85);
+    // The far dissolve target is the SKY, so it is shaped like the sky. Fed raw,
+    // the horizon swatch landed ~1.7 stops hot through ACES and the last two
+    // kilometres of sea became a flat white sheet with a hard edge on it.
+    vec3 horizonCol = skyShape(mix(u_horizonColor, vec3(0.44, 0.47, 0.51), u_stormIntensity * 0.85));
     color = mix(color, fogCol, fogAmt * 0.78);
     color = mix(color, horizonCol, horizonAmt);
 

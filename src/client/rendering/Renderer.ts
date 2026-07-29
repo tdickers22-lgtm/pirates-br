@@ -110,12 +110,34 @@ const SKY_FRAG = /* glsl */`
     vec3 nightMid = vec3(0.11, 0.19, 0.33);
     vec3 nightHorizon = vec3(0.22, 0.32, 0.45);
 
-    vec3 daySky = mix(dayHorizon, dayMid, smoothstep(0.0, 0.30, h));
-    daySky = mix(daySky, dayZenith, smoothstep(0.24, 0.74, h));
-    vec3 twilightSky = mix(twilightHorizon, twilightMid, smoothstep(0.0, 0.30, h));
-    twilightSky = mix(twilightSky, twilightZenith, smoothstep(0.22, 0.72, h));
-    vec3 nightSky = mix(nightHorizon, nightMid, smoothstep(0.0, 0.34, h));
-    nightSky = mix(nightSky, nightZenith, smoothstep(0.20, 0.76, h));
+    // ── THE SEAM ARC ────────────────────────────────────────────────────────
+    // These ramps used to be smoothsteps in h, and every one of them ENDED
+    // inside the visible dome: the zenith blend finished at h = 0.74, about 29
+    // degrees up. A smoothstep's far edge is where a gradient stops changing all
+    // at once, and the eye reads that as a line — a clean arc sweeping across
+    // nearly every frame in the game, loudest at dusk but never actually absent.
+    // It survived a 5x finer dome, every post pass being switched off, and the
+    // whole scene being hidden; it was never geometry or bloom, it was the ramp.
+    //
+    // Exponential ramps have no far edge. They approach the zenith colour
+    // asymptotically and never arrive, so there is no elevation anywhere in the
+    // sky at which the gradient changes character. Constants chosen to sit on
+    // the old curve through the middle of the dome, so the sky still reads the
+    // same — it just no longer has an edge in it.
+    // The offsets are the old ramps' value AT THE WATERLINE, so the dome still
+    // starts where it always did and still deepens overhead at the same rate;
+    // only the top of the curve changes, from "arrives at 29 degrees" to "never
+    // quite arrives". The horizon swatch is held to a tight rim at the waterline
+    // (it contributed nothing above it before) where it doubles as the colour
+    // the far sea dissolves into.
+    float up = clamp(d.y, 0.0, 1.0);
+    float rim = 1.0 - exp(-up * 26.0);
+    vec3 daySky = mix(dayMid, dayZenith, 1.0 - 0.55 * exp(-up * 2.60));
+    daySky = mix(dayHorizon, daySky, rim);
+    vec3 twilightSky = mix(twilightMid, twilightZenith, 1.0 - 0.41 * exp(-up * 2.75));
+    twilightSky = mix(twilightHorizon, twilightSky, rim);
+    vec3 nightSky = mix(nightMid, nightZenith, 1.0 - 0.45 * exp(-up * 2.45));
+    nightSky = mix(nightHorizon, nightSky, rim);
 
     vec3 sky = daySky * u_dayAmount + twilightSky * u_twilightAmount + nightSky * u_nightAmount;
     float antiSun = pow(max(0.0, dot(d, normalize(vec3(-u_sunDir.x, 0.18, -u_sunDir.z)))), 2.2);
@@ -197,11 +219,32 @@ const SKY_FRAG = /* glsl */`
     // Horizon haze band
     float haze = pow(1.0 - abs(d.y), 7.0) * 0.38 * mix(1.0, 0.35, u_stormIntensity);
     vec3 hazeColor = dayHorizon * u_dayAmount + twilightHorizon * u_twilightAmount + nightHorizon * u_nightAmount;
-    sky = mix(sky, mix(hazeColor, vec3(0.50, 0.53, 0.57), u_stormIntensity), haze);
+    vec3 hazeMix = mix(hazeColor, vec3(0.50, 0.53, 0.57), u_stormIntensity);
+    sky = mix(sky, hazeMix, haze);
+
+    // ── Below the eye-level horizon the dome IS the far sea ──────────────
+    // The ocean grid stops at 3264 m. Stand on a deck and that rim is under the
+    // horizon line and invisible; climb a volcano or a mast and it lifts into
+    // frame as a hard curved edge, pale sea-haze on one side and mid-sky blue on
+    // the other — the "horizon band" at altitude. The sea dissolves into
+    // u_horizonColor by 3 km (OceanRenderer's horizonAmt) and hazeColor here is
+    // authored from the SAME horizon swatches, so painting everything below the
+    // horizon with it makes the rim land on its own colour and disappear. The
+    // ramp reaches full by d.y = -0.13, which covers the rim from any altitude
+    // up to ~430 m; under the ocean's own silhouette it is never seen at all.
+    sky = mix(sky, hazeMix, smoothstep(0.035, -0.13, d.y));
 
     vec3 waterBelow = mix(vec3(0.00, 0.04, 0.08), vec3(0.02, 0.18, 0.27), smoothstep(-0.7, 0.2, d.y));
     vec3 waterGlow = vec3(0.08, 0.42, 0.52) * pow(max(0.0, d.y), 2.0);
     sky = mix(sky, waterBelow + waterGlow, u_underwaterIntensity);
+
+    // A clear sky is the flattest gradient on screen — a whole quadrant can span
+    // three or four 8-bit codes — so it is the one surface where quantisation
+    // contours show. One LSB of triangular-PDF noise, added in the authored
+    // domain, turns those contours into grain nobody can see.
+    float d1 = hash21(gl_FragCoord.xy);
+    float d2 = hash21(gl_FragCoord.xy + 41.7);
+    sky += (d1 + d2 - 1.0) * (1.6 / 255.0);
 
     // Display-authored -> linear, shaped so ACES + sRGB output lands near the authored values
     sky = max(sky, vec3(0.0));
@@ -288,6 +331,20 @@ export class Renderer {
   private readonly skyHorizonTwilightColor = new THREE.Color(0xff8a47);
   private readonly skyHorizonNightColor = new THREE.Color(0x38516f);
   private readonly skyHorizonStormColor = new THREE.Color(0x73767f);
+  // ── Storm light COLOURS ───────────────────────────────────────────────────
+  // Dimming alone was never enough. Under a black squall the sun kept its warm
+  // 0xfff0d8, the hemisphere kept a summer-blue sky over amber sand bounce, and
+  // the islands stayed sunny green with a bright teal lagoon while the sky above
+  // them went to slate — the single loudest "the weather is fake" tell in the
+  // game. A storm removes the SPECTRUM as well as the level: the key goes flat
+  // grey-blue (cloud light has no sun in it), the sky term goes to wet slate and
+  // the bounce term to wet sand, and everything lit by them desaturates
+  // together. Intensity ramps stay exactly where they were tuned.
+  private readonly sunStormColor = new THREE.Color(0xa8b0b8);
+  private readonly ambientStormColor = new THREE.Color(0x767f89);
+  private readonly hemiSkyStormColor = new THREE.Color(0x6f7783);
+  private readonly hemiGroundStormColor = new THREE.Color(0x6a6660);
+  private readonly horizonFillStormColor = new THREE.Color(0x8f959c);
   private dayAmount = 1;
   private twilightAmount = 0;
   private nightAmount = 0;
@@ -368,7 +425,17 @@ export class Renderer {
     document.body.insertBefore(this.renderer.domElement, document.body.firstChild);
 
     // ── Sky dome ────────────────────────────────────────────────
-    const skyGeo = new THREE.SphereGeometry(2800, this.quality === 'low' ? 12 : 20, this.quality === 'low' ? 6 : 10);
+    // TESSELLATION IS NOT COSMETIC HERE. v_dir is the interpolated object-space
+    // position, re-normalised per fragment: continuous across a shared edge, but
+    // its DERIVATIVE is not — normalize(lerp(a,b)) is not slerp(a,b), so every
+    // latitude ring of the sphere is a C1 crease in d.y. The gradient ramps are
+    // smoothsteps of d.y, and the eye reads a crease in a smooth ramp as a hard
+    // line: at 20x10 the dome drew a visible arc across nearly every frame (a
+    // ring ~18 degrees up), long blamed on dusk because that is where it was
+    // loudest. At 96x48 the rings are 3.75 degrees apart, the angular error
+    // inside a quad drops by ~23x, and the crease falls under a quantisation
+    // step. It costs ~9k triangles on a dome drawn once, depth-test off.
+    const skyGeo = new THREE.SphereGeometry(2800, this.quality === 'low' ? 48 : 96, this.quality === 'low' ? 24 : 48);
     this.skyMaterial = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
@@ -635,6 +702,15 @@ export class Renderer {
     this.ambientLight.intensity = THREE.MathUtils.lerp(this.getCycleAmbientIntensity(), this.getStormAmbientIntensity(), t);
     this.hemisphereLight.intensity = THREE.MathUtils.lerp(this.getCycleHemisphereIntensity(), this.getStormHemisphereIntensity(), t);
     this.horizonFill.intensity = THREE.MathUtils.lerp(this.getCycleHorizonIntensity(), this.getStormHorizonIntensity(), t);
+    // Re-derive from the cycle first: this path can be entered repeatedly at the
+    // same storm level, and lerping a light that is already grey toward grey
+    // again would walk the whole scene to slate over a few seconds.
+    this.getCycleColor(this.sun.color, this.sunDayColor, this.sunTwilightColor, this.moonColor);
+    this.getCycleColor(this.ambientLight.color, this.ambientDayColor, this.ambientTwilightColor, this.ambientNightColor);
+    this.getCycleColor(this.hemisphereLight.color, this.hemiSkyDayColor, this.hemiSkyTwilightColor, this.hemiSkyNightColor);
+    this.getCycleColor(this.hemisphereLight.groundColor, this.hemiGroundDayColor, this.hemiGroundTwilightColor, this.hemiGroundNightColor);
+    this.getCycleColor(this.horizonFill.color, this.horizonDayColor, this.horizonTwilightColor, this.horizonNightColor);
+    this.applyStormLightColors(t);
     this.setSunDiscWeather(t, 0);
 
     this.renderer.toneMappingExposure = THREE.MathUtils.lerp(this.getCycleExposure(), this.getStormExposure(), t);
@@ -666,6 +742,7 @@ export class Renderer {
     this.getCycleColor(this.hemisphereLight.color, this.hemiSkyDayColor, this.hemiSkyTwilightColor, this.hemiSkyNightColor);
     this.getCycleColor(this.hemisphereLight.groundColor, this.hemiGroundDayColor, this.hemiGroundTwilightColor, this.hemiGroundNightColor);
     this.getCycleColor(this.horizonFill.color, this.horizonDayColor, this.horizonTwilightColor, this.horizonNightColor);
+    this.applyStormLightColors(storm);
     // Submerged fill is TEAL, not grey: the fill light is standing in for light
     // that has already travelled through metres of water, so island slopes and
     // sea rocks below the waterline take a depth ramp instead of going to ink.
@@ -810,6 +887,18 @@ export class Renderer {
     this.sun.position.copy(this.activeLightDir).multiplyScalar(400);
     this.horizonFill.position.copy(this.activeLightDir).multiplyScalar(-340);
     this.horizonFill.position.y = Math.max(28, this.horizonFill.position.y);
+  }
+
+  /** Pull every scene light toward its storm swatch. Call AFTER the day/night
+   *  colours are written and BEFORE any underwater tint, so a submerged dive
+   *  inside a squall still ends up teal rather than grey. */
+  private applyStormLightColors(storm: number) {
+    if (storm <= 0.001) return;
+    this.sun.color.lerp(this.sunStormColor, storm * 0.85);
+    this.ambientLight.color.lerp(this.ambientStormColor, storm * 0.9);
+    this.hemisphereLight.color.lerp(this.hemiSkyStormColor, storm * 0.9);
+    this.hemisphereLight.groundColor.lerp(this.hemiGroundStormColor, storm * 0.9);
+    this.horizonFill.color.lerp(this.horizonFillStormColor, storm * 0.85);
   }
 
   private getCycleColor(target: THREE.Color, day: THREE.Color, twilight: THREE.Color, night: THREE.Color) {

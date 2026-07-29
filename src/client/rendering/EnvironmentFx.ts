@@ -998,7 +998,26 @@ export class EnvironmentFx {
     const edgeFade = THREE.MathUtils.clamp((dist / safeRadius - 0.84) / 0.16, 0, 1);
     const insideIntensity = Math.min(0.24, edgeFade * 0.14 + shrinkBoost * 0.45);
     const outsideIntensity = Math.min(1, 0.52 + phaseBoost + shrinkBoost + stormDepth * 0.32);
-    return THREE.MathUtils.lerp(insideIntensity, outsideIntensity, outsideBlend);
+    const base = THREE.MathUtils.lerp(insideIntensity, outsideIntensity, outsideBlend);
+
+    // A SHOWER CARRIES ITS OWN SKY.
+    //
+    // The rain reaches ~150 m inboard of the wall on purpose, so sailing up to a
+    // squall means a wet approach rather than a dry frame followed by a wall of
+    // water. But only the RAIN reached in: the sky number stayed near 0.10 out
+    // there, so drops fell through cloudless noon blue — the single most
+    // dream-logic frame in the game. The overcast now reaches inboard on the
+    // same ramp the rain does, a little ahead of it, so the cloud arrives first
+    // and the drops fall out of something.
+    const wallOvercast = this.stormWallNearness() * (0.34 + (phase / maxPhase) * 0.14);
+    return Math.max(base, wallOvercast);
+  }
+
+  /** 0 = far from the storm boundary, 1 = at it. Shared by the rain and the
+   *  overcast so a squall's water and its cloud arrive on the same ramp. */
+  private stormWallNearness(): number {
+    const wallDist = this.cameraDistanceToStormWall();
+    return wallDist < 0 ? 0 : 1 - THREE.MathUtils.smoothstep(wallDist, 30, 165);
   }
 
   computeStormRainIntensity(): number {
@@ -1025,10 +1044,15 @@ export class EnvironmentFx {
     // the rain only existed once you had crossed. The squall reaches inboard of
     // its own edge, so the drops (and the rain audio, which rides the same
     // number) fade in over the last ~150m of the approach.
-    const wallDist = this.cameraDistanceToStormWall();
-    const nearWall = wallDist < 0 ? 0 : 1 - THREE.MathUtils.smoothstep(wallDist, 30, 165);
-    const wallFloor = nearWall * (0.30 + (phase / maxPhase) * 0.16);
-    return Math.max(fromPlayer, wallFloor);
+    const wallFloor = this.stormWallNearness() * (0.30 + (phase / maxPhase) * 0.16);
+    const wanted = Math.max(fromPlayer, wallFloor);
+
+    // Hard gate on the sky above: rain may never outrun the cloud that is
+    // supposed to be producing it. The overcast reaches inboard on the same
+    // ramp (see computeStormWeatherIntensity), so this only bites where the two
+    // ramps disagree — and there it is the drops that give way, not the sky.
+    const skyCap = Math.min(1, this.computeStormWeatherIntensity() * 1.3);
+    return Math.min(wanted, skyCap);
   }
 
   // ── Storm rain ────────────────────────────────────────────────────────────
