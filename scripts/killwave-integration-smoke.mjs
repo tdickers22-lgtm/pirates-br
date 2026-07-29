@@ -12,7 +12,33 @@
 // It is a smoke, not a suite: it screenshots what a player sees and reports the
 // numbers the fixes are supposed to move. Read the PNGs.
 //
-//   node --import tsx scripts/killwave-integration-smoke.mjs [outDir]
+// NOT WIRED INTO test:browser, AND CHECK (f) IS WHY. Measured 5x standalone: 3
+// passes, 2 failures, all of them (f) reporting one or two "full-width crease"
+// rows at y≈218-220 of the 300-row resample. Diagnosed rather than tuned, and
+// the finding is that the flagged row is the HORIZON, which (f) already means to
+// exclude — see the note over skyFloor. Instrumenting the sweep three times in
+// one session, same camera and same setDayNightOverride(854):
+//
+//   * the discontinuity at y≈217-220 is ALWAYS there, and it is enormous:
+//     |d2|/mad runs 68-94 against a threshold of 8. It is never a marginal
+//     read. It is the sky/haze -> far-ocean transition.
+//   * skyFloor, the bottom of the searched band, DRIFTS ~10 rows between
+//     identical sweeps (yaw 0 gave 214, then 221, then 223). It is the first
+//     row where blue-red falls under 18, and near the horizon that sits in a
+//     shallow desaturation ramp over animated water, so the wave state under it
+//     decides where the crossing lands.
+//
+// So the band bottom is a moving colour guess carrying a 4-row guard rail, and
+// the cliff it is standing next to is 70-90x the detection threshold. When the
+// drift puts row 218 inside the band the horizon is read as a dome seam; when it
+// does not, (f) passes. Nothing about the sky changes either way.
+//
+// The fix is to bound the band by something that is not wave-modulated, NOT to
+// raise the 8x outlier threshold (which is honest and which nothing here is
+// failing on the merits). That is a change to what (f) measures, so it belongs
+// to whoever owns the sky, and until then this file is run by hand.
+//
+//   node scripts/killwave-integration-smoke.mjs [outDir]
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
 
@@ -229,6 +255,12 @@ for (const yaw of [0, 1.05, 2.1, 3.15, 4.2, 5.25]) {
       // are not. The frame still catches ground at the bottom even pitched up,
       // and the sky/ground boundary is a genuine hard edge — it is not a dome
       // seam, and searching across it would report one on every heading.
+      //
+      // THIS IS THE LINE THAT MAKES (f) INTERMITTENT. Near the horizon blue-red
+      // decays through 18 gradually, over water that is moving, so the crossing
+      // — and therefore skyFloor below — walks about 10 rows between identical
+      // sweeps. The guard rail is 4 rows. See the WHY-UNWIRED note in the file
+      // header for the measurements.
       sky.push((blue - red) / n > 18);
     }
     let floor = SH;
