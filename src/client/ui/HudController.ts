@@ -1755,11 +1755,13 @@ export class HudController {
     if (!this.sailCoachEl) {
       const el = document.createElement('div');
       el.id = 'sail-coach-hint';
-      // Deliberately the pointer-lock hint's own look and place (index.html
+      // Deliberately the pointer-lock hint's own look (index.html
       // #pointer-lock-hint): the game already taught the player that a gold pill
-      // in the middle of the screen is an instruction they can act on.
+      // in the middle of the screen is an instruction they can act on. It sits one
+      // pill LOWER, because that hint is still up whenever the pointer is unlocked
+      // and a paint check caught the two occupying the same 34 px of screen.
       el.style.cssText = [
-        'position:fixed', 'left:50%', 'top:clamp(140px,18vh,208px)', 'transform:translateX(-50%)',
+        'position:fixed', 'left:50%', 'top:clamp(186px,24vh,256px)', 'transform:translateX(-50%)',
         'z-index:95', 'pointer-events:none',
         'padding:9px 16px', 'border-radius:999px',
         'background:rgba(4,14,28,0.85)', 'border:1px solid rgba(201,168,76,0.34)',
@@ -1786,12 +1788,22 @@ export class HudController {
    * screen. None of it told a captain what to do with the wheel. The sectors are
    * the classic points of sail, so the words line up with the speed the physics
    * actually gives (bow = crawl, beam/quarter = fast).
+   *
+   * THE SENTENCE WAS BACK TO FRONT FOR MONTHS, AND IT IS THE FIRST-SAIL TRAP.
+   * `relative` is the yaw the wind BLOWS TOWARD, minus the heading (PhysicsSystem's
+   * convention: rel 0 is a dead run, |rel| ≈ π is head to wind, which is why the
+   * polar reads offWind = π − |rel|). A sailor names the wind by where it comes
+   * FROM, so every sector here was the opposite of the truth: a live probe caught
+   * the panel reading "Wind astern — from behind" on a hull sitting at the 0.10
+   * in-irons floor making 1.3 u/s, and "dead ahead" on a dead run. A learner who
+   * believes that line steers exactly the wrong way and holds W into the wind
+   * forever, which is the plateau the audit reported. The vane arrow was already
+   * flipping the angle (`degrees + 180`) — the words simply never did.
    */
   private windBearingPhrase(relative: number): string {
-    const wrapped = angleWrap(relative);
+    // Where it comes FROM: the source bearing, which is what a sailor names.
+    const wrapped = angleWrap(relative + Math.PI);
     const deg = Math.abs(THREE.MathUtils.radToDeg(wrapped));
-    // Negative relative bearing = the wind is off to port (matches the server's
-    // desired-trim sign convention in PhysicsSystem).
     const side = wrapped < 0 ? 'port' : 'starboard';
     if (deg <= 22) return 'dead ahead';
     if (deg >= 158) return 'astern';
@@ -1811,7 +1823,9 @@ export class HudController {
    * for 'dead ahead', which needs no translation.
    */
   private windPlainGloss(relative: number): string {
-    const wrapped = angleWrap(relative);
+    // Same inversion as windBearingPhrase: "from behind" has to mean the wind is
+    // behind you, which is rel ≈ π, not rel ≈ 0.
+    const wrapped = angleWrap(relative + Math.PI);
     const deg = Math.abs(THREE.MathUtils.radToDeg(wrapped));
     const hand = wrapped < 0 ? 'left' : 'right';
     if (deg <= 22) return '';
@@ -1851,7 +1865,12 @@ export class HudController {
     const signature = `${degrees}:${phrase}`;
     if (signature === this.windVaneSignature) return;
     this.windVaneSignature = signature;
-    vane.arrow.style.transform = `rotate(${degrees + 180}deg)`;
+    // The glyph is an ↑ pointing at the bow, and `relative` is already the yaw the
+    // wind BLOWS TOWARD relative to that bow — so streaming downwind is a straight
+    // rotation. The old `+ 180` pointed it upwind while the words said the opposite
+    // thing about the same angle; both halves of the chip are now the same story as
+    // the physics (see windBearingPhrase).
+    vane.arrow.style.transform = `rotate(${degrees}deg)`;
     vane.text.textContent = phrase.replace('on the ', '');
     vane.root.title = sentence;
   }
