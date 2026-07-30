@@ -496,6 +496,8 @@ export class Game {
   private readonly prevPlayerFallSpeed = new Map<string, number>();
   /** kill_event details, consumed by the next death edge for that victim. */
   private readonly deathCauseHints = new Map<string, { killerId: string | null; headshot: boolean }>();
+  /** performance.now() of the last feed line for each environmental cause. */
+  private readonly envFeedAt = new Map<string, number>();
   /** Weapons flung out of dead hands, tumbling until they fade. */
   private readonly droppedWeapons: Array<{
     mesh: THREE.Group;
@@ -1866,6 +1868,8 @@ export class Game {
         blocked?: boolean;
         meat?: number;
       meatType?: string;
+        /** Set on environmental blows (storm/drown/fall/fire/shark) — no attacker. */
+        cause?: string;
       };
       if (hitPayload.blocked) {
         // A parried swing — steel on steel, not a wound. The clang IS the
@@ -2303,15 +2307,52 @@ export class Game {
     }
   }
 
+  /**
+   * WHAT IS TAKING MY HEALTH? — the environmental half of the answer.
+   *
+   * An audit watched 100 → 58 wandering and 58 → 8 walking to a chest and could
+   * not name a point of it. The red vignette was there (CombatFx watches the
+   * vitals directly), so "something is hurting me" was on screen; nothing ever
+   * said WHAT, because only combat shipped a hit message. The server now names
+   * every environmental blow it bills — these are the words for them, in the
+   * present tense, because they are read while there is still time to act.
+   */
+  private static readonly ENV_DAMAGE_COPY: Record<string, { label: string; feed: string }> = {
+    storm: { label: 'THE STORM', feed: 'The storm is tearing at you — get inside the ring [M]' },
+    drowned: { label: 'DROWNING', feed: 'You are drowning — [SPACE] swims up' },
+    fall: { label: 'THE FALL', feed: 'The landing hurt — deep water breaks a fall, rock does not' },
+    fire: { label: 'FIRE', feed: 'You are burning — get off the fire, or douse it with a bucket' },
+    shark: { label: 'SHARK', feed: 'A shark has you — get out of the water' },
+  };
+
   private handleIncomingHit(payload: {
     damage?: number;
     sourcePosition?: { x: number; y: number; z: number };
+    position?: { x: number; y: number; z: number };
     headshot?: boolean;
     kill?: boolean;
     weaponId?: WeaponId | string;
     attackerName?: string;
+    cause?: string;
   }) {
     const damage = Math.max(1, Math.round(payload.damage ?? 0));
+    // Environmental: no attacker to blame, so the cause carries the frame. A
+    // floating number at your own chest (the same indicator a cutlass draws) and
+    // one feed line naming it and what to do about it.
+    const env = payload.cause ? Game.ENV_DAMAGE_COPY[payload.cause] : undefined;
+    if (env) {
+      if (payload.position) {
+        this.spawnFloatingDamageIndicator(`-${damage}`, payload.position, { weaponLabel: env.label });
+      }
+      // Throttled to one line per cause per stretch of damage, so a storm that
+      // bills for ninety seconds does not become ninety identical feed lines.
+      const lastAt = this.envFeedAt.get(payload.cause!) ?? -Infinity;
+      if (performance.now() - lastAt > 6000) {
+        this.envFeedAt.set(payload.cause!, performance.now());
+        this.pushFeed(env.feed, '#ff9d6f');
+      }
+      return;
+    }
     const wid = payload.weaponId;
     const weaponLabel = wid && wid in WEAPONS
       ? weaponDisplayName(wid)

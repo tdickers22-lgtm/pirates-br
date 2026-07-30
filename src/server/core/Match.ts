@@ -432,7 +432,7 @@ export class Match {
   private downedByPlayer = new Map<string, { attackerId: string | null; at: number; headshot: boolean }>();
   /** playerId → what last took health off them, and when (sim seconds). This is
    *  the death screen's evidence: see DamageSource. */
-  private lastDamageSourceById = new Map<string, { source: DamageSource; at: number }>();
+  private lastDamageSourceById = new Map<string, { source: DamageSource; at: number; tick: number }>();
   /** Scratch: health per player at the start of a subsystem call, so a loss can
    *  be attributed to the system that caused it without every other system
    *  having to grow a reporting channel. */
@@ -1419,7 +1419,19 @@ export class Match {
     // Nothing else in that call can take health off a pirate, so every loss
     // across it is the tempest — including the one that swims back inside the
     // ring afterwards and used to be filed as a drowning.
-    this.endHealthWitness(() => 'storm');
+    //
+    // EXCEPT A BLOW ALREADY NAMED THIS TICK. Skeleton waves resolve earlier in
+    // the same tick and tag themselves 'blade'; an unguarded `() => 'storm'`
+    // then relabelled a 19 hp cutlass as the weather because 0.06 hp of drizzle
+    // landed after it, and the death screen read TAKEN BY THE STORM to a pirate
+    // who was cut down. The latest blow names the death, but a rounding chip of
+    // rain is not the latest blow.
+    this.endHealthWitness((player) => (
+      this.namedThisTickByOther(player.id, 'storm') ? null : 'storm'
+    ));
+    // Both witnesses have spoken: ship whatever they banked, so no loss of
+    // health is ever silent (see noteEnvironmentalDamage).
+    this.flushEnvironmentalDamage();
     // Runs immediately after the storm, because the whole event is keyed to the
     // ring: she rises at the announced next centre and the tempest takes her back.
     this.updateWreckEvent();
@@ -4651,7 +4663,14 @@ export class Match {
       if (s.attackState === 'lunge') {
         if (target && dist2D(target.position.x, target.position.z, s.position.x, s.position.z) < SHARK.LUNGE_HIT_RADIUS) {
           this.noteDamageSource(target.id, 'shark');
-          target.health -= this.absorbWithArmor(target, SHARK.BITE_DAMAGE);
+          const bite = this.absorbWithArmor(target, SHARK.BITE_DAMAGE);
+          target.health -= bite;
+          // A shark bite took a fifth of your health and put NOTHING on screen —
+          // no number, no name, no bearing. It is the one environmental source
+          // with real jaws, so the wedge points at them.
+          this.noteEnvironmentalDamage(target, 'shark', bite, {
+            x: s.position.x, y: s.position.y + 0.4, z: s.position.z,
+          });
           target.lastDamagedById = null;
           target.lastDamagedAt = null;
           target.lastDamageWasHeadshot = false;
@@ -4979,7 +4998,144 @@ export class Match {
 
   /** Remember what just bit this pirate. Latest wins — the LAST blow names the death. */
   private noteDamageSource(playerId: string, source: DamageSource): void {
-    this.lastDamageSourceById.set(playerId, { source, at: this.t });
+    this.lastDamageSourceById.set(playerId, { source, at: this.t, tick: this.tickCount });
+  }
+
+  // ── The silent half of the damage model ───────────────────────────────────
+  //
+  // A fresh-eyes audit watched 100 → 58 while wandering, 58 → 8 walking to a
+  // chest, then died, and could not name one point of it. The client's own
+  // vitals watch (CombatFx.watchLocalVitals) does raise a red vignette on any
+  // loss, so "something is hurting me" was on screen — but only combat ever
+  // shipped a `player_hit`, so nothing ever said WHAT, and nothing put a number
+  // in the frame. Weather, water, fire, rock and sharks were the whole silence.
+  //
+  // The witness above already knows the cause; it only ever threw the AMOUNT
+  // away. So bank it and send the same incoming-hit message combat sends, with
+  // the cause named. Two rules make it readable rather than a firehose:
+  //
+  //   * CHIPS ADD UP FIRST. The tempest bills 0.06–0.4 hp per tick at 62.5 Hz.
+  //     One indicator per ENV_NOTICE_INTERVAL carrying the accumulated total
+  //     reads as "-14 THE STORM" once a second, not as a wall of "-0".
+  //   * A REAL BLOW JUMPS THE QUEUE. Past ENV_NOTICE_IMMEDIATE_HP (a shark's
+  //     bite, a killing fall) the notice goes out on the tick it happened, so
+  //     the number lands with the hit instead of a beat behind it.
+
+  /** Banked environmental loss per pirate, awaiting its on-screen notice. */
+  private envDamage = new Map<string, {
+    amount: number; source: DamageSource; from: Vec3 | null; sentAt: number;
+  }>();
+  /** Cadence for accumulated chip damage. */
+  private static readonly ENV_NOTICE_INTERVAL = 0.9;
+  /** A blow this big is announced the tick it lands, whatever the cadence says. */
+  private static readonly ENV_NOTICE_IMMEDIATE_HP = 10;
+
+  /**
+   * Bank a loss the player cannot otherwise account for.
+   *
+   * Combat sources are skipped: guns, blades, cannon and kegs already ship their
+   * own `player_hit` with an attacker name, and doubling them would print every
+   * musket ball twice.
+   */
+  private noteEnvironmentalDamage(
+    player: Player,
+    source: DamageSource,
+    amount: number,
+    origin?: Vec3,
+  ): void {
+    if (amount <= 1e-6) return;
+    if (source === 'gunshot' || source === 'blade' || source === 'cannon' || source === 'explosion') return;
+    const entry = this.envDamage.get(player.id);
+    // WHERE IT CAME FROM, when that is a real direction. A shark carries its own
+    // (the jaws are a place), and the tempest gets one built from the ring: the
+    // hurt is outside the wall, so the wedge smears the seaward edge of the frame
+    // and the clear side is the way home. Water, fire and the ground are under
+    // you — a direction arrow for them would point at your own boots.
+    const from = origin ?? (source === 'storm' ? this.stormwardPoint(player) : null);
+    if (!entry) {
+      this.envDamage.set(player.id, { amount, source, from, sentAt: this.t });
+      return;
+    }
+    entry.amount += amount;
+    // Latest cause wins, matching the witness: a swimmer the storm is billing
+    // who then gets bitten reads as the shark, which is what just happened.
+    entry.source = source;
+    entry.from = from;
+  }
+
+  /** A point out past the storm wall on the player's own bearing from the eye. */
+  private stormwardPoint(player: Player): Vec3 {
+    const { centerX, centerZ, safeRadius } = this.state.storm;
+    const dx = player.position.x - centerX;
+    const dz = player.position.z - centerZ;
+    const len = Math.hypot(dx, dz) || 1;
+    const reach = safeRadius + 40;
+    return {
+      x: centerX + (dx / len) * reach,
+      y: player.position.y + PLAYER.HEIGHT * 0.72,
+      z: centerZ + (dz / len) * reach,
+    };
+  }
+
+  /** Ship the banked notices whose turn has come. Once per tick, after both witnesses. */
+  private flushEnvironmentalDamage(): void {
+    for (const [playerId, entry] of this.envDamage) {
+      const player = this.playersById.get(playerId);
+      if (!player || player.state === 'eliminated') { this.envDamage.delete(playerId); continue; }
+      const due = entry.amount >= Match.ENV_NOTICE_IMMEDIATE_HP
+        || this.t - entry.sentAt >= Match.ENV_NOTICE_INTERVAL;
+      if (!due) continue;
+      this.envDamage.delete(playerId);
+      // Rounded to a whole point, and never to zero: a notice that says "-0"
+      // is worse than no notice at all, so sub-point trickles keep banking.
+      if (Math.round(entry.amount) < 1) {
+        this.envDamage.set(playerId, { ...entry });
+        continue;
+      }
+      this.notifyIncomingPlayerHit(playerId, {
+        attackerId: null,
+        damage: entry.amount,
+        position: {
+          x: player.position.x,
+          y: player.position.y + PLAYER.HEIGHT * 0.72,
+          z: player.position.z,
+        },
+        sourcePosition: entry.from ?? undefined,
+        // The client turns this into the floating label and the feed line — the
+        // same nine words the death screen would have used, said while there is
+        // still time to act on them.
+        cause: entry.source,
+        remainingHealth: Math.max(0, player.health),
+        kill: player.health <= 0,
+      });
+    }
+  }
+
+  /** Drop a pirate's banked notice — a respawn refills the bar, it is not a wound. */
+  private clearEnvironmentalDamage(playerId: string): void {
+    this.envDamage.delete(playerId);
+  }
+
+  /**
+   * Has something OTHER than `mine` already named this pirate's damage on the
+   * tick now being resolved?
+   *
+   * The tick INDEX, not the clock. `tag.at === this.t` was only ever true for
+   * tags written after `this.t` advanced inside the current tick, so a tag
+   * written on the boundary read as a whole tick old and lost its name to
+   * whichever witness closed last. A time WINDOW fixes that and breaks
+   * something worse: the storm bills every tick, so a window wide enough to
+   * cover one tick made the tempest's own previous tag suppress its next one and
+   * half the storm damage stopped being announced at all. The tick counter is
+   * the only reading that means exactly "this moment".
+   *
+   * `mine` is the source about to be claimed: a witness may always re-name its
+   * own attrition, and may never overwrite somebody else's fresh blow.
+   */
+  private namedThisTickByOther(playerId: string, mine: DamageSource): boolean {
+    const tag = this.lastDamageSourceById.get(playerId);
+    if (!tag) return false;
+    return tag.tick === this.tickCount && tag.source !== mine;
   }
 
   /** Freshest damage tag for this pirate, or null once the evidence goes stale. */
@@ -4999,13 +5155,17 @@ export class Match {
     }
   }
 
-  /** Anyone who lost health since beginHealthWitness gets tagged by `resolve`. */
+  /** Anyone who lost health since beginHealthWitness gets tagged by `resolve`,
+   *  AND banked for a named on-screen notice (see noteEnvironmentalDamage). */
   private endHealthWitness(resolve: (player: Player) => DamageSource | null): void {
     for (const player of this.state.players) {
       const before = this.healthWitness.get(player.id);
       if (before === undefined || player.health >= before - 1e-6) continue;
       const source = resolve(player);
-      if (source) this.noteDamageSource(player.id, source);
+      if (source) {
+        this.noteDamageSource(player.id, source);
+        this.noteEnvironmentalDamage(player, source, before - player.health);
+      }
     }
   }
 
@@ -5017,15 +5177,17 @@ export class Match {
    * precisely (bullet vs cannon) in relayPendingCombatEvents, which runs first.
    */
   private resolvePhysicsDamageSource(player: Player): DamageSource | null {
-    if (this.recentDamageSource(player.id) && this.lastDamageSourceById.get(player.id)!.at === this.t) {
-      // Already named this tick by the combat-event relay — don't overwrite a
-      // cannonball with "fall" just because physics is what moved the number.
-      return null;
-    }
-    if (player.state === 'swimming' && (player.swimTimer ?? 0) > PLAYER.DROWN_TIME) return 'drowned';
-    const deck = player.onShipId ? this.shipsById.get(player.onShipId) : null;
-    if (deck?.onFire) return 'fire';
-    return 'fall';
+    const mine: DamageSource = player.state === 'swimming' && (player.swimTimer ?? 0) > PLAYER.DROWN_TIME
+      ? 'drowned'
+      : (player.onShipId ? this.shipsById.get(player.onShipId) : null)?.onFire
+        ? 'fire'
+        : 'fall';
+    // Already named this tick by the combat-event relay — don't overwrite a
+    // cannonball with "fall" just because physics is what moved the number. The
+    // reading has to be by tick INDEX: the old `at === this.t` equality silently
+    // missed any tag written on the tick boundary (see namedThisTickByOther).
+    if (this.namedThisTickByOther(player.id, mine)) return null;
+    return mine;
   }
 
   /**
@@ -5419,6 +5581,9 @@ export class Match {
       // A fresh death gets a fresh hold: never inherit a spent one (which would
       // skip the mate's rescue window) nor a stale start time.
       this.respawnHoldSince.delete(player.id);
+      // Whatever the weather still owed him died with him — a notice arriving on
+      // the blackout would name a wound he is already past.
+      this.clearEnvironmentalDamage(player.id);
       player.respawnTimer = PLAYER.RESPAWN_TIME;
       player.respawnProtectionTimer = 0;
       player.shipBoundaryGraceTimer = 0;
@@ -5935,6 +6100,8 @@ export class Match {
       remainingHealth?: number;
       weaponId?: string;
       blocked?: boolean;
+      /** Environmental blows have no attacker to name, so they name themselves. */
+      cause?: DamageSource;
     },
   ) {
     const client = this.clients.get(victimId);
