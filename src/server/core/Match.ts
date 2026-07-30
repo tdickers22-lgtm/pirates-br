@@ -5085,13 +5085,27 @@ export class Match {
       const due = entry.amount >= Match.ENV_NOTICE_IMMEDIATE_HP
         || this.t - entry.sentAt >= Match.ENV_NOTICE_INTERVAL;
       if (!due) continue;
+      // Rounded to a whole point, and never to zero: a notice that says "-0" is
+      // worse than no notice at all, so sub-point trickles keep banking — and
+      // they keep banking BY BEING LEFT ALONE.
+      //
+      // This used to delete the entry and set it straight back with a copy, which
+      // WEDGED THE SERVER. Re-inserting a key into a Map that is being iterated
+      // appends it after the cursor, so the loop reaches it again — and it is
+      // still due, because the copy carries the same `sentAt` — so it is deleted
+      // and re-appended again, forever. The tick never returned: 110 % CPU, a
+      // dead /health endpoint, a silent log, and every later client stuck on the
+      // loading screen because nothing could join. The `sample` was the whole
+      // story — Runtime_MapShrink rehashing under MapPrototypeDelete next to
+      // CloneObjectIC_Slow, which is exactly `delete` + `{ ...entry }` + `set`.
+      //
+      // Any storm chip under about half a point per second lands here, so this
+      // was reachable from the edge of the ring in an ordinary match. A plain
+      // `continue` banks it just as well: the entry keeps its old `sentAt`, so it
+      // ships on the first tick it is worth a whole point. Deleting WITHOUT
+      // re-inserting (below, and for the departed above) is safe.
+      if (Math.round(entry.amount) < 1) continue;
       this.envDamage.delete(playerId);
-      // Rounded to a whole point, and never to zero: a notice that says "-0"
-      // is worse than no notice at all, so sub-point trickles keep banking.
-      if (Math.round(entry.amount) < 1) {
-        this.envDamage.set(playerId, { ...entry });
-        continue;
-      }
       this.notifyIncomingPlayerHit(playerId, {
         attackerId: null,
         damage: entry.amount,

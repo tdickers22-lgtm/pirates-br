@@ -243,6 +243,57 @@ console.log('\nA shark bite lands a number and a bearing');
     JSON.stringify(sharkHits[0]?.payload.sourcePosition));
 }
 
+// ══ 3b. A trickle too small to print does not wedge the tick ════════════════
+//
+// THE ONE THAT TOOK THE SERVER DOWN. A bank that is due but rounds below a whole
+// point used to be deleted and set straight back with a copy — which, inside a
+// `for…of` over that same Map, appends the key after the cursor, so the loop
+// reaches it again, and the copy carries the same `sentAt` so it is still due,
+// so it is deleted and re-appended again. Forever. The tick never returned: the
+// dev server sat at 110 % CPU with a dead /health and every later client stuck
+// on the loading screen, and any storm chip under about half a point a second
+// could reach it.
+//
+// IF THIS REGRESSES, THIS SECTION HANGS rather than printing a failure — a tick
+// that does not return cannot be asserted about from inside itself. That is the
+// signal. The assertions below pin the two observable halves: nothing ships while
+// the bank is under a point, and the identical entry OBJECT survives the flush
+// (a re-insert would hand back a copy).
+console.log('\nA trickle too small to print keeps banking, and the tick returns');
+{
+  const { match, player, ship, hits } = withCastaway('sub-point-trickle');
+  closeTheRing(match, 900);
+  ship.anchored = true;
+  player.onShipId = null;
+  player.position.x = 0; player.position.z = 300; player.position.y = 0.5;
+  player.state = 'alive';
+  player.respawnProtectionTimer = 0;
+  banishSharks(match);
+  run(match, STORM_RESPAWN_GRACE_SECONDS + 1, () => banishSharks(match));
+  const before = hits().length;
+  // A third of a point of rock, and then time enough to be long overdue.
+  match.noteEnvironmentalDamage(player, 'fall', 0.34);
+  const banked = match.envDamage.get(player.id);
+  run(match, 3, () => banishSharks(match));
+  const shipped = hits().slice(before).filter((m) => m.payload.cause === 'fall');
+  expect('a third of a point is never printed as "-0"',
+    shipped.length === 0,
+    `${shipped.length} notice(s): ${shipped.map((m) => m.payload.damage.toFixed(2)).join(' ')}`);
+  expect('it is still banked, and it is the SAME entry — never deleted and re-added',
+    match.envDamage.get(player.id) === banked,
+    match.envDamage.has(player.id) ? 'a copy came back' : 'the bank was dropped');
+  // Cross the whole point and it goes out at once, carrying the trickle with it.
+  match.noteEnvironmentalDamage(player, 'fall', 0.9);
+  run(match, 1, () => banishSharks(match));
+  const late = hits().slice(before).filter((m) => m.payload.cause === 'fall');
+  expect('and the moment it is worth a point it ships, trickle included',
+    late.length === 1 && late[0].payload.damage > 1.2,
+    `${late.length} notice(s): ${late.map((m) => m.payload.damage.toFixed(2)).join(' ')}`);
+  expect('and the bank is emptied by shipping it',
+    !match.envDamage.has(player.id),
+    'the entry outlived its own notice');
+}
+
 // ══ 4. Combat is announced exactly once ══════════════════════════════════════
 console.log('\nA cutlass is not billed twice');
 {
