@@ -3135,6 +3135,12 @@ export class Game {
     // World-space rain runs every frame (cheap buffer update; the old canvas
     // overlay throttle is gone with the overlay).
     this.stormRainIntensity = this.debugStormDemo ? 0.9 : this.envFx.computeStormRainIntensity();
+    // The sky over the rain is driven by the rain itself, not only by the storm's
+    // weather level: a replicated squall reaching inboard of the ring runs the
+    // weather number near 0.35, and 0.35 of the sky's storm response is still
+    // open blue with white cumulus in it. ?stormdemo was the only path that ever
+    // closed the cloud deck. Now every drop the client draws carries its sky.
+    this.renderer.setOvercast(this.stormRainIntensity);
     this.envFx.updateStormRain3D(dt, this.stormRainIntensity);
     this.envFx.updateStormLightningFlash(dt);
     const stormW = this.stormWeatherIntensity;

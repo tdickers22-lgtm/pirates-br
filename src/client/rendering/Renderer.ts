@@ -59,6 +59,17 @@ const SKY_FRAG = /* glsl */`
   varying vec3 v_dir;
   uniform vec3 u_sunDir;
   uniform float u_stormIntensity;
+  // ── RAIN OUT OF A BLUE SKY ─────────────────────────────────────────────────
+  // u_stormIntensity is the storm's WEATHER level, and the squall reaches inboard
+  // of the ring so drops fall ~150 m ahead of the wall. That approach runs at a
+  // weather level near 0.34-0.48, and this shader's response to 0.34 is a faint
+  // grey wash over open blue: a full downpour was falling through white cumulus,
+  // orange dusk horizons and visible stars. The audit's most dream-logic frame.
+  //
+  // So the CLOUD DECK gets its own number, driven from the rain volume the client
+  // is actually drawing (Game -> setOvercast). Any rain you can see closes the
+  // deck overhead; the full storm slate is still reserved for the storm itself.
+  uniform float u_overcast;
   uniform float u_underwaterIntensity;
   // Lightning: 0..1 strike envelope + the world direction toward the bolt, so
   // the cloud deck lights from inside and the flash has an azimuth.
@@ -139,34 +150,42 @@ const SKY_FRAG = /* glsl */`
     vec3 nightSky = mix(nightMid, nightZenith, 1.0 - 0.45 * exp(-up * 2.45));
     nightSky = mix(nightHorizon, nightSky, rim);
 
+    // The weather the CLOUD DECK answers to: whichever is heavier, the storm
+    // level or the rain that is actually falling. Rain 0.30 is a legible
+    // downpour, so that is where the deck is fully closed.
+    float oc = max(u_stormIntensity, smoothstep(0.03, 0.30, u_overcast));
+
     vec3 sky = daySky * u_dayAmount + twilightSky * u_twilightAmount + nightSky * u_nightAmount;
     float antiSun = pow(max(0.0, dot(d, normalize(vec3(-u_sunDir.x, 0.18, -u_sunDir.z)))), 2.2);
-    sky = mix(sky, mix(vec3(0.28, 0.22, 0.62), vec3(0.08, 0.13, 0.24), u_nightAmount), antiSun * 0.18 * (1.0 - u_stormIntensity));
+    sky = mix(sky, mix(vec3(0.28, 0.22, 0.62), vec3(0.08, 0.13, 0.24), u_nightAmount), antiSun * 0.18 * (1.0 - oc));
 
     // Storm layer: desaturate, then blend to a dark brooding overcast
     float grey = dot(sky, vec3(0.299, 0.587, 0.114));
-    sky = mix(sky, vec3(grey), u_stormIntensity * 0.4);
+    sky = mix(sky, vec3(grey), oc * 0.4);
     vec3 sZen = vec3(0.12, 0.13, 0.17);
     vec3 sMid = vec3(0.26, 0.28, 0.32);
     vec3 sHor = vec3(0.45, 0.46, 0.50);
     vec3 stormSky = mix(sHor, sMid, smoothstep(0.0, 0.32, h));
     stormSky = mix(stormSky, sZen, smoothstep(0.18, 0.78, h));
-    sky = mix(sky, stormSky, u_stormIntensity);
+    // The slate itself is the STORM's; rain under a fair-weather sky gets most of
+    // the way there so the light overhead matches the water coming out of it,
+    // without repainting a clear afternoon the moment a squall clips the frame.
+    sky = mix(sky, stormSky, max(u_stormIntensity, oc * 0.80));
 
     // Stylized drifting 2-octave fbm cloud layer
     float skyUp = smoothstep(0.015, 0.14, d.y);
     vec2 cuv = d.xz / (abs(d.y) * 0.85 + 0.22);
     vec2 drift = vec2(u_time * 0.010, u_time * 0.0042);
     float cf = fbm2(cuv * 1.15 + drift);
-    float coverage = mix(0.42, 0.24, u_stormIntensity);
-    float cloud = smoothstep(coverage, coverage + mix(0.28, 0.40, u_stormIntensity), cf) * skyUp;
+    float coverage = mix(0.42, 0.18, oc);
+    float cloud = smoothstep(coverage, coverage + mix(0.28, 0.40, oc), cf) * skyUp;
     float cfLit = fbm2(cuv * 1.15 + drift + u_sunDir.xz * 0.16);
     float litEdge = clamp((cf - cfLit) * 2.6 + 0.55, 0.0, 1.0);
     vec3 cloudLit = vec3(1.00, 0.99, 0.96) * u_dayAmount + vec3(1.00, 0.62, 0.40) * u_twilightAmount + vec3(0.30, 0.35, 0.47) * u_nightAmount;
     vec3 cloudShade = vec3(0.62, 0.68, 0.78) * u_dayAmount + vec3(0.42, 0.33, 0.46) * u_twilightAmount + vec3(0.12, 0.15, 0.22) * u_nightAmount;
-    cloudLit = mix(cloudLit, vec3(0.35, 0.37, 0.41), u_stormIntensity);
-    cloudShade = mix(cloudShade, vec3(0.10, 0.11, 0.13), u_stormIntensity);
-    float cloudAlpha = cloud * mix(0.85, 0.97, u_stormIntensity);
+    cloudLit = mix(cloudLit, vec3(0.35, 0.37, 0.41), oc);
+    cloudShade = mix(cloudShade, vec3(0.10, 0.11, 0.13), oc);
+    float cloudAlpha = cloud * mix(0.85, 0.97, oc);
     sky = mix(sky, mix(cloudShade, cloudLit, litEdge), cloudAlpha);
 
     // ── Lightning illumination: the strike lights the CLOUD DECK from inside
@@ -188,7 +207,7 @@ const SKY_FRAG = /* glsl */`
     // Storm scud: fast low dark wisps racing along the horizon band
     float scud = smoothstep(0.48, 0.92, fbm2(cuv * 2.4 + vec2(u_time * 0.055, u_time * 0.020) + 31.7));
     float scudBand = smoothstep(-0.02, 0.06, d.y) * (1.0 - smoothstep(0.16, 0.52, d.y));
-    sky = mix(sky, vec3(0.055, 0.060, 0.075), scud * scudBand * u_stormIntensity * 0.85);
+    sky = mix(sky, vec3(0.055, 0.060, 0.075), scud * scudBand * oc * 0.85);
 
     // Sun disk + glow corona (heavily muted in storm)
     float sunDot  = dot(d, u_sunDir);
@@ -196,12 +215,12 @@ const SKY_FRAG = /* glsl */`
     float sunDisk = smoothstep(0.9994, 0.9999, sunDot);
     float corona  = pow(max(0.0, sunDot), 9.0);
     float scatter = pow(max(0.0, sunDot), 3.2);
-    float sunVis = mix(1.0, 0.06, u_stormIntensity) * sunAbove;
+    float sunVis = mix(1.0, 0.06, oc) * sunAbove;
     vec3 scatterTint = mix(vec3(1.0, 0.78, 0.35), vec3(1.0, 0.32, 0.22), u_twilightAmount);
     sky += scatterTint * scatter * 0.22 * (1.15 - h) * sunVis * (1.0 - cloudAlpha * 0.6);
     sky += vec3(0.62, 0.22, 0.72) * pow(max(0.0, sunDot), 1.8) * 0.08 * sunVis * u_twilightAmount;
     float moonDot = dot(d, -u_sunDir);
-    float moonDisk = smoothstep(0.99972, 0.99994, moonDot) * u_nightAmount * (1.0 - u_stormIntensity * 0.7);
+    float moonDisk = smoothstep(0.99972, 0.99994, moonDot) * u_nightAmount * (1.0 - oc * 0.7);
 
     // Hash-grid stars, fading in with night and hidden by clouds/storm
     float starField = 0.0;
@@ -213,13 +232,20 @@ const SKY_FRAG = /* glsl */`
       float twinkle = 0.72 + 0.28 * sin(u_time * (1.2 + fract(sh * 57.0) * 2.4) + sh * 41.0);
       starField = smoothstep(0.30, 0.02, distToStar) * (0.3 + 0.7 * fract(sh * 97.0)) * twinkle;
     }
-    float starVis = u_nightAmount * (1.0 - u_stormIntensity) * (1.0 - cloudAlpha) * smoothstep(0.02, 0.24, d.y);
+    float starVis = u_nightAmount * (1.0 - oc) * (1.0 - cloudAlpha) * smoothstep(0.02, 0.24, d.y);
+    // The starfield is EMISSIVE and added in LINEAR, where the noon zenith sits
+    // near 0.015 — so a starVis of two percent is not "almost off", it is a
+    // bloomed white speck on a blue afternoon, which is what the audit found at
+    // setDayNightOverride(854). Daylight takes the field to a HARD zero, and the
+    // floor under it goes too: an asymptote is not the same thing as out.
+    starVis *= 1.0 - smoothstep(0.08, 0.34, u_dayAmount);
+    starVis = max(0.0, starVis - 0.02) * 1.0204;
     sky += vec3(0.62, 0.70, 0.86) * starField * starVis * 0.55;
 
     // Horizon haze band
-    float haze = pow(1.0 - abs(d.y), 7.0) * 0.38 * mix(1.0, 0.35, u_stormIntensity);
+    float haze = pow(1.0 - abs(d.y), 7.0) * 0.38 * mix(1.0, 0.35, oc);
     vec3 hazeColor = dayHorizon * u_dayAmount + twilightHorizon * u_twilightAmount + nightHorizon * u_nightAmount;
-    vec3 hazeMix = mix(hazeColor, vec3(0.50, 0.53, 0.57), u_stormIntensity);
+    vec3 hazeMix = mix(hazeColor, vec3(0.50, 0.53, 0.57), oc);
     sky = mix(sky, hazeMix, haze);
 
     // ── Below the eye-level horizon the dome IS the far sea ──────────────
@@ -442,6 +468,7 @@ export class Renderer {
       uniforms: {
         u_sunDir: { value: this.sunDir.clone() },
         u_stormIntensity: { value: 0 },
+        u_overcast: { value: 0 },
         u_underwaterIntensity: { value: 0 },
         u_lightningFlash: { value: 0 },
         u_lightningDir: { value: new THREE.Vector3(0, 0, 1) },
@@ -672,6 +699,15 @@ export class Renderer {
     this.rainMist = next;
     // Force updateStormWeather's early-out to re-derive the fog next call.
     this.lastStormWeather = -1;
+  }
+
+  /** The rain volume the client is actually DRAWING (0 = dry, 1 = downpour), fed
+   *  straight to the cloud deck so the sky over a squall always agrees with the
+   *  water falling out of it. See the note over u_overcast in SKY_FRAG: the
+   *  storm's own weather level runs at ~0.35 where the rain reaches inboard of
+   *  the ring, and 0.35 of this shader's storm response is still open blue. */
+  setOvercast(rain01: number) {
+    this.skyMaterial.uniforms.u_overcast.value = clamp(rain01, 0, 1);
   }
 
   /** Strike lighting for the sky dome / cloud deck. `strength` is the bolt's
