@@ -4,7 +4,7 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import * as THREE from 'three';
-import { ECONOMY, KILL_STREAK_LADDER, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
+import { ECONOMY, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
 import { countOpenHoles } from '../../shared/interactions.js';
@@ -280,18 +280,32 @@ export class HudController {
     this.respawnServerTimer = -1;
   }
 
+  /** performance.now() when the held copy first went up for this death; 0 = not held. */
+  private respawnHeldSince = 0;
+
   /**
    * True when the server has deliberately PAUSED this respawn: it holds the timer
    * while the home ship is outside the storm ring (Match.updateRespawns). Same
    * geometry as the server's isShipInStormSafeZone, so the HUD says "held" for
    * the same reason the timer is not moving instead of pretending to count.
+   *
+   * IT MUST NEVER CLAIM A HOLD THE SERVER IS NOT KEEPING. The old reading was
+   * pure geometry, so it kept promising "the count resumes when your hull is back
+   * inside the ring" in the FINAL storm — a ring 12 m across with no berth and no
+   * clear water in it, where the hull can never come inside and the server does
+   * not hold at all. An auditor read that sentence on a grey screen for four
+   * minutes. The two states the server refuses to hold in (terminal ring,
+   * foundering hull) now read as what they are: a real count.
    */
   private isRespawnHeld(player: Player): boolean {
     const home = this.view.shipsById.get(player.shipId ?? '');
     if (!home) return false;
-    if (!home.alive || home.sinking) return true;
+    // A hull already going down cannot be sailed back — the server stops holding.
+    if (!home.alive || home.sinking) return false;
     const storm = this.view.state?.storm;
     if (!storm) return false;
+    // Terminal ring: there is no "inside" left to sail to, so there is no hold.
+    if (storm.phase >= STORM_PHASES.length) return false;
     return dist2D(home.position.x, home.position.z, storm.centerX, storm.centerZ) > storm.safeRadius - 5;
   }
 
@@ -306,16 +320,33 @@ export class HudController {
         : Math.min(this.respawnDeadlineMs, candidate);
     }
 
-    const held = this.isRespawnHeld(player);
+    // The hold is CAPPED on the server (RESPAWN_HOLD_MAX_SECONDS). Once that
+    // window is spent the count is running whatever the geometry still says, so
+    // the copy stops claiming a pause it no longer has.
+    const geometryHeld = this.isRespawnHeld(player);
+    if (!geometryHeld) {
+      this.respawnHeldSince = 0;
+    } else if (this.respawnHeldSince === 0) {
+      this.respawnHeldSince = now;
+    }
+    const heldFor = this.respawnHeldSince === 0 ? 0 : (now - this.respawnHeldSince) / 1000;
+    const held = geometryHeld && heldFor < RESPAWN_HOLD_MAX_SECONDS + 1.5;
+    const holdLeft = Math.max(1, Math.ceil(RESPAWN_HOLD_MAX_SECONDS - heldFor));
     // THE BLACKOUT NAMED THE WAIT AND NEVER THE CAUSE. You went from playing to
     // a dark screen counting down, with no line anywhere saying what had just
     // killed you — the one thing a dead player wants. The server tags the blow
     // (kill_event.cause) for respawns exactly as it does for eliminations.
     const blame = HudController.DEATH_COPY[this.resolveDeathCause()].blame;
     if (held) {
+      // THE COPY MAY ONLY PROMISE WHAT THE WORLD CAN KEEP. It used to read "the
+      // count resumes when your hull is back inside the ring" — a condition that
+      // in the final storm can never occur, which is how an auditor came to read
+      // it for four minutes. What is actually guaranteed is the CAP, so that is
+      // what it says: a number that is ticking down on screen, whatever happens
+      // to the ship. Sailing her in still lifts the hold early.
       return {
         prompt: 'Respawn held — your ship is in the storm',
-        label: `${this.capitalise(blame)} · the count resumes when your hull is back inside the ring`,
+        label: `${this.capitalise(blame)} · the count starts in ${holdLeft}s, sooner if she makes the ring`,
       };
     }
     const remaining = Math.ceil((this.respawnDeadlineMs - now) / 1000);

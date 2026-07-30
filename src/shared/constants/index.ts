@@ -645,6 +645,74 @@ export const STORM_DOCK_COVER_MARGIN = 45;
  *  rescue, short enough that a solo never reads it as a hang. */
 export const RESPAWN_HOLD_GRACE_SECONDS = 10;
 
+/**
+ * THE HARD CEILING ON A HELD RESPAWN. Nothing may hold a pirate on the blackout
+ * longer than this, in ANY reachable state.
+ *
+ * The grace above was a condition, not a cap: it only converted the hold when
+ * the tide could find somewhere to put the derelict. In the FINAL storm it never
+ * could — the last ring is 12 m across and the endgame circle converges on Old
+ * Maw Caldera, so pickSafeSpawnDock (which needs radius − 50) and
+ * findOpenWaterInsideRing (which needs a hull's length of clear water) both
+ * return nothing, forever. A fresh-eyes audit sat in 'respawning' for four
+ * minutes reading "the count resumes when your hull is back inside the ring"
+ * during a storm with no inside, and died of it.
+ *
+ * So the cap is absolute: past it the respawn ALWAYS converts to a real
+ * countdown, and if the hull cannot be brought to shelter the pirate is put
+ * ashore inside the ring without her (getSafeRespawnPlan).
+ */
+export const RESPAWN_HOLD_MAX_SECONDS = 10;
+
+/**
+ * Storm immunity granted at every respawn.
+ *
+ * The death carousel: the ring crossed a learner's spawn dock, killed him six
+ * seconds after it arrived, respawned him on the same deck inside the same
+ * weather, and killed him again — three times in three minutes. A respawn that
+ * lands inside the tempest has to hand back enough time to make sail and get
+ * out, and the HUD has to show that clock (HudController's storm-grace chip)
+ * so the seconds read as a reprieve rather than a mystery.
+ *
+ * This is NOT combat immunity (that stays PLAYER.RESPAWN_PROTECTION_TIME): the
+ * weather alone stands down, so it can never be used to board a hull for free.
+ */
+export const STORM_RESPAWN_GRACE_SECONDS = 15;
+
+/**
+ * The storm blows a hull HOME.
+ *
+ * Measured best-trim hull speed in the audit was 1.26 u/s against a ring that
+ * displaces 300–500 m every two minutes: the weather outran the boat and the
+ * only counterplay was to already be inside. Outside the wall the local wind now
+ * turns to a gale out of the storm and drives toward shelter — the canvas fills
+ * (visible on the yard), a hull pointed inward runs, and one pointed away claws.
+ * Ramps from nothing AT the ring to the full boost this far outside it, as a
+ * fraction of the current safe radius.
+ */
+export const STORM_TAILWIND = {
+  /** Extra wind strength at full ramp (1.0 = double the ordinary breeze). */
+  STRENGTH_BOOST: 0.55,
+  /** Outside distance, as a fraction of safeRadius, that reaches full boost. */
+  FULL_AT_RADIUS_FRACTION: 0.18,
+  /** How completely the gale overrides the prevailing wind direction (0..1). */
+  DIRECTION_AUTHORITY: 0.85,
+} as const;
+
+/** Trim handed to a crew the first time they get under way. The default yard sits
+ *  square, which on any reach catches ~0% of the wind: PhysicsSystem's speed
+ *  floor (0.16) is all a fresh captain ever saw, and "hold W to get under way"
+ *  plateaued at 0.3 u/s and decayed. Bots have auto-trimmed since day one. */
+export const FIRST_SAIL_ASSIST = {
+  /** Fraction of the wind-optimal yard angle set when the anchor comes up. */
+  TRIM_FRACTION: 0.92,
+  /** Canvas the assist makes sure is out (only ever raises, never shortens). */
+  MIN_SAIL_HEIGHT: 0.5,
+  /** Catch below this, held for COACH_AFTER_SECONDS at the wheel, calls the coach. */
+  COACH_CATCH: 0.2,
+  COACH_AFTER_SECONDS: 4,
+} as const;
+
 // ── Loot tables ──────────────────────────────────────────────
 export const CHEST_LOOT_TABLE = [
   { item: 'gold' as const,           weight: 28, minQty: 50,  maxQty: 200 },

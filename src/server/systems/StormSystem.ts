@@ -13,6 +13,10 @@ interface StormDamageHooks {
    *  berth during the opening storm phases. PhysicsSystem owns the answer so
    *  every environmental source (seabed, reef, tempest) agrees on shelter. */
   isSheltered?: (shipId: string) => boolean;
+  /** True while a pirate is inside his post-respawn storm reprieve. Match owns
+   *  the clock (see grantStormRespawnGrace) — the tempest just asks. Without it
+   *  a respawn the ring had already crossed died again in six seconds, forever. */
+  hasStormGrace?: (playerId: string) => boolean;
 }
 
 /** Accumulated storm damage (per outside-ring second, phase-scaled) that stoves
@@ -229,6 +233,7 @@ export class StormSystem {
         || player.state === 'respawning'
         || player.state === 'downed'
         || player.respawnProtectionTimer > 0
+        || hooks.hasStormGrace?.(player.id)
       ) continue;
       const d = dist2D(player.position.x, player.position.z, storm.centerX, storm.centerZ);
       if (d > storm.safeRadius) {

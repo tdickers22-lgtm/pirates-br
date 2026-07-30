@@ -30,6 +30,7 @@ import {
   ECONOMY,
   PLAYER,
   RESPAWN_HOLD_GRACE_SECONDS,
+  RESPAWN_HOLD_MAX_SECONDS,
   SERVER_TICK_MS,
   STORM_ARC_SECONDS,
   STORM_DOCK_COVER_MARGIN,
@@ -241,13 +242,77 @@ console.log('\nA marooned solo gets a countdown, not a black screen');
   dead.respawnTimer = PLAYER.RESPAWN_TIME;
 
   const before = { x: ship.position.x, z: ship.position.z };
-  run(match, RESPAWN_HOLD_GRACE_SECONDS + 6);
-  expect('with a living mate aboard, the hold KEEPS holding (it is honest there)',
+  run(match, RESPAWN_HOLD_GRACE_SECONDS - 3);
+  expect('with a living mate aboard the hold holds — the rescue is his to make',
     dead.state === 'respawning' && Math.abs(dead.respawnTimer - PLAYER.RESPAWN_TIME) < 0.001,
+    `state=${dead.state} timer=${dead.respawnTimer.toFixed(2)}`);
+  // …BUT NOT FOREVER. A mate at the wheel is a reason to wait, not a licence to
+  // hold a dead man on a grey screen: a crewmate who is losing his own fight with
+  // the ring can hold his mate's respawn indefinitely, which is the same hang
+  // wearing a friendlier hat. RESPAWN_HOLD_MAX_SECONDS caps every hold there is.
+  run(match, 9);
+  expect('past the cap the count is REAL even with a mate still aboard',
+    dead.state === 'respawning' && dead.respawnTimer < PLAYER.RESPAWN_TIME && dead.respawnTimer > 0,
     `state=${dead.state} timer=${dead.respawnTimer.toFixed(2)}`);
   expect('and nobody teleports a hull out from under a pirate who is standing on it',
     Math.abs(ship.position.x - before.x) < 60 && Math.abs(ship.position.z - before.z) < 60,
     `moved to (${ship.position.x.toFixed(0)}, ${ship.position.z.toFixed(0)})`);
+  run(match, PLAYER.RESPAWN_TIME + 2);
+  expect('he comes back INSIDE the ring — never onto a deck the storm is eating',
+    dead.state === 'alive'
+      && dist2D(dead.position.x, dead.position.z, match.state.storm.centerX, match.state.storm.centerZ)
+        <= match.state.storm.safeRadius,
+    `state=${dead.state} d=${dist2D(dead.position.x, dead.position.z, match.state.storm.centerX, match.state.storm.centerZ).toFixed(0)} radius=${match.state.storm.safeRadius}`);
+}
+
+// ── The FINAL storm never holds: there is no "inside" to promise ────────────
+// The audit's four-minute grey screen. The terminal ring is 12 m across and the
+// endgame circle converges on the caldera at the world origin, so the tide has
+// nowhere to tow a derelict and pickSafeSpawnDock (radius − 50) can never
+// return a berth. The hold used to wait on that condition forever.
+{
+  for (const radius of [12, 40, 95]) {
+    const match = liveMatch(`final-storm-${radius}`);
+    const joined = match.addHumanClient(makeFakeWs(), 'Castaway');
+    const player = match.state.players.find((p) => p.id === joined.playerId);
+    const ship = match.state.ships.find((s) => s.id === joined.shipId);
+    const storm = closeTheRing(match, radius);
+    storm.phase = STORM_PHASES.length; // terminal: the ring holds where it is
+    ship.position.x = storm.centerX;
+    ship.position.z = storm.centerZ + 420;
+    ship.anchored = true;
+    player.state = 'respawning';
+    player.health = 0;
+    player.respawnTimer = PLAYER.RESPAWN_TIME;
+    player.onShipId = null;
+
+    let heldTicks = 0;
+    let resolvedAt = null;
+    const steps = Math.ceil((PLAYER.RESPAWN_TIME + 30) / DT);
+    let last = player.respawnTimer;
+    for (let i = 0; i < steps; i++) {
+      match.tick();
+      // Keep the derelict afloat: this asserts the RESPAWN path, not how fast the
+      // tempest can stove in an abandoned hull.
+      ship.holes = [];
+      ship.waterLevel = 0;
+      ship.sinking = false;
+      if (player.state === 'respawning' && Math.abs(player.respawnTimer - last) < 1e-9) heldTicks += 1;
+      last = player.respawnTimer;
+      if (player.state === 'alive') { resolvedAt = match.t; break; }
+      if (player.state === 'eliminated') break;
+    }
+    expect(`r=${radius}: the final storm never holds the count for more than the cap`,
+      heldTicks * DT <= RESPAWN_HOLD_MAX_SECONDS,
+      `held for ${(heldTicks * DT).toFixed(1)}s (cap ${RESPAWN_HOLD_MAX_SECONDS}s)`);
+    expect(`r=${radius}: he comes back rather than waiting out the match`,
+      player.state === 'alive' && resolvedAt !== null && resolvedAt <= PLAYER.RESPAWN_TIME + RESPAWN_HOLD_MAX_SECONDS + 2,
+      `state=${player.state} at t=${resolvedAt?.toFixed(1)}`);
+    expect(`r=${radius}: and he comes back INSIDE the wall, not on the doomed hull`,
+      player.state === 'alive'
+        && dist2D(player.position.x, player.position.z, storm.centerX, storm.centerZ) <= storm.safeRadius,
+      `d=${dist2D(player.position.x, player.position.z, storm.centerX, storm.centerZ).toFixed(1)} radius=${radius} onShip=${player.onShipId}`);
+  }
 }
 
 // ══ 4. Skeletons earn nothing and never rank ════════════════════════════════

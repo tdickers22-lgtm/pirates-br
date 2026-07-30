@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -362,10 +362,21 @@ export class Match {
   private matchStatDeltas = new Map<string, PlayerMatchDeltas>();
   /** Order of elimination — earliest first. Used for placement on match end. */
   private eliminationOrder: string[] = [];
-  /** Sim time each held respawn started holding (home hull outside the ring).
-   *  Cleared the moment the hold lifts — a hold that keeps starting over is a
-   *  crew sailing in and out of the wall, not a marooned solo. */
-  private respawnHoldSince = new Map<string, number>();
+  /** Per-death record of a held respawn: when the hold began, and whether it has
+   *  already been resolved (converted to a real countdown).
+   *
+   *  `resolved` is load-bearing. Clearing the record when the hold lifted let a
+   *  fresh hold start on the very next tick — the count then advanced one tick
+   *  per cap window and a "fixed" blackout still ran for minutes. One hold per
+   *  death, one credit per hold; the record dies with the death. */
+  private respawnHoldSince = new Map<string, { since: number; resolved: boolean }>();
+  /** Sim time each pirate's post-respawn STORM reprieve expires. Not replicated:
+   *  the client is told the length once on `player_spawned` and runs its own chip
+   *  off a local clock, so the reprieve costs the snapshot nothing.
+   *
+   *  Weather only. Combat immunity stays respawnProtectionTimer — fifteen seconds
+   *  of untouchable would be a boarding tool, not a mercy. */
+  private stormGraceUntil = new Map<string, number>();
 
   // ── Hold cargo / bounty / sunken spoils (see shared/cargo.ts) ──────────
   /** Monotonic source for the short spoil ids that ride the wire ('sp7'). */
@@ -1401,6 +1412,9 @@ export class Match {
       // Physics already worked out who is sheltered this tick (it runs first) —
       // one answer for seabed, reef and tempest alike.
       isSheltered: (shipId) => this.physics.isEnvironmentallySheltered(shipId),
+      // The post-respawn reprieve: a pirate who just came back inside the wall
+      // gets STORM_RESPAWN_GRACE_SECONDS to make sail instead of a second death.
+      hasStormGrace: (playerId) => this.hasStormGrace(playerId),
     });
     // Nothing else in that call can take health off a pirate, so every loss
     // across it is the tempest — including the one that swims back inside the
@@ -5402,6 +5416,9 @@ export class Match {
     if (canRespawn) {
       player.state = 'respawning';
       player.health = 0;
+      // A fresh death gets a fresh hold: never inherit a spent one (which would
+      // skip the mate's rescue window) nor a stale start time.
+      this.respawnHoldSince.delete(player.id);
       player.respawnTimer = PLAYER.RESPAWN_TIME;
       player.respawnProtectionTimer = 0;
       player.shipBoundaryGraceTimer = 0;
@@ -6677,36 +6694,67 @@ export class Match {
         // The storm's hull punctures sink the ship (handled above via the
         // homeShip-gone branch) or the crew sails it back to safety.
         //
-        // THAT IS ONLY HONEST WHILE SOMEONE CAN STILL SAIL HER. With no living
-        // crewmate the hold is a promise nobody is coming to keep: a solo sat
-        // on a near-black screen reading "Respawn held" for the two or three
-        // minutes it took an empty, anchored hull to founder, and then died of
-        // it. After a short grace the tide takes over — see towDerelictToSafety.
-        const heldSince = this.respawnHoldSince.get(player.id) ?? this.t;
-        this.respawnHoldSince.set(player.id, heldSince);
-        if (
-          this.t - heldSince >= RESPAWN_HOLD_GRACE_SECONDS
-          && !this.hasSailorForHull(homeShip, player)
-          && this.towDerelictToSafety(homeShip)
-        ) {
-          // A REAL countdown from here: the hull is inside the ring, so the
-          // next tick falls through to the ordinary respawn clock and the HUD
-          // counts down instead of holding.
-          this.respawnHoldSince.delete(player.id);
-          player.respawnTimer = PLAYER.RESPAWN_TIME;
+        // THAT IS ONLY HONEST WHILE SOMEONE CAN STILL SAIL HER, AND ONLY FOR AS
+        // LONG AS THE CAP ALLOWS. With no living crewmate the hold is a promise
+        // nobody is coming to keep; in the final storm it is a promise the world
+        // cannot keep at all (a 12 m ring has no berth and no clear water, so the
+        // tide had nowhere to tow her and the hold ran for minutes on end). Both
+        // readings are answered by the same rule: the hold may last no longer
+        // than RESPAWN_HOLD_MAX_SECONDS, and when it lifts the count is REAL —
+        // aboard her if the tide could bring her in, ashore inside the ring
+        // without her if it could not.
+        let hold = this.respawnHoldSince.get(player.id);
+        if (!hold) {
+          hold = { since: this.t, resolved: false };
+          this.respawnHoldSince.set(player.id, hold);
         }
-        continue;
+        const heldFor = this.t - hold.since;
+        if (heldFor >= RESPAWN_HOLD_GRACE_SECONDS && !this.hasSailorForHull(homeShip, player)) {
+          // The tide takes an abandoned hull in — when there is anywhere to take
+          // her. This runs whether or not the respawn is still being held: a
+          // derelict left outside the wall founders, and THAT eliminates her
+          // whole crew. Failure is no longer terminal; the cap resolves anyway.
+          this.towDerelictToSafety(homeShip);
+        }
+        if (!hold.resolved) {
+          if (
+            this.canHoldRespawnFor(homeShip)
+            && heldFor < RESPAWN_HOLD_MAX_SECONDS
+            && !this.isShipInStormSafeZone(homeShip)
+          ) {
+            continue;
+          }
+          // Past the cap, or never holdable at all (terminal storm, foundering
+          // hull): the countdown becomes real. getRespawnPlan puts him somewhere
+          // inside the CURRENT safe radius whatever became of his ship.
+          //
+          // THE WAIT ALREADY SERVED COUNTS — credited exactly once, on the tick
+          // the hold lifts. Re-crediting every tick pinned the timer just above
+          // its floor forever: a second, quieter version of the same hang.
+          hold.resolved = true;
+          player.respawnTimer = Math.max(
+            1.5,
+            Math.min(player.respawnTimer, PLAYER.RESPAWN_TIME - heldFor),
+          );
+        }
       }
-      this.respawnHoldSince.delete(player.id);
 
       player.respawnTimer -= dt;
       if (player.respawnTimer > 0) continue;
 
-      const respawnPlan = this.getRespawnPlan(homeShip);
+      const respawnPlan = this.getRespawnPlan(homeShip, player);
+      // The berth moves the whole hull, so her deck point can only be read AFTER
+      // she is alongside — reading it first put a respawning pirate at the spot
+      // the ship used to be lying.
+      if (respawnPlan.dock) {
+        this.parkShipAtDock(homeShip, respawnPlan.dock);
+      }
       player.state = 'alive';
       player.health = PLAYER.RESPAWN_HEALTH;
       player.onShipId = respawnPlan.onShipId;
-      player.position = respawnPlan.position;
+      player.position = respawnPlan.dock
+        ? this.getRespawnDeckPosition(homeShip)
+        : respawnPlan.position;
       player.velocity = { x: 0, y: 0, z: 0 };
       player.knockbackVelocity = { x: 0, y: 0, z: 0 };
       this.clearStationFlags(player);
@@ -6725,13 +6773,23 @@ export class Match {
       player.cutlassCharge = 0;
       player.respawnProtectionTimer = respawnPlan.protectionTime;
       player.shipBoundaryGraceTimer = 0;
-      if (respawnPlan.dock) {
-        this.parkShipAtDock(homeShip, respawnPlan.dock);
-      }
+      this.respawnHoldSince.delete(player.id);
       if (!homeShip.crewIds.includes(player.id)) {
         homeShip.crewIds.push(player.id);
       }
-      this.broadcast({ type: 'player_spawned', ts: Date.now(), payload: { playerId: player.id, shipId: homeShip.id } });
+      this.grantStormRespawnGrace(player);
+      this.broadcast({
+        type: 'player_spawned',
+        ts: Date.now(),
+        payload: {
+          playerId: player.id,
+          shipId: homeShip.id,
+          // The HUD runs the reprieve chip off this (a local clock, so it costs
+          // the snapshot nothing) and names the beach when the hull was lost.
+          stormGrace: STORM_RESPAWN_GRACE_SECONDS,
+          ashore: respawnPlan.ashore,
+        },
+      });
     }
   }
 
@@ -6863,13 +6921,151 @@ export class Match {
     };
   }
 
-  private getRespawnPlan(homeShip: Ship) {
+  /**
+   * WHERE A PIRATE COMES BACK — ALWAYS INSIDE THE CURRENT SAFE RADIUS.
+   *
+   * The deck of his own hull whenever she is in shelter, which is the ordinary
+   * case and unchanged. When she is NOT — the hold has hit its cap and the tide
+   * could not bring her in — respawning onto her would put him straight back in
+   * the weather that just killed him, which is the death carousel the audit
+   * measured: ring arrives, dies in six seconds, respawns inside it, dies again.
+   * So the fallbacks walk inward: an unoccupied berth inside the ring (she comes
+   * with him), then dry ground inside it, then the water at the storm's centre.
+   * The last one always exists, so this can never fail to place him.
+   */
+  private getRespawnPlan(homeShip: Ship, player?: Player) {
+    if (this.isShipInStormSafeZone(homeShip)) {
+      return {
+        position: this.getRespawnDeckPosition(homeShip),
+        onShipId: homeShip.id as string | null,
+        protectionTime: PLAYER.RESPAWN_PROTECTION_TIME + 1.5,
+        dock: null as IslandDock | null,
+        ashore: false,
+      };
+    }
+    // Nobody alive aboard her: the berth takes the whole ship, so the crew keeps
+    // its hull. (parkShipAtDock runs in the caller, as the dock path always has.)
+    const dock = player && !this.hasSailorForHull(homeShip, player)
+      ? this.pickSafeSpawnDock()
+      : null;
+    if (dock) {
+      return {
+        position: this.getRespawnDeckPosition(homeShip),
+        onShipId: homeShip.id as string | null,
+        protectionTime: PLAYER.RESPAWN_PROTECTION_TIME + 1.5,
+        dock: dock as IslandDock | null,
+        ashore: false,
+      };
+    }
     return {
-      position: this.getRespawnDeckPosition(homeShip),
-      onShipId: homeShip.id,
+      position: this.findSafeGroundInsideRing(),
+      onShipId: null as string | null,
+      // A pirate washed ashore without his ship has further to walk before he
+      // can defend himself — the same protection the deck spawn gets, and the
+      // storm grace on top of it (see grantStormRespawnGrace).
       protectionTime: PLAYER.RESPAWN_PROTECTION_TIME + 1.5,
-      dock: null,
+      dock: null as IslandDock | null,
+      ashore: true,
     };
+  }
+
+  /**
+   * Dry ground — or failing that water — comfortably inside the storm wall.
+   *
+   * Hunted in the order a marooned pirate would want it: a pier he can walk off,
+   * then a beach or low hillside, then the open water at the ring's centre. Never
+   * a cliff face (the walk branch would slide him off) and never outside the
+   * wall, so the answer is somewhere he can survive standing still.
+   */
+  private findSafeGroundInsideRing(): Vec3 {
+    const { centerX, centerZ, safeRadius } = this.state.storm;
+    const inner = Math.max(4, safeRadius - 8);
+
+    let bestPier: { point: Vec3; d: number } | null = null;
+    for (const island of this.state.islands) {
+      const dock = island.dock;
+      if (!dock) continue;
+      const d = dist2D(dock.respawnPoint.x, dock.respawnPoint.z, centerX, centerZ);
+      if (d > inner) continue;
+      if (!bestPier || d < bestPier.d) {
+        bestPier = { point: { x: dock.respawnPoint.x, y: dock.respawnPoint.y + 0.2, z: dock.respawnPoint.z }, d };
+      }
+    }
+    if (bestPier) return bestPier.point;
+
+    // Sampled on a polar grid inside the wall. A beach or low flank wins
+    // outright; anything else above the waterline is kept as the runner-up, so a
+    // ring that closed on a volcano still puts him on rock rather than in it.
+    let highGround: Vec3 | null = null;
+    for (const reach of [0.55, 0.8, 0.3, 0.95]) {
+      for (let step = 0; step < 12; step++) {
+        const angle = (step / 12) * Math.PI * 2 + reach;
+        const x = centerX + Math.cos(angle) * inner * reach;
+        const z = centerZ + Math.sin(angle) * inner * reach;
+        for (const island of this.state.islands) {
+          const y = getIslandSurfaceY(island, x, z);
+          if (y > 0.6 && y < 9) return { x, y: y + 0.25, z };
+          if (y > 0.6 && (!highGround || y < highGround.y)) highGround = { x, y: y + 0.25, z };
+        }
+      }
+    }
+    if (highGround) return highGround;
+    // The water at the eye of the storm. Swimming is a survivable state and the
+    // ring is centred on it, so this always exists — but the eye can itself be
+    // dry (the late rings converge on Old Maw Caldera), and dropping a pirate at
+    // wave height inside a caldera floor would spawn him embedded in rock.
+    let eyeY = 0.4;
+    for (const island of this.state.islands) {
+      const y = getIslandSurfaceY(island, centerX, centerZ);
+      if (y + 0.25 > eyeY) eyeY = y + 0.25;
+    }
+    return { x: centerX, y: eyeY, z: centerZ };
+  }
+
+  /**
+   * MAY A RESPAWN BE HELD ON THIS HULL AT ALL?
+   *
+   * The hold says "the count resumes when your hull is back inside the ring". It
+   * is only worth saying while that CAN happen — by crew (a living hand sails her
+   * in) or by tide (towDerelictToSafety brings a derelict in after the grace).
+   *
+   * In the FINAL storm neither can: the last ring is 12 m across, so no berth
+   * clears pickSafeSpawnDock's margin and no patch of water clears a hull's
+   * length, and the endgame circle converges on Old Maw Caldera besides. The
+   * sentence became a promise the world could not keep, and a fresh-eyes audit
+   * read it on a grey screen for four minutes and then died of it. A hull already
+   * going down cannot come back either.
+   *
+   * So in those states there is no hold: the ordinary countdown runs at once and
+   * getRespawnPlan lands the pirate inside the ring without her.
+   */
+  private canHoldRespawnFor(ship: Ship): boolean {
+    if (this.state.storm.phase >= STORM_PHASES.length) return false;
+    return ship.alive && !ship.sinking;
+  }
+
+  /**
+   * FIFTEEN SECONDS OF WEATHER, HANDED BACK.
+   *
+   * The carousel the audit rode: the ring crossed his spawn dock, billed him to
+   * death six seconds after it arrived, put him back on the same deck inside the
+   * same wall, and did it again — three deaths in three minutes, none of them
+   * fightable. A fresh life inside the tempest needs long enough to weigh anchor
+   * and bear away, so the storm stands down for exactly that long.
+   */
+  private grantStormRespawnGrace(player: Player): void {
+    this.stormGraceUntil.set(player.id, this.t + STORM_RESPAWN_GRACE_SECONDS);
+  }
+
+  /** True while the tempest may not bill this pirate (post-respawn reprieve). */
+  private hasStormGrace(playerId: string): boolean {
+    const until = this.stormGraceUntil.get(playerId);
+    if (until === undefined) return false;
+    if (this.t >= until) {
+      this.stormGraceUntil.delete(playerId);
+      return false;
+    }
+    return true;
   }
 
   /** Is anyone still able to sail this hull back inside the ring? A mate who is
