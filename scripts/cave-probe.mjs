@@ -71,6 +71,16 @@ if (info) {
   // 2) entrance exterior (stand outside the mouth)
   await freeLook([info.cx + ox*14, info.floorY + 4.0, info.cz + oz*14], [info.cx, info.floorY + 2.6, info.cz]);
   await wait(600); await page.screenshot({ path: `${OUT}/entrance.png`, timeout: 60000 });
+  // 2b/2c) THE TWO RANGES THE ENTRANCE IS JUDGED AT. The audit's complaint was
+  // that the mouth read as "a flat dark-teal triangle with zero recession", so
+  // the question at both distances is whether it reads as a hole: at 30m it must
+  // be legible as an opening in the flank at all, and at 5m — eyes at head
+  // height, the way you actually approach it — the jamb has to have depth and the
+  // interior has to fall off darker than the rock face around it.
+  await freeLook([info.cx + ox*30, info.floorY + 5.0, info.cz + oz*30], [info.cx, info.floorY + 2.4, info.cz]);
+  await wait(600); await page.screenshot({ path: `${OUT}/outside-30m.png`, timeout: 60000 });
+  await freeLook([info.cx + ox*5, info.floorY + 1.7, info.cz + oz*5], [info.cx, info.floorY + 1.7, info.cz]);
+  await wait(600); await page.screenshot({ path: `${OUT}/outside-5m.png`, timeout: 60000 });
   // 3) inside the tunnel looking in
   await freeLook([info.cx - ox*2, info.floorY + 1.6, info.cz - oz*2], [info.cx - ox*info.length, info.floorY + 1.2, info.cz - oz*info.length]);
   await wait(600); await page.screenshot({ path: `${OUT}/interior.png`, timeout: 60000 });
