@@ -148,6 +148,27 @@ const FRONT_HEIGHT = 320;
 /** How far the shell's base sits BELOW the waterline; the curtain has to start
  *  under the swell or storm troughs open a gap under the rain. */
 const FRONT_BASE_DROP = 26;
+/** World Y of the shell's top rim — the one height in here that is GEOMETRY and
+ *  not a gradient, so it is the one height the bank's own fade has to finish
+ *  under. See FRONT_TOP_ROOM below. */
+const FRONT_TOP_Y = FRONT_HEIGHT - FRONT_BASE_DROP;
+/** ── THE ARC ACROSS THE SKY ────────────────────────────────────────────────
+ *  This shell was the "sky-dome rim seam": a hard curved edge in every frame at
+ *  every hour, deep sky above it and pale haze below, read by two audits as the
+ *  dome's lower rim meeting the horizon band. It is neither — it is THIS
+ *  cylinder's top edge, and the arithmetic says so. `bank`'s upper fade ended at
+ *  bTop + topY*0.55; at ring range (baseY ramped to 105) that is 391-513 m of
+ *  world height against 294 m of geometry, so the bank was still ~0.9 opaque
+ *  where the mesh ran out and the wall simply stopped mid-veil. Measured from
+ *  the audit shots the edge sat on a horizontal circle at r≈700-830 m, y≈294 —
+ *  the rim, to the metre, from deck height and from 200 m up alike.
+ *
+ *  So the bank profile is now BOUNDED BY THE GEOMETRY: topY is capped so that
+ *  the ragged top (up to 1.22*topY) plus its own fade (0.55*topY) both land
+ *  under the rim with room to spare, and a final taper drives alpha to zero
+ *  before the last row of quads regardless. A gradient that ends before the
+ *  surface does has no edge in it. */
+const FRONT_TOP_ROOM = 1.22 + 0.55;
 
 const STORM_FRONT_VERT = /* glsl */`
   varying vec3 v_world;
@@ -216,7 +237,11 @@ const STORM_FRONT_FRAG = /* glsl */`
     // and one that reads from 60m is a sliver on the horizon. Ramping the deck
     // down as you close keeps a legible bank + curtain at every range.
     float baseY = mix(26.0, 105.0, smoothstep(70.0, 760.0, d));
-    float topY = baseY * 2.4 + 42.0;
+    // Capped so the ragged top AND its fade finish under the shell's rim (see
+    // FRONT_TOP_ROOM): past ~370 m the deck stops climbing instead of climbing
+    // out through the top of the geometry. Close in, where the bank is supposed
+    // to tower, this cap is nowhere near the profile and does nothing.
+    float topY = min(baseY * 2.4 + 42.0, ${(FRONT_TOP_Y / (FRONT_TOP_ROOM * 1.12)).toFixed(1)});
 
     // Ragged underside AND ragged top: no straight cut anywhere on the silhouette.
     float bBase = baseY * (0.74 + lobe * 0.52);
@@ -260,6 +285,13 @@ const STORM_FRONT_FRAG = /* glsl */`
     col += mix(u_horizon, grey, 0.2) * rim * mix(0.060, 0.035, u_night);
 
     float a = clamp(wSum, 0.0, 1.0);
+
+    // Whatever alpha would still be alive at the last row of quads is a hard
+    // geometric arc in the sky, so nothing is allowed to reach it. The cap on
+    // topY already lands the bank's fade ~30 m under the rim; this is the rail
+    // that holds even if the noise fields are retuned. v_h is the shell's own
+    // parametric height, so it stays true if FRONT_HEIGHT ever moves.
+    a *= 1.0 - smoothstep(0.88, 0.995, v_h);
 
     // Lightning lights the bank from inside, brightest toward the bolt's bearing.
     if (u_flash > 0.001) {
