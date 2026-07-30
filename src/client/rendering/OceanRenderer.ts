@@ -342,15 +342,42 @@ const OCEAN_FRAG = /* glsl */`
     // Whitecap coverage thins with distance in a storm — full-strength crest
     // foam at every range merged into a horizon-wide ice sheet (patrol-1).
     float stormFoamFade = 1.0 - smoothstep(220.0, 1400.0, viewDist) * max(u_stormIntensity, stormSea) * 0.8;
+    // ── THE CHEQUERBOARD FROM ALTITUDE ──────────────────────────────────────
+    // From 120 m up the open sea became a periodic grid of pale blotches with
+    // rows of streaks converging on the vanishing point, at every hour. Neither
+    // was aliasing: the blotches are one whitecap per swell crest and the
+    // streaks are one swell component's crest LINES, and the reason they read as
+    // a lattice is that the thing that breaks foam up had been switched off out
+    // there. The breakup term was gated by detailFade — which is calibrated for the
+    // 0.85 m ripple DERIVATIVES and is gone by 560 m — while the field it gates
+    // has 8-18 m features that are still 15 px across at 300 m and perfectly
+    // resolvable at a kilometre. So past the ripple horizon foam collapsed to a
+    // constant 0.32 of the crest term, i.e. to the wave field's own period,
+    // drawn clean. Foam breakup now gets a range gate matched to the scale of
+    // the noise it actually samples.
+    float breakupRange = 1.0 - smoothstep(900.0, 2400.0, viewDist);
+    // Whitecaps still have to LOD out: broken up or not, a cap is a metre-scale
+    // feature, and from altitude one band of the frame holds dozens of swell
+    // periods at once — which is exactly when the eye starts reading a grid
+    // rather than water. Altitude pulls the handover nearer, and what it hands
+    // over to is the flat base colour the horizon dissolve is already walking
+    // toward. Eye level keeps its caps out past 700 m and is untouched.
+    float highEye = smoothstep(60.0, 240.0, u_cameraPos.y);
+    float capRange = 1.0 - smoothstep(mix(700.0, 300.0, highEye), mix(1800.0, 900.0, highEye), viewDist);
     // Only the STEEPEST crests break into whitecaps on a calm/moderate sea, so
     // open water reads as clear blue with sparse foam — not a dense grid of
     // whitecaps on every wave. Storms still lower the threshold for full coverage.
     float crest = pow(clamp(hn * (1.15 + 0.35 * stormSea) - (0.30 - 0.24 * stormSea), 0.0, 1.0), 3.4 - 1.6 * stormSea)
-                * (0.5 + 0.5 * calm + u_stormIntensity * 0.4 + stormSea * 0.5) * stormFoamFade;
+                * (0.5 + 0.5 * calm + u_stormIntensity * 0.4 + stormSea * 0.5) * stormFoamFade * capRange;
     vec2 foamUv = wp * 0.018 + u_time * vec2(0.012, 0.008);
-    float foamN = noise(foamUv * 3.0) * noise(foamUv * 7.0 + 1.5);
+    // …and a third octave, ROTATED off-axis and on a scale harmonic with
+    // neither the swell nor the other two, so however the periods happen to line
+    // up on a given heading their product does not repeat with any of them.
+    mat2 foamRot = mat2(0.8253, -0.5647, 0.5647, 0.8253);
+    float foamN2 = noise(foamRot * wp * 0.0413 - u_time * vec2(0.009, 0.014));
+    float foamN = noise(foamUv * 3.0) * noise(foamUv * 7.0 + 1.5) * (0.62 + 0.76 * foamN2);
     // Break foam up harder (lower floor) so whitecaps are irregular, not a lattice.
-    float breakup = mix(0.32, smoothstep(0.30 - 0.14 * stormSea, 0.66, foamN), detailFade * 0.9 + 0.1);
+    float breakup = mix(0.32, smoothstep(0.30 - 0.14 * stormSea, 0.66, foamN), breakupRange * 0.9 + 0.1);
     float foam = clamp(crest * breakup * 1.15, 0.0, 1.0);
 
     float shoreDetail = 1.0 - smoothstep(260.0, 900.0, viewDist);
