@@ -52,9 +52,24 @@ await page.evaluate(() => {
   // Another agent's server edits restart :8090 mid-run; the disconnect overlay
   // would then paint over every remaining frame. The last snapshot keeps
   // rendering, which is exactly the static world these shots are OF.
-  e.textContent = '#hud,#disconnect-overlay{visibility:hidden!important;}';
+  // The onboarding card and the overload badge are the other two things that
+  // paint over a shot sheet — the card also DIMS the whole scene, which is why
+  // an early version of this run photographed the mouth at half brightness.
+  e.textContent = '#hud,#disconnect-overlay{visibility:hidden!important;}'
+    + '#onboarding-card,#oc-card,[class*="onboard"]{display:none!important;}'
+    + '.server-overloaded,#server-overloaded,[class*="overload"]{display:none!important;}';
   document.head.appendChild(e);
+  document.getElementById('oc-skip')?.click();
 });
+// Every island's mesh must EXIST before we fly to one: the build queue is
+// drip-fed per frame, and a free cam parked at a cave that has not been built
+// yet photographs open water.
+await page.evaluate(() => window.__piratesBR.drainIslandBuildQueue?.(40));
+await page.waitForFunction(
+  () => window.__piratesBR.islandMeshes.size >= (window.__piratesBR.state?.islands?.length ?? 99),
+  null, { timeout: 90_000 },
+).catch(() => {});
+await wait(1200);
 
 async function look(pos, target) {
   await page.evaluate(([p, t]) => {

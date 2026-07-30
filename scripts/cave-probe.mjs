@@ -15,8 +15,23 @@ async function freeLook(pos, target) {
 await page.goto('http://127.0.0.1:3000/?debug&quality=high', { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#menu-solo-btn', { timeout: 15000 });
 await page.click('#menu-solo-btn', { noWaitAfter: true });
-await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', { timeout: 30000 });
+// GOTCHA: waitForFunction's options are the THIRD argument — passed second they
+// are the page-function's ARG and the timeout silently reverts to the default.
+await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 150_000 });
 await wait(3500);
+await page.evaluate(() => {
+  const e = document.createElement('style');
+  e.textContent = '#onboarding-card,#oc-card,[class*="onboard"]{display:none!important;}'
+    + '#disconnect-overlay,.server-overloaded,#server-overloaded,[class*="overload"]{visibility:hidden!important;}';
+  document.head.appendChild(e);
+  document.getElementById('oc-skip')?.click();
+});
+await page.evaluate(() => window.__piratesBR.drainIslandBuildQueue?.(40));
+await page.waitForFunction(
+  () => window.__piratesBR.islandMeshes.size >= (window.__piratesBR.state?.islands?.length ?? 99),
+  null, { timeout: 90_000 },
+).catch(() => {});
+await wait(1200);
 await page.evaluate(() => window.__piratesBR.setDayNightOverride(854));
 await page.evaluate(() => { const e=document.createElement('style'); e.textContent='#hud{visibility:hidden!important;}'; document.head.appendChild(e); });
 await wait(500);

@@ -19,8 +19,17 @@ import {
   getCaveInteriorAt, getIslandSurfaceY, getCaveCeilingY, getCaveFloorY, isInsideCaveInterior,
 } from '../src/shared/utils/index.ts';
 import {
-  CAVE_SHELL_MARGIN, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors, makeCaveTubeGeometry,
+  CAVE_SHELL_MARGIN, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors,
+  insideCaveShellVolume, makeCaveTubeGeometry,
 } from '../src/client/rendering/factories/CaveGeometry.ts';
+import * as THREE from 'three';
+import { getCaveMouthCarve, isNearCaveMouthCut, getIslandMaxRadius, getIslandSurfacePoint } from '../src/shared/utils/index.ts';
+import { buildTerrainHeightfield } from '../src/client/world/island/TerrainMeshBuilder.ts';
+import { MeshGround } from '../src/client/world/island/GroundTruth.ts';
+import {
+  CAVE_CUTOUT_LIFT, CAVE_CUTOUT_PAD_DEEP, CAVE_CUTOUT_PAD_NEAR,
+  buildCaveCutout, caveCollarLength, caveCutoutHit,
+} from '../src/client/world/island/CaveMouthCutout.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 
 const islands = new MapGenerator(12345).generateIslands();
@@ -497,6 +506,221 @@ for (const island of islands) {
 }
 expect('no walkable eye under the mountain can see the sky through a cave wall',
   windows <= 0, `${windows} sightlines, first at ${windowAt}`);
+
+
+// ── the mouth is a HOLE: collision air must be VISUAL air ───────────────────
+// The bug no test could see. The island terrain is one polar heightfield — a
+// single-valued function of xz — so it can carve a trench but can never express
+// "rock above, air below". At every mouth the shared carve ramps the ground back
+// to raw hillside by lz ≈ −2.6, and that ramp is a sheet of terrain standing
+// floor-to-ceiling across the passage: the player walked through visible rock,
+// and the sweep above passed because it samples the ANALYTIC field, which knows
+// nothing about the drawn mesh. The mouth is now a per-fragment cutout in the
+// terrain material (CaveMouthCutout), so this rebuilds the DRAWN terrain mesh —
+// the same pure heightfield builder the client renders — indexes it with the
+// same MeshGround the props seat on, and asserts, for every mouth:
+//   · no un-cut drawn triangle stands in the doorway between the floor and the
+//     ceiling (that IS the "you walk through the mountainside" defect);
+//   · the cutout genuinely fires — a mouth where nothing is discarded means the
+//     hole is being drawn by luck, and the next heightfield change closes it;
+//   · the floor the pirate walks on is never cut, and nothing is cut outside the
+//     mouth plane (lz ≥ 0), where no rock shell backs the void;
+//   · the cut stays inside what the collar and the tube DRAW, so the hole is
+//     always backed by rock rather than by the island's far hillside.
+console.log('\n── the mouth is a hole: drawn-mesh air matches collision air ──');
+{
+  let doorwayBlocked = 0, blockedAt = '', cutFired = 0, mouthsChecked = 0;
+  let floorCut = 0, outsideCut = 0, coverFail = 0, coverDetail = '';
+  let unbackedCut = 0;
+  let worstLip = 0, worstLipAt = '';
+  for (const island of islands) {
+    const mouths = (island.caves ?? []).filter((c) => c.hasMouth);
+    if (mouths.length === 0) continue;
+    const cutout = buildCaveCutout(island);
+    expect(`${island.id}: the terrain material gets a cutout slot per mouth`,
+      cutout !== null && cutout.count === Math.min(8, mouths.length),
+      `count=${cutout?.count ?? 'null'} mouths=${mouths.length}`);
+    // The DRAWN terrain, exactly as the client builds it at full quality.
+    const field = buildTerrainHeightfield({
+      island,
+      islandMaxR: getIslandMaxRadius(island),
+      lowDetail: false,
+      visualDetail: 1,
+      surfacePoint: (d, angle, extraY = 0) => {
+        const p = getIslandSurfacePoint(island, d, angle, extraY);
+        return { x: p.x - island.position.x, y: p.y, z: p.z - island.position.z };
+      },
+      // Same composition makeCaveMouthCarver builds on the client: the trig-only
+      // reject, then the shared carve, kept idempotent with `min`.
+      carveCaveMouth: (wx, wz, y) => {
+        if (!isNearCaveMouthCut(island, wx, wz)) return { y, carved: 0 };
+        const carve = getCaveMouthCarve(island, wx, wz);
+        return { y: Math.min(y, carve.y), carved: carve.carved };
+      },
+      islandX: island.position.x,
+      islandZ: island.position.z,
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(field.positions, 3));
+    geo.setIndex(field.indices);
+    const ground = new MeshGround(geo);
+
+    for (const m of mouths) {
+      mouthsChecked++;
+      const cR = m.interiorRadius ?? 3;
+      const cLen = m.length ?? 10;
+      const fY = m.floorY;
+      const fEnd = m.floorYEnd ?? fY;
+      const collarLen = caveCollarLength(m);
+      const cs = Math.cos(m.rotation), sn = Math.sin(m.rotation);
+      const world = (lx, lz) => ({
+        x: m.position.x + lx * cs + lz * sn,
+        z: m.position.z - lx * sn + lz * cs,
+      });
+      // COVERAGE, analytically: the lateral cut must stay inside the drawn shell.
+      // Collar: radius cR·CAVE_MOUTH_TRENCH_K + 0.5, so 0.3m of margin.
+      const collarR = cR * CAVE_MOUTH_TRENCH_K + 0.5;
+      if (cR + CAVE_CUTOUT_PAD_NEAR > collarR - 0.3) {
+        coverFail++;
+        coverDetail ||= `${island.id}: near cut ${(cR + CAVE_CUTOUT_PAD_NEAR).toFixed(2)} vs collar ${collarR.toFixed(2)}`;
+      }
+      // Tube: the loft's conservative superellipse half-width (no meander, no
+      // jitter, no widening — all three are outward-only).
+      const tubeHalf = (cR + CAVE_SHELL_MARGIN) * (Math.pow(2, 1 / 5) + 0.01) * 0.95;
+      if (cR + CAVE_CUTOUT_PAD_DEEP > tubeHalf - 0.1) {
+        coverFail++;
+        coverDetail ||= `${island.id}: deep cut ${(cR + CAVE_CUTOUT_PAD_DEEP).toFixed(2)} vs tube ${tubeHalf.toFixed(2)}`;
+      }
+      // …and every point the cutout removes must lie inside SOME cave shell the
+      // client draws, or the hole is a window onto the island's far hillside.
+      for (let lz = -0.25; lz >= -cLen; lz -= 0.5) {
+        const along = Math.min(1, Math.max(0, -lz / cLen));
+        const floorAt = fY + (fEnd - fY) * along;
+        const pad = -lz <= collarLen ? CAVE_CUTOUT_PAD_NEAR : CAVE_CUTOUT_PAD_DEEP;
+        for (const lx of [-(cR + pad), 0, cR + pad]) {
+          for (const fy of [CAVE_CUTOUT_LIFT + 0.01, m.height * 0.5, m.height - 0.01]) {
+            const w = world(lx * 0.999, lz);
+            const wy = floorAt + fy;
+            if (!caveCutoutHit(cutout, w.x, wy, w.z)) continue;
+            const inCollar = -lz <= collarLen && Math.abs(lx) <= collarR - 0.25
+              && wy <= floorAt + m.height * 1.02;
+            const inTube = (island.caves ?? []).some((other) => insideCaveShellVolume(other, w.x, wy, w.z));
+            if (!inCollar && !inTube) {
+              unbackedCut++;
+              coverDetail ||= `${island.id}: cut at local (${lx.toFixed(2)}, ${fy.toFixed(2)}, ${lz.toFixed(2)}) is backed by nothing`;
+            }
+          }
+        }
+      }
+      // THE DOORWAY. Sample the drawn mesh across the passage over the stretch
+      // the carve's ramp lives in, plus the whole tunnel for good measure.
+      //
+      // The doorway is partitioned by ONE number, CAVE_CUTOUT_LIFT: at or above
+      // it the terrain material discards, below it the mesh is the trench floor
+      // the pirate stands on. Sampling with a second, hand-written bound (an
+      // earlier 0.5 against a lift of 0.55) invented a 5cm band that belonged to
+      // neither side and reported 18 phantom blockers, so the bound is READ from
+      // the shader's own constant and there is no third case by construction.
+      //
+      // What that leaves needing a real assertion is the LIP: the drawn floor is
+      // a 4-8m chord grid trying to resolve a 7m trench, so near the mouth it
+      // bleeds upward off the uncarved vertices beside the cut and stands some
+      // way above the analytic floor. That residual is tracked below and has to
+      // stay inside the locomotion step, or the visible fix hands the player an
+      // invisible kerb to brick against.
+      for (let lz = -0.2; lz >= -Math.min(cLen, 12); lz -= 0.2) {
+        const along = Math.min(1, Math.max(0, -lz / cLen));
+        const floorAt = fY + (fEnd - fY) * along;
+        const ceilAt = floorAt + m.height;
+        for (let lat = -0.9; lat <= 0.9001; lat += 0.15) {
+          const w = world(cR * lat, lz);
+          const drawn = ground.heightAt(w.x - island.position.x, w.z - island.position.z);
+          if (drawn === null) continue;
+          if (drawn >= ceilAt) continue; // the lintel — rock overhead, as drawn
+          if (drawn >= floorAt + CAVE_CUTOUT_LIFT) {
+            // Above the partition: the material MUST be discarding here, or the
+            // hillside sheet the audit photographed is still standing.
+            if (caveCutoutHit(cutout, w.x, drawn, w.z)) { cutFired++; continue; }
+            doorwayBlocked++;
+            blockedAt ||= `${island.id} local (${(cR * lat).toFixed(2)}, ${lz.toFixed(2)}): drawn ${drawn.toFixed(2)} between floor ${floorAt.toFixed(2)} and ceiling ${ceilAt.toFixed(2)}`;
+            continue;
+          }
+          // Below it: this is the drawn trench floor. How high does it ride?
+          if (drawn - floorAt > worstLip) {
+            worstLip = drawn - floorAt;
+            worstLipAt = `${island.id} local (${(cR * lat).toFixed(2)}, ${lz.toFixed(2)})`;
+          }
+        }
+      }
+      // THE FLOOR IS NEVER CUT — and the ground under the doorway is drawn.
+      for (let lz = 1.0; lz >= -Math.min(cLen, 12); lz -= 0.25) {
+        const along = Math.min(1, Math.max(0, -lz / cLen));
+        const floorAt = fY + (fEnd - fY) * along;
+        for (const lat of [-0.7, 0, 0.7]) {
+          const w = world(cR * lat, lz);
+          for (const dy of [0.0, 0.2, 0.42]) {
+            if (caveCutoutHit(cutout, w.x, floorAt + dy, w.z)) floorCut++;
+          }
+        }
+      }
+      // NOTHING IS CUT OUTSIDE THE MOUTH PLANE: past lz = 0 the tube's front rim
+      // has ended and no shell backs a hole (frontOvershoot = 0 for a mouth).
+      for (let lz = 0.02; lz <= CAVE_NEAR_OVERHANG + 2; lz += 0.1) {
+        const along = 0;
+        const floorAt = fY + (fEnd - fY) * along;
+        for (const lat of [-0.9, -0.3, 0.3, 0.9]) {
+          const w = world(cR * lat, lz);
+          for (let dy = 0.1; dy <= m.height + 1.5; dy += 0.35) {
+            if (caveCutoutHit(cutout, w.x, floorAt + dy, w.z)) outsideCut++;
+          }
+        }
+      }
+    }
+  }
+  expect(`no drawn terrain triangle stands in any mouth's doorway (${mouthsChecked} mouths)`,
+    doorwayBlocked === 0, `${doorwayBlocked} blocking samples, first ${blockedAt}`);
+  // The lip the mesh's own coarseness leaves at the threshold. SLOPE_MAX_STEP is
+  // 1.0m in PhysicsSystem's LOCO table; a doorway sill the player cannot step
+  // over is a walk-through-rock fix that trades one wall for another.
+  expect('the drawn trench floor never leaves a sill the pirate cannot step over',
+    worstLip <= 1.0 - 0.15,
+    `worst sill ${worstLip.toFixed(3)}m above the collision floor at ${worstLipAt}`);
+  expect('the cutout really is what opens them (the heightfield still runs across every mouth)',
+    cutFired > 0, `cutout discarded ${cutFired} blocking samples`);
+  expect('the trench floor a pirate walks on is never cut away', floorCut === 0, `${floorCut} floor samples cut`);
+  expect('nothing is cut outside the mouth plane, where no shell backs the void',
+    outsideCut === 0, `${outsideCut} samples cut at lz > 0`);
+  expect('the cut stays inside the rock the collar and the tube draw',
+    coverFail === 0 && unbackedCut === 0, `${coverFail} bound failures, ${unbackedCut} unbacked samples: ${coverDetail}`);
+
+  // THE PROXY LOD DOES NOT NEED THE CUTOUT, and this is why rather than a hope.
+  // buildProxyTerrainMesh samples the shared heightfield WITHOUT carveCaveMouth,
+  // so the proxy has no trench and no floor-to-ceiling sheet across a doorway —
+  // it is unbroken hillside, which is the correct silhouette for an island seen
+  // from far enough away that the swap has happened. Cutting a hole in it would
+  // be strictly worse: the collar and tube live under detailRoot and are hidden
+  // alongside it, so a discarded proxy fragment would be backed by nothing and
+  // the mouth would read as a window through the island.
+  // The swap is gated on edgeDist = dist - getIslandMaxRadius(island) exceeding
+  // detailRadius, whose smallest value is 420m at quality 'low' (Game.ts). An eye
+  // at a mouth is inside the island's own footprint, so its edgeDist is at most
+  // zero — the mesh a player can see a mouth in is ALWAYS the cut one.
+  const PROXY_SWAP_MIN = 420;
+  let mouthOutsideFootprint = 0, footprintDetail = '';
+  for (const island of islands) {
+    const maxR = getIslandMaxRadius(island);
+    for (const m of (island.caves ?? []).filter((c) => c.hasMouth)) {
+      const fromCenter = Math.hypot(m.position.x - island.position.x, m.position.z - island.position.z);
+      // Stand back the length of the tunnel plus a body: still nowhere near 420m.
+      if (fromCenter + (m.length ?? 10) + 2 >= maxR + PROXY_SWAP_MIN) {
+        mouthOutsideFootprint++;
+        footprintDetail ||= `${island.id}: mouth ${fromCenter.toFixed(1)}m out of a ${maxR.toFixed(1)}m island`;
+      }
+    }
+  }
+  expect('no mouth is ever seen through the uncut proxy: every one sits deep inside the detail radius',
+    mouthOutsideFootprint === 0, footprintDetail);
+}
 
 console.log(failures === 0 ? '\nALL CAVE WALK TESTS PASSED' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

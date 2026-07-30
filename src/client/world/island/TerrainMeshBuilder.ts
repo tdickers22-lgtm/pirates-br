@@ -8,6 +8,9 @@
  */
 import * as THREE from 'three';
 import { getIslandCoastWeights } from '../../../shared/utils/index.js';
+import {
+  buildCaveCutout, caveCutoutGlsl, caveCutoutUniforms, type CaveCutout,
+} from './CaveMouthCutout.js';
 import type { IslandBuildCtx, IslandBuilderCtx } from './context.js';
 
 /** Terrain-derived values the rest of the island build reads back: the colour
@@ -41,7 +44,10 @@ export type TerrainBuild = {
  *    field smeared them into ~10m glow bars) with the glow confined to the
  *    crack core, and a molten caldera pool from `aSummit`.
  */
-function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: boolean, host: IslandBuilderCtx) {
+function applyTerrainDetail(
+  material: THREE.MeshStandardMaterial, volcanic: boolean, host: IslandBuilderCtx,
+  cutout: CaveCutout | null,
+) {
   const pulse = host.magmaPulseUniform;
   const time = host.foliageTime;
   // Octave ladder. Every octave is a fresh value-noise fetch — four hashes,
@@ -55,6 +61,7 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTerrTime = time;
     if (volcanic) shader.uniforms.uMagmaPulse = pulse;
+    if (cutout) Object.assign(shader.uniforms, caveCutoutUniforms(cutout));
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -82,6 +89,7 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         + 'varying float vTerrMat;\n'
         + 'varying float vTerrSlope;\n'
         + (volcanic ? 'uniform float uMagmaPulse;\nvarying float vMagmaGate;\nvarying float vSummit;\n' : '')
+        + (cutout ? caveCutoutGlsl(cutout.count) : '')
         + 'float tHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n'
         + 'float tNoise(vec2 p) {\n'
         + '  vec2 i = floor(p); vec2 f = fract(p);\n'
@@ -91,11 +99,45 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         + '  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n'
         + '}\n',
       )
+      // ── THE CAVE MOUTHS ARE HOLES ─────────────────────────────────────────
+      // Cut before anything else in main() runs: the heightfield cannot express
+      // "rock above, air below", so the opening is opened per-fragment on the
+      // same oriented boxes physics walks (see CaveMouthCutout).
+      .replace(
+        '#include <clipping_planes_fragment>',
+        '#include <clipping_planes_fragment>\n'
+        + (cutout ? 'if (caveCutout(vTerrWorld)) discard;\n' : ''),
+      )
       // Detail runs AFTER the vertex colour is folded into diffuseColor.
       .replace(
         '#include <color_fragment>',
         '#include <color_fragment>\n'
-        + 'vec2 tP = vTerrWorld.xz;\n'
+        + 'vec2 tP0 = vTerrWorld.xz;\n'
+        // ── THE WEAVE ──────────────────────────────────────────────────────
+        // Rotating each octave stopped the octaves from stacking their cell
+        // edges, but it did not stop ONE octave's edges from reading: a value
+        // noise lattice is a grid, and a grid of smoothstepped cells at 0.5m
+        // pitch photographs as knitting — a repeating checker at your feet and
+        // across a whole cliff face (noon-terrain-feet-lush/highland,
+        // p3-crows-chute-a). Two fixes, both keyed on ONE extra low-frequency
+        // pair of fetches:
+        //  • DOMAIN WARP: displace the sample point by a ~12m field before any
+        //    finer octave reads it. Every lattice edge downstream bends with the
+        //    warp, so no cell boundary stays straight and no cell stays square.
+        //  • SLOW ROTATION: turn the whole detail frame by a second ~16m field,
+        //    so even the warped lattice never keeps one orientation across more
+        //    than a few metres of ground — the "one global knit" read.
+        // The macro field then also does the job it is named for: a 5-20m tonal
+        // and hue octave, so a cliff face is lit in broad patches rather than
+        // being one flat value carrying a uniform texture.
+        + (octaves >= 2
+          ? 'float nMacro = tNoise(tP0 * 0.085);\n'              // ~12m
+            + 'float nMacro2 = tNoise(tP0.yx * 0.062 + 19.3);\n'  // ~16m, other axis
+            + 'vec2 tP = tP0 + (vec2(nMacro, nMacro2) - 0.5) * 2.6;\n'
+            + 'float tAng = (nMacro2 - 0.5) * 2.4;\n'
+            + 'mat2 tRW = mat2(cos(tAng), -sin(tAng), sin(tAng), cos(tAng));\n'
+            + 'tP = tRW * tP;\n'
+          : 'float nMacro = 0.5;\nfloat nMacro2 = 0.5;\nvec2 tP = tP0;\n')
         // Each octave samples a ROTATED lattice. A value-noise grid shares the
         // world axes, and three co-aligned octaves stack their cell edges into
         // a visible checkerboard on flat ground (caught in verification).
@@ -144,6 +186,11 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         // Grit rides on top, weighted per class: sand is nearly all grain at
         // this scale, rock is crystalline, turf is matted and takes the least.
         + 'detail += nGrit * (0.62 * wSand + 0.30 * wGrass + 0.54 * wRock + 0.58 * wAsh);\n'
+        // …and the MACRO octave on top: broad 5-20m patches of light and dark.
+        // Without it every square metre of a biome carries the same statistics,
+        // and identical statistics over a 60m cliff is what makes a procedural
+        // texture read as a tiled texture however good the fine detail is.
+        + 'detail += (nMacro - 0.5) * 0.20 + (nMacro2 - 0.5) * 0.12;\n'
         // Sedimentary STRATA on steep faces — horizontal bands that follow the
         // rock face without moving a single vertex. The cliff/whale-back fix.
         // Heavily noise-warped and shallow: an un-warped low-frequency band
@@ -162,6 +209,9 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
         + 'diffuseColor.rgb += vec3(0.045, 0.038, -0.030) * (nMid - 0.5) * wGrass;\n'
         + 'diffuseColor.rgb += vec3(0.032, 0.019, 0.003) * strata * steep * strataMat;\n'
         + 'diffuseColor.rgb += vec3(-0.012, -0.006, 0.014) * (nFine - 0.5) * wAsh;\n'
+        // Macro HUE drift too: patches of ground that differ in tone but not in
+        // colour still read as one material with a filter over it.
+        + 'diffuseColor.rgb += vec3(0.026, 0.038, -0.020) * (nMacro2 - 0.5);\n'
         // …and the near grain carries hue too: dark mineral flecks in the sand,
         // a shell-white glint here and there. Grain that only shifts VALUE reads
         // as film grain; grain that shifts hue reads as ground.
@@ -223,8 +273,12 @@ function applyTerrainDetail(material: THREE.MeshStandardMaterial, volcanic: bool
     }
   };
   // One program per variant — not one per island — so shader compilation
-  // doesn't churn across 14 island builds.
-  material.customProgramCacheKey = () => (volcanic ? 'pirates-terrain-detail-volcanic' : 'pirates-terrain-detail');
+  // doesn't churn across 14 island builds. The MOUTH-SLOT COUNT is part of the
+  // key: the cutout's uniform arrays are sized by it, and three.js would
+  // otherwise hand this material a program compiled for a different array size
+  // (the hole then reads the wrong island's mouths, or none at all).
+  const key = volcanic ? 'pirates-terrain-detail-volcanic' : 'pirates-terrain-detail';
+  material.customProgramCacheKey = () => `${key}-m${cutout ? cutout.count : 0}`;
 }
 
 /**
@@ -264,14 +318,38 @@ export function coastWobble(island: { profile: { ridgeAxis: number; primaryHillA
   return distRatio * (1 + w * ramp);
 }
 
-export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
-  const {
-    host, island, group, r, rng, lowDetail, visualDetail, surfacePoint, carveCaveMouth,
-    isVolcanic, islandMaxR, whiteSand,
-    sandColor, beachColor, cliffColor, grassColor, jungleColor, peakColor, mudColor, paletteRock,
-  } = ctx;
-  const terrainPositions: number[] = [];
-  const terrainIndices: number[] = [];
+/** One island's terrain heightfield: the polar vertex grid, its quad indices and
+ *  the per-vertex mouth-carve depth. Pure — no THREE.Mesh, no materials, no
+ *  colours — so the DRAWN surface can be rebuilt outside a browser and asserted
+ *  against (scripts/test-cave-walk.mjs samples it through MeshGround to prove
+ *  that where collision says air, the mesh either has no triangle or the mouth
+ *  cutout discards it). `buildTerrainMesh` is its only other caller, so the mesh
+ *  the player looks at and the mesh the suite checks cannot drift apart. */
+export type TerrainField = {
+  readonly positions: number[];
+  readonly indices: number[];
+  /** Parallel to positions/3: how deep the mouth carve cut that vertex. */
+  readonly mouthCarveDepth: number[];
+  readonly angularSegments: number;
+  readonly totalRings: number;
+  readonly shoreRingSpan: number;
+  readonly ringDistRatio: (ring: number) => number;
+};
+
+export function buildTerrainHeightfield(args: {
+  island: { profile: { ridgeAxis: number; primaryHillAngle: number } };
+  islandMaxR: number;
+  lowDetail: boolean;
+  visualDetail: number;
+  surfacePoint: (distRatio: number, angle: number, extraY?: number) => { x: number; y: number; z: number };
+  carveCaveMouth: (worldX: number, worldZ: number, y: number) => { y: number; carved: number };
+  islandX: number;
+  islandZ: number;
+}): TerrainField {
+  const { island, islandMaxR, lowDetail, visualDetail, surfacePoint, carveCaveMouth, islandX, islandZ } = args;
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const mouthCarveDepth: number[] = [];
   // Mesh density scales with the island's real footprint so the shared
   // heightfield's fbm knolls, ridged cliff bands, and 2.4-6m terraces
   // actually resolve instead of aliasing into a smooth dome. A 56x160 cap is
@@ -290,6 +368,99 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   const ringDistRatio = (ring: number): number => ring <= radialSegments
     ? (ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9))
     : 1 + ((ring - radialSegments) / shoreRings) * shoreRingSpan;
+
+  for (let ring = 0; ring <= totalRings; ring++) {
+    const distRatio = ringDistRatio(ring);
+    for (let segment = 0; segment <= angularSegments; segment++) {
+      const angle = (segment / angularSegments) * Math.PI * 2;
+      const point = surfacePoint(coastWobble(island, distRatio, angle), angle, 0.02);
+      const carve = carveCaveMouth(point.x + islandX, point.z + islandZ, point.y);
+      mouthCarveDepth.push(carve.carved);
+      positions.push(point.x, carve.y, point.z);
+    }
+  }
+
+  /**
+   * FEATHER THE TERRACE LIPS.
+   *
+   * The wobble breaks the treads' concentric geometry; this softens the risers
+   * themselves. Where a vertex sits far off the mean of its two RADIAL
+   * neighbours it is standing on the lip of a step, and a lip sampled once per
+   * ring is a hard 90° corner running the length of the coast — the other half
+   * of the "cake steps" read. Pull it a fraction toward that mean.
+   *
+   * Bounded twice over, because the drawn ground and the analytic field the
+   * player walks on must not part company: only on ground steeper than ~40°
+   * (where nothing stands and nothing is seated), and never by more than
+   * FEATHER_CAP. Underwater vertices are exempt from the slope gate — the
+   * submerged shelf is where the steps show worst from a deck — but keep the
+   * same cap.
+   */
+  {
+    const FEATHER_CAP = 0.42;
+    const stride = angularSegments + 1;
+    const smoothed = new Float32Array(positions.length / 3);
+    for (let ring = 0; ring <= totalRings; ring++) {
+      for (let segment = 0; segment <= angularSegments; segment++) {
+        const i = ring * stride + segment;
+        if (ring === 0 || ring === totalRings) { smoothed[i] = positions[i * 3 + 1]; continue; }
+        const yc = positions[i * 3 + 1];
+        const yIn = positions[(i - stride) * 3 + 1];
+        const yOut = positions[(i + stride) * 3 + 1];
+        const mean = (yIn + yOut) * 0.5;
+        // Radial run between the two neighbours, so "steep" is a real gradient
+        // rather than a height difference that depends on mesh density.
+        const dx = positions[(i + stride) * 3] - positions[(i - stride) * 3];
+        const dz = positions[(i + stride) * 3 + 2] - positions[(i - stride) * 3 + 2];
+        const run = Math.max(0.35, Math.hypot(dx, dz));
+        const grade = Math.abs(yOut - yIn) / run;
+        const gate = yc < 0.4 ? 1 : THREE.MathUtils.smoothstep(grade, 0.84, 1.5);
+        if (gate <= 0) { smoothed[i] = yc; continue; }
+        smoothed[i] = yc + THREE.MathUtils.clamp((mean - yc) * 0.5 * gate, -FEATHER_CAP, FEATHER_CAP);
+      }
+    }
+    // The angular seam vertex is a duplicate of segment 0 and must stay one
+    // point, or the coast splits along a meridian.
+    for (let ring = 0; ring <= totalRings; ring++) {
+      smoothed[ring * stride + angularSegments] = smoothed[ring * stride];
+    }
+    for (let i = 0; i < smoothed.length; i++) positions[i * 3 + 1] = smoothed[i];
+  }
+
+  for (let ring = 0; ring < totalRings; ring++) {
+    for (let segment = 0; segment < angularSegments; segment++) {
+      const a = ring * (angularSegments + 1) + segment;
+      const b = a + 1;
+      const c = a + angularSegments + 1;
+      const d = c + 1;
+      indices.push(a, c, b);
+      indices.push(b, c, d);
+    }
+  }
+  return { positions, indices, mouthCarveDepth, angularSegments, totalRings, shoreRingSpan, ringDistRatio };
+}
+
+export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
+  const {
+    host, island, group, r, rng, lowDetail, visualDetail, surfacePoint, carveCaveMouth,
+    isVolcanic, islandMaxR, whiteSand,
+    sandColor, beachColor, cliffColor, grassColor, jungleColor, peakColor, mudColor, paletteRock,
+  } = ctx;
+  // The vertex grid + its carve depths (pure; shared with the regression suite).
+  const field = buildTerrainHeightfield({
+    island, islandMaxR, lowDetail, visualDetail, surfacePoint, carveCaveMouth,
+    islandX: island.position.x, islandZ: island.position.z,
+  });
+  const terrainPositions = field.positions;
+  const terrainIndices = field.indices;
+  /** Per-vertex carve depth (parallel to terrainPositions) — drives the cut
+   *  faces' ROCK recolor in the color pass below (they'd read as floating
+   *  grass-green slabs otherwise) and lets decor placement skip the trench. */
+  const mouthCarveDepth = field.mouthCarveDepth;
+  const angularSegments = field.angularSegments;
+  const totalRings = field.totalRings;
+  const shoreRingSpan = field.shoreRingSpan;
+  const ringDistRatio = field.ringDistRatio;
 
   const terrainColor = new THREE.Color();
   const scratchColor = new THREE.Color();
@@ -316,81 +487,6 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
     && !isVolcanic
     && (island.profile.peakBoost ?? 0) > 0.95;
   const snowColor = new THREE.Color(0xeef3fb);
-
-
-  // Per-vertex carve depth (parallel to terrainPositions) — drives the cut
-  // faces' ROCK recolor in the color pass below (they'd read as floating
-  // grass-green slabs otherwise) and lets decor placement skip the trench.
-  const mouthCarveDepth: number[] = [];
-  for (let ring = 0; ring <= totalRings; ring++) {
-    const distRatio = ringDistRatio(ring);
-    for (let segment = 0; segment <= angularSegments; segment++) {
-      const angle = (segment / angularSegments) * Math.PI * 2;
-      const point = surfacePoint(coastWobble(island, distRatio, angle), angle, 0.02);
-      const carve = carveCaveMouth(point.x + island.position.x, point.z + island.position.z, point.y);
-      point.y = carve.y;
-      mouthCarveDepth.push(carve.carved);
-      terrainPositions.push(point.x, point.y, point.z);
-    }
-  }
-
-  /**
-   * FEATHER THE TERRACE LIPS.
-   *
-   * The wobble breaks the treads' concentric geometry; this softens the risers
-   * themselves. Where a vertex sits far off the mean of its two RADIAL
-   * neighbours it is standing on the lip of a step, and a lip sampled once per
-   * ring is a hard 90° corner running the length of the coast — the other half
-   * of the "cake steps" read. Pull it a fraction toward that mean.
-   *
-   * Bounded twice over, because the drawn ground and the analytic field the
-   * player walks on must not part company: only on ground steeper than ~40°
-   * (where nothing stands and nothing is seated), and never by more than
-   * FEATHER_CAP. Underwater vertices are exempt from the slope gate — the
-   * submerged shelf is where the steps show worst from a deck — but keep the
-   * same cap.
-   */
-  {
-    const FEATHER_CAP = 0.42;
-    const stride = angularSegments + 1;
-    const smoothed = new Float32Array(terrainPositions.length / 3);
-    for (let ring = 0; ring <= totalRings; ring++) {
-      for (let segment = 0; segment <= angularSegments; segment++) {
-        const i = ring * stride + segment;
-        if (ring === 0 || ring === totalRings) { smoothed[i] = terrainPositions[i * 3 + 1]; continue; }
-        const yc = terrainPositions[i * 3 + 1];
-        const yIn = terrainPositions[(i - stride) * 3 + 1];
-        const yOut = terrainPositions[(i + stride) * 3 + 1];
-        const mean = (yIn + yOut) * 0.5;
-        // Radial run between the two neighbours, so "steep" is a real gradient
-        // rather than a height difference that depends on mesh density.
-        const dx = terrainPositions[(i + stride) * 3] - terrainPositions[(i - stride) * 3];
-        const dz = terrainPositions[(i + stride) * 3 + 2] - terrainPositions[(i - stride) * 3 + 2];
-        const run = Math.max(0.35, Math.hypot(dx, dz));
-        const grade = Math.abs(yOut - yIn) / run;
-        const gate = yc < 0.4 ? 1 : THREE.MathUtils.smoothstep(grade, 0.84, 1.5);
-        if (gate <= 0) { smoothed[i] = yc; continue; }
-        smoothed[i] = yc + THREE.MathUtils.clamp((mean - yc) * 0.5 * gate, -FEATHER_CAP, FEATHER_CAP);
-      }
-    }
-    // The angular seam vertex is a duplicate of segment 0 and must stay one
-    // point, or the coast splits along a meridian.
-    for (let ring = 0; ring <= totalRings; ring++) {
-      smoothed[ring * stride + angularSegments] = smoothed[ring * stride];
-    }
-    for (let i = 0; i < smoothed.length; i++) terrainPositions[i * 3 + 1] = smoothed[i];
-  }
-
-  for (let ring = 0; ring < totalRings; ring++) {
-    for (let segment = 0; segment < angularSegments; segment++) {
-      const a = ring * (angularSegments + 1) + segment;
-      const b = a + 1;
-      const c = a + angularSegments + 1;
-      const d = c + 1;
-      terrainIndices.push(a, c, b);
-      terrainIndices.push(b, c, d);
-    }
-  }
 
   const terrainGeometry = new THREE.BufferGeometry();
   terrainGeometry.setAttribute('position', new THREE.Float32BufferAttribute(terrainPositions, 3));
@@ -630,7 +726,7 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
     terrainGeometry.setAttribute('aMagma', new THREE.Float32BufferAttribute(terrainMagma, 1));
     terrainGeometry.setAttribute('aSummit', new THREE.Float32BufferAttribute(terrainSummit, 1));
   }
-  applyTerrainDetail(terrainMat, isVolcanic, host);
+  applyTerrainDetail(terrainMat, isVolcanic, host, buildCaveCutout(island));
   const terrain = new THREE.Mesh(terrainGeometry, terrainMat);
   terrain.name = 'island-terrain';
   // The DoubleSide heightfield casting onto ITSELF produced a heavy self-shadow
@@ -691,7 +787,18 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
 
 /** Proxy LOD = a genuine low-res sample of the same shared heightfield with the
  *  same biome coloring, so distant islands keep their true silhouette, coast
- *  shape, and palette — no pop, no monochrome domes. */
+ *  shape, and palette — no pop, no monochrome domes.
+ *
+ *  IT DELIBERATELY CARRIES NO CAVE-MOUTH CUTOUT. It also carries no mouth carve,
+ *  which is the reason: with no trench there is no floor-to-ceiling sheet across
+ *  a doorway to cut away, only unbroken hillside — the right silhouette for an
+ *  island seen from past the swap. Discarding here would be strictly worse, since
+ *  the collar and tube that back the hole live under detailRoot and are hidden in
+ *  the same breath as this mesh is shown, so the hole would be backed by nothing
+ *  and read as a window straight through the island. The swap needs the camera
+ *  420m clear of the island's own edge at worst (Game.ts detailRadius), and every
+ *  mouth sits inside the footprint — asserted in scripts/test-cave-walk.mjs so
+ *  the argument fails loudly if a generator ever puts a mouth out to sea. */
 export function buildProxyTerrainMesh(ctx: IslandBuildCtx, terrain: TerrainBuild): THREE.Mesh {
   const { island, surfacePoint, sandColor, beachColor, cliffColor, grassColor, peakColor } = ctx;
   const { shoreRingSpan, seaBase, peakEst, rockSlopeColor, wetSandColor, submergedColor } = terrain;

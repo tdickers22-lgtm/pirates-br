@@ -10,6 +10,7 @@ import { CAVE_MOUTH_TRENCH_K, getCaveMouthCarve, getIslandSurfaceY, isNearCaveMo
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import { applyCaveTubeColors, capCaveTubeRims, CAVE_SHELL_MARGIN, caveTubeParams, cullCaveTubeAgainstNeighbors, insideCaveShellVolume, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
+import { buildCaveCutout, type CaveCutout, caveCutoutHit } from './CaveMouthCutout.js';
 import type { CaveMouthCarve, IslandBuildCtx } from './context.js';
 import { ensureMeshGround, type MeshGround } from './GroundTruth.js';
 
@@ -104,10 +105,21 @@ function paintCaveRock(mat: THREE.MeshStandardMaterial, cacheKey: string, expose
  * terrain's own vertex colour, and (through `aCaveExposed`) drops the cavern
  * shading and the throat's warm self-glow with it. What is left reads as the
  * hillside it is embedded in, from the one angle it was ever visible from.
+ *
+ * THE TRENCH IS NOT THE HILLSIDE. The drawn terrain inside a mouth dives metres
+ * — to the cave floor — because the shared carve cuts the doorway, and it is now
+ * cut away entirely by the fragment cutout. Judged against that, most of the
+ * throat collar stood "above the terrain" and was therefore painted in the
+ * terrain's own colour with its self-glow removed: at a shore cave that is a
+ * flat dark-teal plate wearing the wet-sand tint, which is precisely how the
+ * audit photographed the entrance. So the reference height is the UNCARVED
+ * hillside, allowed to follow the drawn mesh only as far as a mesh chord can
+ * legitimately sag below it, and a vertex sitting where the terrain is a HOLE is
+ * never called exposed.
  */
 function tintShellToHillside(
   geo: THREE.BufferGeometry, island: Island, cave: IslandCave,
-  ground: MeshGround | null, base: THREE.Color,
+  ground: MeshGround | null, base: THREE.Color, cutout: CaveCutout | null,
 ): void {
   const pos = geo.getAttribute('position') as THREE.BufferAttribute;
   // The tube already carries the mouth-throat lightening (applyCaveTubeColors);
@@ -129,11 +141,22 @@ function tintShellToHillside(
     if (existing) out.setRGB(existing.getX(i), existing.getY(i), existing.getZ(i));
     else out.copy(base);
     let t = 0;
+    const vy = cave.position.y + pos.getY(i);
+    const wx = ix + island.position.x;
+    const wz = iz + island.position.z;
     const drawn = ground?.heightAt(ix, iz);
-    if (drawn !== null && drawn !== undefined && ground?.colorAt(ix, iz, hill)) {
+    if (drawn !== null && drawn !== undefined && !caveCutoutHit(cutout, wx, drawn, wz)
+      && ground?.colorAt(ix, iz, hill)) {
+      // MESH_SAG: how far below the analytic field a terrain chord may
+      // legitimately hang (the vertices are 4-8m apart, so a convex crest is cut
+      // by its chord). Past that the mesh is not sagging — it is CARVED, and a
+      // carved doorway is not evidence that the rock around it is exposed.
+      const MESH_SAG = 0.6;
+      const natural = getIslandSurfaceY(island, wx, wz, { skipMouthCarve: true });
+      const ref = Math.max(drawn, natural - MESH_SAG);
       // How far this vertex stands out of the hill. Buried by more than a
       // third of a metre and nobody can see it, so nothing changes.
-      t = THREE.MathUtils.smoothstep(cave.position.y + pos.getY(i) - drawn, -0.35, 0.45);
+      t = THREE.MathUtils.smoothstep(vy - ref, -0.35, 0.45);
       if (t > 0) out.lerp(hill, t);
     }
     colors[i * 3] = out.r;
@@ -260,8 +283,15 @@ const CAVE_DECOR_MIN_BURIAL = 1.5;
  *      the prop's own xz. The mouth trench is skipped deliberately: the trench
  *      is open by design and the throat collar draws rock around it, so the
  *      carved ground there is not evidence the prop is exposed.
+ *  (c) …and below the DRAWN hillside by most of that, because the analytic field
+ *      is not what the player looks at. On a steep flank the terrain mesh's
+ *      4-8m chords hang metres below the function they sample, so a crystal
+ *      cluster the analytic gate called "1.5m of rock overhead" hung in open air
+ *      out of the mountain — the pale spiky star the audit shot on the caldera
+ *      slope (p2-night-caldera-summit-close). A hole cut by the mouth cutout is
+ *      not evidence either way, so drawn ground inside one is ignored.
  */
-function makeCaveDecorGate(island: Island, cave: IslandCave) {
+function makeCaveDecorGate(island: Island, cave: IslandCave, ground: MeshGround | null, cutout: CaveCutout | null) {
   const cosCave = Math.cos(cave.rotation);
   const sinCave = Math.sin(cave.rotation);
   const caves = island.caves ?? [cave];
@@ -270,7 +300,10 @@ function makeCaveDecorGate(island: Island, cave: IslandCave) {
     const wy = cave.position.y + ly;
     const wz = cave.position.z - lx * sinCave + lz * cosCave;
     if (!caves.some((other) => insideCaveShellVolume(other, wx, wy, wz))) return false;
-    return wy <= getIslandSurfaceY(island, wx, wz, { skipMouthCarve: true }) - CAVE_DECOR_MIN_BURIAL;
+    if (wy > getIslandSurfaceY(island, wx, wz, { skipMouthCarve: true }) - CAVE_DECOR_MIN_BURIAL) return false;
+    const drawn = ground?.heightAt(wx - island.position.x, wz - island.position.z);
+    if (drawn === null || drawn === undefined || caveCutoutHit(cutout, wx, drawn, wz)) return true;
+    return wy <= drawn - CAVE_DECOR_MIN_BURIAL * 0.7;
   };
 }
 
@@ -298,6 +331,9 @@ export function makeCaveMouthCarver(island: Island): (worldX: number, worldZ: nu
 export function buildCaves(ctx: IslandBuildCtx) {
   const { island, group, rng, lowDetail, isVolcanic, paletteRock, cliffColor } = ctx;
   const meshGround = ensureMeshGround(ctx);
+  // The same mouth boxes the terrain material cuts its holes on: where the
+  // hillside is a HOLE, it is not a hillside the shell has to hide behind.
+  const caveCutout = buildCaveCutout(island);
   if (island.caves && island.caves.length > 0) {
     // Cave stone is the MOUNTAIN'S OWN rock (its palette, darkened for depth) so
     // the mouth reads as an opening carved into the rock face — not a foreign
@@ -560,7 +596,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
       // crown surfaces beside the collar's — same brown plate, same remedy.
       // Deeper segments come out all-zeros (they are metres under the hill), so
       // the attribute the shared material reads is simply always there.
-      tintShellToHillside(tubeGeo, island, cave, meshGround, caveRockCol);
+      tintShellToHillside(tubeGeo, island, cave, meshGround, caveRockCol, caveCutout);
       mottleShellColors(tubeGeo, cw * 31 + 7);
       const tube = new THREE.Mesh(tubeGeo, caveRockMat);
       tube.name = 'cave-tube';
@@ -603,7 +639,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
         // …and whatever the burial could NOT reach — the hill over this mouth
         // being thinner than the collar is tall — stops being a brown plate and
         // becomes hillside.
-        tintShellToHillside(collarGeo, island, cave, meshGround, paletteRock.clone().multiplyScalar(0.7));
+        tintShellToHillside(collarGeo, island, cave, meshGround, paletteRock.clone().multiplyScalar(0.7), caveCutout);
         mottleShellColors(collarGeo, cw * 47 + 13);
         const collar = new THREE.Mesh(collarGeo, collarMat);
         collar.name = 'cave-collar';
@@ -617,7 +653,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
       // to bury it. `siteDecor` slides a prop DEEPER along its own tunnel until
       // the gate accepts it (deeper is always more overburden — the floor ramps
       // into the hill) and reports failure when the whole segment is too thin.
-      const decorOk = makeCaveDecorGate(island, cave);
+      const decorOk = makeCaveDecorGate(island, cave, meshGround, caveCutout);
       /** Floor height at a local z, following the segment's own ramp — the same
        *  ramp the tube loft and the physics floor use. Props pinned to the NEAR
        *  floor alone sank through (or hovered over) the floor deeper in. */
