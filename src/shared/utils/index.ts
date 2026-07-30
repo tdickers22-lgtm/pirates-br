@@ -1,6 +1,6 @@
 import { createNoise2D } from 'simplex-noise';
 import type { Island, IslandCave, IslandDock, IslandGeyser, IslandTavern, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
-import { SHIP, SHIP_STATS, PLAYER } from '../constants/index.js';
+import { SHIP, SHIP_STATS, PLAYER, STORM_TAILWIND } from '../constants/index.js';
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -296,6 +296,50 @@ export function sampleWind(t: number): { direction: number; strength: number } {
   );
   const strength = clamp(0.9 + Math.sin(t * 0.008 - 0.35) * 0.08, 0.78, 0.98);
   return { direction, strength };
+}
+
+/**
+ * THE WIND WHERE THIS HULL ACTUALLY IS.
+ *
+ * sampleWind is the prevailing breeze over the whole sea — one direction, one
+ * strength, everywhere. It is also the reason the storm outran the boat: a ring
+ * that displaces 300–500 m every two minutes against a hull that makes ~10 u/s
+ * at best trim and 1.3 u/s square-rigged is a chase you lose by standing still,
+ * and the ocean offered no help at all to a crew already caught outside.
+ *
+ * So OUTSIDE the wall the local wind turns into a gale out of the tempest and
+ * blows toward shelter: the yard fills, a hull pointed at the eye runs, and one
+ * pointed away claws. It ramps from nothing exactly AT the ring (so nobody
+ * inside ever feels a shove) to the full boost STORM_TAILWIND.FULL_AT_RADIUS
+ * _FRACTION of the safe radius outside it.
+ *
+ * `direction` follows PhysicsSystem's convention: the yaw the wind blows TOWARD,
+ * so a ship whose rotation equals it is on a dead run.
+ */
+export function sampleLocalWind(
+  t: number,
+  x: number,
+  z: number,
+  storm: { centerX: number; centerZ: number; safeRadius: number } | null | undefined,
+): { direction: number; strength: number; tailwind: number } {
+  const base = sampleWind(t);
+  if (!storm) return { ...base, tailwind: 0 };
+  const dx = storm.centerX - x;
+  const dz = storm.centerZ - z;
+  const d = Math.hypot(dx, dz);
+  const outside = d - storm.safeRadius;
+  if (outside <= 0 || d < 1e-3) return { ...base, tailwind: 0 };
+  const full = Math.max(1, storm.safeRadius * STORM_TAILWIND.FULL_AT_RADIUS_FRACTION);
+  const ramp = clamp(outside / full, 0, 1);
+  // Shortest arc toward "blowing at the eye" — a raw lerp of two yaws would
+  // swing a hull the long way round whenever the pair straddles ±PI.
+  const toShelter = Math.atan2(dx, dz);
+  const swing = angleWrap(toShelter - base.direction) * STORM_TAILWIND.DIRECTION_AUTHORITY * ramp;
+  return {
+    direction: angleWrap(base.direction + swing),
+    strength: base.strength * (1 + STORM_TAILWIND.STRENGTH_BOOST * ramp),
+    tailwind: ramp,
+  };
 }
 
 export function directionToYaw(dx: number, dz: number): number {

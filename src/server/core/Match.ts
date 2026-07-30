@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -34,6 +34,7 @@ import {
   dist2D,
   angleWrap,
   clamp,
+  sampleLocalWind,
   getShipDeckRaiseAt,
   getShipDeckY,
   getCrowNestStandingY,
@@ -377,6 +378,9 @@ export class Match {
    *  Weather only. Combat immunity stays respawnProtectionTimer — fifteen seconds
    *  of untouchable would be a boarding tool, not a mercy. */
   private stormGraceUntil = new Map<string, number>();
+  /** Hulls whose crew has already been handed the first-sail trim (once per hull,
+   *  see applyFirstSailAssist). */
+  private firstSailAssisted = new Set<string>();
 
   // ── Hold cargo / bounty / sunken spoils (see shared/cargo.ts) ──────────
   /** Monotonic source for the short spoil ids that ride the wire ('sp7'). */
@@ -2040,6 +2044,7 @@ export class Match {
           // flicker the moment the raise completed.
           ship.anchored = false;
           ship.anchorRaiseProgress = 1;
+          this.applyFirstSailAssist(ship);
         }
       }
 
@@ -2139,6 +2144,7 @@ export class Match {
           if (ship.anchorRaiseProgress >= 1) {
             ship.anchored = false;
             ship.anchorRaiseProgress = 1;
+            this.applyFirstSailAssist(ship);
           }
         }
         // Slower than the rope stations — the helm trim is a convenience, the
@@ -6972,6 +6978,46 @@ export class Match {
         },
       });
     }
+  }
+
+  /**
+   * THE FIRST TIME A CREW GETS UNDER WAY, THE YARD IS ALREADY TRIMMED.
+   *
+   * A fresh berth hands you a hull with the yard SQUARE, and square on any reach
+   * catches almost none of the wind: PhysicsSystem's floor (0.16 of the polar) is
+   * every drop of speed a new captain ever saw. The objective says "hold W to get
+   * under way", so he holds W, the canvas comes down, the ship makes 0.3 u/s and
+   * then decays — and the only thing on screen that could have told him why was a
+   * trim clause in a side panel he had no reason to read. Bots have auto-trimmed
+   * since the day they were written; the human was the only sailor in the world
+   * expected to know about the brace keys before his first metre.
+   *
+   * So the anchor coming up hands the crew a working trim: FIRST_SAIL_ASSIST
+   * .TRIM_FRACTION of the wind-optimal yard angle (≈93% catch, not 100% — there
+   * is still a better trim to find) and enough canvas out to move. ONCE per hull:
+   * after that the yard is the crew's business, and a captain who deliberately
+   * squares up to slow down keeps what he set.
+   *
+   * It only ever ADDS canvas. Shortening sail is a real order — a hull creeping
+   * into a berth under reefed sails must not be given full main by a helper.
+   */
+  private applyFirstSailAssist(ship: Ship): void {
+    if (this.firstSailAssisted.has(ship.id)) return;
+    this.firstSailAssisted.add(ship.id);
+    const wind = sampleLocalWind(this.t, ship.position.x, ship.position.z, this.state.storm);
+    const signedRelative = angleWrap(wind.direction - ship.rotation);
+    // 0.92 is PhysicsSystem's own desired-trim constant — the same optimum the
+    // HUD's Catch% is measured against, so this reads as a high number there.
+    const optimal = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
+    ship.sailAngle = clamp(
+      optimal * FIRST_SAIL_ASSIST.TRIM_FRACTION,
+      -SHIP.MAX_SAIL_ANGLE,
+      SHIP.MAX_SAIL_ANGLE,
+    );
+    ship.sailHeight = Math.max(
+      ship.sailHeight,
+      Math.min(clamp(ship.sailIntegrity, 0, 1), FIRST_SAIL_ASSIST.MIN_SAIL_HEIGHT),
+    );
   }
 
   private getNearbyCannonIndex(player: Player, ship: Ship): number | null {

@@ -4,11 +4,11 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import * as THREE from 'three';
-import { ECONOMY, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHIP_STATS, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
+import { ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
 import { countOpenHoles } from '../../shared/interactions.js';
-import { angleWrap, dist2D, isPointInsideIslandFootprint, sampleWind } from '../../shared/utils/index.js';
+import { angleWrap, dist2D, isPointInsideIslandFootprint, sampleLocalWind } from '../../shared/utils/index.js';
 import type { ClientInteractKind, FloatingDamageIndicator } from '../core/Game.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from '../rendering/OceanRenderer.js';
@@ -250,6 +250,78 @@ export class HudController {
     }
     this.overloadChip.style.display = 'block';
     this.overloadShown = true;
+  }
+
+  // ─── The reprieve you come back with ─────────────────────────
+  /**
+   * THE DEATH CAROUSEL, WITH THE SECONDS SHOWN.
+   *
+   * The ring crossed a learner's spawn dock, killed him six seconds after it
+   * arrived, put him back on the same deck inside the same weather and killed him
+   * again — three times in three minutes. The server now hands every respawn
+   * STORM_RESPAWN_GRACE_SECONDS of immunity FROM THE WEATHER ONLY, and a reprieve
+   * nobody can see is indistinguishable from luck: he needs to know he has fifteen
+   * seconds, and to feel the moment they run out.
+   *
+   * Local clock, armed off the one `player_spawned` message (Game.onPlayerSpawned)
+   * — no per-tick field on the wire for a chip that counts down predictably.
+   */
+  private stormReprieveUntilMs = 0;
+  private stormReprieveAshore = false;
+  private reprieveChip: HTMLDivElement | null = null;
+  private reprieveChipText = '';
+
+  noteStormReprieve(seconds: number, ashore: boolean): void {
+    if (!(seconds > 0)) {
+      this.stormReprieveUntilMs = 0;
+      return;
+    }
+    this.stormReprieveUntilMs = performance.now() + seconds * 1000;
+    this.stormReprieveAshore = ashore;
+  }
+
+  private updateStormReprieveChip(player: Player): void {
+    const left = (this.stormReprieveUntilMs - performance.now()) / 1000;
+    // Dying again inside the reprieve ends it — the count belongs to a life.
+    if (left <= 0 || player.state === 'respawning' || player.state === 'eliminated') {
+      this.setReprieveChip(null);
+      if (left <= 0) this.stormReprieveUntilMs = 0;
+      return;
+    }
+    const seconds = Math.max(1, Math.ceil(left));
+    this.setReprieveChip(this.stormReprieveAshore
+      ? `⛈ Storm reprieve ${seconds}s — put ashore inside the ring, your hull is elsewhere`
+      : `⛈ Storm reprieve ${seconds}s — make sail for the ring`);
+  }
+
+  private setReprieveChip(text: string | null): void {
+    if (text === null) {
+      if (this.reprieveChip) this.reprieveChip.style.display = 'none';
+      this.reprieveChipText = '';
+      return;
+    }
+    if (!this.reprieveChip) {
+      const chip = document.createElement('div');
+      chip.id = 'storm-reprieve-chip';
+      // Under the storm clock, beside the server-load chip's slot — the top-centre
+      // stack is already where "what is happening to me right now" lives.
+      chip.style.cssText = [
+        'position:fixed', 'top:112px', 'left:50%', 'transform:translateX(-50%)',
+        'z-index:60', 'pointer-events:none',
+        'padding:3px 10px', 'border-radius:999px',
+        'background:rgba(14,32,58,0.86)', 'border:1px solid rgba(126,190,255,0.5)',
+        'color:#a9d4ff', 'font-size:0.6rem', 'letter-spacing:0.14em',
+        'text-transform:uppercase', 'white-space:nowrap',
+        'text-shadow:0 2px 6px rgba(0,0,0,0.6)',
+      ].join(';');
+      document.body.appendChild(chip);
+      this.reprieveChip = chip;
+    }
+    if (this.reprieveChipText !== text) {
+      this.reprieveChipText = text;
+      this.reprieveChip.textContent = text;
+    }
+    this.reprieveChip.style.display = 'block';
   }
 
   // ─── Respawn countdown ───────────────────────────────────────
@@ -577,6 +649,7 @@ export class HudController {
 
     this.updateBarrelPanel(player, ship);
     this.updateServerLoadChip();
+    this.updateStormReprieveChip(player);
 
     const timerSeconds = this.view.getStormTimerSeconds();
     const lastPhase = this.view.state.storm.phase >= STORM_PHASES.length - 1;
@@ -657,7 +730,16 @@ export class HudController {
       this.view.ui.shipLeaks.style.color = openLeaks >= 4
         ? '#ff8a6a'
         : openLeaks > 0 ? '#ffb37a' : '#7fe0a0';
-      const wind = sampleWind(this.view.ocean.getTime());
+      // The wind WHERE SHE IS. PhysicsSystem sails every hull on sampleLocalWind,
+      // so reading the prevailing breeze here would print a trim instruction for a
+      // wind this hull is not in — the one place a captain outside the ring is
+      // certain to be looking while the gale is the only thing that can save her.
+      const wind = sampleLocalWind(
+        this.view.ocean.getTime(),
+        ship.position.x,
+        ship.position.z,
+        this.view.state?.storm ?? null,
+      );
       const signedRelative = angleWrap(wind.direction - ship.rotation);
       // 0.92 matches PhysicsSystem's desired-trim constant + the sail-cloth luff
       // visual, so the displayed Catch% peaks exactly where the ship is fastest.
@@ -685,10 +767,17 @@ export class HudController {
       this.updateWindVane(signedRelative, windLine);
       const sailPct = Math.round(ship.sailHeight * 100);
       const canvas = sailPct < 5 ? 'Sails furled' : `Sails ${sailPct}% out`;
+      // HOW FAST SHE IS ACTUALLY GOING, measured off the hull's own velocity.
+      // The only speed number the HUD ever showed was the ship card's "TOP SPEED
+      // 15.0 kn", which is a stat-sheet ceiling in world units wearing a knots
+      // label — an audit measured 1.26 u/s at the wheel and reasonably called the
+      // card a lie. This is the reading that cannot lie: the same vector the
+      // server integrates, in knots, changing as the canvas fills.
+      const speedLine = this.speedPhrase(ship, wind.tailwind);
       if (!aboard) {
         // Ashore: STATE, never orders.
         this.view.ui.sailStatus.textContent =
-          `${ship.anchored ? 'Anchored' : 'Under way'} · ${canvas}${rig} · ${windLine}`;
+          `${ship.anchored ? 'Anchored' : `Under way · ${speedLine}`} · ${canvas}${rig} · ${windLine}`;
       } else if (ship.anchored) {
         // The helm can weigh the anchor too now, so the panel must not send a
         // lone captain forward to the bow capstan. But "or [W] at the helm"
@@ -704,9 +793,11 @@ export class HudController {
         const trim = player.atHelm
           ? ` · sails ${trimSide}, catching ${Math.round(trimCatch * 100)}% of the wind · ${trimHint}`
           : '';
-        this.view.ui.sailStatus.textContent = `${canvas}${rig}${trim} · ${windLine}`;
+        this.view.ui.sailStatus.textContent = `${speedLine} · ${canvas}${rig}${trim} · ${windLine}`;
       }
+      this.updateSailCoach(player, ship, signedRelative, trimCatch);
     } else {
+      this.updateSailCoach(player, null, 0, 0);
       this.view.ui.sailStatus.textContent = 'No tracked ship';
       this.updateWindVane(null, '');
     }
@@ -1504,14 +1595,22 @@ export class HudController {
       return;
     }
 
-    const baseStats = SHIP_STATS[ship.type];
     const hasHull = ship.upgrades.some((u) => u.type === 'hull_reinforcement');
     const hasCannons = ship.upgrades.some((u) => u.type === 'charged_cannons');
     const hasSails = ship.upgrades.some((u) => u.type === 'swift_sails');
 
     const cannonBaseDmg = SHIP.CANNON_DAMAGE_HULL;
     const cannonDmg = Math.round(cannonBaseDmg * (hasCannons ? SHIP_UPGRADES.CANNON_DAMAGE_MULT : 1));
-    const sailSpeed = (baseStats.maxSpeed * (hasSails ? SHIP_UPGRADES.SWIFT_SPEED_MULT : 1)).toFixed(1);
+    // THE CARD MAY NOT QUOTE A SPEED. It printed "TOP SPEED 15.0 kn" — maxSpeed,
+    // which is a metres-per-second ceiling wearing a knots label and reachable
+    // only on a trimmed broad reach. An auditor sailing at 1.26 u/s read it as a
+    // straight lie and was right to. The LIVE number lives in the sail panel now
+    // (speedPhrase, measured off the hull's velocity); what belongs on a card
+    // about UPGRADES is the delta the upgrade buys, which is what the other two
+    // rows already say ("−30% flood", "+45%").
+    const speedRating = hasSails
+      ? `Swift <em>(+${Math.round((SHIP_UPGRADES.SWIFT_SPEED_MULT - 1) * 100)}%)</em>`
+      : 'Standard';
 
     const signature = [
       ship.id,
@@ -1537,8 +1636,8 @@ export class HudController {
         </span>
         <span class="ship-stat" data-stat="sails"${hasSails ? ' data-upgraded="1"' : ''}>
           <span class="ship-stat-icon">✦</span>
-          <span class="ship-stat-label">Top Speed</span>
-          <span class="ship-stat-value">${sailSpeed}<span class="ship-stat-unit">kn</span>${hasSails ? ` <em>(+${Math.round((SHIP_UPGRADES.SWIFT_SPEED_MULT - 1) * 100)}%)</em>` : ''}</span>
+          <span class="ship-stat-label">Rigging</span>
+          <span class="ship-stat-value">${speedRating}</span>
         </span>
       </div>
     `;
@@ -1566,6 +1665,116 @@ export class HudController {
         ? `${Math.max(1, Math.ceil(player.kegCooldown))}s until second keg`
         : player.kegs === 1 ? '1 ready' : `${player.kegs} ready`;
     return player.megaKegs > 0 ? `Mega ${player.megaKegs} ready · ${normal}` : normal;
+  }
+
+  // ─── Speed, measured rather than advertised ──────────────────
+  /**
+   * One world unit is one metre (islands are sized in them, the ring is quoted in
+   * them), so a hull's speed in knots is |velocity| × this. Kept here beside the
+   * only readout that uses it: the number is a UNIT CONVERSION of the server's own
+   * velocity vector, never a stat-sheet figure.
+   */
+  private static readonly KNOTS_PER_UNIT = 1.94384;
+
+  /**
+   * "making 21.6 kn", and whether the storm is doing the pushing.
+   *
+   * The ship card advertised "TOP SPEED 15.0 kn" — SHIP_STATS.maxSpeed printed
+   * with a knots label, which is neither the unit (it is metres per second) nor
+   * reachable on most points of sail. A fresh-eyes audit measured 1.26 u/s at the
+   * wheel, read the card, and correctly concluded the HUD was lying to it. The
+   * honest fix is to stop advertising and start MEASURING: this is the hull's own
+   * velocity, converted, and it is the number that moves when the yard comes round.
+   *
+   * The gale gets named when it is helping. Outside the ring sampleLocalWind turns
+   * the wind into a storm gale blowing toward shelter, which can more than double
+   * a hull's speed — a captain who sees 22 kn out of nowhere is owed the reason.
+   */
+  private speedPhrase(ship: Ship, tailwind: number): string {
+    const knots = Math.hypot(ship.velocity.x, ship.velocity.z) * HudController.KNOTS_PER_UNIT;
+    const made = knots < 0.15 ? 'dead in the water' : `making ${knots.toFixed(1)} kn`;
+    return tailwind > 0.05 ? `${made} · STORM GALE ASTERN` : made;
+  }
+
+  // ─── The first sail: nobody may be left leaning on W ─────────
+  /** performance.now() when the canvas first went slack at this player's wheel. */
+  private sailCoachSince = 0;
+  private sailCoachEl: HTMLDivElement | null = null;
+  private sailCoachText = '';
+
+  /**
+   * A CAPTAIN WHO IS GETTING NO WIND MUST BE TOLD, IN THE MIDDLE OF THE SCREEN.
+   *
+   * The trap the audit fell into: the objective said "hold W to get under way", so
+   * it held W. The anchor came up, the canvas came down, and the ship made 0.3 u/s
+   * and decayed, because a square yard pointed near the wind catches almost
+   * nothing (PhysicsSystem's polar floor is 0.10 in irons). Everything needed to
+   * escape that was on screen — in a right-hand side panel, in small type, behind
+   * sailing vocabulary. Nobody reads a panel while nothing is happening.
+   *
+   * FIRST_SAIL_ASSIST trims the yard on the first anchor-up, so this is the second
+   * net: the two ways to make no way each get their own instruction, and they are
+   * different instructions. Yard wrong → brace it ([Q]/[F]). Bow into the wind →
+   * no trim on earth helps, STEER off it ([A]/[D]). Only at the wheel, only after
+   * FIRST_SAIL_ASSIST.COACH_AFTER_SECONDS of it, so a hull passing through the
+   * no-go cone mid-tack never gets shouted at.
+   */
+  private updateSailCoach(
+    player: Player,
+    ship: Ship | null,
+    signedRelative: number,
+    trimCatch: number,
+  ): void {
+    const offWind = Math.PI - Math.abs(angleWrap(signedRelative));
+    const inIrons = offWind <= SHIP.SAIL_NO_GO_ANGLE;
+    const stalled = !!ship
+      && player.atHelm
+      && !ship.anchored
+      && player.state === 'alive'
+      && ship.sailHeight > 0.08
+      && (inIrons || trimCatch < FIRST_SAIL_ASSIST.COACH_CATCH);
+    if (!stalled) {
+      this.sailCoachSince = 0;
+      this.setSailCoach(null);
+      return;
+    }
+    const now = performance.now();
+    if (this.sailCoachSince === 0) this.sailCoachSince = now;
+    if ((now - this.sailCoachSince) / 1000 < FIRST_SAIL_ASSIST.COACH_AFTER_SECONDS) return;
+    this.setSailCoach(inIrons
+      ? 'Bow into the wind — steer [A] or [D] until the sails fill'
+      : 'Sails are slack — press [Q] or [F] to swing the yard into the wind');
+  }
+
+  private setSailCoach(text: string | null): void {
+    if (text === null) {
+      if (this.sailCoachEl) this.sailCoachEl.style.display = 'none';
+      this.sailCoachText = '';
+      return;
+    }
+    if (!this.sailCoachEl) {
+      const el = document.createElement('div');
+      el.id = 'sail-coach-hint';
+      // Deliberately the pointer-lock hint's own look and place (index.html
+      // #pointer-lock-hint): the game already taught the player that a gold pill
+      // in the middle of the screen is an instruction they can act on.
+      el.style.cssText = [
+        'position:fixed', 'left:50%', 'top:clamp(140px,18vh,208px)', 'transform:translateX(-50%)',
+        'z-index:95', 'pointer-events:none',
+        'padding:9px 16px', 'border-radius:999px',
+        'background:rgba(4,14,28,0.85)', 'border:1px solid rgba(201,168,76,0.34)',
+        'color:#f0ddb2', 'font-size:0.74rem', 'letter-spacing:0.18em',
+        'text-transform:uppercase', 'white-space:nowrap',
+        'text-shadow:0 2px 6px rgba(0,0,0,0.6)',
+      ].join(';');
+      document.body.appendChild(el);
+      this.sailCoachEl = el;
+    }
+    if (this.sailCoachText !== text) {
+      this.sailCoachText = text;
+      this.sailCoachEl.textContent = text;
+    }
+    this.sailCoachEl.style.display = 'block';
   }
 
   // ─── Wind, in words ──────────────────────────────────────────

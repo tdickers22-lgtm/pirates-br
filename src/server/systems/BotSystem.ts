@@ -6,7 +6,7 @@ import {
   BOT_CANNON_CADENCE_BY_PHASE, BOT_CANNON_ACCURACY_BY_PHASE, botPhaseScale,
   WRECK_EVENT,
 } from '../../shared/constants/index.js';
-import { dist2D, randAngle, angleWrap, sampleWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
+import { dist2D, randAngle, angleWrap, sampleLocalWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 import { countOpenHoles, getCannonBroadsideYaw } from '../../shared/interactions.js';
 import { applyShipRudderSteering } from './PhysicsSystem.js';
@@ -167,6 +167,9 @@ export class BotSystem {
   private prizeShipIds: Set<string> = new Set();
   /** This tick's hulls, for arbitrating who is nearest a claimed chest. */
   private lureShips: Ship[] = [];
+  /** This tick's ring — read only for the LOCAL wind a hull is actually sailing
+   *  in (sampleLocalWind). Null before the first update. */
+  private storm: StormState | null = null;
 
   setEventLure(lure: EventLure | null) {
     this.eventLure = lure;
@@ -235,6 +238,13 @@ export class BotSystem {
   ) {
     // Hull positions for the event-claim arbitration below (see freeEventChest).
     this.lureShips = ships;
+    // The ring, for the WIND. PhysicsSystem sails every hull on sampleLocalWind
+    // now (a gale out of the tempest outside the wall), so a bot trimming and
+    // tacking against the prevailing breeze would be trimming for a wind it is
+    // not in — square-rigged and crawling in exactly the weather it is trying
+    // to escape. Held on the instance because every steering call site is deep
+    // inside executeBehavior and already tick-scoped.
+    this.storm = storm;
     for (const [pid, bot] of this.bots) {
       const player = players.find(p => p.id === pid);
       const ship = ships.find(s => s.id === bot.shipId);
@@ -944,7 +954,8 @@ export class BotSystem {
     let desired = this.avoidObstacles(ship, targetAngle);
     // Upwind no-go awareness: a course inside the cone is unsailable — offset
     // to the nearer ~40°-off-the-wind tack instead of pinching straight in.
-    const wind = sampleWind(t);
+    // Read where the HULL is: outside the ring the wind is the storm's gale.
+    const wind = sampleLocalWind(t, ship.position.x, ship.position.z, this.storm);
     const upwind = angleWrap(wind.direction + Math.PI);
     const offUpwind = angleWrap(desired - upwind);
     if (Math.abs(offUpwind) < SHIP.SAIL_NO_GO_ANGLE) {
@@ -1261,7 +1272,7 @@ export class BotSystem {
   }
 
   private trimSails(ship: Ship, t: number, dt: number) {
-    const wind = sampleWind(t);
+    const wind = sampleLocalWind(t, ship.position.x, ship.position.z, this.storm);
     const signedRelative = angleWrap(wind.direction - ship.rotation);
     const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.95;
     const delta = desiredTrim - ship.sailAngle;

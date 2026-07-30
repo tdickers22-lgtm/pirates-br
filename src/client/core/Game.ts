@@ -1760,11 +1760,21 @@ export class Game {
     };
 
     this.network.onPlayerSpawned = (payload) => {
-      const event = payload as { playerId?: string; mermaid?: boolean };
+      const event = payload as {
+        playerId?: string; mermaid?: boolean; stormGrace?: number; ashore?: boolean;
+      };
       if (event.playerId === this.localPlayerId) {
         this.ui.deathScreen.style.display = 'none';
         // The HUD comes back with the pirate (see body.showing-death-screen).
         document.body.classList.remove('showing-death-screen');
+        // The weather stands down for a few seconds after every respawn (Match
+        // .grantStormRespawnGrace). Hand the length to the HUD so the chip can
+        // count it out — a reprieve nobody can see is indistinguishable from luck,
+        // and this one is the whole answer to being respawned inside the ring.
+        this.hud.noteStormReprieve(event.stormGrace ?? 0, event.ashore === true);
+        if (event.ashore) {
+          this.pushFeed('The tide put you ashore inside the ring — your ship is elsewhere.', '#a9d4ff');
+        }
         if (event.mermaid) {
           this.mermaidAnchor = null;
           if (this.mermaidGroup.visible) this.mermaidGroup.visible = false;

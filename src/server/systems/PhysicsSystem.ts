@@ -20,7 +20,7 @@ import {
   resolveCaveWallCollision,
   CAVE_WALL_PAD,
   isPointInsideIslandFootprint,
-  sampleWind,
+  sampleLocalWind,
   getCrowNestStandingY,
   getMainMastLocalZ,
   getShipCompanionwayConfig,
@@ -493,7 +493,6 @@ export class PhysicsSystem {
   }
 
   private updateShips(dt: number, t: number, ships: Ship[], players: Player[], islands: Island[], seaRocks: SeaRock[], storm: StormState | null) {
-    const wind = sampleWind(t);
     this.rebuildEnvSafeShips(t, ships, players, islands, storm);
     const helmedShipIds = new Set<string>();
     const helmsmanByShip = new Map<string, string>();
@@ -554,6 +553,15 @@ export class PhysicsSystem {
       // section used to (same 4-step ceiling at 8 holes as the old model).
       const breachDrag = Math.min(4, countOpenHoles(ship) / 2);
       const floodPenalty = Math.max(0.48, 1 - breachDrag * SHIP.FLOOD_SPEED_PENALTY);
+      // THE WIND IS A LOCAL FACT, NOT A GLOBAL ONE. A single sampleWind() for the
+      // whole sea is what let the weather outrun the boat: the ring displaces
+      // 300–500 m every two minutes and a crew caught outside it had nothing but
+      // their own canvas to argue with. Outside the wall the wind is now a gale
+      // out of the tempest blowing toward shelter (sampleLocalWind), so running
+      // for the eye is genuinely faster than clawing away from it. Inside the
+      // ring the ramp is exactly zero and this is the old prevailing breeze to
+      // the last decimal — nobody sailing in shelter feels a shove.
+      const wind = sampleLocalWind(t, ship.position.x, ship.position.z, storm);
       const signedRelative = angleWrap(wind.direction - ship.rotation);
       const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
       const trimError = Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE;
