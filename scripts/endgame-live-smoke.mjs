@@ -802,8 +802,15 @@ if (phase('j')) {
       const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
       const offWind = Math.PI - Math.abs(wrap(dir - bearing));
       return { i, d, offWind };
-    }).filter((c) => c.offWind > 0.9).sort((a, b) => a.d - b.d);
-    const isle = (reachable[0] ?? null)?.i;
+    }).sort((a, b) => a.d - b.d);
+    // Prefer a beach she can sail to on a decent point of sail, but not at ANY
+    // distance: one run drew Parley Point 776 m away and spent seven minutes not
+    // arriving. A shoal within CLOSE_M is worth crawling to at the in-irons floor
+    // (1.3 u/s covers 100 m in about eighty seconds) and is far more likely to
+    // produce the state this phase is here to photograph.
+    const CLOSE_M = 250;
+    const sailable = reachable.filter((c) => c.offWind > 0.9);
+    const isle = ((sailable[0] && sailable[0].d <= CLOSE_M ? sailable[0] : reachable[0]) ?? null)?.i;
     if (!isle) return null;
     // Steer straight at the beach and hold [W]: the mistake, exactly as a learner
     // makes it. The server owns whether that grounds her.
@@ -812,7 +819,7 @@ if (phase('j')) {
     return {
       isle: isle.name,
       from: Math.round(Math.hypot(isle.position.x - ship.position.x, isle.position.z - ship.position.z)),
-      offWindDeg: Math.round((reachable[0].offWind * 180) / Math.PI),
+      offWindDeg: Math.round(((reachable.find((c) => c.i === isle)?.offWind ?? 0) * 180) / Math.PI),
     };
   });
   say(`  standing in for ${put?.isle} from ${put?.from} m (${put?.offWindDeg}° off the wind)`);
