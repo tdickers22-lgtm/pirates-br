@@ -69,7 +69,7 @@ await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
 await page.evaluate(() => { try { localStorage.removeItem('piratesBR.seenControls'); } catch { /* private mode */ } });
 await page.click('#menu-solo-btn', { noWaitAfter: true });
 await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 180_000 });
-await wait(3000);
+await afterCeremony('on the first-ever join');
 
 const read = () => page.evaluate(() => {
   const cards = document.getElementById('onboard-cards');
@@ -82,6 +82,164 @@ const read = () => page.evaluate(() => {
     chip: document.getElementById('controls-toggle')?.textContent ?? '',
   };
 });
+
+/**
+ * Wait for the moment the tour is ALLOWED to open, then a few frames past it.
+ *
+ * HudController.maybeAutoOpenLegend refuses to deal the cards while
+ * `startCeremonyActive` is true — the opening horn owns the screen and a tutorial
+ * card on top of it is exactly the wall this slice removed. So "has the tour
+ * opened?" is only a real question after the ceremony, and the probe used to ask
+ * it after a flat 3000 ms instead. On the GPU that sleep outlasts the ceremony
+ * and the check happens to be right; on the software rasteriser, where one frame
+ * can cost six seconds, 3000 ms does not even buy a whole frame and the check
+ * fails against a game that is behaving perfectly.
+ *
+ * This matters MORE for the negative assertions than the positive one. "A second
+ * voyage does not re-deal the tour" passes trivially if nothing has had a chance
+ * to deal it — a vacuous pass is worse than a flake, because it never complains.
+ * Waiting on the ceremony flag and then spending real frames means the auto-open
+ * genuinely had its opportunity and genuinely declined to take it.
+ *
+ * WHERE THE FLAG ACTUALLY LIVES. `startCeremonyActive` is a getter on the HudView
+ * object Game hands the HUD, NOT on the Game instance `window.__piratesBR` points
+ * at — so the first cut of this gate read `undefined`, never matched `=== false`,
+ * and burned its whole 120 s budget three times over on a game that had rung the
+ * horn a minute earlier. It failed LOUDLY, which is the only reason it is being
+ * fixed rather than believed. The reading now goes through the two hooks that do
+ * exist — `isStartCeremonyActive()` (private to TypeScript, plain callable at
+ * runtime) and the `match-ceremony` body class the ceremony puts on the document
+ * — and if NEITHER resolves, the gate says so on the first frame instead of
+ * sleeping for two minutes to say it.
+ */
+async function afterCeremony(what, { extraFrames = 6, giveUpMs = 60_000 } = {}) {
+  const out = await page.evaluate(async ({ extraFrames, giveUpMs }) => {
+    const start = performance.now();
+    const frame = () => new Promise((r) => requestAnimationFrame(r));
+    // true / false / null, where null means "no hook answered" — a probe fault,
+    // not a game state, and worth saying immediately.
+    const readCeremony = () => {
+      const g = window.__piratesBR;
+      if (g && typeof g.isStartCeremonyActive === 'function') return g.isStartCeremonyActive();
+      if (typeof g?.startCeremonyActive === 'boolean') return g.startCeremonyActive;
+      if (document.body.classList.contains('match-ceremony')) return true;
+      // The class is only present DURING the ceremony, so its absence is a real
+      // answer once the match is up — but only if the game handle is there at all.
+      return g ? false : null;
+    };
+    if (readCeremony() === null) {
+      return { ready: false, reason: 'no ceremony hook on window.__piratesBR', waitedMs: 0, framesAfter: 0 };
+    }
+    let ceremonyEndedAt = null;
+    let frames = 0;
+    while (performance.now() - start < giveUpMs) {
+      await frame();
+      frames += 1;
+      const g = window.__piratesBR;
+      if (g && g.state?.phase === 'playing' && readCeremony() === false) {
+        if (ceremonyEndedAt === null) { ceremonyEndedAt = performance.now(); frames = 0; }
+        // Spend real frames AFTER the gate opens: maybeAutoOpenLegend runs in the
+        // HUD pass, so the cards need frames, not milliseconds, to appear.
+        if (frames >= extraFrames) {
+          return { ready: true, waitedMs: Math.round(performance.now() - start), framesAfter: frames };
+        }
+      }
+    }
+    return {
+      ready: false,
+      waitedMs: Math.round(performance.now() - start),
+      framesAfter: frames,
+      ceremony: readCeremony(),
+      phase: window.__piratesBR?.state?.phase ?? 'unknown',
+    };
+  }, { extraFrames, giveUpMs });
+  console.log(`  · ceremony over ${what}: ${JSON.stringify(out)}`);
+  if (!out.ready) ok(`the start ceremony ends ${what}`, false, JSON.stringify(out));
+  return out;
+}
+
+// Wait until the match is a match, not a start ceremony — and note that a fixed
+// sleep here is not a slow assertion, it is a WRONG one. The legend card is
+// DESIGNED to stand down while the player is doing the thing it teaches:
+// HudController.updateLegendCard closes it the moment `onShipId` changes
+// ("boarded"), and the opening ceremony is precisely when that field is still
+// moving. Press [L] into that window and the card opens on one frame and is
+// correctly shut on the next, so the probe photographs a closed legend and blames
+// the key binding for a feature working as written.
+//
+// This gate therefore asks TWO questions, and neither of them is "is the machine
+// fast".
+//
+// The first version asked for eight consecutive frames inside a fixed 400 ms and
+// then, on software GL, simply burned its whole timeout and carried on — a
+// sixty-second sleep wearing a check's clothes. Raising the budget to 1600 ms
+// only moved the lie: the cold first match still throws 4972 ms frames often
+// enough to keep resetting the streak, so the gate reported "not settled" for a
+// world that was perfectly ready. Both readings were noise about the RASTERISER.
+// A software rasteriser IS slow; that is not a defect and it is not what this
+// probe is here to find. Widening the number again would only have hidden it a
+// third time.
+//
+// So the speed threshold is gone. What actually has to be true before [L] is
+// pressed is: (a) the frame loop is ALIVE, because the toggle is consumed inside
+// it and a key pressed into a dead loop is never seen; and (b) the boarding
+// state has stopped moving, because HudController.updateLegendCard deliberately
+// shuts the card the moment `onShipId` changes, and the opening ceremony is
+// exactly when it does. Liveness plus stability. Frame times are still reported,
+// as diagnostics, so a genuinely stalled client is legible in the output — but
+// nothing is graded against them.
+async function settle(what, { holdMs = 1400, needFrames = 8, giveUpMs = 45_000 } = {}) {
+  const out = await page.evaluate(async ({ holdMs, needFrames, giveUpMs }) => {
+    const start = performance.now();
+    const frame = () => new Promise((r) => requestAnimationFrame(r));
+    let frames = 0;
+    let prev = start;
+    let worst = 0;
+    let lastShip = Symbol('unset');
+    let stableSince = start;
+    while (performance.now() - start < giveUpMs) {
+      await frame();
+      const now = performance.now();
+      worst = Math.max(worst, now - prev);
+      prev = now;
+      frames += 1;
+      const ship = window.__piratesBR?.getLocalPlayer?.()?.onShipId ?? null;
+      if (ship !== lastShip) { lastShip = ship; stableSince = now; }
+      if (frames >= needFrames && now - stableSince >= holdMs) {
+        return { settled: true, waitedMs: Math.round(now - start), frames, worstFrameMs: Math.round(worst), onShipId: ship };
+      }
+    }
+    return {
+      settled: false,
+      waitedMs: Math.round(performance.now() - start),
+      frames,
+      worstFrameMs: Math.round(worst),
+      onShipId: typeof lastShip === 'symbol' ? null : lastShip,
+    };
+  }, { holdMs, needFrames, giveUpMs });
+  console.log(`  · settled ${what}: ${JSON.stringify(out)}`);
+  // A gate that gives up is not a gate. Failing to see eight frames in 45 s means
+  // the client is genuinely wedged, and that is worth a failed check, not a shrug.
+  if (!out.settled) ok(`the world settles ${what}`, false, JSON.stringify(out));
+  return out;
+}
+
+/**
+ * Press [L] once and WAIT for the card, instead of sampling 600 ms later and
+ * calling the sample the answer. One press is one toggle, so polling is safe —
+ * it never presses again, it just stops guessing how long a frame takes.
+ */
+async function pressLegend(timeoutMs = 25_000) {
+  await page.evaluate(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL', key: 'l', bubbles: true }));
+    setTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyL', key: 'l', bubbles: true })), 70);
+  });
+  await page.waitForFunction(() => {
+    const legend = document.getElementById('controls-hint');
+    return !!legend && getComputedStyle(legend).display === 'block';
+  }, null, { timeout: timeoutMs }).catch(() => { /* let the assertion below say so */ });
+  return read();
+}
 
 console.log('\nA first voyage, then the way back in:');
 const opened = await read();
@@ -97,12 +255,8 @@ ok('and skipping does NOT dump the fourteen-line legend instead', skipped.legend
 await shot('2-after-skip');
 
 // The [L] KEY — the binding the chip advertises.
-await page.evaluate(() => {
-  document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL', key: 'l', bubbles: true }));
-  setTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyL', key: 'l', bubbles: true })), 70);
-});
-await wait(600);
-const byKey = await read();
+await settle('before the first [L]');
+const byKey = await pressLegend();
 ok('the [L] key really opens the controls card the chip promises',
   byKey.legendOpen === true, JSON.stringify(byKey));
 await shot('3-legend-by-L-key');
@@ -148,9 +302,7 @@ await page.waitForSelector('#menu-solo-btn', { state: 'visible', timeout: 30_000
 await wait(800);
 await page.click('#menu-solo-btn', { noWaitAfter: true });
 await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 180_000 });
-// Give the auto-open its whole window: it fires off the HUD frame loop once the
-// start ceremony is done, so a short wait here would prove nothing.
-await wait(9000);
+await afterCeremony('on the same-page rematch');
 const second = await read();
 ok('a same-page rematch does NOT re-deal the tour', second.cardsOpen === false, JSON.stringify(second));
 ok('and it does not fall back to dumping the legend either', second.legendOpen === false, `legendOpen=${second.legendOpen}`);
@@ -167,18 +319,15 @@ const flagSurvived = await page.evaluate(() => {
 ok('the flag survives a page reload', flagSurvived === '1', `piratesBR.seenControls=${flagSurvived}`);
 await page.click('#menu-solo-btn', { noWaitAfter: true });
 await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 180_000 });
-await wait(9000);
+await afterCeremony('after the reload');
 const third = await read();
 ok('a reloaded profile does NOT re-deal the tour', third.cardsOpen === false, JSON.stringify(third));
 await shot('7-after-reload-no-tour');
 
 // …but the door is still open. A one-shot tutorial you can never get back is
 // what this whole slice exists to undo.
-await page.evaluate(() => {
-  document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL', key: 'l', bubbles: true }));
-  setTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyL', key: 'l', bubbles: true })), 70);
-});
-await wait(600);
+await settle('before the veteran re-deal');
+await pressLegend();
 await page.click('#legend-howto-btn');
 await wait(500);
 const reopened = await read();
