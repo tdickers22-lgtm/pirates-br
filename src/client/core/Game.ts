@@ -30,7 +30,7 @@ import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
 import { assets, type AssetName } from '../assets/AssetLibrary.js';
 import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
-import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MID, weaponDisplayName } from '../ui/DisplayNames.js';
+import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MID, shipClassName, weaponDisplayName } from '../ui/DisplayNames.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { HudController, type HudView } from '../ui/HudController.js';
@@ -535,6 +535,27 @@ export class Game {
   private static readonly SPECTATE_RADIUS = 9.5;
   private static readonly SPECTATE_HEIGHT = 7.2;
   private static readonly SPECTATE_CLEARANCE = 4.2;
+  // ── After the lift: SOMETHING TO WATCH ─────────────────────────────────────
+  // Climbing out of the water fixed the black screen, but what it revealed was
+  // usually open sea — you died where nothing is, so the raised frame held a
+  // corpse and a horizon for the rest of the round. Once the lift is done the
+  // rig hands off to a LIVING crew: it flies to whoever is still fighting
+  // nearest to you and orbits them, and the HUD says whose deck you are over
+  // and where you finished. If the fleet is somehow empty it falls back to the
+  // storm ring, which is the other thing still moving.
+  /** 0→1 blend from orbiting your own body to orbiting the watched crew. */
+  private spectateHandoff = 0;
+  private static readonly SPECTATE_HANDOFF_SECONDS = 2.8;
+  /** Orbit framing once handed off — a hull needs more room than a corpse. */
+  private static readonly SPECTATE_SUBJECT_RADIUS = 31;
+  private static readonly SPECTATE_SUBJECT_HEIGHT = 17;
+  /** Who the spectate camera is watching, re-picked only when it has to be. */
+  private spectateSubjectId: string | null = null;
+  private spectateSubjectLabel = '';
+  private readonly spectateSubjectPos = new THREE.Vector3();
+  private spectateRepickAt = 0;
+  /** Frozen the instant you are eliminated: crews still afloat + 1 is your place. */
+  private spectatePlacement: { place: number; of: number } | null = null;
   private prevCutlassSwingProgress = 0;
   /** 0..1 FOV punch on the cutlass dash, decays fast (rush feel). */
   private cutlassDashKick = 0;
@@ -791,6 +812,7 @@ export class Game {
       getPocketWheelCount: (player, slot) => this.getPocketWheelCount(player, slot),
       getStormTimerSeconds: () => this.getStormTimerSeconds(),
       getTrackedShip: () => this.getTrackedShip(),
+      getSpectateSummary: () => this.getSpectateSummary(),
       getUpgradePresentation: (type) => this.getUpgradePresentation(type),
       playIslandArrivalFanfare: () => this.playIslandArrivalFanfare(),
       renderMapWheel: (player) => this.map.renderMapWheel(player),
@@ -1388,6 +1410,10 @@ export class Game {
   private resetLocalRoundState() {
     // A new round may raise the elimination card again.
     this.matchResultsShown = false;
+    this.spectatePlacement = null;
+    this.spectateSubjectId = null;
+    this.spectateSubjectLabel = '';
+    this.spectateHandoff = 0;
     // The server's snapshot counter restarts per match — so must ours.
     this.clientState.lastAppliedSeq = -1;
     this.clearStartSequence();
@@ -4974,9 +5000,29 @@ export class Game {
     const swimming = player.state === 'swimming';
     // Spectating (eliminated, not respawning): drive the lift blend + its slow
     // orbit here, before the framing below reads them.
+    // A RESPAWN HOLD IS A WAIT, NOT A BLINDFOLD.
+    // The lift used to fire only on elimination, so a held respawn kept the
+    // 34 cm corpse eye — which underwater is the grey noise-void the audit
+    // photographed while it read "Respawn held". The hold is short and honest
+    // now; it should also be watchable, so it gets the same climb.
+    const spectating = player.state === 'eliminated' || player.state === 'respawning';
+    // Your standing is the number of crews that outlasted you, plus you. Read it
+    // ONCE, at the instant of elimination: a second later the fleet has thinned
+    // and "Place: #6 of 10" would keep quietly improving while you watched.
+    if (player.state === 'eliminated' && !this.spectatePlacement && this.state) {
+      // Count CREWS, not hulls. The first cut of this read `state.shipsAlive`,
+      // which counts SHIPS — with every hull still afloat in a ten-crew match
+      // it printed "Place: #10 of 11", a standing out of a fleet that does not
+      // exist. Both numbers come off the same list now, so `of` is the fleet
+      // and `place` can never leave it.
+      const fleet = this.state.players.filter((p) => !this.isSkeletonName(p));
+      const of = Math.max(1, fleet.length);
+      const outlasted = fleet.filter((p) => p.id !== player.id && p.state !== 'eliminated').length;
+      this.spectatePlacement = { place: THREE.MathUtils.clamp(outlasted + 1, 1, of), of };
+    }
     this.spectateLift = THREE.MathUtils.clamp(
       this.spectateLift
-        + this.frameDt * (player.state === 'eliminated' ? 1 / Game.SPECTATE_RISE_SECONDS : -1 / 0.4),
+        + this.frameDt * (spectating ? 1 / Game.SPECTATE_RISE_SECONDS : -1 / 0.4),
       0, 1,
     );
     this.spectateOrbit = this.spectateLift > 0.001 ? this.spectateOrbit + this.frameDt * 0.05 : 0;
@@ -5088,7 +5134,21 @@ export class Game {
       // you are out of the match the camera climbs out of the water and swings
       // back off your body, so the last thing you see is the scene that got you.
       if (this.spectateLift > 0.001) {
-        const anchor = this.localDeathAnchor?.pos ?? this.getPlayerRenderPosition(player, 0.02);
+        const body = this.localDeathAnchor?.pos ?? this.getPlayerRenderPosition(player, 0.02);
+        // ── HANDOFF ─────────────────────────────────────────────────────────
+        // Only for the ELIMINATED: a respawning pirate is coming back to this
+        // spot and wants to see it, not somebody else's broadside.
+        const subject = player.state === 'eliminated' ? this.updateSpectateSubject() : null;
+        this.spectateHandoff = THREE.MathUtils.clamp(
+          this.spectateHandoff
+            + this.frameDt * (subject ? 1 / Game.SPECTATE_HANDOFF_SECONDS : -1 / 0.8),
+          0, 1,
+        );
+        // Ease in AFTER the body lift has finished, so the two moves read as one
+        // continuous flight: out of the water, then away across it.
+        const hRaw = this.spectateHandoff * Math.min(1, this.spectateLift * 1.15);
+        const h = hRaw * hRaw * (3 - 2 * hRaw);
+        const anchor = subject ? body.clone().lerp(subject, h) : body;
         const seaY = gerstnerHeight(
           anchor.x, anchor.z, this.ocean.getTime(), WAVE_PARAMS,
           getStormWaveIntensity(this.state?.storm, anchor.x, anchor.z),
@@ -5097,9 +5157,11 @@ export class Game {
         // mouse still steers it (getYaw) for anyone who wants to look.
         const orbitYaw = this.input.getYaw() + this.spectateOrbit;
         const back = new THREE.Vector3(-Math.sin(orbitYaw), 0, -Math.cos(orbitYaw));
+        const radius = THREE.MathUtils.lerp(Game.SPECTATE_RADIUS, Game.SPECTATE_SUBJECT_RADIUS, h);
+        const height = THREE.MathUtils.lerp(Game.SPECTATE_HEIGHT, Game.SPECTATE_SUBJECT_HEIGHT, h);
         const lifted = anchor.clone()
-          .addScaledVector(back, Game.SPECTATE_RADIUS)
-          .add(new THREE.Vector3(0, Game.SPECTATE_HEIGHT, 0));
+          .addScaledVector(back, radius)
+          .add(new THREE.Vector3(0, height, 0));
         // Never below the swell (or the ground it is standing on) — clearing the
         // waterline is the whole point.
         const floor = Math.max(seaY, this.sampleGroundY(lifted.x, lifted.z)) + Game.SPECTATE_CLEARANCE;
@@ -5107,7 +5169,10 @@ export class Game {
         // Ease so the lift reads as the soul leaving, not a teleport.
         const k = this.spectateLift * this.spectateLift * (3 - 2 * this.spectateLift);
         desired = eyePos.clone().lerp(lifted, k);
-        lookTarget = lookTarget.lerp(anchor.clone().add(new THREE.Vector3(0, 0.7, 0)), k);
+        lookTarget = lookTarget.lerp(
+          anchor.clone().add(new THREE.Vector3(0, THREE.MathUtils.lerp(0.7, 3.2, h), 0)),
+          k,
+        );
       }
     }
 
@@ -5205,6 +5270,93 @@ export class Game {
    * as black-on-black. Built lazily (a player who never dies never pays), and
    * it is a HEMISPHERE light, so the point-light budget is untouched.
    */
+  /**
+   * WHO THE DEAD WATCH.
+   *
+   * Pick a crew that is still in the fight and hold onto them: the nearest
+   * living pirate to where you fell, preferring somebody actually aboard a hull
+   * (a fight is worth watching, a swimmer is not). The choice is sticky — it is
+   * only re-made when the subject dies, leaves, or a second has gone by with
+   * nobody chosen — because a camera that re-targets every frame is nausea.
+   *
+   * With nobody left alive at all it falls back to the storm ring's centre,
+   * which is the last thing in the Reach that is still moving.
+   *
+   * Returns the world point to orbit, or null if there is nothing at all (no
+   * state yet), in which case the caller keeps orbiting the body.
+   */
+  private updateSpectateSubject(): THREE.Vector3 | null {
+    const state = this.state;
+    if (!state) return null;
+    const now = this.ocean.getTime();
+
+    const living = (id: string | null) => {
+      if (!id) return null;
+      const p = state.players.find((c) => c.id === id);
+      return p && p.state !== 'eliminated' && p.id !== this.localPlayerId ? p : null;
+    };
+
+    let subject = living(this.spectateSubjectId);
+    if (!subject || now >= this.spectateRepickAt) {
+      const from = this.localDeathAnchor?.pos ?? this.renderer.camera.position;
+      let best: { p: typeof state.players[number]; score: number } | null = null;
+      for (const candidate of state.players) {
+        if (candidate.id === this.localPlayerId) continue;
+        if (candidate.state === 'eliminated' || candidate.state === 'respawning') continue;
+        if (this.isSkeletonName(candidate)) continue;
+        const d = Math.hypot(candidate.position.x - from.x, candidate.position.z - from.z);
+        // Aboard a hull beats swimming: that is where the match is happening.
+        const score = d * (candidate.onShipId ? 0.55 : 1);
+        if (!best || score < best.score) best = { p: candidate, score };
+      }
+      if (best) {
+        subject = best.p;
+        this.spectateSubjectId = best.p.id;
+        this.spectateRepickAt = now + 6;
+      } else {
+        subject = null;
+        this.spectateSubjectId = null;
+        this.spectateRepickAt = now + 1;
+      }
+    }
+
+    if (subject) {
+      const ship = subject.onShipId ? this.shipsById.get(subject.onShipId) : null;
+      // Frame the HULL when they are on one — a 30 m orbit around a person
+      // standing on a galleon points at a plank.
+      const target = ship ? ship.position : subject.position;
+      this.spectateSubjectPos.set(target.x, Math.max(target.y, 0) + 1.2, target.z);
+      this.spectateSubjectLabel = ship
+        ? `${subject.name}'s ${shipClassName(ship.type).toLowerCase()}`
+        : subject.name;
+      return this.spectateSubjectPos;
+    }
+
+    const storm = state.storm;
+    if (storm) {
+      this.spectateSubjectPos.set(storm.centerX, 3, storm.centerZ);
+      this.spectateSubjectLabel = 'the storm ring';
+      return this.spectateSubjectPos;
+    }
+    this.spectateSubjectLabel = '';
+    return null;
+  }
+
+  /** Island skeleton waves ride the player list; they are not a crew to watch. */
+  private isSkeletonName(p: { name?: string; isBot?: boolean }): boolean {
+    return !!p.isBot && /skeleton/i.test(p.name ?? '');
+  }
+
+  /** What the HUD prints while you are out: whose deck, and where you finished. */
+  getSpectateSummary(): { subject: string; place: number; of: number } | null {
+    if (!this.spectatePlacement) return null;
+    return {
+      subject: this.spectateHandoff > 0.35 ? this.spectateSubjectLabel : '',
+      place: this.spectatePlacement.place,
+      of: this.spectatePlacement.of,
+    };
+  }
+
   private updateSpectateLight() {
     if (this.spectateLift <= 0.001) {
       if (this.spectateLight) this.spectateLight.visible = false;

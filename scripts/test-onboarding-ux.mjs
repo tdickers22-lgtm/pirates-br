@@ -692,8 +692,20 @@ for (const variant of ['killed', 'ship_sunk', 'storm', 'drowned']) {
   console.log(`    ${variant}: "${out.title}" — ${out.cause}`);
   expect(`${variant}: the title names the real cause`, expected[variant].test(out.title), out.title);
   expect(`${variant}: a cause line explains it`, out.cause.length > 20, out.cause);
-  expect(`${variant}: the wave-1 spectating prompt is intact`,
-    /eliminated/i.test(out.prompt) && /spectating/i.test(out.prompt), out.prompt);
+  // Wave 1 asked only that this line said "eliminated … spectating". It now
+  // says something a spectator can use: WHERE the voyage put you, out of how
+  // many crews — and, once the camera has flown to a living crew, whose deck it
+  // is over. The standing is the load-bearing part, so that is what is pinned;
+  // the fallback wording is still accepted for a frame that has no fleet yet.
+  expect(`${variant}: the spectate line states the standing (or falls back honestly)`,
+    /place:\s*#\d+\s*of\s*\d+/i.test(out.prompt)
+    || (/eliminated/i.test(out.prompt) && /spectating/i.test(out.prompt)), out.prompt);
+  {
+    const m = /place:\s*#(\d+)\s*of\s*(\d+)/i.exec(out.prompt);
+    // A standing outside its own fleet ("#10 of 11") is worse than no standing.
+    expect(`${variant}: the standing sits inside the fleet it counts`,
+      !m || (Number(m[1]) >= 1 && Number(m[1]) <= Number(m[2])), out.prompt);
+  }
   await shot(`04-death-${variant}`);
   await page.evaluate(() => {
     const g = window.__piratesBR;

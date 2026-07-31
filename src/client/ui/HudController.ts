@@ -62,6 +62,9 @@ export type HudView = {
   getPocketWheelCount(player: Player, slot: number): number;
   getStormTimerSeconds(): number;
   getTrackedShip(): Ship | null;
+  /** Whose deck the spectate camera is over, and where this voyage placed you.
+   *  Null until the local crew is actually out of the match. */
+  getSpectateSummary(): { subject: string; place: number; of: number } | null;
   getUpgradePresentation(type: ShipUpgradeType): {
     name: string;
     short: string;
@@ -976,7 +979,15 @@ export class HudController {
     // were silently out of the match.
     if (player.state === 'eliminated') {
       this.view.ui.interactPrompt.style.display = 'block';
-      this.view.ui.interactPrompt.textContent = 'Crew eliminated — spectating';
+      // SPECTATING IS NOT A VOID WITH A CAPTION.
+      // "Crew eliminated — spectating" over a black frame told a player nothing
+      // about the match they were still in the middle of. The camera now flies
+      // to a living crew (Game.updateSpectateSubject); this names whose deck it
+      // is over, and where the voyage put you.
+      const spectate = this.view.getSpectateSummary();
+      this.view.ui.interactPrompt.textContent = spectate
+        ? `Place: #${spectate.place} of ${spectate.of}${spectate.subject ? ` · watching ${spectate.subject}` : ' — spectating'}`
+        : 'Crew eliminated — spectating';
       this.view.ui.contextLabel.style.display = 'block';
       // Wave 1 gave this line; it now names the cause instead of assuming one.
       this.view.ui.contextLabel.textContent = HudController.DEATH_COPY[this.resolveDeathCause()].spectate;
