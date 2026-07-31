@@ -15,7 +15,7 @@ import type { OceanRenderer } from '../rendering/OceanRenderer.js';
 import type { Renderer } from '../rendering/Renderer.js';
 import type { UiRefs } from './UiRefs.js';
 import { BROKER_NAME, itemDisplayName, shipClassName, weaponSlotName } from './DisplayNames.js';
-import { openOnboardingCards, wireOnboardingCards } from './OnboardingCards.js';
+import { closeOnboardingCards, openOnboardingCards, wireOnboardingCards } from './OnboardingCards.js';
 
 /** Everything the HUD reads or writes on the Game instance. */
 export type HudView = {
@@ -120,7 +120,25 @@ export class HudController {
   resetForMatch(): void {
     this.islandPresenceSeeded = false;
     this.firstSailDone = false;
+    // A MATCH BOUNDARY IS A DISMISSAL.
+    // Every rule that takes SHIP'S ORDERS off the screen is an in-match verb —
+    // board a hull, make sail, fire a shot, stand at a station. None of them
+    // can fire between matches, so a pirate who left [L] up when the round
+    // ended sailed the NEXT one from behind it: the card was still parked over
+    // the sea on the first frame of a brand-new world, and the baseline it
+    // measures verbs against belonged to a match that no longer exists. Nine
+    // seconds into a live rematch it was still up (endgame-onboard-keys phase
+    // 'a second voyage'). So the reading material goes with the round: hide the
+    // card, undock it, and clear the context it was reading against.
     this.legendOpenContext = null;
+    const legend = document.getElementById('controls-hint');
+    if (legend) {
+      legend.style.display = 'none';
+      legend.classList.remove('docked');
+    }
+    // The three-card tour is the same kind of curtain, and it is modal — left
+    // open across a return to port it would dim the new match's first frame.
+    closeOnboardingCards();
     this.brProgressSignature = '';
     this.goldLeaderboardSignature = '';
     this.holdCargoSignature = '';
