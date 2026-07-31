@@ -36,16 +36,31 @@ async function session(query, attempts = 4) {
       await page.goto(`http://127.0.0.1:3000/${query}`, { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#menu-solo-btn', { timeout: 20_000 });
       await page.click('#menu-solo-btn', { noWaitAfter: true });
-      await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', { timeout: 45_000 });
+      // waitForFunction's options are the THIRD argument — passed second, the
+      // 45 s was being handed to the page function as an ARG and the wait was
+      // silently running on the 30 s default.
+      await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 45_000 });
       await page.waitForTimeout(3500);
       // The onboarding cards sit over the scene behind a dimming backdrop —
       // this probe is reading the SKY, so send them away before shooting.
+      // The two class/id selectors this used to lead with (.onboarding-skip,
+      // #onboarding-skip) never existed in this codebase: the tour's skip
+      // button is #oc-skip. When the tour DID open, the probe photographed its
+      // dimming backdrop and called it a sky.
       for (let i = 0; i < 4; i++) {
-        const skip = await page.$('.onboarding-skip, #onboarding-skip, button:has-text("SKIP")');
-        if (!skip) break;
-        await skip.click({ noWaitAfter: true }).catch(() => {});
+        const open = await page.evaluate(
+          () => !!document.getElementById('onboard-cards')?.classList.contains('visible'),
+        );
+        if (!open) break;
+        await page.click('#oc-skip', { noWaitAfter: true, timeout: 2_000 }).catch(() => {});
         await page.waitForTimeout(400);
       }
+      // Belt and braces: whatever the buttons did, the backdrop must be gone
+      // before a sky sample is worth anything.
+      const stillOpen = await page.evaluate(
+        () => !!document.getElementById('onboard-cards')?.classList.contains('visible'),
+      );
+      if (stillOpen) throw new Error('onboarding cards would not close — sky samples would read the backdrop');
       await page.waitForTimeout(600);
       return page;
     } catch (err) {
