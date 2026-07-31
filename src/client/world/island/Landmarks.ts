@@ -5,8 +5,46 @@
  */
 import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
+import { MAX_METALNESS_NO_ENV, MIN_ALBEDO_VALUE } from '../../assets/materialAudit.js';
 import type { IslandBuildCtx } from './context.js';
 import { getMeshGround, snapToDrawnGround } from './GroundTruth.js';
+
+/**
+ * A hand-authored prop material that obeys the SHIPPED-ASSET material rule.
+ *
+ * `materialAudit.ts` documents why a near-black albedo and a high metalness both
+ * collapse a prop to a featureless silhouette in this scene — the AgX toe crushes
+ * anything under ~0.08 linear, and with no PMREM/envMap anywhere in the renderer a
+ * metal has its diffuse lobe multiplied out and gets nothing back. But that audit
+ * runs inside AssetLibrary, over the 56 shipped GLBs. Materials built by hand in
+ * the island builders never pass through it, so the rule simply did not apply to
+ * them — which is how the camp cookpot came to be authored at 0x161616 (0.008
+ * linear, TEN TIMES under the documented floor) with metalness above the ceiling,
+ * and photographed at noon as a pure-black hole in the hillside with no shading
+ * gradient at all.
+ *
+ * This is the same rule with a hand-authored entry point: assert the floor rather
+ * than silently repairing it, so a value that breaks it fails loudly at build time
+ * instead of shipping as a black prop. Emissive-driven materials (embers, lantern
+ * glass) are deliberately NOT run through here — their read comes from the glow,
+ * not the albedo.
+ */
+function litPropMaterial(params: {
+  color: number; roughness: number; metalness?: number; flatShading?: boolean;
+}): THREE.MeshStandardMaterial {
+  const color = new THREE.Color(params.color);
+  const peak = Math.max(color.r, color.g, color.b);
+  if (peak < MIN_ALBEDO_VALUE) {
+    throw new Error(
+      `litPropMaterial: 0x${params.color.toString(16).padStart(6, '0')} is ${peak.toFixed(4)} linear, `
+      + `under the ${MIN_ALBEDO_VALUE} floor — it will render as a black silhouette (see materialAudit).`,
+    );
+  }
+  const metalness = Math.min(params.metalness ?? 0, MAX_METALNESS_NO_ENV);
+  return new THREE.MeshStandardMaterial({
+    color, roughness: params.roughness, metalness, flatShading: params.flatShading ?? false,
+  });
+}
 
 /**
  * The ground THESE landmarks stand on: the drawn terrain mesh, island-local.
@@ -145,9 +183,16 @@ export function buildPirateCamp(ctx: IslandBuildCtx) {
         base.z + (-lx * sinCY + lz * cosCY),
       ) - base.y;
     };
-    const stoneMatC = new THREE.MeshStandardMaterial({ color: 0x3d352b, roughness: 1 });
+    // Every hue below is the ORIGINAL authored hue, scaled in linear space until
+    // its peak channel clears the documented 0.08 floor (see litPropMaterial):
+    // 0x3d352b was 0.047 and 0x2a1a0c was 0.023, so the fire-ring stones, the
+    // criss-crossed logs, the totem and the tripod were all sitting two to four
+    // times under the value at which this scene's tonemap still resolves shading.
+    // The embers keep their char albedo — an ember is read by its glow, and that
+    // is what `emissive` is for.
+    const stoneMatC = litPropMaterial({ color: 0x53483c, roughness: 1 });
     const charredMat = new THREE.MeshStandardMaterial({ color: 0x141210, roughness: 1, emissive: 0x6b2a06, emissiveIntensity: 0.4 });
-    const logMatC = new THREE.MeshStandardMaterial({ color: 0x2a1a0c, roughness: 1 });
+    const logMatC = litPropMaterial({ color: 0x53371f, roughness: 1 });
     // Fire pit: GLB stone ring + charred logs when available (interim — a
     // later pass moves camp placement to the server prop registry).
     const campfireGlb = buildPropInstance(
@@ -203,7 +248,7 @@ export function buildPirateCamp(ctx: IslandBuildCtx) {
       const pillowLx = Math.cos(bedAngle) * 2.2;
       const pillowLz = Math.sin(bedAngle) * 2.2;
       const pillowY = groundOffsetAt(pillowLx, pillowLz);
-      const pillow = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.5), new THREE.MeshStandardMaterial({ color: 0x2a1a14, roughness: 1 }));
+      const pillow = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.5), litPropMaterial({ color: 0x53372d, roughness: 1 }));
       pillow.position.set(pillowLx, pillowY + 0.18, pillowLz);
       pillow.rotation.y = -bedAngle + Math.PI * 0.5;
       camp.add(pillow);
@@ -223,13 +268,31 @@ export function buildPirateCamp(ctx: IslandBuildCtx) {
       eye.position.set(-2.2 + sx * 0.07, totemY + 2.58, 0.78);
       camp.add(eye);
     }
-    // Cookpot — sits on the ground next to fire
+    // Cookpot — sits on the ground next to fire.
+    //
+    // This is the prop the graphics audit photographed as "pure black with no
+    // shading". It was authored at 0x161616 — 0.008 linear, an order of magnitude
+    // under the floor this scene's tonemap needs — with metalness 0.4 over the
+    // no-envMap ceiling, so its diffuse lobe was partly multiplied out and there
+    // was no environment left to give anything back. Sooty cast iron instead: the
+    // albedo clears the floor, the metalness sits at the ceiling, and roughness
+    // comes down off 0.95 so the sun actually lays a broad sheen along the belly
+    // rather than a uniform Lambert nothing.
     const potY = groundOffsetAt(1.4, 0.4);
-    const potMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.95, metalness: 0.4 });
-    const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 0.5, 10), potMat);
+    const potMat = litPropMaterial({ color: 0x554f48, roughness: 0.62, metalness: 0.35 });
+    const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 0.5, 12), potMat);
     pot.position.set(1.4, potY + 0.34, 0.4);
     pot.castShadow = true;
+    pot.receiveShadow = true;
     camp.add(pot);
+    // A cylinder alone reads as a bucket at any range. The lip ring is what says
+    // "cast iron": it catches the sun on its top curve while the belly falls away,
+    // which is the one highlight that makes the silhouette a pot.
+    const potRim = new THREE.Mesh(new THREE.TorusGeometry(0.345, 0.045, 6, 12), potMat);
+    potRim.rotation.x = Math.PI * 0.5;
+    potRim.position.set(1.4, potY + 0.58, 0.4);
+    potRim.castShadow = true;
+    camp.add(potRim);
     // Tripod over fire
     for (let t = 0; t < 3; t++) {
       const a = (t / 3) * Math.PI * 2;
