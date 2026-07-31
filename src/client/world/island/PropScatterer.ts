@@ -320,6 +320,60 @@ function liftFoliageNormals(material: THREE.MeshStandardMaterial, amount: number
   material.customProgramCacheKey = () => `pirates-foliage-card-${amount.toFixed(2)}`;
 }
 
+/**
+ * One grass card: bent, tapered, and no longer a rectangle.
+ *
+ * Ground cover was two 0.52 × 0.64 quads at a dead 90°, one segment each. That
+ * shape has two tells the audit photographed at your feet. A blade was a rigid
+ * flat RECTANGLE — square-topped, the same width at the tip as at the root, and
+ * with no curve anywhere in it, so a tuft read as cut card rather than grass. And
+ * because both quads were perfectly planar, they met along one straight,
+ * full-height intersection: a hard X ruled through the middle of every tuft,
+ * which is the "hard triangle intersection" in the report.
+ *
+ * Two planes always cross somewhere — that is geometry, not a bug. What can be
+ * fixed is how MUCH of them crosses:
+ *
+ *  · BEND. Three height segments and a quadratic lean along the card's own +Z,
+ *    so the blade arcs over the way a blade under its own weight does. The two
+ *    cards of a cross bend along axes 90° apart, so they peel away from each
+ *    other with height and the shared edge stops being a full-height line.
+ *  · TAPER. The card narrows toward the tip, so by the time the two cards are
+ *    nearest to parallel in silhouette there is almost nothing left of either to
+ *    intersect — and a blade ends in a point instead of a cut-off square.
+ *
+ * The crossing that survives is short and sits low in the tuft, where the clump's
+ * own blades cover it. Cost is one shared instanced geometry: 8 vertices a card
+ * instead of 4, on a draw that is alpha-test fragment-bound anyway.
+ */
+function makeBentBladeCard(): THREE.BufferGeometry {
+  const geo = new THREE.PlaneGeometry(0.52, 0.64, 1, 3);
+  geo.translate(0, 0.25, 0);
+  const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+  // The plane spans y = -0.07 .. 0.57 after the lift; normalise over that so the
+  // root stays put and only the blade above it moves.
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    minY = Math.min(minY, pos.getY(i));
+    maxY = Math.max(maxY, pos.getY(i));
+  }
+  const span = Math.max(1e-4, maxY - minY);
+  for (let i = 0; i < pos.count; i++) {
+    const t = (pos.getY(i) - minY) / span;
+    // Quadratic: no lean at the root (where the blade is stiff and seated in the
+    // turf), most of it in the last third, like a stalk under its own weight.
+    pos.setZ(i, pos.getZ(i) + t * t * 0.17);
+    // …and a touch of droop, so the tip is genuinely lower than a straight card's
+    // would be rather than merely displaced sideways.
+    pos.setY(i, pos.getY(i) - t * t * 0.05);
+    pos.setX(i, pos.getX(i) * (1 - 0.55 * Math.pow(t, 1.4)));
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+
 /** Props with a real FLOOR — blades sprouting inside them come up through the
  *  boards/canvas. Radius multiplier on the prop's collider radius. */
 const FLOORED_PROPS: Record<string, number> = {
@@ -388,12 +442,15 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
   const MAX_FLOAT = 0.15;
   if (!lowDetail) {
     const grassCount = Math.min(9000, Math.round(r * r * 1.05));
-    const bladeGeo = new THREE.PlaneGeometry(0.52, 0.64, 1, 1);
-    bladeGeo.translate(0, 0.25, 0);
+    const bladeGeo = makeBentBladeCard();
     const crossGeo = (() => {
       const a = bladeGeo.clone();
       const b = bladeGeo.clone();
+      // Card B bends toward its own +Z, which after this turn is world +X — so
+      // the pair curves APART instead of standing as a rigid plus sign, and the
+      // small lateral shift takes the crossing off the tuft's dead centre.
       b.rotateY(Math.PI * 0.5);
+      b.translate(0.055, 0, 0);
       const merged = new THREE.BufferGeometry();
       const pa = a.getAttribute('position');
       const pb = b.getAttribute('position');
