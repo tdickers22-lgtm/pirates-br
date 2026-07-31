@@ -640,6 +640,12 @@
       font-size: 0.62rem; letter-spacing: 0.05em; color: #7fe0a0;
       margin: 2px 0 4px; transition: color 0.3s ease;
     }
+    #ship-own-bearing {
+      display: none;
+      font-size: 0.6rem; letter-spacing: 0.05em; color: #e0975a;
+      margin: 0 0 5px;
+    }
+    #ship-own-bearing.visible { display: block; }
 
     /* ── Bilge water gauge (shown only when the local ship is taking on water) ── */
     #water-gauge {
@@ -2314,6 +2320,11 @@
       <div id="br-progress-feed">Crew progression —</div>
       <div id="ship-status">
         <h3 id="ship-status-title">⚓ Ship Hull</h3>
+        <!-- Shown ONLY while the deck under your feet belongs to somebody else:
+             where your own hull is, and how far. An auditor fought half a match
+             off a stranger's derelict with her own ship 876 m away, because
+             every row of this panel read the same on any deck. -->
+        <div id="ship-own-bearing"></div>
         <!-- Damage is holes in the planking, not four abstract section bars:
              the count of open leaks plus the bilge gauge IS the damage HUD. -->
         <div id="ship-leaks">Hull sound</div>

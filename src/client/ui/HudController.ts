@@ -717,11 +717,23 @@ export class HudController {
       // Name the hull class in the panel heading: a Cutter's two guns and a
       // Man-o'-War's eight are the same three stat rows otherwise, and the
       // class is the one thing about your ship the HUD never said out loud.
-      const hullTitle = `⚓ ${shipClassName(ship.type)} · Hull`;
+      //
+      // WHOSE HULL THIS IS COMES FIRST.
+      //
+      // The panel tracks the deck you are STANDING ON (getTrackedShip), and it
+      // titled every one of them "⚓ Cutter · Hull". An auditor fought half a
+      // match off a stranger's abandoned cutter — leaks, sails, wheel, guns, all
+      // presented as her own — while her own ship sat 876 m away with nobody on
+      // it. The class was never the missing word; the possessive was.
+      const hullTitle = `⚓ ${this.hullOwnershipWord(ship, player)} ${shipClassName(ship.type).toUpperCase()} · Hull`;
       if (this.shipStatusTitleText !== hullTitle) {
         this.shipStatusTitleText = hullTitle;
         this.view.ui.shipStatusTitle.textContent = hullTitle;
+        // Gold for your own deck, weathered orange for anyone else's — the
+        // heading is the one HUD element a boarder is guaranteed to glance at.
+        this.view.ui.shipStatusTitle.style.color = ship.id === player.shipId ? '' : '#e0975a';
       }
+      this.renderOwnShipBearing(ship, player);
       // The four section bars are gone with the section model. What a captain
       // needs is the count of open planking and the bilge gauge beside it.
       this.view.ui.shipLeaks.textContent = openLeaks > 0
@@ -1554,6 +1566,66 @@ export class HudController {
       ? `HOLD: ${label} · ${cargo}g · −${penalty}% · HUNTED`
       : `HOLD: ${label} · ${cargo}g · −${penalty}% knots`;
     el.style.color = ship?.bountied ? '#ff9d5c' : cargoTier(cargo) >= 3 ? '#ffd278' : '#d9b45e';
+  }
+
+  // ─── Whose deck is this? ─────────────────────────────────────
+  /**
+   * The possessive in the hull panel's heading.
+   *
+   * Three answers, and only three, because a boarder needs to know which of
+   * them she is standing in:
+   *   · YOUR — your own hull, the one the map rings in gold;
+   *   · DERELICT — a hull whose whole crew is dead or gone. Free to fight from,
+   *     but it will never respawn you and nobody is coming to sail it;
+   *   · someone's — a live enemy crew's deck. You are aboard their ship.
+   *
+   * The crew is read off `ownerId` (the crew lead), falling back to whoever is
+   * left on `crewIds` when the lead is the one you just cut down.
+   */
+  private hullOwnershipWord(ship: Ship, player: Player): string {
+    if (ship.id === player.shipId) return 'YOUR';
+    const state = this.view.state;
+    const living = state
+      ? state.players.filter((p) => p.shipId === ship.id && p.state !== 'eliminated')
+      : [];
+    if (!living.length) return 'DERELICT';
+    const lead = living.find((p) => p.id === ship.ownerId) ?? living[0];
+    const name = (lead.name || 'Enemy').toUpperCase();
+    return `${name}'S`;
+  }
+
+  /** Where your own hull actually is, shown only when you are not on it. */
+  private ownBearingText = '';
+  private renderOwnShipBearing(tracked: Ship, player: Player): void {
+    const el = document.getElementById('ship-own-bearing');
+    if (!el) return;
+    const own = player.shipId ? this.view.shipsById.get(player.shipId) ?? null : null;
+    if (!own || own.id === tracked.id) {
+      if (this.ownBearingText !== '') {
+        this.ownBearingText = '';
+        el.classList.remove('visible');
+        el.textContent = '';
+      }
+      return;
+    }
+    const dx = own.position.x - player.position.x;
+    const dz = own.position.z - player.position.z;
+    const metres = Math.round(Math.hypot(dx, dz));
+    const text = own.sinking || own.sinkProgress > 0.02
+      ? `Your own ${shipClassName(own.type).toLowerCase()} is going down, ${metres} m off`
+      : `Your own ${shipClassName(own.type).toLowerCase()} is ${metres} m ${this.compassWord(dx, dz)} — ringed gold on [M]`;
+    if (text === this.ownBearingText) return;
+    this.ownBearingText = text;
+    el.textContent = text;
+    el.classList.add('visible');
+  }
+
+  /** Eight-point bearing from a world-space delta. */
+  private compassWord(dx: number, dz: number): string {
+    // World +z is south on the chart, +x is east.
+    const deg = (Math.atan2(dx, -dz) * 180) / Math.PI;
+    const points = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return points[(Math.round(((deg % 360) + 360) % 360 / 45)) % 8];
   }
 
   private goldLeaderboardSignature = '';

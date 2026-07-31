@@ -1578,6 +1578,17 @@ interface ShipMeshGroup {
   hullHoleUniform: { value: THREE.Vector4[] };
   /** Waterline contact collar (wet-edge foam hugging the hull's own waterline). */
   waterlineFoam: THREE.Mesh;
+  /**
+   * THE ONE HULL IN THE REACH THAT IS YOURS.
+   *
+   * Ten crews sail ten hulls that differ only by team colour, and team colour
+   * is a stranger's colour too — an auditor fought half a match off somebody
+   * else's derelict cutter with her own ship 876 m away and nothing on screen
+   * ever said so. This is a gold swallowtail flown at the TRUCK, above the
+   * ensign, and it is hoisted on exactly one ship: yours. It matches the words
+   * the tour and the chart already use ("the one ringed in gold").
+   */
+  ownPennant: THREE.Mesh;
 }
 
 export class ShipRenderer {
@@ -3584,6 +3595,32 @@ export class ShipRenderer {
     applyFlagWave(flagMat, flagUniforms);
     flagPivot.add(new THREE.Mesh(flagGeo, flagMat));
 
+    // ── Owner's swallowtail ──────────────────────────────────
+    // Flown above the ensign on the LOCAL crew's hull only (see ownPennant in
+    // ShipMeshGroup). Same halyard pivot as the ensign, so it streams with the
+    // same wind; unlit gold so it holds its colour at dusk and at night, when
+    // "which of these silhouettes is mine" is hardest. Hidden by default —
+    // update() hoists it on the one ship the local player crews.
+    const ownPennantGeo = new THREE.PlaneGeometry(FLAG_FLY * 0.72, FLAG_DROP * 0.34, 10, 2);
+    ownPennantGeo.translate(FLAG_FLY * 0.36 + 0.06, 0, 0);
+    const ownPennant = new THREE.Mesh(
+      ownPennantGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xf2ce6a,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.95,
+        toneMapped: false,
+        depthWrite: false,
+      }),
+    );
+    applyFlagWave(ownPennant.material as THREE.Material, flagUniforms);
+    ownPennant.position.y = FLAG_DROP * 0.62 + 0.16;
+    ownPennant.renderOrder = 3;
+    ownPennant.visible = false;
+    ownPennant.name = 'own-pennant';
+    flagPivot.add(ownPennant);
+
     const upgradePennants = {
       hull_reinforcement: new THREE.Mesh(
         new THREE.PlaneGeometry(0.46, 0.18),
@@ -3712,6 +3749,7 @@ export class ShipRenderer {
       wake,
       hullHoleUniform,
       waterlineFoam,
+      ownPennant,
     });
 
     return group;
@@ -4105,6 +4143,23 @@ export class ShipRenderer {
         const breathe = 0.9 + 0.1 * Math.sin(t * 1.7 + ship.position.x * 0.05);
         mesh.waterlineFoam.visible = detailNear && !ship.sinking;
         foamMat.opacity = (0.52 + 0.34 * speed01 + 0.14 * storm01) * breathe;
+        // ── WHICH ONE IS MINE ──────────────────────────────────────────────
+        // The swallowtail says it at any range; the wet edge says it at boarding
+        // range. Ten hulls in one anchorage differ only by team colour, and the
+        // colour of a stranger's ship looks exactly as much like an identity as
+        // the colour of your own, so an auditor fought half a match off someone
+        // else's derelict without ever being told. The collar gilds over the
+        // last 50 m — the distance at which you are choosing a gangway.
+        mesh.ownPennant.visible = localCrewShip;
+        if (localCrewShip) {
+          const gild = cameraPosition
+            ? THREE.MathUtils.clamp(1 - (Math.sqrt(distSq) - 22) / 28, 0, 1)
+            : 1;
+          foamMat.color.setRGB(1, 1 - 0.28 * gild, 1 - 0.62 * gild);
+          foamMat.opacity = Math.min(1, foamMat.opacity * (1 + 0.55 * gild));
+        } else if (foamMat.color.g !== 1 || foamMat.color.b !== 1) {
+          foamMat.color.setRGB(1, 1, 1);
+        }
         // Cancel the hull's pitch/roll (previous frame's settled value — one
         // frame of lag is invisible) so the wet edge stays glued to the sea
         // instead of riding the ship's attitude out of the water.
