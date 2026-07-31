@@ -114,19 +114,32 @@ function applyTerrainDetail(
         '#include <color_fragment>\n'
         + 'vec2 tP0 = vTerrWorld.xz;\n'
         // ── THE WEAVE ──────────────────────────────────────────────────────
-        // Rotating each octave stopped the octaves from stacking their cell
-        // edges, but it did not stop ONE octave's edges from reading: a value
-        // noise lattice is a grid, and a grid of smoothstepped cells at 0.5m
-        // pitch photographs as knitting — a repeating checker at your feet and
-        // across a whole cliff face (noon-terrain-feet-lush/highland,
-        // p3-crows-chute-a). Two fixes, both keyed on ONE extra low-frequency
-        // pair of fetches:
-        //  • DOMAIN WARP: displace the sample point by a ~12m field before any
-        //    finer octave reads it. Every lattice edge downstream bends with the
-        //    warp, so no cell boundary stays straight and no cell stays square.
-        //  • SLOW ROTATION: turn the whole detail frame by a second ~16m field,
-        //    so even the warped lattice never keeps one orientation across more
-        //    than a few metres of ground — the "one global knit" read.
+        // A value-noise lattice is a grid, and a grid of smoothstepped cells at
+        // 0.5m pitch photographs as knitting — a repeating checker at your feet
+        // and across a whole cliff face. Rotating each octave (tR1/tR2 below)
+        // stops the octaves stacking their cell edges on each other, but it does
+        // not stop ONE octave's edges from reading. The cure for that is DOMAIN
+        // WARP: displace the sample point by a low-frequency field before any
+        // finer octave reads it, and every lattice edge downstream bends with the
+        // warp, so no cell boundary stays straight and no cell stays square.
+        //
+        // WHAT MUST NOT BE DONE, AND WAS: rotate the sample point by a
+        // spatially-varying angle. `tP = tRW * tP` turns tP about the WORLD
+        // ORIGIN, so the distance the sample point travels per metre walked is
+        // the angle gradient TIMES THE DISTANCE TO THAT ORIGIN. The angle field
+        // here swung 2.4 rad over ~16m — about 0.3 rad/m — and the islands sit
+        // 400m+ out, which is a ~120x anisotropic stretch of the whole detail
+        // field, rising the further from the origin you sail. It did destroy the
+        // knit. It replaced it with a comb: the ground and every cliff smeared
+        // into long directional strands, like brushed fur, which is what the
+        // verification shots of this pass photographed.
+        //
+        // So: warp at TWO scales instead — a ~12m octave and a ~3.4m one — which
+        // bends the lattice at two frequencies with a strictly BOUNDED
+        // displacement (nothing here moves a sample point more than ~1.8m, at any
+        // distance from the origin). Costs one fetch, and gives back the two
+        // trig calls and the matrix multiply the rotation was spending.
+        //
         // The macro field then also does the job it is named for: a 5-20m tonal
         // and hue octave, so a cliff face is lit in broad patches rather than
         // being one flat value carrying a uniform texture.
@@ -134,9 +147,8 @@ function applyTerrainDetail(
           ? 'float nMacro = tNoise(tP0 * 0.085);\n'              // ~12m
             + 'float nMacro2 = tNoise(tP0.yx * 0.062 + 19.3);\n'  // ~16m, other axis
             + 'vec2 tP = tP0 + (vec2(nMacro, nMacro2) - 0.5) * 2.6;\n'
-            + 'float tAng = (nMacro2 - 0.5) * 2.4;\n'
-            + 'mat2 tRW = mat2(cos(tAng), -sin(tAng), sin(tAng), cos(tAng));\n'
-            + 'tP = tRW * tP;\n'
+            + 'float nWarp = tNoise(tP * 0.29 + 7.7);\n'          // ~3.4m
+            + 'tP += (vec2(nWarp, nMacro2 * 0.6 + nWarp * 0.4) - 0.5) * 1.05;\n'
           : 'float nMacro = 0.5;\nfloat nMacro2 = 0.5;\nvec2 tP = tP0;\n')
         // Each octave samples a ROTATED lattice. A value-noise grid shares the
         // world axes, and three co-aligned octaves stack their cell edges into
@@ -196,7 +208,13 @@ function applyTerrainDetail(
         // Heavily noise-warped and shallow: an un-warped low-frequency band
         // reads as zebra stripes painted across a big cone (seen in review).
         + 'float steep = smoothstep(0.34, 0.62, vTerrSlope);\n'
-        + 'float strataW = sin(vTerrWorld.y * 2.5 + nMid * 6.5 + nFine * 2.4);\n'
+        // The warp on the bedding phase must stay UNDER one full band period.
+        // It was nMid*6.5 + nFine*2.4 — up to 8.9 radians against a 2*PI band, so
+        // the bands folded back through each other and a cone came out wearing
+        // graphic zigzag chevrons rather than bedding. Held under ~0.6 of a period
+        // the same fields make the layers undulate and disagree face-to-face,
+        // which is what sedimentary rock actually does.
+        + 'float strataW = sin(vTerrWorld.y * 2.5 + nMid * 2.6 + nFine * 1.1);\n'
         + 'float strata = smoothstep(-0.40, 0.35, strataW) - 0.5;\n'
         // ...and only on ROCK/ASH ground: contour bands running across a green
         // grass spire read as topographic lines, not sedimentary layers.
