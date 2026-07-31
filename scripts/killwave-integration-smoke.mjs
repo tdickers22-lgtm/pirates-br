@@ -12,6 +12,14 @@
 // It is a smoke, not a suite: it screenshots what a player sees and reports the
 // numbers the fixes are supposed to move. Read the PNGs.
 //
+// WIRE-READY. (f) was what kept this file out of test:browser; it is fixed and
+// measured 5x standalone at 10/10 checks, every run, with the searched band
+// between 246 and 296 of 300 rows and zero agreed seam rows on all six headings.
+// One caveat for whoever wires it: it needs a capture path that returns real
+// pixels. On a boot where the Metal compositor hands back a flat frame, run it
+// with KW_ANGLE=swiftshader — the run will otherwise fail its own capture guard,
+// which is the correct outcome but not a useful one.
+//
 // WHY (f) USED TO BE INTERMITTENT, AND WHAT IT MEASURES NOW. Measured 5x on the
 // old sweep: 3 passes, 2 failures, every failure one or two "full-width crease"
 // rows at y≈218-220 of the 300-row resample, with |d2|/mad at 68-94 against a
