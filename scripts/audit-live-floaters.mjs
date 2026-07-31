@@ -22,6 +22,7 @@
 //   node scripts/audit-live-floaters.mjs [outDir]
 //     PIRATES_BR_FLOAT_LIMIT=0.25   gap (m) that counts as a floater
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 const OUT = process.argv[2] ?? 'test-results/live-floaters';
@@ -29,7 +30,7 @@ mkdirSync(OUT, { recursive: true });
 const LIMIT = Number(process.env.PIRATES_BR_FLOAT_LIMIT ?? 0.25);
 
 const browser = await chromium.launch({
-  args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'],
+  args: browserArgs(['--ignore-gpu-blocklist']),
 });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 page.on('pageerror', (err) => console.log(`  [pageerror] ${err}`));

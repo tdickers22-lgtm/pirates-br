@@ -15,17 +15,28 @@
 //   node --import tsx scripts/day-arc-probe.mjs <outDir>
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
+import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 
 const OUT = process.argv[2] ?? 'test-results/day-arc';
 mkdirSync(OUT, { recursive: true });
 
-const browser = await chromium.launch({
-  args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'],
-});
+console.log(`GL backend: ${describeGl()}`);
+const browser = await chromium.launch({ args: browserArgs(['--ignore-gpu-blocklist']) });
+// A failed sample must not leave a browser behind — this rig runs on a machine a
+// stray headless Chromium has frozen before.
+process.on('exit', () => { browser.close().catch(() => {}); });
+for (const fault of ['uncaughtException', 'unhandledRejection']) {
+  process.on(fault, (err) => {
+    console.error(`\n${fault}: ${err?.stack ?? err}`);
+    browser.close().catch(() => {}).finally(() => process.exit(1));
+  });
+}
 
 async function session(query, attempts = 4) {
   for (let n = 1; n <= attempts; n++) {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    const page = await browser.newPage({
+      viewport: IS_SOFTWARE_GL ? { width: 960, height: 540 } : { width: 1280, height: 720 },
+    });
     page.on('pageerror', (e) => console.log('  [pageerror]', e.message));
     // Other agents edit this tree while the probe walks a 10-frame arc, and a
     // vite HMR reload mid-walk destroys the execution context. The probe only

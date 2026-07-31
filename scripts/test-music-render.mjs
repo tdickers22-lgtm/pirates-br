@@ -18,6 +18,7 @@
 //
 //   node scripts/test-music-render.mjs [outDir]
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -32,7 +33,7 @@ function expect(label, condition, detail = '') {
 }
 
 const browser = await chromium.launch({
-  args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio'],
+  args: browserArgs(['--ignore-gpu-blocklist', '--mute-audio']),
 });
 const page = await browser.newPage({ viewport: { width: 1024, height: 640 } });
 const pageErrors = [];

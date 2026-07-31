@@ -22,6 +22,7 @@
 //
 // node --import tsx scripts/test-viewmodel-poses.mjs
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 
 // `debug` is what exposes window.__piratesBR (main.ts) — without it there is no
 // Game handle at all; `forceinput` opens the fire gate without pointer lock.
@@ -32,7 +33,7 @@ const expect = (name, ok, detail = '') => {
   if (!ok) failures += 1;
 };
 
-const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] });
+const browser = await chromium.launch({ args: browserArgs(['--ignore-gpu-blocklist']) });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const wait = (ms) => page.waitForTimeout(ms);
 // Concurrent edits to this tree make vite full-reload the tab mid-run.

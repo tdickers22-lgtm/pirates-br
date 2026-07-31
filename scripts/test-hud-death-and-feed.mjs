@@ -52,6 +52,7 @@
  * as a named failure instead of a crash.
  */
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync } from 'node:fs';
 
 const OUT = process.argv[2]
@@ -73,7 +74,7 @@ function expect(label, condition, detail = '') {
   else { console.error(`  ✗ FAIL: ${label}${detail ? `\n     ${detail}` : ''}`); failures += 1; }
 }
 
-const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu'] });
+const browser = await chromium.launch({ args: browserArgs() });
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 page.on('pageerror', (e) => console.log('PAGEERROR', e.message));
 page.setDefaultTimeout(90_000);

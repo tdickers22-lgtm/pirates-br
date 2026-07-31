@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import process from 'node:process';
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 
 const ROOT_URL = process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000/';
 const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? 'http://127.0.0.1:8090/health';
@@ -192,7 +193,7 @@ async function main() {
   // than the renderer players actually run, and its fps number meant nothing.
   const browser = await chromium.launch({
     headless: true,
-    args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'],
+    args: browserArgs(['--ignore-gpu-blocklist']),
   });
   try {
     const page = await browser.newPage({

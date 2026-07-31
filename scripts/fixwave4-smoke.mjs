@@ -13,6 +13,7 @@
 //
 //   node scripts/fixwave4-smoke.mjs [outDir]
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
@@ -38,7 +39,7 @@ const scanForeign = (text) => FOREIGN_NOUNS
   .filter((re) => re.test(text)).map((re) => String(re));
 
 const browser = await chromium.launch({
-  args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'],
+  args: browserArgs(['--ignore-gpu-blocklist']),
 });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const errors = [];

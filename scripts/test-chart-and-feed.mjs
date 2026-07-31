@@ -13,6 +13,7 @@
 // Needs the dev stack (vite 3000 + game server 8090).
 //   node scripts/test-chart-and-feed.mjs
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 
 const ROOT_URL = process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000/';
 const GAME_URL = `${ROOT_URL.replace(/\/$/, '')}/?debug&quality=low`;
@@ -28,7 +29,7 @@ function expect(label, condition, detail = '') {
 
 const browser = await chromium.launch({
   headless: true,
-  args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu'],
+  args: browserArgs(),
 });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
 const pageErrors = [];

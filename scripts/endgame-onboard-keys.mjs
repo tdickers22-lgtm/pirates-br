@@ -12,21 +12,38 @@
 //   node scripts/endgame-onboard-keys.mjs [outDir]
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
+import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 
 const OUT = process.argv[2] ?? 'test-results/endgame-onboard-keys';
 mkdirSync(OUT, { recursive: true });
-const browser = await chromium.launch({
-  args: [
-    '--use-gl=angle', '--use-angle=metal', '--enable-gpu',
-    // A headless Chromium that dies must not put a macOS crash dialog on the
-    // user's screen — this rig runs while he is at the machine.
-    '--disable-breakpad', '--noerrdialogs', '--disable-crash-reporter',
-  ],
+console.log(`GL backend: ${describeGl()}`);
+const browser = await chromium.launch({ args: browserArgs() });
+// Every assertion in this rig is on the DOM, so the viewport only has to be big
+// enough to lay the cards out — and on the software rasteriser a smaller frame is
+// the difference between a probe that finishes and one that has to be killed.
+const page = await browser.newPage({
+  viewport: IS_SOFTWARE_GL ? { width: 960, height: 540 } : { width: 1280, height: 720 },
 });
-const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const errors = [];
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 page.on('pageerror', (e) => errors.push(String(e)));
+
+// A throw anywhere below this line used to leave a headless Chromium running: the
+// only `browser.close()` is the last statement, so any failed assertion, timeout or
+// Ctrl-C abandoned the process. On the machine this is developed on an orphaned
+// GPU-backed browser is not a tidiness problem — two of them have frozen the
+// desktop outright — so the close is bound to every way this script can end.
+const closeBrowser = () => browser.close().catch(() => { /* already gone */ });
+process.on('exit', () => { closeBrowser(); });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { closeBrowser().finally(() => process.exit(130)); });
+}
+for (const fault of ['uncaughtException', 'unhandledRejection']) {
+  process.on(fault, (err) => {
+    console.error(`\n${fault}: ${err?.stack ?? err}`);
+    closeBrowser().finally(() => process.exit(1));
+  });
+}
 const shot = (n) => page.screenshot({ path: `${OUT}/${n}.png`, timeout: 60_000 });
 const wait = (ms) => page.waitForTimeout(ms);
 const results = [];

@@ -30,6 +30,7 @@
  * machine's content filter corrupts every websocket on that port.
  */
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync } from 'node:fs';
 
 const OUT = process.argv[2]
@@ -53,7 +54,7 @@ function expect(label, condition, detail = '') {
 }
 
 async function runArm({ tag, noWorker }) {
-  const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=metal', '--enable-gpu'] });
+  const browser = await chromium.launch({ args: browserArgs() });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const logs = [];
   page.on('console', (m) => logs.push(m.text()));

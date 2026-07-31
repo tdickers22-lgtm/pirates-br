@@ -21,6 +21,7 @@
 // Usage (A/B):     node perf-probe.mjs --url <A> --label HEAD \
 //                       --urlB <B> --labelB BASELINE --repeats 3 --out ab.json
 import { chromium } from 'playwright';
+import { browserArgs } from './lib/browser-args.mjs';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -366,18 +367,21 @@ async function activate(build) {
 
 /** The GPU-headless flags every measurement in this repo shares. Without
  *  --use-angle Chromium falls back to SwiftShader and grades a software
- *  rasteriser; without --disable-gpu-vsync every scene reports a flat 60fps. */
-export const PROBE_BROWSER_ARGS = [
-  '--use-gl=angle',
-  '--use-angle=metal',
-  '--enable-gpu',
+ *  rasteriser; without --disable-gpu-vsync every scene reports a flat 60fps.
+ *
+ *  The backend is now chosen by PIRATES_GL (see ./lib/browser-args.mjs) and still
+ *  defaults to metal, so these numbers mean what they always meant. Setting
+ *  PIRATES_GL=swiftshader keeps the machine's GPU out of it — but it also makes
+ *  every frame-rate figure below a measurement of a software rasteriser, so a perf
+ *  budget must be SKIPPED on that path, never graded against a widened threshold. */
+export const PROBE_BROWSER_ARGS = browserArgs([
   '--ignore-gpu-blocklist',
   '--disable-gpu-vsync',
   '--disable-frame-rate-limit',
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
-];
+]);
 
 export { PIN_PIXEL_RATIO, INSTALL_GAP_SAMPLER, readWorld, measureScene, VIEWPORT };
 
