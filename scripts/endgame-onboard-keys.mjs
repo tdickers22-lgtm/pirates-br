@@ -203,9 +203,16 @@ async function settle(what, { holdMs = 1400, needFrames = 8, giveUpMs = 45_000 }
       worst = Math.max(worst, now - prev);
       prev = now;
       frames += 1;
-      const ship = window.__piratesBR?.getLocalPlayer?.()?.onShipId ?? null;
-      if (ship !== lastShip) { lastShip = ship; stableSince = now; }
-      if (frames >= needFrames && now - stableSince >= holdMs) {
+      const me = window.__piratesBR?.getLocalPlayer?.() ?? null;
+      const ship = me?.onShipId ?? null;
+      // A pirate at a STATION is the other way the card legitimately shuts:
+      // updateLegendCard closes it outright at the wheel, on a gun or up the
+      // mast, because there it covers the very thing it explains. An idle probe
+      // drifts, and pressing [L] into that state photographs a correct HUD and
+      // calls it a broken key binding.
+      const stationed = !!me && (me.atHelm || me.atCannon || me.atCrowNest || me.mastClimb !== null);
+      if (ship !== lastShip || stationed) { lastShip = ship; stableSince = now; }
+      if (!stationed && frames >= needFrames && now - stableSince >= holdMs) {
         return { settled: true, waitedMs: Math.round(now - start), frames, worstFrameMs: Math.round(worst), onShipId: ship };
       }
     }
@@ -225,19 +232,48 @@ async function settle(what, { holdMs = 1400, needFrames = 8, giveUpMs = 45_000 }
 }
 
 /**
- * Press [L] once and WAIT for the card, instead of sampling 600 ms later and
- * calling the sample the answer. One press is one toggle, so polling is safe —
- * it never presses again, it just stops guessing how long a frame takes.
+ * Press [L] and WAIT for the card, instead of sampling 600 ms later and calling
+ * the sample the answer.
+ *
+ * A second press is allowed, and only under one condition: the card is still
+ * CLOSED. A toggle that was eaten before the frame loop consumed it leaves the
+ * card exactly as it was, so pressing again cannot double-toggle anything —
+ * whereas pressing again over an OPEN card would shut the thing being asserted.
+ * That is why the retry re-reads the DOM instead of trusting a timeout.
  */
-async function pressLegend(timeoutMs = 25_000) {
-  await page.evaluate(() => {
-    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL', key: 'l', bubbles: true }));
-    setTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyL', key: 'l', bubbles: true })), 70);
-  });
-  await page.waitForFunction(() => {
-    const legend = document.getElementById('controls-hint');
-    return !!legend && getComputedStyle(legend).display === 'block';
-  }, null, { timeout: timeoutMs }).catch(() => { /* let the assertion below say so */ });
+async function pressLegend(timeoutMs = 20_000) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await page.evaluate(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL', key: 'l', bubbles: true }));
+      setTimeout(() => document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyL', key: 'l', bubbles: true })), 70);
+    });
+    const opened = await page.waitForFunction(() => {
+      const legend = document.getElementById('controls-hint');
+      return !!legend && getComputedStyle(legend).display === 'block';
+    }, null, { timeout: timeoutMs }).then(() => true).catch(() => false);
+    if (opened) return read();
+    const state = await read();
+    if (state.legendOpen) return state;
+    console.log(`  · [L] did not land (attempt ${attempt + 1}) — pressing once more`);
+  }
+  return read();
+}
+
+/**
+ * Click the door in the [L] card's footer — but only once the card is on screen.
+ *
+ * Clicking it blind is how a run died: the press before it had not landed, the
+ * button existed but was inside a hidden card, and Playwright spent thirty
+ * seconds waiting for a button that was never going to be visible before
+ * throwing out of the whole probe. A missing card is a CHECK, with the state
+ * that explains it, not an exception four assertions early.
+ */
+async function openTourFromLegendDoor() {
+  const before = await read();
+  ok('the [L] card is on screen before its door is clicked', before.legendOpen === true, JSON.stringify(before));
+  if (!before.legendOpen) return before;
+  await page.click('#legend-howto-btn');
+  await wait(500);
   return read();
 }
 
@@ -268,9 +304,7 @@ const door = await page.evaluate(() => {
   return { present: !!btn, label: btn?.textContent ?? '', w: r ? Math.round(r.width) : 0, h: r ? Math.round(r.height) : 0 };
 });
 ok("the card carries a visible 'How to Play' door", door.present && door.w > 20 && door.h > 8 && /how to play/i.test(door.label), JSON.stringify(door));
-await page.click('#legend-howto-btn');
-await wait(500);
-const back = await read();
+const back = await openTourFromLegendDoor();
 ok('clicking it re-deals the tour at card one',
   back.cardsOpen === true && back.dotOn === 0 && /sail/i.test(back.cardTitle), JSON.stringify(back));
 await shot('4-tour-reopened-from-footer');
@@ -328,9 +362,7 @@ await shot('7-after-reload-no-tour');
 // what this whole slice exists to undo.
 await settle('before the veteran re-deal');
 await pressLegend();
-await page.click('#legend-howto-btn');
-await wait(500);
-const reopened = await read();
+const reopened = await openTourFromLegendDoor();
 ok('and a veteran can still re-deal it from the [L] card forever',
   reopened.cardsOpen === true && reopened.dotOn === 0, JSON.stringify(reopened));
 await shot('8-veteran-reopen');
