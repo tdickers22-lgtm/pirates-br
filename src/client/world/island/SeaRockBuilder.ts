@@ -68,8 +68,18 @@ function addSubmergedSkirt(group: THREE.Group, radius: number, lowDetail: boolea
   const top = 0.3;
   const bottom = -4.0;
   const height = top - bottom;
+  // CLOSED AT BOTH ENDS, and the top one is the point. The skirt used to be an
+  // open tube with a separate down-facing disc under it, which is fine for a
+  // tall stack — the spire sits over the top opening and nobody ever looks down
+  // it. A low rock has no spire to spare: over a shoal the collar's mouth stands
+  // 0.3 m clear of the still line with nothing in it, back faces cull away, and
+  // you are looking through the water into an unwritten frame. It reads as a
+  // flat black ellipse lying on the sea — a hole, at exactly the collar's
+  // radius, and the sea events that seed shoals put four of them in open water.
+  // Capping it costs nothing (the cylinder's own caps replace the disc mesh) and
+  // the top reads as the drowned shelf it is, taking the material's `_wet` band.
   const skirt = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius * 0.6, radius * 0.98, height, lowDetail ? 6 : 10, 1, true),
+    new THREE.CylinderGeometry(radius * 0.6, radius * 0.98, height, lowDetail ? 6 : 10, 1, false),
     getSeaRockMaterial(),
   );
   skirt.position.y = (top + bottom) * 0.5;
@@ -77,14 +87,6 @@ function addSubmergedSkirt(group: THREE.Group, radius: number, lowDetail: boolea
   skirt.receiveShadow = false;
   skirt.name = 'sea-rock-skirt';
   group.add(skirt);
-  const floor = new THREE.Mesh(
-    new THREE.CircleGeometry(radius * 0.98, lowDetail ? 6 : 10),
-    getSeaRockMaterial(),
-  );
-  floor.rotation.x = Math.PI * 0.5;   // faces down — the open cylinder's cap
-  floor.position.y = bottom;
-  floor.name = 'sea-rock-skirt-cap';
-  group.add(floor);
 }
 
 export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
