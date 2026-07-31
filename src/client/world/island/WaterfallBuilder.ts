@@ -21,6 +21,10 @@
  *  BASE   a plunge pool with foam ringing out of the impact, drifting foam
  *         rafts, mist, and a runout stream that carries on to the sea.
  *
+ * Everything here is seated on the DRAWN hillside (see `makeDrawnGround`), not
+ * on the analytic heightfield it was sampled from — a triangle is a chord, and
+ * the difference is what left the outflow lying clear of the grass.
+ *
  * All motion is in the shaders, driven by the shared `foliageTime` clock: the
  * island subtree is frozen out of three's matrix walk (freezeStaticSubtree) and
  * nothing here writes a transform or a vertex after build.
@@ -33,6 +37,7 @@ import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { ZERO_SCALE_MAT4 } from '../../rendering/three-util.js';
 import type { IslandBuildCtx } from './context.js';
+import { ensureMeshGround } from './GroundTruth.js';
 
 const GRAVITY = 9.81;
 /** Base mesh for every rock the fall strews about.
@@ -49,6 +54,41 @@ const FACE_CLEARANCE = 0.34;
 /** Water surface height above the terrain wherever the stream rides the rock;
  *  the trough walls fill the gap so nothing floats. */
 const RIDE_LIFT = 0.36;
+
+// ── the ground this fall is actually drawn against ────────────────────────
+
+/**
+ * Every height in this module used to come from `getIslandSurfaceY` — the
+ * analytic heightfield. The hillside the player looks at is the polar TRIANGLE
+ * MESH sampled from that field on a ~4 m grid, and a triangle is a chord: on
+ * every convex form (a ridge, a shoulder, the lip of a plunge basin — i.e. the
+ * exact places a watercourse is found) the drawn surface runs BELOW the
+ * function it was sampled from.
+ *
+ * That is the whole close-range complaint. The sheet rides at `T(s) +
+ * RIDE_LIFT`, so a chord sagging half a metre under the function leaves the
+ * outflow hanging clear of the grass — "white ribbon fragments lying
+ * disconnected on open grass like torn paper" — and every shelf, crag and bank
+ * boulder seated through `groundAt` hangs the same distance off the cliff it is
+ * supposed to be growing out of. It is the same defect GroundTruth was written
+ * for; the falls were simply never moved onto it.
+ *
+ * So: one sampler, mesh-true wherever the terrain mesh covers the point and
+ * analytic beyond its rim (off the footprint, and on the low-detail proxy path
+ * where there is no indexed mesh at all).
+ */
+type DrawnGround = (localX: number, localZ: number) => number;
+
+function makeDrawnGround(ctx: IslandBuildCtx): DrawnGround {
+  const ground = ensureMeshGround(ctx);
+  const { island } = ctx;
+  const ox = island.position.x;
+  const oz = island.position.z;
+  return (lx: number, lz: number): number => {
+    const y = ground?.heightAt(lx, lz);
+    return y === null || y === undefined ? getIslandSurfaceY(island, lx + ox, lz + oz) : y;
+  };
+}
 
 // ── the descent search ────────────────────────────────────────────────────
 
@@ -71,7 +111,7 @@ type Course = {
 /** Terrain profile along one heading, from just inside the peak to past the
  *  shoreline. Sampled through `surfacePoint` so the island's elliptical
  *  footprint is respected. */
-function traceRay(ctx: IslandBuildCtx, angle: number): RayPoint[] {
+function traceRay(ctx: IslandBuildCtx, angle: number, drawn: DrawnGround): RayPoint[] {
   const out: RayPoint[] = [];
   let s = 0;
   let px = 0;
@@ -79,7 +119,9 @@ function traceRay(ctx: IslandBuildCtx, angle: number): RayPoint[] {
   for (let d = 0.03; d <= 1.06; d += 0.022) {
     const p = ctx.surfacePoint(d, angle);
     if (out.length > 0) s += Math.hypot(p.x - px, p.z - pz);
-    out.push({ s, x: p.x, z: p.z, y: p.y });
+    // The profile the course is SOLVED on has to be the profile it is DRAWN
+    // against, or the whole chain is authored a chord-sag off the hillside.
+    out.push({ s, x: p.x, z: p.z, y: drawn(p.x, p.z) });
     px = p.x;
     pz = p.z;
   }
@@ -94,7 +136,7 @@ function traceRay(ctx: IslandBuildCtx, angle: number): RayPoint[] {
  * drop weighted toward steepness, with a bonus for running all the way out to
  * the waterline (a fall that ends halfway down a hill has nowhere to go).
  */
-function findCourse(ctx: IslandBuildCtx, nominal: number, avoid: number[]): Course | null {
+function findCourse(ctx: IslandBuildCtx, nominal: number, avoid: number[], drawn: DrawnGround): Course | null {
   let best: Course | null = null;
   let bestScore = 0;
   for (let a = -13; a <= 13; a++) {
@@ -106,7 +148,7 @@ function findCourse(ctx: IslandBuildCtx, nominal: number, avoid: number[]): Cour
       if (delta < 0.95) tooClose = true;
     }
     if (tooClose) continue;
-    const ray = traceRay(ctx, angle);
+    const ray = traceRay(ctx, angle, drawn);
     for (let i = 0; i < ray.length - 4; i++) {
       // The crest has to be high ground that is already falling away.
       if (ray[i].y < 7) continue;
@@ -228,7 +270,7 @@ float wfNoise(vec2 p) {
  * alpha that thickens with aeration. Standard material so it takes the sun, the
  * dusk swing and the scene's fog like everything else.
  */
-function makeWaterMaterial(ctx: IslandBuildCtx): THREE.MeshStandardMaterial {
+function makeWaterMaterial(ctx: IslandBuildCtx, spraylight: SprayLight): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.25,
@@ -244,6 +286,7 @@ function makeWaterMaterial(ctx: IslandBuildCtx): THREE.MeshStandardMaterial {
     shader.uniforms.uFallDeep = { value: new THREE.Color(0x1c6c7e) };
     shader.uniforms.uFallShallow = { value: new THREE.Color(0x74c8d4) };
     shader.uniforms.uFallFoam = { value: new THREE.Color(0xeff8fb) };
+    shader.uniforms.uSprayLight = spraylight;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -267,6 +310,7 @@ function makeWaterMaterial(ctx: IslandBuildCtx): THREE.MeshStandardMaterial {
         + 'uniform vec3 uFallDeep;\n'
         + 'uniform vec3 uFallShallow;\n'
         + 'uniform vec3 uFallFoam;\n'
+        + 'uniform vec3 uSprayLight;\n'
         + 'varying vec4 vFlowA;\n'
         + 'varying vec3 vFlowB;\n'
         + WATER_NOISE_GLSL,
@@ -306,8 +350,9 @@ function makeWaterMaterial(ctx: IslandBuildCtx): THREE.MeshStandardMaterial {
         + 'diffuseColor.a = clamp(wfA + wfFres * 0.18 * wfEdge * vFlowB.z, 0.0, 0.92);\n'
         + 'roughnessFactor = mix(0.06, 0.58, wfFoam);\n'
         // A whisper of self-light so whitewater still reads at dusk without
-        // turning the fall into a lamp at midnight.
-        + 'totalEmissiveRadiance += uFallFoam * wfFoam * 0.05;\n',
+        // turning the fall into a lamp at midnight — and the whisper answers to
+        // the sky, or midnight is exactly what it becomes.
+        + 'totalEmissiveRadiance += uFallFoam * uSprayLight * wfFoam * 0.05;\n',
       );
   };
   mat.customProgramCacheKey = () => 'pirates-waterfall-water';
@@ -388,8 +433,26 @@ function paintFallRock(mat: THREE.MeshStandardMaterial) {
   mat.customProgramCacheKey = () => 'pirates-waterfall-rock';
 }
 
+/**
+ * How lit the spray is, right now.
+ *
+ * PointsMaterial is UNLIT: the mist took no sun, no dusk swing and no night, so
+ * at midnight the plunge pools wore a collar of daylight-white spray while
+ * everything around them was moonlit blue — "night spray renders fullbright".
+ * Sprites cannot be lit properly, but they can be told what the sky is doing,
+ * so one shared colour (white by day, a cold moon-blue at night) multiplies the
+ * mist and the foam's self-glow. One uniform object per island, updated on the
+ * frame hook — the island subtree is frozen out of three's matrix walk, so this
+ * is the only per-frame write the falls make.
+ */
+type SprayLight = { value: THREE.Color };
+
+/** Full daylight → untouched; deep night → this. Not black: moonlight is real,
+ *  and whitewater is the last thing on a hillside to stop being visible. */
+const SPRAY_NIGHT_TINT = new THREE.Color(0.20, 0.26, 0.40);
+
 /** Mist: soft sprites that rise, drift and fade on the shared clock. */
-function makeMistMaterial(ctx: IslandBuildCtx, size: number): THREE.PointsMaterial {
+function makeMistMaterial(ctx: IslandBuildCtx, size: number, sprayLight: SprayLight): THREE.PointsMaterial {
   const mat = new THREE.PointsMaterial({
     size,
     map: ctx.host.getSoftParticleTexture(),
@@ -402,6 +465,7 @@ function makeMistMaterial(ctx: IslandBuildCtx, size: number): THREE.PointsMateri
   const time = ctx.host.foliageTime;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uFallTime = time;
+    shader.uniforms.uSprayLight = sprayLight;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -421,8 +485,11 @@ function makeMistMaterial(ctx: IslandBuildCtx, size: number): THREE.PointsMateri
       )
       .replace('gl_PointSize = size;', 'gl_PointSize = size * (0.42 + pf * 1.3);');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying float vPuff;\n')
-      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vPuff * vPuff;\n');
+      .replace('#include <common>', '#include <common>\nvarying float vPuff;\nuniform vec3 uSprayLight;\n')
+      .replace(
+        '#include <color_fragment>',
+        '#include <color_fragment>\ndiffuseColor.a *= vPuff * vPuff;\ndiffuseColor.rgb *= uSprayLight;\n',
+      );
   };
   mat.customProgramCacheKey = () => 'pirates-waterfall-mist';
   return mat;
@@ -464,7 +531,7 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   water: THREE.MeshStandardMaterial;
   rock: THREE.MeshStandardMaterial;
   mist: THREE.PointsMaterial;
-}): THREE.Group | null {
+}, drawn: DrawnGround): THREE.Group | null {
   const { island, rng, lowDetail, islandSeed, cliffColor, paletteRock } = ctx;
   const seed = islandSeed * 977 + fallIndex * 613;
   const rnd = (k: number) => rng(seed + k * 37);
@@ -491,9 +558,10 @@ function buildFall(ctx: IslandBuildCtx, course: Course, fallIndex: number, mats:
   /** Terrain height under an island-LOCAL point. Every rock vertex is seated
    *  with this, not with T(s): the profile only knows the centre line, and on a
    *  cone flank the ground 5m to the side is metres lower — seating the skirt
-   *  off the centre line left the shelves hanging out of the hill as slabs. */
-  const groundAt = (lx: number, lz: number) =>
-    getIslandSurfaceY(island, lx + island.position.x, lz + island.position.z);
+   *  off the centre line left the shelves hanging out of the hill as slabs.
+   *  Mesh-true (see makeDrawnGround): the crags have to touch the cliff that is
+   *  drawn, not the one the heightfield function describes. */
+  const groundAt: DrawnGround = drawn;
   /** First arc position at or past `from` where the rock has fallen to `y`. */
   const faceS = (y: number, from: number): number => {
     for (let s = from; s <= sMax; s += 0.25) {
@@ -1520,6 +1588,10 @@ export function buildWaterfalls(ctx: IslandBuildCtx) {
       : 0;
   if (fallCount === 0) return;
 
+  // Indexed ONCE for the island and shared by the search and every fall: this
+  // is the hillside the falls are drawn against (see makeDrawnGround).
+  const drawn = makeDrawnGround(ctx);
+
   let mats: { water: THREE.MeshStandardMaterial; rock: THREE.MeshStandardMaterial; mist: THREE.PointsMaterial } | null = null;
   const taken: number[] = [];
   const emitters: { x: number; y: number; z: number; scale: number }[] = [];
@@ -1527,21 +1599,30 @@ export function buildWaterfalls(ctx: IslandBuildCtx) {
     const nominal = island.profile.ridgeAxis
       + Math.PI * (fall === 0 ? 0.5 : -0.55)
       + (rng(islandSeed * 47 + fall * 131) - 0.5) * 0.4;
-    const course = findCourse(ctx, nominal, taken);
+    const course = findCourse(ctx, nominal, taken, drawn);
     if (!course) continue;
     taken.push(course.angle);
     if (!mats) {
+      const sprayLight: SprayLight = { value: new THREE.Color(1, 1, 1) };
       mats = {
-        water: makeWaterMaterial(ctx),
+        water: makeWaterMaterial(ctx, sprayLight),
         rock: new THREE.MeshStandardMaterial({
           vertexColors: true, roughness: 1, flatShading: true, side: THREE.DoubleSide,
         }),
-        mist: makeMistMaterial(ctx, lowDetail ? 1.3 : 1.55),
+        mist: makeMistMaterial(ctx, lowDetail ? 1.3 : 1.55, sprayLight),
       };
       mats.rock.name = 'waterfall-rock';
       paintFallRock(mats.rock);
+      // The one per-frame write these falls make. The fx list is cleared on
+      // match teardown along with the island meshes, so this cannot outlive the
+      // materials it drives.
+      const atmosphere = ctx.host.renderer;
+      ctx.host.pushVolcanicFx(() => {
+        const night = THREE.MathUtils.clamp(atmosphere.getAtmosphere().nightFactor, 0, 1);
+        sprayLight.value.setRGB(1, 1, 1).lerp(SPRAY_NIGHT_TINT, night);
+      });
     }
-    const site = buildFall(ctx, course, fall, mats);
+    const site = buildFall(ctx, course, fall, mats, drawn);
     if (!site) continue;
     group.add(site);
     // The audio emitter sits at the loudest point — the plunge pool — with the
