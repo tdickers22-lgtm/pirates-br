@@ -240,12 +240,22 @@ async function main() {
     //
     // So the spawn claim is read at spawn. Everything else — world content, HUD,
     // draw calls — is still read from the settled frame, where it belongs.
-    const spawn = await page.evaluate(() => ({
-      botSpawnIssues: window.__piratesBR.state.players
-        .filter((p) => p.isBot)
-        .filter((p) => !p.shipId || p.onShipId !== p.shipId || p.state !== 'alive')
-        .length,
-    }));
+    // The roster claim is read here for the same reason, and counts BOT CREWS
+    // rather than bot Players. An island skeleton is an `isBot` Player with a
+    // null shipId that a wave pushes into `state.players` mid-match, so by the
+    // time the software path settles the lobby reads 14 players / 13 bots off a
+    // match that still has exactly 10 ships and an HUD saying 10 crews. Counting
+    // hulls instead of bodies makes the assertion true whenever it is asked.
+    const spawn = await page.evaluate(() => {
+      const bots = window.__piratesBR.state.players.filter((p) => p.isBot);
+      return {
+        players: window.__piratesBR.state.players.length,
+        botCrews: bots.filter((p) => !!p.shipId).length,
+        botSpawnIssues: bots
+          .filter((p) => !p.shipId || p.onShipId !== p.shipId || p.state !== 'alive')
+          .length,
+      };
+    });
 
     await page.waitForTimeout(2500);
     // The world build is a synchronous freeze; do not sample across it.
@@ -307,7 +317,8 @@ async function main() {
 
     expect('Match phase is playing', data.phase === 'playing', JSON.stringify(data));
     expect('Solo bot match has 10 ships', data.ships === 10, JSON.stringify(data));
-    expect('Solo bot match has 9 bots plus the player', data.players === 10 && data.bots === 9, JSON.stringify(data));
+    expect('Solo bot match has 9 bots plus the player', spawn.players === 10 && spawn.botCrews === 9,
+      JSON.stringify({ atSpawn: spawn, atSettle: { players: data.players, bots: data.bots } }));
     expect('All ships are alive at spawn', data.shipsAlive === 10, JSON.stringify(data));
     expect('Bots spawn alive on their ships', spawn.botSpawnIssues === 0,
       JSON.stringify({ atSpawn: spawn.botSpawnIssues, atSettle: data.botSpawnIssues }));
