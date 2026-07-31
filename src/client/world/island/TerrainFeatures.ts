@@ -351,14 +351,43 @@ export function buildRockSpires(ctx: IslandBuildCtx) {
   }
 }
 
-/** Peak mist — tall summits wear a slow ring of cloud (SoT reference). */
+/**
+ * Peak mist — tall summits wear a slow ring of cloud (SoT reference).
+ *
+ * WHY THE COLLAR USED TO CUT INTO THE MOUNTAIN. The ring was laid out blind: six
+ * sprites at a fixed 7-16m from the summit axis and 4-9m below the peak, each one
+ * 9-17m wide. On a real summit that band is still SOLID ROCK — the cone has barely
+ * begun to open out that close under its own peak — so most of the ring was placed
+ * inside the mountain. A Sprite is a camera-facing quad with depth TESTING on
+ * (only depthWrite is off), so a buried sprite does not vanish, it gets sliced by
+ * the terrain's depth: a soft round cloud with one dead-straight edge across it,
+ * which is what the night-caldera shot photographed.
+ *
+ * There is no depth texture in this renderer to soft-fade against, so the fix is
+ * geometric, and it is the one the summit's own shape dictates: for each sprite,
+ * march OUTWARD from the summit axis at its own azimuth until the drawn hillside
+ * has actually fallen below the height the sprite wants to sit at, then stand off
+ * by the sprite's visible radius. The cloud ends up hugging the slope from the
+ * outside — where a cloud collar belongs — instead of being embedded in it. A
+ * sprite that can find no clear air inside the island's own footprint is dropped
+ * rather than drawn buried.
+ */
 export function buildPeakMist(ctx: IslandBuildCtx) {
-  const { island, group, rng, lowDetail } = ctx;
+  const { island, group, r, rng, lowDetail } = ctx;
   {
     const profileMist = island.profile;
     const peakLocalX = Math.cos(profileMist.primaryHillAngle) * profileMist.primaryHillOffset * profileMist.footprintX;
     const peakLocalZ = Math.sin(profileMist.primaryHillAngle) * profileMist.primaryHillOffset * profileMist.footprintZ;
     const peakY = getIslandSurfaceY(island, island.position.x + peakLocalX, island.position.z + peakLocalZ);
+    // The hillside the sprite is judged against has to be the one it is DRAWN
+    // against, for the same reason the spires and the falls moved onto it.
+    const ground = ensureMeshGround(ctx);
+    const drawnY = (lx: number, lz: number): number => {
+      const y = ground?.heightAt(lx, lz);
+      return y === null || y === undefined
+        ? getIslandSurfaceY(island, lx + island.position.x, lz + island.position.z)
+        : y;
+    };
     if (!lowDetail && peakY > 30) {
       const size = 96;
       const canvas = document.createElement('canvas');
@@ -372,21 +401,43 @@ export function buildPeakMist(ctx: IslandBuildCtx) {
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, size, size);
       const mistTex = new THREE.CanvasTexture(canvas);
+      /** How much of a sprite's half-width actually paints: the gradient is at
+       *  0.22 alpha by 0.6 of the radius and gone by 1.0, so the part that can be
+       *  caught by a depth slice is the inner ~60%. Standing off by that much
+       *  clears the visible disc without flinging the collar off the mountain. */
+      const VISIBLE_FRACTION = 0.30;
+      /** Air, not a graze: the ground under the sprite's centre must be at least
+       *  this far below it, or a bump in the slope re-buries it. */
+      const HEADROOM = 2.5;
       for (let m = 0; m < 6; m++) {
+        const ma = (m / 6) * Math.PI * 2 + rng(m * 983) * 0.8;
+        const ms = 9 + rng(m * 1009) * 8;
+        const mistY = peakY - 4 - rng(m * 997) * 5;
+        // March out along this azimuth to the first radius whose drawn ground has
+        // dropped clear of the sprite's height. Start where the old ring started,
+        // so a summit that IS open at 7m keeps the tight collar it always had.
+        const standoff = ms * VISIBLE_FRACTION;
+        const maxR = r * 1.05;
+        let mr = -1;
+        for (let probe = 7; probe <= maxR; probe += 1.5) {
+          const px = peakLocalX + Math.cos(ma) * probe;
+          const pz = peakLocalZ + Math.sin(ma) * probe;
+          if (drawnY(px, pz) <= mistY - HEADROOM) { mr = probe + standoff; break; }
+        }
+        // No clear air anywhere on this bearing inside the island: a sprite here
+        // could only ever be drawn sliced, so it is not drawn at all.
+        if (mr < 0 || mr > maxR + standoff) continue;
         const mistSprite = new THREE.Sprite(new THREE.SpriteMaterial({
           map: mistTex,
           transparent: true,
           opacity: 0.4 + rng(m * 977) * 0.2,
           depthWrite: false,
         }));
-        const ma = (m / 6) * Math.PI * 2 + rng(m * 983) * 0.8;
-        const mr = 7 + rng(m * 991) * 9;
         mistSprite.position.set(
           peakLocalX + Math.cos(ma) * mr,
-          peakY - 4 - rng(m * 997) * 5,
+          mistY,
           peakLocalZ + Math.sin(ma) * mr,
         );
-        const ms = 9 + rng(m * 1009) * 8;
         mistSprite.scale.set(ms, ms * 0.55, 1);
         group.add(mistSprite);
       }
