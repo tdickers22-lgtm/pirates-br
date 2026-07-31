@@ -1386,6 +1386,8 @@ export class Game {
   }
 
   private resetLocalRoundState() {
+    // A new round may raise the elimination card again.
+    this.matchResultsShown = false;
     // The server's snapshot counter restarts per match — so must ours.
     this.clientState.lastAppliedSeq = -1;
     this.clearStartSequence();
@@ -1590,7 +1592,21 @@ export class Game {
     });
   }
 
+  /**
+   * ONE END SCREEN AT A TIME.
+   *
+   * The elimination card (SHIP SUNK, "waiting for the voyage to end…") and the
+   * match-results card (DEFEATED, with the fleet board) are two different
+   * moments, and they were both allowed on screen at once: the results card
+   * drew over a still-visible elimination card, each carrying its own RETURN TO
+   * PORT button with one of them unreachable behind the other. Once the results
+   * are up the round is genuinely over, so nothing may re-raise the wait card —
+   * not a late `game_over`, not a victory sting arriving after the board.
+   */
+  private matchResultsShown = false;
+
   private returnToLobbyAfterLoss(kills: number, gold: number, reason = 'Defeated') {
+    if (this.matchResultsShown) return;
     // In multiplayer mode: don't disconnect or auto-respawn. Show the death screen
     // with a "Return to Port" button. The server-side match_ended will deliver the
     // full leaderboard when (or if) the round actually ends.
@@ -1605,6 +1621,7 @@ export class Game {
   private goBackToMenuFromMatch(): void {
     this.network.returnToMenu();
     this.inMatch = false;
+    this.matchResultsShown = false;
     this.ui.deathScreen.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
     document.body.classList.remove('showing-death-screen');
@@ -1809,7 +1826,7 @@ export class Game {
         this.returnToLobbyAfterLoss(result.kills ?? player?.kills ?? 0, result.gold ?? player?.gold ?? 0, 'Crew lost');
       } else if (result.winnerId && result.winnerId === this.localPlayerId) {
         this.audio.playVictory();
-        this.hud.showVictory(player?.kills ?? 0, result.gold ?? player?.gold ?? 0);
+        if (!this.matchResultsShown) this.hud.showVictory(player?.kills ?? 0, result.gold ?? player?.gold ?? 0);
       } else {
         this.audio.playDefeat();
         const reason = result.reason === 'gold'
@@ -1820,25 +1837,41 @@ export class Game {
     };
 
     this.network.onMatchEnded = (payload) => {
+      type EndRow = {
+        playerId: string; name: string; kills: number; deaths: number;
+        gold: number; placement: number; isWinner: boolean; isBot?: boolean; alive?: boolean;
+      };
       const result = payload as {
         winnerId: string | null;
         winnerName: string | null;
         reason: string;
-        humans: Array<{ playerId: string; name: string; kills: number; deaths: number; gold: number; placement: number; isWinner: boolean }>;
+        humans: EndRow[];
+        /** Every crew in the match, bots included, ranked once (Match.buildEndBoard). */
+        board?: EndRow[];
+        crewCount?: number;
       };
       const youId = this.localPlayerId;
-      const youRow = result.humans.find((r) => r.playerId === youId);
+      // The board is the whole fleet; `humans` is the persistence list and is
+      // only the fallback for a server that predates it.
+      const rows = result.board?.length ? result.board : result.humans;
+      const youRow = rows.find((r) => r.playerId === youId);
       const won = !!result.winnerId && result.winnerId === youId;
       const subtitle = result.reason === 'gold'
         ? `${result.winnerName ?? 'A pirate'} amassed enough gold`
         : result.reason === 'last_ship'
           ? 'Last crew afloat takes the seas'
           : 'The voyage ended';
+      this.matchResultsShown = true;
+      const fleet = result.crewCount ?? rows.length;
+      const standing = youRow
+        ? (won ? `Place: #1 of ${fleet} — the seas are yours` : `Place: #${youRow.placement} of ${fleet}`)
+        : '';
       this.menu.showEndmatch({
         isWinner: won,
         title: won ? 'VICTORY' : (youRow?.deaths ? 'DEFEATED' : 'VOYAGE ENDED'),
         subtitle,
-        rows: result.humans.map((r) => ({
+        standing,
+        rows: rows.map((r) => ({
           placement: r.placement,
           name: r.name,
           kills: r.kills,
@@ -1846,6 +1879,8 @@ export class Game {
           gold: r.gold,
           you: r.playerId === youId,
           winner: r.isWinner,
+          bot: r.isBot,
+          alive: r.alive,
         })),
       });
     };

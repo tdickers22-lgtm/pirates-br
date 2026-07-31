@@ -166,12 +166,41 @@ interface PlayerMatchDeltas {
   leftAtSimTime: number | null;
 }
 
+/**
+ * ONE ROW PER CREW IN THE MATCH — bots included.
+ *
+ * The end screen used to be handed `humans` and nothing else, so a solo queue
+ * against nine bots produced a "results table" with exactly ONE row in it: your
+ * own. A battle royale whose scoreboard cannot tell you who won, who you
+ * outlasted, or where you placed out of ten is not a scoreboard.
+ *
+ * `board` is the whole fleet ranked once — winner first, then whoever was still
+ * afloat by gold, then the eliminated in reverse order of dying. `humans` stays
+ * exactly as it was because the lobby persists lifetime stats off it.
+ */
+export interface MatchBoardRow {
+  playerId: string;
+  name: string;
+  kills: number;
+  deaths: number;
+  gold: number;
+  placement: number;
+  isWinner: boolean;
+  isBot: boolean;
+  /** False once the crew was eliminated — the board marks who was still afloat. */
+  alive: boolean;
+}
+
 export interface MatchEndResult {
   matchId: string;
   winnerId: string | null;
   winnerName: string | null;
   reason: 'gold' | 'last_ship' | 'abandoned';
   humans: MatchHumanResult[];
+  /** Every crew in the match, ranked. See MatchBoardRow. */
+  board: MatchBoardRow[];
+  /** How many crews the match was played with — the "of 10" in "Place: #6 of 10". */
+  crewCount: number;
 }
 
 interface MatchOptions {
@@ -361,6 +390,16 @@ export class Match {
   private humanFinalStats: Map<string, { name: string; kills: number; deaths: number; gold: number }> = new Map();
   /** Per-player lifetime-stat deltas accumulated over the match (bots too — only humans persist). */
   private matchStatDeltas = new Map<string, PlayerMatchDeltas>();
+  /**
+   * TIMES DIED, COUNTED WHERE DYING HAPPENS.
+   *
+   * The end screen's Deaths column was `state === 'eliminated' ? 1 : 0` — a
+   * survival flag wearing a counter's name. A pirate who was cut down four
+   * times and respawned each time read 0, and the winner of a bloodbath read 0
+   * beside a runner-up's 1. Every death passes through handlePlayerDeath, so
+   * that is the one place the tally can be honest, respawns included.
+   */
+  private matchDeaths = new Map<string, number>();
   /** Order of elimination — earliest first. Used for placement on match end. */
   private eliminationOrder: string[] = [];
   /** Per-death record of a held respawn: when the hold began, and whether it has
@@ -1077,6 +1116,12 @@ export class Match {
       ...Array.from(this.humanFinalStats.keys()),
       ...this.state.players.filter((p) => !p.isBot).map((p) => p.id),
     ]);
+    // Rank the whole fleet FIRST, then read every human's placement out of it.
+    // The old human-only counter handed the single human in a solo-vs-bots
+    // match placement 1 whatever happened to her — so "best placement" was a
+    // lifetime stat that could never be anything but 1st.
+    const board = this.buildEndBoard(winnerPlayer);
+    const boardPlacement = new Map(board.map((row) => [row.playerId, row.placement]));
     const placements: MatchHumanResult[] = [];
     const seen = new Set<string>();
 
@@ -1086,7 +1131,9 @@ export class Match {
       const live = this.playersById.get(playerId);
       const final = this.humanFinalStats.get(playerId);
       const name = live?.name ?? final?.name ?? this.clients.get(playerId)?.name ?? 'Pirate';
-      const deaths = final?.deaths ?? (live?.state === 'eliminated' ? 1 : 0);
+      const deaths = this.matchDeaths.get(playerId)
+        ?? final?.deaths
+        ?? (live?.state === 'eliminated' ? 1 : 0);
       const gold = live?.gold ?? final?.gold ?? 0;
       const delta = this.matchStatDeltas.get(playerId);
       // The LIFETIME kills stat is PvP only: the in-match scoreboard counts
@@ -1101,7 +1148,7 @@ export class Match {
         kills,
         deaths,
         gold,
-        placement: placements.length + 1,
+        placement: boardPlacement.get(playerId) ?? placements.length + 1,
         isWinner,
         ...(delta ? {
           shipsSunk: delta.shipsSunk,
@@ -1138,9 +1185,86 @@ export class Match {
       winnerName: winnerPlayer?.name ?? null,
       reason: this.endReason ?? 'last_ship',
       humans: placements,
+      board,
+      crewCount: board.length,
     };
     this.broadcast({ type: 'match_ended', ts: Date.now(), payload: result });
     this.onMatchEnd?.(result);
+  }
+
+  /**
+   * THE WHOLE FLEET, RANKED ONCE.
+   *
+   * Same ordering rule the human placements use, applied to every crew in the
+   * match so the number the end screen prints ("Place: #6 of 10") is a real
+   * standing and not a count of the humans who happened to be logged in:
+   *
+   *   1. the winner, if there is one;
+   *   2. everyone still afloat, richest first — surviving beats dying, and
+   *      between survivors the gold race is the tiebreak the match was about;
+   *   3. the eliminated, LAST death first — outlasting is the ranking.
+   *
+   * Skeletons are excluded. They are `isBot` Players like the crews are, but
+   * they are island wildlife with a home cave, not a hull in the running; a
+   * board with eleven rows of "Skeleton" in it is worse than no board.
+   * Humans who disconnected mid-match keep their row from humanFinalStats —
+   * quitting is not a way to vanish off the scoreboard.
+   */
+  private buildEndBoard(winnerPlayer: Player | null): MatchBoardRow[] {
+    const crewIds: string[] = [];
+    const pushId = (id: string) => { if (!crewIds.includes(id)) crewIds.push(id); };
+    for (const p of this.state.players) {
+      if (this.isSkeletonPlayer(p)) continue;
+      pushId(p.id);
+    }
+    // A human who left after being eliminated is gone from state.players but
+    // still finished ahead of whoever died before them.
+    for (const id of this.humanFinalStats.keys()) pushId(id);
+
+    const rowFor = (playerId: string): MatchBoardRow => {
+      const live = this.playersById.get(playerId);
+      const final = this.humanFinalStats.get(playerId);
+      const delta = this.matchStatDeltas.get(playerId);
+      const scoreboardKills = live?.kills ?? final?.kills ?? 0;
+      return {
+        playerId,
+        name: live?.name ?? final?.name ?? this.clients.get(playerId)?.name ?? 'Pirate',
+        // PvP only, exactly as the persisted human row reads it: skeleton waves
+        // respawn forever and would otherwise decide the scoreboard.
+        kills: Math.max(0, scoreboardKills - (delta?.skeletonsKilled ?? 0)),
+        deaths: this.matchDeaths.get(playerId) ?? final?.deaths ?? 0,
+        gold: live?.gold ?? final?.gold ?? 0,
+        placement: 0,
+        isWinner: !!winnerPlayer && winnerPlayer.id === playerId,
+        isBot: live?.isBot ?? false,
+        alive: !!live && live.state !== 'eliminated',
+      };
+    };
+
+    const rows = crewIds.map(rowFor);
+    const byId = new Map(rows.map((r) => [r.playerId, r]));
+    const ordered: MatchBoardRow[] = [];
+    const taken = new Set<string>();
+    const take = (id: string) => {
+      const row = byId.get(id);
+      if (!row || taken.has(id)) return;
+      taken.add(id);
+      ordered.push(row);
+    };
+
+    if (winnerPlayer) take(winnerPlayer.id);
+    for (const row of rows.filter((r) => r.alive && !taken.has(r.playerId)).sort((a, b) => b.gold - a.gold)) {
+      take(row.playerId);
+    }
+    for (const id of [...this.eliminationOrder].reverse()) take(id);
+    // Anything the two passes above missed (a crew that never entered the
+    // elimination order and is not marked alive) still gets a row, by gold.
+    for (const row of rows.filter((r) => !taken.has(r.playerId)).sort((a, b) => b.gold - a.gold)) {
+      take(row.playerId);
+    }
+
+    ordered.forEach((row, i) => { row.placement = i + 1; });
+    return ordered;
   }
 
   private handleMessage(client: ConnectedClient, msg: NetMsg) {
@@ -5243,7 +5367,9 @@ export class Match {
       this.humanFinalStats.set(p.id, {
         name: p.name,
         kills: p.kills,
-        deaths: 1,
+        // Every death, not just the last one (see matchDeaths). An elimination
+        // that somehow bypassed handlePlayerDeath still counts as the one.
+        deaths: Math.max(1, this.matchDeaths.get(p.id) ?? 0),
         gold: p.gold,
       });
     }
@@ -5531,6 +5657,10 @@ export class Match {
   }
 
   private handlePlayerDeath(player: Player, wasDowned = false) {
+    // Every death in the game funnels through here (bled out, finished, sunk,
+    // drowned, stormed) — so this is where the end screen's Deaths column is
+    // actually earned. Counted for bots too: the board ranks the whole fleet.
+    this.matchDeaths.set(player.id, (this.matchDeaths.get(player.id) ?? 0) + 1);
     // The cuirass dies with you — armor never survives a respawn.
     player.armor = 0;
     let killer = player.lastDamagedById

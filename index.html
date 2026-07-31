@@ -380,10 +380,17 @@
       font-size: 0.78rem; color: #889; letter-spacing: 0.2em; text-transform: uppercase;
       margin-bottom: 16px;
     }
+    #endmatch-standing {
+      font-size: 1.05rem; letter-spacing: 0.16em; color: #b8c8dc;
+      margin-bottom: 12px;
+    }
+    #endmatch-standing.won { color: #f0dca0; }
     #endmatch-board {
       display: flex; flex-direction: column; gap: 6px;
       margin: 10px 0 18px;
-      max-height: 280px;
+      /* Ten crews at ~34px a row plus the header — the board is the point of
+         the screen, so it shows the whole fleet without a scroll on a laptop. */
+      max-height: min(46vh, 400px);
       overflow-y: auto;
     }
     .board-row {
@@ -398,6 +405,16 @@
     }
     .board-row.you { background: rgba(201, 168, 76, 0.16); border: 1px solid rgba(201, 168, 76, 0.32); }
     .board-row.winner { color: #fff5d3; }
+    /* A crew that went down is dimmed, so "who was still afloat" reads off the
+       board without counting rows. */
+    .board-row.sunk .nm, .board-row.sunk .col, .board-row.sunk .pl { opacity: 0.62; }
+    .board-row.head { background: none; padding-bottom: 2px; }
+    .board-row .tag {
+      margin-left: 8px; padding: 1px 5px; border-radius: 3px;
+      font-size: 0.56rem; letter-spacing: 0.12em; vertical-align: middle;
+      background: rgba(255,255,255,0.08); color: #8fa2b8;
+    }
+    .board-row .tag.you-tag { background: rgba(201,168,76,0.28); color: #f0dca0; }
     .board-row .pl { font-family: monospace; color: #c9a84c; }
     .board-row .nm { text-align: left; color: #e8d5a3; }
     .board-row .col { font-family: monospace; color: #b8c8dc; text-align: right; }
@@ -2216,6 +2233,10 @@
     <div id="endmatch-panel">
       <div id="endmatch-title">VICTORY</div>
       <div id="endmatch-subtitle"></div>
+      <!-- Where you came out of how many. The board below is every crew in the
+           match, bots included — it used to be the humans only, which in a solo
+           queue is one row. -->
+      <div id="endmatch-standing"></div>
       <div id="endmatch-board"></div>
       <div id="endmatch-actions">
         <button class="menu-btn primary" id="endmatch-play-again-btn" style="display:none;">⚓ Play Again with Crew</button>

@@ -236,23 +236,61 @@ export class MenuController {
     if (active instanceof HTMLElement) active.blur();
   }
 
+  /**
+   * THE RESULTS TABLE IS THE WHOLE FLEET, AND IT IS THE ONLY CARD ON SCREEN.
+   *
+   * Two things were wrong with the end of a match. The board was built from the
+   * server's `humans` list, so a solo queue against nine bots ended on a
+   * "results table" with exactly ONE row in it — your own, placement 1, whether
+   * you won or drowned in the first minute. And the DEFEATED card arrived at
+   * z-index 800 on top of a SHIP SUNK card still sitting at 500, each with its
+   * own RETURN TO PORT button, one of them unclickable behind the other.
+   *
+   * So: the rows are every crew the match was played with, bots included,
+   * ranked once by the server; the standing line says where you came out of how
+   * many; and opening this screen is what CLOSES the elimination card. One card
+   * at a time, one button on it.
+   */
   showEndmatch(opts: {
     isWinner: boolean;
     title: string;
     subtitle: string;
-    rows: Array<{ placement: number; name: string; kills: number; deaths: number; gold: number; you: boolean; winner: boolean }>;
+    /** "Place: #6 of 10" — printed above the board, in gold when you took it. */
+    standing?: string;
+    rows: Array<{
+      placement: number; name: string; kills: number; deaths: number; gold: number;
+      you: boolean; winner: boolean; bot?: boolean; alive?: boolean;
+    }>;
   }): void {
+    // ONE END SCREEN. The elimination card is a wait-for-the-round card; the
+    // round is over, so it goes — along with the body class that was hiding the
+    // HUD behind it.
+    document.getElementById('death-screen')?.classList.remove('visible');
+    const death = document.getElementById('death-screen');
+    if (death) death.style.display = 'none';
+    const win = document.getElementById('win-screen');
+    win?.classList.remove('visible');
+    if (win) win.style.display = 'none';
+    document.body.classList.remove('showing-death-screen');
+
     this.endmatchTitle.textContent = opts.title;
     this.endmatchTitle.classList.toggle('defeat', !opts.isWinner);
     this.endmatchSubtitle.textContent = opts.subtitle;
     this.endmatchPlayAgainBtn.style.display = this.lastMatchPartyCode ? '' : 'none';
     this.endmatchBoard.innerHTML = '';
 
+    const standingEl = document.getElementById('endmatch-standing');
+    if (standingEl) {
+      standingEl.textContent = opts.standing ?? '';
+      standingEl.style.display = opts.standing ? '' : 'none';
+      standingEl.classList.toggle('won', opts.isWinner);
+    }
+
     const header = document.createElement('div');
-    header.className = 'board-row';
+    header.className = 'board-row head';
     header.innerHTML = `
       <span class="pl label">#</span>
-      <span class="nm label">Pirate</span>
+      <span class="nm label">Crew</span>
       <span class="col label">Kills</span>
       <span class="col label">Deaths</span>
       <span class="col label">Gold</span>
@@ -261,10 +299,18 @@ export class MenuController {
 
     for (const row of opts.rows) {
       const div = document.createElement('div');
-      div.className = 'board-row' + (row.you ? ' you' : '') + (row.winner ? ' winner' : '');
+      div.className = 'board-row'
+        + (row.you ? ' you' : '')
+        + (row.winner ? ' winner' : '')
+        + (row.alive === false ? ' sunk' : '');
+      // A bot crew is named as one — the auditor could not tell which of the
+      // ten names on the board were people.
+      const tag = row.you ? '<span class="tag you-tag">YOU</span>'
+        : row.bot ? '<span class="tag">BOT</span>'
+          : '';
       div.innerHTML = `
         <span class="pl">${row.placement}</span>
-        <span class="nm">${escapeHtml(row.name)}${row.winner ? ' ★' : ''}</span>
+        <span class="nm">${escapeHtml(row.name)}${row.winner ? ' ★' : ''}${tag}</span>
         <span class="col">${row.kills}</span>
         <span class="col">${row.deaths}</span>
         <span class="col">${row.gold}</span>
