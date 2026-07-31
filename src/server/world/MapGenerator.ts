@@ -1699,12 +1699,8 @@ export class MapGenerator {
       const shoreAngle = island.dock.shoreAngle;
       const spots: Array<[number, number]> = [[-0.30, 0.845], [0.28, 0.855], [0.02, 0.775]];
       for (const [angleOffset, distRatio] of spots) {
-        const p = getIslandSurfacePoint(island, distRatio, shoreAngle + angleOffset, 0.08);
-        // Dry sand only, and never inside the dock's own levelling stamp or a
-        // cave mouth — a barrel half-swallowed by geometry is worse than none.
-        if (p.y - 0.08 < 0.75) continue;
-        if (this.nearCave(island, p.x, p.z, 1.2)) continue;
-        if (this.nearStamp(island, p.x, p.z, 0.8)) continue;
+        const p = this.landingStoreSpot(island, shoreAngle + angleOffset, distRatio);
+        if (!p) continue;
         barrels.push({
           id: uuid(),
           position: p,
@@ -1714,6 +1710,59 @@ export class MapGenerator {
       }
     }
     return barrels;
+  }
+
+  /**
+   * WHERE A LANDING STORE CAN ACTUALLY STAND.
+   *
+   * The first cut of the stores read the shore ray at three fixed radius
+   * ratios and dropped anything that came back wet. On nine of the Reach's ten
+   * docked islands that is the beach and the barrels land. On THE CROOKED
+   * ATOLL it is the lagoon: the ray goes rim (ratio ~0.97, sand a bare 0.4 m
+   * proud of the water) → two metres of water at 0.75-0.90 → the inner rise.
+   * All three fixed ratios sampled the lagoon floor, all three were correctly
+   * rejected as wet, and the island got NO stores — leaving its nearest barrel
+   * 49 m off the pier and the next three past 115 m, which is the exact defect
+   * the stores exist to fix, surviving on the one island whose beach is
+   * thinnest. A guard that silently drops the case it was written for is worse
+   * than no guard: the atoll looked fixed from every island but itself.
+   *
+   * So the ratio is a PREFERENCE, not an address. The preferred point is tried
+   * first — every island that already worked is bit-identical — and if it is
+   * wet the ray is walked SEAWARD, because the sand between the pier and the
+   * water is the ground a crew crosses first. Only if that whole sweep is
+   * unusable does the dry-sand bar come down to "clear of the waterline",
+   * which is what an atoll rim honestly is, and only after that does it look
+   * inland, where a barrel may be across a lagoon and is a last resort.
+   *
+   * Returns null when the ray has nowhere at all — better one fewer barrel
+   * than one inside a cave mouth or standing in the surf.
+   */
+  private landingStoreSpot(island: Island, angle: number, preferred: number): Vec3 | null {
+    const dock = island.dock;
+    if (!dock) return null;
+    // A store you cannot see from where you tie up is just another scattered
+    // barrel. 46 m is a long look down a beach, and it is the number the
+    // landing-stores test holds the generator to.
+    const REACH = 46;
+    const usable = (p: Vec3, minDry: number) => p.y - 0.08 >= minDry
+      && Math.hypot(p.x - dock.position.x, p.z - dock.position.z) <= REACH
+      // Never inside the dock's own levelling stamp or a cave mouth — a barrel
+      // half-swallowed by geometry is worse than none.
+      && !this.nearCave(island, p.x, p.z, 1.2)
+      && !this.nearStamp(island, p.x, p.z, 0.8);
+
+    const seaward: number[] = [preferred];
+    for (let r = preferred + 0.05; r <= 1.025; r += 0.05) seaward.push(Number(r.toFixed(3)));
+    const at = (r: number) => getIslandSurfacePoint(island, r, angle, 0.08);
+
+    for (const r of seaward) { const p = at(r); if (usable(p, 0.75)) return p; }
+    for (const r of seaward) { const p = at(r); if (usable(p, 0.28)) return p; }
+    for (let r = preferred - 0.05; r >= 0.5; r -= 0.05) {
+      const p = at(Number(r.toFixed(3)));
+      if (usable(p, 0.75)) return p;
+    }
+    return null;
   }
 
   private rollBarrelLoot(rng: Rng) {
