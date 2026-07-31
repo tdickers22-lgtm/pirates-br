@@ -2,7 +2,9 @@ import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
 const OUT = process.argv[2] ?? 'test-results/cave';
 mkdirSync(OUT, { recursive: true });
-const browser = await chromium.launch({ args: ['--use-gl=angle','--use-angle=metal','--enable-gpu','--ignore-gpu-blocklist'] });
+// A crashed headless Chromium must never be able to raise a macOS crash dialog on
+// the user's screen — this box runs these probes while someone is sitting at it.
+const browser = await chromium.launch({ args: ['--use-gl=angle','--use-angle=metal','--enable-gpu','--ignore-gpu-blocklist','--disable-breakpad','--noerrdialogs','--disable-crash-reporter'] });
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 const wait = (ms) => page.waitForTimeout(ms);
 async function freeLook(pos, target) {
@@ -36,12 +38,24 @@ await page.evaluate(() => window.__piratesBR.setDayNightOverride(854));
 await page.evaluate(() => { const e=document.createElement('style'); e.textContent='#hud{visibility:hidden!important;}'; document.head.appendChild(e); });
 await wait(500);
 const AVOID_VOLCANIC = process.argv[3] === 'nonvolcanic';
-const WANT_NAME = process.argv[4] ?? '';
-const info = await page.evaluate(([avoidVolc, wantName]) => {
+const WANT = process.argv[4] ?? "";
+// The entrance has to read as a hole on every kind of flank, not just the one the
+// probe happens to sort first — a mountain's steep face, a rocky island's broken
+// low relief and a tropical island's soft green slope light the jamb completely
+// differently. So the WANT token matches the island NAME, its terrainStyle or its
+// biome, and whichever it hits outranks the default mountain preference.
+const info = await page.evaluate(([avoidVolc, want]) => {
   const g = window.__piratesBR;
+  const hit = (isl) => {
+    if (!want) return false;
+    const w = want.toLowerCase();
+    return (isl.name ?? '').toLowerCase().includes(w)
+      || (isl.profile?.terrainStyle ?? '').toLowerCase() === w
+      || (isl.profile?.biome ?? '').toLowerCase() === w;
+  };
   const score = (isl) => (isl.profile?.terrainStyle === 'mountain' ? 2 : 0)
     + (avoidVolc && (isl.profile?.biome === 'volcanic') ? -3 : 0)
-    + (wantName && (isl.name ?? '').toLowerCase().includes(wantName.toLowerCase()) ? 100 : 0);
+    + (hit(isl) ? 100 : 0);
   const isls = (g.state.islands ?? []).slice().sort((a, b) => score(b) - score(a));
   for (const isl of isls) {
     const mouth = (isl.caves ?? []).find((c) => c.hasMouth);
@@ -54,7 +68,7 @@ const info = await page.evaluate(([avoidVolc, wantName]) => {
     };
   }
   return null;
-}, [AVOID_VOLCANIC, WANT_NAME]);
+}, [AVOID_VOLCANIC, WANT]);
 console.log(JSON.stringify(info));
 if (info) {
   const ox = Math.sin(info.rot), oz = Math.cos(info.rot);      // outward (+z-local)

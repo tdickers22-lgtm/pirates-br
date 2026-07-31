@@ -254,6 +254,19 @@ export function buildReefRing(ctx: IslandBuildCtx) {
 /** Sharp rock spires — jagged peaks for mountain/rocky islands. */
 export function buildRockSpires(ctx: IslandBuildCtx) {
   const { island, group, rng, surfacePoint, isSolidDecorPoint, SURFACE_ABOVE_WATER, scaledCount, boulderGeo, cliffColor } = ctx;
+  // Spires were seated on the analytic heightfield, and a spire cluster is FOUR
+  // rubble stones plus a sub-spike around one cone. On convex ground — a caldera
+  // rim, a ridge shoulder, which is where the 0.32-0.72 distance band puts them
+  // — the drawn mesh chord runs below the function, so the whole cluster lifted
+  // off the slope together and photographed as one pale spiky object balanced on
+  // the hillside. Everything below seats on the ground it is drawn against.
+  const ground = ensureMeshGround(ctx);
+  const drawnY = (lx: number, lz: number): number => {
+    const y = ground?.heightAt(lx, lz);
+    return y === null || y === undefined
+      ? getIslandSurfaceY(island, lx + island.position.x, lz + island.position.z)
+      : y;
+  };
   if (island.profile.terrainStyle === 'mountain' || island.profile.terrainStyle === 'rocky') {
     // Was a hard-coded 0x6a5f52 on a cone up to 13m tall: a black shark fin on
     // the skyline of every rocky isle, and a foreign tone beside the hillside it
@@ -278,6 +291,7 @@ export function buildRockSpires(ctx: IslandBuildCtx) {
       const distRatio = 0.32 + rng(i * 509 + 17) * 0.4;
       const surface = surfacePoint(distRatio, angle);
       if (!isSolidDecorPoint(surface, SURFACE_ABOVE_WATER, -0.2)) continue;
+      surface.y = drawnY(surface.x, surface.z);
       const spireH = 4 + rng(i * 521) * (island.profile.terrainStyle === 'mountain' ? 9 : 5);
       const spireR = 0.7 + rng(i * 523) * 1.6;
       // Tilt is bounded so cos(tilt) ≈ 1 and the base never lifts visibly.
@@ -303,10 +317,14 @@ export function buildRockSpires(ctx: IslandBuildCtx) {
         const rOff = spireR * (0.85 + rng(i * 549 + s) * 0.35);
         const rx = surface.x + Math.cos(sa) * rOff;
         const rz = surface.z + Math.sin(sa) * rOff;
-        const ry = getIslandSurfaceY(island, rx + island.position.x, rz + island.position.z);
+        const ry = drawnY(rx, rz);
         const rock = new THREE.Mesh(boulderGeo, rubbleMat);
-        rock.scale.setScalar(0.35 + rng(i * 551 + s) * 0.32);
-        rock.position.set(rx, ry + 0.18, rz);
+        const rockScale = 0.35 + rng(i * 551 + s) * 0.32;
+        rock.scale.setScalar(rockScale);
+        // Bitten IN, not balanced on: a dodecahedron whose centre sits a fifth of
+        // a metre above the ground shows daylight under it from every downhill
+        // angle. Sink it by a third of its own radius instead.
+        rock.position.set(rx, ry - rockScale * 0.30, rz);
         rock.rotation.set(rng(i * 553 + s) * Math.PI, rng(i * 557 + s) * Math.PI, rng(i * 561 + s) * Math.PI);
         rock.castShadow = true;
         group.add(rock);
@@ -320,7 +338,7 @@ export function buildRockSpires(ctx: IslandBuildCtx) {
         );
         const offX = (rng(i * 549) - 0.5) * spireR * 2.5;
         const offZ = (rng(i * 551) - 0.5) * spireR * 2.5;
-        const subSurfY = getIslandSurfaceY(island, surface.x + offX + island.position.x, surface.z + offZ + island.position.z);
+        const subSurfY = drawnY(surface.x + offX, surface.z + offZ);
         const subTiltX = (rng(i * 553) - 0.5) * 0.18;
         const subTiltZ = (rng(i * 561) - 0.5) * 0.22;
         const subBurial = 0.25;
