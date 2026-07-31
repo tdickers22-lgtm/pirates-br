@@ -84,6 +84,26 @@ const browser = await chromium.launch({
     '--disable-breakpad', '--noerrdialogs', '--disable-crash-reporter',
   ],
 });
+// THE BROWSER MUST DIE EVEN WHEN THIS SCRIPT DOES.
+//
+// Everything below is top-level await with a single browser.close() at the very
+// bottom, so any throw — a failed selector, a lost websocket, Ctrl-C — used to
+// leave a headless Chromium running with a live GPU context. This box kernel
+// panicked twice in one afternoon under exactly that (WindowServer watchdog,
+// gpuEvent from chrome-headless), and a leaked renderer is a panic waiting for
+// the next probe to start. `browser.process().kill()` is synchronous, which is
+// the only kind of cleanup an 'exit' handler can actually perform.
+let closed = false;
+const reap = () => {
+  if (closed) return;
+  closed = true;
+  try { browser.process()?.kill('SIGKILL'); } catch { /* already gone */ }
+};
+process.on('exit', reap);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { reap(); process.exit(130); });
+process.on('uncaughtException', (e) => { console.error('UNCAUGHT:', e); reap(); process.exit(1); });
+process.on('unhandledRejection', (e) => { console.error('UNHANDLED:', e); reap(); process.exit(1); });
+
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const errors = [];
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
@@ -602,6 +622,16 @@ if (phase('g')) {
           panel,
         };
       }));
+      // STEER OFF THE WIND, THEN STEADY UP — which is what the pill says, and what
+      // this loop did not do. Holding [A] for the full 22 s walks her right past
+      // the reach and round into irons on the other side: the panel went from
+      // "catching 97%" to "catching 0%" while the coach flipped from the in-irons
+      // line to the slack-yard one, and the run recorded a 1.33 u/s peak for a
+      // hull that had been through every point of sail on the way. Release the
+      // helm the moment she starts drawing and let her run.
+      if (bearAway[bearAway.length - 1].speed > 2.5) {
+        await page.evaluate(() => { window.__piratesBR.input.keys.delete('KeyA'); });
+      }
       if (bearAway[bearAway.length - 1].speed > 6) break;
     }
     await page.evaluate(() => { window.__piratesBR.input.keys.delete('KeyA'); });
@@ -743,6 +773,127 @@ if (phase('i')) {
     JSON.stringify(painted));
 }
 
+if (phase('j')) {
+  say('\n(j) aground: the third way to make no way, said out loud');
+  // A hull is laid on a real shoal on the SERVER, then the client is asked what it
+  // shows. Everything read below comes off the wire and the DOM — the flag, the
+  // coach pill, the sail panel — so this is the whole chain, not a unit test with
+  // a browser attached.
+  await takeTheHelm();
+  const put = await page.evaluate(() => {
+    const g = window.__piratesBR;
+    const me = g.state.players.find((p) => p.id === g.localPlayerId);
+    const ship = g.state.ships.find((x) => x.id === me?.shipId);
+    // THE BEACH HAS TO BE ONE SHE CAN ACTUALLY REACH. Picking the nearest island
+    // sent her at Booty Bay 189 m dead upwind: she sat in irons at 1.3 u/s and was
+    // still 150 m short when the clock ran out, so the probe reported "never
+    // aground" about a hull that had never arrived. Score every island by the
+    // point of sail the run to it would be — offWind outside the no-go cone — and
+    // take the nearest of the ones she can actually sail to.
+    // sampleWind's closed form, inlined: the page cannot import shared/utils, and
+    // inside the ring sampleLocalWind IS the prevailing breeze (the gale ramp is
+    // exactly zero in shelter), which is where this hull is at T+10 s.
+    const t = g.ocean?.getTime?.() ?? 0;
+    const raw = -Math.PI * 0.26 + Math.sin(t * 0.013) * 0.22 + Math.sin(t * 0.005 + 1.2) * 0.12;
+    const dir = Math.atan2(Math.sin(raw), Math.cos(raw));
+    const reachable = (g.state.islands ?? []).map((i) => {
+      const d = Math.hypot(i.position.x - ship.position.x, i.position.z - ship.position.z);
+      const bearing = Math.atan2(i.position.x - ship.position.x, i.position.z - ship.position.z);
+      const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+      const offWind = Math.PI - Math.abs(wrap(dir - bearing));
+      return { i, d, offWind };
+    }).filter((c) => c.offWind > 0.9).sort((a, b) => a.d - b.d);
+    const isle = (reachable[0] ?? null)?.i;
+    if (!isle) return null;
+    // Steer straight at the beach and hold [W]: the mistake, exactly as a learner
+    // makes it. The server owns whether that grounds her.
+    g.input.setLook(Math.atan2(isle.position.x - ship.position.x, isle.position.z - ship.position.z), -0.1);
+    g.input.keys.add('KeyW');
+    return {
+      isle: isle.name,
+      from: Math.round(Math.hypot(isle.position.x - ship.position.x, isle.position.z - ship.position.z)),
+      offWindDeg: Math.round((reachable[0].offWind * 180) / Math.PI),
+    };
+  });
+  say(`  standing in for ${put?.isle} from ${put?.from} m (${put?.offWindDeg}° off the wind)`);
+  let sawAground = false;
+  let coachText = '';
+  let panelText = '';
+  let secs = 0;
+  for (let i = 0; i < Number(process.env.J_SECONDS ?? 180) && left() > 90_000; i++) {
+    await wait(1000);
+    secs += 1;
+    // KEEP STEERING AT IT. Aiming once and holding [W] for a 300 m beat is not
+    // sailing — she yaws off, the probe reported "never aground" about a hull that
+    // was still 90 m short of the beach when the clock ran out. Re-point every
+    // second, which is what a hand on the wheel actually does.
+    const r = await page.evaluate((target) => {
+      const g = window.__piratesBR;
+      const me = g.state.players.find((p) => p.id === g.localPlayerId);
+      const ship = g.state.ships.find((x) => x.id === me?.shipId);
+      const isle = (g.state.islands ?? []).find((n) => n.name === target);
+      if (isle && ship) {
+        // THE WHEEL ANSWERS [A] AND [D], NOT WHERE YOU ARE LOOKING. setLook aims a
+        // walker (phase h steers by it), but Match.applyInput reads input.left /
+        // input.right at the helm and nothing else — so the first cut of this loop
+        // "steered" for three minutes while she sailed 300 m further away on the
+        // heading she started with, and the probe called it "never aground".
+        const want = Math.atan2(isle.position.x - ship.position.x, isle.position.z - ship.position.z);
+        const err = Math.atan2(Math.sin(want - ship.rotation), Math.cos(want - ship.rotation));
+        g.input.keys.delete('KeyA');
+        g.input.keys.delete('KeyD');
+        // steer=+1 (right) drives angularVelocity negative, so a bearing that needs
+        // MORE rotation is a left-hand wheel.
+        if (Math.abs(err) > 0.06) g.input.keys.add(err > 0 ? 'KeyA' : 'KeyD');
+        g.input.setLook(want, -0.1);
+        g.input.keys.add('KeyW');
+      }
+      const el = document.getElementById('sail-coach-hint');
+      const panel = document.getElementById('sail-status');
+      return {
+        aground: !!ship?.aground,
+        v: +Math.hypot(ship?.velocity?.x ?? 0, ship?.velocity?.z ?? 0).toFixed(2),
+        toIsle: isle && ship
+          ? Math.round(Math.hypot(isle.position.x - ship.position.x, isle.position.z - ship.position.z)) : null,
+        coach: el && el.style.display !== 'none' ? (el.textContent ?? '') : '',
+        panel: (panel?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      };
+    }, put?.isle);
+    if (secs % 15 === 0) say(`  t+${secs}s: ${r.toIsle} m to run, ${r.v} u/s, aground=${r.aground}`);
+    if (r.aground) {
+      sawAground = true;
+      if (r.coach) coachText = r.coach;
+      if (r.panel) panelText = r.panel;
+      // The coach needs COACH_AFTER_SECONDS on the stall before it speaks.
+      if (coachText) break;
+    }
+  }
+  await shot('j-aground');
+  // A PICTURE THAT IS ONE COLOUR IS NOT EVIDENCE. This box's Metal path comes back
+  // wedged after a GPU crash and returns Chrome's unrasterized-tile magenta for
+  // every capture while every DOM check still passes — the j-aground shot from one
+  // such run was 1280x720 of solid #ff00ff. The DOM claims above are still true
+  // (they come off the wire, not the framebuffer), but the screenshot beside them
+  // proves nothing, and a run must say which of the two it is rather than filing
+  // a flat rectangle as a photograph. SOFTGL=1 is the way out when it matters.
+  const lum = await frameLum();
+  say(`  frame: mean=${lum.mean} sd=${lum.sd}`);
+  ok('and the frame it photographed is a rendered world, not a flat GPU placeholder',
+    lum.sd > 3,
+    `sd=${lum.sd} mean=${lum.mean} — a single flat colour; rerun with SOFTGL=1`);
+  say(`  aground=${sawAground} coach="${coachText}" panel="${panelText}"`);
+  ok('sailing her into the beach really does read as aground on the client',
+    sawAground, `never saw ship.aground over ${secs} s at ${put?.isle}`);
+  ok('and the coach pill names the shoal rather than the yard or the wind',
+    /aground/i.test(coachText), `coach="${coachText}"`);
+  ok('and the sail panel stops reporting the pin as a speed',
+    /AGROUND/.test(panelText), `panel="${panelText}"`);
+  await page.evaluate(() => {
+    const k = window.__piratesBR.input.keys;
+    k.delete('KeyW'); k.delete('KeyA'); k.delete('KeyD');
+  });
+}
+
 writeFileSync(`${OUT}/endgame-live-report.json`, JSON.stringify({
   phases: [...PHASES], world, log, results, trace: trace.filter((_, i) => i % 5 === 0),
   bands, bleedTail: bleed.slice(-40), respawnTrace, firstSail, errors: errors.slice(0, 20),
@@ -753,4 +904,5 @@ const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} live checks passed`);
 if (failed.length) { console.log('FAILED:'); for (const f of failed) console.log(`  x ${f.label} — ${f.detail}`); }
 await browser.close();
+closed = true;
 process.exit(failed.length ? 1 : 0);

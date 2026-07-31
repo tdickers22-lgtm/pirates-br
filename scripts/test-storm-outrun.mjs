@@ -411,14 +411,26 @@ for (const isleName of ['Gallows Sands', 'Mermaid\'s Folly', 'Crow\'s Perch']) {
   }
   expect(say('a hull can be laid on this shoal at all (real keel contact, searched for)'),
     beached, `no contact found walking in to r=4`);
+  // THE SEARCH IS SETUP, AND SETUP MAY NOT COST HER PLANKING. Walking in three
+  // metres at a time grounds her at every step that touches, so by the time the
+  // scenario proper began she was already carrying four breaches and 0.39 of
+  // bilge — and on Mermaid's Folly she duly swamped forty seconds later while the
+  // probe reported it as a failure to escape a shoal she had in fact escaped.
+  // Hand the scenario a sound hull; the grounding it is about starts now.
+  ship.holes = [];
+  ship.waterLevel = 0;
+  ship.floodingRate = 0;
 
-  // The mistake itself: ten seconds of holding [W] into it, long enough for the
+  // The mistake itself: six seconds of holding [W] into it — long enough for the
   // coach pill to appear (FIRST_SAIL_ASSIST.COACH_AFTER_SECONDS is four) and be
-  // read. An earlier draft held it for THIRTY and then asked whether she was still
-  // afloat; she was not, and she should not have been — half a minute of
-  // deliberate grinding is a decision to sink the ship.
+  // acted on, which is the situation this whole block is about. Earlier drafts
+  // held it for ten and then thirty and asked whether she was still afloat; she
+  // was not, and she should not have been. Grounding is the harshest damage in
+  // the game by design (four breaches on a steep shoal, ~0.04 of bilge a second),
+  // so a captain who keeps the helm down for half a minute has decided to sink
+  // the ship, and the flooding loop is entitled to oblige him.
   const grindFrom = { x: ship.position.x, z: ship.position.z };
-  hold(match, client, { forward: true, yaw: approach }, 10);
+  hold(match, client, { forward: true, yaw: approach }, 6);
   const grindRun = dist2D(ship.position.x, ship.position.z, grindFrom.x, grindFrom.z);
   const wind = sampleLocalWind(match.t, ship.position.x, ship.position.z, match.state.storm);
 
@@ -429,14 +441,14 @@ for (const isleName of ['Gallows Sands', 'Mermaid\'s Folly', 'Crow\'s Perch']) {
   //
   // GROUND MADE GOOD, NOT INSTANTANEOUS SPEED: the velocity on any one tick swings
   // between 0.4 and 10 u/s while a hull is being worked off a bar. A beam reach in
-  // open water covers ~100 m in these ten seconds.
+  // open water covers ~60 m in these six seconds.
   expect(say('holding [W] into it takes most of the way off her'),
-    grindRun < 45, `made ${grindRun.toFixed(0)} m in 10 s, against ~100 m free`);
+    grindRun < 27, `made ${grindRun.toFixed(0)} m in 6 s, against ~60 m free`);
   expect(say('and the pin is NOT luffing or a slack yard — the sails are drawing'),
     !ship.luffing && catchOf(ship, wind) >= 0.5,
     `luffing=${ship.luffing} catch=${(catchOf(ship, wind) * 100).toFixed(0)}%`);
   expect(say('so the wire says aground — the only thing left that can explain it'),
-    ship.aground === true, `aground=${ship.aground} after ${grindRun.toFixed(0)} m in 10 s`);
+    ship.aground === true, `aground=${ship.aground} after ${grindRun.toFixed(0)} m in 6 s`);
 
   // (iii) THE COACH MAY NOT PROMISE AN ESCAPE THAT DOES NOT EXIST. The pill says
   // "hard over on [A] or [D] to swing her off the shoal", so hard over and then

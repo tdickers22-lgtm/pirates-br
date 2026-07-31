@@ -728,12 +728,17 @@ export const FIRST_SAIL_ASSIST = {
   COACH_AFTER_SECONDS: 4,
   /** How long `ship.aground` survives its last keel contact, in seconds.
    *
-   *  A hull held on a shoal does not touch bottom every tick — she touches, gets
-   *  shoved off, sails back on, and the contact arrives in bursts a few tenths of
-   *  a second apart. A flag read straight off the tick would strobe, and a coach
-   *  pill that strobes is worse than no coach. Long enough to bridge the bursts,
-   *  short enough that backing off clears the words within a breath. */
-  AGROUND_HOLD_SECONDS: 1.4,
+ *  A hull held on a shoal does not touch bottom every tick — she touches, gets
+ *  shoved off, sails back on, and her head yaws across the escape normal as the
+ *  collision kicks her, so the raw signal drops out for a second or two at a time
+ *  while she is plainly still stuck (measured on Mermaid's Folly: false at t+10
+ *  and t+11, true either side). A flag read straight off the tick would strobe,
+ *  and a coach pill that strobes is worse than no coach. Long enough to bridge
+ *  the dropouts, short enough that sailing clear clears the words in a breath. */
+  AGROUND_HOLD_SECONDS: 3,
+  /** Seconds of driving into the bottom before `ship.aground` means anything.
+   *  A graze is one tick; being stuck is continuous. Drains at twice this rate. */
+  AGROUND_ARM_SECONDS: 0.7,
 } as const;
 
 // ── Loot tables ──────────────────────────────────────────────

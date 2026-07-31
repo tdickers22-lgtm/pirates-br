@@ -187,6 +187,12 @@ export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, o
   ship.angularVelocity += (targetOmega - ship.angularVelocity) * blend;
 }
 
+/** What a keel found this tick. `contact` is penetration of any kind; `into` is
+ *  the hull DRIVING at the obstacle rather than sliding out of a shallow berth,
+ *  and it is the only one of the two that means she is stuck. */
+type KeelContact = { contact: boolean; into: boolean };
+const NO_CONTACT: KeelContact = { contact: false, into: false };
+
 // ── Storm sea-state ──────────────────────────────────────────────────────────
 /**
  * Local storm sea-state in [0, 1] at a world position, adapted from the
@@ -344,7 +350,8 @@ export class PhysicsSystem {
    *  FIRST_SAIL_ASSIST.AGROUND_HOLD_SECONDS. Server-side only; the wire carries
    *  the boolean it produces (`Ship.aground`), never the clock. */
   private shipDynamics = new Map<string, {
-    pitchVel: number; rollVel: number; heaveVel: number; agroundFor: number;
+    pitchVel: number; rollVel: number; heaveVel: number;
+    agroundFor: number; agroundArming: number;
   }>();
   /** Each player's footing at the end of the previous tick — the "walk from"
    *  point for steep-slope blocking. Keyed by id so it governs bot body-walk
@@ -677,8 +684,8 @@ export class PhysicsSystem {
       // trim" and concluded the boat was simply this slow. It was on the ground.
       let keelFouled = false;
       for (const island of islands) {
-        if (this.pushShipOutOfIsland(ship, island, t)) keelFouled = true;
-        if (island.dock && this.pushShipOutOfDock(ship, island.dock, t)) keelFouled = true;
+        if (this.pushShipOutOfIsland(ship, island, t).into) keelFouled = true;
+        if (island.dock && this.pushShipOutOfDock(ship, island.dock, t).into) keelFouled = true;
       }
       for (const rock of seaRocks) {
         this.pushShipOutOfSeaRock(ship, rock, t);
@@ -689,7 +696,17 @@ export class PhysicsSystem {
       // bursts (see FIRST_SAIL_ASSIST.AGROUND_HOLD_SECONDS) so the coach reads as
       // one sentence rather than a strobe.
       const sailingIntoIt = !ship.anchored && ship.sailHeight > 0.08 && !ship.sinking;
-      dyn.agroundFor = keelFouled && sailingIntoIt
+      // ARMED, NOT TRIPPED. A single tick of driving into the bottom is a graze —
+      // a wave can supply one — and latching the whole hold off it would put
+      // AGROUND on screen for a hull that clipped a bar and sailed on. The arming
+      // clock has to fill before the flag means anything, and it drains twice as
+      // fast as it fills so getting clear reads as getting clear.
+      if (keelFouled && sailingIntoIt) {
+        dyn.agroundArming = Math.min(FIRST_SAIL_ASSIST.AGROUND_ARM_SECONDS, dyn.agroundArming + dt);
+      } else {
+        dyn.agroundArming = Math.max(0, dyn.agroundArming - dt * 2);
+      }
+      dyn.agroundFor = dyn.agroundArming >= FIRST_SAIL_ASSIST.AGROUND_ARM_SECONDS
         ? FIRST_SAIL_ASSIST.AGROUND_HOLD_SECONDS
         : Math.max(0, dyn.agroundFor - dt);
       ship.aground = dyn.agroundFor > 0;
@@ -2303,7 +2320,7 @@ export class PhysicsSystem {
   private getShipDynamics(shipId: string) {
     let dyn = this.shipDynamics.get(shipId);
     if (!dyn) {
-      dyn = { pitchVel: 0, rollVel: 0, heaveVel: 0, agroundFor: 0 };
+      dyn = { pitchVel: 0, rollVel: 0, heaveVel: 0, agroundFor: 0, agroundArming: 0 };
       this.shipDynamics.set(shipId, dyn);
     }
     return dyn;
@@ -2509,12 +2526,12 @@ export class PhysicsSystem {
    * jitter on her bedding, and that early-out is exactly the state a captain gets
    * stuck in — see `Ship.aground`.
    */
-  private pushShipOutOfIsland(ship: Ship, island: Island, t = 0): boolean {
+  private pushShipOutOfIsland(ship: Ship, island: Island, t = 0): KeelContact {
     const stats = SHIP_STATS[ship.type];
     const broadphase = getIslandMaxRadius(island) + stats.length * 0.6;
     const dxI = ship.position.x - island.position.x;
     const dzI = ship.position.z - island.position.z;
-    if (dxI * dxI + dzI * dzI > broadphase * broadphase) return false;
+    if (dxI * dxI + dzI * dzI > broadphase * broadphase) return NO_CONTACT;
 
     const keelY = ship.position.y - stats.height * SHIP.HULL_DRAFT_F[ship.type] - SHIP.GROUND_KEEL_SAFETY;
     let deepest: { x: number; z: number; depth: number } | null = null;
@@ -2524,7 +2541,7 @@ export class PhysicsSystem {
         deepest = { x: sample.x, z: sample.z, depth };
       }
     }
-    if (!deepest) return false;
+    if (!deepest) return NO_CONTACT;
 
     // A hull AT REST sits on the bottom — no jitter for moored or abandoned ships.
     //
@@ -2543,7 +2560,7 @@ export class PhysicsSystem {
     // out is her own sails, which is the way out the coach names.
     const planarSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
     const resting = ship.anchored || ship.sailHeight <= 0.08 || !!ship.sinking;
-    if (planarSpeed < 0.6 && resting) return true;
+    if (planarSpeed < 0.6 && resting) return { contact: true, into: false };
 
     // Push downhill along the heightfield gradient (fallback: away from centre).
     const eps = 2;
@@ -2569,6 +2586,21 @@ export class PhysicsSystem {
     ship.position.z += nz * push;
 
     const relVel = ship.velocity.x * nx + ship.velocity.z * nz;
+    // `into` is the whole difference between HELD and merely touching, and it is
+    // read off the BOW, not the velocity.
+    //
+    // A berth sits in shallow water, so a hull sailing OUT of one keeps her keel
+    // over the island's slope for several seconds at twelve knots: the first cut
+    // of this flag lit AGROUND across the HUD of a ship that was leaving perfectly
+    // normally, which is a louder lie than the silence it replaced. The second cut
+    // asked whether her VELOCITY pointed into the bar — and that fails the other
+    // way, because the pushback below zeroes the inbound component every tick, so
+    // a hull genuinely pinned reads as not-inbound on most of them.
+    //
+    // Where her HEAD points is the stable fact. A departing hull is aimed at open
+    // water while she scrapes out; a pinned one is aimed at the beach, which is
+    // exactly why she is pinned and exactly what the sails are pressing her onto.
+    const into = Math.sin(ship.rotation) * nx + Math.cos(ship.rotation) * nz < 0;
     if (relVel < 0) {
       const impactSpeed = -relVel;
       ship.velocity.x -= relVel * nx * 1.35;
@@ -2592,7 +2624,7 @@ export class PhysicsSystem {
         });
       }
     }
-    return true;
+    return { contact: true, into };
   }
 
   /**
@@ -2602,12 +2634,12 @@ export class PhysicsSystem {
    * resolved along the least-penetration axis with the sea-rock pushback feel.
    * Berths sit a full beam clear of the box, so moored ships never fight it.
    */
-  private pushShipOutOfDock(ship: Ship, dock: NonNullable<Island['dock']>, t = 0): boolean {
+  private pushShipOutOfDock(ship: Ship, dock: NonNullable<Island['dock']>, t = 0): KeelContact {
     const stats = SHIP_STATS[ship.type];
     const dxD = ship.position.x - dock.position.x;
     const dzD = ship.position.z - dock.position.z;
     const reach = Math.hypot(dock.width, dock.length) * 0.5 + stats.length * 0.6;
-    if (dxD * dxD + dzD * dzD > reach * reach) return false;
+    if (dxD * dxD + dzD * dzD > reach * reach) return NO_CONTACT;
 
     const halfX = dock.width * 0.5;
     const halfZ = dock.length * 0.5;
@@ -2635,7 +2667,7 @@ export class PhysicsSystem {
         };
       }
     }
-    if (!deepest) return false;
+    if (!deepest) return NO_CONTACT;
 
     // Dock-local +x maps to world (cos, −sin) and +z to (sin, cos).
     const cos = Math.cos(dock.rotation);
@@ -2646,6 +2678,8 @@ export class PhysicsSystem {
     ship.position.z += nz * deepest.penetration;
 
     const relVel = ship.velocity.x * nx + ship.velocity.z * nz;
+    // Same rule as the island: her head, not her way. See pushShipOutOfIsland.
+    const into = Math.sin(ship.rotation) * nx + Math.cos(ship.rotation) * nz < 0;
     if (relVel < 0) {
       const impactSpeed = -relVel;
       ship.velocity.x -= relVel * nx * 1.35;
@@ -2666,7 +2700,7 @@ export class PhysicsSystem {
         });
       }
     }
-    return true;
+    return { contact: true, into };
   }
 
   private pushShipOutOfSeaRock(ship: Ship, rock: SeaRock, t = 0) {
