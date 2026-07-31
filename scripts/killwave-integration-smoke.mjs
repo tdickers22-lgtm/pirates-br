@@ -239,9 +239,10 @@ await wait(600);
 //     point at sea level a hundred kilometres down the camera's own forward
 //     bearing and read the row it lands on. Nothing in the world can move it:
 //     not a swell, not a cloud, not a prop. It is the hard cap.
-//   * COLOUR, taken as the MIN over three frames. Blue-minus-red still marks
-//     what is sky, but a single frame's crossing is a moving read, so the
-//     sweep takes the most conservative of three.
+//   * COLOUR, taken as the MIN over three frames, and testing for GROUND
+//     rather than for sky: land is warm, blue sky and the sun's white glow are
+//     not. A single frame's crossing is still a moving read, so the sweep takes
+//     the most conservative of the three.
 //
 // And the pan is flown from a FREE CAMERA over the most open water in the
 // world, not from wherever the join dropped the player. That is the change that
@@ -335,7 +336,7 @@ for (const yaw of [0, 1.05, 2.1, 3.15, 4.2, 5.25]) {
     const frameOutliers = [];
     let frameFloor = SH;
     for (let c = 0; c < COLS; c++) {
-      const rows = [], sky = [];
+      const rows = [], ground = [];
       for (let y = 0; y < SH; y++) {
         let sum = 0, blue = 0, red = 0, n = 0;
         for (let x = c * cw; x < (c + 1) * cw; x++) {
@@ -345,13 +346,19 @@ for (const yaw of [0, 1.05, 2.1, 3.15, 4.2, 5.25]) {
           n += 1;
         }
         rows.push(sum / n);
-        // Sky is the only strongly blue thing up here. Over open water this
-        // only ever trips on the haze band, and the min-of-three keeps the
-        // frame-to-frame walk out of the searched rows.
-        sky.push((blue - red) / n > 18);
+        // WHAT IS BEING EXCLUDED IS GROUND, so test for ground. Asking "is this
+        // blue enough to be sky" fails on the one heading that matters most:
+        // look at the noon sun and the sky washes to white, blue-minus-red goes
+        // to nothing, and the sweep concludes there is no sky in the frame at
+        // all — measured as a band of 0 rows on yaw 3.15 while the other five
+        // headings searched 296. Land is WARM (sand, rock, palm trunks, canvas);
+        // blue sky and the sun's own white glow are not.
+        ground.push((red - blue) / n > 6);
       }
+      // Trim only the run of ground at the BOTTOM of the frame — a warm thing
+      // in mid-frame (the sun's glow, a gull) is not a coastline.
       let floor = SH;
-      for (let y = SH - 1; y >= 0; y--) { if (!sky[y]) floor = y; else if (floor < SH) break; }
+      for (let y = SH - 1; y >= 0; y--) { if (ground[y]) floor = y; else break; }
       frameFloor = Math.min(frameFloor, Math.max(0, floor - 4));
       // Second difference: a crease shows as a spike here, a smooth ramp does not.
       const d2 = [];
