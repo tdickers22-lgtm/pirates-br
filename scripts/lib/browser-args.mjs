@@ -24,8 +24,18 @@
 // while a human is at the keyboard, and a headless Chromium that dies with breakpad
 // armed puts a macOS crash dialog on his screen.
 
+// Two probes shipped their own switch before this file existed — endgame-live-smoke
+// read SOFTGL=1 and killwave-integration-smoke read KW_ANGLE. Both now come through
+// here, and both spellings keep working, because a rig that answers to one variable
+// and ignores another is exactly how the battery ends up on the GPU after being told
+// not to be. PIRATES_GL wins when more than one is set.
+const GL_ENV = process.env.PIRATES_GL
+  ?? process.env.KW_ANGLE
+  ?? (process.env.SOFTGL ? 'swiftshader' : undefined)
+  ?? 'metal';
+
 /** The backend name in effect: 'metal' (default) or 'swiftshader'. */
-export const GL_BACKEND = (process.env.PIRATES_GL ?? 'metal').trim().toLowerCase();
+export const GL_BACKEND = GL_ENV.trim().toLowerCase();
 
 /** True when we are on the software rasteriser — real pixels, but far slower. */
 export const IS_SOFTWARE_GL = GL_BACKEND === 'swiftshader' || GL_BACKEND === 'software' || GL_BACKEND === 'swangle';

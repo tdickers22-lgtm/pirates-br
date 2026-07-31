@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { chromium } from 'playwright';
+import { browserArgs, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 
 const ROOT_URL = process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000/';
 const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? 'http://127.0.0.1:8090/health';
@@ -168,7 +169,11 @@ async function main() {
   }
 
   const browserEvents = [];
-  const browser = await chromium.launch({ headless: true });
+  // This suite never asked for a GL backend — it takes Chromium's default, which is
+  // the right call for a minimap drawn on a 2D canvas. But "default" on macOS is a
+  // real GPU process, and PIRATES_GL=swiftshader has to mean NO GPU anywhere in the
+  // battery or it does not mean anything. Only the software case overrides.
+  const browser = await chromium.launch({ headless: true, args: IS_SOFTWARE_GL ? browserArgs() : [] });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
     page.on('console', (msg) => {

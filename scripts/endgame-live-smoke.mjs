@@ -30,6 +30,7 @@
 //   node scripts/endgame-live-smoke.mjs [outDir]
 import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { browserArgs, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 
 const OUT = process.argv[2]
   ?? '/private/tmp/claude-501/-Users-tobiasdicker/10a91956-1f9b-4664-ae78-2d985d4991c4/scratchpad/endgame/smoke';
@@ -64,7 +65,8 @@ const left = () => DEADLINE - Date.now();
 // The breakpad flags keep a crashed headless child from throwing a macOS dialog at
 // whoever is sitting in front of the machine.
 //
-// SOFTGL=1 SWAPS METAL FOR SWIFTSHADER, AND SOME DAYS IT IS THE ONLY WAY TO SEE.
+// PIRATES_GL=swiftshader SWAPS METAL FOR SOFTWARE, AND SOME DAYS IT IS THE ONLY WAY
+// TO SEE. (SOFTGL=1 still works, as the shorthand this probe was written with.)
 // After this box kernel-panicked twice under GPU browsers, headless captures on the
 // Metal path started coming back as a SINGLE FLAT COLOUR — magenta (Chrome's
 // unrasterized-tile placeholder) in one run, pure black in the next, while the very
@@ -77,12 +79,7 @@ const left = () => DEADLINE - Date.now();
 // either way — those come off the DOM and the wire.
 const browser = await chromium.launch({
   headless: true,
-  args: [
-    ...(process.env.SOFTGL
-      ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
-      : ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist']),
-    '--disable-breakpad', '--noerrdialogs', '--disable-crash-reporter',
-  ],
+  args: browserArgs(['--ignore-gpu-blocklist', ...(IS_SOFTWARE_GL ? ['--enable-unsafe-swiftshader'] : [])]),
 });
 // THE BROWSER MUST DIE EVEN WHEN THIS SCRIPT DOES.
 //

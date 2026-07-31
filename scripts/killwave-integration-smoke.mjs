@@ -17,8 +17,8 @@
 // between 246 and 296 of 300 rows and zero agreed seam rows on all six headings.
 // One caveat for whoever wires it: it needs a capture path that returns real
 // pixels. On a boot where the Metal compositor hands back a flat frame, run it
-// with KW_ANGLE=swiftshader — the run will otherwise fail its own capture guard,
-// which is the correct outcome but not a useful one.
+// with PIRATES_GL=swiftshader — the run will otherwise fail its own capture
+// guard, which is the correct outcome but not a useful one.
 //
 // WHY (f) USED TO BE INTERMITTENT, AND WHAT IT MEASURES NOW. Measured 5x on the
 // old sweep: 3 passes, 2 failures, every failure one or two "full-width crease"
@@ -49,21 +49,21 @@
 //   node scripts/killwave-integration-smoke.mjs [outDir]
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
+import { browserArgs, GL_BACKEND } from './lib/browser-args.mjs';
 
 const OUT = process.argv[2] ?? 'test-results/killwave-integration';
 mkdirSync(OUT, { recursive: true });
 
 // (f) reads pixels, so it is only as honest as the capture path. Metal is the
-// default and the fast one; KW_ANGLE=swiftshader forces software WebGL for boots
-// where the Metal compositor hands back one flat colour instead of a frame.
-const ANGLE = process.env.KW_ANGLE ?? 'metal';
+// default and the fast one; PIRATES_GL=swiftshader forces software WebGL for
+// boots where the Metal compositor hands back one flat colour instead of a
+// frame — and, on the fanless box this is built on, for any run at all. The
+// backend choice lives in lib/browser-args.mjs so that one variable steers the
+// whole battery; a suite keeping its own private switch is a suite that still
+// takes the GPU when the battery was told not to.
+const ANGLE = GL_BACKEND;
 const browser = await chromium.launch({
-  args: [
-    ...(ANGLE === 'swiftshader'
-      ? ['--use-angle=swiftshader']
-      : ['--use-gl=angle', `--use-angle=${ANGLE}`, '--enable-gpu', '--ignore-gpu-blocklist']),
-    '--disable-breakpad', '--noerrdialogs', '--disable-crash-reporter',
-  ],
+  args: browserArgs(['--ignore-gpu-blocklist']),
 });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const errors = [];
