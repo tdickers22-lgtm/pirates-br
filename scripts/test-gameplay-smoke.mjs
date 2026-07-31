@@ -80,16 +80,77 @@ function stopDevServer(processHandle) {
   }
 }
 
+/**
+ * Wait until the frame pipeline is actually delivering frames, then say so.
+ *
+ * THE COLD BOOT COSTS ONE ENORMOUS FRAME. Measured with the counts below: a first
+ * page load after a Vite restart (cold module transform, cold shader compile)
+ * spends 4662 ms inside a SINGLE frame, starting after `phase === 'playing'` and
+ * running well past the fixed 2500 ms settle. A 1400 ms sample that lands inside
+ * that one frame counts one frame in 4.7 s and reports 0 fps — which is a true
+ * statement about the window and a false one about the frame rate. Warm loads
+ * never see it, which is why it read as an every-other-run flake.
+ *
+ * So the window is chosen instead of assumed: sample only once frames are landing
+ * back to back. The assertion downstream is unchanged and unwidened — if the
+ * client never settles at all, this gives up and the measurement fails on the
+ * merits with the counts to prove it.
+ */
+async function waitForSteadyFrames(page, { need = 8, frameBudgetMs = 220, giveUpMs = 25_000 } = {}) {
+  return page.evaluate(async ({ need, frameBudgetMs, giveUpMs }) => {
+    const start = performance.now();
+    let prev = start;
+    let streak = 0;
+    let worst = 0;
+    return await new Promise((resolve) => {
+      function step() {
+        const now = performance.now();
+        const frameMs = now - prev;
+        prev = now;
+        worst = Math.max(worst, frameMs);
+        streak = frameMs <= frameBudgetMs ? streak + 1 : 0;
+        if (streak >= need) {
+          resolve({ settled: true, waitedMs: Math.round(now - start), worstFrameMs: Math.round(worst) });
+        } else if (now - start >= giveUpMs) {
+          resolve({ settled: false, waitedMs: Math.round(now - start), worstFrameMs: Math.round(worst) });
+        } else {
+          requestAnimationFrame(step);
+        }
+      }
+      requestAnimationFrame(step);
+    });
+  }, { need, frameBudgetMs, giveUpMs });
+}
+
+/**
+ * Frames delivered over a window, plus the raw counts behind the number.
+ *
+ * The counts are not decoration. `fps: 0` cannot mean "no frames" — the counter
+ * increments inside the callback that resolves it, so the floor is one — it means
+ * ONE frame arrived and it took longer than two seconds. That is a completely
+ * different defect from a low-but-steady frame rate, and reporting the rounded
+ * rate alone made the two indistinguishable in the failure line.
+ */
 async function measureFps(page, durationMs = 1400) {
   return page.evaluate(async (ms) => {
     let frames = 0;
-    const start = performance.now();
+    let worst = 0;
+    let prev = performance.now();
+    const start = prev;
     return await new Promise((resolve) => {
       function step() {
+        const now = performance.now();
         frames++;
-        const elapsed = performance.now() - start;
+        worst = Math.max(worst, now - prev);
+        prev = now;
+        const elapsed = now - start;
         if (elapsed >= ms) {
-          resolve(Math.round((frames * 1000) / Math.max(1, elapsed)));
+          resolve({
+            fps: Math.round((frames * 1000) / Math.max(1, elapsed)),
+            frames,
+            elapsed: Math.round(elapsed),
+            worstFrameMs: Math.round(worst),
+          });
         } else {
           requestAnimationFrame(step);
         }
@@ -165,7 +226,10 @@ async function main() {
     }, null, { timeout: 45_000 });
 
     await page.waitForTimeout(2500);
-    const fps = await measureFps(page);
+    // The world build is a synchronous freeze; do not sample across it.
+    const settle = await waitForSteadyFrames(page);
+    const frameStats = await measureFps(page);
+    const fps = frameStats.fps;
     await mkdir('test-results', { recursive: true });
     await page.screenshot({ path: 'test-results/latest-game-smoke.png', fullPage: false });
 
@@ -229,10 +293,18 @@ async function main() {
     expect('HUD shows BR state', data.hud.crews === '10' && data.hud.stormPhase.length > 0 && data.hud.stormTimer.length > 0, JSON.stringify(data.hud));
     expect('Debug/perf panel exists behind ?debug', data.debugPanelVisible, JSON.stringify(data));
     expect('Canvas is visible', data.canvas.count > 0 && data.canvas.width > 0 && data.canvas.height > 0, JSON.stringify(data.canvas));
-    expect('Browser produced frames', fps > 0, `fps=${fps}`);
+    expect('The frame pipeline settles after the world build', settle.settled,
+      `still stalling after ${settle.waitedMs}ms (worst frame ${settle.worstFrameMs}ms)`);
+    expect('Browser produced frames', fps > 0,
+      `fps=${fps} (${frameStats.frames} frames in ${frameStats.elapsed}ms,`
+      + ` worst frame ${frameStats.worstFrameMs}ms; settled after ${settle.waitedMs}ms`
+      + ` with a ${settle.worstFrameMs}ms worst boot frame)`);
     expect('No page errors', browserEvents.length === 0, JSON.stringify(browserEvents, null, 2));
 
-    console.log(`\nSmoke metrics: ${fps} fps, ${data.render?.calls ?? '?'} draw calls, ${data.render?.triangles ?? '?'} triangles.`);
+    console.log(`\nSmoke metrics: ${fps} fps (${frameStats.frames} frames/${frameStats.elapsed}ms,`
+      + ` worst ${frameStats.worstFrameMs}ms; boot settled in ${settle.waitedMs}ms after a`
+      + ` ${settle.worstFrameMs}ms worst frame), ${data.render?.calls ?? '?'} draw calls,`
+      + ` ${data.render?.triangles ?? '?'} triangles.`);
   } finally {
     await browser.close().catch(() => {});
     for (const proc of startedProcesses.reverse()) {
