@@ -1,5 +1,5 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
-import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS } from '../../shared/constants/index.js';
+import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles } from '../../shared/interactions.js';
@@ -169,7 +169,16 @@ export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, o
   const way = clamp(speed / (stats.maxSpeed * 0.42), 0, 1);
   // Quadratic-ish rise with a whisper of a floor so a becalmed ship can still
   // creep its bow around instead of feeling bricked.
-  const effectiveness = 0.05 + 0.95 * way * (0.35 + 0.65 * way);
+  //
+  // A HULL ON THE GROUND IS NOT BECALMED, SHE IS PINNED, AND SHE PIVOTS. With
+  // way as the only input, a beached ship answers at the 0.05 floor — 43° of
+  // swing in 25 seconds while her grounding breaches take her from 0.31 to 0.84
+  // of bilge, which is drowning in place with no input that helps. The keel is
+  // held and the rig is loaded, so she turns about the point she is stuck on.
+  const effectiveness = Math.max(
+    ship.aground ? SHIP.AGROUND_HELM_AUTHORITY : 0,
+    0.05 + 0.95 * way * (0.35 + 0.65 * way),
+  );
   // Weight of water in the bilge dulls the helm — a swamped hull barely answers.
   const waterAuthority = 1 - clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.RUDDER_PENALTY;
   const targetOmega = -(ship.rudderAngle / SHIP.RUDDER_MAX_ANGLE)
@@ -331,7 +340,12 @@ export class PhysicsSystem {
   /** Rotation applied to each ship this update — deck passengers must be carried by the actual delta. */
   private shipRotationDeltas = new Map<string, number>();
   /** Per-ship spring-damper velocities for heave/pitch/roll wave riding. */
-  private shipDynamics = new Map<string, { pitchVel: number; rollVel: number; heaveVel: number }>();
+  /** `agroundFor` is the remaining seconds of the aground hold — see
+   *  FIRST_SAIL_ASSIST.AGROUND_HOLD_SECONDS. Server-side only; the wire carries
+   *  the boolean it produces (`Ship.aground`), never the clock. */
+  private shipDynamics = new Map<string, {
+    pitchVel: number; rollVel: number; heaveVel: number; agroundFor: number;
+  }>();
   /** Each player's footing at the end of the previous tick — the "walk from"
    *  point for steep-slope blocking. Keyed by id so it governs bot body-walk
    *  (BotSystem moves position directly, not velocity) exactly like human input. */
@@ -521,6 +535,7 @@ export class PhysicsSystem {
         ship.roll = (ship.roll ?? 0) * attitudeDecay;
         ship.heave = 0;
         ship.luffing = false;
+        ship.aground = false;
         if (ship.sinkProgress >= 1) {
           ship.alive = false;
           this.shipDynamics.delete(ship.id);
@@ -651,13 +666,33 @@ export class PhysicsSystem {
       ship.heave = clamp(buoyTarget - ship.position.y, -2, 2);
 
       // Ship-island collision
+      //
+      // THE THIRD WAY TO MAKE NO WAY, AND THE ONLY SILENT ONE. A yard that is
+      // wrong luffs; a bow in the no-go cone luffs; a keel on a shoal does
+      // NEITHER — the sails are drawing, the trim reads 91%, and the hull makes
+      // 0.57 u/s forever. That number is not a coincidence: the shove below is
+      // skipped under 0.6 u/s so a moored hull does not jitter on her bedding,
+      // so a captain holding [W] into a beach settles into a stable limit cycle
+      // right on that threshold. The fresh-eyes audit measured "1.26 u/s at best
+      // trim" and concluded the boat was simply this slow. It was on the ground.
+      let keelFouled = false;
       for (const island of islands) {
-        this.pushShipOutOfIsland(ship, island, t);
-        if (island.dock) this.pushShipOutOfDock(ship, island.dock, t);
+        if (this.pushShipOutOfIsland(ship, island, t)) keelFouled = true;
+        if (island.dock && this.pushShipOutOfDock(ship, island.dock, t)) keelFouled = true;
       }
       for (const rock of seaRocks) {
         this.pushShipOutOfSeaRock(ship, rock, t);
       }
+      // Held on the bottom, and said so on the wire. Only while she is trying to
+      // sail: an anchored hull resting in her berth is moored, not stuck, and a
+      // ship with no canvas out is simply lying to. The hold bridges the contact
+      // bursts (see FIRST_SAIL_ASSIST.AGROUND_HOLD_SECONDS) so the coach reads as
+      // one sentence rather than a strobe.
+      const sailingIntoIt = !ship.anchored && ship.sailHeight > 0.08 && !ship.sinking;
+      dyn.agroundFor = keelFouled && sailingIntoIt
+        ? FIRST_SAIL_ASSIST.AGROUND_HOLD_SECONDS
+        : Math.max(0, dyn.agroundFor - dt);
+      ship.aground = dyn.agroundFor > 0;
 
       // Ship-ship collision — oriented capsule-chain hulls, resolved pairwise once.
       for (const other of ships) {
@@ -2268,7 +2303,7 @@ export class PhysicsSystem {
   private getShipDynamics(shipId: string) {
     let dyn = this.shipDynamics.get(shipId);
     if (!dyn) {
-      dyn = { pitchVel: 0, rollVel: 0, heaveVel: 0 };
+      dyn = { pitchVel: 0, rollVel: 0, heaveVel: 0, agroundFor: 0 };
       this.shipDynamics.set(shipId, dyn);
     }
     return dyn;
@@ -2467,12 +2502,19 @@ export class PhysicsSystem {
    * deep inlets and coves stay honestly sailable because the heightfield
    * itself sits below the keel there.
    */
-  private pushShipOutOfIsland(ship: Ship, island: Island, t = 0) {
+  /**
+   * Returns TRUE when the keel is actually touching this island's bottom, whether
+   * or not the hull was moving fast enough to be shoved off it. The distinction is
+   * the whole point: the shove is skipped below 0.6 u/s so a moored hull does not
+   * jitter on her bedding, and that early-out is exactly the state a captain gets
+   * stuck in — see `Ship.aground`.
+   */
+  private pushShipOutOfIsland(ship: Ship, island: Island, t = 0): boolean {
     const stats = SHIP_STATS[ship.type];
     const broadphase = getIslandMaxRadius(island) + stats.length * 0.6;
     const dxI = ship.position.x - island.position.x;
     const dzI = ship.position.z - island.position.z;
-    if (dxI * dxI + dzI * dzI > broadphase * broadphase) return;
+    if (dxI * dxI + dzI * dzI > broadphase * broadphase) return false;
 
     const keelY = ship.position.y - stats.height * SHIP.HULL_DRAFT_F[ship.type] - SHIP.GROUND_KEEL_SAFETY;
     let deepest: { x: number; z: number; depth: number } | null = null;
@@ -2482,11 +2524,26 @@ export class PhysicsSystem {
         deepest = { x: sample.x, z: sample.z, depth };
       }
     }
-    if (!deepest) return;
+    if (!deepest) return false;
 
-    // A hull at rest sits on the bottom — no jitter for moored/beached ships.
+    // A hull AT REST sits on the bottom — no jitter for moored or abandoned ships.
+    //
+    // "At rest" has to mean at rest, though, and it used to mean "under 0.6 u/s",
+    // which is a completely different claim. A crew driving her onto a beach under
+    // full canvas crosses that threshold within a second or two of touching, the
+    // shove switches off, and she is WELDED there: a test hull run hard aground
+    // sat at 0.00 u/s for twenty-five seconds of hard-over helm, and a rudder with
+    // no way over it has no bite, so there was no input in the game that could
+    // free her. That is not a beaching, it is a soft-locked ship.
+    //
+    // So the guard now asks what it always meant to ask: is anyone SAILING her?
+    // Anchored, or no canvas set, and she rests on the bottom exactly as before.
+    // With the yard drawing, the sea keeps working her off the bar — she still
+    // stops, still takes the grounding breach, still loses the race, but the way
+    // out is her own sails, which is the way out the coach names.
     const planarSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
-    if (planarSpeed < 0.6) return;
+    const resting = ship.anchored || ship.sailHeight <= 0.08 || !!ship.sinking;
+    if (planarSpeed < 0.6 && resting) return true;
 
     // Push downhill along the heightfield gradient (fallback: away from centre).
     const eps = 2;
@@ -2535,6 +2592,7 @@ export class PhysicsSystem {
         });
       }
     }
+    return true;
   }
 
   /**
@@ -2544,12 +2602,12 @@ export class PhysicsSystem {
    * resolved along the least-penetration axis with the sea-rock pushback feel.
    * Berths sit a full beam clear of the box, so moored ships never fight it.
    */
-  private pushShipOutOfDock(ship: Ship, dock: NonNullable<Island['dock']>, t = 0) {
+  private pushShipOutOfDock(ship: Ship, dock: NonNullable<Island['dock']>, t = 0): boolean {
     const stats = SHIP_STATS[ship.type];
     const dxD = ship.position.x - dock.position.x;
     const dzD = ship.position.z - dock.position.z;
     const reach = Math.hypot(dock.width, dock.length) * 0.5 + stats.length * 0.6;
-    if (dxD * dxD + dzD * dzD > reach * reach) return;
+    if (dxD * dxD + dzD * dzD > reach * reach) return false;
 
     const halfX = dock.width * 0.5;
     const halfZ = dock.length * 0.5;
@@ -2577,7 +2635,7 @@ export class PhysicsSystem {
         };
       }
     }
-    if (!deepest) return;
+    if (!deepest) return false;
 
     // Dock-local +x maps to world (cos, −sin) and +z to (sin, cos).
     const cos = Math.cos(dock.rotation);
@@ -2608,6 +2666,7 @@ export class PhysicsSystem {
         });
       }
     }
+    return true;
   }
 
   private pushShipOutOfSeaRock(ship: Ship, rock: SeaRock, t = 0) {

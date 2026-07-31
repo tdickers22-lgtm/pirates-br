@@ -224,6 +224,21 @@ export const SHIP = {
   /** Impact speed (m/s, measured along the escape normal) below which a scrape
    *  is only a bump: pushback and a yaw kick, no stove planking. */
   GROUND_HOLE_MIN_IMPACT: 2.0,
+  /** Helm authority floor for a hull that is HARD AGROUND, as a fraction of her
+   *  turn rate.
+   *
+   *  The rudder only bites with way on (applyShipRudderSteering), which is right
+   *  at sea and a death sentence on a bar: a hull run onto a beach sits at 0.0
+   *  u/s, so the helm answers at its 0.05 floor — measured, that is 43° of swing
+   *  in twenty-five seconds while grounding breaches flood her from 0.31 to 0.84.
+   *  She drowns where she stands, and no key on the keyboard changes it.
+   *
+   *  A grounded hull is not steering, she is PIVOTING: the keel is pinned, the
+   *  sails press on the rig, and she swings about the point she is stuck on.
+   *  That is what "swinging her off" has always meant, and at this authority it
+   *  takes about ten seconds — well inside the flooding she took getting there,
+   *  so a beaching costs a fright and some planking instead of the ship. */
+  AGROUND_HELM_AUTHORITY: 0.5,
   /** Seconds of no keel contact before the next scrape counts as a NEW grounding
    *  EVENT. Grounding is resolved every tick while a hull sits on a bar, so
    *  without an event ledger one beaching machine-guns 60 breaches a second. */
@@ -711,6 +726,14 @@ export const FIRST_SAIL_ASSIST = {
   /** Catch below this, held for COACH_AFTER_SECONDS at the wheel, calls the coach. */
   COACH_CATCH: 0.2,
   COACH_AFTER_SECONDS: 4,
+  /** How long `ship.aground` survives its last keel contact, in seconds.
+   *
+   *  A hull held on a shoal does not touch bottom every tick — she touches, gets
+   *  shoved off, sails back on, and the contact arrives in bursts a few tenths of
+   *  a second apart. A flag read straight off the tick would strobe, and a coach
+   *  pill that strobes is worse than no coach. Long enough to bridge the bursts,
+   *  short enough that backing off clears the words within a breath. */
+  AGROUND_HOLD_SECONDS: 1.4,
 } as const;
 
 // ── Loot tables ──────────────────────────────────────────────

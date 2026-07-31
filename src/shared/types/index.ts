@@ -152,6 +152,13 @@ export interface Ship {
   rudderAngle?: number;
   /** True when pointed inside the upwind no-go cone with canvas set — sails luff. */
   luffing?: boolean;
+  /** True while the keel is fouled on a shoal, a beach or a dock with canvas set:
+   *  the hull is HELD, not becalmed. PhysicsSystem stops shoving a hull off the
+   *  bottom below 0.6 u/s (a moored ship must not jitter), so a captain holding
+   *  [W] into a beach settles into a stable pin at ~0.57 u/s with a perfectly
+   *  trimmed yard and full canvas — neither luffing nor slack, and until this
+   *  flag existed there was nothing on the wire that could tell him why. */
+  aground?: boolean;
   // ── Flooding (SoT naval damage loop) ─────────────────────────────────────
   /** Normalized bilge fill 0 (dry) – 1 (swamped → sinks). Holed sections below
    *  the waterline take on water; bailing / bilge pump removes it. */

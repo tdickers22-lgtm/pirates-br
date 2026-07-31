@@ -70,6 +70,33 @@ function hold(match, client, keys, seconds) {
     match.tick();
   }
 }
+/** The furthest-from-anything patch of sea in this map, and how clear it is.
+ *
+ *  Sailing claims have to be made somewhere no island can quietly answer them —
+ *  AND INSIDE THE RING. The unbounded version of this picked the world corner at
+ *  (−900, 900): 393 m of clear water, 1296 m from an eye with a 950 m safe radius,
+ *  which is a hull in the tempest bleeding 9 hp and sailing the storm gale, not
+ *  the prevailing breeze. `limit` keeps the search in shelter, where the ordinary
+ *  sailing model is the thing under test. */
+function clearWater(match, limit = 600) {
+  const { centerX, centerZ } = match.state.storm;
+  let best = { x: centerX, z: centerZ, clearance: -Infinity };
+  for (let x = -900; x <= 900; x += 60) {
+    for (let z = -900; z <= 900; z += 60) {
+      if (dist2D(x, z, centerX, centerZ) > limit) continue;
+      let clearance = Infinity;
+      for (const i of match.state.islands) {
+        clearance = Math.min(clearance, dist2D(i.position.x, i.position.z, x, z) - (i.radius ?? 0));
+      }
+      for (const r of match.state.seaRocks ?? []) {
+        clearance = Math.min(clearance, dist2D(r.position.x, r.position.z, x, z) - (r.radius ?? 8));
+      }
+      if (clearance > best.clearance) best = { x, z, clearance };
+    }
+  }
+  return best;
+}
+
 /** Park a small static ring on the origin — the only way to put a hull OUTSIDE
  *  the wall inside a 1000 m world. */
 function closeTheRing(match, radius) {
@@ -238,9 +265,60 @@ console.log('\nThe first sail catches wind without a lesson in bracing');
   expect('with canvas actually out',
     ship.sailHeight >= FIRST_SAIL_ASSIST.MIN_SAIL_HEIGHT - 1e-6,
     `sailHeight=${ship.sailHeight.toFixed(2)}`);
-  expect('so she is genuinely under way, not creeping at the speed floor',
-    Math.hypot(ship.velocity.x, ship.velocity.z) > 1,
-    `v=${Math.hypot(ship.velocity.x, ship.velocity.z).toFixed(2)} u/s`);
+  match.stop?.();
+}
+
+// THE ASSIST HANDS YOU A YARD, NOT A HEADING — SO THE SPEED CLAIM CONTROLS BOTH.
+//
+// This check used to read the hull's speed straight off whichever berth the map
+// RNG handed it, and failed 2 runs in 5. Two different reasons, both real and
+// neither a threshold problem:
+//
+//   - ~40% of berths point the bow inside the 35° no-go cone, where a PERFECTLY
+//     trimmed yard still only draws the 0.10 polar floor (1.3 u/s). That is the
+//     designed shape of the sail model and the sail coach's in-irons line is the
+//     answer to it, not a faster boat.
+//   - Some berths sail her straight onto the beach she is moored at, where the
+//     hull pins at 0.57 u/s (see the aground block below).
+//
+// The assist's promise is TRIM. So the trim is what the random berth tests, and
+// the speed is tested where the claim is actually meaningful: open water, on a
+// reach, with the heading set deliberately rather than drawn from a hat.
+{
+  const match = liveMatch('first-sail-reach');
+  const { player, ship, client } = join(match, 'Reacher');
+  // Open water, FOUND rather than guessed. The first draft of this put her on the
+  // origin, which the fixed map sits an island squarely on top of — the clearance
+  // check below caught it reading −96 m, and without that check the "she sails on
+  // a reach" claim would have been a grounding wearing a pass.
+  const berth = clearWater(match);
+  ship.position.x = berth.x;
+  ship.position.z = berth.z;
+  expect('the reach test really is being sailed in open water',
+    berth.clearance > 60, `nearest island edge ${berth.clearance.toFixed(0)} m`);
+  // Beam-to-broad reach off the wind actually blowing, so the polar is not the
+  // thing under test.
+  const w0 = sampleLocalWind(match.t, berth.x, berth.z, match.state.storm);
+  ship.rotation = angleWrap(w0.direction - Math.PI * 0.55);
+  player.onShipId = ship.id;
+  player.atHelm = true;
+  hold(match, client, { forward: true, yaw: ship.rotation }, 12);
+  const v = Math.hypot(ship.velocity.x, ship.velocity.z);
+  expect('and on a reach, holding [W] and nothing else genuinely gets her going',
+    v > 4, `v=${v.toFixed(2)} u/s (assist trim, no bracing keys touched)`);
+  expect('with the yard the assist set, not one the captain had to find',
+    catchOf(ship, sampleLocalWind(match.t, ship.position.x, ship.position.z, match.state.storm)) >= 0.5,
+    `catch=${(catchOf(ship, w0) * 100).toFixed(0)}%`);
+  expect('and she is sailing, not scraping — nothing on the wire says aground',
+    !ship.aground, `aground=${ship.aground}`);
+  match.stop?.();
+}
+{
+  const match = liveMatch('first-sail');
+  const { player, ship, client } = join(match, 'Learner');
+  player.onShipId = ship.id;
+  player.atHelm = true;
+  hold(match, client, { forward: true, yaw: ship.rotation }, 12);
 
   // ONCE per hull. A captain who squares the yard on purpose keeps what he set:
   // the assist is a first lesson, not a rudder that fights him all match.
@@ -262,6 +340,151 @@ console.log('\nThe first sail catches wind without a lesson in bracing');
   hold(match, client, { forward: true, yaw: ship.rotation }, 6);
   expect('a hull already under full main is not reefed by the assist',
     ship.sailHeight >= 0.95, `sailHeight=${ship.sailHeight.toFixed(2)}`);
+  match.stop?.();
+}
+
+// ══ 4b. Aground: the third way to make no way, and the only silent one ════════
+//
+// THE NUMBER THE AUDIT MEASURED WAS A GROUNDING, NOT A BOAT SPEED. "1.26 u/s at
+// best trim" is what a hull reads when her keel is on a shoal: PhysicsSystem
+// skips the shove that frees her below 0.6 u/s (a moored hull must not jitter on
+// her bedding), so a captain holding [W] into a beach settles into a stable limit
+// cycle right on that threshold — sails drawing, trim 91%, not luffing, going
+// nowhere. Neither existing coach line fits: bracing does nothing and there is no
+// wind to steer off. So the wire carries `ship.aground`, and these are the three
+// things that flag has to be true about, in order:
+//
+//   it is not on when she is merely moored, it IS on when she is held,
+//   and the way out that the coach names actually works.
+console.log('\nA hull held on the ground says so, and can still get off it');
+// NAMED SHOALS, NOT "THE NEAREST ISLAND". The island set is fixed (test-world-fixed
+// pins it); what was random was the BERTH this hull spawned at, and picking the
+// island nearest to it meant every run beached her somewhere else — a steep rock
+// one time, a gentle sandbar the next. That is a scenario that changes under the
+// assertions, not a threshold that is too tight, and widening the numbers to cover
+// both would have measured nothing. Three named shoals of different sizes instead,
+// each in its own match so the wind is a function of the clock and nothing else.
+for (const isleName of ['Gallows Sands', 'Mermaid\'s Folly', 'Crow\'s Perch']) {
+  const match = liveMatch('aground');
+  const { player, ship, client } = join(match, 'Grounder');
+  const say = (label) => `${isleName}: ${label}`;
+
+  // (i) A fresh berth is MOORED, not stuck. If this ever flipped, every player in
+  // the game would be told they were aground on the tick they spawned.
+  hold(match, client, {}, 2);
+  expect(say('a hull lying at her own berth is moored, not aground'),
+    !ship.aground, `aground=${ship.aground} anchored=${ship.anchored}`);
+
+  // (ii) Put her keel on this shoal, beam-on to the wind, and hold [W]. `forward`
+  // is the only key pressed — exactly what the objective tells a new captain to do.
+  //
+  // THE HEADING IS A BEAM REACH, ON PURPOSE, AND THE CONTACT IS SEARCHED FOR.
+  // Approaching on whatever bearing the geometry gave meant roughly half the time
+  // she arrived LUFFING — a fault the game already names, and not the silent pin
+  // this block exists to catch. So the side is chosen off the wind, and the shoal
+  // is found by walking in from clear water until the keel actually fouls.
+  const isle = match.state.islands.find((i) => i.name === isleName);
+  expect(say('the shoal is on the chart at all'), !!isle, `no island named ${isleName}`);
+  if (!isle) { match.stop?.(); continue; }
+  const wIsle = sampleLocalWind(match.t, isle.position.x, isle.position.z, match.state.storm);
+  const approach = angleWrap(wIsle.direction + Math.PI * 0.5);
+  player.onShipId = ship.id;
+  player.atHelm = true;
+  ship.anchored = false;
+  ship.sailHeight = 1;
+  // Trimmed the way the first-sail assist would have trimmed her. The assist fires
+  // on anchor-up and this hull is being placed rather than sailed in, so without
+  // this the yard stays SQUARE and the pin reads as a 9% catch — which is the
+  // slack-yard fault the coach already names, not the silent one.
+  const trimmed = Math.sin(angleWrap(wIsle.direction - approach))
+    * SHIP.MAX_SAIL_ANGLE * FIRST_SAIL_ASSIST.TRIM_FRACTION;
+  let beached = false;
+  for (let r = (isle.radius ?? 60) + 30; r > 4 && !beached; r -= 3) {
+    ship.position.x = isle.position.x - Math.sin(approach) * r;
+    ship.position.z = isle.position.z - Math.cos(approach) * r;
+    ship.position.y = 0;
+    ship.velocity = { x: 0, y: 0, z: 0 };
+    ship.rotation = approach;
+    ship.sailAngle = trimmed;
+    hold(match, client, { forward: true, yaw: approach }, 1);
+    beached = !!ship.aground;
+  }
+  expect(say('a hull can be laid on this shoal at all (real keel contact, searched for)'),
+    beached, `no contact found walking in to r=4`);
+
+  // The mistake itself: ten seconds of holding [W] into it, long enough for the
+  // coach pill to appear (FIRST_SAIL_ASSIST.COACH_AFTER_SECONDS is four) and be
+  // read. An earlier draft held it for THIRTY and then asked whether she was still
+  // afloat; she was not, and she should not have been — half a minute of
+  // deliberate grinding is a decision to sink the ship.
+  const grindFrom = { x: ship.position.x, z: ship.position.z };
+  hold(match, client, { forward: true, yaw: approach }, 10);
+  const grindRun = dist2D(ship.position.x, ship.position.z, grindFrom.x, grindFrom.z);
+  const wind = sampleLocalWind(match.t, ship.position.x, ship.position.z, match.state.storm);
+
+  // She is CHECKED, not welded. Before AGROUND_HELM_AUTHORITY and the resting
+  // guard she sat here at 0.00–0.57 u/s permanently; now the sea keeps working her
+  // off the bar while she is under canvas, so what the beach costs is most of her
+  // way plus stove planking — a bad afternoon, not a soft lock.
+  //
+  // GROUND MADE GOOD, NOT INSTANTANEOUS SPEED: the velocity on any one tick swings
+  // between 0.4 and 10 u/s while a hull is being worked off a bar. A beam reach in
+  // open water covers ~100 m in these ten seconds.
+  expect(say('holding [W] into it takes most of the way off her'),
+    grindRun < 45, `made ${grindRun.toFixed(0)} m in 10 s, against ~100 m free`);
+  expect(say('and the pin is NOT luffing or a slack yard — the sails are drawing'),
+    !ship.luffing && catchOf(ship, wind) >= 0.5,
+    `luffing=${ship.luffing} catch=${(catchOf(ship, wind) * 100).toFixed(0)}%`);
+  expect(say('so the wire says aground — the only thing left that can explain it'),
+    ship.aground === true, `aground=${ship.aground} after ${grindRun.toFixed(0)} m in 10 s`);
+
+  // (iii) THE COACH MAY NOT PROMISE AN ESCAPE THAT DOES NOT EXIST. The pill says
+  // "hard over on [A] or [D] to swing her off the shoal", so hard over and then
+  // steadying up has to work, using only the keys it names.
+  //
+  // It did not, before SHIP.AGROUND_HELM_AUTHORITY. A hull run onto a beach sits
+  // at 0.00 u/s, the rudder only bites with way on, and 25 s of hard-over helm
+  // bought 43° of swing while grounding breaches took her bilge from 0.31 to 0.84.
+  // She drowned standing up, with no input that changed anything.
+  //
+  // "SWING HER OFF" MEANS UNTIL HER HEAD IS POINTING OUT, not until the flag
+  // blinks. Stopping the helm on the first tick she floats leaves her aimed at
+  // whatever she was aimed at, which on a small shoal is straight back onto it —
+  // Gallows Sands re-grounded within the following twenty seconds when this loop
+  // stopped early, and Crow's Perch came off pointing into the wind and made 3 m.
+  const outward = () => Math.atan2(ship.position.x - isle.position.x, ship.position.z - isle.position.z);
+  const headingOut = () => Math.abs(angleWrap(ship.rotation - outward())) < Math.PI / 3;
+  let freedAfter = null;
+  for (let sec = 1; sec <= 25; sec++) {
+    hold(match, client, { forward: true, right: true, yaw: ship.rotation }, 1);
+    if (freedAfter === null && !ship.aground) freedAfter = sec;
+    if (freedAfter !== null && headingOut()) break;
+  }
+  expect(say('and hard over swings her off, exactly as the coach pill says'),
+    freedAfter !== null && freedAfter <= 15,
+    `still aground after 25 s of helm (bilge ${(ship.waterLevel ?? 0).toFixed(2)})`);
+  expect(say('and the helm brings her head round to point at open water'),
+    headingOut(),
+    `heading ${(ship.rotation * 57.3).toFixed(0)}° vs outward ${(outward() * 57.3).toFixed(0)}°`);
+  expect(say('and she is still afloat at the moment she comes off'),
+    ship.alive && !ship.sinking,
+    `alive=${ship.alive} sinking=${ship.sinking} bilge=${(ship.waterLevel ?? 0).toFixed(2)}`);
+
+  // Then steady up and sail. Holding the helm over forever is not what the pill
+  // says and it walks her straight round into irons — an earlier draft did exactly
+  // that and read the resulting 0.7 u/s as a failure to escape.
+  const offAt = dist2D(ship.position.x, ship.position.z, isle.position.x, isle.position.z);
+  hold(match, client, { forward: true, yaw: ship.rotation }, 20);
+  const clearAt = dist2D(ship.position.x, ship.position.z, isle.position.x, isle.position.z);
+  // WHAT HAPPENS AFTER SHE IS OFF IS THE FLOODING LOOP, NOT THE GROUNDING. She
+  // leaves with stove planking, and if nobody patches or bails she goes down some
+  // thirty seconds later — that is the game working, and an earlier draft of this
+  // check was effectively asserting that it should not. The claim here is only
+  // that she is LEAVING: clearance grows and she does not settle back on the bar.
+  expect(say('and steadying up genuinely takes her off the shoal, not along it'),
+    clearAt - offAt > 10 && !ship.aground,
+    `island clearance ${offAt.toFixed(1)} → ${clearAt.toFixed(1)} m in 20 s`
+    + ` (free after ${freedAfter ?? '>20'} s), still aground=${ship.aground}`);
   match.stop?.();
 }
 

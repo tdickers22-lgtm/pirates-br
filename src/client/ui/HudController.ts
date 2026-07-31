@@ -1693,6 +1693,11 @@ export class HudController {
   private speedPhrase(ship: Ship, tailwind: number): string {
     const knots = Math.hypot(ship.velocity.x, ship.velocity.z) * HudController.KNOTS_PER_UNIT;
     const made = knots < 0.15 ? 'dead in the water' : `making ${knots.toFixed(1)} kn`;
+    // A pinned hull is not slow, she is HELD, and the number alone cannot tell
+    // the difference: 1.1 kn on a shoal and 1.1 kn in irons read identically.
+    // Naming it here means the panel agrees with the coach pill instead of
+    // quietly contradicting it.
+    if (ship.aground) return `AGROUND · ${made}`;
     return tailwind > 0.05 ? `${made} · STORM GALE ASTERN` : made;
   }
 
@@ -1727,12 +1732,19 @@ export class HudController {
   ): void {
     const offWind = Math.PI - Math.abs(angleWrap(signedRelative));
     const inIrons = offWind <= SHIP.SAIL_NO_GO_ANGLE;
+    // THE THIRD FAULT, AND THE ONE THAT LOOKS LIKE NO FAULT AT ALL. A keel on a
+    // shoal draws a perfect sail: not luffing, trim 91%, canvas full — and 0.57
+    // u/s, which is where PhysicsSystem's anti-jitter threshold parks a hull that
+    // is being pushed into the beach (see Ship.aground). Both other coach lines
+    // would be WRONG here: bracing the yard does nothing and there is no wind to
+    // steer off. It is checked first for exactly that reason.
+    const aground = !!ship?.aground;
     const stalled = !!ship
       && player.atHelm
       && !ship.anchored
       && player.state === 'alive'
       && ship.sailHeight > 0.08
-      && (inIrons || trimCatch < FIRST_SAIL_ASSIST.COACH_CATCH);
+      && (aground || inIrons || trimCatch < FIRST_SAIL_ASSIST.COACH_CATCH);
     if (!stalled) {
       this.sailCoachSince = 0;
       this.setSailCoach(null);
@@ -1741,9 +1753,15 @@ export class HudController {
     const now = performance.now();
     if (this.sailCoachSince === 0) this.sailCoachSince = now;
     if ((now - this.sailCoachSince) / 1000 < FIRST_SAIL_ASSIST.COACH_AFTER_SECONDS) return;
-    this.setSailCoach(inIrons
-      ? 'Bow into the wind — steer [A] or [D] until the sails fill'
-      : 'Sails are slack — press [Q] or [F] to swing the yard into the wind');
+    this.setSailCoach(
+      // [S] at the helm SHORTENS SAIL (Match.applyInput) — it does not reverse a
+      // ship, and telling a stuck captain to back off would be the same species of
+      // lie as the wind panel that read backwards. Hard over is what actually
+      // works, and test-storm-outrun proves it does before this line may say it.
+      aground ? 'Aground — hard over on [A] or [D] to swing her off the shoal'
+        : inIrons ? 'Bow into the wind — steer [A] or [D] until the sails fill'
+          : 'Sails are slack — press [Q] or [F] to swing the yard into the wind',
+    );
   }
 
   private setSailCoach(text: string | null): void {
