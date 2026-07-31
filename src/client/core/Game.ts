@@ -454,6 +454,12 @@ export class Game {
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
   private stormWeatherIntensity = 0;
+  /** What the WEATHER LOOKS LIKE, as opposed to how hard it is blowing.
+   *  stormWeatherIntensity stays the storm's own level and keeps driving wind,
+   *  wave bed and hull spray; this is the number the sea colour, the fog, the
+   *  scene lights and the sky all read, and it also answers to rain the client
+   *  is drawing. See where it is derived, over the setOvercast call. */
+  private stormVisualIntensity = 0;
   private storyCutscene: StoryCutsceneRefs | null = null;
   private storyCutsceneNpcId: string | null = null;
   private storyCutsceneHideAt = 0;
@@ -600,6 +606,7 @@ export class Game {
       playersById: this.playersById,
       get state() { return self.state; },
       get stormWeatherIntensity() { return self.stormWeatherIntensity; },
+      get stormVisualIntensity() { return self.stormVisualIntensity; },
       get storyCutscene() { return self.storyCutscene; },
       set storyCutscene(v) { self.storyCutscene = v; },
       buildPropInstance: (type, position, yaw, scale) => this.buildPropInstance(type, position, yaw, scale),
@@ -3155,8 +3162,8 @@ export class Game {
     this.stormHalo.rotation.z = this.ocean.getTime() * 0.12;
     this.stormWeatherIntensity = this.envFx.computeStormWeatherIntensity();
     // (renderer storm weather is applied via updateWaterEnvironment below —
-    // calling updateStormWeather here too did the same work twice per frame)
-    this.ocean.setStormIntensity(this.stormWeatherIntensity);
+    // calling updateStormWeather here too did the same work twice per frame.
+    // The sea's own tint is set once the rain level is known, further down.)
     // Storm SEA GEOMETRY (separate from the color tint above): the shader
     // mirrors getStormWaveIntensity, so waves genuinely rage inside the ring.
     // phase01 must match the shared formula: clamp(phase / 6, 0, 1) — phase is
@@ -3166,7 +3173,6 @@ export class Game {
       // it, so the shared sea-state formula returns ~1 right here.
       const cam = this.renderer.camera.position;
       this.stormWeatherIntensity = 0.7;
-      this.ocean.setStormIntensity(0.7);
       // Positive radius, ring parked far away: we are ~780m outside it, so the
       // shared sea-state formula returns 1 here. (A negative radius hits the
       // shader's no-storm sentinel and silently disables the swell geometry.)
@@ -3192,6 +3198,19 @@ export class Game {
     // open blue with white cumulus in it. ?stormdemo was the only path that ever
     // closed the cloud deck. Now every drop the client draws carries its sky.
     this.renderer.setOvercast(this.stormRainIntensity);
+    // ONE WEATHER, NOT TWO. u_overcast closes the cloud deck off the rain the
+    // client is drawing, but the sea, the fog and the scene lights were still
+    // reading the storm's own weather level — ~0.35 where the squall reaches
+    // inboard of the ring — so a black overcast sky with rain falling out of it
+    // stood over a bright tropical noon sea, lit as if the cloud were not there.
+    // The visual level is the greater of the two, and the rain's contribution
+    // uses the same response the sky's own shader applies to u_overcast, so
+    // whatever closes the deck takes the water and the light with it.
+    this.stormVisualIntensity = Math.max(
+      this.stormWeatherIntensity,
+      THREE.MathUtils.smoothstep(this.stormRainIntensity, 0.03, 0.30) * 0.8,
+    );
+    this.ocean.setStormIntensity(this.stormVisualIntensity);
     this.envFx.updateStormRain3D(dt, this.stormRainIntensity);
     this.envFx.updateStormLightningFlash(dt);
     const stormW = this.stormWeatherIntensity;
@@ -5188,7 +5207,8 @@ export class Game {
     this.cameraSubmergeDepth = depthBelowSurface;
     this.renderer.updateWaterEnvironment(
       depthBelowSurface,
-      this.stormWeatherIntensity,
+      // The LOOK of the weather, not its force: see stormVisualIntensity.
+      this.stormVisualIntensity,
       // The sky rides MATCH PROGRESS (one sunset, arriving with the late storm
       // phases) whenever the server is publishing it; the free-running ocean
       // clock is the fallback for the menu/loading world, and the debug

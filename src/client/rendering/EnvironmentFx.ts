@@ -41,6 +41,9 @@ export type EnvironmentFxView = {
   readonly playersById: Map<string, Player>;
   readonly state: GameState | null;
   readonly stormWeatherIntensity: number;
+  /** What the weather LOOKS like: the storm's own level raised by whatever rain
+   *  the client is drawing. Sea colour, fog, scene lights and sky all read it. */
+  readonly stormVisualIntensity: number;
   storyCutscene: StoryCutsceneRefs | null;
   buildPropInstance(type: AssetName, position: THREE.Vector3, yaw: number, scale?: number): THREE.Group | null;
   disposeSceneObject(root: THREE.Object3D): void;
