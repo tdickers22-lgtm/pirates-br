@@ -1683,6 +1683,36 @@ export class MapGenerator {
         loot: this.rollBarrelLoot(rng),
       });
     }
+
+    // ── LANDING STORES ────────────────────────────────────────────────────
+    // Everything above deliberately SCATTERS barrels inland and swings them a
+    // quarter-turn AWAY from the dock — so a crew walking off their own pier
+    // for the first time saw an empty beach. Eight exploration legs off a spawn
+    // island fired zero loot prompts in the audit: the plunder existed, it was
+    // simply never where a new pirate's first hundred steps go.
+    //
+    // These three are the stores landed at the pier head: on the beach, fanned
+    // across the dock's own shore ray, inside the first thing anyone looks at.
+    // Appended AFTER the scatter loop so the existing rng ladder — and every
+    // island's existing barrel placement — is bit-identical to before.
+    if (island.dock) {
+      const shoreAngle = island.dock.shoreAngle;
+      const spots: Array<[number, number]> = [[-0.30, 0.845], [0.28, 0.855], [0.02, 0.775]];
+      for (const [angleOffset, distRatio] of spots) {
+        const p = getIslandSurfacePoint(island, distRatio, shoreAngle + angleOffset, 0.08);
+        // Dry sand only, and never inside the dock's own levelling stamp or a
+        // cave mouth — a barrel half-swallowed by geometry is worse than none.
+        if (p.y - 0.08 < 0.75) continue;
+        if (this.nearCave(island, p.x, p.z, 1.2)) continue;
+        if (this.nearStamp(island, p.x, p.z, 0.8)) continue;
+        barrels.push({
+          id: uuid(),
+          position: p,
+          opened: false,
+          loot: this.rollBarrelLoot(rng),
+        });
+      }
+    }
     return barrels;
   }
 

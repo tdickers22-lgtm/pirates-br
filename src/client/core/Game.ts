@@ -4292,6 +4292,16 @@ export class Game {
           chestMesh.mound.visible = !chest.opened && !portable && !dug;
           const s = Math.max(0.06, 1 - chest.digProgress * 0.95);
           chestMesh.mound.scale.setScalar(s);
+          // The dig tell turns and twinkles — a still gold speck on sand reads
+          // as a prop, a moving one reads as an invitation. Skipped entirely
+          // once the mound is gone, so a dug site advertises nothing.
+          const sparkle = chestMesh.mound.userData.digSparkle as THREE.Points | undefined;
+          if (sparkle && chestMesh.mound.visible) {
+            const phase = this.ocean.getTime() * 0.9 + chest.position.x * 0.13;
+            sparkle.rotation.y = phase * 0.5;
+            const mat = sparkle.material as THREE.PointsMaterial;
+            mat.opacity = 0.62 + 0.34 * (0.5 + 0.5 * Math.sin(phase * 2.3));
+          }
         }
         chestMesh.chestMesh.visible = !chest.opened && (!chest.buried || dug);
         chestMesh.lid.visible = chestMesh.chestMesh.visible;

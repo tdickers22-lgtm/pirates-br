@@ -2072,6 +2072,16 @@ export class HudController {
       return `Objective: deliver ${context.chestsInHold} chest${context.chestsInHold === 1 ? '' : 's'} to ${context.closestHoarder.island.name}`;
     }
     if (context.mappedIsland) return `Objective: dig the ${BROKER_NAME}'s marks on ${context.mappedIsland.name}`;
+    // WHERE GOLD COMES OUT OF THE GROUND.
+    //
+    // Between the first sail and the first chest the line jumped straight to
+    // "claim upgrades, raid ships, and sell treasure" — three verbs, none of
+    // which is the one that starts the economy. An audit walked eight legs of a
+    // spawn island and never dug, because nothing ever named the tell it was
+    // walking past: a mound of turned sand with gold sparkling over it.
+    if (player.gold < ECONOMY.GOLD_WIN_TARGET * 0.06 && !context.chestsInHold && !player.carryingChestId) {
+      return 'Objective: dig a chest — sparkling sand on the beaches, hold [X] with the shovel';
+    }
     if (player.gold >= ECONOMY.GOLD_WIN_TARGET * 0.72) return 'Objective: protect your lead and finish the gold run';
     if (ship && ship.upgrades.length < 2) return 'Objective: claim upgrades, raid ships, and sell treasure';
     return 'Objective: raid ships, sell treasure, and stay ahead of the storm';

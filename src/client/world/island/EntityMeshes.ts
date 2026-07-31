@@ -63,13 +63,80 @@ export function buildChestMeshes(ctx: IslandBuildCtx) {
 
     let mound: THREE.Mesh | null = null;
     if (chest.buried) {
+      // ── THE DIG TELL ──────────────────────────────────────────────────────
+      // A buried chest used to be a 1 m dark-brown cone, 52 cm tall, on sand.
+      // At thirty metres in daylight that is a pebble: an audit walked EIGHT
+      // exploration legs across a spawn island and never once found a reason to
+      // press a key. Gold that cannot be seen is not gold in the game.
+      //
+      // So the tell is three things a player reads at different ranges:
+      //   · the MOUND itself, wider and lower — turned sand, not a spike;
+      //   · a RING of darker dug earth around it, which is what actually makes
+      //     it read against a beach at distance (the silhouette is flat, the
+      //     value contrast is not);
+      //   · a slow gold SPARKLE floating over it, the same colour the chart and
+      //     the ship pennant use for treasure, visible past the mound itself.
       mound = new THREE.Mesh(
-        new THREE.ConeGeometry(1.05, 0.52, 8),
-        new THREE.MeshStandardMaterial({ color: 0x4a3c26, roughness: 1 }),
+        new THREE.ConeGeometry(1.55, 0.62, 10),
+        new THREE.MeshStandardMaterial({ color: 0xa08a5e, roughness: 1 }),
       );
-      mound.position.set(0, surfaceY - chest.position.y + 0.1, 0);
+      mound.position.set(0, surfaceY - chest.position.y + 0.06, 0);
       mound.castShadow = true;
       chestGroup.add(mound);
+
+      // Disturbed earth: a dark flat annulus on the ground, the part that
+      // survives distance and glancing sun.
+      const scar = new THREE.Mesh(
+        new THREE.RingGeometry(1.45, 2.5, 20),
+        new THREE.MeshStandardMaterial({
+          color: 0x53412a,
+          roughness: 1,
+          transparent: true,
+          opacity: 0.78,
+          depthWrite: false,
+        }),
+      );
+      scar.rotation.x = -Math.PI / 2;
+      scar.position.y = surfaceY - chest.position.y + 0.03;
+      scar.renderOrder = 1;
+      mound.add(scar);
+      // Parented to the mound so syncChests' single `mound.visible` toggle and
+      // its dig-progress shrink carry the whole tell — a dug site must stop
+      // advertising itself as a dig site the instant the sand comes off.
+      scar.scale.setScalar(1);
+
+      // Sparkle: eight motes on a lifted disc. Unlit, tone-mapping off, so it
+      // holds the same treasure-gold at noon, at dusk and by lantern.
+      const moteGeo = new THREE.BufferGeometry();
+      const motes = new Float32Array(8 * 3);
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        motes[i * 3] = Math.cos(a) * (0.35 + 0.5 * ((i * 37) % 7) / 7);
+        motes[i * 3 + 1] = 0.55 + 0.75 * ((i * 53) % 5) / 5;
+        motes[i * 3 + 2] = Math.sin(a) * (0.35 + 0.5 * ((i * 29) % 6) / 6);
+      }
+      moteGeo.setAttribute('position', new THREE.BufferAttribute(motes, 3));
+      const sparkle = new THREE.Points(
+        moteGeo,
+        new THREE.PointsMaterial({
+          color: 0xffd77a,
+          size: 0.34,
+          sizeAttenuation: true,
+          transparent: true,
+          opacity: 0.9,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          toneMapped: false,
+        }),
+      );
+      sparkle.name = 'dig-sparkle';
+      sparkle.position.y = surfaceY - chest.position.y;
+      sparkle.frustumCulled = false;
+      mound.add(sparkle);
+      // Handed to syncChests so the motes twinkle and turn without a per-frame
+      // scene-graph search.
+      mound.userData.digSparkle = sparkle;
+
       chestMesh.visible = false;
       lid.visible = false;
       glow.intensity = 0.4;
