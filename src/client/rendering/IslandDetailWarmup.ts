@@ -58,6 +58,13 @@ const WARM_CHUNK_TIMEOUT_FRAMES = 90;
 const REVEAL_BYTES_PER_FRAME = 2_000_000;
 /** …and how many meshes carrying new geometry, whichever cap trips first. */
 const REVEAL_MESHES_PER_FRAME = 48;
+/** Tighter caps while the island being revealed has NOT been compiled yet — a
+ *  teleport, or a hull that crossed the warm band faster than it could compile.
+ *  Every mesh let out then links its programs at draw time, so the reveal is
+ *  slowed to let the warm pass get in front of it. A few more frames of an
+ *  island filling in beats one frame that stops the game. */
+const REVEAL_BYTES_PER_FRAME_COLD = 600_000;
+const REVEAL_MESHES_PER_FRAME_COLD = 12;
 /** Already-uploaded meshes are free, but still capped so the walk stays cheap. */
 const REVEAL_FREE_MESHES_PER_FRAME = 600;
 
@@ -265,12 +272,15 @@ export class IslandDetailWarmer {
     let costly = 0;
     let free = 0;
     for (const [id, job] of this.reveals) {
+      const warm = this.warmed.has(id);
+      const byteCap = warm ? REVEAL_BYTES_PER_FRAME : REVEAL_BYTES_PER_FRAME_COLD;
+      const meshCap = warm ? REVEAL_MESHES_PER_FRAME : REVEAL_MESHES_PER_FRAME_COLD;
       while (job.cursor < job.units.length) {
         const unit = job.units[job.cursor];
         if (unit.bytes > 0) {
           // Always let at least one costly unit through, or a single mesh
           // heavier than the whole budget would wedge the reveal forever.
-          if (costly > 0 && (bytes >= REVEAL_BYTES_PER_FRAME || costly >= REVEAL_MESHES_PER_FRAME)) return;
+          if (costly > 0 && (bytes >= byteCap || costly >= meshCap)) return;
           bytes += unit.bytes;
           costly += 1;
         } else if (++free > REVEAL_FREE_MESHES_PER_FRAME) {
@@ -340,7 +350,11 @@ export class IslandDetailWarmer {
     job.waitedFrames = 0;
 
     const { renderer, scene, camera } = this.target();
-    const size = this.boosted ? WARM_MESHES_PER_CHUNK_BOOST : WARM_MESHES_PER_CHUNK;
+    // An island already filling in un-warmed is a race the compile has to win:
+    // every mesh the reveal lets out ahead of it links its programs at draw
+    // time instead. Compile in the bigger chunks until it is in front.
+    const urgent = this.reveals.has(job.id);
+    const size = this.boosted || urgent ? WARM_MESHES_PER_CHUNK_BOOST : WARM_MESHES_PER_CHUNK;
     const chunk = job.meshes.slice(job.cursor, job.cursor + size);
     job.cursor += chunk.length;
     if (chunk.length === 0) {
