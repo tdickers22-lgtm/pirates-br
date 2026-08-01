@@ -147,11 +147,32 @@ export function isAirClassGpu(rendererString: string | null, cores: number): boo
   return cores <= 10;
 }
 
+/**
+ * The fallback for when the GPU's name is MASKED: a HiDPI panel driven by a
+ * modest core count.
+ *
+ * Only two kinds of machine pair a devicePixelRatio of 2 or more with eight
+ * cores or fewer: a thin laptop, and a small desktop on a HiDPI monitor. Both
+ * are asked, by a ratio of 2, for four times the fragments of 1.0 — and neither
+ * is the workstation the old core-count rule mistook them for. A ratio that high
+ * is also the single most expensive fact about a client, so if the guess is
+ * wrong the cost of being wrong is one tier, which the runtime ladder and the
+ * settings panel both undo.
+ *
+ * Deliberately NOT applied when the renderer string is present and says
+ * otherwise: a named Pro/Max part has already answered this question better.
+ */
+export function isLikelyThinLaptop(rendererString: string | null, cores: number): boolean {
+  if (rendererString) return false;
+  if (cores > 8) return false;
+  return (window.devicePixelRatio || 1) >= 1.9;
+}
+
 export type QualityVerdict = {
   quality: RenderQuality;
   /** 'player' when they chose it, 'url' for ?quality=, otherwise the signal that
    *  decided — surfaced in the settings panel and in probe output. */
-  reason: 'player' | 'url' | 'air-class-gpu' | 'few-cores' | 'low-memory' | 'huge-viewport' | 'audition' | 'default';
+  reason: 'player' | 'url' | 'air-class-gpu' | 'thin-laptop' | 'few-cores' | 'low-memory' | 'huge-viewport' | 'audition' | 'default';
   rendererString: string | null;
 };
 
@@ -167,9 +188,23 @@ export function decideRenderQuality(): QualityVerdict {
   if (isQuality(param)) return { quality: param, reason: 'url', rendererString: null };
 
   const stored = loadQualityPreference();
-  const rendererString = readGpuRendererString();
-  if (stored !== 'auto') return { quality: stored, reason: 'player', rendererString };
+  if (stored !== 'auto') return { quality: stored, reason: 'player', rendererString: readGpuRendererString() };
 
+  return detectRenderQuality();
+}
+
+/**
+ * The HEURISTICS alone — no URL parameter, no stored preference.
+ *
+ * Split out because a probe cannot otherwise ask what the detector thinks. Every
+ * measurement session passes `?quality=` on purpose (a budget graded at whatever
+ * tier the runner's machine happens to earn is not a budget), and that param
+ * wins first in `decideRenderQuality` — so a census asking it "what tier would
+ * this machine get" was answered `url`, every time, and reported the pin back to
+ * itself as a detection. This is the reading it wanted.
+ */
+export function detectRenderQuality(): QualityVerdict {
+  const rendererString = readGpuRendererString();
   const nav = navigator as Navigator & { deviceMemory?: number };
   const cores = nav.hardwareConcurrency ?? 4;
   const memory = nav.deviceMemory;
@@ -184,6 +219,14 @@ export function decideRenderQuality(): QualityVerdict {
   let verdict: QualityVerdict;
   if (isAirClassGpu(rendererString, cores)) {
     verdict = { quality: 'low', reason: 'air-class-gpu', rendererString };
+  } else if (isLikelyThinLaptop(rendererString, cores)) {
+    // The GPU name is the good signal and it is not always there — Firefox
+    // masks WEBGL_debug_renderer_info by default, privacy extensions mask it
+    // everywhere, and a headless shell often has no answer at all. Without it
+    // an eight-core Air fell through to 'balanced' and only reached 'low' after
+    // a session of auditioning itself, which is a session spent at the wrong
+    // tier on the exact machines this rule exists for.
+    verdict = { quality: 'low', reason: 'thin-laptop', rendererString };
   } else if (cores <= 4) {
     verdict = { quality: 'low', reason: 'few-cores', rendererString };
   } else if (memoryLimited) {

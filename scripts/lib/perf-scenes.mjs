@@ -51,7 +51,9 @@ export const READ_AUTO_TIER = async () => {
   // itself: the point is what the DETECTOR says.
   const stored = mod.loadQualityPreference();
   const ceiling = mod.loadAutoTierCeiling();
-  const verdict = mod.decideRenderQuality();
+  // detectRenderQuality, NOT decideRenderQuality: the latter honours the `?quality=`
+  // this very session is pinned with and would report the pin back as a detection.
+  const verdict = mod.detectRenderQuality();
   return {
     quality: verdict.quality,
     reason: verdict.reason,

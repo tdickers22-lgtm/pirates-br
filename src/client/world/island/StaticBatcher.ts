@@ -129,10 +129,14 @@ export function collapseStaticMeshes(root: THREE.Object3D): number {
     batched.renderOrder = sample.renderOrder;
     batched.frustumCulled = sample.frustumCulled;
 
-    for (const part of bucket.parts) {
-      part.mesh.removeFromParent();
-      part.mesh.geometry.dispose();
-    }
+    // Detach, but do NOT dispose: island builders share unit geometries across
+    // pieces on purpose — one `boulderGeo` seats the cairn stones, the tidepool
+    // rocks AND the interior-stone InstancedMesh, and one `bambooGeo` every
+    // stalk. Disposing here frees the GL buffers of whichever meshes were still
+    // using it, and the survivors then re-upload on their next draw — a hitch
+    // manufactured by the very pass that exists to remove them. The merged copy
+    // is a clone; the originals go out of scope with the pieces that held them.
+    for (const part of bucket.parts) part.mesh.removeFromParent();
     root.add(batched);
     saved += bucket.parts.length - 1;
   }
