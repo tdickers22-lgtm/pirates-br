@@ -64,11 +64,23 @@ const VIEWPORT = { width: 960, height: 540 };
  *
  * So the runner pins PIRATES_BR_MAP_SEED on the server it starts. It cannot pin
  * a server somebody else already started — the seed is read once at match
- * generation — and against one of those the counts are simply not the counts
- * these ceilings were set from. That case SKIPS the grading and says why, which
- * is the only honest thing left; it does not quietly grade a different world.
+ * generation — so it ASKS that server which world it rolls (/health carries
+ * `mapSeed`) and grades it when the answer is this seed.
+ *
+ * WHEN THE ANSWER IS THE WRONG WORLD IT FAILS, and that is the whole point of
+ * the change that put it here. This used to print a skip and `return`, which
+ * exits 0 — so on the normal state of a developer's machine, with `npm run dev`
+ * already up, `npm run test:perf` graded nothing and reported success in two
+ * seconds. That is the exact failure this suite's own header was written about
+ * ("it used to `return` the moment it saw SwiftShader"), rebuilt out of a
+ * different material. A gate that cannot measure has not passed; it has failed
+ * to run, and the two must not share an exit code. PIRATES_BR_ANY_MAP=1 is the
+ * escape hatch for someone who knowingly wants a reading off an unpinned world.
  */
 const MAP_SEED = process.env.PIRATES_BR_MAP_SEED ?? '20260801';
+/** The seed as the server normalises it, for comparing against /health. */
+const MAP_SEED_N = Number.parseInt(MAP_SEED, 10) >>> 0;
+const ALLOW_ANY_MAP = process.env.PIRATES_BR_ANY_MAP === '1';
 
 // A 16:9 viewport of any size produces the same frustum, so counts at 960x540
 // are counts at 1600x900 — and the smaller one is kinder to the machine.
@@ -76,11 +88,22 @@ const MAP_SEED = process.env.PIRATES_BR_MAP_SEED ?? '20260801';
 /**
  * THE TRIPWIRES.
  *
- * `measured` is what the scene read on the count-grading rig after the distant-
- * dressing diet landed (2026-08, SwiftShader, quality pinned, pixel ratio 1).
- * `draws`/`tris` are ceilings a modest margin above that — roughly 1.12x, not
- * the 1.3x the July table used, because a 30% allowance is a whole content wave
- * of silent drift.
+ * `measured` is the HIGHEST this scene read across five consecutive runs of
+ * this suite on the pinned map (2026-08-02, SwiftShader, quality pinned, pixel
+ * ratio 1). `draws`/`tris` are ceilings a modest margin above that — roughly
+ * 1.12x, not the 1.3x the July table used, because a 30% allowance is a whole
+ * content wave of silent drift.
+ *
+ * WHY EVERY NUMBER HERE MOVED ONCE. The first version of this table was written
+ * before the map was pinned, so every `measured` in it was a reading from a
+ * world these scenes will never see again, and the ceilings inherited that
+ * world's luck. On the pinned map the errors ran both ways and neither was
+ * harmless: open water was set at 1600 against a reality of 1110 (a 44% blind
+ * spot — the batcher could be deleted outright and open water would not
+ * notice), while the wide vista was set at 1900 against readings that reached
+ * 1827, four percent of headroom on a scene whose own run-to-run spread is six.
+ * A ceiling is only worth what the reading under it is worth, and a reading from
+ * a different world is worth nothing. These are re-derived from the pinned one.
  *
  * RAISING A NUMBER HERE IS A DECISION, NOT A FIX. If a change is worth the
  * draws, say so in the commit that raises it; if it is not, the change is what
@@ -89,38 +112,43 @@ const MAP_SEED = process.env.PIRATES_BR_MAP_SEED ?? '20260801';
  */
 const BUDGETS = {
   high: [
-    // draws: 2588 -> 1671 across the diet;  tris: 2082k -> 1995k.
-    { scene: 'dock-vista', label: 'wide island vista', measured: 1671, draws: 1900, tris: 2_250_000 },
+    // Six pinned runs: 1725-1827 draws, 1901-2007k tris. The 1827 is the one
+    // that matters: this scene's own spread is ~6%, so a 1900 ceiling was inside
+    // its noise. 1950 is the smallest number that still clears the spread AND
+    // still fails a return to per-plank drawing, which reads 2043 here
+    // (measured, batcher removed). The triangle spread is wider than the draw
+    // spread, so that ceiling keeps the fuller margin.
+    { scene: 'dock-vista', label: 'wide island vista', measured: 1827, draws: 1950, tris: 2_250_000 },
     // THE ONE SCENE WHOSE FRAME MOVES, and the widest ceiling in the table
     // because of it. The camera rides the hull, so which islands are behind it
     // is a fact about where the ship is lying when the measurement lands — and
     // the ship is still drifting an hour into a run. Read 1165, 1581, 2742 and
-    // 2660 on four runs; pinning the map removed most of that spread and the
-    // rest is the hull's own position. 2660/3068k is the pinned-world reading.
+    // 2660 across unpinned worlds; pinning removed most of that spread and the
+    // rest is the hull's own position: 2455-2653 over five pinned runs.
     //
     // No before/after is claimed here: the pre-diet 2766/2481k was taken in a
     // DIFFERENT world, so the two numbers are not comparable and pretending
     // otherwise would credit the diet with a scene it barely touched. What the
     // ceiling is for is a return to per-plank drawing, which would clear it.
-    { scene: 'deck-aft', label: 'on-deck aft look', measured: 2660, draws: 3000, tris: 3_400_000 },
-    // 2003 -> 1360 / 1281k -> 1256k. Read 1360 and 1432 on two runs; the ceiling
-    // clears the higher of them, not the luckier.
-    { scene: 'open-sea', label: 'open water', measured: 1432, draws: 1600, tris: 1_450_000 },
-    // 2802 -> 2521 / 2902k -> 2907k. The waterfall wave's own view, which the
-    // July table never had.
-    { scene: 'waterfall-deck', label: 'deck view of a waterfall island', measured: 2521, draws: 2850, tris: 3_250_000 },
-    // 4517 -> 3250 / 3571k -> 3525k. The dearest view in the game and the one
-    // nobody had ever measured: standing in a hole in the ground still pays for
-    // every island on the map.
-    { scene: 'cave-interior', label: 'cave interior', measured: 3250, draws: 3650, tris: 3_900_000 },
+    { scene: 'deck-aft', label: 'on-deck aft look', measured: 2653, draws: 3000, tris: 3_400_000 },
+    // 1098-1115 draws / 1026-1029k tris across five pinned runs — the steadiest
+    // scene in the table, and the one the old 1600 ceiling was blindest at.
+    { scene: 'open-sea', label: 'open water', measured: 1115, draws: 1250, tris: 1_150_000 },
+    // 2501-2534 / 2913-2917k. The waterfall wave's own view, which the July
+    // table never had.
+    { scene: 'waterfall-deck', label: 'deck view of a waterfall island', measured: 2534, draws: 2850, tris: 3_250_000 },
+    // 2979-3006 / 3483-3487k. The dearest view in the game and the one nobody
+    // had ever measured: standing in a hole in the ground still pays for every
+    // island on the map.
+    { scene: 'cave-interior', label: 'cave interior', measured: 3006, draws: 3400, tris: 3_900_000 },
   ],
   // 'low' came in far under the targets it was written against (~1800 dock,
   // ~1400 open sea), so these are its MEASURED cost plus a margin rather than
   // the aspiration — a ceiling nothing has ever approached grades nothing. The
   // ratio checks below are the other half of the assertion.
   low: [
-    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 776, draws: 950, tris: 750_000 },
-    { scene: 'open-sea', label: 'open water (low tier)', measured: 286, draws: 450, tris: 300_000 },
+    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 613, draws: 700, tris: 650_000 },
+    { scene: 'open-sea', label: 'open water (low tier)', measured: 319, draws: 380, tris: 220_000 },
   ],
 };
 
@@ -136,7 +164,7 @@ const BUDGETS = {
  *  Needs a wreck up: the runner hands PIRATES_WRECK_SEC to any server it starts
  *  itself, and SKIPS this one scene (never fails) against a server that was
  *  already running without it. */
-const WRECK_BUDGET = { label: 'the Gilded Wreck alongside', measured: 1763, draws: 2400, tris: 2_600_000 };
+const WRECK_BUDGET = { label: 'the Gilded Wreck alongside', measured: 2163, draws: 2450, tris: 2_100_000 };
 /** Seconds after the horn the dev server raises her for this measurement. */
 const WRECK_RAISE_SEC = 12;
 /** How long to wait for her after the join before giving up and skipping. */
@@ -144,8 +172,12 @@ const WRECK_WAIT_MS = 90_000;
 
 /** The low tier exists to be CHEAPER. These are the ratios it must beat against
  *  the same scene at 'high' — a 'low' that saves nothing is a menu entry that
- *  lies to the player about what it will do for their frame rate. */
-const LOW_TIER_MAX_RATIO = { draws: 0.72, tris: 0.68 };
+ *  lies to the player about what it will do for their frame rate.
+ *
+ *  Measured on the pinned map, low comes in at 30-34% of high's draws and
+ *  18-30% of its triangles, so the 0.72/0.68 these started at could have been
+ *  met by a 'low' twice as expensive as the one that ships. */
+const LOW_TIER_MAX_RATIO = { draws: 0.50, tris: 0.45 };
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -165,6 +197,19 @@ async function isReady(url) {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+/** The map seed a server that this runner did NOT start is rolling, or null
+ *  when it is unpinned (or too old to say). */
+async function readMapSeed(healthUrl) {
+  try {
+    const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1500) });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return typeof body.mapSeed === 'number' ? body.mapSeed : null;
+  } catch {
+    return null;
   }
 }
 
@@ -334,13 +379,28 @@ async function main() {
     // different world and the ceilings below do not describe it.
     const ownServer = started.some((h) => h.scriptName === 'dev' || h.scriptName === 'dev:server');
     if (!ownServer) {
-      console.log(
-        '  – skipped: a game server was already running, so its map seed is not '
-        + `the one these ceilings were measured on.\n     Stop it and re-run, or start it with `
-        + `PIRATES_BR_MAP_SEED=${MAP_SEED} — every join otherwise rolls a fresh\n     world and the `
-        + 'same build reads anywhere from 1165 to 2742 draws at the same scene.',
-      );
-      return;
+      const seed = await readMapSeed(SERVER_HEALTH_URL);
+      if (seed === MAP_SEED_N) {
+        console.log(`  · grading against a server started elsewhere on the same map (seed ${MAP_SEED}).`);
+      } else if (ALLOW_ANY_MAP) {
+        console.log(
+          `  · PIRATES_BR_ANY_MAP=1: grading against map seed ${seed ?? 'unpinned'}, which is NOT `
+          + `${MAP_SEED}.\n     These ceilings do not describe this world; read the numbers, not the verdict.`,
+        );
+      } else {
+        console.error(
+          '  ✗ FAIL: cannot grade — a game server was already running and it rolls '
+          + `map seed ${seed ?? 'unpinned (a fresh world every join)'}, not the ${MAP_SEED} these\n`
+          + '     ceilings were measured on. The same build reads anywhere from 1165 to 2742 draws\n'
+          + '     at the same scene across worlds, so a reading from that one grades nothing.\n'
+          + `     Stop it and re-run, or start it with PIRATES_BR_MAP_SEED=${MAP_SEED}.`,
+        );
+        // NOT `failures += 1; return` — this return is inside the try, so the
+        // `if (failures > 0) process.exit(1)` after the finally never runs and
+        // the process would exit 0 with FAIL on the screen.
+        process.exitCode = 1;
+        return;
+      }
     }
     const wantWreck = ownServer;
 

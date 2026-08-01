@@ -231,7 +231,7 @@ const ENDED_SNAPSHOT_TICKS = SNAPSHOT_RATE * 15;
 /** Optional fixed match seed (PIRATES_BR_MAP_SEED). Unset ⇒ a fresh random
  *  world roll per match, exactly as before. Set ⇒ ship spawns, sea rocks and
  *  loot rolls repeat, which is what makes a two-build perf A/B comparable. */
-function matchSeedFromEnv(): number | undefined {
+export function matchSeedFromEnv(): number | undefined {
   const raw = process.env.PIRATES_BR_MAP_SEED;
   if (!raw) return undefined;
   const parsed = Number.parseInt(raw, 10);

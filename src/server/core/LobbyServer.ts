@@ -8,7 +8,7 @@ import type {
   NetMsg, LobbyUpdatePayload, LobbyMember, QueueUpdatePayload,
   WelcomePayload, MatchStartPayload, PlayerStatsRecord,
 } from '../../shared/types/index.js';
-import { Match, type MatchEndResult } from './Match.js';
+import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
 import { MATCH_TOTAL_SHIPS } from '../../shared/constants/index.js';
 
@@ -848,6 +848,14 @@ export class LobbyServer {
         clients: this.clients.size,
         matches: this.matches.size,
         queue: this.queue.length,
+        // WHICH WORLD THIS HOST ROLLS. Draw-call ceilings are measured against
+        // one pinned map, and the seed is read from the environment at match
+        // generation — so from outside there was no way to tell a host that
+        // rolls the graded world from one that rolls a fresh world every join.
+        // A rig that cannot ask has only two moves, both bad: grade a world its
+        // ceilings never described, or skip and call that a pass. null means
+        // unpinned (a fresh roll per match).
+        mapSeed: matchSeedFromEnv() ?? null,
         worstSimLagSec: sims.reduce((worst, s) => Math.max(worst, s.simLagSec), 0),
         droppedTicks: sims.reduce((sum, s) => sum + s.droppedTicks, 0),
         sims,
