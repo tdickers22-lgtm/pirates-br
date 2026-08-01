@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { firstDrawRemaining, spendFirstDraw } from './FirstDrawBudget.js';
 
 /**
  * Island detail LOD: pay the reveal early, and in slices.
@@ -68,7 +69,9 @@ const WARM_CHUNK_TIMEOUT_FRAMES = 90;
 
 /** Estimated NEW geometry bytes a single frame may hand to the driver. */
 const REVEAL_BYTES_PER_FRAME = 2_000_000;
-/** …and how many meshes carrying new geometry, whichever cap trips first. */
+/** …and how many meshes carrying new geometry, whichever cap trips first.
+ *  Matched to the shared per-frame allowance: this reveal releasing more than
+ *  the whole client is allowed to upload would just move the burst. */
 const REVEAL_MESHES_PER_FRAME = 48;
 /** Tighter caps while the island being revealed has NOT been compiled yet — a
  *  teleport, or a hull that crossed the warm band faster than it could compile.
@@ -343,8 +346,14 @@ export class IslandDetailWarmer {
           // Always let at least one costly unit through, or a single mesh
           // heavier than the whole budget would wedge the reveal forever.
           if (costly > 0 && (bytes >= byteCap || costly >= meshCap)) return;
+          // …and stop at the SHARED allowance too. This reveal is not the only
+          // thing uploading on this frame — the chests, hulls and sea rocks
+          // crossing their own radii spend from the same driver, and a cap this
+          // class enforces alone is only a cap on this class.
+          if (costly > 0 && firstDrawRemaining() <= 0) return;
           bytes += unit.bytes;
           costly += 1;
+          spendFirstDraw(1);
         } else if (++free > REVEAL_FREE_MESHES_PER_FRAME) {
           return;
         }

@@ -7,6 +7,7 @@ import { cargoTier } from '../../shared/cargo.js';
 import { getAmmoCrateLocal, getCannonDeckLocalPosition, getShipGangwayPlan } from '../../shared/interactions.js';
 import type { RenderQuality } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
+import { showWhenAffordable } from './FirstDrawBudget.js';
 
 /** Storm sea-state source accepted by update(): either a precomputed 0..1
  *  intensity, or the replicated storm ring so the renderer can evaluate the
@@ -4068,8 +4069,20 @@ export class ShipRenderer {
         ? (ship.position.x - cameraPosition.x) ** 2 + (ship.position.z - cameraPosition.z) ** 2
         : 0;
       const localCrewShip = !!localPlayerId && ship.crewIds.includes(localPlayerId);
-      const detailNear = !cameraPosition || localCrewShip || distSq < detailDistance * detailDistance;
-      mesh.detailRoot.visible = detailNear;
+      let detailNear = !cameraPosition || localCrewShip || distSq < detailDistance * detailDistance;
+      // A hull's detail root is ~78 geometries and it flips on one frame when
+      // the camera crosses detailDistance — the same shape of stall the island
+      // reveal was built to flatten, and two ships crossing together were
+      // measured putting 140 geometries onto a single frame. Its FIRST
+      // appearance goes through the shared per-frame allowance; every one after
+      // that is a plain assignment. The proxy is not gated: it swaps out only
+      // once the detail root is genuinely up, so the hull is never missing.
+      showWhenAffordable(mesh.detailRoot, detailNear);
+      // Everything downstream — the proxy sails, the waterline foam — keys off
+      // detailNear, so it has to mean what is ACTUALLY up. A hull waiting a
+      // frame for the allowance must keep its proxy and its proxy sails, or it
+      // sails for two frames with no canvas on it.
+      detailNear = mesh.detailRoot.visible;
       mesh.proxyRoot.visible = !detailNear;
       const extrapolation = Math.min(0.14, snapshotAge + dt * 0.5);
       // Local storm sea-state feeds the SAME boosted Gerstner field the ocean

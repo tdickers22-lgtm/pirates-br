@@ -45,6 +45,7 @@ import { EnvironmentFx, type EnvironmentFxView } from '../rendering/EnvironmentF
 import { freezeStaticParent, freezeStaticSubtree, ZERO_SCALE_MAT4 } from '../rendering/three-util.js';
 import { IslandDetailWarmer } from '../rendering/IslandDetailWarmup.js';
 import { registerBudgetLight } from '../rendering/LightBudget.js';
+import { beginFirstDrawFrame, clearFirstDrawBudget, showWhenAffordable } from '../rendering/FirstDrawBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
@@ -1555,6 +1556,7 @@ export class Game {
     // Last match's islands are disposed above; their warm/reveal bookkeeping
     // must go with them or the next match's islands inherit "already warm".
     this.lodWarmer.reset();
+    clearFirstDrawBudget();
     this.islandDetailShown.clear();
     this.tavernDoors = [];
     // Promoted harvest clones / mid-fall palms lived inside island groups —
@@ -2717,6 +2719,10 @@ export class Game {
     // the inventory chart, a network event that repaints mid-frame) draws from
     // the same allowance instead of each helping itself to a fresh one.
     this.map.beginFrame();
+    // …and one first-draw allowance, claimed in the same place and for the same
+    // reason. The island LOD pass and the ship renderer both spend it, so it
+    // cannot be reset by either of them.
+    beginFirstDrawFrame();
     this.ocean.update(dt, this.renderer.camera.position);
     this.ocean.setAtmosphere(this.renderer.getAtmosphere());
     this.updateOceanCaveSuppression();
@@ -3003,6 +3009,7 @@ export class Game {
    *  exactly on the radius used to flip the subtree every other frame. */
   private static readonly DETAIL_HYSTERESIS = 1.06;
 
+
   private updateEnvironmentLod() {
     if (!this.state) return;
 
@@ -3086,7 +3093,7 @@ export class Game {
         if (!record) continue;
         const chestDist = dist2D(cam.x, cam.z, chest.position.x, chest.position.z);
         const carriedByLocal = chest.carriedByPlayerId === this.localPlayerId;
-        record.root.visible = chestDist < lootRadius && !chest.opened && !carriedByLocal;
+        showWhenAffordable(record.root, chestDist < lootRadius && !chest.opened && !carriedByLocal);
         record.root.matrixWorldAutoUpdate = record.root.visible;
         const chestLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (chestLight) chestLight.visible = record.root.visible && chestDist < 55;
@@ -3096,7 +3103,7 @@ export class Game {
         const root = this.barrelMeshes.get(barrel.id);
         if (!root) continue;
         const barrelDist = dist2D(cam.x, cam.z, barrel.position.x, barrel.position.z);
-        root.visible = barrelDist < lootRadius && (!barrel.opened || barrel.loot.length > 0);
+        showWhenAffordable(root, barrelDist < lootRadius && (!barrel.opened || barrel.loot.length > 0));
         root.matrixWorldAutoUpdate = root.visible;
       }
 
@@ -3104,7 +3111,7 @@ export class Game {
         const record = this.upgradeStationMeshes.get(station.id);
         if (!record) continue;
         const stationDist = dist2D(cam.x, cam.z, station.position.x, station.position.z);
-        record.root.visible = stationDist < upgradeRadius;
+        showWhenAffordable(record.root, stationDist < upgradeRadius);
         record.root.matrixWorldAutoUpdate = record.root.visible;
         const stationLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (stationLight) stationLight.visible = record.root.visible && stationDist < 55;
@@ -3114,7 +3121,7 @@ export class Game {
         const record = this.npcMeshes.get(npc.id);
         if (!record) continue;
         const npcDist = dist2D(cam.x, cam.z, npc.position.x, npc.position.z);
-        record.root.visible = npcDist < npcRadius;
+        showWhenAffordable(record.root, npcDist < npcRadius);
         record.root.matrixWorldAutoUpdate = record.root.visible;
         const npcLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (npcLight) npcLight.visible = record.root.visible && npcDist < 55;
@@ -3126,7 +3133,7 @@ export class Game {
       if (!mesh) continue;
       const dist = dist2D(cam.x, cam.z, animal.position.x, animal.position.z);
       // health is server-only (dead animals never reach the wire) — default alive.
-      mesh.visible = (animal.health ?? 1) > 0 && dist < (animal.type === 'gull' ? wildlifeRadius * 1.35 : wildlifeRadius);
+      showWhenAffordable(mesh, (animal.health ?? 1) > 0 && dist < (animal.type === 'gull' ? wildlifeRadius * 1.35 : wildlifeRadius));
       // A crab out of sight still has ~40 rigged nodes, and three refreshes the
       // world matrix of every one of them whether or not it is drawn. Culled
       // animals leave the walk; they rejoin it the frame they come back, before
@@ -3138,7 +3145,7 @@ export class Game {
       const mesh = this.seaRockMeshes.get(rock.id);
       if (!mesh) continue;
       const dist = dist2D(cam.x, cam.z, rock.position.x, rock.position.z);
-      mesh.visible = dist < seaRockRadius;
+      showWhenAffordable(mesh, dist < seaRockRadius);
     }
   }
 
