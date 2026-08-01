@@ -302,6 +302,28 @@ export class IslandDetailWarmer {
     this.reveals.delete(id);
   }
 
+  /**
+   * MEASUREMENT ONLY — let every held unit out at once.
+   *
+   * A reveal is paced in units per FRAME, so how much of the world is on screen
+   * after any fixed wall-clock wait is a question about frame rate, not about
+   * the scene. A budget census run on a software rasteriser waits the same
+   * twelve seconds a GPU rig does and gets three frames for it. Settling the
+   * reveal is what makes the counts mean the same thing on both backends.
+   */
+  flushReveals(): void {
+    for (const [id, job] of this.reveals) {
+      for (; job.cursor < job.units.length; job.cursor++) {
+        const unit = job.units[job.cursor];
+        unit.mesh.visible = unit.wasVisible;
+        if (unit.wasVisible && this.ancestorsVisible(unit.mesh)) {
+          for (const geometry of unit.geometries) this.uploaded.add(geometry);
+        }
+      }
+      this.reveals.delete(id);
+    }
+  }
+
   /** Drop all bookkeeping for an island (match teardown). */
   forget(id: string): void {
     this.cancelReveal(id);

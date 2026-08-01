@@ -205,9 +205,9 @@ export function planScenes(world) {
 }
 
 // ─── measurement ───────────────────────────────────────────────
-async function measureScene(page, cam, { warmupMs, captureMs }) {
+async function measureScene(page, cam, { warmupMs, captureMs, settle = false }) {
   await page.evaluate(
-    ([c]) => {
+    ([c, doSettle]) => {
       const g = window.__piratesBR;
       let y = c.y;
       if (y === null || y === undefined) {
@@ -217,9 +217,16 @@ async function measureScene(page, cam, { warmupMs, captureMs }) {
       if (c.aimAt) yaw = Math.atan2(c.aimAt.x - c.x, c.aimAt.z - c.z);
       g.enableFreeCam(c.x, y, c.z, yaw, c.pitch);
       g.setDayNightOverride(854); // noon: identical sun/shader path in both builds
+      // COUNT-GRADING RIGS ONLY. The LOD reveal and the shared first-draw
+      // allowance are paced per frame, so at software-rasteriser frame rates a
+      // fixed warmup measures how much of the world has ARRIVED, not what the
+      // view costs. Settling first is what makes a draw count backend-neutral.
+      // Left off for the A/B path on purpose: it is the second build's job to
+      // meet the first one's pacing, not to be handed the finished state.
+      if (doSettle) g.settleLod?.();
       window.__camY = y;
     },
-    [cam],
+    [cam, settle],
   );
 
   return page.evaluate(

@@ -45,7 +45,7 @@ import { EnvironmentFx, type EnvironmentFxView } from '../rendering/EnvironmentF
 import { freezeStaticParent, freezeStaticSubtree, ZERO_SCALE_MAT4 } from '../rendering/three-util.js';
 import { IslandDetailWarmer } from '../rendering/IslandDetailWarmup.js';
 import { registerBudgetLight } from '../rendering/LightBudget.js';
-import { beginFirstDrawFrame, clearFirstDrawBudget, showWhenAffordable } from '../rendering/FirstDrawBudget.js';
+import { beginFirstDrawFrame, clearFirstDrawBudget, openFirstDrawBudgetForSettle, showWhenAffordable } from '../rendering/FirstDrawBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
@@ -5026,6 +5026,41 @@ export class Game {
 
   disableFreeCam() {
     this.freeCam = null;
+  }
+
+  /**
+   * MEASUREMENT HOOK — bring the world's LOD to the state it would REACH, now.
+   *
+   * Two mechanisms decide what is visible over a run of frames rather than on
+   * one: the shared first-draw allowance and the island detail reveal. Both are
+   * paced per FRAME, which means "how much of the world is up" after any fixed
+   * wall-clock wait is a fact about the machine's frame rate. On the software
+   * rasteriser this repo is limited to, one frame is two to seven seconds, so a
+   * probe that waits and then counts is grading an unfinished arrival: measured,
+   * the dock vista read 687 draws against the 2206 the same view costs settled.
+   *
+   * A budget must grade the view, not the arrival. So a probe calls this after
+   * placing its camera: run the LOD pass with the allowance open and the reveal
+   * flushed, twice, so an island revealed by the first pass has its micro tier
+   * and foliage layers graded by the second. Nothing here changes a radius or a
+   * visibility RULE — it only stops the pacing from standing in for one.
+   *
+   * The pacing itself is still under test where it belongs (the first-draw
+   * allowance in test-first-draw-budget, the reveal in test-island-reveal); this
+   * is reachable only through the debug object and is never called by the loop.
+   */
+  settleLod(passes = 2) {
+    // The LOD gates read the CAMERA, and a free-cam placement does not reach the
+    // camera until the next frame's updateCamera — so settling straight after
+    // enableFreeCam would settle the view the probe just left.
+    this.updateCamera();
+    for (let i = 0; i < passes; i++) {
+      openFirstDrawBudgetForSettle();
+      this.updateEnvironmentLod();
+      this.lodWarmer.flushReveals();
+    }
+    // Leave the allowance the way the game loop expects to find it.
+    beginFirstDrawFrame();
   }
 
   /** Dev/tour hook: force the day/night clock. Pass seconds into the 960s cycle

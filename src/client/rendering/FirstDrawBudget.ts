@@ -84,6 +84,26 @@ function meshCost(root: THREE.Object3D): number {
   return cached;
 }
 
+/**
+ * MEASUREMENT ONLY — open the allowance wide for one settling pass.
+ *
+ * Every count a budget grades (draw calls, triangles, programs) is decided by
+ * which objects are VISIBLE, and this allowance is the thing that decides that
+ * over a run of frames rather than on one. On a GPU that is a handful of frames
+ * and no probe ever noticed; on the software rasteriser this machine is limited
+ * to, a frame takes two to seven SECONDS, so a rig that waits twelve seconds
+ * after the join and then counts is counting a world that is still arriving.
+ * That is exactly how a census read 687 draws at the dock vista where the July
+ * pass measured 2206 — not a saving, an unfinished reveal.
+ *
+ * So the probe settles the world first. The pacing itself is a separate contract
+ * with its own tests (test-first-draw-budget, test-island-reveal); this hook is
+ * only ever reached through the debug object, never from the game loop.
+ */
+export function openFirstDrawBudgetForSettle(): void {
+  budget = Number.POSITIVE_INFINITY;
+}
+
 /** Match teardown: the next match's objects are new, and must not inherit
  *  "already drawn" from a set still holding the last match's. */
 export function clearFirstDrawBudget(): void {
