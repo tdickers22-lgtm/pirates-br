@@ -51,6 +51,25 @@ const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? 'http://12
 const READY_TIMEOUT_MS = 45_000;
 const VIEWPORT = { width: 960, height: 540 };
 
+/**
+ * THE WORLD HAS TO BE THE SAME WORLD.
+ *
+ * Every join rolls a fresh map, and these scenes are fixed points in it: the
+ * dock vista stands off whichever island drew the dock, the deck look rides the
+ * hull and frames whatever happens to be behind it. Graded against three
+ * different worlds the same build read 1165, 1581 and 2742 draws at deck-aft —
+ * a 2.4x spread that is entirely the map and not at all the renderer. A
+ * tripwire cannot live on top of that: it either sits above the luckiest roll
+ * and grades nothing, or it fails honest builds at random.
+ *
+ * So the runner pins PIRATES_BR_MAP_SEED on the server it starts. It cannot pin
+ * a server somebody else already started — the seed is read once at match
+ * generation — and against one of those the counts are simply not the counts
+ * these ceilings were set from. That case SKIPS the grading and says why, which
+ * is the only honest thing left; it does not quietly grade a different world.
+ */
+const MAP_SEED = process.env.PIRATES_BR_MAP_SEED ?? '20260801';
+
 // A 16:9 viewport of any size produces the same frustum, so counts at 960x540
 // are counts at 1600x900 — and the smaller one is kinder to the machine.
 
@@ -72,14 +91,21 @@ const BUDGETS = {
   high: [
     // draws: 2588 -> 1671 across the diet;  tris: 2082k -> 1995k.
     { scene: 'dock-vista', label: 'wide island vista', measured: 1671, draws: 1900, tris: 2_250_000 },
-    // 2766 -> 1165 / 2481k -> 800k. The widest ceiling in the table on purpose:
-    // this is the only scene whose FRAME moves — the camera rides the hull, and
-    // which islands are behind it is a fact about where the ship is lying. Set
-    // well under the pre-diet reading so a return to per-plank drawing still
-    // fails, without grading ordinary drift as a regression.
-    { scene: 'deck-aft', label: 'on-deck aft look', measured: 1165, draws: 2000, tris: 2_400_000 },
-    // 2003 -> 1360 / 1281k -> 1256k.
-    { scene: 'open-sea', label: 'open water', measured: 1360, draws: 1550, tris: 1_450_000 },
+    // THE ONE SCENE WHOSE FRAME MOVES, and the widest ceiling in the table
+    // because of it. The camera rides the hull, so which islands are behind it
+    // is a fact about where the ship is lying when the measurement lands — and
+    // the ship is still drifting an hour into a run. Read 1165, 1581, 2742 and
+    // 2660 on four runs; pinning the map removed most of that spread and the
+    // rest is the hull's own position. 2660/3068k is the pinned-world reading.
+    //
+    // No before/after is claimed here: the pre-diet 2766/2481k was taken in a
+    // DIFFERENT world, so the two numbers are not comparable and pretending
+    // otherwise would credit the diet with a scene it barely touched. What the
+    // ceiling is for is a return to per-plank drawing, which would clear it.
+    { scene: 'deck-aft', label: 'on-deck aft look', measured: 2660, draws: 3000, tris: 3_400_000 },
+    // 2003 -> 1360 / 1281k -> 1256k. Read 1360 and 1432 on two runs; the ceiling
+    // clears the higher of them, not the luckier.
+    { scene: 'open-sea', label: 'open water', measured: 1432, draws: 1600, tris: 1_450_000 },
     // 2802 -> 2521 / 2902k -> 2907k. The waterfall wave's own view, which the
     // July table never had.
     { scene: 'waterfall-deck', label: 'deck view of a waterfall island', measured: 2521, draws: 2850, tris: 3_250_000 },
@@ -88,12 +114,13 @@ const BUDGETS = {
     // every island on the map.
     { scene: 'cave-interior', label: 'cave interior', measured: 3250, draws: 3650, tris: 3_900_000 },
   ],
-  // 'low' has no measured column yet — these are the TARGETS the tier is
-  // supposed to hit, and the ratio checks below are the real assertion. If the
-  // first wired run comes in under them, tighten these to what it read.
+  // 'low' came in far under the targets it was written against (~1800 dock,
+  // ~1400 open sea), so these are its MEASURED cost plus a margin rather than
+  // the aspiration — a ceiling nothing has ever approached grades nothing. The
+  // ratio checks below are the other half of the assertion.
   low: [
-    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 0, draws: 1200, tris: 1_400_000 },
-    { scene: 'open-sea', label: 'open water (low tier)', measured: 0, draws: 1000, tris: 900_000 },
+    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 776, draws: 950, tris: 750_000 },
+    { scene: 'open-sea', label: 'open water (low tier)', measured: 286, draws: 450, tris: 300_000 },
   ],
 };
 
@@ -159,7 +186,13 @@ function startNpmScript(scriptName) {
     // The wreck is a mid-match event: without this hook she rises at the first
     // ring shrink, four minutes after the join, and the scene below would time
     // out waiting for a hull that is coming but not yet.
-    env: { ...process.env, BROWSER: 'none', PIRATES_WRECK_SEC: String(WRECK_RAISE_SEC) },
+    env: {
+      ...process.env,
+      BROWSER: 'none',
+      PIRATES_WRECK_SEC: String(WRECK_RAISE_SEC),
+      // …and the same map every run. See MAP_SEED.
+      PIRATES_BR_MAP_SEED: MAP_SEED,
+    },
   });
   return { child, scriptName };
 }
@@ -296,8 +329,20 @@ async function main() {
         await waitForReady(SERVER_HEALTH_URL, server.child);
       }
     }
-    // The wreck only rises on a server THIS runner started with the hook.
-    const wantWreck = started.some((h) => h.scriptName === 'dev' || h.scriptName === 'dev:server');
+    // Both hooks — the pinned map and the early wreck — reach only a server
+    // THIS runner started. Against one that was already up, the world is a
+    // different world and the ceilings below do not describe it.
+    const ownServer = started.some((h) => h.scriptName === 'dev' || h.scriptName === 'dev:server');
+    if (!ownServer) {
+      console.log(
+        '  – skipped: a game server was already running, so its map seed is not '
+        + `the one these ceilings were measured on.\n     Stop it and re-run, or start it with `
+        + `PIRATES_BR_MAP_SEED=${MAP_SEED} — every join otherwise rolls a fresh\n     world and the `
+        + 'same build reads anywhere from 1165 to 2742 draws at the same scene.',
+      );
+      return;
+    }
+    const wantWreck = ownServer;
 
     const high = await measureTier(browser, 'high', { wantWreck });
     const low = await measureTier(browser, 'low', { wantWreck: false });
