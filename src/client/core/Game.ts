@@ -3054,7 +3054,15 @@ export class Game {
           this.lodWarmer.requestWarm(island.id, detailRoot);
         }
         detailRoot.visible = showDetail;
-        proxyRoot.visible = !showDetail;
+        // The proxy comes down only once the detail tier actually has the
+        // island's shape on screen. `beginReveal` hides the whole subtree and
+        // the release pass does not run until the top of the next frame, so
+        // dropping the proxy the instant `showDetail` turns true takes the
+        // island OUT OF THE WORLD until the reveal reaches it — measured at
+        // twenty seconds on a cold approach with three islands crossing
+        // together, two of them showing nothing at all the whole time. Same
+        // rule the hulls already follow: swap to detail only when detail is up.
+        proxyRoot.visible = !showDetail || this.lodWarmer.revealSilhouettePending(island.id);
         // Micro decor (shells, rubble, clutter) only reads up close — culling
         // it past ~260m cuts hundreds of draw calls per distant island.
         const microRoot = group.userData.microRoot as THREE.Object3D | undefined;

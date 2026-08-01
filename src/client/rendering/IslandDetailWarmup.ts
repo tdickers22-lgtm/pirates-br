@@ -150,6 +150,11 @@ type RevealJob = {
   root: THREE.Object3D;
   units: RevealUnit[];
   cursor: number;
+  /** How many of the leading units carry the island's SILHOUETTE (priority 0 —
+   *  terrain, shore skirt, contact shadows). They sort to the front, so the
+   *  reveal has put the island's shape on screen exactly when the cursor has
+   *  passed them. The caller keeps the proxy up until then. */
+  silhouette: number;
 };
 
 type WarmJob = {
@@ -261,8 +266,29 @@ export class IslandDetailWarmer {
     // Silhouette first, and within a tier the heavy structure before the trim.
     units.sort((a, b) => a.priority - b.priority || b.bytes - a.bytes);
     for (const unit of units) unit.mesh.visible = false;
-    this.reveals.set(id, { root, units, cursor: 0 });
+    // At least one unit, always: an island whose terrain is not named the way
+    // revealPriority expects would otherwise report its silhouette up before a
+    // single mesh had been released, which is the state this guards against.
+    const silhouette = Math.max(1, units.filter((unit) => unit.priority === 0).length);
+    this.reveals.set(id, { root, units, cursor: 0, silhouette });
     if (!this.warmed.has(id)) this.prioritiseWarm(id);
+  }
+
+  /**
+   * True while a reveal is armed but has not yet put the island's SILHOUETTE on
+   * screen. The LOD pass must keep the proxy up for exactly these frames.
+   *
+   * `beginReveal` hides every unit under the detail root, and the release pass
+   * does not run until the top of the NEXT frame — so a caller that hides the
+   * proxy the instant the detail root goes visible takes the island out of the
+   * world until the reveal reaches it. That is not one frame. Measured on a
+   * cold approach with three islands crossing their radii together: 0/658,
+   * 0/544 and 7/896 meshes released, proxies down, and it stayed that way for
+   * twenty seconds — an approach where two islands were simply not there.
+   */
+  revealSilhouettePending(id: string): boolean {
+    const job = this.reveals.get(id);
+    return !!job && job.cursor < job.silhouette;
   }
 
   /** The island dropped back out of detail range mid-reveal (or was disposed):
@@ -331,12 +357,25 @@ export class IslandDetailWarmer {
 
   // ── reveal ────────────────────────────────────────────────────────────
 
+  /** Which reveal gets first call on the next frame's allowance. */
+  private revealTurn = 0;
+
   private pumpReveals(): void {
     if (this.reveals.size === 0) return;
     let bytes = 0;
     let costly = 0;
     let free = 0;
-    for (const [id, job] of this.reveals) {
+    // Round-robin, and iterate a SNAPSHOT so a job that finishes can be deleted
+    // as we go. The pump stops the moment the frame's allowance is gone, so a
+    // fixed order is not a fair share of it — it is the first island in the map
+    // taking all of it, every frame, for as long as it lasts. Measured with
+    // three islands crossing together: the first reached 443/896 while the two
+    // behind it were still at zero, twenty seconds in.
+    const jobs = [...this.reveals];
+    const start = this.revealTurn % jobs.length;
+    this.revealTurn = (start + 1) % jobs.length;
+    for (let n = 0; n < jobs.length; n++) {
+      const [id, job] = jobs[(start + n) % jobs.length];
       const warm = this.warmed.has(id);
       const byteCap = warm ? REVEAL_BYTES_PER_FRAME : REVEAL_BYTES_PER_FRAME_COLD;
       const meshCap = warm ? REVEAL_MESHES_PER_FRAME : REVEAL_MESHES_PER_FRAME_COLD;
