@@ -60,7 +60,23 @@ try {
     const game = window.__piratesBR;
     return !!game?.state && game.state.phase === 'playing';
   }, undefined, { timeout: 60_000 });
-  await page.waitForTimeout(5000);
+  // Wait for the CONDITION, not for a duration. Charting the Reach is a
+  // one-frame-at-a-time mechanism that deliberately yields to the island builds,
+  // which are themselves one a frame — so what it needs is frames, and on the
+  // software rasteriser this machine is restricted to "five seconds" is about
+  // ten of them. The fixed sleep was measuring the frame rate and reporting it
+  // as a charting bug (6/14). Waiting for the builds to drain and then for the
+  // chart to catch up asserts the same thing and cannot be fooled by a slow
+  // backend; the burst check below is what stops it cheating to get there.
+  const settled = await Promise.all([
+    page.waitForFunction(() => window.__piratesBR?.getWorldBuildBacklog?.() === 0, undefined, { timeout: 180_000 })
+      .then(() => true, () => false),
+  ]).then(([ok]) => ok && page.waitForFunction(() => {
+    const game = window.__piratesBR;
+    const charted = Object.keys(game?.map?.debugChartBitmapSizes?.() ?? {}).length;
+    return charted >= (game?.state?.islands?.length ?? Number.MAX_SAFE_INTEGER);
+  }, undefined, { timeout: 180_000 }).then(() => true, () => false));
+  if (!settled) console.log('    (the Reach never finished charting — the assertion below reports it)');
 
   // ── 1. Island charts arrive a couple at a time ───────────────
   const trace = await page.evaluate(() => window.__chartTrace ?? []);
