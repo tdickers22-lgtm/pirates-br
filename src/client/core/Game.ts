@@ -43,6 +43,7 @@ import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelC
 import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
 import { EnvironmentFx, type EnvironmentFxView } from '../rendering/EnvironmentFx.js';
 import { freezeStaticParent, freezeStaticSubtree, ZERO_SCALE_MAT4 } from '../rendering/three-util.js';
+import { IslandDetailWarmer } from '../rendering/IslandDetailWarmup.js';
 import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
@@ -325,6 +326,14 @@ export class Game {
   private rebuildStateIndexes(state: GameState) { this.clientState.rebuildStateIndexes(state); }
 
   private readonly renderer = new Renderer();
+  /** Pays an island's detail-LOD reveal early and in slices — see the module
+   *  header for the burst it exists to flatten. Exposed on the debug handle so
+   *  the perf probes can assert on warm/reveal state. */
+  readonly lodWarmer = new IslandDetailWarmer(() => ({
+    renderer: this.renderer.renderer,
+    scene: this.renderer.scene,
+    camera: this.renderer.camera,
+  }));
   private readonly ocean = new OceanRenderer();
   /** Dev/tour hook: when non-null, forces the day/night clock to this many
    *  seconds (see setDayNightOverride), so a visual tour can capture noon,
@@ -1543,6 +1552,10 @@ export class Game {
     this.shipRenderer.clear();
     this.islandMeshes.clear();
     this.islandPropInstances.clear();
+    // Last match's islands are disposed above; their warm/reveal bookkeeping
+    // must go with them or the next match's islands inherit "already warm".
+    this.lodWarmer.reset();
+    this.islandDetailShown.clear();
     this.tavernDoors = [];
     // Promoted harvest clones / mid-fall palms lived inside island groups —
     // already disposed with the environment children above.
@@ -2603,6 +2616,19 @@ export class Game {
       try {
         this.islands.buildIsland(island);
         const group = this.islandMeshes.get(island.id);
+        // Arm the chunked reveal HERE, not at the LOD radius crossing. The
+        // group is held hidden for one frame and then made visible by the next
+        // drain — which runs AFTER updateEnvironmentLod — so an island built
+        // inside the detail radius (every spawn island) would otherwise draw
+        // its whole subtree on that one frame before the LOD pass ever saw it.
+        const builtDetailRoot = group?.userData.detailRoot as THREE.Object3D | undefined;
+        if (builtDetailRoot) {
+          this.lodWarmer.requestWarm(island.id, builtDetailRoot);
+          this.lodWarmer.beginReveal(island.id, builtDetailRoot);
+          // Matches detailRoot's own default; a distant island's first LOD pass
+          // reads this as "shown", flips it off and cancels the reveal.
+          this.islandDetailShown.set(island.id, true);
+        }
         if (group && !this.islandAwaitingReveal) {
           group.visible = false;
           this.islandAwaitingReveal = group;
@@ -2962,8 +2988,24 @@ export class Game {
     ].join('\n');
   }
 
+  /** Detail-LOD state per island: whether the subtree is currently shown (for
+   *  hysteresis) — the reveal itself is owned by {@link lodWarmer}. */
+  private readonly islandDetailShown = new Map<string, boolean>();
+  /** Band outside the reveal radius where an island's shaders are pre-compiled.
+   *  Wide enough that a ship at full sail crosses it in seconds, not frames. */
+  private static readonly DETAIL_WARM_SCALE = 1.6;
+  /** Once shown, an island holds its detail a few percent further out. Sitting
+   *  exactly on the radius used to flip the subtree every other frame. */
+  private static readonly DETAIL_HYSTERESIS = 1.06;
+
   private updateEnvironmentLod() {
     if (!this.state) return;
+
+    // Release a slice of any reveal in flight and advance one warm chunk BEFORE
+    // the LOD decisions below, so a mesh let out this frame is drawn against
+    // this frame's tier visibility rather than last frame's.
+    this.lodWarmer.setBoosted(this.isStartCeremonyActive() || this.getWorldBuildBacklog() > 0);
+    this.lodWarmer.update();
 
     const quality = this.renderer.getQuality();
     const cam = this.renderer.camera.position;
@@ -2985,7 +3027,20 @@ export class Game {
       const proxyRoot = group.userData.proxyRoot as THREE.Object3D | undefined;
       if (detailRoot && proxyRoot) {
         const edgeDist = dist - getIslandMaxRadius(island);
-        const showDetail = edgeDist < detailRadius;
+        const wasShown = this.islandDetailShown.get(island.id) ?? false;
+        // Hysteresis: the band you must LEAVE is wider than the one you enter,
+        // so hovering on the edge cannot flip the whole subtree back and forth.
+        const showDetail = edgeDist < detailRadius * (wasShown ? Game.DETAIL_HYSTERESIS : 1);
+        if (showDetail !== wasShown) {
+          this.islandDetailShown.set(island.id, showDetail);
+          if (showDetail) this.lodWarmer.beginReveal(island.id, detailRoot);
+          else this.lodWarmer.cancelReveal(island.id);
+        }
+        // Approaching, still on the proxy: compile this island's materials now,
+        // a chunk a frame, so the reveal has nothing left to link.
+        if (!showDetail && edgeDist < detailRadius * Game.DETAIL_WARM_SCALE) {
+          this.lodWarmer.requestWarm(island.id, detailRoot);
+        }
         detailRoot.visible = showDetail;
         proxyRoot.visible = !showDetail;
         // Micro decor (shells, rubble, clutter) only reads up close — culling
