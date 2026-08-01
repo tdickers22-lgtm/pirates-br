@@ -3027,9 +3027,11 @@ export class Game {
    * SPYGLASS. Raising the scope narrows the camera's field of view, and a
    * distance cut-off would blank the very figure the player raised it to find.
    * So the test is the projected height of a 1.9 m figure, in pixels, and the
-   * scope earns its range back automatically: at a 60° field a pirate falls
-   * under this floor at ~700 m, and through the glass at ~2 km, which is further
-   * than the map is wide.
+   * scope earns its range back automatically. MEASURED against the fields this
+   * game actually uses, not the 60° a first draft of this note assumed: a pirate
+   * falls under the floor at ~545 m on foot (74°), ~657 m down a firearm's sights
+   * (64°), ~507 m while swimming (78°) — and at ~7.8 km through the spyglass
+   * (6°), which is several times the width of the map.
    *
    * Measured against a FIXED reference height rather than the live viewport, so
    * that the same figure is drawn at the same distances in a small window as in
@@ -3804,9 +3806,10 @@ export class Game {
       const pirateCorpseVisible = !!corpseState && corpseState.t < CORPSE_LIFETIME;
       mesh.visible = !isLocal && !useLocalSwimViewmodel
         && (skeletonDeathVisible || pirateCorpseVisible || !isDead)
-        // …and not when he is under two and a half pixels tall. See
-        // characterTooSmallToDraw: forty draw calls for a figure the view cannot
-        // resolve, and the spyglass gets them back by narrowing the field.
+        // …and not when he is under two and a half pixels tall — ~545 m at the
+        // walking field of view. See characterTooSmallToDraw: forty draw calls
+        // for a figure the view cannot resolve, and the spyglass gets every one
+        // of them back by narrowing the field.
         && !this.characterTooSmallToDraw(dist2D(
           this.renderer.camera.position.x, this.renderer.camera.position.z,
           targetPos.x, targetPos.z,
