@@ -85,7 +85,13 @@ export class MapRenderer {
    *  CHART_LOD_ZOOM so the land stops being a blocky upscaled smear. */
   private readonly islandChartLodCache = new Map<string, ChartBitmap>();
   private readonly islandChartLodInFlight = new Map<string, ChartLod>();
-  /** Base rasterizations spent on the frame being drawn (see the constant). */
+  /** Base rasterizations spent on the frame being drawn (see the constant).
+   *  Reset by {@link beginFrame} — once per animation frame, from the game
+   *  loop — and by nothing else. It used to be zeroed at the top of every
+   *  drawing entry point, which meant the budget was per CALL: a frame that
+   *  ran the throttled minimap and then the live fullscreen map spent two
+   *  budgets, and a network event that redrew the chart outside the loop spent
+   *  another, so the cap the whole mechanism rests on was not a cap at all. */
   private chartBuildsThisFrame = 0;
   private treasureChartSignature = '';
 
@@ -217,27 +223,69 @@ export class MapRenderer {
     return sizes;
   }
 
+  /** One animation frame, one island-rasterization budget. Called from the game
+   *  loop before anything can draw a chart. */
+  beginFrame() {
+    this.chartBuildsThisFrame = 0;
+  }
+
+  /** Rasterize the base bitmaps the chart has not built yet — nearest isle
+   *  first, two a frame, on frames the minimap is not redrawn at all.
+   *
+   *  The two-a-frame cap was written to spread the Reach over "a handful of
+   *  frames", but the only thing that ever spent it was `drawMaps`, and that is
+   *  throttled to one call every 0.25-0.5s. Two islands per QUARTER SECOND put
+   *  fourteen islands three and a half seconds out: for the opening seconds of
+   *  a match the minimap was missing most of the archipelago, and a probe
+   *  sampling the cache saw it stall at four. Handing the leftover budget to a
+   *  backlog pass restores the intent — a handful of frames — without ever
+   *  letting a single frame raster more than two. */
+  advanceChartBacklog() {
+    const islands = this.view.state?.islands;
+    if (!islands || this.islandChartCache.size >= islands.length) return;
+    if (this.chartBuildsThisFrame >= CHART_BASE_BUILDS_PER_FRAME) return;
+    const player = this.view.getLocalPlayer();
+    const px = player?.position.x ?? 0;
+    const pz = player?.position.z ?? 0;
+    const pending = islands
+      .filter((island) => !this.islandChartCache.has(island.id))
+      .sort((a, b) => (
+        Math.hypot(a.position.x - px, a.position.z - pz)
+        - Math.hypot(b.position.x - px, b.position.z - pz)
+      ));
+    for (const island of pending) {
+      if (this.chartBuildsThisFrame >= CHART_BASE_BUILDS_PER_FRAME) return;
+      this.chartBuildsThisFrame += 1;
+      this.getIslandChartBitmap(island);
+    }
+  }
+
+  /** Rasterize an island's base bitmap and charge it to this frame's budget.
+   *  Used by the panels that must draw one named island (the Tallyman's chart,
+   *  the treasure inset): they are never asked to wait, but they still count,
+   *  so a frame that draws one of them has that much less left for the map. */
+  private chargedChartBitmap(island: Island): ChartBitmap {
+    if (!this.islandChartCache.has(island.id)) this.chartBuildsThisFrame += 1;
+    return this.getIslandChartBitmap(island);
+  }
+
   drawMaps() {
     if (!this.view.state) return;
-    // One frame, one rasterization budget — the fullscreen pass below draws the
-    // same islands and shares it rather than doubling it.
-    this.chartBuildsThisFrame = 0;
     const minimapCtx = this.view.ui.minimapCanvas.getContext('2d');
     if (minimapCtx) {
       this.renderBattleMap(minimapCtx, this.view.ui.minimapCanvas.width, this.view.ui.minimapCanvas.height, false);
     }
     if (this.mapOpen) {
       this.drawGlyphKey();
-      this.drawFullMap(true);
+      this.drawFullMap();
     }
   }
 
   /** The opened map redraws every frame while it's up, so your arrow and the
    *  other ships track live as you move/turn (the minimap stays throttled). */
-  drawFullMap(shareFrameBudget = false) {
+  drawFullMap() {
     if (!this.view.state || !this.mapOpen) return;
     this.drawGlyphKey();
-    if (!shareFrameBudget) this.chartBuildsThisFrame = 0;
     const mapCtx = this.view.ui.mapCanvas.getContext('2d');
     if (mapCtx) {
       this.renderBattleMap(mapCtx, this.view.ui.mapCanvas.width, this.view.ui.mapCanvas.height, true);
@@ -349,7 +397,7 @@ export class MapRenderer {
     }
     ctx.restore();
 
-    const chartBitmap = this.getIslandChartBitmap(chartIsland);
+    const chartBitmap = this.chargedChartBitmap(chartIsland);
     const cx = width * 0.5;
     const cy = height * 0.53;
     // Scale off the BITMAP's extent, not island.radius: the same land raster the
@@ -998,7 +1046,7 @@ export class MapRenderer {
         // generic ellipse, which contradicted the honest shape three inches away.
         const cx = ix + inset * 0.5;
         const cy = iy + inset * 0.56;
-        const bmp = this.getIslandChartBitmap(chart);
+        const bmp = this.chargedChartBitmap(chart);
         const insetScale = inset * 0.38 / bmp.extent;
         this.stampChartBitmap(
           ctx,
@@ -1468,6 +1516,14 @@ export class MapRenderer {
     let budget = CHART_LOD_BUDGET_MS;
     for (const island of pending) {
       if (budget <= 0.2) break;
+      // The sharp pass needs the base bitmap's land mask, so starting a new LOD
+      // rasterizes a base one — through the SAME per-frame island budget as the
+      // map itself. Without this gate a zoomed chart could raster the whole
+      // Reach's base bitmaps in one frame under the millisecond budget alone.
+      if (!this.islandChartCache.has(island.id)) {
+        if (this.chartBuildsThisFrame >= CHART_BASE_BUILDS_PER_FRAME) continue;
+        this.chartBuildsThisFrame += 1;
+      }
       const startedAt = performance.now();
       this.advanceChartLod(island, budget);
       budget -= performance.now() - startedAt;

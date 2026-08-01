@@ -2712,6 +2712,11 @@ export class Game {
     if (this.serverTimeOffset !== null) {
       this.ocean.setWaveTime(performance.now() / 1000 + this.serverTimeOffset);
     }
+    // One animation frame, one island-chart rasterization budget — claimed here
+    // so every chart drawn this frame (throttled minimap, live fullscreen map,
+    // the inventory chart, a network event that repaints mid-frame) draws from
+    // the same allowance instead of each helping itself to a fresh one.
+    this.map.beginFrame();
     this.ocean.update(dt, this.renderer.camera.position);
     this.ocean.setAtmosphere(this.renderer.getAtmosphere());
     this.updateOceanCaveSuppression();
@@ -3386,6 +3391,11 @@ export class Game {
     }
     // The opened map tracks live (arrow + ships) every frame; minimap throttled.
     if (this.map.mapOpen) this.map.drawFullMap();
+    // Whatever of this frame's chart budget the drawing above left unspent goes
+    // to the isles not yet rasterized — but only once the world has finished
+    // streaming, so the chart never competes with the island builds for the
+    // join frames. Two a frame either way; nothing here can burst.
+    if (this.getWorldBuildBacklog() === 0) this.map.advanceChartBacklog();
 
     this.interactScanTimer -= dt;
     if (this.interactScanTimer <= 0) {
