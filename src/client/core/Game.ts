@@ -3010,6 +3010,51 @@ export class Game {
   private static readonly DETAIL_HYSTERESIS = 1.06;
 
 
+  /**
+   * A HUMAN FIGURE IS FORTY DRAW CALLS, and nothing was ever deciding when to
+   * stop paying them.
+   *
+   * `makePlayerMesh` builds a pirate out of about forty boxes and cylinders —
+   * torso, shirt, coat skirt, two arm pivots, two leg pivots, a skull's worth of
+   * face under a hat — and the same factory builds the story NPCs. The budget
+   * census found nine of them at forty-two calls apiece drawn at the scene root
+   * from INSIDE A CAVE, plus seven more NPCs in the environment group: some
+   * seven hundred draw calls, in every single view, for people the view could
+   * not resolve.
+   *
+   * The honest question is not "how far away is he" but "how big is he on the
+   * screen", and those differ by the one thing a metre radius cannot see: the
+   * SPYGLASS. Raising the scope narrows the camera's field of view, and a
+   * distance cut-off would blank the very figure the player raised it to find.
+   * So the test is the projected height of a 1.9 m figure, in pixels, and the
+   * scope earns its range back automatically: at a 60° field a pirate falls
+   * under this floor at ~700 m, and through the glass at ~2 km, which is further
+   * than the map is wide.
+   *
+   * Measured against a FIXED reference height rather than the live viewport, so
+   * that the same figure is drawn at the same distances in a small window as in
+   * a large one — and so the budget census, which runs at 540p, is measuring the
+   * distances a player actually gets rather than a stricter set of its own.
+   */
+  private static readonly CHARACTER_REFERENCE_HEIGHT_PX = 1080;
+  /** Under this many pixels tall, a pirate is noise on the horizon. */
+  private static readonly CHARACTER_MIN_PIXELS = 2.5;
+  private static readonly CHARACTER_HEIGHT_M = 1.9;
+
+  /** Projected height in reference pixels of a person `dist` metres away. */
+  private characterPixels(dist: number): number {
+    const camera = this.renderer.camera;
+    const halfFov = Math.tan(((camera.fov ?? 60) * Math.PI) / 360);
+    const worldPerPixel = (2 * halfFov * Math.max(1, dist)) / Game.CHARACTER_REFERENCE_HEIGHT_PX;
+    return Game.CHARACTER_HEIGHT_M / Math.max(1e-4, worldPerPixel);
+  }
+
+  /** True when a figure at this distance is too small on screen to be worth its
+   *  forty draw calls. */
+  private characterTooSmallToDraw(dist: number): boolean {
+    return this.characterPixels(dist) < Game.CHARACTER_MIN_PIXELS;
+  }
+
   private updateEnvironmentLod() {
     if (!this.state) return;
 
@@ -3129,7 +3174,9 @@ export class Game {
         const record = this.npcMeshes.get(npc.id);
         if (!record) continue;
         const npcDist = dist2D(cam.x, cam.z, npc.position.x, npc.position.z);
-        showWhenAffordable(record.root, npcDist < npcRadius);
+        // Same forty-call figure as a player, and the same screen-size test —
+        // the metre radius stays as the outer bound it always was.
+        showWhenAffordable(record.root, npcDist < npcRadius && !this.characterTooSmallToDraw(npcDist));
         record.root.matrixWorldAutoUpdate = record.root.visible;
         const npcLight = record.root.userData.decorLight as THREE.PointLight | null | undefined;
         if (npcLight) npcLight.visible = record.root.visible && npcDist < 55;
@@ -3756,7 +3803,14 @@ export class Game {
       const corpseState = mesh.userData.corpse as CorpseState | undefined;
       const pirateCorpseVisible = !!corpseState && corpseState.t < CORPSE_LIFETIME;
       mesh.visible = !isLocal && !useLocalSwimViewmodel
-        && (skeletonDeathVisible || pirateCorpseVisible || !isDead);
+        && (skeletonDeathVisible || pirateCorpseVisible || !isDead)
+        // …and not when he is under two and a half pixels tall. See
+        // characterTooSmallToDraw: forty draw calls for a figure the view cannot
+        // resolve, and the spyglass gets them back by narrowing the field.
+        && !this.characterTooSmallToDraw(dist2D(
+          this.renderer.camera.position.x, this.renderer.camera.position.z,
+          targetPos.x, targetPos.z,
+        ));
       if (skeletonDeathVisible) {
         this.applyCorpseFade(mesh, skeletonDeathTime, SKELETON_CORPSE_LIFETIME - 1.6, SKELETON_CORPSE_LIFETIME);
       } else if (pirateCorpseVisible) {

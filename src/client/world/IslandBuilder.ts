@@ -28,6 +28,7 @@ import { applyFoliageSway, buildGroundCover, buildPropInstance, buildServerProps
 import { buildBeachDecor, buildCairns, buildInteriorDressing, buildPebbles, buildRockAndDriftDecor, buildTreesAndStrays, buildVinesAndStakes } from './island/DecorScatter.js';
 import { buildBridges, buildLookoutPost, buildPirateCamp, buildRopeLadder, buildRuin, buildSecondaryWreck, buildStoneIdols, buildTrails } from './island/Landmarks.js';
 import { buildCliffStrata, buildPeakMist, buildReefRing, buildRockSpires, buildTerraces } from './island/TerrainFeatures.js';
+import { collapseIslandDecor } from './island/StaticBatcher.js';
 import { buildWaterfalls } from './island/WaterfallBuilder.js';
 import { buildVolcanicFx } from './island/VolcanicFx.js';
 import { buildProxyTerrainMesh, buildTerrainMesh } from './island/TerrainMeshBuilder.js';
@@ -385,6 +386,17 @@ export class IslandBuilder {
     buildRuin(ctx);
 
     buildTerraces(ctx);
+
+    // ── Static batching ──────────────────────────────────────────────────
+    // Every piece above is scenery: bolted down, never animated, and drawn a
+    // plank, a rung and a bollard at a time. The census put a single pier at 49
+    // to 67 draw calls, a rope bridge at 150, a lookout at 24 — and five
+    // islands in one wide shot at over a thousand calls of that alone. Merging
+    // each piece's unnamed static sub-meshes by material takes them to one call
+    // apiece with nothing removed from the screen. Runs here, after every
+    // builder has contributed and BEFORE the tiers are assembled, so each child
+    // is still exactly one placed piece. See island/StaticBatcher for the rules.
+    collapseIslandDecor(group);
 
     {
       const detailRoot = new THREE.Group();

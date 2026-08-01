@@ -24,6 +24,9 @@ import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene } from './perf-probe.mjs';
+import {
+  READ_CLIENT_TIER, READ_AUTO_TIER, FIND_WATERFALL_ISLAND, planWaterfallDeck, TALLY_DRAW_SOURCES,
+} from './lib/perf-scenes.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback = null) => {
@@ -74,174 +77,6 @@ function startNpmScript(scriptName) {
 function stopChild(child) {
   if (!child || child.exitCode !== null) return;
   try { process.kill(-child.pid, 'SIGINT'); } catch { try { child.kill('SIGINT'); } catch { /* gone */ } }
-}
-
-/** The pixel ratio, tier and shadow map the CLIENT picked for itself on this
- *  machine, read before anything pins it. */
-const READ_CLIENT_TIER = () => {
-  const r = window.__piratesBR?.renderer;
-  if (!r) return null;
-  return {
-    quality: r.getQuality?.() ?? r.quality ?? null,
-    devicePixelRatio: window.devicePixelRatio || 1,
-    currentPixelRatio: r.currentPixelRatio ?? null,
-    minPixelRatio: r.minPixelRatio ?? null,
-    maxPixelRatio: r.maxPixelRatio ?? null,
-    rendererPixelRatio: r.renderer?.getPixelRatio?.() ?? null,
-    shadowsEnabled: r.areShadowsEnabled?.() ?? null,
-    hardwareConcurrency: navigator.hardwareConcurrency ?? null,
-    deviceMemory: navigator.deviceMemory ?? null,
-    cssPixels: window.innerWidth * window.innerHeight,
-    // Fragments the client is asking the GPU for, per frame, at this ratio.
-    fragments: Math.round(
-      window.innerWidth * window.innerHeight
-      * Math.pow(r.renderer?.getPixelRatio?.() ?? 1, 2),
-    ),
-  };
-};
-
-/** A deck-height look at an island that actually HAS a fall on it. The July
- *  scene table has no such view, and the waterfall sheets/mist were a whole
- *  content wave that therefore never appeared in any budget. */
-const FIND_WATERFALL_ISLAND = () => {
-  const g = window.__piratesBR;
-  for (const [id, group] of g.islandMeshes ?? []) {
-    let site = null;
-    group.traverse((o) => { if (!site && o.name === 'waterfall-site') site = o; });
-    if (site) {
-      const island = g.state.islands.find((i) => i.id === id);
-      // The fall's own plunge pool, in island-local coords (WaterfallBuilder
-      // bakes its geometry local and records the base in userData).
-      const base = site.userData?.base ?? { x: site.position.x, z: site.position.z };
-      return {
-        id,
-        name: island?.name ?? id,
-        x: group.position.x,
-        z: group.position.z,
-        radius: island?.radius ?? 120,
-        siteLocalX: base.x,
-        siteLocalZ: base.z,
-      };
-    }
-  }
-  return null;
-};
-
-/**
- * WHERE THE DRAWS COME FROM.
- *
- * A draw-call total tells you a budget broke; it never tells you which content
- * wave broke it, and "3000 draws at deck view" is not something anyone can act
- * on. This walks the live scene the way three's renderer does — visible, in the
- * frustum, counting an InstancedMesh as the ONE call it actually is — and
- * attributes every call to the subsystem that owns it, keyed off the nearest
- * named ancestor. The keys are the node names the builders already set, so the
- * report reads as a list of modules, not of meshes.
- */
-const TALLY_DRAW_SOURCES = () => {
-  const g = window.__piratesBR;
-  const THREE = g.renderer.THREE ?? null;
-  const camera = g.renderer.camera;
-  const scene = g.renderer.scene;
-  camera.updateMatrixWorld();
-  scene.updateMatrixWorld();
-
-  // Frustum, built by hand so this needs no THREE import of its own.
-  const m = camera.projectionMatrix.clone().multiply(camera.matrixWorldInverse);
-  const e = m.elements;
-  const planes = [];
-  const push = (a, b, c, d) => {
-    const len = Math.hypot(a, b, c) || 1;
-    planes.push([a / len, b / len, c / len, d / len]);
-  };
-  push(e[3] - e[0], e[7] - e[4], e[11] - e[8], e[15] - e[12]);
-  push(e[3] + e[0], e[7] + e[4], e[11] + e[8], e[15] + e[12]);
-  push(e[3] + e[1], e[7] + e[5], e[11] + e[9], e[15] + e[13]);
-  push(e[3] - e[1], e[7] - e[5], e[11] - e[9], e[15] - e[13]);
-  push(e[3] - e[2], e[7] - e[6], e[11] - e[10], e[15] - e[14]);
-  push(e[3] + e[2], e[7] + e[6], e[11] + e[10], e[15] + e[14]);
-
-  const bucketFor = (node) => {
-    // Nearest ancestor (including self) carrying a name a builder chose.
-    for (let c = node; c; c = c.parent) {
-      const n = c.name;
-      if (!n) continue;
-      if (n.startsWith('island-') && n !== 'island-detail-root') return n;
-      if (n.startsWith('waterfall-')) return 'waterfall';
-      if (n.startsWith('cave')) return 'cave';
-      if (n.startsWith('ship') || n.startsWith('hull')) return 'ship';
-      if (n.startsWith('sea-rock')) return 'sea-rock';
-      if (n === 'environment') break;
-    }
-    for (let c = node; c; c = c.parent) {
-      if (c.parent === scene) return c.name || '(scene child)';
-    }
-    return '(unnamed)';
-  };
-
-  const tally = {};
-  const inFrustum = (mesh) => {
-    const geo = mesh.geometry;
-    if (!geo) return true;
-    if (!geo.boundingSphere) geo.computeBoundingSphere();
-    const bs = geo.boundingSphere;
-    if (!bs) return true;
-    const c = bs.center.clone().applyMatrix4(mesh.matrixWorld);
-    const s = mesh.matrixWorld;
-    const el = s.elements;
-    const scale = Math.sqrt(Math.max(
-      el[0] * el[0] + el[1] * el[1] + el[2] * el[2],
-      el[4] * el[4] + el[5] * el[5] + el[6] * el[6],
-      el[8] * el[8] + el[9] * el[9] + el[10] * el[10],
-    ));
-    const r = bs.radius * scale;
-    for (const p of planes) {
-      if (p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] < -r) return false;
-    }
-    return true;
-  };
-
-  const walk = (node) => {
-    if (!node.visible) return;
-    if ((node.isMesh || node.isPoints || node.isLine || node.isSprite)) {
-      const drawn = node.frustumCulled === false || inFrustum(node);
-      if (drawn) {
-        const groups = node.geometry?.groups ?? [];
-        // A multi-material mesh is one call per group; everything else is one.
-        const calls = Array.isArray(node.material) && groups.length > 0 ? groups.length : 1;
-        const key = bucketFor(node);
-        const t = (tally[key] ??= { calls: 0, meshes: 0 });
-        t.calls += calls;
-        t.meshes += 1;
-      }
-    }
-    for (const child of node.children) walk(child);
-  };
-  walk(scene);
-  void THREE;
-
-  return Object.entries(tally)
-    .map(([source, v]) => ({ source, calls: v.calls, meshes: v.meshes }))
-    .sort((a, b) => b.calls - a.calls);
-};
-
-function planWaterfallDeck(w) {
-  // Stand off the fall at deck height, framed the way a player approaching under
-  // sail sees it: 150m out, eye ~6m above the water, looking straight at the site.
-  const sx = w.x + w.siteLocalX;
-  const sz = w.z + w.siteLocalZ;
-  const len = Math.hypot(sx - w.x, sz - w.z) || 1;
-  const ux = (sx - w.x) / len;
-  const uz = (sz - w.z) / len;
-  const stand = w.radius + 150;
-  return {
-    x: w.x + ux * stand,
-    y: 6,
-    z: w.z + uz * stand,
-    yaw: 0,
-    pitch: -0.03,
-    aimAt: { x: sx, z: sz },
-  };
 }
 
 const CENSUS_SCENES = [
@@ -298,10 +133,21 @@ async function main() {
 
         if (!tier) {
           tier = await page.evaluate(READ_CLIENT_TIER);
-          console.log('\n  client tier (unpinned, as this machine would run it):');
+          // …and what the DETECTOR would have said with nothing pinning it. The
+          // session above passes ?quality= on purpose (a budget graded at
+          // whatever tier the runner earns is not a budget), which is exactly
+          // why the tier it reports says nothing about auto-detection. Asking
+          // the module directly is the only reading that does.
+          tier.auto = await page.evaluate(READ_AUTO_TIER).catch(() => null);
+          console.log('\n  client tier (as measured, PINNED by the session URL):');
           console.log(`    quality=${tier.quality}  devicePixelRatio=${tier.devicePixelRatio}  running dPR=${tier.rendererPixelRatio}`);
           console.log(`    min/max dPR=${tier.minPixelRatio}/${tier.maxPixelRatio}  shadows=${tier.shadowsEnabled}`);
           console.log(`    cores=${tier.hardwareConcurrency} deviceMemory=${tier.deviceMemory} cssPixels=${tier.cssPixels} fragments/frame=${tier.fragments}`);
+          if (tier.auto) {
+            console.log('  auto tier (what a PLAYER opening this build on this machine gets):');
+            console.log(`    quality=${tier.auto.quality}  because=${tier.auto.reason}  gpu=${tier.auto.rendererString ?? '(masked)'}`);
+            console.log(`    air-class=${tier.auto.airClass}  stored=${tier.auto.storedPreference}  auditionCeiling=${tier.auto.auditionCeiling ?? 'none'}`);
+          }
         }
 
         await page.evaluate(() => window.__piratesBR.setBotPeace(true));
