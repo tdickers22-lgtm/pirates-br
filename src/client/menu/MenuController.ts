@@ -6,6 +6,10 @@ import type { NetworkClient } from '../network/NetworkClient.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
 import { openOnboardingCards } from '../ui/OnboardingCards.js';
+import {
+  decideRenderQuality, loadQualityPreference, saveAutoTierCeiling, saveQualityPreference,
+  type QualityPreference,
+} from '../rendering/QualityPreference.js';
 
 const STORAGE_KEY = 'piratesBR.name';
 const SETTINGS_KEY = 'piratesBR.settings';
@@ -56,6 +60,8 @@ export class MenuController {
   private settingsMuteCheckbox!: HTMLInputElement;
   private settingsSensSlider!: HTMLInputElement;
   private settingsSensVal!: HTMLElement;
+  private settingsQualitySelect!: HTMLSelectElement;
+  private settingsQualityNote!: HTMLElement;
   private nameInput!: HTMLInputElement;
   private playBtn!: HTMLButtonElement;
   private soloBtn!: HTMLButtonElement;
@@ -171,6 +177,8 @@ export class MenuController {
     this.settingsMuteCheckbox = this.must<HTMLInputElement>('settings-mute');
     this.settingsSensSlider = this.must<HTMLInputElement>('settings-sensitivity');
     this.settingsSensVal = this.must('settings-sensitivity-val');
+    this.settingsQualitySelect = this.must<HTMLSelectElement>('settings-quality');
+    this.settingsQualityNote = this.must('settings-quality-note');
 
     this.endmatchScreen = this.must('endmatch-screen');
     this.endmatchTitle = this.must('endmatch-title');
@@ -491,6 +499,19 @@ export class MenuController {
       this.persistSettings({ sensitivity: sens });
     });
 
+    // GRAPHICS TIER. The renderer reads this at construction, so a change here
+    // lands on the next load rather than this one — say so, plainly, instead of
+    // letting the player toggle it and conclude nothing happened. Choosing a
+    // tier explicitly also clears the audition's remembered ceiling: the player
+    // has overruled the detector, and a floor left behind would keep overruling
+    // them back.
+    this.settingsQualitySelect.addEventListener('change', () => {
+      const value = this.settingsQualitySelect.value as QualityPreference;
+      saveQualityPreference(value);
+      if (value !== 'auto') saveAutoTierCeiling(null);
+      this.renderQualityNote(true);
+    });
+
     // End match
     this.endmatchReturnBtn.addEventListener('click', () => {
       this.network.returnToMenu();
@@ -629,6 +650,31 @@ export class MenuController {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged)); } catch {}
   }
 
+  /** What Auto decided and why — and, once the player changes it, that the new
+   *  tier takes effect on the next load. */
+  /** The verdict as it was when the page LOADED — which is the tier the renderer
+   *  actually built itself with. Re-deciding after the player picks a new one
+   *  would report the choice back to them as if it were already running. */
+  private readonly bootQualityVerdict = decideRenderQuality();
+
+  private renderQualityNote(justChanged: boolean): void {
+    const verdict = this.bootQualityVerdict;
+    const why: Record<string, string> = {
+      player: 'your choice',
+      url: 'set by ?quality=',
+      'air-class-gpu': `${verdict.rendererString ?? 'Apple silicon'} — Air class, no fan to spare`,
+      'few-cores': 'few CPU cores',
+      'low-memory': 'limited device memory',
+      'huge-viewport': 'a very large window on a modest machine',
+      audition: 'this machine could not hold a higher tier last session',
+      default: 'detected hardware',
+    };
+    const detail = why[verdict.reason] ?? 'detected hardware';
+    this.settingsQualityNote.textContent = justChanged
+      ? `Takes effect next time you load the game. (Currently running: ${verdict.quality} — ${detail}.)`
+      : `Running: ${verdict.quality} — ${detail}.`;
+  }
+
   private applyPersistedSettings(): void {
     const s = this.loadSettings();
     this.settingsVolumeSlider.value = String(Math.round(s.volume * 100));
@@ -636,6 +682,8 @@ export class MenuController {
     this.settingsMuteCheckbox.checked = s.muted;
     this.settingsSensSlider.value = String(Math.round(s.sensitivity * 100));
     this.settingsSensVal.textContent = s.sensitivity.toFixed(2) + '×';
+    this.settingsQualitySelect.value = loadQualityPreference();
+    this.renderQualityNote(false);
     this.audio.setVolume(s.volume);
     this.audio.setMuted(s.muted);
     this.inputMgr?.setSensitivity(s.sensitivity);

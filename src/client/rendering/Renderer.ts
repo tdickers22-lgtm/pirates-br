@@ -3,8 +3,47 @@ import { PostFx } from './PostFx.js';
 import { initLightBudget, updateLightBudget } from './LightBudget.js';
 import { freezeStaticParent } from './three-util.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
+import { decideRenderQuality, saveAutoTierCeiling, tierBelow, type QualityVerdict, type RenderQuality } from './QualityPreference.js';
 
-export type RenderQuality = 'low' | 'balanced' | 'high';
+export type { RenderQuality };
+
+/**
+ * THE PIXEL-RATIO CEILING, per tier.
+ *
+ * This is the single most expensive number in the client and the least visible
+ * one. A Retina panel reports devicePixelRatio 2, and a ratio of 2 is FOUR
+ * TIMES the fragments of 1.0 — every fragment of every overdrawn water sheet,
+ * every foliage alpha-test, the whole post chain, four times over, for a
+ * sharpness difference that on a 224 ppi panel at arm's length is most of the
+ * way to invisible. 'high' used to be allowed 1.75 (3.1x the fragments of 1.0)
+ * and the machine spent the session ratcheting back down from it while macOS's
+ * compositor fought for the same GPU.
+ *
+ * 1.25 is 1.56x — still visibly crisper than 1.0, and 49% cheaper per frame
+ * than 1.75 was. The runtime scaler still moves BELOW these; nothing here stops
+ * a good machine from looking good, it stops every machine from opening at a
+ * ceiling only a workstation can hold.
+ */
+const MAX_PIXEL_RATIO: Record<RenderQuality, number> = {
+  // Under 1.0 on purpose and unchanged: 'low' has always rendered below native
+  // and let the upscale carry it. Raising it to 1.0 in the name of "capping" it
+  // would make the cheapest tier more expensive, which is backwards.
+  low: 0.62,
+  balanced: 1.15,
+  high: 1.25,
+};
+
+/** Sky dome tessellation per tier — segments, not a cost anyone reads as
+ *  quality. See the dome construction below for why the count is not cosmetic;
+ *  the short version is that the crease it hides is an artefact of the ramp's
+ *  DERIVATIVE, and how coarse you can go before it shows scales with how much
+ *  else is on screen. 'low' has always had 48x24 (~2.3k tris); 'high' pays 96x48
+ *  (~9.2k) for a dome drawn once with depth-test off, and 'balanced' splits it. */
+const SKY_SEGMENTS: Record<RenderQuality, { width: number; height: number }> = {
+  low: { width: 48, height: 24 },
+  balanced: { width: 64, height: 32 },
+  high: { width: 96, height: 48 },
+};
 
 const DAY_NIGHT_CYCLE_SECONDS = 960; // slower cycle: dusk is a scene, not a flash
 const DAY_NIGHT_START_OFFSET = 0.47;
@@ -375,11 +414,10 @@ export class Renderer {
   private twilightAmount = 0;
   private nightAmount = 0;
   private stormLevel = 0;
-  private readonly quality = detectRenderQuality();
+  private readonly qualityVerdict: QualityVerdict = decideRenderQuality();
+  private readonly quality = this.qualityVerdict.quality;
   private readonly minPixelRatio = this.quality === 'low' ? 0.44 : this.quality === 'balanced' ? 0.58 : 0.8;
-  private readonly maxPixelRatio = this.quality === 'low'
-    ? 0.62
-    : Math.min(window.devicePixelRatio || 1, this.quality === 'balanced' ? 1.5 : 1.75);
+  private readonly maxPixelRatio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO[this.quality]);
   private currentPixelRatio = 1;
   private readonly baseShadowMapSize = this.quality === 'high' ? 4096 : 2048;
   private postFx: PostFx | null = null;
@@ -461,7 +499,8 @@ export class Renderer {
     // loudest. At 96x48 the rings are 3.75 degrees apart, the angular error
     // inside a quad drops by ~23x, and the crease falls under a quantisation
     // step. It costs ~9k triangles on a dome drawn once, depth-test off.
-    const skyGeo = new THREE.SphereGeometry(2800, this.quality === 'low' ? 48 : 96, this.quality === 'low' ? 24 : 48);
+    const skySegments = SKY_SEGMENTS[this.quality];
+    const skyGeo = new THREE.SphereGeometry(2800, skySegments.width, skySegments.height);
     this.skyMaterial = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
@@ -579,6 +618,13 @@ export class Renderer {
     return this.quality;
   }
 
+  /** The tier AND the signal that chose it, so the settings panel can say
+   *  "Auto (low — Apple M2, Air class)" instead of leaving the player to guess
+   *  why their machine looks the way it does. */
+  getQualityVerdict(): QualityVerdict {
+    return this.qualityVerdict;
+  }
+
   getEffectScale(): number {
     return this.quality === 'low' ? 0.48 : this.quality === 'balanced' ? 0.72 : 1;
   }
@@ -599,6 +645,7 @@ export class Renderer {
     this.perfTimer = 0;
     this.perfFrameTime = 0;
     this.perfFrameCount = 0;
+    this.auditionTier(avgFps);
 
     if (avgFps < 47 || this.smoothFrameTime > 1 / 42) {
       this.recoverTimer = 0;
@@ -647,6 +694,67 @@ export class Renderer {
       this.distressRecoverTimer = Math.max(0, this.distressRecoverTimer - 1.15);
     }
   }
+
+  /**
+   * THE STARTUP MICRO-BENCHMARK, run on real frames instead of a synthetic one.
+   *
+   * Auto-detection's good signal is the GPU's own name, and a browser that masks
+   * WEBGL_debug_renderer_info leaves it with a core count — the one number that
+   * cannot tell a fanless Air from a desktop. So the client also listens to the
+   * frames it is actually producing: skip the first stretch (the world is still
+   * streaming in and every machine looks bad), then judge a few seconds of
+   * settled play. A machine that averages below AUDITION_FPS across that window
+   * is not having a rough moment, it is on the wrong tier.
+   *
+   * The verdict is written for the NEXT launch rather than applied now on
+   * purpose. The tier decides the shadow-map size, the sky dome's segment count
+   * and the material set every island was built with; changing it mid-session
+   * would re-link programs and rebuild geometry at exactly the moment the
+   * machine has proven it has nothing to spare. The runtime distress ladder
+   * already covers right now, and it is what carries this session.
+   *
+   * Never runs under an explicit ?quality= — every probe and suite in this repo
+   * pins the tier, and an audition that wrote a floor from a SwiftShader run
+   * would silently re-tier every measurement that followed it.
+   */
+  private auditionTier(avgFps: number) {
+    if (this.auditionDone) return;
+    if (this.qualityVerdict.reason === 'url' || this.qualityVerdict.reason === 'player') {
+      this.auditionDone = true;
+      return;
+    }
+    this.auditionElapsed += 1.15;
+    if (this.auditionElapsed < Renderer.AUDITION_SKIP_SECONDS) return;
+    this.auditionFpsSum += avgFps;
+    this.auditionSamples += 1;
+    if (this.auditionElapsed < Renderer.AUDITION_SKIP_SECONDS + Renderer.AUDITION_WINDOW_SECONDS) return;
+
+    this.auditionDone = true;
+    const mean = this.auditionFpsSum / Math.max(1, this.auditionSamples);
+    if (mean >= Renderer.AUDITION_FPS) return;
+    const below = tierBelow(this.quality);
+    if (!below) return;
+    saveAutoTierCeiling(below);
+    console.info(
+      `[quality] audition: ${mean.toFixed(1)}fps on '${this.quality}' — next launch opens on '${below}'. `
+      + 'Override in Settings → Graphics.',
+    );
+  }
+
+  /** Seconds of play ignored before the audition starts counting — the world is
+   *  still streaming in and every machine looks bad through it. */
+  private static readonly AUDITION_SKIP_SECONDS = 6;
+  /** …and how long it then listens. Roughly the "3s micro-benchmark" idea, but
+   *  spent on frames the player was going to render anyway. */
+  private static readonly AUDITION_WINDOW_SECONDS = 4.6;
+  /** Below this mean, over that window, the tier is simply wrong. Well under the
+   *  47fps the resolution scaler chases: this must not fire on a machine that is
+   *  merely being asked to turn its resolution down. */
+  private static readonly AUDITION_FPS = 34;
+  private auditionElapsed = 0;
+  private auditionFpsSum = 0;
+  private auditionSamples = 0;
+  private auditionDone = false;
 
   /** How far the resolution scaler may drop right now. Each distress step
    *  unlocks more headroom below the tier's nominal floor. */
@@ -1009,21 +1117,3 @@ function positiveModulo(value: number, divisor: number) {
   return ((value % divisor) + divisor) % divisor;
 }
 
-function detectRenderQuality(): RenderQuality {
-  const param = new URLSearchParams(window.location.search).get('quality');
-  if (param === 'low' || param === 'balanced' || param === 'high') return param;
-
-  const nav = navigator as Navigator & { deviceMemory?: number };
-  const cores = nav.hardwareConcurrency ?? 4;
-  const memory = nav.deviceMemory;
-  const memoryLimited = typeof memory === 'number' && memory <= 4;
-  const memoryStrong = typeof memory === 'number' ? memory >= 8 : true;
-  // Judge on CSS pixels: the adaptive pixel-ratio scaler owns the actual
-  // output resolution, so a HiDPI screen must not permanently veto 'high'
-  // (every Retina Mac was stuck on 'balanced' forever).
-  const cssPixels = window.innerWidth * window.innerHeight;
-
-  if (cores <= 4 || memoryLimited || (cssPixels > 3_400_000 && cores <= 6)) return 'low';
-  if (cores >= 8 && memoryStrong && cssPixels <= 2_600_000) return 'high';
-  return 'balanced';
-}
