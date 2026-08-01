@@ -35,7 +35,11 @@ import { dirname } from 'node:path';
 const argv = process.argv.slice(2);
 const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 
-const URL = arg('url', 'http://127.0.0.1:8090').replace(/\/$/, '');
+// :8090 is the lobby server, and it serves the LAST BUILD out of dist/client —
+// which on this branch was six days stale, so a probe pointed there profiled a
+// bundle nobody was editing. Vite serves the working tree; default there, and
+// keep --url for deliberately profiling a production build.
+const URL = arg('url', process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
 const MINUTES = parseFloat(arg('minutes', '4'));
 const QUALITY = arg('quality', 'balanced');
 const SAMPLE_MS = parseInt(arg('sample', '5000'), 10);

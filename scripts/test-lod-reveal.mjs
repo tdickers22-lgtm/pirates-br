@@ -16,12 +16,20 @@
 // Free-cam steps in from 1000m to 400m off each island's EDGE, three times
 // over, and records the worst rAF gap parked at each waypoint.
 //
-// Needs the dev stack (game server on 8090).
+// Needs the dev stack (vite 3000 + game server 8090).
 //   node scripts/test-lod-reveal.mjs
+//
+// ORIGIN. This suite was written against :8090, and :8090 is the LOBBY server —
+// it serves `dist/client`, a bundle only as fresh as the last `npm run build`.
+// The checked-in one was six days and a whole content wave old, so the suite
+// graded code that did not contain the mechanism it exists to prove and failed
+// with a straight face. Every other browser suite in the repo reads
+// PIRATES_BR_URL and points at vite, which serves the working tree; this one now
+// does too. The guard below makes the mistake impossible to repeat quietly.
 import { chromium } from 'playwright';
 import { browserArgs, describeGl } from './lib/browser-args.mjs';
 
-const URL = (process.env.PIRATES_BR_GAME_URL ?? 'http://127.0.0.1:8090').replace(/\/$/, '');
+const URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
 const VIEWPORT = { width: 960, height: 540 };
 /** Pass-1 stall allowed against the same waypoint's pass-3 stall. */
 const RATIO_LIMIT = 2.0;
@@ -87,6 +95,16 @@ try {
   await page.waitForSelector('#menu-solo-btn', { timeout: 60_000 });
   await page.click('#menu-solo-btn', { noWaitAfter: true });
   await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', undefined, { timeout: 180_000 });
+  // Refuse to grade a client that has no warmer in it. Without this the suite
+  // measures whatever the origin happens to serve and reports the verdict as if
+  // it were about the working tree.
+  const hasWarmer = await page.evaluate(() => !!window.__piratesBR?.lodWarmer);
+  if (!hasWarmer) {
+    throw new Error(
+      `${URL} serves a client with no lodWarmer — this is a stale or pre-fix bundle, `
+      + 'not the working tree. Point PIRATES_BR_URL at the vite dev server.',
+    );
+  }
   // Every island GROUP exists after this, so what follows is first-DRAW cost,
   // never first-build cost.
   await page.waitForFunction(() => window.__piratesBR?.getWorldBuildBacklog?.() === 0, undefined, { timeout: 120_000 });
