@@ -40,14 +40,24 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { chromium } from 'playwright';
-import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene } from './perf-probe.mjs';
+import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene, sessionQuery, SERVER_PORT } from './perf-probe.mjs';
 import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 import {
   FIND_WATERFALL_ISLAND, planWaterfallDeck, planWreckScene, TALLY_DRAW_SOURCES,
 } from './lib/perf-scenes.mjs';
 
 const ROOT_URL = process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000/';
-const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? 'http://127.0.0.1:8090/health';
+/**
+ * PIRATES_BR_SERVER_PORT is how this gate runs BESIDE a live match instead of
+ * refusing to. A server somebody else started rolls a world these ceilings were
+ * not measured on, and the check below rightly fails on it — but the only
+ * remedies were "stop their game" or "grade nothing". Naming a port here makes
+ * the runner stand up its own pinned server there, join it through the client's
+ * `?server=` override, and leave :8090 alone. The health URL follows the port so
+ * the two can never disagree about which server is being graded.
+ */
+const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL
+  ?? `http://127.0.0.1:${SERVER_PORT ?? '8090'}/health`;
 const READY_TIMEOUT_MS = 45_000;
 const VIEWPORT = { width: 960, height: 540 };
 
@@ -237,6 +247,9 @@ function startNpmScript(scriptName) {
       PIRATES_WRECK_SEC: String(WRECK_RAISE_SEC),
       // …and the same map every run. See MAP_SEED.
       PIRATES_BR_MAP_SEED: MAP_SEED,
+      // …on its own port when one was named, so a graded run does not have to
+      // evict the person playing on :8090.
+      ...(SERVER_PORT ? { PORT: String(SERVER_PORT) } : {}),
     },
   });
   return { child, scriptName };
@@ -262,7 +275,10 @@ async function measureTier(browser, quality, { wantWreck }) {
   page.on('pageerror', (e) => errors.push(e.message));
   const results = {};
   try {
-    await page.goto(`${ROOT_URL.replace(/\/$/, '')}/?debug&quality=${quality}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(
+      `${ROOT_URL.replace(/\/$/, '')}/?${sessionQuery(['debug', `quality=${quality}`])}`,
+      { waitUntil: 'domcontentloaded' },
+    );
     await page.waitForSelector('#menu-solo-btn', { timeout: 40_000 });
     await page.click('#menu-solo-btn', { noWaitAfter: true });
     // The options bag is waitForFunction's THIRD argument. Passed as the second

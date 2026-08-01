@@ -33,6 +33,7 @@ import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
 import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MID, shipClassName, weaponDisplayName } from '../ui/DisplayNames.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
+import { apparentDistanceScale, updateInstanceLod, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { HudController, type HudView } from '../ui/HudController.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import {
@@ -3068,6 +3069,10 @@ export class Game {
 
     const quality = this.renderer.getQuality();
     const cam = this.renderer.camera.position;
+    // Apparent distance, once for the whole pass: every instance-count rule
+    // measures how big a thing LOOKS, and raising the spyglass is a player
+    // asking for detail at range. See island/InstanceLod.
+    const lodDistanceScale = apparentDistanceScale(this.renderer.camera.fov ?? 74);
     // Islands are THE landmark visuals: hold full detail out to AAA distances,
     // measured from the island EDGE (footprint radius), not its center — a
     // 200m-radius island's shoreline used to flip to proxy while you stood on it.
@@ -3117,6 +3122,17 @@ export class Game {
         const lodLayers = group.userData.lodLayers as { node: THREE.Object3D; radius: number }[] | undefined;
         if (lodLayers) {
           for (const layer of lodLayers) layer.node.visible = showDetail && edgeDist < layer.radius;
+        }
+        // THE TRIANGLE DIET. Everything above decides what is DRAWN; this
+        // decides how much of it. An island held at full detail out to a
+        // kilometre pays for every half-metre flower patch on it at full
+        // geometry — 53% of the island triangles in a settled cave frame are
+        // these batches — and the only lever the old gate had was to hide the
+        // whole batch. Lowering the instance count instead keeps the hero palms
+        // and drops the scrub, one integer per batch per frame, no re-upload.
+        const instanceBatches = group.userData.instanceLodBatches as InstanceLodBatch[] | undefined;
+        if (instanceBatches && showDetail) {
+          updateInstanceLod(instanceBatches, edgeDist, quality, lodDistanceScale);
         }
         // Cave INTERIOR decor + lights (torch, crystals, stalactites, treasure)
         // reveal within ~45m so the warm glow greets you at the mouth and the

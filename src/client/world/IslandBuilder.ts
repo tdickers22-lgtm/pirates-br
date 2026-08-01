@@ -29,6 +29,7 @@ import { buildBeachDecor, buildCairns, buildInteriorDressing, buildPebbles, buil
 import { buildBridges, buildLookoutPost, buildPirateCamp, buildRopeLadder, buildRuin, buildSecondaryWreck, buildStoneIdols, buildTrails } from './island/Landmarks.js';
 import { buildCliffStrata, buildPeakMist, buildReefRing, buildRockSpires, buildTerraces } from './island/TerrainFeatures.js';
 import { collapseIslandDecor } from './island/StaticBatcher.js';
+import { collectInstanceLodBatches } from './island/InstanceLod.js';
 import { buildWaterfalls } from './island/WaterfallBuilder.js';
 import { buildVolcanicFx } from './island/VolcanicFx.js';
 import { buildProxyTerrainMesh, buildTerrainMesh } from './island/TerrainMeshBuilder.js';
@@ -463,6 +464,11 @@ export class IslandBuilder {
       // Resolve the distance-gated foliage layers ONCE. updateEnvironmentLod runs
       // every frame for every island; looking these up by name there meant four
       // recursive scene-graph walks per island per frame.
+      // …and the instanced batches that thin by COUNT rather than by visibility
+      // (island/InstanceLod). Resolved once, for the same reason: the per-frame
+      // update writes one integer per batch and must never walk a graph to find
+      // out which ones.
+      group.userData.instanceLodBatches = collectInstanceLodBatches(detailRoot);
       group.userData.lodLayers = (['island-grass', 'island-ferns', 'island-shells'] as const)
         .map((name) => ({
           node: detailRoot.getObjectByName(name) ?? null,

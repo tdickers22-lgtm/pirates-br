@@ -16,6 +16,7 @@ import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.
 import type { TerrainBuild } from './TerrainMeshBuilder.js';
 import { ensureMeshGround } from './GroundTruth.js';
 import { queueContactShadow } from './ContactShadows.js';
+import { attachCoverLod, attachInstanceLod } from './InstanceLod.js';
 
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
@@ -240,6 +241,13 @@ export function buildServerProps(ctx: IslandBuildCtx) {
     const merged = instancedTypes.has(type) ? assets.mergedGeometry(type as AssetName) : null;
     if (merged) {
       if (SWAYING_FOLIAGE.has(type)) applyFoliageSway(merged.material, host);
+      // BIGGEST FIRST — the whole of instance-count LOD rests on this line.
+      // Instances of one batch share a buffer and three draws the first `count`
+      // of them, so an ordering by scale is the difference between "lower the
+      // count and lose the scrub" and "lower the count and lose whatever
+      // happened to be at the end of the array". Ties break on the server's own
+      // prop id so the order is identical on every client and every session.
+      list.sort((a, b) => (b.scale - a.scale) || ((a.id ?? 0) - (b.id ?? 0)));
       const inst = new THREE.InstancedMesh(merged.geometry, merged.material, list.length);
       list.forEach((prop, i) => {
         pos.set(
@@ -261,6 +269,12 @@ export function buildServerProps(ctx: IslandBuildCtx) {
       inst.castShadow = !lowDetail;
       inst.receiveShadow = true;
       inst.instanceMatrix.needsUpdate = true;
+      // The asset's own height decides how far each instance stays legible. Read
+      // from the MERGED geometry rather than the GLB scene bounds: it is the
+      // geometry actually being drawn, and it is already in hand here.
+      if (!merged.geometry.boundingBox) merged.geometry.computeBoundingBox();
+      const box = merged.geometry.boundingBox;
+      attachInstanceLod(inst, list.map((prop) => prop.scale), box ? box.max.y - box.min.y : 0);
       group.add(inst);
       continue;
     }
@@ -554,6 +568,7 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     grass.castShadow = false;
     grass.receiveShadow = true;
     grass.name = 'island-grass';
+    attachCoverLod(grass);
     group.add(grass);
 
     // ── Ferns: taller arched fronds in the shaded inner jungle band ──
@@ -613,6 +628,7 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     ferns.castShadow = false;
     ferns.receiveShadow = true;
     ferns.name = 'island-ferns';
+    attachCoverLod(ferns);
     group.add(ferns);
 
     // ── Seashells + starfish flecks on the wet-sand band ──
@@ -649,6 +665,7 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     shells.castShadow = false;
     shells.receiveShadow = true;
     shells.name = 'island-shells';
+    attachCoverLod(shells);
     group.add(shells);
   }
 }

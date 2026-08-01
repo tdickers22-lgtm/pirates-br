@@ -20,7 +20,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import process from 'node:process';
 import { browserArgs, describeGl } from './lib/browser-args.mjs';
-import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene } from './perf-probe.mjs';
+import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene, sessionQuery } from './perf-probe.mjs';
 import { FIND_WATERFALL_ISLAND, planWaterfallDeck } from './lib/perf-scenes.mjs';
 
 const argv = process.argv.slice(2);
@@ -165,7 +165,7 @@ async function main() {
   const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
   try {
     page.on('pageerror', (e) => console.error(`  [pageerror] ${String(e.message).slice(0, 240)}`));
-    await page.goto(`${URL}/?debug&quality=${QUALITY}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${URL}/?${sessionQuery(['debug', `quality=${QUALITY}`])}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#menu-solo-btn', { timeout: 60_000 });
     await page.click('#menu-solo-btn', { noWaitAfter: true });
     await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 240_000 });

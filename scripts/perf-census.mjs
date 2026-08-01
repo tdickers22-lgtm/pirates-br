@@ -23,7 +23,7 @@ import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
-import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene } from './perf-probe.mjs';
+import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene, sessionQuery } from './perf-probe.mjs';
 import {
   READ_CLIENT_TIER, READ_AUTO_TIER, FIND_WATERFALL_ISLAND, planWaterfallDeck, TALLY_DRAW_SOURCES,
 } from './lib/perf-scenes.mjs';
@@ -120,7 +120,7 @@ async function main() {
     // numbers a measurement of the other page.
     const sessions = [...new Set(activeScenes.map((s) => s.session))];
     for (const session of sessions) {
-      const params = SESSION_PARAMS[session].join('&');
+      const params = sessionQuery(SESSION_PARAMS[session]);
       const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
       page.on('pageerror', (e) => console.error(`  [pageerror] ${String(e.message).slice(0, 300)}`));
       page.on('console', (m) => { if (m.type() === 'error') console.error(`  [console] ${m.text().slice(0, 300)}`); });

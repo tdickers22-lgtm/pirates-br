@@ -66,6 +66,26 @@ export const SCENES = [
   { id: 'combat-burst',    session: 'combat', label: 'combat burst (cannon + keg FX)' },
 ];
 
+/**
+ * WHICH GAME SERVER A GRADED RUN JOINS.
+ *
+ * The client picks its socket from the page's own port: any localhost port that
+ * is not :8090 is taken for a dev server and the socket goes to :8090 anyway. So
+ * a second Vite on :3100 does NOT get a second world — it gets the one the
+ * person at the keyboard is playing in, on an unpinned map, and the counts below
+ * describe neither build.
+ *
+ * `?server=NNNN` is the client's own dev override for exactly this. Setting
+ * PIRATES_BR_SERVER_PORT puts it on every session URL, so a graded run can stand
+ * up its OWN server on its OWN port with its OWN pinned seed and measure that,
+ * while a live match on :8090 goes on undisturbed. Unset, nothing changes.
+ */
+export const SERVER_PORT = process.env.PIRATES_BR_SERVER_PORT ?? null;
+const SERVER_PARAMS = SERVER_PORT ? [`server=${SERVER_PORT}`] : [];
+export function sessionQuery(params) {
+  return [...params, ...SERVER_PARAMS].join('&');
+}
+
 const sessionParams = (session) => ({
   main:   ['debug', `quality=${QUALITY}`],
   storm:  ['debug', `quality=${QUALITY}`, 'stormdemo'],
@@ -332,7 +352,7 @@ async function measureScene(page, cam, { warmupMs, captureMs, settle = false }) 
 
 // ─── build sessions ────────────────────────────────────────────
 async function openBuild(browser, url, session) {
-  const params = sessionParams(session).join('&');
+  const params = sessionQuery(sessionParams(session));
   const page = await browser.newPage({ viewport: PARKED, deviceScaleFactor: DPR });
   const cdp = await page.context().newCDPSession(page);
   page.on('pageerror', (e) => console.error(`  [pageerror] ${e.message.slice(0, 200)}`));
