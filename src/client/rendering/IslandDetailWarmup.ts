@@ -45,10 +45,22 @@ import * as THREE from 'three';
  * is amortised by the chunked reveal rather than pre-paid by the warm pass.
  */
 
-/** Meshes whose materials are compiled per frame while warming one island. */
-const WARM_MESHES_PER_CHUNK = 14;
+/** DISTINCT PROGRAMS compiled per frame while warming one island — not meshes.
+ *  A shader link is the unit of cost here and the two counts are nothing alike:
+ *  an island's two hundred rocks share one material and link once, while
+ *  fourteen meshes with fourteen materials are fourteen links on one frame.
+ *  Slicing by mesh count made the warm pass its own burst — measured at 7460ms
+ *  on a single frame at a waypoint OUTSIDE the reveal radius, where the only
+ *  thing running was this compile. Deduplicate to program keys first, then let
+ *  a couple through a frame. */
+const WARM_PROGRAMS_PER_CHUNK = 2;
 /** …and while the start ceremony owns the screen, where a hitch costs nothing. */
-const WARM_MESHES_PER_CHUNK_BOOST = 48;
+const WARM_PROGRAMS_PER_CHUNK_BOOST = 8;
+/** Whatever the count budget says, stop adding once a frame's slice has already
+ *  spent this long. Milliseconds are the only budget that means the same thing
+ *  on a discrete GPU and on a software rasteriser. */
+const WARM_MS_PER_CHUNK = 4;
+const WARM_MS_PER_CHUNK_BOOST = 30;
 /** Textures pushed to the GL driver per warm chunk. */
 const WARM_TEXTURES_PER_CHUNK = 8;
 /** Frames a warm chunk may wait on its compile promise before moving on. */
@@ -97,6 +109,26 @@ function geometryBytes(geometry: THREE.BufferGeometry): number {
   }
   if (geometry.index) bytes += (geometry.index.array as Uint32Array).byteLength;
   return bytes;
+}
+
+/** What makes two meshes want DIFFERENT programs. three builds its cache key
+ *  from the material plus a handful of object/geometry facts that switch shader
+ *  defines on and off, so those have to ride along or a deduplicated warm would
+ *  skip a mesh that genuinely needed its own link. Anything missed here is not a
+ *  correctness bug — it links at draw time exactly as it did before. */
+function warmKey(mesh: THREE.Mesh): string {
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  const geometry = mesh.geometry as THREE.BufferGeometry | undefined;
+  const attributes = geometry?.attributes;
+  const flags = [
+    (mesh as unknown as THREE.InstancedMesh).isInstancedMesh ? 'I' : '',
+    (mesh as unknown as THREE.SkinnedMesh).isSkinnedMesh ? 'S' : '',
+    attributes?.color ? 'C' : '',
+    attributes?.tangent ? 'T' : '',
+    attributes?.uv1 ? 'U' : '',
+    geometry?.morphAttributes && Object.keys(geometry.morphAttributes).length > 0 ? 'M' : '',
+  ].join('');
+  return `${flags}|${materials.map((material) => material?.uuid ?? '-').join(',')}`;
 }
 
 type RevealUnit = {
@@ -253,16 +285,46 @@ export class IslandDetailWarmer {
   reset(): void {
     for (const id of [...this.reveals.keys()]) this.cancelReveal(id);
     this.warmed.clear();
+    this.warmedKeys.clear();
     this.warmQueue.length = 0;
     this.warmJob = null;
   }
 
+  /** Frames where this class itself cost real time, newest last. Two clock
+   *  reads a frame buy the ability to say WHICH half of the mechanism a stall
+   *  came from — without it a long frame during an approach is unattributable
+   *  between the warm compile, the reveal, and the ordinary scene draw. */
+  readonly costLog: { at: number; warmMs: number; revealMs: number; warmId: string | null; warmChunk: number; released: number }[] = [];
+  private static readonly COST_LOG_FLOOR_MS = 8;
+  private static readonly COST_LOG_MAX = 400;
+
   /** Per-frame pump. Call BEFORE the LOD pass so a mesh released this frame is
    *  drawn with this frame's LOD decision, not last frame's. */
   update(): void {
+    const t0 = performance.now();
+    this.releasedThisFrame = 0;
     this.pumpReveals();
+    const t1 = performance.now();
+    this.warmChunkThisFrame = 0;
+    this.warmIdThisFrame = null;
     this.pumpWarm();
+    const t2 = performance.now();
+    if (t2 - t0 >= IslandDetailWarmer.COST_LOG_FLOOR_MS) {
+      if (this.costLog.length >= IslandDetailWarmer.COST_LOG_MAX) this.costLog.shift();
+      this.costLog.push({
+        at: Math.round(t0),
+        warmMs: +(t2 - t1).toFixed(1),
+        revealMs: +(t1 - t0).toFixed(1),
+        warmId: this.warmIdThisFrame,
+        warmChunk: this.warmChunkThisFrame,
+        released: this.releasedThisFrame,
+      });
+    }
   }
+
+  private releasedThisFrame = 0;
+  private warmChunkThisFrame = 0;
+  private warmIdThisFrame: string | null = null;
 
   // ── reveal ────────────────────────────────────────────────────────────
 
@@ -288,6 +350,7 @@ export class IslandDetailWarmer {
         }
         unit.mesh.visible = unit.wasVisible;
         job.cursor += 1;
+        this.releasedThisFrame += 1;
         // Bank the geometry only if this unit is genuinely about to be drawn:
         // a mesh released under a still-hidden tier group has not been uploaded
         // and must not be counted as free next time round.
@@ -329,9 +392,20 @@ export class IslandDetailWarmer {
           if (cursor === next.root) break;
         }
       });
+      // One representative mesh per distinct program key. An island is hundreds
+      // of meshes and a few dozen programs; compiling the meshes compiles the
+      // same program over and over for nothing, and it was the mesh count that
+      // sized the per-frame slice. Materials shared with an island already
+      // warmed are skipped outright — the link is global to the renderer, not
+      // per island, so the second island in a group costs almost nothing.
+      const seen = new Set<string>();
       next.root.traverse((node) => {
         const mesh = node as THREE.Mesh;
-        if (mesh.isMesh && mesh.material && !lightAncestors.has(mesh)) meshes.push(mesh);
+        if (!mesh.isMesh || !mesh.material || lightAncestors.has(mesh)) return;
+        const key = warmKey(mesh);
+        if (seen.has(key) || this.warmedKeys.has(key)) return;
+        seen.add(key);
+        meshes.push(mesh);
       });
       if (meshes.length === 0) {
         this.warmed.add(next.id);
@@ -352,40 +426,43 @@ export class IslandDetailWarmer {
     const { renderer, scene, camera } = this.target();
     // An island already filling in un-warmed is a race the compile has to win:
     // every mesh the reveal lets out ahead of it links its programs at draw
-    // time instead. Compile in the bigger chunks until it is in front.
-    const urgent = this.reveals.has(job.id);
-    const size = this.boosted || urgent ? WARM_MESHES_PER_CHUNK_BOOST : WARM_MESHES_PER_CHUNK;
-    const chunk = job.meshes.slice(job.cursor, job.cursor + size);
-    job.cursor += chunk.length;
-    if (chunk.length === 0) {
+    // time instead. Compile harder until it is in front.
+    const hot = this.boosted || this.reveals.has(job.id);
+    const maxPrograms = hot ? WARM_PROGRAMS_PER_CHUNK_BOOST : WARM_PROGRAMS_PER_CHUNK;
+    const msBudget = hot ? WARM_MS_PER_CHUNK_BOOST : WARM_MS_PER_CHUNK;
+
+    this.textureBudgetThisFrame = WARM_TEXTURES_PER_CHUNK;
+    const startedAt = performance.now();
+    const pending: Promise<unknown>[] = [];
+    let compiled = 0;
+    while (job.cursor < job.meshes.length && compiled < maxPrograms) {
+      const mesh = job.meshes[job.cursor];
+      job.cursor += 1;
+      compiled += 1;
+      this.warmedKeys.add(warmKey(mesh));
+      this.warmTextures(renderer, mesh);
+      const compiling = this.compileOne(renderer, scene, camera, mesh);
+      if (compiling) pending.push(compiling);
+      // The first link always goes through, and then the slice stops the moment
+      // it has spent its milliseconds. One link on a software rasteriser can
+      // outrun the whole budget by itself; it must not drag a second in behind
+      // it, which is precisely how a 4ms slice became a 7460ms frame.
+      if (performance.now() - startedAt >= msBudget) break;
+    }
+    this.warmIdThisFrame = job.id;
+    this.warmChunkThisFrame = compiled;
+    if (compiled === 0) {
       this.warmed.add(job.id);
       this.warmJob = null;
       return;
     }
 
-    this.warmTextures(renderer, chunk);
-
-    this.warmGroup.children = chunk;
-    try {
-      const compileAsync = (renderer as THREE.WebGLRenderer & {
-        compileAsync?: (scene: THREE.Object3D, camera: THREE.Camera, targetScene?: THREE.Scene) => Promise<unknown>;
-      }).compileAsync;
-      if (typeof compileAsync === 'function') {
-        job.waiting = true;
-        const compiling = job;
-        compileAsync.call(renderer, this.warmGroup, camera, scene)
-          .then(() => { if (this.warmJob === compiling) compiling.waiting = false; })
-          .catch(() => { if (this.warmJob === compiling) compiling.waiting = false; });
-      } else {
-        // Older three: the same work, just without the readiness handshake.
-        renderer.compile(this.warmGroup, camera, scene);
-      }
-    } catch {
-      // A material that cannot be compiled here will compile at draw time as it
-      // always did; warming is an optimisation, never a correctness step.
-      job.waiting = false;
-    } finally {
-      this.warmGroup.children = [];
+    if (pending.length > 0) {
+      job.waiting = true;
+      const compilingJob = job;
+      Promise.all(pending)
+        .then(() => { if (this.warmJob === compilingJob) compilingJob.waiting = false; })
+        .catch(() => { if (this.warmJob === compilingJob) compilingJob.waiting = false; });
     }
 
     if (job.cursor >= job.meshes.length && !job.waiting) {
@@ -394,29 +471,59 @@ export class IslandDetailWarmer {
     }
   }
 
-  private warmTextures(renderer: THREE.WebGLRenderer, chunk: THREE.Mesh[]): void {
-    let budget = WARM_TEXTURES_PER_CHUNK;
-    for (const mesh of chunk) {
-      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const material of materials) {
-        if (!material) continue;
-        for (const key of Object.keys(material)) {
-          if (budget <= 0) return;
-          const value = (material as unknown as Record<string, unknown>)[key];
-          const texture = value as THREE.Texture | null;
-          if (!texture || !(texture as THREE.Texture).isTexture) continue;
-          if (this.initedTextures.has(texture)) continue;
-          this.initedTextures.add(texture);
-          budget -= 1;
-          try {
-            renderer.initTexture(texture);
-          } catch {
-            /* a render-target texture has no CPU image to upload; harmless */
-          }
+  /** Compile exactly one mesh's program. Returns the readiness promise when the
+   *  renderer offers one, so the caller can hold the next slice until the driver
+   *  says it is done rather than piling links up behind it. */
+  private compileOne(
+    renderer: THREE.WebGLRenderer,
+    scene: THREE.Scene,
+    camera: THREE.Camera,
+    mesh: THREE.Mesh,
+  ): Promise<unknown> | null {
+    this.warmGroup.children = [mesh];
+    try {
+      const compileAsync = (renderer as THREE.WebGLRenderer & {
+        compileAsync?: (scene: THREE.Object3D, camera: THREE.Camera, targetScene?: THREE.Scene) => Promise<unknown>;
+      }).compileAsync;
+      if (typeof compileAsync === 'function') {
+        return compileAsync.call(renderer, this.warmGroup, camera, scene);
+      }
+      // Older three: the same work, just without the readiness handshake.
+      renderer.compile(this.warmGroup, camera, scene);
+      return null;
+    } catch {
+      // A material that cannot be compiled here will compile at draw time as it
+      // always did; warming is an optimisation, never a correctness step.
+      return null;
+    } finally {
+      this.warmGroup.children = [];
+    }
+  }
+
+  private warmTextures(renderer: THREE.WebGLRenderer, mesh: THREE.Mesh): void {
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) {
+      if (!material) continue;
+      for (const key of Object.keys(material)) {
+        if (this.textureBudgetThisFrame <= 0) return;
+        const value = (material as unknown as Record<string, unknown>)[key];
+        const texture = value as THREE.Texture | null;
+        if (!texture || !(texture as THREE.Texture).isTexture) continue;
+        if (this.initedTextures.has(texture)) continue;
+        this.initedTextures.add(texture);
+        this.textureBudgetThisFrame -= 1;
+        try {
+          renderer.initTexture(texture);
+        } catch {
+          /* a render-target texture has no CPU image to upload; harmless */
         }
       }
     }
   }
 
+  private textureBudgetThisFrame = 0;
   private readonly initedTextures = new WeakSet<THREE.Texture>();
+  /** Program keys already linked, across ALL islands — the renderer's program
+   *  cache is global, so the second island sharing a palette warms for free. */
+  private readonly warmedKeys = new Set<string>();
 }
