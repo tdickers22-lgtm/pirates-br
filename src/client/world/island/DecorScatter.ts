@@ -13,6 +13,7 @@ import { assets } from '../../assets/AssetLibrary.js';
 import type { IslandBuildCtx } from './context.js';
 import { ensureMeshGround, seatOnDrawnGround, snapToDrawnGround } from './GroundTruth.js';
 import { flushContactShadows, queueContactShadow } from './ContactShadows.js';
+import { attachFleckLod } from './InstanceLod.js';
 
 /** Rock outcrops, driftwood logs, bamboo clusters and the beached hull GLB.
  *  (The old client-only boulder/palm scatter is gone: palms and boulders come
@@ -322,6 +323,11 @@ export function buildPebbles(ctx: IslandBuildCtx) {
       pebbles.castShadow = false;
       pebbles.receiveShadow = true;
       pebbles.name = 'island-pebbles';
+      // …and thinned to nothing by ~190m. A 0.2m stone is 0.54 reference pixels
+      // at 300m, and the whole point of the scatter is scale reference at two
+      // metres; carrying it to the detail radius cost 7-11k triangles on every
+      // island in frame. See island/InstanceLod's FLECK ramp.
+      attachFleckLod(pebbles);
       group.add(pebbles);
     }
   }

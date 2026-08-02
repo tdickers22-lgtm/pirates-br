@@ -73,9 +73,12 @@ export type InstanceLodBatch = {
   /** 0..1 phase so no two batch types thin at the same distance. */
   readonly stagger: number;
   /** Which ramp this batch follows. */
-  readonly kind: 'prop' | 'cover';
+  readonly kind: 'prop' | 'cover' | 'fleck';
   /** The count last written, so a hovering camera writes nothing. */
   applied: number;
+  /** True while THIS module is the reason the mesh is invisible. Without it a
+   *  restore would fight the radius gates that hide the same nodes. */
+  hidden: boolean;
 };
 
 type LodMesh = THREE.InstancedMesh & {
@@ -130,6 +133,31 @@ const PROP_DENSITY_RAMP: Record<RenderQuality, readonly (readonly [number, numbe
  * space rather than eating one side of the island.
  */
 const COVER_DENSITY_RAMP: readonly (readonly [number, number])[] = [[90, 1], [180, 0.58], [300, 0.3]];
+
+/**
+ * FLECKS — the scatter that exists to be looked at from two metres.
+ *
+ * `island-pebbles` is a scatter of sub-20cm stones whose own build comment says
+ * what it is for: "the island had NOTHING between 8m props and painted colour; a
+ * scatter of sub-20cm stones gives the eye real scale reference AT 2M". Up to
+ * 1,400 of them per island, thirty-six triangles each, and no gate of any kind —
+ * so the triangle attribution finds them at 7.3k to 11.0k triangles on every
+ * island in frame, out to the full detail radius. On a settled open-sea frame
+ * that is 36k triangles of gravel on five islands whose nearest edge is 470 m.
+ *
+ * At the 74° field this game is measured against, a 0.2 m stone is 1.6 reference
+ * pixels at 100 m, 0.54 at 300 m and 0.18 at 900 m. There is no distance in the
+ * band this ramp covers at which removing one of them is a thing anyone could
+ * see, and past 190 m there is no distance at which drawing one is a thing
+ * anyone could see either — so unlike the cover ramp, this one ends at ZERO.
+ *
+ * Reaching zero rather than a floor is deliberate and it is not the same change
+ * as hiding the batch: the count falls continuously the whole way, so the last
+ * stone leaves on its own frame instead of two hundred leaving on one. And a
+ * batch whose count reaches zero is dropped from the render list outright rather
+ * than submitted empty — see the visibility write in `updateInstanceLod`.
+ */
+const FLECK_DENSITY_RAMP: readonly (readonly [number, number])[] = [[40, 1], [110, 0.5], [190, 0]];
 
 /** Piecewise-linear lookup, flat outside the knots. */
 function rampAt(knots: readonly (readonly [number, number])[], dist: number): number {
@@ -187,20 +215,32 @@ export function attachInstanceLod(
     stagger: staggerFor(mesh.name || 'props'),
     kind: 'prop',
     applied: mesh.count,
+    hidden: false,
   };
 }
 
 /** Register a ground-cover batch: density-only, no pixel rule, steeper ramp. */
 export function attachCoverLod(mesh: THREE.InstancedMesh): void {
+  attachDensityLod(mesh, 'cover');
+}
+
+/** Register a fleck batch — pebbles and the like: density-only, and the only
+ *  ramp here that ends at zero. See FLECK_DENSITY_RAMP. */
+export function attachFleckLod(mesh: THREE.InstancedMesh): void {
+  attachDensityLod(mesh, 'fleck');
+}
+
+function attachDensityLod(mesh: THREE.InstancedMesh, kind: 'cover' | 'fleck'): void {
   if (mesh.count === 0) return;
   (mesh as LodMesh).userData.instanceLod = {
     mesh,
     scales: new Float32Array(0),
     height: 0,
     full: mesh.count,
-    stagger: staggerFor(mesh.name || 'cover'),
-    kind: 'cover',
+    stagger: staggerFor(mesh.name || kind),
+    kind,
     applied: mesh.count,
+    hidden: false,
   };
 }
 
@@ -272,8 +312,9 @@ export function updateInstanceLod(
     // shoreline thickens in several small instalments instead of one.
     const phase = 0.83 + batch.stagger * 0.34;
     let target: number;
-    if (batch.kind === 'cover') {
-      target = Math.ceil(batch.full * rampAt(COVER_DENSITY_RAMP, apparent * phase));
+    if (batch.kind === 'cover' || batch.kind === 'fleck') {
+      const ramp = batch.kind === 'fleck' ? FLECK_DENSITY_RAMP : COVER_DENSITY_RAMP;
+      target = Math.ceil(batch.full * rampAt(ramp, apparent * phase));
     } else {
       const byPixels = countAbovePixelFloor(batch, minPixels * worldPerPixel * phase);
       const byDensity = Math.ceil(batch.full * rampAt(propRamp, apparent * phase));
@@ -281,7 +322,16 @@ export function updateInstanceLod(
     }
     if (target > batch.full) target = batch.full;
     if (target < 0) target = 0;
-    if (target === batch.applied) continue;
+    if (target === batch.applied) {
+      // THE ONE FLAG THAT HAS TO BE RE-ASSERTED. The detail reveal captures each
+      // held mesh's `visible` when it begins and gives it back when the mesh is
+      // let out (IslandDetailWarmup), so a batch thinned to nothing during a
+      // reveal comes back visible with a zero count — and this early-out would
+      // never write it again. It costs a boolean read on batches drawing
+      // nothing, which is the cheapest thing in this loop.
+      if (batch.hidden && batch.mesh.visible) batch.mesh.visible = false;
+      continue;
+    }
     // HYSTERESIS. The endpoints snap (a near island must be exactly whole, an
     // invisible one exactly empty); in between, a change has to be worth 5% of
     // the batch — or two instances, whichever is more — before it is written, so
@@ -290,5 +340,26 @@ export function updateInstanceLod(
     if (target !== 0 && target !== batch.full && Math.abs(target - batch.applied) < deadband) continue;
     batch.applied = target;
     batch.mesh.count = target;
+    // AN EMPTY BATCH IS NOT A FREE BATCH. three's buffer renderer returns before
+    // it draws when the instance count is zero, so the call and its triangles
+    // never reach `renderer.info` — but everything upstream of the draw still
+    // happens: the frustum test, the render-list insert, the sort, and then
+    // setProgram with the material's whole uniform block, which is where
+    // uniformMatrix4fv became the single most expensive symbol in the game.
+    // Taking the batch out of the list is what actually stops paying for it.
+    //
+    // ONLY EVER UNDOING ITS OWN WRITE. `visible` on these nodes is not this
+    // module's property: Game's lodLayers pass hides island-grass, -ferns and
+    // -shells by radius on the same frame, and it runs FIRST. A bare
+    // `visible = target > 0` would put the grass back on a 310 m island every
+    // frame, because the cover ramp floors at 0.3 and never reaches zero. So the
+    // flag is written only to hide a batch this module emptied, and restored
+    // only if this module was the one that hid it.
+    if (target === 0) {
+      if (!batch.hidden) { batch.hidden = true; batch.mesh.visible = false; }
+    } else if (batch.hidden) {
+      batch.hidden = false;
+      batch.mesh.visible = true;
+    }
   }
 }
