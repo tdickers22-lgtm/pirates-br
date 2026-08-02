@@ -493,6 +493,36 @@ export class IslandBuilder {
     // untouched by the freeze.
     freezeStaticSubtree(group);
 
+    // ── The bounding sphere the group-level frustum cull tests ───────────────
+    //
+    // Taken here because here is the only moment it is both correct and cheap:
+    // freezeStaticSubtree has just walked every world matrix in the subtree to
+    // its final value, and nothing under this group will ever move again.
+    //
+    // Box3.setFromObject does NOT honour `visible` (three r160: expandByObject
+    // has no such check), which is what makes it the right tool — the box has to
+    // cover the proxy tier that is hidden right now and the detail tier that
+    // will be hidden later, or the cull would change answer with the LOD. An
+    // InstancedMesh contributes the extent of its instance matrices, so the palm
+    // batches and the portal frames are in it too.
+    //
+    // Padded by 8m on top of the corner-to-corner radius. The padding is not for
+    // the geometry — the box already covers all of it — it is for the things
+    // that leave it after the fact: a geyser's plume, a felled palm mid-topple,
+    // waterfall mist drifting off the cliff. Eight metres is more than any of
+    // them travels, and a sphere that is slightly too big can only cost a few
+    // nodes of traversal, while one that is slightly too small pops an island.
+    {
+      const bounds = new THREE.Box3().setFromObject(group);
+      if (!bounds.isEmpty()) {
+        const centre = bounds.getCenter(new THREE.Vector3());
+        const half = bounds.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+        group.userData.cullSphere = {
+          x: centre.x, y: centre.y, z: centre.z, r: half.length() + 8,
+        };
+      }
+    }
+
     buildChestMeshes(ctx);
 
     buildBarrelMeshes(ctx);

@@ -696,6 +696,26 @@ export class Renderer {
   }
 
   /**
+   * The camera three's shadow pass culls casters against — or null when there
+   * is no shadow pass at all.
+   *
+   * Exposed for ONE caller: the group-level island cull, which turns a whole
+   * island group off when it cannot be in frame. `visible === false` removes a
+   * subtree from the shadow walk exactly as it removes it from the colour walk,
+   * so the only way that cull can be proved not to drop a shadow is to ask the
+   * same question the shadow pass asks. Anything outside this frustum was
+   * already casting nothing.
+   *
+   * The matrices are one frame old — they are written during render(), after
+   * the game loop has done its culling — so the caller pads its test. Over one
+   * frame the focus moves as far as the camera did, which is metres.
+   */
+  getShadowCullCamera(): THREE.Camera | null {
+    if (!this.areShadowsEnabled() || !this.sun?.castShadow) return null;
+    return this.sun.shadow.camera;
+  }
+
+  /**
    * One frame's worth of governing. Called from the game loop with the frame's
    * dt in SECONDS, before render().
    *

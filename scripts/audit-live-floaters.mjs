@@ -227,7 +227,14 @@ const report = await page.evaluate((limit) => {
     for (const root of roots) {
       if (SKIP_NAMES.has(root.name) || SKIP_MATCH.test(root.name)) continue;
       if (root === micro) continue;
-      if (!root.visible) continue;
+      // A BATCH THINNED BY DISTANCE IS STILL A BATCH THIS AUDIT HAS TO READ.
+      // island/InstanceLod lowers an InstancedMesh's `count` by distance and
+      // hides it outright once the count reaches zero, so on a far island the
+      // two lines below would quietly audit a fraction of the props and report
+      // it as a clean island. The batch records the count it was BUILT with;
+      // read that instead, and treat "hidden by the instance LOD" as visible.
+      const lod = root.userData?.instanceLod ?? null;
+      if (!root.visible && !(lod && lod.hidden)) continue;
       const label = root.name || (root.isMesh ? root.geometry.type : root.type);
       const local = (obj) => {
         const wm = obj.matrixWorld.elements.slice();
@@ -242,7 +249,8 @@ const report = await page.evaluate((limit) => {
         if (!bb) continue;
         const wm = local(root);
         const im = root.instanceMatrix.array;
-        for (let i = 0; i < root.count; i++) {
+        const instances = lod ? lod.full : root.count;
+        for (let i = 0; i < instances; i++) {
           items.push({ tag: `${label}#${i}`, ...boxOf(bb, mul(wm, im.slice(i * 16, i * 16 + 16))) });
         }
         continue;

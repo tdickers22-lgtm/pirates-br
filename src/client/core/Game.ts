@@ -383,6 +383,11 @@ export class Game {
   private prevOwnHullTotal = 4;   // sum of local ship hull sections for hit detection
   private prevOwnShipId: string | null = null;
   private readonly tempShakeVec = new THREE.Vector3();
+  /** Scratch for the group-level island cull — allocated once, never in a frame. */
+  private readonly cullFrustum = new THREE.Frustum();
+  private readonly shadowCullFrustum = new THREE.Frustum();
+  private readonly cullMatrix = new THREE.Matrix4();
+  private readonly cullSphere = new THREE.Sphere();
   /** Currently-browsed barrel — renders the side-by-side inventory comparison panel */
   private barrelBrowse: { barrelId: string; loot: ItemStack[]; lastEventAt: number } | null = null;
   private readonly network = new NetworkClient();
@@ -3122,6 +3127,81 @@ export class Game {
     return this.characterPixels(dist) < Game.CHARACTER_MIN_PIXELS;
   }
 
+  /**
+   * ONE SPHERE TEST INSTEAD OF SIX HUNDRED — the group-level island cull.
+   *
+   * three's `projectObject` returns at the first `visible === false` and
+   * otherwise walks every node under it, frustum-testing each drawable's own
+   * bounding sphere. An island group holds 300-650 of them. Turning the GROUP
+   * off when the island cannot be in frame replaces all of that with one test.
+   *
+   * WHAT IT IS ACTUALLY WORTH, measured rather than assumed. The cost model
+   * sized this lever off "the scene graph holds 9,201-9,388 drawables and
+   * projectObject walks all of them", which is a `scene.traverse()` — a count
+   * that includes every node under a hidden detail root, proxy root and micro
+   * tier, none of which three ever visits. The walk three really performs, on
+   * the pinned map at high: 4,526 nodes at the dock vista, 4,079 in the cave,
+   * 1,562 at sea. Of those, the islands WHOLLY outside the frustum account for
+   * 1,095 (24%), 150 (3.7%) and 0. So this is a quarter of the traversal in a
+   * wide vista and nothing at all at sea, not the 70-80% the model projected.
+   * It is kept because twelve sphere tests a frame cannot cost that much.
+   *
+   * TWELVE TESTS, NOT A TREE. The lever was written up as "a spatial structure
+   * so the common case is a handful of tests". There are ten to twelve islands.
+   * A BVH over twelve boxes is the handful of tests, plus a tree to maintain.
+   *
+   * WHY THE CAMERA HAS TO BE THIS FRAME'S. Every other gate in the LOD pass is a
+   * DISTANCE, and a distance is one frame stale by a metre or two. A frustum is
+   * stale by however far the mouse moved, and on a machine at eight frames a
+   * second that is most of a field of view — an island culled against last
+   * frame's forward vector is a hole in this frame's picture. So this runs from
+   * updateScene straight after updateCamera, never from updateEnvironmentLod.
+   *
+   * WHY IT CANNOT DROP A SHADOW. `visible === false` takes a subtree out of the
+   * shadow walk exactly as it takes it out of the colour walk, so an island that
+   * is off screen but casting INTO the screen would lose its shadow. The only
+   * honest guard is the question the shadow pass itself asks: three culls
+   * casters against the shadow camera, so an island outside THAT frustum is
+   * already casting nothing and turning it off changes no pixel. So the test is
+   * two frustums, not one, and the second one is the renderer's own — not a
+   * round number standing in for it. A first cut used "never cull inside 500 m"
+   * and it was both too weak (it kept a 217 m island that is 46 m behind the
+   * shadow box's rear face) and unprovable. At 'low' there is no shadow pass at
+   * all and the second test is skipped.
+   *
+   * The shadow camera's matrices are written during render(), so they are one
+   * frame old here; the island sphere is padded by SHADOW_CULL_PAD to cover the
+   * frame of camera motion between the two, which is metres.
+   */
+  private static readonly SHADOW_CULL_PAD = 40;
+
+  private cullIslandGroups() {
+    if (!this.state) return;
+    const camera = this.renderer.camera;
+    camera.updateMatrixWorld();
+    this.cullMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this.cullFrustum.setFromProjectionMatrix(this.cullMatrix);
+    const shadowCamera = this.renderer.getShadowCullCamera();
+    if (shadowCamera) {
+      this.cullMatrix.multiplyMatrices(shadowCamera.projectionMatrix, shadowCamera.matrixWorldInverse);
+      this.shadowCullFrustum.setFromProjectionMatrix(this.cullMatrix);
+    }
+    for (const island of this.state.islands) {
+      const group = this.islandMeshes.get(island.id);
+      if (!group) continue;
+      const sphere = group.userData.cullSphere as { x: number; y: number; z: number; r: number } | undefined;
+      if (!sphere) continue;
+      this.cullSphere.center.set(sphere.x, sphere.y, sphere.z);
+      this.cullSphere.radius = sphere.r;
+      let keep = this.cullFrustum.intersectsSphere(this.cullSphere);
+      if (!keep && shadowCamera) {
+        this.cullSphere.radius = sphere.r + Game.SHADOW_CULL_PAD;
+        keep = this.shadowCullFrustum.intersectsSphere(this.cullSphere);
+      }
+      group.visible = keep;
+    }
+  }
+
   private updateEnvironmentLod() {
     if (!this.state) return;
 
@@ -3529,6 +3609,9 @@ export class Game {
     this.updateDroppedWeapons(dt);
     this.syncProjectiles(dt);
     this.updateCamera();
+    // The camera is final for this frame; the group-level island cull is the one
+    // gate that cannot read a stale one. See cullIslandGroups.
+    this.cullIslandGroups();
     this.updateWaterEnvironment();
     this.updateOwnShipObjective();
     this.hud.updateCombatHud(dt);
@@ -5212,6 +5295,7 @@ export class Game {
     // camera until the next frame's updateCamera — so settling straight after
     // enableFreeCam would settle the view the probe just left.
     this.updateCamera();
+    this.cullIslandGroups();
     for (let i = 0; i < passes; i++) {
       openFirstDrawBudgetForSettle();
       this.updateEnvironmentLod();
