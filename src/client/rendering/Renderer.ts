@@ -871,13 +871,6 @@ export class Renderer {
     this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
   }
 
-  /** 0 = nothing given away, 1 = every runtime lever spent. The old two-rung
-   *  distress ladder's diagnostic, re-expressed on the continuous scalar so the
-   *  probes that read it keep meaning the same thing. */
-  getDistressLevel(): number {
-    return 1 - this.governor.getScalar();
-  }
-
   /** 0 = dry, 1 = full downpour. Couples falling-rain density into the
    *  atmosphere so distance reads WET, not merely dark. */
   setRainMist(amount: number) {

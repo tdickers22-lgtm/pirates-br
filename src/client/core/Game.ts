@@ -3042,9 +3042,20 @@ export class Game {
         ].join(' | ')
       : 'ship none';
 
+    // The governor's own line. The panel above it prints the tier and the dpr,
+    // which between them cannot say WHY either of them is what it is — the
+    // scalar, the mode and the median it is being judged against can.
+    const gov = this.renderer.getGovernorStatus();
+    const governorLine = gov.enabled
+      ? `governor ${gov.mode} @${gov.targetFps}fps | q ${gov.scalar.toFixed(2)} `
+        + `| med ${gov.medianMs.toFixed(1)}ms p95 ${gov.p95Ms.toFixed(1)}ms `
+        + `| shadow ${gov.shadowMapSize || 'off'} | stream ${this.renderer.getFrameBudgetScale().toFixed(2)}x`
+      : 'governor off (quality pinned)';
+
     this.debugPerfPanel.textContent = [
       'Pirates BR debug',
       `fps ${this.debugFps.toFixed(0)} | worst ${worstFrame.toFixed(1)}ms | quality ${this.renderer.getQuality()} | dpr ${this.renderer.renderer.getPixelRatio().toFixed(2)}`,
+      governorLine,
       `draw ${info.render.calls} | tris ${info.render.triangles} | geom ${info.memory.geometries} | tex ${info.memory.textures}`,
       stateLine,
       playerLine,
