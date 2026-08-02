@@ -48,7 +48,7 @@ Two things about the working tree these numbers describe:
 
 ## 1. The five findings
 
-1. **The low tier buys geometry. It does not buy fill.** `low` draws 2.7–6.5× fewer
+1. **The low tier buys geometry. It does not buy fill.** `low` draws 2.6–6.6× fewer
    calls and 3.4–7.6× fewer triangles than `high` — and shades the screen the *same
    number of times*: dock-vista 1.94 vs 1.94 layers, storm 2.37 vs 2.40, the worst
    case 2.30 vs 2.35, combat 2.54 vs 2.62. On a fanless integrated GPU, which is short
@@ -59,7 +59,7 @@ Two things about the working tree these numbers describe:
    it.** Built with `depthTest: false, depthWrite: false, renderOrder: -1`, it reads
    **exactly 1.000 layers over 100.0% of the framebuffer in all nine scenes at both
    tiers** — 518,400 fragments of a procedural sky shader every frame, most of them
-   under ocean, terrain or a hull. It is 38–62% of everything the main pass shades.
+   under ocean, terrain or a hull. It is 34–62% of everything the main pass shades.
 3. **The 4096×4096 shadow map is the largest single fill item in the game.** It covers
    a 310 m box — 7.6 cm per texel — and costs **16,777,216 texels of clear plus 201–561
    draws and 223–450k triangles of depth-only rasterisation, every frame**. That is
@@ -554,7 +554,7 @@ shading. Use the analytic law above; see §9.
 
 | | `high` → `low` |
 |---|---|
-| draws | ÷2.7 to ÷6.5 |
+| draws | ÷2.6 to ÷6.6 |
 | triangles | ÷3.4 to ÷7.6 |
 | programs | ÷1.8 to ÷2.6 |
 | geometry bytes | ÷1.17 |
@@ -633,7 +633,7 @@ hitch is what the player feels and a millisecond of steady cost is not.
 |--:|---|---|--:|--:|---|
 | **1** | **Warm every program the tier can reach, before the match — and cut the program count** (105–155 at `high`, 58–63 at `low`). Eleven of the twelve worst hitches are `getUniforms → replaceLightNums`, three r160's deferred first-use link, being taken *during play*. `ProgramWarmup.ts` fixes the load case; nothing fixes the walk-round-a-corner case | 45 hitches / 37.6 s of a 150 s capture → 0; worst single hitch 4,672 ms | **the biggest single win available**; on the GPU path the repo's own figure for one link is 1,366–1,782 ms | same class, ~60% fewer programs to warm | none |
 | **2** | **Batch `island-decor`** — the #1 or #2 draw source in *every one of the nine scenes*, 247–668 calls. It is already instanced (227–290 instances in frame), so these are many `InstancedMesh` objects — one per prop type per island — not many props | −200 to −600 draw calls; triangles unchanged | **1.0 – 3.0 ms** (draw submission is 43% of all hitched time) | **0.6 – 1.5 ms** | **none** — identical geometry |
-| **3** | **Cull the scene graph at the group level.** The scene holds **9,185 drawables**; three's `projectObject` walks every one of them per frame, and the shadow pass walks them again. Render traversal is 120 hitches and 15% of hitched time | −70–80% of the per-frame traversal if islands out of the frustum have their detail roots hidden rather than per-mesh culled | **0.5 – 1.5 ms** | **0.5 – 1.5 ms** | none |
+| **3** | **Cull the scene graph at the group level.** The scene holds **9,201–9,388 drawables**; three's `projectObject` walks every one of them per frame, and the shadow pass walks them again. Render traversal is 120 hitches and 15% of hitched time | −70–80% of the per-frame traversal if islands out of the frustum have their detail roots hidden rather than per-mesh culled | **0.5 – 1.5 ms** | **0.5 – 1.5 ms** | none |
 | **4** | **Shadow map 4096² → 1536²**, and skip the pass when the ortho box has no casters (measured: **0** caster draws at open-sea and storm-sea, and the 4096² clear is paid anyway) | 16.78 M → 2.36 M texels/frame; 67 MB → 9.4 MB of store traffic per frame; 112 MB → 15.75 MB resident; also −201 to −561 draws | **0.6 – 1.6 ms** | 0 (no shadows) | 7.6 cm/texel → 20 cm/texel under PCF-soft — invisible at this world scale |
 | **5** | **Depth-test the sky and draw it last** (today: `depthTest:false, depthWrite:false, renderOrder:-1`, so it can never be rejected) | **−267k to −328k fragments** of a ~470-op procedural shader per frame — measured, not modelled | **0.18 – 0.22 ms** | **0.18 – 0.22 ms** | **none** — every removed pixel is covered by something else |
 | **6** | **Trim the post chain at `high`/`balanced`**: MSAA 4×→2×, bloom base 480×270→240×135, fold the grade into `OutputPass` | −0.7 M quad fragments, −10 MB/frame of resolve traffic, −33 MB resident, −2 passes | **0.2 – 0.5 ms** | 0 (no post) | bloom a shade softer; one MSAA step |
