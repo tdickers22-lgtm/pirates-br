@@ -234,6 +234,24 @@ void main() {
 }
 `;
 
+// ── THE PARTICLE LEVER IS A FILL LEVER ───────────────────────────────────────
+// The cost model measured a keg going off at 0.484 layers of flame plus 0.159 of
+// smoke — 13.0% of the framebuffer, up to three deep — off pools of 96 and 192.
+// The cost is not the COUNT (a hundred sprites is a hundred draws' worth of
+// nothing); it is the AREA those sprites cover and blend into, and the two are
+// only related through the quad's edge length.
+//
+// So the governor's `particleScale` is spent on `gl_PointSize`, not on the ring
+// buffer's occupancy. Fewer, sparser sprites is a legibly different explosion —
+// you can count the holes in it. The same explosion drawn 15% smaller is the
+// same explosion, and it costs 28% less fill, because fill goes as the square.
+// That is also why the value set here is the SQUARE ROOT of the lever: the lever
+// is a budget in fragments, and this is its edge length.
+//
+// It is 1.0 for the entire top of the ladder and only ever reaches 0.707, at the
+// very bottom, where the governor has already spent every free knob it owns.
+let particleFillScale = 1;
+
 /**
  * Ring-buffer pool of textured point sprites. All buffers are preallocated;
  * emitting recycles the oldest slot and writes scalars only.
@@ -351,8 +369,10 @@ class SpritePool {
     this.colors[index3 + 2] = scratchColor.b;
     this.ages[index] = 0;
     this.lives[index] = life;
-    this.sizeStarts[index] = sizeStart;
-    this.sizeEnds[index] = sizeEnd;
+    // The governor's particle lever is spent HERE, on the quad's edge, and
+    // nowhere else — see `particleFillScale`.
+    this.sizeStarts[index] = sizeStart * particleFillScale;
+    this.sizeEnds[index] = sizeEnd * particleFillScale;
     this.alphaStarts[index] = alphaStart;
     this.alphaEnds[index] = alphaEnd;
     this.gravities[index] = gravity;
@@ -882,6 +902,14 @@ export class CombatFx {
   /** The one engine Game constructed; null before that (audio then no-ops). */
   private get audio(): SoundEngine | null {
     return getSharedSoundEngine();
+  }
+
+  /** The governor's per-frame particle budget, as an edge-length scale on every
+   *  sprite emitted from now on. See `particleFillScale`. Live sprites are left
+   *  alone: a burst that shrank halfway through its own life would read as the
+   *  explosion being sucked back in. */
+  setParticleFillScale(scale: number) {
+    particleFillScale = Number.isFinite(scale) ? Math.min(1, Math.max(0.5, scale)) : 1;
   }
 
   update(dt: number) {

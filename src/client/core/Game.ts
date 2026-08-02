@@ -3555,6 +3555,11 @@ export class Game {
       this.ocean.clearStormState();
     }
     const effectScale = this.renderer.getRuntimeEffectScale();
+    // …and the same lever, as an edge length, to the one system whose particle
+    // cost is fill rather than count. It was reading nothing at all before this:
+    // the governor owned a `particleScale` that the largest particle system in
+    // the game never asked for.
+    this.combatFx.setParticleFillScale(this.renderer.getParticleFillScale());
     // World-space rain runs every frame (cheap buffer update; the old canvas
     // overlay throttle is gone with the overlay).
     this.stormRainIntensity = this.debugStormDemo ? 0.9 : this.envFx.computeStormRainIntensity();

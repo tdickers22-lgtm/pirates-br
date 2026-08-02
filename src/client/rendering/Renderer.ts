@@ -752,6 +752,14 @@ export class Renderer {
     return this.getEffectScale() * this.levers.particleScale;
   }
 
+  /** The same lever as an EDGE-LENGTH scale for the systems whose cost is the
+   *  area of a quad rather than the number of them — the combat sprite pools.
+   *  `particleScale` is a budget in fragments and fill goes as the square, so
+   *  what a quad's size gets is its root. 1.0 → 0.707 across the whole ladder. */
+  getParticleFillScale(): number {
+    return Math.sqrt(this.levers.particleScale);
+  }
+
   areShadowsEnabled(): boolean {
     return this.renderer?.shadowMap.enabled ?? false;
   }
