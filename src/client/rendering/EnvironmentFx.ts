@@ -221,6 +221,26 @@ const STORM_FRONT_FRAG = /* glsl */`
     vec2 fp = v_world.xz;
     float y = v_world.y;
     float d = max(1.0, length(u_cam.xz - fp));
+
+    // ── THE SKY ABOVE THE BANK IS NOT FREE ────────────────────────────────
+    // The shell is ${FRONT_HEIGHT}m of geometry and the weather in it never
+    // reaches the top: the bank's own profile, its ragged crown and its fade
+    // all finish at 1.77 x topY (see FRONT_TOP_ROOM), and every fragment above
+    // that comes out at alpha zero. Those fragments were costing THREE fbm
+    // fetches — nine value-noise lookups, thirty-six hashes — to arrive at
+    // "invisible", on a surface that already reads 0.27-0.43 layers of the
+    // framebuffer in ordinary play.
+    //
+    // baseY and topY are functions of range alone, so the bound can be taken
+    // before a single noise fetch. Nothing below is reachable from up there:
+    // the curtain tops out at 1.51 x baseY and the mist band at 0.55 x baseY,
+    // both under this. Below the waterline there is no matching early-out and
+    // none is needed — the sea is opaque and drawn first, so the depth test has
+    // already rejected everything under it.
+    float baseY = mix(26.0, 105.0, smoothstep(70.0, 760.0, d));
+    float topY = min(baseY * 2.4 + 42.0, ${(FRONT_TOP_Y / (FRONT_TOP_ROOM * 1.12)).toFixed(1)});
+    if (y > topY * ${FRONT_TOP_ROOM.toFixed(3)}) discard;
+
     float lobe = fFbm(fp * 0.0060 + u_time * vec2(0.0040, 0.0026));   // ~170m cloud lobes
     // The bottom tier pays for ONE noise field: the front is a full-screen
     // transparent surface when you are up against it, and three fbm fetches per
@@ -233,18 +253,19 @@ const STORM_FRONT_FRAG = /* glsl */`
     float lobe2 = fFbm(fp * 0.0185 - u_time * vec2(0.0090, 0.0055));  // ~55m bulges
 #endif
 
+    // baseY and topY are computed at the top of main(), before the noise, so the
+    // early-out above can use them. What they mean:
+    //
     // The bank's height above the water is chosen from the RANGE of the piece of
     // wall being drawn. One fixed profile cannot work at both ends: a cloud deck
     // that sits right for a squall line 900m off is 40° overhead when you sail up
     // to it (so the whole bank leaves the frame and you see nothing but haze),
     // and one that reads from 60m is a sliver on the horizon. Ramping the deck
-    // down as you close keeps a legible bank + curtain at every range.
-    float baseY = mix(26.0, 105.0, smoothstep(70.0, 760.0, d));
-    // Capped so the ragged top AND its fade finish under the shell's rim (see
+    // down as you close keeps a legible bank + curtain at every range. topY is
+    // capped so the ragged top AND its fade finish under the shell's rim (see
     // FRONT_TOP_ROOM): past ~370 m the deck stops climbing instead of climbing
     // out through the top of the geometry. Close in, where the bank is supposed
     // to tower, this cap is nowhere near the profile and does nothing.
-    float topY = min(baseY * 2.4 + 42.0, ${(FRONT_TOP_Y / (FRONT_TOP_ROOM * 1.12)).toFixed(1)});
 
     // Ragged underside AND ragged top: no straight cut anywhere on the silhouette.
     float bBase = baseY * (0.74 + lobe * 0.52);
