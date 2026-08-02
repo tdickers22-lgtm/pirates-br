@@ -98,11 +98,28 @@ const ALLOW_ANY_MAP = process.env.PIRATES_BR_ANY_MAP === '1';
 /**
  * THE TRIPWIRES.
  *
- * `measured` is the HIGHEST this scene read across five consecutive runs of
- * this suite on the pinned map (2026-08-02, SwiftShader, quality pinned, pixel
- * ratio 1). `draws`/`tris` are ceilings a modest margin above that — roughly
- * 1.12x, not the 1.3x the July table used, because a 30% allowance is a whole
- * content wave of silent drift.
+ * `measured` is the HIGHEST this scene read across consecutive runs of this
+ * suite on the pinned map (2026-08-02, SwiftShader, quality pinned, pixel ratio
+ * 1). `draws`/`tris` are ceilings a modest margin above that — roughly 1.12x,
+ * not the 1.3x the July table used, because a 30% allowance is a whole content
+ * wave of silent drift.
+ *
+ * RE-DERIVED 2026-08-02 AFTER THE GEOMETRY PASS, over four consecutive runs.
+ * Every triangle ceiling in this table came down, some of them a long way: the
+ * pebble scatter, the cave portal frames and the ocean's outer ring together
+ * took 74k to 198k triangles a frame out of these views, and a ceiling left
+ * where it was is a blind spot the exact width of the saving. Open water was the
+ * worst of them — 1,150k against a reality of 828k, a 39% gap, which is the same
+ * mistake this table's previous note was written about.
+ *
+ * AND WHAT THIS TABLE STILL CANNOT SEE, said plainly so nobody trusts it for
+ * more than it does. A ceiling at 1.12x of a whole frame cannot catch the loss
+ * of ONE geometry lever: reverting all three of the above at once puts ~104k
+ * triangles back on a dock vista that measures 1,784k, which is 5.8% and well
+ * inside the margin — and tightening the margin to 1.06 would put it inside this
+ * scene's own run-to-run spread (1,646-1,727 draws over four runs) and start
+ * failing honest builds. Those levers are guarded one at a time, on themselves,
+ * in scripts/test-geometry-lod.mjs. This table guards the SUM.
  *
  * WHY EVERY NUMBER HERE MOVED ONCE. The first version of this table was written
  * before the map was pinned, so every `measured` in it was a reading from a
@@ -122,13 +139,15 @@ const ALLOW_ANY_MAP = process.env.PIRATES_BR_ANY_MAP === '1';
  */
 const BUDGETS = {
   high: [
-    // Six pinned runs: 1725-1827 draws, 1901-2007k tris. The 1827 is the one
-    // that matters: this scene's own spread is ~6%, so a 1900 ceiling was inside
-    // its noise. 1950 is the smallest number that still clears the spread AND
-    // still fails a return to per-plank drawing, which reads 2043 here
-    // (measured, batcher removed). The triangle spread is wider than the draw
-    // spread, so that ceiling keeps the fuller margin.
-    { scene: 'dock-vista', label: 'wide island vista', measured: 1827, draws: 1950, tris: 2_250_000 },
+    // Four pinned runs after the geometry pass: 1646-1727 draws, 1694-1784k
+    // tris. The draw ceiling STAYS at 1950 and is the one number here that was
+    // not re-derived downward — it is set by a different failure. 1950 is the
+    // smallest value that clears this scene's own ~5% spread and still fails a
+    // return to per-plank drawing, which reads 2043 here (measured, batcher
+    // removed); taking it to 1934 to honour the 1.12x rule would buy nothing and
+    // put the batcher's tripwire inside the noise. The triangle ceiling did come
+    // down, 2,250k -> 2,000k, against a reading that fell 1,885k -> 1,784k.
+    { scene: 'dock-vista', label: 'wide island vista', measured: 1727, draws: 1950, tris: 2_000_000 },
     // THE ONE SCENE WHOSE FRAME MOVES, and the widest ceiling in the table
     // because of it. The camera rides the hull, so which islands are behind it
     // is a fact about where the ship is lying when the measurement lands — and
@@ -140,25 +159,42 @@ const BUDGETS = {
     // DIFFERENT world, so the two numbers are not comparable and pretending
     // otherwise would credit the diet with a scene it barely touched. What the
     // ceiling is for is a return to per-plank drawing, which would clear it.
-    { scene: 'deck-aft', label: 'on-deck aft look', measured: 2653, draws: 3000, tris: 3_400_000 },
-    // 1098-1115 draws / 1026-1029k tris across five pinned runs — the steadiest
-    // scene in the table, and the one the old 1600 ceiling was blindest at.
-    { scene: 'open-sea', label: 'open water', measured: 1115, draws: 1250, tris: 1_150_000 },
-    // 2501-2534 / 2913-2917k. The waterfall wave's own view, which the July
+    { scene: 'deck-aft', label: 'on-deck aft look', measured: 2329, draws: 2650, tris: 2_900_000 },
+    // 983-996 draws / 826-828k tris across four pinned runs — still the
+    // steadiest scene in the table, and still the one its ceiling is blindest
+    // at. It was 1,600 draws against 1,115 in July; the pass before this one cut
+    // it to 1,250/1,150k; the sea's outer ring, the pebbles and the portal
+    // frames then took the reading to 828k, at which point a 1,150k ceiling was
+    // a 39% blind spot — wide enough to hide the whole of this pass twice.
+    { scene: 'open-sea', label: 'open water', measured: 996, draws: 1120, tris: 930_000 },
+    // 2337-2360 / 2435-2438k over four pinned runs, down from 2,395/2,576k
+    // before the geometry pass. The waterfall wave's own view, which the July
     // table never had.
-    { scene: 'waterfall-deck', label: 'deck view of a waterfall island', measured: 2534, draws: 2850, tris: 3_250_000 },
-    // 2979-3006 / 3483-3487k. The dearest view in the game and the one nobody
-    // had ever measured: standing in a hole in the ground still pays for every
-    // island on the map.
-    { scene: 'cave-interior', label: 'cave interior', measured: 3006, draws: 3400, tris: 3_900_000 },
+    { scene: 'waterfall-deck', label: 'deck view of a waterfall island', measured: 2360, draws: 2650, tris: 2_750_000 },
+    // 2762-2777 / 2744-2746k over four pinned runs, down from 2,803/2,944k. The
+    // dearest view in the game, and still the proof that standing in a hole in
+    // the ground pays for every island on the map: the cave frame carries twelve
+    // portal frames, which is why it gained the most triangles from thinning
+    // them (216k -> 195k) and still costs more than any view above it.
+    { scene: 'cave-interior', label: 'cave interior', measured: 2777, draws: 3120, tris: 3_100_000 },
   ],
   // 'low' came in far under the targets it was written against (~1800 dock,
   // ~1400 open sea), so these are its MEASURED cost plus a margin rather than
   // the aspiration — a ceiling nothing has ever approached grades nothing. The
   // ratio checks below are the other half of the assertion.
+  //
+  // AND 'low' BARELY MOVED IN THE GEOMETRY PASS: 528k -> 515k at the dock vista
+  // and 156k -> 156k at sea. That is not the pass underperforming, it is where
+  // the pass landed — the pebble scatter is never built at 'low' (lowDetail
+  // skips it), the ocean's outer ring at 'low' was already the coarse one the
+  // other tiers were moved onto, and a 'low' portal frame is half the stones to
+  // begin with. The only thing 'low' gained is the group cull, which is CPU and
+  // shows up in no column here. A tier whose ceiling does not move when the
+  // frame gets cheaper is a tier that was not made cheaper, and this table
+  // should say so rather than let the high-tier numbers speak for both.
   low: [
-    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 613, draws: 700, tris: 650_000 },
-    { scene: 'open-sea', label: 'open water (low tier)', measured: 319, draws: 380, tris: 220_000 },
+    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 598, draws: 670, tris: 580_000 },
+    { scene: 'open-sea', label: 'open water (low tier)', measured: 283, draws: 320, tris: 180_000 },
   ],
 };
 
@@ -167,6 +203,10 @@ const BUDGETS = {
  *  She only exists for one storm phase in the middle of a match, so she never
  *  showed up in either scene above — and near-wreck frames were measured at
  *  2888-2971 draws against a 2900 ceiling that was never meant to cover her.
+ *  Re-derived after the geometry pass over four pinned runs: 1576-1845 draws,
+ *  1627-1688k tris. Hers is the widest DRAW spread left in the suite (17%) and
+ *  the reason is hers alone — she rises at a ring centre that moves, so what is
+ *  behind her is a different set of islands each run.
  *  Grading her by the dock's number is grading two different views with one
  *  ruler: nobody looking at the wreck is also looking at a dock, a tavern and
  *  a full island of props.
@@ -174,7 +214,7 @@ const BUDGETS = {
  *  Needs a wreck up: the runner hands PIRATES_WRECK_SEC to any server it starts
  *  itself, and SKIPS this one scene (never fails) against a server that was
  *  already running without it. */
-const WRECK_BUDGET = { label: 'the Gilded Wreck alongside', measured: 2163, draws: 2450, tris: 2_100_000 };
+const WRECK_BUDGET = { label: 'the Gilded Wreck alongside', measured: 1845, draws: 2100, tris: 1_900_000 };
 /** Seconds after the horn the dev server raises her for this measurement. */
 const WRECK_RAISE_SEC = 12;
 /** How long to wait for her after the join before giving up and skipping. */

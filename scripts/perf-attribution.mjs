@@ -21,7 +21,7 @@ import { dirname } from 'node:path';
 import process from 'node:process';
 import { browserArgs, describeGl } from './lib/browser-args.mjs';
 import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene, sessionQuery } from './perf-probe.mjs';
-import { FIND_WATERFALL_ISLAND, planWaterfallDeck } from './lib/perf-scenes.mjs';
+import { FIND_WATERFALL_ISLAND, planWaterfallDeck, TALLY_TRAVERSAL } from './lib/perf-scenes.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback = null) => {
@@ -196,9 +196,22 @@ async function main() {
       await page.evaluate(PIN_PIXEL_RATIO);
       await measureScene(page, plan[scene], { warmupMs: 300, captureMs: 300, settle: true });
       const deep = await page.evaluate(DEEP_TALLY, { by: ORDER_BY, rows: ROWS });
+      const walk = await page.evaluate(TALLY_TRAVERSAL).catch(() => null);
+      deep.traversal = walk;
       report.scenes[scene] = deep;
 
       console.log(`\n── ${scene}  (camera ${deep.camera.x}, ${deep.camera.y}, ${deep.camera.z})`);
+      if (deep.traversal) {
+        const t = deep.traversal;
+        console.log(
+          `  traversal: three reaches ${t.total.reached} nodes (${t.total.drawables} drawable, `
+          + `${t.total.drawn} drawn) of ${t.inGraph} drawables in the graph`,
+        );
+        console.log(
+          `             ${t.outsideIslands} island group(s) wholly outside the frustum cost `
+          + `${t.outsideReached} of those reached nodes and ${t.outsideDrawn} drawn`,
+        );
+      }
       console.log('  scene top level:');
       for (const r of deep.scene) console.log(`    ${String(r.calls).padStart(5)} calls  ${String(Math.round(r.tris / 1000)).padStart(5)}k tris  ${r.name}`);
       console.log('  environment children (islands excluded):');
