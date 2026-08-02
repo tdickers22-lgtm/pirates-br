@@ -115,9 +115,20 @@ async function main() {
         await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 300_000 });
         await page.waitForTimeout(SETTLE_MS);
         await page.evaluate(() => window.__piratesBR.setBotPeace(true));
-        // The HUD is not what this pass changes, and it covers the corners of
-        // every frame where a vignette or a grade shift would show first.
-        await page.addStyleTag({ content: '#hud{opacity:0!important;visibility:hidden!important;}' });
+        // EVERY OVERLAY OFF, AND THE ONBOARDING CARD DISMISSED. None of them is
+        // what this pass changes, and between them they cover the middle of the
+        // frame and both bottom corners — which is where a vignette shift, a
+        // grade shift or a sky seam would show first. The first version of this
+        // rig photographed the SHIP'S ORDERS card and a debug panel.
+        await page.evaluate(() => {
+          document.getElementById('oc-skip')?.click();
+          const style = document.createElement('style');
+          style.textContent = '#hud{opacity:0!important;visibility:hidden!important;}'
+            + '#onboard-cards,#onboarding-card,#oc-card,[class*="onboard"]{display:none!important;}'
+            + '#debug-perf-panel{display:none!important;}'
+            + '#disconnect-overlay,[class*="overload"]{visibility:hidden!important;}';
+          document.head.appendChild(style);
+        });
 
         const world = await readWorld(page);
         const plan = planScenes(world);
