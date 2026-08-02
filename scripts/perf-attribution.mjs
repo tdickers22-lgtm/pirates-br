@@ -33,11 +33,25 @@ const URL = arg('url', 'http://127.0.0.1:3000').replace(/\/$/, '');
 const QUALITY = arg('quality', 'high');
 const OUT = arg('out', null);
 const SCENES = (arg('scenes', 'dock-vista,open-sea')).split(',').map((s) => s.trim()).filter(Boolean);
+/**
+ * WHICH COST THE REPORT IS ORDERED BY.
+ *
+ * This rig was written to chase draw CALLS, so every list in it sorted by calls
+ * and then cut the tail off — and the triangle column it was already computing
+ * could not be read, because the rows that carry the triangles are not the rows
+ * that carry the calls. One `props-palm_a` batch is ONE call and 40-58k
+ * triangles; it sorted below a pier that is four calls and nine hundred. A
+ * geometry pass reading this report saw the pier.
+ */
+const ORDER_BY = arg('by', 'calls') === 'tris' ? 'tris' : 'calls';
+/** How many rows of each list survive. Deeper than the call report needed:
+ *  a triangle tail is long and flat, and the point is to find all of it. */
+const ROWS = Number.parseInt(arg('rows', '26'), 10);
 const VIEWPORT = { width: 960, height: 540 };
 
 /** Visible, in-frustum draw calls under a subtree, attributed to each of its
  *  DIRECT children. Same frustum arithmetic the census uses. */
-const DEEP_TALLY = () => {
+const DEEP_TALLY = ({ by, rows }) => {
   const g = window.__piratesBR;
   const camera = g.renderer.camera;
   const scene = g.renderer.scene;
@@ -102,10 +116,11 @@ const DEEP_TALLY = () => {
   };
 
   const label = (n) => n.name || `(${n.type})`;
+  const heavier = (a, b) => b[by] - a[by];
   const listChildren = (node) => node.children
     .map((c) => ({ name: label(c), ...cost(c) }))
     .filter((r) => r.calls > 0)
-    .sort((a, b) => b.calls - a.calls);
+    .sort(heavier);
 
   const camPos = camera.position;
   const dist2D = (x, z) => Math.hypot(camPos.x - x, camPos.z - z);
@@ -127,16 +142,16 @@ const DEEP_TALLY = () => {
       tris: total.tris,
       detailVisible: detailRoot ? detailRoot.visible : null,
       microVisible: microRoot ? microRoot.visible : null,
-      children: detailRoot ? listChildren(detailRoot).slice(0, 26) : [],
+      children: detailRoot ? listChildren(detailRoot).slice(0, rows) : [],
     });
   }
-  islands.sort((a, b) => b.calls - a.calls);
+  islands.sort(heavier);
 
   // The scene's own top level, and whatever unnamed group holds the world.
   const sceneChildren = scene.children
     .map((c) => ({ node: c, name: label(c), ...cost(c) }))
     .filter((r) => r.calls > 0)
-    .sort((a, b) => b.calls - a.calls);
+    .sort(heavier);
   const environment = sceneChildren.find((r) => r.node.children.some((c) => c.name?.startsWith?.('island-')))
     ?? sceneChildren[0];
   const environmentChildren = environment
@@ -144,8 +159,8 @@ const DEEP_TALLY = () => {
       .filter((c) => !c.name?.startsWith?.('island-'))
       .map((c) => ({ name: label(c), ...cost(c) }))
       .filter((r) => r.calls > 0)
-      .sort((a, b) => b.calls - a.calls)
-      .slice(0, 30)
+      .sort(heavier)
+      .slice(0, rows)
     : [];
 
   return {
@@ -180,7 +195,7 @@ async function main() {
       if (!plan[scene]) { console.log(`  ${scene}: (no placement)`); continue; }
       await page.evaluate(PIN_PIXEL_RATIO);
       await measureScene(page, plan[scene], { warmupMs: 300, captureMs: 300, settle: true });
-      const deep = await page.evaluate(DEEP_TALLY);
+      const deep = await page.evaluate(DEEP_TALLY, { by: ORDER_BY, rows: ROWS });
       report.scenes[scene] = deep;
 
       console.log(`\n── ${scene}  (camera ${deep.camera.x}, ${deep.camera.y}, ${deep.camera.z})`);

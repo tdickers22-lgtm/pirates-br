@@ -230,3 +230,132 @@ export const TALLY_DRAW_SOURCES = () => {
     .map(([source, v]) => ({ source, calls: v.calls, meshes: v.meshes }))
     .sort((a, b) => b.calls - a.calls);
 };
+
+/**
+ * WHAT THREE ACTUALLY WALKS — the traversal census.
+ *
+ * The cost model reports "the scene graph holds 9,201–9,388 drawables" and that
+ * `projectObject` walks all of them every frame. The first half is a
+ * `scene.traverse()` and the second half does not follow from it:
+ * `projectObject` returns the moment it sees `visible === false`, so every node
+ * under a hidden island detail root, under a hidden proxy root, under a hidden
+ * micro tier, is never visited at all. A lever sized off the 9,201 is sized off
+ * a number three never pays.
+ *
+ * So this counts the walk three actually performs — every node reached without
+ * crossing a `visible === false`, drawable or not, because `projectObject`
+ * recurses through Groups and Object3Ds exactly as it does through meshes — and
+ * splits it three ways:
+ *
+ *   `reached`      nodes the walk visits (the real cost of the traversal)
+ *   `drawables`    of those, the ones that get a frustum test
+ *   `drawn`        of those, the ones that survive it
+ *
+ * And then the part a group-level cull is actually worth: per island group, the
+ * nodes reached under it and whether the island's own bounding sphere is wholly
+ * outside the view frustum. The sum of `reached` over the islands that are
+ * WHOLLY OUTSIDE is the exact prize — nodes three walks this frame to conclude,
+ * one mesh at a time, what one sphere test already knew.
+ */
+export const TALLY_TRAVERSAL = () => {
+  const g = window.__piratesBR;
+  const camera = g.renderer.camera;
+  const scene = g.renderer.scene;
+  camera.updateMatrixWorld();
+  scene.updateMatrixWorld();
+
+  const m = camera.projectionMatrix.clone().multiply(camera.matrixWorldInverse);
+  const e = m.elements;
+  const planes = [];
+  const push = (a, b, c, d) => {
+    const len = Math.hypot(a, b, c) || 1;
+    planes.push([a / len, b / len, c / len, d / len]);
+  };
+  push(e[3] - e[0], e[7] - e[4], e[11] - e[8], e[15] - e[12]);
+  push(e[3] + e[0], e[7] + e[4], e[11] + e[8], e[15] + e[12]);
+  push(e[3] + e[1], e[7] + e[5], e[11] + e[9], e[15] + e[13]);
+  push(e[3] - e[1], e[7] - e[5], e[11] - e[9], e[15] - e[13]);
+  push(e[3] - e[2], e[7] - e[6], e[11] - e[10], e[15] - e[14]);
+  push(e[3] + e[2], e[7] + e[6], e[11] + e[10], e[15] + e[14]);
+
+  const sphereOutside = (cx, cy, cz, r) => {
+    for (const p of planes) {
+      if (p[0] * cx + p[1] * cy + p[2] * cz + p[3] < -r) return true;
+    }
+    return false;
+  };
+
+  const inFrustum = (mesh) => {
+    const geo = mesh.geometry;
+    if (!geo) return true;
+    if (!geo.boundingSphere) geo.computeBoundingSphere();
+    const bs = geo.boundingSphere;
+    if (!bs) return true;
+    const c = bs.center.clone().applyMatrix4(mesh.matrixWorld);
+    const el = mesh.matrixWorld.elements;
+    const scale = Math.sqrt(Math.max(
+      el[0] * el[0] + el[1] * el[1] + el[2] * el[2],
+      el[4] * el[4] + el[5] * el[5] + el[6] * el[6],
+      el[8] * el[8] + el[9] * el[9] + el[10] * el[10],
+    ));
+    return !sphereOutside(c.x, c.y, c.z, bs.radius * scale);
+  };
+
+  /** The walk, pruned exactly where three prunes it. */
+  const walk = (node, acc) => {
+    if (node.visible === false) return;
+    acc.reached += 1;
+    if (node.isMesh || node.isPoints || node.isLine || node.isSprite) {
+      acc.drawables += 1;
+      if (node.frustumCulled === false || inFrustum(node)) acc.drawn += 1;
+    }
+    for (const child of node.children) walk(child, acc);
+  };
+
+  const zero = () => ({ reached: 0, drawables: 0, drawn: 0 });
+  const total = zero();
+  walk(scene, total);
+
+  // Everything in the graph, visible or not — the figure a plain traverse()
+  // reports, kept beside the real one so the gap is on the record.
+  let inGraph = 0;
+  scene.traverse((o) => { if (o.isMesh || o.isPoints || o.isLine || o.isSprite) inGraph += 1; });
+
+  const camPos = camera.position;
+  const islands = [];
+  for (const [id, group] of g.islandMeshes ?? []) {
+    const st = g.state.islands.find((i) => i.id === id);
+    const acc = zero();
+    walk(group, acc);
+    // The island's own bounds, sized the way a group-level cull would have to
+    // size them: from the SERVER's footprint radius, generously padded, so the
+    // answer does not move when the LOD tiers do. The padding is deliberately
+    // crude — this is measuring the SIZE OF THE PRIZE, and a sphere that is too
+    // big can only under-report it.
+    const cull = group.userData.cullSphere ?? null;
+    const cx = cull ? cull.x : group.position.x;
+    const cy = cull ? cull.y : 40;
+    const cz = cull ? cull.z : group.position.z;
+    const r = cull ? cull.r : (st?.radius ?? 120) * 1.25 + 140;
+    islands.push({
+      id,
+      name: st?.name ?? id,
+      edgeDist: Math.round(Math.hypot(camPos.x - group.position.x, camPos.z - group.position.z) - (st?.radius ?? 0)),
+      reached: acc.reached,
+      drawables: acc.drawables,
+      drawn: acc.drawn,
+      whollyOutside: sphereOutside(cx, cy, cz, r),
+    });
+  }
+  islands.sort((a, b) => b.reached - a.reached);
+
+  const outside = islands.filter((i) => i.whollyOutside);
+  return {
+    inGraph,
+    total,
+    islands,
+    outsideIslands: outside.length,
+    outsideReached: outside.reduce((s, i) => s + i.reached, 0),
+    outsideDrawn: outside.reduce((s, i) => s + i.drawn, 0),
+  };
+};
