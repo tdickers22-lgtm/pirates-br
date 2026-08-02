@@ -251,7 +251,11 @@ export class FrameGovernor {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
     if (!enabled) {
-      this.scalar = this.startScalar;
+      // FULL quality, not the opening scalar. A pinned session is a measurement
+      // session, and it must get exactly the tier it asked for — a census whose
+      // LOD radii were quietly shaved 1.6% by an opening heuristic is a census
+      // of a scene that does not exist.
+      this.scalar = 1;
       this.mode = 'target';
     }
     this.clearWindow();
@@ -313,6 +317,12 @@ export class FrameGovernor {
     this.now = nowMs;
     if (!this.enabled || this.suspended) return this.scalar;
     if (this.windowOpenedAt === 0) this.windowOpenedAt = nowMs;
+    // BEFORE any step, because a step clears the window. On the machine this
+    // game is for that is not a corner case: at one frame a second the window
+    // reaches the four samples a streaming reading needs on the very frame the
+    // ladder steps, so a reading taken afterwards saw an empty window every
+    // single time and the signal read "no throttle" for the whole descent.
+    this.refreshStreamingScale();
     if (nowMs < this.holdUntil) return this.scalar;
     if (!this.hasEvidence(nowMs)) return this.scalar;
 
@@ -393,14 +403,25 @@ export class FrameGovernor {
    * picture the machine can sustain.
    */
   getStreamingScale(): number {
-    if (!this.enabled || this.suspended || this.count < this.tuning.slowSamples) return 1;
+    if (!this.enabled || this.suspended) return 1;
+    this.refreshStreamingScale();
+    return this.lastStreamingScale;
+  }
+
+  /** Recompute from the live window when there IS one, and otherwise leave the
+   *  last reading standing. The frame's pressure does not go away because the
+   *  ladder took a step — if anything the step was evidence of it. */
+  private refreshStreamingScale(): void {
+    if (this.count < this.tuning.slowSamples) return;
     const budget = 1000 / this.getTargetFps();
     const ratio = this.percentile(0.5) / budget;
-    if (ratio <= 0.6) return 1.4;
-    if (ratio <= 0.85) return 1 + (0.85 - ratio) * (0.4 / 0.25);
-    if (ratio >= 1.6) return 0.25;
-    return 1 - (ratio - 0.85) * (0.75 / 0.75);
+    this.lastStreamingScale = ratio <= 0.6 ? 1.4
+      : ratio <= 0.85 ? 1 + (0.85 - ratio) * 1.6
+        : ratio >= 1.6 ? 0.25
+          : 1 - (ratio - 0.85);
   }
+
+  private lastStreamingScale = 1;
 
   /** Match teardown / tier change. Keeps nothing. */
   reset(): void {
@@ -413,6 +434,7 @@ export class FrameGovernor {
     this.headroomSince = -1;
     this.floorHeadroomSince = -1;
     this.warmupLeft = this.tuning.warmupFrames;
+    this.lastStreamingScale = 1;
     this.clearWindow();
   }
 

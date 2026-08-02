@@ -9,7 +9,7 @@ import {
   FrameGovernor, resolveLevers, describeGovernor,
   type GovernorLevers, type GovernorMode, type LeverCaps,
 } from './FrameGovernor.js';
-import { setFrameBudgetScale } from './FrameBudget.js';
+import { frameBudgetScale, setFrameBudgetScale } from './FrameBudget.js';
 
 export type { RenderQuality };
 
@@ -490,6 +490,10 @@ export class Renderer {
 
   init() {
     this.governor.setEnabled(governorEnabledFor(this.qualityVerdict.reason));
+    // Re-derive before anything is built: a DISABLED governor hands back full
+    // tier quality rather than the opening scalar, and the shadow map size and
+    // the opening pixel ratio are both read out of `levers` below.
+    this.levers = resolveLevers(this.governor.getScalar(), this.governorCaps);
     this.scene = new THREE.Scene();
     // The scene root never moves. That matters for more than tidiness: three
     // re-composes a node's local matrix every frame when matrixAutoUpdate is
@@ -762,6 +766,13 @@ export class Renderer {
         { ...this.levers, pixelRatio: this.currentPixelRatio },
       ),
     };
+  }
+
+  /** The shared streaming signal as it stands this frame — 1 means "no
+   *  throttle". Diagnostics and the browser gate; the systems that spend it
+   *  read it through FrameBudget.budgeted(). */
+  getFrameBudgetScale(): number {
+    return frameBudgetScale();
   }
 
   /** The levers as they stand, for the systems the renderer does not own —
