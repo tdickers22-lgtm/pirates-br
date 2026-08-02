@@ -171,12 +171,20 @@ const BUDGETS = {
     // before the geometry pass. The waterfall wave's own view, which the July
     // table never had.
     { scene: 'waterfall-deck', label: 'deck view of a waterfall island', measured: 2360, draws: 2650, tris: 2_750_000 },
-    // 2762-2777 / 2744-2746k over four pinned runs, down from 2,803/2,944k. The
+    // 2762-2911 / 2744-2769k over FIVE pinned runs, down from 2,803/2,944k. The
     // dearest view in the game, and still the proof that standing in a hole in
     // the ground pays for every island on the map: the cave frame carries twelve
     // portal frames, which is why it gained the most triangles from thinning
     // them (216k -> 195k) and still costs more than any view above it.
-    { scene: 'cave-interior', label: 'cave interior', measured: 2777, draws: 3120, tris: 3_100_000 },
+    //
+    // The first cut of this row said 2777/3120/3100k off four runs. A fifth run
+    // read 2911 draws — inside the same build, the same seed and the same
+    // camera, so it is this scene's spread and not a regression — and a 3120
+    // ceiling over a 2911 reading is 7%, not the 12% this table claims for
+    // itself. Widened to the rule, with the sample that moved it named: five
+    // samples of a 5% spread is not many, and a ceiling that quietly means half
+    // what its header says is the thing this table keeps being rewritten about.
+    { scene: 'cave-interior', label: 'cave interior', measured: 2911, draws: 3250, tris: 3_150_000 },
   ],
   // 'low' came in far under the targets it was written against (~1800 dock,
   // ~1400 open sea), so these are its MEASURED cost plus a margin rather than
@@ -193,7 +201,8 @@ const BUDGETS = {
   // frame gets cheaper is a tier that was not made cheaper, and this table
   // should say so rather than let the high-tier numbers speak for both.
   low: [
-    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 598, draws: 670, tris: 580_000 },
+    // 591-601 draws / 515k tris over five pinned runs; 601 came from the fifth.
+    { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 601, draws: 680, tris: 580_000 },
     { scene: 'open-sea', label: 'open water (low tier)', measured: 283, draws: 320, tris: 180_000 },
   ],
 };
