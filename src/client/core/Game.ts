@@ -3051,11 +3051,19 @@ export class Game {
     // which between them cannot say WHY either of them is what it is — the
     // scalar, the mode and the median it is being judged against can.
     const gov = this.renderer.getGovernorStatus();
+    // The shadow pass is skipped whenever it last drew nothing, and a draw-call
+    // total cannot show that: an empty pass costs a full-map CLEAR and zero
+    // draws, so the saving is invisible in every counter this panel already
+    // prints. run/skip is the only place it shows.
+    const sh = this.renderer.getShadowPassStats();
+    const shadowLine = sh.mapSize
+      ? `shadow ${sh.mapSize} ${sh.lastCasterDraws}casters ${sh.run}run/${sh.skipped}skip`
+      : 'shadow off';
     const governorLine = gov.enabled
       ? `governor ${gov.mode} @${gov.targetFps}fps | q ${gov.scalar.toFixed(2)} `
         + `| med ${gov.medianMs.toFixed(1)}ms p95 ${gov.p95Ms.toFixed(1)}ms `
-        + `| shadow ${gov.shadowMapSize || 'off'} | stream ${this.renderer.getFrameBudgetScale().toFixed(2)}x`
-      : 'governor off (quality pinned)';
+        + `| ${shadowLine} | stream ${this.renderer.getFrameBudgetScale().toFixed(2)}x`
+      : `governor off (quality pinned) | ${shadowLine}`;
 
     this.debugPerfPanel.textContent = [
       'Pirates BR debug',

@@ -975,6 +975,15 @@ export class Renderer {
   // at most SHADOW_RECHECK_FRAMES frames and then pays for one, so a caster
   // entering the box shows up within ~0.17 s at 60 fps — an island 150 m out,
   // at the far edge of a box that is centred 108 m ahead of the camera.
+  //
+  // THE DECISION LIVES INSIDE THE WRAPPER, not in this class's `render()`. It
+  // was in `render()` first, and that is wrong twice over: three's shadow pass
+  // is reached by anything that calls `renderer.render`, including the cost
+  // model's own pass-split probe, which renders the scene directly — so the
+  // probe would have found `needsUpdate` false from the last real frame, taken
+  // a shadow-free render, and reported "0 caster draws" for every scene in the
+  // game. A gate that only works when one particular caller remembers to arm it
+  // is a gate that lies to every other caller.
   private shadowSkipFrames = 0;
   /** Frames the gate may skip after an empty pass before it must look again. */
   private static readonly SHADOW_RECHECK_FRAMES = 10;
@@ -997,6 +1006,15 @@ export class Renderer {
     // chain have been added to the same counter. The decision is taken here,
     // where the count is, rather than a frame later somewhere else.
     shadowMap.render = (lights, scene, camera) => {
+      if (this.shadowSkipFrames > 0) {
+        this.shadowSkipFrames -= 1;
+        this.shadowPassesSkipped += 1;
+        return;
+      }
+      // `autoUpdate` is off (below), so three would early-return on its own
+      // unless this says otherwise. Saying it here rather than a frame earlier
+      // is what makes the gate hold for every caller.
+      shadowMap.needsUpdate = true;
       const before = info.render.calls;
       inner(lights, scene, camera);
       const drawn = info.render.calls - before;
@@ -1006,20 +1024,6 @@ export class Renderer {
     };
     // From here the gate owns which frames pay for a depth pass.
     shadowMap.autoUpdate = false;
-    shadowMap.needsUpdate = true;
-  }
-
-  /** Called once per frame, before the render, to decide whether this frame
-   *  pays for a shadow pass. */
-  private armShadowPass() {
-    const shadowMap = this.renderer.shadowMap;
-    if (!shadowMap.enabled || shadowMap.autoUpdate) return;
-    if (this.shadowSkipFrames > 0) {
-      this.shadowSkipFrames -= 1;
-      this.shadowPassesSkipped += 1;
-      shadowMap.needsUpdate = false;
-      return;
-    }
     shadowMap.needsUpdate = true;
   }
 
@@ -1179,7 +1183,6 @@ export class Renderer {
     this.sunGlow.lookAt(this.camera.position);
     this.sunDisc.lookAt(this.camera.position);
     this.updateShadowFrustum();
-    this.armShadowPass();
     // Accumulate draw/tri counters across ALL passes for this frame — with
     // autoReset the post-fx composer wipes them per pass and the debug overlay
     // forever reads the final fullscreen quad ("draw 1 | tris 1").
