@@ -47,6 +47,7 @@ import { freezeStaticParent, freezeStaticSubtree, ZERO_SCALE_MAT4 } from '../ren
 import { IslandDetailWarmer } from '../rendering/IslandDetailWarmup.js';
 import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { beginFirstDrawFrame, clearFirstDrawBudget, openFirstDrawBudgetForSettle, showWhenAffordable } from '../rendering/FirstDrawBudget.js';
+import { budgeted } from '../rendering/FrameBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
@@ -393,6 +394,9 @@ export class Game {
     onMatchStart: (payload) => this.onMatchStartFromMenu(payload),
     onReturnToMenu: () => this.onReturnToMenuFromEnd(),
     onCrewFound: () => this.beginCrewFoundBeat(),
+    // Read through a thunk, not passed by value: the panel's graphics line is
+    // live, and the governor moves while it is open.
+    getGovernorStatus: () => (this.renderer ? this.renderer.getGovernorStatus() : null),
   });
   // Used by ambient render & end-of-round flow + gameplay-key gating.
   private inMatch = false;
@@ -2672,6 +2676,11 @@ export class Game {
     // draws something for the first time — its reveal is paced out behind it.
     if (loading) this.loadGuardUntil = now + Game.LOAD_GUARD_TAIL_MS;
     this.renderer.setLoadGuard(now < this.loadGuardUntil);
+    // …and the governor samples nothing through it. A frame spent building an
+    // island, linking its programs and revealing its subtree is a measurement of
+    // the load, not of the machine, and a controller that believed it would
+    // spend its whole ladder before the horn.
+    this.renderer.setGovernorSuspended(now < this.loadGuardUntil);
     // Nobody is playing during the menu or the ceremony, so warm harder there:
     // every program paid before the horn is one that cannot stall after it.
     this.renderer.setWarmBoost(!this.inMatch || this.isStartCeremonyActive());
@@ -2888,13 +2897,22 @@ export class Game {
     this.updateMermaid(now);
     // Stream one queued island build per frame (join used to build all 10
     // synchronously and freeze the tab for seconds).
-    this.drainIslandBuildQueue(1);
-    this.drainSeaRockBuildQueue(6);
+    // Both queues are amortizers, and both now read the one shared signal
+    // instead of a constant each (see FrameBudget): a machine holding 60 gets
+    // the world faster, a machine at 8fps stops being handed the same quota as
+    // one that is fine. Floored at one island / one rock so the world always
+    // finishes arriving.
+    this.drainIslandBuildQueue(budgeted(1, 1));
+    this.drainSeaRockBuildQueue(budgeted(6, 1));
     this.updateLoadGuard(now);
     this.renderer.updatePerformance(dt);
     this.renderer.render();
     if (this.bugSnapRequested) {
       this.bugSnapRequested = false;
+      // A full-canvas toDataURL is a synchronous readback and a PNG encode, and
+      // it lands in the NEXT frame's dt. It is a one-off the caller can name, so
+      // name it: pressing F8 must not cost the player their resolution.
+      this.renderer.markFrameOneOff();
       try {
         const image = this.renderer.renderer.domElement.toDataURL('image/png');
         const player = this.getLocalPlayer();
@@ -3111,12 +3129,27 @@ export class Game {
     // Islands are THE landmark visuals: hold full detail out to AAA distances,
     // measured from the island EDGE (footprint radius), not its center — a
     // 200m-radius island's shoreline used to flip to proxy while you stood on it.
-    const detailRadius = quality === 'low' ? 420 : quality === 'balanced' ? 700 : 950;
-    const wildlifeRadius = quality === 'low' ? 220 : quality === 'balanced' ? 360 : 520;
-    const lootRadius = quality === 'low' ? 340 : quality === 'balanced' ? 520 : 760;
-    const seaRockRadius = quality === 'low' ? 650 : quality === 'balanced' ? 900 : 1200;
-    const upgradeRadius = quality === 'low' ? 420 : quality === 'balanced' ? 620 : 820;
-    const npcRadius = quality === 'low' ? 360 : quality === 'balanced' ? 560 : 760;
+    // ── THE GOVERNOR'S DRESSING BIAS ────────────────────────────────────────
+    // One multiplier, floored at 0.70 by the governor itself, on every radius
+    // that decides how far away scenery keeps its detail. It is the cheapest
+    // visual loss on the ladder because everything it touches lives at mid and
+    // far distance by construction — and it is the reason there is an explicit
+    // floor under the three radii below rather than a bare multiply.
+    const levers = this.renderer.getFrameLevers();
+    const dressing = levers.lodRadiusScale;
+    const detailRadius = (quality === 'low' ? 420 : quality === 'balanced' ? 700 : 950) * dressing;
+    const wildlifeRadius = (quality === 'low' ? 220 : quality === 'balanced' ? 360 : 520) * dressing;
+    const seaRockRadius = (quality === 'low' ? 650 : quality === 'balanced' ? 900 : 1200) * dressing;
+    // THE INTERACTION FLOOR. A chest, an upgrade station and an NPC are things
+    // the player walks up to and uses, and a governor that culls one of them
+    // because the machine is warm has not degraded the picture, it has broken
+    // the game. 180 m is far outside any interaction range in this client and
+    // outside the distance at which either reads as more than a silhouette, so
+    // the clamp costs nothing and the failure it forbids is unrecoverable.
+    const INTERACTABLE_FLOOR = 180;
+    const lootRadius = Math.max(INTERACTABLE_FLOOR, (quality === 'low' ? 340 : quality === 'balanced' ? 520 : 760) * dressing);
+    const upgradeRadius = Math.max(INTERACTABLE_FLOOR, (quality === 'low' ? 420 : quality === 'balanced' ? 620 : 820) * dressing);
+    const npcRadius = Math.max(INTERACTABLE_FLOOR, (quality === 'low' ? 360 : quality === 'balanced' ? 560 : 760) * dressing);
 
     for (const island of this.state.islands) {
       const group = this.islandMeshes.get(island.id);
@@ -3167,7 +3200,13 @@ export class Game {
         // and drops the scrub, one integer per batch per frame, no re-upload.
         const instanceBatches = group.userData.instanceLodBatches as InstanceLodBatch[] | undefined;
         if (instanceBatches && showDetail) {
-          updateInstanceLod(instanceBatches, edgeDist, quality, lodDistanceScale);
+          // The density bias rides the APPARENT-DISTANCE scale rather than a new
+          // parameter: InstanceLod already measures everything against it, and
+          // shrinking it makes a far batch behave as if it were further away —
+          // which drops the smallest instances first, in the order the batch was
+          // sorted at build time. Below 1 it thins; it can never thin the island
+          // you are standing on, whose edge distance is negative.
+          updateInstanceLod(instanceBatches, edgeDist, quality, lodDistanceScale * levers.instanceDensityScale);
         }
         // Cave INTERIOR decor + lights (torch, crystals, stalactites, treasure)
         // reveal within ~45m so the warm glow greets you at the mouth and the
@@ -3424,7 +3463,7 @@ export class Game {
     } else {
       this.ocean.clearStormState();
     }
-    const effectScale = this.renderer.getEffectScale();
+    const effectScale = this.renderer.getRuntimeEffectScale();
     // World-space rain runs every frame (cheap buffer update; the old canvas
     // overlay throttle is gone with the overlay).
     this.stormRainIntensity = this.debugStormDemo ? 0.9 : this.envFx.computeStormRainIntensity();

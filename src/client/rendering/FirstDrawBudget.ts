@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { budgeted } from './FrameBudget.js';
 
 /**
  * One frame, one allowance for showing things the GL driver has never drawn.
@@ -50,10 +51,23 @@ let drawn = new WeakSet<THREE.Object3D>();
 let subtreeCost = new WeakMap<THREE.Object3D, number>();
 
 /** Claim this frame's allowance. Call once per animation frame, from the game
- *  loop, before anything can ask to be shown. */
+ *  loop, before anything can ask to be shown.
+ *
+ *  The allowance MOVES with the frame (see FrameBudget): 48 was tuned against a
+ *  frame that had room for it, and a machine at 8fps was being handed exactly
+ *  the same quota as one holding 60. Floored at 8 so a struggling machine still
+ *  finishes arriving — a throttle that can reach zero is a deadlock, because
+ *  the prop that is never drawn never makes the frame any faster. */
 export function beginFirstDrawFrame(): void {
-  budget = FIRST_DRAW_MESHES_PER_FRAME;
+  frameAllowance = budgeted(FIRST_DRAW_MESHES_PER_FRAME, 8);
+  budget = frameAllowance;
 }
+
+/** THIS frame's allowance, which is no longer a constant. `firstDrawFrameUntouched`
+ *  has to compare against it and not against the nominal 48, or the moment the
+ *  governor throttles streaming an oversized root would see a budget that can
+ *  never be "whole" again and would be starved forever. */
+let frameAllowance = FIRST_DRAW_MESHES_PER_FRAME;
 
 /** What is left of this frame's allowance. */
 export function firstDrawRemaining(): number {
@@ -71,7 +85,7 @@ export function spendFirstDraw(meshes: number): void {
  *  the entire allowance has to be let through on some frame or it would never
  *  be shown at all; this says when that is safe, namely when it lands alone. */
 export function firstDrawFrameUntouched(): boolean {
-  return budget >= FIRST_DRAW_MESHES_PER_FRAME;
+  return budget >= frameAllowance;
 }
 
 function meshCost(root: THREE.Object3D): number {

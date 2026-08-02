@@ -201,12 +201,27 @@ export class FrameGovernor {
   private floorCeiling = 1;
   private now = 0;
 
-  constructor(tuning: Partial<GovernorTuning> = {}) {
+  /**
+   * `startScalar` is where the session OPENS, and it is deliberately not 1.
+   *
+   * Opening at the ceiling means asking an unknown machine for everything the
+   * tier allows and then walking it back down while it stutters — which is what
+   * the old scaler did, and it is the wrong way round: the cost of opening one
+   * rung low is a picture that gets better after four seconds, and the cost of
+   * opening at the ceiling is a first impression of a game that hitches. The
+   * levers this spends are the invisible ones by construction (see
+   * `resolveLevers`); nothing below 0.8 of the ladder is touched.
+   */
+  constructor(tuning: Partial<GovernorTuning> = {}, startScalar = 1) {
     this.tuning = { ...GOVERNOR_TUNING, ...tuning };
     this.ring = new Float64Array(this.tuning.windowFrames);
     this.scratch = new Float64Array(this.tuning.windowFrames);
     this.warmupLeft = this.tuning.warmupFrames;
+    this.startScalar = clamp(startScalar, 0, 1);
+    this.scalar = this.startScalar;
   }
+
+  private readonly startScalar: number;
 
   /** The 0..1 quality scalar. 1 = everything the tier allows, 0 = every runtime
    *  lever spent. Never leaves [0,1]. */
@@ -236,7 +251,7 @@ export class FrameGovernor {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
     if (!enabled) {
-      this.scalar = 1;
+      this.scalar = this.startScalar;
       this.mode = 'target';
     }
     this.clearWindow();
@@ -389,7 +404,7 @@ export class FrameGovernor {
 
   /** Match teardown / tier change. Keeps nothing. */
   reset(): void {
-    this.scalar = 1;
+    this.scalar = this.startScalar;
     this.mode = 'target';
     this.floorCeiling = 1;
     this.lastDownAt = -1e9;

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-
+import { budgeted } from './FrameBudget.js';
 /**
  * THE SHADER BILL IS DEFERRED TO FIRST DRAW. This pays it on purpose instead.
  *
@@ -234,7 +234,12 @@ export class ProgramWarmer {
     // ── 1. join what was kicked on earlier frames ────────────────────────
     // Oldest first: those have had the most wall-clock time on ANGLE's compile
     // threads, so their join is the shortest one available.
-    const joinBudget = this.boosted ? JOIN_MS_PER_FRAME_BOOST : JOIN_MS_PER_FRAME;
+    // In steady play this rides the shared frame budget (see FrameBudget): a
+    // frame that is already late must not also be asked to join six
+    // milliseconds of shader links. Floored at 2 ms, because a warmer that
+    // never joins anything is a warmer that has handed every link back to the
+    // frame that draws it — which is the hitch this class exists to remove.
+    const joinBudget = this.boosted ? JOIN_MS_PER_FRAME_BOOST : budgeted(JOIN_MS_PER_FRAME, 2);
     while (this.pending.length > 0) {
       const now = performance.now();
       // Checked BEFORE the join, never after: a join cannot be interrupted.
@@ -262,7 +267,7 @@ export class ProgramWarmer {
     let skipped = 0;
     const resume = this.walkCursor;
     let wrapped = false;
-    const kickCap = this.boosted ? KICK_PER_FRAME_BOOST : KICK_PER_FRAME;
+    const kickCap = this.boosted ? KICK_PER_FRAME_BOOST : budgeted(KICK_PER_FRAME, 2);
     scene.traverseVisible((node) => {
       if (!drawable(node)) return;
       const mesh = node;

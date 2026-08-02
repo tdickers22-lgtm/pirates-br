@@ -31,6 +31,24 @@ interface MenuControllerOptions {
   /** Queue popped — the cohort is being placed. Fires once per queue session so
    *  the game can open the CREW FOUND beat before the menu tears down. */
   onCrewFound?: () => void;
+  /** LIVE state from the frame governor, or null before a renderer exists. The
+   *  settings panel is the only place in the product that can answer "what am I
+   *  actually running", and until this existed it could not: it printed the
+   *  STARTUP tier and nothing about the resolution, the shadow map or the
+   *  ladder the machine had spent the last ten minutes walking down. */
+  getGovernorStatus?: () => GovernorStatus | null;
+}
+
+/** The subset of Renderer.getGovernorStatus the panel prints. Declared here so
+ *  the menu does not have to import the renderer. */
+export interface GovernorStatus {
+  enabled: boolean;
+  mode: 'target' | 'floor' | 'off';
+  scalar: number;
+  targetFps: number;
+  pixelRatio: number;
+  shadowMapSize: number;
+  label: string;
 }
 
 export class MenuController {
@@ -40,6 +58,10 @@ export class MenuController {
   private onMatchStartCb: (payload: MatchStartPayload) => void;
   private onReturnToMenuCb: (() => void) | null;
   private onCrewFoundCb: (() => void) | null;
+  private getGovernorStatusCb: (() => GovernorStatus | null) | null;
+  /** Polls the governor only while the panel is up — the label is live, and a
+   *  timer running behind a hidden panel is a timer nobody asked for. */
+  private governorPollTimer: number | null = null;
   /** One CREW FOUND beat per queue session (the server may repeat the payload). */
   private crewFoundFired = false;
 
@@ -122,6 +144,7 @@ export class MenuController {
     this.onMatchStartCb = opts.onMatchStart;
     this.onReturnToMenuCb = opts.onReturnToMenu ?? null;
     this.onCrewFoundCb = opts.onCrewFound ?? null;
+    this.getGovernorStatusCb = opts.getGovernorStatus ?? null;
   }
 
   init(): void {
@@ -609,6 +632,20 @@ export class MenuController {
     this.panelQueue.classList.toggle('visible', which === 'queue');
     this.panelSettings.classList.toggle('visible', which === 'settings');
     this.panelHowto.classList.toggle('visible', which === 'howto');
+    this.setGovernorPolling(which === 'settings');
+  }
+
+  /** The graphics line is LIVE while the panel is open: the governor moves on
+   *  its own, and a settings screen that prints a stale answer to "what am I
+   *  running" is worse than one that prints none. Half a second is well under
+   *  the fastest step this controller can take. */
+  private setGovernorPolling(on: boolean): void {
+    if (on && this.governorPollTimer === null && this.getGovernorStatusCb) {
+      this.governorPollTimer = window.setInterval(() => this.renderQualityNote(false), 500);
+    } else if (!on && this.governorPollTimer !== null) {
+      window.clearInterval(this.governorPollTimer);
+      this.governorPollTimer = null;
+    }
   }
 
   /**
@@ -657,12 +694,30 @@ export class MenuController {
    *  would report the choice back to them as if it were already running. */
   private readonly bootQualityVerdict = decideRenderQuality();
 
+  /**
+   * WHAT IT IS ACTUALLY RUNNING, not what it was asked for.
+   *
+   * Two different facts, and this panel used to conflate them. The TIER is a
+   * startup decision — it decides the material set every island was built with,
+   * so changing it lands on the next load. The QUALITY the machine is running
+   * right now is the frame governor's, it moves during play, and the player had
+   * no way at all to see it: a session that had walked its resolution down to
+   * 0.44 and its shadow map to 1024 still printed "Running: low — detected
+   * hardware", which was true and useless.
+   *
+   * So the line is now two sentences. The first is live. The second says who
+   * chose the tier and, if it was the player, that their choice is a CEILING
+   * the governor may still protect the floor under — because it will, and a
+   * player who has pinned 'high' and watches the resolution move deserves to
+   * have been told that rather than to discover it.
+   */
   private renderQualityNote(justChanged: boolean): void {
     const verdict = this.bootQualityVerdict;
     const why: Record<string, string> = {
       player: 'your choice',
       url: 'set by ?quality=',
       'air-class-gpu': `${verdict.rendererString ?? 'Apple silicon'} — Air class, no fan to spare`,
+      'thin-laptop': 'a HiDPI panel on a modest core count',
       'few-cores': 'few CPU cores',
       'low-memory': 'limited device memory',
       'huge-viewport': 'a very large window on a modest machine',
@@ -670,9 +725,32 @@ export class MenuController {
       default: 'detected hardware',
     };
     const detail = why[verdict.reason] ?? 'detected hardware';
-    this.settingsQualityNote.textContent = justChanged
-      ? `Takes effect next time you load the game. (Currently running: ${verdict.quality} — ${detail}.)`
-      : `Running: ${verdict.quality} — ${detail}.`;
+    const status = this.getGovernorStatusCb?.() ?? null;
+    const pinned = this.settingsQualitySelect.value !== 'auto';
+
+    const lines: string[] = [];
+    if (status) {
+      lines.push(`Now running: ${status.label}.`);
+      if (status.mode === 'floor') {
+        lines.push('This machine could not hold 60fps with every setting spent, '
+          + 'so it is holding a steady 30 rather than degrading further.');
+      }
+    }
+    if (justChanged) {
+      lines.push(`Tier takes effect next time you load the game (still on ${verdict.quality} — ${detail}).`);
+    } else if (!status) {
+      lines.push(`Tier: ${verdict.quality} — ${detail}.`);
+    } else {
+      lines.push(`Tier: ${verdict.quality} — ${detail}.`);
+    }
+    if (status?.enabled) {
+      lines.push(pinned
+        ? 'Your choice sets the CEILING. Auto still lowers resolution and detail below it '
+          + 'if this machine cannot hold the frame rate — it will never raise them past your tier.'
+        : 'Auto measures the frame and spends exactly the budget this machine has: '
+          + 'the settings you cannot see go first, resolution last.');
+    }
+    this.settingsQualityNote.textContent = lines.join(' ');
   }
 
   private applyPersistedSettings(): void {

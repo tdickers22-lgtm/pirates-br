@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { firstDrawRemaining, spendFirstDraw } from './FirstDrawBudget.js';
+import { budgeted } from './FrameBudget.js';
 
 /**
  * Island detail LOD: pay the reveal early, and in slices.
@@ -498,8 +499,13 @@ export class IslandDetailWarmer {
     // every mesh the reveal lets out ahead of it links its programs at draw
     // time instead. Compile harder until it is in front.
     const hot = this.boosted || this.reveals.has(job.id);
-    const maxPrograms = hot ? WARM_PROGRAMS_PER_CHUNK_BOOST : WARM_PROGRAMS_PER_CHUNK;
-    const msBudget = hot ? WARM_MS_PER_CHUNK_BOOST : WARM_MS_PER_CHUNK;
+    // Boosted means a ceremony owns the screen and nobody is playing, so the
+    // shared frame budget has no say: warming harder there is the entire point.
+    // In steady play the chunk moves with the frame (see FrameBudget) — a
+    // machine holding 60 gets its next island warmed sooner, and one already
+    // over budget stops being charged four milliseconds it does not have.
+    const maxPrograms = hot ? WARM_PROGRAMS_PER_CHUNK_BOOST : budgeted(WARM_PROGRAMS_PER_CHUNK, 1);
+    const msBudget = hot ? WARM_MS_PER_CHUNK_BOOST : budgeted(WARM_MS_PER_CHUNK, 2);
 
     this.textureBudgetThisFrame = WARM_TEXTURES_PER_CHUNK;
     const startedAt = performance.now();

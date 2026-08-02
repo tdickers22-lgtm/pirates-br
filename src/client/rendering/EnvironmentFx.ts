@@ -1766,7 +1766,7 @@ export class EnvironmentFx {
 
     // Impact feedback: seed splashes from the live drop xz of the two nearest
     // shells, so rings land where you can actually see streaks come down.
-    const effectScale = this.view.renderer.getEffectScale();
+    const effectScale = this.view.renderer.getRuntimeEffectScale();
     this.splashAccum += 130 * intensity * effectScale * visible * dt;
     let spawns = Math.min(14, Math.floor(this.splashAccum));
     this.splashAccum -= spawns;

@@ -5,6 +5,11 @@ import { freezeStaticParent } from './three-util.js';
 import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 import { decideRenderQuality, saveAutoTierCeiling, tierBelow, type QualityVerdict, type RenderQuality } from './QualityPreference.js';
+import {
+  FrameGovernor, resolveLevers, describeGovernor,
+  type GovernorLevers, type GovernorMode, type LeverCaps,
+} from './FrameGovernor.js';
+import { setFrameBudgetScale } from './FrameBudget.js';
 
 export type { RenderQuality };
 
@@ -75,14 +80,22 @@ export function dayNightSecondsForMatchProgress(progress: number): number {
   return (cycle - DAY_NIGHT_START_OFFSET) * DAY_NIGHT_CYCLE_SECONDS;
 }
 
-/** Below this, with resolution already on the floor, the startup tier is simply
- *  wrong for this machine and the runtime ladder starts giving quality back.
- *  Set well under the 47fps the resolution scaler chases: this rung is for a
- *  machine that cannot cope at all, not one having a rough few seconds. */
-const DISTRESS_FPS = 28;
-/** Seconds under DISTRESS_FPS, at the floor, before a rung is spent. Long on
- *  purpose — the cost of escalating too eagerly is a visibly softer image. */
-const DISTRESS_DWELL_SECONDS = 6.9;
+/**
+ * Whether the adaptive governor is allowed to touch anything this session.
+ *
+ * DEFAULT ON. It goes OFF whenever the tier was pinned with `?quality=`,
+ * because every measurement rig in this repo pins the tier on purpose and a
+ * controller quietly moving the resolution and the LOD radii underneath a
+ * census would make every count it took a reading of a different frame. The
+ * browser gate that grades the governor ITSELF asks for it back with
+ * `?governor=on`; `?governor=off` pins it off anywhere.
+ */
+function governorEnabledFor(reason: QualityVerdict['reason']): boolean {
+  const param = new URLSearchParams(window.location.search).get('governor');
+  if (param === 'off' || param === '0') return false;
+  if (param === 'on' || param === '1') return true;
+  return reason !== 'url';
+}
 
 const SKY_VERT = /* glsl */`
   varying vec3 v_dir;
@@ -442,18 +455,41 @@ export class Renderer {
   private perfTimer = 0;
   private perfFrameCount = 0;
   private perfFrameTime = 0;
-  private smoothFrameTime = 1 / 60;
-  private recoverTimer = 0;
-  /** Runtime quality ladder BELOW the startup tier: 0 = untouched, 2 = spent.
-   *  The tier itself is a one-shot guess off core count, so this is the only
-   *  thing standing between a bad guess (or a thermally throttled Mac) and a
-   *  session pinned at 13fps. */
-  private distressLevel = 0;
-  private distressTimer = 0;
-  private distressRecoverTimer = 0;
+  /**
+   * THE GOVERNOR. One controller, one notion of "too slow", and it can say what
+   * it is running — see FrameGovernor.ts for the argument and the lever order.
+   * It replaced a resolution scaler chasing 47fps off a one-second average and
+   * a separate two-rung "distress ladder" firing after 6.9s under 28fps, which
+   * measured different things, disagreed, and between them could take the
+   * picture apart in a way nothing in the client could report.
+   */
+  private readonly governor = new FrameGovernor({}, Renderer.OPENING_SCALAR);
+  private readonly governorCaps: LeverCaps = {
+    tier: this.quality,
+    maxPixelRatio: this.maxPixelRatio,
+    minPixelRatio: this.minPixelRatio,
+    baseShadowMapSize: this.quality === 'low' ? 0 : this.baseShadowMapSize,
+  };
+  /**
+   * Where the session OPENS on the ladder, before a single frame has been
+   * measured.
+   *
+   * Not 1. On a dPR-2 panel the ceiling is four times the fragments of 1.0, and
+   * opening there means handing an unknown machine everything the tier allows
+   * and then walking it back down while it stutters — which is what the old
+   * scaler's hard-coded `min(max, 1.2)` was reaching for, badly, because it
+   * only ever moved the resolution. At 0.85 the levers that are spent are the
+   * ones nobody can see (§ FrameGovernor.resolveLevers: shadow map and far
+   * dressing at `high`; a 4% resolution trim at `low`), and four seconds of
+   * frames inside budget hands all of it straight back.
+   */
+  private static readonly OPENING_SCALAR = 0.85;
+  private levers: GovernorLevers = resolveLevers(Renderer.OPENING_SCALAR, this.governorCaps);
+  private appliedShadowExtent = SHADOW_HALF_EXTENT;
   private lastStormWeather = -1;
 
   init() {
+    this.governor.setEnabled(governorEnabledFor(this.qualityVerdict.reason));
     this.scene = new THREE.Scene();
     // The scene root never moves. That matters for more than tidiness: three
     // re-composes a node's local matrix every frame when matrixAutoUpdate is
@@ -476,11 +512,8 @@ export class Renderer {
       antialias: false,
       powerPreference: 'high-performance',
     });
-    // Start BELOW the ceiling: on a dpr-2 Retina panel, opening at the max
-    // means 4x the fragments of 1.0 before the machine has proven any
-    // headroom — fanless Macs stuttered until the down-ratchet caught up.
-    // The recovery loop climbs toward maxPixelRatio when frames stay fast.
-    this.applyPixelRatio(Math.min(this.maxPixelRatio, 1.2));
+    // Open where the governor opens (see OPENING_SCALAR), not at the ceiling.
+    this.applyPixelRatio(this.levers.pixelRatio, true);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     // THE DEFAULT COSTS SECONDS, NOT MICROSECONDS. With this on, three's
     // `onFirstUse` reads two shader info logs, a program info log and the
@@ -574,8 +607,9 @@ export class Renderer {
     this.sun = new THREE.DirectionalLight(0xfff0d8, 2.75);
     this.sun.position.copy(sunWorldDir);
     this.sun.castShadow = this.quality !== 'low';
-    // Larger frustum (see SHADOW_HALF_EXTENT) needs more texels to stay crisp.
-    const shadowMapSize = this.baseShadowMapSize;
+    // Larger frustum (see SHADOW_HALF_EXTENT) needs more texels to stay crisp —
+    // and the governor owns how many of them this session opens with.
+    const shadowMapSize = this.levers.shadowMapSize || this.baseShadowMapSize;
     this.sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     this.sun.shadow.camera.near = 30;
     this.sun.shadow.camera.far = SHADOW_LIGHT_DISTANCE + 230;
@@ -617,7 +651,9 @@ export class Renderer {
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
-      this.applyPixelRatio(this.currentPixelRatio);
+      // The one caller that must reallocate at an UNCHANGED ratio: the drawing
+      // buffer has to follow the window even when the ratio has not moved.
+      this.applyPixelRatio(this.currentPixelRatio, true);
       this.renderer.setSize(window.innerWidth, window.innerHeight);
       this.postFx?.setSize(window.innerWidth, window.innerHeight);
     });
@@ -634,74 +670,114 @@ export class Renderer {
     return this.qualityVerdict;
   }
 
+  /** The TIER's effect budget. Build-time only — IslandBuilder reads this to
+   *  decide how much geometry to author, and that answer must not change while
+   *  a session is running or the same island would be two different islands. */
   getEffectScale(): number {
     return this.quality === 'low' ? 0.48 : this.quality === 'balanced' ? 0.72 : 1;
+  }
+
+  /** The tier's effect budget as the GOVERNOR currently allows it. For the
+   *  per-frame spawners (rain splashes, combat FX) only. Halved at the very
+   *  bottom of the ladder and never further: rain you cannot see falling is a
+   *  weather bug, not a saving. */
+  getRuntimeEffectScale(): number {
+    return this.getEffectScale() * this.levers.particleScale;
   }
 
   areShadowsEnabled(): boolean {
     return this.renderer?.shadowMap.enabled ?? false;
   }
 
+  /**
+   * One frame's worth of governing. Called from the game loop with the frame's
+   * dt in SECONDS, before render().
+   *
+   * Everything expensive is behind a change test. `applyLevers` writes nothing
+   * that has not moved, which matters more than it sounds: setPixelRatio is a
+   * swapchain reallocation and re-writing it every frame was 19.5 seconds of
+   * WebGLRenderer.setSize in a 180-second capture in which no window was ever
+   * resized (§9 lever 7).
+   */
   updatePerformance(dt: number) {
-    this.smoothFrameTime = THREE.MathUtils.lerp(this.smoothFrameTime, dt, 0.08);
     this.perfTimer += dt;
     this.perfFrameTime += dt;
     this.perfFrameCount++;
-    if (this.perfTimer < 1.15) return;
 
-    const avgFrameTime = this.perfFrameTime / Math.max(1, this.perfFrameCount);
-    const avgFps = 1 / Math.max(0.001, avgFrameTime);
+    this.governor.pushFrame(dt * 1000);
+    const scalar = this.governor.update(performance.now());
+    setFrameBudgetScale(this.governor.getStreamingScale());
+    this.applyLevers(resolveLevers(scalar, this.governorCaps));
+
+    // The between-sessions verdict still runs on the same one-second cadence it
+    // always did — it is answering a different question (is this the right TIER
+    // for this machine next launch) and it must not be confused by the fact
+    // that the governor has already made this session survivable.
+    if (this.perfTimer < 1.15) return;
+    const avgFps = this.perfFrameCount / Math.max(0.001, this.perfFrameTime);
     this.perfTimer = 0;
     this.perfFrameTime = 0;
     this.perfFrameCount = 0;
     this.auditionTier(avgFps);
+  }
 
-    if (avgFps < 47 || this.smoothFrameTime > 1 / 42) {
-      this.recoverTimer = 0;
-      if (this.currentPixelRatio > this.pixelRatioFloor() + 0.01) {
-        this.applyPixelRatio(Math.max(this.pixelRatioFloor(), this.currentPixelRatio - 0.08));
-        this.distressTimer = 0;
-        return;
-      }
-      // Already scraping the floor and STILL missing frames. The tier was a
-      // one-shot guess off core count at startup, so a machine that guessed
-      // wrong — or a fast one that has since thermally throttled — used to sit
-      // at 13fps forever with nothing left to give. Escalate a step.
-      if (avgFps < DISTRESS_FPS) {
-        this.distressTimer += 1.15;
-        if (this.distressTimer > DISTRESS_DWELL_SECONDS) {
-          this.distressTimer = 0;
-          this.escalateDistress();
-        }
-      } else {
-        this.distressTimer = Math.max(0, this.distressTimer - 1.15);
-      }
-      return;
-    }
+  /** The world is still arriving (or a ceremony owns the screen): sample
+   *  nothing. A frame spent building an island measures the build. */
+  setGovernorSuspended(suspended: boolean): void {
+    this.governor.setSuspended(suspended);
+  }
 
-    // Recovery must be reachable under 60Hz vsync (58fps+perfect frames never
-    // happened, so quality only ratcheted down over a session).
-    if (avgFps > 55.5 && this.smoothFrameTime < 1 / 50) {
-      this.recoverTimer += 1.15;
-      if (this.recoverTimer > 4) {
-        if (this.currentPixelRatio < this.maxPixelRatio - 0.01) {
-          this.applyPixelRatio(Math.min(this.maxPixelRatio, this.currentPixelRatio + 0.06));
-          this.recoverTimer = 0;
-        } else if (this.distressLevel > 0) {
-          // Only hand quality back once resolution is already all the way up
-          // AND has held there — the long dwell is what stops the ladder from
-          // hunting between "shadows off" and "shadows on" every few seconds.
-          this.distressRecoverTimer += 1.15;
-          if (this.distressRecoverTimer > 12) {
-            this.distressRecoverTimer = 0;
-            this.relieveDistress();
-          }
-        }
-      }
-    } else {
-      this.recoverTimer = Math.max(0, this.recoverTimer - 1.15);
-      this.distressRecoverTimer = Math.max(0, this.distressRecoverTimer - 1.15);
-    }
+  /** A frame the caller can name as a one-off — a match start, a respawn.
+   *  Cheaper and more honest than guessing which long frames were real. */
+  markFrameOneOff(): void {
+    this.governor.markOneOff();
+  }
+
+  /** What the settings panel prints, and what the browser gate reads. */
+  getGovernorStatus(): {
+    enabled: boolean;
+    mode: GovernorMode;
+    scalar: number;
+    targetFps: number;
+    medianMs: number;
+    p95Ms: number;
+    pixelRatio: number;
+    shadowMapSize: number;
+    label: string;
+  } {
+    const stats = this.governor.getStats();
+    return {
+      enabled: this.governor.isEnabled(),
+      mode: this.governor.getMode(),
+      scalar: this.governor.getScalar(),
+      targetFps: this.governor.getTargetFps(),
+      medianMs: stats.medianMs,
+      p95Ms: stats.p95Ms,
+      pixelRatio: this.currentPixelRatio,
+      shadowMapSize: this.sun?.castShadow ? this.sun.shadow.mapSize.x : 0,
+      label: describeGovernor(
+        this.quality,
+        this.qualityVerdict.reason === 'player' || this.qualityVerdict.reason === 'url',
+        this.governor.getMode(),
+        { ...this.levers, pixelRatio: this.currentPixelRatio },
+      ),
+    };
+  }
+
+  /** The levers as they stand, for the systems the renderer does not own —
+   *  Game's LOD radii, the instance-density bias, the particle budget. */
+  getFrameLevers(): GovernorLevers {
+    return this.levers;
+  }
+
+  private applyLevers(next: GovernorLevers) {
+    const prev = this.levers;
+    this.levers = next;
+    if (next.pixelRatio !== prev.pixelRatio) this.applyPixelRatio(next.pixelRatio);
+    if (next.shadowMapSize !== prev.shadowMapSize) this.applyShadowMapSize(next.shadowMapSize);
+    // shadowExtentScale is read straight out of `levers` by updateShadowFrustum
+    // — an ortho box is three numbers on a matrix, not an allocation, so there
+    // is nothing here to gate.
   }
 
   /**
@@ -765,35 +841,6 @@ export class Renderer {
   private auditionSamples = 0;
   private auditionDone = false;
 
-  /** How far the resolution scaler may drop right now. Each distress step
-   *  unlocks more headroom below the tier's nominal floor. */
-  private pixelRatioFloor(): number {
-    return this.minPixelRatio * (this.distressLevel >= 2 ? 0.75 : 1);
-  }
-
-  /**
-   * One rung DOWN the runtime ladder. The rungs are deliberately things that do
-   * NOT change any shader program key — a smaller shadow map is a reallocation,
-   * whereas switching shadows off entirely re-links every material in the scene
-   * and would cost a multi-second freeze at exactly the worst moment.
-   */
-  private escalateDistress() {
-    if (this.distressLevel >= 2) return;
-    this.distressLevel++;
-    this.distressRecoverTimer = 0;
-    if (this.distressLevel === 1) this.applyShadowMapSize(Math.max(1024, this.baseShadowMapSize / 2));
-    if (this.distressLevel === 2) this.applyPixelRatio(this.pixelRatioFloor());
-  }
-
-  /** One rung back UP, in the reverse order it was given away. */
-  private relieveDistress() {
-    if (this.distressLevel <= 0) return;
-    this.distressLevel--;
-    // Re-clamp: the floor just rose under whatever ratio we were running at.
-    this.applyPixelRatio(this.currentPixelRatio);
-    if (this.distressLevel === 0) this.applyShadowMapSize(this.baseShadowMapSize);
-  }
-
   private applyShadowMapSize(size: number) {
     if (!this.sun.castShadow || this.sun.shadow.mapSize.x === size) return;
     this.sun.shadow.mapSize.set(size, size);
@@ -803,9 +850,11 @@ export class Renderer {
     this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
   }
 
-  /** 0 = nothing given away, 2 = every runtime rung spent. Diagnostics/tests. */
+  /** 0 = nothing given away, 1 = every runtime lever spent. The old two-rung
+   *  distress ladder's diagnostic, re-expressed on the continuous scalar so the
+   *  probes that read it keep meaning the same thing. */
   getDistressLevel(): number {
-    return this.distressLevel;
+    return 1 - this.governor.getScalar();
   }
 
   /** 0 = dry, 1 = full downpour. Couples falling-rain density into the
@@ -994,16 +1043,26 @@ export class Renderer {
   /** Keeps a tight shadow ortho box centered ahead of the camera, snapped to shadow texels. */
   private updateShadowFrustum() {
     if (!this.sun.castShadow) return;
+    const halfExtent = this.shadowHalfExtent();
+    if (this.appliedShadowExtent !== halfExtent) {
+      this.appliedShadowExtent = halfExtent;
+      const cam = this.sun.shadow.camera;
+      cam.left = -halfExtent;
+      cam.right = halfExtent;
+      cam.top = halfExtent;
+      cam.bottom = -halfExtent;
+      cam.updateProjectionMatrix();
+    }
     this.camera.getWorldDirection(this.cameraForward);
     this.cameraForward.y = 0;
     if (this.cameraForward.lengthSq() < 1e-4) this.cameraForward.set(0, 0, 1);
     else this.cameraForward.normalize();
     // Anchor at sea level so wave/camera bob doesn't shift the frustum vertically.
-    this.shadowFocus.copy(this.camera.position).addScaledVector(this.cameraForward, SHADOW_HALF_EXTENT * 0.7);
+    this.shadowFocus.copy(this.camera.position).addScaledVector(this.cameraForward, halfExtent * 0.7);
     this.shadowFocus.y = 0;
 
     // Snap the focus to the shadow-texel grid in light space to stop edge crawling.
-    const texel = (SHADOW_HALF_EXTENT * 2) / this.sun.shadow.mapSize.x;
+    const texel = (halfExtent * 2) / this.sun.shadow.mapSize.x;
     this.shadowBasis.lookAt(this.activeLightDir, SHADOW_ORIGIN, SHADOW_UP);
     this.shadowBasisInv.copy(this.shadowBasis).invert();
     this.shadowFocus.applyMatrix4(this.shadowBasisInv);
@@ -1134,14 +1193,37 @@ export class Renderer {
     return this.dayAmount * 0.00112 + this.twilightAmount * 0.00146 + this.nightAmount * 0.00158;
   }
 
-  private applyPixelRatio(target: number) {
+  /**
+   * SET THE RATIO, OR DO NOTHING AT ALL.
+   *
+   * `setPixelRatio` is not a scalar assignment: three re-enters `setSize`, which
+   * resizes the drawing buffer, and the post chain resizes every one of its
+   * targets behind it. That is a swapchain reallocation, and this used to run
+   * unconditionally — including on every window `resize` event and every ladder
+   * step that landed on the ratio it was already at. A 180-second capture in
+   * which no window was ever resized spent 19,488 ms inside
+   * WebGLRenderer.setSize, with one 1,644 ms hitch attributed to it (§9 lever
+   * 7). The `force` path exists for the one caller that genuinely needs the
+   * reallocation with an unchanged ratio: an actual window resize.
+   */
+  private applyPixelRatio(target: number, force = false) {
     const deviceRatio = window.devicePixelRatio || 1;
     const viewportCap = window.innerWidth < 900 ? Math.min(this.maxPixelRatio, 0.72) : this.maxPixelRatio;
-    // The floor moves with the distress ladder, so a machine that cannot hold
-    // frames at the tier's nominal minimum is allowed to go lower still.
-    this.currentPixelRatio = clamp(Math.min(deviceRatio, target, viewportCap), this.pixelRatioFloor(), this.maxPixelRatio);
-    this.renderer?.setPixelRatio(this.currentPixelRatio);
-    this.postFx?.setPixelRatio(this.currentPixelRatio);
+    const next = clamp(Math.min(deviceRatio, target, viewportCap), this.minPixelRatio, this.maxPixelRatio);
+    // A tenth of a percent of a pixel is not a resolution change; it is a
+    // reallocation with no picture behind it.
+    if (!force && Math.abs(next - this.currentPixelRatio) < 0.001 && this.renderer) return;
+    this.currentPixelRatio = next;
+    this.renderer?.setPixelRatio(next);
+    this.postFx?.setPixelRatio(next);
+  }
+
+  /** How wide the shadow ortho box is right now. The governor shrinks it late
+   *  on the ladder: a smaller box draws fewer casters into the depth pass and
+   *  raises the texel density of the ones that are left, and it changes no
+   *  program — unlike switching shadows off, which re-links the whole scene. */
+  private shadowHalfExtent(): number {
+    return SHADOW_HALF_EXTENT * this.levers.shadowExtentScale;
   }
 }
 
