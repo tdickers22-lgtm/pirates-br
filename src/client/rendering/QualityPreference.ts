@@ -3,8 +3,8 @@
  *
  * The tier used to be one line inside Renderer: core count, device memory, CSS
  * pixels. On the fanless Air this game is built on that line returns **high** —
- * eight cores, sixteen gigabytes, a 1470x956 CSS viewport — and high means a
- * 4096 shadow map, a 96x48 sky dome, the widest LOD radii and a pixel ratio
+ * eight cores, sixteen gigabytes, a 1470x956 CSS viewport — and high means the
+ * largest shadow map in the game, a 96x48 sky dome, the widest LOD radii and a pixel ratio
  * allowed to climb to 1.75 on a dPR-2 panel, which is three times the fragments
  * of 1.0. The machine then spends the session losing that argument through the
  * distress ladder, and macOS's own compositor loses it with them: the crash in

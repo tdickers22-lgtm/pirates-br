@@ -28,10 +28,12 @@
  *   • Everything that is a fragment scales with ratio²; NOTHING else moves.
  *     Draws, triangles, and the shadow map are all invariant — 1503/1504/1505/
  *     1514 draws measured across a 0.75→1.5 sweep at dock-vista.
- *   • At `high` the shadow map is 4096², i.e. 16.78 M texels against a 0.52 M
- *     framebuffer — THIRTY-TWO screens. The resolution ladder cannot touch one
- *     texel of it. Ratio 1→0.75 at `high` reaches about **12%** of the frame's
- *     total fill+texel work.
+ *   • At `high` the shadow map was 4096², i.e. 16.78 M texels against a 0.52 M
+ *     framebuffer — THIRTY-TWO screens — and the resolution ladder cannot touch
+ *     one texel of it. Ratio 1→0.75 at `high` reached about **12%** of the
+ *     frame's total fill+texel work. (The map now OPENS at 2048², so the ladder
+ *     reaches more of the frame than it did; the asymmetry is smaller, not
+ *     gone.)
  *   • And resolution is, by a distance, the most VISIBLE thing on the list.
  *
  * So the ladder is ordered by measured saving per unit of visible loss, which
@@ -557,15 +559,20 @@ export function resolveLevers(scalar: number, caps: LeverCaps): GovernorLevers {
   const pixelRatio = mix(caps.maxPixelRatio, caps.minPixelRatio, resolutionKeep);
 
   // ── Shadow map ───────────────────────────────────────────────────────────
-  // Discrete, because a shadow map is an allocation. 16.78 M texels → 4.19 M →
-  // 2.36 M → 1.05 M. The last of those is 1024² over a 310 m box: 30 cm per
-  // texel under PCF-soft, which is soft, not broken.
+  // Discrete, because a shadow map is an allocation. The tier now OPENS at
+  // 2048² (`high`) / 1536² (`balanced`) rather than 4096² — see
+  // `Renderer.baseShadowMapSize` for why 15 cm per texel costs nothing to look
+  // at when the normal bias is a metre wide — so the rungs below it are 2.36 M
+  // and 1.05 M texels. 1024² over a 310 m box is 30 cm per texel under
+  // PCF-soft, which is soft, not broken.
+  //
+  // The first rung still has to fall above the resolution ramp's 0.78: the map
+  // is the knob the pixel ratio cannot touch a texel of, so it is spent first.
   let shadowMapSize = caps.baseShadowMapSize;
   if (hasShadows) {
     const stepped = q >= 0.8 ? caps.baseShadowMapSize
-      : q >= 0.58 ? 2048
-        : q >= 0.36 ? 1536
-          : 1024;
+      : q >= 0.55 ? 1536
+        : 1024;
     shadowMapSize = Math.min(caps.baseShadowMapSize, stepped);
   }
 

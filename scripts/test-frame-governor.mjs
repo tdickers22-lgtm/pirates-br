@@ -41,8 +41,9 @@ function section(name) { console.log(`\n${name}`); }
 
 const CAPS = {
   low: { tier: 'low', maxPixelRatio: 0.62, minPixelRatio: 0.44, baseShadowMapSize: 0 },
-  balanced: { tier: 'balanced', maxPixelRatio: 1.15, minPixelRatio: 0.58, baseShadowMapSize: 2048 },
-  high: { tier: 'high', maxPixelRatio: 1.25, minPixelRatio: 0.8, baseShadowMapSize: 4096 },
+  // The tiers' OPENING shadow maps, as Renderer.baseShadowMapSize sets them.
+  balanced: { tier: 'balanced', maxPixelRatio: 1.15, minPixelRatio: 0.58, baseShadowMapSize: 1536 },
+  high: { tier: 'high', maxPixelRatio: 1.25, minPixelRatio: 0.8, baseShadowMapSize: 2048 },
 };
 
 /** A machine whose frame time responds to the levers the way §8.1 says. */

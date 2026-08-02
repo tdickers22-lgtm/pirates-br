@@ -448,7 +448,27 @@ export class Renderer {
   private readonly minPixelRatio = this.quality === 'low' ? 0.44 : this.quality === 'balanced' ? 0.58 : 0.8;
   private readonly maxPixelRatio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO[this.quality]);
   private currentPixelRatio = 1;
-  private readonly baseShadowMapSize = this.quality === 'high' ? 4096 : 2048;
+  /**
+   * THE SHADOW MAP WAS THIRTY-TWO TIMES THE SIZE OF THE SCREEN.
+   *
+   * 4096² over the 310 m ortho box (see SHADOW_HALF_EXTENT) is 16,777,216
+   * texels a frame at 7.6 cm each — 32.4× the 960×540 framebuffer's pixel
+   * count, 112.0 MB of the 160.5 MB of render-target residency, and a knob the
+   * resolution ladder cannot touch a single texel of. It was the largest single
+   * fill item in the game by an order of magnitude.
+   *
+   * WHY 15 CM PER TEXEL COSTS NOTHING TO LOOK AT: `shadow.normalBias` is 1.0 m
+   * at `high` and 1.8 m at `balanced`, in WORLD units. At 4096 that bias was
+   * already 13 texels wide — every contact edge the extra resolution could have
+   * resolved was being pushed a metre off the caster before it was sampled, and
+   * then softened again by PCFSoft. The map was paying for precision the bias
+   * had already spent.
+   *
+   * 2048² is 4.19 M texels and 28.0 MB; `balanced` at 1536² is 2.36 M and
+   * 15.75 MB. The governor's ladder steps down from whichever of those the tier
+   * opened with.
+   */
+  private readonly baseShadowMapSize = this.quality === 'high' ? 2048 : 1536;
   private postFx: PostFx | null = null;
   private readonly shadowFocus = new THREE.Vector3();
   private readonly shadowBasis = new THREE.Matrix4();
@@ -546,6 +566,7 @@ export class Renderer {
     this.renderer.debug.checkShaderErrors = shaderErrorsForced();
     this.renderer.shadowMap.enabled = this.quality !== 'low';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.installShadowPassGate();
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -922,8 +943,93 @@ export class Renderer {
   private auditionSamples = 0;
   private auditionDone = false;
 
+  // ── THE SHADOW PASS THAT DRAWS NOTHING ─────────────────────────────────────
+  // The ortho box is 310 m of sea level around a point ahead of the camera, and
+  // out on open water it is EMPTY: the phase-1 model measured 0 caster draws at
+  // both `open-sea` and `storm-sea` — and the map was cleared, in full, every
+  // frame anyway. At `high` that is 4.19 M texels of clear (16.78 M before the
+  // size cut above) bought with nothing in them.
+  //
+  // `autoUpdate` and `needsUpdate` are the only two shadow knobs that are NOT
+  // part of a material's program cache key. `shadowMap.enabled` is
+  // (`WebGLPrograms.getParameters` folds it in), which is why the pass is gated
+  // here rather than switched off: switching it off would re-link every
+  // material in the scene, and shader links are the hitch class this whole
+  // campaign exists to remove.
+  //
+  // Why skipping is CORRECT and not merely cheap: a pass that drew zero casters
+  // leaves the map at its clear value, "nothing is nearer than the far plane",
+  // which every shadow lookup reads as lit no matter where the light matrix has
+  // moved since. A stale EMPTY map is not stale. The moment one caster draws,
+  // the gate re-arms and the pass runs every frame again.
+  //
+  // The re-check is what bounds the mistake. After an empty pass the gate skips
+  // at most SHADOW_RECHECK_FRAMES frames and then pays for one, so a caster
+  // entering the box shows up within ~0.17 s at 60 fps — an island 150 m out,
+  // at the far edge of a box that is centred 108 m ahead of the camera.
+  private shadowSkipFrames = 0;
+  /** Frames the gate may skip after an empty pass before it must look again. */
+  private static readonly SHADOW_RECHECK_FRAMES = 10;
+  /** Casters drawn by the last depth pass that actually ran. Diagnostics read
+   *  it; the gate below is the only thing that writes it. */
+  private lastShadowPassCalls = 0;
+  private shadowPassesRun = 0;
+  private shadowPassesSkipped = 0;
+
+  private installShadowPassGate() {
+    const shadowMap = this.renderer.shadowMap as THREE.WebGLShadowMap & {
+      render: (lights: THREE.Light[], scene: THREE.Scene, camera: THREE.Camera) => void;
+    };
+    if (!shadowMap.enabled) return;
+    const info = this.renderer.info;
+    const inner = shadowMap.render.bind(shadowMap);
+    // three's `WebGLShadowMap.render` is an own function property, and the
+    // difference across it is the only place the caster draw count exists: by
+    // the time `renderer.render()` has returned, the main pass and the post
+    // chain have been added to the same counter. The decision is taken here,
+    // where the count is, rather than a frame later somewhere else.
+    shadowMap.render = (lights, scene, camera) => {
+      const before = info.render.calls;
+      inner(lights, scene, camera);
+      const drawn = info.render.calls - before;
+      this.lastShadowPassCalls = drawn;
+      this.shadowPassesRun += 1;
+      this.shadowSkipFrames = drawn === 0 ? Renderer.SHADOW_RECHECK_FRAMES : 0;
+    };
+    // From here the gate owns which frames pay for a depth pass.
+    shadowMap.autoUpdate = false;
+    shadowMap.needsUpdate = true;
+  }
+
+  /** Called once per frame, before the render, to decide whether this frame
+   *  pays for a shadow pass. */
+  private armShadowPass() {
+    const shadowMap = this.renderer.shadowMap;
+    if (!shadowMap.enabled || shadowMap.autoUpdate) return;
+    if (this.shadowSkipFrames > 0) {
+      this.shadowSkipFrames -= 1;
+      this.shadowPassesSkipped += 1;
+      shadowMap.needsUpdate = false;
+      return;
+    }
+    shadowMap.needsUpdate = true;
+  }
+
+  /** What the debug overlay prints about the gate. */
+  getShadowPassStats(): { mapSize: number; lastCasterDraws: number; run: number; skipped: number } {
+    return {
+      mapSize: this.sun?.castShadow ? this.sun.shadow.mapSize.x : 0,
+      lastCasterDraws: this.lastShadowPassCalls,
+      run: this.shadowPassesRun,
+      skipped: this.shadowPassesSkipped,
+    };
+  }
+
   private applyShadowMapSize(size: number) {
     if (!this.sun.castShadow || this.sun.shadow.mapSize.x === size) return;
+    // A resize drops the target, and a dropped target is blank until something
+    // renders into it: never skip the frame after one.
+    this.shadowSkipFrames = 0;
     this.sun.shadow.mapSize.set(size, size);
     // Force reallocation at the new size; the depth material is untouched, so
     // nothing recompiles.
@@ -1065,6 +1171,7 @@ export class Renderer {
     this.sunGlow.lookAt(this.camera.position);
     this.sunDisc.lookAt(this.camera.position);
     this.updateShadowFrustum();
+    this.armShadowPass();
     // Accumulate draw/tri counters across ALL passes for this frame — with
     // autoReset the post-fx composer wipes them per pass and the debug overlay
     // forever reads the final fullscreen quad ("draw 1 | tris 1").
