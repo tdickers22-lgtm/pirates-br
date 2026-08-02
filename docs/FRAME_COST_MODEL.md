@@ -211,6 +211,11 @@ the rain streaks (0.01–0.03).
 
 ### 3.2 How much of the sky nobody sees
 
+> **LANDED, phase 4.** The dome is depth-tested and pinned to the far plane, and the
+> after reading lands on this table's prediction to the decimal: 40.1% / 48.5% / 43.2%
+> against the 40.2 / 48.5 / 43.1 predicted below. `docs/FILL_AND_SHADER_PASS.md` §2.2.
+
+
 The dome was flipped to depth-tested and sorted last for a single instrumented frame,
 its stencil armed, and the pixels it still reached counted. Nothing else changed;
 `depthTest` and `renderOrder` are state, not program keys.
@@ -643,14 +648,14 @@ hitch is what the player feels and a millisecond of steady cost is not.
 | **1** | **Warm every program the tier can reach, before the match — and cut the program count** (105–155 at `high`, 58–63 at `low`). Eleven of the twelve worst hitches are `getUniforms → replaceLightNums`, three r160's deferred first-use link, being taken *during play*. `ProgramWarmup.ts` fixes the load case; nothing fixes the walk-round-a-corner case | 45 hitches / 37.6 s of a 150 s capture → 0; worst single hitch 4,672 ms | **the biggest single win available**; on the GPU path the repo's own figure for one link is 1,366–1,782 ms | same class, ~60% fewer programs to warm | none |
 | **2** | **Batch `island-decor`** — the #1 or #2 draw source in *every one of the nine scenes*, 247–668 calls. It is already instanced (227–290 instances in frame), so these are many `InstancedMesh` objects — one per prop type per island — not many props | −200 to −600 draw calls; triangles unchanged | **1.0 – 3.0 ms** (draw submission is 43% of all hitched time) | **0.6 – 1.5 ms** | **none** — identical geometry |
 | **3** | ~~**Cull the scene graph at the group level.**~~ **LANDED, and it is worth a third of what this row claimed.** The 9,201–9,388 figure counts hidden nodes three never visits (see §2): the real walk is 4,526 / 4,079 / 1,562 nodes | measured −16% (dock-vista), −6% (cave-interior), −13% (open-sea) of the per-frame traversal, not −70–80% | proportionally less than **0.5 ms** | same | none |
-| **4** | **Shadow map 4096² → 1536²**, and skip the pass when the ortho box has no casters (measured: **0** caster draws at open-sea and storm-sea, and the 4096² clear is paid anyway) | 16.78 M → 2.36 M texels/frame; 67 MB → 9.4 MB of store traffic per frame; 112 MB → 15.75 MB resident; also −201 to −561 draws | **0.6 – 1.6 ms** | 0 (no shadows) | 7.6 cm/texel → 20 cm/texel under PCF-soft — invisible at this world scale |
-| **5** | **Depth-test the sky and draw it last** (today: `depthTest:false, depthWrite:false, renderOrder:-1`, so it can never be rejected) | **−267k to −328k fragments** of a ~470-op procedural shader per frame — measured, not modelled | **0.18 – 0.22 ms** | **0.18 – 0.22 ms** | **none** — every removed pixel is covered by something else |
-| **6** | **Trim the post chain at `high`/`balanced`**: MSAA 4×→2×, bloom base 480×270→240×135, fold the grade into `OutputPass` | −0.7 M quad fragments, −10 MB/frame of resolve traffic, −33 MB resident, −2 passes | **0.2 – 0.5 ms** | 0 (no post) | bloom a shade softer; one MSAA step |
+| **4** | ~~**Shadow map 4096² → 1536²**, and skip the pass when the ortho box has no casters.~~ **LANDED at 2048², phase 4** — see `docs/FILL_AND_SHADER_PASS.md`. The size argument is not the one this row made: `shadow.normalBias` is 1.0 m at `high`, so at 4096 the bias was already thirteen texels wide and the map was paying for precision the bias had spent | 16.78 M → 4.19 M texels/frame; 117.4 MB → 29.4 MB resident; the pass itself skipped whenever it last drew nothing | — | 0 (no shadows) | none measured in the shot sheets |
+| **5** | ~~**Depth-test the sky and draw it last**~~ **LANDED, phase 4.** Not by depth-testing the sphere as authored — its 2800 m radius sits inside the ocean's 3264 m rim — but by pinning it to the far plane with `gl_Position.z = gl_Position.w` | **−267k to −328k fragments** of a ~470-op procedural shader per frame — measured, not modelled | — | — | **none** — every removed pixel is covered by something else |
+| **6** | ~~**Trim the post chain**~~ **LANDED IN PART, phase 4**: MSAA 4×→2× and the grade folded into `OutputPass`. The bloom base resolution was left at 480×270 — it is the pass whose loss is actually visible, and the other two were free | −518,400 quad fragments and one whole pass; 45.6 MB → 22.8 MB of composer residency and half the per-frame resolve | — | 0 (no post) | one MSAA step |
 | **7** | **Stop the resolution ladder reallocating the swapchain.** `applyPixelRatio` → `setPixelRatio` → `setSize` runs even when the ratio has not changed; 19.5 s of `WebGLRenderer.setSize` in a 180 s capture with no window resize, and a 1,644 ms hitch attributed to it | one swapchain realloc per ladder step → zero when the ratio is unchanged | removes a hitch class | identical | none |
 | **8** | **Cut allocation.** 207–233 KB per second of steady garbage; GC costs 1.5–8.3 ms/s and reached a **125 ms** pause | 20 hitches / 6.9 s of 147 s | **modest and uncertain** — see §6.3 and §10 | identical | none |
 | **9** | **Opaque overdraw on deck** — 1.56 layers at `high`, **1.97 at `low`**, p95 6–7, **21–31% of pixels shaded four times or more**. The most fill-expensive place in the game, and it is hull/deck/interior/rigging, not weather | up to −1.0 layer = −518k heavy fragments | **0.2 – 0.4 ms** | **0.2 – 0.4 ms** | unknown until the cause is attributed (§10) |
-| **10** | **Combat FX particle fill** — flame **0.484** + smoke **0.159** layers during a burst, 13% of the screen up to 3 deep. Cost is *fill*, not count, so shrink the quads rather than the pool | −0.3 to −0.6 layers while a keg is going off | **0.05 – 0.1 ms**, in the burst | same | `getEffectScale()` already exists (0.48 at `low`) |
-| **11** | **The storm-front cylinder** (0.12–0.43 layers **in ordinary play** — it is the safe-ring wall, always up) and the **rain haze** cylinder (0.47 in a storm) | −0.1 to −0.5 layers | **0.03 – 0.17 ms** | same | both are gameplay-legible; trim opacity and extent, not existence |
+| **10** | ~~**Combat FX particle fill**~~ **WIRED, phase 4.** The row was right that the cost is fill and not count, so the governor's `particleScale` — which CombatFx had never read at all — now lands on `gl_PointSize` as the lever's square root, and nowhere else. It is 1.0 across the whole top of the ladder: this is a knob for a machine already in distress, not a cut | up to −29% of the burst's fill at the bottom of the ladder | — | same | none until the governor is at the bottom |
+| **11** | **The storm-front cylinder** (0.19–0.28 layers re-measured **in ordinary play**) — **LANDED, phase 4**, but as an early-out rather than a trim: the wall's own profile finishes at 1.77×topY and everything above that was arriving at alpha zero through three fbm fetches. The **rain haze** (0.466 re-measured in a storm) is untouched: it is a `MeshBasicMaterial` with one texture fetch, i.e. the cheapest fragment in the frame, and its coverage IS the effect | the sky above the bank stops being shaded — 10% of the wall at ring range, 37% of it up close | — | same | **none** — no pixel that was painted stops being painted |
 | **12** | **Pixel ratio** — the knob the governor pulls first, and the smallest one at `high` | ratio² on the main pass and the post chain; **nothing at all** on the 16.8 M-texel shadow map | ratio 1→0.75 reaches ~12% of the frame's fill+texel work | at `low` it is the only fill knob, and it reaches all of it | resolution — the most visible loss on this list |
 
 ### 9.3 What NOT to spend a day on — measured, and innocent
@@ -704,10 +709,14 @@ map and the post chain, and leaves the overdraw *exactly where it was*.
    0.15–1.2 s, so the 10 Hz snapshot stream lands inside a fraction of frames. Two
    captures disagree 5× per frame and agree to 12% per second (§6.3). Splitting them
    needs a run at a realistic frame rate.
-4. **What the opaque overdraw on deck is made of.** 1.56–1.97 layers with p95 6–7 is
-   the largest un-attributed number in the model. The per-source stencil census runs on
-   blended materials by default; pointing it at the opaque set on `deck-aft` is one
-   more run and would name the layers.
+4. ~~**What the opaque overdraw on deck is made of.**~~ **ANSWERED, phase 4.**
+   `perf-cost-model.mjs --opaque deck-aft` points the per-source census at the opaque
+   set, and it is the SHIP: standing on your own deck, `ship` alone reads **1.662
+   layers over 46.0% of the framebuffer, p95 5, max 10** — roughly 87% of the deck's
+   opaque half and about two thirds of the whole frame's depth complexity. Everything
+   else is rounding: `island-decor` 0.238, the four islands in frame 0.074 between
+   them, barrels 0.002. It is not a fill fix — hull, deck, interior and rigging are
+   being shaded and then covered by each other. See `docs/FILL_AND_SHADER_PASS.md` §5.
 5. **How many times `setSize` is actually called.** 19.5 s of self time in a 180 s
    capture and one 1,644 ms hitch, but the profile gives sample hits, not call counts.
    A counting wrapper would settle whether this is 40 expensive calls or 4,000 cheap
