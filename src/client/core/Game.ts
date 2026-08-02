@@ -5208,6 +5208,15 @@ export class Game {
     }
     // Leave the allowance the way the game loop expects to find it.
     beginFirstDrawFrame();
+    // AND DROP THE LOAD GUARD. "Settled" means the load is over — that is the
+    // whole claim this hook makes — and while the guard is up ProgramWarmer
+    // holds every material it has not paid for OUT of the frame. Measured right
+    // after a settle on the software rasteriser: three consecutive frames at 70
+    // draws / 221k triangles with 1,311 materials held, then 2,332 draws the
+    // instant it dropped. A rig that settles the world and then counts a guarded
+    // frame is counting the guard.
+    this.loadGuardUntil = 0;
+    this.renderer.setLoadGuard(false);
   }
 
   /** Dev/tour hook: force the day/night clock. Pass seconds into the 960s cycle

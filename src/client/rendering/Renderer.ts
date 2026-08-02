@@ -485,6 +485,7 @@ export class Renderer {
    */
   private static readonly OPENING_SCALAR = 0.85;
   private levers: GovernorLevers = resolveLevers(Renderer.OPENING_SCALAR, this.governorCaps);
+  private appliedScalar = Renderer.OPENING_SCALAR;
   private appliedShadowExtent = SHADOW_HALF_EXTENT;
   private lastStormWeather = -1;
 
@@ -493,7 +494,8 @@ export class Renderer {
     // Re-derive before anything is built: a DISABLED governor hands back full
     // tier quality rather than the opening scalar, and the shadow map size and
     // the opening pixel ratio are both read out of `levers` below.
-    this.levers = resolveLevers(this.governor.getScalar(), this.governorCaps);
+    this.appliedScalar = this.governor.getScalar();
+    this.levers = resolveLevers(this.appliedScalar, this.governorCaps);
     this.scene = new THREE.Scene();
     // The scene root never moves. That matters for more than tidiness: three
     // re-composes a node's local matrix every frame when matrixAutoUpdate is
@@ -711,7 +713,15 @@ export class Renderer {
     this.governor.pushFrame(dt * 1000);
     const scalar = this.governor.update(performance.now());
     setFrameBudgetScale(this.governor.getStreamingScale());
-    this.applyLevers(resolveLevers(scalar, this.governorCaps));
+    // The scalar is unchanged on the overwhelming majority of frames, and
+    // `resolveLevers` allocates. Sixty objects a second for a value that moves
+    // a few times a minute is exactly the per-frame garbage §6.3 measured at
+    // 207-233 KB/s; the guard below is not an optimisation, it is not doing
+    // work that has no result.
+    if (scalar !== this.appliedScalar) {
+      this.appliedScalar = scalar;
+      this.applyLevers(resolveLevers(scalar, this.governorCaps));
+    }
 
     // The between-sessions verdict still runs on the same one-second cadence it
     // always did — it is answering a different question (is this the right TIER

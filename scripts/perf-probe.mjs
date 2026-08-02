@@ -276,7 +276,7 @@ async function measureScene(page, cam, { warmupMs, captureMs, settle = false }) 
       };
       return await new Promise((resolve) => {
         const frames = [];
-        let sumDraws = 0, sumTris = 0, samples = 0, programs = 0, peakDraws = 0, lines = 0;
+        let sumDraws = 0, sumTris = 0, samples = 0, programs = 0, peakDraws = 0, lines = 0, heldFrames = 0;
         const start = performance.now();
         let last = start;
         let firedAt = 0, fxAt = 0, fxSeq = 0;
@@ -309,20 +309,44 @@ async function measureScene(page, cam, { warmupMs, captureMs, settle = false }) 
             fxSeq++;
           }
           if (elapsed > warmup) {
-            frames.push(dt);
-            sumDraws += info.render.calls;
-            peakDraws = Math.max(peakDraws, info.render.calls);
-            sumTris += info.render.triangles;
-            lines = info.render.lines;
-            programs = info.programs?.length ?? 0;
-            samples++;
+            // A FRAME THE LOAD GUARD IS HOLDING IS NOT A COUNT OF THE SCENE.
+            //
+            // ProgramWarmer.prepare() keeps materials whose programs it has not
+            // yet paid for OUT of the frame, and the guard is armed for a
+            // five-second tail after the last thing arrives. On a GPU that tail
+            // is a few frames nobody was ever going to sample. On this machine's
+            // rasteriser a frame is two to seven SECONDS, so the tail is one to
+            // three frames — and those frames are held: measured 70 draws and
+            // 221k triangles with `heldNow: 1311`, against 2,332 draws and
+            // 2,546k the moment the guard dropped.
+            //
+            // Averaged with a real frame that reads 884 draws where the scene
+            // costs 1,726, which is a lie in the cheap direction — the same
+            // class of error as counting an unfinished LOD reveal, and the same
+            // fix: do not count until the thing being counted is all there.
+            const held = g.renderer.programWarmer?.stats?.heldNow ?? 0;
+            if (held > 0) {
+              heldFrames++;
+            } else {
+              frames.push(dt);
+              sumDraws += info.render.calls;
+              peakDraws = Math.max(peakDraws, info.render.calls);
+              sumTris += info.render.triangles;
+              lines = info.render.lines;
+              programs = info.programs?.length ?? 0;
+              samples++;
+            }
           }
-          if (elapsed >= warmup + capture) {
+          // …and never resolve on zero samples. A capture window that happened
+          // to contain nothing but held frames would otherwise report 0 draws,
+          // which every ceiling in the repo would happily pass.
+          if (elapsed >= warmup + capture && (samples > 0 || elapsed > warmup + capture + 180000)) {
             frames.sort((a, b) => a - b);
             const pct = (p) => frames[Math.min(frames.length - 1, Math.floor(frames.length * p))] ?? 0;
             const avg = frames.reduce((s, v) => s + v, 0) / Math.max(1, frames.length);
             resolve({
               frames: frames.length,
+              heldFrames,
               avgMs: avg,
               p25Ms: pct(0.25),
               medianMs: pct(0.5),
