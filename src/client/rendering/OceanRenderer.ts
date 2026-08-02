@@ -496,21 +496,50 @@ const OCEAN_FRAG = /* glsl */`
 // and level boundaries share vertex positions.
 interface LodLevel { halfExtent: number; cell: number; hole: number }
 
+/**
+ * THE OUTER RING IS ALREADY FOG.
+ *
+ * Counted, not guessed: the three rings at 'high' are 73.7k + 69.1k + 78.6k =
+ * 221.4k triangles, which the census confirms exactly on a settled frame — 20%
+ * of an open-sea view and 11% of a wide island vista. And 78.6k of it, more than
+ * a third, is the OUTER ring: water from 768 m to the grid's 3,264 m rim.
+ *
+ * That band does not get to show what it is made of. The fragment shader mixes
+ * it into the fog colour on an exponential that is 28% closed at 768 m and 74%
+ * at 2,900 m, and then into the SKY's own horizon tint on a smoothstep that is
+ * complete at 2,900 m. What survives to the eye out there is a colour gradient;
+ * the wave silhouette it is tessellated to carry is gone long before the
+ * geometry runs out.
+ *
+ * So the outer ring's cell goes from 32 m to 48 m at 'high' (78,624 -> 34,944
+ * triangles) and 64 m to 96 m at 'balanced' (19,656 -> 8,736), which takes the
+ * whole grid from 221,472 to 177,792 and from 55,368 to 44,448. 'balanced' now
+ * carries the same outer ring 'low' always had, and 'low' is untouched. The two
+ * inner rings — the water you sail through and the water a cannonball crosses —
+ * are untouched at every tier, which is where every wave anyone can resolve is.
+ *
+ * The constraint every level has to keep: hole extents are exact multiples of
+ * each cell, and the whole grid snaps to the COARSEST cell, so each level's
+ * vertices stay pinned to one world lattice and level boundaries share vertex
+ * positions. 768/48 = 16, 6528/48 = 136, and 2 and 8 both divide 48; 768/96 = 8,
+ * 6528/96 = 68, and 4 and 16 both divide 96. Break any of those and the sea
+ * swims under the camera or cracks at a seam.
+ */
 const LOD_LEVELS: Record<RenderQuality, LodLevel[]> = {
-  low: [ // ~13k verts
+  low: [ // 24,608 tris / 13,211 verts
     { halfExtent: 192, cell: 6, hole: 0 },
     { halfExtent: 768, cell: 24, hole: 192 },
     { halfExtent: 3264, cell: 96, hole: 768 },
   ],
-  balanced: [ // ~29k verts
+  balanced: [ // 44,448 tris / 23,579 verts (was 55,368 / 29,427)
     { halfExtent: 192, cell: 4, hole: 0 },
     { halfExtent: 768, cell: 16, hole: 192 },
-    { halfExtent: 3264, cell: 64, hole: 768 },
+    { halfExtent: 3264, cell: 96, hole: 768 },
   ],
-  high: [ // ~117k verts
+  high: [ // 177,792 tris / 93,267 verts (was 221,472 / 116,523)
     { halfExtent: 192, cell: 2, hole: 0 },
     { halfExtent: 768, cell: 8, hole: 192 },
-    { halfExtent: 3264, cell: 32, hole: 768 },
+    { halfExtent: 3264, cell: 48, hole: 768 },
   ],
 };
 
