@@ -1010,6 +1010,21 @@ export class Renderer {
     // chain have been added to the same counter. The decision is taken here,
     // where the count is, rather than a frame later somewhere else.
     shadowMap.render = (lights, scene, camera) => {
+      // ── EVERY FULL-SCREEN QUAD IS A `renderer.render` TOO ─────────────────
+      // `FullScreenQuad.render()` is `renderer.render(quadScene, quadCamera)`,
+      // and the post chain does fourteen of those a frame. Each one arrives
+      // here with an EMPTY shadow-light array and a scene that is one quad, so
+      // it "runs" a shadow pass, draws nothing, and — before this guard — was
+      // read as "the world has no casters". Measured: 12 of every 15 passes
+      // skipped at a dock vista that has 226 of them, with `lastCasterDraws`
+      // pinned at zero forever.
+      //
+      // A render with no shadow-casting lights, or of a scene that is not the
+      // world, is not the world's shadow pass and must not vote on it.
+      if (!lights || lights.length === 0 || scene !== this.scene) {
+        inner(lights, scene, camera);
+        return;
+      }
       // TEN FRAMES IS A SIXTH OF A SECOND AT 60 fps AND TEN SECONDS AT 1 fps.
       // The window this gate is allowed to be wrong in has to be a window in
       // TIME, or the machines that need the saving most — the ones rendering a
