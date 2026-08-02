@@ -13,6 +13,7 @@ import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { buildCaveCutout, type CaveCutout, caveCutoutHit } from './CaveMouthCutout.js';
 import type { CaveMouthCarve, IslandBuildCtx } from './context.js';
 import { ensureMeshGround, type MeshGround } from './GroundTruth.js';
+import { attachInstanceLod } from './InstanceLod.js';
 
 /** The authored boulder GLBs the portal frame and the cave rubble are built
  *  from. `a` is a rounded dome, `b` an angular leaning slab, `c` a split stack —
@@ -367,8 +368,17 @@ export function buildCaves(ctx: IslandBuildCtx) {
     const portalRockCol = isVolcanic
       ? cliffColor.clone().lerp(new THREE.Color(0x2f2823), 0.5).multiplyScalar(0.9)
       : cliffColor.clone().multiplyScalar(0.62);
-    /** Per-asset instance transforms for this island's portal frames + rubble. */
-    const portalXf = new Map<AssetName, THREE.Matrix4[]>();
+    /** Per-asset instance transforms for this island's portal frames + rubble,
+     *  each carrying the uniform scale it was seated at.
+     *
+     *  The scale rides along because the batch is going to be SORTED by it. A
+     *  portal frame is twenty rocks per mouth and they are not twenty of the
+     *  same thing: five brow crags and two jambs that stand to the crown, four
+     *  corner blocks, eight revetment courses lining the carved walls, and three
+     *  spilled rubble stones that are 0.4-1.7 m tall. Sorted biggest-first, the
+     *  instance-count LOD's pixel floor takes the rubble and the low courses off
+     *  a portal at range and never touches the jaws — see the attach below. */
+    const portalXf = new Map<AssetName, { matrix: THREE.Matrix4; scale: number }[]>();
     const rockAsset = (k: number): AssetName => PORTAL_ROCK_ASSETS[Math.min(
       PORTAL_ROCK_ASSETS.length - 1,
       Math.floor(rng(k * 137 + 11) * PORTAL_ROCK_ASSETS.length),
@@ -479,7 +489,7 @@ export function buildCaves(ctx: IslandBuildCtx) {
           xfQuat.setFromEuler(xfEuler);
           xfScale.set(sc * (0.86 + rng(k * 41) * 0.3), sc, sc * (0.86 + rng(k * 43) * 0.3));
           const list = portalXf.get(asset) ?? [];
-          list.push(new THREE.Matrix4().compose(xfPos, xfQuat, xfScale));
+          list.push({ matrix: new THREE.Matrix4().compose(xfPos, xfQuat, xfScale), scale: sc });
           portalXf.set(asset, list);
         };
         // Frame the opening OUTSIDE the carved gully (CAVE_MOUTH_TRENCH_K·cR):
@@ -877,12 +887,32 @@ export function buildCaves(ctx: IslandBuildCtx) {
       mat.metalness = 0;
       mat.flatShading = true;
       mat.needsUpdate = true;
+      // BIGGEST FIRST, for the same reason the prop scatter sorts: three draws
+      // the first `count` instances of a batch, so an ordering by scale is what
+      // makes lowering the count mean "lose the rubble" instead of "lose
+      // whatever happened to be at the end of the array". Ties break on the
+      // scale-equal ordering the placement already produced, which is identical
+      // on every client because every input to it is seeded.
+      list.sort((a, b) => b.scale - a.scale);
       const inst = new THREE.InstancedMesh(merged.geometry, mat, list.length);
       inst.name = 'cave-portal-rock';
-      list.forEach((m, k) => inst.setMatrixAt(k, m));
+      list.forEach((entry, k) => inst.setMatrixAt(k, entry.matrix));
       inst.instanceMatrix.needsUpdate = true;
       inst.castShadow = !lowDetail;
       inst.receiveShadow = true;
+      // The portal frame was the largest single triangle source in the game and
+      // nothing had ever measured it: 17.6-18.0k triangles per island in ONE
+      // draw call, on every island in frame, out to the full detail radius —
+      // 10.2% of a wide island vista and 9.6% of a cave-interior frame. It is
+      // one call, so the batcher could never help and hiding it outright would
+      // take a landmark off the horizon; the count is the only lever, and it is
+      // the right one. At 900 m the pixel floor's threshold is a 1.69 m rock, so
+      // what leaves is the spilled rubble and the shortest revetment courses,
+      // every one of them under a pixel and a half. The jaws stay to the rim of
+      // the map.
+      if (!merged.geometry.boundingBox) merged.geometry.computeBoundingBox();
+      const box = merged.geometry.boundingBox;
+      attachInstanceLod(inst, list.map((entry) => entry.scale), box ? box.max.y - box.min.y : 0);
       group.add(inst);
       portalRockCount += list.length;
     }
