@@ -70,11 +70,15 @@ const EXTRA = (arg('flags', '') || '').split(',').map((s) => s.trim()).filter(Bo
  * long-task definition, with room for the one-off WebGL context creation (a
  * measured 0.94s of the software load, and not a shader at all).
  *
- * What makes this a real gate rather than a rubber stamp is that it is not the
- * only assertion: SLICE_SLACK_MS below grades the part that IS divisible, and it
- * is the same number on both backends.
+ * The software number is set from measurement, not from taste: five clean runs
+ * put the worst task at 1366-1782ms and every one of them was, to within 2ms,
+ * the single worst link. 2000ms sits just above that and below both proofs of
+ * failure — 2385ms before the fix, 2312ms with ProgramWarmer.prepare() disabled.
+ * That is admittedly a narrow gap, which is why the ceiling is NOT carrying this
+ * gate alone: the same disabled-warmer run also failed the slice assertion's
+ * premise and the hover check. Three assertions have to be fooled at once.
  */
-const BUDGET_MS = parseInt(arg('budget', process.env.LOAD_BUDGET_MS || (IS_SOFTWARE_GL ? '1900' : '400')), 10);
+const BUDGET_MS = parseInt(arg('budget', process.env.LOAD_BUDGET_MS || (IS_SOFTWARE_GL ? '2000' : '400')), 10);
 
 /**
  * THE REAL CONTRACT, and the backend-independent one: whatever a frame spends on
