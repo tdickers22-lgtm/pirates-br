@@ -49,6 +49,14 @@ const TIME_OF_DAY = { noon: 854, dusk: 240, night: 374 };
 /** Which stands are shot, and in which session. `storm` reuses the noon clock —
  *  a storm demo at night is two changes in one frame and neither can be read. */
 const SHOTS = [
+  // A CLOSE STAND ON A DRESSED ISLAND, and the only reason it exists is the
+  // shadow map. Every other stand here is a vista, and a vista at 95 m cannot
+  // show what a shadow-map resolution change did: the shadows in it are a few
+  // pixels across. This one is at eye level inside the prop scatter, where a
+  // palm's shadow is a metre wide and its edge is the thing the texel size
+  // decides. Shot at noon (short, hard) and at dusk (long, raking), which are
+  // the two ways a shadow can go wrong.
+  { id: 'island-props', session: 'main', tod: ['noon', 'dusk'] },
   { id: 'dock-vista', session: 'main', tod: ['noon', 'dusk', 'night'] },
   { id: 'island-interior', session: 'main', tod: ['noon', 'dusk', 'night'] },
   { id: 'deck-aft', session: 'main', tod: ['noon', 'dusk', 'night'] },
@@ -57,6 +65,11 @@ const SHOTS = [
   { id: 'storm-sea', session: 'storm', tod: ['storm'] },
   { id: 'waterfall-deck', session: 'storm', tod: ['storm'] },
 ];
+
+/** Re-shoot a subset. A stand added after a set was taken needs its own before
+ *  and after, and re-running thirteen views to get one of them is an hour. */
+const ONLY = (arg('only', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+const WANTED = ONLY.length ? SHOTS.filter((s) => ONLY.includes(s.id)) : SHOTS;
 
 const SESSION_PARAMS = {
   main: ['debug', `quality=${QUALITY}`],
@@ -102,7 +115,7 @@ async function main() {
   let taken = 0;
   try {
     for (const session of ['main', 'storm']) {
-      const shots = SHOTS.filter((s) => s.session === session);
+      const shots = WANTED.filter((s) => s.session === session);
       if (!shots.length) continue;
       const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
       page.setDefaultTimeout(0);
@@ -126,7 +139,7 @@ async function main() {
           style.textContent = '#hud{opacity:0!important;visibility:hidden!important;}'
             + '#onboard-cards,#onboarding-card,#oc-card,[class*="onboard"]{display:none!important;}'
             + '#debug-perf-panel{display:none!important;}'
-            + '#disconnect-overlay,[class*="overload"]{visibility:hidden!important;}';
+            + '#disconnect-overlay,#server-load-chip,[id*="overload"],[class*="overload"]{display:none!important;}';
           document.head.appendChild(style);
         });
 
@@ -134,6 +147,20 @@ async function main() {
         const plan = planScenes(world);
         const waterfall = await page.evaluate(FIND_WATERFALL_ISLAND);
         if (waterfall) plan['waterfall-deck'] = planWaterfallDeck(waterfall);
+
+        // Standing among the props on the dressed island, looking across its
+        // middle. `planScenes`' own island-interior stand is picked for COST
+        // (the biggest island in the world) and on this seed it lands on a bare
+        // dune facing the sea, which has nothing in it to cast a shadow.
+        const dressed = world.islands.find((i) => i.hasDock) ?? world.islands[0];
+        if (dressed) {
+          const off = dressed.radius * 0.42;
+          plan['island-props'] = {
+            x: dressed.x + off, y: null, z: dressed.z + off * 0.55,
+            groundOffset: 1.7, pitch: -0.09,
+            aimAt: { x: dressed.x - off * 0.4, z: dressed.z - off * 0.3 },
+          };
+        }
 
         for (const shot of shots) {
           const cam = plan[shot.id];
