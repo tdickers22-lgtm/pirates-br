@@ -987,6 +987,10 @@ export class Renderer {
   private shadowSkipFrames = 0;
   /** Frames the gate may skip after an empty pass before it must look again. */
   private static readonly SHADOW_RECHECK_FRAMES = 10;
+  /** …and the wall-clock ceiling on the same window, which is what actually
+   *  binds on a machine mid-load. Whichever runs out first ends the skip. */
+  private static readonly SHADOW_RECHECK_MS = 250;
+  private lastShadowPassAt = 0;
   /** Casters drawn by the last depth pass that actually ran. Diagnostics read
    *  it; the gate below is the only thing that writes it. */
   private lastShadowPassCalls = 0;
@@ -1006,11 +1010,19 @@ export class Renderer {
     // chain have been added to the same counter. The decision is taken here,
     // where the count is, rather than a frame later somewhere else.
     shadowMap.render = (lights, scene, camera) => {
-      if (this.shadowSkipFrames > 0) {
+      // TEN FRAMES IS A SIXTH OF A SECOND AT 60 fps AND TEN SECONDS AT 1 fps.
+      // The window this gate is allowed to be wrong in has to be a window in
+      // TIME, or the machines that need the saving most — the ones rendering a
+      // frame a second through a load — are the ones that spend ten seconds
+      // with an island in front of them and no shadow under it.
+      const now = performance.now();
+      const stale = now - this.lastShadowPassAt > Renderer.SHADOW_RECHECK_MS;
+      if (this.shadowSkipFrames > 0 && !stale) {
         this.shadowSkipFrames -= 1;
         this.shadowPassesSkipped += 1;
         return;
       }
+      this.lastShadowPassAt = now;
       // `autoUpdate` is off (below), so three would early-return on its own
       // unless this says otherwise. Saying it here rather than a frame earlier
       // is what makes the gate hold for every caller.
