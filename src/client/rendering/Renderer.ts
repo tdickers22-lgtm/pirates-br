@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { PostFx } from './PostFx.js';
 import { initLightBudget, updateLightBudget } from './LightBudget.js';
 import { freezeStaticParent } from './three-util.js';
+import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 import { decideRenderQuality, saveAutoTierCeiling, tierBelow, type QualityVerdict, type RenderQuality } from './QualityPreference.js';
 
@@ -481,6 +482,14 @@ export class Renderer {
     // The recovery loop climbs toward maxPixelRatio when frames stay fast.
     this.applyPixelRatio(Math.min(this.maxPixelRatio, 1.2));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    // THE DEFAULT COSTS SECONDS, NOT MICROSECONDS. With this on, three's
+    // `onFirstUse` reads two shader info logs, a program info log and the
+    // LINK_STATUS the first time each program is used — four synchronous calls
+    // that each JOIN a link ANGLE is still doing on its own threads. That join
+    // is where a cold start lost 2.4s at a time. ProgramWarmer turns the flag
+    // back on around its own budgeted first-use call, so every program it warms
+    // is still fully checked; `?shadererrors` re-arms it globally for shader work.
+    this.renderer.debug.checkShaderErrors = shaderErrorsForced();
     this.renderer.shadowMap.enabled = this.quality !== 'low';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -938,11 +947,34 @@ export class Renderer {
     // forever reads the final fullscreen quad ("draw 1 | tris 1").
     this.renderer.info.autoReset = false;
     this.renderer.info.reset();
-    if (this.postFx) {
-      this.postFx.render();
-    } else {
-      this.renderer.render(this.scene, this.camera);
+    // Pay three's deferred first-use bill for a few programs, and hold back the
+    // ones that were not paid for — see ProgramWarmup. prepare()/release() are
+    // written here, around the one render call, so they cannot drift apart: a
+    // release that does not run leaves materials hidden.
+    this.programWarmer.prepare(this.renderer, this.scene, this.camera);
+    try {
+      if (this.postFx) {
+        this.postFx.render();
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
+    } finally {
+      this.programWarmer.release();
     }
+  }
+
+  /** Pre-pays shader program links so no frame of the load has to. */
+  readonly programWarmer = new ProgramWarmer();
+
+  /** True while the load path must not block: the gate holds unwarmed materials
+   *  out of a frame rather than letting them link inside it. */
+  setLoadGuard(active: boolean): void {
+    this.programWarmer.setGuard(active);
+  }
+
+  /** Warm harder — a ceremony owns the screen and nobody is playing. */
+  setWarmBoost(boosted: boolean): void {
+    this.programWarmer.setBoosted(boosted);
   }
 
   /** Per-frame atmosphere snapshot for the ocean/other systems. Returned objects are reused. */

@@ -2647,6 +2647,40 @@ export class Game {
   /** Sea rocks still to be built, spread out for the same reason as islands. */
   private pendingSeaRockBuilds: SeaRock[] = [];
 
+  /**
+   * THE LOAD MUST YIELD, and this is the switch that says when "the load" is.
+   *
+   * The freeze the player reported lives entirely between opening the page and
+   * getting first control: the menu's own hover took 1.5s to be acknowledged,
+   * single main-thread tasks ran 2.4s, and the whole of it was three linking
+   * shader programs inside the frame that first drew them (see ProgramWarmup).
+   * While this is up, the renderer refuses to draw a material whose program it
+   * has not already paid for — the frame renders without it and the next frame
+   * pays. That is the difference between a load that tries to warm and a load
+   * that cannot block.
+   *
+   * It comes back DOWN once the world has arrived, because holding a material
+   * out of a frame during play would be a visible pop for no benefit, and the
+   * walk that finds them is not free. Steady state has its own machinery: the
+   * per-frame first-draw allowance and the island LOD warmer.
+   */
+  private updateLoadGuard(now: number): void {
+    const loading = !this.inMatch
+      || this.isStartCeremonyActive()
+      || this.getWorldBuildBacklog() > 0;
+    // A tail, because the last island's build frame is not the last frame that
+    // draws something for the first time — its reveal is paced out behind it.
+    if (loading) this.loadGuardUntil = now + Game.LOAD_GUARD_TAIL_MS;
+    this.renderer.setLoadGuard(now < this.loadGuardUntil);
+    // Nobody is playing during the menu or the ceremony, so warm harder there:
+    // every program paid before the horn is one that cannot stall after it.
+    this.renderer.setWarmBoost(!this.inMatch || this.isStartCeremonyActive());
+  }
+
+  private loadGuardUntil = 0;
+  /** How long the guard outlives the last thing that was still arriving. */
+  private static readonly LOAD_GUARD_TAIL_MS = 5_000;
+
   /** How much of the world is still arriving: 0 = nothing left to stream. */
   getWorldBuildBacklog(): number {
     return this.pendingIslandBuilds.length
@@ -2856,6 +2890,7 @@ export class Game {
     // synchronously and freeze the tab for seconds).
     this.drainIslandBuildQueue(1);
     this.drainSeaRockBuildQueue(6);
+    this.updateLoadGuard(now);
     this.renderer.updatePerformance(dt);
     this.renderer.render();
     if (this.bugSnapRequested) {
