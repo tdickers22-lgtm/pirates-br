@@ -58,6 +58,20 @@ const CAPTURE_MS = parseInt(arg('capture', '2500'), 10);
 const ATTRIBUTE_SCENES = (arg('attribute', 'worst-case,storm-sea,waterfall-deck,dock-vista') ?? '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 const MAX_ATTRIBUTED_SOURCES = parseInt(arg('maxsources', '8'), 10);
+/** Scenes whose OPAQUE layers get the same per-source census.
+ *
+ *  The blended census answers "what is the weather costing"; this one answers
+ *  the question the model left open. `mean - blended` on a deck is 1.56 layers
+ *  at `high` and 1.97 at `low`, p95 6-7, with 21-31% of the framebuffer shaded
+ *  four times or more — the most fill-expensive place in the game, and the
+ *  largest number in the whole cost model that was never attributed to
+ *  anything. It is hull, deck, interior and rigging stacked in depth, and
+ *  saying WHICH of those is the difference between a fix and a guess.
+ *
+ *  Off by default: a source costs a whole extra scene render, and on this
+ *  backend a deck view is seconds per render. */
+const OPAQUE_SCENES = (arg('opaque', '') ?? '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 /** Name the sources to attribute instead of letting the projected-area ranking
  *  choose. The ranking is an upper BOUND, and a bound is exactly wrong about the
  *  two shapes that matter most here: a camera-facing disc whose box straddles
@@ -278,6 +292,36 @@ async function main() {
             bySource.sort((a, b) => b.meanAll - a.meanAll);
           }
 
+          // Per-source OPAQUE attribution. Ranked by DRAW CALLS rather than by
+          // projected coverage: an opaque source's layers come from how many
+          // separate surfaces of it stack in depth over one pixel, and a hull
+          // that draws four hundred times is a better candidate for that than
+          // one whose bounding box happens to be large.
+          let opaqueBySource = [];
+          if (OPAQUE_SCENES.includes(scene.id)) {
+            const candidates = inventory
+              .filter((s) => s.calls > 0)
+              .sort((a, b) => b.calls - a.calls)
+              .slice(0, MAX_ATTRIBUTED_SOURCES)
+              .map((s) => s.source);
+            for (const source of candidates) {
+              const r = await page.evaluate(async ([layers, fx, only]) => {
+                if (fx) await window.__cost.fxBurst(3);
+                return window.__cost.stencilOverdraw({ maxLayers: layers, blendedOnly: false, only });
+              }, [MAX_LAYERS, wantsFx, source]);
+              opaqueBySource.push({
+                source,
+                meanAll: r.meanAll,
+                coveredFraction: r.coveredFraction,
+                p95: r.p95,
+                max: r.max,
+                layerSum: r.layerSum,
+              });
+              console.log(`      opaque[${source}] mean ${r.meanAll.toFixed(3)} covers ${(r.coveredFraction * 100).toFixed(1)}% p95 ${r.p95} max ${r.max}`);
+            }
+            opaqueBySource.sort((a, b) => b.meanAll - a.meanAll);
+          }
+
           const row = {
             scene: scene.id, label: scene.label, quality: QUALITY,
             counts: {
@@ -294,7 +338,7 @@ async function main() {
             // blended source however small — a rain layer is two draws and half
             // the fill, and a table sorted by draw calls would never show it.
             inventory: inventory.filter((s) => s.calls >= 3 || s.blendedCalls > 0 || s.tris > 5000).slice(0, 45),
-            overdraw: { all: overdrawAll, blended: overdrawBlended, bySource },
+            overdraw: { all: overdrawAll, blended: overdrawBlended, bySource, opaqueBySource },
             tookSec: Math.round((Date.now() - t0) / 100) / 10,
           };
           rows.push(row);
