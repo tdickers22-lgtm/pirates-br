@@ -44,7 +44,7 @@ const MAX_PIXEL_RATIO: Record<RenderQuality, number> = {
  *  the short version is that the crease it hides is an artefact of the ramp's
  *  DERIVATIVE, and how coarse you can go before it shows scales with how much
  *  else is on screen. 'low' has always had 48x24 (~2.3k tris); 'high' pays 96x48
- *  (~9.2k) for a dome drawn once with depth-test off, and 'balanced' splits it. */
+ *  (~9.2k) for a dome drawn once, and 'balanced' splits it. */
 const SKY_SEGMENTS: Record<RenderQuality, { width: number; height: number }> = {
   low: { width: 48, height: 24 },
   balanced: { width: 64, height: 32 },
@@ -97,11 +97,26 @@ function governorEnabledFor(reason: QualityVerdict['reason']): boolean {
   return reason !== 'url';
 }
 
+// ── THE DOME SITS ON THE FAR PLANE, NOT IN FRONT OF THE WORLD ────────────────
+// v_dir is the object-space direction and is unaffected by what follows; only
+// the DEPTH the dome writes into the test changes.
+//
+// `gl_Position.z = gl_Position.w` lands every one of the dome's fragments at
+// ndc z = 1.0 — the far plane, exactly where a cleared depth buffer already is.
+// With depthTest on and three's default LessEqual, the dome then passes only
+// where nothing has been drawn, and is rejected before shading everywhere the
+// ocean, the terrain, a hull or a rock already wrote depth.
+//
+// This is not the same as depth-testing the sphere as authored. The sphere has
+// a 2800m radius and the ocean grid runs out to 3264m, so a depth-tested dome
+// would sit IN FRONT of the last few hundred metres of sea and paint over it.
+// Pinned to the far plane it can never be in front of anything.
 const SKY_VERT = /* glsl */`
   varying vec3 v_dir;
   void main() {
     v_dir = position;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    gl_Position.z = gl_Position.w;
   }
 `;
 
@@ -566,11 +581,36 @@ export class Renderer {
       },
       side: THREE.BackSide,
       depthWrite: false,
-      depthTest: false,
+      // See SKY_VERT. The dome used to be `depthTest: false, renderOrder: -1`,
+      // i.e. the first thing drawn and the one surface in the game that nothing
+      // could reject: it shaded EXACTLY 1.000 layers over 100.0% of the
+      // framebuffer in all nine measured scenes at both tiers, and 52-63% of
+      // that was then painted over by the ocean, the terrain or a hull. That is
+      // 267k-328k fragments of a 138-line, ~470-op procedural shader computed
+      // and thrown away in every frame at every tier — the largest single item
+      // in the fill budget after the shadow map, and the cheapest to stop.
+      depthTest: true,
+      // Stated rather than inherited: the far-plane trick is only correct under
+      // a <= comparison. Under GL_LESS every dome fragment would fail against
+      // the cleared 1.0 and the sky would be black.
+      depthFunc: THREE.LessEqualDepth,
       fog: false,
     });
     this.skyMesh = new THREE.Mesh(skyGeo, this.skyMaterial);
-    this.skyMesh.renderOrder = -1;
+    // Drawn after the WORLD's opaques rather than before them, so the depth the
+    // ocean, the terrain and the hulls wrote is already there to reject it.
+    //
+    // 100, not 1000, and the gap is load-bearing. The world draws at 0-20; the
+    // FIRST-PERSON VIEWMODEL draws at 996-1000 with `depthTest: false,
+    // depthWrite: false` on purpose (see applyViewmodelMaterialSettings — a
+    // viewmodel does not participate in world depth), and those materials are
+    // opaque, so they share this list. A sky sorted past them would be rejected
+    // by nothing and would paint over the player's own hands.
+    //
+    // Transparents are unaffected either way: three renders the whole opaque
+    // list before the whole transparent one, so rain, spray, the storm front
+    // and the sun corona still blend over sky exactly as before.
+    this.skyMesh.renderOrder = 100;
     this.skyMesh.frustumCulled = false;
     this.scene.add(this.skyMesh);
 
