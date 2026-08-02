@@ -710,7 +710,9 @@ map and the post chain, and leaves the overdraw *exactly where it was*.
 7. **The `low`-tier scaling sweep** was queued and lost when a run chain was
    interrupted, and the `high` full-resolution CPU profile ran but its JSON was never
    written (its console output is quoted verbatim in §6.1). The `high` hitch census was
-   re-run and is in §7.1. Nothing in the conclusions rests on the two that are missing:
+   re-run and is in §7.1 — though its own JSON was cut short too, so its figures come
+   from `hitch-high.log`, which holds every number quoted. Nothing in the conclusions
+   rests on the two that are missing:
    the pixel-ratio law is analytic (§8.1) and the tier comparison comes from the count
    battery, which ran at both tiers.
 8. **`combat-burst` at the forced-source attribution pass** died with *"Execution
