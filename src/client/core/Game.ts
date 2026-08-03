@@ -2754,6 +2754,39 @@ export class Game {
     // True frame time for the debug overlay (physics dt above is clamped to
     // 50ms for sim stability, which was pinning 'worst' at exactly 50.0).
     this.debugRawFrameMs = rawDtMs;
+    this.stepFrameCpu(now, dt);
+    this.renderer.render();
+    if (this.bugSnapRequested) {
+      this.bugSnapRequested = false;
+      // A full-canvas toDataURL is a synchronous readback and a PNG encode, and
+      // it lands in the NEXT frame's dt. It is a one-off the caller can name, so
+      // name it: pressing F8 must not cost the player their resolution.
+      this.renderer.markFrameOneOff();
+      this.captureBugSnap();
+    }
+    this.stepFramePost();
+    this.updateDebugPerfPanel(dt);
+
+    requestAnimationFrame((time) => this.frame(time));
+  }
+
+  /**
+   * EVERY BIT OF PER-FRAME CPU WORK THAT IS NOT THE DRAW ITSELF.
+   *
+   * Split out of `frame()` so a measurement rig can run it — and only it — a
+   * pinned number of times with a pinned dt (see `benchFrameCpu`). Per-frame
+   * ALLOCATION cannot be read off a rAF window on the software rasteriser: a
+   * frame there is 0.15-1.2s long, so the 10Hz snapshot stream and every timed
+   * subsystem land inside a fraction of the frames and get charged to them. Two
+   * captures of the same build disagreed 5x per frame that way (docs
+   * FRAME_COST_MODEL §6.3). Driving this N times with dt = 1/60 charges every
+   * amortised subsystem exactly the share of a 60fps frame it really costs, and
+   * the answer is the same on Metal and on SwiftShader because no GL is in it.
+   *
+   * Nothing may be added to `frame()` between here and `render()` without going
+   * in this method, or the allocation gate stops covering it.
+   */
+  private stepFrameCpu(now: number, dt: number) {
     this.minimapTimer -= dt;
     this.inputSendTimer -= dt;
     this.inputHeartbeatTimer -= dt;
@@ -2911,52 +2944,74 @@ export class Game {
     this.drainSeaRockBuildQueue(budgeted(6, 1));
     this.updateLoadGuard(now);
     this.renderer.updatePerformance(dt);
-    this.renderer.render();
-    if (this.bugSnapRequested) {
-      this.bugSnapRequested = false;
-      // A full-canvas toDataURL is a synchronous readback and a PNG encode, and
-      // it lands in the NEXT frame's dt. It is a one-off the caller can name, so
-      // name it: pressing F8 must not cost the player their resolution.
-      this.renderer.markFrameOneOff();
-      try {
-        const image = this.renderer.renderer.domElement.toDataURL('image/png');
-        const player = this.getLocalPlayer();
-        const ship = player?.onShipId ? this.shipsById.get(player.onShipId) : null;
-        const meta = {
-          at: new Date().toISOString(),
-          position: player?.position ?? null,
-          state: player?.state ?? null,
-          onShipId: player?.onShipId ?? null,
-          shipType: ship?.type ?? null,
-          nearestIsland: (() => {
-            let best: { id: string; d: number } | null = null;
-            for (const island of this.state?.islands ?? []) {
-              const d = dist2D(player?.position.x ?? 0, player?.position.z ?? 0, island.position.x, island.position.z);
-              if (!best || d < best.d) best = { id: island.id, d: Math.round(d) };
-            }
-            return best;
-          })(),
-          fps: Math.round(this.debugFps),
-          note: 'F8 bug snap',
-        };
-        void fetch('/bugsnap', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ image, meta }),
-        }).then(() => this.pushFeed('Bug snap saved — thanks, captain!', '#7ce38b'))
-          .catch(() => this.pushFeed('Bug snap failed to save', '#ff8a7a'));
-      } catch {
-        this.pushFeed('Bug snap failed to capture', '#ff8a7a');
-      }
-    }
+  }
+
+  /** The DOM-only tail of a frame, after the draw. Part of the CPU frame, so the
+   *  allocation bench runs it too. */
+  private stepFramePost() {
     this.updatePointerLockHint();
     // Outside every `if (!this.state)` guard: the ceremony must keep counting
     // while the join snapshot and the island builds are still landing.
     this.updateStartSequenceFrame();
-    this.updateDebugPerfPanel(dt);
-
-    requestAnimationFrame((time) => this.frame(time));
   }
+
+  /** F8, lifted out of `frame()` so the hot path is not carrying a page of
+   *  once-a-session code that a reader has to skip past to find the render. */
+  private captureBugSnap() {
+    try {
+      const image = this.renderer.renderer.domElement.toDataURL('image/png');
+      const player = this.getLocalPlayer();
+      const ship = player?.onShipId ? this.shipsById.get(player.onShipId) : null;
+      const meta = {
+        at: new Date().toISOString(),
+        position: player?.position ?? null,
+        state: player?.state ?? null,
+        onShipId: player?.onShipId ?? null,
+        shipType: ship?.type ?? null,
+        nearestIsland: (() => {
+          let best: { id: string; d: number } | null = null;
+          for (const island of this.state?.islands ?? []) {
+            const d = dist2D(player?.position.x ?? 0, player?.position.z ?? 0, island.position.x, island.position.z);
+            if (!best || d < best.d) best = { id: island.id, d: Math.round(d) };
+          }
+          return best;
+        })(),
+        fps: Math.round(this.debugFps),
+        note: 'F8 bug snap',
+      };
+      void fetch('/bugsnap', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ image, meta }),
+      }).then(() => this.pushFeed('Bug snap saved — thanks, captain!', '#7ce38b'))
+        .catch(() => this.pushFeed('Bug snap failed to save', '#ff8a7a'));
+    } catch {
+      this.pushFeed('Bug snap failed to capture', '#ff8a7a');
+    }
+  }
+
+  /**
+   * MEASUREMENT HOOK — run the per-frame CPU work `count` times at a pinned dt,
+   * with no draw and no rAF, so a heap sample either side is per-frame
+   * allocation and nothing else. Returns the wall time it took (ADVISORY).
+   *
+   * Reachable only through `window.__piratesBR`; the game loop never calls it.
+   * See `stepFrameCpu` for why a rAF window cannot answer this question here.
+   */
+  benchFrameCpu(count = 240, dt = 1 / 60): number {
+    const t0 = performance.now();
+    for (let i = 0; i < count; i++) {
+      // A synthetic clock, advanced by the same dt the step is charged, so every
+      // `performance.now()`-gated subsystem inside sees a coherent 60fps frame
+      // even though the loop runs far faster than real time.
+      this.benchClockMs += dt * 1000;
+      this.stepFrameCpu(this.benchClockMs, dt);
+      this.stepFramePost();
+    }
+    return performance.now() - t0;
+  }
+
+  private benchClockMs = performance.now();
 
   private setupDebugPerfPanel() {
     if (!this.debugPerfEnabled || this.debugPerfPanel) return;
