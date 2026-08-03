@@ -828,6 +828,7 @@ export class Game {
       get ownShipObjectiveActive() { return self.ownShipObjectiveActive; },
       get visibleInteractKind() { return self.visibleInteractKind; },
       set visibleInteractKind(v) { self.visibleInteractKind = v; },
+      getServerClock: () => this.network.getServerClock(),
       findNearbyCannonIndex: (player, ship) => findNearbyCannonIndex(player, ship),
       findRepairableHole: (player, ship) => this.findRepairableHole(player, ship),
       flashIslandBanner: (name) => this.flashIslandBanner(name),

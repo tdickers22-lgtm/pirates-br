@@ -72,18 +72,16 @@ const THROTTLE = Number.parseInt(arg('throttle', '20'), 10);
 const STALL_MS = Number.parseInt(arg('stall', '1400'), 10);
 const SECONDS = Number.parseInt(arg('seconds', '25'), 10);
 /**
- * MUTATION PROOF (`--mutate`). A gate that cannot fail is not a gate, and this one
- * asserts a NEGATIVE — that something did not happen — which is the easiest kind
- * to pass by accident. So the mutation reproduces the exact mechanism the gate is
- * afraid of: the snapshot handlers are unhooked, so the client keeps drawing and
- * keeps receiving but stops APPLYING, `serverTime` stops advancing while the wall
- * clock does not, and the deficit climbs at one second per second. That is what a
- * client too busy to drain its own stream would look like from inside the
- * detector's arithmetic. This run must go red.
+ * MUTATION PROOF (`--mutate`). A gate that asserts a NEGATIVE — that something did
+ * not happen — is the easiest kind to pass by accident, so it has to be shown
+ * failing. The mutation freezes the SIM clock while snapshots keep arriving: the
+ * wall advances, `serverTime` does not, and the deficit climbs at one second per
+ * second. That is precisely the condition the chip exists for — a sim dilating
+ * under load — so this run must go red, and a build in which it does not has lost
+ * the warning altogether.
  *
- * That it goes red under --mutate and green under a 1.8s frame is the whole
- * finding: the chip is honest as long as snapshots are still being applied, and a
- * slow client still applies them, because both coalescers hold the NEWEST.
+ * Green under a 1.8s frame and red under a frozen sim clock is the whole point:
+ * the chip fires on the server's clock and on nothing else.
  */
 const MUTATE = argv.includes('--mutate');
 const VIEWPORT = { width: 480, height: 270 };
@@ -149,11 +147,17 @@ async function main() {
 
     if (MUTATE) {
       await page.evaluate(() => {
-        const g = window.__piratesBR;
-        g.network.onSnapshot = () => {};
-        g.network.onHotSnapshot = () => {};
+        const net = window.__piratesBR.network;
+        const real = net.getServerClock.bind(net);
+        let frozen = null;
+        net.getServerClock = () => {
+          const c = real();
+          if (!c) return c;
+          if (frozen === null) frozen = c.server;
+          return { server: frozen, at: c.at };
+        };
       });
-      console.log('  --mutate: snapshot application unhooked; this run MUST fail');
+      console.log('  --mutate: the sim clock is frozen while snapshots keep arriving; this run MUST fail');
     }
     await page.evaluate((ms) => {
       const w = window.__slh;

@@ -44,6 +44,9 @@ export type HudView = {
   /** True until the player first boards their own hull — drives the first
    *  objective line ("board your ship") and the world/minimap marker. */
   readonly ownShipObjectiveActive: boolean;
+  /** The newest (sim time, local time) pair as read off the socket — see
+   *  NetworkClient.getServerClock. The overload detector's only input. */
+  getServerClock(): { server: number; at: number } | null;
   findNearbyCannonIndex(player: Player, ship: Ship): number | null;
   findRepairableHole(player: Player, ship: Ship): ShipHole | null;
   flashIslandBanner(name: string): void;
@@ -183,21 +186,24 @@ export class HudController {
   private static readonly SIM_TRIP_DWELL_MS = 1_500;
 
   private simRateSamples: Array<{ server: number; wall: number }> = [];
-  private lastSampledServerTime = -1;
+  /** Local timestamp of the newest snapshot already counted, so one arrival is
+   *  never sampled twice. See the note in updateServerLoadChip on why this is
+   *  keyed on the arrival and not on the sim time it carried. */
+  private lastSampledServerFrameAt = -1;
   private simTripSince = 0;
   private overloadChip: HTMLDivElement | null = null;
   private overloadShown = false;
 
   /**
-   * Clear the sampler WHOLE. lastSampledServerTime has to go back to -1 with the
-   * samples: it is the "have I already counted this reading" gate, so leaving it
+   * Clear the sampler WHOLE. The "already counted" mark has to go back to -1 with
+   * the samples: it is the "have I already counted this reading" gate, so leaving it
    * behind on a reset means the very next reading looks like a duplicate, no
    * sample is ever taken again, and the detector goes silently blind. Found
    * exactly that way — the chip stopped being able to re-arm after a reset.
    */
   private resetSimRateTracking(): void {
     this.simRateSamples.length = 0;
-    this.lastSampledServerTime = -1;
+    this.lastSampledServerFrameAt = -1;
     this.simTripSince = 0;
   }
 
@@ -211,9 +217,24 @@ export class HudController {
       this.setOverloadChip(false);
       return;
     }
-    if (state.serverTime !== this.lastSampledServerTime) {
-      this.lastSampledServerTime = state.serverTime;
-      this.simRateSamples.push({ server: state.serverTime, wall: now });
+    // THE PAIR COMES OFF THE SOCKET, not off this frame. See
+    // NetworkClient.getServerClock: both halves of the comparison have to be read
+    // at the same instant, and the only place that is true is the message
+    // handler. Sampling `state.serverTime` against `performance.now()` here read
+    // the sim clock as of the last snapshot the renderer got round to APPLYING
+    // and the wall clock as of now, and charged the gap between them — which is
+    // this client's own frame length — to the server.
+    const clock = this.view.getServerClock();
+    if (!clock) return;
+    // Keyed on the ARRIVAL, not on the sim time it carried. Keying on the sim
+    // time means a sim that has stopped dead pushes no further samples at all,
+    // the window never widens, and the one condition the chip exists for becomes
+    // the one condition it cannot see. Arrivals keep coming while the sim is
+    // frozen — that is what the freeze looks like from out here — so the window
+    // widens with a flat server clock and the deficit climbs a second a second.
+    if (clock.at !== this.lastSampledServerFrameAt) {
+      this.lastSampledServerFrameAt = clock.at;
+      this.simRateSamples.push({ server: clock.server, wall: clock.at / 1000 });
     }
     while (this.simRateSamples.length > 2
       && now - this.simRateSamples[0].wall > HudController.SIM_RATE_WINDOW_SEC) {
@@ -222,9 +243,14 @@ export class HudController {
     const first = this.simRateSamples[0];
     const last = this.simRateSamples[this.simRateSamples.length - 1];
     if (!first || !last) return;
-    // Measure against NOW, not against the newest sample: a server that has gone
-    // quiet altogether owes exactly as much sim time as one that is crawling.
-    const wallSpan = now - first.wall;
+    // Sample to sample, both ends stamped on the socket. This deliberately no
+    // longer measures against `now`: that term existed so a server which had gone
+    // SILENT would owe as much as one that was crawling, but silence and a client
+    // that cannot get round to reading its socket are indistinguishable from in
+    // here, and a client is the far commoner cause. A server that has genuinely
+    // stopped sending is a dead connection, which this client already reports as
+    // one — the socket's own silence budget closes it and the menu says so.
+    const wallSpan = last.wall - first.wall;
     if (wallSpan < HudController.SIM_RATE_WINDOW_SEC * 0.5) return;
     const deficit = wallSpan - (last.server - first.server);
 

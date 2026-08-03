@@ -221,6 +221,7 @@ export class NetworkClient {
     this.joined = false;
     this.stopHeartbeat();
     this.latencyMs = null;
+    this.serverClock = null;
     this.pendingSnapshot = null;
     this.snapshotFlushQueued = false;
     this.onConnectionClosed?.();
@@ -246,12 +247,18 @@ export class NetworkClient {
         this.onJoin?.(p.playerId, p.shipId, p.snapshot);
         break;
       }
-      case 'state_snapshot':
-        this.queueSnapshot(msg.payload as GameState);
+      case 'state_snapshot': {
+        const p = msg.payload as GameState;
+        this.noteServerClock(p.serverTime);
+        this.queueSnapshot(p);
         break;
-      case 'state_hot':
-        this.queueHotSnapshot(msg.payload as HotSnapshotPayload);
+      }
+      case 'state_hot': {
+        const p = msg.payload as HotSnapshotPayload;
+        this.noteServerClock(p.serverTime);
+        this.queueHotSnapshot(p);
         break;
+      }
       case 'player_downed': this.onPlayerDowned?.(msg.payload as Parameters<NonNullable<typeof this.onPlayerDowned>>[0]); break;
       case 'revive_complete': this.onReviveComplete?.(msg.payload as Parameters<NonNullable<typeof this.onReviveComplete>>[0]); break;
       case 'player_hit': this.onPlayerHit?.(msg.payload); break;
@@ -296,6 +303,38 @@ export class NetworkClient {
       case 'stats_update': this.onStatsUpdate?.(msg.payload as PlayerStatsRecord); break;
       case 'pong': this.notePong(msg.payload); break;
     }
+  }
+
+  /**
+   * THE SIM CLOCK, PAIRED WITH OURS AT THE MOMENT IT CAME OFF THE SOCKET.
+   *
+   * The overload detector's whole question is whether the server's sim time
+   * advances as fast as the wall clock. Answering it needs the two clocks read
+   * at the SAME instant, and the only place that is true is here, in the message
+   * handler, before the snapshot goes into the rAF coalescing slot.
+   *
+   * Taking the pair later — when the snapshot is applied, or when the HUD next
+   * gets a turn — quantises the local half by the frame length and the server
+   * half not at all, and the difference between the two is charged to the
+   * server. Measured: on a client held at 1.8s a frame, that error raised
+   * "SERVER OVERLOADED — sim 1s behind" against a server that had not missed a
+   * tick, in two runs out of five. The accusation was manufactured entirely by
+   * the client's own frame length, and it is pointed at somebody else's machine.
+   */
+  private serverClock: { server: number; at: number } | null = null;
+
+  /** The newest (sim time, local time) pair, or null before the first snapshot. */
+  getServerClock(): { server: number; at: number } | null {
+    return this.serverClock;
+  }
+
+  private noteServerClock(serverTime: unknown): void {
+    if (typeof serverTime !== 'number' || !Number.isFinite(serverTime)) return;
+    // Monotonic: the wire is unordered enough that an older snapshot can land
+    // after a newer one, and a pair that walks the sim clock BACKWARDS reads as
+    // dilation that never happened.
+    if (this.serverClock && serverTime <= this.serverClock.server) return;
+    this.serverClock = { server: serverTime, at: performance.now() };
   }
 
   // ─── Heartbeat ───────────────────────────────────────────────
