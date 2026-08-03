@@ -132,6 +132,26 @@ async function main() {
     for (const [phase, row] of Object.entries(summary.byPhase)) {
       console.log(`  ${phase.padEnd(14)} joins ${String(row.joins).padStart(4)}  keys ${String(row.keys).padStart(4)}  ${String(row.ms).padStart(7)}ms  worst ${row.worstMs}ms`);
     }
+    // The inventory, grouped by three's own custom cache key (the last field of
+    // getProgramCacheKey) — which is where this codebase's material families
+    // announce themselves, and where a family that mints one program per float
+    // value shows up as a column of near-identical rows.
+    const family = (key) => {
+      const tail = String(key).split(',').pop() ?? '';
+      return tail.startsWith('onBeforeCompile') ? '(none)' : tail;
+    };
+    const byFamily = new Map();
+    for (const e of summary.all) {
+      const f = `${String(e.cacheKey).split(',')[0]} · ${family(e.cacheKey)}`;
+      const row = byFamily.get(f) ?? { keys: new Set(), joins: 0, ms: 0, materials: new Set() };
+      row.keys.add(e.cacheKey); row.joins += 1; row.ms += e.ms + e.preMs; row.materials.add(e.materialName || e.material);
+      byFamily.set(f, row);
+    }
+    console.log('\nPROGRAM INVENTORY by shader family (keys / joins / ms):');
+    for (const [f, row] of [...byFamily.entries()].sort((a, b) => b[1].keys.size - a[1].keys.size)) {
+      console.log(`  ${String(row.keys.size).padStart(3)} keys ${String(row.joins).padStart(3)} joins ${String(Math.round(row.ms)).padStart(6)}ms  ${f}`);
+    }
+
     const play = summary.play;
     console.log(`\nLINKED DURING PLAY: ${play.length}  (${Math.round(play.reduce((s, e) => s + e.ms, 0))}ms of joins)`);
     for (const e of play.slice(0, 60)) {

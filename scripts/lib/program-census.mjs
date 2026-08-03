@@ -43,6 +43,7 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
   if (window.__programCensus) return;
 
   const ACTIVE_UNIFORMS = 0x8B86;
+  const LINK_STATUS = 0x8B82;
   const census = {
     /** Set by the runner: 'boot' | 'load' | 'ceremony' | 'play'. */
     phase: 'boot',
@@ -80,7 +81,8 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
     /** Everything that linked after first control, worst first. */
     duringPlay() {
       this.resolve();
-      return this.events.filter((e) => e.phase === 'play').sort((a, b) => b.ms - a.ms);
+      return this.events.filter((e) => e.phase === 'play')
+        .sort((a, b) => (b.ms + b.preMs) - (a.ms + a.preMs));
     },
 
     summary() {
@@ -89,7 +91,8 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
       const keys = new Set();
       for (const e of this.events) {
         const row = (byPhase[e.phase] ??= { joins: 0, ms: 0, worstMs: 0, keys: 0 });
-        row.joins += 1; row.ms += e.ms; row.worstMs = Math.max(row.worstMs, e.ms);
+        const total = e.ms + e.preMs;
+        row.joins += 1; row.ms += total; row.worstMs = Math.max(row.worstMs, total);
         keys.add(e.cacheKey || ('gl#' + e.seq));
       }
       for (const phase of Object.keys(byPhase)) {
@@ -105,8 +108,19 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
         totalKeys: keys.size,
         livePrograms: renderer?.info?.programs?.length ?? -1,
         byPhase,
-        play: this.duringPlay().map((e) => ({
+        all: this.events.map((e) => ({
+          phase: e.phase,
           ms: Math.round(e.ms * 10) / 10,
+          preMs: Math.round(e.preMs * 10) / 10,
+          cacheKey: e.cacheKey || '(unresolved)',
+          material: e.material,
+          materialName: e.materialName,
+          object: e.object,
+          why: e.why,
+        })),
+        play: this.duringPlay().map((e) => ({
+          ms: Math.round((e.ms + e.preMs) * 10) / 10,
+          reflectMs: Math.round(e.ms * 10) / 10,
           atMs: e.controlOffsetMs === null ? null : Math.round(e.controlOffsetMs),
           cacheKey: e.cacheKey || '(unresolved)',
           shaderName: e.shaderName,
@@ -117,6 +131,16 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
           why: e.why,
         })),
       };
+    },
+
+    /** Time already spent joining this program before the reflection began.
+     *  checkShaderErrors reads LINK_STATUS and the info logs FIRST, and on a
+     *  driver without parallel compile that read is where the whole link is
+     *  paid. The warmer turns that flag on for its own joins, so without this
+     *  column every warmed join reads a dishonest 0 ms. */
+    _preMs: new WeakMap(),
+    _charge(glProgram, ms) {
+      try { this._preMs.set(glProgram, (this._preMs.get(glProgram) ?? 0) + ms); } catch {}
     },
 
     _record(glProgram, ms) {
@@ -130,6 +154,7 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
         controlOffsetMs: this.controlAt === null ? null : performance.now() - this.controlAt,
         phase: ctx ? this.phase : (this.phase === 'play' ? 'play-warm' : this.phase + '-warm'),
         ms,
+        preMs: (() => { try { return this._preMs.get(glProgram) ?? 0; } catch { return 0; } })(),
         cacheKey: '',
         shaderName: '',
         shaderType: '',
@@ -151,10 +176,21 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
     const proto = Ctor.prototype;
     const getParam = proto.getProgramParameter;
     proto.getProgramParameter = function (program, pname) {
-      if (pname !== ACTIVE_UNIFORMS) return getParam.call(this, program, pname);
+      if (pname !== ACTIVE_UNIFORMS && pname !== LINK_STATUS) return getParam.call(this, program, pname);
       const t0 = performance.now();
       const out = getParam.call(this, program, pname);
-      try { census._record(program, performance.now() - t0); } catch {}
+      const ms = performance.now() - t0;
+      try {
+        if (pname === LINK_STATUS) census._charge(program, ms);
+        else census._record(program, ms);
+      } catch {}
+      return out;
+    };
+    const infoLog = proto.getProgramInfoLog;
+    proto.getProgramInfoLog = function (program) {
+      const t0 = performance.now();
+      const out = infoLog.call(this, program);
+      try { census._charge(program, performance.now() - t0); } catch {}
       return out;
     };
     const link = proto.linkProgram;
