@@ -168,6 +168,9 @@ const MAX_LINK_WAIT_MS = 2_000;
 /** …and it is abandoned entirely once the backlog is this deep, because waiting
  *  longer then only means the guard holds more of the world out of more frames. */
 const PENDING_HIGH_WATER = 24;
+/** How far down the queue a frame will look for a link the driver has already
+ *  finished, before deciding it has nothing cheap to do. */
+const READY_SCAN = 8;
 
 type Kicked = { key: string; material: THREE.Material; at: number };
 type Owed = { mesh: THREE.Mesh; key: string; material: THREE.Material };
@@ -255,37 +258,7 @@ export class ProgramWarmer {
     // of staying awake is one throttled traverse (see IDLE_WALK_INTERVAL).
     const startedAt = performance.now();
 
-    // ── 1. join what was kicked on earlier frames ────────────────────────
-    // Oldest first: those have had the most wall-clock time on ANGLE's compile
-    // threads, so their join is the shortest one available.
-    // In steady play this rides the shared frame budget (see FrameBudget): a
-    // frame that is already late must not also be asked to join six
-    // milliseconds of shader links. Floored at 2 ms, because a warmer that
-    // never joins anything is a warmer that has handed every link back to the
-    // frame that draws it — which is the hitch this class exists to remove.
-    const joinBudget = this.boosted ? JOIN_MS_PER_FRAME_BOOST : budgeted(JOIN_MS_PER_FRAME, 2);
-    while (this.pending.length > 0) {
-      const now = performance.now();
-      // Checked BEFORE the join, never after: a join cannot be interrupted.
-      if (now - startedAt >= joinBudget) break;
-      // FIFO, so if the oldest is not linked yet neither is anything behind it —
-      // leave them all to the driver for another frame.
-      const head = this.pending[0];
-      if (this.pending.length < PENDING_HIGH_WATER
-        && now - head.at < MAX_LINK_WAIT_MS
-        && this.parallelCompile(renderer)
-        && !this.linked(renderer, head.material)) break;
-      const next = this.pending.shift()!;
-      this.pendingKeys.delete(next.key);
-      const joinStart = performance.now();
-      this.join(renderer, next.material);
-      const joinMs = performance.now() - joinStart;
-      if (joinMs > this.stats.worstJoinMs) this.stats.worstJoinMs = +joinMs.toFixed(1);
-      this.paid.add(next.key);
-      this.stats.paid += 1;
-    }
-
-    // ── 2. walk the scene for meshes that still owe ──────────────────────
+    // ── 1. walk the scene for meshes that still owe ──────────────────────
     //
     // ALL OF IT, NOT JUST WHAT IS ON SCREEN. `traverseVisible` — which this used
     // to walk — describes the frame being drawn, and the whole problem is the
@@ -336,7 +309,13 @@ export class ProgramWarmer {
     // LIGHT gather is `traverseVisible`, and the lights it gathers come from the
     // real scene passed as `targetScene`), so a hidden mesh handed to it here is
     // compiled exactly like a shown one.
-    const owing = visibleOwing.length > 0 ? [...visibleOwing, ...hiddenOwing] : hiddenOwing;
+    // A deep queue means the driver is already linking as fast as it can, and
+    // one more kick only puts another program in front of the one on screen —
+    // so past the high-water mark the walk keeps kicking what is VISIBLE and
+    // stops volunteering the rest of the world.
+    const owing = this.pending.length >= PENDING_HIGH_WATER
+      ? visibleOwing
+      : (visibleOwing.length > 0 ? [...visibleOwing, ...hiddenOwing] : hiddenOwing);
     if (owing.length > 0) {
       const chunk: THREE.Mesh[] = [];
       const kicked: Kicked[] = [];
@@ -359,6 +338,67 @@ export class ProgramWarmer {
         }
         this.stats.kicked += chunk.length;
       }
+    }
+
+    // ── 3. join what was kicked on earlier frames ────────────────────────
+    //
+    // WHAT IS ON SCREEN GOES FIRST, and this is not a refinement — it is the
+    // difference between a warmer and a queue. A join costs what a link costs,
+    // so a frame takes ONE of them; while the queue was strict FIFO, the walk
+    // filled it with material from rooms the player is not in, and the material
+    // he is looking at sat behind fifty of them until its forty frames of
+    // patience ran out and it was let through to link on screen. Warming hidden
+    // material harder made draw-time links go UP, 36 → 52 in a 90-second capture,
+    // for exactly that reason.
+    //
+    // So the frame's own walk decides the order: anything unpaid and ON SCREEN
+    // is joined before anything unpaid and out of sight. Ordering is stable
+    // within each group, so among equals it is still oldest-first — the entry
+    // with the most wall-clock time on the driver's compile threads.
+    const wantNow = new Set<string>();
+    for (const entry of visibleOwing) wantNow.add(entry.key);
+    if (wantNow.size > 0 && this.pending.length > 1) {
+      const urgent: Kicked[] = [];
+      const rest: Kicked[] = [];
+      for (const entry of this.pending) (wantNow.has(entry.key) ? urgent : rest).push(entry);
+      if (urgent.length > 0 && rest.length > 0) {
+        this.pending.length = 0;
+        this.pending.push(...urgent, ...rest);
+      }
+    }
+    // In steady play this rides the shared frame budget (see FrameBudget): a
+    // frame that is already late must not also be asked to join six milliseconds
+    // of shader links. Floored at 2 ms, because a warmer that never joins
+    // anything is a warmer that has handed every link back to the frame that
+    // draws it — which is the hitch this class exists to remove.
+    const joinBudget = this.boosted ? JOIN_MS_PER_FRAME_BOOST : budgeted(JOIN_MS_PER_FRAME, 2);
+    while (this.pending.length > 0) {
+      const now = performance.now();
+      // Checked BEFORE the join, never after: a join cannot be interrupted.
+      if (now - startedAt >= joinBudget) break;
+      // Where the driver reports link completion honestly, take the first entry
+      // that IS ready rather than blocking on the first entry in the queue: the
+      // order above is a statement of what is wanted soonest, and the entry at
+      // the front may have been kicked moments ago by the same walk that asked
+      // for it. Scanning a few places keeps the priority and stops one unfinished
+      // link from idling a frame that had other work it could have paid for.
+      let index = 0;
+      if (this.pending.length < PENDING_HIGH_WATER && this.parallelCompile(renderer)) {
+        while (index < this.pending.length && index < READY_SCAN) {
+          const candidate = this.pending[index];
+          if (now - candidate.at >= MAX_LINK_WAIT_MS || this.linked(renderer, candidate.material)) break;
+          index += 1;
+        }
+        if (index >= Math.min(this.pending.length, READY_SCAN)) break;
+      }
+      const next = this.pending.splice(index, 1)[0]!;
+      this.pendingKeys.delete(next.key);
+      const joinStart = performance.now();
+      this.join(renderer, next.material);
+      const joinMs = performance.now() - joinStart;
+      if (joinMs > this.stats.worstJoinMs) this.stats.worstJoinMs = +joinMs.toFixed(1);
+      this.paid.add(next.key);
+      this.stats.paid += 1;
     }
 
     // ── 4. hold back everything still unpaid ─────────────────────────────
