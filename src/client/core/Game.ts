@@ -4732,29 +4732,33 @@ export class Game {
         created = true;
       }
 
-      // Ship-mounted kegs re-base onto the CLIENT's ship transform from their
-      // ship-local position (like players do) — raw server world coords lag
-      // the rendered deck on a moving/turning ship and slid the keg around.
+      // A keg planted on a deck is BOLTED to it: it has a ship-local position and
+      // nothing moves it until it blows. So it is placed on the drawn hull and
+      // left there — no easing, because there is nothing to ease. This block used
+      // to say it re-based onto "the CLIENT's ship transform" and then read
+      // `kegHostShip.position`, which is the server's; the keg then chased that
+      // through a rate-28 filter and slid around the deck exactly as the crew did.
       const kegHostShip = keg.shipId ? this.shipsById.get(keg.shipId) ?? null : null;
-      if (kegHostShip && keg.localPosition) {
-        const cos = Math.cos(kegHostShip.rotation);
-        const sin = Math.sin(kegHostShip.rotation);
-        this.tempKegPos.set(
-          kegHostShip.position.x + keg.localPosition.x * cos + keg.localPosition.z * sin,
-          kegHostShip.position.y + keg.localPosition.y + 0.28,
-          kegHostShip.position.z + keg.localPosition.z * cos - keg.localPosition.x * sin,
+      const kegHull = kegHostShip ? this.readShipRenderPose(kegHostShip) : null;
+      let targetYaw = 0;
+      if (kegHull && keg.localPosition) {
+        const cos = Math.cos(kegHull.yaw);
+        const sin = Math.sin(kegHull.yaw);
+        targetYaw = kegHull.yaw;
+        mesh.root.position.set(
+          kegHull.x + keg.localPosition.x * cos + keg.localPosition.z * sin,
+          kegHull.y + keg.localPosition.y + 0.28,
+          kegHull.z + keg.localPosition.z * cos - keg.localPosition.x * sin,
         );
       } else {
         this.tempKegPos.set(keg.position.x, keg.position.y + 0.28, keg.position.z);
+        const moveAlpha = 1 - Math.exp(-28 * dt);
+        if (created || mesh.root.position.distanceToSquared(this.tempKegPos) > 16 * 16) {
+          mesh.root.position.copy(this.tempKegPos);
+        } else {
+          mesh.root.position.lerp(this.tempKegPos, moveAlpha);
+        }
       }
-      const moveAlpha = 1 - Math.exp(-28 * dt);
-      if (created || mesh.root.position.distanceToSquared(this.tempKegPos) > 16 * 16) {
-        mesh.root.position.copy(this.tempKegPos);
-      } else {
-        mesh.root.position.lerp(this.tempKegPos, moveAlpha);
-      }
-      const hostShip = keg.shipId ? this.shipsById.get(keg.shipId) ?? null : null;
-      const targetYaw = hostShip?.rotation ?? 0;
       mesh.root.rotation.y += angleWrap(targetYaw - mesh.root.rotation.y) * (1 - Math.exp(-24 * dt));
       const megaBoost = keg.mega ? 1.75 : 1;
       mesh.root.scale.setScalar(keg.mega ? 1.55 : 1);
