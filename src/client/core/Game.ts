@@ -55,6 +55,10 @@ import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
+/** Nobody else's keys are ours to read: the input-lead terms in
+ *  getPlayerRenderPosition are local-only, and this is what an opponent's axes
+ *  read as. Frozen and shared — it must never be written and never allocated. */
+const ZERO_MOVE_AXES = Object.freeze({ x: 0, z: 0 });
 /** Seconds of fuse hiss per burst; re-armed until the keg blows (SHIP.KEG_FUSE_TIME
  *  is 10s). Short bursts keep the sound tracking a keg that rides a turning deck,
  *  and stay inside SoundEngine.playKegFuse's per-call duration clamp. */
@@ -3792,29 +3796,54 @@ export class Game {
         const sin = Math.sin(ship.rotation);
         const localX = dx * cos - dz * sin;
         const localZ = dx * sin + dz * cos;
-        const shipLead = Math.min(0.16, leadSeconds + snapshotAge * (isLocal ? 1 : 0.6));
-        const predictedShipX = ship.position.x + ship.velocity.x * shipLead;
-        const predictedShipZ = ship.position.z + ship.velocity.z * shipLead;
-        const predictedShipRotation = ship.rotation + ship.angularVelocity * shipLead;
-        const predictedCos = Math.cos(predictedShipRotation);
-        const predictedSin = Math.sin(predictedShipRotation);
-        predictedX = predictedShipX + localX * predictedCos + localZ * predictedSin
+        // WELD HIM TO THE HULL THAT IS DRAWN, not to the one in the snapshot.
+        //
+        // This used to re-extrapolate the ship here, with its own lead
+        // (`min(0.16, lead + age × 0.6)` for a shipmate, ×1 for you) — a THIRD
+        // estimate of where the hull is, agreeing with neither the server's nor
+        // the renderer's. The renderer's is the only one that matters: it is the
+        // planking on the screen. Reading it costs a map lookup and makes the
+        // crew rigid with the deck by construction — whatever the hull's own
+        // extrapolation and easing do, they do to the men standing on it too.
+        const hull = this.readShipRenderPose(ship);
+        const hullCos = Math.cos(hull.yaw);
+        const hullSin = Math.sin(hull.yaw);
+        predictedX = hull.x + localX * hullCos + localZ * hullSin
           + (player.velocity.x + player.knockbackVelocity.x * 0.32) * leadSeconds;
-        predictedZ = predictedShipZ + localZ * predictedCos - localX * predictedSin
+        predictedZ = hull.z + localZ * hullCos - localX * hullSin
           + (player.velocity.z + player.knockbackVelocity.z * 0.32) * leadSeconds;
+        // …and vertically too. The drawn hull rides the wave heave and settles as
+        // she floods; the server's y does not, so the deck used to bob out from
+        // under a crew that stayed at snapshot height (0.30m mean, 1.10m worst).
+        visualY += hull.y - ship.position.y;
       }
     }
-    // Lag compensation: extrapolate from last snapshot velocity only.
-    // Do NOT add a second "input × speed × window" step on land or on ships — server velocity already
-    // matches movement input each tick; duplicating it here caused rubber-banding (shuffle back/forth).
-    if (isLocal && !player.atHelm && !player.atCannon) {
+    // DEAD RECKONING — carry the body forward at the velocity the snapshot said
+    // it had, for as long as that snapshot is the newest one we have.
+    //
+    // This block used to be gated on `isLocal`, so every OPPONENT in the game was
+    // drawn at a target that did not move at all between snapshots: frozen for
+    // 32ms, then teleported the whole 32ms of travel at once, 31 times a second.
+    // Measured by routing a genuinely walking pirate down the remote branch
+    // (scripts/test-motion-continuity.mjs): carry 0.00 against the local path's
+    // 1.00, a 0.16m jump per snapshot, 57 pixels at the range he was walking. The
+    // mesh's exponential chase smears that but cannot remove it — a low-pass over
+    // a staircase is a staircase with soft corners, and it is what makes a man
+    // running past you look like a sewing machine.
+    //
+    // Do NOT add a second "input × speed × window" step on land or on ships —
+    // server velocity already matches movement input each tick; duplicating it
+    // here caused rubber-banding (shuffle back/forth). The input-lead block below
+    // stays local-only for the same reason it always was: we have our own keys,
+    // and nobody else's.
+    if (!player.atHelm && !player.atCannon) {
       // On deck the server already couples you to the ship; full velocity×age extrapolation reads as double-counted lag.
       const deckDamp = player.onShipId ? 0.48 : 1;
       predictedX += player.velocity.x * snapshotAge * deckDamp;
       predictedZ += player.velocity.z * snapshotAge * deckDamp;
       visualY += player.velocity.y * snapshotAge * 0.3;
-      const moveAxes = this.input.getMoveAxes();
-      if (player.state !== 'swimming') {
+      const moveAxes = isLocal ? this.input.getMoveAxes() : ZERO_MOVE_AXES;
+      if (isLocal && player.state !== 'swimming') {
         const moving = moveAxes.x !== 0 || moveAxes.z !== 0;
         const inputLead = Math.min(player.onShipId ? 0.07 : 0.12, snapshotAge + leadSeconds + 0.018);
         if (moving) {
@@ -3833,7 +3862,7 @@ export class Game {
           predictedZ -= player.velocity.z * stopLead * 0.45;
         }
       }
-      if (player.state === 'swimming') {
+      if (isLocal && player.state === 'swimming') {
         const predictionWindow = Math.min(0.22, snapshotAge + leadSeconds + 0.04);
         const verticalIntent = this.input.getSwimVerticalIntent();
         if (moveAxes.x !== 0 || moveAxes.z !== 0) {
@@ -3971,6 +4000,82 @@ export class Game {
     const homeShip = player.shipId ? this.shipsById.get(player.shipId) ?? null : null;
     if (homeShip?.ownerId === player.id) return 'captain';
     return player.shipId ? 'crew' : 'raider';
+  }
+
+  /**
+   * Ease a pirate toward where he should be — ACROSS THE DECK when he is on one.
+   *
+   * Every mesh in the game chases its target with `position.lerp(target, alpha)`,
+   * which closes a fixed fraction of the remaining distance per frame. That is a
+   * first-order tracking filter, and a tracking filter following a MOVING target
+   * never catches it: it settles at a standing error of speed × time-constant. On
+   * open ground that error is the point (it is what smooths the snapshot stream).
+   * On a deck it is a disaster, because the target is moving at the speed of the
+   * SHIP — 11 m/s — and the standing error is metres of planking. It also grows
+   * with frame length, which is the wrong way round: the slower the machine, the
+   * further its crew slides.
+   *
+   * So a passenger's persistent state is his offset ON THE HULL, not his position
+   * in the world. The hull carries that offset rigidly — no filter, no lag, no
+   * speed term — and the easing is applied only to how he moves ACROSS the deck,
+   * which is a walking pace and exactly what the filter was chosen for.
+   *
+   * The stored offset is re-seeded from the world position whenever the ship
+   * under him changes (boarding, a plank walk, going over the side), so nothing
+   * can carry a stale offset from one hull onto another.
+   */
+  private easePlayerToward(
+    mesh: THREE.Group,
+    player: Player,
+    targetPos: THREE.Vector3,
+    positionAlpha: number,
+    snapDistSq: number,
+  ) {
+    const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+    const ud = mesh.userData as { deckShipId?: string | null; deckX?: number; deckZ?: number };
+    if (!ship) {
+      ud.deckShipId = null;
+      if (mesh.position.distanceToSquared(targetPos) > snapDistSq) mesh.position.copy(targetPos);
+      else mesh.position.lerp(targetPos, positionAlpha);
+      return;
+    }
+    const hull = this.readShipRenderPose(ship);
+    const cos = Math.cos(hull.yaw);
+    const sin = Math.sin(hull.yaw);
+    const tdx = targetPos.x - hull.x;
+    const tdz = targetPos.z - hull.z;
+    const targetLocalX = tdx * cos - tdz * sin;
+    const targetLocalZ = tdx * sin + tdz * cos;
+    let localX: number;
+    let localZ: number;
+    if (ud.deckShipId === ship.id) {
+      localX = ud.deckX ?? targetLocalX;
+      localZ = ud.deckZ ?? targetLocalZ;
+    } else {
+      // First frame on this hull: read his current drawn spot as an offset on it,
+      // so boarding eases from where he actually is rather than snapping.
+      const mdx = mesh.position.x - hull.x;
+      const mdz = mesh.position.z - hull.z;
+      localX = mdx * cos - mdz * sin;
+      localZ = mdx * sin + mdz * cos;
+      ud.deckShipId = ship.id;
+    }
+    const dx = targetLocalX - localX;
+    const dz = targetLocalZ - localZ;
+    if (dx * dx + dz * dz > snapDistSq) {
+      localX = targetLocalX;
+      localZ = targetLocalZ;
+    } else {
+      localX += dx * positionAlpha;
+      localZ += dz * positionAlpha;
+    }
+    ud.deckX = localX;
+    ud.deckZ = localZ;
+    mesh.position.set(
+      hull.x + localX * cos + localZ * sin,
+      mesh.position.y + (targetPos.y - mesh.position.y) * positionAlpha,
+      hull.z + localZ * cos - localX * sin,
+    );
   }
 
   private syncPlayers(dt: number) {
@@ -4144,11 +4249,7 @@ export class Game {
           targetPos.x -= Math.sin(targetYaw) * 0.62;
           targetPos.z -= Math.cos(targetYaw) * 0.62;
         }
-        if (mesh.position.distanceToSquared(targetPos) > (isLocal ? 20 * 20 : 34 * 34)) {
-          mesh.position.copy(targetPos);
-        } else {
-          mesh.position.lerp(targetPos, positionAlpha);
-        }
+        this.easePlayerToward(mesh, player, targetPos, positionAlpha, isLocal ? 20 * 20 : 34 * 34);
         mesh.rotation.y += angleWrap(targetYaw - mesh.rotation.y) * (isLocal ? 1 : rotationAlpha);
       }
 
@@ -5552,7 +5653,12 @@ export class Game {
           0,
           SHIP_STATS[trackedShip.type].height + 0.18,
         );
-      const inward = new THREE.Vector3(trackedShip.position.x, cannonWorld.y, trackedShip.position.z)
+      // Toward the centreline of the hull that is DRAWN. `cannonWorld` is the
+      // rendered gun; measuring "inward" from the server's hull centre mixes two
+      // transforms that are metres apart on a ship at speed, and the gunner's eye
+      // swings sideways as the gap opens and closes.
+      const inwardHull = this.readShipRenderPose(trackedShip);
+      const inward = new THREE.Vector3(inwardHull.x, cannonWorld.y, inwardHull.z)
         .sub(cannonWorld)
         .normalize();
       desired = cannonWorld
@@ -6870,13 +6976,38 @@ export class Game {
     }
   }
 
+  /** Scratch for {@link readShipRenderPose}: one hull pose, consumed by its caller
+   *  before the next call can overwrite it. Never held across a frame. */
+  private readonly tempHullPose = { x: 0, y: 0, z: 0, yaw: 0 };
+
+  /**
+   * The hull a ship-local point must be resolved against: the one on the screen.
+   *
+   * See ShipRenderer.readRenderedHull for why the server transform is the wrong
+   * one — in short, the drawn hull is extrapolated and then eased toward that
+   * target, so it trails `ship.position` by an amount that grows with hull speed
+   * and with frame length. Anything welded to a ship (its crew, the helmsman's
+   * eye, a corpse on the planking, the anchor a prompt points at) has to use
+   * this or it is welded to a hull nobody is looking at.
+   */
+  private readShipRenderPose(ship: Ship) {
+    const pose = this.tempHullPose;
+    if (this.shipRenderer.readRenderedHull(ship.id, pose)) return pose;
+    pose.x = ship.position.x;
+    pose.y = ship.position.y;
+    pose.z = ship.position.z;
+    pose.yaw = ship.rotation;
+    return pose;
+  }
+
   private getShipWorldPoint(ship: Ship, localX: number, localZ: number, worldY: number) {
-    const cos = Math.cos(ship.rotation);
-    const sin = Math.sin(ship.rotation);
+    const hull = this.readShipRenderPose(ship);
+    const cos = Math.cos(hull.yaw);
+    const sin = Math.sin(hull.yaw);
     return new THREE.Vector3(
-      ship.position.x + localX * cos + localZ * sin,
-      ship.position.y + worldY,
-      ship.position.z + localZ * cos - localX * sin,
+      hull.x + localX * cos + localZ * sin,
+      hull.y + worldY,
+      hull.z + localZ * cos - localX * sin,
     );
   }
 

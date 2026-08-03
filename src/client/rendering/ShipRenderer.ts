@@ -4948,6 +4948,41 @@ export class ShipRenderer {
     return this.shipMeshes.get(shipId)?.root ?? null;
   }
 
+  /**
+   * THE HULL AS DRAWN — for everything that has to stand on it.
+   *
+   * `ship.position` / `ship.rotation` are the SERVER's hull, and this renderer
+   * does not draw that. It extrapolates the hull forward by the snapshot age,
+   * adds the wave heave and the flood settle, and then EASES the mesh toward
+   * that target with a 55ms time constant (`positionAlpha`, rate 18). So a
+   * ship-local point resolved against the server transform is not a point on any
+   * hull the player can see.
+   *
+   * The gap is not small and it is not constant. It is the easing lag, so it
+   * scales with hull speed AND with frame length — the mesh closes a fixed
+   * fraction of the remaining distance per frame, so a client at 3fps leaves it
+   * open five times as wide as one at 60. Measured on the crew of a bot fleet:
+   * 0.48m mean, 1.09m at p95, 9.66m worst. Nobody welded to a hull through
+   * `ship.position` is standing where the planking is.
+   *
+   * Yaw and translation only. The hull also pitches and rolls; leaning the crew
+   * with it is a separate decision from stopping them sliding along the deck,
+   * and this is the one that has metres in it.
+   *
+   * @returns false when the hull has no mesh yet — the caller keeps the server
+   *          transform for those frames, which is what every caller did
+   *          unconditionally before this existed.
+   */
+  readRenderedHull(shipId: string, out: { x: number; y: number; z: number; yaw: number }): boolean {
+    const mesh = this.shipMeshes.get(shipId);
+    if (!mesh) return false;
+    out.x = mesh.root.position.x;
+    out.y = mesh.root.position.y;
+    out.z = mesh.root.position.z;
+    out.yaw = mesh.root.rotation.y;
+    return true;
+  }
+
   /** Per-BREACH FX attach points on the REAL planking. Each open hole exposes
    *  an empty Object3D (child of the rendered ship, so its world transform
    *  follows heave/pitch/roll/list) oriented outward along the surface normal.
