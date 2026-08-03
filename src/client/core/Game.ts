@@ -3310,7 +3310,13 @@ export class Game {
     const upgradeRadius = Math.max(INTERACTABLE_FLOOR, (quality === 'low' ? 420 : quality === 'balanced' ? 620 : 820) * dressing);
     const npcRadius = Math.max(INTERACTABLE_FLOOR, (quality === 'low' ? 360 : quality === 'balanced' ? 560 : 760) * dressing);
 
-    for (const island of this.state.islands) {
+    // Indexed through the whole LOD pass: `for…of` allocates an iterator, and
+    // this pass runs one over every island and then several more INSIDE each
+    // one. At 'high', with fourteen islands holding detail out to a kilometre,
+    // the pass measured 30 KB a frame with not one object literal in it.
+    const islands = this.state.islands;
+    for (let isl = 0; isl < islands.length; isl++) {
+      const island = islands[isl];
       const group = this.islandMeshes.get(island.id);
       if (!group) continue;
       const dist = dist2D(cam.x, cam.z, island.position.x, island.position.z);
@@ -3348,7 +3354,9 @@ export class Game {
         if (microRoot) microRoot.visible = showDetail && edgeDist < (quality === 'low' ? 180 : 260);
         const lodLayers = group.userData.lodLayers as { node: THREE.Object3D; radius: number }[] | undefined;
         if (lodLayers) {
-          for (const layer of lodLayers) layer.node.visible = showDetail && edgeDist < layer.radius;
+          for (let l = 0; l < lodLayers.length; l++) {
+            lodLayers[l].node.visible = showDetail && edgeDist < lodLayers[l].radius;
+          }
         }
         // THE TRIANGLE DIET. Everything above decides what is DRAWN; this
         // decides how much of it. An island held at full detail out to a
@@ -3374,7 +3382,8 @@ export class Game {
         // with the terrain, so the entrance always reads from across the island.
         const caveGroups = group.userData.caveGroups as THREE.Object3D[] | undefined;
         if (caveGroups) {
-          for (const caveGroup of caveGroups) {
+          for (let c = 0; c < caveGroups.length; c++) {
+            const caveGroup = caveGroups[c];
             const e = caveGroup.userData.caveEntranceWorld as { x: number; y: number; z: number };
             const cd = dist2D(cam.x, cam.z, e.x, e.z);
             caveGroup.visible = showDetail && cd < 45;
@@ -3384,7 +3393,8 @@ export class Game {
         // LIGHTS by camera distance here (same 55m budget as chest/station glows).
         const mouthGlows = group.userData.caveMouthGlows as { light: THREE.PointLight; x: number; z: number }[] | undefined;
         if (mouthGlows) {
-          for (const glow of mouthGlows) {
+          for (let m = 0; m < mouthGlows.length; m++) {
+            const glow = mouthGlows[m];
             // 90m: the beckoning mouth glow must read from the approach, not
             // pop in at the threshold like the 55m chest/station budget.
             glow.light.visible = showDetail && dist2D(cam.x, cam.z, glow.x, glow.z) < 90;
@@ -3392,7 +3402,8 @@ export class Game {
         }
       }
 
-      for (const chest of island.chests) {
+      for (let c = 0; c < island.chests.length; c++) {
+        const chest = island.chests[c];
         const record = this.chestMeshes.get(chest.id);
         if (!record) continue;
         const chestDist = dist2D(cam.x, cam.z, chest.position.x, chest.position.z);
@@ -3403,7 +3414,8 @@ export class Game {
         if (chestLight) chestLight.visible = record.root.visible && chestDist < 55;
       }
 
-      for (const barrel of island.barrels) {
+      for (let b = 0; b < island.barrels.length; b++) {
+        const barrel = island.barrels[b];
         const root = this.barrelMeshes.get(barrel.id);
         if (!root) continue;
         const barrelDist = dist2D(cam.x, cam.z, barrel.position.x, barrel.position.z);
@@ -3411,7 +3423,8 @@ export class Game {
         root.matrixWorldAutoUpdate = root.visible;
       }
 
-      for (const station of island.upgradeStations) {
+      for (let u = 0; u < island.upgradeStations.length; u++) {
+        const station = island.upgradeStations[u];
         const record = this.upgradeStationMeshes.get(station.id);
         if (!record) continue;
         const stationDist = dist2D(cam.x, cam.z, station.position.x, station.position.z);
@@ -3421,7 +3434,9 @@ export class Game {
         if (stationLight) stationLight.visible = record.root.visible && stationDist < 55;
       }
 
-      for (const npc of island.npcs ?? []) {
+      const npcs = island.npcs;
+      for (let n = 0; npcs && n < npcs.length; n++) {
+        const npc = npcs[n];
         const record = this.npcMeshes.get(npc.id);
         if (!record) continue;
         const npcDist = dist2D(cam.x, cam.z, npc.position.x, npc.position.z);
@@ -3434,7 +3449,9 @@ export class Game {
       }
     }
 
-    for (const animal of this.state.wildlife ?? []) {
+    const animals = this.state.wildlife;
+    for (let a = 0; animals && a < animals.length; a++) {
+      const animal = animals[a];
       const mesh = this.wildlifeMeshes.get(animal.id);
       if (!mesh) continue;
       const dist = dist2D(cam.x, cam.z, animal.position.x, animal.position.z);
@@ -3447,7 +3464,9 @@ export class Game {
       mesh.matrixWorldAutoUpdate = mesh.visible;
     }
 
-    for (const rock of this.state.seaRocks ?? []) {
+    const rocks = this.state.seaRocks;
+    for (let r = 0; rocks && r < rocks.length; r++) {
+      const rock = rocks[r];
       const mesh = this.seaRockMeshes.get(rock.id);
       if (!mesh) continue;
       const dist = dist2D(cam.x, cam.z, rock.position.x, rock.position.z);

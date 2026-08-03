@@ -4076,7 +4076,12 @@ export class ShipRenderer {
     const nightLightIds = this.pickNightLightShips(ships, cameraPosition);
     const lanternEmissive = THREE.MathUtils.lerp(0.15, 2.2, this.nightFactor);
 
-    for (const ship of ships) {
+    // Indexed here and through every per-hull loop below. `for…of` over an array
+    // allocates an iterator, and at 'high' ten hulls run the full detail path —
+    // sails, furled sails, pennants, lantern glass, holes — so those are dozens
+    // of iterators a frame for lists whose length is known.
+    for (let shipIdx = 0; shipIdx < ships.length; shipIdx++) {
+      const ship = ships[shipIdx];
       let mesh = this.shipMeshes.get(ship.id);
       if (!mesh) {
         this.buildShip(ship);
@@ -4095,7 +4100,7 @@ export class ShipRenderer {
       const stats = SHIP_STATS[ship.type];
       const activeUpgrades = this.activeUpgrades;
       activeUpgrades.clear();
-      for (const upgrade of ship.upgrades) activeUpgrades.add(upgrade.type);
+      for (let u = 0; u < ship.upgrades.length; u++) activeUpgrades.add(ship.upgrades[u].type);
       this.updateUpgradeVisuals(mesh, activeUpgrades);
       const detailDistance = this.quality === 'low' ? 170 : this.quality === 'balanced' ? 285 : 380;
       const distSq = cameraPosition
@@ -4236,7 +4241,8 @@ export class ShipRenderer {
           }
         }
       }
-      for (const sail of mesh.proxySails) {
+      for (let s = 0; s < mesh.proxySails.length; s++) {
+        const sail = mesh.proxySails[s];
         sail.visible = !detailNear && ship.sailHeight > 0.06;
         sail.rotation.y = THREE.MathUtils.lerp(sail.rotation.y, ship.sailAngle * 0.6, 1 - Math.exp(-8 * dt));
         sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, Math.max(0.18, ship.sailHeight), 1 - Math.exp(-8 * dt));
@@ -4306,7 +4312,8 @@ export class ShipRenderer {
       // Round-2 field, read defensively: sails luff (flap, depowered) when pointed
       // into the no-go cone. Force the canvas slack so the cloth flutter goes hard.
       const luffing = !!(ship as Ship & { luffing?: boolean }).luffing;
-      for (const sail of mesh.sails) {
+      for (let s = 0; s < mesh.sails.length; s++) {
+        const sail = mesh.sails[s];
         sail.visible = ship.sailHeight > 0.05;
         const signedRelative = angleWrap(wind.direction - ship.rotation);
         // 0.92 matches the server's desired-trim constant (PhysicsSystem) so the
@@ -4353,7 +4360,8 @@ export class ShipRenderer {
           }
         }
       }
-      for (const furled of mesh.furledSails) {
+      for (let f = 0; f < mesh.furledSails.length; f++) {
+        const furled = mesh.furledSails[f];
         furled.visible = ship.sailHeight <= 0.12;
         const furledSeed = typeof furled.userData.phaseSeed === 'number' ? furled.userData.phaseSeed : furled.position.z;
         furled.scale.setScalar(0.88 + Math.sin(t * 0.9 + furledSeed) * 0.015);
@@ -4372,7 +4380,8 @@ export class ShipRenderer {
       mesh.flag.uniforms.uFlagWave.value.x =
         0.012 + wind.strength * 0.032 + flagSpeed01 * 0.030 + storm01 * 0.055;
 
-      for (const pennant of mesh.pennants) {
+      for (let p = 0; p < mesh.pennants.length; p++) {
+        const pennant = mesh.pennants[p];
         pennant.rotation.y = Math.PI * 0.5 + localWind;
         pennant.rotation.z = Math.sin(t * 8 + pennant.position.z * 0.14) * 0.12;
         pennant.scale.x = 1.05 + wind.strength * 0.65 + Math.min(0.4, Math.hypot(ship.velocity.x, ship.velocity.z) * 0.03);
@@ -4413,7 +4422,7 @@ export class ShipRenderer {
       // Ship lanterns: warm glass emissive ramps day→night (setNightFactor). At
       // night the nearest few ships also get one real PointLight with fast noise
       // flicker (deliberately NOT a smooth sine — reads like a real flame).
-      for (const glassMat of mesh.lanternGlassMats) glassMat.emissiveIntensity = lanternEmissive;
+      for (let g = 0; g < mesh.lanternGlassMats.length; g++) mesh.lanternGlassMats[g].emissiveIntensity = lanternEmissive;
       if (mesh.nightLight) {
         const wantLight = this.nightFactor > 0.02 && nightLightIds.has(ship.id);
         mesh.nightLight.visible = wantLight;
@@ -4661,7 +4670,8 @@ export class ShipRenderer {
       // own half-diagonal plus the longest hull plus the maximum span — a pair
       // outside it cannot produce a plan, so this rejects nothing real.
       const dockReach = Math.hypot(dock.width, dock.length) * 0.5 + GANGWAY_REJECT_MARGIN;
-      for (const ship of ships) {
+      for (let shipIndex = 0; shipIndex < ships.length; shipIndex++) {
+        const ship = ships[shipIndex];
         if (!ship.anchored || ship.sinking || ship.alive === false) continue;
         const berthDx = ship.position.x - dock.position.x;
         const berthDz = ship.position.z - dock.position.z;

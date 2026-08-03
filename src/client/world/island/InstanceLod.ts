@@ -163,9 +163,16 @@ const FLECK_DENSITY_RAMP: readonly (readonly [number, number])[] = [[40, 1], [11
 function rampAt(knots: readonly (readonly [number, number])[], dist: number): number {
   if (dist <= knots[0][0]) return knots[0][1];
   for (let i = 1; i < knots.length; i++) {
-    const [d1, f1] = knots[i];
+    // Indexed, NOT `const [d1, f1] = knots[i]`. Array destructuring goes through
+    // the iterator protocol, so each of those two lines allocated an array
+    // iterator — and this runs twice per prop BATCH per island per frame. At
+    // 'high', with fourteen islands holding detail out to a kilometre, the LOD
+    // pass around it measured 30 KB a frame with no objects anywhere in it.
+    const d1 = knots[i][0];
     if (dist <= d1) {
-      const [d0, f0] = knots[i - 1];
+      const f1 = knots[i][1];
+      const d0 = knots[i - 1][0];
+      const f0 = knots[i - 1][1];
       const t = (dist - d0) / Math.max(1e-3, d1 - d0);
       return f0 + (f1 - f0) * t;
     }
@@ -307,7 +314,8 @@ export function updateInstanceLod(
   // World metres per reference pixel at this apparent distance.
   const worldPerPixel = (2 * BASE_HALF_FOV_TAN * Math.max(1, apparent)) / REFERENCE_HEIGHT_PX;
 
-  for (const batch of batches) {
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
     // Stagger spreads a type's thresholds ±17% around the shared ramp, so a
     // shoreline thickens in several small instalments instead of one.
     const phase = 0.83 + batch.stagger * 0.34;
