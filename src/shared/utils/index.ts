@@ -247,46 +247,75 @@ export function getStormWaveIntensity(
  *  given time. `storm` is getStormWaveIntensity() at (x, z); omit for calm. */
 export function gerstnerHeight(
   x: number, z: number, t: number,
-  waves: Array<{ amplitude: number; wavelength: number; direction: Vec2; speed: number }>,
+  waves: readonly GerstnerWave[],
   storm = 0,
 ): number {
   const roughness = getOceanRoughness(t) * (1 + storm * 0.85);
   let height = 0;
   for (const w of waves) {
     const k = (2 * Math.PI) / w.wavelength;
-    const c = w.speed;
-    const d = normalize2D(w.direction);
-    const f = k * (d.x * x + d.y * z - c * t);
+    const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
     height += w.amplitude * roughness * Math.sin(f);
   }
   if (storm > 0) {
     for (const w of STORM_WAVE_PARAMS) {
       const k = (2 * Math.PI) / w.wavelength;
-      const d = normalize2D(w.direction);
-      const f = k * (d.x * x + d.y * z - w.speed * t);
+      const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
       height += w.amplitude * storm * Math.sin(f);
     }
   }
   return height;
 }
 
+/**
+ * A wave with its direction ALREADY NORMALISED, on the wave itself.
+ *
+ * `gerstnerHeight` used to call `normalize2D(w.direction)` inside its own loop —
+ * four object literals per call, for four constant vectors whose normals never
+ * change. It is the single most-called function in the game (every ship hull
+ * samples five points, every waterline collar samples one per vertex, and the
+ * server's physics samples it for every swimmer, chest and cannonball), and
+ * measured on the client alone it was **163 KB of garbage per frame**, more than
+ * half of everything a frame allocated. `direction` is kept for the call sites
+ * and the shader mirror that read it; `dirX`/`dirY` are what the loop uses.
+ */
+export interface GerstnerWave {
+  amplitude: number;
+  wavelength: number;
+  direction: Vec2;
+  speed: number;
+  dirX: number;
+  dirY: number;
+}
+
+/** Bake the unit direction once, at module load. Normalising an already-unit
+ *  vector is the identity, so no wave height anywhere moves by this. */
+function bakeWaves(
+  list: Array<{ amplitude: number; wavelength: number; direction: Vec2; speed: number }>,
+): GerstnerWave[] {
+  return list.map((w) => {
+    const d = normalize2D(w.direction);
+    return { ...w, dirX: d.x, dirY: d.y };
+  });
+}
+
 /** Base sea. Amplitudes chosen so calm water visibly breathes (~±1m combined
  *  at roughness 1) without making decks nauseating. */
-export const WAVE_PARAMS = [
+export const WAVE_PARAMS: readonly GerstnerWave[] = bakeWaves([
   { amplitude: 0.46, wavelength: 96, direction: { x: 1, y: 0.4 }, speed: 6.4 },
   { amplitude: 0.30, wavelength: 58, direction: { x: -0.5, y: 1 }, speed: 5.2 },
   { amplitude: 0.17, wavelength: 34, direction: { x: 0.8, y: -0.6 }, speed: 6.5 },
   { amplitude: 0.08, wavelength: 20, direction: { x: -0.3, y: -0.9 }, speed: 7.4 },
-];
+]);
 
 /** Dedicated storm swell, blended in by the local storm sea-state: two long
  *  aligned rollers plus a short chaotic chop. At storm=1 this adds ~±2.6m on
  *  top of the boosted base sea — decks pitch hard, small boats struggle. */
-export const STORM_WAVE_PARAMS = [
+export const STORM_WAVE_PARAMS: readonly GerstnerWave[] = bakeWaves([
   { amplitude: 1.55, wavelength: 150, direction: { x: 0.92, y: 0.39 }, speed: 11.5 },
   { amplitude: 0.75, wavelength: 74, direction: { x: 0.72, y: 0.7 }, speed: 8.6 },
   { amplitude: 0.35, wavelength: 30, direction: { x: -0.2, y: -0.98 }, speed: 9.8 },
-];
+]);
 
 export function sampleWind(t: number): { direction: number; strength: number } {
   const direction = angleWrap(
