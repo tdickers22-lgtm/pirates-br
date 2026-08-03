@@ -55,6 +55,29 @@ import { budgeted } from './FrameBudget.js';
  *      frame renders without it and the next frame pays for it. This is what
  *      turns "we try to warm" into "the load path cannot block".
  *
+ * WHAT THIS STILL CANNOT REACH, AND THE TRAP IN FIXING IT NAIVELY. The shadow
+ * pass does not draw the object's own material: `WebGLShadowMap.getDepthMaterial`
+ * keeps ONE `MeshDepthMaterial`, restamps it with the source material's
+ * side/alphaTest/map immediately before the draw, and renders that. So its
+ * programs belong to no material in the scene graph, no walk can find them, and
+ * `renderer.compile()` never touches the shadow path. Measured at `high`, three
+ * of the five most expensive remaining draw-time links are depth programs
+ * (7,965 / 4,281 / 1,398 ms).
+ *
+ * The obvious fix — keep a pool of depth materials stamped the same way and
+ * compile them against the real meshes — was built and MEASURED, and it is
+ * wrong: it minted THIRTY EXTRA PROGRAMS (137 → 167 live) and made draw-time
+ * links worse, because a program's cache key is not just the material. The
+ * shadow pass renders with `_emptyScene` (no fog, no environment), a render
+ * state with NO LIGHTS in it, and a non-null render target (so
+ * `outputColorSpace` is the working space, not the renderer's). `compile()` run
+ * against the real scene supplies all three differently, and three's key changes
+ * accordingly: what got warmed was a program the shadow pass will never ask for,
+ * while the one it does ask for still linked mid-match. Any future attempt has
+ * to reproduce that render state exactly — a light-less target scene AND a bound
+ * render target — or drive `shadowMap.render` itself, which collides with this
+ * repo's shadow update gate. It is not a small change and it is not this one.
+ *
  * FAIL OPEN, ALWAYS. Warming is an optimisation and must never be able to make
  * something permanently invisible. A material that throws on the way through is
  * marked done and left alone forever after; a material that has been held back
