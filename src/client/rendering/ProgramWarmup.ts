@@ -83,10 +83,27 @@ const JOIN_MS_PER_FRAME_BOOST = 24;
  *  through unpaid. A visible stall beats a world that is missing forever. */
 const MAX_HELD_FRAMES = 40;
 
-/** Cost of the guard itself: the scene walk stops after this many meshes, and
- *  resumes where it left off next frame. A scene walk that is itself a long
- *  task would be a fine joke to write into the fix for long tasks. */
-const WALK_BUDGET = 4000;
+/**
+ * Cost of the guard itself: the scene walk stops after this many NODES.
+ *
+ * IT MUST BE BIG ENOUGH TO FINISH. The first version of this budgeted 4,000
+ * meshes and resumed where it left off next frame, which is a sound way to bound
+ * a kick scan and a catastrophic way to decide what to hide: this scene walks
+ * 4,526–9,388 nodes, so on any given frame two thirds of it had not been looked
+ * at, and a mesh that became visible inside the unexamined part drew — and
+ * linked — before the guard ever saw it. That is where 36 draw-time links in a
+ * 90-second capture came from with the guard nominally up the whole time.
+ *
+ * So the walk completes every frame it runs, and the bound is a fuse rather than
+ * a schedule. A traverse of ten thousand nodes is ~1 ms of JS; one link it
+ * catches is 1,900.
+ */
+const WALK_BUDGET = 20_000;
+
+/** …and when a whole walk finds nothing unpaid anywhere in the graph, the next
+ *  few frames skip it. Nothing can become unpaid without something being ADDED
+ *  to the scene, and the walk that follows the add still precedes its reveal. */
+const IDLE_WALK_INTERVAL = 4;
 
 type ProgramLike = { getUniforms?: () => unknown; getAttributes?: () => unknown; isReady?: () => boolean };
 
@@ -153,6 +170,7 @@ const MAX_LINK_WAIT_MS = 2_000;
 const PENDING_HIGH_WATER = 24;
 
 type Kicked = { key: string; material: THREE.Material; at: number };
+type Owed = { mesh: THREE.Mesh; key: string; material: THREE.Material };
 
 /**
  * Pre-pays three's deferred first-use work for every material the scene is
@@ -169,9 +187,9 @@ export class ProgramWarmer {
   private readonly heldFrames = new WeakMap<THREE.Material, number>();
   /** Materials hidden for the current frame, to be restored after the render. */
   private readonly held: THREE.Material[] = [];
-  /** Where last frame's scene walk stopped, so a huge scene costs a bounded
-   *  walk per frame instead of one long one. */
-  private walkCursor = 0;
+  /** Frames since the last walk. A walk that finds nothing unpaid anywhere in
+   *  the graph earns the next few frames off; anything else walks every frame. */
+  private walkSkips = 0;
 
   private boosted = false;
   private guard = true;
@@ -192,6 +210,7 @@ export class ProgramWarmer {
    *  load that gave up quietly. */
   readonly stats = {
     paid: 0, kicked: 0, heldNow: 0, forced: 0, lastMs: 0, worstMs: 0, worstJoinMs: 0,
+    walked: 0, owed: 0,
     guard: true, parallel: null as boolean | null,
   };
 
@@ -217,7 +236,7 @@ export class ProgramWarmer {
     this.pending.length = 0;
     this.pendingKeys.clear();
     this.held.length = 0;
-    this.walkCursor = 0;
+    this.walkSkips = 0;
   }
 
   /**
@@ -228,7 +247,12 @@ export class ProgramWarmer {
    * hidden. Both calls live in `Renderer.render()` so they cannot drift apart.
    */
   prepare(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera): void {
-    if (!this.guard && this.pending.length === 0) { this.stats.heldNow = 0; return; }
+    // NO EARLY EXIT WHEN THE GUARD IS DOWN. That exit is what made this class a
+    // LOAD-time fix and nothing else: with the gate lowered and no join
+    // outstanding it returned before walking, so a material that first appeared
+    // mid-match — a weather shell, a station, a killed player's rig — was never
+    // even looked at, and the first frame that drew it took the link. The cost
+    // of staying awake is one throttled traverse (see IDLE_WALK_INTERVAL).
     const startedAt = performance.now();
 
     // ── 1. join what was kicked on earlier frames ────────────────────────
@@ -262,32 +286,57 @@ export class ProgramWarmer {
     }
 
     // ── 2. walk the scene for meshes that still owe ──────────────────────
-    const owing: { mesh: THREE.Mesh; key: string; material: THREE.Material }[] = [];
-    let visited = 0;
-    let skipped = 0;
-    const resume = this.walkCursor;
-    let wrapped = false;
+    //
+    // ALL OF IT, NOT JUST WHAT IS ON SCREEN. `traverseVisible` — which this used
+    // to walk — describes the frame being drawn, and the whole problem is the
+    // frame AFTER it. A weather shell, a combat-fx pool, a spectate rig, a piece
+    // of island detail that has streamed in but not been revealed yet: every one
+    // of those sits in the graph with `visible = false` until the instant it is
+    // needed, and on that instant it draws, and the link is taken inside the
+    // frame the player is moving through. Warming reaches them only if the walk
+    // descends into hidden subtrees, so it does, and the visibility of the node
+    // becomes a PRIORITY rather than a filter: what is on screen and unpaid is
+    // hidden and kicked first, what is off screen and unpaid is kicked in the
+    // room it has left.
+    const visibleOwing: Owed[] = [];
+    const hiddenOwing: Owed[] = [];
     const kickCap = this.boosted ? KICK_PER_FRAME_BOOST : budgeted(KICK_PER_FRAME, 2);
-    scene.traverseVisible((node) => {
-      if (!drawable(node)) return;
-      const mesh = node;
-      // Resume where the last walk stopped, so no part of a large scene is
-      // starved by always being at the back of the queue.
-      if (skipped < resume) { skipped += 1; return; }
-      visited += 1;
-      if (visited > WALK_BUDGET) { wrapped = true; return; }
-      for (const material of materialsOf(mesh)) {
-        const key = programKey(mesh, material);
-        if (this.paid.has(key)) continue;
-        owing.push({ mesh, key, material });
-      }
-    });
-    this.walkCursor = wrapped ? resume + WALK_BUDGET : 0;
+    const walk = this.guard || this.walkSkips >= IDLE_WALK_INTERVAL || this.pending.length > 0;
+    if (walk) {
+      this.walkSkips = 0;
+      let visited = 0;
+      const descend = (node: THREE.Object3D, shown: boolean): void => {
+        if (visited > WALK_BUDGET) return;
+        visited += 1;
+        const seen = shown && node.visible;
+        if (drawable(node)) {
+          for (const material of materialsOf(node)) {
+            const key = programKey(node, material);
+            if (this.paid.has(key)) continue;
+            (seen ? visibleOwing : hiddenOwing).push({ mesh: node, key, material });
+          }
+        }
+        const children = node.children;
+        for (let i = 0; i < children.length; i++) descend(children[i], shown);
+      };
+      // The scene's own `visible` is not consulted: `shown` starts true because
+      // the renderer starts its own walk at the scene regardless.
+      descend(scene, true);
+      this.stats.walked = visited;
+    } else {
+      this.walkSkips += 1;
+    }
 
     // ── 3. kick the links for a few of them ──────────────────────────────
     // One `compile()` call for the whole chunk: it walks the real scene's lights
     // once, which is the expensive part of the call, and issues `linkProgram`
     // for each mesh. The joins are deliberately NOT taken here.
+    //
+    // `compile()` uses `scene.traverse` for the materials it prepares (only its
+    // LIGHT gather is `traverseVisible`, and the lights it gathers come from the
+    // real scene passed as `targetScene`), so a hidden mesh handed to it here is
+    // compiled exactly like a shown one.
+    const owing = visibleOwing.length > 0 ? [...visibleOwing, ...hiddenOwing] : hiddenOwing;
     if (owing.length > 0) {
       const chunk: THREE.Mesh[] = [];
       const kicked: Kicked[] = [];
@@ -313,8 +362,12 @@ export class ProgramWarmer {
     }
 
     // ── 4. hold back everything still unpaid ─────────────────────────────
+    // Only what would otherwise be DRAWN: hiding something already hidden buys
+    // nothing and would spend its patience (`heldFrames`) while it sits in a
+    // room nobody is in, so that when it is finally needed it is out of credit
+    // and links on screen after all.
     if (this.guard) {
-      for (const entry of owing) {
+      for (const entry of visibleOwing) {
         if (this.paid.has(entry.key)) continue;
         const material = entry.material;
         if (!material.visible) continue;
@@ -325,6 +378,7 @@ export class ProgramWarmer {
         this.held.push(material);
       }
     }
+    this.stats.owed = visibleOwing.length + hiddenOwing.length;
     this.stats.heldNow = this.held.length;
     this.stats.lastMs = +(performance.now() - startedAt).toFixed(2);
     if (this.stats.lastMs > this.stats.worstMs) this.stats.worstMs = this.stats.lastMs;
