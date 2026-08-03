@@ -45,7 +45,15 @@ const GEO_BURST_LIMIT = 96;
 const PROG_BURST_LIMIT = 4;
 
 let failures = 0;
-function expect(label, condition, detail = '') {
+/** Assertions actually taken about the REVEAL. Both of this suite's grading
+ *  paths — the per-frame burst counts and the pass-1/pass-3 ratio — stand down
+ *  under a software rasteriser, for reasons argued at each site. What was left
+ *  was a run that asserted "no page errors" and printed "checks passed", which
+ *  reads in a suite log exactly like a graded green. Counted, so the last line
+ *  can say which of the two it was. */
+let substantive = 0;
+function expect(label, condition, detail = '', counts = true) {
+  if (counts) substantive += 1;
   if (condition) console.log(`  ✓ ${label}`);
   else {
     console.error(`  ✗ FAIL: ${label}${detail ? `\n     ${detail}` : ''}`);
@@ -274,7 +282,7 @@ try {
       `worst ${worstStall}ms at ${worstStallAt}`,
     );
   }
-  expect('no page errors', pageErrors.length === 0, pageErrors.slice(0, 5).join('\n     '));
+  expect('no page errors', pageErrors.length === 0, pageErrors.slice(0, 5).join('\n     '), false);
 } finally {
   await browser.close();
 }
@@ -283,4 +291,11 @@ if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);
   process.exit(1);
 }
-console.log('\nLOD reveal band checks passed.');
+console.log(
+  substantive > 0
+    ? `\nLOD reveal band checks passed (${substantive} graded).`
+    : '\nLOD reveal band NOT GRADED on this backend — the numbers above are advisory only,'
+      + ' and the run is green because nothing was asserted about the reveal, not because'
+      + ' the reveal was proved. The per-frame allowance is graded GL-free in'
+      + ' scripts/test-first-draw-budget.mjs; the ratio needs the GPU path.',
+);

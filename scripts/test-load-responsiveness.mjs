@@ -52,7 +52,13 @@ import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs'
 const argv = process.argv.slice(2);
 const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 
-const URL_BASE = (arg('url', process.env.LOAD_URL || 'http://127.0.0.1:3000')).replace(/\/$/, '');
+// PIRATES_BR_URL IS THE REPO'S VARIABLE. Every other browser suite here reads
+// it, and a graded run points it at a Vite the runner owns rather than at the
+// developer's :3000. This one read only LOAD_URL, so a whole-suite run that set
+// PIRATES_BR_URL correctly still sent this one gate at :3000 and it died with
+// ERR_CONNECTION_REFUSED in under a second — an exit code that looks exactly
+// like a failed load budget. LOAD_URL still wins where someone has set it.
+const URL_BASE = (arg('url', process.env.LOAD_URL || process.env.PIRATES_BR_URL || 'http://127.0.0.1:3000')).replace(/\/$/, '');
 const QUALITY = arg('quality', 'low');
 const REPEAT = parseInt(arg('repeat', '1'), 10);
 const MUTATE_MS = parseInt(arg('mutate', '0'), 10);

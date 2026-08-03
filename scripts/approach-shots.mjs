@@ -28,7 +28,10 @@ const URL = process.argv[2];
 const TAG = process.argv[3];
 const QUALITY = process.argv[4] ?? 'high';
 const PORT = process.env.PIRATES_BR_SERVER_PORT ?? '8091';
-const OUT = '/private/tmp/claude-501/-Users-tobiasdicker/10a91956-1f9b-4664-ae78-2d985d4991c4/scratchpad/approach';
+// Under the repo, like every other shot rig here. This was a hard-coded path
+// into one session's scratch directory, which exists on nobody else's machine
+// and made the sheet unfindable the moment that session ended.
+const OUT = process.argv[5] ?? `test-results/approach-${TAG ?? 'shots'}-${QUALITY}`;
 mkdirSync(OUT, { recursive: true });
 
 const browser = await chromium.launch({
