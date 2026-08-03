@@ -366,7 +366,16 @@ async function main() {
     // Allocation, measured with the profiler OFF so its own sampling is not in
     // the reading, and with the framebuffer still collapsed so a hundred frames
     // take seconds rather than minutes.
-    console.log('\n── allocation ──');
+    //
+    // SUPERSEDED — DO NOT QUOTE THESE PER-FRAME NUMBERS. This is the rAF-window
+    // probe, and a window that spans a garbage collection measures allocation
+    // MINUS whatever was swept inside it: the same build reads 196.5 KB/frame
+    // over 120 frames and 60.3 over 300, and neither is the answer. It is kept
+    // because the retained column is still a useful leak signal at this
+    // timescale. For bytes per frame use scripts/perf-alloc-census.mjs, which
+    // reads the heap either side of ONE frame at a time and drives the CPU path
+    // with no GL in it (docs/FRAME_COST_MODEL.md §6.3.1).
+    console.log('\n── allocation (rAF window — SUPERSEDED, see perf-alloc-census.mjs) ──');
     const alloc = [];
     for (const frames of [120, 300]) {
       const r = await page.evaluate(async (n) => {

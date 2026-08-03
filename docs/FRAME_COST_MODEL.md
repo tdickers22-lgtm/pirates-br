@@ -509,6 +509,33 @@ it **fails when the world it is measuring is not there** — the first run of it
 passed `high` at 0.4 KB/frame because the match had ended under a page running at
 one frame a second, so `updateScene` returned on its first line.
 
+#### 6.3.2 What it did to the pauses
+
+Same rig as §7 (`perf-frame-profile.mjs --quality low --minutes 3`, framebuffer
+collapsed), before and after:
+
+| | pauses | total GC | **longest pause** | GC per second |
+|---|--:|--:|--:|--:|
+| before (180 s capture) | 49 | 604 ms | **125.4 ms** | 3.4 ms/s |
+| after (180 s capture, 1,252 frames) | 101 | **446 ms** | **28.2 ms** | 2.5 ms/s |
+
+**The longest pause fell by 77%,** and that is the number a player feels: a 125 ms
+stop is a quarter-second of a fight going missing, a 28 ms one is a long frame.
+Total GC time fell 26% in a capture that ran roughly **twice as many frames** as
+the one it is compared against — per frame of play, collection costs about half
+what it did.
+
+The pause COUNT went up, and that is not a regression: scavenges are triggered by
+the nursery filling, and 101 short scavenges totalling 446 ms is a strictly better
+shape than 49 that reach 125 ms. What removes pauses outright is allocating less
+still.
+
+⚠️ **The `gc=18/9,435 ms` row in the hitch census below is not a GC cost.** That
+census attributes the WHOLE rAF gap to whatever was sampled inside it, and on the
+software rasteriser a gap is seconds long, so a 20 ms collection inside a 5 s
+frame is charged 5,000 ms. The profiler's own `(garbage collector)` samples —
+the table above — are the measurement.
+
 GC, from the profile's own `(garbage collector)` samples:
 
 | capture | pauses | total | longest | GC per second of play |
