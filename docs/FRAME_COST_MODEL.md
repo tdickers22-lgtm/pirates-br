@@ -920,3 +920,91 @@ draw-time links and no depth programs at all.
 4. **A non-finite `AudioParam`** (`SoundEngine.makeSpatialDest`, via
    `playShipImpact`) throws on every tour run. Unrelated to this lever, found by
    it, unfixed.
+
+---
+
+## 12. Lever 2, half done: a pier is now its material count, and its material count is the wall
+
+### 12.1 What the draw report could not say
+
+Lever 2 was written off `island-decor` being "the #1 or #2 draw source in every one
+of the nine scenes, 247–668 calls, already instanced — so many `InstancedMesh`
+objects, one per prop type per island". **That sentence is wrong in its second
+half.** `perf-attribution` stops one level under the island detail root and the
+answer is four levels down; `scripts/perf-decor-census.mjs` (new) walks each placed
+piece and reports, per mesh, the FIRST rule in `StaticBatcher.isMergeable` that
+refuses it. At `low`, pinned seed, fourteen islands:
+
+| piece | copies | draws/copy | the refusal |
+|---|--:|--:|---|
+| `decor-dock` | 10 | **38.2** | `named` × 362 of 382 meshes |
+| `island-micro-root` | 14 | 22.8 | `named` × 265 |
+| `prop-mermaid_shrine` | 1 | 15.0 | `named` × 15 |
+| `prop-fort` | 1 | 12.0 | `named` × 12 |
+
+Not instancing. **Names** — and not names this repo wrote: `dock_mid_deck`,
+`lantern_post_post_1`, `campfire_stone0_3`, `tent_c_pole_5`. glTF names every node
+it writes, and the batcher's rule was "never merge a named mesh, because a name is
+how this codebase finds a node again". The exporter defeated it wholesale.
+
+### 12.2 What landed
+
+`isMergeable` now refuses a name only if it is ADDRESSED: in
+`StaticBatcher.ADDRESSED_NAMES`, or absent from the set of node names the GLBs
+themselves carry (`assets.isAssetNodeName`). `scripts/test-decor-batch.mjs` re-derives
+the addressed set from `src/` and `scripts/` on every run — every literal reaching
+`getObjectByName` or `o.name === '…'` — and fails on one that is not classified.
+
+| | decor draws, all 14 islands | worst pier |
+|---|--:|--:|
+| before | 1,740 | 38.2 draws / 16 materials |
+| after | **1,510** | **16.0 draws / 16 materials** |
+
+Triangles are bit-identical across all 347 pieces. Mutation-proven both ways: drop
+`'door'` and the source half fails naming `DockBuilder.ts`; restore
+`if (mesh.name) return false` and all ten piers fail the live budget at 34–52.
+
+### 12.3 The wall, and it is not a batching problem
+
+After that change **every remaining decor draw is `sole-of-material`** — draws/copy
+equals materials/copy on every row. The batcher is exhausted. The reason is in the
+assets: **sixty-three GLBs, zero images, zero textures, and 8–16 flat-colour
+`MeshStandardMaterial`s apiece.** `fort.glb` is twelve materials — `Rock_Dark`,
+`Stone_Fort`, `Bone`, `Gold` — i.e. twelve draw calls to say twelve colours. It also
+costs the instanced props: `props-palm_c` is ONE `InstancedMesh` submitted **5**
+times because `mergedGeometry` keeps one group per material.
+
+### 12.4 The collapse: measured, then reverted — and the four traps
+
+Folding every untextured asset material onto one, with the colour and the
+roughness/metalness moved to vertex attributes, was built and measured:
+**decor draws 1,510 → 927**, `prop-fort` 12 → 2, `decor-dock` 16 → 5,
+`props-barrel`/`props-crate`/`props-bush_berry` → 1 each, triangles unchanged.
+It is **reverted at HEAD** because it is not shading-neutral yet. Four traps, three
+of them fixed on the branch that was thrown away, the fourth open:
+
+1. **`aSurface` dropped by the merge path.** `AssetLibrary.subGeometry`/`mergeGeoms`
+   copy position/normal/color by hand. A missing vertex attribute reads (0,0,0,1),
+   so a lost roughness attribute is **roughness 0 — a mirror**, and this game ships
+   no envMap: every instanced boulder rendered matte black. Store *smoothness*
+   (1−roughness) so the same failure is merely "fully rough".
+2. **`COLOR_0` is not yours to redefine.** Baking colour into it (free, no shader)
+   double-darkens every mesh where a builder reuses ASSET GEOMETRY under its OWN
+   material — `SeaRockBuilder` does exactly that. Shore rock RGB 70,68,57 → 41,39,32.
+   Use a private `aTint` attribute instead.
+3. **A material clone drops `onBeforeCompile` and `customProgramCacheKey`.**
+   `Material.copy` does not carry them. Build the material as a **subclass** whose
+   constructor reinstalls the patch, since `clone()` is `new this.constructor()`.
+   And `PropScatterer.applyFoliageSway` **assigns** rather than chains — on a shared
+   asset material that silently deleted the patch and every palm rendered white.
+4. **OPEN: `material.color` stops meaning "the colour".** `CaveBuilder` recolours the
+   portal frame with `mat.color.copy(portalRockCol)` on a clone of the asset's
+   material. With the colour in `aTint`, that multiplies instead of replacing —
+   `cave-portal-rock` went black. Every site that writes `.color` on an asset-derived
+   material has to be found and given an explicit "ignore the baked tint" switch (a
+   `uAssetTint` float the shader mixes with, set to 0 by such callers). **That audit
+   is the remaining work**, and shipping without it trades eye-level quality for a
+   draw count, which this project does not do.
+
+One material per ASSET, never one per library: a library-wide material makes every
+crate and pier bend in `applyFoliageSway`'s wind.
