@@ -700,7 +700,7 @@ export class Game {
       getNearbyUpgradeStation: (player) => (this.state ? findNearbyUpgradeStation(this.state.islands, player) : null),
       getRepairPlankCount: (player, ship) => getRepairPlankCount(player, ship),
       getHoleRepairWorldPoint: (ship, hole) => this.getHoleRepairWorldPoint(ship, hole),
-      getShipWorldPoint: (ship, localX, localZ, worldY) => this.getShipWorldPoint(ship, localX, localZ, worldY),
+      getShipReachPoint: (ship, localX, localZ, worldY) => this.getShipReachPoint(ship, localX, localZ, worldY),
       getTavernDoorWorldPoint: (door, out) => this.getTavernDoorWorldPoint(door, out),
       getTrackedShip: () => this.getTrackedShip(),
       getUpgradePresentation: (type) => this.getUpgradePresentation(type),
@@ -7040,6 +7040,10 @@ export class Game {
     return pose;
   }
 
+  /** A ship-local point placed on the hull AS DRAWN. For things that are looked
+   *  at: a corpse on the planking, the helmsman's eye, the gunner's inward
+   *  vector. NOT for anything that is measured against `player.position` —
+   *  see {@link getShipReachPoint}. */
   private getShipWorldPoint(ship: Ship, localX: number, localZ: number, worldY: number) {
     const hull = this.readShipRenderPose(ship);
     const cos = Math.cos(hull.yaw);
@@ -7048,6 +7052,39 @@ export class Game {
       hull.x + localX * cos + localZ * sin,
       hull.y + worldY,
       hull.z + localZ * cos - localX * sin,
+    );
+  }
+
+  /**
+   * The same ship-local point, on the SERVER's hull — because the thing it gets
+   * compared against is on the server's hull too.
+   *
+   * TWO TRANSFORMS IN ONE SUBTRACTION IS A BUG EVEN WHEN BOTH ARE RIGHT. The
+   * interaction arbiter measures eye-to-station distance from `player.position`,
+   * which is the server's, and grades it against `HANDS_ON_REACH` (1.6 m) and a
+   * dot gate; the shared reach predicates it runs behind (`isNearHelm`,
+   * `isNearAmmoCrate`, `findNearbyCannonIndex`) resolve ship-local against
+   * `ship.position` for the same reason the server does. Handing that comparison
+   * a point on the DRAWN hull adds the renderer's tracking lag to a gameplay
+   * distance: the drawn hull trails the server's by speed × the 55 ms ease and
+   * by frame length, measured at 0.48 m mean, 1.09 m p95 and 9.66 m worst on a
+   * fleet under sail — plus the wave heave, which `ship.position.y` does not
+   * carry at all. A metre is most of the hands-on radius, so at speed a leak
+   * under your boots stops being hands-on, the helm's station lock stops
+   * yielding to it, and the [X] goes somewhere else.
+   *
+   * A rigid body cannot slide relative to itself: resolved in the server's frame
+   * on both sides, the distance is exactly the one the player sees, because the
+   * drawn crew and the drawn station move together. So this is the frame the
+   * arbiter uses, and {@link getShipWorldPoint} is the frame the picture uses.
+   */
+  private getShipReachPoint(ship: Ship, localX: number, localZ: number, worldY: number) {
+    const cos = Math.cos(ship.rotation);
+    const sin = Math.sin(ship.rotation);
+    return new THREE.Vector3(
+      ship.position.x + localX * cos + localZ * sin,
+      ship.position.y + worldY,
+      ship.position.z + localZ * cos - localX * sin,
     );
   }
 
@@ -7070,7 +7107,9 @@ export class Game {
     const player = this.getLocalPlayer();
     const deckLineY = ship.position.y + stats.height - 0.5;
     const inHold = !!player && player.onShipId === ship.id && player.position.y < deckLineY;
-    return this.getShipWorldPoint(
+    // Reach frame, not picture frame: its only consumer is the arbiter, which
+    // measures it against `player.position`. See getShipReachPoint.
+    return this.getShipReachPoint(
       ship,
       localX,
       localZ,

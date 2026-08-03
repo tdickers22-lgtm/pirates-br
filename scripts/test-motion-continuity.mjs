@@ -160,6 +160,15 @@ const MIN_DECK_SAMPLES = 200;
  * says so plainly when it did not — never silently.
  */
 const MIN_SHOT_SAMPLES = 8;
+/** Station points the arbiter measures against `player.position` must be in the
+ *  server's frame. Graded as an identity — the right answer is a pure function
+ *  of `ship.position`/`ship.rotation` — so the tolerance is float noise, not a
+ *  budget. */
+const REACH_FRAME_TOLERANCE_M = 0.01;
+const MIN_REACH_SAMPLES = 40;
+/** …and below this the two frames coincide, so agreeing costs nothing and the
+ *  assertion is vacuous. Reported as ungraded rather than passed. */
+const REACH_SIGNAL_FLOOR_M = 0.05;
 
 const sessionQuery = (extra = []) => ['debug', ...(SERVER_PORT ? [`server=${SERVER_PORT}`] : []), ...extra].join('&');
 
@@ -174,7 +183,7 @@ const SAMPLER = `(() => {
   const acc = {
     carry: [], deck: [], deckY: [], shot: [], shotLag: [], snapGaps: [], frames: 0, started: performance.now(),
     localCarry: [], worstJumpPx: 0, worstJumpM: 0, worstSlip: null, err: null,
-    census: {}, maxSpeed: 0,
+    census: {}, maxSpeed: 0, reachErr: [], hullGap: [],
   };
   window.__mc = acc;
   let lastSnapAt = -1;
@@ -282,6 +291,38 @@ const SAMPLER = `(() => {
         if (m) acc.shotLag.push(Math.hypot(m.position.x - a.x, m.position.y - a.y, m.position.z - a.z));
       }
       cs.lastSnapshotAt = saved;
+
+      // ── THE REACH FRAME ──────────────────────────────────────────────────
+      // The arbiter measures eye-to-station in metres from \`player.position\`,
+      // which is the SERVER's, and grades the result against a 1.6 m hands-on
+      // radius and a dot gate. So a station point handed to it has to be in the
+      // server's frame too. When the deck weld landed, \`getShipWorldPoint\` was
+      // moved onto the DRAWN hull for the crew's sake and the arbiter's eleven
+      // station points went with it — which put the renderer's tracking lag,
+      // the very gap measured as 0.48 m mean / 9.66 m worst above, inside a
+      // gameplay distance.
+      //
+      // Graded as an identity, not a threshold: a ship-local point resolved in
+      // the server's frame is a pure function of \`ship.position\` and
+      // \`ship.rotation\`, so the right answer is exact to floating point. And
+      // \`hullGap\` is recorded alongside it so the assertion can prove it had
+      // SIGNAL — at anchor the two frames coincide and agreement means nothing.
+      for (const ship of st.ships) {
+        if (!ship.alive) continue;
+        if (Math.hypot(ship.velocity.x, ship.velocity.z) < 1.0) continue;
+        const hull = g.shipRenderer.getShipGroup(ship.id);
+        if (!hull) continue;
+        acc.hullGap.push(Math.hypot(hull.position.x - ship.position.x, hull.position.z - ship.position.z));
+        // Two arbitrary ship-local stations, one off-centre so a yaw error shows.
+        for (const [lx, lz, wy] of [[0, 0, 2], [1.4, -3.1, 2.4]]) {
+          const got = g.getShipReachPoint(ship, lx, lz, wy);
+          const c = Math.cos(ship.rotation), s = Math.sin(ship.rotation);
+          const wantX = ship.position.x + lx * c + lz * s;
+          const wantZ = ship.position.z + lz * c - lx * s;
+          const wantY = ship.position.y + wy;
+          acc.reachErr.push(Math.hypot(got.x - wantX, got.y - wantY, got.z - wantZ));
+        }
+      }
     } catch (e) {
       acc.err = String(e && e.message ? e.message : e);
     }
@@ -346,6 +387,7 @@ async function main() {
         shot: a.shot, shotLag: a.shotLag,
         frames: a.frames, err: a.err, worstJumpPx: a.worstJumpPx, worstJumpM: a.worstJumpM,
         worstSlip: a.worstSlip, census: a.census, maxSpeed: a.maxSpeed,
+        reachErr: a.reachErr, hullGap: a.hullGap,
       };
     });
     await page.close();
@@ -400,6 +442,24 @@ async function main() {
         failures.push(`pirates do not ride the deck they are drawn on: p95 vertical slip ${f(deckYp95)}m `
           + `> ${DECK_SLIP_Y_CEILING_M}m`);
       }
+    }
+
+    // ── the reach frame ────────────────────────────────────────────────────
+    const worstReach = r.reachErr.length ? Math.max(...r.reachErr) : null;
+    const worstHullGap = r.hullGap.length ? Math.max(...r.hullGap) : null;
+    console.log(`  REACH FRAME: worst station error ${f(worstReach, 3)}m over ${r.reachErr.length} samples `
+      + `(drawn-vs-server hull gap in the same frames: p95 ${f(pct(r.hullGap, 0.95), 2)}m, worst ${f(worstHullGap, 2)}m)`);
+    if (r.reachErr.length < MIN_REACH_SAMPLES) {
+      failures.push(`only ${r.reachErr.length} reach-frame samples (need ${MIN_REACH_SAMPLES}) — no hull was under way`);
+    } else if (worstHullGap === null || worstHullGap < REACH_SIGNAL_FLOOR_M) {
+      // Agreement between two frames that coincide proves nothing.
+      console.log(`  (reach frame not graded: the drawn hull never got more than ${f(worstHullGap, 3)}m `
+        + `from the server's, so there was nothing for a mixed frame to be wrong by)`);
+    } else if (worstReach > REACH_FRAME_TOLERANCE_M) {
+      failures.push(`the interaction arbiter is being handed station points in the RENDERER's frame: `
+        + `worst ${f(worstReach, 3)}m off the server transform it is compared against `
+        + `(the drawn hull was ${f(worstHullGap, 2)}m from the server's in the same frames). `
+        + `A station point measured against player.position must come from Game.getShipReachPoint.`);
     }
   } finally {
     await browser.close();

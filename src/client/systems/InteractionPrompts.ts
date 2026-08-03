@@ -112,7 +112,11 @@ export type InteractionView = {
   getNearbyUpgradeStation(player: Player): UpgradeStation | null;
   getRepairPlankCount(player: Player, ship: Ship | null): number;
   getHoleRepairWorldPoint(ship: Ship, hole: ShipHole): THREE.Vector3;
-  getShipWorldPoint(ship: Ship, localX: number, localZ: number, worldY: number): THREE.Vector3;
+  /** A station on a hull, in the frame `player.position` is in — the server's.
+   *  Never the drawn hull: everything in this file subtracts one from the other
+   *  and the drawn hull trails the server's by metres at speed. See
+   *  Game.getShipReachPoint. */
+  getShipReachPoint(ship: Ship, localX: number, localZ: number, worldY: number): THREE.Vector3;
   getTavernDoorWorldPoint(door: { node: THREE.Object3D }, out: THREE.Vector3): THREE.Vector3;
   getTrackedShip(): Ship | null;
   getUpgradePresentation(type: ShipUpgradeType): {
@@ -430,7 +434,7 @@ export class InteractionPrompts {
 
       if (player.carryingChestId && player.onShipId === ship.id) {
         const stats = SHIP_STATS[ship.type];
-        const stowPoint = this.view.getShipWorldPoint(ship, 0, -stats.length * 0.22, stats.height + 0.7);
+        const stowPoint = this.view.getShipReachPoint(ship, 0, -stats.length * 0.22, stats.height + 0.7);
         this.pushInteractionCandidate(
           candidates,
           player,
@@ -476,7 +480,7 @@ export class InteractionPrompts {
       const standingAtHelm = isStandingAtHelm(player, ship);
       if (standingAtHelm || isNearHelm(player, ship)) {
         const helm = getHelmControlLocal(SHIP_STATS[ship.type]);
-        const helmPoint = this.view.getShipWorldPoint(ship, helm.x, helm.z, SHIP_STATS[ship.type].height + 0.95);
+        const helmPoint = this.view.getShipReachPoint(ship, helm.x, helm.z, SHIP_STATS[ship.type].height + 0.95);
         const helmPrompt = '[X] Take Helm';
         const helmLabel = 'A/D or arrows turn · W/S trims sails';
         if (standingAtHelm) {
@@ -509,7 +513,7 @@ export class InteractionPrompts {
         const localHere = toShipLocalPoint(player.position, ship);
         const sailControl = ropeStations.reduce((best, st) =>
           Math.hypot(localHere.x - st.x, localHere.z - st.z) < Math.hypot(localHere.x - best.x, localHere.z - best.z) ? st : best);
-        const sailPoint = this.view.getShipWorldPoint(ship, sailControl.x, sailControl.z, SHIP_STATS[ship.type].height + 0.85);
+        const sailPoint = this.view.getShipReachPoint(ship, sailControl.x, sailControl.z, SHIP_STATS[ship.type].height + 0.85);
         const sailPct = Math.round(ship.sailHeight * 100);
         const canvasTorn = ship.sailIntegrity < 0.995;
         const sailPrompt = canvasTorn
@@ -535,7 +539,7 @@ export class InteractionPrompts {
         const stats = SHIP_STATS[ship.type];
         const trimDeg = Math.round((ship.sailAngle * 180) / Math.PI);
         for (const brace of getBraceStationLocals(stats)) {
-          const bracePoint = this.view.getShipWorldPoint(ship, brace.x, brace.z, stats.height + 0.7);
+          const bracePoint = this.view.getShipReachPoint(ship, brace.x, brace.z, stats.height + 0.7);
           this.pushInteractionCandidate(
             candidates,
             player,
@@ -552,7 +556,7 @@ export class InteractionPrompts {
       if (isNearCrowNestLadder(player, ship)) {
         const stats = SHIP_STATS[ship.type];
         const mastZ = getMainMastLocalZ(stats);
-        const ladderPoint = this.view.getShipWorldPoint(ship, 0, mastZ, stats.height + 1.15);
+        const ladderPoint = this.view.getShipReachPoint(ship, 0, mastZ, stats.height + 1.15);
         this.pushInteractionCandidate(
           candidates,
           player,
@@ -567,7 +571,7 @@ export class InteractionPrompts {
 
       if (isNearAnchor(player, ship)) {
         const anchorLocal = getAnchorControlLocal(SHIP_STATS[ship.type]);
-        const anchorPoint = this.view.getShipWorldPoint(ship, anchorLocal.x, anchorLocal.z, SHIP_STATS[ship.type].height + 0.45);
+        const anchorPoint = this.view.getShipReachPoint(ship, anchorLocal.x, anchorLocal.z, SHIP_STATS[ship.type].height + 0.45);
         const anchorProgress = Math.round((ship.anchorRaiseProgress ?? 0) * 100);
         this.pushInteractionCandidate(
           candidates,
@@ -601,7 +605,7 @@ export class InteractionPrompts {
 
       if (nearbyCannon !== null) {
         const cannonLocal = getCannonDeckLocalPosition(SHIP_STATS[ship.type], nearbyCannon);
-        const cannonPoint = this.view.getShipWorldPoint(
+        const cannonPoint = this.view.getShipReachPoint(
           ship,
           cannonLocal.x,
           cannonLocal.z,
@@ -622,7 +626,7 @@ export class InteractionPrompts {
       // Ammo chest (SoT): aft of the companionway — instant firearm top-up.
       if (player.onShipId === ship.id && isNearAmmoCrate(player, ship)) {
         const crateLocal = getAmmoCrateLocal(SHIP_STATS[ship.type]);
-        const cratePoint = this.view.getShipWorldPoint(ship, crateLocal.x, crateLocal.z, SHIP_STATS[ship.type].height + 0.5);
+        const cratePoint = this.view.getShipReachPoint(ship, crateLocal.x, crateLocal.z, SHIP_STATS[ship.type].height + 0.5);
         this.pushInteractionCandidate(
           candidates,
           player,
