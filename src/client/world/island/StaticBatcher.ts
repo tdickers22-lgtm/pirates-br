@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { assets } from '../../assets/AssetLibrary.js';
 
 /**
  * ONE DRAW PER MATERIAL, for scenery that never moves.
@@ -22,12 +23,21 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
  *
  * WHAT IS NOT MERGED, and why the rule is conservative:
  *
- *   * anything with a NAME. Every node this codebase looks up later — the
- *     tavern's `door`, a `waterfall-site`, `dock-piling` for the floater audit,
- *     the FX nodes that push their own world matrix through refreshFrozenChild —
- *     is found by name. Merging one would leave the lookup holding a node that
- *     is no longer in the graph. Unnamed meshes are, by this codebase's own
- *     convention, the ones nobody intends to address again.
+ *   * anything with a NAME THIS CODEBASE WROTE. Every node it looks up later —
+ *     the tavern's `door`, a `waterfall-site`, `dock-piling` for the floater
+ *     audit, the FX nodes that push their own world matrix through
+ *     refreshFrozenChild — is found by name. Merging one would leave the lookup
+ *     holding a node that is no longer in the graph.
+ *
+ *     THE RULE USED TO BE "anything with a name", and it cost almost everything
+ *     this pass was written to save: the census (scripts/perf-decor-census.mjs)
+ *     puts a pier at 38.2 draws per copy of which **362 of 382 meshes are
+ *     refused for being named**, and every one of those names — `dock_mid_deck`,
+ *     `lantern_post_post_1`, `campfire_stone0_3`, `tent_c_pole_5` — is a
+ *     Blender exporter's, written by glTF because glTF names every node, and
+ *     read by nothing. `assets.isAssetNodeName` is what separates them: a name
+ *     that arrived inside a GLB is anonymous unless this file says otherwise,
+ *     and ADDRESSED_NAMES is the list of the ones it says otherwise about.
  *   * anything with CHILDREN. Merging a mesh means removing it, and a mesh with
  *     children is a joint as well as a surface.
  *   * anything with USERDATA — the marker this repo uses for "there is a system
@@ -44,6 +54,49 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
  * Shadow flags ride the key too, because they are per-mesh and a merge picks one.
  */
 
+/**
+ * EVERY NAME THIS REPO LOOKS A NODE UP BY — the one list that decides whether a
+ * named mesh may be merged away.
+ *
+ * It is not a style guide and it is not aspirational: it is the set of string
+ * literals that reach `getObjectByName` or an `o.name === '…'` test anywhere in
+ * `src/` or `scripts/`, and `scripts/test-decor-batch.mjs` re-derives it from the
+ * source on every run and FAILS when a literal appears that is not in here. That
+ * is the whole safety argument. A name only has to be listed when a GLB also
+ * carries it — an unnamed-in-GLB name can never be merged anyway — but listing
+ * the lot costs nothing and means the gate does not need to know the difference.
+ */
+export const ADDRESSED_NAMES: ReadonlySet<string> = new Set([
+  'bucket-water',
+  'cave-portal-rock',
+  'decor-camp',
+  'door',
+  'held-weapon',
+  'hold-cargo',
+  'island-grass',
+  'island-terrain',
+  'local-pocket',
+  'local-view-weapon',
+  'ocean-lod-grid',
+  'own-pennant',
+  'view-hand-right',
+  'vm-eor-scope',
+  'waterfall-site',
+]);
+
+/**
+ * True when a mesh's name is one that has to survive the collapse.
+ *
+ * Unnamed → false, trivially. Named by a GLB and not addressed → false: the
+ * exporter wrote it and nobody reads it. Named by anything else → true, because
+ * a name this codebase wrote is, by its own convention, an address.
+ */
+export function isAddressedName(name: string): boolean {
+  if (!name) return false;
+  if (ADDRESSED_NAMES.has(name)) return true;
+  return !assets.isAssetNodeName(name);
+}
+
 /** Merge candidates are grouped by everything three needs to agree on. */
 function bucketKey(mesh: THREE.Mesh, material: THREE.Material): string {
   const attributes = Object.keys(mesh.geometry.attributes).sort().join(',');
@@ -56,7 +109,7 @@ function isMergeable(node: THREE.Object3D): node is THREE.Mesh {
   if (!mesh.isMesh) return false;
   if ((mesh as unknown as THREE.InstancedMesh).isInstancedMesh) return false;
   if ((mesh as unknown as THREE.SkinnedMesh).isSkinnedMesh) return false;
-  if (mesh.name) return false;
+  if (isAddressedName(mesh.name)) return false;
   if (mesh.children.length > 0) return false;
   if (!mesh.visible) return false;
   if (Array.isArray(mesh.material)) return false;

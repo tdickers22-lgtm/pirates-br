@@ -45,6 +45,22 @@ export class AssetLibrary {
   private boundsCache = new Map<AssetName, THREE.Box3>();
   /** Geometries/materials owned by the library (shared across clones) — must never be disposed by callers. */
   private sharedResources = new WeakSet<object>();
+  /**
+   * Every mesh NAME any loaded GLB carries — `lantern_post_post_1`,
+   * `campfire_stone0_3`, `tent_c_pole_5`.
+   *
+   * These are the Blender exporter's node names, and nothing addresses them:
+   * they exist because glTF names every node it writes. That mattered nowhere
+   * until the static batcher, whose rule is "never merge a mesh with a NAME,
+   * because a name is how this codebase finds a node again" — a rule the
+   * exporter defeats wholesale. A pier is 38 draw calls of which 36 are refused
+   * for carrying a name out of Blender that no line of this repo has ever read.
+   *
+   * Recording the set here is what lets the batcher tell an exporter's name from
+   * one this game wrote, without guessing at the shape of the string. See
+   * `island/StaticBatcher.ts`.
+   */
+  private assetNodeNames = new Set<string>();
   private loaded = false;
 
   /** Loads every GLB in parallel. Failures are logged and tolerated:
@@ -61,6 +77,7 @@ export class AssetLibrary {
           if (o instanceof THREE.Mesh) {
             o.castShadow = true;
             o.receiveShadow = true;
+            if (o.name) this.assetNodeNames.add(o.name);
             this.sharedResources.add(o.geometry);
             const mats = Array.isArray(o.material) ? o.material : [o.material];
             for (const m of mats) {
@@ -96,6 +113,18 @@ export class AssetLibrary {
 
   has(name: AssetName): boolean {
     return this.scenes.has(name);
+  }
+
+  /**
+   * True when `name` is a node name that came out of a GLB rather than out of
+   * this codebase.
+   *
+   * Only ever a licence to treat the node as anonymous — never a licence to
+   * treat it as safe. A GLB is perfectly free to call a node `door`, and the
+   * tavern's is exactly that; the caller still owes the addressed-name check.
+   */
+  isAssetNodeName(name: string): boolean {
+    return this.assetNodeNames.has(name);
   }
 
   /**

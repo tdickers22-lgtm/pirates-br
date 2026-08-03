@@ -85,10 +85,19 @@ const CENSUS = () => {
       };
       walk(child);
       if (rows.length === 0) continue;
+      // THE FLOOR NO MERGE RULE CAN GO BELOW. A batch is one mesh per material,
+      // so a piece whose meshes all carry DIFFERENT materials cannot be reduced
+      // by one call however permissive the predicate gets — `mergeGeometries` is
+      // not the answer to it, an atlas is. Say so per row, or the next reader
+      // spends a day loosening a predicate that is already open.
+      const matCount = new Map();
+      for (const r of rows) matCount.set(r.mat, (matCount.get(r.mat) ?? 0) + 1);
+      for (const r of rows) if (matCount.get(r.mat) === 1) r.soleOfMaterial = true;
       pieces.push({
         island: st?.name ?? id,
         piece: child.name || `(${child.type})`,
         draws: rows.length,
+        materials: matCount.size,
         rows,
       });
     }
@@ -117,25 +126,27 @@ async function main() {
     // one edit to one builder.
     const byType = new Map();
     for (const p of pieces) {
-      const cur = byType.get(p.piece) ?? { piece: p.piece, copies: 0, draws: 0, blockers: {} };
+      const cur = byType.get(p.piece) ?? { piece: p.piece, copies: 0, draws: 0, materials: 0, blockers: {} };
       cur.copies += 1;
       cur.draws += p.draws;
+      cur.materials += p.materials;
       for (const r of p.rows) {
-        const key = r.blocker ?? 'MERGEABLE';
+        const key = r.soleOfMaterial ? 'sole-of-material' : (r.blocker ?? 'MERGEABLE');
         cur.blockers[key] = (cur.blockers[key] ?? 0) + 1;
       }
       byType.set(p.piece, cur);
     }
     const types = [...byType.values()].sort((a, b) => b.draws / b.copies - a.draws / a.copies);
 
-    console.log('\n  draws/copy  copies  piece                      blockers');
+    console.log('\n  draws/copy  mats/copy  copies  piece                      blockers');
     for (const t of types.slice(0, PIECES)) {
       const per = (t.draws / t.copies).toFixed(1);
+      const mats = (t.materials / t.copies).toFixed(1);
       const b = Object.entries(t.blockers)
         .sort((x, y) => y[1] - x[1])
         .map(([k, v]) => `${k}×${v}`)
         .join(' ');
-      console.log(`  ${per.padStart(10)}  ${String(t.copies).padStart(6)}  ${t.piece.padEnd(26)} ${b}`);
+      console.log(`  ${per.padStart(10)}  ${mats.padStart(9)}  ${String(t.copies).padStart(6)}  ${t.piece.padEnd(26)} ${b}`);
     }
 
     const worst = pieces[0];
