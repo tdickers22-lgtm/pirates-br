@@ -90,6 +90,7 @@ export class SeaEventRenderer {
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly tmpPos = new THREE.Vector3();
   private readonly tmpScale = new THREE.Vector3(1, 1, 1);
+  private readonly tmpEuler = new THREE.Euler();
 
   init(scene: THREE.Scene, hooks: SeaEventHooks): void {
     this.scene = scene;
@@ -662,7 +663,10 @@ export class SeaEventRenderer {
       const y = 13 + (i % 4) * 3.4 + Math.sin(worldTime * 0.9 + i) * 1.2;
       this.tmpPos.set(Math.cos(angle) * r, y, Math.sin(angle) * r);
       // Nose along the tangent, banked into the turn.
-      this.tmpQuat.setFromEuler(new THREE.Euler(0, -angle + Math.PI * 0.5, 0.35, 'YXZ'));
+      // One scratch Euler, not one per bird per frame: four flocks of gulls at
+      // ~20 birds each is eighty throwaway Eulers a frame for three numbers.
+      this.tmpEuler.set(0, -angle + Math.PI * 0.5, 0.35, 'YXZ');
+      this.tmpQuat.setFromEuler(this.tmpEuler);
       this.tmpMatrix.compose(this.tmpPos, this.tmpQuat, this.tmpScale);
       gulls.setMatrixAt(i, this.tmpMatrix);
     }

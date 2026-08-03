@@ -1518,6 +1518,13 @@ interface ShipWake {
 
 const WAKE_ROWS = 9;
 const WAKE_COLS = 3;
+/**
+ * How far outside a dock's own footprint a hull can still be and produce a
+ * boarding plank: half the longest hull (22m), plus her beam, plus the planner's
+ * 3.6m maximum span, rounded well up. Used only to reject pairs that CANNOT
+ * berth before the shared planner is asked — see syncGangways.
+ */
+const GANGWAY_REJECT_MARGIN = 40;
 
 /** One rendered breach: the torn-planking decal group on the hull surface, its
  *  pulsing "plank me" halo, the gush anchor Game.ts hangs water jets on, the
@@ -1638,7 +1645,26 @@ export class ShipRenderer {
   /** Reused splinter-shard geometry, scaled per decal (all breaches render at
    *  HOLE_VISUAL_RADIUS — depth of damage reads as MORE holes, not bigger ones). */
   private holeDecalGeo: { opening: THREE.CircleGeometry; rim: THREE.RingGeometry; shards: THREE.BufferGeometry | null; marker: THREE.RingGeometry } | null = null;
-  private readonly cannonOperators = new Map<string, Player>();
+  /**
+   * Who is on which cannon this frame, as `shipId -> operator by cannon index`.
+   *
+   * It used to be one flat map keyed `${shipId}:${cannonIndex}`, which meant a
+   * fresh string built for every crewed cannon when the map was filled AND
+   * another for every cannon on every hull when it was read — ten hulls of eight
+   * guns is eighty throwaway strings a frame to answer a question two integers
+   * already contain. The inner arrays are pooled per ship id and only ever
+   * cleared, never reallocated.
+   */
+  private readonly cannonOperators = new Map<string, Array<Player | undefined>>();
+  /** Upgrade types on a hull this frame — one scratch Set, cleared per hull,
+   *  instead of `new Set(ship.upgrades.map(...))` per hull per frame. */
+  private readonly activeUpgrades = new Set<ShipUpgradeType>();
+  /** The upgrade-pennant keys, resolved once. `Object.entries` on the pennant
+   *  record allocated an array plus one two-element array per pennant, per hull,
+   *  per frame, to walk a key list that is fixed at build time. */
+  private upgradePennantTypes: ShipUpgradeType[] | null = null;
+  /** …and the same for the upgrade-VISUALS record, walked per hull per frame. */
+  private upgradeVisualTypes: ShipUpgradeType[] | null = null;
   private windOverride: { direction: number; strength: number } | null = null;
   private readonly waveMotion = { pitch: 0, roll: 0, surfaceY: 0 };
   /** 0 = day, 1 = night. Drives lantern glass emissive + per-ship PointLights. */
@@ -3996,10 +4022,11 @@ export class ShipRenderer {
     targets.push(trimGroup);
   }
 
-  private updateUpgradeVisuals(mesh: ShipMeshGroup, activeUpgrades: Set<ShipUpgradeType>) {
-    for (const [type, visuals] of Object.entries(mesh.upgradeVisuals) as Array<[ShipUpgradeType, THREE.Object3D[]]>) {
+  private updateUpgradeVisuals(mesh: ShipMeshGroup, activeUpgrades: ReadonlySet<ShipUpgradeType>) {
+    const types = this.upgradeVisualTypes ??= Object.keys(mesh.upgradeVisuals) as ShipUpgradeType[];
+    for (const type of types) {
       const active = activeUpgrades.has(type);
-      for (const visual of visuals) visual.visible = active;
+      for (const visual of mesh.upgradeVisuals[type]) visual.visible = active;
     }
 
     const swift = activeUpgrades.has('swift_sails');
@@ -4034,11 +4061,15 @@ export class ShipRenderer {
     const positionAlpha = 1 - Math.exp(-18 * dt);
     const rotationAlpha = 1 - Math.exp(-20 * dt);
     const cannonOperators = this.cannonOperators;
-    cannonOperators.clear();
+    for (const slots of cannonOperators.values()) slots.length = 0;
     for (const player of players) {
       if (!player.atCannon || !player.onShipId) continue;
-      const key = `${player.onShipId}:${player.cannonIndex}`;
-      cannonOperators.set(key, player);
+      let slots = cannonOperators.get(player.onShipId);
+      if (!slots) {
+        slots = [];
+        cannonOperators.set(player.onShipId, slots);
+      }
+      slots[player.cannonIndex] = player;
     }
 
     // Night lantern budget: only the nearest few ships get a real PointLight.
@@ -4062,7 +4093,9 @@ export class ShipRenderer {
 
       mesh.root.visible = true;
       const stats = SHIP_STATS[ship.type];
-      const activeUpgrades = new Set(ship.upgrades.map(upgrade => upgrade.type));
+      const activeUpgrades = this.activeUpgrades;
+      activeUpgrades.clear();
+      for (const upgrade of ship.upgrades) activeUpgrades.add(upgrade.type);
       this.updateUpgradeVisuals(mesh, activeUpgrades);
       const detailDistance = this.quality === 'low' ? 170 : this.quality === 'balanced' ? 285 : 380;
       const distSq = cameraPosition
@@ -4344,7 +4377,10 @@ export class ShipRenderer {
         pennant.rotation.z = Math.sin(t * 8 + pennant.position.z * 0.14) * 0.12;
         pennant.scale.x = 1.05 + wind.strength * 0.65 + Math.min(0.4, Math.hypot(ship.velocity.x, ship.velocity.z) * 0.03);
       }
-      for (const [type, pennant] of Object.entries(mesh.upgradePennants) as Array<[ShipUpgradeType, THREE.Mesh]>) {
+      const pennantTypes = this.upgradePennantTypes
+        ??= Object.keys(mesh.upgradePennants) as ShipUpgradeType[];
+      for (const type of pennantTypes) {
+        const pennant = mesh.upgradePennants[type];
         pennant.visible = activeUpgrades.has(type);
         if (!pennant.visible) continue;
         pennant.rotation.y = Math.PI * 0.5 + localWind;
@@ -4353,8 +4389,10 @@ export class ShipRenderer {
       }
 
       const cannonsPerSide = Math.max(1, SHIP_STATS[ship.type].cannonCount / 2);
-      for (const [index, cannon] of mesh.cannonMeshes.entries()) {
-        const operator = cannonOperators.get(`${ship.id}:${index}`);
+      const shipOperators = cannonOperators.get(ship.id);
+      for (let index = 0; index < mesh.cannonMeshes.length; index++) {
+        const cannon = mesh.cannonMeshes[index];
+        const operator = shipOperators?.[index];
         if (!detailNear) {
           cannon.root.visible = true;
           continue;
@@ -4616,7 +4654,18 @@ export class ShipRenderer {
     if (this.docks.length === 0 && this.gangwayPlanks.length === 0) return;
     let used = 0;
     for (const dock of this.docks) {
+      // A plank can only exist when the hull is lying against this berth, and
+      // the shared planner allocates eight objects working that out. Every
+      // dock x ship pair was being asked, every frame, so nine hulls anchored
+      // elsewhere on the map paid for the one alongside. The bound is the dock's
+      // own half-diagonal plus the longest hull plus the maximum span — a pair
+      // outside it cannot produce a plan, so this rejects nothing real.
+      const dockReach = Math.hypot(dock.width, dock.length) * 0.5 + GANGWAY_REJECT_MARGIN;
       for (const ship of ships) {
+        if (!ship.anchored || ship.sinking || ship.alive === false) continue;
+        const berthDx = ship.position.x - dock.position.x;
+        const berthDz = ship.position.z - dock.position.z;
+        if (berthDx * berthDx + berthDz * berthDz > dockReach * dockReach) continue;
         const plan = getShipGangwayPlan(ship, dock);
         if (!plan) continue;
         const plank = this.getGangwayPlank(used++);

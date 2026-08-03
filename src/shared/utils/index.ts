@@ -252,13 +252,19 @@ export function gerstnerHeight(
 ): number {
   const roughness = getOceanRoughness(t) * (1 + storm * 0.85);
   let height = 0;
-  for (const w of waves) {
+  // INDEXED, not for-of. A `for (const w of waves)` allocates an array iterator
+  // per loop unless V8 has optimised the frame, and this function runs once per
+  // waterline-collar VERTEX per hull per frame — measured at 170 bytes per
+  // computeWaveMotion (five calls, two loops each) with nothing else in it.
+  for (let i = 0; i < waves.length; i++) {
+    const w = waves[i];
     const k = (2 * Math.PI) / w.wavelength;
     const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
     height += w.amplitude * roughness * Math.sin(f);
   }
   if (storm > 0) {
-    for (const w of STORM_WAVE_PARAMS) {
+    for (let i = 0; i < STORM_WAVE_PARAMS.length; i++) {
+      const w = STORM_WAVE_PARAMS[i];
       const k = (2 * Math.PI) / w.wavelength;
       const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
       height += w.amplitude * storm * Math.sin(f);

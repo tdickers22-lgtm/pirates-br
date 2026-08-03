@@ -65,6 +65,8 @@ const KEG_FUSE_HISS_BURST = 2.5;
 const GAME_SERVER_PORT = '8090';
 /** Skeleton remains linger (and sink/fade) instead of popping after 1.5s. */
 const SKELETON_CORPSE_LIFETIME = 6.5;
+/** The limb node names a wildlife mesh is built with — see buildWildlifeMesh. */
+const WILDLIFE_LEG_KEYS = ['leg0', 'leg1', 'leg2', 'leg3', 'leg4', 'leg5'] as const;
 /** A dropped weapon tumbles, lands and fades over this many seconds. */
 const DROPPED_WEAPON_LIFETIME = 6;
 
@@ -413,6 +415,9 @@ export class Game {
   private joinAssignmentWatchdog: number | null = null;
   private lastFrameTime = performance.now();
   private frameDt = 1 / 60;
+  /** Reused per-frame id set for the wildlife reaper — a fresh Set (plus every
+   *  entry it grows) once a frame is garbage for a question answered in-place. */
+  private readonly wildlifeSeen = new Set<string>();
   /** Shared emissive-glow flicker for volcanic magma veins + caldera lava,
    *  driven per-frame in updateVolcanicFx and read by the terrain shader. */
   private readonly magmaPulseUniform = { value: 1 };
@@ -3994,10 +3999,22 @@ export class Game {
 
       const targetPos = this.getPlayerRenderPosition(player, isLocal ? (player.state === 'swimming' ? 0.05 : player.cannonBallistic ? 0.06 : 0.055) : player.cannonBallistic ? 0.05 : 0.035);
       const onIslandFoot = !player.onShipId && player.state === 'alive';
-      const movementKey = `${player.state}|${player.onShipId ?? 'off'}|${onIslandFoot ? 'isle' : 'open'}|${player.cannonBallistic ? 'bal' : 'nb'}`;
-      const ud = mesh.userData as { movementKey?: string; transitionBoost?: number };
-      if (ud.movementKey !== movementKey) {
-        ud.movementKey = movementKey;
+      // The four things that make this a DIFFERENT kind of movement, compared
+      // field by field. They used to be joined into one `${}|${}|${}|${}` key —
+      // a fresh string per player per frame (thirteen a frame, all of them
+      // identical to the last one) to detect a transition that happens perhaps
+      // twice a minute.
+      const ud = mesh.userData as {
+        mvState?: string; mvShip?: string | null; mvIsle?: boolean; mvBallistic?: boolean;
+        transitionBoost?: number;
+      };
+      const mvBallistic = !!player.cannonBallistic;
+      if (ud.mvState !== player.state || ud.mvShip !== (player.onShipId ?? null)
+        || ud.mvIsle !== onIslandFoot || ud.mvBallistic !== mvBallistic) {
+        ud.mvState = player.state;
+        ud.mvShip = player.onShipId ?? null;
+        ud.mvIsle = onIslandFoot;
+        ud.mvBallistic = mvBallistic;
         ud.transitionBoost = 0.38;
       }
       if (ud.transitionBoost && ud.transitionBoost > 0) {
@@ -4839,7 +4856,8 @@ export class Game {
 
   private syncWildlife(dt: number) {
     if (!this.state) return;
-    const seen = new Set<string>();
+    const seen = this.wildlifeSeen;
+    seen.clear();
     const t = this.ocean.getTime();
     for (const animal of this.state.wildlife ?? []) {
       if ((animal.health ?? 1) <= 0) continue;
@@ -4870,11 +4888,15 @@ export class Game {
       // chickens flap at 11Hz and idle pigs march on the spot; a grounded gull
       // is not a hovering one. Derived from the position delta because the
       // wildlife snapshot carries no velocity.
-      const prevPos = mesh.userData.prevPos as { x: number; z: number } | undefined;
+      let prevPos = mesh.userData.prevPos as { x: number; z: number } | undefined;
       const stepped = prevPos
         ? Math.hypot(animal.position.x - prevPos.x, animal.position.z - prevPos.z) / Math.max(dt, 0.001)
         : 0;
-      mesh.userData.prevPos = { x: animal.position.x, z: animal.position.z };
+      // Written in place. A fresh {x,z} per animal per frame is a hundred
+      // objects a frame to remember two numbers that already have a home.
+      if (!prevPos) prevPos = mesh.userData.prevPos = { x: 0, z: 0 };
+      prevPos.x = animal.position.x;
+      prevPos.z = animal.position.z;
       const speedEma = ((mesh.userData.speedEma as number | undefined) ?? 0) * 0.82 + stepped * 0.18;
       mesh.userData.speedEma = speedEma;
       // A gull on the wing keeps full wingbeat; a grounded one tucks and pecks.
@@ -4897,8 +4919,10 @@ export class Game {
         parts.head.rotation.x = tick * (animal.type === 'chicken' ? 0.7 : 0.4);
       }
       if (parts?.body) parts.body.rotation.z = Math.sin(phase) * (animal.type === 'crab' ? 0.035 : 0.02) * move01;
-      for (let leg = 0; leg < 6; leg++) {
-        const limb = parts?.[`leg${leg}`];
+      for (let leg = 0; leg < WILDLIFE_LEG_KEYS.length; leg++) {
+        // A literal key list, not `leg${leg}`: six template strings per animal
+        // per frame, for six names that were fixed when the mesh was built.
+        const limb = parts?.[WILDLIFE_LEG_KEYS[leg]];
         if (limb) limb.rotation.z = (leg % 2 === 0 ? 1 : -1) * (0.18 + Math.sin(phase + leg) * 0.16 * move01);
       }
     }
