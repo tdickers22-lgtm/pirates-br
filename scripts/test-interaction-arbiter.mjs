@@ -76,7 +76,7 @@ function makeArbiter(shipType) {
     getNearbyUpgradeStation: () => null,
     getRepairPlankCount: () => 0,
     getHoleRepairWorldPoint: () => new THREE.Vector3(),
-    getShipWorldPoint: (s, lx, lz, worldY) => {
+    getShipReachPoint: (s, lx, lz, worldY) => {
       const w = toShipWorldPoint({ x: lx, z: lz }, s);
       return new THREE.Vector3(w.x, s.position.y + worldY, w.z);
     },
