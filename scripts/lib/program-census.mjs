@@ -117,6 +117,7 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
           materialName: e.materialName,
           object: e.object,
           why: e.why,
+          stack: e.stack,
         })),
         play: this.duringPlay().map((e) => ({
           ms: Math.round((e.ms + e.preMs) * 10) / 10,
@@ -159,6 +160,14 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
         shaderName: '',
         shaderType: '',
         programId: -1,
+        // A join taken outside a draw is the interesting one — it is somebody
+        // paying deliberately — so it carries the stack that paid it. Without
+        // this the census can only say "not a draw", and a suite that reasons
+        // from that alone will believe a disabled warmer is still working.
+        stack: ctx ? '' : (() => {
+          try { return (new Error().stack ?? '').split('\n').slice(2, 8).join(' | ').slice(0, 500); }
+          catch { return ''; }
+        })(),
         material: ctx?.material ?? '(warm)',
         materialName: ctx?.materialName ?? '',
         object: ctx?.object ?? '',
@@ -239,6 +248,38 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
     this.installedDraw = true;
     return true;
   };
+
+  // INSTALL THE MOMENT THERE IS A RENDERER TO INSTALL ON.
+  //
+  // The wrapper is what tells a join taken BY A DRAW from a join paid on purpose
+  // by the warmer, and until it is in place every join looks deliberate. Waiting
+  // for the runner to call installDraw() left the menu backdrop's two dozen
+  // programs on the wrong side of that line — enough to report 82% of a session
+  // as "warmed" in a build whose warmer had been disabled before it ever ran.
+  // main.ts publishes the game as soon as it is constructed, so a setter here is
+  // in place before the first frame is drawn.
+  let published;
+  try {
+    Object.defineProperty(window, '__piratesBR', {
+      configurable: true,
+      get: () => published,
+      set: (value) => { published = value; try { census.installDraw(); } catch {} },
+    });
+  } catch { /* something else owns the property; the runner's installDraw() covers it */ }
+
+  // AND KEEP TRYING UNTIL IT TAKES. The game object is published before its
+  // WebGLRenderer exists — that is built later, behind the asset load — so a
+  // one-shot install at publication silently does nothing and every join taken
+  // during the whole load is then recorded as if somebody had warmed it. That
+  // reading (82% "warmed" in a run whose warmer had been disabled before it ever
+  // ran) is what this poll exists to stop. It costs one property read per frame
+  // and stops the moment it succeeds.
+  const tryInstall = () => {
+    let done = false;
+    try { done = census.installDraw() === true; } catch { done = false; }
+    if (!done) requestAnimationFrame(tryInstall);
+  };
+  requestAnimationFrame(tryInstall);
 
   window.__programCensus = census;
 })();
