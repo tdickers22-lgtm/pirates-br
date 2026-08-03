@@ -324,14 +324,24 @@ export function buildServerProps(ctx: IslandBuildCtx) {
  * that would otherwise blacken every card seen from behind.
  */
 function liftFoliageNormals(material: THREE.MeshStandardMaterial, amount: number) {
+  // HOW FAR THE NORMAL BENDS IS A UNIFORM, NOT A LITERAL. Grass asks for 0.85
+  // and ferns for 0.70, and while that number was baked into the source the two
+  // cards were two shader programs of otherwise identical GLSL — with the cache
+  // key naming the float, so a third value would have been a third program. Both
+  // were caught linking mid-match by the program census. The uniform object is
+  // made per material, so one program serves both without sharing the value.
+  const lift = { value: amount };
   material.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <normal_fragment_begin>',
-      `#include <normal_fragment_begin>
-       normal = normalize(mix(normal, vec3(0.0, 1.0, 0.0), ${amount.toFixed(2)}));`,
-    );
+    shader.uniforms.uFoliageLift = lift;
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uFoliageLift;')
+      .replace(
+        '#include <normal_fragment_begin>',
+        `#include <normal_fragment_begin>
+       normal = normalize(mix(normal, vec3(0.0, 1.0, 0.0), uFoliageLift));`,
+      );
   };
-  material.customProgramCacheKey = () => `pirates-foliage-card-${amount.toFixed(2)}`;
+  material.customProgramCacheKey = () => 'pirates-foliage-card';
 }
 
 /**

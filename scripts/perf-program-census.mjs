@@ -90,6 +90,18 @@ async function main() {
   const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
   page.setDefaultTimeout(0);
   page.on('pageerror', (e) => console.error(`  [pageerror] ${String(e.message).slice(0, 200)}`));
+  // A merged program is only a saving if it still COMPILES. checkShaderErrors is
+  // off in play, but ProgramWarmer turns it on for every link it takes itself,
+  // so any GLSL this run breaks is reported through the console — and a run that
+  // silently rendered black would otherwise look like a very good result.
+  const shaderErrors = [];
+  page.on('console', (m) => {
+    const text = m.text();
+    if (!/WebGLProgram|WebGLShader|ERROR:|shader/i.test(text)) return;
+    if (!/error/i.test(text)) return;
+    shaderErrors.push(text.slice(0, 400));
+    console.error(`  [shader] ${text.slice(0, 300)}`);
+  });
 
   const report = { at: new Date().toISOString(), quality: QUALITY, gl: describeGl(), mapSeed: h.mapSeed, seconds: SECONDS, ratio: RATIO };
   try {
@@ -126,6 +138,8 @@ async function main() {
     const summary = await page.evaluate(() => window.__programCensus.summary());
     report.preload = preload;
     report.summary = summary;
+    report.shaderErrors = shaderErrors;
+    if (shaderErrors.length > 0) console.error(`\n!! ${shaderErrors.length} shader errors — a merged program that does not compile is not a saving`);
 
     console.log(`\ntotal program keys: ${summary.totalKeys}   live programs: ${summary.livePrograms}`);
     console.log(`links issued: ${summary.counters.links}   joins: ${summary.counters.joins} (${summary.counters.joinsInDraw} inside a draw, ${summary.counters.joinsOutsideDraw} warmed)`);

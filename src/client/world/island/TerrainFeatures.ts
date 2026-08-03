@@ -30,10 +30,25 @@ import { ensureMeshGround } from './GroundTruth.js';
  *     actually stops a dark stone from reading as a black solid;
  *   · a floor under the darkening, so no face of this family can go to pitch.
  *
- * Costs one program per cache key, no textures, no geometry, no draw calls.
+ * ONE PROGRAM, NOT NINE. Every call site here builds the SAME GLSL and differs
+ * only in how hard the sun has bleached the upper faces — and until this was
+ * measured, each of them also handed three a different `customProgramCacheKey`,
+ * so strata-0, strata-1, strata-2, reef-dark, reef-wet, spire, spire-rubble and
+ * terrace-ledge were eight separate shader programs of identical source. The
+ * census caught six of them linking inside a drawn frame in a single 90-second
+ * session, 10.2 s of joins between them. `bleach` is a float. A float that
+ * varies is a uniform, not a define, and a uniform costs nothing per frame and
+ * nothing per program — the whole family now links once, and whichever of them
+ * the player sails past first pays for all the rest.
+ *
+ * The uniform object is per MATERIAL (each closure makes its own and hands it to
+ * `shader.uniforms`), so sharing the program does not share the value.
  */
-function paintFeatureRock(mat: THREE.MeshStandardMaterial, cacheKey: string, bleach = 0.30) {
+function paintFeatureRock(mat: THREE.MeshStandardMaterial, name: string, bleach = 0.30) {
+  const bleachUniform = { value: bleach };
+  mat.name = mat.name || name;
   mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uFeatBleach = bleachUniform;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vFeatW;\nvarying vec3 vFeatN;\n')
       .replace(
@@ -45,7 +60,7 @@ function paintFeatureRock(mat: THREE.MeshStandardMaterial, cacheKey: string, ble
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
-        '#include <common>\nvarying vec3 vFeatW;\nvarying vec3 vFeatN;\n'
+        '#include <common>\nvarying vec3 vFeatW;\nvarying vec3 vFeatN;\nuniform float uFeatBleach;\n'
         + 'float ftHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n'
         + 'float ftNoise(vec2 p) {\n'
         + '  vec2 i = floor(p); vec2 f = fract(p);\n'
@@ -71,7 +86,7 @@ function paintFeatureRock(mat: THREE.MeshStandardMaterial, cacheKey: string, ble
         + 'diffuseColor.rgb *= clamp(ftShade, 0.72, 1.45);\n'
         // Weathering by ASPECT: the up-facing planes bleach, the undercuts hold
         // damp shadow. On a cone this is what turns a silhouette into a rock.
-        + `diffuseColor.rgb += vec3(0.100, 0.093, 0.074) * ${bleach.toFixed(3)} * smoothstep(0.25, 0.95, vFeatN.y) * (0.45 + 0.55 * ftM1);\n`
+        + 'diffuseColor.rgb += vec3(0.100, 0.093, 0.074) * uFeatBleach * smoothstep(0.25, 0.95, vFeatN.y) * (0.45 + 0.55 * ftM1);\n'
         + 'diffuseColor.rgb *= 1.0 - 0.16 * smoothstep(-0.15, -0.85, vFeatN.y);\n'
         // Lichen in the shaded bedding planes, mineral warmth in the proud ones.
         + 'diffuseColor.rgb += vec3(-0.010, 0.026, -0.012) * smoothstep(0.62, 0.16, ftBed) * ftM1;\n'
@@ -88,7 +103,9 @@ function paintFeatureRock(mat: THREE.MeshStandardMaterial, cacheKey: string, ble
         + 'roughnessFactor = clamp(roughnessFactor - 0.20 * smoothstep(0.55, 0.95, ftM2), 0.42, 1.0);\n',
       );
   };
-  mat.customProgramCacheKey = () => cacheKey;
+  // One key for the whole family — see the note above. Changing this back to a
+  // per-call-site string re-mints eight programs of identical source.
+  mat.customProgramCacheKey = () => 'pirates-feature-rock';
 }
 
 /** Layered cliff strata — exposed rock bands wrapping high cliffs. (Skipped on
