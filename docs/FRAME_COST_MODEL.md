@@ -700,11 +700,23 @@ Read it as: **an island entering the view costs ~60–156 draw calls and ~63–1
 triangles; a ship entering it costs ~154–385 draws.** The R² of ~0.5–0.6 is honest —
 cost depends on *distance* as well as count, and the fit does not know that.
 
-Two things the intercepts say. There is a **floor of 286–542 draw calls that no camera
-angle removes** (sky, ocean rings, viewmodel, HUD-adjacent meshes, the always-resident
+Two things the intercepts say. There is a ~~**floor of 286–542 draw calls that no camera
+angle removes**~~ (sky, ocean rings, viewmodel, HUD-adjacent meshes, the always-resident
 FX pools). And **blended draws barely move with content at all** — 56 at the intercept,
 +2.4 per island — which is the counting-side confirmation of §3.1: the blended bill is
 a handful of fixed full-screen shells, not a crowd of small things.
+
+> **CORRECTED 2026-08-03, phase 7.** The floor is gone, and the group cull
+> (`fd35000`) is what took it. Measured on the pinned map at `low`, free-cam
+> turned away from the archipelago with the reveal settled: **44 draw calls,
+> 30k triangles, 13 of 14 island groups culled**
+> (`scripts/approach-shots.mjs`, `vista-away`). The 286–542 intercept was fitted
+> over yaw sweeps taken *before* that lever landed, when three walked into every
+> island root whether or not its bounding sphere was in the cone. Nothing else in
+> §8.3 moves — the per-island and per-ship slopes are about what entering the
+> frustum costs, not about what leaving it saves — but the sentence a reader is
+> most likely to quote out of this section is now false by an order of magnitude,
+> in the campaign's own favour.
 
 ---
 

@@ -25,6 +25,13 @@ import { chromium } from 'playwright';
 import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
+// EVERY BROWSER SUITE HERE READS PIRATES_BR_URL. A graded run points it at a
+// Vite the runner owns rather than at the developer's :3000, and a suite that
+// hard-codes the port sends itself somewhere else — which reads as
+// ERR_CONNECTION_REFUSED half a second in, an exit code indistinguishable from
+// a real failure.
+const BASE_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
+
 const OUT = process.argv[2] ?? 'test-results/live-floaters';
 mkdirSync(OUT, { recursive: true });
 const LIMIT = Number(process.env.PIRATES_BR_FLOAT_LIMIT ?? 0.25);
@@ -50,7 +57,7 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
   ].join('\n'),
 }));
 
-await page.goto('http://127.0.0.1:3000/?debug', { waitUntil: 'domcontentloaded' });
+await page.goto(`${BASE_URL}/?debug`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
 await page.click('#menu-solo-btn', { noWaitAfter: true });
 // 3rd arg is the options bag — as the 2nd it is silently the page-fn ARG and the

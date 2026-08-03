@@ -29,6 +29,13 @@ import { chromium } from 'playwright';
 import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
 
+// EVERY BROWSER SUITE HERE READS PIRATES_BR_URL. A graded run points it at a
+// Vite the runner owns rather than at the developer's :3000, and a suite that
+// hard-codes the port sends itself somewhere else — which reads as
+// ERR_CONNECTION_REFUSED half a second in, an exit code indistinguishable from
+// a real failure.
+const BASE_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
+
 const OUT = process.argv[2] ?? 'test-results/onboarding-ux';
 mkdirSync(OUT, { recursive: true });
 
@@ -73,7 +80,7 @@ const readCard = (p) => p.evaluate(() => {
   };
 });
 
-await page.goto('http://127.0.0.1:3000/?debug&forceinput', { waitUntil: 'domcontentloaded' });
+await page.goto(`${BASE_URL}/?debug&forceinput`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
 // A FIRST-EVER VOYAGE: drop the onboarding flag so the auto-open path is real.
 await page.evaluate(() => { localStorage.removeItem('piratesBR.seenControls'); });

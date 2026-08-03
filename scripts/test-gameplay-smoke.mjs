@@ -132,8 +132,8 @@ async function waitForSteadyFrames(page, { need = 8, frameBudgetMs = 220, giveUp
  * different defect from a low-but-steady frame rate, and reporting the rounded
  * rate alone made the two indistinguishable in the failure line.
  */
-async function measureFps(page, durationMs = 1400) {
-  return page.evaluate(async (ms) => {
+async function measureFps(page, durationMs = 1400, minFrames = 3, deadlineMs = 30_000) {
+  return page.evaluate(async ({ ms, minFrames, deadlineMs }) => {
     let frames = 0;
     let worst = 0;
     let prev = performance.now();
@@ -145,7 +145,15 @@ async function measureFps(page, durationMs = 1400) {
         worst = Math.max(worst, now - prev);
         prev = now;
         const elapsed = now - start;
-        if (elapsed >= ms) {
+        // A FIXED TIME WINDOW ON A CPU RASTERISER MEASURES THE MACHINE'S LOAD,
+        // NOT THE CLIENT. Under software ANGLE a frame of this scene is 0.5-2.5 s,
+        // so a 1400 ms window catches one frame when the machine is busy and four
+        // when it is not — and the assertion downstream then flips on the rounded
+        // rate: 4 frames reads 2 fps, 1 frame reads 0. Same build, same client,
+        // opposite verdicts, observed 40 minutes apart in one session. So the
+        // window closes on WHICHEVER COMES LAST, the time or the frames, with a
+        // hard deadline so a genuinely dead pipeline still ends the run.
+        if ((elapsed >= ms && frames >= minFrames) || elapsed >= deadlineMs) {
           resolve({
             fps: Math.round((frames * 1000) / Math.max(1, elapsed)),
             frames,
@@ -158,7 +166,7 @@ async function measureFps(page, durationMs = 1400) {
       }
       requestAnimationFrame(step);
     });
-  }, durationMs);
+  }, { ms: durationMs, minFrames, deadlineMs });
 }
 
 async function main() {
@@ -341,7 +349,11 @@ async function main() {
       expect('The frame pipeline settles after the world build', settle.settled,
         `still stalling after ${settle.waitedMs}ms (worst frame ${settle.worstFrameMs}ms)`);
     }
-    expect('Browser produced frames', fps > 0,
+    // Graded in FRAMES, not in a rounded rate. "The pipeline kept delivering"
+    // is the claim this line exists to make, and it is the same claim on both
+    // backends; `fps > 0` was that claim on the GPU and a measurement of how
+    // busy the machine was under SwiftShader (see measureFps).
+    expect('Browser produced frames', frameStats.frames >= 3,
       `fps=${fps} (${frameStats.frames} frames in ${frameStats.elapsed}ms,`
       + ` worst frame ${frameStats.worstFrameMs}ms; settled after ${settle.waitedMs}ms`
       + ` with a ${settle.worstFrameMs}ms worst boot frame)`);

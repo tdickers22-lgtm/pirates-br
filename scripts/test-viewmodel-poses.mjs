@@ -39,6 +39,13 @@
 import { chromium } from 'playwright';
 import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 
+// EVERY BROWSER SUITE HERE READS PIRATES_BR_URL. A graded run points it at a
+// Vite the runner owns rather than at the developer's :3000, and a suite that
+// hard-codes the port sends itself somewhere else — which reads as
+// ERR_CONNECTION_REFUSED half a second in, an exit code indistinguishable from
+// a real failure.
+const BASE_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
+
 if (IS_SOFTWARE_GL) {
   console.log('First-person pose invariants');
   console.log(`  – skipped: pose invariants need real frames at animation rate; this run is on ${describeGl()}`);
@@ -47,7 +54,7 @@ if (IS_SOFTWARE_GL) {
 
 // `debug` is what exposes window.__piratesBR (main.ts) — without it there is no
 // Game handle at all; `forceinput` opens the fire gate without pointer lock.
-const URL = 'http://127.0.0.1:3000/?debug&forceinput';
+const URL = `${BASE_URL}/?debug&forceinput`;
 let failures = 0;
 const expect = (name, ok, detail = '') => {
   console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`);

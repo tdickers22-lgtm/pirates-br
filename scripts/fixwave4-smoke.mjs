@@ -17,6 +17,13 @@ import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
+// EVERY BROWSER SUITE HERE READS PIRATES_BR_URL. A graded run points it at a
+// Vite the runner owns rather than at the developer's :3000, and a suite that
+// hard-codes the port sends itself somewhere else — which reads as
+// ERR_CONNECTION_REFUSED half a second in, an exit code indistinguishable from
+// a real failure.
+const BASE_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
+
 const OUT = process.argv[2] ?? 'test-results/fixwave4-smoke';
 mkdirSync(OUT, { recursive: true });
 
@@ -79,7 +86,7 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
 
 // ══ 1. THE MENU — it names its own world, teaches itself, and sings ════════
 console.log('\n1. MENU');
-await page.goto('http://127.0.0.1:3000/?debug&forceinput', { waitUntil: 'domcontentloaded' });
+await page.goto(`${BASE_URL}/?debug&forceinput`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
 await wait(900);
 await shot('01-menu');
@@ -424,7 +431,7 @@ try {
     } catch { /* not up yet */ }
     await wait(1000);
   }
-  await page.goto('http://127.0.0.1:3000/?debug&forceinput&server=8091', { waitUntil: 'domcontentloaded' });
+  await page.goto(`${BASE_URL}/?debug&forceinput&server=8091`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
   await page.click('#menu-solo-btn', { noWaitAfter: true });
   await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 150_000 });

@@ -22,6 +22,13 @@ import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+// EVERY BROWSER SUITE HERE READS PIRATES_BR_URL. A graded run points it at a
+// Vite the runner owns rather than at the developer's :3000, and a suite that
+// hard-codes the port sends itself somewhere else — which reads as
+// ERR_CONNECTION_REFUSED half a second in, an exit code indistinguishable from
+// a real failure.
+const BASE_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
+
 const OUT = process.argv[2]
   ?? '/private/tmp/claude-501/-Users-tobiasdicker/10a91956-1f9b-4664-ae78-2d985d4991c4/scratchpad/fixwave4/music';
 mkdirSync(OUT, { recursive: true });
@@ -54,7 +61,7 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
   ].join('\n'),
 }));
 
-await page.goto('http://127.0.0.1:3000/?debug', { waitUntil: 'domcontentloaded' });
+await page.goto(`${BASE_URL}/?debug`, { waitUntil: 'domcontentloaded' });
 await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
 
 // ── The offline rendering harness, installed in the page ────────────────────
