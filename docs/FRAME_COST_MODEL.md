@@ -747,7 +747,7 @@ hitch is what the player feels and a millisecond of steady cost is not.
 
 | # | lever | exact delta | est. `high` | est. `low` | visible cost |
 |--:|---|---|--:|--:|---|
-| **1** | **Warm every program the tier can reach, before the match — and cut the program count** (105–155 at `high`, 58–63 at `low`). Eleven of the twelve worst hitches are `getUniforms → replaceLightNums`, three r160's deferred first-use link, being taken *during play*. `ProgramWarmup.ts` fixes the load case; nothing fixes the walk-round-a-corner case | 45 hitches / 37.6 s of a 150 s capture → 0; worst single hitch 4,672 ms | **the biggest single win available**; on the GPU path the repo's own figure for one link is 1,366–1,782 ms | same class, ~60% fewer programs to warm | none |
+| **1** | ~~**Warm every program the tier can reach, before the match — and cut the program count**~~ **WORKED, round 2 phase 1 — and the walk was the defect, not the budget.** See §11 | draw-time links during 90 s of play at `high`: **36 → 25**, 27,964 → 17,655 ms of joins; live programs 137 → 131 | measured; the remaining large ones are the shadow pass's depth programs, which no walk can reach (§11.3) | same class; `low` owes no depth programs at all | none |
 | **2** | **Batch `island-decor`** — the #1 or #2 draw source in *every one of the nine scenes*, 247–668 calls. It is already instanced (227–290 instances in frame), so these are many `InstancedMesh` objects — one per prop type per island — not many props | −200 to −600 draw calls; triangles unchanged | **1.0 – 3.0 ms** (draw submission is 43% of all hitched time) | **0.6 – 1.5 ms** | **none** — identical geometry |
 | **3** | ~~**Cull the scene graph at the group level.**~~ **LANDED, and it is worth a third of what this row claimed.** The 9,201–9,388 figure counts hidden nodes three never visits (see §2): the real walk is 4,526 / 4,079 / 1,562 nodes | measured −16% (dock-vista), −6% (cave-interior), −13% (open-sea) of the per-frame traversal, not −70–80% | proportionally less than **0.5 ms** | same | none |
 | **4** | ~~**Shadow map 4096² → 1536²**, and skip the pass when the ortho box has no casters.~~ **LANDED at 2048², phase 4** — see `docs/FILL_AND_SHADER_PASS.md`. The size argument is not the one this row made: `shadow.normalBias` is 1.0 m at `high`, so at 4096 the bias was already thirteen texels wide and the map was paying for precision the bias had spent | 16.78 M → 4.19 M texels/frame; 117.4 MB → 29.4 MB resident; the pass itself skipped whenever it last drew nothing | — | 0 (no shadows) | none measured in the shot sheets |
@@ -850,3 +850,73 @@ map and the post chain, and leaves the overdraw *exactly where it was*.
     reads ±5–15% across runs (e.g. `waterfall-deck` blended overdraw 1.15 and 1.93 in
     two captures, because the fixed camera framed a different amount of the storm
     front). Single-frame columns (`passes`, per-source overdraw) carry that spread.
+
+---
+
+## 11. Lever 1, done: what actually stalls, and what is left
+
+Round 2, phase 1. Everything here is measured on the pinned map (seed 20260801),
+software ANGLE, framebuffer collapsed to ratio 0.1 so a ninety-second capture is
+thousands of frames of play rather than a few hundred.
+
+### 11.1 The instrument that made it specific
+
+`scripts/perf-program-census.mjs` + `scripts/lib/program-census.mjs`. A CPU
+profile can say `getProgramParameter | getUniforms | replaceLightNums`; it cannot
+say *which* program or what put it on screen. The census patches
+`getProgramParameter` on both context prototypes at document start — the first
+thing `new WebGLUniforms()` does is ask for `ACTIVE_UNIFORMS`, so every deferred
+first use announces itself exactly once — and wraps the renderer's own
+`renderBufferDirect`, so a join taken while that call is on the stack was taken
+BY A DRAW and one taken outside it was paid on purpose.
+
+Two corrections that any future reading depends on:
+
+- `checkShaderErrors` reads `LINK_STATUS` and the info log *before* the uniform
+  reflection, and on a driver with no parallel compile that read is where the
+  link is actually paid. The warmer turns that flag on for its own joins, so
+  timing only `ACTIVE_UNIFORMS` reported every warmed join as 0 ms. Both are
+  charged now.
+- The draw wrapper must be installed with a retry. The game object is published
+  before its `WebGLRenderer` exists, so a one-shot install at publication
+  silently does nothing and the entire load is then recorded as "warmed" — a run
+  whose warmer had been disabled from construction read 82% warmed.
+
+### 11.2 What was wrong, and what it is worth
+
+| finding | measured |
+|---|---|
+| the warm walk was `traverseVisible` — it could only ever see the frame being drawn, and every program that stalls belongs to the frame after it | weather shells, fx pools and unrevealed island detail sit in the graph with `visible = false` until the instant they draw |
+| the walk stopped after 4,000 meshes and resumed next frame, while the scene walks 4,526–9,388 nodes | on any frame most of the graph had not been examined when the hide decision was taken |
+| `prepare()` returned before walking whenever the guard was down and nothing was pending | the class was a load-time fix by construction |
+| kicking hidden material with a strict FIFO join queue | draw-time links went **UP**, 36 → 52: the material on screen waited behind fifty rooms the player was not in until its forty frames of patience ran out |
+| a key was marked paid even when `join()` found no program to join | warmer reported 82 paid; the census could find 16 joins outside a draw |
+| `currentProgram` holds only the last program compiled for a material | a material drawn both instanced and not had its first join take the second's program |
+| eight cliff-rock programs (`pirates-strata-0/1/2`, `reef-dark`, `reef-wet`, `spire`, `spire-rubble`, `terrace-ledge`) were the same GLSL with one float baked in, each with its own cache key | 10.2 s of joins in one 90 s session; now one program |
+| two foliage-card programs, the float named *in* the cache key | now one program |
+
+**Result at `high`, 90 s of play:** draw-time links **36 → 25**, joins **27,964 →
+17,655 ms**, live programs **137 → 131**. `low` tours the world with **10**
+draw-time links and no depth programs at all.
+
+### 11.3 What is left, named
+
+1. **The shadow pass's depth programs.** `getDepthMaterial` keeps one
+   `MeshDepthMaterial`, restamps it per object and draws that, with an empty
+   scene, no lights in the render state and a bound render target. Nothing in the
+   graph owns those programs and `compile()` cannot reproduce their cache key: a
+   pool of hand-stamped depth materials was built and measured, and it minted
+   **thirty programs the shadow pass will never ask for** (137 → 167 live) while
+   making draw-time links worse. Paying them means driving `shadowMap.render`
+   itself, which collides with the shadow update gate. They are the allowlist in
+   `scripts/test-program-warm.mjs`.
+2. **The menu and the load still take most joins inside a draw** (54 of 69 in a
+   toured session). That is the load path, which `test-load-responsiveness.mjs`
+   grades, not the play path this lever is about — but it is where the next
+   sixty programs are.
+3. **`pirates-terrain-detail-m0/m1/volcanic-m1`** fold a cutout COUNT into a
+   `#define`. Merging them needs a fixed-size loop and a real fill measurement
+   first; it is not a free rename like the rock family was.
+4. **A non-finite `AudioParam`** (`SoundEngine.makeSpatialDest`, via
+   `playShipImpact`) throws on every tour run. Unrelated to this lever, found by
+   it, unfixed.
