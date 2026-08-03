@@ -100,9 +100,13 @@ export const MEASURE_ALLOC = async (frames) => {
   if (!performance.memory) return { error: 'performance.memory unavailable — launch with --enable-precise-memory-info' };
   const mem = () => performance.memory.usedJSHeapSize;
 
-  // Warm: first-call lazy paths (a Map growing to its steady size, a shader
-  // string built once) are not steady-state allocation and must not be charged.
-  g.benchFrameCpu(Math.min(120, frames), 1 / 60);
+  // WARM, AND WARM PROPERLY. First-call lazy paths (a Map reaching its steady
+  // size, a shader string built once) are not steady-state allocation — but
+  // neither is the island-detail warmer, which compiles a chunk of materials a
+  // FRAME and takes hundreds of frames to drain. Warmed for 120 the first
+  // sample read 185 KB/frame against a settled 44; this is the load, measured,
+  // and it does not belong in a steady-state figure.
+  g.benchFrameCpu(Math.max(600, frames), 1 / 60);
   window.gc(); window.gc();
   await new Promise((r) => setTimeout(r, 40));
   window.gc(); window.gc();

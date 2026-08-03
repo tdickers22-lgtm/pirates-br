@@ -57,9 +57,9 @@ export class SpoilsRenderer {
       entry.root.rotation.y = t * 0.22 + entry.bob;
     }
 
-    for (const [id, entry] of this.meshes) {
+    for (const id of this.meshes.keys()) {
       if (live.has(id)) continue;
-      scene.remove(entry.root);
+      scene.remove(this.meshes.get(id)!.root);
       this.meshes.delete(id);
     }
   }

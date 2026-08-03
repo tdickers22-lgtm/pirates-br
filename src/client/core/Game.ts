@@ -3957,11 +3957,15 @@ export class Game {
   private syncPlayers(dt: number) {
     if (!this.state) return;
 
-    for (const [playerId, mesh] of this.playerMeshes) {
-      if (!this.livePlayerIds.has(playerId)) {
-        this.renderer.scene.remove(mesh);
-        this.playerMeshes.delete(playerId);
-      }
+    // `keys()`, not `entries()`: destructuring a Map in a for-of builds a fresh
+    // two-element array for EVERY entry, every frame, to hand back a pair the
+    // loop then throws away. Five reapers in this file were doing it over five
+    // live entity maps.
+    for (const playerId of this.playerMeshes.keys()) {
+      if (this.livePlayerIds.has(playerId)) continue;
+      const mesh = this.playerMeshes.get(playerId)!;
+      this.renderer.scene.remove(mesh);
+      this.playerMeshes.delete(playerId);
     }
 
     for (const player of this.state.players) {
@@ -4426,8 +4430,9 @@ export class Game {
   private syncProjectiles(dt: number) {
     if (!this.state) return;
 
-    for (const [projectileId, mesh] of this.projectileMeshes) {
+    for (const projectileId of this.projectileMeshes.keys()) {
       if (!this.liveProjectileIds.has(projectileId)) {
+        const mesh = this.projectileMeshes.get(projectileId)!;
         const projectileType = mesh.userData.projectileType as Projectile['type'] | undefined;
         const showImpact = mesh.userData.showImpact as boolean | undefined;
         if (projectileType && showImpact !== false) {
@@ -4509,12 +4514,12 @@ export class Game {
   private syncKegs(dt: number) {
     if (!this.state) return;
 
-    for (const [kegId, mesh] of this.kegMeshes) {
-      if (!this.liveKegIds.has(kegId)) {
-        this.renderer.scene.remove(mesh.root);
-        this.disposeSceneObject(mesh.root);
-        this.kegMeshes.delete(kegId);
-      }
+    for (const kegId of this.kegMeshes.keys()) {
+      if (this.liveKegIds.has(kegId)) continue;
+      const mesh = this.kegMeshes.get(kegId)!;
+      this.renderer.scene.remove(mesh.root);
+      this.disposeSceneObject(mesh.root);
+      this.kegMeshes.delete(kegId);
     }
 
     for (const keg of this.state.kegs) {
@@ -4841,16 +4846,16 @@ export class Game {
       mesh.rotation.x += (pitchTarget - mesh.rotation.x) * ease;
       mesh.rotation.z += (rollTarget - mesh.rotation.z) * ease;
     }
-    for (const [id, mesh] of this.sharkMeshes) {
-      if (!seen.has(id)) {
-        this.combatFx.emitSharkDeathBloom(
-          { x: mesh.position.x, y: mesh.position.y - 0.12, z: mesh.position.z },
-          this.renderer.camera.position,
-        );
-        this.environment.remove(mesh);
-        this.sharkMeshes.delete(id);
-        this.sharkPrevAttackState.delete(id);
-      }
+    for (const id of this.sharkMeshes.keys()) {
+      if (seen.has(id)) continue;
+      const mesh = this.sharkMeshes.get(id)!;
+      this.combatFx.emitSharkDeathBloom(
+        { x: mesh.position.x, y: mesh.position.y - 0.12, z: mesh.position.z },
+        this.renderer.camera.position,
+      );
+      this.environment.remove(mesh);
+      this.sharkMeshes.delete(id);
+      this.sharkPrevAttackState.delete(id);
     }
   }
 
@@ -4899,6 +4904,13 @@ export class Game {
       prevPos.z = animal.position.z;
       const speedEma = ((mesh.userData.speedEma as number | undefined) ?? 0) * 0.82 + stepped * 0.18;
       mesh.userData.speedEma = speedEma;
+      // THE LIMBS ONLY, AND ONLY ON SCREEN. Position, heading and the gait's own
+      // speed average stay live above this line, so nothing teleports or flaps
+      // when the animal comes back — but wings, heads and six legs were being
+      // posed every frame for every chicken on the map, including the ones
+      // updateEnvironmentLod has already hidden past the wildlife radius. The
+      // pose is a pure function of the clock, so the frame it reappears is right.
+      if (!mesh.visible) continue;
       // A gull on the wing keeps full wingbeat; a grounded one tucks and pecks.
       const flying = animal.type === 'gull' && speedEma > 0.35;
       const move01 = flying ? 1 : THREE.MathUtils.clamp(speedEma / 1.2, 0, 1);
@@ -4927,15 +4939,15 @@ export class Game {
       }
     }
 
-    for (const [id, mesh] of this.wildlifeMeshes) {
-      if (!seen.has(id)) {
-        this.combatFx.emitSharkDeathBloom(
-          { x: mesh.position.x, y: mesh.position.y + 0.12, z: mesh.position.z },
-          this.renderer.camera.position,
-        );
-        this.environment.remove(mesh);
-        this.wildlifeMeshes.delete(id);
-      }
+    for (const id of this.wildlifeMeshes.keys()) {
+      if (seen.has(id)) continue;
+      const mesh = this.wildlifeMeshes.get(id)!;
+      this.combatFx.emitSharkDeathBloom(
+        { x: mesh.position.x, y: mesh.position.y + 0.12, z: mesh.position.z },
+        this.renderer.camera.position,
+      );
+      this.environment.remove(mesh);
+      this.wildlifeMeshes.delete(id);
     }
   }
 
