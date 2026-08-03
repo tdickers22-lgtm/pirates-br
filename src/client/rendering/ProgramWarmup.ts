@@ -194,6 +194,9 @@ const PENDING_HIGH_WATER = 24;
 /** How far down the queue a frame will look for a link the driver has already
  *  finished, before deciding it has nothing cheap to do. */
 const READY_SCAN = 8;
+/** How many times a key may come back from `join()` with nothing joined before
+ *  it is written off as paid. Fail open — see the note at the top. */
+const MAX_JOIN_TRIES = 3;
 
 type Kicked = { key: string; material: THREE.Material; at: number };
 type Owed = { mesh: THREE.Mesh; key: string; material: THREE.Material };
@@ -213,6 +216,8 @@ export class ProgramWarmer {
   private readonly heldFrames = new WeakMap<THREE.Material, number>();
   /** Materials hidden for the current frame, to be restored after the render. */
   private readonly held: THREE.Material[] = [];
+  /** Keys whose join found no program to join, and how often. */
+  private readonly joinTries = new Map<string, number>();
   /** Frames since the last walk. A walk that finds nothing unpaid anywhere in
    *  the graph earns the next few frames off; anything else walks every frame. */
   private walkSkips = 0;
@@ -236,7 +241,7 @@ export class ProgramWarmer {
    *  load that gave up quietly. */
   readonly stats = {
     paid: 0, kicked: 0, heldNow: 0, forced: 0, lastMs: 0, worstMs: 0, worstJoinMs: 0,
-    walked: 0, owed: 0,
+    walked: 0, owed: 0, unjoinable: 0,
     guard: true, parallel: null as boolean | null,
   };
 
@@ -343,10 +348,21 @@ export class ProgramWarmer {
       const chunk: THREE.Mesh[] = [];
       const kicked: Kicked[] = [];
       const seen = new Set<string>();
+      const chunkMaterials = new Set<THREE.Material>();
       for (const entry of owing) {
         if (kicked.length >= kickCap) break;
         if (this.pendingKeys.has(entry.key) || seen.has(entry.key)) continue;
+        // ONE MATERIAL, ONE OUTSTANDING PROGRAM. The join reaches its program
+        // through `properties.get(material).currentProgram`, which holds only the
+        // LAST program compiled for that material — so a material drawn both
+        // instanced and not (two keys, two programs) would have its first
+        // variant's join silently take the second variant's program, and the
+        // first variant would still be unpaid when a frame drew it. A material
+        // with a kick already in flight is left alone until it has been joined.
+        if (chunkMaterials.has(entry.material)) continue;
+        if (this.pending.some((p) => p.material === entry.material)) continue;
         seen.add(entry.key);
+        chunkMaterials.add(entry.material);
         chunk.push(entry.mesh);
         kicked.push({ key: entry.key, material: entry.material, at: 0 });
       }
@@ -417,11 +433,26 @@ export class ProgramWarmer {
       const next = this.pending.splice(index, 1)[0]!;
       this.pendingKeys.delete(next.key);
       const joinStart = performance.now();
-      this.join(renderer, next.material);
+      const joined = this.join(renderer, next.material);
       const joinMs = performance.now() - joinStart;
       if (joinMs > this.stats.worstJoinMs) this.stats.worstJoinMs = +joinMs.toFixed(1);
-      this.paid.add(next.key);
-      this.stats.paid += 1;
+      // A KEY IS ONLY PAID IF SOMETHING WAS ACTUALLY JOINED. This used to mark it
+      // paid whichever way the join went — including the case where
+      // `properties.get(material).currentProgram` was undefined and `join()`
+      // returned having done nothing at all. The key then counted as settled, the
+      // guard stopped protecting it, and the next frame that drew it took the
+      // whole link: the warmer reported 82 programs paid while the census could
+      // find only 16 joins that happened outside a draw.
+      if (joined) {
+        this.paid.add(next.key);
+        this.stats.paid += 1;
+      } else {
+        const tries = (this.joinTries.get(next.key) ?? 0) + 1;
+        this.joinTries.set(next.key, tries);
+        // Fail open after a few goes: a key that can never be joined must not be
+        // walked, kicked and re-queued for the rest of the match.
+        if (tries >= MAX_JOIN_TRIES) { this.paid.add(next.key); this.stats.unjoinable += 1; }
+      }
     }
 
     // ── 4. hold back everything still unpaid ─────────────────────────────
@@ -511,9 +542,9 @@ export class ProgramWarmer {
     }
   }
 
-  private join(renderer: THREE.WebGLRenderer, material: THREE.Material): void {
+  private join(renderer: THREE.WebGLRenderer, material: THREE.Material): boolean {
     const program = this.programOf(renderer, material);
-    if (!program) return;
+    if (!program) return false;
     const previous = renderer.debug.checkShaderErrors;
     renderer.debug.checkShaderErrors = true;
     try {
@@ -521,9 +552,11 @@ export class ProgramWarmer {
       program.getAttributes?.();
     } catch {
       /* a program that will not reflect is a program that will link at draw */
+      return false;
     } finally {
       renderer.debug.checkShaderErrors = previous;
     }
+    return true;
   }
 }
 
