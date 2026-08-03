@@ -151,6 +151,15 @@ const MOVING_SPEED_MPS = 1.5;
  */
 const MIN_CARRY_SAMPLES = 12;
 const MIN_DECK_SAMPLES = 200;
+/**
+ * Shots are the one population this run cannot summon on demand. The probe cannot
+ * fire: the input layer gates the trigger on pointer lock and a headless page is
+ * never granted it (measured — `isFiring()` stays false through any number of
+ * synthetic clicks). So the shots that get graded are the bot fleet's, whenever
+ * it engages inside the window. Graded when the run got enough of them, and it
+ * says so plainly when it did not — never silently.
+ */
+const MIN_SHOT_SAMPLES = 8;
 
 const sessionQuery = (extra = []) => ['debug', ...(SERVER_PORT ? [`server=${SERVER_PORT}`] : []), ...extra].join('&');
 
@@ -163,7 +172,7 @@ const sessionQuery = (extra = []) => ['debug', ...(SERVER_PORT ? [`server=${SERV
 const SAMPLER = `(() => {
   const g = window.__piratesBR;
   const acc = {
-    carry: [], deck: [], deckY: [], snapGaps: [], frames: 0, started: performance.now(),
+    carry: [], deck: [], deckY: [], shot: [], shotLag: [], snapGaps: [], frames: 0, started: performance.now(),
     localCarry: [], worstJumpPx: 0, worstJumpM: 0, worstSlip: null, err: null,
     census: {}, maxSpeed: 0,
   };
@@ -234,6 +243,7 @@ const SAMPLER = `(() => {
         }
 
         // ── deck weld ──
+        // (falls through to the ship block below)
         if (!p.onShipId || p.atHelm || p.atCannon) continue;
         const ship = g.shipsById.get(p.onShipId);
         const hull = g.shipRenderer.getShipGroup(p.onShipId);
@@ -255,6 +265,21 @@ const SAMPLER = `(() => {
         if (!acc.worstSlip || slip > acc.worstSlip.slip) {
           acc.worstSlip = { slip, shipSpeed, isLocal, walking: speed };
         }
+      }
+      // ── shots in flight ──
+      for (const pr of st.projectiles) {
+        if (!pr.alive) continue;
+        const speed = Math.hypot(pr.velocity.x, pr.velocity.y, pr.velocity.z);
+        if (speed < 5) continue;
+        cs.lastSnapshotAt = now;
+        const a = V.clone(g.getProjectileRenderPosition(pr));
+        cs.lastSnapshotAt = now - ${SNAPSHOT_INTERVAL_MS};
+        const b = V.clone(g.getProjectileRenderPosition(pr));
+        cs.lastSnapshotAt = saved;
+        const moved = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+        acc.shot.push(moved / (speed * ${SNAPSHOT_INTERVAL_MS} / 1000));
+        const m = g.projectileMeshes.get(pr.id);
+        if (m) acc.shotLag.push(Math.hypot(m.position.x - a.x, m.position.y - a.y, m.position.z - a.z));
       }
       cs.lastSnapshotAt = saved;
     } catch (e) {
@@ -318,6 +343,7 @@ async function main() {
       cancelAnimationFrame(a.raf);
       return {
         carry: a.carry, localCarry: a.localCarry, deck: a.deck, deckY: a.deckY, snapGaps: a.snapGaps,
+        shot: a.shot, shotLag: a.shotLag,
         frames: a.frames, err: a.err, worstJumpPx: a.worstJumpPx, worstJumpM: a.worstJumpM,
         worstSlip: a.worstSlip, census: a.census, maxSpeed: a.maxSpeed,
       };
@@ -337,6 +363,9 @@ async function main() {
     console.log(`  worst per-snapshot jump (remote): ${f(r.worstJumpM)}m = ${f(r.worstJumpPx, 1)}px at its own range`);
 
     console.log(`  census (player-frames): ${Object.entries(r.census).map(([k, v]) => `${k}=${v}`).join(' ')}  maxSpeed ${f(r.maxSpeed, 1)}`);
+    const shot = { median: pct(r.shot, 0.5), p10: pct(r.shot, 0.1) };
+    console.log(`  CARRY shots in flight: median ${f(shot.median)}  p10 ${f(shot.p10)}  (n=${r.shot.length})  `
+      + `drawn-vs-reckoned lag: p95 ${f(pct(r.shotLag, 0.95))}m worst ${f(r.shotLag.length ? Math.max(...r.shotLag) : null)}m`);
     const deck = { mean: mean(r.deck), p95: pct(r.deck, 0.95), worst: r.deck.length ? Math.max(...r.deck) : null };
     console.log(`  DECK SLIP: mean ${f(deck.mean)}m  p95 ${f(deck.p95)}m  worst ${f(deck.worst)}m`);
     console.log(`  DECK SLIP (vertical): mean ${f(mean(r.deckY))}m  p95 ${f(pct(r.deckY, 0.95))}m  worst ${f(r.deckY.length ? Math.max(...r.deckY) : null)}m`);
@@ -353,6 +382,11 @@ async function main() {
     }
     if (r.localCarry.length >= MIN_CARRY_SAMPLES && localCarry.median < CARRY_FLOOR) {
       failures.push(`the local pirate does not carry between snapshots: median carry ${f(localCarry.median)} < ${CARRY_FLOOR}`);
+    }
+    if (r.shot.length >= MIN_SHOT_SAMPLES && shot.median < CARRY_FLOOR) {
+      failures.push(`shots in flight do not carry between snapshots: median carry ${f(shot.median)} < ${CARRY_FLOOR}`);
+    } else if (r.shot.length < MIN_SHOT_SAMPLES) {
+      console.log(`  (shot carry not graded: only ${r.shot.length} samples — nothing was in the air long enough)`);
     }
     if (r.deck.length < MIN_DECK_SAMPLES) {
       failures.push(`only ${r.deck.length} deck samples (need ${MIN_DECK_SAMPLES}) — no hull was under way with anyone aboard`);

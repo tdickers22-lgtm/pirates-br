@@ -4547,6 +4547,44 @@ export class Game {
     }
   }
 
+  /**
+   * WHERE A SHOT IN FLIGHT ACTUALLY IS, at this instant.
+   *
+   * A cannonball leaves the muzzle at tens of metres a second, so it is the
+   * fastest thing in the game and the one that could least afford what it had:
+   * no extrapolation at all, and a first-order chase toward the last snapshot at
+   * rate 24. That filter settles at a standing error of speed × 42ms — a ball at
+   * 55 m/s was drawn two and a third metres behind itself, and the target it was
+   * chasing froze between snapshots on top of that. Both errors point the same
+   * way: the ball arrives late, so the impact plume opens while the shot is still
+   * visibly short of what it hit.
+   *
+   * The server's own integration is three lines (gravity, then position, with a
+   * ×0.3 gravity on bullets and ×0.7 on shot); mirrored here in closed form,
+   * which over a fifth of a second is the same answer. No easing afterwards: with
+   * the flight path carried forward properly there are no snapshot steps left to
+   * hide, and a filter over a correct target is nothing but lag.
+   *
+   * The age is capped, so a shot whose `alive = false` has not reached us yet
+   * cannot fly on for ever. It is capped generously (0.3s) because a ballistic
+   * arc extrapolated from a real velocity is not a guess — it is the same
+   * arithmetic the server is running — and a client at three frames a second
+   * needs every millisecond of it.
+   */
+  private getProjectileRenderPosition(projectile: Projectile) {
+    const age = Math.min(0.3, Math.max(0, (performance.now() - this.lastSnapshotAt) / 1000));
+    const out = this.tempProjectilePos.set(
+      projectile.position.x + projectile.velocity.x * age,
+      projectile.position.y + projectile.velocity.y * age,
+      projectile.position.z + projectile.velocity.z * age,
+    );
+    if (!projectile.visualOnly) {
+      const gravity = PHYSICS.GRAVITY * (projectile.type === 'bullet' ? 0.3 : SHIP.CANNON_GRAVITY_MULT);
+      out.y += 0.5 * gravity * age * age;
+    }
+    return out;
+  }
+
   private syncProjectiles(dt: number) {
     if (!this.state) return;
 
@@ -4602,10 +4640,7 @@ export class Game {
       }
       mesh.userData.projectileType = projectile.type;
       mesh.userData.showImpact = projectile.showImpact;
-      mesh.position.lerp(
-        this.tempProjectilePos.set(projectile.position.x, projectile.position.y, projectile.position.z),
-        1 - Math.exp(-24 * dt),
-      );
+      mesh.position.copy(this.getProjectileRenderPosition(projectile));
       if (projectile.type === 'tsunami') {
         mesh.rotation.y = Math.atan2(projectile.velocity.x, projectile.velocity.z);
         const life = 1 - Math.min(1, projectile.age / Math.max(0.001, projectile.maxAge));
