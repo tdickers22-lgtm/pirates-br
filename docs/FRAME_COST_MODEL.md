@@ -426,6 +426,11 @@ Two things to take from that list.
 
 ### 6.3 Allocation and GC
 
+> **SUPERSEDED, phase 5.** Everything in the first three paragraphs below was
+> measured with a method that cannot answer the question, and it under-reported
+> by roughly **fifty times**. It is kept because the *reason* it was wrong is the
+> whole finding. The live numbers are in §6.3.1.
+
 Measured with `--js-flags=--expose-gc --enable-precise-memory-info` and a double
 `gc()` before every sample, so these are real bytes and not `performance.memory`
 quantisation. Four windows across two `low`-tier captures:
@@ -445,6 +450,64 @@ per-frame column disagrees by 5×; the two long windows' **per-second** column a
 of time-driven work at 60 fps or 35 KB/frame of frame-driven work cannot be separated
 without a real GPU (§10). Retention is likewise unresolved: 27.7 KB/frame in one
 capture, 2.68 KB/frame in the other.
+
+#### 6.3.1 What a frame actually allocates (phase 5)
+
+**A window that spans a collection cannot measure what the window allocated.** The
+table above reads the heap before N frames and after N frames. A scavenge inside
+that window sweeps part of what the window allocated, so the delta is
+allocation *minus whatever was collected* — and at this allocation rate a scavenge
+lands inside every window. That is why B1 and B2 disagree 9× per frame, why the
+per-second column looked stable (it was averaging over the same collections
+either way), and why every figure above is far too small.
+
+Two changes fix it, both in `scripts/perf-alloc-census.mjs`:
+
+1. **Read the heap either side of ONE frame at a time.** A collection becomes a
+   single negative sample instead of a silent refund; the median of the positive
+   samples is immune to it, and the distribution comes out as a bonus.
+2. **Drive a synthetic frame.** `Game.benchFrameCpu(n, dt)` runs the real
+   per-frame CPU path — everything `frame()` does except the draw — `n` times at
+   a pinned 1/60. No GL is in it, so the answer is identical on Metal and
+   SwiftShader, and every amortised subsystem is charged exactly its share of a
+   60 fps frame instead of its share of a 1 fps one.
+
+V8's **sampling heap profiler was tried first and does not work here**: calibrated
+against 200,000 retained two-field objects (>6.1 MB) at `samplingInterval: 256`
+it reported **0.03 MB**. It finds retention in old space; a frame's garbage dies
+in the nursery. It stays in the rig as a ranking hint, labelled, and its
+magnitudes are not quoted.
+
+Measured that way, on the pinned map, bots at peace, world settled, sitting on
+your own ship:
+
+| tier | before phase 5 | after | at 60 fps |
+|---|--:|--:|--:|
+| `low` | **287 KB/frame** | **31.9 KB/frame** | 17.2 MB/s → 1.9 MB/s |
+| `high` | 89.5 KB/frame¹ | **62 KB/frame** | 5.4 MB/s → 3.7 MB/s |
+
+¹ `high` was not measured before the ship-renderer pass; 89.5 is its reading
+after that pass and before the iterator pass, so the tier's own total drop is
+larger than the column shows.
+
+Where the 255 KB went, in order of size, all of it invisible in a code read:
+
+| lever | bytes/frame | what it was |
+|---|--:|---|
+| `gerstnerHeight` | **186 KB** | `normalize2D(w.direction)` per wave per call — four object literals for four module constants, called once per waterline-collar **vertex** per hull |
+| `for…of` over an array | **~36 KB** | an array iterator per loop, in the same function, at the same call rate |
+| `rampAt` destructuring | **30 KB** (high) | `const [d1, f1] = knots[i]` runs the iterator protocol; twice per prop batch per island per frame |
+| hull renderer keys | ~5 KB | `${ship.id}:${index}` per cannon, `new Set(ship.upgrades.map(…))` and `Object.entries` per hull |
+| Map reapers | ~4 KB | `for (const [id, x] of map)` builds a two-element array per entry, in six live-entity reapers |
+| wildlife | ~13 KB | a fresh `{x,z}` and six `` `leg${n}` `` strings per animal per frame; limbs posed for animals the LOD pass had already hidden |
+| gangway planner | ~6 KB | eight objects per dock × ship pair, asked for every pair every frame |
+| `spinGulls`, `syncPlayers` | ~3 KB | a `THREE.Euler` per bird; a template-literal movement key per player per frame |
+
+The gate is `scripts/test-frame-allocation.mjs` (wired into `npm run test:browser`).
+It grades the median and the p90 of the per-frame distribution at both tiers, and
+it **fails when the world it is measuring is not there** — the first run of it
+passed `high` at 0.4 KB/frame because the match had ended under a page running at
+one frame a second, so `updateScene` returned on its first line.
 
 GC, from the profile's own `(garbage collector)` samples:
 
@@ -652,7 +715,7 @@ hitch is what the player feels and a millisecond of steady cost is not.
 | **5** | ~~**Depth-test the sky and draw it last**~~ **LANDED, phase 4.** Not by depth-testing the sphere as authored — its 2800 m radius sits inside the ocean's 3264 m rim — but by pinning it to the far plane with `gl_Position.z = gl_Position.w` | **−267k to −328k fragments** of a ~470-op procedural shader per frame — measured, not modelled | — | — | **none** — every removed pixel is covered by something else |
 | **6** | ~~**Trim the post chain**~~ **LANDED IN PART, phase 4**: MSAA 4×→2× and the grade folded into `OutputPass`. The bloom base resolution was left at 480×270 — it is the pass whose loss is actually visible, and the other two were free | −518,400 quad fragments and one whole pass; 45.6 MB → 22.8 MB of composer residency and half the per-frame resolve | — | 0 (no post) | one MSAA step |
 | **7** | **Stop the resolution ladder reallocating the swapchain.** `applyPixelRatio` → `setPixelRatio` → `setSize` runs even when the ratio has not changed; 19.5 s of `WebGLRenderer.setSize` in a 180 s capture with no window resize, and a 1,644 ms hitch attributed to it | one swapchain realloc per ladder step → zero when the ratio is unchanged | removes a hitch class | identical | none |
-| **8** | **Cut allocation.** 207–233 KB per second of steady garbage; GC costs 1.5–8.3 ms/s and reached a **125 ms** pause | 20 hitches / 6.9 s of 147 s | **modest and uncertain** — see §6.3 and §10 | identical | none |
+| **8** | ~~**Cut allocation.** 207–233 KB per second of steady garbage~~ **DONE, phase 5 — and the size of it was wrong by 50×.** A settled `low` frame allocated **287 KB**, not 3.6; 17 MB/s at 60 fps, a scavenge every thirty frames. See §6.3.1 | 20 hitches / 6.9 s of 147 s | **287 → 31.9 KB/frame at `low`, 62 at `high`** | identical | none |
 | **9** | **Opaque overdraw on deck** — 1.56 layers at `high`, **1.97 at `low`**, p95 6–7, **21–31% of pixels shaded four times or more**. The most fill-expensive place in the game, and it is hull/deck/interior/rigging, not weather | up to −1.0 layer = −518k heavy fragments | **0.2 – 0.4 ms** | **0.2 – 0.4 ms** | unknown until the cause is attributed (§10) |
 | **10** | ~~**Combat FX particle fill**~~ **WIRED, phase 4.** The row was right that the cost is fill and not count, so the governor's `particleScale` — which CombatFx had never read at all — now lands on `gl_PointSize` as the lever's square root, and nowhere else. It is 1.0 across the whole top of the ladder: this is a knob for a machine already in distress, not a cut | up to −29% of the burst's fill at the bottom of the ladder | — | same | none until the governor is at the bottom |
 | **11** | **The storm-front cylinder** (0.19–0.28 layers re-measured **in ordinary play**) — **LANDED, phase 4**, but as an early-out rather than a trim: the wall's own profile finishes at 1.77×topY and everything above that was arriving at alpha zero through three fbm fetches. The **rain haze** (0.466 re-measured in a storm) is untouched: it is a `MeshBasicMaterial` with one texture fetch, i.e. the cheapest fragment in the frame, and its coverage IS the effect | the sky above the bank stops being shaded — 10% of the wall at ring range, 37% of it up close | — | same | **none** — no pixel that was painted stops being painted |
@@ -705,10 +768,14 @@ map and the post chain, and leaves the overdraw *exactly where it was*.
    came out *faster* than 1.25 at dock-vista. Those frames are dominated by shader-link
    storms and GL entry-point overhead, not by shading, so the fill exponent is not
    recoverable on this backend. §8.1 gives the analytic law instead, which is exact.
-3. **Per-frame allocation, separated from per-second allocation.** A frame here is
-   0.15–1.2 s, so the 10 Hz snapshot stream lands inside a fraction of frames. Two
-   captures disagree 5× per frame and agree to 12% per second (§6.3). Splitting them
-   needs a run at a realistic frame rate.
+3. ~~**Per-frame allocation, separated from per-second allocation.**~~ **ANSWERED,
+   phase 5 — and it needed no GPU, only a frame that is a frame.** The obstacle was
+   never the frame rate, it was that the measurement spanned its own garbage
+   collections and that the "frame" being timed was a software-rasterised one.
+   `Game.benchFrameCpu(n, 1/60)` drives the real per-frame CPU path with no GL in
+   it, sampled one frame at a time: a settled `low` frame allocates **31.9 KB**
+   today and allocated **287 KB** before the pass, which is 80× the figure §6.3
+   inferred. See §6.3.1.
 4. ~~**What the opaque overdraw on deck is made of.**~~ **ANSWERED, phase 4.**
    `perf-cost-model.mjs --opaque deck-aft` points the per-source census at the opaque
    set, and it is the SHIP: standing on your own deck, `ship` alone reads **1.662
