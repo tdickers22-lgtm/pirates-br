@@ -155,6 +155,8 @@ const SAMPLER = `(() => {
   const prev = new Map();
   /** Per-body server speed at the previous tick — the steadiness test above. */
   const serverSpeed = new Map();
+  /** …and the shark's only equivalent: its telegraphed attack state. */
+  const sharkState = new Map();
 
   const record = (arm, popName, id, x, y, z, now, pxPerRad, cam) => {
     const pop = popOf(arm, popName);
@@ -259,7 +261,23 @@ const SAMPLER = `(() => {
       for (const s of st.sharks ?? []) {
         if (s.health <= 0) continue;
         const q = g.getSharkRenderPosition(s);
-        record(arm, 'shark', 'K' + s.id, q.x, q.y, q.z, now, pxPerRad, cam);
+        // The same steadiness test the walkers get, made on the only field a
+        // shark HAS. A telegraphed attack is three deliberate changes of motion
+        // in under a second — rear back, lunge, droop — and the server does each
+        // of them inside a tick or two. Drawn faithfully that is a large step at
+        // a 9ms sample, and it is the animation working, not the netcode
+        // failing. Cruise and recover are graded; the burst and every transition
+        // into or out of it are dropped, and the state comes off the SNAPSHOT,
+        // so a correction cannot hide behind it.
+        const key = 'K' + s.id;
+        const state = s.attackState || 'cruise';
+        const wasState = sharkState.get(key);
+        sharkState.set(key, state);
+        if (state === 'windup' || state === 'lunge' || (wasState !== undefined && wasState !== state)) {
+          prev.delete('shark|' + key);
+          continue;
+        }
+        record(arm, 'shark', key, q.x, q.y, q.z, now, pxPerRad, cam);
       }
     } catch (e) {
       acc.err = String(e && e.message ? e.message : e);
