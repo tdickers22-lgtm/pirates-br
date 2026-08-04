@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { auditAssetMaterial } from './materialAudit.js';
+import { collapseChunks } from './AssetMaterialCollapse.js';
 
 /**
  * Preloaded GLB asset library. Assets are authored in Blender
@@ -229,12 +230,27 @@ export class AssetLibrary {
       orderedGeoms.push(mergeGeoms(list));
     }
     const finalGeom = mergeGeoms(orderedGeoms, true);
-    const result: MergedAsset = {
-      geometry: finalGeom,
-      material: orderedMats.length === 1 ? orderedMats[0] : orderedMats,
-    };
+    // ONE GROUP IS ONE DRAW CALL. three submits a mesh once per group whenever
+    // the material is an ARRAY, so an asset with twelve flat colours was twelve
+    // calls per InstancedMesh — `props-palm_a` was five on every island that has
+    // palms. Bake the colour and the surface into vertex attributes and the
+    // array becomes one material, which three submits once. Same pixels: see
+    // `AssetMaterialCollapse.ts` for the term-for-term argument and for the four
+    // traps this is written around. If the materials differ in anything an
+    // attribute cannot carry — a texture, a transparency, a side — `collapse`
+    // returns null and the array survives untouched.
+    const chunks = finalGeom.groups.map((g) => ({
+      start: g.start,
+      count: g.count,
+      material: orderedMats[g.materialIndex ?? 0],
+    }));
+    const collapsed = collapseChunks(finalGeom, chunks);
+    const result: MergedAsset = collapsed
+      ? { geometry: finalGeom, material: collapsed }
+      : { geometry: finalGeom, material: orderedMats.length === 1 ? orderedMats[0] : orderedMats };
     this.sharedResources.add(finalGeom);
     for (const m of orderedMats) this.sharedResources.add(m);
+    if (collapsed) this.sharedResources.add(collapsed);
     this.merged.set(name, result);
     return result;
   }

@@ -80,7 +80,23 @@ export function applyFoliageSway(material: THREE.Material | THREE.Material[], ho
   const ud = material.userData as { swayApplied?: boolean };
   if (ud.swayApplied) return;
   ud.swayApplied = true;
-  material.onBeforeCompile = (shader) => {
+  // CHAIN, NEVER ASSIGN. This used to be a bare `material.onBeforeCompile = …`,
+  // and on a material that already carried a patch — every collapsed asset
+  // material does — that silently DELETED the patch: cost-model §12.4 trap 3,
+  // where every palm rendered white because the tint read was gone.
+  const inherited = material.onBeforeCompile;
+  // …and the cache key with it. A patch that is not in the key is a patch three
+  // is free to skip: two materials that agree on every standard parameter share
+  // ONE program, so a swayed palm and an unswayed barrel — same type, same
+  // flatShading, colour is not in the key — were competing for the same cache
+  // entry, and whichever linked first decided whether the other one moved in the
+  // wind. MeshStandardMaterial's own customProgramCacheKey returns ''.
+  const inheritedKey = material.customProgramCacheKey;
+  material.customProgramCacheKey = function collapseAndSway(this: THREE.Material) {
+    return `${inheritedKey ? inheritedKey.call(this) : ''}|foliage-sway`;
+  };
+  material.onBeforeCompile = function swayCompile(this: THREE.Material, shader, renderer) {
+    inherited?.call(this, shader, renderer);
     shader.uniforms.uFoliageTime = host.foliageTime;
     shader.uniforms.uFoliageWind = host.foliageWind;
     shader.vertexShader = 'uniform float uFoliageTime;\nuniform vec2 uFoliageWind;\n' + shader.vertexShader;

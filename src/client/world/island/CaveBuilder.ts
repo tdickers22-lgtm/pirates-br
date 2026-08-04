@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import type { Island, IslandCave } from '../../../shared/types/index.js';
 import { CAVE_MOUTH_TRENCH_K, getCaveMouthCarve, getIslandSurfaceY, isNearCaveMouthCut } from '../../../shared/utils/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
+import type { CollapsedAssetMaterial } from '../../assets/AssetMaterialCollapse.js';
 import { applyCaveTubeColors, capCaveTubeRims, CAVE_SHELL_MARGIN, caveTubeParams, cullCaveTubeAgainstNeighbors, insideCaveShellVolume, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { buildCaveCutout, type CaveCutout, caveCutoutHit } from './CaveMouthCutout.js';
@@ -882,6 +883,14 @@ export function buildCaves(ctx: IslandBuildCtx) {
       if (!merged || list.length === 0) continue;
       const src = Array.isArray(merged.material) ? merged.material[0] : merged.material;
       const mat = (src as THREE.MeshStandardMaterial).clone();
+      // THE FRAME IS ONE COLOUR BY DESIGN — it is the island's rock, not the
+      // boulder GLB's. So it must be told to IGNORE the tint baked into the
+      // merged geometry, or `.color` stops replacing and starts multiplying and
+      // the portal goes black: cost-model §12.4 trap 4. Turning the switch off
+      // also hands `roughness`/`metalness` back their ordinary meaning, which is
+      // what the three lines below assume.
+      const collapsed = mat as Partial<CollapsedAssetMaterial>;
+      if (collapsed.bakedTint !== undefined) collapsed.bakedTint = false;
       mat.color.copy(portalRockCol);
       mat.roughness = 1;
       mat.metalness = 0;

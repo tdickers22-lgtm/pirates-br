@@ -11,16 +11,26 @@
 //   2. a merged geometry that HAS COLOR_0 under a material with
 //      vertexColors=false → the authored Blender vertex paint is thrown away
 //      and the prop renders as flat untinted grey,
-//   3. group bookkeeping drift (group count ≠ material count, groups not
-//      covering every vertex, a materialIndex past the end of the array) →
-//      whole chunks of the mesh draw with the wrong material or not at all.
+//   3. the COLLAPSE going wrong. An asset's material array is now folded onto
+//      ONE material with the colour and the surface in per-vertex attributes
+//      (src/client/assets/AssetMaterialCollapse.ts), because three submits a
+//      mesh once per material GROUP and a palm was five draw calls per island.
+//      A tint baked at the wrong offset, a chunk that never got written, or an
+//      array that quietly failed to collapse at all are all invisible to every
+//      other test and all visible on screen.
 // None of those throw. They only show up as a wrong-looking prop in game, so
 // they need an assertion.
+//
+// The check this replaced was group bookkeeping — "one group per material,
+// covering every vertex" — and it is worth recording why it had to go: it was
+// written `if (mats.length > 1)`, so the day the collapse made every asset
+// single-material it stopped running and reported a pass. A gate whose subject
+// can disappear is a gate that cannot fail.
 //
 // Runs headless: THREE + GLTFLoader work fine in Node, and a small fetch shim
 // serves /assets/models/*.glb off disk so preload() takes its real code path.
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -87,8 +97,81 @@ console.log(`asset merge guard — ${ASSET_NAMES.length} assets\n`);
 expect('every GLB loaded (no procedural fallbacks)', loadWarnings.length === 0,
   loadWarnings.join('\n     '));
 
+const { CollapsedAssetMaterial, TINT_ATTRIBUTE, SURFACE_ATTRIBUTE, collapseBlockers } =
+  await import('../src/client/assets/AssetMaterialCollapse.ts');
+
+/**
+ * The asset's materials BEFORE the collapse, and how many merged-geometry
+ * vertices each one owns.
+ *
+ * This is a deliberate re-derivation of `mergedGeometry`'s own walk, not a
+ * reading of what it produced: a gate that asks the collapse to describe itself
+ * cannot catch the collapse being wrong. The two rules that matter are that a
+ * multi-group mesh contributes `group.count` vertices per group, and that a
+ * single-group mesh contributes its INDEX count (mergeGeoms de-indexes), which
+ * is not the same number as its position count.
+ */
+function sourceVertexCounts(name) {
+  const root = assets.clone(name);
+  const counts = new Map();
+  const add = (mat, verts) => { if (mat) counts.set(mat, (counts.get(mat) ?? 0) + verts); };
+  root?.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    const groups = o.geometry.groups;
+    if (groups.length > 1) {
+      for (const g of groups) add(mats[g.materialIndex ?? 0], g.count);
+    } else {
+      const index = o.geometry.getIndex();
+      add(mats[0], index ? index.count : o.geometry.getAttribute('position').count);
+    }
+  });
+  return counts;
+}
+
+const sourceMaterials = (name) => [...sourceVertexCounts(name).keys()];
+
+/**
+ * EVERY ASSET THE GAME DRAWS AS AN InstancedMesh — re-derived from `src/`, not
+ * listed here.
+ *
+ * These are the assets for which a surviving material ARRAY is a draw call per
+ * material on every island that has one, and they are the only ones whose
+ * collapse this gate treats as mandatory. Reading them out of the source is
+ * what keeps the gate honest when someone adds a twentieth instanced prop type:
+ * the list grows on its own, and if the new asset is emissive the gate fails
+ * instead of the prop quietly costing six calls.
+ */
+const MUST_COLLAPSE = (() => {
+  const names = new Set();
+  const files = [
+    'src/client/world/island/PropScatterer.ts',
+    'src/client/world/island/DecorScatter.ts',
+    'src/client/world/island/CaveBuilder.ts',
+  ];
+  for (const rel of files) {
+    const text = readFileSync(path.join(ROOT, rel), 'utf8');
+    // `const instancedTypes: ReadonlySet<string> = new Set([ … ])` and
+    // `const PORTAL_ROCK_ASSETS = [ … ]` — the two array literals that decide
+    // which types get an InstancedMesh at all.
+    for (const block of text.matchAll(/(?:instancedTypes[^=]*=\s*new Set\(\[|PORTAL_ROCK_ASSETS\s*=\s*\[)([\s\S]*?)\]/g)) {
+      for (const q of block[1].matchAll(/'([a-z0-9_]+)'/g)) names.add(q[1]);
+    }
+    // …plus every asset asked for a merged geometry by name.
+    for (const q of text.matchAll(/mergedGeometry\(\s*'([a-z0-9_]+)'\s*\)/g)) names.add(q[1]);
+  }
+  return names;
+})();
+
+/** Quantised so a float round-trip through a Float32Array cannot fail the
+ *  comparison on its own; 1e-4 is far finer than any of these values differ. */
+const bakeKey = (r, g, b, s, m) => [r, g, b, s, m].map((v) => Math.round(v * 10000)).join('/');
+
 let merged = 0;
 const problems = [];
+/** Assets that legitimately cannot collapse (a lit material), reported rather
+ *  than failed — none of them is instanced. */
+const refused = [];
 for (const name of ASSET_NAMES) {
   const issues = [];
 
@@ -141,19 +224,75 @@ for (const name of ASSET_NAMES) {
     }
   }
 
-  // 3. Group bookkeeping: one group per material, covering every vertex, with
-  //    in-range material indices.
-  if (mats.length > 1) {
-    if (groups.length !== mats.length) {
-      issues.push(`GROUP-COUNT: ${groups.length} groups for ${mats.length} materials`);
+  // 3. THE COLLAPSE CONTRACT. It used to be group bookkeeping — one group per
+  //    material, covering every vertex — and that check silently stopped
+  //    existing the day the collapse made every asset single-material, because
+  //    it was written `if (mats.length > 1)`. What replaces it is the claim the
+  //    collapse actually makes: ONE material, no groups, and the per-vertex
+  //    tint/surface reproducing the material array term for term.
+  const collapseIssues = collapseBlockers(sourceMaterials(name));
+  if (collapseIssues.length > 0) {
+    // A refusal is only a DEFECT for an asset the game actually instances. Nine
+    // of the sixty-one carry a lit material — `Ember`, `Lantern_Glass`,
+    // `Candle_Wax` — which no vertex attribute can express, and every one of
+    // them is placed as a GLB clone rather than as an InstancedMesh, so its
+    // material array never costs a draw call per group.
+    const line = `${name}: ${collapseIssues.join('; ')}`;
+    if (MUST_COLLAPSE.has(name)) issues.push(`NOT-COLLAPSIBLE (and instanced): ${collapseIssues.join('; ')}`);
+    else refused.push(line);
+  } else {
+    if (Array.isArray(m.material)) {
+      issues.push(`UNCOLLAPSED: still a material ARRAY of ${mats.length} — ${mats.length} draw calls per InstancedMesh`);
     }
-    const covered = groups.reduce((sum, g) => sum + g.count, 0);
-    if (covered !== pos.count) {
-      issues.push(`GROUP-COVERAGE: groups cover ${covered} of ${pos.count} vertices`);
+    if (groups.length !== 0) {
+      issues.push(`STALE-GROUPS: ${groups.length} groups survive under a single material`);
     }
-    for (const g of groups) {
-      if ((g.materialIndex ?? 0) >= mats.length) {
-        issues.push(`GROUP-MATIDX: materialIndex ${g.materialIndex} >= ${mats.length} materials`);
+    if (!(m.material instanceof CollapsedAssetMaterial) || m.material.bakedTint !== true) {
+      issues.push('NO-BAKED-TINT: merged material does not read the baked attributes');
+    }
+    const tint = geom.getAttribute(TINT_ATTRIBUTE);
+    const surf = geom.getAttribute(SURFACE_ATTRIBUTE);
+    if (!tint || !surf) {
+      issues.push(`MISSING-BAKE: ${TINT_ATTRIBUTE}=${!!tint} ${SURFACE_ATTRIBUTE}=${!!surf}`);
+    } else if (tint.count !== pos.count || surf.count !== pos.count) {
+      issues.push(`BAKE-COUNT: tint ${tint.count} / surface ${surf.count} vs ${pos.count} vertices`);
+    } else {
+      // 3a. THE SHADING IDENTITY, re-derived rather than trusted. Walk the GLB
+      //     the way mergedGeometry walks it and count how many vertices each
+      //     source material owns; then tally the baked attributes by value. The
+      //     two tallies must agree exactly. A single wrong tint, a chunk
+      //     boundary off by one, or a material whose roughness never made it
+      //     into the buffer all fail here — none of them throw on their own, and
+      //     all of them are visible on screen.
+      const want = new Map();
+      for (const [mat, verts] of sourceVertexCounts(name)) {
+        const key = bakeKey(1 - mat.color.r, 1 - mat.color.g, 1 - mat.color.b,
+          1 - mat.roughness, mat.metalness);
+        want.set(key, (want.get(key) ?? 0) + verts);
+      }
+      const got = new Map();
+      for (let i = 0; i < pos.count; i++) {
+        const key = bakeKey(tint.getX(i), tint.getY(i), tint.getZ(i), surf.getX(i), surf.getY(i));
+        got.set(key, (got.get(key) ?? 0) + 1);
+      }
+      const keys = new Set([...want.keys(), ...got.keys()]);
+      const wrong = [...keys].filter((k) => (want.get(k) ?? 0) !== (got.get(k) ?? 0));
+      if (wrong.length > 0) {
+        issues.push(`BAKE-MISMATCH: ${wrong.length} of ${keys.size} (tint,surface) values disagree — `
+          + wrong.slice(0, 3).map((k) => `${k}: want ${want.get(k) ?? 0}v got ${got.get(k) ?? 0}v`).join(', '));
+      }
+      // 3b. ALL-ZERO MUST BE THE IDENTITY, not a mirror and not a black prop.
+      //     The attributes are stored as complements for exactly this reason, so
+      //     a fully-zero row means "white, fully rough" — the benign answer.
+      //     Values outside 0..1 mean the complement arithmetic slipped.
+      for (const [attr, label] of [[tint, TINT_ATTRIBUTE], [surf, SURFACE_ATTRIBUTE]]) {
+        const arr2 = attr.array;
+        for (let i = 0; i < arr2.length; i++) {
+          if (!(arr2[i] >= 0 && arr2[i] <= 1)) {
+            issues.push(`BAKE-RANGE: ${label}[${i}] = ${arr2[i]} outside 0..1`);
+            break;
+          }
+        }
       }
     }
   }
@@ -171,8 +310,15 @@ for (const name of ASSET_NAMES) {
 
 expect(`all ${ASSET_NAMES.length} assets produced a merged geometry`, merged === ASSET_NAMES.length,
   `${merged}/${ASSET_NAMES.length} merged`);
-expect('no asset has a merge defect (groups / materials / COLOR_0)', problems.length === 0,
+expect('no asset has a merge defect (collapse contract / COLOR_0 / vertices)', problems.length === 0,
   problems.join('\n     '));
+expect(`every instanced asset collapsed to one material (${MUST_COLLAPSE.size} derived from src/)`,
+  MUST_COLLAPSE.size >= 19 && [...MUST_COLLAPSE].every((n) => ASSET_NAMES.includes(n)),
+  `derived: ${[...MUST_COLLAPSE].sort().join(', ')}`);
+if (refused.length) {
+  console.log(`\n  · ${refused.length} non-instanced asset(s) keep their material array (lit materials):`);
+  for (const line of refused) console.log(`      ${line}`);
+}
 
 // mergedGeometry caches: the second call must hand back the SAME geometry, or
 // every InstancedMesh rebuild leaks a full copy of the asset.
