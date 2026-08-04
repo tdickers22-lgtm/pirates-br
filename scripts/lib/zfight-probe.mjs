@@ -100,10 +100,26 @@ export const DEPTH_TIE_CENSUS = (opts = {}) => {
   const b = new Uint8Array(bytes);
   const c = new Uint8Array(bytes);
 
+  // FREEZE THE WALL CLOCK ACROSS EVERY RENDER THIS CENSUS TAKES.
+  //
+  // A render in this game ADVANCES ANIMATION: MiscMeshFactory's station halo
+  // runs `onBeforeRender = () => animate(performance.now() / 1000)` and CombatFx
+  // re-orients its points and impostors in theirs. Those fire once per
+  // `renderer.render()`, not once per game frame, so a probe that renders three
+  // times photographs three different worlds. Stubbing performance.now freezes
+  // anything driven by wall-clock time whether this file knows about it or not,
+  // and it is what makes `selfNoise` capable of reading 0 at all.
+  const realNow = performance.now.bind(performance);
+  const frozenAt = realNow();
   const shoot = (buf) => {
-    R.render();
-    renderer.setRenderTarget(null);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    performance.now = () => frozenAt;
+    try {
+      R.render();
+      renderer.setRenderTarget(null);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    } finally {
+      performance.now = realNow;
+    }
   };
 
   // Every distinct material in the graph, hidden subtrees included: a material
