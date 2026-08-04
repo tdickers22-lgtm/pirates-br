@@ -325,10 +325,30 @@ export class RemoteTimeline {
     }
   }
 
-  /** Server time being rendered at client clock `nowMs`. Continuous in `nowMs`. */
+  /**
+   * Server time being rendered at client clock `nowMs`. Continuous and
+   * non-decreasing in `nowMs`, which is the property every drawn position
+   * inherits.
+   *
+   * THE CLAMP IS NOT AN OPTIMISATION. A frame on the target machine can run for a
+   * second, and during that second no snapshot is applied — the message callback
+   * cannot run inside a synchronous frame. The free-running clock therefore
+   * outruns the newest sample by the whole length of the stall, and the next
+   * `advance` saw an error past HARD_SNAP_S and re-anchored the clock BACKWARDS:
+   * measured 15 times in a 60s window on SwiftShader, and every one of those is
+   * every remote body in the world teleporting at once. Parking the clock a
+   * bounded distance past the newest sample instead costs nothing (nothing is
+   * being drawn during the stall) and it keeps the error inside the servo's
+   * range, so the hard snap is left to do the only job it should ever have: a
+   * join, or a stream that stopped and came back.
+   *
+   * `Math.min` of two non-decreasing functions is non-decreasing, and both of
+   * these are, so the clamp cannot make a body step backwards.
+   */
   renderTimeAt(nowMs: number): number {
     if (!this.started) return Number.NEGATIVE_INFINITY;
-    return this.anchorServerT + ((nowMs - this.anchorClientMs) / 1000) * this.rate;
+    const free = this.anchorServerT + ((nowMs - this.anchorClientMs) / 1000) * this.rate;
+    return Math.min(free, this.newestServerT + MAX_EXTRAPOLATION_S);
   }
 
   /**

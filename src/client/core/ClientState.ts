@@ -213,6 +213,66 @@ export class ClientState {
     this.recordRemoteHistory(serverTime);
   }
 
+  /**
+   * Record history straight off a hot payload, on arrival, WITHOUT merging it.
+   *
+   * NetworkClient coalesces hots to one per animation frame before they are
+   * applied — correct for a merge, and fatal for a history: at 180ms a frame,
+   * which is what the target machine does, four of every five samples never
+   * existed as far as the buffer was concerned and it measured the client's
+   * frame rate as the server's snapshot rate. This path sees all of them.
+   *
+   * It reads the payload's own arrays rather than the merged world, which is
+   * both cheaper and more correct: a superseded hot describes a moment that the
+   * merged state will never hold, and that moment is exactly what the buffer is
+   * for.
+   */
+  recordHotHistory(hot: HotSnapshotPayload) {
+    if (!Number.isFinite(hot.serverTime)) return;
+    const now = performance.now();
+    this.remote.timeline.noteSnapshot(hot.serverTime, now);
+    for (const ship of hot.ships) {
+      this.remote.track(`S:${ship.id}`)
+        .push(hot.serverTime, ship.position.x, ship.position.y, ship.position.z, ship.rotation, '', now);
+    }
+    for (const player of hot.players) {
+      if (player.state === 'eliminated' || player.state === 'respawning') continue;
+      // A linear scan over at most a handful of hulls, thirty-one times a
+      // second, and only for a pirate who is standing on one. An id→pose Map
+      // built per payload would be ten objects a snapshot of pure garbage for an
+      // answer a scan gives for free.
+      let hull: { position: { x: number; y: number; z: number }; rotation: number } | null = null;
+      if (player.onShipId) {
+        for (const ship of hot.ships) {
+          if (ship.id === player.onShipId) { hull = ship; break; }
+        }
+      }
+      let x = player.position.x;
+      let y = player.position.y;
+      let z = player.position.z;
+      if (hull) {
+        const dx = player.position.x - hull.position.x;
+        const dz = player.position.z - hull.position.z;
+        const cos = Math.cos(hull.rotation);
+        const sin = Math.sin(hull.rotation);
+        x = dx * cos - dz * sin;
+        z = dx * sin + dz * cos;
+        y = player.position.y - hull.position.y;
+      }
+      this.remote.track(`P:${player.id}`)
+        .push(hot.serverTime, x, y, z, player.rotation.x, hull ? player.onShipId : '', now);
+    }
+    for (const shark of hot.sharks) {
+      if (shark.health <= 0) continue;
+      this.remote.track(`K:${shark.id}`)
+        .push(hot.serverTime, shark.position.x, shark.position.y, shark.position.z, shark.rotation, '', now);
+    }
+    if (now - this.lastRetireAt > 2000) {
+      this.lastRetireAt = now;
+      this.remote.retire(now);
+    }
+  }
+
 
   rebuildStateIndexes(state: GameState) {
     this.playersById.clear();

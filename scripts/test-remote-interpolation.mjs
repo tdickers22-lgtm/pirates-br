@@ -332,6 +332,62 @@ const f = (v, d = 4) => (v === null || v === undefined ? '--' : v.toFixed(d));
   notes.push(`long frames: worst step ${f(g.worst)}m across 900ms frame gaps`);
 }
 
+// ── 7. A STALL MUST NOT RE-ANCHOR THE CLOCK BACKWARDS ───────────────────────
+// The failure the live suite caught: 15 hard snaps in a 60s window. A frame on
+// the target machine can run for a second, and no snapshot can be APPLIED inside
+// a synchronous frame — the message callback cannot run. So the free-running
+// clock outran the newest sample by the length of the stall, the next advance
+// saw an error past HARD_SNAP_S, and it re-anchored the clock BACKWARDS. Every
+// one of those is every remote body in the world teleporting at once.
+//
+// Here the stream stops dead for 1.2s while the frame loop keeps turning, twice.
+// The contract is: no hard snap, no backward step, and the drawn body parks
+// rather than flying off on a stale velocity.
+// The stall modelled here is the one that machine actually suffers: the WIRE is
+// fine and the packets are on the doorstep, but the main thread is inside a
+// 1.4s island build, so neither the message callback nor `advance` can run.
+// Everything that queued up is then delivered in one burst, exactly as the
+// socket worker delivers it. Without the clamp in `renderTimeAt` the free clock
+// has run 1.4s past its data by then and the next advance re-anchors it
+// BACKWARDS, which is what the live suite caught 15 times in 60 seconds.
+{
+  const packets = makeStream({ seconds: 9, seed: 55 });
+  const interp = new RemoteInterpolator();
+  const stalls = [[2000, 3400], [5200, 6600]];
+  const frozen = (now) => stalls.some(([a, b]) => now > a && now < b);
+  let prevT = Number.NEGATIVE_INFINITY;
+  let backwards = 0;
+  let prevPos = null;
+  let worstStep = 0;
+  let heldFrom = 0;
+  let p = 0;
+  for (let now = 0; now <= 8_500; now += 4) {
+    if (!frozen(now)) {
+      // Deliver everything that landed while the thread was busy, in order.
+      while (p < packets.length && packets[p].arriveMs <= now) {
+        const pkt = packets[p++];
+        interp.timeline.noteSnapshot(pkt.serverT, now);
+        const q = truth(pkt.serverT);
+        interp.track('P:bot').push(pkt.serverT, q.x, q.y, q.z, q.yaw, '', now);
+      }
+      if (now - heldFrom >= 16) { heldFrom = now; interp.timeline.advance(now); }
+      const t = interp.timeline.renderTimeAt(now);
+      if (Number.isFinite(t)) { if (t < prevT - 1e-9) backwards++; prevT = t; }
+      const pose = interp.poseAt('P:bot', now);
+      if (pose) {
+        if (prevPos) worstStep = Math.max(worstStep, Math.hypot(pose.x - prevPos.x, pose.z - prevPos.z));
+        prevPos = { x: pose.x, z: pose.z };
+      }
+    }
+  }
+  console.log(`  two 1.4s main-thread stalls: ${interp.timeline.hardSnaps} hard snaps, `
+    + `${backwards} backward clock steps, worst single-sample move ${f(worstStep)}m`);
+  check(interp.timeline.hardSnaps === 0,
+    `a 1.4s stalled frame re-anchored the clock ${interp.timeline.hardSnaps}x — that is every remote body teleporting at once`);
+  check(backwards === 0, `the render clock went backwards ${backwards} times across a stall`);
+  notes.push(`1.4s stalled frames: 0 hard snaps`);
+}
+
 console.log('');
 for (const n of notes) console.log(`  · ${n}`);
 if (failures.length === 0) {

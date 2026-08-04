@@ -15,6 +15,9 @@ export class NetworkClient {
   // Game-scoped events
   public onSnapshot: ((state: GameState) => void) | null = null;
   public onHotSnapshot: ((hot: HotSnapshotPayload) => void) | null = null;
+  /** Fired on EVERY hot as it lands, before coalescing — the interpolation
+   *  history's feed. Must stay cheap: it runs in the socket message handler. */
+  public onHotHistory: ((hot: HotSnapshotPayload) => void) | null = null;
   public onPlayerDowned: ((payload: { playerId: string; playerName: string; attackerId: string | null; attackerName: string | null }) => void) | null = null;
   public onReviveComplete: ((payload: { playerId: string; playerName: string; reviverId: string | null; reviverName: string | null }) => void) | null = null;
   public onJoin: ((playerId: string, shipId: string, snapshot: GameState) => void) | null = null;
@@ -256,6 +259,18 @@ export class NetworkClient {
       case 'state_hot': {
         const p = msg.payload as HotSnapshotPayload;
         this.noteServerClock(p.serverTime);
+        // EVERY hot reaches the interpolation history, not just the one per rAF
+        // that survives the coalescing below. `queueHotSnapshot` keeps only the
+        // newest payload until the next frame, which is right for APPLYING one
+        // (merging into state and rebuilding the indexes is real work, and four
+        // superseded merges are four wasted ones) and wrong for RECORDING one:
+        // on the machine this game is for, a frame is 180ms, so four of every
+        // five samples were being thrown away and the buffer measured the
+        // client's frame rate as the server's snapshot rate — a 178ms interval
+        // against a real 32ms, which inflated the render delay six-fold.
+        // Recording a sample is six float writes into a ring; it can afford to
+        // happen on arrival.
+        this.onHotHistory?.(p);
         this.queueHotSnapshot(p);
         break;
       }

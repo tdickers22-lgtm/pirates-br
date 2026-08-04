@@ -81,6 +81,15 @@ const DISCONTINUITY_M = 0.02;
 const TELEPORT_M = 2.0;
 /** Below this the body reads as still and the statistic is division by noise. */
 const MOVING_SPEED_MPS = 1.0;
+/**
+ * …and above this nothing in the population is a body walking or swimming, so a
+ * sample that claims it is came from a discontinuity, not from motion. A pirate
+ * sprints at ~6 m/s and a shark at ~7; the first run of this suite graded a
+ * "remote player" at 85 m/s, which is what a respawn teleport looks like when
+ * the speed is measured off the path. Sampled out rather than clamped, because a
+ * body that just teleported is not a body whose smoothness anyone can grade.
+ */
+const MAX_GRADEABLE_SPEED_MPS = 15;
 /** How long each arm runs before the lever flips. Long enough to hold a walking
  *  leg inside one arm, short enough that ten of them fit in a minute. */
 const PHASE_MS = 4500;
@@ -114,7 +123,7 @@ const SAMPLER = `(() => {
   const popOf = (arm, name) => {
     const key = arm + '/' + name;
     return (acc.pop[key] ||= {
-      samples: 0, moving: 0, unexplained: [], snaps: 0, teleports: 0,
+      samples: 0, moving: 0, unexplained: [], snaps: 0, teleports: 0, ungradeable: 0,
       worstM: 0, worstPx: 0, bodySeconds: 0, speedSum: 0,
     });
   };
@@ -132,9 +141,14 @@ const SAMPLER = `(() => {
     const dt = (now - was.t) / 1000;
     if (dt <= 0 || dt > 0.05) return; // a stalled timer is not evidence
     const step = Math.hypot(x - was.x, y - was.y, z - was.z);
-    cur.vNext = step / dt;
+    // A teleport is not a speed. Leaving vNext null after one means the NEXT
+    // sample has nothing to be predicted from and is skipped instead of being
+    // charged the teleport's velocity — which is how the first run of this suite
+    // reported a 3.3m "step" on a shark that had merely respawned.
+    cur.vNext = step > ${TELEPORT_M} ? null : step / dt;
     if (was.v === null) return;              // need two intervals to predict one
     if (was.v < ${MOVING_SPEED_MPS}) return; // a body at rest cannot be graded
+    if (was.v > ${MAX_GRADEABLE_SPEED_MPS}) { pop.ungradeable++; return; }
     pop.moving++;
     pop.bodySeconds += dt;
     pop.speedSum += was.v;
@@ -173,7 +187,22 @@ const SAMPLER = `(() => {
         if (isLocal) g.localPlayerId = null;
         let q = null;
         try { q = g.getPlayerRenderPosition(p, 0.035); } finally { if (isLocal) g.localPlayerId = idSaved; }
-        record(arm, isLocal ? 'local-as-remote' : 'remote-player', 'P' + p.id, q.x, q.y, q.z, now, pxPerRad, cam);
+        // WHICH BODIES CAN BE GRADED AT 108Hz, AND WHY THE OTHERS CANNOT.
+        //
+        // A body ashore is placed by the buffer and the render clock and nothing
+        // else, so its drawn path is a pure function of the arithmetic under
+        // test and can be sampled as fast as you like. A body ON A DECK is
+        // composed against readShipRenderPose() — the hull that is ON THE SCREEN,
+        // which is the whole point of the deck weld — and that transform is
+        // written once per FRAME. A swimmer's height is pulled onto the Gerstner
+        // surface off the ocean clock, which is also per frame. Sampling either
+        // at 108Hz on a 6fps rasteriser measures the FRAME RATE: the composed
+        // quantity is frozen for 170ms and then steps, twenty times per sample
+        // window, and the reading says far more about SwiftShader than about the
+        // buffer. They are counted and reported, never graded.
+        const pop = p.onShipId ? 'deck-crew' : p.state === 'swimming' ? 'swimmer'
+          : isLocal ? 'local-as-remote' : 'remote-player';
+        record(arm, pop, 'P' + p.id, q.x, q.y, q.z, now, pxPerRad, cam);
       }
 
       // ── sharks ──────────────────────────────────────────────────────────
@@ -252,6 +281,7 @@ async function main() {
       for (const [k, v] of Object.entries(a.pop)) {
         out.pop[k] = {
           samples: v.samples, moving: v.moving, snaps: v.snaps, teleports: v.teleports,
+          ungradeable: v.ungradeable,
           bodySeconds: v.bodySeconds, worstM: v.worstM, worstPx: v.worstPx,
           meanSpeed: v.moving ? v.speedSum / v.moving : 0,
           unexplained: v.unexplained,
@@ -272,11 +302,22 @@ async function main() {
       const p99 = pct(p.unexplained, 0.99) ?? 0;
       console.log(`  ${label.padEnd(24)} n=${String(p.moving).padStart(5)} at ${f(p.meanSpeed, 1)} m/s  `
         + `snaps ${f(rate, 2)}/body-s  p50 ${f(pct(p.unexplained, 0.5))}  p95 ${f(pct(p.unexplained, 0.95))}  `
-        + `p99 ${f(p99)}m  worst ${f(p.worstM)}m = ${f(p.worstPx, 1)}px`);
+        + `p99 ${f(p99)}m  worst ${f(p.worstM)}m = ${f(p.worstPx, 1)}px`
+        + (p.teleports || p.ungradeable ? `  (${p.teleports} teleports, ${p.ungradeable} above ${MAX_GRADEABLE_SPEED_MPS} m/s, not graded)` : ''));
       return { rate, p99, moving: p.moving, worstM: p.worstM, worstPx: p.worstPx };
     };
 
+    // Graded: bodies the buffer alone places. Reported but not graded: bodies
+    // whose placement composes a per-frame transform (see the sampler).
     const populations = ['local-as-remote', 'remote-player', 'shark'];
+    for (const name of ['deck-crew', 'swimmer']) {
+      const off = r.pop[`off/${name}`];
+      const on = r.pop[`on/${name}`];
+      if (!off && !on) continue;
+      console.log(`  ── ${name}: composes a per-frame transform, reported only ──`);
+      line(`${name}  OFF`, off);
+      line(`${name}  ON `, on);
+    }
     let gradedMoving = 0;
     for (const name of populations) {
       const off = line(`${name}  OFF (dead-reckoned)`, r.pop[`off/${name}`]);

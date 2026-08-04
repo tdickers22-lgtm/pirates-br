@@ -1833,6 +1833,11 @@ export class Game {
     this.network.onHotSnapshot = (hot) => {
       this.applyHotSnapshot(hot);
     };
+    // …and the history takes EVERY hot, including the four in five that the
+    // per-frame coalescing supersedes before anything is merged.
+    this.network.onHotHistory = (hot) => {
+      this.clientState.recordHotHistory(hot);
+    };
 
     this.network.onMatchCountdown = (payload) => this.onMatchCountdownTick(payload);
     this.network.onMatchHorn = (payload) => this.onMatchHornBlown(payload);
