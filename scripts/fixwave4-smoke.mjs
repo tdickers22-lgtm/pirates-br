@@ -609,9 +609,16 @@ try {
   check('her chests are floating on her, not buried under her',
     cargo.chests.length > 0 && cargo.chests.every((c) => c.floating && !c.buried),
     `${cargo.chests.length} chests, values ${cargo.chests.map((c) => c.value).join('/')}`);
+  // `.every()` ON AN EMPTY ARRAY IS TRUE, and `Math.max()` of nothing is
+  // -Infinity — so with no chests found this printed "furthest -Infinitym off
+  // her centre" and passed. That is a vacuous assertion in the exact shape this
+  // repo keeps shipping: it cannot fail in the state where its subject does not
+  // exist. The population is now part of the claim.
   check('and they lie ON her, within a hull length',
-    cargo.chests.every((c) => c.off < 40),
-    `furthest ${Math.max(...cargo.chests.map((c) => c.off)).toFixed(1)}m off her centre`);
+    cargo.chests.length > 0 && cargo.chests.every((c) => c.off < 40),
+    cargo.chests.length
+      ? `furthest ${Math.max(...cargo.chests.map((c) => c.off)).toFixed(1)}m off her centre`
+      : 'no chests to measure — nothing was graded');
 
   // Frame the deck itself so the shot is of her cargo, not of an ocean.
   await page.evaluate(([x, z]) => {

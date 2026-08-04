@@ -79,7 +79,7 @@ minute rather than the twentieth.
 | `test-motion-continuity` | moving things keep moving between snapshots; deck passengers hold station | yes | reports **ungraded** rather than passed when it sampled too little — the right pattern, and the model for `VACUOUS` |
 | `test-remote-smoothness` | remote bodies are drawn along a continuous path | yes | **wired for the first time in this audit** — shipped with the remote-motion wave and run by nothing |
 | `test-viewmodel-poses` | first-person pose invariants | **not here** | `if (IS_SOFTWARE_GL) { console.log('skipped'); process.exit(0) }` — exit 0 is what a pass looks like, so every graded run on this machine has reported a green suite that measured nothing since it was written. The reason is real; it is now a declared `SKIPPED`, not a silent zero |
-| `fixwave4-smoke` | seven features are one game, not seven lanes | yes | |
+| `fixwave4-smoke` | seven features are one game, not seven lanes | yes | **eight failures fixed in this audit — see below.** Went 18/26 → 29/31 |
 | `audit-live-floaters` | every seated prop touches the ground it is drawn on, as seen | yes | slow |
 | `test-program-warm` | no shader links in a frame the player moves through | yes | **has `--mutate`**; tours nine islands and dies, after a previous wave found it could not see the defect that cost most |
 | `test-load-responsiveness` | the longest task of a cold load | yes | **rebuilt in this audit — see below** |
@@ -204,6 +204,42 @@ is about layout: same 16:9 frustum at a third of the pixels, three times the
 frames on a software rasteriser, and inside the ceiling this machine's headless
 GL is held to.
 
+## fixwave4-smoke: the same clock defect, plus a port it did not own
+
+It was failing eight of twenty-six and nobody had seen it, because the `&&` chain
+never got that far. Two causes.
+
+**Twenty-two wall-clock sleeps between "change something" and "read what the HUD
+says about it."** The HUD is repainted by the frame loop. Every read landed one
+step behind, and the failure details said so out loud:
+
+```
+✗ banked gold past the safe line becomes a WEIGHED hold  (cargo=3400g "")
+✗ the bounty SIGN is on the HUD  (HOLD: DEEP-LADEN · 3400g · −6% knots)
+```
+
+The sign it reports missing is printed in its own failure detail, one read late.
+`waitFrames(ms)` waits on the client's frame clock instead — but **opt-in**, and
+that turned out to matter: this game keeps time two ways. A feed toast expires on
+a 3s *wall* timer and a story vignette advances its stages on one too, so applied
+to every sleep it fixed six assertions and broke two, reading an expired bounty
+cry and a vignette two beats on. The bounty moment now takes **two reads on the
+two clocks** — the feed early on the wall, the hold later on the frames.
+
+**And the gilded-wreck stage started a second server on a hard-coded `:8091`** —
+exactly where the new runner stands its own server up. The spawn lost the bind,
+the health poll got a cheerful 200 from the *other* server, and the stage waited
+120 seconds for a wreck nobody had told to hurry. It failed as "the gilded wreck
+stage did not run", which is true and says nothing about the wreck. It now asks
+the OS for a free port and refuses to grade any server answering there before it
+started one. That stage runs for the first time in this audit, and four of its
+five assertions pass.
+
+One vacuous assertion was found and closed on the way past: *"and they lie ON
+her, within a hull length"* ran `.every()` over an empty array — true — and
+printed `furthest -Infinitym off her centre`. It could not fail in the state
+where its subject did not exist. The population is part of the claim now.
+
 ## Still open
 
 - **`test-viewmodel-poses` grades nothing on this machine.** It is declared
@@ -217,3 +253,25 @@ GL is held to.
   (`test-load-responsiveness`, `test-program-warm`, `test-sim-lag-honesty`,
   `test-frame-governor-live`). The rest are argued from their headers, not
   demonstrated. A gate that has never been shown to fail is a claim, not a proof.
+
+### Two suites still red, and both are telling the truth
+
+**`audit-live-floaters` — a real product defect.** Three `decor-dock` pieces
+stand 1.15 m, 1.60 m and 1.78 m above the ground they are drawn on, on islands at
+local (−52.9, 106.2), (−31.5, 70.1) and (43, −94.2). The audit is doing exactly
+its job; this is dock seating in the world generator and it is not test repair.
+Note it may be newly *visible* rather than new: the runner now pins map seed
+20260801, and before this audit the suite graded whatever world the developer's
+server happened to have rolled.
+
+**`fixwave4-smoke` — two of thirty-one.**
+- *"walking into smuggler_cache makes the scene SPEAK its name and its beat"* —
+  the vignette overlay says nothing. Its sibling `skull_totem` passes, so the
+  machinery works; this is either one scene's trigger radius or a walk that does
+  not reach it on a host this slow. Needs the story-vignette path read properly,
+  not another sleep.
+- *"her chests are floating on her, not buried under her"* — the read scans
+  `state.islands[].chests` for ids in `wreck.chestIds` and finds none, while the
+  assertion two lines above confirms the wreck carries four. The wreck's cargo is
+  either not on an island's list or arrives on a later snapshot. This is a wire
+  question, not a timing one.
