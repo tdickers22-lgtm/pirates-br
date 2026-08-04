@@ -148,6 +148,12 @@ export const BROWSER = [
   { ...plain('test-program-warm.mjs'), slow: true },
   { ...plain('test-load-responsiveness.mjs'), slow: true },
   { ...plain('test-perf-budget.mjs'), slow: true },
+  // DEPTH. Both grade the same buffer from opposite ends: the first counts the
+  // pixels standing on a depth-buffer tie (z-fighting, measured exactly rather
+  // than sampled — see scripts/lib/zfight-probe.mjs), the second proves the near
+  // plane those ties depend on takes no geometry out of the picture.
+  { ...plain('test-z-fighting.mjs'), slow: true },
+  { ...plain('test-near-plane-clearance.mjs'), slow: true },
   { ...plain('test-hud-death-and-feed.mjs'), slow: true },
 ];
 

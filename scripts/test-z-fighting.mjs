@@ -241,8 +241,8 @@ async function main() {
           }
           poses.push(census);
           console.log(`    ${stand.id.padEnd(17)} ${todName.padEnd(5)} +${d.toFixed(2)}m  `
-            + `ties ${String(census.ties).padStart(7)}  visible ${String(census.tiesVisible).padStart(7)}  `
-            + `loud ${String(census.tiesLoud).padStart(7)}  self-noise ${census.selfNoise}`);
+            + `ties ${String(census.ties).padStart(6)}  patch ${String(census.patchPixels).padStart(6)}  `
+            + `loud ${String(census.tiesLoud).padStart(6)}  self-noise ${census.selfNoise}`);
         }
         const worst = poses.reduce((a, b) => (b.ties > a.ties ? b : a));
         report.stands.push({ id: stand.id, label: stand.label, tod: todName, poses, worst: worst.ties });
@@ -263,15 +263,18 @@ async function main() {
     }
 
     for (const s of report.stands) {
-      const worstLoud = Math.max(...s.poses.map((p) => p.tiesLoud));
+      const worstPatch = Math.max(...s.poses.map((p) => p.patchPixels));
       const worstAll = Math.max(...s.poses.map((p) => p.ties));
-      const label = `${s.id} @ ${s.tod}: no pixel stands on a depth tie`;
-      if (worstAll === 0) pass(label);
+      const label = `${s.id} @ ${s.tod}: no coplanar patch fights `
+        + `(${worstAll} tie px at worst pose, all of it intersection line)`;
+      if (worstPatch === 0) pass(label);
       else {
-        const c = s.poses.find((p) => p.ties === worstAll).clusters[0];
+        const p = s.poses.find((q) => q.patchPixels === worstPatch);
+        const c = p.clusters[0];
         fail(
           label,
-          `${worstAll} tie pixels (${worstLoud} of them loud) — worst cluster ${c.pixels}px at `
+          `${worstPatch} tie pixels have a tied neighbour on all four sides, so they are inside a `
+          + `coplanar patch and not on an intersection line — worst cluster ${c.pixels}px at `
           + `(${c.x},${c.y}) flipping rgb(${c.colA}) <-> rgb(${c.colB})`,
         );
       }

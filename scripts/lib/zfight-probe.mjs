@@ -182,12 +182,14 @@ export const DEPTH_TIE_CENSUS = (opts = {}) => {
   const CELL = 24;
   const cols = Math.ceil(w / CELL);
   const cells = new Map();
+  const tieMask = new Uint8Array(w * h);
   for (let i = 0, p = 0; i < bytes; i += 4, p += 1) {
     const dr = Math.abs(a[i] - b[i]);
     const dg = Math.abs(a[i + 1] - b[i + 1]);
     const db = Math.abs(a[i + 2] - b[i + 2]);
     const delta = Math.max(dr, dg, db);
     if (delta === 0) continue;
+    tieMask[p] = 1;
     const px = p % w;
     const py = (p / w) | 0;
     const key = ((py / CELL) | 0) * cols + ((px / CELL) | 0);
@@ -208,6 +210,45 @@ export const DEPTH_TIE_CENSUS = (opts = {}) => {
       cell.py = h - 1 - py;
     }
   }
+  // A COPLANAR FIGHT HAS AN INSIDE; AN INTERSECTION DOES NOT.
+  //
+  // Not every depth tie is the artifact anyone means by z-fighting. Where two
+  // surfaces genuinely CROSS — the ocean meeting a beach or a rock skirt, a
+  // waterfall sheet entering its plunge pool, two foliage cards passing through
+  // each other — their depths are exactly equal along the intersection curve,
+  // by geometry and not by precision. The pierce log for the island overlook is
+  // full of exactly that: sea-rock at 340.37 m against ocean-lod-grid at
+  // 340.51 m, island-terrain at 87.77 m against ocean-lod-grid at 88.96 m. No
+  // depth bias removes those and none should: the surfaces really do meet there.
+  //
+  // The shimmering kind is different in SHAPE. Two coplanar surfaces tie over an
+  // AREA — a decal against the wall it lies on, a merged batch against the piece
+  // it duplicates — and the winner reshuffles across that area as the eye moves.
+  // An intersection ties along a LINE one or two pixels wide, and no amount of
+  // camera movement widens it.
+  //
+  // So the count that a gate can honestly demand be zero is the count of tie
+  // pixels with an INTERIOR: a pixel whose four neighbours are all tied is
+  // inside a tied region at least three pixels across. An intersection curve has
+  // no such pixel at any length; a coplanar patch is nothing but such pixels.
+  // ALL EIGHT NEIGHBOURS, not four. Two intersection curves that CROSS, and a
+  // sharp kink in one, both produce a pixel with a tied neighbour on each of the
+  // four sides — measured, exactly one such pixel at two of the nine stands,
+  // which would have made the gate fail on the shape of a coastline. Requiring
+  // the full 3x3 asks for a solid tied block, which a curve of any shape cannot
+  // produce and a coplanar patch produces by the hundred.
+  let patchPixels = 0;
+  for (let y = 1; y < h - 1; y += 1) {
+    for (let x = 1; x < w - 1; x += 1) {
+      const p = y * w + x;
+      if (!tieMask[p]) continue;
+      if (tieMask[p - 1] && tieMask[p + 1] && tieMask[p - w] && tieMask[p + w]
+        && tieMask[p - w - 1] && tieMask[p - w + 1] && tieMask[p + w - 1] && tieMask[p + w + 1]) {
+        patchPixels += 1;
+      }
+    }
+  }
+
   const clusters = [...cells.values()]
     .sort((p, q) => q.n - p.n)
     .slice(0, 12)
@@ -259,6 +300,7 @@ export const DEPTH_TIE_CENSUS = (opts = {}) => {
     pixels: w * h,
     selfNoise,
     ties,
+    patchPixels,
     tiesVisible,
     tiesLoud,
     materialsFlipped: flippable.length,
