@@ -1231,3 +1231,104 @@ interior and 387 at sea** — of 7,014 in the graph. The island-level frustum te
 reached-drawable and drawn (1,181 vs 554 at the dock vista): six hundred bounding
 spheres tested to reject. That is a manual render list or a coarser per-piece
 gate, and it is a smaller prize than the numbers in §9 imply.
+
+---
+
+## 15. Lever 9: the opaque overdraw on a deck, attributed — and two instruments
+that could not have attributed anything
+
+Lever 9 was the largest number in this model that had never been sent anywhere:
+standing on your own deck, **1.56 opaque layers at `high` and 1.97 at `low`**, p95
+6-7, with 21.0% (high) and 30.9% (low) of the framebuffer shaded four times or
+more. §10.4 named it, the fill pass got it as far as the word **`ship`** — 1.662
+layers over 46% of the frame — and there it stopped, one level above anything
+anyone could act on.
+
+`scripts/perf-deck-overdraw.mjs` is the level below. It keys a **part** off the
+material rather than the node name, because a hull is hundreds of unnamed meshes
+under one named group and `mergeStaticMeshes` then collapses them to one draw per
+material: on a ship the material IS the surface, and it is also the thing a fix
+edits (`side`, `depthWrite`, a merge, a cull).
+
+### 15.1 Three defects in the measurement, found before any fix was written
+
+Each of these was found by a reading that could not be true, and each would have
+sent a fix to the wrong place.
+
+**1. The part key was a colour, and every textured material here is white.**
+`MeshStandardMaterial` with a `map` leaves `color` at `0xffffff`, so the first
+part census reported hull shell, deck planking, dark timber and barrel wood as
+ONE part called `Standard#ffffff` carrying **1.119 layers over 34.5% of the
+framebuffer** — the largest reading in the deck's fill budget, naming four
+different surfaces at once, one of which is `DoubleSide` and three of which are
+not. The key now carries the map and the side, and the ship's materials carry
+real names (`ship-hull-shell`, `ship-deck-planking`, …). Nothing reads
+`material.name` at runtime.
+
+**2. The ship sails out from under the camera between renders.** `measureScene`
+re-anchors a ship-relative scene to the hull on every frame of its capture window
+and then returns; every stencil census after it is seconds of software
+rasterisation with a camera that no longer follows. Two runs of the same what-if
+on the same pinned seed:
+
+| | run A | run B |
+|---|---|---|
+| ship's share of the framebuffer | 35.4% | 57.6% |
+| `DoubleSide → FrontSide` | −0.552 layers | −0.098 layers |
+
+Both were labelled `deck-aft`. `ANCHOR_SHIP` now re-places the camera in the
+SAME task as the render that counts, immediately before it.
+
+**3. A counterfactual graded against a stale baseline measures the world's
+drift.** Anchoring fixes the ship's framing, not the world behind it. With the
+baseline taken minutes earlier, **hiding one hammock read −0.874 layers** —
+three quarters of what deleting every ship in the world was worth (−1.168).
+`WHAT_IF` now takes its own baseline in the same call, immediately before the
+mutated render, and reports only the difference.
+
+### 15.2 The three.js fact the brief was wrong about
+
+> "three sorts opaque front-to-back by default — verify `renderOrder` overrides
+> are not defeating it"
+
+**It does not, and nothing is defeating it.** `painterSortStable`
+(`three/build/three.module.js:21250`, r0.160.1) compares `groupOrder`, then
+`renderOrder`, then **`material.id`**, and only reaches `z` when two draws
+already share a material. Opaque draw order in this game is therefore *material
+creation order* — for a ship, the order its constructor happens to declare its
+materials in. There is no depth sort to defeat.
+
+That makes "draw the biggest occluders first" a real and completely unpriced
+lever, so it is priced rather than argued: `WHAT_IF`'s `frontToBack` op assigns
+`renderOrder` by distance from the camera across a bucket's opaque drawables, and
+one measurement says what the whole hypothesis is worth before a line of renderer
+code is written to chase it.
+
+### 15.3 What the deck actually is, at `low`, anchored
+
+Frame 2.741 layers, blended 0.435, **opaque 2.306**. Of that the `ship` bucket is
+**1.353 layers over 35.8% of the framebuffer** — which is **3.78 layers over the
+ship's own pixels**, p95 5, max 9.
+
+| part | layers | covers | p95 | max | side |
+|---|---|---|---|---|---|
+| `ship-hull-shell` | 0.256 | 25.6% | 1 | **1** | double |
+| `ship-dark-timber` | 0.369 | 21.2% | 2 | **6** | front |
+| `ship-iron` | 0.004 | 0.4% | 0 | 2 | front |
+| `hold-floor`, `hold-inner-wall`, `LineBasic`, `ship-team-accent` | 0.000 | 0.0% | 0 | 0 | — |
+
+**The hull is cleared, and it was the brief's first suspect.** `ship-hull-shell`
+reads **max 1**: it never stacks on itself anywhere in the view. From inside a
+closed shell a view ray crosses it exactly once, so its `DoubleSide` — which
+exists so a shot hole shows the far interior wall rather than vanished
+backfaces — cannot be buying a second layer on a deck. The suspect list's "hull
+inner/outer shells drawn twice" is not what is happening.
+
+**The hold is cleared too, for fill, and convicted for something else.** Every
+hold surface reads exactly 0.000 layers: the deck is drawn first (its material is
+older, and material id is the sort key) so the hold below it is entirely
+depth-rejected. It costs no fill at all. What it does cost is that
+`mergeStaticMeshes` buckets by material, and `darkMat` is used by both the hold's
+ribs, beams and ceiling slabs AND the deck rails and masts — so `ship-dark-timber`
+is **one draw call spanning y −0.2 to 11.7**, bilge to masthead. The hold cannot
+be gated separately from the rig because they are the same mesh.
