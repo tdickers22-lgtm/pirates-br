@@ -4075,6 +4075,14 @@ export class ShipRenderer {
     cameraPosition?: THREE.Vector3,
     localPlayerId?: string,
     storm: ShipStormSource = 0,
+    /**
+     * WHERE A HULL SOMEBODY ELSE IS SAILING ACTUALLY IS, on the server's
+     * timeline. Null for a hull nobody has history for yet, and — deliberately —
+     * null for the hull the local player is aboard: he is riding it, his camera
+     * is bolted to it and his aim is measured from it, so it stays predicted
+     * along with him. See src/client/network/RemoteInterpolation.ts.
+     */
+    remoteHullPose?: (shipId: string) => { x: number; y: number; z: number; yaw: number } | null,
   ) {
     this.frameIndex++;
     const wind = this.windOverride ?? sampleWind(t);
@@ -4195,17 +4203,28 @@ export class ShipRenderer {
       const heave = ship.sinking
         ? 0
         : (serverHeave === null ? clientHeave : THREE.MathUtils.lerp(serverHeave, clientHeave, staleBlend)) - floodSettle;
+      // A HULL IS PLACED FROM THE BUFFER WHEN IT IS SOMEBODY ELSE'S.
+      //
+      // `extrapolation` above is `min(0.14, snapshotAge + dt x 0.5)` — an age
+      // measured from when the PACKET LANDED, so the wire's arrival jitter went
+      // straight into where a 20-metre hull was drawn, and the next snapshot
+      // yanked it back. On the biggest moving object in the game that is the
+      // most visible correction there is, and it carries the crew and the
+      // waterline with it. The heave, the pitch and the roll are NOT taken from
+      // the buffer: those are the deterministic wave attitude, computed from the
+      // shared Gerstner clock, and they are already continuous.
+      const buffered = remoteHullPose && !localCrewShip ? remoteHullPose(ship.id) : null;
       this.tempShipPos.set(
-        ship.position.x + ship.velocity.x * extrapolation,
-        ship.position.y + heave,
-        ship.position.z + ship.velocity.z * extrapolation,
+        buffered ? buffered.x : ship.position.x + ship.velocity.x * extrapolation,
+        (buffered ? buffered.y : ship.position.y) + heave,
+        buffered ? buffered.z : ship.position.z + ship.velocity.z * extrapolation,
       );
       if (mesh.root.position.distanceToSquared(this.tempShipPos) > 75 * 75) {
         mesh.root.position.copy(this.tempShipPos);
       } else {
         mesh.root.position.lerp(this.tempShipPos, positionAlpha);
       }
-      const targetRotation = ship.rotation + ship.angularVelocity * extrapolation;
+      const targetRotation = buffered ? buffered.yaw : ship.rotation + ship.angularVelocity * extrapolation;
       mesh.root.rotation.y += angleWrap(targetRotation - mesh.root.rotation.y) * rotationAlpha;
 
       // Waterline contact collar: always on (a hull at anchor still has a wet

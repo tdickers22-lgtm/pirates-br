@@ -3624,6 +3624,7 @@ export class Game {
       this.state.storm
         ? { center: { x: this.state.storm.centerX, y: this.state.storm.centerZ }, safeRadius: this.state.storm.safeRadius, phase: this.state.storm.phase }
         : 0,
+      this.readRemoteHullPose,
     );
     this.syncSharks(dt);
     this.syncWildlife(dt);
@@ -4985,6 +4986,26 @@ export class Game {
   /** Scratch pose for {@link getSharkRenderPosition} — consumed by its caller
    *  before the next call, exactly like `tempRenderPos`. */
   private readonly tempSharkPose = { x: 0, y: 0, z: 0, yaw: 0 };
+  /** …and one for the hull provider handed to ShipRenderer. Separate from
+   *  `tempHullPose`, which readShipRenderPose owns: the drawn hull and the
+   *  buffered hull are two different answers and one scratch between them would
+   *  hand a caller the other one's. */
+  private readonly tempBufferedHullPose = { x: 0, y: 0, z: 0, yaw: 0 };
+
+  /**
+   * Where a hull somebody else is sailing is, on the server's timeline. Bound
+   * once (never per frame — this is handed to ShipRenderer on every update and a
+   * fresh closure a frame is exactly the per-frame garbage §6.3 measured).
+   * Returns null for a hull with no history yet, so the renderer keeps its own
+   * extrapolation for the one frame that needs it.
+   */
+  private readonly readRemoteHullPose = (shipId: string) => {
+    const pose = this.clientState.remote.poseAt(`S:${shipId}`, performance.now());
+    if (!pose || pose.mode === 'empty') return null;
+    const out = this.tempBufferedHullPose;
+    out.x = pose.x; out.y = pose.y; out.z = pose.z; out.yaw = pose.yaw;
+    return out;
+  };
 
   /**
    * Where a shark is at this instant, off the server-time buffer. Falls back to
