@@ -10,19 +10,23 @@
 // freely inside ONE task (which is what a particle burst measured by a census
 // that blocks the frame loop for seconds requires).
 import {
-  BUCKET_FN, FRUSTUM_FN, BLENDED_FN,
+  BUCKET_FN, FRUSTUM_FN, BLENDED_FN, PART_FN,
   LOAD_THREE, TAG_BUCKETS, FRAME_INVENTORY, PASS_SPLIT, RESOURCE_CENSUS, STENCIL_OVERDRAW,
   SKY_OCCLUSION, TIME_FRAMES, FRUSTUM_ENTITIES, PIN_RATIO_AT, INSTALL_HITCH_SAMPLER, ALLOCATION_RATE,
+  BUCKET_PARTS, WHAT_IF,
 } from './cost-model-probes.mjs';
 
 export const COST_PRELUDE = [
   BUCKET_FN,
   FRUSTUM_FN,
   BLENDED_FN,
+  PART_FN,
   `window.__cost = {
     loadThree: ${LOAD_THREE.toString()},
     tagBuckets: ${TAG_BUCKETS.toString()},
     frameInventory: ${FRAME_INVENTORY.toString()},
+    bucketParts: ${BUCKET_PARTS.toString()},
+    whatIf: ${WHAT_IF.toString()},
     passSplit: ${PASS_SPLIT.toString()},
     resourceCensus: ${RESOURCE_CENSUS.toString()},
     stencilOverdraw: ${STENCIL_OVERDRAW.toString()},

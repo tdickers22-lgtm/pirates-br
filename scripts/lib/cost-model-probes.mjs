@@ -253,6 +253,231 @@ function isBlended(mat) {
 `;
 
 /**
+ * THE PART a drawable belongs to — one level finer than the bucket.
+ *
+ * The bucket census answered lever 9 with the word "ship": 1.662 opaque layers
+ * over 46% of the framebuffer, standing on your own deck, and about 87% of the
+ * frame's whole opaque depth complexity. That names a boat, not a fix. A part
+ * names the SURFACE — and a surface in this codebase is a material, because a
+ * material is the thing a fix edits (`side`, `depthWrite`, a merge, a cull).
+ *
+ * Keyed off the material and not the node name on purpose: the hull, the deck,
+ * the interior and the rigging are built as hundreds of unnamed meshes under one
+ * named group (`ship_<id>`), so a name-keyed part census on a ship reports one
+ * part. Materials separate them cleanly — canvas is not oak is not tar — and the
+ * inventory below carries the WORLD HEIGHT of each part's meshes, which is what
+ * tells hold from deck from rig without a single name.
+ */
+export const PART_FN = `
+function materialLabel(mat) {
+  if (!mat) return '(none)';
+  if (mat.name) return mat.name;
+  // A colour is NOT an identity here. Every textured MeshStandardMaterial in this
+  // game leaves \`color\` at white, so a type+colour key put the hull, the deck,
+  // the dark timber and the barrels into ONE part called Standard#ffffff — 18
+  // draws and 1.119 layers with no way to say which surface paid them. The map
+  // and the side are what actually separate them, so both are in the key.
+  const c = mat.color && mat.color.getHexString ? '#' + mat.color.getHexString() : '';
+  const t = (mat.type || '?').replace('Mesh', '').replace('Material', '');
+  const map = mat.map ? '+' + (mat.map.name || ('tex' + String(mat.map.uuid).slice(0, 4))) : '';
+  const side = mat.side === 2 ? '~2side' : mat.side === 1 ? '~backside' : '';
+  return t + c + map + side;
+}
+function makePart(scene) {
+  const bucketFor = makeBucket(scene);
+  return function partFor(node, mat) {
+    const m = mat !== undefined ? mat : (Array.isArray(node.material) ? node.material[0] : node.material);
+    return bucketFor(node) + '/' + materialLabel(m);
+  };
+}
+`;
+
+/**
+ * EVERY SURFACE IN ONE BUCKET, and the three flags that make a surface cost
+ * twice what it looks like — WITHOUT RENDERING ANYTHING.
+ *
+ * The stencil census is exact and costs a whole scene render per key, so it can
+ * only afford to ask about a handful of parts. This is the cheap pass that says
+ * WHICH handful, and it also carries the evidence that explains the answer:
+ *
+ *   side          DoubleSide on an opaque closed solid shades every pixel of it
+ *                 TWICE — the back face rasterises, the front face covers it —
+ *                 and three's front-to-back opaque sort cannot help, because
+ *                 both faces are in the same draw call.
+ *   depthWrite    false on an opaque surface means it never occludes anything
+ *                 behind it, so everything it covers is shaded as well.
+ *   renderOrder   a non-zero order OVERRIDES three's front-to-back opaque sort;
+ *                 an occluder pushed late stops being an occluder.
+ *
+ * `yMin`/`yMax` are world heights, which is how a ship's unnamed meshes are told
+ * apart: below the deck line is the hold, above the rail is the rig.
+ */
+export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
+  const g = window.__piratesBR;
+  const R = g.renderer;
+  const camera = R.camera;
+  const scene = R.scene;
+  camera.updateMatrixWorld();
+  scene.updateMatrixWorld();
+
+  const bucketFor = makeBucket(scene);
+  const partFor = makePart(scene);
+  const planes = makePlanes(camera);
+
+  const parts = new Map();
+  const walk = (node) => {
+    if (!node.visible) return;
+    if (node.isMesh || node.isPoints || node.isLine || node.isSprite || node.isInstancedMesh) {
+      if (bucketFor(node) === bucket) {
+        const drawn = node.frustumCulled === false || inFrustum(node, planes);
+        const mats = Array.isArray(node.material) ? node.material : [node.material];
+        const geo = node.geometry;
+        const idx = geo ? (geo.index ? geo.index.count : (geo.attributes.position?.count ?? 0)) : 0;
+        const inst = node.isInstancedMesh ? (node.count ?? 1) : 1;
+        // World height of this mesh, from its own bounds through its own matrix.
+        let yLo = null, yHi = null;
+        if (geo) {
+          if (!geo.boundingBox) { try { geo.computeBoundingBox(); } catch { /* points */ } }
+          const bb = geo.boundingBox;
+          if (bb) {
+            const m = node.matrixWorld.elements;
+            for (let i = 0; i < 8; i++) {
+              const lx = (i & 1) ? bb.max.x : bb.min.x;
+              const ly = (i & 2) ? bb.max.y : bb.min.y;
+              const lz = (i & 4) ? bb.max.z : bb.min.z;
+              const wy = m[1] * lx + m[5] * ly + m[9] * lz + m[13];
+              if (yLo === null || wy < yLo) yLo = wy;
+              if (yHi === null || wy > yHi) yHi = wy;
+            }
+          }
+        }
+        for (const mat of mats) {
+          if (!mat) continue;
+          const key = partFor(node, mat);
+          let p = parts.get(key);
+          if (!p) {
+            p = {
+              part: key, calls: 0, drawnCalls: 0, meshes: 0, tris: 0,
+              side: mat.side, transparent: !!mat.transparent, depthWrite: mat.depthWrite !== false,
+              depthTest: mat.depthTest !== false, blended: isBlended(mat),
+              alphaTest: mat.alphaTest ?? 0, matType: mat.type, matName: mat.name || null,
+              renderOrders: new Set(), names: new Set(), yMin: null, yMax: null,
+              materials: new Set(),
+            };
+            parts.set(key, p);
+          }
+          p.materials.add(mat);
+          p.calls += 1;
+          if (drawn) {
+            p.drawnCalls += 1;
+            p.tris += (idx / 3) * inst;
+            if (yLo !== null && (p.yMin === null || yLo < p.yMin)) p.yMin = yLo;
+            if (yHi !== null && (p.yMax === null || yHi > p.yMax)) p.yMax = yHi;
+          }
+          p.renderOrders.add(node.renderOrder | 0);
+          if (p.names.size < 6) {
+            for (let c = node; c; c = c.parent) {
+              if (c.name) { p.names.add(c.name); break; }
+            }
+          }
+        }
+      }
+    }
+    for (const child of node.children) walk(child);
+  };
+  walk(scene);
+
+  return [...parts.values()]
+    .map((p) => ({
+      part: p.part, calls: p.calls, drawnCalls: p.drawnCalls, tris: Math.round(p.tris),
+      side: p.side === 2 ? 'double' : p.side === 1 ? 'back' : 'front',
+      transparent: p.transparent, depthWrite: p.depthWrite, depthTest: p.depthTest,
+      blended: p.blended, alphaTest: p.alphaTest, matType: p.matType, matName: p.matName,
+      materialInstances: p.materials.size,
+      renderOrder: [...p.renderOrders].sort((a, b) => a - b),
+      yMin: p.yMin === null ? null : Math.round(p.yMin * 10) / 10,
+      yMax: p.yMax === null ? null : Math.round(p.yMax * 10) / 10,
+      names: [...p.names],
+    }))
+    .sort((a, b) => b.drawnCalls - a.drawnCalls)
+    .slice(0, maxParts);
+};
+
+/**
+ * WHAT THE FRAME WOULD COST IF ONE THING WERE DIFFERENT.
+ *
+ * Attribution says which surface pays; it never says what a fix is worth, and on
+ * a deck the two answers differ a lot — a part with 1.6 layers that is genuinely
+ * two different surfaces of a solid gives back nothing when you cull its back
+ * face, while a part with 0.4 gives back all of it. So the counterfactual is
+ * measured rather than argued: mutate, run the SAME stencil census, put it back.
+ *
+ * Mutations (applied in order, all restored in `finally`):
+ *   { op: 'frontside', bucket }     every opaque DoubleSide material in the
+ *                                   bucket → FrontSide
+ *   { op: 'hide', part }            every mesh whose part key matches → invisible
+ *   { op: 'hideBucket', bucket }    the whole bucket → invisible
+ *   { op: 'depthWrite', part, value }
+ *   { op: 'renderOrder', part, value }
+ *
+ * Nothing here is a fix. It is a price tag, taken on the live scene, so a fix
+ * can be chosen before it is written.
+ */
+export const WHAT_IF = async ({ mutations = [], maxLayers = 24, only = null, blendedOnly = false }) => {
+  const THREE = window.__costThree;
+  const g = window.__piratesBR;
+  const scene = g.renderer.scene;
+  if (!THREE) throw new Error('THREE not loaded into the page (call LOAD_THREE first)');
+
+  const bucketFor = makeBucket(scene);
+  const partFor = makePart(scene);
+  const savedMat = new Map();
+  const savedVis = new Map();
+  const savedOrder = new Map();
+  const keepMat = (mat) => {
+    if (!savedMat.has(mat)) {
+      savedMat.set(mat, { side: mat.side, depthWrite: mat.depthWrite, needsUpdate: false });
+    }
+  };
+
+  let touched = 0;
+  try {
+    for (const mu of mutations) {
+      scene.traverse((o) => {
+        const m = o.material;
+        if (!m) return;
+        const mats = Array.isArray(m) ? m : [m];
+        for (const mat of mats) {
+          if (!mat) continue;
+          const inBucket = mu.bucket ? bucketFor(o) === mu.bucket : true;
+          const inPart = mu.part ? partFor(o, mat) === mu.part : true;
+          if (!inBucket || !inPart) continue;
+          if (mu.op === 'frontside') {
+            if (mat.side === THREE.DoubleSide && !isBlended(mat)) {
+              keepMat(mat); mat.side = THREE.FrontSide; touched += 1;
+            }
+          } else if (mu.op === 'hide' || mu.op === 'hideBucket') {
+            if (!savedVis.has(o)) { savedVis.set(o, o.visible); touched += 1; }
+            o.visible = false;
+          } else if (mu.op === 'depthWrite') {
+            keepMat(mat); mat.depthWrite = !!mu.value; touched += 1;
+          } else if (mu.op === 'renderOrder') {
+            if (!savedOrder.has(o)) { savedOrder.set(o, o.renderOrder); touched += 1; }
+            o.renderOrder = mu.value | 0;
+          }
+        }
+      });
+    }
+    const r = await window.__cost.stencilOverdraw({ maxLayers, only, blendedOnly });
+    return { ...r, mutations, touched };
+  } finally {
+    for (const [mat, s] of savedMat) { mat.side = s.side; mat.depthWrite = s.depthWrite; }
+    for (const [o, v] of savedVis) o.visible = v;
+    for (const [o, v] of savedOrder) o.renderOrder = v;
+  }
+};
+
+/**
  * WHAT THE FRAME IS MADE OF, without rendering anything.
  *
  * Walks the live scene the way three's renderer does — visible, in the frustum,
@@ -688,7 +913,7 @@ export const RESOURCE_CENSUS = () => {
  * `only` names a source bucket to enable stencil writes for; everything else
  * still renders (and still occludes), it simply is not counted.
  */
-export const STENCIL_OVERDRAW = async ({ maxLayers = 24, only = null, blendedOnly = false, preArmed = false }) => {
+export const STENCIL_OVERDRAW = async ({ maxLayers = 24, only = null, blendedOnly = false, preArmed = false, keyBy = 'bucket' }) => {
   const THREE = window.__costThree;
   const g = window.__piratesBR;
   const R = g.renderer;
@@ -698,22 +923,28 @@ export const STENCIL_OVERDRAW = async ({ maxLayers = 24, only = null, blendedOnl
   const gl = renderer.getContext();
   if (!THREE) throw new Error('THREE not loaded into the page (call LOAD_THREE first)');
 
-  const bucketFor = makeBucket(scene);
+  // `bucket` attributes a layer to the content wave that owns it; `part` goes one
+  // level finer, to the SURFACE — the material a fixer would actually edit. The
+  // bucket answer for a deck is "ship", which names the whole boat and no fix.
+  const keyFor = keyBy === 'part' ? makePart(scene) : (() => {
+    const bucketFor = makeBucket(scene);
+    return (node) => bucketFor(node);
+  })();
 
-  // Which materials get to increment. A material shared by two buckets would be
+  // Which materials get to increment. A material shared by two keys would be
   // attributed to both, so that is reported rather than hidden.
   const wanted = new Set();
   const matBuckets = new Map();
   scene.traverse((o) => {
     const m = o.material;
     if (!m) return;
-    const bucket = bucketFor(o);
     for (const mat of (Array.isArray(m) ? m : [m])) {
       if (!mat) continue;
+      const key = keyFor(o, mat);
       let set = matBuckets.get(mat);
       if (!set) { set = new Set(); matBuckets.set(mat, set); }
-      set.add(bucket);
-      const bucketOk = only === null || bucket === only;
+      set.add(key);
+      const bucketOk = only === null || key === only;
       const blendOk = !blendedOnly || isBlended(mat);
       if (bucketOk && blendOk) wanted.add(mat);
     }
