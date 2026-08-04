@@ -146,6 +146,23 @@ async function main() {
       if (a) window.__cost.anchorShip(a);
       return window.__cost.stencilOverdraw(o);
     }, [anchor, opts]);
+    /** An attribution reading AND the whole frame it is a share of, taken in the
+     *  SAME task, back to back.
+     *
+     *  An absolute layer count on this scene does not hold still long enough to
+     *  be compared with anything. In ONE run, minutes apart, the `ship` bucket
+     *  read 0.996 layers over 28.5% and then 0.655 over 21.6% — a third of
+     *  itself — because the hull's heading, its heel and the islands behind it
+     *  are different by the time the second render happens. The SHARE of the
+     *  frame is what survives that, so every attribution row carries the frame
+     *  it was divided by. */
+    const shareCensus = (opts) => page.evaluate(async ([a, o]) => {
+      if (a) window.__cost.anchorShip(a);
+      const part = await window.__cost.stencilOverdraw(o);
+      window.__cost.anchorShip(a);
+      const frame = await window.__cost.stencilOverdraw({ maxLayers: o.maxLayers });
+      return { part, frame, share: frame.meanAll > 0 ? part.meanAll / frame.meanAll : 0 };
+    }, [anchor, opts]);
     const counterfactual = (opts) => page.evaluate(async ([a, o]) => {
       if (a) window.__cost.anchorShip(a);
       return window.__cost.whatIf(o);
@@ -180,9 +197,10 @@ async function main() {
       report.byBucket = [];
       console.log('');
       for (const name of names) {
-        const r = await census({ maxLayers: MAX_LAYERS, only: name });
-        report.byBucket.push({ bucket: name, meanAll: r.meanAll, coveredFraction: r.coveredFraction, p95: r.p95, max: r.max });
-        console.log(`    bucket[${name.padEnd(22)}] mean ${r.meanAll.toFixed(3)} over ${pct(r.coveredFraction)} p95 ${r.p95} max ${r.max}`);
+        const { part: r, frame: f, share } = await shareCensus({ maxLayers: MAX_LAYERS, only: name });
+        report.byBucket.push({ bucket: name, meanAll: r.meanAll, frameMean: f.meanAll, share, coveredFraction: r.coveredFraction, p95: r.p95, max: r.max });
+        console.log(`    bucket[${name.padEnd(22)}] mean ${r.meanAll.toFixed(3)} of frame ${f.meanAll.toFixed(3)} = ${pct(share)}  `
+          + `covers ${pct(r.coveredFraction)} p95 ${r.p95} max ${r.max}`);
       }
       report.byBucket.sort((a, b) => b.meanAll - a.meanAll);
     }
@@ -212,12 +230,13 @@ async function main() {
     const ranked = parts.filter((p) => p.drawnCalls > 0).slice(0, TOP_PARTS);
     const byPart = [];
     for (const p of ranked) {
-      const r = await census({ maxLayers: MAX_LAYERS, only: p.part, keyBy: 'part' });
+      const { part: r, frame: f, share } = await shareCensus({ maxLayers: MAX_LAYERS, only: p.part, keyBy: 'part' });
       byPart.push({ part: p.part, side: p.side, drawnCalls: p.drawnCalls, tris: p.tris,
-        meanAll: r.meanAll, coveredFraction: r.coveredFraction, p95: r.p95, max: r.max, layerSum: r.layerSum });
-      console.log(`    layers[${p.part}] mean ${r.meanAll.toFixed(3)} over ${pct(r.coveredFraction)} p95 ${r.p95} max ${r.max}`);
+        meanAll: r.meanAll, frameMean: f.meanAll, share, coveredFraction: r.coveredFraction, p95: r.p95, max: r.max, layerSum: r.layerSum });
+      console.log(`    layers[${p.part}] mean ${r.meanAll.toFixed(3)} of frame ${f.meanAll.toFixed(3)} = ${pct(share)}  `
+        + `covers ${pct(r.coveredFraction)} p95 ${r.p95} max ${r.max}`);
     }
-    byPart.sort((a, b) => b.meanAll - a.meanAll);
+    byPart.sort((a, b) => b.share - a.share);
     report.byPart = byPart;
 
     // ── 4. counterfactuals ───────────────────────────────────────────────────
