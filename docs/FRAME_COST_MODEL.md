@@ -1332,3 +1332,66 @@ depth-rejected. It costs no fill at all. What it does cost is that
 ribs, beams and ceiling slabs AND the deck rails and masts — so `ship-dark-timber`
 is **one draw call spanning y −0.2 to 11.7**, bilge to masthead. The hold cannot
 be gated separately from the rig because they are the same mesh.
+
+### 15.4 The tier inversion is not a tier effect
+
+§3 records `deck-aft` at 2.66 layers at `high` and **3.03 at `low`**, and calls
+the low tier being worse than the high one backwards. It is backwards. It is also
+not what is happening.
+
+Three anchored runs of the same scene, same pinned seed, same 960×540, same
+machine, taken within one afternoon:
+
+| run | tier | frame | blended | opaque | `ship` | `ship` covers |
+|---|---|--:|--:|--:|--:|--:|
+| A | low | 2.741 | 0.435 | 2.306 | 1.353 | 35.8% |
+| B | high | 2.128 | 0.442 | 1.686 | 1.268 | 34.0% |
+| C | low | **2.198** | 0.430 | 1.768 | 0.996 | 28.5% |
+
+**The two `low` runs differ by 0.543 layers; `low` minus `high` is +0.613 using
+run A and −0.070 using run C.** The sign of the tier difference is decided by
+which of two runs of the same tier you happen to compare.
+
+And inside run C alone, the `ship` bucket was censused twice a few minutes apart:
+**0.996 layers over 28.5%, then 0.655 over 21.6%** — a third of itself, with the
+camera anchored to the hull both times.
+
+This repo's own two published passes already disagreed about the sign and nobody
+noticed, because each pass only ever compared against itself:
+
+| source | deck-aft high | deck-aft low | verdict |
+|---|--:|--:|---|
+| this model, §3 | 2.66 | 3.03 | low is **worse** by 0.37 |
+| `FILL_AND_SHADER_PASS.md` §2.1, after | 3.013 | 1.751 | low is **better** by 1.26 |
+
+Both cannot describe the tier. What `deck-aft` actually measures is *wherever the
+local hull had sailed to by the time the census ran* — which island is astern,
+how far the anchorage is, how the hull is heeled — and that is a different
+picture every session. The scene is fine for grading a build against itself in
+one session; it cannot carry a cross-session claim about anything, and the
+"low is worse than high" entry in §3 should be read as an artifact.
+
+The one cross-tier statement the readings do support is the flat one: the `ship`
+bucket is **1.268 at `high` and 1.353 at `low`**, inside the run-to-run spread.
+Whatever the deck costs, the quality ladder is not changing it.
+
+### 15.5 What lever 9 needs next, and what it does not
+
+It does not need another afternoon of stencil censuses on `deck-aft` at this
+precision. Every absolute reading it can take moves by a third between renders.
+
+1. **A reproducible deck.** Either park the hull (a debug hook that pins ship
+   position and rotation for the length of a census) or stop asking `deck-aft`
+   cross-session questions. Without one of those, no fix on this lever can be
+   shown to have worked.
+2. **Attribution by share, not by layers.** Already done here — every row carries
+   the whole frame taken in the same task — but the shares still need to be
+   re-taken on a parked hull before they rank anything.
+3. **The draw-order lever is unpriced and now measurable.** three r160 never
+   sorts opaque front-to-back (§15.2), so nothing in this game draws its
+   occluders first. `WHAT_IF`'s `frontToBack` op prices it in one paired
+   measurement.
+4. **Two suspects from the brief are already cleared** and should not be
+   re-investigated: the hull's `DoubleSide` (max 1 layer — a ray crosses a closed
+   shell once from inside) and the hold interior (0.000 layers — the deck's
+   material is older, so it draws first and rejects everything below it).
