@@ -1132,6 +1132,7 @@ export class Renderer {
     this.getCycleColor(this.hemisphereLight.groundColor, this.hemiGroundDayColor, this.hemiGroundTwilightColor, this.hemiGroundNightColor);
     this.getCycleColor(this.horizonFill.color, this.horizonDayColor, this.horizonTwilightColor, this.horizonNightColor);
     this.applyStormLightColors(t);
+    this.applySpectateLift();
     this.setSunDiscWeather(t, 0);
 
     this.renderer.toneMappingExposure = THREE.MathUtils.lerp(this.getCycleExposure(), this.getStormExposure(), t);
@@ -1185,6 +1186,9 @@ export class Renderer {
     this.ambientLight.intensity = THREE.MathUtils.lerp(ambientBase, THREE.MathUtils.lerp(1.05, 0.72, deep), underwater);
     this.hemisphereLight.intensity = THREE.MathUtils.lerp(hemisphereBase, THREE.MathUtils.lerp(0.92, 0.62, deep), underwater);
     this.horizonFill.intensity = THREE.MathUtils.lerp(horizonBase, THREE.MathUtils.lerp(0.04, 0.015, deep), underwater);
+    // Last, on top of the finished cycle/storm/underwater colours — see
+    // applySpectateLift for why this is one light and not two.
+    this.applySpectateLift();
     this.renderer.toneMappingExposure = THREE.MathUtils.lerp(
       THREE.MathUtils.lerp(this.getCycleExposure(), this.getStormExposure(), storm),
       THREE.MathUtils.lerp(0.98, 0.76, deep),
@@ -1353,6 +1357,65 @@ export class Renderer {
     this.hemisphereLight.color.lerp(this.hemiSkyStormColor, storm * 0.9);
     this.hemisphereLight.groundColor.lerp(this.hemiGroundStormColor, storm * 0.9);
     this.horizonFill.color.lerp(this.horizonFillStormColor, storm * 0.85);
+  }
+
+  /**
+   * THE SPECTATE FILL IS NOT A SECOND LIGHT, AND IT MUST NOT BE.
+   *
+   * `numHemiLights` is a field of three's program cache key
+   * (`WebGLPrograms.getProgramCacheKeyParameters`, right beside the point-light
+   * count LightBudget exists to pin). The death camera used to answer its lift
+   * by CONSTRUCTING a `THREE.HemisphereLight` and adding it to the scene the
+   * first time a player died, and hiding it again when the lift decayed. Every
+   * one of those transitions moved the count 1 ↔ 2 and re-linked EVERY MATERIAL
+   * IN THE WORLD.
+   *
+   * Measured, `high`, 90 s, pinned map, program census: 31 of 135 program keys
+   * were pure duplicates of a program already linked and paid for, differing in
+   * exactly one field — `numHemiLights`, 1 vs 2 — and 24 of the 40 links taken
+   * inside a drawn frame during play landed in one 600 ms window at the moment
+   * the spectate camera rose. The player dies and the client re-links the map.
+   *
+   * WHY FOLDING IT IN IS EXACT AND NOT AN APPROXIMATION. Both lights are
+   * hemispheres, and three shades a hemisphere as
+   * `mix(groundColor, skyColor, w)` where `w` depends only on the surface
+   * normal — the SAME `w` for both — with the intensity already multiplied into
+   * the colours (`WebGLLights.setup`). So
+   *
+   *   I₁·mix(G₁,S₁,w) + I₂·mix(G₂,S₂,w)
+   *     = (I₁+I₂)·mix( lerp(G₁,G₂,k), lerp(S₁,S₂,k), w ),  k = I₂/(I₁+I₂)
+   *
+   * for every normal. One light carrying the summed intensity and the
+   * intensity-weighted colours is the same radiance the two lights produced, to
+   * the last bit, and costs one fewer light in the fragment loop of every lit
+   * pixel in the game rather than one more.
+   *
+   * Called at the END of both writers of the hemisphere light, each of which
+   * re-derives its colours from the day/night cycle before it runs, so the lift
+   * is applied to a fresh base every frame and cannot accumulate.
+   */
+  private applySpectateLift() {
+    const lift = this.spectateLift;
+    if (lift <= 0.001) return;
+    const added = Renderer.SPECTATE_FILL_INTENSITY * lift;
+    const total = this.hemisphereLight.intensity + added;
+    if (total <= 1e-5) return;
+    const k = added / total;
+    this.hemisphereLight.color.lerp(this.spectateSkyColor, k);
+    this.hemisphereLight.groundColor.lerp(this.spectateGroundColor, k);
+    this.hemisphereLight.intensity = total;
+  }
+
+  /** What the death camera's fill was worth as its own light. */
+  private static readonly SPECTATE_FILL_INTENSITY = 0.85;
+  private readonly spectateSkyColor = new THREE.Color(0xbcd2ee);
+  private readonly spectateGroundColor = new THREE.Color(0x243040);
+  private spectateLift = 0;
+
+  /** 0 = alive and on your feet, 1 = the death camera fully risen. Game owns the
+   *  ramp; this only says how much fill it is asking for. */
+  setSpectateLift(lift: number): void {
+    this.spectateLift = clamp(Number.isFinite(lift) ? lift : 0, 0, 1);
   }
 
   private getCycleColor(target: THREE.Color, day: THREE.Color, twilight: THREE.Color, night: THREE.Color) {

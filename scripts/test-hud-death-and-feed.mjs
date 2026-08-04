@@ -451,9 +451,21 @@ try {
       const g = window.__piratesBR;
       const p = g.getLocalPlayer();
       p.state = 'eliminated';
+      // THE FILL IS THE SCENE'S ONE HEMISPHERE LIGHT, not a light of its own.
+      // A second HemisphereLight would move `numHemiLights`, which is a field of
+      // three's program cache key, and re-link every material in the world in
+      // the frames right after the player dies (31 of 135 keys, measured). So
+      // the reading is a BEFORE/AFTER on the light that is already there, and
+      // the hemisphere-light COUNT is asserted alongside it.
+      const hemi = () => {
+        let found = null; let n = 0;
+        g.renderer.scene.traverseVisible((o) => { if (o.isHemisphereLight) { n += 1; found = o; } });
+        return { n, intensity: found ? +found.intensity.toFixed(3) : 0 };
+      };
       const before = {
         camY: +g.renderer.camera.position.y.toFixed(2),
         vignette: +(document.getElementById('death-vignette')?.style.opacity ?? 0),
+        hemi: hemi(),
       };
       // Let the lift run its full rise (Game.SPECTATE_RISE_SECONDS) on real
       // frames. The rise is integrated on the RENDER clock, so a 9-fps CI box
@@ -473,8 +485,7 @@ try {
         // What the camera is looking down at — the body it lifted off.
         anchorY: g.localDeathAnchor ? +g.localDeathAnchor.pos.y.toFixed(2) : null,
         lift: +g.spectateLift.toFixed(3),
-        fillLight: g.spectateLight ? +g.spectateLight.intensity.toFixed(2) : null,
-        fillVisible: g.spectateLight ? !!g.spectateLight.visible : false,
+        hemi: hemi(),
         vignette: +(document.getElementById('death-vignette')?.style.opacity ?? 0),
         deathScreenUp: getComputedStyle(document.getElementById('death-screen')).display !== 'none',
       };
@@ -483,8 +494,14 @@ try {
     expect('the camera actually rises off the body', spectate.lift > 0.95, `lift=${spectate.lift}`);
     expect('and ends up well clear of the waterline',
       spectate.camY > 3.5, `camY=${spectate.camY} (was ${spectate.before.camY})`);
-    expect('a fill light exists so a night death is not black on black',
-      spectate.fillVisible && (spectate.fillLight ?? 0) > 0.5, JSON.stringify(spectate));
+    expect('the fill actually lifts so a night death is not black on black',
+      spectate.hemi.intensity > spectate.before.hemi.intensity + 0.5,
+      `${spectate.before.hemi.intensity} → ${spectate.hemi.intensity}`);
+    // …and it lifts WITHOUT a second hemisphere light: one more would re-link
+    // every material in the world at the moment of death.
+    expect('and dying does not change the hemisphere-light count',
+      spectate.hemi.n === 1 && spectate.before.hemi.n === 1,
+      `before ${spectate.before.hemi.n}, spectating ${spectate.hemi.n}`);
     expect('the dying vignette eases off instead of blinding the spectator',
       spectate.vignette < 0.42, `vignette=${spectate.vignette}`);
     await shot('spectate-camera.png');

@@ -556,9 +556,11 @@ export class Game {
   private spectateLift = 0;
   /** Slow drift added to the spectate yaw so the held frame is not dead still. */
   private spectateOrbit = 0;
-  /** Fill light that only exists while spectating — a night elimination is
-   *  otherwise unlit and unreadable however high the camera climbs. */
-  private spectateLight: THREE.HemisphereLight | null = null;
+  // The fill light that makes a night elimination readable lives in Renderer,
+  // folded into the ONE hemisphere light the scene has. It used to be a second
+  // HemisphereLight built here on first death — and `numHemiLights` is part of
+  // every program's cache key, so dying re-linked the map. See
+  // Renderer.applySpectateLift.
   private static readonly SPECTATE_RISE_SECONDS = 2.4;
   /** Metres back from the body, up from it, and above whatever is underneath. */
   private static readonly SPECTATE_RADIUS = 9.5;
@@ -5993,16 +5995,10 @@ export class Game {
   }
 
   private updateSpectateLight() {
-    if (this.spectateLift <= 0.001) {
-      if (this.spectateLight) this.spectateLight.visible = false;
-      return;
-    }
-    if (!this.spectateLight) {
-      this.spectateLight = new THREE.HemisphereLight(0xbcd2ee, 0x243040, 0);
-      this.renderer.scene.add(this.spectateLight);
-    }
-    this.spectateLight.visible = true;
-    this.spectateLight.intensity = 0.85 * this.spectateLift;
+    // Hand the lift to the light that is already in the scene. Adding a light —
+    // or hiding one — moves `numHemiLights`, and that is a re-link of every
+    // material in the world, taken in the frames right after the player dies.
+    this.renderer.setSpectateLift(this.spectateLift);
   }
 
   /**
