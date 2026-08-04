@@ -297,12 +297,23 @@ export class FrameGovernor {
     this.dropNext = true;
   }
 
-  /** Feed one rendered frame. `ms`, not seconds — the game loop's dt is in
-   *  seconds and the conversion is the caller's, so a unit slip is one place. */
+  /**
+   * Feed one rendered frame, in MILLISECONDS OF REAL TIME.
+   *
+   * NOT the simulation's dt. The game loop clamps dt to 50 ms so a hitch cannot
+   * teleport a ship through a hull, and for two rounds this controller was
+   * handed that clamped number — which made a 3000 ms stall arithmetically
+   * indistinguishable from a 50 ms frame to the one thing in the build whose
+   * entire job is to react to stalls. The caller keeps its clamp for the sim
+   * and passes the raw frame time here (Renderer.updatePerformance).
+   */
   pushFrame(ms: number, oneOff = false): void {
+    // The one-off mark is consumed by a frame that is actually SAMPLED. Clearing
+    // it above the guards let a suspended frame eat the mark and the real
+    // one-off — the very frame the caller named — land in the window.
+    if (!this.enabled || this.suspended) return;
     const drop = this.dropNext;
     this.dropNext = false;
-    if (!this.enabled || this.suspended) return;
     if (oneOff || drop) return;
     if (!Number.isFinite(ms) || ms <= 0) return;
     if (this.warmupLeft > 0) { this.warmupLeft -= 1; return; }

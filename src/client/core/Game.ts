@@ -460,6 +460,18 @@ export class Game {
       this.bugSnapRequested = true;
     }
   };
+  /**
+   * A hidden tab does not schedule animation frames, so the first frame after
+   * the player comes back is as long as they were away — minutes, sometimes.
+   * That is not a hitch, it is an absence, and now that the governor is fed REAL
+   * frame time it would otherwise read one alt-tab as the worst stall of the
+   * session and spend the ladder on it. Naming the frame is the honest fix; the
+   * alternative (a ceiling on what counts as a frame) would re-blind it to the
+   * multi-second stalls that are the whole point.
+   */
+  private readonly visibilityListener = () => {
+    if (document.visibilityState === 'visible') this.renderer.markFrameOneOff();
+  };
   private debugPerfPanel: HTMLDivElement | null = null;
   private debugFrameCounter = 0;
   private debugFrameAccum = 0;
@@ -2786,7 +2798,7 @@ export class Game {
     // True frame time for the debug overlay (physics dt above is clamped to
     // 50ms for sim stability, which was pinning 'worst' at exactly 50.0).
     this.debugRawFrameMs = rawDtMs;
-    this.stepFrameCpu(now, dt);
+    this.stepFrameCpu(now, dt, rawDtMs);
     this.renderer.render();
     if (this.bugSnapRequested) {
       this.bugSnapRequested = false;
@@ -2818,7 +2830,7 @@ export class Game {
    * Nothing may be added to `frame()` between here and `render()` without going
    * in this method, or the allocation gate stops covering it.
    */
-  private stepFrameCpu(now: number, dt: number) {
+  private stepFrameCpu(now: number, dt: number, rawFrameMs = dt * 1000) {
     // FIRST, before anything reads a transform: walk the remote render clock.
     // It is servoed rather than set, so it must be advanced exactly once per
     // frame; every read between advances is an exact function of the client
@@ -2968,6 +2980,7 @@ export class Game {
     if (!this.bugSnapListenerBound) {
       this.bugSnapListenerBound = true;
       window.addEventListener('keydown', this.bugSnapListener);
+      document.addEventListener('visibilitychange', this.visibilityListener);
     }
     this.updateMermaid(now);
     // Stream one queued island build per frame (join used to build all 10
@@ -2980,7 +2993,13 @@ export class Game {
     this.drainIslandBuildQueue(budgeted(1, 1));
     this.drainSeaRockBuildQueue(budgeted(6, 1));
     this.updateLoadGuard(now);
-    this.renderer.updatePerformance(dt);
+    // RAW frame milliseconds, never the clamped `dt` above: the governor and the
+    // tier audition are the two things here measuring the MACHINE, and the clamp
+    // exists for the integrator. Handing them `dt` capped a 3000 ms stall at
+    // 50 ms and made the smoothness controller blind to the exact event it is
+    // for. (benchFrameCpu drives a synthetic 60fps clock, so its default is
+    // dt × 1000 — a pinned frame is honestly 16.7 ms long there.)
+    this.renderer.updatePerformance(rawFrameMs);
   }
 
   /** The DOM-only tail of a frame, after the draw. Part of the CPU frame, so the

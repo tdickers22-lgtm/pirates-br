@@ -786,7 +786,15 @@ export class Renderer {
 
   /**
    * One frame's worth of governing. Called from the game loop with the frame's
-   * dt in SECONDS, before render().
+   * RAW wall-clock length in MILLISECONDS, before render().
+   *
+   * RAW, not the simulation dt. `Game.frame` clamps dt to 50 ms so a stall
+   * cannot integrate a ship through a hull in one step — and for two rounds
+   * that clamped number was what arrived here, so a 3000 ms hitch and a 50 ms
+   * frame were the same reading to the controller that exists to react to
+   * hitches, and to the tier audition that decides what this machine gets NEXT
+   * launch. Both of those are measurements of the machine and both get real
+   * time; the clamp stays where it belongs, on the integrator.
    *
    * Everything expensive is behind a change test. `applyLevers` writes nothing
    * that has not moved, which matters more than it sounds: setPixelRatio is a
@@ -794,12 +802,13 @@ export class Renderer {
    * WebGLRenderer.setSize in a 180-second capture in which no window was ever
    * resized (§9 lever 7).
    */
-  updatePerformance(dt: number) {
-    this.perfTimer += dt;
-    this.perfFrameTime += dt;
+  updatePerformance(rawFrameMs: number) {
+    const rawSeconds = rawFrameMs / 1000;
+    this.perfTimer += rawSeconds;
+    this.perfFrameTime += rawSeconds;
     this.perfFrameCount++;
 
-    this.governor.pushFrame(dt * 1000);
+    this.governor.pushFrame(rawFrameMs);
     const scalar = this.governor.update(performance.now());
     setFrameBudgetScale(this.governor.getStreamingScale());
     // The scalar is unchanged on the overwhelming majority of frames, and
