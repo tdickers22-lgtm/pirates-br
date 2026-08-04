@@ -18,6 +18,17 @@
 //   node scripts/test-program-warm.mjs --quality high
 //   node scripts/test-program-warm.mjs --quality low
 //   node scripts/test-program-warm.mjs --mutate          # the gate must FAIL
+//   node scripts/test-program-warm.mjs --mutate-lights   # …and so must this
+//
+// THE SECOND THING THIS GATE COUNTS, added after the first one missed it: a
+// program that is linked TWICE because a light entered or left the scene.
+// three folds every light COUNT into the program cache key, so one light
+// appearing re-links every material the frame draws — material the warmer has
+// already paid for, at a moment it can do nothing about. Measured at `high`
+// over 90 s: 31 of 135 keys were duplicates differing only in numHemiLights,
+// and 28 of the 40 links taken during play were them, all inside one 600 ms
+// window at the instant the spectate camera rose. The tour now dies on purpose,
+// because nine islands of sightseeing found none of it.
 //
 // MUTATION (`--mutate`) neuters `ProgramWarmer` the moment the game object is
 // created — before a single island streams — so nothing is ever paid for outside
@@ -47,6 +58,16 @@ import { ensureDevClient, stopDevClient } from './lib/dev-client.mjs';
 const argv = process.argv.slice(2);
 const arg = (n, f = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] ? argv[i + 1] : f; };
 const MUTATE = argv.includes('--mutate');
+/**
+ * The second mutation, and it exists because the first cannot reach the new
+ * assertion. Disabling the warmer proves the warmer runs; it says nothing about
+ * a light count that moves mid-match, because no warmer can defend against
+ * that. `--mutate-lights` puts the defect back exactly as it was found: one
+ * extra HemisphereLight added to the scene after first control. The gate must
+ * go red, and specifically on the light-count line.
+ */
+const MUTATE_LIGHTS = argv.includes('--mutate-lights');
+const MUTATING = MUTATE || MUTATE_LIGHTS;
 
 const URL = (process.env.PIRATES_BR_URL ?? arg('url', 'http://127.0.0.1:3101')).replace(/\/$/, '');
 const QUALITY = arg('quality', 'high');
@@ -141,12 +162,97 @@ window.__tour = {
     }
     g.disableFreeCam();
     await this.frames(framesPerStop);
+    // ── AND THEN DIE ──────────────────────────────────────────────────────
+    // A tour that only ever LOOKS at the world cannot reach the frames that
+    // cost the most. Death is a state change that touches the scene's LIGHTING,
+    // and every light count is a field of three's program cache key: the
+    // spectate fill used to be a second HemisphereLight built on first death,
+    // and it re-linked 31 of the session's 135 programs in one 600 ms window
+    // with the player watching. Nine islands of sightseeing found none of it.
+    try {
+      const p = g.getLocalPlayer();
+      if (p) {
+        p.state = 'eliminated';
+        const until = performance.now() + 30000;
+        while (g.spectateLift < 0.995 && performance.now() < until) await this.frames(2);
+        await this.frames(framesPerStop);
+        p.state = 'alive';
+        while (g.spectateLift > 0.005 && performance.now() < until + 10000) await this.frames(2);
+        await this.frames(framesPerStop);
+      }
+    } catch (e) { window.__tourDeathError = String(e && e.message); }
     return this.stops;
   },
 };
 `;
 
 const shaderTypeOf = (cacheKey) => String(cacheKey).split(',')[0];
+
+/**
+ * THE SAME PROGRAM, LINKED TWICE, BECAUSE A LIGHT CAME OR WENT.
+ *
+ * three folds the scene's light COUNTS into every program's cache key
+ * (`WebGLPrograms.getProgramCacheKeyParameters` — numDirLights, numPointLights,
+ * numSpotLights, numHemiLights, the shadow counts and numLightProbes). So one
+ * light entering or leaving the scene does not cost one program: it costs a
+ * fresh link of EVERY MATERIAL THE FRAME DRAWS, taken inside that frame,
+ * however thoroughly the warmer paid for the same GLSL a minute earlier.
+ *
+ * `LightBudget` exists because of this and pins the point-light count; nothing
+ * was enforcing it for the rest. Measured before this check, `high`, 90 s: 31 of
+ * 135 keys were duplicates differing in numHemiLights alone, and 28 of the 40
+ * links taken during play were them.
+ *
+ * The check is EXACT and needs no clock: normalise every key by blanking the
+ * light-count fields, and any normalised key that maps to more than one real key
+ * is a pair of programs that are the same shader compiled for different light
+ * counts. Counting from the END is what makes it robust — the head of a cache
+ * key is the shader id plus a material's own `defines`, which varies in length.
+ */
+const CACHE_KEY_TAIL = [
+  'precision', 'outputColorSpace', 'envMapMode', 'envMapCubeUVHeight', 'mapUv', 'alphaMapUv',
+  'lightMapUv', 'aoMapUv', 'bumpMapUv', 'normalMapUv', 'displacementMapUv', 'emissiveMapUv',
+  'metalnessMapUv', 'roughnessMapUv', 'anisotropyMapUv', 'clearcoatMapUv', 'clearcoatNormalMapUv',
+  'clearcoatRoughnessMapUv', 'iridescenceMapUv', 'iridescenceThicknessMapUv', 'sheenColorMapUv',
+  'sheenRoughnessMapUv', 'specularMapUv', 'specularColorMapUv', 'specularIntensityMapUv',
+  'transmissionMapUv', 'thicknessMapUv', 'combine', 'fogExp2', 'sizeAttenuation',
+  'morphTargetsCount', 'morphAttributeCount', 'numDirLights', 'numPointLights', 'numSpotLights',
+  'numSpotLightMaps', 'numHemiLights', 'numRectAreaLights', 'numDirLightShadows',
+  'numPointLightShadows', 'numSpotLightShadows', 'numSpotLightShadowsWithMaps', 'numLightProbes',
+  'shadowMapType', 'toneMapping', 'numClippingPlanes', 'numClipIntersection', 'depthPacking',
+  'booleanMaskA', 'booleanMaskB', 'outputColorSpaceTail', 'customProgramCacheKey',
+];
+/** The fields a light entering or leaving the scene moves. */
+const LIGHT_COUNT_FIELDS = new Set([
+  'numDirLights', 'numPointLights', 'numSpotLights', 'numSpotLightMaps', 'numHemiLights',
+  'numRectAreaLights', 'numDirLightShadows', 'numPointLightShadows', 'numSpotLightShadows',
+  'numSpotLightShadowsWithMaps', 'numLightProbes',
+]);
+
+function lightCountChurn(entries) {
+  const groups = new Map();
+  for (const e of entries) {
+    const parts = String(e.cacheKey).split(',');
+    if (parts.length < CACHE_KEY_TAIL.length) continue; // RawShaderMaterial &c: no parameter tail
+    const cut = parts.length - CACHE_KEY_TAIL.length;
+    const normal = parts.slice(0, cut).join(',') + '|'
+      + parts.slice(cut).map((v, i) => (LIGHT_COUNT_FIELDS.has(CACHE_KEY_TAIL[i]) ? '*' : v)).join(',');
+    let row = groups.get(normal);
+    if (!row) groups.set(normal, (row = { keys: new Map(), name: e.materialName || e.object || e.material }));
+    if (!row.keys.has(e.cacheKey)) row.keys.set(e.cacheKey, parts.slice(cut));
+  }
+  const churn = [];
+  for (const row of groups.values()) {
+    if (row.keys.size < 2) continue;
+    const variants = [...row.keys.values()];
+    const fields = [...LIGHT_COUNT_FIELDS].filter((f) => {
+      const i = CACHE_KEY_TAIL.indexOf(f);
+      return new Set(variants.map((v) => v[i])).size > 1;
+    });
+    churn.push({ name: row.name, copies: row.keys.size, fields, values: fields.map((f) => variants.map((v) => v[CACHE_KEY_TAIL.indexOf(f)]).join('/')) });
+  }
+  return churn;
+}
 
 async function main() {
   const port = SERVER_PORT ?? '8090';
@@ -155,6 +261,7 @@ async function main() {
   console.log(`[program-gate] GL: ${describeGl()}  quality=${QUALITY}  map seed ${h.mapSeed ?? 'UNPINNED'}  ${MAX_ISLANDS} islands x 2 vantage points x ${FRAMES_PER_STOP} frames`);
   if (!h.mapSeed) console.error('[program-gate] the map is UNPINNED — this gate counts programs against a fixed world; set PIRATES_BR_MAP_SEED');
   if (MUTATE) console.log('[program-gate] MUTATION ARMED: ProgramWarmer.prepare() is a no-op from first control — this run MUST fail');
+  if (MUTATE_LIGHTS) console.log('[program-gate] MUTATION ARMED: one extra HemisphereLight joins the scene after first control — this run MUST fail on the light-count line');
 
   const client = await ensureDevClient(`${URL}/`);
   const browser = await chromium.launch({
@@ -173,7 +280,8 @@ async function main() {
   });
 
   let failures = 0;
-  const fail = (msg) => { failures += 1; console.error(`  ✗ ${msg}`); };
+  const failed = [];
+  const fail = (msg) => { failures += 1; failed.push(msg); console.error(`  ✗ ${msg}`); };
   const pass = (msg) => console.log(`  ✓ ${msg}`);
 
   try {
@@ -229,12 +337,31 @@ async function main() {
       console.log('  mutation confirmed: the warmer has been a no-op since the game was built');
     }
     await page.evaluate(() => window.__programCensus.markControl());
+    if (MUTATE_LIGHTS) {
+      const added = await page.evaluate(() => {
+        const scene = window.__piratesBR?.renderer?.scene;
+        if (!scene) return false;
+        let source = null;
+        scene.traverse((o) => { if (o.isHemisphereLight && !source) source = o; });
+        if (!source) return false;
+        // Cloned rather than constructed: the suite has no import of three, and
+        // a clone is the same class the renderer is already lighting with.
+        const extra = source.clone();
+        extra.intensity = 0.85;
+        extra.name = 'mutation-extra-hemi';
+        scene.add(extra);
+        return true;
+      });
+      if (!added) throw new Error('the light mutation never took — no hemisphere light to clone, so this run proves nothing');
+      console.log('  mutation confirmed: a second HemisphereLight is in the scene from first control');
+    }
     const stops = await page.evaluate(
       ([frames, islands]) => window.__tour.run(frames, islands),
       [FRAMES_PER_STOP, MAX_ISLANDS],
     );
     console.log(`  toured ${stops} vantage points, ${FRAMES_PER_STOP} frames each`);
 
+    const deathError = await page.evaluate(() => window.__tourDeathError ?? null);
     const summary = await page.evaluate(() => window.__programCensus.summary());
     const warmerStats = await page.evaluate(() => {
       const s = window.__piratesBR?.renderer?.programWarmer?.stats;
@@ -287,6 +414,24 @@ async function main() {
       require('node:fs').writeFileSync(out, JSON.stringify(outOfDraw.slice(0, 40), null, 2));
       console.log(`  dumped ${outOfDraw.length} out-of-draw joins to ${out}`);
     }
+    // NO PROGRAM MAY BE LINKED TWICE BECAUSE A LIGHT MOVED. See lightCountChurn.
+    // This is a hard zero, not a budget: a light count that changes after the
+    // scene is built is a defect with no legitimate form, and the warmer cannot
+    // defend against it — it re-links material the warmer has already paid for.
+    const churn = lightCountChurn(summary.all);
+    for (const c of churn.slice(0, 8)) {
+      console.error(`    ${c.copies} copies of ${c.name || '(unnamed)'} — ${c.fields.join(',')} = ${c.values.join(' ')}`);
+    }
+    if (churn.length > 0) {
+      fail(`${churn.length} program(s) were linked more than once because a light count changed `
+        + `(${[...new Set(churn.flatMap((c) => c.fields))].join(', ')}) — every material the frame draws re-links`);
+    } else {
+      pass(`no program was re-linked by a light count change across ${summary.totalKeys} keys`);
+    }
+
+    if (deathError) fail(`the tour's death leg threw (${deathError}) — the spectate lighting path was never reached`);
+    else pass('the tour died and came back, so the spectate lighting path was exercised');
+
     if (shaderErrors.length > 0) fail(`${shaderErrors.length} shader errors: ${shaderErrors[0]}`);
     else pass('no shader errors (the warmer links with checkShaderErrors on)');
   } finally {
@@ -295,9 +440,18 @@ async function main() {
     stopDevClient(client);
   }
 
-  if (MUTATE) {
-    if (failures > 0) { console.log(`\n✓ MUTATION CAUGHT — ${failures} assertion(s) red with the warmer disabled, as required.`); process.exit(0); }
-    console.error('\n✗ MUTATION SURVIVED — this gate cannot tell a warmed build from an unwarmed one and proves nothing.');
+  if (MUTATING) {
+    // A mutation is only proof if it reddens the line it was written for. A run
+    // that fails on some other assertion has shown the suite is noisy, not that
+    // it can see the defect.
+    const wanted = MUTATE_LIGHTS ? /light count/ : /linked inside a drawn frame|paid outside a draw/;
+    const onTarget = failed.filter((m) => wanted.test(m));
+    if (onTarget.length > 0) {
+      console.log(`\n✓ MUTATION CAUGHT — ${onTarget.length} assertion(s) red on the intended line: ${onTarget[0]}`);
+      process.exit(0);
+    }
+    console.error(`\n✗ MUTATION SURVIVED — ${failures} failure(s), none on the intended line. This gate proves nothing.`);
+    for (const m of failed) console.error(`    (off-target) ${m}`);
     process.exit(1);
   }
   if (failures > 0) { console.error(`\n[program-gate] FAILED — ${failures} assertion(s)`); process.exit(1); }
