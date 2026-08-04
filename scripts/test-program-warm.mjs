@@ -105,14 +105,21 @@ const ALLOWED_SHADER_TYPES = new Set(['depth', 'distance']);
  * before the warm walk was fixed: 36 at `high` over 90 s (27,964 ms of joins),
  * with the load guard nominally up the whole time.
  */
-const BUDGET = { high: 22, low: 14 };
-// Measured on this tour, pinned map, software ANGLE: high 3-4, low 10. The high
-// budget is deliberately far above what it measures because it is inherited from
-// the free-roam census that produced the lever's own baseline (36 links / 27,964
-// ms over 90 s of sailing) and is meant to catch a REGRESSION of that shape, not
-// to fence in this tour. The low budget is close to its measurement because the
-// low tier streams less during the load, so the tour reaches more first-time
-// material and there is genuinely more to catch. Both ratchet down, never up.
+const BUDGET = { high: 16, low: 14 };
+// Measured on this tour, pinned map, software ANGLE: high 7, low 5.
+//
+// The high budget came down from 22 when the spectate hemisphere light stopped
+// re-linking the map (§13 of the cost model): the free-roam census it was
+// inherited from — the one that read 36 links over 90 s of sailing, then 40 —
+// now reads 8, so a fence set for that shape is a fence around nothing. 16 is
+// still better than 2x what this tour measures, which is the margin the tour's
+// own run-to-run spread wants.
+//
+// The low budget is NOT moved with it. `low` measured 10 on this tour before
+// the death leg existed and 5 after, and two readings that far apart are not a
+// spread anybody has characterised — ratcheting on them would be setting a
+// threshold from noise. It comes down when somebody has run it enough times to
+// say what it does. Both ratchet down, never up.
 
 /** Joins that must be paid outside any draw for the mechanism to count as
  *  running at all. Clean build: 15. Warmer disabled from construction: 0. */

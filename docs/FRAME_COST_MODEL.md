@@ -1008,3 +1008,122 @@ of them fixed on the branch that was thrown away, the fourth open:
 
 One material per ASSET, never one per library: a library-wide material makes every
 crate and pier bend in `applyFoliageSway`'s wind.
+
+---
+
+## 13. Lever 1, round 2: the biggest remaining link source was not a link at all
+
+Section 11 left lever 1 at "36 → 25 draw-time links at `high`" and named four
+things still outstanding. None of them was the largest item. A fresh census on
+the pinned map found something the previous pass could not have seen, because
+the previous pass never died.
+
+### 13.1 The reading
+
+`scripts/perf-program-census.mjs --quality high --seconds 90`, pinned map 20260801,
+software ANGLE, framebuffer collapsed to ratio 0.1.
+
+| | before | after |
+|---|---|---|
+| program keys in the session | 135 | **75** |
+| links taken inside a drawn frame **during play** | 40 | **8** |
+| …of those, taken in one 600 ms window | **28** | 0 |
+| program keys that were duplicates of a key already paid for | **31** | **0** |
+
+The milliseconds are not in that table on purpose. The after-run's load phase
+read 51,355 ms of joins against the before-run's 20,387 ms for the same work —
+the machine was simply busier — so a play-phase millisecond comparison across
+the two runs would be reporting the machine's mood. The counts are exact and
+they are the claim: **40 links during play became 8.**
+
+### 13.2 What it was
+
+Thirty-one of the 135 program keys were pure duplicates. Diffed field by field
+against three's own parameter order (`WebGLPrograms.getProgramCacheKeyParameters`),
+every one of the 31 pairs differed in **exactly one field: `numHemiLights`, 1 vs
+2** — and 28 of the 40 links taken during play were those duplicates, all inside
+one 600 ms window at t+76 s.
+
+`Game.updateSpectateLight` built a `THREE.HemisphereLight` the first time the
+player died, added it to the scene, and hid it again when the lift decayed. The
+light count is a field of the program cache key, so **each of those transitions
+re-linked every material the frame drew** — material the warmer had already paid
+for, at the one moment in a match when the player is least able to ignore a
+freeze. `LightBudget`'s own header states the law ("one torch popping in or out
+re-links every material in the scene") and pins the point-light count at a fixed
+pool size; nothing was enforcing it for any other kind of light.
+
+The fix is one light, not two. Both are hemispheres, and three shades a
+hemisphere as `mix(groundColor, skyColor, w)` with `w` a function of the surface
+normal alone and the intensity already multiplied into the colours, so
+
+```
+I₁·mix(G₁,S₁,w) + I₂·mix(G₂,S₂,w) = (I₁+I₂)·mix(lerp(G₁,G₂,k), lerp(S₁,S₂,k), w),  k = I₂/(I₁+I₂)
+```
+
+for every normal. Folding the spectate fill into the scene's existing hemisphere
+light is therefore the same radiance to the last bit, and it costs one fewer
+light in the fragment loop of every lit pixel in the game rather than one more.
+See `Renderer.applySpectateLift`.
+
+### 13.3 Why nine islands of touring never found it
+
+`test-program-warm.mjs` drove the free cam to sixteen vantage points across
+eight islands and passed. Every one of those stops is a change of what is on
+SCREEN, and the defect was a change of what is in the SCENE. The suite now does
+two things it did not:
+
+- **the tour dies.** It eliminates the local player, waits for `spectateLift` to
+  reach 1, and comes back. That is the state change that touches the lighting.
+- **`lightCountChurn()`** normalises every cache key by blanking the eleven
+  light-count fields and fails if any normalised key maps to more than one real
+  key. Exact, no clock, no budget — two keys that differ only in a light count
+  are one shader compiled twice. Fields are indexed from the END of the key,
+  because the head is the shader id plus the material's own `defines` and varies
+  in length.
+
+`--mutate-lights` is its proof and is a SECOND mutation, because the first one
+cannot reach this line: disabling `ProgramWarmer` says nothing about a count
+that moves mid-match, and no warmer can defend against one. It adds a single
+`HemisphereLight` after first control and reproduces the defect as found — 33
+duplicate keys, 37 links during play against a clean run's 7. Both mutations now
+have to redden the assertion they were written for; a run that goes red
+somewhere else no longer counts as proof.
+
+### 13.4 What is left, re-ranked
+
+The `high` play residue is 8 links, and it is no longer dominated by one cause:
+
+| ms (advisory) | what | why it is still there |
+|---|---|---|
+| 6,009 | `props-boulder_a` instanced+vcolor | island detail revealed before the warmer's join budget reached it |
+| 4,534 / 841 | two ship `MeshDepthMaterial` | shadow pass — allowlisted, see 11.3 §1 |
+| 4,427 / 250 | a sea rock arriving | sea rocks are built after the island stream, outside the load guard's tail |
+| 4,377 | `decor-reef-rock` | same class as the boulder |
+| 2,971 | sea-rock `MeshDepthMaterial` | shadow pass |
+| 1,549 | `wrecker_tower_ground` | same class |
+
+Five of the eight are one shape: **a subtree is revealed in the same frame the
+warm walk first sees it.** During play the guard is down (holding material out of
+a frame would be a visible pop), so the walk kicks the program and the reveal
+draws it before the join lands. The principled fix is to couple the LOD reveal to
+the warmer — a subtree stays hidden until its programs are paid, which is the
+guard mechanism applied to newly-revealed subtrees only. `IslandDetailWarmer`
+already has the shape of this in its COLD reveal caps; it is not wired to
+`ProgramWarmer.paid`.
+
+Two items from 11.3 are now answered rather than open:
+
+- **`pirates-terrain-detail-m0/m1/volcanic-m1` are not worth merging.** `m0` is
+  the material with NO cutout at all — no `discard` in its fragment shader — and
+  merging it with `m1` would put a discard on every island that has no cave,
+  which is an early-Z regression on a machine that is short of fill. The merge
+  that IS safe (m1..m8 → one fixed-size loop with the count as a uniform) saves
+  nothing on the pinned map, which only ever produces `m1`. Left alone, on
+  purpose.
+- **The census's own duplicate check is now a gate.** The instrument that found
+  this could only report it after the fact; `lightCountChurn` fails a build.
+
+Still open: the shadow pass's depth programs (11.3 §1), the load path (11.3 §2),
+and the non-finite `AudioParam` (11.3 §4), which still throws once per tour and
+still has no probe of its own.
