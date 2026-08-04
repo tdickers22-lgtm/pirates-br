@@ -8,7 +8,7 @@
 // that no surface anywhere still wears another game's proper nouns.
 //
 // Needs the dev stack (vite :3000, server :8090). Stage 3 boots its own
-// server on :8091 with the wreck forced early — she otherwise rises at ring 0,
+// server on a FREE port with the wreck forced early — she otherwise rises at ring 0,
 // minutes into a match, which is not a smoke test.
 //
 //   node scripts/fixwave4-smoke.mjs [outDir]
@@ -16,6 +16,7 @@ import { chromium } from 'playwright';
 import { browserArgs } from './lib/browser-args.mjs';
 import { mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 
 // EVERY BROWSER SUITE HERE READS PIRATES_BR_URL. A graded run points it at a
 // Vite the runner owns rather than at the developer's :3000, and a suite that
@@ -73,14 +74,23 @@ const shot = (n) => page.screenshot({ path: `${OUT}/${n}.png`, timeout: 60_000 }
  * there in the failure detail, one read late. Nothing was wrong with the hold,
  * the ballast or the bounty.
  *
- * So a wait now blocks until the CLIENT has integrated that many milliseconds of
- * its own frame time. On a 60fps host it is the sleep it always was. Bounded by
- * a wall-clock cap so a genuinely stopped client fails the assertion instead of
- * hanging the suite, and by a stopped-clock check so waits taken before the game
- * loop exists (the menu) fall straight back to a plain sleep.
+ * So `waitFrames` blocks until the CLIENT has integrated that many milliseconds
+ * of its own frame time. On a 60fps host it is the sleep it always was. Bounded
+ * by a wall-clock cap so a genuinely stopped client fails the assertion instead
+ * of hanging the suite, and by a stopped-clock check so waits taken before the
+ * game loop exists (the menu) fall straight back to a plain sleep.
+ *
+ * IT IS OPT-IN, and the reason is that this game keeps time two ways. A feed
+ * toast expires on a 3s WALL timer and a story vignette advances its stages on
+ * one too, so waiting in game seconds sails straight past both: applied to every
+ * sleep in the file it fixed six assertions and broke two, reading an expired
+ * bounty cry and a vignette two beats on. So `waitFrames` is used where the thing
+ * being waited for is painted by the frame loop — the hold, the ballast, the
+ * crates — and plain `wait` stays everywhere else.
  */
 const WAIT_WALL_CAP = (ms) => Math.min(30_000, Math.max(2_000, ms * 15));
-const wait = async (ms) => {
+const wait = (ms) => page.waitForTimeout(ms);
+const waitFrames = async (ms) => {
   try {
     await page.evaluate(async ({ ms, capMs }) => {
       const clock = () => window.__piratesBR?.combatFx?.fxClock;
@@ -236,7 +246,7 @@ check('an empty hold shows no cargo readout and no crates',
 // Past the safe line, into a laden hold. (grantGold SETS the purse, it does
 // not add to it — every figure below is an absolute.)
 await page.evaluate(() => window.__piratesBR.grantGold(4900));
-await wait(2200);
+await waitFrames(2200);
 const laden = await holdState();
 // Frame the crates themselves: a wide deck shot proves nothing about whether
 // anything is actually stacked below.
@@ -283,15 +293,24 @@ check('the HUD names what the hold costs in knots', /[−-]\s*\d+%/.test(laden.h
   laden.holdText);
 
 // Past the bounty line (60% of the 9,000 target = 5,400).
+//
+// TWO READS, ON THE TWO CLOCKS THIS MOMENT KEEPS. The cry in the feed is a toast
+// on a 3s WALL timer and the sign on the HUD is painted by the frame loop, so no
+// single wait can catch both on a host this slow: a wall wait long enough for the
+// sign lets the toast expire, and a frame wait long enough for the sign takes far
+// longer in wall time and lets it expire twice over. So the feed is read first,
+// early, and the hold is read after the frames have actually arrived.
 await page.evaluate(() => window.__piratesBR.grantGold(8600));
-await wait(2500);
+await wait(1200);
+const cried = await holdState();
+await waitFrames(2500);
 const hunted = await holdState();
 await shot('03-hold-wallowing');
 check('crossing 60% of the target raises a BOUNTY on the crew', hunted.bountied,
   `gold=${hunted.gold} cargo=${hunted.cargoGold}`);
 check('the bounty SIGN is on the HUD', /HUNTED/i.test(hunted.holdText), hunted.holdText);
-check('the bounty is CRIED in the feed', /bounty/i.test(hunted.feed),
-  (hunted.feed.match(/[^|]*bounty[^|]*/i) ?? [''])[0].trim().slice(0, 90));
+check('the bounty is CRIED in the feed', /bounty/i.test(cried.feed) || /bounty/i.test(hunted.feed),
+  ((cried.feed + '|' + hunted.feed).match(/[^|]*bounty[^|]*/i) ?? [''])[0].trim().slice(0, 90));
 check('the bounty STING plays (score ↔ gold wire)',
   hunted.stings.includes('bounty'), `stings=[${hunted.stings.join(', ')}]`);
 
@@ -340,7 +359,7 @@ check('the ballast the server computes reaches the HUD, and grows with the hold'
 
 // And emptying her lifts both the weight and the price on her head.
 await page.evaluate(() => window.__piratesBR.grantGold(0));
-await wait(2500);
+await waitFrames(2500);
 const cleared = await holdState();
 check('emptying the hold clears the bounty and the crates',
   !cleared.bountied && cleared.visibleTiers === 0,
@@ -468,20 +487,43 @@ check('none hiding in the markup either (titles, alt text, tooltips)',
 console.log('\n6. THE GILDED WRECK');
 let wreckServer = null;
 try {
+  // A FREE PORT, NOT A FAVOURITE ONE. This stage used to hard-code :8091, and
+  // :8091 is exactly where the graded runner now stands its own server up. The
+  // spawn lost the bind, the health poll got a cheerful 200 from the OTHER
+  // server, and the stage went on to wait 120 seconds for a wreck that rises at
+  // ring 0 on a server nobody told to hurry. It failed as "the gilded wreck
+  // stage did not run", which is true and says nothing about the wreck.
+  //
+  // So: ask the OS for a port that is free right now, and then refuse to believe
+  // any server that answers on it before ours has been started.
+  const wreckPort = await new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  if (await fetch(`http://127.0.0.1:${wreckPort}/health`).then(() => true).catch(() => false)) {
+    throw new Error(`something is already listening on ${wreckPort} — refusing to grade a server this stage did not start`);
+  }
   wreckServer = spawn('npx', ['tsx', 'src/server/index.ts'], {
-    env: { ...process.env, PORT: '8091', PIRATES_WRECK_SEC: '15' },
+    env: { ...process.env, PORT: String(wreckPort), PIRATES_WRECK_SEC: '15' },
     stdio: 'ignore',
     detached: false,
   });
   // Wait for her to answer.
-  for (let i = 0; i < 60; i++) {
+  let wreckUp = false;
+  for (let i = 0; i < 60 && !wreckUp; i++) {
     try {
-      const r = await fetch('http://127.0.0.1:8091/health');
-      if (r.ok) break;
+      const r = await fetch(`http://127.0.0.1:${wreckPort}/health`);
+      wreckUp = r.ok;
     } catch { /* not up yet */ }
-    await wait(1000);
+    if (!wreckUp) await wait(1000);
   }
-  await page.goto(`${BASE_URL}/?debug&forceinput&server=8091`, { waitUntil: 'domcontentloaded' });
+  if (!wreckUp) throw new Error(`the wreck server never answered on ${wreckPort}`);
+  console.log(`  (wreck server on :${wreckPort}, wreck forced at 15s)`);
+  await page.goto(`${BASE_URL}/?debug&forceinput&server=${wreckPort}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
   await page.click('#menu-solo-btn', { noWaitAfter: true });
   await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 150_000 });
