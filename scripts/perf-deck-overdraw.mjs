@@ -199,9 +199,9 @@ async function main() {
       const whatIf = [];
       const run = async (label, mutations) => {
         const r = await counterfactual({ maxLayers: MAX_LAYERS, mutations });
-        whatIf.push({ label, mutations, touched: r.touched, meanAll: r.meanAll, p95: r.p95, max: r.max, coveredFraction: r.coveredFraction });
-        console.log(`    what-if ${label.padEnd(28)} frame mean ${r.meanAll.toFixed(3)} `
-          + `(${(r.meanAll - all.meanAll >= 0 ? '+' : '') + (r.meanAll - all.meanAll).toFixed(3)})  p95 ${r.p95}  max ${r.max}  [${r.touched} touched]`);
+        whatIf.push({ label, mutations, touched: r.touched, meanAll: r.meanAll, base: r.base, deltaMean: r.deltaMean, p95: r.p95, max: r.max, coveredFraction: r.coveredFraction });
+        console.log(`    what-if ${label.padEnd(34)} ${r.base.meanAll.toFixed(3)} -> ${r.meanAll.toFixed(3)}  `
+          + `${(r.deltaMean >= 0 ? '+' : '') + r.deltaMean.toFixed(3)} layers   p95 ${r.base.p95}->${r.p95}  [${r.touched} touched]`);
       };
       console.log('');
       await run(`${BUCKET}: DoubleSide→FrontSide`, [{ op: 'frontside', bucket: BUCKET }]);

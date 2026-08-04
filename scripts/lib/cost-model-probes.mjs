@@ -495,6 +495,14 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
  *   { op: 'depthWrite', part, value }
  *   { op: 'renderOrder', part, value }
  *
+ * PAIRED, and that is not a nicety. The world does not hold still: the ship
+ * sails, islands enter and leave, and one census is seconds of software
+ * rasterisation. Measured against a baseline taken minutes earlier, hiding ONE
+ * HAMMOCK read -0.874 layers of the whole frame — three quarters of what
+ * deleting every ship in the world was worth. The drift, not the hammock. So the
+ * baseline is re-taken in the SAME call, immediately before the mutated render,
+ * and only the difference between the two is reported.
+ *
  * Nothing here is a fix. It is a price tag, taken on the live scene, so a fix
  * can be chosen before it is written.
  */
@@ -514,6 +522,9 @@ export const WHAT_IF = async ({ mutations = [], maxLayers = 24, only = null, ble
       savedMat.set(mat, { side: mat.side, depthWrite: mat.depthWrite, needsUpdate: false });
     }
   };
+
+  // The baseline this delta is against, taken NOW — see the header.
+  const base = await window.__cost.stencilOverdraw({ maxLayers, only, blendedOnly });
 
   let touched = 0;
   try {
@@ -544,7 +555,14 @@ export const WHAT_IF = async ({ mutations = [], maxLayers = 24, only = null, ble
       });
     }
     const r = await window.__cost.stencilOverdraw({ maxLayers, only, blendedOnly });
-    return { ...r, mutations, touched };
+    return {
+      ...r,
+      mutations,
+      touched,
+      base: { meanAll: base.meanAll, p95: base.p95, max: base.max, coveredFraction: base.coveredFraction },
+      deltaMean: r.meanAll - base.meanAll,
+      deltaP95: r.p95 - base.p95,
+    };
   } finally {
     for (const [mat, s] of savedMat) { mat.side = s.side; mat.depthWrite = s.depthWrite; }
     for (const [o, v] of savedVis) o.visible = v;
