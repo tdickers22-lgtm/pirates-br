@@ -380,6 +380,15 @@ export class RemoteInterpolator {
   private readonly scratch: RemotePose = { x: 0, y: 0, z: 0, yaw: 0, mode: 'empty' };
   /** Mode census for the smoothness gate: how the last frame's answers were made. */
   readonly modeCounts: Record<SampleMode, number> = { interpolated: 0, extrapolated: 0, held: 0, empty: 0 };
+  /**
+   * THE MUTATION LEVER. Off, every caller falls back to the dead reckoning it
+   * used before this file existed — same match, same wire, same walker. That is
+   * what lets scripts/test-remote-smoothness.mjs measure both arms inside ONE
+   * run and assert that its bar is a bar the old arithmetic cannot clear, rather
+   * than comparing two runs of two builds and hoping the network was the same.
+   * Reachable only through `window.__piratesBR.setRemoteInterpolation`.
+   */
+  enabled = true;
 
   reset() {
     this.timeline.reset();
@@ -404,6 +413,7 @@ export class RemoteInterpolator {
    * the raw snapshot, which is the right answer for exactly one frame.
    */
   poseAt(key: string, nowMs: number): RemotePose | null {
+    if (!this.enabled) return null;
     const track = this.tracks.get(key);
     if (!track || track.length === 0) return null;
     const renderT = this.timeline.renderTimeAt(nowMs);

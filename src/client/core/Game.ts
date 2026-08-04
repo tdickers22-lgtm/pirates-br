@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  BountyRaisedPayload, CargoSpilledPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
+  BountyRaisedPayload, CargoSpilledPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { dist2D, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
@@ -2538,6 +2538,8 @@ export class Game {
         ? offset
         : this.serverTimeOffset + (offset - this.serverTimeOffset) * 0.1;
     }
+    // …and into the server-time history every remote body is drawn from.
+    this.clientState.recordRemoteHistoryFromFull(nextSnapshot.serverTime);
     // Fresh chest state rides EVERY full snapshot (chestSync) — merge it into
     // the (usually preserved) island copies so pickups/stows/drops/digs read
     // instantly instead of freezing until the ~19s static-world resync left
@@ -2799,6 +2801,11 @@ export class Game {
    * in this method, or the allocation gate stops covering it.
    */
   private stepFrameCpu(now: number, dt: number) {
+    // FIRST, before anything reads a transform: walk the remote render clock.
+    // It is servoed rather than set, so it must be advanced exactly once per
+    // frame; every read between advances is an exact function of the client
+    // clock and costs nothing (see RemoteTimeline.renderTimeAt).
+    this.clientState.remote.timeline.advance(performance.now());
     this.minimapTimer -= dt;
     this.inputSendTimer -= dt;
     this.inputHeartbeatTimer -= dt;
@@ -3790,7 +3797,53 @@ export class Game {
     let predictedX = player.position.x + (player.velocity.x + player.knockbackVelocity.x * 0.32) * leadSeconds;
     let predictedZ = player.position.z + (player.velocity.z + player.knockbackVelocity.z * 0.32) * leadSeconds;
     let visualY = player.position.y + (player.velocity.y + player.knockbackVelocity.y * 0.18) * leadSeconds;
-    if (player.onShipId && this.state) {
+
+    // ── SOMEBODY ELSE'S BODY COMES OUT OF THE BUFFER ────────────────────────
+    // Not out of an extrapolation anchored on when his packet landed. The whole
+    // argument is in src/client/network/RemoteInterpolation.ts; what matters here
+    // is that the answer is a position on the SERVER's timeline, so the only
+    // thing a late packet can cost is history, never a step.
+    //
+    // It replaces the DEAD-RECKONING block and nothing else. Everything below it
+    // — the swimmer's ride on the wave surface, the hull-collision parity that
+    // keeps a swimmer out of a keel — still runs, because those are answers about
+    // where a body may be, not about when it was there.
+    //
+    // Falls through to dead reckoning for the local player (predicted, never
+    // delayed — his own motion, aim and one-shot actions carry no added latency),
+    // for the first frame a body is ever seen, and for a body in cannon flight,
+    // which is handled above as a ballistic arc: exact arithmetic, not a guess.
+    let placedFromBuffer = false;
+    if (!isLocal) {
+      const pose = this.clientState.remote.poseAt(`P:${player.id}`, performance.now());
+      const wantFrame = player.onShipId ?? '';
+      const haveFrame = this.clientState.remote.peek(`P:${player.id}`)?.newestFrame ?? null;
+      if (pose && pose.mode !== 'empty' && haveFrame === wantFrame) {
+        placedFromBuffer = true;
+        if (player.onShipId && this.state) {
+          // Buffered in the SHIP's frame: compose it back onto the hull that is
+          // actually on the screen, exactly as the deck weld does. Whatever the
+          // drawn hull's own smoothing does, it does to the men standing on it.
+          const ship = this.shipsById.get(player.onShipId) ?? null;
+          if (ship) {
+            const hull = this.readShipRenderPose(ship);
+            const hullCos = Math.cos(hull.yaw);
+            const hullSin = Math.sin(hull.yaw);
+            predictedX = hull.x + pose.x * hullCos + pose.z * hullSin;
+            predictedZ = hull.z + pose.z * hullCos - pose.x * hullSin;
+            visualY = hull.y + pose.y;
+          } else {
+            placedFromBuffer = false;
+          }
+        } else {
+          predictedX = pose.x;
+          predictedZ = pose.z;
+          visualY = pose.y;
+        }
+      }
+    }
+
+    if (!placedFromBuffer && player.onShipId && this.state) {
       const ship = this.shipsById.get(player.onShipId) ?? null;
       if (ship) {
         const dx = player.position.x - ship.position.x;
@@ -3839,7 +3892,7 @@ export class Game {
     // here caused rubber-banding (shuffle back/forth). The input-lead block below
     // stays local-only for the same reason it always was: we have our own keys,
     // and nobody else's.
-    if (!player.atHelm && !player.atCannon) {
+    if (!placedFromBuffer && !player.atHelm && !player.atCannon) {
       // On deck the server already couples you to the ship; full velocity×age extrapolation reads as double-counted lag.
       const deckDamp = player.onShipId ? 0.48 : 1;
       predictedX += player.velocity.x * snapshotAge * deckDamp;
@@ -4924,6 +4977,28 @@ export class Game {
     }
   }
 
+  /** Scratch pose for {@link getSharkRenderPosition} — consumed by its caller
+   *  before the next call, exactly like `tempRenderPos`. */
+  private readonly tempSharkPose = { x: 0, y: 0, z: 0, yaw: 0 };
+
+  /**
+   * Where a shark is at this instant, off the server-time buffer. Falls back to
+   * the raw snapshot for the one frame between a shark appearing and its first
+   * history sample. Public through `window.__piratesBR` so the smoothness gate
+   * can reconstruct the drawn path without drawing.
+   */
+  getSharkRenderPosition(shark: Shark) {
+    const out = this.tempSharkPose;
+    const pose = this.clientState.remote.poseAt(`K:${shark.id}`, performance.now());
+    if (pose && pose.mode !== 'empty') {
+      out.x = pose.x; out.y = pose.y; out.z = pose.z; out.yaw = pose.yaw;
+    } else {
+      out.x = shark.position.x; out.y = shark.position.y; out.z = shark.position.z;
+      out.yaw = shark.rotation;
+    }
+    return out;
+  }
+
   private syncSharks(dt: number) {
     if (!this.state) return;
     const sharks = this.state.sharks ?? [];
@@ -4939,14 +5014,28 @@ export class Game {
         this.sharkMeshes.set(shark.id, mesh);
         created = true;
       }
-      this.tempSharkPos.set(shark.position.x, shark.position.y + 0.15, shark.position.z);
+      // THE ONE POPULATION WHOSE PAYLOAD CARRIES NO VELOCITY AT ALL.
+      //
+      // HotSharkState is id/position/rotation/health/attackState/attackTimer —
+      // there is no velocity field, so nothing could carry a shark forward
+      // between snapshots and the target below was the raw snapshot position: a
+      // staircase, thirty-one steps a second, with a first-order chase over it
+      // that turns each step into a soft corner and calls it swimming. It is why
+      // a shark closing on you reads as a slide show.
+      //
+      // The buffer needs no velocity. Two bracketing samples ARE the velocity,
+      // and they are the server's own, not a client-side finite difference of
+      // them — so this costs nothing on the wire, which the snapshot-size suite
+      // would otherwise have to be paid off for.
+      const pose = this.getSharkRenderPosition(shark);
+      this.tempSharkPos.set(pose.x, pose.y + 0.15, pose.z);
       const moveAlpha = 1 - Math.exp(-18 * dt);
       if (created || mesh.position.distanceToSquared(this.tempSharkPos) > 55 * 55) {
         mesh.position.copy(this.tempSharkPos);
       } else {
         mesh.position.lerp(this.tempSharkPos, moveAlpha);
       }
-      mesh.rotation.y += angleWrap(shark.rotation - mesh.rotation.y) * (1 - Math.exp(-16 * dt));
+      mesh.rotation.y += angleWrap(pose.yaw - mesh.rotation.y) * (1 - Math.exp(-16 * dt));
 
       // ── Telegraphed attack animation (attackState rides hot snapshots) ──
       const attackState: SharkAttackState = shark.attackState ?? 'cruise';
@@ -5599,6 +5688,33 @@ export class Game {
    *  bounty on the chart, the spill when she founders. */
   grantGold(gold: number) {
     this.network.sendDevGrantGold(gold);
+  }
+
+  /**
+   * THE MUTATION LEVER for the interpolation buffer. Off, every remote body goes
+   * back to being dead-reckoned from when its packet landed — the arithmetic
+   * this replaced. scripts/test-remote-smoothness.mjs alternates it every few
+   * seconds so both arms are measured on the same walker, the same bot fleet and
+   * the same wire, which is the only way a live gate can prove its bar is one the
+   * old path fails. Reachable only through `window.__piratesBR`; normal play
+   * never touches it.
+   */
+  setRemoteInterpolation(enabled: boolean) {
+    this.clientState.remote.enabled = enabled;
+  }
+
+  /** What the buffer is doing right now — delay in ms, jitter, and how the last
+   *  frame's answers were made. Read by the smoothness gate and the debug HUD. */
+  getRemoteInterpolationStats() {
+    const remote = this.clientState.remote;
+    return {
+      enabled: remote.enabled,
+      delayMs: remote.timeline.delay * 1000,
+      jitterMs: remote.timeline.jitter * 1000,
+      intervalMs: remote.timeline.interval * 1000,
+      hardSnaps: remote.timeline.hardSnaps,
+      modes: { ...remote.modeCounts },
+    };
   }
 
   /** Dev/tour helper: world ground height at (x, z) via the shared heightfield,

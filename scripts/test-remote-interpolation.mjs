@@ -287,6 +287,51 @@ const f = (v, d = 4) => (v === null || v === undefined ? '--' : v.toFixed(d));
   console.log('  starvation: extrapolates from the newest pair, capped at 0.20s of carry');
 }
 
+// ── 6. A LONG FRAME MUST NOT MAKE A BODY JUMP ───────────────────────────────
+// The third thing the brief asked for, and the one the old arithmetic could not
+// give: `snapshotAge` was clamped at 0.18s, so a frame that took 600ms froze
+// every remote body at the clamp and then teleported it the moment the next
+// frame drew. The buffer's render clock is wall-clock and monotonic, so a long
+// frame advances it exactly as far as the wall did and the body arrives where
+// it should be — the picture is late, but it is never wrong.
+//
+// The frame CADENCE is what is punished here, not the sampling: `advance` is
+// called on a stuttering 8/400/16/650ms rhythm while the path is reconstructed
+// at 4ms, which is precisely "the governor stepped and the frame ran long".
+{
+  const packets = makeStream({ seconds: 10, seed: 41 });
+  const interp = new RemoteInterpolator();
+  const stutter = [8, 400, 16, 650, 12, 250, 16, 16, 900, 16];
+  let s = 0;
+  let nextFrame = 0;
+  const path = run(packets, {
+    endMs: 9_500,
+    sampleMs: 4,
+    frameMs: 1, // onFrame every sample; the stutter below decides when to advance
+    deliver: (pkt, now) => {
+      interp.timeline.noteSnapshot(pkt.serverT, now);
+      const q = truth(pkt.serverT);
+      interp.track('P:bot').push(pkt.serverT, q.x, q.y, q.z, q.yaw, '', now);
+    },
+    onFrame: (now) => {
+      if (now < nextFrame) return;
+      nextFrame = now + stutter[s++ % stutter.length];
+      interp.timeline.advance(now);
+    },
+    evaluate: (now) => {
+      const pose = interp.poseAt('P:bot', now);
+      return pose ? { x: pose.x, y: pose.y, z: pose.z } : null;
+    },
+  });
+  const g = grade(path);
+  console.log(`  long frames (up to 900ms between advances): worst step ${f(g.worst)}m, `
+    + `p99 ${f(g.p99)}m, ${interp.timeline.hardSnaps} hard snaps (n=${g.n})`);
+  check(g.worst <= 0.02, `a stuttering frame cadence stepped a body ${f(g.worst)}m (max 0.02m)`);
+  check(interp.timeline.hardSnaps === 0,
+    `a 900ms frame re-anchored the clock ${interp.timeline.hardSnaps}x — every re-anchor teleports every remote body at once`);
+  notes.push(`long frames: worst step ${f(g.worst)}m across 900ms frame gaps`);
+}
+
 console.log('');
 for (const n of notes) console.log(`  · ${n}`);
 if (failures.length === 0) {

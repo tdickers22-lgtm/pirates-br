@@ -4,9 +4,17 @@
  * Pure data — it never touches the scene or the DOM.
  */
 import type { GameState, HotSnapshotPayload, Player, Ship, ShipKeg } from '../../shared/types/index.js';
+import { RemoteInterpolator } from '../network/RemoteInterpolation.js';
 
 export class ClientState {
   state: GameState | null = null;
+  /**
+   * SERVER-TIME HISTORY for every body somebody else controls. Fed from both
+   * snapshot paths below; read by the renderer through Game. See
+   * src/client/network/RemoteInterpolation.ts for why a drawn position must not
+   * be a function of when its packet landed.
+   */
+  readonly remote = new RemoteInterpolator();
   playersById = new Map<string, Player>();
   shipsById = new Map<string, Ship>();
   livePlayerIds = new Set<string>();
@@ -135,6 +143,74 @@ export class ClientState {
         ? offset
         : this.serverTimeOffset + (offset - this.serverTimeOffset) * 0.1;
     }
+    this.recordRemoteHistory(hot.serverTime);
+  }
+
+  /**
+   * Stamp every remote body's current transform into its history at the SERVER
+   * time this snapshot describes.
+   *
+   * Called from BOTH snapshot paths — a hot merges into `state` before it gets
+   * here, so one implementation covers the 31Hz transform stream and the 10Hz
+   * full alike, and neither can drift from the other.
+   *
+   * A PIRATE ABOARD A SHIP IS RECORDED IN THE SHIP'S FRAME, not the world's.
+   * Interpolating his world position and then drawing him against the hull that
+   * is on the screen would slide him along the planking by the hull's own travel
+   * over the delay — half a metre on a ship under sail. What has to be continuous
+   * is where he is standing, so that is what is buffered; Game composes it back
+   * against the drawn hull, which is the same composition the deck weld already
+   * relies on. The frame id travels with the sample so the buffer refuses to
+   * interpolate across a boarding.
+   */
+  private recordRemoteHistory(serverTime: number) {
+    const state = this.state;
+    if (!state || !Number.isFinite(serverTime)) return;
+    const now = performance.now();
+    this.remote.timeline.noteSnapshot(serverTime, now);
+    for (const player of state.players) {
+      if (player.state === 'eliminated' || player.state === 'respawning') continue;
+      const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
+      let x = player.position.x;
+      let y = player.position.y;
+      let z = player.position.z;
+      if (ship) {
+        const dx = player.position.x - ship.position.x;
+        const dz = player.position.z - ship.position.z;
+        const cos = Math.cos(ship.rotation);
+        const sin = Math.sin(ship.rotation);
+        x = dx * cos - dz * sin;
+        z = dx * sin + dz * cos;
+        y = player.position.y - ship.position.y;
+      }
+      this.remote.track(`P:${player.id}`)
+        // `rotation.x` is the yaw (see Game.syncPlayers' targetYaw) — `.y` is pitch.
+        .push(serverTime, x, y, z, player.rotation.x, ship ? ship.id : '', now);
+    }
+    for (const ship of state.ships) {
+      if (!ship.alive) continue;
+      this.remote.track(`S:${ship.id}`)
+        .push(serverTime, ship.position.x, ship.position.y, ship.position.z, ship.rotation, '', now);
+    }
+    for (const shark of state.sharks ?? []) {
+      if (shark.health <= 0) continue;
+      this.remote.track(`K:${shark.id}`)
+        .push(serverTime, shark.position.x, shark.position.y, shark.position.z, shark.rotation, '', now);
+    }
+    // Sweeping the whole map 31 times a second to find the two tracks a death
+    // left behind is thirty sweeps too many, and the iterator it allocates is
+    // charged to whatever frame the snapshot landed in.
+    if (now - this.lastRetireAt > 2000) {
+      this.lastRetireAt = now;
+      this.remote.retire(now);
+    }
+  }
+
+  private lastRetireAt = 0;
+
+  /** Public entry for the full-snapshot path (Game.applySnapshot). */
+  recordRemoteHistoryFromFull(serverTime: number) {
+    this.recordRemoteHistory(serverTime);
   }
 
 
