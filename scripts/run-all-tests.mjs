@@ -1,76 +1,115 @@
 #!/usr/bin/env node
-// ONE COMMAND FOR THE WHOLE SUITE — `npm run test:all`.
+// ONE COMMAND FOR THE WHOLE SUITE — `npm test`.
 //
-// test:logic runs against nothing; test:browser needs the dev stack (vite on
-// 3000 + the game server on 8090) and silently 30-second-times-out against a
-// dead port, which reads as a test failure instead of "you forgot to start the
-// server". So: boot whatever is missing, WAIT for both to answer, run the two
-// chains, and take down only what this script started.
+// WHAT IT DOES: stands up a game server and a Vite of its own on ports nobody
+// plays on, points every suite at them, runs all of them (not just up to the
+// first red one), and prints a table with a real verdict per suite.
 //
-// If a stack is already up (the normal case while developing) it is reused and
-// left running afterwards.
+// ── THE FOUR WAYS THIS REPO'S TESTS HAVE LIED, AND WHAT IS DONE ABOUT EACH ───
 //
-//   node scripts/run-all-tests.mjs            # logic + browser
-//   node scripts/run-all-tests.mjs --logic    # logic only (no stack needed)
-//   node scripts/run-all-tests.mjs --browser  # browser only
+//  1. A SUITE THAT EXITS 0 WITHOUT ASSERTING. `test-perf-budget` did it for a
+//     week: it hit a condition it could not measure in, printed a skip, and
+//     `return`ed — which exits 0. A run that produces no gradeable line at all
+//     is reported VACUOUS here and counts as a failure. See EVIDENCE in
+//     lib/suites.mjs.
+//  2. A CHAIN THAT STOPS AT THE FIRST FAILURE. `test:logic` was sixty-two
+//     commands joined by `&&`, so one red suite hid every suite behind it. The
+//     HUD suite sat failing four assertions for a whole wave because nothing
+//     ever reached it. Every suite runs; every result is reported.
+//  3. A SUITE GRADING SOMEBODY ELSE'S STACK. Pointing PIRATES_BR_URL at a Vite
+//     the runner owns used to move the PAGE and not the SOCKET, so the client
+//     under test still joined whatever server the developer had up — an
+//     unpinned world, and a headless bot in a human's match. The Vite started
+//     here bakes its own server's port into the bundle (vite.config.ts), and
+//     the server it starts is pinned to PIRATES_BR_MAP_SEED.
+//  4. A SUITE NOBODY RUNS. Eight test-shaped files on disk were in no npm
+//     script, including both gates for the remote-motion wave. `--audit` walks
+//     scripts/ and fails on anything neither listed nor explicitly excluded.
+//
+// ── AND ONE HOUSE RULE ───────────────────────────────────────────────────────
+// ONE SUITE AT A TIME. These run on a fanless laptop whose window server has
+// been taken down by concurrent headless GL. Suites are never run in parallel,
+// and every child is niced.
+//
+//   npm test                      # everything: logic, then browser
+//   npm run test:logic            # logic only — needs no stack
+//   npm run test:browser          # browser only
+//   npm run test:audit            # is every suite on disk accounted for?
+//   node scripts/run-all-tests.mjs --only hud,minimap
+//   node scripts/run-all-tests.mjs --list
 import { spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync } from 'node:fs';
+import { createWriteStream, mkdirSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ALL, BROWSER, EVIDENCE, EXCLUDED, LOGIC } from './lib/suites.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CLIENT_URL = process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000/';
-const HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? 'http://127.0.0.1:8090/health';
 const LOG_DIR = path.join(ROOT, 'test-results');
-// Overridable so the boot/wait/teardown path itself can be exercised without
-// taking a real dev stack down (see the smoke in this wave's report).
-const SERVER_CMD = process.env.PIRATES_BR_SERVER_CMD ?? 'npm run dev:server';
-const CLIENT_CMD = process.env.PIRATES_BR_CLIENT_CMD ?? 'npm run dev:client';
-const LOGIC_CMD = process.env.PIRATES_BR_LOGIC_CMD ?? 'npm run test:logic';
-const BROWSER_CMD = process.env.PIRATES_BR_BROWSER_CMD ?? 'npm run test:browser';
 
-const args = process.argv.slice(2);
-const runLogic = !args.includes('--browser');
-const runBrowser = !args.includes('--logic');
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(`--${f}`);
+const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 
-/** NEVER 8080: this machine's content filter replays the WS upgrade bytes and
- *  corrupts every socket served there. The stack is 3000 + 8090. */
+/**
+ * THE PORTS ARE NOT THE DEVELOPER'S. 3000/8090 is where a human plays; a test
+ * run that seizes them evicts him mid-match, and a suite that finds them already
+ * up grades a world it did not pin. So the default stack for a graded run is
+ * 3101/8091 and it is the runner's own. Point PIRATES_BR_URL at something else
+ * and the runner reuses it instead of starting anything.
+ *
+ * NEVER 8080: this machine's content filter replays the WebSocket upgrade bytes
+ * and corrupts every socket served there.
+ */
+const SERVER_PORT = process.env.PIRATES_BR_SERVER_PORT ?? '8091';
+const CLIENT_PORT = process.env.PIRATES_BR_CLIENT_PORT ?? '3101';
+const CLIENT_URL = (process.env.PIRATES_BR_URL ?? `http://127.0.0.1:${CLIENT_PORT}`).replace(/\/$/, '');
+const HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL ?? `http://127.0.0.1:${SERVER_PORT}/health`;
+/** Every perf ceiling in this repo was measured on this world. An unpinned
+ *  server rolls a different one and the same build reads 1165 or 2742 draws. */
+const MAP_SEED = process.env.PIRATES_BR_MAP_SEED ?? '20260801';
+/** Software rasteriser by default: a GPU-backed headless Chromium drives the
+ *  real Metal stack through WindowServer and has panicked this machine twice. */
+const GL = process.env.PIRATES_GL ?? 'swiftshader';
+
+/** A suite that has not spoken in this long is hung, not slow. Killed and
+ *  reported as TIMEOUT — never silently waited on. */
+const SUITE_TIMEOUT_MS = Number(process.env.PIRATES_SUITE_TIMEOUT_MS ?? 900_000);
+
 const started = [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function sh(command, { inherit = true, logFile = null } = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(command, {
-      cwd: ROOT, shell: true,
-      stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
-    });
-    if (!inherit && logFile) {
-      child.stdout.pipe(logFile);
-      child.stderr.pipe(logFile);
-    }
-    child.on('exit', (code) => resolve(code ?? 1));
-  });
-}
+// ── the stack ────────────────────────────────────────────────────────────────
 
 async function isUp(url) {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
-    return res.ok || res.status === 404; // vite answers / with 200; any answer means listening
-  } catch {
-    return false;
-  }
+    return res.ok || res.status === 404;
+  } catch { return false; }
 }
 
-/** Boot `command` detached-ish and wait until `url` answers. */
-async function ensure(name, command, url, timeoutMs = 90_000) {
+/** True when the server answering /health is rolling the world we grade on. */
+async function servesPinnedMap() {
+  try {
+    const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(1500) });
+    const body = await res.json();
+    return String(body.mapSeed ?? '') === String(Number.parseInt(MAP_SEED, 10) >>> 0);
+  } catch { return false; }
+}
+
+async function ensure(name, command, url, env, timeoutMs = 120_000) {
   if (await isUp(url)) {
-    console.log(`[test:all] ${name} already up — reusing it`);
+    console.log(`[test] ${name} already up at ${url} — reusing it`);
     return;
   }
   mkdirSync(LOG_DIR, { recursive: true });
-  const logPath = path.join(LOG_DIR, `test-all-${name}.log`);
+  const logPath = path.join(LOG_DIR, `stack-${name}.log`);
   const logFile = createWriteStream(logPath);
-  console.log(`[test:all] starting ${name} (log: ${logPath})`);
-  const child = spawn(command, { cwd: ROOT, shell: true, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  console.log(`[test] starting ${name} → ${url}  (log: ${logPath})`);
+  const child = spawn(command, {
+    cwd: ROOT, shell: true, detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, ...env },
+  });
   child.stdout.pipe(logFile);
   child.stderr.pipe(logFile);
   started.push({ name, child });
@@ -78,46 +117,186 @@ async function ensure(name, command, url, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`${name} exited before it listened — see ${logPath}`);
-    if (await isUp(url)) {
-      console.log(`[test:all] ${name} is answering at ${url}`);
-      return;
-    }
-    await new Promise(r => setTimeout(r, 600));
+    if (await isUp(url)) { console.log(`[test] ${name} is answering`); return; }
+    await sleep(600);
   }
   throw new Error(`${name} never answered ${url} within ${timeoutMs / 1000}s — see ${logPath}`);
 }
 
 function teardown() {
   for (const { name, child } of started.splice(0)) {
-    console.log(`[test:all] stopping ${name}`);
-    // Kill the whole process group: `vite` and `tsx watch` both fork children
-    // that outlive a bare child.kill() and keep the port bound.
+    console.log(`[test] stopping ${name}`);
+    // The whole process group: `vite` and `tsx watch` both fork children that
+    // outlive a bare kill() and keep the port bound.
     try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch { /* gone */ } }
   }
 }
-
 process.on('SIGINT', () => { teardown(); process.exit(130); });
 process.on('SIGTERM', () => { teardown(); process.exit(143); });
 
+// ── running one suite ────────────────────────────────────────────────────────
+
+function runSuite(suite, env) {
+  return new Promise((resolve) => {
+    mkdirSync(LOG_DIR, { recursive: true });
+    const logPath = path.join(LOG_DIR, `${suite.file.replace(/\.mjs$/, '')}.log`);
+    const logFile = createWriteStream(logPath);
+    const t0 = Date.now();
+    // `taskpolicy -c utility nice -n 15` keeps a suite off the throat of a
+    // machine somebody may be using. Not optional on this hardware.
+    const child = spawn('taskpolicy', ['-c', 'utility', 'nice', '-n', '15', ...suite.cmd], {
+      cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+    });
+    let evidence = false;
+    let bytes = 0;
+    let tail = '';
+    const watch = (chunk) => {
+      const s = chunk.toString();
+      bytes += s.length;
+      if (!evidence && EVIDENCE.test(s)) evidence = true;
+      tail = (tail + s).slice(-4000);
+    };
+    child.stdout.on('data', watch);
+    child.stderr.on('data', watch);
+    child.stdout.pipe(logFile);
+    child.stderr.pipe(logFile);
+
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* gone */ }
+    }, SUITE_TIMEOUT_MS);
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ suite, verdict: 'ERROR', code: -1, ms: Date.now() - t0, logPath, detail: err.message, tail });
+    });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      const ms = Date.now() - t0;
+      let verdict;
+      if (signal === 'SIGKILL' && ms >= SUITE_TIMEOUT_MS - 2000) verdict = 'TIMEOUT';
+      else if (code !== 0) verdict = 'FAIL';
+      // Exit 0 having said nothing gradeable is not a pass. It is the single
+      // most expensive failure mode in this repo's history.
+      else if (!evidence) verdict = 'VACUOUS';
+      else verdict = 'PASS';
+      resolve({ suite, verdict, code, ms, logPath, bytes, tail });
+    });
+  });
+}
+
+// ── the on-disk audit ────────────────────────────────────────────────────────
+
+function audit() {
+  const known = new Set(ALL.map((s) => s.file));
+  const onDisk = readdirSync(path.join(ROOT, 'scripts'))
+    .filter((f) => /^(test-|audit-)/.test(f) || /smoke\.mjs$/.test(f))
+    .filter((f) => f.endsWith('.mjs'));
+  const orphans = onDisk.filter((f) => !known.has(f) && !(f in EXCLUDED));
+  const ghosts = [...known].filter((f) => !onDisk.includes(f));
+  console.log(`[audit] ${known.size} suites wired, ${Object.keys(EXCLUDED).length} excluded on purpose, ${onDisk.length} test-shaped files on disk`);
+  for (const [f, why] of Object.entries(EXCLUDED)) console.log(`  – excluded ${f}: ${why}`);
+  let bad = 0;
+  for (const f of orphans) {
+    console.error(`  ✗ FAIL: scripts/${f} is a test that no npm script runs — wire it in scripts/lib/suites.mjs or list it in EXCLUDED with a reason`);
+    bad += 1;
+  }
+  for (const f of ghosts) {
+    console.error(`  ✗ FAIL: the manifest lists scripts/${f}, which does not exist`);
+    bad += 1;
+  }
+  if (bad === 0) console.log('  ✓ every test-shaped file on disk is either wired or excluded with a reason');
+  return bad;
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+
+const onlyFilter = arg('only');
+const pick = (list) => (onlyFilter
+  ? list.filter((s) => onlyFilter.split(',').some((f) => s.file.includes(f.trim())))
+  : list);
+
+const wantLogic = !has('browser');
+const wantBrowser = !has('logic');
+const logic = wantLogic ? pick(LOGIC) : [];
+// Cheap first, machine-owning last: a broken build should be reported in the
+// first minute rather than the twentieth.
+const browser = wantBrowser
+  ? pick(BROWSER).slice().sort((a, b) => Number(!!a.slow) - Number(!!b.slow))
+  : [];
+
+if (has('list')) {
+  for (const s of [...logic, ...browser]) console.log(s.file);
+  process.exit(0);
+}
+if (has('audit')) process.exit(audit() === 0 ? 0 : 1);
+
+const results = [];
 let code = 0;
 try {
-  if (runLogic) {
-    console.log('\n[test:all] ── logic suites ─────────────────────────────');
-    code = await sh(LOGIC_CMD);
-    if (code !== 0) throw new Error('test:logic failed');
+  if (logic.length) {
+    console.log(`\n[test] ── ${logic.length} logic suites ──────────────────────────`);
+    for (const [i, s] of logic.entries()) {
+      const r = await runSuite(s, {});
+      results.push(r);
+      console.log(`  ${String(i + 1).padStart(2)}/${logic.length}  ${r.verdict.padEnd(7)} ${(r.ms / 1000).toFixed(1)}s  ${s.file}`);
+    }
   }
-  if (runBrowser) {
-    await ensure('server', SERVER_CMD, HEALTH_URL);
-    await ensure('client', CLIENT_CMD, CLIENT_URL);
-    console.log('\n[test:all] ── browser suites ───────────────────────────');
-    code = await sh(BROWSER_CMD);
-    if (code !== 0) throw new Error('test:browser failed');
+
+  if (browser.length) {
+    await ensure('server', `npm run dev:server`, HEALTH_URL, {
+      PORT: SERVER_PORT, PIRATES_BR_MAP_SEED: MAP_SEED,
+    });
+    if (!await servesPinnedMap()) {
+      // Reused somebody else's server, and it rolls a world these ceilings were
+      // not measured on. That is not a state a perf gate can pass or fail in.
+      console.error(`\n[test] ✗ the server at ${HEALTH_URL} is not rolling map seed ${MAP_SEED}.`
+        + `\n       Stop it, or set PIRATES_BR_SERVER_PORT to a port the runner can own.`);
+      throw new Error('server is serving an unpinned world');
+    }
+    await ensure('client', `npx vite --port ${CLIENT_PORT} --strictPort`, CLIENT_URL, {
+      PIRATES_BR_SERVER_PORT: SERVER_PORT,
+    });
+    console.log(`\n[test] ── ${browser.length} browser suites ────────────────────────`);
+    console.log(`[test] client ${CLIENT_URL}  server :${SERVER_PORT}  seed ${MAP_SEED}  gl ${GL}`);
+    const env = {
+      PIRATES_BR_URL: CLIENT_URL,
+      PIRATES_BR_TEST_URL: CLIENT_URL,
+      LOAD_URL: CLIENT_URL,
+      PIRATES_BR_SERVER_PORT: SERVER_PORT,
+      PIRATES_BR_SERVER_HEALTH_URL: HEALTH_URL,
+      PIRATES_BR_MAP_SEED: MAP_SEED,
+      PIRATES_GL: GL,
+    };
+    for (const [i, s] of browser.entries()) {
+      const r = await runSuite(s, env);
+      results.push(r);
+      console.log(`  ${String(i + 1).padStart(2)}/${browser.length}  ${r.verdict.padEnd(7)} ${(r.ms / 1000).toFixed(1)}s  ${s.file}`);
+    }
   }
-  console.log('\n[test:all] ALL SUITES PASSED');
 } catch (err) {
-  console.error(`\n[test:all] ${err.message}`);
-  code = code === 0 ? 1 : code;
+  console.error(`\n[test] ${err.message}`);
+  code = 1;
 } finally {
   teardown();
 }
-process.exit(code);
+
+// ── the verdict ──────────────────────────────────────────────────────────────
+
+const bad = results.filter((r) => r.verdict !== 'PASS');
+console.log(`\n[test] ══ ${results.length - bad.length}/${results.length} suites passed ══════════════════════════`);
+for (const r of bad) {
+  console.error(`\n  ✗ ${r.verdict}  ${r.suite.file}   (${(r.ms / 1000).toFixed(1)}s, exit ${r.code})`);
+  if (r.verdict === 'VACUOUS') {
+    console.error('     exited 0 without printing a single graded line — it did not pass, it failed to assert');
+  }
+  const lines = (r.tail ?? '').trim().split('\n').slice(-12);
+  for (const l of lines) console.error(`     │ ${l}`);
+  console.error(`     full log: ${r.logPath}`);
+}
+if (bad.length || code) {
+  console.error(`\n[test] ${bad.length} suite(s) not green.`);
+  process.exit(1);
+}
+console.log('[test] ALL SUITES PASSED');
+process.exit(0);
