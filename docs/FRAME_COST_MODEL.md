@@ -1127,3 +1127,107 @@ Two items from 11.3 are now answered rather than open:
 Still open: the shadow pass's depth programs (11.3 §1), the load path (11.3 §2),
 and the non-finite `AudioParam` (11.3 §4), which still throws once per tour and
 still has no probe of its own.
+
+## 14. Lever 2, done: the material collapse, and the two gates that could not have caught it
+
+### 14.1 The audit §12.4 left open turned out to be four call sites, not a hunt
+
+§12.4 revert-listed one open trap: *"every site that writes `.color` on an
+asset-derived material has to be found"*, and treated that as an audit of the
+whole codebase. It is not, because the collapse does not have to be
+library-wide. Two paths produce a multi-material draw and they are separable:
+
+* **`assets.mergedGeometry`**, whose output is used by exactly FOUR call sites,
+  all of them building an `InstancedMesh`. Grepped, read, and enumerated: the
+  prop scatter, the interior scrub/log scatter, the cave rubble, the cave portal
+  frame. Only the last writes `.color`, and it is the one §12.4 already named.
+* **`StaticBatcher`**, whose merged material is a fresh private object that
+  nothing addresses — a batch is named `<piece>-batch` on purpose.
+
+So the switch (`bakedTint = false`) has ONE caller, and the batcher needs no
+audit at all provided it refuses to fold a material somebody has patched. That
+refusal is structural rather than grepped: `collapseFamilyKey` returns null for
+a material whose `onBeforeCompile` or `customProgramCacheKey` is not the one
+`THREE.Material.prototype` supplies.
+
+### 14.2 Two three.js facts that cost an hour each
+
+**A material ARRAY is a draw call per group, and `mergedGeometry` returns one.**
+This is why `props-palm_a` — ONE `InstancedMesh` holding four thousand palms —
+was five draw calls on every island that has palms, and why the lever-2 brief's
+"merge instanced batches ACROSS islands" would have bought almost nothing: the
+count was not per-island, it was per-COLOUR.
+
+**`Material.customProgramCacheKey()` defaults to `onBeforeCompile.toString()`.**
+Two consequences, opposite in sign:
+
+* an ordinary patched material already gets its own program for free, so the
+  usual worry ("two materials share a cache key and one of them has a patch")
+  does not arise — but a material that OVERRIDES the method, which any material
+  with its own named key does, gives that up. Anything patching such a material
+  afterwards has to put itself back in the key by hand. `applyFoliageSway` now
+  chains both hooks for this reason.
+* a refusal test written `customProgramCacheKey() !== ''` is **never false**.
+  That one line made the batcher change measure as a no-op for a full census
+  run.
+
+### 14.3 What it bought
+
+Draw calls per island, `perf-attribution --by calls`, high, pinned map
+20260801, triangles bit-identical on every row:
+
+| scene | islands, before | after §14 (asset collapse only) |
+|---|--:|--:|
+| dock-vista | 651 | 528 |
+| island-interior | 573 | 469 |
+| open-sea | 580 | 467 |
+
+Draws per copy, `perf-decor-census`, low, after the batcher collapse too:
+
+| piece | §12 | §14 |
+|---|--:|--:|
+| `decor-dock` | 16.0 | **4.0** |
+| `island-micro-root` | 22.8 | **13.4** |
+| `prop-mermaid_shrine` | 15.0 | **2.0** |
+| `prop-fort` | 12.0 | **2.0** |
+| `prop-watchtower` | 7.0 | **2.0** |
+
+Whole-frame draw calls on the approach ladder at high, identical per-batch
+instance counts on every rung: 900 m 1070→863, 600 m 1486→1238, 380 m
+1273→1038, 220 m 1406→1023.
+
+### 14.4 Two gates that had stopped being able to fail
+
+Both were written before the thing they now guard existed, and both would have
+reported a pass through the regression:
+
+* `test-asset-merge` check 3 was group bookkeeping under `if (mats.length > 1)`.
+  The collapse makes every asset single-material, so the check would simply have
+  stopped running. **A gate whose subject can disappear is a gate that cannot
+  fail.** It is now a re-derivation: walk the GLB the way `mergedGeometry` walks
+  it, count the merged vertices each source material owns, and require the baked
+  tint/surface tally to match exactly.
+* `test-decor-batch` graded the pier with `draws > mats + 4` — a budget
+  expressed in the very number the change moves. Unmerged is 16 draws for 16
+  materials, and 16 is under 20. It now also holds the MATERIAL count to a
+  constant ceiling.
+
+Rule worth keeping: **never grade a quantity against a budget derived from that
+same measurement's own denominator.** Ratio budgets survive the regression they
+were written for.
+
+### 14.5 What is left of lever 2, and what lever 3 turned out to be
+
+`decor-dock` is 4 and not 1 because the bucket key also carries the geometry's
+attribute set, its indexed-ness, and its shadow flags — real constraints, worth
+maybe two more calls per pier, not worth the risk today. `island-micro-root` at
+13.4 is the largest remaining decor row and its census still shows `named×33`.
+
+**Lever 3 is largely already paid.** The model sized it off "the scene holds
+9,201-9,388 drawables and `projectObject` walks all of them", and at LOW, pinned
+map, three now reaches **1,663 nodes at the dock vista, 1,774 in the island
+interior and 387 at sea** — of 7,014 in the graph. The island-level frustum test
+(fd35000) plus the radius gates did that. What is left is the gap between
+reached-drawable and drawn (1,181 vs 554 at the dock vista): six hundred bounding
+spheres tested to reject. That is a manual render list or a coarser per-piece
+gate, and it is a smaller prize than the numbers in §9 imply.
