@@ -22,6 +22,18 @@
  * window was ever resized. A guard against it is invisible in every other test
  * in this repo, because nothing else counts the calls.
  *
+ * …and one it could not prove at all until the clamp was found:
+ *
+ *   3. that the controller can SEE A HITCH. `Game.frame` clamps dt to 50 ms for
+ *      the integrator and used to hand that same clamped number to the
+ *      governor, which put a hard 50 ms ceiling on the median and the p95 of the
+ *      one thing in the build that exists to react to stalls. Nothing was
+ *      broken-looking about it: the ratios still fired, the ladder still
+ *      stepped, the status line still printed. It just could not tell a 50 ms
+ *      frame from a three-second one. So the last phase here injects long
+ *      frames of a KNOWN length and asks the governor what it saw, against what
+ *      the page independently measured. See THE HITCH IS VISIBLE below.
+ *
  * SYNTHETIC LOAD, ON PURPOSE. The gate must engage the same way on a machine
  * that would otherwise hold 60fps, so it burns a fixed slice of every animation
  * frame from an init script. That is a load with a known sign — over budget —
@@ -51,6 +63,14 @@ const MUTATE = has('mutate');
  *  over the 16.67 ms budget on its own, so the sign of the load is not in
  *  question on any backend. */
 const LOAD_MS = parseInt(arg('load', '30'), 10);
+/** The injected stall, in ms. Comfortably above the 50 ms simulation clamp on
+ *  any backend, so a governor reading the clamped dt cannot produce it and one
+ *  reading real time cannot miss it. */
+const HITCH_MS = parseInt(arg('hitch', '400'), 10);
+/** …on one frame in this many, so the hitches land in the p95 tail rather than
+ *  becoming the median. The window is 45 frames; 1-in-5 puts roughly nine of
+ *  them in it, which is well clear of the top 5%. */
+const HITCH_EVERY = 5;
 const VIEWPORT = { width: 960, height: 540 };
 /** The `low` tier's resolution floor (Renderer.minPixelRatio). Written out
  *  rather than read from the app so a regression that lowers the floor is a
@@ -98,14 +118,40 @@ async function main() {
     // The synthetic load, armed before any application code runs. A fresh rAF
     // is scheduled from inside the callback so it survives the app installing
     // its own loop.
-    await page.addInitScript((ms) => {
+    //
+    // It also keeps an INDEPENDENT record of how long each animation frame
+    // really was — the same quantity `Game.frame` computes as `now -
+    // lastFrameTime`, measured by something that has never heard of the
+    // governor. That witness is what turns "the governor reports 400 ms" from a
+    // number into a claim that can be wrong.
+    //
+    // The stall injector is armed but idle (`__hitchEvery = 0`): every
+    // assertion before the last phase is about the STEADY frame, and dropping
+    // 400 ms stalls into the engagement window would be grading two things at
+    // once.
+    await page.addInitScript(({ ms, hitchMs }) => {
+      window.__hitchEvery = 0;
+      window.__hitchMs = hitchMs;
+      window.__rafMs = [];
+      let frames = 0;
+      let last = performance.now();
+      const spin = (until) => { while (performance.now() < until) { Math.sqrt(Math.random()); } };
       const burn = () => {
-        const end = performance.now() + ms;
-        while (performance.now() < end) { Math.sqrt(Math.random()); }
+        const t = performance.now();
+        // Recorded BEFORE this frame's burn: the delta is the length of the
+        // frame that just finished, burn included.
+        window.__rafMs.push(t - last);
+        if (window.__rafMs.length > 400) window.__rafMs.shift();
+        last = t;
+        frames += 1;
+        spin(t + ms);
+        if (window.__hitchEvery > 0 && frames % window.__hitchEvery === 0) {
+          spin(performance.now() + window.__hitchMs);
+        }
         requestAnimationFrame(burn);
       };
       requestAnimationFrame(burn);
-    }, LOAD_MS);
+    }, { ms: LOAD_MS, hitchMs: HITCH_MS });
 
     await page.goto(url(), { waitUntil: 'commit', timeout: 120_000 });
     await page.waitForSelector('#menu-solo-btn', { state: 'visible', timeout: 240_000 });
@@ -231,6 +277,75 @@ async function main() {
     expect('the ratio is written only when it changes, never once per frame',
       after.calls <= 6,
       `${after.calls} setPixelRatio calls in 12s with ${steps} scalar movement`);
+
+    // ── THE HITCH IS VISIBLE ───────────────────────────────────────────────
+    // Arm the injector, throw away both windows, and let a fresh 45 frames go
+    // by with one frame in five deliberately HITCH_MS long. Then ask the two
+    // witnesses the same question.
+    //
+    // A governor fed the simulation's clamped dt answers "50 ms" here whatever
+    // is injected — that is the failure this phase exists to catch, and it is
+    // invisible to every other assertion in this file, all of which pass just
+    // as happily against a ceiling as against a measurement.
+    console.log('\nTHE HITCH IS VISIBLE — the controller reads real frame time, not the sim clamp');
+    await page.evaluate((every) => {
+      window.__rafMs.length = 0;
+      window.__hitchEvery = every;
+    }, HITCH_EVERY);
+
+    const hitchDeadline = Date.now() + 180_000;
+    let hitch = null;
+    while (Date.now() < hitchDeadline) {
+      await sleep(2000);
+      const s = await page.evaluate(() => {
+        const raf = window.__rafMs.slice(-45);
+        const sorted = raf.slice().sort((a, b) => a - b);
+        const at = (p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] : 0);
+        return {
+          status: window.__piratesBR.renderer.getGovernorStatus(),
+          rafSamples: raf.length,
+          rafMedian: at(0.5),
+          rafP95: at(0.95),
+          rafMax: sorted.length ? sorted[sorted.length - 1] : 0,
+        };
+      });
+      // Both windows full, and both describing the same 45 frames.
+      if (s.rafSamples >= 45 && s.status.samples >= 40) { hitch = s; break; }
+    }
+
+    const detail = hitch
+      ? `governor: ${hitch.status.samples} samples, median ${hitch.status.medianMs.toFixed(1)}ms, `
+        + `p95 ${hitch.status.p95Ms.toFixed(1)}ms | page rAF: median ${hitch.rafMedian.toFixed(1)}ms, `
+        + `p95 ${hitch.rafP95.toFixed(1)}ms, max ${hitch.rafMax.toFixed(1)}ms`
+      : 'the governor window never filled — no reading was taken';
+
+    // Printed on the way past, not only on failure: this is the reading the
+    // whole phase is about, and a green tick that hides its own numbers is how
+    // a 50 ms ceiling survived two passes.
+    console.log(`    ${detail}`);
+    expect('the governor filled a window while stalls were being injected',
+      hitch != null, detail);
+    // 55 > the 50 ms clamp. Not a threshold about this machine: it is the exact
+    // number a clamped feed can never exceed.
+    expect(`its p95 is above the 50ms simulation clamp (injected stall ${HITCH_MS}ms)`,
+      hitch != null && hitch.status.p95Ms > 55, detail);
+    // The page measured the same frames. Half is a wide band on purpose — the
+    // two windows are 45 frames each but not the same 45 — and it is still an
+    // order of magnitude tighter than the gap between 50 ms and a real stall.
+    expect('…and it agrees with what the page independently measured',
+      hitch != null && hitch.status.p95Ms >= hitch.rafP95 * 0.5 && hitch.status.p95Ms <= hitch.rafP95 * 2,
+      detail);
+    // The whole reason there are two statistics: a spiky machine and a
+    // uniformly slow one want opposite responses. Under the clamp both numbers
+    // saturate at 50 and the p95 stops carrying any information at all.
+    // The whole reason there are two statistics: a spiky machine and a
+    // uniformly slow one want opposite responses. Under the clamp both numbers
+    // saturate at 50 and the p95 stops carrying any information at all. Graded
+    // against the INJECTED stall rather than a ratio, so it does not quietly
+    // become a reading of how fast this laptop happens to be.
+    expect('…and the p95 separates from the median by the stall that was injected',
+      hitch != null && hitch.status.p95Ms - hitch.status.medianMs >= HITCH_MS * 0.5,
+      detail);
 
     expect('no page errors', pageErrors.length === 0, pageErrors.join('\n'));
   } finally {

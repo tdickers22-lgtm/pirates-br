@@ -851,6 +851,10 @@ export class Renderer {
     mode: GovernorMode;
     scalar: number;
     targetFps: number;
+    /** Frames in the live window. A median read off three samples is not a
+     *  reading, and the gate that grades this window has to know when it is
+     *  looking at one — every step clears the window. */
+    samples: number;
     medianMs: number;
     p95Ms: number;
     pixelRatio: number;
@@ -863,6 +867,7 @@ export class Renderer {
       mode: this.governor.getMode(),
       scalar: this.governor.getScalar(),
       targetFps: this.governor.getTargetFps(),
+      samples: stats.samples,
       medianMs: stats.medianMs,
       p95Ms: stats.p95Ms,
       pixelRatio: this.currentPixelRatio,
