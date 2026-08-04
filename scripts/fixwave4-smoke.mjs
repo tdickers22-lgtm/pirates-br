@@ -53,7 +53,57 @@ const errors = [];
 page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
 page.on('pageerror', (err) => errors.push(String(err)));
 const shot = (n) => page.screenshot({ path: `${OUT}/${n}.png`, timeout: 60_000 });
-const wait = (ms) => page.waitForTimeout(ms);
+/**
+ * WAIT IN THE GAME'S SECONDS, NOT THE WALL'S.
+ *
+ * Twenty-two `wait(ms)` calls in this file sit between "change something" and
+ * "read what the HUD says about it", and every one of them was a wall-clock
+ * sleep. The HUD is repainted by the frame loop, and `Game.frame` clamps its
+ * clock to 50ms per frame — so on this fanless Air's software rasteriser, where
+ * the scene draws at well under a frame a second, `wait(2200)` buys the game
+ * about a tenth of the game-time it buys a player at 60fps.
+ *
+ * The result was eight red assertions that were all the same defect, each one
+ * reading the state BEFORE the change it was about:
+ *
+ *     ✗ banked gold past the safe line becomes a WEIGHED hold  (cargo=3400g "")
+ *     ✗ the bounty SIGN is on the HUD  (HOLD: DEEP-LADEN · 3400g · −6% knots)
+ *
+ * The second line is the tell — the sign it says is missing is printed right
+ * there in the failure detail, one read late. Nothing was wrong with the hold,
+ * the ballast or the bounty.
+ *
+ * So a wait now blocks until the CLIENT has integrated that many milliseconds of
+ * its own frame time. On a 60fps host it is the sleep it always was. Bounded by
+ * a wall-clock cap so a genuinely stopped client fails the assertion instead of
+ * hanging the suite, and by a stopped-clock check so waits taken before the game
+ * loop exists (the menu) fall straight back to a plain sleep.
+ */
+const WAIT_WALL_CAP = (ms) => Math.min(30_000, Math.max(2_000, ms * 15));
+const wait = async (ms) => {
+  try {
+    await page.evaluate(async ({ ms, capMs }) => {
+      const clock = () => window.__piratesBR?.combatFx?.fxClock;
+      const nap = (n) => new Promise((r) => setTimeout(r, n));
+      const t0 = clock();
+      if (typeof t0 !== 'number') { await nap(ms); return; }
+      const wallStart = performance.now();
+      for (;;) {
+        const now = clock();
+        if ((now - t0) * 1000 >= ms) return;
+        const wall = performance.now() - wallStart;
+        if (wall >= capMs) return;
+        // Nothing has rendered in four wall seconds: the loop is not running, so
+        // waiting on its clock is waiting on nothing. Serve the sleep and go.
+        if (wall > 4_000 && now === t0) { await nap(Math.max(0, ms - wall)); return; }
+        await nap(Math.min(120, Math.max(20, ms / 6)));
+      }
+    }, { ms, capMs: WAIT_WALL_CAP(ms) });
+  } catch {
+    // Navigating, or no handle yet — the wall clock is all there is.
+    await page.waitForTimeout(ms);
+  }
+};
 
 /** The first-voyage SHIP'S ORDERS card owns the middle of the screen and does
  *  not appear until the start ceremony ends — so a single blind [L] on join
