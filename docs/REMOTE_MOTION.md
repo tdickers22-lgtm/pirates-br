@@ -83,11 +83,49 @@ composes it back against `readShipRenderPose`, the same composition the weld alr
 relied on. The frame id travels with each sample and the ring refuses to interpolate
 across a change of frame, so a boarding is never lerped through.
 
+**The frame travels with the ANSWER, not with the track.** A pirate who boards and
+steps off leaves a ring of `[world, world, ship, ship, world]`. A render time inside
+the ship stretch comes back in ship-local numbers while the track's newest sample is
+a world one, so a caller that checks the track's newest frame will treat a 2-metre
+deck offset as a world position and draw him at the map origin. It showed up as a
+single 6.78m deck-slip outlier in a run whose p95 was 0.01m. `RemotePose.frame` is
+what the caller must compare.
+
+**A reappearance is a cut, not a glide.** A push more than `STALE_GAP_S` newer than
+anything held empties the ring. A pirate who dies at one end of the map and respawns
+at the other otherwise gets bracketed across the gap and slides the whole way at
+constant speed.
+
 **Sharks need no velocity.** `HotSharkState` is id/position/rotation/health/
 attackState/attackTimer — there is no velocity field, which is why nothing could
 carry a shark between snapshots and why they staircased worst of anything in the
 game. Two bracketing samples ARE the server's own velocity, so the fix costs the
 wire nothing.
+
+## What it costs, and the aim lead
+
+There is no lag compensation on this server. `Match` resolves a hitscan against the
+positions it holds at the moment your fire message arrives — it does not rewind the
+world to what you were looking at. So every millisecond an opponent is drawn in the
+past is a millisecond you must lead him by.
+
+The path this replaced drew remotes at `snapshot + age + 0.035s`: it led the target
+by 35ms on purpose, as a standing approximation of the trip a shot has to make. That
+lead is tuned into the game and is given back rather than spent on the buffer — the
+rendered delay is the buffer's requirement MINUS `AIM_LEAD_S`, floored at one whole
+snapshot interval so a bracketing pair is still guaranteed. On a clean wire it
+settles at exactly one interval.
+
+**Net: an opponent is drawn 32ms behind the newest sample where he used to be drawn
+35ms ahead of it. 67ms of extra lead; 33cm at a sprint.** That is the one thing this
+work takes away from the player, and it buys a path with no 27-pixel sideways jumps
+in it. On a ragged wire the jitter term wins and the buffer is fed first, which is
+the right priority — a target that snaps is harder to hit than one that is honestly
+late.
+
+Client-side hit FEEDBACK cannot drift from the server, whatever the delay: the hit
+marker, the damage numbers and the blood all fire from `network.onPlayerHit`, a
+server event. There is no client-side hit prediction anywhere to disagree with it.
 
 ## What is NOT interpolated, and why
 
