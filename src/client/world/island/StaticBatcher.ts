@@ -1,9 +1,20 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { assets } from '../../assets/AssetLibrary.js';
+import { type CollapseChunk, collapseChunks, collapseFamilyKey } from '../../assets/AssetMaterialCollapse.js';
 
 /**
- * ONE DRAW PER MATERIAL, for scenery that never moves.
+ * ONE DRAW PER MATERIAL FAMILY, for scenery that never moves.
+ *
+ * IT WAS "ONE DRAW PER MATERIAL" UNTIL THE MATERIAL COUNT BECAME THE WALL. The
+ * naming fix below took a pier from 38.2 draws to 16.0, and 16.0 is the number
+ * of flat colours in `dock.glb` — the census's every remaining row was
+ * SOLE-OF-MATERIAL, i.e. the batcher was exhausted with a sixteen-call pier
+ * (cost model §12.3). Colour is not a reason two meshes cannot share a draw; it
+ * is a thing a merge can CARRY. `AssetMaterialCollapse` bakes each part's
+ * colour, roughness and metalness into vertex attributes, so meshes now bucket
+ * by material FAMILY — the per-draw states an attribute cannot express — and a
+ * pier is its family count, which is one.
  *
  * The budget census attributes a wide island vista to a handful of named
  * subsystems, and the ones it names are not the ones anyone would guess. A
@@ -97,10 +108,24 @@ export function isAddressedName(name: string): boolean {
   return !assets.isAssetNodeName(name);
 }
 
-/** Merge candidates are grouped by everything three needs to agree on. */
+/**
+ * Merge candidates are grouped by everything three needs to agree on.
+ *
+ * IT USED TO BE `material.uuid`, and that is what left the pass exhausted at
+ * SOLE-OF-MATERIAL: after the naming fix every remaining decor draw was one
+ * material's worth, and a pier still cost sixteen calls to say sixteen flat
+ * colours (cost model §12.3). Colour is not something three needs two meshes to
+ * agree on — it is something the merge can CARRY, in a vertex attribute, exactly
+ * as `mergedGeometry` now carries it for the instanced props. So a collapsible
+ * material contributes its FAMILY (side, flat shading, blending — the per-draw
+ * states an attribute cannot express) instead of its identity, and sixteen
+ * buckets become one. A material that must keep its identity — textured,
+ * emissive, or carrying somebody's `onBeforeCompile` — returns no family key and
+ * falls back to the uuid, which is the old behaviour exactly.
+ */
 function bucketKey(mesh: THREE.Mesh, material: THREE.Material): string {
   const attributes = Object.keys(mesh.geometry.attributes).sort().join(',');
-  return `${material.uuid}|${attributes}|${mesh.geometry.index ? 'i' : '-'}`
+  return `${collapseFamilyKey(material) ?? material.uuid}|${attributes}|${mesh.geometry.index ? 'i' : '-'}`
     + `|${mesh.castShadow ? 'C' : '-'}${mesh.receiveShadow ? 'R' : '-'}`;
 }
 
@@ -159,9 +184,18 @@ export function collapseStaticMeshes(root: THREE.Object3D): number {
     // One mesh is already one call; merging it would only churn its buffers.
     if (bucket.parts.length < 2) continue;
     const geometries: THREE.BufferGeometry[] = [];
+    // Where each part's vertices land in the merged buffer. mergeGeometries
+    // concatenates in order and rewrites the indices, so a part's range is the
+    // running sum of POSITION counts — true whether or not the parts are
+    // indexed, which is what the bake below indexes by.
+    const chunks: CollapseChunk[] = [];
+    let vertexOffset = 0;
     for (const part of bucket.parts) {
       const geometry = part.mesh.geometry.clone();
       geometry.applyMatrix4(part.matrix);
+      const count = geometry.getAttribute('position').count;
+      chunks.push({ start: vertexOffset, count, material: part.mesh.material as THREE.Material });
+      vertexOffset += count;
       geometries.push(geometry);
     }
     const merged = mergeGeometries(geometries, false);
@@ -170,8 +204,23 @@ export function collapseStaticMeshes(root: THREE.Object3D): number {
     // leave those meshes exactly as they were rather than dropping them.
     if (!merged) continue;
 
+    // ONE MATERIAL, OR THE ONE THEY ALREADY SHARED. A bucket keyed by family can
+    // hold several materials, and then the colour and the surface have to move
+    // into the vertex buffer before the merge is legal. A bucket whose parts all
+    // point at the SAME material needs none of that — skip the bake rather than
+    // pay 20 bytes a vertex to say the same number over and over.
+    const distinct = new Set(bucket.parts.map((p) => p.mesh.material as THREE.Material));
+    let material: THREE.Material | null = distinct.size === 1 ? bucket.material : null;
+    if (!material) {
+      material = collapseChunks(merged, chunks);
+      // Refusing here means the family key promised something collapseChunks
+      // will not honour. Drop the merge rather than draw the whole batch in the
+      // first part's colour.
+      if (!material) { merged.dispose(); continue; }
+    }
+
     const sample = bucket.parts[0].mesh;
-    const batched = new THREE.Mesh(merged, bucket.material);
+    const batched = new THREE.Mesh(merged, material);
     // Named after the piece it belongs to, never after a node anyone looks up.
     // The floater audit rolls a piece's whole subtree into one bounding box, so
     // a batch inside the piece reads to it exactly as the parts did.

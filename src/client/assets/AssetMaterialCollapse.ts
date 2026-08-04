@@ -204,6 +204,44 @@ export function collapseBlockers(materials: readonly THREE.Material[]): string[]
 }
 
 /**
+ * THE KEY TWO MATERIALS MUST SHARE TO BE FOLDED INTO ONE DRAW — or null when a
+ * material must keep its own identity.
+ *
+ * Everything in the returned string is a per-DRAW state that no vertex
+ * attribute can express: which face is culled, whether the normal is flat,
+ * whether the thing blends. Colour, roughness and metalness are deliberately
+ * NOT in it — carrying those is the entire point.
+ *
+ * The three refusals are the safety argument for using this as a merge key:
+ *
+ *   * NOT A STANDARD MATERIAL. Nothing else has the uniforms this patch writes.
+ *   * A MAP OR AN EMISSIVE. A texture needs UVs the merge does not reconcile,
+ *     and a lit material's glow is not a diffuse tint. Nine of the sixty-one
+ *     GLBs are refused here for `Ember`, `Lantern_Glass`, `Candle_Wax`.
+ *   * A MATERIAL SOMEONE HAS PATCHED. `onBeforeCompile` or a non-empty
+ *     `customProgramCacheKey` means a system elsewhere is writing this material's
+ *     shader — the cave rock, the terrain feature rock, the waterfall, the story
+ *     pad, the foliage sway. Folding one of those onto a fresh material would
+ *     drop the patch silently, which is cost-model §12.4 trap 3 arriving from
+ *     the other direction. Its identity is load-bearing, so it keeps it.
+ */
+export function collapseFamilyKey(material: THREE.Material): string | null {
+  const m = material as THREE.MeshStandardMaterial;
+  if (m.isMeshStandardMaterial !== true) return null;
+  if (collapseBlockers([m]).length > 0) return null;
+  // BOTH TESTS ARE IDENTITY TESTS, and the second one has to be. three r160's
+  // DEFAULT `customProgramCacheKey()` returns `this.onBeforeCompile.toString()`
+  // — so "the key is empty" is never true, not even for a material nobody has
+  // touched, and testing for it rejected every clean material in the game. What
+  // is being asked is "has anyone replaced these", so ask that.
+  if (m.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile) return null;
+  if (m.customProgramCacheKey !== THREE.Material.prototype.customProgramCacheKey) return null;
+  return `collapse|${m.type}|${m.side}|${m.flatShading ? 'F' : '-'}|${m.vertexColors ? 'V' : '-'}`
+    + `|${m.transparent ? 'T' : '-'}|${m.opacity}|${m.alphaTest}|${m.depthWrite ? 'W' : '-'}`
+    + `|${m.depthTest ? 'D' : '-'}|${m.blending}|${m.wireframe ? 'w' : '-'}|${m.toneMapped ? 'M' : '-'}`;
+}
+
+/**
  * Bake each chunk's colour/roughness/metalness into per-vertex attributes and
  * return the ONE material that draws the lot.
  *

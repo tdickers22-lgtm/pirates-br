@@ -329,5 +329,68 @@ expect('mergedGeometry is cached (same object on re-request)',
 expect('merged geometry is registered as a shared resource (never disposed by callers)',
   !!first && assets.isShared(first.geometry));
 
+// ── the static batcher's chunk arithmetic ──────────────────────────────────
+//
+// `collapseStaticMeshes` merges a PIECE's meshes and then bakes each part's
+// colour at the vertex range that part landed in. That range is a running sum of
+// position counts, and if it is off by one mesh every plank on the pier draws in
+// the wrong colour — which no counting test can see and which the live gate
+// (test-decor-batch) cannot see either, because a mis-baked batch is still ONE
+// draw call. So build a piece whose right answer is known and read the buffer.
+{
+  const THREE = await import('three');
+  const { collapseStaticMeshes } = await import('../src/client/world/island/StaticBatcher.ts');
+
+  // Three deliberately DIFFERENT vertex counts, so an offset that used a
+  // constant stride, the wrong mesh's count, or a reversed order all land on the
+  // wrong vertices. Same family (flat, double-sided, vertex colours) so the
+  // batcher is obliged to merge them into one.
+  const mk = (hex, rough, w) => {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(w, 1, 1, w, 1, 1),
+      new THREE.MeshStandardMaterial({
+        color: hex, roughness: rough, metalness: 0,
+        flatShading: true, side: THREE.DoubleSide, vertexColors: false,
+      }),
+    );
+    mesh.position.x = w;
+    return mesh;
+  };
+  const piece = new THREE.Group();
+  piece.name = 'test-piece';
+  const parts = [mk(0x804020, 0.9, 1), mk(0x2080ff, 0.4, 2), mk(0x10ff30, 0.6, 3)];
+  for (const p of parts) piece.add(p);
+
+  const saved = collapseStaticMeshes(piece);
+  const batches = piece.children.filter((c) => c.isMesh);
+  expect('the batcher merges three same-family materials into one mesh',
+    saved === 2 && batches.length === 1, `saved=${saved} meshes=${batches.length}`);
+
+  if (batches.length === 1) {
+    const geom = batches[0].geometry;
+    const tint = geom.getAttribute(TINT_ATTRIBUTE);
+    const surf = geom.getAttribute(SURFACE_ATTRIBUTE);
+    let offset = 0;
+    const wrong = [];
+    for (const part of parts) {
+      const n = part.geometry.getAttribute('position').count;
+      const m = part.material;
+      // Sample the FIRST and LAST vertex of each range: an offset that drifts
+      // shows at one end, an order that reverses shows at both.
+      for (const i of [offset, offset + n - 1]) {
+        const gotTint = bakeKey(tint.getX(i), tint.getY(i), tint.getZ(i), surf.getX(i), surf.getY(i));
+        const wantTint = bakeKey(1 - m.color.r, 1 - m.color.g, 1 - m.color.b, 1 - m.roughness, m.metalness);
+        if (gotTint !== wantTint) wrong.push(`vertex ${i} (part range ${offset}..${offset + n - 1}): want ${wantTint} got ${gotTint}`);
+      }
+      offset += n;
+    }
+    expect('every batched vertex carries its OWN part\'s colour and roughness',
+      wrong.length === 0 && offset === tint.count,
+      wrong.length ? wrong.join('\n     ') : `baked ${tint.count} vertices for ${offset} part vertices`);
+    expect('the batch draws with ONE material, not the three it merged',
+      !Array.isArray(batches[0].material) && batches[0].material instanceof CollapsedAssetMaterial);
+  }
+}
+
 console.log(failures === 0 ? '\nAll asset merge assertions passed' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

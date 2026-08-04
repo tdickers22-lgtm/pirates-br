@@ -26,6 +26,9 @@
 //     the lookup lives in (DockBuilder.ts)
 //   * restore `if (mesh.name) return false` → LIVE dock budget fails on all ten
 //     piers, 34–52 draws against a budget of 20
+//   * key the batcher's buckets by `material.uuid` again (i.e. undo the material
+//     collapse) → LIVE dock FAMILY ceiling fails on all ten piers, 16 materials
+//     against a ceiling of 6
 //   * add a getObjectByName('nope') in src/ → SOURCE half fails
 //
 // WHAT THE DOOR CHECK IS AND IS NOT. Dropping 'door' does NOT orphan the door
@@ -181,17 +184,32 @@ async function main() {
     }
     console.log(`  live: ${live.registered.length} registered tavern doors, ${live.doorsInScene} 'door' nodes in scene`);
 
-    // 2. A pier is at its material count, not its mesh count. 38.2 draws per
-    //    copy before the rule changed, 16.0 after, and 16.0 is the number of
-    //    distinct materials in the pier — i.e. the batcher is exhausted. The
-    //    budget sits just above the material floor so a REGRESSION fails and an
-    //    asset gaining a material does not.
+    // 2. TWO CLAIMS, because one of them stopped being able to fail.
+    //
+    //    (a) THE BATCHER IS EXHAUSTED: a pier's draws are its MATERIAL count,
+    //        not its mesh count — 38.2 draws per copy before the naming fix,
+    //        16.0 after.
+    //    (b) ITS MATERIAL COUNT IS ITS FAMILY COUNT: 16.0 before the material
+    //        collapse, 4.0 after, and 4 is what `dock.glb`'s six flat colours
+    //        come to once the shadow-flag and attribute-set splits are counted.
+    //
+    //    (a) alone was the whole gate and it was written `draws > mats + 4`,
+    //        which a collapse regression walks straight through: unmerged is 16
+    //        draws for 16 materials, and 16 is under a budget of 20. A budget
+    //        expressed in the very number the change moves cannot see the change
+    //        move. So the material count is now asserted against a CONSTANT,
+    //        re-derived from the reading above and sitting between the two.
+    const DOCK_FAMILY_CEILING = 6;
     if (live.docks.length === 0) failures.push('no decor-dock found — the dock budget proved nothing');
     for (const d of live.docks) {
-      const budget = d.mats + 4;
+      const budget = d.mats + 2;
       if (d.draws > budget) {
         failures.push(`a decor-dock draws ${d.draws} times for ${d.mats} materials (budget ${budget}) — `
           + 'the static batcher stopped merging it');
+      }
+      if (d.mats > DOCK_FAMILY_CEILING) {
+        failures.push(`a decor-dock draws with ${d.mats} distinct materials (ceiling ${DOCK_FAMILY_CEILING}) — `
+          + 'the material collapse stopped folding its flat colours into one family');
       }
     }
     const worst = live.docks.reduce((a, b) => (b.draws > a.draws ? b : a), { draws: 0, mats: 0 });
