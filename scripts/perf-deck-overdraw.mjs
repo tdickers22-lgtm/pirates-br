@@ -52,6 +52,12 @@ const MAX_LAYERS = parseInt(arg('layers', '16'), 10);
 const TOP_PARTS = parseInt(arg('parts', '8'), 10);
 const HIDE = arg('hide', null); // extra counterfactual: hide this exact part key
 const NO_WHATIF = argv.includes('--no-whatif');
+/** Census these SOURCE BUCKETS as well, one scene render each. The part census
+ *  explains one bucket; this says which bucket to explain. It exists because the
+ *  tier inversion turned out not to be in the bucket the brief named: at
+ *  deck-aft the `ship` reads 1.268 layers at high and 1.353 at low — flat — while
+ *  everything else opaque reads 0.418 at high and 0.953 at low. */
+const BUCKETS = (arg('buckets', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const VIEWPORT = { width: 960, height: 540 };
 const SETTLE_MS = parseInt(arg('settle', '12000'), 10);
 
@@ -160,6 +166,26 @@ async function main() {
     console.log(`  blended      mean ${blended.meanAll.toFixed(3)}`);
     console.log(`  opaque       mean ${(all.meanAll - blended.meanAll).toFixed(3)}`);
     console.log(`  ${BUCKET.padEnd(12)} mean ${bucketOnly.meanAll.toFixed(3)} over ${pct(bucketOnly.coveredFraction)}  p95 ${bucketOnly.p95}  max ${bucketOnly.max}`);
+
+    // ── 1b. the other buckets, when the question is which bucket ────────────
+    if (BUCKETS.length) {
+      const inv = await page.evaluate(async ([a]) => {
+        if (a) window.__cost.anchorShip(a);
+        return window.__cost.frameInventory();
+      }, [anchor]);
+      report.inventory = inv.slice(0, 30);
+      const names = BUCKETS[0] === 'auto'
+        ? inv.filter((s) => s.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 8).map((s) => s.source)
+        : BUCKETS;
+      report.byBucket = [];
+      console.log('');
+      for (const name of names) {
+        const r = await census({ maxLayers: MAX_LAYERS, only: name });
+        report.byBucket.push({ bucket: name, meanAll: r.meanAll, coveredFraction: r.coveredFraction, p95: r.p95, max: r.max });
+        console.log(`    bucket[${name.padEnd(22)}] mean ${r.meanAll.toFixed(3)} over ${pct(r.coveredFraction)} p95 ${r.p95} max ${r.max}`);
+      }
+      report.byBucket.sort((a, b) => b.meanAll - a.meanAll);
+    }
 
     // ── 2. every surface, free ───────────────────────────────────────────────
     const parts = await page.evaluate(async ([a, b]) => {
