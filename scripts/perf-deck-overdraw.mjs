@@ -52,6 +52,10 @@ const MAX_LAYERS = parseInt(arg('layers', '16'), 10);
 const TOP_PARTS = parseInt(arg('parts', '8'), 10);
 const HIDE = arg('hide', null); // extra counterfactual: hide this exact part key
 const NO_WHATIF = argv.includes('--no-whatif');
+/** Pin the hull to a fixed world pose for every counting render (see PARK_SHIP).
+ *  Off by default so an existing reading is not silently redefined; ON is the
+ *  only way to compare two runs, two tiers or two builds. */
+const PARK = argv.includes('--park');
 /** Census these SOURCE BUCKETS as well, one scene render each. The part census
  *  explains one bucket; this says which bucket to explain. It exists because the
  *  tier inversion turned out not to be in the bucket the brief named: at
@@ -140,10 +144,16 @@ async function main() {
     // on the same pinned seed, and the ship's own share of the framebuffer read
     // 35.4% and 57.6%. See ANCHOR_SHIP.
     const anchor = plan[SCENE].ship
-      ? { dy: plan[SCENE].dy ?? 4.2, yawOffset: plan[SCENE].yawOffset ?? Math.PI, pitch: plan[SCENE].pitch ?? -0.05, dside: plan[SCENE].dside ?? 0 }
+      ? { dy: plan[SCENE].dy ?? 4.2, yawOffset: plan[SCENE].yawOffset ?? Math.PI, pitch: plan[SCENE].pitch ?? -0.05, dside: plan[SCENE].dside ?? 0, park: PARK }
       : null;
+    if (PARK) {
+      const parked = await page.evaluate(([a]) => window.__cost.parkShip(a), [anchor]);
+      console.log(`  hull PARKED at ${parked ? `${Math.round(parked.x)},${Math.round(parked.z)} rot ${parked.rot}` : 'FAILED'}`
+        + `${parked && !parked.parkedMesh ? ' (camera only — no mesh found)' : ''}`);
+      report.parked = parked;
+    }
     const census = (opts) => page.evaluate(async ([a, o]) => {
-      if (a) window.__cost.anchorShip(a);
+      if (a) (a.park ? window.__cost.parkShip : window.__cost.anchorShip)(a);
       return window.__cost.stencilOverdraw(o);
     }, [anchor, opts]);
     /** An attribution reading AND the whole frame it is a share of, taken in the
@@ -157,14 +167,15 @@ async function main() {
      *  frame is what survives that, so every attribution row carries the frame
      *  it was divided by. */
     const shareCensus = (opts) => page.evaluate(async ([a, o]) => {
-      if (a) window.__cost.anchorShip(a);
+      const put = a ? (a.park ? window.__cost.parkShip : window.__cost.anchorShip) : null;
+      if (put) put(a);
       const part = await window.__cost.stencilOverdraw(o);
-      window.__cost.anchorShip(a);
+      if (put) put(a);
       const frame = await window.__cost.stencilOverdraw({ maxLayers: o.maxLayers });
       return { part, frame, share: frame.meanAll > 0 ? part.meanAll / frame.meanAll : 0 };
     }, [anchor, opts]);
     const counterfactual = (opts) => page.evaluate(async ([a, o]) => {
-      if (a) window.__cost.anchorShip(a);
+      if (a) (a.park ? window.__cost.parkShip : window.__cost.anchorShip)(a);
       return window.__cost.whatIf(o);
     }, [anchor, opts]);
 
@@ -187,7 +198,7 @@ async function main() {
     // ── 1b. the other buckets, when the question is which bucket ────────────
     if (BUCKETS.length) {
       const inv = await page.evaluate(async ([a]) => {
-        if (a) window.__cost.anchorShip(a);
+        if (a) (a.park ? window.__cost.parkShip : window.__cost.anchorShip)(a);
         return window.__cost.frameInventory();
       }, [anchor]);
       report.inventory = inv.slice(0, 30);
@@ -207,7 +218,7 @@ async function main() {
 
     // ── 2. every surface, free ───────────────────────────────────────────────
     const parts = await page.evaluate(async ([a, b]) => {
-      if (a) window.__cost.anchorShip(a);
+      if (a) (a.park ? window.__cost.parkShip : window.__cost.anchorShip)(a);
       return window.__cost.bucketParts({ bucket: b, maxParts: 80 });
     }, [anchor, BUCKET]);
     report.parts = parts;

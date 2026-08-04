@@ -13,7 +13,7 @@ import {
   BUCKET_FN, FRUSTUM_FN, BLENDED_FN, PART_FN,
   LOAD_THREE, TAG_BUCKETS, FRAME_INVENTORY, PASS_SPLIT, RESOURCE_CENSUS, STENCIL_OVERDRAW,
   SKY_OCCLUSION, TIME_FRAMES, FRUSTUM_ENTITIES, PIN_RATIO_AT, INSTALL_HITCH_SAMPLER, ALLOCATION_RATE,
-  BUCKET_PARTS, WHAT_IF, ANCHOR_SHIP,
+  BUCKET_PARTS, WHAT_IF, ANCHOR_SHIP, PARK_SHIP,
 } from './cost-model-probes.mjs';
 
 export const COST_PRELUDE = [
@@ -27,6 +27,7 @@ export const COST_PRELUDE = [
     frameInventory: ${FRAME_INVENTORY.toString()},
     bucketParts: ${BUCKET_PARTS.toString()},
     anchorShip: ${ANCHOR_SHIP.toString()},
+    parkShip: ${PARK_SHIP.toString()},
     whatIf: ${WHAT_IF.toString()},
     passSplit: ${PASS_SPLIT.toString()},
     resourceCensus: ${RESOURCE_CENSUS.toString()},

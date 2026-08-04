@@ -325,6 +325,55 @@ export const ANCHOR_SHIP = ({ dy = 4.2, yawOffset = Math.PI, pitch = -0.05, dsid
 };
 
 /**
+ * PARK THE HULL — the fix §15.5 of the cost model asks for first.
+ *
+ * Anchoring the camera to the ship makes the ship frame identically; it does not
+ * make the WORLD behind the ship hold still, because the ship keeps sailing and
+ * takes the camera with it. Every absolute reading on `deck-aft` therefore moved
+ * by a third between renders, and no attribution taken on it can be compared
+ * with any other.
+ *
+ * This pins the local hull's RENDER TRANSFORM to a fixed world pose and puts the
+ * camera on it, at the top of the same task as the render that counts. The game
+ * loop overwrites the transform on its next frame, which is harmless: a task
+ * cannot be interrupted by the loop, so the render that follows in this task sees
+ * exactly the pose set here.
+ *
+ * The pose is a FIXED WORLD POSE, not the hull's current one, so two sessions on
+ * the same seed frame the same islands astern — which is what makes a
+ * cross-session or cross-tier comparison mean anything at all. Defaults put her
+ * off the dock island, bows along +z, which is a deck view with land astern.
+ *
+ * Nothing is restored, and nothing needs to be: the next game frame writes the
+ * server's pose back over this one.
+ */
+export const PARK_SHIP = ({ x = null, z = null, rot = 0, dy = 4.2, yawOffset = Math.PI, pitch = -0.05 } = {}) => {
+  const g = window.__piratesBR;
+  const ships = g.state?.ships ?? [];
+  const ship = ships.find((s) => s.ownerId === g.localPlayerId) ?? ships[0] ?? null;
+  if (!ship) return null;
+  const mesh = g.shipRenderer?.shipMeshes?.get(ship.id) ?? null;
+  // A pose derived from the world, not from where she happens to be: the dock
+  // island's centre, offset seaward by its own radius, is the same point in
+  // every session that shares a map seed.
+  let px = x, pz = z;
+  if (px === null || pz === null) {
+    const dock = (g.state?.islands ?? []).find((i) => i.hasDock) ?? (g.state?.islands ?? [])[0] ?? null;
+    if (!dock) return null;
+    px = dock.x + (dock.radius ?? 120) + 90;
+    pz = dock.z;
+  }
+  const y = mesh ? mesh.root.position.y : (ship.position?.y ?? 0);
+  if (mesh) {
+    mesh.root.position.set(px, y, pz);
+    mesh.root.rotation.y = rot;
+    mesh.root.updateMatrixWorld(true);
+  }
+  g.enableFreeCam(px, y + dy, pz, rot + yawOffset, pitch);
+  return { x: px, y, z: pz, rot, parkedMesh: !!mesh };
+};
+
+/**
  * EVERY SURFACE IN ONE BUCKET, and the three flags that make a surface cost
  * twice what it looks like — WITHOUT RENDERING ANYTHING.
  *
