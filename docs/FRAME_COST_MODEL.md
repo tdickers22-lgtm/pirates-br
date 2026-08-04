@@ -1419,3 +1419,84 @@ So the shares in §15.3 can now be re-taken and trusted, and a whole-frame numbe
 on `deck-aft` still cannot be compared across sessions. The remaining step, if a
 frame-level claim is ever wanted here, is to park the fleet as well — the same
 hook over `shipMeshes` rather than over one entry of it.
+
+---
+
+## 16. The governor could not see a hitch, and fourteen green assertions said it could
+
+The adaptive frame governor (`src/client/rendering/FrameGovernor.ts`) is the
+mechanism the whole "smooth on weak hardware" promise rests on. It reads a
+median and a p95 of recent frame times, and the two exist to tell apart the two
+machines that want opposite responses: uniformly slow (spend the ladder) and
+fine-except-for-stalls (fix the stall, change nothing about the picture).
+
+It was reading a number that could never exceed 50 ms.
+
+`Game.frame` computes
+
+```ts
+const rawDtMs = now - this.lastFrameTime;
+const dt = Math.min(0.05, rawDtMs / 1000);   // for the integrator
+```
+
+— the clamp is correct and necessary; an unclamped step integrates a ship
+through a hull. That same clamped `dt` was then handed to
+`Renderer.updatePerformance`, which feeds both the governor's window **and** the
+tier audition that decides what this machine gets at next launch. So to the two
+things in this build that measure the MACHINE, every frame from 50 ms to a
+three-second shader-link storm was "50 ms":
+
+* the p95 could not exceed the median's own ceiling, so the p95 carried no
+  information at all — the two statistics collapsed into one;
+* `downP95Ratio` (1.45 × 16.67 = 24.2 ms) was saturated by any slow frame
+  equally, so the controller could not rank a hitch against a slow frame;
+* the audition read a machine that stalls to a standstill as a steady 20 fps.
+
+Two earlier phases found this independently. Neither fixed it. Now fixed: the
+raw frame time goes to the governor, the clamp stays on the integrator.
+
+### 16.1 Why fourteen assertions missed it
+
+`scripts/test-frame-governor-live.mjs` already graded this controller in a real
+browser with a real GL context and passed every assertion it had. It still does,
+under the bug, deliberately re-applied:
+
+| section | under the clamp |
+|---|---|
+| CONTRACT (enabled, label, drawing buffer) | ✓ ✓ ✓ |
+| ENGAGEMENT (scalar steps, buffer resizes, ratio matches, streaming backs off) | ✓ ✓ ✓ ✓ |
+| CLAMPS (floor, ceiling, HUD alive) | ✓ ✓ ✓ |
+| NO REDUNDANT REALLOCATION | ✓ |
+
+**A 50 ms ceiling is still over a 16.67 ms budget.** Every one of those
+assertions asks whether the controller REACTED; not one asks whether what it
+reacted to was true. That is the shape of this class of defect, and it is worth
+naming: a gate on a control loop that only ever grades the output can be passed
+by a loop wired to a constant.
+
+### 16.2 The phase that can fail
+
+`THE HITCH IS VISIBLE` injects stalls of a known length (one frame in five made
+400 ms long) and puts an independent witness in the page — an init script that
+records raw `requestAnimationFrame` deltas and has never heard of the governor.
+Both are asked about the same 45 frames:
+
+| | governor median | governor p95 | page rAF median | page rAF p95 |
+|---|--:|--:|--:|--:|
+| fixed | 250.4 ms | **632.1 ms** | 250.1 ms | 623.7 ms |
+| clamped `dt` | 50.0 ms | **50.0 ms** | 253.8 ms | 607.6 ms |
+
+Fixed, it tracks the witness to 0.1% on the median and 1.4% on the p95. Clamped,
+it is the ceiling to one decimal place, twice — and the median/p95 separation,
+the whole reason there are two numbers, is exactly zero.
+
+### 16.3 Two things that fall out of feeding it real time
+
+1. **A hidden tab schedules no animation frames**, so the first frame back is as
+   long as the player was away. That is an absence, not a hitch, and under real
+   time it would read as the worst stall of the session and spend the ladder on
+   it. `Game` names it as the one-off it is on `visibilitychange`. The
+   alternative — a ceiling on what counts as a frame — is the bug being fixed.
+2. **`pushFrame` cleared the one-off mark above the enabled/suspended guards**,
+   so a frame that was never sampled could eat the mark and let the frame the
+   caller actually named into the window.
