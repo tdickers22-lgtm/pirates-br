@@ -39,6 +39,56 @@ const MAX_PIXEL_RATIO: Record<RenderQuality, number> = {
   high: 1.25,
 };
 
+/**
+ * DRAW THE NEAR THING FIRST. The one fill lever in this game that changes no
+ * pixel of the output.
+ *
+ * three r160 does NOT sort opaque geometry front-to-back, and this cost me an
+ * afternoon of assuming it did. `painterSortStable`
+ * (three.module.js:21250) compares `groupOrder`, then `renderOrder`, then
+ * **`material.id`**, and only reaches `z` when two draws already share a
+ * material. So opaque draw order in this game was *material creation order* —
+ * whatever order a constructor happened to declare its materials in — and the
+ * depth test spent the whole frame rejecting fragments it had already shaded.
+ *
+ * Measured, on the parked deck at seed 20260801 (`perf-deck-overdraw
+ * --park`, paired census, mutation and baseline in the same task):
+ *
+ *   low    2.457 → **1.430** layers  (−1.027, −42%)   p95 6 → **3**
+ *   high   2.291 → **1.933** layers  (−0.358, −16%)   p95 5 → **4**
+ *
+ * The tier that needs it most gets the most, which is the opposite of how the
+ * quality ladder behaves (§1 of the cost model: the ladder buys geometry, not
+ * fill). For scale, deleting every ship in the world was worth −0.359 at `low`
+ * in the same session: this is worth nearly three of that, and it deletes
+ * nothing.
+ *
+ * WHY IT IS FREE TO LOOK AT. Opaque, depth-tested, depth-writing geometry
+ * composites to the same image in any order — order decides only which shaded
+ * fragments are thrown away, and near-first throws away the most. The one place
+ * order is observable is an exact depth tie, where `LESS` keeps whoever drew
+ * first; that is z-fighting, which is a defect wherever it exists and not a
+ * thing this may preserve.
+ *
+ * WHAT IT COSTS. Batching. three's default key is material id precisely to keep
+ * same-material draws adjacent, and sorting by depth interleaves them. That is
+ * a trade of GL state changes for shaded fragments, and on the machine this game
+ * targets — fanless, fill-bound, `low` — the measurement above says which side
+ * to take. `groupOrder` and `renderOrder` stay AHEAD of z, so everything that
+ * deliberately owns a slot in the order (the sky dome pinned last, the FX
+ * layers) keeps it.
+ */
+function frontToBack(a: { groupOrder: number; renderOrder: number; z: number; id: number },
+  b: { groupOrder: number; renderOrder: number; z: number; id: number }): number {
+  if (a.groupOrder !== b.groupOrder) return a.groupOrder - b.groupOrder;
+  if (a.renderOrder !== b.renderOrder) return a.renderOrder - b.renderOrder;
+  // z is the object origin in NDC (WebGLRenderer.projectObject), so it grows
+  // with distance and ascending IS front-to-back.
+  if (a.z !== b.z) return a.z - b.z;
+  // Stable tail, exactly as painterSortStable's.
+  return a.id - b.id;
+}
+
 /** Sky dome tessellation per tier — segments, not a cost anyone reads as
  *  quality. See the dome construction below for why the count is not cosmetic;
  *  the short version is that the crease it hides is an artefact of the ramp's
@@ -553,6 +603,7 @@ export class Renderer {
       antialias: false,
       powerPreference: 'high-performance',
     });
+    this.renderer.setOpaqueSort(frontToBack);
     // Open where the governor opens (see OPENING_SCALAR), not at the ceiling.
     this.applyPixelRatio(this.levers.pixelRatio, true);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
