@@ -206,6 +206,11 @@ async function main() {
       console.log('');
       await run(`${BUCKET}: DoubleSide→FrontSide`, [{ op: 'frontside', bucket: BUCKET }]);
       await run(`${BUCKET}: hidden entirely`, [{ op: 'hideBucket', bucket: BUCKET }]);
+      // The draw-order hypothesis, priced. three r160's painterSortStable
+      // compares material id BEFORE z, so opaque order in this game is material
+      // creation order and nothing in it is front-to-back.
+      await run(`${BUCKET}: sorted front-to-back`, [{ op: 'frontToBack', bucket: BUCKET }]);
+      await run('whole scene: sorted front-to-back', [{ op: 'frontToBack' }]);
       // PER SURFACE, because the bucket-wide answer is not a fix. Culling the
       // back faces of a closed shell is free; culling them off a sail is a sail
       // that vanishes when you look aft at it. The two cannot be told apart by

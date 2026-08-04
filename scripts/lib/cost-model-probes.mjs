@@ -474,7 +474,7 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
     // Ranked by PROJECTED AREA, not by draw calls: the census that follows can
     // only afford a handful of renders and the biggest surface on the screen is
     // routinely the one with the fewest calls.
-    .sort((a, b) => (b.coverage - a.coverage) || (b.drawnCalls - a.drawnCalls))
+    .sort((a, b) => (b.coverage - a.coverage) || (b.tris - a.tris) || (b.drawnCalls - a.drawnCalls))
     .slice(0, maxParts);
 };
 
@@ -494,6 +494,17 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
  *   { op: 'hideBucket', bucket }    the whole bucket → invisible
  *   { op: 'depthWrite', part, value }
  *   { op: 'renderOrder', part, value }
+ *   { op: 'frontToBack', bucket }   assign renderOrder by distance from the
+ *                                   camera, nearest first, to the bucket's
+ *                                   OPAQUE drawables. This prices the whole
+ *                                   draw-order hypothesis without writing a line
+ *                                   of renderer code — and it is worth pricing,
+ *                                   because three r160 does NOT sort opaque
+ *                                   front-to-back. `painterSortStable` compares
+ *                                   groupOrder, then renderOrder, then
+ *                                   MATERIAL ID, and only reaches z when two
+ *                                   draws share a material. Opaque order in this
+ *                                   game is material creation order.
  *
  * PAIRED, and that is not a nicety. The world does not hold still: the ship
  * sails, islands enter and leave, and one census is seconds of software
@@ -529,6 +540,28 @@ export const WHAT_IF = async ({ mutations = [], maxLayers = 24, only = null, ble
   let touched = 0;
   try {
     for (const mu of mutations) {
+      if (mu.op === 'frontToBack') {
+        const camera = g.renderer.camera;
+        camera.updateMatrixWorld();
+        scene.updateMatrixWorld();
+        const cp = camera.position;
+        const rows = [];
+        scene.traverse((o) => {
+          if (!o.visible || !(o.isMesh || o.isInstancedMesh)) return;
+          if (mu.bucket && bucketFor(o) !== mu.bucket) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          if (mats.some((m) => m && isBlended(m))) return;
+          const e = o.matrixWorld.elements;
+          rows.push({ o, d: (e[12] - cp.x) ** 2 + (e[13] - cp.y) ** 2 + (e[14] - cp.z) ** 2 });
+        });
+        rows.sort((a, b) => a.d - b.d);
+        for (let i = 0; i < rows.length; i++) {
+          const o = rows[i].o;
+          if (!savedOrder.has(o)) { savedOrder.set(o, o.renderOrder); touched += 1; }
+          o.renderOrder = -10000 + i;
+        }
+        continue;
+      }
       scene.traverse((o) => {
         const m = o.material;
         if (!m) return;
