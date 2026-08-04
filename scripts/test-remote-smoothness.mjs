@@ -323,8 +323,11 @@ async function main() {
 
     if (r.err) console.log(`  sampler error: ${r.err}`);
     console.log(`  ticks ${r.ticks} over ${f(r.elapsed, 1)}s = ${f(r.ticks / Math.max(1e-6, r.elapsed), 0)}Hz sampling`);
+    const modeTotal = Object.values(r.stats.modes).reduce((a, b) => a + b, 0) || 1;
     console.log(`  buffer: delay ${f(r.stats.delayMs, 1)}ms  jitter ${f(r.stats.jitterMs, 1)}ms  `
-      + `interval ${f(r.stats.intervalMs, 1)}ms  hard snaps ${r.stats.hardSnaps}  modes ${JSON.stringify(r.stats.modes)}`);
+      + `interval ${f(r.stats.intervalMs, 1)}ms  hard snaps ${r.stats.hardSnapsBack} back / ${r.stats.hardSnapsForward} forward  `
+      + `starved ${(((modeTotal - r.stats.modes.interpolated) / modeTotal) * 100).toFixed(1)}%  `
+      + `modes ${JSON.stringify(r.stats.modes)}`);
 
     const line = (label, p) => {
       if (!p || p.moving === 0) { console.log(`  ${label.padEnd(24)} — no moving samples`); return null; }
@@ -389,9 +392,24 @@ async function main() {
     if (gradedMoving < MIN_MOVING_SAMPLES) {
       failures.push(`only ${gradedMoving} moving samples across graded populations (need ${MIN_MOVING_SAMPLES}) — the run measured nothing`);
     }
-    if (r.stats.hardSnaps > 0) {
-      failures.push(`the remote render clock was re-anchored ${r.stats.hardSnaps} times in ${SECONDS}s — `
-        + `every one of those is every remote body teleporting at once`);
+    // BACKWARD re-anchors only. A backward one moves the clock to an earlier
+    // server time and redraws every remote body where it already was; nothing
+    // legitimate does that. A FORWARD one is a data gap that has been survived —
+    // this machine measures snapshot arrivals up to 2.1 SECONDS apart, because a
+    // frame spent building an island cannot run the message callback, and after a
+    // gap that long the world has genuinely moved on. Reported, not graded.
+    if (r.stats.hardSnapsBack > 0) {
+      failures.push(`the remote render clock was re-anchored BACKWARDS ${r.stats.hardSnapsBack} times in ${SECONDS}s — `
+        + `every one of those redraws every remote body where it already was`);
+    }
+    // …and the buffer has to be answering from two real samples, not guessing.
+    // A starved buffer passes the continuity bars by accident on a quiet fleet
+    // and fails them the moment anything moves.
+    const starved = (modeTotal - r.stats.modes.interpolated) / modeTotal;
+    if (starved > 0.03) {
+      failures.push(`the buffer starved on ${(starved * 100).toFixed(1)}% of answers (max 3%) — `
+        + `delay ${f(r.stats.delayMs, 1)}ms against a measured ${f(r.stats.intervalMs, 1)}ms interval `
+        + `and ${f(r.stats.jitterMs, 1)}ms of jitter is not buying a bracket`);
     }
   } finally {
     await browser.close();

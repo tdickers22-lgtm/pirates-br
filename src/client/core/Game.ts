@@ -5743,7 +5743,8 @@ export class Game {
       delayMs: remote.timeline.delay * 1000,
       jitterMs: remote.timeline.jitter * 1000,
       intervalMs: remote.timeline.interval * 1000,
-      hardSnaps: remote.timeline.hardSnaps,
+      hardSnapsBack: remote.timeline.hardSnapsBack,
+      hardSnapsForward: remote.timeline.hardSnapsForward,
       modes: { ...remote.modeCounts },
     };
   }

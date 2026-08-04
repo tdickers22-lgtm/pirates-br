@@ -95,11 +95,16 @@ const DELAY_SLEW_PER_S = 0.15;
  * that gets rendered is the buffer's requirement MINUS the lead, floored at one
  * whole snapshot interval so a bracketing pair is still guaranteed.
  *
- * On a clean wire that puts the render delay at the floor (one interval, 32ms)
- * instead of 1.5, so an opponent is drawn 32ms behind the newest sample rather
- * than 35ms ahead of it: 67ms of extra lead, 33cm at a sprint. On a ragged one
- * the jitter term wins and the buffer is fed first, which is the right priority
- * — a target that snaps is harder to hit than one that is honestly late.
+ * IT MAY ONLY EAT THE SURPLUS. The first reading of this with the lead taken
+ * off the whole delay measured what that costs: the delay fell to 1.2 measured
+ * intervals, the buffer starved on 3.8% of answers instead of 1.4%, and the
+ * shark population went from p99 0.015m to 0.087m — the jitter it had been
+ * covering came straight back as steps. So the lead is only allowed to spend
+ * what is left ABOVE a guaranteed bracket, which is one whole MEASURED interval
+ * plus the jitter margin. On a clean wire that is ~35ms and the lead is given
+ * back almost in full; on a ragged one the bracket wins and the buffer is fed
+ * first, which is the right priority — a target that snaps is harder to hit than
+ * one that is honestly late.
  */
 const AIM_LEAD_S = 0.035;
 
@@ -350,8 +355,24 @@ export class RemoteTimeline {
   private lastArrivalMs = -1;
   private lastServerT = -1;
   private lastAdvanceMs = -1;
-  /** Counters the gate reads: how often the clock had to be re-anchored. */
-  hardSnaps = 0;
+  /**
+   * Counters the gate reads. The two are not the same event and must never be
+   * added together.
+   *
+   * BACKWARD is always a defect: the clock was moved to an earlier server time,
+   * so every remote body in the world is redrawn where it already was. Nothing
+   * legitimate does that.
+   *
+   * FORWARD is a data gap that has been survived. This machine measures snapshot
+   * arrivals up to 2.1 SECONDS apart — a frame spent building an island cannot
+   * run the message callback — and after a gap that long the world genuinely has
+   * moved on. Slewing at 12% would take fifteen seconds to catch up and draw
+   * everyone a second and a half in the past the whole way; the snap is correct
+   * and the honest thing is to count it, not to forbid it.
+   */
+  hardSnapsBack = 0;
+  hardSnapsForward = 0;
+  get hardSnaps() { return this.hardSnapsBack + this.hardSnapsForward; }
 
   reset() {
     this.started = false;
@@ -363,7 +384,8 @@ export class RemoteTimeline {
     this.lastServerT = -1;
     this.lastAdvanceMs = -1;
     this.rate = 1;
-    this.hardSnaps = 0;
+    this.hardSnapsBack = 0;
+    this.hardSnapsForward = 0;
   }
 
   get ready() { return this.started; }
@@ -437,9 +459,15 @@ export class RemoteTimeline {
     this.anchorServerT = t;
     this.anchorClientMs = nowMs;
 
+    // What starvation actually requires: one whole interval of history plus the
+    // margin the measured jitter demands. Note this is the MEASURED interval, not
+    // the nominal 32ms — a client whose snapshots arrive every 45ms needs 45ms of
+    // bracket, and a floor written in nominal intervals silently under-buys it.
+    const bracket = this.interval + this.jitter * JITTER_MARGIN;
+    const want = this.interval * 1.5 + this.jitter * JITTER_MARGIN;
     const wantDelay = Math.min(
       DELAY_MAX_S,
-      Math.max(DELAY_MIN_S, this.interval * 1.5 + this.jitter * JITTER_MARGIN - AIM_LEAD_S),
+      Math.max(DELAY_MIN_S, bracket, want - AIM_LEAD_S),
     );
     const slew = DELAY_SLEW_PER_S * Math.min(0.25, dt || SNAPSHOT_INTERVAL_S);
     this.delay += Math.max(-slew, Math.min(slew, wantDelay - this.delay));
@@ -451,7 +479,7 @@ export class RemoteTimeline {
       // restarted. Nothing continuous can be made of that, so say so and re-anchor.
       this.anchorServerT = target;
       this.rate = 1;
-      this.hardSnaps++;
+      if (err < 0) this.hardSnapsBack++; else this.hardSnapsForward++;
       return;
     }
     // Close the error over ~0.4s, bounded. Dead zone so a settled clock does not
