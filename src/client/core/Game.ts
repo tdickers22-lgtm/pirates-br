@@ -63,10 +63,23 @@ const ZERO_MOVE_AXES = Object.freeze({ x: 0, z: 0 });
  *  is 10s). Short bursts keep the sound tracking a keg that rides a turning deck,
  *  and stay inside SoundEngine.playKegFuse's per-call duration clamp. */
 const KEG_FUSE_HISS_BURST = 2.5;
+/** Baked in by vite (`define`) from PIRATES_BR_SERVER_PORT, defaulting to 8090.
+ *  See vite.config.ts — the same variable moves the dev proxy target, so the two
+ *  can never disagree about which server this build talks to. */
+declare const __GAME_SERVER_PORT__: string | undefined;
 /** Port the game server listens on by default (src/server/index.ts DEFAULT_PORT).
  *  Kept off 8080: local content filters commonly intercept that port and corrupt
- *  the WebSocket handshake. Only used to hop off a dev server (Vite on :3000). */
-const GAME_SERVER_PORT = '8090';
+ *  the WebSocket handshake. Only used to hop off a dev server (Vite on :3000).
+ *
+ *  IT IS NOT A CONSTANT ANY MORE, and the reason is a whole class of dishonest
+ *  test run. Every browser suite here reads PIRATES_BR_URL so a graded run can
+ *  point at a Vite the runner owns — but the SOCKET ignored that entirely and
+ *  went to :8090 regardless, so the suite rendered the runner's client against
+ *  the developer's live server: a world rolled on nobody's seed (perf ceilings
+ *  are measured against a pinned one) and a bot joining a human's match. Now the
+ *  Vite the runner starts bakes its own server's port and every suite pointed at
+ *  it lands on the right server without a line of per-suite code. */
+const GAME_SERVER_PORT = (typeof __GAME_SERVER_PORT__ === 'string' && __GAME_SERVER_PORT__) || '8090';
 /** Skeleton remains linger (and sink/fade) instead of popping after 1.5s. */
 const SKELETON_CORPSE_LIFETIME = 6.5;
 /** The limb node names a wildlife mesh is built with — see buildWildlifeMesh. */
