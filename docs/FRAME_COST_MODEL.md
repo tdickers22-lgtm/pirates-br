@@ -1395,3 +1395,27 @@ precision. Every absolute reading it can take moves by a third between renders.
    re-investigated: the hull's `DoubleSide` (max 1 layer — a ray crosses a closed
    shell once from inside) and the hold interior (0.000 layers — the deck's
    material is older, so it draws first and rejects everything below it).
+
+### 15.6 The parked hull, measured — it fixes the subject and not the frame
+
+`PARK_SHIP` pins the local hull's render transform to a pose derived from the map
+(the dock island's centre, offset seaward by its own radius) and puts the camera
+on it, at the top of the same task as each counting render. Two sessions, same
+seed, both parked at the same point (196, 690):
+
+| | unparked, same session | **parked**, two sessions |
+|---|--:|--:|
+| `ship` coverage of the framebuffer | 28.5% → 21.6% | **27.7% → 27.7%** |
+| `ship` layers | 0.996 → 0.655 (**−34%**) | 0.850 → 0.914 (**+7%**) |
+| frame layers | 2.198 | 2.489 → 1.435 |
+
+**The subject holds still now and the frame does not.** Ship coverage repeats to
+the tenth of a percent across two separate browser sessions, which is what a
+per-part census needs and never had. The frame mean still swings 2.489 → 1.435,
+and the blended half with it (0.562 → 0.269): the local hull is parked, the nine
+bot hulls, the sea state and the weather are not.
+
+So the shares in §15.3 can now be re-taken and trusted, and a whole-frame number
+on `deck-aft` still cannot be compared across sessions. The remaining step, if a
+frame-level claim is ever wanted here, is to park the fleet as well — the same
+hook over `shipMeshes` rather than over one entry of it.
