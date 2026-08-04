@@ -106,14 +106,14 @@ const BARS = {
   // server tick, so its drawn path should be as continuous as the arithmetic can
   // make it. Measured: 0.00/body-s, p99 0.008m, worst 0.016m.
   'remote-player': { rate: 1.0, p99: 0.02 },
-  // THE WALKER, and he is a harder case for an honest reason. He is driven by a
-  // rig that presses a key and lets go of it every 2.5s, and the server stops a
-  // pirate inside one or two 16ms ticks — a real 5 m/s change of velocity, which
-  // at a 9ms sample is a 4.8cm step that nothing in the renderer put there. It
-  // is in BOTH arms and it is the floor of what this metric can read on a body
-  // that is genuinely starting and stopping. Measured: 1.61/body-s, p99 0.026m
-  // against the dead-reckoned arm's 10.50/body-s and p99 0.536m.
-  'local-as-remote': { rate: 3.0, p99: 0.05 },
+  // THE WALKER, routed down the remote branch. He used to need a looser bar than
+  // anything else here — the rig starts and stops him every 2.5s and the server
+  // stops a pirate inside one tick, which is a real 5 m/s change of velocity and
+  // a 5cm step at a 9ms sample. That is now excluded at the source by the
+  // steadiness test in the sampler (on the SERVER's velocity, so it cannot hide
+  // a correction), and what is left is the same contract the steady population
+  // is held to.
+  'local-as-remote': { rate: 1.0, p99: 0.02 },
   // Sharks: the population the whole exercise was for, and the one a bot match
   // will not reliably produce (they spawn on a swimmer, on a cooldown, by
   // chance). Held to the steady-body bar for the runs that do get them.
@@ -153,6 +153,8 @@ const SAMPLER = `(() => {
   // id -> { t, x, y, z, v }  — v is the speed over the PREVIOUS interval, which
   // is what the next step is predicted from.
   const prev = new Map();
+  /** Per-body server speed at the previous tick — the steadiness test above. */
+  const serverSpeed = new Map();
 
   const record = (arm, popName, id, x, y, z, now, pxPerRad, cam) => {
     const pop = popOf(arm, popName);
@@ -232,7 +234,25 @@ const SAMPLER = `(() => {
         // buffer. They are counted and reported, never graded.
         const pop = p.onShipId ? 'deck-crew' : p.state === 'swimming' ? 'swimmer'
           : isLocal ? 'local-as-remote' : 'remote-player';
-        record(arm, pop, 'P' + p.id, q.x, q.y, q.z, now, pxPerRad, cam);
+        // A BODY THAT IS GENUINELY ACCELERATING CANNOT BE GRADED FOR CONTINUITY.
+        //
+        // The rig presses a key and lets go of it every 2.5s, and the server
+        // stops a pirate inside one or two 16ms ticks — a real 5 m/s change of
+        // velocity. Drawn faithfully, that is a 5cm step at a 9ms sample that
+        // nothing in the renderer put there, and it is what held the walking
+        // population's p99 at 0.03-0.05m in both arms while the steady one read
+        // 0.006m.
+        //
+        // The test is made on the SERVER's velocity field, not on the drawn
+        // path, and that is the whole point: a correction does not change the
+        // entity's velocity, so this cannot hide one. It only drops the samples
+        // where the body itself changed what it was doing.
+        const sp = Math.hypot(p.velocity.x, p.velocity.z);
+        const key = 'P' + p.id;
+        const wasSp = serverSpeed.get(key);
+        serverSpeed.set(key, sp);
+        if (wasSp !== undefined && Math.abs(sp - wasSp) > 1.0) { prev.delete(pop + '|' + key); continue; }
+        record(arm, pop, key, q.x, q.y, q.z, now, pxPerRad, cam);
       }
 
       // ── sharks ──────────────────────────────────────────────────────────
