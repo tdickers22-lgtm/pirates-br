@@ -1,0 +1,295 @@
+// THE Z-FIGHTING INSTRUMENT: A TIE IN THE DEPTH TEST IS THE ARTIFACT ITSELF.
+//
+// WHY THIS IS NOT A FRAME DIFF. The obvious probe is to dolly the camera and
+// diff consecutive frames, and it does not work in this game: the ocean, the
+// foliage sway, the clouds, the rain, the day clock and every particle pool are
+// all moving, so a frame diff of a moving camera reports the whole screen and
+// buries the artifact it was built to find. Worse, it is a SAMPLING probe — it
+// sees a fight only on the frames where the fight happened to flip.
+//
+// So measure the CAUSE, exactly, instead of sampling the symptom.
+//
+// Z-fighting is one thing and one thing only: two fragments from different
+// surfaces whose window-space depths land on the SAME quantised depth value, so
+// which of them survives is decided by something other than geometry — the draw
+// order, and the comparison operator. Every three material in this game runs the
+// default `LessEqualDepth`, under which the LAST of a tied pair wins. Flip the
+// comparison to `LessDepth` and the FIRST of a tied pair wins instead.
+//
+// Render the same world state twice, changing nothing but that operator:
+//
+//   • a pixel with no tie is byte-identical in both renders — the winner is
+//     strictly nearer than everything else, and `<` and `<=` agree about it;
+//   • a pixel WITH a tie changes, because the two operators pick different
+//     surfaces out of the tie.
+//
+// The count of changed pixels is therefore the exact count of pixels standing on
+// a depth-buffer tie: the pixels an infinitesimal camera move can flip, which is
+// the definition of the artifact. It needs no motion, no animation, no
+// threshold and no judgement — a clean frame reads exactly 0.
+//
+// The sweep is what turns an exact per-pose answer into a claim about motion. A
+// coplanar pair that is 1 LSB apart at one pose is TIED half a metre later, so
+// each stand is measured at several poses along a slow dolly and the scene's
+// score is the worst of them.
+//
+// SELF-NOISE IS MEASURED, NOT ASSUMED. Every census first renders twice with
+// NOTHING changed and counts the difference. That number must be 0. If it is
+// not, something in the frame is advancing between the two renders (a warmer
+// releasing a material, an animation clock) and no tie count from that stand
+// means anything. It is reported beside every measurement.
+
+// three's depth-comparison constants, by value, so no import is needed in-page.
+// They are re-declared INSIDE the census rather than shared from module scope:
+// page functions are serialised to source and evaluated in the browser, where
+// nothing this file's module scope holds exists.
+
+/**
+ * Pin the resolution so a tie count is a property of the scene and not of
+ * whatever rung the governor happened to be on. Tie counts scale with pixel
+ * count; a gate that does not pin this grades the ladder.
+ */
+export const PIN_PROBE_RESOLUTION = () => {
+  const r = window.__piratesBR?.renderer;
+  if (!r) return false;
+  r.minPixelRatio = 1;
+  r.maxPixelRatio = 1;
+  r.applyPixelRatio(1);
+  return true;
+};
+
+/** Place the free camera and bring the world's LOD to where it would arrive. */
+export const PLACE_AND_SETTLE = (c) => {
+  const g = window.__piratesBR;
+  let y = c.y;
+  if (y === null || y === undefined) {
+    y = (g.sampleGroundY(c.x, c.z) ?? 0) + (c.groundOffset ?? 1.7);
+  }
+  let yaw = c.yaw ?? 0;
+  if (c.aimAt) yaw = Math.atan2(c.aimAt.x - c.x, c.aimAt.z - c.z);
+  g.enableFreeCam(c.x, y, c.z, yaw, c.pitch ?? 0);
+  if (c.tod !== undefined) g.setDayNightOverride(c.tod);
+  g.settleLod();
+  return { x: c.x, y, z: c.z, yaw, pitch: c.pitch ?? 0 };
+};
+
+/**
+ * ONE CENSUS AT ONE POSE. Runs entirely synchronously so no requestAnimationFrame
+ * can interleave between the two renders — that is what makes the pair a
+ * controlled experiment rather than two photographs of a moving world.
+ *
+ * @param opts.excludeFarPlaneSky
+ *   The sky dome is the one surface in this game placed at EXACTLY the far plane
+ *   (SKY_VERT writes gl_Position.z = w) and it depends on `<=` to survive the
+ *   cleared depth of 1.0 — Renderer.ts says so in as many words. Flipping it to
+ *   `<` blacks the entire sky and reports a quarter of a million ties that are
+ *   not ties. It is held at LessEqual in both renders, which costs the probe
+ *   only its ability to see a fight between the sky and geometry at 2999.99 m.
+ */
+export const DEPTH_TIE_CENSUS = (opts = {}) => {
+  const LESS_DEPTH = 2;
+  const LESS_EQUAL_DEPTH = 3;
+  const g = window.__piratesBR;
+  const R = g.renderer;
+  const renderer = R.renderer;
+  const gl = renderer.getContext();
+  const w = gl.drawingBufferWidth;
+  const h = gl.drawingBufferHeight;
+  const bytes = w * h * 4;
+  const a = new Uint8Array(bytes);
+  const b = new Uint8Array(bytes);
+  const c = new Uint8Array(bytes);
+
+  const shoot = (buf) => {
+    R.render();
+    renderer.setRenderTarget(null);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  };
+
+  // Every distinct material in the graph, hidden subtrees included: a material
+  // reached only through a `visible === false` node draws nothing this frame and
+  // flipping it costs nothing, but skipping the walk into those subtrees would
+  // miss a material shared with something that IS drawn.
+  const materials = new Set();
+  R.scene.traverse((o) => {
+    const m = o.material;
+    if (!m) return;
+    if (Array.isArray(m)) { for (const x of m) if (x) materials.add(x); } else materials.add(m);
+  });
+  const sky = R.skyMaterial ?? null;
+  const flippable = [...materials].filter((m) => {
+    if (m.depthTest === false) return false;
+    if (opts.excludeFarPlaneSky !== false && m === sky) return false;
+    const f = m.depthFunc ?? LESS_EQUAL_DEPTH;
+    return f === LESS_EQUAL_DEPTH || f === LESS_DEPTH;
+  });
+  /** Symmetric: calling it twice restores every material exactly. */
+  const flip = () => {
+    for (const m of flippable) {
+      m.depthFunc = m.depthFunc === LESS_EQUAL_DEPTH ? LESS_DEPTH : LESS_EQUAL_DEPTH;
+    }
+  };
+
+  const countDiff = (x, y, tol) => {
+    let n = 0;
+    for (let i = 0; i < bytes; i += 4) {
+      const dr = Math.abs(x[i] - y[i]);
+      const dg = Math.abs(x[i + 1] - y[i + 1]);
+      const db = Math.abs(x[i + 2] - y[i + 2]);
+      if (dr > tol || dg > tol || db > tol) n += 1;
+    }
+    return n;
+  };
+
+  // ── the control: two renders, nothing changed ──────────────────────────
+  shoot(a);
+  shoot(c);
+  const selfNoise = countDiff(a, c, 0);
+
+  // ── the experiment: the same world state under `<` instead of `<=` ─────
+  flip();
+  shoot(b);
+  flip();
+
+  const ties = countDiff(a, b, 0);
+  // A tie whose two surfaces differ by a couple of levels is invisible; one
+  // whose surfaces differ by 24+ levels is the shimmer a player sees. Both are
+  // reported so a gate can be set on the one that matters without pretending
+  // the other is not there.
+  const tiesVisible = countDiff(a, b, 8);
+  const tiesLoud = countDiff(a, b, 24);
+
+  // WHERE. A count says a stand is dirty; a person fixing it needs the pixels.
+  // Cluster into a coarse grid so the answer is a handful of regions rather than
+  // fifty thousand coordinates, and keep the worst colour pair in each — the two
+  // surfaces that are fighting, in the shading they are fighting in.
+  const CELL = 24;
+  const cols = Math.ceil(w / CELL);
+  const cells = new Map();
+  for (let i = 0, p = 0; i < bytes; i += 4, p += 1) {
+    const dr = Math.abs(a[i] - b[i]);
+    const dg = Math.abs(a[i + 1] - b[i + 1]);
+    const db = Math.abs(a[i + 2] - b[i + 2]);
+    const delta = Math.max(dr, dg, db);
+    if (delta === 0) continue;
+    const px = p % w;
+    const py = (p / w) | 0;
+    const key = ((py / CELL) | 0) * cols + ((px / CELL) | 0);
+    let cell = cells.get(key);
+    if (!cell) {
+      cell = { n: 0, worst: 0, x: 0, y: 0, colA: null, colB: null };
+      cells.set(key, cell);
+    }
+    cell.n += 1;
+    cell.x += px;
+    cell.y += py;
+    if (delta > cell.worst) {
+      cell.worst = delta;
+      cell.colA = [a[i], a[i + 1], a[i + 2]];
+      cell.colB = [b[i], b[i + 1], b[i + 2]];
+      // readPixels is bottom-up; report the coordinate a screenshot uses.
+      cell.px = px;
+      cell.py = h - 1 - py;
+    }
+  }
+  const clusters = [...cells.values()]
+    .sort((p, q) => q.n - p.n)
+    .slice(0, 12)
+    .map((cell) => ({
+      pixels: cell.n,
+      worstDelta: cell.worst,
+      x: cell.px,
+      y: cell.py,
+      colA: cell.colA,
+      colB: cell.colB,
+    }));
+
+  // THE PICTURE, WITH THE FIGHT PAINTED ON IT. Composed here from the probe's
+  // OWN readback rather than from the canvas: by the time a screenshot could be
+  // taken the game's next rAF has already drawn a different frame over it.
+  let maskPng = null;
+  if (opts.mask && ties > 0) {
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    for (let i = 0, p = 0; i < bytes; i += 4, p += 1) {
+      const px = p % w;
+      const py = (p / w) | 0;
+      // readPixels is bottom-up; ImageData is top-down.
+      const q = (((h - 1 - py) * w) + px) * 4;
+      const delta = Math.max(
+        Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]),
+      );
+      if (delta === 0) {
+        img.data[q] = a[i] >> 1;
+        img.data[q + 1] = a[i + 1] >> 1;
+        img.data[q + 2] = a[i + 2] >> 1;
+      } else {
+        img.data[q] = 255;
+        img.data[q + 1] = 0;
+        img.data[q + 2] = delta > 24 ? 0 : 200;
+      }
+      img.data[q + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    maskPng = out.toDataURL('image/png');
+  }
+
+  return {
+    width: w,
+    height: h,
+    pixels: w * h,
+    selfNoise,
+    ties,
+    tiesVisible,
+    tiesLoud,
+    materialsFlipped: flippable.length,
+    materialsSeen: materials.size,
+    clusters,
+    maskPng,
+  };
+};
+
+/**
+ * WHAT IS FIGHTING, BY NAME. Casts a ray through a tie pixel and reports the
+ * surfaces it pierces in depth order — a pair of hits a few millimetres apart at
+ * a tie pixel names the two surfaces in the fight, which is the only thing a
+ * count cannot tell you and the only thing a fix needs.
+ */
+export const PIERCE_TIE_PIXELS = async (points) => {
+  const THREE = await import('/node_modules/three/build/three.module.js');
+  const g = window.__piratesBR;
+  const camera = g.renderer.camera;
+  const scene = g.renderer.scene;
+  camera.updateMatrixWorld();
+  scene.updateMatrixWorld();
+  const ray = new THREE.Raycaster();
+  ray.far = 4000;
+  const named = (o) => {
+    for (let c = o; c; c = c.parent) if (c.name) return c.name;
+    return o.type;
+  };
+  const out = [];
+  for (const p of points) {
+    const ndc = new THREE.Vector2(
+      (p.x / p.width) * 2 - 1,
+      -((p.y / p.height) * 2 - 1),
+    );
+    ray.setFromCamera(ndc, camera);
+    let hits = [];
+    try { hits = ray.intersectObject(scene, true); } catch { hits = []; }
+    out.push({
+      x: p.x,
+      y: p.y,
+      hits: hits.slice(0, 6).map((hit) => ({
+        distance: Number(hit.distance.toFixed(4)),
+        object: hit.object.name || hit.object.type,
+        owner: named(hit.object),
+        material: hit.object.material?.name || hit.object.material?.type || null,
+      })),
+    });
+  }
+  return out;
+};
