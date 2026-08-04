@@ -268,7 +268,16 @@ try {
       PIRATES_BR_MAP_SEED: MAP_SEED,
       PIRATES_GL: GL,
     };
+    const software = GL === 'swiftshader' || GL === 'software' || GL === 'swangle';
     for (const [i, s] of browser.entries()) {
+      // A DECLARED skip. The suite would exit 0 having measured nothing, which
+      // is indistinguishable from a pass; saying so here makes it a line in the
+      // table that nobody can mistake for one.
+      if (s.skipOn === 'software' && software) {
+        results.push({ suite: s, verdict: 'SKIPPED', code: 0, ms: 0, detail: s.why });
+        console.log(`  ${String(i + 1).padStart(2)}/${browser.length}  SKIPPED ${'—'.padStart(6)}  ${s.file}  (${s.why})`);
+        continue;
+      }
       const r = await runSuite(s, env);
       results.push(r);
       console.log(`  ${String(i + 1).padStart(2)}/${browser.length}  ${r.verdict.padEnd(7)} ${(r.ms / 1000).toFixed(1)}s  ${s.file}`);
@@ -283,8 +292,12 @@ try {
 
 // ── the verdict ──────────────────────────────────────────────────────────────
 
-const bad = results.filter((r) => r.verdict !== 'PASS');
-console.log(`\n[test] ══ ${results.length - bad.length}/${results.length} suites passed ══════════════════════════`);
+const skipped = results.filter((r) => r.verdict === 'SKIPPED');
+const bad = results.filter((r) => r.verdict !== 'PASS' && r.verdict !== 'SKIPPED');
+const passed = results.length - bad.length - skipped.length;
+console.log(`\n[test] ══ ${passed}/${results.length} suites passed`
+  + `${skipped.length ? `, ${skipped.length} NOT GRADED` : ''} ══════════════════════`);
+for (const r of skipped) console.log(`  – SKIPPED ${r.suite.file}: ${r.detail}`);
 for (const r of bad) {
   console.error(`\n  ✗ ${r.verdict}  ${r.suite.file}   (${(r.ms / 1000).toFixed(1)}s, exit ${r.code})`);
   if (r.verdict === 'VACUOUS') {

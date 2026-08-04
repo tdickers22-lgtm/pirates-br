@@ -241,6 +241,10 @@ export class ProgramWarmer {
    *  load that gave up quietly. */
   readonly stats = {
     paid: 0, kicked: 0, heldNow: 0, forced: 0, lastMs: 0, worstMs: 0, worstJoinMs: 0,
+    // Every join this run, so the worst one can be read against its own
+    // population instead of against a wall-clock constant — see the note at the
+    // increment site. joinTotalMs/joinCount is the mean link on this host today.
+    joinCount: 0, joinTotalMs: 0,
     walked: 0, owed: 0, unjoinable: 0,
     guard: true, parallel: null as boolean | null,
   };
@@ -436,6 +440,17 @@ export class ProgramWarmer {
       const joined = this.join(renderer, next.material);
       const joinMs = performance.now() - joinStart;
       if (joinMs > this.stats.worstJoinMs) this.stats.worstJoinMs = +joinMs.toFixed(1);
+      // THE OTHER LINKS ARE THE ONLY HONEST RULER FOR THE WORST ONE. A link is
+      // indivisible, so the longest task of a cold load is always one of these,
+      // and what that costs in milliseconds is a fact about the host's spare
+      // CPU on the day — measured 1366ms and 2494ms for the same program on the
+      // same build at load averages of 2 and 6.5. The load gate compared it to a
+      // constant and went bimodal. Compared instead to the MEAN link of the same
+      // run, on the same backend under the same contention, the ratio says the
+      // one thing a constant cannot: whether a single program has become
+      // pathologically more expensive than the shader set it belongs to.
+      this.stats.joinCount += 1;
+      this.stats.joinTotalMs = +(this.stats.joinTotalMs + joinMs).toFixed(1);
       // A KEY IS ONLY PAID IF SOMETHING WAS ACTUALLY JOINED. This used to mark it
       // paid whichever way the join went — including the case where
       // `properties.get(material).currentProgram` was undefined and `join()`

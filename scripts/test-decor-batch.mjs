@@ -48,7 +48,16 @@ import { browserArgs } from './lib/browser-args.mjs';
 import { sessionQuery } from './perf-probe.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const URL_BASE = (process.env.PIRATES_BR_TEST_URL ?? 'http://127.0.0.1:3101').replace(/\/$/, '');
+// PIRATES_BR_URL IS THE REPO'S VARIABLE — every other browser suite reads it, so
+// a graded run sets it once and every gate follows. This one answered only to
+// PIRATES_BR_TEST_URL, a name nothing else uses, and defaulted to :3101, a port
+// that exists only while some agent happens to have a Vite on it. Run from a
+// normal dev stack it went straight to a dead port and died with
+// ERR_CONNECTION_REFUSED — an exit code indistinguishable from a real failure.
+// The old name still wins where somebody has set it.
+const URL_BASE = (process.env.PIRATES_BR_TEST_URL
+  ?? process.env.PIRATES_BR_URL
+  ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
 
 /**
  * Literals the greps find that do not name an Object3D.

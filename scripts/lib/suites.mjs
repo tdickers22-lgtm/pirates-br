@@ -130,7 +130,19 @@ export const BROWSER = [
   // WIRED HERE FOR THE FIRST TIME — see test-remote-interpolation above. This is
   // the same contract measured through a real client against a real server.
   { ...plain('test-remote-smoothness.mjs'), slow: true },
-  { ...plain('test-viewmodel-poses.mjs') },
+  {
+    ...plain('test-viewmodel-poses.mjs'),
+    // A SKIP HAS TO BE DECLARED, NOT BURIED. This suite opens with
+    // `if (IS_SOFTWARE_GL) { console.log('skipped'); process.exit(0); }` — and
+    // exit 0 is what a pass looks like, so on the backend every graded run on
+    // this machine uses it has been reporting a green suite that measured
+    // nothing since the day it was written. Its reason is real (pose invariants
+    // need frames at animation rate, and a software rasteriser cannot make
+    // them), so it is not deleted — it is declared here, printed as SKIPPED in
+    // the table, and counted as a pass by nobody.
+    skipOn: 'software',
+    why: 'pose invariants need real frames at animation rate; SwiftShader cannot produce them',
+  },
   { ...plain('fixwave4-smoke.mjs') },
   { ...plain('audit-live-floaters.mjs'), slow: true },
   { ...plain('test-program-warm.mjs'), slow: true },
