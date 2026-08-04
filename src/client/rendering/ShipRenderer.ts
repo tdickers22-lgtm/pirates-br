@@ -1194,6 +1194,7 @@ function makeShipInterior(
   // Hold floor — warmer brown with a touch of wood grain so it reads as an actual
   // floor (not a flat dark tarp) when the player peers down through the stairwell.
   const floorMat = new THREE.MeshStandardMaterial({ color: 0x4a2e15, roughness: 0.85 });
+  floorMat.name = 'hold-floor';
   const floor = new THREE.Mesh(
     new THREE.BoxGeometry(W * 0.88, 0.12, L * 0.88),
     floorMat,
@@ -1204,6 +1205,7 @@ function makeShipInterior(
 
   // Inner walls (port/starboard)
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a2010, roughness: 1 });
+  wallMat.name = 'hold-inner-wall';
   const wallH = H * 0.75;
   for (const sx of [-1, 1]) {
     const wall = new THREE.Mesh(
@@ -1319,6 +1321,7 @@ function makeShipInterior(
 
   // Hammocks
   const hammockMat = new THREE.MeshStandardMaterial({ color: 0x8a7a55, roughness: 0.9, side: THREE.DoubleSide });
+  hammockMat.name = 'hold-hammock';
   const hammockCount = Math.max(2, Math.round(L / 8));
   for (let h = 0; h < hammockCount; h++) {
     const hz = L * 0.3 - h * (L * 0.6 / Math.max(hammockCount - 1, 1));
@@ -1334,6 +1337,7 @@ function makeShipInterior(
 
   // Crates along port/starboard bilge — keep the stairwell / centerline clear so nothing blocks the view down.
   const crateMat = new THREE.MeshStandardMaterial({ color: 0x5a3818, roughness: 1, map: woodMat instanceof THREE.MeshStandardMaterial ? woodMat.map : null });
+  crateMat.name = 'hold-crate';
   const crateCount = Math.max(2, Math.round(L / 12));
   for (let c = 0; c < crateCount; c++) {
     const cz = -L * 0.2 - c * (L * 0.1);
@@ -1815,8 +1819,11 @@ export class ShipRenderer {
       roughness: 0.85,
       metalness: 0.02,
     });
+    hullMat.name = 'proxy-hull-shell';
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.95 });
+    darkMat.name = 'proxy-timber';
     const sailMat = new THREE.MeshStandardMaterial({ color: 0xeadfbf, roughness: 0.8, side: THREE.DoubleSide });
+    sailMat.name = 'proxy-sail-canvas';
 
     const hull = new THREE.Mesh(makeLoftedHullGeometry(profile, true), hullMat);
     group.add(hull);
@@ -1889,22 +1896,31 @@ export class ShipRenderer {
 
     // Natural dark wood hull — NO team tint on the whole hull. Team color goes on
     // the painted sheer stripe (in the texture), flag cloth and main-sail band only.
+    // NAMED, and not for the debugger's sake. The overdraw census keys a "part"
+    // off the material, and every textured MeshStandardMaterial here leaves
+    // `color` at white — so unnamed, the hull, the deck, the timber and the
+    // barrels all reported as one surface called Standard#ffffff carrying 1.1
+    // layers, which is a number with nowhere to send it. A name costs nothing
+    // and makes the fill report say which plank.
     const hullMat = new THREE.MeshStandardMaterial({
       map: this.getTeamHullTexture(ship.teamColor),
       roughness: 0.82,
       metalness: 0.02,
       side: THREE.DoubleSide,
     });
+    hullMat.name = 'ship-hull-shell';
     const darkMat = new THREE.MeshStandardMaterial({
       map: this.darkWoodTex,
       roughness: 0.92,
       metalness: 0.0,
     });
+    darkMat.name = 'ship-dark-timber';
     const deckMat = new THREE.MeshStandardMaterial({
       map: this.deckTex,
       roughness: 0.78,
       metalness: 0.0,
     });
+    deckMat.name = 'ship-deck-planking';
     const sailMat = new THREE.MeshStandardMaterial({
       map: this.sailTex,
       color: 0xf5edd2,
@@ -1913,6 +1929,7 @@ export class ShipRenderer {
       emissiveIntensity: 0.04,
       side: THREE.DoubleSide,
     });
+    sailMat.name = 'ship-sail-canvas';
     // Muted painted team accent — desaturated toward timber, NO emissive.
     // Saturated team color lives only on flag / pennant / sail band.
     const accent = new THREE.Color(ship.teamColor).lerp(new THREE.Color(0x3a2a18), 0.4);
@@ -1921,10 +1938,15 @@ export class ShipRenderer {
       roughness: 0.72,
       metalness: 0.04,
     });
+    teamAccentMat.name = 'ship-team-accent';
     const metalMat = new THREE.MeshStandardMaterial({ color: 0x484848, roughness: 0.4, metalness: 0.88 });
+    metalMat.name = 'ship-iron';
     const brassHardwareMat = new THREE.MeshStandardMaterial({ color: 0x9A6E28, roughness: 0.42, metalness: 0.82 });
+    brassHardwareMat.name = 'ship-brass';
     const ropeCoilMat = new THREE.MeshStandardMaterial({ color: 0x9a8050, roughness: 1 });
+    ropeCoilMat.name = 'ship-rope';
     const barrelWoodMat = new THREE.MeshStandardMaterial({ map: this.darkWoodTex, roughness: 0.92 });
+    barrelWoodMat.name = 'ship-barrel-wood';
 
     const W = stats.width, L = stats.length, H = stats.height;
     const upgradeVisuals: Record<ShipUpgradeType, THREE.Object3D[]> = {
