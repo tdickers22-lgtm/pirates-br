@@ -69,8 +69,8 @@ export const CLIP_LOSS_CENSUS = async (opts = {}) => {
     cache.b = new Float32Array(w * h);
     cache.c = new Float32Array(w * h);
   }
-  cache.mat ??= new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
 
+  const EXEMPT = -1;
   const far = camera.far;
   const shippedNear = camera.near;
   const baselineNear = opts.baselineNear ?? 0.05;
@@ -92,30 +92,88 @@ export const CLIP_LOSS_CENSUS = async (opts = {}) => {
   const realNow = performance.now.bind(performance);
   const frozenAt = realNow();
 
+  // TWO DEPTH MATERIALS, NOT `scene.overrideMaterial`.
+  //
+  // The viewmodel's materials carry a clip exemption — applyViewmodelMaterialSettings
+  // pins their clip-space z so a weapon can never be cut by the near plane (they
+  // neither test nor write depth, so the value is not information). A single
+  // `scene.overrideMaterial` replaces that exemption along with everything else,
+  // and the probe then reports the weapon being clipped by a plane that does not
+  // clip it — measured, it claimed 41,024 pixels off the cutlass that the real
+  // render keeps. A probe that overrides the property under test is not
+  // measuring the game.
+  //
+  // So the swap is per mesh, and a mesh whose material is exempt gets a depth
+  // material carrying the SAME exemption. The flag is the one the client sets.
+  cache.plain ??= new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+  if (!cache.exempt) {
+    cache.exempt = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+    cache.exempt.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(/\}\s*$/, '\tgl_Position.z = 0.0;\n}');
+    };
+    cache.exempt.customProgramCacheKey = () => 'probe-depth-noclip';
+  }
+  const swapped = [];
+  const hidden = [];
+  const isExempt = (m) => (Array.isArray(m) ? m.some((x) => x?.__vmNoClip) : !!m?.__vmNoClip);
+  const swapIn = () => {
+    scene.traverse((o) => {
+      if (!o.material) return;
+      // SPRITES, POINTS AND LINES ARE HIDDEN, NOT SWAPPED. three draws each of
+      // those through its own geometry and draw mode; handed a mesh depth
+      // material they run a mesh program over attributes that program never
+      // declared, and the result is not merely wrong, it is UNSTABLE — two
+      // identical passes disagreed by up to 81,131 pixels, and only at the
+      // stands full of motes, wisps and birds. Omitting them costs the probe the
+      // ability to see a particle clipped by the near plane; keeping them cost
+      // it the ability to see anything at all.
+      if (o.isSprite || o.isPoints || o.isLine) {
+        if (o.visible) { hidden.push(o); o.visible = false; }
+        return;
+      }
+      swapped.push([o, o.material]);
+      o.material = isExempt(o.material) ? cache.exempt : cache.plain;
+    });
+  };
+  const swapOut = () => {
+    for (const [o, m] of swapped) o.material = m;
+    for (const o of hidden) o.visible = true;
+    swapped.length = 0;
+    hidden.length = 0;
+  };
+
   /** Render the frame's depth at a given near plane into cache.raw. */
   const pass = (near) => {
     const prevNear = camera.near;
     const prevTarget = renderer.getRenderTarget();
     const prevClear = renderer.getClearColor(new THREE.Color());
     const prevClearAlpha = renderer.getClearAlpha();
+    const prevAutoClear = renderer.autoClear;
     camera.near = near;
     camera.updateProjectionMatrix();
-    scene.overrideMaterial = cache.mat;
+    swapIn();
     performance.now = () => frozenAt;
     // WHITE, ALPHA 1: RGBADepthPacking of 1.0 is (1,1,1,1), so an unwritten
     // pixel reads back as "the far plane" instead of "a surface at the eye" —
     // which is exactly the mistake the first version of this probe made.
     renderer.setClearColor(0xffffff, 1);
+    // STATED, NOT INHERITED. A pass that renders onto the PREVIOUS pass's depth
+    // buffer depth-tests against a frame taken from another camera, and the two
+    // control passes then disagree with each other by a third of the screen —
+    // which is exactly what the control reported before this line existed.
+    renderer.autoClear = true;
     try {
       renderer.setRenderTarget(cache.rt);
+      renderer.clear(true, true, true);
       renderer.render(scene, camera);
       renderer.readRenderTargetPixels(cache.rt, 0, 0, w, h, cache.raw);
     } finally {
-      scene.overrideMaterial = null;
+      swapOut();
       camera.near = prevNear;
       camera.updateProjectionMatrix();
       renderer.setRenderTarget(prevTarget);
       renderer.setClearColor(prevClear, prevClearAlpha);
+      renderer.autoClear = prevAutoClear;
       performance.now = realNow;
     }
   };
@@ -137,6 +195,13 @@ export const CLIP_LOSS_CENSUS = async (opts = {}) => {
         + (raw[i + 2] / 255) / 256
         + (raw[i + 3] / 255)
       ) * (255 / 256));
+      // THE EXEMPT SENTINEL. A clip-exempt material writes ndc z = 0 exactly, so
+      // its window depth is 0.5 to the bit — which converts to 0.1 m at near
+      // 0.05 and 0.4 m at near 0.2, and the naive reading is that every pixel of
+      // the player's own cutlass "moved 30 cm farther" and was clipped. It did
+      // not move: it has no depth at all, by construction. Those pixels are
+      // marked and take no part in the comparison.
+      if (Math.abs(d - 0.5) < 2e-5) { out[p] = EXEMPT; continue; }
       // Window depth -> metres along the view axis, with THIS pass's near plane.
       const ndc = d * 2 - 1;
       out[p] = (2 * near * far) / (far + near - ndc * (far - near));
@@ -159,11 +224,17 @@ export const CLIP_LOSS_CENSUS = async (opts = {}) => {
   const a = cache.a;
   const b = cache.b;
   const emptyAt = far * 0.995;
-  const moved = (da, db) => db > da * 1.02 + 0.01;
+  const moved = (da, db) => da !== EXEMPT && db !== EXEMPT && db > da * 1.02 + 0.01;
+  // THE CONTROL IS A MASK, NOT A FOOTNOTE. A pixel the two identical passes
+  // already disagree about cannot testify about the near plane, so it is struck
+  // from the count rather than argued about — and `selfNoise` is reported beside
+  // every reading so nobody mistakes a heavily-masked stand for a clean one.
+  const noisy = new Uint8Array(a.length);
   let selfNoise = 0;
   for (let p = 0; p < a.length; p += 1) {
-    if (moved(a[p], cache.c[p]) || moved(cache.c[p], a[p])) selfNoise += 1;
+    if (moved(a[p], cache.c[p]) || moved(cache.c[p], a[p])) { noisy[p] = 1; selfNoise += 1; }
   }
+  const lostMask = new Uint8Array(a.length);
   let lost = 0;
   let worstGain = 0;
   let worstAt = null;
@@ -173,16 +244,17 @@ export const CLIP_LOSS_CENSUS = async (opts = {}) => {
   for (let p = 0; p < a.length; p += 1) {
     const da = a[p];
     const db = b[p];
-    if (da < emptyAt) {
+    if (da !== EXEMPT && da < emptyAt) {
       covered += 1;
       if (da < nearestA) nearestA = da;
     }
-    if (db < emptyAt && db < nearestB) nearestB = db;
+    if (db !== EXEMPT && db < emptyAt && db < nearestB) nearestB = db;
     // A surface that moved FARTHER lost whatever used to be in front of it.
     // The tolerance is the depth buffer's own quantisation at that distance,
     // generously: a tie reshuffle moves a pixel by well under a millimetre at
     // 1 m and by centimetres at 500 m, and a clip moves it by metres.
-    if (moved(da, db)) {
+    if (!noisy[p] && moved(da, db)) {
+      lostMask[p] = 1;
       lost += 1;
       const gain = db - da;
       if (gain > worstGain) {
@@ -192,8 +264,33 @@ export const CLIP_LOSS_CENSUS = async (opts = {}) => {
     }
   }
 
+  // A HOLE HAS AN INSIDE; A RE-CLIPPING SLIVER DOES NOT.
+  //
+  // "Zero lost pixels" is not a satisfiable claim about ANY near-plane change,
+  // and it took a clean run to see why. Large ground and foliage triangles pass
+  // UNDER the eye — their far vertices are metres away but the polygon crosses
+  // the near plane — so moving the plane re-clips them, and the new clip edge
+  // lands a pixel or two from the old one. Measured at 0.1: 1, 1 and 13 pixels
+  // at three of seventeen stands, with self-noise 0, and the same 13 at 0.2 and
+  // 0.3. It is an edge, not a hole, and it is inherent.
+  //
+  // So the gate asks the structural question instead: does the loss have an
+  // INTERIOR? A pixel whose four neighbours are all lost is inside a region at
+  // least three pixels across — a hole in the picture. A one-pixel-wide clip
+  // edge has no such pixel anywhere along it, at any length. Both numbers are
+  // returned; the assertion is on the second.
+  let holePixels = 0;
+  for (let y = 1; y < h - 1; y += 1) {
+    for (let x = 1; x < w - 1; x += 1) {
+      const p = y * w + x;
+      if (!lostMask[p]) continue;
+      if (lostMask[p - 1] && lostMask[p + 1] && lostMask[p - w] && lostMask[p + w]) holePixels += 1;
+    }
+  }
+
   return {
     lost,
+    holePixels,
     selfNoise,
     lostFraction: Number((lost / (w * h)).toFixed(6)),
     worstGainM: Number(worstGain.toFixed(3)),

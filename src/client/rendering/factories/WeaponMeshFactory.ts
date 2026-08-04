@@ -660,6 +660,51 @@ export function makePocketPreviewMesh(kind: PocketPreviewKind): THREE.Group {
   return group;
 }
 
+/**
+ * A VIEWMODEL DOES NOT PARTICIPATE IN WORLD DEPTH — INCLUDING THE NEAR PLANE.
+ *
+ * `depthTest: false` exempts these materials from the depth TEST. It does not
+ * exempt them from near-plane CLIPPING, which happens before any fragment
+ * exists, and that distinction is what pinned the main camera's near plane at
+ * 0.05 for the whole life of this project.
+ *
+ * Measured (scripts/test-near-plane-clearance.mjs, low tier, 960x540): aiming
+ * the blunderbuss puts geometry 0.181 m from the eye, the cutlass mid-swing
+ * 0.122 m, the compass 0.185 m, the lantern 0.205 m. At near 0.3 that is 86,394
+ * pixels off the blunderbuss and 65,035 off the cutlass — the weapon cut open
+ * lengthways. So the whole world's depth precision was being set by how close a
+ * pirate holds his own cutlass.
+ *
+ * The fix costs one line of generated GLSL. These fragments never read the depth
+ * buffer and never write it, so their clip-space z is not information — it is
+ * only a clip test they have to pass. Pinning it to 0 puts every viewmodel
+ * vertex exactly halfway between the planes, so no weapon, hand or tool can ever
+ * be cut by either one, at any near plane the world wants. x and y clip exactly
+ * as before, so nothing about framing changes.
+ *
+ * `customProgramCacheKey` is not optional. three keys its program cache on the
+ * material's parameters, and `onBeforeCompile` runs only when a program is
+ * actually created — so without a distinct key a viewmodel material can be
+ * handed a cached program built from an identical WORLD material, unpatched, and
+ * the clip exemption silently would not apply to it.
+ */
+function exemptFromNearPlaneClipping(material: THREE.Material) {
+  if ((material as { __vmNoClip?: boolean }).__vmNoClip) return;
+  (material as { __vmNoClip?: boolean }).__vmNoClip = true;
+  const previous = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    previous?.call(material, shader, renderer);
+    // The last brace in the vertex shader closes main().
+    shader.vertexShader = shader.vertexShader.replace(
+      /\}\s*$/,
+      '\tgl_Position.z = 0.0;\n}',
+    );
+  };
+  const previousKey = material.customProgramCacheKey.bind(material);
+  material.customProgramCacheKey = () => `${previousKey()}|viewmodel-noclip`;
+  material.needsUpdate = true;
+}
+
 export function applyViewmodelMaterialSettings(root: THREE.Object3D) {
   root.traverse((object) => {
     object.frustumCulled = false;
@@ -672,6 +717,7 @@ export function applyViewmodelMaterialSettings(root: THREE.Object3D) {
         material.depthTest = false;
         material.depthWrite = false;
         material.polygonOffset = false;
+        exemptFromNearPlaneClipping(material);
       }
     }
   });

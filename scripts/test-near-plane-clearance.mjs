@@ -181,12 +181,13 @@ async function main() {
     // a frame with no viewmodel in it and calls the weapon safe.
     console.log('── viewmodel: pixels the raise takes off the weapon/hands ──');
     const vmReadings = [];
+    const unexemptFound = [];
     const readVm = async (label) => {
       await waitFrames(page, 2);
       const r = await page.evaluate(CLIP_LOSS_CENSUS, { baselineNear: BASELINE_NEAR });
       vmReadings.push({ label, ...r });
-      console.log(`    ${label.padEnd(22)} lost ${String(r.lost).padStart(7)} px  `
-        + `self-noise ${String(r.selfNoise).padStart(6)}  worst +${r.worstGainM} m  `
+      console.log(`    ${label.padEnd(22)} lost ${String(r.lost).padStart(6)} px  `
+        + `hole ${String(r.holePixels).padStart(6)}  self-noise ${String(r.selfNoise).padStart(6)}  `
         + `nearest ${r.nearestShippedM} m (was ${r.nearestBaselineM})`);
     };
     const equipSlot = async (slot) => {
@@ -214,12 +215,58 @@ async function main() {
       input.isAiming = v ? () => true : input.__origIsAiming;
     }, on);
 
+    // WHICH CAMERA-ATTACHED MESHES THE EXEMPTION DID NOT REACH. A lost pixel in
+    // this section can only come from viewmodel geometry whose material never
+    // went through applyViewmodelMaterialSettings, so name those directly rather
+    // than inferring them from a pixel count.
+    const unexempt = () => page.evaluate(() => {
+      const g = window.__piratesBR;
+      const camera = g.renderer.camera;
+      const vm = g.viewmodel;
+      camera.updateMatrixWorld(true);
+      const roots = [camera, vm?.localViewWeaponRoot, vm?.localViewHandsRoot, vm?.localViewPocketRoot]
+        .filter(Boolean);
+      const out = [];
+      const seen = new Set();
+      for (const root of roots) {
+        root.updateMatrixWorld(true);
+        root.traverse((o) => {
+          if (seen.has(o) || !o.material) return;
+          seen.add(o);
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          if (mats.every((m) => m?.__vmNoClip)) return;
+          const pos = o.geometry?.getAttribute?.('position');
+          let nearest = null;
+          if (pos) {
+            const m = camera.matrixWorldInverse.clone().multiply(o.matrixWorld).elements;
+            for (let i = 0; i < pos.count; i++) {
+              const x = pos.getX(i); const y = pos.getY(i); const z = pos.getZ(i);
+              const d = -(m[2] * x + m[6] * y + m[10] * z + m[14]);
+              if (d > 0 && (nearest === null || d < nearest)) nearest = d;
+            }
+          }
+          out.push({
+            name: o.name || o.type,
+            visible: o.visible,
+            material: mats.map((m) => m?.type).join('+'),
+            nearest: nearest === null ? null : Number(nearest.toFixed(4)),
+          });
+        });
+      }
+      return out;
+    });
+
     for (const slot of [0, 1, 2, 3]) {
       const id = await equipSlot(slot);
       if (!id) { console.log(`    slot ${slot}: empty`); continue; }
       await readVm(`${id} rest`);
       await setAim(true);
       await readVm(`${id} aiming`);
+      for (const m of await unexempt()) {
+        if (!m.visible) continue;
+        unexemptFound.push({ state: `${id} aiming`, ...m });
+        console.log(`      ! NOT EXEMPT: ${m.name} (${m.material}) nearest ${m.nearest} m`);
+      }
       await setAim(false);
     }
     for (const [tool, wheelSlot] of TOOLS) {
@@ -231,6 +278,11 @@ async function main() {
         if (got === tool) break;
       }
       await readVm(`tool ${tool}`);
+      for (const m of await unexempt()) {
+        if (!m.visible) continue;
+        unexemptFound.push({ state: `tool ${tool}`, ...m });
+        console.log(`      ! NOT EXEMPT: ${m.name} (${m.material}) nearest ${m.nearest} m`);
+      }
     }
     await equipSlot(0);
 
@@ -244,15 +296,15 @@ async function main() {
       await waitFrames(page, 2);
       const r = await page.evaluate(CLIP_LOSS_CENSUS, { baselineNear: BASELINE_NEAR });
       worldReadings.push({ id: stand.id, ...r });
-      console.log(`    ${stand.id.padEnd(22)} lost ${String(r.lost).padStart(7)} px  `
-        + `self-noise ${String(r.selfNoise).padStart(6)}  worst +${r.worstGainM} m  `
+      console.log(`    ${stand.id.padEnd(22)} lost ${String(r.lost).padStart(6)} px  `
+        + `hole ${String(r.holePixels).padStart(6)}  self-noise ${String(r.selfNoise).padStart(6)}  `
         + `nearest ${r.nearestShippedM} m (was ${r.nearestBaselineM})  `
         + `coverage ${(r.coverage * 100).toFixed(1)}%`);
     }
 
     // ── 3. the assertions ─────────────────────────────────────────────────
     console.log('');
-    const worst = (rows) => rows.reduce((x, y) => (y.lost > x.lost ? y : x), { lost: -1 });
+    const worst = (rows) => rows.reduce((x, y) => (y.holePixels > x.holePixels ? y : x), { holePixels: -1 });
     const all = [...vmReadings, ...worldReadings];
     const noisiest = all.reduce((x, y) => (y.selfNoise > x.selfNoise ? y : x), { selfNoise: -1 });
     if (noisiest.selfNoise > 0) {
@@ -265,15 +317,32 @@ async function main() {
       pass(`the probe is quiet: self-noise is 0 across all ${all.length} readings`);
     }
 
+    // THE POSITIVE PROOF THAT THE VIEWMODEL CANNOT BE CLIPPED. Its clip-space z
+    // is pinned, so it passes both planes by construction — but only for the
+    // materials the exemption actually reached, and a weapon mesh added by a
+    // path that skips applyViewmodelMaterialSettings would be cut open with
+    // nothing to say so. Every visible camera-attached material must carry it.
+    if (unexemptFound.length === 0) {
+      pass('every visible camera-attached material carries the near-plane clip exemption');
+    } else {
+      const worstMissed = unexemptFound.reduce((x, y) => ((y.nearest ?? 9e9) < (x.nearest ?? 9e9) ? y : x));
+      fail(
+        'every visible camera-attached material carries the near-plane clip exemption',
+        `${unexemptFound.length} did not — closest is ${worstMissed.name} (${worstMissed.material}) at `
+        + `${worstMissed.nearest} m in "${worstMissed.state}"`,
+      );
+    }
+
     if (vmReadings.length < 4) {
       fail('the viewmodel was measured at all', `only ${vmReadings.length} weapon/tool states were reached`);
     } else {
       const w = worst(vmReadings);
-      const label = `near ${near} takes no pixel off the viewmodel, over ${vmReadings.length} weapon and tool states`;
-      if (w.lost === 0) pass(label);
+      const label = `near ${near} opens no hole in the viewmodel, over ${vmReadings.length} weapon and tool states`;
+      if (w.holePixels === 0) pass(label);
       else {
-        fail(label, `${w.lost} px lost in "${w.label}" — worst pixel at (${w.worstAt?.x},${w.worstAt?.y}) `
-          + `went from ${w.worstAt?.fromM} m to ${w.worstAt?.toM} m; the weapon is being cut open`);
+        fail(label, `${w.holePixels} px of hole (${w.lost} lost in all) in "${w.label}" — worst pixel at `
+          + `(${w.worstAt?.x},${w.worstAt?.y}) went from ${w.worstAt?.fromM} m to ${w.worstAt?.toM} m; `
+          + 'the weapon is being cut open');
       }
     }
 
@@ -282,11 +351,13 @@ async function main() {
       fail('the world sweep measured enough stands', `${covered.length} stands had geometry in frame`);
     } else {
       const w = worst(worldReadings);
-      const label = `near ${near} takes no pixel off the world, over ${worldReadings.length} close-quarters stands`;
-      if (w.lost === 0) pass(label);
+      const totalLost = worldReadings.reduce((n, r) => n + r.lost, 0);
+      const label = `near ${near} opens no hole in the world, over ${worldReadings.length} close-quarters `
+        + `stands (${totalLost} px of one-pixel clip edge in total, none of it a hole)`;
+      if (w.holePixels === 0) pass(label);
       else {
-        fail(label, `${w.lost} px lost at ${w.id} — worst pixel at (${w.worstAt?.x},${w.worstAt?.y}) `
-          + `went from ${w.worstAt?.fromM} m to ${w.worstAt?.toM} m`);
+        fail(label, `${w.holePixels} px of hole (${w.lost} lost in all) at ${w.id} — worst pixel at `
+          + `(${w.worstAt?.x},${w.worstAt?.y}) went from ${w.worstAt?.fromM} m to ${w.worstAt?.toM} m`);
       }
     }
   } finally {

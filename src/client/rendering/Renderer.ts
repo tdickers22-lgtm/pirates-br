@@ -628,8 +628,34 @@ export class Renderer {
     this.scene.fog = new THREE.FogExp2(this.fogDayColor.getHex(), 0.0015);
     initLightBudget(this.scene, this.quality);
 
+    // NEAR 0.1, NOT 0.05, AND THE FAR:NEAR RATIO IS THE WHOLE POINT.
+    //
+    // A fixed-point depth buffer spends its levels on the near end: the metres
+    // per level at a distance z go as z^2 / (near * 2^24), so at 0.05 a pair of
+    // coplanar surfaces 300 m away was being resolved at ONE LEVEL PER 10.7 cm
+    // and anything closer together than that tied. Measured, at the dock vista
+    // on the pinned map: 121-137 pixels standing on a depth-buffer tie. At 0.3
+    // the same two stands read 34-35 and 21-33 (see scripts/test-z-fighting.mjs
+    // for what a tie is and why the count is exact).
+    //
+    // What stopped it being raised was never the world — the closest surface
+    // over 17 close-quarters stands, crouched and inside a cave, is 0.30 m. It
+    // was the first-person viewmodel, whose cutlass reaches 0.122 m from the eye
+    // mid-swing. `depthTest: false` exempted it from the depth TEST and not from
+    // near-plane CLIPPING; applyViewmodelMaterialSettings now pins its clip-space
+    // z instead, so no weapon, hand or tool can be cut by either plane.
+    //
+    // AND THEN 0.2 WAS MEASURED AND REJECTED, by something neither the survey nor
+    // the viewmodel argument had in it: THE LOCAL PLAYER'S OWN THIRD-PERSON RIG.
+    // At rest the nearest thing in frame is 0.38 m, but in the cutlass block pose
+    // the rig's forearm crosses the eye at 0.1226 m — world geometry, not
+    // camera-attached, so the viewmodel exemption does not cover it, and 0.2 cut
+    // 32,877 pixels out of it. 0.1 is the largest near plane that clears every
+    // surface measured anywhere: the rig at 0.1226 m, the cutlass viewmodel at
+    // 0.1214 m, and the closest world surface over 17 close-quarters stands
+    // (crouched, and under a cave roof) at 0.3029 m.
     this.camera = new THREE.PerspectiveCamera(
-      70, window.innerWidth / window.innerHeight, 0.05, 3000,
+      70, window.innerWidth / window.innerHeight, 0.1, 3000,
     );
     this.camera.position.set(0, 12, -20);
     // Required so first-person viewmodels parented to the camera are included in scene traversal.
