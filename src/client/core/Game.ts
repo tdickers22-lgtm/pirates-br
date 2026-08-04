@@ -3823,8 +3823,13 @@ export class Game {
     if (!isLocal) {
       const pose = this.clientState.remote.poseAt(`P:${player.id}`, performance.now());
       const wantFrame = player.onShipId ?? '';
-      const haveFrame = this.clientState.remote.peek(`P:${player.id}`)?.newestFrame ?? null;
-      if (pose && pose.mode !== 'empty' && haveFrame === wantFrame) {
+      // AGAINST THE ANSWER'S FRAME, not the track's newest. A pirate who boarded
+      // and stepped off leaves a ring of [world, world, ship, ship, world], and a
+      // render time inside the ship stretch comes back in ship-LOCAL numbers
+      // while the newest sample is a world one. Treating a 2-metre deck offset as
+      // a world position drew him at the origin — a 6.78m deck-slip outlier in a
+      // 60s run, against a p95 of 0.01m.
+      if (pose && pose.mode !== 'empty' && pose.frame === wantFrame) {
         placedFromBuffer = true;
         if (player.onShipId && this.state) {
           // Buffered in the SHIP's frame: compose it back onto the hull that is

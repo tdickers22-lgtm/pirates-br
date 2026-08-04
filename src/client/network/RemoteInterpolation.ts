@@ -81,6 +81,29 @@ const JITTER_MARGIN = 2.5;
 const DELAY_SLEW_PER_S = 0.15;
 
 /**
+ * THE AIM LEAD, AND THE ONE THING THIS CHANGE COSTS THE PLAYER.
+ *
+ * Rendering an opponent at (server now − delay) draws him where he WAS. There is
+ * no lag compensation on the server — Match resolves a hitscan against the
+ * positions it holds at the moment your fire message arrives — so every
+ * millisecond of delay is a millisecond you must lead a moving target by.
+ *
+ * The path this replaced drew remotes at snapshot + age + 0.035s: it led the
+ * target by 35ms on purpose, as a standing approximation of the trip your shot
+ * has to make. That lead was tuned into the game and there is no reason to
+ * throw it away in order to buy a bracket, so it is given back here — the delay
+ * that gets rendered is the buffer's requirement MINUS the lead, floored at one
+ * whole snapshot interval so a bracketing pair is still guaranteed.
+ *
+ * On a clean wire that puts the render delay at the floor (one interval, 32ms)
+ * instead of 1.5, so an opponent is drawn 32ms behind the newest sample rather
+ * than 35ms ahead of it: 67ms of extra lead, 33cm at a sprint. On a ragged one
+ * the jitter term wins and the buffer is fed first, which is the right priority
+ * — a target that snaps is harder to hit than one that is honestly late.
+ */
+const AIM_LEAD_S = 0.035;
+
+/**
  * BOUNDED EXTRAPOLATION. When the render time runs past the newest sample the
  * buffer has, the body is carried forward along the velocity of its newest PAIR.
  * Capped, because past this the guess is worth less than standing still and a
@@ -113,6 +136,16 @@ export interface RemotePose {
   z: number;
   yaw: number;
   mode: SampleMode;
+  /**
+   * WHICH COORDINATE SYSTEM THE ANSWER IS IN, which is not always the one the
+   * newest sample is in. A pirate who boarded and stepped off again leaves a ring
+   * of [world, world, ship, ship, world] — ask for a render time inside the ship
+   * stretch and you get ship-LOCAL numbers back while the newest sample is a
+   * world one. A caller that checked the track's newest frame would then treat a
+   * 2-metre deck offset as a world position and draw him at the origin. Measured
+   * as a 6.78m deck-slip outlier in a 60s run before this field existed.
+   */
+  frame: string | null;
 }
 
 const TAU = Math.PI * 2;
@@ -193,12 +226,14 @@ export class RemoteTrack {
   sample(renderT: number, out: RemotePose): SampleMode {
     if (this.count === 0) {
       out.mode = 'empty';
+      out.frame = null;
       return 'empty';
     }
     const newest = this.idx(this.count - 1);
     if (this.count === 1) {
       out.x = this.x[newest]; out.y = this.y[newest]; out.z = this.z[newest];
       out.yaw = this.yaw[newest];
+      out.frame = this.frame[newest];
       out.mode = 'held';
       return 'held';
     }
@@ -209,6 +244,7 @@ export class RemoteTrack {
       // extrapolate backwards into a past nobody measured.
       out.x = this.x[oldest]; out.y = this.y[oldest]; out.z = this.z[oldest];
       out.yaw = this.yaw[oldest];
+      out.frame = this.frame[oldest];
       out.mode = 'held';
       return 'held';
     }
@@ -219,6 +255,7 @@ export class RemoteTrack {
       if (span <= 0 || this.frame[prev] !== this.frame[newest]) {
         out.x = this.x[newest]; out.y = this.y[newest]; out.z = this.z[newest];
         out.yaw = this.yaw[newest];
+        out.frame = this.frame[newest];
         out.mode = 'held';
         return 'held';
       }
@@ -227,6 +264,7 @@ export class RemoteTrack {
       out.y = this.y[newest] + (this.y[newest] - this.y[prev]) * inv * ahead;
       out.z = this.z[newest] + (this.z[newest] - this.z[prev]) * inv * ahead;
       out.yaw = this.yaw[newest] + angleDelta(this.yaw[prev], this.yaw[newest]) * inv * ahead;
+      out.frame = this.frame[newest];
       out.mode = 'extrapolated';
       return 'extrapolated';
     }
@@ -241,6 +279,7 @@ export class RemoteTrack {
       if (this.frame[a] !== this.frame[b] || span <= 0) {
         out.x = this.x[b]; out.y = this.y[b]; out.z = this.z[b];
         out.yaw = this.yaw[b];
+        out.frame = this.frame[b];
         out.mode = 'held';
         return 'held';
       }
@@ -249,11 +288,13 @@ export class RemoteTrack {
       out.y = this.y[a] + (this.y[b] - this.y[a]) * u;
       out.z = this.z[a] + (this.z[b] - this.z[a]) * u;
       out.yaw = this.yaw[a] + angleDelta(this.yaw[a], this.yaw[b]) * u;
+      out.frame = this.frame[a];
       out.mode = 'interpolated';
       return 'interpolated';
     }
     out.x = this.x[newest]; out.y = this.y[newest]; out.z = this.z[newest];
     out.yaw = this.yaw[newest];
+    out.frame = this.frame[newest];
     out.mode = 'held';
     return 'held';
   }
@@ -398,7 +439,7 @@ export class RemoteTimeline {
 
     const wantDelay = Math.min(
       DELAY_MAX_S,
-      Math.max(DELAY_MIN_S, this.interval * 1.5 + this.jitter * JITTER_MARGIN),
+      Math.max(DELAY_MIN_S, this.interval * 1.5 + this.jitter * JITTER_MARGIN - AIM_LEAD_S),
     );
     const slew = DELAY_SLEW_PER_S * Math.min(0.25, dt || SNAPSHOT_INTERVAL_S);
     this.delay += Math.max(-slew, Math.min(slew, wantDelay - this.delay));
@@ -429,7 +470,7 @@ export class RemoteTimeline {
 export class RemoteInterpolator {
   readonly timeline = new RemoteTimeline();
   private readonly tracks = new Map<string, RemoteTrack>();
-  private readonly scratch: RemotePose = { x: 0, y: 0, z: 0, yaw: 0, mode: 'empty' };
+  private readonly scratch: RemotePose = { x: 0, y: 0, z: 0, yaw: 0, mode: 'empty', frame: null };
   /** Mode census for the smoothness gate: how the last frame's answers were made. */
   readonly modeCounts: Record<SampleMode, number> = { interpolated: 0, extrapolated: 0, held: 0, empty: 0 };
   /**
