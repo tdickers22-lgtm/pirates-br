@@ -221,12 +221,28 @@ const SAMPLER = `(() => {
 
         if (speed >= ${MOVING_SPEED_MPS}) {
           const want = speed * ${SNAPSHOT_INTERVAL_MS} / 1000;
+          // TWO CLOCKS, BOTH MOVED TOGETHER.
+          //
+          // lastSnapshotAt is the clock the DEAD-RECKONED path reads — the
+          // packet's arrival — and it is what this suite has always pinned. A
+          // body that comes out of the interpolation buffer does not read it at
+          // all; that is the whole point of the buffer, and pinning it alone
+          // moved nothing and read carry 0.00 on a path measured continuous to
+          // 5mm by scripts/test-remote-smoothness.mjs. The clock that has to
+          // move for a buffered body is the render timeline's. Moving both by
+          // the same interval asks both paths the same question — "how far does
+          // the drawn body advance over one snapshot" — and gets a comparable
+          // answer out of either.
+          const skew = g.clientState.remote.timeline;
           const carryOf = (lead) => {
             cs.lastSnapshotAt = now;
+            skew.debugSkewMs = 0;
             const a = V.clone(g.getPlayerRenderPosition(p, lead));
             cs.lastSnapshotAt = now - ${SNAPSHOT_INTERVAL_MS};
+            skew.debugSkewMs = -${SNAPSHOT_INTERVAL_MS};
             const b = V.clone(g.getPlayerRenderPosition(p, lead));
             cs.lastSnapshotAt = saved;
+            skew.debugSkewMs = 0;
             const moved = Math.hypot(b.x - a.x, b.z - a.z);
             return { carry: want > 0 ? moved / want : 1, moved, at: a };
           };

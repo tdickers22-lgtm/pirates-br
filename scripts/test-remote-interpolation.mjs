@@ -287,6 +287,25 @@ const f = (v, d = 4) => (v === null || v === undefined ? '--' : v.toFixed(d));
   console.log('  starvation: extrapolates from the newest pair, capped at 0.20s of carry');
 }
 
+// ── 5b. A REAPPEARANCE IS A CUT, NOT A GLIDE ────────────────────────────────
+// A pirate who dies at one end of the map and respawns at the other comes back
+// with a sample seconds newer than anything held. Bracketing across that gap
+// would walk him the whole way over the span of it — a body sliding across the
+// world at constant speed, which is a far worse artefact than the cut.
+{
+  const interp = new RemoteInterpolator();
+  const track = interp.track('P:respawner');
+  for (let k = 0; k < 6; k++) track.push(k * 0.032, k * 0.16, 0, 0, 0, '', k * 32);
+  const out = { x: 0, y: 0, z: 0, yaw: 0, mode: 'empty' };
+  // Four seconds later, 400 metres away.
+  track.push(4.0, 400, 0, 0, 0, '', 4000);
+  const mode = track.sample(2.0, out);
+  check(mode === 'held', `a render time inside a 4s gap was ${mode}, not held`);
+  check(out.x === 400, `the ring bracketed across a reappearance and put the body at ${out.x}m`);
+  check(track.length === 1, `the ring kept ${track.length} samples across a reappearance instead of starting over`);
+  console.log('  reappearance: a 4s gap empties the ring instead of being interpolated through');
+}
+
 // ── 6. A LONG FRAME MUST NOT MAKE A BODY JUMP ───────────────────────────────
 // The third thing the brief asked for, and the one the old arithmetic could not
 // give: `snapshotAge` was clamped at 0.18s, so a frame that took 600ms froze

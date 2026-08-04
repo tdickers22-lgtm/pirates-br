@@ -88,6 +88,16 @@ const DELAY_SLEW_PER_S = 0.15;
  */
 const MAX_EXTRAPOLATION_S = 0.20;
 
+/**
+ * A push this much newer than the newest sample held is a REAPPEARANCE, not the
+ * next sample: a pirate who died and respawned across the map, or a body the
+ * server stopped reporting for a while. The ring is emptied rather than
+ * bracketed across it — half a second of history that ends where a man fell and
+ * begins where he came back would be interpolated as a slow glide between the
+ * two, which is the one thing worse than the cut it really is.
+ */
+const STALE_GAP_S = 0.5;
+
 /** Rate dilation limit for the servo. ±12% of real time is imperceptible on a
  *  walking body (7mm/s at 5.5 m/s) and closes a 100ms error in under a second. */
 const MAX_RATE_SKEW = 0.12;
@@ -155,6 +165,12 @@ export class RemoteTrack {
   push(t: number, x: number, y: number, z: number, yaw: number, frame: string | null, nowMs: number) {
     this.touchedAt = nowMs;
     if (this.count > 0 && t <= this.newestTime) return;
+    // A GAP THIS BIG IS NOT HISTORY, IT IS A REAPPEARANCE. A pirate who died and
+    // respawned, or a body the server stopped sending for a while, comes back
+    // with a sample seconds newer than anything held. Bracketing across that gap
+    // would walk him from where he fell to where he respawned over the whole
+    // span — a slow glide across the map instead of the cut it actually is.
+    if (this.count > 0 && t - this.newestTime > STALE_GAP_S) this.clear();
     const i = this.head;
     this.t[i] = t;
     this.x[i] = x;
@@ -274,6 +290,22 @@ export class RemoteTimeline {
   /** Snapshot-interval EMA measured off server timestamps, seconds. */
   interval = SNAPSHOT_INTERVAL_S;
 
+  /**
+   * HARNESS ONLY, and it is not a hack — it is what makes CARRY measurable again.
+   *
+   * scripts/test-motion-continuity.mjs reads the transfer function of the
+   * placement arithmetic by evaluating a body twice with the clock a snapshot
+   * interval apart and dividing the distance by how far the body really travels
+   * in one. For a dead-reckoned body the clock it has to move is `lastSnapshotAt`
+   * — the packet's arrival — and that is what the suite pinned. For a buffered
+   * body arrival time does not enter the answer AT ALL, which is the entire
+   * point of this file, so pinning it moves nothing and carry reads 0.00 on a
+   * path that is in fact perfectly continuous. The clock that has to move is this
+   * one. Written only by the harness, in a single synchronous block, and put
+   * back; the game never touches it.
+   */
+  debugSkewMs = 0;
+
   private lastArrivalMs = -1;
   private lastServerT = -1;
   private lastAdvanceMs = -1;
@@ -347,7 +379,7 @@ export class RemoteTimeline {
    */
   renderTimeAt(nowMs: number): number {
     if (!this.started) return Number.NEGATIVE_INFINITY;
-    const free = this.anchorServerT + ((nowMs - this.anchorClientMs) / 1000) * this.rate;
+    const free = this.anchorServerT + ((nowMs + this.debugSkewMs - this.anchorClientMs) / 1000) * this.rate;
     return Math.min(free, this.newestServerT + MAX_EXTRAPOLATION_S);
   }
 
