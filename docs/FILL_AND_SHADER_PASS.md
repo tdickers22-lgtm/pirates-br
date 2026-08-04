@@ -212,3 +212,86 @@ about SwiftShader.
    above the horizon where it belongs. The remaining question is the reverse one:
    the ocean covers half the screen with a shader that is *heavier* than the sky,
    and its far band dissolves to exactly the sky's own horizon colour by 2900 m.
+
+---
+
+## 6. Round two: the draw order, and the storm front's gate
+
+### 6.1 Nothing in this game drew its occluders first
+
+`FRAME_COST_MODEL.md` §15.2 wrote down the three.js fact and nobody priced it:
+`painterSortStable` sorts opaque draws by `groupOrder`, then `renderOrder`, then
+**`material.id`**, and reaches `z` only when two draws already share a material.
+Opaque order here was *material creation order*, so the depth test spent every
+frame discarding fragments the GPU had already shaded.
+
+`WHAT_IF`'s `frontToBack` op existed to price exactly this and had never been
+run. Run, on the parked hull at seed 20260801, baseline and mutation taken in
+the same task:
+
+| scope | tier | layers | p95 |
+|---|---|--:|--:|
+| ship only | low | 1.891 → 1.457 (**−0.434**) | 5 → 4 |
+| **whole scene** | **low** | 2.457 → **1.430** (**−1.027, −42%**) | 6 → **3** |
+| ship only | high | 2.241 → 1.931 (−0.311) | 5 → 4 |
+| whole scene | high | 2.291 → 1.933 (−0.358, −16%) | 5 → 4 |
+
+In the same session, **deleting every ship in the world** was worth −0.359 at
+`low`. Sorting is worth nearly three of that and deletes nothing.
+
+Shipped as `WebGLRenderer.setOpaqueSort`, not per-object `renderOrder` writes:
+the sort already runs once a frame, so only the comparator changes and nothing
+walks the graph. Whole-frame readings on `deck-aft`, before and after, at the
+parked pose (read with §15.4's caveat — the frame is not comparable across
+sessions, the p95 collapse is the signal):
+
+| | low before | low after | high before | high after |
+|---|--:|--:|--:|--:|
+| frame | 2.252 | **1.627** | 2.534 | **1.802** |
+| opaque | — | **1.074** | 2.044 | **1.236** |
+| p95 | 6 | **3** | 6 | **4** |
+
+And the instrument agrees it is done: after the change the same what-if prices
+at **−0.195** at `low` (was −1.027) and −0.170 at `high` (was −0.358). The
+residue is the what-if ordering by Euclidean distance while three orders by the
+NDC z of the object origin, and it is not worth overriding `renderOrder`
+semantics to chase.
+
+**What it costs, stated plainly:** batching. `material.id` is three's default key
+precisely to keep same-material draws adjacent, and depth order interleaves
+them. That trades GL state changes for shaded fragments, and the tier that gains
+most here is `low` — which is the opposite of how the quality ladder behaves.
+
+**Where it is not free, and what was done about it.** Every viewmodel mesh runs
+`depthTest: false, depthWrite: false` at renderOrder 999–1004, and those
+materials are opaque, so they share this list. With the depth test off, the
+sequence IS the picture — near-first would let a cutlass's guard paint over the
+blade in front of it. The comparator partitions on whether a draw both tests and
+writes depth; only participants are sorted by z, and everything else keeps
+`painterSortStable`'s own tail unchanged.
+
+### 6.2 The storm front: the gate is free and worth nothing
+
+The boundary's cloud bank is up in ordinary play — 0.266 layers at dock-vista in
+the last pass — and two gates get proposed for it every time somebody reads that
+number: skip it when the bank is not in frame, or when the camera is far from
+the ring. Both are arguments about vertices. The cost is fill.
+`scripts/perf-storm-front-gate.mjs` asks the only question that decides either:
+
+| scene | tier | facing the bank | camera pitched at the deck |
+|---|---|--:|--:|
+| dock-vista | low | 0.224 layers over 22.4% (17.0% of the frame) | **0.000 over 0.0%** |
+| waterfall-deck | low | 0.120 layers over 12.0% (9.9% of the frame) | **0.000 over 0.0%** |
+
+**When the bank is not in frame it already costs zero fragments.** An in-frame
+gate can only remove work that is not being done; the 320 m shell is
+`frustumCulled = false`, but per-triangle clipping has already thrown away
+everything off screen, and `p95 1 max 1` says the shell never even stacks on
+itself — from inside the ring the far wall is behind the camera.
+
+So the whole of that number is a band of weather the player is looking at, and
+`hideBucket` puts the ceiling on any gate whatsoever at −0.224 / −0.120 layers:
+the cost of removing the storm from the storm. Reported, not taken. The lever
+that could still pay here is alpha, not visibility — the far side of the ring is
+already multiplied down to 0.22× — and that is a picture change to be argued on
+its own, not a free win.
