@@ -50,6 +50,23 @@
  * explicit precondition (a local player and a world — which is all the HUD
  * checks actually need, horn or no horn), and any unexpected throw is reported
  * as a named failure instead of a crash.
+ *
+ * ── AND HOW IT COUNTS TIME ───────────────────────────────────────────────────
+ * THREE ASSERTIONS HERE USED TO GRADE THE MACHINE. The attrition vignette and
+ * the spectate lift are both integrated on the GAME's clock, and `Game.frame()`
+ * clamps that clock to 50ms per frame for sim stability. So on this fanless
+ * Air's software rasteriser — which renders this scene at under one frame a
+ * second — eight WALL seconds of storm chips deliver the game barely one second
+ * of its own time, and a suite that sleeps eight seconds and then reads the
+ * vignette is reading the frame rate, not the HUD. Measured: attrition peaked at
+ * 0.089 against a 0.15 bar and the lift reached 0.62 of 1.0 after forty seconds.
+ * A player at 60fps gets both in full.
+ *
+ * So every duration-shaped assertion below is driven off `combatFx.fxClock`, the
+ * client's own accumulated frame time, and the damage it feeds is billed per
+ * second of THAT clock — which reproduces the 60fps case exactly, at whatever
+ * speed the host can manage. Running out of wall clock before the game clock
+ * arrives is reported as a failure to MEASURE, not as a failure of the HUD.
  */
 import { chromium } from 'playwright';
 import { browserArgs } from './lib/browser-args.mjs';
@@ -81,8 +98,18 @@ function expect(label, condition, detail = '') {
   else { console.error(`  ✗ FAIL: ${label}${detail ? `\n     ${detail}` : ''}`); failures += 1; }
 }
 
+/** The window the DOM-LAYOUT block is graded in — an ordinary player's. */
+const LAYOUT_VIEWPORT = { width: 1600, height: 900 };
+/** Everything else runs here. 960x540 is the same 16:9 frustum at a third of the
+ *  pixels, and on a software rasteriser fill rate is the whole frame cost: the
+ *  clock-bound blocks below (attrition, spectate lift) got roughly three times
+ *  the frames per wall second out of this change alone. It is also the ceiling
+ *  this machine's agents are held to — a headless GL context at 1600x900 under
+ *  load is how this Air has been made to panic. */
+const VIEWPORT = { width: 960, height: 540 };
+
 const browser = await chromium.launch({ args: browserArgs() });
-const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+const page = await browser.newPage({ viewport: VIEWPORT });
 page.on('pageerror', (e) => console.log('PAGEERROR', e.message));
 page.setDefaultTimeout(90_000);
 
@@ -285,6 +312,9 @@ try {
     // that; and the card is one bounded column, so RETURN TO PORT stopped
     // printing on top of the copy.
     console.log('The elimination screen names the actual killer:');
+    // The only block here that is about LAYOUT, so it is the only one graded in a
+    // player's window rather than the small one the rest of the suite runs in.
+    await page.setViewportSize(LAYOUT_VIEWPORT);
     const reading = await page.evaluate(() => {
       const g = window.__piratesBR;
       const p = g.getLocalPlayer();
@@ -375,6 +405,7 @@ try {
       Object.values(causes).every((c) => c.strayDisplays.every((d) => d === 'none')),
       JSON.stringify(causes.storm.strayDisplays));
     await shot('death-cause-storm.png');
+    await page.setViewportSize(VIEWPORT);
     // Back to a live HUD for the feed checks below.
     await page.evaluate(() => {
       const g = window.__piratesBR;
@@ -393,11 +424,19 @@ try {
     // construction. Chips are banked now, and unbroken damage raises a separate
     // escalating attrition read.
     //
-    // Driven by feeding the local player the exact chips the wire delivers
-    // (0.06 hp at 10 Hz) with the snapshot stream held still, so the read is of
-    // the real frame loop and the real CombatFx, on a real match.
+    // Driven by feeding the local player the tempest's real bill — 0.6 hp per
+    // SECOND OF GAME TIME — with the snapshot stream held still, so the read is
+    // of the real frame loop and the real CombatFx, on a real match.
+    //
+    // PER SECOND OF GAME TIME is the whole correction. The vignette integrates
+    // `dt` and `Game.frame` clamps `dt` to 50ms, so a host at 0.8fps gives the
+    // escalation 4% of the wall clock. The old loop slept 8 real seconds, fed 80
+    // chips against it, and read 0.089 out of a bar of 0.15 — a number about this
+    // Air's rasteriser and nothing about the HUD. Billing against `fxClock` (the
+    // client's own accumulated frame time) reproduces the 60-fps player's curve
+    // exactly, however long the host takes to render it.
     console.log('Storm-rate chip damage raises a visible read:');
-    const attrition = await page.evaluate(async () => {
+    const attrition = await page.evaluate(async ({ gameSeconds, wallCapMs }) => {
       const g = window.__piratesBR;
       g.network.onSnapshot = null;
       g.network.onHotSnapshot = null;
@@ -407,30 +446,55 @@ try {
       p.atHelm = true; // the station the audit was standing at
       document.body.classList.remove('showing-death-screen');
       document.getElementById('death-screen').style.display = 'none';
+      // The client's own clock: `CombatFx.fxClock` is the sum of every clamped
+      // frame dt, which is precisely the clock the vignette escalates on.
+      const clock = () => g.combatFx.fxClock;
       const read = () => ({
+        t: +(clock() - t0).toFixed(2),
         hp: +p.health.toFixed(2),
         attrition: +(document.getElementById('attrition-vignette')?.style.opacity ?? 0),
         hurt: +(document.getElementById('hurt-vignette')?.style.opacity ?? 0),
         barFlash: (document.getElementById('health-bar-wrap')?.style.filter ?? '') !== '',
       });
+      const t0 = clock();
+      let last = t0;
       const samples = [];
-      // 8 seconds of phase-1 tempest, billed exactly as the server bills it.
-      for (let i = 0; i < 80; i++) {
-        p.health = Math.max(1, p.health - 0.06);
-        await new Promise((r) => setTimeout(r, 100));
+      const wallEnd = performance.now() + wallCapMs;
+      while (clock() - t0 < gameSeconds && performance.now() < wallEnd) {
+        await new Promise((r) => setTimeout(r, 60));
+        const now = clock();
+        const step = now - last;
+        last = now;
+        // Nothing rendered since the last poll → the tempest bills nothing. That
+        // keeps the chips one-per-frame, exactly as a snapshot stream does.
+        if (step > 0) p.health = Math.max(1, p.health - 0.6 * step);
         samples.push(read());
       }
+      const gameElapsed = +(clock() - t0).toFixed(2);
       const peak = samples.reduce((a, b) => ({
         attrition: Math.max(a.attrition, b.attrition),
         hurt: Math.max(a.hurt, b.hurt),
         barFlash: a.barFlash || b.barFlash,
       }), { attrition: 0, hurt: 0, barFlash: false });
-      const early = samples[6] ?? samples[0];
-      const late = samples[samples.length - 1];
+      // The first third of the run against the last reading: "early" has to be a
+      // point on the game clock, not the seventh poll of a loop whose polls now
+      // carry wildly different amounts of game time.
+      const early = samples.find((s) => s.t >= gameSeconds / 3) ?? samples[0];
+      const late = samples[samples.length - 1] ?? { attrition: 0, hp: 100 };
       p.atHelm = false;
-      return { peak, early: early.attrition, late: late.attrition, hpAfter: late.hp, count: samples.length };
-    });
+      return {
+        peak, early: early.attrition, late: late.attrition, hpAfter: late.hp,
+        count: samples.length, gameElapsed, gameWanted: gameSeconds,
+        wallSec: +((wallCapMs - (wallEnd - performance.now())) / 1000).toFixed(1),
+      };
+    }, { gameSeconds: 4, wallCapMs: Math.min(70_000, Math.max(10_000, left() - 120_000)) });
     console.log(`    → ${JSON.stringify(attrition)}`);
+    // A run that never reached the game time it was grading has not measured the
+    // HUD; it has run out of host. That is a distinct, named failure.
+    expect(`the host rendered the ${attrition.gameWanted}s of game time this read needs`,
+      attrition.gameElapsed >= attrition.gameWanted * 0.95,
+      `only ${attrition.gameElapsed}s of game clock in ${attrition.wallSec}s of wall clock`
+      + ` (${attrition.count} samples) — the vignette below is graded on an unfinished ramp`);
     expect('storm-rate chips raise the attrition vignette at all',
       attrition.peak.attrition > 0.15, JSON.stringify(attrition.peak));
     expect('…and it ESCALATES the longer the weather has you',
@@ -447,7 +511,7 @@ try {
     // the eye 34 cm above the spot you fell, which in open water is UNDER the
     // swell, and the dying vignette is a 94%-black ellipse on top of that.
     console.log('The spectate camera leaves the corpse behind:');
-    const spectate = await page.evaluate(async () => {
+    const spectate = await page.evaluate(async ({ wallCapMs }) => {
       const g = window.__piratesBR;
       const p = g.getLocalPlayer();
       p.state = 'eliminated';
@@ -467,20 +531,29 @@ try {
         vignette: +(document.getElementById('death-vignette')?.style.opacity ?? 0),
         hemi: hemi(),
       };
-      // Let the lift run its full rise (Game.SPECTATE_RISE_SECONDS) on real
-      // frames. The rise is integrated on the RENDER clock, so a 9-fps CI box
-      // takes several times the wall clock a 60-fps player would — wait for the
-      // rise to finish rather than for a stopwatch that only holds at 60 fps.
-      const until = performance.now() + 40_000;
-      while (g.spectateLift < 0.995 && performance.now() < until) {
-        await new Promise((r) => setTimeout(r, 120));
+      // Let the lift run its full rise (Game.SPECTATE_RISE_SECONDS = 2.4) on real
+      // frames. The rise is integrated on the clamped frame clock, so the wall
+      // clock it takes is the host's business — this waits on the CLIENT's clock
+      // and reports how much of it went by, so "the camera never rose" and "this
+      // machine never rendered the rise" are different sentences. A 40-second
+      // stopwatch used to give up at lift=0.62 and fail two assertions about a
+      // camera that was working perfectly.
+      const clock = () => g.combatFx.fxClock;
+      const t0 = clock();
+      const wallEnd = performance.now() + wallCapMs;
+      while (g.spectateLift < 0.995 && clock() - t0 < 8 && performance.now() < wallEnd) {
+        await new Promise((r) => setTimeout(r, 100));
       }
-      const settleFrom = performance.now();
-      while (performance.now() - settleFrom < 700) await new Promise((r) => setTimeout(r, 60));
+      const settleFrom = clock();
+      const settleWallEnd = performance.now() + 12_000;
+      while (clock() - settleFrom < 0.7 && performance.now() < settleWallEnd) {
+        await new Promise((r) => setTimeout(r, 60));
+      }
       const cam = g.renderer.camera.position;
       return {
         before,
-        roseInMs: Math.round(performance.now() - settleFrom),
+        gameElapsed: +(clock() - t0).toFixed(2),
+        wallSec: +((wallCapMs - (wallEnd - performance.now())) / 1000).toFixed(1),
         camY: +cam.y.toFixed(2),
         // What the camera is looking down at — the body it lifted off.
         anchorY: g.localDeathAnchor ? +g.localDeathAnchor.pos.y.toFixed(2) : null,
@@ -489,8 +562,12 @@ try {
         vignette: +(document.getElementById('death-vignette')?.style.opacity ?? 0),
         deathScreenUp: getComputedStyle(document.getElementById('death-screen')).display !== 'none',
       };
-    });
+    }, { wallCapMs: Math.min(90_000, Math.max(15_000, left() - 90_000)) });
     console.log(`    → ${JSON.stringify(spectate)}`);
+    expect('the host rendered enough of the rise to grade it',
+      spectate.gameElapsed >= 2.4,
+      `only ${spectate.gameElapsed}s of game clock in ${spectate.wallSec}s of wall clock —`
+      + ` the 2.4s rise never finished for want of frames, not for want of a camera`);
     expect('the camera actually rises off the body', spectate.lift > 0.95, `lift=${spectate.lift}`);
     expect('and ends up well clear of the waterline',
       spectate.camY > 3.5, `camY=${spectate.camY} (was ${spectate.before.camY})`);
@@ -568,42 +645,73 @@ try {
     await shot('feed-coalesced.png');
 
     // ── Server-overload chip ─────────────────────────────────────
-    // Snapshots are still stalled from the respawn case above, so the sim clock the
-    // client can see has stopped advancing while its own wall clock has not — the
-    // same arithmetic a host running at 7% real time produces. The chip needs the
-    // 5s measurement window plus its 1.5s anti-flicker dwell before it speaks.
+    // THE INPUT MOVED, AND THIS BLOCK WAS STILL POKING THE OLD ONE.
+    //
+    // It used to lean on the snapshot stall armed above: with `onSnapshot`
+    // nulled, the sim clock the client could see stopped while its wall clock
+    // did not, which is the arithmetic of an overloaded host. The netcode pass
+    // deliberately moved the detector's input OFF the applied snapshot and onto
+    // `NetworkClient.getServerClock()`, stamped in the socket's own message
+    // handler — because reading `state.serverTime` against `performance.now()`
+    // charged this client's frame length to the server. Nulling the apply
+    // callbacks no longer dilates anything: arrivals keep being stamped, the
+    // deficit reads ~0, and the chip correctly stays down. Measured on HEAD: the
+    // chip had the right text on it and `display:none`, and the suite called
+    // that a defect.
+    //
+    // So dilation is now injected where the detector actually reads it. The
+    // clock handed over advances at 7% of real time — a host running at 7%
+    // speed, the exact complaint — and everything downstream of it is the real
+    // HudController: the real 5s window, the real 1s trip, the real 1.5s dwell.
+    // The clear path is asserted too, which the old block never did.
     console.log('Sim dilation is announced instead of silently endured:');
     const chip = await page.evaluate(async () => {
       const g = window.__piratesBR;
-      // Drive the HUD ourselves for the full window: the frame loop is the normal
-      // driver, but this host is contended enough that frames are not something a
-      // test should assume.
-      const until = performance.now() + 9_000;
-      while (performance.now() < until) {
-        g.hud.updateHud();
-        await new Promise((r) => setTimeout(r, 150));
-      }
-      const el = document.getElementById('server-load-chip');
-      if (!el) {
+      const el = () => document.getElementById('server-load-chip');
+      const state = () => {
+        const e = el();
+        if (!e) return { present: false, visible: false, text: null };
+        const box = e.getBoundingClientRect();
         return {
-          present: false,
-          phase: g.state?.phase,
-          serverTime: g.state?.serverTime,
-          samples: g.hud.simRateSamples?.length,
-          tripSince: g.hud.simTripSince,
+          present: true,
+          visible: getComputedStyle(e).display !== 'none' && box.width > 0,
+          display: getComputedStyle(e).display,
+          width: Math.round(box.width),
+          top: Math.round(box.top),
+          text: e.textContent,
         };
-      }
-      const box = el.getBoundingClientRect();
-      return {
-        present: true,
-        visible: getComputedStyle(el).display !== 'none' && box.width > 0,
-        display: getComputedStyle(el).display,
-        inDoc: document.body.contains(el),
-        width: Math.round(box.width),
-        text: el.textContent,
-        top: Math.round(box.top),
-        phase: window.__piratesBR.state?.phase,
       };
+      // The detector's one input (HudView.getServerClock). Both halves are
+      // returned together on purpose — that pairing is the fix this override has
+      // to respect, so the reading stays honest.
+      const realClock = g.hud.view.getServerClock;
+      const wall0 = performance.now();
+      const server0 = g.state?.serverTime ?? 0;
+      const drive = async (simRate, forMs) => {
+        g.hud.view.getServerClock = () => {
+          const wall = performance.now();
+          return { server: server0 + ((wall - wall0) / 1000) * simRate, at: wall };
+        };
+        const until = performance.now() + forMs;
+        // Drive the HUD ourselves: the frame loop is the normal driver, but this
+        // host is contended enough that frames are not something a test assumes.
+        while (performance.now() < until) {
+          g.hud.updateHud();
+          await new Promise((r) => setTimeout(r, 120));
+        }
+      };
+      try {
+        // 5s window + 1.5s dwell, with room to spare.
+        await drive(0.07, 11_000);
+        const tripped = state();
+        // …and a server that catches up puts the chip away again. The deficit is
+        // measured across the window, so real time has to run long enough to
+        // push the dilated samples out of it.
+        await drive(1, 9_000);
+        return { tripped, cleared: state(), phase: g.state?.phase };
+      } finally {
+        g.hud.view.getServerClock = realClock;
+      }
     });
     console.log(`    → ${JSON.stringify(chip)}`);
     if (chip.phase !== 'playing') {
@@ -613,9 +721,13 @@ try {
       // up, but it is not a state this assertion can be made in.
       console.log(`  — SKIPPED: horn never blew (phase=${chip.phase}); chip is correctly silent pre-horn`);
     } else {
-      expect('a dilating sim raises the overload chip', chip.present && chip.visible, JSON.stringify(chip));
+      expect('a dilating sim raises the overload chip',
+        chip.tripped.present && chip.tripped.visible, JSON.stringify(chip.tripped));
       expect('the chip names the problem and the size of it',
-        /overloaded/i.test(chip.text ?? '') && /\d+s behind/.test(chip.text ?? ''), chip.text);
+        /overloaded/i.test(chip.tripped.text ?? '') && /\d+s behind/.test(chip.tripped.text ?? ''),
+        chip.tripped.text);
+      expect('and a server that catches up puts it away again',
+        chip.cleared.visible === false, JSON.stringify(chip.cleared));
       await shot('overload-chip.png');
     }
   }
