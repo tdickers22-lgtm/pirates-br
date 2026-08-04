@@ -126,6 +126,25 @@ async function main() {
     await measureScene(page, plan[SCENE], { warmupMs: 1500, captureMs: 1200, settle: true });
     await page.evaluate(() => window.__cost.tagBuckets({}));
 
+    // EVERY counting render re-anchors first, in its own task, immediately
+    // before it renders. `measureScene` follows the hull for the length of its
+    // capture window and then stops; each census after it is seconds of software
+    // rasterisation during which the ship sails out from under a camera that no
+    // longer follows. Unanchored, the same what-if read -0.552 layers and -0.098
+    // on the same pinned seed, and the ship's own share of the framebuffer read
+    // 35.4% and 57.6%. See ANCHOR_SHIP.
+    const anchor = plan[SCENE].ship
+      ? { dy: plan[SCENE].dy ?? 4.2, yawOffset: plan[SCENE].yawOffset ?? Math.PI, pitch: plan[SCENE].pitch ?? -0.05, dside: plan[SCENE].dside ?? 0 }
+      : null;
+    const census = (opts) => page.evaluate(async ([a, o]) => {
+      if (a) window.__cost.anchorShip(a);
+      return window.__cost.stencilOverdraw(o);
+    }, [anchor, opts]);
+    const counterfactual = (opts) => page.evaluate(async ([a, o]) => {
+      if (a) window.__cost.anchorShip(a);
+      return window.__cost.whatIf(o);
+    }, [anchor, opts]);
+
     report.tier = await page.evaluate(() => {
       const r = window.__piratesBR.renderer;
       return { quality: r.getQuality(), shadows: r.areShadowsEnabled(), effectScale: r.getEffectScale?.() ?? null };
@@ -133,9 +152,9 @@ async function main() {
     console.log(`  tier=${report.tier.quality} shadows=${report.tier.shadows} effectScale=${report.tier.effectScale}`);
 
     // ── 1. the number being explained ────────────────────────────────────────
-    const all = await page.evaluate(([l]) => window.__cost.stencilOverdraw({ maxLayers: l }), [MAX_LAYERS]);
-    const blended = await page.evaluate(([l]) => window.__cost.stencilOverdraw({ maxLayers: l, blendedOnly: true }), [MAX_LAYERS]);
-    const bucketOnly = await page.evaluate(([l, b]) => window.__cost.stencilOverdraw({ maxLayers: l, only: b }), [MAX_LAYERS, BUCKET]);
+    const all = await census({ maxLayers: MAX_LAYERS });
+    const blended = await census({ maxLayers: MAX_LAYERS, blendedOnly: true });
+    const bucketOnly = await census({ maxLayers: MAX_LAYERS, only: BUCKET });
     report.frame = { all, blended, bucketOnly };
     console.log(`\n  frame        mean ${all.meanAll.toFixed(3)}  p95 ${all.p95}  max ${all.max}`);
     console.log(`  blended      mean ${blended.meanAll.toFixed(3)}`);
@@ -143,13 +162,17 @@ async function main() {
     console.log(`  ${BUCKET.padEnd(12)} mean ${bucketOnly.meanAll.toFixed(3)} over ${pct(bucketOnly.coveredFraction)}  p95 ${bucketOnly.p95}  max ${bucketOnly.max}`);
 
     // ── 2. every surface, free ───────────────────────────────────────────────
-    const parts = await page.evaluate(([b]) => window.__cost.bucketParts({ bucket: b, maxParts: 80 }), [BUCKET]);
+    const parts = await page.evaluate(async ([a, b]) => {
+      if (a) window.__cost.anchorShip(a);
+      return window.__cost.bucketParts({ bucket: b, maxParts: 80 });
+    }, [anchor, BUCKET]);
     report.parts = parts;
     console.log(`\n  ${parts.length} parts in "${BUCKET}"  (calls = in the graph, drawn = survived the frustum)`);
-    console.log('    drawn  calls     tris  side   dW dT  order      y-band  part');
+    console.log('     cover  drawn  calls     tris  side   dW dT  order      y-band  part');
     for (const p of parts.slice(0, 30)) {
       console.log(
-        `    ${String(p.drawnCalls).padStart(5)}  ${String(p.calls).padStart(5)}  ${String(Math.round(p.tris / 100) / 10).padStart(7)}k  `
+        `    ${String(p.coverage.toFixed(3)).padStart(6)}  ${String(p.drawnCalls).padStart(5)}  ${String(p.calls).padStart(5)}  `
+        + `${String(Math.round(p.tris / 100) / 10).padStart(7)}k  `
         + `${p.side.padEnd(6)} ${p.depthWrite ? ' Y' : ' n'} ${p.depthTest ? 'Y' : 'n'}  ${JSON.stringify(p.renderOrder).padEnd(9)} `
         + `${String(p.yMin ?? '-').padStart(6)}..${String(p.yMax ?? '-').padEnd(6)} ${p.part}`,
       );
@@ -163,10 +186,7 @@ async function main() {
     const ranked = parts.filter((p) => p.drawnCalls > 0).slice(0, TOP_PARTS);
     const byPart = [];
     for (const p of ranked) {
-      const r = await page.evaluate(
-        ([l, key]) => window.__cost.stencilOverdraw({ maxLayers: l, only: key, keyBy: 'part' }),
-        [MAX_LAYERS, p.part],
-      );
+      const r = await census({ maxLayers: MAX_LAYERS, only: p.part, keyBy: 'part' });
       byPart.push({ part: p.part, side: p.side, drawnCalls: p.drawnCalls, tris: p.tris,
         meanAll: r.meanAll, coveredFraction: r.coveredFraction, p95: r.p95, max: r.max, layerSum: r.layerSum });
       console.log(`    layers[${p.part}] mean ${r.meanAll.toFixed(3)} over ${pct(r.coveredFraction)} p95 ${r.p95} max ${r.max}`);
@@ -178,10 +198,7 @@ async function main() {
     if (!NO_WHATIF) {
       const whatIf = [];
       const run = async (label, mutations) => {
-        const r = await page.evaluate(
-          ([l, ms]) => window.__cost.whatIf({ maxLayers: l, mutations: ms }),
-          [MAX_LAYERS, mutations],
-        );
+        const r = await counterfactual({ maxLayers: MAX_LAYERS, mutations });
         whatIf.push({ label, mutations, touched: r.touched, meanAll: r.meanAll, p95: r.p95, max: r.max, coveredFraction: r.coveredFraction });
         console.log(`    what-if ${label.padEnd(28)} frame mean ${r.meanAll.toFixed(3)} `
           + `(${(r.meanAll - all.meanAll >= 0 ? '+' : '') + (r.meanAll - all.meanAll).toFixed(3)})  p95 ${r.p95}  max ${r.max}  [${r.touched} touched]`);
@@ -189,6 +206,13 @@ async function main() {
       console.log('');
       await run(`${BUCKET}: DoubleSide→FrontSide`, [{ op: 'frontside', bucket: BUCKET }]);
       await run(`${BUCKET}: hidden entirely`, [{ op: 'hideBucket', bucket: BUCKET }]);
+      // PER SURFACE, because the bucket-wide answer is not a fix. Culling the
+      // back faces of a closed shell is free; culling them off a sail is a sail
+      // that vanishes when you look aft at it. The two cannot be told apart by
+      // one number covering both, so each double-sided surface is priced alone.
+      for (const p of doubles.filter((d) => d.drawnCalls > 0).slice(0, TOP_PARTS)) {
+        await run(`frontside ${p.part}`, [{ op: 'frontside', part: p.part }]);
+      }
       if (HIDE) await run(`hide ${HIDE}`, [{ op: 'hide', part: HIDE }]);
       report.whatIf = whatIf;
     }

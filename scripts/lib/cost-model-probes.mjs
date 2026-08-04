@@ -293,6 +293,38 @@ function makePart(scene) {
 `;
 
 /**
+ * PUT THE CAMERA BACK ON THE DECK — before every single render that counts.
+ *
+ * `measureScene` re-anchors a ship-relative scene to the hull ON EVERY FRAME of
+ * its capture window, and then returns. The stencil census that follows is
+ * seconds per render on a software rasteriser, and the ship SAILS THROUGH ALL OF
+ * THEM: the camera stays where the capture left it while the hull moves out from
+ * under it, so a per-part census renders a different framing for every part and
+ * the parts cannot be compared with each other or with the frame total they are
+ * supposed to decompose.
+ *
+ * It is not a subtle error. The same what-if measured twenty minutes apart read
+ * -0.552 layers and -0.098; the ship's own share of the framebuffer read 35.4%
+ * and 57.6%. Both runs were "deck-aft" on the same pinned seed.
+ *
+ * So every counting render re-anchors first, in the SAME task, immediately
+ * before the render — which is the only place the hull's position is known to
+ * still be the one being counted.
+ */
+export const ANCHOR_SHIP = ({ dy = 4.2, yawOffset = Math.PI, pitch = -0.05, dside = 0 } = {}) => {
+  const g = window.__piratesBR;
+  const ships = g.state?.ships ?? [];
+  const ship = ships.find((s) => s.ownerId === g.localPlayerId) ?? ships[0] ?? null;
+  if (!ship) return null;
+  const rot = ship.rotation ?? 0;
+  const x = ship.position.x + Math.cos(rot) * dside;
+  const z = ship.position.z - Math.sin(rot) * dside;
+  const y = ship.position.y + dy;
+  g.enableFreeCam(x, y, z, rot + yawOffset, pitch);
+  return { x, y, z, rot };
+};
+
+/**
  * EVERY SURFACE IN ONE BUCKET, and the three flags that make a surface cost
  * twice what it looks like — WITHOUT RENDERING ANYTHING.
  *
@@ -323,6 +355,44 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
   const bucketFor = makeBucket(scene);
   const partFor = makePart(scene);
   const planes = makePlanes(camera);
+  const vp = viewProjection(camera);
+
+  // Screen-area fraction of a mesh's world bounding box, clipped to the
+  // viewport. RANKING BY DRAW CALLS BURIED THE ANSWER: `mergeStaticMeshes`
+  // collapses a whole hull into ONE call per material, so the hull shell — the
+  // largest surface on the screen — ranked thirtieth on a list sorted by calls
+  // and never got measured, while a barrel with four calls did.
+  const coverage = (mesh) => {
+    const geo = mesh.geometry;
+    if (!geo) return 0;
+    if (!geo.boundingBox) { try { geo.computeBoundingBox(); } catch { return 0; } }
+    const bb = geo.boundingBox;
+    if (!bb) return 0;
+    let behind = 0;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const m = mesh.matrixWorld.elements;
+    const e = vp.elements;
+    for (let i = 0; i < 8; i++) {
+      const lx = (i & 1) ? bb.max.x : bb.min.x;
+      const ly = (i & 2) ? bb.max.y : bb.min.y;
+      const lz = (i & 4) ? bb.max.z : bb.min.z;
+      const wx = m[0] * lx + m[4] * ly + m[8] * lz + m[12];
+      const wy = m[1] * lx + m[5] * ly + m[9] * lz + m[13];
+      const wz = m[2] * lx + m[6] * ly + m[10] * lz + m[14];
+      const cw = e[3] * wx + e[7] * wy + e[11] * wz + e[15];
+      if (cw <= 1e-4) { behind++; continue; }
+      const cx = (e[0] * wx + e[4] * wy + e[8] * wz + e[12]) / cw;
+      const cy = (e[1] * wx + e[5] * wy + e[9] * wz + e[13]) / cw;
+      if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+      if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+    }
+    if (behind === 8) return 0;
+    if (behind > 0) return 1;
+    const w = Math.min(1, maxX) - Math.max(-1, minX);
+    const hh = Math.min(1, maxY) - Math.max(-1, minY);
+    if (w <= 0 || hh <= 0) return 0;
+    return (w * hh) / 4;
+  };
 
   const parts = new Map();
   const walk = (node) => {
@@ -362,7 +432,7 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
               depthTest: mat.depthTest !== false, blended: isBlended(mat),
               alphaTest: mat.alphaTest ?? 0, matType: mat.type, matName: mat.name || null,
               renderOrders: new Set(), names: new Set(), yMin: null, yMax: null,
-              materials: new Set(),
+              materials: new Set(), coverage: 0,
             };
             parts.set(key, p);
           }
@@ -371,6 +441,7 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
           if (drawn) {
             p.drawnCalls += 1;
             p.tris += (idx / 3) * inst;
+            p.coverage += coverage(node);
             if (yLo !== null && (p.yMin === null || yLo < p.yMin)) p.yMin = yLo;
             if (yHi !== null && (p.yMax === null || yHi > p.yMax)) p.yMax = yHi;
           }
@@ -390,6 +461,7 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
   return [...parts.values()]
     .map((p) => ({
       part: p.part, calls: p.calls, drawnCalls: p.drawnCalls, tris: Math.round(p.tris),
+      coverage: Math.round(p.coverage * 1000) / 1000,
       side: p.side === 2 ? 'double' : p.side === 1 ? 'back' : 'front',
       transparent: p.transparent, depthWrite: p.depthWrite, depthTest: p.depthTest,
       blended: p.blended, alphaTest: p.alphaTest, matType: p.matType, matName: p.matName,
@@ -399,7 +471,10 @@ export const BUCKET_PARTS = ({ bucket = 'ship', maxParts = 60 } = {}) => {
       yMax: p.yMax === null ? null : Math.round(p.yMax * 10) / 10,
       names: [...p.names],
     }))
-    .sort((a, b) => b.drawnCalls - a.drawnCalls)
+    // Ranked by PROJECTED AREA, not by draw calls: the census that follows can
+    // only afford a handful of renders and the biggest surface on the screen is
+    // routinely the one with the fewest calls.
+    .sort((a, b) => (b.coverage - a.coverage) || (b.drawnCalls - a.drawnCalls))
     .slice(0, maxParts);
 };
 
