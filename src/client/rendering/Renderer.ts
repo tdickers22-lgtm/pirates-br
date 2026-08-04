@@ -63,12 +63,27 @@ const MAX_PIXEL_RATIO: Record<RenderQuality, number> = {
  * in the same session: this is worth nearly three of that, and it deletes
  * nothing.
  *
- * WHY IT IS FREE TO LOOK AT. Opaque, depth-tested, depth-writing geometry
- * composites to the same image in any order — order decides only which shaded
- * fragments are thrown away, and near-first throws away the most. The one place
- * order is observable is an exact depth tie, where `LESS` keeps whoever drew
- * first; that is z-fighting, which is a defect wherever it exists and not a
- * thing this may preserve.
+ * WHY IT IS FREE TO LOOK AT, AND EXACTLY WHERE IT IS NOT. Opaque geometry that
+ * both TESTS and WRITES depth composites to the same image in any order — order
+ * decides only which shaded fragments are thrown away, and near-first throws
+ * away the most. The one place order is observable there is an exact depth tie,
+ * where `LESS` keeps whoever drew first; that is z-fighting, a defect wherever
+ * it exists and not something this may preserve.
+ *
+ * **A draw that opts out of the depth buffer is the opposite case, and this
+ * game has a whole subsystem of them.** Every viewmodel mesh runs
+ * `depthTest: false, depthWrite: false` at renderOrder 999-1004
+ * (`applyViewmodelMaterialSettings`), so for those draws the SEQUENCE IS THE
+ * PICTURE: the blade, guard, grip and pommel of one cutlass overlap on screen
+ * and whichever draws last wins. Near-first is precisely backwards there — it
+ * would let the guard behind the blade paint over it — and it is the same
+ * failure the HAND_RENDER_ORDER comment in ViewmodelController describes from
+ * the other side. So the comparator partitions on "does this draw participate
+ * in the depth buffer": participants get z, everything else keeps three's
+ * material-id order, byte for byte what it had before. The partition is FIRST,
+ * which is what keeps the comparator a total order — two regimes selected
+ * pairwise would let a < b < c < a, and Array.sort with an inconsistent
+ * comparator has no defined result at all.
  *
  * WHAT IT COSTS. Batching. three's default key is material id precisely to keep
  * same-material draws adjacent, and sorting by depth interleaves them. That is
@@ -78,14 +93,36 @@ const MAX_PIXEL_RATIO: Record<RenderQuality, number> = {
  * deliberately owns a slot in the order (the sky dome pinned last, the FX
  * layers) keeps it.
  */
-function frontToBack(a: { groupOrder: number; renderOrder: number; z: number; id: number },
-  b: { groupOrder: number; renderOrder: number; z: number; id: number }): number {
+interface SortItem {
+  groupOrder: number;
+  renderOrder: number;
+  material: { id: number; depthTest: boolean; depthWrite: boolean };
+  z: number;
+  id: number;
+}
+
+/** Does the depth buffer decide this draw's result? Only then is its position in
+ *  the sequence unobservable, and only then may it be moved. */
+function ownsDepth(item: SortItem): boolean {
+  return item.material.depthTest && item.material.depthWrite;
+}
+
+function frontToBack(a: SortItem, b: SortItem): number {
   if (a.groupOrder !== b.groupOrder) return a.groupOrder - b.groupOrder;
   if (a.renderOrder !== b.renderOrder) return a.renderOrder - b.renderOrder;
-  // z is the object origin in NDC (WebGLRenderer.projectObject), so it grows
-  // with distance and ascending IS front-to-back.
+  const ad = ownsDepth(a);
+  const bd = ownsDepth(b);
+  if (ad !== bd) return ad ? -1 : 1;
+  if (ad) {
+    // z is the object origin in NDC (WebGLRenderer.projectObject), so it grows
+    // with distance and ascending IS front-to-back.
+    if (a.z !== b.z) return a.z - b.z;
+    return a.id - b.id;
+  }
+  // painterSortStable's own tail, unchanged, for everything the depth buffer
+  // does not arbitrate.
+  if (a.material.id !== b.material.id) return a.material.id - b.material.id;
   if (a.z !== b.z) return a.z - b.z;
-  // Stable tail, exactly as painterSortStable's.
   return a.id - b.id;
 }
 
