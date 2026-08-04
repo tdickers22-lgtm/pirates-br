@@ -358,12 +358,23 @@ export const PARK_SHIP = ({ x = null, z = null, rot = 0, dy = 4.2, yawOffset = M
   // every session that shares a map seed.
   let px = x, pz = z;
   if (px === null || pz === null) {
-    const dock = (g.state?.islands ?? []).find((i) => i.hasDock) ?? (g.state?.islands ?? [])[0] ?? null;
+    // Island carries `position: Vec3` and `dock: IslandDock | null` (see
+    // src/shared/types/index.ts) — NOT the flat x/z/hasDock of the perf-probe's
+    // own `world` summary. Reading the wrong shape here parked the hull at
+    // NaN,NaN and the census kept going, because NaN is a perfectly renderable
+    // place to put a ship.
+    const islands = g.state?.islands ?? [];
+    const dock = islands.find((i) => i.dock) ?? islands[0] ?? null;
     if (!dock) return null;
-    px = dock.x + (dock.radius ?? 120) + 90;
-    pz = dock.z;
+    px = dock.position.x + (dock.radius ?? 120) + 90;
+    pz = dock.position.z;
   }
   const y = mesh ? mesh.root.position.y : (ship.position?.y ?? 0);
+  // A pose that is not a number is not a pose: fail loudly rather than park a
+  // hull at NaN and report a census of nothing.
+  if (!Number.isFinite(px) || !Number.isFinite(pz) || !Number.isFinite(y)) {
+    throw new Error(`parkShip: non-finite pose x=${px} y=${y} z=${pz}`);
+  }
   if (mesh) {
     mesh.root.position.set(px, y, pz);
     mesh.root.rotation.y = rot;
