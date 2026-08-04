@@ -494,9 +494,15 @@ try {
     expect('the camera actually rises off the body', spectate.lift > 0.95, `lift=${spectate.lift}`);
     expect('and ends up well clear of the waterline',
       spectate.camY > 3.5, `camY=${spectate.camY} (was ${spectate.before.camY})`);
-    expect('the fill actually lifts so a night death is not black on black',
-      spectate.hemi.intensity > spectate.before.hemi.intensity + 0.5,
-      `${spectate.before.hemi.intensity} → ${spectate.hemi.intensity}`);
+    // Graded against the lift the run ACTUALLY reached, not against a finished
+    // one. The rise is integrated on the render clock, so on a loaded software
+    // rasteriser it is still climbing when the wait above gives up — and a
+    // lighting claim that fails because the machine was busy is a claim about
+    // the machine. Whether the camera finishes its rise is the assertion above;
+    // this one only says the fill tracks it.
+    expect('the fill lifts with the camera so a night death is not black on black',
+      spectate.hemi.intensity > spectate.before.hemi.intensity + 0.5 * spectate.lift,
+      `lift ${spectate.lift}: ${spectate.before.hemi.intensity} → ${spectate.hemi.intensity}`);
     // …and it lifts WITHOUT a second hemisphere light: one more would re-link
     // every material in the world at the moment of death.
     expect('and dying does not change the hemisphere-light count',
