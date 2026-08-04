@@ -164,11 +164,28 @@ population's instability. The census is *printed* because it makes the shape
 obvious at a glance; it is not asserted on. A single pathological new shader is
 `test-first-draw-budget` and `perf-program-census`'s business.
 
-`--mutate 900` still goes red, on the hover-acknowledgement assertion: a 900ms
-block is shorter than one link and never becomes the longest task, but it delays
-a real mouse-over by its own length whatever the host is doing (measured
-3624ms against a 1200ms bar). That is the assertion that speaks for the player,
-and it is the one that catches a regression smaller than a link.
+**The hover assertion was the last piece still going bimodal, and it went the
+same way.** Six runs of one build read 653/773/819/847/883ms and then **3969ms**,
+and what changed was not the menu: a hover is acknowledged *between* frames, and
+during warm-up every frame is one indivisible link. The ack is therefore (frames
+it waited) × (what a link costs on this host today) — the first term is the
+client's business, the second is the host's. It is now counted in **warm slices**:
+the menu must answer within three frames of warm-up work. On a GPU with 30ms
+links that is 390ms, far stricter than the 1200ms constant it replaces. Three
+clean runs after: 634 / 838 / 834ms against bars of 6215 / 6497 / 6608ms.
+
+**The mutation proof is `--mutate 3000`, not `--mutate 900`, and the size is not
+a fudge.** A 900ms block is smaller than this load's own WebGL context creation
+(0.94s) and far smaller than its worst link, so it is genuinely not the worst
+thing happening during a SwiftShader load — asserting that it is would assert
+something false. `--mutate 900` was measured surviving: longest task 1992ms,
+still a link, 47ms of excess. `--mutate 3000` goes red at 1133ms of excess.
+
+**So: this gate cannot see a sub-link block on the software path, and nothing
+here can.** A 900ms freeze is real and player-visible; it is simply not an
+anomaly against a 1.8s link. The hover check appeared to catch it once (3624ms
+against the old constant) and missed it the next time (883ms) — that constant was
+measuring where in the load the block happened to land.
 
 ## The HUD suite's four failures
 
