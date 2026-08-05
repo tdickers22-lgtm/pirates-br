@@ -58,6 +58,30 @@ export const PIN_PROBE_RESOLUTION = () => {
   return true;
 };
 
+/**
+ * DETACH THE POST CHAIN FOR THE WHOLE SESSION, at the tiers that have one.
+ *
+ * `DEPTH_TIE_CENSUS`'s own `bypassPost` covers the renders it takes. It does not
+ * cover the GAME's frames, and those are what make `balanced` and `high`
+ * unmeasurable here: the gate waits three real frames after every placement so
+ * the warmer can finish, and three frames of MSAA resolve + a five-level
+ * UnrealBloom + a graded OutputPass + FXAA on a CPU rasteriser is ten minutes.
+ * One census never completed in a thirty-five minute run.
+ *
+ * Detaching it costs the measurement nothing. The post chain is a deterministic
+ * function of the scene render, so it can smear a tie but cannot create one, and
+ * everything that DOES differ between tiers for depth purposes — LOD distances,
+ * material variants, the shadow pass, the resolution — is untouched.
+ *
+ * @returns whether a chain was actually detached, so the run can say so.
+ */
+export const DETACH_POST_CHAIN = () => {
+  const R = window.__piratesBR?.renderer;
+  if (!R || !R.postFx) return false;
+  R.postFx = null;
+  return true;
+};
+
 /** Place the free camera and bring the world's LOD to where it would arrive. */
 export const PLACE_AND_SETTLE = (c) => {
   const g = window.__piratesBR;

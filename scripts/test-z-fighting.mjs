@@ -26,6 +26,7 @@ import { readWorld, sessionQuery, SERVER_PORT } from './perf-probe.mjs';
 import { ensureDevClient, stopDevClient } from './lib/dev-client.mjs';
 import {
   PIN_PROBE_RESOLUTION, PLACE_AND_SETTLE, DEPTH_TIE_CENSUS, PIERCE_TIE_PIXELS,
+  DETACH_POST_CHAIN,
 } from './lib/zfight-probe.mjs';
 import { planStands, DOLLY, TIME_OF_DAY, VIEWPORT } from './lib/zfight-stands.mjs';
 
@@ -99,6 +100,11 @@ async function main() {
     await page.waitForTimeout(SETTLE_MS);
     await page.evaluate(() => window.__piratesBR.setBotPeace(true));
     await page.evaluate(PIN_PROBE_RESOLUTION);
+    // Detached for the SESSION, not just for the census: the three settling
+    // frames after every placement are game frames, and at `balanced` and `high`
+    // three of those through the bloom chain is ten minutes on SwiftShader.
+    const detached = PRESENTED ? false : await page.evaluate(DETACH_POST_CHAIN);
+    if (detached) console.log('  post chain detached for this run (it can smear a tie, not create one)');
 
     const world = await readWorld(page);
     const stands = planStands(world, SCENE_FILTER);
