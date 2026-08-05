@@ -372,12 +372,29 @@ console.log('\n3. THE REACH SPEAKS (story vignettes)');
 // — and keep standing him there, because the authoritative snapshot puts him
 // back on his real feet every 100 ms and a one-shot write is gone before the
 // scan runs (measured: reverted inside 250 ms).
+// Keep a durable copy of feed calls as well. The visual toast correctly expires
+// after three wall-clock seconds, but a single SwiftShader frame can take longer
+// than that while the scene is first revealed. Grading only the live DOM would
+// therefore confuse "the toast has expired" with "the story never spoke".
+await page.evaluate(() => {
+  const g = window.__piratesBR;
+  window.__storyFeedHistory = [];
+  const pushFeed = g?.hud?.pushFeed;
+  if (typeof pushFeed !== 'function') return;
+  g.hud.pushFeed = function (...args) {
+    window.__storyFeedHistory.push(args.map((value) => String(value)).join(' '));
+    return pushFeed.apply(this, args);
+  };
+});
 const KNOWN_SCENES = ['smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton',
   'rum_still', 'crow_roost', 'mermaid_shrine', 'castaway_camp', 'kraken_wreck',
   'dig_site', 'gallows', 'parley_table', 'mine_head', 'widow_memorial', 'gibbet_cage'];
 for (const nth of [0, 1]) {
   const walked = await page.evaluate(({ KNOWN, n }) => {
     const g = window.__piratesBR;
+    // Each assertion must be backed by a feed call made during this walk, not
+    // by the still-retained line from the previous scene.
+    window.__storyFeedHistory = [];
     const scenes = [];
     for (const isl of g.state.islands ?? []) {
       for (const p of isl.props ?? []) if (KNOWN.includes(p.type)) scenes.push({ isl, p });
@@ -405,6 +422,13 @@ for (const nth of [0, 1]) {
   }, { KNOWN: KNOWN_SCENES, n: nth });
   if (!walked) { check(`story scene ${nth + 1} found`, false, 'no scene props in reach'); continue; }
 
+  // Wait for the exact scene's durable discovery marker. Counting the set is
+  // insufficient when a previous scene was already discovered on the way in.
+  await page.waitForFunction((type) => {
+    const seen = window.__piratesBR?.seenVignettes;
+    return !!seen && [...seen].some((key) => key.endsWith(`:${type}`));
+  }, walked.type, { timeout: 45_000 }).catch(() => {});
+
   // Catch the scene's own banner before landfall for the same island paints
   // over it, then keep the durable proof: the discovery log line.
   let bannerText = '';
@@ -422,14 +446,16 @@ for (const nth of [0, 1]) {
     const g = window.__piratesBR;
     return {
       seen: g.seenVignettes ? [...g.seenVignettes] : [],
-      log: [...document.querySelectorAll('#kill-feed div')]
-        .map((n) => n.textContent).filter((t) => /Discovered:/i.test(t)),
+      log: [...(window.__storyFeedHistory ?? []),
+        ...[...document.querySelectorAll('#kill-feed div')].map((n) => n.textContent)]
+        .filter((t) => /Discovered:/i.test(t)),
     };
   });
   await page.evaluate(() => window.__unpin?.());
   const spoke = told.log.some((l) => !/land discovered/i.test(l));
+  const sawTarget = told.seen.some((key) => key.endsWith(`:${walked.type}`));
   check(`walking into "${walked.type}" makes the scene SPEAK its name and its beat`,
-    spoke && told.seen.length >= nth + 1,
+    spoke && sawTarget,
     `${bannerText || told.log[0] || 'nothing'}`);
 }
 
@@ -525,6 +551,25 @@ try {
   console.log(`  (wreck server on :${wreckPort}, wreck forced at 15s)`);
   await page.goto(`${BASE_URL}/?debug&forceinput&server=${wreckPort}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
+  // Install this before joining: on a cold SwiftShader load the three-second
+  // visual toast may expire while the first world is still being constructed.
+  await page.evaluate(() => {
+    const g = window.__piratesBR;
+    window.__wreckFeedHistory = [];
+    const pushFeed = g?.hud?.pushFeed;
+    if (typeof pushFeed !== 'function') return;
+    g.hud.pushFeed = function (...args) {
+      window.__wreckFeedHistory.push(args.map((value) => String(value)).join(' '));
+      return pushFeed.apply(this, args);
+    };
+
+    // This stage grades the wreck and its cargo, not the bot plunder race. Keep
+    // the real SOLO button path (name submission, menu transition, network
+    // message), but ask the server for the supported zero-bot solo variant so
+    // nine autonomous crews cannot remove every chest during cold world-build.
+    const soloStart = g.network.soloStart.bind(g.network);
+    g.network.soloStart = () => soloStart(0);
+  });
   await page.click('#menu-solo-btn', { noWaitAfter: true });
   await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 150_000 });
   await wait(1500);
@@ -534,6 +579,18 @@ try {
   });
   await dismissOrders();
   await page.waitForFunction(() => !!window.__piratesBR?.state?.wreck, null, { timeout: 120_000 });
+  // The wreck announcement and its static-world loot travel on separate server
+  // messages. Wait until every announced chest has reached an island snapshot
+  // before grading the cargo rather than sampling the valid interval between
+  // those messages.
+  await page.waitForFunction(() => {
+    const state = window.__piratesBR?.state;
+    const ids = state?.wreck?.chestIds;
+    if (!ids?.length) return false;
+    const present = new Set((state.islands ?? []).flatMap((island) =>
+      (island.chests ?? []).map((chest) => chest.id)));
+    return ids.every((id) => present.has(id));
+  }, null, { timeout: 45_000 }).catch(() => {});
   // She may rise while the card is still being read on a fresh join.
   await dismissOrders();
   const wreck = await page.evaluate(() => {
@@ -544,7 +601,8 @@ try {
       x: w.position.x, z: w.position.z,
       chests: w.chestIds.length, barrels: w.barrelIds.length,
       offRingCentre: Math.hypot(w.position.x - storm.nextCenterX, w.position.z - storm.nextCenterZ),
-      feed: [...document.querySelectorAll('#kill-feed div')].map((n) => n.textContent).join(' | '),
+      feed: [...(window.__wreckFeedHistory ?? []),
+        ...[...document.querySelectorAll('#kill-feed div')].map((n) => n.textContent)].join(' | '),
     };
   });
   check('she rises, and she rises at the announced next ring centre',
