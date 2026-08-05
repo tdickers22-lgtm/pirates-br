@@ -185,15 +185,17 @@ The bill is **two extra merged draws per detail hull**: `mergeStaticMeshes`
 batches by material and these are two more of them. They exist only on the detail
 hull, never on the proxy.
 
-## State of the world, seed 20260801, 960×540
+## State of the world, seed 20260801
 
 `self-noise 0` at every stand, pose and time of day, at every tier.
 
 Worst tie count over three poses; `patch` is the gate's assertion and is 0
 everywhere.
 
+The full-resolution `low` sweep is 960×540:
+
 | stand | low noon | low night |
-|---|---|---|
+|---|---:|---:|
 | dock-vista | 81 | 72 |
 | island-interior | 100 | 94 |
 | cave-interior | 40 | 43 |
@@ -208,35 +210,44 @@ Everything remaining is intersection line — the ocean against a beach, a rock
 skirt or a hull, foliage cards crossing — which is geometry meeting geometry and
 not precision failing.
 
-### `balanced` and `high` are NOT measured, and this is why
+### `balanced` and `high`: measured at a reduced framebuffer
 
-They were attempted and abandoned, twice, and the reason is the machine and not
-the instrument. `balanced` reveals detail LOD to 285 m against `low`'s 170 m
-(`high` reaches 380 m), so a single scene render carries several times the
-geometry — and a census is four of them. Measured on this MacBook Air under
-SwiftShader:
+The first full-resolution attempts exposed the practical limit of this machine.
+`balanced` reveals detail LOD to 285 m against `low`'s 170 m (`high` reaches
+380 m), so one census carries several times the geometry and performs four
+software renders. A single `deck-aft` condition failed to complete after 35
+minutes with the post chain attached and after 15 minutes with it detached.
 
-* with the post chain attached, **one census at `deck-aft` did not complete in
-  thirty-five minutes**;
-* with the chain detached for the whole session (the fix above, which took
-  `low` from unusable to routine), **one census still did not complete in
-  fifteen**.
+The close-out therefore added an explicit `--ratio` control and ran the complete
+9 × 2 × 3 matrix for both heavier tiers at ratio 0.25: **240×135**, or one
+sixteenth of the full pixel count. This is sufficient for the binary gate being
+claimed here: a 3×3 coplanar patch still has interior pixels, while line
+intersections do not. It is not sufficient for comparing the raw tie counts with
+the 960×540 `low` table, so the tables stay separate.
 
-At that rate the full 9 × 2 × 3 sweep is somewhere north of seven hours per
-tier, and the reduced 3 × 2 × 2 sweep is over two. Nothing was reported from a
-partial run and no threshold was invented to make one pass.
+| stand | balanced noon | balanced night | high noon | high night |
+|---|---:|---:|---:|---:|
+| dock-vista | 10 | 7 | 8 | 12 |
+| island-interior | 10 | 11 | 9 | 8 |
+| cave-interior | 6 | 7 | 10 | 8 |
+| deck-aft | 13 | 14 | 9 | 7 |
+| open-sea | 5 | 2 | 3 | 3 |
+| shore-waterline | 5 | 6 | 11 | 8 |
+| island-far | 20 | 21 | 23 | 28 |
+| island-overlook | 36 | 33 | 31 | 35 |
+| hull-alongside | 6 | 7 | 8 | 6 |
 
-**What this leaves open, precisely.** Both fights are in the ship's own geometry,
-at ranges of 3.6 m and 12 m, so neither depends on a tier's LOD distance, and
-neither material's `polygonOffset` is tier-conditional. The heavy tiers are
-nevertheless UNMEASURED, and the honest statement is that the near-plane and the
-two fixes are proven at `low` only.
+Every one of the 108 heavy-tier readings had `selfNoise = 0` and
+`patchPixels = 0`. The raw ties in the table are all one-pixel-wide intersection
+lines. The measurements are recorded in
+`test-results/closeout/zfight-balanced/report.json` and
+`test-results/closeout/zfight-high/report.json`; each report records its tier,
+ratio and actual framebuffer dimensions.
 
-The affordable way in is to pin the probe to a smaller framebuffer for those
-tiers — tie counts scale with pixel count, so 480 × 270 is a quarter of the work
-and a quarter of the count, and the gate's assertion is on `patchPixels` being
-zero, which does not care about the scale. That changes the numbers the table
-compares against, which is why it was not done in the middle of a close-out.
+That closes the tier gap honestly: `low` is proven at the normal 960×540 gate
+resolution, and `balanced`/`high` are proven across the same stands, times and
+poses at 240×135. The result is **zero coplanar z-fighting patches at all three
+tiers**, not a claim that every geometrically valid depth tie has disappeared.
 
 ### Before
 
