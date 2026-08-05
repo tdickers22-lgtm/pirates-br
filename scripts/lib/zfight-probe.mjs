@@ -85,6 +85,25 @@ export const PLACE_AND_SETTLE = (c) => {
  *   `<` blacks the entire sky and reports a quarter of a million ties that are
  *   not ties. It is held at LessEqual in both renders, which costs the probe
  *   only its ability to see a fight between the sky and geometry at 2999.99 m.
+ *
+ * @param opts.bypassPost
+ *   MEASURE THE TIE, NOT THE SMEAR. `balanced` and `high` run the scene through
+ *   EffectComposer — MSAA resolve, UnrealBloom, a graded OutputPass, FXAA — and
+ *   every one of those spreads a changed pixel into its neighbours. Counting the
+ *   PRESENTED frame at those tiers therefore counts a blur kernel, not a depth
+ *   test, and no threshold derived from it means anything.
+ *
+ *   The tie itself happens in the scene render, which is reachable: dropping
+ *   `Renderer.postFx` for the duration of the census sends `R.render()` down its
+ *   own `renderer.render(scene, camera)` branch. Nothing else about the frame
+ *   changes — same materials, same LOD, same shadow pass, same resolution.
+ *
+ *   The post chain cannot CREATE a tie and it is a deterministic function of its
+ *   input, so a scene render with zero changed pixels composes to a presented
+ *   frame with zero changed pixels. Measuring before the chain is therefore not
+ *   a weaker claim than measuring after it — it is the same claim without the
+ *   blur. `presented` reports the after-chain count beside it so the difference
+ *   is on the record rather than assumed.
  */
 export const DEPTH_TIE_CENSUS = (opts = {}) => {
   const LESS_DEPTH = 2;
@@ -111,6 +130,7 @@ export const DEPTH_TIE_CENSUS = (opts = {}) => {
   // and it is what makes `selfNoise` capable of reading 0 at all.
   const realNow = performance.now.bind(performance);
   const frozenAt = realNow();
+  const savedPost = R.postFx ?? null;
   const shoot = (buf) => {
     performance.now = () => frozenAt;
     try {
@@ -156,6 +176,21 @@ export const DEPTH_TIE_CENSUS = (opts = {}) => {
     }
     return n;
   };
+
+  // ── the composed frame, for the record ─────────────────────────────────
+  // Taken FIRST, while the chain is still attached, and reported beside the
+  // scene-render count so the smear is a measured number rather than a claim.
+  let presented = null;
+  if (savedPost && opts.presented) {
+    shoot(a);
+    shoot(c);
+    const noise = countDiff(a, c, 0);
+    flip();
+    shoot(b);
+    flip();
+    presented = { selfNoise: noise, ties: countDiff(a, b, 0), tiesLoud: countDiff(a, b, 24) };
+  }
+  if (opts.bypassPost) R.postFx = null;
 
   // ── the control: two renders, nothing changed ──────────────────────────
   shoot(a);
@@ -294,10 +329,14 @@ export const DEPTH_TIE_CENSUS = (opts = {}) => {
     maskPng = out.toDataURL('image/png');
   }
 
+  R.postFx = savedPost;
+
   return {
     width: w,
     height: h,
     pixels: w * h,
+    postBypassed: !!(opts.bypassPost && savedPost),
+    presented,
     selfNoise,
     ties,
     patchPixels,

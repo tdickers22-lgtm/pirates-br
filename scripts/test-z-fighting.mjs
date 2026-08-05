@@ -22,11 +22,12 @@ import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import process from 'node:process';
 import { browserArgs, describeGl } from './lib/browser-args.mjs';
-import { readWorld, sessionQuery, planScenes, SERVER_PORT } from './perf-probe.mjs';
+import { readWorld, sessionQuery, SERVER_PORT } from './perf-probe.mjs';
 import { ensureDevClient, stopDevClient } from './lib/dev-client.mjs';
 import {
   PIN_PROBE_RESOLUTION, PLACE_AND_SETTLE, DEPTH_TIE_CENSUS, PIERCE_TIE_PIXELS,
 } from './lib/zfight-probe.mjs';
+import { planStands, DOLLY, TIME_OF_DAY, VIEWPORT } from './lib/zfight-stands.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback = null) => {
@@ -42,22 +43,11 @@ const SETTLE_MS = parseInt(arg('settle', '12000'), 10);
 const POSES = parseInt(arg('poses', '3'), 10);
 const MASKS = flag('masks');
 const PIERCE = flag('pierce');
+/** Also count the COMPOSED frame at the tiers that have a post chain, so the
+ *  smear the chain adds to a tie is a measured number in the report. */
+const PRESENTED = flag('presented');
 const SCENE_FILTER = arg('scenes', null)?.split(',').map((s) => s.trim()).filter(Boolean) ?? null;
 const TOD_FILTER = arg('tod', null)?.split(',').map((s) => s.trim()).filter(Boolean) ?? null;
-
-const VIEWPORT = { width: 960, height: 540 };
-const TIME_OF_DAY = { noon: 854, night: 374 };
-
-/**
- * THE DOLLY. Metres along the view direction, from the stand's own position.
- *
- * They are deliberately not round numbers and deliberately sub-metre. Depth
- * quantisation is a grid; a coplanar pair drifts across it as the eye moves, so
- * what these have to do is land on DIFFERENT PHASES of that grid, and stepping
- * by a round 0.5 m at 100 m lands on the same phase over and over. Sub-metre
- * because the point is to re-measure the SAME view, not a different one.
- */
-const DOLLY = [0, 0.17, 0.41, 0.83, 1.29];
 
 let failures = 0;
 const fail = (label, detail = '') => {
@@ -65,93 +55,6 @@ const fail = (label, detail = '') => {
   failures += 1;
 };
 const pass = (label) => console.log(`  ✓ ${label}`);
-
-/**
- * THE STANDS. Every one is a place where two surfaces are coplanar or nearly so
- * by construction — which is the only place the artifact can live.
- */
-function planStands(world) {
-  const shared = planScenes(world);
-  const byName = (n) => world.islands.find((i) => i.name === n) ?? null;
-  const dockIsland = byName('Castaway Reach') ?? world.islands.find((i) => i.hasDock) ?? world.islands[0];
-  const biggest = [...world.islands].sort((a, b) => b.radius - a.radius)[0];
-
-  const stands = [
-    // The shared perf stands, so a tie count and a draw count describe the same
-    // frames. dock-vista and island-far are the DISTANCE cases — depth precision
-    // falls off with the square of the distance and these are where it lands.
-    { id: 'dock-vista', label: 'dock vista (island at 95 m + dock planks)', cam: shared['dock-vista'] },
-    { id: 'island-interior', label: 'island interior, eye level in the scatter', cam: shared['island-interior'] },
-    { id: 'cave-interior', label: 'cave interior (shell vs terrain, mouth cutout)', cam: shared['cave-interior'] },
-    { id: 'deck-aft', label: 'on-deck aft (planking, patches, hull decals)', cam: shared['deck-aft'] },
-    { id: 'open-sea', label: 'open sea (ocean plane + horizon)', cam: shared['open-sea'] },
-  ];
-
-  // THE WATERLINE, at eye height, from the water. Shore band, wet-sand band,
-  // shallow disc and sand shelf are all authored as overlapping ramps against
-  // the ocean plane, and this is the only stand that looks straight down the
-  // seam where they meet.
-  stands.push({
-    id: 'shore-waterline',
-    label: 'shore waterline (shore band / wet sand / ocean seam)',
-    cam: {
-      x: dockIsland.x + (dockIsland.radius + 26),
-      y: 1.7,
-      z: dockIsland.z,
-      pitch: -0.06,
-      aimAt: { x: dockIsland.x, z: dockIsland.z },
-    },
-  });
-
-  // THE DISTANCE CASE, and the reason the near plane matters. A whole island at
-  // 520 m: every coplanar pair on it is being resolved by the tail of the depth
-  // buffer, where the levels are ~100x coarser than they are at the dock.
-  stands.push({
-    id: 'island-far',
-    label: 'island at 520 m (the far tail of the depth buffer)',
-    cam: {
-      x: biggest.x + (biggest.radius + 520) * 0.707,
-      y: 26,
-      z: biggest.z + (biggest.radius + 520) * 0.707,
-      pitch: -0.03,
-      aimAt: { x: biggest.x, z: biggest.z },
-    },
-  });
-
-  // LOOKING DOWN ON TERRAIN from above: terrace lips, contact shadows, ground
-  // decals and the detail/proxy crossfade band all present their coplanar face
-  // to a top-down eye and hide it from a level one.
-  stands.push({
-    id: 'island-overlook',
-    label: 'island overlook (terraces, contact shadows, ground decals)',
-    cam: {
-      x: biggest.x + biggest.radius * 0.9,
-      y: 96,
-      z: biggest.z + biggest.radius * 0.9,
-      pitch: -0.62,
-      aimAt: { x: biggest.x, z: biggest.z },
-    },
-  });
-
-  // ALONGSIDE THE HULL at water level: the waterline collar against the ocean
-  // surface, plus the hole decals and plank patches at the distance a boarder
-  // sees them.
-  if (world.ship) {
-    stands.push({
-      id: 'hull-alongside',
-      label: 'alongside the hull at water level (collar vs ocean, hole decals)',
-      cam: {
-        x: world.ship.x + Math.cos(world.ship.rot ?? 0) * 15,
-        y: world.ship.y + 1.2,
-        z: world.ship.z - Math.sin(world.ship.rot ?? 0) * 15,
-        pitch: 0.02,
-        aimAt: { x: world.ship.x, z: world.ship.z },
-      },
-    });
-  }
-
-  return stands.filter((s) => s.cam && (!SCENE_FILTER || SCENE_FILTER.includes(s.id)));
-}
 
 async function health() {
   const port = SERVER_PORT ?? '8090';
@@ -198,7 +101,7 @@ async function main() {
     await page.evaluate(PIN_PROBE_RESOLUTION);
 
     const world = await readWorld(page);
-    const stands = planStands(world);
+    const stands = planStands(world, SCENE_FILTER);
     const tods = Object.entries(TIME_OF_DAY).filter(([k]) => !TOD_FILTER || TOD_FILTER.includes(k));
     console.log(`  ${stands.length} stands x ${tods.length} times of day x ${POSES} poses\n`);
 
@@ -222,7 +125,7 @@ async function main() {
             tod: todSec,
           };
           await page.evaluate(PLACE_AND_SETTLE, cam);
-          const census = await page.evaluate(DEPTH_TIE_CENSUS, { mask: MASKS });
+          const census = await page.evaluate(DEPTH_TIE_CENSUS, { mask: MASKS, bypassPost: true, presented: PRESENTED });
           if (census.maskPng) {
             writeFileSync(
               `${OUT}/${stand.id}-${todName}-p${i}.png`,
@@ -242,7 +145,9 @@ async function main() {
           poses.push(census);
           console.log(`    ${stand.id.padEnd(17)} ${todName.padEnd(5)} +${d.toFixed(2)}m  `
             + `ties ${String(census.ties).padStart(6)}  patch ${String(census.patchPixels).padStart(6)}  `
-            + `loud ${String(census.tiesLoud).padStart(6)}  self-noise ${census.selfNoise}`);
+            + `loud ${String(census.tiesLoud).padStart(6)}  self-noise ${census.selfNoise}`
+            + (census.presented ? `  [composed ${census.presented.ties} / noise ${census.presented.selfNoise}]` : '')
+            + (census.postBypassed ? '  (post chain bypassed)' : ''));
         }
         const worst = poses.reduce((a, b) => (b.ties > a.ties ? b : a));
         report.stands.push({ id: stand.id, label: stand.label, tod: todName, poses, worst: worst.ties });
