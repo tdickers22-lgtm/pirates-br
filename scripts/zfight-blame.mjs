@@ -50,6 +50,8 @@ const ONLY = arg('only', null)?.split(',').map((s) => s.trim()).filter(Boolean) 
 const OWNER = arg('owner', null)?.split(',').map((s) => s.trim()).filter(Boolean) ?? null;
 /** Ablate whole named subtrees instead of single materials — the coarse pass. */
 const BY_OWNER = argv.includes('--by-owner');
+/** Skip the pose scan and stand this many metres along the view direction. */
+const AT = arg('at', null) === null ? null : parseFloat(arg('at'));
 /** Raycast the patch pixels and report hull-local coordinates, optionally
  *  filtered to a comma-separated list of material names. */
 const PIERCE = argv.includes('--pierce')
@@ -110,7 +112,13 @@ async function main() {
     // ablations. A coplanar pair is one depth level apart at one eye position and
     // TIED a few centimetres later; a sweep started at the first is a sweep of a
     // clean frame that can blame nobody.
-    if (park) {
+    // A pose already known good skips the scan, which is six renders of a
+    // software rasteriser and the most expensive part of a short run.
+    if (park && AT !== null) {
+      park.dx = (park.dx ?? 0) + Math.sin(park.yaw) * AT;
+      park.dz = (park.dz ?? 0) + Math.cos(park.yaw) * AT;
+      console.log(`  pose pinned at +${AT}m along the view direction\n`);
+    } else if (park) {
       let best = null;
       // ALONG THE VIEW DIRECTION, not along z. The dolly's whole job is to land
       // on a different phase of the depth grid at the SAME view; stepping
@@ -160,7 +168,10 @@ async function main() {
     // the whole scene, which the material sweep is not.
     if (BY_OWNER) {
       const listing = await page.evaluate(BLAME_SWEEP, { uuids: [], park, box, listOwners: true });
-      const owners = listing.owners.map((o) => o.owner);
+      let owners = listing.owners.map((o) => o.owner);
+      // 254 named owners at the hull, two renders each: the same narrowing the
+      // material sweep needs, for the same reason.
+      if (OWNER) owners = owners.filter((o) => OWNER.some((n) => o.includes(n)));
       console.log(`  ${owners.length} named owners; baseline patch ${listing.base.patch}\n`);
       for (let i = 0; i < owners.length; i += CHUNK) {
         const out = await page.evaluate(BLAME_SWEEP, { owners: owners.slice(i, i + CHUNK), park, box });

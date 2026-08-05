@@ -1,4 +1,4 @@
-# Z-fighting: what it is here, how it is measured, and what is left
+# Z-fighting: what it is here, how it is measured, and what it took to reach zero
 
 ## The instrument
 
@@ -21,7 +21,7 @@ the day clock all move, so a frame diff of a moving camera reports the whole
 screen. It is also a *sampling* probe: it sees a fight only on the frames where
 the fight happened to flip.
 
-### Two things the probe must state out loud
+### Three things the probe must state out loud
 
 **Self-noise.** Every census first renders twice with nothing changed. That count
 must be 0. It is reported beside every measurement and it is the gate's first
@@ -32,6 +32,22 @@ animation" below.
 the far plane (`SKY_VERT` writes `gl_Position.z = w`) and it depends on `<=` to
 survive the cleared depth of 1.0. Flipping it to `<` blacks the whole sky and
 reports a quarter-million ties that are not ties.
+
+**At `balanced` and `high` the census bypasses the post chain.** Those tiers run
+the scene through EffectComposer — MSAA resolve, UnrealBloom, a graded
+OutputPass, FXAA — and every one of those spreads a changed pixel into its
+neighbours, so a count taken on the PRESENTED frame is a count of a blur kernel
+and not of a depth test. The tie happens in the scene render and that render is
+reachable: dropping `Renderer.postFx` for the census sends `R.render()` down its
+own `renderer.render(scene, camera)` branch, with the same materials, the same
+LOD, the same shadow pass and the same resolution.
+
+This is not the weaker claim it looks like. The post chain cannot CREATE a tie,
+and it is a deterministic function of its input, so a scene render with zero
+changed pixels composes to a presented frame with zero changed pixels — which is
+why no per-tier threshold was needed and none was invented. `--presented`
+measures the composed frame anyway and reports it beside the scene count, so the
+smear is on the record as a number rather than as an argument.
 
 ## Not every tie is the artifact
 
@@ -86,6 +102,134 @@ the waterline, a deck — the closest drawn surface is 0.3029 m. It was:
 implementation writes `gl_FragDepth` in the fragment shader, which disables early
 depth rejection everywhere — the opposite of what the fill pass just bought.
 
+## Naming the two surfaces in a fight
+
+`scripts/zfight-blame.mjs`. The census says how many pixels stand on a tie; it
+never said whose, and the two obvious ways of asking both lie here:
+
+* three's raycaster **does not test `visible`**, so a pierce at `deck-aft`
+  cheerfully reported the ship's LOD proxy as one of the fighters when
+  `mesh.proxyRoot.visible` was false and the proxy drew nothing;
+* `Line.threshold` is a metre wide, so alongside the hull every pierce came back
+  as rigging.
+
+So blame by **ablation**. A tie needs both of its surfaces: hide the meshes of one
+material, re-run the flip, and if the coplanar patch goes to zero that material is
+one of the two. `--by-owner` does the same to whole named subtrees first, which is
+what makes it affordable — 517 materials are drawn at `deck-aft` and one ablation
+is two software renders.
+
+Two things had to be pinned before an ablation could be compared with anything:
+
+* **Every render of a sweep happens inside ONE synchronous task.** `deck-aft` is
+  anchored to a hull that sails; the sweep's own baseline fell from 615 patch
+  pixels to 0 in four chunks while everything measured after that was being scored
+  against a frame with no deck in it.
+* **The hull's ATTITUDE is pinned, not just its position.** Pitch, roll and heave
+  are rewritten from the Gerstner field every frame and the tie moves with them:
+  51, 0 and 135 patch pixels on three consecutive chunks of an already-parked hull.
+
+And a pose scan comes before the sweep, because a coplanar pair is one depth level
+apart at one eye position and TIED a few centimetres later — a sweep started at the
+first is a sweep of a clean frame that can blame nobody.
+
+## The two fights that were left, and what they actually were
+
+### `deck-aft` — the quarterdeck step against the stern castle
+
+Ablation: hiding **`ship-deck-planking`** took the patch from 1,077 to 0; hiding
+**`ship-dark-timber`** did the same. A ray through the patch put both of them at
+hull-local **z = −3.12** with a **+z face normal**, over x ∈ [−1.0, 1.0] and
+y ∈ [2.33, 2.61].
+
+That is the upper quarterdeck step's forward face against the stern castle's
+forward face, and they coincide by arithmetic:
+
+```
+step front   = −L·0.235 − stepDepth/2 = −L·0.235 − 0.3
+castle front = −L·0.37  + L·0.11      = −L·0.26
+```
+
+equal exactly when `L·0.025 = 0.3`, i.e. **L = 12 — the sloop**, the hull every
+player starts in. The brigantine misses by 10 cm and the galleon by 25, which is
+why this only ever showed on the starting boat.
+
+Fixed by giving the two step boxes their own material, `ship-deck-riser`, with
+`polygonOffset −2 / −2`.
+
+### `hull-alongside` — the cap rail against the railing it caps
+
+Ablation zeroed the patch by hiding **`ship-dark-timber`** and by hiding nothing
+else: the fight is that material against ITSELF. The pierce put every sample at
+hull-local **x = 2.5** with a **+x normal**, spanning z −4.0 to 4.6 at y 2.608 —
+and 2.5 is exactly `W/2` on the sloop:
+
+```
+railing  x = W·0.5 − 0.07, box 0.14 wide  →  outboard face at W·0.5
+cap rail x = W·0.48,       box 0.20 wide  →  outboard face at W·0.5
+```
+
+a 0.1 m × 9.6 m ribbon of shared plane down each side of every hull, at the height
+a boarder's eye sits. One material meant one merged draw and therefore nothing to
+bias against anything, so the cap rail became its own material, `ship-dark-trim`,
+with `polygonOffset −2 / −2`. The bow cap segments and the stern cap rail moved
+with it — a cap run that is offset for part of its length is a cap run with a seam.
+
+### Why an offset and not a nudge
+
+Neither fix moves a box. Moving two coplanar surfaces apart by an epsilon
+RELOCATES the tie to whatever distance quantises the new gap to zero rather than
+removing it; a polygon offset is a bias in depth and holds at every distance.
+
+The bill is **two extra merged draws per detail hull**: `mergeStaticMeshes`
+batches by material and these are two more of them. They exist only on the detail
+hull, never on the proxy.
+
+## State of the world, seed 20260801, 960×540
+
+`self-noise 0` at every stand, pose and time of day, at every tier.
+
+Worst tie count over three poses; `patch` is the gate's assertion and is 0
+everywhere.
+
+| stand | low noon | low night | balanced noon | balanced night | high noon | high night |
+|---|---|---|---|---|---|---|
+| dock-vista | 81 | 72 | — | — | — | — |
+| island-interior | 100 | 94 | — | — | — | — |
+| cave-interior | 40 | 43 | — | — | — | — |
+| deck-aft | 65 | 62 | — | — | — | — |
+| open-sea | 18 | 16 | — | — | — | — |
+| shore-waterline | 53 | 47 | — | — | — | — |
+| island-far | 72 | 57 | — | — | — | — |
+| island-overlook | 220 | 220 | — | — | — | — |
+| hull-alongside | 45 | 38 | — | — | — | — |
+
+Everything remaining is intersection line — the ocean against a beach, a rock
+skirt or a hull, foliage cards crossing — which is geometry meeting geometry and
+not precision failing.
+
+### Before
+
+| stand | worst ties | patch | |
+|---|---|---|---|
+| deck-aft, noon | 888 | **579** | quarterdeck step vs stern castle |
+| deck-aft, night | 787 | **231** | same |
+| hull-alongside, noon | 477 | **31** | cap rail vs railing |
+
+## The gate still fails when a fight comes back
+
+Proved by mutation, not by assertion. With `polygonOffset` turned back off on both
+new materials and nothing else changed:
+
+| stand | patch, fixed | patch, mutated |
+|---|---|---|
+| deck-aft @ noon | 0 | **254** |
+| deck-aft @ night | 0 | **82** |
+| hull-alongside @ noon | 0 | **60** |
+
+`scripts/test-z-fighting.mjs` is in the browser suite (`scripts/lib/suites.mjs`,
+marked `slow`).
+
 ## Traps this campaign hit, all found by a control
 
 * **A render in this game ADVANCES ANIMATION.** `MiscMeshFactory`'s station halo
@@ -106,39 +250,15 @@ depth rejection everywhere — the opposite of what the fill pass just bought.
   output** — a mesh program over attributes it never declared. That was the whole
   of an 81,131-pixel self-noise reading, and only at the stands full of motes and
   wisps. They are hidden for the depth pass instead.
+* **Editing a client source file kills a live probe run.** Vite's HMR navigates
+  the page and Playwright reports `Execution context was destroyed`. A blame
+  sweep lost twenty minutes to a commit made while it was running.
 
-## State of the world, low tier, seed 20260801
+## Next
 
-`self-noise 0` at every stand, pose and time of day.
-
-| stand | worst ties | patch | verdict |
-|---|---|---|---|
-| dock-vista | 69 | 0 | clean — intersection line only |
-| island-interior | 92 | 0 | clean |
-| cave-interior | 40 | 0 | clean |
-| open-sea | 13 | 0 | clean |
-| shore-waterline | 46 | 0 | clean |
-| island-far | 71 | 0 | clean |
-| island-overlook | 212 | 0 | clean (ocean against rock skirts, all curve) |
-| **deck-aft** | 496–2003 | **87–130** | **FAILS** |
-| **hull-alongside** | 340 | **>0 at pose 0** | **FAILS** |
-
-### What is left, and where
-
-**`deck-aft`, worst at night.** Clusters of 88–310 px along the bottom of the
-frame (y ≈ 465–486, the deck under the eye), flipping between a dim plank brown
-`rgb(38,23,14)` and near-black `rgb(2,0,0)`, delta 30–40 — loud enough to see. A
-dark decal lying exactly on the deck planking and losing the depth test to it
-half the time. `ShipRenderer` gives `polygonOffset` to the hole/rim/splinter
-decals and to the hole marker; whatever this is does not have it.
-
-**`hull-alongside`, at noon.** A horizontal band at y ≈ 262–267 — the waterline —
-in clusters of 35–69 px, but with a delta of only 3–7 levels. Low contrast; the
-collar against the hull rather than against the ocean.
-
-Neither is fixed. Both are named, located, and gated: `scripts/test-z-fighting.mjs`
-is red on exactly these two stands and green on the other seven.
-
-Note also that `deck-aft` follows the local player's ship, whose position and
-heading differ between matches, so its absolute tie count is not comparable run
-to run the way the island stands are. Its *patch* count is the readable signal.
+* `deck-aft` follows the local player's ship, whose pose differs between matches,
+  so its absolute tie count is not comparable run to run the way the island stands
+  are. Its *patch* count is the readable signal. Parking the hull, which
+  `zfight-blame.mjs` does, would make the gate's numbers comparable too.
+* The blame sweep only ever ran on the sloop. The brigantine and galleon miss both
+  coincidences by 10–25 cm, but no other hull class has been swept.
