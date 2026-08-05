@@ -192,21 +192,51 @@ hull, never on the proxy.
 Worst tie count over three poses; `patch` is the gate's assertion and is 0
 everywhere.
 
-| stand | low noon | low night | balanced noon | balanced night | high noon | high night |
-|---|---|---|---|---|---|---|
-| dock-vista | 81 | 72 | — | — | — | — |
-| island-interior | 100 | 94 | — | — | — | — |
-| cave-interior | 40 | 43 | — | — | — | — |
-| deck-aft | 65 | 62 | — | — | — | — |
-| open-sea | 18 | 16 | — | — | — | — |
-| shore-waterline | 53 | 47 | — | — | — | — |
-| island-far | 72 | 57 | — | — | — | — |
-| island-overlook | 220 | 220 | — | — | — | — |
-| hull-alongside | 45 | 38 | — | — | — | — |
+| stand | low noon | low night |
+|---|---|---|
+| dock-vista | 81 | 72 |
+| island-interior | 100 | 94 |
+| cave-interior | 40 | 43 |
+| deck-aft | 65 | 62 |
+| open-sea | 18 | 16 |
+| shore-waterline | 53 | 47 |
+| island-far | 72 | 57 |
+| island-overlook | 220 | 220 |
+| hull-alongside | 45 | 38 |
 
 Everything remaining is intersection line — the ocean against a beach, a rock
 skirt or a hull, foliage cards crossing — which is geometry meeting geometry and
 not precision failing.
+
+### `balanced` and `high` are NOT measured, and this is why
+
+They were attempted and abandoned, twice, and the reason is the machine and not
+the instrument. `balanced` reveals detail LOD to 285 m against `low`'s 170 m
+(`high` reaches 380 m), so a single scene render carries several times the
+geometry — and a census is four of them. Measured on this MacBook Air under
+SwiftShader:
+
+* with the post chain attached, **one census at `deck-aft` did not complete in
+  thirty-five minutes**;
+* with the chain detached for the whole session (the fix above, which took
+  `low` from unusable to routine), **one census still did not complete in
+  fifteen**.
+
+At that rate the full 9 × 2 × 3 sweep is somewhere north of seven hours per
+tier, and the reduced 3 × 2 × 2 sweep is over two. Nothing was reported from a
+partial run and no threshold was invented to make one pass.
+
+**What this leaves open, precisely.** Both fights are in the ship's own geometry,
+at ranges of 3.6 m and 12 m, so neither depends on a tier's LOD distance, and
+neither material's `polygonOffset` is tier-conditional. The heavy tiers are
+nevertheless UNMEASURED, and the honest statement is that the near-plane and the
+two fixes are proven at `low` only.
+
+The affordable way in is to pin the probe to a smaller framebuffer for those
+tiers — tie counts scale with pixel count, so 480 × 270 is a quarter of the work
+and a quarter of the count, and the gate's assertion is on `patchPixels` being
+zero, which does not care about the scale. That changes the numbers the table
+compares against, which is why it was not done in the middle of a close-out.
 
 ### Before
 
@@ -256,6 +286,9 @@ marked `slow`).
 
 ## Next
 
+* **`balanced` and `high` are unmeasured** — see the section above for the two
+  attempts, the numbers that stopped them, and the smaller framebuffer that would
+  make them affordable.
 * `deck-aft` follows the local player's ship, whose pose differs between matches,
   so its absolute tie count is not comparable run to run the way the island stands
   are. Its *patch* count is the readable signal. Parking the hull, which
