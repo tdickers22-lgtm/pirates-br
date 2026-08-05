@@ -49,13 +49,19 @@
  * whatever rung the governor happened to be on. Tie counts scale with pixel
  * count; a gate that does not pin this grades the ladder.
  */
-export const PIN_PROBE_RESOLUTION = () => {
+export const PIN_PROBE_RESOLUTION = (ratio = 1) => {
   const r = window.__piratesBR?.renderer;
   if (!r) return false;
-  r.minPixelRatio = 1;
-  r.maxPixelRatio = 1;
-  r.applyPixelRatio(1);
-  return true;
+  const pinned = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+  r.minPixelRatio = pinned;
+  r.maxPixelRatio = pinned;
+  r.applyPixelRatio(pinned);
+  const gl = r.renderer.getContext();
+  return {
+    ratio: pinned,
+    width: gl.drawingBufferWidth,
+    height: gl.drawingBufferHeight,
+  };
 };
 
 /**

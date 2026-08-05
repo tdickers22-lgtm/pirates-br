@@ -16,6 +16,12 @@
 //   PIRATES_GL=swiftshader PIRATES_BR_SERVER_PORT=8093 PIRATES_BR_URL=http://127.0.0.1:3103 \
 //     node scripts/test-z-fighting.mjs --quality low
 //
+// Heavy tiers can be measured with the same camera/frustum at a smaller drawing
+// buffer. Raw tie totals scale with pixel count and must not be compared across
+// ratios; the gate's zero-patch assertion is resolution-independent:
+//
+//   ... node scripts/test-z-fighting.mjs --quality high --ratio 0.5
+//
 // It never starts or stops a game server; stand one up yourself on a spare port
 // with PIRATES_BR_MAP_SEED pinned. A Vite it has to start, it owns and stops.
 import { chromium } from 'playwright';
@@ -39,6 +45,7 @@ const flag = (name) => argv.includes(`--${name}`);
 
 const URL = (process.env.PIRATES_BR_URL ?? arg('url', 'http://127.0.0.1:3000')).replace(/\/$/, '');
 const QUALITY = arg('quality', 'low');
+const RATIO = parseFloat(arg('ratio', '1'));
 const OUT = arg('out', `test-results/zfight-${QUALITY}`);
 const SETTLE_MS = parseInt(arg('settle', '12000'), 10);
 const POSES = parseInt(arg('poses', '3'), 10);
@@ -75,6 +82,10 @@ const waitFrames = (page, n) => page.evaluate(
 );
 
 async function main() {
+  if (!Number.isFinite(RATIO) || RATIO <= 0 || RATIO > 1) {
+    console.error(`--ratio must be greater than 0 and at most 1 (received ${String(RATIO)})`);
+    process.exit(2);
+  }
   const h = await health();
   if (!h) {
     console.error(`No game server on :${SERVER_PORT ?? '8090'}. Start your OWN on a spare port:\n`
@@ -82,12 +93,12 @@ async function main() {
     process.exit(2);
   }
   mkdirSync(OUT, { recursive: true });
-  console.log(`Z-fighting gate — GL: ${describeGl()}  quality=${QUALITY}  seed ${h.mapSeed ?? 'UNPINNED'}`);
+  console.log(`Z-fighting gate — GL: ${describeGl()}  quality=${QUALITY}  ratio=${RATIO}  seed ${h.mapSeed ?? 'UNPINNED'}`);
 
   const client = await ensureDevClient(`${URL}/`);
   if (client) console.log(`  started a Vite client on :${client.port} for this run`);
   const browser = await chromium.launch({ args: browserArgs(['--mute-audio']) });
-  const report = { quality: QUALITY, seed: h.mapSeed ?? null, stands: [] };
+  const report = { quality: QUALITY, ratio: RATIO, seed: h.mapSeed ?? null, stands: [] };
 
   try {
     const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
@@ -99,7 +110,10 @@ async function main() {
     await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 300_000 });
     await page.waitForTimeout(SETTLE_MS);
     await page.evaluate(() => window.__piratesBR.setBotPeace(true));
-    await page.evaluate(PIN_PROBE_RESOLUTION);
+    const framebuffer = await page.evaluate(PIN_PROBE_RESOLUTION, RATIO);
+    if (!framebuffer) throw new Error('renderer was unavailable while pinning the probe resolution');
+    report.framebuffer = framebuffer;
+    console.log(`  probe framebuffer ${framebuffer.width}x${framebuffer.height} (ratio ${framebuffer.ratio})`);
     // Detached for the SESSION, not just for the census: the three settling
     // frames after every placement are game frames, and at `balanced` and `high`
     // three of those through the bloom chain is ten minutes on SwiftShader.
