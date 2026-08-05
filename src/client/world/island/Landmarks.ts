@@ -382,11 +382,13 @@ export function buildRopeLadder(ctx: IslandBuildCtx) {
         // the shared terrain, so it lies on a sheer face like a hanging ladder
         // and follows a broken slope like a laid rope run.
         const rungCount = Math.max(8, Math.round(len / 0.5));
-        /** Draped centreline sample: the terrain surface, never the chord. */
+        /** Draped centreline sample: the DRAWN terrain surface. The analytic
+         * field runs above its triangle chords at terrace lips; sampling that
+         * field left the first rungs visibly hovering over the mesh. */
         const drapePoint = (t: number) => {
           const px = top.x + dx * t;
           const pz = top.z + dz * t;
-          const gy = getIslandSurfaceY(island, px + island.position.x, pz + island.position.z);
+          const gy = drawnGroundAt(ctx, px, pz);
           return { x: px, y: gy, z: pz };
         };
         const ropeMat = new THREE.LineBasicMaterial({ color: 0xc8b27a });

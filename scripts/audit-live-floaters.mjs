@@ -74,6 +74,13 @@ await page.waitForFunction(
   null,
   { timeout: 60_000 },
 );
+// IslandDetailWarmer deliberately holds individual meshes invisible while a
+// cold island is revealed over several frames. On SwiftShader, the fixed wait
+// below can land with a dock deck released and its `dock-piling` still held;
+// the audit then reports a raft even though the completed pier has driven piles.
+// A floater census is a claim about the settled world, not reveal pacing (which
+// has its own gate), so restore the visibility state each LOD would reach first.
+await page.evaluate(() => window.__piratesBR.settleLod?.(2));
 await page.waitForTimeout(1200);
 
 const report = await page.evaluate((limit) => {

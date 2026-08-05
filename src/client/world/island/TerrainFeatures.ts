@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
 import type { IslandBuildCtx } from './context.js';
-import { ensureMeshGround } from './GroundTruth.js';
+import { ensureMeshGround, snapToDrawnGround } from './GroundTruth.js';
 
 /**
  * THE LAST UNPAINTED ROCK FAMILY.
@@ -466,6 +466,7 @@ export function buildPeakMist(ctx: IslandBuildCtx) {
 export function buildTerraces(ctx: IslandBuildCtx) {
   const { island, group, r, rng, lowDetail, surfacePoint, isSolidDecorPoint, islandSeed, islandHeading, SURFACE_ABOVE_WATER } = ctx;
   if (!lowDetail) {
+    const ground = ensureMeshGround(ctx);
     const terraceMat = new THREE.MeshStandardMaterial({ color: 0xa48d62, roughness: 0.98 });
     paintFeatureRock(terraceMat, 'pirates-terrace-ledge', 0.30);
     const terraceCount = r > 58 ? 3 : 2;
@@ -473,6 +474,10 @@ export function buildTerraces(ctx: IslandBuildCtx) {
       const angle = island.profile.ridgeAxis + (i - 1) * 0.46 + (rng(i * 1103 + islandSeed) - 0.5) * 0.18;
       const pos = surfacePoint(0.34 + i * 0.08 + rng(i * 1109 + islandSeed) * 0.06, angle, 0.035);
       if (pos.y < 1.4 || !isSolidDecorPoint(pos, SURFACE_ABOVE_WATER, -0.2)) continue;
+      // `surfacePoint` samples the analytic field, which can sit half a metre
+      // above the rendered triangle chord at a terrace lip. A ledge is rock
+      // cut INTO that visible hillside, not a shelf hovering over it.
+      snapToDrawnGround(ground, pos, 0.035);
       const ledge = new THREE.Mesh(
         new THREE.BoxGeometry(3.8 + rng(i * 1117 + islandSeed) * 2.2, 0.12, 1.0 + rng(i * 1123 + islandSeed) * 0.65),
         terraceMat,
