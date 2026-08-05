@@ -17,6 +17,77 @@
 // reason. A task cannot be interrupted by the game loop, so every render inside
 // one call sees one pose and the counts are comparable with each other.
 
+/**
+ * WHERE ON THE SHIP, in the ship's own coordinates. Ablation names the two
+ * materials; `mergeStaticMeshes` collapses a whole hull to one mesh per material,
+ * so the name alone still covers eighty surfaces. A ray through a patch pixel,
+ * reported in HULL-LOCAL x/y/z with its face normal, says which eighty-first.
+ */
+export const PIERCE_LOCAL = async (opts) => {
+  // THE IMPORT COMES FIRST, THE PARK AFTER IT. Awaiting yields to the event loop
+  // and the game frame that runs there puts the hull back where the server says
+  // it is; parking before the await would aim every ray at a ship that has moved.
+  const THREE = await import('/node_modules/three/build/three.module.js');
+  const points = opts.points;
+  const g = window.__piratesBR;
+  const camera = g.renderer.camera;
+  const scene = g.renderer.scene;
+  const ships = g.state?.ships ?? [];
+  const ship = ships.find((s) => s.ownerId === g.localPlayerId) ?? ships[0] ?? null;
+  const root = ship ? (g.shipRenderer?.shipMeshes?.get(ship.id)?.root ?? null) : null;
+  if (opts.park && root) {
+    const islands = g.state?.islands ?? [];
+    const dock = islands.find((i) => i.dock) ?? islands[0] ?? null;
+    const px = dock.position.x + (dock.radius ?? 120) + 90;
+    const pz = dock.position.z;
+    root.position.set(px, 0, pz);
+    root.rotation.set(0, 0, 0);
+    root.updateMatrixWorld(true);
+    const p = opts.park;
+    g.enableFreeCam(px + (p.dx ?? 0), (p.dy ?? 4.2), pz + (p.dz ?? 0), p.yaw ?? Math.PI, p.pitch ?? -0.05);
+    if (p.tod !== undefined) g.setDayNightOverride(p.tod);
+    g.settleLod();
+  }
+  camera.updateMatrixWorld();
+  scene.updateMatrixWorld();
+  const inv = root ? new THREE.Matrix4().copy(root.matrixWorld).invert() : null;
+  const only = opts.materials ?? null;
+  const ray = new THREE.Raycaster();
+  ray.far = 200;
+  const out = [];
+  for (const p of points) {
+    ray.setFromCamera(
+      new THREE.Vector2((p.x / opts.width) * 2 - 1, -((p.y / opts.height) * 2 - 1)),
+      camera,
+    );
+    let hits = [];
+    try { hits = ray.intersectObject(scene, true); } catch { hits = []; }
+    out.push({
+      x: p.x,
+      y: p.y,
+      hits: hits
+        .filter((hit) => hit.object.visible && (!only || only.includes(hit.object.material?.name ?? '')))
+        .slice(0, 4)
+        .map((hit) => {
+          const local = inv ? hit.point.clone().applyMatrix4(inv) : hit.point.clone();
+          return {
+            d: Number(hit.distance.toFixed(4)),
+            material: hit.object.material?.name || hit.object.material?.type || null,
+            lx: Number(local.x.toFixed(3)),
+            ly: Number(local.y.toFixed(3)),
+            lz: Number(local.z.toFixed(3)),
+            n: hit.face ? [
+              Number(hit.face.normal.x.toFixed(2)),
+              Number(hit.face.normal.y.toFixed(2)),
+              Number(hit.face.normal.z.toFixed(2)),
+            ] : null,
+          };
+        }),
+    });
+  }
+  return out;
+};
+
 /** Every material actually reachable by a drawn node, with who owns it. */
 export const LIST_MATERIALS = () => {
   const R = window.__piratesBR.renderer;
@@ -121,8 +192,13 @@ export const BLAME_SWEEP = (opts) => {
     }
   };
 
+  const ownerOf = (o) => {
+    for (let n = o; n; n = n.parent) if (n.name) return n.name;
+    return o.type;
+  };
   const materials = new Set();
   const byUuid = new Map();
+  const byOwner = new Map();
   R.scene.traverse((o) => {
     const ms = Array.isArray(o.material) ? o.material : [o.material];
     for (const m of ms) {
@@ -131,6 +207,10 @@ export const BLAME_SWEEP = (opts) => {
       let list = byUuid.get(m.uuid);
       if (!list) { list = []; byUuid.set(m.uuid, list); }
       if (!list.includes(o)) list.push(o);
+      const own = ownerOf(o);
+      let olist = byOwner.get(own);
+      if (!olist) { olist = []; byOwner.set(own, olist); }
+      if (!olist.includes(o)) olist.push(o);
     }
   });
   const sky = R.skyMaterial ?? null;
@@ -171,6 +251,7 @@ export const BLAME_SWEEP = (opts) => {
     let patch = 0;
     let px = 0;
     let py = 0;
+    const samples = [];
     for (let y = Math.max(1, box.y0); y <= Math.min(h - 2, box.y1); y += 1) {
       for (let x = Math.max(1, box.x0); x <= Math.min(w - 2, box.x1); x += 1) {
         const p = y * w + x;
@@ -180,6 +261,9 @@ export const BLAME_SWEEP = (opts) => {
           patch += 1;
           px += x;
           py += y;
+          // Screenshot coordinates, spread across the patch rather than bunched
+          // at its start, so a pierce samples the whole fight and not one corner.
+          if (patch % 37 === 1 && samples.length < 24) samples.push({ x, y: h - 1 - y });
         }
       }
     }
@@ -187,6 +271,7 @@ export const BLAME_SWEEP = (opts) => {
       ties,
       loud,
       patch,
+      samples,
       cx: patch ? Math.round(px / patch) : null,
       cy: patch ? h - 1 - Math.round(py / patch) : null,
     };
@@ -203,7 +288,19 @@ export const BLAME_SWEEP = (opts) => {
 
   const base = measure();
   const results = [];
-  for (const uuid of opts.uuids) {
+  // A COARSE PASS FIRST IS CHEAPER THAN A FINE ONE. 517 materials are drawn at
+  // deck-aft and one ablation is two software renders; ~30 named owners localise
+  // the fight to a subtree in a tenth of the time, and the material sweep then
+  // only has to cover that subtree.
+  for (const owner of opts.owners ?? []) {
+    const nodes = byOwner.get(owner) ?? [];
+    const saved = nodes.map((n) => n.visible);
+    for (const n of nodes) n.visible = false;
+    let r;
+    try { r = measure(); } finally { nodes.forEach((n, i) => { nodes[i].visible = saved[i]; }); }
+    results.push({ owner, nodes: nodes.length, ...r });
+  }
+  for (const uuid of opts.uuids ?? []) {
     const nodes = byUuid.get(uuid) ?? [];
     const saved = nodes.map((n) => n.visible);
     for (const n of nodes) n.visible = false;
@@ -211,5 +308,12 @@ export const BLAME_SWEEP = (opts) => {
     try { r = measure(); } finally { nodes.forEach((n, i) => { nodes[i].visible = saved[i]; }); }
     results.push({ uuid, nodes: nodes.length, ...r });
   }
-  return { width: w, height: h, selfNoise, base, results };
+  return {
+    width: w,
+    height: h,
+    selfNoise,
+    base,
+    results,
+    owners: opts.listOwners ? [...byOwner.entries()].map(([k, v]) => ({ owner: k, nodes: v.length })) : undefined,
+  };
 };

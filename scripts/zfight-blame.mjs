@@ -19,7 +19,7 @@ import { browserArgs, describeGl } from './lib/browser-args.mjs';
 import { readWorld, sessionQuery, SERVER_PORT } from './perf-probe.mjs';
 import { ensureDevClient, stopDevClient } from './lib/dev-client.mjs';
 import { PIN_PROBE_RESOLUTION, PLACE_AND_SETTLE } from './lib/zfight-probe.mjs';
-import { LIST_MATERIALS, BLAME_SWEEP } from './lib/zfight-blame.mjs';
+import { LIST_MATERIALS, BLAME_SWEEP, PIERCE_LOCAL } from './lib/zfight-blame.mjs';
 import { planStands, TIME_OF_DAY, VIEWPORT } from './lib/zfight-stands.mjs';
 
 const argv = process.argv.slice(2);
@@ -48,6 +48,13 @@ const ONLY = arg('only', null)?.split(',').map((s) => s.trim()).filter(Boolean) 
  *  `deck-aft` and ablating every one of them is 1,200 software renders; the fight
  *  under investigation is always in one part of the world and this says which. */
 const OWNER = arg('owner', null)?.split(',').map((s) => s.trim()).filter(Boolean) ?? null;
+/** Ablate whole named subtrees instead of single materials — the coarse pass. */
+const BY_OWNER = argv.includes('--by-owner');
+/** Raycast the patch pixels and report hull-local coordinates, optionally
+ *  filtered to a comma-separated list of material names. */
+const PIERCE = argv.includes('--pierce')
+  ? (arg('pierce', '').startsWith('--') ? [] : arg('pierce', '').split(',').filter(Boolean))
+  : null;
 
 async function health() {
   const port = SERVER_PORT ?? '8090';
@@ -105,16 +112,77 @@ async function main() {
     // clean frame that can blame nobody.
     if (park) {
       let best = null;
-      for (const dz of [0, -0.17, -0.41, -0.83, -1.29, 0.31]) {
-        const probe = { ...park, dz: (park.dz ?? 0) + dz };
+      // ALONG THE VIEW DIRECTION, not along z. The dolly's whole job is to land
+      // on a different phase of the depth grid at the SAME view; stepping
+      // sideways at a stand that looks down -x changes the picture instead.
+      for (const d of [0, 0.17, 0.41, 0.83, 1.29, -0.31]) {
+        const probe = {
+          ...park,
+          dx: (park.dx ?? 0) + Math.sin(park.yaw) * d,
+          dz: (park.dz ?? 0) + Math.cos(park.yaw) * d,
+        };
         const out = await page.evaluate(BLAME_SWEEP, { uuids: [], park: probe });
         if (out.error) throw new Error(out.error);
-        console.log(`  scan dz ${dz.toFixed(2).padStart(6)}  ties ${String(out.base.ties).padStart(5)} `
+        console.log(`  scan +${d.toFixed(2).padStart(5)}m  ties ${String(out.base.ties).padStart(5)} `
           + `patch ${String(out.base.patch).padStart(5)}  self-noise ${out.selfNoise}`);
-        if (!best || out.base.patch > best.patch) best = { patch: out.base.patch, dz };
+        if (!best || out.base.patch > best.patch) best = { patch: out.base.patch, d };
       }
-      park.dz = (park.dz ?? 0) + best.dz;
-      console.log(`  sweeping at dz ${best.dz} (patch ${best.patch})\n`);
+      park.dx = (park.dx ?? 0) + Math.sin(park.yaw) * best.d;
+      park.dz = (park.dz ?? 0) + Math.cos(park.yaw) * best.d;
+      console.log(`  sweeping at +${best.d}m (patch ${best.patch})\n`);
+    }
+
+    const box = BOX ? (([x0, y0, x1, y1]) => ({ x0, y0, x1, y1 }))(BOX.split(',').map(Number)) : null;
+
+    // WHERE ON THE HULL. Ablation names the materials; this names the surfaces.
+    if (PIERCE) {
+      const out = await page.evaluate(BLAME_SWEEP, { uuids: [], park, box });
+      if (out.error) throw new Error(out.error);
+      console.log(`  patch ${out.base.patch} at (${out.base.cx},${out.base.cy}); `
+        + `${out.base.samples.length} sample pixels\n`);
+      const pierced = await page.evaluate(PIERCE_LOCAL, {
+        points: out.base.samples,
+        width: out.width,
+        height: out.height,
+        materials: PIERCE.length ? PIERCE : null,
+        park,
+      });
+      for (const p of pierced) {
+        console.log(`    (${String(p.x).padStart(3)},${String(p.y).padStart(3)})  `
+          + p.hits.map((hh) => `${hh.material}@${hh.d} local(${hh.lx},${hh.ly},${hh.lz}) n${JSON.stringify(hh.n)}`).join('\n                 '));
+      }
+      report.pierced = pierced;
+      if (OUT) { mkdirSync(dirname(OUT), { recursive: true }); writeFileSync(OUT, JSON.stringify(report, null, 2)); }
+      return;
+    }
+
+    // COARSE PASS: which named subtree owns the fight. Cheap enough to run over
+    // the whole scene, which the material sweep is not.
+    if (BY_OWNER) {
+      const listing = await page.evaluate(BLAME_SWEEP, { uuids: [], park, box, listOwners: true });
+      const owners = listing.owners.map((o) => o.owner);
+      console.log(`  ${owners.length} named owners; baseline patch ${listing.base.patch}\n`);
+      for (let i = 0; i < owners.length; i += CHUNK) {
+        const out = await page.evaluate(BLAME_SWEEP, { owners: owners.slice(i, i + CHUNK), park, box });
+        if (out.error) throw new Error(out.error);
+        for (const r of out.results) {
+          const dropped = out.base.patch - r.patch;
+          report.rows.push({ ...r, basePatch: out.base.patch, dropped });
+          if (dropped !== 0) {
+            console.log(`    ${String(r.owner).padEnd(30)} hidden(${String(r.nodes).padStart(4)})  `
+              + `patch ${String(out.base.patch).padStart(5)} -> ${String(r.patch).padStart(5)}  `
+              + `ties ${String(out.base.ties).padStart(5)} -> ${String(r.ties).padStart(5)}`);
+          }
+        }
+        console.log(`  ..${Math.min(i + CHUNK, owners.length)}/${owners.length} (base ${out.base.patch})`);
+      }
+      report.rows.sort((p, q) => q.dropped - p.dropped);
+      console.log('\n  most blame (patch pixels removed by hiding this subtree alone):');
+      for (const r of report.rows.slice(0, 12)) {
+        console.log(`    ${String(r.dropped).padStart(6)}  ${r.owner}`);
+      }
+      if (OUT) { mkdirSync(dirname(OUT), { recursive: true }); writeFileSync(OUT, JSON.stringify(report, null, 2)); }
+      return;
     }
 
     let mats = await page.evaluate(LIST_MATERIALS);
@@ -122,7 +190,6 @@ async function main() {
     if (OWNER) mats = mats.filter((m) => m.owners.some((o) => OWNER.some((n) => o.includes(n))));
     console.log(`  ${mats.length} drawn materials at ${SCENE}/${TOD} +${DOLLY_M}m\n`);
 
-    const box = BOX ? (([x0, y0, x1, y1]) => ({ x0, y0, x1, y1 }))(BOX.split(',').map(Number)) : null;
     const byUuid = new Map(mats.map((m) => [m.uuid, m]));
     let base = null;
     for (let i = 0; i < mats.length; i += CHUNK) {

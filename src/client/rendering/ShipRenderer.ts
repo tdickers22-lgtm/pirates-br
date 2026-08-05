@@ -1921,6 +1921,35 @@ export class ShipRenderer {
       metalness: 0.0,
     });
     deckMat.name = 'ship-deck-planking';
+    /**
+     * THE QUARTERDECK RISERS, AND WHY THEY NEED THEIR OWN MATERIAL.
+     *
+     * On the sloop the upper step's forward face and the stern castle's forward
+     * face are THE SAME PLANE, and not by accident — by arithmetic:
+     *
+     *   step front  = -L·0.235 - stepDepth/2 = -L·0.235 - 0.3
+     *   castle front = -L·0.37 + L·0.11      = -L·0.26
+     *
+     * which are equal exactly when L·0.025 = 0.3, i.e. L = 12, i.e. the sloop —
+     * the hull every player starts in. Both faces point at the bow, they overlap
+     * over the step's whole 2.0 x 0.45 m front, and the depth test has no way to
+     * pick between them: measured 1,077 tie pixels with a whole 3x3 neighbourhood
+     * tied, flipping between planking brown and near-black at 30-40 levels.
+     *
+     * The fix cannot be to move either box. Nudging them apart in world space
+     * relocates the tie to whatever distance quantises the new gap to zero —
+     * which for a 1 mm gap is anywhere past about 40 m — instead of removing it.
+     * A polygon offset is a bias in DEPTH, so it holds at every distance.
+     *
+     * It costs one merged draw per detail hull, because `mergeStaticMeshes`
+     * batches by material and this is a second one. The steps are two small boxes
+     * and they only exist on the detail hull, so that is the whole bill.
+     */
+    const deckRiserMat = deckMat.clone();
+    deckRiserMat.name = 'ship-deck-riser';
+    deckRiserMat.polygonOffset = true;
+    deckRiserMat.polygonOffsetFactor = -2;
+    deckRiserMat.polygonOffsetUnits = -2;
     const sailMat = new THREE.MeshStandardMaterial({
       map: this.sailTex,
       color: 0xf5edd2,
@@ -2567,7 +2596,9 @@ export class ShipRenderer {
     for (let si = 0; si < nSteps; si++) {
       const stepH = qdRise * (si + 1) / nSteps;
       const stepDepth = qd.stepDepth / nSteps;
-      const step = new THREE.Mesh(new THREE.BoxGeometry(qdW * 0.56, stepH, stepDepth), deckMat);
+      // deckRiserMat, not deckMat: the upper step's forward face is coplanar with
+      // the stern castle's on the sloop — see the material's own note.
+      const step = new THREE.Mesh(new THREE.BoxGeometry(qdW * 0.56, stepH, stepDepth), deckRiserMat);
       step.position.set(0, H + stepH * 0.5, qd.frontZ - (si + 0.5) * stepDepth);
       step.receiveShadow = true;
       step.castShadow = true;
