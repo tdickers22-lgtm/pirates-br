@@ -1351,7 +1351,12 @@ export class Renderer {
     // ones that were not paid for — see ProgramWarmup. prepare()/release() are
     // written here, around the one render call, so they cannot drift apart: a
     // release that does not run leaves materials hidden.
-    this.programWarmer.prepare(this.renderer, this.scene, this.camera);
+    this.programWarmer.prepare(
+      this.renderer,
+      this.scene,
+      this.camera,
+      this.postFx?.getSceneRenderTarget() ?? null,
+    );
     try {
       if (this.postFx) {
         this.postFx.render();
@@ -1365,6 +1370,11 @@ export class Renderer {
 
   /** Pre-pays shader program links so no frame of the load has to. */
   readonly programWarmer = new ProgramWarmer();
+
+  /** Render target used by the real scene pass, or null when rendering direct. */
+  getSceneRenderTarget(): THREE.WebGLRenderTarget | null {
+    return this.postFx?.getSceneRenderTarget() ?? null;
+  }
 
   /** True while the load path must not block: the gate holds unwarmed materials
    *  out of a frame rather than letting them link inside it. */
@@ -1640,4 +1650,3 @@ export class Renderer {
 function positiveModulo(value: number, divisor: number) {
   return ((value % divisor) + divisor) % divisor;
 }
-

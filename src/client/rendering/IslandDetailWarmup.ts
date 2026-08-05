@@ -173,6 +173,8 @@ export type WarmupTarget = {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.Camera;
+  /** Null for direct screen rendering; the scene target for a post-FX chain. */
+  renderTarget?: THREE.WebGLRenderTarget | null;
 };
 
 export class IslandDetailWarmer {
@@ -212,6 +214,12 @@ export class IslandDetailWarmer {
   /** True while an island is still filling in — used by tests/probes. */
   isRevealing(id: string): boolean {
     return this.reveals.has(id);
+  }
+
+  /** True while any detail subtree is still being released over future frames.
+   *  This is world-arrival work, even after every island object was built. */
+  hasActiveReveals(): boolean {
+    return this.reveals.size > 0;
   }
 
   debugState() {
@@ -494,7 +502,7 @@ export class IslandDetailWarmer {
     }
     job.waitedFrames = 0;
 
-    const { renderer, scene, camera } = this.target();
+    const { renderer, scene, camera, renderTarget = null } = this.target();
     // An island already filling in un-warmed is a race the compile has to win:
     // every mesh the reveal lets out ahead of it links its programs at draw
     // time instead. Compile harder until it is in front.
@@ -517,7 +525,7 @@ export class IslandDetailWarmer {
       compiled += 1;
       this.warmedKeys.add(warmKey(mesh));
       this.warmTextures(renderer, mesh);
-      const compiling = this.compileOne(renderer, scene, camera, mesh);
+      const compiling = this.compileOne(renderer, scene, camera, renderTarget, mesh);
       if (compiling) pending.push(compiling);
       // The first link always goes through, and then the slice stops the moment
       // it has spent its milliseconds. One link on a software rasteriser can
@@ -554,10 +562,14 @@ export class IslandDetailWarmer {
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
     camera: THREE.Camera,
+    renderTarget: THREE.WebGLRenderTarget | null,
     mesh: THREE.Mesh,
   ): Promise<unknown> | null {
     this.warmGroup.children = [mesh];
+    const previousTarget = renderer.getRenderTarget?.() ?? null;
+    const switchedTarget = previousTarget !== renderTarget;
     try {
+      if (switchedTarget) renderer.setRenderTarget(renderTarget);
       const compileAsync = (renderer as THREE.WebGLRenderer & {
         compileAsync?: (scene: THREE.Object3D, camera: THREE.Camera, targetScene?: THREE.Scene) => Promise<unknown>;
       }).compileAsync;
@@ -572,6 +584,7 @@ export class IslandDetailWarmer {
       // always did; warming is an optimisation, never a correctness step.
       return null;
     } finally {
+      if (switchedTarget) renderer.setRenderTarget(previousTarget);
       this.warmGroup.children = [];
     }
   }

@@ -281,7 +281,12 @@ export class ProgramWarmer {
    * caller MUST call `release()` after the render or those materials stay
    * hidden. Both calls live in `Renderer.render()` so they cannot drift apart.
    */
-  prepare(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera): void {
+  prepare(
+    renderer: THREE.WebGLRenderer,
+    scene: THREE.Scene,
+    camera: THREE.Camera,
+    renderTarget: THREE.WebGLRenderTarget | null = null,
+  ): void {
     // NO EARLY EXIT WHEN THE GUARD IS DOWN. That exit is what made this class a
     // LOAD-time fix and nothing else: with the gate lowered and no join
     // outstanding it returned before walking, so a material that first appeared
@@ -322,7 +327,10 @@ export class ProgramWarmer {
           }
         }
         const children = node.children;
-        for (let i = 0; i < children.length; i++) descend(children[i], shown);
+        // Visibility is inherited. Passing `shown` here classified every mesh
+        // below a hidden island/detail group as on-screen, so those programs
+        // jumped ahead of the material the player was actually looking at.
+        for (let i = 0; i < children.length; i++) descend(children[i], seen);
       };
       // The scene's own `visible` is not consulted: `shown` starts true because
       // the renderer starts its own walk at the scene regardless.
@@ -371,7 +379,7 @@ export class ProgramWarmer {
         kicked.push({ key: entry.key, material: entry.material, at: 0 });
       }
       if (chunk.length > 0) {
-        this.kick(renderer, scene, camera, chunk);
+        this.kick(renderer, scene, camera, chunk, renderTarget);
         const kickedAt = performance.now();
         for (const entry of kicked) {
           if (this.pendingKeys.has(entry.key)) continue;
@@ -505,14 +513,22 @@ export class ProgramWarmer {
     scene: THREE.Scene,
     camera: THREE.Camera,
     meshes: THREE.Mesh[],
+    renderTarget: THREE.WebGLRenderTarget | null,
   ): void {
     this.batch.children = meshes;
+    const previousTarget = renderer.getRenderTarget?.() ?? null;
+    const switchedTarget = previousTarget !== renderTarget;
     try {
+      // `outputColorSpace` and tone mapping are part of three's program cache
+      // key. High/balanced draw the scene into a linear post-FX target, while a
+      // bare compile targets the sRGB screen and pays for the wrong program.
+      if (switchedTarget) renderer.setRenderTarget(renderTarget);
       renderer.compile(this.batch, camera, scene);
     } catch {
       // A material that cannot be compiled here compiles at draw time exactly as
       // it always did; warming is an optimisation, never a correctness step.
     } finally {
+      if (switchedTarget) renderer.setRenderTarget(previousTarget);
       this.batch.children = [];
     }
   }

@@ -27,6 +27,7 @@
 //   node --import tsx scripts/test-island-reveal.mjs
 import * as THREE from 'three';
 import { IslandDetailWarmer } from '../src/client/rendering/IslandDetailWarmup.js';
+import { ProgramWarmer } from '../src/client/rendering/ProgramWarmup.js';
 import { beginFirstDrawFrame, clearFirstDrawBudget } from '../src/client/rendering/FirstDrawBudget.js';
 
 let failures = 0;
@@ -120,6 +121,7 @@ function frame(warmer, islands, shown, showDetailFor) {
   for (let f = 0; f < 200; f++) {
     if (f === 3) inside = true;
     frame(warmer, [island], shown, () => inside);
+    if (f === 3) expect('a newly armed reveal reports world-arrival work', warmer.hasActiveReveals());
     if (drawable(island) === 0) emptyFrames += 1;
     // The handoff must not double-draw either: once the real terrain is up the
     // proxy is down, or the island wears two skins for a frame.
@@ -130,6 +132,7 @@ function frame(warmer, islands, shown, showDetailFor) {
   expect('a crossing never leaves the island with nothing on screen', emptyFrames === 0, `${emptyFrames} empty frames`);
   expect('and never draws the proxy over the real terrain', proxyAndTerrain === 0, `${proxyAndTerrain} doubled frames`);
   expect('the reveal finishes', !warmer.isRevealing('lone'));
+  expect('draining the final reveal clears world-arrival work', !warmer.hasActiveReveals());
 }
 
 // ── three islands crossing together: none of them is starved ──────────────
@@ -193,6 +196,38 @@ function frame(warmer, islands, shown, showDetailFor) {
   island.detailRoot.traverse((node) => { if (node.isMesh && !node.visible) hidden += 1; });
   expect('an island left mid-reveal keeps none of its meshes hidden', hidden === 0, `${hidden} stranded`);
   expect('…and is back on its proxy', island.proxyRoot.visible && !island.detailRoot.visible);
+  expect('cancelling the final reveal clears world-arrival work', !warmer.hasActiveReveals());
+}
+
+// ── hidden island branches never outrank what is actually on screen ───────
+{
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera();
+  const hiddenParent = new THREE.Group();
+  hiddenParent.visible = false;
+  const hiddenMaterial = new THREE.MeshBasicMaterial();
+  hiddenParent.add(new THREE.Mesh(new THREE.BoxGeometry(), hiddenMaterial));
+  const visibleMaterial = new THREE.MeshBasicMaterial();
+  scene.add(hiddenParent, new THREE.Mesh(new THREE.BoxGeometry(), visibleMaterial));
+
+  const warmer = new ProgramWarmer();
+  // Compiling without exposing a currentProgram leaves both keys unpaid, which
+  // lets this assertion observe exactly which branch the guard considers drawn.
+  const sceneTarget = new THREE.WebGLRenderTarget(1, 1);
+  let boundTarget = null;
+  let compiledAgainst = null;
+  const renderer = {
+    getRenderTarget: () => boundTarget,
+    setRenderTarget: target => { boundTarget = target; },
+    compile: () => { compiledAgainst = boundTarget; },
+  };
+  warmer.prepare(renderer, scene, camera, sceneTarget);
+  expect('program warming binds the same target as the real scene pass', compiledAgainst === sceneTarget);
+  expect('program warming restores the caller render target', boundTarget === null);
+  expect('the guard holds the visible unpaid material', !visibleMaterial.visible);
+  expect('but does not spend patience on a mesh below a hidden parent', hiddenMaterial.visible);
+  warmer.release();
+  expect('the visible material is restored after the frame', visibleMaterial.visible);
 }
 
 if (failures > 0) {

@@ -355,6 +355,7 @@ export class Game {
     renderer: this.renderer.renderer,
     scene: this.renderer.scene,
     camera: this.renderer.camera,
+    renderTarget: this.renderer.getSceneRenderTarget(),
   }));
   private readonly ocean = new OceanRenderer();
   /** Dev/tour hook: when non-null, forces the day/night clock to this many
@@ -2730,9 +2731,11 @@ export class Game {
     // the load, not of the machine, and a controller that believed it would
     // spend its whole ladder before the horn.
     this.renderer.setGovernorSuspended(now < this.loadGuardUntil);
-    // Nobody is playing during the menu or the ceremony, so warm harder there:
-    // every program paid before the horn is one that cannot stall after it.
-    this.renderer.setWarmBoost(!this.inMatch || this.isStartCeremonyActive());
+    // Warm harder for every frame classified as load, including a paced reveal
+    // that outlives the horn on a slow backend. Otherwise those newly visible
+    // materials can spend their whole hold allowance behind an off-screen queue
+    // and finally link in a frame the player is steering through.
+    this.renderer.setWarmBoost(loading);
   }
 
   private loadGuardUntil = 0;
@@ -2743,7 +2746,11 @@ export class Game {
   getWorldBuildBacklog(): number {
     return this.pendingIslandBuilds.length
       + (this.islandAwaitingReveal ? 1 : 0)
-      + (this.pendingSeaRockBuilds.length > 0 ? 1 : 0);
+      + (this.pendingSeaRockBuilds.length > 0 ? 1 : 0)
+      // A built island is not fully present until its paced detail reveal has
+      // drained. Counting that work keeps the guard, governor suspension and
+      // warm boost aligned with the world the player can actually see.
+      + (this.lodWarmer.hasActiveReveals() ? 1 : 0);
   }
 
   /** Build a few queued sea rocks. Thirty-six of them landing on the same frame

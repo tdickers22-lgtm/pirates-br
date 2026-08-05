@@ -141,6 +141,13 @@ export class PostFx {
     this.composer.render();
   }
 
+  /** Target used by the first (scene) pass. Shader cache keys include whether
+   *  output is going to the screen or a linear render target, so warm compiles
+   *  must bind this exact class of target before asking three to compile. */
+  getSceneRenderTarget(): THREE.WebGLRenderTarget {
+    return this.composer.readBuffer;
+  }
+
   private syncResolution() {
     if (!this.fxaaPass) return;
     const resolution = this.fxaaPass.material.uniforms.resolution.value as THREE.Vector2;
