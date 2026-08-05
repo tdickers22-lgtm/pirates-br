@@ -51,6 +51,11 @@ const COLLAPSED_RATIO = parseFloat(arg('collapsed', '0.1'));
  *  and it answers a question — how much of a frame is fill — that only has to be
  *  asked once per tier. */
 const SKIP_FULLRES = argv.includes('--skip-fullres');
+/** The rAF-window allocation phase below is retained only as a leak diagnostic;
+ *  perf-alloc-census.mjs supersedes its per-frame readings. Hitch-only closeout
+ *  runs skip it so a failure in obsolete instrumentation cannot discard a
+ *  completed multi-minute CPU profile before the report reaches disk. */
+const SKIP_ALLOCATION = argv.includes('--skip-allocation');
 const VIEWPORT = { width: 960, height: 540 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -375,24 +380,26 @@ async function main() {
     // timescale. For bytes per frame use scripts/perf-alloc-census.mjs, which
     // reads the heap either side of ONE frame at a time and drives the CPU path
     // with no GL in it (docs/FRAME_COST_MODEL.md §6.3.1).
-    console.log('\n── allocation (rAF window — SUPERSEDED, see perf-alloc-census.mjs) ──');
-    const alloc = [];
-    for (const frames of [120, 300]) {
-      const r = await page.evaluate(async (n) => {
-        const driving = window.__drive.run(60_000);
-        const out = await window.__cost.allocationRate(n);
-        window.__drive.stop = true;
-        await driving;
-        window.__drive.stop = false;
-        return out;
-      }, frames);
-      alloc.push(r);
-      if (r.error) console.log(`  ${frames} frames: ${r.error}`);
-      else {
-        console.log(`  ${frames} frames in ${(r.elapsedMs / 1000).toFixed(1)}s — gross ${(r.grossPerFrame / 1024).toFixed(1)} KB/frame, net retained ${(r.netPerFrame / 1024).toFixed(2)} KB/frame`);
+    if (!SKIP_ALLOCATION) {
+      console.log('\n── allocation (rAF window — SUPERSEDED, see perf-alloc-census.mjs) ──');
+      const alloc = [];
+      for (const frames of [120, 300]) {
+        const r = await page.evaluate(async (n) => {
+          const driving = window.__drive.run(60_000);
+          const out = await window.__cost.allocationRate(n);
+          window.__drive.stop = true;
+          await driving;
+          window.__drive.stop = false;
+          return out;
+        }, frames);
+        alloc.push(r);
+        if (r.error) console.log(`  ${frames} frames: ${r.error}`);
+        else {
+          console.log(`  ${frames} frames in ${(r.elapsedMs / 1000).toFixed(1)}s — gross ${(r.grossPerFrame / 1024).toFixed(1)} KB/frame, net retained ${(r.netPerFrame / 1024).toFixed(2)} KB/frame`);
+        }
       }
+      report.phases.allocation = alloc;
     }
-    report.phases.allocation = alloc;
   } finally {
     await page.close().catch(() => {});
     await browser.close().catch(() => {});
