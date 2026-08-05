@@ -271,6 +271,55 @@ new materials and nothing else changed:
 `scripts/test-z-fighting.mjs` is in the browser suite (`scripts/lib/suites.mjs`,
 marked `slow`).
 
+### Re-run from a clean tree, on its own server and Vite
+
+Everything above was re-measured afterwards against a game server and a Vite the
+runner owned (seed 20260801, ports 8111 / 3111), to check the claim rather than
+the notes.
+
+**`low`, the full 9 × 2 × 3 matrix at 960×540: green.** Self-noise 0 and
+`patchPixels` 0 in all 54 censuses. Worst ties per stand, this run:
+
+| stand | noon | night |
+|---|---:|---:|
+| dock-vista | 87 | 76 |
+| island-interior | 115 | 102 |
+| cave-interior | 41 | 40 |
+| deck-aft | 36 | 45 |
+| open-sea | 17 | 13 |
+| shore-waterline | 44 | 47 |
+| island-far | 69 | 57 |
+| island-overlook | 214 | 231 |
+| hull-alongside | 254 | 250 |
+
+The island stands reproduce the earlier table within a few pixels. The two ship
+stands do not, and that is the caveat under "Next" showing itself: `hull-alongside`
+read 254 where it read 45, because the hull sat at a different attitude in this
+match and the ocean crosses it along a different line. `patch` is 0 in both runs,
+which is the assertion.
+
+**The mutation still reddens it, and only at some poses.** With
+`deckRiserMat.polygonOffset` turned back off and nothing else changed:
+
+| stand, pose | patch, fixed | patch, mutated |
+|---|---:|---:|
+| deck-aft @ noon +0.00 m | 0 | 0 |
+| deck-aft @ noon +0.17 m | 0 | **217** |
+| deck-aft @ noon +0.41 m | 0 | **827** |
+| deck-aft @ night +0.00 m | 0 | **204** |
+
+The first row is the reason the stand is measured at three poses. A coplanar pair
+one depth level apart at one eye position is TIED seventeen centimetres later, so
+a single-pose gate would have photographed a broken build and called it clean.
+
+**The heavy tiers did not re-run to completion and were not re-proved here.**
+Another headless-browser suite was working the same eight cores (load average 13–16);
+one `balanced` stand placement — `island-interior`, whose detail LOD reaches 285 m —
+had not finished after twelve minutes, and the run was stopped. What it did read
+agrees: `dock-vista` at 240×135 gave worst ties 7 noon / 5 night against the
+recorded 10 / 7, with self-noise 0 and `patch` 0 in all six censuses. The rest of
+the heavy-tier matrix stands on the reports recorded above, unrepeated.
+
 ## Traps this campaign hit, all found by a control
 
 * **A render in this game ADVANCES ANIMATION.** `MiscMeshFactory`'s station halo
@@ -297,9 +346,10 @@ marked `slow`).
 
 ## Next
 
-* **`balanced` and `high` are unmeasured** — see the section above for the two
-  attempts, the numbers that stopped them, and the smaller framebuffer that would
-  make them affordable.
+* The heavy tiers are proven at 240×135 and only there. A full-resolution
+  `balanced`/`high` sweep is still unaffordable on this machine — see the
+  re-verification below for how long one stand placement takes when anything else
+  is using the CPU.
 * `deck-aft` follows the local player's ship, whose pose differs between matches,
   so its absolute tie count is not comparable run to run the way the island stands
   are. Its *patch* count is the readable signal. Parking the hull, which
