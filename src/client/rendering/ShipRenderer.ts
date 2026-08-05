@@ -1915,6 +1915,31 @@ export class ShipRenderer {
       metalness: 0.0,
     });
     darkMat.name = 'ship-dark-timber';
+    /**
+     * THE CAP RAILS, AND WHY THEY CANNOT SHARE `darkMat`.
+     *
+     * The side railing and the cap rail are both dark timber and both reach the
+     * hull's own half-beam exactly:
+     *
+     *   railing  x = W*0.5 - 0.07, box 0.14 wide  →  outboard face at  W*0.5
+     *   cap rail x = W*0.48,       box 0.20 wide  →  outboard face at  W*0.5
+     *
+     * so they present ONE plane to anything alongside, over the cap rail's whole
+     * 0.1 m height and the railing's whole 0.82·L run: a 9.6 m ribbon down each
+     * side of the ship. Measured at `hull-alongside`, 128 tie pixels with a fully
+     * tied 3x3 neighbourhood, all of them at hull-local x = 2.5 with a +x normal.
+     *
+     * Being the SAME material is what makes this one different from the
+     * quarterdeck's: `mergeStaticMeshes` puts both surfaces in one draw, so there
+     * is nothing to bias relative to anything. The cap has to become its own
+     * material to be offset at all — and the cap reading in front of the rail it
+     * caps is also what it should look like.
+     */
+    const darkTrimMat = darkMat.clone();
+    darkTrimMat.name = 'ship-dark-trim';
+    darkTrimMat.polygonOffset = true;
+    darkTrimMat.polygonOffsetFactor = -2;
+    darkTrimMat.polygonOffsetUnits = -2;
     const deckMat = new THREE.MeshStandardMaterial({
       map: this.deckTex,
       roughness: 0.78,
@@ -2456,7 +2481,7 @@ export class ShipRenderer {
         seg.receiveShadow = true;
         group.add(seg);
         // Cap rail along the same run so the bow reads as one continuous rail.
-        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, segLen + 0.06), darkMat);
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, segLen + 0.06), darkTrimMat);
         cap.position.set(sx * (x0 + x1) * 0.5, H + bulwarkH + 0.05, (z0 + z1) * 0.5);
         cap.rotation.y = seg.rotation.y;
         cap.castShadow = true;
@@ -2476,15 +2501,17 @@ export class ShipRenderer {
       // Ends at z = 0.39·L where the angled bow cap rail above picks it up —
       // the old 0.86·L run carried a straight rail out to 0.43·L, well outboard
       // of the hull's own sheer there (a rail hanging over open water).
+      // darkTrimMat, not darkMat: the cap's outboard face is the same plane as
+      // the side railing's — see the material's own note.
       const capRail = new THREE.Mesh(
         new THREE.BoxGeometry(0.2, 0.1, L * 0.82),
-        darkMat,
+        darkTrimMat,
       );
       capRail.position.set(sx * W * 0.48, H + bulwarkH + 0.05, -L * 0.02);
       capRail.castShadow = true;
       group.add(capRail);
     }
-    const sternCapRail = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, 0.1, 0.22), darkMat);
+    const sternCapRail = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, 0.1, 0.22), darkTrimMat);
     sternCapRail.position.set(0, H + bulwarkH + 0.05, -L * 0.42);
     sternCapRail.castShadow = true;
     group.add(sternCapRail);
