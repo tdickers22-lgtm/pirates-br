@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Vec3 } from '../../shared/types/index.js';
+import { finiteClamp } from '../../shared/utils/index.js';
 
 /** A looped, filtered-noise voice with an optional tremolo/gust LFO on its gain. */
 interface LoopVoice {
@@ -1540,7 +1541,8 @@ export class SoundEngine {
   // ── Storm wind (ambient, looped) ─────────────────────────────────
   /** Set 0..1 for storm intensity. 0 silences the wind, 1 is full gale. */
   setWindIntensity(intensity: number): void {
-    if (intensity <= 0.001) {
+    const clamped = finiteClamp(intensity, 0, 1, 0);
+    if (clamped <= 0.001) {
       this.stopWind();
       return;
     }
@@ -1562,10 +1564,10 @@ export class SoundEngine {
       lfo.start();
       this.wind = { ...v, lfo, lfoGain };
     }
-    const target = THREE.MathUtils.clamp(intensity, 0, 1) * 0.22;
+    const target = clamped * 0.22;
     this.wind.gain.gain.linearRampToValueAtTime(target, ctx.currentTime + 0.4);
-    this.wind.filter.frequency.linearRampToValueAtTime(360 + intensity * 360, ctx.currentTime + 0.4);
-    if (this.wind.lfoGain) this.wind.lfoGain.gain.linearRampToValueAtTime(60 + intensity * 220, ctx.currentTime + 0.4);
+    this.wind.filter.frequency.linearRampToValueAtTime(360 + clamped * 360, ctx.currentTime + 0.4);
+    if (this.wind.lfoGain) this.wind.lfoGain.gain.linearRampToValueAtTime(60 + clamped * 220, ctx.currentTime + 0.4);
   }
 
   private stopWind(): void {
@@ -1586,7 +1588,8 @@ export class SoundEngine {
    * audible swell; a single static filtered-noise loop just hisses.
    */
   setWaveBed(intensity: number): void {
-    if (intensity <= 0.001) {
+    const clamped = finiteClamp(intensity, 0, 1, 0);
+    if (clamped <= 0.001) {
       if (this.waveBed && this.ctx) {
         this.waveBed.gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 0.5);
       }
@@ -1636,7 +1639,6 @@ export class SoundEngine {
         lfo3: fLfo, lfoGain3: fLfoGain,
       };
     }
-    const clamped = THREE.MathUtils.clamp(intensity, 0, 1);
     const target = clamped * 0.085;
     this.waveBed.gain.gain.linearRampToValueAtTime(target, ctx.currentTime + 0.6);
     this.waveBed.filter.frequency.linearRampToValueAtTime(260 + clamped * 360, ctx.currentTime + 0.8);
@@ -1652,7 +1654,9 @@ export class SoundEngine {
    * glues them to the hull.
    */
   setHullCreakIntensity(intensity: number, motion = 0): void {
-    if (intensity <= 0.001) {
+    const clamped = finiteClamp(intensity, 0, 1, 0);
+    const motionClamped = finiteClamp(motion, 0, 1, 0);
+    if (clamped <= 0.001) {
       if (this.hullCreak && this.ctx) {
         this.hullCreak.gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 0.7);
       }
@@ -1692,8 +1696,6 @@ export class SoundEngine {
       lfo.start();
       this.hullCreak = { source, gain, filter, lfo, lfoGain };
     }
-    const clamped = THREE.MathUtils.clamp(intensity, 0, 1);
-    const motionClamped = THREE.MathUtils.clamp(motion, 0, 1);
     this.hullCreak.gain.gain.linearRampToValueAtTime(0.006 + clamped * 0.027, ctx.currentTime + 0.55);
     this.hullCreak.filter.frequency.linearRampToValueAtTime(160 + motionClamped * 190, ctx.currentTime + 0.7);
     this.hullCreak.filter.Q.linearRampToValueAtTime(4.2 + clamped * 2.2, ctx.currentTime + 0.7);
@@ -2257,10 +2259,10 @@ export class SoundEngine {
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
-    const night = THREE.MathUtils.clamp(a.nightFactor, 0, 1);
-    const storm = THREE.MathUtils.clamp(a.storminess, 0, 1);
-    const shore = THREE.MathUtils.clamp(a.nearShore01, 0, 1);
-    const rain = THREE.MathUtils.clamp(a.rain01 ?? storm * 0.85, 0, 1);
+    const night = finiteClamp(a.nightFactor, 0, 1, 0);
+    const storm = finiteClamp(a.storminess, 0, 1, 0);
+    const shore = finiteClamp(a.nearShore01, 0, 1, 0);
+    const rain = finiteClamp(a.rain01 ?? storm * 0.85, 0, 1, 0);
     // The score reads the weather from here: a gale swallows the music, and a
     // whistle only surfaces out in open water, not in the surf line.
     this.stormLevel = storm;

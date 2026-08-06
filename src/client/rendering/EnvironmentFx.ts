@@ -8,6 +8,8 @@ import { HARVEST, PLAYER, SHIP_STATS, STORM_PHASES } from '../../shared/constant
 import type { GameState, Island, IslandProp, IslandPropType, Player, Ship } from '../../shared/types/index.js';
 import {
   dist2D,
+  finiteCircleBoundaryDistance,
+  finiteClamp,
   getIslandMaxRadius,
   getIslandSurfaceY,
   getShipDeckRaiseAt,
@@ -1066,7 +1068,7 @@ export class EnvironmentFx {
     // same ramp the rain does, a little ahead of it, so the cloud arrives first
     // and the drops fall out of something.
     const wallOvercast = this.stormWallNearness() * (0.34 + (phase / maxPhase) * 0.14);
-    return Math.max(base, wallOvercast);
+    return finiteClamp(Math.max(base, wallOvercast), 0, 1, 0);
   }
 
   /** 0 = far from the storm boundary, 1 = at it. Shared by the rain and the
@@ -1108,7 +1110,7 @@ export class EnvironmentFx {
     // ramp (see computeStormWeatherIntensity), so this only bites where the two
     // ramps disagree — and there it is the drops that give way, not the sky.
     const skyCap = Math.min(1, this.computeStormWeatherIntensity() * 1.3);
-    return Math.min(wanted, skyCap);
+    return finiteClamp(Math.min(wanted, skyCap), 0, 1, 0);
   }
 
   // ── Storm rain ────────────────────────────────────────────────────────────
@@ -1617,8 +1619,13 @@ export class EnvironmentFx {
     if (!this.view.state) return -1;
     const storm = this.view.state.storm;
     const cam = this.view.renderer.camera.position;
-    const radius = Math.max(1, storm.safeRadius);
-    return Math.abs(dist2D(cam.x, cam.z, storm.centerX, storm.centerZ) - radius);
+    return finiteCircleBoundaryDistance(
+      cam.x,
+      cam.z,
+      storm.centerX,
+      storm.centerZ,
+      storm.safeRadius,
+    );
   }
 
   private updateStormFront() {

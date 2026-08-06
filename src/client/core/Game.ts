@@ -3,7 +3,7 @@ import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPO
 import type {
   BountyRaisedPayload, CargoSpilledPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
-import { dist2D, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex,
@@ -3672,7 +3672,7 @@ export class Game {
     // only when snapshots arrive.
     this.updateStormRing();
     this.stormHalo.rotation.z = this.ocean.getTime() * 0.12;
-    this.stormWeatherIntensity = this.envFx.computeStormWeatherIntensity();
+    this.stormWeatherIntensity = finiteClamp(this.envFx.computeStormWeatherIntensity(), 0, 1, 0);
     // (renderer storm weather is applied via updateWaterEnvironment below —
     // calling updateStormWeather here too did the same work twice per frame.
     // The sea's own tint is set once the rain level is known, further down.)

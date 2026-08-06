@@ -30,7 +30,14 @@ import {
   STORM_RESPAWN_GRACE_SECONDS,
   STORM_TAILWIND,
 } from '../src/shared/constants/index.ts';
-import { angleWrap, dist2D, sampleWind, sampleLocalWind } from '../src/shared/utils/index.ts';
+import {
+  angleWrap,
+  dist2D,
+  finiteCircleBoundaryDistance,
+  finiteClamp,
+  sampleWind,
+  sampleLocalWind,
+} from '../src/shared/utils/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -118,6 +125,19 @@ function catchOf(ship, wind) {
   const desired = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
   return 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desired)) / SHIP.MAX_SAIL_ANGLE);
 }
+
+// ══ 0. A half-initialised camera cannot poison weather or Web Audio ══════════
+console.log('Transient render poses stay finite at the weather/audio boundary');
+expect('NaN weather falls back to calm instead of surviving an ordinary clamp',
+  finiteClamp(Number.NaN, 0, 1, 0) === 0);
+expect('infinite weather also falls back to calm',
+  finiteClamp(Number.POSITIVE_INFINITY, 0, 1, 0) === 0);
+expect('ordinary weather still clamps normally',
+  finiteClamp(1.4, 0, 1, 0) === 1 && finiteClamp(0.42, 0, 1, 0) === 0.42);
+expect('a non-finite camera pose reports no storm wall instead of NaN',
+  finiteCircleBoundaryDistance(Number.NaN, 0, 0, 0, 950) === -1);
+expect('a settled camera keeps the exact geometric wall distance',
+  finiteCircleBoundaryDistance(0, 800, 0, 0, 950) === 150);
 
 // ══ 1. The gale only exists outside the wall ══════════════════════════════════
 console.log('The wind is a local fact: prevailing inside, a gale out of the storm outside');

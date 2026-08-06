@@ -277,7 +277,9 @@ async function main() {
   });
   const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
   page.setDefaultTimeout(0);
-  page.on('pageerror', (e) => console.error(`  [pageerror] ${String(e.message).slice(0, 200)}`));
+  page.on('pageerror', (e) => {
+    console.error(`  [pageerror] ${(String(e.stack || e.message)).slice(0, 900).replace(/\n/g, ' | ')}`);
+  });
   const shaderErrors = [];
   page.on('console', (m) => {
     const text = m.text();

@@ -48,6 +48,13 @@ export function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/** Clamp a number without allowing NaN/Infinity to escape into render or audio
+ *  APIs. Math.min/Math.max preserve NaN, so their ordinary clamp idiom is not
+ *  a safety boundary. */
+export function finiteClamp(v: number, lo: number, hi: number, fallback = lo): number {
+  return Number.isFinite(v) ? clamp(v, lo, hi) : clamp(fallback, lo, hi);
+}
+
 /** Hermite smoothstep — 0 below e0, 1 above e1, smooth in between. */
 export function smoothstep(e0: number, e1: number, x: number): number {
   const t = clamp((x - e0) / Math.max(1e-6, e1 - e0), 0, 1);
@@ -57,6 +64,21 @@ export function smoothstep(e0: number, e1: number, x: number): number {
 export function dist2D(ax: number, az: number, bx: number, bz: number): number {
   const dx = ax - bx, dz = az - bz;
   return Math.sqrt(dx * dx + dz * dz);
+}
+
+/** Positive distance to a circular boundary, or -1 while its inputs are not a
+ *  usable world pose. The client camera can be transiently non-finite before
+ *  its first settled frame; treating that as "far from the wall" keeps the
+ *  startup frame out of weather and, crucially, out of Web Audio parameters. */
+export function finiteCircleBoundaryDistance(
+  x: number,
+  z: number,
+  centerX: number,
+  centerZ: number,
+  radius: number,
+): number {
+  if (![x, z, centerX, centerZ, radius].every(Number.isFinite)) return -1;
+  return Math.abs(dist2D(x, z, centerX, centerZ) - Math.max(1, radius));
 }
 
 export function buildSeaRockColliders(radius: number, height: number, rotation: number, variant: SeaRock['variant']): {
