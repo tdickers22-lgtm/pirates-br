@@ -165,6 +165,10 @@ const SAMPLER = `(() => {
   const serverSpeed = new Map();
   /** …and the shark's only equivalent: its telegraphed attack state. */
   const sharkState = new Map();
+  // The state is current-snapshot data while the pose is intentionally drawn
+  // from buffered history. Keep the transition quarantined until even the
+  // maximum 192ms render delay plus the 200ms bounded fallback is behind us.
+  const SHARK_TRANSITION_SETTLE_MS = 450;
 
   const record = (arm, popName, id, x, y, z, now, pxPerRad, cam) => {
     const pop = popOf(arm, popName);
@@ -280,8 +284,9 @@ const SAMPLER = `(() => {
         const key = 'K' + s.id;
         const state = s.attackState || 'cruise';
         const wasState = sharkState.get(key);
-        sharkState.set(key, state);
-        if (state === 'windup' || state === 'lunge' || (wasState !== undefined && wasState !== state)) {
+        const changedAt = !wasState || wasState.state !== state ? now : wasState.changedAt;
+        sharkState.set(key, { state, changedAt });
+        if (state === 'windup' || state === 'lunge' || now - changedAt < SHARK_TRANSITION_SETTLE_MS) {
           prev.delete('shark|' + key);
           continue;
         }
