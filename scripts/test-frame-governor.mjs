@@ -28,6 +28,7 @@ import {
   describeGovernor,
 } from '../src/client/rendering/FrameGovernor.js';
 import { budgeted, setFrameBudgetScale, resetFrameBudgetScale } from '../src/client/rendering/FrameBudget.js';
+import { parseRenderQuality } from '../src/client/rendering/QualityPreference.js';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -537,12 +538,17 @@ section('STREAMING BUDGET — one signal, floored so it can never deadlock');
 section('THE HONEST LABEL — the panel says what is actually running');
 // ═══════════════════════════════════════════════════════════════════════════
 {
+  expect('the player-facing medium URL maps to the proven middle engine tier',
+    parseRenderQuality('medium') === 'balanced');
   const l = resolveLevers(0.5, CAPS.low);
   const auto = describeGovernor('low', false, 'target', l);
   expect('auto mode names the tier it landed on and the resolution it is running',
-    auto.startsWith('Auto — low,') && /\d\.\d\d× resolution/.test(auto), auto);
+    auto.startsWith('Auto — Low,') && /\d\.\d\d× resolution/.test(auto), auto);
   const pinned = describeGovernor('high', true, 'target', resolveLevers(1, CAPS.high));
-  expect('a pinned tier says it is pinned', pinned.startsWith('high (pinned)'), pinned);
+  expect('a pinned tier says it is pinned', pinned.startsWith('High (pinned)'), pinned);
+  const medium = describeGovernor('balanced', true, 'target', resolveLevers(1, CAPS.balanced));
+  expect('the internal balanced tier is named Medium for the player',
+    medium.startsWith('Medium (pinned)'), medium);
   const floor = describeGovernor('low', false, 'floor', l);
   expect('floor mode says out loud that it stopped chasing 60',
     floor.includes('holding 30fps'), floor);

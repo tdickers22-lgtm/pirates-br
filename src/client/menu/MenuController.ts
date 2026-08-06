@@ -7,7 +7,8 @@ import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
 import { openOnboardingCards } from '../ui/OnboardingCards.js';
 import {
-  decideRenderQuality, loadQualityPreference, saveAutoTierCeiling, saveQualityPreference,
+  decideRenderQuality, loadQualityPreference, renderQualityLabel,
+  saveAutoTierCeiling, saveQualityPreference,
   type QualityPreference,
 } from '../rendering/QualityPreference.js';
 
@@ -713,6 +714,7 @@ export class MenuController {
    */
   private renderQualityNote(justChanged: boolean): void {
     const verdict = this.bootQualityVerdict;
+    const tierLabel = renderQualityLabel(verdict.quality);
     const why: Record<string, string> = {
       player: 'your choice',
       url: 'set by ?quality=',
@@ -737,11 +739,14 @@ export class MenuController {
       }
     }
     if (justChanged) {
-      lines.push(`Tier takes effect next time you load the game (still on ${verdict.quality} — ${detail}).`);
+      const selected = this.settingsQualitySelect.value === 'balanced'
+        ? 'Medium'
+        : this.settingsQualitySelect.selectedOptions[0]?.textContent?.split(' — ')[0] ?? 'the selected tier';
+      lines.push(`${selected} is saved. Reload the game to apply it (still on ${tierLabel} — ${detail}).`);
     } else if (!status) {
-      lines.push(`Tier: ${verdict.quality} — ${detail}.`);
+      lines.push(`Tier: ${tierLabel} — ${detail}.`);
     } else {
-      lines.push(`Tier: ${verdict.quality} — ${detail}.`);
+      lines.push(`Tier: ${tierLabel} — ${detail}.`);
     }
     if (status?.enabled) {
       lines.push(pinned

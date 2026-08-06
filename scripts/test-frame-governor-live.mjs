@@ -189,7 +189,7 @@ async function main() {
       JSON.stringify(opening.status),
     );
     expect('…and prints a label naming the tier and the resolution it is running',
-      /^(Auto — )?(low|balanced|high)( \(pinned\))?, \d\.\d\d× resolution/.test(opening.status.label),
+      /^(Auto — )?(Low|Medium|High)( \(pinned\))?, \d\.\d\d× resolution/.test(opening.status.label),
       opening.status.label);
     expect('the drawing buffer matches the pixel ratio it claims to be running',
       Math.abs(opening.drawingBufferWidth - Math.round(opening.cssWidth * opening.status.pixelRatio)) <= 1,

@@ -855,7 +855,7 @@ export class Renderer {
    *  decide how much geometry to author, and that answer must not change while
    *  a session is running or the same island would be two different islands. */
   getEffectScale(): number {
-    return this.quality === 'low' ? 0.48 : this.quality === 'balanced' ? 0.72 : 1;
+    return this.quality === 'low' ? 0.48 : this.quality === 'balanced' ? 0.8 : 1;
   }
 
   /** The tier's effect budget as the GOVERNOR currently allows it. For the

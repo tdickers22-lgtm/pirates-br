@@ -66,7 +66,7 @@
  * a machine whose only GL backend draws one frame a second.
  */
 
-import type { RenderQuality } from './QualityPreference.js';
+import { renderQualityLabel, type RenderQuality } from './QualityPreference.js';
 
 /** What the controller is currently trying to hold. */
 export type GovernorMode =
@@ -625,7 +625,8 @@ export function describeGovernor(
   levers: GovernorLevers,
 ): string {
   const ratio = `${levers.pixelRatio.toFixed(2)}× resolution`;
-  const head = pinned ? `${tier} (pinned)` : `Auto — ${tier}`;
+  const label = renderQualityLabel(tier);
+  const head = pinned ? `${label} (pinned)` : `Auto — ${label}`;
   if (mode === 'off') return `${head}, ${ratio}`;
   if (mode === 'floor') return `${head}, ${ratio} — holding 30fps`;
   return `${head}, ${ratio}`;

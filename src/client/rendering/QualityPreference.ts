@@ -29,10 +29,31 @@ export type RenderQuality = 'low' | 'balanced' | 'high';
 /** What the PLAYER asked for. 'auto' means "you decide" — the default. */
 export type QualityPreference = 'auto' | RenderQuality;
 
+/**
+ * `balanced` is the stable engine/storage key used by old saves, probes and
+ * links. To a player it is simply MEDIUM: the middle preset turns shadows and
+ * post-processing back on, more than doubles Low's pixel budget, and holds
+ * denser island dressing much farther out. Keep the internal key so existing
+ * preferences continue to work, but never make the player translate product
+ * jargon to find the obvious middle choice.
+ */
+export function renderQualityLabel(quality: RenderQuality): 'Low' | 'Medium' | 'High' {
+  return quality === 'balanced' ? 'Medium'
+    : quality === 'low' ? 'Low'
+      : 'High';
+}
+
 const SETTINGS_KEY = 'piratesBR.settings';
 
 function isQuality(value: unknown): value is RenderQuality {
   return value === 'low' || value === 'balanced' || value === 'high';
+}
+
+/** Accept the player-facing name in hand-written URLs/local storage while
+ * preserving `balanced` as the canonical internal key. */
+export function parseRenderQuality(value: unknown): RenderQuality | null {
+  if (value === 'medium') return 'balanced';
+  return isQuality(value) ? value : null;
 }
 
 /** The stored preference, or 'auto' when nothing has been chosen (or storage is
@@ -43,7 +64,7 @@ export function loadQualityPreference(): QualityPreference {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return 'auto';
     const parsed = JSON.parse(raw) as { quality?: unknown };
-    return isQuality(parsed.quality) ? parsed.quality : 'auto';
+    return parseRenderQuality(parsed.quality) ?? 'auto';
   } catch {
     return 'auto';
   }
@@ -89,7 +110,7 @@ export function loadAutoTierCeiling(): RenderQuality | null {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { autoQuality?: unknown };
-    return isQuality(parsed.autoQuality) ? parsed.autoQuality : null;
+    return parseRenderQuality(parsed.autoQuality);
   } catch {
     return null;
   }
@@ -185,7 +206,8 @@ export type QualityVerdict = {
  */
 export function decideRenderQuality(): QualityVerdict {
   const param = new URLSearchParams(window.location.search).get('quality');
-  if (isQuality(param)) return { quality: param, reason: 'url', rendererString: null };
+  const requested = parseRenderQuality(param);
+  if (requested) return { quality: requested, reason: 'url', rendererString: null };
 
   const stored = loadQualityPreference();
   if (stored !== 'auto') return { quality: stored, reason: 'player', rendererString: readGpuRendererString() };
