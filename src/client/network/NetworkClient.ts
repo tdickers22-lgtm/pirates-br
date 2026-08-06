@@ -152,7 +152,7 @@ export class NetworkClient {
       let settled = false;
       worker.onmessage = (e: MessageEvent<
         | { k: 'open' }
-        | { k: 'msg'; data: string; n: number }
+        | { k: 'msg'; data: string; n: number; receivedAt: number }
         | { k: 'closed'; code: number; reason: string }
         | { k: 'failed' }
       >) => {
@@ -170,7 +170,7 @@ export class NetworkClient {
             // we are keeping up; skipping it on a throwing frame would wedge its
             // coalescing slots shut for the rest of the session.
             worker.postMessage({ k: 'ack', n: m.n });
-            this.ingest(m.data);
+            this.ingest(m.data, m.receivedAt);
             break;
           case 'closed':
             this.noteClosed(m.code, m.reason);
@@ -201,16 +201,16 @@ export class NetworkClient {
         resolve();
       };
       this.ws.onerror = (e) => reject(e);
-      this.ws.onmessage = (e) => this.ingest(e.data as string);
+      this.ws.onmessage = (e) => this.ingest(e.data as string, Date.now());
       this.ws.onclose = (e) => this.noteClosed(e.code, e.reason);
     });
   }
 
   /** Parse + route one server frame. Identical for both transports. */
-  private ingest(raw: string): void {
+  private ingest(raw: string, receivedAt = Date.now()): void {
     try {
       const msg: NetMsg = JSON.parse(raw);
-      this.handleMsg(msg);
+      this.handleMsg(msg, receivedAt);
     } catch (err) {
       // Swallowing silently turned any join-time build throw into an
       // undiagnosable stuck loading screen — always leave a trace.
@@ -235,7 +235,7 @@ export class NetworkClient {
     console.warn(`[Net] Disconnected (code ${code}${reason ? `: ${reason}` : ''})`);
   }
 
-  private handleMsg(msg: NetMsg) {
+  private handleMsg(msg: NetMsg, receivedAt: number) {
     switch (msg.type) {
       case 'welcome': {
         const p = msg.payload as WelcomePayload;
@@ -252,13 +252,13 @@ export class NetworkClient {
       }
       case 'state_snapshot': {
         const p = msg.payload as GameState;
-        this.noteServerClock(p.serverTime);
+        this.noteServerClock(p.serverTime, receivedAt);
         this.queueSnapshot(p);
         break;
       }
       case 'state_hot': {
         const p = msg.payload as HotSnapshotPayload;
-        this.noteServerClock(p.serverTime);
+        this.noteServerClock(p.serverTime, receivedAt);
         // EVERY hot reaches the interpolation history, not just the one per rAF
         // that survives the coalescing below. `queueHotSnapshot` keeps only the
         // newest payload until the next frame, which is right for APPLYING one
@@ -343,13 +343,14 @@ export class NetworkClient {
     return this.serverClock;
   }
 
-  private noteServerClock(serverTime: unknown): void {
+  private noteServerClock(serverTime: unknown, receivedAt: number): void {
     if (typeof serverTime !== 'number' || !Number.isFinite(serverTime)) return;
+    if (!Number.isFinite(receivedAt)) return;
     // Monotonic: the wire is unordered enough that an older snapshot can land
     // after a newer one, and a pair that walks the sim clock BACKWARDS reads as
     // dilation that never happened.
     if (this.serverClock && serverTime <= this.serverClock.server) return;
-    this.serverClock = { server: serverTime, at: performance.now() };
+    this.serverClock = { server: serverTime, at: receivedAt };
   }
 
   // ─── Heartbeat ───────────────────────────────────────────────

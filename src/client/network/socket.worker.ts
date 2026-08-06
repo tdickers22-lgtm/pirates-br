@@ -63,7 +63,7 @@ type ToWorker =
 
 type FromWorker =
   | { k: 'open' }
-  | { k: 'msg'; data: string; n: number }
+  | { k: 'msg'; data: string; n: number; receivedAt: number }
   | { k: 'closed'; code: number; reason: string }
   | { k: 'failed' };
 
@@ -72,7 +72,7 @@ let beat: ReturnType<typeof setInterval> | null = null;
 let sent = 0;
 let acked = 0;
 /** Newest held frame per coalesced kind, waiting for the main thread to catch up. */
-const held = new Map<string, string>();
+const held = new Map<string, { raw: string; receivedAt: number }>();
 
 const post = (m: FromWorker) => (self as unknown as Worker).postMessage(m);
 
@@ -84,24 +84,28 @@ function stopBeat(): void {
 
 /** Relay a frame, coalescing superseded snapshots while the main thread is behind. */
 function relay(raw: string): void {
+  // Stamp on the thread that actually received the socket frame. The renderer
+  // may be pinned for seconds before it drains this message; stamping there
+  // would turn its own delay into alleged server slowdown.
+  const receivedAt = Date.now();
   const behind = sent - acked > MAX_UNACKED_FRAMES;
   const kind = behind ? SNAPSHOT_HEAD.exec(raw)?.[1] : undefined;
   if (kind) {
-    held.set(kind, raw);
+    held.set(kind, { raw, receivedAt });
     return;
   }
   if (held.size > 0) flushHeld();
-  post({ k: 'msg', data: raw, n: ++sent });
+  post({ k: 'msg', data: raw, n: ++sent, receivedAt });
 }
 
 function flushHeld(): void {
   // Full before hot: a hot snapshot patches onto the last full one, so releasing
   // them in the other order would apply the patch and then throw it away.
   for (const kind of ['state_snapshot', 'state_hot']) {
-    const raw = held.get(kind);
-    if (raw === undefined) continue;
+    const frame = held.get(kind);
+    if (frame === undefined) continue;
     held.delete(kind);
-    post({ k: 'msg', data: raw, n: ++sent });
+    post({ k: 'msg', data: frame.raw, n: ++sent, receivedAt: frame.receivedAt });
   }
 }
 

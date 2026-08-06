@@ -209,7 +209,9 @@ export class HudController {
 
   private updateServerLoadChip(): void {
     const state = this.view.state;
-    const now = performance.now() / 1000;
+    // The pair is stamped in epoch milliseconds by the socket worker, not when
+    // this possibly-stalled renderer finally drains the worker message.
+    const now = Date.now() / 1000;
     // Only the live sim advances serverTime; during the staged start it is 0 by
     // design and would read as an infinite deficit.
     if (!state || state.phase !== 'playing' || !Number.isFinite(state.serverTime)) {
@@ -220,7 +222,7 @@ export class HudController {
     // THE PAIR COMES OFF THE SOCKET, not off this frame. See
     // NetworkClient.getServerClock: both halves of the comparison have to be read
     // at the same instant, and the only place that is true is the message
-    // handler. Sampling `state.serverTime` against `performance.now()` here read
+    // handler. Sampling `state.serverTime` against the renderer clock here read
     // the sim clock as of the last snapshot the renderer got round to APPLYING
     // and the wall clock as of now, and charged the gap between them — which is
     // this client's own frame length — to the server.
