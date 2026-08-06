@@ -81,8 +81,8 @@ minute rather than the twentieth.
 | `test-viewmodel-poses` | first-person pose invariants | **not here** | `if (IS_SOFTWARE_GL) { console.log('skipped'); process.exit(0) }` — exit 0 is what a pass looks like, so every graded run on this machine has reported a green suite that measured nothing since it was written. The reason is real; it is now a declared `SKIPPED`, not a silent zero |
 | `fixwave4-smoke` | seven features are one game, not seven lanes | yes | **eight failures fixed in this audit — see below.** Went 18/26 → 29/31 |
 | `audit-live-floaters` | every seated prop touches the ground it is drawn on, as seen | yes | slow |
-| `test-program-warm` | no shader links in a frame the player moves through | yes | **has `--mutate`**; tours nine islands and dies, after a previous wave found it could not see the defect that cost most |
-| `test-load-responsiveness` | the longest task of a cold load | yes | **rebuilt in this audit — see below** |
+| `test-program-warm` | no shader links in a frame the player moves through when the backend exposes non-blocking readiness; zero proactive warm work otherwise | yes | **has `--mutate`** on capable backends; tours nine islands and dies. A backend without `KHR_parallel_shader_compile` is explicitly the pre-warmer path, because forcing a join there freezes the tab |
+| `test-load-responsiveness` | the longest task of a cold load, plus the invariant that warm-up never synchronously joins an unready program | yes | **rebuilt in this audit — see below**; unsupported backends grade zero proactive compiles/joins rather than manufacturing a multi-second “warm” slice |
 | `test-perf-budget` | draw-call and triangle ceilings per scene | yes | fails rather than skips on an unpinned world, which is what it used to do |
 | `test-hud-death-and-feed` | the whole death/respawn/feed HUD | yes | **four failing assertions fixed in this audit — see below** |
 

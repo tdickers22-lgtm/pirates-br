@@ -216,7 +216,11 @@ function frame(warmer, islands, shown, showDetailFor) {
   const sceneTarget = new THREE.WebGLRenderTarget(1, 1);
   let boundTarget = null;
   let compiledAgainst = null;
+  const pendingProgram = { isReady: () => false, getUniforms: () => {}, getAttributes: () => {} };
   const renderer = {
+    extensions: { get: (name) => name === 'KHR_parallel_shader_compile' ? {} : null },
+    properties: { get: () => ({ currentProgram: pendingProgram }) },
+    debug: { checkShaderErrors: false },
     getRenderTarget: () => boundTarget,
     setRenderTarget: target => { boundTarget = target; },
     compile: () => { compiledAgainst = boundTarget; },
@@ -228,6 +232,70 @@ function frame(warmer, islands, shown, showDetailFor) {
   expect('but does not spend patience on a mesh below a hidden parent', hiddenMaterial.visible);
   warmer.release();
   expect('the visible material is restored after the frame', visibleMaterial.visible);
+}
+
+// ── shader warming is never allowed to manufacture a browser freeze ──────
+{
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera();
+  const material = new THREE.MeshBasicMaterial();
+  scene.add(new THREE.Mesh(new THREE.BoxGeometry(), material));
+  let compiles = 0;
+  let joins = 0;
+  const renderer = {
+    extensions: { get: () => null },
+    properties: { get: () => ({
+      currentProgram: {
+        isReady: () => true,
+        getUniforms: () => { joins += 1; },
+        getAttributes: () => { joins += 1; },
+      },
+    }) },
+    debug: { checkShaderErrors: false },
+    getRenderTarget: () => null,
+    setRenderTarget: () => {},
+    compile: () => { compiles += 1; },
+  };
+  const warmer = new ProgramWarmer();
+  warmer.prepare(renderer, scene, camera);
+  expect('a driver without parallel shader readiness is never proactively compiled', compiles === 0);
+  expect('…and can never be synchronously joined by the warmer', joins === 0);
+  expect('…and its visible material is not held behind an unusable guard', material.visible);
+  expect('the warmer reports the unsupported path honestly', warmer.stats.parallel === false && !warmer.stats.active);
+}
+
+{
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera();
+  const programs = new WeakMap();
+  let joins = 0;
+  for (let i = 0; i < 30; i++) {
+    scene.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial()));
+  }
+  const renderer = {
+    extensions: { get: (name) => name === 'KHR_parallel_shader_compile' ? {} : null },
+    properties: { get: (material) => ({ currentProgram: programs.get(material) }) },
+    debug: { checkShaderErrors: false },
+    getRenderTarget: () => null,
+    setRenderTarget: () => {},
+    compile: (batch) => {
+      for (const mesh of batch.children) {
+        programs.set(mesh.material, {
+          isReady: () => false,
+          getUniforms: () => { joins += 1; },
+          getAttributes: () => { joins += 1; },
+        });
+      }
+    },
+  };
+  const warmer = new ProgramWarmer();
+  for (let frame = 0; frame < 40; frame++) {
+    warmer.prepare(renderer, scene, camera);
+    warmer.release();
+  }
+  expect('thirty not-ready programs never force a synchronous join', joins === 0, `${joins} join calls`);
+  expect('the outstanding shader queue is capped', warmer.stats.kicked <= 24, `${warmer.stats.kicked} kicked`);
+  expect('the parallel warmer remains active while safely yielding', warmer.stats.parallel === true && warmer.stats.active);
 }
 
 if (failures > 0) {

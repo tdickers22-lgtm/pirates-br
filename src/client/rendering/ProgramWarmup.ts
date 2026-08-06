@@ -35,13 +35,14 @@ import { budgeted } from './FrameBudget.js';
  *
  * WHAT THIS DOES INSTEAD, and why it is the whole fix rather than a mitigation:
  *
- *   1. PAY THE JOIN HERE. After `compile()` has kicked off the link, reach the
- *      program through `renderer.properties.get(material).currentProgram` and
- *      call `getUniforms()` and `getAttributes()` ourselves. That is literally
- *      the blocking function from the profile, now called from inside a loop
- *      that holds a stopwatch and stops.
+ *   1. PAY ONLY A COMPLETED JOIN HERE. After `compile()` has kicked off the
+ *      link, reach the program through
+ *      `renderer.properties.get(material).currentProgram`, but call
+ *      `getUniforms()` / `getAttributes()` only after
+ *      KHR_parallel_shader_compile reports completion. That query is the only
+ *      proof the indivisible join cannot park the browser's main thread.
  *
- *   2. KICK FIRST, JOIN LATER. `compile()` is issued for a chunk of meshes on
+ *   2. KICK FIRST, JOIN LATER. `compile()` is issued for a small, capped chunk on
  *      one frame and the joins are taken on following frames, so ANGLE's
  *      background compile threads have real wall-clock time to finish and each
  *      join is short instead of being a full software shader JIT taken inline.
@@ -78,6 +79,13 @@ import { budgeted } from './FrameBudget.js';
  * render target — or drive `shadowMap.render` itself, which collides with this
  * repo's shadow update gate. It is not a small change and it is not this one.
  *
+ * NO EXTENSION, NO WARMER. Without KHR_parallel_shader_compile, three's
+ * `isReady()` returns true before the driver is actually ready. There is no
+ * non-blocking way to distinguish a cheap reflection from a multi-second link,
+ * so proactive compilation and the visibility guard are disabled. That is the
+ * pre-warmer rendering path: the game may take an ordinary first-use hitch, but
+ * this optimisation can never create a beachball or shader backlog of its own.
+ *
  * FAIL OPEN, ALWAYS. Warming is an optimisation and must never be able to make
  * something permanently invisible. A material that throws on the way through is
  * marked done and left alone forever after; a material that has been held back
@@ -86,9 +94,9 @@ import { budgeted } from './FrameBudget.js';
  */
 
 /** Materials compiled per frame — the KICK, which only issues `linkProgram`. */
-const KICK_PER_FRAME = 6;
+const KICK_PER_FRAME = 2;
 /** …and while a ceremony owns the screen and nobody is playing. */
-const KICK_PER_FRAME_BOOST = 14;
+const KICK_PER_FRAME_BOOST = 4;
 
 /**
  * Milliseconds a frame may spend taking JOINS.
@@ -184,12 +192,14 @@ function materialsOf(mesh: THREE.Mesh): THREE.Material[] {
  * wait. Measured on this machine's SwiftShader, a blind 500ms delay before each
  * join changed the worst load task by nothing and cost the load its head start.
  *
- * So the wait is conditional on the extension, and the fuse below only exists
- * for a driver that says it will report and then does not.
+ * So the entire warmer is conditional on the extension. The fuse below retires
+ * a broken/stuck readiness report; it NEVER turns the timeout into permission
+ * to take a synchronous join.
  */
-const MAX_LINK_WAIT_MS = 2_000;
-/** …and it is abandoned entirely once the backlog is this deep, because waiting
- *  longer then only means the guard holds more of the world out of more frames. */
+const MAX_READY_WAIT_MS = 10_000;
+/** Hard cap on outstanding driver work. A previous version treated crossing
+ *  this number as permission to stop checking readiness and force a join — the
+ *  exact opposite of backpressure, and the source of the Medium/High beachball. */
 const PENDING_HIGH_WATER = 24;
 /** How far down the queue a frame will look for a link the driver has already
  *  finished, before deciding it has nothing cheap to do. */
@@ -245,8 +255,8 @@ export class ProgramWarmer {
     // population instead of against a wall-clock constant — see the note at the
     // increment site. joinTotalMs/joinCount is the mean link on this host today.
     joinCount: 0, joinTotalMs: 0,
-    walked: 0, owed: 0, unjoinable: 0,
-    guard: true, parallel: null as boolean | null,
+    walked: 0, owed: 0, unjoinable: 0, retired: 0,
+    guard: true, active: false, parallel: null as boolean | null,
   };
 
   /** Warm harder while a ceremony owns the screen — nobody is playing, and a
@@ -271,6 +281,7 @@ export class ProgramWarmer {
     this.pending.length = 0;
     this.pendingKeys.clear();
     this.held.length = 0;
+    this.joinTries.clear();
     this.walkSkips = 0;
   }
 
@@ -295,6 +306,19 @@ export class ProgramWarmer {
     // of staying awake is one throttled traverse (see IDLE_WALK_INTERVAL).
     const startedAt = performance.now();
 
+    // Without an honest readiness signal, every `getUniforms()` is allowed to
+    // become an unbounded synchronous link. Do not kick a large backlog and do
+    // not hide the world waiting for an optimisation we cannot safely finish.
+    if (!this.parallelCompile(renderer)) {
+      this.stats.active = false;
+      this.stats.heldNow = 0;
+      this.stats.owed = 0;
+      this.stats.lastMs = +(performance.now() - startedAt).toFixed(2);
+      if (this.stats.lastMs > this.stats.worstMs) this.stats.worstMs = this.stats.lastMs;
+      return;
+    }
+    this.stats.active = true;
+
     // ── 1. walk the scene for meshes that still owe ──────────────────────
     //
     // ALL OF IT, NOT JUST WHAT IS ON SCREEN. `traverseVisible` — which this used
@@ -310,7 +334,8 @@ export class ProgramWarmer {
     // room it has left.
     const visibleOwing: Owed[] = [];
     const hiddenOwing: Owed[] = [];
-    const kickCap = this.boosted ? KICK_PER_FRAME_BOOST : budgeted(KICK_PER_FRAME, 2);
+    const requestedKickCap = this.boosted ? KICK_PER_FRAME_BOOST : budgeted(KICK_PER_FRAME, 1);
+    const kickCap = Math.min(requestedKickCap, Math.max(0, PENDING_HIGH_WATER - this.pending.length));
     const walk = this.guard || this.walkSkips >= IDLE_WALK_INTERVAL || this.pending.length > 0;
     if (walk) {
       this.walkSkips = 0;
@@ -349,14 +374,12 @@ export class ProgramWarmer {
     // LIGHT gather is `traverseVisible`, and the lights it gathers come from the
     // real scene passed as `targetScene`), so a hidden mesh handed to it here is
     // compiled exactly like a shown one.
-    // A deep queue means the driver is already linking as fast as it can, and
-    // one more kick only puts another program in front of the one on screen —
-    // so past the high-water mark the walk keeps kicking what is VISIBLE and
-    // stops volunteering the rest of the world.
-    const owing = this.pending.length >= PENDING_HIGH_WATER
-      ? visibleOwing
-      : (visibleOwing.length > 0 ? [...visibleOwing, ...hiddenOwing] : hiddenOwing);
-    if (owing.length > 0) {
+    // A deep queue means the driver is already linking as fast as it can. The
+    // slot calculation above stops every new kick at the high-water mark; until
+    // a completed program leaves the queue, even visible work waits rather than
+    // turning backpressure into more driver work.
+    const owing = visibleOwing.length > 0 ? [...visibleOwing, ...hiddenOwing] : hiddenOwing;
+    if (kickCap > 0 && owing.length > 0) {
       const chunk: THREE.Mesh[] = [];
       const kicked: Kicked[] = [];
       const seen = new Set<string>();
@@ -433,15 +456,28 @@ export class ProgramWarmer {
       // the front may have been kicked moments ago by the same walk that asked
       // for it. Scanning a few places keeps the priority and stops one unfinished
       // link from idling a frame that had other work it could have paid for.
-      let index = 0;
-      if (this.pending.length < PENDING_HIGH_WATER && this.parallelCompile(renderer)) {
-        while (index < this.pending.length && index < READY_SCAN) {
-          const candidate = this.pending[index];
-          if (now - candidate.at >= MAX_LINK_WAIT_MS || this.linked(renderer, candidate.material)) break;
-          index += 1;
-        }
-        if (index >= Math.min(this.pending.length, READY_SCAN)) break;
+      // Retire a driver job that never reports completion. The old code used
+      // this timeout — and a full queue — to FORCE `join()`, converting load
+      // into an unbounded main-thread wait. Retirement fails open: normal draw
+      // owns first use again, exactly as it did before this warmer existed.
+      const scan = Math.min(this.pending.length, READY_SCAN);
+      for (let i = scan - 1; i >= 0; i--) {
+        const candidate = this.pending[i];
+        if (now - candidate.at < MAX_READY_WAIT_MS) continue;
+        this.pending.splice(i, 1);
+        this.pendingKeys.delete(candidate.key);
+        this.paid.add(candidate.key);
+        this.stats.retired += 1;
       }
+      if (this.pending.length === 0) break;
+
+      let index = 0;
+      while (index < this.pending.length && index < READY_SCAN) {
+        if (this.linked(renderer, this.pending[index].material)) break;
+        index += 1;
+      }
+      // No completed program means no safe unit of work this frame. Yield.
+      if (index >= Math.min(this.pending.length, READY_SCAN)) break;
       const next = this.pending.splice(index, 1)[0]!;
       this.pendingKeys.delete(next.key);
       const joinStart = performance.now();
@@ -564,7 +600,7 @@ export class ProgramWarmer {
     return this.stats.parallel;
   }
 
-  /** Only meaningful where `parallelCompile` is true — see MAX_LINK_WAIT_MS. */
+  /** Only meaningful where `parallelCompile` is true — see MAX_READY_WAIT_MS. */
   private linked(renderer: THREE.WebGLRenderer, material: THREE.Material): boolean {
     try {
       return this.programOf(renderer, material)?.isReady?.() ?? true;

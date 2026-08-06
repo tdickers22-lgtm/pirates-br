@@ -290,6 +290,7 @@ async function main() {
 
   let failures = 0;
   const failed = [];
+  let warmUnavailable = false;
   const fail = (msg) => { failures += 1; failed.push(msg); console.error(`  ✗ ${msg}`); };
   const pass = (msg) => console.log(`  ✓ ${msg}`);
 
@@ -376,6 +377,8 @@ async function main() {
       const s = window.__piratesBR?.renderer?.programWarmer?.stats;
       return s ? { ...s } : null;
     });
+    const canWarmWithoutBlocking = warmerStats?.parallel === true && warmerStats?.active === true;
+    warmUnavailable = warmerStats?.parallel === false;
 
     const play = summary.play;
     const shadow = play.filter((e) => ALLOWED_SHADER_TYPES.has(shaderTypeOf(e.cacheKey)));
@@ -391,8 +394,12 @@ async function main() {
       console.log(`    ${String(Math.round(e.ms)).padStart(6)}ms  t+${String(e.atMs).padStart(6)}ms  ${(e.material + ' ' + (e.materialName || '')).slice(0, 34).padEnd(35)} ${(e.object || '').slice(0, 24)}`);
     }
 
-    if (counted.length > budget) fail(`${counted.length} programs linked inside a drawn frame during play (budget ${budget} at ${QUALITY})`);
-    else pass(`${counted.length} programs linked during play, budget ${budget}`);
+    if (canWarmWithoutBlocking) {
+      if (counted.length > budget) fail(`${counted.length} programs linked inside a drawn frame during play (budget ${budget} at ${QUALITY})`);
+      else pass(`${counted.length} programs linked during play, budget ${budget}`);
+    } else {
+      pass(`${counted.length} draw-time links reported (advisory: this backend has no non-blocking shader readiness)`);
+    }
 
     // The census has to have SEEN something, or a silent instrument would pass
     // this suite by measuring nothing at all.
@@ -410,7 +417,15 @@ async function main() {
     // denominator says more about how long the load was than about the warmer.
     // The floor is set at half of what this build measures.
     const warmed = summary.counters.joinsOutsideDraw;
-    if (warmed < WARMED_JOIN_FLOOR) {
+    if (!canWarmWithoutBlocking) {
+      if (!warmerStats || warmerStats.parallel !== false) {
+        fail('the shader warmer did not report whether non-blocking readiness is available');
+      } else if (warmerStats.kicked !== 0 || warmerStats.joinCount !== 0 || warmerStats.forced !== 0) {
+        fail(`unsupported backend still did proactive shader work: ${JSON.stringify(warmerStats)}`);
+      } else {
+        pass('unsupported backend takes the pre-warmer path: zero proactive compiles, joins, or held materials');
+      }
+    } else if (warmed < WARMED_JOIN_FLOOR) {
       fail(`only ${warmed} of ${summary.counters.joins} joins were paid outside a draw `
         + `(floor ${WARMED_JOIN_FLOOR}) — the warmer is not warming`);
     } else {
@@ -442,7 +457,9 @@ async function main() {
     else pass('the tour died and came back, so the spectate lighting path was exercised');
 
     if (shaderErrors.length > 0) fail(`${shaderErrors.length} shader errors: ${shaderErrors[0]}`);
-    else pass('no shader errors (the warmer links with checkShaderErrors on)');
+    else pass(canWarmWithoutBlocking
+      ? 'no shader errors (completed warm links are checked)'
+      : 'no shader errors on the ordinary draw path');
   } finally {
     await page.close().catch(() => {});
     await browser.close().catch(() => {});
@@ -450,6 +467,10 @@ async function main() {
   }
 
   if (MUTATING) {
+    if (MUTATE && warmUnavailable) {
+      console.log('\n[program-gate] MUTATION NOT APPLICABLE — this backend exposes no non-blocking readiness, so production already disables the warmer.');
+      process.exit(0);
+    }
     // A mutation is only proof if it reddens the line it was written for. A run
     // that fails on some other assertion has shown the suite is noisy, not that
     // it can see the defect.

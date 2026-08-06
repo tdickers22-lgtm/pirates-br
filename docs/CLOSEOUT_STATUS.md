@@ -23,12 +23,19 @@ from its closeout scope.
   islands: 0 floaters, 0 unaccounted elevated pieces, 0 indoor-cover failures,
   and 36 explicitly classified design placements. Local evidence:
   `test-results/live-floaters-fixed/live-floaters.json`.
-- Runtime hitches: shader warm-up now targets the same render target used by
+- Runtime hitches: shader warm-up targets the same render target used by
   post-processing. The final high-tier census reduced new play-time program
   links from 43 to 6; three are expected shadow-depth variants, one is a scene
   shader, and the two remaining basic variants took about 1 ms. The official
   eight-island tour recorded no new play-time links. No shader errors were
-  recorded. Local evidence: `test-results/closeout/programs-high-final.json`.
+  recorded. After the closeout, a real-player Medium/High beachball exposed a
+  separate warm-up safety bug: a full queue stopped checking readiness and
+  forced an indivisible synchronous link. Warm-up now has hard backpressure,
+  joins only programs positively reported complete by
+  `KHR_parallel_shader_compile`, and disables itself on backends without that
+  non-blocking signal. The tier's visual settings are unchanged. Local evidence:
+  `test-results/closeout/programs-high-final.json`; deterministic queue/driver
+  safety coverage lives in `test-island-reveal.mjs`.
 - Network smoothness: client/server time is stamped at socket-worker receipt,
   so a slow renderer no longer displays a false server-overload warning. The
   adversarial run held real server lag to 0.03 seconds with no dropped ticks;

@@ -354,6 +354,7 @@ async function runOnce(runIndex) {
 
     const meanLink = run.warm && run.warm.joinCount > 0
       ? run.warm.joinTotalMs / run.warm.joinCount : null;
+    const canWarmWithoutBlocking = run.warm?.parallel === true && run.warm?.active === true;
     if (run.warm) {
       console.log(`  warmer: paid=${run.warm.paid} kicked=${run.warm.kicked} forcedThrough=${run.warm.forced}`
         + ` worstSlice=${run.warm.worstMs}ms worstSingleLink=${run.warm.worstJoinMs}ms parallelShaderCompile=${run.warm.parallel}`);
@@ -369,8 +370,14 @@ async function runOnce(runIndex) {
     // The gate has to be able to tell a load that warmed from a load that gave
     // up. `forced` counts materials let through unpaid after being held too
     // long — every one of those is a draw-time link the guard failed to prevent.
-    expect(`run ${i + 1}: warmer pre-paid the programs`, !!run.warm && run.warm.paid > 0,
-      run.warm ? JSON.stringify(run.warm) : 'no warmer stats on the page');
+    expect(
+      `run ${i + 1}: shader warm-up selected a safe backend path`,
+      canWarmWithoutBlocking
+        ? !!run.warm && run.warm.paid > 0
+        : !!run.warm && run.warm.parallel === false
+          && run.warm.kicked === 0 && run.warm.joinCount === 0 && run.warm.heldNow === 0,
+      run.warm ? JSON.stringify(run.warm) : 'no warmer stats on the page',
+    );
     expect(`run ${i + 1}: guard never failed open`, !!run.warm && run.warm.forced === 0,
       run.warm ? `${run.warm.forced} material(s) drawn with an unpaid program` : '');
     expect(`run ${i + 1}: no page errors`, run.pageErrors.length === 0, run.pageErrors.join('\n     '));
@@ -379,24 +386,29 @@ async function runOnce(runIndex) {
     // One: the longest task is one indivisible link and nothing else worth
     // naming. Two: no single program is pathologically dearer than the shader
     // set it belongs to. See the header for why neither is a millisecond count.
-    const excess = run.warm ? run.worstTask - run.warm.worstJoinMs : Number.POSITIVE_INFINITY;
-    expect(
-      `run ${i + 1}: longest load task is one link plus ${excess.toFixed(0)}ms of schedulable work (<= ${EXCESS_MS}ms)`,
-      excess <= EXCESS_MS,
-      run.warm
-        ? `longest task ${run.worstTask.toFixed(0)}ms, worst single link ${run.warm.worstJoinMs}ms —`
+    if (canWarmWithoutBlocking) {
+      const excess = run.worstTask - run.warm.worstJoinMs;
+      expect(
+        `run ${i + 1}: longest load task is one link plus ${excess.toFixed(0)}ms of schedulable work (<= ${EXCESS_MS}ms)`,
+        excess <= EXCESS_MS,
+        `longest task ${run.worstTask.toFixed(0)}ms, worst single link ${run.warm.worstJoinMs}ms —`
           + ` ${excess.toFixed(0)}ms of it was something that could have been sliced.`
           + ` Longest tasks in the window: ${run.windowTasks
             .slice().sort((a, b) => b.ms - a.ms).slice(0, 6)
-            .map((t) => `${t.ms.toFixed(0)}ms@+${(t.at / 1000).toFixed(1)}s`).join(' ')}`
-        : 'no warmer stats on the page — nothing to attribute the task to',
-    );
-    // The attribution above is only honest if the warmer actually joined links
-    // this run. With none, `excess` is the whole task and would read green by
-    // accident — the classic vacuous pass.
-    expect(`run ${i + 1}: the run linked programs for the attribution to be about`,
-      !!run.warm && run.warm.joinCount > 0,
-      run.warm ? `joinCount=${run.warm.joinCount}` : 'no warmer stats');
+            .map((t) => `${t.ms.toFixed(0)}ms@+${(t.at / 1000).toFixed(1)}s`).join(' ')}`,
+      );
+      expect(`run ${i + 1}: the run linked programs for the attribution to be about`,
+        run.warm.joinCount > 0, `joinCount=${run.warm.joinCount}`);
+    } else {
+      expect(`run ${i + 1}: unsupported backend performed no synchronous warm-up joins`,
+        !!run.warm && run.warm.joinCount === 0 && run.warm.kicked === 0,
+        run.warm ? JSON.stringify(run.warm) : 'no warmer stats');
+      if (MUTATE_MS > 0) {
+        expect(`run ${i + 1}: no injected ${MUTATE_MS}ms main-thread block`,
+          run.worstTask < MUTATE_MS * 0.8,
+          `longest task ${run.worstTask.toFixed(0)}ms`);
+      }
+    }
     // On the GPU path milliseconds mean something again, and this stays.
     if (BUDGET_MS > 0) {
       expect(
@@ -405,21 +417,27 @@ async function runOnce(runIndex) {
         run.overBudget.slice(0, 6).map((t) => `${t.ms.toFixed(0)}ms at +${(t.at / 1000).toFixed(1)}s`).join(', '),
       );
     }
-    const slice = run.warm ? run.warm.worstMs - run.warm.worstJoinMs : Number.POSITIVE_INFINITY;
-    expect(
-      `run ${i + 1}: worst warm slice is one link plus ${slice.toFixed(0)}ms (<= ${SLICE_SLACK_MS}ms)`,
-      slice <= SLICE_SLACK_MS,
-      run.warm ? `slice ${run.warm.worstMs}ms, single link ${run.warm.worstJoinMs}ms — more than one link taken on a frame` : '',
-    );
+    if (canWarmWithoutBlocking) {
+      const slice = run.warm.worstMs - run.warm.worstJoinMs;
+      expect(
+        `run ${i + 1}: worst warm slice is one link plus ${slice.toFixed(0)}ms (<= ${SLICE_SLACK_MS}ms)`,
+        slice <= SLICE_SLACK_MS,
+        `slice ${run.warm.worstMs}ms, single link ${run.warm.worstJoinMs}ms — more than one link taken on a frame`,
+      );
+    }
     // Counted in warm slices on the software path, in milliseconds on a GPU.
-    const hoverBar = HOVER_ACK_MS
-      ?? (run.warm ? run.warm.worstJoinMs * HOVER_SLICES + HOVER_SLACK_MS : Number.POSITIVE_INFINITY);
-    expect(
-      `run ${i + 1}: menu answered a hover in ${m.menuHoverMs}ms (<= ${hoverBar.toFixed(0)}ms`
-      + `${HOVER_ACK_MS ? '' : ` = ${HOVER_SLICES} warm slices of ${run.warm?.worstJoinMs}ms + ${HOVER_SLACK_MS}ms`})`,
-      m.menuHoverMs <= hoverBar,
-      HOVER_ACK_MS ? '' : 'the menu waited more than three frames of warm-up work to answer a mouse',
-    );
+    if (HOVER_ACK_MS || canWarmWithoutBlocking) {
+      const hoverBar = HOVER_ACK_MS
+        ?? (run.warm.worstJoinMs * HOVER_SLICES + HOVER_SLACK_MS);
+      expect(
+        `run ${i + 1}: menu answered a hover in ${m.menuHoverMs}ms (<= ${hoverBar.toFixed(0)}ms`
+        + `${HOVER_ACK_MS ? '' : ` = ${HOVER_SLICES} warm slices of ${run.warm.worstJoinMs}ms + ${HOVER_SLACK_MS}ms`})`,
+        m.menuHoverMs <= hoverBar,
+        HOVER_ACK_MS ? '' : 'the menu waited more than three frames of warm-up work to answer a mouse',
+      );
+    } else {
+      console.log(`  ↷ menu hover ${m.menuHoverMs}ms advisory: software backend has no non-blocking shader readiness`);
+    }
   }
 
   if (MUTATE_MS > 0) {
