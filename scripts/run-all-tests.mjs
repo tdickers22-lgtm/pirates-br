@@ -32,14 +32,16 @@
 // and every child is niced.
 //
 //   npm test                      # everything: logic, then browser
-//   npm run test:logic            # logic + server suites — needs no stack
-//   npm run test:server           # the two LobbyServer suites only (kernel-picked ports)
+//   npm run test:quick            # the sub-second logic suites; ≤60 s soft ceiling
+//   npm run test:logic            # logic only — no stack, no ports
+//   npm run test:server           # the LobbyServer suites (kernel-picked ports)
 //   npm run test:browser          # browser only
+//   test-results/summary.json     # every run: per-suite verdict + ms, HEAD, slowest 5
 //   npm run test:audit            # is every suite on disk accounted for?
 //   node scripts/run-all-tests.mjs --only hud,minimap
 //   node scripts/run-all-tests.mjs --list
-import { spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync, readdirSync } from 'node:fs';
+import { execSync, spawn } from 'node:child_process';
+import { createWriteStream, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ALL, EVIDENCE, EXCLUDED, TIER_TIMEOUT_MS } from './lib/suites.mjs';
@@ -222,13 +224,21 @@ const pick = (list) => (onlyFilter
   : list);
 
 const tier = (kind) => ALL.filter((s) => s.kind === kind);
-// --logic runs everything that needs no stack (logic + server); --server just
-// the LobbyServer suites; --browser just the page suites.
-const wantLogic = !has('browser') && !has('server');
-const wantServer = !has('browser');
-const wantBrowser = !has('logic') && !has('server');
-const logic = wantLogic ? pick(tier('logic')) : [];
+// One tier per flag: --logic (no stack, no ports), --server (own LobbyServer on
+// port 0), --browser (the runner's stack). --quick is the pre-commit subset:
+// logic suites tagged `quick` in the manifest, graded against a wall-clock
+// ceiling below. No flag runs all three tiers.
+const wantQuick = has('quick');
+const wantLogic = wantQuick || (!has('browser') && !has('server'));
+const wantServer = !wantQuick && !has('browser') && !has('logic');
+const wantBrowser = !wantQuick && !has('logic') && !has('server');
+const logic = wantLogic ? pick(tier('logic')).filter((s) => !wantQuick || s.quick) : [];
 const server = wantServer ? pick(tier('server')) : [];
+/** The quick tier's wall-clock budget. A SOFT ceiling: over it prints a
+ *  warning (this SwiftShader Air flaps when another agent runs); over TWICE
+ *  it is a FAIL, because a "quick" gate nobody waits for is not run. */
+const QUICK_BUDGET_MS = Number(process.env.PIRATES_QUICK_BUDGET_MS ?? 60_000);
+const RUN_T0 = Date.now();
 // Cheap first, machine-owning last: a broken build should be reported in the
 // first minute rather than the twentieth.
 const browser = wantBrowser
@@ -328,8 +338,43 @@ for (const r of bad) {
   for (const l of lines) console.error(`     │ ${l}`);
   console.error(`     full log: ${r.logPath}`);
 }
-if (bad.length || code) {
-  console.error(`\n[test] ${bad.length} suite(s) not green.`);
+// ── persist it: durations were computed and thrown away for a month ─────────
+// test-results/summary.json is what a committer reads to pick a subset, what
+// the next audit reads to see where the time goes, and what says which HEAD
+// produced the numbers. The slowest-5 line answers "why was that slow" without
+// opening it.
+const wallMs = Date.now() - RUN_T0;
+{
+  let head = 'unknown';
+  try { head = execSync('git rev-parse --short HEAD', { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { /* not a repo */ }
+  const summary = {
+    head, argv, startedAt: new Date(RUN_T0).toISOString(), wallMs,
+    suites: results.map((r) => ({
+      file: r.suite.file, kind: r.suite.kind, quick: !!r.suite.quick,
+      verdict: r.verdict, ms: r.ms, bytes: r.bytes ?? 0, code: r.code,
+    })),
+  };
+  mkdirSync(LOG_DIR, { recursive: true });
+  writeFileSync(path.join(LOG_DIR, 'summary.json'), JSON.stringify(summary, null, 2));
+  const slowest = results.filter((r) => r.ms > 0).sort((a, b) => b.ms - a.ms).slice(0, 5);
+  if (slowest.length) {
+    console.log(`[test] slowest: ${slowest.map((r) => `${r.suite.file.replace(/\.mjs$/, '')} ${(r.ms / 1000).toFixed(1)}s`).join('  ')}`);
+  }
+  console.log(`[test] ${(wallMs / 1000).toFixed(1)}s wall · summary: test-results/summary.json (HEAD ${head})`);
+}
+let quickOver = false;
+if (wantQuick) {
+  if (wallMs > 2 * QUICK_BUDGET_MS) {
+    console.error(`  ✗ FAIL: the quick tier took ${(wallMs / 1000).toFixed(1)}s, over twice its ${QUICK_BUDGET_MS / 1000}s ceiling — untag suites in lib/suites.mjs or raise PIRATES_QUICK_BUDGET_MS`);
+    quickOver = true;
+  } else if (wallMs > QUICK_BUDGET_MS) {
+    console.log(`  ! quick tier took ${(wallMs / 1000).toFixed(1)}s, over its ${QUICK_BUDGET_MS / 1000}s soft ceiling (advisory; FAIL at 2x)`);
+  } else {
+    console.log(`  ✓ quick tier within its ${QUICK_BUDGET_MS / 1000}s ceiling`);
+  }
+}
+if (bad.length || code || quickOver) {
+  console.error(`\n[test] ${bad.length} suite(s) not green${quickOver ? ', quick ceiling blown' : ''}.`);
   process.exit(1);
 }
 console.log('[test] ALL SUITES PASSED');
