@@ -199,6 +199,15 @@ export const BROWSER = [
   { ...plain('test-z-fighting.mjs'), slow: true },
   { ...plain('test-near-plane-clearance.mjs'), slow: true },
   { ...plain('test-hud-death-and-feed.mjs'), slow: true },
+  // GATES-01 (wave 0.4), written RED FIRST like their logic siblings above.
+  // Both run at ?quality=low, 960x540, and grade counts / pixel ratios, so the
+  // software rasteriser the runner uses here is a valid backend for them.
+  //   test-fill-budget — stencil census: sky layers ≤0.55, whole/blended ceilings;
+  //                      --mutate (sky depthTest=false) must FAIL
+  //   test-storm-wall  — the old storm-wall-probe as a gate: night sea ≤ sky luma,
+  //                      noon sea chroma ≤ 1.3× sky (RED on HEAD: noon 6.67×, blue sea under slate)
+  { ...plain('test-fill-budget.mjs'), slow: true },
+  { ...plain('test-storm-wall.mjs'), slow: true },
 ];
 
 /**
@@ -214,8 +223,6 @@ export const EXCLUDED = {
     'shared instrument library (planScenes, measureScene, sessionQuery) imported by twelve browser suites — a module, not a gate',
   'pacing-sim.mjs':
     'the pacing instrument (lane 0.3 owns it); its gate is test-pacing-curve, opt-in under PACING=1',
-  'storm-wall-probe.mjs':
-    'storm-wall fill probe; lane 0.4 turns it into a gate this wave — an instrument until then',
 };
 
 export const ALL = [
