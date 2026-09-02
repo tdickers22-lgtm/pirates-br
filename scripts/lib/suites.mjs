@@ -82,6 +82,7 @@ export const LOGIC = [
   tsx('test-block-hold.mjs'),
   tsx('test-grounding-cap.mjs'),
   tsx('test-net-resilience.mjs'),
+  tsx('test-http-hardening.mjs'),
   tsx('test-material-floor.mjs'),
   tsx('test-sea-voids.mjs'),
   tsx('test-bot-peace-window.mjs'),
