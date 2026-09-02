@@ -69,6 +69,9 @@ export const LOGIC = [
   // RNG-01 pacing gate: minutes of seeded sim, so opt-in (PACING=1) and long.
   { ...tsx('test-pacing-curve.mjs'), optIn: 'PACING', timeoutMs: 1_500_000,
     why: 'opt-in slow tier: set PACING=1 (two 13-minute seeded matches)' },
+  // DEV-01: dev hooks refused without PIRATES_BR_DEV_HOOKS=1 / MatchOptions.devHooks;
+  // stats skip dev-assisted matches. Pure Match + StatsStore, ~1 s.
+  quick(tsx('test-dev-hooks.mjs')),
   quick(tsx('test-traversal.mjs')),
   quick(tsx('test-revive.mjs')),
   quick(tsx('test-snapshot-size.mjs')),

@@ -280,7 +280,7 @@ try {
     // up here, and nothing on disk or in another agent's shell can collide.
     console.log(`\n[test] ── ${server.length} server suites (own LobbyServer, port 0) ──────`);
     for (const [i, s] of server.entries()) {
-      const r = await runSuite(s, { PIRATES_BR_TEST_PORT: '0' });
+      const r = await runSuite(s, { PIRATES_BR_TEST_PORT: '0', PIRATES_BR_DEV_HOOKS: '1' });
       results.push(r);
       console.log(`  ${String(i + 1).padStart(2)}/${server.length}  ${r.verdict.padEnd(7)} ${(r.ms / 1000).toFixed(1)}s  ${s.file}`);
     }
@@ -289,6 +289,9 @@ try {
   if (browser.length) {
     await ensure('server', `npm run dev:server`, HEALTH_URL, {
       PORT: SERVER_PORT, PIRATES_BR_MAP_SEED: MAP_SEED,
+      // DEV-01: dev_grant_gold / dev_bot_peace are honoured only on a server
+      // that opts in; the runner's stack does, production never does.
+      PIRATES_BR_DEV_HOOKS: '1',
     });
     if (!await servesPinnedMap()) {
       // Reused somebody else's server, and it rolls a world these ceilings were
