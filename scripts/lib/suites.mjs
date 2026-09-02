@@ -63,6 +63,9 @@ export const LOGIC = [
   quick(tsx('test-flooding.mjs')),
   quick(tsx('test-locomotion.mjs')),
   quick(tsx('test-world-fixed.mjs')),
+  // RNG-01: two seeded Matches ticked 90 s side by side, state hashed each
+  // second, plus a different-matchId control. ~11 s, so not in the quick tier.
+  tsx('test-match-determinism.mjs'),
   quick(tsx('test-traversal.mjs')),
   quick(tsx('test-revive.mjs')),
   quick(tsx('test-snapshot-size.mjs')),
