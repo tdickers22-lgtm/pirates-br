@@ -17,6 +17,8 @@ export interface HitscanTrace {
 }
 
 export class WeaponSystem {
+  /** Match-seeded stream (RNG-01): shot spread draws from it. Unseeded it is Math.random. */
+  constructor(private readonly rng: () => number = Math.random) {}
   private pendingProjectiles: Projectile[] = [];
 
   update(dt: number, players: Player[]) {
@@ -368,8 +370,8 @@ export class WeaponSystem {
       : { x: 0, y: 1, z: 0 };
     const right = this.normalizeVector(this.cross(baseDirection, fallbackUp), { x: 1, y: 0, z: 0 });
     const up = this.normalizeVector(this.cross(right, baseDirection), { x: 0, y: 1, z: 0 });
-    const yawOffset = (Math.random() - 0.5) * 2 * Math.tan(spreadRad);
-    const pitchOffset = (Math.random() - 0.5) * 2 * Math.tan(spreadRad);
+    const yawOffset = (this.rng() - 0.5) * 2 * Math.tan(spreadRad);
+    const pitchOffset = (this.rng() - 0.5) * 2 * Math.tan(spreadRad);
     return this.normalizeVector(
       {
         x: baseDirection.x + right.x * yawOffset + up.x * pitchOffset,
