@@ -802,6 +802,7 @@ export class LobbyServer {
         damageDealt: r.damageDealt,
         headshots: r.headshots,
         playSeconds: r.playSeconds,
+        devAssisted: result.devAssisted,
       });
       const clientSession = this.findClientByPlayerId(r.playerId);
       if (clientSession) {
