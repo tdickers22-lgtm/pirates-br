@@ -827,7 +827,36 @@ export const KILL_STREAK_LADDER: ReadonlyArray<{ kills: number; label: string }>
  *  (they still defend when fired upon and still loot/patrol). Without it ~half
  *  the lobby was eliminated before the first storm shrink even began, so the
  *  7-phase ring arc never got to matter. */
-export const BOT_EARLY_PEACE_SECONDS = 150;
+/** 150 s. The env var BOT_EARLY_PEACE_SECONDS overrides it on the SERVER only:
+ *  it is the mutation knob for test-pacing-curve's "can it fail?" proof (0 makes
+ *  bots fight from the horn, which must break the 150 s band). The browser
+ *  bundle has no `process` and always reads 150. */
+export const BOT_EARLY_PEACE_SECONDS = (() => {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  const n = Number(env?.BOT_EARLY_PEACE_SECONDS ?? NaN);
+  return Number.isFinite(n) && n >= 0 ? n : 150;
+})();
+
+/** RNG-01 pacing bands for the seeded bot-only sim (scripts/pacing-sim.mjs,
+ *  graded by scripts/test-pacing-curve.mjs under PACING=1). MARKS are sim
+ *  seconds; the later ones are the storm arc: P3 starts 395, mid-P3 480, P4
+ *  520, P5 610, P6 675, P7 725, the last ring closes at 755. BANDS are mean
+ *  crews afloat [lo, hi] at a mark, 9 bot crews, 2+ runs. Only the two the
+ *  audit could stand behind are pinned; tighten once the printed arc is stable.
+ *  Numbers quoted in older comments came from a sim that stopped at 360 s. */
+export const PACING_TARGETS = {
+  BOT_CREWS: 9,
+  MARKS: [60, 120, 150, 180, 240, 300, 360, 395, 480, 520, 610, 675, 725, 755],
+  /** 150: the peace window holds — nobody is sunk before it lifts (seeded runs
+   *  print exactly 9; BOT_EARLY_PEACE_SECONDS=0 prints 8.5). 360: the audit's
+   *  band; the seeded mean sits on its top edge (7.0) — the lobby empties
+   *  slower than designed, which is a pacing fact, not a gate defect. */
+  BANDS: { 150: [9, 9], 360: [4.5, 7] } as Record<number, [number, number]>,
+  /** Sim length. NOTE: as of RNG-01 no seeded bot-only match ends at all (3-6
+   *  crews still afloat at 780 s, 3 at 1500 s) — the closed ring does not sink
+   *  bot hulls. Reported per run by pacing-sim; graded by the endgame lane. */
+  MAX_MATCH_SECONDS: 13 * 60,
+};
 /** Engage-seek radius by storm phase index (clamped to the last entry) once the
  *  early-peace window is over. The old flat 920/780 had every bot converging
  *  across the whole map from t=0; measured, that emptied the lobby long before
