@@ -284,6 +284,14 @@ export function makeMatchRng(matchId: string): () => number {
   };
 }
 
+/** Per-skeleton phase (guard reflex, roam offset) from its deterministic
+ *  name (Skeleton_<n>), never its uuid: a seeded match must replay (RNG-01). */
+function skeletonPhase(s: { name: string }): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.name.length; i++) h = Math.imul(h ^ s.name.charCodeAt(i), 0x01000193) >>> 0;
+  return h;
+}
+
 const CUTLASS_CHARGE_TIME = 0.72;
 const CUTLASS_CHARGE_MIN_TAP = 0.02;
 const CUTLASS_LUNGE_COOLDOWN = 1.05;
@@ -6651,7 +6659,7 @@ export class Match {
             && targetWeapon.weaponId === 'cutlass'
             && (target.cutlassCharge > 0.12 || (this.cutlassFireHeldByPlayer.get(target.id) ?? false))
             && distance < 4.2;
-          const guardReflex = ((skeleton.id.charCodeAt(1) ?? 0) % 10) / 10;
+          const guardReflex = (skeletonPhase(skeleton) % 10) / 10;
           skeleton.blocking = targetThreatens && guardReflex < 0.7
             && !!weapon && weapon.weaponId === 'cutlass' && !weapon.reloading;
           if (weapon && !weapon.reloading && !skeleton.blocking) {
@@ -6700,7 +6708,7 @@ export class Match {
         }
       } else {
         skeleton.blocking = false;
-        const roamSeed = skeleton.id.charCodeAt(0) * 0.17 + skeleton.id.charCodeAt(skeleton.id.length - 1) * 0.11;
+        const roamSeed = (skeletonPhase(skeleton) % 1000) * 0.0173;
         const patrolAngle = (this.t * 0.22 + roamSeed) % (Math.PI * 2);
         const patrolRadius = 0.2 + ((Math.sin(this.t * 0.13 + roamSeed) + 1) * 0.5) * 0.24;
         const patrolPoint = getIslandSurfacePoint(island, patrolRadius, patrolAngle, 0.04);
