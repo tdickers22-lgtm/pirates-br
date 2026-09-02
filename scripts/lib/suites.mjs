@@ -124,8 +124,12 @@ export const LOGIC = [
   // quick tier so a pre-commit run in another lane is not blocked by them.
   //   test-avatar-pose-invariants — boots -0.19, head 1.92 vs 1.68 (AVATAR-01, wave 2)
   //   test-ship-attitude-frame    — XYZ root Euler: bow never dips E/W (SHIP-01, lane 1.3)
+  //   test-ship-geometry          — hold floor / trim / iron outside the loft, stern 0.85 m aft (HULLGEO-01)
+  //   test-asset-bounds           — boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (ASSETS lane); node TRS applied
   tsx('test-avatar-pose-invariants.mjs'),
   tsx('test-ship-attitude-frame.mjs'),
+  tsx('test-ship-geometry.mjs'),
+  tsx('test-asset-bounds.mjs'),
 ];
 
 /**
