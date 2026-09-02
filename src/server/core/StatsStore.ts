@@ -48,6 +48,8 @@ interface MatchStatDeltas {
   damageDealt?: number;
   headshots?: number;
   playSeconds?: number;
+  /** DEV-01: a match in which dev_grant_gold / dev_bot_peace was honoured. Skipped entirely. */
+  devAssisted?: boolean;
 }
 
 /**
@@ -113,6 +115,9 @@ export class StatsStore {
 
   applyMatchResult(input: MatchStatDeltas): PlayerStatsRecord {
     const rec = this.ensure(input.name);
+    // A dev-assisted match (DEV-01) never reaches the lifetime record: not the
+    // gold it handed out, not the win, not even matchesPlayed.
+    if (input.devAssisted) return rec;
     rec.kills += input.kills;
     rec.deaths += input.deaths;
     rec.totalGold += input.gold;
