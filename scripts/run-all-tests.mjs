@@ -262,6 +262,13 @@ try {
   if (logic.length) {
     console.log(`\n[test] ── ${logic.length} logic suites ──────────────────────────`);
     for (const [i, s] of logic.entries()) {
+      // OPT-IN suites (minutes of sim) run only when their env var is 1; reported
+      // as SKIPPED otherwise so a missing PACING=1 never reads as a pass.
+      if (s.optIn && process.env[s.optIn] !== '1') {
+        results.push({ suite: s, verdict: 'SKIPPED', code: 0, ms: 0, detail: s.why });
+        console.log(`  ${String(i + 1).padStart(2)}/${logic.length}  SKIPPED ${'—'.padStart(6)}  ${s.file}  (${s.why})`);
+        continue;
+      }
       const r = await runSuite(s, {});
       results.push(r);
       console.log(`  ${String(i + 1).padStart(2)}/${logic.length}  ${r.verdict.padEnd(7)} ${(r.ms / 1000).toFixed(1)}s  ${s.file}`);

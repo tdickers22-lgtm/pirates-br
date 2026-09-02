@@ -66,6 +66,9 @@ export const LOGIC = [
   // RNG-01: two seeded Matches ticked 90 s side by side, state hashed each
   // second, plus a different-matchId control. ~11 s, so not in the quick tier.
   tsx('test-match-determinism.mjs'),
+  // RNG-01 pacing gate: minutes of seeded sim, so opt-in (PACING=1) and long.
+  { ...tsx('test-pacing-curve.mjs'), optIn: 'PACING', timeoutMs: 1_500_000,
+    why: 'opt-in slow tier: set PACING=1 (two 13-minute seeded matches)' },
   quick(tsx('test-traversal.mjs')),
   quick(tsx('test-revive.mjs')),
   quick(tsx('test-snapshot-size.mjs')),
