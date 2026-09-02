@@ -118,6 +118,14 @@ export const LOGIC = [
   // drives the buffer directly and needs no stack at all.
   quick(tsx('test-remote-interpolation.mjs')),
   quick(tsx('audit-floating-props.mjs')),
+  // GATES-01 (wave 0.4): written RED FIRST, on purpose. Each grades a defect the
+  // 2026-09-01 audit found unguarded and stays red until its fix lane lands —
+  // that is the record that the gate can fail, not a broken build. Not in the
+  // quick tier so a pre-commit run in another lane is not blocked by them.
+  //   test-avatar-pose-invariants — boots -0.19, head 1.92 vs 1.68 (AVATAR-01, wave 2)
+  //   test-ship-attitude-frame    — XYZ root Euler: bow never dips E/W (SHIP-01, lane 1.3)
+  tsx('test-avatar-pose-invariants.mjs'),
+  tsx('test-ship-attitude-frame.mjs'),
 ];
 
 /**
