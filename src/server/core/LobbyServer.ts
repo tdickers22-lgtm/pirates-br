@@ -796,6 +796,19 @@ export class LobbyServer {
     }
   }
 
+  /** Last resort before the process gives up (index.ts, repeated fatals): stop
+   *  every match and close every socket with 1012 (service restart) so clients
+   *  show "server restarting" instead of a silent 1006 and a frozen sea. */
+  emergencyStop(reason: string): void {
+    console.error(`[Lobby] EMERGENCY STOP (${reason}): ${this.matches.size} matches, ${this.clients.size} clients`);
+    for (const [id, match] of Array.from(this.matches)) {
+      try { this.reapMatch(id, match, `emergency: ${reason}`); } catch {}
+    }
+    for (const session of Array.from(this.clients.values())) {
+      try { session.ws.close(1012, 'server restarting'); } catch {}
+    }
+  }
+
   /** Stop a match, forget it, and send any sessions still pointed at it home. */
   private reapMatch(matchId: string, match: Match, reason: string): void {
     match.stop();
@@ -828,8 +841,40 @@ export class LobbyServer {
   }
 
   // ─── HTTP (static client serving) ────────────────────────────
+  /** Error boundary for the http 'request' listener. A synchronous throw in
+   *  here is an uncaught exception, and Node answers one of those by exiting:
+   *  before this boundary `GET /%E0%A4%A` (decodeURIComponent) or `GET //[`
+   *  (new URL) from any client ended every live match on the host. Anything
+   *  that escapes serveHttp is a client fault or a filesystem race, never a
+   *  reason to stop serving: answer 400 and carry on. */
   private handleHttp(req: IncomingMessage, res: ServerResponse): void {
-    const rawPath = new URL(req.url ?? '/', 'http://localhost').pathname;
+    try {
+      this.serveHttp(req, res);
+    } catch (err) {
+      console.warn(`[Lobby] bad request ${req.method ?? '?'} ${JSON.stringify(req.url ?? '')}: ${(err as Error)?.message ?? err}`);
+      this.replyBadRequest(res);
+    }
+  }
+
+  private replyBadRequest(res: ServerResponse, status = 400): void {
+    try {
+      if (res.headersSent) { res.destroy(); return; }
+      res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(status === 400 ? 'Bad Request' : 'Error');
+    } catch {
+      try { res.destroy(); } catch {}
+    }
+  }
+
+  private serveHttp(req: IncomingMessage, res: ServerResponse): void {
+    // new URL throws TypeError on request lines like `GET //[ HTTP/1.1`.
+    let rawPath: string;
+    try {
+      rawPath = new URL(req.url ?? '/', 'http://localhost').pathname;
+    } catch {
+      this.replyBadRequest(res);
+      return;
+    }
     if (rawPath === '/health' || rawPath === '/healthz') {
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
@@ -906,20 +951,48 @@ export class LobbyServer {
       return;
     }
 
-    const normalizedPath = normalize(decodeURIComponent(rawPath === '/' ? '/index.html' : rawPath))
-      .replace(/^(\.\.(\/|\\|$))+/, '');
+    // decodeURIComponent throws URIError on any invalid percent sequence
+    // (`/%E0%A4%A`): a client fault, answered 400, never fatal.
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(rawPath === '/' ? '/index.html' : rawPath);
+    } catch {
+      this.replyBadRequest(res);
+      return;
+    }
+    const normalizedPath = normalize(decodedPath).replace(/^(\.\.(\/|\\|$))+/, '');
     let filePath = join(CLIENT_DIST_ROOT, normalizedPath);
     if (!filePath.startsWith(CLIENT_DIST_ROOT)) {
       filePath = join(CLIENT_DIST_ROOT, 'index.html');
-    } else if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
+    } else if (!this.isServableFile(filePath)) {
       filePath = join(CLIENT_DIST_ROOT, 'index.html');
     }
 
     const ext = extname(filePath);
-    res.writeHead(200, {
-      'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
-      'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+    // A ReadStream that fails to open (dist/client emptied by an in-place
+    // `vite build` between the stat and the open) emits 'error'; unhandled,
+    // that is another process exit. Headers are already out by then, so the
+    // only honest answer is to drop the connection.
+    const stream = createReadStream(filePath);
+    stream.on('open', () => {
+      res.writeHead(200, {
+        'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
+        'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+      });
     });
-    createReadStream(filePath).pipe(res);
+    stream.on('error', (err) => {
+      console.warn(`[Lobby] static read failed for ${filePath}: ${err.message}`);
+      this.replyBadRequest(res, 500);
+    });
+    stream.pipe(res);
+  }
+
+  /** existsSync is true for things statSync still refuses (ELOOP, EACCES). */
+  private isServableFile(filePath: string): boolean {
+    try {
+      return existsSync(filePath) && statSync(filePath).isFile();
+    } catch {
+      return false;
+    }
   }
 }
