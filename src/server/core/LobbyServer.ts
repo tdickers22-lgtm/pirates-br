@@ -1,4 +1,5 @@
-import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +38,9 @@ const EMPTY_MATCH_GC_MS = 60_000;
 const MAX_INBOUND_MESSAGE_BYTES = 64 * 1024;
 /** Belt on top of maxPayload: a frame that decodes but is absurd never reaches JSON.parse. */
 const MAX_DECODED_MESSAGE_BYTES = 32 * 1024;
+/** /bugsnap: how many snaps the disk keeps (oldest evicted) and the per-IP spacing. */
+const BUGSNAP_MAX_SNAPS = 50;
+const BUGSNAP_MIN_INTERVAL_MS = 10_000;
 /** App-level heartbeat: ping every HEARTBEAT_INTERVAL_MS, drop a socket that has
  *  not answered (pong / any message) within its silence budget. */
 const HEARTBEAT_INTERVAL_MS = 5_000;
@@ -142,6 +146,7 @@ export class LobbyServer {
   /** When each running match last had zero humans in it (zombie sweep). */
   private matchEmptySince: Map<string, number> = new Map();
   private clientToMatch: Map<string, string> = new Map(); // clientId → matchId
+  private bugsnapLastByIp: Map<string, number> = new Map();
   private stats: StatsStore;
 
   constructor() {
@@ -959,7 +964,26 @@ export class LobbyServer {
 
     if (rawPath === '/bugsnap' && req.method === 'POST') {
       // One-keypress bug reports (F8 in the client): { image: dataURL, meta }.
-      // Saved under data/bugsnaps/ for the next polish pass to read.
+      // Saved under data/bugsnaps/ for the next polish pass to read. A public
+      // host must not expose a 12 MB unauthenticated disk write: the endpoint
+      // exists only with PIRATES_BR_DEV=1 or a matching X-Bugsnap-Key, keeps
+      // BUGSNAP_MAX_SNAPS (oldest evicted) and takes one snap per IP per
+      // BUGSNAP_MIN_INTERVAL_MS. Without access it is indistinguishable from
+      // any other unknown path (404).
+      if (!this.bugsnapAllowed(req)) {
+        req.resume();
+        this.replyBadRequest(res, 404);
+        return;
+      }
+      const ip = req.socket.remoteAddress ?? '?';
+      const now = Date.now();
+      const last = this.bugsnapLastByIp.get(ip) ?? 0;
+      if (now - last < BUGSNAP_MIN_INTERVAL_MS) {
+        req.resume();
+        this.replyBadRequest(res, 429);
+        return;
+      }
+      this.bugsnapLastByIp.set(ip, now);
       const chunks: Buffer[] = [];
       let size = 0;
       req.on('data', (chunk: Buffer) => {
@@ -967,22 +991,23 @@ export class LobbyServer {
         if (size > 12 * 1024 * 1024) { req.destroy(); return; }
         chunks.push(chunk);
       });
+      req.on('error', () => {});
       req.on('end', () => {
         try {
           const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { image?: string; meta?: unknown };
           const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const dir = join(PROJECT_ROOT, 'data/bugsnaps');
+          const dir = process.env.BUGSNAP_DIR || join(PROJECT_ROOT, 'data/bugsnaps');
           mkdirSync(dir, { recursive: true });
           if (typeof body.image === 'string' && body.image.startsWith('data:image/png;base64,')) {
             writeFileSync(join(dir, `${stamp}.png`), Buffer.from(body.image.slice('data:image/png;base64,'.length), 'base64'));
           }
           writeFileSync(join(dir, `${stamp}.json`), JSON.stringify(body.meta ?? {}, null, 2));
+          this.pruneBugsnaps(dir);
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end('{"ok":true}');
           console.log(`[BugSnap] saved ${stamp}`);
         } catch {
-          res.writeHead(400);
-          res.end('{"ok":false}');
+          this.replyBadRequest(res);
         }
       });
       return;
@@ -1034,6 +1059,36 @@ export class LobbyServer {
       this.replyBadRequest(res, 500);
     });
     stream.pipe(res);
+  }
+
+  /** PIRATES_BR_DEV=1 opens /bugsnap outright (local play); otherwise only a
+   *  request whose X-Bugsnap-Key equals BUGSNAP_KEY gets in. No key configured
+   *  and no dev flag means the endpoint does not exist. Env is read per request
+   *  so a test can flip posture without restarting the server. */
+  private bugsnapAllowed(req: IncomingMessage): boolean {
+    if (process.env.PIRATES_BR_DEV === '1') return true;
+    const key = process.env.BUGSNAP_KEY;
+    if (!key) return false;
+    const given = req.headers['x-bugsnap-key'];
+    if (typeof given !== 'string') return false;
+    const a = Buffer.from(given);
+    const b = Buffer.from(key);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  /** Keep the newest BUGSNAP_MAX_SNAPS (stamps are ISO, so name order is time
+   *  order); each snap is a .json plus an optional .png sharing the stamp. */
+  private pruneBugsnaps(dir: string): void {
+    const stamps = readdirSync(dir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => f.slice(0, -'.json'.length))
+      .sort();
+    while (stamps.length > BUGSNAP_MAX_SNAPS) {
+      const oldest = stamps.shift()!;
+      for (const ext of ['.json', '.png']) {
+        try { rmSync(join(dir, `${oldest}${ext}`), { force: true }); } catch {}
+      }
+    }
   }
 
   /** existsSync is true for things statSync still refuses (ELOOP, EACCES). */
