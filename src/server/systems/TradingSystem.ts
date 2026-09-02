@@ -15,6 +15,8 @@ interface TradeEvent {
 }
 
 export class TradingSystem {
+  /** Match-seeded stream (RNG-01): trade coin-flips draw from it. Unseeded it is Math.random. */
+  constructor(private readonly rng: () => number = Math.random) {}
   update(dt: number, sessions: TradeSession[], ships: Ship[], players: Player[]): TradeEvent[] {
     const events: TradeEvent[] = [];
 
@@ -42,7 +44,7 @@ export class TradingSystem {
       if (session.betrayalWindow) {
         if (!session.botBetrayalChecked) {
           session.botBetrayalChecked = true;
-          if (targetPlayer.isBot && Math.random() < 0.2) {
+          if (targetPlayer.isBot && this.rng() < 0.2) {
             events.push({
               type: 'trade_betrayed',
               sessionId: session.id,
@@ -235,7 +237,7 @@ export class TradingSystem {
     if (session.timer > TRADE_TIMEOUT - 1.25) return;
     session.botDecisionMade = true;
 
-    if (Math.random() >= 0.3) {
+    if (this.rng() >= 0.3) {
       session.timer = 0.01;
       return;
     }
@@ -256,7 +258,7 @@ export class TradingSystem {
 
   private buildBotOffer(player: Player, ship: Ship): ItemStack[] {
     const offer: ItemStack[] = [];
-    if (player.gold >= 100 && Math.random() < 0.5) {
+    if (player.gold >= 100 && this.rng() < 0.5) {
       offer.push({ item: 'gold', qty: Math.min(150, player.gold) });
     }
 
