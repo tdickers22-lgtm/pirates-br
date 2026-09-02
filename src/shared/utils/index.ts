@@ -196,16 +196,18 @@ function normalize2D(v: Vec2): Vec2 {
   return { x: v.x / len, y: v.y / len };
 }
 
-export function randRange(lo: number, hi: number): number {
-  return lo + Math.random() * (hi - lo);
+/** Uniform in [lo, hi). `rng` defaults to Math.random; the server passes
+ *  match.rng (RNG-01) so a seeded match replays bit-identically. */
+export function randRange(lo: number, hi: number, rng: () => number = Math.random): number {
+  return lo + rng() * (hi - lo);
 }
 
-export function randInt(lo: number, hi: number): number {
-  return Math.floor(randRange(lo, hi + 1));
+export function randInt(lo: number, hi: number, rng: () => number = Math.random): number {
+  return Math.floor(randRange(lo, hi + 1, rng));
 }
 
-export function randAngle(): number {
-  return Math.random() * Math.PI * 2;
+export function randAngle(rng: () => number = Math.random): number {
+  return rng() * Math.PI * 2;
 }
 
 export function angleWrap(a: number): number {

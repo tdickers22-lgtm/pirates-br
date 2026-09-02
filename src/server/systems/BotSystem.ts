@@ -148,6 +148,10 @@ export class BotSystem {
    *  or shoot at. Bots still fight each other. Set by Match each tick. */
   private peaceShipIds: Set<string> = new Set();
   private peacePlayerIds: Set<string> = new Set();
+  /** Match-seeded stream (RNG-01): every bot coin-flip (timers, patrol
+   *  bearings, aim noise) goes through it so a seeded match replays
+   *  bit-identically. Unseeded it is Math.random (no behaviour change). */
+  constructor(private readonly rng: () => number = Math.random) {}
   /** Crews past the gold-bounty line — bot hunters prefer them (see setBountiedShips). */
   private bountiedShipIds: Set<string> = new Set();
   /** Navigation context for the current bot's steering (set per bot each tick). */
@@ -207,13 +211,13 @@ export class BotSystem {
       behavior: 'patrol',
       targetShipId: null,
       targetIslandId: null,
-      patrolAngle: randAngle(),
+      patrolAngle: randAngle(this.rng),
       aimYaw: 0,
       aimPitch: 0.1,
-      fireTimer: 1.5 + Math.random() * 1.5,
+      fireTimer: 1.5 + this.rng() * 1.5,
       difficulty,
-      stateTimer: 5 + Math.random() * 10,
-      firearmTimer: 0.3 + Math.random() * 0.6,
+      stateTimer: 5 + this.rng() * 10,
+      firearmTimer: 0.3 + this.rng() * 0.6,
       shoreTimer: 0,
       shoreLeg: null,
       plunderChestId: null,
@@ -474,7 +478,7 @@ export class BotSystem {
     }
 
     if (bot.stateTimer <= 0) {
-      bot.stateTimer = 6 + Math.random() * 8;
+      bot.stateTimer = 6 + this.rng() * 8;
 
       // Find best target: prefer ships with humans aboard.
       const humanShipIds = new Set<string>();
@@ -612,8 +616,8 @@ export class BotSystem {
         // still below engage and flee, so it never overrides a live fight.
         bot.behavior = 'patrol';
         bot.targetShipId = null;
-        bot.patrolAngle = this.lureBearing(ship)! + (Math.random() - 0.5) * 0.3;
-      } else if (nearIsland && nearIslandDist < 540 && Math.random() < 0.28) {
+        bot.patrolAngle = this.lureBearing(ship)! + (this.rng() - 0.5) * 0.3;
+      } else if (nearIsland && nearIslandDist < 540 && this.rng() < 0.28) {
         bot.behavior = 'loot';
         bot.targetIslandId = nearIsland.id;
       } else {
@@ -624,7 +628,7 @@ export class BotSystem {
           storm.centerX - ship.position.x,
           storm.centerZ - ship.position.z,
         );
-        bot.patrolAngle = towardCenter + (Math.random() - 0.5) * 1.2;
+        bot.patrolAngle = towardCenter + (this.rng() - 0.5) * 1.2;
       }
     }
   }
@@ -693,7 +697,7 @@ export class BotSystem {
 
         // ── Aim with proper ballistic + lead prediction ───────────
         // Gun crews sharpen as the ring closes: same difficulty, later weather.
-        const aim = computeCannonAim(ship, target, bot.difficulty,
+        const aim = computeCannonAim(this.rng, ship, target, bot.difficulty,
           botPhaseScale(BOT_CANNON_ACCURACY_BY_PHASE, storm.phase));
         bot.aimYaw = aim.yaw;
         bot.aimPitch = aim.pitch;
@@ -735,7 +739,7 @@ export class BotSystem {
           }
           // Full cadence after a shot; quick re-check while holding fire.
           if (fired) bot.lastFiredAt = t;
-          bot.fireTimer = fired ? minDelay + Math.random() * 0.6 : 0.35;
+          bot.fireTimer = fired ? minDelay + this.rng() * 0.6 : 0.35;
         }
         break;
       }
@@ -750,8 +754,8 @@ export class BotSystem {
         const distToCenter = dist2D(ship.position.x, ship.position.z, storm.centerX, storm.centerZ);
         if (distToCenter < storm.safeRadius * 0.48 && !storm.shrinking) {
           bot.behavior = 'patrol';
-          bot.patrolAngle = Math.random() * Math.PI * 2;
-          bot.stateTimer = 5 + Math.random() * 8;
+          bot.patrolAngle = this.rng() * Math.PI * 2;
+          bot.stateTimer = 5 + this.rng() * 8;
         }
         break;
       }
@@ -855,8 +859,8 @@ export class BotSystem {
         } else {
           bot.behavior = 'patrol';
           bot.targetIslandId = null;
-          bot.patrolAngle = awayAngle + (Math.random() - 0.5) * 0.8;
-          bot.stateTimer = 7 + Math.random() * 8;
+          bot.patrolAngle = awayAngle + (this.rng() - 0.5) * 0.8;
+          bot.stateTimer = 7 + this.rng() * 8;
         }
         break;
       }
@@ -922,9 +926,9 @@ export class BotSystem {
     // Apply difficulty-based aim noise — a few degrees of jitter.
     const noise = bot.difficulty === 'hard' ? 0.018 : bot.difficulty === 'medium' ? 0.06 : 0.11;
     const noisyAim: Vec3 = {
-      x: aimPoint.x + (Math.random() - 0.5) * noise * bestDist,
-      y: aimPoint.y + (Math.random() - 0.5) * noise * bestDist,
-      z: aimPoint.z + (Math.random() - 0.5) * noise * bestDist,
+      x: aimPoint.x + (this.rng() - 0.5) * noise * bestDist,
+      y: aimPoint.y + (this.rng() - 0.5) * noise * bestDist,
+      z: aimPoint.z + (this.rng() - 0.5) * noise * bestDist,
     };
 
     player.rotation.x = yaw;
@@ -1097,7 +1101,7 @@ export class BotSystem {
         this.resetShoreLeg(bot);
       }
       bot.behavior = 'return';
-      bot.stateTimer = 8 + Math.random() * 6;
+      bot.stateTimer = 8 + this.rng() * 6;
       ship.anchored = false;
       ship.anchorRaiseProgress = 0;
       return;
@@ -1296,6 +1300,7 @@ export class BotSystem {
  * easy/medium" felt random and bad).
  */
 function computeCannonAim(
+  rng: () => number,
   ship: Ship,
   target: Ship,
   difficulty: 'easy' | 'medium' | 'hard',
@@ -1333,8 +1338,8 @@ function computeCannonAim(
   const pitchJitter = (difficulty === 'hard' ? 0.004
     : difficulty === 'medium' ? 0.018
     : 0.04) * scale;
-  yaw += (Math.random() - 0.5) * yawJitter * 2;
-  pitch += (Math.random() - 0.5) * pitchJitter * 2;
+  yaw += (rng() - 0.5) * yawJitter * 2;
+  pitch += (rng() - 0.5) * pitchJitter * 2;
 
   return { yaw, pitch: Math.max(0.02, Math.min(0.6, pitch)) };
 }

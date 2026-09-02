@@ -33,6 +33,9 @@ const RING_LAND_CHECK_RADIUS = 200;
 const RING_CENTER_TRIES = 12;
 
 export class StormSystem {
+  /** Match-seeded stream (RNG-01): ring centres draw from it, so a seeded
+   *  match replays. Unseeded it is Math.random (no behaviour change). */
+  constructor(private readonly rng: () => number = Math.random) {}
   /** Per-ship storm-damage accumulation toward the next punched hole. */
   private shipStormAccum = new Map<string, number>();
   /** Deterministic LCG for where along the seaward face a sea breaks through. */
@@ -254,8 +257,8 @@ export class StormSystem {
     const allowedDrift = Math.max(0, currentRadius - nextRadius - 8);
     const worldBound = Math.max(0, WORLD.HALF - nextRadius - 36);
     const roll = () => {
-      const drift = allowedDrift * (0.22 + Math.random() * 0.68);
-      const angle = Math.random() * Math.PI * 2;
+      const drift = allowedDrift * (0.22 + this.rng() * 0.68);
+      const angle = this.rng() * Math.PI * 2;
       return {
         x: Math.max(-worldBound, Math.min(worldBound, centerX + Math.cos(angle) * drift)),
         z: Math.max(-worldBound, Math.min(worldBound, centerZ + Math.sin(angle) * drift)),
@@ -263,7 +266,7 @@ export class StormSystem {
     };
     // Small end circles must be sailable water, not a volcano. Re-roll (bounded)
     // and keep the driest candidate; every draw comes from the storm's own
-    // Math.random stream, so island generation (its own seeded rng) is untouched.
+    // match rng stream (RNG-01), so island generation (its own seeded rng) is untouched.
     if (nextRadius > RING_LAND_CHECK_RADIUS || this.islands.length === 0) return roll();
     let best: { x: number; z: number; land: number } | null = null;
     for (let i = 0; i < RING_CENTER_TRIES; i++) {

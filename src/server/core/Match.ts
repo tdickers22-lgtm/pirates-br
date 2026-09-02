@@ -201,6 +201,9 @@ export interface MatchEndResult {
   board: MatchBoardRow[];
   /** How many crews the match was played with — the "of 10" in "Place: #6 of 10". */
   crewCount: number;
+  /** True when a dev hook (dev_grant_gold / dev_bot_peace) was honoured —
+   *  lifetime stats skip such matches (DEV-01). */
+  devAssisted: boolean;
 }
 
 interface MatchOptions {
@@ -208,6 +211,9 @@ interface MatchOptions {
   botCount: number;
   /** Names of human players who will join — used so bots get distinct identities. */
   reservedHumanNames?: string[];
+  /** Honour dev_grant_gold / dev_bot_peace (DEV-01). Defaults to
+   *  PIRATES_BR_DEV_HOOKS=1: the test runner sets it, production never does. */
+  devHooks?: boolean;
 }
 
 const SKELETON_WAVE_INITIAL_DELAY_MIN = 35;
@@ -246,6 +252,29 @@ function makeJoinRng(): () => number {
   const seed = matchSeedFromEnv();
   if (seed === undefined) return Math.random;
   let s = (seed ^ 0x5f356495) >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** The match's gameplay RNG (RNG-01): storm centres, bot timers/aim noise,
+ *  skeleton waves, sink knockback, shark spawns, harvest rolls, cannon spread
+ *  and trade coin-flips all draw from it. Unseeded it IS Math.random (no
+ *  behaviour change, no draw-order change). Under PIRATES_BR_MAP_SEED it is a
+ *  private mulberry32 stream salted by matchId, so the same matchId replays
+ *  bit-identically while two matches on one seeded server are not clones. It
+ *  never feeds MapGenerator or the join stream, so island/berth determinism
+ *  is exactly what it was. */
+export function makeMatchRng(matchId: string): () => number {
+  const seed = matchSeedFromEnv();
+  if (seed === undefined) return Math.random;
+  let salt = 0x811c9dc5;
+  for (let i = 0; i < matchId.length; i++) salt = Math.imul(salt ^ matchId.charCodeAt(i), 0x01000193);
+  let s = (seed ^ salt ^ 0x9e3779b9) >>> 0;
   return () => {
     s = (s + 0x6d2b79f5) >>> 0;
     let t = s;
@@ -440,13 +469,19 @@ export class Match {
 
   // Systems
   private physics = new PhysicsSystem();
-  private weapons = new WeaponSystem();
-  private storm = new StormSystem();
+  /** RNG-01: the match's seeded gameplay stream (see makeMatchRng). */
+  private readonly rng: () => number;
+  private weapons: WeaponSystem;
+  private storm: StormSystem;
   private islands = new IslandSystem();
-  private trading = new TradingSystem();
-  private bots = new BotSystem();
+  private trading: TradingSystem;
+  private bots: BotSystem;
   /** Dev-only (solo): when true, bots ignore human players + their ships. */
   private botPeace = false;
+  /** DEV-01: dev hooks are honoured only when opted in (env or MatchOptions). */
+  private readonly devHooks: boolean;
+  /** Set the first time a dev hook is honoured; rides MatchEndResult so stats skip the match. */
+  private devAssisted = false;
   /** PIRATES_BR_MAP_SEED pins the match RNG (ship spawns, sea rocks, loot rolls).
    *  The islands themselves are already fixed per-entry seeds; this exists so a
    *  perf A/B can measure two builds against a bit-identical match. */
@@ -505,6 +540,12 @@ export class Match {
   constructor(opts: MatchOptions) {
     this.id = opts.matchId;
     this.configuredBotCount = opts.botCount;
+    this.devHooks = opts.devHooks ?? process.env.PIRATES_BR_DEV_HOOKS === '1';
+    this.rng = makeMatchRng(opts.matchId);
+    this.weapons = new WeaponSystem(this.rng);
+    this.storm = new StormSystem(this.rng);
+    this.trading = new TradingSystem(this.rng);
+    this.bots = new BotSystem(this.rng);
     this.setupWorld(opts.botCount);
   }
 
@@ -933,8 +974,8 @@ export class Match {
 
     const spawns = this.mapGen.generateShipSpawns(this.state.islands);
     const berth = this.pickHumanSpawn(spawns) ?? {
-      position: { x: randRange(-600, 600), y: 0, z: randRange(-600, 600) },
-      rotation: randAngle(),
+      position: { x: randRange(-600, 600, this.rng), y: 0, z: randRange(-600, 600, this.rng) },
+      rotation: randAngle(this.rng),
       type: 'sloop' as const,
     };
     // HULLS ARE CREW-SCALED. The spawn table rolls sloop/brigantine/galleon for
@@ -1187,6 +1228,7 @@ export class Match {
       humans: placements,
       board,
       crewCount: board.length,
+      devAssisted: this.devAssisted,
     };
     this.broadcast({ type: 'match_ended', ts: Date.now(), payload: result });
     this.onMatchEnd?.(result);
@@ -1289,12 +1331,14 @@ export class Match {
         // to hand yourself the 9000g win in a real lobby. It exists because the
         // hold-cargo loop (ballast, bounty, spill) is otherwise only reachable
         // after an hour of chest runs, which no live probe can afford.
+        if (!this.devHooks) { console.log(`[Match ${this.id}] ${msg.type} refused: PIRATES_BR_DEV_HOOKS unset`); break; }
         if (this.clients.size <= 1) {
           const requested = Number((msg.payload as { gold?: number } | null)?.gold);
           if (Number.isFinite(requested)) {
             const player = this.getPlayer(client.playerId);
             if (player) {
               player.gold = Math.max(0, Math.min(ECONOMY.GOLD_WIN_TARGET * 2, Math.floor(requested)));
+              this.devAssisted = true;
               this.updateCargoAndBounty();
             }
           }
@@ -1305,8 +1349,10 @@ export class Match {
         // Dev/testing convenience — only honoured when a single human is in the
         // match (solo), so it can't be abused to disable bot aggression in a real
         // multiplayer game.
+        if (!this.devHooks) { console.log(`[Match ${this.id}] ${msg.type} refused: PIRATES_BR_DEV_HOOKS unset`); break; }
         if (this.clients.size <= 1) {
           this.botPeace = !!(msg.payload as { enabled?: boolean } | null)?.enabled;
+          this.devAssisted = true;
           console.log(`[Match ${this.id}] dev bot-peace ${this.botPeace ? 'ON' : 'OFF'}`);
         }
         break;
@@ -2738,11 +2784,11 @@ export class Match {
     let wood: number | undefined;
     let ore: number | undefined;
     if (isPalm) {
-      wood = randInt(HARVEST.WOOD_PER_TREE_MIN, HARVEST.WOOD_PER_TREE_MAX);
+      wood = randInt(HARVEST.WOOD_PER_TREE_MIN, HARVEST.WOOD_PER_TREE_MAX, this.rng);
       player.pocketWood += wood;
       this.statsDelta(player.id).woodChopped += wood;
     } else {
-      ore = randInt(HARVEST.ORE_PER_BOULDER_MIN, HARVEST.ORE_PER_BOULDER_MAX);
+      ore = randInt(HARVEST.ORE_PER_BOULDER_MIN, HARVEST.ORE_PER_BOULDER_MAX, this.rng);
       player.pocketOre += ore;
       this.statsDelta(player.id).oreMined += ore;
     }
@@ -4634,12 +4680,12 @@ export class Match {
     const { sharks, players, islands } = this.state;
     this.sharkSpawnCooldown = Math.max(0, this.sharkSpawnCooldown - dt);
 
-    if (sharks.length < SHARK.MAX_WORLD && this.sharkSpawnCooldown <= 0 && Math.random() < SHARK.SPAWN_CHANCE_PER_TICK) {
+    if (sharks.length < SHARK.MAX_WORLD && this.sharkSpawnCooldown <= 0 && this.rng() < SHARK.SPAWN_CHANCE_PER_TICK) {
       const swimmers = players.filter(p => p.state === 'swimming' && p.swimTimer >= SHARK.SPAWN_SWIM_GRACE);
       if (swimmers.length) {
-        const p = swimmers[Math.floor(Math.random() * swimmers.length)];
-        const ang = Math.random() * Math.PI * 2;
-        const dist = randRange(SHARK.SPAWN_MIN_DIST, SHARK.SPAWN_MAX_DIST);
+        const p = swimmers[Math.floor(this.rng() * swimmers.length)];
+        const ang = this.rng() * Math.PI * 2;
+        const dist = randRange(SHARK.SPAWN_MIN_DIST, SHARK.SPAWN_MAX_DIST, this.rng);
         const x = p.position.x + Math.sin(ang) * dist;
         const z = p.position.z + Math.cos(ang) * dist;
         if (Math.abs(x) < WORLD.HALF - 24 && Math.abs(z) < WORLD.HALF - 24) {
@@ -4670,7 +4716,7 @@ export class Match {
               lungeDirZ: 0,
               targetId: p.id,
             });
-            this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX);
+            this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX, this.rng);
           }
         }
       }
@@ -4829,9 +4875,9 @@ export class Match {
         const homeAngle = Math.atan2(animal.spawnPosition.z - animal.position.z, animal.spawnPosition.x - animal.position.x);
         const farFromHome = dist2D(animal.position.x, animal.position.z, animal.spawnPosition.x, animal.spawnPosition.z) > island.radius * 0.32;
         animal.wanderAngle = farFromHome
-          ? homeAngle + randRange(-0.55, 0.55)
-          : animal.wanderAngle + randRange(-1.35, 1.35);
-        animal.wanderTimer = randRange(0.7, animal.type === 'gull' ? 2.0 : 3.0);
+          ? homeAngle + randRange(-0.55, 0.55, this.rng)
+          : animal.wanderAngle + randRange(-1.35, 1.35, this.rng);
+        animal.wanderTimer = randRange(0.7, animal.type === 'gull' ? 2.0 : 3.0, this.rng);
       }
 
       const speed = WILDLIFE.SPEED[animal.type];
@@ -4848,7 +4894,7 @@ export class Match {
         animal.velocity.x = vx;
         animal.velocity.z = vz;
       } else {
-        animal.wanderAngle += Math.PI + randRange(-0.45, 0.45);
+        animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
         animal.velocity.x = 0;
         animal.velocity.z = 0;
       }
@@ -4918,9 +4964,9 @@ export class Match {
       player.cannonBallistic = false;
       player.velocity.y = Math.max(player.velocity.y, rapid ? 4 : 3);
       player.knockbackVelocity = {
-        x: (Math.random() - 0.5) * (rapid ? 7 : 5),
+        x: (this.rng() - 0.5) * (rapid ? 7 : 5),
         y: rapid ? 5.5 : 4.2,
-        z: (Math.random() - 0.5) * (rapid ? 7 : 5),
+        z: (this.rng() - 0.5) * (rapid ? 7 : 5),
       };
     }
 
@@ -6406,7 +6452,7 @@ export class Match {
       if (this.getSkeletonWaveSize(island) <= 0) continue;
       this.skeletonWaveTimers.set(
         island.id,
-        randRange(SKELETON_WAVE_INITIAL_DELAY_MIN, SKELETON_WAVE_INITIAL_DELAY_MAX),
+        randRange(SKELETON_WAVE_INITIAL_DELAY_MIN, SKELETON_WAVE_INITIAL_DELAY_MAX, this.rng),
       );
     }
   }
@@ -6464,13 +6510,13 @@ export class Match {
 
       let timer = this.skeletonWaveTimers.get(island.id);
       if (timer == null) {
-        timer = randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX);
+        timer = randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX, this.rng);
       }
 
       timer -= dt;
       if (timer <= 0) {
         this.spawnSkeletonWave(island, waveSize);
-        timer = randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX);
+        timer = randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX, this.rng);
         playersChanged = true;
       }
       this.skeletonWaveTimers.set(island.id, timer);
@@ -6509,7 +6555,7 @@ export class Match {
   }
 
   private spawnSkeletonWave(island: Island, count: number) {
-    const baseAngle = randAngle();
+    const baseAngle = randAngle(this.rng);
     for (let i = 0; i < count; i++) {
       const skeletonId = uuid();
       const skeleton = this.createPlayer(skeletonId, `Skeleton_${this.skeletonNameIndex++}`, null, true);
@@ -6521,9 +6567,9 @@ export class Match {
         null,
       ];
       skeleton.activeSlot = 0;
-      const offset = (i - (count - 1) * 0.5) * 0.42 + randRange(-0.18, 0.18);
+      const offset = (i - (count - 1) * 0.5) * 0.42 + randRange(-0.18, 0.18, this.rng);
       const angle = baseAngle + offset;
-      const spawnPoint = getIslandSurfacePoint(island, randRange(0.2, 0.5), angle, 0.06);
+      const spawnPoint = getIslandSurfacePoint(island, randRange(0.2, 0.5, this.rng), angle, 0.06);
       skeleton.position = spawnPoint;
       skeleton.rotation.x = angle + Math.PI;
       skeleton.rotation.y = 0;
