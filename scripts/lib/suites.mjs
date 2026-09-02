@@ -81,8 +81,6 @@ export const LOGIC = [
   tsx('test-interaction-arbiter.mjs'),
   tsx('test-block-hold.mjs'),
   tsx('test-grounding-cap.mjs'),
-  tsx('test-net-resilience.mjs'),
-  tsx('test-http-hardening.mjs'),
   tsx('test-material-floor.mjs'),
   tsx('test-sea-voids.mjs'),
   tsx('test-bot-peace-window.mjs'),
@@ -106,6 +104,24 @@ export const LOGIC = [
   tsx('test-remote-interpolation.mjs'),
   tsx('audit-floating-props.mjs'),
 ];
+
+/**
+ * SERVER SUITES. No browser, but a real LobbyServer on a real socket. They sat
+ * in LOGIC ("no ports") while binding fixed ports: test-net-resilience on 8791
+ * hung behind a stale listener until the 900 s kill, and a two-minute logic run
+ * took seventeen with nothing recording why. The runner hands them
+ * PIRATES_BR_TEST_PORT=0 (kernel-picked port) and each carries a timeout sized
+ * off a real run: net-resilience needs 47 s of heartbeat windows.
+ */
+export const SERVER = [
+  { ...tsx('test-net-resilience.mjs'), timeoutMs: 120_000 },
+  { ...tsx('test-http-hardening.mjs'), timeoutMs: 60_000 },
+];
+
+/** Watchdog per tier (ms); an entry's `timeoutMs` overrides it. A suite silent
+ *  past this is hung, not slow. Logic suites finish in 1-18 s on this Air, so
+ *  120 s reports a hang in two minutes rather than fifteen. */
+export const TIER_TIMEOUT_MS = { logic: 120_000, server: 120_000, browser: 900_000 };
 
 /**
  * BROWSER SUITES. Every one wants a page: `PIRATES_BR_URL` for the client and,
@@ -180,5 +196,6 @@ export const EXCLUDED = {
 
 export const ALL = [
   ...LOGIC.map((s) => ({ ...s, kind: 'logic' })),
+  ...SERVER.map((s) => ({ ...s, kind: 'server' })),
   ...BROWSER.map((s) => ({ ...s, kind: 'browser' })),
 ];

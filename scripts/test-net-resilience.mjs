@@ -33,13 +33,19 @@ function expect(label, condition, detail = '') {
   }
 }
 
-const PORT = 8791;
-const URL = `ws://127.0.0.1:${PORT}/ws`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// NEVER A FIXED PORT. This suite sat in the "no ports" LOGIC tier while binding
+// 8791; a stale listener there held it until the runner's 900 s kill and the
+// two-minute logic run took seventeen. init(0) asks the kernel for a free port
+// and the suite reads back what it got. PIRATES_BR_TEST_PORT pins one when a
+// human wants to watch it.
 const server = new LobbyServer();
-server.init(PORT);
-await sleep(400);
+server.init(Number(process.env.PIRATES_BR_TEST_PORT ?? 0));
+for (let i = 0; i < 50 && server.boundPort == null; i += 1) await sleep(100);
+if (server.boundPort == null) throw new Error('LobbyServer never reported a bound port');
+const PORT = server.boundPort;
+const URL = `ws://127.0.0.1:${PORT}/ws`;
 
 /** Open a socket and collect every message type it is sent. */
 function open() {

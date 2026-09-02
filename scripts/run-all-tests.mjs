@@ -32,7 +32,8 @@
 // and every child is niced.
 //
 //   npm test                      # everything: logic, then browser
-//   npm run test:logic            # logic only — needs no stack
+//   npm run test:logic            # logic + server suites — needs no stack
+//   npm run test:server           # the two LobbyServer suites only (kernel-picked ports)
 //   npm run test:browser          # browser only
 //   npm run test:audit            # is every suite on disk accounted for?
 //   node scripts/run-all-tests.mjs --only hud,minimap
@@ -41,7 +42,7 @@ import { spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ALL, BROWSER, EVIDENCE, EXCLUDED, LOGIC } from './lib/suites.mjs';
+import { ALL, EVIDENCE, EXCLUDED, TIER_TIMEOUT_MS } from './lib/suites.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LOG_DIR = path.join(ROOT, 'test-results');
@@ -72,8 +73,11 @@ const MAP_SEED = process.env.PIRATES_BR_MAP_SEED ?? '20260801';
 const GL = process.env.PIRATES_GL ?? 'swiftshader';
 
 /** A suite that has not spoken in this long is hung, not slow. Killed and
- *  reported as TIMEOUT — never silently waited on. */
-const SUITE_TIMEOUT_MS = Number(process.env.PIRATES_SUITE_TIMEOUT_MS ?? 900_000);
+ *  reported as TIMEOUT — never silently waited on. Sized per tier
+ *  (lib/suites.mjs TIER_TIMEOUT_MS) or per suite (`timeoutMs`);
+ *  PIRATES_SUITE_TIMEOUT_MS overrides both. */
+const TIMEOUT_OVERRIDE_MS = process.env.PIRATES_SUITE_TIMEOUT_MS ? Number(process.env.PIRATES_SUITE_TIMEOUT_MS) : null;
+const timeoutFor = (suite) => TIMEOUT_OVERRIDE_MS ?? suite.timeoutMs ?? TIER_TIMEOUT_MS[suite.kind] ?? 900_000;
 
 const started = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -162,9 +166,10 @@ function runSuite(suite, env) {
     child.stdout.pipe(logFile);
     child.stderr.pipe(logFile);
 
+    const limit = timeoutFor(suite);
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* gone */ }
-    }, SUITE_TIMEOUT_MS);
+    }, limit);
 
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -174,7 +179,7 @@ function runSuite(suite, env) {
       clearTimeout(timer);
       const ms = Date.now() - t0;
       let verdict;
-      if (signal === 'SIGKILL' && ms >= SUITE_TIMEOUT_MS - 2000) verdict = 'TIMEOUT';
+      if (signal === 'SIGKILL' && ms >= limit - 2000) verdict = 'TIMEOUT';
       else if (code !== 0) verdict = 'FAIL';
       // Exit 0 having said nothing gradeable is not a pass. It is the single
       // most expensive failure mode in this repo's history.
@@ -216,17 +221,22 @@ const pick = (list) => (onlyFilter
   ? list.filter((s) => onlyFilter.split(',').some((f) => s.file.includes(f.trim())))
   : list);
 
-const wantLogic = !has('browser');
-const wantBrowser = !has('logic');
-const logic = wantLogic ? pick(LOGIC) : [];
+const tier = (kind) => ALL.filter((s) => s.kind === kind);
+// --logic runs everything that needs no stack (logic + server); --server just
+// the LobbyServer suites; --browser just the page suites.
+const wantLogic = !has('browser') && !has('server');
+const wantServer = !has('browser');
+const wantBrowser = !has('logic') && !has('server');
+const logic = wantLogic ? pick(tier('logic')) : [];
+const server = wantServer ? pick(tier('server')) : [];
 // Cheap first, machine-owning last: a broken build should be reported in the
 // first minute rather than the twentieth.
 const browser = wantBrowser
-  ? pick(BROWSER).slice().sort((a, b) => Number(!!a.slow) - Number(!!b.slow))
+  ? pick(tier('browser')).sort((a, b) => Number(!!a.slow) - Number(!!b.slow))
   : [];
 
 if (has('list')) {
-  for (const s of [...logic, ...browser]) console.log(s.file);
+  for (const s of [...logic, ...server, ...browser]) console.log(s.file);
   process.exit(0);
 }
 if (has('audit')) process.exit(audit() === 0 ? 0 : 1);
@@ -240,6 +250,17 @@ try {
       const r = await runSuite(s, {});
       results.push(r);
       console.log(`  ${String(i + 1).padStart(2)}/${logic.length}  ${r.verdict.padEnd(7)} ${(r.ms / 1000).toFixed(1)}s  ${s.file}`);
+    }
+  }
+
+  if (server.length) {
+    // Each boots its own LobbyServer on a kernel-picked port: nothing to stand
+    // up here, and nothing on disk or in another agent's shell can collide.
+    console.log(`\n[test] ── ${server.length} server suites (own LobbyServer, port 0) ──────`);
+    for (const [i, s] of server.entries()) {
+      const r = await runSuite(s, { PIRATES_BR_TEST_PORT: '0' });
+      results.push(r);
+      console.log(`  ${String(i + 1).padStart(2)}/${server.length}  ${r.verdict.padEnd(7)} ${(r.ms / 1000).toFixed(1)}s  ${s.file}`);
     }
   }
 
