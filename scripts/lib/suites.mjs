@@ -181,23 +181,20 @@ export const BROWSER = [
 ];
 
 /**
- * ON DISK, DELIBERATELY NOT IN THE RUN — with the reason, so the audit below
- * can tell "considered and excluded" from "forgotten". Anything else matching
- * `scripts/test-*.mjs` fails `npm run test:audit`.
+ * AT THE TOP LEVEL OF scripts/, DELIBERATELY NOT A GATE — with its role, so the
+ * audit can tell "known" from "forgotten". Everything else on that level must be
+ * wired above. Instruments live in scripts/probes/ (read, never graded),
+ * doc-cited tooling in scripts/tools/, shared code in scripts/lib/; `npm run
+ * test:audit` fails on any other top-level .mjs. The six wave-scoped smokes
+ * that used to sit here were deleted with the 2026-09-02 sweep (72 orphans).
  */
 export const EXCLUDED = {
-  'audit-tour.mjs':
-    'a screenshot tour with no assertions and no exit code — a probe, not a gate',
-  'endgame-live-smoke.mjs':
-    'superseded by test-endmatch-board (logic) + fixwave4-smoke; hard-codes :3000 and ignores PIRATES_BR_URL',
-  'finalwave-island-smoke.mjs':
-    'wave-scoped screenshot smoke; hard-codes :3000, no PIRATES_BR_URL support',
-  'finalwave-skysea-smoke.mjs':
-    'wave-scoped screenshot smoke; hard-codes :3000, no PIRATES_BR_URL support',
-  'finalwave-voyage-smoke.mjs':
-    'wave-scoped screenshot smoke; hard-codes :3000, no PIRATES_BR_URL support',
-  'killwave-integration-smoke.mjs':
-    'wave-scoped; its contract is covered by test-kill-streak-powers and test-death-causes',
+  'perf-probe.mjs':
+    'shared instrument library (planScenes, measureScene, sessionQuery) imported by twelve browser suites — a module, not a gate',
+  'pacing-sim.mjs':
+    'the pacing instrument (lane 0.3 owns it); its gate is test-pacing-curve, opt-in under PACING=1',
+  'storm-wall-probe.mjs':
+    'storm-wall fill probe; lane 0.4 turns it into a gate this wave — an instrument until then',
 };
 
 export const ALL = [

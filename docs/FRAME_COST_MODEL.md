@@ -39,10 +39,10 @@ Two things about the working tree these numbers describe:
   sky-occlusion probe, frame-counted timer, frustum-entity counter.
 - `scripts/lib/cost-model-prelude.mjs` — packs them into one installable source string.
 - `scripts/lib/dev-client.mjs` — a Vite that lives exactly as long as the run.
-- `scripts/perf-cost-model.mjs` — per-scene, per-tier battery (counts + passes +
+- `scripts/tools/perf-cost-model.mjs` — per-scene, per-tier battery (counts + passes +
   bytes + overdraw + attribution). `--only-sky` runs the sky reading alone.
-- `scripts/perf-frame-profile.mjs` — CDP CPU profile, allocation rate, GC, hitch census.
-- `scripts/perf-scaling.mjs` — pixel-ratio sweep and the yaw-sweep regressions.
+- `scripts/tools/perf-frame-profile.mjs` — CDP CPU profile, allocation rate, GC, hitch census.
+- `scripts/tools/perf-scaling.mjs` — pixel-ratio sweep and the yaw-sweep regressions.
 
 ---
 
@@ -461,7 +461,7 @@ lands inside every window. That is why B1 and B2 disagree 9× per frame, why the
 per-second column looked stable (it was averaging over the same collections
 either way), and why every figure above is far too small.
 
-Two changes fix it, both in `scripts/perf-alloc-census.mjs`:
+Two changes fix it, both in `scripts/tools/perf-alloc-census.mjs`:
 
 1. **Read the heap either side of ONE frame at a time.** A collection becomes a
    single negative sample instead of a silent refund; the median of the positive
@@ -710,7 +710,7 @@ a handful of fixed full-screen shells, not a crowd of small things.
 > (`fd35000`) is what took it. Measured on the pinned map at `low`, free-cam
 > turned away from the archipelago with the reveal settled: **44 draw calls,
 > 30k triangles, 13 of 14 island groups culled**
-> (`scripts/approach-shots.mjs`, `vista-away`). The 286–542 intercept was fitted
+> (`scripts/tools/approach-shots.mjs`, `vista-away`). The 286–542 intercept was fitted
 > over yaw sweeps taken *before* that lever landed, when three walked into every
 > island root whether or not its bounding sphere was in the cone. Nothing else in
 > §8.3 moves — the per-island and per-ship slopes are about what entering the
@@ -861,7 +861,7 @@ thousands of frames of play rather than a few hundred.
 
 ### 11.1 The instrument that made it specific
 
-`scripts/perf-program-census.mjs` + `scripts/lib/program-census.mjs`. A CPU
+`scripts/tools/perf-program-census.mjs` + `scripts/lib/program-census.mjs`. A CPU
 profile can say `getProgramParameter | getUniforms | replaceLightNums`; it cannot
 say *which* program or what put it on screen. The census patches
 `getProgramParameter` on both context prototypes at document start — the first
@@ -931,7 +931,7 @@ Lever 2 was written off `island-decor` being "the #1 or #2 draw source in every 
 of the nine scenes, 247–668 calls, already instanced — so many `InstancedMesh`
 objects, one per prop type per island". **That sentence is wrong in its second
 half.** `perf-attribution` stops one level under the island detail root and the
-answer is four levels down; `scripts/perf-decor-census.mjs` (new) walks each placed
+answer is four levels down; `scripts/tools/perf-decor-census.mjs` (new) walks each placed
 piece and reports, per mesh, the FIRST rule in `StaticBatcher.isMergeable` that
 refuses it. At `low`, pinned seed, fourteen islands:
 
@@ -1020,7 +1020,7 @@ the previous pass never died.
 
 ### 13.1 The reading
 
-`scripts/perf-program-census.mjs --quality high --seconds 90`, pinned map 20260801,
+`scripts/tools/perf-program-census.mjs --quality high --seconds 90`, pinned map 20260801,
 software ANGLE, framebuffer collapsed to ratio 0.1.
 
 | | before | after |
@@ -1244,7 +1244,7 @@ more. §10.4 named it, the fill pass got it as far as the word **`ship`** — 1.
 layers over 46% of the frame — and there it stopped, one level above anything
 anyone could act on.
 
-`scripts/perf-deck-overdraw.mjs` is the level below. It keys a **part** off the
+`scripts/tools/perf-deck-overdraw.mjs` is the level below. It keys a **part** off the
 material rather than the node name, because a hull is hundreds of unnamed meshes
 under one named group and `mergeStaticMeshes` then collapses them to one draw per
 material: on a ship the material IS the surface, and it is also the thing a fix

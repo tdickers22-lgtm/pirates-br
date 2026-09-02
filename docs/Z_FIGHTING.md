@@ -104,7 +104,7 @@ depth rejection everywhere — the opposite of what the fill pass just bought.
 
 ## Naming the two surfaces in a fight
 
-`scripts/zfight-blame.mjs`. The census says how many pixels stand on a tie; it
+`scripts/tools/zfight-blame.mjs`. The census says how many pixels stand on a tie; it
 never said whose, and the two obvious ways of asking both lie here:
 
 * three's raycaster **does not test `visible`**, so a pierce at `deck-aft`

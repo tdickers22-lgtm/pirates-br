@@ -196,23 +196,28 @@ function runSuite(suite, env) {
 
 function audit() {
   const known = new Set(ALL.map((s) => s.file));
+  // EVERY top-level scripts/*.mjs, not just test-shaped names. The old filter
+  // (/^(test-|audit-)/ or *smoke.mjs) could not see a file called x-probe.mjs or
+  // x-tour.mjs, and 75 of them piled up unseen. The layout now says what a file
+  // is: scripts/lib/ shared code, scripts/tools/ doc-cited tooling,
+  // scripts/probes/ instruments (read, not graded). A file at the top level is
+  // a wired gate, or it is in EXCLUDED with its role, or this fails.
   const onDisk = readdirSync(path.join(ROOT, 'scripts'))
-    .filter((f) => /^(test-|audit-)/.test(f) || /smoke\.mjs$/.test(f))
-    .filter((f) => f.endsWith('.mjs'));
+    .filter((f) => f.endsWith('.mjs') && !f.startsWith('.') && f !== 'run-all-tests.mjs');
   const orphans = onDisk.filter((f) => !known.has(f) && !(f in EXCLUDED));
-  const ghosts = [...known].filter((f) => !onDisk.includes(f));
-  console.log(`[audit] ${known.size} suites wired, ${Object.keys(EXCLUDED).length} excluded on purpose, ${onDisk.length} test-shaped files on disk`);
-  for (const [f, why] of Object.entries(EXCLUDED)) console.log(`  – excluded ${f}: ${why}`);
+  const ghosts = [...known, ...Object.keys(EXCLUDED)].filter((f) => !onDisk.includes(f));
+  console.log(`[audit] ${known.size} suites wired, ${Object.keys(EXCLUDED).length} top-level non-gates declared, ${onDisk.length} top-level .mjs files on disk`);
+  for (const [f, why] of Object.entries(EXCLUDED)) console.log(`  – not a gate ${f}: ${why}`);
   let bad = 0;
   for (const f of orphans) {
-    console.error(`  ✗ FAIL: scripts/${f} is a test that no npm script runs — wire it in scripts/lib/suites.mjs or list it in EXCLUDED with a reason`);
+    console.error(`  ✗ FAIL: scripts/${f} is neither a wired suite nor a declared non-gate — wire it in scripts/lib/suites.mjs, list it in EXCLUDED with its role, or move it to scripts/probes/ (instrument) or scripts/tools/ (doc-cited tooling)`);
     bad += 1;
   }
   for (const f of ghosts) {
-    console.error(`  ✗ FAIL: the manifest lists scripts/${f}, which does not exist`);
+    console.error(`  ✗ FAIL: the manifest names scripts/${f}, which does not exist`);
     bad += 1;
   }
-  if (bad === 0) console.log('  ✓ every test-shaped file on disk is either wired or excluded with a reason');
+  if (bad === 0) console.log('  ✓ every top-level scripts/*.mjs is a wired suite or a declared non-gate');
   return bad;
 }
 
