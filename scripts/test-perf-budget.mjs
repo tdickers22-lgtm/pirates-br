@@ -239,6 +239,10 @@ const WRECK_WAIT_MS = 90_000;
 const LOW_TIER_MAX_RATIO = { draws: 0.50, tris: 0.45 };
 
 let failures = 0;
+/** MUTATION KNOB for this gate's own proof. PIRATES_BR_MUTATE_DROP_SCENE=dock-vista
+ *  deletes that placement after planScenes, and the row-count assertion below
+ *  must then FAIL. A gate that cannot fail is a bug; this shows it can. */
+const MUTATE_DROP_SCENE = process.env.PIRATES_BR_MUTATE_DROP_SCENE ?? '';
 function expect(label, condition, detail = '') {
   if (condition) {
     console.log(`  ✓ ${label}`);
@@ -346,10 +350,17 @@ async function measureTier(browser, quality, { wantWreck }) {
     const plan = planScenes(await readWorld(page));
     const waterfall = await page.evaluate(FIND_WATERFALL_ISLAND);
     if (waterfall) plan['waterfall-deck'] = planWaterfallDeck(waterfall);
+    if (MUTATE_DROP_SCENE && plan[MUTATE_DROP_SCENE]) {
+      delete plan[MUTATE_DROP_SCENE];
+      console.log(`  ! mutation: dropped the ${MUTATE_DROP_SCENE} placement (PIRATES_BR_MUTATE_DROP_SCENE)`);
+    }
 
+    let graded = 0;
+    const skipped = [];
     for (const budget of BUDGETS[quality]) {
       if (!plan[budget.scene]) {
         console.log(`  – ${budget.scene}: no placement in this world, skipped`);
+        skipped.push(budget.scene);
         continue;
       }
       // Resolution is pinned so the budget measures geometry, not screen area.
@@ -359,7 +370,18 @@ async function measureTier(browser, quality, { wantWreck }) {
       const sources = await page.evaluate(TALLY_DRAW_SOURCES).catch(() => []);
       results[budget.scene] = { draws: Math.round(r.draws), tris: Math.round(r.tris), peakDraws: r.peakDraws, sources };
       report(quality, budget, results[budget.scene], r);
+      graded += 1;
     }
+    // EVERY ROW OR NO PASS. A placement that went missing (a readWorld or
+    // planScenes change, a world without the feature) used to drop its row from
+    // the table behind a one-line "skipped" and the suite still said PASS with
+    // a smaller table. The wreck row below is the only optional one, and only
+    // because a server this runner did not start has no PIRATES_WRECK_SEC hook.
+    expect(
+      `all ${BUDGETS[quality].length} ${quality} scenes graded`,
+      graded === BUDGETS[quality].length,
+      `graded ${graded}, skipped: ${skipped.join(', ') || 'none'}`,
+    );
 
     if (wantWreck) {
       const wreck = await page
