@@ -1,7 +1,9 @@
 # The test suite, one line at a time
 
 *Audited 2026-08-04 on the fanless Air, SwiftShader, map seed 20260801, against
-a stack the audit owned (vite :3101, server :8091).*
+a stack the audit owned (vite :3101, server :8091). Harness revised 2026-09-02
+(HARNESS-01): server tier, per-tier timeouts, summary.json, quick tier, the
+scripts/ sweep.*
 
 This file exists because this repo keeps shipping gates that cannot fail. Not
 gates that are wrong — gates that are **vacuous**: they run, print something
@@ -25,12 +27,19 @@ headless bot in a human's match. `vite.config.ts` now bakes
 ## How to run it
 
 ```
-npm test              # everything: 63 logic suites, then 22 browser suites
-npm run test:logic    # logic only — needs no stack at all
+npm test              # everything: 62 logic, 2 server, then 24 browser suites
+npm run test:quick    # typecheck + the 52 sub-second logic suites (~15 s; 60 s soft ceiling)
+npm run test:logic    # logic only — no stack, no ports
+npm run test:server   # the LobbyServer suites — each boots its own server on port 0
 npm run test:browser  # browser only
-npm run test:audit    # is every test-shaped file on disk accounted for?
+npm run test:audit    # is every top-level scripts/*.mjs a wired suite or a declared non-gate?
+npm run test:perf     # = run-all-tests --only perf-budget (through the runner, pinned stack)
 node scripts/run-all-tests.mjs --only hud,minimap
 ```
+
+Every run writes `test-results/summary.json` (HEAD, argv, wall time, and per
+suite: tier, verdict, ms, bytes, exit code) and prints the slowest five. Pick a
+subset from that file, not from memory.
 
 `npm test` stands up **its own** server and Vite on 8091/3101 pinned to map seed
 20260801, runs every suite in its own process (never in parallel — this machine's
@@ -47,7 +56,7 @@ longer contains one.
 | `PASS` | exit 0 **and** it printed at least one graded line (`✓` / `PASS` / `OK:`) |
 | `FAIL` | non-zero exit |
 | `VACUOUS` | **exit 0 with nothing graded.** Counted as a failure. This is the verdict `test-perf-budget` would have got for a week |
-| `TIMEOUT` | killed at 15 minutes rather than hung on forever |
+| `TIMEOUT` | killed by the tier's watchdog rather than hung on forever: logic and server 120 s, browser 15 min, or the suite's own `timeoutMs` (net-resilience 120 s). `PIRATES_SUITE_TIMEOUT_MS` overrides all |
 | `SKIPPED` | declared in the manifest with a written reason. Printed as `NOT GRADED`, counted as a pass by nobody |
 
 `VACUOUS` is the point of the whole exercise. A suite cannot get a green tick
@@ -55,7 +64,7 @@ here by declining to measure.
 
 ---
 
-## Browser suites (22)
+## Browser suites (24)
 
 All read `PIRATES_BR_URL`; all reach the pinned server through the Vite that
 bakes its port. `slow` ones run last so a cheap failure is reported in the first
@@ -86,7 +95,20 @@ minute rather than the twentieth.
 | `test-perf-budget` | draw-call and triangle ceilings per scene | yes | fails rather than skips on an unpinned world, which is what it used to do |
 | `test-hud-death-and-feed` | the whole death/respawn/feed HUD | yes | **four failing assertions fixed in this audit — see below** |
 
-## Logic suites (63)
+## Server suites (2)
+
+A real `LobbyServer` on a real socket, no browser. Both sat in the logic tier
+("no ports") while binding fixed ports (8791, 8792); a stale listener on 8791
+held `test-net-resilience` until the 900 s kill and a two-minute logic run took
+seventeen, with nothing recording why. Now each calls `init(0)`, reads
+`server.boundPort`, and carries a timeout sized off a real run
+(net-resilience needs 47 s of heartbeat windows). `PIRATES_BR_TEST_PORT` pins
+a port for a human watching.
+
+- `test-net-resilience.mjs` (timeout 120 s)
+- `test-http-hardening.mjs` (timeout 60 s)
+
+## Logic suites (62)
 
 No browser, no server, no ports: they import the real simulation out of `src/`
 and drive it. Every one of them prints `✓` per assertion and exits non-zero on
@@ -101,24 +123,43 @@ failure — the house pattern, and it holds throughout. Two notes:
 
 The full list is `LOGIC` in `scripts/lib/suites.mjs`.
 
-## Deliberately not run (6)
+## Not gates, by layout (3 declared, 33 probes, 13 tools)
 
-`npm run test:audit` fails on any `scripts/test-*.mjs` that is neither wired nor
-listed here with a reason. This is what stops the eight-orphan situation
-recurring.
+`npm run test:audit` fails on **any** top-level `scripts/*.mjs` that is neither
+wired nor declared. The old filter only saw `test-*`/`audit-*`/`*smoke.mjs`
+names, so 72 one-off probes (`*-probe`, `*-tour`, `*-shots`) accumulated
+unseen. On 2026-09-02 the layout was made to say what a file is:
 
-| file | why not |
-|---|---|
-| `audit-tour.mjs` | a screenshot tour with no assertions and no exit code — a probe, not a gate |
-| `endgame-live-smoke.mjs` | superseded by `test-endmatch-board` + `fixwave4-smoke`; hard-codes `:3000` |
-| `finalwave-island-smoke.mjs` | wave-scoped screenshot smoke; hard-codes `:3000` |
-| `finalwave-skysea-smoke.mjs` | wave-scoped screenshot smoke; hard-codes `:3000` |
-| `finalwave-voyage-smoke.mjs` | wave-scoped screenshot smoke; hard-codes `:3000` |
-| `killwave-integration-smoke.mjs` | covered by `test-kill-streak-powers` + `test-death-causes` |
+| where | what | how many |
+|---|---|---|
+| `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 88 |
+| `scripts/lib/` | shared code (browser args, perf scenes, z-fight probes, the manifest) | |
+| `scripts/tools/` | doc-cited instruments: `perf-*`, `zfight-blame`, `approach-shots`, `fill-pass-shots` (paths in `FRAME_COST_MODEL.md`, `Z_FIGHTING.md`, `FILL_AND_SHADER_PASS.md`) | 13 |
+| `scripts/probes/` | live probes touched after 2026-07-25 or cited by the fix plan; each opens with a `// PROBE, not a gate:` line saying what it measures | 33 |
+| top level, in `EXCLUDED` | `perf-probe.mjs` (shared instrument library (planScenes, measureScene, sessionQuery) imported by twelve browser suites); `pacing-sim.mjs` (the pacing instrument (lane 0.3 owns it)); `storm-wall-probe.mjs` (storm-wall fill probe) | 3 |
 
-Everything else under `scripts/` is a probe or a shot-taker (`perf-*.mjs`,
-`*-probe.mjs`, `*-shots.mjs`, `*-tour.mjs`). Probes are instruments, not gates —
-they are read, not graded.
+Deleted in the same sweep (git history keeps them): 21 probes last touched
+before 2026-07-25, the six wave-scoped smokes that were listed as excluded
+(`audit-tour`, `endgame-live-smoke`, `finalwave-*-smoke`,
+`killwave-integration-smoke`) plus `helm-stance-probe` and
+`screenshot-tour` that only they referenced, thirteen dot-prefixed scratch
+files, and the pre-runner `test-results/.last-run.json` (a Playwright reporter
+artifact nothing wrote or read; the directory is gitignored wholesale).
+
+## Timings and the quick tier
+
+`test-results/summary.json` at dcd831d0, `--logic` with 8791 held by a dummy
+listener: 62 suites, 101 s wall. Slowest five: storm-spawn-safety 23.3 s,
+wreck-event 13.5 s, cave-walk 12.3 s, bot-peace-window 8.4 s,
+interaction-arbiter 7.5 s. Server tier: net-resilience 46.5 s,
+http-hardening 18.4 s.
+
+`quick: true` in the manifest marks the 52 logic suites measured under 1.5 s
+each (14.4 s wall together). `npm run test:quick` = typecheck + those, graded
+against `PIRATES_QUICK_BUDGET_MS` (60 s): over it prints a warning (this Air
+flaps when another agent runs), over twice it is a FAIL. Tag a suite only after
+reading its ms off a summary.json; never one that boots a server or walks a
+world.
 
 ---
 
