@@ -37,9 +37,6 @@ function expect(label, condition, detail = '') {
   }
 }
 
-const PORT = 8792;
-const HTTP = `http://127.0.0.1:${PORT}`;
-const WS_URL = `ws://127.0.0.1:${PORT}/ws`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Production posture for the bugsnap checks: no dev flag, no key, and a scratch
@@ -57,9 +54,15 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
+// Never a fixed port: init(0) lets the kernel pick, so a stale listener can never
+// hold this suite until the runner's timeout. PIRATES_BR_TEST_PORT pins one.
 const server = new LobbyServer();
-server.init(PORT);
-await sleep(400);
+server.init(Number(process.env.PIRATES_BR_TEST_PORT ?? 0));
+for (let i = 0; i < 50 && server.boundPort == null; i += 1) await sleep(100);
+if (server.boundPort == null) throw new Error('LobbyServer never reported a bound port');
+const PORT = server.boundPort;
+const HTTP = `http://127.0.0.1:${PORT}`;
+const WS_URL = `ws://127.0.0.1:${PORT}/ws`;
 
 async function health() {
   try {

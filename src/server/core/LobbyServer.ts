@@ -153,6 +153,13 @@ export class LobbyServer {
     this.stats = new StatsStore(defaultStatsPath(PROJECT_ROOT));
   }
 
+  /** The port actually bound: the kernel's pick when init(0) asked for one.
+   *  Null until 'listening'. Test suites read it so they never collide. */
+  get boundPort(): number | null {
+    const a = this.httpServer.address();
+    return a && typeof a === 'object' ? a.port : null;
+  }
+
   init(port: number): void {
     this.wss = new WebSocketServer({
       server: this.httpServer,
