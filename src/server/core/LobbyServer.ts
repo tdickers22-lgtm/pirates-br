@@ -170,8 +170,18 @@ export class LobbyServer {
     this.httpServer.on('error', (err) => {
       console.error(`[Lobby] HTTP server error:`, err);
     });
-    setInterval(() => this.tick(), 1000);
-    setInterval(() => this.sweepDeadSockets(), HEARTBEAT_INTERVAL_MS);
+    // A throw inside a setInterval callback has no caller to catch it: it is an
+    // uncaught exception and the process exits. Both timers get a boundary.
+    setInterval(() => this.guarded('tick', () => this.tick()), 1000);
+    setInterval(() => this.guarded('sweepDeadSockets', () => this.sweepDeadSockets()), HEARTBEAT_INTERVAL_MS);
+  }
+
+  private guarded(what: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`[Lobby] ${what} threw (server keeps running):`, err);
+    }
   }
 
   // ─── Connection lifecycle ────────────────────────────────────
@@ -451,9 +461,10 @@ export class LobbyServer {
     const match = this.spawnMatch({ botCount, source: 'party' });
 
     party.inMatch = true;
-    for (const member of memberSessions) {
-      this.placeClientIntoMatch(member, match, 'party', party.code);
-    }
+    const placed = this.placeCohort(memberSessions, match, 'party', party.code);
+    // Nobody boarded: the party is still in its panel, not "in a match" (a
+    // stale inMatch=true would refuse the next Start).
+    if (placed === 0) party.inMatch = false;
   }
 
   private handleQueueJoin(session: ClientSession, _msg: NetMsg): void {
@@ -492,7 +503,7 @@ export class LobbyServer {
     const requested = typeof payload.botCount === 'number' ? Math.floor(payload.botCount) : PARTY_DEFAULT_BOTS;
     const botCount = Math.max(0, Math.min(PARTY_MAX_BOTS, requested));
     const match = this.spawnMatch({ botCount, source: 'party' });
-    this.placeClientIntoMatch(session, match, 'party');
+    this.placeCohort([session], match, 'party');
   }
 
   private handleReturnToMenu(session: ClientSession): void {
@@ -668,9 +679,7 @@ export class LobbyServer {
 
     const botCount = Math.max(0, QUEUE_MATCH_BOTS_FILL_TO - cohortSessions.length);
     const match = this.spawnMatch({ botCount, source: 'queue' });
-    for (const c of cohortSessions) {
-      this.placeClientIntoMatch(c, match, 'queue');
-    }
+    this.placeCohort(cohortSessions, match, 'queue');
 
     if (this.queue.length === 0) {
       this.queueTimerStartedAt = null;
@@ -688,6 +697,46 @@ export class LobbyServer {
     match.start();
     this.matches.set(matchId, match);
     return match;
+  }
+
+  /** Board a cohort one member at a time, surviving a throw in any single
+   *  placement. createHumanClient does real geometry per join (ship spawns,
+   *  safe-dock pick, parking), and before this boundary one throw there
+   *  propagated out of tick()'s setInterval and exited the process, or left
+   *  the rest of a queue cohort in state 'queue' with no queue entry (a client
+   *  stuck on "Crew found, boarding" forever). A member whose placement fails
+   *  is told, sent home, and can queue again; a match nobody could board is
+   *  reaped at once instead of running empty for EMPTY_MATCH_GC_MS.
+   *  Returns how many members boarded. */
+  private placeCohort(members: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null): number {
+    let placed = 0;
+    for (const member of members) {
+      try {
+        this.placeClientIntoMatch(member, match, source, partyCode);
+        placed += 1;
+      } catch (err) {
+        console.error(`[Lobby] placement failed for ${member.id.slice(0, 6)} in match ${match.id.slice(0, 6)}:`, err);
+        this.failPlacement(member, match);
+      }
+    }
+    if (placed === 0) this.reapMatch(match.id, match, 'placement failed');
+    return placed;
+  }
+
+  private failPlacement(session: ClientSession, match: Match): void {
+    if (session.matchPlayerId) {
+      try { match.detachClient(session.matchPlayerId); } catch {}
+    }
+    this.clientToMatch.delete(session.id);
+    session.state = session.partyCode && this.parties.has(session.partyCode) ? 'party' : 'menu';
+    session.matchId = undefined;
+    session.matchPlayerId = undefined;
+    session.matchJoinedAt = undefined;
+    session.endedMatchSince = undefined;
+    this.lobbyError(session, 'Could not board the match. Try again.');
+    if (session.state === 'menu') {
+      this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
+    }
   }
 
   private placeClientIntoMatch(session: ClientSession, match: Match, source: 'party' | 'queue', partyCode: string | null = null): void {
