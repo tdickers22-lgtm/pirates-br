@@ -712,9 +712,13 @@ export class PhysicsSystem {
       ship.aground = dyn.agroundFor > 0;
 
       // Ship-ship collision — oriented capsule-chain hulls, resolved pairwise once.
-      for (const other of ships) {
-        if (other.id === ship.id || !other.alive) continue;
-        if (ship.id > other.id) continue;
+      // Each pair once, by ARRAY order. Not by id order: ids are uuids, so which
+      // hull plays `ship` in the pair would differ run to run and a seeded match
+      // could not replay the moment two hulls touched (RNG-01).
+      const shipIdx = ships.indexOf(ship);
+      for (let j = shipIdx + 1; j < ships.length; j++) {
+        const other = ships[j];
+        if (!other.alive) continue;
         this.resolveShipShipCollision(ship, other, helmsmanByShip);
       }
 
