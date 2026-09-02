@@ -89,7 +89,7 @@ async function main() {
   const h = await health();
   if (!h) {
     console.error(`No game server on :${SERVER_PORT ?? '8090'}. Start your OWN on a spare port:\n`
-      + '  PORT=8093 PIRATES_BR_MAP_SEED=20260801 npx tsx src/server/index.ts');
+      + '  PORT=8093 PIRATES_BR_MAP_SEED=20260801 PIRATES_BR_DEV_HOOKS=1 npx tsx src/server/index.ts');
     process.exit(2);
   }
   mkdirSync(OUT, { recursive: true });
