@@ -12,7 +12,7 @@ Stencil-counted depth complexity, texels, draw counts and resident bytes are
 
 Every number in §2 is a before/after pair taken with the same rig against the
 same seed: `before` from a pristine worktree at `b177a30`, `after` from this
-branch. The pictures are in `scripts/fill-pass-shots.mjs`.
+branch. The pictures are in `scripts/tools/fill-pass-shots.mjs`.
 
 ---
 
@@ -276,7 +276,7 @@ The boundary's cloud bank is up in ordinary play — 0.266 layers at dock-vista 
 the last pass — and two gates get proposed for it every time somebody reads that
 number: skip it when the bank is not in frame, or when the camera is far from
 the ring. Both are arguments about vertices. The cost is fill.
-`scripts/perf-storm-front-gate.mjs` asks the only question that decides either:
+`scripts/tools/perf-storm-front-gate.mjs` asks the only question that decides either:
 
 | scene | tier | facing the bank | camera pitched at the deck |
 |---|---|--:|--:|
