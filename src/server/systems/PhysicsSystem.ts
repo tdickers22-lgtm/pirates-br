@@ -2,7 +2,7 @@ import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, 
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
-import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles } from '../../shared/interactions.js';
+import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier } from '../../shared/interactions.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
@@ -317,6 +317,35 @@ export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
     if (h.flooding) total += FLOODING.INGRESS_PER_HOLE * h.rateFactor;
   }
   return total * classScale * reinforced;
+}
+
+/**
+ * SERVER-owned list. The heel and trim a hull takes from the water standing in
+ * her, derived ONLY from her open breaches (which rail they are on, which end,
+ * and how deep each one sits) so client and server agree without a wire field
+ * and a seeded match replays the same lean.
+ *
+ * Conventions match the renderer and updateShipWaveAttitude: positive roll
+ * LIFTS starboard, so breaches to starboard produce a NEGATIVE roll (that rail
+ * goes down); positive pitch DIPS the bow, so a flooded bow trims positive.
+ * evaluateHoleFlood already reads pitch/roll, which is what closes the doom
+ * spiral: the list dips the holed side, the holed side then gushes harder.
+ */
+export function floodListTargets(ship: Ship, t: number, storm = 0): { roll: number; trim: number } {
+  const stats = SHIP_STATS[ship.type];
+  const halfW = Math.max(0.001, stats.width * 0.5);
+  const halfL = Math.max(0.001, stats.length * 0.5);
+  let lateral = 0;
+  let longitudinal = 0;
+  for (const h of evaluateHoleFlood(ship, t, storm)) {
+    if (!h.flooding) continue;
+    lateral += h.rateFactor * clamp(h.hole.x / halfW, -1, 1);
+    longitudinal += h.rateFactor * clamp(h.hole.z / halfL, -1, 1);
+  }
+  return {
+    roll: clamp(-lateral * FLOODING.LIST_ROLL_GAIN, -FLOODING.LIST_ROLL_MAX, FLOODING.LIST_ROLL_MAX),
+    trim: clamp(longitudinal * FLOODING.LIST_TRIM_GAIN, -FLOODING.LIST_TRIM_MAX, FLOODING.LIST_TRIM_MAX),
+  };
 }
 
 /**
@@ -1946,6 +1975,7 @@ export class PhysicsSystem {
         y: point.y,
         z: point.z,
         patched: false,
+        tier: getShipHoleTier(point.y, SHIP_STATS[ship.type]),
         ...(source ? { source } : {}),
       };
       ship.nextHoleId = hole.id + 1;
@@ -1985,6 +2015,9 @@ export class PhysicsSystem {
     victim.x = point.x;
     victim.y = point.y;
     victim.z = point.z;
+    // A recycled slot MOVED: re-stamp its tier or the breach lies about its
+    // height for the rest of the match (the wire byte the client reads).
+    victim.tier = getShipHoleTier(point.y, SHIP_STATS[ship.type]);
     if (source) victim.source = source;
     return victim;
   }
@@ -2484,13 +2517,16 @@ export class PhysicsSystem {
     // An anchored hull holds nearly flat — berthed ships used to heel with
     // every passing wave, so identical docks showed randomly tilted parks.
     const anchorCalm = ship.anchored ? 0.3 : 1;
+    // The water standing in her is part of her attitude, not a client flourish:
+    // the list follows the holed rail and the flooded end (SINK-01).
+    const list = floodListTargets(ship, t, seaState);
     const targetPitch = clamp(
-      (Math.atan2(sternY - bowY, stats.length * 0.8) - speedFrac * 0.035) * anchorCalm,
+      (Math.atan2(sternY - bowY, stats.length * 0.8) - speedFrac * 0.035) * anchorCalm + list.trim,
       -pitchCap, pitchCap,
     );
     const turnHeel = clamp(-ship.angularVelocity * speedFrac * 0.5, -0.06, 0.06);
     const targetRoll = clamp(
-      (Math.atan2(starboardY - portY, stats.width * 0.8) + turnHeel + windHeel) * anchorCalm,
+      (Math.atan2(starboardY - portY, stats.width * 0.8) + turnHeel + windHeel) * anchorCalm + list.roll,
       -rollCap, rollCap,
     );
 

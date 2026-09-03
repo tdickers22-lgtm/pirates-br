@@ -1,5 +1,5 @@
 import { FLOODING, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
-import type { Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
+import type { Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipHoleTier, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
 import {
   angleWrap, clamp, dist2D, getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckRaiseAt, getShipDeckWalkHalfWidth, getShipDeckY, getShipHoldFloorY, isInsideSwimHullFootprint, getSwimHullVerticalT, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
 
@@ -44,6 +44,18 @@ export function countOpenHoles(ship: Pick<Ship, 'holes'>): number {
   let n = 0;
   for (const hole of ship.holes ?? []) if (!hole.patched) n += 1;
   return n;
+}
+
+/**
+ * Height class of a breach at hull-local `localY`. SHARED so the server stamp
+ * (placeHole) and any client read agree byte for byte: LOW breaches flood a
+ * level hull, MID ones only once she has settled into her own bilge, HIGH ones
+ * are topside and stay dry until she lists or the sea gets up.
+ */
+export function getShipHoleTier(localY: number, stats: Pick<ShipStats, 'height'>): ShipHoleTier {
+  if (localY < FLOODING.HOLE_TIER_LOW_Y) return 0;
+  if (localY < stats.height * FLOODING.HOLE_TIER_HIGH_F) return 1;
+  return 2;
 }
 
 /**

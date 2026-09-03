@@ -9,11 +9,12 @@ import {
   evaluateHoleFlood,
   shipIngressRate,
   updateShipFlooding,
+  floodListTargets,
   HULL_SATURATION,
 } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared/constants/index.ts';
-import { countOpenHoles } from '../src/shared/interactions.ts';
+import { countOpenHoles, getShipHoleTier } from '../src/shared/interactions.ts';
 import { angleWrap, sampleWind } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -530,6 +531,75 @@ console.log('\nChainshot is a rigging weapon: no hull holes, sets chainshottedUn
     Math.hypot(punched.x - 0.4, punched.y - 0.22, punched.z - 5) < 0.01,
     JSON.stringify(punched));
   expect('the breach is tagged with what made it', punched.source === 'cannon');
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nHole HEIGHT tiers: every breach carries its own tier byte (SINK-01 slice a)');
+
+{
+  const physics = new PhysicsSystem();
+  const ship = makeShip('sloop');
+  const stats = SHIP_STATS.sloop;
+  const [low] = physics.openHoleAt(ship, { x: 2.4, y: 0.05, z: 0 }, 1, 'cannon');
+  const [mid] = physics.openHoleAt(ship, { x: 2.4, y: 0.40, z: 1 }, 1, 'cannon');
+  const [high] = physics.openHoleAt(ship, { x: 2.4, y: 1.45, z: -1 }, 1, 'cannon');
+  expect('a breach at the wale is tier LOW (0)', low.tier === 0, `tier=${low.tier}`);
+  expect('a breach in the band is tier MID (1)', mid.tier === 1, `tier=${mid.tier}`);
+  expect('a breach on the topside is tier HIGH (2)', high.tier === 2, `tier=${high.tier}`);
+  expect('the stored tier agrees with the shared classifier (client parity)',
+    ship.holes.every((h) => h.tier === getShipHoleTier(h.y, stats)),
+    ship.holes.map((h) => `${h.y.toFixed(2)}:${h.tier}`).join(','));
+
+  // Eviction must re-tier the slot it recycles, or a moved breach lies about
+  // its height for the rest of the match.
+  const sat = makeShip('sloop');
+  for (let i = 0; i < FLOODING.MAX_HOLES_PER_SHIP; i += 1) {
+    physics.openHoleAt(sat, { x: (i % 2 ? 1 : -1) * 2.0, y: 1.3, z: -3 + i * 0.8 }, 1, 'cannon');
+  }
+  expect('eight breaches at 1.3 m are all tier MID (a sloop\'s topside starts at 0.6x2.2 m)',
+    sat.holes.every((h) => h.tier === 1), sat.holes.map((h) => h.tier).join(','));
+  const [moved] = physics.openHoleAt(sat, { x: 2.4, y: 0.1, z: 0.5 }, 1, 'cannon');
+  expect('a waterline shot re-tiers the breach it dragged down to LOW', moved.tier === 0, `tier=${moved.tier}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nThe SERVER owns the list: she leans on her holed side and settles by her flooded end');
+
+{
+  // Pure targets first — no wave noise, so the SIGN is unambiguous.
+  const stbd = makeShip('sloop', { holes: [hole(2.5, 0, 0), hole(2.5, 0, 2)] });
+  const port = makeShip('sloop', { holes: [hole(-2.5, 0, 0), hole(-2.5, 0, 2)] });
+  const bow = makeShip('sloop', { holes: [hole(0.5, 0, 5.5), hole(-0.5, 0, 5.5)] });
+  const st = floodListTargets(stbd, 0);
+  const pt = floodListTargets(port, 0);
+  const bt = floodListTargets(bow, 0);
+  expect('breaches to starboard roll the deck DOWN to starboard (negative roll)',
+    st.roll < -0.05, `roll=${st.roll.toFixed(3)}`);
+  expect('breaches to port heel her the other way, to the same order of lean',
+    pt.roll > 0.05 && Math.abs(pt.roll + st.roll) < Math.abs(st.roll) * 0.3,
+    `port=${pt.roll.toFixed(3)} stbd=${st.roll.toFixed(3)}`);
+  expect('a bow full of water dips the bow (positive pitch)', bt.trim > 0.03, `trim=${bt.trim.toFixed(3)}`);
+  expect('the list is bounded (±LIST_ROLL_MAX / ±LIST_TRIM_MAX)',
+    Math.abs(st.roll) <= FLOODING.LIST_ROLL_MAX + 1e-9 && Math.abs(bt.trim) <= FLOODING.LIST_TRIM_MAX + 1e-9);
+  expect('a patched hull sits level (no list without an open breach)',
+    floodListTargets(makeShip('sloop', { holes: [hole(2.5, 0, 0, true)] })).roll === 0);
+
+  // ...and the attitude spring actually carries it into ship.roll.
+  const run = (ship) => {
+    const physics = new PhysicsSystem();
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < 8 * 60; i += 1) {
+      physics.update(DT, i * DT, [ship], [], [], [], [], null);
+      if (i > 4 * 60) { sum += ship.roll ?? 0; n += 1; }
+    }
+    return sum / n;
+  };
+  const rollStbd = run(makeShip('sloop', { holes: [hole(2.5, 0, 0), hole(2.5, 0, 2)] }));
+  const rollPort = run(makeShip('sloop', { holes: [hole(-2.5, 0, 0), hole(-2.5, 0, 2)] }));
+  expect('a starboard-holed hull heels to starboard for real (mean roll < -0.05)',
+    rollStbd < -0.05, `meanRoll=${rollStbd.toFixed(3)}`);
+  expect('and the port-holed hull heels the other way', rollPort > 0.05, `meanRoll=${rollPort.toFixed(3)}`);
 }
 
 if (failures > 0) {

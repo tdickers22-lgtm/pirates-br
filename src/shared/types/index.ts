@@ -42,7 +42,16 @@ export interface ShipHole {
   z: number;
   patched: boolean;
   source?: ShipHoleSource;
+  /** Height class of the breach (ONE wire byte): 0 LOW, 1 MID, 2 HIGH. Server
+   *  truth, stamped at placement from the hull-local y by the shared
+   *  getShipHoleTier, so the client never has to guess which breaches are the
+   *  ones that flood a level hull. */
+  tier?: ShipHoleTier;
 }
+
+/** LOW = at/below the wale (floods on a level hull), MID = floods once she has
+ *  settled, HIGH = topside, dry until she lists or the sea gets up. */
+export type ShipHoleTier = 0 | 1 | 2;
 
 export interface ShipKeg {
   id: string;
