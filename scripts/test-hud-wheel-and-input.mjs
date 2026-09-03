@@ -146,5 +146,26 @@ globalThis.document.pointerLockElement = null;
 fire('pointerlockchange');
 expect('pointer lock lost → right false', input.buildInput().right === false);
 
+// ── The printed card must agree with the code (hud-15, hud-01, hud-13) ──────
+// The legend is the ONLY place a player is told what a key does, and it had
+// drifted from the bindings it documents: it advertised "1–9" for a wheel whose
+// ninth and tenth slices need Digit9 and Digit0, and "T · Trade" for a layer the
+// supply wheel replaced (hud-15 — T leaves the default layer; trade returns as a
+// contextual rail prompt with CREW-01). It also promises a refusal the player
+// can SEE: HudController stamps .refused on #interact-prompt, and index.html
+// must own the keyframes or that class paints nothing (hud-11).
+const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+const legendBlocks = html.split('\n').filter((l) => /·\s*(Spyglass|Special|Supply [Ww]heel|Trade)/.test(l));
+expect('the controls legend was found in index.html', legendBlocks.length >= 3, `blocks=${legendBlocks.length}`);
+expect('no "Trade" key is advertised in the legend (hud-15)',
+  legendBlocks.every((l) => !/Trade/.test(l)),
+  legendBlocks.filter((l) => /Trade/.test(l)).map((l) => l.trim()).join('\n     '));
+const wheelLines = legendBlocks.filter((l) => /Supply [Ww]heel/.test(l));
+expect('the supply-wheel legend prints the key range the table actually binds',
+  wheelLines.length > 0 && wheelLines.every((l) => l.includes(WHEEL_KEY_HINT)),
+  `WHEEL_KEY_HINT=${WHEEL_KEY_HINT} · ${wheelLines.map((l) => l.trim()).join(' | ')}`);
+expect('a refused prompt has an animation to run',
+  /@keyframes\s+refuse-shake/.test(html) && /#interact-prompt\.refused/.test(html));
+
 console.log(failures === 0 ? '\nPASS wheel + input layer' : `\nFAIL wheel + input layer (${failures})`);
 process.exit(failures === 0 ? 0 : 1);
