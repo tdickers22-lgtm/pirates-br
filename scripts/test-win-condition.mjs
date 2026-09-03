@@ -222,6 +222,62 @@ console.log('\nA leaver:');
     `winnerId=${state.winnerId} stayer=${stay.playerId}`);
 }
 
+// ── THE CREW BEING SHOT AT ARE TOLD WHO, AND WHICH SIDE ──────────────────────
+// FEED-01 server half: 'ship_hit' was an attacker-only hit-confirm, so a hull
+// could take fifteen rounds and her crew got no who/where signal at all.
+console.log('\nUnder fire:');
+{
+  const match = new Match({ matchId: 'win-under-fire', botCount: 1 });
+  const state = match.state;
+  state.phase = 'playing';
+  match.broadcast = () => {};
+  const inbox = [];
+  const ws = { readyState: 1, bufferedAmount: 0, send(d) { inbox.push(JSON.parse(d)); }, close() {} };
+  const joined = match.addHumanClient(ws, 'Defender');
+  const defender = state.players.find((p) => p.id === joined.playerId);
+  const hull = state.ships.find((s) => s.id === joined.shipId);
+  const raider = state.players.find((p) => p.isBot);
+  const raiderHull = state.ships.find((s) => s.id === raider.shipId);
+  defender.onShipId = hull.id;
+  inbox.length = 0;
+
+  // A ball into her starboard band, opening one breach. Feed the relay the way
+  // PhysicsSystem does.
+  const stats = { x: 4, z: 0 };
+  const local = { x: 4, z: 0 };
+  const world = {
+    x: hull.position.x + local.x * Math.cos(hull.rotation) + local.z * Math.sin(hull.rotation),
+    y: hull.position.y + 0.4,
+    z: hull.position.z + local.z * Math.cos(hull.rotation) - local.x * Math.sin(hull.rotation),
+  };
+  match.physics.flushCombatEvents = () => [{
+    type: 'ship_hit',
+    attackerId: raider.id,
+    targetId: hull.id,
+    damage: 12,
+    position: world,
+    projectileType: 'cannonball',
+    section: 'starboard',
+    remainingSection: 0.8,
+    remainingHull: 0.8,
+    milestone: null,
+    impact: 'band',
+    holes: [{ id: 7, x: local.x, y: 0.2, z: local.z }],
+  }];
+  match.relayPendingCombatEvents();
+
+  const struck = inbox.filter((m) => m.type === 'ship_hit' && m.payload?.incoming);
+  expect('the struck crew is told they are under fire', struck.length === 1,
+    `ship_hit(incoming)=${struck.length} inbox=${inbox.map((m) => m.type).join(',')}`);
+  expect('...naming the hull that fired',
+    struck[0]?.payload.attackerCrew?.includes(raider.name),
+    `attackerCrew=${struck[0]?.payload.attackerCrew} raiderHull=${raiderHull?.type}`);
+  expect('...and the face that took it, with the breach it opened',
+    struck[0]?.payload.side === 'starboard' && struck[0]?.payload.holeId === 7
+      && struck[0]?.payload.topside === false,
+    `side=${struck[0]?.payload.side} holeId=${struck[0]?.payload.holeId} topside=${struck[0]?.payload.topside} (${stats.x})`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} win-condition assertion(s) failed.`);
   process.exit(1);

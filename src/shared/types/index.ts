@@ -243,7 +243,7 @@ export interface Player {
   /** Last ENVIRONMENTAL hurt (fall / deck fire / drowning) and when. Written
    *  instead of nulling lastDamagedById so a chip-then-drown kill still pays
    *  the shooter (CREDIT-01); Match reads it to name the honest cause. */
-  lastEnvDamage?: { cause: 'fall' | 'fire' | 'drowned'; at: number } | null;
+  lastEnvDamage?: { cause: 'fall' | 'fire' | 'drowned' | 'storm' | 'shark'; at: number } | null;
   selectedCannonAmmo: CannonAmmoType;
   kegs: number;
   kegCooldown: number;

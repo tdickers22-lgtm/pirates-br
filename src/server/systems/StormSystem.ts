@@ -119,7 +119,7 @@ export class StormSystem {
     };
   }
 
-  update(dt: number, storm: StormState, ships: Ship[], players: Player[], hooks: StormDamageHooks): void {
+  update(dt: number, storm: StormState, ships: Ship[], players: Player[], hooks: StormDamageHooks, t = 0): void {
     if (storm.shrinking) {
       storm.shrinkProgress += dt / storm.shrinkDuration;
       if (storm.shrinkProgress >= 1) {
@@ -241,9 +241,13 @@ export class StormSystem {
       const d = dist2D(player.position.x, player.position.z, storm.centerX, storm.centerZ);
       if (d > storm.safeRadius) {
         const excess = (d - storm.safeRadius) / Math.max(1, storm.safeRadius);
-        player.lastDamagedById = null;
-        player.lastDamagedAt = null;
-        player.lastDamageWasHeadshot = false;
+        // THE WEATHER DOES NOT ERASE THE CAPTAIN WHO CHIPPED YOU (CREDIT-01,
+        // storm-19). Nulling lastDamagedById here meant chip-then-ring paid
+        // nobody: the pirate you shot to 10 hp walked into the wall and the feed
+        // credited the storm. The tag is FILED, not wiped — handlePlayerDeath
+        // pays the attacker inside MATCH_END.ASSIST_CREDIT_WINDOW and the death
+        // CAUSE still reads honestly off lastDamageSourceById.
+        player.lastEnvDamage = { cause: 'storm', at: t };
         player.health -= dmg * (1 + excess * 0.75);
       }
     }

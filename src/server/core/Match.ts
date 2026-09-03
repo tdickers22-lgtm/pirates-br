@@ -13,6 +13,7 @@ import {
   splitSpill,
 } from '../../shared/cargo.js';
 import { MapGenerator } from '../world/MapGenerator.js';
+import type { HullImpactKind } from '../systems/PhysicsSystem.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_DECK_AWASH_F, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
@@ -1664,7 +1665,7 @@ export class Match {
       // The post-respawn reprieve: a pirate who just came back inside the wall
       // gets STORM_RESPAWN_GRACE_SECONDS to make sail instead of a second death.
       hasStormGrace: (playerId) => this.hasStormGrace(playerId),
-    });
+    }, this.t);
     // Nothing else in that call can take health off a pirate, so every loss
     // across it is the tempest — including the one that swims back inside the
     // ring afterwards and used to be filed as a drowning.
@@ -5024,9 +5025,10 @@ export class Match {
           this.noteEnvironmentalDamage(target, 'shark', bite, {
             x: s.position.x, y: s.position.y + 0.4, z: s.position.z,
           });
-          target.lastDamagedById = null;
-          target.lastDamagedAt = null;
-          target.lastDamageWasHeadshot = false;
+          // Filed, not wiped (CREDIT-01): a pirate knocked overboard and then
+          // taken by a shark was somebody's play, and the feed owes them the
+          // kill. The CAUSE stays 'shark' through lastDamageSourceById above.
+          target.lastEnvDamage = { cause: 'shark', at: this.t };
           s.biteCooldown = SHARK.BITE_COOLDOWN;
           s.attackState = 'recover';
           s.attackTimer = SHARK.RECOVER_TIME;
@@ -5968,7 +5970,18 @@ export class Match {
       : null;
     if (killer?.id === player.id) killer = null;
     // Stale damage (e.g. shot minutes before drowning in the storm) pays nothing.
-    if (killer && (player.lastDamagedAt === null || this.t - player.lastDamagedAt > KILL_CREDIT_WINDOW_SECONDS)) {
+    // THE ENVIRONMENT LANDING THE LAST BLOW IS NOT THE SAME AS NOBODY LANDING
+    // IT (CREDIT-01). Storm, drowning, fire, a fall and a shark used to WIPE
+    // lastDamagedById, so chip-then-ring and knock-overboard kills paid nobody
+    // and the feed credited the weather. The tag now survives, and the window it
+    // is read through tightens to ASSIST_CREDIT_WINDOW: recent damage from a
+    // captain still pays, a graze two minutes ago is the sea's kill.
+    const envFinish = player.lastEnvDamage
+      && this.t - player.lastEnvDamage.at <= DAMAGE_SOURCE_WINDOW_SECONDS
+      ? player.lastEnvDamage
+      : null;
+    const creditWindow = envFinish ? MATCH_END.ASSIST_CREDIT_WINDOW : KILL_CREDIT_WINDOW_SECONDS;
+    if (killer && (player.lastDamagedAt === null || this.t - player.lastDamagedAt > creditWindow)) {
       killer = null;
     }
     const headshot = !!killer && player.lastDamageWasHeadshot;
@@ -6564,6 +6577,13 @@ export class Match {
           shipHealthMilestone: event.milestone,
           weaponId: event.projectileType,
         });
+        // AND THE CREW BEING SHOT AT ARE TOLD WHO, AND WHICH SIDE (FEED-01).
+        // 'ship_hit' was an attacker-only hit-confirm: a hull could take fifteen
+        // rounds and her crew got no who/where signal at all. The same message
+        // now also goes to the TARGET crew, marked incoming, carrying the
+        // attacker's hull, the face that was struck and whether it opened a
+        // breach — the HUD's HULL STRUCK line, compass arc and shudder.
+        this.notifyCrewUnderFire(event);
         // Victims and bystanders get a slim broadcast so every client can
         // render impact FX / hole decals at the hit point (the attacker-only
         // ship_hit above stays the hit-confirm channel). `holes` carries the
@@ -6685,6 +6705,55 @@ export class Match {
       ts: Date.now(),
       payload,
     });
+  }
+
+  /** The 'ship_hit' the DEFENDERS get: attacker, bearing face, breach, marked
+   *  incoming so the client never mistakes it for its own hit-confirm. Scoped to
+   *  the struck crew — nobody else is being shot at. */
+  private notifyCrewUnderFire(event: {
+    attackerId: string;
+    targetId: string;
+    damage: number;
+    position: Vec3;
+    section: keyof HullSections;
+    remainingHull: number;
+    impact: HullImpactKind;
+    holes: Array<{ id: number }>;
+    projectileType: Projectile['type'];
+  }): void {
+    const ship = this.getShip(event.targetId);
+    if (!ship) return;
+    const attacker = this.getPlayer(event.attackerId);
+    if (attacker && (attacker.shipId === ship.id || attacker.onShipId === ship.id)) return;
+    const attackerShip = attacker ? this.getShip(attacker.shipId) : null;
+    const local = this.toShipLocal(event.position, ship);
+    const side = Math.abs(local.z) > Math.abs(local.x)
+      ? (local.z > 0 ? 'bow' : 'stern')
+      : (local.x > 0 ? 'starboard' : 'port');
+    const payload = {
+      targetId: ship.id,
+      incoming: true as const,
+      attackerId: event.attackerId,
+      attackerName: attacker?.name ?? null,
+      attackerCrew: attacker ? `${attacker.name}'s ${attackerShip?.type ?? 'crew'}` : null,
+      damage: event.damage,
+      position: event.position,
+      section: event.section,
+      remainingSection: event.remainingHull,
+      remainingHull: event.remainingHull,
+      side,
+      topside: event.impact === 'topside' || event.impact === 'deck',
+      holeId: event.holes[0]?.id ?? null,
+      openHoles: countOpenHoles(ship),
+      weaponId: event.projectileType,
+    };
+    const msg: NetMsg = { type: 'ship_hit', ts: Date.now(), payload };
+    for (const [playerId, client] of this.clients) {
+      const p = this.getPlayer(playerId);
+      if (!p || (p.shipId !== ship.id && p.onShipId !== ship.id)) continue;
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      this.send(client.ws, msg);
+    }
   }
 
   private broadcast(msg: NetMsg) {

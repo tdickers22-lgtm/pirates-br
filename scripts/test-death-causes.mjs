@@ -283,6 +283,67 @@ console.log('Tag hygiene:');
     `tag=${JSON.stringify(match.lastDamageSourceById.get(victim.id))}`);
 }
 
+// ── CREDIT-01: THE WEATHER DOES NOT COLLECT THE BOUNTY ──────────────────────
+// Storm, drowning and shark ticks used to NULL lastDamagedById, so the captain
+// who shot you to 10 hp got nothing when the ring or the sea finished you, and
+// the feed credited the weather. The tag survives now; the CAUSE still reads
+// honestly off the damage log.
+console.log('\nAttacker credit through an environmental finish:');
+{
+  // A FRESH match: the blocks above leave this one's fleet eliminated, and a
+  // finished match does not tick a storm.
+  const m = new Match({ matchId: 'credit-window-test', botCount: 3 });
+  m.broadcast = () => {};
+  m.state.phase = 'playing';
+  m.state.storm.centerX = 0;
+  m.state.storm.centerZ = 0;
+  m.state.storm.safeRadius = 900;
+  m.state.storm.damagePerSec = 6;
+  const [prey, gunner] = m.state.players;
+  prey.health = 10;
+  gunner.gold = 0;
+  // A cannonball put him on ten hit points, this very second.
+  m.noteDamageSource(prey.id, 'cannon');
+  prey.lastDamagedById = gunner.id;
+  prey.lastDamagedAt = m.t;
+  prey.lastDamageWasHeadshot = false;
+  prey.lastEnvDamage = null;
+
+  const goldBefore = gunner.gold;
+  for (let i = 0; i < 240 && prey.state !== 'eliminated' && prey.health > 0; i++) {
+    prey.position.x = m.state.storm.centerX + m.state.storm.safeRadius + 200;
+    prey.position.z = m.state.storm.centerZ;
+    m.state.phase = 'playing';
+    m.tick();
+  }
+  expect('the storm finished him', prey.health <= 0 || prey.state !== 'alive',
+    `health=${prey.health} state=${prey.state}`);
+  expect('...and the captain who chipped him is paid', gunner.gold > goldBefore,
+    `gold ${goldBefore} -> ${gunner.gold}`);
+  expect('...while the wound is still filed as the storm\'s',
+    prey.lastEnvDamage?.cause === 'storm',
+    `env=${JSON.stringify(prey.lastEnvDamage)}`);
+}
+
+console.log('\nA graze two minutes before the sea takes him pays nobody:');
+{
+  reset({ x: 0, y: 2, z: 0 });
+  state.phase = 'playing';
+  victim.health = 10;
+  other.gold = 0;
+  match.noteDamageSource(victim.id, 'cannon');
+  victim.lastDamagedById = other.id;
+  // Stale: far outside MATCH_END.ASSIST_CREDIT_WINDOW.
+  victim.lastDamagedAt = match.t - 120;
+  victim.lastEnvDamage = { cause: 'storm', at: match.t };
+  state.phase = 'playing';
+  const goldBefore = other.gold;
+  victim.health = 0;
+  match.handlePlayerDeath(victim);
+  expect('the stale attacker collects nothing', other.gold === goldBefore,
+    `gold ${goldBefore} -> ${other.gold}`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} death-cause assertion(s) failed.`);
   process.exit(1);
