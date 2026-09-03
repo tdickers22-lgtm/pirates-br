@@ -286,7 +286,7 @@ export function makeMatchRng(matchId: string): () => number {
 
 /** Per-skeleton phase (guard reflex, roam offset) from its deterministic
  *  name (Skeleton_<n>), never its uuid: a seeded match must replay (RNG-01). */
-function skeletonPhase(s: { name: string }): number {
+export function skeletonPhase(s: { name: string }): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.name.length; i++) h = Math.imul(h ^ s.name.charCodeAt(i), 0x01000193) >>> 0;
   return h;

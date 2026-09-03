@@ -5,7 +5,7 @@
 //   3. the charged lunge is a guard-breaker (partial damage through a parry)
 //   4. the same rules bind skeleton swings (they used to bypass the check)
 //   5. a threatened skeleton raises its guard (blocking flag) and holds its swing
-import { Match } from '../src/server/core/Match.ts';
+import { Match, skeletonPhase } from '../src/server/core/Match.ts';
 import { WEAPONS, PLAYER } from '../src/shared/constants/index.ts';
 
 let failures = 0;
@@ -103,7 +103,8 @@ function makeDuel() {
 
   // Skeleton guard reflex: threatened by a charging cutlass in range.
   target.cutlassCharge = 0.5;
-  const reflex = ((attacker.id.charCodeAt(1) ?? 0) % 10) / 10;
+  // Same formula Match uses (name hash, RNG-01): a copy of the old uuid formula went stale in wave 0.
+  const reflex = (skeletonPhase(attacker) % 10) / 10;
   const weapon = attacker.weapons[attacker.activeSlot];
   weapon.reloading = false;
   match.updateIslandSkeletons(1 / 60);
