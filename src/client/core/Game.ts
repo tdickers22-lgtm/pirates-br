@@ -509,6 +509,8 @@ export class Game {
   private prevIsInsideIsland: string | null = null;
   private islandBannerHideAt = 0;
   private stormWeatherIntensity = 0;
+  /** Dev/tour hook: a PINNED client weather level (null = the replicated one). */
+  private weatherOverride: number | null = null;
   /** What the WEATHER LOOKS LIKE, as opposed to how hard it is blowing.
    *  stormWeatherIntensity stays the storm's own level and keeps driving wind,
    *  wave bed and hull spray; this is the number the sea colour, the fog, the
@@ -3693,6 +3695,10 @@ export class Game {
       // shared sea-state formula returns 1 here. (A negative radius hits the
       // shader's no-storm sentinel and silently disables the swell geometry.)
       this.ocean.setStormState(cam.x + 900, cam.z, 120, 1);
+    } else if (this.weatherOverride !== null) {
+      // A pinned stand: the replicated storm phase does not reach the look.
+      this.stormWeatherIntensity = this.weatherOverride;
+      if (this.weatherOverride <= 0) this.ocean.clearStormState();
     } else if (this.state?.storm) {
       const storm = this.state.storm;
       this.ocean.setStormState(
@@ -3712,7 +3718,8 @@ export class Game {
     this.combatFx.setParticleFillScale(this.renderer.getParticleFillScale());
     // World-space rain runs every frame (cheap buffer update; the old canvas
     // overlay throttle is gone with the overlay).
-    this.stormRainIntensity = this.debugStormDemo ? 0.9 : this.envFx.computeStormRainIntensity();
+    this.stormRainIntensity = this.debugStormDemo ? 0.9
+      : this.weatherOverride ?? this.envFx.computeStormRainIntensity();
     // The sky over the rain is driven by the rain itself, not only by the storm's
     // weather level: a replicated squall reaching inboard of the ring runs the
     // weather number near 0.35, and 0.35 of the sky's storm response is still
@@ -5748,6 +5755,15 @@ export class Game {
    *  audit lighting at a fixed time; pass null to resume the live match clock. */
   setDayNightOverride(seconds: number | null) {
     this.dayNightOverrideSec = seconds;
+  }
+
+  /** Dev/tour hook: pin the client's weather LOOK so a lighting stand reads the
+   *  same twice. A live match rolls its storm phase and the rain mist riding on
+   *  it (which thickens fog density by up to 62%), and the night sea band is
+   *  mostly fog — that moved the night sea/sky ratio by 1.7x across runs of one
+   *  commit. 0 = flat calm, null = resume the replicated weather. */
+  setWeatherOverride(level: number | null) {
+    this.weatherOverride = level === null ? null : THREE.MathUtils.clamp(level, 0, 1);
   }
 
   /** Dev hook (honoured solo): make bots ignore YOU and your ship (they keep
