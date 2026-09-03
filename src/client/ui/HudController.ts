@@ -486,6 +486,36 @@ export class HudController {
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
+  /** A refused [X], painted WHERE THE PLAYER IS LOOKING. The only feedback for
+   *  a refused press was an amber line in the top-right feed, 400 px from the
+   *  centre prompt that offered the action, so the refusal read as "X does
+   *  nothing" (hud-25). This overrides the context label under the prompt for
+   *  1.5 s and shakes the prompt. */
+  showInteractRefusal(text: string): void {
+    this.interactRefusal = { text, until: performance.now() + HudController.REFUSAL_MS };
+    const el = this.view.ui.interactPrompt;
+    el.classList.remove('refused');
+    void el.offsetWidth;
+    el.classList.add('refused');
+  }
+
+  private interactRefusal: { text: string; until: number } | null = null;
+  private static readonly REFUSAL_MS = 1500;
+
+  /** Called at the end of every prompt paint: the refusal owns the context line
+   *  while it lasts, whatever the arbiter has since decided to offer. */
+  private paintInteractRefusal(): void {
+    const refusal = this.interactRefusal;
+    if (!refusal) return;
+    if (performance.now() >= refusal.until) {
+      this.interactRefusal = null;
+      this.view.ui.interactPrompt.classList.remove('refused');
+      return;
+    }
+    this.view.ui.contextLabel.style.display = 'block';
+    this.view.ui.contextLabel.textContent = refusal.text;
+  }
+
   /** Flash the CREWS AFLOAT chip — the counter used to drop 10 → 7 → 5 in total silence. */
   pulseCrewsAfloat(): void {
     const chip = this.view.ui.playerCount;
@@ -1109,6 +1139,14 @@ export class HudController {
       this.view.ui.contextLabel.style.display = ambientLabel ? 'block' : 'none';
       this.view.ui.contextLabel.textContent = ambientLabel;
     }
+
+    // WHAT THE PAINT PAINTED IS WHAT THE CLICK SENDS. The clickable prompt is
+    // the touch/trackpad interact path; it used to re-arbitrate on the click
+    // frame and read the English word 'Launch' out of the text (hud-13). Stamp
+    // the decision here, once, next to the words.
+    this.view.ui.interactPrompt.dataset.kind = this.view.visibleInteractKind ?? '';
+    this.view.ui.interactPrompt.dataset.launch = player.atCannon ? '1' : '';
+    this.paintInteractRefusal();
 
     this.buildCompassTape();
     const heading = (((player.rotation.x * 180) / Math.PI) % 360 + 360) % 360;

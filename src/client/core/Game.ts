@@ -316,7 +316,10 @@ export type LanternEmitter = {
 /** Interaction kinds the HUD arbiter juggles: server intents plus CLIENT-ONLY
  *  kinds that never ride interactIntent — 'door' (tavern doors swing locally)
  *  and 'harvest' (the axe prompt; LMB does the work via useItem). */
-export type ClientInteractKind = InteractIntent | 'door' | 'harvest';
+// 'info' is a prompt with NO [X]: it states a condition (short of materials)
+// and is never sent as an intent, so the HUD can never offer what the server
+// refuses (hud-11). 'door'/'harvest' are client-side verbs, same exclusion.
+export type ClientInteractKind = InteractIntent | 'door' | 'harvest' | 'info';
 
 /** A story light that has to carry across open water (the widow's lantern).
  *  Core = the flame itself, halo = the bloom a lamp throws into night air. */
@@ -2352,7 +2355,8 @@ export class Game {
     // line and a dull thud, so the failure is at least legible.
     this.network.onInteractRefused = (payload) => {
       const refusal = payload as { intent?: string; reason?: string };
-      this.pushFeed(interactRefusalLine(refusal.intent, refusal.reason), '#e0a33c');
+      // AT the prompt, not 400 px away in the tactical column (hud-25).
+      this.hud.showInteractRefusal(interactRefusalLine(refusal.intent, refusal.reason));
       this.audio.playBodyThud(0.35);
     };
   }
@@ -2956,7 +2960,7 @@ export class Game {
         input.interact = false;
       }
       const toServerIntent = (kind: ClientInteractKind | null): InteractIntent | null =>
-        (kind === 'door' || kind === 'harvest' ? null : kind);
+        (kind === 'door' || kind === 'harvest' || kind === 'info' ? null : kind);
       input.interactIntent = input.interact
         ? (toServerIntent(currentInteractKind) ?? (uiInteract ? toServerIntent(this.lastInteractKind) : null))
         // Revive, the sail halyard, the yard braces and hull REPAIR are

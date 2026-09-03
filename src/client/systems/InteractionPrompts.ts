@@ -29,8 +29,9 @@ import * as THREE from 'three';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
 import { BROKER_NAME, BROKER_NAME_PLURAL } from '../ui/DisplayNames.js';
 import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipHole, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
-import { dist2D, getBraceStationLocals, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
+import { dist2D, getBraceStationLocals, getShipDeckY, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
 import {
+  findBraceStationDir,
   findNearbyCannonIndex,
   getAmmoCrateLocal,
   getAnchorControlLocal,
@@ -58,6 +59,15 @@ const TIER_HANDS_ON = 2;
 /** Margin a challenger must beat the standing winner by, per tier (tier 1 is in
  *  dot units, tier 2 in metres) — the anti-flicker hysteresis. */
 const SWITCH_MARGIN: Record<number, number> = { [TIER_AMBIENT]: 0.05, [TIER_LOOK]: 0.09, [TIER_HANDS_ON]: 0.16 };
+/** The brace rail's grant box is 1.15 x 1.3 m; the prompt reaches a hand's
+ *  width past its far corner and no further (hud-12). */
+const BRACE_PROMPT_REACH = 2.2;
+/** How squarely you must face a breach for [X] to offer the plank. On the open
+ *  deck the strict gate is what keeps the leak from stealing the cannon's
+ *  press; in the unlit hold, where the hole IS the reason you came down, it
+ *  meant the bucket hint won every time (liveplay-v04). */
+const REPAIR_MIN_DOT_ON_DECK = 0.52;
+const REPAIR_MIN_DOT_BELOW_DECK = 0.2;
 /** Memo window for one arbitration. Long enough that the HUD pass and the input
  *  pass of the SAME frame always agree, short enough to feel instant. */
 const ARBITER_MEMO_MS = 40;
@@ -462,15 +472,22 @@ export class InteractionPrompts {
         const needs: string[] = [];
         if (woodHave < cost.wood) needs.push(`Need ${cost.wood - woodHave} more wood`);
         if (oreHave < cost.ore) needs.push(`Need ${cost.ore - oreHave} more ore`);
+        // A PROMPT THAT OFFERS WHAT THE SERVER REFUSES IS A LIE. Short of
+        // wood or ore the press comes back refuse('materials') (Match.ts
+        // 'upgrade'), so drop the [X] and the intent: the candidate becomes
+        // 'info', a kind the input packet never sends (hud-11).
+        const canPay = needs.length === 0;
         this.pushInteractionCandidate(
           candidates,
           player,
           new THREE.Vector3(nearbyStation.position.x, nearbyStation.position.y + 0.9, nearbyStation.position.z),
           4.4,
           0.2,
-          `[X] Claim ${meta.name} — ${cost.wood} wood · ${cost.ore} ore`,
-          `${needs.length > 0 ? needs.join(' · ') : 'Materials ready'} · ${meta.effect}`,
-          'upgrade',
+          canPay
+            ? `[X] Claim ${meta.name} — ${cost.wood} wood · ${cost.ore} ore`
+            : `${meta.name} — ${needs.join(' · ')}`,
+          `${canPay ? 'Materials ready' : `${cost.wood} wood · ${cost.ore} ore`} · ${meta.effect}`,
+          canPay ? 'upgrade' : 'info',
         );
       }
 
@@ -533,9 +550,14 @@ export class InteractionPrompts {
         );
       }
 
-      if (player.onShipId === ship.id && ship.sailIntegrity >= 0.995) {
-        // Brace rails — the physical station that ANGLES the yard. One
-        // candidate per side; the arbiter picks whichever you're looking at.
+      // THE PROMPT MUST NOT OUTRUN THE GRANT. Brace was the one station whose
+      // candidate was not pre-gated on the shared predicate the server checks
+      // (findBraceStationDir, a 1.15 x 1.3 m box): its 4.0 m / dot 0.1 cone
+      // reached the wheel and the guns from half the deck, so "[X] Hold — Brace
+      // the Yard" showed 0.5 m from a cannon, X was refused "out_of_reach", and
+      // the player never manned the gun (hud-12 / liveplay-02). Gate it on the
+      // predicate and cut the reach to arm's length.
+      if (player.onShipId === ship.id && ship.sailIntegrity >= 0.995 && findBraceStationDir(player, ship) !== 0) {
         const stats = SHIP_STATS[ship.type];
         const trimDeg = Math.round((ship.sailAngle * 180) / Math.PI);
         for (const brace of getBraceStationLocals(stats)) {
@@ -544,7 +566,7 @@ export class InteractionPrompts {
             candidates,
             player,
             bracePoint,
-            4.0,
+            BRACE_PROMPT_REACH,
             0.1,
             `[X] Hold — Brace the Yard to ${brace.dir > 0 ? 'Starboard' : 'Port'} (${trimDeg > 0 ? '+' : ''}${trimDeg}°)`,
             'Angle the sails to catch the wind',
@@ -589,12 +611,16 @@ export class InteractionPrompts {
       if (repairHole) {
         const repairPoint = this.view.getHoleRepairWorldPoint(ship, repairHole);
         const plankCount = this.view.getRepairPlankCount(player, ship);
+        // Below the deck beams there is nothing else [X] could mean, and the
+        // hold is dark: relax the look gate so walking onto a breach offers the
+        // plank instead of "Equip the Bucket".
+        const belowDeck = player.position.y < getShipDeckY(ship.position.y, SHIP_STATS[ship.type]) - 0.35;
         this.pushInteractionCandidate(
           candidates,
           player,
           repairPoint,
           4.5,
-          0.52,
+          belowDeck ? REPAIR_MIN_DOT_BELOW_DECK : REPAIR_MIN_DOT_ON_DECK,
           plankCount > 0 ? '[X] Hold — Plank This Leak' : '⚠ Leak here',
           plankCount > 0
             ? `${plankCount} plank${plankCount === 1 ? '' : 's'} ready`
@@ -735,10 +761,16 @@ export class InteractionPrompts {
     el.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.view.lastInteractKind = this.resolveCurrentInteractKind() ?? this.view.visibleInteractKind;
+      // THE CLICK SENDS WHAT THE PAINT PAINTED. This used to re-arbitrate on
+      // the click frame and fall back to whatever kind was last shown, then
+      // decide "launch" by string-matching the English word 'Launch' in the
+      // prompt — a touch player could fire a stale intent, and any copy edit
+      // silently broke the cannon launch (hud-13). HudController stamps
+      // dataset.kind / dataset.launch when it paints; we read exactly that.
+      const painted = el.dataset?.kind ?? '';
+      this.view.lastInteractKind = painted ? (painted as ClientInteractKind) : null;
       this.view.pendingInteractFromUi = true;
-      const t = el.textContent ?? '';
-      if (t.includes('Launch')) {
+      if (el.dataset?.launch === '1') {
         this.view.pendingLaunchFromUi = true;
       }
     });
