@@ -505,6 +505,8 @@ export class Match {
   private announcedCrewEliminations: Set<string> = new Set();
   /** Sim time each hull went under — the clock the lost-at-sea grace runs on. */
   private shipSunkAt: Map<string, number> = new Map();
+  /** Sim time a hull was last left with nobody alive to sail her (TOW-01). */
+  private crewlessSince: Map<string, number> = new Map();
   /** Pirates the sea claimed for want of a deck, so the death card can say so. */
   private lostAtSea: Set<string> = new Set();
   private skeletonHomes: Map<string, string> = new Map();
@@ -922,7 +924,15 @@ export class Match {
     return bestSpawn ?? spawns[0] ?? null;
   }
 
-  private pickSafeSpawnDock(): IslandDock | null {
+  /**
+   * A free berth comfortably inside the ring.
+   *
+   * `farthestFromHulls` is the human-join reading: `pickHumanSpawn` computes the
+   * berth farthest from every other ship and createHumanClient then threw that
+   * work away for a UNIFORMLY RANDOM dock, so two humans could join into the
+   * same bay (gameplay-24). joinRng now only breaks ties.
+   */
+  private pickSafeSpawnDock(farthestFromHulls = false): IslandDock | null {
     const candidates: IslandDock[] = [];
     const { centerX, centerZ, safeRadius } = this.state.storm;
 
@@ -939,9 +949,30 @@ export class Match {
       if (!occupied) candidates.push(dock);
     }
 
-    return candidates.length > 0
-      ? candidates[Math.floor(this.joinRng() * candidates.length)]
-      : null;
+    if (candidates.length === 0) return null;
+    if (!farthestFromHulls) {
+      return candidates[Math.floor(this.joinRng() * candidates.length)];
+    }
+    const hulls = this.state.ships.filter((ship) => ship.alive && !ship.sinking);
+    let best: IslandDock | null = null;
+    let bestScore = -Infinity;
+    for (const dock of candidates) {
+      let nearest = Infinity;
+      for (const hull of hulls) {
+        nearest = Math.min(
+          nearest,
+          dist2D(dock.berthPosition.x, dock.berthPosition.z, hull.position.x, hull.position.z),
+        );
+      }
+      // Ties (an empty sea, or two docks equally clear) fall to the seeded roll,
+      // so the choice stays deterministic per match.
+      const score = (nearest === Infinity ? 1e6 : nearest) + this.joinRng() * 0.001;
+      if (score > bestScore) {
+        bestScore = score;
+        best = dock;
+      }
+    }
+    return best;
   }
 
   private getNextTeamColor() {
@@ -1014,7 +1045,7 @@ export class Match {
     this.state.ships.push(ship);
 
     const player = this.createPlayer(playerId, displayName, shipId, false);
-    const spawnDock = this.pickSafeSpawnDock();
+    const spawnDock = this.pickSafeSpawnDock(/*farthestFromHulls*/ true);
     if (spawnDock) {
       this.parkShipAtDock(ship, spawnDock);
       player.position = {
@@ -1653,6 +1684,7 @@ export class Match {
     this.syncTreasureChests();
     this.updateKegs(dt);
     this.updateFieldRepairs(dt);
+    this.updateDeathAnchor();
 
     // Trading
     const tradeEvents = this.trading.update(dt, this.state.tradeSessions, this.state.ships, this.state.players);
@@ -3646,6 +3678,56 @@ export class Match {
       if (!this.consumeShipItem(ship, 'wood_plank', 1)) continue;
       this.physics.patchHole(ship, target.id);
     }
+  }
+
+  /**
+   * A HULL WITH NOBODY ALIVE ABOARD ROUNDS UP.
+   *
+   * A solo captain killed at speed left his ship under full canvas and nobody at
+   * the wheel: she ran on for the whole respawn — 20 s at 10 m/s is 200 m, and
+   * she usually spent it sailing into the storm or onto a reef, so the pirate
+   * respawned aboard a wreck he never steered (gameplay-24). After
+   * MATCH_END.DEATH_ANCHOR_SECONDS with no living hand — aboard her OR waiting
+   * on her — the canvas comes in and the anchor goes down where she lies.
+   */
+  private updateDeathAnchor(): void {
+    for (const ship of this.state.ships) {
+      if (!ship.alive || ship.sinking) {
+        this.crewlessSince.delete(ship.id);
+        continue;
+      }
+      if (this.hasLivingHand(ship)) {
+        this.crewlessSince.delete(ship.id);
+        continue;
+      }
+      let since = this.crewlessSince.get(ship.id);
+      if (since === undefined) {
+        since = this.t;
+        this.crewlessSince.set(ship.id, since);
+        // The canvas comes in the moment the last hand is gone — nobody is left
+        // to hold the sheets — and she carries her way from there.
+        ship.sailHeight = 0;
+        ship.sailAngle = 0;
+      }
+      ship.sailHeight = 0;
+      if (this.t - since < MATCH_END.DEATH_ANCHOR_SECONDS) continue;
+      if (!ship.anchored) {
+        ship.anchored = true;
+        ship.anchorRaiseProgress = 0;
+      }
+    }
+  }
+
+  /** Anyone alive and on their feet who could still work this hull: a crew
+   *  member on her books, or anybody standing on her deck (a boarder counts —
+   *  she is under way for a reason). A held respawn is not a hand. */
+  private hasLivingHand(ship: Ship): boolean {
+    for (const p of this.state.players) {
+      if (p.state === 'eliminated' || p.state === 'respawning') continue;
+      if (p.health <= 0) continue;
+      if (p.shipId === ship.id || p.onShipId === ship.id) return true;
+    }
+    return false;
   }
 
   /** Kegs riding a hull only carry a hull-local position — freshen the world
@@ -7333,7 +7415,7 @@ export class Match {
       // she is alongside — reading it first put a respawning pirate at the spot
       // the ship used to be lying.
       if (respawnPlan.dock) {
-        this.parkShipAtDock(homeShip, respawnPlan.dock);
+        this.parkShipAtDock(homeShip, respawnPlan.dock, /*refit*/ false);
       }
       player.state = 'alive';
       player.health = PLAYER.RESPAWN_HEALTH;
@@ -7726,13 +7808,17 @@ export class Match {
    */
   private towDerelictToSafety(ship: Ship): boolean {
     if (!ship.alive || ship.sinking) return false;
-    const dock = this.pickSafeSpawnDock();
-    if (dock) {
-      this.parkShipAtDock(ship, dock);
+    // OPEN WATER FIRST. A berth is a full harbour and the crew's own choice to
+    // make; the tide's job is only to get her back inside the wall, so she is
+    // set down in clear water on the line toward the ring and a dock is the
+    // fallback for a ring with no room in it (TOW-01).
+    const berth = this.findOpenWaterInsideRing(ship);
+    if (!berth) {
+      const dock = this.pickSafeSpawnDock();
+      if (!dock) return false;
+      this.parkShipAtDock(ship, dock, /*refit*/ false);
       return true;
     }
-    const berth = this.findOpenWaterInsideRing(ship);
-    if (!berth) return false;
     ship.position.x = berth.x;
     ship.position.z = berth.z;
     ship.position.y = 0.05;
@@ -7746,13 +7832,9 @@ export class Match {
     ship.anchorRaiseProgress = 0;
     ship.sailHeight = 0;
     ship.sailAngle = 0;
-    ship.onFire = false;
-    ship.fireTimer = 0;
-    ship.fireDamageAccum = 0;
-    ship.sailIntegrity = 1;
-    ship.holes = [];
-    ship.nextHoleId = 1;
-    ship.waterLevel = 0;
+    // As she is: still holed, still burning if she was burning, bailed only to
+    // the clamp a crew could sail home on.
+    ship.waterLevel = Math.min(ship.waterLevel ?? 0, MATCH_END.TOW_WATER_CLAMP);
     return true;
   }
 
@@ -7791,7 +7873,14 @@ export class Match {
     return null;
   }
 
-  private parkShipAtDock(ship: Ship, dock: IslandDock) {
+  /**
+   * Moor a hull at a berth. `refit` is the difference between a match start and
+   * a RESCUE: a tow or a respawn used to hand back a brand-new ship (no
+   * breaches, no fire, no water, fresh canvas), which made dying the cheapest
+   * repair in the game — sail out of the ring holed and flooding, get killed,
+   * come back seaworthy at a dock in the middle of the map (TOW-01/gameplay-03).
+   */
+  parkShipAtDock(ship: Ship, dock: IslandDock, refit = true) {
     // Normalized berth, computed for THIS ship: parallel to the dock, bow
     // seaward, a consistent 1m gap between hull side and dock edge, and the hull
     // laid ALONGSIDE the dock's seaward run (stern always inside the dock span,
@@ -7808,18 +7897,25 @@ export class Match {
     ship.anchorRaiseProgress = 0;
     ship.sailHeight = 0;
     ship.sailAngle = 0;
+    ship.chainshottedUntil = 0;
+    ship.sinking = false;
+    ship.sinkProgress = 0;
+    if (!refit) {
+      // She comes in as she is. The sea bails her only down to what a crew could
+      // still sail home; the breaches, the fire and the torn canvas are the
+      // crew's problem, which is the whole point of a carpenter and a bucket.
+      ship.waterLevel = Math.min(ship.waterLevel ?? 0, MATCH_END.TOW_WATER_CLAMP);
+      return;
+    }
     ship.onFire = false;
     ship.fireTimer = 0;
     ship.fireDamageAccum = 0;
-    ship.chainshottedUntil = 0;
     ship.sailIntegrity = 1;
     ship.sailRepairWoodTimer = 0;
-    ship.sinking = false;
-    ship.sinkProgress = 0;
     ship.repairCooldown = 0;
     ship.autoRepairProgress = 0;
-    // A reset/respawned ship is seaworthy again — fresh planking, no breaches
-    // at all (any open hole would keep flooding her under the hole model).
+    // A reset ship is seaworthy again — fresh planking, no breaches at all (any
+    // open hole would keep flooding her under the hole model).
     ship.holes = [];
     ship.nextHoleId = 1;
     ship.waterLevel = 0;

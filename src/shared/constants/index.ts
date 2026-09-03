@@ -836,6 +836,14 @@ export const MATCH_END = {
    *  recently. Deliberately far tighter than the 90 s direct-kill window: a
    *  storm death two minutes after a graze is the weather's, not a captain's. */
   ASSIST_CREDIT_WINDOW: 12,
+  /** A hull brought in by the tide, or moored for a respawn, keeps her breaches
+   *  and her fire — the sea bails her only to what a crew could still sail home.
+   *  Dying used to be the cheapest refit in the game (TOW-01). */
+  TOW_WATER_CLAMP: 0.45,
+  /** With nobody alive aboard and nobody alive who calls her home, a hull rounds
+   *  up after this long: canvas furled, anchor down. A dead solo captain's ship
+   *  used to run on under full sail for the whole respawn. */
+  DEATH_ANCHOR_SECONDS: 4,
 } as const;
 
 /**
