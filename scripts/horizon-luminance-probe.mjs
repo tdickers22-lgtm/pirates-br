@@ -38,6 +38,10 @@
 //       composer to do it for the material (graphics-26);
 //     • u_keyLight / u_ambient / u_moonness exist, and after dark u_sunDir is
 //       the ACTIVE light (the moon), not the below-horizon sun (graphics-15).
+//     • and those three are READ by the body (an existing-but-unsampled uniform
+//       passes a table check and changes nothing), the storm branch mixes the
+//       body toward the shaped sky, and storm-02's second grey desaturation
+//       pass stays deleted (storm-12 / storm-02).
 //
 //   PIXELS (luma ratios, never absolutes, so SwiftShader's curve cannot move
 //   the verdict):
@@ -299,6 +303,24 @@ async function main() {
         // which is exactly the "render target is null" condition.
         toneMapped: /#define TONE_MAPPING/.test(expanded),
         srgbOut: /LinearTosRGB|sRGBTransferOETF\s*\(\s*value/.test(expanded),
+        // ── SLICE f: DECLARED IS NOT CONSUMED ──────────────────────────
+        // The check above reads the uniform TABLE. A uniform that exists and is
+        // never read leaves the sea exactly as self-luminous as it was on HEAD,
+        // and the table check still passes — so these four read the authored
+        // body instead. All four are structural, cost no frames, and are the
+        // only assertions in the battery that guard the storm half of OCEAN-01
+        // (test-storm-wall does the storm PIXELS and is not deterministic yet;
+        // see the w1.4 handoff to lane 5.4).
+        keyLightConsumed: /base\s*\*=\s*u_ambient\s*\+\s*u_keyLight/.test(src),
+        moonnessConsumed: (src.match(/u_moonness/g) ?? []).length > 1,
+        stormTakesSky: /vec3\s+stormSky\s*=\s*mix\(/.test(src)
+          && /base\s*=\s*mix\(\s*base\s*,\s*stormSky/.test(src)
+          && /skyShape\(\s*u_horizonColor\s*\)/.test(src),
+        // storm-02's two ocean greys: the (0.42,0.48,0.55) multiply is kept at
+        // 0.35 strength by slice d, the (0.72,0.76,0.82) second desaturation
+        // pass is gone. Its return is the exact regression that made a squall
+        // read as a black-and-white photograph.
+        greyDesatPasses: (src.match(/0\.72\s*,\s*0\.76\s*,\s*0\.82/g) ?? []).length,
         hasKey: !!u.u_keyLight, hasAmbient: !!u.u_ambient, hasMoonness: !!u.u_moonness,
         moonness: u.u_moonness?.value ?? null,
         sunDir: sd ? [sd.x, sd.y, sd.z] : null,
@@ -319,6 +341,15 @@ async function main() {
     expect('ocean has scene light inputs (u_keyLight, u_ambient, u_moonness)',
       wiring.hasKey && wiring.hasAmbient && wiring.hasMoonness,
       `key=${wiring.hasKey} ambient=${wiring.hasAmbient} moonness=${wiring.hasMoonness}`);
+    expect('the scene light inputs are CONSUMED by the body, not merely declared',
+      wiring.keyLightConsumed && wiring.moonnessConsumed,
+      `keyLight read by the body=${wiring.keyLightConsumed} moonness read=${wiring.moonnessConsumed} — an unread uniform passes the check above and still leaves the sea self-luminous (graphics-03/graphics-15)`);
+    expect('under a front the body mixes toward the SHAPED SKY (Fresnel stormSky)',
+      wiring.stormTakesSky,
+      'the storm sea must take the colour of the sky over it, not a constant blue multiplied by a grey (storm-12)');
+    expect(`storm-02's second grey desaturation pass stays deleted (${wiring.greyDesatPasses} found)`,
+      wiring.greyDesatPasses === 0,
+      'carrying the chroma down twice is what made a squall read as a black-and-white photograph (storm-02)');
 
     // ── MOON PATH: a low moon dead ahead must lay a glitter column ────────
     // Centre-vs-flanks, not peak-vs-median: with the camera yawed AT the moon the
