@@ -127,6 +127,14 @@ const OCEAN_FRAG = /* glsl */`
   uniform float u_twilightFactor;
   uniform vec3  u_fogColor;
   uniform vec3  u_horizonColor;
+  // The scene's own lights, calibrated in Renderer.getAtmosphere so that at NOON
+  // u_ambient is 0.48 and u_keyLight is 0.62 — the two constants that used to be
+  // the ocean's entire light model. u_sunDir is now the ACTIVE light (moon after
+  // dusk); u_sunDirTrue is the astronomical sun, for the sunset terms only.
+  uniform vec3  u_keyLight;
+  uniform vec3  u_ambient;
+  uniform vec3  u_sunDirTrue;
+  uniform float u_moonness;
   uniform vec4  u_islands[${MAX_ISLANDS}];
   uniform int   u_islandCount;
   uniform vec2  u_stormCenter;
@@ -206,6 +214,15 @@ const OCEAN_FRAG = /* glsl */`
 
     vec3 V = normalize(u_cameraPos - v_worldPos);
     vec3 L = normalize(u_sunDir);
+    // The TRUE sun, which is under the horizon all night. Only the warm sunset
+    // streak may key off it — hand it to the diffuse or the specular and the
+    // whole sea goes unlit the moment the sun sets, which is what it did.
+    vec3 S = normalize(u_sunDirTrue);
+    // The two lights as one "how bright is it out" scale, normalised to 1.0 at
+    // noon (0.48 + 0.62*0.55 = 0.821). Terms that are not albedo — foam, spray,
+    // the shore film — used to carry their own hand-rolled night mix; they ride
+    // this instead, so a change to the scene's lights moves them too.
+    vec3 lightScale = (u_ambient + u_keyLight * 0.55) / 0.821;
 
     // How far the EYE sits above this patch of surface. Swimming or wading, the
     // whole visible sea is at grazing incidence, and both the shallow tint and
@@ -285,10 +302,21 @@ const OCEAN_FRAG = /* glsl */`
     float NdotV   = max(0.0, dot(N, V));
     float fresnel = 0.028 + 0.972 * pow(1.0 - NdotV, 5.0);
     // Warm reflection streak only when the sun sits low (sunrise/sunset).
-    float sunLow  = 1.0 - smoothstep(0.16, 0.48, L.y);
-    float sunUp   = smoothstep(-0.06, 0.10, L.y);
-    float sunPath = pow(max(0.0, dot(normalize(vec3(V.x, 0.14, V.z)), normalize(vec3(L.x, 0.14, L.z)))), 5.0);
-    vec3 reflCol = mix(vec3(0.38, 0.54, 0.82), u_horizonColor, 0.42);
+    float sunLow  = 1.0 - smoothstep(0.16, 0.48, S.y);
+    // The KEY light's own elevation — the sun by day, the moon by night, and
+    // never below 0.16 — so there is a specular lobe after dark to carry the
+    // moon path. The old sunUp = smoothstep(-0.06, 0.10, L.y) went to 0 the
+    // moment the sun set and took every highlight on the sea with it. sunLow /
+    // sunPath above stay on the TRUE sun, so the warm sunset streak they tint
+    // does not reappear at midnight under the moon.
+    float keyUp   = smoothstep(-0.06, 0.10, L.y);
+    float sunPath = pow(max(0.0, dot(normalize(vec3(V.x, 0.14, V.z)), normalize(vec3(S.x, 0.14, S.z)))), 5.0);
+    // The sky the water mirrors, shaped the way the sky dome shapes itself, so
+    // the reflection dims with the sky at night instead of staying a daylight
+    // blue constant: this term, not the body colour, is what carried the night
+    // inversion at grazing angles.
+    vec3 skyTint = skyShape(u_horizonColor);
+    vec3 reflCol = mix(vec3(0.38, 0.54, 0.82) * lightScale, skyTint, 0.42);
     reflCol = mix(reflCol, vec3(1.0, 0.55, 0.30), sunPath * sunLow * 0.6);
     base = mix(base, reflCol, fresnel * 0.42);
 
@@ -307,20 +335,19 @@ const OCEAN_FRAG = /* glsl */`
     // — just a paler one.
     vec3 R = reflect(-V, N);
     float rUp = clamp(R.y, 0.0, 1.0);
-    vec3 zenithCol = u_horizonColor * vec3(0.46, 0.62, 0.95);
+    vec3 zenithCol = skyTint * vec3(0.46, 0.62, 0.95);
     // The lookup band is deliberately NARROW: at eye level every reflected ray
     // leaves the surface within a few degrees of the horizon, so a wide ramp
     // reads back the same horizon colour for every ripple and the sheet stays
     // flat. Across 0..0.09 of R.y the ripples separate into visible bands.
-    vec3 skyRefl = mix(u_horizonColor, zenithCol, smoothstep(0.004, 0.090, rUp));
+    vec3 skyRefl = mix(skyTint, zenithCol, smoothstep(0.004, 0.090, rUp));
     float graze = smoothstep(0.30, 0.015, NdotV);
     vec3 grazeCol = mix(skyRefl, base, 0.34);
-    grazeCol = mix(grazeCol, grazeCol * vec3(0.32, 0.44, 0.60), u_nightFactor * 0.7);
     base = mix(base, grazeCol, graze * (0.30 + 0.42 * shallowMask) * (0.35 + 0.65 * lowEye));
 
-    // ── Diffuse sun ─────────────────────────────────────────────────────
+    // ── Diffuse key light ───────────────────────────────────────────────
     float diff = max(0.0, dot(N, L));
-    base *= 0.48 + diff * 0.62;
+    base *= u_ambient + u_keyLight * diff;
 
     // ── Blinn specular: lobe widens with distance (specular AA), energy
     //    drops with it, and the HDR result is clamped — no firefly noise ─
@@ -332,7 +359,12 @@ const OCEAN_FRAG = /* glsl */`
     float shininess = mix(310.0, mix(46.0, 130.0, sunLow), lobeWiden);
     float spec  = pow(NdotH, shininess) * mix(1.9, 0.5, lobeWiden) * (1.0 - sunLow * 0.35);
     float glare = pow(NdotH, 24.0) * 0.1;
-    vec3 specCol = mix(vec3(1.0, 0.94, 0.80), vec3(1.0, 0.50, 0.28), sunPath * sunLow) * (spec + glare) * sunUp;
+    // keyUp, not sunUp: the lobe follows whatever is in the sky. Moonlight is a
+    // reflected-sunlight source about a millionth as strong, so the path is
+    // dimmed rather than removed — 0.35 keeps a legible glitter column without
+    // painting a second sunset on the water.
+    vec3 specCol = mix(vec3(1.0, 0.94, 0.80), vec3(1.0, 0.50, 0.28), sunPath * sunLow)
+                 * (spec + glare) * keyUp * mix(1.0, 0.35, u_moonness);
     specCol = min(specCol, vec3(1.15));
     specCol = mix(specCol, specCol * vec3(0.62, 0.74, 1.05), u_nightFactor);
 
@@ -401,14 +433,17 @@ const OCEAN_FRAG = /* glsl */`
     float shoreFoam = min(max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55), 0.4) * shoreRange;
     foam = clamp(foam + shoreFoam, 0.0, 1.0);
 
-    vec3 foamCol = vec3(0.88, 0.93, 1.0) * mix(1.0, 0.45, u_nightFactor)
+    // Whitecaps are white PAINT, not a light source: they are as bright as what
+    // falls on them. The old fixed 0.45 night mix left them glowing like lanterns
+    // over a sea that had itself been dimmed to 0.42.
+    vec3 foamCol = vec3(0.88, 0.93, 1.0) * lightScale
                  * mix(vec3(1.0), vec3(1.0, 0.82, 0.66), u_twilightFactor * 0.7);
     // …and what shore foam it does lay down is tinted toward the shallow water
     // it floats on rather than paper white, so a 30 cm shelf reads as bright
     // warm turquoise with the sand showing through it. Crest whitecaps out at
     // sea are untouched and keep the full white.
     vec3 shoreFilm = (shallowCol * 1.10 + vec3(0.12, 0.09, 0.04))
-                   * mix(1.0, 0.45, u_nightFactor)
+                   * lightScale
                    * mix(vec3(1.0), vec3(1.0, 0.82, 0.66), u_twilightFactor * 0.7);
     vec3 shoreFoamCol = mix(shoreFilm, foamCol, 0.22);
     float shoreShare = foam > 0.0001 ? clamp(shoreFoam / foam, 0.0, 1.0) : 0.0;
@@ -428,11 +463,13 @@ const OCEAN_FRAG = /* glsl */`
     // shallows so tropical water keeps its turquoise instead of blowing out.
     color += specCol * (1.0 - shallowMask * 0.82);
 
-    // Night: dim the water body (fog/horizon colors arrive pre-dimmed). The
-    // shallows used to be handed a big exemption from this, which is half of why
-    // a night lagoon glowed like a light source; they now dim nearly as far as
-    // open water and get their brightness back only from foam and moonlight.
-    color *= mix(1.0, 0.42, u_nightFactor * (1.0 - foam * 0.4) * (1.0 - shallowMask * 0.12));
+    // THE MAGIC 0.42 NIGHT DIM IS GONE. It was the ocean's stand-in for a light
+    // model: a single scalar, exempting foam from 40% of itself, that had to be
+    // re-tuned by hand every time the scene's night key, ambient or hemisphere
+    // moved — and it is why the sea sat 2.6x above the sky it reflects at
+    // midnight (measured, balanced tier, pinned map). Night now arrives through
+    // u_ambient / u_keyLight / skyTint, which are the same lights the deck under
+    // the player's feet is shaded by.
 
     // Twilight: the sea takes the warm, dimmed cast of the sunset sky instead of
     // staying daytime cyan under a peach/indigo horizon.
@@ -607,10 +644,16 @@ function buildRingGeometry(level: LodLevel): THREE.BufferGeometry {
 interface OceanAtmosphere {
   fogColor?: THREE.Color;
   horizonColor?: THREE.Color;
+  /** The ACTIVE light (sun by day, moon after dusk). */
   sunDir?: THREE.Vector3;
+  /** The astronomical sun, for the sunset terms only. */
+  sunDirTrue?: THREE.Vector3;
+  keyColor?: THREE.Color;
+  ambientColor?: THREE.Color;
   storminess?: number;
   nightFactor?: number;
   twilightFactor?: number;
+  moonness?: number;
 }
 
 /** Island footprint for the shoreline SDF. Preferred: elliptical half-extents
@@ -662,6 +705,13 @@ export class OceanRenderer {
         // the sea-sky junction is seamless before live values get wired in.
         u_fogColor:     { value: new THREE.Color(0x9bbfd4) },
         u_horizonColor: { value: new THREE.Color(0.78, 0.90, 0.98) },
+        // Defaults are the noon calibration: the values the old hand-tuned
+        // `0.48 + diff * 0.62` used, so a frame drawn before the first
+        // setAtmosphere() looks exactly as it did.
+        u_keyLight:   { value: new THREE.Color(0.62, 0.62, 0.62) },
+        u_ambient:    { value: new THREE.Color(0.48, 0.48, 0.48) },
+        u_sunDirTrue: { value: this.sunDir.clone() },
+        u_moonness:   { value: 0 },
         u_islands:     { value: Array.from({ length: MAX_ISLANDS }, () => new THREE.Vector4(0, 0, 1, 1)) },
         u_islandCount: { value: 0 },
         // Storm sea-state (shared getStormWaveIntensity inputs). Negative
@@ -795,6 +845,10 @@ export class OceanRenderer {
     if (atmo.fogColor) (u.u_fogColor.value as THREE.Color).copy(atmo.fogColor);
     if (atmo.horizonColor) (u.u_horizonColor.value as THREE.Color).copy(atmo.horizonColor);
     if (atmo.sunDir) this.setSunDirection(atmo.sunDir);
+    if (atmo.sunDirTrue) (u.u_sunDirTrue.value as THREE.Vector3).copy(atmo.sunDirTrue).normalize();
+    if (atmo.keyColor) (u.u_keyLight.value as THREE.Color).copy(atmo.keyColor);
+    if (atmo.ambientColor) (u.u_ambient.value as THREE.Color).copy(atmo.ambientColor);
+    if (atmo.moonness !== undefined) u.u_moonness.value = Math.max(0, Math.min(1, atmo.moonness));
     if (atmo.storminess !== undefined) this.setStormIntensity(atmo.storminess);
     if (atmo.nightFactor !== undefined) {
       u.u_nightFactor.value = Math.max(0, Math.min(1, atmo.nightFactor));

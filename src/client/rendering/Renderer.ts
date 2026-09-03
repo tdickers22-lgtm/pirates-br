@@ -447,13 +447,42 @@ const SKY_FRAG = /* glsl */`
 `;
 
 interface Atmosphere {
+  /** The light that is actually SHINING: the sun by day, the anti-sun (moon)
+   *  after dusk — the same vector the scene's directional light uses. */
   sunDir: THREE.Vector3;
+  /** The astronomical sun, below the horizon at night. Only the warm sunset
+   *  terms (sunLow / sunPath) may key off this; everything else wants sunDir. */
+  sunDirTrue: THREE.Vector3;
   fogColor: THREE.Color;
   horizonColor: THREE.Color;
+  /** Scene key light, calibrated so NOON reproduces the ocean's old 0.62. */
+  keyColor: THREE.Color;
+  /** Ambient + half the hemisphere, calibrated so NOON reproduces 0.48. */
+  ambientColor: THREE.Color;
   storminess: number;
   nightFactor: number;
   twilightFactor: number;
+  /** 1 once the sun is down and the key light is the moon. */
+  moonness: number;
 }
+
+// ── OCEAN LIGHT CALIBRATION ────────────────────────────────────────────────
+// The ocean's whole light model was `base *= 0.48 + diff * 0.62` — two numbers
+// hand-tuned for noon, at every hour of the day, which is why the night sea had
+// to be dimmed by a separate magic 0.42 and why every re-tune of the inversion
+// came undone the next time a light changed. The sea now reads the scene's own
+// lights; these constants exist only to make NOON land exactly where it did, so
+// the change is a change to the other twenty-three hours.
+const OCEAN_AMBIENT_NOON = 0.48;
+const OCEAN_KEY_NOON = 0.62;
+/** getCycleSunIntensity() at dayAmount 1. */
+const OCEAN_KEY_NOON_INTENSITY = 2.65;
+/** How much of each light's HUE the water takes. Full strength would swing the
+ *  noon sea toward the hemisphere's blue by a visible amount for no defect;
+ *  the magnitude is what carries the day/night truth, the hue is seasoning. */
+const OCEAN_LIGHT_TINT = 0.45;
+/** Rec.709 luminance of a linear colour (three's Color has no getLuminance). */
+const colorLuma = (c: THREE.Color) => c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722;
 
 // Camera-following shadow frustum: an ortho box snapped to shadow texels. Sized
 // to swallow a whole large island (radius up to ~96m) so its cast/self shadows
@@ -478,6 +507,9 @@ export class Renderer {
   private sunGlow!: THREE.Mesh;
   private readonly sunDir = new THREE.Vector3(0.2, 0.92, -0.34).normalize();
   private readonly activeLightDir = new THREE.Vector3();
+  /** smoothstep(-0.06, 0.12, sunDir.y) from updateDayNight: 0 once the key light
+   *  is the moon. getAtmosphere hands its complement to the ocean as moonness. */
+  private sunAboveAmount = 1;
   // Distance fog is deliberately DARKER than the sky it sits under. A fog tint
   // that matched the horizon washed every island to a white ghost by ~500m and
   // killed navigate-by-silhouette: only Old Maw (dark volcanic rock) survived.
@@ -563,11 +595,15 @@ export class Renderer {
   private readonly cameraForward = new THREE.Vector3();
   private readonly atmosphere: Atmosphere = {
     sunDir: new THREE.Vector3(0.2, 0.92, -0.34).normalize(),
+    sunDirTrue: new THREE.Vector3(0.2, 0.92, -0.34).normalize(),
     fogColor: new THREE.Color(0x9bbfd4),
     horizonColor: new THREE.Color(0xc7e6fa),
+    keyColor: new THREE.Color(OCEAN_KEY_NOON, OCEAN_KEY_NOON, OCEAN_KEY_NOON),
+    ambientColor: new THREE.Color(OCEAN_AMBIENT_NOON, OCEAN_AMBIENT_NOON, OCEAN_AMBIENT_NOON),
     storminess: 0,
     nightFactor: 0,
     twilightFactor: 0,
+    moonness: 0,
   };
   /** 0..1 falling-rain density from EnvironmentFx. Rain is not just streaks: a
    *  downpour thickens the air, so it adds fog density and pulls the fog toward
@@ -1390,15 +1426,43 @@ export class Renderer {
   /** Per-frame atmosphere snapshot for the ocean/other systems. Returned objects are reused. */
   getAtmosphere(): Atmosphere {
     const a = this.atmosphere;
-    a.sunDir.copy(this.sunDir);
+    // THE SEA IS LIT BY WHAT IS ACTUALLY SHINING. This used to hand the ocean
+    // this.sunDir — the astronomical sun — which is below the horizon for the
+    // whole back half of every match, so the water's sunUp went to 0, its
+    // diffuse went to 0, and the one large surface in frame lost its key light,
+    // its specular and any sense of direction exactly when land and ships were
+    // being moonlit by activeLightDir. The true sun rides along separately for
+    // the warm sunset streak, which must NOT reappear under the moon.
+    a.sunDir.copy(this.activeLightDir);
+    a.sunDirTrue.copy(this.sunDir);
+    a.moonness = 1 - this.sunAboveAmount;
     const fog = this.scene?.fog as THREE.FogExp2 | null;
     if (fog) a.fogColor.copy(fog.color);
     this.getCycleColor(a.horizonColor, this.skyHorizonDayColor, this.skyHorizonTwilightColor, this.skyHorizonNightColor);
     a.horizonColor.lerp(this.skyHorizonStormColor, this.stormLevel);
+    // Same inputs the land gets, normalised against their own noon values (see
+    // OCEAN_* above): magnitude from the live intensities, hue at 45%.
+    const noonAmbient = colorLuma(this.ambientDayColor) * 0.9
+      + colorLuma(this.hemiSkyDayColor) * 1.34 * 0.5;
+    const liveAmbient = colorLuma(this.ambientLight.color) * this.ambientLight.intensity
+      + colorLuma(this.hemisphereLight.color) * this.hemisphereLight.intensity * 0.5;
+    this.oceanLight(a.ambientColor, this.ambientLight.color, OCEAN_AMBIENT_NOON * liveAmbient / Math.max(1e-4, noonAmbient));
+    this.oceanLight(a.keyColor, this.sun.color, OCEAN_KEY_NOON * this.sun.intensity / OCEAN_KEY_NOON_INTENSITY);
     a.storminess = this.stormLevel;
     a.nightFactor = this.nightAmount;
     a.twilightFactor = this.twilightAmount;
     return a;
+  }
+
+  /** One light expressed the way the water wants it: `magnitude` carries the
+   *  truth, the source colour contributes OCEAN_LIGHT_TINT of its hue. */
+  private oceanLight(target: THREE.Color, tint: THREE.Color, magnitude: number) {
+    const l = Math.max(1e-4, colorLuma(tint));
+    target.setRGB(
+      THREE.MathUtils.lerp(1, tint.r / l, OCEAN_LIGHT_TINT),
+      THREE.MathUtils.lerp(1, tint.g / l, OCEAN_LIGHT_TINT),
+      THREE.MathUtils.lerp(1, tint.b / l, OCEAN_LIGHT_TINT),
+    ).multiplyScalar(Math.max(0, magnitude));
   }
 
   /** Keeps a tight shadow ortho box centered ahead of the camera, snapped to shadow texels. */
@@ -1476,6 +1540,7 @@ export class Renderer {
     this.skyMaterial.uniforms.u_time.value = elapsedSeconds;
 
     const sunAbove = smoothstep(-0.06, 0.12, this.sunDir.y);
+    this.sunAboveAmount = sunAbove;
     this.activeLightDir.copy(this.sunDir);
     if (sunAbove <= 0.08) this.activeLightDir.multiplyScalar(-1);
     this.activeLightDir.y = Math.max(0.16, this.activeLightDir.y);
