@@ -946,6 +946,15 @@
       cursor: pointer;
     }
     #interact-prompt.visible { display: block; }
+    /* A refusal you can SEE (hud-11): HudController stamps .refused on the
+       prompt for 1.5 s and prints the reason under it; without this the class
+       painted nothing at all. */
+    @keyframes refuse-shake {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-3px); }
+      75% { transform: translateX(3px); }
+    }
+    #interact-prompt.refused { animation: refuse-shake 0.18s 2; color: #ff9d7a; }
 
     /* Crosshair */
     #crosshair {
@@ -2220,8 +2229,8 @@
         <div><strong style="color:#9ec0e5;">Controls</strong></div>
         WASD · Move &nbsp;|&nbsp; SPACE · Jump / Swim up &nbsp;|&nbsp; Z · Swim down &nbsp;|&nbsp; C · Crouch &nbsp;|&nbsp; X · Interact<br>
         1–4 · Weapons &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; P · Spyglass<br>
-        LMB · Fire &nbsp;|&nbsp; SHIFT/RMB · Aim (guard, with a cutlass) &nbsp;|&nbsp; E · Special &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; G · Keg<br>
-        Hold I · Supply Wheel (1–9 · Q flips to charts) &nbsp;|&nbsp; B · Drop Chest &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; L · Controls &nbsp;|&nbsp; F8 · Bug report<br>
+        LMB · Fire &nbsp;|&nbsp; SHIFT/RMB · Aim (guard, with a cutlass) &nbsp;|&nbsp; E · Special &nbsp;|&nbsp; G · Keg<br>
+        Hold I · Supply Wheel (1-9, 0 · Q flips to charts) &nbsp;|&nbsp; B · Drop Chest &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; L · Controls &nbsp;|&nbsp; F8 · Bug report<br>
         At Helm: A/D · Steer &nbsp;|&nbsp; W/S · Sails out / in &nbsp;|&nbsp; Q/F · Angle the sails &nbsp;|&nbsp; Hold W · Weigh anchor
       </div>
       <div class="menu-row">
@@ -2514,9 +2523,9 @@
         <br>⛵ Rope stations at the mast rails · Hold X drops / raises the sails (crewmates on the rope haul faster)
         <br>Helm: A/D · Steer &nbsp;·&nbsp; W/S · Sails out / in &nbsp;·&nbsp; Q/F · Angle the sails &nbsp;·&nbsp; Hold W · Weigh anchor &nbsp;|&nbsp; Crow's nest · ladder up the mainmast
         <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; E · Special attack &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Hold for powder keg, release to place
-        <br>Hold I · Supply wheel &amp; tools (1–9 to take one · Q flips to your charts)
+        <br>Hold I · Supply wheel &amp; tools (1-9, 0 to take one · Q flips to your charts)
         <br>LMB · Fire &nbsp;|&nbsp; SHIFT or RMB · Aim — with a cutlass drawn it raises your guard instead
-        <br>P · Spyglass &nbsp;|&nbsp; T · Trade &nbsp;|&nbsp; M · Map (Esc closes) &nbsp;|&nbsp; L · This card &nbsp;|&nbsp; F8 · Bug report
+        <br>P · Spyglass &nbsp;|&nbsp; M · Map (Esc closes) &nbsp;|&nbsp; L · This card &nbsp;|&nbsp; F8 · Bug report
         <br>
         <br><strong style="color:#f0dda9;">Kill streak rewards:</strong> 4 kills · super cannonball &nbsp;·&nbsp; 8 · mega keg &nbsp;·&nbsp; 14 · tsunami [E]
         <br>The storm ring shrinks all match. Outside it your hull takes breaches and your crew bleeds.
