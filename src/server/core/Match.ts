@@ -300,6 +300,9 @@ const CUTLASS_LUNGE_DAMAGE = 50;
 // slide), 52 measured ~15m ("wayyyy too far"). 40 lands ~11.5-12m — a real
 // gap-closer that stays chill.
 const CUTLASS_LUNGE_IMPULSE = 40;
+/** A crewmate this close to a breach owns it: the auto-carpenter stands aside
+ *  rather than closing the hole the pirate is standing at with a hammer. */
+const CARPENTER_STAND_ASIDE_METERS = 6;
 /** Kill credit for prior damage expires after this long (storm/drown deaths). */
 const KILL_CREDIT_WINDOW_SECONDS = 90;
 /**
@@ -2293,7 +2296,21 @@ export class Match {
           // flicker the moment the raise completed.
           ship.anchored = false;
           ship.anchorRaiseProgress = 1;
-          this.applyFirstSailAssist(ship);
+          // WEIGHING ANCHOR IS NOT CASTING OFF (OPEN-01/liveplay-01). The horn
+          // pre-hoists every hull to half canvas and the onboarding card sends a
+          // new pirate to the capstan, which is at the BOW — so the one thing the
+          // game told him to do released the brake on a ship already carrying
+          // sail with nobody at the wheel, and she left the bay without him.
+          // A HUMAN raising the anchor with the helm empty gets her furled
+          // instead; the same W at the wheel that weighs the anchor from the helm
+          // still makes sail. Bots are untouched: they drive sailHeight directly
+          // and never come through this branch with an empty helm.
+          if (!player.isBot && !this.hasHelmsman(ship)) {
+            ship.sailHeight = 0;
+            ship.sailAngle = 0;
+          } else {
+            this.applyFirstSailAssist(ship);
+          }
         }
       }
 
@@ -3660,14 +3677,28 @@ export class Match {
     return best;
   }
 
-  private updateFieldRepairs(dt: number) {
+  /**
+   * The ship's own carpenter: on an ANCHORED hull he planks one leak every
+   * FIELD_REPAIR_INTERVAL out of the hold's planks.
+   *
+   * Two things were wrong with him (OPEN-01/liveplay-08). He worked in total
+   * SILENCE, so a hull riding at anchor through a storm turned sixteen planks
+   * into one with nothing on screen to say where they went. And he worked over
+   * the crew's shoulder: a pirate standing at the breach with a hammer watched
+   * it close itself. He now announces every plank he spends, and he stands aside
+   * for a crewmate who is right there — the hole is that pirate's to plank.
+   */
+  updateFieldRepairs(dt: number) {
     for (const ship of this.state.ships) {
       if (!ship.alive || ship.sinking) continue;
 
       ship.repairCooldown = Math.max(0, ship.repairCooldown - dt);
       const target = this.getBotRepairTargetHole(ship);
       const plankStack = ship.inventory.find((entry) => entry.item === 'wood_plank' && entry.qty > 0);
-      if (!ship.anchored || ship.onFire || ship.repairCooldown > 0 || !target || !plankStack) {
+      if (
+        !ship.anchored || ship.onFire || ship.repairCooldown > 0 || !target || !plankStack
+        || this.crewIsAtHole(ship, target)
+      ) {
         ship.autoRepairProgress = 0;
         continue;
       }
@@ -3677,7 +3708,24 @@ export class Match {
       ship.autoRepairProgress = 0;
       if (!this.consumeShipItem(ship, 'wood_plank', 1)) continue;
       this.physics.patchHole(ship, target.id);
+      const left = ship.inventory.find((entry) => entry.item === 'wood_plank')?.qty ?? 0;
+      this.broadcast({
+        type: 'carpenter_patch',
+        ts: Date.now(),
+        payload: { shipId: ship.id, holeId: target.id, planksLeft: left },
+      });
     }
+  }
+
+  /** A living crewmate on this deck, within reach of the breach: his to plank. */
+  private crewIsAtHole(ship: Ship, hole: { x: number; z: number }): boolean {
+    const world = toShipWorldPoint({ x: hole.x, z: hole.z }, ship);
+    for (const p of this.state.players) {
+      if (p.onShipId !== ship.id) continue;
+      if (p.state === 'eliminated' || p.state === 'respawning' || p.health <= 0) continue;
+      if (dist2D(p.position.x, p.position.z, world.x, world.z) <= CARPENTER_STAND_ASIDE_METERS) return true;
+    }
+    return false;
   }
 
   /**
@@ -7482,6 +7530,13 @@ export class Match {
    * It only ever ADDS canvas. Shortening sail is a real order — a hull creeping
    * into a berth under reefed sails must not be given full main by a helper.
    */
+  /** Is anyone actually steering her? (A held wheel is what makes canvas safe.) */
+  private hasHelmsman(ship: Ship): boolean {
+    return this.state.players.some((p) => (
+      p.atHelm && p.onShipId === ship.id && p.state !== 'eliminated' && p.health > 0
+    ));
+  }
+
   private applyFirstSailAssist(ship: Ship): void {
     if (this.firstSailAssisted.has(ship.id)) return;
     this.firstSailAssisted.add(ship.id);

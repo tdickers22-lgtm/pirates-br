@@ -902,6 +902,9 @@ type MsgType =
   // staged match start: countdown ticks while inputs are locked, then the horn
   | 'match_countdown'
   | 'match_horn'
+  /** The ship's carpenter spent a plank on a leak — feed line + plank count, so
+   *  a hold that empties itself at anchor is never silent (OPEN-01). */
+  | 'carpenter_patch'
   /** A hull went under. The ANNOUNCE for the founder itself — her crew may
    *  still be swimming, boarding and fighting, so this is emphatically not an
    *  elimination (WIN-01). */

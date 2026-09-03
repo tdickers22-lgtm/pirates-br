@@ -20,6 +20,11 @@
  *
  * Driven against a real Match on real ticks.
  */
+// Join-time coin flips (which free dock a newcomer moors at) are plain
+// Math.random unless the map seed is pinned — so pin it, or this suite grades a
+// different world every run. Same seed the test runner boots the stack on.
+process.env.PIRATES_BR_MAP_SEED = process.env.PIRATES_BR_MAP_SEED || '20260801';
+
 import { Match } from '../src/server/core/Match.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 
