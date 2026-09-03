@@ -1100,6 +1100,24 @@ export class Match {
     if (leaverDelta && leaverDelta.leftAtSimTime === null) leaverDelta.leftAtSimTime = this.t;
 
     const player = this.playersById.get(playerId);
+
+    // QUITTING IS A DEATH, AND THE HOLD GOES INTO THE SEA (gameplay-12/15).
+    // Leaving mid-match used to delete the hull, the chests aboard her and the
+    // death from the K/D line all at once: an alt-F4 was a clean escape from a
+    // losing fight and a way to deny the crew that was sinking you their loot.
+    // Now she founders like any abandoned hull — treasure and cargo spill where
+    // she goes down — and the leaver takes the elimination he sailed into.
+    const ownedShips = this.state.ships.filter((ship) => ship.ownerId === playerId);
+    const inPlay = this.state.phase === 'playing';
+    if (inPlay && player && player.state !== 'eliminated') {
+      this.matchDeaths.set(playerId, (this.matchDeaths.get(playerId) ?? 0) + 1);
+      player.state = 'eliminated';
+      this.recordElimination(player);
+    }
+    if (inPlay) {
+      for (const ship of ownedShips) this.startShipSinking(ship, false, null);
+    }
+
     if (player && !this.humanFinalStats.has(playerId)) {
       this.humanFinalStats.set(playerId, {
         name: player.name,
@@ -1116,11 +1134,11 @@ export class Match {
       });
     }
 
-    const removedShipIds = new Set(
-      this.state.ships
-        .filter((ship) => ship.ownerId === playerId)
-        .map((ship) => ship.id),
-    );
+    const ownedShipIds = new Set(ownedShips.map((ship) => ship.id));
+    // A hull left FOUNDERING stays in the world: her crew ride her down through
+    // updateFounderingCrew like any other wreck, and the dive site is real. Only
+    // a hull nobody is sinking (lobby, ended match) is spliced out.
+    const removedShipIds = inPlay ? new Set<string>() : ownedShipIds;
     for (const other of this.state.players) {
       if (other.id === playerId || !other.onShipId || !removedShipIds.has(other.onShipId)) continue;
       other.onShipId = null;
@@ -1128,14 +1146,14 @@ export class Match {
       other.state = other.state === 'eliminated' || other.state === 'respawning' ? other.state : 'swimming';
       this.clearStationFlags(other);
     }
-    this.state.ships = this.state.ships.filter(s => s.ownerId !== playerId);
+    if (!inPlay) this.state.ships = this.state.ships.filter(s => s.ownerId !== playerId);
     this.state.players = this.state.players.filter(p => p.id !== playerId);
     this.state.kegs = this.state.kegs.filter((keg) => !keg.shipId || !removedShipIds.has(keg.shipId));
     this.state.tradeSessions = this.state.tradeSessions.filter((session) => (
       session.initiatorId !== playerId
       && session.targetPlayerId !== playerId
-      && !removedShipIds.has(session.initiatorShipId)
-      && !removedShipIds.has(session.targetShipId)
+      && !ownedShipIds.has(session.initiatorShipId)
+      && !ownedShipIds.has(session.targetShipId)
     ));
     this.lastJumpHeldByPlayer.delete(playerId);
     this.boardLatchUntil.delete(playerId);

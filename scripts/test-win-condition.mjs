@@ -169,6 +169,54 @@ console.log('\nCrews at start:');
     state.phase === 'playing', `phase=${state.phase}`);
 }
 
+// ── QUITTING IS NOT AN ESCAPE HATCH ──────────────────────────────────────────
+console.log('\nA leaver:');
+{
+  const match = new Match({ matchId: 'win-leaver', botCount: 0 });
+  const state = match.state;
+  state.phase = 'playing';
+  state.storm.centerX = 0;
+  state.storm.centerZ = 0;
+  state.storm.safeRadius = 900;
+  state.storm.damagePerSec = 0;
+  const msgs = [];
+  match.broadcast = (msg) => { msgs.push(msg); };
+  const fakeWs = () => ({ readyState: 1, bufferedAmount: 0, send() {}, close() {} });
+  const stay = match.addHumanClient(fakeWs(), 'Stayer');
+  const quit = match.addHumanClient(fakeWs(), 'Quitter');
+  match.tick();
+  msgs.length = 0;
+
+  const quitter = state.players.find((p) => p.id === quit.playerId);
+  const quitterShip = state.ships.find((s) => s.id === quitter.shipId);
+  // A hold worth denying somebody: chests aboard her when he pulls the plug.
+  quitterShip.treasureChestIds = [...(state.islands[0]?.chests ?? []).slice(0, 2).map((c) => c.id)];
+  const chestsAboard = quitterShip.treasureChestIds.length;
+  expect('two crews, both human, both afloat', match.crewsAtStart === 2 && state.shipsAlive === 2,
+    `crewsAtStart=${match.crewsAtStart} shipsAlive=${state.shipsAlive}`);
+
+  match.removeClient(quit.playerId);
+
+  expect('the leaver takes the death he sailed into',
+    (match.humanFinalStats.get(quit.playerId)?.deaths ?? 0) >= 1,
+    `row=${JSON.stringify(match.humanFinalStats.get(quit.playerId))}`);
+  const wreck = state.ships.find((s) => s.id === quitterShip.id);
+  expect('his hull founders instead of vanishing with her hold',
+    !!wreck && wreck.sinking, `ship=${wreck ? `sinking=${wreck.sinking}` : 'GONE'}`);
+  expect('...spilling the chests she carried',
+    !!wreck && wreck.treasureChestIds.length < chestsAboard && chestsAboard > 0,
+    `before=${chestsAboard} after=${wreck?.treasureChestIds.length}`);
+
+  match.tick();
+  expect('a crew_eliminated arrives for the crew that walked off',
+    msgs.some((m) => m.type === 'crew_eliminated' && m.payload.crewId === quitterShip.id),
+    msgs.filter((m) => m.type === 'crew_eliminated').map((m) => m.payload.crewId).join(',') || 'none');
+  expect('and a 2-human 0-bot match finally ends after a leave',
+    state.phase === 'ended', `phase=${state.phase}`);
+  expect('...with the pirate who stayed', state.winnerId === stay.playerId,
+    `winnerId=${state.winnerId} stayer=${stay.playerId}`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} win-condition assertion(s) failed.`);
   process.exit(1);
