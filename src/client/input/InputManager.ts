@@ -82,7 +82,13 @@ export class InputManager {
         e.preventDefault();
         this.jumpPressed = true;
       }
-      if (e.code === 'KeyT') this.tradePressed = true;
+      // T LEFT THE DEFAULT LAYER (hud-15, PLAN row 95). A whole key on the
+      // ship's-orders card bought a parley nobody could answer: any [T]
+      // anywhere on the map opened a request, and the feed printed it to all
+      // sixteen crews (hud-29). Trade returns as a CONTEXTUAL rail prompt
+      // with CREW-01; until then the field below stays false and the wire
+      // message is simply never sent. The legend no longer promises it, and
+      // test-onboarding-ux's bidirectional legend audit holds the two together.
       if (e.code === 'KeyP') this.spyglassHeld = true;
       if (e.code === 'KeyL') this.legendPressed = true;
       if (e.code === 'KeyR') this.reloadPressed = true;
