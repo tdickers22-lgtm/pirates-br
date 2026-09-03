@@ -321,6 +321,17 @@ const OCEAN_FRAG = /* glsl */`
     vec3 skyTint = skyShape(u_horizonColor);
     vec3 reflCol = mix(vec3(0.38, 0.54, 0.82) * lightScale, skyTint, 0.42);
     reflCol = mix(reflCol, vec3(1.0, 0.55, 0.30), sunPath * sunLow * 0.6);
+    // UNDER AN OVERCAST SKY THE SEA IS THE SKY. Most of what the eye gets off
+    // water at grazing angles is reflection, so a slate front turns the water
+    // slate. The storm here was a constant blue body multiplied by a grey
+    // (0.42,0.48,0.55) that only reaches full strength at u_stormIntensity 1 —
+    // and inside the ring that never exceeds ~0.48, which is the "saturated blue
+    // sea under a uniform grey sky" of r3-100/r3-102. The body now mixes toward
+    // the shaped sky itself (already storm-blended by getAtmosphere), weighted by
+    // Fresnel so wave faces still hold their own colour, and gated entirely by
+    // u_stormIntensity so fair weather is byte-for-byte what it was.
+    vec3 stormSky = mix(u_fogColor * 0.35, skyTint * 0.9, clamp(fresnel * 0.7 + u_stormIntensity * 0.3, 0.0, 1.0));
+    base = mix(base, stormSky, u_stormIntensity * 0.75);
     base = mix(base, reflCol, fresnel * 0.42);
 
     // ── Grazing incidence: water seen almost edge-on is a MIRROR ────────
@@ -495,10 +506,14 @@ const OCEAN_FRAG = /* glsl */`
              * (band * (0.09 + foam * 0.90) + boltSpec * (0.25 + 0.75 * align));
     }
 
-    // Storm: darker, desaturated water under gray skies
-    vec3 stormTint = mix(vec3(1.0), vec3(0.42, 0.48, 0.55), u_stormIntensity);
+    // Storm: a last touch of darkening only. The grey multiply used to be the
+    // whole storm look and it was fighting a body colour that had no sky in it;
+    // now that the body takes the sky above (see stormSky), the multiply is kept
+    // at 0.35 of its old strength for contrast and the 55% desaturation pass is
+    // deleted — the sky mix already carries the chroma down, and doing it twice
+    // is what made a squall read as a black-and-white photograph.
+    vec3 stormTint = mix(vec3(1.0), vec3(0.42, 0.48, 0.55), u_stormIntensity * 0.35);
     color *= stormTint;
-    color = mix(color, color * vec3(0.72, 0.76, 0.82), u_stormIntensity * 0.55);
 
     // ── Aerial perspective + horizon dissolve: far water sinks into the
     //    fog color, then fully into the sky's horizon tint ───────────────
