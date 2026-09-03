@@ -21,9 +21,12 @@ persistent volume at `/app/data`. The game runs fine without persistence (leader
 | Variable | Default | Meaning |
 |---|---|---|
 | `PORT` | `8090` | Listen port (HTTP + `/ws`). |
-| `PIRATES_BR_DEV` | unset | `1` enables developer-only surfaces: `POST /bugsnap` (F8 bug reports) and dev hooks. Never set on a public host. |
+| `PIRATES_BR_DEV` | unset | `1` opens `POST /bugsnap` (F8 bug reports) outright. Never set on a public host. |
+| `PIRATES_BR_DEV_HOOKS` | unset | `1` enables the in-match dev hooks (`dev_grant_gold`, `dev_bot_peace`); a match that used one is flagged `devAssisted` and kept out of stats. Never set on a public host. |
 | `BUGSNAP_KEY` | unset | Lets a client with header `X-Bugsnap-Key: <key>` post bug snaps to a production host. Without it (and without `PIRATES_BR_DEV`) `/bugsnap` is a 404. |
 | `BUGSNAP_DIR` | `data/bugsnaps` | Where snaps land; the server keeps the newest 50 and takes one per IP per 10 s. |
+
+`npm run dev` sets both `PIRATES_BR_DEV=1` and `PIRATES_BR_DEV_HOOKS=1` (local play keeps F8 snaps and the hooks); `npm start` sets neither.
 
 **Process safety.** A malformed request (bad percent-encoding, unparseable URL) is answered
 `400`; a throw inside a join or a lobby timer is logged and the server keeps serving; the

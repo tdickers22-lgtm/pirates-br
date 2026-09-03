@@ -64,7 +64,7 @@ here by declining to measure.
 
 ---
 
-## Browser suites (24)
+## Browser suites (26)
 
 All read `PIRATES_BR_URL`; all reach the pinned server through the Vite that
 bakes its port. `slow` ones run last so a cheap failure is reported in the first
@@ -94,8 +94,15 @@ minute rather than the twentieth.
 | `test-load-responsiveness` | the longest task of a cold load, plus the invariant that warm-up never synchronously joins an unready program | yes | **rebuilt in this audit — see below**; unsupported backends grade zero proactive compiles/joins rather than manufacturing a multi-second “warm” slice |
 | `test-perf-budget` | draw-call and triangle ceilings per scene | yes | fails rather than skips on an unpinned world, which is what it used to do |
 | `test-hud-death-and-feed` | the whole death/respawn/feed HUD | yes | **four failing assertions fixed in this audit — see below** |
+| `test-fill-budget` | stencil census: sky layers ≤ 0.55, whole/blended overdraw ceilings | yes | wave 0.4; **has `--mutate`** (sky `depthTest=false` must FAIL); slow |
+| `test-storm-wall` | the old storm-wall-probe as a gate: night sea ≤ sky luma, noon sea chroma ≤ 1.3× sky | yes | wave 0.4; **red by design** until lane 5.4 (STORMVIS-01) lands (noon 6.67×); slow |
 
 ## Server suites (2)
+
+Both gained cases in wave 0: `test-http-hardening` now proves a throw in a single
+placement, in a whole cohort, and in `spawnMatch` itself (new Match / setupWorld /
+start) strands nobody — each member gets `lobby_error` + `lobby_left` and can
+queue again — and that `/bugsnap` is 404 without `PIRATES_BR_DEV=1` or a key.
 
 A real `LobbyServer` on a real socket, no browser. Both sat in the logic tier
 ("no ports") while binding fixed ports (8791, 8792); a stale listener on 8791
@@ -108,7 +115,7 @@ a port for a human watching.
 - `test-net-resilience.mjs` (timeout 120 s)
 - `test-http-hardening.mjs` (timeout 60 s)
 
-## Logic suites (62)
+## Logic suites (70)
 
 No browser, no server, no ports: they import the real simulation out of `src/`
 and drive it. Every one of them prints `✓` per assertion and exits non-zero on
@@ -123,7 +130,37 @@ failure — the house pattern, and it holds throughout. Two notes:
 
 The full list is `LOGIC` in `scripts/lib/suites.mjs`.
 
-## Not gates, by layout (3 declared, 33 probes, 13 tools)
+### Wave 0 additions (2026-09-02)
+
+Logic tier, all node, no stack:
+
+- `test-match-determinism` — two seeded Matches ticked 90 s side by side, state hashed each second, plus a different-matchId control (RNG-01). ~11 s, not quick.
+- `test-dev-hooks` — `dev_grant_gold` / `dev_bot_peace` refused without `PIRATES_BR_DEV_HOOKS=1` (or `MatchOptions.devHooks`); a match that used one is `devAssisted` and StatsStore skips it (DEV-01). Quick.
+- `test-pacing-curve` — the seeded pacing sim graded against `PACING_TARGETS.BANDS`. **Opt-in**: the manifest field `optIn: 'PACING'` means the runner reports it `SKIPPED` unless `PACING=1` is set, never a silent pass. Two 13-minute matches, so its timeout is 1,500 s. Mutation: `BOT_EARLY_PEACE_SECONDS=0` must go red.
+- `test-quality-preference` — `detectRenderQuality()` per device row (Safari M2 Air, iPhone 15, Adreno 650, UHD 620, masked desktop).
+
+**Red by design (GATES-01).** Six gates were written first and fail on HEAD on
+purpose; each grades a defect the 2026-09-01 audit found unguarded and stays
+red until its fix lane lands. `npm run test:logic` exits 1 for the whole
+campaign because of them, so read the FAIL lines, not the exit code, until the
+runner grows an `expectRed` vocabulary. They are not in the quick tier.
+
+| suite | red on HEAD because | goes green with |
+|---|---|---|
+| `test-avatar-pose-invariants` | boots at -0.19, head 1.92 vs 1.68 | AVATAR-01 (wave 2) |
+| `test-ship-attitude-frame` | XYZ root Euler: bow dips E/W | SHIP-01 (lane 1.3) |
+| `test-ship-geometry` | hold floor 24/24 verts outside the loft, stern 0.85 m aft | HULLGEO-01 |
+| `test-asset-bounds` | boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (world-space TRS applied) | ASSETS lane |
+| `test-quality-preference` | Safari M2 Air (opaque "Apple GPU") and four other rows grade `balanced` | PERF-01 (lane 2.6) |
+| `test-storm-wall` (browser) | noon sea chroma 6.67× sky | STORMVIS-01 (lane 5.4) |
+
+`test-perf-budget` also gained balanced-tier rows (dock-vista / open-sea /
+cave-interior) with a `MID_TIER_MAX_RATIO` of 0.80 against high, except
+dock-vista at 0.90: the HIGH reading there swings 1006-1212 between runs (far
+bot hulls beyond balanced's 300 m detail radius) while balanced holds 850-879,
+and 0.80 flaked 1 run in 3. Lane 2.6 re-pins from four runs.
+
+## Not gates, by layout (3 declared, 33 probes, 14 tools)
 
 `npm run test:audit` fails on **any** top-level `scripts/*.mjs` that is neither
 wired nor declared. The old filter only saw `test-*`/`audit-*`/`*smoke.mjs`
@@ -134,7 +171,7 @@ unseen. On 2026-09-02 the layout was made to say what a file is:
 |---|---|---|
 | `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 88 |
 | `scripts/lib/` | shared code (browser args, perf scenes, z-fight probes, the manifest) | |
-| `scripts/tools/` | doc-cited instruments: `perf-*`, `zfight-blame`, `approach-shots`, `fill-pass-shots` (paths in `FRAME_COST_MODEL.md`, `Z_FIGHTING.md`, `FILL_AND_SHADER_PASS.md`) | 13 |
+| `scripts/tools/` | doc-cited instruments: `perf-*`, `zfight-blame`, `approach-shots`, `fill-pass-shots` (paths in `FRAME_COST_MODEL.md`, `Z_FIGHTING.md`, `FILL_AND_SHADER_PASS.md`), `story-tour` (restored for the fix plan's lane 2.5 gate; reads `PIRATES_BR_URL`) | 14 |
 | `scripts/probes/` | live probes touched after 2026-07-25 or cited by the fix plan; each opens with a `// PROBE, not a gate:` line saying what it measures | 33 |
 | top level, in `EXCLUDED` | `perf-probe.mjs` (shared instrument library (planScenes, measureScene, sessionQuery) imported by twelve browser suites); `pacing-sim.mjs` (the pacing instrument (lane 0.3 owns it)); `storm-wall-probe.mjs` (storm-wall fill probe) | 3 |
 

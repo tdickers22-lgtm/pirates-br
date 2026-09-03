@@ -4,7 +4,10 @@
 // Before this gate test-game-balance asserted constants against themselves and
 // pacing-sim was an instrument nobody graded. This runs the seeded sim for
 // RUNS (default 2) whole matches (MAX_MATCH_SECONDS each) and grades:
-//   • PACING_TARGETS.BANDS on the mean crews afloat (150 s ∈ [8, 9], 360 s ∈ [4.5, 7]),
+//   • PACING_TARGETS.BANDS on the mean crews afloat (150 s ∈ [9, 9], 360 s ∈ [4.5, 7]);
+//     the 150 s band is a POINT on purpose — with the early-peace window every
+//     crew is still afloat at 150 s, and [8, 9] let the no-window mutation
+//     (one early sinking → 8.x) pass, so the gate could not fail,
 //   • per-run end reason is printed (not graded: see the note below),
 //   • the whole arc is printed so the later marks can be pinned once stable.
 //
