@@ -464,6 +464,11 @@ interface Atmosphere {
   twilightFactor: number;
   /** 1 once the sun is down and the key light is the moon. */
   moonness: number;
+  /** THE SCENE'S OWN FogExp2 density. Land and sea cannot agree on fog while
+   *  each owns its own curve: three's is Gaussian, the ocean's was exponential,
+   *  and at 800 m that is 55% against 22% — the "dark island pasted on a bright
+   *  sea" read, which no amount of re-tuning two different families can close. */
+  fogDensity: number;
 }
 
 // ── OCEAN LIGHT CALIBRATION ────────────────────────────────────────────────
@@ -604,6 +609,7 @@ export class Renderer {
     nightFactor: 0,
     twilightFactor: 0,
     moonness: 0,
+    fogDensity: 0.00112,
   };
   /** 0..1 falling-rain density from EnvironmentFx. Rain is not just streaks: a
    *  downpour thickens the air, so it adds fog density and pulls the fog toward
@@ -1437,7 +1443,7 @@ export class Renderer {
     a.sunDirTrue.copy(this.sunDir);
     a.moonness = 1 - this.sunAboveAmount;
     const fog = this.scene?.fog as THREE.FogExp2 | null;
-    if (fog) a.fogColor.copy(fog.color);
+    if (fog) { a.fogColor.copy(fog.color); a.fogDensity = fog.density; }
     this.getCycleColor(a.horizonColor, this.skyHorizonDayColor, this.skyHorizonTwilightColor, this.skyHorizonNightColor);
     a.horizonColor.lerp(this.skyHorizonStormColor, this.stormLevel);
     // Same inputs the land gets, normalised against their own noon values (see

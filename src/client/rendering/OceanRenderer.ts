@@ -135,6 +135,9 @@ const OCEAN_FRAG = /* glsl */`
   uniform vec3  u_ambient;
   uniform vec3  u_sunDirTrue;
   uniform float u_moonness;
+  // scene.fog.density, so the water fogs on three's own curve. See the fog block
+  // near the end of main().
+  uniform float u_fogDensity;
   uniform vec4  u_islands[${MAX_ISLANDS}];
   uniform int   u_islandCount;
   uniform vec2  u_stormCenter;
@@ -500,10 +503,24 @@ const OCEAN_FRAG = /* glsl */`
     // ── Aerial perspective + horizon dissolve: far water sinks into the
     //    fog color, then fully into the sky's horizon tint ───────────────
     float underwater = smoothstep(0.08, 1.8, u_underwaterDepth);
-    float fogAmt     = (1.0 - exp(-viewDist * mix(0.00042, 0.0017, u_stormIntensity))) * (1.0 - underwater);
+    // ONE FOG, ONE CURVE, ONE DEPTH. This was a private exponential over
+    // Euclidean distance with its own storm density and a 0.78 ceiling, while
+    // every other surface in the world used three's FogExp2 — which is GAUSSIAN
+    // (1 - exp(-(density*d)^2)) over VIEW-SPACE Z. At the day density 0.00112 an
+    // island at 800 m was 55% fogged and the water at its foot 22%, so distant
+    // land read as a cut-out pasted onto a bright sea and the junction grew a
+    // band of a third colour; and because one measured radial distance and the
+    // other depth, the sea also swung toward the fog colour at the frame edges
+    // as the player turned (26% of range at a 75-deg FOV). Both now come from
+    // the same uniform and the same geometry. The storm no longer needs its own
+    // density here: Renderer already lerps scene fog density to 0.00255 under
+    // storm and thickens it again with rainMist.
+    float fogDepth   = -(viewMatrix * vec4(v_worldPos, 1.0)).z;
+    float fogRange   = u_fogDensity * fogDepth;
+    float fogAmt     = (1.0 - exp(-fogRange * fogRange)) * (1.0 - underwater);
     // Started earlier and finished before the grid's own 3264 m rim so the last
     // ring is already pure sky by the time it runs out of geometry.
-    float horizonAmt = smoothstep(900.0, 2900.0, viewDist) * (1.0 - underwater);
+    float horizonAmt = smoothstep(900.0, 2900.0, fogDepth) * (1.0 - underwater);
     // TWO STORM GREYS USED TO LIVE HERE, AND BOTH WERE DISPLAY-REFERRED NUMBERS
     // TREATED AS LINEAR. mix(u_fogColor, vec3(0.46,0.51,0.56), storm*0.8) is a
     // 0.71-sRGB grey mixed raw into water whose scene fog target (fogStormColor
@@ -522,7 +539,10 @@ const OCEAN_FRAG = /* glsl */`
     // the horizon swatch landed ~1.7 stops hot through ACES and the last two
     // kilometres of sea became a flat white sheet with a hard edge on it.
     vec3 horizonCol = skyShape(u_horizonColor);
-    color = mix(color, fogCol, fogAmt * 0.78);
+    // The 0.78 ceiling is gone with it: land reaches the fog colour completely
+    // and the sea stopped 22% short of it, which is the same mismatch measured
+    // at infinity instead of at 800 m.
+    color = mix(color, fogCol, fogAmt);
     color = mix(color, horizonCol, horizonAmt);
 
     // From below, the ocean surface should read as a bright wavering ceiling instead
@@ -654,6 +674,8 @@ interface OceanAtmosphere {
   nightFactor?: number;
   twilightFactor?: number;
   moonness?: number;
+  /** scene.fog.density — see the fog block in OCEAN_FRAG. */
+  fogDensity?: number;
 }
 
 /** Island footprint for the shoreline SDF. Preferred: elliptical half-extents
@@ -712,6 +734,8 @@ export class OceanRenderer {
         u_ambient:    { value: new THREE.Color(0.48, 0.48, 0.48) },
         u_sunDirTrue: { value: this.sunDir.clone() },
         u_moonness:   { value: 0 },
+        // The scene's day density, until getAtmosphere sends the live one.
+        u_fogDensity: { value: 0.00112 },
         u_islands:     { value: Array.from({ length: MAX_ISLANDS }, () => new THREE.Vector4(0, 0, 1, 1)) },
         u_islandCount: { value: 0 },
         // Storm sea-state (shared getStormWaveIntensity inputs). Negative
@@ -849,6 +873,7 @@ export class OceanRenderer {
     if (atmo.keyColor) (u.u_keyLight.value as THREE.Color).copy(atmo.keyColor);
     if (atmo.ambientColor) (u.u_ambient.value as THREE.Color).copy(atmo.ambientColor);
     if (atmo.moonness !== undefined) u.u_moonness.value = Math.max(0, Math.min(1, atmo.moonness));
+    if (atmo.fogDensity !== undefined) u.u_fogDensity.value = Math.max(0, atmo.fogDensity);
     if (atmo.storminess !== undefined) this.setStormIntensity(atmo.storminess);
     if (atmo.nightFactor !== undefined) {
       u.u_nightFactor.value = Math.max(0, Math.min(1, atmo.nightFactor));
