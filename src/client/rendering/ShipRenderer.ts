@@ -283,6 +283,48 @@ interface HullProfileStation {
  *  hull's outward surface normal. */
 const HULL_Z_AXIS = new THREE.Vector3(0, 0, 1);
 
+/**
+ * SEE-THROUGH BREACHES, ON EVERY SURFACE THAT HUGS THE SHELL.
+ *
+ * The hull shader discards planking inside each open hole, which is what makes
+ * a breach a real opening instead of a painted disc. The proud strakes (sheer
+ * strake, main wale, boot-top) and the hull-reinforcement armour are SEPARATE
+ * merged meshes with their own materials, so they were never discarded: the
+ * boot-top (y 0.03..0.13) ran straight through the bottom of every ram, rock,
+ * grounding, keg, storm and scuttle hole in HOLE_BAND_Y 0.10..0.45, and the
+ * armour belts crossed the rest. A hole with a timber bar across it reads as a
+ * rendering error, not as torn planking (ships-07).
+ *
+ * The discard is in HULL-LOCAL space, so a mesh using this material must sit at
+ * identity in the ship group (the strakes and belts are lofted in hull-local
+ * space; the ribs and plates bake their offset into the geometry). Instanced
+ * meshes carry their offset in `instanceMatrix`, which is applied here.
+ */
+function applyHullHoleDiscard(
+  material: THREE.Material,
+  holeUniform: { value: THREE.Vector4[] },
+  slots: number,
+): void {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uHoles = holeUniform;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vHullPos;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+#ifdef USE_INSTANCING
+  vHullPos = (instanceMatrix * vec4(position, 1.0)).xyz;
+#else
+  vHullPos = position;
+#endif`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nvarying vec3 vHullPos;\nuniform vec4 uHoles[${slots}];`)
+      .replace('#include <map_fragment>', `for (int i = 0; i < ${slots}; i++) { if (uHoles[i].w > 0.0 && distance(vHullPos, uHoles[i].xyz) < uHoles[i].w) discard; }\n#include <map_fragment>`);
+  };
+  // A material whose program source changed must be recompiled, and two
+  // materials that differ only by this patch must not share a program.
+  material.customProgramCacheKey = () => `hull-hole-discard-${slots}`;
+  material.needsUpdate = true;
+}
+
 interface HullProfile {
   W: number;
   H: number;
@@ -1535,6 +1577,8 @@ const GANGWAY_REJECT_MARGIN = 40;
  *  optional deck-side inner decal, and the crossed planks once it is patched. */
 interface HoleVis {
   group: THREE.Group;
+  /** Torn rim + splinters, oriented to the shell normal. Re-aimed on a move. */
+  decal: THREE.Group;
   marker: THREE.Mesh;
   gush: THREE.Object3D;
   inner: THREE.Group | null;
@@ -1542,6 +1586,12 @@ interface HoleVis {
   /** Hull-local surface point the shader discards around. */
   point: THREE.Vector3;
   normal: THREE.Vector3;
+  /** The SERVER hole coords this seating was computed from. A hole is keyed by
+   *  id, and two server paths move a live id: fire burn-down walks it down to
+   *  the waterline, and placeHole recycles a patched slot at the 8-cap. Without
+   *  this the decal, the see-through disc, the gush and the [X] marker stayed at
+   *  the old spot while the bilge filled from somewhere else (ships-26). */
+  src: THREE.Vector3;
   patched: boolean;
 }
 
@@ -1617,6 +1667,7 @@ export class ShipRenderer {
   private readonly teamSailTex = new Map<number, THREE.CanvasTexture>();
   private readonly teamHullTex = new Map<number, THREE.CanvasTexture>();
   private readonly tempShipPos = new THREE.Vector3();
+  private readonly tempHoleQuat = new THREE.Quaternion();
   private readonly tempCannonPos = new THREE.Vector3();
   /** Shared pulsing halo for hull-hole decals — depth-tested so it can never
    *  glow through the hull or a sniper scope (the retired-beacon lesson). */
@@ -2034,15 +2085,7 @@ export class ShipRenderer {
     // wall instead of vanished backfaces.
     const holeSlots = FLOODING.MAX_HOLES_PER_SHIP;
     const hullHoleUniform = { value: Array.from({ length: holeSlots }, () => new THREE.Vector4(0, 0, 0, 0)) };
-    hullMat.onBeforeCompile = (shader) => {
-      shader.uniforms.uHoles = hullHoleUniform;
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vHullPos;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHullPos = position;');
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nvarying vec3 vHullPos;\nuniform vec4 uHoles[${holeSlots}];`)
-        .replace('#include <map_fragment>', `for (int i = 0; i < ${holeSlots}; i++) { if (uHoles[i].w > 0.0 && distance(vHullPos, uHoles[i].xyz) < uHoles[i].w) discard; }\n#include <map_fragment>`);
-    };
+    applyHullHoleDiscard(hullMat, hullHoleUniform, holeSlots);
     const hull = new THREE.Mesh(hullGeo, hullMat);
     hull.castShadow = true;
     hull.receiveShadow = true;
@@ -2077,22 +2120,28 @@ export class ShipRenderer {
     // Wales + boot-top: proud strakes that FOLLOW the loft (no more straight
     // boxes floating off the tapered bow/stern). Sheer strake under the cap
     // rail, main wale at the turn of the topside, boot-top at the waterline.
+    // Own material (its own merge bucket, +1 draw per detail hull) so the
+    // strakes can carry the hole discard: the boot-top crossed the bottom of
+    // every waterline breach and the main wale crossed cannon holes (ships-07).
+    const strakeMat = darkMat.clone();
+    strakeMat.name = 'ship-hull-strake';
+    applyHullHoleDiscard(strakeMat, hullHoleUniform, holeSlots);
     for (const side of [1, -1] as const) {
       const sheerStrake = new THREE.Mesh(
         makeHullStrakeGeometry(profile, side, (st) => st.sheerY - H * 0.14, 0.055, H * 0.055),
-        darkMat,
+        strakeMat,
       );
       sheerStrake.castShadow = true;
       group.add(sheerStrake);
       const mainWale = new THREE.Mesh(
         makeHullStrakeGeometry(profile, side, (st) => st.sheerY * 0.60, 0.07, H * 0.05),
-        darkMat,
+        strakeMat,
       );
       mainWale.castShadow = true;
       group.add(mainWale);
       const bootTop = new THREE.Mesh(
         makeHullStrakeGeometry(profile, side, () => 0.08, 0.03, H * 0.045, 1, 7),
-        darkMat,
+        strakeMat,
       );
       group.add(bootTop);
     }
@@ -2126,6 +2175,13 @@ export class ShipRenderer {
         roughness: 0.5,
         metalness: 0.85,
       });
+      // Belts, ribs, plates and rivets hug the same shell, so they take the same
+      // breach discard (ships-07). Everything under here must therefore be
+      // hull-local: the ribs and plates bake their offset into the geometry
+      // instead of setting mesh.position, and the rivets are read through
+      // instanceMatrix inside the patch.
+      applyHullHoleDiscard(armorMat, hullHoleUniform, holeSlots);
+      applyHullHoleDiscard(darkArmorMat, hullHoleUniform, holeSlots);
       // Armor belts follow the loft like the wales, so they hug the planking
       for (const side of [1, -1] as const) {
         const mainBelt = new THREE.Mesh(
@@ -2143,20 +2199,28 @@ export class ShipRenderer {
       }
       for (const z of [-L * 0.34, -L * 0.08, L * 0.2, L * 0.39]) {
         const ribHalf = hullSurfacePointAt(profile, z, H * 0.52).x + 0.055;
-        const rib = new THREE.Mesh(new THREE.BoxGeometry(ribHalf * 2, H * 0.13, 0.07), darkArmorMat);
-        rib.position.set(0, H * 0.52, z);
+        const rib = new THREE.Mesh(
+          new THREE.BoxGeometry(ribHalf * 2, H * 0.13, 0.07).translate(0, H * 0.52, z),
+          darkArmorMat,
+        );
         rib.castShadow = true;
         armor.add(rib);
       }
       // Bow/stern plates hug the raked stem/counter at their own height — the
       // old fixed ±0.535/0.565·L offsets floated them 0.8-1.9m off the hull in
       // open air (the loft's stern surface at this height is only ~0.48L aft).
-      const bowPlate = new THREE.Mesh(new THREE.BoxGeometry(W * 0.48, H * 0.34, 0.08), armorMat);
-      bowPlate.position.set(0, H * 0.52, stationSurfaceAt(bowStation, H * 0.52).z + 0.05);
+      const bowPlate = new THREE.Mesh(
+        new THREE.BoxGeometry(W * 0.48, H * 0.34, 0.08)
+          .translate(0, H * 0.52, stationSurfaceAt(bowStation, H * 0.52).z + 0.05),
+        armorMat,
+      );
       bowPlate.castShadow = true;
       armor.add(bowPlate);
-      const sternPlate = new THREE.Mesh(new THREE.BoxGeometry(W * 0.82, H * 0.28, 0.08), armorMat);
-      sternPlate.position.set(0, H * 0.52, stationSurfaceAt(sternStation, H * 0.52).z - 0.05);
+      const sternPlate = new THREE.Mesh(
+        new THREE.BoxGeometry(W * 0.82, H * 0.28, 0.08)
+          .translate(0, H * 0.52, stationSurfaceAt(sternStation, H * 0.52).z - 0.05),
+        armorMat,
+      );
       sternPlate.castShadow = true;
       armor.add(sternPlate);
 
@@ -3998,7 +4062,54 @@ export class ShipRenderer {
       mesh.root.add(inner);
     }
 
-    return { group, marker, gush, inner, patch: null, point, normal, patched: false };
+    return {
+      group, decal, marker, gush, inner, patch: null, point, normal,
+      src: new THREE.Vector3(hole.x, hole.y, hole.z), patched: false,
+    };
+  }
+
+  /**
+   * A BREACH THAT MOVED IS STILL THE SAME BREACH.
+   *
+   * `holeVis` is keyed by ShipHole.id and the old sync loop only ever built or
+   * disposed, never re-read x/y/z. Two server paths move a live id:
+   * PhysicsSystem's fire burn-down walks a firebomb char from FIRE_HOLE_START_Y
+   * 1.05 down to the waterline at 0.06 m/s under the same id, and placeHole
+   * recycles the nearest PATCHED slot once the hull is at MAX_HOLES_PER_SHIP,
+   * so a fresh hit can reopen a slot on the other side of the ship. Both left
+   * the drawn hole, the see-through disc, the gush anchor and the repair halo
+   * at the old point while evaluateHoleFlood flooded from the new one
+   * (ships-26). Re-seat in place rather than rebuild: burn-down moves the hole
+   * every frame for ~16 s and rebuilding would churn a Group per frame.
+   */
+  private reseatHoleVis(mesh: ShipMeshGroup, stats: (typeof SHIP_STATS)[ShipType], hole: ShipHole, vis: HoleVis) {
+    const { point, normal } = this.hullBreachSurface(mesh.hullProfile, hole);
+    vis.point.copy(point);
+    vis.normal.copy(normal);
+    vis.src.set(hole.x, hole.y, hole.z);
+    const quat = this.tempHoleQuat.setFromUnitVectors(HULL_Z_AXIS, normal);
+    vis.group.position.copy(point);
+    vis.decal.quaternion.copy(quat);
+    vis.gush.position.copy(normal).multiplyScalar(0.12);
+    vis.gush.quaternion.copy(quat);
+    vis.marker.position.copy(normal).multiplyScalar(0.06);
+    vis.marker.quaternion.copy(quat);
+    if (vis.patch) {
+      // The plank was nailed over the OLD wound. A recycled slot is a fresh
+      // hole by definition, so the carpentry goes with it.
+      mesh.root.remove(vis.patch);
+      vis.patch = null;
+    }
+    if (vis.inner && hole.y <= stats.height * 0.5) {
+      mesh.root.remove(vis.inner);
+      vis.inner = null;
+    } else if (vis.inner) {
+      vis.inner.position.set(
+        point.x - Math.sign(point.x || 1) * 0.12,
+        stats.height + 0.17,
+        THREE.MathUtils.clamp(point.z, -stats.length * 0.36, stats.length * 0.36),
+      );
+    }
   }
 
   private disposeHoleVis(mesh: ShipMeshGroup, vis: HoleVis) {
@@ -4573,6 +4684,11 @@ export class ShipRenderer {
           if (!vis) {
             vis = this.buildHoleVis(mesh, stats, hole);
             mesh.holeVis.set(hole.id, vis);
+          } else if (
+            Math.abs(hole.x - vis.src.x) + Math.abs(hole.y - vis.src.y) + Math.abs(hole.z - vis.src.z) > 1e-3
+          ) {
+            // Fire burn-down or a recycled slot at the cap: same id, new wound.
+            this.reseatHoleVis(mesh, stats, hole, vis);
           }
           if (hole.patched !== vis.patched) {
             vis.patched = !!hole.patched;
