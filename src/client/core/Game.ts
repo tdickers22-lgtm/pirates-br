@@ -3046,8 +3046,12 @@ export class Game {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ image, meta }),
-      }).then(() => this.pushFeed('Bug snap saved — thanks, captain!', '#7ce38b'))
-        .catch(() => this.pushFeed('Bug snap failed to save', '#ff8a7a'));
+      }).then((r) => {
+        // A 404 (server without PIRATES_BR_DEV / BUGSNAP_KEY) or a 429 resolves
+        // the fetch too; only a 2xx means a file landed in data/bugsnaps/.
+        if (r.ok) this.pushFeed('Bug snap saved — thanks, captain!', '#7ce38b');
+        else this.pushFeed(`Bug snap refused by the server (${r.status})`, '#ff8a7a');
+      }).catch(() => this.pushFeed('Bug snap failed to save', '#ff8a7a'));
     } catch {
       this.pushFeed('Bug snap failed to capture', '#ff8a7a');
     }
