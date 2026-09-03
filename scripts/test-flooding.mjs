@@ -17,6 +17,17 @@ import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared
 import { countOpenHoles, getShipHoleTier } from '../src/shared/interactions.ts';
 import { angleWrap, sampleWind } from '../src/shared/utils/index.ts';
 
+// THIS SUITE PINS THE WORLD. Every block below that builds a real `new Match()`
+// (the founder scene, the pump, the sealed hold) inherits `this.rng` from
+// makeMatchRng, and UNSEEDED that rng IS Math.random (RNG-01, by design) — so
+// the hull's type and the dock she lies at were redrawn on every run. The
+// founder assertions are read off the Gerstner surface AT HER OWN x/z, so a
+// different berth meant a different swell under her breaches and under each
+// hand's boots: measured 6 failures in 40 unseeded runs, all three list/trim
+// assertions reporting pitch=0.000 on green code, plus a fwd/aft tie at the
+// deck-awash tick. A gate that grades a different world each run is not a gate.
+process.env.PIRATES_BR_MAP_SEED ??= '20260801';
+
 let failures = 0;
 function expect(label, condition, detail = '') {
   if (condition) {
@@ -621,7 +632,15 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   ship.nextHoleId = 1;
   // Breaches all FORWARD: she must go down by the head, and the pirate standing
   // in the bows must get his boots wet before the one aft on the quarterdeck.
-  match.physics.openHoleAt(ship, { x: 1.5, y: -0.1, z: stats.length * 0.30 }, 3, 'cannon');
+  //
+  // WELL under the waterline, not -0.1. An unseeded Match puts this hull at a
+  // random dock, and beginFounder freezes the list from the breaches that are
+  // FLOODING at that instant — which reads the Gerstner surface at the hull's
+  // own x/z. At -0.1 the crest/trough draw left the breach dry about one run in
+  // seven, floodListTargets returned {0,0}, and the three assertions below
+  // (list kept, down by the head, forward hand swims first) failed with
+  // pitch=0.000 on green code. 40 unseeded fixtures at -0.6: no dry draw.
+  match.physics.openHoleAt(ship, { x: 1.5, y: -0.6, z: stats.length * 0.30 }, 3, 'cannon');
   // Solo bots crew one hull each — press-gang a second hand aboard so the
   // fixture has a pirate at each end of her.
   const pressed = st.players.find((p) => p.onShipId !== ship.id && p.state !== 'eliminated');
