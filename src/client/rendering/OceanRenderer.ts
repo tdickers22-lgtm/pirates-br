@@ -374,11 +374,19 @@ const OCEAN_FRAG = /* glsl */`
     float spec  = pow(NdotH, shininess) * mix(1.9, 0.5, lobeWiden) * (1.0 - sunLow * 0.35);
     float glare = pow(NdotH, 24.0) * 0.1;
     // keyUp, not sunUp: the lobe follows whatever is in the sky. Moonlight is a
-    // reflected-sunlight source about a millionth as strong, so the path is
-    // dimmed rather than removed — 0.35 keeps a legible glitter column without
-    // painting a second sunset on the water.
+    // reflected-sunlight source about a millionth as strong, but the eye adapts
+    // and a moon path is the single most legible thing on a night sea, so what
+    // is dimmed here is the SHEEN, not the path. The two lobes are doing
+    // different jobs: spec is tight (shininess 130-310) and draws the glitter
+    // COLUMN, glare is a broad pow(NdotH, 24) sheen that lifts the whole band.
+    // Scaling both together traded one gate for the other — measured on the
+    // pinned map, low tier, moon at 0.43 elevation: at 0.35 of both, the path
+    // read 1.21x centre-vs-flank and the midnight body 2.05x its sky; at 0.80 of
+    // both, 1.32x and 2.42x. So the moon keeps 0.85 of the tight lobe and 0.20
+    // of the sheen: a legible path over water that stays dark.
     vec3 specCol = mix(vec3(1.0, 0.94, 0.80), vec3(1.0, 0.50, 0.28), sunPath * sunLow)
-                 * (spec + glare) * keyUp * mix(1.0, 0.35, u_moonness);
+                 * (spec * mix(1.0, 0.85, u_moonness) + glare * mix(1.0, 0.20, u_moonness))
+                 * keyUp;
     specCol = min(specCol, vec3(1.15));
     specCol = mix(specCol, specCol * vec3(0.62, 0.74, 1.05), u_nightFactor);
 
