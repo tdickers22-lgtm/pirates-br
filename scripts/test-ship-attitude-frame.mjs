@@ -24,6 +24,8 @@ installCanvasStub();
 const THREE = await import('three');
 const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts');
 const { SHIP_STATS } = await import('../src/shared/constants/index.ts');
+const { angleWrap } = await import('../src/shared/utils/index.ts');
+const { openFirstDrawBudgetForSettle } = await import('../src/client/rendering/FirstDrawBudget.ts');
 
 let failures = 0, checks = 0;
 function expect(label, ok, detail = '') {
@@ -86,6 +88,65 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
     worstRail <= TOL, 'pitch leaks into roll on off-axis headings');
   expect(`${type}: a 0.15 rad roll lifts the starboard rail ${expectedRailLift.toFixed(2)} m at every heading (worst error ${worstRollRail.toFixed(2)} at yaw ${worstRollRailAt}°)`,
     worstRollRail <= TOL);
+}
+
+// ── THE WET EDGE AND THE COMPASS ───────────────────────────────────────────
+// Two children of the root are meant to IGNORE the hull's attitude: the
+// waterline foam collar (it belongs to the sea, not to the ship) and the
+// compass needle (it points north whatever the deck does). Both cancel the
+// root's rotation, and both were composed in the same wrong Euler order as the
+// bug above, so both were only right on a north/south heading.
+{
+  const type = 'sloop';
+  const stats = SHIP_STATS[type];
+  const ship = fixtureShip(type);
+  // Server-sent body-axis attitude: fixed, so the exponential lerps in update()
+  // converge to a known number instead of to whatever the swell is doing.
+  ship.pitch = 0.14;
+  ship.roll = -0.11;
+  sr.buildShip(ship);
+  const mesh = sr.shipMeshes.get(ship.id);
+  // The detail root (wheel, compass, anchor) is held behind the first-draw
+  // allowance; open it the way the probes do or update() never reaches it.
+  openFirstDrawBudgetForSettle();
+  const cam = new THREE.Vector3();
+  const e = new THREE.Euler();
+  const q = new THREE.Quaternion();
+  const p = new THREE.Vector3();
+  const s2 = new THREE.Vector3();
+  let worstFoam = 0, worstFoamAt = 0, worstNeedle = 0, worstNeedleAt = 0;
+  for (const yawDeg of YAWS) {
+    ship.rotation = THREE.MathUtils.degToRad(yawDeg);
+    ship.position.x = 40 * Math.cos(ship.rotation);
+    ship.position.z = 40 * Math.sin(ship.rotation);
+    cam.set(ship.position.x + 12, 6, ship.position.z + 12);
+    // Settle: a fixed clock makes the wave attitude a constant, so the
+    // exponential lerps converge and the collar's one-frame lag vanishes.
+    for (let i = 0; i < 24; i++) sr.update([ship], [], 30, 2, 0, cam);
+    mesh.root.updateMatrixWorld(true);
+    const pitch = mesh.root.rotation.x, roll = mesh.root.rotation.z;
+    mesh.waterlineFoam.matrixWorld.decompose(p, q, s2);
+    e.setFromQuaternion(q, 'YXZ');
+    const foamTilt = Math.max(Math.abs(e.x), Math.abs(e.z));
+    if (foamTilt > worstFoam) { worstFoam = foamTilt; worstFoamAt = yawDeg; }
+    mesh.compassNeedle.matrixWorld.decompose(p, q, s2);
+    e.setFromQuaternion(q, 'YXZ');
+    const needleYaw = Math.abs(angleWrap(e.y));
+    if (needleYaw > worstNeedle) { worstNeedle = needleYaw; worstNeedleAt = yawDeg; }
+    console.log(`    yaw ${String(yawDeg).padStart(3)}°  hull pitch ${pitch.toFixed(3)} roll ${roll.toFixed(3)}  ->  foam tilt ${foamTilt.toFixed(4)} rad, needle yaw ${needleYaw.toFixed(4)} rad`);
+    // Guard against a vacuous pass: with no attitude to cancel both are trivial.
+    expect(`sloop yaw ${yawDeg}°: the hull actually has an attitude to cancel, and the detail root is up`,
+      Math.abs(pitch) > 0.05 && Math.abs(roll) > 0.05 && mesh.detailRoot.visible,
+      `pitch ${pitch} roll ${roll} detailRoot.visible ${mesh.detailRoot.visible}`);
+  }
+  expect(`waterline collar stays flat on the sea at every heading (worst tilt ${worstFoam.toFixed(4)} rad at yaw ${worstFoamAt}°)`,
+    worstFoam <= 0.002, 'the foam cancel is composed in the wrong Euler order');
+  // The needle is rigid, not gimballed: cancelling only the yaw of Ry·Rx·Rz
+  // leaves a second-order pitch·roll term (0.14 x 0.127 = 0.018 rad here), which
+  // is the needle tilting with the deck. Anything larger is the composition bug
+  // (drop the negation or the 'YXZ' order and this reads the hull's own yaw).
+  expect(`compass needle still points north within 2° at every heading (worst yaw ${worstNeedle.toFixed(4)} rad at yaw ${worstNeedleAt}°)`,
+    worstNeedle <= 0.035);
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);

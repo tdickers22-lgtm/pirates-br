@@ -1892,6 +1892,18 @@ export class ShipRenderer {
     const stats = SHIP_STATS[ship.type];
     const group = new THREE.Group();
     group.name = `ship_${ship.id}`;
+    // ── WHICH AXIS IS "PITCH"? ────────────────────────────────────────────
+    // three's default Euler order is XYZ, i.e. R = Rx·Ry·Rz, which applies the
+    // yaw BEFORE the pitch and so swings the hull about WORLD X. World X is the
+    // beam axis only on a north/south heading: sailing east or west the very
+    // same `rotation.x` rolls the ship and the bow never dips, and roll leaks
+    // into pitch the other way. The server sends BODY-axis pitch/roll
+    // (PhysicsSystem.applyShipWaveAttitude) and floods each breach from body
+    // axes (evaluateHoleFlood), so on three quarters of all headings the drawn
+    // hull and the simulated one disagreed about which end was under water.
+    // 'YXZ' = yaw first, then pitch about the yawed beam, then roll about the
+    // fore-and-aft axis: exactly the server's convention. (ships-01, SHIP-01.)
+    group.rotation.order = 'YXZ';
     const proxySails: THREE.Mesh[] = [];
 
     // Natural dark wood hull — NO team tint on the whole hull. Team color goes on
@@ -4312,8 +4324,14 @@ export class ShipRenderer {
         }
         // Cancel the hull's pitch/roll (previous frame's settled value — one
         // frame of lag is invisible) so the wet edge stays glued to the sea
-        // instead of riding the ship's attitude out of the water.
-        mesh.waterlineFoam.rotation.set(-mesh.root.rotation.x, 0, -mesh.root.rotation.z);
+        // instead of riding the ship's attitude out of the water. The collar
+        // ends up on a YAW-ONLY frame: the root is Ry·Rx·Rz, so the exact
+        // inverse of its attitude (leaving the yaw alone) is Rz(-roll)·Rx(-pitch),
+        // which is what Euler order 'ZXY' with y = 0 spells. The old
+        // `rotation.set(-x, 0, -z)` was composed in the SAME wrong order as the
+        // bug it was cancelling and left the ribbon tilted on every heading but
+        // north/south (ships-01).
+        mesh.waterlineFoam.rotation.set(-mesh.root.rotation.x, 0, -mesh.root.rotation.z, 'ZXY');
         if (foamMat.map) {
           foamMat.map.offset.x = (t * (0.03 + speed01 * 0.12)) % 1;
         }
