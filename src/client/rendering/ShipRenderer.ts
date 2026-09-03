@@ -283,6 +283,15 @@ interface HullProfileStation {
  *  hull's outward surface normal. */
 const HULL_Z_AXIS = new THREE.Vector3(0, 0, 1);
 
+/** Three quarter-turns of the helm from hard a-port to hard a-starboard. */
+const WHEEL_TURNS_LOCK_TO_LOCK = 0.75;
+/**
+ * ONE threshold decides whether the canvas is set or rolled on the yard.
+ * Deployed used `> 0.05` and the furled bundle `<= 0.12`, so for ~7% of the
+ * hoist range both were drawn, one inside the other (ships-15).
+ */
+const SAIL_FURL_THRESHOLD = 0.08;
+
 /**
  * SEE-THROUGH BREACHES, ON EVERY SURFACE THAT HUGS THE SHELL.
  *
@@ -1581,7 +1590,6 @@ interface HoleVis {
   decal: THREE.Group;
   marker: THREE.Mesh;
   gush: THREE.Object3D;
-  inner: THREE.Group | null;
   patch: THREE.Group | null;
   /** Hull-local surface point the shader discards around. */
   point: THREE.Vector3;
@@ -1619,6 +1627,8 @@ interface ShipMeshGroup {
   cannonMeshes: CannonMeshGroup[];
   lanterns: THREE.PointLight[];
   wheel: THREE.Object3D;
+  /** Rudder blade on its own stock: rotation.y is Ship.rudderAngle. */
+  rudderPivot: THREE.Object3D;
   compassNeedle: THREE.Object3D;
   anchor: THREE.Group;
   anchorChain: THREE.Mesh;
@@ -2301,10 +2311,20 @@ export class ShipRenderer {
     const keel = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, L * 0.68), darkMat);
     keel.position.set(0, -profile.draft + 0.05, -L * 0.02);
     group.add(keel);
-    const rudder = new THREE.Mesh(new THREE.BoxGeometry(0.09, profile.draft * 0.85 + H * 0.2, L * 0.045), darkMat);
-    rudder.position.set(0, -profile.draft * 0.42 + H * 0.06, -L * 0.455);
+    // The blade hangs off a STOCK it can turn on. It used to be merged into the
+    // dark-timber bucket and never moved at all, while the wheel in front of the
+    // captain span off yaw rate (ships-12). Pivot at the stern post, blade
+    // translated aft of it, so rotation.y is the rudder angle on the wire.
+    const rudderPivot = new THREE.Group();
+    rudderPivot.name = 'rudder-stock';
+    rudderPivot.position.set(0, -profile.draft * 0.42 + H * 0.06, -L * 0.44);
+    const rudder = new THREE.Mesh(
+      new THREE.BoxGeometry(0.09, profile.draft * 0.85 + H * 0.2, L * 0.045).translate(0, 0, -L * 0.015),
+      darkMat,
+    );
     rudder.rotation.x = 0.1;
-    group.add(rudder);
+    rudderPivot.add(rudder);
+    group.add(rudderPivot);
 
     // ── Stairwell hole (shared by the weather deck above and the interior ceiling below) ────────
     const halfDeckZ = L * 0.45;
@@ -3873,6 +3893,7 @@ export class ShipRenderer {
       flagPivot,
       waterlineFoam,
       wheelGroup,
+      rudderPivot,
       compassNeedle,
       anchor,
       anchorCapstan,
@@ -3920,6 +3941,7 @@ export class ShipRenderer {
       cannonMeshes: cannonGroups,
       lanterns,
       wheel: wheelGroup,
+      rudderPivot,
       compassNeedle,
       anchor,
       anchorChain,
@@ -4009,7 +4031,7 @@ export class ShipRenderer {
 
   /** Build the decal group for one breach, hugging the planking at its exact
    *  point. Returns the HoleVis the update loop drives. */
-  private buildHoleVis(mesh: ShipMeshGroup, stats: (typeof SHIP_STATS)[ShipType], hole: ShipHole): HoleVis {
+  private buildHoleVis(mesh: ShipMeshGroup, hole: ShipHole): HoleVis {
     const geo = this.getHoleDecalGeo();
     const { point, normal } = this.hullBreachSurface(mesh.hullProfile, hole);
     const group = new THREE.Group();
@@ -4038,32 +4060,14 @@ export class ShipRenderer {
     group.add(marker);
     mesh.root.add(group);
 
-    // Deck-side torn planking, but ONLY for breaches high enough on the
-    // topside to actually show from inside the rail — a waterline hole is
-    // below the deck, so an inner decal there was always a lie.
-    let inner: THREE.Group | null = null;
-    if (hole.y > stats.height * 0.5) {
-      inner = new THREE.Group();
-      inner.position.set(
-        point.x - Math.sign(point.x || 1) * 0.12,
-        stats.height + 0.17,
-        THREE.MathUtils.clamp(point.z, -stats.length * 0.36, stats.length * 0.36),
-      );
-      // The inboard bulwark face has no discard shader, so THIS one does carry
-      // a dark opening disc to read as torn-through planking from on deck.
-      const innerFace = new THREE.Group();
-      innerFace.add(new THREE.Mesh(geo.opening, this.holeMat));
-      innerFace.add(new THREE.Mesh(geo.rim, this.holeRimMat));
-      innerFace.scale.setScalar(0.7);
-      innerFace.quaternion.setFromUnitVectors(
-        HULL_Z_AXIS, new THREE.Vector3(-Math.sign(point.x || 1), 0, 0),
-      );
-      inner.add(innerFace);
-      mesh.root.add(inner);
-    }
-
+    // NO DECK-SIDE DECAL. It painted a fake "torn planking" disc on the INBOARD
+    // bulwark at y = H + 0.17 whenever hole.y > 0.5H — but PhysicsSystem clamps
+    // every hole to 0.6H at most, so that disc always sat about a metre above
+    // the real breach on planking that was not holed, while the genuine
+    // see-through opening is visible from the hold through the discard shader
+    // (ships-15).
     return {
-      group, decal, marker, gush, inner, patch: null, point, normal,
+      group, decal, marker, gush, patch: null, point, normal,
       src: new THREE.Vector3(hole.x, hole.y, hole.z), patched: false,
     };
   }
@@ -4082,7 +4086,7 @@ export class ShipRenderer {
    * (ships-26). Re-seat in place rather than rebuild: burn-down moves the hole
    * every frame for ~16 s and rebuilding would churn a Group per frame.
    */
-  private reseatHoleVis(mesh: ShipMeshGroup, stats: (typeof SHIP_STATS)[ShipType], hole: ShipHole, vis: HoleVis) {
+  private reseatHoleVis(mesh: ShipMeshGroup, hole: ShipHole, vis: HoleVis) {
     const { point, normal } = this.hullBreachSurface(mesh.hullProfile, hole);
     vis.point.copy(point);
     vis.normal.copy(normal);
@@ -4100,21 +4104,10 @@ export class ShipRenderer {
       mesh.root.remove(vis.patch);
       vis.patch = null;
     }
-    if (vis.inner && hole.y <= stats.height * 0.5) {
-      mesh.root.remove(vis.inner);
-      vis.inner = null;
-    } else if (vis.inner) {
-      vis.inner.position.set(
-        point.x - Math.sign(point.x || 1) * 0.12,
-        stats.height + 0.17,
-        THREE.MathUtils.clamp(point.z, -stats.length * 0.36, stats.length * 0.36),
-      );
-    }
   }
 
   private disposeHoleVis(mesh: ShipMeshGroup, vis: HoleVis) {
     mesh.root.remove(vis.group);
-    if (vis.inner) mesh.root.remove(vis.inner);
     if (vis.patch) mesh.root.remove(vis.patch);
   }
 
@@ -4493,7 +4486,20 @@ export class ShipRenderer {
         this.updateWake(mesh, ship, stats, waveT, dt, false, storm01);
         continue;
       }
-      mesh.wheel.rotation.z -= ship.angularVelocity * 0.22;
+      // ── THE WHEEL SHOWS THE RUDDER, NOT THE SPIN ────────────────────────
+      // It used to integrate yaw RATE: a helmsman at anchor hauling the wheel
+      // hard over saw nothing move, and a ram that spun the hull span the wheel
+      // like a slot machine with nobody on it. Ship.rudderAngle is already on
+      // the wire (PhysicsSystem.applyShipRudderSteering slews it), so the hero
+      // object in front of the captain reads the thing he is actually
+      // commanding: three quarter-turns lock to lock (ships-12).
+      const rudderAngle = Number.isFinite(ship.rudderAngle) ? (ship.rudderAngle ?? 0) : 0;
+      const rudder01 = THREE.MathUtils.clamp(rudderAngle / SHIP.RUDDER_MAX_ANGLE, -1, 1);
+      const helmAlpha = 1 - Math.exp(-9 * dt);
+      mesh.wheel.rotation.z = THREE.MathUtils.lerp(
+        mesh.wheel.rotation.z, -rudder01 * WHEEL_TURNS_LOCK_TO_LOCK * Math.PI, helmAlpha,
+      );
+      mesh.rudderPivot.rotation.y = THREE.MathUtils.lerp(mesh.rudderPivot.rotation.y, rudderAngle, helmAlpha);
       mesh.compassNeedle.rotation.y = -mesh.root.rotation.y;
 
       const anchorRaiseProgress = THREE.MathUtils.clamp(ship.anchorRaiseProgress ?? 0, 0, 1);
@@ -4504,14 +4510,23 @@ export class ShipRenderer {
         mesh.anchorCapstan.rotation.y += dt * 0.08;
       }
       const anchorAlpha = 1 - Math.exp(-10 * dt);
+      // A DROPPED ANCHOR IS IN THE WATER. The descent was a fixed 2.75 m from
+      // H + 0.34, which on the galleon (H 3.5) left the stock a metre ABOVE the
+      // sea with the capstan spinning and the ship stopped (ships-11). Drop far
+      // enough that the flukes are under: cathead height, plus the draft, plus
+      // 0.6 m of margin.
+      const anchorFall = SHIP_STATS[ship.type].height + 0.34 + mesh.hullProfile.draft + 0.6;
       mesh.anchor.position.y = THREE.MathUtils.lerp(
         mesh.anchor.position.y,
-        SHIP_STATS[ship.type].height + 0.34 - anchorDrop * 2.75,
+        SHIP_STATS[ship.type].height + 0.34 - anchorDrop * anchorFall,
         anchorAlpha,
       );
       mesh.anchor.rotation.z = THREE.MathUtils.lerp(mesh.anchor.rotation.z, ship.anchored ? 0.1 * anchorDrop : 0, anchorAlpha);
       // Chain hangs from windlass drum (child of windlass); only length changes
-      mesh.anchorChain.scale.y = THREE.MathUtils.lerp(mesh.anchorChain.scale.y, ship.anchored ? 0.52 + anchorDrop * 0.76 : 0.52, anchorAlpha);
+      // Chain pays out with the fall it now has to cover (0.76 was tuned for the
+      // old 2.75 m), or the anchor swims away from the end of it.
+      const chainPayout = 0.76 * (anchorFall / 2.75);
+      mesh.anchorChain.scale.y = THREE.MathUtils.lerp(mesh.anchorChain.scale.y, ship.anchored ? 0.52 + anchorDrop * chainPayout : 0.52, anchorAlpha);
 
       const visualSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
       const motionPhase = t * 0.9 + ship.id.charCodeAt(0) * 0.37;
@@ -4542,7 +4557,7 @@ export class ShipRenderer {
       const luffing = !!(ship as Ship & { luffing?: boolean }).luffing;
       for (let s = 0; s < mesh.sails.length; s++) {
         const sail = mesh.sails[s];
-        sail.visible = ship.sailHeight > 0.05;
+        sail.visible = ship.sailHeight > SAIL_FURL_THRESHOLD;
         const signedRelative = angleWrap(wind.direction - ship.rotation);
         // 0.92 matches the server's desired-trim constant (PhysicsSystem) so the
         // luff/billow visuals agree with the authoritative sail power.
@@ -4590,7 +4605,7 @@ export class ShipRenderer {
       }
       for (let f = 0; f < mesh.furledSails.length; f++) {
         const furled = mesh.furledSails[f];
-        furled.visible = ship.sailHeight <= 0.12;
+        furled.visible = ship.sailHeight <= SAIL_FURL_THRESHOLD;
         const furledSeed = typeof furled.userData.phaseSeed === 'number' ? furled.userData.phaseSeed : furled.position.z;
         furled.scale.setScalar(0.88 + Math.sin(t * 0.9 + furledSeed) * 0.015);
       }
@@ -4682,13 +4697,13 @@ export class ShipRenderer {
         for (const hole of holes) {
           let vis = mesh.holeVis.get(hole.id);
           if (!vis) {
-            vis = this.buildHoleVis(mesh, stats, hole);
+            vis = this.buildHoleVis(mesh, hole);
             mesh.holeVis.set(hole.id, vis);
           } else if (
             Math.abs(hole.x - vis.src.x) + Math.abs(hole.y - vis.src.y) + Math.abs(hole.z - vis.src.z) > 1e-3
           ) {
             // Fire burn-down or a recycled slot at the cap: same id, new wound.
-            this.reseatHoleVis(mesh, stats, hole, vis);
+            this.reseatHoleVis(mesh, hole, vis);
           }
           if (hole.patched !== vis.patched) {
             vis.patched = !!hole.patched;
@@ -4704,7 +4719,6 @@ export class ShipRenderer {
           const open = !vis.patched;
           vis.group.visible = open;
           vis.marker.visible = open && !ship.sinking;
-          if (vis.inner) vis.inner.visible = open;
           if (open && holeSlot < mesh.hullHoleUniform.value.length) {
             // One shader slot per OPEN breach, all at the same radius: damage
             // depth reads as more holes, never as one growing disc.
