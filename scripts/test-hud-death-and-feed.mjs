@@ -651,6 +651,80 @@ try {
       `rows=${feed.distinctRows}`);
     await shot('feed-coalesced.png');
 
+    // ── A HULL UNDER FIRE, DRIVEN THROUGH THE REAL SOCKET HANDLER ─────
+    // liveplay-21: fifteen cannonballs went into a moored hull in the live rig
+    // and `hud.hit` never fired once — the only 'ship_hit' on the wire was the
+    // ATTACKER's hit-confirm, so the crew being shelled had no name, no bearing
+    // and no shudder. Wave 1.5 added the defender's copy (marked `incoming`);
+    // this drives that payload through NetworkClient's own handler and reads
+    // the DOM it is supposed to produce. It also pins the regression that copy
+    // created: an incoming hit must NOT take the attacker's hit-confirm path.
+    console.log('A hull under fire says who and where:');
+    const struck = await page.evaluate(async () => {
+      const g = window.__piratesBR;
+      g.hud.resetForMatch();
+      const frame = () => new Promise((r) => requestAnimationFrame(r));
+      const foe = (g.state?.players ?? []).find((p) => p.id !== g.localPlayerId && p.shipId);
+      const before = { hitMarkerTimer: g.hitMarkerTimer, cameraShake: g.cameraShake };
+      // A broadside: eight balls from one crew inside a second.
+      for (let i = 0; i < 8; i++) {
+        g.network.onShipHit({
+          incoming: true,
+          attackerId: foe ? foe.id : null,
+          attackerCrew: "Vex's sloop",
+          side: 'starboard',
+          topside: false,
+          // The LAST ball of the broadside is the one that opens a leak, so the
+          // line standing at the end of it must say BREACH.
+          holeId: i === 7 ? 3 : null,
+          openHoles: 2,
+        });
+      }
+      await frame(); await frame();
+      const line = document.getElementById('hull-struck');
+      const mark = document.getElementById('compass-attacker');
+      const feed = document.getElementById('kill-feed');
+      const reading = {
+        foeResolved: !!foe,
+        lineText: line ? line.textContent : null,
+        lineShown: !!line && getComputedStyle(line).display !== 'none',
+        alarmText: document.getElementById('ship-alarm')?.textContent ?? null,
+        markShown: !!mark && mark.style.display === 'block',
+        markBearing: mark ? mark.dataset.bearing : null,
+        markLabel: mark ? mark.textContent : null,
+        feedRows: feed.children.length,
+        feedText: feed.children.length ? feed.children[0].textContent : '',
+        hitMarkerRose: g.hitMarkerTimer > before.hitMarkerTimer,
+        shookHarder: g.cameraShake > before.cameraShake,
+      };
+      // And the ATTACKER's own confirm still marks a hit, unchanged.
+      g.hitMarkerTimer = 0;
+      g.network.onShipHit({ damage: 12, position: { x: 0, y: 2, z: 0 } });
+      reading.confirmStillMarks = g.hitMarkerTimer > 0;
+      return reading;
+    });
+    console.log(`    → ${JSON.stringify(struck)}`);
+    expect('a hull taking fire prints a HULL STRUCK line',
+      struck.lineShown && struck.lineText === "HULL STRUCK · Vex's sloop · STARBOARD · BREACH",
+      `shown=${struck.lineShown} text=${JSON.stringify(struck.lineText)}`);
+    expect('it does NOT steal the ship-alarm slot (hud-04)',
+      !/HULL STRUCK/.test(struck.alarmText ?? ''), JSON.stringify(struck.alarmText));
+    expect('the crew being shelled is not shown the shooter\'s hitmarker',
+      struck.hitMarkerRose === false, `hitMarkerRose=${struck.hitMarkerRose}`);
+    expect('…while the attacker\'s own hit-confirm still marks a hit',
+      struck.confirmStillMarks === true);
+    expect('the hull shudders', struck.shookHarder === true);
+    expect('a compass mark points at the guns', struck.foeResolved && struck.markShown,
+      `foe=${struck.foeResolved} shown=${struck.markShown}`);
+    expect('and it carries a real bearing and a range',
+      struck.markBearing !== null && Number.isFinite(Number(struck.markBearing))
+      && /GUNS \d+ m/.test(struck.markLabel ?? ''),
+      `${struck.markBearing} ${JSON.stringify(struck.markLabel)}`);
+    expect('eight balls from one crew are ONE feed row, not eight',
+      struck.feedRows === 1 && /firing on you/.test(struck.feedText),
+      `rows=${struck.feedRows} text=${JSON.stringify(struck.feedText)}`);
+    await shot('hull-struck.png');
+
     // ── Server-overload chip ─────────────────────────────────────
     // THE INPUT MOVED, AND THIS BLOCK WAS STILL POKING THE OLD ONE.
     //
