@@ -97,6 +97,8 @@ export const LOGIC = [
   quick(tsx('test-frame-governor.mjs')),
   quick(tsx('test-island-reveal.mjs')),
   tsx('test-interaction-arbiter.mjs'),
+  // HUD-01/hud-12: prompt ⊆ grant on a 0.25 m deck grid, all three hulls (w1.6).
+  quick(tsx('test-interact-parity.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
   quick(tsx('test-material-floor.mjs')),
