@@ -55,6 +55,13 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
   status: 200,
   contentType: 'application/javascript',
   body: [
+    // VITE INSTALLS ITS `define` VALUES FROM THIS MODULE IN DEV. Stubbing the
+    // whole client therefore also deleted __GAME_SERVER_PORT__ (vite.config.ts),
+    // so Game.ts fell back to :8090 — the developer's live server — and the menu
+    // never opened against the runner's stack on 8091: 'waiting for
+    // #menu-solo-btn to be visible' for the whole timeout, with no page error to
+    // say why. Re-declare the one define this app has before anything imports it.
+    `globalThis.__GAME_SERVER_PORT__ = ${JSON.stringify(process.env.PIRATES_BR_SERVER_PORT ?? '8090')};`,
     'export const createHotContext = () => ({ on(){}, off(){}, send(){}, accept(){}, acceptExports(){}, dispose(){}, prune(){}, invalidate(){}, data:{} });',
     'export const updateStyle = () => {};',
     'export const removeStyle = () => {};',

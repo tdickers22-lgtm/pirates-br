@@ -145,6 +145,13 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
   status: 200,
   contentType: 'application/javascript',
   body: [
+    // VITE INSTALLS ITS `define` VALUES FROM THIS MODULE IN DEV. Stubbing the
+    // whole client therefore also deleted __GAME_SERVER_PORT__ (vite.config.ts),
+    // so Game.ts fell back to :8090 — the developer's live server — and the menu
+    // never opened against the runner's stack on 8091: 'waiting for
+    // #menu-solo-btn to be visible' for the whole timeout, with no page error to
+    // say why. Re-declare the one define this app has before anything imports it.
+    `globalThis.__GAME_SERVER_PORT__ = ${JSON.stringify(process.env.PIRATES_BR_SERVER_PORT ?? '8090')};`,
     'export const createHotContext = () => ({ on(){}, off(){}, send(){}, accept(){}, acceptExports(){}, dispose(){}, prune(){}, invalidate(){}, data:{} });',
     'export const updateStyle = () => {};',
     'export const removeStyle = () => {};',
@@ -690,7 +697,13 @@ try {
       const drive = async (simRate, forMs) => {
         g.hud.view.getServerClock = () => {
           const wall = performance.now();
-          return { server: server0 + ((wall - wall0) / 1000) * simRate, at: wall };
+          // `at` IS AN EPOCH STAMP, not a page-relative one: NetworkClient
+          // stamps it with Date.now() in the message handler, and
+          // HudController prunes its window with `Date.now()/1000 - sample.wall`.
+          // Handing back performance.now() (~1e4) against an epoch `now` (~1.8e9)
+          // made every sample older than the 5s window, so the deficit never
+          // accumulated and the chip could not trip however dilated the sim was.
+          return { server: server0 + ((wall - wall0) / 1000) * simRate, at: Date.now() };
         };
         const until = performance.now() + forMs;
         // Drive the HUD ourselves: the frame loop is the normal driver, but this
