@@ -107,6 +107,9 @@ export const LOGIC = [
   quick(tsx('test-hud-storm-warnings.mjs')),
   // FEED-01 client half (hud-23, hud-29, liveplay-06/23) + hud-26 (w1.6).
   quick(tsx('test-hud-feed-scope.mjs')),
+  // FEED-01/liveplay-21: the defender's ship_hit — HULL STRUCK line, compass
+  // arc at the guns, bounded shudder, one feed row per attacker (w1.6).
+  quick(tsx('test-hud-ship-struck.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
   quick(tsx('test-material-floor.mjs')),
