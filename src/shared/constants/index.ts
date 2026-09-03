@@ -818,6 +818,27 @@ export const MATCH_START_COUNTDOWN_SEC = 8;
 export const MATCH_TOTAL_SHIPS = 10;
 
 /**
+ * WHEN A CREW STOPS BEING A CREW, AND WHO GETS PAID FOR IT.
+ *
+ * Read by the server's win check (Match.countActiveCrews / checkWinCondition)
+ * and by the death-credit reading in handlePlayerDeath. Shared because the
+ * client's end screen and feed have to describe the same rules.
+ */
+export const MATCH_END = {
+  /** A crew whose hull is gone keeps contending while it is aboard ANY hull
+   *  still afloat, or ashore inside the ring, or for this long after the
+   *  founder. Past it, a pirate treading open water is lost at sea — which is
+   *  what a sunk bot floating 800 m from land actually is, instead of a
+   *  contender holding a finished match open for 60-80 s. */
+  LOST_AT_SEA_GRACE_SECONDS: 60,
+  /** Damage from a PLAYER still pays the kill when the ENVIRONMENT lands the
+   *  last blow (chip-then-ring, knock-overboard-then-drown) — but only this
+   *  recently. Deliberately far tighter than the 90 s direct-kill window: a
+   *  storm death two minutes after a graze is the weather's, not a captain's. */
+  ASSIST_CREDIT_WINDOW: 12,
+} as const;
+
+/**
  * Kill-streak reward ladder — the ONE place the thresholds live.
  *
  * They used to be typed twice in the server, twice in the HUD and once more in

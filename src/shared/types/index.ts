@@ -902,7 +902,12 @@ type MsgType =
   // staged match start: countdown ticks while inputs are locked, then the horn
   | 'match_countdown'
   | 'match_horn'
-  /** A crew is off the board (their ship went down) — HUD announce + counter pulse. */
+  /** A hull went under. The ANNOUNCE for the founder itself — her crew may
+   *  still be swimming, boarding and fighting, so this is emphatically not an
+   *  elimination (WIN-01). */
+  | 'ship_sunk'
+  /** A crew is off the board (nobody left who can still contend) — HUD announce
+   *  + CREWS AFLOAT counter pulse. */
   | 'crew_eliminated'
   /** A crew crossed (or is still past) the gold-bounty line: horn + feed +
    *  map marker. The hunted treasure galleon. */
@@ -972,7 +977,20 @@ export interface MatchHornPayload {
   crews: number;
 }
 
-/** A crew's ship went down: they are off the CREWS AFLOAT board. */
+/** A hull went under. Her crew is NOT off the board — see CrewEliminatedPayload. */
+export interface ShipSunkPayload {
+  /** The sunk ship's id. */
+  shipId: string;
+  /** Display name for the announce line, e.g. "Pirate_4's sloop". */
+  shipName: string;
+  /** Hulls still afloat AFTER this founder. */
+  remaining: number;
+  /** Who sank her, when the sink was credited. */
+  byPlayerId: string | null;
+  byName: string | null;
+}
+
+/** A crew is out of the match: no hull, and nobody left who can still contend. */
 export interface CrewEliminatedPayload {
   /** The sunk ship's id (crew identity on the wire). */
   crewId: string;

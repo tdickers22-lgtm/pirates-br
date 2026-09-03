@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -195,7 +195,7 @@ export interface MatchEndResult {
   matchId: string;
   winnerId: string | null;
   winnerName: string | null;
-  reason: 'gold' | 'last_ship' | 'abandoned';
+  reason: 'gold' | 'last_ship' | 'abandoned' | 'draw';
   humans: MatchHumanResult[];
   /** Every crew in the match, ranked. See MatchBoardRow. */
   board: MatchBoardRow[];
@@ -318,7 +318,7 @@ type DamageSource =
   | 'cannon' | 'gunshot' | 'blade' | 'explosion';
 /** What finished a crew, threaded to the client on `game_over` (elimination)
  *  and on `kill_event` (a respawn still gets told what got it). */
-type EliminationCause = DamageSource | 'ship_sunk' | 'killed';
+type EliminationCause = DamageSource | 'ship_sunk' | 'killed' | 'lost_at_sea';
 /** A damage tag older than this is stale evidence — the world moved on, so the
  *  positional reading is the better answer. Deaths land within a tick or two of
  *  the blow that caused them; this is deliberately generous to bleed-out. */
@@ -495,6 +495,18 @@ export class Match {
    *  perf A/B can measure two builds against a bit-identical match. */
   private mapGen = new MapGenerator(matchSeedFromEnv());
   private readonly joinRng = makeJoinRng();
+  /** WIN-01. A crew is a hull's roster (`player.shipId`), or a shipless
+   *  pirate's own id — the same key the feed announces and the win check
+   *  counts. `crewsAtStart` is the high-water mark of crews that ever contended:
+   *  the guard "was this ever a race?" must not be read off a `ships` array a
+   *  leaver's hull was spliced out of (netcode-34). */
+  private crewsAtStart = 0;
+  private knownCrews: Map<string, string> = new Map();
+  private announcedCrewEliminations: Set<string> = new Set();
+  /** Sim time each hull went under — the clock the lost-at-sea grace runs on. */
+  private shipSunkAt: Map<string, number> = new Map();
+  /** Pirates the sea claimed for want of a deck, so the death card can say so. */
+  private lostAtSea: Set<string> = new Set();
   private skeletonHomes: Map<string, string> = new Map();
   private skeletonWaveTimers: Map<string, number> = new Map();
   private skeletonSpawnedAt: Map<string, number> = new Map();
@@ -1653,6 +1665,10 @@ export class Match {
 
     // Count alive ships
     this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
+
+    // WHO IS STILL IN THE RACE. The sea claims pirates adrift with no deck to
+    // return to, crews leave the board, and only then is the win check asked.
+    this.updateCrewAttrition();
 
     // Check win condition
     this.checkWinCondition();
@@ -4973,7 +4989,12 @@ export class Match {
 
     this.state.kegs = this.state.kegs.filter((keg) => keg.shipId !== ship.id);
     this.shipLastDamagedByPlayer.delete(ship.id);
-    this.announceCrewEliminated(ship, sinkKiller);
+    // The founder starts the lost-at-sea clock for everyone who called her home,
+    // and announces itself as a SHIP going down. Her crew are still in the
+    // water and still in the match; `crew_eliminated` is what says otherwise,
+    // and updateCrewAttrition is the only thing allowed to say it (WIN-01).
+    this.shipSunkAt.set(ship.id, this.t);
+    this.announceShipSunk(ship, sinkKiller);
   }
 
   /**
@@ -5035,21 +5056,39 @@ export class Match {
     }
   }
 
-  /** A ship going under is what the CREWS AFLOAT counter tracks, and it used to
-   *  drop silently (10 → 7 → 5 with no on-screen event). Announce it so the BR's
-   *  tension meter is audible; the crew itself may still be swimming/fighting. */
-  private announceCrewEliminated(ship: Ship, sunkBy: Player | null) {
+  /** A hull going under used to drop silently (10 → 7 → 5 with no on-screen
+   *  event), so it is announced — but as a SHIP. It said `crew_eliminated`
+   *  for years while the crew was still swimming out of her (gameplay-34):
+   *  the tension meter's own event, spent one founder too early. */
+  private announceShipSunk(ship: Ship, sunkBy: Player | null) {
     const owner = this.state.players.find((p) => p.id === ship.ownerId);
     const remaining = this.state.ships.filter((s) => s.alive && !s.sinking && s.id !== ship.id).length;
+    this.broadcast({
+      type: 'ship_sunk',
+      ts: Date.now(),
+      payload: {
+        shipId: ship.id,
+        shipName: owner ? `${owner.name}'s ${ship.type}` : `A ${ship.type}`,
+        remaining,
+        byPlayerId: sunkBy?.id ?? null,
+        byName: sunkBy?.name ?? null,
+      },
+    });
+  }
+
+  /** A crew is OFF THE BOARD: no hull, and nobody left aboard, ashore or inside
+   *  the grace who could still contend. This is what CREWS AFLOAT counts down,
+   *  and it fires exactly once per crew. */
+  private announceCrewEliminated(crewId: string, crewName: string, remaining: number) {
     this.broadcast({
       type: 'crew_eliminated',
       ts: Date.now(),
       payload: {
-        crewId: ship.id,
-        crewName: owner ? `${owner.name}'s crew` : 'A crew',
+        crewId,
+        crewName,
         remaining,
-        byPlayerId: sunkBy?.id ?? null,
-        byName: sunkBy?.name ?? null,
+        byPlayerId: null,
+        byName: null,
       },
     });
   }
@@ -5464,6 +5503,9 @@ export class Match {
         ? source
         : 'killed';
     }
+    // The sea claiming a pirate with no deck to return to is its own ending —
+    // it is not a drowning he swam into, and the card may not call it one.
+    if (this.lostAtSea.has(player.id)) return 'lost_at_sea';
     if (source) return source;
     if (this.storm.isOutside(player.position.x, player.position.z, this.state.storm)) return 'storm';
     if (player.state === 'swimming') return 'drowned';
@@ -6176,29 +6218,128 @@ export class Match {
 
     const aliveShips = this.state.ships.filter((ship) => ship.alive && !ship.sinking);
     this.state.shipsAlive = aliveShips.length;
-    if (aliveShips.length <= 1 && this.state.ships.length > 1) {
-      // A sunk crew is NOT out of the fight — shipless survivors (swimming,
-      // boarding, marooned) keep the match alive until only one crew remains
-      // standing. Ship count alone doesn't end it.
-      const lastShip = aliveShips[0] ?? null;
-      const activeCrews = new Set<string>();
-      let lastContender: Player | null = null;
-      for (const p of this.state.players) {
-        if (p.state === 'eliminated') continue;
-        const standing = p.health > 0;
-        const canReturn = p.state === 'respawning' && aliveShips.some((s) => s.id === p.shipId);
-        if (!standing && !canReturn) continue;
-        activeCrews.add(p.shipId ?? p.id);
-        lastContender = p;
-      }
-      if (activeCrews.size > 1) return;
-      this.state.phase = 'ended';
-      this.state.winnerId = lastShip?.ownerId ?? lastContender?.id ?? null;
-      this.endedAt = Date.now();
+
+    // CREWS, NOT HULLS (gameplay-34). A sunk crew is not out of the fight —
+    // shipless survivors aboard someone else's deck, ashore inside the ring, or
+    // inside the founder grace are all still contending. Equally, a hull with
+    // nobody left to sail her is not a crew, and island skeletons never were
+    // one. The guard is `crewsAtStart`, not the live `ships` array: a leaver's
+    // hull is SPLICED OUT of that array, which is why a 2-human 0-bot match
+    // could never end after a leave (netcode-34).
+    if (this.crewsAtStart <= 1) return;
+    const { crews, contenders } = this.countActiveCrews();
+    if (crews.size > 1) return;
+
+    this.state.phase = 'ended';
+    if (crews.size === 1) {
+      // Prefer the crew's own captain (the hull owner) over whichever mate the
+      // scan happened to reach last.
+      const crewId = [...crews][0];
+      const winner = contenders.find((p) => this.getShip(p.shipId)?.ownerId === p.id)
+        ?? contenders.find((p) => (p.shipId ?? p.id) === crewId)
+        ?? null;
+      this.state.winnerId = winner?.id ?? null;
       this.endReason = 'last_ship';
-      this.broadcast({ type: 'game_over', ts: Date.now(), payload: { winnerId: this.state.winnerId } });
-      this.emitMatchEnd();
+    } else {
+      // EVERYBODY WENT DOWN. A simultaneous wipe used to be filed as a
+      // 'last_ship' win with no ship and no winner; it is a draw and says so.
+      this.state.winnerId = null;
+      this.endReason = 'draw';
     }
+    this.endedAt = Date.now();
+    this.broadcast({
+      type: 'game_over',
+      ts: Date.now(),
+      payload: { winnerId: this.state.winnerId, reason: this.endReason },
+    });
+    this.emitMatchEnd();
+  }
+
+  /**
+   * THE ONE READING OF "WHO IS STILL IN THIS MATCH", shared by the CREWS AFLOAT
+   * feed and the win check so they can never disagree.
+   *
+   * A crew is its hull's roster (`player.shipId`); a shipless pirate is his own
+   * crew. Island skeletons are scenery and are skipped outright — they used to
+   * hold matches open and could be crowned winner. `adrift` is the crews the sea
+   * is about to claim: standing, but with no hull to return to, no deck under
+   * them, no ground inside the ring and the founder grace spent.
+   */
+  private countActiveCrews(): { crews: Set<string>; contenders: Player[]; adrift: Player[] } {
+    const crews = new Set<string>();
+    const contenders: Player[] = [];
+    const adrift: Player[] = [];
+    for (const p of this.state.players) {
+      if (p.state === 'eliminated') continue;
+      if (this.isSkeletonPlayer(p)) continue;
+      const homeShip = this.getAliveShip(p.shipId);
+      if (p.state === 'respawning') {
+        // A held respawn only counts while there is a hull to come back to.
+        if (!homeShip) continue;
+      } else if (p.health <= 0) {
+        continue;
+      } else if (!homeShip && !this.stillContendingWithoutHull(p)) {
+        adrift.push(p);
+        continue;
+      }
+      crews.add(p.shipId ?? p.id);
+      contenders.push(p);
+    }
+    return { crews, contenders, adrift };
+  }
+
+  /** Shipless, but not yet out: aboard any hull still afloat (boarder, guest,
+   *  castaway picked up), ashore inside the ring, or inside the founder grace. */
+  private stillContendingWithoutHull(p: Player): boolean {
+    if (p.onShipId && this.getAliveShip(p.onShipId)) return true;
+    const inRing = !this.storm.isOutside(p.position.x, p.position.z, this.state.storm);
+    // `swimming` is exactly the state PhysicsSystem sets in open water, so this
+    // reads "has ground under him inside the wall" without a second raycast.
+    if (inRing && p.state !== 'swimming') return true;
+    const sunkAt = p.shipId ? this.shipSunkAt.get(p.shipId) : undefined;
+    return sunkAt !== undefined && this.t - sunkAt <= MATCH_END.LOST_AT_SEA_GRACE_SECONDS;
+  }
+
+  /**
+   * Per-tick crew bookkeeping: register every crew that has ever contended,
+   * let the sea claim the adrift, and announce the crews that left the board.
+   *
+   * `crew_eliminated` fires HERE and nowhere else. It used to fire on every
+   * founder, while the crew was still swimming — the CREWS AFLOAT counter's own
+   * event, spent on a hull rather than on a crew.
+   */
+  private updateCrewAttrition(): void {
+    if (this.state.phase !== 'playing') return;
+    for (const p of this.state.players) {
+      if (this.isSkeletonPlayer(p)) continue;
+      const crewId = p.shipId ?? p.id;
+      if (!this.knownCrews.has(crewId)) {
+        const ship = this.getShip(p.shipId);
+        const owner = ship ? this.state.players.find((o) => o.id === ship.ownerId) : p;
+        this.knownCrews.set(crewId, `${(owner ?? p).name}'s crew`);
+      }
+    }
+    this.crewsAtStart = Math.max(this.crewsAtStart, this.knownCrews.size);
+
+    const { crews, adrift } = this.countActiveCrews();
+    for (const p of adrift) this.claimLostAtSea(p);
+
+    // Re-read after the sea has taken anyone: the announce must quote the count
+    // that includes this tick's losses.
+    const active = adrift.length > 0 ? this.countActiveCrews().crews : crews;
+    for (const [crewId, crewName] of this.knownCrews) {
+      if (active.has(crewId) || this.announcedCrewEliminations.has(crewId)) continue;
+      this.announcedCrewEliminations.add(crewId);
+      this.announceCrewEliminated(crewId, crewName, active.size);
+    }
+  }
+
+  /** The sea takes a pirate with no deck left to reach. Filed as its own cause
+   *  so the death card never calls it a plain drowning. */
+  private claimLostAtSea(p: Player): void {
+    this.lostAtSea.add(p.id);
+    p.health = 0;
+    this.handlePlayerDeath(p);
   }
 
   /** Every full snapshot (join included) stamps the next `seq`; hot snapshots draw
