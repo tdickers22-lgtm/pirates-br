@@ -61,6 +61,9 @@ export const LOGIC = [
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-server-fixes.mjs')),
   quick(tsx('test-flooding.mjs')),
+  // HULL-01: cannonball-vs-hull parity with the drawn wale (swept swim-hull
+  // skin, stem crossings, deck-vs-breach classification).
+  quick(tsx('test-projectile-hull-parity.mjs')),
   quick(tsx('test-locomotion.mjs')),
   quick(tsx('test-world-fixed.mjs')),
   // RNG-01: two seeded Matches ticked 90 s side by side, state hashed each

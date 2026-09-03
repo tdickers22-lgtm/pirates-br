@@ -43,6 +43,17 @@ import {
   toDockLocalPoint,
   toTavernLocal,
 } from '../../shared/utils/index.js';
+
+/** Cannonball-vs-hull volume (HULL-01). The skin is the shared swim-hull
+ *  footprint (the drawn wale beam); MARGIN is the ball's own radius plus the
+ *  plank thickness so a ball that visibly kisses the timber registers. The
+ *  band runs from KEEL_MARGIN under the rendered keel to BULWARK_HEIGHT above
+ *  the deck plane. SUBSTEPS samples per tick keeps a 60 m/s ball (1 m/tick)
+ *  from straddling the 0.9 m stem volume. */
+export const PROJECTILE_HULL_MARGIN = 0.12;
+const PROJECTILE_HULL_KEEL_MARGIN = 0.3;
+const PROJECTILE_HULL_BULWARK_HEIGHT = 0.85;
+const PROJECTILE_HULL_SUBSTEPS = 6;
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 
@@ -1579,9 +1590,20 @@ export class PhysicsSystem {
       // (a wave cresting over the impact point no longer eats the ball).
       // Chainshot additionally checks a taller rigging band so it can actually
       // shred the canvas it exists for.
+      // The hull is SWEPT along previousPosition→position (HULL-01): the
+      // sample where the ball first crosses the swim-hull skin is the impact,
+      // so an arcing ball registers where it met the planking, not wherever
+      // the end-of-tick point happened to land inside a slab.
       for (const ship of ships) {
         if (!ship.alive || ship.id === proj.ownerShipId) continue;
-        if (this.isProjectileInsideShipHull(proj, ship) || this.isChainshotInRiggingBand(proj, ship)) {
+        const entry = this.sweepProjectileAgainstHull(previousPosition, proj, ship);
+        if (entry) {
+          proj.position = entry;
+          this.onProjectileHitShip(proj, ship, t);
+          proj.alive = false;
+          break;
+        }
+        if (this.isChainshotInRiggingBand(proj, ship)) {
           this.onProjectileHitShip(proj, ship, t);
           proj.alive = false;
           break;
@@ -2927,11 +2949,63 @@ export class PhysicsSystem {
     }));
   }
 
-  private isProjectileInsideShipHull(projectile: Projectile, ship: Ship) {
+  /** Is a world point inside the SOLID hull: the swim-hull footprint (the
+   *  rendered wale beam, tapering with depth like the drawn section) plus the
+   *  ball's own radius, between 0.3 m under the rendered keel and the bulwark
+   *  cap 0.85 m above the deck. The old test was the deck-WALK taper + 0.38 m
+   *  (0.45–1.58 m inboard of the planking, short of the stem) over a slab
+   *  3.3 m tall each way, so grazing broadsides passed through visible timber
+   *  while plunging balls "hit" the top of thin air (physics-03/27). */
+  private isPointInsideHullSolid(point: Vec3, ship: Ship, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]): boolean {
+    const band = getSwimHullVerticalBand(ship.position.y, stats, ship.type);
+    if (point.y < band.keelY - PROJECTILE_HULL_KEEL_MARGIN || point.y > band.deckY + PROJECTILE_HULL_BULWARK_HEIGHT) return false;
+    const local = this.toShipLocal(point, ship);
+    const verticalT = getSwimHullVerticalT(point.y, ship.position.y, stats, ship.type);
+    return isInsideSwimHullFootprint(stats, local.x, local.z, PROJECTILE_HULL_MARGIN, verticalT);
+  }
+
+  /** March a projectile's tick segment against a hull and return the point
+   *  where it first enters the solid (bisected to ~3 mm), or null when the
+   *  segment stays clear. Pure and allocation-light: a coarse broadphase on
+   *  the hull's bounding circle, PROJECTILE_HULL_SUBSTEPS samples, then a
+   *  bisection between the last clear and first solid sample. A ball that
+   *  BEGINS the tick inside the solid (a hull sailed onto it) hits where it is. */
+  private sweepProjectileAgainstHull(from: Vec3, projectile: Projectile, ship: Ship): Vec3 | null {
     const stats = SHIP_STATS[ship.type];
-    const local = this.toShipLocal(projectile.position, ship);
-    return Math.abs(projectile.position.y - ship.position.y) < stats.height + 1.1
-      && this.isInsideShipDeckFootprint(local, stats, 0.38);
+    const to = projectile.position;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    // Broadphase: the segment's midpoint against the hull's bounding circle
+    // grown by half the travel (the segment cannot reach further than that).
+    const midX = from.x + dx * 0.5 - ship.position.x;
+    const midZ = from.z + dz * 0.5 - ship.position.z;
+    const reach = stats.length * 0.6 + Math.hypot(dx, dz) * 0.5;
+    if (midX * midX + midZ * midZ > reach * reach) return null;
+
+    const sample = { x: from.x, y: from.y, z: from.z };
+    if (this.isPointInsideHullSolid(sample, ship, stats)) return { ...sample };
+    const steps = PROJECTILE_HULL_SUBSTEPS;
+    let clearT = 0;
+    let solidT = -1;
+    for (let i = 1; i <= steps; i += 1) {
+      const u = i / steps;
+      sample.x = from.x + dx * u;
+      sample.y = from.y + dy * u;
+      sample.z = from.z + dz * u;
+      if (this.isPointInsideHullSolid(sample, ship, stats)) { solidT = u; break; }
+      clearT = u;
+    }
+    if (solidT < 0) return null;
+    // Bisect onto the skin so the breach opens ON the planking the ball met.
+    for (let i = 0; i < 6; i += 1) {
+      const u = (clearT + solidT) * 0.5;
+      sample.x = from.x + dx * u;
+      sample.y = from.y + dy * u;
+      sample.z = from.z + dz * u;
+      if (this.isPointInsideHullSolid(sample, ship, stats)) solidT = u; else clearT = u;
+    }
+    return { x: from.x + dx * solidT, y: from.y + dy * solidT, z: from.z + dz * solidT };
   }
 
   /** Chainshot is a rigging weapon: it also connects through the mast/sail
