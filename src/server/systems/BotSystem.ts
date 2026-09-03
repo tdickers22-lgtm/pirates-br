@@ -128,9 +128,45 @@ function hostileHoleCount(ship: Ship): number {
  * wide aggression) — otherwise the opening minutes are sailing and looting, and
  * the storm arc still has crews left to squeeze.
  */
-export function botMayFireCannons(t: number, underFireUntil: number): boolean {
+export function botMayFireCannons(
+  t: number,
+  underFireUntil: number,
+  target?: Pick<Ship, 'id' | 'anchored' | 'position'> | null,
+  islands?: Island[],
+  retaliateShipId?: string | null,
+): boolean {
+  const underFire = t < underFireUntil;
+  // THE BERTH TRUCE (liveplay-19). The clock alone is not the peace: a crew
+  // still moored at its spawn berth at 2:30 is a learner who has not found the
+  // helm yet, and the run-5 sloop that shelled one from 80 m the moment the
+  // clock lifted holed her fifteen times before she ever sailed. A hull that
+  // is ANCHORED within BOT_BERTH_TRUCE_RADIUS of a dock berth is off-limits
+  // until BOT_BERTH_TRUCE_SECONDS — unless she is the one shooting at us.
+  if (target && islands && t < BOT_BERTH_TRUCE_SECONDS && isMooredAtBerth(target, islands)) {
+    const answering = underFire && (retaliateShipId == null || retaliateShipId === target.id);
+    if (!answering) return false;
+  }
   if (t >= BOT_EARLY_PEACE_SECONDS) return true;
-  return t < underFireUntil;
+  return underFire;
+}
+
+/** 270 s: how long a hull moored at a dock berth is spared by every bot.
+ *  BOT_EARLY_PEACE_SECONDS (150) covers the whole lobby; this covers the one
+ *  crew that is still tied up learning the ropes, and reaches to the second
+ *  shrink so "get under way" is a real deadline, not a surprise. */
+export const BOT_BERTH_TRUCE_SECONDS = 270;
+/** A hull anchored within this of a dock berth counts as moored there. */
+export const BOT_BERTH_TRUCE_RADIUS = 60;
+
+/** Anchored within BOT_BERTH_TRUCE_RADIUS of any dock berth: still in harbour. */
+export function isMooredAtBerth(target: Pick<Ship, 'anchored' | 'position'>, islands: Island[]): boolean {
+  if (!target.anchored) return false;
+  for (const island of islands) {
+    const dock = island.dock;
+    if (!dock) continue;
+    if (dist2D(target.position.x, target.position.z, dock.berthPosition.x, dock.berthPosition.z) < BOT_BERTH_TRUCE_RADIUS) return true;
+  }
+  return false;
 }
 
 /** Inside this radius of a live world event, crews fight each other on sight —
@@ -517,6 +553,9 @@ export class BotSystem {
       for (const other of ships) {
         if (other.id === ship.id || !other.alive || other.sinking) continue;
         if (this.peaceShipIds.has(other.id)) continue; // dev bot-peace: never engage this ship
+        // A hull we may not SHOOT is not a hull we SEEK — otherwise the crew
+        // shadows a moored learner with the ports shut until the truce lifts.
+        if (!botMayFireCannons(t, bot.underFireUntil, other, islands)) continue;
 
         const d = dist2D(ship.position.x, ship.position.z, other.position.x, other.position.z);
         // Score: distance, but humans get only a modest discount so bots contest players
@@ -741,8 +780,11 @@ export class BotSystem {
         // The peace covers the guns too — an unprovoked bot shadows its neighbour
         // with the ports shut. Timer is held just short of ready so the window
         // lifting doesn't fire nine simultaneous broadsides.
-        if (!botMayFireCannons(t, bot.underFireUntil)) {
+        if (!botMayFireCannons(t, bot.underFireUntil, target, islands)) {
           bot.fireTimer = Math.max(bot.fireTimer, 0.35);
+          // She went back to her berth and anchored: leave her be rather than
+          // circling her with the ports shut (berth truce, liveplay-19).
+          if (isMooredAtBerth(target, islands)) { bot.behavior = 'patrol'; bot.targetShipId = null; }
           break;
         }
         if (bot.fireTimer <= 0 && inCannonRange) {

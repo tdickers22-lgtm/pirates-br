@@ -103,6 +103,8 @@ export const LOGIC = [
   tsx('test-bot-ghost-helm.mjs'),
   // BOT-01/bots-v03: dry pieces are skipped, the crate tops a bot up in a lull (w1.1).
   tsx('test-bot-ammo.mjs'),
+  // BOT-01/liveplay-19: a hull moored at a dock berth is spared until 270 s (w1.1).
+  tsx('test-bot-berth-truce.mjs'),
   quick(tsx('test-oneshot-underload.mjs')),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),
