@@ -411,6 +411,24 @@ export const FLOODING = {
   SPEED_PENALTY: 0.38,
   /** Full bilge dulls rudder authority by this fraction (~40%). */
   RUDDER_PENALTY: 0.40,
+  /** Breach HEIGHT tiers (one wire byte, shared classifier getShipHoleTier):
+   *  LOW below this hull-local y floods on a level hull, MID up to
+   *  HOLE_TIER_HIGH_F x height only once she has settled, HIGH (topside) only
+   *  while she lists or the sea gets up. */
+  HOLE_TIER_LOW_Y: 0.20,
+  HOLE_TIER_HIGH_F: 0.6,
+  /** SERVER-owned list: radians of heel/trim per unit of open-breach ingress
+   *  weight on one rail / one end, and the bounds the spring may be asked for. */
+  LIST_ROLL_GAIN: 0.09,
+  LIST_TRIM_GAIN: 0.05,
+  LIST_ROLL_MAX: 0.25,
+  LIST_TRIM_MAX: 0.15,
+  /** Vertical reach on a breach: in the hold, or within this many metres of it. */
+  HOLE_REPAIR_REACH_Y: 1.6,
+  /** Manned bilge pump (hold [X] in the hold): beats one open hole, loses to three. */
+  PUMP_RATE: 0.022,
+  /** Hull-local z of the pump as a fraction of length (just aft of amidships). */
+  PUMP_LOCAL_Z_F: -0.15,
 } as const;
 
 // ── Geysers ──────────────────────────────────────────────────

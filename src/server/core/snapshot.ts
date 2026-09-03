@@ -85,9 +85,12 @@ function stripShipInternals(ship: Ship): Ship {
   const { nextHoleId: _nextHoleId, lastHostileShipId: _lastHostileShipId, holes, ...wire } = ship;
   return {
     ...wire,
+    // `tier` is the ONE added byte per breach (SINK-01): the height class the
+    // server stamped at placement, so the client renders/announces LOW/MID/HIGH
+    // without re-deriving it from y and the hull class.
     holes: holes.map((hole) => (hole.patched
-      ? { id: hole.id, x: hole.x, y: hole.y, z: hole.z, patched: true }
-      : { id: hole.id, x: hole.x, y: hole.y, z: hole.z })),
+      ? { id: hole.id, x: hole.x, y: hole.y, z: hole.z, tier: hole.tier, patched: true }
+      : { id: hole.id, x: hole.x, y: hole.y, z: hole.z, tier: hole.tier })),
   } as unknown as Ship;
 }
 
