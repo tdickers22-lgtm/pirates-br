@@ -182,6 +182,38 @@ console.log('A match nobody could board is reaped at once:');
   await sleep(300);
 }
 
+console.log('A throwing spawnMatch (new Match / setupWorld / start) strands nobody:');
+{
+  // Distinct from the two cases above: there the MATCH exists and one
+  // PLACEMENT throws. Here the match itself cannot be built, which used to
+  // happen after the cohort was spliced out of the queue — no lobby_error, no
+  // lobby_left, state 'queue' with no queue entry, "Crew found, boarding"
+  // forever. Match.start() is the last call inside spawnMatch.
+  const originalStart = Match.prototype.start;
+  Match.prototype.start = function () { throw new Error('synthetic spawnMatch failure (test)'); };
+  const matchesBefore = (await (await fetch(`${HTTP}/health`)).json()).matches;
+  const f = await queueUp('Fox');
+  const g = await queueUp('George');
+  await sleep(7_500);
+  Match.prototype.start = originalStart;
+  const matchesAfter = (await (await fetch(`${HTTP}/health`)).json()).matches;
+  expect('both members told (lobby_error)', f.types().includes('lobby_error') && g.types().includes('lobby_error'),
+    `f=${f.types().join(',')} g=${g.types().join(',')}`);
+  expect('both members sent home (lobby_left), not left in limbo', f.types().includes('lobby_left') && g.types().includes('lobby_left'),
+    `f=${f.types().join(',')} g=${g.types().join(',')}`);
+  expect('no half-built match was registered', matchesAfter <= matchesBefore, `before=${matchesBefore} after=${matchesAfter}`);
+  expect('tick survived the throw: /health 200', (await health()) === 200);
+  const before = f.seen.length;
+  f.sendJson({ type: 'queue_join', ts: Date.now(), payload: {} });
+  await sleep(300);
+  const after = f.seen.slice(before).map((m) => m.type);
+  expect('a stranded member can queue again', after.includes('queue_update'), `saw=${after.join(',')}`);
+  f.sendJson({ type: 'queue_leave', ts: Date.now(), payload: {} });
+  await sleep(100);
+  for (const x of [f, g]) { try { x.ws.close(); } catch {} }
+  await sleep(300);
+}
+
 console.log('/bugsnap is gated, capped and rate-limited:');
 {
   const snap = (extra = {}) => fetch(`${HTTP}/bugsnap`, {

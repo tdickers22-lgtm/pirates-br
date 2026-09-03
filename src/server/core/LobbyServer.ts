@@ -470,10 +470,9 @@ export class LobbyServer {
     if (memberSessions.length === 0) return;
 
     const botCount = Math.max(0, Math.min(party.botFill, MATCH_TOTAL_SHIPS - memberSessions.length));
-    const match = this.spawnMatch({ botCount, source: 'party' });
 
     party.inMatch = true;
-    const placed = this.placeCohort(memberSessions, match, 'party', party.code);
+    const { placed } = this.spawnAndBoard(memberSessions, botCount, 'party', party.code);
     // Nobody boarded: the party is still in its panel, not "in a match" (a
     // stale inMatch=true would refuse the next Start).
     if (placed === 0) party.inMatch = false;
@@ -514,8 +513,7 @@ export class LobbyServer {
     const payload = (msg.payload ?? {}) as { botCount?: number };
     const requested = typeof payload.botCount === 'number' ? Math.floor(payload.botCount) : PARTY_DEFAULT_BOTS;
     const botCount = Math.max(0, Math.min(PARTY_MAX_BOTS, requested));
-    const match = this.spawnMatch({ botCount, source: 'party' });
-    this.placeCohort([session], match, 'party');
+    this.spawnAndBoard([session], botCount, 'party');
   }
 
   private handleReturnToMenu(session: ClientSession): void {
@@ -690,8 +688,7 @@ export class LobbyServer {
     }
 
     const botCount = Math.max(0, QUEUE_MATCH_BOTS_FILL_TO - cohortSessions.length);
-    const match = this.spawnMatch({ botCount, source: 'queue' });
-    this.placeCohort(cohortSessions, match, 'queue');
+    this.spawnAndBoard(cohortSessions, botCount, 'queue');
 
     if (this.queue.length === 0) {
       this.queueTimerStartedAt = null;
@@ -709,6 +706,31 @@ export class LobbyServer {
     match.start();
     this.matches.set(matchId, match);
     return match;
+  }
+
+  /** spawnMatch + placeCohort behind ONE boundary. placeCohort below survives
+   *  a throw per member, but the match itself was built outside it: a throw in
+   *  new Match() / setupWorld / start() landed AFTER the cohort had been
+   *  spliced out of the queue (or the party marked inMatch) and was swallowed
+   *  by guarded('tick'), so every member sat in state 'queue' with no queue
+   *  entry — "Crew found, boarding" forever, with no way to queue again.
+   *  Now a failed spawn tells every member (lobby_error + lobby_left) exactly
+   *  as a failed placement does, and returns placed 0 so callers roll back. */
+  private spawnAndBoard(
+    members: ClientSession[],
+    botCount: number,
+    source: 'party' | 'queue',
+    partyCode: string | null = null,
+  ): { match: Match | null; placed: number } {
+    let match: Match;
+    try {
+      match = this.spawnMatch({ botCount, source });
+    } catch (err) {
+      console.error(`[Lobby] spawnMatch failed (${source}, ${members.length} member(s)):`, err);
+      for (const member of members) this.failPlacement(member, null);
+      return { match: null, placed: 0 };
+    }
+    return { match, placed: this.placeCohort(members, match, source, partyCode) };
   }
 
   /** Board a cohort one member at a time, surviving a throw in any single
@@ -735,8 +757,8 @@ export class LobbyServer {
     return placed;
   }
 
-  private failPlacement(session: ClientSession, match: Match): void {
-    if (session.matchPlayerId) {
+  private failPlacement(session: ClientSession, match: Match | null): void {
+    if (match && session.matchPlayerId) {
       try { match.detachClient(session.matchPlayerId); } catch {}
     }
     this.clientToMatch.delete(session.id);
