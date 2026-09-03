@@ -13,7 +13,7 @@ import {
   splitSpill,
 } from '../../shared/cargo.js';
 import { MapGenerator } from '../world/MapGenerator.js';
-import { PhysicsSystem, applyShipRudderSteering, stormSeaState } from '../systems/PhysicsSystem.js';
+import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_DECK_AWASH_F, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { HitscanTrace } from '../systems/WeaponSystem.js';
@@ -507,6 +507,9 @@ export class Match {
   private guardHeldAt = new Map<string, number>();
   private skeletonNameIndex = 1;
   private shipLastDamagedByPlayer = new Map<string, { attackerId: string; at: number }>();
+  /** Hulls that went down FAST (scuttle, keg, rapid founder): their crews are
+   *  thrown clear at once instead of riding the deck down. */
+  private rapidFounderShipIds = new Set<string>();
   /** Per-player: previous frame had jump key held — used for reliable cannon self-launch edge detection. */
   private lastJumpHeldByPlayer = new Map<string, boolean>();
   /** Per-bot cooldown (sim seconds) before the next plank-repair while flooding. */
@@ -1641,6 +1644,8 @@ export class Match {
       if (!ship.alive || ship.sinking) continue;
       this.evaluateShipSinking(ship);
     }
+    // ...and walk the crews of the hulls already going down off them.
+    this.updateFounderingCrew(dt);
 
     // Clean dead projectiles
     this.state.projectiles = this.state.projectiles.filter(p => p.alive && p.age < p.maxAge);
@@ -4928,8 +4933,12 @@ export class Match {
     // does — the wreck mark is a dive site, not just a hole in the sea.
     this.spillCargoOnFounder(ship);
     ship.sinking = true;
-    ship.anchored = true;
-    ship.anchorRaiseProgress = 0;
+    // SHE DOES NOT DROP HER ANCHOR AS SHE GOES (ships-29): the founder is
+    // stopped by the sink drag in PhysicsSystem, and no HUD may describe a
+    // wreck as parked. Freeze the list she has RIGHT NOW, before riddleWreck
+    // dresses her with breaches all round, so she goes down by the flooded end.
+    this.physics.beginFounder(ship, this.t, stormSeaState(this.state.storm, ship.position.x, ship.position.z));
+    if (rapid) this.rapidFounderShipIds.add(ship.id);
     ship.sailHeight = 0;
     ship.sailAngle = 0;
     ship.onFire = false;
@@ -4954,34 +4963,76 @@ export class Match {
       this.creditShipSink(ship, sinkKiller);
     }
 
-    for (const player of this.state.players) {
-      if (player.onShipId !== ship.id || player.state === 'eliminated' || player.state === 'respawning' || player.health <= 0) {
-        continue;
-      }
-      player.onShipId = null;
-      // Downed crew splash out with everyone else but STAY downed (bleeding
-      // out in the water) — only Match's DBNO pass may change that state.
-      if (player.state !== 'downed') player.state = 'swimming';
-      this.dropCarriedChest(player);
-      this.clearStationFlags(player);
-      player.nearShipId = null;
-      player.nearChestId = null;
-      player.swimTimer = 0;
-      player.shipBoundaryGraceTimer = 0;
-      player.cannonFlightTimer = 0;
-      player.cannonBallistic = false;
-      player.velocity.y = Math.max(player.velocity.y, rapid ? 4 : 3);
-      player.knockbackVelocity = {
-        x: (this.rng() - 0.5) * (rapid ? 7 : 5),
-        y: rapid ? 5.5 : 4.2,
-        z: (this.rng() - 0.5) * (rapid ? 7 : 5),
-      };
+    // THE CREW STAY ABOARD (ships-09/liveplay-11). They ride the deck down and
+    // updateFounderingCrew puts each one in the water when the plank under HIS
+    // boots goes under — a rapid founder (scuttle/keg) is the one case that
+    // still throws everyone clear at once.
+    if (rapid) {
+      for (const player of this.state.players) this.ejectFounderingCrew(ship, player, true);
     }
 
-    ship.crewIds = [];
     this.state.kegs = this.state.kegs.filter((keg) => keg.shipId !== ship.id);
     this.shipLastDamagedByPlayer.delete(ship.id);
     this.announceCrewEliminated(ship, sinkKiller);
+  }
+
+  /**
+   * One pirate off a foundering hull and into the water. Downed crew splash out
+   * with everyone else but STAY downed (bleeding out in the water) — only the
+   * DBNO pass may change that state.
+   */
+  private ejectFounderingCrew(ship: Ship, player: Player, rapid: boolean): boolean {
+    if (player.onShipId !== ship.id || player.state === 'eliminated' || player.state === 'respawning' || player.health <= 0) {
+      return false;
+    }
+    player.onShipId = null;
+    if (player.state !== 'downed') player.state = 'swimming';
+    this.dropCarriedChest(player);
+    this.clearStationFlags(player);
+    player.nearShipId = null;
+    player.nearChestId = null;
+    player.swimTimer = 0;
+    player.shipBoundaryGraceTimer = 0;
+    player.cannonFlightTimer = 0;
+    player.cannonBallistic = false;
+    player.velocity.y = Math.max(player.velocity.y, rapid ? 4 : 3);
+    player.knockbackVelocity = {
+      x: (this.rng() - 0.5) * (rapid ? 7 : 5),
+      y: rapid ? 5.5 : 4.2,
+      z: (this.rng() - 0.5) * (rapid ? 7 : 5),
+    };
+    return true;
+  }
+
+  /**
+   * The founder, per pirate: a hand stays aboard while there is still a plank
+   * above water under him, and goes over the side the moment his own footing
+   * (heeled and trimmed with her) is FOUNDER_WADE_DEPTH under the live surface,
+   * or at FOUNDER_DECK_AWASH_F of SINK_TIME at the very latest. So the pirate
+   * at the high end genuinely stays dry longer than the one at the flooded end,
+   * and nobody is teleported off a deck that is still above the sea.
+   */
+  updateFounderingCrew(_dt: number) {
+    for (const ship of this.state.ships) {
+      if (!ship.alive || !ship.sinking) continue;
+      const rapid = this.rapidFounderShipIds.has(ship.id);
+      const sea = stormSeaState(this.state.storm, ship.position.x, ship.position.z);
+      for (const player of this.state.players) {
+        if (player.onShipId !== ship.id) continue;
+        const local = this.toShipLocal(player.position, ship);
+        const footing = getShipFloorYAt(player.position, ship, local)
+          + local.x * Math.sin(ship.roll ?? 0)
+          - local.z * Math.sin(ship.pitch ?? 0);
+        const surfaceY = gerstnerHeight(player.position.x, player.position.z, this.t, WAVE_PARAMS, sea);
+        if (ship.sinkProgress >= FOUNDER_DECK_AWASH_F || footing < surfaceY - FOUNDER_WADE_DEPTH) {
+          this.ejectFounderingCrew(ship, player, rapid);
+        }
+      }
+      // Her roster empties only once the last hand is actually off her.
+      if (ship.crewIds.length > 0 && !this.state.players.some((p) => p.onShipId === ship.id)) {
+        ship.crewIds = [];
+      }
+    }
   }
 
   /** A ship going under is what the CREWS AFLOAT counter tracks, and it used to

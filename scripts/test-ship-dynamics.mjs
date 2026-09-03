@@ -415,16 +415,69 @@ console.log('\nServer wave attitude (pitch/roll/heave)');
 }
 
 {
-  // Sinking ships hand attitude to the client sink tilt: server eases pitch out.
+  // A founder holds the attitude her water gave her (SINK-01 slice b re-pins
+  // this: the server no longer eases pitch/roll out for the client sink tilt).
   const physics = new PhysicsSystem();
   const ship = makeShip('sloop', { sinking: true, sinkProgress: 0.2 });
+  // Below the design waterline, so she is genuinely making water whatever
+  // the wave phase at t=0 happens to be.
+  ship.holes = [{ id: 1, x: 2.4, y: -0.2, z: -3, patched: false, tier: 0 }];
+  ship.nextHoleId = 2;
   ship.pitch = 0.3;
   ship.roll = -0.2;
   ship.heave = 1.2;
+  // Match calls this the instant she founders, before the wreck is riddled.
+  physics.beginFounder(ship, 0);
   for (let i = 0; i < 120; i++) physics.update(DT, i * DT, [ship], [], [], [], []);
-  expect('sinking decays server pitch/roll and zeroes heave',
-    Math.abs(ship.pitch) < 0.15 && Math.abs(ship.roll) < 0.15 && ship.heave === 0,
+  expect('a founder zeroes heave but keeps leaning on her holed rail',
+    ship.roll < -0.02 && ship.heave === 0,
     `pitch=${ship.pitch.toFixed(3)} roll=${ship.roll.toFixed(3)} heave=${ship.heave}`);
+  expect('and she is settling by the end she is holed in', ship.pitch < -0.01,
+    `pitch=${ship.pitch.toFixed(3)}`);
+}
+
+{
+  // physics-23: a sinking hull is NOT a collider, and it must not matter which
+  // side of the array she sits on. On HEAD the wreck is skipped before its own
+  // pass but is still a valid `other` for a live hull earlier in the array, so
+  // the two orders diverge.
+  const runPair = (mode) => {
+    const physics = new PhysicsSystem();
+    const live = makeShip('sloop', { sailHeight: 1 });
+    live.position = { x: 0, y: 0, z: 0 };
+    const wreck = makeShip('sloop', { sinking: true, sinkProgress: 0.1 });
+    wreck.position = { x: 3.2, y: 0, z: 0 };
+    const ships = mode === 'alone' ? [live] : (mode === 'wreckFirst' ? [wreck, live] : [live, wreck]);
+    for (let i = 0; i < 90; i++) physics.update(DT, i * DT, ships, [], [], [], []);
+    return { x: live.position.x, z: live.position.z, vx: live.velocity.x, vz: live.velocity.z };
+  };
+  const a = runPair('liveFirst');
+  const b = runPair('wreckFirst');
+  const alone = runPair('alone');
+  expect('a live hull beside a wreck behaves IDENTICALLY in both array orders',
+    Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.z - b.z) < 1e-9
+      && Math.abs(a.vx - b.vx) < 1e-9 && Math.abs(a.vz - b.vz) < 1e-9,
+    `liveFirst=${JSON.stringify(a)} wreckFirst=${JSON.stringify(b)}`);
+  expect('...and she sails exactly as she would with the wreck not there at all',
+    Math.abs(a.x - alone.x) < 1e-9 && Math.abs(b.x - alone.x) < 1e-9,
+    `liveFirst=${a.x.toFixed(4)} wreckFirst=${b.x.toFixed(4)} alone=${alone.x.toFixed(4)}`);
+}
+
+{
+  // A ball fired at a founder passes through her: a wreck stops absorbing shot.
+  const physics = new PhysicsSystem();
+  const wreck = makeShip('sloop', { sinking: true, sinkProgress: 0.1 });
+  const proj = {
+    id: 'ball-wreck', type: 'cannonball', ownerId: 'gunner', ownerShipId: 'other',
+    position: { x: -4, y: 1.5, z: 0 }, velocity: { x: 400, y: 0, z: 0 },
+    alive: true, age: 0, maxAge: 8, damage: SHIP.CANNON_DAMAGE_HULL,
+    knockback: 0, visualOnly: false, showImpact: false,
+  };
+  physics.update(DT, 0, [wreck], [], [proj], [], []);
+  expect('a cannonball flies THROUGH a wreck instead of being eaten by her',
+    proj.alive === true && proj.position.x > 2, `alive=${proj.alive} x=${proj.position.x.toFixed(2)}`);
+  expect('and the wreck takes no fresh breaches from it', (wreck.holes ?? []).length === 0,
+    JSON.stringify(wreck.holes));
 }
 
 if (failures > 0) {

@@ -263,6 +263,21 @@ export function stormSeaState(
   );
 }
 
+// ── The founder ──────────────────────────────────────────────────────────────
+/** Fraction of SHIP.SINK_TIME by which her weather deck is awash (and by which
+ *  the last hand is off her, whatever the local wave says). */
+export const FOUNDER_DECK_AWASH_F = 0.6;
+/** How deep the plank under a pirate's boots must go before he is swimming
+ *  rather than wading — the same number the descent profile aims the deck at. */
+export const FOUNDER_WADE_DEPTH = 0.4;
+/** She leans HARDER as she goes: the captured list, scaled and re-bounded. */
+const FOUNDER_LIST_SCALE = 1.4;
+const FOUNDER_LIST_MAX = 0.35;
+/** Rate the founder attitude chases its target (1/s). */
+const FOUNDER_ATTITUDE_RATE = 2.5;
+/** Descent once the deck is under: masts and tops follow her down. */
+const FOUNDER_DEEP_RATE = 1.5;
+
 // ── Flooding model ───────────────────────────────────────────────────────────
 /**
  * Per-HOLE flood evaluation. Every unpatched breach is tested at its own
@@ -439,6 +454,10 @@ export class PhysicsSystem {
   private shipDynamics = new Map<string, {
     pitchVel: number; rollVel: number; heaveVel: number;
     agroundFor: number; agroundArming: number;
+    /** The list she carried into her founder, captured ONCE by beginFounder so
+     *  the wreck goes down by the end she was actually holed in (and not by
+     *  whatever the riddling that follows happens to average out to). */
+    founderRoll: number; founderTrim: number;
   }>();
   /** Each player's footing at the end of the previous tick — the "walk from"
    *  point for steep-slope blocking. Keyed by id so it governs bot body-walk
@@ -615,18 +634,32 @@ export class PhysicsSystem {
     for (const ship of ships) {
       if (!ship.alive) continue;
       if (ship.sinking) {
+        const sinkStats = SHIP_STATS[ship.type];
         ship.sinkProgress += dt / SHIP.SINK_TIME;
-        ship.position.y -= dt * 1.5;
+        // A founder is a SCENE, not a pop: she settles just fast enough to put
+        // her weather deck under at FOUNDER_DECK_AWASH_F of SINK_TIME — the
+        // crew are still standing on it — and only then goes down properly.
+        const deckDrop = sinkStats.height + SHIP.DECK_STAND_OFFSET + FOUNDER_WADE_DEPTH;
+        const descent = ship.sinkProgress < FOUNDER_DECK_AWASH_F
+          ? deckDrop / (FOUNDER_DECK_AWASH_F * SHIP.SINK_TIME)
+          : FOUNDER_DEEP_RATE;
+        ship.position.y -= dt * descent;
         // Frame-rate-independent decay preserving the previous per-16ms feel.
         const sinkDrag = Math.pow(0.94, dt / 0.016);
         ship.velocity.x *= sinkDrag;
         ship.velocity.z *= sinkDrag;
         ship.angularVelocity *= Math.pow(0.9, dt / 0.016);
-        // The client's sink tilt owns the attitude while going down — ease the
-        // wave attitude out so it never fights sinkProgress.
-        const attitudeDecay = Math.exp(-dt * 1.6);
-        ship.pitch = (ship.pitch ?? 0) * attitudeDecay;
-        ship.roll = (ship.roll ?? 0) * attitudeDecay;
+        // She keeps — and deepens — the list her breaches gave her instead of
+        // snapping level for a client capsize animation (ships-09). The target
+        // was captured at the founder, so the riddling that dresses the wreck
+        // can never argue her back upright.
+        const sinkDyn = this.getShipDynamics(ship.id);
+        const lean = clamp(ship.sinkProgress / 0.4, 0, 1);
+        const targetRoll = clamp(sinkDyn.founderRoll * FOUNDER_LIST_SCALE, -FOUNDER_LIST_MAX, FOUNDER_LIST_MAX) * lean;
+        const targetTrim = clamp(sinkDyn.founderTrim * FOUNDER_LIST_SCALE, -FOUNDER_LIST_MAX, FOUNDER_LIST_MAX) * lean;
+        const attitudeBlend = 1 - Math.exp(-dt * FOUNDER_ATTITUDE_RATE);
+        ship.pitch = (ship.pitch ?? 0) + (targetTrim - (ship.pitch ?? 0)) * attitudeBlend;
+        ship.roll = (ship.roll ?? 0) + (targetRoll - (ship.roll ?? 0)) * attitudeBlend;
         ship.heave = 0;
         ship.luffing = false;
         ship.aground = false;
@@ -805,7 +838,11 @@ export class PhysicsSystem {
       const shipIdx = ships.indexOf(ship);
       for (let j = shipIdx + 1; j < ships.length; j++) {
         const other = ships[j];
-        if (!other.alive) continue;
+        // A FOUNDER IS NOT A COLLIDER (physics-23). She already `continue`s
+        // before her own pass, so leaving her a valid `other` here made two
+        // hulls alongside the same wreck behave differently purely by array
+        // order: one sailed through her, the other bounced.
+        if (!other.alive || other.sinking) continue;
         this.resolveShipShipCollision(ship, other, helmsmanByShip);
       }
 
@@ -1679,7 +1716,9 @@ export class PhysicsSystem {
       // so an arcing ball registers where it met the planking, not wherever
       // the end-of-tick point happened to land inside a slab.
       for (const ship of ships) {
-        if (!ship.alive || ship.id === proj.ownerShipId) continue;
+        // Shot into a wreck passes through her: a founder stopped absorbing
+        // balls (and taking fresh breaches) for the whole 20 s (physics-23).
+        if (!ship.alive || ship.sinking || ship.id === proj.ownerShipId) continue;
         const hit = this.sweepProjectileAgainstHull(previousPosition, proj, ship, players);
         if (hit) {
           proj.position = hit.point;
@@ -2022,6 +2061,19 @@ export class PhysicsSystem {
     return victim;
   }
 
+  /**
+   * Called by Match the instant a hull founders, BEFORE the wreck is riddled:
+   * freezes the list her open breaches were giving her so the descent goes down
+   * by the flooded end. Server-side only — nothing new on the wire, the client
+   * reads the pitch/roll it already gets.
+   */
+  beginFounder(ship: Ship, t: number, storm = 0) {
+    const dyn = this.getShipDynamics(ship.id);
+    const list = floodListTargets(ship, t, storm);
+    dyn.founderRoll = list.roll;
+    dyn.founderTrim = list.trim;
+  }
+
   /** Plank ONE breach shut (one plank per hole). The entity stays in the list so
    *  the crossed-plank repair keeps rendering at the spot. */
   patchHole(ship: Ship, holeId: number): boolean {
@@ -2194,7 +2246,11 @@ export class PhysicsSystem {
     // deck XZ and within ~1.8m of the deck, claim the ship and let on-ship gravity
     // bring them down to it.
     for (const ship of ships) {
-      if (!ship.alive) continue;
+      // Never auto-claim a founder: a jumper landing on a sinking deck used to
+      // ride her under with no swim transition (physics-23). Crew already
+      // aboard keep the onShipId fast path above and are put in the water by
+      // Match's founder pass.
+      if (!ship.alive || ship.sinking) continue;
       const stats = SHIP_STATS[ship.type];
       const local = this.toShipLocal(player.position, ship);
       const deckY = getShipDeckY(ship.position.y, stats);
@@ -2470,7 +2526,7 @@ export class PhysicsSystem {
   private getShipDynamics(shipId: string) {
     let dyn = this.shipDynamics.get(shipId);
     if (!dyn) {
-      dyn = { pitchVel: 0, rollVel: 0, heaveVel: 0, agroundFor: 0, agroundArming: 0 };
+      dyn = { pitchVel: 0, rollVel: 0, heaveVel: 0, agroundFor: 0, agroundArming: 0, founderRoll: 0, founderTrim: 0 };
       this.shipDynamics.set(shipId, dyn);
     }
     return dyn;

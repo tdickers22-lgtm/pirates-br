@@ -376,7 +376,7 @@ console.log('\nFire chars HIGH and burns DOWN — a firebomb is a real threat no
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (swims out), sinker banks gold');
+console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (rides the deck down), sinker banks gold');
 
 {
   const match = new Match({ matchId: 'flooding-test', botCount: 3 });
@@ -395,11 +395,13 @@ console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (s
   match.evaluateShipSinking(victimShip);
 
   expect('a fully-flooded ship starts sinking', victimShip.sinking === true);
-  // Losing the ship does NOT eliminate the crew — they splash out alive and
-  // keep fighting; the sink only costs them their respawn anchor.
-  expect('the flooded crew survives the sink (swimming, not eliminated)',
-    victimCrew.every((p) => p.state === 'swimming' && p.health > 0),
-    victimCrew.map((p) => p.state).join(','));
+  // Losing the ship does NOT eliminate the crew — they come out alive and keep
+  // fighting; the sink only costs them their respawn anchor. SINK-01 re-pins
+  // WHEN they leave: they are still aboard, alive, on the tick she founders and
+  // walk off as the water reaches them (see the founder-scene block below).
+  expect('the flooded crew survives the sink (alive, still on her deck)',
+    victimCrew.every((p) => p.state !== 'eliminated' && p.health > 0 && p.onShipId === victimShip.id),
+    victimCrew.map((p) => `${p.state}:${p.onShipId ? 'aboard' : 'off'}`).join(','));
   expect('crew keeps NO respawn anchor (home ship sinking)',
     victimShip.sinking && victimCrew.every((p) => p.shipId === victimShip.id));
   expect('sinker banked the ship-sink bounty (gold, not kills)',
@@ -600,6 +602,90 @@ console.log('\nThe SERVER owns the list: she leans on her holed side and settles
   expect('a starboard-holed hull heels to starboard for real (mean roll < -0.05)',
     rollStbd < -0.05, `meanRoll=${rollStbd.toFixed(3)}`);
   expect('and the port-holed hull heels the other way', rollPort > 0.05, `meanRoll=${rollPort.toFixed(3)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down by the flooded end (SINK-01 slice b)');
+
+{
+  const match = new Match({ matchId: 'founder-test', botCount: 3 });
+  match.state.phase = 'playing';
+  const st = match.state;
+  const ship = st.ships[0];
+  const stats = SHIP_STATS[ship.type];
+  ship.position.y = 0;
+  ship.rotation = 0;
+  ship.pitch = 0;
+  ship.roll = 0;
+  ship.holes = [];
+  ship.nextHoleId = 1;
+  // Breaches all FORWARD: she must go down by the head, and the pirate standing
+  // in the bows must get his boots wet before the one aft on the quarterdeck.
+  match.physics.openHoleAt(ship, { x: 1.5, y: -0.1, z: stats.length * 0.30 }, 3, 'cannon');
+  // Solo bots crew one hull each — press-gang a second hand aboard so the
+  // fixture has a pirate at each end of her.
+  const pressed = st.players.find((p) => p.onShipId !== ship.id && p.state !== 'eliminated');
+  if (pressed) {
+    pressed.onShipId = ship.id;
+    pressed.shipId = ship.id;
+    if (!ship.crewIds.includes(pressed.id)) ship.crewIds.push(pressed.id);
+  }
+  const crew = st.players.filter((p) => p.onShipId === ship.id && p.state !== 'eliminated');
+  expect('the founder fixture has crew aboard', crew.length >= 2, `crew=${crew.length}`);
+  const deckY = ship.position.y + stats.height + SHIP.DECK_STAND_OFFSET;
+  const aft = crew[0];
+  const fwd = crew[1];
+  aft.position = { x: ship.position.x, y: deckY, z: ship.position.z - stats.length * 0.18 };
+  fwd.position = { x: ship.position.x, y: deckY, z: ship.position.z + stats.length * 0.18 };
+
+  ship.waterLevel = 1;
+  match.evaluateShipSinking(ship);
+  expect('she founders', ship.sinking === true);
+  expect('a foundering hull does NOT let go her anchor', ship.anchored === false,
+    `anchored=${ship.anchored}`);
+  expect('the crew are still aboard the tick she founders',
+    crew.every((p) => p.onShipId === ship.id), crew.map((p) => `${p.id}:${p.onShipId}`).join(','));
+
+  const rollAtFounder = ship.roll ?? 0;
+  const ticks = Math.round(SHIP.SINK_TIME * 60);
+  const aboardAt = new Map(crew.map((p) => [p.id, ticks]));
+  let deckAwashAt = ticks;
+  for (let i = 0; i < ticks; i += 1) {
+    match.physics.update(DT, i * DT, st.ships, st.players, [], [], [], null);
+    match.updateFounderingCrew(DT);
+    for (const p of crew) {
+      if (p.onShipId !== ship.id && aboardAt.get(p.id) === ticks) aboardAt.set(p.id, i);
+    }
+    if (deckAwashAt === ticks
+      && ship.position.y + stats.height + SHIP.DECK_STAND_OFFSET <= 0) deckAwashAt = i;
+    if (i === Math.round(ticks * 0.25)) {
+      expect('EVERY hand is still aboard a quarter of the way through the founder',
+        crew.every((p) => p.onShipId === ship.id),
+        `progress=${ship.sinkProgress.toFixed(2)} aboard=${crew.filter((p) => p.onShipId === ship.id).length}/${crew.length}`);
+    }
+    if (i === Math.round(ticks * 0.4)) {
+      expect('she still has a crew on her at 40% of SINK_TIME (only the flooded end is awash)',
+        crew.some((p) => p.onShipId === ship.id),
+        `progress=${ship.sinkProgress.toFixed(2)} aboard=${crew.filter((p) => p.onShipId === ship.id).length}/${crew.length}`);
+      expect('...and she still carries the list her breaches gave her',
+        Math.abs(ship.roll ?? 0) > 0.02 || Math.abs(ship.pitch ?? 0) > 0.02,
+        `pitch=${(ship.pitch ?? 0).toFixed(3)} roll=${(ship.roll ?? 0).toFixed(3)} atFounder=${rollAtFounder.toFixed(3)}`);
+      expect('she is down by the HEAD, the end her breaches are in', (ship.pitch ?? 0) > 0.02,
+        `pitch=${(ship.pitch ?? 0).toFixed(3)}`);
+    }
+  }
+  expect('her weather deck goes under around 60% of SINK_TIME, not on the first tick',
+    deckAwashAt > ticks * 0.4 && deckAwashAt < ticks * 0.8,
+    `awash at tick ${deckAwashAt}/${ticks} (${(deckAwashAt / ticks * 100).toFixed(0)}%)`);
+  expect('the pirate at the flooded end swims first, the one at the high end stays dry longer',
+    aboardAt.get(fwd.id) < aboardAt.get(aft.id),
+    `fwd=${aboardAt.get(fwd.id)} aft=${aboardAt.get(aft.id)} of ${ticks}`);
+  expect('everyone is off her by the time she is gone',
+    crew.every((p) => p.onShipId === null && (p.state === 'swimming' || p.state === 'downed' || p.state === 'eliminated')),
+    crew.map((p) => `${p.state}:${p.onShipId}`).join(','));
+  expect('the swimmers came out ALIVE (nobody drowned in the hull)',
+    crew.every((p) => p.health > 0 || p.state === 'downed'),
+    crew.map((p) => p.health.toFixed(1)).join(','));
 }
 
 if (failures > 0) {
