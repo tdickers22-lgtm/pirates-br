@@ -467,11 +467,24 @@ const OCEAN_FRAG = /* glsl */`
     // Started earlier and finished before the grid's own 3264 m rim so the last
     // ring is already pure sky by the time it runs out of geometry.
     float horizonAmt = smoothstep(900.0, 2900.0, viewDist) * (1.0 - underwater);
-    vec3 fogCol     = mix(u_fogColor, vec3(0.46, 0.51, 0.56), u_stormIntensity * 0.8);
+    // TWO STORM GREYS USED TO LIVE HERE, AND BOTH WERE DISPLAY-REFERRED NUMBERS
+    // TREATED AS LINEAR. mix(u_fogColor, vec3(0.46,0.51,0.56), storm*0.8) is a
+    // 0.71-sRGB grey mixed raw into water whose scene fog target (fogStormColor
+    // 0x4a5764) is a 0.30-sRGB slate — five times darker; and
+    // skyShape(mix(u_horizonColor, vec3(0.44,0.47,0.51), storm*0.85)) pushed a
+    // second display number through the curve that expects LINEAR and landed on
+    // 0.198 where the sky's own storm horizon shapes to 0.077. So in any storm
+    // the last kilometre of sea dissolved to a plate ~2.6x the luminance of the
+    // sky above it, with the islands standing in it fogging to the DARK scene
+    // fog: the "bright sea, dark island, darker sky" read in r3-114.
+    // Renderer.getAtmosphere already storm-blends BOTH inputs (fog toward
+    // fogStormColor, horizon toward skyHorizonStormColor), so the ocean's job is
+    // to use them, not to invent a third and a fourth storm grey of its own.
+    vec3 fogCol     = u_fogColor;
     // The far dissolve target is the SKY, so it is shaped like the sky. Fed raw,
     // the horizon swatch landed ~1.7 stops hot through ACES and the last two
     // kilometres of sea became a flat white sheet with a hard edge on it.
-    vec3 horizonCol = skyShape(mix(u_horizonColor, vec3(0.44, 0.47, 0.51), u_stormIntensity * 0.85));
+    vec3 horizonCol = skyShape(u_horizonColor);
     color = mix(color, fogCol, fogAmt * 0.78);
     color = mix(color, horizonCol, horizonAmt);
 
@@ -487,6 +500,21 @@ const OCEAN_FRAG = /* glsl */`
     }
 
     gl_FragColor = vec4(color, 1.0);
+    // A ShaderMaterial TONE-MAPS AND ENCODES ITSELF OR NOBODY DOES IT FOR IT.
+    // three only injects these two chunks when the material renders to the
+    // default framebuffer (WebGLPrograms: toneMapping/outputColorSpace are
+    // per-material parameters only when the render target is null). On
+    // balanced/high the scene goes through PostFx and OutputPass applies ACES +
+    // sRGB to every pixel uniformly, so both includes expand to NOTHING and the
+    // drawn frame is byte-identical to what it was before this line existed. On
+    // the LOW tier there is no composer: renderer.render() writes straight to an
+    // sRGB framebuffer with toneMapping=ACESFilmic set, the sky shader and every
+    // MeshStandardMaterial encode themselves, and the ocean — 45-55% of the
+    // frame — wrote raw linear. Measured at the sea/sky junction on the pinned
+    // map, noon, low: sea 83 vs sky 125, a 0.66x step at the exact pixels that
+    // are supposed to be the same colour.
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -615,6 +643,12 @@ export class OceanRenderer {
     this.material = new THREE.ShaderMaterial({
       vertexShader:   OCEAN_VERT,
       fragmentShader: OCEAN_FRAG,
+      // NAMED so a gate can find the linked program: three copies material.name
+      // into WebGLProgram.name, and scripts/horizon-luminance-probe.mjs reads
+      // gl.getShaderSource() off it to prove the two chunks above expand on low
+      // and expand to nothing on balanced. An unnamed ShaderMaterial matched
+      // three's own empty-named fullscreen quad and the gate graded the composer.
+      name: 'ocean-surface',
       uniforms: {
         u_time:      { value: 0 },
         u_roughness: { value: getOceanRoughness(0) },

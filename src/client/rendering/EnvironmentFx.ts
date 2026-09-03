@@ -341,6 +341,13 @@ const STORM_FRONT_FRAG = /* glsl */`
     a *= u_intensity;
     if (a < 0.004) discard;
     gl_FragColor = vec4(col, a);
+    // Same omission as the ocean's (graphics-26): a ShaderMaterial gets no tone
+    // map and no transfer function unless it includes them, and on the LOW tier
+    // there is no composer to do it downstream. The storm front stood next to a
+    // tone-mapped sky writing raw linear. Both chunks expand to nothing on
+    // balanced/high, where OutputPass owns the conversion.
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
