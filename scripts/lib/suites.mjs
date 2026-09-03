@@ -223,6 +223,13 @@ export const BROWSER = [
   //                      noon sea chroma ≤ 1.3× sky (RED on HEAD: noon 6.67×, blue sea under slate)
   { ...plain('test-fill-budget.mjs'), slow: true },
   { ...plain('test-storm-wall.mjs'), slow: true },
+  // OCEAN-01 (wave 1.4). The fair-weather half of what test-storm-wall grades
+  // under the ring: is the ocean lit by the sky it dissolves into? Reads the
+  // sea/sky junction at noon on the LOW tier (no composer, so the material must
+  // tone-map itself), the night body ratio (the inversion), the moon path, and
+  // the wiring that makes those possible (shared fog density, scene light
+  // uniforms, the active light after dark). RED on HEAD on every band.
+  { ...plain('horizon-luminance-probe.mjs'), slow: true },
 ];
 
 /**
