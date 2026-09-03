@@ -1333,6 +1333,29 @@ ribs, beams and ceiling slabs AND the deck rails and masts — so `ship-dark-tim
 is **one draw call spanning y −0.2 to 11.7**, bilge to masthead. The hold cannot
 be gated separately from the rig because they are the same mesh.
 
+### 15.3a What SHIP-01 did to this census (A/B, parked, 2026-09-03)
+
+The lane that fixed the ship's attitude frame (w1.3) split two surfaces out of
+the buckets above: `ship-hull-strake` (the three proud strakes, so they can carry
+the breach discard) and the rudder blade (onto its own pivot, so it can turn on
+`rudderAngle`). Both are new merge groups, so the census was re-run `--park`ed at
+`low`/`deck-aft` on the pinned seed, before and after, in one sitting:
+
+| | before | after |
+|---|---|---|
+| `ship` bucket draw calls | 140 | **142** |
+| frame / opaque layers | 1.704 / 1.200 | 1.692 / **1.139** |
+| frame p95 | 4 | 4 |
+| `ship-dark-timber` share of frame | 15.0% | 15.1% |
+| parts in `ship` | 72 | 73 |
+
+So the two surfaces cost exactly the two draw calls they are, and no fill: the
+strake reads 0.004 layers over 0.4% of the frame. Whole-scene `sceneDraws` moves
+more than that between the two runs (328 → 453) because the hull's parked
+attitude differs by the very Euler-order fix under test, which re-aims a
+ship-anchored camera at different island decor. Read the BUCKET row, not the
+scene row, when the change is a ship change.
+
 ### 15.4 The tier inversion is not a tier effect
 
 §3 records `deck-aft` at 2.66 layers at `high` and **3.03 at `low`**, and calls
