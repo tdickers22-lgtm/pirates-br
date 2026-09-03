@@ -253,8 +253,14 @@ export class BotSystem {
       const player = players.find(p => p.id === pid);
       const ship = ships.find(s => s.id === bot.shipId);
       // Downed bots stop steering/firing — Match's DBNO pass owns them until
-      // a crewmate revives them or they bleed out.
-      if (!player || !ship || player.state === 'eliminated' || player.state === 'downed' || !ship.alive) continue;
+      // a crewmate revives them or they bleed out. A DEAD pirate (state
+      // 'respawning', PLAYER.RESPAWN_TIME on the clock) is an unmanned hull:
+      // no helm, no trim, no broadside — the wheel centres itself through the
+      // un-helmed rudder decay in PhysicsSystem and she coasts. Sniping the
+      // lone pirate off a bot's deck has to buy the same drift a human crew
+      // gets when its helmsman dies (BOT-02 / bots-02).
+      if (!player || !ship || !ship.alive) continue;
+      if (player.state === 'eliminated' || player.state === 'downed' || player.state === 'respawning') continue;
 
       bot.stateTimer -= dt;
       bot.firearmTimer -= dt;

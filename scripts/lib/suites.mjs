@@ -99,6 +99,8 @@ export const LOGIC = [
   quick(tsx('test-material-floor.mjs')),
   quick(tsx('test-sea-voids.mjs')),
   tsx('test-bot-peace-window.mjs'),
+  // BOT-02: a bot whose lone pirate is dead is an unmanned hull (w1.1).
+  tsx('test-bot-ghost-helm.mjs'),
   quick(tsx('test-oneshot-underload.mjs')),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),

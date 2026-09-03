@@ -55,8 +55,10 @@ export class WeaponSystem {
       aimOrigin?: Vec3 | null;
     },
   ): HitscanTrace[] {
-    // Downed pirates crawl — weapons are locked until revived.
-    if (player.state === 'eliminated' || player.state === 'downed') return [];
+    // Downed pirates crawl — weapons are locked until revived. A pirate on the
+    // respawn clock is dead: no gun fires for a corpse (Match gates human input
+    // earlier; this closes the bot ghost-helm path, BOT-02).
+    if (player.state === 'eliminated' || player.state === 'downed' || player.state === 'respawning') return [];
 
     // If player is at a cannon, fire ship cannon
     if (player.atCannon && ship) {
