@@ -205,6 +205,28 @@ const BUDGETS = {
     { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 601, draws: 680, tris: 580_000 },
     { scene: 'open-sea', label: 'open water (low tier)', measured: 283, draws: 320, tris: 180_000 },
   ],
+  // 'balanced' IS THE DEFAULT VERDICT FOR MOST MACHINES — every Intel laptop,
+  // every phone, every Safari Air and every 8-thread desktop lands here — and
+  // until wave 0.4 it was the one tier no row graded and no census had ever
+  // read (perf-09). A regression that touched only balanced (its 1536² shadow
+  // map, its FXAA path, its 300 m full-detail radius) passed this suite.
+  //
+  // PROVISIONAL CEILINGS: ONE pinned SwiftShader run (2026-09-02, HEAD
+  // 62f29387, seed 20260801) at the +12% rule, not the four runs the high
+  // table earned. Same run read high at 1212/1783k dock, 652/825k sea,
+  // 1837/2777k cave, so balanced sits at 71/72%, 68/43% and 75/59% of high.
+  // Lane 2.6 (PERF-01) re-pins these off four runs when it lands the tier
+  // rules; until then a red row here is a reading to check, not a verdict.
+  // Mutation proof (run 2026-09-02): InstanceLod PROP_DENSITY_RAMP.balanced
+  // never thinning + MIN_INSTANCE_PIXELS.balanced 0.1 → open-sea 396k and
+  // cave-interior 1944k triangles, both rows FAIL; dock-vista only rose 6%
+  // (its props sit inside the 300 m full-detail radius), so it is the two
+  // far-prop scenes that guard the ramp, not the vista.
+  balanced: [
+    { scene: 'dock-vista', label: 'wide island vista (balanced tier)', measured: 864, draws: 970, tris: 1_430_000 },
+    { scene: 'open-sea', label: 'open water (balanced tier)', measured: 442, draws: 495, tris: 395_000 },
+    { scene: 'cave-interior', label: 'cave interior (balanced tier)', measured: 1374, draws: 1540, tris: 1_835_000 },
+  ],
 };
 
 /** THE GILDED WRECK gets her OWN ceiling, and it is not the dock's.
@@ -237,6 +259,9 @@ const WRECK_WAIT_MS = 90_000;
  *  18-30% of its triangles, so the 0.72/0.68 these started at could have been
  *  met by a 'low' twice as expensive as the one that ships. */
 const LOW_TIER_MAX_RATIO = { draws: 0.50, tris: 0.45 };
+/** And 'balanced' exists to be cheaper than 'high' by a margin a player can
+ *  feel: at most 80% of high's draws and triangles at the same placement. */
+const MID_TIER_MAX_RATIO = { draws: 0.80, tris: 0.80 };
 
 let failures = 0;
 /** MUTATION KNOB for this gate's own proof. PIRATES_BR_MUTATE_DROP_SCENE=dock-vista
@@ -492,7 +517,24 @@ async function main() {
     const wantWreck = ownServer;
 
     const high = await measureTier(browser, 'high', { wantWreck });
+    const balanced = await measureTier(browser, 'balanced', { wantWreck: false });
     const low = await measureTier(browser, 'low', { wantWreck: false });
+
+    for (const budget of BUDGETS.balanced) {
+      const a = high[budget.scene];
+      const b = balanced[budget.scene];
+      if (!a || !b) continue;
+      expect(
+        `balanced tier draws no more than ${Math.round(MID_TIER_MAX_RATIO.draws * 100)}% of high at ${budget.scene}`,
+        b.draws <= a.draws * MID_TIER_MAX_RATIO.draws,
+        `balanced ${b.draws} vs high ${a.draws} (${Math.round((b.draws / a.draws) * 100)}%)`,
+      );
+      expect(
+        `balanced tier draws no more than ${Math.round(MID_TIER_MAX_RATIO.tris * 100)}% of high's triangles at ${budget.scene}`,
+        b.tris <= a.tris * MID_TIER_MAX_RATIO.tris,
+        `balanced ${Math.round(b.tris / 1000)}k vs high ${Math.round(a.tris / 1000)}k (${Math.round((b.tris / a.tris) * 100)}%)`,
+      );
+    }
 
     // ── 'low' must actually be low ───────────────────────────────────────
     for (const budget of BUDGETS.low) {

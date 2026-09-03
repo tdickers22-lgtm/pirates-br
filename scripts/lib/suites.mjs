@@ -130,6 +130,8 @@ export const LOGIC = [
   tsx('test-ship-attitude-frame.mjs'),
   tsx('test-ship-geometry.mjs'),
   tsx('test-asset-bounds.mjs'),
+  //   test-quality-preference     — detector rows per device (Safari M2 Air → balanced today; PERF-01, lane 2.6)
+  tsx('test-quality-preference.mjs'),
 ];
 
 /**
