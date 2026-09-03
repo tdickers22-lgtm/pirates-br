@@ -35,7 +35,7 @@ import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MI
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { apparentDistanceScale, updateInstanceLod, type InstanceLodBatch } from '../world/island/InstanceLod.js';
-import { HudController, type HudView } from '../ui/HudController.js';
+import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import {
   CORPSE_FADE_START, CORPSE_LIFETIME, PlayerAnimator,
@@ -258,6 +258,33 @@ export function isDuplicateSinkLine(
 ): boolean {
   if (!shipSink || !killerId || announcedAt === undefined) return false;
   return now - announcedAt < SINK_LINE_DEDUPE_MS;
+}
+
+/** The defender's copy of 'ship_hit' as Match.notifyCrewUnderFire sends it. */
+export type IncomingShipHit = {
+  incoming: true;
+  attackerId?: string | null;
+  attackerCrew?: string | null;
+  side?: HullStruckEvent['side'];
+  topside?: boolean;
+  holeId?: number | null;
+  openHoles?: number;
+};
+
+/** A defender-facing 'ship_hit' (Match.notifyCrewUnderFire, wave 1.5) must
+ *  NEVER take the attacker's hit-confirm path: that path paints the hitmarker,
+ *  the kill chime and the ship-hit splinters, so the crew being shelled was
+ *  being congratulated for the ball that holed them. Pure so it gates. */
+export function isIncomingShipHit(payload: unknown): boolean {
+  return !!payload && typeof payload === 'object' && (payload as { incoming?: unknown }).incoming === true;
+}
+
+/** How hard a ball into your own hull kicks the camera. Scaled by how many
+ *  leaks are open (a holed hull works harder under the same shot) and bounded
+ *  so a hull at the 8-hole cap does not throw the view off the target. */
+export function hullShudderTrauma(openHoles: number): number {
+  const holes = Math.max(0, Math.min(8, Math.floor(openHoles || 0)));
+  return 0.14 + holes * 0.045;
 }
 
 /** The click-to-look hint, in the verbs of the station the pirate is standing
@@ -2098,6 +2125,14 @@ export class Game {
     };
 
     this.network.onShipHit = (payload) => {
+      // Two messages share this type. The attacker's hit-confirm (hitmarker,
+      // chime, splinters) and — since wave 1.5 — the DEFENDER's copy, marked
+      // `incoming`. Diverting is not cosmetic: without it the crew being
+      // shelled got the shooter's hitmarker for the ball that holed them.
+      if (isIncomingShipHit(payload)) {
+        this.handleIncomingShipHit(payload as IncomingShipHit);
+        return;
+      }
       this.handleCombatHit(payload as {
         damage?: number;
         position?: { x: number; y: number; z: number };
@@ -2489,6 +2524,39 @@ export class Game {
         sessionId: this.activeTradeSessionId,
       });
     });
+  }
+
+  /** The last crew we told the player was firing on them, and when. */
+  private lastUnderFire: { crew: string | null; at: number } | null = null;
+
+  /**
+   * YOUR HULL IS BEING SHOT AT, AND NOW YOU KNOW BY WHOM (liveplay-21, hud-23).
+   * A 3 s amber HULL STRUCK line naming the crew and the face, a red pip on the
+   * compass at the attacker's bearing so you can come about, a shudder scaled by
+   * how holed you already are, and ONE feed line per attacker per 20 s — a
+   * broadside is eight balls and must not be eight rows.
+   */
+  private handleIncomingShipHit(ev: IncomingShipHit): void {
+    const attacker = ev.attackerId ? this.playersById.get(ev.attackerId) : undefined;
+    const attackerShip = attacker?.shipId ? this.shipsById.get(attacker.shipId) : undefined;
+    // Prefer the enemy HULL: the pip is something to come about on, and a gunner
+    // stands a few metres off his own ship's centre anyway.
+    const from = attackerShip?.position ?? attacker?.position ?? null;
+    this.hud.showHullStruck({
+      attackerCrew: ev.attackerCrew ?? null,
+      side: ev.side ?? 'port',
+      topside: !!ev.topside,
+      openedBreach: ev.holeId !== null && ev.holeId !== undefined,
+      attackerX: from ? from.x : null,
+      attackerZ: from ? from.z : null,
+    });
+    this.cameraShake = Math.min(1, this.cameraShake + hullShudderTrauma(ev.openHoles ?? 0));
+    const crew = ev.attackerCrew ?? null;
+    const now = performance.now();
+    if (shouldAnnounceUnderFire(this.lastUnderFire, crew, now)) {
+      this.lastUnderFire = { crew, at: now };
+      this.hud.pushFeed(`${crew ?? 'Unseen guns'} is firing on you`, '#ff6b6b');
+    }
   }
 
   private handleCombatHit(

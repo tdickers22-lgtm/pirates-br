@@ -193,6 +193,63 @@ export function stormMarkerPlacement(
   return { bearing, delta, wallMetres, outside, etaSeconds };
 }
 
+/**
+ * A HULL UNDER FIRE SAYS WHO AND WHERE (liveplay-21, hud-23).
+ *
+ * The live rig put fifteen cannonballs into a moored hull and `hud.hit` never
+ * fired once: the only 'ship_hit' on the wire was the ATTACKER's hit-confirm,
+ * so the crew being shelled had no name, no bearing and no shudder — the first
+ * they knew of it was the water rising. Wave 1.5 landed the defender-facing
+ * copy (Match.notifyCrewUnderFire, marked `incoming`); these are the three pure
+ * rules the client half reads it with. No DOM, so they gate without a browser.
+ */
+export type HullStruckEvent = {
+  /** "Vex's sloop", or null when nothing identifiable fired (shore, storm). */
+  attackerCrew: string | null;
+  /** The hull face the ball struck, in ship-local terms. */
+  side: 'port' | 'starboard' | 'bow' | 'stern';
+  /** Above the band: rigging and deck, not a waterline breach. */
+  topside: boolean;
+  /** This ball opened a new leak. */
+  openedBreach: boolean;
+};
+
+export function hullStruckLine(ev: HullStruckEvent): string {
+  const who = ev.attackerCrew ?? 'unseen guns';
+  const where = ev.topside ? 'TOPSIDE' : ev.side.toUpperCase();
+  return `HULL STRUCK · ${who} · ${where}${ev.openedBreach ? ' · BREACH' : ''}`;
+}
+
+/** A broadside is eight balls; the feed says who is firing ONCE (hud-23). */
+export const UNDER_FIRE_ANNOUNCE_MS = 20000;
+export function shouldAnnounceUnderFire(
+  last: { crew: string | null; at: number } | null,
+  crew: string | null,
+  now: number,
+): boolean {
+  if (!last) return true;
+  if (last.crew !== crew) return true;
+  return now - last.at >= UNDER_FIRE_ANNOUNCE_MS;
+}
+
+/** Where the guns are, on the compass tape. Same convention as
+ *  stormMarkerPlacement: bearing clockwise from north, delta the signed turn
+ *  off the current heading in [-180, 180). Pure. */
+export function attackerMarkPlacement(
+  px: number,
+  pz: number,
+  ax: number,
+  az: number,
+  heading: number,
+): { bearing: number; delta: number; metres: number } {
+  const dx = ax - px;
+  const dz = az - pz;
+  const bearing = (((Math.atan2(dx, dz) * 180) / Math.PI) % 360 + 360) % 360;
+  let delta = bearing - heading;
+  delta = ((delta % 360) + 540) % 360 - 180;
+  return { bearing, delta, metres: Math.hypot(dx, dz) };
+}
+
 export class HudController {
   constructor(private readonly view: HudView) {}
 
@@ -642,6 +699,83 @@ export class HudController {
       this.truceWasOn = false;
       this.view.flashIslandBanner('TRUCE OVER — CREWS MAY FIRE');
     }
+  }
+
+  // ── A HULL UNDER FIRE: the line, the arc, the shudder (FEED-01) ───────────
+  // Its OWN transient line under the ship alarm, never sharing a slot with the
+  // storm line or SHIP CRITICAL (hud-04's rule applies here too), plus a red
+  // pip on the compass at the attacker's bearing for as long as the line is up.
+  private static readonly HULL_STRUCK_MS = 3000;
+  private hullStruckEl: HTMLDivElement | null = null;
+  private hullStruck: { text: string; until: number; ax: number; az: number } | null = null;
+  private compassAttackerMark: { root: HTMLElement; pip: HTMLElement; label: HTMLElement } | null = null;
+  private compassAttackerSignature = '';
+
+  /** Called from the ship_hit(incoming) handler. `attackerX/Z` is where the
+   *  guns are (the attacker's own position), NOT the impact point on our hull —
+   *  the arc must point at the ship to come about on. */
+  showHullStruck(ev: HullStruckEvent & { attackerX: number | null; attackerZ: number | null }): void {
+    this.hullStruck = {
+      text: hullStruckLine(ev),
+      until: performance.now() + HudController.HULL_STRUCK_MS,
+      ax: ev.attackerX ?? NaN,
+      az: ev.attackerZ ?? NaN,
+    };
+  }
+
+  private ensureHullStruckEl(): HTMLDivElement | null {
+    if (this.hullStruckEl?.isConnected) return this.hullStruckEl;
+    const host = this.view.ui.stormWarning.parentElement;
+    if (!host) return null;
+    const el = document.createElement('div');
+    el.id = 'hull-struck';
+    el.style.cssText = 'display:none; font:700 0.72rem monospace; letter-spacing:0.06em; color:#ffb366;';
+    const alarm = this.ensureShipAlarmEl();
+    host.insertBefore(el, (alarm ?? this.view.ui.stormWarning).nextSibling);
+    this.hullStruckEl = el;
+    return el;
+  }
+
+  private updateHullStruck(player: Player, heading: number): void {
+    const el = this.ensureHullStruckEl();
+    const struck = this.hullStruck;
+    const live = struck !== null && performance.now() < struck.until;
+    if (!live) {
+      if (struck) this.hullStruck = null;
+      if (el && el.style.display !== 'none') el.style.display = 'none';
+      if (this.compassAttackerMark && this.compassAttackerMark.root.style.display !== 'none') {
+        this.compassAttackerMark.root.style.display = 'none';
+        this.compassAttackerSignature = '';
+      }
+      return;
+    }
+    if (el) {
+      el.style.display = 'block';
+      el.textContent = struck.text;
+    }
+    if (!Number.isFinite(struck.ax) || !Number.isFinite(struck.az)) return;
+    const mark = this.ensureCompassMark(
+      'compass-attacker', '#ff6b6b',
+      (m) => { this.compassAttackerMark = m; }, this.compassAttackerMark,
+    );
+    if (!mark) return;
+    const place = attackerMarkPlacement(player.position.x, player.position.z, struck.ax, struck.az, heading);
+    const arc = HudController.COMPASS_HALF_ARC_DEG;
+    const offScreen = Math.abs(place.delta) > arc;
+    const clamped = THREE.MathUtils.clamp(place.delta, -arc, arc) * (offScreen ? 0.88 : 1);
+    const px = Math.round(clamped * HudController.COMPASS_PX_PER_DEG);
+    const text = `GUNS ${Math.round(place.metres / 10) * 10} m`;
+    const signature = `${px}|${offScreen ? (place.delta > 0 ? 'r' : 'l') : 'on'}|${text}`;
+    if (signature === this.compassAttackerSignature) return;
+    this.compassAttackerSignature = signature;
+    mark.root.style.display = 'block';
+    mark.root.style.transform = `translateX(${px}px)`;
+    mark.pip.style.borderTop = offScreen ? '6px solid transparent' : '6px solid #ff6b6b';
+    mark.pip.style.borderLeft = offScreen && place.delta > 0 ? '7px solid #ff6b6b' : '4px solid transparent';
+    mark.pip.style.borderRight = offScreen && place.delta < 0 ? '7px solid #ff6b6b' : '4px solid transparent';
+    mark.label.textContent = text;
+    mark.root.dataset.bearing = place.bearing.toFixed(1);
+    mark.root.dataset.delta = place.delta.toFixed(1);
   }
 
   /** The storm chevron on the compass tape: which way the ring is, how far the
@@ -1375,6 +1509,7 @@ export class HudController {
     this.view.ui.compassTape.style.opacity = '1';
     this.updateBountyBearing(player, heading);
     this.updateStormBearing(player, heading);
+    this.updateHullStruck(player, heading);
 
     if (this.view.state.phase === 'ended') {
       if (this.view.state.winnerId === this.view.localPlayerId) {
