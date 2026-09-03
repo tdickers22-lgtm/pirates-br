@@ -5032,6 +5032,11 @@ export class Match {
     const attacker = this.getPlayer(attackerId);
     if (!attacker || attacker.state === 'eliminated') return;
     this.shipLastDamagedByPlayer.set(shipId, { attackerId, at: this.t });
+    // Name the hull for the bot brain: a provoked crew answers THIS ship (w1.1).
+    if (attacker.shipId && attacker.shipId !== shipId) {
+      const ship = this.state.ships.find((s) => s.id === shipId);
+      if (ship) ship.lastHostileShipId = attacker.shipId;
+    }
   }
 
   private getRecentShipSinkAttackerId(ship: Ship): string | null {

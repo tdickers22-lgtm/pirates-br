@@ -81,7 +81,7 @@ function stripPlayerInternals(player: Player): Player {
  * That is ~31 B for an open breach against ~70 B for the raw entity.
  */
 function stripShipInternals(ship: Ship): Ship {
-  const { nextHoleId: _nextHoleId, holes, ...wire } = ship;
+  const { nextHoleId: _nextHoleId, lastHostileShipId: _lastHostileShipId, holes, ...wire } = ship;
   return {
     ...wire,
     holes: holes.map((hole) => (hole.patched

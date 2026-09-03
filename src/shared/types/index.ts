@@ -107,6 +107,10 @@ export interface Ship {
   holes: ShipHole[];
   /** Monotonic hole-id source. Server-internal — stripped from the wire. */
   nextHoleId: number;
+  /** Last hull that put powder into this one (Match stamps it from the
+   *  projectile owner; BotSystem retaliation reads it). Server-internal,
+   *  trimmed from the wire like nextHoleId. */
+  lastHostileShipId?: string | null;
   /** Legacy hull-class number kept for display; no longer scales any damage. */
   maxHull: number;
   onFire: boolean;
