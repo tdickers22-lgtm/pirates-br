@@ -116,6 +116,12 @@ export const LOGIC = [
   quick(tsx('test-shanty-grammar.mjs')),
   quick(tsx('test-coast-wobble.mjs')),
   quick(tsx('test-death-causes.mjs')),
+  // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
+  // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens
+  // of seconds of sim, so neither is tagged `quick`.
+  quick(tsx('test-win-condition.mjs')),
+  tsx('test-respawn-tow.mjs'),
+  tsx('test-capstan-first-safe.mjs'),
   tsx('test-storm-spawn-safety.mjs'),
   tsx('test-storm-outrun.mjs'),
   tsx('test-damage-visibility.mjs'),
