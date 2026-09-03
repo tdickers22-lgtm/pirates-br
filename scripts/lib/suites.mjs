@@ -139,6 +139,8 @@ export const LOGIC = [
   tsx('test-ship-attitude-frame.mjs'),
   //   test-ship-hole-vis          — hole decals never re-read moved coords; strakes bar the breach (SHIP-01, lane 1.3)
   tsx('test-ship-hole-vis.mjs'),
+  //   test-ship-helm-anchor       — wheel on yaw rate, galleon anchor in the air, sail+bundle both drawn (SHIP-01, lane 1.3)
+  tsx('test-ship-helm-anchor.mjs'),
   tsx('test-ship-geometry.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   test-quality-preference     — detector rows per device (Safari M2 Air → balanced today; PERF-01, lane 2.6)

@@ -154,6 +154,7 @@ runner grows an `expectRed` vocabulary. They are not in the quick tier.
 | `test-avatar-pose-invariants` | boots at -0.19, head 1.92 vs 1.68 | AVATAR-01 (wave 2) |
 | `test-ship-attitude-frame` | XYZ root Euler: bow dips E/W | SHIP-01 (lane 1.3) |
 | `test-ship-hole-vis` | fire burn-down / recycled slot leave the decal behind; `ship-dark-timber` bars the breach at 0.178 m | SHIP-01 (lane 1.3, landed) |
+| `test-ship-helm-anchor` | wheel span on yaw rate (−12.32 rad from a ram, 0 at the helm); galleon anchor stock at +1.09 m; 7 hoist heights draw both canvases | SHIP-01 (lane 1.3, landed) |
 | `test-ship-geometry` | hold floor 24/24 verts outside the loft, stern 0.85 m aft | HULLGEO-01 |
 | `test-asset-bounds` | boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (world-space TRS applied) | ASSETS lane |
 | `test-quality-preference` | Safari M2 Air (opaque "Apple GPU") and four other rows grade `balanced` | PERF-01 (lane 2.6) |
@@ -174,7 +175,7 @@ unseen. On 2026-09-02 the layout was made to say what a file is:
 
 | where | what | how many |
 |---|---|---|
-| `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 103 |
+| `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 104 |
 | `scripts/lib/` | shared code (browser args, perf scenes, z-fight probes, the manifest) | |
 | `scripts/tools/` | doc-cited instruments: `perf-*`, `zfight-blame`, `approach-shots`, `fill-pass-shots` (paths in `FRAME_COST_MODEL.md`, `Z_FIGHTING.md`, `FILL_AND_SHADER_PASS.md`), `story-tour` (restored for the fix plan's lane 2.5 gate; reads `PIRATES_BR_URL`) | 14 |
 | `scripts/probes/` | live probes touched after 2026-07-25 or cited by the fix plan; each opens with a `// PROBE, not a gate:` line saying what it measures | 33 |
