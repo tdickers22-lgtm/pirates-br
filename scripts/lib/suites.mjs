@@ -102,6 +102,9 @@ export const LOGIC = [
   // HUD-01/hud-01,02,03,27: one wheel table, the axe's key, the modal layer,
   // and letting go of every held key on blur (w1.6).
   quick(tsx('test-hud-wheel-and-input.mjs')),
+  // HUD-01/hud-04, liveplay-07, storm-09: two alarm lines, the ring bearing,
+  // the wall distance and its ETA (w1.6).
+  quick(tsx('test-hud-storm-warnings.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
   quick(tsx('test-material-floor.mjs')),
