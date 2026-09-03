@@ -52,8 +52,24 @@ import {
  *  from straddling the 0.9 m stem volume. */
 export const PROJECTILE_HULL_MARGIN = 0.12;
 const PROJECTILE_HULL_KEEL_MARGIN = 0.3;
-const PROJECTILE_HULL_BULWARK_HEIGHT = 0.85;
 const PROJECTILE_HULL_SUBSTEPS = 6;
+/** Impact classes by hull-local height (fractions of SHIP_STATS.height):
+ *  ≤ BAND_TOP_F a flooding breach (real y, the flood test decides how wet);
+ *  ≤ TOPSIDE_TOP_F a dry topside hole that only takes water once she lists;
+ *  above that, up to the rendered rail (ShipRenderer bulwarkH 0.34 over the
+ *  hull top), a DECK-class hit: no hole, splinters for the crew within
+ *  DECK_SPLASH_RADIUS. A ball over the rail is in the deck airspace: it tests
+ *  the crew directly and strikes the deck when it reaches the planks. */
+export const HULL_IMPACT = {
+  BAND_TOP_F: 0.6,
+  TOPSIDE_TOP_F: 0.95,
+  RAIL_HEIGHT: 0.34,
+  DECK_SPLASH_RADIUS: 1.5,
+} as const;
+export type HullImpactKind = 'band' | 'topside' | 'deck';
+type HullSweepHit =
+  | { kind: HullImpactKind; point: Vec3 }
+  | { kind: 'player'; point: Vec3; player: Player };
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 
@@ -331,6 +347,9 @@ type PhysicsCombatEvent =
       remainingSection: number;
       remainingHull: number;
       milestone: 'half' | 'critical' | null;
+      /** Where on the hull the ball struck: a flooding band breach, a dry
+       *  topside hole, or the deck/rail (no hole, crew splinters). */
+      impact: HullImpactKind;
       /** The breaches this ball opened, hull-local — rides ship_damage so every
        *  client spawns the decal the same frame instead of waiting for the
        *  next 10 Hz full snapshot. */
@@ -1596,10 +1615,11 @@ export class PhysicsSystem {
       // the end-of-tick point happened to land inside a slab.
       for (const ship of ships) {
         if (!ship.alive || ship.id === proj.ownerShipId) continue;
-        const entry = this.sweepProjectileAgainstHull(previousPosition, proj, ship);
-        if (entry) {
-          proj.position = entry;
-          this.onProjectileHitShip(proj, ship, t);
+        const hit = this.sweepProjectileAgainstHull(previousPosition, proj, ship, players);
+        if (hit) {
+          proj.position = hit.point;
+          if (hit.kind === 'player') this.onProjectileHitPlayer(proj, hit.player, t);
+          else this.onProjectileHitShip(proj, ship, t, hit.kind, players);
           proj.alive = false;
           break;
         }
@@ -1702,7 +1722,7 @@ export class PhysicsSystem {
     return dx * dx + dy * dy + dz * dz <= hitRadius * hitRadius;
   }
 
-  private onProjectileHitShip(proj: Projectile, ship: Ship, t: number) {
+  private onProjectileHitShip(proj: Projectile, ship: Ship, t: number, impact: HullImpactKind = 'band', players: Player[] = []) {
     if (proj.type === 'bullet') return;
 
     // Canonical ship-local frame (+z bow, +x starboard) — correct at every
@@ -1711,12 +1731,31 @@ export class PhysicsSystem {
     const local = this.toShipLocal(proj.position, ship);
     const localY = proj.position.y - ship.position.y;
     const section: keyof HullSections = this.impactHullSection(local);
+    // Drawn face from the ball's own heading: a ball flying to port struck the
+    // STARBOARD planking, so the breach carries that sign even when the skin
+    // crossing sits within a few centimetres of the centreline (stem rakes).
+    const stats = SHIP_STATS[ship.type];
+    const localVel = this.rotateWorldToShipLocal(proj.velocity.x, proj.velocity.z, ship.rotation);
+    if (Math.abs(localVel.x) * stats.length >= Math.abs(localVel.z) * stats.width && localVel.x !== 0) {
+      local.x = Math.abs(local.x) * -Math.sign(localVel.x);
+    }
 
     const beforeHull = this.getHullIntegrity(ship);
     // Chainshot is a rigging weapon — it shreds canvas and fouls the helm but
-    // never opens a hull hole, so it punches nothing (see below).
+    // never opens a hull hole, so it punches nothing (see below). A deck/rail
+    // strike opens nothing either: it splinters the crew within reach instead.
     let holes: ShipHole[] = [];
-    if (proj.type !== 'chainshot') {
+    if (impact === 'deck' && proj.type !== 'chainshot') {
+      for (const player of players) {
+        if (player.id === proj.ownerId || player.state === 'eliminated' || player.state === 'respawning') continue;
+        if (player.respawnProtectionTimer > 0) continue;
+        const dx = player.position.x - proj.position.x;
+        const dz = player.position.z - proj.position.z;
+        const dy = player.position.y + PLAYER.HEIGHT * 0.5 - proj.position.y;
+        if (dx * dx + dz * dz > HULL_IMPACT.DECK_SPLASH_RADIUS ** 2 || Math.abs(dy) > PLAYER.HEIGHT) continue;
+        this.onProjectileHitPlayer(proj, player, t);
+      }
+    } else if (proj.type !== 'chainshot') {
       // Discrete holes: one per ball, +CHARGED_EXTRA_HOLES for a Heavy Shot ship,
       // and a super cannonball caves in three. No HP pool — the ball punches the
       // hull; water through the hole is what actually sinks the ship.
@@ -1743,6 +1782,7 @@ export class PhysicsSystem {
       remainingSection: remainingHull,
       remainingHull,
       milestone,
+      impact,
       holes: holes.map((h) => ({ id: h.id, x: h.x, y: h.y, z: h.z })),
     });
 
@@ -1831,7 +1871,11 @@ export class PhysicsSystem {
     if (count <= 0) return [];
     if (!Array.isArray(ship.holes)) ship.holes = [];
     const stats = SHIP_STATS[ship.type];
-    const maxY = Math.max(FLOODING.HOLE_BAND_Y.max, stats.height * 0.6);
+    // Ceiling = the topside limit: a ball that struck the sheer strake leaves
+    // a DRY hole up there (it floods only once she lists) instead of being
+    // dragged down to the wale (ships-17); anything higher is a deck hit and
+    // never reaches this function.
+    const maxY = Math.max(FLOODING.HOLE_BAND_Y.max, stats.height * HULL_IMPACT.TOPSIDE_TOP_F);
     const opened: ShipHole[] = [];
     for (let i = 0; i < count; i += 1) {
       // Deterministic-ish spread: first hole lands exactly on the contact
@@ -2956,12 +3000,41 @@ export class PhysicsSystem {
    *  (0.45–1.58 m inboard of the planking, short of the stem) over a slab
    *  3.3 m tall each way, so grazing broadsides passed through visible timber
    *  while plunging balls "hit" the top of thin air (physics-03/27). */
-  private isPointInsideHullSolid(point: Vec3, ship: Ship, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]): boolean {
+  /** Impact class of a world point, or null in clear air/water: 'band' and
+   *  'topside' are the solid planking, 'deck' the rail/deck band between the
+   *  topside limit and the rail top. */
+  private classifyHullPoint(point: Vec3, ship: Ship, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]): HullImpactKind | null {
     const band = getSwimHullVerticalBand(ship.position.y, stats, ship.type);
-    if (point.y < band.keelY - PROJECTILE_HULL_KEEL_MARGIN || point.y > band.deckY + PROJECTILE_HULL_BULWARK_HEIGHT) return false;
+    const dy = point.y - ship.position.y;
+    if (point.y < band.keelY - PROJECTILE_HULL_KEEL_MARGIN || dy > stats.height + HULL_IMPACT.RAIL_HEIGHT) return null;
     const local = this.toShipLocal(point, ship);
     const verticalT = getSwimHullVerticalT(point.y, ship.position.y, stats, ship.type);
-    return isInsideSwimHullFootprint(stats, local.x, local.z, PROJECTILE_HULL_MARGIN, verticalT);
+    if (!isInsideSwimHullFootprint(stats, local.x, local.z, PROJECTILE_HULL_MARGIN, verticalT)) return null;
+    if (dy <= stats.height * HULL_IMPACT.BAND_TOP_F) return 'band';
+    if (dy <= stats.height * HULL_IMPACT.TOPSIDE_TOP_F) return 'topside';
+    return 'deck';
+  }
+
+  /** Is a world point in the deck AIRSPACE: over the rail, inside the plan
+   *  footprint — where a plunging ball meets the crew before the planks. */
+  private isPointOverDeck(point: Vec3, ship: Ship, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS]): boolean {
+    const dy = point.y - ship.position.y;
+    if (dy <= stats.height + HULL_IMPACT.RAIL_HEIGHT || dy > stats.height + PLAYER.HEIGHT * 2.5) return false;
+    const local = this.toShipLocal(point, ship);
+    return isInsideSwimHullFootprint(stats, local.x, local.z, PROJECTILE_HULL_MARGIN, 0);
+  }
+
+  private deckCrewStruckAt(point: Vec3, projectile: Projectile, players: Player[]): Player | null {
+    const saved = projectile.position;
+    projectile.position = point;
+    let struck: Player | null = null;
+    for (const player of players) {
+      if (player.id === projectile.ownerId || player.state === 'eliminated' || player.state === 'respawning') continue;
+      if (player.respawnProtectionTimer > 0) continue;
+      if (this.projectileHitsPlayer(projectile, player)) { struck = player; break; }
+    }
+    projectile.position = saved;
+    return struck;
   }
 
   /** March a projectile's tick segment against a hull and return the point
@@ -2970,7 +3043,7 @@ export class PhysicsSystem {
    *  the hull's bounding circle, PROJECTILE_HULL_SUBSTEPS samples, then a
    *  bisection between the last clear and first solid sample. A ball that
    *  BEGINS the tick inside the solid (a hull sailed onto it) hits where it is. */
-  private sweepProjectileAgainstHull(from: Vec3, projectile: Projectile, ship: Ship): Vec3 | null {
+  private sweepProjectileAgainstHull(from: Vec3, projectile: Projectile, ship: Ship, players: Player[] = []): HullSweepHit | null {
     const stats = SHIP_STATS[ship.type];
     const to = projectile.position;
     const dx = to.x - from.x;
@@ -2984,17 +3057,27 @@ export class PhysicsSystem {
     if (midX * midX + midZ * midZ > reach * reach) return null;
 
     const sample = { x: from.x, y: from.y, z: from.z };
-    if (this.isPointInsideHullSolid(sample, ship, stats)) return { ...sample };
+    const startKind = this.classifyHullPoint(sample, ship, stats);
+    if (startKind) return { kind: startKind, point: { ...sample } };
     const steps = PROJECTILE_HULL_SUBSTEPS;
     let clearT = 0;
     let solidT = -1;
-    for (let i = 1; i <= steps; i += 1) {
+    let kind: HullImpactKind = 'band';
+    for (let i = 0; i <= steps; i += 1) {
       const u = i / steps;
       sample.x = from.x + dx * u;
       sample.y = from.y + dy * u;
       sample.z = from.z + dz * u;
-      if (this.isPointInsideHullSolid(sample, ship, stats)) { solidT = u; break; }
-      clearT = u;
+      if (i > 0) {
+        const k = this.classifyHullPoint(sample, ship, stats);
+        if (k) { solidT = u; kind = k; break; }
+        clearT = u;
+      }
+      // Over the deck the crew stand in the ball's way before the planks do.
+      if (players.length > 0 && this.isPointOverDeck(sample, ship, stats)) {
+        const struck = this.deckCrewStruckAt(sample, projectile, players);
+        if (struck) return { kind: 'player', point: { ...sample }, player: struck };
+      }
     }
     if (solidT < 0) return null;
     // Bisect onto the skin so the breach opens ON the planking the ball met.
@@ -3003,9 +3086,10 @@ export class PhysicsSystem {
       sample.x = from.x + dx * u;
       sample.y = from.y + dy * u;
       sample.z = from.z + dz * u;
-      if (this.isPointInsideHullSolid(sample, ship, stats)) solidT = u; else clearT = u;
+      const k = this.classifyHullPoint(sample, ship, stats);
+      if (k) { solidT = u; kind = k; } else clearT = u;
     }
-    return { x: from.x + dx * solidT, y: from.y + dy * solidT, z: from.z + dz * solidT };
+    return { kind, point: { x: from.x + dx * solidT, y: from.y + dy * solidT, z: from.z + dz * solidT } };
   }
 
   /** Chainshot is a rigging weapon: it also connects through the mast/sail
