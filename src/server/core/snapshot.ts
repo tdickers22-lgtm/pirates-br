@@ -63,6 +63,7 @@ function stripPlayerInternals(player: Player): Player {
     lastDamagedById: _lastDamagedById,
     lastDamagedAt: _lastDamagedAt,
     lastDamageWasHeadshot: _lastDamageWasHeadshot,
+    lastEnvDamage: _lastEnvDamage,
     ...wire
   } = player;
   return wire as unknown as Player;

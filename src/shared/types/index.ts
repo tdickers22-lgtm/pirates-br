@@ -231,6 +231,10 @@ export interface Player {
   /** Sim time (seconds) when lastDamagedById was set — stale credit expires. */
   lastDamagedAt: number | null;
   lastDamageWasHeadshot: boolean;
+  /** Last ENVIRONMENTAL hurt (fall / deck fire / drowning) and when. Written
+   *  instead of nulling lastDamagedById so a chip-then-drown kill still pays
+   *  the shooter (CREDIT-01); Match reads it to name the honest cause. */
+  lastEnvDamage?: { cause: 'fall' | 'fire' | 'drowned'; at: number } | null;
   selectedCannonAmmo: CannonAmmoType;
   kegs: number;
   kegCooldown: number;
