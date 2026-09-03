@@ -39,7 +39,7 @@ console.log('\nA reef is not an act of war');
  *  are drawn from Math.random(), so parking the pair "wherever ship A happened
  *  to appear" sometimes put an island on the firing line and hasCannonLineOfSight
  *  held fire all 60 s. The islands are fixed, so this answer is not. */
-function openWaterSpot(islands, seaRocks) {
+function openWaterSpot(islands, seaRocks, span = 95) {
   const clearanceAt = (x, z) => {
     let clear = Infinity;
     for (const isl of islands) {
@@ -55,7 +55,7 @@ function openWaterSpot(islands, seaRocks) {
   for (let x = -700; x <= 700; x += 50) {
     for (let z = -700; z <= 700; z += 50) {
       // Both hulls AND the water between them have to be in the clear.
-      const clear = Math.min(clearanceAt(x, z), clearanceAt(x + 47.5, z), clearanceAt(x + 95, z));
+      const clear = Math.min(clearanceAt(x, z), clearanceAt(x + span / 2, z), clearanceAt(x + span, z));
       if (clear > bestClear) { bestClear = clear; best = { x, z }; }
     }
   }
@@ -195,13 +195,15 @@ function smallArms({ atTime, seconds, place, hurt = false, difficulty = 'easy' }
     if (queued.length > 0 && shots === 0) firstShotAt = i * dt;
     shots += queued.length;
   }
-  return { shots, firstShotAt, firstTickTurn };
+  return { shots, firstShotAt, firstTickTurn, underFireUntil: brain.underFireUntil };
 }
 
 const offEarly = smallArms({ atTime: 10, seconds: 10, place: 'off' });
 expect('a human 12 m off a bot at t=10 s is not shot at', offEarly.shots === 0, `shots=${offEarly.shots}`);
 const aboardEarly = smallArms({ atTime: 10, seconds: 10, place: 'aboard' });
 expect('a boarder on the bot deck at t=10 s IS shot at', aboardEarly.shots > 0, `shots=${aboardEarly.shots}`);
+expect('and a boarder lifts this crew\'s peace (it may answer with the guns)', aboardEarly.underFireUntil > 10,
+  `underFireUntil=${aboardEarly.underFireUntil}`);
 const hurtEarly = smallArms({ atTime: 10, seconds: 10, place: 'off', hurt: true });
 expect('a human 12 m off who just shot the pirate IS answered', hurtEarly.shots > 0, `shots=${hurtEarly.shots}`);
 const offLate = smallArms({ atTime: BOT_EARLY_PEACE_SECONDS + 5, seconds: 10, place: 'off' });
@@ -212,6 +214,63 @@ expect('a boarder 2 m astern: the body turns at 7 rad/s, not in one tick',
 expect('no shot until the pirate has turned round (>= 0.25 s)', behind.firstShotAt >= 0.25,
   `first shot at ${behind.firstShotAt.toFixed(3)} s`);
 expect('and then the boarder is shot', behind.shots > 0, `shots=${behind.shots}`);
+
+// ── Deterministic: a provoked crew answers the SHOOTER, not the nearest ────
+// underFireUntil used to be a bare timer: a human who shelled bot A from
+// 240 m while bot B sat 120 m from A made A engage B, whose cannon holes then
+// put B "under fire", three cascades deep from one provocation (bots-v01).
+// Now the hull that provoked us (Match stamps ship.lastHostileShipId from the
+// projectile owner) is THE target while the retaliation window runs.
+console.log('\nA provoked crew answers the shooter');
+{
+  const match = new Match({ matchId: 'peace-retaliation', botCount: 3 });
+  const state = match.state;
+  state.phase = 'playing';
+  const [a, b, c] = state.ships;
+  const pirateA = state.players.find((p) => p.shipId === a.id);
+  const pirateC = state.players.find((p) => p.shipId === c.id);
+  match.bots.bots.delete(pirateC.id); // C is "the human ship": unmanned here
+  const water = openWaterSpot(state.islands, state.seaRocks, 240);
+  const pin = () => {
+    a.position.x = water.x; a.position.z = water.z;
+    b.position.x = water.x + 120; b.position.z = water.z;
+    c.position.x = water.x + 240; c.position.z = water.z;
+    for (const ship of [a, b, c]) {
+      ship.position.y = 0; ship.velocity = { x: 0, y: 0, z: 0 };
+      ship.anchored = false; ship.sailHeight = 0; ship.rotation = 0;
+    }
+  };
+  pin();
+  state.storm.centerX = water.x + 120; state.storm.centerZ = water.z;
+  state.storm.safeRadius = 2000; state.storm.shrinking = false; state.storm.phase = 0;
+  const brainA = match.bots.bots.get(pirateA.id);
+  const brainB = match.bots.bots.get(state.players.find((p) => p.shipId === b.id).id);
+
+  const T_HIT = 30;
+  let engagedShooterAt = null;
+  let engagedBystanderAt = null;
+  let bEverEngaged = false;
+  for (let i = 0; i < Math.ceil(70 / dt); i += 1) {
+    const t = T_HIT + i * dt;
+    pin();
+    if (i === 0) {
+      // C's broadside lands in A: the hole plus the stamp Match writes.
+      match.physics.openHoleAt(a, { x: 1.2, y: 0.1, z: 2 }, 2, 'cannon');
+      a.lastHostileShipId = c.id;
+    }
+    match.bots.update(dt, t, state.players, state.ships, state.islands, state.storm, match.weapons, state.seaRocks);
+    if (brainA.behavior === 'engage' && brainA.targetShipId === c.id && engagedShooterAt === null) engagedShooterAt = t - T_HIT;
+    if (brainA.behavior === 'engage' && brainA.targetShipId === b.id && engagedBystanderAt === null) engagedBystanderAt = t - T_HIT;
+    if (brainB.behavior === 'engage') bEverEngaged = true;
+  }
+  console.log(`  · A engaged the shooter at ${engagedShooterAt === null ? 'never' : engagedShooterAt.toFixed(1) + ' s'}, the bystander at ${engagedBystanderAt === null ? 'never' : engagedBystanderAt.toFixed(1) + ' s'}`);
+  expect('A engages the hull that shelled it within 10 s', engagedShooterAt !== null && engagedShooterAt <= 10,
+    `engagedShooterAt=${engagedShooterAt}`);
+  expect('A never turns on the nearer bystander', engagedBystanderAt === null, `engagedBystanderAt=${engagedBystanderAt}`);
+  expect('the bystander crew stays out of it', bEverEngaged === false);
+  expect('the grudge clears once the retaliation window lapses (70 s > 45 s)', brainA.retaliateShipId === null,
+    `retaliateShipId=${brainA.retaliateShipId}`);
+}
 
 // ── The whole lobby, sailed past the window ────────────────────────────────
 const match = new Match({ matchId: 'bot-peace-window', botCount: 9 });

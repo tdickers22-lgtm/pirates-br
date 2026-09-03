@@ -50,6 +50,14 @@ interface BotState {
   /** Sim time until which this bot counts as "under fire" and may fight back
    *  during the early-game peace window. */
   underFireUntil: number;
+  /** WHO did it: the hull that provoked us, while underFireUntil runs. A
+   *  provoked crew answers THIS ship, not whoever scores nearest — the
+   *  bystander cascade of bots-v01. Null when the provoker is unknown. */
+  retaliateShipId: string | null;
+  /** ship.chainshottedUntil at the last check — a rise is torn canvas. */
+  lastChainshottedUntil: number;
+  /** player.lastDamagedAt at the last check — a change is a fresh wound. */
+  lastDamagedAtSeen: number | null;
   /** Sim time this crew last actually put a ball through a port. A one-pirate
    *  crew that is firing is AT THE GUN — see BotSystem.isAtGuns. */
   lastFiredAt: number;
@@ -70,6 +78,10 @@ interface EventLure {
   /** Her chests, in the order she offers them — the prize first. */
   chestIds: string[];
 }
+
+/** Match stamps the last hull that put powder into this one (see
+ *  Match.markShipDamagedByPlayer); server-internal, optional until it lands. */
+type ProvokedShip = Ship & { lastHostileShipId?: string | null };
 
 interface BotFirearmShot {
   playerId: string;
@@ -279,6 +291,9 @@ export class BotSystem {
       lastHullTotal: hullTotal(ship),
       lastHostileHoles: hostileHoleCount(ship),
       underFireUntil: 0,
+      retaliateShipId: null,
+      lastChainshottedUntil: ship.chainshottedUntil ?? 0,
+      lastDamagedAtSeen: player.lastDamagedAt,
       lastFiredAt: -999,
       lastFirearmThreatAt: -999,
       lastAmmoTopUpAt: 0,
@@ -326,8 +341,21 @@ export class BotSystem {
       // scraped a reef, "retaliated" at a bystander, and that broadside made the
       // bystander "under fire" too, three cascades deep before the first shrink.
       const hostileHoles = hostileHoleCount(ship);
-      if (hostileHoles > bot.lastHostileHoles) bot.underFireUntil = t + BOT_RETALIATE_SECONDS;
+      // THE PROVOCATION SET (bots-12): powder through the planking, chainshot
+      // through the canvas, a wound on this pirate from an enemy crew, or an
+      // enemy standing on our deck. Each names the provoker where it can.
+      const provoker = this.findProvocation(bot, player, ship, players, hostileHoles);
       bot.lastHostileHoles = hostileHoles;
+      bot.lastChainshottedUntil = ship.chainshottedUntil ?? 0;
+      bot.lastDamagedAtSeen = player.lastDamagedAt;
+      if (provoker !== undefined) {
+        bot.underFireUntil = t + BOT_RETALIATE_SECONDS;
+        if (provoker) bot.retaliateShipId = provoker;
+        // A crew that has just been shot decides NOW, not at the next 6-14 s
+        // patrol tick — that lag is half the window it is allowed to answer in.
+        if (provoker && provoker !== bot.targetShipId) bot.stateTimer = Math.min(bot.stateTimer, 0);
+      }
+      if (t >= bot.underFireUntil) bot.retaliateShipId = null;
       bot.lastHullTotal = hullTotal(ship);
 
       this.decideBehavior(bot, ship, ships, islands, storm, players, t);
@@ -335,6 +363,40 @@ export class BotSystem {
       this.maybeFireAtBoarder(bot, player, ship, players, ships, islands, dt, t);
       this.maybeTopUpAmmo(bot, player, ship, t, weaponSystem);
     }
+  }
+
+  /**
+   * Was this crew provoked THIS tick, and by which hull? Returns undefined
+   * when nothing happened, null when something did but the provoker is
+   * unknown, else the provoking ship's id. Sources, in order of certainty:
+   *  - a rise in cannon/keg breaches — provoker is `ship.lastHostileShipId`
+   *    (Match stamps it from the projectile owner; absent ⇒ unknown);
+   *  - chainshot (chainshottedUntil advanced) — same stamp;
+   *  - this pirate freshly hurt by a player of ANOTHER crew (skeletons and
+   *    crewmates never count) — provoker is the attacker's ship;
+   *  - an enemy pirate standing on OUR deck — provoker is his ship.
+   */
+  private findProvocation(
+    bot: BotState, player: Player, ship: Ship, players: Player[], hostileHoles: number,
+  ): string | null | undefined {
+    let provoker: string | null | undefined;
+    const stamped = (ship as ProvokedShip).lastHostileShipId ?? null;
+    if (hostileHoles > bot.lastHostileHoles) provoker = stamped;
+    if ((ship.chainshottedUntil ?? 0) > bot.lastChainshottedUntil) provoker = provoker ?? stamped;
+    if (player.lastDamagedAt !== null && player.lastDamagedAt !== bot.lastDamagedAtSeen && player.lastDamagedById) {
+      const attacker = players.find((p) => p.id === player.lastDamagedById);
+      if (attacker && attacker.shipId && attacker.shipId !== ship.id) provoker = attacker.shipId;
+    }
+    for (const other of players) {
+      if (other.onShipId !== ship.id || other.shipId === ship.id) continue;
+      if (other.state === 'eliminated' || other.state === 'respawning' || other.state === 'downed') continue;
+      if (this.peacePlayerIds.has(other.id)) continue;
+      // A shipless boarder (swam over from a wreck) still provokes; he just
+      // has no hull to answer.
+      provoker = other.shipId ?? provoker ?? null;
+      break;
+    }
+    return provoker;
   }
 
   /** Is this hull in the water the live world event has drawn everyone into? */
@@ -555,7 +617,7 @@ export class BotSystem {
         if (this.peaceShipIds.has(other.id)) continue; // dev bot-peace: never engage this ship
         // A hull we may not SHOOT is not a hull we SEEK — otherwise the crew
         // shadows a moored learner with the ports shut until the truce lifts.
-        if (!botMayFireCannons(t, bot.underFireUntil, other, islands)) continue;
+        if (!botMayFireCannons(t, bot.underFireUntil, other, islands, bot.retaliateShipId)) continue;
 
         const d = dist2D(ship.position.x, ship.position.z, other.position.x, other.position.z);
         // Score: distance, but humans get only a modest discount so bots contest players
@@ -602,6 +664,14 @@ export class BotSystem {
         if (d < nearIslandDist) { nearIslandDist = d; nearIsland = isl; }
       }
 
+      // THE GRUDGE. A crew that knows who shot it answers THAT hull — no range
+      // gate, no hunter cap, no "nearest scores better" — and never picks a
+      // bystander from the peace branch (bots-v01).
+      const grudge = t < bot.underFireUntil && bot.retaliateShipId
+        ? ships.find((s) => s.id === bot.retaliateShipId && s.id !== ship.id && s.alive && !s.sinking
+          && !this.peaceShipIds.has(s.id)) ?? null
+        : null;
+      if (grudge) nearest = grudge;
       const nearestActualDist = nearest
         ? dist2D(ship.position.x, ship.position.z, nearest.position.x, nearest.position.z)
         : Infinity;
@@ -669,11 +739,11 @@ export class BotSystem {
         // the crew decides.
         bot.plunderChestId = claimable.id;
         bot.targetShipId = null;
-      } else if ((contested || prizeHunt || nearestActualDist < engageRange)
-        && (alreadyHunting || contested || prizeHunt || this.countHunters() < hunterCap)) {
+      } else if ((grudge || contested || prizeHunt || nearestActualDist < engageRange)
+        && (grudge || alreadyHunting || contested || prizeHunt || this.countHunters() < hunterCap)) {
         bot.behavior = 'engage';
         bot.targetShipId = nearest?.id ?? null;
-        bot.uncappedHunt = contested || prizeHunt;
+        bot.uncappedHunt = !!grudge || contested || prizeHunt;
       } else if (this.lureBearing(ship) !== null) {
         // A world event is up and this crew is in range: sail AT it. Ranked
         // above island looting on purpose — the wreck's whole job is to stop
@@ -780,7 +850,7 @@ export class BotSystem {
         // The peace covers the guns too — an unprovoked bot shadows its neighbour
         // with the ports shut. Timer is held just short of ready so the window
         // lifting doesn't fire nine simultaneous broadsides.
-        if (!botMayFireCannons(t, bot.underFireUntil, target, islands)) {
+        if (!botMayFireCannons(t, bot.underFireUntil, target, islands, bot.retaliateShipId)) {
           bot.fireTimer = Math.max(bot.fireTimer, 0.35);
           // She went back to her berth and anchored: leave her be rather than
           // circling her with the ports shut (berth truce, liveplay-19).
