@@ -209,6 +209,31 @@ console.log('\n5. Topside hits keep their real height; the drawn face follows th
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+console.log('\n6. CREDIT-01 physics half: drowning and deck fire keep the attacker, and file the honest cause');
+{
+  const physics = new PhysicsSystem();
+  const swimmer = makePlayer('overboard', { x: 300, y: -0.3, z: 300 }, {
+    state: 'swimming', swimTimer: PLAYER.DROWN_TIME + 1, lastDamagedById: 'gunner', lastDamagedAt: 40,
+  });
+  physics.update(DT, 41, [], [swimmer], [], [], [], null);
+  expect('the drowning tick hurts', swimmer.health < 100, `health=${swimmer.health}`);
+  expect('...but the gunner who put him in the sea is still on record', swimmer.lastDamagedById === 'gunner' && swimmer.lastDamagedAt === 40,
+    `lastDamagedById=${swimmer.lastDamagedById} at=${swimmer.lastDamagedAt}`);
+  expect('...and the environment filed itself as the cause', swimmer.lastEnvDamage?.cause === 'drowned' && swimmer.lastEnvDamage?.at === 41,
+    `lastEnvDamage=${JSON.stringify(swimmer.lastEnvDamage)}`);
+
+  const stats = SHIP_STATS.sloop;
+  const ship = makeShip('sloop', { onFire: true, fireTimer: SHIP.FIRE_DURATION, position: { x: 0, y: 0, z: 0 } });
+  const hand = makePlayer('deckhand', { x: 0, y: stats.height + SHIP.DECK_STAND_OFFSET, z: 0 }, {
+    onShipId: ship.id, shipId: ship.id, lastDamagedById: 'gunner', lastDamagedAt: 40,
+  });
+  for (let tick = 0; tick < 30; tick += 1) physics.update(DT, 41 + tick * DT, [ship], [hand], [], [], [], null);
+  expect('deck fire hurts the hand', hand.health < 100, `health=${hand.health}`);
+  expect('...without wiping the attacker', hand.lastDamagedById === 'gunner', `lastDamagedById=${hand.lastDamagedById}`);
+  expect('...and files fire as the cause', hand.lastEnvDamage?.cause === 'fire', `lastEnvDamage=${JSON.stringify(hand.lastEnvDamage)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 if (failures > 0) {
   console.error(`\n${failures} projectile-hull parity assertion(s) failed.`);
   process.exit(1);

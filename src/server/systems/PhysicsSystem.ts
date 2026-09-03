@@ -977,8 +977,10 @@ export class PhysicsSystem {
               LOCO.FALL_DAMAGE_MAX,
               (impactSpeed - LOCO.FALL_SAFE_SPEED) * LOCO.FALL_DAMAGE_PER_SPEED,
             );
-            player.lastDamagedById = null;
-            player.lastDamagedAt = null;
+            // Environmental damage keeps the attacker record (CREDIT-01): the
+            // pirate who put you in the sea still gets the kill; the cause stays
+            // honest through lastEnvDamage.
+            player.lastEnvDamage = { cause: 'fall', at: t };
             player.lastDamageWasHeadshot = false;
             player.health -= dmg;
           }
@@ -1145,8 +1147,10 @@ export class PhysicsSystem {
         player.swimTimer = 0;
         if (!downed) player.state = 'alive';
         if (onShip.onFire && player.respawnProtectionTimer <= 0) {
-          player.lastDamagedById = null;
-          player.lastDamagedAt = null;
+          // Environmental damage keeps the attacker record (CREDIT-01): the
+          // pirate who put you in the sea still gets the kill; the cause stays
+          // honest through lastEnvDamage.
+          player.lastEnvDamage = { cause: 'fire', at: t };
           player.lastDamageWasHeadshot = false;
           player.health -= SHIP.FIRE_PLAYER_DAMAGE_PER_SEC * dt;
         }
@@ -1251,8 +1255,10 @@ export class PhysicsSystem {
                 LOCO.FALL_DAMAGE_MAX,
                 (impactSpeed - LOCO.FALL_SAFE_SPEED) * LOCO.FALL_DAMAGE_PER_SPEED,
               );
-              player.lastDamagedById = null;
-              player.lastDamagedAt = null;
+              // Environmental damage keeps the attacker record (CREDIT-01): the
+              // pirate who put you in the sea still gets the kill; the cause stays
+              // honest through lastEnvDamage.
+              player.lastEnvDamage = { cause: 'fall', at: t };
               player.lastDamageWasHeadshot = false;
               player.health -= dmg;
             }
@@ -1473,8 +1479,10 @@ export class PhysicsSystem {
             // Drowning
             player.swimTimer += dt;
             if (player.swimTimer > PLAYER.DROWN_TIME && player.respawnProtectionTimer <= 0) {
-              player.lastDamagedById = null;
-              player.lastDamagedAt = null;
+              // Environmental damage keeps the attacker record (CREDIT-01): the
+              // pirate who put you in the sea still gets the kill; the cause stays
+              // honest through lastEnvDamage.
+              player.lastEnvDamage = { cause: 'drowned', at: t };
               player.lastDamageWasHeadshot = false;
               player.health -= PLAYER.DROWN_DAMAGE * dt;
             }
