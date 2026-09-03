@@ -137,6 +137,8 @@ export const LOGIC = [
   //   test-asset-bounds           — boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (ASSETS lane); node TRS applied
   tsx('test-avatar-pose-invariants.mjs'),
   tsx('test-ship-attitude-frame.mjs'),
+  //   test-ship-hole-vis          — hole decals never re-read moved coords; strakes bar the breach (SHIP-01, lane 1.3)
+  tsx('test-ship-hole-vis.mjs'),
   tsx('test-ship-geometry.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   test-quality-preference     — detector rows per device (Safari M2 Air → balanced today; PERF-01, lane 2.6)
