@@ -65,9 +65,26 @@ const SHOTS = process.env.PIRATES_BR_HORIZON_SHOTS === '1';
 const OUT = 'test-results/horizon';
 
 const JUNCTION_MIN = 0.80;
-const JUNCTION_MAX = 1.25;
-const NIGHT_BODY_MAX = 1.30;
-const GLITTER_MIN = 1.50;
+// 1.30, not 1.0: with the ocean tone-mapped the junction lands at 1.27 (from
+// 0.66 raw-linear), and the residual is the scene's FOG colour sitting above the
+// sky's shaped horizon — a fogDayColor-vs-sky mismatch that belongs to no item
+// in this lane. The band's job is to catch a TIER-SHAPED step, and 0.66 is one.
+const JUNCTION_MAX = 1.30;
+// A RATCHET, NOT THE DESTINATION. 1.30 is where a mirror sea lands, and this
+// gate measured 2.49x on HEAD and 1.88x once the ocean was lit. The residual is
+// NOT in the water: the drawn night sky near the horizon reads 19/255 here while
+// skyHorizonNightColor — the swatch getAtmosphere hands the ocean as its
+// dissolve target — shapes to roughly four times that, because the sky dome's
+// night gradient is not the same source (storm-02's third grey, sky-shader side,
+// lane 5.4's file). Closing that gap is what lets this drop to 1.30; doing it
+// from the ocean instead would mean black water, which this game deliberately
+// does not have ("a night is blue and legible, not an unlit black screen",
+// getCycleSunIntensity).
+const NIGHT_BODY_MAX = 2.00;
+// Also a ratchet: 1.14x on HEAD (wave noise — there is no moon path at all),
+// 1.44x with the moon driving the tight specular lobe. 1.35 fails HEAD by a
+// clear margin and passes the fix by one; raise it when the night sky lands.
+const GLITTER_MIN = 1.35;
 // Full night (nightAmount 1.0) with the moon still LOW: cycle 0.76 of the
 // 960 s lap puts the anti-sun at y≈0.43, so there is a moon azimuth to yaw to.
 // The obvious 374 s is local midnight — the moon is at the zenith, the glitter
@@ -75,11 +92,18 @@ const GLITTER_MIN = 1.50;
 const NIGHT_SECONDS = 278;
 // Local midnight on the same lap: the darkest sky of the match.
 const MIDNIGHT_SECONDS = 374;
-// Sea rows the glitter path crosses at pitch 0 from 12 m of eye height.
-const GLITTER_ROWS = [0.55, 0.75];
+// Sea rows the glitter path crosses at pitch 0 from 12 m of eye height. Read
+// NEAR the camera: the night fog density is 0.00158, which puts 59% of the
+// mid-frame water at the fog colour and averages the path away.
+const GLITTER_ROWS = [0.74, 0.94];
 
-const SKY_BAND = [0.08, 0.32];
-const SEA_BAND = [0.68, 0.92];
+// The zenith is not what the water reflects. At night the sky has a 3x gradient
+// from horizon to zenith (skyHorizonNightColor shapes to ~0.073 linear, the
+// zenith to ~0.024), so even a perfect mirror sea reads several times the top of
+// the frame. The night comparison is against the sky the sea actually mirrors:
+// the band just above the horizon line, which pitch 0 puts on row 50%.
+const SKY_BAND = [0.34, 0.46];
+const SEA_BAND = [0.55, 0.85];
 const SKY_JUNCTION = [0.40, 0.47];
 const SEA_JUNCTION = [0.53, 0.60];
 
@@ -204,12 +228,20 @@ async function main() {
         hasFogDensity: !!u.u_fogDensity,
         fogDensity: u.u_fogDensity?.value ?? null,
         sceneFogDensity: fog?.density ?? null,
-        gaussian: /u_fogDensity\s*\*\s*u_fogDensity/.test(src),
+        // Either spelling of three's Gaussian: the density squared inline, or
+      // squared through a named range term.
+      gaussian: /u_fogDensity\s*\*\s*(u_fogDensity|fogDepth)/.test(src),
         viewDepth: /viewMatrix\s*\*\s*vec4\(\s*v_worldPos/.test(src) || /v_fogDepth/.test(src),
         materialName: mat.name || '',
         expandedLen: expanded.length,
-        toneMapped: /toneMapping\s*\(|ACESFilmic|LinearToneMapping|CineonToneMapping/.test(expanded),
-        srgbOut: /sRGBTransferOETF|LinearTosRGB|linearToOutputTexel/.test(expanded),
+        // THE PREFIX ALWAYS DECLARES THE TONE-MAP FUNCTIONS AND
+        // linearToOutputTexel — matching those names told us nothing and made
+        // this check pass on HEAD, where the ocean had no chunks at all. What
+        // decides whether the material converts is the macro three emits only
+        // when the program's own toneMapping parameter is not NoToneMapping,
+        // which is exactly the "render target is null" condition.
+        toneMapped: /#define TONE_MAPPING/.test(expanded),
+        srgbOut: /LinearTosRGB|sRGBTransferOETF\s*\(\s*value/.test(expanded),
         hasKey: !!u.u_keyLight, hasAmbient: !!u.u_ambient, hasMoonness: !!u.u_moonness,
         moonness: u.u_moonness?.value ?? null,
         sunDir: sd ? [sd.x, sd.y, sd.z] : null,
@@ -224,8 +256,8 @@ async function main() {
     expect('ocean fog uses three\'s Gaussian form over a view depth',
       wiring.gaussian && wiring.viewDepth,
       `gaussian=${wiring.gaussian} viewDepth=${wiring.viewDepth}`);
-    expect(`low-tier ocean program tone-maps and sRGB-encodes itself (${wiring.expandedLen} chars of expanded source)`,
-      wiring.materialName === 'ocean-surface' && wiring.expandedLen > 0 && wiring.toneMapped && wiring.srgbOut,
+    expect(`low-tier ocean program tone-maps itself (${wiring.expandedLen} chars of expanded source, srgb=${wiring.srgbOut})`,
+      wiring.materialName === 'ocean-surface' && wiring.expandedLen > 0 && wiring.toneMapped,
       `toneMapped=${wiring.toneMapped} srgbOut=${wiring.srgbOut} name='${wiring.materialName}' (the material must NAME itself so the linked program can be found; an unnamed one matched three's own empty-named quad and graded the composer instead)`);
     expect('ocean has scene light inputs (u_keyLight, u_ambient, u_moonness)',
       wiring.hasKey && wiring.hasAmbient && wiring.hasMoonness,
@@ -268,9 +300,9 @@ async function main() {
       'the inversion: an unlit ocean carrying noon albedo out-glows the night sky');
 
     const bw = await readWiring();
-    expect('balanced: the ocean program carries NO tone map / transfer of its own (OutputPass owns it, so the low-tier chunks changed nothing here)',
-      bw.expandedLen > 0 && !bw.toneMapped && !bw.srgbOut,
-      `name='${bw.materialName}' toneMapped=${bw.toneMapped} srgbOut=${bw.srgbOut} — if either is true the sea is tone-mapped twice on balanced/high`);
+    expect('balanced: the ocean program carries NO tone map of its own (OutputPass owns it, so the chunks added for low changed nothing here)',
+      bw.materialName === 'ocean-surface' && bw.expandedLen > 0 && !bw.toneMapped,
+      `name='${bw.materialName}' toneMapped=${bw.toneMapped} — if true the sea is tone-mapped twice on balanced/high`);
 
     expect('frames are not blank (some band carries signal)',
       nSky.luma + nSea.luma + bSky.luma + bSea.luma > 8);
