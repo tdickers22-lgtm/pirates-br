@@ -29,8 +29,9 @@ const CARDS: readonly Card[] = [
     title: 'Sail',
     lines: [
       'Your ship is the one ringed in gold on the map ([M]) and on the minimap. Walk aboard.',
-      'Take the wheel and steer with <b>A</b>/<b>D</b>. <b>W</b>/<b>S</b> lets the sails out and in — more sail, more speed.',
-      'She will not move while the anchor is down: hold <b>X</b> at the capstan (the winch at the bow), or hold <b>W</b> at the wheel.',
+      'TAKE THE WHEEL FIRST: hold <b>X</b> at it, steer with <b>A</b>/<b>D</b>, and let the sails out and in with <b>W</b>/<b>S</b>.',
+      'Weigh anchor FROM the wheel — hold <b>W</b> there. The bow capstan does it too, but she sails herself off the berth with nobody steering.',
+      'No crew may fire for the first <b>2:30</b> (the TRUCE clock, beside the storm timer). Get under way before it runs out.',
     ],
   },
   {

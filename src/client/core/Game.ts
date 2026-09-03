@@ -223,6 +223,51 @@ const NPC_ROLE_TIPS: Record<IslandNpc['role'], readonly string[]> = {
 };
 
 /** One short amber line for a press the server heard and refused. */
+/** FEED SCOPING, AS PURE PREDICATES. The feed's three leaks (hud-23,
+ *  liveplay-06, hud-29, liveplay-23) were all "a broadcast printed as if it
+ *  were yours". Pure so the rules can be gated without a browser. */
+export function isOwnCrewActorIn(
+  players: ReadonlyArray<{ id: string; shipId: string | null }>,
+  localPlayerId: string | null,
+  myShipId: string | null,
+  actorId: string | null | undefined,
+): boolean {
+  if (!actorId) return false;
+  if (actorId === localPlayerId) return true;
+  if (!myShipId) return false;
+  return players.some((p) => p.id === actorId && p.shipId === myShipId);
+}
+
+/** A parley is news only to the two crews in it. */
+export function parleyConcernsMe(
+  session: { initiatorShipId?: string; targetShipId?: string } | null | undefined,
+  myShipId: string | null,
+): boolean {
+  if (!session || !myShipId) return false;
+  return session.initiatorShipId === myShipId || session.targetShipId === myShipId;
+}
+
+/** One sinking, one line: the kill handler's duplicate of a SHIP SUNK already
+ *  announced for the same killer inside 2 s is dropped. */
+export const SINK_LINE_DEDUPE_MS = 2000;
+export function isDuplicateSinkLine(
+  shipSink: boolean | undefined,
+  killerId: string | null | undefined,
+  announcedAt: number | undefined,
+  now: number,
+): boolean {
+  if (!shipSink || !killerId || announcedAt === undefined) return false;
+  return now - announcedAt < SINK_LINE_DEDUPE_MS;
+}
+
+/** The click-to-look hint, in the verbs of the station the pirate is standing
+ *  at. Pure so it can be gated (hud-26). */
+export function pointerLockHintFor(station: 'helm' | 'cannon' | 'foot'): string {
+  if (station === 'helm') return 'Click to look around · A/D steer · W/S sails';
+  if (station === 'cannon') return 'Click to look around · move the mouse to aim';
+  return 'Click to look around · WASD to move';
+}
+
 function interactRefusalLine(intent?: string, reason?: string): string {
   const noun = INTERACT_INTENT_NOUN[intent ?? ''] ?? 'that';
   switch (reason) {
@@ -1311,6 +1356,10 @@ export class Game {
       `SHIP SUNK — ${remaining} crew${remaining === 1 ? '' : 's'} afloat · ${payload.crewName}${credit}`,
       '#f0c46a',
     );
+    // One sinking, one line. The kill handler prints its own "X sank Y" for the
+    // same event; at 3 rows the duplicate pushed the line that mattered off the
+    // panel (liveplay-23).
+    if (payload.byPlayerId) this.sinkAnnouncedAt.set(payload.byPlayerId, performance.now());
     this.hud.pulseCrewsAfloat();
     // The killer already got playKill + playKillConfirm off their own hit —
     // a second toll on top of those is mud, not drama.
@@ -2142,7 +2191,13 @@ export class Game {
       if (event.killerId && event.killerId === this.localPlayerId && !event.shipSink) {
         this.audio.playKillConfirm();
       }
-      if (event.killerName && event.victimName) {
+      const sinkLineAlreadyPrinted = isDuplicateSinkLine(
+        event.shipSink,
+        event.killerId,
+        event.killerId ? this.sinkAnnouncedAt.get(event.killerId) : undefined,
+        performance.now(),
+      );
+      if (event.killerName && event.victimName && !sinkLineAlreadyPrinted) {
         const details = [
           event.headshot ? 'headshot' : '',
           event.boardingKill ? 'boarding raid' : '',
@@ -2158,7 +2213,7 @@ export class Game {
         if (event.killerId === this.localPlayerId && event.streakReward?.label) {
           this.pushFeed(`${event.streakReward.label}.`, '#7fe7ff');
         }
-      } else {
+      } else if (!sinkLineAlreadyPrinted) {
         this.pushFeed(event.victimName ? `${event.victimName} went under.` : 'A pirate was eliminated.');
       }
     };
@@ -2178,10 +2233,34 @@ export class Game {
     };
   }
 
+  /** SHIP SUNK announcements, by killer id, so the kill handler can drop its
+   *  duplicate of the same event (liveplay-23). */
+  private readonly sinkAnnouncedAt = new Map<string, number>();
+
+  /** Is the pirate who did this thing on MY hull? The feed's scoping test. */
+  private isOwnCrewActor(playerId: string | undefined): boolean {
+    return isOwnCrewActorIn(
+      this.state?.players ?? [],
+      this.localPlayerId,
+      this.getLocalPlayer()?.shipId ?? null,
+      playerId,
+    );
+  }
+
   /** Chests, barrels, harvest, upgrades and shop flow. */
   private bindLootNetworkEvents() {
     this.network.onChestOpened = (payload) => {
-      const event = payload as { action?: string; value?: number; loot?: Array<{ item: string; qty: number }> };
+      const event = payload as { action?: string; value?: number; playerId?: string; loot?: Array<{ item: string; qty: number }> };
+      // THE FEED IS NOT A TICKER OF OTHER PEOPLE'S ECONOMY. chest_opened is
+      // broadcast to every client for the map and bounty systems, and the feed
+      // printed all of it as if it were yours: "Chest stowed aboard: base 2600
+      // gold" while you stood alone in a cave with nothing aboard, nine bot
+      // crews digging (hud-23, liveplay-06). Carry/stow/drop lines are the
+      // local crew's only.
+      const mine = this.isOwnCrewActor(event.playerId);
+      if (event.action === 'pickup' || event.action === 'stow' || event.action === 'drop') {
+        if (!mine) return;
+      }
       if (event.action === 'pickup') {
         this.pushFeed(`Chest taken: base ${event.value ?? 0} gold, Tallymen pay more.`, '#d9c17e');
         // The carryingChestId edge-detector also fires for the local player; this covers other crew.
@@ -2364,7 +2443,12 @@ export class Game {
 
   /** Ship-to-ship parley/trade session. */
   private bindTradeNetworkEvents() {
-    this.network.onTradeRequest = () => {
+    this.network.onTradeRequest = (payload) => {
+      // Same class as the chest lines: a [T] press anywhere on the map put
+      // "Parley signaled between nearby ships." in every feed in the fleet and
+      // pushed a combat line out in 3 s (hud-29). Only the two crews involved.
+      const session = payload as { initiatorShipId?: string; targetShipId?: string } | null;
+      if (!parleyConcernsMe(session, this.getTrackedShip()?.id ?? null)) return;
       this.pushFeed('Parley signaled between nearby ships.', '#8bc2d7');
     };
 
@@ -3642,6 +3726,13 @@ export class Game {
     const menuVisible = this.menu.isVisible();
     const showHint = inMatch && !menuVisible && !this.input.isLocked();
     this.pointerLockHintEl.classList.toggle('visible', showHint);
+    // "WASD to move" was wrong at the two stations where a new player most
+    // often loses pointer lock: at the wheel W/S are sails and A/D is rudder,
+    // at a gun nothing moves (hud-26).
+    const me = this.getLocalPlayer();
+    this.pointerLockHintEl.textContent = pointerLockHintFor(
+      me?.atHelm ? 'helm' : me?.atCannon ? 'cannon' : 'foot',
+    );
   }
 
   private updateScene(dt: number) {
