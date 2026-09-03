@@ -101,6 +101,8 @@ export const LOGIC = [
   tsx('test-bot-peace-window.mjs'),
   // BOT-02: a bot whose lone pirate is dead is an unmanned hull (w1.1).
   tsx('test-bot-ghost-helm.mjs'),
+  // BOT-01/bots-v03: dry pieces are skipped, the crate tops a bot up in a lull (w1.1).
+  tsx('test-bot-ammo.mjs'),
   quick(tsx('test-oneshot-underload.mjs')),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),

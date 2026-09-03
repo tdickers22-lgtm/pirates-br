@@ -1,13 +1,13 @@
 import type { Player, Ship, Island, SeaRock, StormState, TreasureChest, Vec3, WeaponId } from '../../shared/types/index.js';
 import {
-  SHIP_STATS, SHIP, PHYSICS, PLAYER,
+  SHIP_STATS, SHIP, PHYSICS, PLAYER, WEAPONS,
   BOT_EARLY_PEACE_SECONDS, BOT_ENGAGE_RANGE_BY_PHASE, BOT_ENGAGE_SHRINK_MULT, BOT_DEFEND_RANGE,
   BOT_MAX_HUNTERS_BY_PHASE, BOT_LOOKAHEAD_METERS, BOT_OBSTACLE_MARGIN, BOT_KEEL_CLEARANCE,
   BOT_CANNON_CADENCE_BY_PHASE, BOT_CANNON_ACCURACY_BY_PHASE, botPhaseScale,
   WRECK_EVENT,
 } from '../../shared/constants/index.js';
 import { dist2D, randAngle, angleWrap, sampleLocalWind, getIslandSurfaceY, getIslandMaxRadius } from '../../shared/utils/index.js';
-import { raymarchIslandSurface } from '../../shared/raycast.js';
+import { raymarchIslandSurface, intersectRayShipHull } from '../../shared/raycast.js';
 import { countOpenHoles, getCannonBroadsideYaw } from '../../shared/interactions.js';
 import { applyShipRudderSteering } from './PhysicsSystem.js';
 import type { WeaponSystem } from './WeaponSystem.js';
@@ -53,6 +53,11 @@ interface BotState {
   /** Sim time this crew last actually put a ball through a port. A one-pirate
    *  crew that is firing is AT THE GUN — see BotSystem.isAtGuns. */
   lastFiredAt: number;
+  /** Sim time a personal-weapon target was last in view. The ammo-crate
+   *  top-up waits for a lull measured from here (see maybeTopUpAmmo). */
+  lastFirearmThreatAt: number;
+  /** Sim time of the last ammo-crate top-up (per-tier cooldown). */
+  lastAmmoTopUpAt: number;
 }
 
 /** A live world event bots sail to, plus the loot they can carry off it. */
@@ -81,6 +86,18 @@ const FIREARM_RANGE = 24;
 const FIREARM_AIM_HEIGHT = 1.4;
 /** How long a bot stays willing to fight back after taking hull damage. */
 const BOT_RETALIATE_SECONDS = 45;
+/** Body turn rate for personal-weapon aiming (rad/s) by tier. A boarder who
+ *  climbs the ladder BEHIND the pirate gets the half-second it takes him to
+ *  turn round — the aim used to be a teleport (bots-v05). */
+const BOT_FIREARM_TURN_RATE: Record<BotState['difficulty'], number> = { easy: 4, medium: 7, hard: 10 };
+/** The shot is only queued once the body is within this of the firing line. */
+const BOT_FIREARM_AIM_TOLERANCE = 0.12;
+/** Seconds without a small-arms target before a bot walks to the ammo crate. */
+const BOT_AMMO_LULL_SECONDS = 8;
+/** Minimum seconds between crate visits, by tier: the deck lull a bot spends
+ *  topping up, so late-match bots are not silent on deck (bots-v03) and the
+ *  opening minutes are not a bottomless magazine either. */
+const BOT_AMMO_TOPUP_SECONDS: Record<BotState['difficulty'], number> = { easy: 90, medium: 60, hard: 40 };
 
 /** Rough "how sound is she" scalar (4 = whole, 0 = riddled) derived from open
  *  breaches — bots watch it drop to know they are being shot at. */
@@ -227,6 +244,8 @@ export class BotSystem {
       lastHostileHoles: hostileHoleCount(ship),
       underFireUntil: 0,
       lastFiredAt: -999,
+      lastFirearmThreatAt: -999,
+      lastAmmoTopUpAt: 0,
     });
   }
 
@@ -277,7 +296,8 @@ export class BotSystem {
 
       this.decideBehavior(bot, ship, ships, islands, storm, players, t);
       this.executeBehavior(bot, player, ship, ships, islands, storm, dt, t, weaponSystem, seaRocks);
-      this.maybeFireAtBoarder(bot, player, ship, players, weaponSystem);
+      this.maybeFireAtBoarder(bot, player, ship, players, ships, islands, dt, t);
+      this.maybeTopUpAmmo(bot, player, ship, t, weaponSystem);
     }
   }
 
@@ -874,17 +894,26 @@ export class BotSystem {
   }
 
   /**
-   * If an enemy player (human or other bot) is within firearm range and roughly on/near
-   * this bot's ship, fire a personal weapon. Match.ts resolves the resulting hitscan trace.
+   * Personal weapons. If an ENEMY THREAT is within firearm range and roughly at
+   * deck height, turn to face him and fire; Match.ts resolves the hitscan.
+   *
+   * THE PEACE INCLUDES THE PISTOLS (BOT-01 / bots-01). The cannon path has
+   * always run through botMayFireCannons; this one ran for every bot every tick
+   * with no clock at all, so a human 20 m off a looting bot's rail at t=40 s
+   * took a Wrecker's Glass round — the "executed at the central dock" report.
+   * A pirate is a threat when (a) the guns are free anyway (peace lifted, or
+   * this crew is under fire), OR (b) he is physically aboard OUR hull, OR
+   * (c) he hurt this pirate recently (Match stamps lastDamagedById/At on every
+   * firearm, blade and keg hit). Nothing else is shot at inside the window.
    */
   private maybeFireAtBoarder(
     bot: BotState, player: Player, ship: Ship,
-    players: Player[],
-    _weaponSystem: WeaponSystem,
+    players: Player[], ships: Ship[], islands: Island[],
+    dt: number, t: number,
   ) {
     if (player.state !== 'alive' || player.atCannon || player.atHelm) return;
-    if (bot.firearmTimer > 0) return;
 
+    const gunsFree = botMayFireCannons(t, bot.underFireUntil);
     // Find the closest enemy who is either on the bot's ship or within firearm range.
     let bestTarget: Player | null = null;
     let bestDist = FIREARM_RANGE;
@@ -894,6 +923,8 @@ export class BotSystem {
       if (this.peacePlayerIds.has(other.id)) continue; // dev bot-peace: never shoot this player
       // Don't shoot allies on the same ship.
       if (other.shipId === player.shipId && other.isBot) continue;
+      const aboard = other.onShipId === ship.id;
+      if (!gunsFree && !aboard && !this.hurtUsRecently(player, other, t)) continue;
       const dx = other.position.x - player.position.x;
       const dy = other.position.y - player.position.y;
       const dz = other.position.z - player.position.z;
@@ -901,20 +932,15 @@ export class BotSystem {
       if (horizontal > FIREARM_RANGE) continue;
       if (Math.abs(dy) > 5.8) continue; // ignore vertical extremes (swimmers far below)
       // Bias toward boarders (same ship).
-      const score = other.onShipId === ship.id ? horizontal * 0.4 : horizontal;
+      const score = aboard ? horizontal * 0.4 : horizontal;
       if (score < bestDist) { bestDist = score; bestTarget = other; }
     }
     if (!bestTarget) return;
+    bot.lastFirearmThreatAt = t;
 
-    // Pick the most appropriate weapon by range.
-    const desiredWeaponId = this.selectFirearm(bestDist, bot.difficulty);
-    const slot = player.weapons.findIndex((w) => w?.weaponId === desiredWeaponId);
+    // Pick the most appropriate weapon by range — one that still has rounds.
+    const slot = this.pickFirearmSlot(player, bestDist);
     if (slot < 0) return;
-    const weapon = player.weapons[slot];
-    if (!weapon) return;
-    if (weapon.reloading || weapon.ammo <= 0) {
-      // Don't waste a tick — bots trigger reload via WeaponSystem.tryFire below.
-    }
     player.activeSlot = slot as 0 | 1 | 2 | 3;
 
     const aimPoint: Vec3 = {
@@ -929,6 +955,17 @@ export class BotSystem {
     const yaw = Math.atan2(dx, dz);
     const pitch = Math.atan2(dy, horizontal);
 
+    // Turn the BODY at a finite rate; the shot waits for the facing.
+    const rate = BOT_FIREARM_TURN_RATE[bot.difficulty];
+    const off = angleWrap(yaw - player.rotation.x);
+    const step = Math.max(-rate * dt, Math.min(rate * dt, off));
+    player.rotation.x = angleWrap(player.rotation.x + step);
+    player.rotation.y = pitch;
+
+    if (bot.firearmTimer > 0) return;
+    if (Math.abs(angleWrap(yaw - player.rotation.x)) > BOT_FIREARM_AIM_TOLERANCE) return;
+    if (!this.hasFirearmLineOfSight(player, aimPoint, ships, islands)) return;
+
     // Apply difficulty-based aim noise — a few degrees of jitter.
     const noise = bot.difficulty === 'hard' ? 0.018 : bot.difficulty === 'medium' ? 0.06 : 0.11;
     const noisyAim: Vec3 = {
@@ -937,13 +974,10 @@ export class BotSystem {
       z: aimPoint.z + (this.rng() - 0.5) * noise * bestDist,
     };
 
-    player.rotation.x = yaw;
-    player.rotation.y = pitch;
-
     this.pendingFirearmFires.push({
       playerId: player.id,
       aimPoint: noisyAim,
-      yaw,
+      yaw: player.rotation.x,
       pitch,
     });
 
@@ -952,10 +986,68 @@ export class BotSystem {
       : 3.1;
   }
 
-  private selectFirearm(distance: number, _difficulty: 'easy' | 'medium' | 'hard'): WeaponId {
-    if (distance > 18) return 'eye_of_reach';
-    if (distance > 9) return 'flintknock';
-    return 'blunderbuss';
+  /** Did `other` hurt this pirate inside the retaliation window? Match stamps
+   *  lastDamagedById/lastDamagedAt on every firearm, blade and keg hit. */
+  private hurtUsRecently(player: Player, other: Player, t: number): boolean {
+    if (player.lastDamagedById !== other.id || player.lastDamagedAt === null) return false;
+    return t - player.lastDamagedAt < BOT_RETALIATE_SECONDS;
+  }
+
+  /** Weapon slot for this range that still has a round to fire or load, or -1
+   *  when the pirate is dry. Range order: long → Glass, mid → flintknock,
+   *  close → blunderbuss, then the next-best piece that has powder. */
+  private pickFirearmSlot(player: Player, distance: number): number {
+    const order: WeaponId[] = distance > 18
+      ? ['eye_of_reach', 'flintknock', 'blunderbuss']
+      : distance > 9
+        ? ['flintknock', 'eye_of_reach', 'blunderbuss']
+        : ['blunderbuss', 'flintknock', 'eye_of_reach'];
+    for (const id of order) {
+      const slot = player.weapons.findIndex((w) => w?.weaponId === id);
+      if (slot < 0) continue;
+      const weapon = player.weapons[slot];
+      if (!weapon) continue;
+      if (weapon.ammo > 0 || weapon.reserve > 0) return slot;
+    }
+    return -1;
+  }
+
+  /** Nothing solid between the muzzle and the target's chest: islands and any
+   *  hull that is not the shooter's own (Match clamps the trace on exactly the
+   *  same occluders, so a shot held here is a shot that would have hit planking). */
+  private hasFirearmLineOfSight(player: Player, aimPoint: Vec3, ships: Ship[], islands: Island[]): boolean {
+    const origin = { x: player.position.x, y: player.position.y + FIREARM_AIM_HEIGHT, z: player.position.z };
+    const dx = aimPoint.x - origin.x;
+    const dy = aimPoint.y - origin.y;
+    const dz = aimPoint.z - origin.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < 0.5) return true;
+    const direction = { x: dx / dist, y: dy / dist, z: dz / dist };
+    if (raymarchIslandSurface(origin, direction, dist, islands).hit) return false;
+    for (const other of ships) {
+      if (!other.alive || other.id === player.onShipId) continue;
+      if (intersectRayShipHull(origin, direction, Math.max(0, dist - 0.8), other) !== null) return false;
+    }
+    return true;
+  }
+
+  /** The ammo crate. Bots never walked to it, so after 6 rounds per firearm a
+   *  bot was silent on deck for the rest of the match (bots-v03). During a lull
+   *  on its own deck a bot tops up exactly as the [X] crate interaction does,
+   *  at most once per tier cooldown. */
+  private maybeTopUpAmmo(bot: BotState, player: Player, ship: Ship, t: number, weaponSystem: WeaponSystem) {
+    if (player.state !== 'alive' || player.onShipId !== ship.id) return;
+    if (t - bot.lastFirearmThreatAt < BOT_AMMO_LULL_SECONDS) return;
+    if (t - bot.lastAmmoTopUpAt < BOT_AMMO_TOPUP_SECONDS[bot.difficulty]) return;
+    let short = false;
+    for (const weapon of player.weapons) {
+      if (!weapon || WEAPONS[weapon.weaponId].melee) continue;
+      const def = WEAPONS[weapon.weaponId];
+      if (weapon.ammo < def.ammoMax || weapon.reserve < def.reserveMax) { short = true; break; }
+    }
+    if (!short) return;
+    weaponSystem.refillFirearms(player);
+    bot.lastAmmoTopUpAt = t;
   }
 
   private steerToward(ship: Ship, targetAngle: number, dt: number, t: number) {

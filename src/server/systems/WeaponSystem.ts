@@ -303,6 +303,24 @@ export class WeaponSystem {
     return [proj];
   }
 
+  /** The ammo crate: every firearm back to a full magazine and reserve, reloads
+   *  cancelled — the one refill path in the game (Match's [X] 'ammo' interaction
+   *  and BotSystem.maybeTopUpAmmo both mean exactly this). Returns whether
+   *  anything actually changed. */
+  refillFirearms(player: Player): boolean {
+    let refilled = false;
+    for (const weapon of player.weapons) {
+      if (!weapon || WEAPONS[weapon.weaponId].melee) continue;
+      const def = WEAPONS[weapon.weaponId];
+      if (weapon.ammo < def.ammoMax || weapon.reserve < def.reserveMax || weapon.reloading) refilled = true;
+      weapon.ammo = def.ammoMax;
+      weapon.reserve = def.reserveMax;
+      weapon.reloading = false;
+      weapon.reloadTimer = 0;
+    }
+    return refilled;
+  }
+
   startReload(player: Player) {
     const weapon = player.weapons[player.activeSlot];
     if (!weapon || weapon.reloading) return;

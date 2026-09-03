@@ -139,6 +139,80 @@ expect('two untouched bots in broadside range hold fire during the peace',
 const afterShots = sailPair({ atTime: BOT_EARLY_PEACE_SECONDS + 5, seconds: 60, provoke: null });
 expect('the same two bots fight once the window lifts', afterShots > 0, `shots=${afterShots}`);
 
+// ── Deterministic: the peace includes the pistols ─────────────────────────
+// maybeFireAtBoarder ran for every bot every tick with no clock: a human 12 m
+// off a looting bot's rail at t=40 s took a Wrecker's Glass round (bots-01,
+// "executed at the central dock"). Inside the window a pirate is only shot if
+// he is ABOARD this hull or HURT this pirate; once the guns are free (peace
+// lifted, or under fire) the pistols come out like before. And the body turns
+// at a finite rate — a boarder behind the pirate gets the half-second it takes
+// him to turn round (bots-v05), instead of a 180-degree snap in one tick.
+console.log('\nThe peace includes the pistols');
+
+/** One bot hull hove to on open water with its pirate on deck, one human
+ *  placed relative to that pirate, only the bot brain running. Returns the
+ *  small-arms shots the bot queued, when the first came, and how far the body
+ *  turned in the first tick. */
+function smallArms({ atTime, seconds, place, hurt = false, difficulty = 'easy' }) {
+  const match = new Match({ matchId: `peace-pistol-${atTime}-${place}-${hurt}-${difficulty}`, botCount: 1 });
+  const state = match.state;
+  state.phase = 'playing';
+  const ship = state.ships[0];
+  const pirate = state.players.find((p) => p.shipId === ship.id);
+  const water = openWaterSpot(state.islands, state.seaRocks);
+  ship.position.x = water.x; ship.position.z = water.z; ship.position.y = 0;
+  ship.rotation = 0; ship.velocity = { x: 0, y: 0, z: 0 }; ship.sailHeight = 0; ship.anchored = true;
+  pirate.position = match.getRespawnDeckPosition(ship);
+  pirate.onShipId = ship.id;
+  pirate.state = 'alive';
+  pirate.rotation.x = 0; // looking +z
+  const brain = match.bots.bots.get(pirate.id);
+  brain.difficulty = difficulty;
+  brain.firearmTimer = 0;
+  state.storm.centerX = ship.position.x; state.storm.centerZ = ship.position.z;
+  state.storm.safeRadius = 2000; state.storm.shrinking = false; state.storm.phase = 0;
+
+  const human = match.createPlayer('human-1', 'Human', null, false);
+  human.state = 'alive';
+  // 'off': 12 m off the rail at deck height (a dock, a dinghy, a swimmer).
+  // 'aboard': 4 m away on this deck. 'behind': aboard, 2 m astern of the pirate.
+  const dx = place === 'off' ? 12 : place === 'aboard' ? 4 : 0;
+  const dz = place === 'behind' ? -2 : 0;
+  human.position = { x: pirate.position.x + dx, y: pirate.position.y, z: pirate.position.z + dz };
+  human.onShipId = place === 'off' ? null : ship.id;
+  if (hurt) { pirate.lastDamagedById = human.id; pirate.lastDamagedAt = atTime; }
+  state.players.push(human);
+
+  const yaw0 = pirate.rotation.x;
+  let shots = 0;
+  let firstShotAt = Infinity;
+  let firstTickTurn = 0;
+  for (let i = 0; i < Math.ceil(seconds / dt); i += 1) {
+    const t = atTime + i * dt;
+    match.bots.update(dt, t, state.players, state.ships, state.islands, state.storm, match.weapons, state.seaRocks);
+    if (i === 0) firstTickTurn = Math.abs(Math.atan2(Math.sin(pirate.rotation.x - yaw0), Math.cos(pirate.rotation.x - yaw0)));
+    const queued = match.bots.flushFirearmShots().filter((shot) => shot.playerId === pirate.id);
+    if (queued.length > 0 && shots === 0) firstShotAt = i * dt;
+    shots += queued.length;
+  }
+  return { shots, firstShotAt, firstTickTurn };
+}
+
+const offEarly = smallArms({ atTime: 10, seconds: 10, place: 'off' });
+expect('a human 12 m off a bot at t=10 s is not shot at', offEarly.shots === 0, `shots=${offEarly.shots}`);
+const aboardEarly = smallArms({ atTime: 10, seconds: 10, place: 'aboard' });
+expect('a boarder on the bot deck at t=10 s IS shot at', aboardEarly.shots > 0, `shots=${aboardEarly.shots}`);
+const hurtEarly = smallArms({ atTime: 10, seconds: 10, place: 'off', hurt: true });
+expect('a human 12 m off who just shot the pirate IS answered', hurtEarly.shots > 0, `shots=${hurtEarly.shots}`);
+const offLate = smallArms({ atTime: BOT_EARLY_PEACE_SECONDS + 5, seconds: 10, place: 'off' });
+expect('once the peace lifts the same human 12 m off is fair game', offLate.shots > 0, `shots=${offLate.shots}`);
+const behind = smallArms({ atTime: BOT_EARLY_PEACE_SECONDS + 5, seconds: 4, place: 'behind', difficulty: 'medium' });
+expect('a boarder 2 m astern: the body turns at 7 rad/s, not in one tick',
+  behind.firstTickTurn < 0.25, `turned ${behind.firstTickTurn.toFixed(3)} rad in tick 1`);
+expect('no shot until the pirate has turned round (>= 0.25 s)', behind.firstShotAt >= 0.25,
+  `first shot at ${behind.firstShotAt.toFixed(3)} s`);
+expect('and then the boarder is shot', behind.shots > 0, `shots=${behind.shots}`);
+
 // ── The whole lobby, sailed past the window ────────────────────────────────
 const match = new Match({ matchId: 'bot-peace-window', botCount: 9 });
 const state = match.state;
