@@ -67,6 +67,27 @@ export const HULL_IMPACT = {
   DECK_SPLASH_RADIUS: 1.5,
 } as const;
 export type HullImpactKind = 'band' | 'topside' | 'deck';
+/** A hull with every slot an OPEN breach is "shot to pieces" (liveplay-v02):
+ *  a wetter shot EVICTS the driest open hole (moves it down to the new point,
+ *  ties by lowest id) so a waterline hit on a saturated hull still floods, and
+ *  after GRACE_SECONDS at the cap the seams work open by themselves at
+ *  FORCED_INGRESS water-level/s (one open waterline hole is 0.0075/s), so a
+ *  hull nobody planks founders instead of being immune. */
+export const HULL_SATURATION = {
+  GRACE_SECONDS: 20,
+  FORCED_INGRESS: 0.02,
+  /** A new point must sit at least this much LOWER than the driest open hole
+   *  to evict it — a shot at the same height lands in the existing wound. */
+  EVICT_MIN_DROP: 0.05,
+} as const;
+/** Sim time at which each hull reached the open-hole cap (server-private:
+ *  keyed by the live Ship object, never on the wire). */
+const saturatedSince = new WeakMap<Ship, number>();
+/** Seconds a hull has sat at the open-hole cap (0 when below it). */
+export function hullSaturatedFor(ship: Ship, t: number): number {
+  const since = saturatedSince.get(ship);
+  return since === undefined ? 0 : Math.max(0, t - since);
+}
 type HullSweepHit =
   | { kind: HullImpactKind; point: Vec3 }
   | { kind: 'player'; point: Vec3; player: Player };
@@ -306,7 +327,14 @@ export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
  */
 export function updateShipFlooding(ship: Ship, t: number, dt: number, storm = 0): void {
   const water = ship.waterLevel ?? 0;
-  const ingress = shipIngressRate(ship, t, storm);
+  let ingress = shipIngressRate(ship, t, storm);
+  // Shot to pieces: at the cap for longer than the grace the seams open.
+  if (countOpenHoles(ship) >= FLOODING.MAX_HOLES_PER_SHIP) {
+    if (!saturatedSince.has(ship)) saturatedSince.set(ship, t);
+    if (hullSaturatedFor(ship, t) > HULL_SATURATION.GRACE_SECONDS) ingress += HULL_SATURATION.FORCED_INGRESS;
+  } else if (saturatedSince.has(ship)) {
+    saturatedSince.delete(ship);
+  }
   if (ingress > 0) {
     ship.waterLevel = clamp(water + ingress * dt, 0, 1);
     ship.floodingRate = ingress;
@@ -1924,15 +1952,26 @@ export class PhysicsSystem {
       const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
       if (d2 < bestSq) { bestSq = d2; victim = hole; }
     }
-    // Every slot already an OPEN hole — the shot lands in an existing wound.
+    // Every slot already an OPEN hole. A WETTER shot evicts the driest open
+    // breach (highest y, ties by lowest id) and moves it down to the new point
+    // so a waterline hit on a shot-up hull still floods (liveplay-v02); a shot
+    // no lower than the driest lands in an existing wound.
     if (!victim) {
-      let nearest = ship.holes[0];
-      let nearestSq = Infinity;
+      let driest = ship.holes[0];
       for (const hole of ship.holes) {
-        const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
-        if (d2 < nearestSq) { nearestSq = d2; nearest = hole; }
+        if (hole.y > driest.y || (hole.y === driest.y && hole.id < driest.id)) driest = hole;
       }
-      return nearest;
+      if (point.y < driest.y - HULL_SATURATION.EVICT_MIN_DROP) {
+        victim = driest;
+      } else {
+        let nearest = ship.holes[0];
+        let nearestSq = Infinity;
+        for (const hole of ship.holes) {
+          const d2 = (hole.x - point.x) ** 2 + (hole.y - point.y) ** 2 + (hole.z - point.z) ** 2;
+          if (d2 < nearestSq) { nearestSq = d2; nearest = hole; }
+        }
+        return nearest;
+      }
     }
     victim.patched = false;
     victim.x = point.x;

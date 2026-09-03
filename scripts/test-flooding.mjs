@@ -9,6 +9,7 @@ import {
   evaluateHoleFlood,
   shipIngressRate,
   updateShipFlooding,
+  HULL_SATURATION,
 } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared/constants/index.ts';
@@ -431,6 +432,55 @@ console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (s
   match.evaluateShipSinking(hpVictim);
   expect('a shot-to-pieces hull still founders — via the rising water (<45 s)',
     hpVictim.sinking === true && wreckT < 45, `filled in ${wreckT.toFixed(1)}s`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nShot to pieces: a saturated hull is never immune (HULL-01 slice c)');
+
+{
+  // Eight OPEN dry holes at deck height (the liveplay run5 state), then a
+  // waterline shot: the driest open breach must move down and start leaking.
+  const physics = new PhysicsSystem();
+  const ship = makeShip('sloop');
+  for (let i = 0; i < FLOODING.MAX_HOLES_PER_SHIP; i += 1) {
+    physics.openHoleAt(ship, { x: (i % 2 ? 1 : -1) * 2.0, y: 1.3, z: -3 + i * 0.8 }, 1, 'cannon');
+  }
+  expect('eight open holes at 1.3 m take no water', countOpenHoles(ship) === 8 && shipIngressRate(ship, 0) === 0,
+    `open=${countOpenHoles(ship)} ingress=${shipIngressRate(ship, 0)}`);
+  const before = ship.holes.map((h) => h.y);
+  const [moved] = physics.openHoleAt(ship, { x: 2.4, y: 0.3, z: 0.5 }, 1, 'cannon');
+  const lowered = ship.holes.filter((h, i) => h.y < before[i] - 0.5);
+  expect('a waterline shot on the saturated hull moves exactly ONE hole down to 0.3 m',
+    lowered.length === 1 && Math.abs(moved.y - 0.3) < 0.01 && ship.holes.length === 8,
+    `moved=${lowered.length} y=${moved?.y} holes=${ship.holes.length}`);
+  expect('...and the hull now takes water', shipIngressRate(ship, 0) > 0, `ingress=${shipIngressRate(ship, 0)}`);
+  const again = physics.openHoleAt(ship, { x: -2.4, y: 1.25, z: 2 }, 1, 'cannon')[0];
+  expect('a shot no lower than the driest open hole lands in an existing wound (no eviction)',
+    ship.holes.filter((h) => h.y >= 1.29).length === 7 && again.y >= 1.29, `heights=${ship.holes.map((h) => h.y.toFixed(2)).join(',')}`);
+}
+
+{
+  // Eight open DRY holes left alone: 20 s of grace, then the seams work open
+  // at HULL_SATURATION.FORCED_INGRESS so the hull founders instead of sitting
+  // at "8 LEAKS, 0 % bilge" for a hundred seconds.
+  const physics = new PhysicsSystem();
+  const ship = makeShip('sloop');
+  for (let i = 0; i < FLOODING.MAX_HOLES_PER_SHIP; i += 1) {
+    physics.openHoleAt(ship, { x: (i % 2 ? 1 : -1) * 2.0, y: 1.3, z: -3 + i * 0.8 }, 1, 'cannon');
+  }
+  let tick = 0;
+  const run = (seconds) => { const n = Math.round(seconds / DT); for (let i = 0; i < n; i += 1, tick += 1) physics.update(DT, tick * DT, [ship], [], [], [], [], null); };
+  run(19);
+  expect('still dry inside the 20 s grace', (ship.waterLevel ?? 0) === 0, `water=${ship.waterLevel}`);
+  run(11);
+  const rate = (ship.waterLevel ?? 0) / 10;
+  expect('after the grace the hull takes ~0.02/s of forced ingress',
+    rate > HULL_SATURATION.FORCED_INGRESS * 0.8 && rate < HULL_SATURATION.FORCED_INGRESS * 1.25,
+    `water=${(ship.waterLevel ?? 0).toFixed(3)} over 10 s (rate ${rate.toFixed(4)})`);
+  physics.patchHole(ship, ship.holes[0].id);
+  const w = ship.waterLevel;
+  run(5);
+  expect('planking ONE hole ends the forced ingress (and the pump starts gaining)', (ship.waterLevel ?? 0) < w, `${w.toFixed(3)} -> ${(ship.waterLevel ?? 0).toFixed(3)}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
