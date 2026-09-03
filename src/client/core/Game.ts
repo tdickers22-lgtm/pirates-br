@@ -3,6 +3,7 @@ import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPO
 import type {
   BountyRaisedPayload, CargoSpilledPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
+import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
 import { dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import {
@@ -6997,32 +6998,29 @@ export class Game {
     return best;
   }
 
-  /** Supply-wheel slot layout: 0 scope · 1 compass · 2 bucket · 3 planks ·
-   *  4 banana · 5 coconut · 6 meat/mango · 7 shovel · 8 lantern · 9 axe.
-   *  Tools (0-2, 7-9) equip. */
+  /** Supply-wheel slot layout comes from ONE table (shared/wheel.ts). Four
+   *  hand-written copies of it disagreed and the pocket strip named the wrong
+   *  key for every consumable (hud-01). */
   private getPocketWheelCount(player: Player, slot: number) {
-    switch (slot) {
-      case 3: return player.pocketWood;
-      case 4: return player.pocketBanana;
-      case 5: return player.pocketCoconut;
-      case 6: return player.pocketMeat + player.pocketMango;
+    switch (wheelPocketForSlot(slot)) {
+      case 'wood': return player.pocketWood;
+      case 'banana': return player.pocketBanana;
+      case 'coconut': return player.pocketCoconut;
+      case 'meat': return player.pocketMeat + player.pocketMango;
       default: return 0;
     }
   }
 
   private getPocketWheelKind(player: Player | null, slot: number): PocketPreviewKind | null {
-    switch (slot) {
-      case 3: return 'wood';
-      case 4: return 'banana';
-      case 5: return 'coconut';
-      case 6: return (player?.pocketMeat ?? 0) > 0 ? 'meat' : 'mango';
-      default: return null; // tool slots have no consumable preview
-    }
+    const pocket = wheelPocketForSlot(slot);
+    // The meat slice covers mango too: whichever the pirate is actually carrying.
+    if (pocket === 'meat') return (player?.pocketMeat ?? 0) > 0 ? 'meat' : 'mango';
+    return pocket; // null on tool slices — nothing is consumed
   }
 
   /** Wheel slice index for an equipped tool (for the highlight), else -1. */
   private toolWheelSlot(tool: Player['equippedTool']): number {
-    return tool === 'spyglass' ? 0 : tool === 'compass' ? 1 : tool === 'bucket' ? 2 : tool === 'shovel' ? 7 : tool === 'lantern' ? 8 : tool === 'axe' ? 9 : -1;
+    return wheelSlotForTool(tool);
   }
 
   private startPocketUsePreview(slot: number) {

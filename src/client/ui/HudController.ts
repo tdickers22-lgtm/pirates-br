@@ -5,6 +5,7 @@
  */
 import * as THREE from 'three';
 import { ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
+import { WHEEL_SLOTS } from '../../shared/wheel.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
 import { countOpenHoles } from '../../shared/interactions.js';
@@ -936,12 +937,19 @@ export class HudController {
     // Only advertise the numbers while they actually do that, or the two
     // always-on strips claim the same keys mean two things at once.
     const wheelHeld = this.view.input.isSupplyWheelOpen();
+    // THE DIGITS COME FROM THE WHEEL TABLE, NOT FROM MEMORY. This strip used to
+    // print "1 Plantain | 2 Plank | 3 Coconut | 4 Meat" while those keys took
+    // the spyglass, the compass, the bucket and a plank — follow the strip to
+    // heal and you ended up holding a bucket (hud-01).
     const stripParts = [
-      `Pocket: ${wheelHeld ? '1 ' : ''}Plantain ${pk.pocketBanana}`,
-      `${wheelHeld ? '2 ' : ''}Plank ${pk.pocketWood}`,
+      ...WHEEL_SLOTS.filter((slot) => slot.pocket !== null).map((slot, i) => {
+        const key = wheelHeld ? `${slot.key} ` : '';
+        const qty = slot.pocket === 'meat'
+          ? `${pk.pocketMeat} / Mango ${pk.pocketMango}`
+          : String(this.view.getPocketWheelCount(pk, slot.index));
+        return `${i === 0 ? 'Pocket: ' : ''}${key}${slot.label} ${qty}`;
+      }),
       `Ore ${pk.pocketOre ?? 0}`,
-      `${wheelHeld ? '3 ' : ''}Coconut ${pk.pocketCoconut}`,
-      `${wheelHeld ? '4 ' : ''}Meat ${pk.pocketMeat} / Mango ${pk.pocketMango}`,
       `Tool: ${pk.hasShovel ? 'Shovel' : 'None'}`,
     ];
     if (mappedIsland) stripParts.push(`Chart: ${mappedIsland.name}`);
@@ -1591,7 +1599,22 @@ export class HudController {
     this.view.ui.inventoryBanana.textContent = String(banana);
   }
 
+  /** The slice labels are static SVG text in index.html and carried no key at
+   *  all, so the tenth slice (the axe) looked keyless while the legend promised
+   *  "1-9 to take one" (hud-02). Stamp the table's key onto each label once. */
+  private wheelLabelsStamped = false;
+  private stampWheelLabels() {
+    if (this.wheelLabelsStamped) return;
+    const labels = this.view.ui.pocketWheel.querySelectorAll<SVGTextElement>('.wheel-label');
+    if (labels.length !== WHEEL_SLOTS.length) return;
+    WHEEL_SLOTS.forEach((slot, i) => {
+      labels[i].textContent = `${slot.key} ${slot.label.toUpperCase()}`;
+    });
+    this.wheelLabelsStamped = true;
+  }
+
   private updateSupplyWheelCounts(player: Player) {
+    this.stampWheelLabels();
     for (const countEl of this.view.ui.pocketWheel.querySelectorAll<SVGTextElement>('[data-wheel-count]')) {
       const slot = Number(countEl.dataset.wheelCount);
       countEl.textContent = Number.isInteger(slot) ? String(this.view.getPocketWheelCount(player, slot)) : '0';

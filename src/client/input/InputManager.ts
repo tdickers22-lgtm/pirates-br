@@ -1,4 +1,5 @@
 import type { CannonAmmoType, PlayerInput, WeaponSlot } from '../../shared/types/index.js';
+import { WHEEL_SLOTS, wheelSlotForDigitCode } from '../../shared/wheel.js';
 
 export class InputManager {
   private keys: Set<string> = new Set();
@@ -61,13 +62,20 @@ export class InputManager {
         e.preventDefault();
         this.wheelPage = this.wheelPage === 'items' ? 'maps' : 'items';
       }
-      if (this.vHeld && /^Digit[1-9]$/.test(e.code)) {
-        e.preventDefault();
-        if (this.wheelPage === 'maps') {
-          this.pendingSelectMapIndex = Number(e.code.slice(5)) - 1; // Digit1→map 0 …
-        } else {
-          this.pendingWheelSlot = Number(e.code.slice(5)) - 1; // Digit1→0 … Digit9→8
+      if (this.vHeld) {
+        // THE WHEEL IS A MODAL LAYER, not a set of per-key exceptions. It used
+        // to re-route only [Q] and Digit1-4 and leave every other binding live,
+        // so [F] (the trim key the legend advertises next to Q) still braced the
+        // yard from inside the overlay, and [X] fired an interact under it
+        // (hud-27). Nothing below this block reads a key while [I] is down.
+        const slot = wheelSlotForDigitCode(e.code);
+        if (slot !== null) {
+          e.preventDefault();
+          // Slot 9 ('0') is the axe: ten slices, and until now nine digits.
+          if (this.wheelPage === 'maps') this.pendingSelectMapIndex = slot;
+          else this.pendingWheelSlot = slot;
         }
+        return;
       }
       if (e.code === 'KeyX') this.interactPressed = true;
       if (e.code === 'Space') {
@@ -148,15 +156,15 @@ export class InputManager {
       this.locked = document.pointerLockElement === this.lockElement;
       if (!this.locked) {
         this.mouseButtons.clear();
+        this.releaseAllKeys();
       } else if (this.wantsRelock) {
         this.wantsRelock = false;
       }
     });
 
-    window.addEventListener('blur', () => {
-      this.mouseButtons.clear();
-      this.vHeld = false;
-      this.kegHeld = false;
+    window.addEventListener('blur', () => this.releaseAllKeys());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') this.releaseAllKeys();
     });
   }
 
@@ -179,8 +187,8 @@ export class InputManager {
       // Set by Game.ts when a use-tool is held (routes LMB to the tool's verb).
       useItem:  false,
       aim:      aiming,
-      interact: this.interactPressed,
-      interactHeld: this.keys.has('KeyX'),
+      interact: !this.vHeld && this.interactPressed,
+      interactHeld: !this.vHeld && this.keys.has('KeyX'),
       anchor:   false,
       // Canvas AMOUNT is hauled by holding [X] at the rigging / W-S at the helm.
       // Sail ANGLE (yard brace / trim) is Q/F while steering — the HUD names these
@@ -189,14 +197,14 @@ export class InputManager {
       sailLower: false,
       // [Q] is the maps-page toggle while the wheel is held — don't trim sails.
       sailLeft:  !this.vHeld && this.keys.has('KeyQ'),
-      sailRight: this.keys.has('KeyF'),
-      trade:    this.tradePressed,
-      reload:   this.reloadPressed,
-      placeKeg: this.placeKegPressed,
-      dropChest: this.dropChestPressed,
-      specialAttack: this.specialAttackPressed,
-      slot:     this.slotPressed,
-      cannonAmmo: this.cannonAmmoPressed,
+      sailRight: !this.vHeld && this.keys.has('KeyF'),
+      trade:    !this.vHeld && this.tradePressed,
+      reload:   !this.vHeld && this.reloadPressed,
+      placeKeg: !this.vHeld && this.placeKegPressed,
+      dropChest: !this.vHeld && this.dropChestPressed,
+      specialAttack: !this.vHeld && this.specialAttackPressed,
+      slot:     this.vHeld ? null : this.slotPressed,
+      cannonAmmo: this.vHeld ? null : this.cannonAmmoPressed,
       yaw:      this.yaw,
       pitch:    this.pitch,
       wheelIndex: wheelUse,
@@ -245,7 +253,39 @@ export class InputManager {
   queueWheelSlot(slot: number) {
     if (slot >= 0 && slot <= 9) this.pendingWheelSlot = slot;
   }
+  /** THE BROWSER NEVER DELIVERS THE KEYUP FOR A KEY RELEASED WHILE UNFOCUSED.
+   *  Cmd-Tab at the helm with [W] held and 'forward' kept riding every packet:
+   *  the sloop sailed itself into the storm while the player read Discord
+   *  (hud-03). Blur, tab-hide and losing pointer lock all mean "her hands are
+   *  off the keyboard" — drop every held key and one-shot, and flag a forced
+   *  send so the zeroed input reaches the server on the very next tick. */
+  private releaseAllKeys() {
+    this.keys.clear();
+    this.mouseButtons.clear();
+    this.vHeld = false;
+    this.kegHeld = false;
+    this.spyglassHeld = false;
+    this.interactPressed = false;
+    this.tradePressed = false;
+    this.reloadPressed = false;
+    this.placeKegPressed = false;
+    this.dropChestPressed = false;
+    this.specialAttackPressed = false;
+    this.jumpPressed = false;
+    this.slotPressed = null;
+    this.cannonAmmoPressed = null;
+    this.pendingWheelSlot = null;
+    this.releasedAllKeys = true;
+  }
+
+  /** One-shot: set by releaseAllKeys so Game forces the zeroed packet out. */
+  private releasedAllKeys = false;
+
   hasPendingActions() {
+    if (this.releasedAllKeys) {
+      this.releasedAllKeys = false;
+      return true;
+    }
     return this.interactPressed
       || this.tradePressed
       || this.reloadPressed
@@ -257,10 +297,11 @@ export class InputManager {
       || this.cannonAmmoPressed !== null
       || this.pendingWheelSlot !== null;
   }
-  /** While supply wheel is open, which slot (0–7) has a digit held — for FP preview */
+  /** While the supply wheel is open, which slice has its digit held — for the
+   *  first-person preview. Reads the shared table, so the axe ('0') counts. */
   getSupplyWheelHeldSlot(): number | null {
     if (!this.vHeld) return null;
-    for (let i = 1; i <= 9; i++) if (this.keys.has(`Digit${i}`)) return i - 1;
+    for (const slot of WHEEL_SLOTS) if (this.keys.has(slot.digitCode)) return slot.index;
     return null;
   }
   getMoveAxes() {
