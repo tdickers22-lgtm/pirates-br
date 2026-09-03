@@ -160,7 +160,7 @@ dock-vista at 0.90: the HIGH reading there swings 1006-1212 between runs (far
 bot hulls beyond balanced's 300 m detail radius) while balanced holds 850-879,
 and 0.80 flaked 1 run in 3. Lane 2.6 re-pins from four runs.
 
-## Not gates, by layout (3 declared, 33 probes, 14 tools)
+## Not gates, by layout (2 declared, 33 probes, 14 tools)
 
 `npm run test:audit` fails on **any** top-level `scripts/*.mjs` that is neither
 wired nor declared. The old filter only saw `test-*`/`audit-*`/`*smoke.mjs`
@@ -169,11 +169,11 @@ unseen. On 2026-09-02 the layout was made to say what a file is:
 
 | where | what | how many |
 |---|---|---|
-| `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 88 |
+| `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 98 |
 | `scripts/lib/` | shared code (browser args, perf scenes, z-fight probes, the manifest) | |
 | `scripts/tools/` | doc-cited instruments: `perf-*`, `zfight-blame`, `approach-shots`, `fill-pass-shots` (paths in `FRAME_COST_MODEL.md`, `Z_FIGHTING.md`, `FILL_AND_SHADER_PASS.md`), `story-tour` (restored for the fix plan's lane 2.5 gate; reads `PIRATES_BR_URL`) | 14 |
 | `scripts/probes/` | live probes touched after 2026-07-25 or cited by the fix plan; each opens with a `// PROBE, not a gate:` line saying what it measures | 33 |
-| top level, in `EXCLUDED` | `perf-probe.mjs` (shared instrument library (planScenes, measureScene, sessionQuery) imported by twelve browser suites); `pacing-sim.mjs` (the pacing instrument (lane 0.3 owns it)); `storm-wall-probe.mjs` (storm-wall fill probe) | 3 |
+| top level, in `EXCLUDED` | `perf-probe.mjs` (shared instrument library (planScenes, measureScene, sessionQuery) imported by twelve browser suites); `pacing-sim.mjs` (the pacing instrument (lane 0.3 owns it)); `storm-wall-probe.mjs` became the gate `test-storm-wall.mjs` in wave 0.4 | 2 |
 
 Deleted in the same sweep (git history keeps them): 21 probes last touched
 before 2026-07-25, the six wave-scoped smokes that were listed as excluded
