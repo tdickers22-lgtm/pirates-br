@@ -49,30 +49,44 @@
 //     • NIGHT body: sea vs the sky just above the horizon — the inversion
 //       itself, a surface cannot out-glow what lights it. ADVISORY, see below.
 //     • NIGHT moon path (camera yawed to the moon azimuth, moon low): the centre
-//       columns ≥ 1.35 × the flanks. Today the ocean is handed the sun after
-//       dark, so sunUp is 0 and there is no glitter. ADVISORY, see below.
+//       columns vs the flanks, ≥ 1.35 × wanted. ADVISORY, see below.
 //
-// ── NIGHT READS ARE NOT STABLE YET — THE TWO NIGHT RATIOS ARE ADVISORY ─────
-// The two night PIXEL reads (the balanced midnight body ratio and the moon-path
-// centre-vs-flank ratio) are printed, not graded. Three runs of the SAME commit
-// on the SAME pinned seed produced body 1.88x / 2.05x / 2.92x and path 1.44x /
-// 1.32x / 0.92x, and a fourth run (w3.fixup, 2026-09-03, same seed, same HEAD)
-// read body 2.63x and path 1.08x — i.e. BOTH thresholds would have been red on
-// the very commit that claims to fix them. That spread is larger than the effect this lane is measuring,
-// so grading it would be a coin flip dressed as a gate — the one failure mode
-// FIX_COMMON's "can it fail?" rule is aimed at, in its other direction.
+// ── WHAT THE PIN CHANGED, AND WHY THE TWO NIGHT RATIOS ARE STILL ADVISORY ──
+// Until 2026-09-03 the two night PIXEL reads were unreadable, not just ungraded:
+// five runs of ONE commit on the pinned seed gave body 1.88x / 2.05x / 2.92x /
+// 2.63x / 1.67x and path 1.44x / 1.32x / 0.92x / 1.08x / 1.04x. The variance was
+// never in the water. The stands join a LIVE solo match, so the server's storm
+// phase — and the rain mist riding on it, which thickens fog density by up to
+// 62% (Renderer :1290) — differed per run, and the night sea band is mostly fog.
 //
-// The variance is not in the water. The night stands join a LIVE solo match, so
-// by the time the second session reaches midnight the server's storm phase and
-// the rain mist that rides on it (Renderer :1284 thickens fog density by up to
-// 62% with rainMist) differ from run to run, and the sea band is mostly fog. A
-// stable version of these two needs the weather pinned the way ?stormdemo pins
-// the ring — a debug hook that does not exist yet.
+// Both sources are closed now. session() pins the weather flat calm through
+// Game.setWeatherOverride(0) (the calm counterpart of ?stormdemo), and every
+// night band is the mean of NIGHT_FRAMES frames ~0.9 s apart, which averages out
+// the free-running wave phase. The sky band went from drifting to reading 19.0
+// on every run, and the noon junction to 1.26-1.27x.
 //
-// What still gates the inversion meanwhile is test-storm-wall's night row (sea
+// What that bought is a NUMBER, not a pass. Pinned to flat calm the sea is
+// BRIGHTER than it looked before, because the rain fog had been hiding it:
+// body 2.22x / 2.25x / 2.02x / 1.95x / 2.14x, path 0.93x / 1.11x / 1.11x /
+// 1.26x / 1.15x
+// (the last three of each are with frame averaging, the last two with the
+// corrected glitter rows). So the honest reading is that this lane lit the ocean but did NOT
+// reach its own night targets: the sea still out-glows the night sky by about
+// 2x, and there is a glitter gradient rather than a glitter column.
+//
+// They stay ADVISORY rather than being re-ratcheted because a cap set above the
+// worst pinned run (~2.5x) is above the 2.49x this gate measured pre-fix — it
+// would pass the broken build too, which is the failure mode FIX_COMMON's "can
+// it fail?" rule exists to stop. The residual is not reachable from this lane:
+// the drawn night sky near the horizon reads 19/255 while skyHorizonNightColor,
+// the swatch getAtmosphere hands the ocean as its dissolve target, shapes to
+// roughly four times that (storm-02's third grey, sky-shader side, lane 5.4).
+// Grade these two the moment that lands — the reads themselves are ready.
+//
+// What DOES gate the inversion meanwhile is test-storm-wall's night row (sea
 // luma <= 1.05x sky under the wall, deterministic because ?stormdemo parks the
-// weather): 0.98x after this lane. And what this file DOES grade — the noon
-// junction and the five wiring reads — is deterministic and was red on HEAD.
+// weather): 0.98x after this lane. And what this file grades — the noon
+// junction, the aim, and the five wiring reads — is deterministic.
 //
 // PIRATES_BR_HORIZON_SHOTS=1 also writes the frames to test-results/horizon/.
 //
@@ -119,7 +133,12 @@ const MIDNIGHT_SECONDS = 374;
 // Sea rows the glitter path crosses at pitch 0 from 12 m of eye height. Read
 // NEAR the camera: the night fog density is 0.00158, which puts 59% of the
 // mid-frame water at the fog colour and averages the path away.
-const GLITTER_ROWS = [0.74, 0.94];
+const GLITTER_ROWS = [0.55, 0.72];
+// Every night band is the mean of this many frames ~0.9 s apart: the ocean clock
+// free-runs, so one frame grades one wave phase (the same pinned stand read the
+// moon path at 0.93x and 1.11x on two runs of one commit). Each frame is ~45 s
+// of SwiftShader, so this is the whole cost knob for the suite.
+const NIGHT_FRAMES = 2;
 
 // The zenith is not what the water reflects. At night the sky has a 3x gradient
 // from horizon to zenith (skyHorizonNightColor shapes to ~0.073 linear, the
@@ -165,6 +184,20 @@ async function main() {
       await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 300_000 });
       await page.waitForTimeout(6_000);
       await page.evaluate(() => window.__piratesBR.setBotPeace?.(true));
+      // FLAT CALM, PINNED. Without this the stands join a live match whose storm
+      // phase — and the rain mist riding on it, which thickens fog density by up
+      // to 62% — differ per run, and the night sea band is mostly fog. That is
+      // what kept the two night ratios advisory. Storm lighting is graded by
+      // test-storm-wall, which parks its own weather with ?stormdemo.
+      // A missing hook must NOT degrade to "unpinned but still graded" — that is
+      // exactly the flaky gate this replaces, so it is a hard error.
+      const pinned = await page.evaluate(() => {
+        const g = window.__piratesBR;
+        if (typeof g.setWeatherOverride !== 'function') return false;
+        g.setWeatherOverride(0);
+        return true;
+      });
+      if (!pinned) throw new Error('Game.setWeatherOverride is missing — the night stands cannot be pinned to flat calm');
       // Every overlay off and the onboarding card dismissed — a band read is only
       // a sea/sky read when nothing but the world is in the frame (the same block
       // test-storm-wall uses, for the same reason: its first run graded a scrim).
@@ -297,27 +330,67 @@ async function main() {
       const L = window.__piratesBR.renderer.activeLightDir;
       return { yaw: Math.atan2(L.x, L.z), moonY: L.y };
     });
-    await look(night0.yaw);
-    await page.waitForTimeout(2_500);
-    const moon = await frame('night-moon-path');
-    const centre = bandStats(moon, GLITTER_ROWS[0], GLITTER_ROWS[1], 0.42, 0.58);
-    const flankL = bandStats(moon, GLITTER_ROWS[0], GLITTER_ROWS[1], 0.05, 0.21);
-    const flankR = bandStats(moon, GLITTER_ROWS[0], GLITTER_ROWS[1], 0.79, 0.95);
-    const flank = (flankL.luma + flankR.luma) / 2;
+    // AIM, AND THEN CHECK THE AIM. atan2(L.x, L.z) and enableFreeCam's yaw are
+    // not guaranteed to be the same convention, and a centre-vs-flank read on a
+    // mis-aimed camera grades the flank the path happens to land in: with the
+    // raw yaw the brightest tenth of the frame sat at x=0.30-0.40, a ninth of a
+    // frame off centre, and the "centre" columns read the shoulder of the path.
+    // So close the loop — one Newton step off a measured sensitivity, which
+    // works whichever way the sign runs — and grade the residual.
+    const aimError = () => page.evaluate(() => {
+      const g = window.__piratesBR;
+      const L = g.renderer.activeLightDir;
+      const f = g.renderer.camera.getWorldDirection(g.renderer.camera.position.clone());
+      const d = Math.atan2(L.x, L.z) - Math.atan2(f.x, f.z);
+      return Math.atan2(Math.sin(d), Math.cos(d));
+    });
+    const aimAt = async (y) => { await look(y); await page.waitForTimeout(700); return aimError(); };
+    let yaw = night0.yaw;
+    const e0 = await aimAt(yaw);
+    const h = 0.25;
+    const e1 = await aimAt(yaw + h);
+    const slope = (e1 - e0) / h;
+    if (Math.abs(slope) > 0.2) yaw += -e0 / slope;
+    const aimErr = await aimAt(yaw);
+    expect(`night camera is aimed AT the moon (residual ${(aimErr * 57.3).toFixed(1)}°)`,
+      Math.abs(aimErr) < 0.035,
+      `yaw ${yaw.toFixed(3)} still ${(aimErr * 57.3).toFixed(1)}° off the moon azimuth — the centre band would read the shoulder of the path`);
+
+    // THREE FRAMES, NOT ONE. The ocean clock free-runs, so a single frame grades
+    // one wave phase: the same pinned stand read 0.93x and 1.11x on two runs of
+    // one commit. Averaging the bands over ~2 s of swell takes that out.
+    let cSum = 0, fSum = 0;
+    let moon = null;
+    for (let i = 0; i < NIGHT_FRAMES; i += 1) {
+      if (i) await page.waitForTimeout(900);
+      moon = await frame(i === NIGHT_FRAMES - 1 ? 'night-moon-path' : `night-moon-path-${i}`);
+      cSum += bandStats(moon, GLITTER_ROWS[0], GLITTER_ROWS[1], 0.42, 0.58).luma;
+      fSum += (bandStats(moon, GLITTER_ROWS[0], GLITTER_ROWS[1], 0.05, 0.21).luma
+        + bandStats(moon, GLITTER_ROWS[0], GLITTER_ROWS[1], 0.79, 0.95).luma) / 2;
+    }
+    const centre = { luma: cSum / NIGHT_FRAMES };
+    const flank = fSum / NIGHT_FRAMES;
     const gr = centre.luma / Math.max(0.5, flank);
-    console.log(`  moon path (yaw ${night0.yaw.toFixed(2)}, moon y ${night0.moonY.toFixed(2)}): centre ${centre.luma.toFixed(1)} vs flanks ${flank.toFixed(1)} → ${gr.toFixed(2)}×`);
-    console.log(`  ADVISORY moon path ${gr.toFixed(2)}× (want ≥ ${GLITTER_MIN}×) — see NIGHT READS ARE NOT STABLE YET at the top of this file`);
+    console.log(`  moon path (yaw ${yaw.toFixed(2)}, moon y ${night0.moonY.toFixed(2)}, ${NIGHT_FRAMES} frames): centre ${centre.luma.toFixed(1)} vs flanks ${flank.toFixed(1)} → ${gr.toFixed(2)}×`);
+    console.log(`  ADVISORY moon path ${gr.toFixed(2)}× (want ≥ ${GLITTER_MIN}×) — see WHAT THE PIN CHANGED at the top of this file`);
 
     // ── BALANCED: the inversion, and the proof the new chunks are inert here ──
     await session('balanced');
     await look(0.6);
     await settle(MIDNIGHT_SECONDS);
-    const night = await frame('balanced-midnight-body');
-    const bSky = bandStats(night, SKY_BAND[0], SKY_BAND[1]);
-    const bSea = bandStats(night, SEA_BAND[0], SEA_BAND[1]);
+    // Three frames, same reason as the moon path: the ocean clock free-runs.
+    let skySum = 0, seaSum = 0, night = null;
+    for (let i = 0; i < NIGHT_FRAMES; i += 1) {
+      if (i) await page.waitForTimeout(900);
+      night = await frame(i === NIGHT_FRAMES - 1 ? 'balanced-midnight-body' : `balanced-midnight-body-${i}`);
+      skySum += bandStats(night, SKY_BAND[0], SKY_BAND[1]).luma;
+      seaSum += bandStats(night, SEA_BAND[0], SEA_BAND[1]).luma;
+    }
+    const bSky = { luma: skySum / NIGHT_FRAMES };
+    const bSea = { luma: seaSum / NIGHT_FRAMES };
     const br = bSea.luma / Math.max(1, bSky.luma);
     console.log(`  balanced midnight body: sky luma ${bSky.luma.toFixed(1)} | sea luma ${bSea.luma.toFixed(1)} → ${br.toFixed(2)}×`);
-    console.log(`  ADVISORY balanced midnight body ${br.toFixed(2)}× (want ≤ ${NIGHT_BODY_MAX}×) — see NIGHT READS ARE NOT STABLE YET at the top of this file`);
+    console.log(`  ADVISORY balanced midnight body ${br.toFixed(2)}× (want ≤ ${NIGHT_BODY_MAX}×) — see WHAT THE PIN CHANGED at the top of this file`);
 
     const bw = await readWiring();
     expect('balanced: the ocean program carries NO tone map of its own (OutputPass owns it, so the chunks added for low changed nothing here)',
