@@ -1152,14 +1152,22 @@ export class MapRenderer {
         }
         ctx.restore();
       }
+      // YOUR HULL, PAST THE RING, IN RED. The chart drew the ring and drew your
+      // ship, and left it to the player to notice that one was inside the other
+      // — while the storm quietly stove her in at the berth (liveplay-07).
+      const storm = this.view.state.storm;
+      const ownOutside = isOwn && Math.hypot(
+        ship.position.x - storm.centerX,
+        ship.position.z - storm.centerZ,
+      ) > storm.safeRadius;
       this.drawShipMarker(
         ctx,
         centerX + ship.position.x * scale,
         centerY + ship.position.z * scale,
         ship.rotation,
         fullscreen ? 12 : 7.5,
-        ship.bountied ? '#ffb347' : isOwn ? '#7fd4ff' : '#ff8f70',
-        ship.bountied ? 'rgba(70, 30, 4, 0.7)' : isOwn ? 'rgba(12, 40, 60, 0.62)' : 'rgba(43, 12, 8, 0.55)',
+        ownOutside ? '#ff5f5f' : ship.bountied ? '#ffb347' : isOwn ? '#7fd4ff' : '#ff8f70',
+        ownOutside ? 'rgba(70, 8, 8, 0.72)' : ship.bountied ? 'rgba(70, 30, 4, 0.7)' : isOwn ? 'rgba(12, 40, 60, 0.62)' : 'rgba(43, 12, 8, 0.55)',
       );
     }
 

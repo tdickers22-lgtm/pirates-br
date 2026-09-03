@@ -4,7 +4,7 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import * as THREE from 'three';
-import { ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHIP_UPGRADES, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
+import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHIP_UPGRADES, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
@@ -104,6 +104,94 @@ const DEATH_CAUSE_KINDS = new Set<string>([
   'ship_sunk', 'storm', 'drowned', 'shark', 'fall', 'fire',
   'cannon', 'gunshot', 'blade', 'explosion', 'killed', 'outlasted',
 ]);
+
+/**
+ * THE TWO ALARMS ARE TWO LINES. One element named `storm-warning` carried three
+ * unrelated warnings with a fixed priority, so the moment the storm had holed
+ * the hull to six leaks — the state the storm itself produces — the only line
+ * that named the cause disappeared and the player read "SHIP CRITICAL" with no
+ * idea why (hud-04, liveplay-07). And when the crew is ashore inside the ring
+ * while their moored hull is outside it, nothing said so at all.
+ *
+ * Pure so it can be gated without a DOM.
+ */
+export type WarningInput = {
+  /** The PLAYER is past the ring. */
+  outsideStorm: boolean;
+  /** Metres the player's own hull is past the ring, or null when she is inside
+   *  (or there is no hull). Only meaningful while the player herself is safe. */
+  shipMetresOutside: number | null;
+  shipSinking: boolean;
+  shipCritical: boolean;
+  shipOnFire: boolean;
+};
+
+export function warningLines(input: WarningInput): { storm: string | null; ship: string | null } {
+  const storm = input.outsideStorm
+    ? 'OUTSIDE STORM ZONE'
+    : input.shipMetresOutside !== null && input.shipMetresOutside > 0
+      ? `YOUR SHIP IS OUTSIDE THE RING · ${Math.round(input.shipMetresOutside)} m`
+      : null;
+  const ship = input.shipSinking
+    ? 'SHIP IS SINKING'
+    : input.shipCritical
+      ? 'SHIP CRITICAL - REPAIR NOW'
+      : input.shipOnFire
+        ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
+        : null;
+  return { storm, ship };
+}
+
+/**
+ * WHICH WAY IS OUT, AND HOW LONG HAVE I GOT. "OUTSIDE STORM ZONE" told the
+ * player nothing steerable: the bearing lived on the map screen only, and
+ * nothing anywhere said whether the wall would reach the hull first (storm-09).
+ *
+ * The bearing is to the nearest point on the RING, which for a circle is the
+ * bearing to its centre; the distance is to the wall, not the centre. Pure.
+ */
+export type StormMarker = {
+  /** Compass bearing to the ring, degrees clockwise from north. */
+  bearing: number;
+  /** Signed turn from the current heading, in [-180, 180). */
+  delta: number;
+  /** Metres to the wall (always positive: in or out). */
+  wallMetres: number;
+  /** True while the player is OUTSIDE and must sail in. */
+  outside: boolean;
+  /** Seconds until the closing wall reaches this position, or null when the
+   *  ring is not shrinking (or is not coming this way). */
+  etaSeconds: number | null;
+};
+
+export function stormMarkerPlacement(
+  x: number,
+  z: number,
+  heading: number,
+  storm: {
+    centerX: number; centerZ: number; safeRadius: number;
+    nextRadius: number; shrinking: boolean; shrinkDuration: number; shrinkProgress: number;
+  },
+): StormMarker {
+  const dx = storm.centerX - x;
+  const dz = storm.centerZ - z;
+  const toCentre = Math.hypot(dx, dz);
+  const bearing = (((Math.atan2(dx, dz) * 180) / Math.PI) % 360 + 360) % 360;
+  let delta = bearing - heading;
+  delta = ((delta % 360) + 540) % 360 - 180;
+  const outside = toCentre > storm.safeRadius;
+  const wallMetres = Math.abs(toCentre - storm.safeRadius);
+  let etaSeconds: number | null = null;
+  if (storm.shrinking && !outside && storm.shrinkDuration > 0) {
+    // The wall sweeps from safeRadius to nextRadius over the rest of the shrink.
+    const remaining = Math.max(0, storm.shrinkDuration * (1 - storm.shrinkProgress));
+    const sweep = storm.safeRadius - storm.nextRadius;
+    if (sweep > 0 && toCentre > storm.nextRadius) {
+      etaSeconds = Math.max(0, ((toCentre - storm.nextRadius) / sweep) * remaining);
+    }
+  }
+  return { bearing, delta, wallMetres, outside, etaSeconds };
+}
 
 export class HudController {
   constructor(private readonly view: HudView) {}
@@ -517,6 +605,114 @@ export class HudController {
     this.view.ui.contextLabel.textContent = refusal.text;
   }
 
+  /** The ship alarm gets its OWN line under the storm line (hud-04). Built
+   *  lazily beside #storm-warning so no index.html change is needed. */
+  private shipAlarmEl: HTMLDivElement | null = null;
+  private ensureShipAlarmEl(): HTMLDivElement | null {
+    if (this.shipAlarmEl?.isConnected) return this.shipAlarmEl;
+    const host = this.view.ui.stormWarning.parentElement;
+    if (!host) return null;
+    const el = document.createElement('div');
+    el.id = 'ship-alarm';
+    el.style.cssText = 'display:none; font:700 0.72rem monospace; letter-spacing:0.06em; color:#ffb366;';
+    host.insertBefore(el, this.view.ui.stormWarning.nextSibling);
+    this.shipAlarmEl = el;
+    return el;
+  }
+
+  /** THE OPENING BEAT NEEDS A CLOCK. For the first BOT_EARLY_PEACE_SECONDS no
+   *  crew may fire, and the only timer on screen was the shrink clock — the
+   *  transition from "safe tutorial dock" to "you are being shelled at anchor"
+   *  arrived unannounced (liveplay-22). Elapsed comes from matchProgress, the
+   *  only match clock on the wire; the peace length is the client's default
+   *  (the server env override is server-only, see constants:877). */
+  private truceWasOn = false;
+  private updateTruceLine(): void {
+    const progress = this.view.state?.matchProgress ?? null;
+    if (progress === null) return;
+    const elapsed = progress * STORM_ARC_SECONDS;
+    const left = BOT_EARLY_PEACE_SECONDS - elapsed;
+    const on = left > 0;
+    if (on) {
+      this.truceWasOn = true;
+      const secs = Math.max(0, Math.ceil(left));
+      this.view.ui.stormPhase.textContent =
+        `${this.view.ui.stormPhase.textContent} · TRUCE ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    } else if (this.truceWasOn) {
+      this.truceWasOn = false;
+      this.view.flashIslandBanner('TRUCE OVER — CREWS MAY FIRE');
+    }
+  }
+
+  /** The storm chevron on the compass tape: which way the ring is, how far the
+   *  wall is, and when it arrives (storm-09). Same DOM shape as the bounty pip. */
+  private compassStormMark: { root: HTMLElement; pip: HTMLElement; label: HTMLElement } | null = null;
+  private compassStormSignature = '';
+  private updateStormBearing(player: Player, heading: number): void {
+    const storm = this.view.state?.storm;
+    if (!storm) return;
+    const mark = this.ensureCompassMark('compass-storm', '#7fd7ff', (m) => { this.compassStormMark = m; }, this.compassStormMark);
+    if (!mark) return;
+    const place = stormMarkerPlacement(player.position.x, player.position.z, heading, storm);
+    const arc = HudController.COMPASS_HALF_ARC_DEG;
+    const offScreen = Math.abs(place.delta) > arc;
+    const clamped = THREE.MathUtils.clamp(place.delta, -arc, arc) * (offScreen ? 0.88 : 1);
+    const px = Math.round(clamped * HudController.COMPASS_PX_PER_DEG);
+    const wall = `WALL ${Math.round(place.wallMetres / 10) * 10} m`;
+    const eta = place.etaSeconds !== null ? ` · ${Math.round(place.etaSeconds)} s` : '';
+    const text = place.outside ? `RING ${Math.round(place.wallMetres / 10) * 10} m` : `${wall}${eta}`;
+    const signature = `${px}|${offScreen ? (place.delta > 0 ? 'r' : 'l') : 'on'}|${text}`;
+    if (signature === this.compassStormSignature) return;
+    this.compassStormSignature = signature;
+    mark.root.style.display = 'block';
+    mark.root.style.transform = `translateX(${px}px)`;
+    mark.pip.style.borderTop = offScreen ? '6px solid transparent' : '6px solid #7fd7ff';
+    mark.pip.style.borderLeft = offScreen && place.delta > 0 ? '7px solid #7fd7ff' : '4px solid transparent';
+    mark.pip.style.borderRight = offScreen && place.delta < 0 ? '7px solid #7fd7ff' : '4px solid transparent';
+    mark.label.textContent = text;
+    mark.root.dataset.bearing = place.bearing.toFixed(1);
+    mark.root.dataset.delta = place.delta.toFixed(1);
+  }
+
+  /** One builder for both compass marks — the bounty pip's DOM, in a colour. */
+  private ensureCompassMark(
+    id: string,
+    colour: string,
+    store: (m: { root: HTMLElement; pip: HTMLElement; label: HTMLElement }) => void,
+    existing: { root: HTMLElement; pip: HTMLElement; label: HTMLElement } | null,
+  ): { root: HTMLElement; pip: HTMLElement; label: HTMLElement } | null {
+    if (existing) return existing;
+    const bezel = this.view.ui.compassTape.parentElement;
+    if (!bezel) return null;
+    const root = document.createElement('div');
+    root.id = id;
+    root.style.cssText = [
+      'position:absolute', 'top:0', 'left:50%', 'height:100%', 'width:0',
+      'display:none', 'pointer-events:none', 'z-index:2',
+    ].join(';');
+    const pip = document.createElement('div');
+    pip.style.cssText = [
+      'position:absolute', 'top:1px', 'left:50%', 'transform:translateX(-50%)',
+      'width:0', 'height:0',
+      'border-left:4px solid transparent', 'border-right:4px solid transparent',
+      `border-top:6px solid ${colour}`,
+      `filter:drop-shadow(0 0 4px ${colour})`,
+    ].join(';');
+    const label = document.createElement('div');
+    label.style.cssText = [
+      'position:absolute', 'bottom:1px', 'left:50%', 'transform:translateX(-50%)',
+      'font:700 0.5rem monospace', 'letter-spacing:0.05em', `color:${colour}`,
+      'white-space:nowrap', 'padding:0 3px', 'border-radius:3px',
+      'background:rgba(4, 14, 24, 0.82)', 'text-shadow:0 1px 2px rgba(0, 0, 0, 0.95)',
+    ].join(';');
+    root.appendChild(pip);
+    root.appendChild(label);
+    bezel.appendChild(root);
+    const mark = { root, pip, label };
+    store(mark);
+    return mark;
+  }
+
   /** Flash the CREWS AFLOAT chip — the counter used to drop 10 → 7 → 5 in total silence. */
   pulseCrewsAfloat(): void {
     const chip = this.view.ui.playerCount;
@@ -772,13 +968,29 @@ export class HudController {
         : `DOWNED — BLEEDING OUT 0:${String(bleed).padStart(2, '0')} · CRAWL TO YOUR CREW`;
       this.view.ui.downedBanner.style.color = (player.reviveProgress ?? 0) > 0 ? '#7ce38b' : '#ff6b6b';
     }
-    this.view.ui.stormWarning.style.display = outsideStorm || shipCritical || shipOnFire ? 'block' : 'none';
-    this.view.ui.stormWarning.textContent = shipCritical
-      ? (ship?.sinking ? 'SHIP IS SINKING' : 'SHIP CRITICAL - REPAIR NOW')
-      : shipOnFire
-        ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
-        : 'OUTSIDE STORM ZONE';
-    this.view.ui.stormWarning.style.color = shipCritical || shipOnFire ? '#ffb366' : '#ff6b6b';
+    // Your hull can be past the ring while your boots are not: she is moored at
+    // a berth the storm has left behind and the weather is stoving her in.
+    const shipMetresOutside = ship && !outsideStorm
+      ? dist2D(ship.position.x, ship.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ)
+        - this.view.state.storm.safeRadius
+      : null;
+    const lines = warningLines({
+      outsideStorm,
+      shipMetresOutside,
+      shipSinking: !!ship?.sinking,
+      shipCritical: shipCritical && !ship?.sinking,
+      shipOnFire,
+    });
+    this.view.ui.stormWarning.style.display = lines.storm ? 'block' : 'none';
+    this.view.ui.stormWarning.textContent = lines.storm ?? '';
+    this.view.ui.stormWarning.style.color = outsideStorm ? '#ff6b6b' : '#ffb366';
+    const alarm = this.ensureShipAlarmEl();
+    if (alarm) {
+      alarm.style.display = lines.ship ? 'block' : 'none';
+      alarm.textContent = lines.ship ?? '';
+      alarm.style.color = ship?.sinking ? '#ff6b6b' : '#ffb366';
+    }
+    this.updateTruceLine();
 
     this.view.ui.shipsAlive.textContent = String(this.view.state.shipsAlive);
     this.view.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
@@ -1162,6 +1374,7 @@ export class HudController {
       `translateX(${Math.round(-heading * HudController.COMPASS_PX_PER_DEG)}px)`;
     this.view.ui.compassTape.style.opacity = '1';
     this.updateBountyBearing(player, heading);
+    this.updateStormBearing(player, heading);
 
     if (this.view.state.phase === 'ended') {
       if (this.view.state.winnerId === this.view.localPlayerId) {
