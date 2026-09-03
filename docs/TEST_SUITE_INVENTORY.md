@@ -141,6 +141,7 @@ Logic tier, all node, no stack:
 - `test-bot-ghost-helm` — a bot whose lone pirate is on the respawn clock is an unmanned hull: 0 cannon shots, rudder decays to 0, while the live crew alongside still fires (BOT-02, w1.1). RED on HEAD: shotsA=2, rudder=0.6.
 - `test-bot-ammo` — a bot never queues a shot for a piece with ammo 0 + reserve 0 (all 18 rounds go downrange) and tops up at the crate in a deck lull (bots-v03, w1.1). RED on HEAD: 6 of 18 fired, 72 dry shots queued, reserve stays 0.
 - `test-bot-berth-truce` — a hull ANCHORED within 60 m of a dock berth is neither shot at nor sought before 270 s unless she fires first; fair game after (liveplay-19, w1.1). RED by mutation (isMooredAtBerth → false): 29 shots inside the truce, first at 159 s. `test-bot-peace-window` gained the pistol half (12 m off at t=10 s → 0 shots; aboard → shots; 7 rad/s body turn) and the retaliation case (A answers the shooter, not the nearer bystander).
+- `test-projectile-hull-parity` — cannonball-vs-hull truth (HULL-01, w1.2): the tick segment is swept against the shared swim-hull skin (200 wale points per class, 0.1 m outboard clear / inboard hit; 100 stem crossings at 60 m/s), impacts classify band / topside / deck (a plunging arc opens NO hole and splinters crew within 1.5 m; a ball over the deck meets the pirate standing there), the drawn face follows the ball, and environmental damage keeps the attacker (CREDIT-01 physics half). RED on HEAD: galleon 82/200 inboard misses (skin 6.10 m), 0/100 stem crossings, deck arc → dry hole at 1.32 m, drowning nulls lastDamagedById. `test-flooding` gained the saturation block (8 open dry holes: a wetter shot evicts the driest; 20 s at the cap → 0.02/s forced ingress).
 
 **Red by design (GATES-01).** Six gates were written first and fail on HEAD on
 purpose; each grades a defect the 2026-09-01 audit found unguarded and stays
@@ -172,7 +173,7 @@ unseen. On 2026-09-02 the layout was made to say what a file is:
 
 | where | what | how many |
 |---|---|---|
-| `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 101 |
+| `scripts/test-*.mjs`, `audit-*.mjs` | gates, all wired in `lib/suites.mjs` | 102 |
 | `scripts/lib/` | shared code (browser args, perf scenes, z-fight probes, the manifest) | |
 | `scripts/tools/` | doc-cited instruments: `perf-*`, `zfight-blame`, `approach-shots`, `fill-pass-shots` (paths in `FRAME_COST_MODEL.md`, `Z_FIGHTING.md`, `FILL_AND_SHADER_PASS.md`), `story-tour` (restored for the fix plan's lane 2.5 gate; reads `PIRATES_BR_URL`) | 14 |
 | `scripts/probes/` | live probes touched after 2026-07-25 or cited by the fix plan; each opens with a `// PROBE, not a gate:` line saying what it measures | 33 |
