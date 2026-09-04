@@ -14,22 +14,31 @@
 // player.position, i.e. the standing surface:
 //   • boot soles on the ground: min boot y in [-0.02, +0.06] when standing;
 //   • hands never below the shins (y > 0.1) in any upright pose;
-//   • head centre within 5 cm of Match's headshot sphere
-//     (PLAYER.HEIGHT*0.96 standing, *0.66 crouched, 1.92 island skeleton);
+//   • head centre within 5 cm of Match's headshot sphere, which is now
+//     PLAYER.HEAD_Y (PLAYER.HEAD_Y − PLAYER.CROUCH_DROP crouched) for pirates
+//     AND island skeletons — one height set, read by both sides;
+//   • the camera eye, the drawn head and the collider are ONE figure: EYE_Y is
+//     7 cm under HEAD_Y, the crown clears PLAYER.HEIGHT by ≤6 cm, and neither
+//     Match.ts nor Game.ts carries a hand-typed height any more;
+//   • the team bandana is OUTSIDE the hair, and a captain has one beard and
+//     one moustache, not two of each;
 //   • a settled corpse lies on the ground (bottom ≥ -0.1, top ≤ 0.8);
 //   • no single frame turns a joint by more than 0.35 rad across a state edge;
 //   • visible-mesh count per variant under a fixed budget.
 //
-// RED ON HEAD (2026-09-02): boots at -0.19 (verifier witness), head at 1.92 vs
-// 1.68, crouched head 1.60 vs 1.155, skeleton shins at -0.09. Green is the job
-// of AVATAR-01 (wave 2). Do not widen a threshold here to pass: the numbers are
-// the server's, not the animator's.
+// RED ON HEAD (2026-09-02, before AVATAR-01): 30 of 46 assertions — boots at
+// -0.19 (verifier witness), head at 1.92 vs the server's 1.68, crouched head
+// 1.60 vs 1.155, skeleton shins at -0.09, corpses propped 1.46 m tall, every
+// state edge a one-frame snap. Do not widen a threshold here to pass: the
+// numbers are the shared constants', not the animator's.
 //
 //   node --import tsx scripts/test-avatar-pose-invariants.mjs
 import * as THREE from 'three';
 import { makePlayerMesh } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
 import { PlayerAnimator } from '../src/client/rendering/PlayerAnimator.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
+import { AVATAR_RIG } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
+import { readFileSync } from 'node:fs';
 
 let failures = 0;
 let checks = 0;
@@ -44,6 +53,8 @@ const BOOT_MIN = -0.02;   // sole may sink 2 cm (shadow acne guard), no more
 const BOOT_MAX = 0.06;    // and may float 6 cm at most (walk lift)
 const HAND_MIN_Y = 0.10;
 const HEAD_TOL = 0.05;
+const STAND_HEAD = PLAYER.HEAD_Y;
+const CROUCH_HEAD = PLAYER.HEAD_Y - PLAYER.CROUCH_DROP;
 const POP_MAX_RAD = 0.35;
 const MESH_BUDGET = { pirate: 26, skeleton: 26 };
 
@@ -87,17 +98,17 @@ function makePlayer(over = {}) {
  *  to let blends settle, and which invariants apply. `ground` = boots must be on
  *  the deck; `upright` = hands above the shins; `headY` = the server sphere. */
 const SCENARIOS = [
-  { name: 'idle', player: {}, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'walk 4 m/s', player: { velocity: { x: 4, y: 0, z: 0 } }, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'helm', player: { atHelm: true }, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'cannon', player: { atCannon: true }, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'crow nest', player: { atCrowNest: true }, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'climb 0.5', player: { mastClimb: 0.5 }, ground: false, upright: false, headY: PLAYER.HEIGHT * 0.96 },
+  { name: 'idle', player: {}, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'walk 4 m/s', player: { velocity: { x: 4, y: 0, z: 0 } }, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'helm', player: { atHelm: true }, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'cannon', player: { atCannon: true }, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'crow nest', player: { atCrowNest: true }, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'climb 0.5', player: { mastClimb: 0.5 }, ground: false, upright: false, headY: STAND_HEAD },
   { name: 'swim', player: { state: 'swimming', velocity: { x: 2, y: 0, z: 0 } }, ground: false, upright: false, headY: null },
-  { name: 'block', player: { activeSlot: 0, blocking: true }, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'cutlass swing 0.4', player: { activeSlot: 0, weapons: [{ ...cutlass(), reloading: true, reloadTimer: 0.33 }, null, null, null] }, swing: 0.4, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'bail', player: { bailing: true, bailScoopProgress: 0.5, bucketFilled: true }, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.96 },
-  { name: 'crouch', player: { crouching: true }, ground: true, upright: true, headY: PLAYER.HEIGHT * 0.66 },
+  { name: 'block', player: { activeSlot: 0, blocking: true }, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'cutlass swing 0.4', player: { activeSlot: 0, weapons: [{ ...cutlass(), reloading: true, reloadTimer: 0.33 }, null, null, null] }, swing: 0.4, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'bail', player: { bailing: true, bailScoopProgress: 0.5, bucketFilled: true }, ground: true, upright: true, headY: STAND_HEAD },
+  { name: 'crouch', player: { crouching: true }, ground: true, upright: true, headY: CROUCH_HEAD },
   { name: 'downed', player: { state: 'downed' }, frames: 40, ground: false, upright: false, headY: null },
   { name: 'airborne', player: { velocity: { x: 0, y: -5, z: 0 } }, frames: 20, ground: false, upright: true, headY: null },
 ];
@@ -166,16 +177,20 @@ for (const variant of ['pirate', 'skeleton']) {
     mesh.userData.animation.landTimer = 0;
     run(mesh, player, null, sc.frames ?? 6);
 
-    const feet = variant === 'skeleton' ? partBounds(mesh, isLeg) : partBounds(mesh, isBoot);
-    const footName = variant === 'skeleton' ? 'shin' : 'boot';
+    // Skeletons have feet now (avatar-26) and stand on the same rig, so the
+    // same measurement applies to both variants.
+    const feet = partBounds(mesh, isBoot);
+    const footName = 'boot';
+    const shins = partBounds(mesh, isLeg);
     const hands = partBounds(mesh, isHand);
     const headY = parts.head.getWorldPosition(new THREE.Vector3()).y;
-    const serverHead = variant === 'skeleton' ? 1.92 : sc.headY;
+    const serverHead = sc.headY;
 
     if (sc.ground) {
       expect(`${sc.name}: ${footName} sole on the deck (min y ${feet.min.toFixed(3)} in [${BOOT_MIN}, ${BOOT_MAX}])`,
         feet.min >= BOOT_MIN && feet.min <= BOOT_MAX,
         feet.min < BOOT_MIN ? `sunk ${(-feet.min).toFixed(2)} m below the standing surface` : `floating ${feet.min.toFixed(2)} m above it`);
+      expect(`${sc.name}: shin bones stay out of the deck (min y ${shins.min.toFixed(3)} ≥ ${BOOT_MIN})`, shins.min >= BOOT_MIN);
     }
     if (sc.upright && variant === 'pirate') {
       expect(`${sc.name}: hands above the shins (min hand y ${hands.min.toFixed(3)} > ${HAND_MIN_Y})`, hands.min > HAND_MIN_Y);
@@ -183,9 +198,69 @@ for (const variant of ['pirate', 'skeleton']) {
     if (serverHead !== null && serverHead !== undefined) {
       expect(`${sc.name}: head centre ${headY.toFixed(3)} within ${HEAD_TOL} of the server sphere at ${serverHead.toFixed(3)}`,
         Math.abs(headY - serverHead) <= HEAD_TOL,
-        `Match.ts headY = PLAYER.HEIGHT*${player.crouching ? 0.66 : 0.96}; the drawn head is what players aim at`);
+        `Match.ts headY = PLAYER.HEAD_Y${player.crouching ? ' − PLAYER.CROUCH_DROP' : ''}; the drawn head is what players aim at`);
     }
   }
+}
+
+// ── 1b. one figure: collider, camera and mesh read the same constants ──────
+console.log('\n[one figure: shared heights]');
+{
+  expect(`eye ${PLAYER.EYE_Y} sits 7 cm under the head centre ${PLAYER.HEAD_Y}`,
+    Math.abs(PLAYER.EYE_Y - (PLAYER.HEAD_Y - 0.07)) < HEAD_TOL,
+    'the camera must be INSIDE the drawn head, not 45 cm under it');
+  expect(`rig head ${AVATAR_RIG.headY} is PLAYER.HEAD_Y`, AVATAR_RIG.headY === PLAYER.HEAD_Y);
+  for (const [variant, role] of [['pirate', 'crew'], ['skeleton', 'raider']]) {
+    const mesh = makePlayerMesh(0x3366cc, variant, role);
+    mesh.updateMatrixWorld(true);
+    const body = partBounds(mesh, isBody);
+    expect(`${variant}: crown ${body.max.toFixed(2)} m ≤ PLAYER.HEIGHT + 0.06`,
+      body.max <= PLAYER.HEIGHT + 0.06,
+      `a ${body.max.toFixed(2)} m avatar on a ${PLAYER.HEIGHT} m collider looms over the camera`);
+  }
+  // The two hand-typed copies of these numbers are what let the three heights
+  // drift apart; a literal creeping back in is the regression to catch.
+  const matchSrc = readFileSync(new URL('../src/server/core/Match.ts', import.meta.url), 'utf8');
+  const gameSrc = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  expect('Match.ts derives the headshot sphere from PLAYER.HEAD_Y',
+    /headY = PLAYER\.HEAD_Y/.test(matchSrc) && !/islandSkeleton \? 1\.92/.test(matchSrc));
+  expect('Match.ts crouch uses PLAYER.CROUCH_DROP', /PLAYER\.CROUCH_DROP/.test(matchSrc));
+  expect('Game.ts places the camera at PLAYER.EYE_Y',
+    /PLAYER\.EYE_Y/.test(gameSrc) && !/PLAYER\.HEIGHT \* 0\.84/.test(gameSrc));
+}
+
+// ── 1c. head dressing: one bandana over the hair, one beard per captain ────
+console.log('\n[head dressing]');
+{
+  const crew = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+  crew.updateMatrixWorld(true);
+  const parts = crew.userData.animation.parts;
+  const hair = parts.hair;
+  const bandana = parts.bandana;
+  const hairCentre = hair.getWorldPosition(new THREE.Vector3());
+  const hairR = hair.geometry.parameters.radius;
+  const pos = bandana.geometry.attributes.position;
+  let outside = 0;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i).applyMatrix4(bandana.matrixWorld);
+    if (v.distanceTo(hairCentre) > hairR + 0.001) outside += 1;
+  }
+  const frac = outside / pos.count;
+  expect(`bandana is worn OVER the hair (${(frac * 100).toFixed(0)}% of its vertices outside the r=${hairR} hair shell > 50%)`,
+    frac > 0.5, 'a torus buried in the skull is not a team marker');
+  expect('crew wear the bandana', bandana.visible);
+
+  const captain = makePlayerMesh(0x3366cc, 'pirate', 'captain');
+  const face = { beard: 0, moustache: 0 };
+  parts.head.parent.updateMatrixWorld(true);
+  captain.userData.animation.parts.head.traverse((o) => {
+    if (o.isMesh && face[o.name] !== undefined) face[o.name] += 1;
+  });
+  expect(`captain has exactly one beard (${face.beard}) and one moustache (${face.moustache})`,
+    face.beard === 1 && face.moustache === 1,
+    'the base face and the captain branch both added a set: two chins, z-fighting where they coincide');
+  expect('captains wear the hat instead of the bandana', !captain.userData.animation.parts.bandana.visible);
 }
 
 // ── 2. pose pops across state edges (pirate) ───────────────────────────────

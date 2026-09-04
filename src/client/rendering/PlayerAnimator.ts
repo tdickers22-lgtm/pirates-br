@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
 import type { Player, Ship } from '../../shared/types/index.js';
 import { angleWrap } from '../../shared/utils/index.js';
+import { AVATAR_RIG } from './factories/PlayerMeshFactory.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 
@@ -227,14 +228,20 @@ export class PlayerAnimator {
     );
     animation.downedBlend = downedBlend;
 
-    torso.position.y = 1.28 + idleBob + walkLift * 0.35;
-    shirt.position.y = 1.24 + idleBob + walkLift * 0.3;
-    pelvis.position.y = 0.8 + idleBob * 0.35 + Math.sin(phase) * 0.05 * moveRatio;
-    head.position.y = 1.92 + idleBob * 0.9;
-    hair.position.y = 2.0 + idleBob * 0.9;
-    bandana.position.y = 2.0 + idleBob * 0.9;
+    // Base pose, straight off the shared rig: every Y here is a metre above the
+    // SOLES, and the stance solve at the end of the frame is what keeps them so.
+    torso.position.y = AVATAR_RIG.torsoY + idleBob + walkLift * 0.35;
+    shirt.position.y = AVATAR_RIG.shirtY + idleBob + walkLift * 0.3;
+    pelvis.position.y = AVATAR_RIG.pelvisY + idleBob * 0.35 + Math.sin(phase) * 0.05 * moveRatio;
+    // The head carries a damped share of the bob: it is the server's headshot
+    // sphere as well as a body part, and the gate holds it to 5 cm of HEAD_Y.
+    head.position.y = AVATAR_RIG.headY + idleBob * 0.55;
+    hair.position.y = AVATAR_RIG.hairY + idleBob * 0.55;
+    bandana.position.y = AVATAR_RIG.hairY + idleBob * 0.55;
+    leftArmPivot.position.y = AVATAR_RIG.armPivotY;
+    rightArmPivot.position.y = AVATAR_RIG.armPivotY;
     if (coatSkirt) {
-      coatSkirt.position.y = 0.66 + idleBob * 0.2;
+      coatSkirt.position.y = AVATAR_RIG.coatSkirtY + idleBob * 0.2;
       coatSkirt.rotation.set(0, Math.sin(phase) * 0.1 * moveRatio, 0);
     }
 
@@ -683,16 +690,16 @@ export class PlayerAnimator {
     leftLegPivot.rotation.set(-0.85 * knee + 0.9 * knee * sprawl + 0.22 * sprawl, 0, -0.1 - 0.3 * sprawl);
     rightLegPivot.rotation.set(-0.45 * knee + 0.5 * knee * sprawl - 0.12 * sprawl, 0, 0.1 + 0.48 * sprawl);
 
-    torso.position.y = 1.28 - 0.34 * knee * (1 - sprawl) - 0.16 * sprawl;
-    shirt.position.y = 1.24 - 0.32 * knee * (1 - sprawl) - 0.16 * sprawl;
-    pelvis.position.y = 0.8 - 0.2 * knee * (1 - sprawl) - 0.06 * sprawl;
-    head.position.y = 1.92 - 0.24 * knee * (1 - sprawl) - 0.18 * sprawl;
+    torso.position.y = AVATAR_RIG.torsoY - 0.24 * knee * (1 - sprawl) - 0.12 * sprawl;
+    shirt.position.y = AVATAR_RIG.shirtY - 0.22 * knee * (1 - sprawl) - 0.12 * sprawl;
+    pelvis.position.y = AVATAR_RIG.pelvisY - 0.14 * knee * (1 - sprawl) - 0.04 * sprawl;
+    head.position.y = AVATAR_RIG.headY - 0.17 * knee * (1 - sprawl) - 0.13 * sprawl;
     if (hair) {
-      hair.position.y = head.position.y + 0.08;
+      hair.position.y = head.position.y + (AVATAR_RIG.hairY - AVATAR_RIG.headY);
       hair.rotation.set(head.rotation.x, head.rotation.y, head.rotation.z);
     }
     if (bandana) {
-      bandana.position.y = head.position.y + 0.08;
+      bandana.position.y = head.position.y + (AVATAR_RIG.hairY - AVATAR_RIG.headY);
       bandana.rotation.set(Math.PI * 0.5 + head.rotation.x, head.rotation.y, head.rotation.z);
     }
   }
@@ -737,8 +744,8 @@ export class PlayerAnimator {
     rightArmPivot.rotation.set(-1.2 * collapse + shudder, 0.3 * collapse, 1.25 * collapse);
     leftLegPivot.rotation.set(0.92 * collapse, 0, -0.42 * collapse);
     rightLegPivot.rotation.set(-0.28 * collapse, 0, 0.76 * collapse);
-    torso.position.y = 1.28 - 0.55 * collapse - sag;
-    pelvis.position.y = 0.8 - 0.32 * collapse - sag * 0.6;
-    head.position.y = 1.92 - 0.26 * collapse - sag;
+    torso.position.y = AVATAR_RIG.torsoY - 0.42 * collapse - sag;
+    pelvis.position.y = AVATAR_RIG.pelvisY - 0.24 * collapse - sag * 0.6;
+    head.position.y = AVATAR_RIG.headY - 0.2 * collapse - sag;
   }
 }

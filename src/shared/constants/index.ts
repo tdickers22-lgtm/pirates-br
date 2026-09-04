@@ -30,6 +30,23 @@ export const PLAYER = {
   SWIM_MAX_DEPTH: 42,
   JUMP_FORCE: 6,
   HEIGHT: 1.75,
+  /** THE avatar height set. Before AVATAR-01 the same pirate was three
+   *  different people: the server's headshot sphere sat at 1.68, the local
+   *  camera at 1.47 and the drawn head at 1.92, so a shot at a visible head was
+   *  a body hit and everyone loomed 45 cm over you. These four numbers are the
+   *  only source: Match's hitbox bands, Game's camera eye, PlayerMeshFactory's
+   *  build and PlayerAnimator's poses all derive from them, and
+   *  scripts/test-avatar-pose-invariants.mjs fails if any of them drifts. */
+  /** Centre of the drawn head AND of the server headshot sphere. */
+  HEAD_Y: 1.62,
+  /** First-person camera: inside the drawn head, 7 cm below its centre. */
+  EYE_Y: 1.55,
+  /** How far the head (and the camera) drop on a crouch, client and server. */
+  CROUCH_DROP: 0.45,
+  /** Centres of the two body hitbox bands (chest, hips+legs). Pirates and
+   *  island skeletons share them: same shot, same result. */
+  UPPER_Y: 1.18,
+  LOWER_Y: 0.56,
   RADIUS: 0.35,
   INTERACT_RANGE: 3.5,
   DROWN_TIME: 60,
