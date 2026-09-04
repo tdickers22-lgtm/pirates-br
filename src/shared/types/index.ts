@@ -972,6 +972,14 @@ type MsgType =
   | 'solo_start'
   | 'lobby_update'
   | 'lobby_left'
+  /** Party roster verbs (PARTY-01): ready tick, host kick, crown handover. */
+  | 'party_ready'
+  | 'party_kick'
+  | 'party_transfer_host'
+  /** The match let go of you but your crew did not: back in the party panel. */
+  | 'match_detached'
+  /** A code you were refused with "at sea" is joinable again. */
+  | 'party_available'
   | 'lobby_error'
   | 'match_start'
   | 'return_to_menu'
@@ -983,6 +991,10 @@ export interface LobbyMember {
   clientId: string;
   name: string;
   isHost: boolean;
+  /** Pressed Ready in the party panel (the host is ready by pressing Start). */
+  ready: boolean;
+  /** Still in the match / on its end screen — cannot be launched with the crew. */
+  atSea: boolean;
 }
 
 export interface LobbyUpdatePayload {
@@ -992,6 +1004,12 @@ export interface LobbyUpdatePayload {
   botFill: number;
   capacity: number;
   canStart: boolean;
+  /** This crew is in a match right now: code-joins are refused until they land. */
+  inMatch: boolean;
+  /** clientIds of the members still at sea (rendered greyed with a spinner). */
+  membersAtSea: string[];
+  /** Selected roster mode; inert until MODE-01 (wave 3) gives it hulls. */
+  mode: string;
 }
 
 /** One tick of the staged match start (sent once per whole second, inputs locked). */

@@ -125,6 +125,10 @@ interface Party {
   hostId: string;            // ClientSession.id
   members: string[];          // ClientSession.id[] including host
   botFill: number;
+  /** clientIds that have pressed Ready. The host is ready by pressing Start. */
+  ready: Set<string>;
+  /** Roster mode picked in the panel; inert until MODE-01 (wave 3). */
+  mode: string;
   createdAt: number;
   /** True while this party's members are in an active match — blocks new code-joins. */
   inMatch: boolean;
@@ -425,6 +429,8 @@ export class LobbyServer {
       hostId: session.id,
       members: [session.id],
       botFill: PARTY_DEFAULT_BOTS,
+      ready: new Set<string>(),
+      mode: 'solo',
       createdAt: Date.now(),
       inMatch: false,
     };
@@ -622,6 +628,11 @@ export class LobbyServer {
     this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
   }
 
+  private atSea(id: string): boolean {
+    const state = this.clients.get(id)?.state;
+    return state === 'in_match' || state === 'match_ended';
+  }
+
   private broadcastLobby(party: Party): void {
     const members: LobbyMember[] = party.members.map((id) => {
       const c = this.clients.get(id);
@@ -629,6 +640,8 @@ export class LobbyServer {
         clientId: id,
         name: c?.name || 'Pirate',
         isHost: id === party.hostId,
+        ready: id === party.hostId || party.ready.has(id),
+        atSea: this.atSea(id),
       };
     });
     const payload: LobbyUpdatePayload = {
@@ -638,6 +651,9 @@ export class LobbyServer {
       botFill: party.botFill,
       capacity: PARTY_CAPACITY,
       canStart: party.members.length >= 1,
+      inMatch: party.inMatch,
+      membersAtSea: party.members.filter((id) => this.atSea(id)),
+      mode: party.mode,
     };
     for (const id of party.members) {
       const c = this.clients.get(id);
