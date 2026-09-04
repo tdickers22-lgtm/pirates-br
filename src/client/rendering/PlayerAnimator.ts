@@ -48,6 +48,42 @@ export const CORPSE_LIFETIME = 8;
 /** Metres covered by one full (two-step) gait cycle at a walk — stride lock. */
 const GAIT_CYCLE_M = 2.8;
 
+/** The eight corners of a boot, in leg-pivot space (the wider pirate boot, so
+ *  the skeleton's foot is covered too). */
+const BOOT_CORNERS: THREE.Vector3[] = [];
+for (const sx of [-0.0675, 0.0675]) {
+  for (const sy of [AVATAR_RIG.bootY - AVATAR_RIG.bootH * 0.5, AVATAR_RIG.bootY + AVATAR_RIG.bootH * 0.5]) {
+    for (const sz of [AVATAR_RIG.bootZ - 0.14, AVATAR_RIG.bootZ + 0.14]) {
+      BOOT_CORNERS.push(new THREE.Vector3(sx, sy, sz));
+    }
+  }
+}
+const SOLE_SCRATCH = new THREE.Vector3();
+const CORPSE_BOX = new THREE.Box3();
+const SOLE_MATRIX = new THREE.Matrix4();
+
+/**
+ * How far the hips must drop (≤0) for the LOWER boot to sit exactly on the
+ * ground once both legs have been rotated. The other foot lifts, which is what
+ * a stride looks like; before AVATAR-01 nothing solved this and the boots
+ * simply floated or sank.
+ */
+function solveHipLift(left: THREE.Euler, right: THREE.Euler) {
+  let need = 0;
+  for (const rot of [left, right]) {
+    SOLE_MATRIX.makeRotationFromEuler(rot);
+    let lowest = Infinity;
+    for (const corner of BOOT_CORNERS) {
+      lowest = Math.min(lowest, SOLE_SCRATCH.copy(corner).applyMatrix4(SOLE_MATRIX).y);
+    }
+    need = Math.max(need, -lowest);
+  }
+  // Positive is allowed but tiny: a boot tilted at the helm reaches ~2 cm past
+  // the straight-leg length, and that 2 cm is the difference between standing
+  // on the planking and standing in it.
+  return THREE.MathUtils.clamp(need - AVATAR_RIG.legPivotY, -0.6, 0.05);
+}
+
 function easeOutCubic(x: number) {
   const k = 1 - x;
   return 1 - k * k * k;
@@ -140,6 +176,10 @@ export class PlayerAnimator {
     if (!torso || !shirt || !pelvis || !leftArmPivot || !rightArmPivot || !leftLegPivot || !rightLegPivot || !head || !hair || !bandana) {
       return;
     }
+
+    // A pooled mesh may have been a corpse a moment ago (animateCorpse switches
+    // it to YXZ to topple in the body frame).
+    if (mesh.rotation.order !== 'XYZ') mesh.rotation.order = 'XYZ';
 
     const swimming = player.state === 'swimming';
     const downed = player.state === 'downed';
@@ -249,7 +289,7 @@ export class PlayerAnimator {
     pelvis.rotation.set(0, 0, 0);
     head.rotation.set(0, angleWrap(player.rotation.x - mesh.rotation.y) * 0.28, 0);
     hair.rotation.set(0, head.rotation.y, 0);
-    bandana.rotation.set(Math.PI * 0.5, head.rotation.y, 0);
+    bandana.rotation.set(0, head.rotation.y, 0);
 
     if (downedBlend > 0.002 && !swimming) {
       // ── DOWNED: a real prone crawl. The body lies FACE-DOWN (Game stops
@@ -266,7 +306,7 @@ export class PlayerAnimator {
       head.rotation.x = 0.85 * b;
       head.rotation.y *= 1 - b * 0.5;
       hair.rotation.x = head.rotation.x;
-      bandana.rotation.x = Math.PI * 0.5 + head.rotation.x;
+      bandana.rotation.x = head.rotation.x;
       leftArmPivot.rotation.set(-2.4 * b + crawl * 0.6 * b, 0.1 * b, -0.25 * b);
       rightArmPivot.rotation.set(-2.4 * b - crawl * 0.6 * b, -0.1 * b, 0.25 * b);
       leftLegPivot.rotation.set(-0.28 * b + crawl * 0.28 * b, 0, -0.12 * b);
@@ -352,7 +392,7 @@ export class PlayerAnimator {
         torso.rotation.z = roll;
         head.rotation.x = -0.55 - swimPitch * 0.25;
         hair.rotation.x = head.rotation.x;
-        bandana.rotation.x = Math.PI * 0.5 + head.rotation.x;
+        bandana.rotation.x = head.rotation.x;
         pelvis.rotation.x = -0.08;
         leftArmPivot.rotation.set(armFor(stroke), stroke * 0.2, -0.2 - stroke * 0.18);
         rightArmPivot.rotation.set(armFor(strokeOpp), strokeOpp * -0.2, 0.2 + strokeOpp * 0.18);
@@ -365,8 +405,8 @@ export class PlayerAnimator {
       pelvis.rotation.y = 0.04;
       leftArmPivot.rotation.set(-0.42, 0.22, 0.34);
       rightArmPivot.rotation.set(-0.88, -0.1, -0.28);
-      leftLegPivot.rotation.set(-walkSwing * 0.72, 0, -0.06);
-      rightLegPivot.rotation.set(walkSwing * 0.72, 0, 0.06);
+      leftLegPivot.rotation.set(-walkSwing * 0.3, 0, -0.06);
+      rightLegPivot.rotation.set(walkSwing * 0.3, 0, 0.06);
       torso.rotation.z = -walkSwing * 0.035;
     } else if (cutlassReady) {
       torso.rotation.x = 0.08;
@@ -377,8 +417,8 @@ export class PlayerAnimator {
       // damped the swing to ±0.07rad — skeletons read as frozen-armed.)
       leftArmPivot.rotation.set(0.08 + armSwing * 1.0 - cutlassCharge * 0.22, 0.08 + cutlassCharge * 0.22, 0.24);
       rightArmPivot.rotation.set(-0.42 - armSwing * 0.58 - cutlassCharge * 0.82, -0.16 - cutlassCharge * 0.24, -0.38 - cutlassCharge * 0.35);
-      leftLegPivot.rotation.set(-walkSwing * 1.05, 0, -0.04);
-      rightLegPivot.rotation.set(walkSwing * 1.05, 0, 0.04);
+      leftLegPivot.rotation.set(-walkSwing * 0.38, 0, -0.04);
+      rightLegPivot.rotation.set(walkSwing * 0.38, 0, 0.04);
       torso.rotation.z = -walkSwing * 0.06 - cutlassCharge * 0.1;
     } else if (player.bailing) {
       // Bailing crew visibly SCOOP (bow low, arms down into the bilge) and
@@ -407,8 +447,8 @@ export class PlayerAnimator {
         leftArmPivot.rotation.set(0.7 - bailArc * 2.05, 0.12, -0.16);
         rightArmPivot.rotation.set(0.7 - lagArc * 1.72, -0.12, 0.16);
       }
-      leftLegPivot.rotation.set(-walkSwing * 0.4, 0, -0.04);
-      rightLegPivot.rotation.set(walkSwing * 0.4, 0, 0.04);
+      leftLegPivot.rotation.set(-walkSwing * 0.24, 0, -0.04);
+      rightLegPivot.rotation.set(walkSwing * 0.24, 0, 0.04);
       torso.rotation.z = walkSwing * 0.04;
     } else {
       // Neutral gait: legs lead, arms trail, torso counter-rotates against the
@@ -416,8 +456,8 @@ export class PlayerAnimator {
       const armRest = 0.2;
       leftArmPivot.rotation.set(armRest + armSwing, 0, -0.12 - Math.abs(armSwing) * 0.1);
       rightArmPivot.rotation.set(armRest - armSwing, 0, 0.12 + Math.abs(armSwing) * 0.1);
-      leftLegPivot.rotation.set(-walkSwing * 1.15, 0, 0);
-      rightLegPivot.rotation.set(walkSwing * 1.15, 0, 0);
+      leftLegPivot.rotation.set(-walkSwing * 0.42, 0, 0);
+      rightLegPivot.rotation.set(walkSwing * 0.42, 0, 0);
       torso.rotation.z = walkSwing * 0.08;
       torso.rotation.y = -Math.sin(phase) * 0.12 * moveRatio;
       pelvis.rotation.y = Math.sin(phase) * 0.1 * moveRatio;
@@ -431,17 +471,14 @@ export class PlayerAnimator {
     }
 
     if (player.crouching) {
-      // Hold-C crouch: everything sinks, knees bend; walk swing stays subtle.
-      const crouchDrop = 0.32;
-      torso.position.y -= crouchDrop;
-      shirt.position.y -= crouchDrop;
-      pelvis.position.y -= crouchDrop * 0.8;
-      head.position.y -= crouchDrop;
-      hair.position.y -= crouchDrop;
-      bandana.position.y -= crouchDrop;
-      torso.rotation.x += 0.14;
-      leftLegPivot.rotation.x = -0.95 + walkSwing * 0.4;
-      rightLegPivot.rotation.x = -0.75 - walkSwing * 0.4;
+      // Hold-C crouch. Knee-less legs can only fold by rotating about the hip,
+      // so the crouch is a wide plie: thighs splayed and pitched, and the
+      // stance solve below drops the hips onto them. The old version rotated
+      // the legs -0.95 rad about a pivot that never moved, which kicked them
+      // 0.7 m forward and parked the boots 26 cm in the air.
+      torso.rotation.x += 0.34;
+      leftLegPivot.rotation.set(-0.3 + walkSwing * 0.12, 0, -0.88);
+      rightLegPivot.rotation.set(-0.3 - walkSwing * 0.12, 0, 0.88);
     }
 
     if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon
@@ -526,6 +563,34 @@ export class PlayerAnimator {
       bandana.position.y -= dip;
     }
 
+    // ── STANCE SOLVE. The group origin is the SOLES (Game parks it on the
+    // server's player.position, which is the ground/deck contact), so whatever
+    // the legs are doing the hips must ride at the height that puts the lower
+    // boot ON the deck: rotating a straight leg raises its own foot. This is
+    // what turns the leg rotations above into a gait with a real hip bob, keeps
+    // the station poses out of the planking, and gives the crouch its drop.
+    const grounded = !swimming && player.mastClimb === null;
+    const hipLift = grounded
+      ? solveHipLift(leftLegPivot.rotation, rightLegPivot.rotation) * (1 - airBlend)
+      : 0;
+    // A crouch owes the camera and the server a fixed drop (PLAYER.CROUCH_DROP,
+    // the same number Match.ts lowers the headshot sphere by), so the torso
+    // folds the rest of the way into the hips.
+    const bodyOffset = player.crouching && grounded
+      ? Math.min(hipLift, -PLAYER.CROUCH_DROP)
+      : hipLift;
+    leftLegPivot.position.y = AVATAR_RIG.legPivotY + hipLift;
+    rightLegPivot.position.y = AVATAR_RIG.legPivotY + hipLift;
+    pelvis.position.y += hipLift;
+    if (coatSkirt) coatSkirt.position.y += hipLift;
+    torso.position.y += bodyOffset;
+    shirt.position.y += bodyOffset;
+    head.position.y += bodyOffset;
+    hair.position.y += bodyOffset;
+    bandana.position.y += bodyOffset;
+    leftArmPivot.position.y += bodyOffset;
+    rightArmPivot.position.y += bodyOffset;
+
     this.applyFlinch(mesh, parts, dt);
   }
 
@@ -594,6 +659,11 @@ export class PlayerAnimator {
     const bandana = parts.bandana;
     if (!torso || !shirt || !pelvis || !leftArmPivot || !rightArmPivot || !leftLegPivot || !rightLegPivot || !head) return;
 
+    // Yaw FIRST: in the default XYZ order the body's yaw feeds back into the
+    // topple, so a corpse that died facing 0.3 rad came to rest standing half
+    // up on its shoulder. YXZ = turn on the spot, then fall in the body frame.
+    mesh.rotation.order = 'YXZ';
+
     const { t, cause, side } = corpse;
     const limp = cause === 'headshot';
     const explosive = cause === 'explosion';
@@ -634,13 +704,15 @@ export class PlayerAnimator {
       leftLegPivot.rotation.set(0.2 + drift * 0.4, 0, -0.18);
       rightLegPivot.rotation.set(0.12 - drift * 0.4, 0, 0.22);
       if (hair) hair.rotation.set(head.rotation.x, head.rotation.y, head.rotation.z);
-      if (bandana) bandana.rotation.set(Math.PI * 0.5 + head.rotation.x, head.rotation.y, head.rotation.z);
+      if (bandana) bandana.rotation.set(head.rotation.x, head.rotation.y, head.rotation.z);
       return;
     }
 
     // ── Whole-body topple. +rotation.x pitches the body face-DOWN, −x drops it
     // onto its back; rotation.z rolls it onto a flank.
-    const fallPitch = pancake ? 1.32 : explosive ? -1.1 : limp ? -1.38 : -1.26;
+    // Near-flat on purpose: at the old 72 deg the body came to rest as a 2 m
+    // ramp with its head 0.8 m up and its boots in the air.
+    const fallPitch = pancake ? 1.5 : explosive ? -1.44 : limp ? -1.54 : -1.5;
     const fallRoll = pancake ? side * 0.18 : explosive ? side * 0.95 : cause === 'cutlass' ? side * 1.02 : side * 0.55;
     const topple = settle + bounce;
     mesh.rotation.x = fallPitch * topple + (explosive ? Math.sin(t * 5.4) * 0.16 * settleRaw : 0);
@@ -652,7 +724,10 @@ export class PlayerAnimator {
     // on the ground plane as the mesh rotates about its FOOT pivot. The sink
     // stays shallow on purpose: the group origin is at the soles, so a deep
     // drop pushes the whole body through the deck it is dying on.
-    let dropY = -0.16 * knee * (1 - settleRaw) + 0.18 * settleRaw;
+    // Knees give first — a shallow sink, no more. The lift that lays the body
+    // on the deck is SOLVED below from the posed bounds; the old constant 0.18
+    // was tuned to cancel the 19 cm the boots used to be sunk by.
+    let dropY = -0.06 * knee * (1 - settleRaw);
     if (explosive) {
       // Blast lift: up-and-over before it lands.
       dropY += Math.max(0, Math.sin(THREE.MathUtils.clamp(t / 0.65, 0, 1) * Math.PI)) * 0.85;
@@ -700,8 +775,21 @@ export class PlayerAnimator {
     }
     if (bandana) {
       bandana.position.y = head.position.y + (AVATAR_RIG.hairY - AVATAR_RIG.headY);
-      bandana.rotation.set(Math.PI * 0.5 + head.rotation.x, head.rotation.y, head.rotation.z);
+      bandana.rotation.set(head.rotation.x, head.rotation.y, head.rotation.z);
     }
+
+    // Lay it ON the deck. The body rotates about its SOLES, so a toppled corpse
+    // hangs below the origin by however much of it is now on the far side of
+    // the pivot; measure the posed bounds and lift by exactly that.
+    this.liftOntoGround(mesh, corpse.basePos.y);
+  }
+
+  /** Raise (never lower) a posed mesh until its lowest point rests on `groundY`. */
+  private liftOntoGround(mesh: THREE.Group, groundY: number) {
+    mesh.updateMatrixWorld(true);
+    CORPSE_BOX.setFromObject(mesh);
+    const sink = CORPSE_BOX.min.y - groundY;
+    if (sink < 0 && Number.isFinite(sink)) mesh.position.y -= sink;
   }
 
   /**

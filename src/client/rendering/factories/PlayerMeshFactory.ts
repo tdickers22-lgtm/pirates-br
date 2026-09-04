@@ -334,14 +334,18 @@ export function makePlayerMesh(
     nose.position.set(0, -0.01 * FACE, 0.225 * FACE);
     nose.name = 'nose';
     head.add(nose);
-    const beard = new THREE.Mesh(new THREE.BoxGeometry(0.19 * FACE, 0.15 * FACE, 0.12 * FACE), darkMat);
-    beard.position.set(0, -0.135 * FACE, 0.135 * FACE);
-    beard.name = 'beard';
-    head.add(beard);
-    const moustache = new THREE.Mesh(new THREE.BoxGeometry(0.15 * FACE, 0.035 * FACE, 0.05 * FACE), darkMat);
-    moustache.position.set(0, -0.055 * FACE, 0.205 * FACE);
-    moustache.name = 'moustache';
-    head.add(moustache);
+    // Captains get the styled cone beard below; adding this one too gave every
+    // human TWO beards and two moustaches, overlapping coplanar and shimmering.
+    if (!isCaptain) {
+      const beard = new THREE.Mesh(new THREE.BoxGeometry(0.19 * FACE, 0.15 * FACE, 0.12 * FACE), darkMat);
+      beard.position.set(0, -0.135 * FACE, 0.135 * FACE);
+      beard.name = 'beard';
+      head.add(beard);
+      const moustache = new THREE.Mesh(new THREE.BoxGeometry(0.15 * FACE, 0.035 * FACE, 0.05 * FACE), darkMat);
+      moustache.position.set(0, -0.055 * FACE, 0.205 * FACE);
+      moustache.name = 'moustache';
+      head.add(moustache);
+    }
   }
   group.add(head);
 
@@ -442,15 +446,24 @@ export function makePlayerMesh(
     head.add(moustache);
   }
 
+  // A real headwrap, not a hoop: a band of the skull sphere drawn OVER the hair
+  // (the old torus lived entirely INSIDE the hair shell — 0 of its 126 vertices
+  // were outside it, so the one head-level team marker was invisible), plus the
+  // knotted tail at the back.
   const bandanaMat = new THREE.MeshStandardMaterial({ color, roughness: 0.9 });
   const bandana = new THREE.Mesh(
-    new THREE.TorusGeometry(0.2, 0.04, 6, 18),
+    new THREE.SphereGeometry(AVATAR_RIG.bandanaR, 18, 6, 0, Math.PI * 2, Math.PI * 0.42, Math.PI * 0.2),
     bandanaMat,
   );
-  bandana.rotation.x = Math.PI * 0.5;
+  bandana.castShadow = true;
   bandana.position.y = AVATAR_RIG.hairY;
   bandana.name = 'bandana';
   bandana.visible = !isSkeleton && !isCaptain;
+  const knot = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.11, 5), bandanaMat);
+  knot.position.set(0, -0.03, -AVATAR_RIG.bandanaR - 0.01);
+  knot.rotation.set(0.5, 0, 0.35);
+  knot.name = 'bandana-knot';
+  bandana.add(knot);
   group.add(bandana);
 
   const healthBarRoot = new THREE.Group();
