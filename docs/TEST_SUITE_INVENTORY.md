@@ -97,7 +97,7 @@ minute rather than the twentieth.
 | `test-fill-budget` | stencil census: sky layers ≤ 0.55, whole/blended overdraw ceilings | yes | wave 0.4; **has `--mutate`** (sky `depthTest=false` must FAIL); slow |
 | `test-storm-wall` | the old storm-wall-probe as a gate: night sea ≤ sky luma, noon sea chroma ≤ 1.3× sky | yes | wave 0.4; **red by design** until lane 5.4 (STORMVIS-01) lands (noon 6.67×); slow |
 
-## Server suites (2)
+## Server suites (3)
 
 Both gained cases in wave 0: `test-http-hardening` now proves a throw in a single
 placement, in a whole cohort, and in `spawnMatch` itself (new Match / setupWorld /
@@ -114,6 +114,12 @@ a port for a human watching.
 
 - `test-net-resilience.mjs` (timeout 120 s)
 - `test-http-hardening.mjs` (timeout 60 s)
+- `test-lobby-flow.mjs` (timeout 180 s) — wave 2.3 (PARTY-01): the lobby state
+  machine end to end (create / join / ready / kick / crown / start / horn /
+  play again / auto-detach / reap / queue cohort), 35 assertions, 27 of them
+  red at `f4cbb078`. It turns the 25 s auto-detach, 60 s match reap, 15 s queue
+  and 30 s join lockout down through `LobbyServer.tunables` rather than
+  sleeping through production clocks; measured 46 s.
 
 ## Logic suites (70)
 
