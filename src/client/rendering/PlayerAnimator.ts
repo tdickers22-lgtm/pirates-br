@@ -123,7 +123,24 @@ type AnimScratch = {
   crawlPhase?: number;
   /** 0..1 eased blend into the downed prone pose. */
   downedBlend?: number;
+  /** Which pose branch was showing last frame (see crossFade). */
+  poseKey?: string;
+  /** Seconds left of the cross-fade out of the previous branch's pose. */
+  poseFade?: number;
+  /** The pose actually SHOWN last frame, and the one being faded out of. */
+  poseLast?: number[];
+  poseFrom?: number[];
 };
+
+/** Joints that cross-fade between pose branches, in a fixed order. */
+const FADE_JOINTS = ['torso', 'pelvis', 'head', 'leftArmPivot', 'rightArmPivot', 'leftLegPivot', 'rightLegPivot'] as const;
+/** A station pose is a whole-body change; longer than this and it reads as slow
+ *  motion, shorter and the arms still teleport. Linear on purpose: an eased
+ *  fade is steeper than 1/N in the middle, and the widest edge (idle -> helm,
+ *  1.35 rad of shoulder) has to stay under the gate's 0.35 rad/frame. */
+const POSE_FADE_TIME = 0.16;
+/** Hip drop the crouch leg fold produces once it is fully faded in. */
+const CROUCH_HIP_DROP = 0.37;
 
 /** Directional flinch pushed in by Game on any health drop. */
 type FlinchState = { t: number; mag: number; yaw: number };
@@ -316,6 +333,7 @@ export class PlayerAnimator {
       head.position.y -= 0.06 * b;
       hair.position.y -= 0.06 * b;
       bandana.position.y -= 0.06 * b;
+      this.crossFade(animation, parts, 'downed', dt);
       this.applyFlinch(mesh, parts, dt);
       return;
     }
@@ -477,8 +495,8 @@ export class PlayerAnimator {
       // the legs -0.95 rad about a pivot that never moved, which kicked them
       // 0.7 m forward and parked the boots 26 cm in the air.
       torso.rotation.x += 0.34;
-      leftLegPivot.rotation.set(-0.3 + walkSwing * 0.12, 0, -0.88);
-      rightLegPivot.rotation.set(-0.3 - walkSwing * 0.12, 0, 0.88);
+      leftLegPivot.rotation.set(-0.36 + walkSwing * 0.12, 0, -1.06);
+      rightLegPivot.rotation.set(-0.36 - walkSwing * 0.12, 0, 1.06);
     }
 
     if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon
@@ -563,6 +581,16 @@ export class PlayerAnimator {
       bandana.position.y -= dip;
     }
 
+    // Which BRANCH produced this pose. Continuous values (gait phase, charge,
+    // recoil) are deliberately absent: they must not restart a fade.
+    const poseKey = `${player.atHelm ? 'helm' : ''}${player.atCannon ? 'gun' : ''}`
+      + `${player.atCrowNest ? 'nest' : ''}${player.mastClimb !== null ? 'climb' : ''}`
+      + `${swimming ? 'swim' : ''}${player.bailing ? 'bail' : ''}`
+      + `${cutlassReady ? (player.blocking ? 'guard' : 'blade') : ''}`
+      + `${player.crouching ? 'crouch' : ''}${airBlend > 0.5 ? 'air' : ''}`
+      + `${moveSpeed > 0.15 ? 'move' : 'still'}`;
+    this.crossFade(animation, parts, poseKey, dt);
+
     // ── STANCE SOLVE. The group origin is the SOLES (Game parks it on the
     // server's player.position, which is the ground/deck contact), so whatever
     // the legs are doing the hips must ride at the height that puts the lower
@@ -575,10 +603,12 @@ export class PlayerAnimator {
       : 0;
     // A crouch owes the camera and the server a fixed drop (PLAYER.CROUCH_DROP,
     // the same number Match.ts lowers the headshot sphere by), so the torso
-    // folds the rest of the way into the hips.
-    const bodyOffset = player.crouching && grounded
-      ? Math.min(hipLift, -PLAYER.CROUCH_DROP)
-      : hipLift;
+    // folds the rest of the way into the hips — in step with them, so the
+    // pelvis never detaches from the legs while the fold fades in.
+    const crouchProgress = player.crouching && grounded
+      ? THREE.MathUtils.clamp(hipLift / -CROUCH_HIP_DROP, 0, 1)
+      : 0;
+    const bodyOffset = hipLift - (PLAYER.CROUCH_DROP - CROUCH_HIP_DROP) * crouchProgress;
     leftLegPivot.position.y = AVATAR_RIG.legPivotY + hipLift;
     rightLegPivot.position.y = AVATAR_RIG.legPivotY + hipLift;
     pelvis.position.y += hipLift;
@@ -592,6 +622,62 @@ export class PlayerAnimator {
     rightArmPivot.position.y += bodyOffset;
 
     this.applyFlinch(mesh, parts, dt);
+  }
+
+  /**
+   * Cross-fade between pose BRANCHES. Every branch above writes absolute joint
+   * rotations, so taking the helm or dropping into a crouch used to rewrite the
+   * whole upper body in a single frame — measured at 1.35 rad of shoulder in
+   * one 16 ms step. Within a branch nothing is damped (the gait keeps its full
+   * amplitude); only the frame the branch CHANGES starts a fade, from the pose
+   * that was actually on screen.
+   */
+  private crossFade(animation: AnimScratch, parts: Record<string, THREE.Object3D>, key: string, dt: number) {
+    const target: number[] = [];
+    for (const name of FADE_JOINTS) {
+      const joint = parts[name];
+      if (!joint) return;
+      target.push(joint.rotation.x, joint.rotation.y, joint.rotation.z);
+    }
+    const last = animation.poseLast;
+    if (!last || last.length !== target.length) {
+      animation.poseLast = target.slice();
+      animation.poseKey = key;
+      animation.poseFade = 0;
+      return;
+    }
+    if (key !== animation.poseKey) {
+      animation.poseKey = key;
+      animation.poseFrom = last.slice();
+      animation.poseFade = POSE_FADE_TIME;
+    }
+    const fade = animation.poseFade ?? 0;
+    if (fade > 0 && animation.poseFrom) {
+      const remaining = Math.max(0, fade - dt);
+      animation.poseFade = remaining;
+      const alpha = 1 - remaining / POSE_FADE_TIME;
+      const from = animation.poseFrom;
+      for (let i = 0; i < FADE_JOINTS.length; i++) {
+        const joint = parts[FADE_JOINTS[i]];
+        joint.rotation.set(
+          THREE.MathUtils.lerp(from[i * 3], target[i * 3], alpha),
+          THREE.MathUtils.lerp(from[i * 3 + 1], target[i * 3 + 1], alpha),
+          THREE.MathUtils.lerp(from[i * 3 + 2], target[i * 3 + 2], alpha),
+        );
+        last[i * 3] = joint.rotation.x;
+        last[i * 3 + 1] = joint.rotation.y;
+        last[i * 3 + 2] = joint.rotation.z;
+      }
+      // The hair and the bandana ride the head, so they follow the faded value.
+      const head = parts.head;
+      for (const worn of [parts.hair, parts.bandana]) {
+        if (!worn) continue;
+        worn.rotation.x = head.rotation.x;
+        worn.rotation.y = head.rotation.y;
+      }
+      return;
+    }
+    for (let i = 0; i < target.length; i++) last[i] = target[i];
   }
 
   /**

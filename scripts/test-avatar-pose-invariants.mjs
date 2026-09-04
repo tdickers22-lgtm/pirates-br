@@ -95,7 +95,8 @@ function makePlayer(over = {}) {
 }
 
 /** Every scenario: the replicated fields that select the pose, how many frames
- *  to let blends settle, and which invariants apply. `ground` = boots must be on
+ *  to let blends settle (a branch change cross-fades over POSE_FADE_TIME, so a
+ *  pose that must be graded SETTLED gets more than that many frames), and which invariants apply. `ground` = boots must be on
  *  the deck; `upright` = hands above the shins; `headY` = the server sphere. */
 const SCENARIOS = [
   { name: 'idle', player: {}, ground: true, upright: true, headY: STAND_HEAD },
@@ -108,7 +109,7 @@ const SCENARIOS = [
   { name: 'block', player: { activeSlot: 0, blocking: true }, ground: true, upright: true, headY: STAND_HEAD },
   { name: 'cutlass swing 0.4', player: { activeSlot: 0, weapons: [{ ...cutlass(), reloading: true, reloadTimer: 0.33 }, null, null, null] }, swing: 0.4, ground: true, upright: true, headY: STAND_HEAD },
   { name: 'bail', player: { bailing: true, bailScoopProgress: 0.5, bucketFilled: true }, ground: true, upright: true, headY: STAND_HEAD },
-  { name: 'crouch', player: { crouching: true }, ground: true, upright: true, headY: CROUCH_HEAD },
+  { name: 'crouch', player: { crouching: true }, frames: 24, ground: true, upright: true, headY: CROUCH_HEAD },
   { name: 'downed', player: { state: 'downed' }, frames: 40, ground: false, upright: false, headY: null },
   { name: 'airborne', player: { velocity: { x: 0, y: -5, z: 0 } }, frames: 20, ground: false, upright: true, headY: null },
 ];
