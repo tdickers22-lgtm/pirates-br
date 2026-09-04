@@ -8,7 +8,7 @@
 //     open deck stay at deck level.
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP_STATS } from '../src/shared/constants/index.ts';
-import { getCannonDeckLocalPosition, getHelmControlLocal, getShipFloorYAt } from '../src/shared/interactions.ts';
+import { getCannonDeckLocalPosition, getHelmControlLocal, getShipFloorYAt, shipLocalUpY } from '../src/shared/interactions.ts';
 import {
   getCrowNestStandingY,
   getMainMastLocalZ,
@@ -106,16 +106,22 @@ for (const type of Object.keys(SHIP_STATS)) {
   // silently lost the quarterdeck dais and the hold footprint, so held-interact
   // context on the raised helm platform measured a floor ~0.45 m too low. Both
   // callers now read shared getShipFloorYAt — pin the two clauses that diverged.
+  // RE-PINNED BY DECK-01: the floor is the hull-local surface lifted onto the
+  // hull's live pitch/roll, so the expectations below carry the same attitude
+  // term the walker does. `tilt` is the identity on a level hull, so this still
+  // fails the moment Match loses the dais or the hold footprint again.
+  const tilt = (lx, lz, flatY) => ship.position.y + shipLocalUpY(lx, flatY - ship.position.y, lz, ship);
   const helm = getHelmControlLocal(stats);
   const helmFloor = floorAt(helm.x, helm.z);
   const helmRaise = getShipDeckRaiseAt(helm, stats);
-  expect('helm stand sits ON the quarterdeck dais', helmRaise > 0.1 && Math.abs(helmFloor - (liveDeckY + helmRaise)) < 1e-6,
-    `floor=${helmFloor.toFixed(3)} deckY=${liveDeckY.toFixed(3)} raise=${helmRaise.toFixed(3)}`);
+  expect('helm stand sits ON the quarterdeck dais', helmRaise > 0.1 && Math.abs(helmFloor - tilt(helm.x, helm.z, liveDeckY + helmRaise)) < 1e-6,
+    `floor=${helmFloor.toFixed(3)} deckY=${liveDeckY.toFixed(3)} raise=${helmRaise.toFixed(3)} pitch=${(ship.pitch ?? 0).toFixed(3)} roll=${(ship.roll ?? 0).toFixed(3)}`);
   // Below the deck line and inside the hold footprint → the hold floor, not the deck.
   const holdY = getShipHoldFloorY(ship.position.y);
+  const belowDeckLz = cw.stairBackZ - 1;
   const belowDeck = getShipFloorYAt(
-    { x: ship.position.x, y: liveDeckY - 1.2, z: ship.position.z + cw.stairBackZ - 1 }, ship);
-  expect('under the deck, amidships, the floor is the HOLD', Math.abs(belowDeck - holdY) < 1e-6,
+    { x: ship.position.x, y: liveDeckY - 1.2, z: ship.position.z + belowDeckLz }, ship);
+  expect('under the deck, amidships, the floor is the HOLD', Math.abs(belowDeck - tilt(0, belowDeckLz, holdY)) < 1e-6,
     `floor=${belowDeck.toFixed(3)} holdY=${holdY.toFixed(3)}`);
 }
 

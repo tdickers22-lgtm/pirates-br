@@ -2,7 +2,7 @@ import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, 
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
-import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier } from '../../shared/interactions.js';
+import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
@@ -994,7 +994,7 @@ export class PhysicsSystem {
             if (!ship.alive) continue;
             const stats = SHIP_STATS[ship.type];
             const local = this.toShipLocal(player.position, ship);
-            const deckY = getShipDeckY(ship.position.y, stats);
+            const deckY = this.deckWorldYAt(ship, stats, local);
             if (
               this.isInsideShipDeckFootprint(local, stats, 0.32)
               && player.position.y <= deckY + 0.42
@@ -1006,9 +1006,8 @@ export class PhysicsSystem {
           }
         }
         if (landedShip) {
-          const stats = SHIP_STATS[landedShip.type];
           player.onShipId = landedShip.id;
-          player.position.y = getShipDeckY(landedShip.position.y, stats);
+          player.position.y = getShipFloorYAt(player.position, landedShip);
           player.velocity.y = 0;
           player.cannonFlightTimer = 0;
           player.cannonBallistic = false;
@@ -1090,8 +1089,10 @@ export class PhysicsSystem {
         if (player.mastClimb !== null) {
           const mastZ = getMainMastLocalZ(stats);
           const world = this.toShipWorld(0.42, mastZ - 0.12, onShip);
-          const baseY = onShip.position.y + stats.height + 0.2;
-          const nestY = onShip.position.y + getCrowNestStandingY(stats);
+          // The ladder is bolted to the mast, and the mast leans with the hull
+          // (DECK-01): both ends of the climb ride the attitude.
+          const baseY = onShip.position.y + shipLocalUpY(0.42, stats.height + 0.2, mastZ - 0.12, onShip);
+          const nestY = onShip.position.y + shipLocalUpY(0.42, getCrowNestStandingY(stats), mastZ - 0.12, onShip);
           player.position.x = world.x;
           player.position.z = world.z;
           player.position.y = baseY + (nestY - baseY) * player.mastClimb;
@@ -1102,8 +1103,13 @@ export class PhysicsSystem {
           if (!downed) player.state = 'alive';
           continue;
         }
-        const deckY = getShipDeckY(onShip.position.y, stats);
         const localBeforeCarry = this.toShipLocal(player.position, onShip);
+        // THE DECK IS WHERE IT IS DRAWN. Every band below ("below deck", "still
+        // aboard", "back on the planking") used to be measured against a flat
+        // plane at ship.position.y + height while the hull pitched and rolled
+        // under it, so a bow 3.3 m up in a storm read as "below deck" and the
+        // walker was resolved against the hold (physics-01/ships-03).
+        const deckY = this.deckWorldYAt(onShip, stats, localBeforeCarry);
 
         // Passengers need to inherit both ship translation and turn so the hold feels welded to the hull.
         player.position.x += onShip.velocity.x * dt;
@@ -1159,7 +1165,8 @@ export class PhysicsSystem {
             player.position.z = world.z;
             local = this.toShipLocal(player.position, onShip);
           }
-          const nestFloorY = onShip.position.y + getCrowNestStandingY(stats);
+          const nestFloorY = onShip.position.y
+            + shipLocalUpY(local.x, getCrowNestStandingY(stats), local.z, onShip);
           player.velocity.y += PHYSICS.GRAVITY * dt;
           player.position.y += player.velocity.y * dt;
           if (player.position.y <= nestFloorY) {
@@ -2229,7 +2236,7 @@ export class PhysicsSystem {
       if (!ship) return null;
       const stats = SHIP_STATS[ship.type];
       const local = this.toShipLocal(player.position, ship);
-      const deckY = getShipDeckY(ship.position.y, stats);
+      const deckY = this.deckWorldYAt(ship, stats, local);
       const holdFloor = getShipHoldFloorY(ship.position.y);
       const aboveDeckLine = player.position.y > ship.position.y + stats.height * 0.35;
       const withinDeckXZ = this.isInsideShipDeckFootprint(local, stats, 0.2);
@@ -2253,7 +2260,7 @@ export class PhysicsSystem {
       if (!ship.alive || ship.sinking) continue;
       const stats = SHIP_STATS[ship.type];
       const local = this.toShipLocal(player.position, ship);
-      const deckY = getShipDeckY(ship.position.y, stats);
+      const deckY = this.deckWorldYAt(ship, stats, local);
       const aboveDeckLine = player.position.y > ship.position.y + stats.height * 0.25;
       const withinDeckXZ = this.isInsideShipDeckFootprint(local, stats, 0.3);
       if (aboveDeckLine && withinDeckXZ && player.position.y <= deckY + 1.8) return ship;
@@ -2539,6 +2546,18 @@ export class PhysicsSystem {
    * positive pitch dips the bow, positive roll lifts the starboard rail.
    * Magnitudes stay inside the client's defensive clamps (±0.5 / ±0.6).
    */
+  /** World height of the FLAT weather deck at a hull-local point, lifted onto
+   *  the hull's live pitch/roll. This is the single place the server answers
+   *  "how high is the deck here"; getShipFloorYAt adds the dais/hold/ramp. */
+  private deckWorldYAt(
+    ship: Ship,
+    stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS],
+    local: { x: number; z: number },
+  ): number {
+    return ship.position.y
+      + shipLocalUpY(local.x, getShipDeckY(ship.position.y, stats) - ship.position.y, local.z, ship);
+  }
+
   private updateShipWaveAttitude(
     ship: Ship,
     stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS],

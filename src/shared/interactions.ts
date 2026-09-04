@@ -33,6 +33,98 @@ export function toShipWorldPoint(local: ShipLocalPoint, ship: Pick<Ship, 'positi
   };
 }
 
+// ── THE 3D SHIP FRAME (DECK-01) ──────────────────────────────────────────────
+// A hull does not sail flat. The renderer has always rotated mesh.root by the
+// replicated pitch and roll (rotation order YXZ: yaw, then pitch about X, then
+// roll about Z), while every standing surface, every crew placement and every
+// hitbox was computed on a flat plane at ship.position.y + height. On a galleon
+// that is 0.44·L to the bow: sin(0.35) · 9.7 m = 3.3 m of daylight between a
+// pirate's boots and the planking he is drawn on, 0.5 m in a calm swell, and
+// the shot aimed at the drawn body missed the server capsule by the same.
+//
+// These three functions are the ONE frame. Conventions match evaluateHoleFlood
+// and updateShipWaveAttitude exactly: positive roll lifts the starboard rail
+// (+x), positive pitch dips the bow (+z).
+//
+// Deliberately NOT changed (verifier's correction on physics-01): toShipLocalPoint,
+// clampDeckPosition and the hold/deck footprints stay 2D. A tilted deck's PLAN
+// outline is the flat outline to within a cosine, and re-clamping through the
+// tilt would fight the walk taper for no visible gain. Only the standing Y, the
+// crew's drawn Y and the hitbox centres take the attitude term.
+
+/** Vertical offset (metres, signed) of a hull-local point once the hull's
+ *  attitude is applied — i.e. `worldY = ship.position.y + shipLocalUpY(...)`.
+ *  With pitch = roll = 0 this is exactly `localY`, so every flat-plane caller
+ *  keeps its old answer on a level hull. */
+export function shipLocalUpY(
+  localX: number,
+  localY: number,
+  localZ: number,
+  ship: Pick<Ship, 'pitch' | 'roll'>,
+): number {
+  const pitch = ship.pitch ?? 0;
+  const roll = ship.roll ?? 0;
+  if (pitch === 0 && roll === 0) return localY;
+  const cp = Math.cos(pitch);
+  const sp = Math.sin(pitch);
+  const cr = Math.cos(roll);
+  const sr = Math.sin(roll);
+  // Y row of Ry·Rx(pitch)·Rz(roll) — the yaw never touches the Y row, which is
+  // why the flat-hull answer is unchanged and why this is cheap.
+  return cp * sr * localX + cp * cr * localY - sp * localZ;
+}
+
+/** World point of a hull-local point, with yaw AND attitude. The inverse of
+ *  toShipLocal3; the pair is what lets a station, a hole or a crewmate be
+ *  stored once in the hull's own frame and read back wherever it is drawn. */
+export function toShipWorld3(
+  local: Vec3,
+  ship: Pick<Ship, 'position' | 'rotation' | 'pitch' | 'roll'>,
+): Vec3 {
+  const pitch = ship.pitch ?? 0;
+  const roll = ship.roll ?? 0;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  // R = Rx(pitch)·Rz(roll) applied first, then the yaw.
+  const ax = cr * local.x - sr * local.y;
+  const ay = cp * (sr * local.x + cr * local.y) - sp * local.z;
+  const az = sp * (sr * local.x + cr * local.y) + cp * local.z;
+  const cos = Math.cos(ship.rotation);
+  const sin = Math.sin(ship.rotation);
+  return {
+    x: ship.position.x + ax * cos + az * sin,
+    y: ship.position.y + ay,
+    z: ship.position.z + az * cos - ax * sin,
+  };
+}
+
+/** Hull-local coordinates of a world point, with yaw AND attitude undone. */
+export function toShipLocal3(
+  position: Vec3,
+  ship: Pick<Ship, 'position' | 'rotation' | 'pitch' | 'roll'>,
+): Vec3 {
+  const dx = position.x - ship.position.x;
+  const dy = position.y - ship.position.y;
+  const dz = position.z - ship.position.z;
+  const cos = Math.cos(ship.rotation);
+  const sin = Math.sin(ship.rotation);
+  // Undo the yaw first (transpose of the Ry above).
+  const ax = dx * cos - dz * sin;
+  const az = dx * sin + dz * cos;
+  const pitch = ship.pitch ?? 0;
+  const roll = ship.roll ?? 0;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  // Then the transpose of Rx(pitch)·Rz(roll).
+  const by = cp * dy + sp * az;
+  const bz = -sp * dy + cp * az;
+  return {
+    x: cr * ax + sr * by,
+    y: -sr * ax + cr * by,
+    z: bz,
+  };
+}
+
 // ── Hull breaches ────────────────────────────────────────────────────────────
 // Holes are POINT ENTITIES in the hull-local frame (see ShipHole). These two
 // helpers are the SHARED truth for "how many leaks are open" and "which hole can
@@ -122,7 +214,7 @@ export function isInsideShipHoldFootprint(local: ShipLocalPoint, stats: Pick<Shi
  */
 export function getShipFloorYAt(
   position: Vec3,
-  ship: Pick<Ship, 'position' | 'rotation' | 'type'>,
+  ship: Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll'>,
   providedLocal?: ShipLocalPoint,
 ): number {
   const stats = SHIP_STATS[ship.type];
@@ -140,14 +232,22 @@ export function getShipFloorYAt(
     // drops you onto the steps; the coaming colliders around the sides/back are
     // what stop accidental entry, not a phantom floor.
     const descent = clamp((stair.stairFrontZ - local.z) / Math.max(0.001, stair.stairFrontZ - stair.stairBackZ), 0, 1);
-    return deckY + (holdFloor - deckY) * descent;
+    return tiltFloor(deckY + (holdFloor - deckY) * descent, local, ship);
   }
   if (isInsideShipHoldFootprint(local, stats, 0.08) && position.y < deckY - 0.25) {
-    return holdFloor;
+    return tiltFloor(holdFloor, local, ship);
   }
   // Stern quarterdeck dais — a genuinely raised helm platform (ramps up over its
   // front step). 0 everywhere off the dais, so the rest of the deck is unchanged.
-  return deckY + getShipDeckRaiseAt(local, stats);
+  return tiltFloor(deckY + getShipDeckRaiseAt(local, stats), local, ship);
+}
+
+/** Lifts a FLAT standing height onto the hull's real attitude. The flat height
+ *  is the hull-local height (deck, dais, ramp, hold sole); the point is then
+ *  rotated with the hull, so the pirate stands on the planking that is drawn
+ *  under him instead of on the plane the hull used to be assumed to be. */
+function tiltFloor(flatWorldY: number, local: ShipLocalPoint, ship: Pick<Ship, 'position' | 'pitch' | 'roll'>): number {
+  return ship.position.y + shipLocalUpY(local.x, flatWorldY - ship.position.y, local.z, ship);
 }
 
 /** Which rail a gun sits on: +1 starboard (first half of the indices), −1 port. */
