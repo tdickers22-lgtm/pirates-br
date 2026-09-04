@@ -87,6 +87,10 @@ export const LOGIC = [
   // pins every derived number against the pre-move renderer capture, the sheer
   // vs walk-taper standing contract, and "only one LOFT_STATIONS in src/".
   quick(tsx('test-hull-loft.mjs')),
+  // DECK-01: the crew stand on the planking that is DRAWN — the shared 3D ship
+  // frame graded against an independent Ry·Rx·Rz reference at the attitude caps
+  // (3.3 m of daylight at a galleon bow before it).
+  quick(tsx('test-deck-attitude.mjs')),
   quick(tsx('test-snapshot-size.mjs')),
   quick(tsx('test-combat-fixes.mjs')),
   quick(tsx('test-geyser.mjs')),
