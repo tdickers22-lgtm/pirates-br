@@ -546,20 +546,60 @@ export class LobbyServer {
 
   private handleReturnToMenu(session: ClientSession): void {
     if (session.state !== 'in_match' && session.state !== 'match_ended') return;
+    this.detachFromMatch(session);
+    session.state = 'menu';
+    // Returning to the MAIN MENU (as opposed to the party panel) also exits the
+    // persistent party. Read the code BEFORE removeFromParty, which clears
+    // session.partyCode: reading it after was `maybeClearPartyInMatch(undefined)`
+    // on every return-to-menu and every 25 s auto-detach, and since that call is
+    // the only writer of `inMatch = false`, the last sailor coming home LATCHED
+    // the party at sea for the lifetime of the process (netcode-26).
+    const code = session.partyCode;
+    if (code) this.removeFromParty(session, true);
+    this.maybeClearPartyInMatch(code);
+    this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
+    if (session.name) this.sendStats(session, this.stats.ensure(session.name));
+  }
+
+  /** Let go of the match without touching the crew. */
+  private detachFromMatch(session: ClientSession): void {
     if (session.matchId && session.matchPlayerId) {
       const match = this.matches.get(session.matchId);
       if (match) match.detachClient(session.matchPlayerId);
     }
     this.clientToMatch.delete(session.id);
-    session.state = 'menu';
     session.matchId = undefined;
     session.matchPlayerId = undefined;
     session.matchJoinedAt = undefined;
     session.endedMatchSince = undefined;
-    // Returning to main menu also exits the persistent party.
-    if (session.partyCode) this.removeFromParty(session, true);
-    this.maybeClearPartyInMatch(session.partyCode);
-    this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
+  }
+
+  /**
+   * THE CREW SURVIVES THE MATCH (netcode-04).
+   *
+   * Every automatic way out of a match — the end-screen timeout, a reaped match
+   * — used to run handleReturnToMenu, which quits the PARTY too. A crew that
+   * read the scoreboard for 25 s was disbanded under its own feet, and the
+   * click on "Play Again with Crew" that followed was a server-side no-op. The
+   * automatic paths now land in the party panel the crew came from, and only
+   * fall back to the main menu when there is no party left to land in.
+   */
+  private detachToParty(session: ClientSession, reason: 'timeout' | 'reaped'): void {
+    this.detachFromMatch(session);
+    const code = session.partyCode;
+    const party = code ? this.parties.get(code) : undefined;
+    if (!party || !party.members.includes(session.id)) {
+      session.state = 'menu';
+      session.partyCode = undefined;
+      this.send(session.ws, { type: 'match_detached', ts: Date.now(), payload: { reason, code: null } });
+      this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
+    } else {
+      session.state = 'party';
+      this.send(session.ws, { type: 'match_detached', ts: Date.now(), payload: { reason, code: party.code } });
+      this.maybeClearPartyInMatch(code);
+      this.ensureHost(party);
+      this.broadcastLobby(party);
+    }
     if (session.name) this.sendStats(session, this.stats.ensure(session.name));
   }
 
@@ -568,16 +608,9 @@ export class LobbyServer {
    * launch another match with the same crew. Falls back to main menu otherwise.
    */
   private handlePlayAgain(session: ClientSession): void {
-    if (session.state !== 'in_match' && session.state !== 'match_ended') return;
-    if (session.matchId && session.matchPlayerId) {
-      const match = this.matches.get(session.matchId);
-      if (match) match.detachClient(session.matchPlayerId);
-    }
-    this.clientToMatch.delete(session.id);
-    session.matchId = undefined;
-    session.matchPlayerId = undefined;
-    session.matchJoinedAt = undefined;
-    session.endedMatchSince = undefined;
+    if (session.state !== 'in_match' && session.state !== 'match_ended'
+        && !(session.state === 'menu' && session.partyCode)) return;
+    this.detachFromMatch(session);
 
     const code = session.partyCode;
     const party = code ? this.parties.get(code) : undefined;
@@ -591,6 +624,7 @@ export class LobbyServer {
     }
     session.state = 'party';
     this.maybeClearPartyInMatch(code);
+    this.ensureHost(party);
     if (session.name) this.sendStats(session, this.stats.ensure(session.name));
     this.broadcastLobby(party);
   }
@@ -616,13 +650,15 @@ export class LobbyServer {
     const party = this.parties.get(code);
     if (!party) return;
     party.members = party.members.filter((id) => id !== session.id);
+    party.ready.delete(session.id);
     if (party.members.length === 0) {
       this.parties.delete(code);
       console.log(`[Lobby] party ${code} destroyed (empty)`);
     } else {
-      if (party.hostId === session.id) {
-        party.hostId = party.members[0];
-      }
+      // Removing the last member who was still at sea is exactly the event that
+      // should free the party for new joiners, and nothing else ever does it.
+      this.maybeClearPartyInMatch(code);
+      this.ensureHost(party);
       if (notifyRest) this.broadcastLobby(party);
     }
     this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
@@ -631,6 +667,23 @@ export class LobbyServer {
   private atSea(id: string): boolean {
     const state = this.clients.get(id)?.state;
     return state === 'in_match' || state === 'match_ended';
+  }
+
+  /**
+   * THE CROWN GOES TO SOMEBODY WHO IS IN THE ROOM (netcode-37).
+   *
+   * `party.hostId = party.members[0]` handed the crown to whoever happened to
+   * be first in the array — which mixes members sitting in the panel with
+   * members still in a match or on its end screen. Only a host in state 'party'
+   * can press Start, so a crew could be left with a crown on an absent member
+   * and Start greyed out for the one person actually there.
+   */
+  private ensureHost(party: Party): void {
+    if (party.members.length === 0) return;
+    const present = this.clients.get(party.hostId);
+    if (present && present.state === 'party' && party.members.includes(party.hostId)) return;
+    party.hostId = party.members.find((id) => this.clients.get(id)?.state === 'party')
+      ?? party.members[0];
   }
 
   private broadcastLobby(party: Party): void {
@@ -870,6 +923,10 @@ export class LobbyServer {
         if (clientSession.state === 'in_match') {
           clientSession.state = 'match_ended';
           clientSession.endedMatchSince = Date.now();
+          // The world-build window (MATCH_BUILD_WINDOW_MS) is a licence to be
+          // silent while the client builds the world. The match is over: hold
+          // the socket to the ordinary heartbeat budget again (netcode-15).
+          clientSession.matchJoinedAt = undefined;
         }
       }
     }
@@ -913,7 +970,7 @@ export class LobbyServer {
     for (const session of this.clients.values()) {
       if (session.state === 'match_ended' && session.endedMatchSince
           && now - session.endedMatchSince > LobbyServer.tunables.endedMatchDetachMs) {
-        this.handleReturnToMenu(session);
+        this.detachToParty(session, 'timeout');
       }
     }
   }
@@ -933,18 +990,20 @@ export class LobbyServer {
 
   /** Stop a match, forget it, and send any sessions still pointed at it home. */
   private reapMatch(matchId: string, match: Match, reason: string): void {
+    // Detach BEFORE stop(). A session still pointed at this match used to be
+    // set to 'menu' in place: partyCode kept, `inMatch` never cleared, no
+    // lobby_left and no match_detached — a second, independent source of the
+    // stuck party latch (netcode-38) — and then Match.stop() closed its socket
+    // with 1000, so the player saw "Lost connection" instead of a lobby.
+    // detachToParty pulls them out of match.clients first, so stop() has
+    // nobody left to hang up on.
+    for (const session of Array.from(this.clients.values())) {
+      if (session.matchId !== matchId) continue;
+      this.detachToParty(session, 'reaped');
+    }
     match.stop();
     this.matches.delete(matchId);
     this.matchEmptySince.delete(matchId);
-    for (const session of this.clients.values()) {
-      if (session.matchId !== matchId) continue;
-      session.state = 'menu';
-      session.matchId = undefined;
-      session.matchPlayerId = undefined;
-      session.matchJoinedAt = undefined;
-      session.endedMatchSince = undefined;
-      this.clientToMatch.delete(session.id);
-    }
     console.log(`[Lobby] match ${matchId.slice(0, 6)} reaped (${reason}) — ${this.matches.size} running`);
   }
 

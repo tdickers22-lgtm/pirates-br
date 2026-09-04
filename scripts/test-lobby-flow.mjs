@@ -74,10 +74,13 @@ async function pirate(name) {
   ws.on('close', (code) => { closeCode = code; });
   ws.on('error', () => {});
   await new Promise((resolve) => ws.once('open', resolve));
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  // Read the id ONCE, off welcome: forget() clears the message log and a
+  // clientId derived from it would go undefined halfway through a section.
+  const clientId = msgs.find((m) => m.type === 'welcome')?.payload?.clientId;
   const c = {
-    name, ws, msgs,
+    name, ws, msgs, clientId,
     get closeCode() { return closeCode; },
-    get clientId() { return c.of('welcome')?.payload?.clientId; },
     of: (type) => [...msgs].reverse().find((m) => m.type === type),
     all: (type) => msgs.filter((m) => m.type === type),
     saw: (type) => msgs.some((m) => m.type === type),
@@ -85,7 +88,6 @@ async function pirate(name) {
     send: (type, payload = {}) => { try { ws.send(JSON.stringify({ type, ts: Date.now(), payload })); } catch {} },
     session: () => server.clients.get(c.clientId),
   };
-  await sleep(60);
   c.send('set_name', { name });
   await sleep(80);
   return c;
@@ -126,7 +128,9 @@ function forceEnd(match) {
 }
 
 const liveMatches = () => server.matches.size;
-const onlyMatch = () => [...server.matches.values()][0];
+/** The match just spawned — an ENDED match lingers until its GC, so "the" match
+ *  is the newest one (Map keeps insertion order). */
+const onlyMatch = () => [...server.matches.values()].at(-1);
 
 /** Host starts; members must be Ready first (PLAN 2.2). */
 async function launch(host, ...others) {
