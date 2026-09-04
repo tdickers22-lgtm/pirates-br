@@ -98,11 +98,17 @@ export type HudView = {
  */
 export type DeathCauseKind =
   | 'ship_sunk' | 'storm' | 'drowned' | 'shark' | 'fall' | 'fire'
-  | 'cannon' | 'gunshot' | 'blade' | 'explosion' | 'killed' | 'outlasted';
-/** The set, as a runtime guard for the value coming off the wire. */
-const DEATH_CAUSE_KINDS = new Set<string>([
+  | 'cannon' | 'gunshot' | 'blade' | 'explosion' | 'killed' | 'outlasted'
+  | 'lost_at_sea';
+/** The set, as a runtime guard for the value coming off the wire. A cause the
+ *  server can send and this set does not hold is silently discarded by
+ *  resolveDeathCause, which then falls back to the positional guess — that is
+ *  how 'lost_at_sea' spent a wave being painted as a plain DROWNED. Parity with
+ *  Match.ts's EliminationCause is graded in scripts/test-death-causes.mjs. */
+export const DEATH_CAUSE_KINDS = new Set<string>([
   'ship_sunk', 'storm', 'drowned', 'shark', 'fall', 'fire',
   'cannon', 'gunshot', 'blade', 'explosion', 'killed', 'outlasted',
+  'lost_at_sea',
 ]);
 
 /**
@@ -1554,6 +1560,14 @@ export class HudController {
       reason: 'Ship sunk',
       spectate: 'Your ship went down — there is no respawn from here',
       blame: 'your ship went down',
+    },
+    lost_at_sea: {
+      title: 'LOST AT SEA',
+      cause: 'Your hull went down and no deck was left to swim to. A crew adrift '
+        + 'with no ship is given a minute to reach one — board an enemy hull, or find a wreck.',
+      reason: 'Lost at sea',
+      spectate: 'The sea took you with no deck left to swim to — no respawn from here',
+      blame: 'the sea took you',
     },
     storm: {
       title: 'TAKEN BY THE STORM',

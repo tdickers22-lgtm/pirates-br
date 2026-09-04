@@ -20,6 +20,8 @@
 import { Match } from '../src/server/core/Match.ts';
 import { PLAYER, SHARK, SHIP } from '../src/shared/constants/index.ts';
 import { getIslandSurfaceY, isPointInsideIslandFootprint } from '../src/shared/utils/index.ts';
+import { DEATH_CAUSE_KINDS } from '../src/client/ui/HudController.ts';
+import { readFileSync } from 'node:fs';
 
 /** PhysicsSystem keeps its locomotion table module-private; this is the only
  *  number this suite needs from it (m/s of descent above which a landing on
@@ -257,10 +259,26 @@ console.log('Blade:');
 // player reads.
 console.log('Vocabulary:');
 {
-  const clientKnows = new Set([
-    'ship_sunk', 'storm', 'drowned', 'shark', 'fall', 'fire',
-    'cannon', 'gunshot', 'blade', 'explosion', 'killed', 'outlasted',
-  ]);
+  // The set is READ OFF THE CLIENT now, not retyped here: the copy in this file
+  // stayed complete while the real guard in HudController went stale, which is
+  // how 'lost_at_sea' shipped invisible. And the whole SERVER union is graded,
+  // not just the causes this run happened to produce — a cause the server can
+  // send is a cause the card must paint, whether or not this fixture reaches it.
+  const clientKnows = DEATH_CAUSE_KINDS;
+  const matchSrc = readFileSync(new URL('../src/server/core/Match.ts', import.meta.url), 'utf8');
+  const unionMembers = (name) => {
+    const at = matchSrc.indexOf(`type ${name} =`);
+    if (at < 0) return [];
+    return [...matchSrc.slice(at, matchSrc.indexOf(';', at)).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  };
+  const serverCauses = [...unionMembers('DamageSource'), ...unionMembers('EliminationCause')];
+  expect('the server cause union was parsed', serverCauses.length >= 12, `parsed=${JSON.stringify(serverCauses)}`);
+  const unpaintable = [...new Set(serverCauses)].filter((c) => !clientKnows.has(c));
+  expect('every cause Match.ts can send is one the death screen can paint',
+    unpaintable.length === 0,
+    `Match.ts sends ${JSON.stringify(unpaintable)}; HudController's DEATH_CAUSE_KINDS rejects them, so resolveDeathCause falls back to the positional guess (a swimmer reads DROWNED)`);
+  expect('the sea taking a crew with no deck left is its own card, not a drowning',
+    clientKnows.has('lost_at_sea'));
   const seen = killEvents.length ? killEvents.map((e) => e.cause) : [];
   expect('every cause emitted in this run is one the death screen can paint',
     seen.every((c) => clientKnows.has(c)), `seen=${JSON.stringify(seen)}`);
