@@ -2590,13 +2590,24 @@ export class MapGenerator {
     return spawns;
   }
 
-  buildShip(id: string, ownerId: string, spawn: { position: Vec3; rotation: number; type: (typeof SHIP_TYPES)[number] }, teamColor: number): Ship {
+  /** `crewIds` is the whole crew aboard her, not just her owner: a party of N
+   *  shares ONE hull (CREW-01), and every per-hull system in the sim (DBNO,
+   *  revive, stations, crewGold, the bounty) reads that list. `crewId` ties her
+   *  to the crew record that outlives her. */
+  buildShip(
+    id: string,
+    ownerId: string,
+    spawn: { position: Vec3; rotation: number; type: (typeof SHIP_TYPES)[number] },
+    teamColor: number,
+    crew?: { crewId: string | null; crewIds: string[] },
+  ): Ship {
     const stats = SHIP_STATS[spawn.type];
     return {
       id,
       type: spawn.type,
       ownerId,
-      crewIds: [ownerId],
+      crewIds: crew?.crewIds ?? [ownerId],
+      crewId: crew?.crewId ?? null,
       position: { ...spawn.position, y: 0 },
       rotation: spawn.rotation,
       velocity: { x: 0, y: 0, z: 0 },

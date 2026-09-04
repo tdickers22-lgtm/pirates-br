@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
+  Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
 import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
 import {
@@ -44,6 +44,7 @@ import {
   intersectRaySeaRock,
 } from '../../shared/utils/index.js';
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
+import { smallArmsHitsCrewmate } from '../../shared/crew.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   findMermaidReturnShip,
@@ -344,6 +345,11 @@ function hullForCrewSize(size: number): 'sloop' | 'brigantine' | 'galleon' {
 /** Mast ladder climb rate — fraction of the full ladder per second (W up, S
  *  down). ~1.8s deck→nest on a sloop keeps the nest a commitment, not a snap. */
 const MAST_CLIMB_RATE = 0.55;
+/** Biggest crew the roster allows (Squads: 3-4 on a Man-o'-War). */
+const CREW_MAX_MEMBERS = 4;
+/** Metres between crewmates where they are set down, so a crew of four lands as
+ *  four pirates on the planking rather than one pile. */
+const CREW_LANDING_STRIDE = 1.8;
 /** How far along a pier a crew is set down from its midpoint, so the two crews
  *  berthed either side of one dock do not start standing in each other. */
 const BERTH_LANDING_SPREAD = 6;
@@ -812,6 +818,7 @@ export class Match {
       seaRocks,
       islands: islandList,
       tradeSessions: [],
+      crews: [],
       sharks: [],
       spoils: [],
       seaPois,
@@ -849,11 +856,12 @@ export class Match {
     }
   }
 
-  private createPlayer(id: string, name: string, shipId: string | null, isBot: boolean): Player {
+  private createPlayer(id: string, name: string, shipId: string | null, isBot: boolean, crewId: string | null = null): Player {
     return {
       id,
       name,
       shipId,
+      crewId,
       position: { x: 0, y: 1, z: 0 },
       rotation: { x: 0, y: 0 },
       velocity: { x: 0, y: 0, z: 0 },
@@ -1128,11 +1136,41 @@ export class Match {
     shipId: string;
     send: () => { playerId: string; shipId: string; snapshot: GameState };
   } {
-    const playerId = uuid();
-    const displayName = (name || '').trim().slice(0, 24) || 'Pirate';
+    return this.createCrew([{ ws, name }]).joins[0];
+  }
+
+  /**
+   * ONE HULL PER CREW (CREW-01 / netcode-21).
+   *
+   * A party of N joins as a crew: one ship, sized by hullForCrewSize(N), parked
+   * at one berth, with every member set down on the planking beside her. Before
+   * this, LobbyServer placed each member individually and a party of four sailed
+   * out as four ENEMY sloops — which is also why DBNO, revive, the station
+   * arbiter and crewGold were dead code in production (netcode-02: every hull
+   * held exactly one pirate, so hasLivingCrewmate was false for everyone).
+   *
+   * The crew record outlives the hull on purpose: two crewmates swimming from a
+   * sunk ship are still one crew, and the win check now counts crews.
+   */
+  createCrew(members: { ws: WebSocket; name: string }[]): {
+    crewId: string;
+    shipId: string;
+    joins: {
+      playerId: string;
+      shipId: string;
+      send: () => { playerId: string; shipId: string; snapshot: GameState };
+    }[];
+  } {
+    const roster = members.slice(0, CREW_MAX_MEMBERS);
+    if (roster.length === 0) throw new Error('Match.createCrew: a crew needs at least one pirate');
+
+    const crewId = uuid();
+    const shipId = uuid();
+    const memberIds = roster.map(() => uuid());
+    const names = roster.map((member) => (member.name || '').trim().slice(0, 24) || 'Pirate');
 
     const spawns = this.mapGen.generateShipSpawns(this.state.islands);
-    const berth = this.pickHumanSpawn(spawns) ?? {
+    const seaSpawn = this.pickHumanSpawn(spawns) ?? {
       position: { x: randRange(-600, 600, this.rng), y: 0, z: randRange(-600, 600, this.rng) },
       rotation: randAngle(this.rng),
       type: 'sloop' as const,
@@ -1141,28 +1179,43 @@ export class Match {
     // the world's variety, and a lone player drawing a Man-o'-War inherits eight
     // guns nobody can man, three masts to haul alone and the worst turn rate in
     // the Reach — the ship is balanced around a crew that does not exist. One
-    // pirate sails a Cutter; the ladder is here for the day crews share a hull.
-    const spawn = { ...berth, type: hullForCrewSize(1) };
+    // pirate sails a Cutter, a pair a Corsair, three or four a Man-o'-War.
+    const spawn = { ...seaSpawn, type: hullForCrewSize(roster.length) };
 
-    const shipId = uuid();
-    const ship = this.mapGen.buildShip(shipId, playerId, spawn, this.getNextTeamColor());
-    ship.crewIds = [playerId];
+    const color = this.getNextTeamColor();
+    const ship = this.mapGen.buildShip(shipId, memberIds[0], spawn, color, { crewId, crewIds: memberIds });
     this.state.ships.push(ship);
 
-    const player = this.createPlayer(playerId, displayName, shipId, false);
+    const crew: Crew = {
+      id: crewId,
+      name: names[0],
+      color,
+      shipId,
+      memberIds: [...memberIds],
+      leaderId: memberIds[0],
+    };
+    this.state.crews = [...(this.state.crews ?? []), crew];
+
+    const players = roster.map((_, index) => (
+      this.createPlayer(memberIds[index], names[index], shipId, false, crewId)
+    ));
+
     const spawnBerth = this.pickSafeSpawnBerth(ship.type, /*farthestFromHulls*/ true);
     if (spawnBerth) {
       this.parkShipAtDock(ship, spawnBerth.dock, /*refit*/ true, spawnBerth.side);
-      // Two crews share a pier, so they land on their OWN half of the planking
-      // rather than both on the midpoint: berth side decides which half.
+      // Two crews share a pier, so a crew lands on its OWN half of the planking
+      // and its members stand a stride apart instead of inside each other.
       const dockFwd = { x: Math.sin(spawnBerth.dock.rotation), z: Math.cos(spawnBerth.dock.rotation) };
-      const alongOffset = spawnBerth.side * Math.min(BERTH_LANDING_SPREAD, spawnBerth.dock.length * 0.25);
-      player.position = {
-        x: spawnBerth.dock.respawnPoint.x + dockFwd.x * alongOffset,
-        y: spawnBerth.dock.respawnPoint.y + 0.2,
-        z: spawnBerth.dock.respawnPoint.z + dockFwd.z * alongOffset,
-      };
-      player.onShipId = null;
+      const base = spawnBerth.side * Math.min(BERTH_LANDING_SPREAD, spawnBerth.dock.length * 0.25);
+      players.forEach((player, index) => {
+        const along = base + (index - (players.length - 1) / 2) * CREW_LANDING_STRIDE;
+        player.position = {
+          x: spawnBerth.dock.respawnPoint.x + dockFwd.x * along,
+          y: spawnBerth.dock.respawnPoint.y + 0.2,
+          z: spawnBerth.dock.respawnPoint.z + dockFwd.z * along,
+        };
+        player.onShipId = null;
+      });
     } else {
       // No berth left in the ring: she rides at ANCHOR with her canvas furled
       // instead of making way the instant the horn sounds with nobody at the
@@ -1171,66 +1224,79 @@ export class Match {
       ship.anchorRaiseProgress = 0;
       ship.sailHeight = 0;
       ship.sailAngle = 0;
-      player.position = {
-        x: spawn.position.x,
-        y: ship.position.y + SHIP_STATS[spawn.type].height + 0.5,
-        z: spawn.position.z,
-      };
-      player.onShipId = shipId;
+      const deck = this.getRespawnDeckPosition(ship);
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      players.forEach((player, index) => {
+        // Spread ALONG the deck (local z), the one axis every hull class has room
+        // on, so a galleon crew of four does not stack at the respawn point.
+        const along = (index - (players.length - 1) / 2) * CREW_LANDING_STRIDE;
+        player.position = { x: deck.x + sin * along, y: deck.y, z: deck.z + cos * along };
+        player.onShipId = shipId;
+      });
     }
 
-    this.state.players.push(player);
+    for (const player of players) this.state.players.push(player);
     this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
     this.rebuildEntityIndexes();
-    this.statsDelta(playerId); // stamp join sim-time for playSeconds (match start = 0, late join > 0)
 
-    const client: ConnectedClient = {
-      ws,
-      playerId,
-      name: displayName,
-      lastInput: null,
-      joinedAt: Date.now(),
-      killsAtJoin: 0,
-      deathsAtJoin: 0,
-      consumedSeq: {
-        interact: -1,
-        trade: -1,
-        wheel: -1,
-        reload: -1,
-        jump: -1,
-        placeKeg: -1,
-        dropChest: -1,
-        special: -1,
-        cannonAmmo: -1,
-        slot: -1,
-        barrelTakeAll: -1,
-        bail: -1,
-        selectMap: -1,
-      },
-      lastOneShotAt: {},
-      appliedInputSeq: null,
-      oneShotPendingSince: null,
-      lastRefusalAt: -Infinity,
-      pendingFullSnapshot: null,
-    };
-    this.clients.set(playerId, client);
+    const joins = players.map((player, index) => {
+      this.statsDelta(player.id); // stamp join sim-time (match start = 0, late join > 0)
+      const client: ConnectedClient = {
+        ws: roster[index].ws,
+        playerId: player.id,
+        name: player.name,
+        lastInput: null,
+        joinedAt: Date.now(),
+        killsAtJoin: 0,
+        deathsAtJoin: 0,
+        consumedSeq: {
+          interact: -1,
+          trade: -1,
+          wheel: -1,
+          reload: -1,
+          jump: -1,
+          placeKeg: -1,
+          dropChest: -1,
+          special: -1,
+          cannonAmmo: -1,
+          slot: -1,
+          barrelTakeAll: -1,
+          bail: -1,
+          selectMap: -1,
+        },
+        lastOneShotAt: {},
+        appliedInputSeq: null,
+        oneShotPendingSince: null,
+        lastRefusalAt: -Infinity,
+        pendingFullSnapshot: null,
+      };
+      this.clients.set(player.id, client);
+      return { player, client };
+    });
 
     // The join snapshot goes out through the SAME wire encoder as every later
     // full snapshot: raw buildSnapshot was ~310KB (vs ~214KB quantized) and its
-    // unquantized floats disagreed with the quantized stream that followed.
+    // unquantized floats disagreed with the quantized stream that followed. It
+    // is built ONCE for the whole crew, after every member is in the state.
     const snapshot = buildWireSnapshot(this.buildSnapshot(true), true);
     return {
-      playerId,
+      crewId,
       shipId,
-      send: () => {
-        this.send(ws, {
-          type: 'join',
-          ts: Date.now(),
-          payload: { playerId, shipId, snapshot, matchId: this.id },
-        });
-        console.log(`[Match ${this.id}] human joined: ${displayName} (${playerId.slice(0, 6)}); humans=${this.clients.size}`);
-        return { playerId, shipId, snapshot };
-      },
+      joins: joins.map(({ player, client }) => ({
+        playerId: player.id,
+        shipId,
+        send: () => {
+          this.send(client.ws, {
+            type: 'join',
+            ts: Date.now(),
+            payload: { playerId: player.id, shipId, snapshot, matchId: this.id },
+          });
+          console.log(`[Match ${this.id}] human joined: ${player.name} (${player.id.slice(0, 6)});`
+            + ` crew=${crewId.slice(0, 6)} of ${roster.length}; humans=${this.clients.size}`);
+          return { playerId: player.id, shipId, snapshot };
+        },
+      })),
     };
   }
 
@@ -4307,6 +4373,11 @@ export class Match {
         || target.state === 'eliminated'
         || target.state === 'respawning'
         || target.respawnProtectionTimer > 0
+        // HOLD YOUR FIRE. Small arms and blades pass THROUGH a crewmate: a crew
+        // fighting in the same 8 m of deck cannot check its lines of fire, and
+        // creditPlayerKill used to pay gold for shooting one (netcode-12). The
+        // ship's own violence — cannon, kegs, fire, the sea — still hurts.
+        || smallArmsHitsCrewmate(shooter, target)
       ) {
         continue;
       }

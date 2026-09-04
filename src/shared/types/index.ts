@@ -96,11 +96,33 @@ export interface IslandNpc {
   cue: string;
 }
 
+/**
+ * A CREW is the unit the match is played and scored in: a party of N shares one
+ * hull, and win/board/elimination/credit/bounty key on the crew rather than on
+ * the hull's ownerId. The record outlives the hull — a crew whose ship is on the
+ * seabed is still one crew, swimming (netcode-21/12).
+ */
+export interface Crew {
+  id: string;
+  /** Display name (the leader's, unless the party named itself). */
+  name: string;
+  /** Colour shared by the hull, the pennant and the crew strip (same integer
+   *  space as Ship.teamColor). */
+  color: number;
+  /** The hull they sail, or null once she is lost. */
+  shipId: string | null;
+  memberIds: string[];
+  leaderId: string;
+}
+
 export interface Ship {
   id: string;
   type: ShipType;
   ownerId: string;        // crew-lead / bot id
   crewIds: string[];
+  /** The crew that sails her (Crew.id). Null only for a hull with no crew record
+   *  at all — she then counts as a crew of her own for win accounting. */
+  crewId: string | null;
   position: Vec3;
   rotation: number;       // Y-axis radians
   velocity: Vec3;
@@ -192,6 +214,9 @@ export type CannonAmmoType = 'cannonball' | 'firebomb' | 'chainshot';
 
 export interface Player {
   id: string;
+  /** The crew this pirate belongs to (Crew.id). Kept when his hull sinks — two
+   *  crewmates in the water are still ONE crew for win accounting. */
+  crewId: string | null;
   name: string;
   shipId: string | null;
   position: Vec3;
@@ -744,6 +769,9 @@ export interface Shark {
 
 export interface GameState {
   phase: GamePhase;
+  /** Crew roster (CREW-01). Optional so a pre-crew snapshot still type-checks;
+   *  the server always sends it, and it rides the full snapshot only. */
+  crews?: Crew[];
   tick: number;
   /** Monotonic per-match snapshot counter shared by full AND hot snapshots (see
    *  HotSnapshotPayload.seq) — lets the client reject an out-of-order snapshot. */
