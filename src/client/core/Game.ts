@@ -52,7 +52,7 @@ import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { beginFirstDrawFrame, clearFirstDrawBudget, openFirstDrawBudgetForSettle, showWhenAffordable } from '../rendering/FirstDrawBudget.js';
 import { budgeted } from '../rendering/FrameBudget.js';
 import { ClientState } from './ClientState.js';
-import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
+import { applyPlayerTeamColor, AVATAR_RIG, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
 import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
 
@@ -4619,7 +4619,7 @@ export class Game {
         healthBar.root.visible = showHealthBar;
         if (showHealthBar) {
           const ratio = THREE.MathUtils.clamp(player.health / PLAYER.MAX_HEALTH, 0, 1);
-          healthBar.root.position.y = player.state === 'swimming' ? 1.55 : 2.38;
+          healthBar.root.position.y = player.state === 'swimming' ? 1.2 : AVATAR_RIG.overheadY;
           this.tempHudVector.copy(this.renderer.camera.position);
           mesh.worldToLocal(this.tempHudVector);
           healthBar.root.lookAt(this.tempHudVector);
@@ -6179,12 +6179,12 @@ export class Game {
       const downed = player.state === 'downed';
       let eyeHeight = swimming
         ? PLAYER.HEIGHT * 0.56
-        : player.crouching ? PLAYER.HEIGHT * 0.55 : PLAYER.HEIGHT * 0.84;
+        : player.crouching ? PLAYER.EYE_Y - PLAYER.CROUCH_DROP : PLAYER.EYE_Y;
       if (downed) {
         eyeHeight = THREE.MathUtils.lerp(eyeHeight, 0.3, this.localDeathBlend)
           + Math.sin(this.ocean.getTime() * 0.9) * 0.02 * this.localDeathBlend;
       } else if (dead) {
-        eyeHeight = THREE.MathUtils.lerp(PLAYER.HEIGHT * 0.84, 0.34, this.localDeathBlend);
+        eyeHeight = THREE.MathUtils.lerp(PLAYER.EYE_Y, 0.34, this.localDeathBlend);
       }
       const basePos = dead && this.localDeathAnchor
         ? this.localDeathAnchor.pos.clone()

@@ -1,6 +1,7 @@
 /** Assorted standalone meshes: nameplates, projectiles, upgrade stations, mermaid. */
 import * as THREE from 'three';
 import type { Projectile, ShipUpgradeType } from '../../../shared/types/index.js';
+import { AVATAR_RIG } from './PlayerMeshFactory.js';
 
 /** Floating name label (billboard) that hovers over an opponent's head. */
 export function makeNameplateSprite(name: string): THREE.Sprite {
@@ -24,8 +25,8 @@ export function makeNameplateSprite(name: string): THREE.Sprite {
   // caves made it obvious, every plate on the island glowed through the rock).
   // depthWrite stays off so the transparent quad never punches holes in FX.
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, transparent: true }));
-  sprite.scale.set(3.4, 0.85, 1);
-  sprite.position.y = 2.35;
+  sprite.scale.set(2.8, 0.7, 1);
+  sprite.position.y = AVATAR_RIG.overheadY + 0.22;
   sprite.name = 'nameplate';
   sprite.renderOrder = 998;
   return sprite;
