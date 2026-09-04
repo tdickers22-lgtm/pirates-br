@@ -344,6 +344,9 @@ function hullForCrewSize(size: number): 'sloop' | 'brigantine' | 'galleon' {
 /** Mast ladder climb rate — fraction of the full ladder per second (W up, S
  *  down). ~1.8s deck→nest on a sloop keeps the nest a commitment, not a snap. */
 const MAST_CLIMB_RATE = 0.55;
+/** How far along a pier a crew is set down from its midpoint, so the two crews
+ *  berthed either side of one dock do not start standing in each other. */
+const BERTH_LANDING_SPREAD = 6;
 /** Catch-up steps per timer callback — bounds the death spiral after a stall. */
 const MAX_CATCHUP_TICKS = 5;
 /** Minimum sim-time interval between accepted one-shot actions (anti-spam). */
@@ -816,6 +819,34 @@ export class Match {
       winnerId: null,
     };
     this.rebuildEntityIndexes();
+    this.moorFleetAtBerths(ships);
+  }
+
+  /**
+   * Bot crews start alongside a pier, like every crew the game claims starts at
+   * one. They used to be built at a uniformly random open-sea point 200-900 m
+   * out, unanchored and under half canvas: ~13% of bot hulls opened the match
+   * already in 'flee' (their spawn was outside the 0.85-of-safeRadius danger
+   * band), none of them got the berth's environmental peace, and StormSystem's
+   * "every crew starts at a berth" comment was true only of humans
+   * (gameplay-27). Berths are taken farthest-from-hulls first, so the fleet
+   * spreads over distinct piers instead of two hulls to a pier while others sit
+   * empty. A hull with no berth left keeps her sea spawn.
+   */
+  private moorFleetAtBerths(ships: Ship[]): void {
+    for (const ship of ships) {
+      if (!ship.alive || ship.sinking) continue;
+      const berth = this.pickSafeSpawnBerth(ship.type, /*farthestFromHulls*/ true);
+      if (!berth) break;
+      this.parkShipAtDock(ship, berth.dock, /*refit*/ true, berth.side);
+      for (const player of this.state.players) {
+        if (player.shipId !== ship.id) continue;
+        player.position = this.getRespawnDeckPosition(ship);
+        player.rotation.x = ship.rotation;
+        player.onShipId = ship.id;
+        player.velocity = { x: 0, y: 0, z: 0 };
+      }
+    }
   }
 
   private createPlayer(id: string, name: string, shipId: string | null, isBot: boolean): Player {
@@ -929,28 +960,99 @@ export class Match {
   }
 
   /**
-   * A free berth comfortably inside the ring.
-   *
-   * `farthestFromHulls` is the human-join reading: `pickHumanSpawn` computes the
-   * berth farthest from every other ship and createHumanClient then threw that
-   * work away for a UNIFORMLY RANDOM dock, so two humans could join into the
-   * same bay (gameplay-24). joinRng now only breaks ties.
+   * A pier has TWO berths — one each side of the run. Ten piers therefore hold
+   * the 20 hulls a 12-crew Solo lobby plus a bot fleet needs (netcode-10), and
+   * `side` is the sign of a hull's lateral offset in the dock's own frame.
    */
-  private pickSafeSpawnDock(farthestFromHulls = false): IslandDock | null {
-    const candidates: IslandDock[] = [];
+  private static readonly BERTH_SIDES: readonly (-1 | 1)[] = [1, -1];
+  /** Frame slack for "this hull is lying in that berth": half the run plus a
+   *  hull length astern/ahead, and one hull-width-plus-gap abeam. Mirrored by
+   *  scripts/test-spawn-berths.mjs — keep the two in step. */
+  private static readonly BERTH_FRAME_ALONG_SLACK = 30;
+  private static readonly BERTH_FRAME_LATERAL_SLACK = 45;
+
+  /** Which berth of `dock` a hull lies in, 0 for "not at this pier at all".
+   *
+   *  The occupancy test used to be a 42 m circle around `dock.berthPosition`,
+   *  but computeShipBerth SLIDES a hull along the run to find water: at The
+   *  Crooked Atoll the moored hull ends up 42.3 m from that point, so the test
+   *  read the berth as empty and the next joiner was parked INSIDE her — two
+   *  hulls at 0.0 m (netcode-V1). Read in the dock's own frame it cannot miss,
+   *  and it is what tells the two berths apart. */
+  private berthSideOf(position: { x: number; z: number }, dock: IslandDock): -1 | 1 | 0 {
+    const fwd = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
+    const right = { x: Math.cos(dock.rotation), z: -Math.sin(dock.rotation) };
+    const rx = position.x - dock.position.x;
+    const rz = position.z - dock.position.z;
+    const along = rx * fwd.x + rz * fwd.z;
+    const lateral = rx * right.x + rz * right.z;
+    if (Math.abs(along) > dock.length * 0.5 + Match.BERTH_FRAME_ALONG_SLACK) return 0;
+    if (Math.abs(lateral) > Match.BERTH_FRAME_LATERAL_SLACK) return 0;
+    return lateral >= 0 ? 1 : -1;
+  }
+
+  /** shipId moored in each berth, keyed `${islandId}#${side}`. The claim is
+   *  released lazily: a hull that sank, was towed off or simply sailed is no
+   *  longer in the frame, so the berth reads free the moment she leaves. */
+  private berthOccupancy = new Map<string, string>();
+
+  private berthKey(islandId: string, side: -1 | 1): string { return `${islandId}#${side}`; }
+
+  private islandOfDock(dock: IslandDock): Island | null {
+    return this.state.islands.find((isl) => isl.dock === dock) ?? null;
+  }
+
+  /** The hull holding this berth, or null. Also reads the water, so a hull that
+   *  drifted in or was towed here still counts as an occupant. */
+  private berthHolder(islandId: string, dock: IslandDock, side: -1 | 1): Ship | null {
+    const key = this.berthKey(islandId, side);
+    const claimed = this.berthOccupancy.get(key);
+    if (claimed) {
+      const ship = this.getAliveShip(claimed);
+      if (ship && this.berthSideOf(ship.position, dock) === side) return ship;
+      this.berthOccupancy.delete(key);
+    }
+    for (const ship of this.state.ships) {
+      if (!ship.alive || ship.sinking) continue;
+      if (this.berthSideOf(ship.position, dock) === side) return ship;
+    }
+    return null;
+  }
+
+  /** Give up whatever berth this hull held (she weighed anchor, sank, or is
+   *  being moored somewhere else). */
+  private releaseBerth(shipId: string): void {
+    for (const [key, held] of this.berthOccupancy) {
+      if (held === shipId) this.berthOccupancy.delete(key);
+    }
+  }
+
+  /**
+   * A free berth comfortably inside the ring, deep enough for `type`.
+   *
+   * `farthestFromHulls` is the human-join reading: the berth farthest from every
+   * other ship, so two humans never join into the same bay (gameplay-24) and an
+   * empty pier always beats the far side of an occupied one. joinRng only breaks
+   * ties, so the choice stays deterministic per match.
+   */
+  private pickSafeSpawnBerth(
+    type: Ship['type'] = 'sloop',
+    farthestFromHulls = false,
+  ): { island: Island; dock: IslandDock; side: -1 | 1 } | null {
+    const candidates: { island: Island; dock: IslandDock; side: -1 | 1 }[] = [];
     const { centerX, centerZ, safeRadius } = this.state.storm;
 
     for (const island of this.state.islands) {
       const dock = island.dock;
       if (!dock) continue;
       if (dist2D(dock.respawnPoint.x, dock.respawnPoint.z, centerX, centerZ) >= safeRadius - 50) continue;
-
-      const occupied = this.state.ships.some((ship) => (
-        ship.alive
-        && !ship.sinking
-        && dist2D(ship.position.x, ship.position.z, dock.berthPosition.x, dock.berthPosition.z) < 42
-      ));
-      if (!occupied) candidates.push(dock);
+      for (const side of Match.BERTH_SIDES) {
+        if (this.berthHolder(island.id, dock, side)) continue;
+        // A berth on the dry side of a reef pier is not a berth. Ask the same
+        // depth planner that will moor her before offering it.
+        if (!this.computeBerthFor(type, island, dock, side)) continue;
+        candidates.push({ island, dock, side });
+      }
     }
 
     if (candidates.length === 0) return null;
@@ -958,9 +1060,10 @@ export class Match {
       return candidates[Math.floor(this.joinRng() * candidates.length)];
     }
     const hulls = this.state.ships.filter((ship) => ship.alive && !ship.sinking);
-    let best: IslandDock | null = null;
+    let best: { island: Island; dock: IslandDock; side: -1 | 1 } | null = null;
     let bestScore = -Infinity;
-    for (const dock of candidates) {
+    for (const candidate of candidates) {
+      const { dock } = candidate;
       let nearest = Infinity;
       for (const hull of hulls) {
         nearest = Math.min(
@@ -968,12 +1071,10 @@ export class Match {
           dist2D(dock.berthPosition.x, dock.berthPosition.z, hull.position.x, hull.position.z),
         );
       }
-      // Ties (an empty sea, or two docks equally clear) fall to the seeded roll,
-      // so the choice stays deterministic per match.
       const score = (nearest === Infinity ? 1e6 : nearest) + this.joinRng() * 0.001;
       if (score > bestScore) {
         bestScore = score;
-        best = dock;
+        best = candidate;
       }
     }
     return best;
@@ -1049,16 +1150,27 @@ export class Match {
     this.state.ships.push(ship);
 
     const player = this.createPlayer(playerId, displayName, shipId, false);
-    const spawnDock = this.pickSafeSpawnDock(/*farthestFromHulls*/ true);
-    if (spawnDock) {
-      this.parkShipAtDock(ship, spawnDock);
+    const spawnBerth = this.pickSafeSpawnBerth(ship.type, /*farthestFromHulls*/ true);
+    if (spawnBerth) {
+      this.parkShipAtDock(ship, spawnBerth.dock, /*refit*/ true, spawnBerth.side);
+      // Two crews share a pier, so they land on their OWN half of the planking
+      // rather than both on the midpoint: berth side decides which half.
+      const dockFwd = { x: Math.sin(spawnBerth.dock.rotation), z: Math.cos(spawnBerth.dock.rotation) };
+      const alongOffset = spawnBerth.side * Math.min(BERTH_LANDING_SPREAD, spawnBerth.dock.length * 0.25);
       player.position = {
-        x: spawnDock.respawnPoint.x,
-        y: spawnDock.respawnPoint.y + 0.2,
-        z: spawnDock.respawnPoint.z,
+        x: spawnBerth.dock.respawnPoint.x + dockFwd.x * alongOffset,
+        y: spawnBerth.dock.respawnPoint.y + 0.2,
+        z: spawnBerth.dock.respawnPoint.z + dockFwd.z * alongOffset,
       };
       player.onShipId = null;
     } else {
+      // No berth left in the ring: she rides at ANCHOR with her canvas furled
+      // instead of making way the instant the horn sounds with nobody at the
+      // wheel (gameplay-11). Late joiners get a ship, not a runaway.
+      ship.anchored = true;
+      ship.anchorRaiseProgress = 0;
+      ship.sailHeight = 0;
+      ship.sailAngle = 0;
       player.position = {
         x: spawn.position.x,
         y: ship.position.y + SHIP_STATS[spawn.type].height + 0.5,
@@ -7778,7 +7890,7 @@ export class Match {
     // Nobody alive aboard her: the berth takes the whole ship, so the crew keeps
     // its hull. (parkShipAtDock runs in the caller, as the dock path always has.)
     const dock = player && !this.hasSailorForHull(homeShip, player)
-      ? this.pickSafeSpawnDock()
+      ? this.pickSafeSpawnBerth(homeShip.type)?.dock ?? null
       : null;
     if (dock) {
       return {
@@ -7862,7 +7974,7 @@ export class Match {
    * in) or by tide (towDerelictToSafety brings a derelict in after the grace).
    *
    * In the FINAL storm neither can: the last ring is 12 m across, so no berth
-   * clears pickSafeSpawnDock's margin and no patch of water clears a hull's
+   * clears pickSafeSpawnBerth's margin and no patch of water clears a hull's
    * length, and the endgame circle converges on Old Maw Caldera besides. The
    * sentence became a promise the world could not keep, and a fresh-eyes audit
    * read it on a grey screen for four minutes and then died of it. A hull already
@@ -7938,7 +8050,7 @@ export class Match {
     // fallback for a ring with no room in it (TOW-01).
     const berth = this.findOpenWaterInsideRing(ship);
     if (!berth) {
-      const dock = this.pickSafeSpawnDock();
+      const dock = this.pickSafeSpawnBerth(ship.type)?.dock ?? null;
       if (!dock) return false;
       this.parkShipAtDock(ship, dock, /*refit*/ false);
       return true;
@@ -8004,13 +8116,25 @@ export class Match {
    * repair in the game — sail out of the ring holed and flooding, get killed,
    * come back seaworthy at a dock in the middle of the map (TOW-01/gameplay-03).
    */
-  parkShipAtDock(ship: Ship, dock: IslandDock, refit = true) {
+  parkShipAtDock(ship: Ship, dock: IslandDock, refit = true, side?: -1 | 1) {
+    const island = this.islandOfDock(dock);
+    // Prefer the berth asked for, else the free side of the pier, else the side
+    // she is already lying on. Claiming it is what stops the next joiner being
+    // parked on top of her (netcode-V1).
+    const berthSide: -1 | 1 = side
+      ?? (island ? Match.BERTH_SIDES.find((s) => {
+        const holder = this.berthHolder(island.id, dock, s);
+        return !holder || holder.id === ship.id;
+      }) : undefined)
+      ?? dock.moorSide;
+    this.releaseBerth(ship.id);
+    if (island) this.berthOccupancy.set(this.berthKey(island.id, berthSide), ship.id);
     // Normalized berth, computed for THIS ship: parallel to the dock, bow
     // seaward, a consistent 1m gap between hull side and dock edge, and the hull
     // laid ALONGSIDE the dock's seaward run (stern always inside the dock span,
     // so the ship is boardable from the deck). Depth is verified per ship type;
     // the pre-baked galleon berth stays as the last-resort fallback.
-    const berth = this.computeShipBerth(ship, dock) ?? dock.berthPosition;
+    const berth = this.computeShipBerth(ship, dock, berthSide) ?? dock.berthPosition;
     ship.position.x = berth.x;
     ship.position.z = berth.z;
     ship.position.y = 0.05;
@@ -8063,10 +8187,23 @@ export class Match {
    *  more than BERTH_SEARCH_REACH, so a ship can never end up parked in open
    *  water tens of metres off the pier. Returns null only when even the deepest
    *  spot in reach would leave the hull sitting on dry ground. */
-  private computeShipBerth(ship: Ship, dock: IslandDock): { x: number; z: number } | null {
-    const island = this.state.islands.find((isl) => isl.dock === dock);
+  private computeShipBerth(ship: Ship, dock: IslandDock, side?: -1 | 1): { x: number; z: number } | null {
+    const island = this.islandOfDock(dock);
     if (!island) return null;
-    const stats = SHIP_STATS[ship.type];
+    return this.computeBerthFor(ship.type, island, dock, side);
+  }
+
+  /** The berth planner proper, by hull TYPE — so a berth can be offered (and
+   *  its depth verified) before the hull that will lie in it exists. `side`
+   *  pins one of the pier's two berths; without it the moor side is tried
+   *  first, as it always was. */
+  private computeBerthFor(
+    type: Ship['type'],
+    island: Island,
+    dock: IslandDock,
+    side?: -1 | 1,
+  ): { x: number; z: number } | null {
+    const stats = SHIP_STATS[type];
     const fwd = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
     const right = { x: Math.cos(dock.rotation), z: -Math.sin(dock.rotation) };
     const half = stats.length * 0.5;
@@ -8076,7 +8213,7 @@ export class Match {
     // and a wave-bob margin. The old conservative KEEL_DRAFT_RATIO figure demanded
     // ~0.7m more water than the hull actually needs, which is a big part of why
     // berths slid off the end of shallow-shelf docks.
-    const draft = stats.height * SHIP.HULL_DRAFT_F[ship.type];
+    const draft = stats.height * SHIP.HULL_DRAFT_F[type];
     const needDepth = -(draft + SHIP.GROUND_KEEL_SAFETY + BERTH_BOB_MARGIN);
     // Sample where PhysicsSystem's HULL_CONTACT_STATIONS do, so "floats here"
     // means exactly the same thing to the berth planner and to grounding.
@@ -8092,10 +8229,10 @@ export class Match {
     // run out onto a reef, so their deep water is on the INSIDE — the old
     // seaward-only slide gave up there and fell back to a berth ~40m off the tip.
     for (const shift of berthShiftLadder(dock.length)) {
-      for (const side of [dock.moorSide, -dock.moorSide]) {
+      for (const berthSide of side !== undefined ? [side] : [dock.moorSide, -dock.moorSide]) {
         const along = alongStart + shift;
-        const cx = dock.position.x + fwd.x * along + right.x * side * lateral;
-        const cz = dock.position.z + fwd.z * along + right.z * side * lateral;
+        const cx = dock.position.x + fwd.x * along + right.x * berthSide * lateral;
+        const cz = dock.position.z + fwd.z * along + right.z * berthSide * lateral;
         let shallowest = -Infinity;
         for (const offset of stations) {
           const y = getIslandSurfaceY(island, cx + fwd.x * offset, cz + fwd.z * offset);
