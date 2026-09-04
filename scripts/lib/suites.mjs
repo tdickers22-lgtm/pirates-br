@@ -112,7 +112,9 @@ export const LOGIC = [
   quick(tsx('test-hud-ship-struck.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
-  quick(tsx('test-material-floor.mjs')),
+  // Not quick: 103.6s of its own on this machine (2026-09-03 run), which alone
+  // blew the 60s quick-tier ceiling. It still runs in the full logic tier.
+  tsx('test-material-floor.mjs'),
   quick(tsx('test-sea-voids.mjs')),
   tsx('test-bot-peace-window.mjs'),
   // BOT-02: a bot whose lone pirate is dead is an unmanned hull (w1.1).
