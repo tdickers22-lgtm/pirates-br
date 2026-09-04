@@ -18,6 +18,10 @@ import { showWhenAffordable } from './FirstDrawBudget.js';
  *  shared getStormWaveIntensity() per ship position. */
 type ShipStormSource = number | { center: Vec2; safeRadius: number; phase: number } | null | undefined;
 
+/** The hull AS DRAWN: mesh.root's world placement and its full attitude. Crew,
+ *  camera and every welded point read this, never the snapshot transform. */
+export type RenderedHullPose = { x: number; y: number; z: number; yaw: number; pitch: number; roll: number };
+
 const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
   hull_reinforcement: 0x67b9ff,
   charged_cannons: 0xff8459,
@@ -5088,13 +5092,19 @@ export class ShipRenderer {
    *          transform for those frames, which is what every caller did
    *          unconditionally before this existed.
    */
-  readRenderedHull(shipId: string, out: { x: number; y: number; z: number; yaw: number }): boolean {
+  readRenderedHull(shipId: string, out: RenderedHullPose): boolean {
     const mesh = this.shipMeshes.get(shipId);
     if (!mesh) return false;
     out.x = mesh.root.position.x;
     out.y = mesh.root.position.y;
     out.z = mesh.root.position.z;
+    // ATTITUDE, NOT JUST YAW (DECK-01). This used to return the yaw alone, with
+    // a comment saying leaning the crew with the hull was "a separate decision".
+    // It is not separate any more: mesh.root.rotation.x/z ARE the deck the crew
+    // are drawn standing on, so anything welded to this hull reads all three.
     out.yaw = mesh.root.rotation.y;
+    out.pitch = mesh.root.rotation.x;
+    out.roll = mesh.root.rotation.z;
     return true;
   }
 

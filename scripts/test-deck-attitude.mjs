@@ -179,5 +179,45 @@ expect(`the SERVER lists a port-holed galleon (roll ${list.roll.toFixed(3)} rad,
 expect(`the server's list ceiling (${FLOODING.LIST_ROLL_MAX}) covers the client term it replaces (0.122)`,
   FLOODING.LIST_ROLL_MAX >= 0.122);
 
+console.log('— the client seats crew through the RENDERED matrix, not yaw alone —');
+// Game.ts places an on-ship pirate by undoing the SERVER frame and re-applying
+// the hull's DRAWN frame. Graded against the same independent Ry·Rx·Rz: the
+// yaw-only placement it replaces is shown alongside so the clause cannot pass
+// by being trivially true.
+{
+  const gameSrc = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  expect('Game.ts seats on-ship crew with toShipWorld3(toShipLocal3(...))',
+    /const seat = toShipLocal3\(player\.position, ship\)/.test(gameSrc) && /toShipWorld3\(seat,/.test(gameSrc));
+  expect('the camera roll is no longer pinned to the token ±0.06 rad',
+    !/clamp\(-\(trackedShip\.roll \?\? 0\) \* 0\.5, -0\.06, 0\.06\)/.test(gameSrc));
+
+  const stats = SHIP_STATS.galleon;
+  const deckLocalY = stats.height + SHIP.DECK_STAND_OFFSET;
+  const ship = { id: 'g', type: 'galleon', position: { x: 40, y: 0.3, z: 9 }, rotation: 1.3, pitch: 0.35, roll: 0.45 };
+  // The renderer eases toward the replicated attitude, so the drawn hull trails
+  // it slightly — that is the case the re-projection has to survive.
+  const hull = { position: { x: 40.05, y: 0.34, z: 9.02 }, rotation: 1.31, pitch: 0.33, roll: 0.42 };
+  let newWorst = 0;
+  let oldWorst = 0;
+  for (const st of [{ x: 0, z: stats.length * 0.44 }, { x: 0, z: -stats.length * 0.44 }, { x: stats.width * 0.4, z: 0 }]) {
+    const standWorld = toShipWorld3({ x: st.x, y: deckLocalY, z: st.z }, ship); // where the server puts him
+    const seat = toShipLocal3(standWorld, ship);
+    const drawnByUs = toShipWorld3(seat, hull);
+    const ref = drawnWorldPoint({ position: hull.position, rotation: hull.rotation, pitch: hull.pitch, roll: hull.roll }, st.x, deckLocalY, st.z);
+    newWorst = Math.max(newWorst, Math.abs(drawnByUs.y - ref.y), Math.abs(drawnByUs.x - ref.x), Math.abs(drawnByUs.z - ref.z));
+    // The placement this replaces, end to end: a FLAT server seat (the deck
+    // plane before slice b) welded to the hull by yaw and translation only.
+    const lx = st.x, lz = st.z;
+    const hc = Math.cos(hull.rotation), hs = Math.sin(hull.rotation);
+    const oldY = ship.position.y + deckLocalY + (hull.position.y - ship.position.y);
+    oldWorst = Math.max(oldWorst,
+      Math.abs(oldY - ref.y),
+      Math.abs((hull.position.x + lx * hc + lz * hs) - ref.x),
+      Math.abs((hull.position.z + lz * hc - lx * hs) - ref.z));
+  }
+  expect(`re-projected crew land on the drawn planking (${newWorst.toExponential(1)} m; the yaw-only placement it replaces is off by ${oldWorst.toFixed(2)} m)`,
+    newWorst < 1e-9 && oldWorst > 1.0, `new=${newWorst} old=${oldWorst}`);
+}
+
 if (failures) { console.error(`\n${failures} assertion(s) FAILED`); process.exit(1); }
 console.log('\nPASS: the deck a pirate stands on is the deck that is drawn.');

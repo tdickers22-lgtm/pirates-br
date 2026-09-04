@@ -16,6 +16,8 @@ import {
   getConstrainedCannonAim,
   getRepairPlankCount,
   toShipLocalPoint,
+  toShipLocal3,
+  toShipWorld3,
   countOpenHoles,
   findRepairableHole as sharedFindRepairableHole,
 } from '../../shared/interactions.js';
@@ -4124,12 +4126,14 @@ export class Game {
     if (!placedFromBuffer && player.onShipId && this.state) {
       const ship = this.shipsById.get(player.onShipId) ?? null;
       if (ship) {
-        const dx = player.position.x - ship.position.x;
-        const dz = player.position.z - ship.position.z;
-        const cos = Math.cos(ship.rotation);
-        const sin = Math.sin(ship.rotation);
-        const localX = dx * cos - dz * sin;
-        const localZ = dx * sin + dz * cos;
+        // THE HULL-LOCAL SEAT, IN THREE DIMENSIONS (DECK-01).
+        //
+        // The server's player.position now carries the hull's own pitch and roll
+        // (getShipFloorYAt), so undoing the SERVER attitude here and re-applying
+        // the RENDERED one is what welds a pirate to the planking on the screen.
+        // Undoing yaw alone, as this did, left the bow of a galleon 3.3 m under
+        // a man's boots at the storm cap and 0.9 m in a calm swell.
+        const seat = toShipLocal3(player.position, ship);
         // WELD HIM TO THE HULL THAT IS DRAWN, not to the one in the snapshot.
         //
         // This used to re-extrapolate the ship here, with its own lead
@@ -4140,16 +4144,19 @@ export class Game {
         // crew rigid with the deck by construction — whatever the hull's own
         // extrapolation and easing do, they do to the men standing on it too.
         const hull = this.readShipRenderPose(ship);
-        const hullCos = Math.cos(hull.yaw);
-        const hullSin = Math.sin(hull.yaw);
-        predictedX = hull.x + localX * hullCos + localZ * hullSin
-          + (player.velocity.x + player.knockbackVelocity.x * 0.32) * leadSeconds;
-        predictedZ = hull.z + localZ * hullCos - localX * hullSin
-          + (player.velocity.z + player.knockbackVelocity.z * 0.32) * leadSeconds;
-        // …and vertically too. The drawn hull rides the wave heave and settles as
-        // she floods; the server's y does not, so the deck used to bob out from
-        // under a crew that stayed at snapshot height (0.30m mean, 1.10m worst).
-        visualY += hull.y - ship.position.y;
+        const drawn = toShipWorld3(seat, {
+          position: { x: hull.x, y: hull.y, z: hull.z },
+          rotation: hull.yaw,
+          pitch: hull.pitch,
+          roll: hull.roll,
+        });
+        predictedX = drawn.x + (player.velocity.x + player.knockbackVelocity.x * 0.32) * leadSeconds;
+        predictedZ = drawn.z + (player.velocity.z + player.knockbackVelocity.z * 0.32) * leadSeconds;
+        // …and vertically too. The drawn hull rides the wave heave, settles as
+        // she floods AND pitches/rolls; the server's y carries the attitude but
+        // not the renderer's easing, so the deck used to bob out from under a
+        // crew that stayed at snapshot height (0.30m mean, 1.10m worst).
+        visualY += drawn.y - player.position.y;
       }
     }
     // DEAD RECKONING — carry the body forward at the velocity the snapshot said
@@ -6299,13 +6306,24 @@ export class Game {
         : 0,
     );
 
-    // ── Deck roll coupling: lean the view with the hull heel, clamped to ±0.06 rad.
+    // ── THE VIEW LEANS WITH THE DECK YOU ARE STANDING ON (DECK-01/ships-03).
+    //
+    // This was a token ±0.06 rad (3.4°) taken from the SERVER roll and halved —
+    // a hull heeled to its 0.55 rad clamp moved the view by a twentieth of what
+    // the planking did, which is why the strongest "I am on a ship" cue in the
+    // genre (the horizon moving while your deck stays under you) was missing.
+    // Now it is the DRAWN attitude, at full strength, eased over ~0.15 s:
+    // ROLL_SMOOTH_TAU 0.15 → alpha = 1 − exp(−dt/tau), frame-rate independent.
+    // Capped well inside the server's own ±0.55 so a founder cannot roll the
+    // horizon past vertical.
     let rollTarget = 0;
     if (onDeck && trackedShip) {
-      rollTarget = THREE.MathUtils.clamp(-(trackedShip.roll ?? 0) * 0.5, -0.06, 0.06);
+      const hull = this.readShipRenderPose(trackedShip);
+      rollTarget = THREE.MathUtils.clamp(-hull.roll, -0.5, 0.5);
     }
-    this.cameraRoll += (rollTarget - this.cameraRoll) * Math.min(1, this.frameDt * 4);
-    this.cameraRoll = THREE.MathUtils.clamp(this.cameraRoll, -0.06, 0.06);
+    const rollAlpha = 1 - Math.exp(-this.frameDt / 0.15);
+    this.cameraRoll += (rollTarget - this.cameraRoll) * rollAlpha;
+    this.cameraRoll = THREE.MathUtils.clamp(this.cameraRoll, -0.5, 0.5);
     if (Math.abs(this.cameraRoll) > 0.0002) camera.rotateZ(this.cameraRoll);
 
     // ── Impact shake (own-hull hits) + a sluggish wallow when heavily flooded.
@@ -7435,7 +7453,7 @@ export class Game {
 
   /** Scratch for {@link readShipRenderPose}: one hull pose, consumed by its caller
    *  before the next call can overwrite it. Never held across a frame. */
-  private readonly tempHullPose = { x: 0, y: 0, z: 0, yaw: 0 };
+  private readonly tempHullPose = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, roll: 0 };
 
   /**
    * The hull a ship-local point must be resolved against: the one on the screen.
@@ -7454,6 +7472,8 @@ export class Game {
     pose.y = ship.position.y;
     pose.z = ship.position.z;
     pose.yaw = ship.rotation;
+    pose.pitch = ship.pitch ?? 0;
+    pose.roll = ship.roll ?? 0;
     return pose;
   }
 
