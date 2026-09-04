@@ -198,6 +198,12 @@ export const LOGIC = [
  */
 export const SERVER = [
   { ...tsx('test-net-resilience.mjs'), timeoutMs: 120_000 },
+  // PARTY-01: the lobby state machine (create/join/ready/kick/crown/start/end/
+  // play-again) over real sockets on a kernel-picked port. It sleeps through
+  // the auto-detach, reap and lockout clocks turned down via LobbyServer
+  // .tunables, and spawns ~10 short matches, so it wants more than the tier's
+  // default: measured 46 s on this Air.
+  { ...tsx('test-lobby-flow.mjs'), timeoutMs: 180_000 },
   { ...tsx('test-http-hardening.mjs'), timeoutMs: 60_000 },
 ];
 
