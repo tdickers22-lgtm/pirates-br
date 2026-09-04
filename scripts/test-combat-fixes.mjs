@@ -320,9 +320,23 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
   // Sinking a ship does NOT eliminate its crew — they swim out and stay in
   // the fight (their respawn anchor is gone, nothing else). The rammer is
   // paid in a ship-sink bounty, not kill credit.
+  //
+  // SINK-01 (w4.1) changed WHEN they get wet: they no longer all pop into the
+  // water the instant she founders, they ride the deck down and leave as the
+  // plank under each pair of boots goes under. So the founder has to be driven
+  // forward here — sink her through the awash fraction and run the crew update
+  // that PhysicsSystem/Match run every tick — before the state is read.
+  let founderT = 0;
+  for (let i = 0; i < 60 * 62 && victimCrew.some((p) => p.state !== 'swimming'); i++) {
+    shipB.sinkProgress = Math.min(1, shipB.sinkProgress + DT * 0.05);
+    match.updateFounderingCrew(DT);
+    founderT += DT;
+  }
   expect('the rammed crew survives the sink (swimming, not eliminated)',
     victimCrew.every((p) => p.state === 'swimming' && p.health > 0),
-    victimCrew.map((p) => p.state).join(','));
+    `${victimCrew.map((p) => p.state).join(',')} after ${founderT.toFixed(1)}s of founder`);
+  expect('they left the deck as she went under, not the instant she foundered',
+    founderT > 0, `left after ${founderT.toFixed(1)}s`);
   expect('rammer banks NO kills for the sink itself', attacker.kills === killsBefore,
     `kills=${attacker.kills}`);
   expect('rammer banks the ship-sink bounty', attacker.gold >= goldBefore + PLAYER.SHIP_SINK_GOLD,
@@ -829,8 +843,13 @@ console.log('\n11. The hole list fits the wire, even with every hull at the cap'
   expect('the server-internal hole counter never ships', !riddled.includes('nextHoleId'));
   expect('the retired per-section hull bars are gone from the wire',
     !/"hull":\{/.test(riddled));
-  expect('an open breach ships id + point and nothing else',
-    /\{"id":\d+,"x":-?[\d.]+,"y":-?[\d.]+,"z":-?[\d.]+\}/.test(riddled));
+  // SINK-01 (w4.1) added exactly ONE field: `tier`, the height class the server
+  // stamps at placement. The pin stays exact — id, point, tier, and nothing
+  // else — so a future field cannot slip onto the breach wire unnoticed.
+  expect('an open breach ships id + point + tier and nothing else',
+    /\{"id":\d+,"x":-?[\d.]+,"y":-?[\d.]+,"z":-?[\d.]+,"tier":[012]\}/.test(riddled));
+  expect('a patched breach adds only the patched flag',
+    !/"patched":true/.test(riddled) || /\{"id":\d+,"x":-?[\d.]+,"y":-?[\d.]+,"z":-?[\d.]+,"tier":[012],"patched":true\}/.test(riddled));
 }
 
 if (failures > 0) {
