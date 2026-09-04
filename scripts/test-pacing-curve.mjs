@@ -37,10 +37,12 @@ const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗'} ${msg}`); if (!
 for (const g of gradeBands(mean, PACING_TARGETS.BANDS)) {
   ok(g.ok, `${g.mark}s: mean ${g.value.toFixed(2)} crews afloat in [${g.lo}, ${g.hi}]`);
 }
-// End reason is REPORTED, not graded: today no seeded bot-only match ends (the
-// closed ring does not sink bot hulls; 3 crews still afloat at 1500 s). That is
-// an endgame defect for its own lane, and grading it here would keep this gate
-// red for reasons the pacing constants cannot fix. Grade it once that lane lands.
+// End reason is REPORTED, not graded. That note used to say no seeded bot-only
+// match ever ends (3 crews still afloat at 1500 s); measured at 6acbc37a, seed
+// 20260801, both runs END by last_ship at 779 s and 767 s, so the closed ring
+// does finish a bot fleet now. Still not graded here: WHEN a match ends is the
+// endgame lane's number, and grading it in the pacing gate would make one lane's
+// re-band turn another lane's gate red. Grade it once END-01 lands.
 for (const r of rows) {
   console.log(`  – ${r.matchId}: ${r.endReason === 'timeout' ? 'did not end' : `ended by ${r.endReason}`}`
     + ` at ${r.endT.toFixed(0)} s, ${r.endAlive} afloat`);
