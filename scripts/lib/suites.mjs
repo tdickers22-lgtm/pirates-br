@@ -77,6 +77,9 @@ export const LOGIC = [
   quick(tsx('test-dev-hooks.mjs')),
   quick(tsx('test-traversal.mjs')),
   quick(tsx('test-revive.mjs')),
+  // SPAWN-01: 12 crews, 10 piers x 2 berths — no hull stacked on another, bot
+  // fleet moored, late joiner anchored. ~4 s of real Match, no stack.
+  quick(tsx('test-spawn-berths.mjs')),
   quick(tsx('test-snapshot-size.mjs')),
   quick(tsx('test-combat-fixes.mjs')),
   quick(tsx('test-geyser.mjs')),
