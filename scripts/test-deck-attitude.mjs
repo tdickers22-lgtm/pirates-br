@@ -13,8 +13,10 @@
 // hull-local deck point pushed through a 3x3 matrix built as Ry·Rx·Rz, exactly
 // the way three.js composes a YXZ Euler for mesh.root. Sign, order and axis all
 // have to agree or the reference disagrees.
+import { readFileSync } from 'node:fs';
 import { getShipFloorYAt, toShipLocal3, toShipWorld3, shipLocalUpY } from '../src/shared/interactions.ts';
-import { SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
+import { floodListTargets } from '../src/server/systems/PhysicsSystem.ts';
+import { FLOODING, SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import { getCrowNestStandingY, getMainMastLocalZ, getShipDeckWalkHalfWidth } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -149,6 +151,33 @@ for (const type of TYPES) {
   }
 }
 expect(`pitch=roll=0 returns exactly the old flat answer (${flatWorst.toExponential(1)} m)`, flatWorst === 0);
+
+console.log('— the drawn attitude is the REPLICATED attitude: no client-only heel (physics-18) —');
+// Once crew and camera ride mesh.root (DECK-01), an attitude term the server
+// does not know about is not a flourish: it is daylight under a pirate's boots
+// and a hitbox that disagrees with the body on screen. The renderer used to add
+// a flood list (0.122 rad), a flood trim (0.06), an extra settle, a steer heel
+// (0.12·omega) and a sail lean (0.045) — all five of which the server's own
+// attitude spring already produces and puts on the wire.
+const rendererSrc = readFileSync(new URL('../src/client/rendering/ShipRenderer.ts', import.meta.url), 'utf8');
+for (const term of ['floodRoll', 'floodPitch', 'floodSettle', 'steerRoll', 'sailLean']) {
+  const declared = new RegExp(`\\b(const|let|var)\\s+${term}\\b`).test(rendererSrc);
+  expect(`ShipRenderer no longer computes a client-only ${term}`, !declared);
+}
+
+// ...and prove the server really does own what was deleted, or the delete would
+// be a lost feature rather than a de-duplication.
+const holed = {
+  id: 'holed', type: 'galleon',
+  position: { x: 0, y: -0.2, z: 0 }, rotation: 0, pitch: 0, roll: 0,
+  waterLevel: 0.5, sinking: false,
+  holes: [0, 1, 2].map((i) => ({ id: i, x: -SHIP_STATS.galleon.width * 0.4, y: -0.4, z: (i - 1) * 2, patched: false })),
+};
+const list = floodListTargets(holed, 0, 0);
+expect(`the SERVER lists a port-holed galleon (roll ${list.roll.toFixed(3)} rad, to starboard-up)`,
+  list.roll > 0.05, `floodListTargets returned roll=${list.roll}`);
+expect(`the server's list ceiling (${FLOODING.LIST_ROLL_MAX}) covers the client term it replaces (0.122)`,
+  FLOODING.LIST_ROLL_MAX >= 0.122);
 
 if (failures) { console.error(`\n${failures} assertion(s) FAILED`); process.exit(1); }
 console.log('\nPASS: the deck a pirate stands on is the deck that is drawn.');

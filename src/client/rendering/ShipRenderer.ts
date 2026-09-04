@@ -4231,25 +4231,25 @@ export class ShipRenderer {
       );
       const basePitch = serverPitch === null ? motion.pitch : THREE.MathUtils.lerp(serverPitch, motion.pitch, staleBlend);
       const baseRoll = serverRoll === null ? motion.roll : THREE.MathUtils.lerp(serverRoll, motion.roll, staleBlend);
-      // Flood attitude: settle deeper as the bilge fills and list toward the
-      // most-damaged side (up to ~7°) so a breached flank reads at a glance.
-      const floodGate = ship.sinking ? 0 : Math.min(1, waterLevel * 2.2);
-      // List toward the breached side: which way she lies now comes straight
-      // from where the open holes actually are, not a section average.
-      let holePort = 0, holeStbd = 0, holeBow = 0, holeStern = 0;
-      for (const hole of ship.holes ?? []) {
-        if (hole.patched) continue;
-        if (hole.x < 0) holePort += 1; else holeStbd += 1;
-        if (hole.z > 0) holeBow += 1; else holeStern += 1;
-      }
-      const floodRoll = THREE.MathUtils.clamp((holePort - holeStbd) / 3, -1, 1) * 0.122 * floodGate;
-      const floodPitch = THREE.MathUtils.clamp((holeBow - holeStern) / 3, -1, 1) * 0.06 * floodGate;
-      // Visual extra on top of the server's FREEBOARD_DROP (0.8·wl, already in
-      // heave): total settle tops out at ~45% of freeboard at full flood.
-      const floodSettle = ship.sinking ? 0 : waterLevel * waterLevel * Math.max(0, stats.height * 0.45 - 0.8);
+      // THE DRAWN ATTITUDE IS THE REPLICATED ATTITUDE (physics-18).
+      //
+      // This block used to add a client-only flood list (±0.122 rad), a
+      // client-only flood trim (±0.06) and a client-only settle on top of the
+      // server's FREEBOARD_DROP — every one of them a second copy of something
+      // the server already owns and already puts on the wire: floodListTargets
+      // feeds ship.pitch/ship.roll through the attitude spring (LIST_ROLL_MAX
+      // 0.25 / LIST_TRIM_MAX 0.15) and the buoyancy target already drops by
+      // 0.8·waterLevel. So the list was applied TWICE, and worse, the hull the
+      // crew were drawn on was not the hull the server floods: a breach the
+      // client tilted above the visible water was gushing on the server.
+      //
+      // Now that crew and camera ride this matrix (DECK-01), a client-only term
+      // is not a flourish — it is a metre of daylight under a pirate's boots
+      // and a hitbox that disagrees with the body you can see. Nothing is added
+      // here that the server has not sent.
       const heave = ship.sinking
         ? 0
-        : (serverHeave === null ? clientHeave : THREE.MathUtils.lerp(serverHeave, clientHeave, staleBlend)) - floodSettle;
+        : (serverHeave === null ? clientHeave : THREE.MathUtils.lerp(serverHeave, clientHeave, staleBlend));
       // A HULL IS PLACED FROM THE BUFFER WHEN IT IS SOMEBODY ELSE'S.
       //
       // `extrapolation` above is `min(0.14, snapshotAge + dt x 0.5)` — an age
@@ -4342,12 +4342,11 @@ export class ShipRenderer {
         sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, Math.max(0.18, ship.sailHeight), 1 - Math.exp(-8 * dt));
       }
       if (!detailNear) {
-        const visualSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
-        const motionPhase = t * 0.9 + ship.id.charCodeAt(0) * 0.37;
-        const steerRoll = THREE.MathUtils.clamp(-ship.angularVelocity * 0.09, -0.05, 0.05);
-        const sailLean = THREE.MathUtils.clamp(ship.sailHeight * 0.014 + visualSpeed * 0.0015, 0, 0.035);
-        const wavePitch = basePitch + floodPitch + Math.sin(motionPhase) * 0.004;
-        const rollTarget = baseRoll + floodRoll + Math.sin(motionPhase * 1.18) * sailLean + steerRoll;
+        // No client-only heel here either: the server's own attitude spring
+        // already carries turn heel (±0.06) and wind heel, sampled from the real
+        // Gerstner slopes at bow/stern/rails.
+        const wavePitch = basePitch;
+        const rollTarget = baseRoll;
         if (ship.sinking) {
           mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, wavePitch * 0.5, 1 - Math.exp(-4 * dt));
           mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, ship.sinkProgress * Math.PI * 0.36, 1 - Math.exp(-6 * dt));
@@ -4401,12 +4400,8 @@ export class ShipRenderer {
       const chainPayout = 0.76 * (anchorFall / 2.75);
       mesh.anchorChain.scale.y = THREE.MathUtils.lerp(mesh.anchorChain.scale.y, ship.anchored ? 0.52 + anchorDrop * chainPayout : 0.52, anchorAlpha);
 
-      const visualSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
-      const motionPhase = t * 0.9 + ship.id.charCodeAt(0) * 0.37;
-      const steerRoll = THREE.MathUtils.clamp(-ship.angularVelocity * 0.12, -0.07, 0.07);
-      const sailLean = THREE.MathUtils.clamp(ship.sailHeight * 0.018 + visualSpeed * 0.002, 0, 0.045);
-      const wavePitch = basePitch + floodPitch + Math.sin(motionPhase) * 0.005;
-      const rollTarget = baseRoll + floodRoll + Math.sin(motionPhase * 1.18) * sailLean + steerRoll;
+      const wavePitch = basePitch;
+      const rollTarget = baseRoll;
 
       // Sinking tilt
       if (ship.sinking) {
