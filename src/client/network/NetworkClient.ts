@@ -2,7 +2,8 @@ import type {
   HotSnapshotPayload,
   NetMsg, PlayerInput, GameState, TradeActionPayload,
   WelcomePayload, LobbyUpdatePayload, QueueUpdatePayload, MatchStartPayload,
-  MatchCountdownPayload, MatchHornPayload, CrewEliminatedPayload,
+  MatchCountdownPayload, MatchHornPayload, CrewEliminatedPayload, ShipSunkPayload,
+  CarpenterPatchPayload,
   BountyRaisedPayload, CargoSpilledPayload, SpoilClaimedPayload, WreckEventPayload,
   PlayerStatsRecord,
 } from '../../shared/types/index.js';
@@ -47,8 +48,15 @@ export class NetworkClient {
   public onMatchCountdown: ((payload: MatchCountdownPayload) => void) | null = null;
   /** Staged start: the sim just went live. */
   public onMatchHorn: ((payload: MatchHornPayload) => void) | null = null;
-  /** A crew's ship went down — CREWS AFLOAT just dropped. */
+  /** A HULL went under. Not an elimination: her crew are swimming out of her
+   *  and still in the match. This is the moment the player must see (SHIP SUNK
+   *  line, counter pulse, sting) — it was landed on the wire with no case here
+   *  at all, so every founder was silent on screen (review-0 P1). */
+  public onShipSunk: ((payload: ShipSunkPayload) => void) | null = null;
+  /** A crew is OFF THE BOARD — CREWS AFLOAT just dropped. */
   public onCrewEliminated: ((payload: CrewEliminatedPayload) => void) | null = null;
+  /** The carpenter spent a plank on a leak at anchor — own crew's feed line. */
+  public onCarpenterPatch: ((payload: CarpenterPatchPayload) => void) | null = null;
   /** A crew crossed the gold-bounty line — hunt the treasure galleon. */
   public onBountyRaised: ((payload: BountyRaisedPayload) => void) | null = null;
   /** A foundering crew's cargo burst into the shallows — a dive site opened. */
@@ -298,7 +306,9 @@ export class NetworkClient {
       case 'match_ended': this.onMatchEnded?.(msg.payload); break;
       case 'match_countdown': this.onMatchCountdown?.(msg.payload as Parameters<NonNullable<typeof this.onMatchCountdown>>[0]); break;
       case 'match_horn': this.onMatchHorn?.(msg.payload as Parameters<NonNullable<typeof this.onMatchHorn>>[0]); break;
+      case 'ship_sunk': this.onShipSunk?.(msg.payload as Parameters<NonNullable<typeof this.onShipSunk>>[0]); break;
       case 'crew_eliminated': this.onCrewEliminated?.(msg.payload as Parameters<NonNullable<typeof this.onCrewEliminated>>[0]); break;
+      case 'carpenter_patch': this.onCarpenterPatch?.(msg.payload as Parameters<NonNullable<typeof this.onCarpenterPatch>>[0]); break;
       case 'bounty_raised': this.onBountyRaised?.(msg.payload as Parameters<NonNullable<typeof this.onBountyRaised>>[0]); break;
       case 'cargo_spilled': this.onCargoSpilled?.(msg.payload as Parameters<NonNullable<typeof this.onCargoSpilled>>[0]); break;
       case 'spoil_claimed': this.onSpoilClaimed?.(msg.payload as Parameters<NonNullable<typeof this.onSpoilClaimed>>[0]); break;

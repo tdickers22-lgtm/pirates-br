@@ -993,6 +993,16 @@ export interface ShipSunkPayload {
   byName: string | null;
 }
 
+/** The ship's carpenter spent a plank on a leak while she lay at anchor. */
+export interface CarpenterPatchPayload {
+  /** The hull he patched — the feed line is her crew's alone. */
+  shipId: string;
+  /** Which breach went under a plank. */
+  holeId: number;
+  /** Planks left in her hold AFTER the repair, so the crew can see the cost. */
+  planksLeft: number;
+}
+
 /** A crew is out of the match: no hull, and nobody left who can still contend. */
 export interface CrewEliminatedPayload {
   /** The sunk ship's id (crew identity on the wire). */

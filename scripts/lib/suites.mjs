@@ -110,6 +110,12 @@ export const LOGIC = [
   // FEED-01/liveplay-21: the defender's ship_hit — HULL STRUCK line, compass
   // arc at the guns, bounded shudder, one feed row per attacker (w1.6).
   quick(tsx('test-hud-ship-struck.mjs')),
+  // WIRING, not copy: every message the server broadcasts reaches a case in
+  // NetworkClient AND a handler something in src/client assigns. `ship_sunk`
+  // and `carpenter_patch` were both landed on the wire with no client case at
+  // all and no suite noticed, because the suites that graded them asserted on
+  // the SERVER payload (review-0 P1, fixup0).
+  quick(plain('test-wire-consumers.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
   // Not quick: 103.6s of its own on this machine (2026-09-03 run), which alone

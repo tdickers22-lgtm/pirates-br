@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
-  BountyRaisedPayload, CargoSpilledPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
+  BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
 import { dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
@@ -258,6 +258,34 @@ export function isDuplicateSinkLine(
 ): boolean {
   if (!shipSink || !killerId || announcedAt === undefined) return false;
   return now - announcedAt < SINK_LINE_DEDUPE_MS;
+}
+
+/** THE FOUNDER'S OWN LINE. `ship_sunk` counts HULLS still afloat, which is what
+ *  the SHIPS AFLOAT chip counts too, so the line and the chip agree — the old
+ *  copy read the hull event off `crew_eliminated` and printed "crews afloat"
+ *  against a chip counting hulls. Credit is named when the server credited it. */
+export function shipSunkLine(payload: { shipName?: string | null; remaining?: number; byName?: string | null }): string {
+  const remaining = Math.max(0, Math.floor(payload.remaining ?? 0));
+  const who = payload.shipName || 'A hull';
+  const credit = payload.byName ? ` \u00b7 sunk by ${payload.byName}` : '';
+  return `SHIP SUNK \u2014 ${who} \u00b7 ${remaining} ship${remaining === 1 ? '' : 's'} afloat${credit}`;
+}
+
+/** A CREW is off the board: no hull, and nobody left who can still contend.
+ *  Fired by updateCrewAttrition up to LOST_AT_SEA_GRACE_SECONDS after the hull
+ *  went down, and the server credits nobody for it (byPlayerId is null there),
+ *  so this line never claims a killer. */
+export function crewEliminatedLine(payload: { crewName?: string | null; remaining?: number }): string {
+  const remaining = Math.max(0, Math.floor(payload.remaining ?? 0));
+  const who = payload.crewName || 'A crew';
+  return `CREW ELIMINATED \u2014 ${who} \u00b7 ${remaining} crew${remaining === 1 ? '' : 's'} left`;
+}
+
+/** The carpenter's plank, spent at anchor. Own crew only: the cost comes out of
+ *  YOUR hold (OPEN-01/liveplay-08 — a hold that empties itself was silent). */
+export function carpenterPatchLine(planksLeft: number | undefined): string {
+  const left = Math.max(0, Math.floor(planksLeft ?? 0));
+  return `Carpenter planked a leak \u00b7 ${left} plank${left === 1 ? '' : 's'} left`;
 }
 
 /** The defender's copy of 'ship_hit' as Match.notifyCrewUnderFire sends it. */
@@ -1363,11 +1391,16 @@ export class Game {
     this.pushFeed(`${payload.playerName} recovered ${payload.gold}g of sunken cargo.`, '#d9c17e');
   }
 
-  // ── Crew eliminations ─────────────────────────────────────────────────
+  // ── Founders and crew eliminations ────────────────────────────────────
   /**
-   * A crew's ship went under. CREWS AFLOAT used to fall 10 → 7 → 5 with no
-   * on-screen event at all, so the BR's tension meter decayed invisibly: a gold
-   * feed line, a counter pulse and a sting now mark every one.
+   * A HULL WENT UNDER. SHIPS AFLOAT used to fall 10 → 7 → 5 with no on-screen
+   * event at all, so the BR's tension meter decayed invisibly: a gold feed
+   * line, a counter pulse and a sting now mark every one.
+   *
+   * The server sends this on `ship_sunk`, the moment she founders. For a while
+   * the wire carried the message and the client had no case for it, so the only
+   * thing a player saw was `crew_eliminated` up to 60 s later, quoting crews at
+   * a chip that counts hulls, with the credit gone (review-0 P1).
    *
    * The line says SHIP SUNK, not "crew eliminated": this fires the moment the
    * hull starts going down, and under the sink-survival rule that crew is still
@@ -1376,23 +1409,41 @@ export class Game {
    * itself never told (it counts hulls AFLOAT); real eliminations have their own
    * kill-feed lines.
    */
-  private announceCrewEliminated(payload: CrewEliminatedPayload): void {
-    const remaining = Math.max(0, payload.remaining);
-    const credit = payload.byName ? ` · sunk by ${payload.byName}` : '';
-    this.pushFeed(
-      `SHIP SUNK — ${remaining} crew${remaining === 1 ? '' : 's'} afloat · ${payload.crewName}${credit}`,
-      '#f0c46a',
-    );
+  private announceShipSunk(payload: ShipSunkPayload): void {
+    this.pushFeed(shipSunkLine(payload), '#f0c46a');
     // One sinking, one line. The kill handler prints its own "X sank Y" for the
     // same event; at 3 rows the duplicate pushed the line that mattered off the
-    // panel (liveplay-23).
+    // panel (liveplay-23). The stamp has to be taken HERE: `crew_eliminated`
+    // carries byPlayerId = null (the server credits nobody for attrition), so
+    // stamping it there left the map empty and the dedupe dead.
     if (payload.byPlayerId) this.sinkAnnouncedAt.set(payload.byPlayerId, performance.now());
     this.hud.pulseCrewsAfloat();
     // The killer already got playKill + playKillConfirm off their own hit —
     // a second toll on top of those is mud, not drama.
     if (payload.byPlayerId !== this.localPlayerId) this.audio.playKill();
+  }
+
+  /** A crew is OFF THE BOARD. Distinct from the founder above: it lands when
+   *  the last hand is gone or the lost-at-sea grace runs out, and it is what
+   *  CREWS AFLOAT counts down. */
+  private announceCrewEliminated(payload: CrewEliminatedPayload): void {
+    const remaining = Math.max(0, payload.remaining);
+    this.pushFeed(crewEliminatedLine(payload), '#f0c46a');
+    this.hud.pulseCrewsAfloat();
     if (remaining === 3) this.pushFeed('THREE CREWS REMAIN — ENDGAME', '#ff9d5c');
     else if (remaining === 2) this.pushFeed('FINAL DUEL — TWO CREWS LEFT', '#ff8a6a');
+  }
+
+  /**
+   * THE CARPENTER SAYS WHAT HE SPENDS. At anchor the ship's carpenter planks
+   * her leaks out of the hold's own planks; the server has broadcast every one
+   * of them since lane 1.5 and nothing on the client read the message, so a
+   * hold that emptied itself while the crew was ashore was silent (OPEN-01,
+   * liveplay-08). Your crew's hull only — the fleet's repairs are not news.
+   */
+  private announceCarpenterPatch(payload: CarpenterPatchPayload): void {
+    if (payload.shipId !== this.localShipId) return;
+    this.pushFeed(carpenterPatchLine(payload.planksLeft), '#9ad4b0');
   }
 
   // ── First objective: your own hull ────────────────────────────────────
@@ -1949,7 +2000,9 @@ export class Game {
 
     this.network.onMatchCountdown = (payload) => this.onMatchCountdownTick(payload);
     this.network.onMatchHorn = (payload) => this.onMatchHornBlown(payload);
+    this.network.onShipSunk = (payload) => this.announceShipSunk(payload);
     this.network.onCrewEliminated = (payload) => this.announceCrewEliminated(payload);
+    this.network.onCarpenterPatch = (payload) => this.announceCarpenterPatch(payload);
     this.network.onBountyRaised = (payload) => this.announceBounty(payload);
     this.network.onCargoSpilled = (payload) => this.announceCargoSpill(payload);
     this.network.onSpoilClaimed = (payload) => this.announceSpoilClaimed(payload);

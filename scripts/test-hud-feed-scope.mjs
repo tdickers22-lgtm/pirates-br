@@ -13,6 +13,7 @@
 // The four rules are pure functions on Game's module surface: no DOM, no stack.
 import {
   isOwnCrewActorIn, parleyConcernsMe, isDuplicateSinkLine, pointerLockHintFor,
+  shipSunkLine, crewEliminatedLine, carpenterPatchLine,
 } from '../src/client/core/Game.ts';
 
 let failures = 0;
@@ -54,6 +55,35 @@ expect('…but a second sinking by the same killer 3 s later still prints',
 expect('a plain kill (no sinking) always prints', !isDuplicateSinkLine(false, 'teal', now - 400, now));
 expect('an uncredited sinking always prints', !isDuplicateSinkLine(true, undefined, now - 400, now));
 expect('a sinking nobody announced always prints', !isDuplicateSinkLine(true, 'teal', undefined, now));
+
+console.log('\nA founder and an elimination are two different events, said differently');
+// The wire carries both: `ship_sunk` the moment she goes down (hulls afloat,
+// credited) and `crew_eliminated` up to 60 s later (crews left, uncredited).
+// The old copy read the founder off crew_eliminated, so it quoted CREWS at a
+// chip that counts HULLS and printed "sunk by" for a payload whose byName the
+// server hardcodes to null.
+const sunk = shipSunkLine({ shipName: "Vex's sloop", remaining: 7, byName: 'Roke' });
+expect('the founder line names the hull, the count and the credit',
+  sunk === "SHIP SUNK — Vex's sloop · 7 ships afloat · sunk by Roke", sunk);
+expect('an uncredited founder drops the credit clause, not the line',
+  shipSunkLine({ shipName: "Vex's sloop", remaining: 7, byName: null })
+    === "SHIP SUNK — Vex's sloop · 7 ships afloat",
+  shipSunkLine({ shipName: "Vex's sloop", remaining: 7, byName: null }));
+expect('the founder line counts SHIPS, never crews (the chip counts hulls)',
+  /ships? afloat/.test(sunk) && !/crew/.test(sunk), sunk);
+expect('the last hull afloat is singular',
+  shipSunkLine({ shipName: 'A galleon', remaining: 1, byName: null }).includes('1 ship afloat'));
+const elim = crewEliminatedLine({ crewName: "Vex's crew", remaining: 3 });
+expect('an elimination says CREW ELIMINATED, not SHIP SUNK',
+  elim === "CREW ELIMINATED — Vex's crew · 3 crews left", elim);
+expect('an elimination never claims a killer (the server sends byName null)',
+  !/sunk by/.test(elim), elim);
+
+console.log('\nThe carpenter says what he spends');
+expect('the plank count is in the line',
+  carpenterPatchLine(4) === 'Carpenter planked a leak · 4 planks left', carpenterPatchLine(4));
+expect('the last plank is singular', carpenterPatchLine(1).includes('1 plank left'));
+expect('an empty hold reads 0, not NaN', carpenterPatchLine(undefined) === 'Carpenter planked a leak · 0 planks left');
 
 console.log('\nThe pointer-lock hint names the keys of the station you are at');
 expect('at the wheel it says steer, not WASD',
