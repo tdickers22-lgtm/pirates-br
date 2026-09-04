@@ -24,6 +24,12 @@ const QUEUE_TIMER_SECONDS = 15;
 const QUEUE_MATCH_BOTS_FILL_TO = MATCH_TOTAL_SHIPS; // total ships per match (humans + bots)
 const MATCH_GC_AFTER_END_MS = 60_000;
 const ENDED_MATCH_DETACH_MS = 25_000; // auto-return-to-menu after this if client doesn't act
+/** How long after the last roster change the host may start a crew that has not
+ *  all pressed Ready (PLAN 2.2: "host may force after 10 s"). */
+const HOST_FORCE_START_MS = 10_000;
+/** Wrong-code lockout: this many misses from one socket buys a cooldown. */
+const JOIN_FAIL_LIMIT = 5;
+const JOIN_LOCKOUT_MS = 30_000;
 /** How long a match may run with nobody human in it before the lobby stops it.
  *  Match abandons itself when the last human leaves a match already PLAYING —
  *  but a solo whose human quits during the start countdown never trips that,
@@ -135,6 +141,22 @@ function generateCode(): string {
 }
 
 export class LobbyServer {
+  /** THE LOBBY CLOCKS IN ONE PLACE, WRITEABLE BY A TEST (netcode-18).
+   *  scripts/test-lobby-flow.mjs has to witness a 25 s auto-detach, a 60 s
+   *  match reap, a 15 s queue timer, a 10 s host-force window and a 30 s join
+   *  lockout. Sleeping through them serially is three minutes of wall clock in
+   *  a suite that otherwise runs in seconds, so the suite turns them down
+   *  instead of the test drifting away from the shipped numbers. Production
+   *  values ARE the module constants above; only a test writes here. */
+  static tunables = {
+    endedMatchDetachMs: ENDED_MATCH_DETACH_MS,
+    matchGcAfterEndMs: MATCH_GC_AFTER_END_MS,
+    queueTimerSeconds: QUEUE_TIMER_SECONDS,
+    hostForceStartMs: HOST_FORCE_START_MS,
+    joinFailLimit: JOIN_FAIL_LIMIT,
+    joinLockoutMs: JOIN_LOCKOUT_MS,
+  };
+
   private httpServer = createServer((req, res) => this.handleHttp(req, res));
   private wss!: WebSocketServer;
 
@@ -634,9 +656,9 @@ export class LobbyServer {
   }
 
   private queueSecondsRemaining(): number {
-    if (this.queueTimerStartedAt === null) return QUEUE_TIMER_SECONDS;
+    if (this.queueTimerStartedAt === null) return LobbyServer.tunables.queueTimerSeconds;
     const elapsed = (Date.now() - this.queueTimerStartedAt) / 1000;
-    return Math.max(0, Math.ceil(QUEUE_TIMER_SECONDS - elapsed));
+    return Math.max(0, Math.ceil(LobbyServer.tunables.queueTimerSeconds - elapsed));
   }
 
   private broadcastQueue(starting: boolean = false): void {
@@ -660,7 +682,7 @@ export class LobbyServer {
 
     const fastReady = have >= QUEUE_TARGET; // full lobby — go now
     const slowReady = seconds === 0 && have >= QUEUE_MIN_HUMANS_FALLBACK;
-    const enoughHumans = have >= QUEUE_MIN_HUMANS_FAST && seconds <= QUEUE_TIMER_SECONDS - 5;
+    const enoughHumans = have >= QUEUE_MIN_HUMANS_FAST && seconds <= LobbyServer.tunables.queueTimerSeconds - 5;
 
     if (!fastReady && !slowReady && !enoughHumans) return;
 
@@ -858,7 +880,7 @@ export class LobbyServer {
       const endedAt = match.endedAtMs();
       if (endedAt) {
         this.matchEmptySince.delete(matchId);
-        if (now - endedAt > MATCH_GC_AFTER_END_MS) this.reapMatch(matchId, match, 'ended');
+        if (now - endedAt > LobbyServer.tunables.matchGcAfterEndMs) this.reapMatch(matchId, match, 'ended');
         continue;
       }
       // Zombie sweep — see EMPTY_MATCH_GC_MS.
@@ -874,7 +896,7 @@ export class LobbyServer {
     // Auto-detach clients lingering on the post-match screen too long.
     for (const session of this.clients.values()) {
       if (session.state === 'match_ended' && session.endedMatchSince
-          && now - session.endedMatchSince > ENDED_MATCH_DETACH_MS) {
+          && now - session.endedMatchSince > LobbyServer.tunables.endedMatchDetachMs) {
         this.handleReturnToMenu(session);
       }
     }
