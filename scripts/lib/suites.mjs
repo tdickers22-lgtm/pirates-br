@@ -83,6 +83,10 @@ export const LOGIC = [
   // CREW-01: a party of N shares ONE hull — crew record, crew-scaled hull,
   // crewmates set down a stride apart, small arms passing through a crewmate.
   quick(tsx('test-crews.mjs')),
+  // DECK-01 / ships-24 phase 1: the hull loft moved to src/shared/hull.ts —
+  // pins every derived number against the pre-move renderer capture, the sheer
+  // vs walk-taper standing contract, and "only one LOFT_STATIONS in src/".
+  quick(tsx('test-hull-loft.mjs')),
   quick(tsx('test-snapshot-size.mjs')),
   quick(tsx('test-combat-fixes.mjs')),
   quick(tsx('test-geyser.mjs')),
