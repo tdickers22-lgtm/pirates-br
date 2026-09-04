@@ -1314,6 +1314,33 @@ export class Match {
 
     const player = this.playersById.get(playerId);
 
+    // THE HULL BELONGS TO THE CREW, NOT TO THE NAME ON HER PAPERS (netcode-21).
+    // Ownership is checked one line below to decide what founders, so a crew of
+    // four whose captain rage-quit watched their ship go down under them with
+    // three hands still aboard. She passes to a crewmate who is still in the
+    // match; only a hull with NOBODY left founders (below, unchanged).
+    const crew = (this.state.crews ?? []).find((c) => c.memberIds.includes(playerId)) ?? null;
+    for (const ship of this.state.ships) {
+      if (ship.ownerId !== playerId || !ship.alive || ship.sinking) continue;
+      const heir = this.state.players.find((mate) => (
+        mate.id !== playerId
+        && mate.shipId === ship.id
+        && mate.state !== 'eliminated'
+        && !this.isSkeletonPlayer(mate)
+      ));
+      if (!heir) continue;
+      ship.ownerId = heir.id;
+      ship.crewIds = ship.crewIds.filter((id) => id !== playerId);
+      if (crew && crew.shipId === ship.id) crew.leaderId = heir.id;
+    }
+    if (crew) {
+      crew.memberIds = crew.memberIds.filter((id) => id !== playerId);
+      if (crew.memberIds.length === 0) {
+        crew.shipId = null;
+        this.state.crews = (this.state.crews ?? []).filter((c) => c.id !== crew.id);
+      }
+    }
+
     // QUITTING IS A DEATH, AND THE HOLD GOES INTO THE SEA (gameplay-12/15).
     // Leaving mid-match used to delete the hull, the chests aboard her and the
     // death from the K/D line all at once: an alt-F4 was a clean escape from a

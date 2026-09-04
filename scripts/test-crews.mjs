@@ -177,5 +177,29 @@ expect('and it is the rich crew that won it', !!goldWinner && goldWinner.crewId 
   `winnerId=${goldMatch.state.winnerId}`);
 goldMatch.stop();
 
+// ------------------------------------------------ the captain leaves, the ship sails
+console.log('A captain who quits hands over the ship:');
+const leaveMatch = new Match({ matchId: 'crews-leave', botCount: 0 });
+leaveMatch.state.storm.safeRadius = 1200;
+const leaveCrew = leaveMatch.createCrew([{ ws: fakeWs(), name: 'Ann' }, { ws: fakeWs(), name: 'Bo' }]);
+for (const join of leaveCrew.joins) join.send();
+leaveMatch.state.phase = 'playing';
+leaveMatch.crewsAtStart = 2;
+const [captain, mate2] = leaveMatch.state.players.filter((p) => p.crewId === leaveCrew.crewId);
+mate2.onShipId = leaveCrew.shipId;
+leaveMatch.removeClient(captain.id);
+const crewShip = leaveMatch.state.ships.find((s) => s.id === leaveCrew.shipId);
+expect('the hull is still afloat with a hand aboard', !!crewShip && crewShip.alive && !crewShip.sinking,
+  `alive=${crewShip?.alive} sinking=${crewShip?.sinking}`);
+expect('she answers to the crewmate now', crewShip && crewShip.ownerId === mate2.id,
+  `ownerId=${crewShip?.ownerId} mate=${mate2.id}`);
+expect('the crew record follows the handover',
+  (leaveMatch.state.crews ?? []).find((c) => c.id === leaveCrew.crewId)?.leaderId === mate2.id);
+expect('the leaver is off her books',
+  !!crewShip && !crewShip.crewIds.includes(captain.id), JSON.stringify(crewShip?.crewIds));
+expect('and the mate is still standing on his own deck', mate2.state !== 'swimming' && mate2.onShipId === leaveCrew.shipId,
+  `state=${mate2.state} onShipId=${mate2.onShipId}`);
+leaveMatch.stop();
+
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
 process.exit(failures === 0 ? 0 : 1);
