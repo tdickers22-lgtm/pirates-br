@@ -115,6 +115,10 @@ interface ClientSession {
    *  world-build window, where silence is expected rather than suspicious.
    *  Cleared when the client leaves the match. See MATCH_BUILD_WINDOW_MS. */
   matchJoinedAt?: number;
+  /** Wrong party codes tried in a row, and the cooldown they bought. A 6-char
+   *  code space is only as private as the guess rate against it (netcode-23). */
+  joinFails?: number;
+  joinLockedUntil?: number;
   /** Set by onDisconnect so the heartbeat sweep and a later 'close' can't tear
    *  the same session down twice. */
   disposed?: boolean;
@@ -129,6 +133,8 @@ interface Party {
   ready: Set<string>;
   /** Roster mode picked in the panel; inert until MODE-01 (wave 3). */
   mode: string;
+  /** When the roster last changed — the host-force window runs from here. */
+  readyClockAt: number;
   createdAt: number;
   /** True while this party's members are in an active match — blocks new code-joins. */
   inMatch: boolean;
@@ -136,9 +142,15 @@ interface Party {
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
 
+/** SIX characters, not four (netcode-23). 1.07e9 codes instead of 1.05e6, which
+ *  is what makes the join lockout below a real defence rather than theatre.
+ *  Four-character codes already in circulation still resolve: nothing validates
+ *  the LENGTH of a code, only whether the map holds it. */
+const CODE_LENGTH = 6;
+
 function generateCode(): string {
   let code = '';
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < CODE_LENGTH; i++) {
     code += CODE_ALPHABET.charAt(Math.floor(Math.random() * CODE_ALPHABET.length));
   }
   return code;
@@ -172,6 +184,9 @@ export class LobbyServer {
   /** When each running match last had zero humans in it (zombie sweep). */
   private matchEmptySince: Map<string, number> = new Map();
   private clientToMatch: Map<string, string> = new Map(); // clientId → matchId
+  /** code → clientIds refused with "already at sea", to be called back the
+   *  moment that crew lands (netcode-16). */
+  private joinWaiters: Map<string, Set<string>> = new Map();
   private bugsnapLastByIp: Map<string, number> = new Map();
   private stats: StatsStore;
 
@@ -362,10 +377,16 @@ export class LobbyServer {
         return this.handleJoinParty(session, msg);
       case 'leave_party':
         return this.handleLeaveParty(session);
+      case 'party_ready':
+        return this.handlePartyReady(session, msg);
+      case 'party_kick':
+        return this.handlePartyKick(session, msg);
+      case 'party_transfer_host':
+        return this.handleTransferHost(session, msg);
       case 'update_party_settings':
         return this.handleUpdatePartySettings(session, msg);
       case 'start_match':
-        return this.handleStartMatch(session);
+        return this.handleStartMatch(session, msg);
       case 'queue_join':
         return this.handleQueueJoin(session, msg);
       case 'queue_leave':
@@ -431,6 +452,7 @@ export class LobbyServer {
       botFill: PARTY_DEFAULT_BOTS,
       ready: new Set<string>(),
       mode: 'solo',
+      readyClockAt: Date.now(),
       createdAt: Date.now(),
       inMatch: false,
     };
@@ -445,9 +467,27 @@ export class LobbyServer {
     if (!session.name) return this.lobbyError(session, 'Set a name first');
     const payload = (msg.payload ?? {}) as { code?: string };
     const code = (payload.code ?? '').trim().toUpperCase();
+    const now = Date.now();
+    if (session.joinLockedUntil && now < session.joinLockedUntil) {
+      const wait = Math.ceil((session.joinLockedUntil - now) / 1000);
+      return this.lobbyError(session, `Too many wrong codes — wait ${wait}s`);
+    }
     const party = this.parties.get(code);
-    if (!party) return this.lobbyError(session, `Party ${code || '????'} not found`);
+    if (!party) {
+      session.joinFails = (session.joinFails ?? 0) + 1;
+      if (session.joinFails >= LobbyServer.tunables.joinFailLimit) {
+        session.joinFails = 0;
+        session.joinLockedUntil = now + LobbyServer.tunables.joinLockoutMs;
+      }
+      return this.lobbyError(session, `Party ${code || '????'} not found — codes never use 0 O 1 I`);
+    }
+    session.joinFails = 0;
     if (party.inMatch && !party.members.includes(session.id)) {
+      // Do not lose the friend: remember them and call them back when the crew
+      // lands, instead of a 4 s toast and a code they have to ask for again.
+      let waiting = this.joinWaiters.get(code);
+      if (!waiting) { waiting = new Set(); this.joinWaiters.set(code, waiting); }
+      waiting.add(session.id);
       return this.lobbyError(session, 'Crew is already at sea — wait for them to return');
     }
     if (party.members.length >= PARTY_CAPACITY) return this.lobbyError(session, 'Party is full');
@@ -462,8 +502,51 @@ export class LobbyServer {
     }
 
     party.members.push(session.id);
+    party.readyClockAt = Date.now();
     session.state = 'party';
     session.partyCode = code;
+    this.broadcastLobby(party);
+  }
+
+  // ─── Roster verbs (PARTY-01 / netcode-23) ────────────────────
+  private handlePartyReady(session: ClientSession, msg: NetMsg): void {
+    if (session.state !== 'party' || !session.partyCode) return;
+    const party = this.parties.get(session.partyCode);
+    if (!party) return;
+    const ready = (msg.payload as { ready?: boolean } | undefined)?.ready !== false;
+    if (ready) party.ready.add(session.id);
+    else { party.ready.delete(session.id); party.readyClockAt = Date.now(); }
+    this.broadcastLobby(party);
+  }
+
+  private handlePartyKick(session: ClientSession, msg: NetMsg): void {
+    if (session.state !== 'party' || !session.partyCode) return;
+    const party = this.parties.get(session.partyCode);
+    if (!party) return;
+    if (party.hostId !== session.id) return this.lobbyError(session, 'Only the host can kick');
+    const targetId = (msg.payload as { clientId?: string } | undefined)?.clientId;
+    if (!targetId || targetId === session.id) return;
+    if (!party.members.includes(targetId)) return;
+    const target = this.clients.get(targetId);
+    if (!target) {
+      party.members = party.members.filter((id) => id !== targetId);
+      party.ready.delete(targetId);
+      this.broadcastLobby(party);
+      return;
+    }
+    this.lobbyError(target, 'The captain put you ashore');
+    this.removeFromParty(target, true);
+    party.readyClockAt = Date.now();
+  }
+
+  private handleTransferHost(session: ClientSession, msg: NetMsg): void {
+    if (session.state !== 'party' || !session.partyCode) return;
+    const party = this.parties.get(session.partyCode);
+    if (!party) return;
+    if (party.hostId !== session.id) return this.lobbyError(session, 'Only the host can hand over the crown');
+    const targetId = (msg.payload as { clientId?: string } | undefined)?.clientId;
+    if (!targetId || !party.members.includes(targetId)) return;
+    party.hostId = targetId;
     this.broadcastLobby(party);
   }
 
@@ -476,25 +559,54 @@ export class LobbyServer {
     if (session.state !== 'party' || !session.partyCode) return;
     const party = this.parties.get(session.partyCode);
     if (!party || party.hostId !== session.id) return this.lobbyError(session, 'Only the host can change settings');
-    const payload = (msg.payload ?? {}) as { botFill?: number };
+    const payload = (msg.payload ?? {}) as { botFill?: number; mode?: string };
+    if (typeof payload.mode === 'string' && ['solo', 'duos', 'squads'].includes(payload.mode)) {
+      // Recorded and broadcast so lane 3.5 can wire the picker; MODE-01 (wave 3)
+      // is what makes it change the hulls.
+      party.mode = payload.mode;
+    }
     if (typeof payload.botFill === 'number' && Number.isFinite(payload.botFill)) {
       party.botFill = Math.max(0, Math.min(PARTY_MAX_BOTS, Math.floor(payload.botFill)));
     }
     this.broadcastLobby(party);
   }
 
-  private handleStartMatch(session: ClientSession): void {
+  private handleStartMatch(session: ClientSession, msg?: NetMsg): void {
     if (session.state !== 'party' || !session.partyCode) return;
     const party = this.parties.get(session.partyCode);
     if (!party) return;
     if (party.hostId !== session.id) return this.lobbyError(session, 'Only the host can start');
     if (party.members.length === 0) return;
+    const force = (msg?.payload as { force?: boolean } | undefined)?.force === true;
+
+    if (!force && !this.canStart(party)) {
+      this.broadcastLobby(party);
+      return this.lobbyError(session, 'The crew is not all ready yet');
+    }
+    // THE CREW IS STILL OUT (netcode-14). handleStartMatch never read inMatch,
+    // so the first member to press "Play Again" could launch a SECOND match
+    // while their crewmates were still at sea — and join_party stayed refused
+    // for everyone else meanwhile. The host may still force it, which brings
+    // the stragglers home off their end screen first.
+    const atSea = party.members.filter((id) => this.atSea(id));
+    if (atSea.length > 0) {
+      if (!force) {
+        this.broadcastLobby(party);
+        return this.lobbyError(session,
+          `Crew still at sea (${atSea.length} pirate${atSea.length === 1 ? '' : 's'})`);
+      }
+      for (const id of atSea) {
+        const straggler = this.clients.get(id);
+        // Somebody still PLAYING is left to play; only the end screen is cut short.
+        if (straggler && straggler.state === 'match_ended') this.detachToParty(straggler, 'timeout');
+      }
+    }
 
     // Only members currently sitting in the party panel are launched. Stragglers still on
     // last match's end-screen will rejoin via play_again.
     const memberSessions = party.members
       .map((id) => this.clients.get(id))
-      .filter((c): c is ClientSession => !!c && c.state === 'party');
+      .filter((c): c is ClientSession => !!c && c.state === 'party' && c.ws.readyState === WebSocket.OPEN);
     if (memberSessions.length === 0) return;
 
     const botCount = Math.max(0, Math.min(party.botFill, MATCH_TOTAL_SHIPS - memberSessions.length));
@@ -638,7 +750,15 @@ export class LobbyServer {
       const c = this.clients.get(id);
       return c?.state === 'in_match' || c?.state === 'match_ended';
     });
-    if (!stillInMatch) party.inMatch = false;
+    if (stillInMatch) return;
+    party.inMatch = false;
+    const waiting = this.joinWaiters.get(code);
+    if (!waiting) return;
+    this.joinWaiters.delete(code);
+    for (const id of waiting) {
+      const c = this.clients.get(id);
+      if (c && !c.partyCode) this.send(c.ws, { type: 'party_available', ts: Date.now(), payload: { code } });
+    }
   }
 
   // ─── Party helpers ───────────────────────────────────────────
@@ -686,6 +806,22 @@ export class LobbyServer {
       ?? party.members[0];
   }
 
+  /** Every mate but the host has pressed Ready (the host readies by starting).
+   *  Members at sea cannot press anything and are not counted. */
+  private crewReady(party: Party): boolean {
+    return party.members
+      .filter((id) => id !== party.hostId && !this.atSea(id))
+      .every((id) => party.ready.has(id));
+  }
+
+  /** Start is live when the crew is ready — or when the host has waited out the
+   *  force window, so one AFK mate can never hold a voyage hostage (PLAN 2.2). */
+  private canStart(party: Party): boolean {
+    if (party.members.length === 0) return false;
+    if (this.crewReady(party)) return true;
+    return Date.now() - party.readyClockAt >= LobbyServer.tunables.hostForceStartMs;
+  }
+
   private broadcastLobby(party: Party): void {
     const members: LobbyMember[] = party.members.map((id) => {
       const c = this.clients.get(id);
@@ -703,7 +839,7 @@ export class LobbyServer {
       members,
       botFill: party.botFill,
       capacity: PARTY_CAPACITY,
-      canStart: party.members.length >= 1,
+      canStart: this.canStart(party),
       inMatch: party.inMatch,
       membersAtSea: party.members.filter((id) => this.atSea(id)),
       mode: party.mode,
@@ -758,7 +894,7 @@ export class LobbyServer {
     const cohort = this.queue.splice(0, Math.min(QUEUE_TARGET, this.queue.length));
     const cohortSessions = cohort
       .map((id) => this.clients.get(id))
-      .filter((c): c is ClientSession => !!c);
+      .filter((c): c is ClientSession => !!c && c.ws.readyState === WebSocket.OPEN);
     if (cohortSessions.length === 0) {
       this.queueTimerStartedAt = null;
       return;
@@ -821,7 +957,12 @@ export class LobbyServer {
       for (const member of members) this.failPlacement(member, null);
       return { match: null, placed: 0 };
     }
-    return { match, placed: this.placeCohort(members, match, source, partyCode) };
+    // A socket that closed while the queue popped (or between Start and the
+    // first placement) must not be given a hull, a dock and a colour: that
+    // pirate stands in the world as a free target and a shipsAlive count until
+    // the sweep trims it up to 75 s later (netcode-15).
+    const live = members.filter((m) => m.ws.readyState === WebSocket.OPEN);
+    return { match, placed: this.placeCohort(live, match, source, partyCode, botCount) };
   }
 
   /** Board a cohort one member at a time, surviving a throw in any single
@@ -833,11 +974,11 @@ export class LobbyServer {
    *  is told, sent home, and can queue again; a match nobody could board is
    *  reaped at once instead of running empty for EMPTY_MATCH_GC_MS.
    *  Returns how many members boarded. */
-  private placeCohort(members: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null): number {
+  private placeCohort(members: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null, botCount = 0): number {
     let placed = 0;
     for (const member of members) {
       try {
-        this.placeClientIntoMatch(member, match, source, partyCode);
+        this.placeClientIntoMatch(member, match, source, partyCode, members.length, botCount);
         placed += 1;
       } catch (err) {
         console.error(`[Lobby] placement failed for ${member.id.slice(0, 6)} in match ${match.id.slice(0, 6)}:`, err);
@@ -864,7 +1005,7 @@ export class LobbyServer {
     }
   }
 
-  private placeClientIntoMatch(session: ClientSession, match: Match, source: 'party' | 'queue', partyCode: string | null = null): void {
+  private placeClientIntoMatch(session: ClientSession, match: Match, source: 'party' | 'queue', partyCode: string | null = null, expectedHumans = 1, botCount = 0): void {
     // Build the join payload first (no send) so a throw in world/spawn setup can
     // never leave the client with a torn-down menu and no join ever arriving.
     // The client still needs match_start BEFORE the join snapshot — it resets
@@ -877,8 +1018,11 @@ export class LobbyServer {
     const startMsg: MatchStartPayload = {
       matchId: match.id,
       source,
-      expectedHumans: match.humanCount(),
-      botCount: 0,
+      // The cohort size, counted BEFORE the placement loop — this was
+      // humanCount() so far, so every member of a crew read a different number
+      // and the first one read 1; botCount was the literal 0 (netcode-17).
+      expectedHumans,
+      botCount,
       partyCode,
     };
     this.send(session.ws, { type: 'match_start', ts: Date.now(), payload: startMsg });
