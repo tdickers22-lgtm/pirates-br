@@ -4516,13 +4516,18 @@ export class Match {
       upperRadius = 0.6;
       lowerRadius = 0.5;
     } else {
-      const headY = islandSkeleton ? 1.92 : target.crouching ? PLAYER.HEIGHT * 0.66 : PLAYER.HEIGHT * 0.96;
-      const upperY = islandSkeleton ? 1.24 : PLAYER.HEIGHT * 0.58;
-      const lowerY = islandSkeleton ? 0.62 : PLAYER.HEIGHT * 0.28;
+      // ONE height set (AVATAR-01). The pirate branch used to sit a full head
+      // below the drawn head and the island-skeleton branch was a hand-typed
+      // second copy of the old mesh numbers, so the same shot landed differently
+      // on a skeleton and on a pirate standing beside it.
+      const drop = target.crouching ? PLAYER.CROUCH_DROP : 0;
+      const headY = PLAYER.HEAD_Y - drop;
+      const upperY = PLAYER.UPPER_Y - drop * 0.8;
+      const lowerY = PLAYER.LOWER_Y - drop * 0.4;
       headCenter = { x: target.position.x, y: target.position.y + headY, z: target.position.z };
       upperBodyCenter = { x: target.position.x, y: target.position.y + upperY, z: target.position.z };
       lowerBodyCenter = { x: target.position.x, y: target.position.y + lowerY, z: target.position.z };
-      headRadius = islandSkeleton ? 0.28 : 0.25;
+      headRadius = islandSkeleton ? 0.26 : 0.25;
       upperRadius = islandSkeleton ? 0.42 : 0.5;
       lowerRadius = islandSkeleton ? 0.34 : 0.38;
     }
