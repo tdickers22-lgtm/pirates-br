@@ -44,7 +44,7 @@ import {
   intersectRaySeaRock,
 } from '../../shared/utils/index.js';
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
-import { smallArmsHitsCrewmate } from '../../shared/crew.js';
+import { isSameCrew, playerCrewId, smallArmsHitsCrewmate } from '../../shared/crew.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   findMermaidReturnShip,
@@ -1531,7 +1531,9 @@ export class Match {
         deaths: this.matchDeaths.get(playerId) ?? final?.deaths ?? 0,
         gold: live?.gold ?? final?.gold ?? 0,
         placement: 0,
-        isWinner: !!winnerPlayer && winnerPlayer.id === playerId,
+        // THE WHOLE CREW WINS. isWinner used to be the one pirate the win check
+        // named, so a crew of four read three losers and one winner (netcode-12).
+        isWinner: !!winnerPlayer && (winnerPlayer.id === playerId || (!!live && isSameCrew(winnerPlayer, live))),
         isBot: live?.isBot ?? false,
         alive: !!live && live.state !== 'eliminated',
       };
@@ -5509,6 +5511,10 @@ export class Match {
     // it onto the gold leaderboard, in a race it is not even running. A skeleton
     // is scenery with a cutlass: it kills, it is killed for gold, it earns none.
     if (this.isSkeletonPlayer(killer)) return { streakReward: null, killGold: 0 };
+    // AND NEITHER DOES A CREWMATE'S KILLER. Small arms no longer touch a crew
+    // brother, but a cannon, a keg or a fire on your own deck still can — and
+    // that must never PAY (netcode-12: crewmates could farm kill gold).
+    if (smallArmsHitsCrewmate(killer, victim)) return { streakReward: null, killGold: 0 };
     killer.kills += 1;
     let streakReward: { type: 'super_cannonball' | 'mega_keg' | 'tsunami'; label: string } | null = null;
     if (killer.shipId && victim.shipId && killer.shipId !== victim.shipId) {
@@ -6536,7 +6542,24 @@ export class Match {
     // reaches the target takes the match, exactly as the bounty horn has been
     // promising the whole way in. Skeletons are the one exception: island
     // scenery does not run the race (and now earns nothing to run it with).
-    const goldWinner = this.state.players.find((player) =>
+    // A CREW BANKS TOGETHER (gameplay-13). The bounty and the ballast have always
+    // been the crew's SUM (crewGold), while the win was one pirate's purse: three
+    // crewmates at 3,000 g each were hunted for 9,000 g, sailed like a full hold,
+    // and could never cross the line. The hull's crew is checked first, then the
+    // lone pirate — a castaway with a full purse still wins.
+    const goldCrewShip = this.state.ships.find((ship) => (
+      ship.alive && !ship.sinking && this.crewGold(ship) >= ECONOMY.GOLD_WIN_TARGET
+    ));
+    // The captain collects for the crew; any crewmate still standing does if she
+    // has lost him.
+    const goldCrewLeader = goldCrewShip
+      ? (this.state.players.find((p) => p.id === goldCrewShip.ownerId && p.state !== 'eliminated')
+        ?? this.state.players.find((p) => (
+          p.shipId === goldCrewShip.id && p.state !== 'eliminated' && !this.isSkeletonPlayer(p)
+        ))
+        ?? null)
+      : null;
+    const goldWinner = goldCrewLeader ?? this.state.players.find((player) =>
       player.state !== 'eliminated'
       && !this.isSkeletonPlayer(player)
       && player.gold >= ECONOMY.GOLD_WIN_TARGET
@@ -6552,7 +6575,7 @@ export class Match {
         payload: {
           winnerId: this.state.winnerId,
           reason: 'gold',
-          gold: goldWinner.gold,
+          gold: goldCrewShip ? this.crewGold(goldCrewShip) : goldWinner.gold,
           targetGold: ECONOMY.GOLD_WIN_TARGET,
         },
       });
@@ -6580,7 +6603,7 @@ export class Match {
       // scan happened to reach last.
       const crewId = [...crews][0];
       const winner = contenders.find((p) => this.getShip(p.shipId)?.ownerId === p.id)
-        ?? contenders.find((p) => (p.shipId ?? p.id) === crewId)
+        ?? contenders.find((p) => playerCrewId(p) === crewId)
         ?? null;
       this.state.winnerId = winner?.id ?? null;
       this.endReason = 'last_ship';
@@ -6626,7 +6649,10 @@ export class Match {
         adrift.push(p);
         continue;
       }
-      crews.add(p.shipId ?? p.id);
+      // KEYED ON THE CREW, NOT THE HULL. `p.shipId ?? p.id` counted two shipless
+      // survivors of ONE crew as two crews, so a match with a single crew left
+      // swimming could never end (netcode-12).
+      crews.add(playerCrewId(p));
       contenders.push(p);
     }
     return { crews, contenders, adrift };
@@ -6656,7 +6682,7 @@ export class Match {
     if (this.state.phase !== 'playing') return;
     for (const p of this.state.players) {
       if (this.isSkeletonPlayer(p)) continue;
-      const crewId = p.shipId ?? p.id;
+      const crewId = playerCrewId(p);
       if (!this.knownCrews.has(crewId)) {
         const ship = this.getShip(p.shipId);
         const owner = ship ? this.state.players.find((o) => o.id === ship.ownerId) : p;

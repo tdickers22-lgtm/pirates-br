@@ -10,7 +10,7 @@
 //
 // LOGIC suite: drives the real Match, no stack, no browser.
 import { Match } from '../src/server/core/Match.ts';
-import { SHIP_STATS } from '../src/shared/constants/index.ts';
+import { ECONOMY, SHIP_STATS } from '../src/shared/constants/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -107,6 +107,75 @@ try {
   failures += 1;
 }
 match.stop();
+
+// -------------------------------------------------- a crew is one crew, sunk or not
+console.log('A crew that lost her hull is still ONE crew:');
+const endMatch = new Match({ matchId: 'crews-end', botCount: 0 });
+endMatch.state.storm.centerX = 0;
+endMatch.state.storm.centerZ = 0;
+endMatch.state.storm.safeRadius = 1200;
+const crew1 = endMatch.createCrew([{ ws: fakeWs(), name: 'Ann' }, { ws: fakeWs(), name: 'Bo' }]);
+const crew2 = endMatch.createCrew([{ ws: fakeWs(), name: 'Cid' }, { ws: fakeWs(), name: 'Dee' }]);
+for (const join of [...crew1.joins, ...crew2.joins]) join.send();
+endMatch.state.phase = 'playing';
+endMatch.crewsAtStart = 2;
+
+// Crew 1 is sunk: her hull is gone and both survivors are ashore inside the ring.
+const sunk = endMatch.state.ships.find((s) => s.id === crew1.shipId);
+sunk.alive = false;
+const survivors = endMatch.state.players.filter((p) => p.crewId === crew1.crewId);
+for (const p of survivors) {
+  p.shipId = null;
+  p.onShipId = null;
+  p.state = 'alive';
+  p.health = 80;
+  p.position = { x: 5, y: 2, z: 5 };
+}
+const counted = endMatch.countActiveCrews();
+expect('two shipless survivors of one crew count as ONE crew', counted.crews.size === 2,
+  `activeCrews=${counted.crews.size} (2 crews are in this match)`);
+endMatch.checkWinCondition();
+expect('and the match does NOT end while they are still in it', endMatch.state.phase === 'playing',
+  `phase=${endMatch.state.phase}`);
+
+// Now the sea takes them: the last crew standing wins, all hands.
+for (const p of survivors) p.state = 'eliminated';
+endMatch.checkWinCondition();
+expect('the last crew afloat ends the match', endMatch.state.phase === 'ended',
+  `phase=${endMatch.state.phase}`);
+const winner = endMatch.state.players.find((p) => p.id === endMatch.state.winnerId);
+expect('and the winner is one of hers', !!winner && winner.crewId === crew2.crewId,
+  `winnerId=${endMatch.state.winnerId}`);
+const board = endMatch.buildEndBoard(winner ?? null);
+const winRows = board.filter((r) => r.isWinner);
+expect('ALL HANDS win, not just the name on the hull', winRows.length === 2,
+  `isWinner rows=${winRows.length}: ${board.map((r) => `${r.name}:${r.isWinner}`).join(' ')}`);
+endMatch.stop();
+
+// ------------------------------------------------------------- the crew's hold wins
+console.log("The crew's hold crosses the line, not one purse:");
+const goldMatch = new Match({ matchId: 'crews-gold', botCount: 0 });
+goldMatch.state.storm.safeRadius = 1200;
+const rich = goldMatch.createCrew([
+  { ws: fakeWs(), name: 'Ann' }, { ws: fakeWs(), name: 'Bo' }, { ws: fakeWs(), name: 'Cid' },
+]);
+for (const join of rich.joins) join.send();
+goldMatch.createCrew([{ ws: fakeWs(), name: 'Dee' }]).joins[0].send();
+goldMatch.state.phase = 'playing';
+goldMatch.crewsAtStart = 2;
+const richCrew = goldMatch.state.players.filter((p) => p.crewId === rich.crewId);
+const share = Math.ceil((ECONOMY.GOLD_WIN_TARGET / richCrew.length) + 1);
+for (const p of richCrew) p.gold = share;
+expect('no crewmate is at the target alone', richCrew.every((p) => p.gold < ECONOMY.GOLD_WIN_TARGET),
+  `each=${share} target=${ECONOMY.GOLD_WIN_TARGET}`);
+goldMatch.checkWinCondition();
+expect('but the crew banks together and takes the match', goldMatch.state.phase === 'ended',
+  `phase=${goldMatch.state.phase}, crewGold=${share * richCrew.length}`);
+expect('the win is filed as gold', goldMatch.endReason === 'gold', `reason=${goldMatch.endReason}`);
+const goldWinner = goldMatch.state.players.find((p) => p.id === goldMatch.state.winnerId);
+expect('and it is the rich crew that won it', !!goldWinner && goldWinner.crewId === rich.crewId,
+  `winnerId=${goldMatch.state.winnerId}`);
+goldMatch.stop();
 
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
 process.exit(failures === 0 ? 0 : 1);
