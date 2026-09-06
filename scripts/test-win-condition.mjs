@@ -200,6 +200,15 @@ console.log('\nA leaver:');
   expect('two crews, both human, both afloat', match.crewsAtStart === 2 && state.shipsAlive === 2,
     `crewsAtStart=${match.crewsAtStart} shipsAlive=${state.shipsAlive}`);
 
+  // THE ANNOUNCE NAMES THE CREW, NOT THE HULL (CREW-01, lane 2.1): a human
+  // crew has a Crew record and countActiveCrews keys on it, so the elimination
+  // carries crew.id — read it before he leaves, because removeClient retires an
+  // emptied crew record and the hull id is no longer a way to find it.
+  const quitterCrewId = quitter.crewId ?? quitterShip.id;
+  expect('the quitter sails under a crew record', !!quitter.crewId
+    && (state.crews ?? []).some((c) => c.id === quitter.crewId && c.shipId === quitterShip.id),
+    `crewId=${quitter.crewId} crews=${(state.crews ?? []).map((c) => `${c.id}:${c.shipId}`).join(',')}`);
+
   match.removeClient(quit.playerId);
 
   expect('the leaver takes the death he sailed into',
@@ -214,8 +223,11 @@ console.log('\nA leaver:');
 
   match.tick();
   expect('a crew_eliminated arrives for the crew that walked off',
-    msgs.some((m) => m.type === 'crew_eliminated' && m.payload.crewId === quitterShip.id),
-    msgs.filter((m) => m.type === 'crew_eliminated').map((m) => m.payload.crewId).join(',') || 'none');
+    msgs.some((m) => m.type === 'crew_eliminated' && m.payload.crewId === quitterCrewId),
+    `want=${quitterCrewId} got=${msgs.filter((m) => m.type === 'crew_eliminated').map((m) => m.payload.crewId).join(',') || 'none'}`);
+  expect('...and his emptied crew is off the books',
+    !(state.crews ?? []).some((c) => c.id === quitterCrewId),
+    (state.crews ?? []).map((c) => c.id).join(','));
   expect('and a 2-human 0-bot match finally ends after a leave',
     state.phase === 'ended', `phase=${state.phase}`);
   expect('...with the pirate who stayed', state.winnerId === stay.playerId,
