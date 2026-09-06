@@ -2,6 +2,7 @@ import type {
   HotSnapshotPayload,
   NetMsg, PlayerInput, GameState, TradeActionPayload,
   WelcomePayload, LobbyUpdatePayload, QueueUpdatePayload, MatchStartPayload,
+  MatchDetachedPayload, PartyAvailablePayload,
   MatchCountdownPayload, MatchHornPayload, CrewEliminatedPayload, ShipSunkPayload,
   CarpenterPatchPayload,
   BountyRaisedPayload, CargoSpilledPayload, SpoilClaimedPayload, WreckEventPayload,
@@ -72,6 +73,10 @@ export class NetworkClient {
   public onLobbyLeft: (() => void) | null = null;
   public onLobbyError: ((reason: string) => void) | null = null;
   public onQueueUpdate: ((payload: QueueUpdatePayload) => void) | null = null;
+  /** The match let go of you; `code` is the party you land back in (null: none left). */
+  public onMatchDetached: ((payload: MatchDetachedPayload) => void) | null = null;
+  /** A code refused with "at sea" is joinable again. */
+  public onPartyAvailable: ((payload: PartyAvailablePayload) => void) | null = null;
   public onMatchStart: ((payload: MatchStartPayload) => void) | null = null;
   public onStatsUpdate: ((stats: PlayerStatsRecord) => void) | null = null;
   public onConnectionClosed: (() => void) | null = null;
@@ -318,6 +323,10 @@ export class NetworkClient {
       case 'lobby_left': this.clearMatchSession(); this.onLobbyLeft?.(); break;
       case 'lobby_error': this.onLobbyError?.((msg.payload as { reason?: string }).reason ?? 'Unknown error'); break;
       case 'queue_update': this.onQueueUpdate?.(msg.payload as QueueUpdatePayload); break;
+      // The match is over for us either way: shut the input channel like
+      // lobby_left does, so nothing addressed to the old match leaks out.
+      case 'match_detached': this.clearMatchSession(); this.onMatchDetached?.(msg.payload as MatchDetachedPayload); break;
+      case 'party_available': this.onPartyAvailable?.(msg.payload as PartyAvailablePayload); break;
       case 'match_start':
         // The NEXT match's join has not landed yet — shut the input channel
         // until it does, so the gap between match_start and join can't leak

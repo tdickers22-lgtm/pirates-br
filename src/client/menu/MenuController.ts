@@ -590,6 +590,33 @@ export class MenuController {
       this.renderQueue(payload);
     };
 
+    // THE CREW SURVIVES THE MATCH (netcode-04, PLAN 2.2): an automatic exit
+    // from a match (end-screen timeout, reaped match) lands the member back in
+    // the PARTY panel, never the main menu. The server's lobby_update that
+    // follows draws the roster; this just brings the menu up and says why.
+    // (Lane 3.5 crew-ui replaces the status line with the full party panel.)
+    this.network.onMatchDetached = (payload) => {
+      this.clearMatchStartState();
+      this.hideEndmatch();
+      this.onReturnToMenuCb?.();
+      this.show();
+      if (payload.code) {
+        this.flashStatus(`Back with your crew (${payload.code}).`, false);
+        this.showPanel('lobby');
+      } else {
+        this.flashStatus('The match let you go. Your crew has disbanded.', false);
+      }
+    };
+
+    // A DEEP LINK WAITS WHILE THE CREW IS AT SEA (netcode-16, PLAN 2.2): the
+    // code that was refused with "at sea" is joinable again — join it now,
+    // unless the pirate has since found another crew.
+    this.network.onPartyAvailable = (payload) => {
+      if (!this.isVisible() || this.panelLobby.classList.contains('visible')) return;
+      this.flashStatus(`Crew ${payload.code} is back in port — joining.`, false);
+      this.network.joinParty(payload.code);
+    };
+
     this.network.onMatchStart = (payload) => {
       this.clearMatchStartState();
       this.hide();

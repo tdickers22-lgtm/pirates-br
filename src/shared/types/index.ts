@@ -1012,6 +1012,19 @@ export interface LobbyUpdatePayload {
   mode: string;
 }
 
+/** The match let go of you (end-screen timeout, reaped match) but your crew
+ *  did not: `code` is the party you land back in, null when there is none
+ *  left and a `lobby_left` follows (PARTY-01, netcode-04). */
+export interface MatchDetachedPayload {
+  reason: 'timeout' | 'reaped';
+  code: string | null;
+}
+
+/** A code you were refused with "at sea" is joinable again (netcode-16). */
+export interface PartyAvailablePayload {
+  code: string;
+}
+
 /** One tick of the staged match start (sent once per whole second, inputs locked). */
 export interface MatchCountdownPayload {
   /** Whole seconds left before the horn. */
