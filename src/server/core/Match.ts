@@ -5318,8 +5318,13 @@ export class Match {
     ship.sinking = true;
     // SHE DOES NOT DROP HER ANCHOR AS SHE GOES (ships-29): the founder is
     // stopped by the sink drag in PhysicsSystem, and no HUD may describe a
-    // wreck as parked. Freeze the list she has RIGHT NOW, before riddleWreck
-    // dresses her with breaches all round, so she goes down by the flooded end.
+    // wreck as parked. A hull that founders AT HER BERTH (a leaver's, a moored
+    // bot's) was still carrying the anchor the dock gave her, so the wreck read
+    // as parked anyway — the cable parts with the ship. Freeze the list she has
+    // RIGHT NOW, before riddleWreck dresses her with breaches all round, so she
+    // goes down by the flooded end.
+    ship.anchored = false;
+    ship.anchorRaiseProgress = 0;
     this.physics.beginFounder(ship, this.t, stormSeaState(this.state.storm, ship.position.x, ship.position.z));
     if (rapid) this.rapidFounderShipIds.add(ship.id);
     ship.sailHeight = 0;
