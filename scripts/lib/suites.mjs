@@ -58,6 +58,9 @@ export const LOGIC = [
   quick(tsx('test-terrain-detail.mjs')),
   quick(tsx('test-foliage-geometry.mjs')),
   quick(tsx('test-ocean-dynamics.mjs')),
+  // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
+  // deadline must be read inside a row or the 2 ms budget is a fiction.
+  quick(tsx('test-bathymetry-budget.mjs')),
   quick(tsx('test-island-props.mjs')),
   quick(tsx('test-asset-merge.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),

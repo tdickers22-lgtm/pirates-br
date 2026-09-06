@@ -5,7 +5,12 @@ import { getIslandDistRatio, getIslandMaxRadius, getIslandSurfaceY } from '../..
 const SIZE = 1024;
 const MIN_Y = -12;
 const HEIGHT_RANGE = 20;
-type RowJob = { island: Island; minX: number; maxX: number; row: number; lastRow: number };
+/** Samples between deadline reads inside a row. */
+const DEADLINE_STRIDE = 16;
+/** `col` is where the current row was left when the frame's budget ran out:
+ * a row is up to ~300 samples of the full relief field (~1.5 ms), so a deadline
+ * checked only between rows overshot a 2 ms budget by 1-4 ms most frames. */
+type RowJob = { island: Island; minX: number; maxX: number; row: number; lastRow: number; col: number };
 
 /** A single filtered texture replaces the ellipse estimate for shoreline
  * shading. Height comes from the same field as terrain and physics, including
@@ -47,6 +52,7 @@ export class OceanBathymetry {
         maxX: Math.min(SIZE - 1, pixelX(island.position.x + reach)),
         row: Math.max(0, pixelZ(island.position.z - reach)),
         lastRow: Math.min(SIZE - 1, pixelZ(island.position.z + reach)),
+        col: -1,
       });
     }
   }
@@ -64,7 +70,17 @@ export class OceanBathymetry {
         return true;
       }
       const z = this.bounds.y + (job.row + 0.5) / SIZE * this.bounds.w;
-      for (let col = job.minX; col <= job.maxX; col++) {
+      if (job.col < job.minX) job.col = job.minX;
+      let col = job.col;
+      for (; col <= job.maxX; col++) {
+        // The deadline is read every DEADLINE_STRIDE samples (a few tens of
+        // microseconds of work), not once per row, so the frame never pays
+        // more than that past `budgetMs`. scripts/test-bathymetry-budget.mjs
+        // holds the overshoot to a fraction of a millisecond.
+        if ((col - job.minX) % DEADLINE_STRIDE === 0 && col !== job.col && performance.now() >= deadline) {
+          job.col = col;
+          return false;
+        }
         const x = this.bounds.x + (col + 0.5) / SIZE * this.bounds.z;
         const rawHeight = getIslandSurfaceY(job.island, x, z);
         // The physics sampler holds a -6.5m safety floor infinitely far from
@@ -79,6 +95,7 @@ export class OceanBathymetry {
         const offset = (job.row * SIZE + col) * 4;
         if (encoded > this.data[offset]) this.data[offset] = encoded;
       }
+      job.col = -1;
       if (++job.row > job.lastRow) this.next++;
     } while (performance.now() < deadline);
     return false;
