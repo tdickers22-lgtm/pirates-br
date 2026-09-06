@@ -8,7 +8,7 @@
 //     open deck stay at deck level.
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP_STATS } from '../src/shared/constants/index.ts';
-import { getCannonDeckLocalPosition, getHelmControlLocal, getShipFloorYAt, shipLocalUpY } from '../src/shared/interactions.ts';
+import { getCannonDeckLocalPosition, getHelmControlLocal, getShipFloorYAt, shipLocalUpY, toShipLocal3 } from '../src/shared/interactions.ts';
 import {
   getCrowNestStandingY,
   getMainMastLocalZ,
@@ -63,14 +63,16 @@ for (const type of Object.keys(SHIP_STATS)) {
     for (let step = 0; step < 40; step++) {
       match.physics.update(DT, match.t + step * DT, [ship], [player], [], [], [], null);
     }
-    const local = { x: player.position.x, z: player.position.z }; // ship at origin, rot 0
+    // Heave, pitch and roll change while physics runs. Grade the gunner in
+    // the live hull frame, not against the pre-float world-space deck height.
+    const local = toShipLocal3(player.position, ship);
     const walkHalf = getShipDeckWalkHalfWidth(stats, local.z);
-    const onDeckHeight = player.position.y > deckY - 0.6;
+    const onDeckHeight = local.y > getShipDeckY(0, stats) - 0.6;
     const insideBulwark = Math.abs(local.x) <= walkHalf + 0.25;
     expect(
       `cannon${index}: gunner stays on deck`,
-      player.state === 'alive' && onDeckHeight && insideBulwark,
-      `state=${player.state} y=${player.position.y.toFixed(2)} (deckY=${deckY.toFixed(2)}) |x|=${Math.abs(local.x).toFixed(2)} walkHalf=${walkHalf.toFixed(2)}`,
+      player.state === 'alive' && player.onShipId === ship.id && onDeckHeight && insideBulwark,
+      `state=${player.state} localY=${local.y.toFixed(2)} (deckY=${getShipDeckY(0, stats).toFixed(2)}) |x|=${Math.abs(local.x).toFixed(2)} walkHalf=${walkHalf.toFixed(2)}`,
     );
     player.atCannon = false;
     player.cannonIndex = 0;

@@ -91,8 +91,12 @@ export class AssetLibrary {
                 if (value && value.isTexture) this.sharedResources.add(value);
               }
               if (m instanceof THREE.MeshStandardMaterial) {
-                // authored for lit scenes; keep flat-shaded stylized look
-                m.flatShading = true;
+                // Organic models carry curved leaf/midrib and trunk normals
+                // from Blender. Keep one setting across the WHOLE asset so
+                // the material collapse still produces one instanced draw.
+                const organic = name.startsWith('palm_') || name.startsWith('bush')
+                  || name.startsWith('flower_') || name === 'fern_plant' || name === 'wildflowers';
+                m.flatShading = !organic;
                 // Lift near-black albedo off the AgX toe and cap metalness
                 // while the scene ships without an envMap — see materialAudit.
                 auditAssetMaterial(m);

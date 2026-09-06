@@ -7,6 +7,8 @@
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
+import * as THREE from 'three';
+import { buildBridges } from '../src/client/world/island/Landmarks.ts';
 import {
   getIslandSurfaceY,
   getIslandDistRatio,
@@ -163,6 +165,62 @@ console.log('Walkable rope bridges:');
       under.position.y < deckY - 0.8,
       `y=${under.position.y.toFixed(2)} deck=${deckY.toFixed(2)}`);
   }
+}
+
+console.log('Peak routes and rendered plank parity:');
+{
+  const islands = new MapGenerator(20260801).generateIslands();
+  const mountains = islands.filter((i) => i.profile.terrainStyle === 'mountain');
+  expect('Every mountain in the fixed archipelago has a suspended peak route',
+    mountains.length >= 3 && mountains.every((i) => i.bridges.length > 0));
+  let rendered = 0, maxDeckError = 0, badWidth = false, blockedDeck = false;
+  for (const island of islands.filter((i) => i.bridges?.length)) {
+    const group = new THREE.Group();
+    group.position.set(island.position.x, 0, island.position.z);
+    buildBridges({ island, group, rng: () => 0.5,
+      boulderGeo: new THREE.IcosahedronGeometry(1, 0), boulderMat: new THREE.MeshStandardMaterial() });
+    group.updateMatrixWorld(true);
+    for (let b = 0; b < island.bridges.length; b++) {
+      const bridge = island.bridges[b];
+      const node = group.children[b];
+      for (const mesh of node.children) {
+        if (!mesh.isMesh || mesh.geometry.parameters?.height !== 0.10) continue;
+        const top = mesh.localToWorld(new THREE.Vector3(0, 0.05, 0));
+        const deck = getBridgeDeckY(bridge, top.x, top.z);
+        badWidth ||= Math.abs(mesh.geometry.parameters.width - bridge.width) > 1e-6;
+        maxDeckError = Math.max(maxDeckError, deck === null ? 100 : Math.abs(top.y - deck));
+        rendered++;
+      }
+      for (const t of [0.2, 0.4, 0.6, 0.8]) {
+        const x = bridge.ax + (bridge.bx - bridge.ax) * t;
+        const z = bridge.az + (bridge.bz - bridge.az) * t;
+        const y = getBridgeDeckY(bridge, x, z);
+        const walker = makePlayer({ x, y: y + 0.03, z });
+        const physics = new PhysicsSystem();
+        for (let n = 0; n < 30; n++) step(physics, walker, [island], null);
+        if (walker.state === 'swimming' || Math.abs(walker.position.y - y) > 0.3) blockedDeck = true;
+      }
+    }
+    group.traverse((o) => { o.geometry?.dispose(); });
+  }
+  expect('Every rendered plank matches the standing surface and full collision width',
+    rendered > 100 && maxDeckError < 1e-5 && !badWidth, `${rendered} planks, error ${maxDeckError}`);
+  expect('Peak and channel crossings remain dry standing surfaces along their span', !blockedDeck);
+
+  // Explicitly force a deep channel beneath a high bridge. This isolates the
+  // water-entry bug from whichever land shape the seeded map happens to roll.
+  const island = structuredClone(islands.find((i) => i.bridges.length > 0));
+  island.props = []; island.caves = [];
+  const bridge = island.bridges[0];
+  const x = (bridge.ax + bridge.bx) * 0.5, z = (bridge.az + bridge.bz) * 0.5;
+  island.stamps = [{ x, z, radius: 8, targetY: -5, blend: 0.35 }];
+  expect('Channel fixture has a submerged seabed', getIslandSurfaceY(island, x, z) < -3);
+  const deck = getBridgeDeckY(bridge, x, z);
+  const walker = makePlayer({ x, y: deck + 0.03, z });
+  const physics = new PhysicsSystem();
+  for (let n = 0; n < 50; n++) step(physics, walker, [island], null);
+  expect('A deep channel under a bridge cannot force its walker into swimming',
+    walker.state !== 'swimming' && Math.abs(walker.position.y - deck) < 0.1);
 }
 
 if (failures > 0) {

@@ -9,7 +9,7 @@ import * as THREE from 'three';
 import type { Island, IslandNpc, IslandProp, IslandPropType } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import { BIOME_PALETTES, getPropGroundY, PROP_COLLIDERS } from '../../../shared/props.js';
-import { makeFernFrondTexture, makeGrassBladeTexture } from '../../rendering/factories/TextureFactory.js';
+import { makeFernRosetteGeometry, makeGrassTuftGeometry, understoryDensity } from './FoliageGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { makePlayerMesh } from '../../rendering/factories/PlayerMeshFactory.js';
 import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.js';
@@ -72,9 +72,9 @@ export function buildPropInstance(type: AssetName, position: THREE.Vector3, yaw:
 /** Inject a vertex wind-sway into an instanced foliage material: higher parts
  *  bend more, each instance offset by its world position so a grove ripples
  *  rather than swaying in lockstep. Applied once per shared material. */
-export function applyFoliageSway(material: THREE.Material | THREE.Material[], host: IslandBuilderCtx) {
+export function applyFoliageSway(material: THREE.Material | THREE.Material[], host: IslandBuilderCtx, groundCover = false) {
   if (Array.isArray(material)) {
-    for (const m of material) applyFoliageSway(m, host);
+    for (const m of material) applyFoliageSway(m, host, groundCover);
     return;
   }
   const ud = material.userData as { swayApplied?: boolean };
@@ -93,13 +93,14 @@ export function applyFoliageSway(material: THREE.Material | THREE.Material[], ho
   // wind. MeshStandardMaterial's own customProgramCacheKey returns ''.
   const inheritedKey = material.customProgramCacheKey;
   material.customProgramCacheKey = function collapseAndSway(this: THREE.Material) {
-    return `${inheritedKey ? inheritedKey.call(this) : ''}|foliage-sway`;
+    return `${inheritedKey ? inheritedKey.call(this) : ''}|foliage-sway-v2`;
   };
   material.onBeforeCompile = function swayCompile(this: THREE.Material, shader, renderer) {
     inherited?.call(this, shader, renderer);
     shader.uniforms.uFoliageTime = host.foliageTime;
     shader.uniforms.uFoliageWind = host.foliageWind;
-    shader.vertexShader = 'uniform float uFoliageTime;\nuniform vec2 uFoliageWind;\n' + shader.vertexShader;
+    shader.uniforms.uFoliageFlex = { value: new THREE.Vector2(groundCover ? 0 : 0.15, groundCover ? 0.18 : 0.06) };
+    shader.vertexShader = 'uniform float uFoliageTime;\nuniform vec2 uFoliageWind;\nuniform vec2 uFoliageFlex;\n' + shader.vertexShader;
     shader.vertexShader = shader.vertexShader.replace(
       '#include <begin_vertex>',
       `#include <begin_vertex>
@@ -109,12 +110,22 @@ export function applyFoliageSway(material: THREE.Material | THREE.Material[], ho
        // fails shader compilation and the clone silently renders NOTHING —
        // the "tree vanishes while chopping" bug.
        #ifdef USE_INSTANCING
-       float swayH = max(0.0, transformed.y - 0.6) * 0.06;   // bend the crown, not the trunk base
-       vec3 iPos = vec3(instanceMatrix[3].x, instanceMatrix[3].y, instanceMatrix[3].z);
+       float plantH = max(0.0, transformed.y - uFoliageFlex.x);
+       float swayH = plantH * uFoliageFlex.y * smoothstep(0.0, 0.5, plantH);
+       vec3 iPos = (modelMatrix * instanceMatrix[3]).xyz;
        float ph = iPos.x * 0.13 + iPos.z * 0.11;
-       float s = sin(uFoliageTime * 1.5 + ph) + 0.35 * sin(uFoliageTime * 3.2 + ph * 1.7);
-       transformed.x += swayH * uFoliageWind.x * s;
-       transformed.z += swayH * uFoliageWind.y * s;
+       float s = 0.55 + sin(uFoliageTime * 1.5 + ph) * 0.55
+         + 0.2 * sin(uFoliageTime * 3.2 + ph * 1.7);
+       // Instance yaw must not rotate the prevailing world wind. Project onto
+       // each instance's axes, so neighbouring shrubs lean in the same gust.
+       vec3 windX = (modelMatrix * vec4(instanceMatrix[0].xyz, 0.0)).xyz;
+       vec3 windZ = (modelMatrix * vec4(instanceMatrix[2].xyz, 0.0)).xyz;
+       vec2 localWind = vec2(dot(normalize(windX.xz), uFoliageWind),
+                             dot(normalize(windZ.xz), uFoliageWind));
+       float flutter = sin(uFoliageTime * 6.4 + ph + transformed.x * 4.1 + transformed.z * 3.7)
+         * min(plantH, 1.0) * 0.012 * length(uFoliageWind);
+       transformed.x += swayH * localWind.x * s + flutter;
+       transformed.z += swayH * localWind.y * s + flutter * 0.6;
        #endif`,
     );
   };
@@ -354,64 +365,11 @@ function liftFoliageNormals(material: THREE.MeshStandardMaterial, amount: number
       .replace(
         '#include <normal_fragment_begin>',
         `#include <normal_fragment_begin>
-       normal = normalize(mix(normal, vec3(0.0, 1.0, 0.0), uFoliageLift));`,
+       vec3 foliageUp = normalize(mat3(viewMatrix) * vec3(0.0, 1.0, 0.0));
+       normal = normalize(mix(normal, foliageUp, uFoliageLift));`,
       );
   };
-  material.customProgramCacheKey = () => 'pirates-foliage-card';
-}
-
-/**
- * One grass card: bent, tapered, and no longer a rectangle.
- *
- * Ground cover was two 0.52 × 0.64 quads at a dead 90°, one segment each. That
- * shape has two tells the audit photographed at your feet. A blade was a rigid
- * flat RECTANGLE — square-topped, the same width at the tip as at the root, and
- * with no curve anywhere in it, so a tuft read as cut card rather than grass. And
- * because both quads were perfectly planar, they met along one straight,
- * full-height intersection: a hard X ruled through the middle of every tuft,
- * which is the "hard triangle intersection" in the report.
- *
- * Two planes always cross somewhere — that is geometry, not a bug. What can be
- * fixed is how MUCH of them crosses:
- *
- *  · BEND. Three height segments and a quadratic lean along the card's own +Z,
- *    so the blade arcs over the way a blade under its own weight does. The two
- *    cards of a cross bend along axes 90° apart, so they peel away from each
- *    other with height and the shared edge stops being a full-height line.
- *  · TAPER. The card narrows toward the tip, so by the time the two cards are
- *    nearest to parallel in silhouette there is almost nothing left of either to
- *    intersect — and a blade ends in a point instead of a cut-off square.
- *
- * The crossing that survives is short and sits low in the tuft, where the clump's
- * own blades cover it. Cost is one shared instanced geometry: 8 vertices a card
- * instead of 4, on a draw that is alpha-test fragment-bound anyway.
- */
-function makeBentBladeCard(): THREE.BufferGeometry {
-  const geo = new THREE.PlaneGeometry(0.52, 0.64, 1, 3);
-  geo.translate(0, 0.25, 0);
-  const pos = geo.getAttribute('position') as THREE.BufferAttribute;
-  // The plane spans y = -0.07 .. 0.57 after the lift; normalise over that so the
-  // root stays put and only the blade above it moves.
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (let i = 0; i < pos.count; i++) {
-    minY = Math.min(minY, pos.getY(i));
-    maxY = Math.max(maxY, pos.getY(i));
-  }
-  const span = Math.max(1e-4, maxY - minY);
-  for (let i = 0; i < pos.count; i++) {
-    const t = (pos.getY(i) - minY) / span;
-    // Quadratic: no lean at the root (where the blade is stiff and seated in the
-    // turf), most of it in the last third, like a stalk under its own weight.
-    pos.setZ(i, pos.getZ(i) + t * t * 0.17);
-    // …and a touch of droop, so the tip is genuinely lower than a straight card's
-    // would be rather than merely displaced sideways.
-    pos.setY(i, pos.getY(i) - t * t * 0.05);
-    pos.setX(i, pos.getX(i) * (1 - 0.55 * Math.pow(t, 1.4)));
-  }
-  pos.needsUpdate = true;
-  geo.computeVertexNormals();
-  return geo;
+  material.customProgramCacheKey = () => 'pirates-foliage-normal-v2';
 }
 
 /** Props with a real FLOOR — blades sprouting inside them come up through the
@@ -456,12 +414,12 @@ function buildingFloors(ctx: IslandBuildCtx): { x: number; z: number; r: number 
   return out;
 }
 
-/** Ground cover: one InstancedMesh each of cross-plane grass tufts over the
- *  grassy interior, arched fern fronds in the shaded inner jungle band, and
+/** Ground cover: one InstancedMesh each of modeled grass tufts over the
+ *  grassy interior, leaf-by-leaf fern rosettes in the shaded inner jungle band, and
  *  seashell flecks on the wet sand. Deterministic from the profile seed; culled
  *  with the micro tier past ~260m; zero colliders (ankle-high). */
 export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
-  const { island, group, r, rng, lowDetail, surfacePoint, carveCaveMouth, paletteGrass, paletteFoliage } = ctx;
+  const { island, group, r, rng, lowDetail, surfacePoint, carveCaveMouth, paletteGrass, paletteFoliage, host } = ctx;
   const ground = ensureMeshGround(ctx);
   const floors = buildingFloors(ctx);
   /** Inside a building's floor: blades grew straight through the tavern's
@@ -481,47 +439,21 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
   const MIN_SLOPE_COS = Math.cos((50 * Math.PI) / 180);
   const MAX_FLOAT = 0.15;
   if (!lowDetail) {
-    const grassCount = Math.min(9000, Math.round(r * r * 1.05));
-    const bladeGeo = makeBentBladeCard();
-    const crossGeo = (() => {
-      const a = bladeGeo.clone();
-      const b = bladeGeo.clone();
-      // Card B bends toward its own +Z, which after this turn is world +X — so
-      // the pair curves APART instead of standing as a rigid plus sign, and the
-      // small lateral shift takes the crossing off the tuft's dead centre.
-      b.rotateY(Math.PI * 0.5);
-      b.translate(0.055, 0, 0);
-      const merged = new THREE.BufferGeometry();
-      const pa = a.getAttribute('position');
-      const pb = b.getAttribute('position');
-      const uva = a.getAttribute('uv');
-      const uvb = b.getAttribute('uv');
-      const positions = new Float32Array((pa.count + pb.count) * 3);
-      positions.set(pa.array as Float32Array, 0);
-      positions.set(pb.array as Float32Array, pa.count * 3);
-      const uvs = new Float32Array((uva.count + uvb.count) * 2);
-      uvs.set(uva.array as Float32Array, 0);
-      uvs.set(uvb.array as Float32Array, uva.count * 2);
-      const idxA = Array.from(a.getIndex()!.array);
-      const idxB = Array.from(b.getIndex()!.array).map((i) => i + pa.count);
-      merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      merged.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-      merged.setIndex([...idxA, ...idxB]);
-      merged.computeVertexNormals();
-      return merged;
-    })();
+    // Each tuft now carries actual blades. Keep the near-field triangle cost
+    // bounded and retain the existing distance/density LOD for every batch.
+    const grassCount = Math.min(6000, Math.round(r * r * 0.85));
+    const grassGeo = makeGrassTuftGeometry();
     // White base: per-instance colors MULTIPLY material.color — a tinted
     // base squared every tuft toward black (the 'invisible grass' bug).
     const grassMat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
-      map: makeGrassBladeTexture(),
       roughness: 0.94,
       side: THREE.DoubleSide,
-      alphaTest: 0.42,
-      transparent: false,
+      vertexColors: true,
     });
-    liftFoliageNormals(grassMat, 0.85);
-    const grass = new THREE.InstancedMesh(crossGeo, grassMat, grassCount);
+    liftFoliageNormals(grassMat, 0.65);
+    applyFoliageSway(grassMat, host, true);
+    const grass = new THREE.InstancedMesh(grassGeo, grassMat, grassCount);
     const gM = new THREE.Matrix4();
     const gP = new THREE.Vector3();
     const gQ = new THREE.Quaternion();
@@ -543,6 +475,8 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       // below this analytic sample).
       if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
       if (onFloor(sample.x, sample.z)) continue;
+      const density = understoryDensity(island.profile.biome, sample.x, sample.z, island.profile.seed ?? 0);
+      if (rng(i * 97 + 17) > density) continue;
       // Place a small CLUMP of blades per seed so grass reads as tufts and
       // masses (carpeting the interior), not isolated specks (audit P1).
       const clump = 2 + Math.floor(rng(i * 3 + 1) * 3); // 2-4 blades
@@ -556,6 +490,7 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
         const tintRoll = rng(i * 31 + c);
         const bx = sample.x + jx;
         const bz = sample.z + jz;
+        if (onFloor(bx, bz)) continue;
         const hit = ground?.hit(bx, bz) ?? null;
         if (ground) {
           // Off the mesh, standing on a wall, or the drawn ground has fallen
@@ -598,21 +533,11 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     group.add(grass);
 
     // ── Ferns: taller arched fronds in the shaded inner jungle band ──
-    const fernCount = Math.min(380, Math.round(r * r * 0.035));
-    const fernGeo = crossGeo.clone();
-    fernGeo.scale(1.15, 2.1, 1.15);
-    {
-      const fpos = fernGeo.getAttribute('position') as THREE.BufferAttribute;
-      for (let i = 0; i < fpos.count; i++) {
-        const fy = fpos.getY(i);
-        // arch the tips outward for a frond silhouette
-        fpos.setX(i, fpos.getX(i) * (1 + fy * 0.5));
-        fpos.setZ(i, fpos.getZ(i) * (1 + fy * 0.5));
-      }
-      fpos.needsUpdate = true;
-    }
-    const fernMat = new THREE.MeshStandardMaterial({ color: 0xffffff, map: makeFernFrondTexture(), roughness: 0.92, side: THREE.DoubleSide, alphaTest: 0.4 });
-    liftFoliageNormals(fernMat, 0.7);   // fronds keep more of their own form than blades
+    const fernCount = Math.min(260, Math.round(r * r * 0.028));
+    const fernGeo = makeFernRosetteGeometry();
+    const fernMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, side: THREE.DoubleSide, vertexColors: true });
+    liftFoliageNormals(fernMat, 0.45);
+    applyFoliageSway(fernMat, host, true);
     const ferns = new THREE.InstancedMesh(fernGeo, fernMat, fernCount);
     // Cluster ferns into leafy clumps (2-3 fronds per seed) instead of
     // isolated cards, so they read as bushes/groundcover not scattered
@@ -625,11 +550,13 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + terrain.peakEst * 0.85) continue;
       if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
       if (onFloor(sample.x, sample.z)) continue;
+      if (rng(seed * 101 + 23) > understoryDensity(island.profile.biome, sample.x, sample.z, island.profile.seed ?? 0)) continue;
       const clump = 2 + Math.floor(rng(seed * 71) * 2);
       for (let c = 0; c < clump && fernsPlaced < fernCount; c++) {
         const i = seed * 7 + c;
         const fx = sample.x + (rng(i * 47) - 0.5) * 0.7;
         const fz = sample.z + (rng(i * 59) - 0.5) * 0.7;
+        if (onFloor(fx, fz)) continue;
         const sc = floraScale(rng(i * 61), FLORA_SCALE.fern);
         const fernHit = ground?.hit(fx, fz) ?? null;
         if (ground) {

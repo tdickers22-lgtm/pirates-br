@@ -193,6 +193,11 @@ for (const name of ASSET_NAMES) {
   const color = geom.getAttribute('color');
   const groups = geom.groups;
 
+  if (['palm_a', 'palm_b', 'palm_c', 'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers'].includes(name)) {
+    if (mats.length !== 1) issues.push('organic asset no longer collapses to one draw');
+    if (mats.some((mat) => mat.flatShading)) issues.push('authored organic normals discarded by loader');
+  }
+
   if (!pos || pos.count === 0) issues.push('merged geometry has no vertices');
 
   // 1. vertexColors materials MUST have a COLOR_0 attribute to multiply against.

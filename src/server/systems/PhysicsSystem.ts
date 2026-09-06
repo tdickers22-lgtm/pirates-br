@@ -7,6 +7,7 @@ import {
   getBridgeDeckY,
   getIslandDistRatio,
   gerstnerHeight,
+  gerstnerVerticalVelocity,
   getStormWaveIntensity,
   geyserEruptionLevel,
   WAVE_PARAMS,
@@ -788,7 +789,10 @@ export class PhysicsSystem {
       // A flooding hull rides lower — the bilge water pushes the buoyancy target
       // down by up to FREEBOARD_DROP, dipping more sections under (the SoT spiral).
       const buoyTarget = waveY - clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.FREEBOARD_DROP;
-      dyn.heaveVel += ((buoyTarget - ship.position.y) * PHYSICS.BUOYANCY_SPRING - dyn.heaveVel * HEAVE_DAMPING) * dt;
+      const surfaceVelocity = gerstnerVerticalVelocity(ship.position.x, ship.position.z, t,
+        WAVE_PARAMS, seaState, ship.velocity.x, ship.velocity.z);
+      dyn.heaveVel += ((buoyTarget - ship.position.y) * PHYSICS.BUOYANCY_SPRING
+        - (dyn.heaveVel - surfaceVelocity) * HEAVE_DAMPING) * dt;
       ship.position.y += dyn.heaveVel * dt;
       ship.heave = clamp(buoyTarget - ship.position.y, -2, 2);
 
@@ -1294,7 +1298,10 @@ export class PhysicsSystem {
           // swim branch — whose seabed resolve (natural surface, 20-45m overhead)
           // then ejects them through the roof onto the hillside.
           const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS, playerSea);
-          submergeDepth = waveY - islandFloor;
+          // A suspended bridge is dry ground even when the channel below it
+          // is deep enough to swim. Under-bridge players never acquire that
+          // floor (the deck-height gate above keeps them on the seabed).
+          submergeDepth = waveY - Math.max(islandFloor, bridgeFloor);
           swimHere = player.state === 'swimming' || downed
             ? submergeDepth > LOCO.SWIM_EXIT_DEPTH
             : submergeDepth > LOCO.SWIM_ENTER_DEPTH;

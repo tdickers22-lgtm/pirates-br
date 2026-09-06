@@ -56,6 +56,8 @@ export const LOGIC = [
   quick(tsx('test-occlusion.mjs')),
   quick(tsx('test-game-balance.mjs')),
   quick(tsx('test-terrain-detail.mjs')),
+  quick(tsx('test-foliage-geometry.mjs')),
+  quick(tsx('test-ocean-dynamics.mjs')),
   quick(tsx('test-island-props.mjs')),
   quick(tsx('test-asset-merge.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),
@@ -219,6 +221,7 @@ export const TIER_TIMEOUT_MS = { logic: 120_000, server: 120_000, browser: 900_0
  * cheap failure is reported in the first minute rather than the twentieth.
  */
 export const BROWSER = [
+  { ...plain('test-world-fidelity.mjs'), timeoutMs: 900_000 },
   { ...plain('test-gameplay-smoke.mjs') },
   { ...plain('test-lod-reveal.mjs') },
   { ...plain('test-minimap.mjs') },

@@ -1,8 +1,7 @@
 # Island vegetation set: leafy bush, berry bush, flowering shrub, a proper
-# 3D fern, a flourishing flower bed, and tall wildflowers — stylized low-poly
-# foliage, heavily instanced so budgets are hard ceilings:
-#   bush<=800  bush_berry<=900  flower_bush<=900  fern_plant<=900
-#   flower_patch<=3000  wildflowers<=800
+# 3D fern, a flourishing flower bed, and tall wildflowers. Individual folded
+# leaves, branched stems and tapered pinnae replace the old foliage blobs.
+# Close-range instanced asset budget: 3,000 triangles, six material slots.
 # Material names are a client API (sway/tint by name) — do not rename.
 # Headless: Blender -b -P scripts/blender/build_plants.py
 # Optional: PLANTS_RENDER_DIR=<dir> to write turntable renders per asset.
@@ -16,20 +15,23 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, '_detail.py')).read())
+exec(open(os.path.join(HERE, '_nature.py')).read())
+EXPORT_DIR = os.environ.get('BR_EXPORT_DIR', EXPORT_DIR)
 
 RENDER_DIR = os.environ.get('PLANTS_RENDER_DIR', '')
 clear_default_scene()
 
 # Extra foliage/accent materials (added to the shared palette namespace).
 EXTRA = {
-    "Leaf_A": ((0.16, 0.40, 0.16, 1.0), 0.82, 0.0),
-    "Leaf_B": ((0.22, 0.50, 0.20, 1.0), 0.8, 0.0),
-    "Leaf_C": ((0.30, 0.44, 0.16, 1.0), 0.84, 0.0),
-    "Berry_Red": ((0.62, 0.10, 0.12, 1.0), 0.42, 0.0),
+    "Leaf_A": ((0.09, 0.28, 0.105, 1.0), 0.82, 0.0),
+    "Leaf_B": ((0.16, 0.39, 0.13, 1.0), 0.8, 0.0),
+    "Leaf_C": ((0.23, 0.33, 0.10, 1.0), 0.84, 0.0),
+    "Berry_Red": ((0.48, 0.07, 0.09, 1.0), 0.75, 0.0),
     "Berry_Blue": ((0.20, 0.24, 0.52, 1.0), 0.45, 0.0),
-    "Flower_Pink": ((0.86, 0.42, 0.60, 1.0), 0.6, 0.0),
-    "Flower_Yellow": ((0.92, 0.80, 0.30, 1.0), 0.6, 0.0),
-    "Flower_White": ((0.94, 0.92, 0.86, 1.0), 0.7, 0.0),
+    "Flower_Pink": ((0.76, 0.27, 0.43, 1.0), 0.8, 0.0),
+    "Flower_Yellow": ((0.87, 0.64, 0.18, 1.0), 0.8, 0.0),
+    "Flower_White": ((0.86, 0.83, 0.73, 1.0), 0.8, 0.0),
     "Stem": ((0.34, 0.24, 0.13, 1.0), 0.9, 0.0),
 }
 for k, v in EXTRA.items():
@@ -42,30 +44,31 @@ def seed_of(name):
 
 
 def finish(coll, name):
-    """Bake AO (bright floor for foliage), export with COLOR_0, verify, render,
-    then hide from later renders (assets share the scene)."""
-    bake_ao(coll, floor=0.65)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR)
-    for o in coll.objects:
-        o.hide_render = True
+    finish_nature(coll, name, budget=3000)
 
 
 # ── shared geometry helpers ─────────────────────────────────
 def bm_blade(length, width, rise, droop, yaw, pitch, base):
-    """Curved tapered leaf/grass blade: quad + tip tri (3 tris).
-    Local frame: +Y outward, X width; 'rise' lifts the midpoint (arch),
-    'droop' drops the tip below the arch. Rotated by pitch (X) then yaw (Z)."""
+    """Twelve triangles define a curved leaf with a raised midvein, cupped
+    margins and a pointed tip. Real leaf gaps work without alpha textures."""
     bm = bmesh.new()
-    b0 = bm.verts.new((-width * 0.5, 0, 0))
-    b1 = bm.verts.new((width * 0.5, 0, 0))
-    m0 = bm.verts.new((-width * 0.33, length * 0.55, rise))
-    m1 = bm.verts.new((width * 0.33, length * 0.55, rise))
-    tip = bm.verts.new((0, length, rise - droop))
-    bm.faces.new((b0, b1, m1, m0))
-    bm.faces.new((m0, m1, tip))
+    root = bm.verts.new((0, 0, 0))
+    rings = []
+    for t in (0.22, 0.50, 0.77):
+        w = width * math.sin(math.pi * t) * 0.5
+        z = rise * math.sin(math.pi * t * 0.72) - droop * t * t
+        # Offset the margin slightly so leaves have an organic asymmetry.
+        rings.append([bm.verts.new((-w, length * t, z - width * 0.12)),
+                      bm.verts.new((0, length * t, z + width * 0.08)),
+                      bm.verts.new((w * 0.91, length * t + length * 0.025, z - width * 0.12))])
+    tip = bm.verts.new((width * 0.045, length, rise * 0.77 - droop))
+    bm.faces.new((root, rings[0][1], rings[0][0]))
+    bm.faces.new((root, rings[0][2], rings[0][1]))
+    for a, b in zip(rings, rings[1:]):
+        bm.faces.new((a[0], a[1], b[1], b[0]))
+        bm.faces.new((a[1], a[2], b[2], b[1]))
+    bm.faces.new((rings[-1][0], rings[-1][1], tip))
+    bm.faces.new((rings[-1][1], rings[-1][2], tip))
     m = Matrix.Translation(base) @ Matrix.Rotation(yaw, 4, 'Z') @ Matrix.Rotation(pitch, 4, 'X')
     bmesh.ops.transform(bm, matrix=m, verts=bm.verts)
     return bm
@@ -99,18 +102,18 @@ def bm_bent_stem(base, height, lean_dir, lean_amt, segs_n=3, r1=0.02, r2=0.008, 
 
 
 def bm_flower_head(petal_r, rng, cup=0.42):
-    """Cupped 5-petal flower head (diamond petals, 2 tris each = 10 tris),
+    """Cupped 5-petal flower head with rounded shoulders (4 tris per petal),
     local +Z up, centered at origin."""
     bm = bmesh.new()
     for p in range(5):
         a = p * math.tau / 5 + rng.random() * 0.18
         v0 = bm.verts.new((0, 0, 0.004))
-        v1 = bm.verts.new((math.cos(a - 0.34) * petal_r * 0.55,
-                           math.sin(a - 0.34) * petal_r * 0.55, petal_r * 0.08))
-        v2 = bm.verts.new((math.cos(a) * petal_r, math.sin(a) * petal_r, petal_r * cup))
-        v3 = bm.verts.new((math.cos(a + 0.34) * petal_r * 0.55,
-                           math.sin(a + 0.34) * petal_r * 0.55, petal_r * 0.08))
-        bm.faces.new((v0, v1, v2, v3))
+        outline = [v0]
+        for offset, reach, lift in ((-0.44, 0.48, 0.10), (-0.25, 0.89, cup * 0.75),
+                                    (0, 1, cup), (0.25, 0.89, cup * 0.75), (0.44, 0.48, 0.10)):
+            outline.append(bm.verts.new((math.cos(a + offset) * petal_r * reach,
+                                         math.sin(a + offset) * petal_r * reach, petal_r * lift)))
+        bm.faces.new(outline)
     return bm
 
 
@@ -120,7 +123,7 @@ def flower_at(coll, name, i, pos, normal_tilt_x, yaw, petal_mat, rng, petal_r=0.
     rot = Matrix.Rotation(yaw, 4, 'Z') @ Matrix.Rotation(normal_tilt_x, 4, 'X')
     hbm = bm_flower_head(petal_r, rng)
     bmesh.ops.transform(hbm, matrix=Matrix.Translation(pos) @ rot, verts=hbm.verts)
-    parts.append(obj_from_bmesh(f"{name}_petal{i}", hbm, coll, mat(petal_mat)))
+    parts.append(obj_from_bmesh(f"{name}_petal{i}", hbm, coll, mat(petal_mat), smooth=True))
     cbm = bmesh.new()
     bmesh.ops.create_icosphere(cbm, subdivisions=1, radius=petal_r * 0.24)
     up = rot @ Vector((0, 0, 1, 0))
@@ -133,36 +136,34 @@ def flower_at(coll, name, i, pos, normal_tilt_x, yaw, petal_mat, rng, petal_r=0.
 
 # ── bushes ──────────────────────────────────────────────────
 def leaf_clump(coll, name, radius, leaf_mats, rng, blobs, jitter=0.46):
-    """Rounded bush body: overlapping icosphere-subdiv-2 blobs with voronoi
-    crinkle (80 tris/blob). Returns (parts, blob_data) so accents can be
-    seated ON the canopy surface. Offsets are clamped so footprint stays
-    within radius*1.06 (baseline ±15% contract)."""
+    """Woody shoots carry opposite leaf pairs, exposing airy gaps and twig
+    forks. Returned tips attach berries/flowers to actual branch endings."""
     parts = []
     blob_data = []
-    for i in range(blobs):
-        br = radius * ((0.46 + rng.random() * 0.20) if i == 0
-                       else (0.36 + rng.random() * 0.34))
-        bm = bmesh.new()
-        bmesh.ops.create_icosphere(bm, subdivisions=2, radius=br)
-        ang = (i / blobs) * math.tau + rng.random() * 1.2
-        if i == 0:
-            # crown blob: big, high and centered so the bush keeps its height
-            rr = radius * 0.10
-            zoff = radius * (0.98 + rng.random() * 0.14)
-        else:
-            rr = min(radius * (0.10 + rng.random() * jitter), radius * 1.04 - br)
-            zoff = radius * (0.26 + rng.random() * 0.55)
-        off = Vector((math.cos(ang) * rr, math.sin(ang) * rr, zoff))
-        for v in bm.verts:
-            v.co.z *= 0.78  # bushes read wider than tall
-        bmesh.ops.transform(bm, matrix=Matrix.Translation(off), verts=bm.verts)
-        # first pass guarantees every leaf material appears (client tint API)
-        leaf = leaf_mats[i % len(leaf_mats)] if i < len(leaf_mats) else rng.choice(leaf_mats)
-        o = obj_from_bmesh(f"{name}_leaf{i}", bm, coll, mat(leaf), smooth=False)
-        displace_noise(o, strength=br * 0.24, scale=0.42, seed=seed_of(name) % 7 + i)
-        apply_modifiers(o)
-        parts.append(o)
-        blob_data.append((off, br))
+    shoots = blobs + 3
+    for i in range(shoots):
+        ang = i * 2.39996 + rng.uniform(-0.30, 0.30)
+        reach = radius * rng.uniform(0.45, 0.84)
+        height = radius * (1.42 if i == 0 else rng.uniform(0.72, 1.24))
+        base = Vector((math.cos(ang) * 0.04, math.sin(ang) * 0.04, 0.05))
+        pts = [base + Vector((math.cos(ang) * reach * t,
+                             math.sin(ang) * reach * t, height * (t - t*t*0.17)))
+               for t in (0, 0.33, 0.66, 1)]
+        parts += chain_pts(coll, f'{name}_shoot{i}', pts, 0.018, 0.005,
+                           mat('Stem'), segs=5, balls=False)
+        for k in range(7):
+            t = 0.21 + k * 0.115 + rng.uniform(-0.018, 0.018)
+            p = base + Vector((math.cos(ang) * reach * t,
+                               math.sin(ang) * reach * t, height * (t - t*t*0.17)))
+            for side in (-1, 1):
+                leaf_yaw = ang - math.pi / 2 + side * (0.85 + t * 0.35)
+                length = rng.uniform(0.14, 0.23) * (1.16 - 0.40 * t)
+                bm = bm_blade(length, length * rng.uniform(0.43, 0.65),
+                              length * 0.24, length * 0.23, leaf_yaw,
+                              rng.uniform(-0.16, 0.38), p)
+                parts.append(obj_from_bmesh(f'{name}_leaf{i}_{k}_{side}', bm, coll,
+                                            mat(leaf_mats[(i + k) % len(leaf_mats)]), smooth=True))
+        blob_data.append((pts[-1], 0.045))
     return parts, blob_data
 
 
@@ -189,8 +190,8 @@ def build_bush(name, berry=None, flower=None):
 
     # short woody base, leaning slightly off-axis
     bm = bmesh.new()
-    bmesh.ops.create_cone(bm, cap_ends=True, segments=6, radius1=0.10, radius2=0.055, depth=0.4)
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, 0.16))
+    bmesh.ops.create_cone(bm, cap_ends=True, segments=8, radius1=0.055, radius2=0.028, depth=0.24)
+    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, 0.075))
                         @ Matrix.Rotation(0.10, 4, 'Y'), verts=bm.verts)
     base = obj_from_bmesh(f"{name}_base", bm, coll, mat("Stem"))
     bevel_obj(base, width=0.012)
@@ -225,14 +226,12 @@ def build_bush(name, berry=None, flower=None):
             parts.extend(flower_at(coll, name, i, pos, tilt, yaw,
                                    flower, rng, petal_r=0.085 + rng.random() * 0.02))
 
-    join(parts, name)
     finish(coll, name)
 
 
 # ── fern ────────────────────────────────────────────────────
 def build_fern(name):
-    """13 arching fronds: multi-segment curved rachis strips with paired
-    curved 2-tri pinna blades (no cones)."""
+    """Arching fronds with tapered, folded pinnae and raised rachis veins."""
     coll = asset_collection(name)
     rng = random.Random(seed_of(name))
     parts = []
@@ -243,7 +242,7 @@ def build_fern(name):
         length = (0.90 if inner else 0.70) + rng.random() * 0.12
         e0 = math.radians((85 if inner else 80) + rng.random() * 4)
         droop = math.radians((50 if inner else 58) + rng.random() * 8)
-        segs_n = 5
+        segs_n = 8
         seg = length / segs_n
         # sample the rachis curve
         pts = [Vector((0, 0.03, 0.02))]
@@ -265,7 +264,7 @@ def build_fern(name):
         # pinnae: paired curved blades at 8 stations, shrinking toward the tip,
         # swept forward and drooping gently so the frond reads as one leaf
         pbm = bmesh.new()
-        stations = 8
+        stations = 12
         for k in range(stations):
             t = (k + 1) / (stations + 1)
             fs = t * segs_n
@@ -274,22 +273,28 @@ def build_fern(name):
             ang = e0 - droop * min(1.0, s0 / (segs_n - 1))
             plen = 0.24 * (1 - t) + 0.06
             for side in (-1, 1):
-                # 2-tri curved blade: quad with narrowed, dipped tip edge
-                b0 = pbm.verts.new((side * 0.010, -0.014, 0.004))
-                b1 = pbm.verts.new((side * 0.010, 0.014, 0.004))
-                t0 = pbm.verts.new((side * plen, -0.018 * (1 - t) - 0.005, -plen * 0.16))
-                t1 = pbm.verts.new((side * plen, 0.018 * (1 - t) + 0.005, -plen * 0.16 - 0.012))
-                f = (b0, b1, t1, t0) if side > 0 else (b1, b0, t0, t1)
-                pbm.faces.new(f)
-                # sweep toward the tip and follow the rachis pitch
+                # Six triangles per pinna: pointed tip, ridged midrib,
+                # broad inner shoulder and narrow outer shoulder.
+                coords = [(0, 0, 0), (side * plen * 0.35, -0.028, -plen * 0.04),
+                          (side * plen * 0.40, 0, 0.012),
+                          (side * plen * 0.35, 0.028, -plen * 0.04),
+                          (side * plen * 0.75, -0.013, -plen * 0.12),
+                          (side * plen * 0.78, 0, -plen * 0.065),
+                          (side * plen * 0.75, 0.013, -plen * 0.12),
+                          (side * plen, 0, -plen * 0.22)]
+                v = [pbm.verts.new(q) for q in coords]
+                for inds in ((0, 1, 2), (0, 2, 3), (1, 4, 5, 2),
+                             (2, 5, 6, 3), (4, 7, 5), (5, 7, 6)):
+                    face = tuple(v[q] for q in inds)
+                    pbm.faces.new(face if side > 0 else tuple(reversed(face)))
                 bmesh.ops.transform(
-                    pbm, verts=[b0, b1, t0, t1],
+                    pbm, verts=v,
                     matrix=Matrix.Translation(p)
                     @ Matrix.Rotation(math.radians(38) * side * (0.5 + t * 0.8), 4, 'Z')
                     @ Matrix.Rotation(-(math.pi / 2 - ang) * 0.55, 4, 'X'))
         bmesh.ops.transform(pbm, matrix=rot, verts=pbm.verts)
         parts.append(obj_from_bmesh(f"{name}_pin{i}", pbm, coll,
-                                    mat("Leaf_A" if i % 2 else "Leaf_B")))
+                                    mat("Leaf_A" if i % 2 else "Leaf_B"), smooth=True))
     # root crown
     cbm = bmesh.new()
     bmesh.ops.create_icosphere(cbm, subdivisions=1, radius=0.11)
@@ -297,7 +302,6 @@ def build_fern(name):
         v.co.z *= 0.55
     bmesh.ops.transform(cbm, matrix=Matrix.Translation((0, 0, 0.02)), verts=cbm.verts)
     parts.append(obj_from_bmesh(f"{name}_crown", cbm, coll, mat("Stem")))
-    join(parts, name)
     finish(coll, name)
 
 
@@ -309,16 +313,14 @@ def build_flower_patch(name):
     rng = random.Random(seed_of(name))
     parts = []
     radius = 0.74
-    # low green mound (icosphere subdiv 2, squashed, voronoi crinkle)
-    bm = bmesh.new()
-    bmesh.ops.create_icosphere(bm, subdivisions=2, radius=radius * 0.96)
-    for v in bm.verts:
-        v.co.z *= 0.20
-    bmesh.ops.transform(bm, matrix=Matrix.Translation((0, 0, 0.045)), verts=bm.verts)
-    mound = obj_from_bmesh(f"{name}_mound", bm, coll, mat("Leaf_A"), smooth=False)
-    displace_noise(mound, strength=0.05, scale=0.45, seed=seed_of(name) % 9)
-    apply_modifiers(mound)
-    parts.append(mound)
+    # Leaf rosettes form an open ground carpet; no solid green mound.
+    for i in range(40):
+        a = i * 2.39996
+        rr = radius * math.sqrt((i + 0.5) / 40) * 0.82
+        parts.append(obj_from_bmesh(f'{name}_rosette{i}',
+            bm_blade(0.18, 0.075, 0.045, 0.05, a, 0.25,
+                     Vector((math.cos(a) * rr, math.sin(a) * rr, 0.015))),
+            coll, mat('Leaf_A'), smooth=True))
     # curved grass blades poking through
     for i in range(16):
         ang = rng.random() * math.tau
@@ -333,7 +335,7 @@ def build_flower_patch(name):
     # blooms carpeting the mound — mixed colours, bent stems, cupped heads
     palettes = ["Flower_Pink", "Flower_Yellow", "Flower_White",
                 "Flower_Pink", "Flower_Yellow"]
-    count = 48 + int(rng.random() * 8)
+    count = 32 + int(rng.random() * 4)
     for i in range(count):
         ang = rng.random() * math.tau
         rr = radius * math.sqrt(rng.random()) * 0.96
@@ -343,12 +345,11 @@ def build_flower_patch(name):
         lean_dir = rng.random() * math.tau
         lean = 0.15 + rng.random() * 0.35
         sbm, top, tilt = bm_bent_stem(base, stem_h, lean_dir, lean,
-                                      segs_n=2, r1=0.013, r2=0.007)
+                                      segs_n=3, sides=4, r1=0.013, r2=0.007)
         parts.append(obj_from_bmesh(f"{name}_stem{i}", sbm, coll, mat("Stem")))
         parts.extend(flower_at(coll, name, i, top, -tilt * 0.8, lean_dir + math.pi / 2,
                                rng.choice(palettes), rng,
                                petal_r=0.09 + rng.random() * 0.04))
-    join(parts, name)
     finish(coll, name)
 
 
@@ -360,7 +361,7 @@ def build_wildflowers(name):
     rng = random.Random(seed_of(name))
     parts = []
     palettes = ["Flower_Pink", "Flower_Yellow", "Flower_White"]
-    stalks = 8
+    stalks = 12
     for i in range(stalks):
         ang = (i / stalks) * math.tau + rng.random() * 0.5
         base_r = 0.04 + rng.random() * 0.17
@@ -369,7 +370,7 @@ def build_wildflowers(name):
         lean_dir = ang + (rng.random() - 0.5) * 1.2
         lean = 0.12 + rng.random() * 0.28
         sbm, top, tilt = bm_bent_stem(base, height, lean_dir, lean,
-                                      segs_n=3, r1=0.018, r2=0.007)
+                                      segs_n=5, sides=5, r1=0.018, r2=0.007)
         parts.append(obj_from_bmesh(f"{name}_stem{i}", sbm, coll, mat("Leaf_C")))
         # two curved leaf blades midway up
         for k in range(2):
@@ -403,7 +404,6 @@ def build_wildflowers(name):
                      gang, math.radians(52 + rng.random() * 25),
                      Vector((math.cos(gang) * 0.08, math.sin(gang) * 0.08, 0))),
             coll, mat("Leaf_C")))
-    join(parts, name)
     finish(coll, name)
 
 
@@ -413,4 +413,5 @@ build_bush("flower_bush", flower="Flower_Pink")
 build_fern("fern_plant")
 build_flower_patch("flower_patch")
 build_wildflowers("wildflowers")
+render_nature(('bush', 'fern_plant', 'flower_patch'), RENDER_DIR)
 print("PLANTS DONE")

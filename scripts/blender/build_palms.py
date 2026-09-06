@@ -16,6 +16,9 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, '_helpers.py')).read())
 exec(open(os.path.join(HERE, '_ao.py')).read())
+exec(open(os.path.join(HERE, '_detail.py')).read())
+exec(open(os.path.join(HERE, '_nature.py')).read())
+EXPORT_DIR = os.environ.get('BR_EXPORT_DIR', EXPORT_DIR)
 
 
 # ── Trunk ────────────────────────────────────────────────────
@@ -30,7 +33,7 @@ def trunk_path(height, lean, curve_pow, n):
 
 
 def build_trunk(name, coll, height, lean, seed, r0=0.30, r1=0.16,
-                rings=15, segs=14, curve_pow=1.7):
+                rings=22, segs=16, curve_pow=1.7):
     """Lofted tapered tube along the bend. Base flare + segment bulges +
     frond-scar diamond pattern (staggered radial bumps on the upper trunk)."""
     rng = random.Random(seed)
@@ -88,7 +91,7 @@ def build_frond(name, coll, origin, yaw, tilt, length, material, seed,
     """One frond: tapered midrib tube + leaflet quads angled off it in a V,
     drooping toward the tips. Built local (+X out), then pitched/yawed."""
     rng = random.Random(seed)
-    n = 10
+    n = 12
     sag = length * (0.95 if droopy else 0.55)
     rise = 0.0 if droopy else length * 0.10
     path = frond_arch(length, rise, sag, n)
@@ -140,9 +143,12 @@ def build_frond(name, coll, origin, yaw, tilt, length, material, seed,
             m0 = p + d * llen * 0.55 + tang * (sweep * 0.5 - w0 * 0.40) - up * drop * 0.30
             m1 = p + d * llen * 0.55 + tang * (sweep * 0.5 + w0 * 0.40) - up * drop * 0.30
             tp = p + d * llen + tang * sweep - up * drop
-            v = [bm.verts.new(q) for q in (b0, b1, m0, m1, tp)]
-            bm.faces.new((v[0], v[1], v[3], v[2]))
-            bm.faces.new((v[2], v[3], v[4]))
+            # Raised midvein splits each leaflet into cupped surfaces; the
+            # extra triangles catch light along the vein and drooping edge.
+            mc = (m0 + m1) * 0.5 + up * w0 * 0.18
+            v = [bm.verts.new(q) for q in (b0, b1, m0, m1, tp, mc)]
+            for ids in ((0, 1, 5), (0, 5, 2), (1, 3, 5), (2, 5, 4), (5, 3, 4)):
+                bm.faces.new(tuple(v[i] for i in ids))
     # tip leaflet pointing along the rib
     p, tang = path_at(1.0)
     side = tang.cross(Vector((0, 0, 1))).normalized()
@@ -155,7 +161,8 @@ def build_frond(name, coll, origin, yaw, tilt, length, material, seed,
 
     rot = Matrix.Rotation(yaw, 4, 'Z') @ Matrix.Rotation(tilt, 4, 'Y')
     bmesh.ops.transform(bm, matrix=Matrix.Translation(origin) @ rot, verts=bm.verts)
-    return obj_from_bmesh(name, bm, coll, material)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    return obj_from_bmesh(name, bm, coll, material, smooth=True)
 
 
 # ── Crown extras ─────────────────────────────────────────────
@@ -173,7 +180,7 @@ def build_coconuts(name, coll, top, seed, count):
     for k in range(count):
         a = k * (2 * math.pi / max(1, count)) + rng.uniform(-0.3, 0.3)
         r = 0.21 + rng.uniform(0.0, 0.05)
-        bm = bm_icosphere(r, 1)
+        bm = bm_icosphere(r, 2)
         bmesh.ops.scale(bm, vec=Vector((1.0, 1.0, 1.15)), verts=bm.verts)
         pos = top + Vector((0.46 * math.cos(a), 0.46 * math.sin(a),
                             -0.56 - rng.uniform(0.0, 0.12)))
@@ -185,7 +192,7 @@ def build_coconuts(name, coll, top, seed, count):
 
 # ── Assembly ─────────────────────────────────────────────────
 def build_palm(name, height, lean, fronds, dead, seed, r0=0.30, r1=0.16,
-               frond_scale=0.42, cocos=4, pairs=16):
+               frond_scale=0.42, cocos=4, pairs=18):
     coll = asset_collection(name)
     trunk, top, tip_dir = build_trunk(f"{name}_trunk", coll, height, lean, seed,
                                       r0=r0, r1=r1)
@@ -221,8 +228,7 @@ def build_palm(name, height, lean, fronds, dead, seed, r0=0.30, r1=0.16,
     if cocos:
         parts += build_coconuts(f"{name}_coco", coll, top + tip_dir * 0.06,
                                 seed + 5, cocos)
-    palm = join(parts, name)
-    return coll, palm
+    return coll, parts
 
 
 # name, height, lean(XY at top), green fronds, dead fronds, seed
@@ -237,14 +243,9 @@ clear_default_scene()
 done = []
 for name, height, lean, fronds, dead, seed in SPECS:
     coll, palm = build_palm(name, height, lean, fronds, dead, seed)
-    bake_ao(coll, floor=0.6)
-    path = export_collection_vc(coll, f"{name}.glb")
-    verify_glb(path)
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR)
-    for o in coll.objects:
-        o.hide_render = True
+    finish_nature(coll, name, budget=6000)
     done.append(name)
     print(f"built {name}")
 
+render_nature(('palm_a', 'palm_c'), RENDER_DIR)
 print("PALMS DONE", done)

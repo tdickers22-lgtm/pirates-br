@@ -21,6 +21,7 @@ import {
   terrainFbm,
   terrainRidge,
 } from '../src/shared/utils/index.ts';
+import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -267,6 +268,9 @@ const caveIsland = makeIsland();
 const noCaveIsland = makeIsland();
 const caveAngle = 1.1;
 const cavePos = getIslandSurfacePoint(caveIsland, 0.6, caveAngle, 0);
+// Cave generation reserves its reference topography before applying the new
+// exterior relief. A synthetic cave must use that same construction contract.
+cavePos.y = getIslandSurfaceY(caveIsland, cavePos.x, cavePos.z, { baseRelief: true });
 const caveRotation = directionToYaw(Math.cos(caveAngle), Math.sin(caveAngle));
 const cave = {
   position: cavePos,
@@ -283,7 +287,7 @@ caveIsland.caves = [cave];
 const insideX = cavePos.x - 3 * Math.sin(caveRotation);
 const insideZ = cavePos.z - 3 * Math.cos(caveRotation);
 const naturalAbove = getIslandSurfaceY(caveIsland, insideX, insideZ);
-const naturalRef = getIslandSurfaceY(noCaveIsland, insideX, insideZ);
+const naturalRef = getIslandSurfaceY(noCaveIsland, insideX, insideZ, { baseRelief: true });
 expect('Walking above a roofed tunnel stands on the NATURAL hillside (no default carve)', naturalAbove === naturalRef, `above=${naturalAbove.toFixed(2)} ref=${naturalRef.toFixed(2)}`);
 const floorInside = getCaveFloorY(caveIsland, insideX, insideZ);
 expect('getCaveFloorY returns the carved floor inside the tunnel', floorInside !== null && Math.abs(floorInside - cave.floorY) < 0.05, `floor=${floorInside}`);
@@ -310,6 +314,27 @@ expect('...and the cut stops at the doorway — past it the tunnel keeps a natur
 const farFromMouthY = getIslandSurfaceY(mouthIsland, cavePos.x + 60, cavePos.z + 60);
 expect('...and the rest of the island is untouched by it',
   farFromMouthY === getIslandSurfaceY(noCaveIsland, cavePos.x + 60, cavePos.z + 60));
+
+// The concave coast must actually open toward its bay bearing. A descending
+// smoothstep previously carved its two arms and left that bearing dry.
+const roster = new MapGenerator(20260801).generateIslands();
+for (const island of roster.filter((i) => i.profile.terrainStyle === 'crescent')) {
+  const bearing = island.profile.primaryHillAngle + Math.PI;
+  const bay = getIslandSurfacePoint(island, 0.5, bearing);
+  const left = getIslandSurfacePoint(island, 0.5, bearing - 1.4);
+  const right = getIslandSurfacePoint(island, 0.5, bearing + 1.4);
+  expect(`${island.name}: an open bay between two dry headlands`, bay.y < -1 && left.y > 3 && right.y > 3,
+    `bay=${bay.y.toFixed(2)}, arms=${left.y.toFixed(2)}/${right.y.toFixed(2)}`);
+}
+const booty = roster.find((i) => i.id === 'booty-bay');
+const bayBearing = booty.profile.primaryHillAngle + Math.PI;
+const channel = getIslandSurfacePoint(booty, 0.65, bayBearing);
+const cay = getIslandSurfacePoint(booty, 0.8, bayBearing);
+expect('Booty Bay has a dry cay beyond its submerged bay channel', channel.y < -1 && cay.y > 1,
+  `channel=${channel.y.toFixed(2)}, cay=${cay.y.toFixed(2)}`);
+const copy = JSON.parse(JSON.stringify(booty));
+expect('Cays survive serialization with identical collision heights',
+  getIslandSurfaceY(copy, cay.x, cay.z) === getIslandSurfaceY(booty, cay.x, cay.z));
 
 if (failures > 0) {
   console.error(`\n${failures} terrain contract check(s) failed`);

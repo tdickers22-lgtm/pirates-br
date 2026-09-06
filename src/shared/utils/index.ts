@@ -234,6 +234,11 @@ export function getOceanRoughness(t: number): number {
   return clamp(1.0 + slow + slower, 0.55, 1.6);
 }
 
+/** Zero-mean second harmonic: steeper crests and broader troughs without
+ *  horizontal displacement, so every world-space water sample stays valid.
+ *  Bounded at 0.28: the profile remains monotonic between crest and trough. */
+export const WAVE_CREST_SHARPNESS = 0.28;
+
 /** Storm sea-state at a world position: 0 = calm seas, 1 = full raging swell.
  *  Deterministic from replicated storm state (center/safeRadius/phase), so the
  *  client shader, client gameplay and server physics all agree. Seas heave
@@ -284,17 +289,59 @@ export function gerstnerHeight(
     const w = waves[i];
     const k = (2 * Math.PI) / w.wavelength;
     const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
-    height += w.amplitude * roughness * Math.sin(f);
+    const s = Math.sin(f);
+    height += w.amplitude * roughness * (s + WAVE_CREST_SHARPNESS * (s * s - 0.5));
   }
   if (storm > 0) {
     for (let i = 0; i < STORM_WAVE_PARAMS.length; i++) {
       const w = STORM_WAVE_PARAMS[i];
       const k = (2 * Math.PI) / w.wavelength;
       const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
-      height += w.amplitude * storm * Math.sin(f);
+      const s = Math.sin(f);
+      height += w.amplitude * storm * (s + WAVE_CREST_SHARPNESS * (s * s - 0.5));
     }
   }
   return height;
+}
+
+/** Vertical speed of the sampled surface along a moving body's x/z path.
+ *  Buoyancy drag is relative to this speed: a hull rising with a swell should
+ *  not be damped toward a stationary y=0 ocean. No objects are allocated in
+ *  this per-hull path. `storm` is held locally constant, as in hull attitude
+ *  sampling; its spatial blend varies gently across a 180m band. */
+export function gerstnerVerticalVelocity(
+  x: number, z: number, t: number,
+  waves: readonly GerstnerWave[],
+  storm = 0, velocityX = 0, velocityZ = 0,
+): number {
+  const rawRoughness = 1 + Math.sin(t * 0.013) * 0.45 + Math.sin(t * 0.0042 + 1.7) * 0.3;
+  const stormBoost = 1 + storm * 0.85;
+  const roughness = clamp(rawRoughness, 0.55, 1.6) * stormBoost;
+  const roughnessRate = rawRoughness > 0.55 && rawRoughness < 1.6
+    ? (Math.cos(t * 0.013) * 0.45 * 0.013 + Math.cos(t * 0.0042 + 1.7) * 0.3 * 0.0042) * stormBoost
+    : 0;
+  let velocity = 0;
+  for (let i = 0; i < waves.length; i++) {
+    const w = waves[i];
+    const k = (2 * Math.PI) / w.wavelength;
+    const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
+    const s = Math.sin(f);
+    const phaseRate = k * (w.dirX * velocityX + w.dirY * velocityZ - w.speed);
+    const shape = s + WAVE_CREST_SHARPNESS * (s * s - 0.5);
+    velocity += w.amplitude * (roughnessRate * shape
+      + roughness * Math.cos(f) * (1 + 2 * WAVE_CREST_SHARPNESS * s) * phaseRate);
+  }
+  if (storm > 0) {
+    for (let i = 0; i < STORM_WAVE_PARAMS.length; i++) {
+      const w = STORM_WAVE_PARAMS[i];
+      const k = (2 * Math.PI) / w.wavelength;
+      const f = k * (w.dirX * x + w.dirY * z - w.speed * t);
+      const phaseRate = k * (w.dirX * velocityX + w.dirY * velocityZ - w.speed);
+      velocity += w.amplitude * storm * Math.cos(f)
+        * (1 + 2 * WAVE_CREST_SHARPNESS * Math.sin(f)) * phaseRate;
+    }
+  }
+  return velocity;
 }
 
 /**
@@ -413,6 +460,83 @@ function islandAngleMask(angle: number, center: number, width: number): number {
   return Math.exp(-Math.pow(islandAngleDelta(angle, center) / width, 2));
 }
 
+interface IslandRelief {
+  summits: { primary: number; secondary: number };
+  spurs: Array<{ x: number; z: number; cos: number; sin: number; length: number; width: number; height: number }>;
+  cays: Array<{ x: number; z: number; cos: number; sin: number; length: number; width: number; height: number }>;
+}
+
+// Derived once per replicated island, never drawn from the map's content RNG.
+// Both the mesh and locomotion sample these same ridges and sand cays. Keeping
+// their placement out of the hot sampler also avoids repeating the trig for
+// every terrain vertex, footstep, and ship-depth probe.
+const islandReliefCache = new WeakMap<Island, IslandRelief>();
+function getIslandRelief(island: Island): IslandRelief {
+  const cached = islandReliefCache.get(island);
+  if (cached) return cached;
+  const p = island.profile;
+  const r = island.radius;
+  const relief: IslandRelief = { summits: {
+    primary: p.terrainStyle === 'mountain' ? r * (0.32 + (p.primaryHillOffset / r - 0.18) / 0.16 * 0.11) : p.primaryHillOffset,
+    secondary: p.terrainStyle === 'mountain' ? r * (0.4 + (p.secondaryHillOffset / r - 0.16) / 0.2 * 0.14) : p.secondaryHillOffset,
+  }, spurs: [], cays: [] };
+  if (p.terrainStyle === 'mountain' || p.terrainStyle === 'twin' || p.terrainStyle === 'rocky' || p.terrainStyle === 'plateau') {
+    const strength = p.terrainStyle === 'mountain' ? 0.095 : p.terrainStyle === 'twin' ? 0.07 : 0.035;
+    const hills = [[p.primaryHillAngle, relief.summits.primary, 1], [p.secondaryHillAngle, relief.summits.secondary, p.secondaryHillScale]];
+    for (const [angle, offset, scale] of hills) {
+      for (const side of [-1, 1]) {
+        const heading = angle + side * 0.72;
+        relief.spurs.push({
+          x: Math.cos(angle) * offset * p.footprintX,
+          z: Math.sin(angle) * offset * p.footprintZ,
+          cos: Math.cos(heading), sin: Math.sin(heading),
+          length: r * (0.34 + scale * 0.1), width: r * (0.065 + scale * 0.025),
+          height: r * strength * (0.55 + scale * 0.45),
+        });
+      }
+    }
+  }
+  if (p.terrainStyle === 'archipelago' || p.terrainStyle === 'crescent') {
+    const rng = mulberry32(((p.seed ?? 0x5eed) ^ 0xca75b4) >>> 0);
+    // Sand satellites occupy the outer lee, leaving the centre of each lagoon
+    // and the gaps between the three principal islets open for swimming.
+    for (let k = 0; k < 3; k++) {
+      const angle = p.primaryHillAngle + Math.PI + (k - 1) * 0.63 + (rng() - 0.5) * 0.12;
+      const dist = r * (0.66 + rng() * 0.12);
+      const heading = angle + Math.PI * 0.5 + (rng() - 0.5) * 0.5;
+      relief.cays.push({
+        x: Math.cos(angle) * dist * p.footprintX,
+        z: Math.sin(angle) * dist * p.footprintZ,
+        cos: Math.cos(heading), sin: Math.sin(heading),
+        length: r * (0.095 + rng() * 0.04), width: r * (0.06 + rng() * 0.025),
+        height: 2.0 + rng() * 0.7,
+      });
+    }
+  }
+  islandReliefCache.set(island, relief);
+  return relief;
+}
+
+/** Derived summit centres do not consume the established content RNG stream. */
+export function getIslandSummitOffsets(island: Island): Readonly<{ primary: number; secondary: number }> {
+  return getIslandRelief(island).summits;
+}
+
+/** Keep the tested underground network's roof and mouth approaches intact.
+ * New relief fades in beyond a broad collar around each existing passage. */
+function caveReliefWeight(island: Island, x: number, z: number): number {
+  let nearest = Infinity;
+  for (const cave of island.caves ?? []) {
+    const dx = x - cave.position.x, dz = z - cave.position.z;
+    const cs = Math.cos(cave.rotation), sn = Math.sin(cave.rotation);
+    const lx = dx * cs - dz * sn, lz = dx * sn + dz * cs;
+    const side = Math.max(0, Math.abs(lx) - (cave.interiorRadius ?? 3));
+    const end = Math.max(0, lz - 4, -cave.length - 3 - lz);
+    nearest = Math.min(nearest, Math.hypot(side, end));
+  }
+  return smoothstep(5, 22, nearest);
+}
+
 /** Total inward bite (0..~0.6 of radius) from all inlets at a given angle. */
 export function getIslandInletCut(island: Island, angle: number): number {
   const inlets = island.profile.inlets;
@@ -509,6 +633,9 @@ export function getIslandCoastType(island: Island, angle: number): 'beach' | 'ro
 }
 
 interface IslandSurfaceOptions {
+  /** Reference topography for cave generation. Surface relief is kept out of
+   * their protected corridors, so adding a summit never rerolls the network. */
+  baseRelief?: boolean;
   /** Skip the cave-MOUTH trench cut (see carveCaveMouthAt). Internal: only the
    *  carve itself, which needs the uncut hillside to cut FROM, passes this.
    *  Everything else — physics footing, the terrain mesh, prop seating — must
@@ -748,6 +875,8 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const profile = island.profile;
   const localX = x - island.position.x;
   const localZ = z - island.position.z;
+  const reliefFeatures = getIslandRelief(island);
+  const reliefWeight = opts?.baseRelief ? 0 : caveReliefWeight(island, x, z);
   const shoreline = Math.max(0, 1 - distRatio / 1.04);
   const innerShelf = Math.max(0, 1 - distRatio / (0.62 + profile.mesaBias * 0.12));
   const crownShelf = Math.max(0, 1 - distRatio / (0.34 + profile.mesaBias * 0.08));
@@ -824,7 +953,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const massifFrac = isMountain ? 0.62 : isTwin ? 0.5 : 0;
   const primaryHill = twoScaleHill(
     profile.primaryHillAngle,
-    profile.primaryHillOffset,
+    lerp(profile.primaryHillOffset, reliefFeatures.summits.primary, reliefWeight),
     primaryPeakR,
     primaryPeakAmp,
     (isMountain ? 0.58 : 0.44) + profile.mesaBias * 0.06,
@@ -839,7 +968,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   const secondaryHill = isTwin
     ? twoScaleHill(
       profile.secondaryHillAngle,
-      profile.secondaryHillOffset,
+      lerp(profile.secondaryHillOffset, reliefFeatures.summits.secondary, reliefWeight),
       primaryPeakR,
       twinFangAmp,
       0.44 + profile.mesaBias * 0.06,
@@ -847,9 +976,11 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     )
     : twoScaleHill(
       profile.secondaryHillAngle,
-      profile.secondaryHillOffset,
+      lerp(profile.secondaryHillOffset, reliefFeatures.summits.secondary, reliefWeight),
       0.3 + profile.secondaryHillScale * 0.1,
-      (0.01 + profile.secondaryHillScale * 0.018) * secondaryAmp,
+      isMountain ? lerp((0.01 + profile.secondaryHillScale * 0.018) * secondaryAmp,
+        primaryPeakAmp * clamp(profile.secondaryHillScale * 0.78, 0.3, 0.64), reliefWeight)
+        : (0.01 + profile.secondaryHillScale * 0.018) * secondaryAmp,
       0.52,
       // Mountains give their second brow a shoulder too, so the massif reads as
       // a ridge with two summits rather than a lawn with two needles.
@@ -921,7 +1052,8 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     const bayPhase = coastPhase((profile.seed ?? 0x5eed) >>> 0, 7) * 21.7;
     const bayWander = terrainFbm(localX * 0.011 + bayPhase, localZ * 0.011 - bayPhase, 2);
     const angFromBay = Math.abs(islandAngleDelta(angle, bayAngle)) + bayWander * 0.36;
-    const wedge = smoothstep(1.15, 0.35, angFromBay);          // 1 straight into the mouth
+    const wedge = opts?.baseRelief ? smoothstep(1.15, 0.35, angFromBay)
+      : 1 - smoothstep(0.35, 1.15, angFromBay); // 1 straight into the mouth
     // The back land-bridge breathes with the same field, so the head of the bay
     // is a curved beach rather than a compass-perfect arc.
     const bayRadial = smoothstep(0.16 + bayWander * 0.05, 0.5 + bayWander * 0.05, distRatio);
@@ -948,6 +1080,21 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // beaches stay smooth and dock/berth/NPC placement is unaffected.
   const interiorMask = clamp(1 - distRatio / 0.97, 0, 1);
   const detailMask = Math.min(1, interiorMask * 1.6);
+  let ridgeSpurs = 0;
+  for (const spur of reliefFeatures.spurs) {
+    const dx = localX - spur.x;
+    const dz = localZ - spur.z;
+    const along = (dx * spur.cos + dz * spur.sin) / spur.length;
+    if (along < -0.12 || along > 1.1) continue;
+    const across = (-dx * spur.sin + dz * spur.cos) / spur.width;
+    if (Math.abs(across) > 2.5) continue;
+    const taper = smoothstep(-0.12, 0.15, along) * (1 - smoothstep(0.45, 1.1, along));
+    // The central arete and broad talus foot are separate scales; scalloped
+    // shoulders form alternating buttresses and gullies down the ridge.
+    const crest = Math.exp(-across * across * 2.8) * 0.72 + Math.exp(-across * across * 0.6) * 0.28;
+    ridgeSpurs += spur.height * crest * taper * (0.78 + 0.22 * Math.cos(along * Math.PI * 5));
+  }
+  ridgeSpurs *= (1 - smoothstep(0.55, 0.8, distRatio)) * reliefWeight;
   // Rolling hill detail — a LARGE-scale octave carves headlands/knolls/valleys
   // that give the aerial silhouette real relief (flat styles read as domes, not
   // discs), plus a medium octave for surface undulation. Interior-only
@@ -985,7 +1132,7 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
   // Noise must never carve interior land below the wave-safe shelf — but keep
   // intentional underwater saddles (twin/archipelago) untouched.
   const lowestAllowed = Math.min(baseY, 5.4);
-  let detailedY = Math.max(baseY + hillDetail + cliffBands + mtnCrag, lowestAllowed);
+  let detailedY = Math.max(baseY + hillDetail + cliffBands + mtnCrag + ridgeSpurs, lowestAllowed);
 
   // Terraced "levels": soft-quantize relief above the sea shelf so hillsides
   // read as walkable tiers. Strong on plateau/rocky islands, subtle on tropical.
@@ -1003,6 +1150,18 @@ export function getIslandSurfaceY(island: Island, x: number, z: number, opts?: I
     detailedY = seaLift + lerp(relief, steppedRelief, terraceStrength * detailMask);
   }
 
+  for (const cay of reliefFeatures.cays) {
+    const dx = localX - cay.x;
+    const dz = localZ - cay.z;
+    const along = (dx * cay.cos + dz * cay.sin) / cay.length;
+    const across = (-dx * cay.sin + dz * cay.cos) / cay.width;
+    const d2 = along * along + across * across;
+    if (d2 >= 3.24) continue;
+    // A dry sand crown, gently shelving into an underwater apron. This is
+    // actual shared land, so a swimmer can climb onto every visible cay.
+    const cayY = -3.4 + (cay.height + 3.4) * (1 - smoothstep(0.08, 3.24, d2));
+    detailedY = lerp(detailedY, Math.max(detailedY, cayY), reliefWeight);
+  }
   const naturalY = detailedY;
 
   // ── Signed shore drop past the rim (heightfield continues UNDERWATER) ──
@@ -1119,10 +1278,18 @@ export function getBridgeDeckY(
   const px = bridge.ax + dx * t;
   const pz = bridge.az + dz * t;
   if (Math.hypot(x - px, z - pz) > bridge.width * 0.5) return null;
-  // Same catenary sag the client planks draw — feet stand ON the boards.
-  const span = Math.sqrt(len2);
+  return getBridgeSpanY(bridge, t);
+}
+
+/** Plank-top height along a bridge. Rendering uses this directly, including
+ *  the end points where roundoff in an XZ projection could leave the strip. */
+export function getBridgeSpanY(
+  bridge: { ax: number; ay: number; az: number; bx: number; by: number; bz: number },
+  t: number,
+): number {
+  const span = Math.hypot(bridge.bx - bridge.ax, bridge.bz - bridge.az);
   const sag = -Math.sin(t * Math.PI) * Math.min(0.9, span * 0.04);
-  return lerp(bridge.ay, bridge.by, t) + sag + 0.16; // plank-top standing surface
+  return lerp(bridge.ay, bridge.by, t) + sag + 0.16;
 }
 
 /**

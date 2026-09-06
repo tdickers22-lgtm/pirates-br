@@ -18,15 +18,18 @@ from mathutils import Vector, Matrix
 HERE = os.path.dirname(os.path.abspath(__file__))
 exec(open(os.path.join(HERE, "_helpers.py")).read())
 exec(open(os.path.join(HERE, "_ao.py")).read())
+exec(open(os.path.join(HERE, "_detail.py")).read())
+exec(open(os.path.join(HERE, "_nature.py")).read())
+EXPORT_DIR = os.environ.get('BR_EXPORT_DIR', EXPORT_DIR)
 
 RENDER_DIR = os.environ.get("ROCKS_RENDER_DIR", "")
 
 # Weathered rock tones for the stacks (lighter + warmer than the old near-black
 # Rock_Sea so they read as sun-and-salt-eroded stone, not flat grey cones).
 EXTRA = {
-    "Rock_Stack":  ((0.40, 0.38, 0.34, 1.0), 0.94, 0.0),  # weathered body
-    "Rock_Wet":    ((0.24, 0.24, 0.25, 1.0), 0.72, 0.0),  # dark wet base
-    "Rock_Pale":   ((0.60, 0.57, 0.50, 1.0), 0.95, 0.0),  # sun-bleached / guano crown
+    "Rock_Stack":  ((0.29, 0.27, 0.23, 1.0), 0.94, 0.0),  # weathered body
+    "Rock_Wet":    ((0.16, 0.17, 0.18, 1.0), 0.78, 0.0),  # dark wet base
+    "Rock_Pale":   ((0.45, 0.42, 0.35, 1.0), 0.95, 0.0),  # sun-bleached / guano crown
 }
 for k, v in EXTRA.items():
     PALETTE.setdefault(k, v)
@@ -51,15 +54,9 @@ def fit_envelope(obj, target_r, target_top, target_bot):
 
 
 def finish(coll, obj, name, target_r, target_top, target_bot):
-    fit_envelope(obj, target_r, target_top, target_bot)
-    bake_ao(coll)
-    export_collection_vc(coll, f"{name}.glb")
-    verify_glb(os.path.join(EXPORT_DIR, f"{name}.glb"))
-    if RENDER_DIR:
-        render_turntable(coll, name, RENDER_DIR)
-    # keep finished assets out of later assets' turntable renders
-    for o in coll.objects:
-        o.hide_render = True
+    # Fit the unjoined parts so AO/tint see their individual materials and
+    # the final node has no leftover transform that could lift it off ground.
+    finish_nature(coll, name)
 
 
 # ── boulders ──────────────────────────────────────────────────────────────
@@ -68,10 +65,21 @@ def rock_lump(name, coll, r, squash, seed, material,
               subdiv=3, deci=0.6, stretch=(1.0, 1.0)):
     """Icosphere -> dual voronoi displacement -> decimate to mixed flat facets."""
     bm = bm_icosphere(r, subdiv)
+    carve_facets(bm, r, count=17, depth=(0.76, 0.96), seed=seed, softness=r * 0.07)
+    # Weathered bedding planes and a diagonal fault weather into the mesh;
+    # extra vertices describe relief instead of only subdividing flat faces.
+    for v in bm.verts:
+        p = v.co.copy()
+        band = math.sin(p.z * 17.0 / r + p.x * 1.7 / r + seed)
+        notch = max(0.0, band) ** 9 * 0.042
+        fault = math.exp(-((p.x + p.z * 0.22 - r * 0.18) / (r * 0.05)) ** 2) * 0.085
+        v.co *= 1.0 - notch - fault
     bmesh.ops.scale(bm, vec=Vector((stretch[0], stretch[1], squash)), verts=bm.verts)
     obj = obj_from_bmesh(name, bm, coll, mat(material), smooth=False)
-    displace_noise(obj, strength=r * coarse, scale=coarse_scale, seed=seed)
-    displace_noise(obj, strength=fine, scale=fine_scale, seed=seed + 31)
+    # Small coherent weathering preserves the broad carved planes. Large
+    # normal displacement after carving folded adjacent facets into spikes.
+    displace_noise(obj, strength=r * coarse * 0.18, scale=coarse_scale, seed=seed)
+    displace_noise(obj, strength=fine * 0.35, scale=fine_scale, seed=seed + 31)
     decimate(obj, deci)
     apply_modifiers(obj)
     return obj
@@ -82,14 +90,14 @@ def build_boulder_a(name, seed):
     coll = asset_collection(name)
     main = rock_lump(f"{name}_m", coll, 1.0, 0.82, seed, "Rock_Grey",
                      coarse=0.50, coarse_scale=1.0, fine=0.10, fine_scale=0.5,
-                     subdiv=5, deci=0.55)
+                     subdiv=5, deci=0.80)
     main.location.z = 0.62
     # small bury-skirt lump seating it into terrain
     skirt = rock_lump(f"{name}_s", coll, 0.72, 0.42, seed + 5, "Rock_Grey",
                       coarse=0.35, coarse_scale=1.1, fine=0.06, fine_scale=0.45,
                       subdiv=4, deci=0.45, stretch=(1.25, 1.1))
     skirt.location = Vector((0.35, -0.25, 0.02))
-    obj = join([main, skirt], name)
+    obj = [main, skirt]
     finish(coll, obj, name, 1.443, 2.226, -0.083)
 
 
@@ -98,7 +106,7 @@ def build_boulder_b(name, seed):
     coll = asset_collection(name)
     main = rock_lump(f"{name}_m", coll, 1.0, 0.50, seed, "Rock_Grey",
                      coarse=0.62, coarse_scale=2.3, fine=0.09, fine_scale=0.5,
-                     subdiv=5, deci=0.25, stretch=(1.45, 0.82))
+                     subdiv=5, deci=0.57, stretch=(1.45, 0.82))
     main.rotation_euler = (math.radians(9), math.radians(-16), math.radians(24))
     main.location.z = 0.62
     shard = rock_lump(f"{name}_sh", coll, 0.55, 0.85, seed + 9, "Rock_Grey",
@@ -110,7 +118,7 @@ def build_boulder_b(name, seed):
                       coarse=0.4, coarse_scale=1.2, fine=0.06, fine_scale=0.45,
                       subdiv=4, deci=0.45, stretch=(1.3, 1.05))
     skirt.location = Vector((-0.45, -0.2, 0.0))
-    obj = join([main, shard, skirt], name)
+    obj = [main, shard, skirt]
     finish(coll, obj, name, 2.469, 3.013, -0.693)
 
 
@@ -119,12 +127,12 @@ def build_boulder_c(name, seed):
     coll = asset_collection(name)
     lobe_l = rock_lump(f"{name}_l", coll, 0.62, 0.95, seed, "Rock_Grey",
                        coarse=0.38, coarse_scale=0.75, fine=0.08, fine_scale=0.45,
-                       subdiv=4, deci=0.6, stretch=(0.85, 1.05))
+                       subdiv=4, deci=0.98, stretch=(0.85, 1.05))
     lobe_l.location = Vector((-0.34, 0.02, 0.52))
     lobe_l.rotation_euler = (0, math.radians(-8), math.radians(12))
     lobe_r = rock_lump(f"{name}_r", coll, 0.58, 1.0, seed + 3, "Rock_Grey",
                        coarse=0.38, coarse_scale=0.7, fine=0.08, fine_scale=0.45,
-                       subdiv=4, deci=0.6, stretch=(0.9, 1.0))
+                       subdiv=4, deci=0.98, stretch=(0.9, 1.0))
     lobe_r.location = Vector((0.36, -0.04, 0.50))
     lobe_r.rotation_euler = (0, math.radians(10), math.radians(-15))
     # dark crack core hidden in the split (smaller than both lobes so only the
@@ -135,10 +143,10 @@ def build_boulder_c(name, seed):
     core.rotation_euler = (0, math.radians(4), math.radians(-2))
     cap = rock_lump(f"{name}_t", coll, 0.42, 0.72, seed + 7, "Rock_Grey",
                     coarse=0.36, coarse_scale=0.7, fine=0.07, fine_scale=0.45,
-                    subdiv=4, deci=0.6, stretch=(1.1, 0.95))
+                    subdiv=4, deci=0.98, stretch=(1.1, 0.95))
     cap.location = Vector((-0.05, 0.05, 1.12))
     cap.rotation_euler = (math.radians(6), math.radians(-5), math.radians(30))
-    obj = join([lobe_l, lobe_r, core, cap], name)
+    obj = [lobe_l, lobe_r, core, cap]
     finish(coll, obj, name, 1.052, 1.907, -0.261)
 
 
@@ -182,7 +190,12 @@ def bm_pillar(height, base_r, seed, segs=16, rings=18, taper=0.6,
         verts = []
         for s in range(segs):
             a = (s / segs) * math.tau
-            rr = r * (1.0 + rng.uniform(-0.09, 0.09))   # per-vertex erosion
+            # Continuous angular faults create coherent flutes and ledges;
+            # independent vertex jitter previously looked like crumpled foil.
+            flutes = 0.08 * math.sin(a * 5 + seed) + 0.055 * math.sin(a * 9 + t * 1.4)
+            fissure = max(0.0, math.cos(a * 3 + seed * 0.31 + t * 0.4)) ** 18 * 0.14
+            grain = (vnoise((math.cos(a) * r, math.sin(a) * r, z), 0.48, seed) - 0.5) * 0.045
+            rr = r * (1.0 + flutes - fissure + grain)
             verts.append(bm.verts.new((lx + math.cos(a) * rr,
                                        ly + math.sin(a) * rr, z)))
         ring_verts.append(verts)
@@ -206,7 +219,7 @@ def build_searock(name, height, base_r, seed, companions, squat, envelope):
 
     # main pillar (weathered body, deep strata, waterline undercut)
     bm = bm_pillar(height, base_r, seed,
-                   segs=30, rings=36,
+                   segs=34, rings=42,
                    taper=0.5 if squat else 0.62,
                    strata=0.24 if squat else 0.20,
                    lean=0.04 if squat else 0.07,
@@ -232,7 +245,7 @@ def build_searock(name, height, base_r, seed, companions, squat, envelope):
     for k in range(companions):
         ch = height * rng.uniform(0.26, 0.55)
         cr = base_r * rng.uniform(0.4, 0.6)
-        cbm = bm_pillar(ch, cr, seed + 200 + k, segs=16, rings=14,
+        cbm = bm_pillar(ch, cr, seed + 200 + k, segs=16, rings=16,
                         taper=0.6, strata=0.14, lean=0.09, cap_r=0.22,
                         undercut=0.10, undercut_z=0.5, undercut_w=0.5)
         spire = obj_from_bmesh(f"{name}_c{k}", cbm, coll, mat("Rock_Stack"), smooth=False)
@@ -255,7 +268,7 @@ def build_searock(name, height, base_r, seed, companions, squat, envelope):
     apply_modifiers(skirt)
     parts.append(skirt)
 
-    rock = join(parts, name)
+    rock = parts
     finish(coll, rock, name, *envelope)
     return coll, rock
 
@@ -282,4 +295,5 @@ for name, h, br, seed, comp, squat, env in SEAROCKS:
     build_searock(name, h, br, seed, comp, squat, env)
     print(f"built {name}")
 
+render_nature(('boulder_b', 'searock_a'), RENDER_DIR)
 print("ROCKS DONE")

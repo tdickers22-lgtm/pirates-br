@@ -2851,6 +2851,7 @@ export class Game {
         rx: i.radius * i.profile.footprintX,
         rz: i.radius * i.profile.footprintZ,
       })));
+      this.ocean.setTerrainIslands(state.islands);
       // Build the closest one now so the spawn area is there; the rest stream
       // in over the next frames, one per frame, each drawn a frame after it is
       // built (see drainIslandBuildQueue).

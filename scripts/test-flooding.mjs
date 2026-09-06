@@ -15,7 +15,7 @@ import {
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared/constants/index.ts';
 import { countOpenHoles, getShipHoleTier } from '../src/shared/interactions.ts';
-import { angleWrap, sampleWind } from '../src/shared/utils/index.ts';
+import { angleWrap, sampleWind, gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
 
 // THIS SUITE PINS THE WORLD. Every block below that builds a real `new Match()`
 // (the founder scene, the pump, the sealed hold) inherits `this.rng` from
@@ -103,6 +103,9 @@ console.log('Ingress: two waterline breaches sink an untended ship');
 /** Untended fill time (seconds) for a level ship with two lateral breaches. */
 function untendedFillTime(type) {
   const ship = makeShip(type, { holes: waterlineHoles(type) });
+  // This fixture freezes time and does not run buoyancy. Put the design
+  // waterline at the actual frozen surface, not the mean sea-level datum.
+  ship.position.y = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
   const flooding = evaluateHoleFlood(ship, 0).filter((h) => h.flooding);
   let t = 0;
   for (let i = 0; i < 200 * 60 && (ship.waterLevel ?? 0) < 1; i++) {
@@ -207,6 +210,7 @@ function simulateBail({ holes, bailers, seconds, start = 0.5 }) {
   const shipHoles = [];
   for (let i = 0; i < holes; i++) shipHoles.push(hole(...spots[i % spots.length]));
   const ship = makeShip('sloop', { holes: shipHoles, waterLevel: start });
+  ship.position.y = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
   for (let i = 0; i < seconds * 60; i++) {
     // Bailers act first (mirrors Match applying input before physics).
     ship.waterLevel = Math.max(0, ship.waterLevel - bailers * FLOODING.BAIL_RATE * DT);
@@ -456,6 +460,7 @@ console.log('\nShot to pieces: a saturated hull is never immune (HULL-01 slice c
   // waterline shot: the driest open breach must move down and start leaking.
   const physics = new PhysicsSystem();
   const ship = makeShip('sloop');
+  ship.position.y = gerstnerHeight(0, 0, 0, WAVE_PARAMS);
   for (let i = 0; i < FLOODING.MAX_HOLES_PER_SHIP; i += 1) {
     physics.openHoleAt(ship, { x: (i % 2 ? 1 : -1) * 2.0, y: 1.3, z: -3 + i * 0.8 }, 1, 'cannon');
   }

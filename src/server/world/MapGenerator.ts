@@ -8,7 +8,7 @@ import type {
 } from '../../shared/types/index.js';
 import {
   BERTH, SHIP, WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS,
-  SEA_POI, WRECK_EVENT, WRECK_SUPPLY_TABLE,
+  SEA_POI, WRECK_EVENT, WRECK_SUPPLY_TABLE, PLAYER,
 } from '../../shared/constants/index.js';
 // The cast's names and spoken lines are a RENDERED SURFACE (nameplate, cutscene
 // card, banner), so every proper noun in them comes from the display layer —
@@ -20,12 +20,14 @@ import {
   directionToYaw,
   buildSeaRockColliders,
   getIslandCoastWeights,
+  getBridgeDeckY,
   getIslandMaxRadius,
+  getIslandSummitOffsets,
   getIslandSurfacePoint,
   getIslandSurfaceY,
   mulberry32,
 } from '../../shared/utils/index.js';
-import { BIOME_PALETTES, getPropSpacingRadius } from '../../shared/props.js';
+import { BIOME_PALETTES, PROP_COLLIDERS, getPropSpacingRadius, resolvePropCollision } from '../../shared/props.js';
 
 const SHIP_TYPES = ['sloop', 'brigantine', 'galleon'] as const;
 
@@ -695,12 +697,10 @@ export class MapGenerator {
     return picks;
   }
 
-  /** Walkable rope bridge between the two main peaks on split-landmass styles.
-   *  Endpoints are the actual LOCAL MAXIMA of the final heightfield (grid
-   *  search around each gaussian hill center — detail noise shifts the true
-   *  summit off-center), so both ends sit flush on the terrain. Deterministic:
-   *  pure function of the island, no rng. Deck math is shared
-   *  (getBridgeDeckY), so the deck the client draws is the deck physics walks. */
+  /** Suspended crossings between summit shoulders. Search every summit pair
+   *  and several contour levels: a lower shoulder often has a useful crossing
+   *  where a summit-to-summit line would bury its deck in the taller mountain.
+   *  Endpoints and the entire sagging strip use the final shared terrain. */
   private generateBridges(island: Island): IslandBridge[] {
     const profile = island.profile;
     const eligible = profile.terrainStyle === 'twin'
@@ -722,42 +722,87 @@ export class MapGenerator {
       }
       return best;
     };
-    let a = localPeak(profile.primaryHillAngle, profile.primaryHillOffset);
-    let b = localPeak(profile.secondaryHillAngle, profile.secondaryHillOffset);
-    // NEAR-LEVEL bridges (SoT): both ends anchor at the LOWER peak's height.
-    // From the low top, cross the dip to wherever the taller flank rises back
-    // to that height — the deck meets the spire's cliff face at altitude
-    // instead of ramping to its summit.
-    if (a.y < b.y) { const swap = a; a = b; b = swap; }
-    let anchor: { x: number; z: number; y: number } | null = null;
-    for (let u = 0.45; u <= 0.96; u += 0.017) {
-      const nx = b.x + (a.x - b.x) * u;
-      const nz = b.z + (a.z - b.z) * u;
-      const ny = getIslandSurfaceY(island, nx, nz);
-      if (ny >= b.y + 0.3) { anchor = { x: nx, z: nz, y: ny }; break; }
+    const offsets = getIslandSummitOffsets(island);
+    const peaks = [localPeak(profile.primaryHillAngle, offsets.primary),
+      localPeak(profile.secondaryHillAngle, offsets.secondary)];
+    if (profile.tertiaryHillScale > 0.12) peaks.push(localPeak(profile.tertiaryHillAngle, profile.tertiaryHillOffset));
+    const candidates: Array<{ bridge: IslandBridge; score: number; pair: string }> = [];
+    for (let i = 0; i < peaks.length; i++) {
+      for (let j = i + 1; j < peaks.length; j++) {
+        const a = peaks[i];
+        const b = peaks[j];
+        const lineLength = Math.hypot(b.x - a.x, b.z - a.z);
+        if (lineLength < 10) continue;
+        const sample = (t: number) => {
+          const x = a.x + (b.x - a.x) * t;
+          const z = a.z + (b.z - a.z) * t;
+          return { x, z, y: getIslandSurfaceY(island, x, z) };
+        };
+        for (const lowering of [0.25, 1.5, 3.0, 5.0]) {
+          const level = Math.min(a.y, b.y) - lowering;
+          if (level < 8) continue;
+          // Find the widest continuous valley below this contour, then refine
+          // both boundary crossings to sub-centimetre terrain contact.
+          let first = -1;
+          let bestStart = -1;
+          let bestEnd = -1;
+          for (let s = 0; s <= 128; s++) {
+            const below = sample(s / 128).y < level;
+            if (below && first < 0) first = s;
+            if (!below && first >= 0) {
+              if (first > 0 && s - first > bestEnd - bestStart) { bestStart = first; bestEnd = s; }
+              first = -1;
+            }
+          }
+          if (bestStart < 0) continue;
+          const crossing = (lo: number, hi: number, entering: boolean) => {
+            for (let k = 0; k < 15; k++) {
+              const mid = (lo + hi) * 0.5;
+              if ((sample(mid).y < level) === entering) hi = mid; else lo = mid;
+            }
+            return sample((lo + hi) * 0.5);
+          };
+          const start = crossing((bestStart - 1) / 128, bestStart / 128, true);
+          const end = crossing((bestEnd - 1) / 128, bestEnd / 128, false);
+          const span = Math.hypot(end.x - start.x, end.z - start.z);
+          if (span < 9 || span > island.radius * 1.5) continue;
+          const bridge: IslandBridge = { ax: start.x, ay: start.y, az: start.z,
+            bx: end.x, by: end.y, bz: end.z, width: 1.9 };
+          const sideX = -(end.z - start.z) / span;
+          const sideZ = (end.x - start.x) / span;
+          let deepestDrop = 0;
+          let obstructed = false;
+          for (let s = 1; s < 32 && !obstructed; s++) {
+            const t = s / 32;
+            const x = start.x + (end.x - start.x) * t;
+            const z = start.z + (end.z - start.z) * t;
+            const deckY = getBridgeDeckY(bridge, x, z)!;
+            const drop = deckY - getIslandSurfaceY(island, x, z);
+            if (t > 0.3 && t < 0.7) deepestDrop = Math.max(deepestDrop, drop);
+            if (resolvePropCollision({ x, y: deckY, z }, PLAYER.RADIUS, island).pushed) obstructed = true;
+            // The landing overlaps its rock shoulder; the suspended middle
+            // must clear the actual SAGGING boards across their full width.
+            if (t < 0.1 || t > 0.9) continue;
+            for (const side of [-0.95, 0, 0.95]) {
+              if (getIslandSurfaceY(island, x + sideX * side, z + sideZ * side) > deckY - 0.12) obstructed = true;
+            }
+          }
+          if (!obstructed && deepestDrop > 1.8) candidates.push({ bridge, score: deepestDrop + span * 0.04, pair: `${i}:${j}` });
+        }
+      }
     }
-    if (!anchor) return [];
-    const span = Math.hypot(b.x - anchor.x, b.z - anchor.z);
-    const seaBase = 5.15 + island.radius * 0.0085;
-    if (span < 7 || span > island.radius * 1.15) return [];
-    if (b.y - seaBase < 3) return [];
-    if (Math.abs(anchor.y - b.y) / span > 0.18) return []; // near-level or nothing
-    // A bridge needs a real gap under it: some point of the crossing must
-    // drop well below the deck, and terrain must never poke through the deck.
-    let deepestDrop = 0;
-    let pokes = false;
-    // Middle window only: the deck naturally grazes terrain at both ends
-    // (that's what an anchor is) — the GAP must exist mid-crossing.
-    for (let f = 0.3; f <= 0.7; f += 0.08) {
-      const sx = b.x + (anchor.x - b.x) * f;
-      const sz = b.z + (anchor.z - b.z) * f;
-      const deckY = b.y + (anchor.y - b.y) * f;
-      const ground = getIslandSurfaceY(island, sx, sz);
-      deepestDrop = Math.max(deepestDrop, deckY - ground);
-      if (ground > deckY - 0.22) pokes = true;
+    candidates.sort((a, b) => b.score - a.score);
+    const selected: typeof candidates = [];
+    for (const candidate of candidates) {
+      if (selected.some((other) => other.pair === candidate.pair)) continue;
+      // At most two routes per island, and keep their middle spans apart.
+      const mid = (b: IslandBridge) => ({ x: (b.ax + b.bx) * 0.5, z: (b.az + b.bz) * 0.5 });
+      const centre = mid(candidate.bridge);
+      if (selected.some((other) => Math.hypot(mid(other.bridge).x - centre.x, mid(other.bridge).z - centre.z) < 12)) continue;
+      selected.push(candidate);
+      if (selected.length === 2) break;
     }
-    if (pokes || deepestDrop < Math.min(2.2, span * 0.09)) return [];
-    return [{ ax: anchor.x, ay: anchor.y, az: anchor.z, bx: b.x, by: b.y, bz: b.z, width: 1.9 }];
+    return selected.map(({ bridge }) => bridge);
   }
 
   /** Steam/water geysers on the volcanic isles. Placed on footable ground (a
@@ -950,6 +995,9 @@ export class MapGenerator {
   //    math unions overlapping segments so the whole network is one walkable,
   //    raycastable, rendered space. ──────────────────────────────────────────
   private generateCaves(island: Island, rng: Rng): IslandCave[] {
+    // Preserve the already-tested tunnel layout and its RNG stream. New
+    // surface relief respects these corridors in the shared heightfield.
+    const ground = (x: number, z: number) => getIslandSurfaceY(island, x, z, { baseRelief: true });
     const style = island.profile.terrainStyle;
     const systems = style === 'rocky' ? 1 + (rng() < 0.5 ? 1 : 0)
       : style === 'mountain' ? 1
@@ -986,7 +1034,7 @@ export class MapGenerator {
       // without demanding full rock cover where the portal is still opening up.
       for (const [f, cScale] of [[0.33, 0.3], [0.45, 1], [0.65, 1], [0.85, 1], [1.0, 1]] as const) {
         const ceilAt = f0 + (f1 - f0) * f + h;
-        if (getIslandSurfaceY(island, fx + dx * len * f, fz + dz * len * f) < ceilAt + clear * cScale) return false;
+        if (ground(fx + dx * len * f, fz + dz * len * f) < ceilAt + clear * cScale) return false;
       }
       return true;
     };
@@ -1008,6 +1056,7 @@ export class MapGenerator {
         // Other styles keep modest grottos.
         const grand = style === 'mountain' || style === 'rocky';
         const mouth = getIslandSurfacePoint(island, rr(rng, 0.34, grand ? 0.62 : 0.6), angle, 0);
+        mouth.y = ground(mouth.x, mouth.z);
         if (mouth.y < 3.2) continue;
         const rot = directionToYaw(Math.cos(angle), Math.sin(angle));
         const inX = -Math.sin(rot), inZ = -Math.cos(rot); // into the hill (toward centre)
@@ -1160,7 +1209,7 @@ export class MapGenerator {
         let exit: { x: number; z: number; y: number; dist: number } | null = null;
         for (let d = jLen + 4; d < THROUGH_SCAN_CAP; d += 2) {
           const ex = jx + inX * d, ez = jz + inZ * d;
-          const surf = getIslandSurfaceY(island, ex, ez);
+          const surf = ground(ex, ez);
           if (surf < ceilingY + 0.4) {
             // The breakout must be on the FAR FLANK — a thin-roof reading near the
             // island centre is an interior basin/saddle (twin peaks, calderas), and
@@ -1183,7 +1232,7 @@ export class MapGenerator {
           for (const f of [0.15, 0.3, 0.45, 0.6, 0.72]) {
             const px = jx + inX * (jLen + tubeLen * f), pz = jz + inZ * (jLen + tubeLen * f);
             const tubeCeil = jFloor + (throughFloorEnd - jFloor) * f + h;
-            if (getIslandSurfaceY(island, px, pz) < tubeCeil + 1.2) { throughRoofed = false; break; }
+            if (ground(px, pz) < tubeCeil + 1.2) { throughRoofed = false; break; }
           }
         }
         // Only open the far mouth once BOTH the thin-roof breakout (surf < ceilingY+0.4,
@@ -1699,7 +1748,7 @@ export class MapGenerator {
       const shoreAngle = island.dock.shoreAngle;
       const spots: Array<[number, number]> = [[-0.30, 0.845], [0.28, 0.855], [0.02, 0.775]];
       for (const [angleOffset, distRatio] of spots) {
-        const p = this.landingStoreSpot(island, shoreAngle + angleOffset, distRatio);
+        const p = this.landingStoreSpot(island, shoreAngle + angleOffset, distRatio, barrels.map((b) => b.position));
         if (!p) continue;
         barrels.push({
           id: uuid(),
@@ -1738,15 +1787,16 @@ export class MapGenerator {
    * Returns null when the ray has nowhere at all — better one fewer barrel
    * than one inside a cave mouth or standing in the surf.
    */
-  private landingStoreSpot(island: Island, angle: number, preferred: number): Vec3 | null {
+  private landingStoreSpot(island: Island, angle: number, preferred: number, occupied: readonly Vec3[]): Vec3 | null {
     const dock = island.dock;
     if (!dock) return null;
     // A store you cannot see from where you tie up is just another scattered
-    // barrel. 46 m is a long look down a beach, and it is the number the
+    // barrel. 40 m is a long look down a beach, and it is the number the
     // landing-stores test holds the generator to.
-    const REACH = 46;
+    const REACH = 40;
     const usable = (p: Vec3, minDry: number) => p.y - 0.08 >= minDry
       && Math.hypot(p.x - dock.position.x, p.z - dock.position.z) <= REACH
+      && occupied.every((q) => Math.hypot(p.x - q.x, p.z - q.z) >= 1.3)
       // Never inside the dock's own levelling stamp or a cave mouth — a barrel
       // half-swallowed by geometry is worse than none.
       && !this.nearCave(island, p.x, p.z, 1.2)
@@ -1761,6 +1811,17 @@ export class MapGenerator {
     for (let r = preferred - 0.05; r >= 0.5; r -= 0.05) {
       const p = at(Number(r.toFixed(3)));
       if (usable(p, 0.75)) return p;
+    }
+    // A concave bay can put the whole preferred ray in water. Search the
+    // adjoining beach while staying in sight of the pier and clear of stores
+    // already placed; never substitute a distant barrel behind a headland.
+    for (let spread = 0.06; spread <= 0.36; spread += 0.06) {
+      for (const side of [-1, 1]) {
+        for (let ratio = 0.98; ratio >= 0.5; ratio -= 0.035) {
+          const p = getIslandSurfacePoint(island, ratio, angle + side * spread, 0.08);
+          if (usable(p, 0.75)) return p;
+        }
+      }
     }
     return null;
   }
@@ -1896,6 +1957,15 @@ export class MapGenerator {
     // deterministic — the harvest system addresses props by (islandId, id).
     let nextPropId = 0;
     const addProp = (type: IslandPropType, x: number, z: number, yaw: number, scale: number) => {
+      if (type === 'driftwood_log') {
+        const center = getIslandSurfaceY(island, x, z);
+        const footprint = PROP_COLLIDERS[type].radius * scale;
+        for (let k = 0; k < 8; k++) {
+          const a = k * Math.PI / 4;
+          const ground = getIslandSurfaceY(island, x + Math.cos(a) * footprint, z + Math.sin(a) * footprint);
+          if (center - ground > 0.65) return;
+        }
+      }
       props.push({ id: nextPropId++, type, x, z, yaw: angleWrap(yaw), scale });
       const r = getPropSpacingRadius(type, scale);
       if (r > 0) blockers.push({ x, z, r });
@@ -1971,12 +2041,15 @@ export class MapGenerator {
       const tentScale = rr(rng, 0.95, 1.1);
       let tentLo = Infinity;
       let tentHi = -Infinity;
-      for (const [ox, oz] of [[0, 0], [1.3, 0], [-1.3, 0], [0, 1.3], [0, -1.3]] as const) {
+      const tentFootprint = PROP_COLLIDERS[variant.tent].radius * tentScale;
+      for (let k = -1; k < 8; k++) {
+        const ox = k < 0 ? 0 : Math.cos(k * Math.PI / 4) * tentFootprint;
+        const oz = k < 0 ? 0 : Math.sin(k * Math.PI / 4) * tentFootprint;
         const ty = getIslandSurfaceY(island, tentX + ox, tentZ + oz);
         tentLo = Math.min(tentLo, ty);
         tentHi = Math.max(tentHi, ty);
       }
-      if (tentHi - tentLo <= 1.2) {
+      if (tentHi - tentLo <= 0.85) {
         // Face the fire, then break the dead-on symmetry: a real pitch is
         // never squared to the hearth.
         const tentYaw = Math.atan2(camp.x - tentX, camp.z - tentZ)

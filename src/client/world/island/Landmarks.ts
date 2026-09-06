@@ -4,7 +4,7 @@
  * between the island's stops, the rope bridges between peaks, and the ruin.
  */
 import * as THREE from 'three';
-import { getIslandSurfaceY } from '../../../shared/utils/index.js';
+import { getBridgeSpanY, getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { MAX_METALNESS_NO_ENV, MIN_ALBEDO_VALUE } from '../../assets/materialAudit.js';
 import type { IslandBuildCtx } from './context.js';
 import { getMeshGround, snapToDrawnGround } from './GroundTruth.js';
@@ -710,29 +710,37 @@ export function buildBridges(ctx: IslandBuildCtx) {
       const midY = (a.y + b.y) * 0.5;
       bridge.position.set(midX, midY, midZ);
       bridge.rotation.y = yaw;
-      // Tilt bridge so each end matches its own peak height (rotate around X axis;
-      // local +Z corresponds to peak b after rotation.y, so we need negative tilt).
-      const tilt = Math.atan2(b.y - a.y, span);
-      bridge.rotation.x = -tilt;
+      // Height is applied per board from the shared span, not by tilting the
+      // group: Euler tilt after yaw displaced both anchors in XZ and left the
+      // visible planks below the surface physics actually walks.
+      const deckAt = (t: number) => getBridgeSpanY(islandBridge, t) - midY;
 
       const plankMat2 = new THREE.MeshStandardMaterial({ color: 0x6b4623, roughness: 0.95 });
       const ropeMat2 = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
       const postMat2 = new THREE.MeshStandardMaterial({ color: 0x3d2814, roughness: 1 });
 
-      // End posts: their bases sit at z = ±span/2 in local space (which maps to each peak after tilt)
+      // Paired posts leave the route between them clear. The old single post
+      // was planted directly in the middle of each landing.
       for (const end of [-1, 1] as const) {
-        const post = new THREE.Mesh(new THREE.BoxGeometry(0.32, 1.6, 0.32), postMat2);
-        post.position.set(0, 0.8, end * span * 0.5);
-        post.castShadow = true;
-        bridge.add(post);
-        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.16, 0.5), postMat2);
-        cap.position.set(0, 1.7, end * span * 0.5);
-        bridge.add(cap);
+        const endY = deckAt((end + 1) * 0.5);
+        for (const side of [-1, 1]) {
+          const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 1.65, 8), postMat2);
+          post.position.set(side * (islandBridge.width * 0.5 + 0.13), endY + 0.65, end * span * 0.5);
+          post.castShadow = true;
+          bridge.add(post);
+          for (let wrap = 0; wrap < 3; wrap++) {
+            const knot = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.032, 4, 10), ropeMat2);
+            knot.rotation.x = Math.PI * 0.5;
+            knot.position.set(post.position.x, endY + 1.0 + wrap * 0.07, post.position.z);
+            bridge.add(knot);
+          }
+        }
         // Anchoring cairn (so the post visually grounds into the rock)
         for (let s = 0; s < 4; s++) {
           const stone = new THREE.Mesh(boulderGeo, boulderMat);
           const ang = (s / 4) * Math.PI * 2;
-          stone.position.set(Math.cos(ang) * 0.5, 0.18, end * span * 0.5 + Math.sin(ang) * 0.5);
+          stone.position.set((s < 2 ? -1 : 1) * (islandBridge.width * 0.5 + 0.25), endY - 0.04,
+            end * span * 0.5 + Math.sin(ang) * 0.45);
           stone.scale.setScalar(0.22 + rng(s * 851 + (end > 0 ? 1 : 2)) * 0.18);
           stone.rotation.set(rng(s * 853) * Math.PI, rng(s * 857) * Math.PI, rng(s * 859) * Math.PI);
           bridge.add(stone);
@@ -740,60 +748,42 @@ export function buildBridges(ctx: IslandBuildCtx) {
       }
 
       // Sagging plank deck — sag is measured from the y=0 reference plane (bridge midline)
-      const plankCount = Math.max(8, Math.floor(span / 0.55));
+      const plankCount = Math.max(8, Math.ceil(span / 0.48));
       for (let i = 0; i < plankCount; i++) {
         const t = (i + 0.5) / plankCount;
         const z = (t - 0.5) * span;
-        const sag = -Math.sin(t * Math.PI) * Math.min(0.9, span * 0.04);
-        const plank = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.06, 0.42), plankMat2);
-        plank.position.set((rng(i * 601) - 0.5) * 0.05, sag, z);
-        plank.rotation.z = (rng(i * 607) - 0.5) * 0.04;
-        plank.rotation.x = (rng(i * 611) - 0.5) * 0.03;
+        const plank = new THREE.Mesh(new THREE.BoxGeometry(islandBridge.width, 0.10, span / plankCount - 0.025), plankMat2);
+        plank.position.set(0, deckAt(t) - 0.05, z);
         plank.castShadow = true;
         plank.receiveShadow = true;
         bridge.add(plank);
       }
 
-      // Two rope rails
-      const ropeSegments = 24;
+      // Rope has a real round silhouette at walking distance. Tubes and
+      // lashings share one material and are merged by the static batcher.
+      const ropeSegments = Math.max(24, Math.ceil(span / 1.5));
       for (const side of [-1, 1] as const) {
-        const railPositions: number[] = [];
-        for (let i = 0; i <= ropeSegments; i++) {
-          const t = i / ropeSegments;
-          const z = (t - 0.5) * span;
-          const sag = -Math.sin(t * Math.PI) * Math.min(0.6, span * 0.03);
-          railPositions.push(side * 0.7, 0.78 + sag, z);
+        for (const height of [0, 1.05]) {
+          const points: THREE.Vector3[] = [];
+          for (let i = 0; i <= ropeSegments; i++) {
+            const t = i / ropeSegments;
+            points.push(new THREE.Vector3(side * islandBridge.width * 0.5,
+              deckAt(t) + height, (t - 0.5) * span));
+          }
+          const curve = new THREE.CatmullRomCurve3(points);
+          bridge.add(new THREE.Mesh(new THREE.TubeGeometry(curve, ropeSegments, height > 0 ? 0.038 : 0.05, 5, false), ropeMat2));
         }
-        const railGeo = new THREE.BufferGeometry();
-        railGeo.setAttribute('position', new THREE.Float32BufferAttribute(railPositions, 3));
-        const rail = new THREE.Line(railGeo, new THREE.LineBasicMaterial({ color: 0xc8b27a }));
-        bridge.add(rail);
-
-        // Lower handhold rope
-        const lowerPos: number[] = [];
-        for (let i = 0; i <= ropeSegments; i++) {
-          const t = i / ropeSegments;
-          const z = (t - 0.5) * span;
-          const sag = -Math.sin(t * Math.PI) * Math.min(0.9, span * 0.04);
-          lowerPos.push(side * 0.6, 0.04 + sag, z);
-        }
-        const lowerGeo = new THREE.BufferGeometry();
-        lowerGeo.setAttribute('position', new THREE.Float32BufferAttribute(lowerPos, 3));
-        const lower = new THREE.Line(lowerGeo, new THREE.LineBasicMaterial({ color: 0xc8b27a }));
-        bridge.add(lower);
 
         // Vertical lashings
         const verticalCount = Math.max(6, Math.floor(span / 1.2));
         for (let v = 0; v < verticalCount; v++) {
           const tv = (v + 0.5) / verticalCount;
           const zv = (tv - 0.5) * span;
-          const sagTop = -Math.sin(tv * Math.PI) * Math.min(0.6, span * 0.03);
-          const sagBot = -Math.sin(tv * Math.PI) * Math.min(0.9, span * 0.04);
           const lash = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.02, 0.02, Math.max(0.5, 0.78 - 0.04 + sagTop - sagBot), 4),
+            new THREE.CylinderGeometry(0.023, 0.023, 1.05, 5),
             ropeMat2,
           );
-          lash.position.set(side * 0.65, (0.78 + sagTop + 0.04 + sagBot) * 0.5, zv);
+          lash.position.set(side * islandBridge.width * 0.5, deckAt(tv) + 0.525, zv);
           bridge.add(lash);
         }
       }
