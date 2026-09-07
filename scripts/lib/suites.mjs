@@ -193,7 +193,8 @@ export const LOGIC = [
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
   quick({ file: 'glb-census.mjs', cmd: ['node', 'scripts/glb-census.mjs', '--check'] }),
   //   test-quality-preference     — detector rows per device: RENDERER_RULES sends the opaque-Apple Air,
-  //                                 phones, Adreno and Intel UHD to 'low', and 'low' is the unknown default (PERF-01, lane 2.6)
+  //                                 phones, Adreno and Intel UHD to 'low', 'low' is the unknown default, and a
+  //                                 fill-bench score or a headroom proof is the only way back up (PERF-01, lane 2.6)
   tsx('test-quality-preference.mjs'),
 ];
 

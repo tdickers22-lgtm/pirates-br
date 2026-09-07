@@ -125,6 +125,57 @@ for (const { row, proof, want, why } of PROOF_ROWS) {
     verdict.quality === 'low' && verdict.reason === 'audition');
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FILL BENCH (perf-20 phase 2, perf-v-04)
+// ─────────────────────────────────────────────────────────────────────────────
+// A rule table cannot fix Safari: the string, the core count and deviceMemory
+// are opaque at once, so only a MEASUREMENT separates an M2 Air from an M2
+// Ultra. A stored score decides where the verdict was a guess — and nowhere
+// else, so a 900 Mpx/s reading on a phone's menu still leaves it on 'low'.
+console.log('\nFill bench (a measured machine beats a guessed one)');
+const BENCH_ROWS = [
+  { row: ROWS[0], score: 900, want: 'high', why: "Safari on a Mac Studio: 900 Mpx/s takes the opaque 'Apple GPU' to high" },
+  { row: ROWS[0], score: 420, want: 'balanced', why: 'the same opaque string at 420 Mpx/s is a middling Mac' },
+  { row: ROWS[0], score: 90, want: 'low', why: 'and at 90 Mpx/s it is the Air the game was tuned for' },
+  { row: ROWS[2], score: 900, want: 'low', why: 'no score promotes a phone off the mobile branch' },
+  { row: ROWS[4], score: 900, want: 'low', why: 'no score promotes an Intel UHD 620' },
+  { row: ROWS[1], score: 900, want: 'low', why: 'no score promotes a NAMED Apple base chip' },
+];
+for (const { row, score, want, why } of BENCH_ROWS) {
+  const sig = `${row.renderer ?? 'masked'}|${row.w}x${row.h}`;
+  installEnv(row, { bench: { score, sig, at: Date.now() } });
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const verdict = mod.detectRenderQuality();
+  expect(`${why} (got ${verdict.quality}, reason ${verdict.reason})`, verdict.quality === want);
+}
+{
+  const row = ROWS[0];
+  installEnv(row, { bench: { score: 900, sig: 'a-different-gpu|3840x2160', at: Date.now() } });
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const verdict = mod.detectRenderQuality();
+  expect(`a score taken on another machine is ignored (got ${verdict.quality}, reason ${verdict.reason})`,
+    verdict.quality === 'low' && verdict.reason === 'unknown-default');
+}
+{
+  // The safe default, stated as a row: opaque inputs AND no bench is 'low',
+  // never 'balanced' by fallthrough (perf-v-04).
+  installEnv(ROWS[0]);
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const verdict = mod.detectRenderQuality();
+  expect(`bench-unavailable opaque Safari is 'low', not 'balanced' (got ${verdict.quality})`, verdict.quality === 'low');
+}
+{
+  // The thresholds themselves, so a change to them is a visible change.
+  installEnv(ROWS[0]);
+  const bench = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  expect('bench thresholds: 249/250 straddles low|balanced and 699/700 straddles balanced|high',
+    bench.tierForBenchScore(249) === 'low' && bench.tierForBenchScore(250) === 'balanced'
+    && bench.tierForBenchScore(699) === 'balanced' && bench.tierForBenchScore(700) === 'high');
+  expect('a bench that could not be measured is low, never a guess upward',
+    bench.tierForBenchScore(0) === 'low' && bench.tierForBenchScore(NaN) === 'low');
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

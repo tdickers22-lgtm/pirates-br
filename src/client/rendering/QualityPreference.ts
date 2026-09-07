@@ -92,6 +92,48 @@ export function tierBelow(quality: RenderQuality): RenderQuality | null {
   return index > 0 ? TIER_ORDER[index - 1] : null;
 }
 
+/** Bench score thresholds, in megapixels per second of the heavy shader.
+ *  Below 250 is an integrated part or a phone; above 700 is a discrete card or
+ *  an Apple Pro/Max. Between them is the tier that was always called balanced. */
+export const BENCH_LOW_MPXS = 250;
+export const BENCH_HIGH_MPXS = 700;
+
+/** Pure: the tier a score earns. Exported so the rows can grade it. */
+export function tierForBenchScore(mpxPerSecond: number): RenderQuality {
+  if (!Number.isFinite(mpxPerSecond) || mpxPerSecond <= 0) return 'low';
+  if (mpxPerSecond < BENCH_LOW_MPXS) return 'low';
+  if (mpxPerSecond < BENCH_HIGH_MPXS) return 'balanced';
+  return 'high';
+}
+
+export type BenchRecord = { score: number; sig: string; at: number };
+
+/** The stored score for THIS machine, or null when there is none, when it was
+ *  taken on a different GPU/panel, or when storage is unavailable. */
+export function loadBenchScore(rendererString: string | null): number | null {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { bench?: Partial<BenchRecord> };
+    const bench = parsed.bench;
+    if (!bench || typeof bench.score !== 'number' || bench.sig !== machineSignature(rendererString)) return null;
+    return bench.score > 0 ? bench.score : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveBenchScore(score: number, rendererString: string | null): void {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    const record = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    record.bench = { score, sig: machineSignature(rendererString), at: Date.now() } satisfies BenchRecord;
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(record));
+  } catch {
+    /* private mode: this session simply has no bench */
+  }
+}
+
 /** One step UP the tier ladder, or null at the top. */
 export function tierAbove(quality: RenderQuality): RenderQuality | null {
   const index = TIER_ORDER.indexOf(quality);
@@ -466,9 +508,20 @@ export function detectRenderQuality(): QualityVerdict {
     verdict = named('balanced', 'low-memory');
   }
 
+  // A MEASUREMENT beats a guess. Where the verdict came from missing
+  // information rather than from a fact about the part, a fill-bench score
+  // taken on this same machine decides instead (perf-20 phase 2) — and it is
+  // the only thing that can tell an M2 Air from an M2 Ultra in Safari, where
+  // the string, the core count and deviceMemory are opaque at once.
+  if (PROMOTABLE_REASONS.has(verdict.reason)) {
+    const score = loadBenchScore(rendererString);
+    if (score !== null) verdict = { quality: tierForBenchScore(score), reason: 'bench', rendererString, rule: rule?.name };
+  }
+
   // A previous session that held this tier with a minute of headroom to spare
   // has earned the one above it — but only over a reason that was a GUESS.
-  const proof = PROMOTABLE_REASONS.has(verdict.reason) ? loadAutoTierProof(rendererString) : null;
+  const proof = PROMOTABLE_REASONS.has(verdict.reason) || verdict.reason === 'bench'
+    ? loadAutoTierProof(rendererString) : null;
   if (proof && TIER_ORDER.indexOf(proof) > TIER_ORDER.indexOf(verdict.quality)) {
     verdict = { quality: proof, reason: 'promoted', rendererString, rule: rule?.name };
   }
