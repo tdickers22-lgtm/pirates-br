@@ -88,14 +88,20 @@ export class PostFx {
   private height: number;
   private pixelRatio: number;
 
-  constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera, quality: RenderQuality) {
+  constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera, quality: RenderQuality, msaaSamples = 0) {
     const size = renderer.getSize(new THREE.Vector2());
     this.width = Math.max(1, size.x);
     this.height = Math.max(1, size.y);
     this.pixelRatio = renderer.getPixelRatio();
 
-    // MSAA render targets need WebGL2; balanced always prefers cheaper FXAA.
-    const useMsaa = quality === 'high' && renderer.capabilities.isWebGL2;
+    // MSAA render targets need WebGL2. `high` has always taken them; `balanced`
+    // now does too ON APPLE SILICON ONLY (AA-01/graphics-16), where the resolve
+    // happens in tile memory and costs almost no bandwidth, while FXAA is a
+    // full extra screen of fill AND blurs exactly what it is here to fix — the
+    // rigging, the rails and the horizon line. Everywhere the resolve is paid
+    // through main memory (Intel and AMD immediate-mode parts) FXAA stays.
+    // The caller decides which, because only it knows the GPU's name.
+    const useMsaa = msaaSamples > 0 && renderer.capabilities.isWebGL2;
     const target = new THREE.WebGLRenderTarget(
       Math.round(this.width * this.pixelRatio),
       Math.round(this.height * this.pixelRatio),
@@ -107,7 +113,7 @@ export class PostFx {
       // What it costs to look at is one step of edge gradation on a chain that
       // is followed by a bloom and a grade; what 4x was buying on a 0.62-ratio
       // framebuffer was mostly being resolved away again.
-      { type: THREE.HalfFloatType, samples: useMsaa ? 2 : 0 },
+      { type: THREE.HalfFloatType, samples: useMsaa ? msaaSamples : 0 },
     );
     target.texture.name = 'PostFx.rt';
 

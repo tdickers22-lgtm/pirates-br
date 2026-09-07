@@ -4,7 +4,10 @@ import { initLightBudget, updateLightBudget } from './LightBudget.js';
 import { freezeStaticParent } from './three-util.js';
 import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
-import { decideRenderQuality, saveAutoTierCeiling, saveAutoTierProof, tierAbove, tierBelow, type QualityVerdict, type RenderQuality } from './QualityPreference.js';
+import {
+  classifyRenderer, decideRenderQuality, readGpuRendererString, saveAutoTierCeiling, saveAutoTierProof,
+  tierAbove, tierBelow, type QualityVerdict, type RenderQuality,
+} from './QualityPreference.js';
 import {
   FrameGovernor, resolveLevers, describeGovernor, pixelRatioCaps,
   type GovernorLevers, type GovernorMode, type LeverCaps,
@@ -702,15 +705,35 @@ export class Renderer {
     // Required so first-person viewmodels parented to the camera are included in scene traversal.
     this.scene.add(this.camera);
 
-    // AA comes from the post chain (MSAA target or FXAA); low renders direct without AA.
+    // ANTI-ALIASING ON THE TIER THAT HAD NONE (AA-01: graphics-16, perf-18).
+    //
+    // `low` renders at 0.44-0.62 of CSS pixels and is bilinear-upscaled by the
+    // compositor, and it constructed no post chain, so it had no MSAA, no FXAA
+    // and no supersampling of any kind: every rope, rail, mast and the horizon
+    // line was a stair-stepped shimmer. That is not an edge case, it is the
+    // tier this game is tuned to survive on and the only picture an Air in
+    // Chrome, a phone or an Intel laptop ever sees.
+    //
+    // `antialias: true` on the DEFAULT framebuffer is the cheap fix precisely
+    // here: the browser resolves it, and on the tile-based GPUs that get `low`
+    // (Apple silicon, Adreno, Mali) the resolve happens in tile memory before
+    // the tile is ever written out — no extra target, no extra pass, no program
+    // relink, and no HalfFloat buffer. It is deliberately NOT set on the tiers
+    // that render into the composer target, where the default framebuffer is
+    // only ever blitted to and its samples would be paid for nothing.
     this.renderer = new THREE.WebGLRenderer({
-      antialias: false,
+      antialias: this.quality === 'low',
       powerPreference: 'high-performance',
     });
     this.renderer.setOpaqueSort(frontToBack);
     // Open where the governor opens (see OPENING_SCALAR), not at the ceiling.
     this.applyPixelRatio(this.levers.pixelRatio, true);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    // Record what the swapchain now holds so a resize event carrying the size
+    // it already has costs nothing (perf-v-02).
+    this.appliedWidth = window.innerWidth;
+    this.appliedHeight = window.innerHeight;
+    this.appliedDpr = window.devicePixelRatio || 1;
     // THE DEFAULT COSTS SECONDS, NOT MICROSECONDS. With this on, three's
     // `onFirstUse` reads two shader info logs, a program info log and the
     // LINK_STATUS the first time each program is used — four synchronous calls
@@ -861,7 +884,7 @@ export class Renderer {
 
     if (this.quality !== 'low') {
       try {
-        this.postFx = new PostFx(this.renderer, this.scene, this.camera, this.quality);
+        this.postFx = new PostFx(this.renderer, this.scene, this.camera, this.quality, this.msaaSamples());
         this.postFx.setSize(window.innerWidth, window.innerHeight);
         this.postFx.setPixelRatio(this.currentPixelRatio);
       } catch (error) {
@@ -870,18 +893,67 @@ export class Renderer {
       }
     }
 
-    window.addEventListener('resize', () => {
-      this.camera.aspect = window.innerWidth / window.innerHeight;
-      this.camera.updateProjectionMatrix();
-      // The budget is a pixel COUNT, so a window that changed area changed the
-      // ratio that spends it. Re-derive before the reallocation, not after.
-      this.refreshPixelRatioCaps();
-      // The one caller that must reallocate at an UNCHANGED ratio: the drawing
-      // buffer has to follow the window even when the ratio has not moved.
-      this.applyPixelRatio(this.currentPixelRatio, true);
-      this.renderer.setSize(window.innerWidth, window.innerHeight);
-      this.postFx?.setSize(window.innerWidth, window.innerHeight);
+    // ONE REALLOCATION PER FRAME, AND NONE FOR A SIZE THAT DID NOT CHANGE
+    // (perf-v-02). Dragging a window edge fires `resize` on every mouse move,
+    // iOS Safari fires it as the URL bar collapses, and an iPad split-view drag
+    // fires it continuously — and each event was forcing a drawing-buffer
+    // reallocation PLUS the two HalfFloat composer targets and ten bloom mips.
+    // This file already measured what unconditional setSize costs (19,488 ms in
+    // a 180 s capture, §9 lever 7) and guarded the ratio path; the resize path
+    // was left open. Coalesced to one apply per animation frame, and the apply
+    // returns early when the width, height and dPR are the ones already on the
+    // swapchain.
+    window.addEventListener('resize', () => this.requestResize());
+  }
+
+  private resizeQueued = false;
+  private appliedWidth = -1;
+  private appliedHeight = -1;
+  private appliedDpr = -1;
+
+  private requestResize() {
+    if (this.resizeQueued) return;
+    this.resizeQueued = true;
+    requestAnimationFrame(() => {
+      this.resizeQueued = false;
+      this.applyViewportSize();
     });
+  }
+
+  private applyViewportSize() {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const dpr = window.devicePixelRatio || 1;
+    if (width === this.appliedWidth && height === this.appliedHeight && dpr === this.appliedDpr) return;
+    this.appliedWidth = width;
+    this.appliedHeight = height;
+    this.appliedDpr = dpr;
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    // The budget is a pixel COUNT, so a window that changed area changed the
+    // ratio that spends it. Re-derive before the reallocation, not after.
+    this.refreshPixelRatioCaps();
+    // The one caller that must reallocate at an UNCHANGED ratio: the drawing
+    // buffer has to follow the window even when the ratio has not moved.
+    this.applyPixelRatio(this.currentPixelRatio, true);
+    this.renderer.setSize(width, height);
+    this.postFx?.setSize(width, height);
+  }
+
+  /**
+   * How many MSAA samples the composer target should carry, or 0 for FXAA.
+   *
+   * `high` has always taken 2x. `balanced` takes it too on Apple silicon
+   * (AA-01/graphics-16): the resolve is free-ish in tile memory there, while
+   * FXAA costs a whole extra screen of fill and softens the rigging it is
+   * supposed to be fixing. On immediate-mode parts (Intel, AMD, NVIDIA) the
+   * resolve is paid through main memory and FXAA remains the cheaper answer.
+   */
+  private msaaSamples(): number {
+    if (this.quality === 'high') return 2;
+    if (this.quality !== 'balanced') return 0;
+    const gpu = classifyRenderer(this.qualityVerdict.rendererString ?? readGpuRendererString());
+    return gpu === 'apple-base' || gpu === 'apple-pro' || gpu === 'apple-opaque' ? 2 : 0;
   }
 
   getQuality(): RenderQuality {
