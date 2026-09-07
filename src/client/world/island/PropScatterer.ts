@@ -449,16 +449,21 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
   if (!lowDetail) {
     // Each tuft now carries actual blades. Keep the near-field triangle cost
     // bounded and retain the existing distance/density LOD for every batch.
-    // COVERAGE, not sparsity. The cap went 9000 -> 6000 when tufts became real
-    // geometry, and on top of that the understory roll DROPPED seeds, so a lush
-    // island's lawn read as bare ground with a handful of tufts on it and the
-    // terrain shading became the loudest thing in the frame. The cap comes back
-    // to 9000 and the far sibling below (3 blades, 15 triangles) pays for it:
-    // past the tier's swap line a tuft is 60% of the triangles it was, and
-    // COVER_DENSITY_RAMP already takes the count to zero by 240/340 m.
+    // COVERAGE, not sparsity — and paid for, not borrowed. The cap went
+    // 9000 -> 6000 when tufts became real geometry, and on top of that the
+    // understory roll DROPPED seeds, so a lush island's lawn read as bare
+    // ground with a handful of tufts on it and the terrain shading became the
+    // loudest thing in the frame.
+    //
+    // The cap comes back to 9000 and the BLADE COUNT pays for it: three blades,
+    // 15 triangles, against five and 25. Nine thousand three-blade tufts are
+    // 135k triangles where six thousand five-blade ones were 150k, so the lawn
+    // gets half again as many tufts for FEWER triangles than it spends today —
+    // which matters, because test-perf-budget's high waterfall-deck sits within
+    // 1% of its 2,750k ceiling and a straight cap raise blew it (2,827k,
+    // measured). Three ribbons read as a tuft; what was missing was tufts.
     const grassCount = Math.min(9000, Math.round(r * r * 1.15));
-    const grassGeo = makeGrassTuftGeometry();
-    const grassFarGeo = makeGrassTuftGeometry(3);
+    const grassGeo = makeGrassTuftGeometry(3);
     // White base: per-instance colors MULTIPLY material.color — a tinted
     // base squared every tuft toward black (the 'invisible grass' bug).
     const grassMat = new THREE.MeshStandardMaterial({
@@ -551,7 +556,6 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     grass.receiveShadow = true;
     grass.name = 'island-grass';
     attachCoverLod(grass);
-    attachInstanceFarLod(grass, { geometry: grassGeo, material: grassMat }, { geometry: grassFarGeo, material: grassMat });
     group.add(grass);
 
     // ── Ferns: taller arched fronds in the shaded inner jungle band ──
