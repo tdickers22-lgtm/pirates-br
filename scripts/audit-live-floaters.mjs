@@ -58,7 +58,13 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
 }));
 
 await page.goto(`${BASE_URL}/?debug`, { waitUntil: 'domcontentloaded' });
-await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
+// A WAIT, not a grade: on the software rasteriser the boot's loading-paint
+// yields (two rAFs each, nine of them) run at seconds per frame, and the menu
+// took over 30 s on 26e17d6b as well as after the fidelity pass. The time is
+// printed so a real regression here still shows up in the log.
+const menuWaitStart = Date.now();
+await page.waitForSelector('#menu-solo-btn', { timeout: 150_000 });
+console.log(`  menu ready after ${((Date.now() - menuWaitStart) / 1000).toFixed(1)}s (advisory on a software rasteriser)`);
 await page.click('#menu-solo-btn', { noWaitAfter: true });
 // 3rd arg is the options bag — as the 2nd it is silently the page-fn ARG and the
 // 30s default applies (a busy dev server then "times the join out").

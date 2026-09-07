@@ -146,7 +146,13 @@ try {
   }
   // Every island GROUP exists after this, so what follows is first-DRAW cost,
   // never first-build cost.
-  await page.waitForFunction(() => window.__piratesBR?.getWorldBuildBacklog?.() === 0, undefined, { timeout: 120_000 });
+  // A WAIT, not a grade: islands build one per frame and reveal over several
+  // more, and on the software rasteriser a balanced frame is 5-10 s, so 14
+  // islands plus their reveals did not fit in 120 s (26e17d6b included). The
+  // elapsed time is printed so a slower build still shows up in the log.
+  const backlogWaitStart = Date.now();
+  await page.waitForFunction(() => window.__piratesBR?.getWorldBuildBacklog?.() === 0, undefined, { timeout: 420_000 });
+  console.log(`  world backlog drained after ${((Date.now() - backlogWaitStart) / 1000).toFixed(1)}s (advisory on a software rasteriser)`);
   await sleep(4000);
 
   const islands = await page.evaluate(() => (window.__piratesBR.state.islands ?? []).map((i) => ({
