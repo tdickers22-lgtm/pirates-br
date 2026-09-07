@@ -35,6 +35,12 @@
 import { readPng } from './png-read.mjs';
 
 const N = 64;
+// Bins finer than ~3 px are the RASTERISER, not the world: the frame governor
+// drops the render scale under a software GL and the upscale leaves a comb of
+// near-Nyquist lines that reads as a lattice on every surface, water included.
+// Captures pin the render scale to 1 for exactly this reason; the cap is the
+// belt to that pair of braces.
+const MAX_RING = 20;
 const HANN = new Float64Array(N);
 for (let i = 0; i < N; i++) HANN[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
 
@@ -94,7 +100,7 @@ function scorePatch(img, x0, y0) {
     for (let kx = 0; kx < N; kx++) {
       const fy = ky > N / 2 ? ky - N : ky, fx = kx > N / 2 ? kx - N : kx;
       const ri = Math.round(Math.hypot(fx, fy));
-      if (ri < 2 || ri > 28) continue;
+      if (ri < 2 || ri > MAX_RING) continue;
       const pw = re[ky * N + kx] ** 2 + im[ky * N + kx] ** 2;
       ringSum[ri] += pw; ringCnt[ri]++; bins.push([ri, pw, fx, fy]);
     }
