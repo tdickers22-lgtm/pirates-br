@@ -224,7 +224,7 @@ export const TIER_TIMEOUT_MS = { logic: 120_000, server: 120_000, browser: 900_0
  * cheap failure is reported in the first minute rather than the twentieth.
  */
 export const BROWSER = [
-  { ...plain('test-world-fidelity.mjs'), timeoutMs: 900_000 },
+  { ...plain('test-world-fidelity.mjs'), timeoutMs: 1_500_000 }, // two tiers (high + low) since I.4
   { ...plain('test-gameplay-smoke.mjs') },
   { ...plain('test-lod-reveal.mjs') },
   { ...plain('test-minimap.mjs') },
