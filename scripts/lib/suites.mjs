@@ -64,6 +64,7 @@ export const LOGIC = [
   quick(tsx('test-island-props.mjs')),
   quick(tsx('test-asset-merge.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),
+  quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),
   quick(tsx('test-flooding.mjs')),
   // HULL-01: cannonball-vs-hull parity with the drawn wale (swept swim-hull

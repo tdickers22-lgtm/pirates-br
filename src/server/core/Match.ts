@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, hullForCrewSize, botDifficultyLadder, type BotSkill } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -211,6 +211,9 @@ export interface MatchEndResult {
 interface MatchOptions {
   matchId: string;
   botCount: number;
+  /** Party setting: shifts the whole bot difficulty ladder one rung
+   *  (MODE-01 / gameplay-07). Defaults to 'normal'. */
+  botSkill?: BotSkill;
   /** Names of human players who will join — used so bots get distinct identities. */
   reservedHumanNames?: string[];
   /** Honour dev_grant_gold / dev_bot_peace (DEV-01). Defaults to
@@ -328,20 +331,6 @@ type EliminationCause = DamageSource | 'ship_sunk' | 'killed' | 'lost_at_sea';
  *  positional reading is the better answer. Deaths land within a tick or two of
  *  the blow that caused them; this is deliberately generous to bleed-out. */
 const DAMAGE_SOURCE_WINDOW_SECONDS = 12;
-/**
- * Which hull a crew of `size` is handed at the dock.
- *
- * SHIP_STATS is written for crews: a Cutter's two guns and 0.7 turn rate are one
- * pair of hands' worth of ship, a Man-o'-War's eight guns and 0.25 turn rate
- * assume four. The world still rolls all three classes for its bot crews and its
- * silhouettes — this decides only what a JOINING crew sails, and today every
- * human joins alone. When crews start sharing a hull, pass the real crew size.
- */
-function hullForCrewSize(size: number): 'sloop' | 'brigantine' | 'galleon' {
-  if (size <= 1) return 'sloop';
-  if (size <= 3) return 'brigantine';
-  return 'galleon';
-}
 /** Mast ladder climb rate — fraction of the full ladder per second (W up, S
  *  down). ~1.8s deck→nest on a sloop keeps the nest a commitment, not a snap. */
 const MAST_CLIMB_RATE = 0.55;
@@ -432,6 +421,8 @@ export class Match {
   private tickBacklogSec = 0;
   private sharkSpawnCooldown = 0;
   private configuredBotCount = 0;
+  /** Party bot-skill setting; shifts botDifficultyLadder one rung (MODE-01). */
+  private botSkill: BotSkill = 'normal';
   private tickInterval: ReturnType<typeof setInterval> | null = null;
   private endedAt: number | null = null;
   private endReason: MatchEndResult['reason'] | null = null;
@@ -578,6 +569,7 @@ export class Match {
   constructor(opts: MatchOptions) {
     this.id = opts.matchId;
     this.configuredBotCount = opts.botCount;
+    this.botSkill = opts.botSkill ?? 'normal';
     this.devHooks = opts.devHooks ?? process.env.PIRATES_BR_DEV_HOOKS === '1';
     this.rng = makeMatchRng(opts.matchId);
     this.weapons = new WeaponSystem(this.rng);
@@ -778,6 +770,13 @@ export class Match {
     // gravedigger and a Tallyman with full names on every isle, and the crews
     // you actually fight were Pirate_1 … Pirate_9.
     const crewNames = this.mapGen.generateBotCrewNames(Math.min(botCount, spawns.length));
+    // THE TOP RUNG IS REACHABLE NOW (gameplay-07 / bots-04). The old
+    // `i < 5 ? 'easy' : i < 12 ? 'medium' : 'hard'` could not produce a hard bot
+    // in any lobby this server can build, so half the fleet was 'easy' all match
+    // and BotSystem's hard profile was dead code. botDifficultyLadder is
+    // lobby-relative (30/50/20) and index-ordered, so the mix is identical for a
+    // given seed and bot identity stays deterministic.
+    const ladder = botDifficultyLadder(Math.min(botCount, spawns.length), this.botSkill);
     for (let i = 0; i < Math.min(botCount, spawns.length); i++) {
       const spawn = spawns[i];
       const botId = uuid();
@@ -795,8 +794,7 @@ export class Match {
       bot.knockbackVelocity = { x: 0, y: 0, z: 0 };
       players.push(bot);
 
-      const diff = i < 5 ? 'easy' : i < 12 ? 'medium' : 'hard';
-      this.bots.registerBot(bot, ship, diff);
+      this.bots.registerBot(bot, ship, ladder[i] ?? 'medium');
     }
 
     this.setupSkeletonWaves(islandList);

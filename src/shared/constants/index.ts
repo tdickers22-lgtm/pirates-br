@@ -183,20 +183,51 @@ export const SHIP_STATS: Record<ShipType, {
   length: number;
   height: number;
   mastCount: number;
+  /** How many pairs of hands the hull is BALANCED for — the crew size of the
+   *  mode that hands it out (MODES below). It is not a cap: a crew of one can
+   *  still sail a Man-o'-War she boarded, badly. Kept here so the mode table,
+   *  the station roster and the test-ship-ladder gate read one number.
+   *  A hull never carries more guns per crewmate than the Cutter's two. */
+  crewStations: number;
 }> = {
+  // THE LADDER IS THE MODE (ships-22 / netcode-22, PLAN §2.1). The old spread —
+  // 15/13/10 at 0.70/0.45/0.25 — made the Corsair a Cutter with two more guns:
+  // 13% slower for 2x the broadside is not a trade a captain feels. Widening
+  // both ends (15.5 → 11.5, 0.72 → 0.32) makes the class a real choice: the
+  // Cutter outruns and out-turns everything and dies to one good broadside; the
+  // Man-o'-War cannot run from anything and does not have to.
   sloop: {
-    maxHull: 600, cannonCount: 2, maxSpeed: 15,
-    turnRate: 0.7, width: 5, length: 12, height: 2.2, mastCount: 1,
+    maxHull: 600, cannonCount: 2, maxSpeed: 15.5,
+    turnRate: 0.72, width: 5, length: 12, height: 2.2, mastCount: 1,
+    crewStations: 1,
   },
   brigantine: {
-    maxHull: 900, cannonCount: 4, maxSpeed: 13,
-    turnRate: 0.45, width: 7, length: 16, height: 2.8, mastCount: 2,
+    maxHull: 900, cannonCount: 4, maxSpeed: 14,
+    turnRate: 0.52, width: 7, length: 16, height: 2.8, mastCount: 2,
+    crewStations: 2,
   },
   galleon: {
-    maxHull: 1400, cannonCount: 8, maxSpeed: 10,
-    turnRate: 0.25, width: 10, length: 22, height: 3.5, mastCount: 3,
+    maxHull: 1400, cannonCount: 8, maxSpeed: 11.5,
+    turnRate: 0.32, width: 10, length: 22, height: 3.5, mastCount: 3,
+    crewStations: 4,
   },
 };
+
+/**
+ * WHICH HULL A CREW OF `size` IS HANDED AT THE DOCK.
+ *
+ * Lived as a private helper in Match.ts that was called with a literal 1
+ * (ships-22), so the ladder above was decoration. Shared now because the lobby
+ * sizes a match from it, the client's mode picker names the hull off it, and
+ * test-ship-ladder grades it. Total function: any size, including junk, lands
+ * on a real class rather than `undefined`.
+ */
+export function hullForCrewSize(size: number): ShipType {
+  const n = Number.isFinite(size) ? Math.floor(size) : 1;
+  if (n <= 1) return 'sloop';
+  if (n <= 2) return 'brigantine';
+  return 'galleon';
+}
 
 export const SHIP = {
   /** Standing surface of the weather deck, above the hull top: shipY + height +
@@ -833,6 +864,142 @@ export const MATCH_START_COUNTDOWN_SEC = 8;
  *  this and the menu's placeholder queue line quotes it, so the two can't drift
  *  ("0 / 8 pirates" flashed on a 10-pirate queue for months). */
 export const MATCH_TOTAL_SHIPS = 10;
+
+/**
+ * THE MODE ROSTER (MODE-01: netcode-22, gameplay-31, ships-22; PLAN §2.1).
+ *
+ * There were no modes. Every match was MATCH_TOTAL_SHIPS hulls of one pirate
+ * each, the public queue dispatched 1-2 humans plus bots within 5-15 s so real
+ * players never met (netcode-11), and a party of four sailed out as four ENEMY
+ * sloops until CREW-01. The table below is the whole roster in one place: the
+ * lobby sizes its queue from it, Match sizes its fleet from it, and the menu's
+ * mode picker is generated from it.
+ *
+ * The fleet numbers are not taste. The map is 2000x2000 with 10 docks and two
+ * berths each (20 berths, netcode-V1), so 12 hulls all start moored. Mean crew
+ * spacing sqrt(ringArea/crews) at the end of storm phase 1 stays ABOVE the
+ * 300 m cannon range in every mode (so the 150 s bot peace is quiet) and falls
+ * BELOW it by the end of phase 2 (so contact is continuous) — which is exactly
+ * the pacing scripts/pacing-sim.mjs says is missing at a flat 9 crews. Hull
+ * density stays ~2.2-3 crews/km² across all three, so the storm phase table
+ * does not have to change per mode.
+ */
+export interface ModeSpec {
+  /** Human crew size the mode is built around (a party of this many is exact). */
+  crewSize: number;
+  /** The hull that crew sails — always hullForCrewSize(crewSize). */
+  hull: ShipType;
+  /** Hulls (crews) in a full match, humans plus bot fill. */
+  crews: number;
+  /** Humans in a full match. */
+  players: number;
+  /** Online-only: how many real crews the queue waits for before it launches. */
+  minCrews: number;
+  /** Bots fill the fleet up to this many crews unless "real players only". */
+  botFillTo: number;
+  /** Label for the picker and the end screen. */
+  label: string;
+  /** False while the mode is not shippable yet. Squads at 4x6 = 24 humans blows
+   *  the 35 KB full-snapshot cap until WIRE-01 (wave 5) lands delta snapshots,
+   *  so the picker greys it and the lobby refuses to queue it — better than a
+   *  mode that drops frames the moment the fleet is full. */
+  available: boolean;
+}
+
+export const MODES: Record<'solo' | 'duos' | 'squads', ModeSpec> = {
+  solo: {
+    crewSize: 1, hull: 'sloop', crews: 12, players: 12,
+    minCrews: 6, botFillTo: 12, label: 'Solo', available: true,
+  },
+  duos: {
+    crewSize: 2, hull: 'brigantine', crews: 9, players: 18,
+    minCrews: 4, botFillTo: 9, label: 'Duos', available: true,
+  },
+  squads: {
+    crewSize: 4, hull: 'galleon', crews: 6, players: 24,
+    minCrews: 3, botFillTo: 6, label: 'Squads', available: false,
+  },
+};
+
+export type ModeId = keyof typeof MODES;
+/** Ladder order — smallest crew first. The picker renders in this order. */
+export const MODE_IDS: ReadonlyArray<ModeId> = ['solo', 'duos', 'squads'];
+export function isModeId(value: unknown): value is ModeId {
+  return typeof value === 'string' && (MODE_IDS as readonly string[]).includes(value);
+}
+/** The mode a party is in, with an unknown/absent picker value falling back to
+ *  Solo rather than throwing on the lobby's hot path. */
+export function modeSpec(id: unknown): ModeSpec {
+  return isModeId(id) ? MODES[id] : MODES.solo;
+}
+
+/**
+ * BOT DIFFICULTY TIERS (bots-04 / gameplay-07, PLAN §2.3).
+ *
+ * Every knob here changes an OUTCOME. The tiers used to differ mainly in a
+ * firing delay that SHIP.CANNON_RELOAD floored anyway, and the top tier was
+ * never spawned at all (see botDifficultyLadder). PLAN §2.3 calls the middle
+ * rung "normal"; this codebase's BotSystem has always called it 'medium' and
+ * that id is on the wire and in save files, so 'medium' IS "normal" here.
+ */
+export const BOT_TIERS = {
+  easy: {
+    reactionDelay: 3.0, rescanInterval: 12, aimJitter: 0.06, cadenceMult: 1.4,
+    retreatHoles: 2, perceptionRange: 350, lootAppetite: 0.8,
+    boardingAllowed: false, takesWreckersGlass: false, trimLag: 0.5,
+  },
+  medium: {
+    reactionDelay: 1.6, rescanInterval: 8, aimJitter: 0.035, cadenceMult: 1.0,
+    retreatHoles: 3, perceptionRange: 450, lootAppetite: 0.5,
+    boardingAllowed: true, takesWreckersGlass: true, trimLag: 0.8,
+  },
+  hard: {
+    reactionDelay: 0.8, rescanInterval: 5, aimJitter: 0.015, cadenceMult: 0.8,
+    retreatHoles: 4, perceptionRange: 560, lootAppetite: 0.3,
+    boardingAllowed: true, takesWreckersGlass: true, trimLag: 1.0,
+  },
+} as const;
+
+export type BotTierId = keyof typeof BOT_TIERS;
+/** Softest first. Ranking order for the botSkill shift and the gate. */
+export const BOT_TIER_IDS: ReadonlyArray<BotTierId> = ['easy', 'medium', 'hard'];
+
+/** The party's `botSkill` setting: shifts the whole ladder one rung. */
+export type BotSkill = 'easy' | 'normal' | 'hard';
+/** Default lobby mix (PLAN §2.3): 30% easy, 50% normal, 20% hard. */
+export const BOT_TIER_MIX = { easy: 0.30, medium: 0.50, hard: 0.20 } as const;
+
+/**
+ * THE LADDER THAT COULD NOT REACH ITS TOP RUNG (gameplay-07, bots-04).
+ *
+ * `i < 5 ? 'easy' : i < 12 ? 'medium' : 'hard'` over a bot count that can never
+ * exceed MATCH_TOTAL_SHIPS - 1 = 9 meant every lobby in the game's history was
+ * 5 easy + 4 medium and BotSystem's hard cadence (0.75 s), range (270 m) and
+ * firearm noise (0.018) were dead code. More than half the fleet was 'easy' for
+ * the whole match, which is why fights converted slowly and the last bot
+ * standing was at best a medium.
+ *
+ * It is now LOBBY-RELATIVE: the mix is a fraction of however many bots this
+ * match has, so 'hard' is reachable at any fleet size that has room for three
+ * rungs, and a two-bot lobby is medium + hard rather than two easies. Index
+ * order is kept (no RNG) so a seeded match is still bit-identical — bot IDENTITY
+ * is deterministic, which the pacing sim and every replay depend on.
+ */
+export function botDifficultyLadder(count: number, skill: BotSkill = 'normal'): BotTierId[] {
+  const n = Math.max(0, Math.floor(Number.isFinite(count) ? count : 0));
+  const shift = skill === 'hard' ? 1 : skill === 'easy' ? -1 : 0;
+  // Round the two cut points so that with 3+ bots each rung gets at least one.
+  const easyCut = n >= 3 ? Math.max(1, Math.round(n * BOT_TIER_MIX.easy)) : 0;
+  const hardCount = n >= 3 ? Math.max(1, Math.round(n * BOT_TIER_MIX.hard)) : 0;
+  const mediumCut = Math.max(easyCut, n - hardCount);
+  const out: BotTierId[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const base: BotTierId = i < easyCut ? 'easy' : i < mediumCut ? 'medium' : 'hard';
+    const idx = Math.min(BOT_TIER_IDS.length - 1, Math.max(0, BOT_TIER_IDS.indexOf(base) + shift));
+    out.push(BOT_TIER_IDS[idx]);
+  }
+  return out;
+}
 
 /**
  * WHEN A CREW STOPS BEING A CREW, AND WHO GETS PAID FOR IT.
