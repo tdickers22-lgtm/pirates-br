@@ -156,6 +156,9 @@ export const LOGIC = [
   // one — an empty stack consumes nothing, so the in-match pointer-lock
   // release and the name field keep their keys (w3.5).
   quick(tsx('test-modal-stack.mjs')),
+  // CREWHUD-01: who is on my crew, what they are doing, and the throttle that
+  // keeps the strip off the per-frame allocation path (w3.5).
+  quick(tsx('test-crew-ui.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
   // Not quick: 103.6s of its own on this machine (2026-09-03 run), which alone
