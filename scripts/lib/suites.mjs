@@ -147,6 +147,11 @@ export const LOGIC = [
   // all and no suite noticed, because the suites that graded them asserted on
   // the SERVER payload (review-0 P1, fixup0).
   quick(plain('test-wire-consumers.mjs')),
+  // PARTY-01 client half: the six-character code the server issues survives
+  // every client path that carries it (it was truncated to four in three
+  // places, which made private crews unjoinable), plus the party panel's
+  // roster model and the DOM contract the controller binds to (w3.5).
+  quick(tsx('test-menu-party-ui.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
   // Not quick: 103.6s of its own on this machine (2026-09-03 run), which alone
