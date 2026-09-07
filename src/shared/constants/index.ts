@@ -287,6 +287,20 @@ export const SHIP = {
    *  takes about ten seconds — well inside the flooding she took getting there,
    *  so a beaching costs a fright and some planking instead of the ship. */
   AGROUND_HELM_AUTHORITY: 0.5,
+  /** Sail thrust a HARD AGROUND hull still makes, as a fraction of her rig.
+   *
+   *  The bar used to hold a hull with an ABSOLUTE push (the downhill shove in
+   *  resolveShipTerrain), so what a beaching cost depended on how much thrust
+   *  the class happened to have. Widening the class ladder to PLAN §2.1
+   *  (Cutter 15 -> 15.5 m/s) proved it: half a knot of extra rig took a cutter
+   *  pinned on Gallows Sands from 26 m of ground made good in six seconds to
+   *  38 m against a ~60 m free run — she sailed off a shoal at two-thirds
+   *  speed, and running aground stopped costing the race it is supposed to.
+   *  Scaling the RIG instead makes the hold thrust-relative: every class loses
+   *  the same share of her way on a bar, at any speed the ladder is ever tuned
+   *  to. She still works free on her own sails (AGROUND_HELM_AUTHORITY above),
+   *  which is the escape the coach names — it just costs her the time it should. */
+  AGROUND_SAIL_SCALE: 0.6,
   /** Seconds of no keel contact before the next scrape counts as a NEW grounding
    *  EVENT. Grounding is resolved every tick while a hull sits on a bar, so
    *  without an event ledger one beaching machine-guns 60 breaches a second. */

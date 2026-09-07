@@ -726,7 +726,11 @@ export class PhysicsSystem {
       const ballast = cargoBallastFactor(ship.cargoGold ?? 0);
       const targetSpeed = ship.anchored
         ? 0
-        : stats.maxSpeed * speedMult * sailDeployment * (0.16 + trimEfficiency * 0.84) * sailPolar * wind.strength * floodPenalty * waterSpeedFactor * ballast;
+        // A hull hard aground makes only a share of her rig (SHIP.AGROUND_SAIL_SCALE):
+        // the bar's hold is thrust-relative, not absolute, so a beaching costs every
+        // class the same share of her way whatever the class ladder is tuned to.
+        : stats.maxSpeed * speedMult * sailDeployment * (0.16 + trimEfficiency * 0.84) * sailPolar * wind.strength * floodPenalty * waterSpeedFactor * ballast
+          * (ship.aground ? SHIP.AGROUND_SAIL_SCALE : 1);
       const sailLoad = clamp(ship.sailHeight * clamp(ship.sailIntegrity, 0, 1), 0, 1);
       const accelRate = ship.anchored ? SHIP.ANCHOR_BRAKE * 1.28 : 1.55 + sailLoad * 1.05;
       const speedBlend = 1 - Math.exp(-accelRate * dt);
