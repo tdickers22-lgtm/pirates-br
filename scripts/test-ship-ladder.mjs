@@ -23,7 +23,7 @@
  */
 import {
   MODES, MODE_IDS, BOT_TIERS, BOT_TIER_IDS, SHIP_STATS, FLOODING,
-  hullForCrewSize, botDifficultyLadder,
+  MATCH_TOTAL_SHIPS, botFillFor, hullForCrewSize, botDifficultyLadder,
 } from '../src/shared/constants/index.ts';
 
 let failures = 0;
@@ -272,6 +272,47 @@ expect('a Match built with no mode is Solo (Cutters, one hand each)',
     && legacy['state'].ships.every((s) => s.type === 'sloop'),
   `${legacy.modeId()} ${legacy['state'].ships.map((s) => s.type).join(',')}`);
 legacy.stop?.();
+
+// ── 6. NO FLEET SIZE IS SPELLED OUT ANYWHERE (netcode-17 / DEADTYPES) ────
+// "9" was typed into four places that all had to agree with a table none of
+// them read: the solo button sent soloStart(9), the private-lobby slider
+// offered 0-9, its readout printed 9, and the lobby subtracted 1 from a
+// MATCH_TOTAL_SHIPS that was 10. The server built a different number of hulls
+// from the one the menu promised, and nobody could see it. This section fails
+// the moment a literal creeps back in or index.html stops agreeing with MODES.
+console.log('\nNo hardcoded fleet sizes (netcode-17)');
+const { readFileSync } = await import('node:fs');
+const src = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+/** Source with comments stripped — a gate that greps for a pattern must not be
+ *  satisfied (or broken) by prose ABOUT the pattern. */
+const code = (rel) => src(rel)
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+const menu = code('src/client/menu/MenuController.ts');
+expect('the solo button asks the constants for its bot fill, not the literal 9',
+  !/soloStart\(\s*\d/.test(menu),
+  (menu.match(/soloStart\([^)]*\)/g) ?? []).join(' '));
+
+const lobby = code('src/server/core/LobbyServer.ts');
+expect('the lobby sizes its bot fill off MODES, not off a fleet-size subtraction',
+  !/MATCH_TOTAL_SHIPS\s*-\s*\w/.test(lobby) && /botFillFor\(/.test(lobby));
+
+const html = src('index.html');
+const slider = (html.match(/<input[^>]*id="lobby-bot-slider"[^>]*>/) ?? [''])[0];
+const sliderMax = Number((slider.match(/max="(\d+)"/) ?? [])[1]);
+const fullFill = MODES.solo.botFillTo - 1;
+expect(`the bot-crew slider's ceiling is the Solo fleet less the host's own hull (${fullFill})`,
+  sliderMax === fullFill, `index.html max="${sliderMax}"`);
+
+// MATCH_TOTAL_SHIPS is the menu's pre-mode fallback; it must BE a mode's fleet,
+// never a number of its own.
+expect('MATCH_TOTAL_SHIPS is derived from MODES, not a literal of its own',
+  MATCH_TOTAL_SHIPS === MODES.solo.crews, `${MATCH_TOTAL_SHIPS} vs ${MODES.solo.crews}`);
+expect('botFillFor fills the rest of the fleet behind the human crews',
+  botFillFor('solo', 1) === 11 && botFillFor('duos', 2) === 7
+    && botFillFor('squads', 6) === 0 && botFillFor('nonsense', 1) === 11,
+  `${botFillFor('solo', 1)},${botFillFor('duos', 2)},${botFillFor('squads', 6)},${botFillFor('nonsense', 1)}`);
 
 if (failures > 0) {
   console.error(`\n${failures} ship-ladder assertion(s) failed.`);

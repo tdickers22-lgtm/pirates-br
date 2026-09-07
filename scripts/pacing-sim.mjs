@@ -22,14 +22,23 @@ import { pathToFileURL } from 'node:url';
 
 if (process.env.UNSEEDED !== '1') process.env.PIRATES_BR_MAP_SEED ??= '20260801';
 const { Match } = await import('../src/server/core/Match.ts');
-const { SERVER_TICK_MS, PACING_TARGETS } = await import('../src/shared/constants/index.ts');
+const { SERVER_TICK_MS, PACING_TARGETS, MODES, isModeId } = await import('../src/shared/constants/index.ts');
+
+/** Which roster to sim. MODE=duos runs nine Corsairs with two hands each; the
+ *  default (unset) is the legacy Solo run PACING_TARGETS' bands are pinned to,
+ *  so the existing gate reads the same numbers it always did. */
+export const MODE = isModeId(process.env.MODE) ? process.env.MODE : 'solo';
+/** A full bot-only fleet for a mode — solo 12, duos 9, squads 6. Used when MODE
+ *  is set; without it the pinned BOT_CREWS (9) is the fleet. */
+export const modeBotCrews = (mode) => MODES[mode].crews;
 
 export const MARKS = PACING_TARGETS.MARKS;
 
 /** One bot-only match. Returns crews afloat at each mark, the sim second it
  *  ended at, and why ('last_ship' | 'gold' | 'timeout' when MINUTES ran out). */
-export function simulateMatch({ matchId, minutes, botCount = PACING_TARGETS.BOT_CREWS, marks = MARKS }) {
-  const match = new Match({ matchId, botCount });
+export function simulateMatch({ matchId, minutes, mode = MODE, botCount, marks = MARKS }) {
+  const crews = botCount ?? (process.env.MODE ? modeBotCrews(mode) : PACING_TARGETS.BOT_CREWS);
+  const match = new Match({ matchId, botCount: crews, mode });
   const state = match['state'];
   state.phase = 'playing';
   const dt = SERVER_TICK_MS / 1000;
@@ -52,7 +61,7 @@ export function simulateMatch({ matchId, minutes, botCount = PACING_TARGETS.BOT_
 export function runPacing({ runs, minutes, marks = MARKS, log = console.log }) {
   const rows = [];
   for (let run = 0; run < runs; run++) {
-    const row = simulateMatch({ matchId: `pacing-${run}`, minutes, marks });
+    const row = simulateMatch({ matchId: `pacing-${run}`, minutes, marks, mode: MODE });
     rows.push(row);
     log(`run ${run}: ` + marks.map((m) => `${m}s=${row.marks[m]}`).join(' ')
       + `  end t=${row.endT.toFixed(0)}s alive=${row.endAlive} reason=${row.endReason}`);
@@ -84,7 +93,9 @@ export function gradeBands(mean, bands) {
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const RUNS = Number(process.env.RUNS ?? 3);
   const MINUTES = Number(process.env.MINUTES ?? PACING_TARGETS.MAX_MATCH_SECONDS / 60);
-  console.log(`pacing-sim: ${RUNS} run(s) x ${MINUTES} min, ${PACING_TARGETS.BOT_CREWS} bot crews, `
+  const CREWS = process.env.MODE ? modeBotCrews(MODE) : PACING_TARGETS.BOT_CREWS;
+  console.log(`pacing-sim: ${RUNS} run(s) x ${MINUTES} min, ${MODE}, ${CREWS} bot crews `
+    + `of ${MODES[MODE].crewSize} on ${MODES[MODE].hull}s, `
     + (process.env.UNSEEDED === '1' ? 'UNSEEDED' : `seed ${process.env.PIRATES_BR_MAP_SEED}`)
     + `, BOT_EARLY_PEACE_SECONDS=${process.env.BOT_EARLY_PEACE_SECONDS ?? 150}`);
   const t0 = performance.now();

@@ -11,12 +11,16 @@ import type {
 } from '../../shared/types/index.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
-import { MATCH_TOTAL_SHIPS, MODES, MODE_IDS, isModeId, type ModeId } from '../../shared/constants/index.js';
+import { MODES, MODE_IDS, botFillFor, isModeId, type ModeId } from '../../shared/constants/index.js';
 
 // ── Tunables ──────────────────────────────────────────────────
 const PARTY_CAPACITY = 16;
-const PARTY_DEFAULT_BOTS = MATCH_TOTAL_SHIPS - 1;
-const PARTY_MAX_BOTS = MATCH_TOTAL_SHIPS - 1;
+/** Bot crews a private lobby starts with, and the most the slider may ask for:
+ *  the rest of the mode's fleet behind the host's own crew. The literal
+ *  `MATCH_TOTAL_SHIPS - 1` these two used to be was 9 against a 10-hull match
+ *  and is 11 against Solo's twelve (netcode-17 / DEADTYPES — the count lives in
+ *  MODES now, not in four separate subtractions). */
+const partyDefaultBots = (mode: unknown) => botFillFor(mode, 1);
 /**
  * THE QUEUE POOLS CREWS (MODE-01: netcode-11, gameplay-31).
  *
@@ -485,7 +489,7 @@ export class LobbyServer {
       code,
       hostId: session.id,
       members: [session.id],
-      botFill: PARTY_DEFAULT_BOTS,
+      botFill: partyDefaultBots('solo'),
       ready: new Set<string>(),
       mode: 'solo',
       readyClockAt: Date.now(),
@@ -602,7 +606,7 @@ export class LobbyServer {
       party.mode = payload.mode;
     }
     if (typeof payload.botFill === 'number' && Number.isFinite(payload.botFill)) {
-      party.botFill = Math.max(0, Math.min(PARTY_MAX_BOTS, Math.floor(payload.botFill)));
+      party.botFill = Math.max(0, Math.min(partyDefaultBots(party.mode), Math.floor(payload.botFill)));
     }
     this.broadcastLobby(party);
   }
@@ -646,7 +650,11 @@ export class LobbyServer {
     if (memberSessions.length === 0) return;
 
     const partyMode: ModeId = isModeId(party.mode) ? party.mode : 'solo';
-    const botCount = Math.max(0, Math.min(party.botFill, MATCH_TOTAL_SHIPS - memberSessions.length));
+    // The party is ONE crew whatever her size, so the fill is the mode's fleet
+    // less that one hull — not less one hull PER MEMBER, which is what
+    // `MATCH_TOTAL_SHIPS - memberSessions.length` meant when every member was
+    // her own ship.
+    const botCount = Math.max(0, Math.min(party.botFill, botFillFor(partyMode, 1)));
 
     party.inMatch = true;
     // A party is ONE crew: one hull, sized by hullForCrewSize(roster).
@@ -764,8 +772,9 @@ export class LobbyServer {
     if (session.state === 'queue') this.removeFromQueue(session);
     if (session.state === 'party') this.removeFromParty(session, true);
     const payload = (msg.payload ?? {}) as { botCount?: number };
-    const requested = typeof payload.botCount === 'number' ? Math.floor(payload.botCount) : PARTY_DEFAULT_BOTS;
-    const botCount = Math.max(0, Math.min(PARTY_MAX_BOTS, requested));
+    const fullFill = botFillFor('solo', 1);
+    const requested = typeof payload.botCount === 'number' ? Math.floor(payload.botCount) : fullFill;
+    const botCount = Math.max(0, Math.min(fullFill, requested));
     this.spawnAndBoard([[session]], botCount, 'solo', 'party');
   }
 

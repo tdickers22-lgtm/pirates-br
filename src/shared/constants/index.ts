@@ -874,10 +874,6 @@ export const FULL_SNAPSHOT_TICKS = SNAPSHOT_RATE * 3;
  *  card + countdown off these messages (see Game.showMatchStartSequence). */
 export const MATCH_START_COUNTDOWN_SEC = 8;
 
-/** Crews (ships) per match — humans plus bot fill. The lobby sizes the queue to
- *  this and the menu's placeholder queue line quotes it, so the two can't drift
- *  ("0 / 8 pirates" flashed on a 10-pirate queue for months). */
-export const MATCH_TOTAL_SHIPS = 10;
 
 /**
  * THE MODE ROSTER (MODE-01: netcode-22, gameplay-31, ships-22; PLAN §2.1).
@@ -936,6 +932,29 @@ export const MODES: Record<'solo' | 'duos' | 'squads', ModeSpec> = {
 };
 
 export type ModeId = keyof typeof MODES;
+
+/** Crews (ships) in a match, when nobody has said which mode — Solo's fleet.
+ *  It was a hard 10 that predated the mode table, so the lobby, the bot-crew
+ *  slider and the menu's queue line all quoted a fleet size the roster no
+ *  longer agrees with (netcode-17 / DEADTYPES). Derived now, so it cannot
+ *  drift from MODES again. Prefer MODES[mode].crews wherever the mode is
+ *  known; this is the fallback the menu quotes before a mode is picked. */
+export const MATCH_TOTAL_SHIPS: number = MODES.solo.crews;
+
+/**
+ * HOW MANY BOT CREWS FILL THE REST OF THE FLEET.
+ *
+ * The one place the answer lives, for the private-party slider, the solo
+ * button, the public queue's dispatch and the "real players only" toggle. Each
+ * of those used to do its own `MATCH_TOTAL_SHIPS - 1` arithmetic on a fleet
+ * size that was not the mode's (netcode-17): the slider offered 9 in a lobby
+ * the server built with 10 hulls, and the solo button shipped the literal 9.
+ */
+export function botFillFor(mode: unknown, humanCrews = 1): number {
+  const spec = modeSpec(mode);
+  const crews = Math.max(0, Math.floor(Number.isFinite(humanCrews) ? humanCrews : 1));
+  return Math.max(0, spec.botFillTo - crews);
+}
 /** Ladder order — smallest crew first. The picker renders in this order. */
 export const MODE_IDS: ReadonlyArray<ModeId> = ['solo', 'duos', 'squads'];
 export function isModeId(value: unknown): value is ModeId {
