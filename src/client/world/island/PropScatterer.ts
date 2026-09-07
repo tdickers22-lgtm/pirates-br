@@ -449,8 +449,16 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
   if (!lowDetail) {
     // Each tuft now carries actual blades. Keep the near-field triangle cost
     // bounded and retain the existing distance/density LOD for every batch.
-    const grassCount = Math.min(6000, Math.round(r * r * 0.85));
+    // COVERAGE, not sparsity. The cap went 9000 -> 6000 when tufts became real
+    // geometry, and on top of that the understory roll DROPPED seeds, so a lush
+    // island's lawn read as bare ground with a handful of tufts on it and the
+    // terrain shading became the loudest thing in the frame. The cap comes back
+    // to 9000 and the far sibling below (3 blades, 15 triangles) pays for it:
+    // past the tier's swap line a tuft is 60% of the triangles it was, and
+    // COVER_DENSITY_RAMP already takes the count to zero by 240/340 m.
+    const grassCount = Math.min(9000, Math.round(r * r * 1.15));
     const grassGeo = makeGrassTuftGeometry();
+    const grassFarGeo = makeGrassTuftGeometry(3);
     // White base: per-instance colors MULTIPLY material.color — a tinted
     // base squared every tuft toward black (the 'invisible grass' bug).
     const grassMat = new THREE.MeshStandardMaterial({
@@ -484,10 +492,15 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
       if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
       if (onFloor(sample.x, sample.z)) continue;
       const density = understoryDensity(island.profile.biome, sample.x, sample.z, island.profile.seed ?? 0);
-      if (rng(i * 97 + 17) > density) continue;
+      // Density thins the CLUMP, it does not delete the seed. Rolling the seed
+      // away meant biome density was applied twice (here and on the fern roll)
+      // on top of the reduced cap, which is how a fertile island ended up with
+      // bare patches metres across. A sparse spot is now a two-blade tuft, not
+      // an absence.
+      if (rng(i * 97 + 17) > 0.22 + 0.78 * density) continue;
       // Place a small CLUMP of blades per seed so grass reads as tufts and
       // masses (carpeting the interior), not isolated specks (audit P1).
-      const clump = 2 + Math.floor(rng(i * 3 + 1) * 3); // 2-4 blades
+      const clump = Math.max(2, Math.round((2 + Math.floor(rng(i * 3 + 1) * 3)) * (0.55 + 0.45 * density)));
       for (let c = 0; c < clump && placed < grassCount; c++) {
         const jx = (rng(i * 41 + c * 7) - 0.5) * 1.15;
         const jz = (rng(i * 43 + c * 11) - 0.5) * 1.15;
@@ -538,6 +551,7 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     grass.receiveShadow = true;
     grass.name = 'island-grass';
     attachCoverLod(grass);
+    attachInstanceFarLod(grass, { geometry: grassGeo, material: grassMat }, { geometry: grassFarGeo, material: grassMat });
     group.add(grass);
 
     // ── Ferns: taller arched fronds in the shaded inner jungle band ──

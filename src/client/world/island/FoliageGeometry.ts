@@ -28,10 +28,14 @@ function finish(out: Leaves): THREE.BufferGeometry {
 }
 
 /** Five independently curved blades, 25 triangles total (the old two cards
- * were 12). Real pointed tips and narrow twisting ribbons catch grazing light. */
-export function makeGrassTuftGeometry(): THREE.BufferGeometry {
+ * were 12). Real pointed tips and narrow twisting ribbons catch grazing light.
+ *
+ * `blades` exists so the same tuft has a far sibling: three blades, 15
+ * triangles, the same silhouette from any distance where the difference is
+ * under a pixel. That is what pays for the coverage the near field needs. */
+export function makeGrassTuftGeometry(blades = 5): THREE.BufferGeometry {
   const out: Leaves = { positions: [], colors: [], indices: [] };
-  for (let blade = 0; blade < 5; blade++) {
+  for (let blade = 0; blade < blades; blade++) {
     const angle = blade * 2.399963;
     const dx = Math.cos(angle), dz = Math.sin(angle);
     const height = 0.38 + (blade % 3) * 0.085;
