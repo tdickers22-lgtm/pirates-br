@@ -193,7 +193,16 @@ ${hullHalfFracGlsl()}
 #endif
 `;
 
-const OCEAN_VERT = /* glsl */`
+/** How many of the LOD rings, innermost first, sample the sun's shadow map.
+ *  Two covers everything inside the 310 m ortho box the shadow camera actually
+ *  renders; a third would be 9 PCF taps a fragment for a lookup that is lit by
+ *  construction. */
+const OCEAN_SHADOW_RINGS = 2;
+
+/** Exported beside OCEAN_FRAG so scripts/test-shadow-bias.mjs can prove the
+ *  shadow coordinate this stage builds is the one the fragment stage samples
+ *  (SHADOW-01 / graphics-14). */
+export const OCEAN_VERT = /* glsl */`
   uniform float u_time;
   uniform float u_roughness;
   uniform vec3  u_cameraPos;
@@ -205,6 +214,15 @@ const OCEAN_VERT = /* glsl */`
 
   varying vec3  v_worldPos;
   varying float v_height;
+
+  // THE SEA TAKES A SHADOW (SHADOW-01 / graphics-14).
+  //
+  // These declare directionalShadowMatrix / directionalLightShadows and the
+  // vDirectionalShadowCoord varying the fragment stage samples. On the low
+  // tier shadowMap.enabled is false, so three defines neither USE_SHADOWMAP
+  // nor NUM_DIR_LIGHT_SHADOWS > 0 and the whole block below compiles to
+  // nothing: that is the tier gate, and it costs low exactly zero.
+  #include <shadowmap_pars_vertex>
 
   ${WAVE_FIELD_GLSL}
   ${SHORE_GLSL}
@@ -223,6 +241,24 @@ const OCEAN_VERT = /* glsl */`
 
     v_worldPos = wp;
     v_height   = h;
+
+    // Not three's <shadowmap_vertex>: that chunk wants 'transformedNormal' and
+    // 'worldPosition' from the standard vertex pipeline this shader does not
+    // run, and pulling <common> in for inverseTransformDirection would collide
+    // with the wave field's own helpers. The bias offset is along the RECEIVER
+    // normal, and the sea's geometric normal is up — the Gerstner normal is a
+    // shading detail rebuilt per fragment, and biasing along a ripple would
+    // make the hull's shadow crawl with the swell.
+    #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+      #pragma unroll_loop_start
+      for ( int i = 0; i < NUM_DIR_LIGHT_SHADOWS; i ++ ) {
+        vec4 shadowWorldPosition = vec4(wp, 1.0)
+          + vec4(vec3(0.0, 1.0, 0.0) * directionalLightShadows[ i ].shadowNormalBias, 0.0);
+        vDirectionalShadowCoord[ i ] = directionalShadowMatrix[ i ] * shadowWorldPosition;
+      }
+      #pragma unroll_loop_end
+    #endif
+
     gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
   }
 `;
@@ -233,6 +269,15 @@ const OCEAN_VERT = /* glsl */`
  *  they have moved (a mirror that silently drifts from the shader grades
  *  nothing). */
 export const OCEAN_FRAG = /* glsl */`
+  // See OCEAN_VERT. <packing> is what getShadow unpacks the depth map with;
+  // 'receiveShadow' is the per-OBJECT flag three uploads in setProgram, and it
+  // is why the two inner LOD rings can sample while the outer rings — which
+  // reach 2 km past a 310 m shadow box and would read "lit" every time — do
+  // not pay for the lookup.
+  #include <packing>
+  #include <shadowmap_pars_fragment>
+  uniform bool receiveShadow;
+
   uniform float u_time;
   uniform vec3  u_sunDir;
   uniform vec3  u_cameraPos;
@@ -533,9 +578,30 @@ export const OCEAN_FRAG = /* glsl */`
     vec3 grazeCol = mix(skyRefl, base, 0.34);
     base = mix(base, grazeCol, graze * (0.30 + 0.42 * shallowMask) * (0.35 + 0.65 * lowEye));
 
-    // ── Diffuse key light ───────────────────────────────────────────────
+    // ── Diffuse key light, shadowed ─────────────────────────────────────
     float diff = max(0.0, dot(N, L));
-    base *= u_ambient + u_keyLight * diff;
+    // A hull at noon used to float on the sea with nothing under it — the one
+    // cue after the waterline foam that says the ship is IN the water rather
+    // than pasted on it. The shadow attenuates the KEY only: water in a
+    // hull's or an island's shadow still takes the full sky term, because a
+    // shadow that also removed the ambient would read as a hole in the sea
+    // rather than as shade on it. 0.55 is the floor, i.e. shadowed water keeps
+    // 45% of its key — same reasoning, and it keeps the edge soft over a
+    // surface that is moving under it.
+    float keyShadow = 1.0;
+    #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+      if ( receiveShadow ) {
+        float sh = getShadow(
+          directionalShadowMap[ 0 ],
+          directionalLightShadows[ 0 ].shadowMapSize,
+          directionalLightShadows[ 0 ].shadowBias,
+          directionalLightShadows[ 0 ].shadowRadius,
+          vDirectionalShadowCoord[ 0 ]
+        );
+        keyShadow = mix(0.55, 1.0, sh);
+      }
+    #endif
+    base *= u_ambient + u_keyLight * diff * keyShadow;
 
     // ── Blinn specular: lobe widens with distance (specular AA), energy
     //    drops with it, and the HDR result is clamped — no firefly noise ─
@@ -561,7 +627,7 @@ export const OCEAN_FRAG = /* glsl */`
     vec3 specCol = mix(vec3(1.0, 0.94, 0.80), vec3(1.0, 0.50, 0.28), sunPath * sunLow)
                  * (spec * mix(1.0, 0.85, u_moonness) + glare * mix(1.0, 0.20, u_moonness))
                  * keyUp;
-    specCol = min(specCol, vec3(1.15));
+    specCol = min(specCol, vec3(1.15)) * keyShadow;
     specCol = mix(specCol, specCol * vec3(0.62, 0.74, 1.05), u_nightFactor);
 
     // ── Foam: noise-broken crests + animated shore band. Storm lowers the
@@ -970,7 +1036,15 @@ export class OceanRenderer {
       // and expand to nothing on balanced. An unnamed ShaderMaterial matched
       // three's own empty-named fullscreen quad and the gate graded the composer.
       name: 'ocean-surface',
-      uniforms: {
+      // lights: true is not "the ocean is lit by three's light loop" — it never
+      // includes lights_pars_begin and never runs a BRDF. It is the ONLY way to
+      // get three to keep directionalShadowMap / directionalShadowMatrix /
+      // directionalLightShadows bound and up to date on a ShaderMaterial, which
+      // is what the two chunks in OCEAN_VERT/OCEAN_FRAG read. The uniforms have
+      // to be present in the object or WebGLRenderer's light refresh writes
+      // through undefined; UniformsLib.lights is cloned in ahead of ours so a
+      // stray name collision would be OURS that wins.
+      uniforms: Object.assign(THREE.UniformsUtils.clone(THREE.UniformsLib.lights), {
         u_time:      { value: 0 },
         u_roughness: { value: getOceanRoughness(0) },
         u_sunDir:    { value: this.sunDir.clone() },
@@ -1009,7 +1083,8 @@ export class OceanRenderer {
         // Lightning strike response (see setLightningFlash).
         u_boltFlash: { value: 0 },
         u_boltDir:   { value: new THREE.Vector2(0, 1) },
-      },
+      }),
+      lights: true,
       side: THREE.DoubleSide,
       extensions: { derivatives: true },
     });
@@ -1021,6 +1096,7 @@ export class OceanRenderer {
       // gl.getShaderSource() off the linked program must find it either way.
       name: 'ocean-surface',
       uniforms: this.material.uniforms,
+      lights: true,
       side: THREE.DoubleSide,
       extensions: { derivatives: true },
     });
@@ -1028,11 +1104,18 @@ export class OceanRenderer {
     this.group = new THREE.Group();
     this.group.name = 'ocean-lod-grid';
     this.surfaceMeshes.length = 0;
-    for (const level of levels) {
-      const mesh = new THREE.Mesh(buildRingGeometry(level), this.material);
+    for (let i = 0; i < levels.length; i++) {
+      const mesh = new THREE.Mesh(buildRingGeometry(levels[i]), this.material);
       this.surfaceMeshes.push(mesh);
       mesh.frustumCulled = false; // always on screen; skips bad flat-geometry bounds vs displaced verts
-      mesh.receiveShadow = false; // shadows on dynamic waves look odd
+      // THE NEAR RINGS ONLY (SHADOW-01 / graphics-14). levels[0] is the finest
+      // cell and the innermost ring; the outer ones reach kilometres out, far
+      // past the 310 m shadow box, where every tap would sample the map's clear
+      // value and return "lit". A PCFSoft lookup is 9 taps of a fragment that
+      // covers half the framebuffer, so paying for it out there is the whole
+      // budget for nothing. `receiveShadow` is a per-object uniform, so both
+      // sets share one program and one uniforms object — no second link.
+      mesh.receiveShadow = i < OCEAN_SHADOW_RINGS;
       this.group.add(mesh);
     }
 
