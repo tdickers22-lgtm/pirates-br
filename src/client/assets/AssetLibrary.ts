@@ -35,14 +35,28 @@ export const ASSET_NAMES = [
 
 export type AssetName = (typeof ASSET_NAMES)[number];
 
-interface MergedAsset {
+/** The assets the 2026-09-05 fidelity pass rebuilt at 1.2-4.8x their old
+ *  triangle counts. Each ships a decimated `<name>_far.glb` sibling
+ *  (scripts/blender/build_far_lods.py) that InstanceLod swaps in once the
+ *  island is far enough that the detail is sub-pixel. A missing sibling is
+ *  tolerated: the batch simply keeps its near geometry at every distance. */
+export const FAR_ASSET_NAMES = [
+  'palm_a', 'palm_b', 'palm_c',
+  'boulder_a', 'boulder_b', 'boulder_c',
+  'searock_a', 'searock_b', 'searock_c',
+  'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
+] as const satisfies readonly AssetName[];
+type FarKey = `${(typeof FAR_ASSET_NAMES)[number]}_far`;
+type AssetKey = AssetName | FarKey;
+
+export interface MergedAsset {
   geometry: THREE.BufferGeometry;
   material: THREE.Material | THREE.Material[];
 }
 
 export class AssetLibrary {
-  private scenes = new Map<AssetName, THREE.Group>();
-  private merged = new Map<AssetName, MergedAsset>();
+  private scenes = new Map<AssetKey, THREE.Group>();
+  private merged = new Map<AssetKey, MergedAsset>();
   private boundsCache = new Map<AssetName, THREE.Box3>();
   /** Geometries/materials owned by the library (shared across clones) — must never be disposed by callers. */
   private sharedResources = new WeakSet<object>();
@@ -70,9 +84,8 @@ export class AssetLibrary {
     if (this.loaded) return;
     const loader = new GLTFLoader();
     let done = 0;
-    await Promise.all(ASSET_NAMES.map(async (name) => {
-      try {
-        const gltf = await loader.loadAsync(`/assets/models/${name}.glb`);
+    const loadOne = async (name: AssetName, key: AssetKey) => {
+        const gltf = await loader.loadAsync(`/assets/models/${key}.glb`);
         const root = gltf.scene;
         root.traverse((o) => {
           if (o instanceof THREE.Mesh) {
@@ -105,14 +118,30 @@ export class AssetLibrary {
             }
           }
         });
-        this.scenes.set(name, root);
-      } catch (err) {
-        console.warn(`[assets] failed to load ${name}.glb — procedural fallback stays`, err);
-      } finally {
-        done += 1;
-        onProgress?.(done, ASSET_NAMES.length);
-      }
-    }));
+        this.scenes.set(key, root);
+    };
+    await Promise.all([
+      ...ASSET_NAMES.map(async (name) => {
+        try {
+          await loadOne(name, name);
+        } catch (err) {
+          console.warn(`[assets] failed to load ${name}.glb — procedural fallback stays`, err);
+        } finally {
+          done += 1;
+          onProgress?.(done, ASSET_NAMES.length);
+        }
+      }),
+      // Far siblings ride the same parallel fetch but never the progress bar:
+      // they are an optimisation, not content, and their absence costs only
+      // triangles at distance.
+      ...FAR_ASSET_NAMES.map(async (name) => {
+        try {
+          await loadOne(name, `${name}_far`);
+        } catch (err) {
+          console.warn(`[assets] no far LOD for ${name} (${name}_far.glb) — near geometry at every distance`, err);
+        }
+      }),
+    ]);
     this.loaded = true;
   }
 
@@ -160,6 +189,15 @@ export class AssetLibrary {
     return src.clone(true);
   }
 
+  /** A clone of the decimated far sibling (`<name>_far.glb`), or null when the
+   *  asset has none — callers then simply keep the near clone at every distance. */
+  cloneFar(name: AssetName): THREE.Group | null {
+    if (!(FAR_ASSET_NAMES as readonly string[]).includes(name)) return null;
+    const src = this.scenes.get(`${name as (typeof FAR_ASSET_NAMES)[number]}_far`);
+    if (!src) return null;
+    return src.clone(true);
+  }
+
   /**
    * Clone with all materials duplicated, then tint materials whose name
    * matches `matchMat` (e.g. 'TeamTint') to the given color.
@@ -190,6 +228,18 @@ export class AssetLibrary {
    * Cached per asset.
    */
   mergedGeometry(name: AssetName): MergedAsset | null {
+    return this.mergeKey(name);
+  }
+
+  /** The decimated far variant of a rebuilt nature asset, merged and collapsed
+   *  exactly like the near one so a batch can swap between the two by pointer.
+   *  Null when the asset has no far sibling on disk. */
+  mergedFarGeometry(name: AssetName): MergedAsset | null {
+    if (!(FAR_ASSET_NAMES as readonly string[]).includes(name)) return null;
+    return this.mergeKey(`${name as (typeof FAR_ASSET_NAMES)[number]}_far`);
+  }
+
+  private mergeKey(name: AssetKey): MergedAsset | null {
     const cached = this.merged.get(name);
     if (cached) return cached;
     const src = this.scenes.get(name);

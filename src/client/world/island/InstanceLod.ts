@@ -62,6 +62,11 @@ import type { RenderQuality } from '../../rendering/QualityPreference.js';
  * scatterer's job to have sorted the instance matrices into the same order; see
  * `attachInstanceLod`, which is the only place the two are tied together.
  */
+export type LodGeometrySet = {
+  readonly geometry: THREE.BufferGeometry;
+  readonly material: THREE.Material | THREE.Material[];
+};
+
 export type InstanceLodBatch = {
   readonly mesh: THREE.InstancedMesh;
   /** Per-instance scale, descending. Empty for density-only batches. */
@@ -76,6 +81,12 @@ export type InstanceLodBatch = {
   readonly kind: 'prop' | 'cover' | 'fleck';
   /** The count last written, so a hovering camera writes nothing. */
   applied: number;
+  /** Near/far geometry pair for the rebuilt nature GLBs; absent for batches
+   *  without a `<name>_far.glb` sibling. See FAR_SWAP_M. */
+  near?: LodGeometrySet;
+  far?: LodGeometrySet;
+  /** True while the mesh is drawing `far`. */
+  farApplied: boolean;
   /** True while THIS module is the reason the mesh is invisible. Without it a
    *  restore would fight the radius gates that hide the same nodes. */
   hidden: boolean;
@@ -113,6 +124,35 @@ const BASE_HALF_FOV_TAN = Math.tan((74 * Math.PI) / 360);
  * this. The far knot is the floor; past it the fraction stops falling, because a
  * shoreline that keeps thinning forever eventually reads as a different island.
  */
+/**
+ * THE GEOMETRY SWAP. Apparent metres from the island's edge beyond which a prop
+ * batch draws its decimated far sibling instead of the full asset. The 2026-09-05
+ * fidelity pass rebuilt palms at 5.6k, boulders at 4.6k, sea rocks at 5.9k and
+ * bushes at 2.2k triangles — real detail up close, and sub-pixel from across a
+ * bay. Count thinning alone (the ramps below) left the low tier's dock vista at
+ * 753k triangles against a 580k ceiling (473k before the pass); swapping the
+ * far islands' batches to ~20-30% geometry is what brings it back without
+ * touching anything the player can walk up to. Hysteresis: back to near only
+ * once the island is inside 85% of the swap distance.
+ */
+const FAR_SWAP_M: Record<RenderQuality, number> = {
+  low: 70,
+  balanced: 130,
+  // 150, not 220: at 150 m apparent a 8 m palm is ~18 px tall in the 540 px
+  // reference field, where its 1.7k-triangle far sibling is already more
+  // triangles than pixels. 220 left the high tier's dock vista at 2,127k
+  // against its 2,000k ceiling (1,535k before the pass).
+  high: 150,
+};
+const FAR_SWAP_HYSTERESIS = 0.85;
+
+/** The tier's near→far swap distance in apparent metres, for the few things
+ *  that are not instanced batches (sea rocks) and swap on their own. */
+export function farSwapDistance(quality: RenderQuality): number {
+  return FAR_SWAP_M[quality];
+}
+export { FAR_SWAP_HYSTERESIS };
+
 const PROP_DENSITY_RAMP: Record<RenderQuality, readonly (readonly [number, number])[]> = {
   low: [[150, 1], [300, 0.62], [460, 0.4]],
   balanced: [[300, 1], [560, 0.74], [820, 0.5]],
@@ -132,7 +172,20 @@ const PROP_DENSITY_RAMP: Record<RenderQuality, readonly (readonly [number, numbe
  * is a seeded walk over the whole island, thinning by count thins uniformly in
  * space rather than eating one side of the island.
  */
-const COVER_DENSITY_RAMP: readonly (readonly [number, number])[] = [[90, 1], [180, 0.58], [300, 0.3]];
+const COVER_DENSITY_RAMP: Record<RenderQuality, readonly (readonly [number, number])[]> = {
+  // The 25-triangle tufts and 310-triangle fern rosettes of the fidelity pass
+  // (ground-cover cards were 6) made the 0.3 floor a standing cost of ~45k
+  // triangles per island in view at balanced; that tier now fades its cover
+  // to nothing by 240 m. 'low' builds no cover at all (PropScatterer).
+  low: [[70, 1], [140, 0.45], [240, 0]],
+  balanced: [[70, 1], [140, 0.45], [240, 0]],
+  // High used to hold a 0.3 floor forever: with up to 6,000 25-triangle tufts
+  // and 260 310-triangle rosettes per island that floor is ~70k triangles for
+  // EVERY island in the frustum, drawn at under a pixel each. It now fades to
+  // nothing by 340 m; the 0.3 floor's "reads as a different island" argument
+  // was made for shoreline props, not for ankle-high cover.
+  high: [[90, 1], [180, 0.55], [340, 0]],
+};
 
 /**
  * FLECKS — the scatter that exists to be looked at from two metres.
@@ -223,7 +276,23 @@ export function attachInstanceLod(
     kind: 'prop',
     applied: mesh.count,
     hidden: false,
+    farApplied: false,
   };
+}
+
+/** Give a prop batch its far sibling. Must follow `attachInstanceLod`; a batch
+ *  that attached nothing (unsorted scales) gets no swap either, on the same
+ *  "do nothing rather than the wrong thing" rule. */
+export function attachInstanceFarLod(
+  mesh: THREE.InstancedMesh,
+  near: LodGeometrySet,
+  far: LodGeometrySet,
+): void {
+  const batch = (mesh as LodMesh).userData.instanceLod;
+  if (!batch) return;
+  batch.near = near;
+  batch.far = far;
+  batch.farApplied = false;
 }
 
 /** Register a ground-cover batch: density-only, no pixel rule, steeper ramp. */
@@ -248,6 +317,7 @@ function attachDensityLod(mesh: THREE.InstancedMesh, kind: 'cover' | 'fleck'): v
     kind,
     applied: mesh.count,
     hidden: false,
+    farApplied: false,
   };
 }
 
@@ -311,6 +381,7 @@ export function updateInstanceLod(
   const apparent = Math.max(0, edgeDist) / Math.max(1e-3, distanceScale);
   const propRamp = PROP_DENSITY_RAMP[quality];
   const minPixels = MIN_INSTANCE_PIXELS[quality];
+  const farSwap = FAR_SWAP_M[quality];
   // World metres per reference pixel at this apparent distance.
   const worldPerPixel = (2 * BASE_HALF_FOV_TAN * Math.max(1, apparent)) / REFERENCE_HEIGHT_PX;
 
@@ -319,9 +390,19 @@ export function updateInstanceLod(
     // Stagger spreads a type's thresholds ±17% around the shared ramp, so a
     // shoreline thickens in several small instalments instead of one.
     const phase = 0.83 + batch.stagger * 0.34;
+    if (batch.far && batch.near) {
+      const d = apparent * phase;
+      const wantFar = batch.farApplied ? d > farSwap * FAR_SWAP_HYSTERESIS : d > farSwap;
+      if (wantFar !== batch.farApplied) {
+        batch.farApplied = wantFar;
+        const set = wantFar ? batch.far : batch.near;
+        batch.mesh.geometry = set.geometry;
+        batch.mesh.material = set.material;
+      }
+    }
     let target: number;
     if (batch.kind === 'cover' || batch.kind === 'fleck') {
-      const ramp = batch.kind === 'fleck' ? FLECK_DENSITY_RAMP : COVER_DENSITY_RAMP;
+      const ramp = batch.kind === 'fleck' ? FLECK_DENSITY_RAMP : COVER_DENSITY_RAMP[quality];
       target = Math.ceil(batch.full * rampAt(ramp, apparent * phase));
     } else {
       const byPixels = countAbovePixelFloor(batch, minPixels * worldPerPixel * phase);

@@ -13,7 +13,7 @@ import { assets } from '../../assets/AssetLibrary.js';
 import type { IslandBuildCtx } from './context.js';
 import { ensureMeshGround, seatOnDrawnGround, snapToDrawnGround } from './GroundTruth.js';
 import { flushContactShadows, queueContactShadow } from './ContactShadows.js';
-import { attachFleckLod } from './InstanceLod.js';
+import { attachFleckLod, attachInstanceFarLod, attachInstanceLod } from './InstanceLod.js';
 
 /** Rock outcrops, driftwood logs, bamboo clusters and the beached hull GLB.
  *  (The old client-only boulder/palm scatter is gone: palms and boulders come
@@ -447,12 +447,27 @@ export function buildInteriorDressing(ctx: IslandBuildCtx) {
     }
     if (bushXf.length && bushAsset) {
       applyFoliageSway(bushAsset.material);
-      const bushInst = new THREE.InstancedMesh(bushAsset.geometry, bushAsset.material, bushXf.length);
-      bushXf.forEach((m, k) => bushInst.setMatrixAt(k, m));
+      // BIGGEST FIRST, like PropScatterer: the count LOD draws the first N of
+      // the batch, so the order decides which bushes go first at distance.
+      const scaled = bushXf.map((m) => ({ m, s: m.getMaxScaleOnAxis() })).sort((a, b) => b.s - a.s);
+      const bushInst = new THREE.InstancedMesh(bushAsset.geometry, bushAsset.material, scaled.length);
+      scaled.forEach((e, k) => bushInst.setMatrixAt(k, e.m));
       bushInst.instanceMatrix.needsUpdate = true;
       bushInst.castShadow = false;
       bushInst.receiveShadow = true;
       bushInst.name = 'decor-interior-scrub';
+      // The rebuilt bush is 2,252 triangles (was 628) and this batch had no LOD
+      // at all: every island in view paid for its scrub at full geometry from
+      // any distance. It now thins by count with the prop ramp and swaps to
+      // the ~560-triangle far sibling past the tier's swap distance.
+      if (!bushAsset.geometry.boundingBox) bushAsset.geometry.computeBoundingBox();
+      const bb = bushAsset.geometry.boundingBox;
+      attachInstanceLod(bushInst, scaled.map((e) => e.s), bb ? bb.max.y - bb.min.y : 0);
+      const farBush = assets.mergedFarGeometry('bush');
+      if (farBush) {
+        applyFoliageSway(farBush.material);
+        attachInstanceFarLod(bushInst, { geometry: bushAsset.geometry, material: bushAsset.material }, farBush);
+      }
       group.add(bushInst);
     }
   }

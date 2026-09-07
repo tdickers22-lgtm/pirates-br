@@ -7,6 +7,32 @@ import * as THREE from 'three';
 import type { SeaRock } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import type { IslandBuilderCtx } from './context.js';
+import type { RenderQuality } from '../../rendering/QualityPreference.js';
+import { FAR_SWAP_HYSTERESIS, farSwapDistance } from './InstanceLod.js';
+
+/** A sea rock's near/far geometry pair. Rocks are per-rock clones, not
+ *  instanced batches, so InstanceLod never sees them; Game's per-frame rock
+ *  loop calls `updateSeaRockLod` with the same apparent distance instead. */
+type SeaRockLod = { near: THREE.Object3D; far: THREE.Object3D; radius: number; farApplied: boolean };
+
+/** Sea stacks are 3-5x a palm's height, so they earn their full geometry
+ *  ~1.5x further out than a prop batch before the swap. */
+const SEA_ROCK_SWAP_SCALE = 1.5;
+
+/** Swap a sea rock between its near and far clone by apparent distance (camera
+ *  to rock centre, already divided by the spyglass scale) minus its radius.
+ *  Hysteresis matches InstanceLod so a rock at the threshold never flickers. */
+export function updateSeaRockLod(group: THREE.Group, apparentDist: number, quality: RenderQuality): void {
+  const lod = group.userData.seaRockLod as SeaRockLod | undefined;
+  if (!lod) return;
+  const swap = farSwapDistance(quality) * SEA_ROCK_SWAP_SCALE;
+  const edge = apparentDist - lod.radius;
+  const wantFar = lod.farApplied ? edge > swap * FAR_SWAP_HYSTERESIS : edge > swap;
+  if (wantFar === lod.farApplied) return;
+  lod.farApplied = wantFar;
+  lod.near.visible = !wantFar;
+  lod.far.visible = wantFar;
+}
 
 let seaRockMaterialCache: THREE.MeshStandardMaterial | null = null;
 /** Shared enriched sea-stack material: the Blender GLB gives the eroded pillar
@@ -109,14 +135,27 @@ export function buildSeaRockMesh(rock: SeaRock, host: IslandBuilderCtx) {
     const sy = Math.max(0.4, mainColliderTop / Math.max(rockBounds.max.y, 0.001));
     rockClone.scale.set(sxz, sy, sxz);
     const seaRockMat = getSeaRockMaterial();
-    rockClone.traverse((o) => {
+    const dress = (root: THREE.Object3D) => root.traverse((o) => {
       if (o instanceof THREE.Mesh) {
         o.material = seaRockMat;          // enriched strata/wet/mottle look
         o.castShadow = !lowDetail;
         o.receiveShadow = !lowDetail;
       }
     });
+    dress(rockClone);
     group.add(rockClone);
+    // The 2026-09-05 pass took sea stacks to 5.4-6k triangles each; a vista
+    // holds 15-35 of them. The decimated `<tier>_far.glb` (~20%) takes over
+    // once the rock is beyond the tier's swap distance (updateSeaRockLod);
+    // same material, same envelope fit, so the silhouette does not move.
+    const farClone = assets.cloneFar(tier);
+    if (farClone) {
+      farClone.scale.set(sxz, sy, sxz);
+      dress(farClone);
+      farClone.visible = false;
+      group.add(farClone);
+      group.userData.seaRockLod = { near: rockClone, far: farClone, radius: rock.radius, farApplied: false } satisfies SeaRockLod;
+    }
     addSubmergedSkirt(group, mainColliderRadius, lowDetail);
 
     const foam = new THREE.Mesh(

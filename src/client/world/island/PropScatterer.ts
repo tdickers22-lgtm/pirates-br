@@ -16,7 +16,7 @@ import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.
 import type { TerrainBuild } from './TerrainMeshBuilder.js';
 import { ensureMeshGround } from './GroundTruth.js';
 import { queueContactShadow } from './ContactShadows.js';
-import { attachCoverLod, attachInstanceLod } from './InstanceLod.js';
+import { attachCoverLod, attachInstanceFarLod, attachInstanceLod } from './InstanceLod.js';
 
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
@@ -302,6 +302,14 @@ export function buildServerProps(ctx: IslandBuildCtx) {
       if (!merged.geometry.boundingBox) merged.geometry.computeBoundingBox();
       const box = merged.geometry.boundingBox;
       attachInstanceLod(inst, list.map((prop) => prop.scale), box ? box.max.y - box.min.y : 0);
+      // The decimated sibling for the rebuilt nature GLBs: same material
+      // collapse, same sway patch, ~20-30% of the triangles, swapped in by
+      // InstanceLod once the island's edge is beyond the tier's FAR_SWAP_M.
+      const far = assets.mergedFarGeometry(type as AssetName);
+      if (far) {
+        if (SWAYING_FOLIAGE.has(type)) applyFoliageSway(far.material, host);
+        attachInstanceFarLod(inst, { geometry: merged.geometry, material: merged.material }, far);
+      }
       group.add(inst);
       continue;
     }
