@@ -241,6 +241,10 @@ export const BROWSER = [
   { ...plain('test-decor-batch.mjs') },
   { ...plain('test-frame-allocation.mjs') },
   { ...plain('test-frame-governor-live.mjs') },
+  //   edge-shimmer-probe          — 'low' asks for and is granted default-framebuffer MSAA, and 30 same-size
+  //                                 resize events cost at most one setSize (AA-01 + perf-v-02, lane 2.6).
+  //                                 The staircase-count half is advisory unless a --ratio 1 baseline exists.
+  { ...plain('edge-shimmer-probe.mjs') },
   { ...plain('test-join-stall-survival.mjs') },
   { ...plain('test-sim-lag-honesty.mjs') },
   { ...plain('test-motion-continuity.mjs') },
