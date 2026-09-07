@@ -58,6 +58,12 @@ export const LOGIC = [
   quick(tsx('test-terrain-detail.mjs')),
   quick(tsx('test-foliage-geometry.mjs')),
   quick(tsx('test-ocean-dynamics.mjs')),
+  // PLAID-01 (wave 3.4). The far-ocean lattice, graded as a 2-D power spectrum
+  // of the shipped foam field rather than as an FFT of a screenshot: the plaid
+  // is a property of the FIELD, and the field is closed form, so this is a
+  // 0.3 s logic suite instead of a stack + a browser. It parses the octave
+  // scales and rotations out of OCEAN_FRAG, so the mirror cannot drift.
+  quick(tsx('ocean-lattice-probe.mjs')),
   // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
   // deadline must be read inside a row or the 2 ms budget is a fiction.
   quick(tsx('test-bathymetry-budget.mjs')),
