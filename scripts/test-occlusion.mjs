@@ -316,7 +316,7 @@ console.log('\nHitscan vs island structures');
   const island = makeIsland();
   const groundY = getIslandSurfaceY(island, 0, 0);
 
-  // Boulder_b (r=2.6, h=2.0) sitting on the island peak.
+  // Boulder_b (r=2.6, measured crown 3.3 m since w2.5) sitting on the island peak.
   island.props = [{ id: 1, type: 'boulder_b', x: 0, z: 0, yaw: 0, scale: 1 }];
   match.state.islands = [island];
 
@@ -333,7 +333,10 @@ console.log('\nHitscan vs island structures');
   expect('Shot through a boulder is blocked', throughBoulder !== null && Math.abs(throughBoulder - 9.66) < 0.6, `distance=${throughBoulder}`);
   const besideBoulder = trace({ x: -12, y: groundY + 1, z: 6 }, { x: 1, y: 0, z: 0 });
   expect('Shot beside the same boulder is clear', besideBoulder === null, `distance=${besideBoulder}`);
-  const overBoulder = trace({ x: -12, y: groundY + 3.2, z: 0 }, { x: 1, y: 0, z: 0 });
+  // Wave 2.5 (assets-22) raised boulder_b from a 2.0 m cap to its MEASURED
+  // 3.3 m crown, so a shot at 3.2 m is now correctly stopped by the stone.
+  // Clear the real crown: over the rock means over 3.3 m.
+  const overBoulder = trace({ x: -12, y: groundY + 3.6, z: 0 }, { x: 1, y: 0, z: 0 });
   expect('Shot over the boulder is clear', overBoulder === null, `distance=${overBoulder}`);
 
   // Palms are deliberately shoot-through (thin capsules, arcade feel).

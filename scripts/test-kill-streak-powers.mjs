@@ -39,7 +39,12 @@ const tiers = {};
 for (const m of tierBlock.slice(0, tierBlock.indexOf('}')).matchAll(/(\w+):\s*(\d+)/g)) {
   tiers[m[1]] = Number(m[2]);
 }
-const lobbyMatch = CONSTANTS.match(/export const MATCH_TOTAL_SHIPS = (\d+)/);
+// MATCH_TOTAL_SHIPS stopped being a literal in wave 3.1 (it is now derived
+// from MODES.solo.crews), so the old `= (\d+)` read returned 0 and graded the
+// top rung against an empty lobby. Read the mode table's Solo fleet instead —
+// that IS the default lobby the ladder has to be reachable in.
+const soloBlock = CONSTANTS.slice(CONSTANTS.indexOf('export const MODES'));
+const lobbyMatch = soloBlock.slice(0, soloBlock.indexOf('duos:')).match(/crews:\s*(\d+)/);
 const lobbySize = lobbyMatch ? Number(lobbyMatch[1]) : 0;
 
 console.log('The ladder:');

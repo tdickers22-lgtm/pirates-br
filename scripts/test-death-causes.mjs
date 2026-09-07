@@ -326,6 +326,13 @@ console.log('\nAttacker credit through an environmental finish:');
   prey.lastDamagedAt = m.t;
   prey.lastDamageWasHeadshot = false;
   prey.lastEnvDamage = null;
+  // STORM-01 (wave 3.3): a pirate ABOARD A FLOATING HULL takes the hull's
+  // verdict and the weather spends itself on her planking, so this fixture
+  // has to put him where the tempest actually kills people — in the water,
+  // off any deck. Every pirate now starts moored at a berth (SPAWN-01), so
+  // the old fixture was silently sheltered and the ring never touched him.
+  prey.onShipId = null;
+  prey.shipId = null;
 
   const goldBefore = gunner.gold;
   for (let i = 0; i < 240 && prey.state !== 'eliminated' && prey.health > 0; i++) {
