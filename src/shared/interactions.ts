@@ -150,23 +150,100 @@ export function getShipHoleTier(localY: number, stats: Pick<ShipStats, 'height'>
   return 2;
 }
 
+/** Margin the hold footprint is tested with when deciding whether a pirate is
+ *  standing BELOW DECKS — the same 0.08 getShipFloorYAt seats him on the sole
+ *  with, so "the floor under him is the hold" and "he can reach a breach from
+ *  the hold" can never disagree by a centimetre at the edge. */
+const HOLD_STAND_MARGIN = 0.08;
+
 /**
- * The unpatched hole this pirate is standing at, or null. Planar hull-local
- * reach only (HOLE_REPAIR_REACH): a breach is worked from the rail/deck
- * directly above it, so height never gates the swing. Nearest hole wins.
+ * Where a breach is WORKED FROM below decks: the nearest point of the walkable
+ * hold to it.
+ *
+ * A waterline hole is in the planking OUTBOARD of the hold sole, and a ram
+ * breach at the stem is forward of the hold footprint entirely, so measuring
+ * the reach against the raw hull point would leave both the sides and both the
+ * ends unpatchable however long a pirate stood down there. Clamping the breach
+ * into the footprint is "he works it from the nearest frame he can actually
+ * stand on", which is what a carpenter does.
+ */
+export function getHoleHoldWorkingLocal(
+  hole: Pick<ShipHole, 'x' | 'z'>,
+  stats: Pick<ShipStats, 'width' | 'length'>,
+): ShipLocalPoint {
+  const z = clamp(hole.z, -stats.length * 0.34, stats.length * 0.34);
+  const halfWidth = getShipHoldHalfWidth(stats, z);
+  return { x: clamp(hole.x, -halfWidth, halfWidth), z };
+}
+
+/** Is this standing point below the weather deck and inside the walkable hold?
+ *  Shared so the repair reach, the bilge pump and the sealed-hold evacuation
+ *  all mean the same thing by "he is down in her". */
+export function isStandingInShipHold(
+  position: Vec3,
+  ship: Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll'>,
+  local?: Vec3,
+): boolean {
+  const stats = SHIP_STATS[ship.type];
+  const l = local ?? toShipLocal3(position, ship);
+  if (l.y >= stats.height + SHIP.DECK_STAND_OFFSET - 0.25) return false;
+  return isInsideShipHoldFootprint(l, stats, HOLD_STAND_MARGIN);
+}
+
+/**
+ * Down on the SOLE with the water over his head, not merely a step under the
+ * deck lid. Deliberately stricter than isStandingInShipHold, and the founder
+ * is why: a hand crossing the weather deck OVER the hold dips a few centimetres
+ * under the lid for a tick at a time as she heels and trims, and treating that
+ * as "below decks" emptied a foundering hull's deck a quarter of the way
+ * through the sink — the crew stopped riding her down, which is the whole
+ * point of the founder scene (SINK-01 slice b). Half the headroom is the line.
+ */
+export function isStandingInFloodedHold(
+  position: Vec3,
+  ship: Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll'>,
+): boolean {
+  const stats = SHIP_STATS[ship.type];
+  const local = toShipLocal3(position, ship);
+  if (!isStandingInShipHold(position, ship, local)) return false;
+  return local.y < (SHIP.HOLD_FLOOR_OFFSET + stats.height + SHIP.DECK_STAND_OFFSET) * 0.5;
+}
+
+/**
+ * The unpatched hole this pirate can plank, or null. Reach is 3D (SINK-01,
+ * ships-25): a breach has a HEIGHT on the hull, and a hand on the weather deck
+ * cannot plank a hole a fathom under his boots — he goes below and works it
+ * from the hold, which is what makes a flooded hold a place you have to go
+ * rather than a swim tutorial.
+ *
+ * Two rules, both hull-local:
+ *  - vertical: |Δy| ≤ HOLE_REPAIR_REACH_Y (1.6 m), so the deck reaches topside
+ *    breaches and the hold reaches the waterline strake, and neither reaches
+ *    the other's;
+ *  - planar: HOLE_REPAIR_REACH from the breach, measured to its hold working
+ *    point when he is below decks (see getHoleHoldWorkingLocal) so the ends
+ *    and the sides stay reachable.
+ *
+ * Nearest qualifying hole wins. The server validates a repair with this and the
+ * client prompt calls the very same function, so [X] can never offer a patch
+ * the server then refuses.
  */
 export function findRepairableHole(
-  position: { x: number; z: number },
-  ship: Pick<Ship, 'position' | 'rotation' | 'holes'>,
+  position: Vec3,
+  ship: Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll' | 'holes'>,
 ): ShipHole | null {
-  const local = toShipLocalPoint(position, ship);
+  const stats = SHIP_STATS[ship.type];
+  const local = toShipLocal3(position, ship);
+  const belowDecks = isStandingInShipHold(position, ship, local);
   const reachSq = FLOODING.HOLE_REPAIR_REACH * FLOODING.HOLE_REPAIR_REACH;
   let best: ShipHole | null = null;
   let bestSq = Infinity;
   for (const hole of ship.holes ?? []) {
     if (hole.patched) continue;
-    const dx = hole.x - local.x;
-    const dz = hole.z - local.z;
+    if (Math.abs(local.y - hole.y) > FLOODING.HOLE_REPAIR_REACH_Y) continue;
+    const at = belowDecks ? getHoleHoldWorkingLocal(hole, stats) : hole;
+    const dx = at.x - local.x;
+    const dz = at.z - local.z;
     const d2 = dx * dx + dz * dz;
     if (d2 <= reachSq && d2 < bestSq) {
       bestSq = d2;
@@ -174,6 +251,35 @@ export function findRepairableHole(
     }
   }
   return best;
+}
+
+/**
+ * THE BILGE PUMP: a hand-worked brake pump standing on the hold sole, on the
+ * centreline just aft of amidships (FLOODING.PUMP_LOCAL_Z_F). It is the reason
+ * to be below decks with the water rising instead of only above them: worked,
+ * it beats ONE open breach and loses to three, so it buys a carpenter the time
+ * to plank rather than replacing him.
+ */
+export function getBilgePumpLocal(stats: Pick<ShipStats, 'width' | 'length'>): ShipLocalPoint {
+  const z = clamp(
+    stats.length * FLOODING.PUMP_LOCAL_Z_F,
+    -stats.length * 0.30,
+    stats.length * 0.30,
+  );
+  return { x: 0, z };
+}
+
+/** Standing at the pump: in the hold (not on the deck lid above it) and within
+ *  arm's length of the brake. */
+export function isNearBilgePump(
+  player: PlayerLike,
+  ship: Pick<Ship, 'position' | 'rotation' | 'type' | 'pitch' | 'roll' | 'id'>,
+): boolean {
+  if (player.onShipId !== ship.id) return false;
+  const local = toShipLocal3(player.position, ship);
+  if (!isStandingInShipHold(player.position, ship, local)) return false;
+  const pump = getBilgePumpLocal(SHIP_STATS[ship.type]);
+  return Math.abs(local.x - pump.x) < 1.25 && Math.abs(local.z - pump.z) < 1.3;
 }
 
 export function getAnchorControlLocal(stats: Pick<ShipStats, 'length'>): ShipLocalPoint {
@@ -417,6 +523,11 @@ export function isNearAmmoCrate(player: PlayerLike, ship: ShipLike): boolean {
   if (player.onShipId !== ship.id) return false;
   const local = toShipLocalPoint(player.position, ship);
   const crate = getAmmoCrateLocal(SHIP_STATS[ship.type]);
+  // The crate stands ON THE WEATHER DECK. Without this the prompt reached
+  // straight through the planking into the hold, where the bilge pump now
+  // stands within a metre of it on the short hulls (SINK-01 slice c).
+  const stats = SHIP_STATS[ship.type];
+  if (player.position.y < ship.position.y + stats.height * 0.5) return false;
   return Math.abs(local.x - crate.x) < 1.0 && Math.abs(local.z - crate.z) < 1.0;
 }
 

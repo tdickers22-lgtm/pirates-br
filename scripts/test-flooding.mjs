@@ -14,7 +14,16 @@ import {
 } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared/constants/index.ts';
-import { countOpenHoles, getShipHoleTier } from '../src/shared/interactions.ts';
+import {
+  countOpenHoles,
+  getShipHoleTier,
+  findRepairableHole,
+  getBilgePumpLocal,
+  isInsideShipHoldFootprint,
+  isStandingInFloodedHold,
+  isStandingInShipHold,
+  toShipLocalPoint,
+} from '../src/shared/interactions.ts';
 import { angleWrap, sampleWind, gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
 
 // THIS SUITE PINS THE WORLD. Every block below that builds a real `new Match()`
@@ -735,6 +744,156 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   expect('the swimmers came out ALIVE (nobody drowned in the hull)',
     crew.every((p) => p.health > 0 || p.state === 'downed'),
     crew.map((p) => p.health.toFixed(1)).join(','));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nRepair reach is 3D: you go BELOW to plank a breach under the waterline (SINK-01 slice c)');
+
+{
+  const physics = new PhysicsSystem();
+  const stats = SHIP_STATS.galleon;
+  const ship = makeShip('galleon');
+  const deckY = ship.position.y + stats.height + SHIP.DECK_STAND_OFFSET;
+  const holdY = ship.position.y + SHIP.HOLD_FLOOR_OFFSET;
+  const [breach] = physics.openHoleAt(ship, { x: stats.width * 0.45, y: 0.05, z: 0 }, 1, 'cannon');
+  expect('the fixture breach is a LOW one', breach.tier === 0, `tier=${breach.tier} y=${breach.y}`);
+  const onDeck = { x: breach.x, y: deckY, z: breach.z };
+  const inHold = { x: breach.x * 0.4, y: holdY, z: breach.z };
+  expect('a hand on the weather deck can NOT plank a breach below the waterline',
+    findRepairableHole(onDeck, ship) === null,
+    `got=${JSON.stringify(findRepairableHole(onDeck, ship))}`);
+  expect('...but standing in the hold beside it, he can',
+    findRepairableHole(inHold, ship)?.id === breach.id,
+    `local=${JSON.stringify(toShipLocalPoint(inHold, ship))}`);
+  expect('the hold stand point really IS below decks',
+    isStandingInShipHold(inHold, ship) && !isStandingInShipHold(onDeck, ship));
+
+  // A topside breach is the other way round: worked from the deck, out of reach
+  // from down in the hold. Both rails of the same 1.6 m band.
+  const top = makeShip('galleon');
+  const [high] = physics.openHoleAt(top, { x: stats.width * 0.45, y: stats.height * 0.7, z: 2 }, 1, 'cannon');
+  expect('a TOPSIDE breach is reachable from the deck above it',
+    findRepairableHole({ x: high.x, y: deckY, z: high.z }, top)?.id === high.id,
+    `hole y=${high.y.toFixed(2)} tier=${high.tier}`);
+  expect('...and is NOT reachable from the hold sole under it',
+    findRepairableHole({ x: high.x * 0.4, y: holdY, z: high.z }, top) === null);
+
+  // THE ENDS STAY REACHABLE. A bow ram lands beyond the forward edge of the
+  // walkable hold, so a naive "must be below decks" rule would have made every
+  // ramming breach unpatchable for the rest of the match.
+  const rammed = makeShip('galleon');
+  physics.openHoleAt(rammed, { x: 1.0, y: 0.05, z: stats.length * 0.5 }, 1, 'ram');
+  const bow = rammed.holes[0];
+  const holdEdge = { x: 0, y: holdY, z: stats.length * 0.33 };
+  expect('the forward end of the hold is inside the walkable hold',
+    isInsideShipHoldFootprint(toShipLocalPoint(holdEdge, rammed), stats),
+    JSON.stringify(toShipLocalPoint(holdEdge, rammed)));
+  expect('a BOW breach is reachable from the forward end of the hold',
+    findRepairableHole(holdEdge, rammed)?.id === bow.id,
+    `hole z=${bow.z.toFixed(2)}, hold edge z=${(stats.length * 0.33).toFixed(2)}`);
+  // Same for the stern, which no walkable frame reaches either.
+  const pooped = makeShip('galleon');
+  physics.openHoleAt(pooped, { x: -1.0, y: 0.05, z: -stats.length * 0.5 }, 1, 'ram');
+  expect('a STERN breach is reachable from the after end of the hold',
+    findRepairableHole({ x: 0, y: holdY, z: -stats.length * 0.33 }, pooped)?.id === pooped.holes[0].id);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nThe bilge pump is a station in the hold: it beats ONE open breach and loses to three');
+
+{
+  const match = new Match({ matchId: 'pump-test', botCount: 2 });
+  const stats = SHIP_STATS.sloop;
+  const pump = getBilgePumpLocal(stats);
+  expect('the pump stands on the walkable hold sole',
+    isInsideShipHoldFootprint(pump, stats), JSON.stringify(pump));
+
+  const ship = makeShip('sloop');
+  // Her own patch of open sea (same reason as the founder scene above: the
+  // ingress depth term reads the live Gerstner surface at her x/z).
+  ship.position = { x: -640, y: 0, z: -350 };
+  const hand = {
+    id: 'pumper', onShipId: ship.id, state: 'alive',
+    atCannon: false, atHelm: false, atCrowNest: false,
+    position: {
+      x: ship.position.x + pump.x,
+      y: ship.position.y + SHIP.HOLD_FLOOR_OFFSET,
+      z: ship.position.z + pump.z,
+    },
+  };
+  expect('a hand at the brake is AT the pump', match.isNearBilgePump(hand, ship));
+  const onDeck = { ...hand, position: { ...hand.position, y: ship.position.y + stats.height + SHIP.DECK_STAND_OFFSET } };
+  expect('...and the man standing on the deck above him is NOT', !match.isNearBilgePump(onDeck, ship));
+  const acrossHer = { ...hand, position: { ...hand.position, z: hand.position.z + 4.0 } };
+  expect('...nor is a hand at the other end of the hold', !match.isNearBilgePump(acrossHer, ship));
+
+  const drain = (holeCount) => {
+    ship.holes = [];
+    ship.nextHoleId = 1;
+    ship.pitch = 0;
+    ship.roll = 0;
+    for (let i = 0; i < holeCount; i += 1) {
+      match.physics.openHoleAt(ship, { x: (i % 2 ? 1 : -1) * stats.width * 0.45, y: -0.15, z: (i - 1) * 1.5 }, 1, 'cannon');
+    }
+    expect(`the ${holeCount}-breach fixture is actually flooding`, shipIngressRate(ship, 0, 0) > 0);
+    ship.waterLevel = 0.5;
+    for (let i = 0; i < 20 * 60; i += 1) {
+      match.applyBilgePump(hand, ship, DT);
+      updateShipFlooding(ship, 0, DT);
+    }
+    return ship.waterLevel;
+  };
+  const one = drain(1);
+  expect('a manned pump GAINS on a single open breach', one < 0.5, `water 0.500 -> ${one.toFixed(3)}`);
+  const three = drain(3);
+  expect('...and LOSES to three (the plank still has to go in)', three > 0.5, `water 0.500 -> ${three.toFixed(3)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\nNobody drowns in a sealed hold: she fills, and the hand below comes out over her side (liveplay-11)');
+
+{
+  const match = new Match({ matchId: 'hold-test', botCount: 3 });
+  match.state.phase = 'playing';
+  const st = match.state;
+  const ship = st.ships[0];
+  const stats = SHIP_STATS[ship.type];
+  ship.position = { x: -640, y: 0, z: -350 };
+  ship.rotation = 0;
+  ship.pitch = 0;
+  ship.roll = 0;
+  ship.holes = [];
+  ship.nextHoleId = 1;
+  const below = st.players.find((p) => p.onShipId === ship.id);
+  expect('the sealed-hold fixture has a hand aboard', !!below);
+  below.position = {
+    x: ship.position.x,
+    y: ship.position.y + SHIP.HOLD_FLOOR_OFFSET,
+    z: ship.position.z,
+  };
+  expect('...and he is DOWN IN HER, not on the deck lid', isStandingInFloodedHold(below.position, ship));
+  const hpBefore = below.health;
+  ship.waterLevel = 1;
+  match.evaluateShipSinking(ship);
+  expect('she founders', ship.sinking === true);
+  // ONE tick of the founder pass. A hand on deck rides her down for tens of
+  // seconds; the hold is already full, so he comes out on the first tick.
+  match.updateFounderingCrew(DT);
+  expect('the hand in the flooded hold is put OUT of her at once, not left inside',
+    below.onShipId === null, `onShipId=${below.onShipId}`);
+  for (let i = 0; i < 3 * 60; i += 1) {
+    match.physics.update(DT, i * DT, st.ships, st.players, [], [], [], null);
+    match.updateFounderingCrew(DT);
+  }
+  expect('he is still in the match', below.state !== 'eliminated' && below.health > 0,
+    `state=${below.state} hp=${below.health}`);
+  expect('he comes up AT the surface, not under her keel', below.position.y > -0.5,
+    `y=${below.position.y.toFixed(2)}`);
+  expect('he did not drown climbing out (< 10 hp)', hpBefore - below.health < 10,
+    `hp ${hpBefore} -> ${below.health}`);
+  expect('he is clear of her beam, not inside her hull',
+    Math.hypot(below.position.x - ship.position.x, below.position.z - ship.position.z) > stats.width * 0.5,
+    `dist=${Math.hypot(below.position.x - ship.position.x, below.position.z - ship.position.z).toFixed(2)} beam=${stats.width}`);
 }
 
 if (failures > 0) {

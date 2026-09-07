@@ -38,6 +38,7 @@ import {
   sampleLocalWind,
   getShipDeckRaiseAt,
   getShipDeckY,
+  getShipCompanionwayConfig,
   getCrowNestStandingY,
   gerstnerHeight,
   WAVE_PARAMS,
@@ -71,6 +72,10 @@ import {
   toShipWorldPoint,
   countOpenHoles,
   findRepairableHole,
+  getHoleHoldWorkingLocal,
+  isNearBilgePump as isSharedNearBilgePump,
+  isStandingInFloodedHold,
+  isStandingInShipHold,
 } from '../../shared/interactions.js';
 
 // Weathered banner dyes — team identity without the LED-strip look.
@@ -2685,6 +2690,21 @@ export class Match {
       }
       player.bailing = player.bailScoopProgress > 0;
 
+      // THE BILGE PUMP (SINK-01 slice c). Hold [X] at the brake on the hold
+      // sole and she comes up faster than one breach lets her down. This is the
+      // reason to go BELOW with the water rising instead of only bailing the
+      // deck: the pump is down there with the breaches the 3D repair reach now
+      // makes you climb down to plank. No new interact verb — a held [X] with
+      // the bail intent, or with no intent at all, is unambiguous at the pump
+      // because nothing else stands within arm's length of it.
+      if (
+        input.interactHeld
+        && (input.interactIntent === 'bail' || input.interactIntent == null)
+        && this.applyBilgePump(player, ship, dt)
+      ) {
+        player.bailing = true;
+      }
+
       // Repair torn sails (hold [X] + wood at the rigging). Repairing both
       // restores rigging integrity and physically hoists the canvas back up.
       const mendingSails = input.interactIntent === 'sails'
@@ -3961,8 +3981,8 @@ export class Match {
             this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL);
           }
         } else {
-          const rail = this.getHoleRailLocal(ship, targetHole);
-          const world = this.toShipWorld(rail.x, rail.z, ship);
+          const stand = this.getHoleWorkStandLocal(player, ship, targetHole);
+          const world = this.toShipWorld(stand.x, stand.z, ship);
           this.stepBotToward(player, { x: world.x, y: player.position.y, z: world.z }, dt);
           if (player.bailing) player.bailing = false;
           continue;
@@ -3996,6 +4016,36 @@ export class Match {
 
   /** Ship-local standing point on the DECK directly above a breach — the spot
    *  a carpenter walks to before swinging. Clamped inside the walkable rail. */
+  /**
+   * Where a damage-control hand STANDS to plank this breach, and how he gets
+   * there. Repair reach is 3D now (SINK-01): a waterline breach cannot be
+   * worked from the weather deck at all, so a bot who tried to would have
+   * walked to the rail above it and stood there for the rest of the match
+   * while she filled. He is routed down the companionway instead — to the
+   * hatch mouth, then into the stairwell (getShipFloorYAt puts him on the ramp
+   * and walks him down), then to the frame beside the breach.
+   */
+  private getHoleWorkStandLocal(player: Player, ship: Ship, hole: ShipHole): { x: number; z: number } {
+    const stats = SHIP_STATS[ship.type];
+    const deckLocalY = stats.height + SHIP.DECK_STAND_OFFSET;
+    if (Math.abs(deckLocalY - hole.y) <= FLOODING.HOLE_REPAIR_REACH_Y) {
+      return this.getHoleRailLocal(ship, hole);
+    }
+    if (isStandingInShipHold(player.position, ship)) {
+      return getHoleHoldWorkingLocal(hole, stats);
+    }
+    // Still topside: the stairwell is the only way below, and it is open at the
+    // FORWARD end only (coamings on the other three sides), so line up on the
+    // mouth first and walk aft down the steps.
+    const stair = getShipCompanionwayConfig(stats);
+    const local = this.toShipLocal(player.position, ship);
+    const linedUp = Math.abs(local.x - stair.cx) < stair.stairHalfWidth
+      && local.z < stair.stairFrontZ + 1.4;
+    return linedUp
+      ? { x: stair.cx, z: stair.stairBackZ + 0.25 }
+      : { x: stair.cx, z: stair.stairFrontZ + 1.0 };
+  }
+
   private getHoleRailLocal(ship: Ship, hole: ShipHole): { x: number; z: number } {
     const stats = SHIP_STATS[ship.type];
     return {
@@ -5510,6 +5560,8 @@ export class Match {
     if (player.onShipId !== ship.id || player.state === 'eliminated' || player.state === 'respawning' || player.health <= 0) {
       return false;
     }
+    // Was he BELOW when she went? Read it before anything moves him.
+    const sealedHold = isStandingInFloodedHold(player.position, ship);
     player.onShipId = null;
     if (player.state !== 'downed') player.state = 'swimming';
     this.dropCarriedChest(player);
@@ -5526,7 +5578,37 @@ export class Match {
       y: rapid ? 5.5 : 4.2,
       z: (this.rng() - 0.5) * (rapid ? 7 : 5),
     };
+    if (sealedHold) this.surfaceFromFloodedHold(ship, player);
     return true;
+  }
+
+  /**
+   * NOBODY DROWNS IN A SEALED HOLD (liveplay-11). A hull is foundering because
+   * her bilge reached waterLevel 1 — the hold is already full and its one
+   * hatch is under the sea — so a hand caught down there had no exit the walk
+   * physics could find: he stayed inside her, took drowning damage as she went
+   * and died with her, which read to the player as "the game trapped me in a
+   * box". He is put over her side instead, clear of her beam and AT the
+   * surface, so the swim physics has him the very next tick and he keeps his
+   * match. Deterministic (the side he was already on), no rng.
+   */
+  private surfaceFromFloodedHold(ship: Ship, player: Player) {
+    const stats = SHIP_STATS[ship.type];
+    const local = this.toShipLocal(player.position, ship);
+    const side = local.x >= 0 ? 1 : -1;
+    const out = this.toShipWorld(
+      side * (stats.width * 0.52 + 1.6),
+      clamp(local.z, -stats.length * 0.3, stats.length * 0.3),
+      ship,
+    );
+    const sea = stormSeaState(this.state.storm, out.x, out.z);
+    const surfaceY = gerstnerHeight(out.x, out.z, this.t, WAVE_PARAMS, sea);
+    player.position.x = out.x;
+    player.position.z = out.z;
+    player.position.y = surfaceY + 0.35;
+    player.velocity.y = 0;
+    player.knockbackVelocity = { x: 0, y: 0, z: 0 };
+    player.swimTimer = 0;
   }
 
   /**
@@ -5549,7 +5631,15 @@ export class Match {
           + local.x * Math.sin(ship.roll ?? 0)
           - local.z * Math.sin(ship.pitch ?? 0);
         const surfaceY = gerstnerHeight(player.position.x, player.position.z, this.t, WAVE_PARAMS, sea);
-        if (ship.sinkProgress >= FOUNDER_DECK_AWASH_F || footing < surfaceY - FOUNDER_WADE_DEPTH) {
+        // A hand on the DECK rides her down until his own planking goes under.
+        // A hand in the HOLD does not: she is foundering because that hold is
+        // already full to the deckhead, so he comes out the moment she starts
+        // to go (ejectFounderingCrew puts him over the side, not into her).
+        if (
+          ship.sinkProgress >= FOUNDER_DECK_AWASH_F
+          || footing < surfaceY - FOUNDER_WADE_DEPTH
+          || isStandingInFloodedHold(player.position, ship)
+        ) {
           this.ejectFounderingCrew(ship, player, rapid);
         }
       }
@@ -8064,6 +8154,33 @@ export class Match {
    *  breach (the prompt reads "no planks ready"); the callers gate on stock. */
   private getRepairableHole(player: Player, ship: Ship): ShipHole | null {
     return findRepairableHole(player.position, ship);
+  }
+
+  /** Standing at the brake pump on the hold sole (shared truth, so the client
+   *  prompt and the server drain agree). */
+  isNearBilgePump(player: Player, ship: Ship): boolean {
+    return isSharedNearBilgePump(player, ship);
+  }
+
+  /**
+   * One tick of a MANNED bilge pump: PUMP_RATE of the bilge per second while a
+   * hand holds the brake. Sized against the ingress table so the relation is a
+   * decision, not a formality — the pump beats ONE open breach and loses to
+   * three, so a holed hull still has to be planked and the man on the pump is
+   * buying the carpenter his minute.
+   *
+   * Returns whether it actually pumped, so the caller can drive the bailing
+   * animation flag off the same answer.
+   */
+  applyBilgePump(player: Player, ship: Ship, dt: number): boolean {
+    if (!ship.alive || ship.sinking) return false;
+    if (player.state === 'eliminated' || player.state === 'respawning' || player.state === 'downed') return false;
+    if (player.atCannon || player.atHelm || player.atCrowNest) return false;
+    if (!this.isNearBilgePump(player, ship)) return false;
+    const water = ship.waterLevel ?? 0;
+    if (water <= 0) return false;
+    ship.waterLevel = Math.max(0, water - FLOODING.PUMP_RATE * dt);
+    return true;
   }
 
   /** Spring waterline planks all round a foundering hull until she reads as a
