@@ -21,6 +21,7 @@
 //   node scripts/glb-census.mjs --write             # rewrite the README counts line
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const DIR = path.resolve('public/assets/models');
 const README = path.join(DIR, 'README.md');
@@ -190,10 +191,14 @@ function cmdTable() {
   }
 }
 
-const args = process.argv.slice(2);
+// CLI only when run directly — test-prop-colliders.mjs imports readGlb, and an
+// import that printed a 78-row table into another suite's output would bury it.
+const args = pathToFileURL(process.argv[1] ?? '').href === import.meta.url ? process.argv.slice(2) : null;
+if (args === null) { /* imported as a library */ } else {
 const flag = (f) => { const i = args.indexOf(f); return i === -1 ? null : (args[i + 1] ?? ''); };
 if (args.includes('--check')) cmdCheck();
 else if (args.includes('--write')) cmdWrite();
 else if (args.includes('--primitives')) cmdPrimitives(flag('--primitives'));
 else if (args.includes('--slices')) cmdSlices(flag('--slices'));
 else cmdTable();
+}
