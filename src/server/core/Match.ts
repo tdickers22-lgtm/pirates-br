@@ -4031,13 +4031,29 @@ export class Match {
     if (Math.abs(deckLocalY - hole.y) <= FLOODING.HOLE_REPAIR_REACH_Y) {
       return this.getHoleRailLocal(ship, hole);
     }
+    const stair = getShipCompanionwayConfig(stats);
     if (isStandingInShipHold(player.position, ship)) {
-      return getHoleHoldWorkingLocal(hole, stats);
+      const work = getHoleHoldWorkingLocal(hole, stats);
+      // THE LADDER IS A WALL, not a doorway: the stairwell slot is the one
+      // patch of the hold whose floor is the RAMP, so a bot that walked a
+      // straight line across it would be lifted back onto the weather deck,
+      // drop out of the hold, be sent to the hatch again and bounce there for
+      // the rest of the match. The slot is narrow (about a metre either side of
+      // the centreline) and the hold is beamy, so he goes AROUND it: out into
+      // the side lane first, then fore-and-aft along it.
+      const below = this.toShipLocal(player.position, ship);
+      const lane = stair.stairHalfWidth + PLAYER.RADIUS + 0.3;
+      const inSlotBand = (z: number) => z > stair.stairBackZ - 0.4 && z < stair.stairFrontZ + 0.4;
+      const mustClear = Math.abs(below.x - stair.cx) < lane
+        && (inSlotBand(below.z) || inSlotBand(work.z)
+          || (below.z - stair.cz) * (work.z - stair.cz) < 0);
+      return mustClear
+        ? { x: stair.cx + (work.x >= stair.cx ? lane : -lane), z: below.z }
+        : work;
     }
     // Still topside: the stairwell is the only way below, and it is open at the
     // FORWARD end only (coamings on the other three sides), so line up on the
     // mouth first and walk aft down the steps.
-    const stair = getShipCompanionwayConfig(stats);
     const local = this.toShipLocal(player.position, ship);
     const linedUp = Math.abs(local.x - stair.cx) < stair.stairHalfWidth
       && local.z < stair.stairFrontZ + 1.4;

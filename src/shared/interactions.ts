@@ -235,15 +235,25 @@ export function findRepairableHole(
   const stats = SHIP_STATS[ship.type];
   const local = toShipLocal3(position, ship);
   const belowDecks = isStandingInShipHold(position, ship, local);
+  const holdHalfLength = stats.length * 0.34;
   const reachSq = FLOODING.HOLE_REPAIR_REACH * FLOODING.HOLE_REPAIR_REACH;
   let best: ShipHole | null = null;
   let bestSq = Infinity;
   for (const hole of ship.holes ?? []) {
     if (hole.patched) continue;
     if (Math.abs(local.y - hole.y) > FLOODING.HOLE_REPAIR_REACH_Y) continue;
-    const at = belowDecks ? getHoleHoldWorkingLocal(hole, stats) : hole;
-    const dx = at.x - local.x;
-    const dz = at.z - local.z;
+    // Allocation-free: this runs EVERY FRAME on the client (the [X] prompt
+    // arbiter and the HUD both ask), so the hold working point is inlined
+    // rather than built as an object per hole per frame.
+    let atX = hole.x;
+    let atZ = hole.z;
+    if (belowDecks) {
+      atZ = clamp(hole.z, -holdHalfLength, holdHalfLength);
+      const halfWidth = getShipHoldHalfWidth(stats, atZ);
+      atX = clamp(hole.x, -halfWidth, halfWidth);
+    }
+    const dx = atX - local.x;
+    const dz = atZ - local.z;
     const d2 = dx * dx + dz * dz;
     if (d2 <= reachSq && d2 < bestSq) {
       bestSq = d2;
