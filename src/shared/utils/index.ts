@@ -1558,7 +1558,11 @@ type HullFootprintStats = { width: number; length: number };
 // Plan-view stations mirror the RENDERED wale beam (ShipRenderer LOFT_STATIONS:
 // dh × the tumblehome bulge at `mid`), so the widest blocking line is the widest
 // visible line and nothing invisible sticks out abeam.
-const SWIM_HULL_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
+/** Exported (WATER-01, lane 3.4): OceanRenderer GENERATES the hull-mask taper
+ *  in GLSL from this table, so the sea is cut out of exactly the plan-view
+ *  outline the swim resolver and the renderer already agree on. Server code
+ *  reaches it through getSwimHullHalfWidth; nothing else may inline it. */
+export const SWIM_HULL_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
   { z: -0.52, half: 0.20 },
   { z: -0.36, half: 0.526 },
   { z: -0.22, half: 0.565 },
