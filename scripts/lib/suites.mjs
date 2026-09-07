@@ -152,6 +152,9 @@ export const LOGIC = [
   // BOTCREW-01/bots-v02/bots-06: a bot helmsman answers her helm like a player,
   // and works the capstan and the rigging instead of switching them (w3.2).
   tsx('test-bot-seamanship-parity.mjs'),
+  // BOTCREW-01/bots-16/bots-03: a two-hand bot crew keeps firing while a hand
+  // is free for the breach; a lone pirate still has to choose (w3.2).
+  tsx('test-bot-crew-roles.mjs'),
   quick(tsx('test-oneshot-underload.mjs')),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),
