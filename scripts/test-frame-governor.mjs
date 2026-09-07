@@ -29,6 +29,7 @@ import {
   pixelRatioCaps,
   TIER_PIXEL_BUDGET,
   TIER_MAX_PIXEL_RATIO,
+  TIER_NATIVE_FLOOR_MAX_PIXELS,
 } from '../src/client/rendering/FrameGovernor.js';
 import { budgeted, setFrameBudgetScale, resetFrameBudgetScale } from '../src/client/rendering/FrameBudget.js';
 import { parseRenderQuality } from '../src/client/rendering/QualityPreference.js';
@@ -595,16 +596,49 @@ section('THE BILL IS PIXELS, NOT A RATIO — pixelRatioCaps per viewport (perf-2
         loosened ??= `${q} ${w}x${h}@${dpr} -> ${caps.maxPixelRatio.toFixed(3)}`;
       }
       const px = (w * caps.maxPixelRatio) * (h * caps.maxPixelRatio);
-      // Over budget is allowed ONLY where the 640 px legibility floor bound.
-      if (px > TIER_PIXEL_BUDGET[q] * 1.02 && w * caps.maxPixelRatio > 640.5) {
+      // Over budget is allowed at exactly two sanctioned floors: the 640 px
+      // legibility floor, and the native floor (Medium/High do not render below
+      // the panel's own grid on a panel small enough to afford it — review-2
+      // P1). Both are BOUNDED: the native one only applies under
+      // TIER_NATIVE_FLOOR_MAX_PIXELS, so a 1440p or 4K desktop is still billed
+      // by the budget.
+      const atNativeFloor = w * h <= TIER_NATIVE_FLOOR_MAX_PIXELS[q]
+        && Math.abs(caps.maxPixelRatio - Math.min(dpr, 1)) < 1e-9;
+      if (px > TIER_PIXEL_BUDGET[q] * 1.02 && w * caps.maxPixelRatio > 640.5 && !atNativeFloor) {
         overBudget ??= `${q} ${w}x${h}@${dpr} -> ${(px / 1e6).toFixed(2)} Mpx`;
       }
       if (caps.minPixelRatio > caps.maxPixelRatio + 1e-9) loosened ??= `${q} ${w}x${h}: floor above ceiling`;
     }
   }
   expect('no viewport is handed a ratio above its tier ceiling', loosened === null, loosened ?? '');
-  expect('…and no viewport exceeds its tier framebuffer budget except at the 640 px floor',
+  expect('…and no viewport exceeds its tier framebuffer budget except at the 640 px / native floors',
     overBudget === null, overBudget ?? '');
+
+  // THE NATIVE FLOOR, STATED AS ROWS (review-2 P1). Medium was taking the
+  // commonest desktop there is BELOW native — 1920x1080 dPR 1 derived 0.761 and
+  // shipped a 1461x822 buffer upscaled onto a native panel — and the owner's own
+  // Air from 1.15 to 0.92, with no owner decision behind either. Fidelity is the
+  // north star's first term; the floor is bounded by pixel count so it cannot
+  // hand a big desktop the bill the budget exists to stop.
+  const desk1080 = pixelRatioCaps('balanced', 1920, 1080, 1);
+  expect(`Medium renders a 1080p dPR-1 desktop at native, not 0.761 (max ${desk1080.maxPixelRatio.toFixed(3)})`,
+    Math.abs(desk1080.maxPixelRatio - 1) < 1e-9);
+  const airBal = pixelRatioCaps('balanced', 1470, 956, 2);
+  expect(`…and the Air's Medium is floored at its own grid too (max ${airBal.maxPixelRatio.toFixed(3)})`,
+    Math.abs(airBal.maxPixelRatio - 1) < 1e-9);
+  const uhdBal = pixelRatioCaps('balanced', 3840, 2160, 1);
+  expect(`…but a 4K panel is over TIER_NATIVE_FLOOR_MAX_PIXELS and keeps the budget (max ${uhdBal.maxPixelRatio.toFixed(3)}, ${((3840 * uhdBal.maxPixelRatio) * (2160 * uhdBal.maxPixelRatio) / 1e6).toFixed(2)} Mpx)`,
+    uhdBal.maxPixelRatio < 0.95
+    && (3840 * uhdBal.maxPixelRatio) * (2160 * uhdBal.maxPixelRatio) <= TIER_PIXEL_BUDGET.balanced * 1.02);
+  const phoneLow = pixelRatioCaps('low', 390, 844, 3);
+  const deskLow = pixelRatioCaps('low', 1920, 1080, 1);
+  expect(`the LOW tier gets no native floor at all — tighten, never loosen (phone ${phoneLow.maxPixelRatio.toFixed(3)}, 1080p ${deskLow.maxPixelRatio.toFixed(3)})`,
+    TIER_NATIVE_FLOOR_MAX_PIXELS.low === 0 && deskLow.maxPixelRatio < 0.95);
+  expect('and no floor ever becomes supersampling (never above dPR, never above 1.0)',
+    [[1366, 768, 1], [1470, 956, 2], [1920, 1080, 1]].every(([w, h, d]) => {
+      const c = pixelRatioCaps('balanced', w, h, d);
+      return c.maxPixelRatio <= Math.max(TIER_MAX_PIXEL_RATIO.balanced, 1) + 1e-9 && c.maxPixelRatio <= d + 1e-9;
+    }));
 
   // A 4K desktop is the case the ratio ladder was silently worst at: 1.25 of
   // 3840x2160 is 12.9 Mpx, five times what 'high' was ever measured against.

@@ -582,6 +582,32 @@ export const MIN_BUFFER_WIDTH = 640;
 export const MIN_BUFFER_WIDTH_FLOOR = 480;
 
 /**
+ * MEDIUM DOES NOT RENDER BELOW THE PANEL'S OWN PIXELS (review-2 P1).
+ *
+ * The pixel budget is an area, so on a viewport bigger than the 1470x956 desk
+ * it was calibrated on it keeps tightening: at 1920x1080 dPR 1 —the commonest
+ * desktop there is— `balanced` derived 0.761 and shipped a 1461x822 buffer
+ * upscaled onto a native panel, where it had rendered native before. The
+ * campaign's north star puts graphical fidelity FIRST and performance third,
+ * and nothing put that picture in front of the owner, so Medium now carries a
+ * floor at the panel's own grid (ratio 1.0, never supersampling).
+ *
+ * The floor is itself bounded by pixel COUNT, which is the whole point of the
+ * budget: flooring at native unconditionally would hand a 4K desktop 8.3 Mpx on
+ * Medium. Above this many CSS pixels the budget takes over again and the image
+ * is upscaled, exactly as it is today. 2.1 Mpx = 1920x1080 with room to spare;
+ * a 1440p or 4K panel is over it and keeps the budget.
+ *
+ * `low` gets 0: it has always rendered below native by design, it is the tier
+ * the weakest machines run, and the rule for it is tighten-never-loosen.
+ */
+export const TIER_NATIVE_FLOOR_MAX_PIXELS: Record<RenderQuality, number> = {
+  low: 0,
+  balanced: 2_100_000,
+  high: 2_100_000,
+};
+
+/**
  * The tier's pixel-ratio ceiling and floor for THIS viewport. Pure, so the
  * governor suite can grade a phone without a phone.
  */
@@ -599,7 +625,11 @@ export function pixelRatioCaps(
   // Never wider than the panel actually is: supersampling is not a floor.
   const openFloor = Math.min(dpr, MIN_BUFFER_WIDTH / w);
   const ladderFloor = Math.min(dpr, MIN_BUFFER_WIDTH_FLOOR / w);
-  const maxPixelRatio = Math.min(dpr, Math.max(tierCap, openFloor));
+  // …and on a panel small enough to afford it, never NARROWER than the panel
+  // either (see TIER_NATIVE_FLOOR_MAX_PIXELS). Also capped at 1.0: this is a
+  // floor at native, not a licence to supersample.
+  const nativeFloor = cssPixels <= TIER_NATIVE_FLOOR_MAX_PIXELS[quality] ? Math.min(dpr, 1) : 0;
+  const maxPixelRatio = Math.min(dpr, Math.max(tierCap, openFloor, nativeFloor));
   const minPixelRatio = Math.min(maxPixelRatio, Math.max(TIER_MIN_PIXEL_RATIO[quality], ladderFloor));
   return { maxPixelRatio, minPixelRatio };
 }
