@@ -11,17 +11,38 @@ import type {
 } from '../../shared/types/index.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
-import { MATCH_TOTAL_SHIPS } from '../../shared/constants/index.js';
+import { MATCH_TOTAL_SHIPS, MODES, MODE_IDS, isModeId, type ModeId } from '../../shared/constants/index.js';
 
 // ── Tunables ──────────────────────────────────────────────────
 const PARTY_CAPACITY = 16;
 const PARTY_DEFAULT_BOTS = MATCH_TOTAL_SHIPS - 1;
 const PARTY_MAX_BOTS = MATCH_TOTAL_SHIPS - 1;
-const QUEUE_TARGET = MATCH_TOTAL_SHIPS;
-const QUEUE_MIN_HUMANS_FAST = 2;
-const QUEUE_MIN_HUMANS_FALLBACK = 1;
-const QUEUE_TIMER_SECONDS = 15;
-const QUEUE_MATCH_BOTS_FILL_TO = MATCH_TOTAL_SHIPS; // total ships per match (humans + bots)
+/**
+ * THE QUEUE POOLS CREWS (MODE-01: netcode-11, gameplay-31).
+ *
+ * The old rule was "2 humans once 5 s have elapsed, 1 human at 15 s" over a
+ * timer that started at the FIRST joiner and was never reset, so six friends
+ * pressing Play within 20 s of one another got THREE matches of two humans and
+ * eight bots — by construction, every public match was 1-2 real players. The
+ * window is now long enough to actually pool people:
+ *
+ *  • SOFT WAIT — hold the door this long, then launch as soon as the mode's
+ *    minimum number of real CREWS is waiting (6 solo / 4 duos / 3 squads).
+ *  • HARD WAIT — the empty-server fallback: after this, launch whoever is here
+ *    and fill the fleet with bots, so a lone captain is never stranded.
+ *  • A FULL FLEET goes at once, whatever the clock says.
+ *
+ * The clock runs from the OLDEST crew still waiting, per mode — a late joiner
+ * never resets somebody else's wait, and never gets to jump the queue either.
+ */
+const QUEUE_SOFT_WAIT_SECONDS = 45;
+const QUEUE_HARD_WAIT_SECONDS = 90;
+/** Hulls held open for a crew that presses Play during the pre-horn countdown.
+ *  Without a reservation the fleet is already full of bots by the time she
+ *  arrives, so she would open a SECOND lobby of one — which is the same
+ *  fragmentation the soft wait exists to stop. Nobody claims it: the match
+ *  simply sails one hull short, which no player can see. */
+const QUEUE_BACKFILL_RESERVE = 1;
 const MATCH_GC_AFTER_END_MS = 60_000;
 const ENDED_MATCH_DETACH_MS = 25_000; // auto-return-to-menu after this if client doesn't act
 /** How long after the last roster change the host may start a crew that has not
@@ -140,6 +161,15 @@ interface Party {
   inMatch: boolean;
 }
 
+/** One waiting crew: a party queued as a unit, or a lone captain. */
+interface QueueEntry {
+  mode: ModeId;
+  /** ClientSession ids, host first. Members that drop are pruned in place. */
+  sessionIds: string[];
+  partyCode: string | null;
+  joinedAt: number;
+}
+
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
 
 /** SIX characters, not four (netcode-23). 1.07e9 codes instead of 1.05e6, which
@@ -167,7 +197,8 @@ export class LobbyServer {
   static tunables = {
     endedMatchDetachMs: ENDED_MATCH_DETACH_MS,
     matchGcAfterEndMs: MATCH_GC_AFTER_END_MS,
-    queueTimerSeconds: QUEUE_TIMER_SECONDS,
+    queueSoftWaitSeconds: QUEUE_SOFT_WAIT_SECONDS,
+    queueHardWaitSeconds: QUEUE_HARD_WAIT_SECONDS,
     hostForceStartMs: HOST_FORCE_START_MS,
     joinFailLimit: JOIN_FAIL_LIMIT,
     joinLockoutMs: JOIN_LOCKOUT_MS,
@@ -178,8 +209,13 @@ export class LobbyServer {
 
   private clients: Map<string, ClientSession> = new Map();
   private parties: Map<string, Party> = new Map();
-  private queue: string[] = [];
-  private queueTimerStartedAt: number | null = null;
+  /** Waiting CREWS, oldest first. A solo queuer is a crew of one; a party
+   *  queues as one entry so friends are never split across matches. */
+  private queue: QueueEntry[] = [];
+  /** matchId → the mode it was dispatched for, and how many hulls are still
+   *  held open for a late crew (see QUEUE_BACKFILL_RESERVE). Dropped when the
+   *  match leaves 'waiting' or is reaped. */
+  private queueMatchSlots: Map<string, { mode: ModeId; slots: number }> = new Map();
   private matches: Map<string, Match> = new Map();
   /** When each running match last had zero humans in it (zombie sweep). */
   private matchEmptySince: Map<string, number> = new Map();
@@ -618,24 +654,99 @@ export class LobbyServer {
     if (placed === 0) party.inMatch = false;
   }
 
-  private handleQueueJoin(session: ClientSession, _msg: NetMsg): void {
+  private handleQueueJoin(session: ClientSession, msg: NetMsg): void {
     if (!session.name) return this.lobbyError(session, 'Set a name first');
     if (session.state === 'in_match' || session.state === 'match_ended') {
       return this.lobbyError(session, 'Already in a match');
     }
-    if (session.state === 'party') this.removeFromParty(session, true);
-    if (this.queue.includes(session.id)) {
-      this.broadcastQueue();
-      return;
+    if (this.queueEntryOf(session.id)) { this.broadcastQueue(); return; }
+
+    // A PARTY QUEUES AS ONE CREW (netcode-11: queue_join used to eject the
+    // session from its party, so friends who queued together were guaranteed to
+    // be split). The party's own mode picker chooses the mode unless the client
+    // names one.
+    const party = session.partyCode ? this.parties.get(session.partyCode) : undefined;
+    const requested = (msg.payload as { mode?: string } | undefined)?.mode;
+    const modeId: ModeId = isModeId(requested) ? requested
+      : (party && isModeId(party.mode) ? party.mode : 'solo');
+    const spec = MODES[modeId];
+    if (!spec.available) {
+      return this.lobbyError(session,
+        `${spec.label} is not open yet — it sails once the crew wire is widened`);
     }
-    this.queue.push(session.id);
-    session.state = 'queue';
-    session.joinedQueueAt = Date.now();
-    if (this.queueTimerStartedAt === null) {
-      this.queueTimerStartedAt = Date.now();
+
+    let crewSessions: ClientSession[] = [session];
+    let partyCode: string | null = null;
+    if (party) {
+      if (party.hostId !== session.id) {
+        return this.lobbyError(session, 'Only the host takes the crew to sea');
+      }
+      if (party.inMatch) return this.lobbyError(session, 'The crew is still at sea');
+      const roster = party.members
+        .map((id) => this.clients.get(id))
+        .filter((c): c is ClientSession => !!c && c.state === 'party' && c.ws.readyState === WebSocket.OPEN);
+      // PLAN §2.1: the mode IS the crew size. A party of three in Duos is told
+      // which mode fits rather than being silently torn in half at the dock.
+      if (roster.length > spec.crewSize) {
+        const fits = MODE_IDS.find((m) => MODES[m].available && MODES[m].crewSize >= roster.length);
+        return this.lobbyError(session,
+          `${spec.label} takes ${spec.crewSize}${fits ? `; switch to ${MODES[fits].label}` : ''}`);
+      }
+      crewSessions = roster;
+      partyCode = party.code;
     }
+    if (crewSessions.length === 0) return;
+
+    for (const member of crewSessions) {
+      member.state = 'queue';
+      member.joinedQueueAt = Date.now();
+    }
+    const entry: QueueEntry = {
+      mode: modeId,
+      sessionIds: crewSessions.map((c) => c.id),
+      partyCode,
+      joinedAt: Date.now(),
+    };
+    // A crew arriving during a match's pre-horn countdown boards THAT match
+    // rather than opening a second lobby of one.
+    if (this.tryBackfill(entry)) return;
+    this.queue.push(entry);
     this.broadcastQueue();
     this.tryDispatchQueue();
+  }
+
+  /** A party that queued as a crew is AT SEA, exactly as one that pressed
+   *  Start: without this a friend with the code walked into the panel of a crew
+   *  that had already sailed (the "already at sea" refusal + callback in
+   *  netcode-16 keys on this flag). Cleared on the way home by
+   *  maybeClearPartyInMatch. */
+  private markPartyAtSea(entry: QueueEntry): void {
+    const party = entry.partyCode ? this.parties.get(entry.partyCode) : undefined;
+    if (party) party.inMatch = true;
+  }
+
+  private queueEntryOf(sessionId: string): QueueEntry | undefined {
+    return this.queue.find((e) => e.sessionIds.includes(sessionId));
+  }
+
+  /** Sessions still queued, across every mode — what the /health line means by
+   *  "queue" and what the panel counts. */
+  private queuedSessionCount(): number {
+    return this.queue.reduce((n, e) => n + e.sessionIds.length, 0);
+  }
+
+  /**
+   * HULLS THIS CREW WILL OCCUPY.
+   *
+   * Placement is still one hull per HUMAN (placeClientIntoMatch →
+   * Match.createHumanClient). MODE-01 slice c moves the queue onto
+   * Match.createCrew, at which point a crew of four is ONE Man-o'-War and this
+   * returns 1. Sizing the bot fill off it — rather than off the crew count —
+   * keeps the fleet honest either way instead of shipping a duos match with
+   * eighteen hulls in it.
+   */
+  private hullsForEntry(entry: QueueEntry): number {
+    return Math.max(1, entry.sessionIds.length);
   }
 
   private handleQueueLeave(session: ClientSession): void {
@@ -852,77 +963,157 @@ export class LobbyServer {
 
   // ─── Queue helpers ───────────────────────────────────────────
   private removeFromQueue(session: ClientSession): void {
-    this.queue = this.queue.filter((id) => id !== session.id);
+    for (const entry of this.queue) {
+      entry.sessionIds = entry.sessionIds.filter((id) => id !== session.id);
+    }
+    // A crew whose last member left stops holding a place in the line.
+    this.queue = this.queue.filter((e) => e.sessionIds.length > 0);
     if (session.state === 'queue') session.state = 'menu';
     session.joinedQueueAt = undefined;
-    if (this.queue.length === 0) this.queueTimerStartedAt = null;
     this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
     this.broadcastQueue();
   }
 
-  private queueSecondsRemaining(): number {
-    if (this.queueTimerStartedAt === null) return LobbyServer.tunables.queueTimerSeconds;
-    const elapsed = (Date.now() - this.queueTimerStartedAt) / 1000;
-    return Math.max(0, Math.ceil(LobbyServer.tunables.queueTimerSeconds - elapsed));
+  /** Seconds until the mode's HARD wait expires for the crew that has waited
+   *  longest — the number the panel counts down. */
+  private queueSecondsRemaining(mode: ModeId): number {
+    const oldest = this.queue.find((e) => e.mode === mode);
+    const hard = LobbyServer.tunables.queueHardWaitSeconds;
+    if (!oldest) return Math.ceil(hard);
+    const elapsed = (Date.now() - oldest.joinedAt) / 1000;
+    return Math.max(0, Math.ceil(hard - elapsed));
   }
 
-  private broadcastQueue(starting: boolean = false): void {
-    const payload: QueueUpdatePayload = {
-      inQueue: this.queue.length,
-      needed: QUEUE_TARGET,
-      secondsRemaining: this.queueSecondsRemaining(),
-      starting,
-    };
-    for (const id of this.queue) {
-      const c = this.clients.get(id);
-      if (c) this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload });
+  private broadcastQueue(): void {
+    for (const mode of MODE_IDS) {
+      const entries = this.queue.filter((e) => e.mode === mode);
+      if (entries.length === 0) continue;
+      const spec = MODES[mode];
+      const payload: QueueUpdatePayload = {
+        inQueue: entries.reduce((n, e) => n + e.sessionIds.length, 0),
+        // THE LINE NOW PROMISES WHAT THE SERVER ACTUALLY WAITS FOR. The panel
+        // printed "n / 10 pirates" while the launch rule was two humans at 5 s,
+        // so the bar crawled to 20% and the match started (netcode-11, third
+        // pass). `needed` is the mode's real minimum, in pirates.
+        needed: spec.minCrews * spec.crewSize,
+        secondsRemaining: this.queueSecondsRemaining(mode),
+        starting: false,
+      };
+      for (const entry of entries) {
+        for (const id of entry.sessionIds) {
+          const c = this.clients.get(id);
+          if (c) this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload });
+        }
+      }
     }
+  }
+
+  /** Live sessions of a queued crew, in roster order. A socket that closed
+   *  while the crew waited is never handed a hull (netcode-15). */
+  private liveMembers(entry: QueueEntry): ClientSession[] {
+    return entry.sessionIds
+      .map((id) => this.clients.get(id))
+      .filter((c): c is ClientSession => !!c && c.ws.readyState === WebSocket.OPEN);
+  }
+
+  /**
+   * A crew that pressed Play while a same-mode match is still standing off the
+   * dock (phase 'waiting' — the MATCH_START_COUNTDOWN_SEC window) boards THAT
+   * match, into a hull the dispatch held open for her. Returns true when she
+   * sailed. Nothing here can grow the fleet past the mode's size: the slots
+   * were subtracted from the bot fill when the match was dispatched.
+   */
+  private tryBackfill(entry: QueueEntry): boolean {
+    const hulls = this.hullsForEntry(entry);
+    for (const [matchId, slot] of this.queueMatchSlots) {
+      if (slot.mode !== entry.mode || slot.slots < hulls) continue;
+      const match = this.matches.get(matchId);
+      if (!match || match.endedAtMs() || !match.isAwaitingHorn()) {
+        this.queueMatchSlots.delete(matchId);
+        continue;
+      }
+      const members = this.liveMembers(entry);
+      if (members.length === 0) return false;
+      const starting: QueueUpdatePayload = {
+        inQueue: members.length,
+        needed: MODES[entry.mode].minCrews * MODES[entry.mode].crewSize,
+        secondsRemaining: 0,
+        starting: true,
+      };
+      for (const c of members) this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload: starting });
+      const placed = this.placeCohort(members, match, 'queue', entry.partyCode, match.botCrewCount());
+      if (placed === 0) return false;
+      this.markPartyAtSea(entry);
+      slot.slots -= hulls;
+      if (slot.slots <= 0) this.queueMatchSlots.delete(matchId);
+      console.log(`[Lobby] backfilled ${placed} into match ${matchId.slice(0, 6)} (${entry.mode})`);
+      return true;
+    }
+    return false;
   }
 
   private tryDispatchQueue(): void {
     if (this.queue.length === 0) return;
-
-    const seconds = this.queueSecondsRemaining();
-    const have = this.queue.length;
-
-    const fastReady = have >= QUEUE_TARGET; // full lobby — go now
-    const slowReady = seconds === 0 && have >= QUEUE_MIN_HUMANS_FALLBACK;
-    const enoughHumans = have >= QUEUE_MIN_HUMANS_FAST && seconds <= LobbyServer.tunables.queueTimerSeconds - 5;
-
-    if (!fastReady && !slowReady && !enoughHumans) return;
-
-    const cohort = this.queue.splice(0, Math.min(QUEUE_TARGET, this.queue.length));
-    const cohortSessions = cohort
-      .map((id) => this.clients.get(id))
-      .filter((c): c is ClientSession => !!c && c.ws.readyState === WebSocket.OPEN);
-    if (cohortSessions.length === 0) {
-      this.queueTimerStartedAt = null;
-      return;
+    // Stale reservations: a match that sounded its horn stops being backfillable.
+    for (const [matchId, slot] of Array.from(this.queueMatchSlots)) {
+      const match = this.matches.get(matchId);
+      if (!match || match.endedAtMs() || !match.isAwaitingHorn() || slot.slots <= 0) {
+        this.queueMatchSlots.delete(matchId);
+      }
     }
 
-    // "Crew found" beat: the cohort is spliced OUT of the queue above, so without
-    // this they never receive a final queue_update — the client's `starting`
-    // branch was unreachable and players jumped from "Searching the seas…"
-    // straight to the match teardown with no acknowledgement.
-    const foundPayload: QueueUpdatePayload = {
-      inQueue: cohortSessions.length,
-      needed: QUEUE_TARGET,
-      secondsRemaining: 0,
-      starting: true,
-    };
-    for (const c of cohortSessions) {
-      this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload: foundPayload });
-    }
+    const now = Date.now();
+    for (const mode of MODE_IDS) {
+      const spec = MODES[mode];
+      const entries = this.queue.filter((e) => e.mode === mode);
+      if (entries.length === 0) continue;
+      const waited = (now - entries[0].joinedAt) / 1000;
+      const hulls = entries.reduce((n, e) => n + this.hullsForEntry(e), 0);
 
-    const botCount = Math.max(0, QUEUE_MATCH_BOTS_FILL_TO - cohortSessions.length);
-    this.spawnAndBoard(cohortSessions, botCount, 'queue');
+      const fleetFull = hulls >= spec.crews;
+      const softReady = entries.length >= spec.minCrews && waited >= LobbyServer.tunables.queueSoftWaitSeconds;
+      const hardReady = waited >= LobbyServer.tunables.queueHardWaitSeconds;
+      if (!fleetFull && !softReady && !hardReady) continue;
 
-    if (this.queue.length === 0) {
-      this.queueTimerStartedAt = null;
-    } else {
-      this.queueTimerStartedAt = Date.now();
+      // Take crews in arrival order until the fleet is full — never a partial
+      // crew, so a party is always whole in whichever match it sails.
+      const cohort: QueueEntry[] = [];
+      let cohortHulls = 0;
+      for (const entry of entries) {
+        const h = this.hullsForEntry(entry);
+        if (cohortHulls + h > spec.crews && cohort.length > 0) break;
+        cohort.push(entry);
+        cohortHulls += h;
+      }
+      this.queue = this.queue.filter((e) => !cohort.includes(e));
+
+      const members = cohort.flatMap((e) => this.liveMembers(e));
+      if (members.length === 0) { this.broadcastQueue(); continue; }
+
+      const reserve = cohortHulls < spec.crews ? QUEUE_BACKFILL_RESERVE : 0;
+      const botCount = Math.max(0, spec.botFillTo - cohortHulls - reserve);
+
+      // "Crew found" beat: the cohort is spliced OUT of the queue above, so
+      // without this they never receive a final queue_update — the client's
+      // `starting` branch was unreachable and players jumped from "Searching the
+      // seas…" straight to the match teardown with no acknowledgement.
+      const foundPayload: QueueUpdatePayload = {
+        inQueue: members.length,
+        needed: spec.minCrews * spec.crewSize,
+        secondsRemaining: 0,
+        starting: true,
+      };
+      for (const c of members) this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload: foundPayload });
+
+      const partyCode = cohort.length === 1 ? cohort[0].partyCode : null;
+      const { match, placed } = this.spawnAndBoard(members, botCount, 'queue', partyCode);
+      if (placed > 0) for (const e of cohort) this.markPartyAtSea(e);
+      if (match && placed > 0 && reserve > 0) {
+        this.queueMatchSlots.set(match.id, { mode, slots: reserve });
+      }
+      console.log(`[Lobby] ${mode} match dispatched: ${cohort.length} crew(s), ${placed} pirate(s), ${botCount} bots`);
+      this.broadcastQueue();
     }
-    this.broadcastQueue();
   }
 
   // ─── Match lifecycle ─────────────────────────────────────────
@@ -1217,7 +1408,7 @@ export class LobbyServer {
         ok: true,
         clients: this.clients.size,
         matches: this.matches.size,
-        queue: this.queue.length,
+        queue: this.queuedSessionCount(),
         // WHICH WORLD THIS HOST ROLLS. Draw-call ceilings are measured against
         // one pinned map, and the seed is read from the environment at match
         // generation — so from outside there was no way to tell a host that

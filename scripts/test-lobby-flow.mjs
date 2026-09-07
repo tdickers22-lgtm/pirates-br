@@ -416,6 +416,114 @@ console.log('\nA socket that is already gone gets no ship:');
   await scuttle();
 }
 
+// ── 9. The public queue pools CREWS (MODE-01: netcode-11, gameplay-31) ──
+//
+// Before this, six friends who each pressed Play within 20 s of one another got
+// THREE separate matches of two humans and eight bots: the launch rule was "2
+// humans once 5 s have elapsed" over a 15 s timer that started at the FIRST
+// joiner and was never reset (LobbyServer 640-646, 472-474). The north star
+// asks that the game be easy to run online with only real players, and the
+// queue actively prevented it. The soft wait now holds the door open for a real
+// minimum of crews; the hard wait is the empty-server fallback that still fills
+// with bots so a lone captain is never stranded in a lobby.
+console.log('\nThe queue pools crews instead of firing in pairs:');
+LobbyServer.tunables.queueSoftWaitSeconds = 1.6;
+LobbyServer.tunables.queueHardWaitSeconds = 3.2;
+{
+  const six = await crew('Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6');
+  for (const c of six) { c.send('queue_join', { mode: 'solo' }); await sleep(180); }
+  // Still inside the soft wait: nobody has sailed without the others.
+  expect('the queue does not fire in pairs while friends are still arriving (gameplay-31)',
+    liveMatches() === 0, `matches=${liveMatches()}`);
+  await sleep(1_600);
+  expect('six captains 180 ms apart land in ONE match (netcode-11)',
+    liveMatches() === 1, `matches=${liveMatches()}`);
+  const match = onlyMatch();
+  const humans = match ? match.state.players.filter((p) => !p.isBot).length : 0;
+  expect('all six are in it', humans === 6, `humans=${humans}`);
+  const start = six[0].of('match_start')?.payload ?? {};
+  expect('match_start.expectedHumans is the real cohort, not "so far" (netcode-17)',
+    start.expectedHumans === 6, JSON.stringify(start));
+  const botsAboard = match ? match.state.players.filter((p) => p.isBot).length : -1;
+  expect('match_start.botCount is the real bot fill, not the literal 0 (netcode-17)',
+    typeof start.botCount === 'number' && start.botCount > 0 && start.botCount === botsAboard,
+    `botCount=${start.botCount} bots=${botsAboard}`);
+  const q = six[0].of('queue_update')?.payload ?? {};
+  expect('the queue line promises the number it actually waits for (netcode-11)',
+    q.needed === 6, JSON.stringify(q));
+  await scuttle();
+}
+
+{
+  // The empty server: one captain, nobody else coming. The hard wait still
+  // launches her with a bot fleet — "every human still gets a hull in Solo".
+  const [lone] = await crew('Alone');
+  lone.send('queue_join', { mode: 'solo' });
+  await sleep(2_000);
+  expect('one captain does not sail before the soft wait has passed',
+    liveMatches() === 0, `matches=${liveMatches()}`);
+  // The dispatcher runs on the lobby's 1 s tick, so allow one tick past the
+  // hard wait rather than sampling exactly on it.
+  await sleep(2_600);
+  expect('the hard wait still launches a lone captain with bots',
+    liveMatches() === 1, `matches=${liveMatches()}`);
+  const match = onlyMatch();
+  expect('she is not alone in the world',
+    !!match && match.state.players.filter((p) => p.isBot).length >= 8,
+    `bots=${match ? match.state.players.filter((p) => p.isBot).length : 0}`);
+  await scuttle();
+}
+
+{
+  // Backfill: a crew that presses Play during the pre-horn countdown joins the
+  // match that is standing off the dock, instead of opening a second lobby.
+  const four = await crew('B1', 'B2', 'B3', 'B4');
+  for (const c of four) c.send('queue_join', { mode: 'solo' });
+  await sleep(2_000);
+  await sleep(2_600);
+  expect('the four sailed', liveMatches() === 1, `matches=${liveMatches()}`);
+  const first = onlyMatch();
+  const late = await pirate('Late');
+  crews.push([late]);
+  late.send('queue_join', { mode: 'solo' });
+  await sleep(400);
+  expect('a late captain backfills the match still in its countdown, not a new one',
+    liveMatches() === 1, `matches=${liveMatches()}`);
+  expect('and she is really aboard that same match',
+    !!first && first.state.players.some((p) => !p.isBot && p.name === 'Late'),
+    first ? first.state.players.filter((p) => !p.isBot).map((p) => p.name).join(',') : 'no match');
+  await scuttle();
+}
+
+{
+  // A party queues as ONE crew, and the roster rules of PLAN 2.1 are enforced
+  // at the door rather than at the dock.
+  const [host, mate, third] = await crew('Cap', 'Mate', 'Third');
+  host.send('create_party');
+  await sleep(120);
+  const code = roster(host).code;
+  mate.send('join_party', { code });
+  third.send('join_party', { code });
+  await sleep(200);
+  host.send('update_party_settings', { mode: 'duos' });
+  await sleep(120);
+  host.forget();
+  host.send('queue_join', { mode: 'duos' });
+  await sleep(200);
+  expect('a party of three is refused Duos with the mode that fits (PLAN 2.1)',
+    /duos takes 2/i.test(errorText(host)), `reason="${errorText(host)}"`);
+  expect('and nothing was launched', liveMatches() === 0, `matches=${liveMatches()}`);
+  host.forget();
+  host.send('queue_join', { mode: 'squads' });
+  await sleep(200);
+  expect('squads is refused while it is behind WIRE-01, in words a player understands',
+    /squads/i.test(errorText(host)) && /not open|soon|yet/i.test(errorText(host)),
+    `reason="${errorText(host)}"`);
+  await scuttle();
+}
+LobbyServer.tunables.queueSoftWaitSeconds = 45;
+LobbyServer.tunables.queueHardWaitSeconds = 90;
+
 await sleep(200);
 if (failures > 0) {
   console.error(`\n${failures} lobby-flow assertion(s) failed.`);

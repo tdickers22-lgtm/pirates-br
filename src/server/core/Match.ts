@@ -745,6 +745,19 @@ export class Match {
   endedAtMs(): number | null { return this.endedAt; }
   humanCount(): number { return this.clients.size; }
 
+  /** THE PRE-HORN WINDOW. True while the match is still standing off the dock
+   *  (phase 'waiting', MATCH_START_COUNTDOWN_SEC) — the only time a late crew
+   *  may still be backfilled into it (MODE-01 / netcode-11). */
+  isAwaitingHorn(): boolean {
+    return this.state.phase === 'waiting';
+  }
+
+  /** Bot crews the world was built with — what the lobby reports as
+   *  match_start.botCount (netcode-17: it used to be the literal 0). */
+  botCrewCount(): number {
+    return this.configuredBotCount;
+  }
+
   /** Detach a client from the match (for return-to-menu) without destroying the match. */
   detachClient(playerId: string): void {
     this.removeClient(playerId, /*closeWs*/ false);
