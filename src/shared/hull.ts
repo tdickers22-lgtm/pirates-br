@@ -192,3 +192,35 @@ export function getHullWaterlineOutline(type: ShipType): ReadonlyArray<{ zF: num
   WATERLINE_OUTLINE_CACHE.set(type, outline);
   return outline;
 }
+
+const CONTACT_CHAIN_CACHE = new Map<ShipType, ReadonlyArray<{ zF: number; halfF: number }>>();
+
+/**
+ * THE CONTACT CHAIN — the capsule chain two hulls, a reef and a pier are
+ * resolved against. `halfF` is the MAXIMUM half-beam of the section at that
+ * station, i.e. the wale, because the wale is the widest timber on the ship
+ * and the widest timber is what rubs, what a rock stops and what a pier hits.
+ *
+ * It used to be a hand-kept table (`HULL_CONTACT_STATIONS`, max 0.52 W) plus a
+ * SECOND hand-kept table for sea rocks (max 0.68 W offset+radius) that was
+ * WIDER than the ship. So rocks stopped a galleon 2.8 m short of touching her
+ * while rammed galleons interpenetrated 1.9 m — both hulls sank 0.096 W of
+ * their real beam into each other (ships-24, physics-20/08/12/40).
+ *
+ * Consumers: `PhysicsSystem.getShipHullContactSamples` → ship-ship, dock and
+ * sea-rock resolution (server), graded by scripts/test-ship-dynamics.mjs,
+ * test-sea-rock-ship-damage.mjs and test-sea-rock-colliders.mjs. No client path
+ * reads it; the client draws the same loft through `getHullProfile`.
+ */
+export function getHullContactChain(type: ShipType): ReadonlyArray<{ zF: number; halfF: number }> {
+  let chain = CONTACT_CHAIN_CACHE.get(type);
+  if (chain) return chain;
+  const profile = getHullProfile(type);
+  chain = Object.freeze(profile.stations.map((st) => {
+    let widest = 0;
+    for (const slot of st.slots) if (slot.x > widest) widest = slot.x;
+    return { zF: st.baseZ / profile.L, halfF: widest / profile.W };
+  }));
+  CONTACT_CHAIN_CACHE.set(type, chain);
+  return chain;
+}

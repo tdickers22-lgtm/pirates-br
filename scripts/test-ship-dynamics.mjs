@@ -7,6 +7,7 @@ import {
   computeSailPolar,
 } from '../src/server/systems/PhysicsSystem.ts';
 import { FLOODING, SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
+import { getHullContactChain } from '../src/shared/hull.ts';
 import {
   angleWrap,
   gerstnerHeight,
@@ -178,15 +179,35 @@ function simulateHelm({ forcedSpeed }) {
 console.log('\nShip-ship collision (oriented hulls)');
 
 {
-  // Parallel galleons rail-to-rail at 11m centers: boarding range, no phantom hit.
+  // RE-PINNED BY LOFT-01 (w3.6 slice b). The contact chain is no longer a hand
+  // table topping out at 0.52 W; it is the loft's own widest timber, the wale,
+  // which on a galleon is 0.616 W. Two of them therefore TOUCH at 12.32 m, not
+  // 10.4 — the 1.9 m of interpenetration rammed hulls used to show was exactly
+  // this gap (physics-20). 11 m centres are now a real overlap and must ease
+  // apart, undamaged; 13 m centres are clear water and must stay put.
+  const chain = getHullContactChain('galleon');
+  const touch = 2 * Math.max(...chain.map((c) => c.halfF)) * SHIP_STATS.galleon.width;
+  expect('the galleon contact beam is the loft wale', Math.abs(touch - 12.32) < 0.02, `touch=${touch.toFixed(2)}`);
+
   const physics = new PhysicsSystem();
   const a = makeShip('galleon', { anchored: true });
   const b = makeShip('galleon', { anchored: true });
-  b.position.x = 11;
+  b.position.x = 13;
   for (let i = 0; i < 60; i++) physics.update(DT, i * DT, [a, b], [], [], [], []);
   const gap = Math.abs(b.position.x - a.position.x);
-  expect('parallel galleons at 11m centers do not collide', Math.abs(gap - 11) < 0.25, `gap=${gap.toFixed(2)}`);
+  expect('parallel galleons a beam clear of touching do not collide', Math.abs(gap - 13) < 0.25, `gap=${gap.toFixed(2)}`);
   expect('rail-to-rail hulls stay undamaged', a.holes.length === 0 && b.holes.length === 0);
+
+  const physics2 = new PhysicsSystem();
+  const c = makeShip('galleon', { anchored: true });
+  const d = makeShip('galleon', { anchored: true });
+  d.position.x = 11;
+  for (let i = 0; i < 240; i++) physics2.update(DT, i * DT, [c, d], [], [], [], []);
+  const gap2 = Math.abs(d.position.x - c.position.x);
+  expect('overlapping galleons ease out to the loft contact beam', gap2 > touch - 0.4 && gap2 < touch + 1.2,
+    `gap=${gap2.toFixed(2)} vs touch ${touch.toFixed(2)}`);
+  expect('easing apart at rest opens no planks', c.holes.length === 0 && d.holes.length === 0,
+    `holes ${c.holes.length}/${d.holes.length}`);
 }
 
 function runConvergence(setup) {

@@ -1,6 +1,6 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
-import { getHullWaterlineOutline } from '../../shared/hull.js';
+import { getHullContactChain, getHullWaterlineOutline } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
@@ -104,20 +104,12 @@ const ATTITUDE_STIFFNESS = 4;
 const ATTITUDE_DAMPING = 3.8;
 /** Broad reach (~110° off the wind) is the power point of the sail polar. */
 const SAIL_POLAR_PEAK = 1.92;
-/** Centerline hull stations (z as a fraction of length, half-width as a
- *  fraction of beam) for the ship-ship / grounding capsule chain.
- *  CONTRACT (pinned by test-ship-dynamics): parallel galleons (beam 10) at 11m
- *  centers are rail-to-rail BOARDING range with no phantom contact — so the
- *  widest station must keep 2·half·beam comfortably under 11 (0.52 → 10.4m). */
-const HULL_CONTACT_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
-  { z: -0.44, half: 0.32 },
-  { z: -0.30, half: 0.47 },
-  { z: -0.15, half: 0.515 },
-  { z: 0.00, half: 0.52 },
-  { z: 0.15, half: 0.49 },
-  { z: 0.30, half: 0.39 },
-  { z: 0.44, half: 0.17 },
-];
+/** A hull's own contact chain lies inside her widest timber by no more than
+ *  this, so two hulls lying alongside always overlap a little before they are
+ *  truly pressed together. Below it the resolution is a SPRING (a slow nudge,
+ *  no snap, no ram); at or above it she is rammed and resolved hard. Without
+ *  the split the loft-true chain teleports moored neighbours apart. */
+const SOFT_CONTACT_DEPTH = 0.6;
 
 /** GROUNDING SAMPLES THE OUTLINE, NOT THE SPINE (PHYS-02 / physics-02).
  *  A galleon carries ten metres of beam either side of her keel line, so
@@ -2690,7 +2682,12 @@ export class PhysicsSystem {
       nz = -Math.sin(ship.rotation);
     }
 
-    const half = deepest.penetration * 0.5;
+    // Soft alongside, hard on a ram. The loft-true chain is the WALE, so two
+    // hulls rubbing rail to rail genuinely overlap by a few tens of centimetres
+    // before they are pressed; snapping them apart on that would fling every
+    // moored neighbour. Under SOFT_CONTACT_DEPTH the correction is a spring.
+    const half = deepest.penetration
+      * (deepest.penetration < SOFT_CONTACT_DEPTH ? 0.12 : 0.5);
     ship.position.x += nx * half;
     ship.position.z += nz * half;
     other.position.x -= nx * half;
@@ -2986,13 +2983,15 @@ export class PhysicsSystem {
   }
 
   private pushShipOutOfSeaRock(ship: Ship, rock: SeaRock, t = 0) {
-    const samples = this.getShipCollisionSamples(ship);
+    const samples = this.getShipHullContactSamples(ship);
     let deepest: {
       nx: number;
       nz: number;
       penetration: number;
       sampleX: number;
       sampleZ: number;
+      contactX: number;
+      contactZ: number;
       section: keyof HullSections;
     } | null = null;
     const stats = SHIP_STATS[ship.type];
@@ -3012,21 +3011,35 @@ export class PhysicsSystem {
         const penetration = collider.radius + sample.radius - d;
         if (penetration > 0 && (!deepest || penetration > deepest.penetration)) {
           const inv = d > 0.001 ? 1 / d : 0;
+          // The chain is a centreline, so the struck FACE is read off where the
+          // rock lies in her own frame — sharper than the old table's fixed
+          // per-sample label, which called every amidships hit 'starboard'.
+          const localRock = this.toShipLocal({ x: center.x, y: 0, z: center.z }, ship);
           deepest = {
             nx: d > 0.001 ? dx * inv : 1,
             nz: d > 0.001 ? dz * inv : 0,
             penetration,
             sampleX: sample.x,
             sampleZ: sample.z,
-            section: sample.section,
+            // The chain is a CENTRELINE chain, so the plank the rock actually
+            // bit is a hull radius out along the contact normal. Stamping the
+            // breach at the sample would put every rock bite on the spine.
+            contactX: sample.x - (d > 0.001 ? dx * inv : 1) * sample.radius,
+            contactZ: sample.z - (d > 0.001 ? dz * inv : 0) * sample.radius,
+            section: localRock.z > stats.length * 0.28 ? 'bow'
+              : localRock.z < -stats.length * 0.28 ? 'stern'
+              : localRock.x >= 0 ? 'starboard' : 'port',
           };
         }
       }
     }
 
     if (!deepest) return;
-    ship.position.x += deepest.nx * deepest.penetration;
-    ship.position.z += deepest.nz * deepest.penetration;
+    // Soft kiss vs hard strike: a shallow overlap is eased out over a few ticks
+    // so a hull working alongside a reef is not snapped off it.
+    const rockPush = deepest.penetration < SOFT_CONTACT_DEPTH ? deepest.penetration * 0.25 : deepest.penetration;
+    ship.position.x += deepest.nx * rockPush;
+    ship.position.z += deepest.nz * rockPush;
 
     const relVel = ship.velocity.x * deepest.nx + ship.velocity.z * deepest.nz;
     if (relVel < 0) {
@@ -3044,7 +3057,7 @@ export class PhysicsSystem {
         // breach every tick until she saturates.
         const breaches = this.takeGroundingBreachBudget(ship, t, impactSpeed, impactSpeed > 5 ? 2 : 1, 'rock');
         if (breaches > 0) {
-          const local = this.toShipLocal({ x: deepest.sampleX, y: 0, z: deepest.sampleZ }, ship);
+          const local = this.toShipLocal({ x: deepest.contactX, y: 0, z: deepest.contactZ }, ship);
           this.openHoleAt(
             ship,
             { x: local.x, y: (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5, z: local.z },
@@ -3053,7 +3066,7 @@ export class PhysicsSystem {
           );
         }
         this.combatEvents.push({
-          type: 'ship_impact', kind: 'rock', position: { x: deepest.sampleX, y: 0, z: deepest.sampleZ }, speed: impactSpeed,
+          type: 'ship_impact', kind: 'rock', position: { x: deepest.contactX, y: 0, z: deepest.contactZ }, speed: impactSpeed,
         });
       }
     }
@@ -3171,38 +3184,15 @@ export class PhysicsSystem {
     const stats = SHIP_STATS[ship.type];
     const sin = Math.sin(ship.rotation);
     const cos = Math.cos(ship.rotation);
-    return HULL_CONTACT_STATIONS.map((station) => {
-      const localZ = station.z * stats.length;
+    return getHullContactChain(ship.type).map((station) => {
+      const localZ = station.zF * stats.length;
       return {
         x: ship.position.x + localZ * sin,
         z: ship.position.z + localZ * cos,
-        radius: stats.width * station.half,
+        radius: stats.width * station.halfF,
         localZ,
       };
     });
-  }
-
-  private getShipCollisionSamples(ship: Ship) {
-    const stats = SHIP_STATS[ship.type];
-    const locals = [
-      { x: 0, z: stats.length * 0.52, radius: stats.width * 0.3, section: 'bow' as const },
-      { x: stats.width * 0.43, z: stats.length * 0.24, radius: stats.width * 0.18, section: 'starboard' as const },
-      { x: -stats.width * 0.43, z: stats.length * 0.24, radius: stats.width * 0.18, section: 'port' as const },
-      { x: 0, z: stats.length * 0.14, radius: stats.width * 0.36, section: 'bow' as const },
-      { x: stats.width * 0.48, z: 0, radius: stats.width * 0.2, section: 'starboard' as const },
-      { x: -stats.width * 0.48, z: 0, radius: stats.width * 0.2, section: 'port' as const },
-      { x: stats.width * 0.4, z: -stats.length * 0.24, radius: stats.width * 0.18, section: 'starboard' as const },
-      { x: -stats.width * 0.4, z: -stats.length * 0.24, radius: stats.width * 0.18, section: 'port' as const },
-      { x: 0, z: -stats.length * 0.45, radius: stats.width * 0.3, section: 'stern' as const },
-    ];
-    const cos = Math.cos(ship.rotation);
-    const sin = Math.sin(ship.rotation);
-    return locals.map((sample) => ({
-      x: ship.position.x + sample.x * cos + sample.z * sin,
-      z: ship.position.z + sample.z * cos - sample.x * sin,
-      radius: sample.radius,
-      section: sample.section,
-    }));
   }
 
   /** Is a world point inside the SOLID hull: the swim-hull footprint (the

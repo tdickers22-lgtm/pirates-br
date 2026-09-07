@@ -7,6 +7,7 @@
 import { PhysicsSystem, PROJECTILE_HULL_MARGIN, shipIngressRate } from '../src/server/systems/PhysicsSystem.ts';
 import { SHIP, SHIP_STATS, PLAYER, PHYSICS } from '../src/shared/constants/index.ts';
 import { getSwimHullHalfWidth, getSwimHullVerticalT } from '../src/shared/utils/index.ts';
+import { getHullContactChain, getHullProfile, hullSurfacePointAt } from '../src/shared/hull.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -231,6 +232,40 @@ console.log('\n6. CREDIT-01 physics half: drowning and deck fire keep the attack
   expect('deck fire hurts the hand', hand.health < 100, `health=${hand.health}`);
   expect('...without wiping the attacker', hand.lastDamagedById === 'gunner', `lastDamagedById=${hand.lastDamagedById}`);
   expect('...and files fire as the cause', hand.lastEnvDamage?.cause === 'fire', `lastEnvDamage=${JSON.stringify(hand.lastEnvDamage)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// THE CONTACT-OUTLINE CLAUSE (LOFT-01 / ships-24, physics-20).
+//
+// Four hand-kept tables described the same hull. The one the server collided
+// with (HULL_CONTACT_STATIONS) topped out at 0.52 W while the loft the renderer
+// DRAWS is 0.616 W at the wale, so every capsule in the chain sat inboard of
+// the planking and two galleons had to bury 1.9 m of each other before the
+// server noticed. This clause holds the chain against the loft it is supposed
+// to be: each station disc must sit within 0.15 m of the widest timber at that
+// station, on every class.
+console.log('\nThe contact chain IS the loft (LOFT-01)');
+{
+  let worst = 0;
+  let worstAt = '';
+  for (const type of ['sloop', 'brigantine', 'galleon']) {
+    const profile = getHullProfile(type);
+    for (const station of getHullContactChain(type)) {
+      const z = station.zF * profile.L;
+      // Widest timber of the drawn section at this station.
+      let drawn = 0;
+      for (let k = 0; k <= 24; k += 1) {
+        const yy = -profile.draft + (k / 24) * (profile.H * 1.08 + profile.draft);
+        const x = hullSurfacePointAt(profile, z, yy).x;
+        if (x > drawn) drawn = x;
+      }
+      const chained = station.halfF * profile.W;
+      const delta = Math.abs(chained - drawn);
+      if (delta > worst) { worst = delta; worstAt = `${type} z=${station.zF.toFixed(2)} chain ${chained.toFixed(2)} m vs loft ${drawn.toFixed(2)} m`; }
+    }
+  }
+  expect('every contact station disc sits within 0.15 m of the drawn hull',
+    worst <= 0.15, `worst ${worst.toFixed(2)} m — ${worstAt}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
