@@ -3079,6 +3079,20 @@ export class Game {
     beginFirstDrawFrame();
     this.ocean.update(dt, this.renderer.camera.position);
     this.ocean.setAtmosphere(this.renderer.getAtmosphere());
+    // WATER-01 (ships-02): cut the exterior sea out of nearby hulls, from the
+    // RENDERED pose — the server transform trails the drawn mesh by up to
+    // 9.66 m, which is more than a beam. OceanRenderer does the 80 m culling.
+    let hullMaskN = 0;
+    for (const ship of this.state?.ships ?? []) {
+      if (ship.sinkProgress >= 1) continue;
+      const pose = this.readShipRenderPose(ship);
+      const st = SHIP_STATS[ship.type];
+      const m = (this.oceanHullMasks[hullMaskN] ??= { x: 0, y: 0, z: 0, yaw: 0, width: 0, length: 0, top: 0, bottom: 0 });
+      m.x = pose.x; m.y = pose.y; m.z = pose.z; m.yaw = pose.yaw;
+      m.width = st.width; m.length = st.length; m.top = st.height * 1.3; m.bottom = st.height * 1.2;
+      hullMaskN += 1;
+    }
+    this.ocean.setHullMasks(this.oceanHullMasks, this.renderer.camera.position, hullMaskN);
     this.updateOceanCaveSuppression();
     this.updateScene(dt);
     // Shared match clock (same value the server passes to the physics/geyser
@@ -7470,6 +7484,10 @@ export class Game {
    * eye, a corpse on the planking, the anchor a prompt points at) has to use
    * this or it is welded to a hull nobody is looking at.
    */
+  /** Reused by the ocean hull-mask feed above so the render loop allocates
+   *  nothing; entries are overwritten, never re-created. */
+  private readonly oceanHullMasks: { x: number; y: number; z: number; yaw: number; width: number; length: number; top: number; bottom: number }[] = [];
+
   private readShipRenderPose(ship: Ship) {
     const pose = this.tempHullPose;
     if (this.shipRenderer.readRenderedHull(ship.id, pose)) return pose;
