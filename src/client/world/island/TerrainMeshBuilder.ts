@@ -97,6 +97,46 @@ function applyTerrainDetail(
         + '  float a = tHash(i), b = tHash(i + vec2(1.0, 0.0));\n'
         + '  float c = tHash(i + vec2(0.0, 1.0)), d = tHash(i + vec2(1.0, 1.0));\n'
         + '  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n'
+        + '}\n'
+        // ── WHY THE DETAIL OCTAVES ARE NOT VALUE NOISE ─────────────────────
+        // tNoise is bilinear VALUE noise: one scalar per lattice corner,
+        // smoothstepped between them. Every cell is therefore a little dome or
+        // bowl with a flat-ish middle and its extremum ON the grid, and three
+        // such octaves — even rotated, even domain-warped — put a repeating
+        // 0.3-0.5m knit across a whole lawn. It is the hexagonal weave the
+        // review photographed at eye level on Astra's own verification shot,
+        // and it is worse on the LOW tier, which collapses the three octaves
+        // onto one and builds no ground cover to hide it (graded: spectral peak
+        // 30.0 on low, 20.0 on high, against 10.3 for a cliff face in the same
+        // frame; ceiling now 15.0 in test-world-fidelity).
+        //
+        // GRADIENT noise fixes it at the source. Each corner carries a random
+        // DIRECTION and contributes a linear ramp; the field is exactly zero at
+        // every lattice point, so cells have no interior plateau and no
+        // extremum to line up with their neighbours. The visible structure
+        // becomes the gradients, which are isotropic, instead of the grid.
+        // Quintic (not cubic) fade keeps the second derivative continuous, so
+        // no cell EDGE reads either.
+        //
+        // Cost: two hashes per corner instead of one, on the three detail
+        // octaves only — the 12-16m macro and warp octaves stay value noise
+        // because at that scale there is no lattice to see and they are what
+        // bends everything below them. On the low tier this is one extra hash
+        // per fragment, because low collapses to a single octave.
+        + 'vec2 tGradDir(vec2 i) {\n'
+        + '  vec2 h = fract(sin(vec2(dot(i, vec2(127.1, 311.7)), dot(i, vec2(269.5, 183.3)))) * 43758.5453);\n'
+        + '  return normalize(h * 2.0 - 1.0 + 1e-4);\n'
+        + '}\n'
+        + 'float tGrad(vec2 p) {\n'
+        + '  vec2 i = floor(p); vec2 f = fract(p);\n'
+        + '  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n'
+        + '  float a = dot(tGradDir(i), f);\n'
+        + '  float b = dot(tGradDir(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0));\n'
+        + '  float c = dot(tGradDir(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0));\n'
+        + '  float d = dot(tGradDir(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0));\n'
+        // Perlin 2D with unit gradients spans about +-0.707; map to 0..1 on the
+        // same convention every consumer below already assumes.
+        + '  return clamp(0.5 + 0.7071 * mix(mix(a, b, u.x), mix(c, d, u.x), u.y), 0.0, 1.0);\n'
         + '}\n',
       )
       // ── THE CAVE MOUTHS ARE HOLES ─────────────────────────────────────────
@@ -153,14 +193,26 @@ function applyTerrainDetail(
         // Each octave samples a ROTATED lattice. A value-noise grid shares the
         // world axes, and three co-aligned octaves stack their cell edges into
         // a visible checkerboard on flat ground (caught in verification).
+        + 'mat2 tR0 = mat2(0.71, 0.70, -0.70, 0.71);\n'
         + 'mat2 tR1 = mat2(0.87, -0.50, 0.50, 0.87);\n'
         + 'mat2 tR2 = mat2(0.36, 0.93, -0.93, 0.36);\n'
-        + 'float nMid = tNoise(tP * 0.55);\n'                    // ~1.8m mottle
-        + (octaves >= 2
-          ? 'float nFine = tNoise(tR1 * tP * 2.1);\n'            // ~0.5m patches
-          : 'float nFine = nMid;\n')
+        // Frequencies are deliberately NOT in small integer ratios (0.53 :
+        // 2.37 : 9.13, not 0.55 : 2.1 : 8.5): octaves whose periods share a
+        // common multiple beat, and a beat is a second, coarser lattice on top
+        // of the first. Each also gets its own rotation and origin offset, so
+        // no two share a cell edge anywhere in the world.
+        + 'float nMid = tGrad(tR0 * tP * 0.53 + 3.1);\n'          // ~1.9m mottle
+        // nFine is NOT tier-gated. ONE gradient octave is worse than one value
+        // octave for the thing being graded: value noise's cells have flat
+        // middles that mush together, gradient noise is exactly zero on its
+        // lattice, so alone it draws that lattice (measured: low ground 12.6
+        // with the old single value octave, 15.2 with a single gradient one).
+        // Two decorrelated octaves cancel each other's zero sets and take it to
+        // 11.7. That is one extra hash pair on the low tier and it is the only
+        // ground detail a low-tier player gets — nothing else is drawn on it.
+        + 'float nFine = tGrad(tR1 * tP * 2.37 + 13.7);\n'        // ~0.42m patches
         + (octaves >= 3
-          ? 'float nGrain = tNoise(tR2 * tP * 8.5);\n'           // ~0.12m grain
+          ? 'float nGrain = tGrad(tR2 * tP * 9.13 + 5.3);\n'      // ~0.11m grain
           : 'float nGrain = nFine;\n')
         // ── NEAR-FIELD GRIT ────────────────────────────────────────────────
         // The ladder above bottoms out at ~0.12m, and 0.12m features are ~1/3
@@ -174,8 +226,13 @@ function applyTerrainDetail(
         + 'float nGrit = 0.0;\n'
         + (octaves >= 2
           ? 'if (near > 0.004) {\n'
-            + '  nGrit = tNoise(tR1 * tP * 29.0) - 0.5;\n'
-            + (octaves >= 3 ? '  nGrit += (tNoise(tR2 * tP * 84.0) - 0.5) * 0.55;\n' : '')
+            // Grit is gradient noise too, and that was MEASURED, not assumed:
+            // sending these two octaves back to tNoise to save two hashes in
+            // the near field put the graded ground score back up from 12.2 to
+            // 16.0. At 1m of eye height a 3.5cm cell is several pixels across,
+            // so its lattice is exactly as visible as the 0.42m one.
+            + '  nGrit = tGrad(tR2 * tP * 31.7 + 21.9) - 0.5;\n'
+            + (octaves >= 3 ? '  nGrit += (tGrad(tR0 * tP * 87.3 + 41.1) - 0.5) * 0.55;\n' : '')
             + '  nGrit *= near;\n'
             + '}\n'
           : '')
