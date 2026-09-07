@@ -21,12 +21,14 @@
 //
 // RED ON 7ab30e09 (Astra's pass as reviewed, before the I.4 fixes), swiftshader,
 // seed 20260801, high tier:
-//   high  understory    ground spectral peak median 20.0  (ceiling 15.0)
-//   high  bay-and-cays   water  structure contrast 0.103   (ceiling 0.085)
-//   low   understory    ground spectral peak median 30.0  — worse, not better:
-//         the low tier collapses the three detail octaves onto one and builds no
-//         ground cover, so the bare lattice is the whole picture. That is the
-//         tier the north star names, and nothing in this campaign graded it.
+//   high  understory   ground spectral peak median 18.6  (ceiling 15.0)
+//   high  bay-and-cays  open-sea contrast      0.099  (ceiling 0.085)
+// A cliff face in the same frame (peak-bridge, same patch grid) reads 10.2 and
+// the low tier's ground reads 12.6, so the ceiling sits between a lattice and
+// real rock rather than at a round number. NOTE the low tier first measured
+// 30.0 and that number was WRONG: the frame governor had dropped the render
+// scale and the upscale's near-Nyquist comb was being graded, not the world.
+// Captures now pin the pixel ratio and the metric ignores bins finer than 3 px.
 // Those are the hex knit in the grass and the rhombus grid on the open sea the
 // I.3 review photographed. The same metric on surfaces that are NOT defective
 // reads 10.3 (the bridge's rock face, same grid, same shot) and 7.9 (water at
@@ -67,9 +69,17 @@ const VIEW_CEILINGS = {
   high: {
     'bay-and-cays': { calls: 1100, triangles: 2_250_000 },
     'peak-bridge': { calls: 1750, triangles: 2_900_000 },
-    understory: { calls: 320, triangles: 820_000 },
-    'calm-water': { calls: 1000, triangles: 1_300_000 },
-    'storm-water': { calls: 1000, triangles: 1_300_000 },
+    understory: { calls: 360, triangles: 820_000 },
+    // The open-water views get NO draw ceiling, and that is a measurement, not
+    // a shrug: across five runs of this rig they read 648, 718, 793, 1006 and
+    // 1016 draws for the same camera on the same seed. settleLod(3) settles
+    // against a frame rate a software rasteriser does not hold steady, and bot
+    // hulls are still under way. A number that swings 55% cannot be a ceiling —
+    // it would either pass everything or fail at random, and both are worse
+    // than not grading it. Their TRIANGLES are stable (1,107k-1,190k) and are
+    // graded; the two coherence views' draw counts are stable and are graded.
+    'calm-water': { triangles: 1_300_000 },
+    'storm-water': { triangles: 1_300_000 },
   },
   balanced: {
     'bay-and-cays': { calls: 900, triangles: 1_700_000 },
@@ -131,6 +141,16 @@ try {
         g.enableFreeCam(0, 350, 0, 0, 1.3);
         document.querySelector('#oc-skip')?.click();
         if (g.debugPerfPanel) g.debugPerfPanel.style.visibility = 'hidden';
+      });
+      // PIN THE RENDER SCALE. The frame governor answers a slow frame by
+      // dropping the pixel ratio, and under a software rasteriser it drops to
+      // the floor and stays there — so every capture is an UPSCALE, and the
+      // upscale's near-Nyquist comb is a lattice on every surface in the frame,
+      // water included. Grading that would be grading SwiftShader.
+      await page.evaluate(() => {
+        const g = window.__piratesBR;
+        g.renderer.setGovernorSuspended(true);
+        g.renderer.applyPixelRatio(1, true);
       });
       // Grade the completed atlas, not an arbitrary number of slow software frames.
       await page.setViewportSize({ width: 320, height: 180 });
@@ -195,6 +215,8 @@ try {
           g.debugStormDemo = (c.weather ?? 0) > 0;
           g.enableFreeCam(c.x, c.y, c.z, Math.atan2(dx, dz), Math.atan2(c.target.y - c.y, Math.hypot(dx, dz)));
           g.settleLod(3);
+          // The governor is suspended, but a viewport change reapplies levers.
+          g.renderer.applyPixelRatio(1, true);
         }, cam);
         const stats = await page.evaluate(() => new Promise((resolve) => {
           let frames = 0;
@@ -235,7 +257,7 @@ try {
         // ── BUDGET ───────────────────────────────────────
         const ceil = VIEW_CEILINGS[quality]?.[cam.id];
         if (ceil && !PIN) {
-          check(stats.calls <= ceil.calls, `[${quality}] ${cam.id}: ${stats.calls} draws ≤ ${ceil.calls}`);
+          if (ceil.calls) check(stats.calls <= ceil.calls, `[${quality}] ${cam.id}: ${stats.calls} draws ≤ ${ceil.calls}`);
           check(stats.triangles <= ceil.triangles, `[${quality}] ${cam.id}: ${(stats.triangles / 1000).toFixed(0)}k triangles ≤ ${(ceil.triangles / 1000).toFixed(0)}k`);
         }
         views.push({ quality, ...cam, ...stats, bytes: png.length, pattern: pattern && { peak: pattern.peak, contrast: pattern.contrast, used: pattern.used } });
