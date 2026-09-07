@@ -56,6 +56,13 @@ process.on('uncaughtException', (err) => {
 
 // Never a fixed port: init(0) lets the kernel pick, so a stale listener can never
 // hold this suite until the runner's timeout. PIRATES_BR_TEST_PORT pins one.
+// MODE-01 (w3.1 slice b) made the public queue pool CREWS behind a 45 s soft
+// wait and a 90 s hard wait, so the old "two humans, five seconds" dispatch this
+// suite leans on no longer happens inside its 7.5 s windows. Turn the clocks
+// down rather than sleep through a minute and a half three times.
+LobbyServer.tunables.queueSoftWaitSeconds = 1;
+LobbyServer.tunables.queueHardWaitSeconds = 2;
+
 const server = new LobbyServer();
 server.init(Number(process.env.PIRATES_BR_TEST_PORT ?? 0));
 for (let i = 0; i < 50 && server.boundPort == null; i += 1) await sleep(100);
