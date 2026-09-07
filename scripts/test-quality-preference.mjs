@@ -176,6 +176,45 @@ for (const { row, score, want, why } of BENCH_ROWS) {
     bench.tierForBenchScore(0) === 'low' && bench.tierForBenchScore(NaN) === 'low');
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// DEFAULT-FRAMEBUFFER MSAA IS A TILE-BASED PRIVILEGE (AA-01, review-2 P1).
+//
+// `low` builds no PostFx, so `antialias: true` on the context is the only AA it
+// can have — but `low` is also where every Intel/AMD integrated part and every
+// masked unknown lands, and there 4x samples + resolve are main-memory traffic
+// per frame on the weakest hardware in the roster, for a staircase gain the
+// edge-shimmer probe measured at ~0 through the 0.62 upscale. It was asked of
+// all of them unconditionally. This grades WHO is asked, per device row, with
+// no browser.
+{
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const TILE_BASED = new Set(['Safari on an M2 Air', 'Chrome on an M2 Air', 'iPhone 15 Safari', 'Android phone']);
+  let wrong = 0;
+  const seen = { yes: 0, no: 0 };
+  for (const row of ROWS) {
+    const tile = [...TILE_BASED].some((n) => row.name.startsWith(n));
+    const got = mod.wantsDefaultFramebufferMsaa(row.want, row.renderer);
+    const want = row.want === 'low' && tile;
+    if (want) seen.yes += 1; else seen.no += 1;
+    if (got !== want) {
+      wrong += 1;
+      console.error(`     ${row.name}: tier=${row.want} tile=${tile} wants MSAA=${got}, expected ${want}`);
+    }
+  }
+  expect('default-framebuffer MSAA is asked of the tile-based low machines and nobody else',
+    wrong === 0, `${wrong}/${ROWS.length} rows disagree`);
+  expect('the row set actually exercises both answers (not vacuously all-false)',
+    seen.yes >= 3 && seen.no >= 5, `yes=${seen.yes} no=${seen.no}`);
+  expect('an immediate-mode part on the low tier is NOT asked for it',
+    mod.wantsDefaultFramebufferMsaa('low', ROWS[4].renderer) === false
+    && mod.wantsDefaultFramebufferMsaa('low', null) === false);
+  expect('and no tier above low asks for it at all (they resolve in the composer target)',
+    mod.wantsDefaultFramebufferMsaa('balanced', 'Apple GPU') === false
+    && mod.wantsDefaultFramebufferMsaa('high', 'Apple GPU') === false);
+  expect('SwiftShader is not tile-based (the browser gates must not pay for samples)',
+    mod.isTileBasedGpu('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))') === false);
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

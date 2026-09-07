@@ -6,6 +6,7 @@ import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 import {
   classifyRenderer, decideRenderQuality, readGpuRendererString, saveAutoTierCeiling, saveAutoTierProof,
+  wantsDefaultFramebufferMsaa,
   tierAbove, tierBelow, type QualityVerdict, type RenderQuality,
 } from './QualityPreference.js';
 import {
@@ -721,8 +722,18 @@ export class Renderer {
     // relink, and no HalfFloat buffer. It is deliberately NOT set on the tiers
     // that render into the composer target, where the default framebuffer is
     // only ever blitted to and its samples would be paid for nothing.
+    //
+    // AND NOT ON EVERY LOW MACHINE. `low` is also where detectRenderQuality
+    // sends Intel/AMD integrated parts and every masked-renderer unknown, and
+    // those are IMMEDIATE-MODE: 4x samples plus a resolve through main memory,
+    // every frame, on the weakest hardware in the roster — for a gain the
+    // edge-shimmer probe measured at ~0 through the 0.62 upscale, which is
+    // already a stronger low-pass than 4x MSAA. Same tile-based test
+    // msaaSamples() applies one tier up (wantsDefaultFramebufferMsaa, graded
+    // per device row by scripts/test-quality-preference.mjs).
     this.renderer = new THREE.WebGLRenderer({
-      antialias: this.quality === 'low',
+      antialias: wantsDefaultFramebufferMsaa(
+        this.quality, this.qualityVerdict.rendererString ?? readGpuRendererString()),
       powerPreference: 'high-performance',
     });
     this.renderer.setOpaqueSort(frontToBack);

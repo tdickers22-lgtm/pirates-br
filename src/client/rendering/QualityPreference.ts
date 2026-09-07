@@ -326,6 +326,42 @@ export function classifyRenderer(rendererString: string | null): GpuClass {
 }
 
 /**
+ * True for a TILE-BASED (deferred) GPU: Apple silicon and the phone parts.
+ *
+ * The distinction is not cosmetic, it decides who may be asked for MSAA. On a
+ * tile-based part the multisample resolve happens in on-chip tile memory before
+ * the tile is ever written out, so 4x on the default framebuffer costs bandwidth
+ * that was never spent. On an immediate-mode part (Intel, AMD, NVIDIA) the
+ * samples and the resolve are paid through main memory on every frame, which is
+ * the most expensive place to pay them and the one the weakest machines can
+ * least afford. `software` (SwiftShader, llvmpipe) is emphatically not
+ * tile-based: there samples are literal extra CPU work.
+ */
+export function isTileBasedGpu(rendererString: string | null): boolean {
+  const gpu = classifyRenderer(rendererString);
+  return gpu === 'apple-base' || gpu === 'apple-pro' || gpu === 'apple-opaque' || gpu === 'mobile-gpu';
+}
+
+/**
+ * Should this machine get MSAA on the DEFAULT framebuffer?
+ *
+ * Only the `low` tier asks: it builds no PostFx, so the default framebuffer is
+ * the picture, and nothing else would anti-alias it (AA-01). But `low` is also
+ * where detectRenderQuality sends every Intel/AMD integrated part and every
+ * masked-renderer unknown, and on those the resolve is main-memory traffic on
+ * the weakest hardware in the roster for a gain the edge-shimmer probe measured
+ * at ~0 through the 0.62 upscale (4775 -> 4774 hard steps on the horizon stand,
+ * 12011 -> 11962 on the rigging stand). So it is asked ONLY of the tile-based
+ * parts, where it is close to free.
+ *
+ * Pure and exported so scripts/test-quality-preference.mjs can grade it per
+ * device row without a browser.
+ */
+export function wantsDefaultFramebufferMsaa(quality: RenderQuality, rendererString: string | null): boolean {
+  return quality === 'low' && isTileBasedGpu(rendererString);
+}
+
+/**
  * True for an Apple BASE-chip machine — the fanless-or-nearly class.
  *
  * `Apple M2` is a base chip; `Apple M2 Pro`, `Apple M2 Max` and `Apple M2 Ultra`
