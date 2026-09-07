@@ -231,7 +231,9 @@ expect('Caves generate across the roster (hillside placement finds sites)', tota
   // 45 → 48: campsite variants tent_b/tent_c (kills the copy-pasted camp kit)
   // plus 'crag', the exposed-bedrock outcrop migrated out of the client-only
   // decoration pass into the collidable registry.
-  expect('Every prop type has collider metadata', Object.keys(PROP_COLLIDERS).length === 48);
+  // 48 → 50: rowboat + signal_pyre, shipped since 2026-07-25 and referenced by
+  // nothing; registered so a scatter pass is one line (assets-04).
+  expect('Every prop type has collider metadata', Object.keys(PROP_COLLIDERS).length === 50);
 }
 
 // ── Chest map offsets reconstruct the true world position ──

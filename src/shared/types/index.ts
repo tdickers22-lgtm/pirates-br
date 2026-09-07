@@ -373,6 +373,9 @@ export type IslandPropType =
   // Exposed bedrock outcrop on mountain/rocky flanks. Was client-only
   // decoration with no collision; now a registry prop so it blocks.
   | 'crag'
+  // Built, AO-baked and shipped 2026-07-25, never referenced until now.
+  // Registered so a scatter pass is one line; nothing places them yet.
+  | 'rowboat' | 'signal_pyre'
   | 'bush' | 'bush_berry' | 'flower_bush' | 'fern_plant' | 'flower_patch' | 'wildflowers'
   | 'dock_mid' | 'dock_end'
   // Story scenes — one hero vignette per roster island (docs/ISLAND_STORY_BIBLE.md)
