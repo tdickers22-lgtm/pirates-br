@@ -139,9 +139,12 @@ async function queueUp(name) {
 console.log('A throwing join strands nobody:');
 {
   // The cohort dispatches once two humans have waited >5 s (QUEUE_MIN_HUMANS_FAST).
-  const original = Match.prototype.createHumanClient;
+  // MODE-01 slice c: the lobby places a CREW at a time (Match.createCrew), so
+  // the synthetic throw goes there — createHumanClient is no longer on the
+  // lobby's path and patching it made all eight of these assertions vacuous.
+  const original = Match.prototype.createCrew;
   let calls = 0;
-  Match.prototype.createHumanClient = function (...args) {
+  Match.prototype.createCrew = function (...args) {
     calls += 1;
     if (calls === 2) throw new Error('synthetic spawn failure (test)');
     return original.apply(this, args);
@@ -150,7 +153,7 @@ console.log('A throwing join strands nobody:');
   const b = await queueUp('Baker');
   const c = await queueUp('Charlie');
   await sleep(7_500);
-  Match.prototype.createHumanClient = original;
+  Match.prototype.createCrew = original;
 
   expect('first cohort member boards', a.types().includes('match_start'), `saw=${a.types().join(',')}`);
   expect('third cohort member boards despite the second throwing', c.types().includes('match_start'), `saw=${c.types().join(',')}`);
@@ -173,13 +176,13 @@ console.log('A throwing join strands nobody:');
 
 console.log('A match nobody could board is reaped at once:');
 {
-  const original = Match.prototype.createHumanClient;
-  Match.prototype.createHumanClient = function () { throw new Error('synthetic total spawn failure (test)'); };
+  const original = Match.prototype.createCrew;
+  Match.prototype.createCrew = function () { throw new Error('synthetic total spawn failure (test)'); };
   const matchesBefore = (await (await fetch(`${HTTP}/health`)).json()).matches;
   const d = await queueUp('Dog');
   const e = await queueUp('Easy');
   await sleep(7_500);
-  Match.prototype.createHumanClient = original;
+  Match.prototype.createCrew = original;
   const matchesAfter = (await (await fetch(`${HTTP}/health`)).json()).matches;
   expect('both members told (lobby_error)', d.types().includes('lobby_error') && e.types().includes('lobby_error'),
     `d=${d.types().join(',')} e=${e.types().join(',')}`);
