@@ -270,6 +270,13 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
     ],
   },
   grave_marker: { shape: 'capsule', radius: 0.3, height: 1.1 },
+  // Wired but unplaced (assets-04): the clinker tender is 1.08 x 2.70 m with
+  // its sheer at 1.10 m, so the hull is a capsule on the measured reach, not a
+  // disc on the beam; the unlit beacon is a 2.44 x 1.60 m log crib 1.98 m tall.
+  // Both sit on a shallow authored skirt (-0.09 / -0.15) that propBaseLift
+  // leaves alone, which is what keeps a beached boat in the sand.
+  rowboat: { shape: 'capsule', radius: 1.35, height: 1.1 },
+  signal_pyre: { shape: 'capsule', radius: 1.30, height: 2.0 },
 };
 
 /** Palette hints per biome (0xRRGGBB) — the client keys vertex colors off

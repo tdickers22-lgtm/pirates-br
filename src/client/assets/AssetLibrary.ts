@@ -29,6 +29,10 @@ export const ASSET_NAMES = [
   'kraken_wreck', 'dig_site', 'gallows', 'parley_table',
   'mine_head', 'widow_memorial', 'gibbet_cage',
   'bone_pile', 'driftwood_log', 'grave_marker',
+  // Shipped since 2026-07-25 and loaded by nothing until now; they appear
+  // embedded in mermaid_shrine and crow_roost, so the standalone GLBs are
+  // the same builders (_story_props.py) and can never drift from the scenes.
+  'rowboat', 'signal_pyre',
   // Creatures with named animatable pivot nodes (scripts/blender/build_animals.py)
   'shark', 'crab', 'chicken', 'pig', 'gull',
 ] as const;
