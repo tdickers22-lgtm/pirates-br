@@ -2156,8 +2156,10 @@
       <div class="lobby-roster" id="lobby-roster"></div>
       <div class="lobby-row" id="lobby-bot-row">
         <span class="label">Bot Crews</span>
-        <input type="range" id="lobby-bot-slider" min="0" max="9" step="1" value="9" />
-        <span id="lobby-bot-count" style="font-family:monospace;color:#f4e2b2;min-width:24px;text-align:right;">9</span>
+        <!-- max/value are overwritten from MODES at boot (MenuController):
+             never hardcode a fleet size here (netcode-17). -->
+        <input type="range" id="lobby-bot-slider" min="0" max="11" step="1" value="11" />
+        <span id="lobby-bot-count" style="font-family:monospace;color:#f4e2b2;min-width:24px;text-align:right;">11</span>
       </div>
       <div class="menu-row">
         <button class="menu-btn primary" id="lobby-start-btn">⛵ Start Voyage</button>

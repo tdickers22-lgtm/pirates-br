@@ -1,7 +1,7 @@
 import type {
   LobbyUpdatePayload, QueueUpdatePayload, PlayerStatsRecord, MatchStartPayload, WelcomePayload,
 } from '../../shared/types/index.js';
-import { MATCH_TOTAL_SHIPS } from '../../shared/constants/index.js';
+import { MATCH_TOTAL_SHIPS, botFillFor } from '../../shared/constants/index.js';
 import type { NetworkClient } from '../network/NetworkClient.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
@@ -178,6 +178,10 @@ export class MenuController {
     this.lobbyCopyBtn = this.must<HTMLButtonElement>('lobby-copy-btn');
     this.lobbyRoster = this.must('lobby-roster');
     this.lobbyBotSlider = this.must<HTMLInputElement>('lobby-bot-slider');
+    // The slider's ceiling is the mode's fleet less the host's own crew, read
+    // from MODES — it was the literal 9 in index.html against a fleet the
+    // server now builds twelve hulls deep (netcode-17 / DEADTYPES).
+    this.lobbyBotSlider.max = String(botFillFor('solo', 1));
     this.lobbyBotCount = this.must('lobby-bot-count');
     this.lobbyStartBtn = this.must<HTMLButtonElement>('lobby-start-btn');
     this.lobbyLeaveBtn = this.must<HTMLButtonElement>('lobby-leave-btn');
@@ -408,7 +412,7 @@ export class MenuController {
       }
       if (!submitName(true)) return;
       this.beginMatchStart('solo');
-      this.network.soloStart(9);
+      this.network.soloStart(botFillFor('solo', 1));
     });
 
     this.createPartyBtn.addEventListener('click', () => {
