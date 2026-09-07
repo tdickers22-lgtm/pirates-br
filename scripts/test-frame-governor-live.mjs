@@ -72,11 +72,25 @@ const HITCH_MS = parseInt(arg('hitch', '400'), 10);
  *  them in it, which is well clear of the top 5%. */
 const HITCH_EVERY = 5;
 const VIEWPORT = { width: 960, height: 540 };
-/** The `low` tier's resolution floor (Renderer.minPixelRatio). Written out
+/** The `low` tier's resolution floor and ceiling AT THIS VIEWPORT. Written out
  *  rather than read from the app so a regression that lowers the floor is a
- *  failure here and not a silently-agreeing pair of numbers. */
-const LOW_TIER_PIXEL_RATIO_FLOOR = 0.44;
-const LOW_TIER_PIXEL_RATIO_CEILING = 0.62;
+ *  failure here and not a silently-agreeing pair of numbers — but written out
+ *  as the arithmetic, because PERF-01 (wave 2.6) made the caps a function of
+ *  the viewport instead of two per-tier literals, and the old flat 0.44/0.62
+ *  then graded a ladder that no longer existed (a settled 0.6217 was reported
+ *  as "above the tier ceiling 0.62" on green code).
+ *
+ *  pixelRatioCaps('low', 960, 540, 1), spelled out:
+ *    budgetRatio = sqrt(550_000 / (960 × 540)) = 1.030  → over TIER_MAX 0.62
+ *    tierCap     = 0.62
+ *    openFloor   = MIN_BUFFER_WIDTH 640 / 960          = 0.667
+ *    ceiling     = min(dPR 1, max(0.62, 0.667))        = 0.667
+ *    ladderFloor = MIN_BUFFER_WIDTH_FLOOR 480 / 960    = 0.5
+ *    floor       = min(0.667, max(TIER_MIN 0.44, 0.5)) = 0.5
+ *  i.e. on a 960x540 dPR-1 panel the cheap tier never renders under a 480 px
+ *  buffer and never opens over a 640 px one. */
+const LOW_TIER_PIXEL_RATIO_FLOOR = 0.5;
+const LOW_TIER_PIXEL_RATIO_CEILING = 2 / 3;
 
 let failures = 0;
 function expect(label, condition, detail = '') {
