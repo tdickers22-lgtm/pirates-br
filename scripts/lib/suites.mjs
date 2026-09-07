@@ -69,6 +69,13 @@ export const LOGIC = [
   // against the shared getSwimHullHalfWidth, and setHullMasks' culling /
   // ordering / zero-allocation contract is driven through the real API.
   quick(tsx('test-ocean-hull-mask.mjs')),
+  // SHADOW-01 (wave 4.3). The four numbers the lighting rig got wrong, graded
+  // without a rasteriser: normalBias as a count of shadow texels instead of a
+  // hand-picked metre (and re-derived across the governor's whole map-size
+  // ladder), the heightfield casting BackSide, the sea's shadow wiring read
+  // back out of the shipped OCEAN_VERT/OCEAN_FRAG, and the storm key/fill
+  // trade plus the third DirectionalLight that is no longer allocated.
+  quick(tsx('test-shadow-bias.mjs')),
   // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
   // deadline must be read inside a row or the 2 ms budget is a fiction.
   quick(tsx('test-bathymetry-budget.mjs')),
