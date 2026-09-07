@@ -729,6 +729,10 @@ export interface StormState {
   shrinkDuration: number;  // seconds to complete shrink
   shrinkProgress: number;  // 0-1
   damagePerSec: number;
+  /** END-01. 0 until the arc runs out, then ramps 0->1 over the collapse window
+   *  as the eye itself closes and the final circle turns lethal. The HUD reads
+   *  it for the THE EYE CLOSES banner; the server reads it for the damage. */
+  eyeCollapse: number;
 }
 
 // ── Trade ─────────────────────────────────────────────────────

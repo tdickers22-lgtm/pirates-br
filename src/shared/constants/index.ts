@@ -717,9 +717,17 @@ export const STORM_PHASES = [
   // Phase 5 — danger zone (45 s wait)
   { waitSec:  40, shrinkSec: 25,  startRadius: 190, endRadius:  95, dmgPerSec:  5.8 },
   // Phase 6 — very dangerous (30 s wait)
-  { waitSec:  30, shrinkSec: 20,  startRadius:  95, endRadius:  40, dmgPerSec:  8.5 },
-  // Phase 7 — endgame, lethal outside (15 s wait)
-  { waitSec:  15, shrinkSec: 15,  startRadius:  40, endRadius:  12, dmgPerSec:  12 },
+  { waitSec:  30, shrinkSec: 20,  startRadius:  95, endRadius:  70, dmgPerSec:  8.5 },
+  // Phase 7 — THE ARENA, not a demolition circle (END-01, gameplay-22).
+  //
+  // The final ring used to close to 12 m — a 24 m disc that cannot contain one
+  // galleon (22 m) let alone two brigs. The last two crews met in a space where
+  // cannon are pointless at 10 m and the decider was whose bow poked out of the
+  // circle first. 35 m is >= 1.5 x the longest hull in the game, so the endgame
+  // is a boarding duel or a gunnery duel you can read off the chart. The clock
+  // is no longer the ring: it is the eye collapse (StormSystem), which is why
+  // this can be wide without the match becoming unbounded.
+  { waitSec:  15, shrinkSec: 15,  startRadius:  70, endRadius:  35, dmgPerSec:  12 },
 ];
 
 /** The whole storm arc in seconds — every phase's wait plus its shrink. The
