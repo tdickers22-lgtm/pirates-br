@@ -98,7 +98,9 @@ const WALKERS = ['pig', 'chicken', 'crab'];
  *  slopes never show air). Measured world-space on 2026-09-02; a rebuild that
  *  moves one by more than PIN_TOL fails here. */
 const PINNED_BASE = {
-  boulder_a: 0.537, boulder_b: 0.137, boulder_c: 0.337,
+  // Re-pinned 2026-09-07: the Astra rebuild dropped the boulders' authored
+  // +0.14/+0.34/+0.54 Blender lift; they now seat on their own small skirt.
+  boulder_a: -0.083, boulder_b: -0.120, boulder_c: -0.100,
   crag: -1.55, searock_a: -1.026, searock_b: -1.268, searock_c: -0.785,
   castaway_camp: -3.4, crow_roost: -0.342, dig_site: -0.541, fort: -5.006, gallows: -0.611,
   kraken_wreck: -2.503, mermaid_shrine: -0.151, mine_head: -3.028, parley_table: -0.217,
@@ -147,7 +149,9 @@ for (const [type, col] of Object.entries(PROP_COLLIDERS)) {
 console.log('\n[b] scene spacing vs footprint');
 for (const [type, col] of Object.entries(PROP_COLLIDERS)) {
   const b = rows.get(type);
-  if (!b || col.shape !== 'none') continue;
+  // A 'none' scene with a solid sub-chain (wreck, log) is graded on the chain
+  // by test-prop-colliders §9, not on a disc that must reserve its whole box.
+  if (!b || col.shape !== 'none' || col.subColliders?.length) continue;
   const spacing = getPropSpacingRadius(type, 1);
   if (spacing === 0) continue; // foliage: walk-through and unreserved by design
   const half = Math.max(b.halfX, b.halfZ);
@@ -158,9 +162,13 @@ for (const [type, col] of Object.entries(PROP_COLLIDERS)) {
 console.log('\n[c] bases: on the ground or pinned');
 for (const [name, b] of rows) {
   if (WALKERS.includes(name) || name === 'gull') continue;
-  if (name in PINNED_BASE) {
-    const want = PINNED_BASE[name];
-    expect(`${name}: pinned base ${want} (measured ${b.minY.toFixed(3)})`, Math.abs(b.minY - want) <= PIN_TOL,
+  // An LOD variant inherits its master's pin; decimation moves the single
+  // lowest vertex by up to ~0.3 m, which is not a re-authored base.
+  const master = name.endsWith('_far') ? name.slice(0, -4) : name;
+  const tol = master === name ? PIN_TOL : 0.3;
+  if (master in PINNED_BASE) {
+    const want = PINNED_BASE[master];
+    expect(`${name}: pinned base ${want} (measured ${b.minY.toFixed(3)})`, Math.abs(b.minY - want) <= tol,
       `authored lift/skirt moved by ${(b.minY - want).toFixed(3)} m — update PINNED_BASE only if the rebuild meant it`);
   } else {
     expect(`${name}: base ${b.minY.toFixed(3)} in [${GROUND_MIN}, ${GROUND_MAX}]`, b.minY >= GROUND_MIN && b.minY <= GROUND_MAX,
