@@ -546,8 +546,19 @@ export class PhysicsSystem {
     const botForgiveness = t < BOT_GROUNDING_FORGIVENESS_SECONDS;
     if (!berthShelter && !botForgiveness) return;
 
-    // A human aboard forfeits the bot rail — a captured hull is a real crew's
-    // problem, and the peace window must never make a player's ship unsinkable.
+    // TWO RAILS, TWO REASONS — and they were merged (STORM-01, storm-20).
+    //
+    // groundForgiven is a BOT rail: bot helms miss shoals, and a pathing miss no
+    // player witnesses was sinking crews in the first ninety seconds. A human
+    // aboard forfeits it, because the peace window must never make a player's
+    // ship unsinkable.
+    //
+    // berthSheltered is a WORLD rail: a hull lying at her own mooring is not
+    // available to the tempest or the seabed, whoever happens to be standing on
+    // her deck. Sharing one `continue` with the bot rail meant a player who
+    // walked aboard his OWN moored ship handed her to the storm — the hull she
+    // was sheltered as an empty bot hull started taking breaches the moment he
+    // stepped on the deck, which is the opposite of what a berth is for.
     const humanAboard = new Set<string>();
     const botById = new Map<string, boolean>();
     for (const player of players) {
@@ -557,8 +568,7 @@ export class PhysicsSystem {
 
     for (const ship of ships) {
       if (!ship.alive || ship.sinking) continue;
-      if (humanAboard.has(ship.id)) continue;
-      if (botForgiveness && botById.get(ship.ownerId) === true) {
+      if (botForgiveness && botById.get(ship.ownerId) === true && !humanAboard.has(ship.id)) {
         this.groundForgivenShipIds.add(ship.id);
       }
       if (!berthShelter || !ship.anchored) continue;
