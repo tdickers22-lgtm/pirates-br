@@ -493,6 +493,41 @@ const colorLuma = (c: THREE.Color) => c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722
 // never clip to a hard rectangular seam on the terrain you're standing near.
 const SHADOW_HALF_EXTENT = 155;
 const SHADOW_LIGHT_DISTANCE = 210;
+/**
+ * THE BIAS IS A NUMBER OF TEXELS, NOT A NUMBER OF METRES (SHADOW-01 /
+ * graphics-04, physics-39).
+ *
+ * `shadow.normalBias` displaces the RECEIVER along its own normal before the
+ * shadow map is sampled. It was a flat 1.0 m at `high` and 1.8 m at
+ * `balanced` — world units, hand-picked once against a 4096² map and never
+ * re-derived when the map shrank. A receiver point pushed `d` along its normal
+ * moves the sampled shadow edge on level ground by `d / tan(sunElevation)`:
+ * 1.8 m under a 30° late-match sun is 3.1 m, and at noon (~70°) still 0.65 m.
+ * That is why every barrel, post, mast, rail and pair of legs threw a shadow
+ * that started a stride away from the thing casting it (peter-panning), and why
+ * anything thinner than the bias could not shadow itself at all — which is the
+ * hole ContactShadows was built to paper over.
+ *
+ * The quantity the bias actually has to beat is ONE SHADOW TEXEL of depth
+ * slop, so it belongs in texels. `2.0 * texel` is the PCFSoft kernel's own
+ * reach (a 3×3 tap spread is ~1.5 texels) plus a margin; the floor keeps a
+ * future tighter cascade honest and the ceiling stops a governor step that
+ * halves the map from re-introducing the metre.
+ *
+ * At today's single 310 m box that is 0.30 m at `high` (2048², 15.1 cm texels)
+ * and 0.40 m at `balanced` (1536², 20.2 cm) — 3.3× and 4.5× closer to the
+ * caster's feet than before, for zero per-frame cost. Acne does not come back
+ * because the one DoubleSide receiver in the world (the terrain heightfield)
+ * gets `shadowSide = BackSide` in the same lane, so it stops writing its own
+ * front-face depth into the map.
+ */
+export function shadowNormalBias(texelWorldSize: number): number {
+  return Math.min(0.40, Math.max(0.06, 2.0 * texelWorldSize));
+}
+/** Constant depth bias that rides with it. -0.00035 was tuned to hide the acne
+ *  a DoubleSide terrain wrote; with shadowSide fixed at the source it only
+ *  costs contact, so it comes back to the finder's -0.0002. */
+export const SHADOW_DEPTH_BIAS = -0.0002;
 const SHADOW_UP = new THREE.Vector3(0, 1, 0);
 const SHADOW_ORIGIN = new THREE.Vector3(0, 0, 0);
 
@@ -874,8 +909,7 @@ export class Renderer {
     this.sun.shadow.camera.top    =  SHADOW_HALF_EXTENT;
     this.sun.shadow.camera.bottom = -SHADOW_HALF_EXTENT;
     this.sun.shadow.camera.updateProjectionMatrix();
-    this.sun.shadow.bias = -0.00035;
-    this.sun.shadow.normalBias = this.quality === 'high' ? 1.0 : 1.8;
+    this.applyShadowBias();
     this.scene.add(this.sun);
     // Target must be in the graph so the follow-camera shadow frustum updates.
     this.scene.add(this.sun.target);
@@ -1459,6 +1493,17 @@ export class Renderer {
     };
   }
 
+  /** Re-derives the shadow biases from the box the light is CURRENTLY looking
+   *  through. Called from the constructor and from both things that can change
+   *  a texel's world size under it: the governor's map-size ladder and the
+   *  governor's extent scale (shadowHalfExtent). Neither is part of a program
+   *  cache key, so nothing re-links. */
+  private applyShadowBias() {
+    const texel = (this.shadowHalfExtent() * 2) / this.sun.shadow.mapSize.x;
+    this.sun.shadow.bias = SHADOW_DEPTH_BIAS;
+    this.sun.shadow.normalBias = shadowNormalBias(texel);
+  }
+
   private applyShadowMapSize(size: number) {
     if (!this.sun.castShadow || this.sun.shadow.mapSize.x === size) return;
     // A resize drops the target, and a dropped target is blank until something
@@ -1469,6 +1514,9 @@ export class Renderer {
     // nothing recompiles.
     this.sun.shadow.map?.dispose();
     this.sun.shadow.map = null as unknown as THREE.WebGLRenderTarget;
+    // Half the texels across the same box is twice the texel: the bias moves
+    // with it or the ladder's bottom step goes back to peter-panning.
+    this.applyShadowBias();
   }
 
   /** 0 = dry, 1 = full downpour. Couples falling-rain density into the
@@ -1702,6 +1750,7 @@ export class Renderer {
     const halfExtent = this.shadowHalfExtent();
     if (this.appliedShadowExtent !== halfExtent) {
       this.appliedShadowExtent = halfExtent;
+      this.applyShadowBias();
       const cam = this.sun.shadow.camera;
       cam.left = -halfExtent;
       cam.right = halfExtent;
