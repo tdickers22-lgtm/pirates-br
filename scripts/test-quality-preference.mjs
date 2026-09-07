@@ -18,7 +18,7 @@
 // canvas. The URL and stored-preference short-circuits are NOT exercised here —
 // `decideRenderQuality` keeps them and the pinned suites depend on `?quality=`.
 //
-// RED ON HEAD (2026-09-02): Safari M2 Air → balanced, iPhone → balanced,
+// RED ON HEAD (2026-09-02, re-witnessed 2026-09-07): Safari M2 Air → balanced, iPhone → balanced,
 // UHD 620 → balanced, Adreno phone → balanced, masked unknown → balanced.
 // Green is lane 2.6's job (RENDERER_RULES + mobile/integrated/opaque-Apple rules).
 //

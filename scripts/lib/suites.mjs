@@ -192,7 +192,8 @@ export const LOGIC = [
   //   glb-census --check          — the models README's counts vs disk + ASSET_NAMES/FAR_ASSET_NAMES
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
   quick({ file: 'glb-census.mjs', cmd: ['node', 'scripts/glb-census.mjs', '--check'] }),
-  //   test-quality-preference     — detector rows per device (Safari M2 Air → balanced today; PERF-01, lane 2.6)
+  //   test-quality-preference     — detector rows per device: RENDERER_RULES sends the opaque-Apple Air,
+  //                                 phones, Adreno and Intel UHD to 'low', and 'low' is the unknown default (PERF-01, lane 2.6)
   tsx('test-quality-preference.mjs'),
 ];
 

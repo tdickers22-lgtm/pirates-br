@@ -151,6 +151,73 @@ export function readGpuRendererString(): string | null {
   return cachedRendererString;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE RULE TABLE — what the GPU's own name says about its fill rate
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * The detector used to guess from CPU facts about a GPU problem, and it was
+ * wrong on three of four device classes (PERF-01: perf-01/02/03): Safari on an
+ * Apple-silicon Air reports the opaque `Apple GPU`, so the Air rule missed and
+ * the Air opened on `balanced` with a 1536² shadow map, bloom and FXAA; every
+ * phone landed on `balanced` too (no touch signal, and iOS never exposes
+ * `deviceMemory`, so `memoryStrong` defaulted true); a 2018 Intel UHD 620
+ * ultrabook landed on `balanced` because eight threads read as headroom.
+ *
+ * So the string is classified FIRST, by a table rather than by two ad-hoc
+ * regexes, and the table is exported so the settings panel can print the rule
+ * that matched instead of a bare tier.
+ *
+ * The classes, and why each is its own class rather than a boolean:
+ * - `mobile-gpu`   Adreno / Mali / PowerVR / Xclipse: a phone or tablet part.
+ * - `integrated`   Intel HD/UHD/Iris and AMD APU graphics: shares memory
+ *                  bandwidth with the CPU and has roughly a third of an M2's
+ *                  fill rate. Never a `balanced` machine by default.
+ * - `apple-base`   `Apple M2` and friends WITHOUT a Pro/Max/Ultra suffix: the
+ *                  fanless-to-nearly class (see `isAirClassGpu`).
+ * - `apple-pro`    `Apple M2 Pro/Max/Ultra`: real headroom.
+ * - `apple-opaque` Safari's `Apple GPU`. Could be an Air or an Ultra and the
+ *                  string cannot tell you (perf-v-04) — treated as UNKNOWN, not
+ *                  as a base chip, and settled by the fill benchmark.
+ * - `software`     SwiftShader / llvmpipe: a headless rasteriser.
+ * - `discrete`     GeForce/RTX/Quadro/Radeon RX/Arc: the only class that may
+ *                  reach `high` from the string alone.
+ */
+export type GpuClass = 'mobile-gpu' | 'integrated' | 'apple-base' | 'apple-pro' | 'apple-opaque' | 'software' | 'discrete' | 'unknown';
+
+export interface RendererRule {
+  /** Printed in the settings panel and in probe output. */
+  readonly name: string;
+  readonly test: RegExp;
+  readonly gpuClass: GpuClass;
+}
+
+/** Ordered: the FIRST rule whose regex matches wins, so the narrow strings
+ *  (Pro/Max/Ultra, Iris Xe MAX) are tested before the broad ones. */
+export const RENDERER_RULES: readonly RendererRule[] = [
+  { name: 'software rasteriser', test: /swiftshader|llvmpipe|software\s*rasteriz|generic\s+renderer|basic\s+render/i, gpuClass: 'software' },
+  { name: 'Apple M-series Pro/Max/Ultra', test: /\bapple\s+m\d+\s+(pro|max|ultra)\b/i, gpuClass: 'apple-pro' },
+  { name: 'Apple M-series base chip', test: /\bapple\s+m\d+\b/i, gpuClass: 'apple-base' },
+  { name: 'Apple GPU (opaque, Safari)', test: /\bapple\s+gpu\b/i, gpuClass: 'apple-opaque' },
+  { name: 'Qualcomm Adreno / ARM Mali / PowerVR / Xclipse', test: /\b(adreno|mali|powervr|xclipse|videocore)\b/i, gpuClass: 'mobile-gpu' },
+  // Iris Xe MAX (DG1) is a discrete part that happens to carry the Iris name.
+  { name: 'Intel Xe MAX / Arc', test: /\b(iris\s+xe\s+max|intel\s*\(?r?\)?\s*arc)\b/i, gpuClass: 'discrete' },
+  { name: 'Intel integrated graphics', test: /intel.*\b(hd|uhd|iris|gma)\b/i, gpuClass: 'integrated' },
+  { name: 'AMD APU graphics', test: /\b(vega\s*\d|radeon\s+graphics|radeon\s+hd\s+[678]\d{3}g)\b/i, gpuClass: 'integrated' },
+  { name: 'discrete NVIDIA / AMD', test: /\b(geforce|rtx|gtx|quadro|tesla|radeon\s+(rx|pro)\b)/i, gpuClass: 'discrete' },
+];
+
+/** The rule that matched, or null when the string is absent or unrecognised. */
+export function matchRendererRule(rendererString: string | null): RendererRule | null {
+  if (!rendererString) return null;
+  for (const rule of RENDERER_RULES) if (rule.test.test(rendererString)) return rule;
+  return null;
+}
+
+export function classifyRenderer(rendererString: string | null): GpuClass {
+  return matchRendererRule(rendererString)?.gpuClass ?? 'unknown';
+}
+
 /**
  * True for an Apple BASE-chip machine — the fanless-or-nearly class.
  *
@@ -159,13 +226,42 @@ export function readGpuRendererString(): string | null {
  * core count cannot. The core ceiling is the second half of the test: a base
  * chip with more than ten cores is not a part Apple ships in an Air.
  *
+ * Deliberately does NOT accept Safari's opaque `Apple GPU`: that string is an
+ * Ultra as often as it is an Air, and answering "Air" to it would under-tier a
+ * Mac Studio permanently (perf-v-04). `apple-opaque` gets the unknown path.
+ *
  * Exported so the settings panel can say WHY it defaulted the way it did.
  */
 export function isAirClassGpu(rendererString: string | null, cores: number): boolean {
-  if (!rendererString) return false;
-  if (/\bapple\s+m\d+\s+(pro|max|ultra)\b/i.test(rendererString)) return false;
-  if (!/\bapple\s+m\d+\b/i.test(rendererString)) return false;
-  return cores <= 10;
+  return classifyRenderer(rendererString) === 'apple-base' && cores <= 10;
+}
+
+/**
+ * A phone or a tablet, by any signal that is actually present.
+ *
+ * There was no mobile branch at all (perf-02), so an iPhone (6 cores, no
+ * `deviceMemory`, `Apple GPU`) and an 8 GB Android both fell through every
+ * `low` branch into `balanced`: a 1536² PCF-soft shadow map, UnrealBloom and
+ * FXAA on a part that cannot pay for any of them. Worse, the two rungs that
+ * would have helped most are the two the runtime governor is forbidden to pull
+ * (switching shadows or post off re-links every program), so nothing recovered.
+ *
+ * Three independent signals, because every one of them is missing somewhere:
+ * a mobile GPU name; coarse-pointer touch; a mobile user-agent. iPadOS reports
+ * a desktop UA and `Apple GPU`, and is caught by touch points.
+ */
+export function isMobileClient(rendererString: string | null, nav: Navigator): boolean {
+  if (classifyRenderer(rendererString) === 'mobile-gpu') return true;
+  const ua = typeof nav.userAgent === 'string' ? nav.userAgent : '';
+  if (/android|iphone|ipad|ipod|\bmobile\b|silk|kindle/i.test(ua)) return true;
+  const touchPoints = typeof nav.maxTouchPoints === 'number' ? nav.maxTouchPoints : 0;
+  if (touchPoints > 1) {
+    const coarse = typeof window.matchMedia === 'function'
+      ? window.matchMedia('(pointer: coarse)').matches
+      : true;
+    if (coarse) return true;
+  }
+  return false;
 }
 
 /**
@@ -175,26 +271,32 @@ export function isAirClassGpu(rendererString: string | null, cores: number): boo
  * Only two kinds of machine pair a devicePixelRatio of 2 or more with eight
  * cores or fewer: a thin laptop, and a small desktop on a HiDPI monitor. Both
  * are asked, by a ratio of 2, for four times the fragments of 1.0 — and neither
- * is the workstation the old core-count rule mistook them for. A ratio that high
- * is also the single most expensive fact about a client, so if the guess is
- * wrong the cost of being wrong is one tier, which the runtime ladder and the
- * settings panel both undo.
+ * is the workstation the old core-count rule mistook them for.
  *
- * Deliberately NOT applied when the renderer string is present and says
- * otherwise: a named Pro/Max part has already answered this question better.
+ * Deliberately NOT applied when the renderer string is present and recognised:
+ * a named part has already answered this question better. An UNRECOGNISED
+ * string is no better than a masked one, so it does not disable the rule.
  */
 export function isLikelyThinLaptop(rendererString: string | null, cores: number): boolean {
-  if (rendererString) return false;
+  if (classifyRenderer(rendererString) !== 'unknown') return false;
   if (cores > 8) return false;
   return (window.devicePixelRatio || 1) >= 1.9;
 }
 
-export type QualityVerdict = {
-  quality: RenderQuality;
+export type QualityReason =
   /** 'player' when they chose it, 'url' for ?quality=, otherwise the signal that
    *  decided — surfaced in the settings panel and in probe output. */
-  reason: 'player' | 'url' | 'air-class-gpu' | 'thin-laptop' | 'few-cores' | 'low-memory' | 'huge-viewport' | 'audition' | 'default';
+  | 'player' | 'url'
+  | 'mobile' | 'integrated-gpu' | 'air-class-gpu' | 'thin-laptop' | 'software-gpu'
+  | 'few-cores' | 'low-memory' | 'huge-viewport' | 'unknown-default'
+  | 'bench' | 'audition' | 'promoted' | 'default';
+
+export type QualityVerdict = {
+  quality: RenderQuality;
+  reason: QualityReason;
   rendererString: string | null;
+  /** The rule that classified the GPU, for the settings panel. */
+  rule?: string;
 };
 
 /**
@@ -224,6 +326,15 @@ export function decideRenderQuality(): QualityVerdict {
  * wins first in `decideRenderQuality` — so a census asking it "what tier would
  * this machine get" was answered `url`, every time, and reported the pin back to
  * itself as a detection. This is the reading it wanted.
+ *
+ * LOW IS THE UNKNOWN DEFAULT (perf-20 phase 3). The old fallthrough was
+ * `balanced`, which meant every machine the detector could not identify — a
+ * masked string, a privacy extension, a browser this table has never seen — was
+ * handed shadows, bloom and FXAA on the strength of nothing at all. The cost of
+ * being wrong downward is one tier that the in-session governor gives back as
+ * scalar and the cross-session promotion proof gives back as a tier; the cost of
+ * being wrong upward is a session of stutter and, on this repo's own history, a
+ * `userspace_watchdog_timeout`.
  */
 export function detectRenderQuality(): QualityVerdict {
   const rendererString = readGpuRendererString();
@@ -231,44 +342,64 @@ export function detectRenderQuality(): QualityVerdict {
   const cores = nav.hardwareConcurrency ?? 4;
   const memory = nav.deviceMemory;
   const memoryLimited = typeof memory === 'number' && memory <= 4;
-  const memoryStrong = typeof memory === 'number' ? memory >= 8 : true;
+  const memoryStrong = typeof memory === 'number' && memory >= 8;
   // Judge on CSS pixels: the adaptive pixel-ratio scaler owns the output
   // resolution, so a HiDPI panel must not by itself veto a tier.
   const cssPixels = window.innerWidth * window.innerHeight;
+  const rule = matchRendererRule(rendererString);
+  const gpuClass = rule?.gpuClass ?? 'unknown';
+  const named = (quality: RenderQuality, reason: QualityReason): QualityVerdict =>
+    ({ quality, reason, rendererString, rule: rule?.name });
 
-  // The signal core count cannot give. A fanless Air reports the same eight
-  // cores and sixteen gigabytes as a desktop that would run this at the ceiling.
   let verdict: QualityVerdict;
-  if (isAirClassGpu(rendererString, cores)) {
-    verdict = { quality: 'low', reason: 'air-class-gpu', rendererString };
-  } else if (isLikelyThinLaptop(rendererString, cores)) {
-    // The GPU name is the good signal and it is not always there — Firefox
-    // masks WEBGL_debug_renderer_info by default, privacy extensions mask it
-    // everywhere, and a headless shell often has no answer at all. Without it
-    // an eight-core Air fell through to 'balanced' and only reached 'low' after
-    // a session of auditioning itself, which is a session spent at the wrong
-    // tier on the exact machines this rule exists for.
-    verdict = { quality: 'low', reason: 'thin-laptop', rendererString };
+  // The GPU's class first: it is a fact about the part that will render the
+  // frame, and every rule below it is an inference about the machine around it.
+  if (isMobileClient(rendererString, nav)) {
+    verdict = named('low', 'mobile');
+  } else if (gpuClass === 'integrated') {
+    verdict = named('low', 'integrated-gpu');
+  } else if (gpuClass === 'software') {
+    verdict = named('low', 'software-gpu');
+  } else if (isAirClassGpu(rendererString, cores)) {
+    verdict = named('low', 'air-class-gpu');
   } else if (cores <= 4) {
-    verdict = { quality: 'low', reason: 'few-cores', rendererString };
+    verdict = named('low', 'few-cores');
   } else if (memoryLimited) {
-    verdict = { quality: 'low', reason: 'low-memory', rendererString };
+    verdict = named('low', 'low-memory');
+  } else if (isLikelyThinLaptop(rendererString, cores)) {
+    // Firefox masks WEBGL_debug_renderer_info by default and privacy extensions
+    // mask it everywhere; without the string an eight-core Air fell through to
+    // 'balanced' and only reached 'low' after a session of auditioning itself.
+    verdict = named('low', 'thin-laptop');
   } else if (cssPixels > 3_400_000 && cores <= 6) {
-    verdict = { quality: 'low', reason: 'huge-viewport', rendererString };
-  } else if (cores >= 12 && memoryStrong && cssPixels <= 2_600_000) {
-    // 'high' now needs headroom the eight-core class does not demonstrate.
-    // Twelve is the first count that is not an Air, a base Mini or a two-port
-    // Pro — the machines this game kept telling it was a workstation.
-    verdict = { quality: 'high', reason: 'default', rendererString };
+    verdict = named('low', 'huge-viewport');
+  } else if (gpuClass === 'discrete' || gpuClass === 'apple-pro') {
+    // 'high' needs headroom the eight-core class does not demonstrate. Twelve is
+    // the first count that is not an Air, a base Mini or a two-port Pro.
+    verdict = cores >= 12 && cssPixels <= 2_600_000
+      ? named('high', 'default')
+      : named('balanced', 'default');
+  } else if (gpuClass === 'apple-opaque') {
+    // Safari on Apple silicon: the string, the core count (WebKit clamps it)
+    // and deviceMemory (never exposed) are ALL opaque at once, so there is no
+    // input that separates an M2 Air from an M2 Ultra (perf-v-04). Only the
+    // fill benchmark can, and until it has run this opens safe.
+    verdict = named('low', 'unknown-default');
   } else {
-    verdict = { quality: 'balanced', reason: 'default', rendererString };
+    verdict = named('low', 'unknown-default');
+  }
+  // memoryStrong is only ever allowed to hold a tier back, never to grant one:
+  // an unreported deviceMemory used to read as "strong" and was the reason iOS
+  // reached 'balanced'.
+  if (verdict.quality === 'high' && typeof memory === 'number' && !memoryStrong) {
+    verdict = named('balanced', 'low-memory');
   }
 
   // …and clamp to whatever a previous session's audition proved this machine
   // could not hold. Only ever downward.
   const ceiling = loadAutoTierCeiling();
   if (ceiling && TIER_ORDER.indexOf(ceiling) < TIER_ORDER.indexOf(verdict.quality)) {
-    return { quality: ceiling, reason: 'audition', rendererString };
+    return { quality: ceiling, reason: 'audition', rendererString, rule: rule?.name };
   }
   return verdict;
 }
