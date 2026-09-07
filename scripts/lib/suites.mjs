@@ -227,6 +227,11 @@ export const LOGIC = [
   //   test-ship-helm-anchor       — wheel on yaw rate, galleon anchor in the air, sail+bundle both drawn (SHIP-01, lane 1.3)
   tsx('test-ship-helm-anchor.mjs'),
   tsx('test-ship-geometry.mjs'),
+  //   test-ship-geometry-hash     — the refactor seatbelt for HULLGEO-01: the drawn geometry of all three
+  //                                 hulls hashed against scripts/fixtures/ship-geometry.snapshot.json, so a
+  //                                 "pure move" of ShipRenderer into rendering/ship/* cannot change a vertex
+  //                                 unnoticed. --update rebuilds the baseline; --mutate is its red proof.
+  tsx('test-ship-geometry-hash.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   glb-census --check          — the models README's counts vs disk + ASSET_NAMES/FAR_ASSET_NAMES
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
