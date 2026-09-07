@@ -391,8 +391,28 @@ export function updateInstanceLod(
     // shoreline thickens in several small instalments instead of one.
     const phase = 0.83 + batch.stagger * 0.34;
     if (batch.far && batch.near) {
-      const d = apparent * phase;
-      const wantFar = batch.farApplied ? d > farSwap * FAR_SWAP_HYSTERESIS : d > farSwap;
+      // ONE ISLAND MUST NOT CHANGE SILHOUETTE IN ONE FRAME. The swap used to be
+      // decided from a single apparent distance with only the ±17% type phase
+      // on it, so a hull closing at 15 m/s watched every palm, bush, boulder
+      // and scrub batch on an island exchange geometry inside the same second
+      // — and a swap with no cross-fade is a pop wherever it lands.
+      //
+      // A batch's own SIZE says where its swap belongs: a 9 m palm's crown
+      // outline is worth tens of pixels at the tier's swap line, a half-metre
+      // tuft's is worth one, so the palm should hold its near mesh longer and
+      // the tuft should let go sooner. Spreading on height (and then ±18% of
+      // the type hash inside that) puts every batch on its own line, which is
+      // roughly triangle-neutral — the big things keep more, the small things
+      // keep less — and no two cross together.
+      // The band is deliberately BELOW 1 on average: spreading the swaps must
+      // not buy coherence with the low tier's triangles. Measured on the
+      // fidelity gate's low calm-water view — 0.55 + h/6 (palms out to 1.30x)
+      // took it from 246k to 352k triangles against a 330k ceiling; this band
+      // lands it under where it started.
+      const sizeSpread = Math.min(1.05, Math.max(0.78, 0.70 + batch.height / 14));
+      const threshold = farSwap * sizeSpread * (0.82 + batch.stagger * 0.36);
+      const d = apparent;
+      const wantFar = batch.farApplied ? d > threshold * FAR_SWAP_HYSTERESIS : d > threshold;
       if (wantFar !== batch.farApplied) {
         batch.farApplied = wantFar;
         const set = wantFar ? batch.far : batch.near;
