@@ -43,19 +43,14 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 page.on('pageerror', (err) => console.log(`  [pageerror] ${err}`));
 
 // Other agents editing this tree make vite full-reload the page mid-run, which
-// wipes the match out from under us. Stub the HMR client so this tab never
-// listens for reloads.
-await page.route('**/@vite/client*', (route) => route.fulfill({
-  status: 200,
-  contentType: 'application/javascript',
-  body: [
-    'export const createHotContext = () => ({ on(){}, off(){}, send(){}, accept(){}, acceptExports(){}, dispose(){}, prune(){}, invalidate(){}, data:{} });',
-    'export const updateStyle = () => {};',
-    'export const removeStyle = () => {};',
-    'export const injectQuery = (u) => u;',
-    'export default {};',
-  ].join('\n'),
-}));
+// wipes the match out from under us. Swallow Vite's HMR WebSocket (the vite
+// dev server's own port) so this tab never hears a reload. NOT page.route on
+// /@vite/client: any HTTP route makes Playwright intercept every request, and
+// under that interception the GAME socket's upgrade dies with code 1006 and the
+// menu never appears (measured 2026-09-06: connected in 1.0 s without the
+// route, never in 90 s with it — on 26e17d6b as well as HEAD).
+const viteHost = new URL(BASE_URL).host;
+await page.routeWebSocket((url) => new URL(url).host === viteHost, () => { /* never connect */ });
 
 await page.goto(`${BASE_URL}/?debug`, { waitUntil: 'domcontentloaded' });
 // A WAIT, not a grade: on the software rasteriser the boot's loading-paint
