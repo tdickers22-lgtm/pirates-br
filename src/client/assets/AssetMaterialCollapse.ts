@@ -6,7 +6,8 @@ import * as THREE from 'three';
  * The static batcher was taught to merge a pier's meshes (c6ca898) and every
  * remaining decor draw became SOLE-OF-MATERIAL: draws per copy equal materials
  * per copy, on every row of the census. The reason is in the assets, not in the
- * code that places them. Sixty-three GLBs, **zero images, zero textures**, and
+ * code that places them. Sixty-three GLBs (plus 15 _far LODs — the models
+ * README carries the generated count), **zero images, zero textures**, and
  * 8-16 flat-colour `MeshStandardMaterial`s apiece. `fort.glb` is twelve
  * materials — `Rock_Dark`, `Stone_Fort`, `Bone`, `Gold` — i.e. twelve draw
  * calls to say twelve colours.
@@ -216,7 +217,7 @@ export function collapseBlockers(materials: readonly THREE.Material[]): string[]
  *
  *   * NOT A STANDARD MATERIAL. Nothing else has the uniforms this patch writes.
  *   * A MAP OR AN EMISSIVE. A texture needs UVs the merge does not reconcile,
- *     and a lit material's glow is not a diffuse tint. Nine of the sixty-one
+ *     and a lit material's glow is not a diffuse tint. Nine of the sixty-three
  *     GLBs are refused here for `Ember`, `Lantern_Glass`, `Candle_Wax`.
  *   * A MATERIAL SOMEONE HAS PATCHED. `onBeforeCompile` or a non-empty
  *     `customProgramCacheKey` means a system elsewhere is writing this material's

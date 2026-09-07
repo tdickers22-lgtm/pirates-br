@@ -19,7 +19,7 @@ import * as THREE from 'three';
  *     cage straps and gold coins all collapse to black regardless of albedo.
  *
  * Both are corrected on load rather than per-GLB in Blender: it is one rule
- * over every asset (56 GLBs, ~300 materials) instead of 22 rebuilt binaries,
+ * over every asset (63 GLBs, ~300 materials) instead of 22 rebuilt binaries,
  * and it cannot drift back when a scene is next rebuilt.
  *
  * Pinned by scripts/test-material-floor.mjs, which runs the real AssetLibrary
