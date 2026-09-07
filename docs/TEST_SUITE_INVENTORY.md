@@ -163,6 +163,7 @@ runner grows an `expectRed` vocabulary. They are not in the quick tier.
 | `test-ship-helm-anchor` | wheel span on yaw rate (−12.32 rad from a ram, 0 at the helm); galleon anchor stock at +1.09 m; 7 hoist heights draw both canvases | SHIP-01 (lane 1.3, landed) |
 | `test-ship-geometry` | hold floor 24/24 verts outside the loft, stern 0.85 m aft | HULLGEO-01 |
 | `test-asset-bounds` | boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (world-space TRS applied) | ASSETS lane |
+| `glb-census --check` | the models README's counts vs disk + `ASSET_NAMES`/`FAR_ASSET_NAMES` (78 = 63 + 15, 0 unwired) | PROPCOL-01 assets-20 (lane 2.5) |
 | `test-quality-preference` | Safari M2 Air (opaque "Apple GPU") and four other rows grade `balanced` | PERF-01 (lane 2.6) |
 | `test-storm-wall` (browser) | noon sea chroma 6.67× sky | STORMVIS-01 (lane 5.4) |
 
