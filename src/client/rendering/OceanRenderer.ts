@@ -65,6 +65,11 @@ ${STORM_WAVE_PARAMS.map((w) => waveComponentGlsl(w, 'storm', '      ')).join('\n
   }
 `;
 
+/** Seconds the shoreline takes to hand over from the ellipse estimate to the
+ *  sampled depth texture. Long enough that no beach changes in one frame,
+ *  short enough that nobody sails through the whole of it. */
+const BATHY_FADE_SEC = 1.5;
+
 const SHORE_GLSL = `
   uniform sampler2D u_bathymetry;
   uniform vec4 u_bathymetryBounds;
@@ -74,13 +79,19 @@ const SHORE_GLSL = `
   // ellipse distance is rescaled to meters by the minor half-extent, which is
   // exact on the minor axis and slightly conservative on the major one.
   float shoreDist(vec2 p, float waterY) {
-    if (u_bathymetryReady > 0.5) {
+    float bed = 1000.0;
+    if (u_bathymetryReady > 0.0) {
       vec2 uv = (p - u_bathymetryBounds.xy) / u_bathymetryBounds.zw;
-      if (min(uv.x, uv.y) < 0.0 || max(uv.x, uv.y) > 1.0) return 1000.0;
-      float bedY = texture2D(u_bathymetry, uv).r * 20.0 - 12.0;
-      // Express actual depth on the existing metre-scale tint/foam ramps.
-      // A deep channel inside an island's outline must not become a surf film.
-      return max(0.0, waterY - bedY) * 5.0;
+      if (min(uv.x, uv.y) >= 0.0 && max(uv.x, uv.y) <= 1.0) {
+        float bedY = texture2D(u_bathymetry, uv).r * 20.0 - 12.0;
+        // Express actual depth on the existing metre-scale tint/foam ramps.
+        // A deep channel inside an island's outline must not become a surf film.
+        bed = max(0.0, waterY - bedY) * 5.0;
+      }
+      // Once the fade is finished the ellipse loop is DEAD CODE on the GPU:
+      // u_bathymetryReady is a uniform, so this branch is coherent across the
+      // whole draw and costs one comparison, not sixteen ellipses.
+      if (u_bathymetryReady >= 0.999) return bed;
     }
     float d = 100000.0;
     for (int i = 0; i < ${MAX_ISLANDS}; i++) {
@@ -89,7 +100,7 @@ const SHORE_GLSL = `
       vec2 q = (p - isl.xy) / isl.zw;
       d = min(d, (length(q) - 1.0) * min(isl.z, isl.w));
     }
-    return d;
+    return mix(d, bed, u_bathymetryReady);
   }
 `;
 
@@ -291,6 +302,26 @@ const OCEAN_FRAG = /* glsl */`
     float ampNorm = u_roughness * 0.70 * (1.0 + stormSea * 0.85) + stormSea * 1.85;
     float hn = clamp(v_height / max(0.22, ampNorm), -1.0, 1.0);
     float flank = clamp(hn * (0.32 + 0.18 * stormSea) + 0.5, 0.0, 1.0);
+    // ── FROM ALTITUDE, hn IS NOT CREST-VS-TROUGH, IT IS A GRID ──────────
+    // Every wave component fades out with camDist (waveField), and the SHORT
+    // ones go first. Climb to 250m and what is left of the swell is the two or
+    // three LONGEST components — which is exactly the periodic set, so their
+    // interference draws a regular diagonal lattice of dark rhombi, and the
+    // height tint paints it in colour at full strength no matter how far away
+    // the water is. The whitecaps already knew about this (capRange, below,
+    // thins foam on highEye x viewDist); the base colour did not, which is why
+    // the open sea in the fidelity shots is a chequerboard the foam is not.
+    //
+    // So fade the tint toward its own mean on the same ramp, and break what
+    // survives with a slow aperiodic mottle: a grid you can still see but
+    // cannot predict stops reading as a grid. Both are zero at deck height, so
+    // nothing about sailing changes.
+    float highEye = smoothstep(60.0, 240.0, u_cameraPos.y);
+    float flankFlat = smoothstep(160.0, 620.0, viewDist) * highEye * 0.88;
+    if (flankFlat > 0.001) {
+      float tint = noise(wp * 0.021 + u_time * vec2(0.004, 0.003));
+      flank = mix(flank, 0.5 + (tint - 0.5) * 0.34, flankFlat);
+    }
     vec3 deep   = mix(vec3(0.008, 0.09, 0.28), vec3(0.004, 0.045, 0.15), stormSea);
     vec3 lifted = mix(vec3(0.045, 0.30, 0.50), vec3(0.11, 0.33, 0.44), stormSea);
     vec3 base   = mix(deep, lifted, flank);
@@ -437,7 +468,6 @@ const OCEAN_FRAG = /* glsl */`
     // rather than water. Altitude pulls the handover nearer, and what it hands
     // over to is the flat base colour the horizon dissolve is already walking
     // toward. Eye level keeps its caps out past 700 m and is untouched.
-    float highEye = smoothstep(60.0, 240.0, u_cameraPos.y);
     float capRange = 1.0 - smoothstep(mix(700.0, 300.0, highEye), mix(1800.0, 900.0, highEye), viewDist);
     // Only the STEEPEST crests break into whitecaps on a calm/moderate sea, so
     // open water reads as clear blue with sparse foam — not a dense grid of
@@ -751,10 +781,15 @@ export class OceanRenderer {
   private pendingIslands: OceanIslandFootprint[] | null = null;
   private pendingStorm: StormSeaState | null = null;
   private bathymetry: OceanBathymetry | null = null;
+  /** 0 while the ellipse fallback is authoritative, 1 once the depth texture
+   *  is; the shoreline CROSS-FADES between them over BATHY_FADE_SEC. */
+  private bathymetryFade = 0;
+  private quality: RenderQuality = 'balanced';
 
   private readonly sunDir = new THREE.Vector3(0.62, 0.24, -0.74).normalize();
 
   init(scene: THREE.Scene, quality: RenderQuality = 'balanced') {
+    this.quality = quality;
     const levels = LOD_LEVELS[quality];
     this.snapSize = levels[levels.length - 1].cell;
 
@@ -849,8 +884,17 @@ export class OceanRenderer {
 
   update(dt: number, cameraPos?: THREE.Vector3) {
     this.time += dt;
-    if (this.bathymetry && !this.bathymetry.complete && this.bathymetry.step()) {
-      this.material.uniforms.u_bathymetryReady.value = 1;
+    // THE SHORELINE MUST NOT CHANGE IN ONE FRAME. Completion used to set
+    // u_bathymetryReady = 1, and every visible beach's turquoise ramp and lap
+    // film jumped together — pop-in a player sees, at the worst possible
+    // moment (they have just joined and are looking at the shore). shoreDist
+    // now blends the ellipse estimate into the texture over BATHY_FADE_SEC,
+    // and the 16-ellipse loop is skipped entirely once the fade is done, so
+    // the steady-state fragment cost is the single texture fetch it was.
+    if (this.bathymetry && !this.bathymetry.complete) this.bathymetry.step();
+    if (this.bathymetry?.complete && this.bathymetryFade < 1) {
+      this.bathymetryFade = Math.min(1, this.bathymetryFade + dt / BATHY_FADE_SEC);
+      this.material.uniforms.u_bathymetryReady.value = this.bathymetryFade;
     }
     this.material.uniforms.u_time.value = this.time;
     this.material.uniforms.u_roughness.value = getOceanRoughness(this.time);
@@ -903,7 +947,12 @@ export class OceanRenderer {
 
   setTerrainIslands(islands: readonly Island[]) {
     this.bathymetry?.dispose();
-    this.bathymetry = new OceanBathymetry(islands);
+    // 512² on low: a quarter of the samples and a quarter of the 4 MB, on the
+    // tier that told us it cannot afford the benefit of the doubt. At 3.3 m per
+    // texel across this archipelago the shallows ramp (4-52 m) is still ten
+    // texels wide, which is what the tint and the foam band read.
+    this.bathymetry = new OceanBathymetry(islands, this.quality === 'low' ? 512 : 1024);
+    this.bathymetryFade = 0;
     if (this.material) {
       this.material.uniforms.u_bathymetry.value = this.bathymetry.texture;
       this.material.uniforms.u_bathymetryBounds.value = this.bathymetry.bounds;
