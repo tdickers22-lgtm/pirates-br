@@ -1,10 +1,20 @@
 import * as THREE from 'three';
-import { WAVE_PARAMS, STORM_WAVE_PARAMS, WAVE_CREST_SHARPNESS, getOceanRoughness, gerstnerHeight } from '../../shared/utils/index.js';
+import { WAVE_PARAMS, STORM_WAVE_PARAMS, WAVE_CREST_SHARPNESS, SWIM_HULL_STATIONS, getOceanRoughness, gerstnerHeight } from '../../shared/utils/index.js';
 import type { RenderQuality } from './Renderer.js';
 import type { Island } from '../../shared/types/index.js';
+import { PLAYER } from '../../shared/constants/index.js';
 import { OceanBathymetry } from './OceanBathymetry.js';
 
 const MAX_ISLANDS = 16;
+
+/** Hull cut-outs carried by the ocean shader at once. Ten is MATCH_TOTAL_SHIPS,
+ *  but the CPU side only ever fills the hulls within HULL_MASK_RANGE of the
+ *  camera (see setHullMasks), so on open water u_hullCount is 0 and the loop is
+ *  one comparison. */
+const MAX_HULL_MASKS = 10;
+/** Metres. Past this a hull's interior cannot be in frame, and the sea inside
+ *  it is exactly what a distant hull is supposed to be sitting in. */
+export const HULL_MASK_RANGE = 80;
 
 // GLSL is generated from the shared WAVE_PARAMS / STORM_WAVE_PARAMS so the
 // rendered surface is the same field gameplay samples via
@@ -104,6 +114,73 @@ const SHORE_GLSL = `
   }
 `;
 
+
+/** THE SEA IS NOT ALLOWED INSIDE A HULL (WATER-01 / ships-02).
+ *
+ * Nothing masked the exterior ocean against a ship, so the one flat sheet the
+ * whole world floats on was drawn straight through the planking: measured on
+ * the pinned map, the sea sits above the hold floor (0.35 m over the hull
+ * origin) in 23% of calm samples on a sloop and 66% on a galleon, and once
+ * waterLevel passes 0.44 the FREEBOARD_DROP settle puts it there PERMANENTLY —
+ * the hold floor in evidence/liveplay/18-hold-interior.png is half flat cyan.
+ *
+ * The cut-out is per-fragment and needs no stencil pass: transform the shaded
+ * world point into each hull frame and discard it if it is inside the hull box.
+ * The plan-view outline is GENERATED from the shared SWIM_HULL_STATIONS below,
+ * so what the sea is cut out of is the same outline a swimmer is pushed out of
+ * and the same one the wale is lofted to — one table, three consumers.
+ *
+ * The chain of mixes reproduces the table's piecewise-linear interpolation
+ * exactly: once zf passes station i the clamp saturates and h is pinned to that
+ * station, and every later mix has t = 0.
+ */
+const hullHalfFracGlsl = () => {
+  const st = SWIM_HULL_STATIONS;
+  const lines = [`    float h = ${fmt(st[0].half)};`];
+  for (let i = 0; i < st.length - 1; i++) {
+    const span = Math.max(1e-4, st[i + 1].z - st[i].z);
+    lines.push(`    h = mix(h, ${fmt(st[i + 1].half)}, clamp((zf - (${fmt(st[i].z)})) / ${fmt(span)}, 0.0, 1.0));`);
+  }
+  return `  // Plan-view half-beam as a fraction of hull width, at the waterline
+  // (verticalT = 0, section factor 1) — the widest line the hull ever presents.
+  float hullHalfFrac(float zf) {
+${lines.join('\n')}
+    return h;
+  }`;
+};
+
+const HULL_MASK_GLSL = /* glsl */`
+  uniform vec4 u_hullA[${MAX_HULL_MASKS}];   // x, z, cos(yaw), sin(yaw)
+  uniform vec4 u_hullB[${MAX_HULL_MASKS}];   // width, length, yMin, yMax
+  uniform int  u_hullCount;
+
+${hullHalfFracGlsl()}
+
+  // True when this world point is inside a hull the camera is close enough to
+  // see into. Reads nothing when u_hullCount is 0, which is every frame nobody
+  // is near a ship.
+  bool insideHull(vec3 p) {
+    if (u_hullCount <= 0) return false;
+    for (int i = 0; i < ${MAX_HULL_MASKS}; i++) {
+      if (i >= u_hullCount) break;
+      vec4 B = u_hullB[i];
+      if (p.y < B.z || p.y > B.w) continue;
+      vec4 A = u_hullA[i];
+      vec2 d = p.xz - A.xy;
+      // Rotate into hull space (bow +Z). A.zw is cos/sin of the RENDERED yaw.
+      vec2 l = vec2(A.z * d.x - A.w * d.y, A.w * d.x + A.z * d.y);
+      float halfLen = B.y * ${fmt(SWIM_HULL_STATIONS[SWIM_HULL_STATIONS.length - 1].z)};
+      if (abs(l.y) > halfLen) continue;
+      // Same floor the shared getSwimHullHalfWidth applies: at the stem the
+      // planking is narrower than a swimmer, and the outline all three
+      // consumers share is the one with the floor in it.
+      float hw = max(${fmt(PLAYER.RADIUS + 0.1)}, B.x * hullHalfFrac(clamp(l.y / max(0.001, B.y), -0.52, 0.52)));
+      if (abs(l.x) <= hw) return true;
+    }
+    return false;
+  }
+`;
+
 const OCEAN_VERT = /* glsl */`
   uniform float u_time;
   uniform float u_roughness;
@@ -180,6 +257,7 @@ export const OCEAN_FRAG = /* glsl */`
 
   ${WAVE_FIELD_GLSL}
   ${SHORE_GLSL}
+  ${HULL_MASK_GLSL}
 
   // Smooth pseudo-random for detail foam / ripples.
   //
@@ -247,6 +325,13 @@ export const OCEAN_FRAG = /* glsl */`
   }
 
   void main() {
+    // FIRST, BEFORE ANY SHADING: is this patch of sea inside somebody's hull?
+    // The discard costs the early-depth test on this program, which is why the
+    // whole thing is behind u_hullCount and why the CPU only ever fills hulls
+    // within HULL_MASK_RANGE — but a hold floor with the open sea drawn across
+    // it is not a fidelity nit, it is the room the crew fight in.
+    if (insideHull(v_worldPos)) discard;
+
     vec2  wp = v_worldPos.xz;
     float camDist = distance(u_cameraPos.xz, wp);
     // camDist is HORIZONTAL — the wave field's per-component fade is matched to
@@ -829,6 +914,10 @@ export class OceanRenderer {
    *  is; the shoreline CROSS-FADES between them over BATHY_FADE_SEC. */
   private bathymetryFade = 0;
   private quality: RenderQuality = 'balanced';
+  /** Reused by setHullMasks so a per-frame call allocates nothing: two number
+   *  arrays that only ever have their length reset, never new objects. */
+  private readonly maskOrder: number[] = [];
+  private readonly maskDist: number[] = [];
 
   private readonly sunDir = new THREE.Vector3(0.62, 0.24, -0.74).normalize();
 
@@ -878,6 +967,10 @@ export class OceanRenderer {
         u_stormCenter:     { value: new THREE.Vector2() },
         u_stormSafeRadius: { value: -1 },
         u_stormPhase01:    { value: 0 },
+        // Hull cut-outs (WATER-01 / ships-02) — see setHullMasks.
+        u_hullA: { value: Array.from({ length: MAX_HULL_MASKS }, () => new THREE.Vector4()) },
+        u_hullB: { value: Array.from({ length: MAX_HULL_MASKS }, () => new THREE.Vector4()) },
+        u_hullCount: { value: 0 },
         // Lightning strike response (see setLightningFlash).
         u_boltFlash: { value: 0 },
         u_boltDir:   { value: new THREE.Vector2(0, 1) },
@@ -1044,6 +1137,50 @@ export class OceanRenderer {
     if (atmo.twilightFactor !== undefined) {
       u.u_twilightFactor.value = Math.max(0, Math.min(1, atmo.twilightFactor));
     }
+  }
+
+  /** Cut the exterior sea out of these hulls (WATER-01 / ships-02).
+   *
+   *  Callers pass every hull they would like masked, in any order, with the
+   *  RENDERED pose (ShipRenderer.readRenderedHull) — not the server transform,
+   *  which trails the drawn mesh by 0.48 m mean / 9.66 m worst, i.e. by more
+   *  than a beam. This method does the culling: hulls further than
+   *  HULL_MASK_RANGE from the camera are dropped (their interior cannot be in
+   *  frame, and the sea AROUND them must still be drawn), and the nearest
+   *  MAX_HULL_MASKS survive. On open water that leaves u_hullCount at 0 and the
+   *  fragment loop at one comparison.
+   *
+   *  `top`/`bottom` are metres above/below the hull origin: the box has to
+   *  reach the rail, because the measured worst-case rise of the sea above a
+   *  galleon's centre inside her own footprint is 2.03 m in a storm.
+   *
+   *  No allocation: the uniform Vector4s are written in place, so this can be
+   *  called every frame from the render loop. */
+  setHullMasks(
+    hulls: ReadonlyArray<{ x: number; y: number; z: number; yaw: number; width: number; length: number; top: number; bottom: number }>,
+    cameraPos?: THREE.Vector3,
+  ) {
+    if (!this.material) return;
+    const u = this.material.uniforms;
+    const a = u.u_hullA.value as THREE.Vector4[];
+    const b = u.u_hullB.value as THREE.Vector4[];
+    this.maskOrder.length = 0;
+    this.maskDist.length = 0;
+    for (let i = 0; i < hulls.length; i++) {
+      const h = hulls[i];
+      const d = cameraPos ? Math.hypot(h.x - cameraPos.x, h.z - cameraPos.z) : 0;
+      if (d > HULL_MASK_RANGE) continue;
+      this.maskOrder.push(i);
+      this.maskDist[i] = d;   // keyed by hull index, so the sort is O(n log n)
+    }
+    this.maskOrder.sort((p, q) => this.maskDist[p] - this.maskDist[q]);
+    const n = Math.min(this.maskOrder.length, MAX_HULL_MASKS);
+    for (let i = 0; i < n; i++) {
+      const h = hulls[this.maskOrder[i]];
+      a[i].set(h.x, h.z, Math.cos(h.yaw), Math.sin(h.yaw));
+      b[i].set(h.width, h.length, h.y - h.bottom, h.y + h.top);
+    }
+    u.u_hullCount.value = n;
   }
 
   /** Local-weather storm COLOR intensity (darken/desaturate tint, wider spec
