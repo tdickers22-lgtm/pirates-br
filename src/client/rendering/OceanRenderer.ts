@@ -138,7 +138,12 @@ const OCEAN_VERT = /* glsl */`
   }
 `;
 
-const OCEAN_FRAG = /* glsl */`
+/** Exported so scripts/ocean-lattice-probe.mjs can pin its JS mirror of the
+ *  foam field to the GLSL that actually ships: the probe re-reads the hash(),
+ *  noise() and foam-octave lines out of this string and refuses to grade if
+ *  they have moved (a mirror that silently drifts from the shader grades
+ *  nothing). */
+export const OCEAN_FRAG = /* glsl */`
   uniform float u_time;
   uniform vec3  u_sunDir;
   uniform vec3  u_cameraPos;
@@ -176,9 +181,21 @@ const OCEAN_FRAG = /* glsl */`
   ${WAVE_FIELD_GLSL}
   ${SHORE_GLSL}
 
-  // Smooth pseudo-random for detail foam / ripples
+  // Smooth pseudo-random for detail foam / ripples.
+  //
+  // THE MULTIPLIERS ARE NOT DECORATIVE. This hash is fed INTEGER lattice
+  // coordinates, so all that survives of p * 127.1 is fract(0.1 * ix) — and
+  // 0.1 has period ten. The foam field therefore repeated exactly every ten
+  // cells along world X and Z: on the 7.9 m octave that is a pattern that tiles
+  // every 79 m, which is the plaid, and no amount of rotating the octaves
+  // removes it (a rotated tiling is still a tiling). Measured by
+  // scripts/ocean-lattice-probe.mjs: with the octaves already rotated, changing
+  // ONLY these two constants takes the sharpest spectral mode of the foam field
+  // from 48.2x its own ring median to 16.9x, and the coarse-band spike (the
+  // tiling itself) from 7.5x to 6.8x. The fractional parts below are chosen so their float32
+  // representations have no short period; the instruction count is unchanged.
   float hash(vec2 p) {
-    p = fract(p * vec2(127.1, 311.7));
+    p = fract(p * vec2(127.3217, 311.7913));
     p += dot(p, p + 19.19);
     return fract(p.x * p.y);
   }
@@ -461,7 +478,16 @@ const OCEAN_FRAG = /* glsl */`
     // constant 0.32 of the crest term, i.e. to the wave field's own period,
     // drawn clean. Foam breakup now gets a range gate matched to the scale of
     // the noise it actually samples.
-    float breakupRange = 1.0 - smoothstep(900.0, 2400.0, viewDist);
+    // AT GRAZING INCIDENCE 900 m IS THE WRONG PLACE TO START. Looking along the
+    // sea from a deck, everything past ~250 m is compressed into the last few
+    // rows of the frame: a foam field that is still fully "broken up" out there
+    // is broken up into features an eighth of a pixel tall, which is the row of
+    // woven streaks converging on the vanishing point. Looking DOWN into the
+    // water (a mast, a cliff, the chart camera) keeps the old 900 m, because
+    // from above those same features are metres across and worth drawing.
+    float grazeBreakup = 1.0 - smoothstep(0.02, 0.09, sightPitch);
+    float breakupStart = mix(900.0, 250.0, grazeBreakup);
+    float breakupRange = 1.0 - smoothstep(breakupStart, breakupStart + 1500.0, viewDist);
     // Whitecaps still have to LOD out: broken up or not, a cap is a metre-scale
     // feature, and from altitude one band of the frame holds dozens of swell
     // periods at once — which is exactly when the eye starts reading a grid
@@ -475,12 +501,30 @@ const OCEAN_FRAG = /* glsl */`
     float crest = pow(clamp(hn * (1.15 + 0.35 * stormSea) - (0.30 - 0.24 * stormSea), 0.0, 1.0), 3.4 - 1.6 * stormSea)
                 * (0.5 + 0.5 * calm + u_stormIntensity * 0.4 + stormSea * 0.5) * stormFoamFade * capRange;
     vec2 foamUv = wp * 0.018 + u_time * vec2(0.012, 0.008);
-    // …and a third octave, ROTATED off-axis and on a scale harmonic with
-    // neither the swell nor the other two, so however the periods happen to line
-    // up on a given heading their product does not repeat with any of them.
-    mat2 foamRot = mat2(0.8253, -0.5647, 0.5647, 0.8253);
-    float foamN2 = noise(foamRot * wp * 0.0413 - u_time * vec2(0.009, 0.014));
-    float foamN = noise(foamUv * 3.0) * noise(foamUv * 7.0 + 1.5) * (0.62 + 0.76 * foamN2);
+    // EVERY octave is rotated off the world axes, on scales harmonic with
+    // neither the swell nor each other. Two of the three used to be sampled
+    // straight along world X/Z at 3.0 and 7.0 — harmonics of one another — so
+    // their product drew a rectangular weave aligned with the map, identical on
+    // every heading. 23.7 deg / 61.3 deg / 34.4 deg, and 7.0 -> 7.37.
+    mat2 foamRotA = mat2(0.91566, -0.40194, 0.40194, 0.91566);
+    mat2 foamRotB = mat2(0.47971, -0.87742, 0.87742, 0.47971);
+    mat2 foamRot  = mat2(0.8253, -0.5647, 0.5647, 0.8253);
+    // FOAM IS A PATTERN UNTIL ITS CELLS GO SUBPIXEL, THEN IT IS A TINT.
+    // The 18.5 m and 7.5 m cells stay resolvable to well past a kilometre, and
+    // a screen full of them read as weave, not water. foamLod is the screen
+    // footprint of this fragment in metres (surfaceFootprint is already the
+    // max of the two world-space derivatives — fwidth in all but name, so this
+    // costs no extra derivative instruction) and blends the mask toward its own
+    // mean, 0.25. Past the handover the three noise() calls — twelve hashes —
+    // are SKIPPED, so the far sea gets cheaper as well as calmer; the branch is
+    // coherent across whole distance bands, not per pixel.
+    float foamLod = smoothstep(4.5, 9.0, surfaceFootprint * 2.0);
+    float foamN = 0.25;
+    if (foamLod < 0.998) {
+      float foamN2 = noise(foamRot * wp * 0.0413 - u_time * vec2(0.009, 0.014));
+      foamN = mix(noise(foamRotA * foamUv * 3.0) * noise(foamRotB * foamUv * 7.37 + 1.5)
+                * (0.62 + 0.76 * foamN2), 0.25, foamLod);
+    }
     // Break foam up harder (lower floor) so whitecaps are irregular, not a lattice.
     float breakup = mix(0.32, smoothstep(0.30 - 0.14 * stormSea, 0.66, foamN), breakupRange * 0.9 + 0.1);
     float foam = clamp(crest * breakup * 1.15, 0.0, 1.0);
