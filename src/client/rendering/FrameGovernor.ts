@@ -176,7 +176,7 @@ export interface GovernorStats {
 }
 
 export class FrameGovernor {
-  private readonly tuning: GovernorTuning;
+  private tuning: GovernorTuning;
   private readonly ring: Float64Array;
   private readonly scratch: Float64Array;
   private count = 0;
@@ -288,6 +288,37 @@ export class FrameGovernor {
 
   isSuspended(): boolean {
     return this.suspended;
+  }
+
+  /**
+   * WHAT THE DISPLAY IS ACTUALLY CAPABLE OF (perf-v-01).
+   *
+   * The governor is fed the rAF INTERVAL, and macOS Safari in Low Power Mode,
+   * iOS Low Power Mode, some external monitors and every battery-saver profile
+   * cap rAF at 30 Hz regardless of load. Every frame then arrives at ~33 ms
+   * with the GPU idle, the governor reads 2x over a 16.7 ms budget and walks
+   * the resolution to the tier floor for nothing, and the tier audition writes
+   * the tier below as a one-way ceiling for the NEXT session — so a laptop that
+   * spent one match on battery opens a tier lower on mains power forever.
+   *
+   * A budget of 1000/displayHz cannot be beaten by definition, so the target
+   * follows the display: 60 where the display can do 60, 30 where it cannot.
+   * `floorFps` follows at 0.8 of it so 'floor' mode still means something.
+   */
+  setDisplayHz(hz: number): void {
+    if (!Number.isFinite(hz) || hz <= 0) return;
+    const targetFps = Math.min(GOVERNOR_TUNING.targetFps, Math.round(hz));
+    const floorFps = Math.min(GOVERNOR_TUNING.floorFps, Math.round(hz * 0.8));
+    if (targetFps === this.tuning.targetFps && floorFps === this.tuning.floorFps) return;
+    this.tuning = { ...this.tuning, targetFps, floorFps };
+    // The window was measured against the old budget; grading it against the
+    // new one would step on evidence that never applied to it.
+    this.clearWindow();
+  }
+
+  /** The frame budget the governor is currently chasing, in ms. */
+  getTargetBudgetMs(): number {
+    return 1000 / this.tuning.targetFps;
   }
 
   /** Discard the NEXT frame — a known one-off the caller can name (a match

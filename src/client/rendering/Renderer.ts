@@ -4,7 +4,7 @@ import { initLightBudget, updateLightBudget } from './LightBudget.js';
 import { freezeStaticParent } from './three-util.js';
 import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
-import { decideRenderQuality, saveAutoTierCeiling, tierBelow, type QualityVerdict, type RenderQuality } from './QualityPreference.js';
+import { decideRenderQuality, saveAutoTierCeiling, saveAutoTierProof, tierAbove, tierBelow, type QualityVerdict, type RenderQuality } from './QualityPreference.js';
 import {
   FrameGovernor, resolveLevers, describeGovernor, pixelRatioCaps,
   type GovernorLevers, type GovernorMode, type LeverCaps,
@@ -961,10 +961,30 @@ export class Renderer {
    * resized (§9 lever 7).
    */
   updatePerformance(rawFrameMs: number) {
-    const rawSeconds = rawFrameMs / 1000;
-    this.perfTimer += rawSeconds;
-    this.perfFrameTime += rawSeconds;
-    this.perfFrameCount++;
+    // The rAF CADENCE is a fact about the display, not about this machine's
+    // speed, and it is read from every frame including suspended ones — a load
+    // frame is still one rAF callback apart from the next (perf-v-01).
+    this.sampleDisplayCadence(rawFrameMs);
+
+    // THE AUDITION IGNORES THE LOAD, exactly as the governor already does
+    // (perf-11). The governor was taught to ignore world-build frames with
+    // setSuspended; the between-sessions audition was not, so on a machine
+    // whose world build outlasts the 6 s skip the window averaged island
+    // reveals, the mean fell under 34 and the NEXT launch opened a tier lower
+    // with reason 'audition' — permanently, because the ceiling is one-way.
+    const suspended = this.governor.isSuspended();
+    if (!suspended) {
+      const rawSeconds = rawFrameMs / 1000;
+      this.perfTimer += rawSeconds;
+      this.perfFrameTime += rawSeconds;
+      this.perfFrameCount++;
+    } else {
+      // A suspension is a discontinuity, not a pause: the partial window on
+      // either side of it was measuring two different things.
+      this.perfTimer = 0;
+      this.perfFrameTime = 0;
+      this.perfFrameCount = 0;
+    }
 
     this.governor.pushFrame(rawFrameMs);
     const scalar = this.governor.update(performance.now());
@@ -983,13 +1003,113 @@ export class Renderer {
     // always did — it is answering a different question (is this the right TIER
     // for this machine next launch) and it must not be confused by the fact
     // that the governor has already made this session survivable.
-    if (this.perfTimer < 1.15) return;
+    this.updateTierProof(suspended, rawFrameMs);
+    if (suspended || this.perfTimer < 1.15) return;
     const avgFps = this.perfFrameCount / Math.max(0.001, this.perfFrameTime);
     this.perfTimer = 0;
     this.perfFrameTime = 0;
     this.perfFrameCount = 0;
     this.auditionTier(avgFps);
   }
+
+  /**
+   * WHAT RATE THIS DISPLAY CAN EVEN PRODUCE.
+   *
+   * The FASTEST intervals, not the median: a slow machine on a 60 Hz panel
+   * still lands the occasional 16.7 ms frame, but nothing on a 30 Hz-capped
+   * context ever lands one — the cap is a floor under the interval that no
+   * amount of headroom can get below. So the 10th percentile of a rolling
+   * window of intervals IS the display period, and 1000 / it is the rate.
+   *
+   * No allocation: one ring buffer and one scratch array, both preallocated,
+   * sorted once every DISPLAY_SAMPLES frames (a 120-element TypedArray sort
+   * every two seconds).
+   */
+  private sampleDisplayCadence(rawFrameMs: number) {
+    if (!(rawFrameMs > 0.5) || rawFrameMs > 400) return; // a stall is not a cadence
+    this.displayRing[this.displayRingAt] = rawFrameMs;
+    this.displayRingAt = (this.displayRingAt + 1) % this.displayRing.length;
+    if (this.displayRingFilled < this.displayRing.length) this.displayRingFilled += 1;
+    if (this.displayRingFilled < this.displayRing.length) return;
+    if (--this.displayRecomputeIn > 0) return;
+    this.displayRecomputeIn = this.displayRing.length;
+    this.displayScratch.set(this.displayRing);
+    this.displayScratch.sort();
+    const period = this.displayScratch[Math.floor(this.displayScratch.length * 0.1)];
+    if (!(period > 0)) return;
+    // Snap to the rates displays actually run at, so jitter cannot walk the
+    // target: 24, 30, 48, 60, 90, 120, 144.
+    const raw = 1000 / period;
+    let best = 60;
+    for (const hz of Renderer.DISPLAY_RATES) {
+      if (Math.abs(hz - raw) < Math.abs(best - raw)) best = hz;
+    }
+    if (best === this.displayHz) return;
+    this.displayHz = best;
+    this.governor.setDisplayHz(best);
+  }
+
+  /** The rates a real panel or a rAF cap produces. */
+  private static readonly DISPLAY_RATES = [24, 30, 48, 60, 90, 120, 144];
+  private readonly displayRing = new Float64Array(120);
+  private readonly displayScratch = new Float64Array(120);
+  private displayRingAt = 0;
+  private displayRingFilled = 0;
+  private displayRecomputeIn = 1;
+  private displayHz = 60;
+
+  /** The refresh rate the governor is currently budgeting against. */
+  getDisplayHz(): number {
+    return this.displayHz;
+  }
+
+  /**
+   * THE WAY BACK UP (perf-04).
+   *
+   * The audition could only ever write a CEILING, so a machine misdetected
+   * downward — a six-thread desktop with a discrete card, or, after this lane's
+   * rule table, anything the detector could not identify — stayed there for
+   * good. A full minute of unsuspended play at scalar 1.0 in 'target' mode with
+   * the median frame under HALF the budget is a machine being asked for well
+   * under what it has, and the tier above is offered next launch.
+   *
+   * Written for next launch, never applied now, for the same reason the ceiling
+   * is: the tier decides the shadow map, the sky dome's segment count and the
+   * material set every island was built with.
+   */
+  private updateTierProof(suspended: boolean, rawFrameMs: number) {
+    if (this.proofDone) return;
+    const reason = this.qualityVerdict.reason;
+    if (reason === 'url' || reason === 'player' || !this.governor.isEnabled()) {
+      this.proofDone = true;
+      return;
+    }
+    const above = tierAbove(this.quality);
+    if (!above) { this.proofDone = true; return; }
+    const halfBudget = this.governor.getTargetBudgetMs() * 0.5;
+    const idle = !suspended
+      && this.appliedScalar >= 0.999
+      && this.governor.getMode() === 'target'
+      && this.governor.getStats().medianMs > 0
+      && this.governor.getStats().medianMs < halfBudget
+      && rawFrameMs < halfBudget * 2;
+    if (!idle) { this.proofHeadroomSeconds = 0; return; }
+    this.proofHeadroomSeconds += rawFrameMs / 1000;
+    if (this.proofHeadroomSeconds < Renderer.PROOF_SECONDS) return;
+    this.proofDone = true;
+    saveAutoTierProof(above, this.qualityVerdict.rendererString);
+    console.info(
+      `[quality] ${Renderer.PROOF_SECONDS}s of headroom on '${this.quality}' — `
+      + `next launch offers '${above}'. Override in Settings → Graphics.`,
+    );
+  }
+
+  /** How long a machine must hold its tier with half the budget unspent before
+   *  it is offered the tier above. A minute, not a moment: an open-sea stretch
+   *  is not evidence about a storm over an island. */
+  private static readonly PROOF_SECONDS = 60;
+  private proofHeadroomSeconds = 0;
+  private proofDone = false;
 
   /** The world is still arriving (or a ceremony owns the screen): sample
    *  nothing. A frame spent building an island measures the build. */
@@ -1090,15 +1210,33 @@ export class Renderer {
       this.auditionDone = true;
       return;
     }
+    if (this.displayHz < 45) {
+      // A 30 Hz rAF cap (Low Power Mode, a 30 Hz display) is 30 fps by
+      // construction with the GPU idle, and the old bar of 34 would have
+      // written a permanent ceiling from it (perf-v-01). Nothing to learn here.
+      this.auditionDone = true;
+      return;
+    }
     this.auditionElapsed += 1.15;
     if (this.auditionElapsed < Renderer.AUDITION_SKIP_SECONDS) return;
-    this.auditionFpsSum += avgFps;
-    this.auditionSamples += 1;
+    if (this.auditionSamples < this.auditionFps.length) {
+      this.auditionFps[this.auditionSamples] = avgFps;
+      this.auditionSamples += 1;
+    }
     if (this.auditionElapsed < Renderer.AUDITION_SKIP_SECONDS + Renderer.AUDITION_WINDOW_SECONDS) return;
 
     this.auditionDone = true;
-    const mean = this.auditionFpsSum / Math.max(1, this.auditionSamples);
-    if (mean >= Renderer.AUDITION_FPS) return;
+    // THE MEDIAN OF THE WINDOWS, NOT THEIR MEAN (perf-11). One island reveal
+    // inside the four-second window used to drag the mean under the bar and
+    // write a ceiling the machine never earned; a median needs half the windows
+    // to be bad before it moves.
+    const taken = this.auditionFps.slice(0, this.auditionSamples).sort((a, b) => a - b);
+    if (taken.length === 0) return;
+    const median = taken[Math.floor(taken.length / 2)];
+    // …and against a bar the display can actually clear.
+    const bar = Math.min(Renderer.AUDITION_FPS, this.displayHz * 0.55);
+    if (median >= bar) return;
+    const mean = median;
     const below = tierBelow(this.quality);
     if (!below) return;
     saveAutoTierCeiling(below);
@@ -1119,7 +1257,9 @@ export class Renderer {
    *  merely being asked to turn its resolution down. */
   private static readonly AUDITION_FPS = 34;
   private auditionElapsed = 0;
-  private auditionFpsSum = 0;
+  /** Every 1.15 s window's average, so the verdict can be a median. Fixed size:
+   *  the window is 4.6 s, which is five of them. */
+  private readonly auditionFps = new Float64Array(8);
   private auditionSamples = 0;
   private auditionDone = false;
 

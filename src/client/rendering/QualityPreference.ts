@@ -92,6 +92,71 @@ export function tierBelow(quality: RenderQuality): RenderQuality | null {
   return index > 0 ? TIER_ORDER[index - 1] : null;
 }
 
+/** One step UP the tier ladder, or null at the top. */
+export function tierAbove(quality: RenderQuality): RenderQuality | null {
+  const index = TIER_ORDER.indexOf(quality);
+  return index >= 0 && index < TIER_ORDER.length - 1 ? TIER_ORDER[index + 1] : null;
+}
+
+/**
+ * A FINGERPRINT of the machine a measurement was taken on.
+ *
+ * A ceiling or a proof is a statement about one GPU driving one panel. Plug the
+ * laptop into a 4K monitor, or open the same profile on another machine through
+ * a synced localStorage, and the old verdict is about a machine that is not
+ * here. The renderer string plus the screen size is the cheapest pair that
+ * changes when either of those does.
+ */
+export function machineSignature(rendererString: string | null): string {
+  const screen = typeof window !== 'undefined' && window.screen ? window.screen : null;
+  const w = screen?.width ?? 0;
+  const h = screen?.height ?? 0;
+  return `${rendererString ?? 'masked'}|${w}x${h}`;
+}
+
+/**
+ * A PROMOTION the machine earned by holding its tier with headroom to spare.
+ *
+ * The audition ceiling was one-way (perf-04): a six-thread gaming desktop with
+ * an RTX 3060 was handed 'balanced' and had no path back, and after this lane's
+ * rule table every machine the detector cannot identify opens on 'low' — which
+ * would be a trap without a way up. So the renderer also writes a PROOF: a full
+ * minute of unsuspended play at scalar 1.0 in 'target' mode with the median
+ * frame under half the budget is a machine that is plainly not being asked for
+ * enough, and the tier above is offered on the NEXT launch (never mid-session:
+ * the tier decides the shadow map, the sky dome and every island's material
+ * set).
+ *
+ * A proof is only ever applied over a reason that was a GUESS. `mobile`,
+ * `integrated-gpu` and `air-class-gpu` are facts about the part, and a fanless
+ * Air holding 60 fps in a menu is not evidence that it can hold a 1536² shadow
+ * map in a storm.
+ */
+export function loadAutoTierProof(rendererString: string | null): RenderQuality | null {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { autoQualityProof?: { tier?: unknown; sig?: unknown } };
+    const proof = parsed.autoQualityProof;
+    if (!proof || proof.sig !== machineSignature(rendererString)) return null;
+    return parseRenderQuality(proof.tier);
+  } catch {
+    return null;
+  }
+}
+
+export function saveAutoTierProof(quality: RenderQuality | null, rendererString: string | null): void {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    const record = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    if (quality === null) delete record.autoQualityProof;
+    else record.autoQualityProof = { tier: quality, sig: machineSignature(rendererString) };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(record));
+  } catch {
+    /* private mode */
+  }
+}
+
 /**
  * A CEILING the machine earned by failing to hold a tier, remembered for next
  * launch.
@@ -336,6 +401,12 @@ export function decideRenderQuality(): QualityVerdict {
  * being wrong upward is a session of stutter and, on this repo's own history, a
  * `userspace_watchdog_timeout`.
  */
+/** Reasons a cross-session promotion proof is allowed to overrule: every one of
+ *  them is an inference from missing information, not a fact about the GPU. */
+const PROMOTABLE_REASONS: ReadonlySet<QualityReason> = new Set<QualityReason>([
+  'default', 'few-cores', 'huge-viewport', 'unknown-default', 'thin-laptop',
+]);
+
 export function detectRenderQuality(): QualityVerdict {
   const rendererString = readGpuRendererString();
   const nav = navigator as Navigator & { deviceMemory?: number };
@@ -393,6 +464,13 @@ export function detectRenderQuality(): QualityVerdict {
   // reached 'balanced'.
   if (verdict.quality === 'high' && typeof memory === 'number' && !memoryStrong) {
     verdict = named('balanced', 'low-memory');
+  }
+
+  // A previous session that held this tier with a minute of headroom to spare
+  // has earned the one above it — but only over a reason that was a GUESS.
+  const proof = PROMOTABLE_REASONS.has(verdict.reason) ? loadAutoTierProof(rendererString) : null;
+  if (proof && TIER_ORDER.indexOf(proof) > TIER_ORDER.indexOf(verdict.quality)) {
+    verdict = { quality: proof, reason: 'promoted', rendererString, rule: rule?.name };
   }
 
   // …and clamp to whatever a previous session's audition proved this machine

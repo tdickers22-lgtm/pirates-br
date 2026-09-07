@@ -48,8 +48,9 @@ const ROWS = [
   { name: 'four-core anything', renderer: 'ANGLE (Intel, Intel(R) HD Graphics 4000, OpenGL 4.1)', cores: 4, memory: 8, w: 1440, h: 900, dpr: 2, touch: 0, want: 'low' },
 ];
 
-function installEnv(row) {
+function installEnv(row, seed = null) {
   const store = new Map();
+  if (seed) store.set('piratesBR.settings', JSON.stringify(seed));
   const storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
   const gl = row.renderer === null ? { getExtension: () => null, getParameter: () => null } : {
     getExtension: (n) => (n === 'WEBGL_debug_renderer_info' ? { UNMASKED_RENDERER_WEBGL: 0x9246 } : n === 'WEBGL_lose_context' ? { loseContext() {} } : null),
@@ -57,12 +58,14 @@ function installEnv(row) {
   };
   globalThis.window = {
     location: { search: '' }, innerWidth: row.w, innerHeight: row.h, devicePixelRatio: row.dpr,
+    screen: { width: row.w, height: row.h },
     localStorage: storage, navigator: undefined, matchMedia: () => ({ matches: row.touch > 0 }),
   };
   globalThis.navigator = { hardwareConcurrency: row.cores, deviceMemory: row.memory, maxTouchPoints: row.touch, userAgent: row.touch ? 'Mobile Safari' : 'Mozilla/5.0' };
   globalThis.window.navigator = globalThis.navigator;
   globalThis.localStorage = storage;
   globalThis.document = { createElement: () => ({ getContext: () => gl }) };
+  return store;
 }
 
 const modPath = path.resolve('src/client/rendering/QualityPreference.ts');
@@ -75,6 +78,51 @@ for (const row of ROWS) {
   try { verdict = mod.detectRenderQuality(); }
   catch (e) { expect(`${row.name}: detector runs under the stub`, false, String(e?.message ?? e)); continue; }
   expect(`${row.name} → ${row.want} (got ${verdict.quality}, reason ${verdict.reason})`, verdict.quality === row.want);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE WAY BACK UP, AND THE WAY IT MUST NOT GO (perf-04, perf-v-04)
+// ─────────────────────────────────────────────────────────────────────────────
+// The audition ceiling was one-way, and after RENDERER_RULES every machine the
+// detector cannot identify opens on 'low' — which would be a trap without a
+// promotion path. A proof is a minute of unsuspended play at scalar 1.0 with
+// half the frame budget unspent, written by Renderer.updateTierProof for the
+// NEXT launch. It may only ever overrule a reason that was a GUESS.
+console.log('\nPromotion proof (a machine that proved it has headroom, and one that never can)');
+const PROOF_ROWS = [
+  { row: ROWS[6], proof: 'balanced', want: 'balanced', why: "an unknown desktop that held 'low' with headroom is offered 'balanced'" },
+  { row: ROWS[0], proof: 'balanced', want: 'balanced', why: "Safari's opaque 'Apple GPU' is unknown, not a verdict — a proven Mac Studio is promoted" },
+  { row: ROWS[1], proof: 'balanced', want: 'low', why: "a NAMED Apple base chip is a fact about the part: no proof promotes the Air" },
+  { row: ROWS[2], proof: 'high', want: 'low', why: 'no proof promotes a phone' },
+  { row: ROWS[4], proof: 'balanced', want: 'low', why: 'no proof promotes an Intel UHD 620' },
+  { row: ROWS[7], proof: 'low', want: 'balanced', why: 'a proof never LOWERS a tier' },
+];
+for (const { row, proof, want, why } of PROOF_ROWS) {
+  const sig = `${row.renderer ?? 'masked'}|${row.w}x${row.h}`;
+  installEnv(row, { autoQualityProof: { tier: proof, sig } });
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const verdict = mod.detectRenderQuality();
+  expect(`${why} (got ${verdict.quality}, reason ${verdict.reason})`, verdict.quality === want);
+}
+{
+  // A proof taken on a different machine (or a laptop now on a 4K monitor) is
+  // about a machine that is not here.
+  const row = ROWS[6];
+  installEnv(row, { autoQualityProof: { tier: 'high', sig: 'someone-elses-gpu|3840x2160' } });
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const verdict = mod.detectRenderQuality();
+  expect(`a proof whose machine signature does not match is ignored (got ${verdict.quality})`, verdict.quality === 'low');
+}
+{
+  // The downward ceiling still wins over a proof: a machine that failed its
+  // audition does not get promoted by an older proof.
+  const row = ROWS[7];
+  installEnv(row, { autoQuality: 'low', autoQualityProof: { tier: 'high', sig: `${row.renderer}|${row.w}x${row.h}` } });
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const verdict = mod.detectRenderQuality();
+  expect(`a failed audition still clamps a promoted tier (got ${verdict.quality}, reason ${verdict.reason})`,
+    verdict.quality === 'low' && verdict.reason === 'audition');
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);

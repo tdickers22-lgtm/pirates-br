@@ -625,6 +625,39 @@ section('THE BILL IS PIXELS, NOT A RATIO — pixelRatioCaps per viewport (perf-2
   expect('the levers stay inside the derived caps across the whole ladder', outside === null, outside ?? '');
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+section('A 30 Hz CAP IS NOT A SLOW MACHINE — setDisplayHz (perf-v-01)');
+// ═══════════════════════════════════════════════════════════════════════════
+// Low Power Mode on macOS/iOS, and some external monitors, cap requestAnimation-
+// Frame at 30 Hz regardless of load: every frame arrives at ~33 ms with the GPU
+// idle. Against a 16.7 ms budget that reads as 2x over on EVERY frame.
+{
+  // The machine's own work is 4 ms; the other 29 ms is the display waiting.
+  const run = (hz) => {
+    const gov = new FrameGovernor({}, 1);
+    if (hz) gov.setDisplayHz(hz);
+    let now = 0;
+    for (let i = 0; i < 3000; i += 1) { gov.pushFrame(33.3); now += 33.3; gov.update(now); }
+    return { scalar: gov.getScalar(), mode: gov.getMode() };
+  };
+  const capped = run(30);
+  const control = run(0);
+  expect(`33 ms frames on a 30 Hz display keep the picture whole (scalar ${capped.scalar.toFixed(3)})`,
+    capped.scalar >= 0.999, `mode ${capped.mode}`);
+  // THE CONTROL: without the display signal the very same trace is graded
+  // against 60 Hz and the ladder is spent to the floor. If this ever passes,
+  // setDisplayHz has become a no-op and the row above is vacuous.
+  expect(`…and without it the same trace is stripped to the floor (scalar ${control.scalar.toFixed(3)})`,
+    control.scalar <= 0.01, `mode ${control.mode}`);
+  const gov = new FrameGovernor({}, 1);
+  gov.setDisplayHz(30);
+  expect(`the budget follows the display (${gov.getTargetBudgetMs().toFixed(1)} ms)`,
+    Math.abs(gov.getTargetBudgetMs() - 1000 / 30) < 0.01);
+  gov.setDisplayHz(144);
+  expect('…but never above 60: the game is budgeted for 60, not for the panel',
+    Math.abs(gov.getTargetBudgetMs() - 1000 / 60) < 0.01, `${gov.getTargetBudgetMs()} ms`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);
   process.exit(1);
