@@ -91,28 +91,89 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   // GLB XZ half-extents are 1.29 × 1.21 on a rounded mesh — 1.6 ringed every
   // boulder with ~0.3 m of invisible blocking ground.
   boulder_a: { shape: 'sphere', radius: 1.35, height: 2.4 },
-  boulder_b: { shape: 'sphere', radius: 2.6, height: 2.0 },
-  boulder_c: { shape: 'sphere', radius: 1.1, height: 2.0 },
+  // Tilted slab + shard: 4.51 x 3.33 m of rock, so one sphere could only ever
+  // be right on one axis and 2.6 was cut for the long one — 0.9 m of invisible
+  // blocking ground along the thin face, and a pistol shot past the visible
+  // edge eaten by air. Two discs on the MEASURED masses instead (world-space
+  // per-primitive slices, `node scripts/glb-census.mjs --slices boulder_b:2`),
+  // and their tops are the rock's real 3.26 m, not the old 2.0 m cap that let
+  // ship-deck fire through the crown of the stone. assets-01, assets-22.
+  boulder_b: {
+    shape: 'none',
+    radius: 2.6, // retained: the broad-phase/legacy footprint figure, see SPACING_OVERRIDES
+    height: 3.3,
+    subColliders: [
+      { dx: -1.40, dz: 0.60, radius: 1.25, height: 3.00 },
+      { dx: 0.55, dz: 0.35, radius: 1.45, height: 3.30 },
+    ],
+  },
+  // Split stack, world half-extents 0.75 x 0.56 — r1.1 ringed the small
+  // everywhere-boulder with 0.35-0.55 m of invisible ground (worse relative to
+  // its mesh than boulder_b was) and ate shots that visibly missed the stone.
+  // SPACING_OVERRIDES holds the old 1.22 scatter spacing so the fixed world
+  // does not move. assets-23.
+  boulder_c: { shape: 'sphere', radius: 0.7, height: 2.1 },
   barrel: { shape: 'capsule', radius: 0.42, height: 1.0 },
   crate: { shape: 'capsule', radius: 0.45, height: 0.72 },
   campfire: { shape: 'sphere', radius: 0.55, height: 0.5 },
   lantern_post: { shape: 'capsule', radius: 0.16, height: 2.6 },
   // Base drum is r≈2.0 with corner block courses reaching ~2.6 — 2.5 left the
   // protruding masonry torso-deep penetrable.
-  watchtower: { shape: 'capsule', radius: 2.9, height: 9.0 },
+  // Height is the MEASURED crown (brazier at 11.45 m): the old 9.0 cap let
+  // cannon fire through the top 2.4 m of the tower. assets-22.
+  watchtower: { shape: 'capsule', radius: 2.9, height: 11.2 },
   // Central keep (r 2.8, 8.4 m) is the primary mass; towers and the curtain wall
   // are compound so everything between them stops being walk-through masonry.
-  fort: { shape: 'capsule', radius: 2.8, height: 8.4, subColliders: FORT_STRUCTURE },
-  shipwreck: { shape: 'sphere', radius: 2.6, height: 3.2 },
+  fort: { shape: 'capsule', radius: 2.8, height: 12.6, subColliders: FORT_STRUCTURE },
+  // 12.2 x 4.8 m of broken hull that used to block a 2.6 m ball at its middle:
+  // 7 m of planking and ribs were walk-through, and shots passed through the
+  // top 1.4 m of the standing side. Six discs down the keel at the measured
+  // half-beam of each station (`--slices shipwreck:6`), each topped at that
+  // station's real crown, so the silhouette IS the cover. SPACING_OVERRIDES
+  // already reserves 5.2 m, so scatter is unchanged. assets-02, assets-22.
+  shipwreck: {
+    shape: 'none',
+    radius: 2.6,
+    height: 4.64,
+    subColliders: [
+      { dx: -5.40, dz: 0, radius: 1.05, height: 3.50 },
+      { dx: -3.30, dz: 0, radius: 1.45, height: 1.90 },
+      { dx: -1.40, dz: 0, radius: 2.05, height: 4.10 },
+      { dx: 0.70, dz: 0, radius: 2.15, height: 4.10 },
+      { dx: 2.70, dz: 0, radius: 2.25, height: 4.60 },
+      { dx: 4.35, dz: 0, radius: 1.35, height: 3.60 },
+    ],
+  },
   standing_stones: { shape: 'none', radius: 0, height: 3.35, subColliders: STANDING_STONE_RING },
   // Tent canvas cores. Each variant blocks only its own occupied mass — the
   // measured p70 XZ radius of the geometry above ankle height — while
   // SPACING_OVERRIDES reserves the full guy-rope/peg footprint so scatter
   // never grows through a tent's ropes.
-  tent_a: { shape: 'sphere', radius: 1.3, height: 1.6 },
+  // The A-frame is 4.42 m along its ridge: the centre sphere covers 2.6 m of
+  // it and the last metre of canvas at BOTH gables was walk-through. Two end
+  // discs finish the ridge (offsets rotate with prop.yaw). The centre radius
+  // is deliberately untouched — MapGenerator reads it as the camp's slope
+  // probe footprint, so changing it would move the fixed world. assets-26.
+  tent_a: {
+    shape: 'sphere',
+    radius: 1.3,
+    height: 2.0,
+    subColliders: [
+      { dx: 0, dz: -1.20, radius: 1.00, height: 1.90 },
+      { dx: 0, dz: 1.20, radius: 1.00, height: 1.90 },
+    ],
+  },
   // Lean-to: one canted slope, so the mass is shallower and lower than the
   // A-frame but the driftwood windbreak runs its whole 4.8 m length.
-  tent_b: { shape: 'sphere', radius: 1.15, height: 1.5 },
+  tent_b: {
+    shape: 'sphere',
+    radius: 1.15,
+    height: 1.9,
+    subColliders: [
+      { dx: 0, dz: -1.35, radius: 1.05, height: 1.85 },
+      { dx: 0, dz: 1.35, radius: 1.05, height: 1.85 },
+    ],
+  },
   // Bell tent: round footprint round a centre pole — narrow but tall.
   tent_c: { shape: 'sphere', radius: 1.0, height: 2.3 },
   bedroll: { shape: 'none', radius: 0, height: 0.2 },
@@ -139,8 +200,8 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
     radius: 0,
     height: 4.6,
     subColliders: [
-      { dx: -2.57, dz: 0.12, radius: 1.00, height: 4.0 },
-      { dx: 2.58, dz: -0.13, radius: 1.00, height: 4.0 },
+      { dx: -2.57, dz: 0.12, radius: 1.00, height: 4.3 },
+      { dx: 2.58, dz: -0.13, radius: 1.00, height: 4.3 },
     ],
   },
   bush: { shape: 'none', radius: 0, height: 1.0 },
@@ -166,7 +227,7 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
   // 21.8 x 12.0 x 25.6 m) while this entry did not — the crushed bow, the coil
   // and the harpoon thicket were all walk-through above a 4 m core. Both figures
   // are the old authored numbers times that same 1.8.
-  kraken_wreck: { shape: 'capsule', radius: 7.2, height: 8.28 },
+  kraken_wreck: { shape: 'capsule', radius: 7.2, height: 9.2 },
   dig_site: { shape: 'none', radius: 0, height: 1.0 },
   // Walk INTO the scene between the posts (cut ropes are the focal point), but
   // not THROUGH the two heavy uprights or the coffin cart.
@@ -181,11 +242,33 @@ export const PROP_COLLIDERS: Record<IslandPropType, PropCollider> = {
     ],
   },
   parley_table: { shape: 'capsule', radius: 1.9, height: 1.0 },
-  mine_head: { shape: 'capsule', radius: 3.2, height: 5.0 },
-  widow_memorial: { shape: 'capsule', radius: 1.6, height: 3.4 },
+  mine_head: { shape: 'capsule', radius: 3.2, height: 5.2 },
+  // The gable and chimney reach 5.58 m; 3.4 left the whole upper cottage
+  // shoot-through while it read as cover. assets-22.
+  widow_memorial: { shape: 'capsule', radius: 1.6, height: 5.4 },
   gibbet_cage: { shape: 'capsule', radius: 0.5, height: 3.4 },
   bone_pile: { shape: 'none', radius: 0, height: 0.6 },
-  driftwood_log: { shape: 'sphere', radius: 1.1, height: 0.9 },
+  // A 5.74 m twisted snag that blocked a 1.1 m disc at its middle: 3.5 m of
+  // trunk walk-through, and 0.3 m too fat across the grain. Five discs down
+  // the trunk at the measured half-widths (`--slices driftwood_log:6`), from
+  // the 0.72 m butt to the thin branch end. `radius` is KEPT at 1.1 because
+  // MapGenerator reads it directly as the log's slope-probe footprint
+  // (MapGenerator.ts addProp) — shape 'none' is what removes the central
+  // blocking disc. SPACING_OVERRIDES holds the old 1.22 scatter spacing.
+  // assets-02.
+  driftwood_log: {
+    shape: 'none',
+    radius: 1.1,
+    height: 1.7,
+    subColliders: [
+      { dx: 0, dz: -2.05, radius: 0.72, height: 1.45 },
+      { dx: 0, dz: -1.05, radius: 0.50, height: 0.80 },
+      { dx: 0, dz: -0.15, radius: 0.45, height: 0.60 },
+      { dx: 0, dz: 0.70, radius: 0.55, height: 1.70 },
+      { dx: 0, dz: 1.65, radius: 0.45, height: 0.60 },
+      { dx: 0, dz: 2.60, radius: 0.52, height: 0.55 },
+    ],
+  },
   grave_marker: { shape: 'capsule', radius: 0.3, height: 1.1 },
 };
 
@@ -204,6 +287,12 @@ export const BIOME_PALETTES: Record<IslandBiome, { sand: number; grass: number; 
  *  hull skeleton is ~11×5). Scatter spacing uses the visual footprint. */
 const SPACING_OVERRIDES: Partial<Record<IslandPropType, number>> = {
   standing_stones: 3.6,
+  // Colliders that became compound (boulder_b, driftwood_log) or shrank to
+  // their mesh (boulder_c) keep their PREVIOUS spacing — radius + 0.12 as the
+  // default rule computed it — so the fixed world's scatter is bit-identical.
+  boulder_b: 2.72,
+  boulder_c: 1.22,
+  driftwood_log: 1.22,
   shipwreck: 5.2,
   fort: 8.5,
   // Tents: the canvas collider is the sleeping mass, but guy ropes and pegs

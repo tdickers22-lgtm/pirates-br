@@ -14,7 +14,8 @@
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import { PLAYER, SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
-import { PROP_COLLIDERS, getPropBoundsRadius } from '../src/shared/props.ts';
+import { PROP_COLLIDERS, SHOT_BLOCKING_PROPS, getPropBoundsRadius } from '../src/shared/props.ts';
+import { readGlb } from './glb-census.mjs';
 import {
   getIslandSurfaceY,
   getSwimHullHalfWidth,
@@ -399,6 +400,105 @@ console.log('\nSwim hull vs rendered draft');
     }
   }
   expect('broad-phase bounds cover every compound mass', boundsOk, boundsDetail);
+}
+
+
+// ── 9. Silhouette vs collider: the GLB is the contract ──
+// The four checks a stale measurement always breaks. Bounds are WORLD space
+// (node TRS composed) because 7 of the GLBs carry node transforms and the
+// accessor min/max lies about exactly the props in this section (assets-25).
+console.log('\nSilhouette vs collider (measured from the GLBs)');
+{
+  /** Long props whose ends were walk-through until they got a mass chain.
+   *  `axis` is the long axis in PROP-LOCAL space (before yaw). */
+  const ELONGATED = [
+    { type: 'driftwood_log', axis: 'z' },
+    { type: 'shipwreck', axis: 'x' },
+    { type: 'tent_a', axis: 'z' },
+    { type: 'tent_b', axis: 'z' },
+    { type: 'boulder_b', axis: 'x' },
+  ];
+  const bounds = new Map();
+  for (const type of new Set([...ELONGATED.map((e) => e.type), ...SHOT_BLOCKING_PROPS])) {
+    try { bounds.set(type, readGlb(`${type}.glb`).bounds); } catch { /* procedural, no GLB */ }
+  }
+
+  // (a) A body walking at the far END of the long axis is stopped by the
+  //     canvas / planking / trunk it can see, at yaw 0 AND rotated.
+  for (const { type, axis } of ELONGATED) {
+    const b = bounds.get(type);
+    const half = axis === 'x' ? b.halfX : b.halfZ;
+    const mid = axis === 'x' ? (b.minX + b.maxX) / 2 : (b.minZ + b.maxZ) / 2;
+    for (const yaw of [0, 1.05]) {
+      const island = makeFlatIsland();
+      const prop = { id: 90, type, x: 0, z: 0, yaw, scale: 1 };
+      island.props.push(prop);
+      let worst = Infinity;
+      let detail = '';
+      for (const sign of [-1, 1]) {
+        const t = mid + sign * half * 0.85;
+        const local = axis === 'x' ? { dx: t, dz: 0 } : { dx: 0, dz: t };
+        const c = subWorld(prop, local);
+        for (let a = 0; a < 4; a++) {
+          const res = walkProbe(island, c.x, c.z, (a / 4) * Math.PI * 2 + 0.37, 9);
+          if (res.closest < worst) {
+            worst = res.closest;
+            detail = `${sign > 0 ? '+' : '-'} end, bearing ${a}: body centre came ${res.closest.toFixed(2)} m from the mesh point (needs ≥ ${(PLAYER.RADIUS * 0.9).toFixed(2)})`;
+          }
+        }
+      }
+      expect(`${type} (yaw ${yaw}): both ends of the ${axis}-axis block a walker`,
+        worst >= PLAYER.RADIUS * 0.9, detail);
+    }
+  }
+
+  // (b) Ranged cover reads as the silhouette: every shot-blocking prop's
+  //     tallest cylinder reaches its visible crown (assets-22). The old caps
+  //     let a musket ball from a ship deck pass through the top of the rock
+  //     a player was crouched behind.
+  for (const type of SHOT_BLOCKING_PROPS) {
+    const b = bounds.get(type);
+    if (!b) continue;
+    const col = PROP_COLLIDERS[type];
+    // Props are seated origin-on-ground, then sunk by their own authored lift
+    // (PropScatterer.propBaseLift), so the crown above the terrain sample is
+    // maxY minus that lift.
+    const visible = b.maxY - Math.max(0, b.minY);
+    let top = col.shape === 'none' ? 0 : col.height;
+    for (const sub of col.subColliders ?? []) top = Math.max(top, sub.height);
+    expect(`${type}: hitscan cylinder ${top.toFixed(2)} m reaches the visible ${visible.toFixed(2)} m crown`,
+      top >= visible - 0.3, `${(visible - top).toFixed(2)} m of solid cover is shoot-through`);
+  }
+
+  // (c) A mass chain must stay INSIDE the mesh (no invisible wall) and cover
+  //     it (no walk-through gap) along the long axis.
+  for (const { type, axis } of ELONGATED) {
+    const b = bounds.get(type);
+    const col = PROP_COLLIDERS[type];
+    const lo = axis === 'x' ? b.minX : b.minZ;
+    const hi = axis === 'x' ? b.maxX : b.maxZ;
+    const spans = [];
+    if (col.shape !== 'none') spans.push([-col.radius, col.radius]);
+    for (const sub of col.subColliders ?? []) {
+      const c = axis === 'x' ? sub.dx : sub.dz;
+      spans.push([c - sub.radius, c + sub.radius]);
+    }
+    spans.sort((p, q) => p[0] - q[0]);
+    const outside = Math.max(0, lo - spans[0][0], spans[spans.length - 1][1] - hi);
+    expect(`${type}: mass chain stays inside the mesh on ${axis} (${outside.toFixed(2)} m of invisible ground)`,
+      outside <= 0.15);
+    let covered = 0;
+    let cursor = lo;
+    for (const [s0, s1] of spans) {
+      if (s1 <= cursor) continue;
+      covered += Math.min(s1, hi) - Math.max(s0, cursor);
+      cursor = Math.min(s1, hi);
+      if (cursor >= hi) break;
+    }
+    const frac = covered / (hi - lo);
+    expect(`${type}: mass chain covers ${(frac * 100).toFixed(0)}% of its ${(hi - lo).toFixed(2)} m ${axis}-span`,
+      frac >= 0.9, 'a gap in the chain is a walk-through hole in a visible mass');
+  }
 }
 
 console.log(failures === 0 ? '\nAll prop collider assertions passed' : `\n${failures} FAILURES`);
