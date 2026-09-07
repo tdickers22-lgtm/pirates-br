@@ -29,6 +29,8 @@ import {
   STORM_PHASES,
 } from '../src/shared/constants/index.ts';
 import { dist2D, getIslandSurfaceY, mulberry32 } from '../src/shared/utils/index.ts';
+import { buildWireSnapshot, CHART_REVEAL_CREWS } from '../src/server/core/snapshot.ts';
+import { warningLines } from '../src/client/ui/HudController.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -172,6 +174,55 @@ console.log('\nThe 35 m arena fits the fleet and is not a beach');
     `${(share * 100).toFixed(1)}% wet (median land ${(median * 100).toFixed(1)}%, worst ${(worst * 100).toFixed(1)}%)`);
   console.log(`     ${results.length} rings over ${WORLDS} worlds: `
     + `${(share * 100).toFixed(1)}% under the line, median land ${(median * 100).toFixed(1)}%`);
+}
+
+
+// ══ 3. The endgame is legible: the chart names the fleet, the HUD names the clock
+console.log('\nThe endgame announces itself on the chart and on the HUD');
+{
+  // The wire flag. `revealed` is written by the snapshot writer, never by the
+  // sim, and never written false — a match with four crews left pays nothing.
+  const hull = (id, alive = true, sinking = false) => ({
+    id, type: 'sloop', alive, sinking, rotation: 0, holes: [], nextHoleId: 1,
+    lastHostileShipId: null, position: { x: 1, y: 0, z: 2 },
+  });
+  const snapOf = (ships) => ({
+    serverTime: 0, shipsAlive: ships.filter((s) => s.alive && !s.sinking).length,
+    storm: { centerX: 0, centerZ: 0, safeRadius: 35, eyeCollapse: 0 },
+    ships, players: [], projectiles: [], kegs: [], sharks: [], wildlife: [],
+    islands: [], seaRocks: [], chestSync: [],
+  });
+  const four = buildWireSnapshot(snapOf([hull('a'), hull('b'), hull('c'), hull('d')]), false);
+  expect(`four crews afloat: nobody is on the chart (${CHART_REVEAL_CREWS} is the line)`,
+    four.ships.every((s) => s.revealed === undefined),
+    JSON.stringify(four.ships.map((s) => s.revealed)));
+  const three = buildWireSnapshot(snapOf([hull('a'), hull('b'), hull('c')]), false);
+  expect('three crews afloat: every hull is revealed',
+    three.ships.every((s) => s.revealed === true),
+    JSON.stringify(three.ships.map((s) => s.revealed)));
+  const withWreck = buildWireSnapshot(
+    snapOf([hull('a'), hull('b'), hull('c', true, true), hull('d', false)]), false);
+  expect('a sinking hull and a dead one are not crews, and are not revealed',
+    withWreck.ships.filter((s) => s.revealed).length === 2,
+    JSON.stringify(withWreck.ships.map((s) => [s.id, s.revealed])));
+}
+{
+  // The banner. THE EYE CLOSES outranks OUTSIDE STORM ZONE: past the collapse
+  // there is nowhere on the map that is not the storm, so telling a pirate to
+  // sail inside the ring would be sending him somewhere that no longer exists.
+  const base = {
+    outsideStorm: true, shipMetresOutside: null,
+    shipSinking: false, shipCritical: false, shipOnFire: false,
+  };
+  expect('before the arc runs out the ring line is unchanged',
+    warningLines({ ...base, eyeCollapse: 0 }).storm === 'OUTSIDE STORM ZONE');
+  expect('the moment the eye starts closing the banner says so',
+    warningLines({ ...base, eyeCollapse: 0.01 }).storm === 'THE EYE CLOSES',
+    JSON.stringify(warningLines({ ...base, eyeCollapse: 0.01 })));
+  expect('…and it does not eat the ship alarm underneath it',
+    warningLines({ ...base, eyeCollapse: 1, shipSinking: true }).ship === 'SHIP IS SINKING');
+  expect('a caller that knows nothing about the collapse still reads as no collapse',
+    warningLines(base).storm === 'OUTSIDE STORM ZONE');
 }
 
 console.log(failures === 0

@@ -130,10 +130,19 @@ export type WarningInput = {
   shipSinking: boolean;
   shipCritical: boolean;
   shipOnFire: boolean;
+  /** END-01. 0..1 once the arc has run out and the eye itself is closing.
+   *  Optional so every existing caller (and gate) still reads as "no collapse". */
+  eyeCollapse?: number;
 };
 
 export function warningLines(input: WarningInput): { storm: string | null; ship: string | null } {
-  const storm = input.outsideStorm
+  // THE EYE CLOSES outranks every other storm line, because past this point the
+  // ring is not the danger — there is nowhere on the map that is not the storm,
+  // and "OUTSIDE STORM ZONE" would be telling a pirate to sail somewhere that
+  // no longer exists.
+  const storm = (input.eyeCollapse ?? 0) > 0
+    ? 'THE EYE CLOSES'
+    : input.outsideStorm
     ? 'OUTSIDE STORM ZONE'
     : input.shipMetresOutside !== null && input.shipMetresOutside > 0
       ? `YOUR SHIP IS OUTSIDE THE RING · ${Math.round(input.shipMetresOutside)} m`
@@ -1120,10 +1129,12 @@ export class HudController {
       shipSinking: !!ship?.sinking,
       shipCritical: shipCritical && !ship?.sinking,
       shipOnFire,
+      eyeCollapse: this.view.state.storm.eyeCollapse,
     });
     this.view.ui.stormWarning.style.display = lines.storm ? 'block' : 'none';
     this.view.ui.stormWarning.textContent = lines.storm ?? '';
-    this.view.ui.stormWarning.style.color = outsideStorm ? '#ff6b6b' : '#ffb366';
+    this.view.ui.stormWarning.style.color = (this.view.state.storm.eyeCollapse ?? 0) > 0 || outsideStorm
+      ? '#ff6b6b' : '#ffb366';
     const alarm = this.ensureShipAlarmEl();
     if (alarm) {
       alarm.style.display = lines.ship ? 'block' : 'none';

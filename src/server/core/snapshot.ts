@@ -129,12 +129,28 @@ function quantizeIslandForWire(island: Island): Island {
   };
 }
 
+/** END-01: how many crews it takes before the chart shows the fleet. */
+export const CHART_REVEAL_CREWS = 3;
+
 export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean): GameState {
+  // ALL HANDS ON THE CHART (END-01, gameplay-22). The last three crews are the
+  // match's endgame, and until now nothing anywhere said where they were: the
+  // feed printed "THREE CREWS REMAIN" and the chart carried a mark for the
+  // bounty leader and for nobody else. Past this line every hull afloat is
+  // stamped `revealed`, which is what the chart draws its endgame treatment
+  // from. The flag is never written false — a match with four crews left pays
+  // literally nothing for it.
+  const revealed = snap.shipsAlive <= CHART_REVEAL_CREWS;
   return {
     ...snap,
     serverTime: roundTo(snap.serverTime, 3),
     storm: quantizeDeep(snap.storm, 2),
-    ships: snap.ships.map((ship) => quantizeDeep(stripShipInternals(ship), 2)),
+    ships: snap.ships.map((ship) => quantizeDeep(
+      revealed && ship.alive && !ship.sinking
+        ? { ...stripShipInternals(ship), revealed: true }
+        : stripShipInternals(ship),
+      2,
+    )),
     players: snap.players.map((player) => quantizeDeep(stripPlayerInternals(player), 2)),
     projectiles: snap.projectiles.map((proj) => quantizeDeep(proj, 2)),
     kegs: snap.kegs.map((keg) => quantizeDeep(keg, 2)),

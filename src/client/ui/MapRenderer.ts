@@ -1152,6 +1152,40 @@ export class MapRenderer {
         }
         ctx.restore();
       }
+      // ALL HANDS ON THE CHART (END-01, gameplay-22). Three crews left is the
+      // endgame, and it used to arrive as a feed line and nothing else — the
+      // player was told "THREE CREWS REMAIN" and given no way to point at them.
+      // A revealed hull that is not yours now wears a hunter's mark and, on the
+      // full chart, her class, so the last fight is something you sail INTO
+      // rather than stumble across at 30 m in a 70 m circle.
+      //
+      // Cost: at most three marks, only in the last minute or two of a match,
+      // on a 2D canvas the low tier already redraws. No new texture, no new
+      // pass, nothing in the 3D scene. The `revealed` flag is absent until the
+      // endgame, so before it there is not even a branch taken.
+      if (ship.revealed && !isOwn) {
+        const rx = centerX + ship.position.x * scale;
+        const ry = centerY + ship.position.z * scale;
+        const sweep = 0.5 + 0.5 * Math.sin(performance.now() / 420 + ship.position.z);
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 96, 96, ${0.35 + sweep * 0.4})`;
+        ctx.lineWidth = fullscreen ? 2.2 : 1.5;
+        const markR = (fullscreen ? 17 : 10) + sweep * (fullscreen ? 4 : 2.5);
+        for (let k = 0; k < 4; k += 1) {
+          const a0 = (k / 4) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.arc(rx, ry, markR, a0 + 0.28, a0 + Math.PI * 0.5 - 0.28);
+          ctx.stroke();
+        }
+        if (fullscreen) {
+          ctx.fillStyle = 'rgba(255, 190, 170, 0.9)';
+          ctx.font = '700 11px Georgia, serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'alphabetic';
+          ctx.fillText(String(ship.type).toUpperCase(), rx, ry - markR - 5);
+        }
+        ctx.restore();
+      }
       // YOUR HULL, PAST THE RING, IN RED. The chart drew the ring and drew your
       // ship, and left it to the player to notice that one was inside the other
       // — while the storm quietly stove her in at the berth (liveplay-07).
