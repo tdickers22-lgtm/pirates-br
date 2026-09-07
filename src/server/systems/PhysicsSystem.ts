@@ -1,5 +1,5 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
-import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
+import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
 import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRiggingMasts } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
@@ -39,6 +39,7 @@ import {
   getSwimHullVerticalT,
   getTavernBoundsRadius,
   getTavernWallBand,
+  berthFrameSideOf,
   intersectRayTavern,
   pushOutOfTavernWalls,
   tavernLocalToWorld,
@@ -575,9 +576,11 @@ export class PhysicsSystem {
       for (const island of islands) {
         const dock = island.dock;
         if (!dock) continue;
-        const dx = ship.position.x - dock.berthPosition.x;
-        const dz = ship.position.z - dock.berthPosition.z;
-        if (dx * dx + dz * dz <= BERTH_ENV_SAFE_RADIUS * BERTH_ENV_SAFE_RADIUS) {
+        // In the DOCK'S frame, never a circle round dock.berthPosition: the
+        // berth planner slides a hull along the run to find water, so a moored
+        // hull sits up to 51.1 m from that point and the old 42 m circle read
+        // the outliers as at sea (see BERTH_FRAME_*_SLACK).
+        if (berthFrameSideOf(dock, ship.position.x, ship.position.z) !== 0) {
           this.berthShelteredShipIds.add(ship.id);
           break;
         }
@@ -2842,9 +2845,15 @@ export class PhysicsSystem {
     // quarter of the way through the founder).
     let moored = !!ship.sinking;
     if (!moored && ship.anchored && dock) {
-      const bdx = ship.position.x - dock.berthPosition.x;
-      const bdz = ship.position.z - dock.berthPosition.z;
-      moored = bdx * bdx + bdz * bdz <= BERTH_ENV_SAFE_RADIUS * BERTH_ENV_SAFE_RADIUS;
+      // Her BERTH, read in the dock's own frame — the same question
+      // Match.berthSideOf asks when it hands the berth out. A circle round
+      // dock.berthPosition is the wrong shape for a berth the planner slid a
+      // hull along: measured at seed 20260801, moored hulls sit up to 51.1 m
+      // from that point, and 3 of 20 solo/duos hulls fell outside the old 42 m
+      // radius — including a squads galleon standing 0.02 m of rock through her
+      // waterline, who was therefore shoved off her own plank every tick, which
+      // is the exact defect this exemption exists to prevent.
+      moored = berthFrameSideOf(dock, ship.position.x, ship.position.z) !== 0;
     }
     const againstWall = wallOver > 0 && !moored;
 

@@ -1,6 +1,6 @@
 import { createNoise2D } from 'simplex-noise';
 import type { Island, IslandCave, IslandDock, IslandGeyser, IslandTavern, SeaRock, SeaRockCollider, Ship, ShipType, Vec3, Vec2 } from '../types/index.js';
-import { SHIP, SHIP_STATS, PLAYER, STORM_TAILWIND } from '../constants/index.js';
+import { SHIP, SHIP_STATS, PLAYER, STORM_TAILWIND, BERTH_FRAME_ALONG_SLACK, BERTH_FRAME_LATERAL_SLACK } from '../constants/index.js';
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -1705,6 +1705,19 @@ export function toDockLocalPoint(dock: IslandDock, x: number, z: number): { x: n
   const cos = Math.cos(dock.rotation);
   const sin = Math.sin(dock.rotation);
   return { x: dx * cos - dz * sin, z: dx * sin + dz * cos };
+}
+
+/** Which berth of `dock` a point lies in (-1 / +1 by the sign of its lateral
+ *  offset), or 0 for "not at this pier at all". CANONICAL: this is the ONLY
+ *  test for "is that hull moored here" — see BERTH_FRAME_*_SLACK for why a
+ *  radius around dock.berthPosition is not one. Read by Match (berth
+ *  occupancy), by PhysicsSystem (environmental shelter and the waterline-wall
+ *  exemption) and mirrored by scripts/test-spawn-berths.mjs. */
+export function berthFrameSideOf(dock: IslandDock, x: number, z: number): -1 | 1 | 0 {
+  const local = toDockLocalPoint(dock, x, z);
+  if (Math.abs(local.z) > dock.length * 0.5 + BERTH_FRAME_ALONG_SLACK) return 0;
+  if (Math.abs(local.x) > BERTH_FRAME_LATERAL_SLACK) return 0;
+  return local.x >= 0 ? 1 : -1;
 }
 
 /** World point at the SEAWARD swim-up ladder (for prompts / climb checks). */

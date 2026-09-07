@@ -12,7 +12,8 @@
 //
 // LOGIC suite: drives the real Match, no stack, no browser.
 import { Match } from '../src/server/core/Match.ts';
-import { SHIP_STATS } from '../src/shared/constants/index.ts';
+import { SHIP_STATS, BERTH_ENV_SAFE_MAX_PHASE } from '../src/shared/constants/index.ts';
+import { berthFrameSideOf } from '../src/shared/utils/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -27,19 +28,12 @@ function expect(label, condition, detail = '') {
 const fakeWs = () => ({ readyState: 1, send() {} });
 const dist2 = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 
-/** Which side of a pier a hull lies on, in the dock's own frame.
- *  0 = not at this dock at all. */
-function berthSideOf(pos, dock) {
-  const fwd = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
-  const right = { x: Math.cos(dock.rotation), z: -Math.sin(dock.rotation) };
-  const rx = pos.x - dock.position.x;
-  const rz = pos.z - dock.position.z;
-  const along = rx * fwd.x + rz * fwd.z;
-  const lateral = rx * right.x + rz * right.z;
-  if (Math.abs(along) > dock.length * 0.5 + 30) return 0;
-  if (Math.abs(lateral) > 45) return 0;
-  return lateral >= 0 ? 1 : -1;
-}
+/** Which side of a pier a hull lies on, in the dock's own frame. 0 = not at
+ *  this dock at all. This used to be a hand-copy of Match.berthSideOf with the
+ *  slack numbers written out again; it now calls the SHARED helper, which is
+ *  the same one Match's occupancy map and both of PhysicsSystem's berth rails
+ *  ask — so "moored" cannot mean three different shapes in three files. */
+const berthSideOf = (pos, dock) => berthFrameSideOf(dock, pos.x, pos.z);
 
 const HUMANS = 12;
 const match = new Match({ matchId: 'spawn-berths', botCount: 0 });
@@ -129,8 +123,47 @@ expect('every bot hull lies in a berth of its own', unberthed === 0, `unberthed=
 expect('every bot hull rides at anchor', botHulls.every((h) => h.anchored),
   `adrift=${botHulls.filter((h) => !h.anchored).length}`);
 expect('no bot hull opens the match already fleeing', inDangerBand === 0, `inDanger=${inDangerBand}/${botHulls.length}`);
-botMatch.stop();
 
+// ────────────────────────────────────────────────────────────────────────────
+// A BERTH SHELTERS THE HULL THE PLANNER PUT THERE, HOWEVER FAR SHE SLID.
+//
+// PhysicsSystem has two berth rails — environmental shelter (no storm/keel/reef
+// breaches at your moorings during the opening phases) and the waterline-wall
+// exemption (a pier deck standing through your planking is not rock, so you are
+// not shoved off your own boarding plank). Both used to key on a 42 m circle
+// around dock.berthPosition, and computeShipBerth SLIDES a hull along the run
+// to find water: the outliers below sit well past 42 m, so the rails read them
+// as at sea. That is how 6 of 30 boarding planks stopped reaching the deck.
+// The rails now read the dock's own frame, exactly like the occupancy map.
+console.log('Both berth rails cover every hull the planner moored:');
+for (const [label, m] of [['12 humans', match], ['bot fleet', botMatch]]) {
+  const st = m.state;
+  const berthed = st.ships.filter((s) => s.alive && !s.sinking && s.anchored);
+  st.storm.phase = Math.min(st.storm.phase, BERTH_ENV_SAFE_MAX_PHASE);
+  m.physics.update(1 / 60, 0, st.ships, st.players, [], st.islands, st.seaRocks ?? [], st.storm);
+  let unsheltered = 0;
+  let worstSlide = 0;
+  let pastOldRadius = 0;
+  for (const hull of berthed) {
+    let slide = Infinity;
+    for (const isl of st.islands) {
+      if (!isl.dock) continue;
+      if (berthFrameSideOf(isl.dock, hull.position.x, hull.position.z) === 0) continue;
+      slide = Math.hypot(hull.position.x - isl.dock.berthPosition.x,
+        hull.position.z - isl.dock.berthPosition.z);
+      break;
+    }
+    if (!Number.isFinite(slide)) continue;
+    worstSlide = Math.max(worstSlide, slide);
+    if (slide > 42) pastOldRadius += 1;
+    if (!m.physics.isEnvironmentallySheltered(hull.id)) unsheltered += 1;
+  }
+  expect(`${label}: every moored hull is sheltered by her berth`, unsheltered === 0,
+    `unsheltered=${unsheltered}/${berthed.length}, worst slide from berthPosition`
+    + ` ${worstSlide.toFixed(1)} m, ${pastOldRadius} hull(s) past the old 42 m circle`);
+}
+
+botMatch.stop();
 match.stop();
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
 process.exit(failures === 0 ? 0 : 1);

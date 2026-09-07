@@ -1198,9 +1198,20 @@ export function botPhaseScale(schedule: readonly number[], phase: number): numbe
  *  crews foundered offscreen inside the first 90 s of every match. A berth is
  *  shelter; the sea starts collecting once the ring means something. */
 export const BERTH_ENV_SAFE_MAX_PHASE = 1;
-/** How close to a dock's berth a hull must lie (metres, planar) to count as
- *  moored there. Matches the berth-occupancy radius the join planner uses. */
-export const BERTH_ENV_SAFE_RADIUS = 42;
+/** Frame slack for "this hull is lying in that berth": half the pier run plus a
+ *  hull length astern/ahead, and one hull-width-plus-gap abeam. CANONICAL —
+ *  Match.berthSideOf (occupancy), PhysicsSystem (env shelter + the waterline
+ *  wall) and scripts/test-spawn-berths.mjs all read the berth through the same
+ *  two numbers, in the dock's own frame.
+ *
+ *  A CIRCLE around dock.berthPosition cannot do this job and used to be tried
+ *  twice: computeShipBerth SLIDES a hull along the run to find water, so a
+ *  moored hull sits up to 51.1 m from that point (measured at seed 20260801
+ *  across solo/duos/squads fleets; the old radius was 42). Once as occupancy it
+ *  parked a second hull inside the first (netcode-V1); once as the waterline-
+ *  wall exemption it shoved the outlying hulls off their own boarding plank. */
+export const BERTH_FRAME_ALONG_SLACK = 30;
+export const BERTH_FRAME_LATERAL_SLACK = 45;
 /** Bot crews take NO grounding breaches before the early-peace window lifts —
  *  they still bounce off, lose way and get shoved back toward deep water, they
  *  just don't drown for it. A bot helm running a shoal at t=40 s is a pathing

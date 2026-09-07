@@ -42,6 +42,7 @@ import {
   gerstnerHeight,
   WAVE_PARAMS,
   intersectRaySeaRock,
+  berthFrameSideOf,
 } from '../../shared/utils/index.js';
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
 import { isSameCrew, playerCrewId, smallArmsHitsCrewmate } from '../../shared/crew.js';
@@ -1109,12 +1110,6 @@ export class Match {
    * `side` is the sign of a hull's lateral offset in the dock's own frame.
    */
   private static readonly BERTH_SIDES: readonly (-1 | 1)[] = [1, -1];
-  /** Frame slack for "this hull is lying in that berth": half the run plus a
-   *  hull length astern/ahead, and one hull-width-plus-gap abeam. Mirrored by
-   *  scripts/test-spawn-berths.mjs — keep the two in step. */
-  private static readonly BERTH_FRAME_ALONG_SLACK = 30;
-  private static readonly BERTH_FRAME_LATERAL_SLACK = 45;
-
   /** Which berth of `dock` a hull lies in, 0 for "not at this pier at all".
    *
    *  The occupancy test used to be a 42 m circle around `dock.berthPosition`,
@@ -1122,17 +1117,11 @@ export class Match {
    *  Crooked Atoll the moored hull ends up 42.3 m from that point, so the test
    *  read the berth as empty and the next joiner was parked INSIDE her — two
    *  hulls at 0.0 m (netcode-V1). Read in the dock's own frame it cannot miss,
-   *  and it is what tells the two berths apart. */
+   *  and it is what tells the two berths apart. The frame test itself now lives
+   *  in shared/utils so PhysicsSystem's berth rails ask the identical question.
+   */
   private berthSideOf(position: { x: number; z: number }, dock: IslandDock): -1 | 1 | 0 {
-    const fwd = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
-    const right = { x: Math.cos(dock.rotation), z: -Math.sin(dock.rotation) };
-    const rx = position.x - dock.position.x;
-    const rz = position.z - dock.position.z;
-    const along = rx * fwd.x + rz * fwd.z;
-    const lateral = rx * right.x + rz * right.z;
-    if (Math.abs(along) > dock.length * 0.5 + Match.BERTH_FRAME_ALONG_SLACK) return 0;
-    if (Math.abs(lateral) > Match.BERTH_FRAME_LATERAL_SLACK) return 0;
-    return lateral >= 0 ? 1 : -1;
+    return berthFrameSideOf(dock, position.x, position.z);
   }
 
   /** shipId moored in each berth, keyed `${islandId}#${side}`. The claim is
