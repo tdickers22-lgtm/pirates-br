@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, hullForCrewSize, botDifficultyLadder, type BotSkill } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -210,7 +210,15 @@ export interface MatchEndResult {
 
 interface MatchOptions {
   matchId: string;
+  /** BOT CREWS, not bot pirates. In Solo a crew is one pirate and the two are
+   *  the same number; in Duos each of these is a Corsair with two hands aboard
+   *  and in Squads a Man-o'-War with four (MODE-01 slice c). */
   botCount: number;
+  /** Which roster this match is played on (PLAN §2.1). It decides the crew
+   *  size, and through hullForCrewSize the whole fleet's hull class, so a Solo
+   *  captain in a Cutter is never broadsided by a bot Man-o'-War. Absent or
+   *  unknown falls back to Solo, which is the legacy world byte for byte. */
+  mode?: ModeId;
   /** Party setting: shifts the whole bot difficulty ladder one rung
    *  (MODE-01 / gameplay-07). Defaults to 'normal'. */
   botSkill?: BotSkill;
@@ -336,6 +344,10 @@ const DAMAGE_SOURCE_WINDOW_SECONDS = 12;
 const MAST_CLIMB_RATE = 0.55;
 /** Biggest crew the roster allows (Squads: 3-4 on a Man-o'-War). */
 const CREW_MAX_MEMBERS = 4;
+/** Hard ceiling on hulls in one match: ten piers x two berths (netcode-10), and
+ *  the largest number MODES asks for is 12. A guard, not a design number — it
+ *  only stops a hostile botCount from spinning growSeaSpawns. */
+const MAX_FLEET_HULLS = 20;
 /** Metres between crewmates where they are set down, so a crew of four lands as
  *  four pirates on the planking rather than one pile. */
 const CREW_LANDING_STRIDE = 1.8;
@@ -423,6 +435,9 @@ export class Match {
   private configuredBotCount = 0;
   /** Party bot-skill setting; shifts botDifficultyLadder one rung (MODE-01). */
   private botSkill: BotSkill = 'normal';
+  /** The roster this match is played on (MODE-01). Read by the lobby's crew
+   *  placement and by the end screen; 'solo' is the legacy behaviour. */
+  private readonly mode: ModeId;
   private tickInterval: ReturnType<typeof setInterval> | null = null;
   private endedAt: number | null = null;
   private endReason: MatchEndResult['reason'] | null = null;
@@ -569,6 +584,7 @@ export class Match {
   constructor(opts: MatchOptions) {
     this.id = opts.matchId;
     this.configuredBotCount = opts.botCount;
+    this.mode = isModeId(opts.mode) ? opts.mode : 'solo';
     this.botSkill = opts.botSkill ?? 'normal';
     this.devHooks = opts.devHooks ?? process.env.PIRATES_BR_DEV_HOOKS === '1';
     this.rng = makeMatchRng(opts.matchId);
@@ -576,7 +592,7 @@ export class Match {
     this.storm = new StormSystem(this.rng);
     this.trading = new TradingSystem(this.rng);
     this.bots = new BotSystem(this.rng);
-    this.setupWorld(opts.botCount);
+    this.setupWorld(opts.botCount, MODES[this.mode].crewSize);
   }
 
   /**
@@ -758,12 +774,22 @@ export class Match {
     return this.configuredBotCount;
   }
 
+  /** The roster this match was built on, and the hands each hull is crewed for
+   *  (MODE-01). The lobby reads them to size the crew it hands to createCrew. */
+  modeId(): ModeId {
+    return this.mode;
+  }
+
+  crewSize(): number {
+    return MODES[this.mode].crewSize;
+  }
+
   /** Detach a client from the match (for return-to-menu) without destroying the match. */
   detachClient(playerId: string): void {
     this.removeClient(playerId, /*closeWs*/ false);
   }
 
-  private setupWorld(botCount: number) {
+  private setupWorld(botCrews: number, crewSize: number) {
     const islandList = this.mapGen.generateIslands();
     const spawns = this.mapGen.generateShipSpawns(islandList);
     const wildlife = this.mapGen.generateWildlife(islandList);
@@ -782,32 +808,69 @@ export class Match {
     // (MapGenerator.generateBotCrewNames) — the world has a barkeep, a
     // gravedigger and a Tallyman with full names on every isle, and the crews
     // you actually fight were Pirate_1 … Pirate_9.
-    const crewNames = this.mapGen.generateBotCrewNames(Math.min(botCount, spawns.length));
+    // A BOT HULL IS A CREW, NOT A PIRATE (MODE-01 slice c + BOTCREW-01). Every
+    // bot ship used to hold exactly one pirate, so in Duos and Squads a human
+    // crew of two or four fought hulls sailed single-handed — and the whole
+    // crew half of the sim (stations, DBNO, revive, crewGold, the station
+    // arbiter) was dead on the bot side. `hands` is the mode's crew size, so a
+    // Solo lobby is unchanged pirate for pirate.
+    const wanted = Math.max(0, Math.min(Math.floor(botCrews) || 0, MAX_FLEET_HULLS));
+    const spawnTable = this.growSeaSpawns(spawns, islandList, wanted);
+    const hulls = Math.min(wanted, spawnTable.length);
+    const hands = Math.max(1, Math.min(CREW_MAX_MEMBERS, Math.floor(crewSize) || 1));
+    const crewNames = this.mapGen.generateBotCrewNames(hulls * hands);
     // THE TOP RUNG IS REACHABLE NOW (gameplay-07 / bots-04). The old
     // `i < 5 ? 'easy' : i < 12 ? 'medium' : 'hard'` could not produce a hard bot
     // in any lobby this server can build, so half the fleet was 'easy' all match
     // and BotSystem's hard profile was dead code. botDifficultyLadder is
     // lobby-relative (30/50/20) and index-ordered, so the mix is identical for a
-    // given seed and bot identity stays deterministic.
-    const ladder = botDifficultyLadder(Math.min(botCount, spawns.length), this.botSkill);
-    for (let i = 0; i < Math.min(botCount, spawns.length); i++) {
-      const spawn = spawns[i];
-      const botId = uuid();
+    // given seed and bot identity stays deterministic. It is graded PER HULL:
+    // one mind per ship, so every hand aboard shares her captain's tier.
+    const ladder = botDifficultyLadder(hulls, this.botSkill);
+    for (let i = 0; i < hulls; i++) {
+      // THE MODE IS THE HULL, for bots exactly as for humans (ships-22). The
+      // spawn table still rolls a class for the world's variety, and honouring
+      // it here meant a Solo captain in her Cutter met bot Man-o'-Wars with
+      // eight guns and 1400 hull — the ladder PLAN §2.1 calls a choice was
+      // decided by a dice roll nobody could see.
+      const spawn = { ...spawnTable[i], type: hullForCrewSize(hands) };
       const shipId = uuid();
-      const ship = this.mapGen.buildShip(shipId, botId, spawn, TEAM_COLORS[i % TEAM_COLORS.length]);
+      const memberIds: string[] = [];
+      for (let j = 0; j < hands; j++) memberIds.push(uuid());
+      const ship = this.mapGen.buildShip(
+        shipId, memberIds[0], spawn, TEAM_COLORS[i % TEAM_COLORS.length],
+        { crewId: null, crewIds: memberIds },
+      );
       ships.push(ship);
 
-      const bot = this.createPlayer(botId, crewNames[i] ?? `Pirate_${i + 1}`, shipId, true);
-      bot.position = this.getRespawnDeckPosition(ship);
-      bot.rotation.x = ship.rotation;
-      bot.rotation.y = 0;
-      bot.onShipId = shipId;
-      bot.state = 'alive';
-      bot.velocity = { x: 0, y: 0, z: 0 };
-      bot.knockbackVelocity = { x: 0, y: 0, z: 0 };
-      players.push(bot);
+      // One mind, many hands: the captain is registered first (she draws the
+      // crew's patrol bearing and state timer from the seeded stream, see
+      // BotSystem.registerBot), then each extra hand. Roles are a SEED only —
+      // BotCrew.assignRoles re-reads them by need every tick.
+      const deck = this.getRespawnDeckPosition(ship);
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      for (let j = 0; j < hands; j++) {
+        const bot = this.createPlayer(
+          memberIds[j], crewNames[i * hands + j] ?? `Pirate_${i * hands + j + 1}`, shipId, true,
+        );
+        // Spread ALONG the deck (local z) so a galleon crew of four does not
+        // stack inside one collider at the respawn point, exactly as createCrew
+        // lands a human crew.
+        const along = (j - (hands - 1) / 2) * CREW_LANDING_STRIDE;
+        bot.position = hands === 1
+          ? deck
+          : { x: deck.x + sin * along, y: deck.y, z: deck.z + cos * along };
+        bot.rotation.x = ship.rotation;
+        bot.rotation.y = 0;
+        bot.onShipId = shipId;
+        bot.state = 'alive';
+        bot.velocity = { x: 0, y: 0, z: 0 };
+        bot.knockbackVelocity = { x: 0, y: 0, z: 0 };
+        players.push(bot);
 
-      this.bots.registerBot(bot, ship, ladder[i] ?? 'medium');
+        this.bots.registerBot(bot, ship, ladder[i] ?? 'medium', j === 0 ? 'helm' : 'deckhand');
+      }
     }
 
     this.setupSkeletonWaves(islandList);
@@ -857,13 +920,24 @@ export class Match {
       const berth = this.pickSafeSpawnBerth(ship.type, /*farthestFromHulls*/ true);
       if (!berth) break;
       this.parkShipAtDock(ship, berth.dock, /*refit*/ true, berth.side);
-      for (const player of this.state.players) {
-        if (player.shipId !== ship.id) continue;
-        player.position = this.getRespawnDeckPosition(ship);
+      // MOORING RE-SEATS THE WHOLE CREW, and a crew is more than one pirate
+      // since MODE-01 slice c: seating every hand on the same deck point put a
+      // Man-o'-War's four bots inside one collider, so the station arbiter, the
+      // shove resolver and every distance test saw four bodies at one spot.
+      // Spread ALONG the deck (local z), exactly as createCrew lands humans.
+      const aboard = this.state.players.filter((p) => p.shipId === ship.id);
+      const deck = this.getRespawnDeckPosition(ship);
+      const cos = Math.cos(ship.rotation);
+      const sin = Math.sin(ship.rotation);
+      aboard.forEach((player, index) => {
+        const along = (index - (aboard.length - 1) / 2) * CREW_LANDING_STRIDE;
+        player.position = aboard.length === 1
+          ? deck
+          : { x: deck.x + sin * along, y: deck.y, z: deck.z + cos * along };
         player.rotation.x = ship.rotation;
         player.onShipId = ship.id;
         player.velocity = { x: 0, y: 0, z: 0 };
-      }
+      });
     }
   }
 
@@ -954,6 +1028,57 @@ export class Match {
   private getAliveShip(shipId: string | null | undefined): Ship | null {
     const ship = this.getShip(shipId);
     return ship && ship.alive && !ship.sinking ? ship : null;
+  }
+
+  /**
+   * TWELVE HULLS OUT OF A TEN-BERTH TABLE (MODE-01 slice c).
+   *
+   * MapGenerator.generateShipSpawns lays exactly WORLD.SHIP_COUNT = 10 sea
+   * berths, and those draws sit INSIDE the world's own seeded stream — wildlife,
+   * sea POIs and the rock field are all drawn after them, so asking the map for
+   * an eleventh berth would move every one of them and break the bit-identical
+   * world (test-world-fixed, both floater audits, test-cave-walk).
+   *
+   * A Solo fleet is 12 crews (PLAN §2.1), so the surplus berths are drawn HERE,
+   * from the MATCH stream (makeMatchRng(matchId)) — a different stream that the
+   * world never reads. Nothing is drawn at all while the fleet fits the table,
+   * so every legacy lobby (≤10 hulls) is byte for byte what it was.
+   *
+   * Each surplus berth takes the best of up to 240 candidates by clearance:
+   * 30 m off any island's own radius and 120 m off every other hull, the same
+   * two rules generateShipSpawns uses.
+   */
+  private growSeaSpawns(base: ShipSpawn[], islands: Island[], want: number): ShipSpawn[] {
+    if (base.length >= want) return base;
+    const out = base.slice();
+    const MIN_SPACING = 120;
+    const ISLAND_MARGIN = 30;
+    while (out.length < want) {
+      let best: ShipSpawn | null = null;
+      let bestClearance = -Infinity;
+      for (let attempt = 0; attempt < 240; attempt += 1) {
+        const angle = randAngle(this.rng);
+        const radius = randRange(200, 900, this.rng);
+        const rotation = randAngle(this.rng);
+        const position = { x: Math.cos(angle) * radius, y: 0, z: Math.sin(angle) * radius };
+        let clearance = Infinity;
+        for (const isl of islands) {
+          clearance = Math.min(clearance, dist2D(position.x, position.z, isl.position.x, isl.position.z)
+            - getIslandMaxRadius(isl) - ISLAND_MARGIN);
+        }
+        for (const sp of out) {
+          clearance = Math.min(clearance, dist2D(position.x, position.z, sp.position.x, sp.position.z) - MIN_SPACING);
+        }
+        if (clearance > bestClearance) {
+          bestClearance = clearance;
+          best = { position, rotation, type: 'sloop' };
+        }
+        if (bestClearance > 0) break;
+      }
+      // `best` is never null: the first attempt always sets it.
+      out.push(best ?? { position: { x: 0, y: 0, z: 0 }, rotation: 0, type: 'sloop' });
+    }
+    return out;
   }
 
   private pickHumanSpawn(spawns: ShipSpawn[]): ShipSpawn | null {

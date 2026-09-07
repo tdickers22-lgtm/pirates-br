@@ -211,6 +211,68 @@ expect("botSkill 'easy' never hardens a rung and softens at least one",
 expect("botSkill 'normal' is the base ladder",
   botDifficultyLadder(9, 'normal').join(',') === base.join(','));
 
+// ── 5. THE FLEET A MODE ACTUALLY BUILDS (MODE-01 slice c) ────────────────
+// The table above is a promise; this section makes a real Match keep it. Before
+// slice c, setupWorld took a bot COUNT and built one pirate per hull with the
+// class the spawn table happened to roll — so a Duos human crew of two fought
+// eight single-handed ships, half of them Man-o'-Wars, and every station,
+// revive and crew-gold path on the bot side was unreachable.
+console.log('\nThe fleet a mode builds (real Match)');
+process.env.PIRATES_BR_MAP_SEED ??= '20260801';
+const { Match } = await import('../src/server/core/Match.ts');
+
+/** Bot hulls, their class, and who is aboard each one. */
+function fleetOf(match) {
+  const state = match['state'];
+  const byShip = new Map();
+  for (const p of state.players) {
+    if (!p.isBot || !p.shipId) continue;
+    if (!byShip.has(p.shipId)) byShip.set(p.shipId, []);
+    byShip.get(p.shipId).push(p);
+  }
+  return state.ships.map((ship) => ({ ship, hands: byShip.get(ship.id) ?? [] }));
+}
+
+for (const [mode, botCrews] of [['solo', 11], ['duos', 8], ['squads', 5]]) {
+  const spec = MODES[mode];
+  const match = new Match({ matchId: `ladder-${mode}`, botCount: botCrews, mode });
+  const fleet = fleetOf(match);
+  expect(`${mode}: ${botCrews} bot crews are ${botCrews} hulls, not ${botCrews * spec.crewSize}`,
+    fleet.length === botCrews, `hulls=${fleet.length}`);
+  expect(`${mode}: every bot hull is a ${spec.hull} (the mode IS the hull, ships-22)`,
+    fleet.every((f) => f.ship.type === spec.hull),
+    fleet.map((f) => f.ship.type).join(','));
+  expect(`${mode}: every bot hull is crewed by ${spec.crewSize} hand(s)`,
+    fleet.every((f) => f.hands.length === spec.crewSize),
+    fleet.map((f) => f.hands.length).join(','));
+  expect(`${mode}: the hull's crewIds are her whole crew, so a crewmate's shot passes through`,
+    fleet.every((f) => f.ship.crewIds.length === spec.crewSize
+      && f.hands.every((p) => f.ship.crewIds.includes(p.id))),
+    fleet.map((f) => f.ship.crewIds.length).join(','));
+  expect(`${mode}: total bot pirates = ${botCrews * spec.crewSize}`,
+    fleet.reduce((n, f) => n + f.hands.length, 0) === botCrews * spec.crewSize);
+  expect(`${mode}: no two hands start inside each other`,
+    fleet.every((f) => new Set(f.hands.map((p) => `${p.position.x.toFixed(2)},${p.position.z.toFixed(2)}`)).size
+      === f.hands.length));
+  expect(`${mode}: every hand is registered with the bot brain, one 'helm' seed per hull`,
+    fleet.every((f) => f.hands.every((p) => match['bots'].getRole(p.id) !== null)
+      && f.hands.filter((p) => match['bots'].getRole(p.id) === 'helm').length === 1),
+    fleet.map((f) => f.hands.map((p) => match['bots'].getRole(p.id)).join('+')).join(' '));
+  expect(`${mode}: every bot hull carries her mode's guns (${SHIP_STATS[spec.hull].cannonCount})`,
+    fleet.every((f) => f.ship.cannonCooldowns.length === SHIP_STATS[spec.hull].cannonCount),
+    fleet.map((f) => f.ship.cannonCooldowns.length).join(','));
+  match.stop?.();
+}
+
+// An absent or junk mode is the legacy Solo world, not a throw on the lobby's
+// hot path (LobbyServer.spawnMatch builds one of these per dispatch).
+const legacy = new Match({ matchId: 'ladder-legacy', botCount: 3 });
+expect('a Match built with no mode is Solo (Cutters, one hand each)',
+  legacy.modeId() === 'solo' && legacy.crewSize() === 1
+    && legacy['state'].ships.every((s) => s.type === 'sloop'),
+  `${legacy.modeId()} ${legacy['state'].ships.map((s) => s.type).join(',')}`);
+legacy.stop?.();
+
 if (failures > 0) {
   console.error(`\n${failures} ship-ladder assertion(s) failed.`);
   process.exit(1);
