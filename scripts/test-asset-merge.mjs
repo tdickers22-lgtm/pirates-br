@@ -82,7 +82,7 @@ globalThis.fetch = async (input, init) => {
   return realFetch(input, init);
 };
 
-const { ASSET_NAMES, assets } = await import('../src/client/assets/AssetLibrary.ts');
+const { ASSET_NAMES, FLAT_SHADED_ASSETS, assets } = await import('../src/client/assets/AssetLibrary.ts');
 
 // Loader failures inside preload() are logged and tolerated by design (callers
 // keep a procedural fallback), so capture them rather than let them scroll past.
@@ -195,7 +195,20 @@ for (const name of ASSET_NAMES) {
 
   if (['palm_a', 'palm_b', 'palm_c', 'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers'].includes(name)) {
     if (mats.length !== 1) issues.push('organic asset no longer collapses to one draw');
-    if (mats.some((mat) => mat.flatShading)) issues.push('authored organic normals discarded by loader');
+  }
+  // The GLB's normals decide the shading (assets-06). Anything that comes back
+  // flat-shaded and is not in the allowlist means the loader threw away
+  // authored smooth normals — ropes, tentacles, the idol, the shark.
+  const flat = mats.filter((mat) => mat.flatShading);
+  if (flat.length > 0 && !FLAT_SHADED_ASSETS.has(name)) {
+    issues.push(`${flat.length}/${mats.length} materials forced flatShading; authored normals discarded`);
+  }
+  // …and the converse: removing the override must NOT have smoothed a rock.
+  // A flat-authored mesh ships split normals, so it has 3 verts per triangle.
+  if (['boulder_a', 'boulder_b', 'boulder_c', 'rock_arch'].includes(name)) {
+    const idx = geom.getIndex();
+    const tris = (idx ? idx.count : pos.count) / 3;
+    if (pos.count < tris * 2.9) issues.push(`stone lost its split normals (${(pos.count / tris).toFixed(2)} verts/tri, want 3)`);
   }
 
   if (!pos || pos.count === 0) issues.push('merged geometry has no vertices');
