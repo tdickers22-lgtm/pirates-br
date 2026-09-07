@@ -161,3 +161,34 @@ export function hullSurfacePointAt(profile: HullProfile, z: number, y: number): 
   const len = Math.hypot(nx, ny) || 1;
   return { x: sa.x + (sb.x - sa.x) * t, nx: nx / len, ny: ny / len };
 }
+
+// ─── DERIVED FOOTPRINTS (LOFT-01 phase 2) ────────────────────────────────────
+
+const WATERLINE_OUTLINE_CACHE = new Map<ShipType, ReadonlyArray<{ zF: number; halfF: number }>>();
+
+/**
+ * THE WATERLINE OUTLINE — half-beam at every loft station, taken at y = 0.
+ * This is the line the renderer draws meeting the sea, so it is the line the
+ * seabed has to be measured against: the server used to ask about a strip one
+ * metre wide down the keel and let cliff faces pass through ten metres of
+ * planking either side of it (physics-02).
+ *
+ * Returned as FRACTIONS (zF of length, halfF of beam) so a caller scales two
+ * multiplies per sample instead of walking the profile. Cached per class; the
+ * array is frozen because the server iterates it every tick.
+ *
+ * Consumers: `PhysicsSystem.pushShipOutOfIsland` (server) via
+ * `scripts/test-hull-vs-terrain.mjs`; the client reads the same loft through
+ * `getHullProfile` in ShipRenderer, so drawn and collided agree by construction.
+ */
+export function getHullWaterlineOutline(type: ShipType): ReadonlyArray<{ zF: number; halfF: number }> {
+  let outline = WATERLINE_OUTLINE_CACHE.get(type);
+  if (outline) return outline;
+  const profile = getHullProfile(type);
+  outline = Object.freeze(profile.stations.map((st) => ({
+    zF: st.baseZ / profile.L,
+    halfF: hullSurfacePointAt(profile, st.baseZ, 0).x / profile.W,
+  })));
+  WATERLINE_OUTLINE_CACHE.set(type, outline);
+  return outline;
+}

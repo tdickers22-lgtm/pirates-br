@@ -1,5 +1,6 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
+import { getHullWaterlineOutline } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
@@ -117,6 +118,23 @@ const HULL_CONTACT_STATIONS: ReadonlyArray<{ z: number; half: number }> = [
   { z: 0.30, half: 0.39 },
   { z: 0.44, half: 0.17 },
 ];
+
+/** GROUNDING SAMPLES THE OUTLINE, NOT THE SPINE (PHYS-02 / physics-02).
+ *  A galleon carries ten metres of beam either side of her keel line, so
+ *  "is the seabed above my keel" answered a question about a strip one metre
+ *  wide and missed every cliff face she laid her broadside into. Each contact
+ *  station is therefore probed at its centre AND at ±its own half-beam abeam,
+ *  which is the same silhouette the renderer draws at the waterline. Cost: 21
+ *  heightfield samples per hull per nearby island instead of 7, server-side
+ *  only, and only inside the existing broadphase — no client frame pays it. */
+const HULL_OUTLINE_ABEAM: ReadonlyArray<number> = [0, 1, -1];
+
+/** THE WATERLINE WALL. Terrain that stands higher than this far below the
+ *  hull's own waterline is not a shoal she can settle onto — it is rock
+ *  standing through her planking. She is shoved off it even when she is lying
+ *  at rest (a hull may bed on a bar; she may not bed INSIDE a cliff) and she
+ *  reads AGROUND while any of it touches her outline. */
+const WATERLINE_WALL_DROP = 0.3;
 
 /** Walkable crow's-nest basket: ship-local disc radius around the mast the
  *  lookout can pace. Mirrors the client nest geometry (ShipRenderer builds the
@@ -2773,14 +2791,31 @@ export class PhysicsSystem {
     if (dxI * dxI + dzI * dzI > broadphase * broadphase) return NO_CONTACT;
 
     const keelY = ship.position.y - stats.height * SHIP.HULL_DRAFT_F[ship.type] - SHIP.GROUND_KEEL_SAFETY;
+    const wallY = ship.position.y - WATERLINE_WALL_DROP;
+    // Abeam basis: forward is (sin, cos), so starboard is (cos, -sin).
+    const sinR = Math.sin(ship.rotation);
+    const cosR = Math.cos(ship.rotation);
     let deepest: { x: number; z: number; depth: number } | null = null;
-    for (const sample of this.getShipHullContactSamples(ship)) {
-      const depth = getIslandSurfaceY(island, sample.x, sample.z) - keelY;
-      if (depth > 0 && (!deepest || depth > deepest.depth)) {
-        deepest = { x: sample.x, z: sample.z, depth };
+    let wallOver = 0;
+    for (const station of getHullWaterlineOutline(ship.type)) {
+      const localZ = station.zF * stats.length;
+      const half = station.halfF * stats.width;
+      const bx = ship.position.x + localZ * sinR;
+      const bz = ship.position.z + localZ * cosR;
+      for (const abeam of HULL_OUTLINE_ABEAM) {
+        const px = bx + cosR * half * abeam;
+        const pz = bz - sinR * half * abeam;
+        const surface = getIslandSurfaceY(island, px, pz);
+        const depth = surface - keelY;
+        if (depth > 0 && (!deepest || depth > deepest.depth)) {
+          deepest = { x: px, z: pz, depth };
+        }
+        const over = surface - wallY;
+        if (over > wallOver) wallOver = over;
       }
     }
     if (!deepest) return NO_CONTACT;
+    const againstWall = wallOver > 0;
 
     // A hull AT REST sits on the bottom — no jitter for moored or abandoned ships.
     //
@@ -2797,9 +2832,14 @@ export class PhysicsSystem {
     // With the yard drawing, the sea keeps working her off the bar — she still
     // stops, still takes the grounding breach, still loses the race, but the way
     // out is her own sails, which is the way out the coach names.
+    //
+    // A WALL IS NOT A BED, THOUGH. The rest exemption is about a hull settling
+    // onto the bottom; rock standing up through her waterline is not a bottom,
+    // and a moored hull left inside a cliff face is the same hole in the world
+    // as a sailing one. So the exemption is skipped while she is against a wall.
     const planarSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
     const resting = ship.anchored || ship.sailHeight <= 0.08 || !!ship.sinking;
-    if (planarSpeed < 0.6 && resting) return { contact: true, into: false };
+    if (planarSpeed < 0.6 && resting && !againstWall) return { contact: true, into: false };
 
     // Push downhill along the heightfield gradient (fallback: away from centre).
     const eps = 2;
@@ -2820,7 +2860,7 @@ export class PhysicsSystem {
     }
 
     const slope = Math.max(gradLen / (2 * eps), 0.08);
-    const push = Math.min(deepest.depth / slope, 0.9);
+    const push = Math.min(Math.max(deepest.depth, wallOver) / slope, 0.9);
     ship.position.x += nx * push;
     ship.position.z += nz * push;
 
@@ -2839,7 +2879,10 @@ export class PhysicsSystem {
     // Where her HEAD points is the stable fact. A departing hull is aimed at open
     // water while she scrapes out; a pinned one is aimed at the beach, which is
     // exactly why she is pinned and exactly what the sails are pressing her onto.
-    const into = Math.sin(ship.rotation) * nx + Math.cos(ship.rotation) * nz < 0;
+    //
+    // Against a WALL her head is beside the point: rock is through her planking
+    // whichever way she is pointed, so she reads AGROUND until it is not.
+    const into = againstWall || Math.sin(ship.rotation) * nx + Math.cos(ship.rotation) * nz < 0;
     if (relVel < 0) {
       const impactSpeed = -relVel;
       ship.velocity.x -= relVel * nx * 1.35;
