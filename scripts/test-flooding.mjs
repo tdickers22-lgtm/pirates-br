@@ -629,12 +629,37 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   const st = match.state;
   const ship = st.ships[0];
   const stats = SHIP_STATS[ship.type];
+  // HER OWN PATCH OF OPEN SEA, not whatever berth the fleet builder handed hull
+  // zero. The founder is a scene AT SEA and it was being graded at a dock, so
+  // the fixture inherited the berth — and when w3.6's outline grounding moved
+  // that berth 2.24 m (z -155.56 -> -153.32) the swell phase under her bows
+  // moved with it and the forward hand's boots went under at tick 287 of 1200
+  // instead of 336: a do-not-regress suite turned red on a fixture accident,
+  // not on a behaviour change. (Her sinking DEPTH is identical either way —
+  // y = -1.129 at the quarter mark at the berth and here — so the bottom was
+  // never what moved. It was the sea over it, which is why re-pinning to a
+  // different berth would only buy the next terrain lane the same failure.)
+  // Pinned to clear water instead, and the clearance is ASSERTED below so a
+  // future map change cannot silently re-berth her.
+  ship.position.x = -640;
+  ship.position.z = -350;
   ship.position.y = 0;
   ship.rotation = 0;
   ship.pitch = 0;
   ship.roll = 0;
   ship.holes = [];
   ship.nextHoleId = 1;
+  let clearWater = Infinity;
+  for (const island of st.islands) {
+    clearWater = Math.min(clearWater, Math.hypot(
+      ship.position.x - island.position.x, ship.position.z - island.position.z) - island.radius);
+  }
+  for (const rock of st.seaRocks ?? []) {
+    clearWater = Math.min(clearWater, Math.hypot(
+      ship.position.x - rock.position.x, ship.position.z - rock.position.z) - rock.colliderBoundsRadius);
+  }
+  expect('the founder fixture lies in open water (no berth under her, no bottom to sit on)',
+    clearWater > 100, `clearWater=${clearWater.toFixed(0)} m to the nearest island edge or sea rock`);
   // Breaches all FORWARD: she must go down by the head, and the pirate standing
   // in the bows must get his boots wet before the one aft on the quarterdeck.
   //
