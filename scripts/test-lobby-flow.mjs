@@ -521,6 +521,73 @@ LobbyServer.tunables.queueHardWaitSeconds = 3.2;
     `reason="${errorText(host)}"`);
   await scuttle();
 }
+{
+  // ── 10. ONE CREW, ONE HULL (MODE-01 slice c, netcode-21's lobby half) ─────
+  // CREW-01 built the crew: one ship for a party of N, DBNO, revive, the
+  // station arbiter, crewGold, a crew-keyed win check. NOTHING in production
+  // reached it: LobbyServer placed every session on its own through
+  // createHumanClient, so a party of two sailed out as TWO ENEMY SLOOPS and a
+  // duos queue of nine crews would have put eighteen hulls to sea.
+  const [cap, mate] = await crew('Pair1', 'Pair2');
+  cap.send('create_party');
+  await sleep(120);
+  const code = roster(cap).code;
+  mate.send('join_party', { code });
+  await sleep(200);
+  cap.send('update_party_settings', { mode: 'duos', botFill: 3 });
+  await sleep(120);
+  mate.send('party_ready', { ready: true });
+  await sleep(160);
+  cap.send('start_match', { force: true });
+  await sleep(600);
+  const match = onlyMatch();
+  const humans = match ? match.state.players.filter((p) => !p.isBot) : [];
+  expect('a party of two sails ONE hull, not two enemy sloops',
+    humans.length === 2 && new Set(humans.map((p) => p.shipId)).size === 1,
+    `humans=${humans.length} hulls=${new Set(humans.map((p) => p.shipId)).size}`);
+  const hull = match?.state.ships.find((sh) => sh.id === humans[0]?.shipId);
+  expect('and she is the Corsair a pair is handed (hullForCrewSize(2))',
+    hull?.type === 'brigantine', `type=${hull?.type}`);
+  expect('the hull knows her whole crew, so a crewmate\'s pistol passes through',
+    !!hull && humans.every((p) => hull.crewIds.includes(p.id)),
+    `crewIds=${hull?.crewIds?.length}`);
+  expect('both mates are in the same crew record',
+    !!match && (match.state.crews ?? []).some((cw) => humans.every((p) => cw.memberIds.includes(p.id))),
+    `crews=${(match?.state.crews ?? []).length}`);
+  expect('the bot fleet she meets is crewed for the mode too (Corsairs, two hands)',
+    !!match && match.state.ships.filter((sh) => sh.id !== hull?.id)
+      .every((sh) => sh.type === 'brigantine'),
+    (match?.state.ships ?? []).map((sh) => sh.type).join(','));
+  await scuttle();
+}
+
+{
+  // The same rule through the PUBLIC queue: two crews of two are two hulls in
+  // one duos match, and the fleet never exceeds the mode's size.
+  const [a1, a2] = await crew('Qa1', 'Qa2');
+  const [b1, b2] = await crew('Qb1', 'Qb2');
+  for (const [host, mate] of [[a1, a2], [b1, b2]]) {
+    host.send('create_party');
+    await sleep(120);
+    mate.send('join_party', { code: roster(host).code });
+    await sleep(160);
+    host.send('update_party_settings', { mode: 'duos' });
+    await sleep(120);
+    host.send('queue_join', { mode: 'duos' });
+    await sleep(120);
+  }
+  await sleep(4_200);
+  expect('two duos crews land in ONE match', liveMatches() === 1, `matches=${liveMatches()}`);
+  const qm = onlyMatch();
+  const qHumans = qm ? qm.state.players.filter((p) => !p.isBot) : [];
+  expect('all four sailed, on TWO hulls (not four)',
+    qHumans.length === 4 && new Set(qHumans.map((p) => p.shipId)).size === 2,
+    `humans=${qHumans.length} hulls=${new Set(qHumans.map((p) => p.shipId)).size}`);
+  expect('the fleet is the mode\'s fleet, never bigger (duos = 9 hulls)',
+    !!qm && qm.state.ships.length <= 9, `ships=${qm?.state.ships.length}`);
+  await scuttle();
+}
+
 LobbyServer.tunables.queueSoftWaitSeconds = 45;
 LobbyServer.tunables.queueHardWaitSeconds = 90;
 

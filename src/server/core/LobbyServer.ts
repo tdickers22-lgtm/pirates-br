@@ -645,10 +645,12 @@ export class LobbyServer {
       .filter((c): c is ClientSession => !!c && c.state === 'party' && c.ws.readyState === WebSocket.OPEN);
     if (memberSessions.length === 0) return;
 
+    const partyMode: ModeId = isModeId(party.mode) ? party.mode : 'solo';
     const botCount = Math.max(0, Math.min(party.botFill, MATCH_TOTAL_SHIPS - memberSessions.length));
 
     party.inMatch = true;
-    const { placed } = this.spawnAndBoard(memberSessions, botCount, 'party', party.code);
+    // A party is ONE crew: one hull, sized by hullForCrewSize(roster).
+    const { placed } = this.spawnAndBoard([memberSessions], botCount, partyMode, 'party', party.code);
     // Nobody boarded: the party is still in its panel, not "in a match" (a
     // stale inMatch=true would refuse the next Start).
     if (placed === 0) party.inMatch = false;
@@ -738,15 +740,15 @@ export class LobbyServer {
   /**
    * HULLS THIS CREW WILL OCCUPY.
    *
-   * Placement is still one hull per HUMAN (placeClientIntoMatch →
-   * Match.createHumanClient). MODE-01 slice c moves the queue onto
-   * Match.createCrew, at which point a crew of four is ONE Man-o'-War and this
-   * returns 1. Sizing the bot fill off it — rather than off the crew count —
-   * keeps the fleet honest either way instead of shipping a duos match with
-   * eighteen hulls in it.
+   * ONE. A queue entry IS a crew and a crew is ONE hull, whatever her size —
+   * that is what MODE-01 slice c changed: placement went through
+   * Match.createHumanClient, one hull per HUMAN, so a duos cohort of nine crews
+   * put EIGHTEEN sloops to sea and a party of four sailed out as four enemy
+   * ships (netcode-21's lobby half). The queue's fleet arithmetic counts hulls,
+   * so it reads the same number the match will actually build.
    */
-  private hullsForEntry(entry: QueueEntry): number {
-    return Math.max(1, entry.sessionIds.length);
+  private hullsForEntry(_entry: QueueEntry): number {
+    return 1;
   }
 
   private handleQueueLeave(session: ClientSession): void {
@@ -764,7 +766,7 @@ export class LobbyServer {
     const payload = (msg.payload ?? {}) as { botCount?: number };
     const requested = typeof payload.botCount === 'number' ? Math.floor(payload.botCount) : PARTY_DEFAULT_BOTS;
     const botCount = Math.max(0, Math.min(PARTY_MAX_BOTS, requested));
-    this.spawnAndBoard([session], botCount, 'party');
+    this.spawnAndBoard([[session]], botCount, 'solo', 'party');
   }
 
   private handleReturnToMenu(session: ClientSession): void {
@@ -1041,7 +1043,7 @@ export class LobbyServer {
         starting: true,
       };
       for (const c of members) this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload: starting });
-      const placed = this.placeCohort(members, match, 'queue', entry.partyCode, match.botCrewCount());
+      const placed = this.placeCohort([members], match, 'queue', entry.partyCode, match.botCrewCount());
       if (placed === 0) return false;
       this.markPartyAtSea(entry);
       slot.slots -= hulls;
@@ -1087,7 +1089,8 @@ export class LobbyServer {
       }
       this.queue = this.queue.filter((e) => !cohort.includes(e));
 
-      const members = cohort.flatMap((e) => this.liveMembers(e));
+      const crews = cohort.map((e) => this.liveMembers(e)).filter((c) => c.length > 0);
+      const members = crews.flat();
       if (members.length === 0) { this.broadcastQueue(); continue; }
 
       const reserve = cohortHulls < spec.crews ? QUEUE_BACKFILL_RESERVE : 0;
@@ -1106,7 +1109,9 @@ export class LobbyServer {
       for (const c of members) this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload: foundPayload });
 
       const partyCode = cohort.length === 1 ? cohort[0].partyCode : null;
-      const { match, placed } = this.spawnAndBoard(members, botCount, 'queue', partyCode);
+      // One array per QUEUE ENTRY: a party queues as one crew and sails one
+      // hull, so the cohort's shape survives all the way into createCrew.
+      const { match, placed } = this.spawnAndBoard(crews, botCount, mode, 'queue', partyCode);
       if (placed > 0) for (const e of cohort) this.markPartyAtSea(e);
       if (match && placed > 0 && reserve > 0) {
         this.queueMatchSlots.set(match.id, { mode, slots: reserve });
@@ -1117,9 +1122,12 @@ export class LobbyServer {
   }
 
   // ─── Match lifecycle ─────────────────────────────────────────
-  private spawnMatch(opts: { botCount: number; source: 'party' | 'queue' }): Match {
+  private spawnMatch(opts: { botCount: number; mode: ModeId; source: 'party' | 'queue' }): Match {
     const matchId = uuid();
-    const match = new Match({ matchId, botCount: opts.botCount });
+    // The mode decides the bot fleet's crew size and hull class (MODE-01): a
+    // Duos match is nine Corsairs with two hands each, not nine single-handed
+    // ships of whatever class the spawn table rolled.
+    const match = new Match({ matchId, botCount: opts.botCount, mode: opts.mode });
     match.onMatchEnd = (result) => this.onMatchEnd(matchId, result);
     match.start();
     this.matches.set(matchId, match);
@@ -1135,14 +1143,16 @@ export class LobbyServer {
    *  Now a failed spawn tells every member (lobby_error + lobby_left) exactly
    *  as a failed placement does, and returns placed 0 so callers roll back. */
   private spawnAndBoard(
-    members: ClientSession[],
+    crews: ClientSession[][],
     botCount: number,
+    mode: ModeId,
     source: 'party' | 'queue',
     partyCode: string | null = null,
   ): { match: Match | null; placed: number } {
+    const members = crews.flat();
     let match: Match;
     try {
-      match = this.spawnMatch({ botCount, source });
+      match = this.spawnMatch({ botCount, mode, source });
     } catch (err) {
       console.error(`[Lobby] spawnMatch failed (${source}, ${members.length} member(s)):`, err);
       for (const member of members) this.failPlacement(member, null);
@@ -1152,7 +1162,9 @@ export class LobbyServer {
     // first placement) must not be given a hull, a dock and a colour: that
     // pirate stands in the world as a free target and a shipsAlive count until
     // the sweep trims it up to 75 s later (netcode-15).
-    const live = members.filter((m) => m.ws.readyState === WebSocket.OPEN);
+    const live = crews
+      .map((crew) => crew.filter((m) => m.ws.readyState === WebSocket.OPEN))
+      .filter((crew) => crew.length > 0);
     return { match, placed: this.placeCohort(live, match, source, partyCode, botCount) };
   }
 
@@ -1165,15 +1177,19 @@ export class LobbyServer {
    *  is told, sent home, and can queue again; a match nobody could board is
    *  reaped at once instead of running empty for EMPTY_MATCH_GC_MS.
    *  Returns how many members boarded. */
-  private placeCohort(members: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null, botCount = 0): number {
+  private placeCohort(crews: ClientSession[][], match: Match, source: 'party' | 'queue', partyCode: string | null = null, botCount = 0): number {
     let placed = 0;
-    for (const member of members) {
+    const humans = crews.reduce((n, crew) => n + crew.length, 0);
+    // The boundary is now the CREW, because the hull is: createCrew builds one
+    // ship for the whole crew, so a throw inside it loses that crew's hull and
+    // nobody else's. Every member of a crew that fails is sent home together.
+    for (const crew of crews) {
       try {
-        this.placeClientIntoMatch(member, match, source, partyCode, members.length, botCount);
-        placed += 1;
+        this.placeCrewIntoMatch(crew, match, source, partyCode, humans, botCount);
+        placed += crew.length;
       } catch (err) {
-        console.error(`[Lobby] placement failed for ${member.id.slice(0, 6)} in match ${match.id.slice(0, 6)}:`, err);
-        this.failPlacement(member, match);
+        console.error(`[Lobby] placement failed for crew ${crew[0]?.id.slice(0, 6)} in match ${match.id.slice(0, 6)}:`, err);
+        for (const member of crew) this.failPlacement(member, match);
       }
     }
     if (placed === 0) this.reapMatch(match.id, match, 'placement failed');
@@ -1196,33 +1212,49 @@ export class LobbyServer {
     }
   }
 
-  private placeClientIntoMatch(session: ClientSession, match: Match, source: 'party' | 'queue', partyCode: string | null = null, expectedHumans = 1, botCount = 0): void {
-    // Build the join payload first (no send) so a throw in world/spawn setup can
-    // never leave the client with a torn-down menu and no join ever arriving.
+  /**
+   * ONE CREW, ONE HULL (MODE-01 slice c, netcode-21's lobby half).
+   *
+   * This used to be placeClientIntoMatch, called once per session, and each call
+   * went to Match.createHumanClient → createCrew([one]). So the crew machinery
+   * CREW-01 built — one hull per crew, DBNO, revive, the station arbiter,
+   * crewGold, crew-keyed win — was reachable only from the test suite: in
+   * production every party of four put four ENEMY sloops to sea. The whole crew
+   * now goes through createCrew in one call, gets one hull sized by
+   * hullForCrewSize(n), and lands together on one pier.
+   */
+  private placeCrewIntoMatch(crew: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null, expectedHumans = 1, botCount = 0): void {
+    if (crew.length === 0) return;
+    // Build the join payloads first (no send) so a throw in world/spawn setup
+    // can never leave a client with a torn-down menu and no join ever arriving.
     // The client still needs match_start BEFORE the join snapshot — it resets
     // local round state on match_start, which would otherwise wipe
     // localPlayerId and unanchor the camera/input.
-    const pending = match.createHumanClient(session.ws, session.name);
-    // Open the world-build window BEFORE the join snapshot goes out — that
-    // snapshot is what pins the client's main thread.
-    session.matchJoinedAt = Date.now();
-    const startMsg: MatchStartPayload = {
-      matchId: match.id,
-      source,
-      // The cohort size, counted BEFORE the placement loop — this was
-      // humanCount() so far, so every member of a crew read a different number
-      // and the first one read 1; botCount was the literal 0 (netcode-17).
-      expectedHumans,
-      botCount,
-      partyCode,
-    };
-    this.send(session.ws, { type: 'match_start', ts: Date.now(), payload: startMsg });
-    const { playerId } = pending.send();
-    session.state = 'in_match';
-    session.matchId = match.id;
-    session.matchPlayerId = playerId;
-    session.endedMatchSince = undefined;
-    this.clientToMatch.set(session.id, match.id);
+    const pending = match.createCrew(crew.map((session) => ({ ws: session.ws, name: session.name })));
+    crew.forEach((session, index) => {
+      const join = pending.joins[index];
+      if (!join) return;
+      // Open the world-build window BEFORE the join snapshot goes out — that
+      // snapshot is what pins the client's main thread.
+      session.matchJoinedAt = Date.now();
+      const startMsg: MatchStartPayload = {
+        matchId: match.id,
+        source,
+        // The cohort size, counted BEFORE the placement loop — this was
+        // humanCount() so far, so every member of a crew read a different number
+        // and the first one read 1; botCount was the literal 0 (netcode-17).
+        expectedHumans,
+        botCount,
+        partyCode,
+      };
+      this.send(session.ws, { type: 'match_start', ts: Date.now(), payload: startMsg });
+      const { playerId } = join.send();
+      session.state = 'in_match';
+      session.matchId = match.id;
+      session.matchPlayerId = playerId;
+      session.endedMatchSince = undefined;
+      this.clientToMatch.set(session.id, match.id);
+    });
   }
 
   private onMatchEnd(matchId: string, result: MatchEndResult): void {
