@@ -1159,6 +1159,10 @@ export class OceanRenderer {
   setHullMasks(
     hulls: ReadonlyArray<{ x: number; y: number; z: number; yaw: number; width: number; length: number; top: number; bottom: number }>,
     cameraPos?: THREE.Vector3,
+    /** How many leading entries of `hulls` are live. Lets a caller keep ONE
+     *  pooled array across frames and refill its front, instead of slicing a
+     *  fresh one into the render loop every frame. */
+    count = hulls.length,
   ) {
     if (!this.material) return;
     const u = this.material.uniforms;
@@ -1166,7 +1170,8 @@ export class OceanRenderer {
     const b = u.u_hullB.value as THREE.Vector4[];
     this.maskOrder.length = 0;
     this.maskDist.length = 0;
-    for (let i = 0; i < hulls.length; i++) {
+    const live = Math.min(count, hulls.length);
+    for (let i = 0; i < live; i++) {
       const h = hulls[i];
       const d = cameraPos ? Math.hypot(h.x - cameraPos.x, h.z - cameraPos.z) : 0;
       if (d > HULL_MASK_RANGE) continue;
