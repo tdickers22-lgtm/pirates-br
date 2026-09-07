@@ -919,7 +919,14 @@ export class Match {
     for (const ship of ships) {
       if (!ship.alive || ship.sinking) continue;
       const berth = this.pickSafeSpawnBerth(ship.type, /*farthestFromHulls*/ true);
-      if (!berth) break;
+      // CONTINUE, NOT BREAK (review-2 P2). pickSafeSpawnBerth returns null when
+      // no free berth clears the DEPTH check for THIS hull's class, which is a
+      // fact about this hull, not about the pier list: breaking stranded every
+      // hull after her at her sea spawn — the opposite of the "a hull with no
+      // berth left keeps her sea spawn" above, which is about ONE hull. Same
+      // outcome while MODE-01 makes every hull in a match the same class, and a
+      // silent fleet-wide strand the moment that stops being true.
+      if (!berth) continue;
       this.parkShipAtDock(ship, berth.dock, /*refit*/ true, berth.side);
       // MOORING RE-SEATS THE WHOLE CREW, and a crew is more than one pirate
       // since MODE-01 slice c: seating every hand on the same deck point put a
