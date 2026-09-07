@@ -298,6 +298,11 @@ export function normalizeForMerge(geo: THREE.BufferGeometry, matrix: THREE.Matri
  *  skipping excluded subtrees (anything animated, tinted, or toggled at
  *  runtime). This is the main per-ship draw-call reduction. */
 export function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<THREE.Object3D>) {
+  // Census escape hatch: merging batches by material and throws every mesh
+  // NAME away, so a geometry gate can say "ship-dark-timber hangs 0.85 m aft"
+  // and nothing can say WHICH timber. Node-side probes set this global to keep
+  // the parts separate; nothing in the browser build ever sets it.
+  if ((globalThis as { __shipNoMerge?: boolean }).__shipNoMerge) return;
   root.updateMatrixWorld(true);
   const rootInverse = new THREE.Matrix4().copy(root.matrixWorld).invert();
   const relative = new THREE.Matrix4();
@@ -343,3 +348,179 @@ export function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<TH
 }
 
 /** Masthead flag: hoist→fly and head→foot, in metres (roughly a 2:1 ensign). */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SHEER LINE — everything that stands ON the hull instead of IN her.
+//
+// The deck, the bulwarks, the cap rail, the railings and the stern castle were
+// all straight boxes sized off W and L: a W·0.95 deck slab, bulwarks at 0.44 W
+// and a cap rail at 0.48 W, all carried the full length of the ship. The lofted
+// hull is not a box — she is 0.30 W at the transom and 0.055 W at the stem — so
+// every one of those parts hung over open water at the ends: 2.5 m of planking
+// past the galleon's bow, a cap rail 1.5 m outboard of her own topside
+// (ships-04/05/06). These helpers put each of them back on the sheer curve.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Half-beam of the DECK EDGE at a hull-local z: the loft's top slot (sheer),
+ *  interpolated on its raked z, so the run closes at the real stem and transom
+ *  rather than at the station's base z. */
+export function sheerHalfWidthAt(profile: HullProfile, z: number): number {
+  const sts = profile.stations;
+  const zs = sts.map((st) => st.slots[0].z);
+  if (z <= zs[0]) return sts[0].slots[0].x;
+  if (z >= zs[zs.length - 1]) return sts[sts.length - 1].slots[0].x;
+  let i = 0;
+  while (i < zs.length - 2 && z > zs[i + 1]) i++;
+  const t = (z - zs[i]) / Math.max(0.0001, zs[i + 1] - zs[i]);
+  return sts[i].slots[0].x + (sts[i + 1].slots[0].x - sts[i].slots[0].x) * t;
+}
+
+/** Fore-and-aft z of the sheer at the transom and at the stem. */
+export function sheerZRange(profile: HullProfile): { aft: number; fore: number } {
+  const sts = profile.stations;
+  return { aft: sts[0].slots[0].z, fore: sts[sts.length - 1].slots[0].z };
+}
+
+function slabZSamples(zFrom: number, zTo: number, samples: number, extra: number[]): number[] {
+  const zs: number[] = [];
+  for (let i = 0; i <= samples; i++) zs.push(zFrom + (zTo - zFrom) * (i / samples));
+  for (const e of extra) if (e > zFrom + 1e-4 && e < zTo - 1e-4) zs.push(e);
+  zs.sort((a, b) => a - b);
+  return zs.filter((z, i) => i === 0 || z - zs[i - 1] > 1e-4);
+}
+
+/**
+ * A SLAB THAT FOLLOWS THE SHEER — the weather deck and the stern castle.
+ *
+ * Top face at `topY`, bottom at `topY - thickness`, half-beam at every z taken
+ * from the loft (less `inset`). An optional rectangular `hole` (the
+ * companionway) is cut by splitting the strip at the hole's own z values, so no
+ * ShapeGeometry triangulation and no T-junctions. Roughly 24 z samples: about
+ * 190 triangles for the deck against the 60 the five boxes cost, and it exists
+ * only on the DETAIL hull (the far LOD proxy is untouched), so the low tier's
+ * far-hull budget does not move.
+ *
+ * uv is world-metric — u = x·uvScaleX, v = z·uvScaleY — so plank spacing is a
+ * length in metres and does not stretch with hull class (ships-19).
+ */
+export function makeLoftedSlabGeometry(
+  profile: HullProfile,
+  opts: {
+    topY: number;
+    thickness: number;
+    zFrom: number;
+    zTo: number;
+    inset?: number;
+    hole?: { cx: number; cz: number; halfX: number; halfZ: number } | null;
+    samples?: number;
+    uvScaleX?: number;
+    uvScaleY?: number;
+  },
+): THREE.BufferGeometry {
+  const inset = opts.inset ?? 0;
+  const hole = opts.hole ?? null;
+  const uvx = opts.uvScaleX ?? 1;
+  const uvy = opts.uvScaleY ?? 1;
+  const botY = opts.topY - opts.thickness;
+  const zs = slabZSamples(opts.zFrom, opts.zTo, opts.samples ?? 22,
+    hole ? [hole.cz - hole.halfZ, hole.cz + hole.halfZ] : []);
+  const half = zs.map((z) => Math.max(0.05, sheerHalfWidthAt(profile, z) - inset));
+
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  const push = (x: number, y: number, z: number) => {
+    const i = pos.length / 3;
+    pos.push(x, y, z);
+    uv.push(x * uvx, z * uvy);
+    return i;
+  };
+  const quad = (a: number, b: number, c: number, d: number) => { idx.push(a, b, c, a, c, d); };
+  /** One fore-and-aft strip between two z samples, from x0(z) to x1(z). */
+  const strip = (i: number, x0a: number, x1a: number, x0b: number, x1b: number) => {
+    const za = zs[i], zb = zs[i + 1];
+    const tA = push(x0a, opts.topY, za), tB = push(x1a, opts.topY, za);
+    const tC = push(x1b, opts.topY, zb), tD = push(x0b, opts.topY, zb);
+    quad(tA, tB, tC, tD);
+    const uA = push(x0a, botY, za), uB = push(x1a, botY, za);
+    const uC = push(x1b, botY, zb), uD = push(x0b, botY, zb);
+    quad(uA, uD, uC, uB);
+  };
+  for (let i = 0; i < zs.length - 1; i++) {
+    const za = zs[i], zb = zs[i + 1];
+    const ha = half[i], hb = half[i + 1];
+    const inHole = hole
+      && (za + zb) * 0.5 > hole.cz - hole.halfZ
+      && (za + zb) * 0.5 < hole.cz + hole.halfZ;
+    if (inHole && hole) {
+      const xMin = hole.cx - hole.halfX, xMax = hole.cx + hole.halfX;
+      strip(i, -ha, Math.max(-ha, Math.min(xMin, ha)), -hb, Math.max(-hb, Math.min(xMin, hb)));
+      strip(i, Math.min(ha, Math.max(xMax, -ha)), ha, Math.min(hb, Math.max(xMax, -hb)), hb);
+    } else {
+      strip(i, -ha, ha, -hb, hb);
+    }
+    // Outboard skirt (both sides), so the deck edge has a visible thickness.
+    for (const s of [-1, 1] as const) {
+      const a = push(s * ha, opts.topY, za), b = push(s * hb, opts.topY, zb);
+      const c = push(s * hb, botY, zb), d = push(s * ha, botY, za);
+      if (s === 1) quad(a, b, c, d); else quad(a, d, c, b);
+    }
+  }
+  // End caps.
+  for (const [z, h, sign] of [[zs[0], half[0], -1], [zs[zs.length - 1], half[half.length - 1], 1]] as const) {
+    const a = push(-h, opts.topY, z), b = push(h, opts.topY, z);
+    const c = push(h, botY, z), d = push(-h, botY, z);
+    if (sign === 1) quad(a, b, c, d); else quad(a, d, c, b);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * A WALL THAT FOLLOWS THE SHEER — bulwark, cap rail, side railing.
+ *
+ * A closed box-section run whose OUTER face sits on the deck edge at every z.
+ * `inset` pulls the outer face inboard (the cap rail sits proud of the bulwark,
+ * the railing inboard of it). ~14 samples: 4 faces x 13 spans = 104 triangles
+ * per side against the 12 of the old box, again detail-hull only.
+ */
+export function makeSheerRunGeometry(
+  profile: HullProfile,
+  side: 1 | -1,
+  opts: { y0: number; y1: number; thickness: number; zFrom: number; zTo: number; inset?: number; samples?: number },
+): THREE.BufferGeometry {
+  const inset = opts.inset ?? 0;
+  const zs = slabZSamples(opts.zFrom, opts.zTo, opts.samples ?? 14, []);
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  const run = Math.max(0.001, opts.zTo - opts.zFrom);
+  for (let i = 0; i < zs.length; i++) {
+    const z = zs[i];
+    const xOut = Math.max(0.05, sheerHalfWidthAt(profile, z) - inset);
+    const xIn = Math.max(0.02, xOut - opts.thickness);
+    const rails: Array<[number, number]> = [[xOut, opts.y1], [xOut, opts.y0], [xIn, opts.y0], [xIn, opts.y1]];
+    for (let r = 0; r < 4; r++) {
+      pos.push(side * rails[r][0], rails[r][1], z);
+      uv.push((z - opts.zFrom) / run, r / 3);
+    }
+  }
+  const vi = (s: number, r: number) => s * 4 + (r % 4);
+  for (let s = 0; s < zs.length - 1; s++) {
+    for (let r = 0; r < 4; r++) {
+      const a = vi(s, r), b = vi(s + 1, r), c = vi(s, r + 1), d = vi(s + 1, r + 1);
+      if (side === 1) idx.push(a, b, c, b, d, c);
+      else idx.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}

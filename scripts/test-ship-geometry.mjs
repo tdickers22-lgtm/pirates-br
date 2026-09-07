@@ -45,15 +45,15 @@ function expect(label, ok, detail = '') {
 // ── loft (copy of ShipRenderer LOFT_STATIONS / HULL_SHAPES / getHullProfile) ──
 const HULL_SHAPES = { sloop: { bulge: 1.045, draftF: 0.365 }, brigantine: { bulge: 1.07, draftF: 0.36 }, galleon: { bulge: 1.10, draftF: 0.35 } };
 const LOFT = [
-  { zf: -0.50, dh: 0.300, sheer: 0.95, keel01: 0.32, wlF: 0.62, bilgeF: 0.34, mid: 0.15, ztF: -0.505 },
-  { zf: -0.36, dh: 0.500, sheer: 0.98, keel01: 0.74, wlF: 0.76, bilgeF: 0.48, mid: 0.75, ztF: -0.360 },
-  { zf: -0.22, dh: 0.530, sheer: 0.99, keel01: 0.90, wlF: 0.80, bilgeF: 0.52, mid: 0.95, ztF: -0.220 },
-  { zf: -0.08, dh: 0.560, sheer: 1.00, keel01: 1.00, wlF: 0.82, bilgeF: 0.54, mid: 1.00, ztF: -0.080 },
-  { zf: 0.07, dh: 0.520, sheer: 0.995, keel01: 1.00, wlF: 0.80, bilgeF: 0.52, mid: 1.00, ztF: 0.070 },
-  { zf: 0.22, dh: 0.480, sheer: 0.99, keel01: 0.92, wlF: 0.74, bilgeF: 0.46, mid: 0.90, ztF: 0.220 },
-  { zf: 0.32, dh: 0.390, sheer: 1.015, keel01: 0.78, wlF: 0.62, bilgeF: 0.36, mid: 0.60, ztF: 0.325 },
-  { zf: 0.42, dh: 0.320, sheer: 1.04, keel01: 0.55, wlF: 0.46, bilgeF: 0.24, mid: 0.30, ztF: 0.445 },
-  { zf: 0.50, dh: 0.055, sheer: 1.08, keel01: 0.18, wlF: 0.30, bilgeF: 0.14, mid: 0.00, ztF: 0.530 },
+  { zf: -0.50, dh: 0.300, sheer: 0.95, keel01: 0.32, wlF: 0.62, bilgeF: 0.34, mid: 0.15, ztF: -0.505, zbF: -0.415 },
+  { zf: -0.36, dh: 0.500, sheer: 0.98, keel01: 0.74, wlF: 0.76, bilgeF: 0.48, mid: 0.75, ztF: -0.360, zbF: -0.350 },
+  { zf: -0.22, dh: 0.530, sheer: 0.99, keel01: 0.90, wlF: 0.80, bilgeF: 0.52, mid: 0.95, ztF: -0.220, zbF: -0.220 },
+  { zf: -0.08, dh: 0.560, sheer: 1.00, keel01: 1.00, wlF: 0.82, bilgeF: 0.54, mid: 1.00, ztF: -0.080, zbF: -0.080 },
+  { zf: 0.07, dh: 0.520, sheer: 0.995, keel01: 1.00, wlF: 0.80, bilgeF: 0.52, mid: 1.00, ztF: 0.070, zbF: 0.070 },
+  { zf: 0.22, dh: 0.480, sheer: 0.99, keel01: 0.92, wlF: 0.74, bilgeF: 0.46, mid: 0.90, ztF: 0.220, zbF: 0.220 },
+  { zf: 0.32, dh: 0.390, sheer: 1.015, keel01: 0.78, wlF: 0.62, bilgeF: 0.36, mid: 0.60, ztF: 0.325, zbF: 0.310 },
+  { zf: 0.42, dh: 0.320, sheer: 1.04, keel01: 0.55, wlF: 0.46, bilgeF: 0.24, mid: 0.30, ztF: 0.445, zbF: 0.405 },
+  { zf: 0.50, dh: 0.055, sheer: 1.08, keel01: 0.18, wlF: 0.30, bilgeF: 0.14, mid: 0.00, ztF: 0.530, zbF: 0.415 },
 ];
 function profile(type) {
   const { width: W, height: H, length: L } = SHIP_STATS[type];
@@ -63,7 +63,7 @@ function profile(type) {
     const sheerY = def.sheer * H, keelY = -draft * def.keel01, dh = def.dh * W;
     const wale = dh * (1 + (bulge - 1) * def.mid), wl = dh * def.wlF, bilge = dh * def.bilgeF, waleY = sheerY * 0.6;
     const slots = [[dh, sheerY], [dh + (wale - dh) * 0.72, sheerY - (sheerY - waleY) * 0.45], [wale, waleY], [wl + (wale - wl) * 0.62, waleY * 0.5], [wl, 0], [bilge, keelY * 0.52], [W * 0.015, keelY]];
-    return { baseZ: def.zf * L, sheerY, keelY, slots, zt: def.ztF * L };
+    return { baseZ: def.zf * L, sheerY, keelY, slots, zt: def.ztF * L, zb: def.zbF * L };
   });
   return { W, H, L, draft, bulge, stations };
 }
@@ -73,10 +73,35 @@ function stationX(st, y) {
   const a = s[j], b = s[j + 1]; const t = Math.min(1, Math.max(0, (a[1] - yc) / Math.max(1e-4, a[1] - b[1])));
   return a[0] + (b[0] - a[0]) * t;
 }
+/** THE DRAWN SHELL at (z, y).
+ *
+ *  This used to interpolate the stations by their BASE z and read the section
+ *  half-width there. That is not the surface the renderer draws: every station
+ *  is RAKED (`ztF`/`zbF` in shared/hull.ts), so at the bow the shell's own
+ *  vertices sit up to 1.9 m forward of the station they came from. Grading
+ *  against the base-z curve therefore called the lofted hull itself 10% outside
+ *  the hull — `ship-hull-shell`, built from these very numbers, failed at
+ *  +0.90 m on the galleon — and any deck or rail correctly seated ON the sheer
+ *  failed with it. So the reference is now the same polyline the renderer
+ *  lofts: each station's surface point at height y, carrying that point's raked
+ *  z, interpolated over z. Everything the gate caught for real (hold floor,
+ *  hold walls, iron, ropes) still fails after the correction. */
 function hullHalf(p, z, y) {
-  const sts = p.stations; let i = 0; while (i < sts.length - 2 && z > sts[i + 1].baseZ) i++;
-  const a = sts[i], b = sts[i + 1]; const t = Math.min(1, Math.max(0, (z - a.baseZ) / (b.baseZ - a.baseZ)));
-  return stationX(a, y) + (stationX(b, y) - stationX(a, y)) * t;
+  const sts = p.stations;
+  const xs = sts.map((st) => stationX(st, y));
+  const zs = sts.map((st) => stationZ(st, y));
+  if (z <= zs[0]) return xs[0];
+  if (z >= zs[zs.length - 1]) return xs[xs.length - 1];
+  let i = 0; while (i < zs.length - 2 && z > zs[i + 1]) i++;
+  const t = Math.min(1, Math.max(0, (z - zs[i]) / Math.max(1e-4, zs[i + 1] - zs[i])));
+  return xs[i] + (xs[i + 1] - xs[i]) * t;
+}
+/** The raked z of a station at height y: sheer z at the top, keel z at the
+ *  bottom, on the same 1.35 power curve shared/hull.ts uses. */
+function stationZ(st, y) {
+  const span = Math.max(0.001, st.sheerY - st.keelY);
+  const vf = Math.min(1, Math.max(0, (st.sheerY - y) / span));
+  return st.zt + (st.zb - st.zt) * Math.pow(vf, 1.35);
 }
 function sheerYAt(p, z) {
   const sts = p.stations; let i = 0; while (i < sts.length - 2 && z > sts[i + 1].baseZ) i++;

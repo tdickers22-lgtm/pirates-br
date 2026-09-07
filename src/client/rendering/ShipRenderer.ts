@@ -31,7 +31,7 @@ const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
 
 import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidTexture, woodCanvas, woodTexture } from './ship/textures.js';
 import type { SupplyKind } from './ship/textures.js';
-import { makeBillowedSailGeometry, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
+import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBillowedSailGeometry, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
 import { makeHoldCargoStacks, makeShipInterior } from './ship/interior.js';
@@ -973,37 +973,36 @@ export class ShipRenderer {
     // the rectangular outer edge.
     // Slab center such that the TOP face lands exactly on the server's standing
     // plane (ship.y + H + 0.1) — pirates stand ON the planks, not ankle-deep.
-    const deckTopY = H + 0.025;
-    const addDeckSlab = (cx: number, cz: number, bw: number, bd: number) => {
-      if (bw <= 0.05 || bd <= 0.05) return;
-      const slab = new THREE.Mesh(
-        new THREE.BoxGeometry(Math.max(0.25, bw), 0.15, Math.max(0.25, bd)),
-        deckMat,
-      );
-      slab.position.set(cx, deckTopY, cz);
-      slab.receiveShadow = true;
-      slab.castShadow = true;
-      group.add(slab);
-    };
-
-    const zSternEdge = -halfDeckZ;
-    const zBowEdge = halfDeckZ;
-    const zHoleMin = holeCz - voidHalfZ;
-    const zHoleMax = holeCz + voidHalfZ;
-    const sternDepth = Math.max(0, zHoleMin - zSternEdge);
-    if (sternDepth > 0) addDeckSlab(0, zSternEdge + sternDepth * 0.5, W * 0.95, sternDepth);
-    const bowDepth = Math.max(0, zBowEdge - zHoleMax);
-    if (bowDepth > 0) addDeckSlab(0, zHoleMax + bowDepth * 0.5, W * 0.95, bowDepth);
-
-    const midDepth = Math.max(0, zHoleMax - zHoleMin);
-    const xPortOuter = -W * 0.475;
-    const xStarOuter = W * 0.475;
-    const xHoleMin = holeCx - voidHalfX;
-    const xHoleMax = holeCx + voidHalfX;
-    const portMidW = Math.max(0, xHoleMin - xPortOuter);
-    if (portMidW > 0 && midDepth > 0) addDeckSlab(xPortOuter + portMidW * 0.5, holeCz, portMidW, midDepth);
-    const starMidW = Math.max(0, xStarOuter - xHoleMax);
-    if (starMidW > 0 && midDepth > 0) addDeckSlab(xHoleMax + starMidW * 0.5, holeCz, starMidW, midDepth);
+    // ONE lofted slab, not five boxes. The old deck was W·0.95 wide from
+    // -0.45 L to 0.45 L: at the galleon's bow the hull is 0.27 W there, so
+    // 2.54 m of planking hung over open water (ships-04). This follows the
+    // sheer at every z and carries the companionway as a real hole.
+    const deckSurfaceY = H + SHIP.DECK_STAND_OFFSET;
+    const midDepth = Math.max(0, voidHalfZ * 2);
+    if (deckMat.map) {
+      deckMat.map.wrapS = THREE.RepeatWrapping;
+      deckMat.map.wrapT = THREE.RepeatWrapping;
+      deckMat.map.needsUpdate = true;
+    }
+    const deckRepX = deckMat.map ? deckMat.map.repeat.x || 1 : 1;
+    const deckRepY = deckMat.map ? deckMat.map.repeat.y || 1 : 1;
+    const weatherDeck = new THREE.Mesh(
+      makeLoftedSlabGeometry(profile, {
+        topY: deckSurfaceY,
+        thickness: 0.15,
+        zFrom: -halfDeckZ,
+        zTo: halfDeckZ,
+        hole: { cx: holeCx, cz: holeCz, halfX: voidHalfX, halfZ: voidHalfZ },
+        // Plank pitch is a LENGTH, not a fraction of the hull: 1.4 m across the
+        // beam, 0.9 m fore-and-aft on every class (ships-19).
+        uvScaleX: 1 / (1.4 * deckRepX),
+        uvScaleY: 1 / (0.9 * deckRepY),
+      }),
+      deckMat,
+    );
+    weatherDeck.receiveShadow = true;
+    weatherDeck.castShadow = true;
+    group.add(weatherDeck);
 
     // Trim coamings around the companionway (no hatch — just raised lip)
     const coamingMat = darkMat;
@@ -1096,86 +1095,58 @@ export class ShipRenderer {
       r.position.set(x, H + railH * 0.5, z);
       group.add(r);
     };
-    addRail( W * 0.5 - railThick, 0, railThick * 2, L * 0.82);
-    addRail(-W * 0.5 + railThick, 0, railThick * 2, L * 0.82);
-    addRail(0, -L * 0.41, W * 0.95, railThick * 2);
+    // The side runs follow the sheer (they used to be straight at 0.5 W, i.e.
+    // outboard of the hull over the whole forward third); the stern run is
+    // transverse, so a box sized to the transom's own beam is right.
+    for (const side of [-1, 1] as const) {
+      const rail = new THREE.Mesh(
+        makeSheerRunGeometry(profile, side, {
+          y0: H, y1: H + railH, thickness: railThick * 2, zFrom: -halfDeckZ, zTo: halfDeckZ, inset: 0.16,
+        }),
+        darkMat,
+      );
+      group.add(rail);
+    }
+    addRail(0, -L * 0.41, sheerHalfWidthAt(profile, -L * 0.41) * 2, railThick * 2);
 
-    // Bulwarks keep the upper deck feeling like a proper enclosed ship instead of an open raft.
+    // ── Bulwark + cap rail, lofted ────────────────────────────
+    // Both used to be straight runs (bulwark 0.44 W, cap rail 0.48 W, carried
+    // 0.78-0.82 L) with three hand-placed patches at the bow to hide where they
+    // left the hull. On a galleon the cap rail sat 1.49 m outboard of her own
+    // topside. Now each is ONE run per side on the sheer curve, closed by a
+    // transverse breastwork at each end of the deck, so the bow needs no patch.
     const bulwarkH = 0.34;
-    for (const sx of [-1, 1]) {
+    const bulwarkTop = H + bulwarkH;
+    for (const side of [-1, 1] as const) {
       const bulwark = new THREE.Mesh(
-        new THREE.BoxGeometry(0.14, bulwarkH, L * 0.78),
+        makeSheerRunGeometry(profile, side, {
+          y0: H, y1: bulwarkTop, thickness: 0.14, zFrom: -halfDeckZ, zTo: halfDeckZ,
+        }),
         deckMat,
       );
-      bulwark.position.set(sx * (W * 0.44), H + bulwarkH * 0.5, 0);
       bulwark.castShadow = true;
       bulwark.receiveShadow = true;
       group.add(bulwark);
-    }
-    const bowBreastwork = new THREE.Mesh(
-      new THREE.BoxGeometry(W * 0.72, bulwarkH, 0.16),
-      deckMat,
-    );
-    bowBreastwork.position.set(0, H + bulwarkH * 0.5, L * 0.36);
-    group.add(bowBreastwork);
-    // Forward-quarter bulwark: the straight side run stops at z = 0.39·L while
-    // the walk clamp reaches 0.46·L, so the last ~0.3 m of bow deck used to be
-    // fenced by an invisible rail. Two short angled segments per side carry the
-    // rail from the bulwark end in to the stem, staying OUTBOARD of the walk
-    // taper (0.325·W at 0.39·L → 0.175·W at 0.46·L) the whole way.
-    for (const sx of [-1, 1] as const) {
-      const bowRun: Array<[number, number]> = [
-        [W * 0.44, L * 0.39],
-        [W * 0.345, L * 0.435],
-        [W * 0.155, L * 0.472],
-      ];
-      for (let i = 0; i < bowRun.length - 1; i++) {
-        const [x0, z0] = bowRun[i];
-        const [x1, z1] = bowRun[i + 1];
-        const dx = (x1 - x0) * sx;
-        const dz = z1 - z0;
-        const segLen = Math.hypot(dx, dz);
-        const seg = new THREE.Mesh(new THREE.BoxGeometry(0.14, bulwarkH, segLen + 0.06), deckMat);
-        seg.position.set(sx * (x0 + x1) * 0.5, H + bulwarkH * 0.5, (z0 + z1) * 0.5);
-        seg.rotation.y = Math.atan2(dx, dz);
-        seg.castShadow = true;
-        seg.receiveShadow = true;
-        group.add(seg);
-        // Cap rail along the same run so the bow reads as one continuous rail.
-        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.1, segLen + 0.06), darkTrimMat);
-        cap.position.set(sx * (x0 + x1) * 0.5, H + bulwarkH + 0.05, (z0 + z1) * 0.5);
-        cap.rotation.y = seg.rotation.y;
-        cap.castShadow = true;
-        group.add(cap);
-      }
-    }
-    for (const sx of [-1, 1]) {
-      const quarterBulwark = new THREE.Mesh(
-        new THREE.BoxGeometry(0.14, bulwarkH, L * 0.18),
-        deckMat,
-      );
-      quarterBulwark.position.set(sx * (W * 0.33), H + bulwarkH * 0.5, -L * 0.31);
-      group.add(quarterBulwark);
-    }
-
-    for (const sx of [-1, 1] as const) {
-      // Ends at z = 0.39·L where the angled bow cap rail above picks it up —
-      // the old 0.86·L run carried a straight rail out to 0.43·L, well outboard
-      // of the hull's own sheer there (a rail hanging over open water).
-      // darkTrimMat, not darkMat: the cap's outboard face is the same plane as
-      // the side railing's — see the material's own note.
       const capRail = new THREE.Mesh(
-        new THREE.BoxGeometry(0.2, 0.1, L * 0.82),
+        makeSheerRunGeometry(profile, side, {
+          y0: bulwarkTop, y1: bulwarkTop + 0.1, thickness: 0.2, zFrom: -halfDeckZ, zTo: halfDeckZ,
+        }),
         darkTrimMat,
       );
-      capRail.position.set(sx * W * 0.48, H + bulwarkH + 0.05, -L * 0.02);
       capRail.castShadow = true;
       group.add(capRail);
     }
-    const sternCapRail = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, 0.1, 0.22), darkTrimMat);
-    sternCapRail.position.set(0, H + bulwarkH + 0.05, -L * 0.42);
-    sternCapRail.castShadow = true;
-    group.add(sternCapRail);
+    for (const endZ of [-halfDeckZ, halfDeckZ] as const) {
+      const endHalf = sheerHalfWidthAt(profile, endZ);
+      const breastwork = new THREE.Mesh(new THREE.BoxGeometry(endHalf * 2, bulwarkH, 0.16), deckMat);
+      breastwork.position.set(0, H + bulwarkH * 0.5, endZ + (endZ < 0 ? 0.08 : -0.08));
+      breastwork.castShadow = true;
+      group.add(breastwork);
+      const endCap = new THREE.Mesh(new THREE.BoxGeometry(endHalf * 2, 0.1, 0.22), darkTrimMat);
+      endCap.position.set(0, bulwarkTop + 0.05, endZ + (endZ < 0 ? 0.08 : -0.08));
+      endCap.castShadow = true;
+      group.add(endCap);
+    }
 
     // Railing stanchions
     const stanchionCount = Math.max(4, Math.round(L / 3));
@@ -1186,7 +1157,7 @@ export class ShipRenderer {
           new THREE.CylinderGeometry(0.045, 0.045, railH, 6),
           darkMat,
         );
-        stanchion.position.set(sx * (W * 0.5 - railThick), H + railH * 0.5, sz);
+        stanchion.position.set(sx * (sheerHalfWidthAt(profile, sz) - 0.16 - railThick), H + railH * 0.5, sz);
         group.add(stanchion);
       }
     }
@@ -1219,9 +1190,18 @@ export class ShipRenderer {
     }
 
     // ── Stern castle ─────────────────────────────────────────
-    const sternW = W * 0.88, sternH = H * 0.28, sternL = L * 0.22;
-    const stern = new THREE.Mesh(new THREE.BoxGeometry(sternW, sternH, sternL), darkMat);
-    stern.position.set(0, H + sternH * 0.5, -L * 0.37);
+    const sternH = H * 0.28, sternL = L * 0.22;
+    const castleBackZ = -L * 0.37 - sternL * 0.5;
+    const castleFrontZ = -L * 0.37 + sternL * 0.5;
+    // Clamped per station: the old W·0.88 box overhung the counter by up to
+    // 2.5 m of open water on a galleon (ships-06).
+    const sternW = sheerHalfWidthAt(profile, castleBackZ) * 2;
+    const stern = new THREE.Mesh(
+      makeLoftedSlabGeometry(profile, {
+        topY: H + sternH, thickness: sternH, zFrom: castleBackZ, zTo: castleFrontZ, inset: 0.06, samples: 8,
+      }),
+      darkMat,
+    );
     stern.castShadow = true;
     group.add(stern);
 
@@ -1237,7 +1217,10 @@ export class ShipRenderer {
       opacity: 0.78,
     });
     const windowCount = Math.max(2, Math.round(W / 2.5));
-    const sternFaceZ = -L * 0.51 - 0.085;
+    // The gallery used to be pinned to a fixed -0.51 L - 0.085, which on a
+    // galleon put brass and glass 0.85 m aft of the transom with sky behind it
+    // (ships-05). Seat it on the loft's own raked stern surface at that height.
+    const sternFaceZ = stationSurfaceAt(sternStation, H + sternH * 0.55).z + 0.02;
     for (let w = 0; w < windowCount; w++) {
       const wx = -sternW * 0.35 + w * (sternW * 0.7 / Math.max(windowCount - 1, 1));
       const win = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 0.05), windowMat);
@@ -1250,7 +1233,7 @@ export class ShipRenderer {
 
     const galleryRailY = H + sternH * 0.24;
     const galleryRail = new THREE.Group();
-    galleryRail.position.set(0, galleryRailY, sternFaceZ - 0.16);
+    galleryRail.position.set(0, galleryRailY, sternFaceZ - 0.1);
     const galleryTop = new THREE.Mesh(new THREE.BoxGeometry(sternW * 0.72, 0.06, 0.07), brassHardwareMat);
     galleryTop.position.y = 0.28;
     galleryRail.add(galleryTop);
@@ -1300,9 +1283,16 @@ export class ShipRenderer {
       railTop.position.set(rx, H + qdRise + 0.62, rz);
       railTop.rotation.y = rot;
       group.add(railTop);
+      // sin/cos, not cos/sin. The rail BOX is rotated by rot, so its length runs
+      // along +z at rot 0 and along +x at rot pi/2 — and the balusters have to
+      // march the same way. Written the other way round, the stern rail's three
+      // posts walked AFT down the centreline instead of across the beam: on a
+      // galleon the last one stood 0.85 m behind the transom, in the air, which
+      // is exactly what test-ship-geometry's stern rule had been reporting as
+      // "ship-dark-timber" since the gate was written (ships-05).
       for (const t of [-0.36, 0, 0.36]) {
         const baluster = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.62, 5), darkMat);
-        baluster.position.set(rx + Math.cos(rot) * t * rlen, H + qdRise + 0.31, rz + Math.sin(rot) * t * rlen);
+        baluster.position.set(rx + Math.sin(rot) * t * rlen, H + qdRise + 0.31, rz + Math.cos(rot) * t * rlen);
         group.add(baluster);
       }
     }
@@ -1440,15 +1430,13 @@ export class ShipRenderer {
 
     group.add(anchorCapstan);
 
-    // Bow anchors: seated against the visible topside. The loft tapers well
-    // inboard of the deck box at the bow, so "flush" is governed by whichever
-    // is prouder — the hull surface or the straight bulwark line. Arms run
-    // fore-aft (y-rotated 90°) so the flukes lie flat along the planking.
+    // Bow anchors: stowed INBOARD, catted against the inner face of the
+    // bulwark. The old rule took the greater of the hull surface and the
+    // straight 0.44 W bulwark line and then added clearance, which on a galleon
+    // hung 616 of 616 iron vertices 1.27 m off the ship's side (ships-04).
+    // Arms run fore-aft (y-rotated 90°) so the flukes lie flat along the planking.
     const anchorZ = L * 0.38;
-    const anchorX = Math.max(
-      hullSurfacePointAt(profile, anchorZ, H * 0.6).x + 0.05,
-      W * 0.44 + 0.16,
-    );
+    const anchorX = Math.max(W * 0.12, sheerHalfWidthAt(profile, anchorZ) - 0.42);
     const anchor = new THREE.Group();
     const buildAnchor = (side: -1 | 1) => {
       const g = new THREE.Group();
@@ -1491,8 +1479,8 @@ export class ShipRenderer {
     // of floating beside it. Static dressing — the anchor group alone descends
     // on drop, paying out visually below the beam.
     for (const side of [-1, 1] as const) {
-      const beamInnerX = W * 0.44 - 0.7;
-      const beamOuterX = anchorX + 0.22;
+      const beamInnerX = Math.max(W * 0.06, anchorX - 0.62);
+      const beamOuterX = anchorX + 0.16;
       const catBeam = new THREE.Mesh(
         new THREE.BoxGeometry(beamOuterX - beamInnerX, 0.14, 0.15),
         darkMat,

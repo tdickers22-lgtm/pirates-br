@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "952a8fb9",
+      "digest": "b6ee8e11",
       "meshCount": 98,
-      "vertTotal": 59118,
+      "vertTotal": 61338,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -24,11 +24,11 @@
           "meshes": 62,
           "verts": 29790,
           "tris": 11078,
-          "hash": "22583a9c",
+          "hash": "3510624c",
           "box": [
             -4.11,
             0.447,
-            -6.242,
+            -6.077,
             4.11,
             10.86,
             6.962
@@ -94,39 +94,39 @@
           "meshes": 5,
           "verts": 1920,
           "tris": 640,
-          "hash": "5640e901",
+          "hash": "8aa44e61",
           "box": [
-            -1.927,
+            -1.925,
             2.28,
-            -1.819,
-            1.777,
+            -1.816,
+            1.78,
             3.06,
-            4.369
+            4.365
           ]
         },
         "ship-brass": {
           "meshes": 2,
           "verts": 4020,
           "tris": 1340,
-          "hash": "3d88ce8a",
+          "hash": "6ef51619",
           "box": [
-            -1.835,
+            -1.466,
             2.268,
-            -6.4,
-            1.835,
+            -6.175,
+            1.466,
             3.235,
             5.815
           ]
         },
         "ship-dark-timber": {
           "meshes": 7,
-          "verts": 9404,
-          "tris": 3188,
-          "hash": "139e1c79",
+          "verts": 10172,
+          "tris": 3444,
+          "hash": "74358709",
           "box": [
             -2.819,
             -0.893,
-            -6.416,
+            -6.13,
             2.819,
             11.02,
             9.301
@@ -134,30 +134,30 @@
         },
         "ship-dark-trim": {
           "meshes": 1,
-          "verts": 252,
-          "tris": 84,
-          "hash": "16a2eb49",
+          "verts": 744,
+          "tris": 248,
+          "hash": "4ece1309",
           "box": [
-            -2.5,
+            -2.779,
             2.54,
-            -5.16,
-            2.5,
+            -5.43,
+            2.779,
             2.64,
-            5.767
+            5.43
           ]
         },
         "ship-deck-planking": {
           "meshes": 1,
-          "verts": 1080,
-          "tris": 360,
-          "hash": "cdf90c61",
+          "verts": 2040,
+          "tris": 680,
+          "hash": "bc8bbfd9",
           "box": [
-            -2.375,
+            -2.798,
             0.21,
             -5.4,
-            2.375,
+            2.798,
             9.176,
-            5.74
+            5.4
           ]
         },
         "ship-deck-riser": {
@@ -206,12 +206,12 @@
           "meshes": 4,
           "verts": 5536,
           "tris": 1856,
-          "hash": "13311733",
+          "hash": "bb0d127f",
           "box": [
-            -2.55,
+            -1.859,
             0.445,
             -5.67,
-            2.55,
+            1.859,
             4.663,
             5.445
           ]
@@ -275,9 +275,9 @@
       }
     },
     "brigantine": {
-      "digest": "13acc9e5",
+      "digest": "fbb425ce",
       "meshCount": 127,
-      "vertTotal": 72558,
+      "vertTotal": 74778,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -297,11 +297,11 @@
           "meshes": 86,
           "verts": 41913,
           "tris": 15788,
-          "hash": "d6d3ae59",
+          "hash": "5cf6ec7d",
           "box": [
             -5.11,
             0.447,
-            -8.282,
+            -8.097,
             5.11,
             12.22,
             9.001
@@ -367,39 +367,39 @@
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "5b35cf39",
+          "hash": "7f7a4d29",
           "box": [
-            -2.58,
+            -2.579,
             2.88,
-            -2.438,
-            2.899,
+            -2.436,
+            2.898,
             3.66,
-            5.399
+            5.398
           ]
         },
         "ship-brass": {
           "meshes": 2,
           "verts": 4308,
           "tris": 1436,
-          "hash": "c734a5d6",
+          "hash": "f3fcaf5a",
           "box": [
-            -2.451,
+            -1.934,
             2.908,
-            -8.44,
-            2.451,
+            -8.195,
+            1.934,
             3.835,
             7.495
           ]
         },
         "ship-dark-timber": {
           "meshes": 8,
-          "verts": 9912,
-          "tris": 3380,
-          "hash": "2e35f3a0",
+          "verts": 10680,
+          "tris": 3636,
+          "hash": "7add814c",
           "box": [
             -3.939,
             -1.098,
-            -8.635,
+            -8.15,
             3.939,
             12.38,
             12.4
@@ -407,30 +407,30 @@
         },
         "ship-dark-trim": {
           "meshes": 1,
-          "verts": 252,
-          "tris": 84,
-          "hash": "914f3b5d",
+          "verts": 744,
+          "tris": 248,
+          "hash": "dbc8d155",
           "box": [
-            -3.46,
+            -3.891,
             3.14,
-            -6.88,
-            3.46,
+            -7.23,
+            3.891,
             3.24,
-            7.656
+            7.23
           ]
         },
         "ship-deck-planking": {
           "meshes": 1,
-          "verts": 1116,
-          "tris": 372,
-          "hash": "c186d121",
+          "verts": 2076,
+          "tris": 692,
+          "hash": "371ec651",
           "box": [
-            -3.325,
+            -3.917,
             0.21,
             -7.2,
-            3.325,
+            3.917,
             10.43,
-            7.628
+            7.2
           ]
         },
         "ship-deck-riser": {
@@ -479,12 +479,12 @@
           "meshes": 4,
           "verts": 4912,
           "tris": 1648,
-          "hash": "2832d483",
+          "hash": "0b42ada2",
           "box": [
-            -3.43,
+            -2.737,
             1.045,
             -7.51,
-            3.43,
+            2.737,
             4.891,
             7.125
           ]
@@ -548,9 +548,9 @@
       }
     },
     "galleon": {
-      "digest": "43ee4169",
+      "digest": "a48f3b31",
       "meshCount": 169,
-      "vertTotal": 94881,
+      "vertTotal": 97101,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -570,11 +570,11 @@
           "meshes": 121,
           "verts": 61405,
           "tris": 23250,
-          "hash": "24eb97d7",
+          "hash": "f1d25253",
           "box": [
             -6.61,
             0.447,
-            -11.342,
+            -11.127,
             6.61,
             15.09,
             12.659
@@ -640,39 +640,39 @@
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "8e2a83e9",
+          "hash": "14d50be1",
           "box": [
-            -4.08,
+            -4.079,
             3.58,
-            -3.843,
-            4.077,
+            -3.845,
+            4.075,
             4.36,
-            6.72
+            6.718
           ]
         },
         "ship-brass": {
           "meshes": 2,
           "verts": 4596,
           "tris": 1532,
-          "hash": "0641d004",
+          "hash": "72af7e0e",
           "box": [
-            -3.375,
+            -2.636,
             3.655,
-            -11.5,
-            3.375,
+            -11.225,
+            2.636,
             4.535,
             10.015
           ]
         },
         "ship-dark-timber": {
           "meshes": 9,
-          "verts": 10564,
-          "tris": 3620,
-          "hash": "89e173b0",
+          "verts": 11332,
+          "tris": 3876,
+          "hash": "8bf5746c",
           "box": [
             -5.619,
             -1.315,
-            -11.962,
+            -11.18,
             5.619,
             15.25,
             17.049
@@ -680,30 +680,30 @@
         },
         "ship-dark-trim": {
           "meshes": 1,
-          "verts": 252,
-          "tris": 84,
-          "hash": "8a8f6fe5",
+          "verts": 744,
+          "tris": 248,
+          "hash": "b0125e8d",
           "box": [
-            -4.9,
+            -5.558,
             3.84,
-            -9.46,
-            4.9,
+            -9.93,
+            5.558,
             3.94,
-            10.488
+            9.93
           ]
         },
         "ship-deck-planking": {
           "meshes": 1,
-          "verts": 1152,
-          "tris": 384,
-          "hash": "3d724119",
+          "verts": 2112,
+          "tris": 704,
+          "hash": "01c255fd",
           "box": [
-            -4.75,
+            -5.596,
             0.21,
             -9.9,
-            4.75,
+            5.596,
             12.996,
-            10.46
+            9.9
           ]
         },
         "ship-deck-riser": {
@@ -752,12 +752,12 @@
           "meshes": 4,
           "verts": 5536,
           "tris": 1856,
-          "hash": "abccede7",
+          "hash": "8a21e893",
           "box": [
-            -4.75,
+            -4.056,
             1.745,
             -10.27,
-            4.75,
+            4.056,
             5.788,
             9.645
           ]
