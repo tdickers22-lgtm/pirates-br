@@ -8,6 +8,7 @@ import type { NetworkClient } from '../network/NetworkClient.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
 import { openOnboardingCards } from '../ui/OnboardingCards.js';
+import { installModalStack, modalStack } from '../ui/ModalStack.js';
 import {
   decideRenderQuality, loadQualityPreference, renderQualityLabel,
   saveAutoTierCeiling, saveQualityPreference,
@@ -295,6 +296,10 @@ export class MenuController {
     // starting while it's open (queue pops mid-browse) would leave it covering
     // the spawn. Menu gone ⇒ modal gone.
     this.closeStatsPanel();
+    // …and no menu panel may stay on the stack, or the first in-match Escape
+    // would be eaten by a panel that is display:none (hud-22).
+    modalStack.notifyClosed('menu-panel-settings');
+    modalStack.notifyClosed('menu-panel-howto');
     // Drop focus from any menu input/button so keydown WASD lands on document, not the input/button.
     const active = document.activeElement;
     if (active instanceof HTMLElement) active.blur();
@@ -530,14 +535,14 @@ export class MenuController {
       this.showPanel('main');
     });
 
-    // Lifetime stats modal
+    // Lifetime stats modal. Escape used to be a `document` listener of this
+    // panel's own, firing whether or not the panel was the top thing on screen;
+    // it goes through the one stack now (hud-22).
+    installModalStack();
     this.statsBtn.addEventListener('click', () => this.openStatsPanel());
     this.statsCloseBtn.addEventListener('click', () => this.closeStatsPanel());
     this.statsBackdrop.addEventListener('click', (e) => {
       if (e.target === this.statsBackdrop) this.closeStatsPanel();
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.statsBackdrop.classList.contains('visible')) this.closeStatsPanel();
     });
 
     // How to Play
@@ -706,6 +711,16 @@ export class MenuController {
 
   // ─── Render helpers ──────────────────────────────────────────
   private showPanel(which: MenuPanel): void {
+    // ESCAPE AND ENTER BOTH MEAN BACK on the two panels that have a Back
+    // button (hud-22). Registered as they open, dropped as they close, so the
+    // stack never holds a panel that is not on screen.
+    if (which === 'settings' || which === 'howto') {
+      const back = () => this.showPanel('main');
+      modalStack.open({ id: `menu-panel-${which}`, close: back, confirm: back });
+    } else {
+      modalStack.notifyClosed('menu-panel-settings');
+      modalStack.notifyClosed('menu-panel-howto');
+    }
     this.panelMain.classList.toggle('visible', which === 'main');
     this.panelLobby.classList.toggle('visible', which === 'lobby');
     this.panelQueue.classList.toggle('visible', which === 'queue');
@@ -1046,10 +1061,12 @@ export class MenuController {
     if (!this.latestStats) return;
     this.renderStatsPanel();
     this.statsBackdrop.classList.add('visible');
+    modalStack.open({ id: 'stats-panel', close: () => this.closeStatsPanel() });
   }
 
   private closeStatsPanel(): void {
     this.statsBackdrop.classList.remove('visible');
+    modalStack.notifyClosed('stats-panel');
   }
 
   private renderStatsPanel(): void {

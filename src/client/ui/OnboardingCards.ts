@@ -18,6 +18,8 @@
  * so the menu and the HUD drive exactly one implementation.
  */
 
+import { modalStack } from './ModalStack.js';
+
 type Card = { kicker: string; glyph: string; title: string; lines: string[] };
 
 /** Three cards, three verbs. Each is what a pirate must do NEXT, not a list of
@@ -88,10 +90,14 @@ export function openOnboardingCards(): void {
   index = 0;
   paint();
   root.classList.add('visible');
+  // hud-22: the tour was mouse-only. Escape skips it, Enter is Next / Set sail
+  // — the same two keys every other overlay answers to (ModalStack).
+  modalStack.open({ id: 'onboarding-cards', close: closeOnboardingCards, confirm: advance });
 }
 
 export function closeOnboardingCards(): void {
   el('onboard-cards')?.classList.remove('visible');
+  modalStack.notifyClosed('onboarding-cards');
 }
 
 export function areOnboardingCardsOpen(): boolean {
