@@ -226,7 +226,19 @@ export class BotSystem {
   isAtGuns(playerId: string, t: number): boolean {
     const bot = this.bb.bots.get(playerId);
     if (!bot) return false;
-    return t - bot.crew.lastFiredAt < BOT_GUN_CREW_SECONDS;
+    if (t - bot.crew.lastFiredAt >= BOT_GUN_CREW_SECONDS) return false;
+    // WHICH HANDS ARE ON THE GUN. With a crew this is a per-BODY question: her
+    // gunners are holding the rail, her deckhand is holding a plank, and the
+    // whole point of a crew is that those happen at once. Asking it per CREW
+    // (which is all that was possible with one pirate per hull) meant a
+    // two-hand crew that fired froze her own working party.
+    if (bot.role === 'gunner') return true;
+    // A hand her crew SPARED for the work is not on the gun — that is the whole
+    // difference a crew makes. A one-pirate hull has nobody to spare, so she is
+    // still on the gun she just fired and still has to choose (which is what
+    // makes a gunfight between two lone pirates end in a sinking).
+    if (bot.role === 'deckhand' && bot.crew.memberIds.length > 1) return false;
+    return true;
   }
 
   /** Drain any personal-weapon shots generated this tick. Match resolves their hits. */
