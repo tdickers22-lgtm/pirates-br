@@ -37,6 +37,7 @@ import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MI
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { apparentDistanceScale, updateInstanceLod, type InstanceLodBatch } from '../world/island/InstanceLod.js';
+import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import {
@@ -3748,6 +3749,9 @@ export class Game {
       if (!mesh) continue;
       const dist = dist2D(cam.x, cam.z, rock.position.x, rock.position.z);
       showWhenAffordable(mesh, dist < seaRockRadius);
+      // Near/far clone swap on the same apparent distance the instanced
+      // batches use, so the spyglass brings a far stack's detail back too.
+      if (mesh.visible) updateSeaRockLod(mesh, dist / lodDistanceScale, quality);
     }
   }
 
