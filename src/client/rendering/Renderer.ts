@@ -521,8 +521,48 @@ const SHADOW_LIGHT_DISTANCE = 210;
  * gets `shadowSide = BackSide` in the same lane, so it stops writing its own
  * front-face depth into the map.
  */
+/**
+ * THE STORM PUTS THE SUN OUT (SHADOW-01 / storm-06).
+ *
+ * Under a fully overcast squall the sky shader takes the sun disc to 6%
+ * visibility — and the key light stayed at 42%, so the deck, the masts and
+ * every pirate on board went on throwing hard-edged directional shadows out of
+ * a sky with no sun in it. After the fog, it was the loudest "the weather is
+ * just a tint" tell in the game.
+ *
+ * The finder's other half — scale `sun.shadow.radius` 1 → 4 to soften the edge
+ * — is a NO-OP: the renderer is on PCFSoftShadowMap and three r160 ignores
+ * `shadow.radius` for that type. three also has no per-light shadow intensity.
+ * So the key has to actually go out: 0.42 → 0.12, and the 0.30 (0.41 at night)
+ * of illumination that leaves has to arrive back through the ambient and the
+ * hemisphere or a storm reads as night rather than as overcast. Exposure holds,
+ * contrast collapses, the shadow/lit ratio goes from ~0.35 to ~0.89, and the
+ * scene flattens exactly the way a real overcast flattens one.
+ *
+ * Exported (with the two fills that pay for it) so the gate can grade the
+ * trade rather than the intention.
+ */
+export function stormKeyIntensity(nightAmount: number): number {
+  return 0.12 + nightAmount * 0.05;
+}
+export function stormAmbientIntensity(nightAmount: number): number {
+  return 0.54 + nightAmount * 0.46;
+}
+export function stormHemisphereIntensity(nightAmount: number): number {
+  return 0.42 + nightAmount * 0.59;
+}
+
 export function shadowNormalBias(texelWorldSize: number): number {
-  return Math.min(0.40, Math.max(0.06, 2.0 * texelWorldSize));
+  // Two conflicting truths, and the gate caught the conflict: the bias must be
+  // at least ~1.4 texels or PCFSoft's own 3x3 spread reads the receiver's
+  // depth back as an occluder (acne — a shimmering dark wash over everything,
+  // which is far uglier than a detached shadow), and it must stay well under
+  // half a metre or it is the defect this function replaced. Those hold
+  // together at every size a tier OPENS at; only the governor's emergency steps
+  // (1024 and below over the full 310 m box, i.e. 30-60 cm texels) force a
+  // choice, and there the shadow is already mush, so acne loses.
+  const floorTexels = 1.4 * texelWorldSize;
+  return Math.min(Math.max(0.40, floorTexels), Math.max(0.06, 2.0 * texelWorldSize));
 }
 /** Constant depth bias that rides with it. -0.00035 was tuned to hide the acne
  *  a DoubleSide terrain wrote; with shadowSide fixed at the source it only
@@ -1548,6 +1588,72 @@ export class Renderer {
     }
   }
 
+  // ── THE LIGHTNING BOLT BORROWS THE FILL LIGHT ─────────────────────────────
+  //
+  // EnvironmentFx used to own a THIRD DirectionalLight for the strike,
+  // allocated at startup and never removed because the light count is baked
+  // into every shader program and building one mid-storm re-linked the whole
+  // scene (a measured ~150 ms hitch). The reasoning was right; the conclusion
+  // was not. three r160's lights_fragment_begin unrolls NUM_DIR_LIGHTS and pays
+  // a full diffuse + GGX specular lobe per lit fragment for each one, at any
+  // intensity — so balanced and high spent a third of their direct-lighting
+  // cost, every fragment of every frame, on a light that is non-zero for 0.45 s
+  // per strike.
+  //
+  // horizonFill is already a directional light pointing away from the key, and
+  // during a strike the fill IS the strike. Overriding it for the envelope is
+  // free and looks the same (applySpectateLift folds the death-camera fill into
+  // the hemisphere light on exactly this argument).
+  private boltFillStrength = 0;
+  private boltFillDirX = 0;
+  private boltFillDirZ = 1;
+  private boltFillActive = false;
+  private readonly boltFillColor = new THREE.Color(0xc3daff);
+  private readonly boltFillBaseColor = new THREE.Color();
+  private readonly boltFillBasePos = new THREE.Vector3();
+  private boltFillBaseIntensity = 0;
+
+  /** The strike's 0..1 brightness envelope and the bearing it is on, from
+   *  EnvironmentFx.updateLightning. 0 releases the fill light. */
+  setBoltFill(strength: number, dirX: number, dirZ: number) {
+    this.boltFillStrength = Math.max(0, strength);
+    const len = Math.hypot(dirX, dirZ);
+    if (len > 1e-4) { this.boltFillDirX = dirX / len; this.boltFillDirZ = dirZ / len; }
+  }
+
+  /** Applied from render(), which is AFTER updateDayNight has re-aimed
+   *  horizonFill at the anti-sun and clamped its y, AFTER applyStormLightColors
+   *  has lerped its colour to the storm swatch and AFTER updateWaterEnvironment
+   *  has written its intensity. An override anywhere earlier is overwritten in
+   *  the same frame (verifier note on graphics-25). */
+  private applyBoltFill() {
+    if (this.boltFillStrength <= 0.0001) {
+      if (this.boltFillActive) {
+        this.horizonFill.position.copy(this.boltFillBasePos);
+        this.horizonFill.color.copy(this.boltFillBaseColor);
+        this.horizonFill.intensity = this.boltFillBaseIntensity;
+        this.boltFillActive = false;
+      }
+      return;
+    }
+    if (!this.boltFillActive) {
+      // One snapshot per strike; updateDayNight rewrites all three every frame
+      // anyway, so a 0.45 s-old restore is corrected on the frame after.
+      this.boltFillBasePos.copy(this.horizonFill.position);
+      this.boltFillBaseColor.copy(this.horizonFill.color);
+      this.boltFillBaseIntensity = this.horizonFill.intensity;
+      this.boltFillActive = true;
+    }
+    const cam = this.camera.position;
+    this.horizonFill.position.set(
+      cam.x + this.boltFillDirX * 180,
+      cam.y + 130,
+      cam.z + this.boltFillDirZ * 180,
+    );
+    this.horizonFill.color.copy(this.boltFillColor);
+    this.horizonFill.intensity = this.boltFillBaseIntensity + this.boltFillStrength;
+  }
+
   /** 0 = clear weather, 1 = full storm (gray sky, fog, dim lights). */
   updateStormWeather(intensity: number) {
     const t = clamp(intensity, 0, 1);
@@ -1645,6 +1751,9 @@ export class Renderer {
   }
 
   render() {
+    // The strike override goes on LAST, after every per-frame clamp that would
+    // otherwise overwrite it in the same frame — see applyBoltFill.
+    this.applyBoltFill();
     // Hand this frame's few brightest torches/lanterns to the fixed light pool
     // BEFORE anything is drawn (see LightBudget: the pool size never changes,
     // so no material ever re-links because a torch came into view).
@@ -1942,9 +2051,9 @@ export class Renderer {
   // and drove the whole frame to black (only the HUD survived). The floors now
   // rise with nightAmount, so a night storm is a dark BLUE squall you can still
   // read a deck and a coastline through.
-  private getStormSunIntensity() { return 0.42 + this.nightAmount * 0.16; }
-  private getStormAmbientIntensity() { return 0.36 + this.nightAmount * 0.40; }
-  private getStormHemisphereIntensity() { return 0.28 + this.nightAmount * 0.50; }
+  private getStormSunIntensity() { return stormKeyIntensity(this.nightAmount); }
+  private getStormAmbientIntensity() { return stormAmbientIntensity(this.nightAmount); }
+  private getStormHemisphereIntensity() { return stormHemisphereIntensity(this.nightAmount); }
   private getStormHorizonIntensity() { return 0.08 + this.nightAmount * 0.06; }
   private getStormExposure() { return 0.78 + this.nightAmount * 0.22; }
 

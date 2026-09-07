@@ -1006,21 +1006,7 @@ export class EnvironmentFx {
     }
   }
 
-  /** The bolt's directional pulse — everything in the scene flash-lit from the
-   *  strike's bearing. Allocated HERE, at startup, and never removed: the
-   *  directional-light count is baked into every shader program, so building it
-   *  on the first strike re-linked the whole scene mid-storm (measured as a
-   *  ~150ms hitch on the first bolt). The bottom tier never gets one — the sky
-   *  flash, the ribbon and the screen pulse carry the strike without it. */
-  private setupLightningPulse() {
-    if (this.boltLight || this.view.renderer.getQuality() === 'low') return;
-    this.boltLight = new THREE.DirectionalLight(0xc3daff, 0);
-    this.view.renderer.scene.add(this.boltLight);
-    this.view.renderer.scene.add(this.boltLight.target);
-  }
-
   setupStormWeatherOverlay() {
-    this.setupLightningPulse();
     const wrap = document.createElement('div');
     wrap.id = 'storm-weather-overlay';
     wrap.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:50;overflow:hidden;';
@@ -1881,7 +1867,6 @@ export class EnvironmentFx {
   private boltDirZ = 1;
   /** Directional pulse: hulls and islands flash-lit from the strike's bearing.
    *  Not built on the low tier. */
-  private boltLight: THREE.DirectionalLight | null = null;
   /** ?stormdemo parks a full-power storm on the camera for visual work; without
    *  this the strike gate (which keys off the REPLICATED storm ring) never fires
    *  in the demo, so the flag could not preview lightning at all. */
@@ -2108,7 +2093,15 @@ export class EnvironmentFx {
       const env = this.boltEnvelope(this.boltAge);
       this.updateBoltRibbon(env);
       if (this.lightningFlash) this.lightningFlash.intensity = env * (42 + this.view.state.storm.phase * 8);
-      if (this.boltLight) this.boltLight.intensity = env * 2.3;
+      // THE THIRD DIRECTIONAL LIGHT IS GONE (SHADOW-01 / graphics-25). It used
+      // to be allocated here at startup and left in the scene forever, because
+      // the light count is baked into every program — and three r160 pays a
+      // full diffuse + GGX lobe per lit fragment for a directional light at any
+      // intensity, including the zero it held for all but 0.45 s of a match.
+      // The strike now overrides horizonFill, the fill light that already
+      // exists, for exactly the envelope. Renderer.applyBoltFill runs at the
+      // top of render(), i.e. after every per-frame clamp on that light.
+      this.view.renderer.setBoltFill(env * 2.3, this.boltDirX, this.boltDirZ);
       this.view.renderer.setLightningFlash(env * 0.95, this.boltDirX, this.boltDirZ);
       this.view.ocean.setLightningFlash(env, this.boltDirX, this.boltDirZ);
       if (this.stormLightningFlashEl) {
@@ -2122,17 +2115,13 @@ export class EnvironmentFx {
           this.bolt.glow.visible = false;
         }
         if (this.lightningFlash) this.lightningFlash.intensity = 0;
-        if (this.boltLight) this.boltLight.intensity = 0;
+        this.view.renderer.setBoltFill(0, this.boltDirX, this.boltDirZ);
         this.view.renderer.setLightningFlash(0, this.boltDirX, this.boltDirZ);
         this.view.ocean.setLightningFlash(0, this.boltDirX, this.boltDirZ);
       }
     }
-    // Keep the directional pulse aimed from the strike's bearing at the camera.
-    if (this.boltLight && this.boltLight.intensity > 0) {
-      const cam = this.view.renderer.camera.position;
-      this.boltLight.target.position.copy(cam);
-      this.boltLight.position.set(cam.x + this.boltDirX * 180, cam.y + 130, cam.z + this.boltDirZ * 180);
-    }
+    // Aiming the pulse from the strike's bearing at the camera is now
+    // Renderer.applyBoltFill's job, every frame, on the fill light.
 
     const phase = this.view.state.storm.phase;
     const player = this.view.getLocalPlayer();
