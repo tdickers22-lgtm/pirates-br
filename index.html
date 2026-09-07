@@ -301,6 +301,30 @@
     }
     .stats-line .val { font-family: ui-monospace, monospace; color: #f0ddb2; }
 
+    /* Crew strip — the only place the HUD says the word crew (hud-21). */
+    #crew-strip {
+      display: flex; flex-direction: column; gap: 4px;
+      margin-top: 6px; max-width: 232px;
+      font-size: 0.68rem; letter-spacing: 0.06em;
+      pointer-events: none;
+    }
+    #crew-strip .cs-row {
+      display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center;
+      padding: 4px 7px; border-radius: 6px;
+      background: rgba(6, 14, 24, 0.52);
+      border-left: 3px solid var(--crew-color, #7eacdc);
+    }
+    #crew-strip .cs-row.downed { border-left-color: #e08a8a; }
+    #crew-strip .cs-row.out { opacity: 0.45; }
+    #crew-strip .cs-glyph { color: #cddbe9; text-align: center; }
+    #crew-strip .cs-name {
+      color: #e8d5a3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #crew-strip .cs-hp { height: 3px; border-radius: 2px; background: rgba(255,255,255,0.14); margin-top: 3px; }
+    #crew-strip .cs-hp > i { display: block; height: 100%; border-radius: 2px; background: #6fbf73; }
+    #crew-strip .cs-row.hurt .cs-hp > i { background: #d9b64a; }
+    #crew-strip .cs-row.critical .cs-hp > i { background: #d96a5a; }
+    #crew-strip .cs-far { color: #8ea3b8; font-family: ui-monospace, monospace; font-size: 0.62rem; }
     /* Lobby roster + queue list */
     .lobby-roster {
       display: flex; flex-direction: column; gap: 6px;
@@ -2346,6 +2370,9 @@
           <div class="num" id="kill-count">0</div>
           <div class="lbl">Kills</div>
         </div>
+        <!-- CREW STRIP (PLAN 2.6 TOP-LEFT / CREWHUD-01). Rows are built at
+             2 Hz from the snapshot; empty and display:none in Solo. -->
+        <div id="crew-strip" style="display:none;"></div>
       </div>
       <div id="hud-top-center">
         <div id="compass">

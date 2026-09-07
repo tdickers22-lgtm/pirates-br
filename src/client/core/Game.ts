@@ -39,6 +39,7 @@ import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '.
 import { apparentDistanceScale, updateInstanceLod, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
+import { isCrewmate } from '../ui/crewStrip.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import {
   CORPSE_FADE_START, CORPSE_LIFETIME, PlayerAnimator,
@@ -980,6 +981,7 @@ export class Game {
       getStormTimerSeconds: () => this.getStormTimerSeconds(),
       getTrackedShip: () => this.getTrackedShip(),
       getSpectateSummary: () => this.getSpectateSummary(),
+      getLocalCrewColor: () => this.getLocalCrewColor(),
       getUpgradePresentation: (type) => this.getUpgradePresentation(type),
       playIslandArrivalFanfare: () => this.playIslandArrivalFanfare(),
       renderMapWheel: (player) => this.map.renderMapWheel(player),
@@ -4479,7 +4481,20 @@ export class Game {
       const plate = mesh.userData.nameplate as THREE.Sprite | undefined;
       if (plate) {
         const ndist = dist2D(this.renderer.camera.position.x, this.renderer.camera.position.z, player.position.x, player.position.z);
-        plate.visible = !isLocal && player.state === 'alive' && ndist < 85;
+        // A CREWMATE'S PLATE IS IN THE CREW'S COLOUR, and carries further
+        // (hud-21). Every nameplate used to be the same white, so in Duos and
+        // Squads the one name you need to find on a crowded deck looked exactly
+        // like the boarder standing next to her. Costs nothing: the tint is set
+        // only when it CHANGES (a material write per frame per plate would dirty
+        // the sprite's uniforms every frame for the whole match).
+        const me = this.getLocalPlayer();
+        const mate = !isLocal && me ? isCrewmate(me, player) : false;
+        plate.visible = !isLocal && player.state === 'alive' && ndist < (mate ? 140 : 85);
+        const tint = mate ? playerTeamColor : 0xffffff;
+        if (mesh.userData.plateTint !== tint) {
+          mesh.userData.plateTint = tint;
+          (plate.material as THREE.SpriteMaterial).color.setHex(tint);
+        }
       }
       const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
       const hideForLocalAim = isLocal;
@@ -6446,6 +6461,15 @@ export class Game {
   }
 
   /** What the HUD prints while you are out: whose deck, and where you finished. */
+  /** The local crew's colour as CSS, so the crew strip's rail and the crew
+   *  nameplates read as ONE crew (CREWHUD-01). Falls back to the neutral HUD
+   *  blue before a hull is assigned. */
+  getLocalCrewColor(): string {
+    const me = this.getLocalPlayer();
+    const hex = me ? this.getPlayerTeamColor(me) : 0x7eacdc;
+    return `#${hex.toString(16).padStart(6, '0')}`;
+  }
+
   getSpectateSummary(): { subject: string; place: number; of: number } | null {
     if (!this.spectatePlacement) return null;
     return {

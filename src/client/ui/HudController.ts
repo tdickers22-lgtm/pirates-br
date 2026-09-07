@@ -17,6 +17,7 @@ import type { Renderer } from '../rendering/Renderer.js';
 import type { UiRefs } from './UiRefs.js';
 import { BROKER_NAME, itemDisplayName, shipClassName, weaponSlotName } from './DisplayNames.js';
 import { closeOnboardingCards, openOnboardingCards, wireOnboardingCards } from './OnboardingCards.js';
+import { crewStripRows, type CrewStripRow } from './crewStrip.js';
 
 /** Everything the HUD reads or writes on the Game instance. */
 export type HudView = {
@@ -69,6 +70,8 @@ export type HudView = {
   /** Whose deck the spectate camera is over, and where this voyage placed you.
    *  Null until the local crew is actually out of the match. */
   getSpectateSummary(): { subject: string; place: number; of: number } | null;
+  /** The local crew's colour, for the strip's rail and the crew nameplates. */
+  getLocalCrewColor(): string;
   getUpgradePresentation(type: ShipUpgradeType): {
     name: string;
     short: string;
@@ -1073,6 +1076,7 @@ export class HudController {
     if (!player) return;
 
     this.updateBarrelPanel(player, ship);
+    this.renderCrewStrip(player, performance.now());
     this.updateServerLoadChip();
     this.updateStormReprieveChip(player);
 
@@ -1681,6 +1685,65 @@ export class HudController {
       respawning: player.state === 'respawning',
       shipGone: !own || own.alive === false || !!own.sinking,
     };
+  }
+
+  /** Last painted signature, so the strip only touches the DOM when it moved. */
+  private crewStripSig = '';
+  private crewStripAt = 0;
+  private crewStripCache: HTMLElement | null | undefined = undefined;
+
+  /**
+   * THE CREW STRIP (CREWHUD-01 / hud-21) — top-left, under the gold chip, 2 Hz.
+   *
+   * The menu, the lobby and the end board all speak of crews; the HUD never
+   * did. A pirate in Duos could not answer "where is my mate, is she alive, is
+   * she at the wheel" without turning round and looking for her.
+   *
+   * It is rebuilt only when something a player can SEE changed — a name, a
+   * station, a ten-metre distance bucket, a ten-percent health bucket. A HUD
+   * element that rewrites innerHTML every frame is a per-frame allocation in
+   * the hottest loop the client has, for the whole match. In Solo there are no
+   * crewmates, the node is display:none, and this costs one array walk at 2 Hz.
+   */
+  private renderCrewStrip(player: Player, nowMs: number): void {
+    if (this.crewStripCache === undefined) this.crewStripCache = document.getElementById('crew-strip');
+    const host = this.crewStripCache;
+    if (!host) return;
+    if (nowMs - this.crewStripAt < 500) return;
+    this.crewStripAt = nowMs;
+    const state = this.view.state;
+    if (!state) return;
+    const cam = this.view.renderer.camera.position;
+    const rows: CrewStripRow[] = crewStripRows(state.players, player, {
+      camera: { x: cam.x, z: cam.z }, maxHealth: PLAYER.MAX_HEALTH,
+    });
+    if (rows.length === 0) {
+      if (this.crewStripSig !== '') {
+        host.style.display = 'none';
+        host.innerHTML = '';
+        this.crewStripSig = '';
+      }
+      return;
+    }
+    const sig = rows
+      .map((r) => `${r.id}|${r.station}|${Math.round(r.distance / 10)}|${Math.round(r.health * 10)}`)
+      .join(';');
+    if (sig === this.crewStripSig) return;
+    this.crewStripSig = sig;
+    host.style.display = 'flex';
+    host.style.setProperty('--crew-color', this.view.getLocalCrewColor());
+    host.innerHTML = rows.map((r) => {
+      const cls = r.station === 'downed' ? 'downed'
+        : r.station === 'out' ? 'out'
+          : r.health < 0.34 ? 'critical' : r.health < 0.7 ? 'hurt' : '';
+      const far = r.station === 'out' ? 'out' : `${r.distance} m`;
+      // Names are player-supplied: escaped, never interpolated raw.
+      return `<div class="cs-row ${cls}">`
+        + `<span class="cs-glyph">${r.glyph}</span>`
+        + `<span><span class="cs-name">${escapeCrewName(r.name)}</span>`
+        + `<span class="cs-hp"><i style="width:${Math.round(r.health * 100)}%"></i></span></span>`
+        + `<span class="cs-far">${far}</span></div>`;
+    }).join('');
   }
 
   private resolveDeathCause(): DeathCauseKind {
@@ -2695,4 +2758,12 @@ export class HudController {
     this.view.ui.winStats.innerHTML = `<div>Kills: ${kills}</div><div>Gold: ${gold}</div>`;
     this.view.ui.winScreen.style.display = 'flex';
   }
+}
+
+/** Pirate names come off the wire. The crew strip is the one place in this file
+ *  that interpolates one into innerHTML, so it escapes it here. */
+function escapeCrewName(name: string): string {
+  return name.replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]!));
 }
