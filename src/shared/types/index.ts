@@ -116,6 +116,11 @@ export interface Crew {
 }
 
 export interface Ship {
+  /** END-01. Set by the snapshot writer on EVERY hull once three crews or fewer
+   *  are left: the endgame is a fight you can read off the chart. Absent means
+   *  "not the endgame yet" — it is never written false, so it costs nothing on
+   *  the wire until it matters. */
+  revealed?: boolean;
   id: string;
   type: ShipType;
   ownerId: string;        // crew-lead / bot id
