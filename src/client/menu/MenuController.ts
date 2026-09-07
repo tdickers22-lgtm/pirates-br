@@ -1,7 +1,9 @@
 import type {
   LobbyUpdatePayload, QueueUpdatePayload, PlayerStatsRecord, MatchStartPayload, WelcomePayload,
 } from '../../shared/types/index.js';
-import { MATCH_TOTAL_SHIPS, botFillFor } from '../../shared/constants/index.js';
+import {
+  MATCH_TOTAL_SHIPS, MODES, MODE_IDS, botFillFor, isModeId, modeSpec, type ModeId,
+} from '../../shared/constants/index.js';
 import type { NetworkClient } from '../network/NetworkClient.js';
 import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
@@ -89,8 +91,7 @@ export class MenuController {
   private playBtn!: HTMLButtonElement;
   private soloBtn!: HTMLButtonElement;
   private createPartyBtn!: HTMLButtonElement;
-  private joinPartyToggleBtn!: HTMLButtonElement;
-  private joinPartyRow!: HTMLElement;
+  private modeControlMain!: HTMLElement;
   private joinCodeInput!: HTMLInputElement;
   private joinConfirmBtn!: HTMLButtonElement;
   private menuStatus!: HTMLElement;
@@ -111,6 +112,11 @@ export class MenuController {
   private lobbyRoster!: HTMLElement;
   private lobbyBotSlider!: HTMLInputElement;
   private lobbyBotCount!: HTMLElement;
+  private modeControlLobby!: HTMLElement;
+  private lobbyBotFillToggle!: HTMLInputElement;
+  private lobbyBotFillLabel!: HTMLElement;
+  private lobbyBotRow!: HTMLElement;
+  private lobbyReadyBtn!: HTMLButtonElement;
   private lobbyStartBtn!: HTMLButtonElement;
   private lobbyLeaveBtn!: HTMLButtonElement;
   private lobbyStatusEl!: HTMLElement;
@@ -137,6 +143,17 @@ export class MenuController {
   private pendingPartyJoin: string | null = null;
   /** Last match's party code (null for solo/queue) — controls whether the Play Again button shows. */
   private lastMatchPartyCode: string | null = null;
+  /** The mode the picker is on. Drives the public queue, the solo voyage and —
+   *  when this pirate wears the crown — the party's own mode (PLAN 2.2). */
+  private selectedMode: ModeId = 'solo';
+  /** Am I the host of the party the last lobby_update described? */
+  private isPartyHost = false;
+  /** My own ready tick, mirrored so the button can read as a toggle. */
+  private selfReady = false;
+  /** The mode the picker was on when "Create Private Party" was pressed. The
+   *  server creates every party in Solo, so without this the picker silently
+   *  lied: you chose Duos, got a party, and the panel snapped back to Solo. */
+  private pendingPartyMode: ModeId | null = null;
 
   constructor(opts: MenuControllerOptions) {
     this.network = opts.network;
@@ -157,8 +174,8 @@ export class MenuController {
     this.playBtn = this.must<HTMLButtonElement>('menu-play-btn');
     this.soloBtn = this.must<HTMLButtonElement>('menu-solo-btn');
     this.createPartyBtn = this.must<HTMLButtonElement>('menu-create-party-btn');
-    this.joinPartyToggleBtn = this.must<HTMLButtonElement>('menu-join-party-toggle-btn');
-    this.joinPartyRow = this.must('menu-join-party-row');
+    this.must('menu-join-party-row'); // presence assertion: the join row is no longer toggled
+    this.modeControlMain = this.must('menu-mode-control');
     this.joinCodeInput = this.must<HTMLInputElement>('menu-join-code-input');
     this.joinConfirmBtn = this.must<HTMLButtonElement>('menu-join-confirm-btn');
     this.menuStatus = this.must('menu-status');
@@ -181,8 +198,13 @@ export class MenuController {
     // The slider's ceiling is the mode's fleet less the host's own crew, read
     // from MODES — it was the literal 9 in index.html against a fleet the
     // server now builds twelve hulls deep (netcode-17 / DEADTYPES).
-    this.lobbyBotSlider.max = String(botFillFor('solo', 1));
+    this.lobbyBotSlider.max = String(botFillFor(this.selectedMode, 1));
     this.lobbyBotCount = this.must('lobby-bot-count');
+    this.lobbyBotRow = this.must('lobby-bot-row');
+    this.lobbyBotFillToggle = this.must<HTMLInputElement>('lobby-botfill-toggle');
+    this.lobbyBotFillLabel = this.must('lobby-botfill-label');
+    this.modeControlLobby = this.must('lobby-mode-control');
+    this.lobbyReadyBtn = this.must<HTMLButtonElement>('lobby-ready-btn');
     this.lobbyStartBtn = this.must<HTMLButtonElement>('lobby-start-btn');
     this.lobbyLeaveBtn = this.must<HTMLButtonElement>('lobby-leave-btn');
     this.lobbyStatusEl = this.must('lobby-status');
@@ -215,6 +237,8 @@ export class MenuController {
     this.endmatchReturnBtn = this.must<HTMLButtonElement>('endmatch-return-btn');
     this.endmatchPlayAgainBtn = this.must<HTMLButtonElement>('endmatch-play-again-btn');
 
+    this.buildModeControl(this.modeControlMain, false);
+    this.buildModeControl(this.modeControlLobby, true);
     this.bindUi();
     this.bindNetwork();
     this.applyPersistedSettings();
@@ -225,8 +249,12 @@ export class MenuController {
     // ?party=CODE deep-link → auto-join once we have a name + welcome.
     try {
       const params = new URLSearchParams(window.location.search);
-      const raw = (params.get('party') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
-      if (raw.length === 4) {
+      // SIX, not four (netcode-23). `.slice(0, 4)` here cut every invite link
+      // the shipped server issues down to its first four characters and then
+      // dropped it on the floor for not being four long — the deep link was
+      // dead for every code created since lane 2.3.
+      const raw = normalisePartyCode(params.get('party') ?? '');
+      if (isPartyCode(raw)) {
         this.pendingPartyJoin = raw;
         this.flashStatus(`Crew invite ${raw} — enter your pirate name to join.`, false);
       }
@@ -395,7 +423,7 @@ export class MenuController {
       }
       if (!submitName()) return;
       this.crewFoundFired = false;
-      this.network.queueJoin();
+      this.network.queueJoin(this.selectedMode);
       this.showPanel('queue');
       this.queueStatusLine.textContent = 'Hoisting sails…';
       // The real count lands with the first queue_update; quote the true target
@@ -412,29 +440,30 @@ export class MenuController {
       }
       if (!submitName(true)) return;
       this.beginMatchStart('solo');
+      // A solo voyage is Solo's fleet whatever the picker says: the ladder's
+      // other modes need a crew, and a lone pirate pressing "Sail With Bots"
+      // in Duos would otherwise get a brigantine with one hand aboard.
       this.network.soloStart(botFillFor('solo', 1));
     });
 
     this.createPartyBtn.addEventListener('click', () => {
       if (!submitName()) return;
+      this.pendingPartyMode = this.selectedMode;
       this.network.createParty();
     });
 
-    this.joinPartyToggleBtn.addEventListener('click', () => {
-      const visible = this.joinPartyRow.style.display !== 'none';
-      this.joinPartyRow.style.display = visible ? 'none' : 'flex';
-      if (!visible) this.joinCodeInput.focus();
-    });
-
+    // The field is always on screen now (PLAN 2.2) — there is no toggle to
+    // bind. Paste tolerance lives in normalisePartyCode: an invite URL, a code
+    // with a dash in it and a lowercase code all resolve.
     this.joinCodeInput.addEventListener('input', () => {
-      this.joinCodeInput.value = this.joinCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+      this.joinCodeInput.value = normalisePartyCode(this.joinCodeInput.value);
     });
 
     const submitJoin = () => {
       if (!submitName()) return;
-      const code = this.joinCodeInput.value.trim().toUpperCase();
-      if (code.length !== 4) {
-        this.flashStatus('Code must be 4 characters.', true);
+      const code = normalisePartyCode(this.joinCodeInput.value);
+      if (!isPartyCode(code)) {
+        this.flashStatus('A crew code is 6 characters.', true);
         return;
       }
       this.network.joinParty(code);
@@ -460,6 +489,24 @@ export class MenuController {
     this.lobbyBotSlider.addEventListener('change', () => {
       const value = Number(this.lobbyBotSlider.value);
       this.network.updatePartySettings({ botFill: value });
+    });
+
+    // FILL WITH BOTS / REAL PLAYERS ONLY (PLAN 2.2). The slider alone could
+    // express "no bots" only by being dragged to zero, which reads as a broken
+    // slider rather than a choice. Unticking it sends botFill 0 and parks the
+    // slider; ticking it restores the mode's full fleet.
+    this.lobbyBotFillToggle.addEventListener('change', () => {
+      const on = this.lobbyBotFillToggle.checked;
+      this.network.updatePartySettings({ botFill: on ? botFillFor(this.selectedMode, 1) : 0 });
+    });
+
+    // READY TICK (netcode-14). The server has taken party_ready since lane 2.3
+    // and nothing ever sent one, so `canStart` could only ever come true by the
+    // host's 10 s force window.
+    this.lobbyReadyBtn.addEventListener('click', () => {
+      this.selfReady = !this.selfReady;
+      this.network.partyReady(this.selfReady);
+      this.paintReadyBtn();
     });
 
     this.lobbyStartBtn.addEventListener('click', () => {
@@ -805,28 +852,156 @@ export class MenuController {
 
   private renderLobby(payload: LobbyUpdatePayload): void {
     this.lobbyCode.textContent = payload.code;
-    this.lobbyRoster.innerHTML = '';
-    for (const m of payload.members) {
-      const el = document.createElement('div');
-      el.className = 'lobby-member' + (m.isHost ? ' host' : '');
-      el.innerHTML = `
-        <span>${escapeHtml(m.name)}</span>
-        ${m.isHost ? '<span class="role-pill">Host</span>' : '<span class="role-pill" style="background:rgba(126,172,220,0.16);color:#9ec0e5;">Crew</span>'}
-      `;
-      this.lobbyRoster.appendChild(el);
-    }
     const isHost = this.network.clientId === payload.hostId;
-    this.lobbyBotSlider.value = String(payload.botFill);
+    this.isPartyHost = isHost;
+    if (this.pendingPartyMode && isHost && payload.mode !== this.pendingPartyMode) {
+      const want = this.pendingPartyMode;
+      this.pendingPartyMode = null;
+      this.network.updatePartySettings({ mode: want });
+      return; // the echo lands as another lobby_update; draw once, on the truth
+    }
+    this.pendingPartyMode = null;
+    if (isModeId(payload.mode) && payload.mode !== this.selectedMode) {
+      this.selectedMode = payload.mode;
+      this.paintModeControls();
+    }
+
+    const model = partyRosterModel(payload, this.network.clientId ?? '');
+    this.selfReady = model.rows.find((r) => r.you)?.ready ?? false;
+    this.lobbyRoster.innerHTML = '';
+    for (const group of model.groups) {
+      const head = document.createElement('div');
+      head.className = 'lobby-group-head';
+      head.textContent = group.label;
+      this.lobbyRoster.appendChild(head);
+      for (const row of group.rows) this.lobbyRoster.appendChild(this.buildRosterRow(row));
+    }
+    if (model.refusal) {
+      const warn = document.createElement('div');
+      warn.className = 'lobby-refusal';
+      warn.textContent = model.refusal;
+      this.lobbyRoster.appendChild(warn);
+    }
+
+    const fullFill = botFillFor(this.selectedMode, 1);
+    this.lobbyBotSlider.max = String(fullFill);
+    this.lobbyBotSlider.value = String(Math.min(payload.botFill, fullFill));
     this.lobbyBotCount.textContent = String(payload.botFill);
-    this.lobbyBotSlider.disabled = !isHost;
-    this.lobbyStartBtn.disabled = this.startingLobby || !isHost || !payload.canStart;
+    this.lobbyBotSlider.disabled = !isHost || payload.botFill === 0;
+    this.lobbyBotFillToggle.checked = payload.botFill > 0;
+    this.lobbyBotFillToggle.disabled = !isHost;
+    this.lobbyBotFillLabel.textContent = payload.botFill > 0 ? 'Fill with bots' : 'Real players only';
+    this.lobbyBotRow.style.opacity = payload.botFill > 0 ? '1' : '0.45';
+
+    this.paintReadyBtn();
+    this.lobbyStartBtn.disabled = this.startingLobby || !isHost || !payload.canStart || !!model.refusal;
     this.lobbyStartBtn.style.opacity = isHost ? '1' : '0.55';
-    if (this.startingLobby) {
-      this.lobbyStatusEl.textContent = 'Starting bot voyage...';
-    } else {
-      this.lobbyStatusEl.textContent = isHost
-        ? `${payload.members.length} aboard · ${payload.botFill} bot crews will fill out the seas`
-        : 'Waiting for the host to start…';
+    this.lobbyStartBtn.textContent = payload.inMatch ? '⛵ Crew At Sea' : '⛵ Start Voyage';
+    if (model.refusal) this.lobbyStatusEl.textContent = model.refusal;
+    else if (payload.membersAtSea.length > 0) {
+      this.lobbyStatusEl.textContent = `${payload.membersAtSea.length} still at sea — the voyage waits for them.`;
+    } else if (!isHost) this.lobbyStatusEl.textContent = 'The captain casts off.';
+    else this.lobbyStatusEl.textContent = payload.canStart ? '' : 'Waiting on the crew to ready up.';
+  }
+
+  /** ONE roster row: ready tick, name, crown, and the host's two controls. */
+  private buildRosterRow(row: PartyRosterRow): HTMLElement {
+    const el = document.createElement('div');
+    el.className = 'lobby-member'
+      + (row.isHost ? ' host' : '')
+      + (row.atSea ? ' at-sea' : '')
+      + (row.overflow ? ' overflow' : '');
+    const who = document.createElement('div');
+    who.className = 'who';
+    const tick = document.createElement('span');
+    tick.className = 'tick' + (row.ready ? '' : ' waiting');
+    tick.textContent = row.ready ? '✔' : '○';
+    tick.title = row.ready ? 'Ready' : 'Not ready';
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = row.name + (row.you ? ' (you)' : '');
+    who.append(tick, nm);
+    if (row.isHost) {
+      const crown = document.createElement('span');
+      crown.className = 'role-pill';
+      crown.textContent = '👑 Captain';
+      who.appendChild(crown);
+    }
+    if (row.atSea) {
+      const pill = document.createElement('span');
+      pill.className = 'role-pill';
+      pill.textContent = 'At sea';
+      who.appendChild(pill);
+    }
+    el.appendChild(who);
+
+    const acts = document.createElement('div');
+    acts.className = 'acts';
+    if (row.crownable) {
+      const btn = document.createElement('button');
+      btn.className = 'mini';
+      btn.textContent = 'Make captain';
+      btn.addEventListener('click', () => this.network.partyTransferHost(row.clientId));
+      acts.appendChild(btn);
+    }
+    if (row.kickable) {
+      const btn = document.createElement('button');
+      btn.className = 'mini danger';
+      btn.textContent = 'Kick';
+      btn.addEventListener('click', () => this.network.partyKick(row.clientId));
+      acts.appendChild(btn);
+    }
+    el.appendChild(acts);
+    return el;
+  }
+
+  private paintReadyBtn(): void {
+    this.lobbyReadyBtn.textContent = this.selfReady ? '✔ Ready' : 'Ready';
+    this.lobbyReadyBtn.classList.toggle('primary', this.selfReady);
+  }
+
+  /**
+   * THE MODE PICKER (PLAN 2.2 / MODE-01).
+   *
+   * Rendered twice from one table: on the main menu (it chooses what the public
+   * queue and the party you create are for) and inside the party panel (where
+   * only the captain may move it). Squads renders disabled straight off
+   * `MODES.squads.available` — the snapshot ceiling is real until WIRE-01, and
+   * a mode you can pick and then be refused for is worse than one greyed out
+   * with the reason on it.
+   */
+  private buildModeControl(host: HTMLElement, partyScoped: boolean): void {
+    host.innerHTML = '';
+    for (const id of MODE_IDS) {
+      const spec = MODES[id];
+      const btn = document.createElement('button');
+      btn.className = 'mode-opt';
+      btn.type = 'button';
+      btn.dataset.mode = id;
+      btn.setAttribute('role', 'radio');
+      btn.setAttribute('aria-checked', String(id === this.selectedMode));
+      btn.innerHTML = `${escapeHtml(spec.label)}<span class="sub">${spec.crewSize} · ${spec.crews} ships</span>`;
+      if (!spec.available) {
+        btn.disabled = true;
+        btn.title = 'Not open yet — sails once the crew wire is widened';
+      }
+      btn.addEventListener('click', () => {
+        if (!spec.available) return;
+        if (partyScoped && !this.isPartyHost) return;
+        this.selectedMode = id;
+        this.paintModeControls();
+        this.lobbyBotSlider.max = String(botFillFor(id, 1));
+        if (partyScoped) this.network.updatePartySettings({ mode: id });
+      });
+      host.appendChild(btn);
+    }
+  }
+
+  private paintModeControls(): void {
+    for (const host of [this.modeControlMain, this.modeControlLobby]) {
+      for (const el of Array.from(host.querySelectorAll<HTMLElement>('.mode-opt'))) {
+        el.setAttribute('aria-checked', String(el.dataset.mode === this.selectedMode));
+      }
     }
   }
 
@@ -1011,4 +1186,99 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]!));
+}
+
+// ─── The party panel's pure model (graded by scripts/test-menu-party-ui.mjs) ──
+// Kept out of the class on purpose: none of it touches the DOM, the socket or
+// `window`, so the gate can drive it under plain node in 0.3 s instead of
+// standing up a stack and a browser to look at a roster.
+
+/** A code as the server issues it: A-Z2-9, six long, four still legal for one
+ *  release (PLAN §7 — shared links must not break). Tolerates a pasted URL's
+ *  punctuation, a lowercase code and trailing whitespace. */
+export function normalisePartyCode(raw: string): string {
+  return (raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+}
+
+export function isPartyCode(code: string): boolean {
+  return code.length === 6 || code.length === 4;
+}
+
+export interface PartyRosterRow {
+  clientId: string;
+  name: string;
+  isHost: boolean;
+  ready: boolean;
+  atSea: boolean;
+  you: boolean;
+  /** Beyond the mode's crew size — this hand has no berth until the mode moves. */
+  overflow: boolean;
+  kickable: boolean;
+  crownable: boolean;
+}
+
+export interface PartyRosterGroup {
+  /** "Hull 1 · Brigantine · 2 / 2" — the header above the group's rows. */
+  label: string;
+  hull: string;
+  rows: PartyRosterRow[];
+}
+
+export interface PartyRosterModel {
+  rows: PartyRosterRow[];
+  groups: PartyRosterGroup[];
+  /** Set when the roster cannot sail this mode, in the server's own words. */
+  refusal: string | null;
+}
+
+/**
+ * THE ROSTER, GROUPED BY THE HULL EACH MEMBER SAILS (hud-21).
+ *
+ * The panel used to print a flat list of names with a Host pill, in a product
+ * whose whole premise is crews: it never said how many berths the chosen mode
+ * has, never showed a ready tick (nothing sent `party_ready`, so nothing could),
+ * and gave the captain no kick and no way to hand the crown over. It also let a
+ * party of three sit in Duos looking perfectly fine until `start_match` refused
+ * it at the dock — the refusal is computed here instead, from the same rule the
+ * server applies (LobbyServer.handleQueueJoin, PLAN §2.1).
+ */
+export function partyRosterModel(
+  payload: Pick<LobbyUpdatePayload, 'mode' | 'hostId' | 'members' | 'membersAtSea'>,
+  selfId: string,
+): PartyRosterModel {
+  const spec = modeSpec(payload.mode);
+  const atSea = new Set(payload.membersAtSea ?? []);
+  const iAmHost = payload.hostId === selfId;
+  const rows: PartyRosterRow[] = payload.members.map((m, i) => ({
+    clientId: m.clientId,
+    name: m.name,
+    isHost: m.clientId === payload.hostId,
+    ready: !!m.ready,
+    atSea: !!m.atSea || atSea.has(m.clientId),
+    you: m.clientId === selfId,
+    overflow: i >= spec.crewSize,
+    kickable: iAmHost && m.clientId !== selfId,
+    crownable: iAmHost && m.clientId !== selfId,
+  }));
+
+  const groups: PartyRosterGroup[] = [];
+  const berths = Math.max(1, spec.crewSize);
+  for (let start = 0; start < Math.max(rows.length, 1); start += berths) {
+    const slice = rows.slice(start, start + berths);
+    if (slice.length === 0) break;
+    const hullNo = Math.floor(start / berths) + 1;
+    groups.push({
+      hull: spec.hull,
+      label: `Hull ${hullNo} · ${spec.hull} · ${slice.length} / ${berths}`,
+      rows: slice,
+    });
+  }
+
+  let refusal: string | null = null;
+  if (rows.length > spec.crewSize) {
+    const fits = MODE_IDS.find((m) => MODES[m].available && MODES[m].crewSize >= rows.length);
+    refusal = `${spec.label} takes ${spec.crewSize}`
+      + (fits ? `; switch to ${MODES[fits].label}` : '; too many hands for any mode');
+  }
+  return { rows, groups, refusal };
 }

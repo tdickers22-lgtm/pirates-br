@@ -310,6 +310,40 @@
       text-transform: uppercase;
     }
     .lobby-member.host { border-color: rgba(201, 168, 76, 0.5); }
+    .lobby-member.at-sea { opacity: 0.55; }
+    .lobby-member .who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .lobby-member .who .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lobby-member .tick { width: 14px; color: #6fbf73; font-size: 0.8rem; }
+    .lobby-member .tick.waiting { color: #5a6b7d; }
+    .lobby-member .acts { display: flex; gap: 6px; }
+    .lobby-member .mini {
+      font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase;
+      padding: 3px 8px; border-radius: 6px; cursor: pointer;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: #cddbe9;
+    }
+    .lobby-member .mini.danger { color: #e79a9a; border-color: rgba(231,154,154,0.28); }
+    .lobby-member.overflow { border-color: rgba(231, 154, 154, 0.55); }
+    .lobby-group-head {
+      font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase;
+      color: #7f92a8; padding: 6px 2px 2px;
+    }
+    .lobby-refusal { font-size: 0.7rem; color: #e79a9a; letter-spacing: 0.08em; text-align: center; }
+    .lobby-toggle { display: flex; align-items: center; gap: 8px; color: #cddbe9; font-size: 0.74rem; cursor: pointer; }
+    .lobby-toggle input { accent-color: #c9a84c; }
+
+    /* Mode segmented control (PLAN 2.2) */
+    .mode-control { display: flex; gap: 6px; }
+    .mode-control .mode-opt {
+      flex: 1; padding: 8px 4px; border-radius: 8px; cursor: pointer;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09);
+      color: #b8c8dc; font: inherit; font-size: 0.72rem; letter-spacing: 0.14em;
+      text-transform: uppercase; text-align: center;
+    }
+    .mode-control .mode-opt .sub { display: block; font-size: 0.58rem; letter-spacing: 0.1em; color: #7f92a8; }
+    .mode-control .mode-opt[aria-checked="true"] {
+      background: rgba(201, 168, 76, 0.18); border-color: rgba(201,168,76,0.6); color: #f4e2b2;
+    }
+    .mode-control .mode-opt[disabled] { opacity: 0.42; cursor: not-allowed; }
 
     .lobby-row {
       display: flex; align-items: center; justify-content: space-between;
@@ -2121,12 +2155,18 @@
       </div>
       <button class="menu-btn primary" id="menu-play-btn">⚓ Find Crew · Public Match</button>
       <button class="menu-btn" id="menu-solo-btn">☠ Solo Voyage · Sail With Bots</button>
-      <div class="menu-button-grid">
-        <button class="menu-btn" id="menu-create-party-btn">Create Private Party</button>
-        <button class="menu-btn" id="menu-join-party-toggle-btn">Join With Code</button>
-      </div>
-      <div class="menu-row" id="menu-join-party-row" style="display:none;">
-        <input type="text" id="menu-join-code-input" class="menu-input code-input" placeholder="CODE" maxlength="4" />
+      <!-- MODE PICKER (PLAN 2.2). One segmented control drives the public
+           queue, the solo voyage and — mirrored in the party panel — the
+           crew's own mode. Squads is rendered disabled until WIRE-01 widens
+           the snapshot; MODES[].available is the only source of that. -->
+      <div class="mode-control" id="menu-mode-control" role="radiogroup" aria-label="Crew size"></div>
+      <button class="menu-btn" id="menu-create-party-btn">Create Private Party</button>
+      <!-- ONE ALWAYS-VISIBLE JOIN FIELD (PLAN 2.2). It used to hide behind a
+           "Join With Code" toggle AND cap at four characters, against a server
+           that issues six (netcode-23) — so a pasted invite code was cut in
+           half and refused. -->
+      <div class="menu-row" id="menu-join-party-row">
+        <input type="text" id="menu-join-code-input" class="menu-input code-input" placeholder="CREW CODE" maxlength="6" />
         <button class="menu-btn primary" id="menu-join-confirm-btn">Join</button>
       </div>
       <div class="menu-row" style="justify-content:center;">
@@ -2153,7 +2193,12 @@
         <code id="lobby-code">----</code>
         <button class="menu-btn" id="lobby-copy-btn">Copy Link</button>
       </div>
+      <div class="mode-control" id="lobby-mode-control" role="radiogroup" aria-label="Crew size"></div>
       <div class="lobby-roster" id="lobby-roster"></div>
+      <div class="lobby-row" id="lobby-botfill-row">
+        <span class="label">Fill With Bots</span>
+        <label class="lobby-toggle"><input type="checkbox" id="lobby-botfill-toggle" checked /><span id="lobby-botfill-label">Fill with bots</span></label>
+      </div>
       <div class="lobby-row" id="lobby-bot-row">
         <span class="label">Bot Crews</span>
         <!-- max/value are overwritten from MODES at boot (MenuController):
@@ -2162,6 +2207,7 @@
         <span id="lobby-bot-count" style="font-family:monospace;color:#f4e2b2;min-width:24px;text-align:right;">11</span>
       </div>
       <div class="menu-row">
+        <button class="menu-btn" id="lobby-ready-btn">Ready</button>
         <button class="menu-btn primary" id="lobby-start-btn">⛵ Start Voyage</button>
         <button class="menu-btn danger" id="lobby-leave-btn">Leave</button>
       </div>

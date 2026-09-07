@@ -473,11 +473,21 @@ export class NetworkClient {
   createParty() { this.send({ type: 'create_party', ts: Date.now(), payload: {} }); }
   joinParty(code: string) { this.send({ type: 'join_party', ts: Date.now(), payload: { code } }); }
   leaveParty() { this.send({ type: 'leave_party', ts: Date.now(), payload: {} }); }
-  updatePartySettings(settings: { botFill: number }) {
+  updatePartySettings(settings: { botFill?: number; mode?: string }) {
     this.send({ type: 'update_party_settings', ts: Date.now(), payload: settings });
   }
+  // PARTY-01 (netcode-14/15): the server has accepted these three since lane
+  // 2.3 and no client ever sent one, so the ready tick, the kick and the crown
+  // were server-only vocabulary. A roster row is a control now.
+  partyReady(ready: boolean) { this.send({ type: 'party_ready', ts: Date.now(), payload: { ready } }); }
+  partyKick(clientId: string) { this.send({ type: 'party_kick', ts: Date.now(), payload: { clientId } }); }
+  partyTransferHost(clientId: string) {
+    this.send({ type: 'party_transfer_host', ts: Date.now(), payload: { clientId } });
+  }
   startMatch() { this.send({ type: 'start_match', ts: Date.now(), payload: {} }); }
-  queueJoin() { this.send({ type: 'queue_join', ts: Date.now(), payload: {} }); }
+  /** The mode picker travels with the request: a lone pirate queueing for Duos
+   *  must not be dispatched into Solo's twelve-hull fleet (MODE-01). */
+  queueJoin(mode?: string) { this.send({ type: 'queue_join', ts: Date.now(), payload: mode ? { mode } : {} }); }
   queueLeave() { this.send({ type: 'queue_leave', ts: Date.now(), payload: {} }); }
   soloStart(botCount = 9) { this.send({ type: 'solo_start', ts: Date.now(), payload: { botCount } }); }
   // Leaving is decided HERE, not when the server's answer arrives: close the
