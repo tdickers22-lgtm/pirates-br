@@ -804,11 +804,32 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   applyTerrainDetail(terrainMat, isVolcanic, host, buildCaveCutout(island));
   const terrain = new THREE.Mesh(terrainGeometry, terrainMat);
   terrain.name = 'island-terrain';
-  // The DoubleSide heightfield casting onto ITSELF produced a heavy self-shadow
-  // acne wash that crushed every island to murky olive. Let the terrain receive
-  // shadows (props/trees/ships ground onto it) but not cast — a single-dome
-  // island barely shadows itself anyway, and this restores lush sunlit ground.
-  terrain.castShadow = false;
+  // THE ISLAND CASTS (SHADOW-01 / graphics-13).
+  //
+  // Casting was switched off because the DoubleSide heightfield shadowing
+  // ITSELF produced an acne wash that crushed every island to murky olive —
+  // and the diagnosis was right about the symptom and wrong about the cause.
+  // three renders the shadow pass with `material.shadowSide`, which defaults to
+  // "the opposite of side" for a FrontSide material and to DoubleSide for a
+  // DoubleSide one. So this material was writing its OWN front faces into the
+  // depth map and then sampling them from a hair in front: that is the acne,
+  // and no bias short of a metre hides it.
+  //
+  // Pinning shadowSide to BackSide writes the FAR side of the cap+skirt volume
+  // instead. A receiver point can never be in front of the far side of the
+  // solid it sits on, so self-acne is gone at the source rather than bought off
+  // with the metre of normalBias that detached every other shadow in the world
+  // (slice a). What comes back is the thing a low sun is FOR: a cliff's shadow
+  // across its own beach, a peak's across its bay, terraces and cave mouths
+  // that finally read as relief instead of paint.
+  //
+  // COST, low tier: zero — shadowMap.enabled is false on low, so a castShadow
+  // flag is never read. On balanced/high it is +1 draw and the cap's 9-30k
+  // triangles per island in the depth pass, and ONLY for islands already inside
+  // the 310 m ortho box (three culls the shadow pass against it, and the box is
+  // sized to hold one island). The distance LOD's proxy stays non-casting below.
+  terrain.castShadow = true;
+  terrainMat.shadowSide = THREE.BackSide;
   terrain.receiveShadow = true;
   group.add(terrain);
 
@@ -941,6 +962,10 @@ export function buildProxyTerrainMesh(ctx: IslandBuildCtx, terrain: TerrainBuild
     pGeo,
     new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.98 }),
   );
+  // The far LOD is a 30-segment silhouette of the same heightfield. It must NOT
+  // cast: at the crossover distance both meshes exist, and two shadows of one
+  // island half a metre apart is a doubled, crawling edge across the water.
+  proxyMesh.castShadow = false;
 
   return proxyMesh;
 }
