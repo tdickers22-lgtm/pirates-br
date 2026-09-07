@@ -20,8 +20,31 @@ interface StormDamageHooks {
 }
 
 /** Accumulated storm damage (per outside-ring second, phase-scaled) that stoves
- *  a fresh hole into the seaward hull section. */
-const STORM_HOLE_DAMAGE = 30;
+ *  a fresh hole into the seaward hull section. Lowered 30 -> 18 with STORM-01:
+ *  the tempest's lethality moved OFF the crew's health bar and ONTO the planking,
+ *  so the hull has to take holes fast enough that the bail/repair fight is the
+ *  thing keeping you afloat. At phase 2, 60 m outside, that is a breach every
+ *  12 s instead of every 20 s. */
+const STORM_HOLE_DAMAGE = 18;
+
+/** Weather bills a pirate in the water or on a beach at twice the rate it bills
+ *  a deck (STORM-01). Being caught OFF a hull is the lethal state now — a
+ *  swimmer 60 m outside the phase-2 wall is gone in ~33 s. */
+const STORM_EXPOSED_MULT = 2;
+
+/** Exposure aboard: a crew standing on a floating hull takes no drain at all
+ *  UNTIL she is already at the end of her rope. Without this a hull whose bail
+ *  rate beats the ingress would carry an immortal crew around outside the ring
+ *  forever (the verifier's stall risk on storm-01); with it, a doomed crew
+ *  still resolves and a healthy one gets the fight the storm holes exist for. */
+const STORM_EXPOSURE_HEALTH = 25;
+
+/** The fastest the wall may close on the hull it is chasing, m/s (gameplay-08).
+ *  A sloop at the half sail the horn hands out makes 6.75 m/s and 10.5 m/s with
+ *  the storm gale behind her; a phase-2 ring drifting at the old maximum closed
+ *  at 11.79 m/s, which no canvas in the game could answer from the far side.
+ *  The drift — never the shrink — is capped to hold this line. */
+export const STORM_MAX_EDGE_SPEED = 8;
 
 /** Fraction of the final circle that may sit on dry land before a candidate
  *  centre is rejected (rings this small are the endgame arena). */
@@ -38,6 +61,14 @@ export class StormSystem {
   constructor(private readonly rng: () => number = Math.random) {}
   /** Per-ship storm-damage accumulation toward the next punched hole. */
   private shipStormAccum = new Map<string, number>();
+  /** Hulls the tempest is actually working on THIS tick (outside the wall,
+   *  afloat, unsheltered). The player loop reads it so a pirate aboard gets his
+   *  hull's verdict instead of his own — reused across ticks, never realloc'd
+   *  (the server tick is a hot path). */
+  private hullsInTheWeather = new Set<string>();
+  /** Floating hulls by id, rebuilt each tick from the ships array — the player
+   *  loop needs to know whether the deck under a pirate is still a deck. */
+  private floatingHulls = new Map<string, Ship>();
   /** Deterministic LCG for where along the seaward face a sea breaks through. */
   private stormHolePhase = 0x51f3c7;
   /** Islands, for keeping the late rings off dry land (Old Maw Caldera sits at
@@ -133,7 +164,9 @@ export class StormSystem {
         storm.phase++;
         if (storm.phase < STORM_PHASES.length) {
           const next = STORM_PHASES[storm.phase];
-          const nextCenter = this.pickNextSafeCenter(storm.centerX, storm.centerZ, storm.safeRadius, next.endRadius);
+          const nextCenter = this.pickNextSafeCenter(
+            storm.centerX, storm.centerZ, storm.safeRadius, next.endRadius, next.shrinkSec,
+          );
           storm.nextCenterX = nextCenter.x;
           storm.nextCenterZ = nextCenter.z;
           storm.nextRadius = next.endRadius;
@@ -175,13 +208,23 @@ export class StormSystem {
     // Apply damage to entities outside safe zone (scaled excess ramps gently)
     const dmg = storm.damagePerSec * dt;
 
+    this.hullsInTheWeather.clear();
+    this.floatingHulls.clear();
     for (const ship of ships) {
       if (!ship.alive || ship.sinking) {
         this.shipStormAccum.delete(ship.id);
         continue;
       }
+      this.floatingHulls.set(ship.id, ship);
       const d = dist2D(ship.position.x, ship.position.z, storm.centerX, storm.centerZ);
-      if (d <= storm.safeRadius) {
+      // A HULL IS TESTED BY HER NEAREST-INBOARD POINT, NOT BY HER CENTRE
+      // (storm-23). The final ring is smaller than every hull in the game, so
+      // in the endgame a centre test says "safe" while the pirate standing at
+      // the stern is metres outside the wall — the two verdicts disagreed and
+      // the endgame became a footrace to the inboard rail. One reading now:
+      // if any part of her is in shelter, she is in shelter.
+      const inboard = d - SHIP_STATS[ship.type].length * 0.5;
+      if (inboard <= storm.safeRadius) {
         this.shipStormAccum.delete(ship.id);
         continue;
       }
@@ -193,6 +236,8 @@ export class StormSystem {
         this.shipStormAccum.delete(ship.id);
         continue;
       }
+      // Her crew reads this verdict below — one answer for hull and hands.
+      this.hullsInTheWeather.add(ship.id);
       const excess = (d - storm.safeRadius) / Math.max(1, storm.safeRadius);
       const scaled = dmg * (1 + excess * 0.75);
       // The storm batters the seaward face: the section facing away from the
@@ -238,6 +283,27 @@ export class StormSystem {
         || player.respawnProtectionTimer > 0
         || hooks.hasStormGrace?.(player.id)
       ) continue;
+      // THE STORM SINKS THE SHIP; IT DOES NOT ERASE THE CREW (STORM-01).
+      //
+      // Every non-downed pirate outside the wall used to bleed whether he was
+      // swimming, standing on a beach or standing on his own quarterdeck — so
+      // at phase 2 a full-health pirate died at 77 s while the hull under him
+      // had taken four holes of the eight she needed to founder. The plank
+      // patch, the bilge and the hole-facing were all irrelevant: the crew was
+      // always dead first. So a pirate ABOARD A FLOATING HULL takes the HULL's
+      // verdict — sheltered, inboard or safe means he is too — and the weather
+      // spends itself on her planking instead. Off a deck it is worse than it
+      // was (STORM_EXPOSED_MULT): the water is where the tempest kills people.
+      const deck = player.onShipId ? this.floatingHulls.get(player.onShipId) : undefined;
+      if (deck) {
+        // Her planking is taking it, or nothing is. Exposure only bites a crew
+        // already at the end of her rope, so a doomed hull still resolves.
+        if (!this.hullsInTheWeather.has(deck.id)) continue;
+        if (player.health >= STORM_EXPOSURE_HEALTH) continue;
+        player.lastEnvDamage = { cause: 'storm', at: t };
+        player.health -= dmg;
+        continue;
+      }
       const d = dist2D(player.position.x, player.position.z, storm.centerX, storm.centerZ);
       if (d > storm.safeRadius) {
         const excess = (d - storm.safeRadius) / Math.max(1, storm.safeRadius);
@@ -248,7 +314,7 @@ export class StormSystem {
         // pays the attacker inside MATCH_END.ASSIST_CREDIT_WINDOW and the death
         // CAUSE still reads honestly off lastDamageSourceById.
         player.lastEnvDamage = { cause: 'storm', at: t };
-        player.health -= dmg * (1 + excess * 0.75);
+        player.health -= dmg * (1 + excess * 0.75) * STORM_EXPOSED_MULT;
       }
     }
   }
@@ -257,8 +323,20 @@ export class StormSystem {
     return dist2D(x, z, storm.centerX, storm.centerZ) > storm.safeRadius;
   }
 
-  private pickNextSafeCenter(centerX: number, centerZ: number, currentRadius: number, nextRadius: number) {
-    const allowedDrift = Math.max(0, currentRadius - nextRadius - 8);
+  private pickNextSafeCenter(
+    centerX: number, centerZ: number, currentRadius: number, nextRadius: number,
+    shrinkSec = Infinity,
+  ) {
+    const slack = Math.max(0, currentRadius - nextRadius - 8);
+    // THE WALL MAY NOT CLOSE FASTER THAN CANVAS CAN ANSWER (gameplay-08). The
+    // hull on the far side of a drifting ring is chased by the shrink AND by
+    // the drift, and in phase 2 that summed to 11.79 m/s against a half-sail
+    // sloop making 10.5 m/s with the gale — caught on any heading, the exact
+    // "died where the game put you" death phase 1 promises never to repeat.
+    // The shrink is the design; the DRIFT is the lever, so the drift is what
+    // gives way. Every other phase is already under the line and is untouched.
+    const speedBudget = shrinkSec * STORM_MAX_EDGE_SPEED - (currentRadius - nextRadius);
+    const allowedDrift = Math.max(0, Math.min(slack, speedBudget));
     const worldBound = Math.max(0, WORLD.HALF - nextRadius - 36);
     const roll = () => {
       const drift = allowedDrift * (0.22 + this.rng() * 0.68);

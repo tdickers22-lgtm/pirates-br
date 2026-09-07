@@ -21,6 +21,7 @@
 //
 //   node --import tsx scripts/test-storm-outrun.mjs
 import { Match } from '../src/server/core/Match.ts';
+import { StormSystem } from '../src/server/systems/StormSystem.ts';
 import {
   FIRST_SAIL_ASSIST,
   PLAYER,
@@ -194,6 +195,10 @@ console.log('\nA crew caught outside the wall can outrun it home');
   const match = liveMatch('outrun');
   const { player, ship, client } = join(match);
   const storm = closeTheRing(match, 300);
+  // The parked ring says phase 2, so it bills at phase 2 — closeTheRing only
+  // moves the circle, and the opening 0.6 hp/s could not stove a plank in the
+  // time this crossing takes, which is what the hull half of it grades.
+  storm.damagePerSec = STORM_PHASES[1].dmgPerSec;
   const startD = 420;
   ship.position.x = 0;
   ship.position.z = startD;
@@ -209,6 +214,7 @@ console.log('\nA crew caught outside the wall can outrun it home');
 
   let insideAt = null;
   let peak = 0;
+  let stormWork = 0;
   const steps = Math.ceil(90 / DT);
   for (let i = 0; i < steps; i++) {
     client.lastInput = { ...BLANK_INPUT, seq: i, ts: Date.now(), yaw: Math.PI };
@@ -216,6 +222,7 @@ console.log('\nA crew caught outside the wall can outrun it home');
     peak = Math.max(peak, Math.hypot(ship.velocity.x, ship.velocity.z));
     const d = dist2D(ship.position.x, ship.position.z, storm.centerX, storm.centerZ);
     if (insideAt === null && d <= storm.safeRadius) insideAt = match.t;
+    stormWork = Math.max(stormWork, ship.holes.length);
     if (player.state === 'eliminated') break;
   }
   // The ring's own worst closing rate is the bar: a hull that cannot match it is
@@ -228,9 +235,16 @@ console.log('\nA crew caught outside the wall can outrun it home');
   expect('and she does it fast enough to beat the ring closing on her',
     peak >= ringRate,
     `peak ${peak.toFixed(2)} u/s vs ring ${ringRate.toFixed(2)} m/s`);
-  expect('the crossing costs blood, not the crew — the gale is a chance, not a taxi',
-    player.health < PLAYER.MAX_HEALTH && player.health > 0,
-    `hp=${player.health.toFixed(1)}`);
+  // RE-PINNED BY STORM-01. This used to read "the crossing costs blood": the
+  // weather billed the pirate on deck directly, which is the whole defect —
+  // the crew died long before the hull did and the bail/repair fight never
+  // happened. The crossing still costs, but it costs PLANKING: her crew comes
+  // home whole and her hull comes home leaking. (Mutation proof: delete the
+  // `this.hullsInTheWeather.add(ship.id)` line in StormSystem and this goes
+  // red — nothing bills the hull either.)
+  expect('the crossing costs planking, not blood — the gale is a chance, not a taxi',
+    player.health === PLAYER.MAX_HEALTH && stormWork > 0,
+    `hp=${player.health.toFixed(1)} holes=${ship.holes.length} bilge=${(ship.bilgeWater ?? 0).toFixed(2)}`);
   match.stop?.();
 }
 
@@ -589,6 +603,148 @@ console.log('\nA respawn inside the tempest gets seconds to make sail, and no mo
     STORM_RESPAWN_GRACE_SECONDS > PLAYER.RESPAWN_PROTECTION_TIME,
     `storm ${STORM_RESPAWN_GRACE_SECONDS}s vs combat ${PLAYER.RESPAWN_PROTECTION_TIME}s`);
   match.stop?.();
+}
+
+
+// ══ 6. THE STORM SINKS THE SHIP, IT DOES NOT ERASE THE CREW (STORM-01) ════════
+//
+// Measured on HEAD: a pirate standing on his own deck 60 m outside the phase-2
+// wall died at 77 s while the hull he was standing on had taken FOUR holes and
+// would have needed eight to founder. So the bail/repair fight the storm-hole
+// model exists for never happened — the crew was dead first, every time, and
+// the only counterplay the weather offered was a health bar. The tempest now
+// bills the HULL: pirates aboard a floating hull take the hull's verdict, the
+// water is where the storm kills people (x2), and exposure only bites a crew
+// already at the end of her rope.
+/** The fastest the wall may ever close on the hull it is chasing (gameplay-08).
+ *  Half sail plus the storm gale makes 10.5 m/s; the ring must stay under it. */
+const STORM_MAX_EDGE_SPEED = 8;
+console.log('\nThe tempest bills the hull, not the crew standing on her');
+{
+  const match = liveMatch('storm-bills-the-hull');
+  const { player, ship } = join(match, 'Bosun');
+  const storm = closeTheRing(match, 300);
+  storm.damagePerSec = STORM_PHASES[1].dmgPerSec;
+  ship.position.x = 0; ship.position.z = 360; ship.position.y = 0;
+  ship.anchored = true;
+  player.onShipId = ship.id;
+  player.position = { x: ship.position.x, y: 2, z: ship.position.z };
+  player.health = PLAYER.MAX_HEALTH;
+  let wentDownAt = null;
+  let hullLostAt = null;
+  let holesPeak = 0;
+  for (let i = 0; i < Math.ceil(90 / DT); i++) {
+    match.tick();
+    storm.damagePerSec = STORM_PHASES[1].dmgPerSec;
+    holesPeak = Math.max(holesPeak, ship.holes.length);
+    if (hullLostAt === null && (!ship.alive || ship.sinking)) hullLostAt = match.t;
+    if (wentDownAt === null && (player.health <= 0 || player.state === 'downed'
+      || player.state === 'eliminated' || player.state === 'respawning')) wentDownAt = match.t;
+  }
+  // THE CREW OUTLIVES THE HULL. On HEAD the pirate was dead at 67 s with his
+  // ship afloat under him and four of the eight holes she needed to founder —
+  // so plank patches, the bilge and hole-facing were all beside the point. Now
+  // the only way the weather gets him is by taking his ship out from under him
+  // first, which is a 70 s bail/repair fight he can actually win.
+  expect('90 s at 60 m outside the phase-2 wall: the crew never goes down before the hull does',
+    wentDownAt === null || (hullLostAt !== null && hullLostAt <= wentDownAt),
+    `crew down at ${wentDownAt === null ? 'never' : wentDownAt.toFixed(0) + 's'}, `
+    + `hull lost at ${hullLostAt === null ? 'never' : hullLostAt.toFixed(0) + 's'}`);
+  expect('…and the hull has been stove in at least three times (the bail fight is real)',
+    holesPeak >= 3,
+    `peak holes ${holesPeak} alive=${ship.alive} sinking=${ship.sinking}`);
+  match.stop?.();
+}
+{
+  // The water is still lethal — that is where the storm kills people.
+  const match = liveMatch('storm-kills-the-swimmer');
+  const { player, ship } = join(match, 'Castaway');
+  const storm = closeTheRing(match, 300);
+  storm.damagePerSec = STORM_PHASES[1].dmgPerSec;
+  ship.position.x = 0; ship.position.z = 360; ship.anchored = true;
+  player.onShipId = null;
+  player.state = 'swimming';
+  player.health = PLAYER.MAX_HEALTH;
+  player.position = { x: 0, y: 0.4, z: 360 };
+  let downAt = null;
+  for (let i = 0; i < Math.ceil(90 / DT); i++) {
+    match.tick();
+    storm.damagePerSec = STORM_PHASES[1].dmgPerSec;
+    if (downAt === null && (player.health <= 0 || player.state === 'eliminated'
+      || player.state === 'downed' || player.state === 'respawning')) downAt = match.t;
+  }
+  expect('a swimmer in the same water is dead inside 90 s',
+    downAt !== null && downAt <= 90,
+    `downAt ${downAt === null ? 'never' : downAt.toFixed(0) + 's'} hp ${player.health.toFixed(1)}`);
+  match.stop?.();
+}
+
+// The three rails below are graded on StormSystem itself: shelter and the
+// hull-vs-pirate verdict are its contract, and a whole Match cannot state them
+// without dragging PhysicsSystem's shelter bookkeeping in with it.
+const stormAt = (radius, phase, dmgPerSec) => ({
+  phase, centerX: 0, centerZ: 0, nextCenterX: 0, nextCenterZ: 0,
+  shrinkStartCenterX: 0, shrinkStartCenterZ: 0, shrinkStartRadius: radius,
+  safeRadius: radius, nextRadius: radius, shrinking: false, shrinkTimer: 900,
+  shrinkDuration: 1, shrinkProgress: 0, damagePerSec: dmgPerSec,
+});
+const runStorm = (seconds, storm, ships, players, hooks) => {
+  const system = new StormSystem();
+  let holes = 0;
+  const wrapped = { openHoleAt: (_s, _l, c) => { holes += c; }, ...hooks };
+  const outer = { ...wrapped, openHoleAt: (s, l, c) => { holes += c; wrapped.openHoleAt?.(s, l, c); } };
+  for (let i = 0; i < Math.ceil(seconds / DT); i++) system.update(DT, storm, ships, players, outer, i * DT);
+  return holes;
+};
+const deckPlayer = (id, shipId, x, z, health = PLAYER.MAX_HEALTH) => ({
+  id, state: 'alive', health, respawnProtectionTimer: 0, onShipId: shipId,
+  position: { x, y: 2, z }, lastEnvDamage: null,
+});
+const hull = (id, type, x, z) => ({
+  id, type, alive: true, sinking: false, rotation: 0, position: { x, y: 0, z },
+});
+
+console.log('\nShelter and the wall are read the same way for the hull and for her crew');
+{
+  // storm-20 / liveplay-v03: a moored hull under berth shelter took no damage
+  // while the pirate standing on her lost half his health to the same weather.
+  const storm = stormAt(300, 1, STORM_PHASES[1].dmgPerSec);
+  const ship = hull('berthed', 'sloop', 0, 360);
+  const player = deckPlayer('moored', 'berthed', 0, 360);
+  const holes = runStorm(60, storm, [ship], [player], { isSheltered: () => true });
+  expect('60 s in a sheltered berth: no holes AND no blood',
+    holes === 0 && player.health === PLAYER.MAX_HEALTH,
+    `holes ${holes} hp ${player.health.toFixed(1)}`);
+}
+{
+  // storm-23: the ring is smaller than every hull in the endgame, so the crew
+  // straddles the wall. Hull and crew must return the SAME verdict.
+  const storm = stormAt(12, 6, STORM_PHASES[6].dmgPerSec);
+  const ship = hull('straddler', 'galleon', 0, 9);
+  const player = deckPlayer('sternwatch', 'straddler', 0, 20);
+  const holes = runStorm(20, storm, [ship], [player], {});
+  const bled = player.health < PLAYER.MAX_HEALTH - 1e-6;
+  expect('a galleon straddling the final wall: either both take it or neither does',
+    (holes > 0) === bled,
+    `holes ${holes} hp ${player.health.toFixed(1)}`);
+}
+{
+  // gameplay-08: the phase-2 wall closed on a half-sail sloop at up to 11.8 m/s
+  // — faster than the storm gale could push her. Cap the drift so the worst
+  // case the ring can ever produce stays inside what canvas can answer.
+  const maxRng = new StormSystem(() => 1);
+  let worst = { phase: 0, speed: 0 };
+  for (let i = 1; i < STORM_PHASES.length; i++) {
+    const current = STORM_PHASES[i - 1].endRadius;
+    const next = STORM_PHASES[i];
+    const centre = maxRng['pickNextSafeCenter'](0, 0, current, next.endRadius, next.shrinkSec);
+    const drift = Math.hypot(centre.x, centre.z);
+    const speed = (current - next.endRadius + drift) / next.shrinkSec;
+    if (speed > worst.speed) worst = { phase: i + 1, speed };
+  }
+  expect('no phase can close its wall faster than 8 m/s on the hull it is chasing',
+    worst.speed <= STORM_MAX_EDGE_SPEED + 1e-6,
+    `worst phase ${worst.phase} at ${worst.speed.toFixed(2)} m/s (cap ${STORM_MAX_EDGE_SPEED})`);
 }
 
 console.log(failures === 0
