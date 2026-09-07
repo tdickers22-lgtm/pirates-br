@@ -224,3 +224,41 @@ export function getHullContactChain(type: ShipType): ReadonlyArray<{ zF: number;
   CONTACT_CHAIN_CACHE.set(type, chain);
   return chain;
 }
+
+/** THE RIGGING SILHOUETTE — where the CANVAS is, per mast, so a rigging weapon
+ *  connects with sail and not with the sky beside it.
+ *
+ *  Chainshot used one flat box, |x| ≤ 0.75 W: three quarters of a beam either
+ *  side of the centreline, which on a galleon is 1.34 W-tenths OUTBOARD of the
+ *  widest timber on the ship. A chain passing a metre clear of the wale tore
+ *  canvas it never touched (ships-24). A yard is narrower than the wale:
+ *  yardW = W·(1.06 − 0.1·m) in the renderer (ShipRenderer mast loop), so the
+ *  half-width here is 0.53 W on the main and less on each mast aft of her.
+ *
+ *  Mast layout mirrors that same loop: mastStartZ = 0.28 L, spacing
+ *  0.42 L / (mastCount − 1). Fore-and-aft the band is generous, because stays,
+ *  shrouds and a swinging boom really do spread the rig over the deck.
+ *
+ *  Consumers: PhysicsSystem.isChainshotInRiggingBand (server), graded by
+ *  scripts/test-combat-fixes.mjs. The client draws the yards from the same
+ *  numbers; when ShipRenderer is rebuilt (HULLGEO-01) it should read this. */
+export function getShipRiggingMasts(
+  stats: { width: number; length: number; height: number; mastCount: number },
+): Array<{ z: number; halfWidth: number; halfDepth: number }> {
+  const spacing = stats.length * 0.42 / Math.max(stats.mastCount - 1, 1);
+  const masts = [];
+  for (let m = 0; m < stats.mastCount; m++) {
+    masts.push({
+      z: stats.length * 0.28 - m * spacing,
+      halfWidth: stats.width * (1.06 - m * 0.1) * 0.5,
+      halfDepth: Math.max(spacing * 0.5, stats.length * 0.22),
+    });
+  }
+  return masts;
+}
+
+/** Mast height above the deck — H × 3.6 single-masted, × 3.1 otherwise. The
+ *  canvas tops out at 0.90 of it (the crow's nest rides at 0.86). */
+export function getMastHeight(stats: { height: number; mastCount: number }): number {
+  return stats.height * (stats.mastCount === 1 ? 3.6 : 3.1);
+}

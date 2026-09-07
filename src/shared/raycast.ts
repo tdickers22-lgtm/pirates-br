@@ -1,5 +1,6 @@
 import type { Island, Ship, Vec3 } from './types/index.js';
 import { SHIP_STATS } from './constants/index.js';
+import { getHullProfile } from './hull.js';
 import {
   getCaveCeilingY,
   getCaveFloorY,
@@ -182,7 +183,13 @@ export function intersectRayShipHull(
   ship: Pick<Ship, 'type' | 'position' | 'rotation'>,
 ): number | null {
   const stats = SHIP_STATS[ship.type];
-  const minY = ship.position.y - stats.height * 0.72; // keel (matches swim-hull band)
+  // THE KEEL IS THE DRAWN KEEL (LOFT-01 / physics-12). This band used to reach
+  // 0.72 H below the waterline while the loft the renderer draws bottoms out at
+  // 0.35–0.365 H, so a full half-height of open water under a galleon
+  // registered as solid hull: shots aimed UNDER a ship stopped dead in nothing,
+  // and a swimmer beneath her keel was shielded by timber that was not there.
+  // getHullProfile is the same loft the client builds the planking from.
+  const minY = ship.position.y - getHullProfile(ship.type).draft - 0.15;
   const maxY = ship.position.y + stats.height + 0.85; // deck + bulwark rail
 
   const interval = rayCircleIntervalXZ(

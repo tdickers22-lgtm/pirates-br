@@ -1,6 +1,6 @@
 import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BERTH_ENV_SAFE_RADIUS, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
-import { getHullContactChain, getHullWaterlineOutline } from '../../shared/hull.js';
+import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRiggingMasts } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
@@ -110,6 +110,10 @@ const SAIL_POLAR_PEAK = 1.92;
  *  no snap, no ram); at or above it she is rammed and resolved hard. Without
  *  the split the loft-true chain teleports moored neighbours apart. */
 const SOFT_CONTACT_DEPTH = 0.6;
+
+/** Canvas set below this is rolled on the yard — the renderer's own furl
+ *  threshold (ShipRenderer SAIL_FURL_THRESHOLD). Nothing for a chain to tear. */
+const SAIL_FURLED_BELOW = 0.08;
 
 /** GROUNDING SAMPLES THE OUTLINE, NOT THE SPINE (PHYS-02 / physics-02).
  *  A galleon carries ten metres of beam either side of her keel line, so
@@ -3294,19 +3298,27 @@ export class PhysicsSystem {
     return { kind, point: { x: from.x + dx * solidT, y: from.y + dy * solidT, z: from.z + dz * solidT } };
   }
 
-  /** Chainshot is a rigging weapon: it also connects through the mast/sail
-   *  band ABOVE the hull — a narrower footprint reaching to the mast tops —
-   *  so a shot aimed through the canvas actually tears it instead of passing
-   *  clean over the hull band. Matches the client mast layout (mast height =
-   *  H × 3.6 single-mast / 3.1 multi-mast, see getCrowNestStandingY). */
+  /** Chainshot is a rigging weapon: it connects through the CANVAS above the
+   *  hull instead of passing clean over the hull band. The footprint is the
+   *  sail silhouette per mast (shared/hull.ts getShipRiggingMasts) — a yard is
+   *  narrower than the wale, so the old flat |x| ≤ 0.75 W box tore canvas a
+   *  metre OUTBOARD of the widest timber on the ship (ships-24).
+   *
+   *  And a furled sail is not a target: with the canvas rolled on the yard
+   *  there is nothing up there but spars, so a chain goes through. */
   private isChainshotInRiggingBand(projectile: Projectile, ship: Ship): boolean {
     if (projectile.type !== 'chainshot') return false;
+    const set = clamp(ship.sailHeight, 0, 1) * clamp(ship.sailIntegrity, 0, 1);
+    if (set <= SAIL_FURLED_BELOW) return false;
     const stats = SHIP_STATS[ship.type];
-    const mastHeight = stats.height * (stats.mastCount === 1 ? 3.6 : 3.1);
     const dy = projectile.position.y - ship.position.y;
-    if (dy < 0 || dy > stats.height + mastHeight + 0.8) return false;
+    // Deck to the head of the canvas; a half-hoisted sail hangs lower.
+    if (dy < stats.height || dy > stats.height + getMastHeight(stats) * 0.90 * set) return false;
     const local = this.toShipLocal(projectile.position, ship);
-    return Math.abs(local.x) <= stats.width * 0.75 && Math.abs(local.z) <= stats.length * 0.42;
+    for (const mast of getShipRiggingMasts(stats)) {
+      if (Math.abs(local.x) <= mast.halfWidth && Math.abs(local.z - mast.z) <= mast.halfDepth) return true;
+    }
+    return false;
   }
 
   private isInsideShipDeckFootprint(local: { x: number; z: number }, stats: (typeof SHIP_STATS)[keyof typeof SHIP_STATS], margin = 0) {

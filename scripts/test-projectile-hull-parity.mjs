@@ -8,6 +8,7 @@ import { PhysicsSystem, PROJECTILE_HULL_MARGIN, shipIngressRate } from '../src/s
 import { SHIP, SHIP_STATS, PLAYER, PHYSICS } from '../src/shared/constants/index.ts';
 import { getSwimHullHalfWidth, getSwimHullVerticalT } from '../src/shared/utils/index.ts';
 import { getHullContactChain, getHullProfile, hullSurfacePointAt } from '../src/shared/hull.ts';
+import { intersectRayShipHull } from '../src/shared/raycast.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -232,6 +233,32 @@ console.log('\n6. CREDIT-01 physics half: drowning and deck fire keep the attack
   expect('deck fire hurts the hand', hand.health < 100, `health=${hand.health}`);
   expect('...without wiping the attacker', hand.lastDamagedById === 'gunner', `lastDamagedById=${hand.lastDamagedById}`);
   expect('...and files fire as the cause', hand.lastEnvDamage?.cause === 'fire', `lastEnvDamage=${JSON.stringify(hand.lastEnvDamage)}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// THE HITSCAN KEEL (LOFT-01 / physics-12). intersectRayShipHull extruded the
+// hull footprint from 0.72 H BELOW the waterline while the loft the renderer
+// draws bottoms out at 0.35 H. Half a hull height of open water under every
+// ship registered as solid timber: shots aimed under a keel stopped dead in
+// nothing, and a swimmer beneath her was shielded by planking that is not there.
+console.log('\nThe hitscan keel is the DRAWN keel (LOFT-01)');
+{
+  const shots = [];
+  for (const type of ['sloop', 'brigantine', 'galleon']) {
+    const profile = getHullProfile(type);
+    const stats = SHIP_STATS[type];
+    const ship = makeShip(type);
+    // Fired abeam, level, passing under the hull at a depth the loft says is
+    // open water but the old band claimed as hull.
+    const y = -profile.draft - 0.45;
+    const under = intersectRayShipHull({ x: -40, y, z: 0 }, { x: 1, y: 0, z: 0 }, 80, ship);
+    // …and the same shot at the turn of the bilge, which IS timber.
+    const into = intersectRayShipHull({ x: -40, y: -profile.draft * 0.35, z: 0 }, { x: 1, y: 0, z: 0 }, 80, ship);
+    shots.push([type, y.toFixed(2), under, into]);
+    expect(`${type}: a shot ${(profile.draft + 0.45).toFixed(2)} m down passes UNDER the keel`,
+      under === null, `hit at ${under}`);
+    expect(`${type}: a shot at the bilge still strikes timber`, into !== null, `missed`);
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -229,6 +229,47 @@ console.log('\n2. Chainshot shreds rigging ABOVE the hull band; never holes hull
   expect('chainshot tears the canvas', ship.sailIntegrity < 1 && ship.sailHeight < 1,
     `integrity=${ship.sailIntegrity} height=${ship.sailHeight}`);
   expect('chainshot opens NO hull breaches', ship.holes.length === 0, JSON.stringify(ship.holes));
+
+  // LOFT-01 (w3.6 slice c). The rigging band was a flat box |x| ≤ 0.75 W —
+  // wider than the ship's widest timber (the wale, 0.616 W) — so a chain
+  // passing a clear metre outboard of the hull still tore canvas. The band is
+  // now the SAIL silhouette per mast (yard half-width 0.53 W on the main).
+  {
+    const wide = new PhysicsSystem();
+    const galleonStats = SHIP_STATS.galleon;
+    const far = makeShip('galleon', {
+      position: { x: 0, y: gerstnerHeight(0, 0, 0, WAVE_PARAMS), z: 0 },
+      sailHeight: 1,
+    });
+    const outboard = galleonStats.width * 0.616 + 1.0; // a metre clear of the wale
+    const miss = makeProjectile({
+      type: 'chainshot',
+      position: { x: outboard, y: far.position.y + galleonStats.height + 2.0, z: far.position.z + galleonStats.length * 0.28 },
+    });
+    wide.update(DT, 2, [far], [], [miss], [], [], null);
+    expect('chainshot a metre outboard of the wale tears nothing',
+      miss.alive === true && far.sailIntegrity === 1 && far.chainshottedUntil === 0,
+      `alive=${miss.alive} integrity=${far.sailIntegrity} fouled=${far.chainshottedUntil}`);
+  }
+
+  // A furled sail is spars and air: the canvas is rolled on the yard, so a
+  // chain goes through instead of "tearing" a sail that is not set.
+  {
+    const furledPhysics = new PhysicsSystem();
+    const furledStats = SHIP_STATS.sloop;
+    const furled = makeShip('sloop', {
+      position: { x: 0, y: gerstnerHeight(0, 0, 0, WAVE_PARAMS), z: 0 },
+      sailHeight: 0,
+    });
+    const through = makeProjectile({
+      type: 'chainshot',
+      position: { x: 0.5, y: furled.position.y + furledStats.height + 2.0, z: 1 },
+    });
+    furledPhysics.update(DT, 2, [furled], [], [through], [], [], null);
+    expect('chainshot passes clean through FURLED canvas',
+      through.alive === true && furled.chainshottedUntil === 0,
+      `alive=${through.alive} fouled=${furled.chainshottedUntil}`);
+  }
   const chainHit = physics.flushCombatEvents().find((e) => e.type === 'ship_hit');
   expect('rigging hit reports 0 hull damage', !!chainHit && chainHit.damage === 0,
     `damage=${chainHit?.damage}`);
