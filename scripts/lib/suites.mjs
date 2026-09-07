@@ -149,6 +149,9 @@ export const LOGIC = [
   tsx('test-bot-ammo.mjs'),
   // BOT-01/liveplay-19: a hull moored at a dock berth is spared until 270 s (w1.1).
   tsx('test-bot-berth-truce.mjs'),
+  // BOTCREW-01/bots-v02/bots-06: a bot helmsman answers her helm like a player,
+  // and works the capstan and the rigging instead of switching them (w3.2).
+  tsx('test-bot-seamanship-parity.mjs'),
   quick(tsx('test-oneshot-underload.mjs')),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),
