@@ -35,6 +35,13 @@ export const ASSET_NAMES = [
 
 export type AssetName = (typeof ASSET_NAMES)[number];
 
+/** Assets that must be faceted even though their GLB carries smooth normals.
+ *  Empty by design: the right place to force facets is the Blender builder
+ *  (`use_smooth=False`), which then ships split normals and needs no loader
+ *  override. `scripts/test-asset-merge.mjs` fails on any material outside this
+ *  set that comes back flat-shaded. */
+export const FLAT_SHADED_ASSETS: ReadonlySet<string> = new Set<string>();
+
 /** The assets the 2026-09-05 fidelity pass rebuilt at 1.2-4.8x their old
  *  triangle counts. Each ships a decimated `<name>_far.glb` sibling
  *  (scripts/blender/build_far_lods.py) that InstanceLod swaps in once the
@@ -104,12 +111,18 @@ export class AssetLibrary {
                 if (value && value.isTexture) this.sharedResources.add(value);
               }
               if (m instanceof THREE.MeshStandardMaterial) {
-                // Organic models carry curved leaf/midrib and trunk normals
-                // from Blender. Keep one setting across the WHOLE asset so
-                // the material collapse still produces one instanced draw.
-                const organic = name.startsWith('palm_') || name.startsWith('bush')
-                  || name.startsWith('flower_') || name === 'fern_plant' || name === 'wildflowers';
-                m.flatShading = !organic;
+                // The GLB's own normals decide (assets-06). The exporter
+                // already writes SPLIT normals wherever the builder chose
+                // flat — every rock ships 3 verts per triangle — and SHARED
+                // normals wherever it chose smooth: ropes, kraken tentacles,
+                // the mermaid idol, the shark's fusiform body, palm trunks.
+                // Forcing flatShading here faceted all of them and capped the
+                // payoff of every high-poly rebuild (a 10k-tri smooth boulder
+                // still showed 10k facets). Collapse keys on flatShading
+                // (AssetMaterialCollapse), so this must stay uniform per
+                // asset — an empty allowlist keeps it uniform (all false) and
+                // lets MORE pieces share a batch, not fewer.
+                m.flatShading = FLAT_SHADED_ASSETS.has(name);
                 // Lift near-black albedo off the AgX toe and cap metalness
                 // while the scene ships without an envMap — see materialAudit.
                 auditAssetMaterial(m);
