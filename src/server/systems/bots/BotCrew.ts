@@ -3,9 +3,10 @@ import {
   BOT_EARLY_PEACE_SECONDS, BOT_ENGAGE_RANGE_BY_PHASE, BOT_ENGAGE_SHRINK_MULT, BOT_DEFEND_RANGE, BOT_MAX_HUNTERS_BY_PHASE, WRECK_EVENT,
 } from '../../../shared/constants/index.js';
 import { dist2D, angleWrap } from '../../../shared/utils/index.js';
+import { countOpenHoles } from '../../../shared/interactions.js';
 import type { Blackboard } from './Blackboard.js';
 import type { BotState, CrewState, ProvokedShip } from './Blackboard.js';
-import { hullTotal, botMayFireCannons, BOT_LURE_BRAWL_RADIUS, BOT_LURE_STATION_RADIUS } from './Blackboard.js';
+import { BOT_DAMAGE_CONTROL_WATER, FIREARM_RANGE, hullTotal, botMayFireCannons, BOT_LURE_BRAWL_RADIUS, BOT_LURE_STATION_RADIUS } from './Blackboard.js';
 
 /**
  * THE CREW'S MIND (BOTCREW-01 / bots-16, bots-03).
@@ -30,6 +31,61 @@ export class BotCrew {
    *    crewmates never count) — provoker is the attacker's ship;
    *  - an enemy pirate standing on OUR deck — provoker is his ship.
    */
+  /**
+   * WHO DOES WHAT, THIS TICK (BOTCREW-01 slice b/c).
+   *
+   * A pure function of the crew's decision, the hull's condition and the order
+   * the hands were enlisted in — no rng, no memory — so a seeded match replays
+   * bit-identically and a crew never dithers between two equal jobs.
+   *
+   * The order of need is the one a real crew works to:
+   *   1. THE WHEEL, whenever she is under way. Somebody visibly has the helm,
+   *      which is what physics counts as helmed (bots-v02) and what a boarder
+   *      climbing the ladder finds at the top.
+   *   2. DAMAGE CONTROL, up to two hands, the moment there is a breach open or
+   *      water in the bilge. Match's updateBotFlooding caps bailers at two.
+   *   3. THE GUNS for everyone left while the crew is fighting.
+   *
+   * THE ONE-PIRATE CREW IS THE INTERESTING CASE and it is why this cannot be a
+   * fixed table: a lone hand at the wheel is a lone hand NOT at the bucket, and
+   * Match refuses damage control to anyone at a station. So she leaves the
+   * wheel to plank — exactly the trade a human sailing alone makes — and the
+   * hull coasts while she does it. Handing her a permanent helm would have made
+   * every one-pirate bot hull unsinkable-by-neglect and un-bailable at once.
+   */
+  assignRoles(crew: CrewState, ship: Ship, hands: { bot: BotState; player: Player }[], players: Player[], t: number) {
+    const anchored = crew.behavior === 'loot' || crew.behavior === 'plunder';
+    // ENEMIES ON OUR DECK OUTRANK THE WHEEL. A pirate at the helm has both
+    // hands on it — Match refuses a human at a station his pistol, and the bot
+    // brain's own aim turn is overwritten by the helm pose every tick. A lone
+    // hand therefore lets go of the wheel and fights, exactly as a solo player
+    // must; a crew with hands to spare keeps her helmsman and answers with the
+    // rest (which is the whole point of having a crew).
+    const boarded = players.some((other) => {
+      if (other.shipId === ship.id) return false;
+      if (other.state === 'eliminated' || other.state === 'respawning' || other.state === 'downed') return false;
+      if (this.bb.peacePlayerIds.has(other.id)) return false;
+      if (other.onShipId === ship.id) return true;
+      // Not aboard yet, but inside pistol range of one of our people — in the
+      // water alongside, on the dock, on his own rail. Same call.
+      return hands.some((hand) => dist2D(hand.player.position.x, hand.player.position.z,
+        other.position.x, other.position.z) <= FIREARM_RANGE);
+    });
+    const damage = countOpenHoles(ship) > 0 || (ship.waterLevel ?? 0) > BOT_DAMAGE_CONTROL_WATER;
+    const fighting = crew.behavior === 'engage' || t - crew.lastFiredAt < 7;
+    // Hands away over the side (a shore or wreck party) are nobody's station.
+    const aboard = hands.filter((h) => h.bot.shoreLeg === null && h.player.onShipId === ship.id);
+    for (const hand of hands) hand.bot.role = 'deckhand';
+    if (aboard.length === 0) return;
+
+    let next = 0;
+    const wantHelm = !anchored && !((damage || boarded) && aboard.length === 1);
+    if (wantHelm) aboard[next++].bot.role = 'helm';
+    let repairers = damage ? Math.min(2, aboard.length - next) : 0;
+    while (repairers-- > 0) aboard[next++].bot.role = 'deckhand';
+    while (next < aboard.length) aboard[next++].bot.role = fighting ? 'gunner' : 'deckhand';
+  }
+
   /** Is any body of this crew currently away on a shore/wreck party? The
    *  commitment check in decideBehavior used to read the lone pirate's leg;
    *  with a crew it is "are any of my people in the water". */

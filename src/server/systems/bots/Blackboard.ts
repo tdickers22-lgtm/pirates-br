@@ -8,11 +8,24 @@ import { countOpenHoles } from '../../../shared/interactions.js';
 export type BotBehavior = 'patrol' | 'chase' | 'engage' | 'flee' | 'loot' | 'plunder' | 'return';
 
 /** WHAT A PIRATE IS FOR THIS TICK.
- *  `captain` steers and trims; `gunner` works a rail; `deckhand` bails, planks
- *  and carries. Every crew has exactly one captain (the hull's owner) — the
- *  station arbiter and the helm both key on him — and the rest are assigned by
- *  need each tick (BotCrew.assignRoles). */
-export type BotRole = 'captain' | 'gunner' | 'deckhand';
+ *  `helm` has the wheel (and is the one pirate the station arbiter and the
+ *  physics see AS a helmsman); `gunner` works a rail; `deckhand` bails, planks
+ *  and carries. Assigned by need every tick in BotCrew.assignRoles, in
+ *  memberIds order, so a seeded match replays bit-identically. */
+export type BotRole = 'helm' | 'gunner' | 'deckhand';
+
+/** A bot crew weighs anchor through the capstan like anyone else. Match gives a
+ *  captain who calls it from the WHEEL this same 1.35x penalty over manning the
+ *  capstan himself (HELM_ANCHOR_RAISE_FACTOR): a bot helmsman is doing exactly
+ *  that, so she pays the same 4.3 s. Before this, eight sites in the bot brain
+ *  set `anchored = false` in one tick (bots-06). */
+export const BOT_ANCHOR_RAISE_FACTOR = 1.35;
+/** Rate a crew makes / shortens sail, copied from the player helm (Match's
+ *  0.22 up, 0.28 down). Bots used to assign sailHeight outright. */
+export const BOT_SAIL_RAISE_RATE = 0.22;
+export const BOT_SAIL_LOWER_RATE = 0.28;
+/** Water in the bilge, or any open breach, that pulls a hand off her station. */
+export const BOT_DAMAGE_CONTROL_WATER = 0.15;
 
 /** THE CREW'S DECISION. One per bot HULL, not per body: a crew has one mind
  *  about who it is fighting, where it is sailing and whether it has been shot

@@ -2,14 +2,14 @@ import type { Player, Ship, Island, SeaRock, StormState, TreasureChest, Vec3, We
 import {
   SHIP_STATS, SHIP, PLAYER, WEAPONS, BOT_LOOKAHEAD_METERS, BOT_OBSTACLE_MARGIN, BOT_KEEL_CLEARANCE, BOT_CANNON_CADENCE_BY_PHASE, BOT_CANNON_ACCURACY_BY_PHASE, botPhaseScale, WRECK_EVENT,
 } from '../../../shared/constants/index.js';
-import { dist2D, angleWrap, sampleLocalWind, getIslandSurfaceY, getIslandMaxRadius } from '../../../shared/utils/index.js';
+import { dist2D, angleWrap, sampleLocalWind, getIslandSurfaceY, getIslandMaxRadius, getShipDeckY, getShipDeckRaiseAt } from '../../../shared/utils/index.js';
 import { raymarchIslandSurface, intersectRayShipHull } from '../../../shared/raycast.js';
-import { getCannonBroadsideYaw } from '../../../shared/interactions.js';
+import { getCannonBroadsideYaw, getHelmControlLocal } from '../../../shared/interactions.js';
 import { applyShipRudderSteering } from '../PhysicsSystem.js';
 import type { WeaponSystem } from '../WeaponSystem.js';
 import type { Blackboard } from './Blackboard.js';
 import type { BotState, CrewState } from './Blackboard.js';
-import { CANNON_GRAVITY, CANNON_VY_BOOST, FIREARM_RANGE, FIREARM_AIM_HEIGHT, BOT_RETALIATE_SECONDS, BOT_FIREARM_TURN_RATE, BOT_FIREARM_AIM_TOLERANCE, BOT_AMMO_LULL_SECONDS, BOT_AMMO_TOPUP_SECONDS, botMayFireCannons, isMooredAtBerth } from './Blackboard.js';
+import { BOT_ANCHOR_RAISE_FACTOR, BOT_SAIL_RAISE_RATE, BOT_SAIL_LOWER_RATE, CANNON_GRAVITY, CANNON_VY_BOOST, FIREARM_RANGE, FIREARM_AIM_HEIGHT, BOT_RETALIATE_SECONDS, BOT_FIREARM_TURN_RATE, BOT_FIREARM_AIM_TOLERANCE, BOT_AMMO_LULL_SECONDS, BOT_AMMO_TOPUP_SECONDS, botMayFireCannons, isMooredAtBerth } from './Blackboard.js';
 import type { BotCrew } from './BotCrew.js';
 
 /**
@@ -27,6 +27,64 @@ export class BotPirate {
 
   constructor(private readonly bb: Blackboard, private readonly crew: BotCrew) {}
 
+
+  /**
+   * WEIGH ANCHOR THROUGH THE CAPSTAN (bots-06). Eight sites in the old brain
+   * set `ship.anchored = false` in the same tick they decided to leave, while a
+   * human works the capstan for SHIP.ANCHOR_RAISE_TIME (x1.35 when he calls it
+   * from the wheel). A bot leaving a berth the instant she changes her mind is
+   * the most visible of the small cheats: you watch her anchor chain do nothing.
+   */
+  weighAnchor(ship: Ship, dt: number): boolean {
+    if (!ship.anchored) { ship.anchorRaiseProgress = 1; return true; }
+    ship.anchorRaiseProgress = Math.min(1, (ship.anchorRaiseProgress ?? 0)
+      + dt / (SHIP.ANCHOR_RAISE_TIME * BOT_ANCHOR_RAISE_FACTOR));
+    if (ship.anchorRaiseProgress < 1) return false;
+    ship.anchored = false;
+    return true;
+  }
+
+  /**
+   * MAKE OR SHORTEN SAIL AT THE RATE HANDS CAN HAUL (bots-06). Same 0.22/0.28
+   * per second the player helm uses, and the same clamp to `sailIntegrity` — a
+   * chainshotted bot can no longer snap back to full canvas the tick after her
+   * rig is cut.
+   */
+  setSail(ship: Ship, target: number, dt: number) {
+    const want = Math.max(0, Math.min(target, ship.sailIntegrity ?? 1));
+    if (ship.sailHeight < want) ship.sailHeight = Math.min(want, ship.sailHeight + BOT_SAIL_RAISE_RATE * dt);
+    else if (ship.sailHeight > want) ship.sailHeight = Math.max(want, ship.sailHeight - BOT_SAIL_LOWER_RATE * dt);
+  }
+
+  /**
+   * PUT THE HELMSMAN ON THE QUARTERDECK (bots-v02).
+   *
+   * Two things follow from `player.atHelm`, and the bot brain had neither:
+   * PhysicsSystem counts the hull as HELMED (no un-helmed rudder decay, which
+   * alone was 0.43x of a player's turn rate), and everyone who looks at her —
+   * the client animator, a boarder at the top of the ladder, Match's station
+   * arbiter — sees a pirate standing at the wheel instead of an empty
+   * quarterdeck with broadsides coming out of it.
+   */
+  private standStation(bot: BotState, player: Player, ship: Ship) {
+    const helm = bot.role === 'helm' && player.onShipId === ship.id && bot.shoreLeg === null;
+    if (!helm) {
+      if (player.atHelm) player.atHelm = false;
+      return;
+    }
+    player.atHelm = true;
+    const stats = SHIP_STATS[ship.type];
+    const local = getHelmControlLocal(stats);
+    const cos = Math.cos(ship.rotation);
+    const sin = Math.sin(ship.rotation);
+    player.position.x = ship.position.x + local.x * cos + local.z * sin;
+    player.position.z = ship.position.z + local.z * cos - local.x * sin;
+    player.position.y = getShipDeckY(ship.position.y, stats) + getShipDeckRaiseAt(local, stats);
+    player.rotation.x = ship.rotation;
+    player.velocity.x = 0;
+    player.velocity.z = 0;
+  }
+
   executeBehavior(
     crew: CrewState, bot: BotState, player: Player, ship: Ship,
     ships: Ship[], islands: Island[], storm: StormState,
@@ -39,6 +97,7 @@ export class BotPirate {
     this.navIslands = islands;
     this.navSeaRocks = seaRocks;
     this.navSkipIslandId = crew.behavior === 'loot' ? crew.targetIslandId : null;
+    this.standStation(bot, player, ship);
     // Shore parties belong to the 'loot' and 'plunder' behaviors only — any
     // other behavior with the body off the ship recalls it aboard after a short
     // grace so a knocked-overboard bot isn't an instant teleport, yet can never
@@ -58,9 +117,8 @@ export class BotPirate {
     switch (crew.behavior) {
       case 'patrol':
         this.steerToward(ship, crew.patrolAngle, dt, t);
-        ship.sailHeight = Math.min(ship.sailHeight + dt * 0.08, 0.35);
-        ship.anchored = false;
-        ship.anchorRaiseProgress = 0;
+        this.weighAnchor(ship, dt);
+        this.setSail(ship, 0.35, dt);
         this.trimSails(ship, t, dt);
         break;
 
@@ -74,19 +132,18 @@ export class BotPirate {
         const angleToTarget = Math.atan2(dx, dz);
 
         const orbitRange = 90;
-        if (d > orbitRange * 1.6) {
+        if (d > orbitRange * 1.45) {
           this.steerToward(ship, angleToTarget, dt, t);
-          ship.sailHeight = Math.min(ship.sailHeight + dt * 0.14, 0.5);
-        } else if (d < orbitRange * 0.6) {
+          this.setSail(ship, 0.5, dt);
+        } else if (d < orbitRange * 0.7) {
           this.steerToward(ship, angleToTarget + Math.PI, dt, t);
-          ship.sailHeight = 0.22;
+          this.setSail(ship, 0.22, dt);
         } else {
           // Broadside — turn perpendicular to target so cannons face them.
           this.steerToward(ship, angleToTarget + Math.PI * 0.5, dt, t);
-          ship.sailHeight = 0.16;
+          this.setSail(ship, 0.16, dt);
         }
-        ship.anchored = false;
-        ship.anchorRaiseProgress = 0;
+        this.weighAnchor(ship, dt);
         this.trimSails(ship, t, dt);
 
         // ── Aim with proper ballistic + lead prediction ───────────
@@ -144,9 +201,8 @@ export class BotPirate {
       case 'flee': {
         const angleToCenter = Math.atan2(storm.centerX - ship.position.x, storm.centerZ - ship.position.z);
         this.steerToward(ship, angleToCenter, dt, t);
-        ship.sailHeight = Math.min(ship.sailHeight + dt * 0.5, 1.0);
-        ship.anchored = false;
-        ship.anchorRaiseProgress = 0;
+        this.weighAnchor(ship, dt);
+        this.setSail(ship, 1.0, dt);
         this.trimSails(ship, t, dt);
         const distToCenter = dist2D(ship.position.x, ship.position.z, storm.centerX, storm.centerZ);
         if (distToCenter < storm.safeRadius * 0.48 && !storm.shrinking) {
@@ -179,14 +235,13 @@ export class BotPirate {
         // Keep closing only while there is still water under the keel ahead.
         if (d > island.radius + 40 && this.hasSeaRoomAhead(ship, angleToIsland, islands)) {
           this.steerToward(ship, angleToIsland, dt, t);
-          ship.sailHeight = 0.32;
-          ship.anchored = false;
-          ship.anchorRaiseProgress = 0;
+          this.weighAnchor(ship, dt);
+          this.setSail(ship, 0.32, dt);
           this.trimSails(ship, t, dt);
         } else {
           ship.anchored = true;
           ship.anchorRaiseProgress = 0;
-          ship.sailHeight = 0;
+          this.setSail(ship, 0, dt);
           ship.sailAngle *= Math.pow(0.9, dt / 0.016); // frame-rate-independent decay
           this.updateShoreParty(crew, bot, player, ship, island, dt);
         }
@@ -219,9 +274,8 @@ export class BotPirate {
         const d = dist2D(ship.position.x, ship.position.z, lure.x, lure.z);
         if (d > WRECK_EVENT.PLUNDER_RANGE && player.onShipId) {
           this.steerToward(ship, Math.atan2(lure.x - ship.position.x, lure.z - ship.position.z), dt, t);
-          ship.sailHeight = Math.min(ship.sailHeight + dt * 0.14, 0.42);
-          ship.anchored = false;
-          ship.anchorRaiseProgress = 0;
+          this.weighAnchor(ship, dt);
+          this.setSail(ship, 0.42, dt);
           this.trimSails(ship, t, dt);
           break;
         }
@@ -229,7 +283,7 @@ export class BotPirate {
         // every other crew at the wreck would rather be shooting at.
         ship.anchored = true;
         ship.anchorRaiseProgress = 0;
-        ship.sailHeight = 0;
+        this.setSail(ship, 0, dt);
         ship.sailAngle *= Math.pow(0.9, dt / 0.016);
         this.updateWreckParty(crew, bot, player, ship, chest, dt);
         break;
@@ -249,9 +303,8 @@ export class BotPirate {
         const distance = dist2D(ship.position.x, ship.position.z, island.position.x, island.position.z);
         if (distance < island.radius + 115) {
           this.steerToward(ship, awayAngle, dt, t);
-          ship.sailHeight = Math.min(ship.sailHeight + dt * 0.14, 0.44);
-          ship.anchored = false;
-          ship.anchorRaiseProgress = 0;
+          this.weighAnchor(ship, dt);
+          this.setSail(ship, 0.44, dt);
           this.trimSails(ship, t, dt);
         } else {
           crew.behavior = 'patrol';
@@ -437,8 +490,22 @@ export class BotPirate {
     // Same rudder physics as the player helm (negative steer turns toward a
     // positive heading error); turning still requires way on the ship.
     const diff = angleWrap(desired - ship.rotation);
-    const steer = Math.max(-1, Math.min(1, -diff * 1.5));
-    applyShipRudderSteering(ship, dt, steer, 0.36 + ship.sailHeight * 0.52);
+    // Proportional on the heading error, DAMPED on the rate she is already
+    // swinging at. Without the damping term a crew that now has a player's full
+    // rudder authority (below) slams the wheel hard over, sails through the
+    // course she wanted and slams it back: the 90 m broadside circle became a
+    // zig-zag. The damping is what makes the retuned orbit band hold.
+    const steer = Math.max(-1, Math.min(1, -diff * 1.5 + (ship.angularVelocity ?? 0) * 0.45));
+    // THE SAME CAP A PLAYER GETS (bots-06 / bots-v02). Bots passed
+    // 0.36 + 0.52*sail (<= 0.88) where Match's helm passes 0.5 + 0.5*sail, and
+    // on top of that nobody was at the wheel so the un-helmed decay took the
+    // rest — a bot answered her helm at 0.38x a player on the same hull.
+    // Difficulty tiers are decisions now, not a physics handicap.
+    const chainshotted = t < (ship.chainshottedUntil ?? 0);
+    const omegaCapScale = (0.5 + ship.sailHeight * 0.5)
+      * (chainshotted ? 0.75 : 1)
+      * ((ship.sailIntegrity ?? 1) < 0.5 ? 0.9 : 1);
+    applyShipRudderSteering(ship, dt, steer, omegaCapScale);
     // Rotation is integrated once for all ships in PhysicsSystem.updateShips;
     // integrating here too would double the bot turn rate.
   }

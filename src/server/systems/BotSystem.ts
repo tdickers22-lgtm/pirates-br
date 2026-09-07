@@ -74,7 +74,7 @@ export class BotSystem {
   registerBot(
     player: Player, ship: Ship,
     difficulty: 'easy' | 'medium' | 'hard' = 'medium',
-    role: BotRole = 'captain',
+    role: BotRole = 'deckhand',
   ) {
     // DRAW ORDER IS THE REPLAY. The seeded stream (RNG-01) must be consumed in
     // exactly the order the one-pirate registry used — patrol bearing, fire
@@ -114,7 +114,7 @@ export class BotSystem {
     this.bb.bots.set(player.id, {
       playerId: player.id,
       crew,
-      role: player.id === crew.captainId ? 'captain' : role,
+      role: player.id === crew.captainId ? 'helm' : role,
       aimYaw: 0,
       aimPitch: 0.1,
       fireTimer,
@@ -200,6 +200,7 @@ export class BotSystem {
       crew.lastHullTotal = hullTotal(ship);
 
       this.crewBrain.decideBehavior(crew, ship, ships, islands, storm, players, t);
+      this.crewBrain.assignRoles(crew, ship, crewOnDeck, players, t);
       for (const hand of crewOnDeck) {
         this.hands.executeBehavior(crew, hand.bot, hand.player, ship, ships, islands, storm, dt, t, weaponSystem, seaRocks);
         this.hands.maybeFireAtBoarder(crew, hand.bot, hand.player, ship, players, ships, islands, dt, t);
