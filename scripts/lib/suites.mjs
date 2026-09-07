@@ -104,6 +104,11 @@ export const LOGIC = [
   // pins every derived number against the pre-move renderer capture, the sheer
   // vs walk-taper standing contract, and "only one LOFT_STATIONS in src/".
   quick(tsx('test-hull-loft.mjs')),
+  // PHYS-02 / physics-02: grounding sampled the KEEL LINE, so a hull laid
+  // beam-on to a cliff sailed her whole broadside into the rock and the server
+  // called it clear water. 30,240 placements round all 14 islands; ~4 s, so
+  // logic tier but NOT quick.
+  tsx('test-hull-vs-terrain.mjs'),
   // DECK-01: the crew stand on the planking that is DRAWN — the shared 3D ship
   // frame graded against an independent Ry·Rx·Rz reference at the attitude caps
   // (3.3 m of daylight at a galleon bow before it).
