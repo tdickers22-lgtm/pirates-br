@@ -1,5 +1,5 @@
 import type { StormState, Ship, Player, Island } from '../../shared/types/index.js';
-import { STORM_PHASES, STORM_DOCK_COVER_MARGIN, WORLD, FLOODING } from '../../shared/constants/index.js';
+import { STORM_PHASES, STORM_ARC_SECONDS, STORM_DOCK_COVER_MARGIN, WORLD, FLOODING } from '../../shared/constants/index.js';
 import { dist2D, lerp, getIslandSurfaceY } from '../../shared/utils/index.js';
 import { SHIP_STATS } from '../../shared/constants/index.js';
 
@@ -47,8 +47,27 @@ const STORM_EXPOSURE_HEALTH = 25;
 export const STORM_MAX_EDGE_SPEED = 8;
 
 /** Fraction of the final circle that may sit on dry land before a candidate
- *  centre is rejected (rings this small are the endgame arena). */
-const RING_LAND_REJECT_FRACTION = 0.4;
+ *  centre is rejected (rings this small are the endgame arena). Tightened
+ *  0.4 -> 0.2 with END-01: 40 % dry land in a 35 m arena is not an arena, and
+ *  the 17-sample grid it was measured on could not see a 20 % answer anyway
+ *  (see ringLandFraction). */
+const RING_LAND_REJECT_FRACTION = 0.2;
+
+/** Seconds after the arc runs out before the eye is fully closed (END-01,
+ *  gameplay-06). The final circle used to hold FOREVER: two crews who did not
+ *  sink each other produced a match with no end, the sky pinned at
+ *  matchProgress 1 and the HUD clock reading 0. */
+const EYE_COLLAPSE_RAMP_SECONDS = 60;
+/** Damage per second the closed eye does at full collapse, to hull and hand
+ *  alike, wherever they are standing. Matches the phase-7 outside rate: there
+ *  is no longer anywhere on the map that is not the storm. */
+const EYE_COLLAPSE_DMG_PER_SEC = 12;
+
+/** Seconds after the arc at which the match resolves DETERMINISTICALLY, whatever
+ *  is still afloat (END-01). The collapse itself is 60 s and kills everything
+ *  left; this is the backstop for the cases it cannot resolve — a simultaneous
+ *  wipe, a hull the eye cannot reach, a stalemate at anchor. Match reads it. */
+export const STORM_EYE_RESOLUTION_SECONDS = 150;
 /** Rings at or below this radius get the land check — earlier rings are large
  *  enough that an island inside them is a feature, not a dead arena. */
 const RING_LAND_CHECK_RADIUS = 200;
@@ -147,6 +166,7 @@ export class StormSystem {
       shrinkDuration: phase.shrinkSec,
       shrinkProgress: 0,
       damagePerSec: phase.dmgPerSec,
+      eyeCollapse: 0,
     };
   }
 
@@ -205,6 +225,18 @@ export class StormSystem {
       }
     }
 
+    // THE EYE CLOSES (END-01, gameplay-06). Once the arc has run out the final
+    // circle used to hold forever: two crews who could not or would not sink
+    // each other, a marooned pirate inside the ring, a passive pair of friends
+    // — all produced a match with no end, the sky pinned at matchProgress 1 and
+    // the storm clock reading 0. Now the eye itself closes over
+    // EYE_COLLAPSE_RAMP_SECONDS and the arena becomes the weather: hull and
+    // hand take it wherever they are standing, so the last fight resolves.
+    storm.eyeCollapse = storm.phase >= STORM_PHASES.length
+      ? Math.max(0, Math.min(1, (t - STORM_ARC_SECONDS) / EYE_COLLAPSE_RAMP_SECONDS))
+      : 0;
+    const eyeDmg = EYE_COLLAPSE_DMG_PER_SEC * storm.eyeCollapse * dt;
+
     // Apply damage to entities outside safe zone (scaled excess ramps gently)
     const dmg = storm.damagePerSec * dt;
 
@@ -224,7 +256,7 @@ export class StormSystem {
       // the endgame became a footrace to the inboard rail. One reading now:
       // if any part of her is in shelter, she is in shelter.
       const inboard = d - SHIP_STATS[ship.type].length * 0.5;
-      if (inboard <= storm.safeRadius) {
+      if (inboard <= storm.safeRadius && eyeDmg <= 0) {
         this.shipStormAccum.delete(ship.id);
         continue;
       }
@@ -232,14 +264,17 @@ export class StormSystem {
       // the ring starts at 950 m in a 1000 m world, so half the outer docks sat
       // OUTSIDE the very first circle and quietly took a breach a minute while
       // nobody was even aboard. The storm collects on her once phase 2 lands.
-      if (hooks.isSheltered?.(ship.id)) {
-        this.shipStormAccum.delete(ship.id);
-        continue;
+      const outside = inboard > storm.safeRadius;
+      if (outside && hooks.isSheltered?.(ship.id)) {
+        if (eyeDmg <= 0) { this.shipStormAccum.delete(ship.id); continue; }
+      } else if (outside) {
+        // Her crew reads this verdict below — one answer for hull and hands.
+        this.hullsInTheWeather.add(ship.id);
       }
-      // Her crew reads this verdict below — one answer for hull and hands.
-      this.hullsInTheWeather.add(ship.id);
       const excess = (d - storm.safeRadius) / Math.max(1, storm.safeRadius);
-      const scaled = dmg * (1 + excess * 0.75);
+      // A closed eye bills every hull afloat, inside the circle or out: there is
+      // no longer anywhere on the map that is not the storm.
+      const scaled = (this.hullsInTheWeather.has(ship.id) ? dmg * (1 + excess * 0.75) : 0) + eyeDmg;
       // The storm batters the seaward face: the section facing away from the
       // safe zone accumulates damage until it stoves in a hole (which then
       // floods — the storm kills ships the SoT way, a real repair/bail fight).
@@ -283,6 +318,12 @@ export class StormSystem {
         || player.respawnProtectionTimer > 0
         || hooks.hasStormGrace?.(player.id)
       ) continue;
+      // The closed eye reaches everyone the ring's protections still shield —
+      // deck, beach or open water alike (END-01).
+      if (eyeDmg > 0) {
+        player.lastEnvDamage = { cause: 'storm', at: t };
+        player.health -= eyeDmg;
+      }
       // THE STORM SINKS THE SHIP; IT DOES NOT ERASE THE CREW (STORM-01).
       //
       // Every non-downed pirate outside the wall used to bleed whether he was
@@ -364,8 +405,12 @@ export class StormSystem {
   private ringLandFraction(cx: number, cz: number, radius: number): number {
     let dry = 0;
     let total = 0;
-    for (const fraction of [0, 0.45, 0.8]) {
-      const steps = fraction === 0 ? 1 : 8;
+    // 33 SAMPLES, NOT 17 (END-01). The old grid was one centre point and two
+    // rings of 8: its finest resolution was 1/17 = 5.9 %, and a 20 % reject
+    // threshold read on it is mostly quantisation. Three rings of 8/8/16 plus
+    // the centre resolves 3 %, and weights the OUTER annulus — which is most of
+    // a disc's area, and where a beach actually eats an arena.
+    for (const [fraction, steps] of [[0, 1], [0.35, 8], [0.65, 8], [0.9, 16]] as const) {
       for (let i = 0; i < steps; i++) {
         const angle = (i / steps) * Math.PI * 2;
         const x = cx + Math.cos(angle) * radius * fraction;

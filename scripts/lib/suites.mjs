@@ -171,6 +171,10 @@ export const LOGIC = [
   tsx('test-capstan-first-safe.mjs'),
   tsx('test-storm-spawn-safety.mjs'),
   tsx('test-storm-outrun.mjs'),
+  // END-01 (wave 3.3). The eye-collapse sim and the ring Monte Carlo: 200 ring
+  // sequences over 5 generated worlds, so it costs ~60 s of CPU and no stack.
+  // Not `quick` for that reason — it is a logic-tier suite, not a browser one.
+  tsx('test-storm-endgame.mjs'),
   tsx('test-damage-visibility.mjs'),
   quick(tsx('test-endmatch-board.mjs')),
   quick(tsx('test-landing-stores.mjs')),

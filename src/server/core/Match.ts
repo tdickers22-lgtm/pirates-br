@@ -18,7 +18,7 @@ import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_DECK_AWA
 import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { HitscanTrace } from '../systems/WeaponSystem.js';
-import { StormSystem } from '../systems/StormSystem.js';
+import { StormSystem, STORM_EYE_RESOLUTION_SECONDS } from '../systems/StormSystem.js';
 import { IslandSystem } from '../systems/IslandSystem.js';
 import { TradingSystem } from '../systems/TradingSystem.js';
 import { BotSystem } from '../systems/BotSystem.js';
@@ -6768,7 +6768,31 @@ export class Match {
     // could never end after a leave (netcode-34).
     if (this.crewsAtStart <= 1) return;
     const { crews, contenders } = this.countActiveCrews();
-    if (crews.size > 1) return;
+    // END-01: THE MATCH HAS A LAST SECOND. The eye closes 60 s after the arc and
+    // bills everything still afloat; anything it somehow cannot resolve (a
+    // stalemate at anchor, a hull it cannot reach) is resolved here instead of
+    // running forever — crew gold, then kills, then join order, so the same
+    // match ends the same way on any server.
+    if (crews.size > 1) {
+      if (this.t < STORM_ARC_SECONDS + STORM_EYE_RESOLUTION_SECONDS) return;
+      const key = (p: Player): [number, number, number] => [
+        -(this.getShip(p.shipId) ? this.crewGold(this.getShip(p.shipId)!) : p.gold),
+        -p.kills,
+        this.state.players.indexOf(p),
+      ];
+      const ranked = [...contenders].sort((a, b) => {
+        const ka = key(a); const kb = key(b);
+        return ka[0] - kb[0] || ka[1] - kb[1] || ka[2] - kb[2];
+      });
+      this.state.phase = 'ended';
+      this.state.winnerId = ranked[0]?.id ?? null;
+      this.endReason = ranked[0] ? 'last_ship' : 'draw';
+      this.endedAt = Date.now();
+      this.broadcast({ type: 'game_over', ts: Date.now(),
+        payload: { winnerId: this.state.winnerId, reason: this.endReason } });
+      this.emitMatchEnd();
+      return;
+    }
 
     this.state.phase = 'ended';
     if (crews.size === 1) {
