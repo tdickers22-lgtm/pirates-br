@@ -152,6 +152,10 @@ export const LOGIC = [
   // places, which made private crews unjoinable), plus the party panel's
   // roster model and the DOM contract the controller binds to (w3.5).
   quick(tsx('test-menu-party-ui.mjs')),
+  // hud-22: ONE Escape key. The stack's negative property is the important
+  // one — an empty stack consumes nothing, so the in-match pointer-lock
+  // release and the name field keep their keys (w3.5).
+  quick(tsx('test-modal-stack.mjs')),
   quick(tsx('test-block-hold.mjs')),
   tsx('test-grounding-cap.mjs'),
   // Not quick: 103.6s of its own on this machine (2026-09-03 run), which alone
