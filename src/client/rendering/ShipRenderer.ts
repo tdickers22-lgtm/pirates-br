@@ -863,11 +863,17 @@ export class ShipRenderer {
     sternTransom.receiveShadow = true;
     group.add(sternTransom);
 
+    // Sized to the planking at its own height, not to W: a fixed W.0.34 cap
+    // 0.49 L forward is wider than the stem is there, so its 24 corners were the
+    // last thing in the hull-shell family sitting outside the hull (ships-04).
+    const bowCapY = H * 0.78;
+    const bowCapZ = L * 0.49;
+    const bowCapHalf = Math.max(0.08, hullSurfacePointAt(profile, bowCapZ, bowCapY).x - 0.02);
     const bowCap = new THREE.Mesh(
-      new THREE.BoxGeometry(W * 0.34, H * 0.18, 0.12),
+      new THREE.BoxGeometry(bowCapHalf * 2, H * 0.18, 0.12),
       hullMat,
     );
-    bowCap.position.set(0, H * 0.78, L * 0.49);
+    bowCap.position.set(0, bowCapY, bowCapZ);
     bowCap.castShadow = true;
     group.add(bowCap);
 
@@ -906,7 +912,7 @@ export class ShipRenderer {
       cz: holeCz,
       halfX: voidHalfX,
       halfZ: voidHalfZ,
-    });
+    }, profile);
     group.add(interior);
 
     // ── Hold cargo (the gold race, made physical) ─────────────
@@ -1168,13 +1174,24 @@ export class ShipRenderer {
     const ladderHeight = ladderTop - ladderBottom;
     const ladderRopeMat = ropeCoilMat;
     const ladderRungMat = darkMat;
+    // DRAPED, not hung in the air. The ladder was two vertical cylinders and six
+    // rungs at a fixed 0.56 W: the hull tumbles home below the wale, so on a
+    // galleon the bottom of every ladder stood 0.97 m off her side and a pirate
+    // climbed a rope ladder with a metre of daylight behind it (ships-10). Each
+    // stile now runs between the planking's own surface points at its top and
+    // bottom, and each rung sits on the surface at its own height.
     for (const ladder of getShipBoardingLadderLocals(ship.type)) {
+      const ladderSide = ladder.x >= 0 ? 1 : -1;
+      const surfaceX = (z: number, y: number) => ladderSide * (hullSurfacePointAt(profile, z, y).x + 0.035);
       for (const ropeOffset of [-0.14, 0.14]) {
-        const rope = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.018, 0.018, ladderHeight, 6),
+        const rz = ladder.z + ropeOffset;
+        const rope = makeCylinderBetween(
+          new THREE.Vector3(surfaceX(rz, ladderBottom), ladderBottom, rz),
+          new THREE.Vector3(surfaceX(rz, ladderTop), ladderTop, rz),
+          0.018,
           ladderRopeMat,
+          6,
         );
-        rope.position.set(ladder.x, ladderBottom + ladderHeight * 0.5, ladder.z + ropeOffset);
         group.add(rope);
       }
       for (let rung = 0; rung < 6; rung++) {
@@ -1184,7 +1201,7 @@ export class ShipRenderer {
           ladderRungMat,
         );
         rungMesh.rotation.x = Math.PI * 0.5;
-        rungMesh.position.set(ladder.x, rungY, ladder.z);
+        rungMesh.position.set(surfaceX(ladder.z, rungY) + ladderSide * 0.025, rungY, ladder.z);
         group.add(rungMesh);
       }
     }

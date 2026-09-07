@@ -415,6 +415,8 @@ export function makeLoftedSlabGeometry(
     samples?: number;
     uvScaleX?: number;
     uvScaleY?: number;
+    /** Override the sheer as the outline — the hold uses its own footprint. */
+    halfAt?: (z: number) => number;
   },
 ): THREE.BufferGeometry {
   const inset = opts.inset ?? 0;
@@ -424,7 +426,8 @@ export function makeLoftedSlabGeometry(
   const botY = opts.topY - opts.thickness;
   const zs = slabZSamples(opts.zFrom, opts.zTo, opts.samples ?? 22,
     hole ? [hole.cz - hole.halfZ, hole.cz + hole.halfZ] : []);
-  const half = zs.map((z) => Math.max(0.05, sheerHalfWidthAt(profile, z) - inset));
+  const outline = opts.halfAt ?? ((z: number) => sheerHalfWidthAt(profile, z));
+  const half = zs.map((z) => Math.max(0.05, outline(z) - inset));
 
   const pos: number[] = [];
   const uv: number[] = [];
@@ -491,9 +494,10 @@ export function makeLoftedSlabGeometry(
 export function makeSheerRunGeometry(
   profile: HullProfile,
   side: 1 | -1,
-  opts: { y0: number; y1: number; thickness: number; zFrom: number; zTo: number; inset?: number; samples?: number },
+  opts: { y0: number; y1: number; thickness: number; zFrom: number; zTo: number; inset?: number; samples?: number; halfAt?: (z: number) => number },
 ): THREE.BufferGeometry {
   const inset = opts.inset ?? 0;
+  const outline = opts.halfAt ?? ((z: number) => sheerHalfWidthAt(profile, z));
   const zs = slabZSamples(opts.zFrom, opts.zTo, opts.samples ?? 14, []);
   const pos: number[] = [];
   const uv: number[] = [];
@@ -501,7 +505,7 @@ export function makeSheerRunGeometry(
   const run = Math.max(0.001, opts.zTo - opts.zFrom);
   for (let i = 0; i < zs.length; i++) {
     const z = zs[i];
-    const xOut = Math.max(0.05, sheerHalfWidthAt(profile, z) - inset);
+    const xOut = Math.max(0.05, outline(z) - inset);
     const xIn = Math.max(0.02, xOut - opts.thickness);
     const rails: Array<[number, number]> = [[xOut, opts.y1], [xOut, opts.y0], [xIn, opts.y0], [xIn, opts.y1]];
     for (let r = 0; r < 4; r++) {

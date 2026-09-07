@@ -33,6 +33,7 @@ installCanvasStub();
 const THREE = await import('three');
 const { ShipRenderer } = await import('../src/client/rendering/ShipRenderer.ts');
 const { SHIP_STATS } = await import('../src/shared/constants/index.ts');
+const { getShipHoldHalfWidth } = await import('../src/shared/interactions.ts');
 
 const MUTATE = process.argv.includes('--mutate');
 let failures = 0, checks = 0;
@@ -197,6 +198,36 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
   const overhang = aftmost - sternMinZ;
   expect(`${type}: nothing above 0.9H hangs more than ${STERN_OVERHANG_MAX} m aft of the transom (aftmost sheer z ${aftmost.toFixed(2)}, ${sternMinName} reaches ${sternMinZ.toFixed(2)}: ${overhang.toFixed(2)} m aft)`,
     overhang <= STERN_OVERHANG_MAX);
+
+  // 2b. THE HOLD'S INNER SKIN vs THE SERVER'S CLAMP.
+  //     The drawn wall must stand 3-12 cm OUTBOARD of getShipHoldHalfWidth:
+  //     inboard of it and a pirate clips through her own bulkhead, far outboard
+  //     and she is stopped by an invisible wall short of the timber she can see
+  //     (the box hold was 1.1 m short fore-and-aft and 0.03 W inboard abeam).
+  //     Measured on the port and starboard skin at five z through the hold, with
+  //     the ends of the taper excluded: there the planking arrives before the
+  //     footprint does and the hull, correctly, wins.
+  {
+    const holdVerts = [];
+    detail.traverse((o) => {
+      if (!o.isMesh || o.isInstancedMesh || o.material?.name !== 'hold-inner-wall') return;
+      const pos = o.geometry.attributes.position; if (!pos) return;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+        holdVerts.push([v.x, v.y, v.z]);
+      }
+    });
+    // Per vertex, against the clamp AT THAT VERTEX'S z — a neighbourhood would
+    // read the taper, not the skin.
+    let minGap = Infinity, at = null;
+    for (const [x, y, z] of holdVerts) {
+      if (Math.abs(z) > stats.length * 0.28 || y < 0.3 || y > stats.height * 0.95) continue;
+      const gap = Math.abs(x) - getShipHoldHalfWidth(stats, z);
+      if (gap < minGap) { minGap = gap; at = [+x.toFixed(2), +z.toFixed(2)]; }
+    }
+    expect(`${type}: the drawn hold skin stands 3-12 cm outboard of the walk clamp (innermost ${isFinite(minGap) ? minGap.toFixed(3) : '-'} m at ${JSON.stringify(at)})`,
+      isFinite(minGap) && minGap >= 0.03 && minGap <= 0.12);
+  }
 
   // 3. floating clusters: union-find over expanded AABBs
   const parent = meshes.map((_, i) => i);

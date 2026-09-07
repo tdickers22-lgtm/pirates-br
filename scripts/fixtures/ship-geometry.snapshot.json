@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "b6ee8e11",
+      "digest": "8defc8b5",
       "meshCount": 98,
-      "vertTotal": 61338,
+      "vertTotal": 62050,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -24,7 +24,7 @@
           "meshes": 62,
           "verts": 29790,
           "tris": 11078,
-          "hash": "3510624c",
+          "hash": "55b62c7c",
           "box": [
             -4.11,
             0.447,
@@ -38,7 +38,7 @@
           "meshes": 1,
           "verts": 144,
           "tris": 48,
-          "hash": "388828e5",
+          "hash": "72d13a1d",
           "box": [
             -1.76,
             0.35,
@@ -50,44 +50,44 @@
         },
         "hold-floor": {
           "meshes": 1,
-          "verts": 24,
-          "tris": 12,
-          "hash": "9bde6a79",
+          "verts": 232,
+          "tris": 116,
+          "hash": "f41aac35",
           "box": [
-            -2.2,
-            0.29,
-            -5.28,
-            2.2,
-            0.41,
-            5.28
+            -1.96,
+            0.23,
+            -4.08,
+            1.96,
+            0.35,
+            4.08
           ]
         },
         "hold-hammock": {
           "meshes": 1,
           "verts": 12,
           "tris": 4,
-          "hash": "e1db5a09",
+          "hash": "6b315109",
           "box": [
-            -2.1,
+            -1.884,
             0.682,
             -3.662,
-            2.1,
+            1.82,
             1.166,
             3.662
           ]
         },
         "hold-inner-wall": {
           "meshes": 1,
-          "verts": 144,
-          "tris": 48,
-          "hash": "642a8501",
+          "verts": 648,
+          "tris": 216,
+          "hash": "9d39d2ed",
           "box": [
-            -2.17,
+            -2.1,
             0.35,
-            -4.92,
-            2.17,
+            -4.22,
+            2.1,
             2,
-            4.92
+            4.22
           ]
         },
         "ship-barrel-wood": {
@@ -122,12 +122,12 @@
           "meshes": 7,
           "verts": 10172,
           "tris": 3444,
-          "hash": "74358709",
+          "hash": "cf1850b5",
           "box": [
-            -2.819,
+            -2.884,
             -0.893,
             -6.13,
-            2.819,
+            2.884,
             11.02,
             9.301
           ]
@@ -178,7 +178,7 @@
           "meshes": 1,
           "verts": 684,
           "tris": 228,
-          "hash": "dc04993c",
+          "hash": "3f455244",
           "box": [
             -2.926,
             -0.803,
@@ -220,13 +220,13 @@
           "meshes": 1,
           "verts": 3564,
           "tris": 1188,
-          "hash": "4a7c422f",
+          "hash": "28117fe7",
           "box": [
-            -2.816,
-            0.35,
+            -2.756,
+            0.348,
             -3.375,
-            2.816,
-            2.62,
+            2.756,
+            2.622,
             4.857
           ]
         },
@@ -275,9 +275,9 @@
       }
     },
     "brigantine": {
-      "digest": "fbb425ce",
+      "digest": "21d928f6",
       "meshCount": 127,
-      "vertTotal": 74778,
+      "vertTotal": 75490,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -297,7 +297,7 @@
           "meshes": 86,
           "verts": 41913,
           "tris": 15788,
-          "hash": "5cf6ec7d",
+          "hash": "6602d4ad",
           "box": [
             -5.11,
             0.447,
@@ -311,7 +311,7 @@
           "meshes": 1,
           "verts": 144,
           "tris": 48,
-          "hash": "6ceb5b85",
+          "hash": "d007738d",
           "box": [
             -2.32,
             0.35,
@@ -323,44 +323,44 @@
         },
         "hold-floor": {
           "meshes": 1,
-          "verts": 24,
-          "tris": 12,
-          "hash": "1d7a6759",
+          "verts": 232,
+          "tris": 116,
+          "hash": "1c269ce5",
           "box": [
-            -3.08,
-            0.29,
-            -7.04,
-            3.08,
-            0.41,
-            7.04
+            -2.72,
+            0.23,
+            -5.44,
+            2.72,
+            0.35,
+            5.44
           ]
         },
         "hold-hammock": {
           "meshes": 1,
           "verts": 12,
           "tris": 4,
-          "hash": "0dc98379",
+          "hash": "27b0ed7d",
           "box": [
-            -2.66,
+            -2.486,
             0.934,
             -4.862,
-            2.66,
+            2.389,
             1.418,
             4.862
           ]
         },
         "hold-inner-wall": {
           "meshes": 1,
-          "verts": 144,
-          "tris": 48,
-          "hash": "dd7507c1",
+          "verts": 648,
+          "tris": 216,
+          "hash": "8eab6eed",
           "box": [
-            -3.01,
+            -2.86,
             0.35,
-            -6.56,
-            3.01,
+            -5.58,
+            2.86,
             2.45,
-            6.56
+            5.58
           ]
         },
         "ship-barrel-wood": {
@@ -395,12 +395,12 @@
           "meshes": 8,
           "verts": 10680,
           "tris": 3636,
-          "hash": "7add814c",
+          "hash": "b3283f50",
           "box": [
-            -3.939,
+            -4.061,
             -1.098,
             -8.15,
-            3.939,
+            4.061,
             12.38,
             12.4
           ]
@@ -451,7 +451,7 @@
           "meshes": 1,
           "verts": 684,
           "tris": 228,
-          "hash": "edecc65e",
+          "hash": "0cc14c66",
           "box": [
             -4.194,
             -1.008,
@@ -493,13 +493,13 @@
           "meshes": 1,
           "verts": 3564,
           "tris": 1188,
-          "hash": "c3b62a92",
+          "hash": "c8724f6e",
           "box": [
-            -3.936,
-            0.35,
+            -3.834,
+            0.347,
             -4.415,
-            3.936,
-            3.22,
+            3.834,
+            3.223,
             6.377
           ]
         },
@@ -548,9 +548,9 @@
       }
     },
     "galleon": {
-      "digest": "a48f3b31",
+      "digest": "5606ee6f",
       "meshCount": 169,
-      "vertTotal": 97101,
+      "vertTotal": 97813,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -570,7 +570,7 @@
           "meshes": 121,
           "verts": 61405,
           "tris": 23250,
-          "hash": "f1d25253",
+          "hash": "cd13aa53",
           "box": [
             -6.61,
             0.447,
@@ -584,7 +584,7 @@
           "meshes": 1,
           "verts": 144,
           "tris": 48,
-          "hash": "0954782d",
+          "hash": "3ff6f735",
           "box": [
             -3.16,
             0.35,
@@ -596,44 +596,44 @@
         },
         "hold-floor": {
           "meshes": 1,
-          "verts": 24,
-          "tris": 12,
-          "hash": "137d15e1",
+          "verts": 232,
+          "tris": 116,
+          "hash": "ca7664dd",
           "box": [
-            -4.4,
-            0.29,
-            -9.68,
-            4.4,
-            0.41,
-            9.68
+            -3.86,
+            0.23,
+            -7.48,
+            3.86,
+            0.35,
+            7.48
           ]
         },
         "hold-hammock": {
           "meshes": 1,
           "verts": 18,
           "tris": 6,
-          "hash": "c3c38581",
+          "hash": "b31aa643",
           "box": [
-            -3.5,
+            -4.18,
             1.228,
             -6.662,
-            3.5,
+            3.388,
             1.712,
             6.662
           ]
         },
         "hold-inner-wall": {
           "meshes": 1,
-          "verts": 144,
-          "tris": 48,
-          "hash": "2723f1e1",
+          "verts": 648,
+          "tris": 216,
+          "hash": "1fe86f91",
           "box": [
-            -4.27,
+            -4,
             0.35,
-            -9.02,
-            4.27,
+            -7.62,
+            4,
             2.975,
-            9.02
+            7.62
           ]
         },
         "ship-barrel-wood": {
@@ -668,12 +668,12 @@
           "meshes": 9,
           "verts": 11332,
           "tris": 3876,
-          "hash": "8bf5746c",
+          "hash": "e4fae1d0",
           "box": [
-            -5.619,
+            -5.915,
             -1.315,
             -11.18,
-            5.619,
+            5.915,
             15.25,
             17.049
           ]
@@ -724,7 +724,7 @@
           "meshes": 1,
           "verts": 684,
           "tris": 228,
-          "hash": "128b25b6",
+          "hash": "9008a6da",
           "box": [
             -6.16,
             -1.225,
@@ -766,13 +766,13 @@
           "meshes": 1,
           "verts": 3564,
           "tris": 1188,
-          "hash": "b23c5abc",
+          "hash": "1502230c",
           "box": [
-            -5.616,
-            0.35,
+            -5.45,
+            0.347,
             -5.975,
-            5.616,
-            3.92,
+            5.45,
+            3.923,
             8.657
           ]
         },

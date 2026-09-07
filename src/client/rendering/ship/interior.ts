@@ -5,6 +5,43 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { registerBudgetLight } from '../LightBudget.js';
+import { getShipHoldHalfWidth } from '../../../shared/interactions.js';
+import { hullSurfacePointAt } from '../../../shared/hull.js';
+import type { HullProfile } from '../../../shared/hull.js';
+import { makeLoftedSlabGeometry, makeSheerRunGeometry } from './geometry.js';
+
+/** Hold floor top = the plane the server stands crew on (SHIP.HOLD_FLOOR_OFFSET). */
+const HOLD_FLOOR_Y = 0.35;
+/** Fore-and-aft half-length of the hold, matching isInsideShipHoldFootprint. */
+const HOLD_HALF_LENGTH_F = 0.34;
+/** How far OUTBOARD of the walk clamp the drawn inner skin sits. The gate wants
+ *  3-12 cm: closer and a pirate clips through her own bulkhead, further and the
+ *  hold has an invisible wall short of the timber you can see. */
+const HOLD_SKIN_MARGIN = 0.06;
+
+/**
+ * THE HOLD'S OUTLINE, and why it is a min() of two things.
+ *
+ * The hold was a rectangle: floor W.0.88 x L.0.88, walls at 0.42 W, bulkheads
+ * at 0.39 L. The hull is a loft and the walk footprint is a taper, so all three
+ * disagreed with both: on a galleon 24 of 24 floor corners sat up to 4.2 m
+ * outside the planking (the floor stuck through the bow), while the server's
+ * clamp stopped a pirate 1.1 m short of the bulkhead she could see (ships-04,
+ * liveplay-09).
+ *
+ * So the drawn skin is the walk footprint plus HOLD_SKIN_MARGIN — except where
+ * the planking arrives first, at the very ends of the taper, where the hull
+ * wins and the last few centimetres of footprint are inside timber.
+ */
+function holdHalfWidthAt(
+  stats: { width: number; length: number },
+  profile: HullProfile,
+  z: number,
+): number {
+  const footprint = getShipHoldHalfWidth(stats, z) + HOLD_SKIN_MARGIN;
+  const planking = hullSurfacePointAt(profile, z, HOLD_FLOOR_Y + 0.02).x - 0.09;
+  return Math.max(0.2, Math.min(footprint, planking));
+}
 
 export interface StairwellHole {
   cx: number;
@@ -18,19 +55,24 @@ export function makeShipInterior(
   woodMat: THREE.Material,
   darkMat: THREE.Material,
   hole: StairwellHole,
+  profile: HullProfile,
 ): THREE.Group {
   const g = new THREE.Group();
   const W = stats.width, L = stats.length, H = stats.height;
+  const holdZ = L * HOLD_HALF_LENGTH_F;
+  const holdHalf = (z: number) => holdHalfWidthAt(stats, profile, z);
 
   // Hold floor — warmer brown with a touch of wood grain so it reads as an actual
   // floor (not a flat dark tarp) when the player peers down through the stairwell.
   const floorMat = new THREE.MeshStandardMaterial({ color: 0x4a2e15, roughness: 0.85 });
   floorMat.name = 'hold-floor';
   const floor = new THREE.Mesh(
-    new THREE.BoxGeometry(W * 0.88, 0.12, L * 0.88),
+    makeLoftedSlabGeometry(profile, {
+      topY: HOLD_FLOOR_Y, thickness: 0.12, zFrom: -holdZ, zTo: holdZ, samples: 14,
+      halfAt: holdHalf,
+    }),
     floorMat,
   );
-  floor.position.y = 0.35;
   floor.receiveShadow = true;
   g.add(floor);
 
@@ -38,31 +80,30 @@ export function makeShipInterior(
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a2010, roughness: 1 });
   wallMat.name = 'hold-inner-wall';
   const wallH = H * 0.75;
-  for (const sx of [-1, 1]) {
+  for (const side of [-1, 1] as const) {
     const wall = new THREE.Mesh(
-      new THREE.BoxGeometry(0.14, wallH, L * 0.82),
+      makeSheerRunGeometry(profile, side, {
+        y0: HOLD_FLOOR_Y, y1: HOLD_FLOOR_Y + wallH, thickness: 0.14,
+        zFrom: -holdZ, zTo: holdZ, samples: 12, halfAt: (z) => holdHalf(z) + 0.14,
+      }),
       wallMat,
     );
-    wall.position.set(sx * W * 0.42, wallH * 0.5 + 0.35, 0);
     g.add(wall);
   }
 
   // Bow/stern bulkheads so the hold reads as an enclosed room instead of an open box.
-  const bulkheadW = W * 0.84;
+  // Both bulkheads stand ON the footprint's own end (0.34 L), not 0.39 L: the
+  // clamp used to stop a pirate 1.1 m short of the timber she could see.
   const bulkheadD = 0.14;
-  const bowBulkhead = new THREE.Mesh(
-    new THREE.BoxGeometry(bulkheadW, wallH, bulkheadD),
-    wallMat,
-  );
-  bowBulkhead.position.set(0, wallH * 0.5 + 0.35, L * 0.39);
-  g.add(bowBulkhead);
-
-  const sternBulkhead = new THREE.Mesh(
-    new THREE.BoxGeometry(bulkheadW, wallH, bulkheadD),
-    wallMat,
-  );
-  sternBulkhead.position.set(0, wallH * 0.5 + 0.35, -L * 0.39);
-  g.add(sternBulkhead);
+  for (const sz of [-1, 1] as const) {
+    const bz = sz * (holdZ + bulkheadD * 0.5);
+    const bulkhead = new THREE.Mesh(
+      new THREE.BoxGeometry(holdHalf(sz * holdZ) * 2, wallH, bulkheadD),
+      wallMat,
+    );
+    bulkhead.position.set(0, wallH * 0.5 + HOLD_FLOOR_Y, bz);
+    g.add(bulkhead);
+  }
 
   for (const sx of [-1, 1] as const) {
     for (const sz of [-1, 1] as const) {
@@ -70,7 +111,7 @@ export function makeShipInterior(
         new THREE.BoxGeometry(0.16, wallH, 0.16),
         darkMat,
       );
-      cornerPost.position.set(sx * W * 0.38, wallH * 0.5 + 0.35, sz * L * 0.39);
+      cornerPost.position.set(sx * (holdHalf(sz * holdZ) - 0.09), wallH * 0.5 + HOLD_FLOOR_Y, sz * holdZ);
       cornerPost.castShadow = true;
       g.add(cornerPost);
     }
@@ -79,10 +120,10 @@ export function makeShipInterior(
   // Low angled bilge planks close the bottom corners that were visible from the hold.
   for (const sx of [-1, 1] as const) {
     const bilge = new THREE.Mesh(
-      new THREE.BoxGeometry(0.16, H * 0.34, L * 0.72),
+      new THREE.BoxGeometry(0.16, H * 0.34, holdZ * 2 * 0.9),
       darkMat,
     );
-    bilge.position.set(sx * W * 0.34, 0.52, 0);
+    bilge.position.set(sx * (holdHalf(0) - 0.24), 0.52, 0);
     bilge.rotation.z = -sx * Math.PI * 0.12;
     g.add(bilge);
   }
@@ -130,7 +171,7 @@ export function makeShipInterior(
         new THREE.BoxGeometry(0.1, wallH * 0.92, 0.12),
         darkMat,
       );
-      rib.position.set(sx * W * 0.31, wallH * 0.5 + 0.38, rz);
+      rib.position.set(sx * (holdHalf(rz) - 0.16), wallH * 0.5 + 0.38, rz);
       rib.rotation.z = sx * Math.PI * 0.1;
       g.add(rib);
     }
@@ -143,7 +184,7 @@ export function makeShipInterior(
     const bz = -L * 0.38 + b * (L * 0.76 / Math.max(beamCount - 1, 1));
     if (bz > hole.cz - hole.halfZ - 0.18 && bz < hole.cz + hole.halfZ + 0.18) continue;
     const beam = new THREE.Mesh(
-      new THREE.BoxGeometry(W * 0.86, 0.12, 0.18),
+      new THREE.BoxGeometry(Math.min(W * 0.86, holdHalf(bz) * 2 + 0.2), 0.12, 0.18),
       beamMat,
     );
     beam.position.set(0, H - 0.25, bz);
@@ -161,7 +202,7 @@ export function makeShipInterior(
       new THREE.PlaneGeometry(0.5, 1.4),
       hammockMat,
     );
-    hammock.position.set(sx * W * 0.28, H * 0.42, hz);
+    hammock.position.set(sx * (holdHalf(hz) - 0.38), H * 0.42, hz);
     hammock.rotation.set(Math.PI * 0.08, 0, Math.PI * 0.5);
     g.add(hammock);
   }
@@ -174,7 +215,7 @@ export function makeShipInterior(
     const cz = -L * 0.2 - c * (L * 0.1);
     for (const sx of [-1, 1] as const) {
       const cGrp = new THREE.Group();
-      cGrp.position.set(sx * W * 0.28, 0.35, cz);
+      cGrp.position.set(sx * Math.min(W * 0.28, holdHalf(cz) - 0.45), HOLD_FLOOR_Y, cz);
 
       const crate = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.62, 0.72), crateMat);
       crate.position.y = 0.31;
