@@ -15,6 +15,16 @@ const MAX_HULL_MASKS = 10;
 /** Metres. Past this a hull's interior cannot be in frame, and the sea inside
  *  it is exactly what a distant hull is supposed to be sitting in. */
 export const HULL_MASK_RANGE = 80;
+/** How near a hull must be before the ocean switches to the HULL_MASK program.
+ *  Wider than HULL_MASK_RANGE ON PURPOSE: the swap is what pays three's
+ *  deferred link for the second program, and paying it 40 m early means the
+ *  link lands while the hull is still out of masking range instead of in the
+ *  frame where her interior first matters. At a galleon's 11.5 m/s that is
+ *  ~3.5 s of warning; at a cutter's 15.5 m/s, ~2.6 s. */
+export const HULL_MASK_ARM_RANGE = HULL_MASK_RANGE + 40;
+/** Hysteresis on the way out, so a hull hovering at the arming distance cannot
+ *  swap the material back and forth every frame. */
+export const HULL_MASK_DISARM_RANGE = HULL_MASK_ARM_RANGE + 20;
 
 // GLSL is generated from the shared WAVE_PARAMS / STORM_WAVE_PARAMS so the
 // rendered surface is the same field gameplay samples via
@@ -150,6 +160,7 @@ ${lines.join('\n')}
 };
 
 const HULL_MASK_GLSL = /* glsl */`
+#ifdef HULL_MASK
   uniform vec4 u_hullA[${MAX_HULL_MASKS}];   // x, z, cos(yaw), sin(yaw)
   uniform vec4 u_hullB[${MAX_HULL_MASKS}];   // width, length, yMin, yMax
   uniform int  u_hullCount;
@@ -179,6 +190,7 @@ ${hullHalfFracGlsl()}
     }
     return false;
   }
+#endif
 `;
 
 const OCEAN_VERT = /* glsl */`
@@ -326,11 +338,19 @@ export const OCEAN_FRAG = /* glsl */`
 
   void main() {
     // FIRST, BEFORE ANY SHADING: is this patch of sea inside somebody's hull?
-    // The discard costs the early-depth test on this program, which is why the
-    // whole thing is behind u_hullCount and why the CPU only ever fills hulls
-    // within HULL_MASK_RANGE — but a hold floor with the open sea drawn across
-    // it is not a fidelity nit, it is the room the crew fight in.
+    //
+    // A discard anywhere in a fragment shader costs the whole program its
+    // early-depth test — not per pixel, not per frame, but as a property of the
+    // COMPILED program, paid on open water and in a storm and on the low tier,
+    // whether or not a hull exists. The ocean covers 45-55% of the frame, so
+    // that is the one place the game cannot afford it speculatively. Hence two
+    // programs: this clause only exists in the HULL_MASK variant, and the ocean
+    // runs the maskless one until a hull comes within arming range (see
+    // setHullMasks). Open water keeps early-Z; the hold floor still stops being
+    // open ocean, which is the room the crew fight in.
+#ifdef HULL_MASK
     if (insideHull(v_worldPos)) discard;
+#endif
 
     vec2  wp = v_worldPos.xz;
     float camDist = distance(u_cameraPos.xz, wp);
@@ -918,6 +938,14 @@ export class OceanRenderer {
    *  arrays that only ever have their length reset, never new objects. */
   private readonly maskOrder: number[] = [];
   private readonly maskDist: number[] = [];
+  /** The HULL_MASK variant of `material`: identical program plus the cut-out
+   *  clause, sharing the SAME uniforms object so nothing has to be written
+   *  twice. Built at init, but three only LINKS it the first time it is
+   *  actually drawn, so open water never pays for it. */
+  private maskMaterial!: THREE.ShaderMaterial;
+  /** The LOD ring meshes, so the swap is one assignment each. */
+  private readonly surfaceMeshes: THREE.Mesh[] = [];
+  private maskProgramActive = false;
 
   private readonly sunDir = new THREE.Vector3(0.62, 0.24, -0.74).normalize();
 
@@ -926,6 +954,13 @@ export class OceanRenderer {
     const levels = LOD_LEVELS[quality];
     this.snapSize = levels[levels.length - 1].cell;
 
+    // ONE uniforms object, TWO programs (review-2 P1). See the #ifdef HULL_MASK
+    // block in OCEAN_FRAG: the cut-out needs a `discard`, and a discard costs
+    // the whole program its early-depth test whether or not a hull is anywhere
+    // near — on the surface that covers half the frame, on every tier. So the
+    // maskless program is the default and the masking one is swapped in only
+    // while a hull is close enough to matter. Sharing the uniforms object means
+    // every setter below writes once and both variants see it.
     this.material = new THREE.ShaderMaterial({
       vertexShader:   OCEAN_VERT,
       fragmentShader: OCEAN_FRAG,
@@ -978,11 +1013,24 @@ export class OceanRenderer {
       side: THREE.DoubleSide,
       extensions: { derivatives: true },
     });
+    this.maskMaterial = new THREE.ShaderMaterial({
+      vertexShader:   OCEAN_VERT,
+      fragmentShader: OCEAN_FRAG,
+      defines: { HULL_MASK: '1' },
+      // Same name: it IS the ocean surface, and the probes that read
+      // gl.getShaderSource() off the linked program must find it either way.
+      name: 'ocean-surface',
+      uniforms: this.material.uniforms,
+      side: THREE.DoubleSide,
+      extensions: { derivatives: true },
+    });
 
     this.group = new THREE.Group();
     this.group.name = 'ocean-lod-grid';
+    this.surfaceMeshes.length = 0;
     for (const level of levels) {
       const mesh = new THREE.Mesh(buildRingGeometry(level), this.material);
+      this.surfaceMeshes.push(mesh);
       mesh.frustumCulled = false; // always on screen; skips bad flat-geometry bounds vs displaced verts
       mesh.receiveShadow = false; // shadows on dynamic waves look odd
       this.group.add(mesh);
@@ -1171,13 +1219,16 @@ export class OceanRenderer {
     this.maskOrder.length = 0;
     this.maskDist.length = 0;
     const live = Math.min(count, hulls.length);
+    let nearest = Infinity;
     for (let i = 0; i < live; i++) {
       const h = hulls[i];
       const d = cameraPos ? Math.hypot(h.x - cameraPos.x, h.z - cameraPos.z) : 0;
+      if (d < nearest) nearest = d;
       if (d > HULL_MASK_RANGE) continue;
       this.maskOrder.push(i);
       this.maskDist[i] = d;   // keyed by hull index, so the sort is O(n log n)
     }
+    this.armHullMaskProgram(nearest);
     this.maskOrder.sort((p, q) => this.maskDist[p] - this.maskDist[q]);
     const n = Math.min(this.maskOrder.length, MAX_HULL_MASKS);
     for (let i = 0; i < n; i++) {
@@ -1186,6 +1237,29 @@ export class OceanRenderer {
       b[i].set(h.width, h.length, h.y - h.bottom, h.y + h.top);
     }
     u.u_hullCount.value = n;
+  }
+
+  /** Swap the LOD rings between the maskless program (early-Z intact, what open
+   *  water and the whole low tier run) and the HULL_MASK one (which discards,
+   *  and therefore cannot have early-Z). Once per approach, not per frame: the
+   *  arm/disarm ranges are 40/60 m outside HULL_MASK_RANGE, so a hull crossing
+   *  the boundary cannot flip it, and the swap happens while she is still too
+   *  far to be masked at all. */
+  private armHullMaskProgram(nearestHullDist: number) {
+    const want = this.maskProgramActive
+      ? nearestHullDist <= HULL_MASK_DISARM_RANGE
+      : nearestHullDist <= HULL_MASK_ARM_RANGE;
+    if (want === this.maskProgramActive) return;
+    this.maskProgramActive = want;
+    const material = want ? this.maskMaterial : this.material;
+    for (const mesh of this.surfaceMeshes) mesh.material = material;
+  }
+
+  /** Which ocean program is on the rings right now — read by
+   *  scripts/test-ocean-hull-mask.mjs, which grades that open water never
+   *  carries the discard. */
+  isHullMaskProgramActive(): boolean {
+    return this.maskProgramActive;
   }
 
   /** Local-weather storm COLOR intensity (darken/desaturate tint, wider spec

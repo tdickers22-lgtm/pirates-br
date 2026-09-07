@@ -32,7 +32,7 @@
 //
 // Run: node --import tsx scripts/test-ocean-hull-mask.mjs
 import * as THREE from 'three';
-import { OceanRenderer, OCEAN_FRAG, HULL_MASK_RANGE } from '../src/client/rendering/OceanRenderer.ts';
+import { OceanRenderer, OCEAN_FRAG, HULL_MASK_RANGE, HULL_MASK_ARM_RANGE, HULL_MASK_DISARM_RANGE } from '../src/client/rendering/OceanRenderer.ts';
 import { getSwimHullHalfWidth } from '../src/shared/utils/index.ts';
 import { SHIP_STATS } from '../src/shared/constants/index.ts';
 
@@ -151,6 +151,59 @@ expect('the ocean fragment discards on insideHull BEFORE it shades anything',
   /if \(insideHull\(v_worldPos\)\) discard;/.test(OCEAN_FRAG)
   && OCEAN_FRAG.indexOf('discard;') < OCEAN_FRAG.indexOf('float camDist = distance'),
   'shading a fragment and then throwing it away pays for it twice');
+
+// ── 5. OPEN WATER PAYS NOTHING FOR IT (review-2 P1) ────────────────────────
+//
+// A discard costs the whole PROGRAM its early-depth test — a property of the
+// compiled shader, not of the frame, paid on empty sea, in a storm and on the
+// low tier alike, on the surface that covers 45-55% of the picture. So the
+// clause lives in a HULL_MASK variant and the rings run the maskless program
+// until a hull is close enough to matter. test-fill-budget censuses shader ops
+// and full-screen passes; it cannot see early-Z, so this is what grades it.
+{
+  const discardAt = OCEAN_FRAG.indexOf('if (insideHull(v_worldPos)) discard;');
+  const ifdefAt = OCEAN_FRAG.lastIndexOf('#ifdef HULL_MASK', discardAt);
+  const endifAt = OCEAN_FRAG.indexOf('#endif', discardAt);
+  expect('the discard is inside #ifdef HULL_MASK, so the default program has no discard at all',
+    ifdefAt >= 0 && endifAt > discardAt && OCEAN_FRAG.slice(ifdefAt, discardAt).indexOf('#endif') < 0,
+    'an unconditional discard in OCEAN_FRAG is early-Z gone on every tier');
+
+  const rings = ocean['surfaceMeshes'];
+  const plain = ocean['material'];
+  const masked = ocean['maskMaterial'];
+  expect('the two programs share ONE uniforms object (every setter writes once)',
+    plain.uniforms === masked.uniforms && masked.defines?.HULL_MASK === '1');
+  expect(`arming is wider than masking (${HULL_MASK_ARM_RANGE} > ${HULL_MASK_RANGE} m), so the link is paid before the cut-out is needed`,
+    HULL_MASK_ARM_RANGE > HULL_MASK_RANGE && HULL_MASK_DISARM_RANGE > HULL_MASK_ARM_RANGE);
+
+  const at = (d) => ({ ...HULL, x: cam.x + d, z: cam.z });
+  ocean.setHullMasks([], cam, 0);
+  expect('open water runs the MASKLESS program (early-Z intact)',
+    !ocean.isHullMaskProgramActive() && rings.length > 0 && rings.every((m) => m.material === plain),
+    `rings=${rings.length} active=${ocean.isHullMaskProgramActive()}`);
+
+  ocean.setHullMasks([at(HULL_MASK_ARM_RANGE + 30)], cam);
+  expect('a hull hull-down over the horizon does not arm it',
+    !ocean.isHullMaskProgramActive() && rings.every((m) => m.material === plain));
+
+  ocean.setHullMasks([at(HULL_MASK_ARM_RANGE - 5)], cam);
+  expect('she arms the mask program while still OUTSIDE masking range (u_hullCount 0)',
+    ocean.isHullMaskProgramActive() && rings.every((m) => m.material === masked)
+    && uniforms.u_hullCount.value === 0,
+    `active=${ocean.isHullMaskProgramActive()} count=${uniforms.u_hullCount.value}`);
+
+  ocean.setHullMasks([at(HULL_MASK_ARM_RANGE + 5)], cam);
+  expect('and the hysteresis holds it through a hull loitering at the boundary (no per-frame swap)',
+    ocean.isHullMaskProgramActive());
+
+  ocean.setHullMasks([at(HULL_MASK_DISARM_RANGE + 5)], cam);
+  expect('once she is well clear the sea goes back to the maskless program',
+    !ocean.isHullMaskProgramActive() && rings.every((m) => m.material === plain));
+
+  ocean.setHullMasks([at(10)], cam);
+  expect('alongside, the mask program is on AND the hull is on the wire',
+    ocean.isHullMaskProgramActive() && uniforms.u_hullCount.value === 1);
+}
 
 console.log(failures ? `\nFAIL: ${failures} check(s)` : '\nPASS: ocean hull mask');
 process.exit(failures ? 1 : 0);
