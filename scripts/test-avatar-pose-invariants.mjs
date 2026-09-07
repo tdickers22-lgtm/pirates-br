@@ -244,6 +244,20 @@ for (const variant of ['pirate', 'skeleton']) {
   }
 }
 
+// Every crew has a captain, and a captain is the dressed-up variant (hat, coat,
+// beard, moustache). One avatar = one draw per body mesh at the low tier, so the
+// role that adds parts is the one the budget has to cover; only crew and raider
+// were ever counted.
+console.log('\n[pirate/captain]');
+{
+  const mesh = makePlayerMesh(0x3366cc, 'pirate', 'captain');
+  mesh.updateMatrixWorld(true);
+  let visible = 0;
+  mesh.traverse((o) => { if (o.isMesh && o.visible && o.parent?.visible !== false && isBody(o)) visible += 1; });
+  expect(`captain: ${visible} visible body meshes ≤ ${MESH_BUDGET.pirate}`, visible <= MESH_BUDGET.pirate,
+    `a captain is drawn for every crew; ${visible} draws each is what the low tier pays`);
+}
+
 // ── 1b. one figure: collider, camera and mesh read the same constants ──────
 console.log('\n[one figure: shared heights]');
 {
