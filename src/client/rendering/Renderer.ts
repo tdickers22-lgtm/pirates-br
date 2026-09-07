@@ -6,7 +6,7 @@ import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 import { decideRenderQuality, saveAutoTierCeiling, tierBelow, type QualityVerdict, type RenderQuality } from './QualityPreference.js';
 import {
-  FrameGovernor, resolveLevers, describeGovernor,
+  FrameGovernor, resolveLevers, describeGovernor, pixelRatioCaps,
   type GovernorLevers, type GovernorMode, type LeverCaps,
 } from './FrameGovernor.js';
 import { frameBudgetScale, setFrameBudgetScale } from './FrameBudget.js';
@@ -30,14 +30,9 @@ export type { RenderQuality };
  * a good machine from looking good, it stops every machine from opening at a
  * ceiling only a workstation can hold.
  */
-const MAX_PIXEL_RATIO: Record<RenderQuality, number> = {
-  // Under 1.0 on purpose and unchanged: 'low' has always rendered below native
-  // and let the upscale carry it. Raising it to 1.0 in the name of "capping" it
-  // would make the cheapest tier more expensive, which is backwards.
-  low: 0.62,
-  balanced: 1.15,
-  high: 1.25,
-};
+// The ceilings themselves now live beside the framebuffer-pixel budgets they
+// are clamped against, in FrameGovernor.TIER_MAX_PIXEL_RATIO — the ratio is no
+// longer the primary quantity, the pixel count is (perf-21).
 
 /**
  * DRAW THE NEAR THING FIRST. The one fill lever in this game that changes no
@@ -569,8 +564,12 @@ export class Renderer {
   private stormLevel = 0;
   private readonly qualityVerdict: QualityVerdict = decideRenderQuality();
   private readonly quality = this.qualityVerdict.quality;
-  private readonly minPixelRatio = this.quality === 'low' ? 0.44 : this.quality === 'balanced' ? 0.58 : 0.8;
-  private readonly maxPixelRatio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO[this.quality]);
+  /** Derived from the tier's framebuffer-pixel budget and THIS viewport, and
+   *  re-derived whenever the window changes size. Not `readonly`: the perf
+   *  probes pin both to 1 through `window.__piratesBR.renderer` so fps is the
+   *  only free variable, and `applyPixelRatio` reads them on every call. */
+  private minPixelRatio = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1).minPixelRatio;
+  private maxPixelRatio = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1).maxPixelRatio;
   private currentPixelRatio = 1;
   /**
    * THE SHADOW MAP WAS THIRTY-TWO TIMES THE SIZE OF THE SCREEN.
@@ -628,7 +627,7 @@ export class Renderer {
    * picture apart in a way nothing in the client could report.
    */
   private readonly governor = new FrameGovernor({}, Renderer.OPENING_SCALAR);
-  private readonly governorCaps: LeverCaps = {
+  private governorCaps: LeverCaps = {
     tier: this.quality,
     maxPixelRatio: this.maxPixelRatio,
     minPixelRatio: this.minPixelRatio,
@@ -874,6 +873,9 @@ export class Renderer {
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
+      // The budget is a pixel COUNT, so a window that changed area changed the
+      // ratio that spends it. Re-derive before the reallocation, not after.
+      this.refreshPixelRatioCaps();
       // The one caller that must reallocate at an UNCHANGED ratio: the drawing
       // buffer has to follow the window even when the ratio has not moved.
       this.applyPixelRatio(this.currentPixelRatio, true);
@@ -1697,10 +1699,32 @@ export class Renderer {
    * 7). The `force` path exists for the one caller that genuinely needs the
    * reallocation with an unchanged ratio: an actual window resize.
    */
+  /**
+   * Re-derive this tier's ratio ceiling and floor for the CURRENT viewport, and
+   * hand the governor the new caps so its scalar keeps meaning the same thing.
+   *
+   * Skipped entirely when a probe has pinned the ratio (min === max === 1):
+   * `PIN_PIXEL_RATIO` exists so a census measures one framebuffer, and a resize
+   * that quietly un-pinned it would make the counts unreadable.
+   */
+  private refreshPixelRatioCaps() {
+    if (this.minPixelRatio === this.maxPixelRatio) return;
+    const caps = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
+    if (Math.abs(caps.maxPixelRatio - this.maxPixelRatio) < 0.001
+      && Math.abs(caps.minPixelRatio - this.minPixelRatio) < 0.001) return;
+    this.minPixelRatio = caps.minPixelRatio;
+    this.maxPixelRatio = caps.maxPixelRatio;
+    this.governorCaps = { ...this.governorCaps, maxPixelRatio: caps.maxPixelRatio, minPixelRatio: caps.minPixelRatio };
+    this.levers = resolveLevers(this.appliedScalar, this.governorCaps);
+  }
+
   private applyPixelRatio(target: number, force = false) {
     const deviceRatio = window.devicePixelRatio || 1;
-    const viewportCap = window.innerWidth < 900 ? Math.min(this.maxPixelRatio, 0.72) : this.maxPixelRatio;
-    const next = clamp(Math.min(deviceRatio, target, viewportCap), this.minPixelRatio, this.maxPixelRatio);
+    // No narrow-viewport special case any more. `innerWidth < 900 -> cap 0.72`
+    // was a ratio patch on a ratio bug: on a 390 px phone it capped something
+    // that was already producing 242 device pixels. The floor that matters is
+    // absolute framebuffer WIDTH, and `pixelRatioCaps` owns it (perf-21).
+    const next = clamp(Math.min(deviceRatio, target, this.maxPixelRatio), this.minPixelRatio, this.maxPixelRatio);
     // A tenth of a percent of a pixel is not a resolution change; it is a
     // reallocation with no picture behind it.
     if (!force && Math.abs(next - this.currentPixelRatio) < 0.001 && this.renderer) return;

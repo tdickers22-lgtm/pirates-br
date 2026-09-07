@@ -495,6 +495,84 @@ export class FrameGovernor {
 // THE LEVERS
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * THE FILL BILL IS PIXELS, NOT A RATIO (perf-21).
+ *
+ * Every resolution knob in this game used to be a ratio of CSS pixels,
+ * calibrated on the 1470x956 CSS desktop it was written on, where `low`'s 0.62
+ * gives a 911 px wide framebuffer. A phone's CSS viewport is a quarter of that
+ * area, so the SAME ratio produced 242x523 device pixels on an iPhone — a
+ * framebuffer narrower than the phone's own app icons, upscaled five times, and
+ * the governor's floor of 0.44 took it to 172x371. The ratio was never the
+ * quantity the GPU is billed for; the framebuffer's pixel COUNT is.
+ *
+ * So each tier owns a framebuffer-pixel budget and the ceiling is derived from
+ * the viewport: `sqrt(budget / cssPixels)`, then clamped by the tier's old
+ * ratio ceiling so no machine is ever handed MORE resolution than it had
+ * before, and floored by a minimum framebuffer WIDTH so a small viewport cannot
+ * be scaled into illegibility. On the 1470x956 desktop these reproduce today's
+ * numbers exactly at `low` (0.62) and `high` (1.25); `balanced` tightens from
+ * 1.15 to 0.92 there, which is 36% fewer fragments on the tier the owner plays.
+ */
+export const TIER_PIXEL_BUDGET: Record<RenderQuality, number> = {
+  low: 550_000,
+  balanced: 1_200_000,
+  high: 2_400_000,
+};
+
+/** The tier ratio ceilings the budget may never exceed. Kept as a hard cap so
+ *  the budget can only ever TIGHTEN a machine's opening resolution: a dPR-1
+ *  1366x768 laptop is under budget at `high` and would otherwise be handed
+ *  1.71x supersampling it never asked for. */
+export const TIER_MAX_PIXEL_RATIO: Record<RenderQuality, number> = {
+  // Under 1.0 on purpose and unchanged: 'low' has always rendered below native
+  // and let the upscale carry it. Raising it to 1.0 in the name of "capping" it
+  // would make the cheapest tier more expensive, which is backwards.
+  low: 0.62,
+  balanced: 1.15,
+  high: 1.25,
+};
+
+/** …and the tuned bottom of each tier's ladder, as a ratio. Anchored to the
+ *  tier ceiling rather than to the derived one so a big-viewport machine's
+ *  ladder does not silently gain extra travel at the blurry end. */
+export const TIER_MIN_PIXEL_RATIO: Record<RenderQuality, number> = {
+  low: 0.44,
+  balanced: 0.58,
+  high: 0.8,
+};
+
+/** No tier opens narrower than this many DEVICE pixels, and the ladder never
+ *  takes it below `MIN_BUFFER_WIDTH_FLOOR`. 640/480 are not new numbers: the
+ *  1470 px desktop this game was tuned on already sat at 911 px opening and
+ *  647 px at the `low` floor, so these floors bind only where the old ratios
+ *  produced something unusable — a phone. */
+export const MIN_BUFFER_WIDTH = 640;
+export const MIN_BUFFER_WIDTH_FLOOR = 480;
+
+/**
+ * The tier's pixel-ratio ceiling and floor for THIS viewport. Pure, so the
+ * governor suite can grade a phone without a phone.
+ */
+export function pixelRatioCaps(
+  quality: RenderQuality,
+  cssWidth: number,
+  cssHeight: number,
+  devicePixelRatio: number,
+): { maxPixelRatio: number; minPixelRatio: number } {
+  const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const w = Math.max(1, cssWidth);
+  const cssPixels = Math.max(1, w * Math.max(1, cssHeight));
+  const budgetRatio = Math.sqrt(TIER_PIXEL_BUDGET[quality] / cssPixels);
+  const tierCap = Math.min(budgetRatio, TIER_MAX_PIXEL_RATIO[quality]);
+  // Never wider than the panel actually is: supersampling is not a floor.
+  const openFloor = Math.min(dpr, MIN_BUFFER_WIDTH / w);
+  const ladderFloor = Math.min(dpr, MIN_BUFFER_WIDTH_FLOOR / w);
+  const maxPixelRatio = Math.min(dpr, Math.max(tierCap, openFloor));
+  const minPixelRatio = Math.min(maxPixelRatio, Math.max(TIER_MIN_PIXEL_RATIO[quality], ladderFloor));
+  return { maxPixelRatio, minPixelRatio };
+}
+
 export interface LeverCaps {
   tier: RenderQuality;
   /** The tier's pixel-ratio ceiling, already clamped to devicePixelRatio. */

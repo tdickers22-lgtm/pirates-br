@@ -26,6 +26,9 @@ import {
   GOVERNOR_TUNING,
   resolveLevers,
   describeGovernor,
+  pixelRatioCaps,
+  TIER_PIXEL_BUDGET,
+  TIER_MAX_PIXEL_RATIO,
 } from '../src/client/rendering/FrameGovernor.js';
 import { budgeted, setFrameBudgetScale, resetFrameBudgetScale } from '../src/client/rendering/FrameBudget.js';
 import { parseRenderQuality } from '../src/client/rendering/QualityPreference.js';
@@ -552,6 +555,74 @@ section('THE HONEST LABEL — the panel says what is actually running');
   const floor = describeGovernor('low', false, 'floor', l);
   expect('floor mode says out loud that it stopped chasing 60',
     floor.includes('holding 30fps'), floor);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('THE BILL IS PIXELS, NOT A RATIO — pixelRatioCaps per viewport (perf-21)');
+// ═══════════════════════════════════════════════════════════════════════════
+// RED before this lane: the caps were `min(devicePixelRatio, MAX_PIXEL_RATIO[q])`
+// with a `innerWidth < 900 -> 0.72` patch on top, so an iPhone 14 at 'low'
+// opened at 0.62 x 390 = 242 device pixels wide and the ladder's floor took it
+// to 172. Every row below that names a WIDTH failed.
+{
+  // 390x844 CSS at dPR 3 — an iPhone 14 in Safari.
+  const phone = pixelRatioCaps('low', 390, 844, 3);
+  const phoneOpenW = 390 * phone.maxPixelRatio;
+  const phoneFloorW = 390 * phone.minPixelRatio;
+  expect(`a dPR-3 phone at 'low' opens at least 640 device px wide (${phoneOpenW.toFixed(0)} px)`,
+    phoneOpenW >= 640 - 0.5, `maxPixelRatio ${phone.maxPixelRatio.toFixed(3)}`);
+  expect(`…and the ladder's floor never takes it below 480 px (${phoneFloorW.toFixed(0)} px)`,
+    phoneFloorW >= 480 - 0.5, `minPixelRatio ${phone.minPixelRatio.toFixed(3)}`);
+  expect('…and never asks a phone for more than its own panel',
+    phone.maxPixelRatio <= 3 + 1e-9);
+
+  // 1470x956 CSS at dPR 2 — the fanless Air this game was tuned on. The
+  // budget must reproduce the numbers that calibration produced.
+  const air = pixelRatioCaps('low', 1470, 956, 2);
+  expect(`the tuned desktop is unchanged at 'low' (max ${air.maxPixelRatio.toFixed(3)}, min ${air.minPixelRatio.toFixed(3)})`,
+    Math.abs(air.maxPixelRatio - 0.62) < 0.005 && Math.abs(air.minPixelRatio - 0.44) < 0.005);
+  const airHigh = pixelRatioCaps('high', 1470, 956, 2);
+  expect(`…and at 'high' (max ${airHigh.maxPixelRatio.toFixed(3)}, min ${airHigh.minPixelRatio.toFixed(3)})`,
+    Math.abs(airHigh.maxPixelRatio - 1.25) < 0.005 && Math.abs(airHigh.minPixelRatio - 0.8) < 0.005);
+
+  // Tighten, never loosen: no viewport may earn a ratio above the tier ceiling.
+  const viewports = [[390, 844, 3], [412, 915, 2.625], [1366, 768, 1], [1470, 956, 2], [1920, 1080, 1], [2560, 1440, 2], [3840, 2160, 1]];
+  let loosened = null, overBudget = null;
+  for (const q of ['low', 'balanced', 'high']) {
+    for (const [w, h, dpr] of viewports) {
+      const caps = pixelRatioCaps(q, w, h, dpr);
+      if (caps.maxPixelRatio > TIER_MAX_PIXEL_RATIO[q] + 1e-9 && w * caps.maxPixelRatio > 640.5) {
+        loosened ??= `${q} ${w}x${h}@${dpr} -> ${caps.maxPixelRatio.toFixed(3)}`;
+      }
+      const px = (w * caps.maxPixelRatio) * (h * caps.maxPixelRatio);
+      // Over budget is allowed ONLY where the 640 px legibility floor bound.
+      if (px > TIER_PIXEL_BUDGET[q] * 1.02 && w * caps.maxPixelRatio > 640.5) {
+        overBudget ??= `${q} ${w}x${h}@${dpr} -> ${(px / 1e6).toFixed(2)} Mpx`;
+      }
+      if (caps.minPixelRatio > caps.maxPixelRatio + 1e-9) loosened ??= `${q} ${w}x${h}: floor above ceiling`;
+    }
+  }
+  expect('no viewport is handed a ratio above its tier ceiling', loosened === null, loosened ?? '');
+  expect('…and no viewport exceeds its tier framebuffer budget except at the 640 px floor',
+    overBudget === null, overBudget ?? '');
+
+  // A 4K desktop is the case the ratio ladder was silently worst at: 1.25 of
+  // 3840x2160 is 12.9 Mpx, five times what 'high' was ever measured against.
+  const uhd = pixelRatioCaps('high', 3840, 2160, 1);
+  const uhdPx = (3840 * uhd.maxPixelRatio) * (2160 * uhd.maxPixelRatio);
+  expect(`a 4K panel at 'high' stays inside 2.4 Mpx (${(uhdPx / 1e6).toFixed(2)} Mpx at ${uhd.maxPixelRatio.toFixed(3)})`,
+    uhdPx <= TIER_PIXEL_BUDGET.high * 1.02);
+
+  // The ladder still has to be a ladder with the derived caps.
+  const phoneCaps = { tier: 'low', ...phone, baseShadowMapSize: 0 };
+  let outside = null;
+  for (let i = 0; i <= 1000; i += 1) {
+    const l = resolveLevers(i / 1000, phoneCaps);
+    if (l.pixelRatio < phone.minPixelRatio - 1e-9 || l.pixelRatio > phone.maxPixelRatio + 1e-9) {
+      outside ??= `scalar ${(i / 1000).toFixed(3)} -> ${l.pixelRatio}`;
+    }
+  }
+  expect('the levers stay inside the derived caps across the whole ladder', outside === null, outside ?? '');
 }
 
 if (failures > 0) {
