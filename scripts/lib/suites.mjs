@@ -64,6 +64,11 @@ export const LOGIC = [
   // 0.3 s logic suite instead of a stack + a browser. It parses the octave
   // scales and rotations out of OCEAN_FRAG, so the mirror cannot drift.
   quick(tsx('ocean-lattice-probe.mjs')),
+  // WATER-01 (wave 3.4). The hull cut-out that keeps the exterior sea out of
+  // the hold: the GLSL outline is parsed back out of OCEAN_FRAG and graded
+  // against the shared getSwimHullHalfWidth, and setHullMasks' culling /
+  // ordering / zero-allocation contract is driven through the real API.
+  quick(tsx('test-ocean-hull-mask.mjs')),
   // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
   // deadline must be read inside a row or the 2 ms budget is a fiction.
   quick(tsx('test-bathymetry-budget.mjs')),
