@@ -57,6 +57,7 @@ const STAND_HEAD = PLAYER.HEAD_Y;
 const CROUCH_HEAD = PLAYER.HEAD_Y - PLAYER.CROUCH_DROP;
 const POP_MAX_RAD = 0.35;
 const MESH_BUDGET = { pirate: 26, skeleton: 26 };
+const ALLOC_MAX_B = 350;   // bytes per avatar per frame; 783 before the scratch buffers
 
 let clock = 0;
 const view = {
@@ -153,6 +154,45 @@ function maxJointDelta(a, b) {
 function run(mesh, player, ship, frames = 6, dt = 1 / 60) {
   for (let i = 0; i < frames; i++) { clock += dt; animator.animatePlayerMesh(mesh, player, ship, dt); }
   mesh.updateMatrixWorld(true);
+}
+
+// ── 0. hot path: steady-state allocation ───────────────────────────────────
+// A GC is a hitch the player feels, and this path runs once per visible avatar
+// per frame. The pose cross-fade landed building a fresh 21-number array AND a
+// template-literal branch key every frame: 783 B per avatar per frame, 9.4 KB a
+// frame with twelve pirates on screen, all of it garbage. Read the heap either
+// side of ONE frame at a time and take the median of the positive samples (the
+// method test-frame-allocation had to learn: a collection inside a long window
+// silently refunds what the window allocated).
+console.log('\n[hot path: steady-state allocation]');
+{
+  scenarioSwing = 0;
+  const N = 12;
+  const crowd = [];
+  const crowdPlayers = [];
+  for (let i = 0; i < N; i++) {
+    crowd.push(makePlayerMesh(0x3366cc, 'pirate', 'crew'));
+    crowdPlayers.push(makePlayer({ id: `alloc${i}`, velocity: { x: 3.2, y: 0, z: 0 } }));
+  }
+  const frame = () => {
+    clock += 1 / 60;
+    for (let i = 0; i < N; i++) animator.animatePlayerMesh(crowd[i], crowdPlayers[i], null, 1 / 60);
+  };
+  for (let i = 0; i < 300; i++) frame();       // warm: let V8 settle and the hidden classes stabilise
+  const samples = [];
+  for (let i = 0; i < 600; i++) {
+    const before = process.memoryUsage().heapUsed;
+    frame();
+    const d = process.memoryUsage().heapUsed - before;
+    if (d > 0) samples.push(d);
+  }
+  samples.sort((a, b) => a - b);
+  const perAvatar = samples.length ? samples[samples.length >> 1] / N : 0;
+  expect(`animatePlayerMesh allocates ${perAvatar.toFixed(0)} B per avatar per frame ≤ ${ALLOC_MAX_B}`,
+    samples.length >= 100 && perAvatar <= ALLOC_MAX_B,
+    samples.length < 100
+      ? `only ${samples.length}/600 positive samples: the measurement, not the build, is broken`
+      : `${(perAvatar * N / 1024).toFixed(1)} KB of garbage a frame with ${N} pirates on screen`);
 }
 
 // ── 1. per-scenario placement ─────────────────────────────────────────────

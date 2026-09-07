@@ -68,16 +68,20 @@ const SOLE_MATRIX = new THREE.Matrix4();
  * a stride looks like; before AVATAR-01 nothing solved this and the boots
  * simply floated or sank.
  */
-function solveHipLift(left: THREE.Euler, right: THREE.Euler) {
-  let need = 0;
-  for (const rot of [left, right]) {
-    SOLE_MATRIX.makeRotationFromEuler(rot);
-    let lowest = Infinity;
-    for (const corner of BOOT_CORNERS) {
-      lowest = Math.min(lowest, SOLE_SCRATCH.copy(corner).applyMatrix4(SOLE_MATRIX).y);
-    }
-    need = Math.max(need, -lowest);
+function lowestSole(rot: THREE.Euler) {
+  SOLE_MATRIX.makeRotationFromEuler(rot);
+  let lowest = Infinity;
+  for (let i = 0; i < BOOT_CORNERS.length; i++) {
+    const y = SOLE_SCRATCH.copy(BOOT_CORNERS[i]).applyMatrix4(SOLE_MATRIX).y;
+    if (y < lowest) lowest = y;
   }
+  return lowest;
+}
+
+function solveHipLift(left: THREE.Euler, right: THREE.Euler) {
+  // Unrolled on purpose: this runs once per avatar per frame and a `[left,
+  // right]` literal here is a per-frame allocation in the hot path.
+  const need = Math.max(-lowestSole(left), -lowestSole(right));
   // Positive is allowed but tiny: a boot tilted at the helm reaches ~2 cm past
   // the straight-leg length, and that 2 cm is the difference between standing
   // on the planking and standing in it.
@@ -124,7 +128,7 @@ type AnimScratch = {
   /** 0..1 eased blend into the downed prone pose. */
   downedBlend?: number;
   /** Which pose branch was showing last frame (see crossFade). */
-  poseKey?: string;
+  poseKey?: number;
   /** Seconds left of the cross-fade out of the previous branch's pose. */
   poseFade?: number;
   /** The pose actually SHOWN last frame, and the one being faded out of. */
@@ -134,6 +138,17 @@ type AnimScratch = {
 
 /** Joints that cross-fade between pose branches, in a fixed order. */
 const FADE_JOINTS = ['torso', 'pelvis', 'head', 'leftArmPivot', 'rightArmPivot', 'leftLegPivot', 'rightLegPivot'] as const;
+/** One reusable read-back buffer for the fade. crossFade runs once per avatar
+ *  per frame and never keeps `target` past the call, so a module-level scratch
+ *  replaces the 21-element array it used to build every frame. */
+const POSE_SCRATCH: number[] = new Array(FADE_JOINTS.length * 3).fill(0);
+/** Pose-branch bits. A NUMBER, not a string: the key is rebuilt every frame for
+ *  every avatar, and the template literal it used to be allocated ~0.6 KB of
+ *  cons-strings per avatar per frame (12 avatars = 9.4 KB/frame of garbage,
+ *  measured by the allocation row in test-avatar-pose-invariants). */
+const POSE_HELM = 1, POSE_GUN = 2, POSE_NEST = 4, POSE_CLIMB = 8, POSE_SWIM = 16;
+const POSE_BAIL = 32, POSE_BLADE = 64, POSE_GUARD = 128, POSE_CROUCH = 256;
+const POSE_AIR = 512, POSE_MOVE = 1024, POSE_DOWNED = 2048;
 /** A station pose is a whole-body change; longer than this and it reads as slow
  *  motion, shorter and the arms still teleport. Linear on purpose: an eased
  *  fade is steeper than 1/N in the middle, and the widest edge (idle -> helm,
@@ -333,7 +348,7 @@ export class PlayerAnimator {
       head.position.y -= 0.06 * b;
       hair.position.y -= 0.06 * b;
       bandana.position.y -= 0.06 * b;
-      this.crossFade(animation, parts, 'downed', dt);
+      this.crossFade(animation, parts, POSE_DOWNED, dt);
       this.applyFlinch(mesh, parts, dt);
       return;
     }
@@ -583,12 +598,12 @@ export class PlayerAnimator {
 
     // Which BRANCH produced this pose. Continuous values (gait phase, charge,
     // recoil) are deliberately absent: they must not restart a fade.
-    const poseKey = `${player.atHelm ? 'helm' : ''}${player.atCannon ? 'gun' : ''}`
-      + `${player.atCrowNest ? 'nest' : ''}${player.mastClimb !== null ? 'climb' : ''}`
-      + `${swimming ? 'swim' : ''}${player.bailing ? 'bail' : ''}`
-      + `${cutlassReady ? (player.blocking ? 'guard' : 'blade') : ''}`
-      + `${player.crouching ? 'crouch' : ''}${airBlend > 0.5 ? 'air' : ''}`
-      + `${moveSpeed > 0.15 ? 'move' : 'still'}`;
+    const poseKey = (player.atHelm ? POSE_HELM : 0) | (player.atCannon ? POSE_GUN : 0)
+      | (player.atCrowNest ? POSE_NEST : 0) | (player.mastClimb !== null ? POSE_CLIMB : 0)
+      | (swimming ? POSE_SWIM : 0) | (player.bailing ? POSE_BAIL : 0)
+      | (cutlassReady ? (player.blocking ? POSE_GUARD : POSE_BLADE) : 0)
+      | (player.crouching ? POSE_CROUCH : 0) | (airBlend > 0.5 ? POSE_AIR : 0)
+      | (moveSpeed > 0.15 ? POSE_MOVE : 0);
     this.crossFade(animation, parts, poseKey, dt);
 
     // ── STANCE SOLVE. The group origin is the SOLES (Game parks it on the
@@ -632,12 +647,14 @@ export class PlayerAnimator {
    * amplitude); only the frame the branch CHANGES starts a fade, from the pose
    * that was actually on screen.
    */
-  private crossFade(animation: AnimScratch, parts: Record<string, THREE.Object3D>, key: string, dt: number) {
-    const target: number[] = [];
-    for (const name of FADE_JOINTS) {
-      const joint = parts[name];
+  private crossFade(animation: AnimScratch, parts: Record<string, THREE.Object3D>, key: number, dt: number) {
+    const target = POSE_SCRATCH;
+    for (let i = 0; i < FADE_JOINTS.length; i++) {
+      const joint = parts[FADE_JOINTS[i]];
       if (!joint) return;
-      target.push(joint.rotation.x, joint.rotation.y, joint.rotation.z);
+      target[i * 3] = joint.rotation.x;
+      target[i * 3 + 1] = joint.rotation.y;
+      target[i * 3 + 2] = joint.rotation.z;
     }
     const last = animation.poseLast;
     if (!last || last.length !== target.length) {
@@ -648,7 +665,12 @@ export class PlayerAnimator {
     }
     if (key !== animation.poseKey) {
       animation.poseKey = key;
-      animation.poseFrom = last.slice();
+      // Reused, not re-sliced: a player hovering on the 0.15 m/s move threshold
+      // flips branch every frame, and a fresh array per flip is exactly the
+      // garbage this path must not make.
+      let from = animation.poseFrom;
+      if (!from || from.length !== last.length) { from = new Array(last.length); animation.poseFrom = from; }
+      for (let i = 0; i < last.length; i++) from[i] = last[i];
       animation.poseFade = POSE_FADE_TIME;
     }
     const fade = animation.poseFade ?? 0;
@@ -670,11 +692,10 @@ export class PlayerAnimator {
       }
       // The hair and the bandana ride the head, so they follow the faded value.
       const head = parts.head;
-      for (const worn of [parts.hair, parts.bandana]) {
-        if (!worn) continue;
-        worn.rotation.x = head.rotation.x;
-        worn.rotation.y = head.rotation.y;
-      }
+      const hair = parts.hair;
+      const bandana = parts.bandana;
+      if (hair) { hair.rotation.x = head.rotation.x; hair.rotation.y = head.rotation.y; }
+      if (bandana) { bandana.rotation.x = head.rotation.x; bandana.rotation.y = head.rotation.y; }
       return;
     }
     for (let i = 0; i < target.length; i++) last[i] = target[i];
