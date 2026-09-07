@@ -2826,7 +2826,27 @@ export class PhysicsSystem {
       }
     }
     if (!deepest) return NO_CONTACT;
-    const againstWall = wallOver > 0;
+    // ...AND A BERTH IS A BED. A mooring lies alongside a pier whose own deck
+    // and beach stand well above the waterline INSIDE the hull's outline, so
+    // the wall clause read every moored hull as rock through her planking and
+    // shoved her 0.66 m off the berth — out from under her own boarding plank.
+    // (test-gangway-walk: 6 of 30 planks stopped reaching the deck and three
+    // dunked the walker.) Berths are depth-verified per side when they are
+    // handed out (SPAWN-01), so a hull ANCHORED at one keeps the rest
+    // exemption; a hull under way, or anchored nowhere near a dock, does not.
+    const dock = island.dock;
+    // A FOUNDERING HULL IS A SCENE, NOT A SAILOR (w4.1 b). She has let go her
+    // anchor by then, so the anchored test alone would hand her back to the
+    // wall clause and shove her sideways out from under her own crew while
+    // they ride her down (test-flooding: one hand of two lost the deck a
+    // quarter of the way through the founder).
+    let moored = !!ship.sinking;
+    if (!moored && ship.anchored && dock) {
+      const bdx = ship.position.x - dock.berthPosition.x;
+      const bdz = ship.position.z - dock.berthPosition.z;
+      moored = bdx * bdx + bdz * bdz <= BERTH_ENV_SAFE_RADIUS * BERTH_ENV_SAFE_RADIUS;
+    }
+    const againstWall = wallOver > 0 && !moored;
 
     // A hull AT REST sits on the bottom — no jitter for moored or abandoned ships.
     //
