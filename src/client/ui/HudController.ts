@@ -285,6 +285,10 @@ export class HudController {
 
   /** Called on match teardown so per-match latches don't leak into the next round. */
   resetForMatch(): void {
+    // A new voyage is not a spectated one: the banner must not survive the
+    // match boundary that put it up.
+    this.setSpectateBanner(false, '', '');
+    this.crewStripSig = '';
     this.islandPresenceSeeded = false;
     this.firstSailDone = false;
     // A MATCH BOUNDARY IS A DISMISSAL.
@@ -1428,6 +1432,10 @@ export class HudController {
     // through this chain, so the last thing painted before the kill — usually a
     // respawn count the player was still reading — sat there unchanged while they
     // were silently out of the match.
+    // The banner is off for every state but one; the branch below turns it back
+    // on with this frame's line. Cheap: classList.toggle on an unchanged value
+    // is a no-op, and the text is only written when it differs.
+    if (player.state !== 'eliminated') this.setSpectateBanner(false, '', '');
     if (player.state === 'eliminated') {
       this.view.ui.interactPrompt.style.display = 'block';
       // SPECTATING IS NOT A VOID WITH A CAPTION.
@@ -1436,12 +1444,19 @@ export class HudController {
       // to a living crew (Game.updateSpectateSubject); this names whose deck it
       // is over, and where the voyage put you.
       const spectate = this.view.getSpectateSummary();
-      this.view.ui.interactPrompt.textContent = spectate
+      const line = spectate
         ? `Place: #${spectate.place} of ${spectate.of}${spectate.subject ? ` · watching ${spectate.subject}` : ' — spectating'}`
         : 'Crew eliminated — spectating';
+      this.view.ui.interactPrompt.textContent = line;
       this.view.ui.contextLabel.style.display = 'block';
       // Wave 1 gave this line; it now names the cause instead of assuming one.
-      this.view.ui.contextLabel.textContent = HudController.DEATH_COPY[this.resolveDeathCause()].spectate;
+      const sub = HudController.DEATH_COPY[this.resolveDeathCause()].spectate;
+      this.view.ui.contextLabel.textContent = sub;
+      // …and BOTH of those live inside #hud, which is display:none for the
+      // whole time you are eliminated (body.showing-death-screen). The caption
+      // was painted into a hidden subtree and no spectating player ever saw it
+      // (hud-24, liveplay-05). The banner is a sibling of #hud, top-centre.
+      this.setSpectateBanner(true, line, sub);
     } else if (player.state === 'respawning') {
       const countdown = this.respawnCountdownText(player);
       this.view.ui.interactPrompt.style.display = 'block';
@@ -1745,6 +1760,34 @@ export class HudController {
         + `<span class="cs-far">${far}</span></div>`;
     }).join('');
   }
+
+  /**
+   * The spectate banner, the one caption a dead player can actually see.
+   *
+   * Top-centre and nothing in the middle 60% of the screen: the death camera's
+   * whole job is to show the match going on without you, and a card across the
+   * centre of it defeats the point.
+   */
+  private setSpectateBanner(on: boolean, line: string, sub: string): void {
+    if (this.spectateBannerEl === undefined) {
+      this.spectateBannerEl = document.getElementById('spectate-banner');
+      this.spectateLineEl = document.getElementById('spectate-line');
+      this.spectateSubEl = document.getElementById('spectate-sub');
+    }
+    const host = this.spectateBannerEl;
+    if (!host) return;
+    host.classList.toggle('visible', on);
+    if (!on) return;
+    if (this.spectateLineEl && this.spectateLineEl.textContent !== line) {
+      this.spectateLineEl.textContent = line;
+    }
+    if (this.spectateSubEl && this.spectateSubEl.textContent !== sub) {
+      this.spectateSubEl.textContent = sub;
+    }
+  }
+  private spectateBannerEl: HTMLElement | null | undefined = undefined;
+  private spectateLineEl: HTMLElement | null = null;
+  private spectateSubEl: HTMLElement | null = null;
 
   private resolveDeathCause(): DeathCauseKind {
     const server = this.serverEliminationCause;

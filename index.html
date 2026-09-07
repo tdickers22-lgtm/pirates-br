@@ -492,6 +492,20 @@
     .board-row .label { font-size: 0.6rem; color: #7f92a8; letter-spacing: 0.12em; }
     #endmatch-actions { display: flex; gap: 10px; justify-content: center; }
 
+    /* Spectate banner — top-centre, clear of the middle of the screen. */
+    #spectate-banner {
+      position: fixed; top: 22px; left: 50%; transform: translateX(-50%);
+      z-index: 320; display: none; pointer-events: none;
+      padding: 8px 20px; border-radius: 10px; text-align: center;
+      background: rgba(6, 14, 24, 0.62);
+      border: 1px solid rgba(201, 168, 76, 0.3);
+      max-width: min(560px, 84vw);
+    }
+    #spectate-banner.visible { display: block; }
+    #spectate-line {
+      font-size: 0.86rem; letter-spacing: 0.2em; text-transform: uppercase; color: #f0ddb2;
+    }
+    #spectate-sub { font-size: 0.72rem; letter-spacing: 0.08em; color: #b8c8dc; margin-top: 3px; }
     #hud {
       position: fixed; inset: 0; pointer-events: none;
       display: none; z-index: 100;
@@ -2356,6 +2370,16 @@
   </div>
 
   <!-- HUD -->
+  <!-- SPECTATE BANNER (hud-24 / liveplay-05). It is OUTSIDE #hud on purpose:
+       #hud is display:none the whole time you are eliminated
+       (body.showing-death-screen), so the spectate caption the HUD wrote into
+       the interact prompt was painted into a hidden subtree and nobody ever
+       saw it. Top-centre, and nothing in the middle 60% of the screen. -->
+  <div id="spectate-banner">
+    <div id="spectate-line">Spectating</div>
+    <div id="spectate-sub"></div>
+  </div>
+
   <div id="hud">
     <header id="hud-top-nav">
       <div id="hud-top-left">

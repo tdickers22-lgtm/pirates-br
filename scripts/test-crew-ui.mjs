@@ -22,6 +22,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { crewStation, crewStripRows, isCrewmate } from '../src/client/ui/crewStrip.ts';
+import { playerMeshVisible } from '../src/client/core/corpseVisibility.ts';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 let failures = 0;
@@ -114,6 +115,48 @@ console.log('\nThe strip on screen, and what it costs');
     /isCrewmate\(me, player\)/.test(game) && /color\.setHex\(tint\)/.test(game));
   expect('and the tint is written only when it CHANGES, never per frame',
     /userData\.plateTint !== tint/.test(game));
+}
+
+console.log('\nYour own body is on screen when you die (avatar-24)');
+{
+  const v = (over) => playerMeshVisible({
+    isLocal: false, isDead: false, skeletonDeathVisible: false, pirateCorpseVisible: false,
+    tooSmallToDraw: false, useLocalSwimViewmodel: false, ...over,
+  });
+  expect('THE LOCAL MESH IS VISIBLE WHEN ELIMINATED — the death camera had been '
+    + 'craning up off an empty deck',
+    v({ isLocal: true, isDead: true, pirateCorpseVisible: true }) === true);
+  expect('a living local pirate is still hidden (the camera is inside his head)',
+    v({ isLocal: true }) === false);
+  expect('and so is he the instant he dies with no corpse record yet',
+    v({ isLocal: true, isDead: true }) === false);
+  expect('the local swim viewmodel still wins',
+    v({ isLocal: true, isDead: true, pirateCorpseVisible: true, useLocalSwimViewmodel: true }) === false);
+  expect('a corpse under the draw floor is still dropped',
+    v({ isLocal: true, isDead: true, pirateCorpseVisible: true, tooSmallToDraw: true }) === false);
+  expect('a living opponent is drawn', v({}) === true);
+  expect('a dead opponent with no remains left is not', v({ isDead: true }) === false);
+  expect('a skeleton\'s remains linger', v({ isDead: true, skeletonDeathVisible: true }) === true);
+}
+
+console.log('\nThe spectate caption is somewhere a dead player can see it (hud-24)');
+{
+  const html = readFileSync(`${ROOT}index.html`, 'utf8');
+  const hudStart = html.indexOf('<div id="hud">');
+  const banner = html.indexOf('id="spectate-banner"');
+  expect('there is a spectate banner at all', banner >= 0);
+  expect('IT IS OUTSIDE #hud — #hud is display:none for the whole time you are '
+    + 'eliminated, so the old caption was painted into a hidden subtree',
+    banner >= 0 && banner < hudStart, `banner at ${banner}, #hud at ${hudStart}`);
+  expect('it sits at the top, leaving the centre of the death camera clear',
+    /#spectate-banner \{[^}]*top:\s*\d+px/.test(html));
+  expect('and it is not part of the death-screen blackout',
+    !/showing-death-screen[^{]*#spectate-banner/.test(html));
+  const hud = readFileSync(`${ROOT}src/client/ui/HudController.ts`, 'utf8');
+  expect('the HUD puts this frame\'s spectate line into it',
+    /setSpectateBanner\(true, line, sub\)/.test(hud));
+  expect('and takes it down again for every other state',
+    /player\.state !== 'eliminated'\) this\.setSpectateBanner\(false/.test(hud));
 }
 
 console.log(failures === 0

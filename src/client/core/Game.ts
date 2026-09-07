@@ -40,6 +40,7 @@ import { apparentDistanceScale, updateInstanceLod, type InstanceLodBatch } from 
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
 import { isCrewmate } from '../ui/crewStrip.js';
+import { playerMeshVisible } from './corpseVisibility.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import {
   CORPSE_FADE_START, CORPSE_LIFETIME, PlayerAnimator,
@@ -4576,16 +4577,23 @@ export class Game {
       const skeletonDeathVisible = isSkeleton && isDead && skeletonDeathTime < SKELETON_CORPSE_LIFETIME;
       const corpseState = mesh.userData.corpse as CorpseState | undefined;
       const pirateCorpseVisible = !!corpseState && corpseState.t < CORPSE_LIFETIME;
-      mesh.visible = !isLocal && !useLocalSwimViewmodel
-        && (skeletonDeathVisible || pirateCorpseVisible || !isDead)
-        // …and not when he is under two and a half pixels tall — ~545 m at the
-        // walking field of view. See characterTooSmallToDraw: forty draw calls
-        // for a figure the view cannot resolve, and the spyglass gets every one
-        // of them back by narrowing the field.
-        && !this.characterTooSmallToDraw(dist2D(
+      // ONE RULE, and the local pirate is now in it as a CORPSE (avatar-24):
+      // the death camera used to crane up off a deck with nothing on it,
+      // because `!isLocal` hid your own body the frame you died. Alive he is
+      // still hidden — the camera is inside his head — and a figure under two
+      // and a half pixels tall (~545 m at the walking field of view) is still
+      // dropped, forty draw calls the view cannot resolve.
+      mesh.visible = playerMeshVisible({
+        isLocal,
+        isDead,
+        skeletonDeathVisible,
+        pirateCorpseVisible,
+        useLocalSwimViewmodel,
+        tooSmallToDraw: this.characterTooSmallToDraw(dist2D(
           this.renderer.camera.position.x, this.renderer.camera.position.z,
           targetPos.x, targetPos.z,
-        ));
+        )),
+      });
       if (skeletonDeathVisible) {
         this.applyCorpseFade(mesh, skeletonDeathTime, SKELETON_CORPSE_LIFETIME - 1.6, SKELETON_CORPSE_LIFETIME);
       } else if (pirateCorpseVisible) {
