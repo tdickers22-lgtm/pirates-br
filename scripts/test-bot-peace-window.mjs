@@ -167,7 +167,7 @@ function smallArms({ atTime, seconds, place, hurt = false, difficulty = 'easy' }
   pirate.state = 'alive';
   pirate.rotation.x = 0; // looking +z
   const brain = match.bots.bots.get(pirate.id);
-  brain.difficulty = difficulty;
+  brain.crew.difficulty = difficulty;
   brain.firearmTimer = 0;
   state.storm.centerX = ship.position.x; state.storm.centerZ = ship.position.z;
   state.storm.safeRadius = 2000; state.storm.shrinking = false; state.storm.phase = 0;
@@ -195,7 +195,7 @@ function smallArms({ atTime, seconds, place, hurt = false, difficulty = 'easy' }
     if (queued.length > 0 && shots === 0) firstShotAt = i * dt;
     shots += queued.length;
   }
-  return { shots, firstShotAt, firstTickTurn, underFireUntil: brain.underFireUntil };
+  return { shots, firstShotAt, firstTickTurn, underFireUntil: brain.crew.underFireUntil };
 }
 
 const offEarly = smallArms({ atTime: 10, seconds: 10, place: 'off' });
@@ -259,17 +259,17 @@ console.log('\nA provoked crew answers the shooter');
       a.lastHostileShipId = c.id;
     }
     match.bots.update(dt, t, state.players, state.ships, state.islands, state.storm, match.weapons, state.seaRocks);
-    if (brainA.behavior === 'engage' && brainA.targetShipId === c.id && engagedShooterAt === null) engagedShooterAt = t - T_HIT;
-    if (brainA.behavior === 'engage' && brainA.targetShipId === b.id && engagedBystanderAt === null) engagedBystanderAt = t - T_HIT;
-    if (brainB.behavior === 'engage') bEverEngaged = true;
+    if (brainA.crew.behavior === 'engage' && brainA.crew.targetShipId === c.id && engagedShooterAt === null) engagedShooterAt = t - T_HIT;
+    if (brainA.crew.behavior === 'engage' && brainA.crew.targetShipId === b.id && engagedBystanderAt === null) engagedBystanderAt = t - T_HIT;
+    if (brainB.crew.behavior === 'engage') bEverEngaged = true;
   }
   console.log(`  · A engaged the shooter at ${engagedShooterAt === null ? 'never' : engagedShooterAt.toFixed(1) + ' s'}, the bystander at ${engagedBystanderAt === null ? 'never' : engagedBystanderAt.toFixed(1) + ' s'}`);
   expect('A engages the hull that shelled it within 10 s', engagedShooterAt !== null && engagedShooterAt <= 10,
     `engagedShooterAt=${engagedShooterAt}`);
   expect('A never turns on the nearer bystander', engagedBystanderAt === null, `engagedBystanderAt=${engagedBystanderAt}`);
   expect('the bystander crew stays out of it', bEverEngaged === false);
-  expect('the grudge clears once the retaliation window lapses (70 s > 45 s)', brainA.retaliateShipId === null,
-    `retaliateShipId=${brainA.retaliateShipId}`);
+  expect('the grudge clears once the retaliation window lapses (70 s > 45 s)', brainA.crew.retaliateShipId === null,
+    `retaliateShipId=${brainA.crew.retaliateShipId}`);
 }
 
 // ── The whole lobby, sailed past the window ────────────────────────────────

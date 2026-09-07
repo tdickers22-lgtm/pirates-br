@@ -58,7 +58,7 @@ pirate.onShipId = ship.id;
 pirate.state = 'alive';
 pirate.rotation.x = Math.PI / 2; // already facing the boarder (+x)
 const brain = match.bots.bots.get(pirate.id);
-brain.difficulty = 'easy';
+brain.crew.difficulty = 'easy';
 brain.firearmTimer = 0;
 state.storm.centerX = ship.position.x; state.storm.centerZ = ship.position.z;
 state.storm.safeRadius = 2000; state.storm.shrinking = false; state.storm.phase = 0;

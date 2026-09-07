@@ -121,7 +121,7 @@ function sailBerth({ seconds, provokeAt = null }) {
     match.bots.update(dt, t, state.players, state.ships, state.islands, state.storm, weapons, state.seaRocks);
     for (let c = 0; c < a.cannonCooldowns.length; c += 1) a.cannonCooldowns[c] = Math.max(0, a.cannonCooldowns[c] - dt);
   }
-  return { shots, behaviorA: match.bots.bots.get(state.players.find((p) => p.shipId === a.id).id).behavior };
+  return { shots, behaviorA: match.bots.bots.get(state.players.find((p) => p.shipId === a.id).id).crew.behavior };
 }
 
 console.log(`\nA learner moored at the berth, a bot sloop 100 m off, ${BOT_BERTH_TRUCE_SECONDS + 130} s`);
