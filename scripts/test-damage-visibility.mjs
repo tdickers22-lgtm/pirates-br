@@ -336,11 +336,19 @@ console.log('\nThe last blow names the death — and drizzle is not a blow');
   // Outside the wall (so the tempest is billing him every tick) AND cut down by
   // a blade in the same tick. This is the exact shape of the mis-blame: the
   // storm witness ran last and relabelled the swing.
-  player.position.x = 0; player.position.z = 600;
+  // JUST outside the wall, the same 132 m section 1 uses. At z=600 (480 m out)
+  // the excess multiplier killed him during the grace burn-off, and a
+  // respawning pirate is skipped by the health witness entirely: the storm
+  // never billed a tick, so the tag stayed 'blade' and the FIRST clause below
+  // passed for the wrong reason too — it could not fail (R.1).
+  player.position.x = 0; player.position.z = 132;
   player.state = 'alive';
   player.respawnProtectionTimer = 0;
-  run(match, STORM_RESPAWN_GRACE_SECONDS + 1);
+  run(match, STORM_RESPAWN_GRACE_SECONDS + 1, () => banishSharks(match));
   player.health = PLAYER.MAX_HEALTH;
+  expect('the pirate under the blade is still on his feet to be mis-blamed',
+    player.state !== 'respawning' && player.state !== 'eliminated',
+    `state=${player.state} — the section graded nothing`);
   // Tag a blade on the tick the storm is also billing, exactly as the skeleton
   // wave does (it resolves earlier in the same tick).
   // Written the way the skeleton wave writes it: `tickCount` is incremented at
@@ -357,7 +365,7 @@ console.log('\nThe last blow names the death — and drizzle is not a blow');
     named?.source === 'blade',
     `read '${named?.source}' at tick ${named?.tick} (now ${match.tickCount})`);
   // …and the weather still owns the ticks that are genuinely only weather.
-  run(match, 2);
+  run(match, 2, () => banishSharks(match));
   expect('but the tempest still names the ticks that ARE only the tempest',
     match.lastDamageSourceById.get(player.id)?.source === 'storm',
     `read '${match.lastDamageSourceById.get(player.id)?.source}'`);
@@ -401,9 +409,18 @@ console.log('\nThe death carousel is broken: every respawn resolves, inside the 
     // the weather cannot touch him there — so to measure the reprieve at all he
     // has to be put back out in it. That is also the honest case: the carousel
     // was a pirate who came back and was billed before he could weigh anchor.
-    player.position.x = storm.centerX;
-    player.position.z = storm.centerZ + 420;
+    // IN THE WATER, not on the derelict's deck. The old spot was centerZ+420 —
+    // exactly where this section parked the abandoned hull — so clearing
+    // onShipId did nothing: PhysicsSystem put him straight back aboard her, and
+    // a pirate under a deck is sheltered from the weather. The reprieve then
+    // "never expired" because nothing was ever billing him (R.1).
+    player.position.x = storm.centerX + 420;
+    player.position.z = storm.centerZ;
     player.onShipId = null;
+    run(match, DT);
+    expect(`r=${radius} phase=${phase}: and he is out in the weather, off any deck`,
+      player.onShipId === null,
+      `onShipId=${player.onShipId} — the reprieve below would grade shelter, not the storm`);
     const hpOnSpawn = player.health;
     run(match, STORM_RESPAWN_GRACE_SECONDS - 3);
     expect(`r=${radius} phase=${phase}: the weather stands down while he gets under way`,
@@ -413,8 +430,13 @@ console.log('\nThe death carousel is broken: every respawn resolves, inside the 
     // …and it is a REPRIEVE, not immunity: it must expire, or fifteen seconds of
     // untouchable becomes a boarding tool.
     run(match, 6);
+    // TIGHTENED (R.1): the old escape clause was `player.state !== 'alive'`,
+    // and a pirate treading water 420 m outside the wall reads 'swimming' — so
+    // two of the three radii passed this without the storm ever billing a
+    // point. Only death answers it now.
     expect(`r=${radius} phase=${phase}: and the reprieve EXPIRES — the storm is not survivable`,
-      player.health < hpOnSpawn || player.state !== 'alive',
+      player.health < hpOnSpawn
+        || player.state === 'respawning' || player.state === 'eliminated',
       `hp still ${player.health.toFixed(1)} after ${STORM_RESPAWN_GRACE_SECONDS + 3}s outside the wall`);
   }
 }
