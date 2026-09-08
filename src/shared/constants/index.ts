@@ -671,6 +671,10 @@ export const SHARK = {
   /** In the storm ring they hunt in packs of up to PACK_MAX. */
   PACK_MAX: 3,
   PACK_STORM_MIN: 0.5,
+  /** ...and only once the storm is really a storm. The sea-state term alone
+   *  reads high outside the opening safe circle, which would put a pack on the
+   *  first swimmer of the match. */
+  PACK_PHASE_MIN: 2,
   /** A deck riding this close to the sea is inside a shark's reach: a pirate on
    *  a sinking hull is not safe just because her feet are dry. */
   DECK_FREEBOARD: 0.6,
