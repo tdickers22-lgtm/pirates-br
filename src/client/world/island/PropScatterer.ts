@@ -228,6 +228,82 @@ export function propBaseLift(type: string, scale: number): number {
   return bounds ? Math.max(0, bounds.min.y) * scale : 0;
 }
 
+/**
+ * AO-01, the half `ContactShadows` cannot do: the prop's OWN base.
+ *
+ * The radial decal under each piece darkens the GROUND. It does nothing to the
+ * piece, so a barrel still met the sand as two full-bright surfaces touching
+ * along a hard line — the "sticker" read the audit photographed, only now with
+ * a shadow beside it. Real contact occlusion is mutual: the ground occludes the
+ * bottom of the barrel exactly as much as the barrel occludes the ground.
+ *
+ * WHERE IT IS PAID. At BUILD time, once per merged geometry per session, by
+ * multiplying a smooth vertical ramp into `COLOR_0` — which is already Blender's
+ * baked hemisphere AO and is already multiplied into the albedo by three's
+ * `<color_fragment>`. So this is more AO in the AO channel: ZERO new shader ops,
+ * ZERO new attributes, ZERO new bytes, nothing per frame, and therefore nothing
+ * to tier-gate or LOD (the far sibling gets the same bake so the swap cannot
+ * pop).
+ *
+ * WHY IN PLACE ON THE SHARED GEOMETRY, which normally would be a sin. A wrapper
+ * geometry sharing the source's attribute objects is not registered in the
+ * library's shared set, so `Game.disposeIsland` would call `dispose()` on it and
+ * three would delete the GPU buffers *the cached asset is still drawing from* —
+ * the next island's boulders would render from freed buffers. Mutating the one
+ * cached geometry has no such edge, costs no memory at all, and is right for
+ * every other consumer of it too (CaveBuilder's rubble sits on a cave floor and
+ * wants exactly this). The `userData` latch is what makes it safe to call from
+ * a per-island build path: ten islands must not darken the same barrel ten
+ * times, which would take it to 0.62^10.
+ */
+const GROUND_CONTACT = {
+  /** Occlusion band as a fraction of the prop's own height... */
+  bandFraction: 0.16,
+  /** …clamped, because neither end scales: a 6 cm shell needs a band it can be
+   *  seen through, and a 12 m palm with a 2 m dark boot reads as scorched. */
+  minBand: 0.08,
+  maxBand: 0.85,
+  /** Albedo multiplier AT the contact. 0.62 is a shadow, 0.4 is a hole. */
+  floor: 0.62,
+} as const;
+
+/**
+ * Multiply a ground-contact gradient into a merged geometry's vertex colours.
+ *
+ * Exported for `scripts/test-prop-ground-ao.mjs`, which is where the two
+ * properties that matter are graded: the top of the prop is left EXACTLY alone
+ * (this is contact occlusion, not a global dimmer), and a second call is a
+ * no-op (the shared-cache latch).
+ */
+export function bakeGroundContactAo(geometry: THREE.BufferGeometry): boolean {
+  if (geometry.userData.groundContactAo) return false;
+  const color = geometry.getAttribute('color');
+  const position = geometry.getAttribute('position');
+  if (!color || !position || color.itemSize < 3) return false;
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  if (!box) return false;
+  const baseY = box.min.y;
+  const height = box.max.y - baseY;
+  if (!(height > 1e-4)) return false;
+  const band = Math.min(
+    GROUND_CONTACT.maxBand,
+    Math.max(GROUND_CONTACT.minBand, height * GROUND_CONTACT.bandFraction),
+  );
+  // Latched BEFORE the loop so an exception mid-bake cannot leave a half-dark
+  // geometry that a later call darkens the rest of the way.
+  geometry.userData.groundContactAo = true;
+  for (let i = 0; i < color.count; i++) {
+    const t = Math.min(1, Math.max(0, (position.getY(i) - baseY) / band));
+    if (t >= 1) continue; // Untouched above the band, bit for bit.
+    const smooth = t * t * (3 - 2 * t);
+    const k = GROUND_CONTACT.floor + (1 - GROUND_CONTACT.floor) * smooth;
+    color.setXYZ(i, color.getX(i) * k, color.getY(i) * k, color.getZ(i) * k);
+  }
+  color.needsUpdate = true;
+  return true;
+}
+
 /** Foliage lets light through; masonry and rock do not. */
 function propShadowStrength(type: string): number {
   if (SWAYING_FOLIAGE.has(type)) return type.startsWith('palm') ? 0.72 : 0.5;
@@ -268,6 +344,8 @@ export function buildServerProps(ctx: IslandBuildCtx) {
     const merged = instancedTypes.has(type) ? assets.mergedGeometry(type as AssetName) : null;
     if (merged) {
       if (SWAYING_FOLIAGE.has(type)) applyFoliageSway(merged.material, host);
+      // Once per geometry per session, latched inside — see GROUND_CONTACT.
+      bakeGroundContactAo(merged.geometry);
       // BIGGEST FIRST — the whole of instance-count LOD rests on this line.
       // Instances of one batch share a buffer and three draws the first `count`
       // of them, so an ordering by scale is the difference between "lower the
@@ -308,6 +386,8 @@ export function buildServerProps(ctx: IslandBuildCtx) {
       const far = assets.mergedFarGeometry(type as AssetName);
       if (far) {
         if (SWAYING_FOLIAGE.has(type)) applyFoliageSway(far.material, host);
+        // The far sibling gets the identical bake or the LOD swap pops brighter.
+        bakeGroundContactAo(far.geometry);
         attachInstanceFarLod(inst, { geometry: merged.geometry, material: merged.material }, far);
       }
       group.add(inst);
