@@ -120,6 +120,12 @@ const PINNED_BASE = {
   // lantern live below y=0 on purpose. The cannon's carriage and the capstan's
   // base do sit on the deck and are graded by the normal ground rule.
   wheel: -0.807, ship_lantern: -0.655,
+  // Cave kit (CAVE-01): a stalactite cluster HANGS. Its origin is the ceiling
+  // plane it grows out of, so the whole piece lives below y=0 by design and the
+  // client seats it by putting the origin ON the rock — the same contract as the
+  // wheel's axle, pinning an anchor rather than a skirt. Every other cave piece
+  // stands on the cave floor and is graded by the normal ground rule.
+  stalactite_cluster_a: -1.446, stalactite_cluster_b: -1.411,
 };
 const mutate = process.env.PIRATES_BR_MUTATE_BASE ?? '';
 if (mutate) {
