@@ -83,6 +83,10 @@ export const LOGIC = [
   // neutral under the split tone, and that the body still costs no fetch — it
   // rides inside OutputPass and must never become a pass again.
   quick(tsx('test-grade.mjs')),
+  // GFXPOL-01 (wave 8.2). Whether a lantern is bright enough for the bloom pass
+  // to see it at night, which is arithmetic on the shipped threshold curve and
+  // the shipped glow opacities — and whether noon still blooms at the old 1.05.
+  quick(tsx('test-lantern-bloom.mjs')),
   // WATER-01 (wave 3.4). The hull cut-out that keeps the exterior sea out of
   // the hold: the GLSL outline is parsed back out of OCEAN_FRAG and graded
   // against the shared getSwimHullHalfWidth, and setHullMasks' culling /
