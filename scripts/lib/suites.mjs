@@ -145,6 +145,8 @@ export const LOGIC = [
   tsx('test-swim-shore.mjs'),
   quick(tsx('test-harvest.mjs')),
   quick(tsx('test-shark-lunge.mjs')),
+  quick(tsx('test-shark-surface.mjs')),
+  quick(tsx('test-shark-inland-shove.mjs')),
   quick(tsx('test-station-spacing.mjs')),
   quick(tsx('test-block.mjs')),
   quick(tsx('test-deck-safety.mjs')),
