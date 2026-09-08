@@ -1,0 +1,507 @@
+/* Menu, lobby, end-of-match and spectate styles.
+   Extracted verbatim from index.html's 2,174-line <style> block (HUDS-01,
+   codehealth-16). The split point is #hud: everything the player reads BEFORE
+   and AFTER a voyage lives here, everything drawn DURING one lives in hud.css.
+   Load order is menu.css then hud.css, which is the order the rules had inside
+   the <style> block, so cascade precedence is unchanged. */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; font-family: 'Georgia', serif; color: #e8d5a3; }
+canvas { display: block; }
+
+#loading-screen {
+  position: fixed; inset: 0;
+  background:
+    linear-gradient(180deg, rgba(5, 14, 26, 0.22), rgba(0, 0, 0, 0.82)),
+    radial-gradient(ellipse at 50% 36%, #102544 0%, #07111f 48%, #000 100%);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px;
+  padding: 28px;
+  z-index: 1000; transition: opacity 0.8s ease;
+  text-align: center;
+}
+#loading-screen.hidden { opacity: 0; pointer-events: none; }
+#loading-screen h1 {
+  font-size: 3.5rem; letter-spacing: 0.3em; color: #c9a84c;
+  text-shadow: 0 0 40px #c9a84c88; margin-bottom: 0.3em;
+}
+#loading-screen .subtitle {
+  font-size: 1rem; letter-spacing: 0.2em; color: #8899aa;
+  margin-bottom: 1.2rem; text-transform: uppercase;
+}
+#loading-mode {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 10px;
+  margin-bottom: 0.4rem;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #c9a84c;
+  background: rgba(201, 168, 76, 0.12);
+  border: 1px solid rgba(201, 168, 76, 0.24);
+}
+#loading-copy {
+  width: min(520px, calc(100vw - 48px));
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: #a9b8c9;
+  margin-bottom: 0.6rem;
+}
+#loading-bar-wrap {
+  width: 320px; height: 4px; background: #1a2a3a;
+  border: 1px solid #2a3a4a; position: relative;
+}
+#loading-bar { height: 100%; width: 0%; background: #c9a84c; transition: width 0.3s ease; }
+#loading-text { margin-top: 1rem; font-size: 0.8rem; color: #7f92a8; letter-spacing: 0.15em; text-transform: uppercase; }
+
+/* ─── Main menu / lobby / queue overlay ─── */
+#menu-screen {
+  position: fixed; inset: 0;
+  background:
+    linear-gradient(180deg, rgba(5, 14, 26, 0.34), rgba(0, 0, 0, 0.86)),
+    radial-gradient(ellipse at 50% 36%, #102544 0%, #07111f 48%, #000 100%);
+  display: none;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 18px;
+  padding: 28px;
+  z-index: 900;
+  text-align: center;
+  animation: menuFadeIn 0.45s ease;
+}
+#menu-screen.visible { display: flex; }
+@keyframes menuFadeIn { from { opacity: 0 } to { opacity: 1 } }
+
+#menu-screen h1 {
+  font-size: clamp(2.2rem, 5vw, 3.4rem);
+  letter-spacing: 0.32em;
+  color: #c9a84c;
+  text-shadow: 0 0 36px rgba(201, 168, 76, 0.45);
+  margin-bottom: 0.2em;
+}
+#menu-screen .subtitle {
+  font-size: 0.84rem; letter-spacing: 0.24em; color: #7f92a8;
+  text-transform: uppercase;
+  margin-bottom: 0.8rem;
+}
+
+.menu-panel {
+  width: min(560px, calc(100vw - 32px));
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  /* hud-22: Settings is taller than a 540 px viewport, so its Back button
+     sat BELOW the fold with nothing to scroll — a dead end you could only
+     leave by reloading. The panel scrolls now and its footer is sticky. */
+  max-height: calc(100vh - 150px);
+  overflow-y: auto;
+  padding: 22px 26px;
+  border-radius: 14px;
+  background: rgba(4, 14, 28, 0.78);
+  border: 1px solid rgba(201, 168, 76, 0.22);
+  box-shadow: 0 28px 60px rgba(0, 0, 0, 0.45);
+}
+.menu-panel.visible { display: flex; }
+.menu-panel-footer {
+  position: sticky;
+  bottom: -22px;
+  margin: 0 -26px -22px;
+  padding: 10px 26px 16px;
+  display: flex; gap: 12px; justify-content: center;
+  background: linear-gradient(to top, rgba(4, 14, 28, 0.97) 62%, rgba(4, 14, 28, 0));
+}
+.menu-panel h2 {
+  font-size: 0.78rem; letter-spacing: 0.22em; text-transform: uppercase;
+  color: #c9a84c;
+  margin-bottom: 4px;
+}
+/* How to Play needs room for the cloned controls card. */
+#menu-panel-howto {
+  width: min(820px, calc(100vw - 32px));
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+  text-align: left;
+}
+#howto-win {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px; border-radius: 10px;
+  background: rgba(201, 168, 76, 0.09);
+  border: 1px solid rgba(201, 168, 76, 0.3);
+}
+.howto-win-title {
+  font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase; color: #c9a84c;
+}
+.howto-win-row { display: flex; gap: 10px; align-items: baseline; font-size: 0.86rem; color: #e8dcc0; line-height: 1.6; }
+.howto-win-row strong { color: #f4e2b2; }
+.howto-win-key { flex: 0 0 auto; font-size: 1rem; }
+#howto-controls {
+  color: #cdc2a8; font: 500 13px/1.85 'Georgia', serif; letter-spacing: 0.03em;
+  /* The legend card is nowrap in-match (it is centred on a wide screen);
+     here it must fold instead of running off the panel. */
+  white-space: normal;
+}
+#howto-controls strong { color: #f0dda9; }
+
+.menu-row { display: flex; gap: 10px; align-items: center; }
+.menu-row > * { flex: 1 1 auto; min-width: 0; }
+.menu-row .menu-btn { flex: 0 0 auto; }
+
+.menu-input {
+  padding: 11px 14px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.42);
+  border: 1px solid rgba(201, 168, 76, 0.32);
+  color: #f0e2c4;
+  font-family: Georgia, serif;
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.menu-input:focus {
+  border-color: #c9a84c;
+  background: rgba(20, 32, 50, 0.55);
+}
+.menu-input.code-input {
+  text-transform: uppercase;
+  letter-spacing: 0.32em;
+  font-size: 1.2rem;
+  text-align: center;
+}
+
+.menu-btn {
+  cursor: pointer;
+  padding: 12px 18px;
+  border-radius: 8px;
+  border: 1px solid rgba(201, 168, 76, 0.42);
+  background: rgba(201, 168, 76, 0.08);
+  color: #f4e2b2;
+  font-family: Georgia, serif;
+  font-size: 0.86rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  transition: background 0.15s ease, transform 0.05s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.menu-btn:hover { background: rgba(201, 168, 76, 0.22); border-color: #c9a84c; }
+.menu-btn:active { transform: translateY(1px); }
+.menu-btn:disabled {
+  opacity: 0.45; cursor: not-allowed; background: transparent; color: #6a7585;
+  border-color: rgba(170, 170, 170, 0.18);
+}
+.menu-btn.primary {
+  background: linear-gradient(180deg, rgba(201, 168, 76, 0.32), rgba(201, 168, 76, 0.16));
+  border-color: #c9a84c;
+  color: #fff5d3;
+}
+.menu-btn.primary:hover { background: linear-gradient(180deg, rgba(201, 168, 76, 0.5), rgba(201, 168, 76, 0.24)); }
+.menu-btn.danger {
+  border-color: rgba(231, 76, 60, 0.55);
+  color: #ffb09a;
+  background: rgba(231, 76, 60, 0.12);
+}
+.menu-btn.danger:hover { background: rgba(231, 76, 60, 0.28); }
+
+.menu-button-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+#menu-stats-strip {
+  display: flex; flex-wrap: wrap; gap: 14px; justify-content: center;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(4, 14, 28, 0.68);
+  border: 1px solid rgba(126, 172, 220, 0.18);
+  font-size: 0.7rem; color: #b8c8dc;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  margin-top: 4px;
+}
+#menu-stats-strip span.label { color: #7f92a8; }
+#menu-stats-strip span.val { color: #f0ddb2; font-family: monospace; margin-left: 5px; }
+
+#menu-status {
+  min-height: 20px;
+  font-size: 0.76rem; color: #ffb09a;
+  letter-spacing: 0.12em;
+}
+
+/* Lifetime stats modal (front-page STATS button) */
+#stats-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.66);
+  display: none; align-items: center; justify-content: center;
+  padding: 24px;
+  z-index: 950;
+}
+#stats-backdrop.visible { display: flex; }
+#stats-panel {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  padding: 24px 28px;
+  background: rgba(7, 19, 36, 0.96);
+  border: 1px solid rgba(201, 168, 76, 0.32);
+  border-radius: 14px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+  text-align: left;
+}
+#stats-panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+#stats-panel-title {
+  font-size: 0.66rem; letter-spacing: 0.24em; text-transform: uppercase;
+  color: #c9a84c;
+  margin-bottom: 2px;
+}
+#stats-panel-name {
+  font-size: 1.15rem; letter-spacing: 0.16em; text-transform: uppercase;
+  color: #f4e2b2;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#stats-close-btn {
+  cursor: pointer;
+  flex: 0 0 auto;
+  width: 34px; height: 34px;
+  border-radius: 8px;
+  border: 1px solid rgba(201, 168, 76, 0.42);
+  background: rgba(201, 168, 76, 0.08);
+  color: #f4e2b2;
+  font-size: 0.9rem;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+#stats-close-btn:hover { background: rgba(201, 168, 76, 0.22); border-color: #c9a84c; }
+#stats-panel-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
+}
+@media (max-width: 560px) { #stats-panel-body { grid-template-columns: 1fr; } }
+.stats-section {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(126, 172, 220, 0.14);
+}
+.stats-section h3 {
+  font-size: 0.62rem; letter-spacing: 0.24em; text-transform: uppercase;
+  color: #c9a84c;
+  margin-bottom: 8px;
+}
+.stats-line {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 3px 0;
+  font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #7f92a8;
+}
+.stats-line .val { font-family: ui-monospace, monospace; color: #f0ddb2; }
+
+/* Crew strip — the only place the HUD says the word crew (hud-21). */
+#crew-strip {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-top: 6px; max-width: 232px;
+  font-size: 0.68rem; letter-spacing: 0.06em;
+  pointer-events: none;
+}
+#crew-strip .cs-row {
+  display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center;
+  padding: 4px 7px; border-radius: 6px;
+  background: rgba(6, 14, 24, 0.52);
+  border-left: 3px solid var(--crew-color, #7eacdc);
+}
+#crew-strip .cs-row.downed { border-left-color: #e08a8a; }
+#crew-strip .cs-row.out { opacity: 0.45; }
+#crew-strip .cs-glyph { color: #cddbe9; text-align: center; }
+#crew-strip .cs-name {
+  color: #e8d5a3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#crew-strip .cs-hp { height: 3px; border-radius: 2px; background: rgba(255,255,255,0.14); margin-top: 3px; }
+#crew-strip .cs-hp > i { display: block; height: 100%; border-radius: 2px; background: #6fbf73; }
+#crew-strip .cs-row.hurt .cs-hp > i { background: #d9b64a; }
+#crew-strip .cs-row.critical .cs-hp > i { background: #d96a5a; }
+#crew-strip .cs-far { color: #8ea3b8; font-family: ui-monospace, monospace; font-size: 0.62rem; }
+/* Lobby roster + queue list */
+.lobby-roster {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.lobby-member {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 0.86rem;
+  color: #e8d5a3;
+}
+.lobby-member .role-pill {
+  font-size: 0.6rem; letter-spacing: 0.2em; padding: 2px 8px; border-radius: 999px;
+  background: rgba(201, 168, 76, 0.18);
+  color: #f4e2b2;
+  text-transform: uppercase;
+}
+.lobby-member.host { border-color: rgba(201, 168, 76, 0.5); }
+.lobby-member.at-sea { opacity: 0.55; }
+.lobby-member .who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lobby-member .who .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lobby-member .tick { width: 14px; color: #6fbf73; font-size: 0.8rem; }
+.lobby-member .tick.waiting { color: #5a6b7d; }
+.lobby-member .acts { display: flex; gap: 6px; }
+.lobby-member .mini {
+  font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 6px; cursor: pointer;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: #cddbe9;
+}
+.lobby-member .mini.danger { color: #e79a9a; border-color: rgba(231,154,154,0.28); }
+.lobby-member.overflow { border-color: rgba(231, 154, 154, 0.55); }
+.lobby-group-head {
+  font-size: 0.62rem; letter-spacing: 0.2em; text-transform: uppercase;
+  color: #7f92a8; padding: 6px 2px 2px;
+}
+.lobby-refusal { font-size: 0.7rem; color: #e79a9a; letter-spacing: 0.08em; text-align: center; }
+.lobby-toggle { display: flex; align-items: center; gap: 8px; color: #cddbe9; font-size: 0.74rem; cursor: pointer; }
+.lobby-toggle input { accent-color: #c9a84c; }
+
+/* Mode segmented control (PLAN 2.2) */
+.mode-control { display: flex; gap: 6px; }
+.mode-control .mode-opt {
+  flex: 1; padding: 8px 4px; border-radius: 8px; cursor: pointer;
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09);
+  color: #b8c8dc; font: inherit; font-size: 0.72rem; letter-spacing: 0.14em;
+  text-transform: uppercase; text-align: center;
+}
+.mode-control .mode-opt .sub { display: block; font-size: 0.58rem; letter-spacing: 0.1em; color: #7f92a8; }
+.mode-control .mode-opt[aria-checked="true"] {
+  background: rgba(201, 168, 76, 0.18); border-color: rgba(201,168,76,0.6); color: #f4e2b2;
+}
+.mode-control .mode-opt[disabled] { opacity: 0.42; cursor: not-allowed; }
+
+.lobby-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 0.78rem; color: #b8c8dc;
+  letter-spacing: 0.06em;
+}
+.lobby-row .label { color: #7f92a8; text-transform: uppercase; letter-spacing: 0.18em; font-size: 0.66rem; }
+.lobby-row code {
+  font-family: ui-monospace, monospace; font-size: 1.4rem; letter-spacing: 0.34em;
+  color: #fff5d3;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.42);
+  border: 1px solid rgba(201, 168, 76, 0.42);
+}
+
+#lobby-bot-slider {
+  flex: 1;
+  accent-color: #c9a84c;
+}
+
+#queue-status-line {
+  font-size: 1rem; color: #f0ddb2; letter-spacing: 0.12em;
+}
+#queue-detail-line {
+  font-size: 0.78rem; color: #b8c8dc; letter-spacing: 0.14em;
+}
+#queue-progress-wrap {
+  width: 100%; height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 4px 0;
+}
+#queue-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #c9a84c, #f4e2b2);
+  width: 0%;
+  transition: width 0.4s ease;
+}
+
+/* End-of-match overlay (replaces simple death/win, but we keep them for fallback) */
+#endmatch-screen {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.86);
+  display: none; align-items: center; justify-content: center;
+  z-index: 800;
+}
+#endmatch-screen.visible { display: flex; }
+#endmatch-panel {
+  width: min(560px, calc(100vw - 32px));
+  padding: 28px;
+  background: rgba(7, 19, 36, 0.94);
+  border: 1px solid rgba(201, 168, 76, 0.32);
+  border-radius: 14px;
+  text-align: center;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+}
+#endmatch-title {
+  font-size: 2.4rem; letter-spacing: 0.3em; color: #c9a84c;
+  text-shadow: 0 0 30px rgba(201, 168, 76, 0.45);
+  margin-bottom: 4px;
+}
+#endmatch-title.defeat { color: #e74c3c; text-shadow: 0 0 30px rgba(231, 76, 60, 0.45); }
+#endmatch-subtitle {
+  font-size: 0.78rem; color: #889; letter-spacing: 0.2em; text-transform: uppercase;
+  margin-bottom: 16px;
+}
+#endmatch-standing {
+  font-size: 1.05rem; letter-spacing: 0.16em; color: #b8c8dc;
+  margin-bottom: 12px;
+}
+#endmatch-standing.won { color: #f0dca0; }
+#endmatch-board {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 10px 0 18px;
+  /* Ten crews at ~34px a row plus the header — the board is the point of
+     the screen, so it shows the whole fleet without a scroll on a laptop. */
+  max-height: min(46vh, 400px);
+  overflow-y: auto;
+}
+.board-row {
+  display: grid;
+  grid-template-columns: 30px 1fr 60px 60px 80px;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.84rem;
+  background: rgba(255, 255, 255, 0.04);
+  align-items: center;
+}
+.board-row.you { background: rgba(201, 168, 76, 0.16); border: 1px solid rgba(201, 168, 76, 0.32); }
+.board-row.winner { color: #fff5d3; }
+/* A crew that went down is dimmed, so "who was still afloat" reads off the
+   board without counting rows. */
+.board-row.sunk .nm, .board-row.sunk .col, .board-row.sunk .pl { opacity: 0.62; }
+.board-row.head { background: none; padding-bottom: 2px; }
+.board-row .tag {
+  margin-left: 8px; padding: 1px 5px; border-radius: 3px;
+  font-size: 0.56rem; letter-spacing: 0.12em; vertical-align: middle;
+  background: rgba(255,255,255,0.08); color: #8fa2b8;
+}
+.board-row .tag.you-tag { background: rgba(201,168,76,0.28); color: #f0dca0; }
+.board-row .pl { font-family: monospace; color: #c9a84c; }
+.board-row .nm { text-align: left; color: #e8d5a3; }
+.board-row .col { font-family: monospace; color: #b8c8dc; text-align: right; }
+.board-row .label { font-size: 0.6rem; color: #7f92a8; letter-spacing: 0.12em; }
+#endmatch-actions { display: flex; gap: 10px; justify-content: center; }
+
+/* Spectate banner — top-centre, clear of the middle of the screen. */
+#spectate-banner {
+  position: fixed; top: 22px; left: 50%; transform: translateX(-50%);
+  z-index: 320; display: none; pointer-events: none;
+  padding: 8px 20px; border-radius: 10px; text-align: center;
+  background: rgba(6, 14, 24, 0.62);
+  border: 1px solid rgba(201, 168, 76, 0.3);
+  max-width: min(560px, 84vw);
+}
+#spectate-banner.visible { display: block; }
+#spectate-line {
+  font-size: 0.86rem; letter-spacing: 0.2em; text-transform: uppercase; color: #f0ddb2;
+}
+#spectate-sub { font-size: 0.72rem; letter-spacing: 0.08em; color: #b8c8dc; margin-top: 3px; }
