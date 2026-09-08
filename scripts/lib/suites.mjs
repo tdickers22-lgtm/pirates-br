@@ -77,6 +77,11 @@ export const LOGIC = [
   // back out of the shipped OCEAN_VERT/OCEAN_FRAG, and the storm key/fill
   // trade plus the third DirectionalLight that is no longer allocated.
   quick(tsx('test-shadow-bias.mjs')),
+  // STORMVIS-01 (wave 5.4): the weather anchor (one position for overcast, rain,
+  // wall nearness and lightning), the leak gate's sea-state, thunder delay, the
+  // deleted halo/ring/rain-canvas, and the storm front + sky shader terms read
+  // back out of the shipped GLSL. 0.2 s, no stack.
+  quick(tsx('test-storm-visuals.mjs')),
   // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
   // deadline must be read inside a row or the 2 ms budget is a fiction.
   quick(tsx('test-bathymetry-budget.mjs')),
