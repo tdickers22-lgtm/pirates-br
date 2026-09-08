@@ -104,6 +104,12 @@ export const LOGIC = [
   // deleted halo/ring/rain-canvas, and the storm front + sky shader terms read
   // back out of the shipped GLSL. 0.2 s, no stack.
   quick(tsx('test-storm-visuals.mjs')),
+  // STORMUP-01 (wave 9.2): the weather is one set of SHARED fields, not two sets
+  // of client-local scalars. Grades stormCloudDensity/stormRain against the
+  // client functions they replaced point for point, and grades the gust field
+  // bounded, zero-mean, and continuous in x/z/t (a hashed cell lattice snaps the
+  // wind 1.2 rad across a border). 0.3 s, no stack.
+  quick(tsx('test-storm-fields.mjs')),
   // [I.3] the five authored weapon GLBs must land in the envelope the
   // primitive-era viewmodel constants (muzzleTipFor, the hand grips, the near
   // plane) were measured in — the logic-tier half of test-near-plane-clearance.
