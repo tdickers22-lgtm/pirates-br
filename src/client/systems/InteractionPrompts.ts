@@ -29,21 +29,25 @@ import * as THREE from 'three';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
 import { BROKER_NAME, BROKER_NAME_PLURAL } from '../ui/DisplayNames.js';
 import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipHole, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
-import { dist2D, getBraceStationLocals, getShipDeckY, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
+import { dist2D, getBraceStationLocals, getShipDeckY, getShipHoldFloorY, getIslandDockSwimLadderPoint, getIslandSurfaceY, getMainMastLocalZ, getNearestShipBoardingLadder, getSailRopeStationLocals } from '../../shared/utils/index.js';
 import {
+  countOpenHoles,
   findBraceStationDir,
   findNearbyCannonIndex,
   getAmmoCrateLocal,
   getAnchorControlLocal,
+  getBilgePumpLocal,
   getCannonDeckLocalPosition,
   getHelmControlLocal,
   isBoardingOwnHull,
   isNearAmmoCrate,
   isNearAnchor,
   isNearCrowNestLadder,
+  isNearBilgePump,
   isNearHelm,
   isNearSailStation,
   isStandingAtHelm,
+  isStandingInShipHold,
   SHIP_BOARD_LADDER_REACH,
   toShipLocalPoint,
 } from '../../shared/interactions.js';
@@ -440,6 +444,55 @@ export class InteractionPrompts {
         }
         // Ambient (no geometry of its own): only ever the fallback offer.
         candidates.push({ prompt, label, score: -0.5, kind: 'bail', tier: TIER_AMBIENT, distance: 0, dot: 0 });
+      }
+
+      // ── THE BILGE PUMP HAS A PROMPT (SINK-01 slice c, review-4 P1) ───────
+      // The pump shipped with a server handler (Match.applyBilgePump), a shared
+      // reach test (isNearBilgePump) and NO client affordance: nothing outside
+      // Match.ts and shared/interactions.ts ever called it, so the one new
+      // reason to go below decks with the water rising was invisible. The
+      // server takes a HELD [X] carrying the 'bail' intent (or none), so this
+      // is a bail candidate anchored on the brake itself — hands-on at the
+      // pump, and it beats the bucket hint because it has real geometry.
+      if (isNearBilgePump(player, ship)) {
+        const pumpStats = SHIP_STATS[ship.type];
+        const pumpLocal = getBilgePumpLocal(pumpStats);
+        const pumpPoint = this.view.getShipReachPoint(
+          ship, pumpLocal.x, pumpLocal.z, getShipHoldFloorY(ship.position.y) + 0.95,
+        );
+        const bilgePct = Math.round((ship.waterLevel ?? 0) * 100);
+        const dryBilge = (ship.waterLevel ?? 0) <= 0.001;
+        this.pushInteractionCandidate(
+          candidates,
+          player,
+          pumpPoint,
+          2.4,
+          -1,
+          dryBilge ? 'Bilge pump — she is dry' : '[Hold X] Work the Bilge Pump',
+          dryBilge
+            ? 'Nothing in her to pump'
+            : `Bilge ${bilgePct}% · the pump beats one breach, not three`,
+          dryBilge ? 'info' : 'bail',
+        );
+      }
+
+      // ── A BREACH YOU CANNOT REACH IS STILL EXPLAINED (PLAN 2.6) ──────────
+      // SINK-01 slice c made the repair reach 3D (|Δy| ≤ HOLE_REPAIR_REACH_Y),
+      // which is right — you plank a waterline strake from the hold, not from
+      // the rail above it. But the deck-side [X] that used to work simply
+      // stopped painting, with no refusal at the prompt: a working key silently
+      // disappeared (review-4 P1). Say where the work is instead.
+      if (!repairHole && player.onShipId === ship.id && countOpenHoles(ship) > 0) {
+        const inHold = isStandingInShipHold(player.position, ship);
+        candidates.push({
+          prompt: inHold ? '⚠ Leak above the deck beams' : '⚠ Leak below the waterline',
+          label: inHold ? 'Go up on deck to plank it' : 'Go below decks to plank it',
+          score: -0.6,
+          kind: 'info',
+          tier: TIER_AMBIENT,
+          distance: 0,
+          dot: 0,
+        });
       }
 
       if (player.carryingChestId && player.onShipId === ship.id) {
