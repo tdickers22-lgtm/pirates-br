@@ -156,21 +156,22 @@ const MAST_RUNS = [20260801, 4242, 777, 31337];
     groundedStrikes >= 1, `${groundedStrikes} grounded strikes`);
 }
 
-console.log('\nA swimmer under the bolt');
+// The swimmer case storm-04 proposed (60 hp within 6 m of an open-water bolt)
+// is NOT built: measured, it downed a crew at 11 s with the hull barely
+// scratched, which re-opens the STORM-01 defect the storm's damage model was
+// moved off. See the note in StormSystem.rollLightning. The bolt bills hulls.
 {
-  // Find a bolt that hit open water, then put a pirate exactly under it. The
-  // control swims the same radius on the far side, so the ordinary storm DoT
-  // is identical and only the strike can separate them.
+  // Put one pirate exactly under the first open-water bolt and another the same
+  // distance out on the far side, so the ordinary storm DoT is identical and
+  // only the bolt could separate them.
   const probe = run(600, 5150, stormAt(300, 4), [], []);
   const open = probe.strikes.find((s) => s.shipId === null);
-  const storm = stormAt(300, 4);
-  const struck = swimmer('struck', open.x, open.z);
-  const control = swimmer('control', -open.x, -open.z);
-  run(600, 5150, storm, [], [struck, control]);
-  const extra = control.health - struck.health;
-  expect('a pirate in the water under the strike takes the charge',
-    extra >= STORM_LIGHTNING.SWIMMER_DAMAGE - 1e-6,
-    `struck ${struck.health.toFixed(1)} vs control ${control.health.toFixed(1)} (delta ${extra.toFixed(1)})`);
+  const under = swimmer('under', open.x, open.z);
+  const away = swimmer('away', -open.x, -open.z);
+  const { strikes } = run(600, 5150, stormAt(300, 4), [], [under, away]);
+  expect('the bolt itself never bills a pirate: hulls take the lightning',
+    Math.abs(under.health - away.health) < 1e-6 && strikes.length > 0,
+    `under ${under.health.toFixed(1)} vs away ${away.health.toFixed(1)} after ${strikes.length} strikes`);
 }
 
 console.log(failures === 0

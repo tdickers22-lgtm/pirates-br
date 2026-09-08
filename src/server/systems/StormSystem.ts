@@ -363,7 +363,7 @@ export class StormSystem {
       }
     }
 
-    this.rollLightning(dt, storm, ships, players, hooks, t);
+    this.rollLightning(dt, storm, ships, hooks, t);
   }
 
   /**
@@ -382,7 +382,7 @@ export class StormSystem {
    * storm-08 — a prepared crew CHOOSES the weather.
    */
   private rollLightning(
-    dt: number, storm: StormState, ships: Ship[], players: Player[], hooks: StormDamageHooks, t: number,
+    dt: number, storm: StormState, ships: Ship[], hooks: StormDamageHooks, t: number,
   ): void {
     if (!storm.strikes) storm.strikes = [];
     this.strikeTimer -= dt;
@@ -434,23 +434,19 @@ export class StormSystem {
           target.fireTimer = Math.max(target.fireTimer, STORM_LIGHTNING.FIRE_SECONDS);
         }
       }
-    } else {
-      // Open water. A pirate swimming under the strike is cooked; a pirate on a
-      // deck is not (his mast took it, or nothing did).
-      for (const player of players) {
-        if (player.onShipId) continue;
-        if (
-          player.state === 'eliminated'
-          || player.state === 'respawning'
-          || player.state === 'downed'
-          || player.respawnProtectionTimer > 0
-          || hooks.hasStormGrace?.(player.id)
-        ) continue;
-        if (dist2D(player.position.x, player.position.z, x, z) > STORM_LIGHTNING.SWIMMER_RADIUS) continue;
-        player.lastEnvDamage = { cause: 'storm', at: t };
-        player.health -= STORM_LIGHTNING.SWIMMER_DAMAGE;
-      }
     }
+    // THE BOLT BILLS HULLS, NOT PEOPLE (STORM-01).
+    //
+    // storm-04 proposed 60 hp to a swimmer within 6 m of an open-water strike.
+    // Built and measured, it destabilised the two assertions STORM-01 exists
+    // for: over ten runs of scripts/test-storm-outrun.mjs a crew went down at
+    // 11 s with the hull barely scratched (1 hole), because one 60 hp bolt plus
+    // the exposed-swimmer drain is a death before any planking gives. That is
+    // precisely the "the crew was always dead first" defect the storm's whole
+    // damage model was moved off. So the tempest's lightning stoves masts and
+    // lights them; what it does to the pirate standing under it is what the
+    // FIRE does, which he can run from, bail against and now let the rain put
+    // out. Re-open this only behind a gate that grades the STORM-01 pair.
 
     storm.strikes.push({ t, x, z, shipId: target?.id ?? null, grounded });
     while (storm.strikes.length > STORM_LIGHTNING.MAX_REPLICATED) storm.strikes.shift();
