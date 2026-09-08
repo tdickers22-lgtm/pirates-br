@@ -317,6 +317,12 @@ export const LOGIC = [
   //                                 time there and a shark that swims out and back returns at a different
   //                                 phase, a pop on the one creature a player is watching (FAUNAGLB-01, w6.6)
   tsx('test-fauna-gait.mjs'),
+  //   test-prop-ground-ao         — AO-01: a prop's OWN base occlusion, baked into COLOR_0 once per cached
+  //                                 geometry. Graded because every failure here is silent: without the
+  //                                 userData latch ten islands take one barrel to 0.62^10 (black), and a ramp
+  //                                 that reaches the canopy is a global dimmer wearing occlusion's name. Also
+  //                                 pins the zero-cost claim — no new attribute, same mutated array (w7.3)
+  quick(tsx('test-prop-ground-ao.mjs')),
   //   check-hud-ids               — every id the client reads by string exists in index.html, and no id inside
   //                                 the HUD block is driven by nothing. TypeScript cannot see through
   //                                 getElementById('x'), so a renamed id used to type-check and then silently
