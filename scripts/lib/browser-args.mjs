@@ -11,8 +11,8 @@
 // There was no way to say "run the battery, just not on the GPU" without editing
 // eleven files by hand every time, so the choice moves into an environment variable:
 //
-//   npm run test:browser                          # metal, unchanged
-//   PIRATES_GL=swiftshader npm run test:browser    # software ANGLE, no GPU process
+//   npm run test:browser                     # software ANGLE, no GPU process (default)
+//   PIRATES_GL=metal npm run test:browser    # the real GPU, opt-in, see the note below
 //
 // SwiftShader renders real pixels — it is a full software rasteriser, so screenshots
 // and readPixels are trustworthy — it is simply slow (single digit fps on a scene
@@ -29,10 +29,26 @@
 // here, and both spellings keep working, because a rig that answers to one variable
 // and ignores another is exactly how the battery ends up on the GPU after being told
 // not to be. PIRATES_GL wins when more than one is set.
+//
+// THE DEFAULT FLIPPED ON 2026-09-08, AND IT MUST NOT FLIP BACK BY ACCIDENT. The
+// hazard described above stopped being hypothetical: at 14:07 that day the Mac took
+// a GPU firmware lockup ("restart_reason_desc":"firmware-detected lockup") with
+// `chrome-headless-` named as the guilty client, alongside a second GPU consumer,
+// and the desktop went down with it — the second crash of the day. The suites were
+// being TOLD to run software in every brief; nothing enforced it, so any command
+// that forgot the variable silently took the Metal path. An instruction that has to
+// be remembered on every one of a hundred invocations is not a safeguard.
+//
+// So the GPU is now opt-IN. `PIRATES_GL=metal` still gives the old behaviour, byte
+// for byte, for a run that genuinely needs real-GPU timing (test-lod-reveal's reveal
+// band and test-perf-budget's frame times are the honest cases) on a machine that
+// can take it. Everything else gets real pixels from the software rasteriser and
+// cannot lock the GPU up, at the cost of speed and of frame-timing evidence that
+// suites already know to treat as advisory via IS_SOFTWARE_GL.
 const GL_ENV = process.env.PIRATES_GL
   ?? process.env.KW_ANGLE
   ?? (process.env.SOFTGL ? 'swiftshader' : undefined)
-  ?? 'metal';
+  ?? 'swiftshader';
 
 /** The backend name in effect: 'metal' (default) or 'swiftshader'. */
 export const GL_BACKEND = GL_ENV.trim().toLowerCase();
@@ -48,7 +64,7 @@ const NO_CRASH_UI = ['--disable-breakpad', '--noerrdialogs', '--disable-crash-re
 // noise and at worst the very thing being avoided.
 const SOFTWARE_ARGS = ['--use-angle=swiftshader', ...NO_CRASH_UI];
 
-// The historical default, byte for byte what the suites hardcoded.
+// The historical default (opt-in since 2026-09-08), byte for byte what the suites hardcoded.
 const METAL_ARGS = ['--use-gl=angle', '--use-angle=metal', '--enable-gpu', ...NO_CRASH_UI];
 
 /**
