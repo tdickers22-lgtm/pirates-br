@@ -17,6 +17,18 @@
  *
  * Driven against a real Match on real ticks, like the other logic suites.
  */
+// SEED THE WORLD BEFORE Match IS IMPORTED. makeMatchRng falls back to
+// Math.random unless PIRATES_BR_MAP_SEED is set, so every run drew a different
+// island/ship layout, openWater() picked a different spot, and the shark case
+// went red about one run in four (gate6, w6/w7 close-out). Pinned here, and
+// restored after, exactly as test-wreck-site and test-wreck-event do.
+const priorMapSeed = process.env.PIRATES_BR_MAP_SEED;
+process.env.PIRATES_BR_MAP_SEED = '20260801';
+process.on('exit', () => {
+  if (priorMapSeed === undefined) delete process.env.PIRATES_BR_MAP_SEED;
+  else process.env.PIRATES_BR_MAP_SEED = priorMapSeed;
+});
+
 import { Match } from '../src/server/core/Match.ts';
 import { PLAYER, SHARK, SHIP } from '../src/shared/constants/index.ts';
 import { getIslandSurfaceY, isPointInsideIslandFootprint } from '../src/shared/utils/index.ts';
@@ -225,7 +237,13 @@ console.log('Shark:');
     targetId: victim.id,
   });
   const before = victim.health;
-  for (let i = 0; i < 60 * 8 && victim.health >= before; i++) {
+  // 20 s, not 8. SHARK-01 (w6.3 slice c) announces the first bite: the shark
+  // orbits at 9-14 m for CIRCLE_TIME_MIN..MAX (3-6 s) before it ever closes,
+  // and then still owes a 0.75 s windup. Time-to-first-bite is legitimately
+  // ~8-10 s now, which sat exactly on the old window's edge. This suite grades
+  // what a death is CALLED, not how fast it arrives (test-shark-lunge owns the
+  // timing), so the window covers the worst-case announce with room over it.
+  for (let i = 0; i < 60 * 20 && victim.health >= before; i++) {
     victim.state = 'swimming';
     victim.swimTimer = 0;
     match.updateSharks(DT);
