@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
 import type { Player, Ship } from '../../shared/types/index.js';
 import { angleWrap } from '../../shared/utils/index.js';
+import { getShipFloorYAt, toShipLocalPointInto } from '../../shared/interactions.js';
 import { AVATAR_RIG } from './factories/PlayerMeshFactory.js';
 import { playRigDeath, updatePlayerRig } from './factories/PlayerRigFactory.js';
 import type { InputManager } from '../input/InputManager.js';
@@ -63,6 +64,38 @@ const SOLE_SCRATCH = new THREE.Vector3();
 const CORPSE_BOX = new THREE.Box3();
 const SOLE_MATRIX = new THREE.Matrix4();
 
+// ── FOOT PLANT (ANIMPOL / avatar-15) ────────────────────────────────────────
+/**
+ * How high the surface is under the LEFT and RIGHT boot, relative to the height
+ * midway between them. Centred on purpose: the group origin is where the server
+ * says the pirate stands, so a centred solve never moves the body off the seat
+ * Match and PhysicsSystem agree on — it only straddles the slope. On flat
+ * ground both numbers are 0 and every pose below is bit-identical to before.
+ */
+const FOOT_PLANT = { left: 0, right: 0, slope: 0 };
+/** Scratch for the ground query: this runs once per visible pirate per frame
+ *  and the allocation row of test-avatar-pose-invariants grades it at 350 B. */
+const FOOT_LOCAL: { x: number; z: number } = { x: 0, z: 0 };
+const FOOT_QUERY = { x: 0, y: 0, z: 0 };
+/**
+ * Beyond 30 m the boots are a couple of pixels and the two ground samples buy
+ * nothing a player can see, so the solve (and its cost) switches off entirely
+ * and the stance falls back to the flat-ground one. This is the LOD: inside
+ * 30 m a pirate costs two extra `getShipFloorYAt` (or two GridGround cell
+ * lookups) and one `acos` per frame, with no allocation; outside it, nothing.
+ */
+const FOOT_PLANT_D2 = 30 * 30;
+/** A boot may straddle at most this much of slope; past it the body would have
+ *  to squat, and a squatting sentry on a 30° hillside reads worse than a boot
+ *  0.05 m into the sand. */
+const FOOT_PLANT_MAX = 0.09;
+/** Hip → sole, straight-legged: rotating a leg pivot by `a` lifts its own boot
+ *  by LEG_LEN·(1−cos a), which is how the higher foot shortens its leg. */
+const LEG_LEN = AVATAR_RIG.legPivotY;
+/** A rigged pirate's legs are bones, not pivots; the foot query still wants a
+ *  fore/aft offset, and a shared zero (feet abreast) is the honest one. */
+const RIG_LEG_REST = new THREE.Euler(0, 0, 0);
+
 /**
  * How far the hips must drop (≤0) for the LOWER boot to sit exactly on the
  * ground once both legs have been rotated. The other foot lifts, which is what
@@ -113,6 +146,13 @@ export type PlayerAnimatorView = {
    *  AnimationMixer is stepped falls off with range. Optional so a probe can
    *  build a view without a camera; missing means "step every pirate fully". */
   readonly camera?: THREE.Camera;
+  /**
+   * Drawn ground height at a world (x, z), or null off every island — the same
+   * answer the terrain the player can SEE gives (GridGround, TERRAIN-01), not
+   * the analytic heightfield. ANIMPOL's foot plant asks it twice per visible
+   * pirate ashore. Optional so a probe can build a view without a world.
+   */
+  groundYAt?(x: number, z: number): number | null;
 };
 
 /** Mutable per-mesh animation scratch stored on `mesh.userData.animation`. */
@@ -139,6 +179,11 @@ type AnimScratch = {
   /** The pose actually SHOWN last frame, and the one being faded out of. */
   poseLast?: number[];
   poseFrom?: number[];
+  /** The two boot meshes, looked up once. They hang off the leg pivots and are
+   *  not in the factory's parts table, and the foot plant has to roll the ankle
+   *  so the SOLE lies flat on the surface rather than on one edge. */
+  bootL?: THREE.Object3D | null;
+  bootR?: THREE.Object3D | null;
 };
 
 /** Joints that cross-fade between pose branches, in a fixed order. */
@@ -202,6 +247,61 @@ export class PlayerAnimator {
     return 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / cooldown, 0, 1);
   }
 
+  /**
+   * FOOT PLANT (avatar-15). Where the surface is under each boot, relative to
+   * the height between them, in the mesh's own frame.
+   *
+   * A pirate on a hull that is heeled 0.2 rad has 5.4 cm of deck between her
+   * boots; before this she stood on a flat plane through the origin, so the
+   * downhill boot floated 2.7 cm and the uphill one was 2.7 cm inside the
+   * planking. The two samples come from the SHARED functions the server
+   * collides against (`getShipFloorYAt` aboard, the drawn GridGround ashore),
+   * so the plane she stands on is the one the server put her on.
+   *
+   * Writes FOOT_PLANT and returns it; never allocates.
+   */
+  private solveFootPlant(mesh: THREE.Group, ship: Ship | null, legRotL: THREE.Euler, legRotR: THREE.Euler) {
+    FOOT_PLANT.left = 0;
+    FOOT_PLANT.right = 0;
+    FOOT_PLANT.slope = 0;
+    const ground = this.view.groundYAt;
+    if (!ship && !ground) return FOOT_PLANT;
+    const cam = this.view.camera;
+    if (cam && cam.position.distanceToSquared(mesh.position) > FOOT_PLANT_D2) return FOOT_PLANT;
+
+    const yaw = mesh.rotation.y;
+    const cos = Math.cos(yaw);
+    const sin = Math.sin(yaw);
+    const originY = mesh.position.y;
+    let gl = 0;
+    let gr = 0;
+    for (let i = 0; i < 2; i++) {
+      const lx = i === 0 ? -AVATAR_RIG.legPivotX : AVATAR_RIG.legPivotX;
+      // Where the boot actually IS this frame: the pivot swings it fore/aft with
+      // the stride, which is what makes a PITCHED deck (and a hill walked up)
+      // reach the solve at all — two feet abreast only ever see roll.
+      const lz = AVATAR_RIG.bootZ - LEG_LEN * Math.sin((i === 0 ? legRotL : legRotR).x);
+      FOOT_QUERY.x = mesh.position.x + lx * cos + lz * sin;
+      FOOT_QUERY.z = mesh.position.z - lx * sin + lz * cos;
+      FOOT_QUERY.y = originY + 0.02;
+      let g: number | null = null;
+      if (ship) {
+        g = getShipFloorYAt(FOOT_QUERY, ship, toShipLocalPointInto(FOOT_LOCAL, FOOT_QUERY, ship));
+      } else if (ground) {
+        g = ground(FOOT_QUERY.x, FOOT_QUERY.z);
+      }
+      const dy = g === null || !Number.isFinite(g) ? originY : g;
+      if (i === 0) gl = dy; else gr = dy;
+    }
+    const mid = (gl + gr) * 0.5;
+    FOOT_PLANT.left = THREE.MathUtils.clamp(gl - mid, -FOOT_PLANT_MAX, FOOT_PLANT_MAX);
+    FOOT_PLANT.right = THREE.MathUtils.clamp(gr - mid, -FOOT_PLANT_MAX, FOOT_PLANT_MAX);
+    // The surface roll in the pirate's OWN frame, straight off the two samples —
+    // no second copy of the hull attitude maths, and it works on a hillside too.
+    FOOT_PLANT.slope = Math.atan2(FOOT_PLANT.right - FOOT_PLANT.left, AVATAR_RIG.legPivotX * 2);
+    return FOOT_PLANT;
+  }
+
   animatePlayerMesh(mesh: THREE.Group, player: Player, ship: Ship | null, dt: number, remote?: RemoteAnimPose | null) {
     // A SKINNED pirate plays her own clips (RIG-01). This branch must come
     // BEFORE the `parts` read, because a rig deliberately carries no parts
@@ -210,10 +310,17 @@ export class PlayerAnimator {
     if (mesh.userData.rig) {
       const cam = this.view.camera;
       const distSq = cam ? cam.position.distanceToSquared(mesh.position) : 0;
+      // The rig's legs are bones, but "where is the surface under each boot" is
+      // the same world question with the same shared answer, so the solve lives
+      // here (which has the ship and the ground sampler) and the rig is handed
+      // the two numbers. RIG_LEG_REST keeps the query honest without reading
+      // bones back: a clip's stride is what the fore/aft offset is for.
+      const plant = this.solveFootPlant(mesh, ship, RIG_LEG_REST, RIG_LEG_REST);
       updatePlayerRig(
         mesh, player, dt, distSq,
         remote ? remote.pitch : player.rotation.y,
         this.view.getCutlassSwingProgress(player),
+        plant.left, plant.right,
       );
       return;
     }
@@ -592,6 +699,25 @@ export class PlayerAnimator {
       head.rotation.y -= torso.rotation.y * 0.6;
       hair.rotation.y = head.rotation.y;
       bandana.rotation.y = head.rotation.y;
+      // UPPER-BODY OVERRIDE (avatar-15: "a walking gunner cannot aim"). The
+      // legs above keep their whole stride; only the arms are rewritten, which
+      // is the split the finding says the welded animator does not have. Before
+      // this a pirate holding a pistol swung it at her hip like a handbag while
+      // her first-person muzzle — and the server's shot — pointed downrange.
+      if (firearmReady && !player.blocking) {
+        const aimPitch = THREE.MathUtils.clamp(lookPitchRaw, -0.7, 0.7);
+        // The weapon arm holds; the stride is allowed to shake it by ~7°, which
+        // is what keeps it from reading as a mannequin's welded prop.
+        rightArmPivot.rotation.set(-0.94 + aimPitch * 0.52 - armSwing * 0.12, -0.14, 0.16);
+        // The support hand comes across to the grip at a walk, and falls away
+        // into a counter-swing at a run (nobody two-hands a pistol sprinting).
+        const support = 1 - moveRatio * moveRatio;
+        leftArmPivot.rotation.set(
+          (-0.72 + aimPitch * 0.4) * support + (0.2 + armSwing) * (1 - support),
+          0.3 * support,
+          -0.34 * support - 0.12 * (1 - support),
+        );
+      }
     }
 
     if (player.crouching) {
@@ -724,15 +850,68 @@ export class PlayerAnimator {
     // what turns the leg rotations above into a gait with a real hip bob, keeps
     // the station poses out of the planking, and gives the crouch its drop.
     const grounded = !swimming && player.mastClimb === null;
-    const hipLift = grounded
+    // FOOT PLANT (avatar-15). Straddle the real surface first: the higher boot
+    // shortens its leg by splaying the pivot inward (a straight leg cannot
+    // stretch, so the LOWER boot is the one the hip drop is solved against, and
+    // it is the one that ends up exactly on the plane). Airborne and at a mast
+    // there is no surface to stand on, so the splay fades out with the gait.
+    let planted = 0;
+    let splayL = 0;
+    let splayR = 0;
+    if (grounded && airBlend < 0.999) {
+      const plant = this.solveFootPlant(mesh, ship, leftLegPivot.rotation, rightLegPivot.rotation);
+      const base = Math.min(plant.left, plant.right);
+      const weight = 1 - airBlend;
+      for (let i = 0; i < 2; i++) {
+        const pivot = i === 0 ? leftLegPivot : rightLegPivot;
+        const lift = ((i === 0 ? plant.left : plant.right) - base) * weight;
+        if (lift <= 1e-5) continue;
+        // Rotating the pivot toward the body's centre-line by `a` raises its own
+        // boot by LEG_LEN·(1−cos a): +z for the left leg, −z for the right.
+        const a = Math.acos(THREE.MathUtils.clamp(1 - lift / LEG_LEN, -1, 1));
+        pivot.rotation.z += i === 0 ? a : -a;
+        if (i === 0) splayL = a; else splayR = -a;
+      }
+      // ANKLE ROLL. A splayed leg carries its boot with it, so the sole would
+      // stand on one edge and the toe corner would still be in the planking.
+      // Rolling the boot back by the leg's splay and on by the surface's own
+      // angle lands the whole sole flat on the surface — which is the thing a
+      // gate measuring the boot's lowest corner is actually asking for.
+      if (animation.bootL === undefined) {
+        animation.bootL = leftLegPivot.getObjectByName('left-boot') ?? null;
+        animation.bootR = rightLegPivot.getObjectByName('right-boot') ?? null;
+      }
+      // Only MY splay is undone, never the factory's authored stance: on flat
+      // ground both terms are 0 and the boots are exactly where they were.
+      const surface = plant.slope * weight;
+      if (animation.bootL) animation.bootL.rotation.z = surface - splayL;
+      if (animation.bootR) animation.bootR.rotation.z = surface - splayR;
+      planted = base * weight;
+      // …and the body leans WITH the deck instead of standing plumb on a hull
+      // that is heeled over (the old `deckSway` was a sine on ocean time and
+      // knew nothing about the ship's attitude).
+      const lean = THREE.MathUtils.clamp(plant.slope, -0.5, 0.5) * 0.34 * weight;
+      torso.rotation.z += lean;
+      pelvis.rotation.z += lean * 0.5;
+    } else if (animation.bootL) {
+      // Off the ground (swimming, up a mast, in the air) there is no surface to
+      // lie flat on, and a boot left rolled from the last stride would twist.
+      animation.bootL.rotation.z = 0;
+      if (animation.bootR) animation.bootR.rotation.z = 0;
+    }
+    // The fold the LEGS produce, without the surface offset: the crouch drop is
+    // owed to the camera and the server whatever the ground is doing, so it is
+    // read off the leg solve alone.
+    const hipFold = grounded
       ? solveHipLift(leftLegPivot.rotation, rightLegPivot.rotation) * (1 - airBlend)
       : 0;
+    const hipLift = hipFold + planted;
     // A crouch owes the camera and the server a fixed drop (PLAYER.CROUCH_DROP,
     // the same number Match.ts lowers the headshot sphere by), so the torso
     // folds the rest of the way into the hips — in step with them, so the
     // pelvis never detaches from the legs while the fold fades in.
     const crouchProgress = player.crouching && grounded
-      ? THREE.MathUtils.clamp(hipLift / -CROUCH_HIP_DROP, 0, 1)
+      ? THREE.MathUtils.clamp(hipFold / -CROUCH_HIP_DROP, 0, 1)
       : 0;
     const bodyOffset = hipLift - (PLAYER.CROUCH_DROP - CROUCH_HIP_DROP) * crouchProgress;
     leftLegPivot.position.y = AVATAR_RIG.legPivotY + hipLift;

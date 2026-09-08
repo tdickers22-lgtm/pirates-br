@@ -97,6 +97,15 @@ const MIXER_FREEZE_D2 = 120 * 120;
  */
 const SHADOW_D2 = 40 * 40;
 
+/** The span PlayerAnimator sampled the two surface heights over. It is the
+ *  SAMPLE span, not the rig's own foot span (±0.112 m, pirate_rig.py HIP_X):
+ *  dividing by it turns the two heights back into the surface's angle, and a
+ *  pelvis rolled by that angle lifts a foot at ANY offset to its own height. */
+const FOOT_SPAN_X = AVATAR_RIG.legPivotX * 2;
+/** A pelvis braces up to ~17°; past that a sailor squats or grabs a shroud, and
+ *  a body rolled further than this reads as a mannequin nailed to the deck. */
+const PELVIS_ROLL_MAX = 0.3;
+
 type ClipPair = { lower: THREE.AnimationClip; upper: THREE.AnimationClip };
 
 /** Masked clips are immutable data and are shared by every pirate's mixer. */
@@ -136,6 +145,8 @@ export type PlayerRig = {
   bones: {
     head: THREE.Bone | null;
     hips: THREE.Bone | null;
+    /** First spine bone: takes the pelvis roll back out so the head stays plumb. */
+    spine: THREE.Bone | null;
     footL: THREE.Bone | null;
     footR: THREE.Bone | null;
   };
@@ -149,6 +160,11 @@ export type PlayerRig = {
    *  frame left it — including our own offset. So we stash the clip value,
    *  restore it before every mixer step, and write base+pitch after. */
   headClipX: number;
+  /** The same stash for the two bones the foot plant writes absolutely. */
+  hipsClipZ: number;
+  spineClipZ: number;
+  /** Damped surface roll the pelvis is currently carrying (ANIMPOL). */
+  pelvisRoll: number;
   /** Accumulated, unspent dt for the distance-rate-limited mixer step. */
   pending: number;
   /** The one-shot the upper layer is committed to, and its remaining time. */
@@ -263,9 +279,12 @@ export function makePlayerRig(
     root,
     lower: { action: null, name: '' },
     upper: { action: null, name: '' },
-    bones: { head: bone('head'), hips, footL: bone('foot_l'), footR: bone('foot_r') },
+    bones: { head: bone('head'), hips, spine: bone('spine1'), footL: bone('foot_l'), footR: bone('foot_r') },
     hipsRestY: hips?.position.y ?? 0,
     headClipX: bone('head')?.rotation.x ?? 0,
+    hipsClipZ: hips?.rotation.z ?? 0,
+    spineClipZ: bone('spine1')?.rotation.z ?? 0,
+    pelvisRoll: 0,
     pending: 0,
     oneShot: 0,
     prevSwing: 0,
@@ -384,6 +403,11 @@ export function updatePlayerRig(
   cameraDistSq: number,
   lookPitch: number,
   cutlassSwing: number,
+  /** Surface height under the left/right boot relative to the height between
+   *  them, from PlayerAnimator's shared-function samples (ANIMPOL, avatar-15).
+   *  0/0 = flat, and flat is exactly what RIG-01 shipped. */
+  plantL = 0,
+  plantR = 0,
 ): boolean {
   const rig = playerRigOf(mesh);
   if (!rig) return false;
@@ -417,6 +441,8 @@ export function updatePlayerRig(
   // nothing else. Without this the solve compounds on itself every frame.
   const headBone = rig.bones.head;
   if (headBone) headBone.rotation.x = rig.headClipX;
+  if (rig.bones.hips) rig.bones.hips.rotation.z = rig.hipsClipZ;
+  if (rig.bones.spine) rig.bones.spine.rotation.z = rig.spineClipZ;
   rig.pending += dt;
   let interval = Number.POSITIVE_INFINITY;
   if (cameraDistSq < MIXER_FREEZE_D2) {
@@ -447,11 +473,32 @@ export function updatePlayerRig(
     rig.headClipX = headBone.rotation.x; // whatever the clip left, solve-free
     headBone.rotation.x = rig.headClipX + THREE.MathUtils.clamp(lookPitch, -0.5, 0.5);
   }
+  if (rig.bones.hips) rig.hipsClipZ = rig.bones.hips.rotation.z;
+  if (rig.bones.spine) rig.spineClipZ = rig.bones.spine.rotation.z;
 
-  // Sole solve. The clips are authored on flat ground; a pose that lifts both
-  // feet (or a blend between two clips mid-crossfade) can leave the lower boot
-  // hanging or buried. Drop/lift the HIPS so the lower foot is on the surface —
-  // two bone reads and one write, no IK chain.
+  // FOOT PLANT ON A HEELING DECK (ANIMPOL / avatar-15).
+  //
+  // A clip is authored on flat ground, so on a hull heeled 0.2 rad the downhill
+  // boot floats and the uphill one is inside the planking. A two-bone IK chain
+  // would fix that by bending one knee; rolling the PELVIS onto the surface
+  // fixes both boots at once, in one write, with no knowledge of a Blender
+  // rig's bone axes. Rolling the pelvis by the surface angle moves the boots
+  // apart in y by exactly stance-width x angle, which is the height the two
+  // samples asked for, and spine1 takes the whole roll straight back out again
+  // so the chest, the neck, the head and therefore the server's headshot sphere
+  // stay plumb over the seat (avatar-02 — the head may not wander off it).
+  const slope = THREE.MathUtils.clamp(
+    Math.atan2(plantR - plantL, FOOT_SPAN_X), -PELVIS_ROLL_MAX, PELVIS_ROLL_MAX,
+  );
+  rig.pelvisRoll += (slope - rig.pelvisRoll) * Math.min(1, dt * 12);
+  const { hips: hipsBone, spine } = rig.bones;
+  if (hipsBone) hipsBone.rotation.z = rig.hipsClipZ + rig.pelvisRoll;
+  if (spine) spine.rotation.z = rig.spineClipZ - rig.pelvisRoll;
+
+  // Sole solve. Even square to the surface, a pose that lifts both feet (or a
+  // blend between two clips mid-crossfade) can leave the lower boot hanging or
+  // buried. Drop/lift the HIPS so the lower foot is on the surface — two bone
+  // reads and one write, no IK chain.
   const { hips, footL, footR } = rig.bones;
   if (hips && footL && footR) {
     rig.root.updateMatrixWorld(true);

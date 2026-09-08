@@ -43,6 +43,7 @@ import { AVATAR_RIG } from '../src/client/rendering/factories/PlayerMeshFactory.
 import { hudAnchorLocal, makeNameplateSprite, NAMEPLATE_SCREEN_H } from '../src/client/rendering/factories/MiscMeshFactory.ts';
 import { applyViewHandTeamColor, makeViewHand } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
 import { playerMeshVisible } from '../src/client/core/corpseVisibility.ts';
+import { getShipFloorYAt } from '../src/shared/interactions.ts';
 import { readFileSync } from 'node:fs';
 
 let failures = 0;
@@ -61,6 +62,8 @@ const HEAD_TOL = 0.05;
 const STAND_HEAD = PLAYER.HEAD_Y;
 const CROUCH_HEAD = PLAYER.HEAD_Y - PLAYER.CROUCH_DROP;
 const POP_MAX_RAD = 0.35;
+/** ANIMPOL: how far a sole may be from the surface under it (PLAN §5, w9.3). */
+const DECK_TOL = 0.03;
 const MESH_BUDGET = { pirate: 26, skeleton: 26 };
 const ALLOC_MAX_B = 350;   // bytes per avatar per frame; 783 before the scratch buffers
 
@@ -137,6 +140,8 @@ function partBounds(group, pick) {
   return { min, max };
 }
 const isBoot = (o) => o.name.endsWith('boot');
+const isLeftBoot = (o) => isBoot(o) && /left/.test(o.name);
+const isRightBoot = (o) => isBoot(o) && /right/.test(o.name);
 const isLeg = (o) => o.name.endsWith('leg');
 const isHand = (o) => o.name.endsWith('hand');
 const isBody = (o) => !/health|bar/i.test(o.name) && !/health|bar/i.test(o.parent?.name ?? '');
@@ -549,6 +554,121 @@ for (const cause of ['shot', 'cutlass', 'fall']) {
   expect(`corpse (${cause}): lies on the ground — bottom ${body.min.toFixed(2)} ≥ -0.10, top ${body.max.toFixed(2)} ≤ 0.80`,
     body.min >= -0.10 && body.max <= 0.80,
     body.max > 0.8 ? 'propped: the body is still standing up off the deck' : 'sunk below the deck');
+}
+
+// ── 4. FOOT PLANT ON A REAL SURFACE (ANIMPOL / avatar-15) ──────────────────
+// avatar-15's witness: "legs swing about the hip with no ground contact solve;
+// on a rolling deck the downhill foot floats and the uphill foot sinks". The
+// animator stood every pirate on a flat plane through the group origin, so on a
+// hull heeled 0.2 rad the two boots were at the SAME height while the planking
+// under them was 5.5 cm apart.
+//
+// The plane is not this suite's opinion: it is `getShipFloorYAt`, the shared
+// function the server collides the walker against, sampled under each boot.
+console.log('\n[4. foot plant]');
+{
+  const heeled = (roll, pitch) => ({
+    id: 'deck', type: 'sloop', position: { x: 0, y: 0, z: 0 }, rotation: 0,
+    pitch, roll, angularVelocity: 0,
+  });
+  // Where a boot centre sits in the hull frame when the body faces +z at origin.
+  const planeAt = (ship, lx, lz, originY) => getShipFloorYAt(
+    { x: lx, y: originY + 0.02, z: lz }, ship,
+  ) - originY;
+
+  for (const [label, roll, pitch] of [['heeled 0.20 rad', 0.2, 0], ['storm heel 0.35 rad', 0.35, 0.06]]) {
+    const ship = heeled(roll, pitch);
+    const originY = getShipFloorYAt({ x: 0, y: 4, z: 0 }, ship);
+    const mesh = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+    mesh.position.set(0, originY, 0);
+    const player = makePlayer({ onShipId: 'deck' });
+    run(mesh, player, ship, 40);
+    mesh.updateMatrixWorld(true);
+    const soleL = partBounds(mesh, isLeftBoot).min - originY;
+    const soleR = partBounds(mesh, isRightBoot).min - originY;
+    // The plane is read RELATIVE TO ITSELF between the boots. The solve is
+    // centred on purpose: the group origin is the seat Match and PhysicsSystem
+    // agree on, and a solve that moved the body off it to chase a ramp under
+    // one toe would put a pirate somewhere the server does not have her. What
+    // it owes is the STRADDLE — that the two soles sit on the surface's slope.
+    const rawL = planeAt(ship, -AVATAR_RIG.legPivotX, AVATAR_RIG.bootZ, originY);
+    const rawR = planeAt(ship, AVATAR_RIG.legPivotX, AVATAR_RIG.bootZ, originY);
+    const planeMid = (rawL + rawR) * 0.5;
+    const planeL = rawL - planeMid;
+    const planeR = rawR - planeMid;
+    expect(`${label}: LEFT sole on the deck plane (${soleL.toFixed(3)} vs ${planeL.toFixed(3)}, |Δ| ≤ ${DECK_TOL})`,
+      Math.abs(soleL - planeL) <= DECK_TOL,
+      'the boot stands on a flat plane through the origin, not on the planking');
+    expect(`${label}: RIGHT sole on the deck plane (${soleR.toFixed(3)} vs ${planeR.toFixed(3)}, |Δ| ≤ ${DECK_TOL})`,
+      Math.abs(soleR - planeR) <= DECK_TOL,
+      'the boot stands on a flat plane through the origin, not on the planking');
+    // The pair must actually STRADDLE the slope. Two boots that are both 2.7 cm
+    // wrong in opposite directions can each squeak under a tolerance; a stance
+    // that never opens at all cannot.
+    const spread = Math.abs(soleR - soleL);
+    const want = Math.abs(planeR - planeL) * 0.8;
+    expect(`${label}: the stance straddles the slope (boot spread ${spread.toFixed(3)} ≥ ${want.toFixed(3)})`,
+      spread >= want, 'both boots sat at the same height on a tilted deck');
+  }
+
+  // Ashore: the same solve off the drawn ground sampler, on a 1-in-4 slope.
+  {
+    const mesh = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+    mesh.position.set(0, 0, 0);
+    const slope = 0.25;
+    const hillView = { ...view, groundYAt: (x) => x * slope };
+    const hillAnimator = new PlayerAnimator(hillView);
+    const player = makePlayer({});
+    for (let i = 0; i < 40; i++) { clock += 1 / 60; hillAnimator.animatePlayerMesh(mesh, player, null, 1 / 60); }
+    mesh.updateMatrixWorld(true);
+    const soleL = partBounds(mesh, isLeftBoot).min;
+    const soleR = partBounds(mesh, isRightBoot).min;
+    const mid = 0;
+    expect(`hillside 1-in-4: LEFT sole on the hill (${soleL.toFixed(3)} vs ${(-AVATAR_RIG.legPivotX * slope - mid).toFixed(3)})`,
+      Math.abs(soleL - (-AVATAR_RIG.legPivotX * slope)) <= DECK_TOL,
+      'the animator never asked the terrain how high it was under the boot');
+    expect(`hillside 1-in-4: RIGHT sole on the hill (${soleR.toFixed(3)} vs ${(AVATAR_RIG.legPivotX * slope).toFixed(3)})`,
+      Math.abs(soleR - AVATAR_RIG.legPivotX * slope) <= DECK_TOL,
+      'the animator never asked the terrain how high it was under the boot');
+  }
+
+  // Flat ground must be bit-identical to before the solve: an avatar on a deck
+  // with no attitude, and one with no ground sampler at all, may not move.
+  {
+    const flatShip = { id: 'deck', type: 'sloop', position: { x: 0, y: 0, z: 0 }, rotation: 0, pitch: 0, roll: 0, angularVelocity: 0 };
+    const originY = getShipFloorYAt({ x: 0, y: 4, z: 0 }, flatShip);
+    const mesh = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+    mesh.position.set(0, originY, 0);
+    run(mesh, makePlayer({ onShipId: 'deck' }), flatShip, 20);
+    mesh.updateMatrixWorld(true);
+    const soleL = partBounds(mesh, isLeftBoot).min - originY;
+    const soleR = partBounds(mesh, isRightBoot).min - originY;
+    expect(`flat deck: the solve is a no-op (soles ${soleL.toFixed(4)} / ${soleR.toFixed(4)} in [${BOOT_MIN}, ${BOOT_MAX}])`,
+      soleL >= BOOT_MIN && soleL <= BOOT_MAX && soleR >= BOOT_MIN && soleR <= BOOT_MAX
+        && Math.abs(soleL - soleR) < 1e-9);
+  }
+}
+
+// ── 5. WALK AND AIM AT ONCE (avatar-15: upper and lower body are welded) ────
+// "a walking gunner cannot aim". The gunner is only honest if BOTH halves move:
+// the legs must still cycle through a stride while the weapon arm is up.
+console.log('\n[5. walk + aim]');
+{
+  const mesh = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+  const player = makePlayer({ velocity: { x: 4, y: 0, z: 0 }, weapons: [pistol(), null, null, null], activeSlot: 0 });
+  const parts = mesh.userData.animation.parts;
+  let legMin = Infinity; let legMax = -Infinity; let armMin = Infinity;
+  for (let i = 0; i < 60; i++) {
+    clock += 1 / 60;
+    animator.animatePlayerMesh(mesh, player, null, 1 / 60);
+    legMin = Math.min(legMin, parts.rightLegPivot.rotation.x);
+    legMax = Math.max(legMax, parts.rightLegPivot.rotation.x);
+    armMin = Math.min(armMin, parts.rightArmPivot.rotation.x);
+  }
+  expect(`walking + aiming: the legs still cycle (right thigh swept ${(legMax - legMin).toFixed(2)} rad > 0.3)`,
+    legMax - legMin > 0.3, 'the weapon pose froze the legs — upper and lower body are welded');
+  expect(`walking + aiming: the weapon arm is raised (right shoulder ${armMin.toFixed(2)} ≤ -0.7)`,
+    armMin <= -0.7, 'the arm hung at the side while walking');
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);
