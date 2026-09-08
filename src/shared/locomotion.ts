@@ -380,3 +380,106 @@ export function stepPirate(
     k.velocity.y = PLAYER.JUMP_FORCE;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRED-01, the client half: the input ring and the rewind/replay.
+//
+// The server applies `client.lastInput` on EVERY 62.5 Hz tick until a newer
+// packet arrives — the client only sends when the input signature changes (or on
+// a heartbeat), so an "input" is a value that is IN FORCE over an interval, not
+// an event on one tick. The ring stores it that way, and the replay re-applies
+// whatever was in force at each fixed step. Anything else drifts as soon as the
+// player holds a key for longer than one send interval.
+//
+// Pure and allocation-light: recording is one push, pruning is one shift loop,
+// and the replay walks the ring with no allocation per step.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PredictedInput<I extends PirateMoveInput = PirateMoveInput> {
+  seq: number;
+  /** Server-clock seconds at which this input came into force. */
+  t: number;
+  input: I;
+}
+
+/** Above this the correction is not smoothed away, it is taken at once: past a
+ *  metre and a half the predicted body is somewhere the player can SEE it is
+ *  not, and easing there over 100 ms is worse than admitting it. */
+export const PREDICTION_HARD_SNAP_M = 1.5;
+/** The correction is bled off over this many seconds when it is small enough to
+ *  hide (a 100 ms tail is under one frame of visible slide at walking speed). */
+export const PREDICTION_ERROR_DECAY_SEC = 0.1;
+
+export class PredictionRing<I extends PirateMoveInput = PirateMoveInput> {
+  private readonly entries: PredictedInput<I>[] = [];
+  /** Hard cap so a client that never hears an ack again cannot grow without
+   *  bound: 4 s of the worst case (one input per 62.5 Hz tick) is 250. */
+  constructor(private readonly capacity = 250) {}
+
+  get size(): number { return this.entries.length; }
+
+  /** Record an input as it goes on the wire. `t` is the client's estimate of the
+   *  server clock at that moment (the same clock the ack's `t` is on). */
+  record(seq: number, t: number, input: I): void {
+    this.entries.push({ seq, t, input });
+    while (this.entries.length > this.capacity) this.entries.shift();
+  }
+
+  /** Drop everything the server has already consumed, KEEPING the acked entry
+   *  itself: it is still the input in force at the acked instant, so the replay
+   *  that starts there needs it. */
+  pruneTo(seq: number): void {
+    let keepFrom = 0;
+    for (let i = 0; i < this.entries.length; i += 1) {
+      if (this.entries[i].seq <= seq) keepFrom = i; else break;
+    }
+    if (keepFrom > 0) this.entries.splice(0, keepFrom);
+  }
+
+  clear(): void { this.entries.length = 0; }
+
+  /** The input in force at server time `t`, or null if the ring starts later. */
+  inputAt(t: number): I | null {
+    let found: I | null = null;
+    for (const entry of this.entries) {
+      if (entry.t <= t) found = entry.input; else break;
+    }
+    return found ?? (this.entries.length > 0 ? this.entries[0].input : null);
+  }
+
+  /**
+   * Rewind to the acked state and replay everything since, at the SERVER's fixed
+   * step. `state` is mutated in place; the caller seeds it from the ack.
+   *
+   * The final partial step is deliberately dropped rather than run short: the
+   * server never runs a partial tick, and a client that did would sit a fraction
+   * of a step ahead of it forever, which reads as a permanent small error the
+   * decay keeps chasing.
+   */
+  replay(
+    state: PirateMotionState,
+    fromT: number,
+    toT: number,
+    dt: number,
+    env: PirateStepEnv,
+  ): number {
+    let t = fromT;
+    let steps = 0;
+    // Bounded: a client whose clock ran away must not spin here.
+    const maxSteps = this.capacity * 2;
+    // Epsilon on the bound, not on the accumulator: `t` is walked by repeated
+    // += dt from a server timestamp, so after a few hundred steps the sum lands
+    // a few ulps ABOVE the exact multiple and the final step is silently
+    // dropped. One dropped step is one whole tick of travel — 0.088 m at
+    // MOVE_SPEED, i.e. the entire 0.05 m divergence budget, and it shows up as
+    // a body that trails its own input by a frame whenever the ack is late.
+    const bound = toT + dt * 1e-6;
+    while (t + dt <= bound && steps < maxSteps) {
+      const input = this.inputAt(t);
+      if (input) stepPirate(state, input, dt, env);
+      t += dt;
+      steps += 1;
+    }
+    return steps;
+  }
+}

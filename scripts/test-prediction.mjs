@@ -24,7 +24,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { stepPirate, isPirateGrounded } from '../src/shared/locomotion.ts';
+import { stepPirate, isPirateGrounded, PredictionRing, PREDICTION_HARD_SNAP_M } from '../src/shared/locomotion.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { getIslandSurfaceY } from '../src/shared/utils/index.ts';
@@ -262,6 +262,94 @@ console.log('\n[5] The per-client input receipt (input_ack)');
   const workerSrc = readFileSync(join(ROOT, 'src/client/network/socket.worker.ts'), 'utf8');
   expect('the socket worker coalesces receipts (a stale ack must never rewind prediction)',
     /input_ack/.test(workerSrc) && workerSrc.includes("'state_snapshot', 'state_hot', 'input_ack'"));
+}
+
+console.log('\n[6] Reconciliation — a 6-tick ack delay never shows on the body');
+{
+  const DT = 1 / 62.5;
+  const env = airborneEnv;
+  // The SERVER: applies whatever input is in force on every tick, exactly as
+  // Match does with client.lastInput.
+  const server = makeState('alive');
+  // The CLIENT: predicts forward from the last ack it heard.
+  const client = makeState('alive');
+  // THE CONTROL: today's behaviour — the body is placed at the last state the
+  // server sent and carried forward at that state's velocity, with no replay of
+  // the inputs the player has pressed since. If this does NOT diverge, the whole
+  // measurement is vacuous and the gate proves nothing.
+  const control = makeState('alive');
+  const ring = new PredictionRing();
+  const r = rng(0xac4de1);
+
+  let seq = 0;
+  let held = { forward: true, back: false, left: false, right: false, jump: false, jumpPressed: false, sailLower: false, yaw: 0.3, pitch: 0 };
+  ring.record(seq, 0, held);
+  // Delayed receipts: the ack the client acts on is 6 ticks (96 ms) old.
+  const ACK_DELAY_TICKS = 6;
+  const pending = [];
+  let worst = 0;
+  let worstControl = 0;
+  let worstAt = -1;
+  const TICKS = 600;
+  for (let i = 0; i < TICKS; i += 1) {
+    const t = i * DT;
+    // The player changes what he is holding now and then — a new seq, exactly
+    // as the client's send path stamps one when the signature changes.
+    if (r() < 0.06) {
+      seq += 1;
+      held = {
+        forward: r() < 0.6, back: r() < 0.2, left: r() < 0.25, right: r() < 0.25,
+        jump: false, jumpPressed: false, sailLower: false,
+        yaw: (r() - 0.5) * Math.PI * 2, pitch: 0,
+      };
+      ring.record(seq, t, held);
+    }
+    // Server tick.
+    stepPirate(server, held, DT, env);
+    pending.push({ at: i + ACK_DELAY_TICKS, seq, t: t + DT, pos: { ...server.position }, vel: { ...server.velocity } });
+
+    // Client: on an ack, rewind to it and replay the ring forward to NOW.
+    const due = pending.length > 0 && pending[0].at === i ? pending.shift() : null;
+    if (due) {
+      ring.pruneTo(due.seq);
+      client.position.x = due.pos.x; client.position.y = due.pos.y; client.position.z = due.pos.z;
+      client.velocity.x = due.vel.x; client.velocity.y = due.vel.y; client.velocity.z = due.vel.z;
+      ring.replay(client, due.t, t + DT, DT, env);
+      control.position.x = due.pos.x; control.position.z = due.pos.z;
+      control.velocity.x = due.vel.x; control.velocity.z = due.vel.z;
+    } else {
+      const now = ring.inputAt(t);
+      if (now) stepPirate(client, now, DT, env);
+    }
+    // The control dead-reckons at the acked velocity, like getPlayerRenderPosition does today.
+    control.position.x += control.velocity.x * DT;
+    control.position.z += control.velocity.z * DT;
+    const controlErr = Math.hypot(control.position.x - server.position.x, control.position.z - server.position.z);
+    if (i > ACK_DELAY_TICKS + 2 && controlErr > worstControl) worstControl = controlErr;
+    const err = Math.hypot(client.position.x - server.position.x, client.position.z - server.position.z);
+    // Skip the first ack window: before the first receipt lands the client has
+    // nothing to reconcile against, which is not what this measures.
+    if (i > ACK_DELAY_TICKS + 2 && err > worst) { worst = err; worstAt = i; }
+  }
+  expect(`predicted body never diverges >0.05 m under a 6-tick ack delay (worst ${worst.toFixed(4)} m at tick ${worstAt})`,
+    worst <= 0.05, `worst ${worst} m`);
+  expect(`CONTROL: dead reckoning alone DOES diverge (worst ${worstControl.toFixed(3)} m > 0.05)`,
+    worstControl > 0.05, `control worst ${worstControl} m — the tape does not move the body enough to grade anything`);
+  expect('the ring does not grow without bound', ring.size <= 250, `${ring.size} entries`);
+  expect('a hard snap threshold exists and is above the smoothable band',
+    PREDICTION_HARD_SNAP_M > 0.05 && PREDICTION_HARD_SNAP_M <= 2);
+}
+{
+  // pruneTo keeps the acked entry: it is still the input in force at the acked
+  // instant, so a replay that starts there needs it.
+  const ring = new PredictionRing();
+  const a = { forward: true, yaw: 0, pitch: 0 };
+  const b = { forward: false, back: true, yaw: 0, pitch: 0 };
+  ring.record(1, 0, a);
+  ring.record(2, 1, b);
+  ring.pruneTo(2);
+  expect('pruning to the acked seq keeps the input in force at that instant', ring.size === 1 && ring.inputAt(1) === b);
+  expect('an input before the ring start still answers (the oldest is in force)', ring.inputAt(-5) === b);
 }
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — test-prediction (${failures} failure${failures === 1 ? '' : 's'})`);
