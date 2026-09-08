@@ -47,19 +47,31 @@ for (const type of TYPES) {
   const stats = SHIP_STATS[type];
   for (const depth of [0.0, 0.4, 0.9, 1.6, 2.4]) {
     const y = SHIP_Y - depth;
-    // SERVER: the authoritative arguments (PhysicsSystem.resolveSwimmerShipCollision).
+    // The authoritative wall (PhysicsSystem.resolveSwimmerShipCollision).
     const serverT = getSwimHullVerticalT(y, SHIP_Y, stats, type);
     const serverWall = getSwimHullHalfWidth(stats, 0, MARGIN, serverT);
-    // CLIENT, as of this fix: the same arguments.
-    const clientT = getSwimHullVerticalT(y, SHIP_Y, stats, type);
-    const clientWall = getSwimHullHalfWidth(stats, 0, MARGIN, clientT);
     // CLIENT, before this fix: fallback draft, verticalT = 0.
     const oldWall = getSwimHullHalfWidth(stats, 0, MARGIN, 0);
-    worstAgreement = Math.max(worstAgreement, Math.abs(clientWall - serverWall));
     worstOldGap = Math.max(worstOldGap, Math.abs(oldWall - serverWall));
   }
 }
-expect(`client and server wall agree within 0.15 m (worst ${worstAgreement.toFixed(4)} m)`, worstAgreement < 0.15);
+// review-6 P2: this block used to ALSO compute `clientT` from the identical
+// expression one line below `serverT` and assert the two agreed within 0.15 m.
+// That number was 0 by construction whatever Game.ts did, i.e. the headline
+// assertion of the file could not fail. It is gone. What the two sides share is
+// the ARGUMENT LIST at the call site, so that is what is graded — here across
+// the two source files, and in section [4] against the exact client expression.
+const clientCall = readFileSync(join(ROOT, 'src/client/core/Game.ts'), 'utf8')
+  .match(/getSwimHullVerticalT\(([^)]*)\)/);
+const serverCall = readFileSync(join(ROOT, 'src/server/systems/PhysicsSystem.ts'), 'utf8')
+  .match(/getSwimHullVerticalT\(([^)]*)\)/);
+const argShape = (m) => (m ? m[1].split(',').map((a) => a.trim().split('.').pop()) : null);
+const clientArgs = argShape(clientCall);
+const serverArgs = argShape(serverCall);
+expect('both sides call getSwimHullVerticalT with the same four arguments',
+  !!clientArgs && !!serverArgs && clientArgs.length === 4 && serverArgs.length === 4
+  && clientArgs[1] === serverArgs[1] && clientArgs[2] === serverArgs[2] && clientArgs[3] === serverArgs[3],
+  `client(${clientArgs?.join(', ')}) vs server(${serverArgs?.join(', ')})`);
 expect(
   `CONTROL: the pre-fix client arguments DID disagree (worst ${worstOldGap.toFixed(3)} m)`,
   worstOldGap > 0.15,
