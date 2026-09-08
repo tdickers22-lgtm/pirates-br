@@ -27,7 +27,7 @@ import type { CombatFx } from './CombatFx.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
-import { stormRainIntensityAt, stormWallNearness01, stormWeatherIntensityAt } from './stormWeather.js';
+import { stormFrontShellCount, stormRainIntensityAt, stormWallNearness01, stormWeatherIntensityAt } from './stormWeather.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
 import { refreshFrozenChild, ZERO_SCALE_MAT4 } from './three-util.js';
 
@@ -186,6 +186,10 @@ const FRONT_TOP_ROOM = 1.22 + 0.55;
  *  so the change is "the bank now thickens with the weather", not "the bank
  *  moved". */
 const FRONT_FOG_GAIN = 1.16;
+/** How close to the wall the outer parallax shell is worth drawing. Past this
+ *  the bank is a horizon-band haze whose two silhouettes coincide anyway, so
+ *  the second shell is a full-ring transparent surface buying nothing. */
+const OUTER_SHELL_RANGE = 1500;
 
 const STORM_FRONT_VERT = /* glsl */`
   varying vec3 v_world;
@@ -208,6 +212,12 @@ const STORM_FRONT_FRAG = /* glsl */`
   uniform float u_fogDensity;
   uniform float u_flash;
   uniform vec2  u_flashDir;
+  /** 0 = the near shell (at the ring), 1 = the outer shell standing behind it.
+   *  One program, two materials: the outer one samples the same noise fields at
+   *  an offset, sits darker and thinner, and is 6% further out, so the two
+   *  silhouettes slide against each other as you move. That parallax is what a
+   *  cloud bank has and a single quad-thick shell does not (storm-03). */
+  uniform float u_shell;
   varying vec3  v_world;
   varying float v_h;
 
@@ -233,7 +243,7 @@ const STORM_FRONT_FRAG = /* glsl */`
   void main() {
     // Noise is sampled in WORLD xz, so it wraps around the ring by construction
     // — a uv.x-based pattern would leave a seam down one bearing of the wall.
-    vec2 fp = v_world.xz;
+    vec2 fp = v_world.xz + u_shell * 913.0;
     float y = v_world.y;
     float d = max(1.0, length(u_cam.xz - fp));
 
@@ -315,7 +325,7 @@ const STORM_FRONT_FRAG = /* glsl */`
     // Ragged underside AND ragged top: no straight cut anywhere on the silhouette.
     float bBase = baseY * (0.74 + lobe * 0.52);
     float bTop = topY * (0.80 + lobe2 * 0.42);
-    float bank = smoothstep(bBase - baseY * 0.36, bBase + baseY * 0.30, y)
+    float bankRaw = smoothstep(bBase - baseY * 0.36, bBase + baseY * 0.30, y)
                * (1.0 - smoothstep(bTop - topY * 0.12, bTop + topY * 0.55, y));
 
     // Rain curtain: scrolling columns hanging out of the bank to the water.
@@ -344,6 +354,9 @@ const STORM_FRONT_FRAG = /* glsl */`
     vec3 rainCol  = mix(u_horizon, grey, 0.35) * mix(0.160, 0.85, u_night);
     vec3 mistCol  = mix(u_horizon, grey, 0.22) * mix(0.260, 0.75, u_night);
 
+    // The far shell is a DEEPER, dimmer body of cloud: it reads as the mass
+    // behind the near edge, never as a second wall of its own.
+    float bank = bankRaw * mix(1.0, 1.14, u_shell);
     float wBank = bank * 0.88;
     float wRain = curtain * 0.55;
     float wMist = mist * 0.26;
@@ -377,7 +390,8 @@ const STORM_FRONT_FRAG = /* glsl */`
     // product was hoisted to the top of main() as rangeAtt (storm-13); this
     // is the same arithmetic, applied once.
     col = mix(col, u_fog, fogAmt * 0.85);
-    a *= rangeAtt;
+    col *= mix(1.0, 0.74, u_shell);
+    a *= rangeAtt * mix(1.0, 0.58, u_shell);
     if (a < 0.004) discard;
     gl_FragColor = vec4(col, a);
     // Same omission as the ocean's (graphics-26): a ShaderMaterial gets no tone
@@ -1546,46 +1560,68 @@ export class EnvironmentFx {
   }
 
   // ── Storm front ───────────────────────────────────────────────────────────
-  private stormFront: THREE.Mesh | null = null;
-  private stormFrontMat: THREE.ShaderMaterial | null = null;
+  //
+  // TWO NESTED SHELLS, NOT ONE (storm-03). A single open cylinder is a
+  // zero-thickness surface: it has no parallax and no top, so the moment the
+  // camera rises above the bank's own fade the silhouette IS the shell's edge —
+  // a grey rectangle with a straight top and a hard side (r3-102). The second
+  // shell stands 6% further out, samples the same noise offset by 913 m, and is
+  // darker and thinner; the two ragged crowns slide against each other as the
+  // ship moves, which is the depth cue the bank was missing.
+  //
+  // TIERS AND RANGE. Low keeps exactly what it had: ONE shell, one fbm per
+  // fragment (FRONT_CHEAP), no second draw. Balanced and high get the outer
+  // shell, and even there it is a distance LOD: deep inside the ring the bank
+  // is a horizon-band haze where a parallax layer buys nothing, so the outer
+  // shell only exists within OUTER_SHELL_RANGE of the wall.
+  private stormFrontShells: { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; outer: boolean }[] | null = null;
 
-  /** Built on first use rather than at boot: the shell only ever exists in a
-   *  match, and building it lazily keeps it off the loading path. */
-  private ensureStormFront(): THREE.Mesh {
-    if (this.stormFront) return this.stormFront;
+  /** Built on first use rather than at boot: the shells only ever exist in a
+   *  match, and building them lazily keeps them off the loading path. */
+  private ensureStormFront(): { mesh: THREE.Mesh; mat: THREE.ShaderMaterial; outer: boolean }[] {
+    if (this.stormFrontShells) return this.stormFrontShells;
     const cheap = this.view.renderer.getQuality() === 'low';
     const geo = new THREE.CylinderGeometry(1, 1, FRONT_HEIGHT, cheap ? 64 : 128, 1, true);
-    const mat = new THREE.ShaderMaterial({
-      vertexShader: STORM_FRONT_VERT,
-      fragmentShader: STORM_FRONT_FRAG,
-      defines: cheap ? { FRONT_CHEAP: '' } : {},
-      uniforms: {
-        u_cam: { value: new THREE.Vector3() },
-        u_time: { value: 0 },
-        u_intensity: { value: 0 },
-        u_night: { value: 0 },
-        u_horizon: { value: new THREE.Color(0xc7e6fa) },
-        u_fog: { value: new THREE.Color(0x7ba3bd) },
-        u_fogDensity: { value: 0.00112 },
-        u_flash: { value: 0 },
-        u_flashDir: { value: new THREE.Vector2(0, 1) },
-      },
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      fog: false,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    // The front IS the ring now — the flat textured wall/halo cylinders it used
-    // to paint over are gone. This order only has to keep it under the near-field
-    // rain (lines/haze/rings at 7-9), which falls in front of the bank.
-    mesh.renderOrder = 3;
-    mesh.frustumCulled = false;
-    mesh.visible = false;
-    this.view.renderer.scene.add(mesh);
-    this.stormFront = mesh;
-    this.stormFrontMat = mat;
-    return mesh;
+    const build = (outer: boolean) => {
+      const mat = new THREE.ShaderMaterial({
+        vertexShader: STORM_FRONT_VERT,
+        fragmentShader: STORM_FRONT_FRAG,
+        // Same source and same defines for both, so three's program cache hands
+        // them ONE program: a second shell is a second draw, not a second link
+        // (test-program-warm counts links, not meshes).
+        defines: cheap ? { FRONT_CHEAP: '' } : {},
+        uniforms: {
+          u_cam: { value: new THREE.Vector3() },
+          u_time: { value: 0 },
+          u_intensity: { value: 0 },
+          u_night: { value: 0 },
+          u_horizon: { value: new THREE.Color(0xc7e6fa) },
+          u_fog: { value: new THREE.Color(0x7ba3bd) },
+          u_fogDensity: { value: 0.00112 },
+          u_flash: { value: 0 },
+          u_flashDir: { value: new THREE.Vector2(0, 1) },
+          u_shell: { value: outer ? 1 : 0 },
+        },
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      // The front IS the ring now — the flat textured wall/halo cylinders it used
+      // to paint over are gone. This order only has to keep it under the near-field
+      // rain (lines/haze/rings at 7-9), which falls in front of the bank, and the
+      // outer shell behind the near one (both share a centre, so distance sorting
+      // ties and would otherwise be arbitrary).
+      mesh.renderOrder = outer ? 2 : 3;
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      this.view.renderer.scene.add(mesh);
+      return { mesh, mat, outer };
+    };
+    const shells = stormFrontShellCount(this.view.renderer.getQuality());
+    this.stormFrontShells = shells > 1 ? [build(false), build(true)] : [build(false)];
+    return this.stormFrontShells;
   }
 
   /** How developed the front is: always present (the ring is always there), but
@@ -1616,34 +1652,44 @@ export class EnvironmentFx {
 
   private updateStormFront() {
     if (!this.view.state) {
-      if (this.stormFront) this.stormFront.visible = false;
+      if (this.stormFrontShells) for (const s of this.stormFrontShells) s.mesh.visible = false;
       return;
     }
     const storm = this.view.state.storm;
     const radius = Math.max(16, storm.safeRadius);
-    const mesh = this.ensureStormFront();
-    const mat = this.stormFrontMat!;
-    // Sits a hair OUTSIDE the safe radius — the boundary you are judged against
-    // stays a hair inside the weather you can see — and low enough that storm
-    // troughs can't open a gap under it.
-    mesh.position.set(storm.centerX, FRONT_HEIGHT * 0.5 - FRONT_BASE_DROP, storm.centerZ);
-    mesh.scale.set(radius * 1.006, 1, radius * 1.006);
+    const shells = this.ensureStormFront();
     const atmosphere = this.view.renderer.getAtmosphere();
-    const u = mat.uniforms;
-    u.u_cam.value.copy(this.view.renderer.camera.position);
-    u.u_time.value = this.view.ocean.getTime();
-    u.u_intensity.value = this.computeStormFrontIntensity();
-    u.u_night.value = atmosphere.nightFactor;
-    (u.u_horizon.value as THREE.Color).copy(atmosphere.horizonColor);
-    (u.u_fog.value as THREE.Color).copy(atmosphere.fogColor);
-    // The bank dissolves into the SCENE's air, not its own: night and storm
-    // thicken the fog and the front thickens with them (storm-13, liveplay-14).
-    u.u_fogDensity.value = Math.max(0.0002, atmosphere.fogDensity);
-    // The strike lights the bank from inside — same envelope the sky dome and
-    // the sea glint already run off, so all three flash on the same frame.
-    u.u_flash.value = this.boltEnvelope(this.boltAge);
-    (u.u_flashDir.value as THREE.Vector2).set(this.boltDirX, this.boltDirZ);
-    mesh.visible = u.u_intensity.value > 0.01;
+    const intensity = this.computeStormFrontIntensity();
+    const flash = this.boltEnvelope(this.boltAge);
+    const time = this.view.ocean.getTime();
+    // Distance LOD for the parallax layer: from deep inside the ring the bank is
+    // a horizon-band haze and a second shell behind it is fill for nothing.
+    const wallDist = this.anchorDistanceToStormWall();
+    const outerWanted = wallDist >= 0 && wallDist < OUTER_SHELL_RANGE;
+    for (const shell of shells) {
+      const { mesh, mat } = shell;
+      // Sits a hair OUTSIDE the safe radius — the boundary you are judged against
+      // stays a hair inside the weather you can see — and low enough that storm
+      // troughs can't open a gap under it. The outer shell stands 6% further out.
+      const scale = radius * (shell.outer ? 1.06 : 1.006);
+      mesh.position.set(storm.centerX, FRONT_HEIGHT * 0.5 - FRONT_BASE_DROP, storm.centerZ);
+      mesh.scale.set(scale, 1, scale);
+      const u = mat.uniforms;
+      u.u_cam.value.copy(this.view.renderer.camera.position);
+      u.u_time.value = time;
+      u.u_intensity.value = intensity;
+      u.u_night.value = atmosphere.nightFactor;
+      (u.u_horizon.value as THREE.Color).copy(atmosphere.horizonColor);
+      (u.u_fog.value as THREE.Color).copy(atmosphere.fogColor);
+      // The bank dissolves into the SCENE's air, not its own: night and storm
+      // thicken the fog and the front thickens with them (storm-13, liveplay-14).
+      u.u_fogDensity.value = Math.max(0.0002, atmosphere.fogDensity);
+      // The strike lights the bank from inside — same envelope the sky dome and
+      // the sea glint already run off, so all three flash on the same frame.
+      u.u_flash.value = flash;
+      (u.u_flashDir.value as THREE.Vector2).set(this.boltDirX, this.boltDirZ);
+      mesh.visible = intensity > 0.01 && (!shell.outer || outerWanted);
+    }
   }
 
   updateStormRain3D(dt: number, intensity: number) {

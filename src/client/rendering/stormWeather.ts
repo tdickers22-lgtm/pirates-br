@@ -104,3 +104,17 @@ export function stormRainIntensityAt(
   const skyCap = Math.min(1, stormWeatherIntensityAt(x, z, storm, maxPhase, wallNearness) * 1.3);
   return clamp01(finite(Math.min(wanted, skyCap)));
 }
+
+/**
+ * HOW MANY STORM-FRONT SHELLS A TIER DRAWS (storm-03).
+ *
+ * One shell is a zero-thickness surface: no parallax, no top, so from any
+ * elevation the storm is a grey rectangle with a straight edge. Two nested
+ * shells at different radii with offset noise give the bank depth. The bottom
+ * tier does not pay for it — it keeps the single cheap shell it shipped with,
+ * and the far one is additionally range-gated (see OUTER_SHELL_RANGE) even on
+ * the tiers that have it.
+ */
+export function stormFrontShellCount(quality: 'low' | 'balanced' | 'high'): number {
+  return quality === 'low' ? 1 : 2;
+}

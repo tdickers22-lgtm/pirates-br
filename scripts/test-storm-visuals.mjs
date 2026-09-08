@@ -168,7 +168,7 @@ expect('storm-13 an invisible fragment is discarded before any fbm fetch',
   iDiscard > 0 && iDiscard < iFirstFbm, `discard@${iDiscard} fbm@${iFirstFbm}`);
 expect('storm-13 the bound is an EXACT upper bound (alpha is only ever scaled by it once)',
   (mainBody.match(/smoothstep\(380\.0, 1500\.0, d\)/g) || []).length === 1
-  && /a \*= rangeAtt;/.test(mainBody)
+  && /a \*= rangeAtt/.test(mainBody)
   && !/a \*= u_intensity;/.test(mainBody));
 expect('storm-13 the two detail fields are range-faded, so far fragments pay one fbm',
   /float detail = 1\.0 - smoothstep\(/.test(mainBody)
@@ -180,6 +180,31 @@ expect('storm-13/liveplay-14 the bank dissolves into the SCENE fog, not its own 
   && /u_fogDensity: \{ value:/.test(envSrc)
   && /u\.u_fogDensity\.value = Math\.max\(0\.0002, atmosphere\.fogDensity\)/.test(envSrc),
   'the front still runs off a hand-picked 0.0013/m');
+
+// ── storm-03: the bank has a body, and the bottom tier does not pay for it ──
+if (sw) {
+  expect('storm-03 low keeps ONE shell, balanced and high get the parallax pair',
+    sw.stormFrontShellCount?.('low') === 1
+    && sw.stormFrontShellCount?.('balanced') === 2
+    && sw.stormFrontShellCount?.('high') === 2,
+    `${sw.stormFrontShellCount?.('low')}/${sw.stormFrontShellCount?.('balanced')}/${sw.stormFrontShellCount?.('high')}`);
+}
+expect('storm-03 the renderer builds its shells from that table',
+  /stormFrontShellCount\(this\.view\.renderer\.getQuality\(\)\)/.test(envSrc));
+expect('storm-03 the outer shell stands further out, samples offset noise, and is darker and thinner',
+  /uniform float u_shell;/.test(frag)
+  && /v_world\.xz \+ u_shell \* /.test(frag)
+  && /col \*= mix\(1\.0, 0\.74, u_shell\);/.test(frag)
+  && /a \*= rangeAtt \* mix\(1\.0, 0\.58, u_shell\);/.test(frag)
+  && /shell\.outer \? 1\.06 : 1\.006/.test(envSrc));
+expect('storm-03 the outer shell is range-gated even on the tiers that have it',
+  /const OUTER_SHELL_RANGE = \d+;/.test(envSrc)
+  && /wallDist < OUTER_SHELL_RANGE/.test(envSrc)
+  && /!shell\.outer \|\| outerWanted/.test(envSrc));
+expect('storm-03 both shells share one program (same source, same defines)',
+  (envSrc.match(/defines: cheap \? \{ FRONT_CHEAP: '' \} : \{\}/g) || []).length === 1
+  && /const build = \(outer: boolean\)/.test(envSrc)
+  && /mesh\.renderOrder = outer \? 2 : 3;/.test(envSrc));
 
 console.log(failures === 0 ? `\nPASS storm visuals (${failures} failures)` : `\nFAIL storm visuals (${failures} failures)`);
 process.exit(failures === 0 ? 0 : 1);
