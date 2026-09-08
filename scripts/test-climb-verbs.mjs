@@ -28,7 +28,8 @@ console.log('Climb verbs ([X] → interactIntent → server grant)');
     (types.match(/export type InteractIntent =([\s\S]*?);/)?.[1] ?? '')
       .split('|').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean),
   );
-  const match = readFileSync(new URL('../src/server/core/Match.ts', import.meta.url), 'utf8');
+  // ONLINE-01 moved the whitelist to the wire validator; the contract is the same.
+  const match = readFileSync(new URL('../src/server/net/validate.ts', import.meta.url), 'utf8');
   const whitelisted = new Set(
     (match.match(/VALID_INTERACT_INTENTS[^=]*=\s*new Set<InteractIntent>\(\[([\s\S]*?)\]\)/)?.[1] ?? '')
       .split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean),

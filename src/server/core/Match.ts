@@ -80,6 +80,7 @@ import {
   isStandingInShipHold,
 } from '../../shared/interactions.js';
 import { stepPirate } from '../../shared/locomotion.js';
+import { sanitizePlayerInput } from '../net/validate.js';
 
 // Weathered banner dyes — team identity without the LED-strip look.
 const TEAM_COLORS = [
@@ -467,11 +468,6 @@ function berthShiftLadder(dockLength: number): number[] {
   for (let d = 0.75; d <= reach; d += 0.75) shifts.push(d, -d);
   return shifts;
 }
-const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<InteractIntent>([
-  'barrel', 'chest', 'board', 'dock', 'mermaid', 'keg_diffuse', 'upgrade',
-  'gold_hoarder', 'stow_chest', 'helm', 'sails', 'brace',
-  'crow', 'anchor', 'repair', 'bail', 'revive', 'cannon', 'ammo',
-]);
 
 export class Match {
   readonly id: string;
@@ -2385,72 +2381,11 @@ export class Match {
    * dropped) when any required numeric is non-finite. Enum-ish fields fall back
    * to null rather than rejecting the whole packet.
    */
+  /** ONLINE-01: the shape check itself lives in src/server/net/validate.ts, so
+   *  the lobby boundary and the sim agree on one definition. Kept as a method
+   *  because test-server-fixes drives it through a Match instance. */
   private sanitizeInput(raw: unknown): PlayerInput | null {
-    if (typeof raw !== 'object' || raw === null) return null;
-    const input = raw as Record<keyof PlayerInput, unknown>;
-    const seq = input.seq;
-    const yaw = input.yaw;
-    const pitch = input.pitch;
-    if (typeof seq !== 'number' || !Number.isFinite(seq)) return null;
-    if (typeof yaw !== 'number' || !Number.isFinite(yaw)) return null;
-    if (typeof pitch !== 'number' || !Number.isFinite(pitch)) return null;
-
-    const slot = input.slot === 0 || input.slot === 1 || input.slot === 2 || input.slot === 3
-      ? input.slot
-      : null;
-    const wheelIndex = typeof input.wheelIndex === 'number'
-      && Number.isInteger(input.wheelIndex)
-      && input.wheelIndex >= 0
-      && input.wheelIndex <= 9
-      ? input.wheelIndex
-      : null;
-    const cannonAmmo = input.cannonAmmo === 'cannonball' || input.cannonAmmo === 'firebomb' || input.cannonAmmo === 'chainshot'
-      ? input.cannonAmmo
-      : null;
-    const interactIntent = typeof input.interactIntent === 'string'
-      && VALID_INTERACT_INTENTS.has(input.interactIntent as InteractIntent)
-      ? input.interactIntent as InteractIntent
-      : null;
-
-    return {
-      seq,
-      ts: typeof input.ts === 'number' && Number.isFinite(input.ts) ? input.ts : 0,
-      forward: !!input.forward,
-      back: !!input.back,
-      left: !!input.left,
-      right: !!input.right,
-      jump: !!input.jump,
-      jumpPressed: !!input.jumpPressed,
-      fire: !!input.fire,
-      useItem: !!input.useItem,
-      crouch: !!input.crouch,
-      aim: !!input.aim,
-      interact: !!input.interact,
-      interactHeld: !!input.interactHeld,
-      anchor: !!input.anchor,
-      sailRaise: !!input.sailRaise,
-      sailLower: !!input.sailLower,
-      sailLeft: !!input.sailLeft,
-      sailRight: !!input.sailRight,
-      trade: !!input.trade,
-      reload: !!input.reload,
-      placeKeg: !!input.placeKeg,
-      dropChest: !!input.dropChest,
-      specialAttack: !!input.specialAttack,
-      slot,
-      cannonAmmo,
-      yaw: angleWrap(yaw),
-      pitch: clamp(pitch, -Math.PI / 2, Math.PI / 2),
-      wheelIndex,
-      useWheelItem: !!input.useWheelItem,
-      barrelTakeAll: !!input.barrelTakeAll,
-      interactIntent,
-      // Quest-map equip rode in the payload but was dropped here, so the
-      // selectMap one-shot on the other side could never fire.
-      selectMap: typeof input.selectMap === 'string' && input.selectMap.length <= 64
-        ? input.selectMap
-        : null,
-    };
+    return sanitizePlayerInput(raw);
   }
 
   private applyInput(client: ConnectedClient, input: PlayerInput, dt: number) {
