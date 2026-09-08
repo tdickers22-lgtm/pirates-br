@@ -1,9 +1,9 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent,
+  Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -409,6 +409,8 @@ const INTERACT_REFUSAL_INTERVAL = 0.7;
  *  physics tick, so validating one instantaneous press ate 8 presses in a row
  *  ("14 seconds of dead X at a visible Climb Ladder prompt"). */
 const BOARD_LATCH_TIME = 2.0;
+/** Kegs a pirate may carry off the Tallyman's table (ECON-01 shop line). */
+const TALLYMAN_KEG_CAP = 2;
 /** Feet on your own deck for this long with the server still calling you
  *  un-boarded (walking up the dock gangway) → you are aboard. */
 const DECK_AUTO_BOARD_TIME = 0.5;
@@ -1839,6 +1841,13 @@ export class Match {
       case 'player_input': {
         const input = this.sanitizeInput(msg.payload);
         if (input) client.lastInput = this.carryUnreadOneShots(client, input);
+        break;
+      }
+      case 'shop_buy': {
+        const p = msg.payload as { line?: unknown } | null;
+        if (!p || typeof p !== 'object' || typeof p.line !== 'string') break;
+        const player = this.state.players.find((c) => c.id === client.playerId);
+        if (player) this.buyFromTallyman(player, p.line as ShopLine);
         break;
       }
       case 'trade_action': {
@@ -3585,6 +3594,87 @@ export class Match {
         payload: { playerId: player.id, chestId, value, action: 'drop' },
       });
     }
+  }
+
+  /**
+   * THE TALLYMAN'S TABLE — gold's second sink (ECON-01, gameplay-30).
+   *
+   * Before this, gold bought exactly one thing (the Iron Cuirass) and otherwise
+   * sat on a scoreboard: a crew banked 1,265 g over a whole match and had
+   * nowhere to spend a coin of it. Every line is priced under one mean chest
+   * sale on purpose — this is a between-fights top-up, not a second win
+   * condition — and the whole table is deliberately reachable by BOTS too
+   * (6.2 spends on planks and shot through this exact method), so an economy
+   * that only humans can enter never happens again.
+   *
+   * Returns false and refuses out loud when the pirate is not at a hoarder, is
+   * short of coin, or the line does nothing for her right now.
+   */
+  buyFromTallyman(player: Player, line: ShopLine): boolean {
+    const price = SHOP_PRICES[line];
+    if (price == null) return this.refuseShop(player, line, 'no_such_line');
+    const hoarder = findNearbyGoldHoarder(this.state.islands, player);
+    if (!hoarder) return this.refuseShop(player, line, 'no_tallyman');
+    if (player.gold < price) return this.refuseShop(player, line, 'not_enough_gold');
+    const ship = player.onShipId ? this.getAliveShip(player.onShipId) : this.getAliveShip(player.shipId);
+
+    let qty = SHOP_QUANTITIES[line] ?? 1;
+    if (line === 'cuirass') {
+      if (player.armor >= PLAYER.MAX_ARMOR * 0.5) return this.refuseShop(player, line, 'armor_full');
+      player.armor = PLAYER.MAX_ARMOR;
+      qty = 1;
+    } else if (line === 'hull_refit') {
+      // Bought for the hull you are standing on, or your own if she is moored
+      // alongside: the breaches close, the bilge is not touched.
+      if (!ship || ship.holes.every((hole) => hole.patched)) return this.refuseShop(player, line, 'hull_sound');
+      qty = ship.holes.filter((hole) => !hole.patched).length;
+      for (const hole of ship.holes) hole.patched = true;
+    } else if (line === 'sail_refit') {
+      if (!ship || ship.sailIntegrity >= 0.999) return this.refuseShop(player, line, 'sails_sound');
+      ship.sailIntegrity = 1;
+      qty = 1;
+    } else if (line === 'powder_keg') {
+      // A keg is carried, not stowed: the pirate leaves the table with it.
+      if (player.kegs >= TALLYMAN_KEG_CAP) return this.refuseShop(player, line, 'keg_full');
+      player.kegs += qty;
+    } else if (line === 'banana') {
+      player.pocketBanana += qty;
+    } else {
+      if (!ship) return this.refuseShop(player, line, 'no_hull');
+      this.addShipStack(ship, line as ItemType, qty);
+    }
+
+    player.gold -= price;
+    const client = this.clients.get(player.id);
+    if (client) {
+      this.send(client.ws, {
+        type: 'shop_bought',
+        ts: Date.now(),
+        payload: { line, price, qty, gold: player.gold, ok: true },
+      });
+    }
+    return true;
+  }
+
+  /** A dead purchase answers out loud, on the same message the sale uses. */
+  private refuseShop(player: Player, line: ShopLine, reason: string): false {
+    const client = this.clients.get(player.id);
+    if (client && this.t - client.lastRefusalAt >= INTERACT_REFUSAL_INTERVAL) {
+      client.lastRefusalAt = this.t;
+      this.send(client.ws, {
+        type: 'shop_bought',
+        ts: Date.now(),
+        payload: { line, price: SHOP_PRICES[line] ?? 0, qty: 0, gold: player.gold, ok: false, reason },
+      });
+    }
+    return false;
+  }
+
+  /** Add to a hull's deck stacks, merging with an existing stack of the item. */
+  private addShipStack(ship: Ship, item: ItemType, qty: number): void {
+    const stack = ship.inventory.find((entry) => entry.item === item);
+    if (stack) stack.qty += qty;
+    else ship.inventory.push({ item, qty });
   }
 
   private handleGoldHoarderInteraction(player: Player): boolean {

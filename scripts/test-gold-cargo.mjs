@@ -209,8 +209,12 @@ console.log('\n3. Match weighs every hold, and the HUD number is the crew total'
   match.updateCargoAndBounty();
   expect('banked gold over the line becomes hold cargo on the hull',
     ship.cargoGold === 2200, `cargoGold=${ship.cargoGold}`);
+  // ECON-01 re-pin: the tier floors moved to [1,700,1800,3200] against a 4500 g
+  // full load, so 2200 g of cargo now reads DEEP-LADEN where it used to read
+  // laden. The assertion that matters is unchanged — a purse this size is a
+  // visible, high hold tier, not a number on a scoreboard.
   expect('the hold reads as a tier, not a number',
-    cargoTierLabel(ship.cargoGold) === 'laden', cargoTierLabel(ship.cargoGold));
+    cargoTierLabel(ship.cargoGold) === 'deep-laden', cargoTierLabel(ship.cargoGold));
 
   // Crew gold is a CREW total: a second pirate's purse rides the same hull.
   const mate = st.players.find((p) => p.isBot && p.shipId !== ship.id);
@@ -347,7 +351,7 @@ console.log('\n5. Divability — a swimmer who reaches the wreck banks it');
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-console.log('\n6. Bounty — past 60% of the target, the leader is the hunted');
+console.log("\n6. Bounty — past 42% of the target, the leader is the hunted");
 
 {
   const match = liveMatch('cargo-bounty', 3);
@@ -356,8 +360,13 @@ console.log('\n6. Bounty — past 60% of the target, the leader is the hunted');
   const leader = st.players.find((p) => p.id === joined.playerId);
   const ship = st.ships.find((s) => s.id === joined.shipId);
 
-  expect('the bounty line is 60% of the win target',
-    bountyThresholdGold() === Math.ceil(ECONOMY.GOLD_WIN_TARGET * 0.6),
+  // ECON-01 re-pin: 60% of the target was 5,400 g in a match whose LEADER
+  // banked 1,265 g — the bounty never once fired. It is now BOUNTY_RATIO 0.42
+  // of an 8,000 g target, and the second clause is the part that failed live:
+  // the line has to sit inside what a good crew actually earns.
+  expect('the bounty line is 42% of the win target and reachable in an arc',
+    bountyThresholdGold() === Math.ceil(ECONOMY.GOLD_WIN_TARGET * CARGO.BOUNTY_RATIO)
+    && bountyThresholdGold() <= 3500,
     `${bountyThresholdGold()}`);
 
   const broadcasts = [];

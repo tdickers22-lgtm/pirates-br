@@ -78,7 +78,7 @@ export const PLAYER = {
   HEADSHOT_GOLD_BONUS: 40,
   BOARDING_KILL_HEAL: 25,
   BOARDING_GOLD_STEAL_CAP: 180,
-  STARTING_KEGS: 2,
+  STARTING_KEGS: 1,
   KEG_REPLENISH_COOLDOWN: 60,
 } as const;
 
@@ -111,7 +111,7 @@ export const DBNO = {
 } as const;
 
 export const ECONOMY = {
-  GOLD_WIN_TARGET: 9000,
+  GOLD_WIN_TARGET: 8000,
   PLAYER_HIT_GOLD_MIN: 6,
   PLAYER_HIT_GOLD_MAX: 30,
   PLAYER_HIT_GOLD_RATIO: 0.18,
@@ -124,6 +124,57 @@ export const ECONOMY = {
   ARMOR_PRICE: 1200,
 } as const;
 
+// ── The Tallyman's table: gold's SECOND sink ─────────────────
+// Before ECON-01 gold bought exactly one thing (the Iron Cuirass at 1200) and
+// otherwise sat on a scoreboard. A price list turns every chest into a decision
+// at the hoarder's table, and gives the bots something to spend on (6.2 buys
+// planks and shot off this same table). Every line is priced UNDER one mean
+// chest sale on purpose: the shop is a between-fights top-up, not a second
+// win condition. Quantities are per purchase.
+export const SHOP_PRICES = {
+  wood_plank: 45,
+  cannonball: 30,
+  chainshot: 90,
+  firebomb_ball: 130,
+  powder_keg: 320,
+  banana: 35,
+  /** Hull repair: patches every open breach on the moored hull at once. */
+  hull_refit: 600,
+  /** Restores sailIntegrity to 1 after chainshot. */
+  sail_refit: 380,
+  /** The Iron Cuirass (ECONOMY.ARMOR_PRICE keeps the legacy name). */
+  cuirass: 1200,
+} as const;
+export type ShopLine = keyof typeof SHOP_PRICES;
+/** Units delivered per purchase of a stackable line. */
+export const SHOP_QUANTITIES: Partial<Record<ShopLine, number>> = {
+  wood_plank: 3,
+  cannonball: 6,
+  chainshot: 2,
+  firebomb_ball: 1,
+  powder_keg: 1,
+  banana: 2,
+};
+
+// ── The gear-up beat: a hull sails HUNGRY ────────────────────
+// gameplay-23: a fresh hull used to carry 48 balls, 16 planks, 14 chainshot and
+// 4 firebombs — more ordnance than a whole match consumes — so the first minute
+// had no reason to touch land and the supply barrels ashore were decoration.
+// The spawn kit is now a starter and the LANDING STORES ashore are the make-up:
+// every dock island is guaranteed at least LANDING_STORES_MIN, so "go ashore and
+// stock up" is always a real, satisfiable opening move (never a dead run).
+export const SHIP_SPAWN_STORES = {
+  cannonball: 12,
+  wood_plank: 6,
+  chainshot: 0,
+  firebomb_ball: 0,
+  banana: 2,
+} as const;
+export const LANDING_STORES_MIN = {
+  cannonball: 6,
+  wood_plank: 3,
+} as const;
+
 // ── Hold cargo: the gold race made PHYSICAL ──────────────────
 // The 9000g win target used to be an invisible number on a scoreboard. Past
 // SAFE_GOLD a crew's winnings stop being pocket coin and become CARGO: crates
@@ -133,19 +184,19 @@ export const ECONOMY = {
 // taken by the world — a bad night never zeroes a pirate.
 export const CARGO = {
   /** Banked gold at or below this is safe pocket coin: no weight, no spill. */
-  SAFE_GOLD: 1500,
+  SAFE_GOLD: 500,
   /** Cargo gold that reads as a completely full hold (target minus the safe
    *  pocket) — the ballast/steal curves normalize against this. */
-  FULL_LOAD: 7500,
+  FULL_LOAD: 4500,
   /** Top-speed penalty a completely full hold costs. The leader is catchable. */
   MAX_BALLAST_PENALTY: 0.14,
   /** Cargo-gold floors for hold tiers 1..4 (tier 0 = trim, an empty hold). */
-  TIER_THRESHOLDS: [1, 1500, 3400, 5400] as readonly number[],
+  TIER_THRESHOLDS: [1, 700, 1800, 3200] as readonly number[],
   /** Share of a crew's CARGO gold that spills into the shallows when she
    *  founders. Half stays with the swimming crew — sinking is not a wipe. */
   SPILL_FRACTION: 0.5,
   /** Hard ceiling on what one wreck can put on the seabed. */
-  SPILL_MAX: 2400,
+  SPILL_MAX: 1600,
   /** A spill breaks into at most this many divable pieces. */
   SPILL_PIECES_MAX: 6,
   /** Never split a spill into pieces smaller than this. */
@@ -164,10 +215,10 @@ export const CARGO = {
    *  cargo rides it. Oldest are culled first. */
   SPILL_WORLD_MAX: 24,
   /** Crew gold, as a share of GOLD_WIN_TARGET, that raises a map-wide bounty. */
-  BOUNTY_RATIO: 0.6,
+  BOUNTY_RATIO: 0.42,
   /** The bounty only lifts once the crew falls back below this share —
    *  hysteresis, so a leader hovering at the line doesn't strobe the map. */
-  BOUNTY_CLEAR_RATIO: 0.55,
+  BOUNTY_CLEAR_RATIO: 0.38,
   /** Boarding steal cap multiplier against a completely full hold: a laden
    *  leader is worth boarding, which is the counterplay to the ballast. */
   STEAL_LADEN_MULT: 4,

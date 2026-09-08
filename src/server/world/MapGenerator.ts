@@ -8,7 +8,7 @@ import type {
 } from '../../shared/types/index.js';
 import {
   BERTH, SHIP, WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS,
-  SEA_POI, WRECK_EVENT, WRECK_SUPPLY_TABLE, PLAYER,
+  SEA_POI, WRECK_EVENT, WRECK_SUPPLY_TABLE, PLAYER, SHIP_SPAWN_STORES, LANDING_STORES_MIN,
 } from '../../shared/constants/index.js';
 // The cast's names and spoken lines are a RENDERED SURFACE (nameplate, cutscene
 // card, banner), so every proper noun in them comes from the display layer —
@@ -1744,6 +1744,7 @@ export class MapGenerator {
     // across the dock's own shore ray, inside the first thing anyone looks at.
     // Appended AFTER the scatter loop so the existing rng ladder — and every
     // island's existing barrel placement — is bit-identical to before.
+    const landingStoreStart = barrels.length;
     if (island.dock) {
       const shoreAngle = island.dock.shoreAngle;
       const spots: Array<[number, number]> = [[-0.30, 0.845], [0.28, 0.855], [0.02, 0.775]];
@@ -1756,6 +1757,26 @@ export class MapGenerator {
           opened: false,
           loot: this.rollBarrelLoot(rng),
         });
+      }
+      // ECON-01: the landing stores are the MAKE-UP for the thin spawn kit, so
+      // the first run ashore can never be a dead run. The loot rolls above are
+      // still whatever the seeded table gave; this only tops the pier-head
+      // stores up to LANDING_STORES_MIN in total. It draws no rng, so every
+      // island's placement ladder stays bit-identical.
+      const landed = barrels.slice(landingStoreStart);
+      if (landed.length > 0) {
+        for (const [item, floor] of Object.entries(LANDING_STORES_MIN) as Array<[ItemType, number]>) {
+          let held = 0;
+          for (const barrel of landed) {
+            for (const stack of barrel.loot) if (stack.item === item) held += stack.qty;
+          }
+          if (held >= floor) continue;
+          const deficit = floor - held;
+          const target = landed[0];
+          const existing = target.loot.find((stack) => stack.item === item);
+          if (existing) existing.qty += deficit;
+          else target.loot.push({ item, qty: deficit });
+        }
       }
     }
     return barrels;
@@ -2703,14 +2724,15 @@ export class MapGenerator {
       sailRepairWoodTimer: 0,
       gold: 0,
       treasureChestIds: [],
-      // SoT-style: most cannon ordnance lives in deck barrels (represented as ship stacks)
-      inventory: [
-        { item: 'cannonball', qty: 48 },
-        { item: 'wood_plank', qty: 16 },
-        { item: 'banana', qty: 5 },
-        { item: 'firebomb_ball', qty: 4 },
-        { item: 'chainshot', qty: 14 },
-      ],
+      // SoT-style: most cannon ordnance lives in deck barrels (represented as
+      // ship stacks). ECON-01: the kit is a STARTER, not a magazine — the old
+      // 48/16/14/4 was more ordnance than a whole match spends, so the first
+      // minute had no reason to touch land. Empty stacks are dropped so a hull
+      // genuinely carries no chainshot and no firebombs until someone lands for
+      // them (or buys them off the Tallyman).
+      inventory: (Object.entries(SHIP_SPAWN_STORES) as Array<[ItemType, number]>)
+        .filter(([, qty]) => qty > 0)
+        .map(([item, qty]) => ({ item, qty })),
       repairCooldown: 0,
       autoRepairProgress: 0,
       teamColor,
