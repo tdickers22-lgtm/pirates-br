@@ -796,6 +796,16 @@ export interface Shark {
   lungeDirX: number;
   lungeDirZ: number;
   targetId: string | null;
+  /** Where this shark took its current target: the leash anchor (SHARK-01).
+   *  Optional so a pre-leash snapshot still type-checks; the server normalises
+   *  it to the shark's own position on the first tick it hunts. */
+  anchorX?: number;
+  anchorZ?: number;
+  /** Seconds with no swimmer to hunt — the despawn clock (bots-10). */
+  idleTime?: number;
+  /** Set when the shark has given up: counts down while the client fades it,
+   *  spliced out of state.sharks at 0. Absent on a live shark. */
+  despawnTimer?: number;
 }
 
 export interface GameState {

@@ -614,6 +614,30 @@ export const SHARK = {
   HIT_RADIUS: 1.25,
   SPAWN_MIN_DIST: 26,
   SPAWN_MAX_DIST: 52,
+  /** A shark swims just UNDER the drawn sea, and the drawn sea moves: y is
+   *  gerstnerHeight(x,z,t) - SURFACE_DEPTH every tick (physics-29). */
+  SURFACE_DEPTH: 0.25,
+  /** Distance from where a shark took its target after which it breaks off and
+   *  leaves. CHASE_SPEED > PLAYER.SWIM_SPEED, so this leash is the ONLY way a
+   *  swimmer outruns one: open 60 m of chase and the fin turns away. */
+  LEASH_RANGE: 60,
+  /** With no swimmer to hunt for this long, or with every swimmer this far off,
+   *  a shark fades out and frees its slot in MAX_WORLD (bots-10). */
+  DESPAWN_IDLE_TIME: 40,
+  DESPAWN_RANGE: 180,
+  /** Seconds the shark glides while the client fades it out. */
+  DESPAWN_FADE: 1.2,
+  /** Two fins, two sharks (liveplay-12): pairs inside SEPARATION_RANGE are
+   *  pushed apart to it, and the second jaw waits half a cooldown. */
+  SEPARATION_RANGE: 4,
+  SEPARATION_PUSH: 2,
+  /** Clearance a shark keeps from a hull's swim footprint and a sea rock. */
+  HULL_MARGIN: 0.6,
+  ROCK_MARGIN: 0.8,
+  /** ONE margin for the spawn test and the inland shove. They were 2.8 and 4,
+   *  so a shark could spawn into the band it is shoved out of next tick
+   *  (bots-18). */
+  SHORE_MARGIN: 4,
 } as const;
 
 export const WILDLIFE = {
