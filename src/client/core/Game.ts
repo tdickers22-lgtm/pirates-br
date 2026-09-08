@@ -44,7 +44,7 @@ import { playerMeshVisible } from './corpseVisibility.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import {
   CORPSE_FADE_START, CORPSE_LIFETIME, PlayerAnimator,
-  type CorpseState, type DeathCause, type PlayerAnimatorView,
+  type CorpseState, type DeathCause, type PlayerAnimatorView, type RemoteAnimPose,
 } from '../rendering/PlayerAnimator.js';
 import { ViewmodelController, type ViewmodelView } from '../rendering/ViewmodelController.js';
 import { InteractionPrompts, type InteractionView } from '../systems/InteractionPrompts.js';
@@ -68,6 +68,16 @@ const ZERO_MOVE_AXES = Object.freeze({ x: 0, z: 0 });
 /** Reused by updateHudAnchor: one Vector3 for every nameplate and health bar in
  *  the match, because this runs per body per frame. */
 const HUD_ANCHOR_SCRATCH = new THREE.Vector3();
+/** One RemoteAnimPose for the whole match: syncPlayers reads it and hands it
+ *  straight to the animator inside the same iteration, so a per-player object
+ *  here would be pure per-frame garbage (thirteen a frame). */
+const REMOTE_ANIM_SCRATCH: RemoteAnimPose = { pitch: 0, vx: 0, vz: 0 };
+function REMOTE_ANIM_SCRATCH_SET(pitch: number, vx: number, vz: number): RemoteAnimPose {
+  REMOTE_ANIM_SCRATCH.pitch = pitch;
+  REMOTE_ANIM_SCRATCH.vx = vx;
+  REMOTE_ANIM_SCRATCH.vz = vz;
+  return REMOTE_ANIM_SCRATCH;
+}
 /** Seconds of fuse hiss per burst; re-armed until the keg blows (SHIP.KEG_FUSE_TIME
  *  is 10s). Short bursts keep the sound tracking a keg that rides a turning deck,
  *  and stay inside SoundEngine.playKegFuse's per-call duration clamp. */
@@ -4481,6 +4491,8 @@ export class Game {
       }
 
       const isLocal = player.id === this.localPlayerId;
+      // Your first-person sleeves wear your crew's colour too (avatar-18).
+      if (isLocal && !playerIsSkeleton) this.viewmodel.setLocalCrewColor(playerTeamColor);
       // Nameplate: shown for living opponents within ~85m, hidden when downed/gone.
       const plate = mesh.userData.nameplate as THREE.Sprite | undefined;
       if (plate) {
@@ -4555,11 +4567,42 @@ export class Game {
         : (player.cannonBallistic ? 120 : onIslandFoot ? 38 : player.state === 'swimming' ? 72 : 32);
       const positionAlpha = 1 - Math.exp(-(basePosRate + boost) * dt);
       const rotationAlpha = 1 - Math.exp(-18 * dt);
-      const targetYaw = player.atHelm && ship
-        ? ship.rotation
-        : isLocal
-          ? this.input.getYaw()
-          : player.rotation.x;
+      // ── WHICH WAY HIS BODY FACES, and on which clock (avatar-25, avatar-07).
+      //
+      // The position comes off the interpolation buffer (1-2 snapshots behind)
+      // and the yaw used to come off the NEWEST raw snapshot, so a remote in an
+      // orbit-strafe rotated ahead of his own translation: the feet slid
+      // sideways relative to the facing and a lunge read in the wrong direction.
+      // The interpolated yaw was already in the ring and simply discarded.
+      //
+      // Then the body no longer chases the look yaw one-for-one. A pirate turns
+      // his HEAD first and his shoulders only when he has to — the body holds
+      // until the head is more than 0.6 rad off, then swings until it is back
+      // inside 0.5, and moving bodies always face where they are going. That is
+      // what makes the head angle mean something instead of being the easing
+      // residual it used to be.
+      const remotePose = isLocal ? null : this.clientState.remote.poseAt(`P:${player.id}`, performance.now());
+      const remoteAnim = remotePose
+        ? REMOTE_ANIM_SCRATCH_SET(remotePose.pitch, remotePose.vx, remotePose.vz)
+        : null;
+      const lookYaw = isLocal ? this.input.getYaw() : remotePose?.yaw ?? player.rotation.x;
+      let targetYaw: number;
+      if (player.atHelm && ship) {
+        targetYaw = ship.rotation;
+      } else if (isLocal) {
+        targetYaw = lookYaw;
+      } else {
+        const bodyMoving = remoteAnim
+          ? Math.hypot(remoteAnim.vx, remoteAnim.vz) > 0.4
+          : Math.hypot(player.velocity.x, player.velocity.z) > 0.4;
+        const off = angleWrap(lookYaw - mesh.rotation.y);
+        const held = (mesh.userData.bodyYawHeld as boolean | undefined) ?? false;
+        const turning = bodyMoving || Math.abs(off) > 0.6 || (held && Math.abs(off) > 0.5);
+        mesh.userData.bodyYawHeld = turning;
+        targetYaw = turning
+          ? (bodyMoving ? lookYaw : lookYaw - Math.sign(off) * 0.5)
+          : mesh.rotation.y;
+      }
       const isSkeleton = mesh.userData.animation?.variant === 'skeleton';
       const lastState = mesh.userData.lastState as Player['state'] | undefined;
       const isDead = player.state === 'eliminated' || player.state === 'respawning';
@@ -4752,7 +4795,7 @@ export class Game {
       if (skeletonDeathVisible) {
         this.anim.animateSkeletonDeath(mesh);
       } else {
-        this.anim.animatePlayerMesh(mesh, player, ship, dt);
+        this.anim.animatePlayerMesh(mesh, player, ship, dt, remoteAnim);
       }
       this.updateHudAnchor(mesh, healthBar?.root, plate);
       this.viewmodel.syncHeldWeapon(mesh, player);
@@ -4973,10 +5016,29 @@ export class Game {
     if (prevHealth === undefined) return;
     const drop = prevHealth - player.health;
     if (drop < 5 || player.state === 'eliminated' || player.state === 'respawning') return;
+    // WHICH WAY HE WAS HIT FROM (avatar-09). The doc comment on the animator's
+    // reaction says "directional"; the yaw it was fed was a coin flip, so a
+    // pirate shot from the left could twist right. lastDamagedById is already on
+    // the wire and this map already holds every body's drawn position.
+    const attacker = player.lastDamagedById ? this.playerMeshes.get(player.lastDamagedById) : undefined;
+    let flinchYaw: number;
+    if (attacker && attacker !== mesh) {
+      flinchYaw = angleWrap(Math.atan2(
+        attacker.position.x - mesh.position.x,
+        attacker.position.z - mesh.position.z,
+      ) - mesh.rotation.y);
+      // Read as a twist, not a spin: a hit from dead ahead or dead astern still
+      // has to move the torso somewhere.
+      flinchYaw = THREE.MathUtils.clamp(flinchYaw, -1.2, 1.2);
+    } else {
+      // Cannon fire, drowning, fall damage, a shooter we have never seen: no
+      // direction exists, so keep the old coin flip rather than invent one.
+      flinchYaw = (Math.random() - 0.5) * 0.8;
+    }
     mesh.userData.flinch = {
       t: 0,
       mag: THREE.MathUtils.clamp(drop / 40, 0.3, 1),
-      yaw: (Math.random() - 0.5) * 0.8,
+      yaw: flinchYaw,
     };
     if (isLocal) {
       this.cameraShake = Math.min(1, this.cameraShake + THREE.MathUtils.clamp(drop / 90, 0.05, 0.3));

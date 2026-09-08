@@ -12,7 +12,7 @@ import type { InputManager } from '../input/InputManager.js';
 import type { MapRenderer } from '../ui/MapRenderer.js';
 import { applyViewmodelMaterialSettings, makeHeldWeaponMesh, makePocketPreviewMesh, type PocketPreviewKind } from './factories/WeaponMeshFactory.js';
 import { makeCarpentersHammerMesh } from './factories/MiscMeshFactory.js';
-import { makeViewHand } from './factories/PlayerMeshFactory.js';
+import { makeViewHand, applyViewHandTeamColor } from './factories/PlayerMeshFactory.js';
 import { registerBudgetLight } from './LightBudget.js';
 import { CUTLASS_VIEW_CHARGE_TIME } from './PlayerAnimator.js';
 import type { CombatFx } from './CombatFx.js';
@@ -265,8 +265,25 @@ export class ViewmodelController {
    */
   private static readonly HAND_RENDER_ORDER = 1004;
 
+  /** The crew colour the world coat is wearing, once Game knows it (avatar-18). */
+  private localCrewColor: number | null = null;
+
+  /**
+   * Tell the viewmodel which crew you are on. Called from syncPlayers with the
+   * same number `applyPlayerTeamColor` gives the world mesh, so the sleeve you
+   * see and the coat everyone else sees on you are one garment. Cheap: both
+   * sides bail on an unchanged colour, so this is a no-op after the first frame.
+   */
+  setLocalCrewColor(color: number) {
+    if (this.localCrewColor === color) return;
+    this.localCrewColor = color;
+    if (this.weaponHands) { applyViewHandTeamColor(this.weaponHands.left, color); applyViewHandTeamColor(this.weaponHands.right, color); }
+    if (this.pocketHands) { applyViewHandTeamColor(this.pocketHands.left, color); applyViewHandTeamColor(this.pocketHands.right, color); }
+  }
+
   private makeHand(side: 1 | -1, parent: THREE.Group): THREE.Group {
     const hand = makeViewHand(side);
+    if (this.localCrewColor !== null) applyViewHandTeamColor(hand, this.localCrewColor);
     applyViewmodelMaterialSettings(hand);
     hand.traverse((object) => {
       if ((object as THREE.Mesh).isMesh) object.renderOrder = ViewmodelController.HAND_RENDER_ORDER;

@@ -41,6 +41,7 @@ import { PlayerAnimator } from '../src/client/rendering/PlayerAnimator.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 import { AVATAR_RIG } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
 import { hudAnchorLocal, makeNameplateSprite, NAMEPLATE_SCREEN_H } from '../src/client/rendering/factories/MiscMeshFactory.ts';
+import { applyViewHandTeamColor, makeViewHand } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
 import { playerMeshVisible } from '../src/client/core/corpseVisibility.ts';
 import { readFileSync } from 'node:fs';
 
@@ -478,6 +479,63 @@ console.log('\n[own body, floating UI, nameplates]');
     'a world-sized plate at 50 m is a three-pixel smear');
   expect('nameplates keep their occlusion (depthTest ON: names must not read through rock)',
     plate.material.depthTest === true);
+}
+
+// ── 2d. the buffered remote, the truthful flinch, the tinted sleeve ─────────
+// avatar-25/12 (body yaw and gait off the newest raw snapshot while the body is
+// drawn 1-2 snapshots behind), avatar-09 (a "directional" hit reaction with a
+// random direction), avatar-18 (first-person sleeves stuck brown).
+console.log('\n[remote timeline, flinch direction, sleeve tint]');
+{
+  const gameSrc3 = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  expect('remote body yaw comes from the interpolated pose, not the newest raw snapshot',
+    /remotePose\?\.yaw \?\? player\.rotation\.x/.test(gameSrc3)
+    && !/: isLocal\n\s*\? this\.input\.getYaw\(\)\n\s*: player\.rotation\.x;/.test(gameSrc3),
+    'the ring already held the interpolated yaw and Game threw it away');
+  expect('the body HOLDS while the head turns, and swings only when it must',
+    /bodyYawHeld/.test(gameSrc3) && /Math\.abs\(off\) > 0\.6/.test(gameSrc3));
+  expect('the flinch direction is derived from lastDamagedById',
+    /lastDamagedById \? this\.playerMeshes\.get/.test(gameSrc3)
+    && !/yaw: \(Math\.random\(\) - 0\.5\) \* 0\.8,/.test(gameSrc3),
+    'a pirate shot from the left could twist right');
+  expect('the animator is handed the buffered pitch/velocity for remotes',
+    /animatePlayerMesh\(mesh, player, ship, dt, remoteAnim\)/.test(gameSrc3));
+
+  // The consumer: the additive reaction must actually USE that yaw, and in the
+  // right direction, or deriving it truthfully buys nothing.
+  const mesh = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+  const parts = mesh.userData.animation.parts;
+  scenarioSwing = 0;
+  const still = makePlayer();
+  run(mesh, still, null, 20);
+  mesh.userData.flinch = { t: 0, mag: 1, yaw: 1.0 };
+  run(mesh, still, null, 1);
+  const twistRight = parts.torso.rotation.y;
+  run(mesh, still, null, 20);
+  mesh.userData.flinch = { t: 0, mag: 1, yaw: -1.0 };
+  run(mesh, still, null, 1);
+  const twistLeft = parts.torso.rotation.y;
+  expect(`the torso twists TOWARD the hit (+yaw ${twistRight.toFixed(3)} > 0 > ${twistLeft.toFixed(3)} -yaw)`,
+    twistRight > 0.01 && twistLeft < -0.01);
+
+  // avatar-12: the animator reads the buffered pitch, not the raw one.
+  run(mesh, makePlayer({ rotation: { x: 0, y: 0 } }), null, 30);
+  for (let i = 0; i < 30; i++) { clock += 1 / 60; animator.animatePlayerMesh(mesh, makePlayer({ rotation: { x: 0, y: 0 } }), null, 1 / 60, { pitch: -0.5, vx: 0, vz: 0 }); }
+  expect(`a remote's head follows the BUFFERED pitch (head.x ${parts.head.rotation.x.toFixed(3)} < -0.2)`,
+    parts.head.rotation.x < -0.2,
+    'the raw snapshot pitch would step the head at the 31 Hz snapshot rate');
+
+  // avatar-18: the sleeve.
+  const hand = makeViewHand(1);
+  const before = hand.userData.viewCoatMat.color.getHex();
+  applyViewHandTeamColor(hand, 0xff0000);
+  const after = hand.userData.viewCoatMat.color;
+  const want = new THREE.Color(0xff0000).lerp(new THREE.Color(0x2a1d14), 0.34);
+  expect(`the first-person forearm wears the crew tint (#${after.getHexString()} == #${want.getHexString()})`,
+    Math.abs(after.r - want.r) < 1e-6 && Math.abs(after.g - want.g) < 1e-6 && Math.abs(after.b - want.b) < 1e-6,
+    `it was a hard-coded #${before.toString(16)} while the world coat was team-tinted`);
+  expect('a second call with the same colour is a no-op (no per-frame material write)',
+    (() => { const h = hand.userData.viewTeamColor; applyViewHandTeamColor(hand, 0xff0000); return hand.userData.viewTeamColor === h; })());
 }
 
 // ── 3. corpse ──────────────────────────────────────────────────────────────

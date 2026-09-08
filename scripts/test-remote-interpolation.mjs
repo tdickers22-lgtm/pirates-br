@@ -28,6 +28,7 @@
 import process from 'node:process';
 import {
   RemoteInterpolator,
+  RemoteTrack,
   SNAPSHOT_INTERVAL_S,
 } from '../src/client/network/RemoteInterpolation.ts';
 
@@ -411,6 +412,35 @@ const f = (v, d = 4) => (v === null || v === undefined ? '--' : v.toFixed(d));
     `a 1.4s stalled frame re-anchored the clock BACKWARDS ${interp.timeline.hardSnapsBack}x — that is every remote body teleporting at once`);
   check(backwards === 0, `the render clock went backwards ${backwards} times across a stall`);
   notes.push(`1.4s stalled frames: 0 hard snaps`);
+}
+
+// ── PITCH AND VELOCITY RIDE THE SAME RING (avatar-12) ──────────────────────
+// The body is drawn 1-2 snapshots behind; the head angle and the gait phase used
+// to come off the newest RAW snapshot, so the head stepped at 31 Hz while the
+// body glided and the feet started cycling before the body moved. Both now go
+// through the same bracket as the position.
+{
+  const t = new RemoteTrack();
+  t.push(10.0, 0, 0, 0, 0, '', 0, 0, 0, 0);
+  t.push(10.1, 1, 0, 2, 0, '', 0, 0.5, 4, -2);
+  const out = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, vx: 0, vz: 0, mode: 'empty', frame: null };
+  const mode = t.sample(10.05, out);
+  check(mode === 'interpolated', `midpoint sample came back '${mode}', not interpolated`);
+  check(Math.abs(out.pitch - 0.25) < 1e-9,
+    `pitch 0 -> 0.5 read ${f(out.pitch)} at the midpoint, not 0.25 (the ring never carried pitch)`);
+  check(Math.abs(out.vx - 2) < 1e-9 && Math.abs(out.vz - -1) < 1e-9,
+    `velocity (0,0) -> (4,-2) read (${f(out.vx)}, ${f(out.vz)}) at the midpoint, not (2, -1)`);
+  // Held and extrapolated answers must still carry a REPORTED aim, never a
+  // guessed one: an extrapolated muzzle angle points where nobody said.
+  t.sample(10.4, out);
+  check(out.mode === 'extrapolated' && Math.abs(out.pitch - 0.5) < 1e-9,
+    `past the newest sample the pitch ran on to ${f(out.pitch)} instead of holding 0.5`);
+  const empty = new RemoteTrack();
+  empty.push(3, 7, 8, 9, 1.1, '', 0);
+  empty.sample(3, out);
+  check(out.pitch === 0 && out.vx === 0 && out.vz === 0,
+    'a track pushed without pitch/velocity (ships, sharks) must read 0, not stale numbers');
+  notes.push('pitch/velocity: 0 -> 0.5 reads 0.25 at the midpoint, held past the newest sample');
 }
 
 console.log('');

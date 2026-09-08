@@ -93,6 +93,25 @@ const VIEW_HAND_PALETTE = {
  *
  * @param side −1 = left hand, +1 = right hand (mirrors the thumb).
  */
+/**
+ * YOUR OWN SLEEVE IS YOUR CREW'S COLOUR (avatar-18).
+ *
+ * The first-person forearm was a hard-coded brown while the world coat every
+ * crewmate sees on you is team-tinted, so your arms never matched your own
+ * pirate — and the one cue that tells you which crew colour you ARE was missing
+ * from the only body you look at all match. The cuff keeps its darker leather
+ * shade; only the sleeve retints, and only when the colour actually changes
+ * (a material write per frame would dirty the uniforms for the whole match).
+ */
+export function applyViewHandTeamColor(hand: THREE.Group, color: number) {
+  const ud = hand.userData as { viewCoatMat?: THREE.MeshStandardMaterial; viewTeamColor?: number };
+  if (!ud.viewCoatMat || ud.viewTeamColor === color) return;
+  // Same darkening the world belt uses, so the sleeve reads as the shaded side
+  // of the coat rather than a second, brighter garment.
+  ud.viewCoatMat.color.copy(new THREE.Color(color).lerp(new THREE.Color(0x2a1d14), 0.34));
+  ud.viewTeamColor = color;
+}
+
 export function makeViewHand(side: 1 | -1): THREE.Group {
   const group = new THREE.Group();
   const skinMat = new THREE.MeshStandardMaterial({ color: VIEW_HAND_PALETTE.skin, roughness: 0.86 });
@@ -129,6 +148,7 @@ export function makeViewHand(side: 1 | -1): THREE.Group {
   cuff.position.set(0, 0.032, 0.082);
   group.add(cuff);
 
+  group.userData.viewCoatMat = coatMat;
   const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.055, 0.32, 10), coatMat);
   forearm.rotation.x = Math.PI * 0.5;
   forearm.position.set(0, 0.026, 0.25);

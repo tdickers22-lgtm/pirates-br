@@ -158,6 +158,13 @@ const POSE_FADE_TIME = 0.16;
 /** Hip drop the crouch leg fold produces once it is fully faded in. */
 const CROUCH_HIP_DROP = 0.37;
 
+/**
+ * The buffered timeline's answer for a REMOTE body (avatar-12). Game hands this
+ * in for anyone but the local player, so the gait phase and the head angle are
+ * on the same clock as the position instead of on the newest raw snapshot.
+ */
+export type RemoteAnimPose = { pitch: number; vx: number; vz: number };
+
 /** Directional flinch pushed in by Game on any health drop. */
 type FlinchState = { t: number; mag: number; yaw: number };
 
@@ -190,7 +197,7 @@ export class PlayerAnimator {
     return 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / cooldown, 0, 1);
   }
 
-  animatePlayerMesh(mesh: THREE.Group, player: Player, ship: Ship | null, dt: number) {
+  animatePlayerMesh(mesh: THREE.Group, player: Player, ship: Ship | null, dt: number, remote?: RemoteAnimPose | null) {
     const animation = mesh.userData.animation as AnimScratch;
     const parts = animation?.parts;
     if (!parts) return;
@@ -217,7 +224,12 @@ export class PlayerAnimator {
     const swimming = player.state === 'swimming';
     const downed = player.state === 'downed';
     const atStation = player.atCannon || player.atHelm || player.atCrowNest || player.mastClimb !== null;
-    const moveSpeed = Math.hypot(player.velocity.x, player.velocity.z);
+    // Buffered for remotes, raw (predicted) for the local player, who owns his
+    // own input and must not be lagged by his own interpolation buffer.
+    const moveSpeed = remote
+      ? Math.hypot(remote.vx, remote.vz)
+      : Math.hypot(player.velocity.x, player.velocity.z);
+    const lookPitchRaw = remote ? remote.pitch : player.rotation.y;
     const moveRatio = Math.min(
       1,
       swimming
@@ -334,7 +346,7 @@ export class PlayerAnimator {
     // residual yaw here is a real head turn of up to ±0.6 rad rather than the
     // easing error it used to be. Clamped asymmetrically: a neck looks further
     // up than down.
-    const lookPitch = THREE.MathUtils.clamp(player.rotation.y * 0.55, -0.6, 0.5);
+    const lookPitch = THREE.MathUtils.clamp(lookPitchRaw * 0.55, -0.6, 0.5);
     const headYaw = THREE.MathUtils.clamp(angleWrap(player.rotation.x - mesh.rotation.y), -0.85, 0.85);
     head.rotation.set(lookPitch, headYaw, 0);
     hair.rotation.set(lookPitch, head.rotation.y, 0);
@@ -418,7 +430,7 @@ export class PlayerAnimator {
       // PRONE FRONT CRAWL: the body lies face-down (Game pitches the mesh
       // forward now, not onto its back), arms windmill overarm and the legs
       // flutter-kick in antiphase.
-      const swimPitch = THREE.MathUtils.clamp(player.rotation.y, -0.65, 0.65);
+      const swimPitch = THREE.MathUtils.clamp(lookPitchRaw, -0.65, 0.65);
       const strokePhase = phase * 2.1;
       const kick = Math.sin(strokePhase * 1.6);
       const roll = Math.sin(strokePhase) * 0.14;
@@ -669,7 +681,7 @@ export class PlayerAnimator {
       let wristX = 0;
       if (wristFree) {
         wristX = -rightArmPivot.rotation.x * 0.94;
-        if (firearmReady) wristX += THREE.MathUtils.clamp(player.rotation.y, -0.7, 0.7);
+        if (firearmReady) wristX += THREE.MathUtils.clamp(lookPitchRaw, -0.7, 0.7);
       }
       rightWrist.rotation.x = wristX;
     }
