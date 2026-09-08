@@ -78,6 +78,11 @@ export const LOGIC = [
   // the control, plus the proof that the low tier's cloud field is still
   // bit-identical to the one it had before the ladder existed.
   quick(tsx('test-cloud-depth.mjs')),
+  // GFXPOL-01 (wave 8.2). The colour grade: which tiers get one at all (it was
+  // 'high' only, so balanced played an ungraded game), that mid grey stays
+  // neutral under the split tone, and that the body still costs no fetch — it
+  // rides inside OutputPass and must never become a pass again.
+  quick(tsx('test-grade.mjs')),
   // WATER-01 (wave 3.4). The hull cut-out that keeps the exterior sea out of
   // the hold: the GLSL outline is parsed back out of OCEAN_FRAG and graded
   // against the shared getSwimHullHalfWidth, and setHullMasks' culling /
