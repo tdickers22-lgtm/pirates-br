@@ -7,7 +7,7 @@
  */
 import * as THREE from 'three';
 import type { Island, IslandNpc, IslandProp, IslandPropType } from '../../../shared/types/index.js';
-import { assets, type AssetName } from '../../assets/AssetLibrary.js';
+import { assets, isLazyAsset, type AssetName } from '../../assets/AssetLibrary.js';
 import { BIOME_PALETTES, getPropGroundY, PROP_COLLIDERS } from '../../../shared/props.js';
 import { makeFernRosetteGeometry, makeGrassTuftGeometry, understoryDensity } from './FoliageGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
@@ -16,7 +16,7 @@ import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.
 import type { TerrainBuild } from './TerrainMeshBuilder.js';
 import { ensureMeshGround } from './GroundTruth.js';
 import { queueContactShadow } from './ContactShadows.js';
-import { attachCoverLod, attachInstanceFarLod, attachInstanceLod } from './InstanceLod.js';
+import { attachCoverLod, attachInstanceFarLod, attachInstanceLod, attachLazyStoryLod } from './InstanceLod.js';
 
 /** Instanced prop types that bend in the wind (palms + soft foliage; not rocks). */
 const SWAYING_FOLIAGE: ReadonlySet<string> = new Set([
@@ -53,6 +53,113 @@ function floraScale(rand01: number, range: FloraScaleRange): number {
 /** Hold a composed (multiplied) scale to its type's rail. */
 function clampFloraScale(value: number, range: FloraScaleRange): number {
   return value < range.min ? range.min : value > range.max ? range.max : value;
+}
+
+/**
+ * A STORY SCENE THAT HAS NOT ARRIVED YET IS STILL A PIECE OF THE WORLD.
+ *
+ * The fifteen hero tableaux left the world preload (LOD-01 / assets-08), so at
+ * island-build time `assets.clone()` returns null for them. What stands in is
+ * NOT nothing: a single-instance box the size of the scene's own footprint,
+ * seated on exactly the ground the real scene will sit on and carrying the same
+ * `prop-<type>` name. That matters three ways — the floating-prop census counts
+ * the same pieces whether or not the GLB is in, a distant island keeps a
+ * silhouette instead of growing one, and the swap is a replacement of one node
+ * by another at the same transform rather than an appearance out of thin air.
+ *
+ * Half-extents are the scenes' measured footprints rounded down, so the stand-in
+ * is never LARGER than what replaces it. 12 triangles each, at most fifteen of
+ * them in a match: the low tier pays 180 triangles and one draw per scene for
+ * the seconds before its GLB lands, against the ~17 MB and 400k triangles it no
+ * longer waits on to start the match.
+ */
+const STORY_PLACEHOLDER_HALF: Record<string, readonly [number, number, number]> = {
+  smuggler_cache: [1.2, 0.8, 1.2],
+  skull_totem: [0.7, 1.6, 0.7],
+  wrecker_tower: [1.6, 3.0, 1.6],
+  whale_skeleton: [3.4, 1.0, 1.2],
+  rum_still: [1.3, 1.2, 1.3],
+  crow_roost: [1.4, 2.4, 1.4],
+  mermaid_shrine: [1.6, 1.4, 1.6],
+  castaway_camp: [1.8, 1.0, 1.8],
+  kraken_wreck: [3.6, 1.8, 2.2],
+  dig_site: [1.8, 0.5, 1.8],
+  gallows: [1.2, 2.4, 1.2],
+  parley_table: [1.2, 0.7, 1.2],
+  mine_head: [1.6, 1.8, 1.6],
+  widow_memorial: [0.9, 1.5, 0.9],
+  gibbet_cage: [0.7, 1.9, 0.7],
+};
+const DEFAULT_PLACEHOLDER_HALF = [1.0, 1.0, 1.0] as const;
+/** One geometry and one material for every placeholder in the session. */
+let placeholderGeo: THREE.BoxGeometry | null = null;
+let placeholderMat: THREE.MeshStandardMaterial | null = null;
+
+/**
+ * Stand a placeholder for a story scene that has not been fetched yet, queue
+ * the fetch, and swap the real tableau in at the same transform when it lands
+ * (LOD-01 / assets-08). Returns null for anything that is not a lazy asset —
+ * a genuinely failed GLB still falls through to the caller's `continue`.
+ *
+ * TWO requests, deliberately: the background one here means every scene arrives
+ * whether or not the player ever sails near (the prop census and the world's
+ * own completeness do not depend on where the camera went), and the promotion
+ * `updateInstanceLod` fires inside LAZY_PRIORITY_M only re-orders the queue.
+ */
+function lazyStoryStandIn(
+  type: string,
+  position: THREE.Vector3,
+  yaw: number,
+  scale: number,
+  island: Island,
+  lowDetail: boolean,
+): THREE.InstancedMesh | null {
+  if (!isLazyAsset(type)) return null;
+  const name = type as AssetName;
+  const ph = makeStoryPlaceholder(type, position, yaw, scale);
+  ph.castShadow = !lowDetail;
+  ph.receiveShadow = true;
+  attachLazyStoryLod(ph, () => { void assets.ensure(name, true); });
+  void assets.ensure(name).then(() => {
+    const parent = ph.parent;
+    if (!parent) return;
+    const real = buildPropInstance(name, position, yaw, scale);
+    if (!real) return;
+    real.name = ph.name;
+    real.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = !lowDetail;
+        obj.receiveShadow = true;
+        blendStoryPad(obj, island);
+      }
+    });
+    parent.add(real);
+    parent.remove(ph);
+  });
+  return ph;
+}
+
+function makeStoryPlaceholder(type: string, position: THREE.Vector3, yaw: number, scale: number): THREE.InstancedMesh {
+  if (!placeholderGeo) placeholderGeo = new THREE.BoxGeometry(1, 1, 1);
+  if (!placeholderMat) {
+    placeholderMat = new THREE.MeshStandardMaterial({ color: 0x6b6152, roughness: 0.95, metalness: 0 });
+  }
+  const half = STORY_PLACEHOLDER_HALF[type] ?? DEFAULT_PLACEHOLDER_HALF;
+  const mesh = new THREE.InstancedMesh(placeholderGeo, placeholderMat, 1);
+  // The box sits ON the ground: the unit box is centred, so it lifts by its own
+  // half-height. Same seat the real scene takes, which is what keeps the census
+  // reading "on the ground" through the swap.
+  const m = new THREE.Matrix4().compose(
+    new THREE.Vector3(0, half[1] * scale, 0),
+    new THREE.Quaternion(),
+    new THREE.Vector3(half[0] * 2 * scale, half[1] * 2 * scale, half[2] * 2 * scale),
+  );
+  mesh.setMatrixAt(0, m);
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.position.copy(position);
+  mesh.rotation.y = yaw;
+  mesh.frustumCulled = true;
+  return mesh;
 }
 
 /**
@@ -399,7 +506,9 @@ export function buildServerProps(ctx: IslandBuildCtx) {
         getPropGroundY(island, prop) - propBaseLift(prop.type, prop.scale),
         prop.z - island.position.z,
       );
-      const node = buildPropInstance(prop.type as AssetName, localPos, prop.yaw, prop.scale);
+      const node: THREE.Object3D | null =
+        buildPropInstance(prop.type as AssetName, localPos, prop.yaw, prop.scale)
+        ?? lazyStoryStandIn(prop.type, localPos, prop.yaw, prop.scale, island, lowDetail);
       if (!node) continue;
       node.name = `prop-${prop.type}`;
       queueContactShadow(ctx, localPos.x, localPos.z, propShadowRadius(prop.type, prop.scale), propShadowStrength(prop.type));

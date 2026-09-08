@@ -91,9 +91,50 @@ export const BOOT_ASSET_NAMES = [
 
 const BOOT_ASSET_SET: ReadonlySet<string> = new Set<string>(BOOT_ASSET_NAMES);
 
-/** The 53 the world build needs and the menu does not. */
+/** How many lazy GLBs may be in flight at once. Four keeps a phone's socket
+ *  pool and its decoder busy without starving the ones the player can see. */
+const LAZY_FETCH_DEPTH = 4;
+
+/**
+ * THE FIFTEEN HERO SCENES NOBODY CAN SEE FROM THE QUEUE (LOD-01 / assets-08).
+ *
+ * Each story scene is a whole tableau in one GLB — the wrecker's tower, the
+ * kraken wreck, the whale skeleton — 25-48k triangles and ~17 MB between them,
+ * and every one of them was fetched and decoded before `preloadWorld()`
+ * resolved, i.e. before the countdown could end. A match cannot start until the
+ * last of them is in, yet at most three are ever within a kilometre of the
+ * spawn and a roster island carries one or two.
+ *
+ * So they leave the world set and load through `ensure()` instead: the island
+ * build asks for the ones its own scatter actually names, PropScatterer stands
+ * a seated placeholder in the meantime (see buildLazyStoryProp), and
+ * `updateInstanceLod` promotes an island's request to the head of the queue
+ * once its edge is inside LAZY_PRIORITY_M. Nothing is ever MISSING from the
+ * scene graph — the placeholder is a real, ground-seated, named node, so the
+ * floating-prop census counts the same 3,298 pieces it always did — and
+ * nothing waits on 17 MB it cannot see.
+ */
+export const LAZY_ASSET_NAMES = [
+  'smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton',
+  'rum_still', 'crow_roost', 'mermaid_shrine', 'castaway_camp',
+  'kraken_wreck', 'dig_site', 'gallows', 'parley_table',
+  'mine_head', 'widow_memorial', 'gibbet_cage',
+] as const satisfies readonly AssetName[];
+
+const LAZY_ASSET_SET: ReadonlySet<string> = new Set<string>(LAZY_ASSET_NAMES);
+
+/** True for a name that `preloadWorld()` deliberately does NOT fetch. */
+export function isLazyAsset(name: string): boolean {
+  return LAZY_ASSET_SET.has(name);
+}
+
+/** Metres. Inside this an island's story scenes are wanted NOW (they are about
+ *  to be legible); outside it they still load, just behind everything else. */
+export const LAZY_PRIORITY_M = 400;
+
+/** The 38 the world build needs, the menu does not, and that are not lazy. */
 export const WORLD_ASSET_NAMES: readonly AssetName[] =
-  ASSET_NAMES.filter((n) => !BOOT_ASSET_SET.has(n));
+  ASSET_NAMES.filter((n) => !BOOT_ASSET_SET.has(n) && !LAZY_ASSET_SET.has(n));
 
 /** Assets that must be faceted even though their GLB carries smooth normals.
  *  Empty by design: the right place to force facets is the Blender builder
@@ -157,6 +198,10 @@ export class AssetLibrary {
   /** In-flight (or settled) world load, so a second caller joins the first
    *  rather than fetching 53 GLBs again. */
   private worldLoad: Promise<void> | null = null;
+  /** One promise per `ensure()`d name, so N callers share one fetch. */
+  private readonly ensured = new Map<AssetName, Promise<void>>();
+  private readonly lazyQueue: { name: AssetName; run: () => void }[] = [];
+  private lazyActive = 0;
   private readonly loader = new GLTFLoader();
   private done = 0;
 
@@ -193,9 +238,60 @@ export class AssetLibrary {
     return this.worldLoad;
   }
 
-  /** True once every GLB is in and `clone()` can be trusted for any name. */
+  /** True once every GLB the world set names is in. Lazy story scenes are NOT
+   *  in it by design — `clone()` still returns null for one that has not been
+   *  `ensure()`d yet, and the caller keeps its placeholder. */
   get isFullyLoaded(): boolean {
     return this.loaded;
+  }
+
+  /**
+   * Fetch ONE asset on demand, at most once, joinable by any number of callers.
+   *
+   * `priority` moves a pending request to the head of the queue instead of
+   * starting a second fetch — the island 300 m off the bow gets its tableau
+   * before the one on the far side of the map, and neither costs the countdown
+   * anything. The queue is depth-limited so a fourteen-island roster cannot open
+   * fifteen sockets at once on a phone.
+   */
+  ensure(name: AssetName, priority = false): Promise<void> {
+    const existing = this.ensured.get(name);
+    if (existing) {
+      if (priority) this.promote(name);
+      return existing;
+    }
+    if (this.scenes.has(name)) {
+      const done = Promise.resolve();
+      this.ensured.set(name, done);
+      return done;
+    }
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const job = { name, run: release };
+    if (priority) this.lazyQueue.unshift(job); else this.lazyQueue.push(job);
+    const settled = gate
+      .then(() => this.loadSet([name]))
+      .finally(() => { this.lazyActive -= 1; this.pumpLazy(); });
+    this.ensured.set(name, settled);
+    this.pumpLazy();
+    return settled;
+  }
+
+  /** Has this name been asked for through `ensure()` (settled or in flight)? */
+  isEnsured(name: AssetName): boolean {
+    return this.ensured.has(name);
+  }
+
+  private promote(name: AssetName): void {
+    const i = this.lazyQueue.findIndex((j) => j.name === name);
+    if (i > 0) this.lazyQueue.unshift(this.lazyQueue.splice(i, 1)[0]);
+  }
+
+  private pumpLazy(): void {
+    while (this.lazyActive < LAZY_FETCH_DEPTH && this.lazyQueue.length > 0) {
+      this.lazyActive += 1;
+      this.lazyQueue.shift()!.run();
+    }
   }
 
   /** Loads a set of GLBs in parallel. Failures are logged and tolerated:

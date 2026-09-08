@@ -54,6 +54,10 @@
  */
 import type * as THREE from 'three';
 import type { RenderQuality } from '../../rendering/QualityPreference.js';
+import { LAZY_PRIORITY_M } from '../../assets/AssetLibrary.js';
+
+/** Shared empty rail for batches that carry no per-instance scales. */
+const EMPTY_SCALES = new Float32Array(0);
 
 /**
  * A batch that can be thinned, and everything the per-frame update needs.
@@ -90,6 +94,13 @@ export type InstanceLodBatch = {
   /** True while THIS module is the reason the mesh is invisible. Without it a
    *  restore would fight the radius gates that hide the same nodes. */
   hidden: boolean;
+  /** A lazily-loaded story scene standing behind a placeholder (LOD-01). The
+   *  batch is not a density batch at all — it carries no ramp and is skipped by
+   *  every rule below; all it wants is to be TOLD when its island is close
+   *  enough that the tableau is about to be legible, so the fetch already
+   *  queued at build time can jump the queue. `asked` latches: the promotion is
+   *  one call, not a per-frame one. */
+  lazy?: { request: () => void; asked: boolean };
 };
 
 type LodMesh = THREE.InstancedMesh & {
@@ -296,6 +307,30 @@ export function attachInstanceFarLod(
 }
 
 /** Register a ground-cover batch: density-only, no pixel rule, steeper ramp. */
+/**
+ * Register a story-scene PLACEHOLDER so the per-frame update can promote its
+ * fetch when the island comes inside LAZY_PRIORITY_M (LOD-01 / assets-08).
+ *
+ * The placeholder is a one-instance InstancedMesh purely so it is a batch like
+ * any other and rides the array `collectInstanceLodBatches` already builds at
+ * island-build time — the per-frame update never walks a scene graph, and this
+ * must not be the exception that does.
+ */
+export function attachLazyStoryLod(mesh: THREE.InstancedMesh, request: () => void): void {
+  (mesh as LodMesh).userData.instanceLod = {
+    mesh,
+    scales: EMPTY_SCALES,
+    height: 0,
+    full: mesh.count,
+    stagger: 0,
+    kind: 'prop',
+    applied: mesh.count,
+    hidden: false,
+    farApplied: false,
+    lazy: { request, asked: false },
+  };
+}
+
 export function attachCoverLod(mesh: THREE.InstancedMesh): void {
   attachDensityLod(mesh, 'cover');
 }
@@ -387,6 +422,14 @@ export function updateInstanceLod(
 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
+    // A story-scene placeholder is not scenery to be thinned — it is a promise
+    // that the real tableau is coming. One latched call at LAZY_PRIORITY_M and
+    // then nothing, ever again, for that batch.
+    const lazy = batch.lazy;
+    if (lazy) {
+      if (!lazy.asked && apparent < LAZY_PRIORITY_M) { lazy.asked = true; lazy.request(); }
+      continue;
+    }
     // Stagger spreads a type's thresholds ±17% around the shared ramp, so a
     // shoreline thickens in several small instalments instead of one.
     const phase = 0.83 + batch.stagger * 0.34;
