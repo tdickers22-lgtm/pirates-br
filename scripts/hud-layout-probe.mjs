@@ -112,7 +112,12 @@ const readLayout = () => page.evaluate(() => {
     const walker = document.createTreeWalker(hud, NodeFilter.SHOW_TEXT);
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
       const t = (n.textContent ?? '').replace(/\s+/g, ' ').trim();
-      if (!t) continue;
+      // A STRING IS SOMETHING A PLAYER READS. Icon glyphs (⛵ 🪵 ●), the "/"
+      // between two ammo numbers and single-character chips are marks, not
+      // sentences; counting them made the ceiling meaningless. This counts
+      // words and numbers, which is what the audit counted when it found ~45 of
+      // them at 1280x720 (PLAN row 35).
+      if (t.length < 2 || !/[A-Za-z0-9]/.test(t)) continue;
       const el = n.parentElement;
       if (!el || !visibleUp(el)) continue;
       strings.push(t);

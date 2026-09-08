@@ -1649,3 +1649,18 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
   bottom: calc(var(--footer-h, 120px) + 12px);
   max-height: none;
 }
+
+/* THE STORES ROW IS FIVE ICONS AND FIVE COUNTS (PLAN 2.6). The word beside each
+   icon was five more always-on strings for a row whose icons are unambiguous
+   and whose items are named on the supply wheel; each item keeps the word as a
+   title tooltip. Nothing moves, nothing re-lays-out: display:none on a span. */
+.ship-inventory-label { display: none; }
+
+/* ONE WEAPON CARD, NOT FOUR (PLAN 2.6). The rack printed a name, an ammo count
+   and a key for all four slots at all times: twelve always-on strings about
+   three guns in your pocket. The card you are holding stays; the rack opens for
+   2.2 s on a switch (HudController.updateWeaponHud adds .revealed) so choosing
+   a weapon still shows you the choice. */
+#weapon-slots .weapon-slot { display: none; }
+#weapon-slots .weapon-slot.active,
+#weapon-slots.revealed .weapon-slot { display: block; }

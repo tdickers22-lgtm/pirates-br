@@ -4,7 +4,7 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import * as THREE from 'three';
-import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHIP_UPGRADES, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
+import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
@@ -1302,7 +1302,6 @@ export class HudController {
     }
     this.renderShipUpgrades(ship);
     this.renderShipInventory(ship, player);
-    this.renderKegStatus(player);
     this.updateWaterGauge(player);
 
     let chestsInHold = 0;
@@ -1940,7 +1939,22 @@ export class HudController {
     if (performance.now() - opened.at > HudController.LEGEND_DOCK_MS) legend.classList.add('docked');
   }
 
+  /** Slot the loadout was last switched to, and when — the rack reveals itself on a change. */
+  private lastWeaponSlotSeen = -1;
+  private weaponRackRevealUntil = 0;
+
   private updateWeaponHud(activeSlot: number, activeWeapon: WeaponInstance | null, loadout: Array<WeaponInstance | null>) {
+    // CONTEXTUAL RACK (PLAN 2.6: bottom-left is vitals + the ACTIVE weapon card).
+    // Four cards were always on — twelve strings naming three guns the player is
+    // not holding, every frame of every match. The rack opens for 2.2 s when the
+    // loadout actually changes (that is when the other cards are information)
+    // and closes again. Pure class toggle: no layout thrash, no per-frame work.
+    if (activeSlot !== this.lastWeaponSlotSeen) {
+      if (this.lastWeaponSlotSeen !== -1) this.weaponRackRevealUntil = performance.now() + 2200;
+      this.lastWeaponSlotSeen = activeSlot;
+    }
+    const rack = this.view.ui.weaponSlots[0]?.parentElement;
+    if (rack) rack.classList.toggle('revealed', performance.now() < this.weaponRackRevealUntil);
     for (const [slotIndex, slotEl] of this.view.ui.weaponSlots.entries()) {
       slotEl.classList.toggle('active', slotIndex === activeSlot);
       const weapon = loadout[slotIndex];
@@ -2253,67 +2267,21 @@ export class HudController {
       return;
     }
 
-    const hasHull = ship.upgrades.some((u) => u.type === 'hull_reinforcement');
-    const hasCannons = ship.upgrades.some((u) => u.type === 'charged_cannons');
-    const hasSails = ship.upgrades.some((u) => u.type === 'swift_sails');
-
-    const cannonBaseDmg = SHIP.CANNON_DAMAGE_HULL;
-    const cannonDmg = Math.round(cannonBaseDmg * (hasCannons ? SHIP_UPGRADES.CANNON_DAMAGE_MULT : 1));
-    // THE CARD MAY NOT QUOTE A SPEED. It printed "TOP SPEED 15.0 kn" — maxSpeed,
-    // which is a metres-per-second ceiling wearing a knots label and reachable
-    // only on a trimmed broad reach. An auditor sailing at 1.26 u/s read it as a
-    // straight lie and was right to. The LIVE number lives in the sail panel now
-    // (speedPhrase, measured off the hull's velocity); what belongs on a card
-    // about UPGRADES is the delta the upgrade buys, which is what the other two
-    // rows already say ("−30% flood", "+45%").
-    const speedRating = hasSails
-      ? `Swift <em>(+${Math.round((SHIP_UPGRADES.SWIFT_SPEED_MULT - 1) * 100)}%)</em>`
-      : 'Standard';
-
-    const signature = [
-      ship.id,
-      ship.maxHull,
-      hasHull ? 1 : 0,
-      hasCannons ? 1 : 0,
-      hasSails ? 1 : 0,
-    ].join(':');
+    // PILLS ONLY (PLAN 2.6 "Cut: upgrade stat row"). The card used to print
+    // three icon/label/value rows — "🛡 Hull Standard · ✹ Cannon Dmg 120 · ✦
+    // Rigging Standard" — six always-on strings that say the ship is ORDINARY.
+    // A stat that has not changed is not news; what a player needs to see is
+    // what this hull has that a stock hull does not. No upgrades, no rows.
+    const signature = `${ship.id}:${ship.upgrades.map((u) => u.type).sort().join(',')}`;
     if (signature === this.shipUpgradeSignature) return;
     this.shipUpgradeSignature = signature;
 
-    const statRow = `
-      <div class="ship-stat-row">
-        <span class="ship-stat" data-stat="hull"${hasHull ? ' data-upgraded="1"' : ''}>
-          <span class="ship-stat-icon">🛡</span>
-          <span class="ship-stat-label">Hull</span>
-          <span class="ship-stat-value">${hasHull ? `Reinforced <em>(−${Math.round((1 - SHIP_UPGRADES.HULL_INGRESS_MULT) * 100)}% flood)</em>` : 'Standard'}</span>
-        </span>
-        <span class="ship-stat" data-stat="cannons"${hasCannons ? ' data-upgraded="1"' : ''}>
-          <span class="ship-stat-icon">✹</span>
-          <span class="ship-stat-label">Cannon Dmg</span>
-          <span class="ship-stat-value">${cannonDmg}${hasCannons ? ` <em>(+${Math.round((SHIP_UPGRADES.CANNON_DAMAGE_MULT - 1) * 100)}%)</em>` : ''}</span>
-        </span>
-        <span class="ship-stat" data-stat="sails"${hasSails ? ' data-upgraded="1"' : ''}>
-          <span class="ship-stat-icon">✦</span>
-          <span class="ship-stat-label">Rigging</span>
-          <span class="ship-stat-value">${speedRating}</span>
-        </span>
-      </div>
-    `;
-
-    const pills = ship.upgrades.length === 0
+    this.view.ui.shipUpgrades.innerHTML = ship.upgrades.length === 0
       ? ''
       : `<div class="ship-upgrade-pills">${ship.upgrades.map((upgrade) => {
           const meta = this.view.getUpgradePresentation(upgrade.type);
           return `<span class="upgrade-pill" data-type="${upgrade.type}" title="${meta.name}: ${meta.effect}">${meta.icon} ${meta.short} <em>${meta.effect}</em></span>`;
         }).join('')}</div>`;
-
-    this.view.ui.shipUpgrades.innerHTML = statRow + pills;
-  }
-
-  private renderKegStatus(player: Player) {
-    const hidden = player.state === 'eliminated' || player.state === 'respawning';
-    this.view.ui.kegStatus.classList.toggle('visible', !hidden);
-    this.view.ui.kegStatusValue.textContent = this.getKegSummary(player);
   }
 
   private getKegSummary(player: Player) {

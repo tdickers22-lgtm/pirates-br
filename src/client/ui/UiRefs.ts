@@ -30,8 +30,6 @@ export type UiRefs = {
   inventoryChainshot: HTMLSpanElement;
   inventoryBanana: HTMLSpanElement;
   shipInventory: HTMLDivElement;
-  kegStatus: HTMLDivElement;
-  kegStatusValue: HTMLDivElement;
   interactPrompt: HTMLDivElement;
   contextLabel: HTMLDivElement;
   waterGauge: HTMLDivElement;
@@ -126,8 +124,6 @@ export function buildUiRefs(): UiRefs {
     inventoryChainshot: requireElement('inv-chainshot'),
     inventoryBanana: requireElement('inv-banana'),
     shipInventory: requireElement('ship-inventory'),
-    kegStatus: requireElement('keg-status'),
-    kegStatusValue: requireElement('keg-status-value'),
     interactPrompt: requireElement('interact-prompt'),
     contextLabel: requireElement('context-label'),
     waterGauge: requireElement('water-gauge'),
