@@ -7,6 +7,56 @@ import { countOpenHoles } from '../../../shared/interactions.js';
 
 export type BotBehavior = 'patrol' | 'chase' | 'engage' | 'flee' | 'loot' | 'plunder' | 'return';
 
+/** WHY A CREW IS DOING WHAT IT IS DOING — the leaf of the behaviour tree that
+ *  won this decision (BOTFUN-01 / bots-15). `behavior` says what the hull does;
+ *  the intent says which branch chose it, and it is the thing a player is
+ *  allowed to READ: one feed line and one pennant per crew.
+ *
+ *  The tree is a strict priority ladder, checked top-down every decision:
+ *    SURVIVE   — she is coming apart; nothing else matters.
+ *    STORM     — the wall is closing on her; run for the ring.
+ *    OPPORTUNITY — a chest with our name on it, a grudge, the prize, a brawl
+ *                  the world started.
+ *    OBJECTIVE — the ordinary business of the match: a hull in range, a lure to
+ *                sail to, an island to dig, a hold to bank.
+ *    IDLE      — nothing to answer; make for the centre.
+ *  Before this, the same conditions were a flat if-else chain nobody could name
+ *  and no gate could count: a crew "changed its mind" with no vocabulary for
+ *  what it had changed it TO. */
+export type BotIntent =
+  | 'survive' | 'storm' | 'plunder' | 'grudge' | 'hunt' | 'raid' | 'loot' | 'deliver' | 'patrol';
+
+/** Which rung of the ladder an intent sits on — the probe counts distinct
+ *  BRANCHES, not distinct leaves, so "patrol then patrol again" is not variety. */
+export const INTENT_BRANCH: Record<BotIntent, 'survive' | 'storm' | 'opportunity' | 'objective' | 'idle'> = {
+  survive: 'survive',
+  storm: 'storm',
+  plunder: 'opportunity',
+  grudge: 'opportunity',
+  hunt: 'objective',
+  raid: 'objective',
+  loot: 'objective',
+  deliver: 'objective',
+  patrol: 'idle',
+};
+
+/** One line of bot voice, drained by Match each tick and broadcast as
+ *  `bot_intent`. Bounded (INTENT_LOG_MAX) because a server that keeps every
+ *  line a nine-crew lobby produces over thirteen minutes is a leak. */
+export interface BotIntentLine {
+  shipId: string;
+  playerId: string;
+  name: string;
+  intent: BotIntent;
+  /** What the crew says out loud. Personality-flavoured (BOT_PERSONALITIES). */
+  text: string;
+  t: number;
+}
+export const INTENT_LOG_MAX = 24;
+/** A crew never cries out more often than this, however fast it changes its
+ *  mind — the feed is three rows, not a log. */
+export const INTENT_SPEAK_COOLDOWN = 18;
+
 /** WHAT A PIRATE IS FOR THIS TICK.
  *  `helm` has the wheel (and is the one pirate the station arbiter and the
  *  physics see AS a helmsman); `gunner` works a rail; `deckhand` bails, planks
@@ -66,6 +116,12 @@ export interface CrewState {
   lastChainshottedUntil: number;
   /** Sim time this crew last actually put a ball through a port. */
   lastFiredAt: number;
+  /** The behaviour-tree leaf that won the last decision (BOTFUN-01). */
+  intent: BotIntent;
+  /** Sim time the intent last CHANGED (not the last time it was re-chosen). */
+  intentAt: number;
+  /** Sim time this crew last said something out loud. */
+  spokeAt: number;
 }
 
 /** ONE PIRATE'S BODY. Everything here is about the man, not the crew: where he
@@ -76,6 +132,9 @@ export interface BotState {
   crew: CrewState;
   /** What this body is doing for the crew this tick. */
   role: BotRole;
+  /** The name on her nameplate — carried here so the intent line the feed
+   *  prints does not need a players[] scan on a hot path. */
+  displayName: string;
   aimYaw: number;
   aimPitch: number;
   fireTimer: number;
@@ -267,7 +326,42 @@ export class Blackboard {
   lureShips: Ship[] = [];
   /** This tick's ring — read only for the LOCAL wind a hull is sailing in. */
   storm: StormState | null = null;
+  /** Voice waiting to go out on the wire. Match drains it every tick; capped at
+   *  INTENT_LOG_MAX so an undrained blackboard (a headless probe) cannot grow. */
+  intentLog: BotIntentLine[] = [];
 
   constructor(readonly rng: () => number = Math.random) {}
+
+  /**
+   * STAMP A DECISION. Called by every leaf of the tree, once per decision.
+   * A CHANGE of intent is what a player is told about — the same intent chosen
+   * again is the crew carrying on, which is not news — and even a change is
+   * silent inside INTENT_SPEAK_COOLDOWN of the last cry.
+   */
+  noteIntent(crew: CrewState, intent: BotIntent, t: number, text: string) {
+    if (crew.intent === intent) return;
+    crew.intent = intent;
+    crew.intentAt = t;
+    if (t - crew.spokeAt < INTENT_SPEAK_COOLDOWN) return;
+    crew.spokeAt = t;
+    const speaker = this.bots.get(crew.captainId);
+    this.intentLog.push({
+      shipId: crew.shipId,
+      playerId: crew.captainId,
+      name: speaker?.displayName ?? 'Crew',
+      intent,
+      text,
+      t,
+    });
+    while (this.intentLog.length > INTENT_LOG_MAX) this.intentLog.shift();
+  }
+
+  /** Match takes the pending lines and leaves the log empty. */
+  drainIntents(): BotIntentLine[] {
+    if (this.intentLog.length === 0) return [];
+    const out = this.intentLog;
+    this.intentLog = [];
+    return out;
+  }
 }
 

@@ -43,6 +43,17 @@ export class BotSystem {
     this.hands = new BotPirate(this.bb, this.crewBrain);
   }
 
+  /** Bot voice waiting to go out on the wire (BOTFUN-01). Match drains it each
+   *  tick and broadcasts one `bot_intent` per line; the probe reads it directly. */
+  drainIntents() {
+    return this.bb.drainIntents();
+  }
+
+  /** Read-only view of the crews, for gates and for Match's pennant mirror. */
+  get crewStates() {
+    return this.bb.crews;
+  }
+
   setEventLure(lure: EventLure | null) {
     this.bb.eventLure = lure;
   }
@@ -107,6 +118,9 @@ export class BotSystem {
         retaliateShipId: null,
         lastChainshottedUntil: ship.chainshottedUntil ?? 0,
         lastFiredAt: -999,
+        intent: 'patrol',
+        intentAt: 0,
+        spokeAt: -999,
       };
       this.bb.crews.set(ship.id, crew);
     }
@@ -114,6 +128,7 @@ export class BotSystem {
     this.bb.bots.set(player.id, {
       playerId: player.id,
       crew,
+      displayName: player.name,
       role: player.id === crew.captainId ? 'helm' : role,
       aimYaw: 0,
       aimPitch: 0.1,

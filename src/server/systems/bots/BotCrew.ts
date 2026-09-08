@@ -5,7 +5,8 @@ import {
 import { dist2D, angleWrap } from '../../../shared/utils/index.js';
 import { countOpenHoles } from '../../../shared/interactions.js';
 import type { Blackboard } from './Blackboard.js';
-import type { BotState, CrewState, ProvokedShip } from './Blackboard.js';
+import type { BotState, CrewState, ProvokedShip, BotIntent } from './Blackboard.js';
+import { intentLine } from './personalities.js';
 import { BOT_DAMAGE_CONTROL_WATER, FIREARM_RANGE, hullTotal, botMayFireCannons, BOT_LURE_BRAWL_RADIUS, BOT_LURE_STATION_RADIUS } from './Blackboard.js';
 
 /**
@@ -256,16 +257,25 @@ export class BotCrew {
     const dangerThreshold = storm.shrinking ? 0.65 : 0.85;
     const inDanger = distRatio > dangerThreshold;
 
-    if (inDanger) {
-      crew.behavior = 'flee';
-      crew.targetShipId = null;
-      return;
-    }
-
+    // ── 1. SURVIVE ─────────────────────────────────────────────────────────
+    // She is coming apart. Checked ABOVE the ring on purpose: a hull at a fifth
+    // of her planking does not care which side of the wall she drowns on, and
+    // the ring branch used to win this tie and send her back into a fight with
+    // her target still set.
     const avgHull = hullTotal(ship) / 4;
     if (avgHull < 0.2 && crew.behavior !== 'flee') {
       crew.behavior = 'flee';
+      crew.targetShipId = null;
       crew.stateTimer = 15;
+      this.leaf(crew, 'survive', t);
+      return;
+    }
+
+    // ── 2. STORM ───────────────────────────────────────────────────────────
+    if (inDanger) {
+      crew.behavior = 'flee';
+      crew.targetShipId = null;
+      this.leaf(crew, 'storm', t);
       return;
     }
 
@@ -282,6 +292,7 @@ export class BotCrew {
     if (crew.behavior === 'plunder' && this.bb.eventLure
       && (this.anyShoreLeg(crew) || this.freeEventChest(islands, crew))) {
       crew.stateTimer = Math.max(crew.stateTimer, 2);
+      this.leaf(crew, 'plunder', t);
       return;
     }
 
@@ -432,11 +443,16 @@ export class BotCrew {
         // the crew decides.
         crew.plunderChestId = claimable.id;
         crew.targetShipId = null;
+        this.leaf(crew, 'plunder', t);
       } else if ((grudge || contested || prizeHunt || nearestActualDist < engageRange)
         && (grudge || alreadyHunting || contested || prizeHunt || this.countHunters() < hunterCap)) {
         crew.behavior = 'engage';
         crew.targetShipId = nearest?.id ?? null;
         crew.uncappedHunt = !!grudge || contested || prizeHunt;
+        // A GRUDGE IS NOT A HUNT. Answering the hull that holed you is the
+        // OPPORTUNITY rung; picking the softest thing in the seek radius is
+        // ordinary business. A player reads the difference off the pennant.
+        this.leaf(crew, grudge ? 'grudge' : 'hunt', t);
       } else if (this.lureBearing(ship) !== null) {
         // A world event is up and this crew is in range: sail AT it. Ranked
         // above island looting on purpose — the wreck's whole job is to stop
@@ -445,9 +461,11 @@ export class BotCrew {
         crew.behavior = 'patrol';
         crew.targetShipId = null;
         crew.patrolAngle = this.lureBearing(ship)! + (this.bb.rng() - 0.5) * 0.3;
+        this.leaf(crew, 'raid', t);
       } else if (nearIsland && nearIslandDist < 540 && this.bb.rng() < 0.28) {
         crew.behavior = 'loot';
         crew.targetIslandId = nearIsland.id;
+        this.leaf(crew, 'loot', t);
       } else {
         // No nearby target — pick patrol direction biased toward the storm center
         // so bots converge over time.
@@ -457,7 +475,15 @@ export class BotCrew {
           storm.centerZ - ship.position.z,
         );
         crew.patrolAngle = towardCenter + (this.bb.rng() - 0.5) * 1.2;
+        this.leaf(crew, 'patrol', t);
       }
     }
+  }
+
+  /** Stamp the leaf that won this decision and give the crew its voice. The
+   *  phrase is the crew's, not the leaf's — a Coward and a Wrecker running for
+   *  the same ring do not say the same thing (BOT_PERSONALITIES). */
+  private leaf(crew: CrewState, intent: BotIntent, t: number) {
+    this.bb.noteIntent(crew, intent, t, intentLine(crew, intent));
   }
 }
