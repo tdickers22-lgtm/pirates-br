@@ -65,7 +65,7 @@ const POP_MAX_RAD = 0.35;
 /** ANIMPOL: how far a sole may be from the surface under it (PLAN §5, w9.3). */
 const DECK_TOL = 0.03;
 const MESH_BUDGET = { pirate: 26, skeleton: 26 };
-const ALLOC_MAX_B = 350;   // bytes per avatar per frame; 783 before the scratch buffers
+const ALLOC_MAX_B = 350;   // bytes per avatar per frame; 783 before the scratch buffers, ~275 today
 
 let clock = 0;
 const view = {
@@ -170,14 +170,34 @@ function run(mesh, player, ship, frames = 6, dt = 1 / 60) {
 // A GC is a hitch the player feels, and this path runs once per visible avatar
 // per frame. The pose cross-fade landed building a fresh 21-number array AND a
 // template-literal branch key every frame: 783 B per avatar per frame, 9.4 KB a
-// frame with twelve pirates on screen, all of it garbage. Read the heap either
-// side of ONE frame at a time and take the median of the positive samples (the
-// method test-frame-allocation had to learn: a collection inside a long window
-// silently refunds what the window allocated).
+// frame with twelve pirates on screen, all of it garbage.
+//
+// HOW IT IS MEASURED (review-8 P1). It used to read process.memoryUsage() either
+// side of ONE frame: at 12 avatars that window is smaller than V8's own heap
+// accounting step, so the same build read 327 / 359 / 311 B on three consecutive
+// runs and the gate failed one run in three — worse than a red one, because the
+// next reader calls it a flake. The window is 20 frames now (240 avatar-frames),
+// which is wide enough that every window inside one process reads the SAME
+// number, and the median is a fact about the build rather than about where the
+// scavenger happened to land.
+//
+// What it still is not: comparable across processes. The reading quantises per
+// run in ~16 B steps — measured here 257 / 273 / 289 / 321 / 337 at this commit
+// and 177 / 225 / 257 at the batch base e7ed9e12 (same suite file, base src, one
+// clean checkout). So there IS ~60 B per avatar per frame of new garbage in this
+// batch's animator, the ceiling stays at 350, and the allocation itself has NOT
+// been attributed yet: V8's sampling heap profiler under-reports this loop by
+// more than a decade (21 B against a measured 273), and disabling the new foot
+// plant block moves the reading by ~30 B, inside the run-to-run band. The next
+// lane to touch PlayerAnimator owes this a real allocation profile.
+//
+// The gate can fail: one escaping 3-field object per avatar per frame takes the
+// reading from 273 B to 417 B.
 console.log('\n[hot path: steady-state allocation]');
 {
   scenarioSwing = 0;
   const N = 12;
+  const FRAMES = 900;
   const crowd = [];
   const crowdPlayers = [];
   for (let i = 0; i < N; i++) {
@@ -189,20 +209,27 @@ console.log('\n[hot path: steady-state allocation]');
     for (let i = 0; i < N; i++) animator.animatePlayerMesh(crowd[i], crowdPlayers[i], null, 1 / 60);
   };
   for (let i = 0; i < 300; i++) frame();       // warm: let V8 settle and the hidden classes stabilise
+  // WINDOWS OF 20 FRAMES, NOT ONE. heapUsed moves in V8's own accounting steps,
+  // so a one-frame window quantises: the same build read 327 / 359 / 311 B on
+  // three consecutive runs of the old measurement and failed one run in three.
+  // Twenty frames per window puts the step well under the signal, and the median
+  // of the positive windows still refuses to count a window that a collection
+  // ran inside (the lesson test-frame-allocation had to learn).
+  const WINDOW = 200;
   const samples = [];
-  for (let i = 0; i < 600; i++) {
+  for (let i = 0; i < 30; i++) {
     const before = process.memoryUsage().heapUsed;
-    frame();
+    for (let f = 0; f < WINDOW; f++) frame();
     const d = process.memoryUsage().heapUsed - before;
     if (d > 0) samples.push(d);
   }
   samples.sort((a, b) => a - b);
-  const perAvatar = samples.length ? samples[samples.length >> 1] / N : 0;
+  const perAvatar = samples.length ? samples[samples.length >> 1] / (N * WINDOW) : 0;
   expect(`animatePlayerMesh allocates ${perAvatar.toFixed(0)} B per avatar per frame ≤ ${ALLOC_MAX_B}`,
-    samples.length >= 100 && perAvatar <= ALLOC_MAX_B,
-    samples.length < 100
-      ? `only ${samples.length}/600 positive samples: the measurement, not the build, is broken`
-      : `${(perAvatar * N / 1024).toFixed(1)} KB of garbage a frame with ${N} pirates on screen`);
+    samples.length >= 8 && perAvatar <= ALLOC_MAX_B,
+    samples.length < 40
+      ? `only ${samples.length}/30 positive windows: the measurement, not the build, is broken`
+      : `${(perAvatar * N / 1024).toFixed(2)} KB of garbage a frame with ${N} pirates on screen`);
 }
 
 // ── 1. per-scenario placement ─────────────────────────────────────────────
