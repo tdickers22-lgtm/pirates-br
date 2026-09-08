@@ -6,7 +6,7 @@
  */
 import * as THREE from 'three';
 import type { Island, IslandCave } from '../../../shared/types/index.js';
-import { CAVE_MOUTH_TRENCH_K, getCaveMouthCarve, getIslandSurfaceY, isNearCaveMouthCut } from '../../../shared/utils/index.js';
+import { CAVE_MOUTH_TRENCH_K, CAVE_WALK_EXTRA, CAVE_WALL_PAD, getCaveMouthCarve, getIslandSurfaceY, isNearCaveMouthCut } from '../../../shared/utils/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import type { CollapsedAssetMaterial } from '../../assets/AssetMaterialCollapse.js';
 import { applyCaveTubeColors, capCaveTubeRims, CAVE_SHELL_MARGIN, caveTubeParams, cullCaveTubeAgainstNeighbors, insideCaveShellVolume, makeCaveTubeGeometry } from '../../rendering/factories/CaveGeometry.js';
@@ -353,8 +353,6 @@ export function buildCaves(ctx: IslandBuildCtx) {
       emissive: new THREE.Color(0x30200f), emissiveIntensity: 0.7, vertexColors: true,
     });
     paintCaveRock(caveRockMat, 'pirates-cave-tube', true);
-    const torchMat = new THREE.MeshStandardMaterial({ color: 0x4a2f17, roughness: 1 });
-    const flameMat = new THREE.MeshStandardMaterial({ color: 0xff8a20, emissive: 0xff5500, emissiveIntensity: 1.4, roughness: 0.4 });
 
     // ── The portal stone ─────────────────────────────────────────────────────
     // The mouth used to be framed by DodecahedronGeometry scaled to cR×1.7 by
@@ -410,6 +408,28 @@ export function buildCaves(ctx: IslandBuildCtx) {
       const ch = cave.height;
       const cLen = (cave as { length?: number }).length ?? 10;
       const cR = (cave as { interiorRadius?: number }).interiorRadius ?? 3.0;
+      /** PER-SEGMENT decor salt (islandworld-33). Every interior draw used to be
+       *  keyed on the accent index alone — rng(s*401), rng(s*419) — inside a loop
+       *  over island.caves, so all 6-10 segments of a warren got the SAME sides,
+       *  the same fractional positions and the same heights, scaled only by
+       *  cLen/ch. Walking a warren showed the same pair of formations at the same
+       *  relative spot in every corridor, which is what made the interior read as
+       *  tiled. The salt folds the segment's own geometry into the key. */
+      const salt = cw * 13.7 + cLen * 3.1 + cR * 5.9
+        + cave.position.x * 0.017 + cave.position.z * 0.023;
+      const crng = (n: number) => rng(n + salt);
+      /** The furthest a body's CENTRE can get from the axis, and the line decor
+       *  must stand beyond. Interior dressing used to be placed at 0.42-0.93 cR,
+       *  i.e. INSIDE the box physics walks you through: a 2.4 m stalagmite or a
+       *  1 m boulder on the wall foot was walked straight through and the camera
+       *  passed through the ceiling cones (islandworld-01, physics-14). Now every
+       *  floor piece is planted in the wall itself — half of it buried, which is
+       *  also how a formation actually grows — and the client needs no server
+       *  collider for something a body can never reach. */
+      const walkLimit = cR + CAVE_WALK_EXTRA - CAVE_WALL_PAD;
+      const decorMinLx = walkLimit + 0.25;
+      /** Head clearance a hanging piece must leave over the floor below it. */
+      const CEILING_TIP_CLEAR = 2.0;
       // Floor sits at the SAME depth physics stands you on (cave.floorY), so
       // your feet meet the visible slab instead of floating ~0.6-1.3m above it.
       const floorLocalY = cave.floorY - cave.position.y;
@@ -685,37 +705,59 @@ export function buildCaves(ctx: IslandBuildCtx) {
         return null;
       };
 
-      // ── Stalactite + stalagmite accents ──
-      // Scale matters more than count here: the old accents were 0.16-0.28m
-      // wide and 0.4-1.1m long inside a 4m-radius, 4m-high passage, which is
-      // sub-pixel dressing — the reason a lit interior still photographed as a
-      // featureless brown blur. These are cave-sized (up to 2.4m), fluted with
-      // a second collar cone, and there are twice as many of them.
-      const stoneAccentMat = new THREE.MeshStandardMaterial({ color: caveRockCol.clone().multiplyScalar(1.5).getHex(), roughness: 1, flatShading: true });
-      paintCaveRock(stoneAccentMat, 'pirates-cave-accent');
-      const accentCount = lowDetail ? 4 : 11;
-      for (let s = 0; s < accentCount; s++) {
-        const lz = -1 - rng(s * 401) * (cLen - 2);
-        // Formations grow off the WALLS, not down the middle of the walkway.
-        const side = rng(s * 419) > 0.5 ? 1 : -1;
-        const lx = side * cR * (0.42 + rng(s * 403) * 0.5);
-        const stalH = (0.9 + rng(s * 407) * 1.5) * THREE.MathUtils.clamp(ch / 4, 0.6, 1.5);
-        const fromCeiling = rng(s * 409) > 0.45;
-        const seat = siteDecor(lx, lz, fromCeiling ? -stalH * 0.5 : stalH * 0.5, fromCeiling);
-        if (!seat) continue;
-        const rTop = 0.22 + rng(s * 411) * 0.26;
-        const stal = new THREE.Mesh(new THREE.ConeGeometry(rTop, stalH, 6), stoneAccentMat);
-        stal.position.set(lx, seat.y, seat.z);
-        stal.rotation.y = rng(s * 413) * Math.PI;
-        if (fromCeiling) stal.rotation.x = Math.PI;
-        caveGroup.add(stal);
-        // Flared collar where it meets the rock — a bare cone reads as a traffic
-        // cone stuck to the ceiling; the collar makes it grow out of the stone.
-        const collar = new THREE.Mesh(new THREE.ConeGeometry(rTop * 1.85, stalH * 0.34, 6), stoneAccentMat);
-        collar.position.set(lx, seat.y + (fromCeiling ? 1 : -1) * stalH * 0.33, seat.z);
-        collar.rotation.y = rng(s * 417) * Math.PI;
-        if (fromCeiling) collar.rotation.x = Math.PI;
-        caveGroup.add(collar);
+      // ── Dripstone: authored clusters from the cave kit, instanced ────────
+      // Was 11 ConeGeometry(rTop, stalH, 6) spikes each with a second collar
+      // cone — 22 separate draw calls of sub-pixel dressing per segment, and the
+      // reason a lit interior still photographed as a featureless brown blur
+      // (islandworld-03). Now: ONE InstancedMesh per segment per orientation,
+      // drawing a 420-740 tri authored cluster (scripts/blender/build_cave_kit.py).
+      // 22 draws -> 2, and the pieces stand in the WALL instead of the walkway.
+      {
+        const ceilName = crng(3.1) > 0.5 ? 'stalactite_cluster_a' : 'stalactite_cluster_b';
+        const floorName = crng(3.3) > 0.5 ? 'stalagmite_cluster_a' : 'stalagmite_cluster_b';
+        const dripMat = new THREE.MeshStandardMaterial({
+          color: caveRockCol.clone().multiplyScalar(1.45).getHex(), roughness: 1,
+          vertexColors: true, emissive: new THREE.Color(0x2a1c0d), emissiveIntensity: 0.45,
+        });
+        paintCaveRock(dripMat, 'pirates-cave-drip');
+        const ceilXf: THREE.Matrix4[] = [];
+        const floorXf: THREE.Matrix4[] = [];
+        const accentCount = lowDetail ? 3 : 6;
+        for (let s = 0; s < accentCount; s++) {
+          const lz = -1 - crng(s * 401) * (cLen - 2);
+          const side = crng(s * 419) > 0.5 ? 1 : -1;
+          // Planted in the wall: the piece's own half-width buries inside the
+          // rock, so nothing of it reaches the walkable box.
+          const lx = side * (decorMinLx + crng(s * 403) * 0.35);
+          const fromCeiling = crng(s * 409) > 0.45;
+          // A hanging cluster is 1.41-1.45 m long at scale 1; it may not hang
+          // below CEILING_TIP_CLEAR over the floor under it, whatever the
+          // passage height. A passage too low for a readable one gets none.
+          const roomForDrop = ch - CEILING_TIP_CLEAR;
+          const sc = fromCeiling
+            ? Math.min(0.55 + crng(s * 407) * 0.6, roomForDrop / 1.45)
+            : Math.min(0.6 + crng(s * 407) * 0.7, (ch - 0.9) / 1.34);
+          if (!(sc > 0.34)) continue;
+          const seat = siteDecor(lx, lz, 0, fromCeiling);
+          if (!seat) continue;
+          xfPos.set(lx, seat.y, seat.z);
+          xfEuler.set(0, crng(s * 413) * Math.PI * 2, side * (0.05 + crng(s * 417) * 0.12));
+          xfQuat.setFromEuler(xfEuler);
+          xfScale.set(sc, sc, sc);
+          (fromCeiling ? ceilXf : floorXf).push(new THREE.Matrix4().compose(xfPos, xfQuat, xfScale));
+        }
+        for (const [name, list] of [[ceilName, ceilXf], [floorName, floorXf]] as const) {
+          if (list.length === 0) continue;
+          const kit = assets.mergedGeometry(name as AssetName);
+          if (!kit) continue;
+          const im = new THREE.InstancedMesh(kit.geometry, dripMat, list.length);
+          im.name = `cave-${name}`;
+          list.forEach((m, k) => im.setMatrixAt(k, m));
+          im.instanceMatrix.needsUpdate = true;
+          im.castShadow = false;
+          im.receiveShadow = true;
+          caveGroup.add(im);
+        }
       }
 
       // ── Floor scatter: broken rock along the wall feet ────────────────────
@@ -729,19 +771,22 @@ export function buildCaves(ctx: IslandBuildCtx) {
           const rubbleXf: THREE.Matrix4[] = [];
           const rubbleCount = lowDetail ? 3 : 9;
           for (let s = 0; s < rubbleCount; s++) {
-            const side = rng(s * 431) > 0.5 ? 1 : -1;
-            const lx = side * cR * (0.55 + rng(s * 433) * 0.38);
-            const lz = -0.8 - rng(s * 437) * (cLen - 1.4);
-            const size = 0.32 + rng(s * 439) * 0.72;
+            const side = crng(s * 431) > 0.5 ? 1 : -1;
+            // Broken rock banks against the wall FOOT, outside the box a body
+            // walks through, and nothing over 0.6 m reads as a step-over lump
+            // you could be expected to walk through (physics-14).
+            const lx = side * (decorMinLx - 0.15 + crng(s * 433) * 0.45);
+            const lz = -0.8 - crng(s * 437) * (cLen - 1.4);
+            const size = 0.28 + crng(s * 439) * 0.32;
             const seat = siteDecor(lx, lz, size * 0.22);
             if (!seat) continue;
             xfPos.set(lx, seat.y - size * 0.34, seat.z);
             xfEuler.set(
-              (rng(s * 443) - 0.5) * 1.1, rng(s * 449) * Math.PI * 2, (rng(s * 457) - 0.5) * 1.1,
+              (crng(s * 443) - 0.5) * 1.1, crng(s * 449) * Math.PI * 2, (crng(s * 457) - 0.5) * 1.1,
             );
             xfQuat.setFromEuler(xfEuler);
             const sc = size / 2.226;   // boulder_a stands 2.226m at scale 1
-            xfScale.set(sc * (0.8 + rng(s * 461) * 0.5), sc, sc * (0.8 + rng(s * 463) * 0.5));
+            xfScale.set(sc * (0.8 + crng(s * 461) * 0.5), sc, sc * (0.8 + crng(s * 463) * 0.5));
             rubbleXf.push(new THREE.Matrix4().compose(xfPos, xfQuat, xfScale));
           }
           if (rubbleXf.length > 0) {
@@ -761,99 +806,99 @@ export function buildCaves(ctx: IslandBuildCtx) {
         }
       }
 
-      // ── Torch sconce on the side wall + warm point light so the inside isn't pitch-black ──
-      const torchSide = rng(cw * 7) > 0.5 ? 1 : -1;
-      const torchSeat = siteDecor(torchSide * (cR - 0.1), -cLen * 0.55, ch * 0.65);
-      if (torchSeat) {
-        const torchZ = torchSeat.z;
-        const torchBaseY = torchSeat.y - ch * 0.65;
-        const torchMount = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), torchMat);
-        torchMount.position.set(torchSide * (cR - 0.1), torchSeat.y, torchZ);
-        caveGroup.add(torchMount);
-        const torchStaff = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.55, 5), torchMat);
-        torchStaff.rotation.z = -torchSide * 0.45;
-        torchStaff.position.set(torchSide * (cR - 0.18), torchBaseY + ch * 0.78, torchZ);
-        caveGroup.add(torchStaff);
-        const flame = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), flameMat);
-        flame.position.set(torchSide * (cR - 0.34), torchBaseY + ch * 0.95, torchZ);
-        caveGroup.add(flame);
+      // ── Torch sconce on the side wall + warm point light ────────────────
+      // Was a BoxGeometry mount + a 5-sided CylinderGeometry staff + an
+      // 8x6 SphereGeometry flame: three draws of a shape nobody could read.
+      // wall_torch (180 tris) is one draw, and it hangs OUTSIDE the walkable box.
+      const torchSide = crng(cw * 7) > 0.5 ? 1 : -1;
+      const torchSeat = siteDecor(torchSide * decorMinLx, -cLen * 0.55, ch * 0.55);
+      const torchKit = assets.mergedGeometry('wall_torch');
+      if (torchSeat && torchKit) {
+        const torch = new THREE.Mesh(torchKit.geometry, torchKit.material);
+        torch.name = 'cave-wall-torch';
+        torch.position.set(torchSide * decorMinLx, torchSeat.y - 0.82, torchSeat.z);
+        torch.rotation.y = torchSide > 0 ? -Math.PI / 2 : Math.PI / 2;
+        caveGroup.add(torch);
         // Underground is dark regardless of day/night, so caves get their OWN
-        // always-on warm torch light (parented to the group → only lit when the
+        // always-on warm torch light (parented to the group -> only lit when the
         // cave is in view range, so no global light-budget blowout).
         if (caveTorchBudget > 0) {
           caveTorchBudget--;
           const torchLight = new THREE.PointLight(0xffb060, 4.4, cLen + cR * 3.0, 1.4);
-          torchLight.position.copy(flame.position);
+          torchLight.position.set(torchSide * (decorMinLx - 0.25), torchSeat.y + 0.15, torchSeat.z);
           registerBudgetLight(torchLight);
           caveGroup.add(torchLight);
         }
       }
-      // Sparse glowing crystals deeper in — cool blue emissive clusters with a
-      // faint light each, so the tunnel reads as lit but moody, not a flat box.
+      // Sparse glowing crystals deeper in — cool emissive veins with a faint
+      // light each, so the tunnel reads as lit but moody, not a flat box.
+      // Was a DodecahedronGeometry bed plus SIX ConeGeometry shards per cluster,
+      // 7 draws x 3-5 clusters = up to 35 draw calls of "blue flat blades"
+      // (islandworld-03). crystal_vein_a/b is 160-240 tris in ONE instanced draw.
       if (!lowDetail) {
-        const crystalMat = new THREE.MeshStandardMaterial({ color: 0x6fd3ff, emissive: 0x2f8fe0, emissiveIntensity: 2.2, roughness: 0.3 });
-        // The bed of dull rock each cluster erupts from, so the shards don't
-        // look glued flat to a smooth wall.
-        const crystalBedMat = new THREE.MeshStandardMaterial({
-          color: caveRockCol.clone().lerp(new THREE.Color(0x3f6f8a), 0.35).getHex(),
-          roughness: 0.85, flatShading: true, emissive: new THREE.Color(0x102838), emissiveIntensity: 0.7,
-        });
-        const clusters = 3 + Math.floor(rng(cw * 5) * 3);
+        const veinName = crng(5.7) > 0.5 ? 'crystal_vein_a' : 'crystal_vein_b';
+        const veinKit = assets.mergedGeometry(veinName);
+        const veinXf: THREE.Matrix4[] = [];
+        const clusters = 3 + Math.floor(crng(cw * 5) * 3);
         for (let c = 0; c < clusters; c++) {
-          const cz = -cLen * (0.28 + c * 0.2) - rng(c * 91) * 1.4;
-          const side = rng(c * 89) > 0.5 ? 1 : -1;
-          const cx = side * cR * (0.4 + rng(c * 93) * 0.55);
-          const onCeil = rng(c * 95) > 0.62;
-          const seat = siteDecor(cx, cz, onCeil ? -0.35 : 0.12, onCeil);
+          const cz = -cLen * (0.28 + c * 0.2) - crng(c * 91) * 1.4;
+          const side = crng(c * 89) > 0.5 ? 1 : -1;
+          const cx = side * (decorMinLx + crng(c * 93) * 0.3);
+          const onCeil = crng(c * 95) > 0.62;
+          const sc = 0.7 + crng(c * 101) * 0.7;
+          if (onCeil && ch - 1.07 * sc < CEILING_TIP_CLEAR) continue;
+          const seat = siteDecor(cx, cz, 0, onCeil);
           if (!seat) continue;
-          const cy = seat.y;
-          const bed = new THREE.Mesh(new THREE.DodecahedronGeometry(0.42 + rng(c * 101) * 0.3, 0), crystalBedMat);
-          bed.position.set(cx, cy + (onCeil ? 0.14 : -0.14), seat.z);
-          bed.scale.set(1, 0.55, 1);
-          bed.rotation.set(rng(c * 103) * 0.5, rng(c * 107) * Math.PI, rng(c * 109) * 0.5);
-          caveGroup.add(bed);
-          // Six shards, up to 1.35m — the old 0.3-0.7m splinters were invisible
-          // past three metres, which is why the "lit but moody" read never landed.
-          for (let s = 0; s < 6; s++) {
-            const shardH = 0.45 + rng(c * 99 + s) * 0.9;
-            const shard = new THREE.Mesh(
-              new THREE.ConeGeometry(0.09 + rng(c * 97 + s) * 0.1, shardH, 5), crystalMat,
-            );
-            shard.position.set(
-              cx + (rng(s * 13 + c) - 0.5) * 0.75,
-              cy + (onCeil ? -1 : 1) * (0.1 + shardH * 0.35),
-              seat.z + (rng(s * 17 + c) - 0.5) * 0.75,
-            );
-            shard.rotation.set(rng(s * 19 + c) * 0.8 - 0.4 + (onCeil ? Math.PI : 0), rng(s * 21 + c) * Math.PI, rng(s * 23 + c) * 0.8 - 0.4);
-            caveGroup.add(shard);
-          }
+          xfPos.set(cx, seat.y, seat.z);
+          xfEuler.set(onCeil ? Math.PI : 0, crng(c * 103) * Math.PI * 2, side * 0.25);
+          xfQuat.setFromEuler(xfEuler);
+          xfScale.set(sc, sc, sc);
+          veinXf.push(new THREE.Matrix4().compose(xfPos, xfQuat, xfScale));
           if (caveGlowBudget > 0) {
             caveGlowBudget--;
             const glow = new THREE.PointLight(0x5fbfff, 1.6, 8.5, 1.8);
-            glow.position.set(cx, cy, seat.z);
+            glow.position.set(cx - side * 0.3, seat.y + (onCeil ? -0.4 : 0.4), seat.z);
             registerBudgetLight(glow);
             caveGroup.add(glow);
           }
         }
+        if (veinKit && veinXf.length > 0) {
+          const im = new THREE.InstancedMesh(veinKit.geometry, veinKit.material, veinXf.length);
+          im.name = `cave-${veinName}`;
+          veinXf.forEach((m, k) => im.setMatrixAt(k, m));
+          im.instanceMatrix.needsUpdate = true;
+          im.castShadow = false;
+          caveGroup.add(im);
+        }
       }
 
-      // ── Treasure chest tucked at the back of the cave (visual only — gameplay
-      //     chests still spawn from server). Only in the dead-end treasure room. ──
-      if ((cave.hasBackWall ?? true) && rng(cw * 11) > 0.35 && !lowDetail) {
-        const chestSeat = siteDecor(0, -cLen + 1.0, 0.35);
-        if (chestSeat) {
-          const goldChestMat = new THREE.MeshStandardMaterial({ color: 0x5d3a18, roughness: 0.95 });
-          const goldLidMat = new THREE.MeshStandardMaterial({ color: 0xc9a84c, roughness: 0.5, metalness: 0.6 });
-          const treasure = new THREE.Group();
-          treasure.position.set(0, chestSeat.y, chestSeat.z);
-          treasure.rotation.y = (rng(cw * 13) - 0.5) * 0.6;
-          const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.55, 0.7), goldChestMat);
-          body.position.y = 0;
-          treasure.add(body);
-          const lid = new THREE.Mesh(new THREE.BoxGeometry(1.04, 0.18, 0.74), goldLidMat);
-          lid.position.y = 0.32;
-          treasure.add(lid);
-          caveGroup.add(treasure);
+      // ── What is actually at the back of a dead end ───────────────────────
+      // It used to be a two-box chest with a gold lid and a source comment
+      // saying "visual only - gameplay chests still spawn from server": no
+      // prompt, no collider, no loot. ~2-3 per cave island, and walking a warren
+      // to its end to find a decoy is what taught players caves are worthless
+      // (islandworld-02). The decoy is gone. The room now holds something that
+      // is honestly scenery — a shrine, a bone pile, a hand-print panel — so a
+      // dead end reads as a PLACE that was here before you, and the only chest
+      // underground is one the server really spawned.
+      if ((cave.hasBackWall ?? true) && !lowDetail) {
+        const shrineName = ((): AssetName => {
+          const r = crng(cw * 11);
+          if (r > 0.62) return 'skull_shrine';
+          if (r > 0.3) return 'cave_painting_panel';
+          return 'bone_pile_cave';
+        })();
+        const onWall = shrineName === 'cave_painting_panel';
+        const kit = assets.mergedGeometry(shrineName);
+        const seat = siteDecor(onWall ? decorMinLx : 0, -cLen + 1.1, 0);
+        if (kit && seat) {
+          const piece = new THREE.Mesh(kit.geometry, kit.material);
+          piece.name = `cave-${shrineName}`;
+          piece.position.set(onWall ? decorMinLx : 0, seat.y, seat.z);
+          piece.rotation.y = onWall ? -Math.PI / 2 : (crng(cw * 13) - 0.5) * 1.2;
+          piece.castShadow = false;
+          piece.receiveShadow = true;
+          caveGroup.add(piece);
         }
       }
 
