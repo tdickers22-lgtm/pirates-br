@@ -208,6 +208,13 @@ export const LOGIC = [
   // BOTCREW-01/bots-16/bots-03: a two-hand bot crew keeps firing while a hand
   // is free for the breach; a lone pirate still has to choose (w3.2).
   tsx('test-bot-crew-roles.mjs'),
+  // BOTFUN-01/bots-08: a bot hunts what she can SEE — tier sight x storm
+  // weather, a loud cue inside 200 m, and a 25 s memory (w6.2).
+  tsx('test-bot-perception.mjs'),
+  // BOTFUN-01/bots-15, bots-14: the behaviour tree has named leaves and a
+  // voice — >=3 distinct branches per crew over an arc, >=1 line per 2 min.
+  // Not `quick`: it sails a whole 9-crew match (~90 s on this Air) (w6.2).
+  tsx('bot-intent-probe.mjs'),
   quick(tsx('test-oneshot-underload.mjs')),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),
