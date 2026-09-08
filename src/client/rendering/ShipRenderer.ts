@@ -3042,16 +3042,9 @@ export class ShipRenderer {
         // No client-only heel here either: the server's own attitude spring
         // already carries turn heel (±0.06) and wind heel, sampled from the real
         // Gerstner slopes at bow/stern/rails.
-        const wavePitch = basePitch;
-        const rollTarget = baseRoll;
-        if (ship.sinking) {
-          mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, wavePitch * 0.5, 1 - Math.exp(-4 * dt));
-          mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, ship.sinkProgress * Math.PI * 0.36, 1 - Math.exp(-6 * dt));
-          mesh.root.position.y = THREE.MathUtils.lerp(mesh.root.position.y, ship.position.y - ship.sinkProgress * 4.5, 1 - Math.exp(-9 * dt));
-        } else {
-          mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, wavePitch, 1 - Math.exp(-3 * dt));
-          mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, rollTarget, 1 - Math.exp(-3 * dt));
-        }
+        const attitudeAlpha = 1 - Math.exp(-(ship.sinking ? 6 : 3) * dt);
+        mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, basePitch, attitudeAlpha);
+        mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, baseRoll, attitudeAlpha);
         this.updateWake(mesh, ship, stats, waveT, dt, false, storm01);
         continue;
       }
@@ -3097,18 +3090,27 @@ export class ShipRenderer {
       const chainPayout = 0.76 * (anchorFall / 2.75);
       mesh.anchorChain.scale.y = THREE.MathUtils.lerp(mesh.anchorChain.scale.y, ship.anchored ? 0.52 + anchorDrop * chainPayout : 0.52, anchorAlpha);
 
-      const wavePitch = basePitch;
-      const rollTarget = baseRoll;
-
-      // Sinking tilt
-      if (ship.sinking) {
-        mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, wavePitch * 0.6, 1 - Math.exp(-5 * dt));
-        mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, ship.sinkProgress * Math.PI * 0.42, 1 - Math.exp(-8 * dt));
-        mesh.root.position.y = THREE.MathUtils.lerp(mesh.root.position.y, ship.position.y - ship.sinkProgress * 5, 1 - Math.exp(-11 * dt));
-      } else {
-        mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, wavePitch, 1 - Math.exp(-3.8 * dt));
-        mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, rollTarget, 1 - Math.exp(-3.4 * dt));
-      }
+      // A FOUNDERING HULL IS DRAWN WHERE THE SERVER SANK HER (review-4 P0).
+      //
+      // These two lines used to be a client-only capsize: rotation.z was
+      // OVERWRITTEN with `sinkProgress * PI * 0.42` (0.79 rad at 60% of
+      // SINK_TIME, 1.32 at the end) and position.y with `ship.position.y -
+      // sinkProgress * 5`. They were written when the server had an
+      // `attitudeDecay` and no founder scene. SINK-01 slice b deleted that and
+      // gave the server a real one: beginFounder freezes the flood list,
+      // PhysicsSystem chases the list she actually took (±0.35 rad), and the
+      // descent profile puts her weather deck under at 0.6·SINK_TIME. Match's
+      // updateFounderingCrew keeps every hand aboard until HIS OWN plank is
+      // under, so for the first twelve seconds of a twenty-second founder the
+      // crew were standing on a deck drawn 45° over and three metres below
+      // where the server was seating them. Nothing here now that the wire has
+      // not sent: the same expressions as the alive branch, just chased faster
+      // because a founder's attitude moves faster than a swell.
+      const attitudeAlpha = 1 - Math.exp(-(ship.sinking ? 8 : 3.8) * dt);
+      mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, basePitch, attitudeAlpha);
+      mesh.root.rotation.z = THREE.MathUtils.lerp(
+        mesh.root.rotation.z, baseRoll, 1 - Math.exp(-(ship.sinking ? 8 : 3.4) * dt),
+      );
 
       // Sail state — keep canvas mostly vertical so it stays visible; tear is subtle
       const rawInt = ship.sailIntegrity ?? 1;

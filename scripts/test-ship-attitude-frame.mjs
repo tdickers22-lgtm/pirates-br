@@ -149,6 +149,53 @@ for (const type of ['sloop', 'brigantine', 'galleon']) {
     worstNeedle <= 0.035);
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// A FOUNDERING HULL IS THE SERVER'S HULL.
+//
+// The drawn wreck used to capsize on the CLIENT's own clock: rotation.z was
+// overwritten with sinkProgress·PI·0.42 and position.y with position.y −
+// sinkProgress·5, so the server's frozen flood list was never drawn and the
+// deck the crew are seated on was metres below the deck you can see. Grade
+// both LODs: the drawn attitude must be the replicated attitude and the drawn
+// hull must be at the replicated height, sinking or not.
+{
+  const stats = SHIP_STATS.brigantine;
+  const ship = fixtureShip('brigantine');
+  ship.id = 'founder-attitude';
+  ship.position = { x: 300, y: -1.4, z: -220 };
+  ship.rotation = 0.8;
+  ship.sinking = true;
+  ship.sinkProgress = 0.62;
+  ship.alive = true;
+  // The list SINK-01 slice b freezes at beginFounder and PhysicsSystem chases.
+  ship.pitch = 0.09;
+  ship.roll = -0.24;
+  sr.buildShip(ship);
+  const mesh = sr.shipMeshes.get(ship.id);
+  openFirstDrawBudgetForSettle();
+  const near = new THREE.Vector3(ship.position.x + 10, 4, ship.position.z + 10);
+  const far = new THREE.Vector3(ship.position.x + 900, 40, ship.position.z + 900);
+  for (const [label, cam] of [['detail', near], ['proxy', far]]) {
+    for (let i = 0; i < 240; i++) sr.update([ship], [], 30, 1 / 60, 0, cam);
+    const drawnPitch = mesh.root.rotation.x;
+    const drawnRoll = mesh.root.rotation.z;
+    const drawnY = mesh.root.position.y;
+    console.log(`    ${label.padEnd(6)} sinkProgress ${ship.sinkProgress}  ->  drawn pitch ${drawnPitch.toFixed(3)} (wire ${ship.pitch}) roll ${drawnRoll.toFixed(3)} (wire ${ship.roll}) y ${drawnY.toFixed(3)} (wire ${ship.position.y})`);
+    expect(`${label}: a foundering hull is drawn with the list the SERVER gave her, not with sinkProgress`,
+      Math.abs(drawnRoll - ship.roll) < 0.02,
+      `drawn roll ${drawnRoll.toFixed(4)}, wire roll ${ship.roll}, sinkProgress term would be ${(ship.sinkProgress * Math.PI * 0.42).toFixed(3)}`);
+    expect(`${label}: ...and with her replicated trim`,
+      Math.abs(drawnPitch - ship.pitch) < 0.02,
+      `drawn pitch ${drawnPitch.toFixed(4)}, wire pitch ${ship.pitch}`);
+    expect(`${label}: ...and at the height the server is standing her crew on`,
+      Math.abs(drawnY - ship.position.y) < 0.05,
+      `drawn y ${drawnY.toFixed(4)}, wire y ${ship.position.y}, sinkProgress drop would be ${(ship.sinkProgress * 5).toFixed(2)} m`);
+  }
+  // Not vacuous: she really is well into the founder and really is listing.
+  expect('the founder fixture is past the deck-awash point and carries a real list',
+    ship.sinkProgress > 0.6 && Math.abs(ship.roll) > 0.2);
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS: nothing graded'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);
