@@ -336,18 +336,32 @@ function makeJoinRng(): () => number {
  *  is exactly what it was. */
 export function makeMatchRng(matchId: string): () => number {
   const seed = matchSeedFromEnv();
-  if (seed === undefined) return Math.random;
-  let salt = 0x811c9dc5;
-  for (let i = 0; i < matchId.length; i++) salt = Math.imul(salt ^ matchId.charCodeAt(i), 0x01000193);
-  let s = (seed ^ salt ^ 0x9e3779b9) >>> 0;
-  return () => {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = s;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  const draw: () => number = seed === undefined
+    ? Math.random
+    : (() => {
+      let salt = 0x811c9dc5;
+      for (let i = 0; i < matchId.length; i++) salt = Math.imul(salt ^ matchId.charCodeAt(i), 0x01000193);
+      let s = (seed ^ salt ^ 0x9e3779b9) >>> 0;
+      return () => {
+        s = (s + 0x6d2b79f5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    })();
+  // MATCHSPLIT-01: every gameplay draw is counted so `scripts/test-tick-order.mjs`
+  // can pin HOW MANY draws each subsystem takes per tick. That is the only
+  // instrument that can catch an extraction which preserves behaviour under one
+  // seed but re-orders the shared stream (two systems then swap outcomes on
+  // every other seed). One integer increment per draw, and draws are single
+  // digits per tick, so this is free.
+  return () => { rngDraws.n++; return draw(); };
 }
+
+/** Gameplay-RNG draw counter (MATCHSPLIT-01). Read by test-tick-order; nothing
+ *  in the sim may branch on it. */
+export const rngDraws = { n: 0 };
 
 /** Per-skeleton phase (guard reflex, roam offset) from its deterministic
  *  name (Skeleton_<n>), never its uuid: a seeded match must replay (RNG-01). */

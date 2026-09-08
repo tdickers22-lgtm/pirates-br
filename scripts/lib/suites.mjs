@@ -300,6 +300,10 @@ export const LOGIC = [
   // ENTITYSEAT (w7.2): chests, barrels and stations on the DRAWN ground, not
   // the analytic field. MUTATE=raw restores the old placement (60/133 out).
   quick(tsx('test-entity-seat.mjs')),
+  // MATCHSPLIT-01 (w7.5): the tick spine — which subsystem runs when, and how
+  // many draws each takes off the shared seeded stream. Pins the Match.ts split
+  // against a silent re-order. Swap two update* calls in tick() to see it fail.
+  tsx('test-tick-order.mjs'),
   quick(tsx('test-death-causes.mjs')),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
   // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens
