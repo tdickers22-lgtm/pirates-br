@@ -37,6 +37,16 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MODELS_DIR = path.join(ROOT, 'public/assets/models');
 
+// TEXTURED GLBs IN NODE. The island's assets carry no images, so GLTFLoader
+// never reached its texture path here; the hero assets (WEAPON-01/HWGLB-01)
+// embed one baked atlas each, and the loader then throws `self is not defined`
+// and the whole file "fails to parse". The image is not what this suite grades
+// — attributes, material collapse, boot/world partition are — so the decode is
+// stubbed rather than emulated: a 1x1 bitmap, and every geometry test is
+// unaffected.
+globalThis.self ??= globalThis;
+globalThis.createImageBitmap ??= async () => ({ width: 1, height: 1, close() {} });
+
 let failures = 0;
 function expect(label, condition, detail = '') {
   if (condition) {

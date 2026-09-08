@@ -23,6 +23,13 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MODELS_DIR = path.join(ROOT, 'public/assets/models');
 
+// The hero GLBs (WEAPON-01/HWGLB-01) embed a baked atlas, and GLTFLoader's
+// texture path throws `self is not defined` under Node — which reads here as
+// "every GLB loaded" failing, not as a texture problem. This suite grades
+// material floors, not images, so the decode is stubbed with a 1x1 bitmap.
+globalThis.self ??= globalThis;
+globalThis.createImageBitmap ??= async () => ({ width: 1, height: 1, close() {} });
+
 let failures = 0;
 function expect(label, condition, detail = '') {
   if (condition) {
