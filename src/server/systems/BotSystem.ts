@@ -123,6 +123,7 @@ export class BotSystem {
         retaliateShipId: null,
         lastChainshottedUntil: ship.chainshottedUntil ?? 0,
         lastFiredAt: -999,
+        contacts: new Map(),
         intent: 'patrol',
         intentAt: 0,
         spokeAt: -999,

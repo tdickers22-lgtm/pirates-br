@@ -120,6 +120,9 @@ export interface CrewState {
   lastChainshottedUntil: number;
   /** Sim time this crew last actually put a ball through a port. */
   lastFiredAt: number;
+  /** LAST KNOWN BEARINGS. shipId -> where she was and when we last had her.
+   *  Bounded by the hull count (<= 12); pruned when a contact goes stale. */
+  contacts: Map<string, { x: number; z: number; t: number }>;
   /** The behaviour-tree leaf that won the last decision (BOTFUN-01). */
   intent: BotIntent;
   /** Sim time the intent last CHANGED (not the last time it was re-chosen). */

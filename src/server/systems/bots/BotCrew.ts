@@ -6,7 +6,7 @@ import { dist2D, angleWrap } from '../../../shared/utils/index.js';
 import { countOpenHoles } from '../../../shared/interactions.js';
 import type { Blackboard } from './Blackboard.js';
 import type { BotState, CrewState, ProvokedShip, BotIntent } from './Blackboard.js';
-import { intentLine, BOT_TIERS } from './personalities.js';
+import { intentLine, BOT_TIERS, botSightRange, BOT_LOUD_RANGE, BOT_CONTACT_MEMORY } from './personalities.js';
 import { BOT_DAMAGE_CONTROL_WATER, FIREARM_RANGE, hullTotal, botMayFireCannons, BOT_LURE_BRAWL_RADIUS, BOT_LURE_STATION_RADIUS } from './Blackboard.js';
 
 /**
@@ -250,7 +250,7 @@ export class BotCrew {
   decideBehavior(
     crew: CrewState, ship: Ship,
     ships: Ship[], islands: Island[], storm: StormState,
-    players: Player[], t: number,
+    _players: Player[], t: number,
   ) {
     const distToCenter = dist2D(ship.position.x, ship.position.z, storm.centerX, storm.centerZ);
     const distRatio = distToCenter / Math.max(1, storm.safeRadius);
@@ -324,14 +324,22 @@ export class BotCrew {
       const [rescanMin, rescanMax] = tier.rescanInterval;
       crew.stateTimer = rescanMin + this.bb.rng() * (rescanMax - rescanMin);
 
-      // Find best target: prefer ships with humans aboard.
-      const humanShipIds = new Set<string>();
-      for (const p of players) {
-        if (!p.isBot && p.shipId && p.state !== 'eliminated') humanShipIds.add(p.shipId);
-      }
+      // WHAT THIS CREW CAN SEE FROM HER OWN DECK (bots-08). There is no
+      // roster of humans here any more: the old scan read every hull on the
+      // chart and gave a human's a flat 0.88 discount, so a player could not
+      // break contact by running or by weather. Now a hull is a candidate only
+      // if she is inside the tier's sight (scaled by the storm's weather), or
+      // close enough to HEAR, or still in memory from when she was last seen.
+      const sight = botSightRange(tier.perceptionRange, storm.phase);
 
       let nearest: Ship | null = null;
       let nearestScore = Infinity;
+      /** How far away the crew BELIEVES her best candidate is — her last known
+       *  bearing when the hull is out of sight. The range gate below has to ask
+       *  the same question the scan asked, or a remembered contact is dropped
+       *  the instant she is lost: the crew "chases" a memory and is then told
+       *  the true position is 4 km away. */
+      let nearestPerceived = Infinity;
       for (const other of ships) {
         if (other.id === ship.id || !other.alive || other.sinking) continue;
         if (this.bb.peaceShipIds.has(other.id)) continue; // dev bot-peace: never engage this ship
@@ -339,7 +347,21 @@ export class BotCrew {
         // shadows a moored learner with the ports shut until the truce lifts.
         if (!botMayFireCannons(t, crew.underFireUntil, other, islands, crew.retaliateShipId)) continue;
 
-        const d = dist2D(ship.position.x, ship.position.z, other.position.x, other.position.z);
+        const trueD = dist2D(ship.position.x, ship.position.z, other.position.x, other.position.z);
+        // SEEN, HEARD, OR REMEMBERED — in that order.
+        const heard = trueD <= BOT_LOUD_RANGE;
+        const seen = heard || trueD <= sight;
+        if (seen) crew.contacts.set(other.id, { x: other.position.x, z: other.position.z, t });
+        const memory = crew.contacts.get(other.id);
+        if (!seen) {
+          if (!memory || t - memory.t > BOT_CONTACT_MEMORY) {
+            if (memory) crew.contacts.delete(other.id);
+            continue;
+          }
+        }
+        // A crew chases the bearing she last HAD, not the one the server knows.
+        const d = seen ? trueD
+          : dist2D(ship.position.x, ship.position.z, memory!.x, memory!.z);
         // Score: distance, but humans get only a modest discount so bots contest players
         // without feeling like they are hard-locked from across the map.
         // A BOUNTIED hull (a crew hauling most of a win in her hold) gets a
@@ -370,9 +392,11 @@ export class BotCrew {
         // moment somebody is lifting the prize off her deck. This is what makes
         // her DECK the contested ground rather than the water around it.
         const heaveTo = this.shipIsPlundering(other.id) ? 0.5 : 1;
-        const score = (humanShipIds.has(other.id) ? d * 0.88 : d)
-          * bountyDiscount * wounded * pileOn * heaveTo;
-        if (score < nearestScore) { nearestScore = score; nearest = other; }
+        // A stale contact scores worse the older it is: a hull last seen twenty
+        // seconds ago in the murk is a worse bet than one under the guns now.
+        const staleness = seen ? 1 : 1 + (t - memory!.t) / BOT_CONTACT_MEMORY;
+        const score = d * staleness * bountyDiscount * wounded * pileOn * heaveTo;
+        if (score < nearestScore) { nearestScore = score; nearest = other; nearestPerceived = d; }
       }
 
       // Find island for looting
@@ -392,9 +416,15 @@ export class BotCrew {
           && !this.bb.peaceShipIds.has(s.id)) ?? null
         : null;
       if (grudge) nearest = grudge;
-      const nearestActualDist = nearest
-        ? dist2D(ship.position.x, ship.position.z, nearest.position.x, nearest.position.z)
-        : Infinity;
+      if (grudge && grudge !== null) {
+        // The grudge is not a sighting: she knows who shot her. Take her last
+        // known bearing if there is one, else the true one.
+        const known = crew.contacts.get(grudge.id);
+        nearestPerceived = known
+          ? dist2D(ship.position.x, ship.position.z, known.x, known.z)
+          : dist2D(ship.position.x, ship.position.z, grudge.position.x, grudge.position.z);
+      }
+      const nearestActualDist = nearest ? nearestPerceived : Infinity;
 
       // Early-game pacing governor. For the first BOT_EARLY_PEACE_SECONDS bots do
       // not SEEK ship fights — they patrol and loot — unless something shot them

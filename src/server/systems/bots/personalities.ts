@@ -131,3 +131,29 @@ export function personalityFor(index: number, spawnX: number, spawnZ: number): B
  *  inside every tier's cannon reach (245-270 m) and outside every personality's
  *  back-off radius, so the band still shapes the fight it starts. */
 export const BOT_GUNNERY_HOLD = 135;
+
+/**
+ * WHAT A CREW CAN ACTUALLY SEE (BOTFUN-01 / bots-08).
+ *
+ * Bots had perfect information: every hull on the chart was a candidate, and a
+ * human's hull got a flat 0.88 discount for being human — a magnet no amount of
+ * sea room or weather could break. A player who ran 700 m into a squall was
+ * still being hunted, which is why bots felt like they were cheating.
+ *
+ * Sight is the tier's clear-weather range times the weather, and the weather is
+ * the storm phase: an opening afternoon is clear, the late arc is spray, rain
+ * and dark. Below that, two things still give a hull away — she is close enough
+ * to HEAR (hull, canvas, gun crew), or she has a lit ship's lantern the ring
+ * lights up. Everything else is memory: a contact stays hunted for
+ * BOT_CONTACT_MEMORY seconds after she is lost, at her last known bearing.
+ */
+export const BOT_STORM_VISIBILITY = [1, 0.95, 0.86, 0.78, 0.7, 0.6, 0.52];
+/** A hull inside this is heard whatever the weather. */
+export const BOT_LOUD_RANGE = 200;
+/** How long a lost contact stays worth chasing, at her last known position. */
+export const BOT_CONTACT_MEMORY = 25;
+
+export function botSightRange(perceptionRange: number, stormPhase: number): number {
+  const i = Math.min(Math.max(0, stormPhase | 0), BOT_STORM_VISIBILITY.length - 1);
+  return perceptionRange * BOT_STORM_VISIBILITY[i];
+}
