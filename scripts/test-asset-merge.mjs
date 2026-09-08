@@ -93,7 +93,7 @@ globalThis.fetch = async (input, init) => {
   return realFetch(input, init);
 };
 
-const { ASSET_NAMES, FLAT_SHADED_ASSETS, BOOT_ASSET_NAMES, WORLD_ASSET_NAMES, AssetLibrary, assets } = await import('../src/client/assets/AssetLibrary.ts');
+const { ASSET_NAMES, FLAT_SHADED_ASSETS, BOOT_ASSET_NAMES, WORLD_ASSET_NAMES, LAZY_ASSET_NAMES, AssetLibrary, assets } = await import('../src/client/assets/AssetLibrary.ts');
 
 // Loader failures inside preload() are logged and tolerated by design (callers
 // keep a procedural fallback), so capture them rather than let them scroll past.
@@ -101,6 +101,12 @@ const loadWarnings = [];
 const realWarn = console.warn;
 console.warn = (...args) => { loadWarnings.push(args.map(String).join(' ')); };
 await assets.preload();
+// LOD-01 (w7.4): the fifteen story tableaux left preloadWorld and now arrive
+// through ensure() behind a seated placeholder (test-story-lazy grades that
+// contract). They are still SHIPPED geometry that the merge/collapse rules bind,
+// so this suite still grades all of them — it just has to ask for them the way
+// the game does instead of assuming preload() brought everything.
+await Promise.all(LAZY_ASSET_NAMES.map((n) => assets.ensure(n)));
 console.warn = realWarn;
 
 console.log(`asset merge guard — ${ASSET_NAMES.length} assets\n`);
@@ -487,12 +493,17 @@ expect('merged geometry is registered as a shared resource (never disposed by ca
 {
   const boot = [...BOOT_ASSET_NAMES];
   const world = [...WORLD_ASSET_NAMES];
-  expect('the boot set and the world set partition the library exactly',
-    boot.length + world.length === ASSET_NAMES.length
-      && boot.every((n) => ASSET_NAMES.includes(n))
-      && world.every((n) => ASSET_NAMES.includes(n))
-      && boot.every((n) => !world.includes(n)),
-    `${boot.length} boot + ${world.length} world vs ${ASSET_NAMES.length}`);
+  // Three sets since LOD-01 (w7.4): boot (the menu), world (the countdown) and
+  // lazy (the story tableaux, fetched on approach). The partition rule is the
+  // point — a name in two sets is fetched twice, a name in none is never
+  // fetched at all and renders as a procedural fallback nobody sees fail.
+  const lazy = [...LAZY_ASSET_NAMES];
+  const sets = [boot, world, lazy];
+  expect('the boot, world and lazy sets partition the library exactly',
+    boot.length + world.length + lazy.length === ASSET_NAMES.length
+      && sets.every((set) => set.every((n) => ASSET_NAMES.includes(n)))
+      && new Set([...boot, ...world, ...lazy]).size === ASSET_NAMES.length,
+    `${boot.length} boot + ${world.length} world + ${lazy.length} lazy vs ${ASSET_NAMES.length}`);
   expect('the boot set is small enough to be worth splitting for (<= 12 files)',
     boot.length <= 12, `${boot.length} boot assets: ${boot.join(', ')}`);
 
@@ -504,7 +515,7 @@ expect('merged geometry is registered as a shared resource (never disposed by ca
 
   const missingBoot = boot.filter((n) => !lib.has(n));
   expect('preloadBoot loads every boot asset', missingBoot.length === 0, missingBoot.join(', '));
-  const leaked = world.filter((n) => lib.has(n));
+  const leaked = [...world, ...lazy].filter((n) => lib.has(n));
   expect('preloadBoot loads NO island content (the world set must stay behind the countdown)',
     leaked.length === 0, `${leaked.length} world asset(s) fetched at boot: ${leaked.slice(0, 6).join(', ')}`);
   expect('a boot-only library does not claim to be fully loaded',
