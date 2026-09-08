@@ -27,7 +27,7 @@ import {
   getIslandSurfaceY,
   mulberry32,
 } from '../../shared/utils/index.js';
-import { BIOME_PALETTES, PROP_COLLIDERS, getPropSpacingRadius, resolvePropCollision } from '../../shared/props.js';
+import { BIOME_PALETTES, PROP_COLLIDERS, getPropSpacingRadius, radialFill, resolvePropCollision } from '../../shared/props.js';
 
 const SHIP_TYPES = ['sloop', 'brigantine', 'galleon'] as const;
 
@@ -2234,7 +2234,14 @@ export class MapGenerator {
     while (placed < target && attempts-- > 0) {
       const spec = pickWeighted(rng, mix);
       const angle = ra(rng);
-      const distRatio = rr(rng, spec.dMin, spec.dMax);
+      // Area-uniform. `rr` here was uniform in RADIUS, so the same expected
+      // count landed in every annulus and the annulus at dMin held a fraction
+      // of the area of the one at dMax: the interior of every island came out
+      // ~6.6x denser per square metre than its rim, at every seed
+      // (islandworld-13). `radialFill` consumes exactly one draw, in the same
+      // order, so the seeded stream keeps its shape; the values move, which is
+      // why test-island-props is re-pinned in this commit.
+      const distRatio = radialFill(rng(), spec.dMin, spec.dMax);
       const scale = rr(rng, spec.sMin, spec.sMax);
       const pos = getIslandSurfacePoint(island, distRatio, angle, 0);
       const spacing = getPropSpacingRadius(spec.type, scale);
@@ -2306,7 +2313,7 @@ export class MapGenerator {
       while (fillPlaced < fillTarget && fillAttempts-- > 0) {
         const spec = pickWeighted(fillRng, mix);
         const angle = ra(fillRng);
-        const distRatio = rr(fillRng, Math.max(spec.dMin, 0.12), Math.min(spec.dMax, 0.72));
+        const distRatio = radialFill(fillRng(), Math.max(spec.dMin, 0.12), Math.min(spec.dMax, 0.72));
         const scale = rr(fillRng, spec.sMin, spec.sMax);
         const pos = getIslandSurfacePoint(island, distRatio, angle, 0);
         const spacing = getPropSpacingRadius(spec.type, scale);
