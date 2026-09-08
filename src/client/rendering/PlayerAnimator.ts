@@ -8,6 +8,7 @@ import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
 import type { Player, Ship } from '../../shared/types/index.js';
 import { angleWrap } from '../../shared/utils/index.js';
 import { AVATAR_RIG } from './factories/PlayerMeshFactory.js';
+import { playRigDeath, updatePlayerRig } from './factories/PlayerRigFactory.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 
@@ -108,6 +109,10 @@ export type PlayerAnimatorView = {
    * onto the live Game instance, and that override must win here too.
    */
   getCutlassSwingProgress(player: Player): number;
+  /** For the skinned rig's distance LOD only (RIG-01): how often a pirate's
+   *  AnimationMixer is stepped falls off with range. Optional so a probe can
+   *  build a view without a camera; missing means "step every pirate fully". */
+  readonly camera?: THREE.Camera;
 };
 
 /** Mutable per-mesh animation scratch stored on `mesh.userData.animation`. */
@@ -198,6 +203,21 @@ export class PlayerAnimator {
   }
 
   animatePlayerMesh(mesh: THREE.Group, player: Player, ship: Ship | null, dt: number, remote?: RemoteAnimPose | null) {
+    // A SKINNED pirate plays her own clips (RIG-01). This branch must come
+    // BEFORE the `parts` read, because a rig deliberately carries no parts
+    // table: everything below is the procedural box body, which survives as the
+    // LOW-tier and load-failure fallback and as the island skeleton.
+    if (mesh.userData.rig) {
+      const cam = this.view.camera;
+      const distSq = cam ? cam.position.distanceToSquared(mesh.position) : 0;
+      updatePlayerRig(
+        mesh, player, dt, distSq,
+        remote ? remote.pitch : player.rotation.y,
+        this.view.getCutlassSwingProgress(player),
+      );
+      return;
+    }
+
     const animation = mesh.userData.animation as AnimScratch;
     const parts = animation?.parts;
     if (!parts) return;
@@ -841,6 +861,13 @@ export class PlayerAnimator {
    * rolls face-down and sinks, and a fall pancakes.
    */
   animateCorpse(mesh: THREE.Group, corpse: CorpseState, dt: number) {
+    // A rigged corpse falls with an authored death clip that clamps on its last
+    // frame; the scripted crumple below is the procedural body's.
+    if (mesh.userData.rig) {
+      corpse.t += dt;
+      playRigDeath(mesh, corpse.cause === 'headshot' ? 'shot' : corpse.cause, dt);
+      return;
+    }
     const animation = mesh.userData.animation as AnimScratch;
     const parts = animation?.parts;
     if (!parts) return;

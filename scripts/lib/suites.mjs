@@ -265,6 +265,10 @@ export const LOGIC = [
   //                                 33 clips present and non-empty, dressed tris/draws/materials (RIG-01, lane 7.1).
   //                                 Pure GLB JSON parse — no THREE, no GPU, ~60 ms.
   tsx('test-avatar-rig.mjs'),
+  //   test-avatar-rig-drive       — the rig DRIVEN: SkeletonUtils clone, the dressed set, the crew tint,
+  //                                 disjoint upper/lower masks, state->clip, soles on the ground, the
+  //                                 distance mixer LOD and the low-tier gate (RIG-01, lane 7.1).
+  tsx('test-avatar-rig-drive.mjs'),
   tsx('test-ship-attitude-frame.mjs'),
   //   test-ship-hole-vis          — hole decals never re-read moved coords; strakes bar the breach (SHIP-01, lane 1.3)
   tsx('test-ship-hole-vis.mjs'),

@@ -168,7 +168,8 @@ runner grows an `expectRed` vocabulary. They are not in the quick tier.
 | suite | red on HEAD because | goes green with |
 |---|---|---|
 | `test-avatar-pose-invariants` | boots at -0.19, head 1.92 vs 1.68 | AVATAR-01 (wave 2) |
-| `test-avatar-rig` | pirate_base.glb: 23 bones, head bone at PLAYER.HEAD_Y, 33 clips, dressed 3.2k tris / 7 draws / 6 materials | RIG-01 (wave 7.1) |
+| `test-avatar-rig` | pirate_base.glb: 23 bones, head bone at PLAYER.HEAD_Y, 33 clips, dressed 2.8k tris / 7 draws / 6 materials | RIG-01 (wave 7.1) |
+| `test-avatar-rig-drive` | PlayerRigFactory: own skeleton per pirate, dressed set, crew tint, disjoint clip masks, state→clip, soles ≥ −0.02, mixer distance LOD, low tier keeps makePlayerMesh | RIG-01 (wave 7.1) |
 | `test-ship-attitude-frame` | XYZ root Euler: bow dips E/W | SHIP-01 (lane 1.3) |
 | `test-ship-hole-vis` | fire burn-down / recycled slot leave the decal behind; `ship-dark-timber` bars the breach at 0.178 m | SHIP-01 (lane 1.3, landed) |
 | `test-ship-helm-anchor` | wheel span on yaw rate (−12.32 rad from a ram, 0 at the helm); galleon anchor stock at +1.09 m; 7 hoist heights draw both canvases | SHIP-01 (lane 1.3, landed) |

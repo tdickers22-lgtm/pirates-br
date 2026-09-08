@@ -916,6 +916,8 @@ export class Game {
       tempSlashPos: this.tempSlashPos,
       spawnRemoteSlashArc: (worldPos) => this.viewmodel.spawnRemoteSlashArc(worldPos),
       getCutlassSwingProgress: (player) => this.getCutlassSwingProgress(player),
+      // RIG-01: the skinned pirate's mixer is stepped less often with range.
+      get camera() { return self.renderer.camera; },
     };
   }
 

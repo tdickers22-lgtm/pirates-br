@@ -35,6 +35,9 @@ export const ASSET_NAMES = [
   'rowboat', 'signal_pyre',
   // Creatures with named animatable pivot nodes (scripts/blender/build_animals.py)
   'shark', 'crab', 'chicken', 'pig', 'gull',
+  // The player: one 23-bone skeleton, six heads, three hats, two coats and 33
+  // clips (RIG-01, scripts/blender/pirate_rig.py). Boot asset — see below.
+  'pirate_base',
   // Hero weapons: atlas-textured GLBs with named nodes (hammer/trigger/muzzle/
   // scope) that WeaponMeshFactory clones in place of its primitive union
   // (WEAPON-01, scripts/blender/build_weapons.py). World assets, not boot
@@ -80,6 +83,10 @@ export type AssetName = (typeof ASSET_NAMES)[number];
 export const BOOT_ASSET_NAMES = [
   'barrel', 'keg', 'crate', 'chest_closed', 'chest_open',
   'bedroll', 'dock_mid', 'dock_end', 'lantern_post', 'rowboat',
+  // The skinned pirate boots with the hull, not with the island: a player mesh
+  // is built the moment a player appears, and a pirate built before her rig
+  // arrived stays a box pirate for the whole match (RIG-01, lane 7.1).
+  'pirate_base',
 ] as const satisfies readonly AssetName[];
 
 const BOOT_ASSET_SET: ReadonlySet<string> = new Set<string>(BOOT_ASSET_NAMES);
