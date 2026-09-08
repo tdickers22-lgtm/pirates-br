@@ -5552,9 +5552,15 @@ export class Match {
       for (const player of this.state.players) {
         if (player.onShipId !== ship.id) continue;
         const local = this.toShipLocal(player.position, ship);
-        const footing = getShipFloorYAt(player.position, ship, local)
-          + local.x * Math.sin(ship.roll ?? 0)
-          - local.z * Math.sin(ship.pitch ?? 0);
+        // getShipFloorYAt already returns a TILTED height (every branch runs
+        // through tiltFloor → shipLocalUpY), so the heel/trim contribution is
+        // ALREADY in it. Adding local.x*sin(roll) − local.z*sin(pitch) on top
+        // applied the hull's attitude a second time: at the founder list cap
+        // (roll 0.35) that is ±1.7 m of error across a galleon's beam, and the
+        // hand at the flooded rail was judged 1.7 m lower than he stands and
+        // went over the side off a plank that was still dry — the exact thing
+        // this function's contract promises never happens.
+        const footing = getShipFloorYAt(player.position, ship, local);
         const surfaceY = gerstnerHeight(player.position.x, player.position.z, this.t, WAVE_PARAMS, sea);
         // A hand on the DECK rides her down until his own planking goes under.
         // A hand in the HOLD does not: she is foundering because that hold is

@@ -10,6 +10,8 @@ import {
   shipIngressRate,
   updateShipFlooding,
   floodListTargets,
+  stormSeaState,
+  FOUNDER_WADE_DEPTH,
   HULL_SATURATION,
 } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
@@ -19,6 +21,7 @@ import {
   getShipHoleTier,
   findRepairableHole,
   getBilgePumpLocal,
+  getShipFloorYAt,
   isInsideShipHoldFootprint,
   isStandingInFloodedHold,
   isStandingInShipHold,
@@ -744,6 +747,95 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   expect('the swimmers came out ALIVE (nobody drowned in the hull)',
     crew.every((p) => p.health > 0 || p.state === 'downed'),
     crew.map((p) => p.health.toFixed(1)).join(','));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// A hull's list is already IN her floor. getShipFloorYAt runs every branch
+// through tiltFloor -> shipLocalUpY, so the heel/trim contribution is baked in;
+// updateFounderingCrew used to add `local.x*sin(roll) - local.z*sin(pitch)` on
+// top of it and judged the hand at the flooded rail up to 1.7 m lower than he
+// stands, throwing him over the side off a plank that was still dry.
+console.log('\nThe founder reads a plank once, not twice: a listed hull does not throw a dry hand over the side');
+
+{
+  const match = new Match({ matchId: 'founder-list-double-count', botCount: 3 });
+  match.state.phase = 'playing';
+  const st = match.state;
+  const ship = st.ships[0];
+  const stats = SHIP_STATS[ship.type];
+  ship.position.x = -640;
+  ship.position.z = -350;
+  ship.position.y = 0;
+  ship.rotation = 0;
+  ship.pitch = 0;
+  ship.roll = 0;
+  ship.holes = [];
+  ship.nextHoleId = 1;
+  // Two hands on the rails, one each side, same plank height in her own frame.
+  const crew = st.players.filter((p) => p.onShipId === ship.id && p.state !== 'eliminated');
+  const pressed = st.players.find((p) => p.onShipId !== ship.id && p.state !== 'eliminated');
+  if (crew.length < 2 && pressed) {
+    pressed.onShipId = ship.id;
+    pressed.shipId = ship.id;
+    if (!ship.crewIds.includes(pressed.id)) ship.crewIds.push(pressed.id);
+    crew.push(pressed);
+  }
+  expect('the listed-hull fixture has a hand on each rail', crew.length >= 2, `crew=${crew.length}`);
+  const low = crew[0];
+  const high = crew[1];
+  const halfBeam = stats.width * 0.42;
+
+  ship.waterLevel = 1;
+  match.evaluateShipSinking(ship);
+  expect('the listed-hull fixture founders', ship.sinking === true);
+  // She lists to PORT (-x) hard, but nowhere near awash: sinkProgress is still 0.
+  ship.sinkProgress = 0;
+  ship.pitch = 0;
+  ship.roll = 0.3;
+  ship.position.y = 0;
+
+  const sea = stormSeaState(st.storm, ship.position.x, ship.position.z);
+  const probeY = () => ship.position.y + stats.height + 6;
+  const footingAt = (worldX, worldZ) => getShipFloorYAt(
+    { x: worldX, y: probeY(), z: worldZ }, ship, { x: worldX - ship.position.x, z: worldZ - ship.position.z },
+  );
+  const lowX = ship.position.x - halfBeam;
+  const highX = ship.position.x + halfBeam;
+  const surfaceLow = gerstnerHeight(lowX, ship.position.z, match.t, WAVE_PARAMS, sea);
+  // Sit her deep enough that the DOWNHILL rail is only 15 cm of dry plank above
+  // the sea — dry, but with no room for a phantom second helping of her list.
+  ship.position.y = surfaceLow + 0.15 - footingAt(lowX, ship.position.z);
+  const lowFooting = footingAt(lowX, ship.position.z);
+  const highFooting = footingAt(highX, ship.position.z);
+  const surfaceHigh = gerstnerHeight(highX, ship.position.z, match.t, WAVE_PARAMS, sea);
+  expect('the downhill rail is genuinely still dry (barely)',
+    lowFooting > surfaceLow && lowFooting - surfaceLow < 0.4,
+    `footing=${lowFooting.toFixed(3)} surface=${surfaceLow.toFixed(3)}`);
+  expect('...and the weather rail is a whole beam of list higher',
+    highFooting - lowFooting > halfBeam * Math.sin(0.3) * 1.5,
+    `high=${highFooting.toFixed(3)} low=${lowFooting.toFixed(3)}`);
+  low.position = { x: lowX, y: lowFooting, z: ship.position.z };
+  high.position = { x: highX, y: highFooting, z: ship.position.z };
+  expect('both hands stand clear of the water before the pass runs',
+    lowFooting > surfaceLow - FOUNDER_WADE_DEPTH && highFooting > surfaceHigh - FOUNDER_WADE_DEPTH);
+
+  match.updateFounderingCrew(DT);
+  expect('the hand at the LOW rail keeps his footing (his plank is above the sea)',
+    low.onShipId === ship.id,
+    `footing=${lowFooting.toFixed(3)} surface=${surfaceLow.toFixed(3)} wade=${FOUNDER_WADE_DEPTH}`);
+  expect('the hand at the WEATHER rail keeps his too',
+    high.onShipId === ship.id,
+    `footing=${highFooting.toFixed(3)} surface=${surfaceHigh.toFixed(3)}`);
+
+  // Now put the downhill plank genuinely under: only that hand goes over.
+  ship.position.y -= 0.7;
+  low.position.y = footingAt(lowX, ship.position.z);
+  high.position.y = footingAt(highX, ship.position.z);
+  match.updateFounderingCrew(DT);
+  expect('once the downhill plank IS under, that hand goes over the side',
+    low.onShipId !== ship.id, `footing=${low.position.y.toFixed(3)}`);
+  expect('...and the hand on the weather rail is still aboard',
+    high.onShipId === ship.id, `footing=${high.position.y.toFixed(3)}`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
