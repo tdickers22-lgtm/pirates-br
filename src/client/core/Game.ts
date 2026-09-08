@@ -5584,19 +5584,6 @@ export class Game {
       const wireAge = Math.min((ud.wireAge as number | undefined) ?? 0, 0.25);
       const vx = animal.vx ?? 0;
       const vz = animal.vz ?? 0;
-      this.tempWildlifePos.set(
-        animal.position.x + vx * wireAge,
-        animal.position.y,
-        animal.position.z + vz * wireAge,
-      );
-      const alpha = 1 - Math.exp(-16 * dt);
-      if (created || mesh.position.distanceToSquared(this.tempWildlifePos) > 18 * 18) {
-        mesh.position.copy(this.tempWildlifePos);
-      } else {
-        mesh.position.lerp(this.tempWildlifePos, alpha);
-      }
-      mesh.rotation.y += angleWrap(animal.rotation - mesh.rotation.y) * (1 - Math.exp(-14 * dt));
-
       // ── SEATED ON THE DRAWN GROUND (islandworld-06, assets-24) ───────────
       // The server writes an ANALYTIC y and the client used to draw it verbatim,
       // so a pig on a stamp rim (dock apron, tavern pad, terrace lip) hovered by
@@ -5609,6 +5596,15 @@ export class Game {
       //   and only once it has moved 0.3 m — a walking chicken re-samples ~4x a
       //   second instead of 60, and the offset is eased in between, so nothing
       //   pops. Gulls in the air never ask.
+      //
+      // THE CORRECTION GOES IN THE LERP TARGET, NOT ON TOP OF IT (review-4 P1).
+      // It used to be `mesh.position.y += seatEased` AFTER the exponential
+      // lerp below, which makes the steady state analytic + offset/alpha:
+      // alpha = 1 − exp(−16·dt) is 0.234 at 60 fps and 0.413 at 30, so a 10 cm
+      // rim correction seated the animal 43 cm off the ground on a fast machine
+      // and 24 cm off on a slow one — the hover this code exists to remove,
+      // amplified and made frame-rate dependent. Same for the idle bob.
+      let seatY = 0;
       if (mesh.visible && animal.type !== 'gull') {
         let island = ud.seatIsland as Island | undefined;
         if (!island) {
@@ -5630,9 +5626,27 @@ export class Game {
           const eased = ((ud.seatEased as number | undefined) ?? (ud.seatOffset as number | undefined) ?? 0);
           const target = (ud.seatOffset as number | undefined) ?? 0;
           ud.seatEased = eased + (target - eased) * (1 - Math.exp(-8 * dt));
-          mesh.position.y += ud.seatEased as number;
+          seatY = ud.seatEased as number;
         }
       }
+      // The idle bob rides the target too, for the same reason.
+      const bobY = animal.dead
+        ? 0
+        : (animal.type === 'gull'
+          ? Math.sin(t * 8 + animal.position.x * 0.03) * 0.025
+          : Math.sin(t * 10 + animal.position.x * 0.07) * 0.01);
+      this.tempWildlifePos.set(
+        animal.position.x + vx * wireAge,
+        animal.position.y + seatY + bobY,
+        animal.position.z + vz * wireAge,
+      );
+      const alpha = 1 - Math.exp(-16 * dt);
+      if (created || mesh.position.distanceToSquared(this.tempWildlifePos) > 18 * 18) {
+        mesh.position.copy(this.tempWildlifePos);
+      } else {
+        mesh.position.lerp(this.tempWildlifePos, alpha);
+      }
+      mesh.rotation.y += angleWrap(animal.rotation - mesh.rotation.y) * (1 - Math.exp(-14 * dt));
 
       // ── CARCASSES (islandworld-09) ───────────────────────────────────────
       // A shot pig used to be deleted server-side the same tick and the client
@@ -5655,10 +5669,6 @@ export class Game {
         mesh.scale.setScalar(shrink);
         continue;
       }
-
-      mesh.position.y += animal.type === 'gull'
-        ? Math.sin(t * 8 + animal.position.x * 0.03) * 0.025
-        : Math.sin(t * 10 + animal.position.x * 0.07) * 0.01;
 
       const parts = mesh.userData.parts as Record<string, THREE.Object3D | undefined> | undefined;
       // Gate the gait on ACTUAL movement. Riding the global clock made standing

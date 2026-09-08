@@ -219,5 +219,47 @@ console.log('— the client seats crew through the RENDERED matrix, not yaw alon
     newWorst < 1e-9 && oldWorst > 1.0, `new=${newWorst} old=${oldWorst}`);
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+console.log('— a seated animal is seated, not lifted by one over alpha (islandworld-06 / assets-24) —');
+{
+  // THE ARITHMETIC. Game.syncWildlife draws a ground animal by lerping the mesh
+  // toward the server's ANALYTIC y with alpha = 1 − exp(−16·dt), then correcting
+  // for the difference between the drawn terrain and that analytic surface. If
+  // the correction is added AFTER the lerp the recursion is
+  //     y[n+1] = (1−a)·y[n] + a·analytic + off
+  // whose fixed point is analytic + off/a — the correction divided by alpha, so
+  // a 10 cm stamp-rim correction hovers the animal 43 cm off the ground at
+  // 60 fps and 24 cm at 30, i.e. the exact defect it exists to remove, amplified
+  // and made machine-dependent. Folded into the TARGET it settles on the ground
+  // at any frame rate.
+  const OFF = 0.10;
+  const settle = (dt, afterLerp) => {
+    const a = 1 - Math.exp(-16 * dt);
+    let y = 0;
+    for (let i = 0; i < 4000; i++) {
+      y = y + ((afterLerp ? 0 : OFF) - y) * a + (afterLerp ? OFF : 0);
+    }
+    return y;
+  };
+  const after60 = settle(1 / 60, true);
+  const after30 = settle(1 / 30, true);
+  const folded60 = settle(1 / 60, false);
+  const folded30 = settle(1 / 30, false);
+  console.log(`  after-lerp: ${after60.toFixed(3)} m at 60 fps, ${after30.toFixed(3)} m at 30 fps  |  folded: ${folded60.toFixed(4)} / ${folded30.toFixed(4)} m (offset ${OFF})`);
+  expect(`adding the seat correction after the lerp amplifies it ${(after60 / OFF).toFixed(1)}x at 60 fps and makes it frame-rate dependent`,
+    after60 > OFF * 3 && Math.abs(after60 - after30) > 0.1);
+  expect('folding it into the lerp target seats the animal on the ground at any frame rate',
+    Math.abs(folded60 - OFF) < 1e-6 && Math.abs(folded30 - OFF) < 1e-6);
+
+  // THE CODE. Whichever form Game.ts is in decides which of the two numbers
+  // above a player sees, so the shape is graded, not just the arithmetic.
+  const gameSrc = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  expect('Game.syncWildlife folds the ground-seat correction and the idle bob into the lerp TARGET',
+    gameSrc.includes('animal.position.y + seatY + bobY'));
+  expect('...and adds nothing to mesh.position.y after the wildlife lerp',
+    !gameSrc.includes('mesh.position.y += ud.seatEased')
+    && !/mesh\.position\.y \+= animal\.type === 'gull'/.test(gameSrc));
+}
+
 if (failures) { console.error(`\n${failures} assertion(s) FAILED`); process.exit(1); }
 console.log('\nPASS: the deck a pirate stands on is the deck that is drawn.');
