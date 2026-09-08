@@ -140,6 +140,16 @@ export interface RemotePose {
   y: number;
   z: number;
   yaw: number;
+  /**
+   * Look PITCH on the same timeline as the position (avatar-12). The body is
+   * drawn 1-2 snapshots behind, so feeding the animator the newest raw pitch
+   * stepped the head at the 31 Hz snapshot rate while the body glided.
+   */
+  pitch: number;
+  /** Ground velocity, also on the buffered timeline: the gait phase used to
+   *  advance off the newest raw snapshot, so feet cycled before the body moved. */
+  vx: number;
+  vz: number;
   mode: SampleMode;
   /**
    * WHICH COORDINATE SYSTEM THE ANSWER IS IN, which is not always the one the
@@ -178,6 +188,9 @@ export class RemoteTrack {
   private readonly y = new Float64Array(TRACK_CAPACITY);
   private readonly z = new Float64Array(TRACK_CAPACITY);
   private readonly yaw = new Float64Array(TRACK_CAPACITY);
+  private readonly pitch = new Float64Array(TRACK_CAPACITY);
+  private readonly vx = new Float64Array(TRACK_CAPACITY);
+  private readonly vz = new Float64Array(TRACK_CAPACITY);
   private readonly frame: (string | null)[] = new Array(TRACK_CAPACITY).fill(null);
   /** Index one past the newest sample, modulo capacity. */
   private head = 0;
@@ -200,7 +213,8 @@ export class RemoteTrack {
    * hot can overtake the full it was built from, and a ring that is not sorted by
    * time cannot be bracketed.
    */
-  push(t: number, x: number, y: number, z: number, yaw: number, frame: string | null, nowMs: number) {
+  push(t: number, x: number, y: number, z: number, yaw: number, frame: string | null, nowMs: number,
+    pitch = 0, vx = 0, vz = 0) {
     this.touchedAt = nowMs;
     if (this.count > 0 && t <= this.newestTime) return;
     // A GAP THIS BIG IS NOT HISTORY, IT IS A REAPPEARANCE. A pirate who died and
@@ -215,6 +229,9 @@ export class RemoteTrack {
     this.y[i] = y;
     this.z[i] = z;
     this.yaw[i] = yaw;
+    this.pitch[i] = pitch;
+    this.vx[i] = vx;
+    this.vz[i] = vz;
     this.frame[i] = frame;
     this.head = (i + 1) % TRACK_CAPACITY;
     if (this.count < TRACK_CAPACITY) this.count++;
@@ -238,6 +255,7 @@ export class RemoteTrack {
     if (this.count === 1) {
       out.x = this.x[newest]; out.y = this.y[newest]; out.z = this.z[newest];
       out.yaw = this.yaw[newest];
+      this.copyAux(newest, out);
       out.frame = this.frame[newest];
       out.mode = 'held';
       return 'held';
@@ -249,6 +267,7 @@ export class RemoteTrack {
       // extrapolate backwards into a past nobody measured.
       out.x = this.x[oldest]; out.y = this.y[oldest]; out.z = this.z[oldest];
       out.yaw = this.yaw[oldest];
+      this.copyAux(oldest, out);
       out.frame = this.frame[oldest];
       out.mode = 'held';
       return 'held';
@@ -260,6 +279,7 @@ export class RemoteTrack {
       if (span <= 0 || this.frame[prev] !== this.frame[newest]) {
         out.x = this.x[newest]; out.y = this.y[newest]; out.z = this.z[newest];
         out.yaw = this.yaw[newest];
+        this.copyAux(newest, out);
         out.frame = this.frame[newest];
         out.mode = 'held';
         return 'held';
@@ -269,6 +289,9 @@ export class RemoteTrack {
       out.y = this.y[newest] + (this.y[newest] - this.y[prev]) * inv * ahead;
       out.z = this.z[newest] + (this.z[newest] - this.z[prev]) * inv * ahead;
       out.yaw = this.yaw[newest] + angleDelta(this.yaw[prev], this.yaw[newest]) * inv * ahead;
+      // Pitch and velocity are HELD past the newest sample rather than run on:
+      // an extrapolated aim angle points a muzzle somewhere nobody reported.
+      this.copyAux(newest, out);
       out.frame = this.frame[newest];
       out.mode = 'extrapolated';
       return 'extrapolated';
@@ -284,6 +307,7 @@ export class RemoteTrack {
       if (this.frame[a] !== this.frame[b] || span <= 0) {
         out.x = this.x[b]; out.y = this.y[b]; out.z = this.z[b];
         out.yaw = this.yaw[b];
+        this.copyAux(b, out);
         out.frame = this.frame[b];
         out.mode = 'held';
         return 'held';
@@ -293,15 +317,27 @@ export class RemoteTrack {
       out.y = this.y[a] + (this.y[b] - this.y[a]) * u;
       out.z = this.z[a] + (this.z[b] - this.z[a]) * u;
       out.yaw = this.yaw[a] + angleDelta(this.yaw[a], this.yaw[b]) * u;
+      out.pitch = this.pitch[a] + (this.pitch[b] - this.pitch[a]) * u;
+      out.vx = this.vx[a] + (this.vx[b] - this.vx[a]) * u;
+      out.vz = this.vz[a] + (this.vz[b] - this.vz[a]) * u;
       out.frame = this.frame[a];
       out.mode = 'interpolated';
       return 'interpolated';
     }
     out.x = this.x[newest]; out.y = this.y[newest]; out.z = this.z[newest];
     out.yaw = this.yaw[newest];
+    this.copyAux(newest, out);
     out.frame = this.frame[newest];
     out.mode = 'held';
     return 'held';
+  }
+
+  /** Pitch and velocity for a single stored sample. Pitch is NOT wrapped: it is
+   *  a look elevation clamped well inside ±π/2, never an angle that can wind. */
+  private copyAux(i: number, out: RemotePose) {
+    out.pitch = this.pitch[i];
+    out.vx = this.vx[i];
+    out.vz = this.vz[i];
   }
 
   /** The frame the newest sample is expressed in — callers compose against the
@@ -498,7 +534,7 @@ export class RemoteTimeline {
 export class RemoteInterpolator {
   readonly timeline = new RemoteTimeline();
   private readonly tracks = new Map<string, RemoteTrack>();
-  private readonly scratch: RemotePose = { x: 0, y: 0, z: 0, yaw: 0, mode: 'empty', frame: null };
+  private readonly scratch: RemotePose = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, vx: 0, vz: 0, mode: 'empty', frame: null };
   /** Mode census for the smoothness gate: how the last frame's answers were made. */
   readonly modeCounts: Record<SampleMode, number> = { interpolated: 0, extrapolated: 0, held: 0, empty: 0 };
   /**

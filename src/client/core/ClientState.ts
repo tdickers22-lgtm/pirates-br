@@ -185,7 +185,8 @@ export class ClientState {
       }
       this.remote.track(`P:${player.id}`)
         // `rotation.x` is the yaw (see Game.syncPlayers' targetYaw) — `.y` is pitch.
-        .push(serverTime, x, y, z, player.rotation.x, ship ? ship.id : '', now);
+        .push(serverTime, x, y, z, player.rotation.x, ship ? ship.id : '', now,
+          player.rotation.y, player.velocity.x, player.velocity.z);
     }
     for (const ship of state.ships) {
       if (!ship.alive) continue;
@@ -260,7 +261,8 @@ export class ClientState {
         y = player.position.y - hull.position.y;
       }
       this.remote.track(`P:${player.id}`)
-        .push(hot.serverTime, x, y, z, player.rotation.x, hull ? player.onShipId : '', now);
+        .push(hot.serverTime, x, y, z, player.rotation.x, hull ? player.onShipId : '', now,
+          player.rotation.y, player.velocity.x, player.velocity.z);
     }
     for (const shark of hot.sharks) {
       if (shark.health <= 0) continue;
