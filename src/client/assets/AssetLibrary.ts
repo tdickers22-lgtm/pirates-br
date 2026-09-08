@@ -35,6 +35,11 @@ export const ASSET_NAMES = [
   'rowboat', 'signal_pyre',
   // Creatures with named animatable pivot nodes (scripts/blender/build_animals.py)
   'shark', 'crab', 'chicken', 'pig', 'gull',
+  // Hero weapons: atlas-textured GLBs with named nodes (hammer/trigger/muzzle/
+  // scope) that WeaponMeshFactory clones in place of its primitive union
+  // (WEAPON-01, scripts/blender/build_weapons.py). World assets, not boot
+  // assets — the primitive fallback covers the queue window.
+  'cutlass', 'flintlock', 'flintknock', 'eye_of_reach', 'blunderbuss',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
