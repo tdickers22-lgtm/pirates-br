@@ -730,12 +730,23 @@ export class PlayerAnimator {
       // her first-person muzzle — and the server's shot — pointed downrange.
       if (firearmReady && !player.blocking) {
         const aimPitch = THREE.MathUtils.clamp(lookPitchRaw, -0.7, 0.7);
-        // The weapon arm holds; the stride is allowed to shake it by ~7°, which
-        // is what keeps it from reading as a mannequin's welded prop.
-        rightArmPivot.rotation.set(-0.94 + aimPitch * 0.52 - armSwing * 0.12, -0.14, 0.16);
+        // SIGHTED, OR JUST CARRYING (POSE-01 `aiming`, w7.5). Holding a firearm
+        // and pointing one at somebody used to draw the same: the shoulder never
+        // came up and the stride shook the barrel either way, so a player could
+        // not read intent off a remote at all. The bit now crosses the wire, so
+        // the sighted stance is a real one — shoulder up past -1.2 rad, both
+        // hands on the grip whatever her feet are doing, and the stride shake
+        // suppressed because a pirate taking aim plants the weapon.
+        const sighted = !!player.aiming;
+        rightArmPivot.rotation.set(
+          (sighted ? -1.34 : -0.94) + aimPitch * 0.52 - armSwing * (sighted ? 0.03 : 0.12),
+          sighted ? -0.06 : -0.14,
+          sighted ? 0.08 : 0.16,
+        );
         // The support hand comes across to the grip at a walk, and falls away
-        // into a counter-swing at a run (nobody two-hands a pistol sprinting).
-        const support = 1 - moveRatio * moveRatio;
+        // into a counter-swing at a run (nobody two-hands a pistol sprinting) —
+        // unless she is sighted, and then it stays on the grip.
+        const support = sighted ? 1 : 1 - moveRatio * moveRatio;
         leftArmPivot.rotation.set(
           (-0.72 + aimPitch * 0.4) * support + (0.2 + armSwing) * (1 - support),
           0.3 * support,
