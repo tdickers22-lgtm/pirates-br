@@ -7410,10 +7410,17 @@ export class Game {
             const waveY = gerstnerHeight(this.tempRenderPos.x, this.tempRenderPos.z, this.ocean.getTime(), WAVE_PARAMS, storminess);
             if (this.tempRenderPos.y > waveY + 0.2) continue;
             hole.anchor.getWorldDirection(this.tempHudVector);
+            // INBOARD (HULLGEO-01, ships-19). A breach below the waterline is
+            // the sea being forced INTO the hull; jetting along +normal drew
+            // every leak spraying out of the ship like a fountain, which is the
+            // one thing the pressure cannot do. Anchors still sit on the outer
+            // skin until lane 4.2 lands its gush-anchor slice (0.12 m inboard
+            // along -normal); the sign is right either way.
+            const gush = -(0.7 + (floodShip.waterLevel ?? 0) * 0.9);
             this.combatFx.emitHullLeak(
               { x: this.tempRenderPos.x, y: this.tempRenderPos.y, z: this.tempRenderPos.z },
-              this.tempHudVector.x * (0.7 + (floodShip.waterLevel ?? 0) * 0.9),
-              this.tempHudVector.z * (0.7 + (floodShip.waterLevel ?? 0) * 0.9),
+              this.tempHudVector.x * gush,
+              this.tempHudVector.z * gush,
             );
           }
         }
