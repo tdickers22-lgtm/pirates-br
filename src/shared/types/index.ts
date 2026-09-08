@@ -627,6 +627,21 @@ export interface WildlifeAnimal {
   health: number;
   wanderAngle: number;
   wanderTimer: number;
+  // ── WILD-01 server-only AI state (trimmed off the wire by snapshot.ts) ──
+  alertUntil?: number;
+  fleeX?: number;
+  fleeZ?: number;
+  gullState?: 'perched' | 'circling';
+  gullTimer?: number;
+  gullAngle?: number;
+  gullRadius?: number;
+  gullAltitude?: number;
+  deadAt?: number;
+  // ── WILD-01 wire bits (present only when true, so they cost nothing idle) ──
+  /** Spooked: the client picks the panic gait and a startled voice. */
+  alert?: boolean;
+  /** A carcass, not a live animal: the client plays the fall and fades it. */
+  dead?: boolean;
 }
 
 export interface SeaRockCollider {
