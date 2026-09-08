@@ -1029,6 +1029,8 @@ export class MapGenerator {
     const THROUGH_FAN = [0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05, 1.4, -1.4, 1.75, -1.75];
     // The roster fallback sweeps the full circle around the junction (a second
     // door on ANY flank beats a sack), nearest bearings first.
+    // Bearings tried for the upper gallery ramp, off the vein base's normal.
+    const GALLERY_FAN = [0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.1, -2.1, 2.7, -2.7];
     const SECOND_DOOR_FAN = [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6, 2.0, -2.0, 2.4, -2.4, 2.8, -2.8, Math.PI];
     // Natural surface stays ≥ `clear` above the tube's (ramping) ceiling along a
     // ray → the roof holds. The ceiling follows the floor ramp f0→f1 (+h), so a
@@ -1046,11 +1048,11 @@ export class MapGenerator {
       return true;
     };
     const seg = (x: number, z: number, rot: number, rad: number, len: number, floor: number, h: number,
-                 opts: { mouth?: boolean; back?: boolean; floorEnd?: number }): IslandCave => ({
+                 opts: { mouth?: boolean; back?: boolean; floorEnd?: number; kind?: IslandCave['kind'] }): IslandCave => ({
       position: { x, y: island.position.y, z }, rotation: rot, width: rad * 2, height: h,
       length: len, interiorRadius: rad, floorY: floor, ceilingY: floor + h,
       floorYEnd: opts.floorEnd ?? floor,
-      hasMouth: !!opts.mouth, hasBackWall: !!opts.back,
+      hasMouth: !!opts.mouth, hasBackWall: !!opts.back, kind: opts.kind ?? 'tube',
     });
 
     for (let i = 0; i < systems; i++) {
@@ -1184,7 +1186,16 @@ export class MapGenerator {
             // Terminate this vein in a chamber (treasure room) or a plain dead-end.
             const cRad = rr(rng, 3.6, 5.0), cLen = rr(rng, 4, 6), cH = rr(rng, 4.4, 5.8);
             if (!overlapClash(ex, ez, dX, dZ, cLen, floorEnd, floorEnd, cRad) && roofed(ex, ez, dX, dZ, cLen, floorEnd, floorEnd, cH, 2)) {
-              sys.push(seg(ex, ez, dRot, cRad, cLen, floorEnd, cH, { back: true }));
+              // DOME: try to lift the crown above corridor height so the room
+              // READS as a cavern. The bonus is only taken when the roof check
+              // proves the rock for it (no new rng draw, so the world downstream
+              // of the cave pass stays bit-identical).
+              let domeH = cH;
+              for (const bonus of [2.6, 1.8, 1.0]) {
+                if (roofed(ex, ez, dX, dZ, cLen, floorEnd, floorEnd, cH + bonus, 2)) { domeH = cH + bonus; break; }
+              }
+              sys.push(seg(ex, ez, dRot, cRad, cLen, floorEnd, domeH,
+                { back: true, kind: domeH > cH ? 'dome' : 'tube' }));
             } else {
               passage.hasBackWall = true;
             }
@@ -1207,6 +1218,35 @@ export class MapGenerator {
         const veinBase = rot + (rng() < 0.5 ? 1 : -1) * rr(rng, 0.7, 1.2);
         drill(jcx, jcz, veinBase, jFloor + 0.1, rr(rng, 2.8, 3.6), rr(rng, 3.8, 4.6), grand ? 3 : 2);
         drill(jcx, jcz, veinBase + Math.PI * (0.72 + rng() * 0.46), jFloor + 0.1, rr(rng, 2.8, 3.6), rr(rng, 3.8, 4.6), grand ? 3 : 1);
+
+        // ── Upper GALLERY: verticality you climb, not just sprawl ────────────
+        // A ramp off the junction that RISES into the massif and opens a chamber
+        // a storey above the warren floor. Every metre of it is roof-checked, so
+        // a gallery only exists where the rock genuinely stands over it, and it
+        // costs no rng draw (the world downstream of the cave pass is unchanged).
+        if (grand && sys.length + 2 <= MAX_SEGS + 2) {
+          const gRad = 4.0, gLen = 4.5, gH = 3.6, rampLen = 8, rampRad = 2.7, rampH = 3.6;
+          gallery:
+          for (const off of GALLERY_FAN) {
+            const gRot = rot + off; // fan off the INWARD heading: the massif is where the rock is
+            const gX = -Math.sin(gRot), gZ = -Math.cos(gRot);
+            // The ramp leaves from the junction's FAR END, not its centre: a rise
+            // that starts inside the chamber reads to the overlap test (rightly)
+            // as a floor that steps away from the chamber's own.
+            const gsx = jx + inX * jLen, gsz = jz + inZ * jLen;
+            for (const rise of [3.4, 2.8, 2.2]) {
+              const top = jFloor + rise;
+              const ex = gsx + gX * rampLen, ez = gsz + gZ * rampLen;
+              if (!roofed(gsx, gsz, gX, gZ, rampLen, jFloor, top, rampH, 1.4)) continue;
+              if (overlapClash(gsx, gsz, gX, gZ, rampLen, jFloor, top, rampRad)) continue;
+              if (!roofed(ex, ez, gX, gZ, gLen, top, top, gH, 1.6)) continue;
+              if (overlapClash(ex, ez, gX, gZ, gLen, top, top, gRad)) continue;
+              sys.push(seg(gsx, gsz, gRot, rampRad, rampLen, jFloor, rampH, { floorEnd: top }));
+              sys.push(seg(ex, ez, gRot, gRad, gLen, top, gH, { back: true, kind: 'gallery' }));
+              break gallery;
+            }
+          }
+        }
 
         // THROUGH-tunnel: bore inward until the roof thins on the far flank, then
         // break out as a SECOND mouth — but ONLY when it stays HONEST. The scan is

@@ -89,6 +89,9 @@ for (const seed of [SEED, 20260702]) {
   let countsOk = true;
   let cavesOk = true;
   let caveDoorsOk = true;
+  let caveKindsOk = true;
+  let domeIslands = 0;
+  let galleryIslands = 0;
   let detail = '';
 
   for (const island of islands) {
@@ -188,6 +191,21 @@ for (const seed of [SEED, 20260702]) {
       }
     }
 
+    // SHAPE: a warren is rooms and levels, not one flat sprawl of corridors.
+    // Every segment declares what it reads as; domes are terminal caverns whose
+    // crown was raised into proven rock; galleries sit a storey up their own ramp.
+    if (island.caves.length > 0) {
+      const lowest = Math.min(...island.caves.map((c) => Math.min(c.floorY, c.floorYEnd ?? c.floorY)));
+      for (const cave of island.caves) {
+        if (!['tube', 'dome', 'gallery'].includes(cave.kind)) { caveKindsOk = false; detail = `${island.name}: kind=${cave.kind}`; }
+        if (cave.kind === 'gallery' && cave.floorY - lowest < 2.0) {
+          caveKindsOk = false; detail = `${island.name}: gallery only ${(cave.floorY - lowest).toFixed(2)}m up`;
+        }
+      }
+      if (island.caves.some((c) => c.kind === 'dome')) domeIslands += 1;
+      if (island.caves.some((c) => c.kind === 'gallery')) galleryIslands += 1;
+    }
+
     for (const cave of island.caves) {
       const midX = cave.position.x - Math.sin(cave.rotation) * cave.length * 0.6;
       const midZ = cave.position.z - Math.cos(cave.rotation) * cave.length * 0.6;
@@ -229,6 +247,8 @@ for (const seed of [SEED, 20260702]) {
   expect('Taverns sit on stamped flats at their stated height', tavernFlatOk, detail);
   expect('Cave volumes are roofed and helpers behave', cavesOk, detail);
   expect('Every cave island has ≥2 separate mouths (no single-entrance sacks)', caveDoorsOk, detail);
+  expect('Every cave segment declares a valid kind, galleries sit ≥2m up', caveKindsOk, detail);
+  expect('The roster grows real cave rooms: ≥4 islands with a dome, ≥1 with a gallery', domeIslands >= 4 && galleryIslands >= 1, `domes=${domeIslands} galleries=${galleryIslands}`);
 }
 expect('Caves generate across the roster (hillside placement finds sites)', totalCaves > 0, `caves=${totalCaves}`);
 

@@ -519,6 +519,16 @@ export interface IslandCave {
   /** Cap the far end with a back wall (a dead-end chamber). Through-tunnels and
    *  junction-connected segments set this false so the system stays open. */
   hasBackWall?: boolean;
+  /** What this segment READS as, so the client can dress it and the gates can
+   *  assert the warren has shape:
+   *   'tube'    — a passage or a mouth (the default; every segment before
+   *               CAVEUP-01 was one of these).
+   *   'dome'    — a terminal cavern whose crown was raised into the rock the
+   *               roof check proved is there: a room, not a wider corridor.
+   *   'gallery' — a chamber on an UPPER level, reached by its own ramp off the
+   *               junction, so a warren has verticality you climb rather than
+   *               one flat sprawl. */
+  kind?: 'tube' | 'dome' | 'gallery';
 }
 
 export interface Island {
