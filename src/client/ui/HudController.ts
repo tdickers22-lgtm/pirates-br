@@ -9,7 +9,14 @@ import { WHEEL_SLOTS } from '../../shared/wheel.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
 import { countOpenHoles } from '../../shared/interactions.js';
-import { angleWrap, dist2D, isPointInsideIslandFootprint, sampleLocalWind } from '../../shared/utils/index.js';
+import {
+  STORM_GUST_BLOWOUT_DEPLOYMENT,
+  STORM_GUST_BLOWOUT_PULSE,
+  angleWrap,
+  dist2D,
+  isPointInsideIslandFootprint,
+  sampleLocalWind,
+} from '../../shared/utils/index.js';
 import type { ClientInteractKind, FloatingDamageIndicator } from '../core/Game.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from '../rendering/OceanRenderer.js';
@@ -136,7 +143,74 @@ export type WarningInput = {
   /** END-01. 0..1 once the arc has run out and the eye itself is closing.
    *  Optional so every existing caller (and gate) still reads as "no collapse". */
   eyeCollapse?: number;
+  /** STORMUP-01 / storm-07, review-8 P1. The canvas line from sailCanvasState:
+   *  'CANVAS BLOWN OUT ...' while the yard is held at the storm rag, 'REEF
+   *  SAILS ...' while the squall is about to take it. Optional, so every
+   *  existing caller still reads as "nothing wrong with the rig". */
+  sailAlarm?: string | null;
 };
+
+// ── THE PUNISHMENT AND THE TELL SHIP TOGETHER (storm-07, review-8 P1) ────────
+//
+// PhysicsSystem clamps a hull's canvas to STORM_GUST_BLOWOUT_SAIL_HEIGHT for
+// STORM_GUST_BLOWOUT_SECONDS when she carries more than
+// STORM_GUST_BLOWOUT_DEPLOYMENT through a squall for two seconds. That landed
+// with NO client half at all: `sailBlownOutUntil` appeared nowhere in src/client,
+// so a crew racing the wall pressed W, watched the sail bar stick at 30 % and
+// the hull slow, and had nothing on screen to tell them why — indistinguishable
+// from a broken control. Two seconds of dwell is only a DECISION if the warning
+// exists before the tear, so this returns both: the warning while there is still
+// time to shorten sail, and the reason afterwards.
+export type SailCanvasInput = {
+  /** 0..1 yard deployment the server is integrating. */
+  sailHeight: number;
+  /** 0..1 rigging health; torn cloth carries less canvas into the gust. */
+  sailIntegrity: number;
+  /** Chainshot cuts effective deployment to 0.42x — the same factor
+   *  PhysicsSystem applies before testing the blow-out threshold. */
+  chainshotted: boolean;
+  anchored: boolean;
+  /** sampleLocalWind at the HULL: only a following gale can blow the canvas out. */
+  gustPulse: number;
+  tailwind: number;
+  /** Seconds left on ship.sailBlownOutUntil, 0 when the rig is sound. */
+  blownOutRemaining: number;
+};
+
+/** Pulse at which the HUD starts shouting, as a fraction of the pulse that
+ *  actually tears the sail. Below 1 on purpose: the alarm has to beat the 2 s
+ *  dwell or it is a post-mortem, not a warning. */
+export const SAIL_REEF_WARN_RATIO = 0.9;
+
+export function sailCanvasState(input: SailCanvasInput): {
+  /** The ship card's canvas clause. */
+  canvas: string;
+  /** The alarm line, or null. Fed to warningLines as `sailAlarm`. */
+  alarm: string | null;
+  /** True while the sail is actually blown out (the card paints it red). */
+  blownOut: boolean;
+} {
+  const pct = Math.round(input.sailHeight * 100);
+  const plain = pct < 5 ? 'Sails furled' : `Sails ${pct}% out`;
+  if (input.blownOutRemaining > 0) {
+    return {
+      canvas: `CANVAS BLOWN OUT — ${Math.ceil(input.blownOutRemaining)}s of storm rag`,
+      alarm: 'CANVAS BLOWN OUT - SHE WILL NOT CARRY SAIL',
+      blownOut: true,
+    };
+  }
+  const deployment = (input.chainshotted ? 0.42 : 1)
+    * input.sailHeight * Math.max(0, Math.min(1, input.sailIntegrity));
+  const atRisk = !input.anchored
+    && input.tailwind > 0
+    && deployment > STORM_GUST_BLOWOUT_DEPLOYMENT
+    && input.gustPulse >= STORM_GUST_BLOWOUT_PULSE * SAIL_REEF_WARN_RATIO;
+  return {
+    canvas: plain,
+    alarm: atRisk ? 'REEF SAILS - THE GUST WILL TEAR THEM' : null,
+    blownOut: false,
+  };
+}
 
 export function warningLines(input: WarningInput): { storm: string | null; ship: string | null } {
   // THE EYE CLOSES outranks every other storm line, because past this point the
@@ -156,7 +230,10 @@ export function warningLines(input: WarningInput): { storm: string | null; ship:
       ? 'SHIP CRITICAL - REPAIR NOW'
       : input.shipOnFire
         ? 'FIRE ABOARD - REPAIR TO DOUSE IT'
-        : null;
+        // Under sinking/critical/fire, above nothing: the rig is the reason the
+        // hull is not answering the helm, and it is the only one of the four a
+        // crew can still act on in the next two seconds.
+        : (input.sailAlarm ?? null);
   return { storm, ship };
 }
 
@@ -1169,6 +1246,28 @@ export class HudController {
       ? dist2D(ship.position.x, ship.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ)
         - this.view.state.storm.safeRadius
       : null;
+    // The wind WHERE SHE IS, sampled ONCE a frame and read by both the alarm
+    // stack and the ship card below (two samples of a 4-sine field per frame is
+    // waste, and two of them could disagree by a tick).
+    const hullWind = ship
+      ? sampleLocalWind(
+        this.view.ocean.getTime(),
+        ship.position.x,
+        ship.position.z,
+        this.view.state?.storm ?? null,
+      )
+      : null;
+    const canvasState = ship && hullWind
+      ? sailCanvasState({
+        sailHeight: ship.sailHeight,
+        sailIntegrity: ship.sailIntegrity,
+        chainshotted: (ship.chainshottedUntil ?? 0) > this.view.state.serverTime,
+        anchored: ship.anchored,
+        gustPulse: hullWind.gustPulse,
+        tailwind: hullWind.tailwind,
+        blownOutRemaining: Math.max(0, (ship.sailBlownOutUntil ?? 0) - this.view.state.serverTime),
+      })
+      : null;
     const lines = warningLines({
       outsideStorm,
       shipMetresOutside,
@@ -1176,6 +1275,9 @@ export class HudController {
       shipCritical: shipCritical && !ship?.sinking,
       shipOnFire,
       eyeCollapse: this.view.state.storm.eyeCollapse,
+      // Only the deck she is standing on: a stranger's rig is not this crew's
+      // emergency, and the alarm stack is for things the player can act on.
+      sailAlarm: ship && player.onShipId === ship.id ? canvasState?.alarm ?? null : null,
     });
     this.view.ui.stormWarning.style.display = lines.storm ? 'block' : 'none';
     this.view.ui.stormWarning.textContent = lines.storm ?? '';
@@ -1233,7 +1335,7 @@ export class HudController {
       // so reading the prevailing breeze here would print a trim instruction for a
       // wind this hull is not in — the one place a captain outside the ring is
       // certain to be looking while the gale is the only thing that can save her.
-      const wind = sampleLocalWind(
+      const wind = hullWind ?? sampleLocalWind(
         this.view.ocean.getTime(),
         ship.position.x,
         ship.position.z,
@@ -1264,8 +1366,11 @@ export class HudController {
       // by. One clause, one fact: where the wind is sitting on this hull.
       const windLine = `Wind ${this.windBearingPhrase(signedRelative)}${this.windPlainGloss(signedRelative)}`;
       this.updateWindVane(signedRelative, windLine);
-      const sailPct = Math.round(ship.sailHeight * 100);
-      const canvas = sailPct < 5 ? 'Sails furled' : `Sails ${sailPct}% out`;
+      // 'Sails 30% out' with no reason is the bug review-8 names: while the
+      // blow-out timer runs the card says what happened to the canvas and how
+      // long the yard is stuck there.
+      const canvas = canvasState?.canvas
+        ?? (Math.round(ship.sailHeight * 100) < 5 ? 'Sails furled' : `Sails ${Math.round(ship.sailHeight * 100)}% out`);
       // HOW FAST SHE IS ACTUALLY GOING, measured off the hull's own velocity.
       // The only speed number the HUD ever showed was the ship card's "TOP SPEED
       // 15.0 kn", which is a stat-sheet ceiling in world units wearing a knots
@@ -1294,6 +1399,9 @@ export class HudController {
           : '';
         this.view.ui.sailStatus.textContent = `${speedLine} · ${canvas}${rig}${trim} · ${windLine}`;
       }
+      // The one hull state the card paints: torn canvas is red for as long as
+      // the yard is stuck, so the eye finds the reason without reading.
+      this.view.ui.sailStatus.style.color = canvasState?.blownOut ? '#ff8a6a' : '';
       this.updateSailCoach(player, ship, signedRelative, trimCatch);
     } else {
       this.updateSailCoach(player, null, 0, 0);

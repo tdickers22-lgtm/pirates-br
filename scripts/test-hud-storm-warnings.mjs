@@ -11,7 +11,13 @@
 //    and nothing for the storm.
 //
 // Both fixes are pure functions so this gate needs no DOM, no browser, no stack.
-import { warningLines, stormMarkerPlacement } from '../src/client/ui/HudController.ts';
+import { warningLines, stormMarkerPlacement, sailCanvasState, SAIL_REEF_WARN_RATIO } from '../src/client/ui/HudController.ts';
+import {
+  STORM_GUST_BLOWOUT_DEPLOYMENT,
+  STORM_GUST_BLOWOUT_PULSE,
+  STORM_GUST_BLOWOUT_SAIL_HEIGHT,
+  STORM_GUST_BLOWOUT_SECONDS,
+} from '../src/shared/utils/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -94,6 +100,62 @@ m = stormMarkerPlacement(0, 200, 0, { ...storm, shrinking: true });
 expect('a hull already inside the NEXT ring is never reached by this wall', m.etaSeconds === null);
 m = stormMarkerPlacement(0, 400, 0, { ...storm, shrinking: false });
 expect('a ring that is not moving has no ETA', m.etaSeconds === null);
+
+// ── THE SAIL BLOW-OUT HAS A TELL (storm-07, review-8 P1) ────────────────────
+//
+// PhysicsSystem holds a hull's canvas at 30 % for 20 s when she carries full
+// sail through a squall for two seconds. It shipped with no client half at all:
+// `sailBlownOutUntil` appeared nowhere under src/client, so the bar stuck, the
+// hull slowed, and the HUD said "Sails 30% out" as though the crew had asked
+// for it. The warning must also beat the 2 s dwell, or it is a post-mortem.
+console.log('\nThe squall says what it is about to do, then what it did');
+const squall = {
+  sailHeight: 1, sailIntegrity: 1, chainshotted: false, anchored: false,
+  gustPulse: STORM_GUST_BLOWOUT_PULSE, tailwind: 4, blownOutRemaining: 0,
+};
+{
+  const warned = sailCanvasState(squall);
+  expect('full canvas in a following squall → REEF SAILS before it tears',
+    warned.alarm === 'REEF SAILS - THE GUST WILL TEAR THEM' && !warned.blownOut,
+    JSON.stringify(warned));
+  expect('and the warning starts BELOW the pulse that tears it (it beats the dwell)',
+    SAIL_REEF_WARN_RATIO < 1
+    && sailCanvasState({ ...squall, gustPulse: STORM_GUST_BLOWOUT_PULSE * SAIL_REEF_WARN_RATIO }).alarm !== null,
+    `ratio ${SAIL_REEF_WARN_RATIO}`);
+  const reefed = sailCanvasState({ ...squall, sailHeight: STORM_GUST_BLOWOUT_DEPLOYMENT - 0.05 });
+  expect('a crew that already shortened sail is not shouted at',
+    reefed.alarm === null, JSON.stringify(reefed));
+  expect('nor is a hull at anchor, or one running with the gale astern of her',
+    sailCanvasState({ ...squall, anchored: true }).alarm === null
+    && sailCanvasState({ ...squall, tailwind: 0 }).alarm === null);
+  expect('fair weather says nothing at all',
+    sailCanvasState({ ...squall, gustPulse: 1.0 }).alarm === null);
+}
+{
+  const blown = sailCanvasState({
+    ...squall,
+    sailHeight: STORM_GUST_BLOWOUT_SAIL_HEIGHT,
+    blownOutRemaining: STORM_GUST_BLOWOUT_SECONDS - 3,
+  });
+  expect('while the canvas is blown out the card names it, with the clock',
+    blown.blownOut && blown.canvas.includes('CANVAS BLOWN OUT') && blown.canvas.includes('17'),
+    JSON.stringify(blown));
+  expect('and the alarm stack carries it, under sinking / critical / fire',
+    warningLines({
+      outsideStorm: false, shipMetresOutside: null, shipSinking: false,
+      shipCritical: false, shipOnFire: false, sailAlarm: blown.alarm,
+    }).ship === blown.alarm
+    && warningLines({
+      outsideStorm: false, shipMetresOutside: null, shipSinking: true,
+      shipCritical: false, shipOnFire: false, sailAlarm: blown.alarm,
+    }).ship === 'SHIP IS SINKING');
+  expect('a sound rig leaves the card and the alarm exactly as they were',
+    sailCanvasState({ ...squall, sailHeight: 0.5, gustPulse: 1 }).canvas === 'Sails 50% out'
+    && warningLines({
+      outsideStorm: false, shipMetresOutside: null, shipSinking: false,
+      shipCritical: false, shipOnFire: false,
+    }).ship === null);
+}
 
 console.log(failures === 0 ? '\nPASS storm warnings + compass' : `\nFAIL storm warnings + compass (${failures})`);
 process.exit(failures === 0 ? 0 : 1);
