@@ -160,6 +160,8 @@ export type PlayerRig = {
    *  frame left it — including our own offset. So we stash the clip value,
    *  restore it before every mixer step, and write base+pitch after. */
   headClipX: number;
+  /** …and the same for the yaw the look-at solve adds (ANIMPOL). */
+  headClipY: number;
   /** The same stash for the two bones the foot plant writes absolutely. */
   hipsClipZ: number;
   spineClipZ: number;
@@ -282,6 +284,7 @@ export function makePlayerRig(
     bones: { head: bone('head'), hips, spine: bone('spine1'), footL: bone('foot_l'), footR: bone('foot_r') },
     hipsRestY: hips?.position.y ?? 0,
     headClipX: bone('head')?.rotation.x ?? 0,
+    headClipY: bone('head')?.rotation.y ?? 0,
     hipsClipZ: hips?.rotation.z ?? 0,
     spineClipZ: bone('spine1')?.rotation.z ?? 0,
     pelvisRoll: 0,
@@ -402,6 +405,9 @@ export function updatePlayerRig(
   dt: number,
   cameraDistSq: number,
   lookPitch: number,
+  /** Look yaw RELATIVE to the body's facing, so the head turns the way the
+   *  player is actually looking instead of staring through her own shoulder. */
+  lookYaw: number,
   cutlassSwing: number,
   /** Surface height under the left/right boot relative to the height between
    *  them, from PlayerAnimator's shared-function samples (ANIMPOL, avatar-15).
@@ -440,7 +446,7 @@ export function updatePlayerRig(
   // bone it leaves behind when it decides nothing changed) is the clip pose and
   // nothing else. Without this the solve compounds on itself every frame.
   const headBone = rig.bones.head;
-  if (headBone) headBone.rotation.x = rig.headClipX;
+  if (headBone) { headBone.rotation.x = rig.headClipX; headBone.rotation.y = rig.headClipY; }
   if (rig.bones.hips) rig.bones.hips.rotation.z = rig.hipsClipZ;
   if (rig.bones.spine) rig.bones.spine.rotation.z = rig.spineClipZ;
   rig.pending += dt;
@@ -471,7 +477,12 @@ export function updatePlayerRig(
   // a puppet. Limits are PLAN §2.5's.
   if (headBone) {
     rig.headClipX = headBone.rotation.x; // whatever the clip left, solve-free
+    rig.headClipY = headBone.rotation.y;
     headBone.rotation.x = rig.headClipX + THREE.MathUtils.clamp(lookPitch, -0.5, 0.5);
+    // PLAN 2.5's limits. Past 0.6 rad a neck would break, and the shoulders are
+    // what should have turned — the body yaw is already tracking, so clamping
+    // here reads as a glance rather than as an owl.
+    headBone.rotation.y = rig.headClipY + THREE.MathUtils.clamp(lookYaw, -0.6, 0.6);
   }
   if (rig.bones.hips) rig.hipsClipZ = rig.bones.hips.rotation.z;
   if (rig.bones.spine) rig.spineClipZ = rig.bones.spine.rotation.z;
@@ -517,6 +528,23 @@ function footYInRoot(root: THREE.Object3D, foot: THREE.Bone): number {
   root.worldToLocal(FOOT_SCRATCH);
   // the sole is ~4.5 cm under the ankle bone (pirate_rig.py foot tail)
   return FOOT_SCRATCH.y - 0.045;
+}
+
+/**
+ * ADDITIVE HIT FLINCH, ON THE RIG (avatar-15: "flinch is the only additive
+ * layer" — and the rigged pirate had lost even that, because the rig branch
+ * returns before the procedural animator's applyFlinch).
+ *
+ * It is written on the clone's ROOT, not on a bone: the mixer never touches the
+ * root, so there is no clip value to stash and restore, and a jolt of the whole
+ * body toward the shot is what a hit reads as at any range. `k` is the animator's
+ * own decay envelope, so the rigged and the boxy body flinch on one clock.
+ */
+export function applyRigFlinch(mesh: THREE.Group, yaw: number, k: number): void {
+  const rig = playerRigOf(mesh);
+  if (!rig) return;
+  rig.root.rotation.y = rig.pelvisRoll * 0 + yaw * 0.3 * k;
+  rig.root.rotation.x = 0.16 * k;
 }
 
 /** A rigged corpse: play the death clip for the cause and let it clamp. */

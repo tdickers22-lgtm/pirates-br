@@ -671,6 +671,32 @@ console.log('\n[5. walk + aim]');
     armMin <= -0.7, 'the arm hung at the side while walking');
 }
 
+// ── 6. THE RIGGED PIRATE GETS THE SAME TWO POST-SOLVERS ────────────────────
+// A skinned pirate is built from a GLB and cannot be posed in node, so what is
+// graded here is the WIRING: the rig branch of animatePlayerMesh returns early,
+// and before ANIMPOL it returned before the look-at yaw and before the hit
+// reaction ever reached her. Both are read out of the source, which is the only
+// honest thing a GPU-free suite can say about a file it cannot instantiate.
+console.log('\n[6. rig post-solvers]');
+{
+  const animSrc = readFileSync(new URL('../src/client/rendering/PlayerAnimator.ts', import.meta.url), 'utf8');
+  const rigSrc = readFileSync(new URL('../src/client/rendering/factories/PlayerRigFactory.ts', import.meta.url), 'utf8');
+  expect('the rig is handed a look yaw relative to the body, not the raw world yaw',
+    /updatePlayerRig\([\s\S]{0,320}?angleWrap\(player\.rotation\.x - mesh\.rotation\.y\)/.test(animSrc),
+    'updatePlayerRig only ever received a pitch, so a rigged head never turned');
+  expect('the rigged head yaw is clamped to PLAN 2.5 (±0.6 rad)',
+    /clamp\(lookYaw, -0\.6, 0\.6\)/.test(rigSrc));
+  expect('a rigged pirate flinches toward the shot (applyRigFlinch on the rig branch)',
+    /applyRigFlinch\(mesh,/.test(animSrc),
+    'the rig branch returned before applyFlinch, so a skinned pirate never reacted to a hit');
+  expect('both bodies flinch on ONE envelope (no second decay curve)',
+    (animSrc.match(/flinch\.t \+= dt/g) ?? []).length === 1
+      && /const k = flinchEnvelope\(mesh, dt\)/.test(animSrc),
+    'a second copy of the decay would drift out of step with the first');
+  expect('the rig is handed the surface under each boot',
+    /plant\.left, plant\.right/.test(animSrc));
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS: nothing graded'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

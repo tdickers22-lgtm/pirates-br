@@ -9,7 +9,7 @@ import type { Player, Ship } from '../../shared/types/index.js';
 import { angleWrap } from '../../shared/utils/index.js';
 import { getShipFloorYAt, toShipLocalPointInto } from '../../shared/interactions.js';
 import { AVATAR_RIG } from './factories/PlayerMeshFactory.js';
-import { playRigDeath, updatePlayerRig } from './factories/PlayerRigFactory.js';
+import { applyRigFlinch, playRigDeath, updatePlayerRig } from './factories/PlayerRigFactory.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 
@@ -215,8 +215,30 @@ const CROUCH_HIP_DROP = 0.37;
  */
 export type RemoteAnimPose = { pitch: number; vx: number; vz: number };
 
+/** How long a hit reaction lasts. Shared by the boxy body and the rig. */
+const FLINCH_TIME = 0.28;
+
 /** Directional flinch pushed in by Game on any health drop. */
 type FlinchState = { t: number; mag: number; yaw: number };
+
+/** ONE decay envelope for the hit reaction, so the boxy body and the rigged one
+ *  jolt on the same clock: a 25% snap in, then an eased recovery. Advances the
+ *  timer and clears the state when it runs out; returns 0 when nothing is on. */
+function flinchEnvelope(mesh: THREE.Group, dt: number): number {
+  const flinch = mesh.userData.flinch as FlinchState | undefined;
+  if (!flinch) return 0;
+  flinch.t += dt;
+  if (flinch.t >= FLINCH_TIME) {
+    mesh.userData.flinch = undefined;
+    return 0;
+  }
+  const p = flinch.t / FLINCH_TIME;
+  return (p < 0.25 ? p / 0.25 : 1 - easeOutCubic((p - 0.25) / 0.75)) * flinch.mag;
+}
+
+function flinchYaw(mesh: THREE.Group): number {
+  return (mesh.userData.flinch as FlinchState | undefined)?.yaw ?? 0;
+}
 
 export class PlayerAnimator {
   constructor(private readonly view: PlayerAnimatorView) {}
@@ -319,9 +341,11 @@ export class PlayerAnimator {
       updatePlayerRig(
         mesh, player, dt, distSq,
         remote ? remote.pitch : player.rotation.y,
+        angleWrap(player.rotation.x - mesh.rotation.y),
         this.view.getCutlassSwingProgress(player),
         plant.left, plant.right,
       );
+      applyRigFlinch(mesh, flinchYaw(mesh), flinchEnvelope(mesh, dt));
       return;
     }
 
@@ -997,17 +1021,13 @@ export class PlayerAnimator {
    * health drop; here it just decays.
    */
   private applyFlinch(mesh: THREE.Group, parts: Record<string, THREE.Object3D>, dt: number) {
-    const flinch = mesh.userData.flinch as FlinchState | undefined;
-    if (!flinch) return;
-    flinch.t += dt;
-    const FLINCH_TIME = 0.28;
-    if (flinch.t >= FLINCH_TIME) {
-      mesh.userData.flinch = undefined;
-      return;
-    }
-    // Snap in over the first 25%, ease out across the rest.
-    const p = flinch.t / FLINCH_TIME;
-    const k = (p < 0.25 ? p / 0.25 : 1 - easeOutCubic((p - 0.25) / 0.75)) * flinch.mag;
+    // Snap in over the first 25%, ease out across the rest — the ONE envelope
+    // the rigged pirate flinches on too (flinchEnvelope), so a hit reads the
+    // same whichever body the tier gave this player.
+    const yaw = flinchYaw(mesh);
+    const k = flinchEnvelope(mesh, dt);
+    if (k === 0) return;
+    const flinch = { yaw };
     const torso = parts.torso;
     const head = parts.head;
     const hair = parts.hair;
