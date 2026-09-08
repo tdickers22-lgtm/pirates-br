@@ -227,7 +227,11 @@ expect('storm-05 the sky shader carries the storm bearing and uses it on the sla
   && /max\(u_stormIntensity, oc \* 0\.80\) \* stormSide/.test(rendererSrc)
   && /scud \* scudBand \* oc \* 0\.85 \* stormSide/.test(rendererSrc));
 expect('storm-05 the rotating anvil is a tier gate, masked to the storm sector',
-  /defines: this\.quality === 'low' \? \{\} : \{ SKY_ANVIL: '' \}/.test(rendererSrc)
+  // The sky material's `defines` grew a second entry in wave 8.2 (the cloud
+  // octave ladder), so the anvil's tier gate moved from being the whole object
+  // literal to a spread inside it. What is graded is unchanged: on 'low' the
+  // define is absent, so the anvil block is not even compiled.
+  /\.\.\.\(this\.quality === 'low' \? \{\} : \{ SKY_ANVIL: '' \}\)/.test(rendererSrc)
   && /#ifdef SKY_ANVIL/.test(rendererSrc)
   && /float anvilMask = smoothstep\(0\.05, 0\.75, bearing\)/.test(rendererSrc)
   && /if \(anvilMask > 0\.004\) \{/.test(rendererSrc)
