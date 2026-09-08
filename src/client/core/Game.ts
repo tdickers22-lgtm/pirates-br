@@ -1785,6 +1785,7 @@ export class Game {
     }
     this.environment.clear();
     this.envFx.clearLanternEmitters();
+    this.envFx.resetStrikeStateForMatch();
     this.shipRenderer.clear();
     this.islandMeshes.clear();
     this.islandPropInstances.clear();

@@ -30,6 +30,7 @@ import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
 import {
+  shouldDrawStrike,
   stormFrontShellCount,
   stormSkyNear01,
 } from './stormWeather.js';
@@ -972,6 +973,15 @@ export class EnvironmentFx {
         break;
       }
     }
+  }
+
+  /** Sim-clock state that belongs to ONE match. Called from Game's per-match
+   *  reset: this renderer is built once per Game and outlives every match in
+   *  the session, so anything keyed on Match.t has to be dropped here or the
+   *  next match is graded against last match's clock (review-8 P1). */
+  resetStrikeStateForMatch() {
+    this.lastDrawnStrikeT = -1;
+    this.lightningTimer = 4 + Math.random() * 6;
   }
 
   clearLanternEmitters() {
@@ -2233,7 +2243,10 @@ export class EnvironmentFx {
       const strikes = this.view.state.storm.strikes;
       if (!strikes || strikes.length === 0) return;
       const newest = strikes[strikes.length - 1];
-      if (!(newest.t > this.lastDrawnStrikeT)) return;
+      // Not `newest.t > last`: match seconds restart at 0 every match and this
+      // renderer lives for the whole session, so that comparison silently
+      // refused every bolt of every match after the first (review-8 P1).
+      if (!shouldDrawStrike(newest.t, this.lastDrawnStrikeT)) return;
       // CONSUME IT EVEN IF IT IS NOT DRAWN. Otherwise a bolt rolled while the
       // camera was deep in the eye would be held and fired the instant the
       // player sailed out — a strike arriving seconds after the sky rolled it.

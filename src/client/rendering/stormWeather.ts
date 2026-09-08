@@ -138,3 +138,25 @@ export function stormSkySideMask(bearing: number, stormNear: number): number {
 export function stormSkyNear01(signedDistOutside: number): number {
   return smoothstep(signedDistOutside, -60, 60);
 }
+
+// ── ONE SKY PER MATCH, NOT PER SESSION (review-8 P1) ────────────────────────
+//
+// The bolt is replicated now, and EnvironmentFx draws a strike only once by
+// remembering the sim time of the last one it drew. `t` is Match.t: match
+// seconds, counted from 0 by EVERY match. EnvironmentFx is built once per Game
+// and survives "Play Again", so after a 400 s match the remembered time was 400
+// and the whole storm arc of the SECOND match was refused — no bolt, no flash,
+// no thunder, for the rest of the session. The guard now knows a restart when
+// it sees one, and Game's per-match reset clears the state as well.
+
+/** A strike time this far BELOW the last one drawn is not snapshot jitter or a
+ *  stale ring entry, it is a new match with its clock back at 0. */
+export const STRIKE_MATCH_RESTART_BACKSTEP = 5;
+
+/** Should the newest replicated strike be drawn, given the last one drawn?
+ *  `lastDrawnT` is -1 when nothing has been drawn yet. */
+export function shouldDrawStrike(newestT: number, lastDrawnT: number): boolean {
+  if (!Number.isFinite(newestT)) return false;
+  if (newestT > lastDrawnT) return true;
+  return newestT < lastDrawnT - STRIKE_MATCH_RESTART_BACKSTEP;
+}

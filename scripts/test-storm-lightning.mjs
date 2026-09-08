@@ -19,6 +19,7 @@
 //
 //   node --import tsx scripts/test-storm-lightning.mjs
 import { StormSystem } from '../src/server/systems/StormSystem.ts';
+import { shouldDrawStrike } from '../src/client/rendering/stormWeather.ts';
 import {
   PLAYER,
   SERVER_TICK_MS,
@@ -141,6 +142,52 @@ console.log('\nNothing strikes inside the circle the game calls shelter');
     minBand >= STORM_LIGHTNING.BAND_MIN - 1e-9
     && maxBand <= STORM_LIGHTNING.BAND_MIN + STORM_LIGHTNING.BAND_RANGE + 1e-9,
     `band ${minBand.toFixed(3)} .. ${maxBand.toFixed(3)}`);
+}
+
+// ── THE SECOND MATCH OF A SESSION GETS A SKY TOO (review-8 P1) ──────────────
+//
+// EnvironmentFx is built once per Game and survives "Play Again"; `strike.t` is
+// Match.t, which every match counts from 0. The draw guard was `newest.t >
+// lastDrawnStrikeT`, so after a 400 s match nothing under t=400 was ever drawn
+// again: the entire storm arc of match two, and of every match after it, was
+// silently refused. This replays two matches through ONE guard state.
+console.log('\nOne sky per match, not one per session');
+{
+  const drawnIn = (strikes, state) => {
+    let drawn = 0;
+    for (const s of strikes) {
+      if (shouldDrawStrike(s.t, state.last)) { drawn += 1; state.last = s.t; }
+      else state.last = Math.max(state.last, s.t);
+    }
+    return drawn;
+  };
+  const first = run(420, 20260801, stormAt(300, 4), [], []).strikes;
+  const second = run(420, 90210, stormAt(300, 4), [], []).strikes;
+  expect('both matches roll bolts at all (the fixture is real)',
+    first.length > 3 && second.length > 3, `${first.length} then ${second.length}`);
+
+  const session = { last: -1 };
+  const drawnFirst = drawnIn(first, session);
+  // What "Play Again" does NOT do for us: no reset call here on purpose, so the
+  // guard alone has to survive the clock going back to 0.
+  const drawnSecond = drawnIn(second, session);
+  expect('every bolt of match one is drawn',
+    drawnFirst === first.length, `${drawnFirst}/${first.length}`);
+  expect('every bolt of match two is drawn as well, with no reset in between',
+    drawnSecond === second.length, `${drawnSecond}/${second.length} after a ${first.at(-1).t.toFixed(0)} s match`);
+
+  const withReset = { last: -1 };
+  drawnIn(first, withReset);
+  withReset.last = -1; // EnvironmentFx.resetStrikeStateForMatch()
+  expect('and the explicit per-match reset agrees with it',
+    drawnIn(second, withReset) === second.length);
+  // The guard still refuses a repeat: the newest entry of the ring buffer sits
+  // there for every frame until the next bolt is rolled, and it is one flash.
+  const held = { last: -1 };
+  drawnIn(first, held);
+  expect('but the newest bolt, held on the wire between strikes, is drawn once',
+    drawnIn(new Array(30).fill(first.at(-1)), held) === 0,
+    'the same strike fired again on later frames');
 }
 
 console.log('\nThe mainmast is the conductor');
