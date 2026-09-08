@@ -15,7 +15,7 @@ import {
 import { MapGenerator } from '../world/MapGenerator.js';
 import type { HullImpactKind } from '../systems/PhysicsSystem.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_DECK_AWASH_F, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
-import { buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
+import { buildInputAck, buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { HitscanTrace } from '../systems/WeaponSystem.js';
 import { StormSystem, STORM_EYE_RESOLUTION_SECONDS } from '../systems/StormSystem.js';
@@ -2209,7 +2209,23 @@ export class Match {
       } else {
         const hot = buildHotSnapshot(this.state, this.t, ++this.snapshotSeq);
         this.broadcastVolatile({ type: 'state_hot', ts: Date.now(), payload: hot }, 'hot');
+        this.broadcastInputAcks();
       }
+    }
+  }
+
+  /** PRED-01: one ~70 B receipt per client per hot tick, so a client that
+   *  simulates its own body can rewind to the last state the sim agreed with
+   *  and replay from there. Skipped for bots (no socket) and for a congested
+   *  client (an ack is superseded 31x/s, so a withheld one is simply dropped). */
+  private broadcastInputAcks() {
+    for (const [, client] of this.clients) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      if (client.ws.bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES) continue;
+      const player = this.getPlayer(client.playerId);
+      if (!player) continue;
+      const payload = buildInputAck(player, client.appliedInputSeq ?? -1, this.t);
+      try { client.ws.send(JSON.stringify({ type: 'input_ack', ts: Date.now(), payload })); } catch {}
     }
   }
 
