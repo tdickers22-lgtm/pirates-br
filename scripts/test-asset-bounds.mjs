@@ -115,6 +115,11 @@ const PINNED_BASE = {
   // pivot instead of a skirt.
   cutlass: -0.210, flintlock: -0.264, flintknock: -0.264,
   eye_of_reach: -0.264, blunderbuss: -0.264,
+  // Ship hardware (HWGLB-01) that hangs rather than stands: the wheel's origin
+  // is its AXLE and the lantern's is its HOOK, so half a wheel and a whole
+  // lantern live below y=0 on purpose. The cannon's carriage and the capstan's
+  // base do sit on the deck and are graded by the normal ground rule.
+  wheel: -0.807, ship_lantern: -0.655,
 };
 const mutate = process.env.PIRATES_BR_MUTATE_BASE ?? '';
 if (mutate) {
