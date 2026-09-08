@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { geyserEruptionLevel, getIslandSurfaceY } from '../../../shared/utils/index.js';
 import { refreshFrozenChild } from '../../rendering/three-util.js';
+import { ensureMeshGround } from './GroundTruth.js';
 import type { IslandBuildCtx } from './context.js';
 
 /** Caldera lava, ashfall, embers, smoke and geyser plumes. */
@@ -23,6 +24,17 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
     const particleTex = host.getSoftParticleTexture();
     const islandCenter = new THREE.Vector3(island.position.x, 0, island.position.z);
     const cullRadius = islandMaxR + 440;
+    // RESIDUAL ANALYTIC SEAT (islandworld-17/30). The vent furniture below was
+    // seated on `getIslandSurfaceY` -- the SERVER's heightfield -- while the
+    // player looks at a triangle mesh whose chord sits below that field wherever
+    // the field is convex. A caldera flank is convex everywhere, so rim stones
+    // stood proud of the ground they are supposed to have been shouldered out
+    // of, and 'geyser' had to be exempted from the live floater census by name.
+    // Read the DRAWN ground; fall back to the analytic field only when the
+    // terrain mesh is not indexed yet.
+    const drawn = ensureMeshGround(ctx);
+    const groundAt = (localX: number, localZ: number, fallback: number): number =>
+      drawn?.heightAt(localX, localZ) ?? fallback;
 
     // Caldera / peak position — anchors the smoke plume + ember source. The
     // molten glow of the crater is painted into the summit TERRAIN (aMagma
@@ -161,7 +173,9 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
     for (const geyser of island.geysers ?? []) {
       const gx = geyser.x - island.position.x;
       const gz = geyser.z - island.position.z;
-      const gy = geyser.y;
+      // The vent's own seat: the server's geyser.y is the analytic surface and
+      // stays the launch height for physics; the STONE is drawn where the mesh is.
+      const gy = groundAt(gx, gz, geyser.y);
       // ── Vent: a real cracked-stone rim around a recessed dark throat ──
       // (was a flat orange RingGeometry decal + emissive disc lying on the
       // grass — the open backlog defect: "geyser vents are painted circles").
@@ -182,7 +196,7 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
         const rr = ventR * (0.92 + rng(c * 67 + 11) * 0.30);
         const cx = gx + Math.cos(a) * rr;
         const cz = gz + Math.sin(a) * rr;
-        const cy = getIslandSurfaceY(island, cx + island.position.x, cz + island.position.z);
+        const cy = groundAt(cx, cz, getIslandSurfaceY(island, cx + island.position.x, cz + island.position.z));
         const s = ventR * (0.24 + rng(c * 71 + 3) * 0.24);
         rimS.set(s * (0.8 + rng(c * 73) * 0.7), s * (0.7 + rng(c * 79) * 0.9), s * (0.8 + rng(c * 83) * 0.6));
         // Rim stones lean OUTWARD, as if shouldered up by the vent.

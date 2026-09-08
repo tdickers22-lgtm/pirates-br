@@ -656,34 +656,52 @@ export function buildVinesAndStakes(ctx: IslandBuildCtx) {
       const vd = 0.34 + rng(i * 947) * 0.32;
       const top = surfacePoint(vd, va, 0);
       if (!isSolidDecorPoint(top, SURFACE_ABOVE_WATER, -0.2)) continue;
+      // RESIDUAL ANALYTIC SEAT (islandworld-17/30). Both ends of this vine were
+      // read off the analytic heightfield, and the player is looking at a
+      // triangle mesh whose chord runs BELOW that field over every convex cliff
+      // lip -- which is exactly where vines are placed. The anchor is now the
+      // DRAWN ground under the ribbon's own footprint, and the far sample that
+      // sets the length is drawn ground too, so the ribbon starts in the rock
+      // it hangs off instead of a hand's width in front of it.
+      const anchorX = top.x + Math.cos(va) * 0.4;
+      const anchorZ = top.z + Math.sin(va) * 0.4;
+      const anchorY = ground?.heightAt(anchorX, anchorZ) ?? top.y;
       // Find ground a bit further out so the vine hangs over a slope drop
       const drop = 1.5 + rng(i * 953) * 3.0;
-      const groundWX = top.x + island.position.x + Math.cos(va) * 1.6;
-      const groundWZ = top.z + island.position.z + Math.sin(va) * 1.6;
-      const groundY = getIslandSurfaceY(island, groundWX, groundWZ);
-      const vineLen = Math.max(1.2, top.y - groundY + 0.2);
+      const groundLX = top.x + Math.cos(va) * 1.6;
+      const groundLZ = top.z + Math.sin(va) * 1.6;
+      const groundY = ground?.heightAt(groundLX, groundLZ)
+        ?? getIslandSurfaceY(island, groundLX + island.position.x, groundLZ + island.position.z);
+      const vineLen = Math.max(1.2, anchorY - groundY + 0.2);
       if (vineLen > drop * 2) continue; // skip if vines would tunnel through ground
-      // Vine ribbon
-      const vine = new THREE.Mesh(new THREE.PlaneGeometry(0.16, vineLen), vineMat);
+      // ONE NODE PER VINE. The leaves used to be siblings of the ribbon, i.e.
+      // five separate roots hanging in the air with nothing under them, which
+      // is why 'vine' had to be exempted from the live floater census by name.
+      // A vine is one thing: its group's box reaches from the anchor down to
+      // the ground the ribbon ends on, and the census can grade it like any
+      // other decor piece.
+      const vine = new THREE.Group();
       vine.name = 'cliff-vine';
-      vine.position.set(top.x + Math.cos(va) * 0.4, top.y - vineLen * 0.5 + 0.1, top.z + Math.sin(va) * 0.4);
-      vine.rotation.y = va + Math.PI * 0.5;
-      vine.rotation.z = (rng(i * 957) - 0.5) * 0.18;
-      group.add(vine);
+      const ribbon = new THREE.Mesh(new THREE.PlaneGeometry(0.16, vineLen), vineMat);
+      ribbon.position.set(anchorX, anchorY - vineLen * 0.5 + 0.1, anchorZ);
+      ribbon.rotation.y = va + Math.PI * 0.5;
+      ribbon.rotation.z = (rng(i * 957) - 0.5) * 0.18;
+      vine.add(ribbon);
       // Leaves along the vine
       for (let l = 0; l < 4; l++) {
         const lt = (l + 0.5) / 4;
         const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.18), vineMat);
         leaf.name = 'cliff-vine-leaf';
         leaf.position.set(
-          top.x + Math.cos(va) * 0.4,
-          top.y - vineLen * lt + 0.1,
-          top.z + Math.sin(va) * 0.4 + (rng(l * 961 + i) - 0.5) * 0.1,
+          anchorX,
+          anchorY - vineLen * lt + 0.1,
+          anchorZ + (rng(l * 961 + i) - 0.5) * 0.1,
         );
         leaf.rotation.y = va + Math.PI * 0.5 + (rng(l * 963 + i) - 0.5) * 0.6;
         leaf.rotation.z = (rng(l * 967 + i) - 0.5) * 0.6;
-        group.add(leaf);
+        vine.add(leaf);
       }
+      group.add(vine);
     }
   }
 

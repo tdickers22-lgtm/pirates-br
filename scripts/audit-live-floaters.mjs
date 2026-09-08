@@ -173,7 +173,16 @@ const report = await page.evaluate((limit) => {
     },
   ];
   const bidDesign = (tag) => ELEVATED_BY_DESIGN.find((e) => e.re.test(tag)) ?? null;
-  const SKIP_MATCH = /waterfall|mist|smoke|spray|steam|ember|plume|geyser|cloud|vine|bird|glow|halo|foam|water|splash|light|particle/i;
+  // 'geyser' and 'vine' LEFT this list in wave 9.1. They were never particle
+  // vocabulary: a geyser's rim stones are stone, and a cliff vine is a ribbon
+  // anchored in rock. Both were seated on the SERVER's analytic heightfield
+  // while the player looks at the mesh, so both floated, and both were exempted
+  // by name rather than fixed (islandworld-17/30). The vent furniture and the
+  // vine anchor now read the drawn ground, and each vine is ONE node whose box
+  // runs from its anchor down to the ground its ribbon ends on, so both grade
+  // like any other decor piece. The jets themselves stay skipped under
+  // 'plume'/'steam'/'spray'/'mist', which is what those words are for.
+  const SKIP_MATCH = /waterfall|mist|smoke|spray|steam|ember|plume|cloud|bird|glow|halo|foam|water|splash|light|particle/i;
   const DIAG = Math.SQRT1_2;
   const RING = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [DIAG, DIAG], [DIAG, -DIAG], [-DIAG, DIAG], [-DIAG, -DIAG]];
 
