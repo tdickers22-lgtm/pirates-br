@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "8940b2fd",
-      "meshCount": 98,
-      "vertTotal": 62050,
+      "digest": "a08ce79a",
+      "meshCount": 100,
+      "vertTotal": 62074,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -24,7 +24,7 @@
           "meshes": 62,
           "verts": 29790,
           "tris": 11078,
-          "hash": "62ebd1c8",
+          "hash": "666bb008",
           "box": [
             -4.11,
             0.447,
@@ -94,14 +94,14 @@
           "meshes": 5,
           "verts": 1920,
           "tris": 640,
-          "hash": "d842c7a5",
+          "hash": "bdda937d",
           "box": [
             -1.93,
             2.28,
             -1.819,
-            1.78,
+            1.775,
             3.06,
-            4.369
+            4.366
           ]
         },
         "ship-brass": {
@@ -216,6 +216,34 @@
             5.445
           ]
         },
+        "ship-rigging-ratline": {
+          "meshes": 1,
+          "verts": 12,
+          "tris": 140,
+          "hash": "6580bbdd",
+          "box": [
+            -0.951,
+            -0.5,
+            -0.809,
+            0.951,
+            0.5,
+            1
+          ]
+        },
+        "ship-rigging-rope": {
+          "meshes": 1,
+          "verts": 12,
+          "tris": 90,
+          "hash": "6580bbdd",
+          "box": [
+            -0.951,
+            -0.5,
+            -0.809,
+            0.951,
+            0.5,
+            1
+          ]
+        },
         "ship-rope": {
           "meshes": 1,
           "verts": 3564,
@@ -275,9 +303,9 @@
       }
     },
     "brigantine": {
-      "digest": "615426be",
-      "meshCount": 127,
-      "vertTotal": 75490,
+      "digest": "297b78ad",
+      "meshCount": 129,
+      "vertTotal": 75514,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -297,7 +325,7 @@
           "meshes": 86,
           "verts": 41913,
           "tris": 15788,
-          "hash": "590b0011",
+          "hash": "5d456f51",
           "box": [
             -5.11,
             0.447,
@@ -367,11 +395,11 @@
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "6ef448d5",
+          "hash": "cfd46cf1",
           "box": [
-            -2.578,
+            -2.58,
             2.88,
-            -2.434,
+            -2.436,
             2.896,
             3.66,
             5.396
@@ -489,6 +517,34 @@
             7.125
           ]
         },
+        "ship-rigging-ratline": {
+          "meshes": 1,
+          "verts": 12,
+          "tris": 280,
+          "hash": "6580bbdd",
+          "box": [
+            -0.951,
+            -0.5,
+            -0.809,
+            0.951,
+            0.5,
+            1
+          ]
+        },
+        "ship-rigging-rope": {
+          "meshes": 1,
+          "verts": 12,
+          "tris": 110,
+          "hash": "6580bbdd",
+          "box": [
+            -0.951,
+            -0.5,
+            -0.809,
+            0.951,
+            0.5,
+            1
+          ]
+        },
         "ship-rope": {
           "meshes": 1,
           "verts": 3564,
@@ -548,9 +604,9 @@
       }
     },
     "galleon": {
-      "digest": "dca2c297",
-      "meshCount": 169,
-      "vertTotal": 97813,
+      "digest": "2a53f918",
+      "meshCount": 171,
+      "vertTotal": 97837,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -570,7 +626,7 @@
           "meshes": 121,
           "verts": 61405,
           "tris": 23250,
-          "hash": "a07906b3",
+          "hash": "2fab767b",
           "box": [
             -6.61,
             0.447,
@@ -640,12 +696,12 @@
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "1c042b61",
+          "hash": "b2aaa3e9",
           "box": [
-            -4.08,
+            -4.075,
             3.58,
-            -3.849,
-            4.08,
+            -3.848,
+            4.077,
             4.36,
             6.718
           ]
@@ -760,6 +816,34 @@
             4.056,
             5.788,
             9.645
+          ]
+        },
+        "ship-rigging-ratline": {
+          "meshes": 1,
+          "verts": 12,
+          "tris": 420,
+          "hash": "6580bbdd",
+          "box": [
+            -0.951,
+            -0.5,
+            -0.809,
+            0.951,
+            0.5,
+            1
+          ]
+        },
+        "ship-rigging-rope": {
+          "meshes": 1,
+          "verts": 12,
+          "tris": 130,
+          "hash": "6580bbdd",
+          "box": [
+            -0.951,
+            -0.5,
+            -0.809,
+            0.951,
+            0.5,
+            1
           ]
         },
         "ship-rope": {

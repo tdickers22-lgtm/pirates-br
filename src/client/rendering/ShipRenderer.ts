@@ -34,6 +34,7 @@ import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidT
 import type { SupplyKind } from './ship/textures.js';
 import { applyPlankDetail, makePlankUniforms, type PlankUniforms } from './ship/plankDetail.js';
 import { releaseShipGeometry } from './ship/geometry.js';
+import { buildRigging, updateRigging, type RopeRun, type Rigging } from './ship/rigging.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBillowedSailGeometry, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
@@ -192,6 +193,8 @@ interface ShipMeshGroup {
   holeVis: Map<number, HoleVis>;
   /** Yard+sail+furled-roll pivots, one per square-rigged mast (rotated to trim). */
   trimPivots: THREE.Group[];
+  /** Instanced rope + ratline rigging; the yard-attached runs follow the trim. */
+  rigging: Rigging | null;
   cannonMeshes: CannonMeshGroup[];
   lanterns: THREE.PointLight[];
   wheel: THREE.Object3D;
@@ -1562,10 +1565,14 @@ export class ShipRenderer {
     const mastSpacing = L * 0.42 / Math.max(mastCount - 1, 1);
     const mastStartZ = L * 0.28;
 
-    // All rigging collapses into two LineSegments draw calls (rope + ratline)
-    // instead of ~50 individual Line objects per ship.
-    const ropeSegmentPts: THREE.Vector3[] = [];
-    const ratlineSegmentPts: THREE.Vector3[] = [];
+    // All rigging collapses into two INSTANCED draw calls (rope + ratline): one
+    // draw each, exactly as the old LineSegments, but lit, shadowed and thick
+    // enough to survive a resolve — and the runs that end ON a yard carry their
+    // seat in pivot-local space so they follow the spar when she is braced
+    // (ships-16). See src/client/rendering/ship/rigging.ts.
+    const ropeRuns: RopeRun[] = [];
+    const ratlineRuns: RopeRun[] = [];
+    const yardHalfSpanForMast: number[] = [];
 
     for (let m = 0; m < mastCount; m++) {
       const mastZ = mastStartZ - m * mastSpacing;
@@ -1655,16 +1662,22 @@ export class ShipRenderer {
       yard.castShadow = true;
       trimPivot.add(yard);
 
-      // Rigging lines from yardarm to deck
+      // Lifts from the yardarm down to the deck. The upper end is ON the yard,
+      // which lives in the trim pivot, so it is stored PIVOT-LOCAL: the yard is
+      // a cylinder laid along the pivot's x axis at its origin, so the yardarm
+      // is (±yardW·0.48, 0, 0) in that frame.
+      yardHalfSpanForMast[m] = yardW * 0.48;
       for (const sx of [-1, 1]) {
-        ropeSegmentPts.push(
-          new THREE.Vector3(sx * yardW * 0.48, H + mastH * 0.82, mastZ),
-          new THREE.Vector3(sx * W * 0.44, H + 0.15, mastZ - L * 0.04),
-        );
+        ropeRuns.push({
+          a: new THREE.Vector3(sx * W * 0.44, H + 0.15, mastZ - L * 0.04),
+          b: new THREE.Vector3(sx * yardW * 0.48, H + mastH * 0.82, mastZ),
+          pivot: trimPivot,
+          bLocal: new THREE.Vector3(sx * yardW * 0.48, 0, 0),
+        });
       }
 
       const addRigLine = (a: THREE.Vector3, b: THREE.Vector3) => {
-        ratlineSegmentPts.push(a, b);
+        ratlineRuns.push({ a, b });
       };
       for (const sx of [-1, 1] as const) {
         const topA = new THREE.Vector3(sx * mastR * 1.8, H + mastH * 0.78, mastZ - L * 0.025);
@@ -1826,6 +1839,19 @@ export class ShipRenderer {
       // the rigging above. The floating deck-ring station is gone.
       const ropeStationMat = new THREE.MeshStandardMaterial({ color: 0xb99e6a, roughness: 0.95 });
       const mastHForHalyard = H * (stats.mastCount === 1 ? 3.6 : 3.1);
+      // The yard a brace actually swings: the pivot nearest the main mast. The
+      // mast loop has already run, so trimPivots is complete here.
+      const mainMastLocalZForBrace = getMainMastLocalZ(stats);
+      let mainTrimPivot: THREE.Group | null = null;
+      let mainYardHalfSpan = 0;
+      for (let i = 0; i < trimPivots.length; i++) {
+        if (mainTrimPivot === null
+          || Math.abs(trimPivots[i].position.z - mainMastLocalZForBrace)
+             < Math.abs(mainTrimPivot.position.z - mainMastLocalZForBrace)) {
+          mainTrimPivot = trimPivots[i];
+          mainYardHalfSpan = yardHalfSpanForMast[i] ?? 0;
+        }
+      }
       for (const ropeStation of getSailRopeStationLocals(stats)) {
         // Clamp the rack onto the REAL deck at this station — the hull
         // narrows toward the mast, and the shared approximation can land a
@@ -1855,10 +1881,12 @@ export class ShipRenderer {
         // The stations sit abeam the mainmast, so the halyard runs from the
         // pin rail UP to the yard — the rope you haul visibly leads to the
         // sail it moves (taut both ends, no floating tail, no text tag).
-        ropeSegmentPts.push(
-          new THREE.Vector3(rackX, H + 0.72, ropeStation.z),
-          new THREE.Vector3(rackX * 0.1, H + mastHForHalyard * 0.55, getMainMastLocalZ(stats)),
-        );
+        // Halyard: pin rail up to a block ON THE MAST, not on the yard, so it
+        // is static by design — hauling it hoists the sail, it does not brace.
+        ropeRuns.push({
+          a: new THREE.Vector3(rackX, H + 0.72, ropeStation.z),
+          b: new THREE.Vector3(rackX * 0.1, H + mastHForHalyard * 0.55, getMainMastLocalZ(stats)),
+        });
       }
       // Brace stations: cleat + coil at the quarterdeck rails, brace rope
       // running up to the yard END on that side — the physical "angle the
@@ -1874,10 +1902,19 @@ export class ShipRenderer {
         braceCoil.rotation.z = Math.PI * 0.5;
         braceCoil.position.set(bx, H + 0.48, brace.z);
         group.add(braceCoil);
-        ropeSegmentPts.push(
-          new THREE.Vector3(bx, H + 0.7, brace.z),
-          new THREE.Vector3(Math.sign(brace.x) * L * 0.2, H + mastHForHalyard * 0.6, getMainMastLocalZ(stats)),
-        );
+        // THE BRACE ACTUALLY REACHES THE YARD NOW (ships-16). Its own comment
+        // said "running up to the yard END on that side" while the drawn line
+        // stopped at a fixed point beside the mast, so the one rope the player
+        // hauls to swing the spar was the one rope that never moved with it.
+        const braceSide = Math.sign(brace.x);
+        ropeRuns.push({
+          a: new THREE.Vector3(bx, H + 0.7, brace.z),
+          b: mainTrimPivot
+            ? new THREE.Vector3(braceSide * mainYardHalfSpan, mainTrimPivot.position.y, mainTrimPivot.position.z)
+            : new THREE.Vector3(braceSide * L * 0.2, H + mastHForHalyard * 0.6, getMainMastLocalZ(stats)),
+          pivot: mainTrimPivot ?? undefined,
+          bLocal: mainTrimPivot ? new THREE.Vector3(braceSide * mainYardHalfSpan, 0, 0) : undefined,
+        });
       }
     }
 
@@ -1925,31 +1962,31 @@ export class ShipRenderer {
 
     // Fore-stay rigging (bowsprit to foremast)
     const foreMastZ = mastStartZ;
-    ropeSegmentPts.push(
-      new THREE.Vector3(0, H + H * 2.15, foreMastZ),
-      new THREE.Vector3(0, H + 0.55, L * 0.76),
-    );
+    ropeRuns.push({
+      a: new THREE.Vector3(0, H + 0.55, L * 0.76),
+      b: new THREE.Vector3(0, H + H * 2.15, foreMastZ),
+    });
     // Side stays land ON the bowsprit shaft just behind the tip — never in open air
     for (const sx of [-1, 1] as const) {
-      ropeSegmentPts.push(
-        new THREE.Vector3(sx * 0.06, H + 0.53, L * 0.72),
-        new THREE.Vector3(0, H + H * 1.95, foreMastZ),
-      );
+      ropeRuns.push({
+        a: new THREE.Vector3(sx * 0.06, H + 0.53, L * 0.72),
+        b: new THREE.Vector3(0, H + H * 1.95, foreMastZ),
+      });
     }
 
-    // Flush all collected rigging into two draw calls
-    if (ropeSegmentPts.length > 0) {
-      group.add(new THREE.LineSegments(
-        new THREE.BufferGeometry().setFromPoints(ropeSegmentPts),
-        new THREE.LineBasicMaterial({ color: 0x6a5030 }),
-      ));
-    }
-    if (ratlineSegmentPts.length > 0) {
-      group.add(new THREE.LineSegments(
-        new THREE.BufferGeometry().setFromPoints(ratlineSegmentPts),
-        new THREE.LineBasicMaterial({ color: 0x4b3520 }),
-      ));
-    }
+    // Flush all collected rigging into two INSTANCED draw calls. Three radial
+    // sides on the low tier, five elsewhere: ~290 triangles per hull on low,
+    // ~480 on balanced — under a tenth of a percent of the wide-shot budget,
+    // and the draw-call count is identical to the two LineSegments it replaces.
+    const ropeSides = this.quality === 'low' ? 3 : 5;
+    const ropeRigMat = new THREE.MeshStandardMaterial({ color: 0x6a5030, roughness: 1 });
+    ropeRigMat.name = 'ship-rigging-rope';
+    const ratlineRigMat = new THREE.MeshStandardMaterial({ color: 0x4b3520, roughness: 1 });
+    ratlineRigMat.name = 'ship-rigging-ratline';
+    const ropeRig = buildRigging(ropeRuns, ropeRigMat, 0.028, ropeSides);
+    const ratlineRig = buildRigging(ratlineRuns, ratlineRigMat, 0.018, ropeSides);
+    if (ropeRig) group.add(ropeRig.mesh);
+    if (ratlineRig) group.add(ratlineRig.mesh);
 
     // ── Cannons ──────────────────────────────────────────────
     const cannonGroups: CannonMeshGroup[] = [];
@@ -2557,6 +2594,7 @@ export class ShipRenderer {
       hullProfile: profile,
       holeVis: new Map<number, HoleVis>(),
       trimPivots,
+      rigging: ropeRig,
       cannonMeshes: cannonGroups,
       lanterns,
       wheel: wheelGroup,
@@ -3227,6 +3265,10 @@ export class ShipRenderer {
           }
         }
       }
+      // The yards have just been braced for this frame; re-seat every rope that
+      // is made fast to one (ships-16). No-op when the trim did not move, and
+      // allocation-free when it did.
+      updateRigging(mesh.rigging);
       for (let f = 0; f < mesh.furledSails.length; f++) {
         const furled = mesh.furledSails[f];
         furled.visible = ship.sailHeight <= SAIL_FURL_THRESHOLD;
@@ -3813,6 +3855,20 @@ export class ShipRenderer {
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
     return new THREE.Points(geo, mat);
+  }
+
+  /** The yard-attached rope runs on a hull, with the InstancedMesh they live in.
+   *  Read by scripts/test-ship-rigging.mjs to grade a 60-degree brace (ships-16). */
+  __riggingDynamic(shipId: string): Array<{ index: number; pivot: THREE.Group; local: THREE.Vector3; mesh: THREE.InstancedMesh }> {
+    const rig = this.shipMeshes.get(shipId)?.rigging;
+    if (!rig) return [];
+    return rig.dynamic.map((d) => ({ index: d.index, pivot: d.pivot, local: d.local, mesh: rig.mesh }));
+  }
+
+  /** The whole rigging record for a hull. scripts/test-ship-rigging.mjs drives
+   *  updateRigging directly with it to measure the re-seat in isolation. */
+  __rigging(shipId: string): Rigging | null {
+    return this.shipMeshes.get(shipId)?.rigging ?? null;
   }
 
   /** Hull-local Y of the sea on a given hull this frame — the wet line the
