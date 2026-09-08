@@ -1,9 +1,62 @@
 /** Held-weapon and pocket-item meshes plus the shared viewmodel material tweak. */
 import * as THREE from 'three';
 import type { WeaponInstance } from '../../../shared/types/index.js';
+import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import { registerBudgetLight } from '../LightBudget.js';
 
+/**
+ * The five weapons that now come out of Blender (WEAPON-01,
+ * `scripts/blender/build_weapons.py`): one atlas-textured GLB each, 5.2-6.1k
+ * triangles, in the SAME frame as the primitive fallback below — grip at the
+ * origin, muzzle toward +Z, cutlass blade up +Y — so the viewmodel does not
+ * move when the file lands.
+ */
+const HERO_WEAPON_FILES: ReadonlySet<string> = new Set([
+  'cutlass', 'flintlock', 'flintknock', 'eye_of_reach', 'blunderbuss',
+]);
+
+/**
+ * The authored weapon, or null while its GLB is still in flight.
+ *
+ * NULL IS A NORMAL ANSWER, not an error. Weapons are world assets, not boot
+ * assets (`AssetLibrary.BOOT_ASSET_NAMES` is ten files and the menu waits on
+ * those only), so between the menu and the end of `preloadWorld` there is a
+ * window where the player can already be holding a cutlass. The primitive
+ * union below covers that window, exactly as it covers a failed fetch.
+ *
+ * MATERIALS ARE COPIED PER CLONE, and that is not optional: the library hands
+ * back its ONE shared material, and `applyViewmodelMaterialSettings` turns
+ * `depthTest` OFF on whatever it is given. The same factory also builds the
+ * weapon in a crewmate's fist out in the world ('held-weapon'), so a shared
+ * material would draw that cutlass through the hull. Geometry and the atlas
+ * texture stay shared — one upload, one program.
+ */
+function cloneHeroWeapon(weaponId: string): THREE.Group | null {
+  if (!HERO_WEAPON_FILES.has(weaponId) || !assets.has(weaponId as AssetName)) return null;
+  const root = assets.clone(weaponId as AssetName);
+  if (!root) return null;
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    object.material = Array.isArray(object.material)
+      ? object.material.map((m) => m.clone())
+      : object.material.clone();
+    object.castShadow = true;
+    // The Eye of Reach hides everything but the scope while scoped, and
+    // ViewmodelController reads these two flags off the parts it traverses.
+    // The GLB keeps the node names the builder wrote, so the joined `scope`
+    // group is the only part that stays visible.
+    if (weaponId === 'eye_of_reach') {
+      if (object.name.startsWith('scope')) object.userData.eorKeepInScope = true;
+      else object.userData.eorHideInScope = true;
+    }
+  });
+  return root;
+}
+
 export function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
+  const hero = cloneHeroWeapon(weaponId);
+  if (hero) return hero;
+
   const group = new THREE.Group();
   const woodMat = new THREE.MeshStandardMaterial({ color: 0x6a4322, roughness: 0.95 });
   const steelMat = new THREE.MeshStandardMaterial({ color: 0xb9c2c9, roughness: 0.45, metalness: 0.75 });

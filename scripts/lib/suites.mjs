@@ -241,6 +241,12 @@ export const LOGIC = [
   //                                 unnoticed. --update rebuilds the baseline; --mutate is its red proof.
   tsx('test-ship-geometry-hash.mjs'),
   tsx('test-asset-bounds.mjs'),
+  //   test-hero-assets            — the atlas-textured hero GLBs (weapons, ship hardware): triangle band,
+  //                                 ONE material with a baseColorTexture, COLOR_0 present and WHITE (the AO
+  //                                 is in the atlas now), the node names the viewmodel and the aim rig
+  //                                 address, the pivots, and the far LOD. PIRATES_BR_MUTATE_HERO is its red
+  //                                 proof (WEAPON-01 / HWGLB-01, lane 5.3)
+  quick({ file: 'test-hero-assets.mjs', cmd: ['node', 'scripts/test-hero-assets.mjs'] }),
   //   glb-census --check          — the models README's counts vs disk + ASSET_NAMES/FAR_ASSET_NAMES
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
   quick({ file: 'glb-census.mjs', cmd: ['node', 'scripts/glb-census.mjs', '--check'] }),
