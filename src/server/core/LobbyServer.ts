@@ -6,11 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  NetMsg, LobbyUpdatePayload, LobbyMember, QueueUpdatePayload,
+  NetMsg, ClientMsg, LobbyUpdatePayload, LobbyMember, QueueUpdatePayload,
   WelcomePayload, MatchStartPayload, PlayerStatsRecord,
   ResumeOkPayload, ResumeFailedPayload,
 } from '../../shared/types/index.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
+import { validateClientMsg } from '../net/validate.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
 import { MODES, MODE_IDS, botFillFor, isModeId, type ModeId } from '../../shared/constants/index.js';
@@ -328,6 +329,10 @@ export class LobbyServer {
   /** RECON-01/netcode-29: set by shutdown(); no seat is held while the process
    *  is on its way out, because there is nothing left to come back to. */
   private draining = false;
+  /** Frames the wire validator refused since boot (unknown type, or a payload
+   *  that did not match its declared shape). Reported by /health so a client
+   *  build that has drifted off the protocol is visible without a debugger. */
+  private rejectedFrames = 0;
   private stats: StatsStore;
 
   constructor() {
@@ -543,7 +548,25 @@ export class LobbyServer {
   }
 
   // ─── Message routing ─────────────────────────────────────────
-  private routeMessage(session: ClientSession, msg: NetMsg): void {
+  /**
+   * ONE VALIDATOR PER TYPE, BEFORE ANY HANDLER (ONLINE-01 / codehealth-13).
+   * `raw.type` is only known to be a string at this point. `validateClientMsg`
+   * refuses anything outside the CLIENT vocabulary (a client posting
+   * `state_snapshot` or `game_over` used to be forwarded into the match switch)
+   * and hands back a payload of the declared shape, so every handler below
+   * reads typed fields instead of casting `unknown`.
+   *
+   * A refused frame is DROPPED, not punished: the socket stays open and the
+   * session keeps its liveness stamp (taken in the 'message' listener, ahead of
+   * this). Killing a session over one malformed frame would cost a player their
+   * whole match for a bug in their own build.
+   */
+  private routeMessage(session: ClientSession, raw: NetMsg): void {
+    const msg = validateClientMsg(raw);
+    if (!msg) {
+      this.rejectedFrames += 1;
+      return;
+    }
     // Lobby-scoped messages
     switch (msg.type) {
       case 'set_name':
@@ -612,15 +635,15 @@ export class LobbyServer {
    * party roster, the queue entry, clientToMatch and the host crown pointing at
    * the same person, so nothing downstream has to learn about reconnects.
    */
-  private handleResume(session: ClientSession, msg: NetMsg): void {
-    const payload = (msg.payload ?? {}) as { token?: unknown; protocolVersion?: unknown };
+  private handleResume(session: ClientSession, msg: ClientMsg<'resume'>): void {
+    const payload = msg.payload;
     const fail = (reason: ResumeFailedPayload['reason']) => this.send(session.ws, {
       type: 'resume_failed', ts: Date.now(), payload: { reason } satisfies ResumeFailedPayload,
     });
     // A bundle from before the last wire change must reload rather than re-enter
     // a match it would decode wrongly — a stale client is a desync, not a guest.
     if (payload.protocolVersion !== PROTOCOL_VERSION) return fail('stale_client');
-    const token = typeof payload.token === 'string' ? payload.token : '';
+    const token = payload.token;
     const parked = token ? this.held.get(token) : undefined;
     if (!parked) return fail('unknown_token');
     this.held.delete(token);
@@ -681,16 +704,15 @@ export class LobbyServer {
     console.log(`[Lobby] client ${session.id.slice(0, 6)} resumed (state=${session.state}, seat=${resumed ? 'kept' : 'gone'})`);
   }
 
-  private handleSetName(session: ClientSession, msg: NetMsg): void {
-    const payload = (msg.payload ?? {}) as { name?: string };
-    const name = (payload.name ?? '').trim().slice(0, 24);
+  private handleSetName(session: ClientSession, msg: ClientMsg<'set_name'>): void {
+    const name = msg.payload.name.trim().slice(0, 24);
     if (!name) return this.lobbyError(session, 'Name cannot be empty');
     session.name = name;
     const stats = this.stats.ensure(name);
     this.sendStats(session, stats);
   }
 
-  private handleCreateParty(session: ClientSession, _msg: NetMsg): void {
+  private handleCreateParty(session: ClientSession, _msg: ClientMsg<'create_party'>): void {
     if (!session.name) return this.lobbyError(session, 'Set a name first');
     if (session.state === 'in_match' || session.state === 'match_ended') {
       return this.lobbyError(session, 'Already in a match');
@@ -724,10 +746,9 @@ export class LobbyServer {
     console.log(`[Lobby] party ${code} created by ${session.name}`);
   }
 
-  private handleJoinParty(session: ClientSession, msg: NetMsg): void {
+  private handleJoinParty(session: ClientSession, msg: ClientMsg<'join_party'>): void {
     if (!session.name) return this.lobbyError(session, 'Set a name first');
-    const payload = (msg.payload ?? {}) as { code?: string };
-    const code = (payload.code ?? '').trim().toUpperCase();
+    const code = msg.payload.code.trim().toUpperCase();
     const now = Date.now();
     if (session.joinLockedUntil && now < session.joinLockedUntil) {
       const wait = Math.ceil((session.joinLockedUntil - now) / 1000);
@@ -770,22 +791,22 @@ export class LobbyServer {
   }
 
   // ─── Roster verbs (PARTY-01 / netcode-23) ────────────────────
-  private handlePartyReady(session: ClientSession, msg: NetMsg): void {
+  private handlePartyReady(session: ClientSession, msg: ClientMsg<'party_ready'>): void {
     if (session.state !== 'party' || !session.partyCode) return;
     const party = this.parties.get(session.partyCode);
     if (!party) return;
-    const ready = (msg.payload as { ready?: boolean } | undefined)?.ready !== false;
+    const ready = msg.payload.ready;
     if (ready) party.ready.add(session.id);
     else { party.ready.delete(session.id); party.readyClockAt = Date.now(); }
     this.broadcastLobby(party);
   }
 
-  private handlePartyKick(session: ClientSession, msg: NetMsg): void {
+  private handlePartyKick(session: ClientSession, msg: ClientMsg<'party_kick'>): void {
     if (session.state !== 'party' || !session.partyCode) return;
     const party = this.parties.get(session.partyCode);
     if (!party) return;
     if (party.hostId !== session.id) return this.lobbyError(session, 'Only the host can kick');
-    const targetId = (msg.payload as { clientId?: string } | undefined)?.clientId;
+    const targetId = msg.payload.clientId;
     if (!targetId || targetId === session.id) return;
     if (!party.members.includes(targetId)) return;
     const target = this.clients.get(targetId);
@@ -800,12 +821,12 @@ export class LobbyServer {
     party.readyClockAt = Date.now();
   }
 
-  private handleTransferHost(session: ClientSession, msg: NetMsg): void {
+  private handleTransferHost(session: ClientSession, msg: ClientMsg<'party_transfer_host'>): void {
     if (session.state !== 'party' || !session.partyCode) return;
     const party = this.parties.get(session.partyCode);
     if (!party) return;
     if (party.hostId !== session.id) return this.lobbyError(session, 'Only the host can hand over the crown');
-    const targetId = (msg.payload as { clientId?: string } | undefined)?.clientId;
+    const targetId = msg.payload.clientId;
     if (!targetId || !party.members.includes(targetId)) return;
     party.hostId = targetId;
     this.broadcastLobby(party);
@@ -816,29 +837,29 @@ export class LobbyServer {
     this.removeFromParty(session, true);
   }
 
-  private handleUpdatePartySettings(session: ClientSession, msg: NetMsg): void {
+  private handleUpdatePartySettings(session: ClientSession, msg: ClientMsg<'update_party_settings'>): void {
     if (session.state !== 'party' || !session.partyCode) return;
     const party = this.parties.get(session.partyCode);
     if (!party || party.hostId !== session.id) return this.lobbyError(session, 'Only the host can change settings');
-    const payload = (msg.payload ?? {}) as { botFill?: number; mode?: string };
-    if (typeof payload.mode === 'string' && ['solo', 'duos', 'squads'].includes(payload.mode)) {
+    const payload = msg.payload;
+    if (payload.mode !== null && ['solo', 'duos', 'squads'].includes(payload.mode)) {
       // Recorded and broadcast so lane 3.5 can wire the picker; MODE-01 (wave 3)
       // is what makes it change the hulls.
       party.mode = payload.mode;
     }
-    if (typeof payload.botFill === 'number' && Number.isFinite(payload.botFill)) {
+    if (payload.botFill !== null) {
       party.botFill = Math.max(0, Math.min(partyDefaultBots(party.mode), Math.floor(payload.botFill)));
     }
     this.broadcastLobby(party);
   }
 
-  private handleStartMatch(session: ClientSession, msg?: NetMsg): void {
+  private handleStartMatch(session: ClientSession, msg?: ClientMsg<'start_match'>): void {
     if (session.state !== 'party' || !session.partyCode) return;
     const party = this.parties.get(session.partyCode);
     if (!party) return;
     if (party.hostId !== session.id) return this.lobbyError(session, 'Only the host can start');
     if (party.members.length === 0) return;
-    const force = (msg?.payload as { force?: boolean } | undefined)?.force === true;
+    const force = msg?.payload.force === true;
 
     if (!force && !this.canStart(party)) {
       this.broadcastLobby(party);
@@ -885,7 +906,7 @@ export class LobbyServer {
     if (placed === 0) party.inMatch = false;
   }
 
-  private handleQueueJoin(session: ClientSession, msg: NetMsg): void {
+  private handleQueueJoin(session: ClientSession, msg: ClientMsg<'queue_join'>): void {
     if (!session.name) return this.lobbyError(session, 'Set a name first');
     if (session.state === 'in_match' || session.state === 'match_ended') {
       return this.lobbyError(session, 'Already in a match');
@@ -897,7 +918,7 @@ export class LobbyServer {
     // be split). The party's own mode picker chooses the mode unless the client
     // names one.
     const party = session.partyCode ? this.parties.get(session.partyCode) : undefined;
-    const requested = (msg.payload as { mode?: string } | undefined)?.mode;
+    const requested = msg.payload.mode;
     const modeId: ModeId = isModeId(requested) ? requested
       : (party && isModeId(party.mode) ? party.mode : 'solo');
     const spec = MODES[modeId];
@@ -985,16 +1006,15 @@ export class LobbyServer {
     this.removeFromQueue(session);
   }
 
-  private handleSoloStart(session: ClientSession, msg: NetMsg): void {
+  private handleSoloStart(session: ClientSession, msg: ClientMsg<'solo_start'>): void {
     if (!session.name) return this.lobbyError(session, 'Set a name first');
     if (session.state === 'in_match' || session.state === 'match_ended') {
       return this.lobbyError(session, 'Already in a match');
     }
     if (session.state === 'queue') this.removeFromQueue(session);
     if (session.state === 'party') this.removeFromParty(session, true);
-    const payload = (msg.payload ?? {}) as { botCount?: number };
     const fullFill = botFillFor('solo', 1);
-    const requested = typeof payload.botCount === 'number' ? Math.floor(payload.botCount) : fullFill;
+    const requested = msg.payload.botCount !== null ? Math.floor(msg.payload.botCount) : fullFill;
     const botCount = Math.max(0, Math.min(fullFill, requested));
     this.spawnAndBoard([[session]], botCount, 'solo', 'party');
   }

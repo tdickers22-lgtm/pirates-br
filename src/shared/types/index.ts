@@ -1382,3 +1382,86 @@ export interface TradeActionPayload {
   action: 'offer' | 'confirm' | 'cancel';
   offer?: ItemStack[];
 }
+
+// ── The client→server wire (ONLINE-01 / codehealth-13) ───────────────────────
+//
+// `NetMsg.payload` is `unknown`, so before this block every inbound handler
+// carried its own `as { code?: string }` cast and its own (or no) shape check.
+// That is not a style problem: `solo_start` with `{botCount: NaN}` reached
+// `Math.max(0, Math.min(fullFill, NaN))` = NaN and spawned a NaN-sized fleet,
+// `set_name` with a number threw inside `.trim()`, and `ping` echoed whatever
+// 64 KB blob it was handed straight back down the socket.
+//
+// The union below is the vocabulary a CLIENT is allowed to speak. Everything
+// else in MsgType is server→client and is refused at the boundary. Each type
+// has exactly one validator in `src/server/net/validate.ts`, and
+// `scripts/test-wire-validation.mjs` fails if any member of this union lacks
+// one — so a new client message cannot be added without a shape check.
+
+/** Every message type a client may send. Server→client types are not in here. */
+export type ClientMsgType =
+  | 'set_name'
+  | 'create_party'
+  | 'join_party'
+  | 'leave_party'
+  | 'party_ready'
+  | 'party_kick'
+  | 'party_transfer_host'
+  | 'update_party_settings'
+  | 'start_match'
+  | 'queue_join'
+  | 'queue_leave'
+  | 'solo_start'
+  | 'return_to_menu'
+  | 'play_again'
+  | 'resume'
+  | 'ping'
+  | 'player_input'
+  | 'shop_buy'
+  | 'trade_action'
+  | 'dev_bot_peace'
+  | 'dev_grant_gold';
+
+/** A verb that carries no data. Still validated: a non-object payload is a
+ *  malformed frame whatever the type, and it is dropped rather than routed. */
+export type EmptyMsgPayload = Record<string, never>;
+
+/**
+ * The NORMALISED shape each client message arrives in after validation. These
+ * are what handlers may assume; `null` fields mean "the client did not name
+ * one", never "the client sent rubbish" (rubbish is dropped at the boundary).
+ */
+export interface ClientMsgPayloads {
+  set_name: { name: string };
+  create_party: EmptyMsgPayload;
+  join_party: { code: string };
+  leave_party: EmptyMsgPayload;
+  party_ready: { ready: boolean };
+  party_kick: { clientId: string };
+  party_transfer_host: { clientId: string };
+  update_party_settings: { mode: string | null; botFill: number | null };
+  start_match: { force: boolean };
+  queue_join: { mode: string | null };
+  queue_leave: EmptyMsgPayload;
+  solo_start: { botCount: number | null };
+  return_to_menu: EmptyMsgPayload;
+  play_again: EmptyMsgPayload;
+  resume: { token: string; protocolVersion: number | null };
+  ping: { t: number };
+  player_input: PlayerInput;
+  shop_buy: { line: string };
+  trade_action: TradeActionPayload;
+  dev_bot_peace: { enabled: boolean };
+  dev_grant_gold: { gold: number };
+}
+
+/** One validated client message. */
+export interface ClientMsg<K extends ClientMsgType = ClientMsgType> {
+  type: K;
+  ts: number;
+  payload: ClientMsgPayloads[K];
+}
+
+/** The discriminated union `routeMessage` switches on: narrowing on `type`
+ *  narrows `payload` too, so no handler needs a cast. */
+export type AnyClientMsg = { [K in ClientMsgType]: ClientMsg<K> }[ClientMsgType];
