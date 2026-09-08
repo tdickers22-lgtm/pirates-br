@@ -65,6 +65,14 @@ export const LOGIC = [
   // 0.3 s logic suite instead of a stack + a browser. It parses the octave
   // scales and rotations out of OCEAN_FRAG, so the mirror cannot drift.
   quick(tsx('ocean-lattice-probe.mjs')),
+  // GFXPOL-01 (wave 8.2). The same measurement turned on the two OTHER
+  // hand-drawn grids: the sea-stack mottle (one hash per floor()ed 1.8 m cell)
+  // and the terrain caustics (a product of two world-axis sines switched on by
+  // step() across one contour, i.e. a bright ring at 0.6 m around every coast).
+  // Both fields are closed form, so this grades them directly — worst adjacent
+  // brightness step over an 8 m patch, worst modulation change per 1 cm of
+  // height — off the GLSL strings the shaders are actually compiled from.
+  quick(tsx('test-shader-lattice.mjs')),
   // WATER-01 (wave 3.4). The hull cut-out that keeps the exterior sea out of
   // the hold: the GLSL outline is parsed back out of OCEAN_FRAG and graded
   // against the shared getSwimHullHalfWidth, and setHullMasks' culling /
