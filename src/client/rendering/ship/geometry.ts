@@ -294,10 +294,102 @@ export function normalizeForMerge(geo: THREE.BufferGeometry, matrix: THREE.Matri
   return g;
 }
 
+/**
+ * THE SHARED HULL GEOMETRY CACHE (perf-15).
+ *
+ * Ten to twenty-four hulls of three classes were each merging and keeping a
+ * private ~2.5 MB copy of planking, rails, masts and deck furniture: 25.7 MB,
+ * more than a third of every geometry byte in the game and more than the five
+ * largest islands put together (docs/FRAME_COST_MODEL.md section 5). The static
+ * part of a hull is IDENTICAL across ships of a class — team colour is a
+ * material, breaches are a shader uniform, sails/flags/upgrades/patches are all
+ * in the merge exclusion set — so the merged BufferGeometry can be shared and
+ * three shares the GPU buffer behind it.
+ *
+ * Refcounted, because ShipRenderer.clear() disposes every geometry it can reach
+ * and one hull leaving a match must not take the other nine's planking with it.
+ * The refcount lives on the entry; `geo.userData.shipSharedKey` is how a
+ * disposer knows to release instead of dispose.
+ */
+type SharedMerge = { geo: THREE.BufferGeometry; refs: number; bytes: number };
+const SHARED_MERGES = new Map<string, SharedMerge>();
+
+function geometryBytes(geo: THREE.BufferGeometry): number {
+  let bytes = 0;
+  for (const name of Object.keys(geo.attributes)) {
+    const a = geo.attributes[name] as THREE.BufferAttribute;
+    bytes += a.array.byteLength ?? 0;
+  }
+  if (geo.index) bytes += (geo.index.array as ArrayLike<number> & { byteLength?: number }).byteLength ?? 0;
+  return bytes;
+}
+
+/** Resident bytes and refcounts of the shared hull geometry — the census
+ *  scripts/perf-cost-model.mjs grades. */
+export function sharedShipGeometryCensus(): { entries: number; bytes: number; byKey: Array<{ key: string; bytes: number; refs: number }> } {
+  let bytes = 0;
+  const byKey: Array<{ key: string; bytes: number; refs: number }> = [];
+  for (const [key, e] of SHARED_MERGES) {
+    bytes += e.bytes;
+    byKey.push({ key, bytes: e.bytes, refs: e.refs });
+  }
+  byKey.sort((a, b) => b.bytes - a.bytes);
+  return { entries: SHARED_MERGES.size, bytes, byKey };
+}
+
+/**
+ * Dispose a geometry that came out of a ship build. Shared merges are released
+ * (disposed only when the last hull using them is gone); anything else is
+ * disposed outright. Every ship teardown path must go through this instead of
+ * calling `geometry.dispose()`.
+ */
+export function releaseShipGeometry(geo: THREE.BufferGeometry | undefined): void {
+  if (!geo) return;
+  const key = (geo.userData as { shipSharedKey?: string }).shipSharedKey;
+  if (!key) { geo.dispose?.(); return; }
+  const entry = SHARED_MERGES.get(key);
+  if (!entry || entry.geo !== geo) { geo.dispose?.(); return; }
+  entry.refs -= 1;
+  if (entry.refs <= 0) {
+    SHARED_MERGES.delete(key);
+    geo.dispose?.();
+  }
+}
+
+/**
+ * Share one BufferGeometry across every hull that asks for the same key
+ * (perf-15), building it on the first ask. For geometry that is assembled
+ * outside `mergeStaticMeshes` but is still identical per hull class — the hold's
+ * cumulative cargo tiers, for instance. Released by `releaseShipGeometry`.
+ */
+export function acquireSharedGeometry(
+  key: string,
+  build: () => THREE.BufferGeometry | null,
+): THREE.BufferGeometry | null {
+  if ((globalThis as { __shipMergeNoCache?: boolean }).__shipMergeNoCache) return build();
+  const hit = SHARED_MERGES.get(key);
+  if (hit) { hit.refs += 1; return hit.geo; }
+  const geo = build();
+  if (!geo) return null;
+  (geo.userData as { shipSharedKey?: string }).shipSharedKey = key;
+  SHARED_MERGES.set(key, { geo, refs: 1, bytes: geometryBytes(geo) });
+  return geo;
+}
+
+/** Test hook: drop the whole cache (a suite that builds fleet after fleet). */
+export function resetSharedShipGeometry(): void {
+  for (const e of SHARED_MERGES.values()) e.geo.dispose?.();
+  SHARED_MERGES.clear();
+}
+
 /** Bakes every static leaf mesh under `root` into one mesh per material,
  *  skipping excluded subtrees (anything animated, tinted, or toggled at
- *  runtime). This is the main per-ship draw-call reduction. */
-export function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<THREE.Object3D>) {
+ *  runtime). This is the main per-ship draw-call reduction.
+ *
+ *  `cacheKey` (the hull class) opts the result into the shared cache above: a
+ *  second hull of the same class reuses the first hull's merged buffers instead
+ *  of merging and keeping its own. Pass nothing for a one-off group. */
+export function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<THREE.Object3D>, cacheKey?: string) {
   // Census escape hatch: merging batches by material and throws every mesh
   // NAME away, so a geometry gate can say "ship-dark-timber hangs 0.85 m aft"
   // and nothing can say WHICH timber. Node-side probes set this global to keep
@@ -328,13 +420,56 @@ export function mergeStaticMeshes(root: THREE.Object3D, excluded: ReadonlySet<TH
   };
   visit(root);
 
+  // Two materials in one build can carry the same NAME (a clone keeps it unless
+  // it is renamed), so the cache key counts occurrences: `sloop|ship-rope#1`.
+  const nameSeen = new Map<string, number>();
+  const g = globalThis as { __shipMergeVerify?: boolean; __shipMergeNoCache?: boolean };
+  const verify = Boolean(g.__shipMergeVerify);
+  // The census gate's red proof: rebuild every hull the way HEAD did, with a
+  // private merged copy each, and watch the resident bill go back over budget.
+  if (g.__shipMergeNoCache) cacheKey = undefined;
   for (const [material, bucket] of buckets) {
     if (bucket.meshes.length < 2) {
       for (const geo of bucket.geos) geo.dispose();
       continue;
     }
-    const merged = mergeGeometries(bucket.geos, false);
-    for (const geo of bucket.geos) geo.dispose();
+    let merged: THREE.BufferGeometry | null = null;
+    let sharedKey: string | undefined;
+    if (cacheKey) {
+      const n = (nameSeen.get(material.name) ?? 0) + 1;
+      nameSeen.set(material.name, n);
+      sharedKey = `${cacheKey}|${material.name}#${n}|${bucket.meshes.length}`;
+      const hit = SHARED_MERGES.get(sharedKey);
+      if (hit) {
+        if (verify) {
+          // "Can the cache be wrong?" mode: merge anyway and compare. A hull
+          // class whose static geometry is NOT identical across ships (a random
+          // seed, a per-ship dimension) shows up here instead of on screen.
+          const fresh = mergeGeometries(bucket.geos, false);
+          const a = hit.geo.attributes.position as THREE.BufferAttribute | undefined;
+          const b = fresh?.attributes.position as THREE.BufferAttribute | undefined;
+          let same = Boolean(a && b) && a!.count === b!.count;
+          if (same) {
+            for (let i = 0; i < a!.array.length; i++) {
+              if (Math.abs((a!.array as ArrayLike<number>)[i] - (b!.array as ArrayLike<number>)[i]) > 1e-5) { same = false; break; }
+            }
+          }
+          fresh?.dispose();
+          if (!same) throw new Error(`shared hull geometry mismatch for ${sharedKey}: the cache would draw the wrong shape`);
+        }
+        for (const geo of bucket.geos) geo.dispose();
+        hit.refs += 1;
+        merged = hit.geo;
+      }
+    }
+    if (!merged) {
+      merged = mergeGeometries(bucket.geos, false);
+      for (const geo of bucket.geos) geo.dispose();
+      if (merged && sharedKey) {
+        (merged.userData as { shipSharedKey?: string }).shipSharedKey = sharedKey;
+        SHARED_MERGES.set(sharedKey, { geo: merged, refs: 1, bytes: geometryBytes(merged) });
+      }
+    }
     if (!merged) continue;
     const mesh = new THREE.Mesh(merged, material);
     mesh.castShadow = bucket.castShadow;

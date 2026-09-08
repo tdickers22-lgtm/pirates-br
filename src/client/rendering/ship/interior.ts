@@ -8,7 +8,7 @@ import { registerBudgetLight } from '../LightBudget.js';
 import { getShipHoldHalfWidth } from '../../../shared/interactions.js';
 import { hullSurfacePointAt } from '../../../shared/hull.js';
 import type { HullProfile } from '../../../shared/hull.js';
-import { makeLoftedSlabGeometry, makeSheerRunGeometry } from './geometry.js';
+import { acquireSharedGeometry, makeLoftedSlabGeometry, makeSheerRunGeometry } from './geometry.js';
 
 /** Hold floor top = the plane the server stands crew on (SHIP.HOLD_FLOOR_OFFSET). */
 const HOLD_FLOOR_Y = 0.35;
@@ -288,6 +288,9 @@ export function makeHoldCargoStacks(
   stats: { width: number; length: number; height: number },
   crateMat: THREE.Material,
   goldMat: THREE.Material,
+  /** Hull class. Given, the four cumulative tiers are shared across every hull
+   *  of the class instead of merged and kept per ship (perf-15). */
+  cacheKey?: string,
 ): { group: THREE.Group; tiers: THREE.Object3D[] } {
   const W = stats.width, L = stats.length, H = stats.height;
   const floorY = 0.41;                    // top of the hold's floor slab
@@ -348,8 +351,11 @@ export function makeHoldCargoStacks(
     crateGeos.push(...lot.crates);
     goldGeos.push(...lot.gold);
     const tier = new THREE.Group();
-    const crates = mergeGeometries(crateGeos.map((g) => g.clone()), false);
-    const coins = mergeGeometries(goldGeos.map((g) => g.clone()), false);
+    const tierIndex = tiers.length;
+    const share = <T extends THREE.BufferGeometry | null>(part: string, build: () => T): T =>
+      (cacheKey ? acquireSharedGeometry(`cargo-${cacheKey}-${part}${tierIndex}`, build) : build()) as T;
+    const crates = share('crates', () => mergeGeometries(crateGeos.map((g) => g.clone()), false));
+    const coins = share('coins', () => mergeGeometries(goldGeos.map((g) => g.clone()), false));
     if (crates) {
       const mesh = new THREE.Mesh(crates, crateMat);
       mesh.castShadow = true;

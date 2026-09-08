@@ -2,7 +2,7 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "8defc8b5",
+      "digest": "8940b2fd",
       "meshCount": 98,
       "vertTotal": 62050,
       "families": {
@@ -24,7 +24,7 @@
           "meshes": 62,
           "verts": 29790,
           "tris": 11078,
-          "hash": "55b62c7c",
+          "hash": "62ebd1c8",
           "box": [
             -4.11,
             0.447,
@@ -94,14 +94,14 @@
           "meshes": 5,
           "verts": 1920,
           "tris": 640,
-          "hash": "8aa44e61",
+          "hash": "d842c7a5",
           "box": [
-            -1.925,
+            -1.93,
             2.28,
-            -1.816,
+            -1.819,
             1.78,
             3.06,
-            4.365
+            4.369
           ]
         },
         "ship-brass": {
@@ -275,7 +275,7 @@
       }
     },
     "brigantine": {
-      "digest": "21d928f6",
+      "digest": "615426be",
       "meshCount": 127,
       "vertTotal": 75490,
       "families": {
@@ -297,7 +297,7 @@
           "meshes": 86,
           "verts": 41913,
           "tris": 15788,
-          "hash": "6602d4ad",
+          "hash": "590b0011",
           "box": [
             -5.11,
             0.447,
@@ -367,14 +367,14 @@
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "7f7a4d29",
+          "hash": "6ef448d5",
           "box": [
-            -2.579,
+            -2.578,
             2.88,
-            -2.436,
-            2.898,
+            -2.434,
+            2.896,
             3.66,
-            5.398
+            5.396
           ]
         },
         "ship-brass": {
@@ -548,7 +548,7 @@
       }
     },
     "galleon": {
-      "digest": "5606ee6f",
+      "digest": "dca2c297",
       "meshCount": 169,
       "vertTotal": 97813,
       "families": {
@@ -570,7 +570,7 @@
           "meshes": 121,
           "verts": 61405,
           "tris": 23250,
-          "hash": "cd13aa53",
+          "hash": "a07906b3",
           "box": [
             -6.61,
             0.447,
@@ -640,12 +640,12 @@
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "14d50be1",
+          "hash": "1c042b61",
           "box": [
-            -4.079,
+            -4.08,
             3.58,
-            -3.845,
-            4.075,
+            -3.849,
+            4.08,
             4.36,
             6.718
           ]

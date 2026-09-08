@@ -33,6 +33,7 @@ const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
 import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidTexture, woodCanvas, woodTexture } from './ship/textures.js';
 import type { SupplyKind } from './ship/textures.js';
 import { applyPlankDetail, makePlankUniforms, type PlankUniforms } from './ship/plankDetail.js';
+import { releaseShipGeometry } from './ship/geometry.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBillowedSailGeometry, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
@@ -352,10 +353,13 @@ export class ShipRenderer {
       // Dispose per-ship GPU buffers (lofted hulls, rigging, decals are unique
       // per ship) or every match restart leaks them all. Materials are mostly
       // shared palette/canvas singletons — leave those alive.
+      // releaseShipGeometry, not dispose: the merged static hull is SHARED
+      // across every ship of this class (perf-15). Disposing it here would take
+      // the planking off the other nine hulls still afloat. It is refcounted and
+      // disposed by the last holder.
       for (const root of [mesh.root, mesh.wake.group]) {
         root.traverse((obj) => {
-          const geo = (obj as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
-          geo?.dispose?.();
+          releaseShipGeometry((obj as THREE.Mesh).geometry as THREE.BufferGeometry | undefined);
         });
       }
     }
@@ -513,7 +517,8 @@ export class ShipRenderer {
     flag.position.set(0.38, H * 3.9, mastStartZ);
     group.add(flag);
 
-    mergeStaticMeshes(group, new Set<THREE.Object3D>([...proxySails, flag]));
+    // perf-15: proxy hulls of one class share one merged geometry too.
+    mergeStaticMeshes(group, new Set<THREE.Object3D>([...proxySails, flag]), `proxy-${ship.type}`);
 
     return group;
   }
@@ -946,6 +951,7 @@ export class ShipRenderer {
         color: 0xE0B44A, emissive: 0x6a4a10, emissiveIntensity: 0.55,
         roughness: 0.34, metalness: 0.72,
       }),
+      ship.type,
     );
     group.add(holdCargo.group);
 
@@ -2158,9 +2164,11 @@ export class ShipRenderer {
 
         // Merge rigid geometry per pivot: barrel hardware bakes into ~2 meshes
         // that still swing with the pitch pivot, carriage into a few under root.
-        mergeStaticMeshes(chargeGroup, NO_MERGE_EXCLUDE);
-        mergeStaticMeshes(pitchPivot, new Set<THREE.Object3D>([chargeGroup]));
-        mergeStaticMeshes(cg, new Set<THREE.Object3D>([yawPivot]));
+        // perf-15: a gun is a gun. Every carriage of a class merges to the
+        // same local geometry, so the whole broadside shares one set of buffers.
+        mergeStaticMeshes(chargeGroup, NO_MERGE_EXCLUDE, `cannon-charge-${ship.type}`);
+        mergeStaticMeshes(pitchPivot, new Set<THREE.Object3D>([chargeGroup]), `cannon-pitch-${ship.type}`);
+        mergeStaticMeshes(cg, new Set<THREE.Object3D>([yawPivot]), `cannon-root-${ship.type}`);
 
         cg.position.set(sideX, H + 0.18, cz);
         cg.rotation.y = side === 0 ? 0 : Math.PI;
@@ -2210,7 +2218,8 @@ export class ShipRenderer {
       barrel.rotation.y = Math.random() * Math.PI * 2;
       // Bake the barrel's own staves/hoops, but keep the named group intact
       // (it's excluded from the ship-level merge below).
-      mergeStaticMeshes(barrel, NO_MERGE_EXCLUDE);
+      // A barrel is a barrel on every hull in the game — one set of staves.
+      mergeStaticMeshes(barrel, NO_MERGE_EXCLUDE, 'supply-barrel');
       group.add(barrel);
       supplyBarrels.push(barrel);
     };
@@ -2271,7 +2280,7 @@ export class ShipRenderer {
       horn.position.set(-0.32, 0.56, -0.18);
       horn.rotation.z = Math.PI * 0.4;
       crate.add(horn);
-      mergeStaticMeshes(crate, NO_MERGE_EXCLUDE);
+      mergeStaticMeshes(crate, NO_MERGE_EXCLUDE, 'hold-crate');
       crate.position.set(crateSpot.x, H + 0.1, crateSpot.z);
       group.add(crate);
       deckStations.push({ x: crateSpot.x, z: crateSpot.z, r: 1.15 });
@@ -2290,7 +2299,12 @@ export class ShipRenderer {
       const lidMat = new THREE.MeshStandardMaterial({ color: spot.lid, roughness: 0.8 });
       const barrel = makeBarrel(barrelWoodMat, barrelHoopMat, lidMat);
       barrel.position.set(spot.x, H + 0.5, spot.z);
-      barrel.rotation.y = Math.random() * Math.PI * 2;
+      // Deterministic yaw from the barrel's own berth, NOT Math.random. It was
+      // cosmetic noise either way, but a decor barrel merges into the static
+      // bake, so a per-ship random made two sloops' merged planking differ by a
+      // few hundred rotated vertices and the shared-geometry cache (perf-15)
+      // could not be used for the class. Caught by __shipMergeVerify.
+      barrel.rotation.y = (Math.abs(Math.sin(spot.x * 12.9898 + spot.z * 78.233)) % 1) * Math.PI * 2;
       group.add(barrel);
     }
 
@@ -2475,11 +2489,11 @@ export class ShipRenderer {
     // Bake all static dressing into one mesh per material — this is where the
     // per-ship draw-call count collapses. Everything animated, tinted or
     // visibility-toggled at runtime is excluded and keeps its own object.
-    mergeStaticMeshes(wheelGroup, NO_MERGE_EXCLUDE);
-    mergeStaticMeshes(anchor, NO_MERGE_EXCLUDE);
+    mergeStaticMeshes(wheelGroup, NO_MERGE_EXCLUDE, `wheel-${ship.type}`);
+    mergeStaticMeshes(anchor, NO_MERGE_EXCLUDE, `anchor-${ship.type}`);
     mergeStaticMeshes(anchorCapstan, new Set<THREE.Object3D>(
       capstanGrip ? [anchorChain, capstanGrip] : [anchorChain],
-    ));
+    ), `capstan-${ship.type}`);
     const mergeExclude = new Set<THREE.Object3D>([
       holdCargo.group,
       ...sails,
@@ -2500,7 +2514,11 @@ export class ShipRenderer {
       anchorCapstan,
       holdWater,
     ]);
-    mergeStaticMeshes(group, mergeExclude);
+    // perf-15: the static hull is identical across every ship of a class —
+    // team colour is a material, breaches a uniform, sails/flags/upgrades/patches
+    // are all excluded above — so the merged buffers are shared and refcounted
+    // instead of copied per hull. 25.7 MB of ship geometry becomes one set.
+    mergeStaticMeshes(group, mergeExclude, `detail-${ship.type}`);
 
     // ── Wake foam ─────────────────────────────────────────────
     // Scene-level (NOT parented to the ship): the old wake quad inherited hull
