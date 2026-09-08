@@ -105,6 +105,11 @@ export const FAR_ASSET_NAMES = [
   'boulder_a', 'boulder_b', 'boulder_c',
   'searock_a', 'searock_b', 'searock_c',
   'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers',
+  // The shark's far sibling is a TIER swap, not only a distance one: it is the
+  // 1,058-tri rigid puppet FaunaMeshFactory draws on `low`, where the 8.3k
+  // skinned hero would cost SHARK.MAX_WORLD x ~7k extra triangles and a
+  // skinning shader variant (FAUNAGLB-01).
+  'shark',
 ] as const satisfies readonly AssetName[];
 type FarKey = `${(typeof FAR_ASSET_NAMES)[number]}_far`;
 type AssetKey = AssetName | FarKey;
