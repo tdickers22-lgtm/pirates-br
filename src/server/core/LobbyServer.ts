@@ -118,6 +118,55 @@ const MAX_DECODED_MESSAGE_BYTES = 32 * 1024;
 /** /bugsnap: how many snaps the disk keeps (oldest evicted) and the per-IP spacing. */
 const BUGSNAP_MAX_SNAPS = 50;
 const BUGSNAP_MIN_INTERVAL_MS = 10_000;
+/**
+ * HOW MANY MATCHES ONE PROCESS WILL CARRY (ONLINE-01 phase 2, netcode-24).
+ *
+ * A match is a 60 Hz sim over ~24 pirates, twelve hulls, wildlife and a storm;
+ * `perf-server-load.mjs` measures what this box can actually hold. Before this
+ * ceiling the lobby accepted matches until the event loop could no longer make
+ * its tick budget, and the failure mode is the worst one online has: NOBODY is
+ * refused, EVERYONE degrades — every live match drops ticks together and every
+ * player on the host feels the same slow motion. A refusal is a message; a
+ * host in slow motion is twelve broken games.
+ *
+ * So: the (N+1)th crew is TOLD the host is full, from a lobby that is still
+ * responsive, and a fleet in front of a matchmaker takes them elsewhere.
+ * `PIRATES_BR_MAX_MATCHES=0` disables the ceiling (a dev box, or a matchmaker
+ * that does the capacity arithmetic itself).
+ */
+const MAX_MATCHES_PER_PROCESS = (() => {
+  const raw = Number(process.env.PIRATES_BR_MAX_MATCHES);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 8;
+})();
+/**
+ * TRUST THE PROXY'S CLIENT ADDRESS (ONLINE-01 phase 1). On Fly/Render/nginx
+ * every socket's `remoteAddress` is the edge, not the player — so the /bugsnap
+ * per-IP throttle collapsed to ONE report per 10 s for the whole internet, and
+ * every log line named the same address. With PIRATES_BR_TRUST_PROXY=1 the
+ * left-most `x-forwarded-for` hop is used instead.
+ *
+ * Off by default, and that default is the security-relevant one: a directly
+ * exposed host that trusted the header would let any client forge its own
+ * identity and bypass the throttle outright.
+ */
+const TRUST_PROXY = process.env.PIRATES_BR_TRUST_PROXY === '1';
+
+/**
+ * The address to attribute a request to. Behind a trusted proxy that is the
+ * LEFT-MOST `x-forwarded-for` hop (the client the edge saw); everywhere else it
+ * is the socket, because a forgeable header must never become an identity on a
+ * directly exposed host. Bounded and stripped: the header is attacker-supplied
+ * text and it ends up as a Map key.
+ */
+function clientIp(req: IncomingMessage): string {
+  if (TRUST_PROXY) {
+    const header = req.headers['x-forwarded-for'];
+    const raw = Array.isArray(header) ? header[0] : header;
+    const first = (raw ?? '').split(',')[0]?.trim() ?? '';
+    if (first && first.length <= 64) return first;
+  }
+  return req.socket.remoteAddress ?? '?';
+}
 /** App-level heartbeat: ping every HEARTBEAT_INTERVAL_MS, drop a socket that has
  *  not answered (pong / any message) within its silence budget. */
 const HEARTBEAT_INTERVAL_MS = 5_000;
@@ -306,6 +355,8 @@ export class LobbyServer {
 
   private httpServer = createServer((req, res) => this.handleHttp(req, res));
   private wss!: WebSocketServer;
+  private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   private clients: Map<string, ClientSession> = new Map();
   private parties: Map<string, Party> = new Map();
@@ -374,8 +425,10 @@ export class LobbyServer {
     });
     // A throw inside a setInterval callback has no caller to catch it: it is an
     // uncaught exception and the process exits. Both timers get a boundary.
-    setInterval(() => this.guarded('tick', () => this.tick()), 1000);
-    setInterval(() => this.guarded('sweepDeadSockets', () => this.sweepDeadSockets()), HEARTBEAT_INTERVAL_MS);
+    // Held so shutdown() can stop them: an interval that outlives its server
+    // keeps the process alive and keeps ticking matches that are already gone.
+    this.tickTimer = setInterval(() => this.guarded('tick', () => this.tick()), 1000);
+    this.heartbeatTimer = setInterval(() => this.guarded('sweepDeadSockets', () => this.sweepDeadSockets()), HEARTBEAT_INTERVAL_MS);
   }
 
   private guarded(what: string, fn: () => void): void {
@@ -1372,6 +1425,14 @@ export class LobbyServer {
   }
 
   // ─── Match lifecycle ─────────────────────────────────────────
+  /** True when this process will not start another match: at the ceiling, or on
+   *  its way out. A draining host finishes what it is running and starts
+   *  nothing new (RECON-01's other half). */
+  private atCapacity(): boolean {
+    if (this.draining) return true;
+    return MAX_MATCHES_PER_PROCESS > 0 && this.matches.size >= MAX_MATCHES_PER_PROCESS;
+  }
+
   private spawnMatch(opts: { botCount: number; mode: ModeId; source: 'party' | 'queue' }): Match {
     const matchId = uuid();
     // The mode decides the bot fleet's crew size and hull class (MODE-01): a
@@ -1400,6 +1461,17 @@ export class LobbyServer {
     partyCode: string | null = null,
   ): { match: Match | null; placed: number } {
     const members = crews.flat();
+    if (this.atCapacity()) {
+      // Refuse EARLY, before a hull, a dock or a colour is handed out: the
+      // members keep their party and can queue again the moment a match ends.
+      console.warn(`[Lobby] refusing ${source} match: ${this.matches.size}/${MAX_MATCHES_PER_PROCESS} matches on this host`);
+      // ONE message, not two: failPlacement's generic "could not board" would
+      // land on top of this and the player would read the wrong reason.
+      for (const member of members) {
+        this.failPlacement(member, null, 'This host is full — try again in a moment');
+      }
+      return { match: null, placed: 0 };
+    }
     let match: Match;
     try {
       match = this.spawnMatch({ botCount, mode, source });
@@ -1446,7 +1518,7 @@ export class LobbyServer {
     return placed;
   }
 
-  private failPlacement(session: ClientSession, match: Match | null): void {
+  private failPlacement(session: ClientSession, match: Match | null, reason = 'Could not board the match. Try again.'): void {
     if (match && session.matchPlayerId) {
       try { match.detachClient(session.matchPlayerId); } catch {}
     }
@@ -1456,7 +1528,7 @@ export class LobbyServer {
     session.matchPlayerId = undefined;
     session.matchJoinedAt = undefined;
     session.endedMatchSince = undefined;
-    this.lobbyError(session, 'Could not board the match. Try again.');
+    this.lobbyError(session, reason);
     if (session.state === 'menu') {
       this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
     }
@@ -1609,6 +1681,44 @@ export class LobbyServer {
   /** Last resort before the process gives up (index.ts, repeated fatals): stop
    *  every match and close every socket with 1012 (service restart) so clients
    *  show "server restarting" instead of a silent 1006 and a frozen sea. */
+  /**
+   * GRACEFUL DRAIN (ONLINE-01 phase 1 / RECON-01, netcode-29).
+   *
+   * `draining` existed and gated the seat-hold path, but nothing ever set it:
+   * the flag was written once and read three times, so on a real deploy every
+   * SIGTERM was an emergency stop. Online that is the difference between "the
+   * host you were on was replaced" and twelve players seeing 1006 mid-broadside
+   * while their seats are held for a process that is already gone.
+   *
+   * Drain order matters and is the whole method: flip the flag FIRST (so
+   * /health answers 503 and the edge stops routing here, and so no seat is held
+   * for a host that will not come back), stop taking new matches, then give the
+   * live ones `graceMs` to finish what they are doing, then close everything.
+   * Resolves when the listeners are shut.
+   */
+  async shutdown(reason = 'shutdown', graceMs = 0): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    console.log(`[Lobby] draining (${reason}): ${this.matches.size} matches, ${this.clients.size} clients`);
+    if (graceMs > 0) {
+      const deadline = Date.now() + graceMs;
+      while (this.matches.size > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    this.emergencyStop(reason);
+    if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    await new Promise<void>((resolve) => {
+      let left = 2;
+      const done = () => { if (--left === 0) resolve(); };
+      try { this.wss?.close(done); } catch { done(); }
+      try { this.httpServer?.close(() => done()); } catch { done(); }
+      // close() waits for keep-alive sockets; a drained host must not hang on one.
+      setTimeout(resolve, 2_000).unref();
+    });
+  }
+
   emergencyStop(reason: string): void {
     console.error(`[Lobby] EMERGENCY STOP (${reason}): ${this.matches.size} matches, ${this.clients.size} clients`);
     for (const [id, match] of Array.from(this.matches)) {
@@ -1688,7 +1798,12 @@ export class LobbyServer {
       return;
     }
     if (rawPath === '/health' || rawPath === '/healthz') {
-      res.writeHead(200, {
+      // 503 ONLY while draining. A FULL host is still healthy — its live
+      // matches must keep their players — so it answers 200 with
+      // `accepting: false` and lets the fleet read the difference. Failing the
+      // health check on "full" would have the orchestrator restart a box with
+      // eight live matches on it.
+      res.writeHead(this.draining ? 503 : 200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-cache',
       });
@@ -1701,10 +1816,23 @@ export class LobbyServer {
         droppedTicks: m.droppedTickCount(),
       }));
       res.end(JSON.stringify({
-        ok: true,
+        ok: !this.draining,
         clients: this.clients.size,
         matches: this.matches.size,
         queue: this.queuedSessionCount(),
+        // CAPACITY, SO A MATCHMAKER CAN ROUTE AROUND THIS HOST (ONLINE-01
+        // phase 2). `accepting` is the field to load-balance on: false means
+        // full or draining, and a fleet in front should send the next crew
+        // somewhere else rather than let this box take a thirteenth match and
+        // drop ticks in all twelve. maxMatches 0 means "no ceiling configured".
+        maxMatches: MAX_MATCHES_PER_PROCESS,
+        accepting: !this.atCapacity(),
+        draining: this.draining,
+        // Frames the wire validator refused since boot. A client build that has
+        // drifted off the protocol shows up here as a rising count instead of
+        // as silence.
+        rejectedFrames: this.rejectedFrames,
+        trustProxy: TRUST_PROXY,
         // WHICH WORLD THIS HOST ROLLS. Draw-call ceilings are measured against
         // one pinned map, and the seed is read from the environment at match
         // generation — so from outside there was no way to tell a host that
@@ -1733,7 +1861,7 @@ export class LobbyServer {
         this.replyBadRequest(res, 404);
         return;
       }
-      const ip = req.socket.remoteAddress ?? '?';
+      const ip = clientIp(req);
       const now = Date.now();
       const last = this.bugsnapLastByIp.get(ip) ?? 0;
       if (now - last < BUGSNAP_MIN_INTERVAL_MS) {

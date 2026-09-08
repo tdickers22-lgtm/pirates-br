@@ -36,4 +36,30 @@ function onFatal(kind: string, err: unknown): void {
 process.on('uncaughtException', (err) => onFatal('uncaughtException', err));
 process.on('unhandledRejection', (reason) => onFatal('unhandledRejection', reason));
 
+/**
+ * GRACEFUL DRAIN ON SIGTERM (ONLINE-01 phase 1 / RECON-01, netcode-29).
+ *
+ * SIGTERM is what Fly, Render and Kubernetes send before replacing a machine.
+ * Node's default for it is an immediate exit, so every deploy hung up on every
+ * live match with a 1006 — indistinguishable, from the player's side, from
+ * their own wifi dropping, and the seat-hold path would park seats for a
+ * process that is never coming back. LobbyServer.shutdown flips /health to 503
+ * first (the edge stops routing here), gives live matches their grace, then
+ * closes with 1012 "server restarting", which the client reads as "reload".
+ *
+ * A SECOND signal exits at once: a drain that has itself wedged must not be
+ * the reason a deploy cannot finish.
+ */
+const DRAIN_MS = Math.max(0, Number(process.env.PIRATES_BR_DRAIN_SECONDS ?? 10) * 1000) || 0;
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => {
+    if (stopping) { process.exit(0); return; }
+    stopping = true;
+    console.log(`[server] ${signal} — draining for up to ${DRAIN_MS / 1000}s`);
+    server.shutdown(signal, DRAIN_MS)
+      .catch((err) => console.error('[server] drain failed:', err))
+      .finally(() => process.exit(0));
+  });
+}
+
 server.init(port);

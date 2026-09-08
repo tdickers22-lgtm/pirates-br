@@ -215,6 +215,11 @@ export const LOGIC = [
   // fleet, set_name's throwing .trim(), the unchecked party ids, ping's 64 KB
   // echo, trade_action's crashing cast) are pinned one by one (w8.4).
   quick(tsx('test-wire-validation.mjs')),
+  // ONLINE-01 phase 2 (netcode-24): N matches on ONE process. Server-side only
+  // (no browser, no GPU) but ~45 s and CPU-bound, so NOT quick tier. Grades
+  // worstSimLagSec < 0.1 at 8 matches, the capacity refusal above the ceiling,
+  // and /health's accepting/maxMatches/rejectedFrames fields (w8.4).
+  { ...tsx('perf-server-load.mjs'), timeoutMs: 180_000 },
   // PARTY-01 client half: the six-character code the server issues survives
   // every client path that carries it (it was truncated to four in three
   // places, which made private crews unjoinable), plus the party panel's

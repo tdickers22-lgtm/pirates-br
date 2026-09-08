@@ -1,0 +1,73 @@
+# Pirates BR on Fly.io — ONLINE-01 phase 1/2 (netcode-24).
+#
+# One service: the Node game server also serves the built client, so the browser
+# reaches wss://<app>.fly.dev/ws on the same origin over TLS that Fly terminates
+# at the edge. `fly deploy` uses the repo Dockerfile.
+#
+# Read DEPLOY.md "Capacity, drain and the proxy" before changing anything here;
+# every value below is load-bearing and the reasons are not obvious.
+
+app = "pirates-br"
+primary_region = "yyz"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8090"
+  # Fly terminates TLS at the edge, so every socket's remoteAddress is the edge.
+  # Without this the per-IP throttles collapse to one bucket for the internet.
+  PIRATES_BR_TRUST_PROXY = "1"
+  # Measured with scripts/perf-server-load.mjs. shared-cpu-2x carries this
+  # comfortably; raise it only after that script stays under its 0.1 s
+  # worstSimLagSec budget at the new number ON THIS MACHINE SIZE.
+  PIRATES_BR_MAX_MATCHES = "8"
+  # Seconds a drained machine gives its live matches before it closes sockets.
+  # Must stay well under kill_timeout below.
+  PIRATES_BR_DRAIN_SECONDS = "10"
+
+[http_service]
+  internal_port = 8090
+  force_https = true
+  # A MACHINE WITH A LIVE MATCH MUST NEVER BE STOPPED FOR BEING "IDLE".
+  # Fly's autostop looks at HTTP concurrency, and a match is a WebSocket that
+  # sends no HTTP requests at all — an eight-match host looks idle from up there
+  # and would be suspended mid-broadside.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    # Concurrency here is the ROUTING hint, not the sim ceiling
+    # (PIRATES_BR_MAX_MATCHES is the sim ceiling). Counted in connections
+    # because every player holds one WebSocket for the whole match: 24 players
+    # per match x 8 matches, with headroom for menu and party sockets.
+    type = "connections"
+    soft_limit = 200
+    hard_limit = 260
+
+[[http_service.checks]]
+  # Grades the process, not capacity: a FULL host answers 200 with
+  # `accepting: false` and must keep serving its live matches. Only a DRAINING
+  # host answers 503, and that is the one Fly should replace.
+  grace_period = "20s"
+  interval = "15s"
+  method = "GET"
+  path = "/health"
+  timeout = "4s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+# SIGTERM starts the graceful drain (see LobbyServer.shutdown). Fly's default
+# 5 s kill timeout would cut it off mid-drain and every player would see a 1006
+# instead of a clean 1012 "server restarting".
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+# Stats are ephemeral without this. The game runs fine without it (the
+# leaderboard resets on each deploy); uncomment to keep it.
+# [[mounts]]
+#   source = "pirates_data"
+#   destination = "/app/data"
