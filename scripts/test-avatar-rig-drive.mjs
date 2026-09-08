@@ -215,6 +215,21 @@ expect('a pirate in your face is stepped every frame', near === 60, `${near}/60`
 expect('a pirate at 40 m is stepped ~half as often', mid < near && mid > 0, `${mid}/60`);
 expect('a pirate past 120 m is not stepped at all', far === 0, `${far}/60`);
 
+// ── the shadow LOD ─────────────────────────────────────────────────────────
+// 7 draws become 14 with the shadow pass, and a 1.75 m figure at 40 m casts a
+// shadow a couple of texels wide. The old body had castShadow on all 22-26
+// meshes (avatar-13).
+const casting = () => rigA.skins.filter((m) => m.castShadow).length;
+updatePlayerRig(a, player(), 1 / 60, 5 * 5, 0, 0);
+const nearShadows = casting();
+updatePlayerRig(a, player(), 1 / 60, 80 * 80, 0, 0);
+const farShadows = casting();
+updatePlayerRig(a, player(), 1 / 60, 3 * 3, 0, 0);
+const backShadows = casting();
+expect('a pirate in front of you casts a shadow', nearShadows === rigA.skins.length, `${nearShadows}/${rigA.skins.length}`);
+expect('a pirate at 80 m casts nothing', farShadows === 0, `${farShadows} still casting`);
+expect('and she casts again when you walk back to her', backShadows === rigA.skins.length, `${backShadows}`);
+
 // ── deaths reach a death clip ──────────────────────────────────────────────
 expect('a drowned corpse plays death_drown', playRigDeath(a, 'drown', 1 / 60) && rigA.lower.name === 'death_drown', rigA.lower.name);
 expect('a shot corpse plays death_shot', playRigDeath(a, 'shot', 1 / 60) && rigA.lower.name === 'death_shot', rigA.lower.name);

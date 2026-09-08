@@ -83,6 +83,20 @@ const MIXER_LOD: readonly { d2: number; interval: number }[] = [
 /** Past this the mixer stops entirely: the pose freezes where it was. */
 const MIXER_FREEZE_D2 = 120 * 120;
 
+/**
+ * Past this range a pirate stops casting a shadow.
+ *
+ * avatar-13's second complaint after the draw count is that every one of the
+ * old body's 22-26 meshes had castShadow=true, so a crowd cost its draws TWICE
+ * on balanced and high. The rig is 7, but 7 is still 14 with the shadow pass,
+ * and the shadow of a 1.75 m figure at 40 m falls inside a couple of shadow-map
+ * texels — it is a smudge you cannot attribute to a person. Toggling
+ * `castShadow` costs nothing (it is a render-list flag, not a material change,
+ * so nothing re-links), and it is the cheapest halving of a crowd's cost there
+ * is.
+ */
+const SHADOW_D2 = 40 * 40;
+
 type ClipPair = { lower: THREE.AnimationClip; upper: THREE.AnimationClip };
 
 /** Masked clips are immutable data and are shared by every pirate's mixer. */
@@ -136,6 +150,11 @@ export type PlayerRig = {
   prevHealth: number;
   /** Alternating swing so two cuts in a row are not the same cut. */
   swingFlip: number;
+  /** Whether this pirate is currently in the shadow-casting band. */
+  casting: boolean;
+  /** Her skinned parts, so the shadow toggle is a loop over 7 and not a
+   *  traverse of the whole body every frame. */
+  skins: THREE.Mesh[];
 };
 
 /** True when the GLB is loaded AND actually carries skin + clips. */
@@ -243,7 +262,10 @@ export function makePlayerRig(
     prevSwing: 0,
     prevHealth: Number.POSITIVE_INFINITY,
     swingFlip: 0,
+    casting: true,
+    skins: [],
   };
+  root.traverse((o) => { if ((o as THREE.Mesh).isMesh) rig.skins.push(o as THREE.Mesh); });
   group.userData.rig = rig;
   // Game and PlayerAnimator both branch on `animation.variant`; keeping the
   // same shape (with an EMPTY parts table) means the procedural animator bails
@@ -394,6 +416,13 @@ export function updatePlayerRig(
     rig.pending = 0;
   } else if (interval === Number.POSITIVE_INFINITY) {
     rig.pending = 0; // frozen: do not bank an hour of dt for the walk back
+  }
+
+  // ── shadow LOD ───────────────────────────────────────────────────────────
+  const wantCasting = cameraDistSq <= SHADOW_D2;
+  if (wantCasting !== rig.casting) {
+    rig.casting = wantCasting;
+    for (const skin of rig.skins) skin.castShadow = wantCasting;
   }
 
   // ── post-solvers ─────────────────────────────────────────────────────────
