@@ -924,12 +924,36 @@ export interface HotSnapshotPayload {
   sharks: HotSharkState[];
 }
 
+/**
+ * PRED-01 (netcode-35): the per-client receipt for prediction.
+ *
+ * The server already tracked `appliedInputSeq` per connection and never put it
+ * on the wire, so a client could not have reconciled even if it simulated. This
+ * rides the hot tick, one per client (~70 B), and says: "at server time `t` I
+ * had consumed your input `seq`, and this is where your body was." Everything
+ * else on the wire is unchanged, and nobody else's client sees it.
+ */
+export interface InputAckPayload {
+  /** Last input seq the sim consumed for THIS client. */
+  seq: number;
+  /** Authoritative body position after that input. */
+  pos: Vec3;
+  vel: Vec3;
+  /** Hull the body was standing on (position is world-space regardless). */
+  onShipId: string | null;
+  state: PlayerState;
+  /** Server sim seconds — the same clock HotSnapshotPayload.serverTime uses. */
+  t: number;
+}
+
 // ── Network messages ─────────────────────────────────────────
 type MsgType =
   // game-scoped messages (within a match)
   | 'join'
   | 'state_snapshot'
   | 'state_hot'
+  /** PRED-01: per-client input receipt; see InputAckPayload. */
+  | 'input_ack'
   | 'state_delta'
   | 'player_input'
   | 'player_spawned'
