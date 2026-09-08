@@ -26,6 +26,10 @@ export interface CorpseVisibilityInput {
   tooSmallToDraw: boolean;
   /** The local swim viewmodel is standing in for the body. */
   useLocalSwimViewmodel: boolean;
+  /** The local pirate's own body is drawn this frame (avatar-10): head culled,
+   *  arms culled while a first-person rig has hands out, shadow cast on the
+   *  deck. False at the 'low' tier, which has no shadow pass to pay for it. */
+  localBodyDrawn?: boolean;
 }
 
 /**
@@ -40,6 +44,6 @@ export function playerMeshVisible(i: CorpseVisibilityInput): boolean {
   if (i.tooSmallToDraw) return false;
   if (i.useLocalSwimViewmodel) return false;
   const remains = i.skeletonDeathVisible || i.pirateCorpseVisible;
-  if (i.isLocal) return remains;
+  if (i.isLocal) return remains || (!!i.localBodyDrawn && !i.isDead);
   return remains || !i.isDead;
 }
