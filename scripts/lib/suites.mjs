@@ -104,6 +104,9 @@ export const LOGIC = [
   // transcription of the pre-extraction Match block, plus the ack-delay
   // reconciliation. Logic tier, no stack, ~2 s.
   quick(tsx('test-prediction.mjs')),
+  // PRED-01/physics-09: the client's mirror of a server pushout must stand in
+  // the same place the server's does. Logic tier, ~1 s.
+  quick(tsx('test-client-prediction-parity.mjs')),
   quick(tsx('test-world-fixed.mjs')),
   // RNG-01: two seeded Matches ticked 90 s side by side, state hashed each
   // second, plus a different-matchId control. ~11 s, so not in the quick tier.

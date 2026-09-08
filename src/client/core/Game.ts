@@ -4,7 +4,7 @@ import type {
   BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId, WildlifeAnimal,
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
-import { dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex,
@@ -4263,20 +4263,30 @@ export class Game {
         for (const ship of this.state.ships) {
           if (!ship.alive || ship.sinking) continue;
           const stats = SHIP_STATS[ship.type];
-          const band = getSwimHullVerticalBand(ship.position.y, stats);
+          // THE HULL TUCKS IN BELOW THE WATERLINE, AND THE MIRROR MUST KNOW IT
+          // (PRED-01 / physics-09). This read the band and the footprint with
+          // the FALLBACK draft and verticalT = 0 — a straight prism — while the
+          // server resolves against the tapered section with the ship's own
+          // draft factor (PhysicsSystem.resolveSwimmerShipCollision passes
+          // ship.type and getSwimHullVerticalT). A deep swimmer was therefore
+          // walled 0.4-1.2 m further out on the client than on the server and
+          // rubber-banded back in on every snapshot, and the keel barrier sat at
+          // the wrong height on every hull class but the fallback's.
+          const band = getSwimHullVerticalBand(ship.position.y, stats, ship.type);
           const dx = predictedX - ship.position.x;
           const dz = predictedZ - ship.position.z;
           const cos = Math.cos(ship.rotation);
           const sin = Math.sin(ship.rotation);
           const localX = dx * cos - dz * sin;
           const localZ = dx * sin + dz * cos;
-          if (!isInsideSwimHullFootprint(stats, localX, localZ, hullMargin)) continue;
+          const verticalT = getSwimHullVerticalT(visualY, ship.position.y, stats, ship.type);
+          if (!isInsideSwimHullFootprint(stats, localX, localZ, hullMargin, verticalT)) continue;
           if (visualY < band.keelY) {
             if (visualY > band.keelY - (PLAYER.HEIGHT + 0.4)) visualY = Math.min(visualY, band.keelY - 0.02);
             continue;
           }
           if (visualY > band.deckY + 0.35) continue;
-          const out = pushOutOfSwimHullFootprint(stats, localX, localZ, hullMargin);
+          const out = pushOutOfSwimHullFootprint(stats, localX, localZ, hullMargin, verticalT);
           if (!out.pushed) continue;
           predictedX = ship.position.x + out.x * cos + out.z * sin;
           predictedZ = ship.position.z + out.z * cos - out.x * sin;
