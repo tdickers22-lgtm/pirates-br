@@ -184,7 +184,8 @@ function teamMaterial(color: number): THREE.MeshStandardMaterial {
 export function makePlayerRig(
   color: number,
   variant: 'pirate' | 'skeleton',
-  role: 'crew' | 'captain',
+  // The same union Game already passes makePlayerMesh: a raider dresses as crew.
+  role: 'crew' | 'captain' | 'raider',
   playerId: string,
   quality: RenderQuality,
 ): THREE.Group | null {

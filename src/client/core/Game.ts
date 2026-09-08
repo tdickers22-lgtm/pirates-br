@@ -58,6 +58,7 @@ import { beginFirstDrawFrame, clearFirstDrawBudget, openFirstDrawBudgetForSettle
 import { budgeted } from '../rendering/FrameBudget.js';
 import { ClientState } from './ClientState.js';
 import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
+import { makePlayerRig } from '../rendering/factories/PlayerRigFactory.js';
 import { buildMermaidMesh, hudAnchorLocal, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
 
@@ -4465,11 +4466,13 @@ export class Game {
       const playerTeamColor = playerIsSkeleton ? 0xd7d1c4 : this.getPlayerTeamColor(player);
       let mesh = this.playerMeshes.get(player.id);
       if (!mesh) {
-        mesh = makePlayerMesh(
-          playerTeamColor,
-          playerIsSkeleton ? 'skeleton' : 'pirate',
-          playerIsSkeleton ? 'crew' : this.getPlayerTeamRole(player),
-        );
+        const bodyVariant = playerIsSkeleton ? 'skeleton' : 'pirate';
+        const bodyRole = playerIsSkeleton ? 'crew' : this.getPlayerTeamRole(player);
+        // RIG-01: the skinned pirate on balanced/high. `makePlayerRig` returns
+        // null on the low tier, for the island skeleton and whenever
+        // pirate_base.glb is missing or unskinned — and null is the box body.
+        mesh = makePlayerRig(playerTeamColor, bodyVariant, bodyRole, player.id, this.renderer.getQuality())
+          ?? makePlayerMesh(playerTeamColor, bodyVariant, bodyRole);
         // Floating username over every OPPONENT's head (not yourself).
         if (player.id !== this.localPlayerId) {
           const nameplate = makeNameplateSprite(player.name);
