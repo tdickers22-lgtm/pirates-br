@@ -415,6 +415,13 @@ const INTERACT_REFUSAL_INTERVAL = 0.7;
 const BOARD_LATCH_TIME = 2.0;
 /** Kegs a pirate may carry off the Tallyman's table (ECON-01 shop line). */
 const TALLYMAN_KEG_CAP = 2;
+/** CAPTURE-01: seconds at the wheel of a crewless hull before she is yours. */
+const CAPTURE_HOLD_SECONDS = 8;
+/** CAPTURE-01: pay factor for the 1st, 2nd, 3rd, 4th+ kill of the SAME pirate
+ *  by the same killer inside REPEAT_KILL_WINDOW. Boarding a bot deck and
+ *  standing on the respawn point paid 275 g every 20 s, forever. */
+const REPEAT_KILL_DECAY = [1, 0.4, 0.15, 0];
+const REPEAT_KILL_WINDOW = 120;
 /** Feet on your own deck for this long with the server still calling you
  *  un-boarded (walking up the dock gangway) → you are aboard. */
 const DECK_AUTO_BOARD_TIME = 0.5;
@@ -573,6 +580,10 @@ export class Match {
   private skeletonProvoked: Set<string> = new Set();
   /** The one skeleton per wave that drops stores when he falls. */
   private skeletonCaptains: Set<string> = new Set();
+  /** CAPTURE-01: helm-hold progress per hull being taken. */
+  private helmCaptureHold: Map<string, { playerId: string; seconds: number }> = new Map();
+  /** CAPTURE-01: recent kills per killer→victim pair, for the repeat decay. */
+  private repeatKills: Map<string, number[]> = new Map();
   private skeletonWaveTimers: Map<string, number> = new Map();
   private skeletonSpawnedAt: Map<string, number> = new Map();
   private skeletonDefeatedAt: Map<string, number> = new Map();
@@ -2073,6 +2084,7 @@ export class Match {
       if (traces.length > 0) this.resolveFirearmHits(shooter, traces);
     }
     this.updateSkeletonWaves(dt);
+    this.updateCaptures(dt);
     this.updateIslandSkeletons(dt);
     this.processBotLooting();
     this.updateBotFlooding(dt);
@@ -5744,7 +5756,22 @@ export class Match {
     }
     const isSkeleton = this.isSkeletonPlayer(victim);
     if (isSkeleton) this.statsDelta(killer.id).skeletonsKilled += 1;
-    const killGold = isSkeleton ? PLAYER.SKELETON_KILL_GOLD : PLAYER.KILL_GOLD_REWARD;
+    // NO FARMING THE SAME PIRATE (CAPTURE-01, gameplay-29). Boarding a bot deck
+    // and standing on the respawn point paid the full bounty every 20 s for as
+    // long as you cared to stand there. The 2nd, 3rd and 4th+ kill of the SAME
+    // pirate by the same killer inside REPEAT_KILL_WINDOW pay 40%, 15% and
+    // nothing. Killing someone ELSE is unaffected: this is anti-farm, not
+    // anti-kill.
+    const ledgerKey = `${killer.id}>${victim.id}`;
+    const priorKills = (this.repeatKills.get(ledgerKey) ?? []).filter((at) => this.t - at < REPEAT_KILL_WINDOW);
+    const decay = isSkeleton
+      ? 1
+      : REPEAT_KILL_DECAY[Math.min(priorKills.length, REPEAT_KILL_DECAY.length - 1)];
+    priorKills.push(this.t);
+    this.repeatKills.set(ledgerKey, priorKills);
+    const killGold = Math.round(
+      (isSkeleton ? PLAYER.SKELETON_KILL_GOLD : PLAYER.KILL_GOLD_REWARD) * decay,
+    );
     killer.gold += killGold;
     this.checkWinCondition();
     return { streakReward, killGold };
@@ -7480,6 +7507,93 @@ export class Match {
     }
   }
 
+  /**
+   * TAKING A SHIP (CAPTURE-01, gameplay-19).
+   *
+   * A pirate whose hull went down had NO route back to a deck of her own: she
+   * could board an empty enemy brig, stand at the wheel, sail her across the
+   * Reach — and the match still called her shipless, still refused her a
+   * respawn anchor, still scored the hull to a crew that no longer existed.
+   *
+   * So: stand at the wheel of a CREWLESS hull for CAPTURE_HOLD_SECONDS with no
+   * living crew of hers aboard to stop you, and she is yours — owner, crew,
+   * colours and all. Whoever used to respawn on her loses the anchor (they were
+   * already dead or gone), and a bot skipper is unregistered so the fleet does
+   * not keep steering a hull it no longer owns.
+   */
+  private updateCaptures(dt: number) {
+    for (const ship of this.state.ships) {
+      if (!ship.alive || ship.sinking) { this.helmCaptureHold.delete(ship.id); continue; }
+      const helmsman = this.state.players.find((player) =>
+        player.atHelm
+        && player.onShipId === ship.id
+        && player.shipId !== ship.id
+        && player.state !== 'eliminated'
+        && player.state !== 'respawning'
+        && player.health > 0
+        && !this.isSkeletonPlayer(player),
+      );
+      if (!helmsman || this.hasCrewAlive(ship)) { this.helmCaptureHold.delete(ship.id); continue; }
+      const hold = this.helmCaptureHold.get(ship.id);
+      const held = hold && hold.playerId === helmsman.id ? hold.seconds + dt : dt;
+      if (held < CAPTURE_HOLD_SECONDS) {
+        this.helmCaptureHold.set(ship.id, { playerId: helmsman.id, seconds: held });
+        continue;
+      }
+      this.helmCaptureHold.delete(ship.id);
+      this.captureShip(ship, helmsman);
+    }
+  }
+
+  /** Anyone still alive who belongs to this hull's crew. */
+  private hasCrewAlive(ship: Ship): boolean {
+    return this.state.players.some((player) =>
+      player.shipId === ship.id
+      && player.state !== 'eliminated'
+      && player.state !== 'respawning'
+      && player.health > 0,
+    );
+  }
+
+  private captureShip(ship: Ship, captor: Player) {
+    const losers = this.state.players.filter((player) => player.shipId === ship.id && player.id !== captor.id);
+    const previousOwnerId = ship.ownerId;
+    ship.ownerId = captor.id;
+    ship.crewIds = [captor.id];
+    ship.crewId = captor.crewId;
+    const captorHull = this.state.ships.find((other) => other.id === captor.shipId);
+    if (captorHull && captorHull.id !== ship.id) ship.teamColor = captorHull.teamColor;
+    captor.shipId = ship.id;
+    captor.onShipId = ship.id;
+
+    for (const loser of losers) {
+      loser.shipId = null;
+      // They were already dead or gone — this only takes the anchor they were
+      // waiting on, and says so, instead of leaving them counting down on a hull
+      // that now flies someone else's colours.
+      if (loser.state === 'respawning' || loser.state === 'eliminated' || loser.health <= 0) {
+        loser.state = 'eliminated';
+        this.recordElimination(loser);
+        this.applyEliminatedPlayerFields(loser);
+        if (loser.isBot) this.bots.removeBot(loser.id);
+      }
+    }
+    if (previousOwnerId !== captor.id) this.bots.removeBot(previousOwnerId);
+
+    this.broadcast({
+      type: 'ship_captured',
+      ts: Date.now(),
+      payload: {
+        shipId: ship.id,
+        captorId: captor.id,
+        captorName: captor.name,
+        teamColor: ship.teamColor,
+        losers: losers.map((loser) => loser.id),
+      },
+    });
+    this.checkWinCondition();
+  }
+
   private getSkeletonWaveSize(island: Island) {
     if (island.radius > 84) return 4;
     if (island.radius > 68) return 3;
@@ -8397,7 +8511,10 @@ export class Match {
       return {
         position: this.getRespawnDeckPosition(homeShip),
         onShipId: homeShip.id as string | null,
-        protectionTime: PLAYER.RESPAWN_PROTECTION_TIME + 1.5,
+        // A boarder still on her planking is not a sailor (hasSailorForHull), so
+        // the berth takes the hull with him aboard: the pirate comes back on her
+        // OWN deck, and gets the extra breath she needs to meet him.
+        protectionTime: PLAYER.RESPAWN_PROTECTION_TIME + (this.isHullContested(homeShip, player) ? 3 : 1.5),
         dock: dock as IslandDock | null,
         ashore: false,
       };
@@ -8519,12 +8636,35 @@ export class Match {
    *  which is exactly the deadlock this answers. Anyone standing on her deck
    *  counts too, even an enemy: a boarded hull is somebody's problem, and the
    *  tide does not move a ship out from under a living pirate. */
+  /**
+   * IS ANYONE LEFT TO SAIL HER? (gameplay-29)
+   *
+   * This used to answer yes for `other.onShipId === ship.id` — ANYONE standing
+   * on the deck. So the boarder who had just cut your whole crew down counted as
+   * your sailor: the hold was kept open on a hull the enemy owned, and your
+   * respawn timer waited on him. A hull's sailor is a member of HER CREW. An
+   * outsider on the planking is not crew, he is a boarding party, and
+   * isHullContested is what answers for him.
+   */
   private hasSailorForHull(ship: Ship, exclude: Player): boolean {
     for (const other of this.state.players) {
       if (other.id === exclude.id) continue;
       if (other.state === 'eliminated' || other.state === 'respawning') continue;
       if (other.health <= 0) continue;
-      if (other.shipId === ship.id || other.onShipId === ship.id) return true;
+      if (this.isSkeletonPlayer(other)) continue;
+      if (other.shipId === ship.id) return true;
+    }
+    return false;
+  }
+
+  /** Someone who is NOT of this crew has his feet on her planking. */
+  private isHullContested(ship: Ship, exclude?: Player): boolean {
+    for (const other of this.state.players) {
+      if (exclude && other.id === exclude.id) continue;
+      if (other.state === 'eliminated' || other.state === 'respawning') continue;
+      if (other.health <= 0) continue;
+      if (this.isSkeletonPlayer(other)) continue;
+      if (other.onShipId === ship.id && other.shipId !== ship.id) return true;
     }
     return false;
   }
