@@ -119,13 +119,71 @@ function liveSkeletons(match) {
 // ── 4. the client half: a distant garrison builds no body ─────────────────
 {
   const game = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url).pathname, 'utf8');
-  expect('Game.ts declares a skeleton draw range', /SKELETON_DRAW_RANGE_SQ\s*=/.test(game));
-  const sync = game.slice(game.indexOf('private syncPlayers'), game.indexOf('private syncPlayers') + 3000);
-  expect('syncPlayers skips the body for a skeleton past that range',
-    /playerIsSkeleton[\s\S]{0,400}SKELETON_DRAW_RANGE_SQ[\s\S]{0,300}continue;/.test(sync),
+  const sync = game.slice(game.indexOf('private syncPlayers'), game.indexOf('private syncPlayers') + 3600);
+  expect('syncPlayers gates the skeleton body on the draw range',
+    /playerIsSkeleton[\s\S]{0,900}skeletonDrawCulled\([\s\S]{0,600}continue;/.test(sync),
     'no range gate around the skeleton mesh build');
-  expect('and it drops the mesh it already built',
-    /SKELETON_DRAW_RANGE_SQ[\s\S]{0,300}playerMeshes\.delete/.test(sync));
+  // The mesh is HIDDEN, not demolished: the old fix did scene.remove +
+  // playerMeshes.delete at the boundary, which is the rebuild this suite now
+  // forbids. If that pair ever comes back inside the skeleton branch the
+  // hysteresis below is decoration.
+  const skeletonBranch = sync.slice(sync.indexOf('playerIsSkeleton'), sync.indexOf('const playerTeamColor'));
+  expect('the culled body is hidden, not destroyed',
+    /visible\s*=\s*false/.test(skeletonBranch) && !/playerMeshes\.delete/.test(skeletonBranch),
+    skeletonBranch.includes('playerMeshes.delete')
+      ? 'the cull still deletes the mesh — every re-entry rebuilds 98 THREE objects'
+      : 'the cull never hides the mesh');
+  // The reaper that runs when a player leaves the match is the only release
+  // path left, so it is the only place a skeleton's GPU memory can be freed.
+  expect('and the mesh the reaper releases is disposed',
+    /livePlayerIds\.has\(playerId\)[\s\S]{0,600}disposeSceneObject/.test(sync),
+    'playerMeshes entries are dropped without disposing their geometries/materials');
+}
+
+// ── 5. hysteresis: a shoreline walk cannot flip the body on and off ───────
+{
+  const {
+    skeletonDrawCulled, SKELETON_DRAW_RANGE_M, SKELETON_DRAW_ARM_RANGE_M,
+  } = await import('../src/client/core/skeletonCull.ts');
+
+  expect('the arm radius is strictly inside the draw radius',
+    SKELETON_DRAW_ARM_RANGE_M < SKELETON_DRAW_RANGE_M,
+    `arm ${SKELETON_DRAW_ARM_RANGE_M} / draw ${SKELETON_DRAW_RANGE_M}`);
+
+  // The boundary itself: a body that has never been built is culled, one that
+  // is already drawn is kept, at the SAME distance. That is the whole point.
+  const mid = ((SKELETON_DRAW_RANGE_M + SKELETON_DRAW_ARM_RANGE_M) / 2) ** 2;
+  expect('a body already drawn survives the middle of the band',
+    skeletonDrawCulled(mid, false) === false);
+  expect('a body not yet built is not built in the middle of the band',
+    skeletonDrawCulled(mid, true) === true);
+
+  /** Walk the camera in and out across the boundary and count state flips. */
+  function flips(centreM, amplitudeM, steps, startCulled) {
+    let culled = startCulled;
+    let transitions = 0;
+    for (let i = 0; i < steps; i++) {
+      const d = centreM + amplitudeM * Math.sin((i / steps) * Math.PI * 2 * 8);
+      const next = skeletonDrawCulled(d * d, culled);
+      if (next !== culled) transitions += 1;
+      culled = next;
+    }
+    return transitions;
+  }
+
+  // A pirate pacing a garrison island's edge, 140 m to 152 m and back, eight
+  // laps: he straddles the draw radius but never returns inside the arm
+  // radius. One transition. Collapse the two radii into one and the same walk
+  // is sixteen build/teardown pairs of ~980 GPU resources.
+  const pacing = flips(SKELETON_DRAW_RANGE_M - 4, 6, 400, false);
+  expect('eight laps across the draw radius cost at most one transition',
+    pacing <= 1, `${pacing} transitions over 400 frames`);
+
+  // And it is not a gate that cannot fail: a walk that genuinely leaves and
+  // re-enters must still flip, or the body would never come back.
+  const wide = flips(SKELETON_DRAW_RANGE_M - 20, 60, 400, true);
+  expect('a genuine departure and return still arms and disarms',
+    wide >= 2, `${wide} transitions over 400 frames`);
 }
 
 console.log(`\n${checks} checks, ${failures} failed`);

@@ -44,6 +44,7 @@ import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
 import { isCrewmate } from '../ui/crewStrip.js';
 import { playerMeshVisible } from './corpseVisibility.js';
+import { skeletonDrawCulled } from './skeletonCull.js';
 import { MapRenderer, type MapView } from '../ui/MapRenderer.js';
 import {
   CORPSE_FADE_START, CORPSE_LIFETIME, PlayerAnimator,
@@ -111,8 +112,10 @@ const SKELETON_CORPSE_LIFETIME = 6.5;
  *  whatever its distance. Since any crew wakes a garrison (bots-09), bot crews
  *  ashore across the map can hold several of them at once, none of them within
  *  sight of you. 150 m: a 1.8 m figure is a couple of pixels past that, and the
- *  server-side SKELETON_LIVE_CAP bounds how many can be inside it. */
-const SKELETON_DRAW_RANGE_SQ = 150 * 150;
+ *  server-side SKELETON_LIVE_CAP bounds how many can be inside it.
+ *
+ *  The arm/disarm split and the hide-don't-destroy rule live in
+ *  ./skeletonCull.ts (final-sweep P1) — see that file for why. */
 /** How far a shark that has given up sinks over SHARK.DESPAWN_FADE (review-6
  *  P1). Deep enough that it is out of the light before it is spliced out. */
 const SHARK_FADE_SINK = 3.4;
@@ -4549,6 +4552,12 @@ export class Game {
       if (this.livePlayerIds.has(playerId)) continue;
       const mesh = this.playerMeshes.get(playerId)!;
       this.renderer.scene.remove(mesh);
+      // scene.remove + Map.delete drops the last reference with the geometries,
+      // materials and the nameplate's canvas texture still resident on the GPU.
+      // Skeleton waves keep rising all match, so that leak has no ceiling.
+      // disposeSceneObject skips anything the AssetLibrary owns, so the shared
+      // pirate rig survives (final-sweep P1).
+      this.disposeSceneObject(mesh);
       this.playerMeshes.delete(playerId);
     }
 
@@ -4557,14 +4566,24 @@ export class Game {
       if (playerIsSkeleton) {
         const dx = player.position.x - this.renderer.camera.position.x;
         const dz = player.position.z - this.renderer.camera.position.z;
-        if (dx * dx + dz * dz > SKELETON_DRAW_RANGE_SQ) {
-          const distant = this.playerMeshes.get(player.id);
+        const distant = this.playerMeshes.get(player.id);
+        // A body that does not exist yet counts as culled, so the arm radius
+        // (the tighter one) is what decides whether a distant garrison is ever
+        // built at all. A body that exists keeps drawing out to the wider
+        // radius: the hysteresis is what stops a shoreline walk from
+        // rebuilding 98 THREE objects a second. skeletonDrawCulled + why.
+        const culled = skeletonDrawCulled(dx * dx + dz * dz, !distant || distant.userData.drawCulled === true);
+        if (culled) {
+          // HIDE, never destroy: scene.remove + Map.delete dropped the last
+          // reference with the geometries and materials still resident, and
+          // the next re-entry paid for the whole rebuild.
           if (distant) {
-            this.renderer.scene.remove(distant);
-            this.playerMeshes.delete(player.id);
+            distant.visible = false;
+            distant.userData.drawCulled = true;
           }
           continue;
         }
+        if (distant) distant.userData.drawCulled = false;
       }
       const playerTeamColor = playerIsSkeleton ? 0xd7d1c4 : this.getPlayerTeamColor(player);
       let mesh = this.playerMeshes.get(player.id);
