@@ -27,7 +27,7 @@
 import { Match } from '../src/server/core/Match.ts';
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { buildWireSnapshot } from '../src/server/core/snapshot.ts';
-import { SERVER_TICK_MS, WRECK_EVENT, SEA_POI, WORLD } from '../src/shared/constants/index.ts';
+import { SERVER_TICK_MS, WRECK_EVENT, WRECK_SITES, SEA_POI, WORLD } from '../src/shared/constants/index.ts';
 import { getIslandSurfaceY, getIslandMaxRadius, dist2D } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -88,8 +88,15 @@ console.log('The Gilded Wreck rises:');
     `phase=${phaseAtRise} shrinking=${shrinkingAtRise}`);
   expect('and never before the ring moves — the opening is still peaceful',
     riseTime > 0, `t=${riseTime.toFixed(1)}s`);
-  expect('she lands ON the announced next ring centre (or the nearest water to it)',
-    !!wreck && !!announced && dist2D(wreck.position.x, wreck.position.z, announced.x, announced.z) < 300,
+  // ECON-01 re-pin (gameplay-05): the announced ring centre is now the CHOOSER,
+  // not the site — she rises at whichever of WRECK_SITES.COUNT seeded sites lies
+  // nearest it, because deriving the site from the fixed world put her in the
+  // same water every match. The pacing promise is unchanged and is what this
+  // assertion guards: she is still in the water the lobby is being sent to.
+  // Site variety and determinism are pinned by scripts/test-wreck-site.mjs.
+  expect('she lands in the water the announced ring centre sends the fleet to',
+    !!wreck && !!announced
+    && dist2D(wreck.position.x, wreck.position.z, announced.x, announced.z) < WRECK_SITES.MAX_RING_DISTANCE + 60,
     wreck && announced
       ? `${dist2D(wreck.position.x, wreck.position.z, announced.x, announced.z).toFixed(0)}m off (${announced.x.toFixed(0)}, ${announced.z.toFixed(0)})`
       : 'no wreck');

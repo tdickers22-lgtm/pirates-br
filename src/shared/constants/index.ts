@@ -74,7 +74,9 @@ export const PLAYER = {
    *  a mid/late-game investment, not a lobby pickup. */
   MAX_ARMOR: 50,
   /** PvE skeletons pay a small bounty, not the full pirate reward. */
-  SKELETON_KILL_GOLD: 60,
+  /** gameplay-26: a head is pocket change; the wave pays through the captain's
+   *  stores, not through a per-head bounty a crew can farm. */
+  SKELETON_KILL_GOLD: 25,
   HEADSHOT_GOLD_BONUS: 40,
   BOARDING_KILL_HEAL: 25,
   BOARDING_GOLD_STEAL_CAP: 180,
@@ -122,6 +124,25 @@ export const ECONOMY = {
   /** Iron Cuirass price at the Tallyman — ~a chest-and-a-half of gold,
    *  so armor is a real decision against the 9000g win target. */
   ARMOR_PRICE: 1200,
+} as const;
+
+// ── Where the Gilded Wreck rises (ECON-01 / gameplay-05) ─────
+// She used to come up at the announced next ring centre, which the storm derives
+// from the same fixed world every match: the same water, every game. The site is
+// now drawn from a SEEDED LIST of candidates and the one nearest the announced
+// ring centre wins, so the convergence pacing survives and the memorisation does
+// not. Sites are sampled on a ring band around the map centre and pushed to open
+// water by the existing findWreckWater search.
+export const WRECK_SITES = {
+  /** Candidate sites drawn per match. */
+  COUNT: 8,
+  /** Inner/outer radius (m from the map centre) the candidates are drawn in. */
+  MIN_RADIUS: 150,
+  MAX_RADIUS: 640,
+  /** A candidate further than this from the announced ring centre is not worth
+   *  sailing to; the picker falls back to the nearest one regardless, and the
+   *  gate pins that the chosen site always clears this. */
+  MAX_RING_DISTANCE: 400,
 } as const;
 
 // ── The Tallyman's table: gold's SECOND sink ─────────────────

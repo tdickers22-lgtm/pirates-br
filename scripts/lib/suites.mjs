@@ -211,6 +211,7 @@ export const LOGIC = [
   quick(tsx('test-oneshot-underload.mjs')),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),
+  quick(tsx('test-wreck-site.mjs')),
   quick(tsx('test-reach-vocabulary.mjs')),
   quick(tsx('test-story-delivery.mjs')),
   quick(tsx('test-shanty-grammar.mjs')),

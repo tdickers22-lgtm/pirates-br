@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
 } from '../../shared/types/index.js';
-import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
+import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, WRECK_SITES, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -44,6 +44,7 @@ import {
   WAVE_PARAMS,
   intersectRaySeaRock,
   berthFrameSideOf,
+  mulberry32,
 } from '../../shared/utils/index.js';
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
 import { isSameCrew, playerCrewId, smallArmsHitsCrewmate } from '../../shared/crew.js';
@@ -251,6 +252,9 @@ interface MatchOptions {
   devHooks?: boolean;
 }
 
+/** gameplay-26: no island garrison rises in the opening minute and a half —
+ *  unless a shovel provokes it (see updateSkeletonWaves). */
+const SKELETON_WAVE_PEACE_SECONDS = 90;
 const SKELETON_WAVE_INITIAL_DELAY_MIN = 35;
 const SKELETON_WAVE_INITIAL_DELAY_MAX = 70;
 const SKELETON_WAVE_COOLDOWN_MIN = 120;
@@ -565,6 +569,10 @@ export class Match {
   /** Pirates the sea claimed for want of a deck, so the death card can say so. */
   private lostAtSea: Set<string> = new Set();
   private skeletonHomes: Map<string, string> = new Map();
+  /** Islands whose garrison has been provoked (a dig) — see updateSkeletonWaves. */
+  private skeletonProvoked: Set<string> = new Set();
+  /** The one skeleton per wave that drops stores when he falls. */
+  private skeletonCaptains: Set<string> = new Set();
   private skeletonWaveTimers: Map<string, number> = new Map();
   private skeletonSpawnedAt: Map<string, number> = new Map();
   private skeletonDefeatedAt: Map<string, number> = new Map();
@@ -3228,6 +3236,9 @@ export class Match {
       for (const chest of island.chests) {
         if (chest.id !== player.nearChestId || chest.opened) continue;
         if (!chest.buried || chest.digProgress >= 1) return;
+        // A shovel in the ground wakes this island's garrison NOW, whatever the
+        // opening peace says (updateSkeletonWaves reads this set).
+        this.skeletonProvoked.add(island.id);
         chest.digProgress = Math.min(1, chest.digProgress + POCKET.DIG_RATE * dt);
         if (chest.digProgress >= 1) {
           chest.position.y = getIslandSurfaceY(island, chest.position.x, chest.position.z) + 0.32;
@@ -3681,7 +3692,7 @@ export class Match {
     const hoarder = findNearbyGoldHoarder(this.state.islands, player);
     if (!hoarder) return false;
     if (player.carryingChestId) {
-      return this.sellCarriedChest(player, hoarder.island);
+      return this.sellChestFor(player, hoarder.island);
     }
     // Iron Cuirass — deliberately pricey combat plate, offered once you've
     // taken a map job and can pay. One plate at a time (no topping a full set).
@@ -3705,7 +3716,18 @@ export class Match {
     return this.grantTreasureMap(player, hoarder.island.id);
   }
 
-  private sellCarriedChest(player: Player, island: Island): boolean {
+  /**
+   * ONE SALE PATH, HUMAN OR BOT (ECON-01 / bots-19).
+   *
+   * This was `private sellCarriedChest`, reachable only from the human [X]
+   * handler, so bots could dig and stow chests forever and never bank a coin:
+   * they could not win on gold, could not be bountied, and never entered the
+   * economy the match is scored on. It is now the ONE path — BotSystem's
+   * 'deliver'/'bank' behaviour (lane 6.2) calls this exact method, so a bot sale
+   * pays, broadcasts, counts in the stats and checks the win condition the same
+   * way a human's does.
+   */
+  sellChestFor(player: Player, island: Island): boolean {
     const found = this.getChestById(player.carryingChestId);
     if (!found || found.chest.opened) {
       player.carryingChestId = null;
@@ -7343,6 +7365,8 @@ export class Match {
     this.skeletonSpawnedAt.clear();
     this.skeletonDefeatedAt.clear();
     this.skeletonHomes.clear();
+    this.skeletonProvoked.clear();
+    this.skeletonCaptains.clear();
     this.skeletonNameIndex = 1;
     for (const island of islands) {
       if (this.getSkeletonWaveSize(island) <= 0) continue;
@@ -7366,8 +7390,34 @@ export class Match {
 
       const eliminated = player.state === 'eliminated' || player.health <= 0;
       if (eliminated) {
-        const defeatedAt = this.skeletonDefeatedAt.get(player.id) ?? this.t;
+        const known = this.skeletonDefeatedAt.get(player.id);
+        const defeatedAt = known ?? this.t;
         this.skeletonDefeatedAt.set(player.id, defeatedAt);
+        // THE CAPTAIN PAYS (gameplay-26). A head is 25 g, which is pocket change
+        // against a chest — so the wave is only worth fighting if the thing
+        // leading it drops STORES. Dropped once, on the tick we first see him
+        // down, at the spot he fell, as an ordinary island barrel: prompts,
+        // take-all, meshes and chestSync all already work on it.
+        if (known === undefined && this.skeletonCaptains.delete(player.id)) {
+          const island = this.state.islands.find((candidate) => candidate.id === homeIslandId);
+          if (island) {
+            island.barrels.push({
+              id: `skeleton-captain-${player.id}`,
+              position: {
+                x: player.position.x,
+                y: getIslandSurfaceY(island, player.position.x, player.position.z) + 0.66,
+                z: player.position.z,
+              },
+              opened: false,
+              loot: [
+                { item: 'cannonball' as ItemType, qty: 8 },
+                { item: 'wood_plank' as ItemType, qty: 4 },
+                { item: 'firebomb_ball' as ItemType, qty: 1 },
+              ],
+            });
+            this.worldResyncPending = true;
+          }
+        }
         if (this.t - defeatedAt >= SKELETON_DEFEAT_DESPAWN_SECONDS) {
           this.forgetSkeleton(player.id);
           playersChanged = true;
@@ -7378,7 +7428,7 @@ export class Match {
         const spawnedAt = this.skeletonSpawnedAt.get(player.id) ?? this.t;
         if (
           this.t - spawnedAt >= SKELETON_WAVE_LINGER_SECONDS
-          && !this.hasHumanNearPoint(player.position.x, player.position.z, SKELETON_PLAYER_WAKE_RADIUS)
+          && !this.hasCrewNearPoint(player.position.x, player.position.z, SKELETON_PLAYER_WAKE_RADIUS)
         ) {
           this.forgetSkeleton(player.id);
           playersChanged = true;
@@ -7400,9 +7450,16 @@ export class Match {
       if (this.countActiveSkeletonsOnIsland(island.id) > 0) continue;
 
       const activationRadius = island.radius + SKELETON_ISLAND_ACTIVATION_MARGIN;
-      if (!this.hasHumanNearPoint(island.position.x, island.position.z, activationRadius)) {
+      if (!this.hasCrewNearPoint(island.position.x, island.position.z, activationRadius)) {
         continue;
       }
+      // THE OPENING NINETY SECONDS ARE YOURS (gameplay-26). Waves used to be
+      // armed from t=0, so the first thing a fresh crew met on their spawn
+      // island was a garrison — before a cannon was loaded or a plank stowed.
+      // The dead keep still until SKELETON_WAVE_PEACE_SECONDS, UNLESS someone
+      // puts a shovel in their ground: a dig provokes that island at once, and
+      // that is the bargain the whole system rests on.
+      if (this.t < SKELETON_WAVE_PEACE_SECONDS && !this.skeletonProvoked.has(island.id)) continue;
 
       let timer = this.skeletonWaveTimers.get(island.id);
       if (timer == null) {
@@ -7441,11 +7498,22 @@ export class Match {
     return count;
   }
 
-  private hasHumanNearPoint(x: number, z: number, radius: number) {
+  /**
+   * ANY CREW WAKES THE DEAD (bots-09, gameplay-26).
+   *
+   * This used to read `!player.isBot`, which made the whole skeleton system a
+   * HUMAN-ONLY TAX: a bot crew dug a chest on Cutlass Cay unmolested while the
+   * one human on the map fought two waves for the same loot, and a player
+   * watching a bot walk through a garrison saw the world admit it was fake.
+   * Skeletons are the island's garrison, so they rise for anything alive that is
+   * not one of them.
+   */
+  private hasCrewNearPoint(x: number, z: number, radius: number) {
     return this.state.players.some((player) =>
-      !player.isBot
+      !this.isSkeletonPlayer(player)
       && player.state !== 'eliminated'
       && player.state !== 'respawning'
+      && player.health > 0
       && dist2D(player.position.x, player.position.z, x, z) <= radius,
     );
   }
@@ -7454,8 +7522,15 @@ export class Match {
     const baseAngle = randAngle(this.rng);
     for (let i = 0; i < count; i++) {
       const skeletonId = uuid();
-      const skeleton = this.createPlayer(skeletonId, `Skeleton_${this.skeletonNameIndex++}`, null, true);
-      skeleton.health = 70;
+      const isCaptain = i === 0;
+      const skeleton = this.createPlayer(
+        skeletonId,
+        isCaptain ? `Skeleton Captain ${this.skeletonNameIndex++}` : `Skeleton_${this.skeletonNameIndex++}`,
+        null,
+        true,
+      );
+      skeleton.health = isCaptain ? 110 : 70;
+      if (isCaptain) this.skeletonCaptains.add(skeletonId);
       skeleton.weapons = [
         { weaponId: 'cutlass', ammo: 0, reserve: 0, reloading: false, reloadTimer: 0 },
         null,
@@ -7686,10 +7761,47 @@ export class Match {
     return this.state.wreck ?? null;
   }
 
+  /**
+   * THE SEEDED SITE LIST (ECON-01 / gameplay-05).
+   *
+   * She used to rise exactly at the announced next ring centre, which the storm
+   * derives from the same fixed world every match — so the ghost galleon came up
+   * in the same water game after game and a veteran simply parked on the mark.
+   *
+   * WRECK_SITES.COUNT candidates are drawn instead, from a stream salted by the
+   * match id alone (NOT this.rng: unseeded that IS Math.random, and a replay of
+   * the same match must raise her in the same water). Angles are evenly spread
+   * with a jittered offset so no two candidates crowd, and the picker takes the
+   * one nearest the announced ring centre — the convergence pacing survives, the
+   * memorisation does not.
+   */
+  private wreckSiteCandidates(): Array<{ x: number; z: number }> {
+    let salt = 0x811c9dc5;
+    for (let i = 0; i < this.id.length; i++) salt = Math.imul(salt ^ this.id.charCodeAt(i), 0x01000193);
+    const rng = mulberry32((salt ^ 0x5f27a3b1) >>> 0);
+    const sites: Array<{ x: number; z: number }> = [];
+    const spread = (Math.PI * 2) / WRECK_SITES.COUNT;
+    const phase = rng() * Math.PI * 2;
+    for (let i = 0; i < WRECK_SITES.COUNT; i++) {
+      const angle = phase + spread * (i + (rng() - 0.5) * 0.7);
+      const radius = WRECK_SITES.MIN_RADIUS
+        + (WRECK_SITES.MAX_RADIUS - WRECK_SITES.MIN_RADIUS) * (0.25 + rng() * 0.75);
+      sites.push({ x: Math.cos(angle) * radius, z: Math.sin(angle) * radius });
+    }
+    return sites;
+  }
+
   private raiseGildedWreck() {
     const storm = this.state.storm;
-    // The ANNOUNCED next centre — the ring the HUD is already drawing dashed.
-    const site = this.findWreckWater(storm.nextCenterX, storm.nextCenterZ);
+    // The announced next centre is the CHOOSER, not the site: the lobby is being
+    // told to sail there, so she rises at whichever authored site lies nearest it.
+    let pick = { x: storm.nextCenterX, z: storm.nextCenterZ };
+    let bestD = Infinity;
+    for (const candidate of this.wreckSiteCandidates()) {
+      const d = dist2D(candidate.x, candidate.z, storm.nextCenterX, storm.nextCenterZ);
+      if (d < bestD) { bestD = d; pick = candidate; }
+    }
+    const site = this.findWreckWater(pick.x, pick.z);
     // Lies across the ring's radius so her broken length reads broadside from
     // whichever way you come in off the wall.
     const rotation = angleWrap(Math.atan2(site.x - storm.centerX, site.z - storm.centerZ) + Math.PI * 0.5);
