@@ -291,6 +291,12 @@ export const LOGIC = [
   //                                 drives) — without that second file SHARK.MAX_WORLD=4 heroes are +25k tris
   //                                 in a low-tier frame (FAUNAGLB-01/assets-12, w6.6)
   quick({ file: 'test-fauna-census.mjs', cmd: ['node', 'scripts/test-fauna-census.mjs'] }),
+  //   test-fauna-gait             — the shark's pose maths (pure, out of Game.syncSharks) and the mixer's
+  //                                 distance LOD: every frame inside 45 m, 15 Hz off a LOSSLESS accumulator
+  //                                 to 130 m, nothing past that. The accumulator is the graded part — drop
+  //                                 time there and a shark that swims out and back returns at a different
+  //                                 phase, a pop on the one creature a player is watching (FAUNAGLB-01, w6.6)
+  tsx('test-fauna-gait.mjs'),
   //   check-hud-ids               — every id the client reads by string exists in index.html, and no id inside
   //                                 the HUD block is driven by nothing. TypeScript cannot see through
   //                                 getElementById('x'), so a renamed id used to type-check and then silently
