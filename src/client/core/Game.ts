@@ -105,6 +105,14 @@ declare const __GAME_SERVER_PORT__: string | undefined;
 const GAME_SERVER_PORT = (typeof __GAME_SERVER_PORT__ === 'string' && __GAME_SERVER_PORT__) || '8090';
 /** Skeleton remains linger (and sink/fade) instead of popping after 1.5s. */
 const SKELETON_CORPSE_LIFETIME = 6.5;
+/** A GARRISON ON ANOTHER ISLAND DRAWS NOTHING (review-6 P1). An island skeleton
+ *  is the only body makePlayerRig refuses, so it stays the 22-26-draw
+ *  procedural build; syncPlayers used to give one to EVERY skeleton in state
+ *  whatever its distance. Since any crew wakes a garrison (bots-09), bot crews
+ *  ashore across the map can hold several of them at once, none of them within
+ *  sight of you. 150 m: a 1.8 m figure is a couple of pixels past that, and the
+ *  server-side SKELETON_LIVE_CAP bounds how many can be inside it. */
+const SKELETON_DRAW_RANGE_SQ = 150 * 150;
 /** The limb node names a wildlife mesh is built with — see buildWildlifeMesh. */
 const WILDLIFE_LEG_KEYS = ['leg0', 'leg1', 'leg2', 'leg3', 'leg4', 'leg5'] as const;
 /** A dropped weapon tumbles, lands and fades over this many seconds. */
@@ -4535,6 +4543,18 @@ export class Game {
 
     for (const player of this.state.players) {
       const playerIsSkeleton = player.isBot && player.shipId === null;
+      if (playerIsSkeleton) {
+        const dx = player.position.x - this.renderer.camera.position.x;
+        const dz = player.position.z - this.renderer.camera.position.z;
+        if (dx * dx + dz * dz > SKELETON_DRAW_RANGE_SQ) {
+          const distant = this.playerMeshes.get(player.id);
+          if (distant) {
+            this.renderer.scene.remove(distant);
+            this.playerMeshes.delete(player.id);
+          }
+          continue;
+        }
+      }
       const playerTeamColor = playerIsSkeleton ? 0xd7d1c4 : this.getPlayerTeamColor(player);
       let mesh = this.playerMeshes.get(player.id);
       if (!mesh) {

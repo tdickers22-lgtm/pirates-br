@@ -263,6 +263,18 @@ const SKELETON_WAVE_LINGER_SECONDS = 85;
 const SKELETON_DEFEAT_DESPAWN_SECONDS = 2.25;
 const SKELETON_ISLAND_ACTIVATION_MARGIN = 70;
 const SKELETON_PLAYER_WAKE_RADIUS = 38;
+/** THE WHOLE MAP MAY NOT RISE AT ONCE (review-6 P1).
+ *  A garrison used to wake for a HUMAN only, so at most one or two islands were
+ *  ever armed. Now any crew wakes it (bots-09) and 9-12 bot crews go ashore, so
+ *  5-8 of the 14 islands can be active together: 12-32 extra skeletons, ceiling
+ *  ~45. Each one is a Player in the snapshot AND a 22-26-draw procedural body on
+ *  the client (makePlayerRig refuses the skeleton variant), which is hundreds of
+ *  draw calls against a 380-draw low-tier scene. This is the global ceiling on
+ *  live skeletons; islands with a crew closest to them get the budget first, and
+ *  an island that misses out keeps its expired timer and takes the next opening
+ *  rather than losing its turn. 10 ≈ the pre-bots-09 worst case (two big
+ *  islands, 4+3 plus stragglers). */
+const SKELETON_LIVE_CAP = 10;
 /** Static world (islands + seaRocks) rides every 4th full snapshot (~2.6 Hz) —
  *  it is immutable apart from chest/barrel state, which also has explicit events. */
 // Statics ride the 'join' message, and the websocket is TCP (no loss), so the
@@ -7470,6 +7482,10 @@ export class Match {
       this.state.players = retainedPlayers;
     }
 
+    // Islands whose timer expired this tick, nearest crew first. They are
+    // collected rather than spawned in place so the global cap can spend its
+    // budget on the garrison somebody is actually standing in.
+    const ready: { island: Island; waveSize: number; crewDist: number }[] = [];
     for (const island of this.state.islands) {
       const waveSize = this.getSkeletonWaveSize(island);
       if (waveSize <= 0) continue;
@@ -7495,11 +7511,30 @@ export class Match {
 
       timer -= dt;
       if (timer <= 0) {
-        this.spawnSkeletonWave(island, waveSize);
-        timer = randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX, this.rng);
-        playersChanged = true;
+        ready.push({
+          island,
+          waveSize,
+          crewDist: this.nearestCrewDistance(island.position.x, island.position.z),
+        });
       }
       this.skeletonWaveTimers.set(island.id, timer);
+    }
+
+    if (ready.length > 0) {
+      let live = this.countLiveSkeletons();
+      ready.sort((a, b) => a.crewDist - b.crewDist);
+      for (const candidate of ready) {
+        // Over budget: leave the timer expired so this island rises the moment
+        // another garrison is put back down, instead of waiting a fresh cooldown.
+        if (live + candidate.waveSize > SKELETON_LIVE_CAP) continue;
+        this.spawnSkeletonWave(candidate.island, candidate.waveSize);
+        live += candidate.waveSize;
+        playersChanged = true;
+        this.skeletonWaveTimers.set(
+          candidate.island.id,
+          randRange(SKELETON_WAVE_COOLDOWN_MIN, SKELETON_WAVE_COOLDOWN_MAX, this.rng),
+        );
+      }
     }
 
     if (playersChanged) {
@@ -7600,6 +7635,31 @@ export class Match {
     if (island.radius > 52) return 2;
     if (island.radius > 42) return 1;
     return 0;
+  }
+
+  /** Every skeleton still on its feet anywhere on the map — the quantity
+   *  SKELETON_LIVE_CAP bounds. */
+  private countLiveSkeletons() {
+    let count = 0;
+    for (const player of this.state.players) {
+      if (!this.skeletonHomes.has(player.id)) continue;
+      if (player.state === 'eliminated' || player.state === 'respawning' || player.health <= 0) continue;
+      count++;
+    }
+    return count;
+  }
+
+  /** Distance to the nearest living non-skeleton, or Infinity if the island is
+   *  deserted. hasCrewNearPoint's answer with a number attached. */
+  private nearestCrewDistance(x: number, z: number) {
+    let best = Number.POSITIVE_INFINITY;
+    for (const player of this.state.players) {
+      if (this.isSkeletonPlayer(player)) continue;
+      if (player.state === 'eliminated' || player.state === 'respawning' || player.health <= 0) continue;
+      const d = dist2D(player.position.x, player.position.z, x, z);
+      if (d < best) best = d;
+    }
+    return best;
   }
 
   private countActiveSkeletonsOnIsland(islandId: string) {

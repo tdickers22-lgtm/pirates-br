@@ -150,6 +150,7 @@ export const LOGIC = [
   quick(tsx('test-shark-spawn-curve.mjs')),
   quick(tsx('test-station-spacing.mjs')),
   quick(tsx('test-block.mjs')),
+  quick(tsx('test-skeleton-crowd.mjs')),
   quick(tsx('test-deck-safety.mjs')),
   quick(tsx('test-stats.mjs')),
   quick(tsx('test-dock-frame.mjs')),
