@@ -122,6 +122,9 @@ export interface MergedAsset {
 export class AssetLibrary {
   private scenes = new Map<AssetKey, THREE.Group>();
   private merged = new Map<AssetKey, MergedAsset>();
+  /** Animation clips per asset — GLTFLoader hands them back beside the scene,
+   *  not on it, so they would otherwise be dropped on the floor. */
+  private clips = new Map<AssetKey, THREE.AnimationClip[]>();
   private boundsCache = new Map<AssetName, THREE.Box3>();
   /** Geometries/materials owned by the library (shared across clones) — must never be disposed by callers. */
   private sharedResources = new WeakSet<object>();
@@ -239,6 +242,7 @@ export class AssetLibrary {
           }
         });
         this.scenes.set(key, root);
+        if (gltf.animations.length) this.clips.set(key, gltf.animations);
     };
     await Promise.all([
       ...names.map(async (name) => {
@@ -308,6 +312,17 @@ export class AssetLibrary {
     const src = this.scenes.get(name);
     if (!src) return null;
     return src.clone(true);
+  }
+
+  /** The LOADED source scene (not a clone) and its clips. For skinned assets
+   *  only: THREE.Object3D.clone() copies a SkinnedMesh's skeleton BY REFERENCE,
+   *  so every clone would pose off the source's bones — which are not in any
+   *  scene and never update — and all four sharks would share one pose. Such a
+   *  caller clones with SkeletonUtils instead (FAUNAGLB-01). */
+  source(name: AssetName): { scene: THREE.Group; animations: THREE.AnimationClip[] } | null {
+    const scene = this.scenes.get(name);
+    if (!scene) return null;
+    return { scene, animations: this.clips.get(name) ?? [] };
   }
 
   /** A clone of the decimated far sibling (`<name>_far.glb`), or null when the
