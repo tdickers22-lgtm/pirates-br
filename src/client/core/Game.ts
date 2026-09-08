@@ -953,6 +953,16 @@ export class Game {
       getCutlassSwingProgress: (player) => this.getCutlassSwingProgress(player),
       // RIG-01: the skinned pirate's mixer is stepped less often with range.
       get camera() { return self.renderer.camera; },
+      // ANIMPOL: the surface under each boot, off the ground the player can SEE
+      // (getSeatSurfaceY is the same drawn GridGround the props are seated on),
+      // so a pirate ashore stands on the hillside instead of on a flat plane.
+      groundYAt(x, z) {
+        for (const island of self.state?.islands ?? []) {
+          if (!isPointInsideIslandFootprint(island, x, z, 4)) continue;
+          return getSeatSurfaceY(island, x, z);
+        }
+        return null;
+      },
     };
   }
 
