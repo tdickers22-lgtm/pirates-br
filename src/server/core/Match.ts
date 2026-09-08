@@ -4363,6 +4363,9 @@ export class Match {
     }>();
 
     for (const trace of traces) {
+      // The BANG, before the ball: every animal within SHOT_ALERT_RADIUS of the
+      // muzzle bolts whether or not this trace found anything (WILD-01).
+      this.fauna.alertToShot(this.state, trace.origin.x, trace.origin.z);
       // Terrain and ship hulls clamp the trace before any target test — a hit
       // beyond the first solid surface never lands.
       const occlusionDistance = this.getFirearmOcclusionDistance(shooter, trace);

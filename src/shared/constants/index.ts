@@ -584,6 +584,54 @@ export const WILDLIFE = {
     pig: 'pork shank',
     gull: 'gull cut',
   },
+  // ── Awareness (WILD-01, islandworld-07) ──────────────────────────────────
+  /** How close a pirate gets before the animal bolts, metres. A crab lets you
+   *  nearly step on it; a gull is off at nine. */
+  FLEE_RADIUS: {
+    crab: 4,
+    chicken: 6,
+    pig: 7,
+    gull: 9,
+  },
+  /** A gunshot spooks EVERYTHING inside this radius of the muzzle. */
+  SHOT_ALERT_RADIUS: 25,
+  /** How long an animal stays spooked after the last scare, seconds. */
+  ALERT_SECONDS: 3,
+  /** Panic gait multiplier on SPEED while alerted. */
+  FLEE_SPEED_MULT: 1.8,
+  /** A crab does not run: it stops dead and burrows for this long. */
+  CRAB_BURROW_SECONDS: 2.4,
+  /** How long a carcass lies where it fell before it fades (islandworld-09). */
+  CARCASS_SECONDS: 20,
+  // ── Walking rules (WILD-01 slice c, islandworld-11/32/34, physics-31) ────
+  /** Ground shallower than this is sea, beach apron or archipelago saddle and
+   *  the wander walker refuses it. Crabs work the waterline, so they get less. */
+  MIN_GROUND_Y: {
+    crab: 0.2,
+    chicken: 0.6,
+    pig: 0.6,
+    gull: 0.6,
+  },
+  /** Steepest |rise|/|run| a step may take (0.7 ≈ 35°): animals graze flanks,
+   *  they do not free-climb summits. */
+  MAX_STEP_SLOPE: 0.7,
+  /** Clearance kept from a cave mouth footprint — the same pad spawn uses. */
+  CAVE_PAD: 0.5,
+  // ── Gulls (WILD-01 slice b, islandworld-08) ──────────────────────────────
+  GULL: {
+    PERCH_MIN: 6,
+    PERCH_MAX: 20,
+    CIRCLE_MIN: 10,
+    CIRCLE_MAX: 30,
+    RADIUS_MIN: 12,
+    RADIUS_MAX: 25,
+    ALTITUDE_MIN: 8,
+    ALTITUDE_MAX: 15,
+    /** rad/s round the circle centre. */
+    ANGULAR_SPEED: 0.5,
+    /** Seconds a gull takes to climb to / settle from its circling altitude. */
+    CLIMB_RATE: 5.5,
+  },
 } as const;
 
 export const SEA_ROCKS = {

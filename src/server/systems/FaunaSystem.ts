@@ -1,5 +1,5 @@
 import { v4 as uuid } from 'uuid';
-import type { GameState, Player, Vec3, WildlifeAnimal } from '../../shared/types/index.js';
+import type { GameState, Island, Player, Vec3, WildlifeAnimal } from '../../shared/types/index.js';
 import { SHARK, WILDLIFE, WORLD } from '../../shared/constants/index.js';
 import { dist2D, getIslandSurfaceY, isPointInsideIslandFootprint, randRange } from '../../shared/utils/index.js';
 
@@ -227,13 +227,104 @@ export class FaunaSystem {
     }
   }
 
-  updateWildlife(dt: number, state: GameState) {
+  /**
+   * A gunshot is the loudest thing on an island: everything inside
+   * SHOT_ALERT_RADIUS of the muzzle bolts, whether or not the ball found it
+   * (islandworld-07). Called once per firearm trace from Match.
+   */
+  alertToShot(state: GameState, x: number, z: number) {
     const t = this.hooks.now();
+    const r2 = WILDLIFE.SHOT_ALERT_RADIUS * WILDLIFE.SHOT_ALERT_RADIUS;
     for (const animal of state.wildlife) {
       if (animal.health <= 0) continue;
+      const dx = animal.position.x - x;
+      const dz = animal.position.z - z;
+      if (dx * dx + dz * dz > r2) continue;
+      this.spook(animal, x, z, t);
+    }
+  }
+
+  /** Mark an animal spooked and remember what spooked it. */
+  private spook(animal: WildlifeAnimal, fromX: number, fromZ: number, t: number) {
+    animal.alertUntil = t + WILDLIFE.ALERT_SECONDS;
+    animal.fleeX = fromX;
+    animal.fleeZ = fromZ;
+    // A spooked gull is a gull ON THE WING, always.
+    if (animal.type === 'gull' && animal.gullState !== 'circling') {
+      animal.gullState = 'circling';
+      animal.gullTimer = WILDLIFE.GULL.CIRCLE_MIN;
+      animal.gullRadius = animal.gullRadius ?? WILDLIFE.GULL.RADIUS_MIN;
+      animal.gullAltitude = animal.gullAltitude ?? WILDLIFE.GULL.ALTITUDE_MIN;
+      animal.gullAngle = animal.gullAngle ?? Math.atan2(
+        animal.position.z - animal.spawnPosition.z,
+        animal.position.x - animal.spawnPosition.x,
+      );
+    }
+  }
+
+  /**
+   * Nearest ALIVE pirate on foot inside this animal's flee radius, if any.
+   * One squared-distance pass per animal per tick (70 x 12 multiplies at 30 Hz
+   * on the server, nothing on any client tier).
+   */
+  private senseThreat(animal: WildlifeAnimal, players: Player[], t: number) {
+    const r = WILDLIFE.FLEE_RADIUS[animal.type];
+    const r2 = r * r;
+    let bestD2 = r2;
+    let bestX = 0;
+    let bestZ = 0;
+    let found = false;
+    for (const p of players) {
+      if (p.state !== 'alive') continue;
+      const dx = p.position.x - animal.position.x;
+      const dz = p.position.z - animal.position.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= bestD2) continue;
+      bestD2 = d2;
+      bestX = p.position.x;
+      bestZ = p.position.z;
+      found = true;
+    }
+    if (found) this.spook(animal, bestX, bestZ, t);
+  }
+
+  updateWildlife(dt: number, state: GameState) {
+    const t = this.hooks.now();
+    const players = state.players;
+    let expired = false;
+
+    for (const animal of state.wildlife) {
+      // ── Carcasses (islandworld-09) ───────────────────────────────────────
+      // A shot pig used to be deleted the same tick and the client painted the
+      // SHARK death bloom over the hole it left. Now it lies where it fell.
+      if (animal.health <= 0) {
+        if (animal.deadAt === undefined) {
+          animal.deadAt = t;
+          animal.dead = true;
+          animal.alert = undefined;
+          animal.alertUntil = undefined;
+          animal.velocity.x = 0;
+          animal.velocity.y = 0;
+          animal.velocity.z = 0;
+        }
+        if (t - animal.deadAt > WILDLIFE.CARCASS_SECONDS) expired = true;
+        continue;
+      }
+
       const island = state.islands.find((candidate) => candidate.id === animal.islandId);
       if (!island) {
         animal.health = 0;
+        continue;
+      }
+
+      // ── Awareness (islandworld-07) ───────────────────────────────────────
+      this.senseThreat(animal, players, t);
+      const alerted = (animal.alertUntil ?? 0) > t;
+      // Wire bit: `undefined` when calm, so a calm world costs zero bytes.
+      animal.alert = alerted ? true : undefined;
+
+      if (animal.type === 'gull') {
+        this.updateGull(animal, island, dt, alerted);
         continue;
       }
 
@@ -244,16 +335,32 @@ export class FaunaSystem {
         animal.wanderAngle = farFromHome
           ? homeAngle + randRange(-0.55, 0.55, this.rng)
           : animal.wanderAngle + randRange(-1.35, 1.35, this.rng);
-        animal.wanderTimer = randRange(0.7, animal.type === 'gull' ? 2.0 : 3.0, this.rng);
+        animal.wanderTimer = randRange(0.7, 3.0, this.rng);
       }
 
-      const speed = WILDLIFE.SPEED[animal.type];
-      const moveScale = animal.type === 'crab' ? (0.55 + Math.abs(Math.sin(t * 3.5 + animal.position.x)) * 0.55) : 1;
+      // A crab does not run: it stops dead and burrows (islandworld-07).
+      const burrowing = alerted && animal.type === 'crab';
+      if (alerted && !burrowing) {
+        // Re-aimed every tick so a pirate who keeps walking keeps being fled
+        // FROM, instead of the animal running a fixed bearing into him.
+        animal.wanderAngle = Math.atan2(
+          animal.position.z - (animal.fleeZ ?? animal.position.z),
+          animal.position.x - (animal.fleeX ?? animal.position.x),
+        );
+        animal.wanderTimer = Math.max(animal.wanderTimer, 0.25);
+      }
+
+      const speed = burrowing
+        ? 0
+        : WILDLIFE.SPEED[animal.type] * (alerted ? WILDLIFE.FLEE_SPEED_MULT : 1);
+      const moveScale = animal.type === 'crab' && !alerted
+        ? (0.55 + Math.abs(Math.sin(t * 3.5 + animal.position.x)) * 0.55)
+        : 1;
       const vx = Math.cos(animal.wanderAngle) * speed * moveScale;
       const vz = Math.sin(animal.wanderAngle) * speed * moveScale;
       const nextX = animal.position.x + vx * dt;
       const nextZ = animal.position.z + vz * dt;
-      const allowed = isPointInsideIslandFootprint(island, nextX, nextZ, animal.type === 'gull' ? -4 : -2);
+      const allowed = speed > 0 && isPointInsideIslandFootprint(island, nextX, nextZ, -2);
 
       if (allowed) {
         animal.position.x = nextX;
@@ -261,22 +368,117 @@ export class FaunaSystem {
         animal.velocity.x = vx;
         animal.velocity.z = vz;
       } else {
-        animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
+        if (speed > 0) animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
         animal.velocity.x = 0;
         animal.velocity.z = 0;
       }
 
-      const groundY = getIslandSurfaceY(island, animal.position.x, animal.position.z);
-      animal.position.y = animal.type === 'gull'
-        ? groundY + 1.8 + Math.sin(t * 3.2 + animal.position.x * 0.04) * 0.35
-        : groundY + 0.06;
+      animal.position.y = getIslandSurfaceY(island, animal.position.x, animal.position.z) + 0.06;
 
       if (Math.abs(animal.velocity.x) + Math.abs(animal.velocity.z) > 0.01) {
         animal.rotation = Math.atan2(animal.velocity.x, animal.velocity.z);
       }
     }
 
-    state.wildlife = state.wildlife.filter((animal: WildlifeAnimal) => animal.health > 0);
+    // Only when something actually aged out — the old unconditional filter
+    // allocated a fresh 70-element array 30 times a second forever.
+    if (expired) {
+      state.wildlife = state.wildlife.filter(
+        (animal: WildlifeAnimal) => animal.health > 0 || t - (animal.deadAt ?? t) <= WILDLIFE.CARCASS_SECONDS,
+      );
+    }
   }
 
+  /**
+   * Gulls fly (islandworld-08). A gull used to hover at a fixed 1.8 m over the
+   * terrain and follow its contour like a drone; now it alternates PERCHED (on
+   * the ground, wings tucked, pottering) and CIRCLING (8-15 m up, a 12-25 m
+   * ring round its spawn at 0.5 rad/s), and anything that spooks it puts it on
+   * the wing immediately.
+   */
+  private updateGull(animal: WildlifeAnimal, island: Island, dt: number, alerted: boolean) {
+    const G = WILDLIFE.GULL;
+    if (!animal.gullState) {
+      animal.gullState = 'perched';
+      animal.gullTimer = randRange(0, G.PERCH_MAX, this.rng);
+      animal.gullRadius = randRange(G.RADIUS_MIN, G.RADIUS_MAX, this.rng);
+      animal.gullAltitude = randRange(G.ALTITUDE_MIN, G.ALTITUDE_MAX, this.rng);
+      animal.gullAngle = Math.atan2(
+        animal.position.z - animal.spawnPosition.z,
+        animal.position.x - animal.spawnPosition.x,
+      );
+    }
+
+    animal.gullTimer = (animal.gullTimer ?? 0) - dt;
+    if (animal.gullTimer <= 0 && !alerted) {
+      if (animal.gullState === 'perched') {
+        animal.gullState = 'circling';
+        animal.gullTimer = randRange(G.CIRCLE_MIN, G.CIRCLE_MAX, this.rng);
+        animal.gullRadius = randRange(G.RADIUS_MIN, G.RADIUS_MAX, this.rng);
+        animal.gullAltitude = randRange(G.ALTITUDE_MIN, G.ALTITUDE_MAX, this.rng);
+      } else {
+        animal.gullState = 'perched';
+        animal.gullTimer = randRange(G.PERCH_MIN, G.PERCH_MAX, this.rng);
+      }
+    }
+
+    const prevX = animal.position.x;
+    const prevZ = animal.position.z;
+
+    if (animal.gullState === 'circling') {
+      const angular = G.ANGULAR_SPEED * (alerted ? 1.6 : 1);
+      animal.gullAngle = (animal.gullAngle ?? 0) + angular * dt;
+      const radius = animal.gullRadius ?? G.RADIUS_MIN;
+      animal.position.x = animal.spawnPosition.x + Math.cos(animal.gullAngle) * radius;
+      animal.position.z = animal.spawnPosition.z + Math.sin(animal.gullAngle) * radius;
+      const base = Math.max(getIslandSurfaceY(island, animal.position.x, animal.position.z), 0.2);
+      const targetY = base + (animal.gullAltitude ?? G.ALTITUDE_MIN);
+      animal.position.y = approach(animal.position.y, targetY, G.CLIMB_RATE * dt);
+    } else {
+      const ground = getIslandSurfaceY(island, animal.position.x, animal.position.z);
+      const settled = animal.position.y <= ground + 0.35;
+      if (!settled) {
+        // Gliding down to the spot: no ground walking in mid-air.
+        const dx = animal.spawnPosition.x - animal.position.x;
+        const dz = animal.spawnPosition.z - animal.position.z;
+        const d = Math.hypot(dx, dz) || 1;
+        const glide = WILDLIFE.SPEED.gull * 0.6 * dt;
+        if (d > glide) {
+          animal.position.x += (dx / d) * glide;
+          animal.position.z += (dz / d) * glide;
+        }
+        animal.position.y = approach(animal.position.y, ground + 0.05, G.CLIMB_RATE * dt);
+      } else {
+        // Pottering: a quarter-speed shuffle so a perched gull is not a statue.
+        animal.wanderTimer -= dt;
+        if (animal.wanderTimer <= 0) {
+          animal.wanderAngle += randRange(-1.35, 1.35, this.rng);
+          animal.wanderTimer = randRange(0.7, 2.0, this.rng);
+        }
+        const step = WILDLIFE.SPEED.gull * 0.22 * dt;
+        const nextX = animal.position.x + Math.cos(animal.wanderAngle) * step;
+        const nextZ = animal.position.z + Math.sin(animal.wanderAngle) * step;
+        if (isPointInsideIslandFootprint(island, nextX, nextZ, -2)) {
+          animal.position.x = nextX;
+          animal.position.z = nextZ;
+        } else {
+          animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
+        }
+        animal.position.y = getIslandSurfaceY(island, animal.position.x, animal.position.z) + 0.05;
+      }
+    }
+
+    animal.velocity.x = (animal.position.x - prevX) / Math.max(dt, 1e-4);
+    animal.velocity.z = (animal.position.z - prevZ) / Math.max(dt, 1e-4);
+    if (Math.abs(animal.velocity.x) + Math.abs(animal.velocity.z) > 0.01) {
+      animal.rotation = Math.atan2(animal.velocity.x, animal.velocity.z);
+    }
+  }
+}
+
+/** Move `value` toward `target` by at most `maxStep`. */
+function approach(value: number, target: number, maxStep: number): number {
+  const d = target - value;
+  if (Math.abs(d) <= maxStep) return target;
+  return value + Math.sign(d) * maxStep;
 }
