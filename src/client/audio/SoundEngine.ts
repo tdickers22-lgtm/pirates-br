@@ -365,6 +365,38 @@ export function thunderArrivalDelay(distanceM: number): number {
   return d / 343;
 }
 
+/** One drip's clock: when it next falls, where it sits in the stereo field and
+ *  how bright the plink is. */
+export interface CaveDripVoice { nextAt: number; pan: number; base: number }
+
+/** Metres of `caveAmount` below which a cave is not caveish enough to drip. */
+export const CAVE_DRIP_MIN_AMOUNT = 0.35;
+
+/**
+ * The cave drip bed, as a PURE function of a clock so it can be graded without
+ * a Web Audio context (scripts/test-cave-audio.mjs). Batches one second ahead,
+ * exactly like the cricket scheduler it is modelled on, and jitters each
+ * interval 0.8-4.0 s so two voices never lock into a metronome — a grid of
+ * drips is the thing that gives a synthesised cave away.
+ */
+export function scheduleCaveDrips(
+  voices: CaveDripVoice[],
+  now: number,
+  amount: number,
+  emit: (at: number, base: number, pan: number, level: number) => void,
+  rand: () => number = Math.random,
+): void {
+  if (amount <= CAVE_DRIP_MIN_AMOUNT) return;
+  const level = (amount - CAVE_DRIP_MIN_AMOUNT) / (1 - CAVE_DRIP_MIN_AMOUNT);
+  for (const voice of voices) {
+    if (voice.nextAt < now) voice.nextAt = now + rand() * 1.2;
+    while (voice.nextAt < now + 1) {
+      emit(voice.nextAt, voice.base * (0.86 + rand() * 0.3), voice.pan, level);
+      voice.nextAt += 0.8 + rand() * 3.2;
+    }
+  }
+}
+
 export class SoundEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -463,11 +495,17 @@ export class SoundEngine {
 
   // ── Schedulers (lookahead batches, driven per frame by setAmbience) ─
   private cricketLevel = 0;
+  /** Drip voices scheduled since boot — the audio gate's only observable. */
+  caveDrips = 0;
   private readonly cricketVoices = [
     { nextAt: 0, pan: -0.45, base: 4200 },
     { nextAt: 0, pan: 0.5, base: 4550 },
   ];
   private nextRainDropAt = 0;
+  private readonly caveDripVoices: CaveDripVoice[] = [
+    { nextAt: 0, pan: -0.55, base: 1900 },
+    { nextAt: 0, pan: 0.6, base: 2450 },
+  ];
   private nextBubbleAt = 0;
   private nextCreakAt = 0;
   private lastHeel = 0;
@@ -2328,6 +2366,16 @@ export class SoundEngine {
         }
       }
     }
+    // Cave drips. Entering a cave used to change the reverb TAIL and nothing
+    // else (islandworld-05): a silent room with a long echo reads as a bug, not
+    // as underground. Two voices on their own clocks, like the crickets.
+    scheduleCaveDrips(this.caveDripVoices, now, this.caveAmount, (at, base, pan, level) => {
+      this.caveDrips += 1;
+      // Short filtered-noise plink through the cave wet path, so the drip
+      // inherits the same convolver the world does.
+      this.playNoise(at, 0.006, base, 9, 0.05 * level, 'bandpass', this.busBed ?? undefined, pan);
+      this.playNoise(at + 0.035, 0.05, base * 0.42, 3, 0.014 * level, 'bandpass', this.busBed ?? undefined, pan);
+    });
     // Rain drumming on the deck overhead.
     if (this.rainLevel > 0.1 && this.aboardShip) {
       if (this.nextRainDropAt < now) this.nextRainDropAt = now;

@@ -202,6 +202,9 @@ export const LOGIC = [
   quick(tsx('test-reach-vocabulary.mjs')),
   quick(tsx('test-story-delivery.mjs')),
   quick(tsx('test-shanty-grammar.mjs')),
+  // CAVE-01 (islandworld-05): the cave drip bed, on a fake clock — pure, so no
+  // AudioContext and no stack. PIRATES_BR_MUTATE_DRIP=grid proves it can fail.
+  quick(tsx('test-cave-audio.mjs')),
   quick(tsx('test-coast-wobble.mjs')),
   quick(tsx('test-death-causes.mjs')),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
