@@ -610,9 +610,7 @@ console.log('\n── the mouth is a hole: drawn-mesh air matches collision air 
     // The DRAWN terrain, exactly as the client builds it at full quality.
     const field = buildTerrainHeightfield({
       island,
-      islandMaxR: getIslandMaxRadius(island),
-      lowDetail: false,
-      visualDetail: 1,
+      withAO: false,
       surfacePoint: (d, angle, extraY = 0) => {
         const p = getIslandSurfacePoint(island, d, angle, extraY);
         return { x: p.x - island.position.x, y: p.y, z: p.z - island.position.z };
@@ -629,7 +627,7 @@ console.log('\n── the mouth is a hole: drawn-mesh air matches collision air 
     });
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(field.positions, 3));
-    geo.setIndex(field.indices);
+    geo.setIndex(new THREE.BufferAttribute(field.indices, 1));
     const ground = new MeshGround(geo);
 
     for (const m of mouths) {

@@ -8,6 +8,8 @@
  */
 import * as THREE from 'three';
 import { getIslandCoastWeights } from '../../../shared/utils/index.js';
+import { buildTerrainGrid, coastWobble } from '../../../shared/terrainGrid.js';
+import type { Island } from '../../../shared/types/index.js';
 import {
   buildCaveCutout, caveCutoutGlsl, caveCutoutUniforms, type CaveCutout,
 } from './CaveMouthCutout.js';
@@ -357,182 +359,80 @@ function applyTerrainDetail(
 }
 
 /**
- * COAST WOBBLE — why every island sat in a mathematically perfect turquoise disc.
- *
- * The terrain cap is sampled on concentric rings of the footprint ellipse, and
- * the outermost ring is a fixed distRatio. So the shallow shelf — the pale disc
- * you read an island's edge by from the air — ended on an exact ellipse on
- * every island on the map, and the 2.4-6m terraces the shared heightfield cuts
- * into a cliff coast came out as concentric arcs: the "cake steps". Neither is
- * a heightfield fault. Both are a SAMPLING fault, and this is the sampling fix.
- *
- * The ring radius gains a low-order angular wobble and the vertex is then
- * resampled from the shared field at its new place — so every drawn vertex
- * still lies EXACTLY on `getIslandSurfaceY`, the drawn ground and the ground
- * physics stands you on cannot drift apart, and not one line of shared math is
- * touched. Frequencies stop at 7 because the 44-segment shore skirt and the
- * 30-segment LOD proxy have to trace the SAME curve or a seam opens between
- * them — which is why this is a module function all three call.
- *
- * Amplitude ramps in from the interior, so nothing moves under the ground the
- * player walks on or the props are seated on, and peaks out on the shelf where
- * the disc rim actually is.
+ * The coast wobble and the vertex grid itself moved to `src/shared/terrainGrid.ts`
+ * under GRID-01: the server now stands the player on these exact triangles, so
+ * the grid cannot live in the renderer any more. Re-exported here because the
+ * skirt, the LOD proxy and `scripts/test-coast-wobble.mjs` call it by this name.
  */
-export function coastWobble(island: { profile: { ridgeAxis: number; primaryHillAngle: number } }, distRatio: number, angle: number): number {
-  const ramp = THREE.MathUtils.smoothstep(distRatio, 0.42, 1.06);
-  if (ramp <= 0) return distRatio;
-  const s = (island.profile.ridgeAxis + island.profile.primaryHillAngle) * 3.1;
-  const w = Math.sin(angle * 2 + s) * 0.078
-    + Math.sin(angle * 3 - s * 1.7) * 0.052
-    + Math.sin(angle * 5 + s * 0.6) * 0.032
-    + Math.sin(angle * 7 - s * 2.3) * 0.020;
-  // The rings must stay ORDERED — d(out)/d(in) > 0 — or a quad folds through
-  // its neighbour. With |w| ≤ 0.182 and the ramp spread over 0.64 of distRatio
-  // (max slope 2.34) the worst case is 1 − 0.182 − 1.06·0.182·2.34 ≈ 0.33.
-  // Raise the amplitudes or narrow the ramp and that budget is what breaks.
-  return distRatio * (1 + w * ramp);
-}
+export { coastWobble };
 
-/** One island's terrain heightfield: the polar vertex grid, its quad indices and
- *  the per-vertex mouth-carve depth. Pure — no THREE.Mesh, no materials, no
- *  colours — so the DRAWN surface can be rebuilt outside a browser and asserted
- *  against (scripts/test-cave-walk.mjs samples it through MeshGround to prove
- *  that where collision says air, the mesh either has no triangle or the mouth
- *  cutout discards it). `buildTerrainMesh` is its only other caller, so the mesh
- *  the player looks at and the mesh the suite checks cannot drift apart. */
+/** One island's terrain heightfield: the polar vertex grid, its triangle
+ *  indices, the per-vertex mouth-carve depth and the baked vertex AO. Pure — no
+ *  THREE.Mesh, no materials, no colours — and now built in SHARED code at ONE
+ *  fixed resolution, so `buildTerrainMesh`, `scripts/test-cave-walk.mjs` and the
+ *  server's GridGround all read the same surface at every quality tier. */
 export type TerrainField = {
-  readonly positions: number[];
-  readonly indices: number[];
+  readonly positions: Float32Array;
+  readonly indices: Uint32Array;
   /** Parallel to positions/3: how deep the mouth carve cut that vertex. */
-  readonly mouthCarveDepth: number[];
-  readonly angularSegments: number;
+  readonly mouthCarveDepth: Float32Array;
+  /** Parallel to positions/3: baked hemisphere AO, 1 = open sky. */
+  readonly ao: Float32Array | null;
+  /** First vertex of each ring (length rings + 2, last = vertex count). */
+  readonly ringStart: Uint32Array;
+  /** Segment count of each ring; ring 0 is the single apex vertex. */
+  readonly ringSegments: Uint32Array;
   readonly totalRings: number;
   readonly shoreRingSpan: number;
   readonly ringDistRatio: (ring: number) => number;
 };
 
 export function buildTerrainHeightfield(args: {
-  island: { profile: { ridgeAxis: number; primaryHillAngle: number } };
-  islandMaxR: number;
-  lowDetail: boolean;
-  visualDetail: number;
+  island: Island;
   surfacePoint: (distRatio: number, angle: number, extraY?: number) => { x: number; y: number; z: number };
   carveCaveMouth: (worldX: number, worldZ: number, y: number) => { y: number; carved: number };
-  islandX: number;
-  islandZ: number;
+  /** Bake vertex AO (the mesh path); the pure suites can skip it. */
+  withAO?: boolean;
 }): TerrainField {
-  const { island, islandMaxR, lowDetail, visualDetail, surfacePoint, carveCaveMouth, islandX, islandZ } = args;
-  const positions: number[] = [];
-  const indices: number[] = [];
-  const mouthCarveDepth: number[] = [];
-  // Mesh density scales with the island's real footprint so the shared
-  // heightfield's fbm knolls, ridged cliff bands, and 2.4-6m terraces
-  // actually resolve instead of aliasing into a smooth dome. A 56x160 cap is
-  // ~9k verts — trivial for a landmark mesh.
-  const radialDetailStep = lowDetail ? 8 : visualDetail < 0.85 ? 5.5 : 4;
-  const angularDetailStep = lowDetail ? 11 : visualDetail < 0.85 ? 7 : 5;
-  const radialSegments = THREE.MathUtils.clamp(Math.round(islandMaxR / radialDetailStep), 16, 60);
-  const angularSegments = THREE.MathUtils.clamp(Math.round((Math.PI * 2 * islandMaxR) / angularDetailStep), 48, 176);
-  // Extra rings past the footprint follow the shared heightfield UNDERWATER
-  // (beach slides to −3m by distRatio ~1.15) so sand visibly walks into the
-  // sea — the old cap stopped at 1.0 and hid the walk-in slope behind a
-  // vertical rock curtain.
-  const shoreRings = lowDetail ? 3 : 5;
-  const shoreRingSpan = 0.16;
-  const totalRings = radialSegments + shoreRings;
-  const ringDistRatio = (ring: number): number => ring <= radialSegments
-    ? (ring === 0 ? 0 : Math.pow(ring / radialSegments, 0.9))
-    : 1 + ((ring - radialSegments) / shoreRings) * shoreRingSpan;
-
-  for (let ring = 0; ring <= totalRings; ring++) {
-    const distRatio = ringDistRatio(ring);
-    for (let segment = 0; segment <= angularSegments; segment++) {
-      const angle = (segment / angularSegments) * Math.PI * 2;
-      const point = surfacePoint(coastWobble(island, distRatio, angle), angle, 0.02);
-      const carve = carveCaveMouth(point.x + islandX, point.z + islandZ, point.y);
-      mouthCarveDepth.push(carve.carved);
-      positions.push(point.x, carve.y, point.z);
-    }
-  }
-
-  /**
-   * FEATHER THE TERRACE LIPS.
-   *
-   * The wobble breaks the treads' concentric geometry; this softens the risers
-   * themselves. Where a vertex sits far off the mean of its two RADIAL
-   * neighbours it is standing on the lip of a step, and a lip sampled once per
-   * ring is a hard 90° corner running the length of the coast — the other half
-   * of the "cake steps" read. Pull it a fraction toward that mean.
-   *
-   * Bounded twice over, because the drawn ground and the analytic field the
-   * player walks on must not part company: only on ground steeper than ~40°
-   * (where nothing stands and nothing is seated), and never by more than
-   * FEATHER_CAP. Underwater vertices are exempt from the slope gate — the
-   * submerged shelf is where the steps show worst from a deck — but keep the
-   * same cap.
-   */
-  {
-    const FEATHER_CAP = 0.42;
-    const stride = angularSegments + 1;
-    const smoothed = new Float32Array(positions.length / 3);
-    for (let ring = 0; ring <= totalRings; ring++) {
-      for (let segment = 0; segment <= angularSegments; segment++) {
-        const i = ring * stride + segment;
-        if (ring === 0 || ring === totalRings) { smoothed[i] = positions[i * 3 + 1]; continue; }
-        const yc = positions[i * 3 + 1];
-        const yIn = positions[(i - stride) * 3 + 1];
-        const yOut = positions[(i + stride) * 3 + 1];
-        const mean = (yIn + yOut) * 0.5;
-        // Radial run between the two neighbours, so "steep" is a real gradient
-        // rather than a height difference that depends on mesh density.
-        const dx = positions[(i + stride) * 3] - positions[(i - stride) * 3];
-        const dz = positions[(i + stride) * 3 + 2] - positions[(i - stride) * 3 + 2];
-        const run = Math.max(0.35, Math.hypot(dx, dz));
-        const grade = Math.abs(yOut - yIn) / run;
-        const gate = yc < 0.4 ? 1 : THREE.MathUtils.smoothstep(grade, 0.84, 1.5);
-        if (gate <= 0) { smoothed[i] = yc; continue; }
-        smoothed[i] = yc + THREE.MathUtils.clamp((mean - yc) * 0.5 * gate, -FEATHER_CAP, FEATHER_CAP);
-      }
-    }
-    // The angular seam vertex is a duplicate of segment 0 and must stay one
-    // point, or the coast splits along a meridian.
-    for (let ring = 0; ring <= totalRings; ring++) {
-      smoothed[ring * stride + angularSegments] = smoothed[ring * stride];
-    }
-    for (let i = 0; i < smoothed.length; i++) positions[i * 3 + 1] = smoothed[i];
-  }
-
-  for (let ring = 0; ring < totalRings; ring++) {
-    for (let segment = 0; segment < angularSegments; segment++) {
-      const a = ring * (angularSegments + 1) + segment;
-      const b = a + 1;
-      const c = a + angularSegments + 1;
-      const d = c + 1;
-      indices.push(a, c, b);
-      indices.push(b, c, d);
-    }
-  }
-  return { positions, indices, mouthCarveDepth, angularSegments, totalRings, shoreRingSpan, ringDistRatio };
+  const grid = buildTerrainGrid(args.island, {
+    surfacePoint: args.surfacePoint,
+    carveCaveMouth: args.carveCaveMouth,
+    withAO: args.withAO !== false,
+  });
+  return {
+    positions: grid.positions,
+    indices: grid.indices,
+    mouthCarveDepth: grid.mouthCarveDepth,
+    ao: grid.ao,
+    ringStart: grid.ringStart,
+    ringSegments: grid.ringSegments,
+    totalRings: grid.rings,
+    shoreRingSpan: grid.shoreRingSpan,
+    ringDistRatio: (ring: number) => grid.ringDist[Math.max(0, Math.min(grid.rings, ring))],
+  };
 }
+
 
 export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   const {
     host, island, group, r, rng, lowDetail, visualDetail, surfacePoint, carveCaveMouth,
-    isVolcanic, islandMaxR, whiteSand,
+    isVolcanic, whiteSand,
     sandColor, beachColor, cliffColor, grassColor, jungleColor, peakColor, mudColor, paletteRock,
   } = ctx;
   // The vertex grid + its carve depths (pure; shared with the regression suite).
-  const field = buildTerrainHeightfield({
-    island, islandMaxR, lowDetail, visualDetail, surfacePoint, carveCaveMouth,
-    islandX: island.position.x, islandZ: island.position.z,
-  });
+  // The vertex grid is SHARED and quality-independent (GRID-01): low, balanced
+  // and high get identical positions, and the tiers differ only in decoration
+  // and shading below. `lowDetail`/`visualDetail` no longer touch geometry.
+  const field = buildTerrainHeightfield({ island, surfacePoint, carveCaveMouth });
   const terrainPositions = field.positions;
   const terrainIndices = field.indices;
   /** Per-vertex carve depth (parallel to terrainPositions) — drives the cut
    *  faces' ROCK recolor in the color pass below (they'd read as floating
    *  grass-green slabs otherwise) and lets decor placement skip the trench. */
   const mouthCarveDepth = field.mouthCarveDepth;
-  const angularSegments = field.angularSegments;
+  const fieldAO = field.ao;
+  const ringStart = field.ringStart;
+  const ringSegments = field.ringSegments;
   const totalRings = field.totalRings;
   const shoreRingSpan = field.shoreRingSpan;
   const ringDistRatio = field.ringDistRatio;
@@ -565,7 +465,7 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
 
   const terrainGeometry = new THREE.BufferGeometry();
   terrainGeometry.setAttribute('position', new THREE.Float32BufferAttribute(terrainPositions, 3));
-  terrainGeometry.setIndex(terrainIndices);
+  terrainGeometry.setIndex(new THREE.BufferAttribute(terrainIndices, 1));
   terrainGeometry.computeVertexNormals();
 
   // Colors are computed after normals: slope (1 - normal.y) drives exposed
@@ -625,9 +525,11 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
   }));
   for (let ring = 0; ring <= totalRings; ring++) {
     const distRatio = ringDistRatio(ring);
-    for (let segment = 0; segment <= angularSegments; segment++) {
-      const index = ring * (angularSegments + 1) + segment;
-      const angle = (segment / angularSegments) * Math.PI * 2;
+    const ringSegs = ringSegments[ring];
+    const ringBase = ringStart[ring];
+    for (let segment = 0; segment < ringSegs; segment++) {
+      const index = ringBase + segment;
+      const angle = (segment / ringSegs) * Math.PI * 2;
       const coast = getIslandCoastWeights(island, angle);
       const rockyCoast = coast.rocky + coast.cliff;
       const pointY = terrainPositions[index * 3 + 1];
@@ -772,8 +674,16 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
       // per-vertex grain. Warm the brighter patches, cool the darker ones.
       const fbm = groundFbm(worldX, worldZ) - 0.5;                       // -0.5..0.5
       const grain = (rng(ring * 113 + segment * 17) - 0.5) * (0.05 + sandiness * 0.05);
-      const bright = 1 + fbm * 0.26 + grain;
-      const warm = fbm * 0.05;
+      // ── AMBIENT OCCLUSION (graphics-06 phase 1). An unoccluded ambient term
+      // lit the inside of a cave-mouth trench and the crease between two crags
+      // exactly as brightly as an open beach — the "cardboard" read. The grid
+      // bakes a horizon estimate per vertex at build time, so this costs
+      // nothing per frame and no material or batching path changes: it is a
+      // multiply into the vertex colour the terrain already carries.
+      // mix(1, ao, 0.7) so full occlusion darkens to ~0.55x, never to black.
+      const occ = fieldAO ? 1 - (1 - fieldAO[index]) * 0.7 : 1;
+      const bright = (1 + fbm * 0.26 + grain) * occ;
+      const warm = fbm * 0.05 * occ;
       terrainColors.push(
         THREE.MathUtils.clamp(terrainColor.r * bright + warm, 0, 1),
         THREE.MathUtils.clamp(terrainColor.g * bright, 0, 1),

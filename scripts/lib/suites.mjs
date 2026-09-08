@@ -230,6 +230,11 @@ export const LOGIC = [
   // AudioContext and no stack. PIRATES_BR_MUTATE_DRIP=grid proves it can fail.
   quick(tsx('test-cave-audio.mjs')),
   quick(tsx('test-coast-wobble.mjs')),
+  // GRID-01 (w7.2): the ONE terrain grid — GridGround vs the drawn triangles
+  // within 1 mm, tier-independent positions, ring doubling, the 1.22 apron, a
+  // watertight stitch and the baked vertex AO. MUTATE=analytic|tier|nostitch
+  // proves each half can fail.
+  quick(tsx('test-terrain-grid.mjs')),
   quick(tsx('test-death-causes.mjs')),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
   // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens

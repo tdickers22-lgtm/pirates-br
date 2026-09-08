@@ -1344,6 +1344,26 @@ export function geyserEruptionLevel(geyser: IslandGeyser, t: number): number {
   return clamp(rise * fall, 0, 1);
 }
 
+/**
+ * THE APRON. The drawn cap, the swim seabed and the terrain raycast all used to
+ * stop at a different distRatio (1.155 / 1.22 / 1.03), which left a band of
+ * invisible sandbar you could stand on, a band of drawn rock you could shoot
+ * through, and a walk floor that switched off while the shore face was still
+ * 2-20 m above the sea. One number now, read by src/shared/terrainGrid.ts,
+ * src/shared/raycast.ts and PhysicsSystem.
+ */
+export const SHORE_APRON_DIST_RATIO = 1.22;
+
+/**
+ * How far past the polar footprint a walker keeps a floor, as a fraction of
+ * distRatio. Rocky coasts hold terrain to ~1.14 and cliff plinths to ~1.05, so
+ * a footprint test at exactly 1.0 dropped the pirate THROUGH the drawn shore
+ * face (physics-28: 60 of 305 dry-edge columns). The apron is the honest edge:
+ * out there the shared field is already below the waterline, so nobody walks on
+ * water — they walk down the sand and start swimming.
+ */
+export const WALK_FOOTPRINT_MARGIN = SHORE_APRON_DIST_RATIO - 1;
+
 export function isPointInsideIslandFootprint(island: Island, x: number, z: number, margin = 0): boolean {
   const { distRatio } = getIslandDistRatio(island, x, z);
   return distRatio <= 1 + margin / Math.max(island.radius, 1);
