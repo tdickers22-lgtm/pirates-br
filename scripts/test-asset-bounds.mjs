@@ -109,6 +109,12 @@ const PINNED_BASE = {
   wrecker_tower: -2.2, driftwood_log: -0.232, bone_pile: -0.113, tent_a: -0.063, tent_b: -0.132,
   tent_c: -0.131, flower_patch: -0.089, widow_memorial: -0.089, gibbet_cage: -0.066,
   rowboat: -0.092, shark: -0.48,
+  // Hero weapons (WEAPON-01) are HELD, not seated: their origin is the grip, so
+  // the pommel / butt plate hangs below it by design. The pin is still the same
+  // contract — a rebuild that moves the hand anchor fails here — it just pins a
+  // pivot instead of a skirt.
+  cutlass: -0.210, flintlock: -0.264, flintknock: -0.264,
+  eye_of_reach: -0.264, blunderbuss: -0.264,
 };
 const mutate = process.env.PIRATES_BR_MUTATE_BASE ?? '';
 if (mutate) {
