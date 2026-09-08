@@ -73,6 +73,11 @@ export const LOGIC = [
   // brightness step over an 8 m patch, worst modulation change per 1 cm of
   // height — off the GLSL strings the shaders are actually compiled from.
   quick(tsx('test-shader-lattice.mjs')),
+  // GFXPOL-01 (wave 8.2). The cloud deck's thickness: the spread of shading
+  // inside a cloud's silhouette, graded against the shipped 2-octave field as
+  // the control, plus the proof that the low tier's cloud field is still
+  // bit-identical to the one it had before the ladder existed.
+  quick(tsx('test-cloud-depth.mjs')),
   // WATER-01 (wave 3.4). The hull cut-out that keeps the exterior sea out of
   // the hold: the GLSL outline is parsed back out of OCEAN_FRAG and graded
   // against the shared getSwimHullHalfWidth, and setHullMasks' culling /
