@@ -29,8 +29,9 @@
 //
 // Runs headless: THREE + GLTFLoader work fine in Node, and a small fetch shim
 // serves /assets/models/*.glb off disk so preload() takes its real code path.
+import * as THREE from 'three';
 import { readFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -512,6 +513,151 @@ expect('merged geometry is registered as a shared resource (never disposed by ca
     progress.length === boot.length && progress.every(([, total]) => total === ASSET_NAMES.length)
       && progress[progress.length - 1][0] === boot.length,
     `${progress.length} ticks, last ${JSON.stringify(progress[progress.length - 1])}`);
+}
+
+// ── TEX-01 phase 2: the DETAIL FAMILY table (PLAN 2.4a) ────────────────────
+//
+// A triplanar detail set needs to know what a surface is made of, and the only
+// thing a shipped GLB still says about that is the Blender material NAME. So
+// the classification is a TABLE, and a table's whole failure mode is being
+// incomplete: the day an asset ships `Wood_Charred`, the shader would grain it
+// like a plank (family 0 -> no fetch, or worse, a wrong one) and nothing would
+// print. This section is what makes that loud.
+//
+// It grades three separate things, because they fail in different ways:
+//   1. COVERAGE — every material name on every shipped GLB has a row. Derived
+//      from the loaded assets, never from the table, so the table cannot grade
+//      itself.
+//   2. PARITY — the Blender-side table and the runtime table are the same rows.
+//      Two copies of a 108-row map WILL drift; this is the only thing that
+//      stops it, and it is a text parse of the .py so it cannot be fooled by an
+//      import shim.
+//   3. THE BAKE — with `bakeFamily`, every vertex of a chunk carries its own
+//      material's index; without it, no buffer is allocated at all (the low
+//      tier does not pay for an attribute nothing samples yet).
+{
+  const {
+    DETAIL_FAMILIES, MATERIAL_FAMILIES, FAMILY_ATTRIBUTE,
+    familyForMaterialName, familyIndexForMaterialName, collapseChunks,
+  } = await import('../src/client/assets/AssetMaterialCollapse.ts');
+
+  // 1. COVERAGE, read out of the SHIPPED FILES rather than out of the library.
+  //    `assets` only preloads the island set; the ship hardware and hero GLBs
+  //    are loaded elsewhere and carry material names too (`Atlas_wheel`,
+  //    `Glass_Flame.001`), so grading the library would leave five rows
+  //    ungraded and would call a genuinely-shipped material an orphan. The GLB
+  //    JSON chunk is enough and needs no loader.
+  const glbMaterialNames = () => {
+    const byName = new Map(); // material name -> the files that carry it
+    const dir = path.join(ROOT, 'public/assets/models');
+    for (const file of readdirSync(dir).filter((f) => f.endsWith('.glb'))) {
+      const buf = readFileSync(path.join(dir, file));
+      const jsonLength = buf.readUInt32LE(12);
+      const gltf = JSON.parse(buf.subarray(20, 20 + jsonLength).toString('utf8'));
+      for (const mat of gltf.materials ?? []) {
+        const list = byName.get(mat.name) ?? [];
+        if (!list.includes(file)) list.push(file);
+        byName.set(mat.name, list);
+      }
+    }
+    return byName;
+  };
+  const shipped = glbMaterialNames();
+  const glbFiles = readdirSync(path.join(ROOT, 'public/assets/models')).filter((f) => f.endsWith('.glb'));
+  const unclassified = [...shipped].filter(([name]) => !familyForMaterialName(name));
+  expect(`every material name on all ${glbFiles.length} shipped GLBs has a detail family`,
+    unclassified.length === 0,
+    `${unclassified.length} unclassified: `
+    + unclassified.slice(0, 8).map(([m, f]) => `${m} (${f[0]})`).join(', '));
+  expect('every family in the table is one of the nine declared families',
+    Object.values(MATERIAL_FAMILIES).every((f) => DETAIL_FAMILIES.includes(f)),
+    [...new Set(Object.values(MATERIAL_FAMILIES))].filter((f) => !DETAIL_FAMILIES.includes(f)).join(', '));
+  // A row for a material nobody ships is dead weight the next reader will
+  // trust, and it is how a table drifts away from the assets it describes.
+  const orphans = Object.keys(MATERIAL_FAMILIES).filter((n) => !shipped.has(n));
+  expect('the table carries no rows for materials no GLB ships',
+    orphans.length === 0, orphans.join(', '));
+  // The library's own assets are the ones the collapse actually runs on, so
+  // they are graded a second time through the loaded materials — this is what
+  // would catch a name the loader mangles on the way in.
+  const loadedUnclassified = new Set();
+  for (const name of ASSET_NAMES) {
+    if (!assets.has(name)) continue;
+    for (const mat of sourceMaterials(name)) {
+      if (!familyForMaterialName(mat.name)) loadedUnclassified.add(`${mat.name} (${name})`);
+    }
+  }
+  expect(`every material the library loads for its ${ASSET_NAMES.length} assets has a family after parsing`,
+    loadedUnclassified.size === 0, [...loadedUnclassified].slice(0, 8).join(', '));
+  console.log(`   families: ${shipped.size} material names over ${glbFiles.length} GLBs`);
+
+  // 2. PARITY with the Blender-side table.
+  const py = readFileSync(path.join(ROOT, 'scripts/blender/_families.py'), 'utf8');
+  const pyBody = py.split('MATERIAL_FAMILIES = {')[1]?.split('\n}')[0] ?? '';
+  const pyTable = new Map();
+  for (const row of pyBody.matchAll(/'([^']+)':\s*'([^']+)',/g)) pyTable.set(row[1], row[2]);
+  const pyFamilies = (py.match(/^FAMILIES = \[([^\]]*)\]/m)?.[1] ?? '')
+    .split(',').map((t) => t.trim().replace(/'/g, '')).filter(Boolean);
+  expect('the Blender family list and the runtime family list are identical',
+    pyFamilies.join('|') === DETAIL_FAMILIES.join('|'),
+    `py [${pyFamilies.join(', ')}] vs ts [${DETAIL_FAMILIES.join(', ')}]`);
+  const drift = [];
+  for (const [name, family] of pyTable) {
+    if (MATERIAL_FAMILIES[name] !== family) drift.push(`${name}: py=${family} ts=${MATERIAL_FAMILIES[name] ?? '(absent)'}`);
+  }
+  for (const name of Object.keys(MATERIAL_FAMILIES)) {
+    if (!pyTable.has(name)) drift.push(`${name}: py=(absent) ts=${MATERIAL_FAMILIES[name]}`);
+  }
+  expect(`scripts/blender/_families.py and AssetMaterialCollapse.ts agree on all ${pyTable.size} rows`,
+    drift.length === 0, drift.slice(0, 6).join('; '));
+
+  // 3. THE BAKE, on a real asset's real materials and its real vertex ranges.
+  //    `barrel` is the useful one: five materials that span three families
+  //    (plank, plank, plank, iron, iron), so a bake that wrote one value for the
+  //    whole geometry — the obvious bug — cannot pass.
+  const counts = sourceVertexCounts('barrel');
+  const chunks = [];
+  let cursor = 0;
+  for (const [material, verts] of counts) {
+    chunks.push({ start: cursor, count: verts, material });
+    cursor += verts;
+  }
+  const distinct = new Set(chunks.map((c) => familyIndexForMaterialName(c.material.name)));
+  expect('the bake fixture spans more than one family (or it grades nothing)',
+    distinct.size >= 2, `families ${[...distinct].join(',')} over ${chunks.length} chunks`);
+
+  const makeGeometry = () => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(cursor * 3), 3));
+    return g;
+  };
+  const plain = makeGeometry();
+  expect('collapseChunks allocates NO family buffer by default (nothing samples it yet)',
+    !!collapseChunks(plain, chunks) && !plain.getAttribute(FAMILY_ATTRIBUTE));
+
+  const baked = makeGeometry();
+  const bakedMat = collapseChunks(baked, chunks, { bakeFamily: true });
+  const attr = baked.getAttribute(FAMILY_ATTRIBUTE);
+  expect('collapseChunks bakes one family float per vertex when asked',
+    !!bakedMat && !!attr && attr.itemSize === 1 && attr.count === cursor,
+    attr ? `itemSize ${attr.itemSize}, count ${attr.count} vs ${cursor}` : 'no attribute');
+  let wrong = 0;
+  if (attr) {
+    for (const chunk of chunks) {
+      const want = familyIndexForMaterialName(chunk.material.name);
+      for (let i = chunk.start; i < chunk.start + chunk.count; i++) {
+        if (attr.array[i] !== want) { wrong++; break; }
+      }
+    }
+  }
+  expect('every baked vertex carries its own chunk material\'s family index',
+    wrong === 0, `${wrong}/${chunks.length} chunks baked the wrong family`);
+  expect('a name the table has never heard of resolves to null, not to a guess',
+    familyForMaterialName('Wood_Charred') === null
+      && familyIndexForMaterialName('Wood_Charred') === 0);
+  expect("Blender's .001 duplicate suffix falls back to the base row, and an explicit row still wins",
+    familyForMaterialName('Trunk_Palm.001') === 'bark'
+      && familyForMaterialName('Glass_Flame.001') === 'flat');
 }
 
 console.log(failures === 0 ? '\nAll asset merge assertions passed' : `\n${failures} FAILURES`);

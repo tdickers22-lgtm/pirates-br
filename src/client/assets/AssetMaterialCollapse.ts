@@ -77,6 +77,192 @@ export const SURFACE_ATTRIBUTE = 'aSurface';
  */
 export const EMISSIVE_ATTRIBUTE = 'aEmissive';
 
+/**
+ * THE DETAIL FAMILY LADDER (PLAN 2.4a) — what a surface is MADE OF, per vertex.
+ *
+ * The 63 island GLBs ship zero images and never get authored UVs, so the only
+ * way they can gain surface texture is a world-space TRIPLANAR fetch, and the
+ * only way a triplanar fetch knows whether it is standing on bark or on iron is
+ * a family id riding alongside `aTintComp`/`aSurface` in the same collapse. The
+ * id is decided by the Blender MATERIAL NAME, because that is the one thing a
+ * GLB still carries that says what a surface is: `Rock_Pale` and `Bone_White`
+ * are nearly the same beige, so a colour cannot tell them apart, and a hand-set
+ * attribute would be forgotten on the next asset.
+ *
+ * `flat` is family 0 and it is a REFUSAL, not a fallback: skin, feathers,
+ * glass, gold, a lantern glow and every hero asset that already carries an
+ * authored atlas must not be ground under a tiling rock grain. Zero also stays
+ * the identity for a missing attribute, the same rule the tint and the surface
+ * follow (trap 1 above).
+ *
+ * The KTX2 array ships the eight real layers only, so a sampler reads layer
+ * `familyIndex - 1` and skips the fetch when the index is 0.
+ *
+ * PARITY: `scripts/blender/_families.py` carries the identical table for the
+ * build scripts, and `scripts/test-asset-merge.mjs` parses that file and fails
+ * on a single differing row.
+ */
+export const DETAIL_FAMILIES = [
+  'flat', 'sand', 'grass', 'rock', 'ash', 'bark', 'plank', 'canvas', 'iron',
+] as const;
+
+export type DetailFamily = typeof DETAIL_FAMILIES[number];
+
+/** One row per material name every shipped GLB uses. Exhaustive on purpose: an
+ *  asset that coins a new material fails the coverage gate instead of silently
+ *  reading family 0. */
+export const MATERIAL_FAMILIES: Readonly<Record<string, DetailFamily>> = {
+  // ── hero atlases: already textured, never re-grained ──────────────────
+  Atlas_blunderbuss: 'flat',
+  Atlas_cannon: 'flat',
+  Atlas_capstan: 'flat',
+  Atlas_cutlass: 'flat',
+  Atlas_eye_of_reach: 'flat',
+  Atlas_flintknock: 'flat',
+  Atlas_flintlock: 'flat',
+  Atlas_ship_lantern: 'flat',
+  Atlas_wheel: 'flat',
+  // ── granular ground ───────────────────────────────────────────────────
+  Sand: 'sand',
+  Sand_Pad: 'sand',
+  Dirt: 'sand',
+  Grave_Dirt: 'sand',
+  // ── foliage ───────────────────────────────────────────────────────────
+  Leaf_A: 'grass',
+  Leaf_B: 'grass',
+  Leaf_C: 'grass',
+  Leaf_Dry: 'grass',
+  Leaf_Green: 'grass',
+  Leaf_Green_Lt: 'grass',
+  Stem: 'grass',
+  Flower_Pink: 'grass',
+  Flower_White: 'grass',
+  Flower_Yellow: 'grass',
+  // ── stone ─────────────────────────────────────────────────────────────
+  Rock_Cave: 'rock',
+  Rock_Dark: 'rock',
+  Rock_Grey: 'rock',
+  Rock_Pale: 'rock',
+  Rock_Sea: 'rock',
+  Rock_Stack: 'rock',
+  Rock_Wet: 'rock',
+  Stone_Dark: 'rock',
+  Stone_Fort: 'rock',
+  Stone_Statue: 'rock',
+  Slate: 'rock',
+  Plaster: 'rock',
+  // ── volcanic / burnt ──────────────────────────────────────────────────
+  Rock_Flow: 'ash',
+  Obsidian: 'ash',
+  Char_Black: 'ash',
+  Tar_Black: 'ash',
+  // ── living wood ───────────────────────────────────────────────────────
+  Trunk_Palm: 'bark',
+  Coconut: 'bark',
+  Wood_Bleached: 'bark',
+  // ── worked wood ───────────────────────────────────────────────────────
+  Wood_Dark: 'plank',
+  Wood_Light: 'plank',
+  Wood_Mid: 'plank',
+  Wood_Wet: 'plank',
+  Timber: 'plank',
+  Shingle: 'plank',
+  Shingle_Lt: 'plank',
+  Ochre_Paint: 'plank',
+  Keg_Red: 'plank',
+  // ── cloth and cordage ─────────────────────────────────────────────────
+  Canvas: 'canvas',
+  Canvas_Dirty: 'canvas',
+  Cloth: 'canvas',
+  Awning_Cream: 'canvas',
+  Awning_Red: 'canvas',
+  Flag_Fin: 'canvas',
+  Flag_Rival: 'canvas',
+  Flag_White: 'canvas',
+  Rope: 'canvas',
+  // ── metal ─────────────────────────────────────────────────────────────
+  Metal_Band: 'iron',
+  Metal_Iron: 'iron',
+  Rust: 'iron',
+  Copper: 'iron',
+  Verdigris: 'iron',
+  // ── refusals: organic, glass, glow, precious ──────────────────────────
+  Beak_Yellow: 'flat',
+  Berry_Red: 'flat',
+  Bone: 'flat',
+  Bone_Shadow: 'flat',
+  Bone_White: 'flat',
+  Bottle_Green: 'flat',
+  Candle_Wax: 'flat',
+  Comb_Red: 'flat',
+  Coral: 'flat',
+  Coral_Pink: 'flat',
+  Crab_Dark: 'flat',
+  Crab_Red: 'flat',
+  Crow_Black: 'flat',
+  Crystal_Glow: 'flat',
+  Ember: 'flat',
+  Eye_Black: 'flat',
+  Feather_Black: 'flat',
+  Flame_Glow: 'flat',
+  GlassWarm: 'flat',
+  Glass_Dead: 'flat',
+  'Glass_Flame.001': 'flat',
+  Gold: 'flat',
+  Gull_Dark: 'flat',
+  Gull_Grey: 'flat',
+  Gull_White: 'flat',
+  Hair: 'flat',
+  Hen_Brown: 'flat',
+  Hen_Cream: 'flat',
+  Hoof_Dark: 'flat',
+  Kraken_Flesh: 'flat',
+  Kraken_Sucker: 'flat',
+  Lantern_Glass: 'flat',
+  Leather: 'flat',
+  Mouth_Red: 'flat',
+  Pig_Pink: 'flat',
+  Pig_Snout: 'flat',
+  Shark_Belly: 'flat',
+  Shark_Dark: 'flat',
+  Shark_Grey: 'flat',
+  Shell_Pearl: 'flat',
+  Skin: 'flat',
+  TeamTint: 'flat',
+  Teeth_White: 'flat',
+};
+
+/** Per-vertex detail family index (0..8). Optional, and only baked when a
+ *  caller asks: nothing samples the detail array yet, and an attribute nobody
+ *  reads is bytes on a low-tier GPU for no picture. */
+export const FAMILY_ATTRIBUTE = 'aFamily';
+
+/**
+ * The family for a material name, or null when the table has never heard of it.
+ *
+ * Null rather than `'flat'` so the coverage gate can tell "deliberately plain"
+ * from "nobody classified this yet" — the second is a bug and the first is a
+ * decision. The `.001` second chance is Blender's duplicate suffix, which the
+ * exporter keeps (`Glass_Flame.001` ships today); the exact row still wins, so
+ * a deliberately-suffixed row is never shadowed by its base name.
+ */
+export function familyForMaterialName(name: string | undefined | null): DetailFamily | null {
+  if (!name) return null;
+  const exact = MATERIAL_FAMILIES[name];
+  if (exact) return exact;
+  const dedupe = /^(.*)\.\d{3}$/.exec(name);
+  if (dedupe) return MATERIAL_FAMILIES[dedupe[1]] ?? null;
+  return null;
+}
+
+/** The number the attribute carries. An unclassified material bakes 0 (`flat`),
+ *  which draws exactly what it draws today — the gate, not the shader, is what
+ *  refuses to ship one. */
+export function familyIndexForMaterialName(name: string | undefined | null): number {
+  const family = familyForMaterialName(name);
+  return family ? DETAIL_FAMILIES.indexOf(family) : 0;
+}
+
 /** Program cache keys this file can produce — the warm-up and the program
  *  census both want them by name rather than by reconstruction. */
 export const COLLAPSE_CACHE_KEY_TINTED = 'pirates-asset-collapse-tinted';
@@ -273,6 +459,24 @@ export function collapseFamilyKey(material: THREE.Material): string | null {
     + `|${m.depthTest ? 'D' : '-'}|${m.blending}|${m.wireframe ? 'w' : '-'}|${m.toneMapped ? 'M' : '-'}`;
 }
 
+/** Knobs the collapse takes. Everything here is OFF by default: the collapse
+ *  is on the boot path of every asset and a new buffer it allocates is paid by
+ *  every player, tier or no tier. */
+export type CollapseOptions = {
+  /**
+   * Also bake `aFamily` (one float per vertex, 4 bytes).
+   *
+   * Off until a consumer exists. The triplanar detail sets (TEX-01 phase 0,
+   * `rendering/DetailSets.ts`) are what will read it; until that ships, turning
+   * this on would upload ~330 KB of attribute across the shipped library for a
+   * picture that does not change, which is exactly the kind of free-seeming
+   * cost the low tier cannot afford. The family of every chunk is decided and
+   * gated regardless (`familyForMaterialName`), so switching this on is a flag,
+   * not a re-derivation.
+   */
+   readonly bakeFamily?: boolean;
+};
+
 /**
  * Bake each chunk's colour/roughness/metalness into per-vertex attributes and
  * return the ONE material that draws the lot.
@@ -286,6 +490,7 @@ export function collapseFamilyKey(material: THREE.Material): string | null {
 export function collapseChunks(
   geometry: THREE.BufferGeometry,
   chunks: readonly CollapseChunk[],
+  options: CollapseOptions = {},
 ): CollapsedAssetMaterial | null {
   const materials = chunks.map((c) => c.material);
   if (materials.length === 0) return null;
@@ -340,6 +545,19 @@ export function collapseChunks(
   geometry.setAttribute(SURFACE_ATTRIBUTE, new THREE.BufferAttribute(surface, 2));
   if (emissive) geometry.setAttribute(EMISSIVE_ATTRIBUTE, new THREE.BufferAttribute(emissive, 3));
   else geometry.deleteAttribute(EMISSIVE_ATTRIBUTE);
+  if (options.bakeFamily) {
+    const family = new Float32Array(vertices);
+    for (const chunk of chunks) {
+      const index = familyIndexForMaterialName((chunk.material as THREE.Material).name);
+      if (index === 0) continue; // 0 is the default the array already holds.
+      const end = Math.min(vertices, chunk.start + chunk.count);
+      for (let i = chunk.start; i < end; i++) family[i] = index;
+    }
+    geometry.setAttribute(FAMILY_ATTRIBUTE, new THREE.BufferAttribute(family, 1));
+  } else {
+    // Never leave a stale one behind on a geometry the library re-collapses.
+    geometry.deleteAttribute(FAMILY_ATTRIBUTE);
+  }
   geometry.clearGroups();
 
   const sample = materials[0] as THREE.MeshStandardMaterial;
