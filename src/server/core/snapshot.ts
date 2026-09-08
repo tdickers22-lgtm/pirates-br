@@ -65,9 +65,18 @@ function stripPlayerInternals(player: Player): Player {
     lastDamagedAt: _lastDamagedAt,
     lastDamageWasHeadshot: _lastDamageWasHeadshot,
     lastEnvDamage: _lastEnvDamage,
+    aiming,
+    atCapstan,
     ...wire
   } = player;
-  return wire as unknown as Player;
+  // POSE-01's two pose bits ride the same rule as a hole's `patched`: TRUE ships,
+  // false is absent. Written out both ways they are ~35 B per player per full —
+  // 24 players x ~11 fulls/s is ~9 KB/s of the word "false", and the 24-player
+  // static-world full is already within 2 KB of its ceiling.
+  const out = wire as unknown as Player;
+  if (aiming) out.aiming = true;
+  if (atCapstan) out.atCapstan = true;
+  return out;
 }
 
 /**
