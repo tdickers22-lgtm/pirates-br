@@ -282,6 +282,11 @@ export const LOGIC = [
   //   glb-census --check          — the models README's counts vs disk + ASSET_NAMES/FAR_ASSET_NAMES
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
   quick({ file: 'glb-census.mjs', cmd: ['node', 'scripts/glb-census.mjs', '--check'] }),
+  //   check-hud-ids               — every id the client reads by string exists in index.html, and no id inside
+  //                                 the HUD block is driven by nothing. TypeScript cannot see through
+  //                                 getElementById('x'), so a renamed id used to type-check and then silently
+  //                                 stop painting one line of HUD (HUDS-01/codehealth-16, w6.5)
+  quick({ file: 'tools/check-hud-ids.mjs', cmd: ['node', 'scripts/tools/check-hud-ids.mjs'] }),
   //   test-quality-preference     — detector rows per device: RENDERER_RULES sends the opaque-Apple Air,
   //                                 phones, Adreno and Intel UHD to 'low', 'low' is the unknown default, and a
   //                                 fill-bench score or a headroom proof is the only way back up (PERF-01, lane 2.6)
@@ -334,6 +339,12 @@ export const BROWSER = [
   { ...plain('test-chart-and-feed.mjs') },
   { ...plain('test-music-render.mjs') },
   { ...tsx('test-onboarding-ux.mjs') },
+  // HUDS-01/hud-20, hud-16: the HUD measured at the three window shapes people
+  // play in (960x540, 1280x720, 1366x650) — regions that must not overlap, <=24
+  // strings at idle, the objective line never hidden, one gold readout, one
+  // storm clock, and the [X] prompt inside the window AND clear of the footer.
+  // One browser, one solo match, three resizes: ~95 s on this Air (w6.5).
+  { ...plain('hud-layout-probe.mjs') },
   { ...plain('test-geometry-lod.mjs') },
   { ...plain('test-shadow-gate.mjs') },
   { ...plain('test-decor-batch.mjs') },
