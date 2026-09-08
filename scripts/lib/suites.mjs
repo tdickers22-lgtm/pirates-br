@@ -356,6 +356,11 @@ export const LOGIC = [
   //                                 that the low tier compiles the colour-only program, and that the wet line
   //                                 is a live uniform that climbs the topside as she floods. --mutate is red.
   tsx('test-ship-plank-shader.mjs'),
+  //   perf-cost-model             — perf-15's resident-geometry census: a full match's hulls built by the
+  //                                 real ShipRenderer, every BufferGeometry billed once by identity, graded
+  //                                 against the 8 MB ship budget. --no-cache reproduces the pre-fix 25.4 MB
+  //                                 and is its red proof; the plain run also verifies every shared buffer.
+  tsx('perf-cost-model.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   test-hero-assets            — the atlas-textured hero GLBs (weapons, ship hardware): triangle band,
   //                                 ONE material with a baseColorTexture, COLOR_0 present and WHITE (the AO
