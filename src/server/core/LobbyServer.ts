@@ -67,6 +67,41 @@ const EMPTY_MATCH_GC_MS = 60_000;
  *  is a player_input (<1KB); anything past this is junk or an attack, and ws
  *  raises WS_ERR_UNSUPPORTED_MESSAGE_LENGTH which our 'error' handler contains. */
 const MAX_INBOUND_MESSAGE_BYTES = 64 * 1024;
+
+/**
+ * WIRE-01 phase A (netcode-03). The snapshot stream is JSON, and JSON of the
+ * same fleet tick after tick is the most compressible thing on the wire: at
+ * deflate level 3 a 33 KB full snapshot goes out in ~5 KB. `ws` defaults
+ * `perMessageDeflate: false`, so before this every one of those bytes was sent
+ * raw — ~460 KB/s per client at ten hulls, 37 Mbit/s of egress for a ten-human
+ * match, and a home uplink could not carry a single 16-solo client.
+ *
+ * The parameters are deliberate, not defaults:
+ *  · `level: 3` — zlib's cheap end. Level 9 buys ~4% on this payload for ~4x
+ *    the CPU, and the server compresses once per client per snapshot.
+ *  · `serverNoContextTakeover: false` — the server KEEPS its sliding window
+ *    between frames, which is where most of the ratio comes from (successive
+ *    snapshots differ in a few hundred numbers out of thirty thousand).
+ *  · `clientNoContextTakeover: true` — inputs are tiny and frequent; making a
+ *    phone hold a 32 KB window per socket is not worth the handful of bytes.
+ *  · `threshold: 1024` — a pong or an input ack costs more in deflate framing
+ *    than it saves, so small frames go through uncompressed.
+ *  · `concurrencyLimit: 10` — zlib runs on the libuv threadpool (4 threads by
+ *    default); an unbounded queue would let one congested socket's backlog
+ *    delay every match's tick.
+ *
+ * Exported because `scripts/test-snapshot-size.mjs` measures per-client egress
+ * through EXACTLY these parameters: delete the negotiation and the suite starts
+ * measuring raw JSON and goes red, instead of quietly grading a wire nobody
+ * ships.
+ */
+export const WS_PERMESSAGE_DEFLATE = {
+  serverNoContextTakeover: false,
+  clientNoContextTakeover: true,
+  threshold: 1024,
+  concurrencyLimit: 10,
+  zlibDeflateOptions: { level: 3 },
+} as const;
 /** Belt on top of maxPayload: a frame that decodes but is absurd never reaches JSON.parse. */
 const MAX_DECODED_MESSAGE_BYTES = 32 * 1024;
 /** /bugsnap: how many snaps the disk keeps (oldest evicted) and the per-IP spacing. */
@@ -289,6 +324,10 @@ export class LobbyServer {
       // Oversized frames are rejected by ws itself (emits a socket 'error' we
       // contain) instead of being buffered into memory.
       maxPayload: MAX_INBOUND_MESSAGE_BYTES,
+      // WIRE-01 phase A: JSON snapshots compress 6-9x at level 3 (see the
+      // constant above). This is the single biggest byte win on the wire and it
+      // costs the client nothing — every browser negotiates permessage-deflate.
+      perMessageDeflate: { ...WS_PERMESSAGE_DEFLATE, zlibDeflateOptions: { ...WS_PERMESSAGE_DEFLATE.zlibDeflateOptions } },
     });
     this.wss.on('connection', (ws) => this.onConnect(ws));
     // A ws-level error (failed upgrade, socket blow-up before 'connection') is
