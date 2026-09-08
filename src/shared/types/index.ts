@@ -1015,6 +1015,10 @@ type MsgType =
   | 'match_start'
   | 'return_to_menu'
   | 'play_again'
+  /** RECON-01: a returning client offers its session token before anything else. */
+  | 'resume'
+  | 'resume_ok'
+  | 'resume_failed'
   | 'stats_update';
 
 // ── Lobby payload shapes ─────────────────────────────────────
@@ -1185,10 +1189,31 @@ export interface PlayerStatsRecord {
   playSeconds: number;
 }
 
+/** Bumped whenever the wire shape changes incompatibly: a client holding a
+ *  session token from an older bundle is refused a resume (RECON-01). */
+export const PROTOCOL_VERSION = 2;
+
 export interface WelcomePayload {
   clientId: string;
   stats: PlayerStatsRecord | null;
   partyCapacity: number;
+  /** Opaque secret this client presents to `resume` after a blip. */
+  sessionToken: string;
+  protocolVersion: number;
+}
+
+/** The server found the held session and re-bound this socket to it. */
+export interface ResumeOkPayload {
+  clientId: string;
+  state: 'menu' | 'party' | 'queue' | 'in_match' | 'match_ended';
+  matchId: string | null;
+  playerId: string | null;
+  shipId: string | null;
+  partyCode: string | null;
+}
+
+export interface ResumeFailedPayload {
+  reason: 'unknown_token' | 'expired' | 'stale_client' | 'in_use';
 }
 
 export interface MatchStartPayload {

@@ -8,7 +8,9 @@ import { v4 as uuid } from 'uuid';
 import type {
   NetMsg, LobbyUpdatePayload, LobbyMember, QueueUpdatePayload,
   WelcomePayload, MatchStartPayload, PlayerStatsRecord,
+  ResumeOkPayload, ResumeFailedPayload,
 } from '../../shared/types/index.js';
+import { PROTOCOL_VERSION } from '../../shared/types/index.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
 import { MODES, MODE_IDS, botFillFor, isModeId, type ModeId } from '../../shared/constants/index.js';
@@ -53,6 +55,14 @@ const ENDED_MATCH_DETACH_MS = 25_000; // auto-return-to-menu after this if clien
  *  all pressed Ready (PLAN 2.2: "host may force after 10 s"). */
 const HOST_FORCE_START_MS = 10_000;
 /** Wrong-code lockout: this many misses from one socket buys a cooldown. */
+/** RECON-01 (netcode-05): how long a dropped socket's seat is held for it.
+ *  Sixty seconds is the number a player can feel the shape of — long enough for
+ *  a lift, a tunnel, a wifi handover or a laptop that slept, short enough that
+ *  a hull whose whole crew really did quit is not sailed by ghosts for minutes.
+ *  On expiry the session is torn down exactly as a `close` used to tear it down
+ *  immediately, so ownership still passes to a living crewmate (Match.removeClient's
+ *  heir search, netcode-21) and only a hull with nobody left founders. */
+const RECONNECT_GRACE_MS = 60_000;
 const JOIN_FAIL_LIMIT = 5;
 const JOIN_LOCKOUT_MS = 30_000;
 /** How long a match may run with nobody human in it before the lobby stops it.
@@ -200,6 +210,10 @@ type ClientState = 'menu' | 'party' | 'queue' | 'in_match' | 'match_ended';
 
 interface ClientSession {
   id: string;
+  /** RECON-01: the secret this socket was handed on `welcome`. A client that
+   *  drops presents it back as `resume` and takes its own seat again. Never
+   *  logged, never broadcast — it is the whole authentication of a resume. */
+  token: string;
   ws: WebSocket;
   name: string;
   state: ClientState;
@@ -223,6 +237,11 @@ interface ClientSession {
   /** Set by onDisconnect so the heartbeat sweep and a later 'close' can't tear
    *  the same session down twice. */
   disposed?: boolean;
+  /** Wall time this session's socket dropped while it still had a seat in a
+   *  live match. Set => the session is PARKED: it stays in `clients` (so the
+   *  crew roster, the match and findClientByPlayerId all still see it) but its
+   *  socket is closed, and `tick` disposes it once the grace runs out. */
+  heldSince?: number;
 }
 
 interface Party {
@@ -304,6 +323,11 @@ export class LobbyServer {
    *  moment that crew lands (netcode-16). */
   private joinWaiters: Map<string, Set<string>> = new Map();
   private bugsnapLastByIp: Map<string, number> = new Map();
+  /** token → parked session, awaiting a `resume` inside RECONNECT_GRACE_MS. */
+  private held: Map<string, ClientSession> = new Map();
+  /** RECON-01/netcode-29: set by shutdown(); no seat is held while the process
+   *  is on its way out, because there is nothing left to come back to. */
+  private draining = false;
   private stats: StatsStore;
 
   constructor() {
@@ -362,6 +386,7 @@ export class LobbyServer {
     const clientId = uuid();
     const session: ClientSession = {
       id: clientId,
+      token: uuid(),
       ws,
       name: '',
       state: 'menu',
@@ -426,14 +451,46 @@ export class LobbyServer {
       clientId,
       stats: null,
       partyCapacity: PARTY_CAPACITY,
+      sessionToken: session.token,
+      protocolVersion: PROTOCOL_VERSION,
     };
     this.send(ws, { type: 'welcome', ts: Date.now(), payload: welcome });
     console.log(`[Lobby] client connected: ${clientId.slice(0, 6)} (${this.clients.size} online)`);
   }
 
+  /**
+   * A socket closed. RECON-01: decide whether this is a player LEAVING or a
+   * player whose link failed, and only tear the session down for the first.
+   * A seat is held when the client had one in a match that is still running —
+   * everywhere else (menu, party panel, queue, end screen) there is nothing to
+   * hold and reconnecting from the menu costs nothing.
+   */
   private onDisconnect(session: ClientSession): void {
     if (session.disposed) return;
+    if (this.shouldHold(session)) {
+      session.heldSince = Date.now();
+      this.held.set(session.token, session);
+      const match = this.matches.get(session.matchId!);
+      match?.markDisconnected(session.matchPlayerId!);
+      console.log(`[Lobby] client ${session.id.slice(0, 6)} dropped mid-match — seat held ${RECONNECT_GRACE_MS / 1000}s`);
+      return;
+    }
+    this.disposeSession(session);
+  }
+
+  private shouldHold(session: ClientSession): boolean {
+    if (session.heldSince !== undefined || this.draining) return false;
+    if (session.state !== 'in_match' || !session.matchId || !session.matchPlayerId) return false;
+    const match = this.matches.get(session.matchId);
+    return !!match && !match.isEnded();
+  }
+
+  /** RECON-01 handleResume's other end: the seat's grace ran out (or the player
+   *  really did leave). This is the body `onDisconnect` used to be. */
+  private disposeSession(session: ClientSession): void {
+    if (session.disposed) return;
     session.disposed = true;
+    this.held.delete(session.token);
     console.log(`[Lobby] client disconnected: ${session.id.slice(0, 6)} (state=${session.state})`);
     this.clients.delete(session.id);
     if (session.state === 'queue') {
@@ -517,6 +574,8 @@ export class LobbyServer {
         return this.handleReturnToMenu(session);
       case 'play_again':
         return this.handlePlayAgain(session);
+      case 'resume':
+        return this.handleResume(session, msg);
       case 'ping':
         return this.send(session.ws, { type: 'pong', ts: Date.now(), payload: msg.payload });
     }
@@ -540,6 +599,88 @@ export class LobbyServer {
   }
 
   // ─── Lobby handlers ──────────────────────────────────────────
+
+  /**
+   * RECON-01 (netcode-05, netcode-31). A returning client presents the token it
+   * was handed on its PREVIOUS `welcome`; if a parked session still holds that
+   * token, this socket takes over that seat.
+   *
+   * The parked session's clientId is moved onto THIS session object rather than
+   * the other way round, because every ws listener (message, close, error,
+   * pong) closes over this object — rebinding the old one would leave a live
+   * socket whose frames route into a dead session. Taking the OLD id keeps the
+   * party roster, the queue entry, clientToMatch and the host crown pointing at
+   * the same person, so nothing downstream has to learn about reconnects.
+   */
+  private handleResume(session: ClientSession, msg: NetMsg): void {
+    const payload = (msg.payload ?? {}) as { token?: unknown; protocolVersion?: unknown };
+    const fail = (reason: ResumeFailedPayload['reason']) => this.send(session.ws, {
+      type: 'resume_failed', ts: Date.now(), payload: { reason } satisfies ResumeFailedPayload,
+    });
+    // A bundle from before the last wire change must reload rather than re-enter
+    // a match it would decode wrongly — a stale client is a desync, not a guest.
+    if (payload.protocolVersion !== PROTOCOL_VERSION) return fail('stale_client');
+    const token = typeof payload.token === 'string' ? payload.token : '';
+    const parked = token ? this.held.get(token) : undefined;
+    if (!parked) return fail('unknown_token');
+    this.held.delete(token);
+    if (parked.disposed) return fail('expired');
+    // The parked object must never tear anything down again: its seat now
+    // belongs to this socket.
+    parked.disposed = true;
+
+    this.clients.delete(session.id);
+    this.clients.delete(parked.id);
+    session.id = parked.id;
+    session.name = parked.name;
+    session.state = parked.state;
+    session.partyCode = parked.partyCode;
+    session.matchId = parked.matchId;
+    session.matchPlayerId = parked.matchPlayerId;
+    session.joinedQueueAt = parked.joinedQueueAt;
+    session.endedMatchSince = parked.endedMatchSince;
+    // Coming back means rebuilding the world off the resume snapshot, which is
+    // the same silence the join grace exists for (MATCH_BUILD_WINDOW_MS).
+    session.matchJoinedAt = Date.now();
+    session.lastSeenAt = Date.now();
+    this.clients.set(session.id, session);
+
+    const match = session.matchId ? this.matches.get(session.matchId) : undefined;
+    const resumed = match && session.matchPlayerId
+      ? match.resumeClient(session.matchPlayerId, session.ws)
+      : null;
+    if (session.state === 'in_match' && !resumed) {
+      // The match ended or reaped while the link was down: keep the person, drop
+      // the seat, and put them back where 'return to menu' would have.
+      session.state = 'menu';
+      session.matchId = undefined;
+      session.matchPlayerId = undefined;
+      session.matchJoinedAt = undefined;
+      this.clientToMatch.delete(session.id);
+    }
+    const ok: ResumeOkPayload = {
+      clientId: session.id,
+      state: session.state,
+      matchId: session.matchId ?? null,
+      playerId: session.matchPlayerId ?? null,
+      shipId: resumed?.shipId ?? null,
+      partyCode: session.partyCode ?? null,
+    };
+    this.send(session.ws, { type: 'resume_ok', ts: Date.now(), payload: ok });
+    if (resumed) {
+      // Exactly the join every fresh client gets, world included: the client
+      // re-anchors through the path that is already proven, instead of a second
+      // half-tested one. Match.resumeClient armed worldResyncPending too, so the
+      // next ordinary full carries the world even if this one is lost.
+      this.send(session.ws, {
+        type: 'join',
+        ts: Date.now(),
+        payload: { playerId: resumed.playerId, shipId: resumed.shipId, snapshot: resumed.snapshot, matchId: session.matchId },
+      });
+    }
+    console.log(`[Lobby] client ${session.id.slice(0, 6)} resumed (state=${session.state}, seat=${resumed ? 'kept' : 'gone'})`);
+  }
+
   private handleSetName(session: ClientSession, msg: NetMsg): void {
     const payload = (msg.payload ?? {}) as { name?: string };
     const name = (payload.name ?? '').trim().slice(0, 24);
@@ -1399,6 +1540,20 @@ export class LobbyServer {
 
   // ─── Tick: queue progression + match GC ─────────────────────
   private tick(): void {
+    // RECON-01: a seat held for a link that never came back is released here,
+    // and the release is the ORIGINAL teardown — Match.removeClient's heir
+    // search passes the hull to a living crewmate, and only a hull with nobody
+    // left founders and spills (netcode-21, gameplay-12/15). The grace delays
+    // that outcome; it never changes it.
+    if (this.held.size > 0) {
+      const cutoff = Date.now() - RECONNECT_GRACE_MS;
+      for (const [token, parked] of Array.from(this.held)) {
+        if ((parked.heldSince ?? 0) > cutoff) continue;
+        this.held.delete(token);
+        console.log(`[Lobby] held seat ${parked.id.slice(0, 6)} expired after ${RECONNECT_GRACE_MS / 1000}s`);
+        this.disposeSession(parked);
+      }
+    }
     if (this.queue.length > 0) {
       this.tryDispatchQueue();
       this.broadcastQueue();

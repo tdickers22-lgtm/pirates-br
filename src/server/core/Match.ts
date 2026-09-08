@@ -1484,6 +1484,68 @@ export class Match {
    * Lobby calls this on WS close OR when the client returns to menu.
    * If closeWs=true the client's WS is also closed.
    */
+  /**
+   * RECON-01 (netcode-05). A LINK DROPPED IS NOT A PLAYER GONE.
+   *
+   * Before this, `close` ran straight into removeClient: a wifi blip founders
+   * your hull, dumps whoever was aboard her into the sea and spills the hold —
+   * for two seconds of lost packets. The lobby now PARKS the session for
+   * RECONNECT_GRACE_MS and calls this instead. What it does is deliberately
+   * small, and that is the point: the pirate keeps standing exactly where he
+   * was, in the same ship, with the same crew and the same gold, because
+   * nothing about him is touched except the two things that would keep MOVING
+   * without a hand on them.
+   *
+   *  · `lastInput` is cleared. The server replays the last input every tick
+   *    until a fresh one lands (see updateHumans), so a captain who dropped
+   *    mid-turn with W held would sail his crew into the storm wall on a dead
+   *    socket. Clearing it leaves him standing still.
+   *  · station flags are cleared, so the wheel, the sails, the capstan and the
+   *    cannon he was holding are free for a crewmate immediately, not in sixty
+   *    seconds — the arbiter's whole contract is that one press claims one
+   *    station (test-interaction-arbiter).
+   *
+   * Everything else — downed timers, bleed-out, storm damage, the ship's
+   * physics — keeps running, so the grace window costs an absent player exactly
+   * what standing still costs a present one. No new player state reaches the
+   * wire: to every other client he is simply a pirate who stopped moving, which
+   * is what he is.
+   */
+  markDisconnected(playerId: string): boolean {
+    const client = this.clients.get(playerId);
+    if (!client) return false;
+    client.lastInput = null;
+    client.pendingFullSnapshot = null;
+    client.congestedSince = null;
+    const player = this.playersById.get(playerId);
+    if (player) this.clearStationFlags(player);
+    return true;
+  }
+
+  /**
+   * The other half: a returning socket takes over the same seat. The client may
+   * be a fresh page (reload) or the same page that never tore its scene down,
+   * and the server cannot tell the two apart — so it hands back a full join
+   * payload WITH the static world and arms `worldResyncPending`, which is the
+   * cheap, always-correct answer. `hasWorld` goes false so WIRE-01's
+   * once-per-client world rule re-arms for this socket.
+   */
+  resumeClient(playerId: string, ws: WebSocket): { playerId: string; shipId: string; snapshot: GameState } | null {
+    const client = this.clients.get(playerId);
+    const player = this.playersById.get(playerId);
+    if (!client || !player) return null;
+    client.ws = ws;
+    client.hasWorld = false;
+    client.pendingFullSnapshot = null;
+    client.congestedSince = null;
+    client.lastInput = null;
+    this.worldResyncPending = true;
+    const snapshot = buildWireSnapshot(this.buildSnapshot(true), true);
+    const shipId = player.shipId ?? '';
+    console.log(`[Match ${this.id}] human resumed: ${player.name} (${playerId.slice(0, 6)}) ship=${shipId.slice(0, 6)}`);
+    return { playerId, shipId, snapshot };
+  }
+
   removeClient(playerId: string, closeWs: boolean = false): void {
     const client = this.clients.get(playerId);
     if (!client) return;

@@ -22,6 +22,7 @@
 import { WebSocket } from 'ws';
 import { LobbyServer } from '../src/server/core/LobbyServer.ts';
 import { Match } from '../src/server/core/Match.ts';
+import { PROTOCOL_VERSION } from '../src/shared/types/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -131,6 +132,103 @@ console.log('Hostile frames are contained, not fatal:');
     survivor.seen.includes('welcome'), JSON.stringify(survivor.seen));
   victim.ws.close();
   survivor.ws.close();
+}
+
+console.log('A blip is not a departure — the seat is held and resumed (RECON-01):');
+{
+  // The whole point of RECON-01, end to end over a real socket: kill the link
+  // mid-match, come back with the token, and get the SAME pirate on the SAME
+  // hull with the fleet untouched. Before the fix the close ran straight into
+  // Match.removeClient: the player was deleted, the hull foundered (or was
+  // spliced out of a match still counting down) and the only recovery the
+  // client had was a reload into a new match.
+  const first = open();
+  const frames = [];
+  first.ws.on('message', (data) => { try { frames.push(JSON.parse(data.toString())); } catch {} });
+  await first.ready;
+  first.sendJson({ type: 'set_name', ts: Date.now(), payload: { name: 'Castaway' } });
+  first.sendJson({ type: 'solo_start', ts: Date.now(), payload: { botCount: 2 } });
+  const waitFor = (buf, type, ms = 20_000) => new Promise(async (resolve) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const hit = buf.find((m) => m.type === type);
+      if (hit) return resolve(hit);
+      await sleep(100);
+    }
+    resolve(null);
+  });
+  const welcome = await waitFor(frames, 'welcome', 5_000);
+  const join = await waitFor(frames, 'join');
+  expect('welcome carries a session token and a protocol version',
+    !!welcome && typeof welcome.payload.sessionToken === 'string' && welcome.payload.sessionToken.length > 8
+      && welcome.payload.protocolVersion === PROTOCOL_VERSION,
+    JSON.stringify(welcome?.payload && { t: typeof welcome.payload.sessionToken, v: welcome.payload.protocolVersion }));
+  expect('the solo match joined', !!join, `frames=${frames.map((f) => f.type).join(',')}`);
+
+  if (welcome && join) {
+    const playerId = join.payload.playerId;
+    const shipId = join.payload.shipId;
+    const hullsBefore = join.payload.snapshot.ships.length;
+
+    // A blip, not a goodbye: terminate kills the TCP connection the way a lost
+    // wifi does, with no close frame.
+    first.ws.terminate();
+    await sleep(1_500);
+
+    const second = open();
+    const back = [];
+    second.ws.on('message', (data) => { try { back.push(JSON.parse(data.toString())); } catch {} });
+    await second.ready;
+    await waitFor(back, 'welcome', 5_000);
+    second.sendJson({
+      type: 'resume',
+      ts: Date.now(),
+      payload: { token: welcome.payload.sessionToken, protocolVersion: PROTOCOL_VERSION },
+    });
+    const ok = await waitFor(back, 'resume_ok', 8_000);
+    const failed = back.find((m) => m.type === 'resume_failed');
+    const rejoin = await waitFor(back, 'join', 8_000);
+    expect('a resume inside the grace window is accepted', !!ok,
+      failed ? `resume_failed: ${JSON.stringify(failed.payload)}` : `frames=${back.map((f) => f.type).join(',')}`);
+    expect('the same pirate comes back', !!ok && ok.payload.playerId === playerId,
+      `${ok?.payload.playerId} != ${playerId}`);
+    expect('on the same hull', !!ok && ok.payload.shipId === shipId,
+      `${ok?.payload.shipId} != ${shipId}`);
+    expect('the resume is handed the world again, as a join', !!rejoin && !!rejoin.payload.snapshot,
+      `frames=${back.map((f) => f.type).join(',')}`);
+    expect('no hull left the fleet while the link was down',
+      !!rejoin && rejoin.payload.snapshot.ships.length === hullsBefore,
+      `${rejoin?.payload.snapshot.ships.length} != ${hullsBefore}`);
+
+    // A token is good for exactly one resume; a second attempt is refused.
+    const third = open();
+    const again = [];
+    third.ws.on('message', (data) => { try { again.push(JSON.parse(data.toString())); } catch {} });
+    await third.ready;
+    await waitFor(again, 'welcome', 5_000);
+    third.sendJson({
+      type: 'resume',
+      ts: Date.now(),
+      payload: { token: welcome.payload.sessionToken, protocolVersion: PROTOCOL_VERSION },
+    });
+    const reused = await waitFor(again, 'resume_failed', 5_000);
+    expect('a spent token cannot be resumed twice',
+      !!reused && reused.payload.reason === 'unknown_token', JSON.stringify(reused?.payload));
+
+    // And a bundle from another protocol generation is sent to reload rather
+    // than let back into a match whose wire it may not decode.
+    third.sendJson({
+      type: 'resume',
+      ts: Date.now(),
+      payload: { token: 'anything', protocolVersion: PROTOCOL_VERSION - 1 },
+    });
+    await sleep(400);
+    const stale = again.filter((m) => m.type === 'resume_failed').pop();
+    expect('a stale bundle is refused by version, not by token',
+      !!stale && stale.payload.reason === 'stale_client', JSON.stringify(stale?.payload));
+    third.ws.close();
+    second.ws.close();
+  }
 }
 
 console.log('A starved sim counts what it throws away:');
