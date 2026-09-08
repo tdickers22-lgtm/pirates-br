@@ -261,6 +261,10 @@ export const LOGIC = [
   //   test-ship-geometry          — hold floor / trim / iron outside the loft, stern 0.85 m aft (HULLGEO-01)
   //   test-asset-bounds           — boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (ASSETS lane); node TRS applied
   tsx('test-avatar-pose-invariants.mjs'),
+  //   test-avatar-rig             — the skinned pirate's contract: 23 bones, head bone == PLAYER.HEAD_Y,
+  //                                 33 clips present and non-empty, dressed tris/draws/materials (RIG-01, lane 7.1).
+  //                                 Pure GLB JSON parse — no THREE, no GPU, ~60 ms.
+  tsx('test-avatar-rig.mjs'),
   tsx('test-ship-attitude-frame.mjs'),
   //   test-ship-hole-vis          — hole decals never re-read moved coords; strakes bar the breach (SHIP-01, lane 1.3)
   tsx('test-ship-hole-vis.mjs'),
