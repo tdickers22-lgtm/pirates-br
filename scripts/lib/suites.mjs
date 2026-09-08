@@ -48,6 +48,7 @@ export const LOGIC = [
   quick(plain('test-barrel-flow.mjs')),
   quick(plain('test-kill-streak-powers.mjs')),
   quick(tsx('test-wildlife-meat.mjs')),
+  tsx('test-wildlife-flee.mjs'),
   quick(tsx('test-ship-interactions.mjs')),
   quick(tsx('test-swimmer-ship-collision.mjs')),
   quick(tsx('test-keg-placement.mjs')),

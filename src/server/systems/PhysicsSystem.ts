@@ -95,6 +95,7 @@ type HullSweepHit =
   | { kind: HullImpactKind; point: Vec3 }
   | { kind: 'player'; point: Vec3; player: Player };
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
+import { resolveWalkerAgainstWildlife } from '../../shared/locomotion.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 
 // ── Ship wave-riding dynamics tuning ─────────────────────────────────────────
@@ -1271,6 +1272,16 @@ export class PhysicsSystem {
         // Props (palms/towers/lantern posts/boulders) block walkers and near-shore
         // swimmers via capsule/sphere pushout; steep faces block a walking ascent.
         this.resolvePlayerPropCollision(player, islands);
+        // A pig is 0.62 m of muscle and you used to walk straight through it
+        // (islandworld-32, WILD-01). Same pushout the animals get from props.
+        const herd = this.wildlifeSource?.();
+        if (herd && herd.length) {
+          const shove = resolveWalkerAgainstWildlife(player.position.x, player.position.z, PLAYER.RADIUS, herd, this.wildlifeShove);
+          if (shove.pushed) {
+            player.position.x = shove.x;
+            player.position.z = shove.z;
+          }
+        }
         this.resolvePlayerTavernCollision(player, islands);
         this.resolveCaveWallBlock(player, onIsland);
         this.resolveSlopeBlock(player, onIsland);
@@ -2359,6 +2370,12 @@ export class PhysicsSystem {
    * island centre so it stays cheap at 62.5 Hz. Projectiles never call this —
    * visual-scale props only block players, not cannon fire.
    */
+  /** Live animals, read through Match so the reference never goes stale when a
+   *  carcass ages out and the array is rebuilt (WILD-01). */
+  wildlifeSource: (() => readonly import('../../shared/types/index.js').WildlifeAnimal[]) | null = null;
+  /** Reused pushout result — this runs per player per 62.5 Hz step. */
+  private readonly wildlifeShove = { x: 0, z: 0, pushed: false };
+
   private resolvePlayerPropCollision(player: Player, islands: Island[]) {
     for (const island of islands) {
       const props = island.props;

@@ -599,6 +599,9 @@ export class Match {
     this.storm = new StormSystem(this.rng);
     this.trading = new TradingSystem(this.rng);
     this.bots = new BotSystem(this.rng);
+    // A pirate walks AROUND an animal, not through it (WILD-01): the physics
+    // step reads the live herd through this, so a rebuilt array is never stale.
+    this.physics.wildlifeSource = () => this.state.wildlife;
     // Sharks and island animals. Hooks, not `this`: the system only reaches back
     // for the player lookup and the damage ledger the bite has to file.
     this.fauna = new FaunaSystem(this.rng, {
