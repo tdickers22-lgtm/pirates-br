@@ -669,6 +669,29 @@ interface IslandSurfaceOptions {
 export const CAVE_NEAR_OVERHANG = 1.2;
 /** Body clearance kept between a walker's centre and a cave's rock wall. */
 export const CAVE_WALL_PAD = 0.35;
+/** Metres the WALKABLE box reaches past the generator's interior radius, and
+ *  metres of extra headroom over the nominal ceiling (physics-04).
+ *
+ *  The see-through fix grew the drawn shell until it provably enclosed the
+ *  walkable box from every angle, but nobody grew the box to meet it: a probe
+ *  over the 49 real segments measured the drawn wall 1.28-1.90 m outboard of
+ *  the limit a body could reach, and the crown 0.85-1.01 m over the collision
+ *  ceiling. Half the fix is CaveGeometry pulling the shell IN (an additive,
+ *  solved offset instead of a multiplicative 2^(1/p) fudge); this is the other
+ *  half — the body walks and jumps closer to the rock it can see.
+ *
+ *  These widen the WALL PUSHOUT and the HEADROOM only. Membership (which
+ *  segment you are standing in, and therefore the standing floor) is unchanged,
+ *  so the shared heightfield, MapGenerator's roofed() acceptance and
+ *  test-world-fixed's bit-identical world are all untouched by them. The 0.25 m
+ *  of headroom is far inside the 1.8-2.2 m of rock roofed() already demands
+ *  over every segment, so no roof thins. */
+export const CAVE_WALK_EXTRA = 0.3;
+export const CAVE_CEIL_HEADROOM = 0.25;
+/** The lateral half-width a body may actually reach inside a segment. */
+export function caveWalkRadius(cave: IslandCave): number {
+  return (cave.interiorRadius ?? 3.0) + CAVE_WALK_EXTRA;
+}
 
 /** Cave-local frame of a segment: +z points OUTWARD (entrance side), the tunnel
  *  runs to -z. `depth` is the distance to the nearest wall of this segment's
@@ -691,12 +714,22 @@ function caveSegLocal(cave: IslandCave, x: number, z: number) {
   const floorAt = cFloorY + (cFloorEnd - cFloorY) * along;
   const openNear = cave.hasMouth === true;
   const sideDepth = Math.min(cRadius - Math.abs(lx), lz + cLen);
+  // The WALL is 0.3 m further out than membership is (CAVE_WALK_EXTRA): the
+  // drawn rock stands there, so a body may too. Membership keeps the narrower
+  // radius, which is what decides the standing floor — widening THAT would
+  // change the shared heightfield and the generated world.
+  const walkRadius = cRadius + CAVE_WALK_EXTRA;
+  const sideWalk = Math.min(walkRadius - Math.abs(lx), lz + cLen);
   // Membership always stops at the near plane (otherwise a mouth's "interior"
   // would stretch out over the whole beach in front of it); the wall pushout
   // ignores it for mouths so walking out of a cave is never blocked.
   const depth = Math.min(sideDepth, CAVE_NEAR_OVERHANG - lz);
-  const wallDepth = openNear ? sideDepth : depth;
-  return { lx, lz, cLen, cRadius, floorAt, ceilAt: floorAt + cave.height, depth, wallDepth, openNear, cosR, sinR };
+  const wallDepth = openNear ? sideWalk : Math.min(sideWalk, CAVE_NEAR_OVERHANG - lz);
+  return {
+    lx, lz, cLen, cRadius, walkRadius, floorAt,
+    ceilAt: floorAt + cave.height + CAVE_CEIL_HEADROOM,
+    depth, wallDepth, openNear, cosR, sinR,
+  };
 }
 
 export interface CaveInterior {
@@ -852,11 +885,11 @@ export function resolveCaveWallCollision(
   for (const cave of caves) {
     const s = caveSegLocal(cave, x, z);
     // A segment narrower than the body can't hold it — never project into one.
-    if (s.cRadius <= pad) continue;
+    if (s.walkRadius <= pad) continue;
     if (!best || s.wallDepth > best.wallDepth) { best = s; bestCave = cave; }
   }
   if (!best || !bestCave || best.wallDepth >= pad) return { x, z, pushed: false };
-  const limit = best.cRadius - pad;
+  const limit = best.walkRadius - pad;
   const lx = clamp(best.lx, -limit, limit);
   let lz = Math.max(best.lz, -best.cLen + pad);
   if (!best.openNear) lz = Math.min(lz, CAVE_NEAR_OVERHANG - pad);

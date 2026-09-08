@@ -1,7 +1,7 @@
 /** Cave tunnel tube geometry: lofting, neighbour culling and vertex shading. */
 import * as THREE from 'three';
 import type { Island, IslandCave } from '../../../shared/types/index.js';
-import { CAVE_NEAR_OVERHANG, getIslandSurfaceY } from '../../../shared/utils/index.js';
+import { CAVE_CEIL_HEADROOM, CAVE_NEAR_OVERHANG, CAVE_WALK_EXTRA, getIslandSurfaceY } from '../../../shared/utils/index.js';
 
 /** Metres of rock the drawn shell keeps OUTSIDE the walkable interior box. The
  *  shell used to be an ellipse whose radius WOBBLED between 0.67× and 1.45× the
@@ -10,14 +10,51 @@ import { CAVE_NEAR_OVERHANG, getIslandSurfaceY } from '../../../shared/utils/ind
  *  the drawn rock and saw the whole island exterior through the wall. The shell
  *  is now a rounded-rect loft that provably contains the box (+ this margin) at
  *  every ring, so the wall can never be behind the player. */
-export const CAVE_SHELL_MARGIN = 0.5;
+export const CAVE_SHELL_MARGIN = 0.25;
 /** Superellipse exponent of the tunnel cross-section: 2 is an ellipse, ∞ a
- *  rectangle. 5 reads as an arched passage with square-ish shoulders — and, at
- *  CAVE_SHELL_K, provably encloses the rectangular interior. */
-const SHELL_P = 5;
-/** Scale that makes a superellipse of exponent SHELL_P contain the rectangle it
- *  is built around: k ≥ 2^(1/p) puts the rectangle's CORNERS inside it. */
-const CAVE_SHELL_K = Math.pow(2, 1 / SHELL_P) + 0.01;
+ *  rectangle. 14 hugs the walkable box closely enough that the rock a player
+ *  can SEE and the rock a player can REACH are within a body-width of each
+ *  other; the arch still reads as an arch because the crown corners round off
+ *  and the floor is flattened under it. */
+const SHELL_P = 14;
+/** Ring samples per tube cross-section (chords between them are what the
+ *  containment solve has to clear, so it is a shell parameter, not a detail
+ *  knob). */
+export const CAVE_SHELL_SEGS = 16;
+/** Per-vertex outward rock jitter. Was 0.30 — on a 6 m gallery that alone put
+ *  1.8 m of drawn rock outside the wall a player could touch (physics-04's
+ *  1.28-1.90 m invisible wall). The rock reads rocky from the triplanar detail
+ *  and the AO, not from a silhouette that lies about where the wall is. */
+const SHELL_JITTER = 0.02;
+
+/**
+ * Half-extents of the drawn shell around a segment, SOLVED rather than scaled.
+ *
+ * The shell used to be the interior box scaled by k = 2^(1/p): a multiplicative
+ * fudge that puts the box's corners inside the superellipse but whose slack
+ * grows with the cave — on the roster's 6.2 m gallery it stood the wall 1.9 m
+ * outboard of the walkable limit, which is the invisible wall players walked
+ * into (physics-04). Here the offset is ADDITIVE and minimal: bisect for the
+ * smallest s ≥ CAVE_SHELL_MARGIN with (X/(X+s))^p + (Y/(Y+s))^p ≤ 1, so the
+ * gap between drawn rock and reachable air is s at every cave size.
+ *
+ * X/Y are the box that must be contained: the WALK box (interior radius +
+ * CAVE_WALK_EXTRA, ceiling + CAVE_CEIL_HEADROOM), inflated by the chord sag of
+ * a `CAVE_SHELL_SEGS`-gon so the straight edges between ring samples clear it
+ * too — the shell is a polygon, and a chord is the other way into the box.
+ */
+export function caveShellHalfExtents(walkR: number, walkHalfH: number): { bx: number; by: number } {
+  const sag = 1 - Math.cos(Math.PI / CAVE_SHELL_SEGS);
+  const X = walkR * (1 + sag) + 0.02;
+  const Y = walkHalfH * (1 + sag) + 0.02;
+  const covers = (s: number) => Math.pow(X / (X + s), SHELL_P) + Math.pow(Y / (Y + s), SHELL_P) <= 1;
+  let lo = CAVE_SHELL_MARGIN;
+  if (covers(lo)) return { bx: X + lo, by: Y + lo };
+  let hi = CAVE_SHELL_MARGIN;
+  for (let i = 0; i < 12 && !covers(hi); i++) { lo = hi; hi *= 1.6; }
+  for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (covers(mid)) hi = mid; else lo = mid; }
+  return { bx: X + hi, by: Y + hi };
+}
 /** Metres every segment's tube overshoots its far plane so its open rim buries
  *  inside the neighbour it joins (see the tubeLen comment in CaveBuilder). */
 export const CAVE_TUBE_BACK_OVERSHOOT = 1.2;
@@ -59,7 +96,7 @@ export function caveTubeParams(cave: IslandCave) {
  *  `cR`/`ceilY - floorY` describe the WALKABLE interior — the shell itself is
  *  lofted outside them (CAVE_SHELL_MARGIN), never through them. */
 export function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, ceilY: number, seed: number, capBack: boolean, floorYEnd?: number, frontOvershoot = 0): THREE.BufferGeometry {
-  const segs = 16;
+  const segs = CAVE_SHELL_SEGS;
   const total = cLen + frontOvershoot;
   const rings = Math.max(5, Math.round(total / 1.3));
   const hash = (n: number) => { const x = Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453; return x - Math.floor(x); };
@@ -79,24 +116,36 @@ export function makeCaveTubeGeometry(cR: number, cLen: number, floorY: number, c
     const t = cLen > 0 ? Math.max(0, -z / cLen) : 0;
     const floorJ = floorY + (fEnd - floorY) * t;          // ramp down into the mountain
     const vc = floorJ + height * 0.5;
-    const cxWob = (hash(j * 3.7) - 0.5) * cR * 0.5;      // tunnel meanders
-    // Wobble is OUTWARD-ONLY (≥1): a pinch below the interior radius is a hole
-    // in the wall, not a pinch. The meander is added back into the half-width
-    // so the shifted shell still clears the interior box on the near side.
-    const rMul = 1 + hash(j * 6.3) * 0.3;                 // widenings
-    const bx = (cR + CAVE_SHELL_MARGIN + Math.abs(cxWob)) * CAVE_SHELL_K * rMul;
-    // Vertical half-extent takes NO wobble: the generator only guarantees ~1-2m
-    // of rock over the ceiling (roofed()), so a tube that wobbles UP pokes out
-    // of the hillside as a black slab — and light leaks in where it does.
-    const by = (height * 0.5 + CAVE_SHELL_MARGIN) * CAVE_SHELL_K;
+    // The meander (cxWob) and the per-ring widening (rMul) are GONE. They were
+    // outward-only by construction — a shifted or widened ring had to add its
+    // own shift back into the half-width or it pinched a hole in the wall — so
+    // together they stood up to 1.9 m of drawn rock outboard of the walkable
+    // limit and the player bonked into air (physics-04). The tunnel gets its
+    // life from the floor ramp, the neighbour joins and the rock shading now.
+    const { bx, by } = caveShellHalfExtents(
+      cR + CAVE_WALK_EXTRA, height * 0.5 + CAVE_CEIL_HEADROOM,
+    );
+    const cxWob = 0;
     const idxs: number[] = [];
     for (let s = 0; s < segs; s++) {
-      const a = (s / segs) * Math.PI * 2;                 // 0=right, π/2=up, 3π/2=down
+      // Ring samples are NOT uniform in polar angle. A superellipse this square
+      // is almost all flat wall and flat roof with four tight CORNERS, and a
+      // chord across a corner is the only remaining way into the walkable box
+      // (it cut 0.15 m under the collision ceiling at 32 uniform samples). The
+      // superellipse's own PARAMETRIC form concentrates its parameter exactly
+      // there, so reading the polar angle off it packs samples where the curve
+      // turns and spends none on the flats, where a chord IS the surface.
+      // Same vertex count, same shape, same axis points.
+      const th = (s / segs) * Math.PI * 2;                // 0=right, π/2=up, 3π/2=down
+      const a = Math.atan2(
+        by * Math.sign(Math.sin(th)) * Math.pow(Math.abs(Math.sin(th)), 2 / SHELL_P),
+        bx * Math.sign(Math.cos(th)) * Math.pow(Math.abs(Math.cos(th)), 2 / SHELL_P),
+      );
       const ca = Math.abs(Math.cos(a));
       const sa = Math.sin(a);
       // Rocky jitter, outward only, and faded out toward the crown for the same
       // roof-thickness reason.
-      const n = 1 + hash(j * 131 + s * 7.7) * 0.3 * (1 - Math.max(0, sa));
+      const n = 1 + hash(j * 131 + s * 7.7) * SHELL_JITTER * (1 - Math.max(0, sa));
       // Superellipse radius along this angle — the rounded rectangle around the
       // interior box (see CAVE_SHELL_K).
       const rA = 1 / Math.pow(Math.pow(ca / bx, SHELL_P) + Math.pow(Math.abs(sa) / by, SHELL_P), 1 / SHELL_P);
@@ -167,8 +216,11 @@ export function insideCaveShellVolume(other: IslandCave, wx: number, wy: number,
   const f0 = other.floorY;
   const fEnd = other.floorYEnd ?? f0;
   const floorAt = f0 + (fEnd - f0) * (oLen > 0 ? Math.max(0, -lz / oLen) : 0);
-  const bx = (oR + CAVE_SHELL_MARGIN) * CAVE_SHELL_K * 0.95;
-  const by = (oH * 0.5 + CAVE_SHELL_MARGIN) * CAVE_SHELL_K * 0.95;
+  // Same solve the loft runs, pulled in 5% so "inside the shell volume" never
+  // claims a point the drawn surface only grazes.
+  const ext = caveShellHalfExtents(oR + CAVE_WALK_EXTRA, oH * 0.5 + CAVE_CEIL_HEADROOM);
+  const bx = ext.bx * 0.95;
+  const by = ext.by * 0.95;
   // Below the floor plane the loft is not a superellipse — it is the flat
   // walkable floor with the wall skirt tucked under it, so the covered volume
   // there is the full-width slab between the skirt's feet.

@@ -19,9 +19,10 @@ import {
   getCaveInteriorAt, getIslandSurfaceY, getCaveCeilingY, getCaveFloorY, isInsideCaveInterior,
 } from '../src/shared/utils/index.ts';
 import {
-  CAVE_SHELL_MARGIN, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors,
+  CAVE_SHELL_MARGIN, CAVE_SHELL_SEGS, capCaveTubeRims, caveTubeParams, cullCaveTubeAgainstNeighbors,
   insideCaveShellVolume, makeCaveTubeGeometry,
 } from '../src/client/rendering/factories/CaveGeometry.ts';
+import { CAVE_CEIL_HEADROOM, CAVE_WALK_EXTRA } from '../src/shared/utils/index.ts';
 import * as THREE from 'three';
 import { getCaveMouthCarve, isNearCaveMouthCut, getIslandMaxRadius, getIslandSurfacePoint } from '../src/shared/utils/index.ts';
 import { buildTerrainHeightfield } from '../src/client/world/island/TerrainMeshBuilder.ts';
@@ -339,11 +340,16 @@ for (const island of islands) {
       // overhang. The tube deliberately overshoots the far plane (its open rim
       // buries inside the neighbour) and a dead-end's back cap seals it there —
       // both sit BEYOND the box in z, which is not an intrusion.
-      return Math.min(cR - Math.abs(x), y - fl, fl + c.height - y, z + cLen, 1.2 - z);
+      // The box is the WALKABLE one, which is 0.3 m wider and 0.25 m taller than
+      // the generator's nominal interior (CAVE_WALK_EXTRA / CAVE_CEIL_HEADROOM,
+      // physics-04): the shell has to clear the rock a BODY can reach, not the
+      // rock the generator nominally carved.
+      return Math.min(cR + CAVE_WALK_EXTRA - Math.abs(x), y - fl,
+        fl + c.height + CAVE_CEIL_HEADROOM - y, z + cLen, 1.2 - z);
     };
     // Vertices AND the midpoint of every ring edge: the shell is a closed loft,
     // so a chord between two clearing vertices is the only other way in.
-    const segsPerRing = 16;
+    const segsPerRing = CAVE_SHELL_SEGS;
     for (let i = 0; i + segsPerRing <= pos.count; i += segsPerRing) {
       for (let s = 0; s < segsPerRing; s++) {
         const a = i + s, b = i + ((s + 1) % segsPerRing);
@@ -363,8 +369,69 @@ for (const island of islands) {
 }
 expect('no tube wall/ceiling vertex or edge cuts into the walkable box',
   shellIntrusions === 0, `${shellIntrusions} intrusions, worst ${shellWorst.toFixed(2)}m at ${shellWorstAt}`);
-expect('and the shell keeps a real slab of rock outside it', CAVE_SHELL_MARGIN >= 0.35,
+expect('and the shell keeps a real slab of rock outside it', CAVE_SHELL_MARGIN >= 0.2,
   `CAVE_SHELL_MARGIN=${CAVE_SHELL_MARGIN}`);
+
+// ── the OVER-shoot side of the same bug (physics-04) ───────────────────────
+// Enclosing the box is only half a wall. The shell used to be the box scaled by
+// 2^(1/p) with the meander and the widening folded into the half-width, and the
+// slack of a multiplicative fudge GROWS with the cave: a probe over these 49
+// segments measured the drawn wall 1.28 m / 1.46 m / 1.90 m (min/median/max)
+// outboard of the limit a body could reach, and the crown 0.85-1.01 m over the
+// collision ceiling. You stopped a metre and a half short of visible rock and
+// bonked a metre under a visible roof — an invisible wall in every cave.
+// So the gap is graded, not just the sign of it.
+const SHELL_GAP_MAX = 0.6;   // drawn half-width at eye height − walkable half-width
+const CROWN_GAP_MAX = 0.4;   // drawn crown − collision ceiling
+let worstGap = 0, worstGapAt = '', worstCrown = 0, worstCrownAt = '';
+const gaps = [];
+for (const island of islands) {
+  for (const [si, c] of (island.caves ?? []).entries()) {
+    const cR = c.interiorRadius ?? 3;
+    const cLen = c.length ?? 10;
+    const floorLocal = c.floorY - c.position.y;
+    const floorEndLocal = (c.floorYEnd ?? c.floorY) - c.position.y;
+    const tp = caveTubeParams(c);
+    const geo = makeCaveTubeGeometry(
+      tp.cR, tp.tubeLen, tp.floorLocalY, tp.ceilingLocalY, tp.seed, tp.capBack, tp.tubeFloorEnd, tp.frontOvershoot,
+    );
+    const pos = geo.getAttribute('position');
+    const walkR = cR + CAVE_WALK_EXTRA;
+    for (let i = 0; i + CAVE_SHELL_SEGS <= pos.count; i += CAVE_SHELL_SEGS) {
+      const z = pos.getZ(i);
+      if (z > 0 || z < -cLen) continue;                    // only inside the segment proper
+      const t = cLen > 0 ? Math.min(1, Math.max(0, -z / cLen)) : 0;
+      const fl = floorLocal + (floorEndLocal - floorLocal) * t;
+      const eyeY = fl + PLAYER.EYE_Y;
+      // The drawn half-width AT EYE HEIGHT: walk the ring's edges and interpolate
+      // where each one crosses the eye plane. Taking the nearest vertex instead
+      // would read the shell at whatever height the 16-gon happened to sample.
+      let half = 0, crown = -Infinity;
+      for (let k = 0; k < CAVE_SHELL_SEGS; k++) {
+        const a = i + k, b = i + ((k + 1) % CAVE_SHELL_SEGS);
+        const ya = pos.getY(a), yb = pos.getY(b);
+        crown = Math.max(crown, ya);
+        if ((ya - eyeY) * (yb - eyeY) > 0) continue;
+        const f = Math.abs(yb - ya) < 1e-9 ? 0 : (eyeY - ya) / (yb - ya);
+        half = Math.max(half, Math.abs(pos.getX(a) + (pos.getX(b) - pos.getX(a)) * f));
+      }
+      const gap = half - walkR;
+      gaps.push(gap);
+      if (gap > worstGap) { worstGap = gap; worstGapAt = `${island.id} seg${si} (cR ${cR.toFixed(2)}, h ${c.height.toFixed(2)})`; }
+      const crownGap = crown - (fl + c.height + CAVE_CEIL_HEADROOM);
+      if (crownGap > worstCrown) { worstCrown = crownGap; worstCrownAt = `${island.id} seg${si} (h ${c.height.toFixed(2)})`; }
+    }
+  }
+}
+gaps.sort((a, b) => a - b);
+const median = gaps.length ? gaps[gaps.length >> 1] : 0;
+console.log(`  shell gap over ${gaps.length} rings: min ${gaps[0]?.toFixed(2)} median ${median.toFixed(2)} max ${worstGap.toFixed(2)} m`);
+expect(`the drawn wall is within ${SHELL_GAP_MAX} m of the wall a body can reach (worst ${worstGap.toFixed(2)} m)`,
+  worstGap <= SHELL_GAP_MAX, `worst at ${worstGapAt}`);
+expect(`the drawn crown is within ${CROWN_GAP_MAX} m of the collision ceiling (worst ${worstCrown.toFixed(2)} m)`,
+  worstCrown <= CROWN_GAP_MAX, `worst at ${worstCrownAt}`);
+expect('…and never BELOW it — a head that goes through the drawn roof is the see-through bug again',
+  worstCrown > 0, `worst crown gap ${worstCrown.toFixed(2)} m`);
 
 console.log('\n── caves are solid: no eye underground sees daylight through the rock ──');
 // The shell being in the right PLACE is not the same as the shell being CLOSED.
