@@ -40,6 +40,16 @@ export const ASSET_NAMES = [
   // (WEAPON-01, scripts/blender/build_weapons.py). World assets, not boot
   // assets — the primitive fallback covers the queue window.
   'cutlass', 'flintlock', 'flintknock', 'eye_of_reach', 'blunderbuss',
+  // Cave interior kit (CAVE-01, scripts/blender/build_cave_kit.py). World tier,
+  // not boot: nothing on the menu is underground, and CaveBuilder only instances
+  // them on the 6 roster islands that HAVE caves, behind the 45 m visibility
+  // gate. The two stalactite clusters hang from their origin (see PINNED_BASE in
+  // scripts/test-asset-bounds.mjs); everything else stands on its base.
+  'stalactite_cluster_a', 'stalactite_cluster_b',
+  'stalagmite_cluster_a', 'stalagmite_cluster_b',
+  'rock_arch_cave', 'cave_ledge', 'crystal_vein_a', 'crystal_vein_b',
+  'cave_pool_rim', 'rope_bridge_short', 'wall_torch',
+  'bone_pile_cave', 'skull_shrine', 'cave_painting_panel',
 ] as const;
 
 export type AssetName = (typeof ASSET_NAMES)[number];
