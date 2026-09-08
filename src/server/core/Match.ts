@@ -135,6 +135,14 @@ interface ConnectedClient {
   /** Latest full snapshot skipped while the socket was congested — flushed
    *  (newest only, older ones dropped) once the buffer drains. */
   pendingFullSnapshot: string | null;
+  /** WIRE-01 (netcode-28): this client has been handed the static world (in her
+   *  join payload, or in a world-carrying full that was either written to her
+   *  socket or parked in `pendingFullSnapshot` for the flush). The world is a
+   *  quarter megabyte of islands, caves and props that never changes, so once
+   *  every client aboard has it the periodic re-send is pure waste — and it was
+   *  not free waste: the client JSON.parses it on the main thread and re-walks
+   *  ensureWorldMeshes, which is a visible hitch every 19.2 s. */
+  hasWorld: boolean;
 }
 
 export interface MatchHumanResult {
@@ -1420,6 +1428,8 @@ export class Match {
         oneShotPendingSince: null,
         lastRefusalAt: -Infinity,
         pendingFullSnapshot: null,
+        // The join payload below carries the static world, so she starts with it.
+        hasWorld: true,
       };
       this.clients.set(player.id, client);
       return { player, client };
@@ -2094,11 +2104,25 @@ export class Match {
         // island entities only ride the ~19 s static-world tick. A dynamic event
         // cannot wait 19 s to become lootable, so raising or claiming her arms
         // one extra world tick, on the very next full snapshot.
-        const includeStaticWorld = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0
-          || this.worldResyncPending;
+        // THE WORLD IS POSTED, NOT BROADCAST (WIRE-01, netcode-28). The static
+        // world rode a clock: every FULL_WORLD_SNAPSHOT_TICKS (19.2 s) every
+        // client was re-sent ~250 KB of islands/caves/props that had not changed
+        // since the join snapshot already delivered them. That is ~13 KB/s per
+        // client of pure repetition AND a main-thread JSON.parse plus a full
+        // ensureWorldMeshes/syncBarrels walk on the client every 19 s — a hitch
+        // the player feels. The clock now only fires for someone who is actually
+        // missing the world, which after a normal join is nobody. A real world
+        // change (the Gilded Wreck raising her chests) still sets
+        // `worldResyncPending` and goes out on the very next full, unchanged.
+        const worldTick = this.tickCount % FULL_WORLD_SNAPSHOT_TICKS === 0;
+        let someoneLacksWorld = false;
+        for (const [, client] of this.clients) {
+          if (!client.hasWorld) { someoneLacksWorld = true; break; }
+        }
+        const includeStaticWorld = this.worldResyncPending || (worldTick && someoneLacksWorld);
         this.worldResyncPending = false;
         const snap = buildWireSnapshot(this.buildSnapshot(includeStaticWorld), includeStaticWorld);
-        this.broadcastVolatile({ type: 'state_snapshot', ts: Date.now(), payload: snap }, 'full');
+        this.broadcastVolatile({ type: 'state_snapshot', ts: Date.now(), payload: snap }, 'full', includeStaticWorld);
       } else {
         const hot = buildHotSnapshot(this.state, this.t, ++this.snapshotSeq);
         this.broadcastVolatile({ type: 'state_hot', ts: Date.now(), payload: hot }, 'hot');
@@ -7072,16 +7096,23 @@ export class Match {
    * instead of silently skipping new snapshots while stale bytes sit in
    * flight (the old behavior that ran clients ~1 s behind).
    */
-  private broadcastVolatile(msg: NetMsg, kind: 'full' | 'hot') {
+  private broadcastVolatile(msg: NetMsg, kind: 'full' | 'hot', carriesWorld = false) {
     const data = JSON.stringify(msg);
     for (const [, client] of this.clients) {
       if (client.ws.readyState !== WebSocket.OPEN) continue;
       if (client.ws.bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES) {
         // Hot updates are superseded ~31x/second, so a withheld one is simply
         // dropped; only the newest FULL base is worth holding for the flush.
-        if (kind === 'full') client.pendingFullSnapshot = data;
+        // A parked full still reaches her on the flush, so a world it carries
+        // counts as delivered — otherwise a congested client would re-arm the
+        // 19.2 s clock for the whole match.
+        if (kind === 'full') {
+          client.pendingFullSnapshot = data;
+          if (carriesWorld) client.hasWorld = true;
+        }
         continue;
       }
+      if (carriesWorld) client.hasWorld = true;
       if (kind === 'full') {
         // A newer full snapshot supersedes any pending one outright.
         client.pendingFullSnapshot = null;

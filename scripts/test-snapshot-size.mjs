@@ -145,15 +145,16 @@ async function measure(cfg) {
       hots += 1;
     }
   }
-  // The 19.2 s static-world resend, amortized.
+  // The 19.2 s static-world resend, amortized — charged only while the server
+  // still puts it on the clock (see the section above).
   const worldSnap = JSON.stringify({ type: 'state_snapshot', ts: Date.now(), payload: buildWireSnapshot(m.buildSnapshot(true), true) });
-  const worldBytes = await socket.bytes(worldSnap);
+  const worldBytes = worldResent ? await socket.bytes(worldSnap) : 0;
   socket.end();
   const joinBytes = joinMessage ? await deflateOnce(joinMessage) : 0;
   const joinRaw = joinMessage ? Buffer.byteLength(joinMessage) : 0;
   m.stop();
   return {
-    perSecond: bytes + worldBytes / WORLD_RESEND_SECONDS,
+    perSecond: bytes + (worldResent ? worldBytes / WORLD_RESEND_SECONDS : 0),
     streamed: bytes,
     worldBytes,
     joinBytes,
@@ -163,6 +164,38 @@ async function measure(cfg) {
     players: cfg.crews * cfg.crewSize,
   };
 }
+
+// ------------------------------------------------- the world is posted ONCE
+// netcode-28 third pass: the static world did not only ride the join, it was
+// RE-BROADCAST to every client every FULL_WORLD_SNAPSHOT_TICKS (1200 ticks =
+// 19.2 s) whether or not anything in it had changed — ~13 KB/s per client of
+// repetition, and on the receiving end a 250 KB JSON.parse plus a full
+// ensureWorldMeshes/syncBarrels walk on the main thread, i.e. a hitch the
+// player feels three times a minute. This drives the REAL broadcast path (the
+// match's own tick, through the client's own socket) past that clock.
+console.log('\nThe static world is posted once, not on a clock:');
+const worldMatch = new Match({ matchId: 'wire-world-clock', botCount: 9 });
+const recorded = [];
+const recordingWs = { readyState: 1, bufferedAmount: 0, send(data) { recorded.push(data); } };
+worldMatch.createCrew([{ ws: recordingWs, name: 'Watcher' }]).joins[0].send();
+// The horn, without start()'s setInterval — this fixture steps the sim by hand
+// and a live timer would tick it twice.
+worldMatch.state.phase = 'playing';
+const joinFrames = recorded.length;
+expect('the join itself hands her the world', recorded.some((d) => d.includes('"caves"')),
+  'no join frame carried islands — the fixture is wrong, not the rule');
+recorded.length = 0;
+const WORLD_CLOCK_TICKS = FULL_SNAPSHOT_TICKS * 200 + 60;
+for (let i = 0; i < WORLD_CLOCK_TICKS; i++) worldMatch.tick(1 / 62.5);
+const worldFrames = recorded.filter((d) => d.includes('"caves"'));
+const worldResent = worldFrames.length > 0;
+console.log(`  ${recorded.length} frames over ${WORLD_CLOCK_TICKS} ticks (${(WORLD_CLOCK_TICKS / TICKS_PER_SECOND).toFixed(1)} s), ${worldFrames.length} of them carrying the static world`
+  + ` (join was ${joinFrames} frame${joinFrames === 1 ? '' : 's'})`);
+expect('a client who already has the world is never re-sent it', !worldResent,
+  `${worldFrames.length} world frames re-broadcast, ${(worldFrames.reduce((a, d) => a + d.length, 0) / 1024).toFixed(0)} KB`);
+expect('the ordinary fulls kept flowing (the match did not simply go quiet)',
+  recorded.length > 100, `${recorded.length} frames`);
+worldMatch.stop();
 
 const CONFIGS = [
   { label: '1-human', botCount: 9, mode: 'solo', crews: 1, crewSize: 1 },
@@ -175,7 +208,7 @@ console.log(`\nPer-client egress at ${deflateCfg ? `deflate level ${level}` : 'N
 for (const cfg of CONFIGS) {
   const r = await measure(cfg);
   console.log(`  ${cfg.label.padEnd(11)} ${String(r.players).padStart(2)} players`
-    + ` | ${(r.perSecond / 1024).toFixed(1)} KB/s (${r.fulls} fulls + ${r.hots} hots + world/${WORLD_RESEND_SECONDS.toFixed(0)}s)`
+    + ` | ${(r.perSecond / 1024).toFixed(1)} KB/s (${r.fulls} fulls + ${r.hots} hots${worldResent ? ` + world/${WORLD_RESEND_SECONDS.toFixed(0)}s` : ', world posted once'})`
     + ` | join ${(r.joinBytes / 1024).toFixed(1)} KB compressed of ${(r.joinRaw / 1024).toFixed(1)} KB raw`);
   expect(`${cfg.label}: per-client egress under 120 KB/s`, r.perSecond < EGRESS_CAP,
     `${(r.perSecond / 1024).toFixed(1)} KB/s`);
