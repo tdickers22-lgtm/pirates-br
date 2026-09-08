@@ -176,6 +176,9 @@ runner grows an `expectRed` vocabulary. They are not in the quick tier.
 | `test-ship-hole-vis` | fire burn-down / recycled slot leave the decal behind; `ship-dark-timber` bars the breach at 0.178 m | SHIP-01 (lane 1.3, landed) |
 | `test-ship-helm-anchor` | wheel span on yaw rate (−12.32 rad from a ram, 0 at the helm); galleon anchor stock at +1.09 m; 7 hoist heights draw both canvases | SHIP-01 (lane 1.3, landed) |
 | `test-ship-geometry` | hold floor 24/24 verts outside the loft, stern 0.85 m aft | HULLGEO-01 |
+| `test-ship-plank-shader` | SHIPVIS-01 phase A: the caulking/timber/grime block reaches the drawn colour on hull and deck, the breach discard still runs after chaining, and the wet line rides the waterline foam height | SHIPVIS-01 (lane 9.6); **has `--mutate`** (renames the chunk the colour block hooks: 19/23) |
+| `perf-cost-model` | perf-15 resident-geometry census: a full-match fleet built the way the client builds it stays under 8 MB of ship geometry, and `clear()` releases every shared buffer exactly once | perf-15 (lane 9.6); **has `--no-cache`** (rebuilds per hull like HEAD did: 25.37 MB) |
+| `test-ship-rigging` | ships-16: every yard-attached rope still ends on its yard after a 60° brace (≤0.05 m, all three classes), and the rig is instanced cylinders rebuilt in place, not per frame | ships-16 (lane 9.6); **has `--mutate`** (restores the baked rest matrices: 19/22) |
 | `test-asset-bounds` | boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (world-space TRS applied) | ASSETS lane |
 | `glb-census --check` | the models README's counts vs disk + `ASSET_NAMES`/`FAR_ASSET_NAMES` (78 = 63 + 15, 0 unwired) | PROPCOL-01 assets-20 (lane 2.5) |
 | `test-quality-preference` | Safari M2 Air (opaque "Apple GPU") and four other rows grade `balanced` | PERF-01 (lane 2.6) |
