@@ -506,7 +506,11 @@ export class BotPirate {
     // Upwind no-go awareness: a course inside the cone is unsailable — offset
     // to the nearer ~40°-off-the-wind tack instead of pinching straight in.
     // Read where the HULL is: outside the ring the wind is the storm's gale.
-    const wind = sampleLocalWind(t, ship.position.x, ship.position.z, this.bb.storm);
+    // STORMUP-01 / storm-07: a bot trims on the MEAN gale, never on the gust. A
+    // 6-10 s pulse chased through a 0.5x trim lag is a crew that never has the
+    // yard right, which reads as a broken bot, not as weather.
+    const gusting = sampleLocalWind(t, ship.position.x, ship.position.z, this.bb.storm);
+    const wind = { ...gusting, direction: gusting.meanDirection, strength: gusting.meanStrength };
     const upwind = angleWrap(wind.direction + Math.PI);
     const offUpwind = angleWrap(desired - upwind);
     if (Math.abs(offUpwind) < SHIP.SAIL_NO_GO_ANGLE) {
@@ -837,7 +841,11 @@ export class BotPirate {
   }
 
   trimSails(ship: Ship, t: number, dt: number) {
-    const wind = sampleLocalWind(t, ship.position.x, ship.position.z, this.bb.storm);
+    // STORMUP-01 / storm-07: a bot trims on the MEAN gale, never on the gust. A
+    // 6-10 s pulse chased through a 0.5x trim lag is a crew that never has the
+    // yard right, which reads as a broken bot, not as weather.
+    const gusting = sampleLocalWind(t, ship.position.x, ship.position.z, this.bb.storm);
+    const wind = { ...gusting, direction: gusting.meanDirection, strength: gusting.meanStrength };
     const signedRelative = angleWrap(wind.direction - ship.rotation);
     const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.95;
     const delta = desiredTrim - ship.sailAngle;

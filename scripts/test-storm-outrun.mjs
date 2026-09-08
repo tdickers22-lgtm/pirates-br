@@ -830,6 +830,55 @@ console.log('\nCanvas has to be watched: the gust blows a full press of sail out
     && inside.gustPulse === 1);
 }
 
+// ══ 7. The storm is somewhere you would CHOOSE to go (storm-08) ═════════════
+console.log('\nA burning crew has a reason to run INTO the weather');
+{
+  const match = liveMatch('douse');
+  const { player, ship, client } = join(match);
+  const storm = closeTheRing(match, 300);
+  storm.damagePerSec = 0;
+  ship.position.x = 0; ship.position.z = 620; ship.position.y = 0;
+  ship.velocity = { x: 0, y: 0, z: 0 };
+  ship.anchored = true;
+  ship.onFire = true;
+  ship.fireTimer = SHIP.FIRE_DURATION;
+  player.onShipId = ship.id;
+  player.position = { x: 0, y: 4, z: 620 };
+  let outAt = null;
+  for (let i = 0; i < Math.ceil(30 / DT); i++) {
+    client.lastInput = { ...BLANK_INPUT, seq: i, ts: Date.now() };
+    match.tick();
+    ship.position.z = 620;
+    if (outAt === null && !ship.onFire) outAt = match.t;
+  }
+  expect('a burning hull out in the rain is extinguished within 10 s',
+    outAt !== null && outAt <= 10,
+    `out at ${outAt === null ? 'never' : outAt.toFixed(1)} s (dry burn is ${SHIP.FIRE_DURATION} s)`);
+}
+{
+  // The control: the same fire, in shelter. Rain is the mechanism, not time.
+  const match = liveMatch('douse');
+  const { player, ship, client } = join(match);
+  const storm = closeTheRing(match, 300);
+  storm.damagePerSec = 0;
+  ship.position.x = 0; ship.position.z = 40; ship.position.y = 0;
+  ship.velocity = { x: 0, y: 0, z: 0 };
+  ship.anchored = true;
+  ship.onFire = true;
+  ship.fireTimer = SHIP.FIRE_DURATION;
+  player.onShipId = ship.id;
+  player.position = { x: 0, y: 4, z: 40 };
+  let outAt = null;
+  for (let i = 0; i < Math.ceil(12 / DT); i++) {
+    client.lastInput = { ...BLANK_INPUT, seq: i, ts: Date.now() };
+    match.tick();
+    ship.position.z = 40;
+    if (outAt === null && !ship.onFire) outAt = match.t;
+  }
+  expect('the same fire inside the ring is still burning at 12 s — it is the RAIN',
+    outAt === null, `out at ${outAt === null ? 'never' : outAt.toFixed(1)} s`);
+}
+
 console.log(failures === 0
   ? '\nAll storm-outrun / first-sail checks passed.'
   : `\n${failures} check(s) FAILED.`);

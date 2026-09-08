@@ -424,8 +424,15 @@ export class StormSystem {
         // amidships, on the centreline, which is why this hole is not on the
         // seaward face like the ones the seas stove in.
         hooks.openHoleAt(target, { x: 0, y: bandY, z: stats.length * 0.06 }, STORM_LIGHTNING.MAST_HOLES);
-        target.onFire = true;
-        target.fireTimer = Math.max(target.fireTimer, STORM_LIGHTNING.FIRE_SECONDS);
+        // A second bolt into a mast that is ALREADY burning adds the hole, not a
+        // second full burn. Without this a 90 s crossing could stack two 12 s
+        // fires at 4 hp/s onto a crew that has no way to fight them yet, take
+        // them under STORM_EXPOSURE_HEALTH, and hand the tempest the crew kill
+        // STORM-01 took off it.
+        if (!target.onFire) {
+          target.onFire = true;
+          target.fireTimer = Math.max(target.fireTimer, STORM_LIGHTNING.FIRE_SECONDS);
+        }
       }
     } else {
       // Open water. A pirate swimming under the strike is cooked; a pirate on a

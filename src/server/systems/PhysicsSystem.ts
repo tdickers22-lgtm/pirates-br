@@ -26,6 +26,9 @@ import {
   WALK_FOOTPRINT_MARGIN,
   SHORE_APRON_DIST_RATIO,
   sampleLocalWind,
+  stormRain,
+  STORM_RAIN_DOUSE_SECONDS,
+  STORM_RAIN_DOUSE_THRESHOLD,
   STORM_GUST_BLOWOUT_DEPLOYMENT,
   STORM_GUST_BLOWOUT_DWELL,
   STORM_GUST_BLOWOUT_PULSE,
@@ -957,6 +960,18 @@ export class PhysicsSystem {
 
       if (ship.onFire) {
         ship.fireTimer = Math.max(0, ship.fireTimer - dt);
+        // THE RAIN PUTS IT OUT (storm-08). Fire was doused only by flooding, so
+        // every incentive in the storm pointed inward and the weather was a
+        // pure penalty field. A burning crew now has a reason to run INTO it:
+        // in a real downpour the blaze is out in STORM_RAIN_DOUSE_SECONDS
+        // whatever its clock said. stormRain is the SAME shared field the sky
+        // is drawn from, so what the player sees is what the fire feels.
+        if (stormRain(storm, ship.position.x, ship.position.z) >= STORM_RAIN_DOUSE_THRESHOLD) {
+          ship.fireTimer = Math.max(
+            0,
+            ship.fireTimer - dt * (SHIP.FIRE_DURATION / STORM_RAIN_DOUSE_SECONDS - 1),
+          );
+        }
         // A deck fire chars through the planking HIGH on the topside
         // (FIRE_HOLE_START_Y, well above the calm waterline) and then keeps
         // burning each of its own chars DOWNWARD toward the sea. So a firebomb

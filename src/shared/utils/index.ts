@@ -351,6 +351,12 @@ export function stormRain(storm: StormFieldRing | null | undefined, x: number, z
  *  1 in fair weather, STORM_VISIBILITY_FLOOR in the thick of it. The server
  *  reads this for bot perception; the client reads it for fog density. */
 export const STORM_VISIBILITY_FLOOR = 0.45;
+/** Seconds a squall takes to put out a burning hull, whatever the fire had left
+ *  on its clock (storm-08). This is the first reason in the game to run INTO
+ *  the weather rather than away from it. */
+export const STORM_RAIN_DOUSE_SECONDS = 8;
+/** Rain below this is a shower, not a downpour: it does not put a fire out. */
+export const STORM_RAIN_DOUSE_THRESHOLD = 0.5;
 export function stormVisibility(storm: StormFieldRing | null | undefined, x: number, z: number): number {
   if (!storm) return 1;
   return finiteClamp(1 - stormRain(storm, x, z) * (1 - STORM_VISIBILITY_FLOOR), STORM_VISIBILITY_FLOOR, 1, 1);
