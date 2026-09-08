@@ -260,6 +260,19 @@ export interface Player {
   atHelm: boolean;
   /** Climbing / stationed in the main mast crow's nest */
   atCrowNest: boolean;
+  /** POSE-01 wire bit: this pirate has a firearm UP this tick (holding aim, or
+   *  firing, or — for a bot — turned onto a target she has picked). Third
+   *  person had no way to tell a walking pirate from one drawing a bead on you:
+   *  the aim state lived in the shooter's own input and never crossed the wire,
+   *  so every remote carried her weapon at the hip. Set fresh every tick by the
+   *  server (Match.tick clears, applyInput/BotPirate set) and, like a ship
+   *  hole's `patched`, it only SHIPS when true — absent on the wire reads as
+   *  weapon down, which is what nearly every pirate is on nearly every tick. */
+  aiming?: boolean;
+  /** POSE-01 wire bit: leaning on the capstan bar this tick (the bow anchor
+   *  raise, not the helmsman's shortcut). Same story as `aiming` — the capstan
+   *  push was invisible to everyone but the pusher. Ships only when true. */
+  atCapstan?: boolean;
   /** Cutlass guard is held; frontal melee damage is mostly blocked. */
   blocking: boolean;
   /** True while actively bailing water out of the current ship's bilge. */

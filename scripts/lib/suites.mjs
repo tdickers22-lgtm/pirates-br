@@ -300,6 +300,10 @@ export const LOGIC = [
   // ENTITYSEAT (w7.2): chests, barrels and stations on the DRAWN ground, not
   // the analytic field. MUTATE=raw restores the old placement (60/133 out).
   quick(tsx('test-entity-seat.mjs')),
+  // POSE-01 wire half (w7.5): `aiming` and `atCapstan` cross the wire, are
+  // momentary, and cost nothing when false. Comment out updateAimStance (or the
+  // atCapstan line) in Match to see it fail.
+  quick(tsx('test-aim-wire.mjs')),
   // MATCHSPLIT-01 (w7.5): the tick spine — which subsystem runs when, and how
   // many draws each takes off the shared seeded stream. Pins the Match.ts split
   // against a silent re-order. Swap two update* calls in tick() to see it fail.

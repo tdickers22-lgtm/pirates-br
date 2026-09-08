@@ -1075,6 +1075,8 @@ export class Match {
       atCannon: false,
       atHelm: false,
       atCrowNest: false,
+      aiming: false,
+      atCapstan: false,
       blocking: false,
       bailing: false,
       cutlassCharge: 0,
@@ -2057,6 +2059,12 @@ export class Match {
     this.updateRespawns(dt);
 
     for (const player of this.state.players) {
+      // POSE-01 wire bits: both are momentary and both are re-asserted later in
+      // THIS tick (applyInput for humans, BotPirate for bots), so clearing here
+      // is what keeps a pirate from freezing mid-aim when her input stops
+      // arriving — the same reason the server does not trust a sticky flag.
+      player.aiming = false;
+      player.atCapstan = false;
       if (player.kegCooldown > 0) player.kegCooldown = Math.max(0, player.kegCooldown - dt);
       if (player.pocketUseCooldown > 0) player.pocketUseCooldown = Math.max(0, player.pocketUseCooldown - dt);
     }
@@ -2491,6 +2499,7 @@ export class Match {
       return;
     }
 
+    this.updateAimStance(player, input);
     this.updateBlockingState(player, input);
 
     // Queued climb + gangway walk-on. Runs before the [X] dispatch so a latched
@@ -2767,6 +2776,10 @@ export class Match {
         && !player.atCrowNest
         && this.isNearAnchor(player, ship)
       ) {
+        // POSE-01: she is leaning on the capstan bar, and now everyone can see
+        // it (the helmsman's shortcut below is NOT this — that pirate is at the
+        // wheel and is animated as such).
+        player.atCapstan = true;
         ship.anchorRaiseProgress = Math.min(1, ship.anchorRaiseProgress + dt / SHIP.ANCHOR_RAISE_TIME);
         if (ship.anchorRaiseProgress >= 1) {
           // Anchor is fully raised — release the brake but keep progress at 1 so the HUD reads
@@ -3149,6 +3162,32 @@ export class Match {
    * did. Transient ones only drop it once the stance has gone unfed for
    * PLAYER.GUARD_HOLD_GRACE, so input jitter can't open you up.
    */
+  /**
+   * POSE-01 (avatar-06/11): WHO IS POINTING A GUN AT YOU.
+   *
+   * `aim` and `fire` live in the shooter's own input packet and never crossed
+   * the wire, so a remote pirate about to shoot you looked exactly like a
+   * remote pirate walking past: weapon at the hip, arms on the stride. One bit
+   * per player per tick fixes the read, and it costs nothing to send — the flag
+   * is momentary (Match.tick clears it) so a client that stops sending input
+   * cannot leave her frozen with the barrel up.
+   *
+   * Hands that are full are not aiming: a chest carrier, a gunner on the
+   * cannon, a swimmer and a climber all keep the weapon down whatever the
+   * packet says. The helm is deliberately NOT excluded — you can fire from the
+   * wheel, and getFirearmAimRay already resolves that shot.
+   */
+  private updateAimStance(player: Player, input: PlayerInput) {
+    const activeWeapon = player.weapons[player.activeSlot];
+    player.aiming = !!activeWeapon
+      && !WEAPONS[activeWeapon.weaponId].melee
+      && (!!input.aim || !!input.fire)
+      && !activeWeapon.reloading
+      && player.state !== 'swimming'
+      && !player.carryingChestId
+      && !player.atCannon;
+  }
+
   private updateBlockingState(player: Player, input: PlayerInput) {
     const activeWeapon = player.weapons[player.activeSlot];
     const guardDropped = !activeWeapon

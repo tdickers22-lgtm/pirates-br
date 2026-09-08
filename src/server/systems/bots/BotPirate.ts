@@ -405,6 +405,12 @@ export class BotPirate {
     const pitch = Math.atan2(dy, horizontal);
 
     // Turn the BODY at a finite rate; the shot waits for the facing.
+    // POSE-01: a bot that has picked a target and is turning onto it has her
+    // weapon UP from this tick, not from the tick the shot leaves the barrel —
+    // that half second of visible intent is the whole tell a player gets.
+    // Cleared for every player at the top of Match.tick.
+    player.aiming = true;
+
     const rate = BOT_FIREARM_TURN_RATE[crew.difficulty];
     const off = angleWrap(yaw - player.rotation.x);
     const step = Math.max(-rate * dt, Math.min(rate * dt, off));
