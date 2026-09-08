@@ -42,6 +42,11 @@ const KNOWN_DARK = {
   revive_start: 'Predates this campaign: the reviver\'s progress is read off the '
     + 'snapshot (player.reviveProgress), so the event carries nothing the HUD '
     + 'needs. Left dark deliberately; CREWHUD-01 either uses it or deletes it.',
+  input_ack: 'PRED-01 slice c2 (the client half of prediction) is not landed, so '
+    + 'the per-client receipt broadcastInputAcks sends every hot tick has no '
+    + '`case` yet. Declared here rather than left invisible: until c2 lands, '
+    + 'every client pays ~70 B x 31 Hz for a message the switch drops. Delete '
+    + 'this entry the moment NetworkClient reconciles against it.',
 };
 
 function walk(dir, out = []) {
@@ -72,7 +77,10 @@ for (const file of walk('src/server')) {
   for (const m of src.matchAll(/type: '([a-z_]+)'/g)) {
     const t = m[1];
     if (!KNOWN_TYPES.has(t)) continue;
-    if (!/payload\s*:/.test(src.slice(m.index, m.index + 400))) continue;
+    // `payload` may be shorthand (`{ type: 'input_ack', ts, payload }`) — the
+    // old /payload\s*:/ made exactly that send invisible to the gate whose whole
+    // job is finding a producer with no consumer (review-6 P2).
+    if (!/\bpayload\s*[:},]/.test(src.slice(m.index, m.index + 400))) continue;
     const line = src.slice(0, m.index).split('\n').length;
     if (!produced.has(t)) produced.set(t, `${file}:${line}`);
   }

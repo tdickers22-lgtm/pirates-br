@@ -8690,12 +8690,6 @@ export class Match {
     return true;
   }
 
-  /** Is anyone still able to sail this hull back inside the ring? A mate who is
-   *  merely DOWNED counts — he can be picked up. A mate who is himself waiting
-   *  on the same held respawn does not: two dead men cannot rescue each other,
-   *  which is exactly the deadlock this answers. Anyone standing on her deck
-   *  counts too, even an enemy: a boarded hull is somebody's problem, and the
-   *  tide does not move a ship out from under a living pirate. */
   /**
    * IS ANYONE LEFT TO SAIL HER? (gameplay-29)
    *
@@ -8705,6 +8699,10 @@ export class Match {
    * respawn timer waited on him. A hull's sailor is a member of HER CREW. An
    * outsider on the planking is not crew, he is a boarding party, and
    * isHullContested is what answers for him.
+   *
+   * Within the crew: a mate who is merely DOWNED counts — he can be picked up.
+   * A mate who is himself waiting on the same held respawn does not (two dead
+   * men cannot rescue each other), which is the deadlock this answers.
    */
   private hasSailorForHull(ship: Ship, exclude: Player): boolean {
     for (const other of this.state.players) {
