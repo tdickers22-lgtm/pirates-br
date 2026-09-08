@@ -124,8 +124,16 @@ console.log('1. Cruise → windup: in range, vector locked at windup start');
   expect('one bite of BITE_DAMAGE landed', swimmer.health === 100 - SHARK.BITE_DAMAGE, `health=${swimmer.health}`);
   expect('bite arms the cooldown', shark.biteCooldown > SHARK.BITE_COOLDOWN - 0.5, `cd=${shark.biteCooldown.toFixed(2)}`);
   expect('shark drops into recover after the hit', shark.attackState === 'recover', `state=${shark.attackState}`);
-  expect('recover ends back in cruise', tickUntil(shark, 'cruise', Math.ceil((SHARK.RECOVER_TIME + 0.5) / DT)),
-    `state=${shark.attackState}`);
+  // Re-pinned by SHARK-01 slice c: a shark that CONNECTED opens the range
+  // before coming back round, instead of grinding the swimmer down from a
+  // metre away. A MISS still goes straight back to cruise (case 3 below).
+  expect('a bite is followed by a retreat, not another bite',
+    tickUntil(shark, 'retreat', Math.ceil((SHARK.RECOVER_TIME + 0.5) / DT)), `state=${shark.attackState}`);
+  const openedTo = sharkDist(shark);
+  expect('the retreat ends back in the hunt',
+    tickUntil(shark, 'cruise', Math.ceil((SHARK.RETREAT_TIME + 0.5) / DT)), `state=${shark.attackState}`);
+  expect('and it opened real distance while it did',
+    sharkDist(shark) > openedTo + 3, `${openedTo.toFixed(1)} m -> ${sharkDist(shark).toFixed(1)} m`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -201,6 +209,48 @@ console.log('\n5. Two sharks on one swimmer stay two sharks');
   }
   expect('both sharks are still in the water', state.sharks.length === 2, `${state.sharks.length}`);
   expect('min pairwise distance over 5 s > 2.5 m', closest > 2.5, `closest=${closest.toFixed(3)} m`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\n6. The fin comes round you before it commits');
+
+{
+  const shark = setupEncounter();
+  // Released at the edge of the circling ring, dead ahead of a stationary
+  // swimmer — the first thing she should see is an orbit, not a bite.
+  shark.position = { x: sea.x, y: shark.position.y, z: sea.z - SHARK.CIRCLE_MAX + 1 };
+  shark.circleCooldown = 0;
+  let reached = false;
+  for (let i = 0; i < 600 && !reached; i++) {
+    match.updateSharks(DT);
+    reached = shark.attackState === 'circle';
+  }
+  expect('a shark that finds you CIRCLES first', reached, `state=${shark.attackState}`);
+
+  let held = 0;
+  let closest = Infinity;
+  let farthest = 0;
+  let sweep = 0;
+  let prevBearing = Math.atan2(shark.position.x - swimmer.position.x, shark.position.z - swimmer.position.z);
+  for (let i = 0; i < Math.ceil(8 / DT) && shark.attackState === 'circle'; i++) {
+    match.updateSharks(DT);
+    held += DT;
+    const d = sharkDist(shark);
+    closest = Math.min(closest, d);
+    farthest = Math.max(farthest, d);
+    const bearing = Math.atan2(shark.position.x - swimmer.position.x, shark.position.z - swimmer.position.z);
+    let step = bearing - prevBearing;
+    while (step > Math.PI) step -= Math.PI * 2;
+    while (step < -Math.PI) step += Math.PI * 2;
+    sweep += Math.abs(step);
+    prevBearing = bearing;
+  }
+  expect('the circle lasts at least 3 s', held >= 3, `held=${held.toFixed(2)} s`);
+  expect('it never closes inside 6 m while circling', closest > 6, `closest=${closest.toFixed(2)} m`);
+  expect('it stays inside the circling ring', farthest <= SHARK.CIRCLE_MAX + 4.001, `farthest=${farthest.toFixed(2)} m`);
+  expect('it actually went AROUND her, not just sat there',
+    sweep > 0.8, `swept ${(sweep * 57.3).toFixed(0)}° of bearing`);
+  expect('and then it commits', shark.attackState !== 'circle', `state=${shark.attackState}`);
 }
 
 if (failures > 0) {

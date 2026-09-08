@@ -9,6 +9,7 @@ import {
   getSeaRockBoundsRadius,
   getSeaRockColliders,
   getStormWaveIntensity,
+  getSwimHullVerticalBand,
   isInsideSwimHullFootprint,
   isPointInsideIslandFootprint,
   pushOutOfSwimHullFootprint,
@@ -71,6 +72,9 @@ export class FaunaSystem {
   private readonly lastSwimHealth = new Map<string, number>();
   /** Reused per tick — never reallocated in the 62.5 Hz shark loop. */
   private readonly swimmers: Player[] = [];
+  /** Swimmers PLUS anyone standing on a deck with less than DECK_FREEBOARD of
+   *  freeboard left: a sinking hull is not cover. */
+  private readonly huntable: Player[] = [];
   private readonly swimHazards: number[] = [];
   private readonly separationOrder: Shark[] = [];
   /** One reused walker result — the wander runs 70 times a tick forever. */
@@ -110,6 +114,27 @@ export class FaunaSystem {
         // Died in the water: the last thing she did was bleed into it.
         if (prev !== undefined && inWater) bleeder = p;
         if (prev !== undefined) this.lastSwimHealth.delete(p.id);
+      }
+    }
+
+    // ── What a shark may hunt ─────────────────────────────────────────────
+    // Deck-edge behaviour (bots-17): a hull whose deck is riding within
+    // DECK_FREEBOARD of the sea is awash, and the pirate bailing at her rail is
+    // in reach. She still has to be at the EDGE — the hull itself keeps the
+    // shark out of the footprint, so amidships is safe and the rail is not.
+    const huntable = this.huntable;
+    huntable.length = 0;
+    for (const p of swimmers) huntable.push(p);
+    for (const p of players) {
+      if (p.state !== 'alive' || p.health <= 0 || !p.onShipId) continue;
+      for (const ship of state.ships) {
+        if (ship.id !== p.onShipId) continue;
+        if (!ship.alive) break;
+        const stats = SHIP_STATS[ship.type];
+        const band = getSwimHullVerticalBand(ship.position.y, stats, ship.type);
+        const seaHere = this.seaY(state, p.position.x, p.position.z, t) + SHARK.SURFACE_DEPTH;
+        if (band.deckY - seaHere <= SHARK.DECK_FREEBOARD) huntable.push(p);
+        break;
       }
     }
 
@@ -168,8 +193,9 @@ export class FaunaSystem {
         s.anchorZ = s.position.z;
       }
 
+      s.circleCooldown = Math.max(0, (s.circleCooldown ?? 0) - dt);
       let target = this.hooks.getPlayer(s.targetId);
-      if (target && (target.state !== 'swimming' || target.health <= 0)) target = null;
+      if (target && (target.health <= 0 || !huntable.includes(target))) target = null;
       // ── The leash ────────────────────────────────────────────────────────
       // CHASE_SPEED (5.4) beats PLAYER.SWIM_SPEED (5.2), so a chase the shark
       // never abandons is a chase no swimmer can survive except by boarding.
@@ -184,7 +210,7 @@ export class FaunaSystem {
       if (!target && s.despawnTimer === undefined) {
         let best: Player | null = null;
         let bestD = Infinity;
-        for (const pl of swimmers) {
+        for (const pl of huntable) {
           const d = dist2D(pl.position.x, pl.position.z, s.position.x, s.position.z);
           if (d < bestD) { bestD = d; best = pl; }
         }
@@ -234,6 +260,44 @@ export class FaunaSystem {
           s.velocity.z = (dz / d) * SHARK.CHASE_SPEED;
           break;
         }
+        case 'circle': {
+          // The orbit: a tangent term plus a radial correction that holds the
+          // shark on the ring. This is the whole telegraph — you see the fin go
+          // round you for seconds before anything commits, and you have that
+          // long to make for a hull, a rock or a beach.
+          s.attackTimer -= dt;
+          const dir = s.circleDir ?? 1;
+          const want = (SHARK.CIRCLE_MIN + SHARK.CIRCLE_MAX) * 0.5;
+          const radial = Math.max(-1, Math.min(1, (d - want) / 4));
+          const vx = -(dz / d) * dir + (dx / d) * radial;
+          const vz = (dx / d) * dir + (dz / d) * radial;
+          const vl = Math.hypot(vx, vz) || 1;
+          const orbitSpeed = SHARK.CHASE_SPEED * SHARK.CIRCLE_SPEED_F;
+          s.velocity.x = (vx / vl) * orbitSpeed;
+          s.velocity.z = (vz / vl) * orbitSpeed;
+          s.rotation = Math.atan2(s.velocity.x, s.velocity.z);
+          if (d > SHARK.CIRCLE_MAX + 4) {
+            // She is outswimming the orbit: stop showing off and close.
+            s.attackState = 'cruise';
+          } else if (s.attackTimer <= 0) {
+            s.circleCooldown = SHARK.CIRCLE_COOLDOWN;
+            s.attackState = 'cruise';
+          }
+          break;
+        }
+        case 'retreat': {
+          // Bite and open (bots-17): it does not grind a swimmer down from a
+          // metre away, it takes its bite and comes back round.
+          s.attackTimer -= dt;
+          s.velocity.x = -(dx / d) * SHARK.CHASE_SPEED * 0.85;
+          s.velocity.z = -(dz / d) * SHARK.CHASE_SPEED * 0.85;
+          s.rotation = Math.atan2(s.velocity.x, s.velocity.z);
+          if (d >= SHARK.RETREAT_DIST || s.attackTimer <= 0) {
+            s.circleCooldown = 0;
+            s.attackState = 'cruise';
+          }
+          break;
+        }
         case 'windup': {
           const brake = Math.pow(0.85, dt / 0.016);
           s.velocity.x *= brake;
@@ -256,7 +320,16 @@ export class FaunaSystem {
           s.velocity.x *= drift;
           s.velocity.z *= drift;
           s.attackTimer -= dt;
-          if (s.attackTimer <= 0) s.attackState = 'cruise';
+          if (s.attackTimer <= 0) {
+            // It bit (the cooldown is armed) → open the range. It missed →
+            // straight back to the hunt, as before.
+            if (s.biteCooldown > 0) {
+              s.attackState = 'retreat';
+              s.attackTimer = SHARK.RETREAT_TIME;
+            } else {
+              s.attackState = 'cruise';
+            }
+          }
           break;
         }
       }
@@ -264,6 +337,23 @@ export class FaunaSystem {
       s.position.z += s.velocity.z * dt;
 
       const inLand = this.settleShark(s, state, t);
+
+      // The circle comes FIRST: it opens at CIRCLE_MAX (14 m), the windup only
+      // at 1.9x bite range (~4.5 m), so a shark that has just found you always
+      // announces itself before the first bite.
+      if (
+        s.attackState === 'cruise'
+        && target
+        && !inLand
+        && s.despawnTimer === undefined
+        && d <= SHARK.CIRCLE_MAX
+        && (s.circleCooldown ?? 0) <= 0
+        && s.biteCooldown <= 0
+      ) {
+        s.attackState = 'circle';
+        s.attackTimer = randRange(SHARK.CIRCLE_TIME_MIN, SHARK.CIRCLE_TIME_MAX, this.rng);
+        s.circleDir = this.rng() < 0.5 ? -1 : 1;
+      }
 
       // Only wind up from open water (not from inside the shore rock) — the
       // 1.9× bite range gives the windup brake room before the lunge fires.
@@ -329,21 +419,41 @@ export class FaunaSystem {
 
   /** Put a spawned shark in open water near a swimmer, or leave the slot free. */
   private trySpawnSharkNear(state: GameState, p: Player, t: number, maxDist: number, ignoreCooldown = false) {
+    if (!this.placeSharkNear(state, p, t, maxDist)) return;
+    // A blood call must not eat the budget's cooldown: the next long swim still
+    // gets its own shark.
+    if (!ignoreCooldown) {
+      this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX, this.rng);
+    }
+    // PACKS (bots-17). In the storm ring the sea itself is hunting you, and the
+    // sharks come in twos and threes. Nowhere else: a pack in calm water early
+    // is just an unfair death.
+    if (state.storm.phase < SHARK.PACK_PHASE_MIN) return;
+    if (getStormWaveIntensity(state.storm, p.position.x, p.position.z) < SHARK.PACK_STORM_MIN) return;
+    const packSize = 2 + Math.floor(this.rng() * (SHARK.PACK_MAX - 1));
+    for (let mate = 1; mate < packSize && state.sharks.length < SHARK.MAX_WORLD; mate++) {
+      this.placeSharkNear(state, p, t, maxDist);
+    }
+  }
+
+  /** One spawn attempt in open water near `p`. Returns the shark, or null when
+   *  the roll landed on terrain, out of bounds, or on top of another shark. */
+  private placeSharkNear(state: GameState, p: Player, t: number, maxDist: number): Shark | null {
     const { sharks, islands } = state;
     const ang = this.rng() * Math.PI * 2;
     const dist = randRange(Math.min(SHARK.SPAWN_MIN_DIST, maxDist * 0.6), maxDist, this.rng);
     const x = p.position.x + Math.sin(ang) * dist;
     const z = p.position.z + Math.cos(ang) * dist;
-    if (Math.abs(x) >= WORLD.HALF - 24 || Math.abs(z) >= WORLD.HALF - 24) return;
+    if (Math.abs(x) >= WORLD.HALF - 24 || Math.abs(z) >= WORLD.HALF - 24) return null;
     for (const island of islands) {
       // ONE margin with the shove (bots-18): a shark spawned in the 2.8-4 m
       // band used to be teleported out of the terrain on its very first tick.
-      if (isPointInsideIslandFootprint(island, x, z, SHARK.SHORE_MARGIN)) return;
+      if (isPointInsideIslandFootprint(island, x, z, SHARK.SHORE_MARGIN)) return null;
     }
     for (const shark of sharks) {
-      if (dist2D(shark.position.x, shark.position.z, x, z) < SHARK.SEPARATION_RANGE * 2) return;
+      if (dist2D(shark.position.x, shark.position.z, x, z) < SHARK.SEPARATION_RANGE * 2) return null;
     }
-    sharks.push({
+    const spawned: Shark = {
       id: uuid(),
       position: { x, y: this.seaY(state, x, z, t), z },
       rotation: 0,
@@ -358,12 +468,10 @@ export class FaunaSystem {
       anchorX: x,
       anchorZ: z,
       idleTime: 0,
-    });
-    // A blood call must not eat the budget's cooldown: the next long swim still
-    // gets its own shark.
-    if (!ignoreCooldown) {
-      this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX, this.rng);
-    }
+      circleCooldown: 0,
+    };
+    sharks.push(spawned);
+    return spawned;
   }
 
   /** Open water: outside every island footprint by OPEN_WATER_DIST. Paddling in
