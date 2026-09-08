@@ -36,6 +36,19 @@ function expect(label, condition, detail = '') {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Ask the kernel for a port, then give it straight back — the cold-start case
+ *  needs a port nothing is listening on YET. */
+async function freePort() {
+  const { createServer } = await import('node:net');
+  return await new Promise((resolve) => {
+    const probe = createServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
 // NEVER A FIXED PORT. This suite sat in the "no ports" LOGIC tier while binding
 // 8791; a stale listener there held it until the runner's 900 s kill and the
 // two-minute logic run took seventeen. init(0) asks the kernel for a free port
@@ -229,6 +242,52 @@ console.log('A blip is not a departure — the seat is held and resumed (RECON-0
     third.ws.close();
     second.ws.close();
   }
+}
+
+console.log('The client supervises its own link (RECON-01 client half):');
+{
+  // NetworkClient, driven straight from node: no Worker (spawnWorker catches the
+  // ReferenceError and falls back to the direct socket, which is the pre-worker
+  // path it keeps byte-for-byte) and `ws` standing in for the browser global.
+  globalThis.WebSocket = WebSocket;
+  const { NetworkClient } = await import('../src/client/network/NetworkClient.ts');
+
+  // 1. A cold start. The platform is not listening yet; the old client raced a
+  //    single connect() against a 6 s timeout and painted "…then refresh".
+  const coldPort = await freePort();
+  const cold = new NetworkClient();
+  const attempts = [];
+  cold.onReconnecting = (n) => attempts.push(n);
+  const coldServer = new LobbyServer();
+  setTimeout(() => coldServer.init(coldPort), 2_200);
+  const t0 = Date.now();
+  let coldOk = true;
+  try { await cold.connect(`ws://127.0.0.1:${coldPort}/ws`); } catch { coldOk = false; }
+  expect('connect survives a server that is not up yet', coldOk, `after ${Date.now() - t0}ms`);
+  expect('and it retried rather than failing once', attempts.length >= 2, `attempts=${attempts.join(',')}`);
+  cold.disconnect();
+
+  // 2. A blip mid-match: the transport dies with 1006 and the client puts
+  //    itself back in the same seat with no reload and no player action.
+  const live = new NetworkClient();
+  let resumed = null;
+  let joinedPlayerId = null;
+  live.onResumed = (p) => { resumed = p; };
+  live.onJoin = (playerId) => { joinedPlayerId ??= playerId; };
+  await live.connect(URL);
+  live.setName('Blip');
+  live.soloStart(2);
+  for (let i = 0; i < 200 && !joinedPlayerId; i += 1) await sleep(100);
+  expect('the harness client reached a match', !!joinedPlayerId);
+  // Kill the TCP connection under it — a lost wifi, not a goodbye.
+  live.ws.terminate();
+  for (let i = 0; i < 200 && !resumed; i += 1) await sleep(100);
+  expect('the client reconnects and resumes with no reload', !!resumed,
+    `resumed=${JSON.stringify(resumed)}`);
+  expect('into the same seat', !!resumed && resumed.playerId === joinedPlayerId,
+    `${resumed?.playerId} != ${joinedPlayerId}`);
+  live.disconnect();
+  coldServer.emergencyStop('test over');
 }
 
 console.log('A starved sim counts what it throws away:');

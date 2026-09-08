@@ -688,25 +688,67 @@ export class MenuController {
       // up, inputs dropped. Surface an unmissable overlay with the only real
       // recovery (there is no reconnect flow; the server removes the player
       // immediately on disconnect).
-      if (!this.isVisible() && !document.getElementById('disconnect-overlay')) {
-        const overlay = document.createElement('div');
-        overlay.id = 'disconnect-overlay';
-        overlay.style.cssText = 'position:fixed;inset:0;z-index:400;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(8,10,14,0.82);color:#f3e7c8;font-family:inherit;text-align:center;';
-        const title = document.createElement('div');
-        title.textContent = 'Lost connection to the server';
-        title.style.cssText = 'font-size:28px;letter-spacing:0.06em;';
-        const sub = document.createElement('div');
-        sub.textContent = 'The match went on without you, pirate. Reload to set sail again.';
-        sub.style.cssText = 'font-size:15px;opacity:0.8;';
-        const btn = document.createElement('button');
-        btn.textContent = 'Reload';
-        btn.style.cssText = 'padding:10px 34px;font-size:17px;cursor:pointer;background:#c8a24a;border:none;border-radius:4px;color:#1c1408;';
-        btn.onclick = () => window.location.reload();
-        overlay.append(title, sub, btn);
-        document.body.appendChild(overlay);
-        document.exitPointerLock?.();
-      }
+      if (!this.isVisible()) this.showDisconnectOverlay('Reconnecting to the server', 'Your seat is held for a minute, pirate. Hold fast.', false);
     };
+    // RECON-01 (netcode-31): the recovery UI is no longer a Reload button.
+    this.network.onReconnecting = (attempt, nextInMs) => {
+      if (this.isVisible()) { this.flashStatus(`Server waking up… retrying (${attempt})`, false); return; }
+      this.showDisconnectOverlay('Reconnecting to the server',
+        `Attempt ${attempt} — next try in ${Math.round(nextInMs / 100) / 10}s. Your seat is held for a minute.`, false);
+    };
+    this.network.onResumed = () => {
+      // Back aboard: the `join` that follows rebuilds the scene, so the only
+      // thing to undo here is the overlay.
+      this.dismissDisconnectOverlay();
+      this.flashStatus('Back aboard.', false);
+    };
+    this.network.onResumeFailed = (payload) => {
+      const stale = payload.reason === 'stale_client';
+      this.showDisconnectOverlay(
+        stale ? 'The game was updated' : 'Lost connection to the server',
+        stale
+          ? 'A new version is out. Reload to set sail again.'
+          : 'The match went on without you, pirate. Reload to set sail again.',
+        true,
+      );
+    };
+  }
+
+  /** One overlay, two states: "reconnecting" (no button, it is still trying)
+   *  and "gone" (a Reload button, the only recovery left). Re-entrant: a later
+   *  call rewrites the text in place rather than stacking a second overlay. */
+  private showDisconnectOverlay(titleText: string, subText: string, offerReload: boolean): void {
+    let overlay = document.getElementById('disconnect-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'disconnect-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:400;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(8,10,14,0.82);color:#f3e7c8;font-family:inherit;text-align:center;';
+      const title = document.createElement('div');
+      title.id = 'disconnect-title';
+      title.style.cssText = 'font-size:28px;letter-spacing:0.06em;';
+      const sub = document.createElement('div');
+      sub.id = 'disconnect-sub';
+      sub.style.cssText = 'font-size:15px;opacity:0.8;';
+      overlay.append(title, sub);
+      document.body.appendChild(overlay);
+      document.exitPointerLock?.();
+    }
+    const title = document.getElementById('disconnect-title');
+    const sub = document.getElementById('disconnect-sub');
+    if (title) title.textContent = titleText;
+    if (sub) sub.textContent = subText;
+    if (offerReload && !document.getElementById('disconnect-reload')) {
+      const btn = document.createElement('button');
+      btn.id = 'disconnect-reload';
+      btn.textContent = 'Reload';
+      btn.style.cssText = 'padding:10px 34px;font-size:17px;cursor:pointer;background:#c8a24a;border:none;border-radius:4px;color:#1c1408;';
+      btn.onclick = () => window.location.reload();
+      overlay.appendChild(btn);
+    }
+  }
+
+  private dismissDisconnectOverlay(): void {
+    document.getElementById('disconnect-overlay')?.remove();
   }
 
   // ─── Render helpers ──────────────────────────────────────────

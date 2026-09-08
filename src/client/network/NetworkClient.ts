@@ -6,8 +6,9 @@ import type {
   MatchCountdownPayload, MatchHornPayload, CrewEliminatedPayload, ShipSunkPayload,
   CarpenterPatchPayload,
   BountyRaisedPayload, CargoSpilledPayload, SpoilClaimedPayload, WreckEventPayload,
-  PlayerStatsRecord,
+  PlayerStatsRecord, ResumeOkPayload, ResumeFailedPayload,
 } from '../../shared/types/index.js';
+import { PROTOCOL_VERSION } from '../../shared/types/index.js';
 
 export class NetworkClient {
   private ws!: WebSocket;
@@ -80,6 +81,44 @@ export class NetworkClient {
   public onMatchStart: ((payload: MatchStartPayload) => void) | null = null;
   public onStatsUpdate: ((stats: PlayerStatsRecord) => void) | null = null;
   public onConnectionClosed: (() => void) | null = null;
+  /** RECON-01 (netcode-31): the supervisor is between attempts. `attempt` is
+   *  1-based, `nextInMs` is how long until it tries again — the HUD/menu chip
+   *  says "Reconnecting… (3)" instead of the old dead Reload button. */
+  public onReconnecting: ((attempt: number, nextInMs: number) => void) | null = null;
+  /** The link came back AND the server still had our seat. */
+  public onResumed: ((payload: ResumeOkPayload) => void) | null = null;
+  /** The link came back but the seat is gone (grace expired, match reaped) or
+   *  this bundle is too old to re-enter. The menu decides what to show. */
+  public onResumeFailed: ((payload: ResumeFailedPayload) => void) | null = null;
+
+  /**
+   * RECON-01. The secret `welcome` hands out, replayed as `resume` after a blip
+   * to take the same seat back. Kept in sessionStorage as well as in memory so a
+   * RELOAD (the only recovery this client used to offer) can also resume rather
+   * than start a fresh match — same tab, same session, and it dies with the tab.
+   */
+  public sessionToken: string | null = null;
+  private static readonly TOKEN_KEY = 'piratesBR.sessionToken';
+  /** The url the supervisor reconnects to, and whether it should. */
+  private url: string | null = null;
+  private wantConnected = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private reconnectStartedAt = 0;
+  /**
+   * BACKOFF, 0.5 → 8 s, with 20% jitter, for at most RECONNECT_BUDGET_MS.
+   * The budget is the server's grace (RECONNECT_GRACE_MS, 60 s) — past it the
+   * seat is gone and retrying only holds a loading screen open on a lie.
+   * Jitter matters for the case this exists for: a server restart drops every
+   * client in the same millisecond, and un-jittered backoff would bring all of
+   * them back in the same millisecond too, onto a process that is still booting.
+   */
+  private static readonly RECONNECT_STEPS_MS = [500, 1_000, 2_000, 4_000, 8_000];
+  private static readonly RECONNECT_BUDGET_MS = 60_000;
+  /** Close codes that mean "the link failed", not "you were let go". 1000 is a
+   *  clean goodbye (match reaped, we called disconnect) and 1008 is a policy
+   *  kick — reconnecting into either is how a client ends up in a hot loop. */
+  private static readonly RESUMABLE_CLOSE_CODES = new Set([1001, 1006, 1011, 1012, 1013]);
 
   private pendingSnapshot: GameState | null = null;
   private snapshotFlushQueued = false;
@@ -117,7 +156,7 @@ export class NetworkClient {
    * runs only when the worker could not be created at all.
    */
   private static readonly HEARTBEAT_INTERVAL_MS = 3_000;
-  private heartbeatTimer: number | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private lastPingSentAt = 0;
   private latencyMs: number | null = null;
 
@@ -139,9 +178,106 @@ export class NetworkClient {
     return this.joined;
   }
 
+  /**
+   * RECON-01 (netcode-31): connect is a SUPERVISOR, not a single attempt.
+   *
+   * The two things every online player hits both used to end the session here:
+   * a platform cold start (the first connect fails and Game.connectToServer
+   * painted "Cannot reach game server … then refresh") and a 2-10 s blip (one
+   * close and the only UI was a Reload button). Now the first attempt that
+   * fails is retried on the backoff above until the budget runs out, and
+   * `onReconnecting` lets the menu say what is happening.
+   */
   async connect(url: string): Promise<void> {
+    this.url = url;
+    this.wantConnected = true;
+    this.reconnectStartedAt = Date.now();
+    let attempt = 0;
+    for (;;) {
+      try {
+        await this.openTransport(url);
+        this.reconnectAttempt = 0;
+        return;
+      } catch (err) {
+        attempt += 1;
+        const elapsed = Date.now() - this.reconnectStartedAt;
+        const wait = NetworkClient.backoffMs(attempt);
+        if (!this.wantConnected || elapsed + wait > NetworkClient.RECONNECT_BUDGET_MS) throw err;
+        this.onReconnecting?.(attempt, wait);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+  }
+
+  /** 0.5/1/2/4/8 s, then 8 s forever, ±20% jitter. Exported shape for the gate. */
+  static backoffMs(attempt: number): number {
+    const steps = NetworkClient.RECONNECT_STEPS_MS;
+    const base = steps[Math.min(attempt, steps.length) - 1] ?? steps[steps.length - 1];
+    return Math.round(base * (0.8 + Math.random() * 0.4));
+  }
+
+  private openTransport(url: string): Promise<void> {
+    this.teardownTransport();
     const worker = this.spawnWorker();
     return worker ? this.connectViaWorker(worker, url) : this.connectDirect(url);
+  }
+
+  /** Drop whatever transport is in play without telling the supervisor to stop. */
+  private teardownTransport(): void {
+    this.stopHeartbeat();
+    if (this.worker) {
+      const worker = this.worker;
+      this.worker = null;
+      worker.onmessage = null;
+      worker.onerror = null;
+      try { worker.postMessage({ k: 'close' }); } catch {}
+      try { worker.terminate(); } catch {}
+    } else if (this.ws) {
+      try {
+        this.ws.onopen = null; this.ws.onclose = null; this.ws.onerror = null; this.ws.onmessage = null;
+        this.ws.close();
+      } catch {}
+    }
+    this.connected = false;
+    this.transportOpen = false;
+  }
+
+  /**
+   * The link dropped on its own. If the server may still be holding our seat,
+   * re-open and present the token; the server answers resume_ok (and a `join`
+   * carrying the world, which re-anchors the scene through the one path that is
+   * already proven) or resume_failed.
+   */
+  private scheduleReconnect(code: number): void {
+    if (!this.wantConnected || !this.url) return;
+    if (!NetworkClient.RESUMABLE_CLOSE_CODES.has(code)) { this.wantConnected = false; return; }
+    if (this.reconnectTimer) return;
+    if (this.reconnectAttempt === 0) this.reconnectStartedAt = Date.now();
+    this.reconnectAttempt += 1;
+    const wait = NetworkClient.backoffMs(this.reconnectAttempt);
+    if (Date.now() - this.reconnectStartedAt + wait > NetworkClient.RECONNECT_BUDGET_MS) {
+      this.wantConnected = false;
+      this.onResumeFailed?.({ reason: 'expired' });
+      return;
+    }
+    this.onReconnecting?.(this.reconnectAttempt, wait);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.wantConnected || !this.url) return;
+      this.openTransport(this.url).then(() => {
+        this.reconnectAttempt = 0;
+        // The token from the PREVIOUS socket. The new socket's own welcome will
+        // overwrite `sessionToken` moments from now, which is what we want for
+        // the NEXT blip — so the resume is sent from the value read here.
+        const token = this.sessionToken ?? this.readStoredToken();
+        if (!token) return;
+        this.send({ type: 'resume', ts: Date.now(), payload: { token, protocolVersion: PROTOCOL_VERSION } });
+      }).catch(() => { this.scheduleReconnect(1006); });
+    }, wait);
+  }
+
+  private readStoredToken(): string | null {
+    try { return globalThis.sessionStorage?.getItem(NetworkClient.TOKEN_KEY) ?? null; } catch { return null; }
   }
 
   /** Build the socket worker, or null on any environment that refuses one. */
@@ -241,6 +377,7 @@ export class NetworkClient {
     this.pendingSnapshot = null;
     this.snapshotFlushQueued = false;
     this.onConnectionClosed?.();
+    this.scheduleReconnect(code);
     // Always print the close code: a bare "Disconnected" hides WHY (1002 =
     // the socket's byte stream was rejected as a protocol violation, 1006 =
     // the server vanished, 1000 = a clean goodbye) and turns a five-second
@@ -253,7 +390,25 @@ export class NetworkClient {
       case 'welcome': {
         const p = msg.payload as WelcomePayload;
         this.clientId = p.clientId;
+        this.sessionToken = p.sessionToken ?? null;
+        if (this.sessionToken) {
+          try { globalThis.sessionStorage?.setItem(NetworkClient.TOKEN_KEY, this.sessionToken); } catch {}
+        }
         this.onWelcome?.(p);
+        break;
+      }
+      case 'resume_ok': {
+        const p = msg.payload as ResumeOkPayload;
+        this.clientId = p.clientId;
+        // The `join` that follows re-opens the match channel; until it lands,
+        // nothing match-scoped may leave (same rule as a fresh join).
+        this.joined = false;
+        this.onResumed?.(p);
+        break;
+      }
+      case 'resume_failed': {
+        this.wantConnected = false;
+        this.onResumeFailed?.(msg.payload as ResumeFailedPayload);
         break;
       }
       case 'join': {
@@ -402,7 +557,10 @@ export class NetworkClient {
     // Beat once immediately: a client that opens the socket and then sits on the
     // name field should be counted as alive from the first second, not the third.
     this.sendPing();
-    this.heartbeatTimer = window.setInterval(() => {
+    // globalThis, not window: the RECON-01 gate drives this client from node
+    // (scripts/test-net-resilience.mjs), and `window` there is a ReferenceError
+    // that killed the socket the moment it opened.
+    this.heartbeatTimer = setInterval(() => {
       if (!this.isConnected()) {
         this.stopHeartbeat();
         return;
@@ -413,7 +571,7 @@ export class NetworkClient {
 
   private stopHeartbeat(): void {
     if (this.heartbeatTimer === null) return;
-    window.clearInterval(this.heartbeatTimer);
+    clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
   }
 
@@ -520,6 +678,9 @@ export class NetworkClient {
   }
 
   disconnect() {
+    // A deliberate goodbye: the supervisor must not fight it.
+    this.wantConnected = false;
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     // Stop the timer even if there is no socket to close — connect() can reject
     // before ever assigning one, and a stray interval would outlive the client.
     this.stopHeartbeat();
@@ -533,7 +694,7 @@ export class NetworkClient {
       try { this.worker.postMessage({ k: 'close' }); } catch {}
       const worker = this.worker;
       this.worker = null;
-      window.setTimeout(() => worker.terminate(), 250);
+      setTimeout(() => worker.terminate(), 250);
       return;
     }
     if (!this.ws) return;
