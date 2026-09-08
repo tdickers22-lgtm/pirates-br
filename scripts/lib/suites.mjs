@@ -350,6 +350,12 @@ export const LOGIC = [
   //                                 "pure move" of ShipRenderer into rendering/ship/* cannot change a vertex
   //                                 unnoticed. --update rebuilds the baseline; --mutate is its red proof.
   tsx('test-ship-geometry-hash.mjs'),
+  //   test-ship-plank-shader      — SHIPVIS-01 phase A: the procedural planking injected into hullMat and
+  //                                 deckMat. Grades declaration-before-use in three's chunk order, that the
+  //                                 patch CHAINS with the breach see-through discard instead of replacing it,
+  //                                 that the low tier compiles the colour-only program, and that the wet line
+  //                                 is a live uniform that climbs the topside as she floods. --mutate is red.
+  tsx('test-ship-plank-shader.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   test-hero-assets            — the atlas-textured hero GLBs (weapons, ship hardware): triangle band,
   //                                 ONE material with a baseColorTexture, COLOR_0 present and WHITE (the AO
