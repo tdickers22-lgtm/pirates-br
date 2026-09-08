@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { extname, join, normalize } from 'node:path';
+import { basename, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
@@ -118,7 +118,48 @@ const MIME_TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+  // The 63 models were the biggest thing this server sends and it sent every
+  // one of them as application/octet-stream (netcode-33). A proxy or a CDN in
+  // front of the origin decides what to compress and what to cache off the
+  // content type, so the wrong one is not cosmetic.
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.bin': 'application/octet-stream',
+  '.ktx2': 'image/ktx2',
+  '.wasm': 'application/wasm',
+  '.txt': 'text/plain; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
 };
+
+/** Extensions worth a precompressed sibling. Everything here is text or an
+ *  uncompressed binary container; .png/.webp/.woff2 are already compressed and
+ *  brotli only makes them bigger. Must agree with
+ *  `scripts/postbuild-compress.mjs`, which is what writes the siblings —
+ *  `scripts/test-static-serving.mjs` asserts the two lists match. */
+export const PRECOMPRESSED_EXTENSIONS: ReadonlySet<string> = new Set([
+  '.js', '.css', '.html', '.json', '.map', '.svg', '.txt',
+  '.glb', '.gltf', '.bin', '.ktx2', '.wasm',
+]);
+
+/**
+ * A name Vite content-hashed, e.g. `index-D1ZqjUcr.js` — eight base64url
+ * characters between a dash and the extension.
+ *
+ * Only such a name has earned `immutable`. `publicDir` files are copied
+ * VERBATIM, so `/assets/models/palm_a.glb` keeps its name across every Blender
+ * re-export, and a year of `immutable` on it meant every returning player kept
+ * the OLD model until their cache evicted, with renaming the file as the only
+ * repair (netcode-33). `models/` is excluded outright as a second belt: a model
+ * is never hashed no matter what an artist calls it.
+ */
+const VITE_HASHED_NAME = /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
+function isImmutablyNamed(filePath: string): boolean {
+  if (filePath.includes(`${sep}models${sep}`)) return false;
+  return VITE_HASHED_NAME.test(basename(filePath));
+}
 
 type ClientState = 'menu' | 'party' | 'queue' | 'in_match' | 'match_ended';
 
@@ -1546,22 +1587,93 @@ export class LobbyServer {
     }
 
     const ext = extname(filePath);
+    const info = this.statFile(filePath);
+    if (!info) { this.replyBadRequest(res, 500); return; }
+
+    // WHAT MAY BE CACHED FOREVER. `index.html` never; a Vite-hashed name for a
+    // year, because a new build writes a new name; EVERYTHING ELSE — every GLB,
+    // every future .ktx2 — revalidates. `max-age=0, must-revalidate` costs a
+    // conditional request and gets back ~200 bytes of 304 when nothing moved,
+    // which is the cheap half of the trade the old `immutable` refused to make.
+    const cacheControl = ext === '.html' ? 'no-cache'
+      : isImmutablyNamed(filePath) ? 'public, max-age=31536000, immutable'
+        : 'public, max-age=0, must-revalidate';
+
+    // The ETag is derived from the ORIGIN file, never the sibling, so the same
+    // bytes keep the same validator whichever encoding a client negotiated —
+    // but it carries the encoding, because a shared cache holding the brotli
+    // body must not answer a gzip-only client out of it.
+    const encoding = this.negotiateEncoding(req, filePath, ext);
+    const bodyPath = encoding ? `${filePath}.${encoding === 'br' ? 'br' : 'gz'}` : filePath;
+    const bodyInfo = encoding ? this.statFile(bodyPath) : info;
+    if (!bodyInfo) { this.replyBadRequest(res, 500); return; }
+    const etag = `W/"${info.size.toString(16)}-${Math.round(info.mtimeMs).toString(16)}`
+      + `${encoding ? `-${encoding}` : ''}"`;
+
+    const ifNoneMatch = req.headers['if-none-match'];
+    if (typeof ifNoneMatch === 'string'
+      && ifNoneMatch.split(',').some((tag) => tag.trim() === etag)) {
+      res.writeHead(304, { etag, 'cache-control': cacheControl, vary: 'accept-encoding' });
+      res.end();
+      return;
+    }
+
+    const headers: Record<string, string> = {
+      'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
+      'cache-control': cacheControl,
+      etag,
+      // Always, not only when a sibling was found: the answer to this URL
+      // genuinely varies by Accept-Encoding, and a cache that learned otherwise
+      // from an early miss would keep serving br to a client that cannot read it.
+      vary: 'accept-encoding',
+      // Content-Length is what makes the loading bar's percentage real: without
+      // it three's FileLoader reports lengthComputable=false and the bar sits
+      // at "12/64" with no idea how far into the current file it is.
+      'content-length': String(bodyInfo.size),
+    };
+    if (encoding) headers['content-encoding'] = encoding;
+
     // A ReadStream that fails to open (dist/client emptied by an in-place
     // `vite build` between the stat and the open) emits 'error'; unhandled,
     // that is another process exit. Headers are already out by then, so the
     // only honest answer is to drop the connection.
-    const stream = createReadStream(filePath);
+    const stream = createReadStream(bodyPath);
     stream.on('open', () => {
-      res.writeHead(200, {
-        'content-type': MIME_TYPES[ext] ?? 'application/octet-stream',
-        'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
-      });
+      res.writeHead(200, headers);
     });
     stream.on('error', (err) => {
-      console.warn(`[Lobby] static read failed for ${filePath}: ${err.message}`);
+      console.warn(`[Lobby] static read failed for ${bodyPath}: ${err.message}`);
       this.replyBadRequest(res, 500);
     });
     stream.pipe(res);
+  }
+
+  /**
+   * The precompressed sibling this client can read, or null for "send the
+   * original".
+   *
+   * Compression happens at BUILD time (`scripts/postbuild-compress.mjs`), never
+   * per request: the 63 GLBs are 26.3 MB and gzipping them on the fly would
+   * spend a core per joining player on bytes that are identical every time. If
+   * the sibling is not on disk the original goes out uncompressed — a build
+   * that skipped the step is slower, never broken.
+   */
+  private negotiateEncoding(req: IncomingMessage, filePath: string, ext: string): 'br' | 'gzip' | null {
+    if (!PRECOMPRESSED_EXTENSIONS.has(ext)) return null;
+    const accept = String(req.headers['accept-encoding'] ?? '').toLowerCase();
+    if (/(^|[\s,])br\b/.test(accept) && this.isServableFile(`${filePath}.br`)) return 'br';
+    if (/(^|[\s,])gzip\b/.test(accept) && this.isServableFile(`${filePath}.gz`)) return 'gzip';
+    return null;
+  }
+
+  /** Size + mtime for the ETag, or null for anything that is not a file. */
+  private statFile(filePath: string): { size: number; mtimeMs: number } | null {
+    try {
+      const st = statSync(filePath);
+      return st.isFile() ? { size: st.size, mtimeMs: st.mtimeMs } : null;
+    } catch {
+      return null;
+    }
   }
 
   /** PIRATES_BR_DEV=1 opens /bugsnap outright (local play); otherwise only a

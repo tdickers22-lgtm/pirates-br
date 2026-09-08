@@ -7,7 +7,7 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "PIRATES_BR_DEV=1 PIRATES_BR_DEV_HOOKS=1 tsx watch src/server/index.ts",
     "dev:client": "vite",
-    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.json --noEmit && vite build",
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.json --noEmit && vite build && node scripts/postbuild-compress.mjs",
     "start": "node dist/server/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test": "node scripts/run-all-tests.mjs",
