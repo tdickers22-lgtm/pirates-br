@@ -197,6 +197,39 @@ expect('the ordinary fulls kept flowing (the match did not simply go quiet)',
   recorded.length > 100, `${recorded.length} frames`);
 worldMatch.stop();
 
+// ------------------------------------------- a link that cannot carry the sim
+// netcode-V2. broadcastVolatile withholds snapshots from a congested socket and
+// that is right, but nothing ever ENDED the story: `sweepDeadSockets` in the
+// lobby tests silence only, and a congested client keeps answering pings while
+// sitting minutes behind the sim, so she was kept forever — reliable events
+// (kills, hits, countdowns) still queued behind her 512 KB backlog and arrived
+// after the state they described, and the server held the memory.
+console.log('\nA socket that never drains is let go:');
+const jamMatch = new Match({ matchId: 'wire-congestion', botCount: 9 });
+const closes = [];
+let eventsAfterDeadline = 0;
+let deadlinePassed = false;
+const jammedWs = {
+  readyState: 1,
+  bufferedAmount: 600 * 1024,   // permanently over MAX_VOLATILE_BUFFERED_BYTES
+  send() { if (deadlinePassed) eventsAfterDeadline += 1; },
+  close(code, reason) { closes.push({ code, reason }); this.readyState = 3; },
+};
+jamMatch.createCrew([{ ws: jammedWs, name: 'Jammed' }]).joins[0].send();
+jamMatch.state.phase = 'playing';
+const TICKS_PER_SEC = TICKS_PER_SECOND;
+for (let i = 0; i < TICKS_PER_SEC * 5; i++) jamMatch.tick(1 / 62.5);
+expect('a five-second jam is a spike, not a verdict — she is still aboard', closes.length === 0,
+  `closed with ${closes[0]?.code} after 5 s`);
+deadlinePassed = true;
+for (let i = 0; i < TICKS_PER_SEC * 7; i++) jamMatch.tick(1 / 62.5);
+console.log(`  after 12 s jammed: ${closes.length} close(s) ${closes.map((c) => c.code).join(',')},`
+  + ` ${eventsAfterDeadline} frames pushed at her past the deadline`);
+expect('a socket jammed past the deadline is closed', closes.length === 1, `${closes.length} closes`);
+expect('closed with 1013 Try Again Later, not a kick', closes[0]?.code === 1013,
+  `code=${closes[0]?.code}`);
+jamMatch.stop();
+
 const CONFIGS = [
   { label: '1-human', botCount: 9, mode: 'solo', crews: 1, crewSize: 1 },
   { label: '16-solo', botCount: 0, mode: 'solo', crews: 16, crewSize: 1 },

@@ -143,6 +143,13 @@ interface ConnectedClient {
    *  not free waste: the client JSON.parses it on the main thread and re-walks
    *  ensureWorldMeshes, which is a visible hitch every 19.2 s. */
   hasWorld: boolean;
+  /** Sim time at which this socket's send buffer first went over
+   *  MAX_VOLATILE_BUFFERED_BYTES and stayed there, or null while it is keeping
+   *  up. netcode-V2: a link that cannot carry the stream was previously kept
+   *  forever — snapshots were withheld (correct) but every reliable EVENT still
+   *  queued behind the backlog, so kill feeds, hits and countdowns arrived
+   *  seconds after the state they describe and the server held the buffer. */
+  congestedSince: number | null;
 }
 
 export interface MatchHumanResult {
@@ -259,6 +266,18 @@ const SKELETON_PLAYER_WAKE_RADIUS = 38;
 // worst-case bandwidth negligible (~10KB/s) instead of ~470KB/s at every 4th full.
 const FULL_WORLD_SNAPSHOT_TICKS = FULL_SNAPSHOT_TICKS * 200;
 const MAX_VOLATILE_BUFFERED_BYTES = 512 * 1024;
+/**
+ * How long a socket may sit over that buffer before the match gives up on it
+ * (netcode-V2). Ten seconds is far past any normal spike — a client that has
+ * been unable to drain 512 KB for ten straight seconds is not a player who is
+ * briefly behind, she is a tab the OS suspended or a link that cannot carry the
+ * stream at all, and every second she is kept costs the server memory and costs
+ * her a session that is unplayably behind the sim. The close code is 1013 (Try
+ * Again Later), which is the one the client supervisor treats as "reconnect",
+ * not as "you were kicked".
+ */
+const CONGESTION_EVICT_SECONDS = 10;
+const WS_TRY_AGAIN_LATER = 1013;
 /** End-screen clients keep receiving a slow full snapshot so spectate views stay live. */
 const ENDED_SNAPSHOT_TICKS = SNAPSHOT_RATE * 15;
 
@@ -1430,6 +1449,7 @@ export class Match {
         pendingFullSnapshot: null,
         // The join payload below carries the static world, so she starts with it.
         hasWorld: true,
+        congestedSince: null,
       };
       this.clients.set(player.id, client);
       return { player, client };
@@ -2097,6 +2117,7 @@ export class Match {
     // Send snapshots: quantized full state at ~10.4 Hz, light 'state_hot'
     // transform updates on the snapshot ticks in between (31.25 Hz total).
     if (this.tickCount % SNAPSHOT_RATE === 0) {
+      this.enforceCongestion();
       if (this.tickCount % FULL_SNAPSHOT_TICKS === 0) {
         this.pruneQuestMaps();
         // The Gilded Wreck's chests and supply barrels are ORDINARY island
@@ -7083,8 +7104,42 @@ export class Match {
   private broadcast(msg: NetMsg) {
     const data = JSON.stringify(msg);
     for (const [, client] of this.clients) {
-      if (client.ws.readyState === WebSocket.OPEN) {
-        try { client.ws.send(data); } catch {}
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      // netcode-V2: events are RELIABLE, so they are never dropped for a client
+      // we still intend to keep — but a socket already past the eviction
+      // deadline is about to be closed, and queueing another kill feed behind
+      // its 512 KB backlog only grows memory we are about to throw away.
+      if (client.congestedSince !== null && this.t - client.congestedSince > CONGESTION_EVICT_SECONDS) continue;
+      try { client.ws.send(data); } catch {}
+    }
+  }
+
+  /**
+   * Backpressure bookkeeping, run once per snapshot tick (netcode-V2).
+   *
+   * `broadcastVolatile` already holds the newest full and drops hots while a
+   * socket is congested, which is the right behaviour for a client who is
+   * briefly behind. What was missing is the end of that story: nothing ever
+   * decided that a client was never coming back. `sweepDeadSockets` in the
+   * lobby only tests SILENCE, and a congested client keeps answering pings
+   * happily while sitting minutes behind the sim, so it never swept her.
+   */
+  private enforceCongestion(): void {
+    for (const [playerId, client] of this.clients) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      if (client.ws.bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES) {
+        if (client.congestedSince === null) client.congestedSince = this.t;
+        else if (this.t - client.congestedSince > CONGESTION_EVICT_SECONDS) {
+          console.log(`[Match ${this.id}] evicting congested client ${playerId.slice(0, 6)}:`
+            + ` ${(client.ws.bufferedAmount / 1024).toFixed(0)} KB buffered for`
+            + ` ${(this.t - client.congestedSince).toFixed(1)}s`);
+          client.pendingFullSnapshot = null;
+          client.congestedSince = null;
+          try { client.ws.close(WS_TRY_AGAIN_LATER, 'connection cannot carry the match stream'); } catch {}
+        }
+      } else if (client.congestedSince !== null) {
+        // She drained. One clean tick is enough to forgive the spike.
+        client.congestedSince = null;
       }
     }
   }
