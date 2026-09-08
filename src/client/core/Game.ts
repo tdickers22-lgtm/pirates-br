@@ -6,6 +6,7 @@ import type {
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
 import { WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
+import { seatedEntityY } from '../world/island/EntityMeshes.js';
 import {
   findNearbyCannonIndex,
   findMermaidReturnShip,
@@ -5376,7 +5377,16 @@ export class Game {
       for (const chest of island.chests) {
         const chestMesh = this.chestMeshes.get(chest.id);
         if (!chestMesh) continue;
-        chestMesh.root.position.set(chest.position.x, chest.position.y, chest.position.z);
+        // On land and not being carried, the mesh sits on the DRAWN ground
+        // (ENTITYSEAT): the server's Y is analytic and the chord under it sags.
+        const settled = !chest.carriedByPlayerId && !chest.storedOnShipId && !chest.floating;
+        chestMesh.root.position.set(
+          chest.position.x,
+          settled
+            ? seatedEntityY(island, chest.position.x, chest.position.z, chest.position.y)
+            : chest.position.y,
+          chest.position.z,
+        );
         const carriedByLocal = chest.carriedByPlayerId === this.localPlayerId;
         chestMesh.root.visible = !chest.opened && !carriedByLocal;
         const portable = !!chest.carriedByPlayerId || !!chest.storedOnShipId || chest.floating;
