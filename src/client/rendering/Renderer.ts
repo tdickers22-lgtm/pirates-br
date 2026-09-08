@@ -137,6 +137,131 @@ const SKY_SEGMENTS: Record<RenderQuality, { width: number; height: number }> = {
   high: { width: 96, height: 48 },
 };
 
+/** THE CLOUD LADDER (GFXPOL-01 / graphics-07).
+ *
+ *  The deck was a flat 2-octave fbm thresholded to a silhouette: inside a cloud
+ *  every fragment got the same two colours mixed by an edge term that saturates
+ *  in the body, so a cumulus read as a paper cut-out with no thickness in it.
+ *  The fix is octaves + a domain warp + a belly term, and all three are TIER
+ *  KNOBS, because the sky is the largest surface in the frame and the low tier
+ *  cannot pay for any of them.
+ *
+ *  low = 2 is not "fewer octaves", it is BIT-IDENTICAL to what shipped: the
+ *  weights below times CLOUD_NORM collapse to the old 0.6667 / 0.3333, the warp
+ *  compiles out, and the belly compiles out. Low pays zero new ALU.
+ *  balanced = 3 adds one octave and the warp (+4 vnoise per fragment of sky).
+ *  high = 4 adds a fourth octave and one cirrus sample (+7 vs low). */
+export const SKY_CLOUD_OCTAVES_BY_TIER: Record<RenderQuality, number> = { low: 2, balanced: 3, high: 4 };
+
+/** The sky's base value noise. Exported so the cloud gate's JS mirror can be
+ *  PINNED to the body that ships instead of drifting away from it. */
+export const SKY_NOISE_GLSL = /* glsl */`
+  float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+  }
+
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+      mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+      f.y);
+  }
+
+  float fbm2(vec2 p) {
+    return vnoise(p) * 0.6667 + vnoise(p * 2.13 + 19.7) * 0.3333;
+  }
+`;
+
+/** The cloud noise: one warp, one fbm, both compiled to the tier's octave count.
+ *  Exported so `scripts/test-cloud-depth.mjs` grades the field that SHIPS. */
+export const SKY_CLOUD_NOISE_GLSL = /* glsl */`
+  // ONE normaliser for every tier above low, deliberately. If the 4-octave tier
+  // renormalised, its first three octaves would weigh less than the balanced
+  // tier's and the SAME cloud would be smaller and softer on high than on
+  // balanced — two tiers disagreeing about where the cloud is. The fourth octave
+  // is detail ADDED to the same silhouette, worth at most +0.067.
+  #define CLOUD_NORM 1.0714286
+
+  // Domain warp: identity below 3 octaves. Two low-frequency noise fetches bend
+  // the whole field, which is what turns a lump of fbm into something with
+  // billows and tails instead of round blobs.
+  vec2 cloudWarp(vec2 p) {
+    #if SKY_CLOUD_OCTAVES >= 3
+      vec2 w = vec2(vnoise(p * 0.55 + 4.1), vnoise(p * 0.55 + 71.3)) - 0.5;
+      return p + w * 0.85;
+    #else
+      return p;
+    #endif
+  }
+
+  float cloudFbm(vec2 p) {
+    #if SKY_CLOUD_OCTAVES <= 2
+      // The low tier does not get a "cheaper version" of the new field, it gets
+      // the OLD field, to the bit: same two taps, same weights, same rounding.
+      return fbm2(p);
+    #else
+      float a = vnoise(p) * 0.5333;
+      a += vnoise(p * 2.13 + 19.7) * 0.2667;
+      a += vnoise(p * 4.37 + 7.31) * 0.1333;
+      #if SKY_CLOUD_OCTAVES >= 4
+        a += vnoise(p * 8.71 + 41.9) * 0.0667;
+      #endif
+      return a * CLOUD_NORM;
+    #endif
+  }
+`;
+
+/** How far under the coverage edge a fragment has to be before the belly is at
+ *  full strength, and how much light the belly loses. Parsed by the gate. */
+export const CLOUD_BODY_DEPTH = 0.26;
+export const CLOUD_BELLY = 0.34;
+
+/** The cloud deck itself. Exported for the same reason as the noise: the gate
+ *  grades this string, not a copy of it. */
+export const SKY_CLOUD_GLSL = /* glsl */`
+    // ── THE CLOUD DECK ──────────────────────────────────────────────────────
+    float skyUp = smoothstep(0.015, 0.14, d.y);
+    vec2 cuv = d.xz / (abs(d.y) * 0.85 + 0.22);
+    vec2 drift = vec2(u_time * 0.010, u_time * 0.0042);
+    // ONE warp, both taps. The sun-side tap has to walk through the SAME warped
+    // field or the lit edge belongs to a different cloud than the body it lights.
+    vec2 cwp = cloudWarp(cuv * 1.15 + drift);
+    float cf = cloudFbm(cwp);
+    float coverage = mix(0.42, 0.18, oc);
+    float cband = mix(0.28, 0.40, oc);
+    float cloud = smoothstep(coverage, coverage + cband, cf) * skyUp;
+    float cfLit = cloudFbm(cwp + u_sunDir.xz * 0.16);
+    float litEdge = clamp((cf - cfLit) * 2.6 + 0.55, 0.0, 1.0);
+    vec3 cloudLit = vec3(1.00, 0.99, 0.96) * u_dayAmount + vec3(1.00, 0.62, 0.40) * u_twilightAmount + vec3(0.30, 0.35, 0.47) * u_nightAmount;
+    vec3 cloudShade = vec3(0.62, 0.68, 0.78) * u_dayAmount + vec3(0.42, 0.33, 0.46) * u_twilightAmount + vec3(0.12, 0.15, 0.22) * u_nightAmount;
+    cloudLit = mix(cloudLit, vec3(0.35, 0.37, 0.41), oc);
+    cloudShade = mix(cloudShade, vec3(0.10, 0.11, 0.13), oc);
+    float cloudAlpha = cloud * mix(0.85, 0.97, oc);
+    vec3 cloudCol = mix(cloudShade, cloudLit, litEdge);
+    #if SKY_CLOUD_OCTAVES >= 3
+      // THICKNESS. How far past the coverage edge a fragment sits IS how much
+      // cloud the light had to cross to reach it, so that is what the belly
+      // loses. Without it the interior of every cumulus is one flat colour —
+      // the "paper cut-out" read — because litEdge saturates away from the rim.
+      float cdepth = smoothstep(0.0, ${CLOUD_BODY_DEPTH}, cf - coverage - cband);
+      cloudCol *= 1.0 - ${CLOUD_BELLY} * cdepth;
+    #endif
+    sky = mix(sky, cloudCol, cloudAlpha);
+    #if SKY_CLOUD_OCTAVES >= 4
+      // CIRRUS: one stretched tap, high above the deck, fair weather only, and
+      // never over the cumulus it would otherwise wash out.
+      float cirrus = smoothstep(0.56, 0.95, vnoise(vec2(cuv.x * 0.34, cuv.y * 2.7) + vec2(u_time * 0.004, 0.0)))
+                   * skyUp * (1.0 - oc) * (1.0 - cloudAlpha) * 0.30;
+      sky = mix(sky, cloudLit, cirrus);
+      cloudAlpha = max(cloudAlpha, cirrus * 0.5);
+    #endif
+`;
+
 const DAY_NIGHT_CYCLE_SECONDS = 960; // slower cycle: dusk is a scene, not a flash
 const DAY_NIGHT_START_OFFSET = 0.47;
 
@@ -241,31 +366,14 @@ const SKY_FRAG = /* glsl */`
   uniform float u_nightAmount;
   uniform float u_time;
 
-  float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-  }
-
+${SKY_NOISE_GLSL}
   float hash31(vec3 p) {
     p = fract(p * vec3(0.1031, 0.11369, 0.13787));
     p += dot(p, p.yzx + 19.19);
     return fract((p.x + p.y) * p.z);
   }
 
-  float vnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(
-      mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
-      mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
-      f.y);
-  }
-
-  float fbm2(vec2 p) {
-    return vnoise(p) * 0.6667 + vnoise(p * 2.13 + 19.7) * 0.3333;
-  }
+${SKY_CLOUD_NOISE_GLSL}
 
   void main() {
     vec3 d = normalize(v_dir);
@@ -341,21 +449,7 @@ const SKY_FRAG = /* glsl */`
     // without repainting a clear afternoon the moment a squall clips the frame.
     sky = mix(sky, stormSky, max(u_stormIntensity, oc * 0.80) * stormSide);
 
-    // Stylized drifting 2-octave fbm cloud layer
-    float skyUp = smoothstep(0.015, 0.14, d.y);
-    vec2 cuv = d.xz / (abs(d.y) * 0.85 + 0.22);
-    vec2 drift = vec2(u_time * 0.010, u_time * 0.0042);
-    float cf = fbm2(cuv * 1.15 + drift);
-    float coverage = mix(0.42, 0.18, oc);
-    float cloud = smoothstep(coverage, coverage + mix(0.28, 0.40, oc), cf) * skyUp;
-    float cfLit = fbm2(cuv * 1.15 + drift + u_sunDir.xz * 0.16);
-    float litEdge = clamp((cf - cfLit) * 2.6 + 0.55, 0.0, 1.0);
-    vec3 cloudLit = vec3(1.00, 0.99, 0.96) * u_dayAmount + vec3(1.00, 0.62, 0.40) * u_twilightAmount + vec3(0.30, 0.35, 0.47) * u_nightAmount;
-    vec3 cloudShade = vec3(0.62, 0.68, 0.78) * u_dayAmount + vec3(0.42, 0.33, 0.46) * u_twilightAmount + vec3(0.12, 0.15, 0.22) * u_nightAmount;
-    cloudLit = mix(cloudLit, vec3(0.35, 0.37, 0.41), oc);
-    cloudShade = mix(cloudShade, vec3(0.10, 0.11, 0.13), oc);
-    float cloudAlpha = cloud * mix(0.85, 0.97, oc);
-    sky = mix(sky, mix(cloudShade, cloudLit, litEdge), cloudAlpha);
+${SKY_CLOUD_GLSL}
 
     // ── Lightning illumination: the strike lights the CLOUD DECK from inside
     //    (bellies flare, clear sky only lifts) and is brightest toward the
@@ -883,7 +977,12 @@ export class Renderer {
       fragmentShader: SKY_FRAG,
       // The rotating anvil is a second fbm field in the storm sector: worth it
       // where there are cycles for it, off where there are not.
-      defines: this.quality === 'low' ? {} : { SKY_ANVIL: '' },
+      defines: {
+        // The cloud ladder is a define, not a uniform: the low tier must not
+        // even compile the extra octaves, the warp or the belly.
+        SKY_CLOUD_OCTAVES: String(SKY_CLOUD_OCTAVES_BY_TIER[this.quality]),
+        ...(this.quality === 'low' ? {} : { SKY_ANVIL: '' }),
+      },
       uniforms: {
         u_sunDir: { value: this.sunDir.clone() },
         u_stormIntensity: { value: 0 },
