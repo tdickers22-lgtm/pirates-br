@@ -2,9 +2,9 @@
   "note": "Baseline for scripts/test-ship-geometry-hash.mjs. Rebuild ONLY inside a slice that intends the geometry change, and name the moved families in the commit.",
   "hulls": {
     "sloop": {
-      "digest": "a08ce79a",
-      "meshCount": 100,
-      "vertTotal": 62074,
+      "digest": "851c10c8",
+      "meshCount": 101,
+      "vertTotal": 62302,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 2,
@@ -21,10 +21,10 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 62,
-          "verts": 29790,
-          "tris": 11078,
-          "hash": "666bb008",
+          "meshes": 61,
+          "verts": 29766,
+          "tris": 11066,
+          "hash": "c38897ac",
           "box": [
             -4.11,
             0.447,
@@ -90,16 +90,44 @@
             4.22
           ]
         },
+        "hold-lantern-glass": {
+          "meshes": 1,
+          "verts": 144,
+          "tris": 48,
+          "hash": "b4fcfa15",
+          "box": [
+            -0.091,
+            1.1,
+            -2.025,
+            0.091,
+            1.32,
+            2.025
+          ]
+        },
+        "hold-lantern-iron": {
+          "meshes": 1,
+          "verts": 108,
+          "tris": 36,
+          "hash": "bed3252d",
+          "box": [
+            -0.1,
+            1.317,
+            -2.035,
+            0.1,
+            1.5,
+            2.035
+          ]
+        },
         "ship-barrel-wood": {
           "meshes": 5,
           "verts": 1920,
           "tris": 640,
-          "hash": "bdda937d",
+          "hash": "9a3c9395",
           "box": [
             -1.93,
             2.28,
-            -1.819,
-            1.775,
+            -1.82,
+            1.78,
             3.06,
             4.366
           ]
@@ -303,9 +331,9 @@
       }
     },
     "brigantine": {
-      "digest": "297b78ad",
-      "meshCount": 129,
-      "vertTotal": 75514,
+      "digest": "242d3af7",
+      "meshCount": 130,
+      "vertTotal": 75742,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 4,
@@ -322,10 +350,10 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 86,
-          "verts": 41913,
-          "tris": 15788,
-          "hash": "5d456f51",
+          "meshes": 85,
+          "verts": 41889,
+          "tris": 15776,
+          "hash": "514c6b79",
           "box": [
             -5.11,
             0.447,
@@ -391,15 +419,43 @@
             5.58
           ]
         },
+        "hold-lantern-glass": {
+          "meshes": 1,
+          "verts": 144,
+          "tris": 48,
+          "hash": "6f80e235",
+          "box": [
+            -0.091,
+            1.43,
+            -2.665,
+            0.091,
+            1.65,
+            2.665
+          ]
+        },
+        "hold-lantern-iron": {
+          "meshes": 1,
+          "verts": 108,
+          "tris": 36,
+          "hash": "8a3e0715",
+          "box": [
+            -0.1,
+            1.648,
+            -2.675,
+            0.1,
+            1.83,
+            2.675
+          ]
+        },
         "ship-barrel-wood": {
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "cfd46cf1",
+          "hash": "9d9e5a4d",
           "box": [
-            -2.58,
+            -2.573,
             2.88,
-            -2.436,
+            -2.438,
             2.896,
             3.66,
             5.396
@@ -604,9 +660,9 @@
       }
     },
     "galleon": {
-      "digest": "2a53f918",
-      "meshCount": 171,
-      "vertTotal": 97837,
+      "digest": "d6575ad6",
+      "meshCount": 172,
+      "vertTotal": 98065,
       "families": {
         "MeshBasicMaterial": {
           "meshes": 8,
@@ -623,10 +679,10 @@
           ]
         },
         "MeshStandardMaterial": {
-          "meshes": 121,
-          "verts": 61405,
-          "tris": 23250,
-          "hash": "2fab767b",
+          "meshes": 120,
+          "verts": 61381,
+          "tris": 23238,
+          "hash": "82c4a1a7",
           "box": [
             -6.61,
             0.447,
@@ -692,16 +748,44 @@
             7.62
           ]
         },
+        "hold-lantern-glass": {
+          "meshes": 1,
+          "verts": 144,
+          "tris": 48,
+          "hash": "a5343f79",
+          "box": [
+            -0.091,
+            1.815,
+            -3.625,
+            0.091,
+            2.035,
+            3.625
+          ]
+        },
+        "hold-lantern-iron": {
+          "meshes": 1,
+          "verts": 108,
+          "tris": 36,
+          "hash": "f120a941",
+          "box": [
+            -0.1,
+            2.033,
+            -3.635,
+            0.1,
+            2.215,
+            3.635
+          ]
+        },
         "ship-barrel-wood": {
           "meshes": 5,
           "verts": 2304,
           "tris": 768,
-          "hash": "b2aaa3e9",
+          "hash": "c0de9e79",
           "box": [
-            -4.075,
+            -4.079,
             3.58,
-            -3.848,
-            4.077,
+            -3.85,
+            4.076,
             4.36,
             6.718
           ]

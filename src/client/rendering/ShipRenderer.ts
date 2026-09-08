@@ -943,7 +943,7 @@ export class ShipRenderer {
       cz: holeCz,
       halfX: voidHalfX,
       halfZ: voidHalfZ,
-    }, profile);
+    }, profile, this.quality);
     group.add(interior);
 
     // ── Hold cargo (the gold race, made physical) ─────────────
@@ -2255,7 +2255,17 @@ export class ShipRenderer {
       barrel.name = `supply-barrel-${kind}`;
       barrel.userData.supplyKind = kind;
       barrel.position.set(x, H + 0.5, z);
-      barrel.rotation.y = Math.random() * Math.PI * 2;
+      // Deterministic yaw from the barrel's own berth, the same way the decor
+      // barrels were fixed in slice b, and for a second reason on top of that
+      // one. `Math.random()` here reads the GLOBAL sequence, and three draws
+      // from that same sequence for every generateUUID — so adding one mesh
+      // anywhere else in the renderer silently re-rolled every supply barrel on
+      // every hull, and test-ship-geometry-hash's ship-barrel-wood family
+      // re-pinned on changes that had nothing to do with barrels. (That is
+      // exactly how this was found: two lanterns in the hold moved the barrels.)
+      // Supply barrels are NO_MERGE_EXCLUDE so this never corrupted the shared
+      // bake the way the decor barrels did, but it was the same landmine.
+      barrel.rotation.y = (Math.abs(Math.sin(x * 12.9898 + z * 78.233)) % 1) * Math.PI * 2;
       // Bake the barrel's own staves/hoops, but keep the named group intact
       // (it's excluded from the ship-level merge below).
       // A barrel is a barrel on every hull in the game — one set of staves.

@@ -56,6 +56,8 @@ export function makeShipInterior(
   darkMat: THREE.Material,
   hole: StairwellHole,
   profile: HullProfile,
+  /** Only the lantern silhouettes read it: four radial sides instead of six. */
+  quality: 'low' | 'balanced' | 'high' = 'balanced',
 ): THREE.Group {
   const g = new THREE.Group();
   const W = stats.width, L = stats.length, H = stats.height;
@@ -233,15 +235,62 @@ export function makeShipInterior(
     }
   }
 
-  // Lantern + actual point light so the hold is visibly illuminated when peering
-  // through the stairwell. Without a real light, the dark brown floor reads as a
-  // featureless "tarp".
-  const holdLantern = new THREE.Mesh(
-    new THREE.BoxGeometry(0.18, 0.28, 0.18),
-    new THREE.MeshStandardMaterial({ color: 0xFFD66A, emissive: 0xFF8800, emissiveIntensity: 2.0 }),
-  );
-  holdLantern.position.set(0, H * 0.55, 0);
-  g.add(holdLantern);
+  // TWO LANTERNS, ONE BUDGET LIGHT (ships-23).
+  //
+  // The hold had a single 18 cm CUBE hanging amidships, and that cube was the
+  // only thing in the ship's belly that was supposed to read as a light. A box
+  // does not read as a lantern from a metre away, and one of them amidships
+  // left both ends of a galleon's hold — which is nearly nine metres of it —
+  // with no visible source at all for the pool of light on the floor.
+  //
+  // So: two lanterns, hung fore and aft off the deck beams, each with a
+  // silhouette (tapered glass, iron cap, hook) instead of a cube. They sit
+  // SYMMETRICALLY about the point light, which does not move, does not change
+  // intensity or range, and is still registered exactly once — the light budget
+  // sees no difference whatsoever (test-light-budget). Both lanterns are
+  // emissive, so both read as burning and the pool between them is attributed
+  // to the pair; only one of them is a real emitter, and at hold scale nobody
+  // can tell which. That is the whole trick, and it is the reason a second
+  // lantern costs zero lights.
+  //
+  // WHAT IT COSTS ON THE LOW TIER: four radial sides instead of six, so a
+  // lantern is 28 triangles and the pair is 56 per hull (84 elsewhere). All six
+  // meshes share two materials, so they merge into the hull's existing static
+  // bake and add no draw call at all. The hold is interior geometry behind the
+  // detail root, so a distant hull never builds or draws them.
+  const lanternSides = quality === 'low' ? 4 : 6;
+  const glassMat = new THREE.MeshStandardMaterial({
+    color: 0xFFD66A, emissive: 0xFF8800, emissiveIntensity: 2.0,
+  });
+  glassMat.name = 'hold-lantern-glass';
+  const ironMat = new THREE.MeshStandardMaterial({ color: 0x140f08, roughness: 0.75 });
+  ironMat.name = 'hold-lantern-iron';
+  const lanternY = H * 0.55;
+  const lanternZ = Math.min(L * 0.16, holdZ * 0.62);
+  for (const lz of [-lanternZ, lanternZ]) {
+    // Tapered glass: wider at the shoulder than at the foot, the way a horn
+    // lantern is, so it catches the light differently top and bottom.
+    const glass = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.105, 0.078, 0.22, lanternSides), glassMat,
+    );
+    glass.position.set(0, lanternY, lz);
+    g.add(glass);
+    // Open-ended: the cap's top is against the beam and its underside is
+    // against the glass, so both discs are geometry nobody can ever see. Same
+    // for the hook, which is buried at both ends. That is 36 triangles a pair
+    // saved for nothing given up.
+    const cap = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.115, 0.115, 0.045, lanternSides, 1, true), ironMat,
+    );
+    cap.position.set(0, lanternY + 0.13, lz);
+    g.add(cap);
+    // The hook it hangs by: without it the lantern floats under the beams.
+    const hook = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.011, 0.011, 0.14, 3, 1, true), ironMat,
+    );
+    hook.position.set(0, lanternY + 0.22, lz);
+    g.add(hook);
+  }
 
   // THE HOLD IS WINDOWLESS, so what the sun is doing outside is irrelevant to
   // it: this lantern burns on the middle watch and it burns at noon. It was
