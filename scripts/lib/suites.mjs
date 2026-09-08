@@ -209,6 +209,12 @@ export const LOGIC = [
   // all and no suite noticed, because the suites that graded them asserted on
   // the SERVER payload (review-0 P1, fixup0).
   quick(plain('test-wire-consumers.mjs')),
+  // ONLINE-01 / codehealth-13: the other direction. Every ClientMsgType has one
+  // validator in src/server/net/validate.ts, LobbyServer routes nothing that
+  // has not been through it, and the five shipped holes (solo_start's NaN
+  // fleet, set_name's throwing .trim(), the unchecked party ids, ping's 64 KB
+  // echo, trade_action's crashing cast) are pinned one by one (w8.4).
+  quick(tsx('test-wire-validation.mjs')),
   // PARTY-01 client half: the six-character code the server issues survives
   // every client path that carries it (it was truncated to four in three
   // places, which made private crews unjoinable), plus the party panel's
