@@ -282,6 +282,15 @@ export const LOGIC = [
   //   glb-census --check          — the models README's counts vs disk + ASSET_NAMES/FAR_ASSET_NAMES
   //                                 (64 / 63 / 61 / 56 were all quoted as the contract; assets-20, lane 2.5)
   quick({ file: 'glb-census.mjs', cmd: ['node', 'scripts/glb-census.mjs', '--check'] }),
+  //   test-fauna-census           — the shark is the closest a creature ever gets to the camera (it swims at
+  //                                 your face in the dodge window) and was the lowest-fidelity mesh we
+  //                                 shipped: 1,972 tris, a belly sphere pushed through the hull, three node
+  //                                 rotations for a swim. Grades the skinned hero (>=8k tris, skin, joints,
+  //                                 swim+bite clips, unchanged 3.4 m silhouette) AND the low-tier swap
+  //                                 shark_far (<=3.2k, unskinned, the four pivot nodes the fallback animator
+  //                                 drives) — without that second file SHARK.MAX_WORLD=4 heroes are +25k tris
+  //                                 in a low-tier frame (FAUNAGLB-01/assets-12, w6.6)
+  quick({ file: 'test-fauna-census.mjs', cmd: ['node', 'scripts/test-fauna-census.mjs'] }),
   //   check-hud-ids               — every id the client reads by string exists in index.html, and no id inside
   //                                 the HUD block is driven by nothing. TypeScript cannot see through
   //                                 getElementById('x'), so a renamed id used to type-check and then silently
