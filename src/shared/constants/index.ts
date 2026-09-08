@@ -589,8 +589,24 @@ export const GEYSER = {
 
 export const SHARK = {
   MAX_WORLD: 4,
+  /** Kept for the sinking-scene suites; the real spawn is the swim-time budget
+   *  below. A flat 3.4 %/s coin flip made a shark neither reliable (a 10 s beach
+   *  swim almost never saw one) nor escapable (bots-11). */
   SPAWN_CHANCE_PER_TICK: 0.00055,
-  SPAWN_SWIM_GRACE: 8,
+  /** Seconds in open water before the water is dangerous at all. */
+  SPAWN_SWIM_GRACE: 15,
+  /** Hazard rate, per second, once the ramp is full: P(shark by T) =
+   *  1 - exp(-∫rate). 0 at the grace, SPAWN_RATE_MAX after SPAWN_RATE_RAMP more
+   *  seconds — ~80 % by a 25 s swim, 0 % on a 10 s dash for the beach. */
+  SPAWN_RATE_MAX: 0.8,
+  SPAWN_RATE_RAMP: 25,
+  /** "Open water" is this far outside every island footprint: paddling in the
+   *  shallows is safe, and the budget only runs where a fin has room. */
+  OPEN_WATER_DIST: 25,
+  /** Blood in the water brings one (bots-17): any damage to a swimmer, or a
+   *  death in the water, spawns a shark this close, no matter the budget. */
+  BLOOD_SPAWN_DIST: 30,
+  BLOOD_COOLDOWN: 25,
   SPAWN_COOLDOWN_MIN: 12,
   SPAWN_COOLDOWN_MAX: 20,
   /** A few solid hits will down a shark — still threatening up close, no longer a slog. */
