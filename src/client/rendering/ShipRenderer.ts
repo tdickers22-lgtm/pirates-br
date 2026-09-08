@@ -35,6 +35,7 @@ import type { SupplyKind } from './ship/textures.js';
 import { applyPlankDetail, makePlankUniforms, type PlankUniforms } from './ship/plankDetail.js';
 import { releaseShipGeometry } from './ship/geometry.js';
 import { buildRigging, updateRigging, type RopeRun, type Rigging } from './ship/rigging.js';
+import { buildWakeSurface, writeWakeSurface, setArmsVisible, makeWakeFrame, ARM_FACTOR_FLOOR, type WakeSurface, type WakeFrame } from './ship/wake.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBillowedSailGeometry, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
@@ -132,16 +133,15 @@ interface WakeSpray {
 interface ShipWake {
   group: THREE.Group;
   ribbon: THREE.Mesh;
-  positions: THREE.BufferAttribute;
+  /** Stern ribbon + (off the low tier) the Kelvin arms and bow sheets, in ONE
+   *  geometry and one draw — see rendering/ship/wake.ts. */
+  surface: WakeSurface;
   material: THREE.MeshBasicMaterial;
   spray: WakeSpray[];
   sprayCursor: number;
   sprayTimer: number;
   scroll: number;
 }
-
-const WAKE_ROWS = 9;
-const WAKE_COLS = 3;
 /**
  * How far outside a dock's own footprint a hull can still be and produce a
  * boarding plank: half the longest hull (22m), plus her beam, plus the planner's
@@ -240,6 +240,9 @@ export class ShipRenderer {
   private shipMeshes: Map<string, ShipMeshGroup> = new Map();
   private scene!: THREE.Scene;
   private quality: RenderQuality = 'balanced';
+  /** One reused frame record for every hull's wake — filled in place each
+   *  update so driving twelve wakes allocates nothing. */
+  private wakeFrame: WakeFrame = makeWakeFrame();
   private darkWoodTex!: THREE.CanvasTexture;
   private deckTex!: THREE.CanvasTexture;
   private sailTex!: THREE.CanvasTexture;
@@ -3140,7 +3143,9 @@ export class ShipRenderer {
         const attitudeAlpha = 1 - Math.exp(-(ship.sinking ? 6 : 3) * dt);
         mesh.root.rotation.x = THREE.MathUtils.lerp(mesh.root.rotation.x, basePitch, attitudeAlpha);
         mesh.root.rotation.z = THREE.MathUtils.lerp(mesh.root.rotation.z, baseRoll, attitudeAlpha);
-        this.updateWake(mesh, ship, stats, waveT, dt, false, storm01);
+        // armFade 0: beyond the detail range the near path has already ramped
+        // the wedge to nothing, so this is a continuation, not a cut.
+        this.updateWake(mesh, ship, stats, waveT, dt, false, storm01, 0);
         continue;
       }
       // ── THE WHEEL SHOWS THE RUDDER, NOT THE SPIN ────────────────────────
@@ -3347,8 +3352,14 @@ export class ShipRenderer {
         }
       }
 
-      // Animated foam wake ribbon + bow spray, tracking the Gerstner surface
-      this.updateWake(mesh, ship, stats, waveT, dt, true, storm01);
+      // Animated foam wake ribbon + Kelvin wedge + bow spray, tracking the
+      // Gerstner surface. The wedge is full strength inside 86% of the detail
+      // range (distSq is 75% of the square there) and linear to nothing at the
+      // edge of it, so it is already zero-area when the far path takes over.
+      const armFade = THREE.MathUtils.clamp(
+        (1 - distSq / (detailDistance * detailDistance)) * 4, 0, 1,
+      );
+      this.updateWake(mesh, ship, stats, waveT, dt, true, storm01, armFade);
 
       // Shared pulse for every hole halo (one material, breathing in sync).
       this.holeMarkerMat.opacity = 0.28 + 0.24 * (0.5 + 0.5 * Math.sin(t * 3.4));
@@ -3493,42 +3504,9 @@ export class ShipRenderer {
     const group = new THREE.Group();
     group.name = 'ship-wake';
 
-    // Tapered foam ribbon: WAKE_ROWS rows x 3 columns, positions rewritten
-    // every frame in world space along the ship's track.
-    const vertCount = WAKE_ROWS * WAKE_COLS;
-    const positions = new THREE.BufferAttribute(new Float32Array(vertCount * 3), 3);
-    positions.setUsage(THREE.DynamicDrawUsage);
-    const uvs = new Float32Array(vertCount * 2);
-    const colors = new Float32Array(vertCount * 4);
-    for (let row = 0; row < WAKE_ROWS; row++) {
-      const jt = row / (WAKE_ROWS - 1);
-      const rowAlpha = Math.pow(1 - jt, 1.35);
-      for (let col = 0; col < WAKE_COLS; col++) {
-        const i = row * WAKE_COLS + col;
-        uvs[i * 2] = col / (WAKE_COLS - 1);
-        uvs[i * 2 + 1] = jt * 2; // texture tiles twice along the ribbon
-        const edge = col === 1 ? 1 : 0.32;
-        colors[i * 4] = 1;
-        colors[i * 4 + 1] = 1;
-        colors[i * 4 + 2] = 1;
-        colors[i * 4 + 3] = rowAlpha * edge;
-      }
-    }
-    const indices: number[] = [];
-    for (let row = 0; row < WAKE_ROWS - 1; row++) {
-      for (let col = 0; col < WAKE_COLS - 1; col++) {
-        const a = row * WAKE_COLS + col;
-        const b = a + 1;
-        const c = a + WAKE_COLS;
-        const d = c + 1;
-        indices.push(a, b, c, b, d, c);
-      }
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', positions);
-    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
-    geo.setIndex(indices);
+    // Stern ribbon + Kelvin arms + bow sheets, in one geometry and one draw.
+    // The low tier gets the stern ribbon alone, exactly as before this lane.
+    const surface = buildWakeSurface(this.quality);
 
     const material = new THREE.MeshBasicMaterial({
       map: this.foamTex.clone(), // per-ship clone so scroll offsets don't fight
@@ -3542,7 +3520,7 @@ export class ShipRenderer {
     });
     material.map!.needsUpdate = true;
 
-    const ribbon = new THREE.Mesh(geo, material);
+    const ribbon = new THREE.Mesh(surface.geometry, material);
     ribbon.renderOrder = 2;
     ribbon.frustumCulled = false;
     group.add(ribbon);
@@ -3563,7 +3541,7 @@ export class ShipRenderer {
     }
 
     group.visible = false;
-    return { group, ribbon, positions, material, spray, sprayCursor: 0, sprayTimer: 0, scroll: 0 };
+    return { group, ribbon, surface, material, spray, sprayCursor: 0, sprayTimer: 0, scroll: 0 };
   }
 
   /** Boarding planks: a berthed hull drops a gangway to the dock deck, so
@@ -3651,6 +3629,9 @@ export class ShipRenderer {
     dt: number,
     detailNear: boolean,
     storm = 0,
+    /** 0..1 distance ramp for the Kelvin wedge; the caller drives it to 0
+     *  BEFORE the hull leaves its detail range so the wedge never pops. */
+    armFade = 0,
   ) {
     const wake = mesh.wake;
     const speed = Math.hypot(ship.velocity.x, ship.velocity.z);
@@ -3690,23 +3671,24 @@ export class ShipRenderer {
     const sternZ = mesh.root.position.z - fwdZ * L * 0.46;
     const wakeLen = L * (1.1 + speedFrac * 1.5);
 
-    const pos = wake.positions;
-    for (let row = 0; row < WAKE_ROWS; row++) {
-      const jt = row / (WAKE_ROWS - 1);
-      const dist = Math.pow(jt, 1.25) * wakeLen;
-      const sway = Math.sin(waveT * 0.9 + jt * 4.2) * W * 0.05 * jt;
-      const cx = sternX - fwdX * dist + latX * sway;
-      const cz = sternZ - fwdZ * dist + latZ * sway;
-      const half = W * (0.14 + jt * (0.42 + 0.42 * speedFrac));
-      for (let col = 0; col < WAKE_COLS; col++) {
-        const u = col - 1; // -1, 0, 1
-        const x = cx + latX * half * u;
-        const z = cz + latZ * half * u;
-        const y = gerstnerHeight(x, z, waveT, WAVE_PARAMS, storm) + 0.08 + (1 - jt) * 0.04;
-        pos.setXYZ(row * WAKE_COLS + col, x, y, z);
-      }
-    }
-    pos.needsUpdate = true;
+    // The wedge only exists once she is really driving: a hull ghosting along
+    // at a knot leaves a stern smear and nothing either side of the bow. Ramped,
+    // not switched, and it scales the arm WIDTH — so at the bottom of the ramp
+    // every arm triangle is degenerate and there is no frame on which an edge
+    // appears. Below the floor the arms leave the draw range entirely.
+    const speedRamp = THREE.MathUtils.smoothstep(speedFrac, 0.22, 0.62);
+    const armFactor = wake.surface.hasArms ? armFade * speedRamp : 0;
+    setArmsVisible(wake.surface, armFactor > ARM_FACTOR_FLOOR);
+
+    const f = this.wakeFrame;
+    f.sternX = sternX; f.sternZ = sternZ;
+    f.bowX = mesh.root.position.x + fwdX * L * 0.5;
+    f.bowZ = mesh.root.position.z + fwdZ * L * 0.5;
+    f.fwdX = fwdX; f.fwdZ = fwdZ; f.latX = latX; f.latZ = latZ;
+    f.width = W; f.length = L;
+    f.speedFrac = speedFrac; f.waveT = waveT; f.storm = storm;
+    f.armFactor = armFactor;
+    writeWakeSurface(wake.surface, f);
 
     // Scroll foam toward the tail so blobs read as staying put in the water
     wake.scroll = (wake.scroll - (speed * dt) / Math.max(wakeLen, 1)) % 1;
