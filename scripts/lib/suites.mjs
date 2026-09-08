@@ -163,6 +163,12 @@ export const LOGIC = [
   quick(tsx('test-snapshot-size.mjs')),
   quick(tsx('test-combat-fixes.mjs')),
   quick(tsx('test-geyser.mjs')),
+  // PHYSREM-01 (wave 8.3). Bodies in the cannonBallistic branch driven over the
+  // real fixed world: single-tick vertical LIFT at cliff faces (a landing may
+  // raise a body onto the ground under it, never by a cliff height), bodies held
+  // under cave roofs, and the tavern's slates as a real surface. Quick tier, no
+  // stack, 0.5 s measured on this Air.
+  quick(tsx('test-ballistic-terrain.mjs')),
   tsx('test-cave-walk.mjs'),
   tsx('test-swim-shore.mjs'),
   quick(tsx('test-harvest.mjs')),
