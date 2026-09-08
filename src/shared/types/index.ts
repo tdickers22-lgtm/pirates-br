@@ -67,7 +67,7 @@ export interface ShipKeg {
   defused?: boolean;
 }
 
-export type ShipUpgradeType = 'hull_reinforcement' | 'charged_cannons' | 'swift_sails';
+export type ShipUpgradeType = 'hull_reinforcement' | 'charged_cannons' | 'swift_sails' | 'lightning_rod';
 
 /** Held tools selectable from the supply wheel (all innate to the pirate). */
 export type EquippableTool = 'spyglass' | 'compass' | 'bucket' | 'shovel' | 'lantern' | 'axe';
@@ -757,6 +757,26 @@ export interface StormState {
    *  as the eye itself closes and the final circle turns lethal. The HUD reads
    *  it for the THE EYE CLOSES banner; the server reads it for the damage. */
   eyeCollapse: number;
+  /** STORMUP-01 / storm-04. THE BOLTS ARE THE SERVER'S, NOT THE RENDERER'S.
+   *  Lightning used to be `Math.random` inside EnvironmentFx: every player saw
+   *  different bolts at different moments, 32 % of them landed INSIDE the safe
+   *  ring (contradicting the ring), and no bolt could hit anything because
+   *  nothing on the server knew it existed. The storm now rolls strikes off the
+   *  match-seeded stream into this ring buffer (newest last, at most
+   *  STORM_LIGHTNING.MAX_REPLICATED) and the client only draws them, so two
+   *  clients watching the same sea see the same sky. */
+  strikes: StormStrike[];
+}
+
+/** One bolt: when it fell, where it hit, and what it hit. `shipId` is set when
+ *  the strike found a mast to run down (the conductor); `grounded` is true when
+ *  that hull carried a lightning rod and took the charge without a scratch. */
+export interface StormStrike {
+  t: number;
+  x: number;
+  z: number;
+  shipId: string | null;
+  grounded: boolean;
 }
 
 // ── Trade ─────────────────────────────────────────────────────

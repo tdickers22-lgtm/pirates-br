@@ -41,6 +41,13 @@ import { refreshFrozenChild, ZERO_SCALE_MAT4 } from './three-util.js';
  *  the bloom threshold curve, which is where the number has to make sense. */
 export const LANTERN_BLOOM_GAIN = 2.8;
 
+/** Metres from the weather anchor beyond which a replicated strike is not
+ *  drawn. The bolts are rolled around the whole ring now, so on a 950 m opening
+ *  circle most of them fall on the far side of the map: without this the
+ *  renderer would rebuild the ribbon and light a flash for a bolt nobody can
+ *  see. Well past the fog, so nothing visibly pops out of existence. */
+const BOLT_VISIBLE_RANGE = 1600;
+
 /** Glow-sprite opacity at full night, for a lantern that HAS a real point light
  *  (the pooled few) and for one that does not. The dimmer of the two is what the
  *  bloom gate has to clear: if only the pooled lanterns bloom, an island reads as
@@ -453,6 +460,10 @@ export class EnvironmentFx {
   private readonly waterfallSites = new Map<string, { x: number; y: number; z: number; scale: number }[]>();
   lightningFlash: THREE.PointLight | null = null;
   lightningTimer = 4 + Math.random() * 6;
+  /** The `t` of the newest replicated strike this renderer has already played.
+   *  Bolts arrive in storm.strikes (a 4-deep ring buffer); this is how the
+   *  client tells a new one from the three it has already drawn. */
+  private lastDrawnStrikeT = -1;
   stormLightningFlashEl: HTMLDivElement | null = null;
   stormLightningFlashOpacity = 0;
   lightningLightPool: THREE.PointLight | null = null;
@@ -2198,34 +2209,43 @@ export class EnvironmentFx {
     // spectating, lightning belongs to the sky the CAMERA is under, not to the
     // one over the body it left behind.
     const weatherAnchor = this.view.getWeatherAnchor();
-    const anchorDist = weatherAnchor
-      ? dist2D(weatherAnchor.x, weatherAnchor.z, this.view.state.storm.centerX, this.view.state.storm.centerZ)
-      : 0;
-    const outsideStorm = !!weatherAnchor
-      && anchorDist > this.view.state.storm.safeRadius;
-    const nearStormWall = !!weatherAnchor && Math.abs(anchorDist - this.view.state.storm.safeRadius) < 85;
-
-    // Keep lightning tied to the storm front, not clear water well inside the safe zone.
-    if (!this.stormDemo && !outsideStorm && !(this.view.state.storm.shrinking && nearStormWall) && phase < 2) return;
-
-    this.lightningTimer -= dt;
-    if (this.lightningTimer <= 0) {
+    // ── WHERE THE NEXT BOLT FALLS (STORMUP-01 / storm-04) ──────────────────
+    //
+    // It is no longer this renderer's decision. The strike is rolled by
+    // StormSystem off the match-seeded stream, in the band [1.02, 1.35] x
+    // safeRadius, and replicated in storm.strikes — so two clients watching the
+    // same sea see the same sky, and a bolt can actually hit a mast. All that
+    // is left here is the drawing, which is unchanged.
+    //
+    // ?stormdemo keeps the old local roll: there is no server in that preview.
+    let lx: number;
+    let lz: number;
+    if (this.stormDemo) {
+      this.lightningTimer -= dt;
+      if (this.lightningTimer > 0) return;
+      const camPos = this.view.renderer.camera.position;
+      const demoAngle = Math.random() * Math.PI * 2;
+      const demoDist = 190 + Math.random() * 260;
+      lx = camPos.x + Math.cos(demoAngle) * demoDist;
+      lz = camPos.z + Math.sin(demoAngle) * demoDist;
+      this.lightningTimer = 1.6 * (0.35 + Math.random() * 0.85);
+    } else {
+      const strikes = this.view.state.storm.strikes;
+      if (!strikes || strikes.length === 0) return;
+      const newest = strikes[strikes.length - 1];
+      if (!(newest.t > this.lastDrawnStrikeT)) return;
+      // CONSUME IT EVEN IF IT IS NOT DRAWN. Otherwise a bolt rolled while the
+      // camera was deep in the eye would be held and fired the instant the
+      // player sailed out — a strike arriving seconds after the sky rolled it.
+      this.lastDrawnStrikeT = newest.t;
+      lx = newest.x;
+      lz = newest.z;
+      // Nothing to look at from the far side of the map, and drawing it would
+      // still pay the ribbon rebuild and the light. Range cull, not a rule.
+      if (weatherAnchor && dist2D(weatherAnchor.x, weatherAnchor.z, lx, lz) > BOLT_VISIBLE_RANGE) return;
+    }
+    {
       const stormR = this.view.state.storm.safeRadius;
-      const angle = Math.random() * Math.PI * 2;
-      let lx: number;
-      let lz: number;
-      if (this.stormDemo) {
-        // Demo storm is parked on the camera: strike where it can be seen.
-        const camPos = this.view.renderer.camera.position;
-        const demoDist = 190 + Math.random() * 260;
-        lx = camPos.x + Math.cos(angle) * demoDist;
-        lz = camPos.z + Math.sin(angle) * demoDist;
-      } else {
-        // Strike near the storm wall boundary
-        const dist = stormR * (0.88 + Math.random() * 0.38);
-        lx = this.view.state.storm.centerX + Math.cos(angle) * dist;
-        lz = this.view.state.storm.centerZ + Math.sin(angle) * dist;
-      }
 
       // Pooled flash light (allocating one per strike forced shader churn).
       // A 300m-radius point light re-lights every fragment of every island,
@@ -2261,13 +2281,6 @@ export class EnvironmentFx {
         this.view.audio.playThunder(dist2D(weatherAnchor.x, weatherAnchor.z, lx, lz));
       }
 
-      const baseCooldown = this.stormDemo
-        ? 1.6 // demo preview: strike often enough to actually look at
-        : Math.max(
-          0.75,
-          10.5 - phase * 1.25 - (outsideStorm ? 3.2 : 0) - this.view.stormWeatherIntensity * 2.5,
-        );
-      this.lightningTimer = baseCooldown * (0.35 + Math.random() * 0.85);
     }
   }
 }

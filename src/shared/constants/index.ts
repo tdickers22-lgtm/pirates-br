@@ -801,10 +801,13 @@ export const HARVEST = {
   RANGE: 3.2,              // how close the axe must be
 } as const;
 
-export const UPGRADE_COSTS: Record<'hull_reinforcement' | 'charged_cannons' | 'swift_sails', { wood: number; ore: number }> = {
+export const UPGRADE_COSTS: Record<'hull_reinforcement' | 'charged_cannons' | 'swift_sails' | 'lightning_rod', { wood: number; ore: number }> = {
   hull_reinforcement: { wood: 6, ore: 3 },
   charged_cannons: { wood: 3, ore: 6 },
   swift_sails: { wood: 8, ore: 2 },
+  // Iron and chain, not canvas: the rod is the cheapest upgrade in wood and the
+  // dearest in ore, because it is a spike and forty feet of chain.
+  lightning_rod: { wood: 4, ore: 5 },
 };
 
 export const SHIP_UPGRADES = {
@@ -817,6 +820,43 @@ export const SHIP_UPGRADES = {
   /** Heavy shot: anti-personnel cannonball blast multiplier (unchanged). */
   CANNON_DAMAGE_MULT: 1.30,
   SWIFT_SPEED_MULT: 1.20,
+  /** Lightning rod: an iron spike at the masthead wired to a chain over the
+   *  side. A strike on a rodded hull is GROUNDED — the bolt still falls and is
+   *  still drawn, but it opens no hole and lights no fire. This is what makes
+   *  the storm a place a prepared crew chooses to go (storm-08). */
+  LIGHTNING_ROD_GROUNDS: true,
+} as const;
+
+/**
+ * THE BOLTS (STORMUP-01 / storm-04).
+ *
+ * Every number the tempest's lightning is rolled from, in one place, because
+ * the server rolls it and the client draws it and the gate reads it. The band
+ * is the point: bolts fall OUTSIDE the safe ring, between 1.02 and 1.35 of the
+ * safe radius, so the sky agrees with the rule the ring states. The old
+ * client-local roll put 32 % of them inside shelter.
+ */
+export const STORM_LIGHTNING = {
+  /** Seconds between strikes at phase 0, before the phase term shortens it. */
+  INTERVAL_MIN: 4,
+  INTERVAL_RANGE: 6,
+  /** Seconds knocked off the interval per storm phase (late storms rage). */
+  INTERVAL_PER_PHASE: 0.42,
+  /** Radial band, as a fraction of safeRadius. Never below 1.0. */
+  BAND_MIN: 1.02,
+  BAND_RANGE: 0.33,
+  /** Ring-buffer length on the wire. Four bolts at ~4 s apart covers every
+   *  strike a client can still be drawing plus one it may have missed. */
+  MAX_REPLICATED: 4,
+  /** A hull this close to the rolled point takes the bolt on her mainmast. */
+  MAST_SEEK_RADIUS: 70,
+  /** Holes stoved at the mast step by an ungrounded strike. */
+  MAST_HOLES: 1,
+  /** Seconds the mast burns after the strike. */
+  FIRE_SECONDS: 12,
+  /** A swimmer this close to the water strike takes SWIMMER_DAMAGE. */
+  SWIMMER_RADIUS: 6,
+  SWIMMER_DAMAGE: 60,
 } as const;
 
 // ── Weapons ──────────────────────────────────────────────────

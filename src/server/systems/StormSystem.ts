@@ -1,5 +1,5 @@
 import type { StormState, Ship, Player, Island } from '../../shared/types/index.js';
-import { STORM_PHASES, STORM_ARC_SECONDS, STORM_DOCK_COVER_MARGIN, WORLD, FLOODING } from '../../shared/constants/index.js';
+import { STORM_PHASES, STORM_ARC_SECONDS, STORM_DOCK_COVER_MARGIN, WORLD, FLOODING, STORM_LIGHTNING, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { dist2D, lerp, getIslandSurfaceY } from '../../shared/utils/index.js';
 import { SHIP_STATS } from '../../shared/constants/index.js';
 
@@ -90,6 +90,9 @@ export class StormSystem {
   private floatingHulls = new Map<string, Ship>();
   /** Deterministic LCG for where along the seaward face a sea breaks through. */
   private stormHolePhase = 0x51f3c7;
+  /** Seconds until the next bolt. Counts down on the seeded stream, so a seeded
+   *  match replays its sky exactly (scripts/test-storm-lightning.mjs). */
+  private strikeTimer: number = STORM_LIGHTNING.INTERVAL_MIN;
   /** Islands, for keeping the late rings off dry land (Old Maw Caldera sits at
    *  the world origin, which is exactly where the ring converges). */
   private islands: Island[] = [];
@@ -167,6 +170,7 @@ export class StormSystem {
       shrinkProgress: 0,
       damagePerSec: phase.dmgPerSec,
       eyeCollapse: 0,
+      strikes: [],
     };
   }
 
@@ -358,6 +362,91 @@ export class StormSystem {
         player.health -= dmg * (1 + excess * 0.75) * STORM_EXPOSED_MULT;
       }
     }
+
+    this.rollLightning(dt, storm, ships, players, hooks, t);
+  }
+
+  /**
+   * THE BOLTS ARE ROLLED HERE, NOT DRAWN HERE (STORMUP-01 / storm-04).
+   *
+   * Lightning was `Math.random` inside EnvironmentFx: private to each client,
+   * hitting nothing, and 32 % of it landing INSIDE the safe ring — the sky
+   * contradicting the one rule the ring states. Now the storm rolls a strike
+   * off the match-seeded stream into a replicated ring buffer, in the band
+   * [1.02, 1.35] x safeRadius, and the client only draws what it is sent.
+   *
+   * THE MAINMAST IS THE CONDUCTOR. A hull already in the weather within
+   * MAST_SEEK_RADIUS of the rolled point takes the bolt down her mast: a hole
+   * stoved at the step and the mast alight, unless she is carrying a lightning
+   * rod, which grounds the charge for nothing. That is the whole point of
+   * storm-08 — a prepared crew CHOOSES the weather.
+   */
+  private rollLightning(
+    dt: number, storm: StormState, ships: Ship[], players: Player[], hooks: StormDamageHooks, t: number,
+  ): void {
+    if (!storm.strikes) storm.strikes = [];
+    this.strikeTimer -= dt;
+    if (this.strikeTimer > 0) return;
+    this.strikeTimer = Math.max(
+      1.2,
+      STORM_LIGHTNING.INTERVAL_MIN + this.rng() * STORM_LIGHTNING.INTERVAL_RANGE
+        - storm.phase * STORM_LIGHTNING.INTERVAL_PER_PHASE,
+    );
+
+    const angle = this.rng() * Math.PI * 2;
+    const band = STORM_LIGHTNING.BAND_MIN + this.rng() * STORM_LIGHTNING.BAND_RANGE;
+    const radius = Math.max(1, storm.safeRadius) * band;
+    let x = storm.centerX + Math.cos(angle) * radius;
+    let z = storm.centerZ + Math.sin(angle) * radius;
+
+    // Only a hull the tempest already has her hands on (outside the wall and
+    // not sheltered in her berth) can be struck — hullsInTheWeather is the same
+    // verdict the holes and the crew's exposure read, so nothing disagrees.
+    let target: Ship | null = null;
+    let best: number = STORM_LIGHTNING.MAST_SEEK_RADIUS;
+    for (const ship of ships) {
+      if (!ship.alive || ship.sinking) continue;
+      if (!this.hullsInTheWeather.has(ship.id)) continue;
+      const d = dist2D(ship.position.x, ship.position.z, x, z);
+      if (d < best) { best = d; target = ship; }
+    }
+
+    let grounded = false;
+    if (target) {
+      x = target.position.x;
+      z = target.position.z;
+      grounded = SHIP_UPGRADES.LIGHTNING_ROD_GROUNDS
+        && (target.upgrades ?? []).some((u) => u.type === 'lightning_rod');
+      if (!grounded) {
+        const stats = SHIP_STATS[target.type];
+        const bandY = (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5;
+        // The charge runs down the mast and blows the planking at the STEP —
+        // amidships, on the centreline, which is why this hole is not on the
+        // seaward face like the ones the seas stove in.
+        hooks.openHoleAt(target, { x: 0, y: bandY, z: stats.length * 0.06 }, STORM_LIGHTNING.MAST_HOLES);
+        target.onFire = true;
+        target.fireTimer = Math.max(target.fireTimer, STORM_LIGHTNING.FIRE_SECONDS);
+      }
+    } else {
+      // Open water. A pirate swimming under the strike is cooked; a pirate on a
+      // deck is not (his mast took it, or nothing did).
+      for (const player of players) {
+        if (player.onShipId) continue;
+        if (
+          player.state === 'eliminated'
+          || player.state === 'respawning'
+          || player.state === 'downed'
+          || player.respawnProtectionTimer > 0
+          || hooks.hasStormGrace?.(player.id)
+        ) continue;
+        if (dist2D(player.position.x, player.position.z, x, z) > STORM_LIGHTNING.SWIMMER_RADIUS) continue;
+        player.lastEnvDamage = { cause: 'storm', at: t };
+        player.health -= STORM_LIGHTNING.SWIMMER_DAMAGE;
+      }
+    }
+
+    storm.strikes.push({ t, x, z, shipId: target?.id ?? null, grounded });
+    while (storm.strikes.length > STORM_LIGHTNING.MAX_REPLICATED) storm.strikes.shift();
   }
 
   isOutside(x: number, z: number, storm: StormState): boolean {
