@@ -119,3 +119,52 @@ export function understoryDensity(biome: IslandBiome | undefined, x: number, z: 
   const patch = terrainFbm(x * 0.047 + phase, z * 0.047 - phase, 2);
   return FERTILITY[biome ?? 'lush'] * THREE.MathUtils.clamp(0.58 + patch * 1.15, 0.14, 1);
 }
+
+/** What one island's ground cover is allowed to cost, per tier.
+ *
+ * The low tier used to be a GATE: `if (!lowDetail)` wrapped the whole cover
+ * block, so an integrated-GPU player got islands with no lawn at all — bare
+ * shaded terrain with props standing on it, which is the loudest possible
+ * coherence break between tiers (islandworld-15). A ceiling is not a reason to
+ * draw nothing; it is a reason to draw less. So low gets a BUDGET instead: a
+ * quarter of the tuft seeds, and two blades per tuft instead of three, which
+ * is 10 triangles a tuft against 15.
+ *
+ * Cost on the low tier, per island, worst case (r=88): 1600 tufts x 10 tris =
+ * 16k triangles in ONE draw, and it still rides the existing cover density
+ * ramp (`attachCoverLod`) so it thins with distance like every other batch.
+ * The low dock-vista row in `test-perf-budget` measures 515k tris against a
+ * 580k ceiling, so one island's lawn is ~3% of that ceiling and ~25% of the
+ * headroom. Ferns and shell flecks stay OFF on low: the fern rosette is ~310
+ * triangles a piece and reads as inner-jungle detail nobody sees at that tier,
+ * and it would spend the rest of the headroom on its own.
+ *
+ * Pure and tier-only so `scripts/test-flora-density.mjs` can grade it. */
+export type CoverBudget = {
+  /** Hard cap on placed grass instances for this island. */
+  grassCap: number;
+  /** Blades per tuft (5 tris each). */
+  grassBlades: number;
+  /** Hard cap on placed fern instances; 0 means the batch is not built. */
+  fernCap: number;
+  /** Whether the wet-sand shell/starfish flecks are built. */
+  shells: boolean;
+};
+
+export function coverBudget(radius: number, lowDetail: boolean): CoverBudget {
+  const full = Math.min(9000, Math.round(radius * radius * 1.15));
+  if (lowDetail) {
+    return {
+      grassCap: Math.max(120, Math.min(1600, Math.round(full * 0.25))),
+      grassBlades: 2,
+      fernCap: 0,
+      shells: false,
+    };
+  }
+  return {
+    grassCap: full,
+    grassBlades: 3,
+    fernCap: Math.min(260, Math.round(radius * radius * 0.028)),
+    shells: true,
+  };
+}

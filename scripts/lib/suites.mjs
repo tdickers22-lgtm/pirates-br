@@ -112,6 +112,12 @@ export const LOGIC = [
   // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
   // deadline must be read inside a row or the 2 ms budget is a fiction.
   quick(tsx('test-bathymetry-budget.mjs')),
+  // [9.1] FLORA-01: radial scatter sampling must be area-uniform (the old
+  // radius-uniform draw made every island ~7x denser in the middle than at the
+  // rim) and the low tier must get a ground-cover BUDGET, not a gate that left
+  // integrated-GPU players on bald islands. Mutation: revert radialFill to the
+  // lerp, or set the low branch's grassCap to 0.
+  quick(tsx('test-flora-density.mjs')),
   quick(tsx('test-island-props.mjs')),
   quick(tsx('test-asset-merge.mjs')),
   quick(tsx('test-ship-dynamics.mjs')),

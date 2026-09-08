@@ -8,8 +8,8 @@
 import * as THREE from 'three';
 import type { Island, IslandNpc, IslandProp, IslandPropType } from '../../../shared/types/index.js';
 import { assets, isLazyAsset, type AssetName } from '../../assets/AssetLibrary.js';
-import { BIOME_PALETTES, getPropGroundY, PROP_COLLIDERS } from '../../../shared/props.js';
-import { makeFernRosetteGeometry, makeGrassTuftGeometry, understoryDensity } from './FoliageGeometry.js';
+import { BIOME_PALETTES, getPropGroundY, PROP_COLLIDERS, radialFill } from '../../../shared/props.js';
+import { coverBudget, makeFernRosetteGeometry, makeGrassTuftGeometry, understoryDensity } from './FoliageGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { makePlayerMesh } from '../../rendering/factories/PlayerMeshFactory.js';
 import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.js';
@@ -635,7 +635,14 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
   // floats wherever the mesh chord dips under it.
   const MIN_SLOPE_COS = Math.cos((50 * Math.PI) / 180);
   const MAX_FLOAT = 0.15;
-  if (!lowDetail) {
+  // A TIER IS A BUDGET, NOT A GATE. This whole block used to hang off
+  // `if (!lowDetail)`, so an integrated-GPU player got islands with no lawn at
+  // all: bare shaded terrain with props standing on it, the loudest coherence
+  // break between tiers there is (islandworld-15). `coverBudget` gives low a
+  // quarter of the seeds and two blades a tuft instead of three, and says in
+  // its own doc what that costs.
+  const budget = coverBudget(r, lowDetail);
+  {
     // Each tuft now carries actual blades. Keep the near-field triangle cost
     // bounded and retain the existing distance/density LOD for every batch.
     // COVERAGE, not sparsity — and paid for, not borrowed. The cap went
@@ -651,8 +658,8 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     // which matters, because test-perf-budget's high waterfall-deck sits within
     // 1% of its 2,750k ceiling and a straight cap raise blew it (2,827k,
     // measured). Three ribbons read as a tuft; what was missing was tufts.
-    const grassCount = Math.min(9000, Math.round(r * r * 1.15));
-    const grassGeo = makeGrassTuftGeometry(3);
+    const grassCount = budget.grassCap;
+    const grassGeo = makeGrassTuftGeometry(budget.grassBlades);
     // White base: per-instance colors MULTIPLY material.color — a tinted
     // base squared every tuft toward black (the 'invisible grass' bug).
     const grassMat = new THREE.MeshStandardMaterial({
@@ -674,7 +681,11 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     let placed = 0;
     for (let i = 0; i < grassCount && placed < grassCount; i++) {
       const angle = rng(i * 7 + 3) * Math.PI * 2;
-      const dRatio = 0.06 + rng(i * 11 + 5) * 0.86;
+      // Area-uniform, not radius-uniform: the old draw piled the lawn into
+      // the middle of the island and left the coastal apron bare, because an
+      // annulus at r=0.1 holds a hundredth of the area of one at r=0.92 and
+      // got the same expected count (islandworld-14). Same single rng draw.
+      const dRatio = radialFill(rng(i * 11 + 5), 0.06, 0.92);
       const sample = surfacePoint(dRatio, angle, 0);
       // grassy band: above the beach, below the rocky heights, not too steep
       if (sample.y < seaBaseForGrass - 1.6) continue;
@@ -748,19 +759,24 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
     group.add(grass);
 
     // ── Ferns: taller arched fronds in the shaded inner jungle band ──
-    const fernCount = Math.min(260, Math.round(r * r * 0.028));
-    const fernGeo = makeFernRosetteGeometry();
-    const fernMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, side: THREE.DoubleSide, vertexColors: true });
-    liftFoliageNormals(fernMat, 0.45);
-    applyFoliageSway(fernMat, host, true);
-    const ferns = new THREE.InstancedMesh(fernGeo, fernMat, fernCount);
+    const fernCount = budget.fernCap;
+    // The low tier's budget is 0 ferns (~310 triangles a rosette), so nothing
+    // here is built at all: no geometry, no material, no sway program.
+    const fernGeo = fernCount > 0 ? makeFernRosetteGeometry() : null;
+    let ferns: THREE.InstancedMesh | null = null;
+    if (fernGeo) {
+      const fernMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, side: THREE.DoubleSide, vertexColors: true });
+      liftFoliageNormals(fernMat, 0.45);
+      applyFoliageSway(fernMat, host, true);
+      ferns = new THREE.InstancedMesh(fernGeo, fernMat, fernCount);
+    }
     // Cluster ferns into leafy clumps (2-3 fronds per seed) instead of
     // isolated cards, so they read as bushes/groundcover not scattered
     // cardboard (patrol-3).
     let fernsPlaced = 0;
-    for (let seed = 0; seed < fernCount && fernsPlaced < fernCount; seed++) {
+    for (let seed = 0; ferns && seed < fernCount && fernsPlaced < fernCount; seed++) {
       const angle = rng(seed * 41 + 9) * Math.PI * 2;
-      const dRatio = 0.05 + rng(seed * 43 + 3) * 0.6;
+      const dRatio = radialFill(rng(seed * 43 + 3), 0.05, 0.65);
       const sample = surfacePoint(dRatio, angle, 0);
       if (sample.y < seaBaseForGrass - 0.6 || sample.y > seaBaseForGrass + terrain.peakEst * 0.85) continue;
       if (carveCaveMouth(sample.x + island.position.x, sample.z + island.position.z, sample.y).carved > 0.25) continue;
@@ -790,16 +806,19 @@ export function buildGroundCover(ctx: IslandBuildCtx, terrain: TerrainBuild) {
         fernsPlaced += 1;
       }
     }
-    ferns.count = fernsPlaced;
-    ferns.instanceMatrix.needsUpdate = true;
-    if (ferns.instanceColor) ferns.instanceColor.needsUpdate = true;
-    ferns.castShadow = false;
-    ferns.receiveShadow = true;
-    ferns.name = 'island-ferns';
-    attachCoverLod(ferns);
-    group.add(ferns);
+    if (ferns) {
+      ferns.count = fernsPlaced;
+      ferns.instanceMatrix.needsUpdate = true;
+      if (ferns.instanceColor) ferns.instanceColor.needsUpdate = true;
+      ferns.castShadow = false;
+      ferns.receiveShadow = true;
+      ferns.name = 'island-ferns';
+      attachCoverLod(ferns);
+      group.add(ferns);
+    }
 
     // ── Seashells + starfish flecks on the wet-sand band ──
+    if (!budget.shells) return;
     const shellCount = Math.min(240, Math.round(r * 2.2));
     const shellGeo = new THREE.SphereGeometry(0.09, 6, 4);
     shellGeo.scale(1.25, 0.4, 1);

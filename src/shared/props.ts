@@ -602,3 +602,29 @@ export function getPropGroundY(island: Island, prop: IslandProp): number {
   // chord under a convex ridge sits a little proud of the seat samples.
   return ground - (prop.type === 'crag' ? 0.45 : 0.07);
 }
+
+/**
+ * Area-uniform radial sampling on a disc.
+ *
+ * Every scatter loop in the world drew its distance from the island's centre
+ * as `dMin + u * (dMax - dMin)` — uniform in RADIUS. That puts the same
+ * expected count in every annulus, and the annulus at r=0.1 has a hundredth of
+ * the AREA of the one at r=0.95, so the middle of an island came out roughly
+ * an order of magnitude denser per square metre than its rim: dense thickets
+ * around the peak and a bald coastal apron, on every island, at every seed
+ * (islandworld-13/14).
+ *
+ * Mapping the SAME uniform draw through the inverse of the area CDF flattens
+ * per-square-metre density. One rng draw in, one out, in the same call order,
+ * so no seeded stream shifts position; only the values it produces do (which
+ * DOES move props, so consumers on the server re-pin their fixtures).
+ *
+ * Consumed by: `MapGenerator` biome scatter + interior fill (server; pinned by
+ * `scripts/test-island-props.mjs`) and `PropScatterer.buildGroundCover`
+ * (client ground cover). Graded by `scripts/test-flora-density.mjs`.
+ */
+export function radialFill(u: number, dMin: number, dMax: number): number {
+  const a = dMin * dMin;
+  const b = dMax * dMax;
+  return Math.sqrt(a + Math.min(1, Math.max(0, u)) * (b - a));
+}
