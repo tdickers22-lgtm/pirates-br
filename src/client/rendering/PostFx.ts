@@ -18,20 +18,36 @@ import type { RenderQuality } from './Renderer.js';
 // So it is spliced INTO OutputPass instead (see `makeOutputPass`): same
 // arithmetic, same place in the chain — after tone mapping and after the sRGB
 // transfer, exactly where it was authored to run — for zero extra fragments.
-const GRADE_UNIFORMS = /* glsl */`
+export const GRADE_UNIFORMS = /* glsl */`
   uniform float u_vignette;
   uniform float u_saturation;
   uniform float u_gamma;
   uniform vec3 u_lift;
+  uniform vec3 u_shadowTint;
+  uniform vec3 u_highlightTint;
+  uniform float u_splitPivot;
 `;
 
-const GRADE_BODY = /* glsl */`
+/** THE GRADE (GFXPOL-01 / graphics-11). Exported so `scripts/test-grade.mjs`
+ *  grades the string that is actually spliced into OutputPass. */
+export const GRADE_BODY = /* glsl */`
   {
     vec3 col = max(gl_FragColor.rgb, 0.0);
     // Gentle contrast shape + cool shadow lift.
     col = pow(col, vec3(u_gamma));
     col = col * (1.0 - u_lift) + u_lift;
     float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    // SPLIT TONE. Four scalars can move the whole image, but they cannot make it
+    // a LOOK: nothing in gamma/lift/saturation/vignette changes HUE with
+    // exposure, which is the one thing every graded frame does. The shadows go
+    // to sea slate and the highlights to lantern brass, both centred on
+    // u_splitPivot so mid grey stays exactly where the tone mapper put it.
+    // This is the LUT, evaluated analytically: no 3D texture, no extra fetch.
+    float shadowW = 1.0 - smoothstep(0.0, u_splitPivot, luma);
+    float highW = smoothstep(u_splitPivot, 1.0, luma);
+    col += u_shadowTint * shadowW + u_highlightTint * highW;
+    // Re-read the luma AFTER the tint so saturation cannot cancel it.
+    luma = dot(max(col, 0.0), vec3(0.2126, 0.7152, 0.0722));
     col = clamp(mix(vec3(luma), col, u_saturation), 0.0, 1.0);
     // Vignette
     float edge = smoothstep(0.42, 1.12, length(vUv - 0.5) * 1.55);
@@ -39,6 +55,33 @@ const GRADE_BODY = /* glsl */`
     gl_FragColor.rgb = col;
   }
 `;
+
+/** The grade's settings, in one place so the gate reads the shipped numbers. */
+export const GRADE_SETTINGS = {
+  vignette: 0.25,
+  saturation: 1.07,
+  gamma: 0.985,
+  lift: [0.006, 0.008, 0.013] as const,
+  /** Sea slate in the shadows, lantern brass in the highlights. Both are tiny:
+   *  a grade you can NAME is a grade that is too strong. */
+  shadowTint: [-0.008, 0.000, 0.016] as const,
+  highlightTint: [0.016, 0.006, -0.010] as const,
+  splitPivot: 0.5,
+};
+
+/** Which tiers get the grade. 'low' never builds PostFx at all, so this is
+ *  really "balanced and high agree about what the game looks like".
+ *
+ *  WHY BALANCED NOW HAS IT. The grade was `high` only, so two players on the
+ *  same map saw two different colour treatments and one of them saw none — the
+ *  balanced frame was raw tone-mapped output with no vignette, no lift and no
+ *  saturation. It is not a pass and never was (see makeOutputPass): it is ~14
+ *  ALU spliced into the OutputPass fragment that already runs on every tier
+ *  that has a composer. Zero extra fragments, zero extra draws, zero extra
+ *  bandwidth on balanced. */
+export function gradeEnabledFor(quality: RenderQuality): boolean {
+  return quality !== 'low';
+}
 
 /**
  * OutputPass with the grade folded in. `OutputShader` is a RawShaderMaterial —
@@ -58,10 +101,13 @@ function makeOutputPass(graded: boolean): OutputPass {
   // every frame, and the material shares that object — so the grade uniforms go
   // into the same one rather than replacing it.
   Object.assign(material.uniforms, {
-    u_vignette: { value: 0.25 },
-    u_saturation: { value: 1.07 },
-    u_gamma: { value: 0.985 },
-    u_lift: { value: new THREE.Vector3(0.006, 0.008, 0.013) },
+    u_vignette: { value: GRADE_SETTINGS.vignette },
+    u_saturation: { value: GRADE_SETTINGS.saturation },
+    u_gamma: { value: GRADE_SETTINGS.gamma },
+    u_lift: { value: new THREE.Vector3(...GRADE_SETTINGS.lift) },
+    u_shadowTint: { value: new THREE.Vector3(...GRADE_SETTINGS.shadowTint) },
+    u_highlightTint: { value: new THREE.Vector3(...GRADE_SETTINGS.highlightTint) },
+    u_splitPivot: { value: GRADE_SETTINGS.splitPivot },
   });
   material.fragmentShader = material.fragmentShader
     .replace('uniform sampler2D tDiffuse;', `uniform sampler2D tDiffuse;\n${GRADE_UNIFORMS}`)
@@ -121,7 +167,7 @@ export class PostFx {
     this.composer.addPass(new RenderPass(scene, camera));
     this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(this.width, this.height), 0.42, 0.55, 1.05));
     // The grade rides inside OutputPass rather than following it — see above.
-    this.composer.addPass(makeOutputPass(quality === 'high'));
+    this.composer.addPass(makeOutputPass(gradeEnabledFor(quality)));
     if (!useMsaa) {
       this.fxaaPass = new ShaderPass(FXAAShader);
       this.composer.addPass(this.fxaaPass);
