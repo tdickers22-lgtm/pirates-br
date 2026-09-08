@@ -1839,6 +1839,21 @@ export function getTavernWallBand(tavern: IslandTavern): { minY: number; maxY: n
   return { minY: tavern.position.y - 1.2, maxY: tavern.position.y + TAVERN_WALL_HEIGHT };
 }
 
+/** The gable ROOF as a real surface (physics-10: the tavern had walls and no
+ *  hat, so a cannon-launched pirate dropped through the slates into the bar).
+ *  Mirrors build_buildings.py exactly: ridge along local X, `rise` 1.9 m above
+ *  the eaves line, eaves overhanging the depth by 0.6 m. Null off the roof. */
+const TAVERN_ROOF_RISE = 1.9;
+const TAVERN_ROOF_EAVE = 0.6;
+export function getTavernRoofY(tavern: IslandTavern, x: number, z: number): number | null {
+  const local = toTavernLocal(tavern, x, z);
+  const halfZ = tavern.depth * 0.5 + TAVERN_ROOF_EAVE;
+  const halfX = tavern.width * 0.5 + 0.5;
+  if (Math.abs(local.x) > halfX || Math.abs(local.z) > halfZ) return null;
+  return tavern.position.y + TAVERN_WALL_HEIGHT
+    + TAVERN_ROOF_RISE * (1 - Math.abs(local.z) / halfZ);
+}
+
 /** Broad-phase radius covering the whole tavern shell (plus wall thickness). */
 export function getTavernBoundsRadius(tavern: IslandTavern): number {
   return Math.hypot(tavern.width * 0.5, tavern.depth * 0.5) + TAVERN_WALL_HALF_T;
