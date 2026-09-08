@@ -232,6 +232,48 @@ export const MATERIAL_FAMILIES: Readonly<Record<string, DetailFamily>> = {
   Teeth_White: 'flat',
 };
 
+/**
+ * THE TERRAIN'S OWN CLASSES, and the reason the ladder is ordered the way it is.
+ *
+ * `TerrainMeshBuilder` already ships a per-vertex `aMat` in 0..3 — sand, grass,
+ * rock, ash — and its fragment shader fans that into four weights. Those are
+ * the first four detail layers, in that order, on purpose: layer index is
+ * `family - 1`, so `aMat` IS the layer index for the terrain and the triplanar
+ * fetch needs no lookup, no branch and no second attribute. That alignment is
+ * free right up until someone reorders either list, which is why it is graded
+ * (`test-asset-merge.mjs` also re-reads the four `mC - N` lines out of the
+ * terrain shader, so reordering the CLASSES fails too).
+ */
+export const TERRAIN_MAT_FAMILIES = ['sand', 'grass', 'rock', 'ash'] as const;
+
+/**
+ * The families for the surfaces that are BUILT rather than loaded — the ones
+ * with no GLB and therefore no material name to read (PLAN 2.4a: "terrain,
+ * caves, sea rocks, ship hull/deck/interior").
+ *
+ * This is the decision, recorded and gated, ahead of the sampler that will read
+ * it (`rendering/DetailSets.ts`, TEX-01 phase 0). Keeping it here rather than
+ * in each builder is what stops the ship's deck and the dock's planks drifting
+ * onto two different layers of the same array.
+ */
+export const SURFACE_FAMILIES: Readonly<Record<string, DetailFamily>> = {
+  // Caves and sea stacks are the same stone as the cliffs they grow out of; a
+  // second rock layer for them would read as a seam at every cave mouth.
+  cave_shell: 'rock',
+  cave_rubble: 'rock',
+  sea_rock: 'rock',
+  // The ship. Three families, which is exactly the split PLAN 7.3 slice c asks
+  // for: everything wooden is plank (the hull loft, the deck, the interior),
+  // everything woven is canvas (sails, flags, awnings, rope), everything struck
+  // is iron (guns, anchors, chain, hardware).
+  ship_hull: 'plank',
+  ship_deck: 'plank',
+  ship_interior: 'plank',
+  ship_sail: 'canvas',
+  ship_rigging: 'canvas',
+  ship_iron: 'iron',
+};
+
 /** Per-vertex detail family index (0..8). Optional, and only baked when a
  *  caller asks: nothing samples the detail array yet, and an attribute nobody
  *  reads is bytes on a low-tier GPU for no picture. */

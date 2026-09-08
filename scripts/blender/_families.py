@@ -147,6 +147,25 @@ MATERIAL_FAMILIES = {
 }
 
 
+
+# The terrain's own per-vertex classes (TerrainMeshBuilder's `aMat`, 0..3) and
+# the surfaces the game BUILDS rather than loads. Mirrored from
+# AssetMaterialCollapse.ts and checked row for row by test-asset-merge.mjs, for
+# the same reason the material table is: two copies drift.
+TERRAIN_MAT_FAMILIES = ['sand', 'grass', 'rock', 'ash']
+
+SURFACE_FAMILIES = {
+    'cave_shell': 'rock',
+    'cave_rubble': 'rock',
+    'sea_rock': 'rock',
+    'ship_hull': 'plank',
+    'ship_deck': 'plank',
+    'ship_interior': 'plank',
+    'ship_sail': 'canvas',
+    'ship_rigging': 'canvas',
+    'ship_iron': 'iron',
+}
+
 def family_of(name):
     """The family for a material name, or None when the table has never heard
     of it. None is deliberate: a build script that coins a new material must add

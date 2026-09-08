@@ -537,8 +537,8 @@ expect('merged geometry is registered as a shared resource (never disposed by ca
 //      tier does not pay for an attribute nothing samples yet).
 {
   const {
-    DETAIL_FAMILIES, MATERIAL_FAMILIES, FAMILY_ATTRIBUTE,
-    familyForMaterialName, familyIndexForMaterialName, collapseChunks,
+    DETAIL_FAMILIES, MATERIAL_FAMILIES, FAMILY_ATTRIBUTE, SURFACE_FAMILIES,
+    TERRAIN_MAT_FAMILIES, familyForMaterialName, familyIndexForMaterialName, collapseChunks,
   } = await import('../src/client/assets/AssetMaterialCollapse.ts');
 
   // 1. COVERAGE, read out of the SHIPPED FILES rather than out of the library.
@@ -610,6 +610,51 @@ expect('merged geometry is registered as a shared resource (never disposed by ca
   }
   expect(`scripts/blender/_families.py and AssetMaterialCollapse.ts agree on all ${pyTable.size} rows`,
     drift.length === 0, drift.slice(0, 6).join('; '));
+
+  // 2b. THE TERRAIN'S CLASSES ARE THE FIRST FOUR LAYERS, in order.
+  //
+  //     `TerrainMeshBuilder` ships `aMat` in 0..3 and its shader fans that into
+  //     four weights with hard-coded class numbers. If `aMat` class c equals
+  //     detail layer c (family c+1), the triplanar fetch needs no lookup and no
+  //     branch for the biggest surface in the game — and that alignment is free
+  //     until somebody reorders either list, at which point the terrain would
+  //     sample ash where it means grass and NOTHING would print. So both ends
+  //     are read from their own source: the family ladder from the module, the
+  //     class numbers out of the terrain shader's own GLSL.
+  expect('each terrain aMat class maps to the detail layer of the same index',
+    TERRAIN_MAT_FAMILIES.every((family, c) => DETAIL_FAMILIES.indexOf(family) === c + 1),
+    TERRAIN_MAT_FAMILIES.map((f, c) => `${c}:${f}=${DETAIL_FAMILIES.indexOf(f) - 1}`).join(' '));
+  const terrainSource = readFileSync(path.join(ROOT, 'src/client/world/island/TerrainMeshBuilder.ts'), 'utf8');
+  const shaderClasses = [...terrainSource.matchAll(/float w(\w+) = max\(0\.0, 1\.0 - abs\(mC - (\d)\.0\)\)/g)]
+    .map(([, name, index]) => [name.toLowerCase(), Number(index)]);
+  expect('the terrain shader still numbers its classes sand=0 grass=1 rock=2 ash=3',
+    shaderClasses.length === TERRAIN_MAT_FAMILIES.length
+      && shaderClasses.every(([name, index]) => TERRAIN_MAT_FAMILIES[index] === name),
+    shaderClasses.map(([n, i]) => `${n}=${i}`).join(' ') || 'no class weights found in the shader');
+
+  // 2c. The BUILT surfaces (caves, sea rocks, the ship) — the same table on
+  //     both sides, and every value a real family.
+  const pySurfaceBody = py.split('SURFACE_FAMILIES = {')[1]?.split('\n}')[0] ?? '';
+  const pySurface = new Map();
+  for (const row of pySurfaceBody.matchAll(/'([^']+)':\s*'([^']+)',/g)) pySurface.set(row[1], row[2]);
+  const surfaceDrift = [];
+  for (const [key, family] of pySurface) {
+    if (SURFACE_FAMILIES[key] !== family) surfaceDrift.push(`${key}: py=${family} ts=${SURFACE_FAMILIES[key] ?? '(absent)'}`);
+  }
+  for (const key of Object.keys(SURFACE_FAMILIES)) {
+    if (!pySurface.has(key)) surfaceDrift.push(`${key}: py=(absent)`);
+  }
+  expect(`the built-surface families agree on both sides (${pySurface.size} rows)`,
+    surfaceDrift.length === 0, surfaceDrift.join('; '));
+  expect('every built surface names a real family',
+    Object.values(SURFACE_FAMILIES).every((f) => DETAIL_FAMILIES.includes(f))
+      && TERRAIN_MAT_FAMILIES.every((f) => DETAIL_FAMILIES.includes(f)));
+  // The ship's three families are the point of PLAN 7.3 slice c: wood, weave,
+  // iron. A ship surface that fell back to `flat` would lose its grain silently.
+  const shipFamilies = new Set(Object.entries(SURFACE_FAMILIES)
+    .filter(([key]) => key.startsWith('ship_')).map(([, f]) => f));
+  expect('the ship spans exactly the plank / canvas / iron families',
+    [...shipFamilies].sort().join(',') === 'canvas,iron,plank', [...shipFamilies].join(','));
 
   // 3. THE BAKE, on a real asset's real materials and its real vertex ranges.
   //    `barrel` is the useful one: five materials that span three families
