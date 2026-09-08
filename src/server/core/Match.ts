@@ -4,6 +4,7 @@ import type {
   Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
 } from '../../shared/types/index.js';
 import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, WRECK_SITES, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
+import { warmIslandGrounds } from '../../shared/terrainGrid.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -951,6 +952,13 @@ export class Match {
         this.bots.registerBot(bot, ship, ladder[i] ?? 'medium', j === 0 ? 'helm' : 'deckhand');
       }
     }
+
+    // THE TERRAIN GRIDS ARE BUILT HERE, NOT IN A TICK (review-6 P2). The server
+    // collides swimmers against the DRAWN ground (drawnIslandSurfaceY), which
+    // builds an island's grid on first ask -- and on the server the first ask
+    // used to be inside a tick, 16-29 ms of it. The world is fixed, so this
+    // costs ~226 ms in the first match of a process and nothing after.
+    warmIslandGrounds(islandList);
 
     this.setupSkeletonWaves(islandList);
     // The storm samples terrain when picking late ring centres (see

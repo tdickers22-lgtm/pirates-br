@@ -26,6 +26,8 @@
 //   MUTATE=analytic node --import tsx scripts/test-terrain-grid.mjs
 import { readFileSync } from 'node:fs';
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
+import { Match } from '../src/server/core/Match.ts';
+import { hasIslandGround, warmIslandGrounds } from '../src/shared/terrainGrid.ts';
 import {
   buildTerrainGrid, GridGround, GRID_RADIAL_STEP, GRID_SEGMENTS_MIN,
 } from '../src/shared/terrainGrid.ts';
@@ -195,6 +197,29 @@ expect('baked AO stays in [0.35, 1]', aoMin >= 0.35 - 1e-6 && aoMax <= 1 + 1e-6,
 expect('AO encodes occlusion: concave ground bakes darker than convex',
   creaseTotal > 10000 && creaseDarker === 1, `${creaseTotal} vertices ranked — ${aoSpread}`);
 expect('the grid keeps its documented radial step', GRID_RADIAL_STEP === 4 && GRID_SEGMENTS_MIN === 24);
+
+// ── the cache is warm BEFORE the first tick (review-6 P2) ──────────────────
+// The server collides swimmers against the drawn ground, and getIslandGround
+// builds an island's grid on first ask. The only setIslandGround caller is the
+// client's TerrainMeshBuilder, so on the server that first ask came from inside
+// a tick (PhysicsSystem.swimSeabedY): 226 ms for all 14 islands, 29 ms worst,
+// against a 16 ms budget. Match.setupWorld must warm them all up front.
+{
+  const cold = islands.filter((i) => !hasIslandGround(i.id));
+  expect('a fresh process has not built any island ground yet',
+    cold.length === islands.length, `${islands.length - cold.length} already cached before a Match exists`);
+  const t0 = performance.now();
+  const match = new Match({ matchId: 'terrain-grid-warm', botCount: 1, seed: SEED });
+  const buildMs = performance.now() - t0;
+  const stillCold = match.state.islands.filter((i) => !hasIslandGround(i.id));
+  expect('constructing a Match warms every island ground, off-tick',
+    stillCold.length === 0, `${stillCold.length} island(s) would build inside a tick: ${stillCold.map((i) => i.id).join(', ')}`);
+  console.log(`     (match construction incl. grids: ${buildMs.toFixed(0)} ms — paid once per process, never in a tick)`);
+  const t1 = performance.now();
+  const built = warmIslandGrounds(match.state.islands);
+  expect('and a warm process rebuilds nothing', built === 0 && performance.now() - t1 < 5,
+    `${built} rebuilt in ${(performance.now() - t1).toFixed(1)} ms`);
+}
 
 console.log(`\n${failures === 0 ? 'PASS' : `FAIL (${failures})`} — terrain grid\n`);
 process.exit(failures === 0 ? 0 : 1);

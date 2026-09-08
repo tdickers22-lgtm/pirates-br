@@ -498,6 +498,35 @@ export function setIslandGround(islandId: string, positions: Float32Array, indic
   groundCache.set(islandId, new GridGround(positions, indices));
 }
 
+/**
+ * WARM THE CACHE OFF-TICK (review-6 P2).
+ *
+ * The doc above says a grid is built "never inside a tick". On the server that
+ * was not true: the only setIslandGround caller is the client's
+ * TerrainMeshBuilder, so the server's first ask came from
+ * PhysicsSystem.swimSeabedY -> drawnIslandSurfaceY -> getIslandGround, i.e. the
+ * first time any swimmer entered an island's apron mid-match. Measured on the
+ * owner's Air: 226 ms for all 14 islands, 29 ms worst (smuggler-s-rest) against
+ * a 16 ms tick -- up to fourteen unpredictable two-tick overruns in the first
+ * match of a process. Match.setupWorld calls this once, before the loop starts.
+ *
+ * Returns how many grounds it actually built (0 once the process is warm).
+ */
+export function warmIslandGrounds(islands: Island[]): number {
+  let built = 0;
+  for (const island of islands) {
+    if (groundCache.has(island.id)) continue;
+    getIslandGround(island);
+    built += 1;
+  }
+  return built;
+}
+
+/** True when this island's drawn ground is already in the cache. */
+export function hasIslandGround(islandId: string): boolean {
+  return groundCache.has(islandId);
+}
+
 /** The drawn ground for one island, built on first ask and kept. */
 export function getIslandGround(island: Island): GridGround {
   let g = groundCache.get(island.id);
