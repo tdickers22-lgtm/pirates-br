@@ -149,6 +149,7 @@ const POSE_SCRATCH: number[] = new Array(FADE_JOINTS.length * 3).fill(0);
 const POSE_HELM = 1, POSE_GUN = 2, POSE_NEST = 4, POSE_CLIMB = 8, POSE_SWIM = 16;
 const POSE_BAIL = 32, POSE_BLADE = 64, POSE_GUARD = 128, POSE_CROUCH = 256;
 const POSE_AIR = 512, POSE_MOVE = 1024, POSE_DOWNED = 2048;
+const POSE_REPAIR = 4096, POSE_TOOL = 8192;
 /** A station pose is a whole-body change; longer than this and it reads as slow
  *  motion, shorter and the arms still teleport. Linear on purpose: an eased
  *  fade is steeper than 1/N in the middle, and the widest edge (idle -> helm,
@@ -259,6 +260,13 @@ export class PlayerAnimator {
     }
     const cutlassCharge = cutlassReady ? THREE.MathUtils.clamp(player.cutlassCharge ?? 0, 0, 1) : 0;
     const firearmReady = !!activeWeapon && !WEAPONS[activeWeapon.weaponId].melee;
+    // Work states, in priority order: patching a hull beats carrying a tool.
+    const hullRepair = atStation || swimming || downed ? 0 : THREE.MathUtils.clamp(player.hullRepairProgress ?? 0, 0, 1);
+    const toolKind = atStation || swimming || downed || hullRepair > 0 || player.bailing
+      ? null
+      : player.equippedTool ?? null;
+    /** Both hands are on a job: the blade poses and the strike additive stand down. */
+    const poseBusy = hullRepair > 0 || !!toolKind;
     const localSwimAim = player.id === this.view.localPlayerId && firearmReady && this.view.input.isAiming();
 
     // ── Airborne / landing bookkeeping ────────────────────────────────────
@@ -319,9 +327,18 @@ export class PlayerAnimator {
 
     torso.rotation.set(0.04, 0, 0);
     pelvis.rotation.set(0, 0, 0);
-    head.rotation.set(0, angleWrap(player.rotation.x - mesh.rotation.y) * 0.28, 0);
-    hair.rotation.set(0, head.rotation.y, 0);
-    bandana.rotation.set(0, head.rotation.y, 0);
+    // WHERE HE IS LOOKING, not just how far his body lags (avatar-07). The head
+    // carries the replicated look PITCH — a crewmate squinting up at the crow's
+    // nest or down at a hole now reads as doing it — and, since the body no
+    // longer snaps to the look yaw (Game hands remotes a lagged body yaw), the
+    // residual yaw here is a real head turn of up to ±0.6 rad rather than the
+    // easing error it used to be. Clamped asymmetrically: a neck looks further
+    // up than down.
+    const lookPitch = THREE.MathUtils.clamp(player.rotation.y * 0.55, -0.6, 0.5);
+    const headYaw = THREE.MathUtils.clamp(angleWrap(player.rotation.x - mesh.rotation.y), -0.85, 0.85);
+    head.rotation.set(lookPitch, headYaw, 0);
+    hair.rotation.set(lookPitch, head.rotation.y, 0);
+    bandana.rotation.set(lookPitch, head.rotation.y, 0);
 
     if (downedBlend > 0.002 && !swimming) {
       // ── DOWNED: a real prone crawl. The body lies FACE-DOWN (Game stops
@@ -432,7 +449,7 @@ export class PlayerAnimator {
         leftLegPivot.rotation.set(-0.12 - kick * 0.4, 0, -0.06);
         rightLegPivot.rotation.set(-0.12 + kick * 0.4, 0, 0.06);
       }
-    } else if (cutlassReady && player.blocking) {
+    } else if (cutlassReady && player.blocking && !poseBusy) {
       torso.rotation.x = 0.12;
       torso.rotation.y = -0.08;
       pelvis.rotation.y = 0.04;
@@ -441,7 +458,7 @@ export class PlayerAnimator {
       leftLegPivot.rotation.set(-walkSwing * 0.3, 0, -0.06);
       rightLegPivot.rotation.set(walkSwing * 0.3, 0, 0.06);
       torso.rotation.z = -walkSwing * 0.035;
-    } else if (cutlassReady) {
+    } else if (cutlassReady && !poseBusy) {
       torso.rotation.x = 0.08;
       torso.rotation.y = -0.14 - cutlassCharge * 0.24;
       pelvis.rotation.y = 0.08 + cutlassCharge * 0.12;
@@ -453,7 +470,7 @@ export class PlayerAnimator {
       leftLegPivot.rotation.set(-walkSwing * 0.38, 0, -0.04);
       rightLegPivot.rotation.set(walkSwing * 0.38, 0, 0.04);
       torso.rotation.z = -walkSwing * 0.06 - cutlassCharge * 0.1;
-    } else if (player.bailing) {
+    } else if (player.bailing && hullRepair <= 0) {
       // Bailing crew visibly SCOOP (bow low, arms down into the bilge) and
       // TOSS (straighten, both arms flinging out). The two arms are offset —
       // a lead arm deeper, the trail arm lagging — plus a torso twist toward
@@ -483,6 +500,48 @@ export class PlayerAnimator {
       leftLegPivot.rotation.set(-walkSwing * 0.24, 0, -0.04);
       rightLegPivot.rotation.set(walkSwing * 0.24, 0, 0.04);
       torso.rotation.z = walkSwing * 0.04;
+    } else if (hullRepair > 0) {
+      // ── CARPENTER (avatar-08). Holes are the headline feature and until now
+      // the man patching one looked like an idle pirate: hullRepairProgress is
+      // replicated and nothing read it. He stoops over the breach and swings a
+      // hammer; the beat is on the shared ocean clock, not on progress, so the
+      // blows keep their rhythm however long the plank takes.
+      const strike = (Math.sin(this.view.ocean.getTime() * 7.4) + 1) * 0.5;
+      torso.rotation.x = 0.52 + strike * 0.1;
+      torso.rotation.y = -0.16;
+      pelvis.rotation.x = 0.14;
+      // Raise, then drive down onto the plank. Both ends stay well forward of
+      // the rest pose so the arm never passes through the stooped torso.
+      rightArmPivot.rotation.set(-1.5 + strike * 1.28, -0.12, 0.2);
+      leftArmPivot.rotation.set(-0.92, 0.3, -0.34);
+      leftLegPivot.rotation.set(-0.34, 0, -0.16);
+      rightLegPivot.rotation.set(0.22, 0, 0.16);
+      head.rotation.x = Math.max(head.rotation.x, 0.42);
+      hair.rotation.x = head.rotation.x;
+      bandana.rotation.x = head.rotation.x;
+    } else if (toolKind) {
+      // ── A TOOL IN HAND (avatar-08). equippedTool is replicated and was never
+      // drawn or posed: a spyglass goes to the eye, a shovel gets a two-hand dig
+      // cycle, everything else is carried across the chest.
+      const work = Math.sin(this.view.ocean.getTime() * 3.6);
+      if (toolKind === 'spyglass') {
+        torso.rotation.x = 0.02;
+        rightArmPivot.rotation.set(-1.52, -0.34, 0.14);
+        leftArmPivot.rotation.set(-0.62, 0.16, -0.2);
+      } else if (toolKind === 'shovel') {
+        const dig = (work + 1) * 0.5;
+        torso.rotation.x = 0.3 + dig * 0.26;
+        torso.rotation.y = -0.2;
+        rightArmPivot.rotation.set(-0.34 - dig * 0.72, -0.18, 0.24);
+        leftArmPivot.rotation.set(-0.86 - dig * 0.52, 0.26, -0.3);
+      } else {
+        torso.rotation.x = 0.1;
+        rightArmPivot.rotation.set(-0.94 + work * 0.05, -0.42, 0.3);
+        leftArmPivot.rotation.set(0.16 + armSwing * 0.4, 0, -0.14);
+      }
+      leftLegPivot.rotation.set(-walkSwing * 0.4, 0, 0);
+      rightLegPivot.rotation.set(walkSwing * 0.4, 0, 0);
+      torso.rotation.z = walkSwing * 0.06;
     } else {
       // Neutral gait: legs lead, arms trail, torso counter-rotates against the
       // pelvis and the head stabilises against the torso roll.
@@ -514,7 +573,7 @@ export class PlayerAnimator {
       rightLegPivot.rotation.set(-0.36 - walkSwing * 0.12, 0, 1.06);
     }
 
-    if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon
+    if (cutlassReady && !poseBusy && !player.blocking && !swimming && !player.atHelm && !player.atCannon
       && this.cutlassSwingKind.get(player.id) === 'lunge' && cutlassSwing > 0) {
       // DASH STAB: full-extension fencer's thrust — body lunges forward, sword
       // arm rams horizontal, trailing arm flung back, legs in a deep stride.
@@ -532,7 +591,7 @@ export class PlayerAnimator {
       leftArmPivot.rotation.z = 0.32 + ext * 0.35;
       leftLegPivot.rotation.x -= ext * 0.55;
       rightLegPivot.rotation.x += ext * 0.68;
-    } else if (cutlassReady && !player.blocking && !swimming && !player.atHelm && !player.atCannon) {
+    } else if (cutlassReady && !poseBusy && !player.blocking && !swimming && !player.atHelm && !player.atCannon) {
       const windup = THREE.MathUtils.smoothstep(cutlassSwing, 0.02, 0.26);
       const strike = THREE.MathUtils.smoothstep(cutlassSwing, 0.18, 0.58);
       const recover = THREE.MathUtils.smoothstep(cutlassSwing, 0.62, 1);
@@ -596,6 +655,25 @@ export class PlayerAnimator {
       bandana.position.y -= dip;
     }
 
+    // ── WRIST (avatar-22). The socket used to hang rigidly off the shoulder, so
+    // the blade swept ±0.5 rad with the stride and a pistol pointed at the deck.
+    // The wrist counter-rotates against the shoulder (0.94, not 1: a fully
+    // cancelled arm reads as a mannequin carrying a prop) and, with a firearm
+    // up, adds the look pitch so the muzzle points where he is aiming. During a
+    // strike, a block, a station or a work pose it stays neutral — the whole
+    // point of a swing is that the wrist goes WITH the arm.
+    const rightWrist = parts.rightWrist;
+    if (rightWrist) {
+      const wristFree = !swimming && downedBlend <= 0.002 && !atStation && !poseBusy
+        && !player.blocking && !player.bailing && cutlassSwing <= 0.001 && airBlend < 0.5;
+      let wristX = 0;
+      if (wristFree) {
+        wristX = -rightArmPivot.rotation.x * 0.94;
+        if (firearmReady) wristX += THREE.MathUtils.clamp(player.rotation.y, -0.7, 0.7);
+      }
+      rightWrist.rotation.x = wristX;
+    }
+
     // Which BRANCH produced this pose. Continuous values (gait phase, charge,
     // recoil) are deliberately absent: they must not restart a fade.
     const poseKey = (player.atHelm ? POSE_HELM : 0) | (player.atCannon ? POSE_GUN : 0)
@@ -603,7 +681,8 @@ export class PlayerAnimator {
       | (swimming ? POSE_SWIM : 0) | (player.bailing ? POSE_BAIL : 0)
       | (cutlassReady ? (player.blocking ? POSE_GUARD : POSE_BLADE) : 0)
       | (player.crouching ? POSE_CROUCH : 0) | (airBlend > 0.5 ? POSE_AIR : 0)
-      | (moveSpeed > 0.15 ? POSE_MOVE : 0);
+      | (moveSpeed > 0.15 ? POSE_MOVE : 0)
+      | (hullRepair > 0 ? POSE_REPAIR : 0) | (toolKind ? POSE_TOOL : 0);
     this.crossFade(animation, parts, poseKey, dt);
 
     // ── STANCE SOLVE. The group origin is the SOLES (Game parks it on the

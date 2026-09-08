@@ -341,6 +341,79 @@ console.log('\n[state edges: one-frame joint deltas]');
   }
 }
 
+// ── 2b. what the replicated fields must SHOW (POSE-01 / avatar-07, 08, 22) ──
+// Every one of these is a field the server already sends and the animator used
+// to ignore: look pitch, hullRepairProgress, equippedTool. A crewmate patching
+// a hole looked like an idle pirate with a cutlass, and a man squinting up at
+// the crow's nest looked straight ahead.
+console.log('\n[replicated fields the pose must express]');
+{
+  const mesh = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+  const parts = mesh.userData.animation.parts;
+
+  // avatar-07: look pitch reaches the head.
+  scenarioSwing = 0;
+  run(mesh, makePlayer({ rotation: { x: 0, y: -0.5 } }), null, 30);
+  expect(`look up (pitch -0.5): head.x ${parts.head.rotation.x.toFixed(3)} < -0.2`,
+    parts.head.rotation.x < -0.2, 'the head never showed pitch: everyone looked straight ahead');
+  run(mesh, makePlayer({ rotation: { x: 0, y: 0.5 } }), null, 30);
+  expect(`look down (pitch +0.5): head.x ${parts.head.rotation.x.toFixed(3)} > 0.2`,
+    parts.head.rotation.x > 0.2);
+
+  // avatar-08: the carpenter. Sampled across a whole hammer cycle, because the
+  // beat is on the shared clock — one lucky frame must not carry the check.
+  let armMin = Infinity, armMax = -Infinity, torsoMin = Infinity;
+  const repairing = makePlayer({ hullRepairProgress: 0.5 });
+  run(mesh, repairing, null, 30);
+  for (let i = 0; i < 90; i++) {
+    run(mesh, repairing, null, 1);
+    armMin = Math.min(armMin, parts.rightArmPivot.rotation.x);
+    armMax = Math.max(armMax, parts.rightArmPivot.rotation.x);
+    torsoMin = Math.min(torsoMin, parts.torso.rotation.x);
+  }
+  expect(`hull repair: he stoops over the breach (torso.x ${torsoMin.toFixed(2)} > 0.3 all cycle)`, torsoMin > 0.3,
+    'no repair pose at all: hullRepairProgress was never read');
+  expect(`hull repair: the hammer arm reaches ${armMin.toFixed(2)} < -1.0`, armMin < -1.0);
+  expect(`hull repair: the hammer SWINGS (arc ${(armMax - armMin).toFixed(2)} rad > 0.6)`, armMax - armMin > 0.6,
+    'a frozen arm is a pose, not a repair');
+  expect('hull repair: the hand hangs off a WRIST joint the tool can be aimed on',
+    parts.rightHand.parent?.name === 'right-wrist',
+    'the socket was the hand sphere bolted straight to the upper arm');
+
+  // avatar-08: tools.
+  run(mesh, makePlayer({ equippedTool: 'spyglass' }), null, 30);
+  expect(`spyglass: the glass arm comes up to the eye (right arm x ${parts.rightArmPivot.rotation.x.toFixed(2)} < -1.2)`,
+    parts.rightArmPivot.rotation.x < -1.2, 'equippedTool was never read by the animator');
+  const shovelPlayer = makePlayer({ equippedTool: 'shovel' });
+  run(mesh, shovelPlayer, null, 30);
+  let digMin = Infinity, digMax = -Infinity;
+  for (let i = 0; i < 90; i++) {
+    run(mesh, shovelPlayer, null, 1);
+    digMin = Math.min(digMin, parts.rightArmPivot.rotation.x);
+    digMax = Math.max(digMax, parts.rightArmPivot.rotation.x);
+  }
+  expect(`shovel: a dig CYCLE, not a hold (arc ${(digMax - digMin).toFixed(2)} rad > 0.4)`, digMax - digMin > 0.4);
+
+  // avatar-22: the wrist. The weapon socket must hold its aim through a stride.
+  const walker = makePlayer({ velocity: { x: 4, y: 0, z: 0 } });
+  run(mesh, walker, null, 40);
+  let pitchMin = Infinity, pitchMax = -Infinity;
+  const fwd = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const socket = parts.rightWrist ?? parts.rightHand;
+  for (let i = 0; i < 120; i++) {
+    run(mesh, walker, null, 1);
+    socket.getWorldQuaternion(q);
+    fwd.set(0, -1, 0).applyQuaternion(q);
+    const pitch = Math.asin(THREE.MathUtils.clamp(fwd.y, -1, 1));
+    pitchMin = Math.min(pitchMin, pitch);
+    pitchMax = Math.max(pitchMax, pitch);
+  }
+  expect(`walk 4 m/s: the weapon socket holds its aim (pitch swing ${(pitchMax - pitchMin).toFixed(3)} rad < 0.15)`,
+    pitchMax - pitchMin < 0.15,
+    'no wrist: the blade/muzzle swings a full stride with the shoulder');
+}
+
 // ── 3. corpse ──────────────────────────────────────────────────────────────
 console.log('\n[corpse t=3 s]');
 for (const cause of ['shot', 'cutlass', 'fall']) {

@@ -241,14 +241,24 @@ export function makePlayerMesh(
   rightArm.position.y = -0.26;
   rightArm.name = 'right-arm';
   rightArmPivot.add(rightArm);
+  // A WRIST (avatar-22). The weapon socket used to be the hand sphere hanging
+  // rigidly off the shoulder, so a cutlass swept ±0.5 rad with the stride and a
+  // pistol pointed at the planking at rest. This Group sits AT the hand centre,
+  // carries the hand (and therefore anything ViewmodelController parents to it),
+  // and the animator counter-rotates it against the shoulder so the muzzle stays
+  // level through a gait and pitches with the look instead. It is a Group, not a
+  // mesh: zero extra draws, zero triangles, on every tier.
+  const rightWrist = new THREE.Group();
+  rightWrist.position.y = -0.59;
+  rightWrist.name = 'right-wrist';
+  rightArmPivot.add(rightWrist);
   const rightHand = new THREE.Mesh(
     new THREE.SphereGeometry(isSkeleton ? 0.06 : 0.072, 10, 8),
     skinMat,
   );
   rightHand.castShadow = true;
-  rightHand.position.y = -0.59;
   rightHand.name = 'right-hand';
-  rightArmPivot.add(rightHand);
+  rightWrist.add(rightHand);
   group.add(rightArmPivot);
 
   const leftLegPivot = new THREE.Group();
@@ -500,6 +510,7 @@ export function makePlayerMesh(
       head,
       hair,
       bandana,
+      rightWrist,
       rightHand,
     },
   };

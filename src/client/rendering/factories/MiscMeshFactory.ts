@@ -32,6 +32,34 @@ export function makeNameplateSprite(name: string): THREE.Sprite {
   return sprite;
 }
 
+/**
+ * The carpenter's hammer a pirate swings while `hullRepairProgress > 0`
+ * (avatar-08). Two meshes, ~120 triangles, built only when a repair actually
+ * starts and disposed the frame it ends — so the low tier pays two draws per
+ * VISIBLY repairing crewmate and nothing at all the rest of the match. Held by
+ * ViewmodelController on the world hand, never in the first-person viewmodel.
+ */
+export function makeCarpentersHammerMesh(): THREE.Group {
+  const group = new THREE.Group();
+  const haft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.017, 0.021, 0.32, 6),
+    new THREE.MeshStandardMaterial({ color: 0x7a4e28, roughness: 0.92 }),
+  );
+  haft.name = 'hammer-haft';
+  haft.castShadow = true;
+  group.add(haft);
+  const headMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(0.055, 0.06, 0.13),
+    new THREE.MeshStandardMaterial({ color: 0x33383d, roughness: 0.55, metalness: 0.62 }),
+  );
+  headMesh.name = 'hammer-head';
+  headMesh.position.y = 0.16;
+  headMesh.castShadow = true;
+  group.add(headMesh);
+  group.name = 'carpenters-hammer';
+  return group;
+}
+
 export function makeProjectileMesh(projectile: Projectile): THREE.Mesh {
   if (projectile.type === 'tsunami') {
     const mesh = new THREE.Mesh(

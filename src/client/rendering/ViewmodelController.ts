@@ -11,6 +11,7 @@ import type { ClientInteractKind } from '../core/Game.js';
 import type { InputManager } from '../input/InputManager.js';
 import type { MapRenderer } from '../ui/MapRenderer.js';
 import { applyViewmodelMaterialSettings, makeHeldWeaponMesh, makePocketPreviewMesh, type PocketPreviewKind } from './factories/WeaponMeshFactory.js';
+import { makeCarpentersHammerMesh } from './factories/MiscMeshFactory.js';
 import { makeViewHand } from './factories/PlayerMeshFactory.js';
 import { registerBudgetLight } from './LightBudget.js';
 import { CUTLASS_VIEW_CHARGE_TIME } from './PlayerAnimator.js';
@@ -758,6 +759,80 @@ export class ViewmodelController {
     }
   }
 
+  /** Free a held item's geometries and materials — a repair that starts and
+   *  stops every few seconds would otherwise leak one hammer per cycle. */
+  private disposeHeldItem(root: THREE.Object3D) {
+    root.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      m.geometry?.dispose();
+      const mat = m.material as THREE.Material | THREE.Material[];
+      if (Array.isArray(mat)) for (const x of mat) x.dispose();
+      else mat?.dispose();
+    });
+  }
+
+  /**
+   * THE THING IN HIS HAND WHEN IT IS NOT A WEAPON (avatar-08).
+   *
+   * `equippedTool` and `hullRepairProgress` are both replicated and neither was
+   * ever drawn on the world body: a crewmate patching a hole or scanning with a
+   * spyglass held a cutlass and stood idle. Returns true when it took the hand,
+   * so `syncHeldWeapon` knows to stow the steel.
+   *
+   * Cost: ONE extra Group of 2-6 meshes per pirate who is actually holding
+   * something, built on the transition and disposed on the way out, so a low-tier
+   * frame with nobody working pays nothing.
+   */
+  private syncHeldItem(
+    mesh: THREE.Group,
+    player: Player,
+    rightHand: THREE.Object3D,
+    useLocalSwimViewmodel: boolean,
+  ): boolean {
+    const ud = mesh.userData as { heldItemKind?: string | null };
+    const existing = rightHand.getObjectByName('held-item') as THREE.Group | null;
+    const dead = player.state === 'eliminated' || player.state === 'respawning';
+    const repairing = (player.hullRepairProgress ?? 0) > 0;
+    const kind: string | null = dead || useLocalSwimViewmodel || player.state === 'swimming'
+      || player.atCannon || player.atHelm || player.atCrowNest || player.mastClimb !== null
+      ? null
+      : repairing ? 'hammer' : player.equippedTool ?? null;
+    if (!kind) {
+      if (existing) {
+        this.disposeHeldItem(existing);
+        existing.removeFromParent();
+        ud.heldItemKind = null;
+      }
+      return false;
+    }
+    let item = existing;
+    if (!item || ud.heldItemKind !== kind) {
+      if (existing) { this.disposeHeldItem(existing); existing.removeFromParent(); }
+      item = kind === 'hammer'
+        ? makeCarpentersHammerMesh()
+        : makePocketPreviewMesh(kind as PocketPreviewKind);
+      item.name = 'held-item';
+      rightHand.add(item);
+      ud.heldItemKind = kind;
+    }
+    // Sit it in the fist, pointing the way the tool is used.
+    if (kind === 'hammer') {
+      item.position.set(0.01, -0.02, 0.05);
+      item.rotation.set(-1.32, 0, 0.1);
+    } else if (kind === 'spyglass') {
+      item.position.set(0.0, -0.02, 0.08);
+      item.rotation.set(-1.5, 0, 0);
+    } else if (kind === 'shovel') {
+      item.position.set(0.01, -0.05, 0.06);
+      item.rotation.set(-1.1, 0, 0.12);
+    } else {
+      item.position.set(0.0, -0.04, 0.06);
+      item.rotation.set(-0.3, 0, 0);
+    }
+    return true;
+  }
+
   syncHeldWeapon(mesh: THREE.Group, player: Player) {
     const rightHand = (mesh.userData.animation?.parts as Record<string, THREE.Object3D | undefined> | undefined)?.rightHand;
     if (!rightHand) return;
@@ -766,6 +841,12 @@ export class ViewmodelController {
     const currentId = activeWeapon?.weaponId ?? null;
     const existing = rightHand.getObjectByName('held-weapon') as THREE.Group | null;
     const useLocalSwimViewmodel = player.id === this.view.localPlayerId;
+    if (this.syncHeldItem(mesh, player, rightHand, useLocalSwimViewmodel)) {
+      // Both hands are on a job (hammer, spyglass, shovel): the weapon is stowed.
+      existing?.removeFromParent();
+      mesh.userData.heldWeaponId = null;
+      return;
+    }
     // Swimmers STOW their steel — a pirate doing the crawl with a blunderbuss
     // held dry in one hand was the single clearest tell that the swim pose was
     // a static prop. (Aiming while treading water keeps it, below.)
