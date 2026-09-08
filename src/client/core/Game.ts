@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ECONOMY, PHYSICS, PLAYER, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
+import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
 import type {
   BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId,
 } from '../../shared/types/index.js';
@@ -113,6 +113,9 @@ const SKELETON_CORPSE_LIFETIME = 6.5;
  *  sight of you. 150 m: a 1.8 m figure is a couple of pixels past that, and the
  *  server-side SKELETON_LIVE_CAP bounds how many can be inside it. */
 const SKELETON_DRAW_RANGE_SQ = 150 * 150;
+/** How far a shark that has given up sinks over SHARK.DESPAWN_FADE (review-6
+ *  P1). Deep enough that it is out of the light before it is spliced out. */
+const SHARK_FADE_SINK = 3.4;
 /** The limb node names a wildlife mesh is built with — see buildWildlifeMesh. */
 const WILDLIFE_LEG_KEYS = ['leg0', 'leg1', 'leg2', 'leg3', 'leg4', 'leg5'] as const;
 /** A dropped weapon tumbles, lands and fades over this many seconds. */
@@ -5595,6 +5598,21 @@ export class Game {
       }
       mesh.rotation.y += angleWrap(pose.yaw - mesh.rotation.y) * (1 - Math.exp(-16 * dt));
 
+      // ── A SHARK THAT GAVE UP SLIPS UNDER (review-6 P1) ──────────────────
+      // The leash breaks 60 m from where it took you, i.e. right beside the
+      // swimmer it was chasing. The server sets despawnTimer and holds the
+      // shark in state for SHARK.DESPAWN_FADE so the client can fade it out;
+      // nothing here read the field, so the fin turned away and then popped in
+      // a cloud of blood as if someone had shot it. Now it sinks out of the
+      // light on an ease-in over that same clock, and the reaper below knows
+      // not to paint a death bloom over a shark that was already leaving.
+      const fadeLeft = shark.despawnTimer;
+      if (fadeLeft !== undefined) {
+        const gone = Math.min(1, Math.max(0, 1 - fadeLeft / SHARK.DESPAWN_FADE));
+        mesh.position.y -= gone * gone * SHARK_FADE_SINK;
+        mesh.userData.fading = true;
+      }
+
       // ── Telegraphed attack animation (attackState rides hot snapshots) ──
       const attackState: SharkAttackState = shark.attackState ?? 'cruise';
       const prevAttack = this.sharkPrevAttackState.get(shark.id);
@@ -5624,10 +5642,14 @@ export class Game {
     for (const id of this.sharkMeshes.keys()) {
       if (seen.has(id)) continue;
       const mesh = this.sharkMeshes.get(id)!;
-      this.combatFx.emitSharkDeathBloom(
-        { x: mesh.position.x, y: mesh.position.y - 0.12, z: mesh.position.z },
-        this.renderer.camera.position,
-      );
+      // Only a shark that DIED bleeds. One that gave up has been sinking for
+      // SHARK.DESPAWN_FADE and is already out of the light.
+      if (!mesh.userData.fading) {
+        this.combatFx.emitSharkDeathBloom(
+          { x: mesh.position.x, y: mesh.position.y - 0.12, z: mesh.position.z },
+          this.renderer.camera.position,
+        );
+      }
       disposeSharkAnim(mesh);
       this.environment.remove(mesh);
       this.sharkMeshes.delete(id);

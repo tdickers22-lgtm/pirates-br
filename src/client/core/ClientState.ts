@@ -132,6 +132,7 @@ export class ClientState {
           shark.health = h.health;
           shark.attackState = h.attackState;
           shark.attackTimer = h.attackTimer;
+          shark.despawnTimer = h.despawnTimer;
           break;
         }
       }

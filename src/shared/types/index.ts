@@ -920,6 +920,11 @@ interface HotSharkState {
   health: number;
   attackState: SharkAttackState;
   attackTimer: number;
+  /** Present ONLY while the shark is fading out after giving up (SHARK-01
+   *  leash / idle despawn). The client ramps the sink over it and, crucially,
+   *  knows not to paint a death bloom when the shark leaves the array. Absent
+   *  (and free on the wire) on every live shark. */
+  despawnTimer?: number;
 }
 
 export interface HotSnapshotPayload {

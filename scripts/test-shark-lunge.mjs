@@ -8,7 +8,9 @@
 //      BITE_DAMAGE, cooldown armed, shark drops into RECOVER
 //   4. a swimmer who strafes 3m perpendicular during the 0.75s windup leaves
 //      the locked corridor — no damage, the shark recovers and re-cruises
+import { readFileSync } from 'node:fs';
 import { Match } from '../src/server/core/Match.ts';
+import { buildHotSnapshot } from '../src/server/core/snapshot.ts';
 import { SHARK } from '../src/shared/constants/index.ts';
 
 let failures = 0;
@@ -251,6 +253,66 @@ console.log('\n6. The fin comes round you before it commits');
   expect('it actually went AROUND her, not just sat there',
     sweep > 0.8, `swept ${(sweep * 57.3).toFixed(0)}° of bearing`);
   expect('and then it commits', shark.attackState !== 'circle', `state=${shark.attackState}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\n7. A shark that gives up FADES OUT — it does not pop in a cloud of blood');
+
+// review-6 P1. The leash breaks 60 m from where the shark took you, which is
+// right beside the swimmer it was chasing. FaunaSystem.beginDespawn holds the
+// shark in state for SHARK.DESPAWN_FADE precisely so the client can fade it —
+// but the field never reached the client (not on HotSharkState, no consumer),
+// and the client's only reaction to a shark leaving state.sharks was the DEATH
+// BLOOM. So the fin turned away and then burst as if someone had shot it.
+{
+  setupEncounter();
+  const shark = state.sharks[0];
+  const live = buildHotSnapshot(state, 0, 1).sharks.find((h) => h.id === shark.id);
+  expect('a live shark pays nothing on the wire for the fade field',
+    live !== undefined && live.despawnTimer === undefined, `despawnTimer=${live?.despawnTimer}`);
+
+  // Drag the leash: teleport the shark 60+ m from the anchor it took her at.
+  shark.anchorX = shark.position.x;
+  shark.anchorZ = shark.position.z;
+  shark.position = { x: shark.position.x + SHARK.LEASH_RANGE + 12, y: shark.position.y, z: shark.position.z };
+  match.updateSharks(DT);
+  expect('breaking the leash starts a fade instead of a splice',
+    shark.despawnTimer !== undefined && state.sharks.includes(shark),
+    `despawnTimer=${shark.despawnTimer}, in state=${state.sharks.includes(shark)}`);
+
+  const fading = buildHotSnapshot(state, 0, 2).sharks.find((h) => h.id === shark.id);
+  expect('and the hot snapshot carries the fade clock to the client',
+    fading !== undefined && typeof fading.despawnTimer === 'number' && fading.despawnTimer > 0,
+    `despawnTimer=${fading?.despawnTimer}`);
+
+  let ticks = 0;
+  let sawFade = 0;
+  while (state.sharks.includes(shark) && ticks < Math.ceil(10 / DT)) {
+    match.updateSharks(DT);
+    ticks += 1;
+    if (shark.despawnTimer !== undefined && shark.despawnTimer > 0) sawFade += 1;
+  }
+  const faded = sawFade * DT;
+  expect(`the fade runs for about SHARK.DESPAWN_FADE (${SHARK.DESPAWN_FADE} s) before it is gone`,
+    Math.abs(faded - SHARK.DESPAWN_FADE) < 0.1, `${faded.toFixed(2)} s of fade`);
+  expect('and then it is out of state', !state.sharks.includes(shark));
+}
+
+// The client half. Game.ts needs a WebGL context to instantiate, so these are
+// source assertions: they cannot measure a pixel, but they do fail the moment
+// somebody deletes the consumer again, which is the defect that was found.
+{
+  const game = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url).pathname, 'utf8');
+  const clientState = readFileSync(new URL('../src/client/core/ClientState.ts', import.meta.url).pathname, 'utf8');
+  expect('ClientState copies despawnTimer off the hot snapshot',
+    /shark\.despawnTimer\s*=\s*h\.despawnTimer/.test(clientState));
+  const sync = game.slice(game.indexOf('private syncSharks'));
+  const body = sync.slice(0, sync.indexOf('private syncWildlife'));
+  expect('syncSharks ramps the fade off despawnTimer',
+    /despawnTimer[\s\S]{0,400}SHARK\.DESPAWN_FADE/.test(body), 'no fade consumer in syncSharks');
+  expect('and a fading shark is NOT given a death bloom',
+    /if\s*\(!\s*mesh\.userData\.fading\)\s*\{[\s\S]{0,200}emitSharkDeathBloom/.test(body),
+    'the death bloom is still unconditional');
 }
 
 if (failures > 0) {

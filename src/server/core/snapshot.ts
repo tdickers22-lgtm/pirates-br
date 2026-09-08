@@ -293,6 +293,11 @@ export function buildHotSnapshot(state: GameState, serverTime: number, seq?: num
         health: roundTo(shark.health, 2),
         attackState: shark.attackState ?? 'cruise',
         attackTimer: roundTo(shark.attackTimer ?? 0, 2),
+        // Only while it is leaving: the client fades a shark that gave up
+        // instead of exploding it in blood (review-6 P1).
+        ...(shark.despawnTimer !== undefined
+          ? { despawnTimer: roundTo(shark.despawnTimer, 2) }
+          : {}),
       })),
   };
 }
