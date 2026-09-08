@@ -654,6 +654,26 @@ export const SHARK = {
    *  so a shark could spawn into the band it is shoved out of next tick
    *  (bots-18). */
   SHORE_MARGIN: 4,
+  /** CIRCLING (bots-17). The fin comes around you before it commits: a 9-14 m
+   *  orbit at CIRCLE_SPEED_F of chase speed for 3-6 s, so the first bite is
+   *  always announced. CIRCLE_COOLDOWN is how long before the same shark may
+   *  circle again — in between it closes and bites. */
+  CIRCLE_MIN: 9,
+  CIRCLE_MAX: 14,
+  CIRCLE_TIME_MIN: 3,
+  CIRCLE_TIME_MAX: 6,
+  CIRCLE_SPEED_F: 0.7,
+  CIRCLE_COOLDOWN: 9,
+  /** After a bite it opens to RETREAT_DIST (or gives up after RETREAT_TIME) and
+   *  circles again, instead of grinding the swimmer down from a metre away. */
+  RETREAT_DIST: 15,
+  RETREAT_TIME: 4,
+  /** In the storm ring they hunt in packs of up to PACK_MAX. */
+  PACK_MAX: 3,
+  PACK_STORM_MIN: 0.5,
+  /** A deck riding this close to the sea is inside a shark's reach: a pirate on
+   *  a sinking hull is not safe just because her feet are dry. */
+  DECK_FREEBOARD: 0.6,
 } as const;
 
 export const WILDLIFE = {

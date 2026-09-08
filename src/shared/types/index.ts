@@ -780,7 +780,9 @@ export interface TradeSession {
 type GamePhase = 'waiting' | 'playing' | 'ended';
 
 /** Great white — rare surface predator; heavy bites, low HP */
-export type SharkAttackState = 'cruise' | 'windup' | 'lunge' | 'recover';
+/** cruise closes, circle announces, windup is the dodge window, lunge is the
+ *  locked dash, recover is vulnerable, retreat opens the range after a bite. */
+export type SharkAttackState = 'cruise' | 'circle' | 'windup' | 'lunge' | 'recover' | 'retreat';
 
 export interface Shark {
   id: string;
@@ -803,6 +805,10 @@ export interface Shark {
   anchorZ?: number;
   /** Seconds with no swimmer to hunt — the despawn clock (bots-10). */
   idleTime?: number;
+  /** Which way round it is circling (+1 / -1), and how long until it may circle
+   *  again. In between it closes and bites (SHARK-01 phase 1). */
+  circleDir?: number;
+  circleCooldown?: number;
   /** Set when the shark has given up: counts down while the client fades it,
    *  spliced out of state.sharks at 0. Absent on a live shark. */
   despawnTimer?: number;
