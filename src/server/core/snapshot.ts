@@ -192,7 +192,13 @@ export function buildWireSnapshot(snap: GameState, includeStaticWorld: boolean):
     // much larger multi-vein segment lists quantize to 2 decimals (~1cm) to keep
     // the world payload lean without touching the island's terrain parameters.
     islands: includeStaticWorld ? snap.islands.map(quantizeIslandForWire) : [],
-    seaRocks: includeStaticWorld ? snap.seaRocks : [],
+    // Sea rocks rode at full float precision, and their collider lists are the
+    // single densest run of raw doubles in the world payload: 37 stacks x ~5
+    // capsules, each carrying "minY":-3.8040000000000003. 28.8 KB of the 250 KB
+    // ceiling was that mantissa noise. 3 decimals is 1 mm on a 15 m shoal —
+    // below anything the client renders or predicts against, and the server
+    // keeps its own unrounded copy for the authoritative collision test.
+    seaRocks: includeStaticWorld ? quantizeDeep(snap.seaRocks, 3) : [],
     // Only DIRTY chests (touched by play: dug/carried/stowed/floating/opened)
     // ride the 10Hz sync, trimmed to their dynamic fields — pristine buried
     // chests never change, and shipping all ~50 in full blew the snapshot cap.
