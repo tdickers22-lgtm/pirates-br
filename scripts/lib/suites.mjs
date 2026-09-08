@@ -361,6 +361,11 @@ export const LOGIC = [
   //                                 against the 8 MB ship budget. --no-cache reproduces the pre-fix 25.4 MB
   //                                 and is its red proof; the plain run also verifies every shared buffer.
   tsx('perf-cost-model.mjs'),
+  //   test-ship-rigging           — ships-16: the rigging is instanced cylinders, not hairlines, and every
+  //                                 rope made fast to a yard still ends on that yard within 5 cm after a
+  //                                 60-degree brace. Refuses to grade a ship whose yards did not move.
+  //                                 --mutate freezes the yard-attached instances and is its red proof.
+  tsx('test-ship-rigging.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   test-hero-assets            — the atlas-textured hero GLBs (weapons, ship hardware): triangle band,
   //                                 ONE material with a baseColorTexture, COLOR_0 present and WHITE (the AO
