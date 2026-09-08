@@ -2438,6 +2438,71 @@ export class SoundEngine {
    * Gull cry — a vibrato'd carrier with a rise-then-fall pitch envelope and a
    * breathy top, so it reads as a bird rather than a sawtooth siren.
    */
+  /** Nearest an animal voice may be re-triggered, seconds — one beast at a
+   *  time, so a flock does not turn into a wall of clucking. */
+  private static readonly ANIMAL_VOICE_GAP = 1.5;
+  /** Past this the island is silent (islandworld-12). */
+  private static readonly ANIMAL_VOICE_RANGE = 25;
+  private lastAnimalVoiceAt = -Infinity;
+
+  /**
+   * A positional voice for an island animal (islandworld-12). Pigs, chickens
+   * and crabs were completely silent and the only gull cry in the game played
+   * on a random timer whether or not a gull was anywhere near, so hunting had
+   * no audio at all.
+   *
+   * Cheap by construction: rate-limited to one voice every ANIMAL_VOICE_GAP
+   * across the whole world, dropped outright past ANIMAL_VOICE_RANGE, and every
+   * voice is two or three oscillator/noise nodes that free themselves.
+   */
+  playAnimalVoice(type: 'pig' | 'chicken' | 'crab' | 'gull', pos: SoundPos, alerted = false): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.busDry) return;
+    const now = ctx.currentTime;
+    if (now - this.lastAnimalVoiceAt < SoundEngine.ANIMAL_VOICE_GAP) return;
+    const dx = pos.x - this.listenerPos.x;
+    const dz = pos.z - this.listenerPos.z;
+    const dist = Math.hypot(dx, dz);
+    if (this.listenerKnown && dist > SoundEngine.ANIMAL_VOICE_RANGE) return;
+    const near = this.listenerKnown
+      ? Math.max(0, 1 - dist / SoundEngine.ANIMAL_VOICE_RANGE) ** 1.6
+      : 0.5;
+    if (near < 0.03) return;
+    this.lastAnimalVoiceAt = now;
+    const dest = this.makePanGroup(this.panFor(pos), 0.3);
+    const loud = near * (alerted ? 1.35 : 1);
+    switch (type) {
+      case 'pig': {
+        // A grunt: a low saw dropping in pitch, twice, with a breath under it.
+        const base = 88 + (alerted ? 26 : 0);
+        this.playTone(now, base, base * 0.62, 0.22, 0.055 * loud, 'sawtooth', 0.008, dest);
+        this.playTone(now + 0.26, base * 1.06, base * 0.6, 0.18, 0.04 * loud, 'sawtooth', 0.008, dest);
+        this.playNoise(now, 0.3, 320, 1.2, 0.012 * loud, 'lowpass', dest);
+        break;
+      }
+      case 'chicken': {
+        // A cluck: two short filtered noise bursts with a chirp on the second.
+        this.playNoise(now, 0.06, 1400, 6, 0.05 * loud, 'bandpass', dest);
+        this.playNoise(now + 0.11, 0.07, 1900, 6, 0.045 * loud, 'bandpass', dest);
+        this.playTone(now + 0.11, 900, 620, 0.09, 0.03 * loud, 'triangle', 0.004, dest);
+        break;
+      }
+      case 'crab': {
+        // Claw clicks: two dry 2 kHz ticks.
+        this.playNoise(now, 0.02, 2100, 10, 0.05 * loud, 'bandpass', dest);
+        this.playNoise(now + 0.07, 0.02, 2400, 10, 0.04 * loud, 'bandpass', dest);
+        break;
+      }
+      case 'gull': {
+        const calls = alerted ? 3 : 2;
+        for (let i = 0; i < calls; i++) {
+          this.gullNote(now + i * 0.26, 1500 + i * 120, dest);
+        }
+        break;
+      }
+    }
+  }
+
   private playGullCry(): void {
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;

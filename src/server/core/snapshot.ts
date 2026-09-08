@@ -95,17 +95,37 @@ function stripShipInternals(ship: Ship): Ship {
 }
 
 /** Wildlife wire trim: drop server AI internals (spawnPosition, wander state,
- *  velocity, islandId) — the client only reads id/type/position/rotation.
- *  `health` is server-only too: dead animals are culled from state.wildlife
- *  before the snapshot is built, so anything on the wire is by definition
- *  alive, and 70 birds x "health":24 was 0.8 KB of every 10 Hz full. */
+ *  islandId, the alert clock, the gull state machine, the carcass timer) — the
+ *  client reads id/type/position/rotation, the ground VELOCITY it dead-reckons
+ *  with, and two flags. `health` is server-only: liveness is now carried by the
+ *  `dead` flag instead, and 70 birds x "health":24 was 0.8 KB of every 10 Hz full.
+ *
+ *  WILD-01 (islandworld-24): at 10 Hz a gull at 2.8 m/s moves 28 cm between
+ *  snapshots and the client's exponential lerp converged in ~60 ms and then
+ *  waited, so every animal moved in a sequence of dashes and the gait speed had
+ *  to be recovered from noisy position deltas. Two numbers at 0.1 m/s (the
+ *  fastest animal is 2.8 m/s x 1.8 while fleeing, so one decimal is ~2 % of top
+ *  speed) buy real motion between snapshots. `alert` and `dead` are written only
+ *  when true, so a calm world pays nothing for them. */
 function trimWildlife(animal: WildlifeAnimal): WildlifeAnimal {
-  return {
+  const wire = {
     id: animal.id,
     type: animal.type,
     position: quantizeDeep(animal.position, 2),
     rotation: roundTo(animal.rotation, 3),
-  } as WildlifeAnimal;
+  } as unknown as WildlifeAnimal;
+  // 0.1 m/s, and written only when the animal is actually moving: a burrowing
+  // crab, a blocked walker and a perched gull are most of the roster most of
+  // the time, and "vx":0,"vz":0 on 70 animals is 1 KB of every full snapshot
+  // for no information. One decimal is ~2 % of the fastest animal's flee speed
+  // (2.8 x 1.8 m/s) and the client only extrapolates 0.25 s with it.
+  const vx = Math.round(animal.velocity.x * 10) / 10;
+  const vz = Math.round(animal.velocity.z * 10) / 10;
+  if (vx !== 0) wire.vx = vx;
+  if (vz !== 0) wire.vz = vz;
+  if (animal.alert) wire.alert = true;
+  if (animal.dead) wire.dead = true;
+  return wire;
 }
 
 /**

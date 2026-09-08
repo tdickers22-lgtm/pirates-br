@@ -5,7 +5,7 @@ import type {
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
 import { dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
-import { getPropGroundY } from '../../shared/props.js';
+import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex,
   findMermaidReturnShip,
@@ -5474,7 +5474,28 @@ export class Game {
         created = true;
       }
 
-      this.tempWildlifePos.set(animal.position.x, animal.position.y, animal.position.z);
+      const ud = mesh.userData;
+      // ── DEAD RECKONING (islandworld-24) ─────────────────────────────────
+      // At 10 Hz a walking animal moves 15-28 cm between snapshots and the old
+      // exponential lerp converged in ~60 ms then WAITED, so everything moved in
+      // a sequence of dashes. The wire now carries ground velocity, so between
+      // snapshots the target keeps moving. Extrapolation is capped at 0.25 s so
+      // a dropped packet cannot fling a pig across the beach.
+      if (ud.wireX !== animal.position.x || ud.wireZ !== animal.position.z) {
+        ud.wireX = animal.position.x;
+        ud.wireZ = animal.position.z;
+        ud.wireAge = 0;
+      } else {
+        ud.wireAge = ((ud.wireAge as number | undefined) ?? 0) + dt;
+      }
+      const wireAge = Math.min((ud.wireAge as number | undefined) ?? 0, 0.25);
+      const vx = animal.vx ?? 0;
+      const vz = animal.vz ?? 0;
+      this.tempWildlifePos.set(
+        animal.position.x + vx * wireAge,
+        animal.position.y,
+        animal.position.z + vz * wireAge,
+      );
       const alpha = 1 - Math.exp(-16 * dt);
       if (created || mesh.position.distanceToSquared(this.tempWildlifePos) > 18 * 18) {
         mesh.position.copy(this.tempWildlifePos);
@@ -5482,6 +5503,66 @@ export class Game {
         mesh.position.lerp(this.tempWildlifePos, alpha);
       }
       mesh.rotation.y += angleWrap(animal.rotation - mesh.rotation.y) * (1 - Math.exp(-14 * dt));
+
+      // ── SEATED ON THE DRAWN GROUND (islandworld-06, assets-24) ───────────
+      // The server writes an ANALYTIC y and the client used to draw it verbatim,
+      // so a pig on a stamp rim (dock apron, tavern pad, terrace lip) hovered by
+      // the chord error the floating-props campaign spent 1,193 fixes on, and
+      // sank to the belly where the field is concave. Correct by the DELTA
+      // between the drawn surface and the analytic one, which is exactly zero
+      // until the terrain mesh has published its sampler.
+      //   Cost: two terrain samples per GROUND animal, only while it is visible
+      //   (updateEnvironmentLod culls at 220 m on low / 360 balanced / 520 high)
+      //   and only once it has moved 0.3 m — a walking chicken re-samples ~4x a
+      //   second instead of 60, and the offset is eased in between, so nothing
+      //   pops. Gulls in the air never ask.
+      if (mesh.visible && animal.type !== 'gull') {
+        let island = ud.seatIsland as Island | undefined;
+        if (!island) {
+          island = (this.state.islands ?? []).find(
+            (candidate) => isPointInsideIslandFootprint(candidate, animal.position.x, animal.position.z, 6),
+          );
+          if (island) ud.seatIsland = island;
+        }
+        if (island) {
+          const movedX = animal.position.x - ((ud.seatX as number | undefined) ?? 1e9);
+          const movedZ = animal.position.z - ((ud.seatZ as number | undefined) ?? 1e9);
+          if (movedX * movedX + movedZ * movedZ > 0.09) {
+            ud.seatX = animal.position.x;
+            ud.seatZ = animal.position.z;
+            const drawn = getSeatSurfaceY(island, animal.position.x, animal.position.z);
+            const analytic = getIslandSurfaceY(island, animal.position.x, animal.position.z);
+            ud.seatOffset = THREE.MathUtils.clamp(drawn - analytic, -0.8, 0.8);
+          }
+          const eased = ((ud.seatEased as number | undefined) ?? (ud.seatOffset as number | undefined) ?? 0);
+          const target = (ud.seatOffset as number | undefined) ?? 0;
+          ud.seatEased = eased + (target - eased) * (1 - Math.exp(-8 * dt));
+          mesh.position.y += ud.seatEased as number;
+        }
+      }
+
+      // ── CARCASSES (islandworld-09) ───────────────────────────────────────
+      // A shot pig used to be deleted server-side the same tick and the client
+      // painted the SHARK blood bloom over the hole. Now it rolls onto its side
+      // where it fell and shrinks away at the end of the carcass window — a
+      // SCALE fade, not an opacity one, so no material turns transparent and no
+      // new shader program is linked mid-fight.
+      if (animal.dead) {
+        if (ud.deadSince === undefined) {
+          ud.deadSince = t;
+          this.combatFx.emitSharkDeathBloom(
+            { x: mesh.position.x, y: mesh.position.y + 0.12, z: mesh.position.z },
+            this.renderer.camera.position,
+          );
+        }
+        const deadFor = t - (ud.deadSince as number);
+        mesh.rotation.z += (Math.PI * 0.5 - mesh.rotation.z) * (1 - Math.exp(-6 * dt));
+        const shrinkFrom = Math.max(WILDLIFE.CARCASS_SECONDS - 1.5, 1);
+        const shrink = deadFor <= shrinkFrom ? 1 : Math.max(0, 1 - (deadFor - shrinkFrom) / 1.5);
+        mesh.scale.setScalar(shrink);
+        continue;
+      }
+
       mesh.position.y += animal.type === 'gull'
         ? Math.sin(t * 8 + animal.position.x * 0.03) * 0.025
         : Math.sin(t * 10 + animal.position.x * 0.07) * 0.01;
@@ -5489,18 +5570,12 @@ export class Game {
       const parts = mesh.userData.parts as Record<string, THREE.Object3D | undefined> | undefined;
       // Gate the gait on ACTUAL movement. Riding the global clock made standing
       // chickens flap at 11Hz and idle pigs march on the spot; a grounded gull
-      // is not a hovering one. Derived from the position delta because the
-      // wildlife snapshot carries no velocity.
-      let prevPos = mesh.userData.prevPos as { x: number; z: number } | undefined;
-      const stepped = prevPos
-        ? Math.hypot(animal.position.x - prevPos.x, animal.position.z - prevPos.z) / Math.max(dt, 0.001)
-        : 0;
-      // Written in place. A fresh {x,z} per animal per frame is a hundred
-      // objects a frame to remember two numbers that already have a home.
-      if (!prevPos) prevPos = mesh.userData.prevPos = { x: 0, z: 0 };
-      prevPos.x = animal.position.x;
-      prevPos.z = animal.position.z;
-      const speedEma = ((mesh.userData.speedEma as number | undefined) ?? 0) * 0.82 + stepped * 0.18;
+      // is not a hovering one. The wire carries the server's own ground velocity
+      // now (islandworld-24), so this is the real speed rather than a filtered
+      // position delta — the 0.82 EMA only exists to smooth the 10 Hz steps and
+      // can be much lighter.
+      const stepped = Math.hypot(vx, vz);
+      const speedEma = ((mesh.userData.speedEma as number | undefined) ?? 0) * 0.55 + stepped * 0.45;
       mesh.userData.speedEma = speedEma;
       // THE LIMBS ONLY, AND ONLY ON SCREEN. Position, heading and the gait's own
       // speed average stay live above this line, so nothing teleports or flaps
@@ -5511,7 +5586,9 @@ export class Game {
       if (!mesh.visible) continue;
       // A gull on the wing keeps full wingbeat; a grounded one tucks and pecks.
       const flying = animal.type === 'gull' && speedEma > 0.35;
-      const move01 = flying ? 1 : THREE.MathUtils.clamp(speedEma / 1.2, 0, 1);
+      // A spooked animal is not ambling: full gait, whatever the ground speed
+      // says, and the burrowing crab reads as a scramble (WILD-01).
+      const move01 = flying || animal.alert ? 1 : THREE.MathUtils.clamp(speedEma / 1.2, 0, 1);
       const phase = t * (animal.type === 'gull' ? 9.5 : animal.type === 'chicken' ? 11 : animal.type === 'crab' ? 14 : 6.5)
         + animal.position.x * 0.04
         + animal.position.z * 0.03;
@@ -5521,6 +5598,15 @@ export class Game {
         ?? (mesh.userData.idleSeed = 2 + Math.random() * 3);
       const idleCycle = (t + idleSeed * 7) % (2.6 + idleSeed);
       const tick = idleCycle < 0.42 ? Math.sin((idleCycle / 0.42) * Math.PI) * (1 - move01) : 0;
+      // A VOICE on the tick the animal already computes (islandworld-12). The
+      // engine drops it past 25 m and rate-limits the whole world to one voice
+      // every 1.5 s, so this is a single compare for every animal but one.
+      if (ud.voiced !== idleSeed && (tick > 0.9 || animal.alert)) {
+        ud.voiced = idleSeed;
+        this.audio.playAnimalVoice(animal.type, animal.position, !!animal.alert);
+      } else if (tick <= 0.01 && !animal.alert) {
+        ud.voiced = undefined;
+      }
       if (parts?.leftWing) parts.leftWing.rotation.z = 0.35 + Math.sin(phase) * 0.55 * move01 - tick * 0.3;
       if (parts?.rightWing) parts.rightWing.rotation.z = -0.35 - Math.sin(phase) * 0.55 * move01 + tick * 0.3;
       if (parts?.head) {
@@ -5540,10 +5626,9 @@ export class Game {
     for (const id of this.wildlifeMeshes.keys()) {
       if (seen.has(id)) continue;
       const mesh = this.wildlifeMeshes.get(id)!;
-      this.combatFx.emitSharkDeathBloom(
-        { x: mesh.position.x, y: mesh.position.y + 0.12, z: mesh.position.z },
-        this.renderer.camera.position,
-      );
+      // The bloom fires at the KILL now (the `dead` transition above), not when
+      // the id finally leaves the wire: a carcass that has finished fading, or
+      // an animal dropped by a snapshot, must not spray blood over the beach.
       this.environment.remove(mesh);
       this.wildlifeMeshes.delete(id);
     }

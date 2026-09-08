@@ -18,6 +18,7 @@ import { WILDLIFE } from '../src/shared/constants/index.ts';
 import { getIslandSurfaceY, dist2D } from '../src/shared/utils/index.ts';
 import { nearCaveFootprint, resolveWalkerAgainstIsland, resolveWalkerAgainstWildlife } from '../src/shared/locomotion.ts';
 import { resolvePropCollision } from '../src/shared/props.ts';
+import { buildWireSnapshot } from '../src/server/core/snapshot.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -91,8 +92,13 @@ console.log('2. A gunshot inside the alert radius spooks a gull');
   expect('gull is more than 4 m from where the shot found it, within 1 s', away > 4, `away=${away.toFixed(2)}`);
   const far = pick('pig');
   const farStart = { x: far.position.x, z: far.position.z };
+  // Calm it first: the gull shot above may have carried to this one too, and
+  // the assertion under test is about THIS shot, not the last one.
+  far.alertUntil = undefined;
+  far.alert = undefined;
   match.fauna.alertToShot(state, farStart.x + WILDLIFE.SHOT_ALERT_RADIUS + 40, farStart.z);
-  expect('a shot beyond the alert radius does NOT spook', far.alert !== true, `alert=${far.alert}`);
+  expect('a shot beyond the alert radius does NOT spook',
+    far.alertUntil === undefined, `alertUntil=${far.alertUntil}`);
 }
 
 // ── 3. Gulls fly ────────────────────────────────────────────────────────────
@@ -210,6 +216,36 @@ console.log('6. A pirate cannot stand inside an animal');
   const clear = resolveWalkerAgainstWildlife(before.x + 40, before.z, 0.35, state.wildlife);
   expect('and a pirate 40 m away is not moved at all',
     Math.abs(clear.x - (before.x + 40)) < 1e-9 && Math.abs(clear.z - before.z) < 1e-9);
+}
+
+// ── 7. The wire ─────────────────────────────────────────────────────────────
+console.log('7. The wildlife wire record carries velocity and the two flags, and nothing else');
+{
+  parkPlayers();
+  const walker = state.wildlife.find((a) => a.health > 0 && a.type !== 'gull' && !a.dead);
+  walker.velocity.x = 1.2345;
+  walker.velocity.z = -0.5;
+  walker.alert = true;
+  const wire = buildWireSnapshot(match.buildSnapshot(), false);
+  const rec = wire.wildlife.find((a) => a.id === walker.id);
+  expect('the record exists', !!rec);
+  expect('it carries vx/vz for dead reckoning',
+    typeof rec.vx === 'number' && typeof rec.vz === 'number', `vx=${rec.vx} vz=${rec.vz}`);
+  expect('quantized to 0.1 m/s, not raw floats', rec.vx === 1.2 && rec.vz === -0.5, `vx=${rec.vx} vz=${rec.vz}`);
+  expect('the spooked bit reaches the client', rec.alert === true, `alert=${rec.alert}`);
+  expect('server AI internals never do',
+    rec.spawnPosition === undefined && rec.islandId === undefined
+    && rec.wanderAngle === undefined && rec.alertUntil === undefined
+    && rec.gullState === undefined && rec.deadAt === undefined && rec.health === undefined);
+  const calm = state.wildlife.find((a) => a.health > 0 && !a.alert && !a.dead);
+  if (calm) {
+    calm.velocity.x = 0;
+    calm.velocity.z = 0;
+    const calmRec = buildWireSnapshot(match.buildSnapshot(), false).wildlife.find((a) => a.id === calm.id);
+    expect('and a calm, still animal spends no bytes on the flags or on zero velocity',
+      calmRec && !('alert' in calmRec) && !('dead' in calmRec) && !('vx' in calmRec) && !('vz' in calmRec));
+  }
+  walker.alert = undefined;
 }
 
 console.log(failures === 0 ? '\nAll wildlife awareness assertions passed.' : `\n${failures} wildlife assertion(s) FAILED.`);

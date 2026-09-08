@@ -642,6 +642,10 @@ export interface WildlifeAnimal {
   alert?: boolean;
   /** A carcass, not a live animal: the client plays the fall and fades it. */
   dead?: boolean;
+  /** Ground velocity as sent (0.01 m/s), for client dead reckoning. Present on
+   *  the wire record only — the server reads `velocity`. */
+  vx?: number;
+  vz?: number;
 }
 
 export interface SeaRockCollider {
