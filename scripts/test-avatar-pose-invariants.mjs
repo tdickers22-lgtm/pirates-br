@@ -34,10 +34,14 @@
 //
 //   node --import tsx scripts/test-avatar-pose-invariants.mjs
 import * as THREE from 'three';
+import { installCanvasStub } from './lib/canvas-stub.mjs';
+installCanvasStub();
 import { makePlayerMesh } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
 import { PlayerAnimator } from '../src/client/rendering/PlayerAnimator.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 import { AVATAR_RIG } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
+import { hudAnchorLocal, makeNameplateSprite, NAMEPLATE_SCREEN_H } from '../src/client/rendering/factories/MiscMeshFactory.ts';
+import { playerMeshVisible } from '../src/client/core/corpseVisibility.ts';
 import { readFileSync } from 'node:fs';
 
 let failures = 0;
@@ -412,6 +416,68 @@ console.log('\n[replicated fields the pose must express]');
   expect(`walk 4 m/s: the weapon socket holds its aim (pitch swing ${(pitchMax - pitchMin).toFixed(3)} rad < 0.15)`,
     pitchMax - pitchMin < 0.15,
     'no wrist: the blade/muzzle swings a full stride with the shoulder');
+}
+
+// ── 2c. what you see of yourself, and what you can read on everyone else ────
+// avatar-10 (own body never drawn), avatar-21 (floating UI rides the pitched
+// group), avatar-19 (3.4 m world-sized nameplates).
+console.log('\n[own body, floating UI, nameplates]');
+{
+  const base = { isDead: false, skeletonDeathVisible: false, pirateCorpseVisible: false, tooSmallToDraw: false, useLocalSwimViewmodel: false };
+  expect('alive local pirate with the body enabled is DRAWN',
+    playerMeshVisible({ ...base, isLocal: true, localBodyDrawn: true }) === true,
+    'looking down showed nothing and the deck never had your shadow');
+  expect("the 'low' tier keeps the old behaviour (no local body)",
+    playerMeshVisible({ ...base, isLocal: true, localBodyDrawn: false }) === false);
+  expect('your corpse is still drawn for the death camera',
+    playerMeshVisible({ ...base, isLocal: true, isDead: true, pirateCorpseVisible: true, localBodyDrawn: false }) === true);
+  expect('too small to draw still wins over everything',
+    playerMeshVisible({ ...base, isLocal: true, localBodyDrawn: true, tooSmallToDraw: true }) === false);
+  expect('remotes are unaffected',
+    playerMeshVisible({ ...base, isLocal: false }) === true
+    && playerMeshVisible({ ...base, isLocal: false, isDead: true }) === false);
+  const gameSrc2 = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  expect('Game.ts no longer short-circuits the per-part visibility for the local body',
+    !/const hideForLocalAim = isLocal;/.test(gameSrc2) && /localBodyDrawn/.test(gameSrc2));
+
+  // avatar-21: the bar over a PITCHED body.
+  const swimmer = makePlayerMesh(0x3366cc, 'pirate', 'crew');
+  const parts = swimmer.userData.animation.parts;
+  const bar = swimmer.userData.healthBar.root;
+  scenarioSwing = 0;
+  run(swimmer, makePlayer({ state: 'swimming', velocity: { x: 2, y: 0, z: 0 } }), null, 30);
+  swimmer.rotation.x = 1.26;              // the swim pitch Game applies about the soles
+  swimmer.updateMatrixWorld(true);
+  bar.position.copy(hudAnchorLocal(swimmer, parts.head, 0.42, new THREE.Vector3()));
+  swimmer.updateMatrixWorld(true);
+  const headW = parts.head.getWorldPosition(new THREE.Vector3());
+  const barW = bar.getWorldPosition(new THREE.Vector3());
+  const horiz = Math.hypot(barW.x - headW.x, barW.z - headW.z);
+  expect(`swimmer: the health bar sits over his head, not ahead of him (${horiz.toFixed(2)} m horizontally < 0.15)`,
+    horiz < 0.15, 'the bar is a child of the group Game pitches by 1.26 rad about the feet');
+  expect(`swimmer: the bar is 0.42 m above the head (${(barW.y - headW.y).toFixed(2)})`,
+    Math.abs((barW.y - headW.y) - 0.42) < 0.05);
+
+  // avatar-19: a nameplate the same readable size at 5 m and at 50 m.
+  const plate = makeNameplateSprite('Blackbeard');
+  const FOV = 70;
+  const focal = 1 / Math.tan((FOV * Math.PI) / 360);
+  // three's sprite shader: with sizeAttenuation OFF the scale is multiplied by
+  // the view depth, which cancels the perspective divide exactly.
+  const screenFrac = (d) => (plate.material.sizeAttenuation === false
+    ? plate.scale.y * focal / 2
+    : (plate.scale.y / d) * focal / 2);
+  const near = screenFrac(5);
+  const far = screenFrac(50);
+  const TARGET = NAMEPLATE_SCREEN_H * focal / 2;
+  expect(`nameplate at 5 m covers ${(near * 100).toFixed(1)}% of the screen height, within 20% of ${(TARGET * 100).toFixed(1)}%`,
+    Math.abs(near - TARGET) <= TARGET * 0.2,
+    'a 2.8 m world billboard is wider than the pirate is tall up close');
+  expect(`nameplate at 50 m covers ${(far * 100).toFixed(1)}% of the screen height, within 20% of ${(TARGET * 100).toFixed(1)}%`,
+    Math.abs(far - TARGET) <= TARGET * 0.2,
+    'a world-sized plate at 50 m is a three-pixel smear');
+  expect('nameplates keep their occlusion (depthTest ON: names must not read through rock)',
+    plate.material.depthTest === true);
 }
 
 // ── 3. corpse ──────────────────────────────────────────────────────────────

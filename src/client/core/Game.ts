@@ -55,8 +55,8 @@ import { registerBudgetLight } from '../rendering/LightBudget.js';
 import { beginFirstDrawFrame, clearFirstDrawBudget, openFirstDrawBudgetForSettle, showWhenAffordable } from '../rendering/FirstDrawBudget.js';
 import { budgeted } from '../rendering/FrameBudget.js';
 import { ClientState } from './ClientState.js';
-import { applyPlayerTeamColor, AVATAR_RIG, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
-import { buildMermaidMesh, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
+import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/PlayerMeshFactory.js';
+import { buildMermaidMesh, hudAnchorLocal, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
@@ -65,6 +65,9 @@ const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
  *  getPlayerRenderPosition are local-only, and this is what an opponent's axes
  *  read as. Frozen and shared — it must never be written and never allocated. */
 const ZERO_MOVE_AXES = Object.freeze({ x: 0, z: 0 });
+/** Reused by updateHudAnchor: one Vector3 for every nameplate and health bar in
+ *  the match, because this runs per body per frame. */
+const HUD_ANCHOR_SCRATCH = new THREE.Vector3();
 /** Seconds of fuse hiss per burst; re-armed until the keg blows (SHIP.KEG_FUSE_TIME
  *  is 10s). Short bursts keep the sound tracking a keg that rides a turning deck,
  *  and stay inside SoundEngine.playKegFuse's per-call duration clamp. */
@@ -4498,7 +4501,21 @@ export class Game {
         }
       }
       const ship = player.onShipId ? this.shipsById.get(player.onShipId) ?? null : null;
-      const hideForLocalAim = isLocal;
+      // ── YOUR OWN BODY (avatar-10). Looking down used to show nothing: no
+      // legs, no chest, no shadow on the deck you are standing on, because
+      // `hideForLocalAim = isLocal` short-circuited a per-part visibility system
+      // that was already written. Now the world body is drawn for the local
+      // pirate too, with the head culled (the camera is inside the skull) and
+      // the arms culled while a first-person rig is drawing hands.
+      //
+      // TIER GATE: 'low' keeps the old behaviour. The body is up to 26 draws for
+      // ONE avatar, and at 'low' there is no shadow pass at all — which is the
+      // half of the win that pays for it. Balanced and high draw it.
+      const localBodyDrawn = isLocal && this.renderer.getQuality() !== 'low'
+        && player.state !== 'eliminated' && player.state !== 'respawning';
+      const hideForLocalAim = isLocal && !localBodyDrawn;
+      const hideLocalHead = isLocal;
+      const hideLocalArms = isLocal && (!localBodyDrawn || this.viewmodel.armsInUse);
       const useLocalSwimViewmodel = false;
 
       const targetPos = this.getPlayerRenderPosition(player, isLocal ? (player.state === 'swimming' ? 0.05 : player.cannonBallistic ? 0.06 : 0.055) : player.cannonBallistic ? 0.05 : 0.035);
@@ -4589,6 +4606,7 @@ export class Game {
         skeletonDeathVisible,
         pirateCorpseVisible,
         useLocalSwimViewmodel,
+        localBodyDrawn,
         tooSmallToDraw: this.characterTooSmallToDraw(dist2D(
           this.renderer.camera.position.x, this.renderer.camera.position.z,
           targetPos.x, targetPos.z,
@@ -4661,7 +4679,8 @@ export class Game {
         healthBar.root.visible = showHealthBar;
         if (showHealthBar) {
           const ratio = THREE.MathUtils.clamp(player.health / PLAYER.MAX_HEALTH, 0, 1);
-          healthBar.root.position.y = player.state === 'swimming' ? 1.2 : AVATAR_RIG.overheadY;
+          // Height comes from updateHudAnchor below, off the POSED head — the
+          // hand-picked 1.2 / overheadY pair rode the pitched group (avatar-21).
           this.tempHudVector.copy(this.renderer.camera.position);
           mesh.worldToLocal(this.tempHudVector);
           healthBar.root.lookAt(this.tempHudVector);
@@ -4692,14 +4711,20 @@ export class Game {
       const shirt = animParts.shirt;
       const coatSkirt = animParts.coatSkirt ?? animParts['coat-skirt'];
       const leftArmPivot = animParts.leftArmPivot ?? animParts['left-arm-pivot'];
-      const showHead = (!isLocal || !this.input.isAiming()) && !hideForLocalAim;
+      const rightArmPivot = animParts.rightArmPivot ?? animParts['right-arm-pivot'];
+      const corpseNow = !!(mesh.userData.corpse as CorpseState | undefined);
+      // A corpse is watched from OUTSIDE the head, so the death camera gets the
+      // whole body back; alive, the local skull is always culled.
+      const showHead = (!isLocal || !this.input.isAiming()) && (!hideLocalHead || corpseNow);
       if (head) head.visible = showHead;
       if (hair) hair.visible = showHead && !isSkeleton;
       if (bandana) bandana.visible = showHead && !isSkeleton;
       if (torso) torso.visible = !isSkeleton && !hideForLocalAim;
       if (shirt) shirt.visible = !isSkeleton && !hideForLocalAim;
       if (coatSkirt) coatSkirt.visible = !isSkeleton && !hideForLocalAim;
-      if (leftArmPivot) leftArmPivot.visible = !hideForLocalAim;
+      const armsHidden = hideLocalArms && !corpseNow;
+      if (leftArmPivot) leftArmPivot.visible = !armsHidden;
+      if (rightArmPivot) rightArmPivot.visible = !armsHidden;
 
       if (player.state === 'swimming') {
         // PRONE swimmer: +rotation.x pitches the body face-DOWN with the head
@@ -4729,8 +4754,36 @@ export class Game {
       } else {
         this.anim.animatePlayerMesh(mesh, player, ship, dt);
       }
+      this.updateHudAnchor(mesh, healthBar?.root, plate);
       this.viewmodel.syncHeldWeapon(mesh, player);
     }
+  }
+
+  /**
+   * FLOATING UI RIDES THE HEAD, NOT THE PITCHED BODY (avatar-21).
+   *
+   * The health bar and the nameplate are children of the player group, and that
+   * group is rotated about the SOLES — 1.26 rad for a swimmer, 1.4 for a downed
+   * pirate. A child parked at a fixed local height therefore swings forward with
+   * the pitch: a swimmer's name floated a metre and a half ahead of him, over
+   * open water, and the finder measured the bar resolving to (0, 0.47, +1.48).
+   *
+   * Solved where it is caused: take the head's WORLD position — which the
+   * animator has just finished posing — lift it, and express that point back in
+   * the group's own frame. No new node in the graph, no reaping, no draw; two
+   * matrix chains and a transform per body with UI on it, and the anchor is
+   * exact for every pose rather than for the standing one only.
+   */
+  private updateHudAnchor(
+    mesh: THREE.Group,
+    healthBarRoot: THREE.Object3D | undefined,
+    plate: THREE.Object3D | undefined,
+  ) {
+    if (!healthBarRoot?.visible && !plate?.visible) return;
+    const head = (mesh.userData.animation?.parts as Record<string, THREE.Object3D | undefined> | undefined)?.head;
+    if (!head) return;
+    if (healthBarRoot?.visible) healthBarRoot.position.copy(hudAnchorLocal(mesh, head, 0.42, HUD_ANCHOR_SCRATCH));
+    if (plate?.visible) plate.position.copy(hudAnchorLocal(mesh, head, 0.66, HUD_ANCHOR_SCRATCH));
   }
 
   /**

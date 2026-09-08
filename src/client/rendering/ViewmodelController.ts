@@ -833,6 +833,17 @@ export class ViewmodelController {
     return true;
   }
 
+  /**
+   * Is a first-person rig currently drawing hands? Game hides the WORLD body's
+   * arms when it is (avatar-10) — the local body is drawn now, and two right
+   * arms in the same eye is worse than none.
+   */
+  get armsInUse(): boolean {
+    return this.localViewWeaponRoot.visible
+      || this.localViewPocketRoot.visible
+      || this.localViewHandsRoot.visible;
+  }
+
   syncHeldWeapon(mesh: THREE.Group, player: Player) {
     const rightHand = (mesh.userData.animation?.parts as Record<string, THREE.Object3D | undefined> | undefined)?.rightHand;
     if (!rightHand) return;

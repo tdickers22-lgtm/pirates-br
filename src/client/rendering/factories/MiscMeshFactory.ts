@@ -24,12 +24,51 @@ export function makeNameplateSprite(name: string): THREE.Sprite {
   // depthTest ON: names must not read through mountains/ships (wallhack feel —
   // caves made it obvious, every plate on the island glowed through the rock).
   // depthWrite stays off so the transparent quad never punches holes in FX.
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, transparent: true }));
-  sprite.scale.set(2.8, 0.7, 1);
+  // sizeAttenuation OFF (avatar-19). A world-sized plate is a 2.8 m billboard:
+  // at 4 m it is wider than the pirate is tall and its 34 px of text is stretched
+  // over half the screen, and at 60 m it is a three-pixel smear. Off, the scale
+  // is read in clip space, so the label is the SAME readable height at every
+  // range and the 256x64 canvas is sampled at roughly its native resolution.
+  // Costs nothing: same sprite, same draw, one flag on the material.
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: true, depthWrite: false, transparent: true, sizeAttenuation: false }));
+  sprite.scale.set(NAMEPLATE_SCREEN_H * 4, NAMEPLATE_SCREEN_H, 1);
   sprite.position.y = AVATAR_RIG.overheadY + 0.22;
   sprite.name = 'nameplate';
   sprite.renderOrder = 998;
   return sprite;
+}
+
+/**
+ * Clip-space height of a nameplate, i.e. the fraction of the viewport height it
+ * covers is `NAMEPLATE_SCREEN_H * focal / 2` (focal = 1/tan(fov/2)). At the
+ * game's 70 deg vertical field of view that is 3.5% of the screen — about 25 px
+ * on a 720p canvas, which is what the 34 px source glyphs want.
+ * The canvas is 256x64, so the sprite is four times as wide as it is tall.
+ */
+export const NAMEPLATE_SCREEN_H = 0.049;
+
+/**
+ * WHERE FLOATING UI GOES ON A BODY THAT IS NOT STANDING UP (avatar-21).
+ *
+ * The health bar and the nameplate are children of the player group, which is
+ * rotated about the SOLES: 1.26 rad for a swimmer, ~1.4 for a downed pirate. A
+ * child parked at a constant local height therefore swings out in front of the
+ * body — the finder measured a swimmer's bar resolving 1.48 m ahead of him.
+ *
+ * Lift the POSED head in WORLD space (lifting after the transform would just
+ * reintroduce the pitch as a forward offset), then express the result in the
+ * group's own frame. Writes into `out` and returns it: this runs per body per
+ * frame and must not allocate.
+ */
+export function hudAnchorLocal(
+  mesh: THREE.Object3D,
+  head: THREE.Object3D,
+  lift: number,
+  out: THREE.Vector3,
+): THREE.Vector3 {
+  head.getWorldPosition(out);
+  out.y += lift;
+  return mesh.worldToLocal(out);
 }
 
 /**
