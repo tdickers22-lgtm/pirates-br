@@ -127,9 +127,40 @@ function makeOutputPass(graded: boolean): OutputPass {
  * `setPixelRatio` re-runs it. There is no full-screen target in the game that
  * renders at native resolution while the main pass does not.
  */
+/** BLOOM BY NIGHT (GFXPOL-01 / graphics-23).
+ *
+ *  The bloom threshold was a constant 1.05 of linear HDR. Nothing on an island
+ *  at night is that bright — a lantern glow sprite peaked at 0.85 — so the one
+ *  scene in the game that is ABOUT small warm lights in the dark was the one
+ *  scene bloom never touched. Meanwhile 1.05 is the right number at noon, where
+ *  a lower threshold would smear the sun off the sea and wash the whole frame.
+ *
+ *  So the threshold follows the clock instead of being a constant, and the
+ *  lantern glass is lifted into HDR (see LANTERN_BLOOM_GAIN in EnvironmentFx) so
+ *  it crosses the night threshold with room to spare. This is a uniform on a
+ *  pass that already runs — no new pass, no new target, no per-tier cost. */
+export const BLOOM_DAY_THRESHOLD = 1.05;
+export const BLOOM_NIGHT_THRESHOLD = 0.55;
+export const BLOOM_DAY_STRENGTH = 0.42;
+export const BLOOM_NIGHT_STRENGTH = 0.5;
+
+/** nightAmount (0 = noon, 1 = full night) → the bloom threshold. Exported as a
+ *  pure function so `scripts/test-lantern-bloom.mjs` grades the real curve. */
+export function bloomThresholdForNight(nightAmount: number): number {
+  const n = Math.min(1, Math.max(0, nightAmount));
+  return BLOOM_DAY_THRESHOLD + (BLOOM_NIGHT_THRESHOLD - BLOOM_DAY_THRESHOLD) * n;
+}
+
+export function bloomStrengthForNight(nightAmount: number): number {
+  const n = Math.min(1, Math.max(0, nightAmount));
+  return BLOOM_DAY_STRENGTH + (BLOOM_NIGHT_STRENGTH - BLOOM_DAY_STRENGTH) * n;
+}
+
 export class PostFx {
   private readonly composer: EffectComposer;
+  private readonly bloomPass: UnrealBloomPass;
   private readonly fxaaPass: ShaderPass | null = null;
+  private bloomNight = -1;
   private width: number;
   private height: number;
   private pixelRatio: number;
@@ -165,7 +196,10 @@ export class PostFx {
 
     this.composer = new EffectComposer(renderer, target);
     this.composer.addPass(new RenderPass(scene, camera));
-    this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(this.width, this.height), 0.42, 0.55, 1.05));
+    this.bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(this.width, this.height), BLOOM_DAY_STRENGTH, 0.55, BLOOM_DAY_THRESHOLD,
+    );
+    this.composer.addPass(this.bloomPass);
     // The grade rides inside OutputPass rather than following it — see above.
     this.composer.addPass(makeOutputPass(gradeEnabledFor(quality)));
     if (!useMsaa) {
@@ -191,6 +225,17 @@ export class PostFx {
 
   render() {
     this.composer.render();
+  }
+
+  /** Drive the bloom off the day/night cycle. Called from Renderer's day/night
+   *  update; it writes two floats and only when the clock has actually moved
+   *  (the pass' own uniforms are read every frame either way). */
+  setNightAmount(nightAmount: number) {
+    const n = Math.min(1, Math.max(0, nightAmount));
+    if (Math.abs(n - this.bloomNight) < 0.002) return;
+    this.bloomNight = n;
+    this.bloomPass.threshold = bloomThresholdForNight(n);
+    this.bloomPass.strength = bloomStrengthForNight(n);
   }
 
   /** Target used by the first (scene) pass. Shader cache keys include whether

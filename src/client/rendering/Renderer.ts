@@ -2073,6 +2073,9 @@ export class Renderer {
     this.skyMaterial.uniforms.u_twilightAmount.value = this.twilightAmount;
     this.skyMaterial.uniforms.u_nightAmount.value = this.nightAmount;
     this.skyMaterial.uniforms.u_time.value = elapsedSeconds;
+    // The bloom threshold follows the same clock: 1.05 is right at noon and
+    // means nothing on an island at night is ever bright enough to bloom.
+    this.postFx?.setNightAmount(this.nightAmount);
 
     const sunAbove = smoothstep(-0.06, 0.12, this.sunDir.y);
     this.sunAboveAmount = sunAbove;

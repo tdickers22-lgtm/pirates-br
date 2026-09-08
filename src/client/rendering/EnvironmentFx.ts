@@ -37,6 +37,24 @@ import {
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
 import { refreshFrozenChild, ZERO_SCALE_MAT4 } from './three-util.js';
 
+/** How far above linear white the lantern/campfire glass is driven so the bloom
+ *  pass can see it at night. Graded by `scripts/test-lantern-bloom.mjs` against
+ *  the bloom threshold curve, which is where the number has to make sense. */
+export const LANTERN_BLOOM_GAIN = 2.8;
+
+/** Glow-sprite opacity at full night, for a lantern that HAS a real point light
+ *  (the pooled few) and for one that does not. The dimmer of the two is what the
+ *  bloom gate has to clear: if only the pooled lanterns bloom, an island reads as
+ *  a handful of glowing lamps and a row of dull decals. */
+export const LANTERN_GLOW_BASE_LIT = 0.3;
+export const LANTERN_GLOW_BASE_UNLIT = 0.85;
+
+/** The HDR gain by tier. 'low' builds no composer, so there is no bloom pass to
+ *  catch an HDR sprite and it would only clip to a white disc. */
+export function lanternBloomGainFor(quality: 'low' | 'balanced' | 'high'): number {
+  return quality === 'low' ? 1 : LANTERN_BLOOM_GAIN;
+}
+
 export type EnvironmentFxView = {
   readonly audio: SoundEngine;
   readonly combatFx: CombatFx;
@@ -788,6 +806,20 @@ export class EnvironmentFx {
 
   /** Register a warm island light. `container` is an island sub-group (dock/camp/
    *  tavern/cave); the anchor tracks its transform so world positions stay correct. */
+  /** The HDR gain on lantern and campfire glass, and ONLY where there is a
+   *  bloom pass to catch it. The glow sprites are additive and peaked at 0.85 of
+   *  linear white, under a bloom threshold of 1.05 at the brightest: the lights
+   *  the night scene is built around were the one thing bloom could not see.
+   *  Lifting the glass into HDR puts it over the night threshold (0.55) with
+   *  room for the flicker.
+   *
+   *  On the LOW tier there is no composer and no bloom, so the gain is 1: an
+   *  HDR sprite there would only clip to a white disc through the tone mapper
+   *  and make a lantern look like a different object on a different tier. */
+  private lanternBloomGain(): number {
+    return lanternBloomGainFor(this.view.renderer.getQuality());
+  }
+
   registerLanternEmitter(
     container: THREE.Object3D,
     localX: number,
@@ -800,9 +832,10 @@ export class EnvironmentFx {
     anchor.position.set(localX, localY, localZ);
     container.add(anchor);
 
+    const gain = this.lanternBloomGain();
     const glow = new THREE.Sprite(new THREE.SpriteMaterial({
       map: this.lanternGlowTexture,
-      color: kind === 'campfire' ? 0xff8a3c : 0xffbb66,
+      color: new THREE.Color(kind === 'campfire' ? 0xff8a3c : 0xffbb66).multiplyScalar(gain),
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       transparent: true,
@@ -816,7 +849,7 @@ export class EnvironmentFx {
     if (kind === 'campfire' && this.lanternFlameTexture) {
       flame = new THREE.Sprite(new THREE.SpriteMaterial({
         map: this.lanternFlameTexture,
-        color: 0xffb257,
+        color: new THREE.Color(0xffb257).multiplyScalar(gain),
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         transparent: true,
@@ -883,7 +916,7 @@ export class EnvironmentFx {
       const glowFlicker = e.kind === 'campfire'
         ? 1 + Math.sin(t * 12 + e.phase) * 0.18
         : 1 + Math.sin(t * 6 + e.phase) * 0.06;
-      const glowBase = hasRealLight ? 0.3 : 0.85;
+      const glowBase = hasRealLight ? LANTERN_GLOW_BASE_LIT : LANTERN_GLOW_BASE_UNLIT;
       const glowOpacity = day ? 0 : nf * glowBase * glowFlicker;
       e.glow.position.copy(e.worldPos);
       e.glow.material.opacity = glowOpacity;
