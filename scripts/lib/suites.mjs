@@ -266,6 +266,14 @@ export const SERVER = [
   // default: measured 46 s on this Air.
   { ...tsx('test-lobby-flow.mjs'), timeoutMs: 180_000 },
   { ...tsx('test-http-hardening.mjs'), timeoutMs: 60_000 },
+  // BOOT-01 (wave 4.4). What the real LobbyServer puts on the wire for the 27 MB
+  // of client it serves: precompressed br/gz siblings, `.glb` as
+  // model/gltf-binary, ETag/304, and `immutable` earned by a Vite content hash
+  // instead of promised for a year on `/assets/models/palm_a.glb`. Needs
+  // `dist/client` (it fails with that instruction when the build is absent) and
+  // writes the siblings itself, which costs ~12 s the first time and ~0.3 s
+  // after, since they are stamped at their source's mtime.
+  { ...tsx('test-static-serving.mjs'), timeoutMs: 120_000 },
 ];
 
 /** Watchdog per tier (ms); an entry's `timeoutMs` overrides it. A suite silent
