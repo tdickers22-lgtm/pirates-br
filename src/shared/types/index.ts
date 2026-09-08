@@ -971,6 +971,10 @@ type MsgType =
   | 'ship_upgraded'
   | 'treasure_sold'
   | 'armor_bought'
+  /** ECON-01: the Tallyman's table. Client sends {line}; server answers
+   *  'shop_bought' {line, price, qty, gold} or 'interact_refused'. */
+  | 'shop_buy'
+  | 'shop_bought'
   | 'ammo_refilled'
   | 'prop_removed'
   /** The [X] was heard and REFUSED — feedback so a dead press is never silent. */
