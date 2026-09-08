@@ -1435,7 +1435,7 @@ export class MapGenerator {
     const count = island.radius > 70 ? 2 : island.radius > 50 ? 1 : (rng() < 0.55 ? 1 : 0);
     if (count === 0) return [];
 
-    const allTypes: ShipUpgradeType[] = ['hull_reinforcement', 'charged_cannons', 'swift_sails'];
+    const allTypes: ShipUpgradeType[] = ['hull_reinforcement', 'charged_cannons', 'swift_sails', 'lightning_rod'];
     const types = shuffled(rng, allTypes).slice(0, count);
 
     return types.map((type, i) => {

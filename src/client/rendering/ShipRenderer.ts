@@ -26,6 +26,7 @@ const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
   hull_reinforcement: 0x67b9ff,
   charged_cannons: 0xff8459,
   swift_sails: 0xf6d360,
+  lightning_rod: 0xbfe4ff,
 };
 
 
@@ -645,6 +646,7 @@ export class ShipRenderer {
       hull_reinforcement: [],
       charged_cannons: [],
       swift_sails: [],
+      lightning_rod: [],
     };
 
     // ── Hull ─────────────────────────────────────────────────
@@ -2425,6 +2427,16 @@ export class ShipRenderer {
           side: THREE.DoubleSide,
         }),
       ),
+      lightning_rod: new THREE.Mesh(
+        new THREE.PlaneGeometry(0.46, 0.18),
+        new THREE.MeshStandardMaterial({
+          color: UPGRADE_PENNANT_COLORS.lightning_rod,
+          emissive: UPGRADE_PENNANT_COLORS.lightning_rod,
+          emissiveIntensity: 0.18,
+          roughness: 0.85,
+          side: THREE.DoubleSide,
+        }),
+      ),
     } satisfies Record<ShipUpgradeType, THREE.Mesh>;
     // Upgrade pennants keep their long-standing spot on the mast, well below the
     // nest (the team flag moved to the truck; these did not).
@@ -2433,6 +2445,7 @@ export class ShipRenderer {
       { type: 'hull_reinforcement' as const, x: 0.34, y: upgradePennantY - 0.72, z: mastStartZ + 0.12 },
       { type: 'charged_cannons' as const, x: 0.34, y: upgradePennantY - 0.98, z: mastStartZ + 0.02 },
       { type: 'swift_sails' as const, x: 0.34, y: upgradePennantY - 1.24, z: mastStartZ - 0.08 },
+      { type: 'lightning_rod' as const, x: 0.34, y: upgradePennantY - 1.50, z: mastStartZ - 0.18 },
     ];
     for (const { type, x, y, z } of upgradePennantEntries) {
       const pennant = upgradePennants[type];

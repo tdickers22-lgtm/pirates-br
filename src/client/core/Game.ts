@@ -7365,6 +7365,15 @@ export class Game {
           hex: 0xff8459,
           effect: `+${SHIP_UPGRADES.CHARGED_EXTRA_HOLES} hole per hit`,
         };
+      case 'lightning_rod':
+        return {
+          name: 'Lightning Rod',
+          short: 'Rod',
+          icon: '⚡',
+          color: '#bfe4ff',
+          hex: 0xbfe4ff,
+          effect: 'grounds storm strikes',
+        };
       case 'swift_sails':
       default:
         return {
