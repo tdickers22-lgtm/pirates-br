@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+// STORMVIS-01 — THE STORM IS ONE PIECE OF WEATHER, IN ONE PLACE, PAID FOR ONCE.
+//
+// Ten defects that all live in the same squall and none of which had a suite
+// that could fail on them (storm-18: every storm gate we own tests spawn safety
+// and outrun distance, never a pixel or a decibel of the weather itself).
+// Everything here is graded with no browser and no stack: pure functions the
+// renderer and the audio engine actually call, plus the shipped source of the
+// two shaders and the two call sites that cannot be reduced to a function.
+//
+//   storm-14  weather came from the LOCAL PLAYER's position while the
+//     wall-nearness term came from the CAMERA, so a spectator watching the
+//     endgame from the ring centre got the downpour of a corpse 300 m outside.
+//     Graded on the anchored function: same storm, two anchors, two answers.
+//   storm-15  the hull-leak submersion test fed the WEATHER number to
+//     gerstnerHeight as a sea-state. Graded on the call site: it reads the
+//     drawn surface (ocean.getSurfaceY) instead.
+//   storm-11  stormHalo — a 47 m dark ribbon at 9 m altitude, never culled,
+//     drawn at >= 0.08 alpha every frame of every match — and the stormRing
+//     LineLoop at y=0.55, under the crests. Graded: neither exists.
+//   storm-16  a full-screen fixed 2D canvas overlay created every match that
+//     draws nothing since rain became 3D. Graded: gone, flash div kept.
+//   storm-10  random thunder every 6-14 s with no flash and no bolt, on top of
+//     the strike-synced thunder EnvironmentFx already plays. Graded: the
+//     scheduler is gone and the only caller is a real strike.
+//   storm-21  thunder for a 900 m strike arrived 1.5 s after the flash because
+//     the delay was clamped there. Graded: 900 m -> 2.62 s, ceiling 1500 m.
+//   storm-13  three fbm fetches per fragment before the range attenuation that
+//     makes most far-side fragments invisible. Graded on the GLSL: the range
+//     bound is computed and discarded on BEFORE the first noise fetch.
+//   storm-03  one zero-thickness shell: a grey rectangle with a straight top
+//     from any elevation. Graded on the tier table: low 1 shell, balanced 2,
+//     high 2 + anvil, and the outer shell is offset and darker.
+//   storm-05  the slate closed evenly in every direction: the storm had no
+//     bearing in the sky. Graded on the CPU mirror of the sky term: facing the
+//     wall vs facing away differs by >= 12%.
+//   graphics-10  rain as 1-device-pixel GL lines. Graded on the width solver:
+//     a streak never subtends less than 1.5 px, at any range or pixel ratio.
+//
+// RED ON HEAD: src/client/rendering/stormWeather.ts does not exist, Game.ts
+// still owns stormHalo/stormRing, SoundEngine still schedules random thunder.
+//
+// Run: node --import tsx scripts/test-storm-visuals.mjs
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const read = (rel) => readFileSync(resolve(root, rel), 'utf8');
+
+let failures = 0;
+const expect = (label, ok, detail = '') => {
+  if (ok) {
+    console.log(`✓ ${label}`);
+  } else {
+    failures++;
+    console.log(`✗ ${label}${detail ? ` — ${detail}` : ''}`);
+  }
+};
+const near = (a, b, eps) => Number.isFinite(a) && Math.abs(a - b) <= eps;
+
+const gameSrc = read('src/client/core/Game.ts');
+const envSrc = read('src/client/rendering/EnvironmentFx.ts');
+const soundSrc = read('src/client/audio/SoundEngine.ts');
+
+// ── storm-14: one weather anchor ──────────────────────────────────────────
+// The endgame case from the finding: ring centre at the origin, radius 500,
+// phase 4 of 6, the body 300 m OUTSIDE (dist 800) and the spectate camera at
+// the centre. One function, two anchors; the camera's answer is the inside one.
+let sw = null;
+try {
+  sw = await import('../src/client/rendering/stormWeather.ts');
+} catch (err) {
+  expect('src/client/rendering/stormWeather.ts imports', false, String(err?.message ?? err).slice(0, 120));
+}
+
+if (sw) {
+  const storm = { centerX: 0, centerZ: 0, safeRadius: 500, phase: 4, shrinking: false, shrinkProgress: 0 };
+  const maxPhase = 6;
+  // wallNearness is a function of the SAME anchor's distance to the wall, so
+  // the spectate camera at the centre is 500 m off the wall: nowhere near it.
+  const nearnessAt = (x, z) => sw.stormWallNearness01(Math.abs(Math.hypot(x, z) - storm.safeRadius));
+  const atCamera = sw.stormWeatherIntensityAt(0, 0, storm, maxPhase, nearnessAt(0, 0));
+  const atCorpse = sw.stormWeatherIntensityAt(800, 0, storm, maxPhase, nearnessAt(800, 0));
+  expect('storm-14 spectate camera at the ring centre reads inside weather (<= 0.24)',
+    atCamera <= 0.24 + 1e-6, `got ${atCamera.toFixed(3)}`);
+  expect('storm-14 the same function 300 m outside reads storm weather (>= 0.52)',
+    atCorpse >= 0.52, `got ${atCorpse.toFixed(3)}`);
+  expect('storm-14 wall nearness is 1 at the boundary and 0 far inside',
+    near(sw.stormWallNearness01(0), 1, 1e-6) && sw.stormWallNearness01(400) === 0,
+    `got ${sw.stormWallNearness01(0)} / ${sw.stormWallNearness01(400)}`);
+  expect('storm-14 rain never outruns the cloud that makes it',
+    sw.stormRainIntensityAt(800, 0, storm, maxPhase, nearnessAt(800, 0))
+      <= sw.stormWeatherIntensityAt(800, 0, storm, maxPhase, nearnessAt(800, 0)) * 1.3 + 1e-6);
+}
+
+// The renderer must ASK for the anchor rather than reach for the corpse.
+expect('storm-14 computeStormWeatherIntensity anchors on the weather anchor, not getLocalPlayer',
+  /computeStormWeatherIntensity\(\)[\s\S]{0,600}?getWeatherAnchor\(\)/.test(envSrc)
+  && !/computeStormWeatherIntensity\(\)[\s\S]{0,400}?getLocalPlayer\(\)/.test(envSrc));
+expect('storm-14 lightning gating uses the same anchor',
+  /updateLightning[\s\S]{0,2600}?getWeatherAnchor\(\)/.test(envSrc));
+expect('storm-14 Game hands over the CAMERA while spectating or in free cam',
+  /getWeatherAnchor\s*\(\)[\s\S]{0,500}?(spectateLift|freeCam)/.test(gameSrc)
+  && /getWeatherAnchor:/.test(gameSrc));
+
+// ── storm-15: the leak gate is a sea-state, not a weather number ───────────
+expect('storm-15 hull-leak submersion reads the DRAWN surface',
+  /const waveY = this\.ocean\.getSurfaceY\(/.test(gameSrc));
+expect('storm-15 no gerstnerHeight call in Game is fed the weather number',
+  !/gerstnerHeight\([\s\S]{0,200}?storminess\s*\)/.test(gameSrc));
+
+// ── storm-11: no mid-air ribbon, no ring under the crests ─────────────────
+expect('storm-11 stormHalo is gone from Game.ts',
+  !/stormHalo/.test(gameSrc), `${(gameSrc.match(/stormHalo/g) || []).length} references left`);
+expect('storm-11 stormRing LineLoop is gone from Game.ts',
+  !/stormRing\b/.test(gameSrc), `${(gameSrc.match(/stormRing\b/g) || []).length} references left`);
+
+// ── storm-16: the dead 2D rain canvas ────────────────────────────────────
+expect('storm-16 stormRainCtx / stormRainCanvas are gone',
+  !/stormRainCtx|stormRainCanvas/.test(envSrc));
+expect('storm-16 #storm-rain-canvas is no longer created',
+  !/storm-rain-canvas/.test(envSrc));
+expect('storm-16 the soft-light flash div is KEPT (it is live)',
+  /storm-lightning-flash/.test(envSrc));
+
+// ── storm-10 / storm-21: thunder ─────────────────────────────────────────
+expect('storm-10 no random thunder scheduler in the ambience tick',
+  !/nextThunderAt/.test(soundSrc), `${(soundSrc.match(/nextThunderAt/g) || []).length} references left`);
+expect('storm-10 playThunder has exactly one caller, the real strike',
+  (soundSrc.match(/this\.playThunder\(/g) || []).length === 0);
+expect('storm-10 the strike still sounds', /audio\.playThunder\(/.test(envSrc));
+
+let se = null;
+try {
+  se = await import('../src/client/audio/SoundEngine.ts');
+} catch (err) {
+  expect('SoundEngine imports', false, String(err?.message ?? err).slice(0, 120));
+}
+if (se) {
+  const d900 = se.thunderArrivalDelay?.(900);
+  const d1500 = se.thunderArrivalDelay?.(1500);
+  const d80 = se.thunderArrivalDelay?.(80);
+  expect('storm-21 thunder for a 900 m strike starts at now + 2.62 s',
+    near(d900, 900 / 343, 0.01), `got ${d900}`);
+  expect('storm-21 the delay ceiling is the audible ceiling (1500 m), not 1.5 s',
+    near(d1500, 1500 / 343, 0.01) && near(se.thunderArrivalDelay?.(4000), 1500 / 343, 0.01),
+    `got ${d1500}`);
+  expect('storm-21 a near strike is still nearly instant',
+    Number.isFinite(d80) && d80 < 0.3, `got ${d80}`);
+  expect('storm-21 the distance ceiling is exported and audible',
+    se.THUNDER_MAX_DISTANCE_M === 1500, `got ${se.THUNDER_MAX_DISTANCE_M}`);
+}
+
+console.log(failures === 0 ? `\nPASS storm visuals (${failures} failures)` : `\nFAIL storm visuals (${failures} failures)`);
+process.exit(failures === 0 ? 0 : 1);

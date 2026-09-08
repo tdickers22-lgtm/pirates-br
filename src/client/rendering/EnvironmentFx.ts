@@ -9,7 +9,6 @@ import type { GameState, Island, IslandProp, IslandPropType, Player, Ship } from
 import {
   dist2D,
   finiteCircleBoundaryDistance,
-  finiteClamp,
   getIslandMaxRadius,
   getIslandSurfaceY,
   getShipDeckRaiseAt,
@@ -28,6 +27,7 @@ import type { CombatFx } from './CombatFx.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
+import { stormRainIntensityAt, stormWallNearness01, stormWeatherIntensityAt } from './stormWeather.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
 import { refreshFrozenChild, ZERO_SCALE_MAT4 } from './three-util.js';
 
@@ -51,6 +51,11 @@ export type EnvironmentFxView = {
   disposeSceneObject(root: THREE.Object3D): void;
   getLocalPlayer(): Player | null;
   getTrackedShip(): Ship | null;
+  /** THE ONE PLACE THE WEATHER IS MEASURED FROM (storm-14). The camera once it
+   *  has left the body (spectate, free cam), the local player otherwise. Rain,
+   *  overcast, wall nearness and lightning all read this, so a spectator gets
+   *  the weather where the picture is, not the weather over a corpse. */
+  getWeatherAnchor(): { x: number; z: number } | null;
 };
 
 /** One camera-relative rain shell. Near shells are sparse with long fast
@@ -377,8 +382,6 @@ export class EnvironmentFx {
   private readonly waterfallSites = new Map<string, { x: number; y: number; z: number; scale: number }[]>();
   lightningFlash: THREE.PointLight | null = null;
   lightningTimer = 4 + Math.random() * 6;
-  stormRainCanvas: HTMLCanvasElement | null = null;
-  stormRainCtx: CanvasRenderingContext2D | null = null;
   stormLightningFlashEl: HTMLDivElement | null = null;
   stormLightningFlashOpacity = 0;
   lightningLightPool: THREE.PointLight | null = null;
@@ -1010,13 +1013,12 @@ export class EnvironmentFx {
     const wrap = document.createElement('div');
     wrap.id = 'storm-weather-overlay';
     wrap.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:50;overflow:hidden;';
-    const cvs = document.createElement('canvas');
-    cvs.id = 'storm-rain-canvas';
-    cvs.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
+    // No 2D rain canvas here since the rain became 3D shells (storm-16): it was
+    // an extra composited full-screen layer and a 2D context per match that
+    // drew nothing. The soft-light flash div below IS live.
     const flash = document.createElement('div');
     flash.id = 'storm-lightning-flash';
     flash.style.cssText = 'position:absolute;inset:0;background:#9fc4e6;opacity:0;mix-blend-mode:soft-light;';
-    wrap.appendChild(cvs);
     wrap.appendChild(flash);
     const hud = document.getElementById('hud');
     if (hud?.parentNode) {
@@ -1024,86 +1026,41 @@ export class EnvironmentFx {
     } else {
       document.body.appendChild(wrap);
     }
-    this.stormRainCanvas = cvs;
-    this.stormRainCtx = cvs.getContext('2d');
     this.stormLightningFlashEl = flash;
   }
 
   computeStormWeatherIntensity(): number {
     if (!this.view.state) return 0;
-    const player = this.view.getLocalPlayer();
-    if (!player) return 0;
-    const dist = dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ);
-
-    const safeRadius = Math.max(1, this.view.state.storm.safeRadius);
-    const phase = this.view.state.storm.phase;
-    const maxPhase = Math.max(1, STORM_PHASES.length);
-    const phaseBoost = Math.min(1, phase / maxPhase) * 0.2;
-    const shrinkBoost = this.view.state.storm.shrinking ? 0.08 + this.view.state.storm.shrinkProgress * 0.08 : 0;
-
-    // Crossfade across a ±30m band at the wall — weather used to snap from
-    // 0.24 to 0.52+ the frame you crossed the boundary.
-    const distOutside = dist - safeRadius;
-    const outsideBlend = THREE.MathUtils.smoothstep(distOutside, -30, 30);
-    const stormDepth = THREE.MathUtils.clamp(distOutside / 240, 0, 1);
-    const edgeFade = THREE.MathUtils.clamp((dist / safeRadius - 0.84) / 0.16, 0, 1);
-    const insideIntensity = Math.min(0.24, edgeFade * 0.14 + shrinkBoost * 0.45);
-    const outsideIntensity = Math.min(1, 0.52 + phaseBoost + shrinkBoost + stormDepth * 0.32);
-    const base = THREE.MathUtils.lerp(insideIntensity, outsideIntensity, outsideBlend);
-
-    // A SHOWER CARRIES ITS OWN SKY.
-    //
-    // The rain reaches ~150 m inboard of the wall on purpose, so sailing up to a
-    // squall means a wet approach rather than a dry frame followed by a wall of
-    // water. But only the RAIN reached in: the sky number stayed near 0.10 out
-    // there, so drops fell through cloudless noon blue — the single most
-    // dream-logic frame in the game. The overcast now reaches inboard on the
-    // same ramp the rain does, a little ahead of it, so the cloud arrives first
-    // and the drops fall out of something.
-    const wallOvercast = this.stormWallNearness() * (0.34 + (phase / maxPhase) * 0.14);
-    return finiteClamp(Math.max(base, wallOvercast), 0, 1, 0);
+    const anchor = this.view.getWeatherAnchor();
+    if (!anchor) return 0;
+    return stormWeatherIntensityAt(
+      anchor.x,
+      anchor.z,
+      this.view.state.storm,
+      STORM_PHASES.length,
+      this.stormWallNearness(),
+    );
   }
 
   /** 0 = far from the storm boundary, 1 = at it. Shared by the rain and the
-   *  overcast so a squall's water and its cloud arrive on the same ramp. */
+   *  overcast so a squall's water and its cloud arrive on the same ramp. Read
+   *  off the WEATHER ANCHOR, the same position the intensities use (storm-14):
+   *  these two ramps used to disagree by hundreds of metres while spectating. */
   private stormWallNearness(): number {
-    const wallDist = this.cameraDistanceToStormWall();
-    return wallDist < 0 ? 0 : 1 - THREE.MathUtils.smoothstep(wallDist, 30, 165);
+    return stormWallNearness01(this.anchorDistanceToStormWall());
   }
 
   computeStormRainIntensity(): number {
     if (!this.view.state) return 0;
-    const player = this.view.getLocalPlayer();
-    if (!player) return 0;
-
-    const dist = dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ);
-    const safeRadius = Math.max(1, this.view.state.storm.safeRadius);
-    const phase = this.view.state.storm.phase;
-    const maxPhase = Math.max(1, STORM_PHASES.length);
-
-    // Rain builds across the wall band instead of popping on at the boundary.
-    const distOutside = dist - safeRadius;
-    const outsideBlend = THREE.MathUtils.smoothstep(distOutside, -25, 35);
-    const stormDepth = THREE.MathUtils.clamp(distOutside / 220, 0, 1);
-    const shrinkBoost = this.view.state.storm.shrinking ? 0.08 : 0;
-    const fromPlayer = outsideBlend <= 0.001
-      ? 0
-      : Math.min(1, 0.34 + stormDepth * 0.42 + (phase / maxPhase) * 0.2 + shrinkBoost) * outsideBlend;
-
-    // Weather AT the wall. Sailing up to the boundary from the safe side used to
-    // put you a few metres from a squall line in dead-still air with a dry deck:
-    // the rain only existed once you had crossed. The squall reaches inboard of
-    // its own edge, so the drops (and the rain audio, which rides the same
-    // number) fade in over the last ~150m of the approach.
-    const wallFloor = this.stormWallNearness() * (0.30 + (phase / maxPhase) * 0.16);
-    const wanted = Math.max(fromPlayer, wallFloor);
-
-    // Hard gate on the sky above: rain may never outrun the cloud that is
-    // supposed to be producing it. The overcast reaches inboard on the same
-    // ramp (see computeStormWeatherIntensity), so this only bites where the two
-    // ramps disagree — and there it is the drops that give way, not the sky.
-    const skyCap = Math.min(1, this.computeStormWeatherIntensity() * 1.3);
-    return finiteClamp(Math.min(wanted, skyCap), 0, 1, 0);
+    const anchor = this.view.getWeatherAnchor();
+    if (!anchor) return 0;
+    return stormRainIntensityAt(
+      anchor.x,
+      anchor.z,
+      this.view.state.storm,
+      STORM_PHASES.length,
+      this.stormWallNearness(),
+    );
   }
 
   // ── Storm rain ────────────────────────────────────────────────────────────
@@ -1606,15 +1563,16 @@ export class EnvironmentFx {
     return Math.min(1, 0.62 + phase01 * 0.32 + (storm.shrinking ? 0.06 : 0));
   }
 
-  /** Distance from the camera to the ring wall (positive either side), or -1
-   *  when there is no ring. Used by the rain floor at the boundary. */
-  private cameraDistanceToStormWall(): number {
+  /** Distance from the WEATHER ANCHOR to the ring wall (positive either side),
+   *  or -1 when there is no ring. Used by the rain floor at the boundary. */
+  private anchorDistanceToStormWall(): number {
     if (!this.view.state) return -1;
     const storm = this.view.state.storm;
-    const cam = this.view.renderer.camera.position;
+    const anchor = this.view.getWeatherAnchor();
+    if (!anchor) return -1;
     return finiteCircleBoundaryDistance(
-      cam.x,
-      cam.z,
+      anchor.x,
+      anchor.z,
       storm.centerX,
       storm.centerZ,
       storm.safeRadius,
@@ -1655,12 +1613,6 @@ export class EnvironmentFx {
     // not the LOCAL player is standing in the rain, so it is driven here (the one
     // weather hook that runs every frame) ahead of the density early-out below.
     this.updateStormFront();
-
-    // Clear the legacy canvas overlay once (kept in the DOM for compatibility).
-    if (this.stormRainCanvas && this.stormRainCtx && this.stormRainCanvas.width > 0) {
-      this.stormRainCtx.clearRect(0, 0, this.stormRainCanvas.width, this.stormRainCanvas.height);
-      this.stormRainCanvas.width = 0;
-    }
 
     // Ease the cover state either way so a cave mouth fades rather than cuts.
     const coverTarget = intensity > 0.001 ? this.computeRainCoverTarget() : 0;
@@ -2124,13 +2076,16 @@ export class EnvironmentFx {
     // Renderer.applyBoltFill's job, every frame, on the fill light.
 
     const phase = this.view.state.storm.phase;
-    const player = this.view.getLocalPlayer();
-    const playerDist = player
-      ? dist2D(player.position.x, player.position.z, this.view.state.storm.centerX, this.view.state.storm.centerZ)
+    // Same weather anchor as the rain and the overcast (storm-14): while
+    // spectating, lightning belongs to the sky the CAMERA is under, not to the
+    // one over the body it left behind.
+    const weatherAnchor = this.view.getWeatherAnchor();
+    const anchorDist = weatherAnchor
+      ? dist2D(weatherAnchor.x, weatherAnchor.z, this.view.state.storm.centerX, this.view.state.storm.centerZ)
       : 0;
-    const outsideStorm = !!player
-      && playerDist > this.view.state.storm.safeRadius;
-    const nearStormWall = !!player && Math.abs(playerDist - this.view.state.storm.safeRadius) < 85;
+    const outsideStorm = !!weatherAnchor
+      && anchorDist > this.view.state.storm.safeRadius;
+    const nearStormWall = !!weatherAnchor && Math.abs(anchorDist - this.view.state.storm.safeRadius) < 85;
 
     // Keep lightning tied to the storm front, not clear water well inside the safe zone.
     if (!this.stormDemo && !outsideStorm && !(this.view.state.storm.shrinking && nearStormWall) && phase < 2) return;
@@ -2182,10 +2137,10 @@ export class EnvironmentFx {
       const blen = Math.hypot(bdx, bdz) || 1;
       this.boltDirX = bdx / blen;
       this.boltDirZ = bdz / blen;
-      // Thunder boom matched to the actual strike distance.
-      const localPlayerForThunder = this.view.getLocalPlayer();
-      if (localPlayerForThunder) {
-        this.view.audio.playThunder(dist2D(localPlayerForThunder.position.x, localPlayerForThunder.position.z, lx, lz));
+      // Thunder boom matched to the actual strike distance, measured from the
+      // ears — which are at the weather anchor, not on a corpse.
+      if (weatherAnchor) {
+        this.view.audio.playThunder(dist2D(weatherAnchor.x, weatherAnchor.z, lx, lz));
       }
 
       const baseCooldown = this.stormDemo

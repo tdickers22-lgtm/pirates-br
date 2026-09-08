@@ -349,6 +349,22 @@ export function getSharedSoundEngine(): SoundEngine | null {
  *
  * `worldFilter` is the submerged muffle; `busBed` lets booms duck the ambience.
  */
+
+/** The furthest a strike is still heard, and the furthest its delay is grown
+ *  from. The old ceiling was 900 m of distance and 1.5 s of delay, so every
+ *  bolt past ~515 m cracked EARLY — the far side of a 900 m ring flashed and
+ *  boomed within a second and a half of each other, which is a strike two
+ *  streets away, not one across the bay (storm-21). */
+export const THUNDER_MAX_DISTANCE_M = 1500;
+
+/** Seconds between a strike's flash and its thunder: distance over the speed of
+ *  sound, clamped to the audible range. 900 m -> 2.62 s. Pure so the storm
+ *  suite can grade it with no AudioContext. */
+export function thunderArrivalDelay(distanceM: number): number {
+  const d = Number.isFinite(distanceM) ? Math.max(0, Math.min(THUNDER_MAX_DISTANCE_M, distanceM)) : 0;
+  return d / 343;
+}
+
 export class SoundEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -384,7 +400,6 @@ export class SoundEngine {
   private rainBody: LoopVoice | null = null;
   private submergedBed: LoopVoice | null = null;
   private nextGullAt = 0;
-  private nextThunderAt = 0;
   // Interior flooding slosh (single instance)
   private flooding: RichLoopVoice | null = null;
   // Per-burning-ship fire crackle loops (capped at 2; oldest is stolen)
@@ -2288,16 +2303,11 @@ export class SoundEngine {
     } else {
       this.nextGullAt = 0;
     }
-    // Sparse storm thunder, distance-varied.
-    if (storm > 0.45) {
-      if (this.nextThunderAt === 0) this.nextThunderAt = now + 3 + Math.random() * 6;
-      else if (now >= this.nextThunderAt) {
-        this.playThunder(80 + Math.random() * 620);
-        this.nextThunderAt = now + 6 + Math.random() * 8;
-      }
-    } else {
-      this.nextThunderAt = 0;
-    }
+    // NO PHANTOM THUNDER (storm-10). There used to be a second thunder source
+    // here: a roll every 6-14 s at a made-up distance whenever the storm number
+    // passed 0.45, with no flash, no bolt and no relation to the strike
+    // EnvironmentFx sounds for real — and the two doubled up on each other.
+    // Thunder now has exactly one cause: a bolt, at the bolt's own distance.
     this.tickSchedulers(now);
   }
 
@@ -2694,19 +2704,21 @@ export class SoundEngine {
 
   /** One thunder crack + rolling rumble. distance in metres varies delay, brightness, and length. */
   playThunder(distance = 300): void {
+    // (delay/brightness live in thunderArrivalDelay + THUNDER_MAX_DISTANCE_M
+    //  below, so scripts/test-storm-visuals.mjs can grade them with no ctx.)
     this.unlock();
     if (!this.ctx || !this.busDry) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
-    const d = THREE.MathUtils.clamp(distance, 20, 900);
+    const d = THREE.MathUtils.clamp(distance, 20, THUNDER_MAX_DISTANCE_M);
     const g = 1 / (1 + d / 220);
     const near = d < 120;
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = near ? 1600 : 400 + (1 - d / 900) * 600;
+    filter.frequency.value = near ? 1600 : 400 + (1 - d / THUNDER_MAX_DISTANCE_M) * 600;
     filter.Q.value = 0.5;
     this.connectGroup(filter, null, 0.35);
-    const at = now + THREE.MathUtils.clamp(d / 343, 0, 1.5);
+    const at = now + thunderArrivalDelay(distance);
     if (near) {
       this.playNoise(at, 0.08, 5000, 0.7, 0.34 * g, 'highpass', filter);
       this.playTone(at, 90, 40, 0.5, 0.4 * g, 'sine', 0.004, filter);

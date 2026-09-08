@@ -566,6 +566,8 @@ export class Game {
   /** Dev-only detached camera. Inert unless enableFreeCam() is called (e.g. from
    *  a visual-tour harness via window.__piratesBR); normal play never touches it. */
   private freeCam: { pos: THREE.Vector3; yaw: number; pitch: number } | null = null;
+  /** Reused by getWeatherAnchor(): read every frame, allocates nothing. */
+  private readonly weatherAnchor = { x: 0, z: 0 };
   private readonly debugPerfEnabled = (() => {
     const params = new URLSearchParams(window.location.search);
     return params.has('debug') || params.has('perf');
@@ -649,7 +651,6 @@ export class Game {
   private visibleInteractKind: ClientInteractKind | null = null;
   private pendingInteractFromUi = false;
   private pendingLaunchFromUi = false;
-  private readonly stormRingPositions = new Float32Array(96 * 3);
   private readonly tempProjectilePos = new THREE.Vector3();
   private readonly tempKegPos = new THREE.Vector3();
   private readonly tempSharkPos = new THREE.Vector3();
@@ -815,6 +816,7 @@ export class Game {
       disposeSceneObject: (root) => this.disposeSceneObject(root),
       getLocalPlayer: () => this.getLocalPlayer(),
       getTrackedShip: () => this.getTrackedShip(),
+      getWeatherAnchor: () => this.getWeatherAnchor(),
     };
   }
 
@@ -1017,22 +1019,14 @@ export class Game {
 
   private readonly mermaidGroup = buildMermaidMesh();
   private mermaidAnchor: { x: number; z: number; shipId: string } | null = null;
-  private readonly stormRing = new THREE.LineLoop(
-    new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({ color: 0x587ca5, transparent: true, opacity: 0.58 }),
-  );
-  // (The old fogged MeshBasicMaterial storm-wall cylinder lived here. EnvironmentFx
-  // owns the weather at the ring now, and the legacy wall was laying a faint pale
-  // veil across everything at range from under it.)
-  private readonly stormHalo = new THREE.Mesh(
-    new THREE.TorusGeometry(1, 0.05, 8, 64),
-    new THREE.MeshBasicMaterial({
-      color: 0x25344f,
-      transparent: true,
-      opacity: 0.18,
-      depthWrite: false,
-    }),
-  );
+  // (The old fogged MeshBasicMaterial storm-wall cylinder lived here, then a
+  // TorusGeometry "halo" and a LineLoop ring outlived it. Both are gone
+  // (storm-11): scaling a 0.05 m tube by the safe radius made the halo a 47 m
+  // dark band hanging at 9 m over open water, never frustum-culled and never
+  // invisible, and the ring sat at y=0.55 — under the crests, so it blinked in
+  // and out of the swell. EnvironmentFx's front owns the boundary now: its
+  // sea-level mist band IS the line, and it rides the water because it is
+  // drawn on the water.)
 
   async init() {
     document.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -1092,15 +1086,7 @@ export class Game {
     this.renderer.scene.add(this.envFx.windWisps);
     this.renderer.scene.add(this.mermaidGroup);
     this.mermaidGroup.visible = false;
-    this.renderer.scene.add(this.stormRing);
-    this.renderer.scene.add(this.stormHalo);
     this.envFx.initWindWisps();
-    this.stormRing.geometry.setAttribute('position', new THREE.BufferAttribute(this.stormRingPositions, 3));
-    this.stormRing.position.y = 0.55;
-    this.stormRing.frustumCulled = false;
-    this.stormHalo.rotation.x = Math.PI * 0.5;
-    this.stormHalo.renderOrder = 2;
-    this.stormHalo.frustumCulled = false;
     this.setLoading(68, 'Reading the weather glass...');
     await this.yieldForLoadingPaint();
 
@@ -2826,7 +2812,6 @@ export class Game {
     this.seaEvents.syncPois(nextSnapshot.seaPois);
     this.seaEvents.syncWreck(nextSnapshot.wreck ?? null, nextSnapshot.islands);
     this.syncChests();
-    this.updateStormRing();
     this.updateDamageFx();
     this.syncTradeUi(nextSnapshot);
     const localPlayer = this.getLocalPlayer();
@@ -3928,10 +3913,6 @@ export class Game {
     this.syncSharks(dt);
     this.syncWildlife(dt);
     this.updateEnvironmentLod();
-    // Per-frame so the ring/halo track the shrink smoothly instead of stepping
-    // only when snapshots arrive.
-    this.updateStormRing();
-    this.stormHalo.rotation.z = this.ocean.getTime() * 0.12;
     this.stormWeatherIntensity = finiteClamp(this.envFx.computeStormWeatherIntensity(), 0, 1, 0);
     // (renderer storm weather is applied via updateWaterEnvironment below —
     // calling updateStormWeather here too did the same work twice per frame.
@@ -3995,9 +3976,6 @@ export class Game {
     this.ocean.setStormIntensity(this.stormVisualIntensity);
     this.envFx.updateStormRain3D(dt, this.stormRainIntensity);
     this.envFx.updateStormLightningFlash(dt);
-    const stormW = this.stormWeatherIntensity;
-    const haloMat = this.stormHalo.material as THREE.MeshBasicMaterial;
-    haloMat.opacity = 0.08 + stormW * 0.16;
     // Feed the local vitals watch BEFORE the fx update consumes them: storm,
     // fire and drowning bill in fractions of a point per snapshot, and nothing
     // in the client was announcing that kind of damage at all.
@@ -6140,25 +6118,33 @@ export class Game {
     // kill feed printed every NPC's words twice on screen at once.
   }
 
-  private updateStormRing() {
-    if (!this.state) return;
-
-    const segments = this.stormRingPositions.length / 3;
-    const safeRadius = Math.max(16, this.state.storm.safeRadius);
-    for (let index = 0; index < segments; index++) {
-      const angle = (index / segments) * Math.PI * 2;
-      const offset = index * 3;
-      this.stormRingPositions[offset] = this.state.storm.centerX + Math.cos(angle) * safeRadius;
-      this.stormRingPositions[offset + 1] = 0;
-      this.stormRingPositions[offset + 2] = this.state.storm.centerZ + Math.sin(angle) * safeRadius;
+  /**
+   * WHERE THE WEATHER IS MEASURED FROM (storm-14).
+   *
+   * The overcast, the rain, the wall-nearness ramp and the lightning gate used
+   * to disagree: three of them read the local PLAYER and one read the CAMERA.
+   * That is invisible for as long as the camera is on the player's head, and
+   * wrong for the whole endgame — spectating from the ring centre with your
+   * body 300 m outside painted the corpse's downpour over a calm frame.
+   *
+   * One rule: whenever the camera has LEFT the body (free cam, or the spectate
+   * camera once it has begun to rise) the weather is the camera's; otherwise it
+   * is the player's. Returns a reused object — this is read every frame.
+   */
+  getWeatherAnchor(): { x: number; z: number } {
+    const detached = this.freeCam !== null || this.spectateLift > 0.001;
+    if (!detached) {
+      const player = this.getLocalPlayer();
+      if (player) {
+        this.weatherAnchor.x = player.position.x;
+        this.weatherAnchor.z = player.position.z;
+        return this.weatherAnchor;
+      }
     }
-    const positionAttr = this.stormRing.geometry.getAttribute('position') as THREE.BufferAttribute;
-    positionAttr.needsUpdate = true;
-    this.stormRing.material.opacity = 0.42 + Math.sin(this.ocean.getTime() * 3.6) * 0.08;
-
-    this.stormHalo.position.set(this.state.storm.centerX, 9, this.state.storm.centerZ);
-    this.stormHalo.scale.set(safeRadius, safeRadius, 1);
-    this.stormHalo.visible = true;
+    const cam = this.renderer.camera.position;
+    this.weatherAnchor.x = cam.x;
+    this.weatherAnchor.z = cam.z;
+    return this.weatherAnchor;
   }
 
   /** Dev/tour hook: detach the camera and place it in the world. Call
@@ -7407,7 +7393,12 @@ export class Game {
             // Submerged = the breach sits at/below the LIVE wave surface — computed
             // per-hole (not a hardcoded per-section flag) so a holed, submerged bow
             // or stern jets water just like the port/starboard breaches do.
-            const waveY = gerstnerHeight(this.tempRenderPos.x, this.tempRenderPos.z, this.ocean.getTime(), WAVE_PARAMS, storminess);
+            // The SEA-STATE, not the weather number (storm-15): storminess is
+            // the overcast ramp (0.34-0.52 at the wall, 1 only deep outside)
+            // and feeding it to the Gerstner field asked whether the breach was
+            // under a swell nobody is drawing. getSurfaceY is the height of the
+            // water actually on screen, at this hole, this frame.
+            const waveY = this.ocean.getSurfaceY(this.tempRenderPos.x, this.tempRenderPos.z);
             if (this.tempRenderPos.y > waveY + 0.2) continue;
             hole.anchor.getWorldDirection(this.tempHudVector);
             // INBOARD (HULLGEO-01, ships-19). A breach below the waterline is
