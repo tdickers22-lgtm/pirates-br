@@ -179,6 +179,13 @@ const FRONT_TOP_Y = FRONT_HEIGHT - FRONT_BASE_DROP;
  *  before the last row of quads regardless. A gradient that ends before the
  *  surface does has no edge in it. */
 const FRONT_TOP_ROOM = 1.22 + 0.55;
+/** The front's atmospheric dissolve used to run off its own hand-picked
+ *  0.0013/m while the sea, the islands and the sky ran off the scene's fog
+ *  density. It reads u_fogDensity now; this gain is what makes the default
+ *  0.00112 land on the curve the bank shipped with (0.00112 x 1.16 = 0.0013),
+ *  so the change is "the bank now thickens with the weather", not "the bank
+ *  moved". */
+const FRONT_FOG_GAIN = 1.16;
 
 const STORM_FRONT_VERT = /* glsl */`
   varying vec3 v_world;
@@ -198,6 +205,7 @@ const STORM_FRONT_FRAG = /* glsl */`
   uniform float u_night;
   uniform vec3  u_horizon;
   uniform vec3  u_fog;
+  uniform float u_fogDensity;
   uniform float u_flash;
   uniform vec2  u_flashDir;
   varying vec3  v_world;
@@ -248,6 +256,33 @@ const STORM_FRONT_FRAG = /* glsl */`
     float topY = min(baseY * 2.4 + 42.0, ${(FRONT_TOP_Y / (FRONT_TOP_ROOM * 1.12)).toFixed(1)});
     if (y > topY * ${FRONT_TOP_ROOM.toFixed(3)}) discard;
 
+    // ── AND NEITHER IS THE FAR SIDE OF THE RING (storm-13) ────────────────
+    // Everything that attenuates this fragment by RANGE is known here, before
+    // a single noise fetch: the atmospheric dissolve (now the scene's own fog
+    // density, so the bank fades into the same air the sea and the islands do
+    // instead of its own hand-picked curve), the mid-range thinning that stops
+    // the far wall reading as a second wall behind the near one, the front's
+    // development, and the shell's own top fade. Their product is an EXACT
+    // upper bound on alpha, because everything the noise can add tops out at
+    // 1.0 — so discarding on it here changes no pixel and skips the three fbm
+    // fetches (nine value-noise lookups, thirty-six hashes) a fragment used to
+    // pay before finding out it was invisible.
+    float fogAmt = 1.0 - exp(-d * u_fogDensity * ${FRONT_FOG_GAIN.toFixed(2)});
+    float rangeAtt = (1.0 - fogAmt * 0.35)
+                   * (1.0 - smoothstep(380.0, 1500.0, d) * 0.78)
+                   * u_intensity
+                   * (1.0 - smoothstep(0.88, 0.995, v_h));
+    if (rangeAtt < 0.004) discard;
+
+    // DISTANCE LOD ON THE NOISE. Past ~1.1 km the bank is a horizon-band haze
+    // at under a tenth alpha: its 55 m bulges and its curtain columns are not
+    // resolvable, they just cost two more fbm fetches per fragment on the
+    // largest transparent surface in the frame. detail reaches zero BEFORE
+    // the branch is taken, so the cheap path is only ever entered where its
+    // result is weighted out — no arc in the sky where the shader changes
+    // its mind.
+    float detail = 1.0 - smoothstep(700.0, 1100.0, d);
+
     float lobe = fFbm(fp * 0.0060 + u_time * vec2(0.0040, 0.0026));   // ~170m cloud lobes
     // The bottom tier pays for ONE noise field: the front is a full-screen
     // transparent surface when you are up against it, and three fbm fetches per
@@ -257,7 +292,10 @@ const STORM_FRONT_FRAG = /* glsl */`
 #ifdef FRONT_CHEAP
     float lobe2 = 1.0 - lobe;
 #else
-    float lobe2 = fFbm(fp * 0.0185 - u_time * vec2(0.0090, 0.0055));  // ~55m bulges
+    float lobe2 = 1.0 - lobe;
+    if (detail > 0.001) {
+      lobe2 = mix(lobe2, fFbm(fp * 0.0185 - u_time * vec2(0.0090, 0.0055)), detail);  // ~55m bulges
+    }
 #endif
 
     // baseY and topY are computed at the top of main(), before the noise, so the
@@ -284,7 +322,10 @@ const STORM_FRONT_FRAG = /* glsl */`
 #ifdef FRONT_CHEAP
     float colN = 0.30 + 0.40 * lobe;
 #else
-    float colN = fFbm(vec2(dot(fp, vec2(0.052, 0.047)), y * 0.055 - u_time * 0.55));
+    float colN = 0.30 + 0.40 * lobe;
+    if (detail > 0.001) {
+      colN = mix(colN, fFbm(vec2(dot(fp, vec2(0.052, 0.047)), y * 0.055 - u_time * 0.55)), detail);
+    }
 #endif
     float curtain = (1.0 - smoothstep(bBase * 0.55, bBase * 1.20, y))
                   * smoothstep(-3.0, 6.0, y)
@@ -317,12 +358,10 @@ const STORM_FRONT_FRAG = /* glsl */`
 
     float a = clamp(wSum, 0.0, 1.0);
 
-    // Whatever alpha would still be alive at the last row of quads is a hard
-    // geometric arc in the sky, so nothing is allowed to reach it. The cap on
-    // topY already lands the bank's fade ~30 m under the rim; this is the rail
-    // that holds even if the noise fields are retuned. v_h is the shell's own
-    // parametric height, so it stays true if FRONT_HEIGHT ever moves.
-    a *= 1.0 - smoothstep(0.88, 0.995, v_h);
+    // (The rail that keeps any alpha off the shell's last row of quads —
+    //  1 - smoothstep(0.88, 0.995, v_h) — is folded into rangeAtt at the top of
+    //  main(), where it also helps the early discard. v_h is the shell's own
+    //  parametric height, so it stays true if FRONT_HEIGHT ever moves.)
 
     // Lightning lights the bank from inside, brightest toward the bolt's bearing.
     if (u_flash > 0.001) {
@@ -334,16 +373,11 @@ const STORM_FRONT_FRAG = /* glsl */`
     }
 
     // Range dissolve: the far side of a 900m ring must read as haze, never as a
-    // second crisp wall standing behind the near one.
-    float fogAmt = 1.0 - exp(-d * 0.0013);
+    // second crisp wall standing behind the near one. The whole range/intensity
+    // product was hoisted to the top of main() as rangeAtt (storm-13); this
+    // is the same arithmetic, applied once.
     col = mix(col, u_fog, fogAmt * 0.85);
-    a *= 1.0 - fogAmt * 0.35;
-    // Deep inside the safe zone the ring is DISTANT weather, not something that
-    // may lay a veil across half a fair sky: past ~400m the front thins to a
-    // horizon-band haze, and the far side of the ring never reads as a second
-    // wall standing behind the near one.
-    a *= 1.0 - smoothstep(380.0, 1500.0, d) * 0.78;
-    a *= u_intensity;
+    a *= rangeAtt;
     if (a < 0.004) discard;
     gl_FragColor = vec4(col, a);
     // Same omission as the ocean's (graphics-26): a ShaderMaterial gets no tone
@@ -1532,6 +1566,7 @@ export class EnvironmentFx {
         u_night: { value: 0 },
         u_horizon: { value: new THREE.Color(0xc7e6fa) },
         u_fog: { value: new THREE.Color(0x7ba3bd) },
+        u_fogDensity: { value: 0.00112 },
         u_flash: { value: 0 },
         u_flashDir: { value: new THREE.Vector2(0, 1) },
       },
@@ -1601,6 +1636,9 @@ export class EnvironmentFx {
     u.u_night.value = atmosphere.nightFactor;
     (u.u_horizon.value as THREE.Color).copy(atmosphere.horizonColor);
     (u.u_fog.value as THREE.Color).copy(atmosphere.fogColor);
+    // The bank dissolves into the SCENE's air, not its own: night and storm
+    // thicken the fog and the front thickens with them (storm-13, liveplay-14).
+    u.u_fogDensity.value = Math.max(0.0002, atmosphere.fogDensity);
     // The strike lights the bank from inside — same envelope the sky dome and
     // the sea glint already run off, so all three flash on the same frame.
     u.u_flash.value = this.boltEnvelope(this.boltAge);

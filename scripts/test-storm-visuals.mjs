@@ -152,5 +152,34 @@ if (se) {
     se.THUNDER_MAX_DISTANCE_M === 1500, `got ${se.THUNDER_MAX_DISTANCE_M}`);
 }
 
+// ── storm-13: the far side of the ring stops paying for noise it cannot show ─
+// The front is a full-ring transparent surface measured at 27-43% of frame
+// layers in FAIR WEATHER (scripts/perf-storm-front-gate.mjs). Everything that
+// attenuates a fragment by range is knowable before the first noise fetch, so
+// that is where the bound and its discard have to be.
+const frag = envSrc.slice(envSrc.indexOf('const STORM_FRONT_FRAG'), envSrc.indexOf('// Lightning channel budget'));
+const mainBody = frag.slice(frag.indexOf('void main()'));
+const iRange = mainBody.indexOf('float rangeAtt');
+const iDiscard = mainBody.indexOf('if (rangeAtt <');
+const iFirstFbm = mainBody.indexOf('fFbm(');
+expect('storm-13 the range/intensity bound is computed before any fbm fetch',
+  iRange > 0 && iFirstFbm > 0 && iRange < iFirstFbm, `rangeAtt@${iRange} fbm@${iFirstFbm}`);
+expect('storm-13 an invisible fragment is discarded before any fbm fetch',
+  iDiscard > 0 && iDiscard < iFirstFbm, `discard@${iDiscard} fbm@${iFirstFbm}`);
+expect('storm-13 the bound is an EXACT upper bound (alpha is only ever scaled by it once)',
+  (mainBody.match(/smoothstep\(380\.0, 1500\.0, d\)/g) || []).length === 1
+  && /a \*= rangeAtt;/.test(mainBody)
+  && !/a \*= u_intensity;/.test(mainBody));
+expect('storm-13 the two detail fields are range-faded, so far fragments pay one fbm',
+  /float detail = 1\.0 - smoothstep\(/.test(mainBody)
+  && (mainBody.match(/if \(detail > 0\.001\) \{/g) || []).length === 2
+  && mainBody.indexOf('float detail') < iFirstFbm);
+expect('storm-13/liveplay-14 the bank dissolves into the SCENE fog, not its own curve',
+  /uniform float u_fogDensity;/.test(frag)
+  && /exp\(-d \* u_fogDensity/.test(mainBody)
+  && /u_fogDensity: \{ value:/.test(envSrc)
+  && /u\.u_fogDensity\.value = Math\.max\(0\.0002, atmosphere\.fogDensity\)/.test(envSrc),
+  'the front still runs off a hand-picked 0.0013/m');
+
 console.log(failures === 0 ? `\nPASS storm visuals (${failures} failures)` : `\nFAIL storm visuals (${failures} failures)`);
 process.exit(failures === 0 ? 0 : 1);
