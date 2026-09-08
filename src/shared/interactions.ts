@@ -13,15 +13,25 @@ const GOLD_HOARDER_REACH_BONUS = 0.8;
 /** Swim out at least this far before the mermaid will carry you home. */
 const MERMAID_RETURN_MIN_DISTANCE = 45;
 
-export function toShipLocalPoint(position: { x: number; z: number }, ship: Pick<Ship, 'position' | 'rotation'>): ShipLocalPoint {
+/** Hull-local (x, z) written into a caller-owned point. Same maths as
+ *  `toShipLocalPoint`, no allocation — for per-frame callers such as the
+ *  avatar foot-plant solve, which asks twice per visible pirate per frame. */
+export function toShipLocalPointInto(
+  out: ShipLocalPoint,
+  position: { x: number; z: number },
+  ship: Pick<Ship, 'position' | 'rotation'>,
+): ShipLocalPoint {
   const dx = position.x - ship.position.x;
   const dz = position.z - ship.position.z;
   const cos = Math.cos(ship.rotation);
   const sin = Math.sin(ship.rotation);
-  return {
-    x: dx * cos - dz * sin,
-    z: dx * sin + dz * cos,
-  };
+  out.x = dx * cos - dz * sin;
+  out.z = dx * sin + dz * cos;
+  return out;
+}
+
+export function toShipLocalPoint(position: { x: number; z: number }, ship: Pick<Ship, 'position' | 'rotation'>): ShipLocalPoint {
+  return toShipLocalPointInto({ x: 0, z: 0 }, position, ship);
 }
 
 export function toShipWorldPoint(local: ShipLocalPoint, ship: Pick<Ship, 'position' | 'rotation'>): ShipLocalPoint {
