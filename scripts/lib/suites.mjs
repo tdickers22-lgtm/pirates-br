@@ -235,6 +235,10 @@ export const LOGIC = [
   // watertight stitch and the baked vertex AO. MUTATE=analytic|tier|nostitch
   // proves each half can fail.
   quick(tsx('test-terrain-grid.mjs')),
+  // GRID-01 slice c (w7.2): one apron for the walk floor, the swim seabed and
+  // the terrain raycast. MUTATE=footprint|seabed|raylimit restores each of the
+  // three old cut-offs and each turns it red.
+  quick(tsx('test-walk-off-edge.mjs')),
   quick(tsx('test-death-causes.mjs')),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
   // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens

@@ -4,6 +4,7 @@ import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRig
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
+import { drawnIslandSurfaceY } from '../../shared/terrainGrid.js';
 import {
   getBridgeDeckY,
   getIslandDistRatio,
@@ -22,6 +23,8 @@ import {
   resolveCaveWallCollision,
   CAVE_WALL_PAD,
   isPointInsideIslandFootprint,
+  WALK_FOOTPRINT_MARGIN,
+  SHORE_APRON_DIST_RATIO,
   sampleLocalWind,
   getCrowNestStandingY,
   getMainMastLocalZ,
@@ -2322,19 +2325,41 @@ export class PhysicsSystem {
    *  footprint (wet-sand walk-in to distRatio ~1.16), so the collision floor
    *  must cover that apron too — inside-footprint-only checks let swimmers
    *  dive straight under the island shell. Returns -Infinity in open water. */
+  /**
+   * The seabed a swimmer is held above. It reads the DRAWN cap now, not the
+   * analytic field cut at a fixed distRatio: the coast wobble bends the rim by
+   * up to ±18% of the radius, so a fixed cut left a band where the body was
+   * clamped 0.3-1.9 m under the surface on a sandbar with no triangles over it
+   * and could not dive (physics-21, 885 probe points). Where the cap ends there
+   * is no floor, which is the honest answer — past the rim the sea is open.
+   * GridGround is a bucket lookup over ~8 triangles, built once per island.
+   */
   private swimSeabedY(islands: Island[], x: number, z: number): number {
     let floor = -Infinity;
     for (const island of islands) {
       const { distRatio } = getIslandDistRatio(island, x, z);
-      if (distRatio > 1.22) continue;
-      floor = Math.max(floor, getIslandSurfaceY(island, x, z));
+      if (distRatio > SHORE_APRON_DIST_RATIO * 1.2) continue;
+      const drawn = drawnIslandSurfaceY(island, x, z);
+      if (drawn !== null && drawn > floor) floor = drawn;
     }
     return floor;
   }
 
+  /**
+   * The island whose walk floor the player is on. The margin is the APRON, not
+   * the polar footprint: rocky coasts hold terrain to distRatio ~1.14 and cliff
+   * plinths to ~1.05, so a test at exactly 1.0 switched the floor off while the
+   * drawn shore face under the pirate was still 2-20 m above the sea and
+   * dropped her THROUGH it (physics-28: 60 of 305 dry-edge columns left the
+   * walker over a metre inside above-water rock for 10+ ticks). Out at the
+   * apron the shared field is already under the waterline, so nobody gains a
+   * step on water — they walk down the sand and the swim branch takes them.
+   * Client prediction (Game.ts) uses the same margin or the two disagree.
+   */
   private findPlayerIsland(player: Player, islands: Island[]): Island | null {
     for (const island of islands) {
-      if (isPointInsideIslandFootprint(island, player.position.x, player.position.z, 0)) return island;
+      const apron = WALK_FOOTPRINT_MARGIN * Math.max(island.radius, 1);
+      if (isPointInsideIslandFootprint(island, player.position.x, player.position.z, apron)) return island;
     }
     return null;
   }

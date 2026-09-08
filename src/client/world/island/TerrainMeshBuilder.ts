@@ -8,7 +8,7 @@
  */
 import * as THREE from 'three';
 import { getIslandCoastWeights } from '../../../shared/utils/index.js';
-import { buildTerrainGrid, coastWobble } from '../../../shared/terrainGrid.js';
+import { buildTerrainGrid, coastWobble, setIslandGround } from '../../../shared/terrainGrid.js';
 import type { Island } from '../../../shared/types/index.js';
 import {
   buildCaveCutout, caveCutoutGlsl, caveCutoutUniforms, type CaveCutout,
@@ -430,6 +430,9 @@ export function buildTerrainMesh(ctx: IslandBuildCtx): TerrainBuild {
    *  faces' ROCK recolor in the color pass below (they'd read as floating
    *  grass-green slabs otherwise) and lets decor placement skip the trench. */
   const mouthCarveDepth = field.mouthCarveDepth;
+  // Publish the grid the player is looking at, so the shared sampler the client
+  // prediction and the entity seats read is THIS mesh and nothing rebuilds it.
+  setIslandGround(island.id, field.positions, field.indices);
   const fieldAO = field.ao;
   const ringStart = field.ringStart;
   const ringSegments = field.ringSegments;

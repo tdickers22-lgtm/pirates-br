@@ -481,3 +481,35 @@ export function buildIslandGridGround(island: Island): { grid: TerrainGrid; grou
   const grid = buildTerrainGrid(island);
   return { grid, ground: new GridGround(grid.positions, grid.indices) };
 }
+
+/**
+ * ONE GridGround per island, for the whole process.
+ *
+ * The world is FIXED (`test-world-fixed.mjs`: every match seed draws the same
+ * Shattered Reach), so an island's grid is built at most once on the server and
+ * once in the browser — ~15 ms and ~180 KB each, never inside a tick and never
+ * per frame. The client REGISTERS the grid it already built for the mesh rather
+ * than building a second one.
+ */
+const groundCache = new Map<string, GridGround>();
+
+/** Publish the grid the renderer just drew, so nothing builds it twice. */
+export function setIslandGround(islandId: string, positions: Float32Array, indices: Uint32Array): void {
+  groundCache.set(islandId, new GridGround(positions, indices));
+}
+
+/** The drawn ground for one island, built on first ask and kept. */
+export function getIslandGround(island: Island): GridGround {
+  let g = groundCache.get(island.id);
+  if (!g) {
+    const grid = buildTerrainGrid(island);
+    g = new GridGround(grid.positions, grid.indices);
+    groundCache.set(island.id, g);
+  }
+  return g;
+}
+
+/** Drawn ground height at WORLD (x, z) for one island, or null off the cap. */
+export function drawnIslandSurfaceY(island: Island, x: number, z: number): number | null {
+  return getIslandGround(island).heightAt(x - island.position.x, z - island.position.z);
+}

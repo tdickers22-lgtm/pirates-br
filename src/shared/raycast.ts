@@ -8,6 +8,7 @@ import {
   getIslandMaxRadius,
   getIslandSurfaceY,
   isInsideSwimHullFootprint,
+  SHORE_APRON_DIST_RATIO,
 } from './utils/index.js';
 
 interface SurfaceRaycastHit {
@@ -19,8 +20,21 @@ interface SurfaceRaycastHit {
 
 /** Coarse march step over island heightfields — refined by bisection on contact. */
 const TERRAIN_STEP = 1.5;
-/** Matches the shoreline ring PhysicsSystem collides ships against (distRatio 1.02). */
-const TERRAIN_FOOTPRINT_LIMIT = 1.03;
+/** Fine step for the shore band. The coarse 1.5 m step only bisects after a
+ *  SIGN CHANGE, so a rock plinth or a ridge crest thinner than 1.5 m along the
+ *  ray reads as air on both bracketing samples and the ball flies through it
+ *  (physics-34). The apron is where those thin crests live. */
+const TERRAIN_SHORE_STEP = 0.75;
+/** Inside this distRatio the march uses the fine step. */
+const TERRAIN_SHORE_BAND = 1.1;
+/** The march stops caring about terrain past the apron — the SAME apron the
+ *  swim seabed collides to and the terrain grid is now drawn out to. It used to
+ *  stop at 1.03, copied from a ship-collision constant that no longer exists,
+ *  so up to 3.4 m of drawn shore rock (585 of 10,080 probe columns) was
+ *  shoot-through: a pirate on the apron was hittable from the sea and a
+ *  cannonball fired at a cliff plinth buried itself in the island (physics-34).
+ *  Past ~1.15 the shared field is below the waterline, so this costs nothing. */
+const TERRAIN_FOOTPRINT_LIMIT = SHORE_APRON_DIST_RATIO;
 const BISECT_ITERATIONS = 14;
 const HULL_STEP = 0.5;
 
@@ -127,7 +141,9 @@ export function raymarchIslandSurface(
       continue;
     }
 
-    for (let t = tEnter + TERRAIN_STEP; ; t += TERRAIN_STEP) {
+    // Step size follows the ray: fine across the shore band, coarse inland.
+    let step = TERRAIN_STEP;
+    for (let t = tEnter + step; ; t += step) {
       const tSample = Math.min(t, tExit);
       const inside = isInsideIslandTerrain(
         island,
@@ -153,6 +169,12 @@ export function raymarchIslandSurface(
       }
       tPrev = tSample;
       if (tSample >= tExit) break;
+      const { distRatio } = getIslandDistRatio(
+        island,
+        origin.x + direction.x * tSample,
+        origin.z + direction.z * tSample,
+      );
+      step = distRatio <= TERRAIN_SHORE_BAND && distRatio >= 0.9 ? TERRAIN_SHORE_STEP : TERRAIN_STEP;
     }
   }
 
