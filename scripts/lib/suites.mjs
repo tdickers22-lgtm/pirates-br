@@ -100,6 +100,10 @@ export const LOGIC = [
   // skin, stem crossings, deck-vs-breach classification).
   quick(tsx('test-projectile-hull-parity.mjs')),
   quick(tsx('test-locomotion.mjs')),
+  // PRED-01: the shared pirate step (server + client prediction) against a
+  // transcription of the pre-extraction Match block, plus the ack-delay
+  // reconciliation. Logic tier, no stack, ~2 s.
+  quick(tsx('test-prediction.mjs')),
   quick(tsx('test-world-fixed.mjs')),
   // RNG-01: two seeded Matches ticked 90 s side by side, state hashed each
   // second, plus a different-matchId control. ~11 s, so not in the quick tier.

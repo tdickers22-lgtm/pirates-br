@@ -40,7 +40,6 @@ import {
   getShipDeckRaiseAt,
   getShipDeckY,
   getShipCompanionwayConfig,
-  getCrowNestStandingY,
   gerstnerHeight,
   WAVE_PARAMS,
   intersectRaySeaRock,
@@ -78,6 +77,7 @@ import {
   isStandingInFloodedHold,
   isStandingInShipHold,
 } from '../../shared/interactions.js';
+import { stepPirate } from '../../shared/locomotion.js';
 
 // Weathered banner dyes — team identity without the LED-strip look.
 const TEAM_COLORS = [
@@ -2937,120 +2937,24 @@ export class Match {
         this.armShipExitGrace(player, ship, input);
       }
 
-      // On-foot / swim movement
-      const yaw = input.yaw;
-      // The crow's nest is deliberately NOT in this list: PhysicsSystem treats the
-      // basket as a walkable FLOOR (gravity + velocity.y run, the WASD clamp keeps
-      // the lookout on the disc), so a lookout can hop like anywhere else. The helm
-      // still blocks — it pins the body to a station.
-      const jumpBlocked = !!ship && player.atHelm;
-      const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-      const moveZ = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
-      if (player.state === 'swimming') {
-        const pitch = input.pitch;
-        const forwardScale = Math.cos(pitch);
-        const forwardX = Math.sin(yaw) * forwardScale;
-        const forwardY = Math.sin(pitch);
-        const forwardZ = Math.cos(yaw) * forwardScale;
-        const rightX = -Math.cos(yaw);
-        const rightZ = Math.sin(yaw);
-        const forwardIntent = (input.forward ? 1 : 0) - (input.back ? 0.58 : 0);
-        const strafeIntent = (input.right ? 0.72 : 0) - (input.left ? 0.72 : 0);
-        let wishX = 0;
-        let wishY = 0;
-        let wishZ = 0;
-        if (forwardIntent !== 0) {
-          const forwardScaleY = forwardIntent > 0 ? 1.18 : 0.6;
-          wishX += forwardX * forwardIntent;
-          wishY += forwardY * forwardScaleY * Math.abs(forwardIntent);
-          wishZ += forwardZ * forwardIntent;
-        }
-        if (strafeIntent !== 0) {
-          wishX += rightX * strafeIntent;
-          wishZ += rightZ * strafeIntent;
-        }
-        if (input.jump) wishY += 0.95;
-        if (input.sailLower) wishY -= 0.95;
-        // While plunging from a fall/cannon launch, don't let upward swim input
-        // steal the plunge momentum. The player can still dive deeper or steer
-        // horizontally; once the plunge slows, jump becomes a swim-up again.
-        const plunging = player.velocity.y < -1.5;
-        if (plunging && wishY > 0) wishY = 0;
-
-        const swimLen = Math.sqrt(wishX * wishX + wishY * wishY + wishZ * wishZ);
-        if (swimLen > 0.001) {
-          const swimSpeed = PLAYER.SWIM_SPEED * (input.forward ? 1.06 : 1);
-          const targetVx = (wishX / swimLen) * swimSpeed;
-          const targetVz = (wishZ / swimLen) * swimSpeed;
-          const targetVy = (wishY / swimLen) * PLAYER.SWIM_SPEED * 0.92;
-          // Blend toward swim input rather than replacing velocity outright. This
-          // preserves cannon-launch / cliff-jump plunge momentum even if the player
-          // is holding space when they hit the water — they slow first, then rise.
-          const horizBlend = 1 - Math.exp(-dt * 9);   // ~0.11 s response on X/Z
-          const vertBlend  = 1 - Math.exp(-dt * 3.5); // ~0.29 s response on Y
-          player.velocity.x += (targetVx - player.velocity.x) * horizBlend;
-          player.velocity.z += (targetVz - player.velocity.z) * horizBlend;
-          player.velocity.y += (targetVy - player.velocity.y) * vertBlend;
-          player.position.x += player.velocity.x * dt;
-          player.position.z += player.velocity.z * dt;
-        }
-        // No-input case is intentionally left to PhysicsSystem so cannon-launch and
-        // cliff-jump plunges keep their downward momentum. Killing velocity here at
-        // 0.82 per tick = 0.82^60/sec destroyed plunges in a single frame.
-      } else {
-        const len = Math.sqrt(moveX * moveX + moveZ * moveZ) || 1;
-        const nx = moveX / len, nz = moveZ / len;
-        const speed = PLAYER.MOVE_SPEED * (player.crouching ? 0.55 : 1);
-
-        if (moveX !== 0 || moveZ !== 0) {
-          const cosY = Math.cos(yaw);
-          const sinY = Math.sin(yaw);
-          player.velocity.x = (sinY * nz - cosY * nx) * speed;
-          player.velocity.z = (cosY * nz + sinY * nx) * speed;
-          player.position.x += player.velocity.x * dt;
-          player.position.z += player.velocity.z * dt;
-        } else {
-          player.velocity.x = 0;
-          player.velocity.z = 0;
-        }
-
-        const verticalReady = player.velocity.y <= 0.2;
-        let grounded = false;
-        if (ship && player.onShipId === ship.id && player.atCrowNest) {
-          // A lookout stands on the nest basket, not the deck — getShipFloorY would
-          // report the deck ~15m below and read the lookout as airborne, so Space
-          // did nothing up there. Ground against the basket floor instead.
-          const nestFloorY = ship.position.y + getCrowNestStandingY(SHIP_STATS[ship.type]);
-          grounded = verticalReady && Math.abs(player.position.y - nestFloorY) < 0.24;
-        } else if (ship && player.onShipId === ship.id) {
-          const floorY = getShipFloorYAt(player.position, ship);
-          grounded = verticalReady && Math.abs(player.position.y - floorY) < 0.24;
-        } else {
-          for (const island of this.state.islands) {
-            if (isPointInsideIslandFootprint(island, player.position.x, player.position.z, 0)) {
-              grounded = verticalReady && Math.abs(player.position.y - getIslandSurfaceY(island, player.position.x, player.position.z)) < 0.24;
-              if (grounded) break;
-            }
-            if (island.dock) {
-              const dx = player.position.x - island.dock.position.x;
-              const dz = player.position.z - island.dock.position.z;
-              const cos = Math.cos(island.dock.rotation);
-              const sin = Math.sin(island.dock.rotation);
-              const localX = dx * cos - dz * sin;
-              const localZ = dx * sin + dz * cos;
-              if (Math.abs(localX) <= island.dock.width * 0.5 + 0.45 && Math.abs(localZ) <= island.dock.length * 0.5 + 0.45) {
-                grounded = verticalReady && Math.abs(player.position.y - (island.dock.position.y + 0.14)) < 0.22;
-                if (grounded) break;
-              }
-            }
-          }
-        }
-
-        // Jump
-        if (input.jumpPressed && !jumpBlocked && grounded) {
-          player.velocity.y = PLAYER.JUMP_FORCE;
-        }
-      }
+      // ── ON-FOOT / SWIM MOVEMENT — ONE COPY, IN shared/locomotion.ts ────────
+      // This block used to be integrated here and nowhere else, which is why the
+      // client could not predict its own body: it had no way to run the server's
+      // arithmetic (PRED-01 / netcode-35). It moved verbatim into `stepPirate`;
+      // the server calls it, the client's reconciliation calls it, and
+      // scripts/test-prediction.mjs holds the pre-extraction block and proves a
+      // 600-tick tape is still bit-identical through it.
+      //
+      // The crow's nest is deliberately NOT excluded: PhysicsSystem treats the
+      // basket as a walkable FLOOR (gravity + velocity.y run, the WASD clamp
+      // keeps the lookout on the disc), so a lookout can hop like anywhere else.
+      // The helm still blocks — it pins the body to a station.
+      const onOwnShip = ship && player.onShipId === ship.id ? ship : null;
+      stepPirate(player, input, dt, {
+        ship: onOwnShip,
+        islands: this.state.islands,
+        jumpBlocked: !!ship && player.atHelm,
+      });
     }
 
     const cutlassHandled = this.updateCutlassAttack(player, input, dt);
