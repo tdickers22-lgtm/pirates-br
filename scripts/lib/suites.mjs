@@ -323,6 +323,19 @@ export const LOGIC = [
   //                                 that reaches the canopy is a global dimmer wearing occlusion's name. Also
   //                                 pins the zero-cost claim — no new attribute, same mutated array (w7.3)
   quick(tsx('test-prop-ground-ao.mjs')),
+  //   test-story-lazy             — LOD-01: the fifteen story tableaux (~17 MB, 25-48k tris each) leave
+  //                                 preloadWorld and load through AssetLibrary.ensure() behind a seated,
+  //                                 named placeholder. Graded because both halves are silent when wrong: a
+  //                                 leak back into the world set only shows as a longer countdown, and a
+  //                                 placeholder that is not seated/named only shows in the floater census
+  //                                 four suites later (w7.4)
+  quick(tsx('test-story-lazy.mjs')),
+  //   test-ocean-tier             — OCEANTIER-01: the ocean fragment shader is the heaviest in the game over
+  //                                 45-55% of the frame and was IDENTICAL on low and high. Grades the
+  //                                 OCEAN_TIER define on both ocean programs, the static fill-op count per
+  //                                 tier (897 / 1369 / 1709), and the parity rule that the VERTEX stage has
+  //                                 no tiers — one displaced surface, shared with the physics (w7.4)
+  quick(tsx('test-ocean-tier.mjs')),
   //   check-hud-ids               — every id the client reads by string exists in index.html, and no id inside
   //                                 the HUD block is driven by nothing. TypeScript cannot see through
   //                                 getElementById('x'), so a renamed id used to type-check and then silently
