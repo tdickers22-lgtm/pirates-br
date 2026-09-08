@@ -82,6 +82,11 @@ export const LOGIC = [
   // deleted halo/ring/rain-canvas, and the storm front + sky shader terms read
   // back out of the shipped GLSL. 0.2 s, no stack.
   quick(tsx('test-storm-visuals.mjs')),
+  // [I.3] the five authored weapon GLBs must land in the envelope the
+  // primitive-era viewmodel constants (muzzleTipFor, the hand grips, the near
+  // plane) were measured in — the logic-tier half of test-near-plane-clearance.
+  // Mutation: PIRATES_BR_MUTATE_VIEWMODEL=nofit.
+  quick(tsx('test-viewmodel-envelope.mjs')),
   // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
   // deadline must be read inside a row or the 2 ms budget is a fiction.
   quick(tsx('test-bathymetry-budget.mjs')),

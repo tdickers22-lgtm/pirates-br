@@ -31,7 +31,7 @@ const HERO_WEAPON_FILES: ReadonlySet<string> = new Set([
  * material would draw that cutlass through the hull. Geometry and the atlas
  * texture stay shared — one upload, one program.
  */
-function cloneHeroWeapon(weaponId: string): THREE.Group | null {
+function cloneHeroWeaponRaw(weaponId: string): THREE.Group | null {
   if (!HERO_WEAPON_FILES.has(weaponId) || !assets.has(weaponId as AssetName)) return null;
   const root = assets.clone(weaponId as AssetName);
   if (!root) return null;
@@ -53,10 +53,108 @@ function cloneHeroWeapon(weaponId: string): THREE.Group | null {
   return root;
 }
 
+/** The authored weapon, fitted onto the frame of the primitive it replaces. */
+function cloneHeroWeapon(weaponId: string): THREE.Group | null {
+  const root = cloneHeroWeaponRaw(weaponId);
+  if (!root) return null;
+  const fit = heroWeaponFit(weaponId);
+  if (!fit) return root;
+  // A wrapper group carries the fit, so every node name, userData flag and
+  // child transform the viewmodel and the scope reader address is untouched.
+  const fitted = new THREE.Group();
+  root.scale.multiplyScalar(fit.scale);
+  root.position.copy(fit.offset);
+  fitted.add(root);
+  return fitted;
+}
+
+/**
+ * THE HERO GLB IS FITTED TO THE FRAME IT REPLACES (review-4 P0, w5.3 slice c).
+ *
+ * The docstring above promises the authored files arrive "in the SAME frame as
+ * the primitive fallback … so the viewmodel does not move when the file lands".
+ * They do not. Measured against the primitives they replace: the flintknock GLB
+ * is 1.142 m stem to stern where the primitive is 0.569, and the flintlock's
+ * butt sits 0.442 m behind the grip where the primitive's sits 0.310. The
+ * viewmodel turns the weapon by rotation.y = PI, so a longer BUTT walks
+ * straight into the camera: with the primitive-era 1.2 scale still applied,
+ * test-near-plane-clearance opened a 140,583 px hole and the aiming hand came
+ * to 0.0506 m of the eye, inside the 0.1 near plane PLAN section 7 pins.
+ *
+ * Rather than hand-tune five more constants (gate-4 tried a flat 0.92 and only
+ * halved the hole, because the miss is in the length AND the pivot), the frame
+ * is DERIVED: fit the hero's bounding box onto the primitive's along the
+ * weapon's own long axis — match both extents there, centre the other two — so
+ * the authored mesh occupies exactly the envelope every primitive-era constant
+ * (muzzleTipFor, the hand grips, the near-plane clearance) was measured
+ * against. The primitive is built once per weapon id for the measurement and
+ * cached; it never reaches a scene.
+ */
+const heroFitCache = new Map<string, { scale: number; offset: THREE.Vector3 }>();
+
+/**
+ * The fit itself, as a pure function of two boxes, so a logic-tier gate can
+ * apply the SHIPPED formula to the real GLB bounds without a GL context.
+ */
+export function fitBoxOnto(
+  heroBox: THREE.Box3,
+  primBox: THREE.Box3,
+): { scale: number; offset: THREE.Vector3; axis: 'x' | 'y' | 'z' } {
+  const heroSize = heroBox.getSize(new THREE.Vector3());
+  const primSize = primBox.getSize(new THREE.Vector3());
+  // The long axis is the weapon's own: Z for a barrel, Y for a blade.
+  const axis: 'x' | 'y' | 'z' = primSize.z >= primSize.y && primSize.z >= primSize.x
+    ? 'z'
+    : (primSize.y >= primSize.x ? 'y' : 'x');
+  const scale = heroSize[axis] > 1e-4 ? primSize[axis] / heroSize[axis] : 1;
+  const heroCentre = heroBox.getCenter(new THREE.Vector3());
+  const primCentre = primBox.getCenter(new THREE.Vector3());
+  const offset = new THREE.Vector3(
+    primCentre.x - heroCentre.x * scale,
+    primCentre.y - heroCentre.y * scale,
+    primCentre.z - heroCentre.z * scale,
+  );
+  // On the long axis, match the EXTENTS rather than the centre: that is the
+  // one that decides how far the butt reaches back toward the eye.
+  offset[axis] = primBox.min[axis] - heroBox.min[axis] * scale;
+  // …and whatever the long axis is, nothing may end up further back along −Z
+  // than the primitive: the viewmodel turns the weapon by rotation.y = PI, so
+  // the weapon's own −Z is the direction of the player's eye. On a gun this is
+  // already exact (Z is the long axis); on the cutlass, whose long axis is the
+  // blade, it slides a 15 mm wider guard forward instead of into the camera.
+  const fittedMinZ = heroBox.min.z * scale + offset.z;
+  if (fittedMinZ < primBox.min.z) offset.z += primBox.min.z - fittedMinZ;
+  return { scale, offset, axis };
+}
+
+/** The primitive envelope a hero file has to land in — built once, never drawn. */
+export function primitiveWeaponBox(weaponId: WeaponInstance['weaponId']): THREE.Box3 {
+  const primitive = makePrimitiveWeaponMesh(weaponId);
+  primitive.updateMatrixWorld(true);
+  return new THREE.Box3().setFromObject(primitive);
+}
+
+export function heroWeaponFit(weaponId: string): { scale: number; offset: THREE.Vector3 } | null {
+  const cached = heroFitCache.get(weaponId);
+  if (cached) return cached;
+  const hero = cloneHeroWeaponRaw(weaponId);
+  if (!hero) return null;
+  hero.updateMatrixWorld(true);
+  const fit = fitBoxOnto(
+    new THREE.Box3().setFromObject(hero),
+    primitiveWeaponBox(weaponId as WeaponInstance['weaponId']),
+  );
+  heroFitCache.set(weaponId, fit);
+  return fit;
+}
+
 export function makeHeldWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
   const hero = cloneHeroWeapon(weaponId);
   if (hero) return hero;
+  return makePrimitiveWeaponMesh(weaponId);
+}
 
+function makePrimitiveWeaponMesh(weaponId: WeaponInstance['weaponId']): THREE.Group {
   const group = new THREE.Group();
   const woodMat = new THREE.MeshStandardMaterial({ color: 0x6a4322, roughness: 0.95 });
   const steelMat = new THREE.MeshStandardMaterial({ color: 0xb9c2c9, roughness: 0.45, metalness: 0.75 });

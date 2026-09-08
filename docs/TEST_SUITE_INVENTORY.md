@@ -97,6 +97,13 @@ minute rather than the twentieth.
 | `test-fill-budget` | stencil census: sky layers ≤ 0.55, whole/blended overdraw ceilings | yes | wave 0.4; **has `--mutate`** (sky `depthTest=false` must FAIL); slow |
 | `test-storm-wall` | the old storm-wall-probe as a gate: night sea ≤ sky luma, noon sea chroma ≤ 1.3× sky | yes | wave 0.4; **red by design**; its noon-chroma half is the SEA's body colour (storm-12), not STORMVIS-01, so lane 5.4 does not close it; slow |
 | `test-storm-visuals` | STORMVIS-01: the one weather anchor, the leak gate's sea-state, thunder delay, the deleted halo/ring/rain-canvas, and the storm-front + sky storm terms read back out of the shipped GLSL | yes | lane 5.4; logic tier, quick (0.2 s), no stack |
+| `test-viewmodel-envelope` | the five authored weapon GLBs land in the primitive envelope the viewmodel constants were measured in; nothing reaches back toward the eye | yes | fixup wave 4; logic tier, quick (0.3 s), no stack; **has `PIRATES_BR_MUTATE_VIEWMODEL=nofit`** (the unfitted hero must FAIL: flintknock overhangs 382 mm) |
+| `test-shadow-bias` | SHADOW-01: cascade split/bias table, peter-panning and acne bounds | yes | lane 4.3; logic tier, quick, no stack |
+| `test-ship-geometry-hash` | the drawn hull geometry is byte-identical to a pinned baseline per class | yes | lane 4.2; logic tier; re-pin deliberately, never silently |
+| `test-static-serving` | the built client is served with the headers and precompressed siblings it ships | yes | lane 5.1; logic tier |
+| `test-hero-assets` | HERO GLB census: triangle band, one textured material, white COLOR_0, node names, pivots, no skins, draw split, far LOD | yes | lane 5.3; logic tier, plain node; **has `PIRATES_BR_MUTATE_HERO`** |
+| `test-wildlife-flee` | WILD-01: an animal that is shot at leaves, and the flee state is the server's | yes | lane 4.5; logic tier |
+| `test-cave-audio` | CAVE-01: the drip bed and the cave reverb send are driven by the shipped cave state | yes | lane 5.5; logic tier; **has `PIRATES_BR_MUTATE_DRIP=grid`** |
 
 ## Server suites (3)
 
