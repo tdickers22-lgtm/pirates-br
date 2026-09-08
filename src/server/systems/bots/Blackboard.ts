@@ -4,6 +4,7 @@ import {
 } from '../../../shared/constants/index.js';
 import { dist2D } from '../../../shared/utils/index.js';
 import { countOpenHoles } from '../../../shared/interactions.js';
+import type { BotPersonality } from './personalities.js';
 
 export type BotBehavior = 'patrol' | 'chase' | 'engage' | 'flee' | 'loot' | 'plunder' | 'return';
 
@@ -91,6 +92,9 @@ export interface CrewState {
   captainId: string;
   /** Crew skill tier (BOT_TIERS). One tier per crew, not per body. */
   difficulty: 'easy' | 'medium' | 'hard';
+  /** WHAT THIS CAPTAIN WANTS (BOT_PERSONALITIES) — fight range, the hull
+   *  fraction she runs at, her appetite for loot, and how she closes. */
+  personality: BotPersonality;
   behavior: BotBehavior;
   targetShipId: string | null;
   targetIslandId: string | null;

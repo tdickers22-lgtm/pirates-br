@@ -28,7 +28,12 @@ function expect(label, condition, detail = '') {
   else { console.error(`  ✗ FAIL: ${label}${detail ? `\n     ${detail}` : ''}`); failures += 1; }
 }
 
-const ARC_SECONDS = 420;
+// THE WHOLE ARC, not a slice of it: "three branches per match" is a claim about
+// a match. A crew sunk in the opening never got one, so she is graded on a
+// lower bar (she must at least have left idle) and the crews that lived the arc
+// carry the assertion.
+const ARC_SECONDS = 900;
+const FULL_LIFE = 240;
 const match = new Match({ matchId: 'bot-intent-probe', botCount: 9 });
 match.state.phase = 'playing';
 
@@ -60,17 +65,20 @@ console.log(`\nArc ${match.t.toFixed(0)} s, ${crews.size} bot crews`);
 expect('the probe actually watched a lobby', crews.size >= 6, `crews=${crews.size}`);
 
 let thinnest = Infinity; let thinnestId = '';
-let mute = [];
+const thin = [];
+const mute = [];
 for (const [shipId, row] of crews) {
   const life = row.lastSeen - row.bornAt;
   if (row.branches.size < thinnest) { thinnest = row.branches.size; thinnestId = shipId; }
   const owed = Math.floor(life / 120);
+  const wanted = life >= FULL_LIFE ? 3 : 2;
+  if (row.branches.size < wanted) thin.push(`${shipId} life=${life.toFixed(0)}s branches=[${[...row.branches].join(', ')}] wanted ${wanted}`);
   if (row.lines < Math.max(1, owed)) mute.push(`${shipId} life=${life.toFixed(0)}s lines=${row.lines} owed=${Math.max(1, owed)}`);
   console.log(`  ${shipId}: branches=[${[...row.branches].join(', ')}] lines=${row.lines} life=${life.toFixed(0)}s`);
 }
 
-expect('every crew shows at least three distinct branches of the tree',
-  thinnest >= 3, `thinnest crew ${thinnestId} showed ${thinnest === Infinity ? 0 : thinnest}`);
+expect('every crew that sails the arc shows at least three distinct branches of the tree',
+  thin.length === 0, thin.slice(0, 4).join('\n     ') || `thinnest crew ${thinnestId} showed ${thinnest === Infinity ? 0 : thinnest}`);
 expect('every crew that lives two minutes says something out loud',
   mute.length === 0, mute.slice(0, 4).join('\n     '));
 expect('the intent log is bounded, drained or not',

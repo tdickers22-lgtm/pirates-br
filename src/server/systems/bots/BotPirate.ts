@@ -9,7 +9,8 @@ import { applyShipRudderSteering } from '../PhysicsSystem.js';
 import type { WeaponSystem } from '../WeaponSystem.js';
 import type { Blackboard } from './Blackboard.js';
 import type { BotState, CrewState } from './Blackboard.js';
-import { BOT_ANCHOR_RAISE_FACTOR, BOT_SAIL_RAISE_RATE, BOT_SAIL_LOWER_RATE, CANNON_GRAVITY, CANNON_VY_BOOST, FIREARM_RANGE, FIREARM_AIM_HEIGHT, BOT_RETALIATE_SECONDS, BOT_FIREARM_TURN_RATE, BOT_FIREARM_AIM_TOLERANCE, BOT_AMMO_LULL_SECONDS, BOT_AMMO_TOPUP_SECONDS, botMayFireCannons, isMooredAtBerth } from './Blackboard.js';
+import { BOT_TIERS, BOT_GUNNERY_HOLD } from './personalities.js';
+import { hullTotal, BOT_ANCHOR_RAISE_FACTOR, BOT_SAIL_RAISE_RATE, BOT_SAIL_LOWER_RATE, CANNON_GRAVITY, CANNON_VY_BOOST, FIREARM_RANGE, FIREARM_AIM_HEIGHT, BOT_RETALIATE_SECONDS, BOT_FIREARM_TURN_RATE, BOT_FIREARM_AIM_TOLERANCE, BOT_AMMO_LULL_SECONDS, BOT_AMMO_TOPUP_SECONDS, botMayFireCannons, isMooredAtBerth } from './Blackboard.js';
 import type { BotCrew } from './BotCrew.js';
 
 /**
@@ -131,8 +132,25 @@ export class BotPirate {
         const d = Math.sqrt(dx * dx + dz * dz);
         const angleToTarget = Math.atan2(dx, dz);
 
-        const orbitRange = 90;
-        if (d > orbitRange * 1.45) {
+        // HOW THIS CAPTAIN CLOSES (BOTFUN-01). One flat 90 m circle for nine
+        // crews is what made every bot fight look like the same fight.
+        //  rake          — cross her stern: hold the broadside band, but bias
+        //                  the turn toward the quarter she cannot answer from.
+        //  weather_gauge — keep the wind, fight long, never let her close.
+        //  ram           — a wounded hull is boarded, not shelled.
+        const orbitRange = crew.personality.orbitRange;
+        const manoeuvre = crew.personality.manoeuvre;
+        const charging = manoeuvre === 'ram' && hullTotal(target) < 1.6;
+        // A CREW ALREADY IN GUN RANGE FIGHTS WHERE SHE STANDS. The preferred
+        // band is where a captain SAILS to, not a rule that turns her bow-on to
+        // a hull she could already hit: a Corsair at 110 m used to break off the
+        // broadside to close 36 m and stopped shooting while she did it
+        // (test-bot-crew-roles: hull a fired nothing in thirty seconds).
+        if (charging) {
+          // Straight down her throat; the collision and the boarders do the rest.
+          this.steerToward(ship, angleToTarget, dt, t);
+          this.setSail(ship, 0.85, dt);
+        } else if (d > orbitRange * 1.45 && d > BOT_GUNNERY_HOLD) {
           this.steerToward(ship, angleToTarget, dt, t);
           this.setSail(ship, 0.5, dt);
         } else if (d < orbitRange * 0.7) {
@@ -140,7 +158,13 @@ export class BotPirate {
           this.setSail(ship, 0.22, dt);
         } else {
           // Broadside — turn perpendicular to target so cannons face them.
-          this.steerToward(ship, angleToTarget + Math.PI * 0.5, dt, t);
+          // A raker leans the circle 25 degrees toward the target's stern; a
+          // weather-gauge captain leans the other way, upwind, to hold the
+          // advantage she picked the range for.
+          const sternBias = manoeuvre === 'rake'
+            ? Math.sign(angleWrap(target.rotation - angleToTarget)) * 0.44
+            : manoeuvre === 'weather_gauge' ? -0.3 : 0;
+          this.steerToward(ship, angleToTarget + Math.PI * 0.5 + sternBias, dt, t);
           this.setSail(ship, 0.16, dt);
         }
         this.weighAnchor(ship, dt);
@@ -161,7 +185,8 @@ export class BotPirate {
         const baseDelay = crew.difficulty === 'hard' ? 0.75
           : crew.difficulty === 'medium' ? 2.0
           : 3.5;
-        const minDelay = baseDelay * botPhaseScale(BOT_CANNON_CADENCE_BY_PHASE, storm.phase);
+        const minDelay = baseDelay * BOT_TIERS[crew.difficulty].cadenceMult
+          * botPhaseScale(BOT_CANNON_CADENCE_BY_PHASE, storm.phase);
         const inCannonRange = d < (crew.difficulty === 'hard' ? 270 : 245);
         // The peace covers the guns too — an unprovoked bot shadows its neighbour
         // with the ports shut. Timer is held just short of ready so the window

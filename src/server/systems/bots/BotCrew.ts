@@ -6,7 +6,7 @@ import { dist2D, angleWrap } from '../../../shared/utils/index.js';
 import { countOpenHoles } from '../../../shared/interactions.js';
 import type { Blackboard } from './Blackboard.js';
 import type { BotState, CrewState, ProvokedShip, BotIntent } from './Blackboard.js';
-import { intentLine } from './personalities.js';
+import { intentLine, BOT_TIERS } from './personalities.js';
 import { BOT_DAMAGE_CONTROL_WATER, FIREARM_RANGE, hullTotal, botMayFireCannons, BOT_LURE_BRAWL_RADIUS, BOT_LURE_STATION_RADIUS } from './Blackboard.js';
 
 /**
@@ -262,8 +262,21 @@ export class BotCrew {
     // of her planking does not care which side of the wall she drowns on, and
     // the ring branch used to win this tie and send her back into a fight with
     // her target still set.
+    // HOW MUCH SHE WILL TAKE is the captain's, not a constant: the Coward
+    // breaks off at half planking and the Wrecker keeps coming at a ninth. A
+    // flat 0.2 for nine crews is why every bot fight ended the same way — and
+    // why a whole peaceful crew could sail an arc without ever changing rung.
     const avgHull = hullTotal(ship) / 4;
-    if (avgHull < 0.2 && crew.behavior !== 'flee') {
+    const retreatHull = crew.personality.retreatHull;
+    const tier = BOT_TIERS[crew.difficulty];
+    // Breaches alone are not a reason to run — a sound hull with three holes in
+    // her is a hull with a carpenter on her, and a crew that broke off for that
+    // stopped fighting the moment the first ball landed (test-bot-crew-roles
+    // caught exactly that: hull a never fired a shot). She runs when the water
+    // is winning: past her captain's threshold, or holed past her tier's
+    // patience AND already down to sixty percent.
+    const holed = countOpenHoles(ship) > tier.retreatHoles && avgHull < 0.6;
+    if ((avgHull < retreatHull || holed) && crew.behavior !== 'flee') {
       crew.behavior = 'flee';
       crew.targetShipId = null;
       crew.stateTimer = 15;
@@ -306,7 +319,10 @@ export class BotCrew {
     }
 
     if (crew.stateTimer <= 0) {
-      crew.stateTimer = 6 + this.bb.rng() * 8;
+      // A hard crew re-reads the water every 4-7 s; an easy one every 10-14.
+      // One rng draw either way, so the seeded stream keeps its shape.
+      const [rescanMin, rescanMax] = tier.rescanInterval;
+      crew.stateTimer = rescanMin + this.bb.rng() * (rescanMax - rescanMin);
 
       // Find best target: prefer ships with humans aboard.
       const humanShipIds = new Set<string>();
@@ -462,7 +478,8 @@ export class BotCrew {
         crew.targetShipId = null;
         crew.patrolAngle = this.lureBearing(ship)! + (this.bb.rng() - 0.5) * 0.3;
         this.leaf(crew, 'raid', t);
-      } else if (nearIsland && nearIslandDist < 540 && this.bb.rng() < 0.28) {
+      } else if (nearIsland && nearIslandDist < 540
+        && this.bb.rng() < Math.min(0.9, tier.lootAppetite * crew.personality.lootMult * 0.55)) {
         crew.behavior = 'loot';
         crew.targetIslandId = nearIsland.id;
         this.leaf(crew, 'loot', t);

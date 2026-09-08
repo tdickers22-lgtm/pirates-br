@@ -1,3 +1,4 @@
+import { personalityFor } from './bots/personalities.js';
 import type { Player, Ship, Island, SeaRock, StormState } from '../../shared/types/index.js';
 import { randAngle } from '../../shared/utils/index.js';
 import type { WeaponSystem } from './WeaponSystem.js';
@@ -105,6 +106,10 @@ export class BotSystem {
         memberIds: [],
         captainId: player.id,
         difficulty,
+        // The captain's temperament, hashed off her spawn berth and the order
+        // she was enlisted in — deterministic, and never a draw from the match
+        // rng stream (that order is the replay; see the comment above).
+        personality: personalityFor(this.bb.crews.size, ship.position.x, ship.position.z),
         behavior: 'patrol',
         targetShipId: null,
         targetIslandId: null,
