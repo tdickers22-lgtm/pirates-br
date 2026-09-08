@@ -461,13 +461,33 @@ function findSteepAscent(pool) {
         if (gmag < 1.0) continue;
         const ux = gxg / gmag;
         const uz = gzg / gmag;
-        // Measure the ACTUAL rise/run over a per-tick-sized uphill step.
+        // Measure the ACTUAL rise/run over a per-tick-sized uphill step — and
+        // then keep measuring, out to the distance the walk test actually
+        // covers. A single 0.12 m probe is not a cliff: a walker standing at
+        // the LIP of one reads 4.1 rise/run over 12 cm and then 0.45 over the
+        // next seven metres, which is a legitimate stroll across a shoulder,
+        // and grading it as "the player climbed a cliff face" is how this
+        // assertion went red when wave 9.4's second cave mouth reshaped a
+        // hillside and handed the search a steeper lip than the real cliff it
+        // used to find. The face has to STAY a face: every probe along the
+        // uphill ray, over the ~7 m the 90-tick walk can cover, must be steep.
         const s = 0.12;
         const yUp = getIslandSurfaceY(island, x + ux * s, z + uz * s);
         if (yUp < 1.0) continue;
         const smallSlope = (yUp - y) / s;
-        if (smallSlope > 1.7 && (!best || smallSlope > best.slope)) {
-          best = { island, at: { x, z }, up: { x: ux, z: uz }, slope: smallSlope };
+        if (smallSlope <= 1.7) continue;
+        let sustained = smallSlope;
+        let broken = false;
+        for (let d = 0.5; d <= 7.0; d += 0.5) {
+          const yA = getIslandSurfaceY(island, x + ux * (d - 0.5), z + uz * (d - 0.5));
+          const yB = getIslandSurfaceY(island, x + ux * d, z + uz * d);
+          const seg = (yB - yA) / 0.5;
+          if (yB < 1.0 || seg <= 1.7) { broken = true; break; }
+          sustained = Math.min(sustained, seg);
+        }
+        if (broken) continue;
+        if (!best || sustained > best.slope) {
+          best = { island, at: { x, z }, up: { x: ux, z: uz }, slope: sustained };
         }
       }
     }
