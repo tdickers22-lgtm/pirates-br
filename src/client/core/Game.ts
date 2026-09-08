@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, WEAPONS, WILDLIFE } from '../../shared/constants/index.js';
+import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, SHOP_PRICES, SHOP_QUANTITIES, WEAPONS, WILDLIFE, type ShopLine } from '../../shared/constants/index.js';
 import type {
   BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId,
 } from '../../shared/types/index.js';
@@ -358,6 +358,11 @@ export function pointerLockHintFor(station: 'helm' | 'cannon' | 'foot'): string 
   if (station === 'cannon') return 'Click to look around · move the mouse to aim';
   return 'Click to look around · WASD to move';
 }
+
+/** ECON-01: the order of the Tallyman's shelf. ONE declaration, read by the
+ *  shop page's rows AND by the digit that buys one, so key [3] is chainshot in
+ *  the panel, in the send and in the gate. */
+export const SHOP_LINE_ORDER = Object.keys(SHOP_PRICES) as ShopLine[];
 
 /** ECON-01: the Tallyman's shelf names, and why a purchase was refused. Pure so
  *  the wording is gradeable without a stack. */
@@ -1053,6 +1058,7 @@ export class Game {
       getUpgradePresentation: (type) => this.getUpgradePresentation(type),
       playIslandArrivalFanfare: () => this.playIslandArrivalFanfare(),
       renderMapWheel: (player) => this.map.renderMapWheel(player),
+      renderShopWheel: (player) => this.renderShopWheel(player),
       renderTreasureInventoryChart: (player, mapped, hoarder) => this.map.renderTreasureInventoryChart(player, mapped, hoarder),
       returnToLobbyAfterLoss: (kills, gold, reason) => this.returnToLobbyAfterLoss(kills, gold, reason),
       toolWheelSlot: (tool) => this.toolWheelSlot(tool),
@@ -1995,6 +2001,54 @@ export class Game {
       this.wheelHoverSlot = Math.round(ang / (Math.PI * 2 / 10)) % 10; // 10-slice wheel
     });
   }
+
+  /** ECON-01 SEND HALF (w6.1 slice d, deferred there, landed by the final
+   *  sweep). The Tallyman's shelf is the third page of the supply wheel — the
+   *  wheel is already a modal layer that releases pointer lock and already
+   *  routes the digits, so the table costs no new key and nothing on the
+   *  legend it does not already promise. Rows are ordered by the SHOP_PRICES
+   *  declaration so a digit means the same line every time. */
+  private renderShopWheel(player: Player) {
+    const hoarder = this.state ? findNearbyGoldHoarder(this.state.islands, player) : null;
+    const signature = `${hoarder ? hoarder.island.id : ''}|${player.gold}`;
+    if (signature === this.shopWheelSignature) return;
+    this.shopWheelSignature = signature;
+    const list = this.ui.shopWheelList;
+    list.textContent = '';
+    if (!hoarder) {
+      const empty = document.createElement('div');
+      empty.className = 'mw-empty';
+      empty.textContent = `No ${BROKER_NAME} in reach — his table is on the isles marked with a coin.`;
+      list.appendChild(empty);
+      return;
+    }
+    SHOP_LINE_ORDER.forEach((line, index) => {
+      const price = SHOP_PRICES[line];
+      const qty = SHOP_QUANTITIES[line] ?? 1;
+      const affordable = player.gold >= price;
+      const entry = document.createElement('div');
+      entry.className = `mw-entry${affordable ? '' : ' mw-dim'}`;
+      const digit = document.createElement('span');
+      digit.className = 'mw-digit';
+      digit.textContent = String(index + 1);
+      const name = document.createElement('span');
+      name.textContent = `${qty > 1 ? `${qty}x ` : ''}${SHOP_LINE_LABEL[line] ?? line}`;
+      name.style.flex = '1';
+      const cost = document.createElement('span');
+      cost.textContent = `${price}g`;
+      cost.style.color = affordable ? '#f0c86a' : '#b06a5c';
+      entry.append(digit, name, cost);
+      // The server is the only authority on whether the sale happens: a row a
+      // pirate cannot afford is still clickable, and comes back as the amber
+      // 'not_enough_gold' refusal at the prompt like every other refused press.
+      entry.addEventListener('click', () => { this.pendingShopLineFromUi = line; });
+      list.appendChild(entry);
+    });
+  }
+
+  /** Row clicked on the shop page; drained on the next input frame. */
+  private pendingShopLineFromUi: ShopLine | null = null;
+  private shopWheelSignature = '';
 
   /** Use/equip a supply-wheel slot (shared by click and hover-release). */
   private activateWheelSlot(slot: number) {
@@ -3259,6 +3313,14 @@ export class Game {
       // Quest-map equip (maps wheel page): digit index or clicked row → the
       // held chart's island id rides ONE input as a server one-shot.
       const selectMapIndex = this.input.consumeSelectMapIndex();
+      // Tallyman purchase (shop wheel page): digit index or clicked row. It is
+      // its own ClientMsg, not a PlayerInput field, because the server answers
+      // it out loud on 'shop_bought' whether it sold or refused.
+      const shopIndex = this.input.consumeShopLineIndex();
+      const shopLine = this.pendingShopLineFromUi
+        ?? (shopIndex !== null ? SHOP_LINE_ORDER[shopIndex] ?? null : null);
+      this.pendingShopLineFromUi = null;
+      if (shopLine) this.network.sendShopBuy(shopLine);
       const me = this.getLocalPlayer();
       const selectMapId = this.map.pendingSelectMapFromUi
         ?? (selectMapIndex !== null ? me?.questMaps?.[selectMapIndex] ?? null : null);

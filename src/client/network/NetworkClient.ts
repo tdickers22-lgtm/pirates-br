@@ -616,6 +616,14 @@ export class NetworkClient {
     if (!this.joined) return;
     this.send({ type: 'player_input', ts: Date.now(), payload: input });
   }
+  /** ECON-01 SEND HALF. The server has routed, validated and answered
+   *  'shop_buy' since w6.1, but w6.1 deferred the panel, so nothing in the
+   *  client ever sent one and the whole gold sink was unreachable. Answered on
+   *  'shop_bought' (ok or a refusal reason) — see Game.onShopBought. */
+  sendShopBuy(line: string) {
+    if (!this.joined) return;
+    this.send({ type: 'shop_buy', ts: Date.now(), payload: { line } });
+  }
   sendTradeAction(action: TradeActionPayload) {
     if (!this.joined) return;
     this.send({ type: 'trade_action', ts: Date.now(), payload: action });

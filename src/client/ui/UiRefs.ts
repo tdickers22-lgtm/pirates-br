@@ -37,6 +37,8 @@ export type UiRefs = {
   waterGaugeFill: HTMLDivElement;
   waterGaugeTrend: HTMLSpanElement;
   waterGaugePct: HTMLSpanElement;
+  shopWheel: HTMLDivElement;
+  shopWheelList: HTMLDivElement;
   barrelPanel: HTMLDivElement;
   barrelPanelLoot: HTMLDivElement;
   barrelPanelInventory: HTMLDivElement;
@@ -131,6 +133,8 @@ export function buildUiRefs(): UiRefs {
     waterGaugeFill: requireElement('wg-fill'),
     waterGaugeTrend: requireElement('wg-trend'),
     waterGaugePct: requireElement('wg-pct'),
+    shopWheel: requireElement('shop-wheel'),
+    shopWheelList: requireElement('shop-wheel-list'),
     barrelPanel: requireElement('barrel-panel'),
     barrelPanelLoot: requireElement('barrel-panel-loot'),
     barrelPanelInventory: requireElement('barrel-panel-inventory'),

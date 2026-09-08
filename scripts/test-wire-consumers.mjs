@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// EVERY MESSAGE THE SERVER BROADCASTS REACHES A HUMAN — OR IS DECLARED DARK.
+// EVERY MESSAGE THE SERVER BROADCASTS REACHES A HUMAN, AND EVERY MESSAGE THE
+// SERVER ROUTES CAN BE SENT — OR IS DECLARED DARK / UNSENT.
 //
 // The bug this gate exists for (review-0, P1): lane 1.5 moved the sink announce
 // off `crew_eliminated` onto a NEW `ship_sunk` message, and the client's message
@@ -103,7 +104,10 @@ for (let i = 0; i < hits.length; i += 1) {
 }
 
 // Every `onFoo` a Game-side file assigns: `network.onFoo =`, `this.onFoo =`, …
-const clientFiles = walk('src/client').filter((f) => f !== NETWORK_CLIENT);
+const allClientFiles = walk('src/client');
+// The RECEIVE rule needs assignments made OUTSIDE NetworkClient; the SEND rule
+// below needs NetworkClient too, since that is where every envelope is built.
+const clientFiles = allClientFiles.filter((f) => f !== NETWORK_CLIENT);
 const bound = new Set();
 for (const file of clientFiles) {
   for (const m of read(file).matchAll(/\.(on[A-Z]\w*)\s*=/g)) bound.add(m[1]);
@@ -136,7 +140,91 @@ for (const [type, why] of Object.entries(KNOWN_DARK)) {
     !cases.has(type), why);
 }
 
+// ── 6. THE MIRROR RULE (final-sweep P1) ──────────────────────────────────
+// The rule above was one-directional: it graded that every message the SERVER
+// broadcasts reaches a human, and said nothing about the other half of the
+// wire. So `shop_buy` — ECON-01's whole gold sink — sat with a complete server
+// half (handler, validator, price table, broadcast) and a complete client
+// RECEIVE half (case, feed line, sting, a nine-branch refusal table) and no
+// sender anywhere in src/client. It was the only one of 21 ClientMsgTypes in
+// that state and nothing could see it. Same shape as the rule above:
+//
+//   ClientMsgType 'x' the server routes and validates
+//     → a `type: 'x'` envelope exists in src/client
+//       → the method that builds it is CALLED somewhere (a helper nobody calls
+//         is exactly as unreachable as no helper)
+//
+// Declared exceptions go in KNOWN_UNSENT and are graded both ways, like
+// KNOWN_DARK.
+const KNOWN_UNSENT = {};
+
+const clientUnionStart = typesSrc.indexOf('type ClientMsgType');
+const clientUnionEnd = typesSrc.indexOf(';', clientUnionStart);
+const clientUnion = typesSrc.slice(clientUnionStart, clientUnionEnd);
+const CLIENT_TYPES = [...clientUnion.matchAll(/\|\s*'([a-z_]+)'/g)].map((m) => m[1]);
+expect('the ClientMsgType union parsed', CLIENT_TYPES.length > 15,
+  `parsed ${CLIENT_TYPES.length} client message types`);
+
+// Every `type: 'x'` envelope built anywhere under src/client, and the method it
+// sits in (nearest preceding two-space method declaration in the same file).
+const senders = new Map();
+for (const file of allClientFiles) {
+  const src = read(file);
+  const methods = [...src.matchAll(/^ {2}(?:private |protected |public |async |readonly )*([a-zA-Z_]\w*)\s*\(/gm)];
+  for (const m of src.matchAll(/type:\s*'([a-z_]+)'/g)) {
+    let owner = null;
+    for (const decl of methods) {
+      if (decl.index < m.index) owner = decl[1];
+      else break;
+    }
+    if (!senders.has(m[1])) senders.set(m[1], { file, owner });
+  }
+}
+
+// Call sites: every identifier followed by '(' across the client and the page,
+// minus the declarations themselves, so a helper that only exists is not
+// mistaken for a helper that is used.
+const callSites = new Map();
+for (const file of [...allClientFiles, 'index.html']) {
+  const src = read(file);
+  const declared = new Set(
+    [...src.matchAll(/^ {2}(?:private |protected |public |async |readonly )*([a-zA-Z_]\w*)\s*\(/gm)]
+      .map((m) => m.index),
+  );
+  for (const m of src.matchAll(/([a-zA-Z_]\w*)\s*\(/g)) {
+    if (declared.has(m.index)) continue;
+    if (!callSites.has(m[1])) callSites.set(m[1], []);
+    callSites.get(m[1]).push(file);
+  }
+}
+
+console.log('\nEvery client message type the server routes has a sender');
+for (const type of CLIENT_TYPES) {
+  if (type in KNOWN_UNSENT) continue;
+  const sender = senders.get(type);
+  if (!sender) {
+    expect(`'${type}' is built somewhere in src/client`, false,
+      `the server routes and validates '${type}' but no \`type: '${type}'\` envelope exists in src/client — the receive half is dead code`);
+    continue;
+  }
+  expect(`'${type}' is built somewhere in src/client`, true);
+  if (!sender.owner) continue; // top-level literal, not a method
+  const calls = (callSites.get(sender.owner) ?? []).filter((f) => f !== sender.file || true);
+  expect(`'${type}' — something calls ${sender.owner}()`,
+    calls.length > 0,
+    `${sender.file} declares ${sender.owner}() and nothing anywhere calls it, so '${type}' can never leave the client`);
+}
+
+console.log('\nThe unsent list is honest');
+for (const [type, why] of Object.entries(KNOWN_UNSENT)) {
+  expect(`'${type}' is still a ClientMsgType (a stale exemption is a lie)`,
+    CLIENT_TYPES.includes(type), why);
+  expect(`'${type}' is still unsent (wire it up, then delete the exemption)`,
+    !senders.has(type), why);
+}
+
 console.log(failures === 0
-  ? `\nPASS — ${produced.size} broadcast types, ${Object.keys(KNOWN_DARK).length} declared dark`
+  ? `\nPASS — ${produced.size} broadcast types, ${Object.keys(KNOWN_DARK).length} declared dark, `
+    + `${CLIENT_TYPES.length} client types, ${Object.keys(KNOWN_UNSENT).length} declared unsent`
   : `\nFAIL — ${failures} wire message(s) with no consumer`);
 process.exit(failures === 0 ? 0 : 1);

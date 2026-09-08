@@ -1,6 +1,10 @@
 import type { CannonAmmoType, PlayerInput, WeaponSlot } from '../../shared/types/index.js';
 import { WHEEL_SLOTS, wheelSlotForDigitCode } from '../../shared/wheel.js';
 
+/** The pages [Q] cycles while the supply wheel is held open. */
+export type WheelPage = 'items' | 'maps' | 'shop';
+const WHEEL_PAGE_ORDER: readonly WheelPage[] = ['items', 'maps', 'shop'];
+
 export class InputManager {
   private keys: Set<string> = new Set();
   private yaw = 0;
@@ -27,7 +31,9 @@ export class InputManager {
   private vHeld = false;
   private pendingWheelSlot: number | null = null;
   /** Second wheel page ([Q] while the wheel is held): quest maps (SoT radial). */
-  private wheelPage: 'items' | 'maps' = 'items';
+  private wheelPage: WheelPage = 'items';
+  /** ECON-01 send half: the shop line a digit/click picked on the shop page. */
+  private pendingShopLineIndex: number | null = null;
   private pendingSelectMapIndex: number | null = null;
 
   init(lockElement: HTMLElement = document.body) {
@@ -60,7 +66,12 @@ export class InputManager {
       }
       if (this.vHeld && e.code === 'KeyQ') {
         e.preventDefault();
-        this.wheelPage = this.wheelPage === 'items' ? 'maps' : 'items';
+        // items -> maps -> the Tallyman's table -> items. The shop page is the
+        // SEND half of shop_buy (ECON-01): before it existed the server routed,
+        // validated and answered a message no client could ever produce.
+        this.wheelPage = WHEEL_PAGE_ORDER[
+          (WHEEL_PAGE_ORDER.indexOf(this.wheelPage) + 1) % WHEEL_PAGE_ORDER.length
+        ];
       }
       if (this.vHeld) {
         // THE WHEEL IS A MODAL LAYER, not a set of per-key exceptions. It used
@@ -73,6 +84,7 @@ export class InputManager {
           e.preventDefault();
           // Slot 9 ('0') is the axe: ten slices, and until now nine digits.
           if (this.wheelPage === 'maps') this.pendingSelectMapIndex = slot;
+          else if (this.wheelPage === 'shop') this.pendingShopLineIndex = slot;
           else this.pendingWheelSlot = slot;
         }
         return;
@@ -249,7 +261,14 @@ export class InputManager {
   /** True while [I] is held — supply wheel overlay */
   isSupplyWheelOpen() { return this.vHeld; }
   /** Which wheel page is showing while [I] is held ([Q] toggles). */
-  getWheelPage(): 'items' | 'maps' { return this.wheelPage; }
+  getWheelPage(): WheelPage { return this.wheelPage; }
+
+  /** One-shot: the Tallyman shelf index a digit picked on the shop page. */
+  consumeShopLineIndex(): number | null {
+    const index = this.pendingShopLineIndex;
+    this.pendingShopLineIndex = null;
+    return index;
+  }
   /** One-shot: quest-map index picked on the maps page (Digit1..3). */
   consumeSelectMapIndex(): number | null {
     const index = this.pendingSelectMapIndex;

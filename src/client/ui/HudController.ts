@@ -89,6 +89,7 @@ export type HudView = {
   };
   playIslandArrivalFanfare(): void;
   renderMapWheel(player: Player): void;
+  renderShopWheel(player: Player): void;
   renderTreasureInventoryChart(
     player: Player,
     mappedIsland: Island | null,
@@ -1469,10 +1470,14 @@ export class HudController {
     // [Q] while the wheel is held flips between the SUPPLY page and the QUEST
     // MAPS page (SoT radial) — only one occupies the screen center at a time.
     const wheelOpen = this.view.input.isSupplyWheelOpen();
-    const mapsPage = wheelOpen && this.view.input.getWheelPage() === 'maps';
-    this.view.ui.pocketWheel.classList.toggle('visible', wheelOpen && !mapsPage);
+    const page = this.view.input.getWheelPage();
+    const mapsPage = wheelOpen && page === 'maps';
+    const shopPage = wheelOpen && page === 'shop';
+    this.view.ui.pocketWheel.classList.toggle('visible', wheelOpen && !mapsPage && !shopPage);
     this.view.ui.mapWheel.classList.toggle('visible', mapsPage);
+    this.view.ui.shopWheel.classList.toggle('visible', shopPage);
     if (mapsPage) this.view.renderMapWheel(player);
+    if (shopPage) this.view.renderShopWheel(player);
     // The controls legend and the supply wheel park on the same screen center
     // — holding [I] closes the legend rather than stacking on top of it.
     if (wheelOpen) {
