@@ -134,6 +134,24 @@ const HERO = [
     nodes: ['eye_of_reach_body', 'hammer', 'trigger', 'muzzle', 'scope'],
     pivot: (b) => [['muzzle forward of the grip', b.get('muzzle').min[2] > 0.9],
       ['scope sits over the bore', b.get('scope').min[1] > 0.04 && b.get('scope').max[1] > 0.17]] },
+  // Ship hardware (HWGLB-01). These are the pieces a pirate stands beside, and
+  // the only hero family that is MULTIPLIED (eight cannons a galleon, six
+  // hulls) — so every one of them carries a far LOD.
+  { file: 'cannon', tris: [2500, 7000], far: true, nodes: ['cannon_body', 'barrel'],
+    pivot: (b) => [['carriage base on the deck', Math.abs(b.get('cannon_body').min[1]) < 0.04],
+      ['barrel points forward (+Z)', b.get('barrel').max[2] > 0.9],
+      ['barrel node pivots on the trunnions, not the origin', b.get('barrel').min[1] > 0.35]] },
+  { file: 'wheel', tris: [2000, 5000], far: true, nodes: ['wheel_body'],
+    pivot: (b) => [['origin on the axle', Math.abs(b.get('wheel_body').min[1] + b.get('wheel_body').max[1]) < 0.06
+      && Math.abs(b.get('wheel_body').min[0] + b.get('wheel_body').max[0]) < 0.06],
+      ['the disc lies in XY so rotation.z spins it', (b.get('wheel_body').max[2] - b.get('wheel_body').min[2]) < 0.4]] },
+  { file: 'capstan', tris: [1800, 4500], far: true, nodes: ['capstan_body', 'drum'],
+    pivot: (b) => [['base on the deck', Math.abs(b.get('capstan_body').min[1]) < 0.04],
+      ['drum above the deck', b.get('drum').min[1] > 0.05]] },
+  { file: 'ship_lantern', tris: [600, 2500], far: true, mats: 2,
+    nodes: ['ship_lantern_body', 'glass'],
+    pivot: (b) => [['the hook is at y=0 and the body hangs below it',
+      Math.abs(b.get('ship_lantern_body').max[1]) < 0.04 && b.get('ship_lantern_body').min[1] < -0.4]] },
 ];
 
 const mutate = process.env.PIRATES_BR_MUTATE_HERO ?? '';
@@ -153,7 +171,11 @@ for (const h of HERO) {
   console.log(`  ${h.file.padEnd(16)} ${String(s.tris).padStart(6)} tris  ${s.prims} prims  ${s.mats} mat  ${s.images} img  ${(g.bytes / 1024).toFixed(0)} KB`);
   expect(`[a] ${h.file}: ${s.tris} tris in [${h.tris[0]}, ${h.tris[1]}]`, s.tris >= h.tris[0] && s.tris <= h.tris[1],
     s.tris < h.tris[0] ? 'too coarse for a hero asset' : 'blows the viewmodel budget on the low tier');
-  expect(`[b] ${h.file}: one atlas material with a baseColorTexture`, s.mats === 1 && s.textured === 1 && s.images === 1,
+  // `mats: 2` is the lantern: its glass is emissive, and an emissive pane baked
+  // flat into an albedo atlas is just a yellow sticker.
+  const wantMats = h.mats ?? 1;
+  expect(`[b] ${h.file}: ${wantMats} material(s), one of them the atlas with a baseColorTexture`,
+    s.mats === wantMats && s.textured === 1 && s.images === 1,
     `${s.mats} materials, ${s.textured} textured, ${s.images} images — the Cycles bake did not land`);
   expect(`[c] ${h.file}: COLOR_0 on every primitive and white (min ${s.colorMin.toFixed(3)})`,
     s.color0 === s.prims && s.colorMin >= 0.94, 'AO is in the atlas; a non-white COLOR_0 applies it twice');

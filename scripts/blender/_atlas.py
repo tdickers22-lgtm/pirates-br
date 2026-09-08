@@ -33,6 +33,7 @@
 import bpy
 import math
 import os
+from mathutils import Vector, Matrix
 
 
 def _unique_materials(objs):
@@ -105,10 +106,17 @@ def atlas_unwrap(objs, angle_deg=66.0, island_margin=0.02):
 
 
 def hero_atlas(coll, name, size=512, samples=1, roughness=0.62, metallic=0.0,
-               angle_deg=66.0, island_margin=0.02, margin_px=6):
+               angle_deg=66.0, island_margin=0.02, margin_px=6, keep=()):
     """AO x tint x albedo -> one `atlas_<name>` image; returns (image, material).
-    Run after bake_ao + tint_pass, before join/export."""
-    objs = [o for o in coll.objects if o.type == 'MESH' and o.data.materials]
+    Run after bake_ao + tint_pass, before join/export.
+
+    `keep` names objects that stay OUT of the atlas and keep their own material:
+    an emissive lantern glass is not an albedo, and baking it flat would put the
+    lit pane in the same unlit draw as the iron."""
+    kept = [o for o in coll.objects
+            if o.type == 'MESH' and any(o.name.startswith(k) for k in keep)]
+    objs = [o for o in coll.objects if o.type == 'MESH' and o.data.materials
+            and o not in kept]
     if not objs:
         raise RuntimeError(f'hero_atlas: {name} has no textured meshes')
     _unique_materials(objs)
@@ -157,10 +165,12 @@ def hero_atlas(coll, name, size=512, samples=1, roughness=0.62, metallic=0.0,
     tex.location = (-340, 200)
     nt.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
 
-    for obj in objs:
+    _unique_materials(kept)
+    for obj in objs + kept:
         me = obj.data
-        me.materials.clear()
-        me.materials.append(amat)
+        if obj in objs:
+            me.materials.clear()
+            me.materials.append(amat)
         # COLOR_0 stays present (uniform attributes for the merge) but WHITE:
         # the AO it used to carry now lives in the atlas.
         attr = me.color_attributes.get('Col')
@@ -188,6 +198,34 @@ def hero_atlas(coll, name, size=512, samples=1, roughness=0.62, metallic=0.0,
     print(f'ATLAS {name}: {size}x{size} baked from {n_mats} materials '
           f'on {len(objs)} objects -> Atlas_{name}')
     return img, amat
+
+
+# ── hero authoring frame ─────────────────────────────────────
+# Hero builders author in GAME space (x right, y up, z forward = the bow, the
+# muzzle, the direction the client's +Z points) and this converts once, so a
+# pivot in the plan reads the same in the script: game +Y = Blender +Z, game +Z
+# = Blender -Y (the export is yup).
+def G(x, y, z):
+    return Vector((x, -z, y))
+
+
+def game_axis_rot(axis):
+    """Rotation that points a Blender-Z primitive down a GAME axis."""
+    if axis == 'y':
+        return Matrix.Identity(4)
+    if axis == 'z':
+        return Matrix.Rotation(math.radians(90), 4, 'X')
+    return Matrix.Rotation(math.radians(90), 4, 'Y')
+
+
+def set_origin_game(obj, pivot):
+    """Move the object's ORIGIN to a game-space point without moving the mesh.
+    The node's translation is what the client rotates about: a cannon barrel
+    elevates around its trunnions, a wheel spins on its axle."""
+    p = G(*pivot)
+    for v in obj.data.vertices:
+        v.co = v.co - p
+    obj.location = obj.location + p
 
 
 print('atlas helpers loaded')
