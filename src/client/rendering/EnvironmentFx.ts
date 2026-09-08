@@ -16,6 +16,8 @@ import {
   isInsideCaveInterior,
   isPointInsideIslandFootprint,
   sampleWind,
+  stormCloudDensity,
+  stormRain,
 } from '../../shared/utils/index.js';
 import { getPropGroundY } from '../../shared/props.js';
 import { propBaseLift } from '../world/island/PropScatterer.js';
@@ -29,10 +31,7 @@ import type { Renderer } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
 import {
   stormFrontShellCount,
-  stormRainIntensityAt,
   stormSkyNear01,
-  stormWallNearness01,
-  stormWeatherIntensityAt,
 } from './stormWeather.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
 import { refreshFrozenChild, ZERO_SCALE_MAT4 } from './three-util.js';
@@ -1116,38 +1115,24 @@ export class EnvironmentFx {
     this.stormLightningFlashEl = flash;
   }
 
+  /** THE OVERCAST, FROM THE SHARED FIELD (STORMUP-01 / storm-17 phase A).
+   *  Was a client-local scalar (stormWeatherIntensityAt) the server could not
+   *  see. It is now `stormCloudDensity` in src/shared/utils, sampled at the one
+   *  weather anchor — same maths, same numbers (scripts/test-storm-fields.mjs
+   *  grades the two against each other), but the server reads the same field
+   *  for rain-douses-fire and bot sight. */
   computeStormWeatherIntensity(): number {
     if (!this.view.state) return 0;
     const anchor = this.view.getWeatherAnchor();
     if (!anchor) return 0;
-    return stormWeatherIntensityAt(
-      anchor.x,
-      anchor.z,
-      this.view.state.storm,
-      STORM_PHASES.length,
-      this.stormWallNearness(),
-    );
-  }
-
-  /** 0 = far from the storm boundary, 1 = at it. Shared by the rain and the
-   *  overcast so a squall's water and its cloud arrive on the same ramp. Read
-   *  off the WEATHER ANCHOR, the same position the intensities use (storm-14):
-   *  these two ramps used to disagree by hundreds of metres while spectating. */
-  private stormWallNearness(): number {
-    return stormWallNearness01(this.anchorDistanceToStormWall());
+    return stormCloudDensity(this.view.state.storm, anchor.x, anchor.z);
   }
 
   computeStormRainIntensity(): number {
     if (!this.view.state) return 0;
     const anchor = this.view.getWeatherAnchor();
     if (!anchor) return 0;
-    return stormRainIntensityAt(
-      anchor.x,
-      anchor.z,
-      this.view.state.storm,
-      STORM_PHASES.length,
-      this.stormWallNearness(),
-    );
+    return stormRain(this.view.state.storm, anchor.x, anchor.z);
   }
 
   // ── Storm rain ────────────────────────────────────────────────────────────

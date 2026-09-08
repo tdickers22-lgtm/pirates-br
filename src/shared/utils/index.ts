@@ -269,6 +269,128 @@ export function getStormWaveIntensity(
   return clamp(Math.max(edge * (0.55 + phase01 * 0.45), ambient), 0, 1);
 }
 
+// ── THE WEATHER AS SHARED FIELDS (STORMUP-01 / storm-17 phase A) ─────────────
+//
+// Until now the sea was the ONLY part of the storm both sides agreed on
+// (getStormWaveIntensity above, mirrored in OCEAN_VERT). Overcast, rain and
+// visibility were client-local scalars living in src/client/rendering/
+// stormWeather.ts, so the server could not reason about them at all: it could
+// not know that it is pouring on a burning hull, and a bot's eyes were as good
+// in a squall as at noon.
+//
+// These four fields are the same maths, moved to where both sides can read it,
+// and reduced to pure functions of (storm, x, z) — the wall-nearness term the
+// client used to pass in is now derived from the anchor position, which is
+// where it always came from. `scripts/test-storm-fields.mjs` grades them
+// against the client functions point for point, so the look does not move.
+export interface StormFieldRing {
+  centerX: number;
+  centerZ: number;
+  safeRadius: number;
+  phase: number;
+  shrinking?: boolean;
+  shrinkProgress?: number;
+}
+
+/** Number of ring phases the fields normalise `phase` against. Kept here rather
+ *  than imported from STORM_PHASES so the fields stay a leaf (utils is imported
+ *  by constants-free tools); asserted equal to STORM_PHASES.length by the gate. */
+export const STORM_FIELD_PHASES = 7;
+
+/** 0 = far from the storm boundary, 1 = standing at it. Reaches inboard of the
+ *  wall as well as outboard, so a shower carries its own sky. */
+export function stormWallNearness(storm: StormFieldRing | null | undefined, x: number, z: number): number {
+  if (!storm) return 0;
+  const wallDist = finiteCircleBoundaryDistance(x, z, storm.centerX, storm.centerZ, storm.safeRadius);
+  if (!Number.isFinite(wallDist) || wallDist < 0) return 0;
+  return 1 - smoothstep(30, 165, wallDist);
+}
+
+/** How much storm sky is over (x, z). Inside the ring this stays under 0.24
+ *  except at the very edge; outside it ramps to 1 over ~240 m, scaled by phase
+ *  and by whether the ring is on the move. */
+export function stormCloudDensity(storm: StormFieldRing | null | undefined, x: number, z: number): number {
+  if (!storm) return 0;
+  const safeRadius = Math.max(1, storm.safeRadius);
+  const phases = STORM_FIELD_PHASES;
+  const dist = Math.hypot(x - storm.centerX, z - storm.centerZ);
+  const phaseBoost = Math.min(1, storm.phase / phases) * 0.2;
+  const shrinkBoost = storm.shrinking ? 0.08 + (storm.shrinkProgress ?? 0) * 0.08 : 0;
+  const distOutside = dist - safeRadius;
+  const outsideBlend = smoothstep(-30, 30, distOutside);
+  const stormDepth = clamp(distOutside / 240, 0, 1);
+  const edgeFade = clamp((dist / safeRadius - 0.84) / 0.16, 0, 1);
+  const insideIntensity = Math.min(0.24, edgeFade * 0.14 + shrinkBoost * 0.45);
+  const outsideIntensity = Math.min(1, 0.52 + phaseBoost + shrinkBoost + stormDepth * 0.32);
+  const base = insideIntensity + (outsideIntensity - insideIntensity) * outsideBlend;
+  const wallOvercast = stormWallNearness(storm, x, z) * (0.34 + (storm.phase / phases) * 0.14);
+  return finiteClamp(Math.max(base, wallOvercast), 0, 1, 0);
+}
+
+/** The drops: the same shape as the overcast on a slightly later ramp, hard
+ *  capped by the sky above (rain may never outrun the cloud producing it). */
+export function stormRain(storm: StormFieldRing | null | undefined, x: number, z: number): number {
+  if (!storm) return 0;
+  const safeRadius = Math.max(1, storm.safeRadius);
+  const phases = STORM_FIELD_PHASES;
+  const dist = Math.hypot(x - storm.centerX, z - storm.centerZ);
+  const distOutside = dist - safeRadius;
+  const outsideBlend = smoothstep(-25, 35, distOutside);
+  const stormDepth = clamp(distOutside / 220, 0, 1);
+  const shrinkBoost = storm.shrinking ? 0.08 : 0;
+  const fromAnchor = outsideBlend <= 0.001
+    ? 0
+    : Math.min(1, 0.34 + stormDepth * 0.42 + (storm.phase / phases) * 0.2 + shrinkBoost) * outsideBlend;
+  const wallFloor = stormWallNearness(storm, x, z) * (0.30 + (storm.phase / phases) * 0.16);
+  const wanted = Math.max(fromAnchor, wallFloor);
+  const skyCap = Math.min(1, stormCloudDensity(storm, x, z) * 1.3);
+  return finiteClamp(Math.min(wanted, skyCap), 0, 1, 0);
+}
+
+/** How far anything can be SEEN at (x, z), as a multiplier on a sight range.
+ *  1 in fair weather, STORM_VISIBILITY_FLOOR in the thick of it. The server
+ *  reads this for bot perception; the client reads it for fog density. */
+export const STORM_VISIBILITY_FLOOR = 0.45;
+export function stormVisibility(storm: StormFieldRing | null | undefined, x: number, z: number): number {
+  if (!storm) return 1;
+  return finiteClamp(1 - stormRain(storm, x, z) * (1 - STORM_VISIBILITY_FLOOR), STORM_VISIBILITY_FLOOR, 1, 1);
+}
+
+// ── THE GUST FIELD (storm-07) ───────────────────────────────────────────────
+//
+// A gale that only ever blows you home is the best point of sail in the game:
+// point at the eye, hold W, and nothing fights back. The gust is what makes
+// the weather WEATHER — the yaw wanders ±35° and the strength pulses 0.7..1.4
+// on a 6–10 s beat, so canvas has to be watched.
+//
+// Deliberately NOT a hashed lattice. A cell hash on floor(x/48) snaps the wind
+// by tens of degrees the frame a hull crosses a cell border, which is both a
+// visible jolt on the yard and a lattice in the wind field. Four smooth sines
+// over ~500 m wavelengths are continuous in x, z AND t, cost 2 sin per query,
+// and allocate nothing (two scalar entry points, no result object).
+/** Peak yaw swing either side of the mean wind, radians (±35°). */
+export const STORM_GUST_MAX_YAW = 0.6109;
+/** Strength pulse midpoint and half-range: 1.05 ± 0.35 = 0.7 .. 1.4. */
+export const STORM_GUST_PULSE_MID = 1.05;
+export const STORM_GUST_PULSE_SWING = 0.35;
+/** Pulse at or above which canvas carried past STORM_GUST_BLOWOUT_DEPLOYMENT
+ *  starts to tear (PhysicsSystem holds the 2 s dwell). */
+export const STORM_GUST_BLOWOUT_PULSE = 1.25;
+
+/** Signed yaw offset the gust adds to the mean wind at (t, x, z), in radians. */
+export function stormGustYaw(t: number, x: number, z: number): number {
+  const a = Math.sin(x * 0.0131 + z * 0.0074 + t * 0.72);
+  const b = Math.sin(x * -0.0068 + z * 0.0155 + t * 1.05 + 2.1);
+  return (a * 0.6 + b * 0.4) * STORM_GUST_MAX_YAW;
+}
+
+/** Strength multiplier of the gust at (t, x, z): 0.70 lull .. 1.40 squall. */
+export function stormGustPulse(t: number, x: number, z: number): number {
+  const c = Math.sin(x * 0.0093 - z * 0.0121 + t * 0.83 + 1.3);
+  const d = Math.sin(x * 0.0177 + z * 0.0059 + t * 0.57 - 0.8);
+  return STORM_GUST_PULSE_MID + (c * 0.62 + d * 0.38) * STORM_GUST_PULSE_SWING;
+}
+
 /** Simple Gerstner wave height at world position. Amplitude is modulated by the
  *  global ocean roughness — and by the local storm sea-state, which both scales
  *  the base waves and blends in the dedicated STORM_WAVE_PARAMS swell — so the
