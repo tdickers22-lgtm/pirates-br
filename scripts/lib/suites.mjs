@@ -373,6 +373,13 @@ export const LOGIC = [
   //                                 sub-millimetre width BEFORE leaving the draw range so nothing pops.
   //                                 --mutate collapses the arms onto the ship's track and is its red proof.
   tsx('test-ship-wake.mjs'),
+  //   test-hold-lanterns          — ships-23: the hold's two lanterns are served by exactly ONE registered
+  //                                 budget light, unmoved in position, intensity and range, with the pair
+  //                                 hung symmetrically about it and both emissive so neither reads as unlit.
+  //                                 Also grades that they share two materials (so they merge into the hull
+  //                                 bake) and prints the low/high triangle cost. --mutate gives the after
+  //                                 lantern its own point light — the obvious fix — and is its red proof.
+  tsx('test-hold-lanterns.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   test-hero-assets            — the atlas-textured hero GLBs (weapons, ship hardware): triangle band,
   //                                 ONE material with a baseColorTexture, COLOR_0 present and WHITE (the AO
