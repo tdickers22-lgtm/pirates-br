@@ -78,10 +78,19 @@ export function resolveWalkerAgainstIsland(
   toX: number,
   toZ: number,
   limits: WalkerLimits,
+  out: WalkerStep = { x: fromX, z: fromZ, groundY: fromGroundY, blocked: false, reason: 'none' },
 ): WalkerStep {
-  const refuse = (reason: WalkerBlockReason): WalkerStep =>
-    ({ x: fromX, z: fromZ, groundY: fromGroundY, blocked: true, reason });
+  const refuse = (reason: WalkerBlockReason): WalkerStep => {
+    out.x = fromX;
+    out.z = fromZ;
+    out.groundY = fromGroundY;
+    out.blocked = true;
+    out.reason = reason;
+    return out;
+  };
 
+  // Cheapest test first, and each one exits: the prop sweep (the only test that
+  // walks a list) is reached only by a step that is otherwise legal.
   if (!isPointInsideIslandFootprint(island, toX, toZ, limits.footprintPad)) return refuse('footprint');
 
   const groundY = getIslandSurfaceY(island, toX, toZ);
@@ -93,11 +102,49 @@ export function resolveWalkerAgainstIsland(
   if (limits.cavePad > 0 && nearCaveFootprint(island, toX, toZ, limits.cavePad)) return refuse('cave');
 
   if (limits.radius > 0) {
-    const pushed = resolvePropCollision({ x: toX, y: groundY, z: toZ }, limits.radius, island);
-    if (pushed.pushed) return refuse('prop');
+    const pushed = resolvePropCollision(propProbe(toX, groundY, toZ), limits.radius, island);
+    if (pushed.pushed) {
+      // Take the PUSHED-OUT point rather than refusing outright: a walker that
+      // starts inside a collider (a spawn the registry never checked) would
+      // otherwise find every direction illegal and be trapped there forever.
+      // Only if the shove lands somewhere legal, mind.
+      const pushedGround = getIslandSurfaceY(island, pushed.x, pushed.z);
+      // …and only if the shove actually got it CLEAR. A compound prop (a fort
+      // wall, a crag's overlapping blades) can shove a walker out of one mass
+      // and into its neighbour, and the relaxation inside resolvePropCollision
+      // is capped; accepting that blind would seat the animal in the stone.
+      const clear = !resolvePropCollision(propProbe(pushed.x, pushedGround, pushed.z), limits.radius, island).pushed;
+      if (
+        clear
+        && pushedGround >= limits.minGroundY
+        && isPointInsideIslandFootprint(island, pushed.x, pushed.z, limits.footprintPad)
+      ) {
+        out.x = pushed.x;
+        out.z = pushed.z;
+        out.groundY = pushedGround;
+        out.blocked = true;
+        out.reason = 'prop';
+        return out;
+      }
+      return refuse('prop');
+    }
   }
 
-  return { x: toX, z: toZ, groundY, blocked: false, reason: 'none' };
+  out.x = toX;
+  out.z = toZ;
+  out.groundY = groundY;
+  out.blocked = false;
+  out.reason = 'none';
+  return out;
+}
+
+/** One scratch Vec3 for the prop sweep — resolvePropCollision only reads it. */
+const PROP_PROBE = { x: 0, y: 0, z: 0 };
+function propProbe(x: number, y: number, z: number) {
+  PROP_PROBE.x = x;
+  PROP_PROBE.y = y;
+  PROP_PROBE.z = z;
+  return PROP_PROBE;
 }
 
 /**

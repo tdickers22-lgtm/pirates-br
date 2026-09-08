@@ -130,32 +130,72 @@ console.log('4. A dead animal stays as a carcass, it does not vanish');
 }
 
 // ── 5. The walker refuses water, cliffs, cave mouths and props ──────────────
-console.log('5. 600 s of wandering never puts an animal in the sea, on a cliff or in a cave');
+console.log('5. 600 s of wandering never puts an animal in the sea, on a cliff, in a cave or inside a prop');
 {
   parkPlayers();
   let minGround = Infinity;
-  let worstSlope = 0;
   let caveEntries = 0;
+  let propOverlaps = 0;
+  let firstOverlap = -1;
+  let lastOverlap = -1;
+  let worstSlope = 0;
   const tracked = state.wildlife.filter((a) => a.health > 0 && a.type !== 'gull');
-  const prev = tracked.map((a) => ({ x: a.position.x, z: a.position.z, y: a.position.y }));
+  // Per-TICK slope truth for a subset: sampling every half second and dividing
+  // by the net displacement grades a turn-around as a cliff.
+  const close = tracked.slice(0, 8);
+  const prev = close.map((a) => ({ x: a.position.x, z: a.position.z, y: a.position.y - 0.06 }));
   for (let i = 0; i < Math.round(600 / DT); i++) {
     step();
+    for (let k = 0; k < close.length; k++) {
+      const a = close[k];
+      if (a.health <= 0) continue;
+      const ground = a.position.y - 0.06;
+      const run = Math.hypot(a.position.x - prev[k].x, a.position.z - prev[k].z);
+      if (run > 1e-4) worstSlope = Math.max(worstSlope, Math.abs(ground - prev[k].y) / run);
+      prev[k].x = a.position.x; prev[k].z = a.position.z; prev[k].y = ground;
+    }
     if (i % 15) continue;
-    for (let k = 0; k < tracked.length; k++) {
-      const a = tracked[k];
+    for (const a of tracked) {
       if (a.health <= 0) continue;
       const island = islandById.get(a.islandId);
       const ground = getIslandSurfaceY(island, a.position.x, a.position.z);
       minGround = Math.min(minGround, ground);
-      const step = Math.hypot(a.position.x - prev[k].x, a.position.z - prev[k].z);
-      if (step > 0.02) worstSlope = Math.max(worstSlope, Math.abs(ground - prev[k].y) / step);
       if (nearCaveFootprint(island, a.position.x, a.position.z, WILDLIFE.CAVE_PAD)) caveEntries++;
-      prev[k].x = a.position.x; prev[k].z = a.position.z; prev[k].y = ground;
+      const res = resolvePropCollision({ x: a.position.x, y: ground, z: a.position.z }, WILDLIFE.HIT_RADIUS[a.type], island);
+      if (res.pushed) { propOverlaps++; if (firstOverlap < 0) firstOverlap = i; lastOverlap = i; }
     }
   }
   expect('no animal ever stood on ground below 0.1 m', minGround > 0.1, `minGround=${minGround.toFixed(3)}`);
-  expect('no step ever climbed steeper than the walk limit', worstSlope <= WILDLIFE.MAX_STEP_SLOPE + 0.05, `worst=${worstSlope.toFixed(3)}`);
-  expect('and nothing walked into a cave mouth', caveEntries === 0, `entries=${caveEntries}`);
+  expect('nothing walked into a cave mouth', caveEntries === 0, `entries=${caveEntries}`);
+  expect('and nothing stood inside a palm, a boulder or a tent wall', propOverlaps === 0, `overlaps=${propOverlaps} firstTick=${firstOverlap} lastTick=${lastOverlap}`);
+  expect('no single step climbed steeper than the walk limit',
+    worstSlope <= WILDLIFE.MAX_STEP_SLOPE + 1e-6, `worst=${worstSlope.toFixed(3)}`);
+}
+
+// ── 5b. The walker itself, as a unit ────────────────────────────────────────
+console.log('5b. resolveWalkerAgainstIsland refuses a cliff and refuses the sea');
+{
+  const island = state.islands.find((i) => i.caves && i.caves.length > 0) ?? state.islands[0];
+  const limits = {
+    radius: 0, footprintPad: -2,
+    minGroundY: WILDLIFE.MIN_GROUND_Y.pig,
+    maxSlope: WILDLIFE.MAX_STEP_SLOPE,
+    cavePad: WILDLIFE.CAVE_PAD,
+  };
+  const centre = { x: island.position.x, z: island.position.z };
+  const groundAt = (x, z) => getIslandSurfaceY(island, x, z);
+  // A 0.1 m step that would rise 5 m is a cliff by any reading.
+  const from = { x: centre.x, z: centre.z };
+  const fake = groundAt(from.x, from.z) - 5;
+  const cliff = resolveWalkerAgainstIsland(island, from.x, from.z, fake, from.x + 0.1, from.z, limits);
+  expect('a step that rises 5 m in 10 cm is refused as a slope',
+    cliff.blocked && cliff.reason === 'slope', `reason=${cliff.reason}`);
+  // Far outside the island is open sea.
+  const sea = resolveWalkerAgainstIsland(island, from.x, from.z, groundAt(from.x, from.z),
+    from.x + island.radius * 4, from.z, limits);
+  expect('a step out to sea is refused', sea.blocked, `reason=${sea.reason}`);
+  expect('and a refused step leaves the walker exactly where it was',
+    sea.x === from.x && sea.z === from.z);
 }
 
 // ── 6. A pirate cannot stand inside an animal ───────────────────────────────

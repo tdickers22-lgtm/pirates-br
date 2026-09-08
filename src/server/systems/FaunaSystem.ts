@@ -1,7 +1,20 @@
 import { v4 as uuid } from 'uuid';
-import type { GameState, Island, Player, Vec3, WildlifeAnimal } from '../../shared/types/index.js';
+import type { GameState, Island, Player, Vec3, WildlifeAnimal, WildlifeType } from '../../shared/types/index.js';
 import { SHARK, WILDLIFE, WORLD } from '../../shared/constants/index.js';
 import { dist2D, getIslandSurfaceY, isPointInsideIslandFootprint, randRange } from '../../shared/utils/index.js';
+import { resolveWalkerAgainstIsland, type WalkerLimits, type WalkerStep } from '../../shared/locomotion.js';
+
+/** How each animal is allowed to walk (WILD-01 slice c). Built once at module
+ *  load: a fresh limits object per animal per tick would be 70 allocations a
+ *  tick for five numbers that never change. */
+const WALK_LIMITS: Record<WildlifeType, WalkerLimits> = {
+  crab: { radius: WILDLIFE.HIT_RADIUS.crab, footprintPad: -2, minGroundY: WILDLIFE.MIN_GROUND_Y.crab, maxSlope: WILDLIFE.MAX_STEP_SLOPE, cavePad: WILDLIFE.CAVE_PAD },
+  chicken: { radius: WILDLIFE.HIT_RADIUS.chicken, footprintPad: -2, minGroundY: WILDLIFE.MIN_GROUND_Y.chicken, maxSlope: WILDLIFE.MAX_STEP_SLOPE, cavePad: WILDLIFE.CAVE_PAD },
+  pig: { radius: WILDLIFE.HIT_RADIUS.pig, footprintPad: -2, minGroundY: WILDLIFE.MIN_GROUND_Y.pig, maxSlope: WILDLIFE.MAX_STEP_SLOPE, cavePad: WILDLIFE.CAVE_PAD },
+  // A perched gull potters on foot and obeys the same ground rules; a flying
+  // one is resolved by the state machine and never asks.
+  gull: { radius: WILDLIFE.HIT_RADIUS.gull, footprintPad: -2, minGroundY: WILDLIFE.MIN_GROUND_Y.gull, maxSlope: WILDLIFE.MAX_STEP_SLOPE, cavePad: WILDLIFE.CAVE_PAD },
+};
 
 /**
  * Every living thing in the world that is not a pirate.
@@ -32,6 +45,8 @@ export interface FaunaHooks {
 
 export class FaunaSystem {
   private sharkSpawnCooldown = 0;
+  /** One reused walker result — the wander runs 70 times a tick forever. */
+  private readonly stepOut: WalkerStep = { x: 0, z: 0, groundY: 0, blocked: false, reason: 'none' };
 
   constructor(private readonly rng: () => number, private readonly hooks: FaunaHooks) {}
 
@@ -360,20 +375,39 @@ export class FaunaSystem {
       const vz = Math.sin(animal.wanderAngle) * speed * moveScale;
       const nextX = animal.position.x + vx * dt;
       const nextZ = animal.position.z + vz * dt;
-      const allowed = speed > 0 && isPointInsideIslandFootprint(island, nextX, nextZ, -2);
+      // THE WALKER, not a footprint test (islandworld-11/32/34, physics-31).
+      // Spawn placement always refused water and cave mouths; the wander loop
+      // never did, so a pig strolled into an archipelago saddle and was drawn
+      // 3 m under the sea, chickens climbed 60-degree flanks, and everything
+      // walked through palms, boulders and tent walls.
+      const step = speed > 0
+        ? resolveWalkerAgainstIsland(
+          island,
+          animal.position.x, animal.position.z, animal.position.y - 0.06,
+          nextX, nextZ,
+          WALK_LIMITS[animal.type],
+          this.stepOut,
+        )
+        : null;
 
-      if (allowed) {
-        animal.position.x = nextX;
-        animal.position.z = nextZ;
+      if (step && !step.blocked) {
+        animal.position.x = step.x;
+        animal.position.z = step.z;
         animal.velocity.x = vx;
         animal.velocity.z = vz;
       } else {
-        if (speed > 0) animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
+        if (step) {
+          // A shove out of a prop still moves it — that is how a walker that
+          // spawned inside a collider gets free instead of vibrating in it.
+          animal.position.x = step.x;
+          animal.position.z = step.z;
+          animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
+        }
         animal.velocity.x = 0;
         animal.velocity.z = 0;
       }
 
-      animal.position.y = getIslandSurfaceY(island, animal.position.x, animal.position.z) + 0.06;
+      animal.position.y = (step ? step.groundY : getIslandSurfaceY(island, animal.position.x, animal.position.z)) + 0.06;
 
       if (Math.abs(animal.velocity.x) + Math.abs(animal.velocity.z) > 0.01) {
         animal.rotation = Math.atan2(animal.velocity.x, animal.velocity.z);
@@ -455,16 +489,19 @@ export class FaunaSystem {
           animal.wanderAngle += randRange(-1.35, 1.35, this.rng);
           animal.wanderTimer = randRange(0.7, 2.0, this.rng);
         }
-        const step = WILDLIFE.SPEED.gull * 0.22 * dt;
-        const nextX = animal.position.x + Math.cos(animal.wanderAngle) * step;
-        const nextZ = animal.position.z + Math.sin(animal.wanderAngle) * step;
-        if (isPointInsideIslandFootprint(island, nextX, nextZ, -2)) {
-          animal.position.x = nextX;
-          animal.position.z = nextZ;
-        } else {
-          animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
-        }
-        animal.position.y = getIslandSurfaceY(island, animal.position.x, animal.position.z) + 0.05;
+        const stride = WILDLIFE.SPEED.gull * 0.22 * dt;
+        const walked = resolveWalkerAgainstIsland(
+          island,
+          animal.position.x, animal.position.z, animal.position.y - 0.05,
+          animal.position.x + Math.cos(animal.wanderAngle) * stride,
+          animal.position.z + Math.sin(animal.wanderAngle) * stride,
+          WALK_LIMITS.gull,
+          this.stepOut,
+        );
+        animal.position.x = walked.x;
+        animal.position.z = walked.z;
+        if (walked.blocked) animal.wanderAngle += Math.PI + randRange(-0.45, 0.45, this.rng);
+        animal.position.y = walked.groundY + 0.05;
       }
     }
 
