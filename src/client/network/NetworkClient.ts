@@ -36,6 +36,11 @@ export class NetworkClient {
   public onPropRemoved: ((payload: unknown) => void) | null = null;
   public onTreasureSold: ((payload: unknown) => void) | null = null;
   public onArmorBought: ((payload: unknown) => void) | null = null;
+  /** ECON-01 (w6.1): the Tallyman's answer to a [X] at his table — the sale, or
+   *  the reason there was none. Both arrive on this one message (ok:boolean). */
+  public onShopBought: ((payload: unknown) => void) | null = null;
+  /** CAPTURE-01 (w6.1): a crewless hull changed hands at her own wheel. */
+  public onShipCaptured: ((payload: unknown) => void) | null = null;
   public onAmmoRefilled: ((payload: unknown) => void) | null = null;
   /** The server heard your [X] and refused it — never leave a press unanswered. */
   public onInteractRefused: ((payload: unknown) => void) | null = null;
@@ -456,6 +461,8 @@ export class NetworkClient {
       case 'prop_removed': this.onPropRemoved?.(msg.payload); break;
       case 'treasure_sold': this.onTreasureSold?.(msg.payload); break;
       case 'armor_bought': this.onArmorBought?.(msg.payload); break;
+      case 'shop_bought': this.onShopBought?.(msg.payload); break;
+      case 'ship_captured': this.onShipCaptured?.(msg.payload); break;
       case 'ammo_refilled': this.onAmmoRefilled?.(msg.payload); break;
       case 'interact_refused': this.onInteractRefused?.(msg.payload); break;
       case 'treasure_map': this.onTreasureMap?.(msg.payload); break;

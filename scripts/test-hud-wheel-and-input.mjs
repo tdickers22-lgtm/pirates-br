@@ -82,24 +82,27 @@ for (const slot of WHEEL_SLOTS) {
     `got wheelIndex ${packet.wheelIndex}`);
 }
 
-// The pocket strip that HudController builds, reproduced from the same table:
-// the gate is that the strip's digit for a consumable equals the wheel's digit.
-console.log('\nThe pocket strip names the key that works');
+// RE-POINTED w6.5 (HUDS-01 / PLAN 2.6 "Cut: ... pocket sentence"). The always-on
+// pocket strip is DELETED: it printed the same digits the wheel prints, in a
+// corner, every frame of the match. What the gate protects is unchanged and is
+// the reason it existed — the digit a label advertises IS the digit the input
+// layer honours — so it now grades the surface that survived, the wheel's own
+// labels, and asserts the deleted strip has not crept back.
+console.log('\nThe supply wheel names the key that works');
 const pocketSlots = WHEEL_SLOTS.filter((s) => s.pocket !== null);
-const strip = pocketSlots.map((slot, i) => `${i === 0 ? 'Pocket: ' : ''}${slot.key} ${slot.label} 0`).join(' | ');
 for (const slot of pocketSlots) {
-  const advertised = `${slot.key} ${slot.label}`;
-  expect(`strip says "${advertised}" and ${slot.key} takes ${slot.label}`,
-    strip.includes(advertised) && wheelSlotForDigitCode(`Digit${slot.key}`) === slot.index);
+  expect(`the wheel label "${slot.key} ${slot.label.toUpperCase()}" and ${slot.key} take ${slot.label}`,
+    wheelSlotForDigitCode(`Digit${slot.key}`) === slot.index,
+    `Digit${slot.key} -> slot ${wheelSlotForDigitCode(`Digit${slot.key}`)}, table says ${slot.index}`);
 }
 
-// …and the HUD must DERIVE it rather than keep a fifth hand-written copy.
+// …and the HUD must DERIVE those labels rather than keep a hand-written copy.
 const hudSource = readFileSync(new URL('../src/client/ui/HudController.ts', import.meta.url), 'utf8');
-expect('HudController builds the pocket strip from WHEEL_SLOTS',
-  hudSource.includes('WHEEL_SLOTS.filter'),
-  'the strip is hand-written again — the digits will drift a second time');
+expect('HudController stamps the wheel labels from WHEEL_SLOTS',
+  /WHEEL_SLOTS\.forEach\([\s\S]{0,200}?\$\{slot\.key\}/.test(hudSource),
+  'the labels are hand-written again — the digits will drift a second time');
 expect('the old hand-written "1 Plantain | 2 Plank" strip is gone',
-  !hudSource.includes("'1 ' : ''}Plantain"));
+  !hudSource.includes("'1 ' : ''}Plantain") && !/Pocket:\s/.test(hudSource));
 
 // ── The wheel is a modal layer ─────────────────────────────────────────────
 console.log('\n[I] is a modal layer, not a set of per-key exceptions');
@@ -155,6 +158,10 @@ expect('pointer lock lost → right false', input.buildInput().right === false);
 // can SEE: HudController stamps .refused on #interact-prompt, and index.html
 // must own the keyframes or that class paints nothing (hud-11).
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+// w6.5 (HUDS-01 slice a) moved the HUD stylesheet out of index.html; the
+// keyframes below are graded on the document plus the sheets it loads.
+const css = html + '\n' + ['hud', 'menu']
+  .map((f) => readFileSync(new URL(`../src/client/styles/${f}.css`, import.meta.url), 'utf8')).join('\n');
 const legendBlocks = html.split('\n').filter((l) => /·\s*(Spyglass|Special|Supply [Ww]heel|Trade)/.test(l));
 expect('the controls legend was found in index.html', legendBlocks.length >= 3, `blocks=${legendBlocks.length}`);
 expect('no "Trade" key is advertised in the legend (hud-15)',
@@ -165,7 +172,7 @@ expect('the supply-wheel legend prints the key range the table actually binds',
   wheelLines.length > 0 && wheelLines.every((l) => l.includes(WHEEL_KEY_HINT)),
   `WHEEL_KEY_HINT=${WHEEL_KEY_HINT} · ${wheelLines.map((l) => l.trim()).join(' | ')}`);
 expect('a refused prompt has an animation to run',
-  /@keyframes\s+refuse-shake/.test(html) && /#interact-prompt\.refused/.test(html));
+  /@keyframes\s+refuse-shake/.test(css) && /#interact-prompt\.refused/.test(css));
 
 console.log(failures === 0 ? '\nPASS wheel + input layer' : `\nFAIL wheel + input layer (${failures})`);
 process.exit(failures === 0 ? 0 : 1);

@@ -142,6 +142,11 @@ console.log('\nYour own body is on screen when you die (avatar-24)');
 console.log('\nThe spectate caption is somewhere a dead player can see it (hud-24)');
 {
   const html = readFileSync(`${ROOT}index.html`, 'utf8');
+  // w6.5 (HUDS-01 slice a) moved the stylesheets out of index.html into
+  // src/client/styles/*.css. Markup is still graded on the document; RULES are
+  // graded on the document plus the sheets it loads.
+  const css = html + '\n' + ['hud', 'menu']
+    .map((f) => readFileSync(`${ROOT}src/client/styles/${f}.css`, 'utf8')).join('\n');
   const hudStart = html.indexOf('<div id="hud">');
   const banner = html.indexOf('id="spectate-banner"');
   expect('there is a spectate banner at all', banner >= 0);
@@ -149,9 +154,9 @@ console.log('\nThe spectate caption is somewhere a dead player can see it (hud-2
     + 'eliminated, so the old caption was painted into a hidden subtree',
     banner >= 0 && banner < hudStart, `banner at ${banner}, #hud at ${hudStart}`);
   expect('it sits at the top, leaving the centre of the death camera clear',
-    /#spectate-banner \{[^}]*top:\s*\d+px/.test(html));
+    /#spectate-banner \{[^}]*top:\s*\d+px/.test(css));
   expect('and it is not part of the death-screen blackout',
-    !/showing-death-screen[^{]*#spectate-banner/.test(html));
+    !/showing-death-screen[^{]*#spectate-banner/.test(css));
   const hud = readFileSync(`${ROOT}src/client/ui/HudController.ts`, 'utf8');
   expect('the HUD puts this frame\'s spectate line into it',
     /setSpectateBanner\(true, line, sub\)/.test(hud));

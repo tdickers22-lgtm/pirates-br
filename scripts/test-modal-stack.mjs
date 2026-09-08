@@ -102,11 +102,17 @@ console.log('\nRe-opening, self-closing and sticky layers');
 console.log('\nThe Back button is on screen at 540 px (hud-22)');
 {
   const html = readFileSync(`${ROOT}index.html`, 'utf8');
-  const panel = html.match(/\.menu-panel \{[^}]*\}/)?.[0] ?? '';
+  // w6.5 moved the HUD/menu stylesheets out of index.html into
+  // src/client/styles/*.css (HUDS-01 slice a). The RULES are graded here, the
+  // MARKUP below is still in the document, so the sheet a browser would load is
+  // the document plus its stylesheets.
+  const css = html + '\n' + ['hud', 'menu']
+    .map((f) => readFileSync(`${ROOT}src/client/styles/${f}.css`, 'utf8')).join('\n');
+  const panel = css.match(/\.menu-panel \{[^}]*\}/)?.[0] ?? '';
   expect('.menu-panel is height-capped', /max-height:/.test(panel), `rule: ${panel.replace(/\s+/g, ' ')}`);
   expect('.menu-panel scrolls rather than spilling off the screen',
     /overflow-y:\s*auto/.test(panel), `rule: ${panel.replace(/\s+/g, ' ')}`);
-  const footer = html.match(/\.menu-panel-footer \{[^}]*\}/)?.[0] ?? '';
+  const footer = css.match(/\.menu-panel-footer \{[^}]*\}/)?.[0] ?? '';
   expect('and the footer holding Back is sticky',
     /position:\s*sticky/.test(footer), `rule: ${footer.replace(/\s+/g, ' ') || '(no .menu-panel-footer rule)'}`);
   expect('Settings uses it', /id="settings-back-btn"/.test(html)

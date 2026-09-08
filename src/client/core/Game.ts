@@ -345,6 +345,28 @@ export function pointerLockHintFor(station: 'helm' | 'cannon' | 'foot'): string 
   return 'Click to look around · WASD to move';
 }
 
+/** ECON-01: the Tallyman's shelf names, and why a purchase was refused. Pure so
+ *  the wording is gradeable without a stack. */
+const SHOP_LINE_LABEL: Record<string, string> = {
+  wood_plank: 'planks', cannonball: 'round shot', chainshot: 'chainshot',
+  firebomb_ball: 'firebomb shot', powder_keg: 'a powder keg', banana: 'plantains',
+  hull_refit: 'a hull refit', sail_refit: 'a sail refit', cuirass: 'an iron cuirass',
+};
+
+function shopRefusalLine(noun: string, reason?: string, price?: number): string {
+  switch (reason) {
+    case 'not_enough_gold': return `Not enough gold for ${noun} (${price ?? 0}g).`;
+    case 'no_hull': return `No hull to stow ${noun} in.`;
+    case 'no_tallyman': return 'No Tallyman in reach.';
+    case 'armor_full': return 'Your cuirass is still sound.';
+    case 'hull_sound': return 'Nothing to mend on her.';
+    case 'sails_sound': return 'Her canvas is whole.';
+    case 'keg_full': return 'You cannot carry another keg.';
+    case 'no_such_line': return "The Tallyman doesn't stock that.";
+    default: return `The Tallyman won't sell ${noun} right now.`;
+  }
+}
+
 function interactRefusalLine(intent?: string, reason?: string): string {
   const noun = INTERACT_INTENT_NOUN[intent ?? ''] ?? 'that';
   switch (reason) {
@@ -2507,6 +2529,51 @@ export class Game {
       if (event.playerId === this.localPlayerId || (event.playerName && this.getLocalPlayer()?.name === event.playerName)) {
         this.audio.playGoldEarn();
       }
+    };
+
+    // ECON-01 (w6.1). The Tallyman's table answers on ONE message whether the
+    // purchase happened or not; the sale gets a feed line and the buy sting,
+    // the refusal gets the amber line AT the prompt like every other refused
+    // press (hud-25) rather than a fourth kind of silence.
+    this.network.onShopBought = (payload) => {
+      const event = payload as {
+        line?: string; price?: number; qty?: number; gold?: number;
+        ok?: boolean; reason?: string;
+      };
+      const noun = SHOP_LINE_LABEL[event.line ?? ''] ?? 'that';
+      if (event.ok === false) {
+        this.hud.showInteractRefusal(shopRefusalLine(noun, event.reason, event.price));
+        this.audio.playBodyThud(0.35);
+        return;
+      }
+      const qty = event.qty ?? 1;
+      const count = qty > 1 ? `${qty}x ` : '';
+      this.pushFeed(
+        `Bought ${count}${noun} for ${event.price ?? 0}g (${event.gold ?? 0}g left).`,
+        '#f0c86a',
+      );
+      this.audio.playUpgradeBought();
+    };
+
+    // CAPTURE-01 (w6.1). A crewless hull changing hands is the loudest thing
+    // that can happen to a player who is not looking at it, and it was silent.
+    this.network.onShipCaptured = (payload) => {
+      const event = payload as {
+        shipId?: string; captorId?: string; captorName?: string; losers?: string[];
+      };
+      const isMine = event.captorId === this.localPlayerId;
+      const lostMine = Array.isArray(event.losers) && this.localPlayerId !== null
+        && event.losers.includes(this.localPlayerId);
+      const captor = isMine ? 'You' : (event.captorName ?? 'A pirate');
+      const verb = isMine ? 'take' : 'takes';
+      this.pushFeed(
+        lostMine
+          ? `${captor} ${verb} the wheel — your hull is lost.`
+          : `${captor} ${verb} an unmanned hull.`,
+        lostMine ? '#ff9d7a' : '#d9c17e',
+      );
+      if (isMine) this.audio.playUpgradeBought();
+      else if (lostMine) this.audio.playBodyThud(0.5);
     };
 
     this.network.onArmorBought = (payload) => {
