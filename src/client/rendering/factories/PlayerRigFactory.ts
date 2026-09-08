@@ -554,8 +554,23 @@ export function playRigDeath(mesh: THREE.Group, cause: string, dt: number): bool
   const clip = cause === 'drown' ? 'death_drown' : cause === 'fall' ? 'death_fall' : 'death_shot';
   setLayer(rig, 'lower', clip);
   setLayer(rig, 'upper', clip);
-  if (rig.bones.head) rig.bones.head.rotation.x = rig.headClipX;
+  // BOTH AXES, or the corpse keeps her last glance (final-sweep P2). three's
+  // PropertyMixer only calls setValue when the accumulated value CHANGED, so a
+  // head track that holds still leaves the bone exactly as the previous frame
+  // left it. [fixup6] established restore-step-reread for the look-at PITCH;
+  // [w9.3] b added look-at YAW to updatePlayerRig and did not extend this
+  // function, and PlayerAnimator.animateCorpse returns straight after this call
+  // for a rigged body, so updatePlayerRig never runs again to undo it. A pirate
+  // shot while glancing sideways lay dead with up to 0.6 rad (34 degrees) of
+  // baked yaw in her neck for the whole corpse lifetime.
+  if (rig.bones.head) {
+    rig.bones.head.rotation.x = rig.headClipX;
+    rig.bones.head.rotation.y = rig.headClipY;
+  }
   rig.mixer.update(dt);
-  if (rig.bones.head) rig.headClipX = rig.bones.head.rotation.x;
+  if (rig.bones.head) {
+    rig.headClipX = rig.bones.head.rotation.x;
+    rig.headClipY = rig.bones.head.rotation.y;
+  }
   return true;
 }

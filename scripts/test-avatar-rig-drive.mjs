@@ -272,6 +272,40 @@ expect('and she casts again when you walk back to her', backShadows === rigA.ski
 expect('a drowned corpse plays death_drown', playRigDeath(a, 'drown', 1 / 60) && rigA.lower.name === 'death_drown', rigA.lower.name);
 expect('a shot corpse plays death_shot', playRigDeath(a, 'shot', 1 / 60) && rigA.lower.name === 'death_shot', rigA.lower.name);
 
+// ── and a corpse does not keep her last glance (final-sweep P2) ────────────
+// PlayerAnimator.animateCorpse returns straight after playRigDeath for a rigged
+// body, so updatePlayerRig never runs again on her. If playRigDeath restores
+// only the PITCH, the YAW the look-at solver wrote on her last living frame is
+// baked into the neck for the whole corpse lifetime: three's PropertyMixer only
+// writes a track whose accumulated value CHANGED, and a head track that holds
+// still never changes. Drive her yaw hard, kill her, and the head must come
+// back to whatever the death clip itself says.
+camDistSq = 0;
+const YAW = 0.5;
+/** Live for 30 frames at `lookYaw`, then lie dead for 120, and report the head
+ *  yaw of the corpse. The CONTROL is the same pirate who died looking straight
+ *  ahead: whatever the death clip itself puts in the neck is in both numbers,
+ *  so only the baked glance can separate them. */
+const corpseHeadAfterLook = (pitch, yaw, tag) => {
+  const body = makePlayerRig(0x3366cc, 'pirate', 'crew', `player-corpse-${tag}`, 'balanced');
+  const rig = playerRigOf(body);
+  for (let i = 0; i < 30; i++) updatePlayerRig(body, player(), 1 / 60, 0, pitch, yaw);
+  const live = { x: rig.bones.head.rotation.x, y: rig.bones.head.rotation.y };
+  for (let i = 0; i < 120; i++) playRigDeath(body, 'shot', 1 / 60);
+  return { live, dead: { x: rig.bones.head.rotation.x, y: rig.bones.head.rotation.y } };
+};
+const straight = corpseHeadAfterLook(0, 0, 'straight');
+const glanced = corpseHeadAfterLook(0, YAW, 'glancing');
+const craned = corpseHeadAfterLook(PITCH, 0, 'craning');
+expect('the look-at yaw reaches the head bone at all', Math.abs(glanced.live.y - straight.live.y) > 0.4,
+  `${(glanced.live.y - straight.live.y).toFixed(3)} rad of glance`);
+expect('a corpse\'s head comes off the look-at YAW',
+  Math.abs(glanced.dead.y - straight.dead.y) <= 0.05,
+  `she died glancing and her head stayed ${(glanced.dead.y - straight.dead.y).toFixed(3)} rad off the pirate who died looking straight ahead`);
+expect('and off the look-at PITCH (the axis [fixup6] fixed — pinned so it stays fixed)',
+  Math.abs(craned.dead.x - straight.dead.x) <= 0.05,
+  `she died looking up and her head stayed ${(craned.dead.x - straight.dead.x).toFixed(3)} rad off`);
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS: nothing graded'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);
