@@ -366,6 +366,13 @@ export const LOGIC = [
   //                                 60-degree brace. Refuses to grade a ship whose yards did not move.
   //                                 --mutate freezes the yard-attached instances and is its red proof.
   tsx('test-ship-rigging.mjs'),
+  //   test-ship-wake              — SHIPVIS-01 phase B: the Kelvin wedge. Measures the drawn arm geometry
+  //                                 and requires arcsin(1/3) = 19.47 deg at four yaws and two speeds (the
+  //                                 wedge lengthens with speed, never widens), that the low tier builds no
+  //                                 arm at all, that they cost no second draw, and that the fade reaches
+  //                                 sub-millimetre width BEFORE leaving the draw range so nothing pops.
+  //                                 --mutate collapses the arms onto the ship's track and is its red proof.
+  tsx('test-ship-wake.mjs'),
   tsx('test-asset-bounds.mjs'),
   //   test-hero-assets            — the atlas-textured hero GLBs (weapons, ship hardware): triangle band,
   //                                 ONE material with a baseColorTexture, COLOR_0 present and WHITE (the AO
