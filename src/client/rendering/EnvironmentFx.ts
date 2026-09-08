@@ -27,7 +27,13 @@ import type { CombatFx } from './CombatFx.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
 import { registerBudgetLight } from './LightBudget.js';
-import { stormFrontShellCount, stormRainIntensityAt, stormWallNearness01, stormWeatherIntensityAt } from './stormWeather.js';
+import {
+  stormFrontShellCount,
+  stormRainIntensityAt,
+  stormSkyNear01,
+  stormWallNearness01,
+  stormWeatherIntensityAt,
+} from './stormWeather.js';
 import { makeLanternFlameTexture, makeLanternGlowTexture, makeWindWispTexture } from './factories/TextureFactory.js';
 import { refreshFrozenChild, ZERO_SCALE_MAT4 } from './three-util.js';
 
@@ -1666,6 +1672,16 @@ export class EnvironmentFx {
     // a horizon-band haze and a second shell behind it is fill for nothing.
     const wallDist = this.anchorDistanceToStormWall();
     const outerWanted = wallDist >= 0 && wallDist < OUTER_SHELL_RANGE;
+    // The sky needs the storm's BEARING, and this is the one place per frame
+    // that already has the ring and the camera in hand (storm-05).
+    const cam = this.view.renderer.camera.position;
+    const toCentreX = storm.centerX - cam.x;
+    const toCentreZ = storm.centerZ - cam.z;
+    this.view.renderer.setStormBearing(
+      toCentreX,
+      toCentreZ,
+      stormSkyNear01(Math.hypot(toCentreX, toCentreZ) - radius),
+    );
     for (const shell of shells) {
       const { mesh, mat } = shell;
       // Sits a hair OUTSIDE the safe radius — the boundary you are judged against

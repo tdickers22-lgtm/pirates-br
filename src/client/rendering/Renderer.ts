@@ -224,6 +224,13 @@ const SKY_FRAG = /* glsl */`
   // is actually drawing (Game -> setOvercast). Any rain you can see closes the
   // deck overhead; the full storm slate is still reserved for the storm itself.
   uniform float u_overcast;
+  // WHERE THE STORM IS (storm-05). u_stormDir is the unit xz vector from the
+  // camera to the ring CENTRE, so -u_stormDir points at the nearest wall — the
+  // bearing the weather is on. u_stormNear is 0 deep inside the ring (the slate
+  // is strongly one-sided: you can look up and steer by it) and 1 once you are
+  // at or outside the wall (the storm is all around you, so it closes evenly).
+  uniform vec2  u_stormDir;
+  uniform float u_stormNear;
   uniform float u_underwaterIntensity;
   // Lightning: 0..1 strike envelope + the world direction toward the bolt, so
   // the cloud deck lights from inside and the flash has an azimuth.
@@ -309,6 +316,14 @@ const SKY_FRAG = /* glsl */`
     // downpour, so that is where the deck is fully closed.
     float oc = max(u_stormIntensity, smoothstep(0.03, 0.30, u_overcast));
 
+    // THE STORM HAS A BEARING. The overcast used to be a scalar applied to
+    // every direction equally, so from inside the ring there was no way to look
+    // up and see which way the weather was — the only cue in the whole sky was
+    // the wall shell itself. bearing = 1 looking straight at the near wall,
+    // -1 with it behind you.
+    float bearing = dot(normalize(vec2(d.x, d.z) + vec2(1e-5)), -u_stormDir);
+    float stormSide = mix(mix(0.35, 1.0, smoothstep(-0.2, 0.6, bearing)), 1.0, u_stormNear);
+
     vec3 sky = daySky * u_dayAmount + twilightSky * u_twilightAmount + nightSky * u_nightAmount;
     float antiSun = pow(max(0.0, dot(d, normalize(vec3(-u_sunDir.x, 0.18, -u_sunDir.z)))), 2.2);
     sky = mix(sky, mix(vec3(0.28, 0.22, 0.62), vec3(0.08, 0.13, 0.24), u_nightAmount), antiSun * 0.18 * (1.0 - oc));
@@ -324,7 +339,7 @@ const SKY_FRAG = /* glsl */`
     // The slate itself is the STORM's; rain under a fair-weather sky gets most of
     // the way there so the light overhead matches the water coming out of it,
     // without repainting a clear afternoon the moment a squall clips the frame.
-    sky = mix(sky, stormSky, max(u_stormIntensity, oc * 0.80));
+    sky = mix(sky, stormSky, max(u_stormIntensity, oc * 0.80) * stormSide);
 
     // Stylized drifting 2-octave fbm cloud layer
     float skyUp = smoothstep(0.015, 0.14, d.y);
@@ -361,7 +376,21 @@ const SKY_FRAG = /* glsl */`
     // Storm scud: fast low dark wisps racing along the horizon band
     float scud = smoothstep(0.48, 0.92, fbm2(cuv * 2.4 + vec2(u_time * 0.055, u_time * 0.020) + 31.7));
     float scudBand = smoothstep(-0.02, 0.06, d.y) * (1.0 - smoothstep(0.16, 0.52, d.y));
-    sky = mix(sky, vec3(0.055, 0.060, 0.075), scud * scudBand * oc * 0.85);
+    sky = mix(sky, vec3(0.055, 0.060, 0.075), scud * scudBand * oc * 0.85 * stormSide);
+
+#ifdef SKY_ANVIL
+    // THE ANVIL: the cloud mass over the storm, turning slowly about its own
+    // bearing. Two octaves, and only inside the sector that faces the weather
+    // and above the horizon band — a fragment outside the mask pays a
+    // smoothstep, not a noise field. Off entirely on the bottom tier.
+    float anvilMask = smoothstep(0.05, 0.75, bearing) * smoothstep(0.02, 0.38, d.y) * oc;
+    if (anvilMask > 0.004) {
+      float ca = cos(u_time * 0.020), sa = sin(u_time * 0.020);
+      vec2 ap = vec2(cuv.x * ca - cuv.y * sa, cuv.x * sa + cuv.y * ca) * 0.55;
+      float anvil = smoothstep(0.34, 0.86, fbm2(ap + u_stormDir * 0.8));
+      sky = mix(sky, vec3(0.045, 0.050, 0.062), anvilMask * anvil * 0.85);
+    }
+#endif
 
     // Sun disk + glow corona (heavily muted in storm)
     float sunDot  = dot(d, u_sunDir);
@@ -852,10 +881,15 @@ export class Renderer {
     this.skyMaterial = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
+      // The rotating anvil is a second fbm field in the storm sector: worth it
+      // where there are cycles for it, off where there are not.
+      defines: this.quality === 'low' ? {} : { SKY_ANVIL: '' },
       uniforms: {
         u_sunDir: { value: this.sunDir.clone() },
         u_stormIntensity: { value: 0 },
         u_overcast: { value: 0 },
+        u_stormDir: { value: new THREE.Vector2(0, 1) },
+        u_stormNear: { value: 1 },
         u_underwaterIntensity: { value: 0 },
         u_lightningFlash: { value: 0 },
         u_lightningDir: { value: new THREE.Vector3(0, 0, 1) },
@@ -1652,6 +1686,19 @@ export class Renderer {
     );
     this.horizonFill.color.copy(this.boltFillColor);
     this.horizonFill.intensity = this.boltFillBaseIntensity + this.boltFillStrength;
+  }
+
+  /**
+   * WHICH WAY THE WEATHER IS (storm-05). `dirX/dirZ` point from the camera to
+   * the ring centre (the storm is the far side of the wall behind you), `near`
+   * is 0 deep inside the ring and 1 at or outside the wall. EnvironmentFx owns
+   * the ring geometry and feeds this every frame it updates the front.
+   */
+  setStormBearing(dirX: number, dirZ: number, near: number) {
+    const u = this.skyMaterial.uniforms;
+    const len = Math.hypot(dirX, dirZ);
+    if (len > 1e-4) (u.u_stormDir.value as THREE.Vector2).set(dirX / len, dirZ / len);
+    u.u_stormNear.value = clamp(near, 0, 1);
   }
 
   /** 0 = clear weather, 1 = full storm (gray sky, fog, dim lights). */

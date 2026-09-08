@@ -118,3 +118,23 @@ export function stormRainIntensityAt(
 export function stormFrontShellCount(quality: 'low' | 'balanced' | 'high'): number {
   return quality === 'low' ? 1 : 2;
 }
+
+/**
+ * WHICH SIDE OF THE SKY THE STORM IS ON (storm-05) — the CPU mirror of the
+ * `stormSide` term in SKY_FRAG, so the asymmetry can be graded without a
+ * rasteriser. `bearing` is dot(view.xz, centre->camera), i.e. 1 looking
+ * straight at the nearest wall and -1 with it behind you; `stormNear` is
+ * stormSkyNear01 below. Deep inside the ring the slate is 0.35 of itself away
+ * from the weather and full toward it; outside, the storm is all around and
+ * the sky closes evenly.
+ */
+export function stormSkySideMask(bearing: number, stormNear: number): number {
+  const s = smoothstep(bearing, -0.2, 0.6);
+  return 0.35 + (1 - 0.35) * s + (1 - (0.35 + (1 - 0.35) * s)) * clamp01(stormNear);
+}
+
+/** 0 = inside the ring (directional sky), 1 = outside it (even slate), crossing
+ *  over a ±60 m band at the wall so nothing snaps as you sail through. */
+export function stormSkyNear01(signedDistOutside: number): number {
+  return smoothstep(signedDistOutside, -60, 60);
+}

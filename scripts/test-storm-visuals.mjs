@@ -206,5 +206,35 @@ expect('storm-03 both shells share one program (same source, same defines)',
   && /const build = \(outer: boolean\)/.test(envSrc)
   && /mesh\.renderOrder = outer \? 2 : 3;/.test(envSrc));
 
+// ── storm-05: the storm has a bearing in the sky ─────────────────────────────
+const rendererSrc = read('src/client/rendering/Renderer.ts');
+if (sw) {
+  const facing = sw.stormSkySideMask?.(1, 0);
+  const away = sw.stormSkySideMask?.(-1, 0);
+  expect('storm-05 inside the ring the slate is at least 12% heavier toward the wall',
+    Number.isFinite(facing) && Number.isFinite(away) && facing - away >= 0.12,
+    `facing ${facing} vs away ${away}`);
+  expect('storm-05 outside the ring the storm is all around and the sky closes evenly',
+    sw.stormSkySideMask?.(1, 1) === 1 && sw.stormSkySideMask?.(-1, 1) === 1);
+  expect('storm-05 the inside/outside crossover is a band at the wall, not a step',
+    sw.stormSkyNear01?.(-200) === 0 && sw.stormSkyNear01?.(200) === 1
+    && near(sw.stormSkyNear01?.(0), 0.5, 1e-6));
+}
+expect('storm-05 the sky shader carries the storm bearing and uses it on the slate',
+  /uniform vec2  u_stormDir;/.test(rendererSrc)
+  && /uniform float u_stormNear;/.test(rendererSrc)
+  && /mix\(mix\(0\.35, 1\.0, smoothstep\(-0\.2, 0\.6, bearing\)\), 1\.0, u_stormNear\)/.test(rendererSrc)
+  && /max\(u_stormIntensity, oc \* 0\.80\) \* stormSide/.test(rendererSrc)
+  && /scud \* scudBand \* oc \* 0\.85 \* stormSide/.test(rendererSrc));
+expect('storm-05 the rotating anvil is a tier gate, masked to the storm sector',
+  /defines: this\.quality === 'low' \? \{\} : \{ SKY_ANVIL: '' \}/.test(rendererSrc)
+  && /#ifdef SKY_ANVIL/.test(rendererSrc)
+  && /float anvilMask = smoothstep\(0\.05, 0\.75, bearing\)/.test(rendererSrc)
+  && /if \(anvilMask > 0\.004\) \{/.test(rendererSrc)
+  && /cos\(u_time \* 0\.020\)/.test(rendererSrc));
+expect('storm-05 the bearing is fed from the ring, every frame the front updates',
+  /this\.view\.renderer\.setStormBearing\(/.test(envSrc)
+  && /stormSkyNear01\(Math\.hypot\(toCentreX, toCentreZ\) - radius\)/.test(envSrc));
+
 console.log(failures === 0 ? `\nPASS storm visuals (${failures} failures)` : `\nFAIL storm visuals (${failures} failures)`);
 process.exit(failures === 0 ? 0 : 1);
