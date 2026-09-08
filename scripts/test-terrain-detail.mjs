@@ -7,6 +7,7 @@
 // plunges past the rim; rocky coasts sit between. Cave trenches are opt-in
 // (carveCaves) — walking above a cave stands on the natural hillside.
 import {
+  CAVE_CEIL_HEADROOM,
   directionToYaw,
   getCaveCeilingY,
   getCaveFloorY,
@@ -292,10 +293,18 @@ expect('Walking above a roofed tunnel stands on the NATURAL hillside (no default
 const floorInside = getCaveFloorY(caveIsland, insideX, insideZ);
 expect('getCaveFloorY returns the carved floor inside the tunnel', floorInside !== null && Math.abs(floorInside - cave.floorY) < 0.05, `floor=${floorInside}`);
 expect('getCaveFloorY returns null outside every cave', getCaveFloorY(caveIsland, cavePos.x + 60, cavePos.z + 60) === null);
+// The COLLISION ceiling is the nominal roof plus CAVE_CEIL_HEADROOM (0.25 m):
+// the drawn crown stood ~1 m over the ceiling a jump could reach, so physics-04
+// moved both sides toward each other (w5.5 slice c). The gate on the gap itself
+// is test-cave-walk's crown-gap assertion; here the contract is only that the
+// helper reports the roof a BODY meets, and that it is exactly one headroom
+// above the geometric roof — never a free metre, never below it.
 const ceilInside = getCaveCeilingY(caveIsland, insideX, insideZ);
-expect('getCaveCeilingY returns the interior ceiling inside the tunnel', ceilInside === cave.ceilingY, `ceil=${ceilInside}`);
+expect('getCaveCeilingY returns the interior ceiling inside the tunnel',
+  ceilInside === cave.ceilingY + CAVE_CEIL_HEADROOM, `ceil=${ceilInside}`);
 expect('getCaveCeilingY returns null outside every cave', getCaveCeilingY(caveIsland, cavePos.x + 60, cavePos.z + 60) === null);
-expect('Cave ceiling sits height above floor', ceilInside !== null && Math.abs(ceilInside - cave.floorY - cave.height) < 1e-9);
+expect('Cave ceiling sits height (plus one headroom) above floor',
+  ceilInside !== null && Math.abs(ceilInside - cave.floorY - cave.height - CAVE_CEIL_HEADROOM) < 1e-9);
 
 // ── The mouth trench is part of the shared GROUND, not a client decoration ──
 // A cave with a real surface mouth gashes the hillside open at its doorway, and

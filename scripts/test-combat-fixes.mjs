@@ -18,7 +18,7 @@ import { WeaponSystem } from '../src/server/systems/WeaponSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS, FLOODING, PLAYER } from '../src/shared/constants/index.ts';
 import { gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
-import { countOpenHoles, toShipLocalPoint } from '../src/shared/interactions.ts';
+import { countOpenHoles, getShipFloorYAt, isStandingInShipHold, toShipLocalPoint } from '../src/shared/interactions.ts';
 import { buildHotSnapshot, buildWireSnapshot } from '../src/server/core/snapshot.ts';
 
 /** Which hull face a hull-local breach point lies on. Beam-normalised: a hull
@@ -602,12 +602,22 @@ console.log('\n6. Bots bail under player-like constraints');
   let patched = false;
   for (let i = 0; i < 900 && !patched; i++) {
     match.updateBotFlooding(DT);
+    // SINK-01 made repair reach 3D: a breach at the waterline cannot be worked
+    // from the weather deck at all, so the bot is routed down the companionway
+    // instead. updateBotFlooding only steers in x/z — PhysicsSystem is what
+    // seats a walker on the deck, the stair ramp or the hold sole every tick —
+    // so the harness owes him that vertical half, or he walks on the deck lid
+    // forever and this section grades nothing.
+    for (const b of bots) b.position.y = getShipFloorYAt(b.position, ship);
     patched = ship.holes[0].patched === true;
   }
   const endLocal = toShipLocalPoint(b0.position, ship);
-  expect('a bot walks to the rail above the breach', 
+  expect('a bot goes below and works his way to the breach',
     Math.hypot(endLocal.x - target.x, endLocal.z - target.z) < startDist,
     `start=${startDist.toFixed(2)}m end=${Math.hypot(endLocal.x - target.x, endLocal.z - target.z).toFixed(2)}m`);
+  expect('...standing in the HOLD, not on the weather deck above it',
+    isStandingInShipHold(b0.position, ship),
+    `y=${b0.position.y.toFixed(2)} local=${JSON.stringify(endLocal)}`);
   expect('...and planks THAT specific breach id', patched === true,
     JSON.stringify(ship.holes));
   expect('planking it consumed a plank',

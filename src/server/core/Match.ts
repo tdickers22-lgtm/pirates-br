@@ -4167,9 +4167,19 @@ export class Match {
       const mustClear = Math.abs(below.x - stair.cx) < lane
         && (inSlotBand(below.z) || inSlotBand(work.z)
           || (below.z - stair.cz) * (work.z - stair.cz) < 0);
-      return mustClear
-        ? { x: stair.cx + (work.x >= stair.cx ? lane : -lane), z: below.z }
-        : work;
+      if (!mustClear) return work;
+      // Out into the lane FIRST, then fore-and-aft ALONG it. Steering him at
+      // {laneX, hisOwnZ} and nothing more is a livelock: the moment he reaches
+      // the lane the guard reads |x - cx| < lane as false, sends him back at
+      // the work point, which puts him inside the lane again — so he shuffles
+      // across a centimetre of beam beside the ladder forever and the breach
+      // never gets planked (test-combat-fixes section 6 caught exactly this).
+      // Advancing z while he is out here is what actually gets him past the
+      // stairwell; the band test then clears on its own.
+      const laneX = stair.cx + (work.x >= stair.cx ? lane : -lane);
+      return Math.abs(below.x - laneX) > 0.15
+        ? { x: laneX, z: below.z }
+        : { x: laneX, z: work.z };
     }
     // Still topside: the stairwell is the only way below, and it is open at the
     // FORWARD end only (coamings on the other three sides), so line up on the
