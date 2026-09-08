@@ -1023,6 +1023,13 @@ export class MapGenerator {
     // .updateOceanCaveSuppression) — and floors this deep are always far enough
     // in for that predicate to have turned on.
     const CAVE_MIN_FLOOR = 1.0;
+    // Bearings the through-tunnel scan tries, in order. 0 is the entrance axis
+    // (the historical scan, bit-identical); the rest fan symmetrically so a
+    // warren whose far flank is thick straight ahead still finds its second door.
+    const THROUGH_FAN = [0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05, 1.4, -1.4, 1.75, -1.75];
+    // The roster fallback sweeps the full circle around the junction (a second
+    // door on ANY flank beats a sack), nearest bearings first.
+    const SECOND_DOOR_FAN = [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6, 2.0, -2.0, 2.4, -2.4, 2.8, -2.8, Math.PI];
     // Natural surface stays ≥ `clear` above the tube's (ramping) ceiling along a
     // ray → the roof holds. The ceiling follows the floor ramp f0→f1 (+h), so a
     // descending entrance needs far less overhead rock than its mouth height
@@ -1096,6 +1103,9 @@ export class MapGenerator {
         const iRad = grand ? (style === 'rocky' ? rr(rng, 3.2, 4.2) : rr(rng, 4.4, 5.6)) : rr(rng, 2.7, 3.4);
         if (caves.some((c) => Math.hypot(c.position.x - mouth.x, c.position.z - mouth.z) < c.length + mainLen)) continue;
         const sys: IslandCave[] = [];
+        // Where each bored vein ends: candidate launch points for the second
+        // door when the junction itself is walled in by its own warren.
+        const veinTips: Array<{ x: number; z: number; floor: number }> = [];
         sys.push(seg(mouth.x, mouth.z, rot, iRad, mainLen, floorY, h, { mouth: true, floorEnd: rampFloor }));
 
         // Central junction chamber, deep underground (taller, at the ramp's base).
@@ -1168,6 +1178,7 @@ export class MapGenerator {
           if (overlapClash(sx, sz, dX, dZ, len, floor, floorEnd, rad)) return;
           const passage = seg(sx, sz, dRot, rad, len, floor, height, { floorEnd });
           sys.push(passage);
+          veinTips.push({ x: ex, z: ez, floor: floorEnd });
           const roll = rng();
           if (sys.length >= MAX_SEGS || depth <= 1 || roll < 0.22) {
             // Terminate this vein in a chamber (treasure room) or a plain dead-end.
@@ -1206,47 +1217,127 @@ export class MapGenerator {
         // breach mid-run — the deep end is sealed instead of boring a protruding tube.
         const THROUGH_SCAN_CAP = 48; // ≈46 + one step, so a genuinely honest far-flank
         //   through-tunnel still qualifies while long straight boxes are rejected.
-        let exit: { x: number; z: number; y: number; dist: number } | null = null;
-        for (let d = jLen + 4; d < THROUGH_SCAN_CAP; d += 2) {
-          const ex = jx + inX * d, ez = jz + inZ * d;
-          const surf = ground(ex, ez);
-          if (surf < ceilingY + 0.4) {
-            // The breakout must be on the FAR FLANK — a thin-roof reading near the
-            // island centre is an interior basin/saddle (twin peaks, calderas), and
-            // boring up into it leaves a tube floating proud of the terrain with a
-            // "far" mouth in the middle of the island. No honest exit here → seal.
-            const exDist = Math.hypot(ex - island.position.x, ez - island.position.z);
-            if (surf > 3.0 && exDist > island.radius * 0.45) exit = { x: ex, z: ez, y: surf, dist: d };
-            break;
+        // The scan runs from the junction's FAR END (tbx,tbz) outward along a
+        // heading. Heading 0 is the entrance axis — the historical scan, kept
+        // bit-identical — and the fan retries the same honesty tests on other
+        // headings, because a warren whose far flank happens to be thick on ONE
+        // bearing is not a warren that deserves a single door (all six roster
+        // cave islands read exactly 1 mouth before this).
+        const tbx = jx + inX * jLen, tbz = jz + inZ * jLen;
+        const breakoutOn = (dX: number, dZ: number): { x: number; z: number; y: number; dist: number; tubeLen: number } | null => {
+          let hit: { x: number; z: number; y: number; dist: number } | null = null;
+          for (let d = 4; d < THROUGH_SCAN_CAP - jLen; d += 2) {
+            const ex = tbx + dX * d, ez = tbz + dZ * d;
+            const surf = ground(ex, ez);
+            if (surf < ceilingY + 0.4) {
+              // The breakout must be on the FAR FLANK — a thin-roof reading near the
+              // island centre is an interior basin/saddle (twin peaks, calderas), and
+              // boring up into it leaves a tube floating proud of the terrain with a
+              // "far" mouth in the middle of the island. No honest exit here → seal.
+              const exDist = Math.hypot(ex - island.position.x, ez - island.position.z);
+              if (surf > 3.0 && exDist > island.radius * 0.45) hit = { x: ex, z: ez, y: surf, dist: d };
+              break;
+            }
           }
-        }
-        // Roof-validate the mid-run: the natural surface must stay a clear ≥1.2m ABOVE
-        // the tube ceiling (floor ramps jFloor→exit.y−1, ceiling = floorAt + h — the
-        // same ramp getCaveCeilingY reads) over all but the final approach to the
-        // breakout mouth. If any sample breaches, the tube would poke out → reject it.
-        let throughRoofed = false;
-        if (exit) {
-          const tubeLen = Math.max(4, exit.dist - jLen - 2);
-          const throughFloorEnd = exit.y - 1;
-          throughRoofed = true;
+          if (!hit) return null;
+          // Roof-validate the mid-run: the natural surface must stay a clear ≥1.2m ABOVE
+          // the tube ceiling (floor ramps jFloor→exit.y−1, ceiling = floorAt + h — the
+          // same ramp getCaveCeilingY reads) over all but the final approach to the
+          // breakout mouth. If any sample breaches, the tube would poke out → reject it.
+          const tubeLen = Math.max(4, hit.dist - 2);
+          const throughFloorEnd = hit.y - 1;
           for (const f of [0.15, 0.3, 0.45, 0.6, 0.72]) {
-            const px = jx + inX * (jLen + tubeLen * f), pz = jz + inZ * (jLen + tubeLen * f);
+            const px = tbx + dX * tubeLen * f, pz = tbz + dZ * tubeLen * f;
             const tubeCeil = jFloor + (throughFloorEnd - jFloor) * f + h;
-            if (ground(px, pz) < tubeCeil + 1.2) { throughRoofed = false; break; }
+            if (ground(px, pz) < tubeCeil + 1.2) return null;
           }
+          // Off-axis tubes may cross a vein at a clashing depth; the union's floor
+          // would then step by the difference over one cell (the hole players fall
+          // through). The axis run starts at the junction end and never can.
+          if (overlapClash(tbx, tbz, dX, dZ, tubeLen, jFloor, throughFloorEnd, iRad)) return null;
+          return { ...hit, tubeLen };
+        };
+        let exit: { x: number; z: number; y: number; dist: number; tubeLen: number } | null = null;
+        let exitRot = rot;
+        for (const off of THROUGH_FAN) {
+          const r2 = rot + off;
+          const found = off === 0 ? breakoutOn(inX, inZ) : breakoutOn(-Math.sin(r2), -Math.cos(r2));
+          if (found) { exit = found; exitRot = r2; break; }
         }
-        // Only open the far mouth once BOTH the thin-roof breakout (surf < ceilingY+0.4,
-        // above) and the along-length roof validation pass; otherwise seal the junction.
-        if (exit && throughRoofed) {
-          const exTunLen = exit.dist - jLen;
+        if (exit) {
           // Tunnel ramps UP from the deep junction back to the far surface.
-          sys.push(seg(jx + inX * jLen, jz + inZ * jLen, rot, iRad, Math.max(4, exTunLen - 2), jFloor, h, { floorEnd: exit.y - 1 }));
+          sys.push(seg(tbx, tbz, exitRot, iRad, exit.tubeLen, jFloor, h, { floorEnd: exit.y - 1 }));
           // Far mouth on the far flank (descends inward to meet the ramp).
           const exAngle = Math.atan2(exit.z - island.position.z, exit.x - island.position.x);
           const exRot = directionToYaw(Math.cos(exAngle), Math.sin(exAngle));
-          sys.push(seg(exit.x, exit.z, exRot, iRad, Math.min(exTunLen, 9), exit.y - 1, h, { mouth: true, floorEnd: exit.y - 2 }));
+          sys.push(seg(exit.x, exit.z, exRot, iRad, Math.min(exit.dist, 9), exit.y - 1, h, { mouth: true, floorEnd: exit.y - 2 }));
         } else {
           junction.hasBackWall = true; // no honest through-route → seal the deep end
+        }
+
+        // ── Roster fallback: search INWARD for the second door ────────────────
+        // The outward ray scan only finds an exit where the roof happens to thin
+        // along a straight bearing. When it finds none, look from the OUTSIDE in:
+        // candidate hillside points on a different flank, each tested for the
+        // same roofed, walkable-gradient run down to the junction. A cave island
+        // with one door is a sack; every warren on the roster gets two.
+        if (!sys.some((c) => c.hasMouth && c !== sys[0])) {
+          // Ramp UP from the junction on a fan of bearings and open where the run
+          // first reaches honest hillside: the exit does not have to be a thin-roof
+          // reading (that is what the through scan wanted), it only has to be a
+          // hillside a walkable ramp can reach with the roof intact all the way.
+          // A side door is a modest passage, not a second grand portal: a lower,
+          // narrower tube needs far less rock overhead and clashes with fewer
+          // veins, so the warren gets its exit instead of staying a sack. It stays
+          // above the 3.0 m headroom bar test-island-props holds every cave to.
+          const dH = Math.max(3.4, Math.min(h, 4.2));
+          const dRad = Math.max(2.4, Math.min(iRad, 3.4));
+          const secondDoorOn = (bx: number, bz: number, bFloor: number, dX: number, dZ: number) => {
+            // Bore FLAT at the junction's own depth and open where the hillside
+            // falls to meet the tube — the classic daylighting adit. A ramp that
+            // chases the surface downhill can never keep its roof (the flank
+            // drops faster than the 0.75 walkable gradient allows), which is why
+            // the outward thin-roof scan finds nothing on a mountain flank.
+            for (let d = 6; d <= 46; d += 1) {
+              const ex = bx + dX * d, ez = bz + dZ * d;
+              const g = ground(ex, ez);
+              if (g >= bFloor + dH + 1.2) continue;   // rock still thick overhead: keep boring
+              // The roof has thinned to the tube here: this sample is the ONLY
+              // candidate on this bearing (going further would float the tube
+              // proud of the hillside), so it either makes a legal door or not.
+              if (d < 10) return null;                                   // too close to the junction
+              if (g < bFloor + 2.4) return null;                         // opening too low to walk out of
+              if (Math.hypot(ex - mouth.x, ez - mouth.z) < 14) return null;      // second hole in the same wall
+              if (Math.hypot(ex - island.position.x, ez - island.position.z) < island.radius * 0.3) return null;
+              const tubeLen = Math.max(4, d - 2);
+              if (overlapClash(bx, bz, dX, dZ, d, bFloor, bFloor, dRad)) return null;
+              return { x: ex, z: ez, y: g, dist: d, tubeLen };
+            }
+            return null;
+          };
+          const launches = [{ x: tbx, z: tbz, floor: jFloor }, ...veinTips];
+          outer:
+          for (const from of launches) {
+            for (const off of SECOND_DOOR_FAN) {
+              const r2 = rot + off;
+              const dX = -Math.sin(r2), dZ = -Math.cos(r2);
+              const door = secondDoorOn(from.x, from.z, from.floor, dX, dZ);
+              if (!door) continue;
+              sys.push(seg(from.x, from.z, r2, dRad, door.tubeLen, from.floor, dH, {}));
+              sys.push(seg(door.x, door.z, directionToYaw(dX, dZ), dRad, Math.min(door.dist, 9), from.floor, dH,
+                { mouth: true }));
+              // Whatever the door was bored from is no longer a dead end: a
+              // rendered back wall standing across an open tunnel is worse than
+              // the sack it replaced.
+              for (const c of sys) {
+                if (!c.hasBackWall) continue;
+                const fx = c.position.x - Math.sin(c.rotation) * c.length;
+                const fz = c.position.z - Math.cos(c.rotation) * c.length;
+                if (Math.hypot(fx - from.x, fz - from.z) < 0.75) c.hasBackWall = false;
+              }
+              break outer;
+            }
+          }
         }
 
         caves.push(...sys);

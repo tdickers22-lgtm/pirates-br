@@ -88,6 +88,7 @@ for (const seed of [SEED, 20260702]) {
   let tavernFlatOk = true;
   let countsOk = true;
   let cavesOk = true;
+  let caveDoorsOk = true;
   let detail = '';
 
   for (const island of islands) {
@@ -172,6 +173,21 @@ for (const seed of [SEED, 20260702]) {
     // network, so the ceiling/floor helpers may report a connected segment's
     // value — assert a roofed, walkable volume rather than exact per-segment
     // equality. Mouth segments intentionally break the surface (an opening).
+    // TWO DOORS: a warren with one mouth is a sack — you fight your way in and
+    // there is no other way out. Every cave island on the roster carries at
+    // least two mouth segments, and they must be genuinely different openings
+    // (≥12 m apart), not two boxes in the same hole in the hill.
+    if (island.caves.length > 0) {
+      const mouths = island.caves.filter((c) => c.hasMouth);
+      if (mouths.length < 2) { caveDoorsOk = false; detail = `${island.name}: ${mouths.length} mouth(s)`; }
+      for (let i = 0; i < mouths.length; i++) {
+        for (let j = i + 1; j < mouths.length; j++) {
+          const d = Math.hypot(mouths[i].position.x - mouths[j].position.x, mouths[i].position.z - mouths[j].position.z);
+          if (d < 12) { caveDoorsOk = false; detail = `${island.name}: mouths ${d.toFixed(1)}m apart`; }
+        }
+      }
+    }
+
     for (const cave of island.caves) {
       const midX = cave.position.x - Math.sin(cave.rotation) * cave.length * 0.6;
       const midZ = cave.position.z - Math.cos(cave.rotation) * cave.length * 0.6;
@@ -212,6 +228,7 @@ for (const seed of [SEED, 20260702]) {
   expect('Dock shore ends sit on dry stamped flats', dockFlatOk, detail);
   expect('Taverns sit on stamped flats at their stated height', tavernFlatOk, detail);
   expect('Cave volumes are roofed and helpers behave', cavesOk, detail);
+  expect('Every cave island has ≥2 separate mouths (no single-entrance sacks)', caveDoorsOk, detail);
 }
 expect('Caves generate across the roster (hillside placement finds sites)', totalCaves > 0, `caves=${totalCaves}`);
 
