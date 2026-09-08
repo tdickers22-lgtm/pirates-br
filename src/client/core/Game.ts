@@ -4,7 +4,7 @@ import type {
   BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId,
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
-import { dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
 import {
   findNearbyCannonIndex,
@@ -4309,7 +4309,11 @@ export class Game {
         const islandReach = island.radius * 1.75 + 48;
         if (r2 > islandReach * islandReach) continue;
 
-        if (isPointInsideIslandFootprint(island, predictedX, predictedZ, 0)) {
+        // The APRON, not the polar footprint — the server's findPlayerIsland
+        // uses the same margin (GRID-01 / physics-28). Pad 0 here would make
+        // the client fall through the shore face a tick before the server said
+        // it should not, which is a rubber band on every rocky coast.
+        if (isPointInsideIslandFootprint(island, predictedX, predictedZ, WALK_FOOTPRINT_MARGIN * Math.max(island.radius, 1))) {
           // Mirror the server's islandStandY: inside a cave tunnel the
           // authoritative floor is the carved cave floor, 2-6m below the
           // natural hillside — snapping to the hilltop made players pop out
