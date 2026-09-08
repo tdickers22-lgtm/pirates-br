@@ -218,7 +218,7 @@ async function main() {
     page.on('pageerror', (error) => browserEvents.push({ type: 'pageerror', text: error.message }));
 
     await page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('#menu-solo-btn', { timeout: 12_000 });
+    await page.waitForSelector('#menu-solo-btn', { timeout: 150_000 }); // slow client boot on software GL
     await page.fill('#menu-name-input', `Smoke${Math.floor(Math.random() * 9000 + 1000)}`);
     // noWaitAfter: the synchronous world build freezes the main thread long
     // enough that Playwright's post-click wait can time out even though the

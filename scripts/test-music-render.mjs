@@ -53,16 +53,39 @@ await page.route('**/@vite/client*', (route) => route.fulfill({
   status: 200,
   contentType: 'application/javascript',
   body: [
+    // VITE'S DEV `define`s LIVE IN THIS MODULE, and stubbing it dropped them.
+    // In dev, `__GAME_SERVER_PORT__` is not substituted into the served source:
+    // the real /@vite/client installs the define table on globalThis, so a stub
+    // that only fakes HMR left `typeof __GAME_SERVER_PORT__ === 'undefined'`,
+    // Game.ts fell back to its :8090 default, the socket never reached the
+    // runner's server on :8091, and the client sat on the loading screen with
+    // "CANNOT REACH GAME SERVER" while this probe waited for a menu button that
+    // was never going to be shown. Hand the one define the client needs.
+    `globalThis.__GAME_SERVER_PORT__ = ${JSON.stringify(process.env.PIRATES_BR_SERVER_PORT ?? '8090')};`,
     'export const createHotContext = () => ({ on(){}, off(){}, send(){}, accept(){}, acceptExports(){}, dispose(){}, prune(){}, invalidate(){}, data:{} });',
-    'export const updateStyle = () => {};',
-    'export const removeStyle = () => {};',
+    // …but STYLES ARE NOT HMR. The HUD/menu stylesheets are imported by the
+    // client modules and, in dev, land through this very export: stubbing it to
+    // a no-op left every rule out of the document, so #menu-solo-btn existed and
+    // was never visible and both of these probes timed out on a working build.
+    // Inject for real; only the reload listener is meant to be stubbed.
+    'export const updateStyle = (id, content) => {',
+    '  let el = document.querySelector(`style[data-vite-dev-id="${id}"]`);',
+    '  if (!el) { el = document.createElement("style"); el.setAttribute("data-vite-dev-id", id); document.head.appendChild(el); }',
+    '  el.textContent = content;',
+    '};',
+    'export const removeStyle = (id) => { document.querySelector(`style[data-vite-dev-id="${id}"]`)?.remove(); };',
     'export const injectQuery = (u) => u;',
     'export default {};',
   ].join('\n'),
 }));
 
 await page.goto(`${BASE_URL}/?debug`, { waitUntil: 'domcontentloaded' });
-await page.waitForSelector('#menu-solo-btn', { timeout: 30_000 });
+// THE MENU BUTTON IS HIDDEN UNTIL THE CLIENT HAS BOOTED, AND BOOTING IS SLOW
+// ON THE SOFTWARE RASTERISER: the smoke run measures ~23 s to settle under
+// SwiftShader against ~3 s on a GPU, so a 30 s wait was a coin flip once the
+// machine was also running a stack. The suites that already survive software
+// GL (audit-live-floaters, edge-shimmer-probe) wait 150-240 s; match them.
+await page.waitForSelector('#menu-solo-btn', { timeout: 150_000 });
 
 // ── The offline rendering harness, installed in the page ────────────────────
 await page.evaluate(() => {
