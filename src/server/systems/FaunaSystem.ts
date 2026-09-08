@@ -63,8 +63,15 @@ const SHARK_HULL_VERTICAL_T = 0.5;
 
 export class FaunaSystem {
   private sharkSpawnCooldown = 0;
+  /** Seconds until blood may call another shark (bots-17). Without it a bite
+   *  is itself blood, and one shark in a crowd snowballs into four. */
+  private bloodCooldown = 0;
+  /** Last seen health per swimmer: a drop between ticks IS blood in the water,
+   *  so no caller has to remember to tell the sharks about it. */
+  private readonly lastSwimHealth = new Map<string, number>();
   /** Reused per tick — never reallocated in the 62.5 Hz shark loop. */
   private readonly swimmers: Player[] = [];
+  private readonly swimHazards: number[] = [];
   private readonly separationOrder: Shark[] = [];
   /** One reused walker result — the wander runs 70 times a tick forever. */
   private readonly stepOut: WalkerStep = { x: 0, z: 0, groundY: 0, blocked: false, reason: 'none' };
@@ -87,22 +94,56 @@ export class FaunaSystem {
     // Reused, never reallocated: this loop runs at 62.5 Hz for the whole match.
     const swimmers = this.swimmers;
     swimmers.length = 0;
+    this.bloodCooldown = Math.max(0, this.bloodCooldown - dt);
+    let bleeder: Player | null = null;
     for (const p of players) {
-      if (p.state === 'swimming' && p.health > 0) swimmers.push(p);
+      const inWater = p.state === 'swimming';
+      const prev = this.lastSwimHealth.get(p.id);
+      if (inWater && p.health > 0) {
+        swimmers.push(p);
+        // A wound taken in the water is blood in the water. Read off the health
+        // ledger rather than a hook, so EVERY source counts: a broadside, a
+        // pistol from a deck, a rock, another shark.
+        if (prev !== undefined && p.health < prev - 0.01) bleeder = p;
+        this.lastSwimHealth.set(p.id, p.health);
+      } else {
+        // Died in the water: the last thing she did was bleed into it.
+        if (prev !== undefined && inWater) bleeder = p;
+        if (prev !== undefined) this.lastSwimHealth.delete(p.id);
+      }
     }
 
-    if (sharks.length < SHARK.MAX_WORLD && this.sharkSpawnCooldown <= 0 && this.rng() < SHARK.SPAWN_CHANCE_PER_TICK) {
-      let eligible = 0;
-      for (const p of swimmers) if (p.swimTimer >= SHARK.SPAWN_SWIM_GRACE) eligible++;
-      if (eligible > 0) {
-        let pick = Math.floor(this.rng() * eligible);
-        let chosen: Player | null = null;
-        for (const p of swimmers) {
-          if (p.swimTimer < SHARK.SPAWN_SWIM_GRACE) continue;
-          if (pick-- === 0) { chosen = p; break; }
-        }
-        if (chosen) this.trySpawnSharkNear(state, chosen, t);
+    // ── Who gets a shark, and when ────────────────────────────────────────
+    // The old rule was a flat 3.4 %/s coin flip after an 8 s grace: mean first
+    // shark ~37 s into a swim, so a 10 s beach swim never saw one and a bot
+    // wreck party 75 s in the water was the only real victim (bots-11). Now
+    // every swimmer in OPEN water carries a hazard rate that ramps from 0 to
+    // SPAWN_RATE_MAX: nothing for a dash to the beach, near-certain for a long
+    // crossing. ONE rng draw a tick, as before, so the seeded stream is stable.
+    if (sharks.length < SHARK.MAX_WORLD && this.sharkSpawnCooldown <= 0) {
+      const hazards = this.swimHazards;
+      hazards.length = 0;
+      let total = 0;
+      for (const p of swimmers) {
+        const ramp = Math.min(1, Math.max(0, (p.swimTimer - SHARK.SPAWN_SWIM_GRACE) / SHARK.SPAWN_RATE_RAMP));
+        const h = ramp > 0 && this.isOpenWater(state, p.position.x, p.position.z) ? SHARK.SPAWN_RATE_MAX * ramp : 0;
+        hazards.push(h);
+        total += h;
       }
+      if (total > 0 && this.rng() < 1 - Math.exp(-total * dt)) {
+        let pick = this.rng() * total;
+        for (let i = 0; i < swimmers.length; i++) {
+          pick -= hazards[i];
+          if (pick <= 0) { this.trySpawnSharkNear(state, swimmers[i], t, SHARK.SPAWN_MAX_DIST); break; }
+        }
+      }
+    }
+
+    // Blood jumps the budget entirely: a shark is on it inside BLOOD_SPAWN_DIST.
+    if (bleeder && sharks.length < SHARK.MAX_WORLD && this.bloodCooldown <= 0) {
+      const before = sharks.length;
+      this.trySpawnSharkNear(state, bleeder, t, SHARK.BLOOD_SPAWN_DIST, true);
+      if (sharks.length > before) this.bloodCooldown = SHARK.BLOOD_COOLDOWN;
     }
 
     for (let i = sharks.length - 1; i >= 0; i--) {
@@ -248,6 +289,11 @@ export class FaunaSystem {
           this.hooks.noteDamageSource(target.id, 'shark');
           const bite = this.hooks.absorbWithArmor(target, SHARK.BITE_DAMAGE);
           target.health -= bite;
+          // A shark already on you does not need to call its friends: file the
+          // post-bite health so the blood watcher above sees no NEW wound next
+          // tick. Without this a first bite spawns a second shark, whose bite
+          // spawns a third, and one mistake in the water is four fins.
+          this.lastSwimHealth.set(target.id, target.health);
           // A shark bite took a fifth of your health and put NOTHING on screen —
           // no number, no name, no bearing. It is the one environmental source
           // with real jaws, so the wedge points at them.
@@ -282,10 +328,10 @@ export class FaunaSystem {
   }
 
   /** Put a spawned shark in open water near a swimmer, or leave the slot free. */
-  private trySpawnSharkNear(state: GameState, p: Player, t: number) {
+  private trySpawnSharkNear(state: GameState, p: Player, t: number, maxDist: number, ignoreCooldown = false) {
     const { sharks, islands } = state;
     const ang = this.rng() * Math.PI * 2;
-    const dist = randRange(SHARK.SPAWN_MIN_DIST, SHARK.SPAWN_MAX_DIST, this.rng);
+    const dist = randRange(Math.min(SHARK.SPAWN_MIN_DIST, maxDist * 0.6), maxDist, this.rng);
     const x = p.position.x + Math.sin(ang) * dist;
     const z = p.position.z + Math.cos(ang) * dist;
     if (Math.abs(x) >= WORLD.HALF - 24 || Math.abs(z) >= WORLD.HALF - 24) return;
@@ -295,7 +341,7 @@ export class FaunaSystem {
       if (isPointInsideIslandFootprint(island, x, z, SHARK.SHORE_MARGIN)) return;
     }
     for (const shark of sharks) {
-      if (dist2D(shark.position.x, shark.position.z, x, z) < SHARK.SPAWN_MIN_DIST) return;
+      if (dist2D(shark.position.x, shark.position.z, x, z) < SHARK.SEPARATION_RANGE * 2) return;
     }
     sharks.push({
       id: uuid(),
@@ -313,7 +359,21 @@ export class FaunaSystem {
       anchorZ: z,
       idleTime: 0,
     });
-    this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX, this.rng);
+    // A blood call must not eat the budget's cooldown: the next long swim still
+    // gets its own shark.
+    if (!ignoreCooldown) {
+      this.sharkSpawnCooldown = randRange(SHARK.SPAWN_COOLDOWN_MIN, SHARK.SPAWN_COOLDOWN_MAX, this.rng);
+    }
+  }
+
+  /** Open water: outside every island footprint by OPEN_WATER_DIST. Paddling in
+   *  the shallows is safe — a fin needs room, and a shark shoved out of the
+   *  shore rock every tick is the "random damage" bug in bots-18. */
+  private isOpenWater(state: GameState, x: number, z: number): boolean {
+    for (const island of state.islands) {
+      if (isPointInsideIslandFootprint(island, x, z, SHARK.OPEN_WATER_DIST)) return false;
+    }
+    return true;
   }
 
   /** The shark has given up. It glides out while the client fades it. */
