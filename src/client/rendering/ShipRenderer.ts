@@ -32,6 +32,7 @@ const UPGRADE_PENNANT_COLORS: Record<ShipUpgradeType, number> = {
 
 import { finishCanvasTexture, foamTexture, sailTexture, sprayTexture, supplyLidTexture, woodCanvas, woodTexture } from './ship/textures.js';
 import type { SupplyKind } from './ship/textures.js';
+import { applyPlankDetail, makePlankUniforms, type PlankUniforms } from './ship/plankDetail.js';
 import { makeLoftedSlabGeometry, makeSheerRunGeometry, sheerHalfWidthAt, makeBillowedSailGeometry, makeHullStrakeGeometry, makeLoftedHullGeometry, makeStairRampGeometry, makeWaterlineFoamGeometry, makeWaterlineFoamTexture, mergeStaticMeshes, NO_MERGE_EXCLUDE } from './ship/geometry.js';
 import { applyFlagWave, FLAG_DROP, FLAG_FLY, flagPhaseFromId, flagTexture, makeBarrel, makeCylinderBetween, makeFigurehead, makeHatchGrating, makeLanternFixture, makeRopeCoil, makeWindowFrame } from './ship/dressing.js';
 import type { FlagUniforms, ShipFlag } from './ship/dressing.js';
@@ -216,6 +217,8 @@ interface ShipMeshGroup {
   hullHoleUniform: { value: THREE.Vector4[] };
   /** Waterline contact collar (wet-edge foam hugging the hull's own waterline). */
   waterlineFoam: THREE.Mesh;
+  /** Phase-A planking uniforms: the hull-local wet line, moved every frame. */
+  plankUniforms: PlankUniforms;
   /**
    * THE ONE HULL IN THE REACH THAT IS YOURS.
    *
@@ -614,6 +617,17 @@ export class ShipRenderer {
     deckRiserMat.polygonOffset = true;
     deckRiserMat.polygonOffsetFactor = -2;
     deckRiserMat.polygonOffsetUnits = -2;
+    // SHIPVIS-01 phase A. Procedural planking on the two surfaces the player is
+    // nose-to-nose with all match. `deckRiserMat` is patched separately because
+    // three's Material.copy does NOT carry onBeforeCompile across a clone — the
+    // riser would otherwise be the one un-planked patch of deck on the ship.
+    // Costs no draws, no triangles and no bytes; the low tier compiles the
+    // colour-only variant (no bevel normal, no grain). Distant hulls use the
+    // proxy, which is never patched — that is the LOD.
+    const plankUniforms = makePlankUniforms();
+    const plankHighTier = this.quality !== 'low';
+    applyPlankDetail(deckMat, 'deck', plankUniforms, plankHighTier);
+    applyPlankDetail(deckRiserMat, 'deck', plankUniforms, plankHighTier);
     const sailMat = new THREE.MeshStandardMaterial({
       map: this.sailTex,
       color: 0xf5edd2,
@@ -663,6 +677,10 @@ export class ShipRenderer {
     const holeSlots = FLOODING.MAX_HOLES_PER_SHIP;
     const hullHoleUniform = { value: Array.from({ length: holeSlots }, () => new THREE.Vector4(0, 0, 0, 0)) };
     applyHullHoleDiscard(hullMat, hullHoleUniform, holeSlots);
+    // Chained AFTER the breach discard: applyPlankDetail calls whatever
+    // onBeforeCompile it finds and folds the previous program-cache key into
+    // its own, so the two patches compose instead of overwriting each other.
+    applyPlankDetail(hullMat, 'hull', plankUniforms, plankHighTier);
     const hull = new THREE.Mesh(hullGeo, hullMat);
     hull.castShadow = true;
     hull.receiveShadow = true;
@@ -2537,6 +2555,7 @@ export class ShipRenderer {
       wake,
       hullHoleUniform,
       waterlineFoam,
+      plankUniforms,
       ownPennant,
     });
 
@@ -2988,6 +3007,13 @@ export class ShipRenderer {
       // edge — that is the whole point), brightening as the ship makes way.
       {
         const foamMat = mesh.waterlineFoam.material as THREE.MeshBasicMaterial;
+        // The planking's wet line, in HULL-LOCAL metres: where the sea actually
+        // is minus where the hull is. Normally ~0 (the loft's y = 0 slot IS the
+        // design waterline); it climbs the topside as she settles, so a sinking
+        // hull darkens from the boot-top up instead of staying showroom-dry.
+        mesh.plankUniforms.uWetY.value =
+          gerstnerHeight(mesh.root.position.x, mesh.root.position.z, waveT, WAVE_PARAMS, storm01)
+          - mesh.root.position.y;
         const speed01 = THREE.MathUtils.clamp(Math.hypot(ship.velocity.x, ship.velocity.z) / 8, 0, 1);
         const breathe = 0.9 + 0.1 * Math.sin(t * 1.7 + ship.position.x * 0.05);
         mesh.waterlineFoam.visible = detailNear && !ship.sinking;
@@ -3769,6 +3795,13 @@ export class ShipRenderer {
       blending: THREE.AdditiveBlending, depthWrite: false,
     });
     return new THREE.Points(geo, mat);
+  }
+
+  /** Hull-local Y of the sea on a given hull this frame — the wet line the
+   *  planking shader darkens below. Read by scripts/test-ship-plank-shader.mjs
+   *  to prove the uniform is live rather than frozen at its build-time zero. */
+  getPlankWetLevel(shipId: string): number | null {
+    return this.shipMeshes.get(shipId)?.plankUniforms.uWetY.value ?? null;
   }
 
   getShipGroup(shipId: string): THREE.Group | null {
