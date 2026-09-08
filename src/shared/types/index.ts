@@ -975,6 +975,9 @@ type MsgType =
    *  'shop_bought' {line, price, qty, gold} or 'interact_refused'. */
   | 'shop_buy'
   | 'shop_bought'
+  /** CAPTURE-01: a crewless hull changed hands at her own wheel.
+   *  {shipId, captorId, captorName, teamColor, losers[]} */
+  | 'ship_captured'
   | 'ammo_refilled'
   | 'prop_removed'
   /** The [X] was heard and REFUSED — feedback so a dead press is never silent. */
