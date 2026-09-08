@@ -9,19 +9,56 @@
  */
 import * as THREE from 'three';
 import { getIslandSurfaceY } from '../../../shared/utils/index.js';
+import { getSeatSurfaceY } from '../../../shared/props.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { makeUpgradeSignTexture } from '../../rendering/factories/TextureFactory.js';
 import { makeUpgradeStationProp } from '../../rendering/factories/MiscMeshFactory.js';
 import type { IslandBuildCtx } from './context.js';
 import { buildPropInstance } from './PropScatterer.js';
 
+/**
+ * THE CHORD GAP, for replicated furniture (ENTITYSEAT / physics-06).
+ *
+ * The server seats a chest at `getIslandSurfaceY + 0.35`, a barrel at `+0.08`,
+ * a station at its own offset — all on the ANALYTIC field. The player looks at
+ * a triangle mesh, and wherever the field is convex (stamp rims, terrace lips,
+ * ridges) a triangle is a CHORD that runs below it, so the box hovers. Props
+ * and decor were fixed by seating them on the drawn triangles (GroundTruth);
+ * every replicated entity was left on the function, and the live floater census
+ * never walked `host.environment`, so "0 floaters" was a statement about props.
+ *
+ * Fix the VISUAL only: keep the server's Y for gameplay and shift the mesh by
+ * the local chord gap, so the entity keeps exactly the offset the server meant
+ * it to have, measured from the ground the player can actually see. Zero per
+ * frame beyond one bucket lookup on the frames that move the entity, and the
+ * shift is 0 once GRID-01 makes both heights equal.
+ */
+export function seatedEntityY(
+  island: { id: string; position: { x: number; z: number } } & Parameters<typeof getIslandSurfaceY>[0],
+  x: number,
+  z: number,
+  serverY: number,
+): number {
+  const drawn = getSeatSurfaceY(island, x, z);
+  const analytic = getIslandSurfaceY(island, x, z);
+  if (!Number.isFinite(drawn) || !Number.isFinite(analytic)) return serverY;
+  // A metre of disagreement is not a chord gap, it is a different surface
+  // (cave carve, a stamp the mesh does not carry): leave the server alone.
+  const gap = drawn - analytic;
+  return Math.abs(gap) > 1 ? serverY : serverY + gap;
+}
+
 export function buildChestMeshes(ctx: IslandBuildCtx) {
   const { host, island, lowDetail } = ctx;
   for (const chest of island.chests) {
     const chestGroup = new THREE.Group();
-    chestGroup.position.set(chest.position.x, chest.position.y, chest.position.z);
+    chestGroup.position.set(
+      chest.position.x,
+      seatedEntityY(island, chest.position.x, chest.position.z, chest.position.y),
+      chest.position.z,
+    );
 
-    const surfaceY = getIslandSurfaceY(island, chest.position.x, chest.position.z);
+    const surfaceY = getSeatSurfaceY(island, chest.position.x, chest.position.z);
 
     let chestMesh: THREE.Object3D;
     let lid: THREE.Object3D;
@@ -152,7 +189,11 @@ export function buildBarrelMeshes(ctx: IslandBuildCtx) {
   const { host, island } = ctx;
   for (const barrel of island.barrels) {
     const barrelRoot = new THREE.Group();
-    barrelRoot.position.set(barrel.position.x, barrel.position.y, barrel.position.z);
+    barrelRoot.position.set(
+      barrel.position.x,
+      seatedEntityY(island, barrel.position.x, barrel.position.z, barrel.position.y),
+      barrel.position.z,
+    );
     const barrelGlb = buildPropInstance(
       'barrel',
       new THREE.Vector3(0, 0, 0),
@@ -184,7 +225,11 @@ export function buildUpgradeStationMeshes(ctx: IslandBuildCtx) {
   for (const station of island.upgradeStations) {
     const meta = host.getUpgradePresentation(station.type);
     const stationGroup = new THREE.Group();
-    stationGroup.position.set(station.position.x, station.position.y - 0.24, station.position.z);
+    stationGroup.position.set(
+      station.position.x,
+      seatedEntityY(island, station.position.x, station.position.z, station.position.y - 0.24),
+      station.position.z,
+    );
 
     const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6d6558, roughness: 1 });
     const sootMat = new THREE.MeshStandardMaterial({ color: 0x2b2723, roughness: 1 });

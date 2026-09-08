@@ -239,6 +239,9 @@ export const LOGIC = [
   // the terrain raycast. MUTATE=footprint|seabed|raylimit restores each of the
   // three old cut-offs and each turns it red.
   quick(tsx('test-walk-off-edge.mjs')),
+  // ENTITYSEAT (w7.2): chests, barrels and stations on the DRAWN ground, not
+  // the analytic field. MUTATE=raw restores the old placement (60/133 out).
+  quick(tsx('test-entity-seat.mjs')),
   quick(tsx('test-death-causes.mjs')),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
   // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens
