@@ -34,6 +34,45 @@ export function updateSeaRockLod(group: THREE.Group, apparentDist: number, quali
   lod.far.visible = wantFar;
 }
 
+/** Peak-to-peak brightness swing of the sea-stack position mottle, as a
+ *  fraction of the base colour. The old cell hash swung 0.20 across a HARD
+ *  cell boundary; the smooth field is capped at 0.16 peak-to-peak (±8%) so the
+ *  mottle reads as weathering rather than as paint. `scripts/test-shader-lattice.mjs`
+ *  imports this constant rather than parsing it out of the GLSL. */
+export const SEA_ROCK_MOTTLE_SWING = 0.16;
+
+/** ── THE MOTTLE IS NOT A CELL HASH ────────────────────────────────────────
+ *  It was `fract(sin(dot(floor(vRockWorld.xz * 0.55), ...)))`: one hash per
+ *  1.8 m cell with NOTHING between the cells, so every stack wore 1.8 m squares
+ *  of ±10% brightness with a hard edge at every cell boundary. A sea stack is
+ *  the one rock family a player passes at arm's length in open water, so that
+ *  lattice is read at 5-20 m, every match.
+ *
+ *  Smoothstepped bilinear value noise is continuous by construction: the field
+ *  agrees on both sides of every cell boundary, so no edge exists to see.
+ *
+ *  Exported (not inlined) because `scripts/test-shader-lattice.mjs` grades the
+ *  very string that is compiled — a JS mirror of a shader it cannot see would
+ *  drift silently the first time somebody edited the GLSL. */
+export const SEA_ROCK_NOISE_GLSL =
+  'float srHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n'
+  + 'float srNoise(vec2 p) {\n'
+  + '  vec2 i = floor(p); vec2 f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);\n'
+  + '  float a = srHash(i), b = srHash(i + vec2(1.0, 0.0));\n'
+  + '  float c = srHash(i + vec2(0.0, 1.0)), d = srHash(i + vec2(1.0, 1.0));\n'
+  + '  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n'
+  + '}\n';
+
+/** ONE octave, at the same 0.55 world scale the cell hash used. A second near
+ *  octave was drafted and cut: this material is a single shared cached program
+ *  with no tier knowledge (`customProgramCacheKey` is a constant), so a second
+ *  octave would be an unconditional cost on the low tier, and keying the cache
+ *  by tier would add a second sea-rock program for the warm-up and the program
+ *  census to carry. The lattice is the defect; extra frequency is not the fix. */
+export const SEA_ROCK_MOTTLE_GLSL =
+  'float _m = srNoise(vRockWorld.xz * 0.55);\n'
+  + `_col *= 1.0 + (_m - 0.5) * ${SEA_ROCK_MOTTLE_SWING.toFixed(3)};\n`;
+
 let seaRockMaterialCache: THREE.MeshStandardMaterial | null = null;
 /** Shared enriched sea-stack material: the Blender GLB gives the eroded pillar
  *  geometry, this paints it with sedimentary strata bands, a wet dark base at
@@ -48,7 +87,10 @@ function getSeaRockMaterial(): THREE.MeshStandardMaterial {
       .replace('#include <common>', '#include <common>\nvarying vec3 vRockWorld;\nvarying float vRockLocalY;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRockLocalY = position.y;\nvRockWorld = (modelMatrix * vec4(position, 1.0)).xyz;');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vRockWorld;\nvarying float vRockLocalY;')
+      .replace(
+        '#include <common>',
+        `#include <common>\nvarying vec3 vRockWorld;\nvarying float vRockLocalY;\n${SEA_ROCK_NOISE_GLSL}`,
+      )
       .replace(
         '#include <color_fragment>',
         '#include <color_fragment>\n'
@@ -58,8 +100,7 @@ function getSeaRockMaterial(): THREE.MeshStandardMaterial {
         + 'vec3 _rockB = vec3(0.40, 0.36, 0.30);\n'                       // warm lit band
         + 'vec3 _col = mix(_rockA, _rockB, _band);\n'
         + '_col *= 0.88 + 0.12 * sin(vRockLocalY * 5.0 + 1.3);\n'
-        + 'float _m = fract(sin(dot(floor(vRockWorld.xz * 0.55), vec2(12.9898, 78.233))) * 43758.5453);\n'
-        + '_col *= 0.86 + 0.2 * _m;\n'
+        + SEA_ROCK_MOTTLE_GLSL
         + 'float _wet = 1.0 - smoothstep(-1.0, 5.5, vRockWorld.y);\n'
         + '_col = mix(_col, vec3(0.11, 0.13, 0.14), _wet * 0.75);\n'      // dark salt-wet base
         + 'float _crown = smoothstep(7.0, 12.5, vRockLocalY);\n'

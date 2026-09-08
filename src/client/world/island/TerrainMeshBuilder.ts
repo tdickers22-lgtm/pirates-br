@@ -46,6 +46,35 @@ export type TerrainBuild = {
  *    field smeared them into ~10m glow bars) with the glow confined to the
  *    crack core, and a molten caldera pool from `aSummit`.
  */
+
+/** ── THE CAUSTICS ARE NOT A CHECKERBOARD, AND THE SHALLOWS HAVE NO RING ────
+ *  Shipped as `sin(x * 1.15 + t) * sin(z * 0.97 - t)` gated by
+ *  `step(vTerrWorld.y, 0.6)`. Two defects a player reads on every approach:
+ *
+ *  1. Two WORLD-AXIS sines multiplied together are a 5.5 m x 6.5 m CHECKER of
+ *     light, laid over the strip of island every landing stares at. This file
+ *     argues at length above that an axis-aligned field must be domain-warped;
+ *     the caustics were the one field that never got the treatment. They now
+ *     read the ALREADY WARPED point `tP` on two non-axis bearings and are
+ *     phase-modulated by the two detail octaves already sitting in registers.
+ *     Zero new texture fetches and zero new noise evaluations on every tier
+ *     (`tP`, `nMid`, `nFine` all exist even at low, where `tP` is unwarped but
+ *     the phase modulation still breaks the grid); net cost is 2 `dot` and 2
+ *     multiply-adds against the 2 multiplies it replaces.
+ *  2. `step()` switched the whole 16% modulation on across ONE contour, drawing
+ *     a hard bright ring at exactly 0.6 m around every coast in the world. A
+ *     `smoothstep(0.9, 0.2, y)` spreads that switch over ~0.7 m of ground: same
+ *     look, no ring, and `step` and `smoothstep` are both one op here.
+ *
+ *  Exported so `scripts/test-shader-lattice.mjs` grades the string that is
+ *  actually compiled rather than a mirror of it. */
+export const TERRAIN_CAUSTIC_GLSL =
+  'float cA = sin(dot(tP, vec2(1.15, 0.31)) + nMid * 3.0 + uTerrTime * 0.7);\n'
+  + 'float cB = sin(dot(tP, vec2(-0.42, 0.97)) - nFine * 2.4 - uTerrTime * 0.55);\n'
+  + 'float caustic = cA * cB;\n'
+  + 'float causticBand = smoothstep(0.9, 0.2, vTerrWorld.y);\n'
+  + 'diffuseColor.rgb *= 1.0 + caustic * 0.16 * (1.0 - subm) * causticBand + caustic * 0.10 * subm;\n';
+
 function applyTerrainDetail(
   material: THREE.MeshStandardMaterial, volcanic: boolean, host: IslandBuilderCtx,
   cutout: CaveCutout | null,
@@ -300,9 +329,10 @@ function applyTerrainDetail(
         + 'diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.58, 0.63, 0.69), wet * 0.88);\n'
         // ── Submerged floor: keep the terrain read going under the water ──
         + 'float subm = smoothstep(-0.15, -2.6, vTerrWorld.y);\n'
-        + 'float caustic = sin(vTerrWorld.x * 1.15 + uTerrTime * 0.7) * sin(vTerrWorld.z * 0.97 - uTerrTime * 0.55);\n'
+        // The submerged tint is written BEFORE the caustics (it does not read
+        // them) so the whole caustic field is one contiguous, exportable block.
         + 'diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb, vec3(0.10, 0.30, 0.33), 0.55), subm);\n'
-        + 'diffuseColor.rgb *= 1.0 + caustic * 0.16 * (1.0 - subm) * step(vTerrWorld.y, 0.6) + caustic * 0.10 * subm;\n'
+        + TERRAIN_CAUSTIC_GLSL
         + (volcanic
           ? // Hairline magma cracks, per pixel. Two crossed sine fields sharpened
             // HARD so only the crack CORE lights; the flanks stay charred basalt.
