@@ -215,6 +215,44 @@ expect('a pirate in your face is stepped every frame', near === 60, `${near}/60`
 expect('a pirate at 40 m is stepped ~half as often', mid < near && mid > 0, `${mid}/60`);
 expect('a pirate past 120 m is not stepped at all', far === 0, `${far}/60`);
 
+// ── the head look-at is ABSOLUTE, not accumulated (review-6 P1) ────────────
+// The mixer is rate-limited by distance, but the head post-solver runs EVERY
+// frame. If it writes `head.rotation.x += pitch` then on any frame the mixer
+// skipped, nothing has rewritten the bone from the clip and the pitch is
+// applied on top of itself: a 30 Hz nod in the 25-60 m band, and past the
+// freeze range (nothing ever resets the bone) a head that spins without bound.
+// So: pose the head at a fixed pitch for 120 frames at each LOD band and
+// require the bone to stay inside the clip's own range plus one pitch limit.
+camDistSq = 0;
+let baseMin = Infinity;
+let baseMax = -Infinity;
+for (let i = 0; i < 120; i++) {
+  updatePlayerRig(a, player(), 1 / 60, 0, 0, 0);
+  baseMin = Math.min(baseMin, rigA.bones.head.rotation.x);
+  baseMax = Math.max(baseMax, rigA.bones.head.rotation.x);
+}
+const PITCH = 0.5;
+for (const [label, d2] of [['in your face', 0], ['in the 30 Hz band (45 m)', 45 * 45],
+  ['in the 15 Hz band (90 m)', 90 * 90], ['past the freeze range (200 m)', 200 * 200]]) {
+  let worst = 0;
+  let worstX = 0;
+  for (let i = 0; i < 120; i++) {
+    updatePlayerRig(a, player(), 1 / 60, d2, PITCH, 0);
+    const x = rigA.bones.head.rotation.x;
+    const over = Math.max(x - (baseMax + PITCH), baseMin - PITCH - x);
+    if (over > worst) { worst = over; worstX = x; }
+  }
+  expect(`the head look-at does not accumulate ${label}`, worst <= 1e-3,
+    `head.rotation.x ran to ${worstX.toFixed(3)} rad, ${worst.toFixed(3)} outside [${(baseMin - PITCH).toFixed(3)}, ${(baseMax + PITCH).toFixed(3)}]`);
+}
+// and it still actually LOOKS: the pitch must reach the bone.
+updatePlayerRig(a, player(), 1 / 60, 0, 0, 0);
+const flat = rigA.bones.head.rotation.x;
+updatePlayerRig(a, player(), 1 / 60, 0, PITCH, 0);
+expect('the pitch still reaches the head bone', Math.abs(rigA.bones.head.rotation.x - flat) > 0.4,
+  `${(rigA.bones.head.rotation.x - flat).toFixed(3)} rad of look`);
+camDistSq = 0;
+
 // ── the shadow LOD ─────────────────────────────────────────────────────────
 // 7 draws become 14 with the shadow pass, and a 1.75 m figure at 40 m casts a
 // shadow a couple of texels wide. The old body had castShadow on all 22-26

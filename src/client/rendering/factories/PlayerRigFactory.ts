@@ -141,6 +141,14 @@ export type PlayerRig = {
   };
   /** Bind-pose hip height, so the sole solve has something to return to. */
   hipsRestY: number;
+  /** The head's CLIP-driven pitch, without the look-at solve on top of it.
+   *  The solve has to write absolutely, and it cannot just read the bone after
+   *  a mixer step to find the clip value: three's PropertyMixer only calls
+   *  setValue when the accumulated value CHANGED, so a head track that holds
+   *  still (every idle/walk/helm clip) leaves the bone exactly as the previous
+   *  frame left it — including our own offset. So we stash the clip value,
+   *  restore it before every mixer step, and write base+pitch after. */
+  headClipX: number;
   /** Accumulated, unspent dt for the distance-rate-limited mixer step. */
   pending: number;
   /** The one-shot the upper layer is committed to, and its remaining time. */
@@ -257,6 +265,7 @@ export function makePlayerRig(
     upper: { action: null, name: '' },
     bones: { head: bone('head'), hips, footL: bone('foot_l'), footR: bone('foot_r') },
     hipsRestY: hips?.position.y ?? 0,
+    headClipX: bone('head')?.rotation.x ?? 0,
     pending: 0,
     oneShot: 0,
     prevSwing: 0,
@@ -403,6 +412,11 @@ export function updatePlayerRig(
   }
 
   // ── mixer, rate-limited by distance ──────────────────────────────────────
+  // Undo the head look-at BEFORE the step, so the bone the mixer sees (and the
+  // bone it leaves behind when it decides nothing changed) is the clip pose and
+  // nothing else. Without this the solve compounds on itself every frame.
+  const headBone = rig.bones.head;
+  if (headBone) headBone.rotation.x = rig.headClipX;
   rig.pending += dt;
   let interval = Number.POSITIVE_INFINITY;
   if (cameraDistSq < MIXER_FREEZE_D2) {
@@ -429,9 +443,9 @@ export function updatePlayerRig(
   // Head look-at. A clip cannot know where the player is looking, and a pirate
   // whose skull ignores 90° of aim is the single most obvious tell that she is
   // a puppet. Limits are PLAN §2.5's.
-  const head = rig.bones.head;
-  if (head) {
-    head.rotation.x += THREE.MathUtils.clamp(lookPitch, -0.5, 0.5);
+  if (headBone) {
+    rig.headClipX = headBone.rotation.x; // whatever the clip left, solve-free
+    headBone.rotation.x = rig.headClipX + THREE.MathUtils.clamp(lookPitch, -0.5, 0.5);
   }
 
   // Sole solve. The clips are authored on flat ground; a pose that lifts both
@@ -465,6 +479,8 @@ export function playRigDeath(mesh: THREE.Group, cause: string, dt: number): bool
   const clip = cause === 'drown' ? 'death_drown' : cause === 'fall' ? 'death_fall' : 'death_shot';
   setLayer(rig, 'lower', clip);
   setLayer(rig, 'upper', clip);
+  if (rig.bones.head) rig.bones.head.rotation.x = rig.headClipX;
   rig.mixer.update(dt);
+  if (rig.bones.head) rig.headClipX = rig.bones.head.rotation.x;
   return true;
 }
