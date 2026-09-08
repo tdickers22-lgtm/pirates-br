@@ -459,6 +459,8 @@ function report(quality, budget, got, raw) {
   );
   if (got.sources?.length) {
     console.log(`      by source: ${got.sources.slice(0, 8).map((s) => `${s.source}=${s.calls}`).join('  ')}`);
+    const byTris = [...got.sources].sort((a, b) => (b.tris ?? 0) - (a.tris ?? 0)).slice(0, 8);
+    console.log(`      by tris:   ${byTris.map((s) => `${s.source}=${Math.round((s.tris ?? 0) / 1000)}k`).join('  ')}`);
   }
   expect(
     `[${quality}] ${budget.label} stays under ${budget.draws} draw calls`,

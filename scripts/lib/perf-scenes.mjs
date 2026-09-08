@@ -217,9 +217,19 @@ export const TALLY_DRAW_SOURCES = () => {
         // A multi-material mesh is one call per group; everything else is one.
         const calls = Array.isArray(node.material) && groups.length > 0 ? groups.length : 1;
         const key = bucketFor(node);
-        const t = (tally[key] ??= { calls: 0, meshes: 0 });
+        const t = (tally[key] ??= { calls: 0, meshes: 0, tris: 0 });
         t.calls += calls;
         t.meshes += 1;
+        // TRIANGLES PER BUCKET. The draw-call column alone cannot say WHICH
+        // wave grew a triangle ceiling: a rig or a fauna GLB replaces a box
+        // stack without adding a single call. Count the same way three does
+        // (index count when indexed, else position count), thirds for
+        // triangles, halves for line segments, one for points/sprites.
+        const geo = node.geometry;
+        const count = geo ? (geo.index ? geo.index.count : (geo.attributes?.position?.count ?? 0)) : 0;
+        const instances = node.isInstancedMesh ? node.count : 1;
+        if (node.isMesh) t.tris += (count / 3) * instances;
+        else if (node.isLine) t.tris += count / 2;
       }
     }
     for (const child of node.children) walk(child);
@@ -227,7 +237,7 @@ export const TALLY_DRAW_SOURCES = () => {
   walk(scene);
 
   return Object.entries(tally)
-    .map(([source, v]) => ({ source, calls: v.calls, meshes: v.meshes }))
+    .map(([source, v]) => ({ source, calls: v.calls, meshes: v.meshes, tris: Math.round(v.tris) }))
     .sort((a, b) => b.calls - a.calls);
 };
 
