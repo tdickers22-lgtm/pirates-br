@@ -11,8 +11,6 @@ export type UiRefs = {
   downedBanner: HTMLDivElement;
   shipsAlive: HTMLDivElement;
   goldAmount: HTMLDivElement;
-  goldLeaders: HTMLDivElement;
-  killCount: HTMLDivElement;
   healthFill: HTMLDivElement;
   armorFill: HTMLDivElement;
   /** One-line breach readout that replaced the four hull-section bars. */
@@ -82,12 +80,12 @@ export type UiRefs = {
   pocketWheelStats: HTMLDivElement;
   mapWheel: HTMLDivElement;
   mapWheelList: HTMLDivElement;
-  pocketStrip: HTMLDivElement;
   treasureChart: HTMLDivElement;
   treasureChartCanvas: HTMLCanvasElement;
   treasureChartIsland: HTMLDivElement;
   treasureChartRoute: HTMLDivElement;
-  brProgressFeed: HTMLDivElement;
+  /** The ONE objective line, under the compass (PLAN 2.6). */
+  objectiveLine: HTMLDivElement;
 };
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -111,8 +109,6 @@ export function buildUiRefs(): UiRefs {
     downedBanner: requireElement('downed-banner'),
     shipsAlive: requireElement('ships-alive'),
     goldAmount: requireElement('gold-amount'),
-    goldLeaders: requireElement('gold-leaders'),
-    killCount: requireElement('kill-count'),
     healthFill: requireElement('health-fill'),
     armorFill: requireElement('armor-fill'),
     shipLeaks: requireElement('ship-leaks'),
@@ -177,11 +173,10 @@ export function buildUiRefs(): UiRefs {
     pocketWheelStats: requireElement('pocket-wheel-stats'),
     mapWheel: requireElement('map-wheel'),
     mapWheelList: requireElement('map-wheel-list'),
-    pocketStrip: requireElement('pocket-strip'),
     treasureChart: requireElement('treasure-chart'),
     treasureChartCanvas: requireElement('treasure-chart-canvas'),
     treasureChartIsland: requireElement('treasure-chart-island'),
     treasureChartRoute: requireElement('treasure-chart-route'),
-    brProgressFeed: requireElement('br-progress-feed'),
+    objectiveLine: requireElement('objective-line'),
   };
 }

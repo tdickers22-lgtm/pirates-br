@@ -269,9 +269,42 @@ export function attackerMarkPlacement(
 }
 
 export class HudController {
-  constructor(private readonly view: HudView) {}
+  /** Kept alive for the lifetime of the HUD; disconnected by nothing, like the HUD itself. */
+  private footerObserver: ResizeObserver | null = null;
 
-  private pocketStripSignature = '';
+  constructor(private readonly view: HudView) {
+    this.watchFooterHeight();
+  }
+
+  /**
+   * THE FOOTER'S HEIGHT IS A LAYOUT INPUT, SO IT HAS TO BE MEASURED (hud-16, P1).
+   *
+   * #hud-center-prompt was anchored at top:63% while #hud-bottom-combat is
+   * anchored to the bottom and grows whenever its contents wrap. At 960x540 the
+   * two met: the prompt painted UNDER the footer, so the single line telling a
+   * player which button opens the chest in front of them was invisible on the
+   * window size most laptops run. CSS cannot ask how tall a sibling is, so one
+   * ResizeObserver publishes it as --footer-h and the prompt sits above it at
+   * every size, in every footer state.
+   *
+   * Cost: one observer, one CSS custom property written only when the rounded
+   * height actually changes (footer height is stable between wraps), so this is
+   * zero per-frame work on any tier.
+   */
+  private watchFooterHeight(): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    const footer = document.getElementById('hud-bottom-combat');
+    if (!footer) return;
+    let last = -1;
+    this.footerObserver = new ResizeObserver(() => {
+      const h = Math.round(footer.getBoundingClientRect().height);
+      if (h === last) return;
+      last = h;
+      document.documentElement.style.setProperty('--footer-h', `${h}px`);
+    });
+    this.footerObserver.observe(footer);
+  }
+
   private shipUpgradeSignature = '';
   /** Last painted hull-panel heading — the class only changes on a new berth. */
   private shipStatusTitleText = '';
@@ -311,7 +344,6 @@ export class HudController {
     // open across a return to port it would dim the new match's first frame.
     closeOnboardingCards();
     this.brProgressSignature = '';
-    this.goldLeaderboardSignature = '';
     this.holdCargoSignature = '';
     if (this.holdCargoEl) this.holdCargoEl.style.display = 'none';
     this.lastStreakSeen = -1;
@@ -715,8 +747,14 @@ export class HudController {
     if (on) {
       this.truceWasOn = true;
       const secs = Math.max(0, Math.ceil(left));
-      this.view.ui.stormPhase.textContent =
-        `${this.view.ui.stormPhase.textContent} · TRUCE ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+      // ONE CLOCK ON SCREEN (hud-07). This used to append a second m:ss to the
+      // phase line while #storm-timer showed the storm's own, so the top of the
+      // HUD carried two counters that disagreed. The truce is the clock that
+      // matters while it runs, so it TAKES the one clock and the phase line
+      // says which clock you are reading.
+      this.view.ui.stormPhase.textContent = `${this.view.ui.stormPhase.textContent} · TRUCE`;
+      this.view.ui.stormTimer.textContent =
+        `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
     } else if (this.truceWasOn) {
       this.truceWasOn = false;
       this.view.flashIslandBanner('TRUCE OVER — CREWS MAY FIRE');
@@ -1154,8 +1192,6 @@ export class HudController {
     this.view.ui.shipsAlive.textContent = String(this.view.state.shipsAlive);
     this.view.ui.goldAmount.textContent = `${player.gold}/${ECONOMY.GOLD_WIN_TARGET}`;
     this.renderHoldCargo(ship);
-    this.renderGoldLeaderboard(player.id);
-    this.view.ui.killCount.textContent = String(player.kills);
     this.view.ui.healthFill.style.width = `${Math.max(0, player.health)}%`;
     this.view.ui.armorFill.style.width = `${Math.max(0, Math.min(100, ((player.armor ?? 0) / PLAYER.MAX_ARMOR) * 100))}%`;
 
@@ -1282,7 +1318,12 @@ export class HudController {
       : null;
     const closestHoarder = this.view.getClosestGoldHoarder(player);
     this.announcePowerThresholds(player);
-    const powerLine = this.getPowerBadge(player);
+    // THE STREAK BADGE IS NOT A FIRST-FRAME STRING (hud-07/hud-18). "Streak
+    // 0/4 ⚡" printed in TWO always-on strips from second zero, to a player who
+    // had not fired a shot and had never been told what a streak buys. It
+    // appears once you actually have a kill; the rungs themselves land as feed
+    // lines through announcePowerThresholds.
+    const powerLine = player.kills > 0 ? this.getPowerBadge(player) : '';
     const objectiveLine = this.getObjectiveSummary(player, ship, {
       chestsInHold,
       mappedIsland,
@@ -1291,48 +1332,26 @@ export class HudController {
       shipCritical,
       shipOnFire,
     });
-    const progLine = ship
-      // "Hold 3" read as an ORDER on a strip full of key prompts — the one word
-      // on the line that is a noun in this game and a verb everywhere else in
-      // the HUD. Say what is actually being counted.
-      ? `${objectiveLine} · ${powerLine} · Gold ${player.gold}/${ECONOMY.GOLD_WIN_TARGET} · Chests aboard ${chestsInHold} · Upgrades ${ship.upgrades.length}`
-      : `${objectiveLine} · ${powerLine}`;
+    // ONE OWNER PER NUMBER (hud-07, PLAN 2.6). This line used to re-print the
+    // gold chip's number, the pocket strip's streak badge, the hold count and
+    // the upgrade count — four numbers a player had already been shown
+    // somewhere else, on the one line that is supposed to say what to do next.
+    // It says what to do next, and nothing else.
+    const progLine = powerLine ? `${objectiveLine} · ${powerLine}` : objectiveLine;
     if (progLine !== this.brProgressSignature) {
-      this.view.ui.brProgressFeed.textContent = progLine;
+      this.view.ui.objectiveLine.textContent = progLine;
+      this.view.ui.objectiveLine.title = progLine;
       this.brProgressSignature = progLine;
     }
 
     const pk = player;
-    // The 1–4 digit labels are MODAL (they select pocket items only while the
-    // wheel is held; otherwise 1–4 are weapon slots, labeled bottom-right).
-    // Only advertise the numbers while they actually do that, or the two
-    // always-on strips claim the same keys mean two things at once.
-    const wheelHeld = this.view.input.isSupplyWheelOpen();
-    // THE DIGITS COME FROM THE WHEEL TABLE, NOT FROM MEMORY. This strip used to
-    // print "1 Plantain | 2 Plank | 3 Coconut | 4 Meat" while those keys took
-    // the spyglass, the compass, the bucket and a plank — follow the strip to
-    // heal and you ended up holding a bucket (hud-01).
-    const stripParts = [
-      ...WHEEL_SLOTS.filter((slot) => slot.pocket !== null).map((slot, i) => {
-        const key = wheelHeld ? `${slot.key} ` : '';
-        const qty = slot.pocket === 'meat'
-          ? `${pk.pocketMeat} / Mango ${pk.pocketMango}`
-          : String(this.view.getPocketWheelCount(pk, slot.index));
-        return `${i === 0 ? 'Pocket: ' : ''}${key}${slot.label} ${qty}`;
-      }),
-      `Ore ${pk.pocketOre ?? 0}`,
-      `Tool: ${pk.hasShovel ? 'Shovel' : 'None'}`,
-    ];
-    if (mappedIsland) stripParts.push(`Chart: ${mappedIsland.name}`);
-    if (closestHoarder && (mappedIsland || pk.carryingChestId)) stripParts.push(`${BROKER_NAME}: ${closestHoarder.island.name}`);
-    // ONE compact badge — the streak count and the powers table used to be two
-    // separate entries here, and the same table again in the progress feed.
-    stripParts.push(powerLine);
-    const pocketText = stripParts.join(' | ');
-    if (pocketText !== this.pocketStripSignature) {
-      this.view.ui.pocketStrip.textContent = pocketText;
-      this.pocketStripSignature = pocketText;
-    }
+    // THE POCKET SENTENCE IS GONE FROM THE ALWAYS-ON FOOTER (PLAN 2.6 "Cut").
+    // It was a wrapping 100-character line naming ten counts a player could
+    // read on the supply wheel the moment they held it — and its wrapping is
+    // what grew the footer until it covered the [X] prompt at 960x540
+    // (hud-16). The counts live on the wheel; the footer keeps the two things
+    // you cannot open a wheel to check: your kegs and the ship's stores.
+    void pk;
     this.view.renderTreasureInventoryChart(player, mappedIsland, closestHoarder);
     this.view.ui.pocketWheelStats.textContent = this.view.input.isSupplyWheelOpen()
       ? (player.equippedTool
@@ -1392,10 +1411,10 @@ export class HudController {
                 ? this.view.getInventoryQty(ship, 'firebomb_ball')
                 : this.view.getInventoryQty(ship, 'chainshot'),
             );
+      // A 30-CHARACTER RULE IN A 1.2rem AMMO FONT (hud-19). The reserve slot
+      // says what the shot is, in two words, or nothing.
       this.view.ui.ammoReserve.textContent =
-        player.selectedCannonAmmo === 'cannonball'
-          ? 'ship store (each shot spends 1)'
-          : player.selectedCannonAmmo.replace('_', ' ');
+        player.selectedCannonAmmo === 'cannonball' ? 'balls' : player.selectedCannonAmmo.replace('_', ' ');
       this.view.ui.reloadIndicator.style.display = ship.cannonCooldowns[player.cannonIndex] > 0 ? 'block' : 'none';
     } else {
       this.updateWeaponHud(player.activeSlot, weapon, player.weapons);
@@ -2225,36 +2244,6 @@ export class HudController {
     return points[(Math.round(((deg % 360) + 360) % 360 / 45)) % 8];
   }
 
-  private goldLeaderboardSignature = '';
-  private renderGoldLeaderboard(localPlayerId: string) {
-    if (!this.view.state) return;
-    const ranked = this.view.state.players
-      .filter((p) => p.state !== 'eliminated')
-      .slice()
-      .sort((a, b) => b.gold - a.gold)
-      .slice(0, 3);
-    const signature = `${localPlayerId}:${ranked.map((p) => `${p.id}:${p.gold}`).join('|')}`;
-    if (signature === this.goldLeaderboardSignature) return;
-    this.goldLeaderboardSignature = signature;
-    if (!ranked.length) {
-      this.view.ui.goldLeaders.innerHTML = '';
-      return;
-    }
-    this.view.ui.goldLeaders.innerHTML = ranked
-      .map((p, index) => {
-        const isSelf = p.id === localPlayerId;
-        const safeName = (p.name || 'Pirate').replace(/[<>&"]/g, (c) =>
-          c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '&' ? '&amp;' : '&quot;',
-        );
-        return `<div class="leader-row" data-rank="${index + 1}" data-self="${isSelf ? 1 : 0}">
-          <span class="leader-rank">${index + 1}</span>
-          <span class="leader-name">${safeName}</span>
-          <span class="leader-amt">${p.gold}</span>
-        </div>`;
-      })
-      .join('');
-  }
-
   private renderShipUpgrades(ship: Ship | null) {
     if (!ship) {
       if (this.shipUpgradeSignature !== '') {
@@ -2332,7 +2321,9 @@ export class HudController {
       ? 'None remaining'
       : player.kegCooldown > 0
         ? `${Math.max(1, Math.ceil(player.kegCooldown))}s until second keg`
-        : player.kegs === 1 ? '1 ready' : `${player.kegs} ready`;
+        // EVERY CHIP CARRIES ITS NOUN (hud-18): "1 READY" told a first-time
+        // player nothing about what was ready.
+        : player.kegs === 1 ? '1 keg ready' : `${player.kegs} kegs ready`;
     return player.megaKegs > 0 ? `Mega ${player.megaKegs} ready · ${normal}` : normal;
   }
 

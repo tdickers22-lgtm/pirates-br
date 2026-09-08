@@ -174,7 +174,7 @@ const spawn = await page.evaluate(() => {
     chip: t('controls-toggle'),
     chipVisible: !!document.getElementById('controls-toggle')?.getBoundingClientRect().width,
     pocketStrip: t('pocket-strip'),
-    brProgress: t('br-progress-feed'),
+    brProgress: t('objective-line'),
     sailStatus: t('sail-status'),
     vaneText: t('wind-vane-text'),
     vaneArrow: document.getElementById('wind-vane-arrow')?.style.transform ?? '',
@@ -196,14 +196,20 @@ expect('and the fourteen-line wall does NOT dump itself on top of the horn',
 // world's variety; a solo crew handed a Man-o'-War inherits eight guns nobody
 // can man and the worst turn rate in the Reach.
 expect('a solo crew is berthed on a sloop', spawn.shipType === 'sloop', `type=${spawn.shipType}`);
-expect('the powers table is gone from the pocket strip',
-  !/super cannonball|mega keg|tsunami/i.test(spawn.pocketStrip), spawn.pocketStrip);
-expect('the pocket strip carries the compact badge instead',
-  /Streak \d+\/\d+ ⚡/.test(spawn.pocketStrip), spawn.pocketStrip);
-expect('the powers table is gone from the progress feed',
+// RE-PINNED BY HUDS-01 (hud-07/hud-18). The compact streak badge was the fix
+// for a powers TABLE printed in two always-on strips; the badge itself then
+// printed "Streak 0/4 ⚡" twice, from second zero, to a player with no kills
+// and no idea what a streak buys. The pocket sentence is gone from the footer
+// entirely (PLAN 2.6 "Cut"), and the badge now appears on the one objective
+// line only once you actually have a kill.
+expect('the powers table is gone from the objective line',
   !/super cannonball|mega keg|tsunami/i.test(spawn.brProgress), spawn.brProgress);
-expect('the progress feed carries the compact badge too',
-  /Streak \d+\/\d+ ⚡/.test(spawn.brProgress), spawn.brProgress);
+expect('no streak badge is painted before the first kill',
+  !/Streak/i.test(spawn.brProgress), spawn.brProgress);
+expect('the objective line says what to do next',
+  spawn.brProgress.trim().length > 8, spawn.brProgress);
+expect('the pocket sentence has left the always-on footer',
+  spawn.pocketStrip === '(missing)' || spawn.pocketStrip === '', JSON.stringify(spawn.pocketStrip));
 
 // Carry-forward: canvas set at the horn, anchor still down (gangway survives).
 expect('the horn pre-hoists canvas to ~50%', Math.abs((spawn.sailHeight ?? 0) - 0.5) < 0.001,
@@ -394,7 +400,7 @@ const funnel = await page.evaluate(() => {
   const ship = g.state.ships.find((s) => s.id === p.shipId);
   const line = () => {
     g.hud.updateHud();
-    return document.getElementById('br-progress-feed').textContent;
+    return document.getElementById('objective-line').textContent;
   };
   // Re-arm the one-shot: this pass is a brand-new pirate's first deck.
   g.hud.firstSailDone = false;

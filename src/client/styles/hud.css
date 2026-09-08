@@ -32,8 +32,16 @@
 }
 #hud-right-tactical > * { pointer-events: auto; }
 
+/* THE PROMPT IS ANCHORED TO THE FOOTER, NOT TO THE TOP (hud-16, P1).
+   top:63% against a bottom-anchored footer that GROWS when its contents wrap
+   put the prompt UNDERNEATH the footer at 960x540: the one line telling a
+   player what the button does was behind a panel. HudController keeps
+   --footer-h in sync with #hud-bottom-combat through a ResizeObserver, so the
+   prompt rides above the footer at every window size and every footer state. */
 #hud-center-prompt {
-  position: absolute; left: 50%; top: 63%; transform: translate(-50%, 0);
+  position: absolute; left: 50%; top: auto;
+  bottom: calc(var(--footer-h, 120px) + 24px);
+  transform: translate(-50%, 0);
   display: flex; flex-direction: column; align-items: center; gap: 8px;
   max-width: min(480px, 88vw);
   text-align: center;
@@ -55,20 +63,22 @@
 #hud-bottom-mid { grid-column: 2; grid-row: 1 / span 2; justify-self: center; align-self: end; width: 100%; max-width: 560px; }
 #hud-bottom-right { grid-column: 3; grid-row: 1 / span 2; justify-self: end; align-self: end; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 
-#br-progress-feed {
-  font-size: 0.64rem; line-height: 1.5; color: #d3ddea;
-  letter-spacing: 0.04em;
-  padding: 8px 11px;
-  border-radius: 10px;
+/* THE OBJECTIVE LINE (PLAN 2.6). One line under the compass, ellipsised, and
+   no media query is allowed to display:none it. */
+#objective-line {
+  max-width: min(460px, 74vw);
+  margin-top: 4px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: clamp(0.54rem, 1.2vw, 0.66rem);
+  line-height: 1.35;
+  letter-spacing: 0.06em;
+  color: #e8d5a3;
   background: rgba(4, 14, 28, 0.72);
-  border: 1px solid rgba(201, 168, 76, 0.14);
-  /* clamp at whole-line boundaries so long objective text never clips mid-sentence */
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 6;
-  line-clamp: 6;
-  overflow: hidden;
-  overflow-wrap: anywhere;
+  border: 1px solid rgba(201, 168, 76, 0.2);
+  text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  pointer-events: none;
 }
 
 #pocket-equipment-bar {
@@ -78,11 +88,6 @@
   background: rgba(4, 14, 28, 0.72);
   border: 1px solid rgba(126, 172, 220, 0.18);
 }
-#pocket-equipment-bar #pocket-strip {
-  position: static; transform: none;
-  flex: 1 1 160px;
-  font-size: 0.62rem; color: #dfe9f5;
-}
 #pocket-equipment-bar #keg-status {
   position: static; transform: none;
   flex: 0 0 auto;
@@ -90,10 +95,6 @@
 }
 
 #ship-stores-wrap { display: flex; flex-direction: column; gap: 4px; align-items: center; }
-#ship-stores-title {
-  font-size: 0.56rem; letter-spacing: 0.14em; text-transform: uppercase; color: #baa871;
-  line-height: 1.4; text-align: center; max-width: 100%; padding: 0 6px;
-}
 #ship-inventory { position: static !important; transform: none !important; left: auto !important; bottom: auto !important; }
 
 @media (max-width: 900px) {
@@ -489,35 +490,14 @@
 #player-count .lbl { font-size: 0.54rem; color: #98a5b3; text-transform: uppercase; letter-spacing: 0.12em; }
 
 /* Gold */
-#gold-display, #kill-display {
+#gold-display {
   position: static;
   background: rgba(0,0,0,0.58); border: 1px solid #c9a84c22;
   padding: 6px 11px; border-radius: 4px;
 }
 #gold-display { display: flex; align-items: stretch; gap: 9px; }
-#gold-display .num, #kill-display .num { font-size: 1.08rem; color: #c9a84c; font-family: monospace; }
-#gold-display .lbl, #kill-display .lbl { font-size: 0.52rem; color: #98a5b3; text-transform: uppercase; }
-#gold-leaders {
-  display: flex; flex-direction: column; gap: 1px;
-  padding-left: 8px;
-  border-left: 1px solid rgba(201, 168, 76, 0.18);
-  min-width: 78px;
-  justify-content: center;
-}
-#gold-leaders .leader-row {
-  display: flex; justify-content: space-between; align-items: baseline;
-  gap: 6px;
-  font-family: monospace;
-  font-size: 0.6rem;
-  line-height: 1.1;
-  color: #b8a273;
-}
-#gold-leaders .leader-rank { color: #889; font-size: 0.5rem; letter-spacing: 0.1em; }
-#gold-leaders .leader-row[data-self="1"] { color: #ffe9a8; text-shadow: 0 0 6px rgba(201, 168, 76, 0.4); }
-#gold-leaders .leader-row[data-rank="1"] .leader-rank { color: #ffd278; }
-#gold-leaders .leader-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 7ch; }
-#gold-leaders .leader-amt { font-size: 0.6rem; color: #d9c17e; }
-
+#gold-display .num { font-size: 1.08rem; color: #c9a84c; font-family: monospace; }
+#gold-display .lbl { font-size: 0.52rem; color: #98a5b3; text-transform: uppercase; }
 /* Interaction prompt */
 #interact-prompt {
   position: static; transform: none;
@@ -1268,18 +1248,6 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
   50% { margin-top: -6px; }
 }
 
-#pocket-strip {
-  position: static; transform: none;
-  max-width: min(760px, 94vw);
-  padding: 7px 16px; border-radius: 10px;
-  font-size: 0.64rem; letter-spacing: 0.1em; color: #b8c8dc;
-  background: rgba(4, 14, 28, 0.78);
-  border: 1px solid rgba(126, 172, 220, 0.22);
-  pointer-events: none;
-  text-align: center;
-  z-index: 99;
-}
-
 #treasure-chart {
   position: static;
   left: auto;
@@ -1324,8 +1292,8 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
 /* ── Shared HUD panel chrome: gold-on-navy, one radius, subtle inner shadow ──
    Kept above the media queries so responsive overrides still win. */
 #hud { text-shadow: 0 1px 2px rgba(3, 8, 16, 0.85); } /* inherited: AA legibility over bright ocean */
-#gold-display, #kill-display, #player-count, #ship-status,
-#br-progress-feed, #pocket-equipment-bar, #ship-inventory,
+#gold-display, #player-count, #ship-status,
+#objective-line, #pocket-equipment-bar, #ship-inventory,
 #minimap-head, #interact-prompt {
   background: linear-gradient(180deg, rgba(10, 24, 44, 0.82), rgba(4, 12, 24, 0.88));
   border: 1px solid rgba(201, 168, 76, 0.34);
@@ -1336,7 +1304,6 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
     inset 0 0 22px rgba(0, 0, 0, 0.28);
 }
 /* nested chips inside the equipment bar stay subtler than their parent panel */
-#pocket-equipment-bar #pocket-strip,
 #pocket-equipment-bar #keg-status {
   background: rgba(0, 0, 0, 0.3);
   border: 1px solid rgba(201, 168, 76, 0.16);
@@ -1384,7 +1351,6 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
     gap: 6px;
   }
   #kill-feed { max-height: 90px; }
-  #br-progress-feed { display: none; }
   #ship-status {
     min-width: 0;
     padding: 7px 8px;
@@ -1441,8 +1407,9 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
 
   #hud-center-prompt {
     left: 10px;
-    top: 40%;
-    transform: translateY(-50%);
+    top: auto;
+    bottom: calc(var(--footer-h, 92px) + 14px);
+    transform: none;
     align-items: flex-start;
     text-align: left;
     max-width: min(174px, calc(55vw - 18px));
@@ -1459,8 +1426,13 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
     line-height: 1.25;
     letter-spacing: 0.045em;
   }
+  /* SHRINK, NEVER HIDE (hud-16). The click-to-look hint and the objective
+     line were display:none'd on exactly the windows where a new player most
+     needs them. */
   #pointer-lock-hint.visible {
-    display: none;
+    font-size: 0.52rem;
+    padding: 5px 9px;
+    letter-spacing: 0.06em;
   }
 
   #hud-bottom-combat {
@@ -1485,15 +1457,6 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
     padding: 5px;
     border-radius: 8px;
   }
-  #pocket-strip {
-    max-width: none;
-    max-height: 54px;
-    overflow: hidden;
-    padding: 5px 6px;
-    font-size: 0.51rem;
-    line-height: 1.25;
-    letter-spacing: 0.02em;
-  }
   #keg-status {
     min-width: 0;
     padding: 5px 6px;
@@ -1501,7 +1464,6 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
   #keg-status .label { font-size: 0.48rem; }
   #keg-status .value { font-size: 0.76rem; }
 
-  #ship-stores-title { display: none; }
   #ship-stores-wrap { gap: 3px; }
   #ship-inventory {
     gap: 4px;
@@ -1554,9 +1516,6 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
     width: 132px;
     height: 132px;
     border-radius: 8px;
-  }
-  #br-progress-feed {
-    display: none;
   }
   #kill-feed {
     max-height: 52px;
@@ -1676,3 +1635,17 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
 }
 #map-wheel .mw-entry .mw-x { color: #c23a2b; font-weight: bold; }
 #map-wheel .mw-empty { color: #7d92a8; font-size: 0.66rem; padding: 8px 4px; }
+
+/* ── THE RIGHT COLUMN STOPS WHERE THE FOOTER STARTS (hud-05, hud-16) ─────────
+   #hud-right-tactical was sized `top: <n>px; max-height: calc(100vh - 220px)`
+   against a footer whose height is decided at runtime by its own contents. At
+   960x540 the column ran 455px² into #hud-bottom-mid and 1,303px² into
+   #hud-bottom-right — panels painting over panels, which is also how the hull
+   card silently lost its bottom rows. --footer-h is measured (HudController's
+   ResizeObserver), so the column can simply end above the footer instead of
+   guessing. Last in the file so it wins over every media query above.
+   Costs nothing per frame: two custom-property reads at layout time. */
+#hud-right-tactical {
+  bottom: calc(var(--footer-h, 120px) + 12px);
+  max-height: none;
+}

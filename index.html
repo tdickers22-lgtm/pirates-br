@@ -220,11 +220,6 @@
             <div class="num" id="gold-amount">0</div>
             <div class="lbl">Gold</div>
           </div>
-          <div id="gold-leaders" aria-label="Top gold earners"></div>
-        </div>
-        <div id="kill-display">
-          <div class="num" id="kill-count">0</div>
-          <div class="lbl">Kills</div>
         </div>
         <!-- CREW STRIP (PLAN 2.6 TOP-LEFT / CREWHUD-01). Rows are built at
              2 Hz from the snapshot; empty and display:none in Solo. -->
@@ -249,11 +244,18 @@
           <div id="storm-timer">3:00</div>
           <div id="storm-warning">⚠ OUTSIDE STORM ZONE</div>
         </div>
+        <!-- THE ONE OBJECTIVE LINE (PLAN 2.6 TOP-CENTRE). It used to be a
+             six-line panel in the right column that the responsive rules hid
+             outright below 720 px wide and 700 px tall — the small laptop
+             windows most players use lost the only sentence saying what to do
+             next (hud-16, liveplay-04). It is one line here, it shrinks, and no
+             media query may display:none it. -->
+        <div id="objective-line">—</div>
       </div>
       <div id="hud-top-right">
         <div id="player-count">
           <div class="num" id="ships-alive">10</div>
-          <div class="lbl">Crews Afloat</div>
+          <div class="lbl">Ships Afloat</div>
         </div>
       </div>
     </header>
@@ -280,7 +282,6 @@
         <div id="minimap"><canvas id="minimap-canvas" width="176" height="176"></canvas></div>
       </div>
       <div id="kill-feed"></div>
-      <div id="br-progress-feed">Crew progression —</div>
       <div id="ship-status">
         <h3 id="ship-status-title">⚓ Ship Hull</h3>
         <!-- Shown ONLY while the deck under your feet belongs to somebody else:
@@ -397,15 +398,13 @@
       </div>
       <div id="hud-bottom-mid">
         <div id="pocket-equipment-bar">
-          <div id="pocket-strip">Pocket (on you): —</div>
           <div id="keg-status">
-            <div class="label">Powder Kegs (equipment)</div>
+            <div class="label">Powder Kegs</div>
             <div class="value" id="keg-status-value">2 ready</div>
           </div>
         </div>
         <div id="ship-stores-wrap">
-          <div id="ship-stores-title">Ship stores (crew) · planks repair · cannonballs −1 per shot</div>
-          <div id="ship-inventory">
+            <div id="ship-inventory">
             <div class="ship-inventory-item"><span class="ship-inventory-icon">🪵</span><span class="ship-inventory-label">Planks</span><span class="ship-inventory-qty" id="inv-wood">0</span></div>
             <div class="ship-inventory-item"><span class="ship-inventory-icon">●</span><span class="ship-inventory-label">Cannonballs</span><span class="ship-inventory-qty" id="inv-cannonball">0</span></div>
             <div class="ship-inventory-item"><span class="ship-inventory-icon">🔥</span><span class="ship-inventory-label">Firebombs</span><span class="ship-inventory-qty" id="inv-firebomb">0</span></div>
