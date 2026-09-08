@@ -110,6 +110,12 @@ export const LOGIC = [
   // bounded, zero-mean, and continuous in x/z/t (a hashed cell lattice snaps the
   // wind 1.2 rad across a border). 0.3 s, no stack.
   quick(tsx('test-storm-fields.mjs')),
+  // STORMUP-01 (wave 9.2), storm-04: the bolts are rolled by the server off the
+  // match-seeded stream into a replicated ring buffer, in a band that is wholly
+  // OUTSIDE the safe ring, and the mainmast conducts them unless the crew bought
+  // the rod. Mutation: restore the old client band (0.88 + rand*0.38) and 34.7%
+  // of bolts land inside shelter again. ~2 s, no stack.
+  tsx('test-storm-lightning.mjs'),
   // [I.3] the five authored weapon GLBs must land in the envelope the
   // primitive-era viewmodel constants (muzzleTipFor, the hand grips, the near
   // plane) were measured in — the logic-tier half of test-near-plane-clearance.
