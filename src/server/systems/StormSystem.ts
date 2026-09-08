@@ -385,6 +385,13 @@ export class StormSystem {
     dt: number, storm: StormState, ships: Ship[], hooks: StormDamageHooks, t: number,
   ): void {
     if (!storm.strikes) storm.strikes = [];
+    // Nothing to strike out of: the opening phases have no storm sky over
+    // anything a player can see from inside the ring (STORM_LIGHTNING.MIN_PHASE).
+    // The timer is left alone rather than run down, so the first bolt of the
+    // match falls a normal interval AFTER the weather arrives, not the instant
+    // the phase flips. No rng is drawn here, so the early match costs the
+    // match-seeded stream nothing.
+    if (storm.phase < STORM_LIGHTNING.MIN_PHASE) return;
     this.strikeTimer -= dt;
     if (this.strikeTimer > 0) return;
     this.strikeTimer = Math.max(

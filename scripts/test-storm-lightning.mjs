@@ -96,10 +96,36 @@ console.log('\nOne sky, rolled once, replicated');
     `deepest ring buffer ${a.deepest}`);
 }
 
+// ── NO BOLT FALLS OUT OF A CLEAR SKY (review-8 P1) ──────────────────────────
+//
+// The roll used to start at t=0 with no phase gate at all, so the first strike
+// of every match landed ~4 s in, just outside the opening 950 m circle, while
+// the whole fleet was still in fair weather looting the middle of the map — and
+// the client drew it, with its flash light and its thunder, because the guard
+// that used to hold the bolt until phase 2 was deleted along with the local
+// roll. The storm rolls nothing before it is a storm.
+console.log('\nNo bolt falls before the storm is a storm');
+{
+  for (const phase of [0, 1]) {
+    const { strikes } = run(600, 20260801, stormAt(950 - phase * 125, phase), [], []);
+    expect(`phase ${phase} (fair weather over the ring) rolls 0 bolts`,
+      strikes.length === 0, `${strikes.length} strikes at phase ${phase}`);
+  }
+  const { strikes } = run(600, 20260801, stormAt(825, STORM_LIGHTNING.MIN_PHASE), [], []);
+  expect(`phase ${STORM_LIGHTNING.MIN_PHASE} (the sky the bolts belong to) still rolls them`,
+    strikes.length >= 1, `${strikes.length} strikes`);
+  // And the wait starts when the weather does: the held timer must not dump a
+  // backlog of bolts the instant the phase flips.
+  expect('the first bolt of the storm arrives no sooner than one INTERVAL_MIN in',
+    strikes[0].t >= STORM_LIGHTNING.INTERVAL_MIN
+      - STORM_LIGHTNING.INTERVAL_PER_PHASE * STORM_LIGHTNING.MIN_PHASE - DT,
+    `first strike at t=${strikes[0].t.toFixed(2)}`);
+}
+
 console.log('\nNothing strikes inside the circle the game calls shelter');
 {
   let inside = 0, total = 0, minBand = Infinity, maxBand = 0;
-  for (const [radius, phase] of [[900, 0], [520, 2], [300, 4], [120, 6]]) {
+  for (const [radius, phase] of [[900, 2], [520, 3], [300, 4], [120, 6]]) {
     const { strikes } = run(600, 1234 + phase, stormAt(radius, phase), [], []);
     for (const s of strikes) {
       const band = Math.hypot(s.x, s.z) / radius;

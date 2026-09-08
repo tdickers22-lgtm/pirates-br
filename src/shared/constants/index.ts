@@ -837,6 +837,19 @@ export const SHIP_UPGRADES = {
  * client-local roll put 32 % of them inside shelter.
  */
 export const STORM_LIGHTNING = {
+  /**
+   * THE FIRST BOLT WAITS FOR A SKY TO FALL OUT OF (review-8 P1).
+   *
+   * When the roll moved to the server the client's old guard went with it —
+   * `if (!stormDemo && !outsideStorm && !(shrinking && nearStormWall) && phase < 2) return;`
+   * — and nothing replaced it but a 1600 m range cull. So the very first strike
+   * landed ~4 s into the match, just outside the opening 950 m circle, and every
+   * crew still in fair weather at the middle of the map saw a bolt and heard
+   * thunder under a clear sky. The rule the deleted client guard stated is now
+   * stated once, on the server, where both the drawing AND the mast strike read
+   * it: no lightning below the phase the storm is a storm at.
+   */
+  MIN_PHASE: 2,
   /** Seconds between strikes at phase 0, before the phase term shortens it. */
   INTERVAL_MIN: 4,
   INTERVAL_RANGE: 6,
