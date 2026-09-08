@@ -4,7 +4,7 @@ import type {
   BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId,
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
-import { WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, isOnDockDeck, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
 import { seatedEntityY } from '../world/island/EntityMeshes.js';
 import {
@@ -4423,16 +4423,13 @@ export class Game {
             resolvedSurfaceY = Math.max(resolvedSurfaceY, deckY + 0.03);
           }
         }
-        if (island.dock) {
-          const dx = predictedX - island.dock.position.x;
-          const dz = predictedZ - island.dock.position.z;
-          const cos = Math.cos(island.dock.rotation);
-          const sin = Math.sin(island.dock.rotation);
-          const localX = dx * cos - dz * sin;
-          const localZ = dx * sin + dz * cos;
-          if (Math.abs(localX) <= island.dock.width * 0.5 + 0.45 && Math.abs(localZ) <= island.dock.length * 0.5 + 0.45) {
-            resolvedSurfaceY = Math.max(resolvedSurfaceY, island.dock.position.y + 0.14);
-          }
+        // THE PLANKING, NOT THE PLANKING PLUS A PAD (review-8 P1). This is the
+        // server's floor predicate verbatim (PhysicsSystem.findDockUnderfoot);
+        // the 0.45 m pad it used to carry is the broad-phase margin and drew a
+        // pirate who had walked off the pier standing on open water at deck
+        // height until the server flipped her to swimming.
+        if (island.dock && isOnDockDeck(island.dock, predictedX, predictedZ)) {
+          resolvedSurfaceY = Math.max(resolvedSurfaceY, island.dock.position.y + 0.14);
         }
       }
       if (resolvedSurfaceY > -Infinity) {

@@ -1919,6 +1919,37 @@ export function toDockLocalPoint(dock: IslandDock, x: number, z: number): { x: n
   return { x: dx * cos - dz * sin, z: dx * sin + dz * cos };
 }
 
+/**
+ * IS THIS POINT STANDING ON THE PLANKING? (review-8 P1)
+ *
+ * CANONICAL. The drawn pier is exactly width x length (the GLB modules run 3 m
+ * wide along local Z and getShipGangwayPlan attaches its plank at exactly
+ * width*0.5), so the deck floor is the exact box and nothing else. The server's
+ * walk branch tests it this way; the client's local-player surface mirror used
+ * to carry a 0.45 m pad instead, so a pirate who stepped off the pier was DRAWN
+ * standing on air at deck height for the whole fall while the server had her
+ * falling — the client only caught up when the server flipped her to swimming,
+ * and then she jumped. Both sides read this one function now.
+ *
+ * The 0.45 m pad is a BROAD-PHASE margin ("near the pier": grace windows, ashore
+ * checks) and lives in isNearDockFrame below. A floor is not a proximity test.
+ */
+export function isOnDockDeck(dock: IslandDock, x: number, z: number): boolean {
+  const local = toDockLocalPoint(dock, x, z);
+  return Math.abs(local.x) <= dock.width * 0.5 && Math.abs(local.z) <= dock.length * 0.5;
+}
+
+/** Metres of slack the broad-phase "at this pier" tests allow past the planking.
+ *  Never a floor: see isOnDockDeck. */
+export const DOCK_NEAR_PAD = 0.45;
+
+/** Broad-phase: is this point at the pier at all (planking plus DOCK_NEAR_PAD)? */
+export function isNearDockFrame(dock: IslandDock, x: number, z: number): boolean {
+  const local = toDockLocalPoint(dock, x, z);
+  return Math.abs(local.x) <= dock.width * 0.5 + DOCK_NEAR_PAD
+    && Math.abs(local.z) <= dock.length * 0.5 + DOCK_NEAR_PAD;
+}
+
 /** Which berth of `dock` a point lies in (-1 / +1 by the sign of its lateral
  *  offset), or 0 for "not at this pier at all". CANONICAL: this is the ONLY
  *  test for "is that hull moored here" — see BERTH_FRAME_*_SLACK for why a

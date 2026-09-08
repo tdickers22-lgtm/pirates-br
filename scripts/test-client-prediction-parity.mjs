@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   getSwimHullVerticalBand,
+  isNearDockFrame,
+  isOnDockDeck,
   getSwimHullVerticalT,
   getSwimHullHalfWidth,
   pushOutOfSwimHullFootprint,
@@ -113,6 +115,42 @@ expect('the footprint test is tapered',
   gameSrc.includes('isInsideSwimHullFootprint(stats, localX, localZ, hullMargin, verticalT)'));
 expect('the pushout is tapered',
   gameSrc.includes('pushOutOfSwimHullFootprint(stats, localX, localZ, hullMargin, verticalT)'));
+
+console.log('\n[5] The pier edge is in the same place on both sides (review-8 P1)');
+// w8.3 narrowed the SERVER's standing surface to the exact planking, but the
+// client's local-player mirror kept the 0.45 m pad, so a pirate who stepped off
+// the run was drawn standing on open water at deck height for the whole fall —
+// clippedUnderTerrain lerped her all the way back up to the deck — and only
+// snapped down when the server flipped her to swimming.
+{
+  const dock = { position: { x: 120, y: 2.4, z: -60 }, rotation: 0.7, width: 6, length: 34 };
+  const at = (lx, lz) => {
+    const cos = Math.cos(dock.rotation);
+    const sin = Math.sin(dock.rotation);
+    return {
+      x: dock.position.x + lx * cos + lz * sin,
+      z: dock.position.z - lx * sin + lz * cos,
+    };
+  };
+  const inboard = at(dock.width * 0.5 - 0.1, 0);
+  const overboard = at(dock.width * 0.5 + 0.3, 0);
+  const pastTheEnd = at(0, dock.length * 0.5 + 0.3);
+  expect('a pirate on the last plank is standing on the pier',
+    isOnDockDeck(dock, inboard.x, inboard.z));
+  expect('30 cm past the plank she is over water, on BOTH sides',
+    !isOnDockDeck(dock, overboard.x, overboard.z)
+    && !isOnDockDeck(dock, pastTheEnd.x, pastTheEnd.z));
+  expect('CONTROL: the 0.45 m pad still exists, as a broad phase and not as a floor',
+    isNearDockFrame(dock, overboard.x, overboard.z)
+    && isNearDockFrame(dock, pastTheEnd.x, pastTheEnd.z));
+  expect('the client mirror calls the shared predicate, pad and all removed',
+    gameSrc.includes('isOnDockDeck(island.dock, predictedX, predictedZ)')
+    && !gameSrc.includes('island.dock.width * 0.5 + 0.45'),
+    'Game.getPlayerRenderPosition still resolves the dock surface itself');
+  const physicsSrc = readFileSync(join(ROOT, 'src/server/systems/PhysicsSystem.ts'), 'utf8');
+  expect('and the server floor calls the same one',
+    physicsSrc.includes('isOnDockDeck(island.dock, player.position.x, player.position.z)'));
+}
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — test-client-prediction-parity (${failures} failure${failures === 1 ? '' : 's'})`);
 process.exit(failures === 0 ? 0 : 1);

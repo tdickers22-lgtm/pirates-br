@@ -55,6 +55,8 @@ import {
   intersectRayTavern,
   pushOutOfTavernWalls,
   tavernLocalToWorld,
+  isNearDockFrame,
+  isOnDockDeck,
   toDockLocalPoint,
   toTavernLocal,
 } from '../../shared/utils/index.js';
@@ -2847,8 +2849,10 @@ export class PhysicsSystem {
   private findDockUnderfoot(player: Player, islands: Island[]) {
     for (const island of islands) {
       if (!island.dock) continue;
-      const local = this.toDockLocal(player.position, island.dock);
-      if (Math.abs(local.x) <= island.dock.width * 0.5 && Math.abs(local.z) <= island.dock.length * 0.5) {
+      // Shared with the client's local-player surface mirror
+      // (Game.getPlayerRenderPosition) so the drawn body and the simulated one
+      // leave the planking on the same step (review-8 P1).
+      if (isOnDockDeck(island.dock, player.position.x, player.position.z)) {
         return island.dock;
       }
     }
@@ -2859,8 +2863,7 @@ export class PhysicsSystem {
   private findPlayerDock(player: Player, islands: Island[]) {
     for (const island of islands) {
       if (!island.dock) continue;
-      const local = this.toDockLocal(player.position, island.dock);
-      if (Math.abs(local.x) <= island.dock.width * 0.5 + 0.45 && Math.abs(local.z) <= island.dock.length * 0.5 + 0.45) {
+      if (isNearDockFrame(island.dock, player.position.x, player.position.z)) {
         return island.dock;
       }
     }
