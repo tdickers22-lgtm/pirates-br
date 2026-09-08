@@ -327,71 +327,144 @@ export class AssetLibrary {
   }
 }
 
-/** Extract an index-range slice of a geometry as a standalone geometry. */
+/**
+ * WHAT A MISSING ATTRIBUTE READS, per attribute name.
+ *
+ * The merge below is ALL-OR-IDENTITY: if ANY source mesh of an asset carries an
+ * attribute, EVERY vertex of the merged buffer gets one, because a buffer with a
+ * hole in it is not a buffer three can draw. The value used for the vertices
+ * that never had one has to be the boring answer for that channel — the same
+ * argument `AssetMaterialCollapse` trap 1 makes about `aSurface`/`aTintComp`,
+ * generalised: a missing `color` is WHITE (no AO), a missing `normal` is up, a
+ * missing `uv` is the atlas origin, a missing `tangent` is +X with a positive
+ * handedness. Anything unknown gets zeros, which is what WebGL would have given
+ * the shader anyway.
+ */
+const ATTRIBUTE_IDENTITY: Readonly<Record<string, readonly number[]>> = {
+  normal: [0, 1, 0],
+  color: [1, 1, 1],
+  tangent: [1, 0, 0, 1],
+  uv: [0, 0],
+  uv1: [0, 0],
+  uv2: [0, 0],
+  uv3: [0, 0],
+  skinWeight: [1, 0, 0, 0],
+};
+
+function identityFor(name: string, itemSize: number): readonly number[] {
+  const known = ATTRIBUTE_IDENTITY[name];
+  if (known && known.length === itemSize) return known;
+  return new Array<number>(itemSize).fill(0);
+}
+
+type ReadableAttribute = {
+  readonly itemSize: number;
+  readonly count: number;
+  getX(i: number): number;
+  getY(i: number): number;
+  getZ(i: number): number;
+  getW(i: number): number;
+};
+
+/** Component read that works for a plain BufferAttribute AND for the
+ *  InterleavedBufferAttribute a glTF with interleaved accessors hands back, and
+ *  that denormalises u8/u16 storage on the way out (three r152+). */
+function readComponent(attr: ReadableAttribute, i: number, c: number): number {
+  switch (c) {
+    case 0: return attr.getX(i);
+    case 1: return attr.getY(i);
+    case 2: return attr.getZ(i);
+    case 3: return attr.getW(i);
+    default: return 0;
+  }
+}
+
+/**
+ * Extract an index-range slice of a geometry as a standalone geometry.
+ *
+ * EVERY attribute travels, not a hand-listed three. The list used to be
+ * position/normal/color, which is why `crow_roost` — the one GLB the Blender
+ * pipeline exports with `TEXCOORD_0` — arrived in the instanced buffer with no
+ * UVs and no warning (assets-05). Any texture pass is dead on arrival while a
+ * channel can vanish here, so the rule is now structural: read what the source
+ * has, whatever it is called.
+ */
 function subGeometry(geom: THREE.BufferGeometry, start: number, count: number): THREE.BufferGeometry {
   const out = new THREE.BufferGeometry();
   const index = geom.getIndex();
-  const pos = geom.getAttribute('position') as THREE.BufferAttribute;
-  const normal = geom.getAttribute('normal') as THREE.BufferAttribute | null;
-  // COLOR_0 (baked vertex AO) must survive the slice: materials from the GLTF
-  // loader have vertexColors=true, and a geometry missing the attribute makes
-  // WebGL read (0,0,0) — every instanced prop rendered black. getX/getY/getZ
-  // denormalize u8/u16 automatically (three r152+).
-  const color = geom.getAttribute('color') as THREE.BufferAttribute | null;
-
-  const positions: number[] = [];
-  const normals: number[] = [];
-  const colors: number[] = [];
-  const readVertex = (vi: number) => {
-    positions.push(pos.getX(vi), pos.getY(vi), pos.getZ(vi));
-    if (normal) normals.push(normal.getX(vi), normal.getY(vi), normal.getZ(vi));
-    if (color) colors.push(color.getX(vi), color.getY(vi), color.getZ(vi));
-  };
-  if (index) {
-    for (let i = start; i < start + count; i++) readVertex(index.getX(i));
-  } else {
-    for (let i = start; i < start + count; i++) readVertex(i);
+  const names = Object.keys(geom.attributes);
+  const sources = names.map((n) => geom.getAttribute(n) as unknown as ReadableAttribute);
+  const buffers = sources.map((a) => new Float32Array(count * a.itemSize));
+  for (let w = 0; w < count; w++) {
+    const vi = index ? index.getX(start + w) : start + w;
+    for (let a = 0; a < sources.length; a++) {
+      const attr = sources[a];
+      const buf = buffers[a];
+      const k = attr.itemSize;
+      for (let c = 0; c < k; c++) buf[w * k + c] = readComponent(attr, vi, c);
+    }
   }
-  out.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  if (normal) out.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  if (color) out.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  for (let a = 0; a < names.length; a++) {
+    out.setAttribute(names[a], new THREE.Float32BufferAttribute(buffers[a], sources[a].itemSize));
+  }
   return out;
 }
 
-/** Minimal non-indexed geometry merge (positions + normals + vertex color),
- *  optionally keeping groups. Vertex color (baked AO) defaults to white for
- *  sources without the attribute so the merged buffer stays uniform. */
+/**
+ * Non-indexed geometry merge over the UNION of the sources' attributes,
+ * optionally keeping groups.
+ *
+ * ALL-OR-IDENTITY (see `ATTRIBUTE_IDENTITY`): the union decides the merged
+ * buffer's channels, and a source that lacks one of them contributes that
+ * channel's identity rather than dropping it for everyone. `normal` is forced
+ * into the union whether or not anything authored one, because every material
+ * this library produces is lit.
+ */
 function mergeGeoms(geoms: THREE.BufferGeometry[], withGroups = false): THREE.BufferGeometry {
   if (geoms.length === 1 && !withGroups) return geoms[0];
   const out = new THREE.BufferGeometry();
-  const positions: number[] = [];
-  const normals: number[] = [];
-  const colors: number[] = [];
-  const anyColor = geoms.some((g) => !!g.getAttribute('color'));
+  const sources = geoms.map((g) => (g.getIndex() ? g.toNonIndexed() : g));
+
+  const order: string[] = ['position', 'normal'];
+  const sizes = new Map<string, number>([['position', 3], ['normal', 3]]);
+  for (const src of sources) {
+    for (const name of Object.keys(src.attributes)) {
+      if (sizes.has(name)) continue;
+      sizes.set(name, (src.getAttribute(name) as THREE.BufferAttribute).itemSize);
+      order.push(name);
+    }
+  }
+
+  let total = 0;
+  for (const src of sources) total += (src.getAttribute('position') as THREE.BufferAttribute).count;
+  const buffers = new Map<string, Float32Array>();
+  for (const name of order) buffers.set(name, new Float32Array(total * sizes.get(name)!));
+
   let offset = 0;
-  geoms.forEach((g, gi) => {
-    const src = g.getIndex() ? g.toNonIndexed() : g;
-    const pos = src.getAttribute('position') as THREE.BufferAttribute;
-    const nor = src.getAttribute('normal') as THREE.BufferAttribute | null;
-    const col = src.getAttribute('color') as THREE.BufferAttribute | null;
-    for (let i = 0; i < pos.count; i++) {
-      positions.push(pos.getX(i), pos.getY(i), pos.getZ(i));
-      if (nor) normals.push(nor.getX(i), nor.getY(i), nor.getZ(i));
-      else normals.push(0, 1, 0);
-      if (anyColor) {
-        if (col) colors.push(col.getX(i), col.getY(i), col.getZ(i));
-        else colors.push(1, 1, 1);
+  sources.forEach((src, gi) => {
+    const n = (src.getAttribute('position') as THREE.BufferAttribute).count;
+    for (const name of order) {
+      const k = sizes.get(name)!;
+      const buf = buffers.get(name)!;
+      const attr = src.getAttribute(name) as unknown as ReadableAttribute | undefined;
+      const ident = identityFor(name, k);
+      for (let i = 0; i < n; i++) {
+        const base = (offset + i) * k;
+        for (let c = 0; c < k; c++) {
+          buf[base + c] = attr && c < attr.itemSize ? readComponent(attr, i, c) : ident[c];
+        }
       }
     }
-    if (withGroups) {
-      out.addGroup(offset, pos.count, gi);
-      offset += pos.count;
-    }
-    if (src !== g) src.dispose();
+    if (withGroups) out.addGroup(offset, n, gi);
+    offset += n;
   });
-  out.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  out.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-  if (anyColor) out.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+  for (const name of order) {
+    out.setAttribute(name, new THREE.Float32BufferAttribute(buffers.get(name)!, sizes.get(name)!));
+  }
+  for (let i = 0; i < sources.length; i++) {
+    if (sources[i] !== geoms[i]) sources[i].dispose();
+  }
   return out;
 }
 

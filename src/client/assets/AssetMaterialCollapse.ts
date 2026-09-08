@@ -66,6 +66,16 @@ import * as THREE from 'three';
 export const TINT_ATTRIBUTE = 'aTintComp';
 /** Per-vertex (smoothness, metalness). Smoothness so a missing one reads rough. */
 export const SURFACE_ATTRIBUTE = 'aSurface';
+/**
+ * Per-vertex emissive radiance (`emissive` x `emissiveIntensity`), and the one
+ * attribute here that is stored STRAIGHT rather than complemented — because for
+ * a glow, all-zero already IS the identity. That is what lets it be OPTIONAL:
+ * a collapsed geometry with no lit chunk never allocates the buffer at all, the
+ * program still declares the attribute, and WebGL's default generic value
+ * (0,0,0,1) makes the shader read "no glow" (trap 1, from the useful side).
+ * So the 9 lit GLBs pay 12 bytes a vertex and the other 54 pay nothing.
+ */
+export const EMISSIVE_ATTRIBUTE = 'aEmissive';
 
 /** Program cache keys this file can produce — the warm-up and the program
  *  census both want them by name rather than by reconstruction. */
@@ -115,18 +125,24 @@ export class CollapsedAssetMaterial extends THREE.MeshStandardMaterial {
       if (!this.bakedTint) return;
       shader.vertexShader = `attribute vec3 ${TINT_ATTRIBUTE};
 attribute vec2 ${SURFACE_ATTRIBUTE};
+attribute vec3 ${EMISSIVE_ATTRIBUTE};
 varying vec3 vAssetTint;
 varying vec2 vAssetSurface;
+varying vec3 vAssetEmissive;
 ` + shader.vertexShader.replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
         // Complement in, colour out — see trap 1. Smoothness in, roughness out,
         // for the same reason: an all-zero read has to be the boring answer.
         vAssetTint = 1.0 - ${TINT_ATTRIBUTE};
-        vAssetSurface = vec2(1.0 - ${SURFACE_ATTRIBUTE}.x, ${SURFACE_ATTRIBUTE}.y);`,
+        vAssetSurface = vec2(1.0 - ${SURFACE_ATTRIBUTE}.x, ${SURFACE_ATTRIBUTE}.y);
+        // Straight, not complemented: black already means "does not glow", and
+        // a geometry with no lit chunk ships no buffer for this at all.
+        vAssetEmissive = ${EMISSIVE_ATTRIBUTE};`,
       );
       shader.fragmentShader = `varying vec3 vAssetTint;
 varying vec2 vAssetSurface;
+varying vec3 vAssetEmissive;
 ` + shader.fragmentShader
         // AFTER <color_fragment>, which is where three multiplies COLOR_0 in.
         // The two are independent: COLOR_0 is Blender's baked AO and this is the
@@ -146,6 +162,16 @@ varying vec2 vAssetSurface;
         .replace(
           '#include <metalnessmap_fragment>',
           '#include <metalnessmap_fragment>\n\tmetalnessFactor = vAssetSurface.y;',
+        )
+        // `totalEmissiveRadiance` starts as the `emissive` uniform (which three
+        // has already multiplied by `emissiveIntensity`) and <emissivemap_fragment>
+        // is the last thing to touch it before it is added to outgoingLight. The
+        // collapsed material's own emissive is black, so this ASSIGNS rather than
+        // adds: the attribute is the whole answer, per chunk, for every lantern
+        // pane and ember in one draw.
+        .replace(
+          '#include <emissivemap_fragment>',
+          '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance = vAssetEmissive;',
         );
     };
   }
@@ -183,7 +209,12 @@ export function collapseBlockers(materials: readonly THREE.Material[]): string[]
     for (const key of maps) {
       if (m[key]) blockers.push(`${m.name || '(unnamed)'} has a ${key}`);
     }
-    if (m.emissive && m.emissive.getHex() !== 0x000000) blockers.push(`${m.name || '(unnamed)'} is emissive`);
+    // NO EMISSIVE BLOCKER. A glow used to refuse the collapse outright, which
+    // cost `lantern_post` — on every dock and every trail — three draws a copy,
+    // and `campfire` five, for one `Ember` sub-material. It is now a third baked
+    // attribute (`EMISSIVE_ATTRIBUTE`), so it costs a vec3 per vertex on the 9
+    // GLBs that have one and nothing at all on the other 54. `emissiveMap` is
+    // still blocked above: a texture needs UVs the collapse does not reconcile.
   }
   // Everything below is a per-DRAW state that no vertex attribute can express.
   const uniform = <T>(read: (m: THREE.MeshStandardMaterial) => T, label: string) => {
@@ -265,6 +296,8 @@ export function collapseChunks(
   const vertices = position.count;
   const tint = new Float32Array(vertices * 3);
   const surface = new Float32Array(vertices * 2);
+  // Allocated only if something actually glows — see EMISSIVE_ATTRIBUTE.
+  let emissive: Float32Array | null = null;
   // Default is the identity for both, so a vertex no chunk covers — which the
   // gate forbids, but which a future edit could reintroduce — is untinted and
   // fully rough rather than black and mirrored.
@@ -279,6 +312,14 @@ export function collapseChunks(
     const cb = 1 - m.color.b;
     const smoothness = 1 - m.roughness;
     const metal = m.metalness;
+    // three folds emissiveIntensity into the `emissive` uniform, so the baked
+    // value has to carry it too or a dimmed ember comes back at full strength.
+    const intensity = m.emissiveIntensity ?? 1;
+    const er = m.emissive ? m.emissive.r * intensity : 0;
+    const eg = m.emissive ? m.emissive.g * intensity : 0;
+    const eb = m.emissive ? m.emissive.b * intensity : 0;
+    const lit = er !== 0 || eg !== 0 || eb !== 0;
+    if (lit && !emissive) emissive = new Float32Array(vertices * 3);
     const end = Math.min(vertices, chunk.start + chunk.count);
     for (let i = chunk.start; i < end; i++) {
       tint[i * 3] = cr;
@@ -287,9 +328,18 @@ export function collapseChunks(
       surface[i * 2] = smoothness;
       surface[i * 2 + 1] = metal;
     }
+    if (lit) {
+      for (let i = chunk.start; i < end; i++) {
+        emissive![i * 3] = er;
+        emissive![i * 3 + 1] = eg;
+        emissive![i * 3 + 2] = eb;
+      }
+    }
   }
   geometry.setAttribute(TINT_ATTRIBUTE, new THREE.BufferAttribute(tint, 3));
   geometry.setAttribute(SURFACE_ATTRIBUTE, new THREE.BufferAttribute(surface, 2));
+  if (emissive) geometry.setAttribute(EMISSIVE_ATTRIBUTE, new THREE.BufferAttribute(emissive, 3));
+  else geometry.deleteAttribute(EMISSIVE_ATTRIBUTE);
   geometry.clearGroups();
 
   const sample = materials[0] as THREE.MeshStandardMaterial;
@@ -309,6 +359,9 @@ export function collapseChunks(
     depthWrite: sample.depthWrite,
     depthTest: sample.depthTest,
     toneMapped: sample.toneMapped,
+    // Black, because the glow is per-vertex now. A non-zero uniform here would
+    // be added to every vertex of the asset, lit or not.
+    emissive: 0x000000,
   });
   collapsed.name = `${sample.name || 'asset'}+${materials.length - 1}`;
   return collapsed;

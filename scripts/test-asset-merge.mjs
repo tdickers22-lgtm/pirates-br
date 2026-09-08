@@ -97,7 +97,7 @@ console.log(`asset merge guard — ${ASSET_NAMES.length} assets\n`);
 expect('every GLB loaded (no procedural fallbacks)', loadWarnings.length === 0,
   loadWarnings.join('\n     '));
 
-const { CollapsedAssetMaterial, TINT_ATTRIBUTE, SURFACE_ATTRIBUTE, collapseBlockers } =
+const { CollapsedAssetMaterial, TINT_ATTRIBUTE, SURFACE_ATTRIBUTE, EMISSIVE_ATTRIBUTE, collapseBlockers } =
   await import('../src/client/assets/AssetMaterialCollapse.ts');
 
 /**
@@ -165,9 +165,30 @@ const MUST_COLLAPSE = (() => {
 
 /** Quantised so a float round-trip through a Float32Array cannot fail the
  *  comparison on its own; 1e-4 is far finer than any of these values differ. */
-const bakeKey = (r, g, b, s, m) => [r, g, b, s, m].map((v) => Math.round(v * 10000)).join('/');
+const bakeKey = (...vals) => vals.map((v) => Math.round(v * 10000)).join('/');
+
+/** The union of every attribute name the asset's SOURCE meshes carry. The merge
+ *  owes the merged buffer a channel for each — see the superset assertion. */
+function sourceAttributeNames(name) {
+  const root = assets.clone(name);
+  const names = new Set();
+  root?.traverse((o) => {
+    if (!o.isMesh || !o.geometry) return;
+    for (const attr of Object.keys(o.geometry.attributes)) names.add(attr);
+  });
+  return names;
+}
+
+/** emissive x emissiveIntensity, which is what three folds into the `emissive`
+ *  uniform and therefore what the baked attribute has to reproduce. */
+const litRGB = (mat) => {
+  const k = mat.emissiveIntensity ?? 1;
+  return mat.emissive ? [mat.emissive.r * k, mat.emissive.g * k, mat.emissive.b * k] : [0, 0, 0];
+};
 
 let merged = 0;
+let collapsedCount = 0;
+const droppedAttributes = [];
 const problems = [];
 /** Assets that legitimately cannot collapse (a lit material), reported rather
  *  than failed — none of them is instanced. */
@@ -192,6 +213,19 @@ for (const name of ASSET_NAMES) {
   const pos = geom.getAttribute('position');
   const color = geom.getAttribute('color');
   const groups = geom.groups;
+
+  // 0. EVERY SOURCE CHANNEL SURVIVES THE MERGE (assets-05). mergeGeoms used to
+  //    copy a hand-listed position/normal/color, so `crow_roost` — the only GLB
+  //    the Blender pipeline exports with TEXCOORD_0 — reached the InstancedMesh
+  //    with its UVs silently gone, and any texture pass with it. Nothing throws;
+  //    the prop just cannot ever be textured. So assert the merged attribute set
+  //    is a SUPERSET of the union of the source meshes' attribute sets.
+  const wantAttrs = sourceAttributeNames(name);
+  const gotAttrs = new Set(Object.keys(geom.attributes));
+  const lost = [...wantAttrs].filter((a) => !gotAttrs.has(a));
+  if (lost.length > 0) {
+    droppedAttributes.push(`${name}: merge dropped ${lost.join(', ')} (source has ${[...wantAttrs].sort().join(', ')})`);
+  }
 
   if (['palm_a', 'palm_b', 'palm_c', 'bush', 'bush_berry', 'flower_bush', 'fern_plant', 'flower_patch', 'wildflowers'].includes(name)) {
     if (mats.length !== 1) issues.push('organic asset no longer collapses to one draw');
@@ -261,6 +295,8 @@ for (const name of ASSET_NAMES) {
   } else {
     if (Array.isArray(m.material)) {
       issues.push(`UNCOLLAPSED: still a material ARRAY of ${mats.length} — ${mats.length} draw calls per InstancedMesh`);
+    } else {
+      collapsedCount += 1;
     }
     if (groups.length !== 0) {
       issues.push(`STALE-GROUPS: ${groups.length} groups survive under a single material`);
@@ -270,6 +306,17 @@ for (const name of ASSET_NAMES) {
     }
     const tint = geom.getAttribute(TINT_ATTRIBUTE);
     const surf = geom.getAttribute(SURFACE_ATTRIBUTE);
+    const emis = geom.getAttribute(EMISSIVE_ATTRIBUTE);
+    // The glow buffer is OPTIONAL by design: 12 bytes a vertex on the nine lit
+    // GLBs, nothing on the other fifty-four (a missing attribute reads
+    // (0,0,0,1), i.e. no glow). Allocating it everywhere would be ~12 MB of
+    // zeros in the instanced buffers, which the low tier cannot spare.
+    const anyLit = [...sourceVertexCounts(name).keys()].some((mat) => litRGB(mat).some((v) => v !== 0));
+    if (anyLit !== !!emis) {
+      issues.push(anyLit
+        ? `MISSING-GLOW: a source material is emissive but the merged geometry has no ${EMISSIVE_ATTRIBUTE}`
+        : `WASTED-GLOW: nothing in this asset glows but it still allocates ${EMISSIVE_ATTRIBUTE} (${emis.count} vertices)`);
+    }
     if (!tint || !surf) {
       issues.push(`MISSING-BAKE: ${TINT_ATTRIBUTE}=${!!tint} ${SURFACE_ATTRIBUTE}=${!!surf}`);
     } else if (tint.count !== pos.count || surf.count !== pos.count) {
@@ -285,12 +332,13 @@ for (const name of ASSET_NAMES) {
       const want = new Map();
       for (const [mat, verts] of sourceVertexCounts(name)) {
         const key = bakeKey(1 - mat.color.r, 1 - mat.color.g, 1 - mat.color.b,
-          1 - mat.roughness, mat.metalness);
+          1 - mat.roughness, mat.metalness, ...litRGB(mat));
         want.set(key, (want.get(key) ?? 0) + verts);
       }
       const got = new Map();
       for (let i = 0; i < pos.count; i++) {
-        const key = bakeKey(tint.getX(i), tint.getY(i), tint.getZ(i), surf.getX(i), surf.getY(i));
+        const key = bakeKey(tint.getX(i), tint.getY(i), tint.getZ(i), surf.getX(i), surf.getY(i),
+          emis ? emis.getX(i) : 0, emis ? emis.getY(i) : 0, emis ? emis.getZ(i) : 0);
         got.set(key, (got.get(key) ?? 0) + 1);
       }
       const keys = new Set([...want.keys(), ...got.keys()]);
@@ -330,6 +378,13 @@ expect(`all ${ASSET_NAMES.length} assets produced a merged geometry`, merged ===
   `${merged}/${ASSET_NAMES.length} merged`);
 expect('no asset has a merge defect (collapse contract / COLOR_0 / vertices)', problems.length === 0,
   problems.join('\n     '));
+expect('the merge keeps every attribute the source meshes carry (UVs included)',
+  droppedAttributes.length === 0, droppedAttributes.join('\n     '));
+// A glow is a baked vec3 now, not a refusal (assets-09): `lantern_post` stands
+// on every dock and cost three draws a copy for one `Lantern_Glass`. 52 assets
+// collapsed before that landed; the nine lit ones bring it to 61 at least.
+expect(`at least 61 of ${ASSET_NAMES.length} assets collapse to ONE material (emissive is baked, not refused)`,
+  collapsedCount >= 61, `${collapsedCount} collapsed, ${refused.length} refused`);
 expect(`every instanced asset collapsed to one material (${MUST_COLLAPSE.size} derived from src/)`,
   MUST_COLLAPSE.size >= 19 && [...MUST_COLLAPSE].every((n) => ASSET_NAMES.includes(n)),
   `derived: ${[...MUST_COLLAPSE].sort().join(', ')}`);
