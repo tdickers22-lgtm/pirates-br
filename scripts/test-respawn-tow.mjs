@@ -54,17 +54,25 @@ function livePlayingMatch(botCount, id) {
 // ── A TOW IS A RESCUE, NOT A DRYDOCK ─────────────────────────────────────────
 console.log('The tide brings her in as she is:');
 {
-  const match = livePlayingMatch(2, 'tow-refit');
+  // FOUR crews, not two. With two, killing this captain leaves ONE crew
+  // contending the moment his hull founders, the win check ends the match, and
+  // every tick after that grades nothing — the tide is never asked (R.1).
+  const match = livePlayingMatch(4, 'tow-refit');
   const state = match.state;
   const [captain] = state.players;
   const hull = state.ships.find((s) => s.id === captain.shipId);
 
   // She is 200 m outside the wall, holed four times and half full of water.
+  // NOT fuller than that: four open breaches gain ~0.035 of her hold a second,
+  // so a hull handed over at 0.7 is under in 9 s — a second BEFORE
+  // RESPAWN_HOLD_GRACE_SECONDS, i.e. she founders before any tide could reach
+  // her. That is the sea working as designed (the block below pins it); this
+  // block grades the rescue, so she is handed over still swimmable.
   hull.position = { x: state.storm.safeRadius + 200, y: 0.05, z: 0 };
   hull.anchored = false;
   hull.holes = [1, 2, 3, 4].map((id) => ({ id, x: 0, y: 0.2, z: id * 1.5 - 3, patched: false }));
   hull.nextHoleId = 5;
-  hull.waterLevel = 0.7;
+  hull.waterLevel = 0.45;
   hull.onFire = false;
 
   // Her captain is killed: nobody alive aboard, nobody who calls her home.
@@ -87,6 +95,38 @@ console.log('The tide brings her in as she is:');
     hull.waterLevel > 0 && hull.waterLevel <= 0.45, `waterLevel=${hull.waterLevel.toFixed(3)}`);
 }
 
+// ── ...BUT THE TIDE IS NOT A PUMP ────────────────────────────────────────────
+// The other half of the same rule, and the reason the block above hands her
+// over at 0.45 rather than 0.7: a derelict that is already going down does NOT
+// get warped to shelter. She founders where she lies and takes her crew with
+// her, which is what stops "sail out holed, get killed, get rescued" being the
+// cheapest repair in the game.
+console.log('\nA derelict already going down is not rescued:');
+{
+  const match = livePlayingMatch(4, 'tow-founder');
+  const state = match.state;
+  const [captain] = state.players;
+  const hull = state.ships.find((s) => s.id === captain.shipId);
+
+  hull.position = { x: state.storm.safeRadius + 200, y: 0.05, z: 0 };
+  hull.anchored = false;
+  hull.holes = [1, 2, 3, 4].map((id) => ({ id, x: 0, y: 0.2, z: id * 1.5 - 3, patched: false }));
+  hull.nextHoleId = 5;
+  hull.waterLevel = 0.7;
+  captain.position = { ...hull.position };
+  captain.health = 0;
+  match.handlePlayerDeath(captain);
+
+  const deadline = match.t + 35;
+  while (match.t < deadline) match.tick();
+
+  expect('she went down where she lay — no tow for a foundering hull',
+    dist2(hull.position, { x: 0, z: 0 }) > state.storm.safeRadius,
+    `d=${dist2(hull.position, { x: 0, z: 0 }).toFixed(1)} sinking=${hull.sinking}`);
+  expect('...and the crew she was holding is eliminated with her',
+    captain.state === 'eliminated', `state=${captain.state}`);
+}
+
 // ── A DEAD CAPTAIN'S SHIP ROUNDS UP AND ANCHORS ──────────────────────────────
 console.log('\nThe ghost helmsman:');
 {
@@ -99,8 +139,11 @@ console.log('\nThe ghost helmsman:');
   const captain = state.players.find((p) => p.id === joined.playerId);
   const hull = state.ships.find((s) => s.id === captain.shipId);
 
-  // Well inside the ring (no tow), making way under full canvas.
-  hull.position = { x: 0, y: 0.05, z: 0 };
+  // Well inside the ring (no tow), in GENUINE OPEN WATER, making way under
+  // full canvas. Not the storm centre: (0,0) is the middle of Old Maw Caldera,
+  // a 96 m island, so the old fixture put her on dry land and the grounding
+  // push-out shoved her 100 m off the rock — way she never sailed (R.1).
+  hull.position = { x: 0, y: 0.05, z: 300 };
   hull.rotation = 0;
   hull.anchored = false;
   hull.anchorRaiseProgress = 1;
@@ -109,7 +152,7 @@ console.log('\nThe ghost helmsman:');
   hull.velocity = { x: 0, y: 0, z: 10 };
   const start = { x: hull.position.x, z: hull.position.z };
 
-  captain.position = { x: 0, y: 3, z: 0 };
+  captain.position = { x: 0, y: 3, z: 300 };
   captain.health = 0;
   match.handlePlayerDeath(captain);
 
