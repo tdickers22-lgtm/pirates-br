@@ -95,7 +95,8 @@ minute rather than the twentieth.
 | `test-perf-budget` | draw-call and triangle ceilings per scene | yes | fails rather than skips on an unpinned world, which is what it used to do |
 | `test-hud-death-and-feed` | the whole death/respawn/feed HUD | yes | **four failing assertions fixed in this audit — see below** |
 | `test-fill-budget` | stencil census: sky layers ≤ 0.55, whole/blended overdraw ceilings | yes | wave 0.4; **has `--mutate`** (sky `depthTest=false` must FAIL); slow |
-| `test-storm-wall` | the old storm-wall-probe as a gate: night sea ≤ sky luma, noon sea chroma ≤ 1.3× sky | yes | wave 0.4; **red by design** until lane 5.4 (STORMVIS-01) lands (noon 6.67×); slow |
+| `test-storm-wall` | the old storm-wall-probe as a gate: night sea ≤ sky luma, noon sea chroma ≤ 1.3× sky | yes | wave 0.4; **red by design**; its noon-chroma half is the SEA's body colour (storm-12), not STORMVIS-01, so lane 5.4 does not close it; slow |
+| `test-storm-visuals` | STORMVIS-01: the one weather anchor, the leak gate's sea-state, thunder delay, the deleted halo/ring/rain-canvas, and the storm-front + sky storm terms read back out of the shipped GLSL | yes | lane 5.4; logic tier, quick (0.2 s), no stack |
 
 ## Server suites (3)
 
