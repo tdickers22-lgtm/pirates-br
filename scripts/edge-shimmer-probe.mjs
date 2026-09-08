@@ -44,7 +44,7 @@ import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import { browserArgs, describeGl } from './lib/browser-args.mjs';
+import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 import { readPng } from './lib/png-read.mjs';
 
 const argv = process.argv.slice(2);
@@ -238,9 +238,19 @@ async function main() {
     }
     // THE ROW THAT WITNESSES THE FIX AT ANY RATIO: on HEAD this was
     // antialias=false / SAMPLES=1 on every tier.
+    // THE ASK IS CONDITIONAL ON THE GPU, SO IT IS ONLY GRADED ON A GPU.
+    // `wantsDefaultFramebufferMsaa` = low tier AND a TILE-BASED renderer (Apple,
+    // Adreno, Mali): MSAA on the default framebuffer is nearly free there and is
+    // not free anywhere else. ANGLE/SwiftShader is not tile-based, so it is
+    // ANSWERED CORRECTLY with antialias:false and grants SAMPLES=0 — and since
+    // the campaign made software the default backend (945e60ff, after two GPU
+    // lockups) these two rows failed on the backend rather than on the build.
+    // Advisory there, graded whenever a real GL is asked for.
     if (antialiasOn === true) pass("the 'low' context asked for anti-aliasing");
+    else if (IS_SOFTWARE_GL) console.log(`  ~ ADVISORY: antialias=${antialiasOn} — SwiftShader is not a tile-based GPU, so the low tier correctly does not ask for MSAA here. Re-run with PIRATES_GL=metal to grade it.`);
     else fail("the 'low' context did not ask for anti-aliasing", `getContextAttributes().antialias === ${antialiasOn}`);
     if (typeof samples === 'number' && samples > 1) pass(`…and the backend granted it (SAMPLES=${samples})`);
+    else if (IS_SOFTWARE_GL) console.log(`  ~ ADVISORY: SAMPLES=${samples} on the software rasteriser (nothing was asked for).`);
     else fail(`the backend granted no multisampling (SAMPLES=${samples})`, 'on a real GPU this is the whole fix');
 
     console.log('\nResize coalescing (perf-v-02)');

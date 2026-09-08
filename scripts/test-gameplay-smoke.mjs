@@ -252,7 +252,7 @@ async function main() {
     // rather than bot Players. An island skeleton is an `isBot` Player with a
     // null shipId that a wave pushes into `state.players` mid-match, so by the
     // time the software path settles the lobby reads 14 players / 13 bots off a
-    // match that still has exactly 10 ships and an HUD saying 10 crews. Counting
+    // match that still has exactly the fleet's hulls and an HUD saying so. Counting
     // hulls instead of bodies makes the assertion true whenever it is asked.
     const spawn = await page.evaluate(() => {
       const bots = window.__piratesBR.state.players.filter((p) => p.isBot);
@@ -324,15 +324,23 @@ async function main() {
     });
 
     expect('Match phase is playing', data.phase === 'playing', JSON.stringify(data));
-    expect('Solo bot match has 10 ships', data.ships === 10, JSON.stringify(data));
-    expect('Solo bot match has 9 bots plus the player', spawn.players === 10 && spawn.botCrews === 9,
+    // THE FLEET IS SOLO'S, AND SOLO SAYS 12 (PLAN 2.1: 12 cutters, 12 players,
+    // bot-filled to 12). It was a hard 10 that predated the mode table and the
+    // constant MATCH_TOTAL_SHIPS is derived from MODES.solo.crews now, so this
+    // suite asserted a fleet size the game stopped shipping when the modes lane
+    // landed. Written as one constant here because this file is plain node and
+    // does not load src/ TypeScript; if MODES.solo.crews moves, this moves.
+    const FLEET = 12;
+    expect(`Solo bot match has ${FLEET} ships`, data.ships === FLEET, JSON.stringify(data));
+    expect(`Solo bot match has ${FLEET - 1} bots plus the player`,
+      spawn.players === FLEET && spawn.botCrews === FLEET - 1,
       JSON.stringify({ atSpawn: spawn, atSettle: { players: data.players, bots: data.bots } }));
-    expect('All ships are alive at spawn', data.shipsAlive === 10, JSON.stringify(data));
+    expect('All ships are alive at spawn', data.shipsAlive === FLEET, JSON.stringify(data));
     expect('Bots spawn alive on their ships', spawn.botSpawnIssues === 0,
       JSON.stringify({ atSpawn: spawn.botSpawnIssues, atSettle: data.botSpawnIssues }));
     expect('World content is present', data.islands >= 8 && data.chests > 0 && data.wildlife > 0 && data.seaRocks > 0, JSON.stringify(data));
     expect('Local player spawned with weapons and kegs', !!data.local && data.local.health > 0 && data.local.weapons.length >= 4 && data.local.kegs >= 1, JSON.stringify(data));
-    expect('HUD shows BR state', data.hud.crews === '10' && data.hud.stormPhase.length > 0 && data.hud.stormTimer.length > 0, JSON.stringify(data.hud));
+    expect('HUD shows BR state', data.hud.crews === String(FLEET) && data.hud.stormPhase.length > 0 && data.hud.stormTimer.length > 0, JSON.stringify(data.hud));
     expect('Debug/perf panel exists behind ?debug', data.debugPanelVisible, JSON.stringify(data));
     expect('Canvas is visible', data.canvas.count > 0 && data.canvas.width > 0 && data.canvas.height > 0, JSON.stringify(data.canvas));
     // FRAME PACING IS A CLAIM ABOUT THE RENDERER PLAYERS RUN, SO IT IS ONLY MADE

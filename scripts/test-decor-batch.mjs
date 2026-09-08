@@ -71,6 +71,35 @@ const NOT_AN_OBJECT_NAME = new Map([
   ['Pirate', 'the default player name'],
   ['Grave_Dirt', 'a MATERIAL name (PropScatterer tints by material)'],
   ['Sand_Pad', 'a MATERIAL name (PropScatterer tints by material)'],
+  ['Sally', 'a player name in a wire-validation fixture'],
+  ['Late', 'a player name in a lobby-flow fixture'],
+  ['TeamTint', 'a MATERIAL name on the rig (PlayerRigFactory tints by material)'],
+  ['death_shot', 'an animation CLIP name'],
+  ['death_drown', 'an animation CLIP name'],
+  ["Booty Bay", 'an ISLAND name (world data), compared as island.name'],
+  ['Crow', 'an ISLAND name prefix (world data), compared as island.name'],
+]);
+
+/**
+ * Object3D names that ARE looked up, but on bodies the island batcher never
+ * sees: the skinned pirate, the viewmodel, and the ship. StaticBatcher merges
+ * ISLAND decor — it is not reachable from a player rig or a hull, so putting
+ * these in ADDRESSED_NAMES would claim a protection the batcher cannot give
+ * and would hide the day one of them really does become island decor.
+ *
+ * Written down with its owner rather than dropped, because the gate's whole
+ * point is that a new by-name lookup is a decision somebody made on purpose.
+ */
+const NOT_BATCHER_TERRITORY = new Map([
+  ['left-boot', 'pirate rig — PlayerAnimator foot plant'],
+  ['right-boot', 'pirate rig — PlayerAnimator foot plant'],
+  ['right-wrist', 'pirate rig bone — pose-invariants probe'],
+  ['held-item', 'viewmodel node — ViewmodelController'],
+  ['hold-lantern', 'ship interior node — hold lanterns (w9.6 f)'],
+  ['hold-hammock', 'ship interior node — ship geometry gate'],
+  ['ship-detail-root', 'ship detail LOD root — ship geometry gate'],
+  ['ship-rigging', 'ship rigging group — rigging gate (w9.6 e)'],
+  ['upgrade-hull-reinforcement', 'ship upgrade node — hole-visibility gate'],
 ]);
 
 /** Names the batcher is allowed to merge despite a lookup, with the reason. */
@@ -164,7 +193,8 @@ async function main() {
   const declared = declaredAddressedNames();
   const literals = addressedLiterals();
   for (const [name, where] of literals) {
-    if (declared.has(name) || NOT_AN_OBJECT_NAME.has(name) || MERGE_SAFE_ANYWAY.has(name)) continue;
+    if (declared.has(name) || NOT_AN_OBJECT_NAME.has(name) || MERGE_SAFE_ANYWAY.has(name)
+      || NOT_BATCHER_TERRITORY.has(name)) continue;
     failures.push(`unclassified node-name lookup '${name}' (${where}) — add it to ADDRESSED_NAMES in `
       + 'src/client/world/island/StaticBatcher.ts, or classify it in this test');
   }
