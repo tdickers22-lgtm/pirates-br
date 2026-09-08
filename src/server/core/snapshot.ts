@@ -1,6 +1,7 @@
 import type {
   GameState,
   HotSnapshotPayload,
+  InputAckPayload,
   Island,
   Player,
   Ship,
@@ -293,5 +294,30 @@ export function buildHotSnapshot(state: GameState, serverTime: number, seq?: num
         attackState: shark.attackState ?? 'cruise',
         attackTimer: roundTo(shark.attackTimer ?? 0, 2),
       })),
+  };
+}
+
+/**
+ * PRED-01 (netcode-35): the per-client receipt a predicting client reconciles
+ * against.
+ *
+ * Deliberately NOT part of the hot snapshot: a hot frame is one string shared by
+ * every socket (that is what keeps it cheap), and this is the one fact that is
+ * different for every client. It is built per client per hot tick, so it is
+ * kept to the six fields the reconciliation actually reads and quantised to
+ * millimetres like every other position on the wire — ~70 B, ~2 KB/s at 31 Hz.
+ *
+ * `pos` is world-space even aboard a hull: the client re-derives the deck-local
+ * seat from the hull pose it is already drawing, so an ack that crossed a
+ * boarding cannot be misread as a two-metre deck offset in world coordinates.
+ */
+export function buildInputAck(player: Player, seq: number, serverTime: number): InputAckPayload {
+  return {
+    seq,
+    pos: quantizeDeep(player.position, 3),
+    vel: quantizeDeep(player.velocity, 2),
+    onShipId: player.onShipId ?? null,
+    state: player.state,
+    t: roundTo(serverTime, 3),
   };
 }

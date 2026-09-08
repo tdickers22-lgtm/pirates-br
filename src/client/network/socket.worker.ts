@@ -53,7 +53,7 @@ const MAX_UNACKED_FRAMES = 6;
 /** Cheap type sniff on the head of the frame. The server writes `type` first
  *  (`JSON.stringify({ type, ts, payload })`), so this needs no parse. If that
  *  ever changes, coalescing simply stops happening — frames still all arrive. */
-const SNAPSHOT_HEAD = /^\{"type":"(state_hot|state_snapshot)"/;
+const SNAPSHOT_HEAD = /^\{"type":"(state_hot|state_snapshot|input_ack)"/;
 
 type ToWorker =
   | { k: 'open'; url: string }
@@ -101,7 +101,8 @@ function relay(raw: string): void {
 function flushHeld(): void {
   // Full before hot: a hot snapshot patches onto the last full one, so releasing
   // them in the other order would apply the patch and then throw it away.
-  for (const kind of ['state_snapshot', 'state_hot']) {
+  // Ack last: the ack is read against the state it describes.
+  for (const kind of ['state_snapshot', 'state_hot', 'input_ack']) {
     const frame = held.get(kind);
     if (frame === undefined) continue;
     held.delete(kind);

@@ -28,6 +28,7 @@ import { stepPirate, isPirateGrounded } from '../src/shared/locomotion.ts';
 import { PLAYER } from '../src/shared/constants/index.ts';
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { getIslandSurfaceY } from '../src/shared/utils/index.ts';
+import { buildInputAck } from '../src/server/core/snapshot.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -227,6 +228,41 @@ expect(
   'Match.ts no longer holds the inline swim blend',
   !matchSrc.includes('const horizBlend = 1 - Math.exp(-dt * 9)'),
 );
+
+console.log('\n[5] The per-client input receipt (input_ack)');
+{
+  const player = {
+    position: { x: 123.456789, y: 8.7654321, z: -55.5555 },
+    velocity: { x: 1.23456, y: -0.5, z: 3.99999 },
+    onShipId: 'ship-7',
+    state: 'alive',
+  };
+  const ack = buildInputAck(player, 4242, 91.23456);
+  expect('carries the consumed seq', ack.seq === 4242);
+  expect('carries world position, quantised to mm', ack.pos.x === 123.457 && ack.pos.z === -55.555,
+    JSON.stringify(ack.pos));
+  expect('carries velocity and the hull the body stood on',
+    ack.vel.x === 1.23 && ack.onShipId === 'ship-7' && ack.state === 'alive', JSON.stringify(ack));
+  expect('carries the server clock the hot snapshot uses', ack.t === 91.235);
+  const bytes = Buffer.byteLength(JSON.stringify({ type: 'input_ack', ts: Date.now(), payload: ack }));
+  // The budget in the plan is ~70 B of payload; the envelope takes it to ~150 B.
+  // At 31 Hz that is <=4.7 KB/s per client and nothing changes for anyone else.
+  expect(`one receipt fits the wire budget (${bytes} B <= 200)`, bytes <= 200, `${bytes} B`);
+  const acksPerSecond = 31;
+  expect(`31 Hz of receipts stays under 6 KB/s (${(bytes * acksPerSecond / 1024).toFixed(1)} KB/s)`,
+    bytes * acksPerSecond <= 6 * 1024);
+}
+{
+  // Anchored to the hot broadcast itself: a grep for the method NAME would go
+  // on passing with the call commented out (it matches the declaration).
+  expect('Match sends a receipt on the hot tick',
+    matchSrc.includes("}, 'hot');\n        this.broadcastInputAcks();"));
+  expect('a congested socket is skipped rather than queued',
+    /bufferedAmount > MAX_VOLATILE_BUFFERED_BYTES\) continue;\n      const player = this\.getPlayer/.test(matchSrc));
+  const workerSrc = readFileSync(join(ROOT, 'src/client/network/socket.worker.ts'), 'utf8');
+  expect('the socket worker coalesces receipts (a stale ack must never rewind prediction)',
+    /input_ack/.test(workerSrc) && workerSrc.includes("'state_snapshot', 'state_hot', 'input_ack'"));
+}
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — test-prediction (${failures} failure${failures === 1 ? '' : 's'})`);
 process.exit(failures === 0 ? 0 : 1);
