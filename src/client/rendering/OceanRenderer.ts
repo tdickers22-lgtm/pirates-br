@@ -122,6 +122,23 @@ const SHORE_GLSL = `
     }
     return mix(d, bed, u_bathymetryReady);
   }
+
+  // TIER 0's SHORE DISTANCE (OCEANTIER-01 / perf-06). Same value, minus the
+  // sixteen-ellipse loop: the vertex stage already ran the full function and
+  // handed the result down as v_shoreDist, so all the fragment has to do is the
+  // ONE thing that has detail finer than a grid cell — the bathymetry fetch,
+  // which is what draws the actual waterline. Between vertices the ellipse term
+  // interpolates, and an ellipse SDF over a 6 m cell is linear to within
+  // centimetres. Where the depth texture has not arrived yet (the first seconds
+  // of a match) the varying is the whole answer, which is exactly what the
+  // ellipse fallback was.
+  float shoreDistLod(vec2 p, float waterY, float fallback) {
+    if (u_bathymetryReady <= 0.0) return fallback;
+    vec2 uv = (p - u_bathymetryBounds.xy) / u_bathymetryBounds.zw;
+    if (min(uv.x, uv.y) < 0.0 || max(uv.x, uv.y) > 1.0) return fallback;
+    float bedY = texture2D(u_bathymetry, uv).r * 20.0 - 12.0;
+    return mix(fallback, max(0.0, waterY - bedY) * 5.0, u_bathymetryReady);
+  }
 `;
 
 
@@ -214,6 +231,16 @@ export const OCEAN_VERT = /* glsl */`
 
   varying vec3  v_worldPos;
   varying float v_height;
+  // THE WAVE FIELD, SOLVED ONCE PER VERTEX INSTEAD OF ONCE PER PIXEL
+  // (OCEANTIER-01 / perf-06). waveField already computes its own exact
+  // derivative here — the vertex stage was throwing .yz away and every fragment
+  // was re-deriving it from scratch, on the surface that covers 45-55% of the
+  // frame. There are 13k vertices in the low grid and ~250k ocean fragments in a
+  // 960x540 frame. v_shoreDist likewise: the sixteen-ellipse SDF is a
+  // per-vertex quantity at tier 0.
+  varying vec2  v_slope;
+  varying float v_shoreDist;
+  varying float v_stormSea;
 
   // THE SEA TAKES A SHADOW (SHADOW-01 / graphics-14).
   //
@@ -236,11 +263,18 @@ export const OCEAN_VERT = /* glsl */`
     // Shore tint is a shading cue only. Damping the drawn wave here used to
     // separate swimmers and hull waterlines from the server by up to 0.8m
     // during a storm, especially inside the ellipse over a deep bay.
-    float h = waveField(wp.xz, camDist).x;
+    vec3 wf = waveField(wp.xz, camDist);
+    float h = wf.x;
     wp.y += h;
 
     v_worldPos = wp;
     v_height   = h;
+    v_slope    = wf.yz;
+    v_shoreDist = shoreDist(wp.xz, h);
+    // The local sea state is a smooth radial field around the storm centre —
+    // it changes over hundreds of metres, not over a 6 m cell — so tier 0 reads
+    // it off this varying instead of re-deriving the storm geometry per pixel.
+    v_stormSea = stormWaveIntensity(wp.xz);
 
     // Not three's <shadowmap_vertex>: that chunk wants 'transformedNormal' and
     // 'worldPosition' from the standard vertex pipeline this shader does not
@@ -311,6 +345,9 @@ export const OCEAN_FRAG = /* glsl */`
 
   varying vec3  v_worldPos;
   varying float v_height;
+  varying vec2  v_slope;
+  varying float v_shoreDist;
+  varying float v_stormSea;
 
   ${WAVE_FIELD_GLSL}
   ${SHORE_GLSL}
@@ -359,13 +396,24 @@ export const OCEAN_FRAG = /* glsl */`
   // Screen-footprint filtering fades each octave before it becomes a subpixel
   // shimmer. The 24cm band survives close inspection without aliasing at the
   // horizon; these normals never displace the physics surface.
+  //
+  // OCTAVE COUNT IS THE TIER (OCEANTIER-01). Each octave is four hashes and its
+  // own footprint fade. Tier 2 keeps all three; tier 1 drops the 24 cm capillary
+  // band, which is under a pixel past ~30 m anyway; tier 0 keeps only the 59 cm
+  // band — the one that carries the "this is water, not a sheet" read — with its
+  // amplitude raised so the surface does not go glassy where the finer bands
+  // used to sit.
   vec2 rippleSlope(vec2 p, float footprint) {
     vec2 n = noiseSlope(p * 0.60 + u_time * vec2(0.06, 0.04))
-      * 0.36 * (1.0 - smoothstep(0.30, 0.85, footprint * 0.60));
+      * (0.36 + 0.16 * float(OCEAN_TIER == 0)) * (1.0 - smoothstep(0.30, 0.85, footprint * 0.60));
+#if OCEAN_TIER >= 1
     n += noiseSlope(p * 1.70 - u_time * vec2(0.05, 0.09))
       * 0.22 * (1.0 - smoothstep(0.30, 0.85, footprint * 1.70));
+#endif
+#if OCEAN_TIER >= 2
     n += noiseSlope(p * 4.10 + u_time * vec2(0.11, -0.07))
       * 0.12 * (1.0 - smoothstep(0.30, 0.85, footprint * 4.10));
+#endif
     return n;
   }
 
@@ -408,14 +456,41 @@ export const OCEAN_FRAG = /* glsl */`
     // specular lobe at that footprint is precisely the far-ocean moiré.
     float viewDist = distance(u_cameraPos, v_worldPos);
 
-    // Analytic per-pixel normal: displacement is vertical-only, so xz is
-    // undistorted and the derivative field matches the drawn surface exactly.
+    // Analytic normal: displacement is vertical-only, so xz is undistorted and
+    // the derivative field matches the drawn surface exactly.
+    //
+    // WHERE it is evaluated is the tier (OCEANTIER-01 / perf-06). Tier 2 solves
+    // the whole wave field per pixel, everywhere. Tier 1 does it inside 192 m —
+    // the finest ring, the water you sail through — and hands over to the
+    // interpolated vertex slope across 160-192 m, so there is no line in the
+    // sea where the shading changes. Tier 0 uses the vertex slope throughout:
+    // its finest cell is 6 m against swell components 8-90 m long, so the
+    // interpolated normal is the same surface to within the ripple detail that
+    // is added on top of it a few lines below. The DISPLACEMENT is untouched at
+    // every tier — the drawn surface is still bit-for-bit the one the physics
+    // samples.
+#if OCEAN_TIER >= 2
     vec3 wf = waveField(wp, camDist);
     vec3 N = normalize(vec3(-wf.y, 1.0, -wf.z));
+#elif OCEAN_TIER == 1
+    vec2 slope = v_slope;
+    float nearField = 1.0 - smoothstep(160.0, 192.0, camDist);
+    if (nearField > 0.0) {
+      vec3 wf = waveField(wp, camDist);
+      slope = mix(slope, wf.yz, nearField);
+    }
+    vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));
+#else
+    vec3 N = normalize(vec3(-v_slope.x, 1.0, -v_slope.y));
+#endif
     float surfaceFootprint = max(length(dFdx(wp)), length(dFdy(wp)));
 
     // Local storm sea-state (same value waveField used for displacement).
+#if OCEAN_TIER == 0
+    float stormSea = v_stormSea;
+#else
     float stormSea = stormWaveIntensity(wp);
+#endif
 
     vec3 V = normalize(u_cameraPos - v_worldPos);
     vec3 L = normalize(u_sunDir);
@@ -494,7 +569,17 @@ export const OCEAN_FRAG = /* glsl */`
     vec3 base   = mix(deep, lifted, flank);
 
     // ── Shore shallows: turquoise ramp toward the beach ─────────────────
+    // Tiers 0 and 1 refine the vertex shore distance with the bathymetry fetch
+    // alone; tier 2 keeps the full sixteen-ellipse SDF per pixel. Note what the
+    // ellipse loop IS: the fallback for the seconds before the depth texture
+    // finishes filling, after which it is dead code on the GPU by uniform. What
+    // the two cheaper tiers give up is a linear interpolation of that fallback
+    // across one grid cell, for those seconds only.
+#if OCEAN_TIER <= 1
+    float sd = shoreDistLod(wp, v_height, v_shoreDist);
+#else
     float sd = shoreDist(wp, v_height);
+#endif
     float shallowMask = 1.0 - smoothstep(4.0, 52.0, sd);
     // The sand-depth tint is a TOP-DOWN read: at 20cm of eye height there is no
     // sand path through the water to see, so lowEye (computed above) fades it out
@@ -689,10 +774,23 @@ export const OCEAN_FRAG = /* glsl */`
     // mean, 0.25. Past the handover the three noise() calls — twelve hashes —
     // are SKIPPED, so the far sea gets cheaper as well as calmer; the branch is
     // coherent across whole distance bands, not per pixel.
-    float foamLod = smoothstep(4.5, 9.0, surfaceFootprint * 2.0);
+    // …and past 2,400 m there is nothing to break up at all: capRange has taken
+    // the crest term to zero by 1,800 m and the horizon dissolve is 86% closed,
+    // so the last kilometre of grid was paying twelve hashes a fragment to tint
+    // water that is already sky. step() rather than a ramp because the field it
+    // gates is already at its own mean out there — there is no edge to cross.
+    float foamLod = max(smoothstep(4.5, 9.0, surfaceFootprint * 2.0), step(2400.0, viewDist));
     float foamN = 0.25;
     if (foamLod < 0.998) {
+      // The third octave is the one that de-correlates the other two; it is what
+      // stops the product reading as a weave. Tiers 1 and 2 keep it. Tier 0
+      // cannot afford four more hashes on half the frame, so it takes the
+      // product alone and leans on the two rotations to break the grid.
+#if OCEAN_TIER >= 1
       float foamN2 = noise(foamRot * wp * 0.0413 - u_time * vec2(0.009, 0.014));
+#else
+      float foamN2 = 0.5;
+#endif
       foamN = mix(noise(foamRotA * foamUv * 3.0) * noise(foamRotB * foamUv * 7.37 + 1.5)
                 * (0.62 + 0.76 * foamN2), 0.25, foamLod);
     }
@@ -701,12 +799,14 @@ export const OCEAN_FRAG = /* glsl */`
     float foam = clamp(crest * breakup * 1.15, 0.0, 1.0);
     // Fine holes and tendrils in nearby whitecaps, advected with the larger
     // foam patches. Fade at their own pixel scale instead of sparkling at sea.
+#if OCEAN_TIER >= 2
     float laceFade = (1.0 - smoothstep(45.0, 160.0, viewDist))
       * (1.0 - smoothstep(0.20, 0.65, surfaceFootprint));
     if (laceFade > 0.001) {
       float lace = noise(wp * 1.8 + u_time * vec2(0.22, 0.14));
       foam *= mix(1.0, smoothstep(0.22, 0.66, lace) * 1.5, laceFade * 0.75);
     }
+#endif
 
     float shoreDetail = 1.0 - smoothstep(260.0, 900.0, viewDist);
     // The lap-film term below is one-sided in sd and so has no far edge of its
@@ -715,7 +815,14 @@ export const OCEAN_FRAG = /* glsl */`
     // hundred metres it is below a pixel and has no business being opaque.
     float shoreRange = 1.0 - smoothstep(110.0, 460.0, viewDist);
     float lap = sin(sd * 0.5 - u_time * 1.3) * 0.5 + 0.5;
+#if OCEAN_TIER >= 1
     float lapNoise = noise(wp * 0.3 + u_time * vec2(0.05, -0.04));
+#else
+    // The surf line keeps its animation (the lap sine below is the wave that
+    // runs up the sand); what tier 0 gives up is the noise that varies its
+    // strength along the beach. Mid-value, so the band is the same width.
+    float lapNoise = 0.5;
+#endif
     float shoreBand = (1.0 - smoothstep(2.0, 11.0, sd)) * smoothstep(0.5, 0.9, lap * (0.55 + 0.45 * lapNoise));
     float waterline = 1.0 - smoothstep(0.0, 2.2, sd);
     // Shore foam is a lapping FILM over lit sand, never an opaque plate. Both
@@ -846,7 +953,11 @@ export const OCEAN_FRAG = /* glsl */`
     // of disappearing due to back-face culling or using the above-water shader.
     if (underwater > 0.0) {
       float underside = step(u_cameraPos.y, v_worldPos.y + 0.05);
+#if OCEAN_TIER >= 2
       float caustic = noise(v_worldPos.xz * 0.055 + u_time * vec2(0.05, -0.035));
+#else
+      float caustic = 0.5;
+#endif
       vec3 undersideColor = mix(vec3(0.02, 0.20, 0.31), vec3(0.20, 0.74, 0.86), fresnel * 0.72 + caustic * 0.12);
       undersideColor += vec3(0.05, 0.18, 0.22) * pow(max(0.0, dot(N, L)), 2.0);
       color = mix(color, mix(color, undersideColor, underside), underwater);
@@ -907,6 +1018,22 @@ interface LodLevel { halfExtent: number; cell: number; hole: number }
  * 6528/96 = 68, and 4 and 16 both divide 96. Break any of those and the sea
  * swims under the camera or cracks at a seam.
  */
+/**
+ * WHICH OCEAN PROGRAM A TIER GETS (OCEANTIER-01 / perf-06, graphics-12).
+ *
+ * The ocean fragment shader is the heaviest in the game and covers 45-55% of
+ * every frame, and until now every tier compiled the SAME one: a machine that
+ * opened on 'low' — the machine that told us it cannot afford the benefit of
+ * the doubt — solved the full Gerstner field, a sixteen-ellipse shore SDF,
+ * three ripple octaves and three foam octaves per pixel, exactly like a desktop
+ * on 'high'. The geometry had three tiers; the fill did not.
+ *
+ * 0 = low, 1 = balanced, 2 = high, as a compile-time define. See OCEAN_FRAG for
+ * what each level costs; the DISPLACED SURFACE is identical at all three, so
+ * nothing about hull heave, swimming or gunnery changes with it.
+ */
+export const OCEAN_TIER: Record<RenderQuality, number> = { low: 0, balanced: 1, high: 2 };
+
 const LOD_LEVELS: Record<RenderQuality, LodLevel[]> = {
   low: [ // 24,608 tris / 13,211 verts
     { halfExtent: 192, cell: 6, hole: 0 },
@@ -1036,6 +1163,7 @@ export class OceanRenderer {
       // and expand to nothing on balanced. An unnamed ShaderMaterial matched
       // three's own empty-named fullscreen quad and the gate graded the composer.
       name: 'ocean-surface',
+      defines: { OCEAN_TIER: OCEAN_TIER[quality] },
       // lights: true is not "the ocean is lit by three's light loop" — it never
       // includes lights_pars_begin and never runs a BRDF. It is the ONLY way to
       // get three to keep directionalShadowMap / directionalShadowMatrix /
@@ -1091,7 +1219,7 @@ export class OceanRenderer {
     this.maskMaterial = new THREE.ShaderMaterial({
       vertexShader:   OCEAN_VERT,
       fragmentShader: OCEAN_FRAG,
-      defines: { HULL_MASK: '1' },
+      defines: { HULL_MASK: '1', OCEAN_TIER: OCEAN_TIER[quality] },
       // Same name: it IS the ocean surface, and the probes that read
       // gl.getShaderSource() off the linked program must find it either way.
       name: 'ocean-surface',

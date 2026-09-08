@@ -151,6 +151,15 @@ function programKey(mesh: THREE.Mesh, material: THREE.Material): string {
     (mesh as unknown as THREE.Sprite).isSprite ? 'P' : '',
     (mesh as unknown as THREE.Points).isPoints ? 'O' : '',
     (mesh as unknown as THREE.Line).isLine ? 'L' : '',
+    // THE THIRD OCEAN PROGRAM. `receiveShadow` is a per-OBJECT flag that three
+    // puts straight into its program parameters, so ONE material with two
+    // receiveShadow values is two programs — and the ocean is exactly that: the
+    // two inner LOD rings sample the shadow map and the outer rings do not
+    // (OceanRenderer, OCEAN_SHADOW_RINGS). Keyed on the material uuid alone this
+    // walk warmed whichever ring it met first and left the other to link at draw
+    // time, on the surface that covers half the frame. Same for any prop that
+    // opts out of receiving.
+    mesh.receiveShadow ? 'R' : '',
     attributes?.color ? 'C' : '',
     attributes?.tangent ? 'T' : '',
     attributes?.uv1 ? 'U' : '',
