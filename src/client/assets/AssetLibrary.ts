@@ -39,6 +39,40 @@ export const ASSET_NAMES = [
 
 export type AssetName = (typeof ASSET_NAMES)[number];
 
+/**
+ * THE ASSETS BOOT WAITS FOR. Everything else is island content.
+ *
+ * `Game.init` used to `await assets.preload()` over all 63 GLBs before the name
+ * field worked — 26.3 MB (9.1 MB brotli, since BOOT-01's build step) parked
+ * behind "Loading ship's stores... 12/64" with the menu inert (netcode-33).
+ * Nothing on that screen draws a fern.
+ *
+ * What IS drawn before the island finishes is a hull, her mooring and what the
+ * player carries: barrels, kegs, crates, chests, a bedroll, the dock decking,
+ * a lantern post and the rowboat. Ten files. The other fifty-three are island
+ * and story scatter, and the world build is the first thing that can ask for
+ * one — so they load during the queue and the countdown instead
+ * (`preloadWorld`), where the wait is free.
+ *
+ * THE SAFETY RULE, and it is the whole reason this is a named set rather than a
+ * slice of the array: `preloadBoot` alone does NOT make the world drawable.
+ * `clone()` returns null for anything not yet in, and callers fall back to
+ * procedural geometry — a visibly wrong island, not a crash. So a caller that
+ * builds a world MUST await `preloadWorld()` (or `preload()`, which is both in
+ * order) first. `scripts/test-asset-merge.mjs` pins that: after `preloadBoot()`
+ * the world set is deterministically ABSENT.
+ */
+export const BOOT_ASSET_NAMES = [
+  'barrel', 'keg', 'crate', 'chest_closed', 'chest_open',
+  'bedroll', 'dock_mid', 'dock_end', 'lantern_post', 'rowboat',
+] as const satisfies readonly AssetName[];
+
+const BOOT_ASSET_SET: ReadonlySet<string> = new Set<string>(BOOT_ASSET_NAMES);
+
+/** The 53 the world build needs and the menu does not. */
+export const WORLD_ASSET_NAMES: readonly AssetName[] =
+  ASSET_NAMES.filter((n) => !BOOT_ASSET_SET.has(n));
+
 /** Assets that must be faceted even though their GLB carries smooth normals.
  *  Empty by design: the right place to force facets is the Blender builder
  *  (`use_smooth=False`), which then ships split normals and needs no loader
@@ -89,12 +123,61 @@ export class AssetLibrary {
   private assetNodeNames = new Set<string>();
   private loaded = false;
 
-  /** Loads every GLB in parallel. Failures are logged and tolerated:
-   *  callers get `null` from clone() and should keep their procedural fallback. */
+  private bootLoaded = false;
+  /** In-flight (or settled) world load, so a second caller joins the first
+   *  rather than fetching 53 GLBs again. */
+  private worldLoad: Promise<void> | null = null;
+  private readonly loader = new GLTFLoader();
+  private done = 0;
+
+  /**
+   * Boot first, then the world — the old whole-library behaviour, unchanged for
+   * any caller that just wants everything before it starts. A caller that can
+   * put the island's 53 files behind a countdown calls `preloadBoot()` and then
+   * `preloadWorld()`; see BOOT_ASSET_NAMES for why the second is not optional.
+   */
   async preload(onProgress?: (done: number, total: number) => void): Promise<void> {
     if (this.loaded) return;
-    const loader = new GLTFLoader();
-    let done = 0;
+    await this.preloadBoot(onProgress);
+    await this.preloadWorld(onProgress);
+  }
+
+  /** The ten files a hull, her berth and the player's hands need. Resolves
+   *  WITHOUT having started the world set: nothing races the assertion that the
+   *  island content is still absent. */
+  async preloadBoot(onProgress?: (done: number, total: number) => void): Promise<void> {
+    if (this.bootLoaded) return;
+    await this.loadSet(BOOT_ASSET_NAMES, onProgress);
+    this.bootLoaded = true;
+  }
+
+  /** The other 53, plus the far LODs. Idempotent and joinable: two callers
+   *  during the countdown share one fetch. */
+  preloadWorld(onProgress?: (done: number, total: number) => void): Promise<void> {
+    if (!this.worldLoad) {
+      this.worldLoad = (async () => {
+        await this.loadSet(WORLD_ASSET_NAMES, onProgress, true);
+        this.loaded = true;
+      })();
+    }
+    return this.worldLoad;
+  }
+
+  /** True once every GLB is in and `clone()` can be trusted for any name. */
+  get isFullyLoaded(): boolean {
+    return this.loaded;
+  }
+
+  /** Loads a set of GLBs in parallel. Failures are logged and tolerated:
+   *  callers get `null` from clone() and should keep their procedural fallback.
+   *  `done`/`total` stay a count over the WHOLE library across both calls, so a
+   *  split boot still drives one honest progress bar. */
+  private async loadSet(
+    names: readonly AssetName[],
+    onProgress?: (done: number, total: number) => void,
+    withFarLods = false,
+  ): Promise<void> {
+    const loader = this.loader;
     const loadOne = async (name: AssetName, key: AssetKey) => {
         const gltf = await loader.loadAsync(`/assets/models/${key}.glb`);
         const root = gltf.scene;
@@ -138,28 +221,29 @@ export class AssetLibrary {
         this.scenes.set(key, root);
     };
     await Promise.all([
-      ...ASSET_NAMES.map(async (name) => {
+      ...names.map(async (name) => {
         try {
           await loadOne(name, name);
         } catch (err) {
           console.warn(`[assets] failed to load ${name}.glb — procedural fallback stays`, err);
         } finally {
-          done += 1;
-          onProgress?.(done, ASSET_NAMES.length);
+          this.done += 1;
+          onProgress?.(this.done, ASSET_NAMES.length);
         }
       }),
       // Far siblings ride the same parallel fetch but never the progress bar:
       // they are an optimisation, not content, and their absence costs only
-      // triangles at distance.
-      ...FAR_ASSET_NAMES.map(async (name) => {
+      // triangles at distance. They are all island nature, so they ride the
+      // WORLD set — a boot that fetched them would be paying for distant
+      // triangles before the menu exists.
+      ...(withFarLods ? FAR_ASSET_NAMES.map(async (name) => {
         try {
           await loadOne(name, `${name}_far`);
         } catch (err) {
           console.warn(`[assets] no far LOD for ${name} (${name}_far.glb) — near geometry at every distance`, err);
         }
-      }),
+      }) : []),
     ]);
-    this.loaded = true;
   }
 
   has(name: AssetName): boolean {

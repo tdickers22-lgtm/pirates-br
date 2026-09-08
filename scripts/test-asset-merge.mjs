@@ -82,7 +82,7 @@ globalThis.fetch = async (input, init) => {
   return realFetch(input, init);
 };
 
-const { ASSET_NAMES, FLAT_SHADED_ASSETS, assets } = await import('../src/client/assets/AssetLibrary.ts');
+const { ASSET_NAMES, FLAT_SHADED_ASSETS, BOOT_ASSET_NAMES, WORLD_ASSET_NAMES, AssetLibrary, assets } = await import('../src/client/assets/AssetLibrary.ts');
 
 // Loader failures inside preload() are logged and tolerated by design (callers
 // keep a procedural fallback), so capture them rather than let them scroll past.
@@ -463,6 +463,45 @@ expect('merged geometry is registered as a shared resource (never disposed by ca
     expect('the batch draws with ONE material, not the three it merged',
       !Array.isArray(batches[0].material) && batches[0].material instanceof CollapsedAssetMaterial);
   }
+}
+
+// ── the boot/world split (BOOT-01) ─────────────────────────────────────────
+//
+// `Game.init` awaited all 63 GLBs before the name field worked. The split is
+// only safe if `preloadBoot` genuinely does NOT start the island content: a
+// caller that skipped `preloadWorld` and built a world anyway would get
+// procedural fallbacks for 53 assets — a wrong-looking island, silently. So the
+// absence is asserted, not the presence, and it is deterministic because
+// preloadBoot resolves before anything world-shaped is even requested.
+{
+  const boot = [...BOOT_ASSET_NAMES];
+  const world = [...WORLD_ASSET_NAMES];
+  expect('the boot set and the world set partition the library exactly',
+    boot.length + world.length === ASSET_NAMES.length
+      && boot.every((n) => ASSET_NAMES.includes(n))
+      && world.every((n) => ASSET_NAMES.includes(n))
+      && boot.every((n) => !world.includes(n)),
+    `${boot.length} boot + ${world.length} world vs ${ASSET_NAMES.length}`);
+  expect('the boot set is small enough to be worth splitting for (<= 12 files)',
+    boot.length <= 12, `${boot.length} boot assets: ${boot.join(', ')}`);
+
+  const lib = new AssetLibrary();
+  const progress = [];
+  console.warn = () => {};
+  await lib.preloadBoot((done, total) => progress.push([done, total]));
+  console.warn = realWarn;
+
+  const missingBoot = boot.filter((n) => !lib.has(n));
+  expect('preloadBoot loads every boot asset', missingBoot.length === 0, missingBoot.join(', '));
+  const leaked = world.filter((n) => lib.has(n));
+  expect('preloadBoot loads NO island content (the world set must stay behind the countdown)',
+    leaked.length === 0, `${leaked.length} world asset(s) fetched at boot: ${leaked.slice(0, 6).join(', ')}`);
+  expect('a boot-only library does not claim to be fully loaded',
+    lib.isFullyLoaded === false && assets.isFullyLoaded === true);
+  expect('the progress bar still counts against the WHOLE library, not the boot set',
+    progress.length === boot.length && progress.every(([, total]) => total === ASSET_NAMES.length)
+      && progress[progress.length - 1][0] === boot.length,
+    `${progress.length} ticks, last ${JSON.stringify(progress[progress.length - 1])}`);
 }
 
 console.log(failures === 0 ? '\nAll asset merge assertions passed' : `\n${failures} FAILURES`);
