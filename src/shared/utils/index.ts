@@ -376,6 +376,13 @@ export const STORM_GUST_PULSE_SWING = 0.35;
 /** Pulse at or above which canvas carried past STORM_GUST_BLOWOUT_DEPLOYMENT
  *  starts to tear (PhysicsSystem holds the 2 s dwell). */
 export const STORM_GUST_BLOWOUT_PULSE = 1.25;
+/** Canvas carried above this fraction of full deployment is at risk in a squall. */
+export const STORM_GUST_BLOWOUT_DEPLOYMENT = 0.7;
+/** Seconds of continuous squall at that deployment before the sail lets go. */
+export const STORM_GUST_BLOWOUT_DWELL = 2;
+/** Seconds the blown-out canvas is stuck at STORM_GUST_BLOWOUT_SAIL_HEIGHT. */
+export const STORM_GUST_BLOWOUT_SECONDS = 20;
+export const STORM_GUST_BLOWOUT_SAIL_HEIGHT = 0.3;
 
 /** Signed yaw offset the gust adds to the mean wind at (t, x, z), in radians. */
 export function stormGustYaw(t: number, x: number, z: number): number {
@@ -549,24 +556,48 @@ export function sampleLocalWind(
   x: number,
   z: number,
   storm: { centerX: number; centerZ: number; safeRadius: number } | null | undefined,
-): { direction: number; strength: number; tailwind: number } {
+): {
+  direction: number; strength: number; tailwind: number;
+  meanDirection: number; meanStrength: number; gustPulse: number;
+} {
   const base = sampleWind(t);
-  if (!storm) return { ...base, tailwind: 0 };
+  const calm = () => ({
+    ...base, tailwind: 0,
+    meanDirection: base.direction, meanStrength: base.strength, gustPulse: 1,
+  });
+  if (!storm) return calm();
   const dx = storm.centerX - x;
   const dz = storm.centerZ - z;
   const d = Math.hypot(dx, dz);
   const outside = d - storm.safeRadius;
-  if (outside <= 0 || d < 1e-3) return { ...base, tailwind: 0 };
+  if (outside <= 0 || d < 1e-3) return calm();
   const full = Math.max(1, storm.safeRadius * STORM_TAILWIND.FULL_AT_RADIUS_FRACTION);
   const ramp = clamp(outside / full, 0, 1);
   // Shortest arc toward "blowing at the eye" — a raw lerp of two yaws would
   // swing a hull the long way round whenever the pair straddles ±PI.
   const toShelter = Math.atan2(dx, dz);
   const swing = angleWrap(toShelter - base.direction) * STORM_TAILWIND.DIRECTION_AUTHORITY * ramp;
+  const meanDirection = angleWrap(base.direction + swing);
+  const meanStrength = base.strength * (1 + STORM_TAILWIND.STRENGTH_BOOST * ramp);
+  // THE GALE IS NOT A CONVEYOR BELT (storm-07). The mean tailwind is what fixed
+  // the ring outrunning the boat and it is kept exactly; the GUST is what makes
+  // it weather. Yaw wanders +-35 deg and strength pulses 0.70..1.40 on a 6-10 s
+  // beat, both ramped in with the tailwind so the sheltered sea inside the ring
+  // is the old prevailing breeze to the last decimal. Zero-mean, so a hull
+  // pointed at the eye still gets home (test-storm-fields, test-storm-outrun).
+  const gustYaw = stormGustYaw(t, x, z) * ramp;
+  const pulse = 1 + (stormGustPulse(t, x, z) - STORM_GUST_PULSE_MID) * ramp;
   return {
-    direction: angleWrap(base.direction + swing),
-    strength: base.strength * (1 + STORM_TAILWIND.STRENGTH_BOOST * ramp),
+    direction: angleWrap(meanDirection + gustYaw),
+    strength: meanStrength * pulse,
     tailwind: ramp,
+    /** The gale WITHOUT the gust. Bots trim on this: chasing a 6 s pulse with a
+     *  0.5x trim lag is how you make a crew that never has the yard right. */
+    meanDirection,
+    meanStrength,
+    /** The pulse this hull is standing in, 1 = no gust. PhysicsSystem reads it
+     *  for the blow-out; the HUD reads it for REEF SAILS. */
+    gustPulse: pulse,
   };
 }
 

@@ -158,6 +158,13 @@ export interface Ship {
   chainshottedUntil: number; // sim-time seconds (GameState.serverTime clock)
   /** 0–1 rigging health; chainshot tears canvas and caps speed until repaired at sails */
   sailIntegrity: number;
+  /** STORMUP-01 / storm-07. Server time until which this hull's canvas is BLOWN
+   *  OUT: she carried more than STORM_GUST_BLOWOUT_DEPLOYMENT through a squall
+   *  (gust pulse >= 1.25) for two seconds and the sail let go. Deployment is
+   *  held at STORM_GUST_BLOWOUT_SAIL_HEIGHT until it passes, so reefing before
+   *  a pulse builds is the counterplay - and the reason the HUD shouts REEF
+   *  SAILS. Absent/0 on a hull that has never blown one out. */
+  sailBlownOutUntil?: number;
   /** Seconds accumulated toward next wood plank spent while repairing sails */
   sailRepairWoodTimer: number;
   gold: number;

@@ -31,6 +31,7 @@ import {
   STORM_RESPAWN_GRACE_SECONDS,
   STORM_TAILWIND,
 } from '../src/shared/constants/index.ts';
+import { STORM_GUST_BLOWOUT_SAIL_HEIGHT } from '../src/shared/utils/index.ts';
 import {
   angleWrap,
   dist2D,
@@ -157,7 +158,8 @@ console.log('The wind is a local fact: prevailing inside, a gale out of the stor
   // And with no storm at all (lobby, pre-match) it degrades to the plain breeze.
   const noStorm = sampleLocalWind(t, 900, 900, null);
   expect('with no ring in the world it is still just the breeze',
-    noStorm.direction === base.direction && noStorm.strength === base.strength && noStorm.tailwind === 0);
+    noStorm.direction === base.direction && noStorm.strength === base.strength && noStorm.tailwind === 0
+    && noStorm.gustPulse === 1);
 
   // Outside, the ramp climbs and the gale freshens.
   const full = storm.safeRadius * STORM_TAILWIND.FULL_AT_RADIUS_FRACTION;
@@ -165,15 +167,18 @@ console.log('The wind is a local fact: prevailing inside, a gale out of the stor
   for (const out of [1, 10, full * 0.5, full, full * 3]) {
     const local = sampleLocalWind(t, 0, storm.safeRadius + out, storm);
     expect(`${out.toFixed(0)} m outside: the ramp has climbed and the wind has freshened`,
-      local.tailwind > prevRamp - 1e-9 && local.strength > base.strength,
-      `ramp ${local.tailwind.toFixed(3)} (was ${prevRamp.toFixed(3)}) str ${local.strength.toFixed(3)} vs ${base.strength.toFixed(3)}`);
+      local.tailwind > prevRamp - 1e-9 && local.meanStrength > base.strength,
+      `ramp ${local.tailwind.toFixed(3)} (was ${prevRamp.toFixed(3)}) mean str ${local.meanStrength.toFixed(3)} vs ${base.strength.toFixed(3)}`);
     prevRamp = local.tailwind;
   }
   const saturated = sampleLocalWind(t, 0, storm.safeRadius + full * 3, storm);
+  // Graded on the MEAN, not the instant: since storm-07 the sampled strength
+  // carries the gust pulse (0.70..1.40) on top of the gale, and the gale is the
+  // thing this contract is about.
   expect('the ramp saturates at 1 — a gale, not an ever-growing hurricane',
     saturated.tailwind === 1
-      && Math.abs(saturated.strength - base.strength * (1 + STORM_TAILWIND.STRENGTH_BOOST)) < 1e-9,
-    `ramp ${saturated.tailwind} str ${saturated.strength.toFixed(3)}`);
+      && Math.abs(saturated.meanStrength - base.strength * (1 + STORM_TAILWIND.STRENGTH_BOOST)) < 1e-9,
+    `ramp ${saturated.tailwind} mean str ${saturated.meanStrength.toFixed(3)}`);
 
   // …and it blows TOWARD the eye, from every side of the ring.
   for (const bearing of [0, Math.PI * 0.5, Math.PI, -Math.PI * 0.5, 2.4, -2.4]) {
@@ -182,7 +187,7 @@ console.log('The wind is a local fact: prevailing inside, a gale out of the stor
     const local = sampleLocalWind(t, x, z, { centerX: 0, centerZ: 0, safeRadius: 300 });
     const toEye = Math.atan2(-x, -z);
     const offBase = Math.abs(angleWrap(toEye - base.direction));
-    const offGale = Math.abs(angleWrap(toEye - local.direction));
+    const offGale = Math.abs(angleWrap(toEye - local.meanDirection));
     expect(`from bearing ${(bearing * 57.3).toFixed(0)}° the gale points nearer the eye than the breeze did`,
       offGale <= offBase + 1e-9 && offGale <= (1 - STORM_TAILWIND.DIRECTION_AUTHORITY) * offBase + 1e-6,
       `off-eye ${offGale.toFixed(3)} rad vs breeze ${offBase.toFixed(3)}`);
@@ -242,9 +247,18 @@ console.log('\nA crew caught outside the wall can outrun it home');
   // home whole and her hull comes home leaking. (Mutation proof: delete the
   // `this.hullsInTheWeather.add(ship.id)` line in StormSystem and this goes
   // red — nothing bills the hull either.)
+  // RE-PINNED AGAIN BY STORMUP-01 (storm-04). The tempest can now light her
+  // mainmast: a bolt down the conductor stoves a hole at the step AND sets the
+  // mast alight, and a crew standing in that fire burns (cause 'fire', the same
+  // as a firebomb, and now dousable by the rain). So the pin is no longer
+  // "untouched health" — it is the thing STORM-01 actually established: the
+  // GALE never bills the crew's health bar. A hull that comes home leaking and
+  // scorched is the storm working; a pirate bled by cause 'storm' on a floating
+  // deck is the defect. (Mutation proof: delete `this.hullsInTheWeather.add
+  // (ship.id)` in StormSystem and stormWork goes to 0.)
   expect('the crossing costs planking, not blood — the gale is a chance, not a taxi',
-    player.health === PLAYER.MAX_HEALTH && stormWork > 0,
-    `hp=${player.health.toFixed(1)} holes=${ship.holes.length} bilge=${(ship.bilgeWater ?? 0).toFixed(2)}`);
+    (player.lastEnvDamage?.cause ?? null) !== 'storm' && stormWork > 0,
+    `hp=${player.health.toFixed(1)} cause=${player.lastEnvDamage?.cause ?? 'none'} holes=${ship.holes.length}`);
   match.stop?.();
 }
 
@@ -745,6 +759,75 @@ console.log('\nShelter and the wall are read the same way for the hull and for h
   expect('no phase can close its wall faster than 8 m/s on the hull it is chasing',
     worst.speed <= STORM_MAX_EDGE_SPEED + 1e-6,
     `worst phase ${worst.phase} at ${worst.speed.toFixed(2)} m/s (cap ${STORM_MAX_EDGE_SPEED})`);
+}
+
+// ══ 6. The gale is weather, not a conveyor belt (storm-07) ══════════════════
+console.log('\nCanvas has to be watched: the gust blows a full press of sail out');
+{
+  // A hull hove to well outside the wall with everything set. The gust pulse
+  // (0.70..1.40, 6-10 s beat, shared field) must eventually tear it out.
+  const match = liveMatch('blowout');
+  const { player, ship, client } = join(match);
+  const storm = closeTheRing(match, 300);
+  storm.damagePerSec = 0;                 // grade the canvas, not the planking
+  ship.position.x = 0; ship.position.z = 700; ship.position.y = 0;
+  ship.velocity = { x: 0, y: 0, z: 0 };
+  ship.rotation = Math.PI;
+  ship.anchored = false;
+  ship.sailHeight = 1;
+  player.onShipId = ship.id;
+  player.position = { x: 0, y: 4, z: 700 };
+  let blowOuts = 0;
+  let wasBlown = false;
+  let minHeight = 1;
+  for (let i = 0; i < Math.ceil(180 / DT); i++) {
+    client.lastInput = { ...BLANK_INPUT, seq: i, ts: Date.now(), yaw: Math.PI, sailRaise: true };
+    match.tick();
+    // Hold her outside: this case is about the canvas, not the passage.
+    ship.position.z = 700;
+    const blown = (ship.sailBlownOutUntil ?? 0) > match.t;
+    if (blown && !wasBlown) blowOuts += 1;
+    if (blown) minHeight = Math.min(minHeight, ship.sailHeight);
+    wasBlown = blown;
+  }
+  expect('a crew that never reefs loses her canvas in the weather',
+    blowOuts >= 1, `${blowOuts} blow-outs in 180 s`);
+  expect('and while it is blown out the yard is held at a storm rag',
+    blowOuts === 0 || minHeight <= STORM_GUST_BLOWOUT_SAIL_HEIGHT + 1e-6,
+    `lowest deployment while blown ${minHeight.toFixed(2)} (cap ${STORM_GUST_BLOWOUT_SAIL_HEIGHT})`);
+}
+{
+  // The same 180 s, the same weather, reefed. Reefing is the counterplay, so a
+  // crew that shortens sail must NEVER blow one out.
+  const match = liveMatch('blowout');
+  const { player, ship, client } = join(match);
+  const storm = closeTheRing(match, 300);
+  storm.damagePerSec = 0;
+  ship.position.x = 0; ship.position.z = 700; ship.position.y = 0;
+  ship.velocity = { x: 0, y: 0, z: 0 };
+  ship.rotation = Math.PI;
+  ship.anchored = false;
+  player.onShipId = ship.id;
+  player.position = { x: 0, y: 4, z: 700 };
+  let blowOuts = 0;
+  for (let i = 0; i < Math.ceil(180 / DT); i++) {
+    ship.sailHeight = Math.min(ship.sailHeight, 0.5);   // reefed, every tick
+    client.lastInput = { ...BLANK_INPUT, seq: i, ts: Date.now(), yaw: Math.PI };
+    match.tick();
+    ship.position.z = 700;
+    if ((ship.sailBlownOutUntil ?? 0) > match.t) blowOuts += 1;
+  }
+  expect('a reefing crew never blows one out — reefing IS the counterplay',
+    blowOuts === 0, `${blowOuts} ticks blown out while reefed at 0.5`);
+}
+{
+  // Inside the ring nothing changed: the gust ramps in with the tailwind, so
+  // sheltered water is the old prevailing breeze to the last decimal.
+  const inside = sampleLocalWind(123.4, 0, 100, { centerX: 0, centerZ: 0, safeRadius: 300 });
+  const breeze = sampleWind(123.4);
+  expect('inside the wall there is no gust at all',
+    inside.direction === breeze.direction && inside.strength === breeze.strength
+    && inside.gustPulse === 1);
 }
 
 console.log(failures === 0

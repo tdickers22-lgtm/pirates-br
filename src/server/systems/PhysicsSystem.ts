@@ -26,6 +26,11 @@ import {
   WALK_FOOTPRINT_MARGIN,
   SHORE_APRON_DIST_RATIO,
   sampleLocalWind,
+  STORM_GUST_BLOWOUT_DEPLOYMENT,
+  STORM_GUST_BLOWOUT_DWELL,
+  STORM_GUST_BLOWOUT_PULSE,
+  STORM_GUST_BLOWOUT_SAIL_HEIGHT,
+  STORM_GUST_BLOWOUT_SECONDS,
   getCrowNestStandingY,
   getMainMastLocalZ,
   getShipCompanionwayConfig,
@@ -484,6 +489,10 @@ type PhysicsCombatEvent =
 
 export class PhysicsSystem {
   private combatEvents: PhysicsCombatEvent[] = [];
+  /** STORMUP-01 / storm-07. Seconds this hull has been carrying more canvas
+   *  than STORM_GUST_BLOWOUT_DEPLOYMENT inside a squall. Server-side only; at
+   *  most one entry per floating hull (<=12). */
+  private gustDwell = new Map<string, number>();
   /** Rotation applied to each ship this update — deck passengers must be carried by the actual delta. */
   private shipRotationDeltas = new Map<string, number>();
   /** Per-ship spring-damper velocities for heave/pitch/roll wave riding. */
@@ -754,6 +763,15 @@ export class PhysicsSystem {
       // for the eye is genuinely faster than clawing away from it. Inside the
       // ring the ramp is exactly zero and this is the old prevailing breeze to
       // the last decimal — nobody sailing in shelter feels a shove.
+      // BLOWN-OUT CANVAS (storm-07). While the timer runs the yard is held at a
+      // storm rag whatever the helm asks for, so the counterplay to a squall is
+      // to reef BEFORE it builds, not to argue with it after.
+      const blownOutUntil = ship.sailBlownOutUntil ?? 0;
+      if (blownOutUntil > t) {
+        ship.sailHeight = Math.min(ship.sailHeight, STORM_GUST_BLOWOUT_SAIL_HEIGHT);
+      } else if (blownOutUntil > 0) {
+        ship.sailBlownOutUntil = 0;
+      }
       const wind = sampleLocalWind(t, ship.position.x, ship.position.z, storm);
       const signedRelative = angleWrap(wind.direction - ship.rotation);
       const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
@@ -767,6 +785,25 @@ export class PhysicsSystem {
         (chainshotted ? 0.42 : 1) * ship.sailHeight * clamp(ship.sailIntegrity, 0, 1);
       // Inside the no-go cone with canvas set the sails visibly luff (client flutter).
       ship.luffing = offWind <= SHIP.SAIL_NO_GO_ANGLE && sailDeployment > 0.08 && !ship.anchored;
+      // Full canvas held through a squall tears it out of the bolt-ropes. The
+      // dwell is what makes this a decision and not a dice roll: two seconds is
+      // long enough to see the pulse on the HUD and shorten sail.
+      if (
+        !ship.anchored && blownOutUntil <= t
+        && wind.tailwind > 0 && wind.gustPulse >= STORM_GUST_BLOWOUT_PULSE
+        && sailDeployment > STORM_GUST_BLOWOUT_DEPLOYMENT
+      ) {
+        const dwell = (this.gustDwell.get(ship.id) ?? 0) + dt;
+        if (dwell >= STORM_GUST_BLOWOUT_DWELL) {
+          this.gustDwell.set(ship.id, 0);
+          ship.sailBlownOutUntil = t + STORM_GUST_BLOWOUT_SECONDS;
+          ship.sailHeight = Math.min(ship.sailHeight, STORM_GUST_BLOWOUT_SAIL_HEIGHT);
+        } else {
+          this.gustDwell.set(ship.id, dwell);
+        }
+      } else if (this.gustDwell.get(ship.id)) {
+        this.gustDwell.set(ship.id, 0);
+      }
       const speedMult = ship.upgrades.some(u => u.type === 'swift_sails') ? SHIP_UPGRADES.SWIFT_SPEED_MULT : 1;
       // Weight of water: a swamped hull is dragged down to ~0.62× top speed.
       const waterSpeedFactor = 1 - clamp(ship.waterLevel ?? 0, 0, 1) * FLOODING.SPEED_PENALTY;
@@ -907,7 +944,11 @@ export class PhysicsSystem {
       // Wave attitude — pitch/roll chase the sampled Gerstner slope through a
       // spring-damper so the deck genuinely rides the ocean. Storm winds heel
       // the hull noticeably harder.
-      const windHeelCap = 0.05 * (1 + seaState * 0.8);
+      // STORM HEEL (storm-07). Was 0.05 * (1 + seaState * 0.8) — 2.9 deg calm,
+      // 5.2 deg in a full gale, i.e. the tempest could not lean the deck far
+      // enough for a crew to notice it. 0.14 rad (8 deg) at seaState 1; calm
+      // water is untouched at 0.05.
+      const windHeelCap = 0.05 * (1 + seaState * 1.8);
       const windHeel = clamp(
         -Math.sin(signedRelative) * sailDeployment * wind.strength * windHeelCap,
         -windHeelCap, windHeelCap,
