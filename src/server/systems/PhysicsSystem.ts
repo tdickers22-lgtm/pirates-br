@@ -41,6 +41,7 @@ import {
   getSwimHullVerticalBand,
   getSwimHullVerticalT,
   getTavernBoundsRadius,
+  getTavernRoofY,
   getTavernWallBand,
   berthFrameSideOf,
   intersectRayTavern,
@@ -195,6 +196,24 @@ const LOCO = {
    *  puddles still count as hard ground. */
   FALL_SAFE_WATER_DEPTH: 0.3,
 } as const;
+
+/** BALLISTIC TERRAIN SWEEP (physics-33/10/15). A cannon self-launch leaves at
+ *  62 m/s, so one 16 ms tick moves a body a whole metre — the old single point
+ *  test at the ARRIVAL point read the surface inside the cliff it had already
+ *  passed into. 0.35 m per sample resolves the sharpest coast wobble
+ *  (the terrain's finest real feature is ~1 m) at a cost of at most
+ *  BALLISTIC_SWEEP_MAX_STEPS surface lookups per flying body per tick. Only
+ *  bodies in the `cannonBallistic` branch pay it (a handful per match, never
+ *  the walkers), so the server tick cost is unchanged in the common case. */
+const BALLISTIC_SWEEP_STEP = 0.35;
+/** Hard ceiling on samples per tick so a geyser fling or a warp cannot turn one
+ *  body into thousands of heightfield evaluations. 12 samples covers 4.2 m,
+ *  more than any legal single-tick displacement. */
+const BALLISTIC_SWEEP_MAX_STEPS = 12;
+/** Rise over run above which the ground ahead is a cliff FACE, not a ramp the
+ *  arc can land on. Matches the walker's LOCO.SLOPE_MAX (~49°) so a face a
+ *  pirate cannot climb is also a face she cannot be teleported up. */
+const BALLISTIC_WALL_SLOPE = 1.15;
 
 /**
  * Arcade points-of-sail polar over the angle off the wind
@@ -1014,6 +1033,12 @@ export class PhysicsSystem {
         // velocity per second and made every launch feel near-vertical (cannonballs in this game don't
         // suffer this drag, so the player's arc looked broken next to the round they were riding).
         player.velocity.y += PHYSICS.GRAVITY * dt;
+        // The segment this tick covers. At the cannon's 62 m/s that is a whole
+        // metre; the terrain resolve below sweeps it instead of testing the
+        // arrival point, which is how a body used to arrive INSIDE a cliff.
+        const ballPrevX = player.position.x;
+        const ballPrevY = player.position.y;
+        const ballPrevZ = player.position.z;
         player.position.x += player.velocity.x * dt;
         player.position.y += player.velocity.y * dt;
         player.position.z += player.velocity.z * dt;
@@ -1054,10 +1079,50 @@ export class PhysicsSystem {
           continue;
         }
 
-        const onIsland = this.findPlayerIsland(player, islands);
+        // ── Ballistic terrain: a SWEPT SEGMENT, cave-aware, with a wall rule ──
+        // physics-33/10/15. The old test was one point against the NATURAL
+        // surface: `if (y <= getIslandSurfaceY(x,z)) y = getIslandSurfaceY(x,z)`.
+        // Three things a player saw. (1) A body that flew into a cliff FACE read
+        // the surface at the point it had already penetrated to — the cliff TOP —
+        // and was teleported there in one tick (measured: >5 m on 111 of 178
+        // headings, worst 17.75 m). (2) A body inside a CAVE read the mountain
+        // 40 m above the roof as its ground and was fired through the roof onto
+        // the hilltop (98/98 placements). (3) There was no roof on the tavern.
+        // The sweep walks the tick's segment, takes the cave-aware floor, stops
+        // a body DEAD at the last free point when the ground ahead rises faster
+        // than a climbable face (it then slides down instead of summiting), and
+        // keeps a body under a cave ceiling it entered under.
+        const hit = this.sweepBallisticTerrain(player, islands, ballPrevX, ballPrevY, ballPrevZ);
+        if (hit && hit.kind === 'ceiling') {
+          // Head against the slates: stop the climb, keep the arc.
+          player.position.x = hit.x;
+          player.position.y = hit.y;
+          player.position.z = hit.z;
+          if (player.velocity.y > 0) player.velocity.y = 0;
+          continue;
+        }
+        if (hit && hit.kind === 'wall') {
+          player.position.x = hit.x;
+          player.position.y = hit.y;
+          player.position.z = hit.z;
+          // Cancel the into-face component only, so a graze runs along the cliff
+          // instead of bricking; the rest is bled off by the impact.
+          const into = player.velocity.x * hit.nx + player.velocity.z * hit.nz;
+          if (into > 0) {
+            player.velocity.x -= into * hit.nx;
+            player.velocity.z -= into * hit.nz;
+          }
+          player.velocity.x *= 0.5;
+          player.velocity.z *= 0.5;
+          continue;
+        }
         const onDock = this.findPlayerDock(player, islands);
+        if (hit) {
+          player.position.x = hit.x;
+          player.position.z = hit.z;
+        }
         const groundY = Math.max(
-          onIsland ? getIslandSurfaceY(onIsland, player.position.x, player.position.z) : -Infinity,
+          hit ? hit.y : -Infinity,
           onDock ? onDock.position.y + 0.14 : -Infinity,
         );
         if (groundY > -Infinity && player.position.y <= groundY) {
@@ -1099,7 +1164,10 @@ export class PhysicsSystem {
         const waveY = gerstnerHeight(player.position.x, player.position.z, t, WAVE_PARAMS,
           stormSeaState(storm, player.position.x, player.position.z));
         const waterSurface = waveY + 0.32;
-        if (player.position.y <= waterSurface) {
+        // Caves are DRY by fiat (the same rule the walk branch keeps): comparing
+        // a carved interior against the open-sea wave height would drop a body
+        // flying down a tunnel into the swim state inside solid rock.
+        if (!hit?.inCave && player.position.y <= waterSurface) {
           // Don't snap to the surface — let the player keep their downward
           // momentum so they actually plunge underwater and have to swim back up.
           // Water absorbs ~35% of impact velocity in each axis on entry.
@@ -2356,6 +2424,126 @@ export class PhysicsSystem {
    * step on water — they walk down the sand and the swim branch takes them.
    * Client prediction (Game.ts) uses the same margin or the two disagree.
    */
+  /**
+   * BALLISTIC TERRAIN SWEEP (physics-33, physics-10, physics-15).
+   *
+   * Walks the segment a flying body covered this tick and reports the FIRST
+   * thing it met, cave-aware:
+   *   'ground'  — the floor rose gently under the arc: land here.
+   *   'wall'    — the floor ahead rose faster than BALLISTIC_WALL_SLOPE over the
+   *               step: a cliff FACE. The body is put back at the last free
+   *               sample with the into-face velocity cancelled, so it slides
+   *               down the face instead of being teleported to the summit.
+   *   'ceiling' — the body is under a cave roof and its head reached it.
+   *
+   * `underRoof` is sticky along the sweep: once a body is inside a cave box it
+   * keeps the CARVED floor as its ground even while its head is up against the
+   * slates, which is exactly the case the point test got wrong (it read the
+   * mountain above the tunnel and fired the body through the roof).
+   */
+  private sweepBallisticTerrain(
+    player: Player,
+    islands: Island[],
+    px: number,
+    py: number,
+    pz: number,
+  ): { kind: 'ground' | 'wall' | 'ceiling'; x: number; y: number; z: number; nx: number; nz: number; inCave: boolean } | null {
+    const dx = player.position.x - px;
+    const dy = player.position.y - py;
+    const dz = player.position.z - pz;
+    const run = Math.hypot(dx, dy, dz);
+    const steps = Math.max(1, Math.min(BALLISTIC_SWEEP_MAX_STEPS, Math.ceil(run / BALLISTIC_SWEEP_STEP)));
+    const dirRun = Math.hypot(dx, dz);
+    const nx = dirRun > 1e-6 ? dx / dirRun : 0;
+    const nz = dirRun > 1e-6 ? dz / dirRun : 0;
+    let lastX = px;
+    let lastY = py;
+    let lastZ = pz;
+    const startIsland = this.islandAtPoint(px, pz, islands);
+    const startStand = startIsland ? this.ballisticStandAt(startIsland, px, pz, py, false) : null;
+    let underRoof = startStand ? startStand.inCave : false;
+    // If the body BEGINS the tick below its own floor it is already embedded (a
+    // warp or a spawn inside rock — the sweep itself never leaves one there).
+    // The wall rule must stand down for it: "put it back at the last free
+    // sample" has no free sample to offer, so the body would be pinned in mid
+    // air forever, which is a worse bug than the pop this rule exists to stop.
+    const startEmbedded = startStand !== null && py <= startStand.floorY;
+    for (let i = 1; i <= steps; i++) {
+      const f = i / steps;
+      const sx = px + dx * f;
+      const sy = py + dy * f;
+      const sz = pz + dz * f;
+      const island = this.islandAtPoint(sx, sz, islands);
+      if (!island) {
+        underRoof = false;
+        lastX = sx; lastY = sy; lastZ = sz;
+        continue;
+      }
+      const stand = this.ballisticStandAt(island, sx, sz, sy, underRoof);
+      if (stand.inCave && stand.ceilingY !== null && sy > stand.ceilingY - LOCO.CAVE_HEAD_CLEARANCE) {
+        return {
+          kind: 'ceiling', x: sx, z: sz,
+          y: stand.ceilingY - LOCO.CAVE_HEAD_CLEARANCE, nx, nz, inCave: true,
+        };
+      }
+      // The tavern roof is a surface, not a hologram — but only from above, so a
+      // body launched out of the bar's doorway does not stick to its own ceiling.
+      let floorY = stand.floorY;
+      if (island.tavern && !stand.inCave) {
+        const roofY = getTavernRoofY(island.tavern, sx, sz);
+        if (roofY !== null && lastY >= roofY - 0.05 && roofY > floorY) floorY = roofY;
+      }
+      if (sy <= floorY) {
+        const advance = Math.hypot(sx - lastX, sz - lastZ);
+        const rise = floorY - lastY;
+        const isWall = !startEmbedded && advance > 1e-3 && rise > 0.6
+          && rise / advance > BALLISTIC_WALL_SLOPE;
+        return isWall
+          ? { kind: 'wall', x: lastX, y: lastY, z: lastZ, nx, nz, inCave: underRoof }
+          : { kind: 'ground', x: sx, y: floorY, z: sz, nx, nz, inCave: stand.inCave };
+      }
+      underRoof = stand.inCave;
+      lastX = sx; lastY = sy; lastZ = sz;
+    }
+    return null;
+  }
+
+  /** Cave-aware footing for a FLYING body. Differs from islandStandY only in
+   *  the stickiness: a body already under a roof keeps the carved floor even
+   *  when its head is inside the head-clearance band. */
+  private ballisticStandAt(
+    island: Island,
+    x: number,
+    z: number,
+    y: number,
+    underRoof: boolean,
+  ): { floorY: number; ceilingY: number | null; inCave: boolean } {
+    const natural = getIslandSurfaceY(island, x, z);
+    const ceilingY = getCaveCeilingY(island, x, z);
+    if (ceilingY === null) return { floorY: natural, ceilingY: null, inCave: false };
+    const caveFloor = getCaveFloorY(island, x, z);
+    const insideBox = caveFloor !== null && caveFloor < natural;
+    // `<=` with a slack, not `<`: the ceiling branch parks a body at EXACTLY
+    // ceilingY - CAVE_HEAD_CLEARANCE, so a strict test declared that same body
+    // out of the cave on the very next tick. It then read the mountain over the
+    // tunnel as its floor, called itself embedded, stood the wall rule down, and
+    // popped onto the hilltop the moment the roof ran out (Widow's Watch: 2.11 m
+    // in one tick) — the exact bug this sweep exists to kill, one tick later.
+    const inCave = insideBox
+      && (underRoof || y <= ceilingY - LOCO.CAVE_HEAD_CLEARANCE + 1e-3);
+    return { floorY: inCave ? (caveFloor as number) : natural, ceilingY, inCave };
+  }
+
+  /** Footprint lookup at an arbitrary XZ (the sweep samples points the player
+   *  is not standing on, so findPlayerIsland's player-position form cannot serve). */
+  private islandAtPoint(x: number, z: number, islands: Island[]): Island | null {
+    for (const island of islands) {
+      const apron = WALK_FOOTPRINT_MARGIN * Math.max(island.radius, 1);
+      if (isPointInsideIslandFootprint(island, x, z, apron)) return island;
+    }
+    return null;
+  }
+
   private findPlayerIsland(player: Player, islands: Island[]): Island | null {
     for (const island of islands) {
       const apron = WALK_FOOTPRINT_MARGIN * Math.max(island.radius, 1);
