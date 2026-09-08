@@ -160,6 +160,49 @@ console.log('\n3. Perpendicular strafe during the windup dodges the lunge');
     shark.attackState === 'cruise' || shark.attackState === 'windup', `state=${shark.attackState}`);
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\n4. The swimmer boards: the shark loses interest and LEAVES');
+
+{
+  setupEncounter();
+  // She is out of the water and on a deck. Nothing is left to hunt.
+  swimmer.state = 'alive';
+  swimmer.swimTimer = 0;
+  let goneAt = null;
+  for (let i = 0; i < Math.ceil(60 / DT); i++) {
+    match.updateSharks(DT);
+    if (state.sharks.length === 0) { goneAt = i * DT; break; }
+  }
+  expect('sharks.length === 0 within 60 s of the swimmer boarding',
+    state.sharks.length === 0, `${state.sharks.length} shark(s) still parked after 60 s`);
+  expect('and it took the idle clock to do it, not one tick',
+    goneAt !== null && goneAt > 5, `gone at ${goneAt === null ? 'never' : goneAt.toFixed(1)} s`);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+console.log('\n5. Two sharks on one swimmer stay two sharks');
+
+{
+  setupEncounter();
+  // Both released from almost the same point: the old chase drove them onto
+  // identical coordinates (one fin, two bites on the same tick).
+  const a = state.sharks[0];
+  a.id = 'shark-a';
+  const b = { ...a, id: 'shark-b', position: { x: a.position.x + 0.4, y: a.position.y, z: a.position.z + 0.2 }, velocity: { x: 0, y: 0, z: 0 } };
+  state.sharks.push(b);
+  let closest = Infinity;
+  for (let i = 0; i < Math.ceil(5 / DT); i++) {
+    match.updateSharks(DT);
+    if (state.sharks.length < 2) break;
+    closest = Math.min(closest, Math.hypot(
+      state.sharks[0].position.x - state.sharks[1].position.x,
+      state.sharks[0].position.z - state.sharks[1].position.z,
+    ));
+  }
+  expect('both sharks are still in the water', state.sharks.length === 2, `${state.sharks.length}`);
+  expect('min pairwise distance over 5 s > 2.5 m', closest > 2.5, `closest=${closest.toFixed(3)} m`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} shark-lunge assertion(s) failed.`);
   process.exit(1);
