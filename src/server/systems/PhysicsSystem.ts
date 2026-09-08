@@ -3,7 +3,7 @@ import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYS
 import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRiggingMasts } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
-import { toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
+import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
 import { drawnIslandSurfaceY } from '../../shared/terrainGrid.js';
 import {
   getBridgeDeckY,
@@ -1116,14 +1116,14 @@ export class PhysicsSystem {
           player.velocity.z *= 0.5;
           continue;
         }
-        const onDock = this.findPlayerDock(player, islands);
+        const onDock = this.findDockUnderfoot(player, islands);
         if (hit) {
           player.position.x = hit.x;
           player.position.z = hit.z;
         }
         const groundY = Math.max(
           hit ? hit.y : -Infinity,
-          onDock ? onDock.position.y + 0.14 : -Infinity,
+          onDock ? onDock.position.y + DOCK_DECK_RISE : -Infinity,
         );
         if (groundY > -Infinity && player.position.y <= groundY) {
           // A geyser arc (flagged by the live launch cooldown) lands as a real
@@ -1357,7 +1357,7 @@ export class PhysicsSystem {
         this.resolveCaveWallBlock(player, onIsland);
         this.resolveSlopeBlock(player, onIsland);
 
-        const onDock = this.findPlayerDock(player, islands);
+        const onDock = this.findDockUnderfoot(player, islands);
         // Cave-aware floor: on the hillside ABOVE a cave the player rests on the
         // natural surface (getIslandSurfaceY, cave carve opt-out); once they drop
         // under the ceiling they stand on the carved cave floor instead.
@@ -1369,7 +1369,7 @@ export class PhysicsSystem {
         // Hysteresis source for next tick's cave-wall pushout (see resolveCaveWallBlock).
         if (stand.inCave) this.playerInCave.add(player.id);
         else this.playerInCave.delete(player.id);
-        const dockFloor = onDock ? onDock.position.y + 0.14 : -Infinity;
+        const dockFloor = onDock ? onDock.position.y + DOCK_DECK_RISE : -Infinity;
         // Rope-bridge deck: a real standing surface, but only when the player
         // is at deck level (within a step) — walking through the saddle UNDER
         // the bridge must not teleport them up onto it.
@@ -1526,14 +1526,15 @@ export class PhysicsSystem {
           // If we ever end up spatially inside dock geometry, snap back to solid ground.
           // Do not rescue against the wider island footprint here: just past a cliff
           // edge that reads as an invisible platform over open water.
-          let rescueY = -Infinity;
-          for (const island of islands) {
-            if (!island.dock) continue;
-            const local = this.toDockLocal(player.position, island.dock);
-            if (Math.abs(local.x) <= island.dock.width * 0.5 + 0.75 && Math.abs(local.z) <= island.dock.length * 0.5 + 0.75) {
-              rescueY = Math.max(rescueY, island.dock.position.y + 0.14);
-            }
-          }
+          // physics-11: this rescue carried a 0.75 m pad of its OWN, wider than
+          // the footing pad, so narrowing the floor alone just moved the
+          // invisible platform here — and made it worse, because a body beside
+          // the pier fell to rescueY - 0.75, got yanked back to the deck, fell
+          // again, and bobbed up and down beside the planking for as long as she
+          // stood there. It is an ANTI-EMBED, not a ledge: only a body under the
+          // planking itself is inside dock geometry.
+          const embedded = this.findDockUnderfoot(player, islands);
+          const rescueY = embedded ? embedded.position.y + DOCK_DECK_RISE : -Infinity;
           if (rescueY > -Infinity && player.position.y < rescueY - 0.75) {
             player.position.y = rescueY;
             player.velocity.y = 0;
@@ -2775,6 +2776,30 @@ export class PhysicsSystem {
     }
   }
 
+  /**
+   * DOCK FOOTING (physics-11) — the planking, and not a metre of air round it.
+   *
+   * `findPlayerDock` carries a 0.45 m pad, which is right for the PROXIMITY
+   * questions it also answers ("is this pirate ashore rather than adrift?").
+   * As a FLOOR it was wrong: the drawn pier is exactly width x length (the GLB
+   * modules run 3 m wide along local Z, and getShipGangwayPlan attaches its
+   * plank at exactly width*0.5), so a body whose feet were up to 0.45 m past
+   * the last plank still stood at deck height. All the way round the run a
+   * pirate could walk off the edge and keep standing, on open water, with
+   * daylight under her boots.
+   */
+  private findDockUnderfoot(player: Player, islands: Island[]) {
+    for (const island of islands) {
+      if (!island.dock) continue;
+      const local = this.toDockLocal(player.position, island.dock);
+      if (Math.abs(local.x) <= island.dock.width * 0.5 && Math.abs(local.z) <= island.dock.length * 0.5) {
+        return island.dock;
+      }
+    }
+    return null;
+  }
+
+  /** Broad-phase "near the pier" (grace / ashore checks), pad included. */
   private findPlayerDock(player: Player, islands: Island[]) {
     for (const island of islands) {
       if (!island.dock) continue;

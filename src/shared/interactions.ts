@@ -553,7 +553,11 @@ const GANGWAY_MAX_GAP = 3.0;
 const GANGWAY_HALF_WIDTH = 0.55;
 /** Walkable top of a dock deck above the dock's own origin (matches the
  *  server's dock floor: dock.position.y + 0.14). */
-const DOCK_DECK_RISE = 0.14;
+/** Planking thickness above the pier module's own base plane. The gangway plan
+ *  and the server's dock FOOTING both stand on it, so it is exported: the two
+ *  had the same literal typed out twice and a drift would put the plank end and
+ *  the walkable deck at different heights. */
+export const DOCK_DECK_RISE = 0.14;
 /** How far the plank's outboard end rests ON the dock, past the dock edge. */
 const GANGWAY_DOCK_BITE = 0.6;
 

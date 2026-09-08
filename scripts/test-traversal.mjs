@@ -223,6 +223,68 @@ console.log('Peak routes and rendered plank parity:');
     walker.state !== 'swimming' && Math.abs(walker.position.y - deck) < 0.1);
 }
 
+// ── The pier's edge is the last plank (physics-11, PHYSREM-01) ───────────────
+// The server's dock footing carried a 0.45 m pad, so a pirate whose feet were
+// past the drawn planking still stood at deck height — she walked off the end
+// of the pier and kept walking, on open water. The drawn deck is exactly
+// width x length (the GLB modules are 3 m wide and getShipGangwayPlan attaches
+// its plank at exactly width*0.5), so anything beyond that half-extent must be
+// a fall, and everything inside it must still hold her up.
+{
+  const docked = new MapGenerator(20260801).generateIslands().filter((i) => i.dock);
+  expect('The fixed archipelago has piers to walk off', docked.length >= 3,
+    `docks=${docked.length}`);
+  let heldOnAir = 0;
+  let fellThroughPlanking = 0;
+  let cases = 0;
+  const worst = [];
+  for (const island of docked) {
+    const dock = island.dock;
+    const cos = Math.cos(dock.rotation);
+    const sin = Math.sin(dock.rotation);
+    const toWorld = (lx, lz) => ({
+      x: dock.position.x + lx * cos + lz * sin,
+      z: dock.position.z - lx * sin + lz * cos,
+    });
+    const deckY = dock.position.y + 0.14;
+    // Sample along the pier's long axis, on the seaward half only: the inboard
+    // end runs onto the shore, where the island surface legitimately catches her.
+    for (let f = -0.35; f <= 0.45; f += 0.1) {
+      const lz = f * dock.length;
+      // 0.30 m INSIDE the edge must hold; 0.30 m OUTSIDE it must not.
+      for (const [lx, mustHold] of [
+        [dock.width * 0.5 - 0.3, true],
+        [-(dock.width * 0.5 - 0.3), true],
+        [dock.width * 0.5 + 0.3, false],
+        [-(dock.width * 0.5 + 0.3), false],
+      ]) {
+        const w = toWorld(lx, lz);
+        // Only grade spots that are genuinely over WATER, so the island's own
+        // surface under the inboard end never masks the result either way.
+        if (getIslandSurfaceY(island, w.x, w.z) > deckY - 1.5) continue;
+        cases += 1;
+        const p = makePlayer({ x: w.x, y: deckY + 0.05, z: w.z });
+        const physics = new PhysicsSystem();
+        for (let n = 0; n < 30; n++) step(physics, p, [island], null);
+        const held = Math.abs(p.position.y - deckY) < 0.35 && p.state !== 'swimming';
+        if (mustHold && !held) {
+          fellThroughPlanking += 1;
+          if (worst.length < 3) worst.push(`${island.name ?? island.id} lx=${lx.toFixed(2)} fell to y=${p.position.y.toFixed(2)}`);
+        }
+        if (!mustHold && held) {
+          heldOnAir += 1;
+          if (worst.length < 3) worst.push(`${island.name ?? island.id} lx=${lx.toFixed(2)} stood on air at y=${p.position.y.toFixed(2)}`);
+        }
+      }
+    }
+  }
+  expect('Graded a real population of pier-edge stands', cases >= 24, `cases=${cases}`);
+  expect('Nobody stands on the water past the last plank', heldOnAir === 0,
+    `stood on air in ${heldOnAir}/${cases} cases; ${worst.join('; ')}`);
+  expect('The planking itself still holds a pirate up', fellThroughPlanking === 0,
+    `fell through in ${fellThroughPlanking}/${cases} cases; ${worst.join('; ')}`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} traversal assertion(s) failed.`);
   process.exit(1);
