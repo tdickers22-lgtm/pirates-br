@@ -57,6 +57,7 @@ export const LOGIC = [
   quick(tsx('test-occlusion.mjs')),
   quick(tsx('test-game-balance.mjs')),
   quick(tsx('test-terrain-detail.mjs')),
+  tsx('test-perf-scenes.mjs'),
   quick(tsx('test-foliage-geometry.mjs')),
   quick(tsx('test-ocean-dynamics.mjs')),
   // PLAID-01 (wave 3.4). The far-ocean lattice, graded as a 2-D power spectrum

@@ -766,7 +766,10 @@ export function buildCaves(ctx: IslandBuildCtx) {
       // them with the rest of the interior) give the eye something to read depth
       // against and hide the wall/floor seam.
       {
-        const rubbleAsset = assets.mergedGeometry('boulder_a');
+        // These are 28-60 cm stones, not the several-metre portal boulders.
+        // The existing reduced mesh keeps their shape; full boulders spent
+        // 121k triangles on floor rubble alone at the first cave mouth.
+        const rubbleAsset = assets.mergedFarGeometry('boulder_a') ?? assets.mergedGeometry('boulder_a');
         if (rubbleAsset) {
           const rubbleXf: THREE.Matrix4[] = [];
           const rubbleCount = lowDetail ? 3 : 9;

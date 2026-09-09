@@ -139,7 +139,7 @@ async function readWorld(page) {
         .filter((c) => c.hasMouth !== false)
         .map((c) => ({
           x: c.position.x, y: c.position.y, z: c.position.z,
-          rotation: c.rotation, length: c.length, floorY: c.floorY,
+          rotation: c.rotation, length: c.length, floorY: c.floorY, floorYEnd: c.floorYEnd,
         })),
     }));
     // The LOCAL player's ship: with the pinned match seed it spawns at the same
@@ -201,7 +201,10 @@ export function planScenes(world) {
   plan['cave-interior'] = cave
     ? {
         x: cave.x - Math.sin(cave.rotation) * (cave.length * 0.35),
-        y: (cave.floorY ?? cave.y) + 1.6,
+        // Mouths slope down: the old mouth-height camera was ABOVE the roof
+        // at this point (Skull Cove y=10.71, local ceiling=9.07).
+        y: (cave.floorY ?? cave.y)
+          + ((cave.floorYEnd ?? cave.floorY ?? cave.y) - (cave.floorY ?? cave.y)) * 0.35 + 1.55,
         z: cave.z - Math.cos(cave.rotation) * (cave.length * 0.35),
         yaw: cave.rotation + Math.PI,
         pitch: -0.02,

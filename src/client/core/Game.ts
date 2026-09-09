@@ -3644,7 +3644,7 @@ export class Game {
    */
   private static readonly CHARACTER_REFERENCE_HEIGHT_PX = 1080;
   /** Under this many pixels tall, a pirate is noise on the horizon. */
-  private static readonly CHARACTER_MIN_PIXELS = 2.5;
+  private static readonly CHARACTER_MIN_PIXELS = { low: 6, balanced: 4, high: 2.5 };
   private static readonly CHARACTER_HEIGHT_M = 1.9;
 
   /** Projected height in reference pixels of a person `dist` metres away. */
@@ -3658,7 +3658,7 @@ export class Game {
   /** True when a figure at this distance is too small on screen to be worth its
    *  forty draw calls. */
   private characterTooSmallToDraw(dist: number): boolean {
-    return this.characterPixels(dist) < Game.CHARACTER_MIN_PIXELS;
+    return this.characterPixels(dist) < Game.CHARACTER_MIN_PIXELS[this.renderer.getQuality()];
   }
 
   /**
@@ -4846,7 +4846,7 @@ export class Game {
       // still hidden — the camera is inside his head — and a figure under two
       // and a half pixels tall (~545 m at the walking field of view) is still
       // dropped, forty draw calls the view cannot resolve.
-      mesh.visible = playerMeshVisible({
+      showWhenAffordable(mesh, playerMeshVisible({
         isLocal,
         isDead,
         skeletonDeathVisible,
@@ -4857,7 +4857,8 @@ export class Game {
           this.renderer.camera.position.x, this.renderer.camera.position.z,
           targetPos.x, targetPos.z,
         )),
-      });
+      }));
+      mesh.matrixWorldAutoUpdate = mesh.visible;
       if (skeletonDeathVisible) {
         this.applyCorpseFade(mesh, skeletonDeathTime, SKELETON_CORPSE_LIFETIME - 1.6, SKELETON_CORPSE_LIFETIME);
       } else if (pirateCorpseVisible) {
@@ -4908,6 +4909,10 @@ export class Game {
       const nextLean = downedLean + (downedTarget - downedLean) * Math.min(1, dt * 4);
       mesh.userData.downedLean = nextLean;
       if (nextLean > 0.002) mesh.position.y -= 0.14 * nextLean;
+
+      // Keep replicated transforms and death timers current while culled, but
+      // don't solve feet or pose dozens of body parts the frame cannot see.
+      if (!mesh.visible) continue;
 
       const healthBar = mesh.userData.healthBar as {
         root: THREE.Group;

@@ -455,7 +455,12 @@ export function updateInstanceLod(
       const sizeSpread = Math.min(1.05, Math.max(0.78, 0.70 + batch.height / 14));
       const threshold = farSwap * sizeSpread * (0.82 + batch.stagger * 0.36);
       const d = apparent;
-      const wantFar = batch.farApplied ? d > threshold * FAR_SWAP_HYSTERESIS : d > threshold;
+      // Low uses the authored lightweight mesh even on the player's island.
+      // Edge distance is negative anywhere inland: a distance-only swap kept
+      // every boulder/fern in that island at high detail (729k triangles in
+      // the low inland view). Keep all placements and the same silhouettes.
+      const wantFar = quality === 'low'
+        || (batch.farApplied ? d > threshold * FAR_SWAP_HYSTERESIS : d > threshold);
       if (wantFar !== batch.farApplied) {
         batch.farApplied = wantFar;
         const set = wantFar ? batch.far : batch.near;

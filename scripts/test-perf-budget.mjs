@@ -60,6 +60,12 @@ const SERVER_HEALTH_URL = process.env.PIRATES_BR_SERVER_HEALTH_URL
   ?? `http://127.0.0.1:${SERVER_PORT ?? '8090'}/health`;
 const READY_TIMEOUT_MS = 45_000;
 const VIEWPORT = { width: 960, height: 540 };
+// A targeted rerun never silently becomes a full pass: log the selected tiers
+// and skip comparisons whose other tier was not measured. Default stays full.
+const PERF_TIERS = (process.env.PIRATES_PERF_TIERS ?? 'high,balanced,low').split(',');
+if (!PERF_TIERS.length || PERF_TIERS.some((tier) => !['high', 'balanced', 'low'].includes(tier))) {
+  throw new Error('PIRATES_PERF_TIERS must contain high, balanced and/or low');
+}
 
 /**
  * THE WORLD HAS TO BE THE SAME WORLD.
@@ -204,6 +210,12 @@ const BUDGETS = {
     // 591-601 draws / 515k tris over five pinned runs; 601 came from the fifth.
     { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 601, draws: 680, tris: 580_000 },
     { scene: 'open-sea', label: 'open water (low tier)', measured: 283, draws: 320, tris: 180_000 },
+    // The same device must afford the places a pirate actually walks into.
+    // Audit r1: inland/cave 731-754k tris, respawn deck 725 draws. Keep the
+    // existing dock ceiling for these newly covered views, never widen it.
+    { scene: 'cave-interior', label: 'cave interior (low tier)', measured: 620, draws: 680, tris: 580_000 },
+    { scene: 'island-interior', label: 'island interior (low tier)', measured: 459, draws: 680, tris: 580_000 },
+    { scene: 'deck-aft', label: 'on-deck aft look (low tier)', measured: 725, draws: 680, tris: 580_000 },
   ],
   // 'balanced' IS THE DEFAULT VERDICT FOR MOST MACHINES — every Intel laptop,
   // every phone, every Safari Air and every 8-thread desktop lands here — and
@@ -536,9 +548,10 @@ async function main() {
     }
     const wantWreck = ownServer;
 
-    const high = await measureTier(browser, 'high', { wantWreck });
-    const balanced = await measureTier(browser, 'balanced', { wantWreck: false });
-    const low = await measureTier(browser, 'low', { wantWreck: false });
+    console.log(`  Grading tiers: ${PERF_TIERS.join(', ')}${PERF_TIERS.length < 3 ? ' (targeted run; cross-tier comparisons only where measured)' : ''}`);
+    const high = PERF_TIERS.includes('high') ? await measureTier(browser, 'high', { wantWreck }) : {};
+    const balanced = PERF_TIERS.includes('balanced') ? await measureTier(browser, 'balanced', { wantWreck: false }) : {};
+    const low = PERF_TIERS.includes('low') ? await measureTier(browser, 'low', { wantWreck: false }) : {};
 
     for (const budget of BUDGETS.balanced) {
       const a = high[budget.scene];
