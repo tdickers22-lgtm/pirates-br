@@ -1159,12 +1159,12 @@ export class EnvironmentFx {
   // ── Storm rain ────────────────────────────────────────────────────────────
   // World-space, depth-layered rain: 1–3 camera-relative shells of line-segment
   // drops, all sharing one wind field with travelling gust bands, plus an
-  // instanced splash pool where those streaks meet sea / deck / terrain, a haze
-  // curtain that thickens the distance, and cover occlusion so caves and the
-  // hold stay dry. Nothing in the loop allocates.
+  // instanced splash pool where those streaks meet sea / deck / terrain, and
+  // cover occlusion so caves and the hold stay dry. The distance reads wet off
+  // the scene's own fog (Renderer.setRainMist), not off a veil mesh — see
+  // ensureRainShells. Nothing in the loop allocates.
 
   private rainShells: RainShell[] | null = null;
-  private rainHaze: THREE.Mesh | null = null;
   private splash: SplashPool | null = null;
   /** 0 = out in the weather, 1 = fully sheltered. Eased, so walking into a cave
    *  mouth fades the rain out instead of cutting it. */
@@ -1246,25 +1246,6 @@ export class EnvironmentFx {
     return tex;
   }
 
-  private makeRainHazeTexture(): THREE.CanvasTexture {
-    const canvas = document.createElement('canvas');
-    canvas.width = 4;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d')!;
-    const g = ctx.createLinearGradient(0, 0, 0, 128);
-    g.addColorStop(0.00, 'rgba(178,193,208,0.00)');
-    g.addColorStop(0.34, 'rgba(178,193,208,0.55)');
-    g.addColorStop(0.78, 'rgba(190,204,218,0.95)');
-    g.addColorStop(1.00, 'rgba(196,210,224,0.20)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 4, 128);
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.repeat.set(6, 1);
-    return tex;
-  }
-
   private ensureRainShells(): RainShell[] {
     if (this.rainShells) return this.rainShells;
     const tier = RAIN_TIERS[this.view.renderer.getQuality()];
@@ -1321,23 +1302,19 @@ export class EnvironmentFx {
       });
     }
 
-    // Haze curtain: a soft depth-tested veil at mid range so distance reads wet.
-    const hazeGeo = new THREE.CylinderGeometry(96, 96, 130, 24, 1, true);
-    const haze = new THREE.Mesh(hazeGeo, new THREE.MeshBasicMaterial({
-      map: this.makeRainHazeTexture(),
-      color: 0xb9c8d6,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      side: THREE.BackSide,
-      fog: false,
-    }));
-    haze.renderOrder = 7;
-    haze.frustumCulled = false;
-    haze.visible = false;
-    this.view.renderer.scene.add(haze);
-    this.rainHaze = haze;
-
+    // THE HAZE CURTAIN IS GONE — the fog does its job (STORMVIS-01 slice e).
+    // It was a 96 m, 24-segment BackSide cylinder parked on the camera at
+    // renderOrder 7 with alpha up to 0.19, and the fill census names it as the
+    // single most expensive blended surface in the game: measured at the
+    // test-fill-budget open-sea stand on the LOW tier it shaded 47.1% of the
+    // framebuffer for 0.471 blended layers, against the sky's own 0.486 and the
+    // storm front's 0.304 — three quarters of a 1.268 reading whose cap is 0.9.
+    // What it bought was "distance reads wet", which is what FogExp2 already is:
+    // Renderer.setRainMist thickens fog density and pulls fog colour toward
+    // fogRainColor off the SAME `wet` number this mesh's opacity rode, in every
+    // opaque shader, at zero extra fill. Folding it into the fog also removes a
+    // veil that began at a fixed 96 m radius — a soft ring in the air that moved
+    // with the eye and never with the world.
     this.rainShells = shells;
     this.ensureSplashPool();
     return shells;
@@ -1743,6 +1720,25 @@ export class EnvironmentFx {
       // the sea glint already run off, so all three flash on the same frame.
       u.u_flash.value = flash;
       (u.u_flashDir.value as THREE.Vector2).set(this.boltDirX, this.boltDirZ);
+      // ── ONE WALL PER RAY, NOT TWO (STORMVIS-01 slice e) ──────────────────
+      // The shell was DoubleSide, so from OUTSIDE the ring every ray toward the
+      // weather rasterised the near wall AND the wall on the far side of the
+      // circle — two full transparent layers, the second of them a whole ring
+      // diameter further off and composited underneath the first. That is the
+      // "second crisp wall standing behind the near one" storm-13 spent a range
+      // dissolve fighting, and it is fill: at the test-fill-budget open-sea
+      // stand (422 m outside the ring, LOW tier) the front read 0.304 blended
+      // layers over 23.9% of the frame, i.e. 1.27 layers wherever it covered.
+      // Which face can be seen is not a guess — a ray from inside an open
+      // cylinder leaves through exactly one wall, and it is a back face; from
+      // outside, the visible one is a front face. So cull the other. The 1%
+      // band either side of the surface keeps DoubleSide so crossing the wall
+      // cannot pop, and `side` is render state, not a define: no relink
+      // (test-program-warm counts links).
+      const camDist = Math.hypot(cam.x - storm.centerX, cam.z - storm.centerZ);
+      mat.side = camDist < scale * 0.99 ? THREE.BackSide
+        : camDist > scale * 1.01 ? THREE.FrontSide
+        : THREE.DoubleSide;
       mesh.visible = intensity > 0.01 && (!shell.outer || outerWanted);
     }
   }
@@ -1764,7 +1760,6 @@ export class EnvironmentFx {
 
     if (intensity <= 0.001) {
       if (this.rainShells) for (const shell of this.rainShells) shell.lines.visible = false;
-      if (this.rainHaze) this.rainHaze.visible = false;
       if (this.splash) {
         this.splash.rings.visible = false;
         this.splash.droplets.visible = false;
@@ -1910,14 +1905,6 @@ export class EnvironmentFx {
     }
     this.updateSplashes(dt);
 
-    if (this.rainHaze) {
-      const haze = this.rainHaze;
-      haze.position.set(cam.x, cam.y - 18, cam.z);
-      haze.rotation.y = t * 0.012;
-      const mat = haze.material as THREE.MeshBasicMaterial;
-      mat.opacity = 0.19 * wet * (1 - nightFactor * 0.4);
-      haze.visible = mat.opacity > 0.004;
-    }
   }
 
   updateStormLightningFlash(dt: number) {

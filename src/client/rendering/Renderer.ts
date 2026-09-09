@@ -131,6 +131,17 @@ function frontToBack(a: SortItem, b: SortItem): number {
  *  DERIVATIVE, and how coarse you can go before it shows scales with how much
  *  else is on screen. 'low' has always had 48x24 (~2.3k tris); 'high' pays 96x48
  *  (~9.2k) for a dome drawn once, and 'balanced' splits it. */
+/** HOW WET THE DISTANCE LOOKS, now that the rain has no veil mesh.
+ *  `rainMist` (0..0.8, set from the rain the client is actually drawing) is the
+ *  only instrument left for it: it thickens the scene's FogExp2 and pulls the
+ *  fog colour toward fogRainColor. Both gains were raised when EnvironmentFx's
+ *  96 m haze cylinder was deleted (STORMVIS-01 slice e) so the cue it carried
+ *  survives in the one place that costs no fill — density 0.62 -> 0.95, colour
+ *  0.40 -> 0.55. Fair weather is untouched: rainMist is 0 there, so every
+ *  product below is byte-for-byte what it was. */
+const RAIN_MIST_DENSITY = 0.95;
+const RAIN_MIST_COLOR = 0.55;
+
 const SKY_SEGMENTS: Record<RenderQuality, { width: number; height: number }> = {
   low: { width: 48, height: 24 },
   balanced: { width: 64, height: 32 },
@@ -1811,8 +1822,12 @@ export class Renderer {
     const fog = this.scene.fog as THREE.FogExp2;
     this.getCycleColor(this.tempFogColor, this.fogDayColor, this.fogTwilightColor, this.fogNightColor);
     fog.color.copy(this.tempFogColor).lerp(this.fogStormColor, t);
-    fog.color.lerp(this.fogRainColor, this.rainMist * 0.4);
-    fog.density = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, t) * (1 + this.rainMist * 0.62);
+    // RAIN_MIST_* : the rain's whole contribution to "the distance reads wet".
+    // It used to share that job with a 96 m haze cylinder in EnvironmentFx that
+    // shaded 47% of the framebuffer for it (see ensureRainShells); the mesh is
+    // gone and these two numbers carry it alone now.
+    fog.color.lerp(this.fogRainColor, this.rainMist * RAIN_MIST_COLOR);
+    fog.density = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, t) * (1 + this.rainMist * RAIN_MIST_DENSITY);
 
     this.sun.intensity = THREE.MathUtils.lerp(this.getCycleSunIntensity(), this.getStormSunIntensity(), t);
     this.ambientLight.intensity = THREE.MathUtils.lerp(this.getCycleAmbientIntensity(), this.getStormAmbientIntensity(), t);
@@ -1847,10 +1862,10 @@ export class Renderer {
     const fog = this.scene.fog as THREE.FogExp2;
     this.getCycleColor(this.tempFogColor, this.fogDayColor, this.fogTwilightColor, this.fogNightColor);
     this.tempFogColor.lerp(this.fogStormColor, storm);
-    this.tempFogColor.lerp(this.fogRainColor, this.rainMist * 0.4);
+    this.tempFogColor.lerp(this.fogRainColor, this.rainMist * RAIN_MIST_COLOR);
     this.tempUnderwaterFogColor.copy(this.fogUnderwaterNearColor).lerp(this.fogUnderwaterDeepColor, deep);
     fog.color.copy(this.tempFogColor).lerp(this.tempUnderwaterFogColor, underwater);
-    const weatherFog = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, storm) * (1 + this.rainMist * 0.62);
+    const weatherFog = THREE.MathUtils.lerp(this.getCycleFogDensity(), 0.00255, storm) * (1 + this.rainMist * RAIN_MIST_DENSITY);
     const waterFog = THREE.MathUtils.lerp(0.0058, 0.011, deep); // gentler falloff so silhouettes survive at depth
     fog.density = THREE.MathUtils.lerp(weatherFog, waterFog, underwater);
 
