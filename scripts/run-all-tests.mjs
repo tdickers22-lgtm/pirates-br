@@ -157,10 +157,22 @@ function runSuite(suite, env) {
     let evidence = false;
     let bytes = 0;
     let tail = '';
+    // A RUNTIME SKIP CHANNEL. `skipOn: 'software'` is a declaration made before
+    // the suite runs; this is for a suite that can only find out afterwards that
+    // the host never fed it enough to grade anything (test-remote-smoothness:
+    // a stalling rasteriser evicts the very history it samples). Without it such
+    // a run has two dishonest choices — exit 0, which reads PASS, or exit 1,
+    // which blames the product for the machine. Only honoured on exit 0, so it
+    // can never turn a real red into a skip.
+    let notGraded = null;
     const watch = (chunk) => {
       const s = chunk.toString();
       bytes += s.length;
       if (!evidence && EVIDENCE.test(s)) evidence = true;
+      if (notGraded === null) {
+        const m = /^\s*SUITE-NOT-GRADED:\s*(.+)$/m.exec(s);
+        if (m) notGraded = m[1].trim();
+      }
       tail = (tail + s).slice(-4000);
     };
     child.stdout.on('data', watch);
@@ -183,11 +195,14 @@ function runSuite(suite, env) {
       let verdict;
       if (signal === 'SIGKILL' && ms >= limit - 2000) verdict = 'TIMEOUT';
       else if (code !== 0) verdict = 'FAIL';
+      // Said so itself: it ran, it measured, and the host gave it nothing it
+      // could put a bar behind. Reported as NOT GRADED, never as a pass.
+      else if (notGraded) verdict = 'SKIPPED';
       // Exit 0 having said nothing gradeable is not a pass. It is the single
       // most expensive failure mode in this repo's history.
       else if (!evidence) verdict = 'VACUOUS';
       else verdict = 'PASS';
-      resolve({ suite, verdict, code, ms, logPath, bytes, tail });
+      resolve({ suite, verdict, code, ms, logPath, bytes, tail, detail: notGraded ?? undefined });
     });
   });
 }
