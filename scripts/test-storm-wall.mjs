@@ -83,13 +83,19 @@ async function main() {
       style.textContent = '#hud{opacity:0!important;visibility:hidden!important;}'
         + '#onboard-cards,#onboarding-card,#oc-card,[class*="onboard"]{display:none!important;}'
         + '#debug-perf-panel{display:none!important;}'
+        // THE LIGHTNING SCRIM IS NOT THE WORLD EITHER. #storm-lightning-flash is
+        // a full-viewport soft-light div over the canvas whose opacity spikes on
+        // every strike; a band read taken during one is a read of the div. It
+        // was worth up to +170% on the sky band and +220% on the sea band across
+        // the polls that produced this settle (see gradedFrame).
+        + '#storm-lightning-flash{display:none!important;}'
         + '#disconnect-overlay,#server-load-chip,[id*="overload"],[class*="overload"]{display:none!important;}';
       document.head.appendChild(style);
     });
     await page.waitForTimeout(800);
     const overlays = await page.evaluate(() => {
       const vis = (el) => !!el && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden' && Number(getComputedStyle(el).opacity) > 0.01;
-      return ['oc-card', 'onboarding-card', 'onboard-cards', 'debug-perf-panel', 'hud', 'disconnect-overlay'].filter((id) => vis(document.getElementById(id)));
+      return ['oc-card', 'onboarding-card', 'onboard-cards', 'debug-perf-panel', 'hud', 'disconnect-overlay', 'storm-lightning-flash'].filter((id) => vis(document.getElementById(id)));
     });
     expect(`no UI overlay left in the frame (${overlays.length ? overlays.join(', ') : 'clean'})`, overlays.length === 0);
     const storm = await page.evaluate(() => {
@@ -103,29 +109,78 @@ async function main() {
     // '02-inside-near-out', where the inversion was reported.
     const OUTWARD = Math.PI * 0.5;
     const look = async (mult, y, yaw, pitch) => page.evaluate(([p, ya, pi]) => window.__piratesBR.enableFreeCam(p[0], p[1], p[2], ya, pi), [[storm.cx + storm.r * mult, y, storm.cz], yaw, pitch]);
-    const settle = async (sec) => {
-      await page.evaluate((s) => window.__piratesBR.setDayNightOverride(s), sec);
-      await page.evaluate(() => window.__piratesBR.settleLod?.());
-      await page.waitForTimeout(2_500);
-    };
-    const frame = async (name) => {
+    const shot = async (name) => {
       await page.evaluate(() => document.getElementById('disconnect-overlay')?.remove());
       const buf = await page.screenshot({ type: 'png', timeout: 180_000 });
-      if (SHOTS) writeFileSync(`${OUT}/${name}.png`, buf);
+      if (SHOTS && name) writeFileSync(`${OUT}/${name}.png`, buf);
       const png = readPng(buf);
       return { sky: bandStats(png, SKY_BAND[0], SKY_BAND[1]), sea: bandStats(png, SEA_BAND[0], SEA_BAND[1]) };
     };
+    const bolt = () => page.evaluate(() => Number(window.__piratesBR.envFx?.debugBoltEnvelope?.() ?? 0));
+    const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+
+    /**
+     * ONE GRADED READ = THE MEDIAN OF FIVE CONVERGED, FLASH-FREE FRAMES.
+     *
+     * The old settle was setDayNightOverride + settleLod + a flat 2,500 ms, and
+     * one shot. Both halves of that were wrong, and gate-0 recorded the result
+     * as a coin flip (night sea/sky 1.49 / 1.02 / 1.34 / 1.08 on ONE commit;
+     * noon chroma 1.26 / 2.65 / 2.50 / 2.43) without being able to say why.
+     * Polled at this exact placement on 2026-09-09 it is both of these:
+     *   • LIGHTNING. Strikes fire continuously under ?stormdemo. A frame taken
+     *     during one read sky 89.1 luma against 32.2 unflashed and sea 118.4
+     *     against 28.6 — the shader flash on the bank AND the soft-light div
+     *     (now hidden above). Two of six polls at each hour were flashed.
+     *   • THE SETTLE HAS NOT LANDED AT 2,500 ms. On SwiftShader at single-digit
+     *     fps the sea band read 98.2, then 30.1, then 27.5 luma over the three
+     *     polls after the override; the storm/light lerps need ~4 s of frames.
+     * So: reject any frame with a strike burning either side of the shutter,
+     * wait for two consecutive accepted frames to agree on the sky band, then
+     * take five more and grade the median of each statistic. A median over
+     * accepted frames cannot be carried by one lucky frame in either direction,
+     * which is the property the thresholds below have never had. Thresholds are
+     * untouched; this changes what is measured, not what is allowed.
+     */
+    const gradedFrame = async (name, sec) => {
+      await page.evaluate((s) => window.__piratesBR.setDayNightOverride(s), sec);
+      await page.evaluate(() => window.__piratesBR.settleLod?.());
+      await page.waitForTimeout(2_500);
+      const accepted = [];
+      let converged = false;
+      let prevSky = null;
+      let flashed = 0;
+      for (let i = 0; i < 18 && accepted.length < 5; i++) {
+        const before = await bolt();
+        const f = await shot(accepted.length === 0 ? name : null);
+        const after = await bolt();
+        if (before > 0.001 || after > 0.001) { flashed += 1; await page.waitForTimeout(400); continue; }
+        if (!converged) {
+          if (prevSky !== null && Math.abs(f.sky.luma - prevSky) <= Math.max(0.6, prevSky * 0.04)) converged = true;
+          prevSky = f.sky.luma;
+          if (!converged) { await page.waitForTimeout(700); continue; }
+        }
+        accepted.push(f);
+        await page.waitForTimeout(400);
+      }
+      expect(`${name}: ${accepted.length} converged flash-free frames graded (${flashed} rejected for lightning)`,
+        converged && accepted.length >= 3,
+        'the storm look never held still long enough to be graded — do not read a verdict off this run');
+      const at = (pick) => median(accepted.map(pick));
+      return {
+        n: accepted.length,
+        sky: { luma: at((f) => f.sky.luma), chroma: at((f) => f.sky.chroma) },
+        sea: { luma: at((f) => f.sea.luma), chroma: at((f) => f.sea.chroma) },
+      };
+    };
 
     await look(0.9, 7, OUTWARD, 0.06);
-    await settle(374);
-    const night = await frame('night-inside-near-out');
-    console.log(`  night: sky luma ${night.sky.luma.toFixed(1)} chroma ${night.sky.chroma.toFixed(1)} | sea luma ${night.sea.luma.toFixed(1)} chroma ${night.sea.chroma.toFixed(1)}`);
+    const night = await gradedFrame('night-inside-near-out', 374);
+    console.log(`  night (median of ${night.n}): sky luma ${night.sky.luma.toFixed(1)} chroma ${night.sky.chroma.toFixed(1)} | sea luma ${night.sea.luma.toFixed(1)} chroma ${night.sea.chroma.toFixed(1)}`);
     expect(`night: sea luma ${night.sea.luma.toFixed(1)} ≤ ${NIGHT_SEA_OVER_SKY_MAX}× sky luma ${night.sky.luma.toFixed(1)} (${(night.sea.luma / Math.max(1, night.sky.luma)).toFixed(2)}×)`,
       night.sea.luma <= NIGHT_SEA_OVER_SKY_MAX * night.sky.luma, 'inversion: the sea under the storm wall is brighter than the sky that lights it');
 
-    await settle(854);
-    const noon = await frame('noon-inside-near-out');
-    console.log(`  noon:  sky luma ${noon.sky.luma.toFixed(1)} chroma ${noon.sky.chroma.toFixed(1)} | sea luma ${noon.sea.luma.toFixed(1)} chroma ${noon.sea.chroma.toFixed(1)}`);
+    const noon = await gradedFrame('noon-inside-near-out', 854);
+    console.log(`  noon (median of ${noon.n}):  sky luma ${noon.sky.luma.toFixed(1)} chroma ${noon.sky.chroma.toFixed(1)} | sea luma ${noon.sea.luma.toFixed(1)} chroma ${noon.sea.chroma.toFixed(1)}`);
     expect(`noon storm: sea chroma ${noon.sea.chroma.toFixed(1)} ≤ ${NOON_SEA_CHROMA_RATIO_MAX}× sky chroma ${noon.sky.chroma.toFixed(1)} (${(noon.sea.chroma / Math.max(1, noon.sky.chroma)).toFixed(2)}×)`,
       noon.sea.chroma <= NOON_SEA_CHROMA_RATIO_MAX * Math.max(1, noon.sky.chroma), 'a saturated blue sea under a slate front');
     expect('frames are not blank (sky or sea band has signal)', night.sky.luma + night.sea.luma + noon.sky.luma + noon.sea.luma > 8);
