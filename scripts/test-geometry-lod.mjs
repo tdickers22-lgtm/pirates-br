@@ -150,6 +150,8 @@ const READ_BATCHES = ([islandName, batchName]) => {
       full: batch.full,
       visible: batch.mesh.visible,
       hidden: batch.hidden,
+      farApplied: batch.farApplied,
+      usesFarGeometry: !!batch.far && batch.mesh.geometry === batch.far.geometry,
       scaleCount: batch.scales.length,
       sorted,
     });
@@ -325,6 +327,11 @@ async function run(browser, quality) {
       nearPortal.batches.every((b) => b.sorted && b.scaleCount === b.full),
       'an unsorted batch drops the wrong stones and nothing downstream can tell',
     );
+    if (quality === 'low') {
+      expect('low portal rocks use their lightweight geometry even on approach',
+        nearPortal.batches.length > 0 && nearPortal.batches.every((b) => b.farApplied && b.usesFarGeometry),
+        JSON.stringify(nearPortal.batches));
+    }
     expect(
       `[${quality}] every pebble mesh on ${subject} is registered for instance LOD`,
       nearPebbles.batches.length === nearPebbles.meshes,
