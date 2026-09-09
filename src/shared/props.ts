@@ -320,7 +320,16 @@ const SPACING_OVERRIDES: Partial<Record<IslandPropType, number>> = {
   smuggler_cache: 5.0,
   skull_totem: 5.0,
   wrecker_tower: 5.5,
-  whale_skeleton: 10.0,
+  // 26.66 m of ribs and vertebrae along its own Z, 11.14 m across: measured
+  // world half-extents 5.57 x 13.33, corner reach 13.65 (test-asset-bounds
+  // census). The scatter reservation is a DISC, so it is the long axis that
+  // decides it — 10.0 left 3.3 m of the tail outside the reservation and
+  // scatter grew ferns and boulders up through the bones. 13.7 covers the
+  // whole tableau the way kraken_wreck's 16.2 covers its 15.55 m reach.
+  // Re-pins the scatter on Dead Man Shoals only (the one island carrying the
+  // landmark); test-world-fixed, test-island-props and both floater audits
+  // re-run on it. assets-18 / assets-25.
+  whale_skeleton: 13.7,
   rum_still: 5.5,
   crow_roost: 5.0,
   mermaid_shrine: 5.0,

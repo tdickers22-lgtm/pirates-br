@@ -374,7 +374,13 @@ interface StoryCoastalSpec { bandLo: number; bandHi: number; stampRadius: number
 const STORY_COASTAL: Partial<Record<LandmarkType, StoryCoastalSpec>> = {
   // Wide scenes need pads that clear a camp's furniture ring (~5m), not just
   // the camp stamp centre.
-  whale_skeleton: { bandLo: 0.45, bandHi: 2.0, stampRadius: 7, pad: 8 },
+  // 7 m of flat under a 26.66 m whale was a coincidence, not a seat: the moment
+  // SPACING_OVERRIDES told the truth about her footprint (13.7, so the seat
+  // audit samples 6.17 m out instead of 4.5) the analytic terrain under her
+  // ribs read -2.48..6.10 and her tail hung 2.68 m in the air on the shoreline
+  // slope. Same fault and same fix as kraken_wreck below — the flat she lies on
+  // has to be as wide as she is. 10.5/9 is the smallest pair that seats her.
+  whale_skeleton: { bandLo: 0.45, bandHi: 2.0, stampRadius: 10.5, pad: 9 },
   // The tableau is 1.8x the size the collider used to claim (see
   // PROP_COLLIDERS.kraken_wreck): a 7.5 m pad left her 7.2 m blocking footprint
   // hanging 0.86 m over the slope at its outer edge — the live-floater audit
