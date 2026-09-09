@@ -3532,7 +3532,21 @@ export class ShipRenderer {
 
     const ribbon = new THREE.Mesh(surface.geometry, material);
     ribbon.renderOrder = 2;
-    ribbon.frustumCulled = false;
+    // A WORLD-SPACE ribbon WITH A BOUNDING SPHERE, not an unculled one.
+    //
+    // The positions written by writeWakeSurface are absolute world coordinates
+    // and the ribbon hangs off the scene at the origin, so three's computed
+    // bounds are meaningless the moment the hull moves — which is why this said
+    // `frustumCulled = false`. But "the bounds are stale" is an argument for
+    // MAINTAINING them, not for abolishing the test: every hull in the match
+    // that was foaming submitted its ribbon on every frame, whatever the camera
+    // was pointed at. Measured on the world-fidelity understory view (low tier,
+    // seed 20260801, a camera one metre off the ground looking at a bush): 16 of
+    // the frame's 135 draws were wakes of hulls that were not in shot at all.
+    // updateWake now writes a sphere around the hull and its tail after every
+    // writeWakeSurface — one Vector3 set and one float, no allocation — so the
+    // ribbon is culled by the same rule as everything else.
+    ribbon.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1);
     group.add(ribbon);
 
     // Bow-spray sprite pool
@@ -3699,6 +3713,16 @@ export class ShipRenderer {
     f.speedFrac = speedFrac; f.waveT = waveT; f.storm = storm;
     f.armFactor = armFactor;
     writeWakeSurface(wake.surface, f);
+    // The bounds that make the ribbon cullable (see createShipWake). Bow to the
+    // end of the tail, plus a lateral allowance for the widest Kelvin arm and a
+    // vertical one for the storm swell the ribbon rides. Deliberately generous:
+    // a sphere that is too big costs a draw that was already being paid, a
+    // sphere that is too small pops a wake off the screen.
+    const tailX = sternX - fwdX * wakeLen;
+    const tailZ = sternZ - fwdZ * wakeLen;
+    const sphere = wake.ribbon.geometry.boundingSphere!;
+    sphere.center.set((f.bowX + tailX) / 2, 0, (f.bowZ + tailZ) / 2);
+    sphere.radius = Math.hypot(f.bowX - tailX, f.bowZ - tailZ) * 0.5 + W * 1.6 + 8;
 
     // Scroll foam toward the tail so blobs read as staying put in the water
     wake.scroll = (wake.scroll - (speed * dt) / Math.max(wakeLen, 1)) % 1;
