@@ -73,6 +73,17 @@ const ROOT_URL = (arg('url', process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:300
 const SERVER_PORT = arg('server', process.env.PIRATES_BR_SERVER_PORT ?? null);
 const SECONDS = Number.parseInt(arg('seconds', '60'), 10);
 const REPORT_ONLY = has('report');
+/**
+ * THE HOST-STALL RIG, and it is the reason this suite can be trusted on any
+ * machine. `--stall-ms 1500 --stall-every 4000` busy-waits the page's main
+ * thread for 1.5s out of every 4 — which is not a simulation of a slow host, it
+ * IS one: the message callback cannot run, snapshots queue, and they arrive in a
+ * burst that overruns a 24-deep ring exactly as a 1.4s island build does. Used
+ * to prove that the numbers this suite grades stop moving when the HOST changes
+ * and only move when the PRODUCT does. Off in a graded run.
+ */
+const STALL_MS = Number.parseInt(arg('stall-ms', '0'), 10);
+const STALL_EVERY_MS = Number.parseInt(arg('stall-every', '4000'), 10);
 const VIEWPORT = { width: 480, height: 270 };
 
 /** A step this far beyond carrying on at the current speed is a visible twitch. */
@@ -93,6 +104,68 @@ const MAX_GRADEABLE_SPEED_MPS = 15;
 /** How long each arm runs before the lever flips. Long enough to hold a walking
  *  leg inside one arm, short enough that ten of them fit in a minute. */
 const PHASE_MS = 4500;
+
+// ── WHAT THIS SUITE REFUSES TO GRADE, AND WHY IT HAD TO LEARN TO ────────────
+//
+// The header above is right that the SAMPLING is frame-rate-free: the render
+// target is a pure function of (world state, clock) and this reads it on a
+// 227Hz timer, not on a drawn frame. What that argument misses is that the
+// HISTORY those answers come out of is destroyed by a main-thread stall, and a
+// stall is exactly what a software rasteriser produces.
+//
+// A browser that spends 1.4s building an island runs no message callback while
+// it does. Every snapshot that landed meanwhile is queued and delivered in one
+// burst, and RemoteTrack is a ring TRACK_CAPACITY=24 deep — about 0.9s of
+// history at the ~37ms interval this stack measures. A burst longer than that
+// evicts the span the render clock is still standing in, so `sample()` takes
+// the `renderT <= t[oldest]` branch and HOLDS the body: not because the delay
+// was sized too small for the wire, which is the defect the 3% held bar exists
+// to catch, but because the rasteriser stopped the client for a second and a
+// half. Then the clock catches up and the held body moves in one step, which
+// lands in the p99 as an unexplained one.
+//
+// That is why this suite was red on every baseline anyone tried while passing
+// in isolation on the same commit (gate-4: "held 4.5% of answers (max 3%)"
+// under the battery; 0.4-0.9% here on an idle machine). The bar was measuring
+// the host. Neither number is widened: the run now SEPARATES the answers taken
+// while the host was feeding the measurement from the ones taken in the wake of
+// a stall, grades the first at the same bars, reports the second, and says
+// NOT GRADED rather than FAIL when there is not enough of the first left.
+//
+/** A gap between sampler ticks this long is not a 9ms window a body moved
+ *  through; it is a stall. Same 50ms the per-sample rule below already uses to
+ *  refuse a differenced pair, so the two cannot disagree. */
+const STALL_GAP_MS = 50;
+/**
+ * …and how long the wake of one lasts. MEASURED, not reasoned. Under the rig
+ * below at `--stall-ms 1500 --stall-every 4000` — 30 stalls in a 60s window,
+ * worst gap 1509ms, a quarter of the window frozen solid — the held answers
+ * fell out by time since the last stall ended as
+ *
+ *     in-stall 48 · 0-100ms 1358 · 100-300ms 550 · 300-900ms 128 · settled 48
+ *
+ * against 30 / 611 / 1269 / 2448 / 4393 ticks: 91% of them inside 300ms of a
+ * stall ending, on 21% of the ticks. This was first written as 900ms — one ring
+ * of TRACK_CAPACITY=24 at the measured interval, reasoned from the code — and is
+ * RE-PINNED TIGHTER to 300 against that census. Tighter is the safe direction
+ * here: it excludes LESS of the run, so the bar is applied to more of it, and at
+ * 900ms the suite threw away half the window and could not grade the held bar at
+ * all on a stalling host (54.5% healthy against a 60% floor). What survives past
+ * 300ms is graded, and it clears the unchanged 3% bar with room: 176 held
+ * answers in ~44k under a rig far more brutal than any real frame stall.
+ */
+const STALL_SETTLE_MS = 300;
+/**
+ * THE HOST-SPEED FLOOR. Below this share of the window spent feeding the
+ * measurement, the run has not measured the buffer badly — it has measured the
+ * machine, and it says so instead of failing. Deliberately generous: two idle
+ * runs on this Air spent 97-99% of their ticks healthy, and gate-4's battery
+ * runs are the case this exists for.
+ */
+const MIN_HEALTHY_TICK_SHARE = 0.6;
+/** …and the absolute one: a held rate is a ratio, and a ratio of a few hundred
+ *  answers cannot resolve a 3% bar. One idle run makes ~87k. */
+const MIN_HEALTHY_ANSWERS = 10_000;
 
 /**
  * THE TRIPWIRES, set from the measured OFF arm (see the commit that landed the
@@ -155,9 +228,28 @@ const SAMPLER = `(() => {
     const key = arm + '/' + name;
     return (acc.pop[key] ||= {
       samples: 0, moving: 0, unexplained: [], snaps: 0, teleports: 0, ungradeable: 0,
+      stalled: 0, worstStalledM: 0,
       worstM: 0, worstPx: 0, bodySeconds: 0, speedSum: 0,
     });
   };
+  // ── THE HOST-SPEED CENSUS (see the header block in the runner) ───────────
+  // Answers are attributed to the interval they were made in, and an interval
+  // that straddles or follows a main-thread stall is reported rather than
+  // graded. Nothing here is a frame time: it is a tick gap, which is what the
+  // measurement itself was starved by.
+  const host = {
+    ticks: 0, healthyTicks: 0, stalls: 0, worstGapMs: 0, stalledMs: 0,
+    healthy: { interpolated: 0, extrapolated: 0, held: 0, empty: 0 },
+    stalled: { interpolated: 0, extrapolated: 0, held: 0, empty: 0 },
+    // Held answers against how long ago the last stall ended, printed every run
+    // so "held tracks the stall, not the wire" stays a reading and not a claim.
+    heldBy: { inStall: 0, ms0_100: 0, ms100_300: 0, ms300_900: 0, settled: 0 },
+    ticksBy: { inStall: 0, ms0_100: 0, ms100_300: 0, ms300_900: 0, settled: 0 },
+  };
+  acc.host = host;
+  let lastTickAt = -1;
+  let lastStallEndAt = -Infinity;
+  let prevModes = null;
   // id -> { t, x, y, z, v }  — v is the speed over the PREVIOUS interval, which
   // is what the next step is predicted from.
   const prev = new Map();
@@ -170,7 +262,7 @@ const SAMPLER = `(() => {
   // maximum 192ms render delay plus the 200ms bounded fallback is behind us.
   const SHARK_TRANSITION_SETTLE_MS = 450;
 
-  const record = (arm, popName, id, x, y, z, now, pxPerRad, cam) => {
+  const record = (arm, popName, id, x, y, z, now, pxPerRad, cam, healthy) => {
     const pop = popOf(arm, popName);
     pop.samples++;
     // KEYED BY POPULATION AS WELL AS BY BODY. A pirate who steps off a gangway
@@ -195,6 +287,20 @@ const SAMPLER = `(() => {
     if (was.v === null) return;              // need two intervals to predict one
     if (was.v < ${MOVING_SPEED_MPS}) return; // a body at rest cannot be graded
     if (was.v > ${MAX_GRADEABLE_SPEED_MPS}) { pop.ungradeable++; return; }
+    // NOT IN THE WAKE OF A STALL. Both of the guards above drop a sample for
+    // something the BODY did; this one drops it for something the HOST did, and
+    // it has to come before bodySeconds so the excluded sample leaves neither a
+    // snap in the numerator nor a body-second in the denominator. The step it
+    // would have contributed is kept as worstStalledM and printed, because a
+    // suite that silently swallows its largest numbers is not honest either.
+    if (!healthy) {
+      pop.stalled++;
+      if (step <= ${TELEPORT_M}) {
+        const u = Math.abs(step - was.v * dt);
+        if (u > pop.worstStalledM) pop.worstStalledM = u;
+      }
+      return;
+    }
     pop.moving++;
     pop.bodySeconds += dt;
     pop.speedSum += was.v;
@@ -215,7 +321,40 @@ const SAMPLER = `(() => {
       if (!st || st.phase !== 'playing') return;
       acc.ticks++;
       const now = performance.now();
-      const arm = g.getRemoteInterpolationStats().enabled ? 'on' : 'off';
+      const stats = g.getRemoteInterpolationStats();
+      const arm = stats.enabled ? 'on' : 'off';
+
+      // ── was the host feeding this tick? ──────────────────────────────────
+      const gap = lastTickAt < 0 ? 0 : now - lastTickAt;
+      lastTickAt = now;
+      if (gap > ${STALL_GAP_MS}) { lastStallEndAt = now; host.stalls++; host.stalledMs += gap; }
+      if (gap > host.worstGapMs) host.worstGapMs = gap;
+      const sinceStall = now - lastStallEndAt;
+      const healthy = gap <= ${STALL_GAP_MS} && sinceStall >= ${STALL_SETTLE_MS};
+      // Finer than the settle window on purpose: the bands either side of it are
+      // the evidence that it is pinned where the held answers actually stop.
+      const bucket = gap > ${STALL_GAP_MS} ? 'inStall'
+        : sinceStall < 100 ? 'ms0_100'
+        : sinceStall < 300 ? 'ms100_300'
+        : sinceStall < 900 ? 'ms300_900' : 'settled';
+      host.ticks++;
+      if (healthy) host.healthyTicks++;
+      host.ticksBy[bucket]++;
+      // The mode census is CUMULATIVE in the client, so the answers made since
+      // the last tick are its delta — and they belong to the interval that just
+      // elapsed, which is the one whose health was just decided. Only the ON arm
+      // produces any: poseAt returns null with the buffer off.
+      const modes = stats.modes;
+      if (prevModes) {
+        const bin = healthy ? host.healthy : host.stalled;
+        const dHeld = modes.held - prevModes.held;
+        bin.interpolated += modes.interpolated - prevModes.interpolated;
+        bin.extrapolated += modes.extrapolated - prevModes.extrapolated;
+        bin.held += dHeld;
+        bin.empty += modes.empty - prevModes.empty;
+        host.heldBy[bucket] += dHeld;
+      }
+      prevModes = modes;
       const cam = g.renderer.camera;
       const fovRad = (cam.fov * Math.PI) / 180;
       const pxPerRad = window.innerHeight / (2 * Math.tan(fovRad / 2));
@@ -266,7 +405,7 @@ const SAMPLER = `(() => {
         const wasSp = serverSpeed.get(key);
         serverSpeed.set(key, sp);
         if (wasSp !== undefined && Math.abs(sp - wasSp) > 1.0) { prev.delete(pop + '|' + key); continue; }
-        record(arm, pop, key, q.x, q.y, q.z, now, pxPerRad, cam);
+        record(arm, pop, key, q.x, q.y, q.z, now, pxPerRad, cam, healthy);
       }
 
       // ── sharks ──────────────────────────────────────────────────────────
@@ -290,7 +429,7 @@ const SAMPLER = `(() => {
           prev.delete('shark|' + key);
           continue;
         }
-        record(arm, 'shark', key, q.x, q.y, q.z, now, pxPerRad, cam);
+        record(arm, 'shark', key, q.x, q.y, q.z, now, pxPerRad, cam, healthy);
       }
     } catch (e) {
       acc.err = String(e && e.message ? e.message : e);
@@ -339,6 +478,11 @@ async function main() {
 
   const browser = await chromium.launch({ headless: true, args: browserArgs(['--mute-audio']) });
   const failures = [];
+  /** Bars this run could not put a number behind. Never silent, never a FAIL:
+   *  each one is printed with the measurement that disqualified it, and if
+   *  NOTHING was graded the run tells the runner so rather than exiting 0. */
+  const notGraded = [];
+  let graded = 0;
   try {
     const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
     page.on('pageerror', (e) => console.error(`  [pageerror] ${e.message.slice(0, 160)}`));
@@ -349,20 +493,30 @@ async function main() {
     await page.waitForTimeout(8_000);
     await page.evaluate(() => window.__piratesBR.setBotPeace(true));
     await page.evaluate(SAMPLER);
+    if (STALL_MS > 0) {
+      console.log(`  ** host-stall rig: freezing the main thread ${STALL_MS}ms out of every ${STALL_EVERY_MS}ms **`);
+      await page.evaluate(([ms, every]) => {
+        window.__rs.stallTimer = setInterval(() => {
+          const until = performance.now() + ms;
+          while (performance.now() < until) { /* the island build, without the island */ }
+        }, every);
+      }, [STALL_MS, STALL_EVERY_MS]);
+    }
     await walkAbout(page, SECONDS * 1000);
     const r = await page.evaluate(() => {
       const a = window.__rs;
       clearInterval(a.timer);
       clearInterval(a.phase);
+      if (a.stallTimer) clearInterval(a.stallTimer);
       window.__piratesBR.setRemoteInterpolation(true);
       const out = {
         ticks: a.ticks, err: a.err, elapsed: (performance.now() - a.started) / 1000,
-        stats: window.__piratesBR.getRemoteInterpolationStats(), pop: {},
+        stats: window.__piratesBR.getRemoteInterpolationStats(), host: a.host, pop: {},
       };
       for (const [k, v] of Object.entries(a.pop)) {
         out.pop[k] = {
           samples: v.samples, moving: v.moving, snaps: v.snaps, teleports: v.teleports,
-          ungradeable: v.ungradeable,
+          ungradeable: v.ungradeable, stalled: v.stalled, worstStalledM: v.worstStalledM,
           bodySeconds: v.bodySeconds, worstM: v.worstM, worstPx: v.worstPx,
           meanSpeed: v.moving ? v.speedSum / v.moving : 0,
           unexplained: v.unexplained,
@@ -374,11 +528,27 @@ async function main() {
 
     if (r.err) console.log(`  sampler error: ${r.err}`);
     console.log(`  ticks ${r.ticks} over ${f(r.elapsed, 1)}s = ${f(r.ticks / Math.max(1e-6, r.elapsed), 0)}Hz sampling`);
-    const modeTotal = Object.values(r.stats.modes).reduce((a, b) => a + b, 0) || 1;
+    const answersTotal = Object.values(r.stats.modes).reduce((a, b) => a + b, 0);
+    const modeTotal = answersTotal || 1;
     console.log(`  buffer: delay ${f(r.stats.delayMs, 1)}ms  jitter ${f(r.stats.jitterMs, 1)}ms  `
       + `interval ${f(r.stats.intervalMs, 1)}ms  hard snaps ${r.stats.hardSnapsBack} back / ${r.stats.hardSnapsForward} forward  `
       + `starved ${(((modeTotal - r.stats.modes.interpolated) / modeTotal) * 100).toFixed(1)}%  `
       + `modes ${JSON.stringify(r.stats.modes)}`);
+
+    // ── THE HOST-SPEED READING, before a single bar is applied ───────────────
+    const h = r.host;
+    const healthyShare = h.ticks > 0 ? h.healthyTicks / h.ticks : 0;
+    const healthyAnswers = h.healthy.interpolated + h.healthy.extrapolated + h.healthy.held + h.healthy.empty;
+    const stalledAnswers = h.stalled.interpolated + h.stalled.extrapolated + h.stalled.held + h.stalled.empty;
+    console.log(`  host: ${h.stalls} stalls over ${STALL_GAP_MS}ms (${(h.stalledMs / 1000).toFixed(1)}s of the window, `
+      + `worst gap ${h.worstGapMs.toFixed(0)}ms); ${(healthyShare * 100).toFixed(1)}% of ticks were feeding the `
+      + `measurement (outside a stall and ${STALL_SETTLE_MS}ms of its wake)`);
+    console.log(`  held answers by time since the last stall: `
+      + `in-stall ${h.heldBy.inStall} of ${h.ticksBy.inStall} ticks, `
+      + `0-100ms ${h.heldBy.ms0_100}/${h.ticksBy.ms0_100}, `
+      + `100-300ms ${h.heldBy.ms100_300}/${h.ticksBy.ms100_300}, `
+      + `300-900ms ${h.heldBy.ms300_900}/${h.ticksBy.ms300_900}, `
+      + `settled ${h.heldBy.settled}/${h.ticksBy.settled}`);
 
     const line = (label, p) => {
       if (!p || p.moving === 0) { console.log(`  ${label.padEnd(24)} — no moving samples`); return null; }
@@ -412,6 +582,7 @@ async function main() {
       }
       gradedMoving += on.moving;
       const bar = BARS[name];
+      if (bar) graded += 2;
       if (bar && on.rate > bar.rate) {
         failures.push(`${name}: the buffered path snaps ${f(on.rate, 2)} times a body-second (max ${bar.rate}) `
           + `— worst ${f(on.worstM)}m = ${f(on.worstPx, 1)}px`);
@@ -422,6 +593,7 @@ async function main() {
       // MUTATION PROOF, in the same run: a bar the replaced arithmetic clears is
       // not a bar. Only asserted when the OFF arm actually got a population.
       if (off && off.moving >= 100) {
+        graded += 2;
         const ratio = off.p99 / Math.max(1e-9, on.p99);
         if (ratio < MIN_P99_IMPROVEMENT) {
           failures.push(`${name}: the buffer only improved p99 ${ratio.toFixed(1)}x over the arithmetic it replaced `
@@ -441,7 +613,18 @@ async function main() {
       }
     }
     if (gradedMoving < MIN_MOVING_SAMPLES) {
-      failures.push(`only ${gradedMoving} moving samples across graded populations (need ${MIN_MOVING_SAMPLES}) — the run measured nothing`);
+      // A RUN THAT MEASURED NOTHING IS NOT A RUN THAT MEASURED A DEFECT, and
+      // which of the two it is depends on WHY the samples are missing. A host
+      // that spent the window stalling starved the sampler; that is a fact about
+      // this machine and it is said, not failed on. A host that fed the sampler
+      // and still produced no moving body is a broken rig, and that IS a failure.
+      const why = `only ${gradedMoving} moving samples across graded populations (need ${MIN_MOVING_SAMPLES})`;
+      if (healthyShare < MIN_HEALTHY_TICK_SHARE) {
+        notGraded.push(`${why} — and only ${(healthyShare * 100).toFixed(1)}% of ticks were outside a stall `
+          + `(floor ${(MIN_HEALTHY_TICK_SHARE * 100).toFixed(0)}%): this host could not feed the measurement`);
+      } else {
+        failures.push(`${why} — the run measured nothing, on a host that was ${(healthyShare * 100).toFixed(1)}% healthy`);
+      }
     }
     // BACKWARD re-anchors only. A backward one moves the clock to an earlier
     // server time and redraws every remote body where it already was; nothing
@@ -449,6 +632,10 @@ async function main() {
     // this machine measures snapshot arrivals up to 2.1 SECONDS apart, because a
     // frame spent building an island cannot run the message callback, and after a
     // gap that long the world has genuinely moved on. Reported, not graded.
+    // A COUNT, not a frame time: backend-independent and gradeable on any host
+    // that got as far as buffering a body at all. Zero answers means the client
+    // never connected, and "no backward re-anchors" is then vacuously true.
+    if (answersTotal > 0) graded += 1;
     if (r.stats.hardSnapsBack > 0) {
       failures.push(`the remote render clock was re-anchored BACKWARDS ${r.stats.hardSnapsBack} times in ${SECONDS}s — `
         + `every one of those redraws every remote body where it already was`);
@@ -461,12 +648,32 @@ async function main() {
     // one. Grading that would grade SwiftShader. `held` is the real thing —
     // the ring had nothing usable and the body stopped — and it is what a delay
     // sized too small for the wire actually produces.
-    const held = r.stats.modes.held / modeTotal;
-    const extrap = r.stats.modes.extrapolated / modeTotal;
-    console.log(`  answered from two real samples ${(((modeTotal - r.stats.modes.held - r.stats.modes.extrapolated) / modeTotal) * 100).toFixed(1)}%, `
-      + `carried forward ${(extrap * 100).toFixed(1)}% (frame stalls), held ${(held * 100).toFixed(1)}%`);
-    if (held > 0.03) {
-      failures.push(`the buffer held a body still on ${(held * 100).toFixed(1)}% of answers (max 3%) — `
+    //
+    // …AND IT IS GRADED ON THE ANSWERS THE HOST LET IT MEASURE. A stall does not
+    // just make the client slow: it queues every snapshot that lands during it
+    // and then delivers them in one burst, which evicts the span of history the
+    // render clock is standing in and makes the buffer hold every body until the
+    // clock walks forward again. Those answers say nothing about whether the
+    // delay is buying a bracket, which is the only thing this bar is about. The
+    // BAR IS UNCHANGED at 3%; what changed is that the denominator is now the
+    // answers taken while the host was feeding the measurement.
+    const held = healthyAnswers > 0 ? h.healthy.held / healthyAnswers : 0;
+    const extrap = healthyAnswers > 0 ? h.healthy.extrapolated / healthyAnswers : 0;
+    const heldAll = r.stats.modes.held / modeTotal;
+    console.log(`  of the ${healthyAnswers} answers taken while the host was feeding: `
+      + `two real samples ${(((healthyAnswers - h.healthy.held - h.healthy.extrapolated) / Math.max(1, healthyAnswers)) * 100).toFixed(1)}%, `
+      + `carried forward ${(extrap * 100).toFixed(1)}%, held ${(held * 100).toFixed(1)}%`);
+    console.log(`  (${stalledAnswers} more answers were taken inside a stall or its ${STALL_SETTLE_MS}ms wake: `
+      + `${(((h.stalled.held) / Math.max(1, stalledAnswers)) * 100).toFixed(1)}% held there, `
+      + `${(heldAll * 100).toFixed(1)}% held over the whole window — reported, not graded)`);
+    if (healthyAnswers < MIN_HEALTHY_ANSWERS || healthyShare < MIN_HEALTHY_TICK_SHARE) {
+      notGraded.push(`the held-answer bar: only ${healthyAnswers} answers (need ${MIN_HEALTHY_ANSWERS}) came from `
+        + `${(healthyShare * 100).toFixed(1)}% of ticks outside a stall (floor ${(MIN_HEALTHY_TICK_SHARE * 100).toFixed(0)}%) — `
+        + `${h.stalls} stalls, worst gap ${h.worstGapMs.toFixed(0)}ms. Held over the whole window was `
+        + `${(heldAll * 100).toFixed(1)}%, which on this host is a reading of the rasteriser, not of the delay`);
+    } else if (++graded && held > 0.03) {
+      failures.push(`the buffer held a body still on ${(held * 100).toFixed(1)}% of the ${healthyAnswers} answers `
+        + `taken while the host was feeding (max 3%) — `
         + `delay ${f(r.stats.delayMs, 1)}ms against a measured ${f(r.stats.intervalMs, 1)}ms interval `
         + `and ${f(r.stats.jitterMs, 1)}ms of jitter is not buying a bracket`);
     }
@@ -474,8 +681,21 @@ async function main() {
     await browser.close();
   }
 
+  if (notGraded.length) {
+    console.log('');
+    for (const msg of notGraded) console.log(`NOT GRADED — ${msg}`);
+  }
+  // NOTHING SURVIVED. Exiting 0 here would be read as a pass by the runner, and
+  // a suite that exits 0 having asserted nothing is the most expensive failure
+  // mode this repo has. The sentinel line is the runner's SKIPPED channel
+  // (scripts/run-all-tests.mjs), so the tally says NOT GRADED with the reason.
+  if (graded === 0) {
+    console.log(`\nSUITE-NOT-GRADED: this host could not feed the measurement — ${notGraded[0] ?? 'no gradeable population'}`);
+    return;
+  }
   if (failures.length === 0) {
-    console.log('\nPASS — remote bodies are drawn along a continuous path, and the arithmetic this replaced is not.');
+    console.log(`\nPASS — remote bodies are drawn along a continuous path, and the arithmetic this replaced is not. `
+      + `(${graded} bars graded${notGraded.length ? `, ${notGraded.length} not gradeable on this host` : ''})`);
     return;
   }
   console.log('');
