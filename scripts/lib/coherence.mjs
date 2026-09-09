@@ -153,3 +153,103 @@ export function surfaceScore(png, grid, { minRms = 1.2 } = {}) {
 export const GROUND_GRID = { x: [80, 240, 400, 560, 720, 840], y: [300, 380, 440] };
 /** Open water seen from altitude: the frame's top band and its outer columns. */
 export const WATER_GRID = { x: [20, 180, 340, 660, 844], y: [12, 80, 150] };
+
+// ── PIXEL GRAIN AND PIXEL SHEETS (P.1 fixup, audit r1) ──────────────────────
+// Two defects the spectral peak cannot see, because neither is periodic:
+//
+// 3. GRAIN — a noise octave evaluated at or under pixel frequency has no
+//    lattice to find; it is white noise, and the peak of white noise is the
+//    peak of nothing. What it has is ENERGY at the finest scale: the RMS of
+//    each pixel against the mean of its 3x3 neighbourhood. Terrain that reads
+//    as a stylised surface carries little of it; TV static carries a lot.
+//
+// 4. SHEETS — the opposite failure: a surface with NO texture at all where
+//    there should be moving water. The same number, graded from below.
+//
+// 5. SHELF STEP — a hard-edged tint disc around an island seen from altitude
+//    is a luminance CLIFF along a radial profile; a lagoon that fades into the
+//    sea is a slope. Sample the profile at projected world points (the suite
+//    projects them through the live camera) and grade the largest step between
+//    adjacent rings against the profile's range.
+
+/** RMS of luminance against its 3x3 mean over a rectangle (pixels). With
+ *  `water: true` only pixels whose whole 3x3 window is water-coloured (blue
+ *  above red, green above red: the cyan/blue family, never sand or foliage)
+ *  are counted, so a beach in the corner of the frame cannot lend the lagoon
+ *  its grain. */
+export function textureRms(png, { x0, y0, x1, y1 }, { water = false, land = false } = {}) {
+  const img = readPng(png);
+  const { width, height, channels, data } = img;
+  const luma = (x, y) => {
+    const i = (y * width + x) * channels;
+    return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  };
+  const isWater = (x, y) => {
+    const i = (y * width + x) * channels;
+    return data[i + 2] > data[i] + 24 && data[i + 1] > data[i] + 8;
+  };
+  // Land is whatever is not the blue family: sand, turf, rock and ash all
+  // carry more red than blue; sea and sky never do.
+  const isLand = (x, y) => {
+    const i = (y * width + x) * channels;
+    return data[i] >= data[i + 2];
+  };
+  const pass = water ? isWater : land ? isLand : null;
+  let sum = 0, n = 0, meanL = 0;
+  const xa = Math.max(1, x0), xb = Math.min(width - 2, x1), ya = Math.max(1, y0), yb = Math.min(height - 2, y1);
+  for (let y = ya; y <= yb; y++) {
+    for (let x = xa; x <= xb; x++) {
+      if (pass) {
+        let ok = true;
+        for (let dy = -1; dy <= 1 && ok; dy++) for (let dx = -1; dx <= 1; dx++) if (!pass(x + dx, y + dy)) { ok = false; break; }
+        if (!ok) continue;
+      }
+      let m = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) m += luma(x + dx, y + dy);
+      m /= 9;
+      const d = luma(x, y) - m;
+      sum += d * d; meanL += luma(x, y); n++;
+    }
+  }
+  return n ? { rms: Math.sqrt(sum / n), meanLuma: meanL / n, pixels: n } : { rms: null, meanLuma: null, pixels: 0 };
+}
+
+/** Mean luminance in a 5x5 window at each screen point (null when off-frame). */
+export function pointLuminance(png, points) {
+  const img = readPng(png);
+  const { width, height, channels, data } = img;
+  return points.map(({ x, y }) => {
+    const cx = Math.round(x), cy = Math.round(y);
+    if (cx < 2 || cy < 2 || cx >= width - 2 || cy >= height - 2) return null;
+    let s = 0;
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const i = ((cy + dy) * width + (cx + dx)) * channels;
+        s += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      }
+    }
+    return s / 25;
+  });
+}
+
+/** Largest luminance step between adjacent radial rings, over the profile's
+ *  range: 1.0 is a cliff, ~0.1-0.2 a gradient. `rings` is an array of arrays
+ *  of screen points (one array per radius, innermost first). */
+export function shelfStep(png, rings) {
+  const means = rings.map((ring) => {
+    const l = pointLuminance(png, ring).filter((v) => v !== null);
+    return l.length >= 4 ? l.reduce((a, b) => a + b, 0) / l.length : null;
+  });
+  const valid = means.filter((m) => m !== null);
+  if (valid.length < 3) return { step: null, means };
+  const range = Math.max(...valid) - Math.min(...valid);
+  let step = 0;
+  for (let i = 1; i < means.length; i++) {
+    if (means[i] === null || means[i - 1] === null) continue;
+    step = Math.max(step, Math.abs(means[i] - means[i - 1]));
+  }
+  // A halo too faint to see (range under ~24 luma) cannot have a visible rim,
+  // whatever its ratio; normalising by a floor keeps a faint slope from being
+  // graded as a cliff.
+  return { step: step / Math.max(range, 24), range, means };
+}

@@ -38,7 +38,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
-import { surfaceScore, GROUND_GRID, WATER_GRID } from './lib/coherence.mjs';
+import { surfaceScore, textureRms, shelfStep, GROUND_GRID, WATER_GRID } from './lib/coherence.mjs';
 import { sessionQuery } from './perf-probe.mjs';
 import { ensureDevClient, stopDevClient } from './lib/dev-client.mjs';
 
@@ -108,9 +108,36 @@ const VIEW_CEILINGS = {
 // and takes the lot; the cheaper tiers take the two coherence views plus water.
 const TIER_VIEWS = {
   high: null,
-  balanced: ['understory', 'bay-and-cays', 'calm-water'],
-  low: ['understory', 'bay-and-cays', 'calm-water'],
+  balanced: ['understory', 'bay-and-cays', 'calm-water', 'waterline', 'hillside'],
+  low: ['understory', 'bay-and-cays', 'calm-water', 'waterline', 'hillside'],
 };
+// ── GRAIN, SHEETS AND SHELVES (P.1 fixup, audit r1) ─────────────────────────
+// Three non-periodic defects the spectral peak is blind to, see coherence.mjs.
+// GRAIN: RMS of land pixels against their 3x3 mean at the hillside stand
+// (terrain 40-150 m off, land mask). RED on b96ced82 (detail octaves
+// evaluated under pixel frequency): low 10.09. With every octave faded once
+// its cell is under ~2 px the same stand reads 7.6 at low; the residue is
+// palm fronds and silhouettes, which are edges, not grain.
+const GRAIN_MAX = { low: 8.6, balanced: 9.0, high: 9.0 };
+const GRAIN_REGION = { x0: 40, y0: 150, x1: 920, y1: 420 };
+// SHEET: the same number on the water at the waterline stand, graded from
+// BELOW (water mask) — the last 30 m of lagoon at eye level must carry ripple
+// shading, not be one flat cyan plate. RED on b96ced82: low 0.35. Reading the
+// shore distance and the shelf tint through the ripple field lifts it to
+// 0.87 at low.
+const SHEET_MIN = { low: 0.6, balanced: 0.6, high: 0.6 };
+const SHEET_REGION = { x0: 100, y0: 300, x1: 860, y1: 470 };
+// SHELF: the largest luminance step between adjacent rings from 1.15 to 3.2
+// island radii around the bay, seen from 2.9 radii up, over the profile's
+// range, on the ELLIPSE FALLBACK — PRINTED, not graded: on this stand the
+// largest step sits where the island's own beach meets the water and reads
+// 0.3-0.5 with or without a disc. What IS graded is the HALO: how much
+// brighter the water inside 1.15-1.9 radii is than the open sea at 2.6-3.2
+// radii (peak minus mean). RED on b96ced82: low 46, balanced 37, high 33 —
+// the pasted cyan ellipse. With the shelf tint fading from 30 m of eye
+// height onto a linear fall-off the same stand reads 30 at low.
+const SHELF_HALO_MAX = 32;
+const SHELF_RADII = [1.15, 1.3, 1.45, 1.6, 1.75, 1.9, 2.05, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2];
 const TIERS = (process.env.WORLD_FIDELITY_TIERS ?? 'high,low').split(',').map((s) => s.trim()).filter(Boolean);
 const PIN = process.env.WORLD_FIDELITY_PIN === '1'; // print measurements, grade nothing new
 
@@ -198,7 +225,21 @@ try {
         const shrubIsland = islands.find((i) => i.props?.some((p) => p.type === 'bush'));
         const shrub = shrubIsland.props.find((p) => p.type === 'bush');
         const sx = shrub.x, sz = shrub.z;
+        // The waterline stand: walk east from the bay's centre until the ground
+        // drops under the sea, stand 3 m back up the beach at eye height and
+        // look out over the lagoon, so the lower half of the frame is the
+        // water a pirate sees from the sand.
+        let shoreR = bay.radius * 0.5;
+        while (shoreR < bay.radius * 1.6 && g.sampleGroundY(bay.position.x + shoreR, bay.position.z) > 0.15) shoreR += 1;
+        const wx = bay.position.x + shoreR - 3, wz = bay.position.z;
         return [
+          { id: 'waterline', x: wx, y: Math.max(0.2, g.sampleGroundY(wx, wz)) + 1.6, z: wz,
+            target: { x: wx + 40, y: -0.2, z: wz }, grade: 'shore' },
+          // The hillside stand: 55 m off the same beach at mast height, looking
+          // back at the island, so the frame's middle band is terrain 40-150 m
+          // away — the distance at which the detail octaves went sub-pixel.
+          { id: 'hillside', x: bay.position.x + shoreR + 55, y: 7, z: bay.position.z,
+            target: { x: bay.position.x + shoreR - 40, y: 9, z: bay.position.z }, grade: 'hill' },
           { id: 'bay-and-cays', x: bay.position.x, y: bay.radius * 2.9, z: bay.position.z - bay.radius * 0.7,
             target: { x: bay.position.x, y: 0, z: bay.position.z }, grade: 'water' },
           { id: 'peak-bridge', x: mx - (b.bz - b.az) / span * 26, y: Math.max(b.ay, b.by) + 14,
@@ -247,7 +288,62 @@ try {
 
         // ── COHERENCE ──────────────────────────────────────────────────────
         let pattern = null;
-        if (cam.grade) {
+        if (cam.grade === 'hill') {
+          const grain = textureRms(png, GRAIN_REGION, { land: true });
+          console.log(`   [${quality}] ${cam.id} grain: 3x3 high-pass rms ${grain.rms?.toFixed(2)} over ${grain.pixels} px (mean luma ${grain.meanLuma?.toFixed(0)})`);
+          if (!PIN) {
+            check(grain.rms !== null && grain.rms <= GRAIN_MAX[quality],
+              `[${quality}] ${cam.id}: ground grain ${grain.rms?.toFixed(2)} ≤ ${GRAIN_MAX[quality]}`,
+              'a detail octave is being evaluated under pixel frequency: the hillside is per-pixel speckle, not a surface');
+          }
+        }
+        if (cam.grade === 'shore') {
+          const sheet = textureRms(png, SHEET_REGION, { water: true });
+          console.log(`   [${quality}] ${cam.id} sheet: 3x3 high-pass rms ${sheet.rms?.toFixed(2)} over ${sheet.pixels} px (mean luma ${sheet.meanLuma?.toFixed(0)})`);
+          if (!PIN) {
+            check(sheet.rms !== null && sheet.rms >= SHEET_MIN[quality],
+              `[${quality}] ${cam.id}: near-shore water texture ${sheet.rms?.toFixed(2)} ≥ ${SHEET_MIN[quality]}`,
+              'the lagoon at eye level is one flat plate: no ripple shading survives the shallow tint and the graze hand-over');
+          }
+        }
+        if (cam.id === 'bay-and-cays') {
+          // The shelf is graded on the ELLIPSE FALLBACK the shader paints until
+          // the bathymetry atlas lands (and for good on a client whose worker
+          // never does): that is the pasted cyan disc audit r1 photographed
+          // from altitude. Force the uniform for one frame, capture, restore.
+          await page.evaluate(() => { window.__piratesBR.ocean.material.uniforms.u_bathymetryReady.value = 0; });
+          await page.waitForTimeout(400);
+          const fallbackPng = await page.screenshot({ path: `${out}/${quality}-${cam.id}-fallback.png` });
+          await page.evaluate(() => { window.__piratesBR.ocean.material.uniforms.u_bathymetryReady.value = 1; });
+          const rings = await page.evaluate(([radii, target]) => {
+            const g = window.__piratesBR;
+            const camera = g.renderer.camera;
+            camera.updateMatrixWorld(true);
+            const R = g.state.islands.find((i) => i.name === 'Booty Bay').radius;
+            const v = new g.renderer.camera.position.constructor();
+            return radii.map((k) => {
+              const pts = [];
+              for (let a = 0; a < 16; a++) {
+                const th = (a / 16) * Math.PI * 2;
+                v.set(target.x + Math.cos(th) * R * k, 0, target.z + Math.sin(th) * R * k).project(camera);
+                pts.push({ x: (v.x * 0.5 + 0.5) * 960, y: (0.5 - v.y * 0.5) * 540 });
+              }
+              return pts;
+            });
+          }, [SHELF_RADII, cam.target]);
+          const shelf = shelfStep(fallbackPng, rings);
+          const inner = shelf.means.slice(0, 6).filter((m) => m !== null);
+          const outer = shelf.means.slice(-3).filter((m) => m !== null);
+          const halo = inner.length && outer.length
+            ? Math.max(...inner) - outer.reduce((a, b) => a + b, 0) / outer.length : null;
+          console.log(`   [${quality}] ${cam.id} shelf (fallback): halo ${halo?.toFixed(1)} luma over the open sea, largest ring step ${shelf.step?.toFixed(3)} (advisory); profile ${shelf.means.map((m) => (m === null ? '-' : m.toFixed(0))).join(' ')}`);
+          if (!PIN) {
+            check(halo !== null && halo <= SHELF_HALO_MAX,
+              `[${quality}] ${cam.id}: fallback shelf halo ${halo?.toFixed(1)} ≤ ${SHELF_HALO_MAX} luma`,
+              'from altitude the island sits in a saturated tint disc: the shallow mix is at full strength at any eye height');
+          }
+        }
+        if (cam.grade && cam.grade !== 'shore' && cam.grade !== 'hill') {
           const grid = cam.grade === 'ground' ? GROUND_GRID : WATER_GRID;
           pattern = surfaceScore(png, grid);
           console.log(`   [${quality}] ${cam.id} ${cam.grade}: spectral peak median ${pattern.peak.median} (max ${pattern.peak.max}),`
@@ -271,7 +367,23 @@ try {
         // ── BUDGET ───────────────────────────────────────
         const ceil = VIEW_CEILINGS[quality]?.[cam.id];
         if (ceil && !PIN) {
-          if (ceil.calls) check(stats.calls <= ceil.calls, `[${quality}] ${cam.id}: ${stats.calls} draws ≤ ${ceil.calls}`);
+          if (ceil.calls) {
+            check(stats.calls <= ceil.calls, `[${quality}] ${cam.id}: ${stats.calls} draws ≤ ${ceil.calls}`);
+            if (stats.calls > ceil.calls) {
+              // Who is drawing: visible meshes by name (an upper bound on draws,
+              // no frustum), so a ceiling miss names its suspect.
+              const census = await page.evaluate(() => {
+                const counts = new Map();
+                window.__piratesBR.renderer.scene.traverseVisible((o) => {
+                  if (!o.isMesh && !o.isPoints && !o.isLine) return;
+                  const key = (o.name || o.parent?.name || o.type) + (Array.isArray(o.material) ? `[x${o.material.length}]` : '');
+                  counts.set(key, (counts.get(key) ?? 0) + 1);
+                });
+                return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+              });
+              console.log(`     visible meshes by name: ${census.map(([k, n]) => `${k}=${n}`).join('  ')}`);
+            }
+          }
           check(stats.triangles <= ceil.triangles, `[${quality}] ${cam.id}: ${(stats.triangles / 1000).toFixed(0)}k triangles ≤ ${(ceil.triangles / 1000).toFixed(0)}k`);
         }
         views.push({ quality, ...cam, ...stats, bytes: png.length, pattern: pattern && { peak: pattern.peak, contrast: pattern.contrast, used: pattern.used } });

@@ -531,10 +531,14 @@ export const OCEAN_FRAG = /* glsl */`
     // the water pushes the ripple normals out with the horizon.
     float wading = 1.0 - smoothstep(0.25, 2.20, eyeAbove);
     float detailFade = 1.0 - smoothstep(40.0 + 120.0 * wading, 560.0 + 520.0 * wading, viewDist);
+    // Kept for the shoreline below: the same ripple field that tilts the
+    // normal also has to refract the bed the shallow tint reads.
+    vec2 rippleXZ = vec2(0.0);
     if (detailFade > 0.001) {
       vec2 ripples = rippleSlope(wp, surfaceFootprint);
       float rippleAmp = (0.24 + 0.35 * calm + 0.26 * stormSea) * detailFade;
       N = normalize(N + vec3(-ripples.x, 0.0, -ripples.y) * rippleAmp);
+      rippleXZ = ripples * detailFade;
     }
 
     // ── Base water color: deep troughs to lifted flanks. Height is
@@ -591,7 +595,29 @@ export const OCEAN_FRAG = /* glsl */`
 #else
     float sd = shoreDist(wp, v_height);
 #endif
-    float shallowMask = 1.0 - smoothstep(4.0, 52.0, sd);
+    // THE SHORE DISTANCE IS READ THROUGH THE RIPPLES (P.1 fixup, audit r1). At
+    // eye level on a beach every term below — the sand tint, the lap band, the
+    // waterline film — was a smooth function of a smooth sd, so together they
+    // painted the last 30-60 m of lagoon as one flat cyan plate with a straight
+    // bright edge against grainy sand, on every tier. Real shallows are seen
+    // THROUGH a moving surface: a ripple tilted toward the eye shows deeper
+    // bed, its back shows shallower. Offsetting sd by the ripple slope (a value
+    // already in registers) makes every shoreline term break up per ripple,
+    // and the plate becomes water. ±0.35 of slope is ±1.4 sd, i.e. ±0.28 m of
+    // apparent depth, well under the 2-11 band the lap film lives in.
+    sd = max(0.0, sd + (rippleXZ.x + rippleXZ.y) * 6.0);
+    // FROM ALTITUDE THE SHELF IS A PASTED DISC. shallowMask ramps over 48 sd
+    // (under 10 m of bed) and shallowMix served it at 0.9: from 300 m up that
+    // is a saturated cyan ellipse with a hard rim, brightest on the ellipse
+    // FALLBACK the shader paints until the bathymetry atlas lands (and for
+    // good on a client whose worker never does). A lagoon seen from a peak
+    // still reads — the fade starts at 30 m, a 60 m summit keeps 80% — but by
+    // 160 m the shelf is a fifth-strength halo on a linear fall-off, a slope
+    // not a cliff. Zero from a crow's nest: nothing about sailing changes.
+    float aloft = smoothstep(30.0, 160.0, u_cameraPos.y);
+    // At altitude the mask is a LINEAR fall-off, not a smoothstep: a smoothstep
+    // is steepest in its middle, and that middle is the rim of the disc.
+    float shallowMask = mix(1.0 - smoothstep(4.0, 52.0, sd), 1.0 - clamp(sd / 190.0, 0.0, 1.0), aloft);
     // The sand-depth tint is a TOP-DOWN read: at 20cm of eye height there is no
     // sand path through the water to see, so lowEye (computed above) fades it out
     // and the reflected sky takes over instead.
@@ -610,6 +636,11 @@ export const OCEAN_FRAG = /* glsl */`
     float shallowGrey = dot(shallowCol, vec3(0.299, 0.587, 0.114));
     shallowCol = mix(shallowCol, vec3(shallowGrey) * 0.62, u_stormIntensity * 0.85);
     float shallowMix = shallowMask * 0.9
+      * (1.0 - aloft * 0.8)
+      // …and the tint itself is read through the ripples: a face tilted
+      // toward the eye shows the sand, its back the sky. Without this the
+      // shelf is one value across the whole lagoon, whatever the surface does.
+      * clamp(0.8 + (rippleXZ.x + rippleXZ.y) * 1.8, 0.4, 1.3)
       * (1.0 - u_stormIntensity * 0.55)
       * (1.0 - u_twilightFactor * 0.42)
       * shoreLight
@@ -678,7 +709,10 @@ export const OCEAN_FRAG = /* glsl */`
     vec3 skyRefl = mix(skyTint, zenithCol, smoothstep(0.004, 0.090, rUp));
     float graze = smoothstep(0.30, 0.015, NdotV);
     vec3 grazeCol = mix(skyRefl, base, 0.34);
-    base = mix(base, grazeCol, graze * (0.30 + 0.42 * shallowMask) * (0.35 + 0.65 * lowEye));
+    // The hand-over is capped in the shallows (min 0.5): at full shallowMask
+    // it replaced 72% of the body with one sky colour and the lagoon's own
+    // per-ripple tint — the only texture it has at tier 0 — went with it.
+    base = mix(base, grazeCol, graze * (0.30 + 0.42 * min(shallowMask, 0.5)) * (0.35 + 0.65 * lowEye));
 
     // ── Diffuse key light, shadowed ─────────────────────────────────────
     float diff = max(0.0, dot(N, L));
@@ -839,8 +873,16 @@ export const OCEAN_FRAG = /* glsl */`
     // runs up the sand); what tier 0 gives up is the noise that varies its
     // strength along the beach. Mid-value, so the band is the same width.
     float lapNoise = 0.5;
+    // One octave, and only where the surf line IS (under 2.4 m of bed and
+    // inside shoreRange): a constant here made the tier-0 lap film a set of
+    // straight bands on the depth contours — the rectangular white blocks in
+    // the audit's grazing shots. The branch is coherent along the shore.
+    if (sd < 12.0 && shoreRange > 0.001) lapNoise = noise(wp * 0.3 + u_time * vec2(0.05, -0.04));
 #endif
-    float shoreBand = (1.0 - smoothstep(2.0, 11.0, sd)) * smoothstep(0.5, 0.9, lap * (0.55 + 0.45 * lapNoise));
+    // The lap film lives in the last 1.2 m of bed (2..6 sd), not the last
+    // 2.2 m: at 2..11 it washed the whole shelf of a shallow lagoon toward
+    // the film colour and the water came out near-white at eye level.
+    float shoreBand = (1.0 - smoothstep(2.0, 6.0, sd)) * smoothstep(0.5, 0.9, lap * (0.55 + 0.45 * lapNoise));
     float waterline = 1.0 - smoothstep(0.0, 2.2, sd);
     // Shore foam is a lapping FILM over lit sand, never an opaque plate. Both
     // ramps above are one-sided in sd, and sd measures the footprint
@@ -850,7 +892,9 @@ export const OCEAN_FRAG = /* glsl */`
     // snow and the atoll's reef slabs as pancakes floating on it. Capping what
     // the shore band may contribute keeps the surf line and gives the shelf
     // back its turquoise.
-    float shoreFoam = min(max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55), 0.4) * shoreRange;
+    // Surf is a metre-scale feature; from 300 m up it is a pasted white ring
+    // around every rock and cay (audit r1), so it fades with the shelf.
+    float shoreFoam = min(max(shoreBand * (0.3 + 0.6 * shoreDetail), waterline * 0.55), 0.32) * shoreRange * (1.0 - aloft * 0.85);
     foam = clamp(foam + shoreFoam, 0.0, 1.0);
 
     // Whitecaps are white PAINT, not a light source: they are as bright as what
@@ -862,7 +906,7 @@ export const OCEAN_FRAG = /* glsl */`
     // it floats on rather than paper white, so a 30 cm shelf reads as bright
     // warm turquoise with the sand showing through it. Crest whitecaps out at
     // sea are untouched and keep the full white.
-    vec3 shoreFilm = (shallowCol * 1.10 + vec3(0.12, 0.09, 0.04))
+    vec3 shoreFilm = (shallowCol * 1.10 + vec3(0.12, 0.09, 0.04) * shoreLight)
                    * lightScale
                    * mix(vec3(1.0), vec3(1.0, 0.82, 0.66), u_twilightFactor * 0.7);
     vec3 shoreFoamCol = mix(shoreFilm, foamCol, 0.22);

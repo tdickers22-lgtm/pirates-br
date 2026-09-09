@@ -224,6 +224,17 @@ function applyTerrainDetail(
         // Each octave samples a ROTATED lattice. A value-noise grid shares the
         // world axes, and three co-aligned octaves stack their cell edges into
         // a visible checkerboard on flat ground (caught in verification).
+        // ── NO OCTAVE UNDER THE PIXEL ──────────────────────────────────────
+        // Every octave below was evaluated at whatever frequency the screen
+        // happened to give it, so on a hillside 20-100 m away the 0.42 m and
+        // 0.11 m cells were one pixel or less and the surface was per-pixel
+        // speckle — TV static, worst on the bald low-tier islands that have no
+        // foliage over it (audit r1). fwidth(tP) is the lattice's world size
+        // of one pixel; times an octave's frequency it is cells per pixel. An
+        // octave is whole under ~0.15 cells/px (6.7 px per cell) and gone by
+        // 0.45 (under 2.2 px per cell), replaced by its own mean so the material
+        // weights below are untouched. Two derivative ops per fragment.
+        + 'float tFw = max(fwidth(tP.x), fwidth(tP.y));\n'
         + 'mat2 tR0 = mat2(0.71, 0.70, -0.70, 0.71);\n'
         + 'mat2 tR1 = mat2(0.87, -0.50, 0.50, 0.87);\n'
         + 'mat2 tR2 = mat2(0.36, 0.93, -0.93, 0.36);\n'
@@ -241,9 +252,13 @@ function applyTerrainDetail(
         // Two decorrelated octaves cancel each other's zero sets and take it to
         // 11.7. That is one extra hash pair on the low tier and it is the only
         // ground detail a low-tier player gets — nothing else is drawn on it.
-        + 'float nFine = tGrad(tR1 * tP * 2.37 + 13.7);\n'        // ~0.42m patches
+        + 'float nFine = 0.5;\n'
+        + 'float fadeFine = 1.0 - smoothstep(0.15, 0.45, tFw * 2.37);\n'
+        + 'if (fadeFine > 0.002) nFine = mix(0.5, tGrad(tR1 * tP * 2.37 + 13.7), fadeFine);\n'   // ~0.42m patches
         + (octaves >= 3
-          ? 'float nGrain = tGrad(tR2 * tP * 9.13 + 5.3);\n'      // ~0.11m grain
+          ? 'float nGrain = 0.5;\n'
+            + 'float fadeGrain = 1.0 - smoothstep(0.15, 0.45, tFw * 9.13);\n'
+            + 'if (fadeGrain > 0.002) nGrain = mix(0.5, tGrad(tR2 * tP * 9.13 + 5.3), fadeGrain);\n'  // ~0.11m grain
           : 'float nGrain = nFine;\n')
         // ── NEAR-FIELD GRIT ────────────────────────────────────────────────
         // The ladder above bottoms out at ~0.12m, and 0.12m features are ~1/3
@@ -262,8 +277,8 @@ function applyTerrainDetail(
             // the near field put the graded ground score back up from 12.2 to
             // 16.0. At 1m of eye height a 3.5cm cell is several pixels across,
             // so its lattice is exactly as visible as the 0.42m one.
-            + '  nGrit = tGrad(tR2 * tP * 31.7 + 21.9) - 0.5;\n'
-            + (octaves >= 3 ? '  nGrit += (tGrad(tR0 * tP * 87.3 + 41.1) - 0.5) * 0.55;\n' : '')
+            + '  nGrit = (tGrad(tR2 * tP * 31.7 + 21.9) - 0.5) * (1.0 - smoothstep(0.15, 0.45, tFw * 31.7));\n'
+            + (octaves >= 3 ? '  nGrit += (tGrad(tR0 * tP * 87.3 + 41.1) - 0.5) * 0.55 * (1.0 - smoothstep(0.15, 0.45, tFw * 87.3));\n' : '')
             + '  nGrit *= near;\n'
             + '}\n'
           : '')
