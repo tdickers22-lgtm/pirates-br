@@ -211,11 +211,14 @@ const BUDGETS = {
     { scene: 'dock-vista', label: 'wide island vista (low tier)', measured: 601, draws: 680, tris: 580_000 },
     { scene: 'open-sea', label: 'open water (low tier)', measured: 283, draws: 320, tris: 180_000 },
     // The same device must afford the places a pirate actually walks into.
-    // Audit r1: inland/cave 731-754k tris, respawn deck 725 draws. Keep the
-    // existing dock ceiling for these newly covered views, never widen it.
-    { scene: 'cave-interior', label: 'cave interior (low tier)', measured: 620, draws: 680, tris: 580_000 },
-    { scene: 'island-interior', label: 'island interior (low tier)', measured: 459, draws: 680, tris: 580_000 },
-    { scene: 'deck-aft', label: 'on-deck aft look (low tier)', measured: 725, draws: 680, tris: 580_000 },
+    // Audit r1: inland/cave 731-754k tris, respawn deck 725 draws. Pinned
+    // AFTER the fixes (P.1 a+b: lightweight instance meshes on low, cave
+    // rubble on the far mesh, remote pirates culled under 6 px) at the
+    // measured value plus ~12% for the bot fleet's drift: cave 578 / 494k,
+    // inland 428 / 392k, deck 402 / 349k. Tighten, never widen.
+    { scene: 'cave-interior', label: 'cave interior (low tier)', measured: 578, draws: 650, tris: 560_000 },
+    { scene: 'island-interior', label: 'island interior (low tier)', measured: 428, draws: 520, tris: 470_000 },
+    { scene: 'deck-aft', label: 'on-deck aft look (low tier)', measured: 402, draws: 500, tris: 440_000 },
   ],
   // 'balanced' IS THE DEFAULT VERDICT FOR MOST MACHINES — every Intel laptop,
   // every phone, every Safari Air and every 8-thread desktop lands here — and
