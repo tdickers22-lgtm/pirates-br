@@ -206,7 +206,15 @@ const READ_SCENE = () => {
     // correctness failure whenever a build lands on the frame it samples — a
     // flake that would eventually be "fixed" by deleting the assertion that
     // matters most here.
+    //
+    // `cullSphere` alone did NOT exclude it: IslandBuilder writes the sphere
+    // during the build, so a group in its hold has one. The hold now carries
+    // its own flag (Game.drainIslandBuildQueue), which is the only thing that
+    // can tell "held for one frame" apart from "the cull hid it" — and the
+    // cull is now the sole writer of `visible`, so everything else here means
+    // exactly what it says.
     if (!group.userData.cullSphere) continue;
+    if (group.userData.buildRevealPending) continue;
     culled += 1;
     const sphere = group.userData.cullSphere;
     // The sphere the cull tested is padded for the shadow pass; test the BARE

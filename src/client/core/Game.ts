@@ -3030,7 +3030,13 @@ export class Game {
    *  ever compiles per frame. */
   drainIslandBuildQueue(count = 1) {
     if (this.islandAwaitingReveal) {
-      this.islandAwaitingReveal.visible = true;
+      // Hand the group BACK to the cull rather than forcing it visible. The
+      // release used to write `visible = true` unconditionally, which drew an
+      // island the cull had just decided was off screen for a whole frame, and
+      // — because `visible` was the only record of the hold — made "invisible
+      // with a cull sphere" mean two different things. See buildRevealPending.
+      this.islandAwaitingReveal.userData.buildRevealPending = false;
+      this.islandAwaitingReveal.visible = this.islandGroupInFrustum(this.islandAwaitingReveal);
       this.islandAwaitingReveal = null;
     }
     for (let i = 0; i < count && this.pendingIslandBuilds.length > 0; i++) {
@@ -3056,6 +3062,13 @@ export class Game {
           this.islandDetailShown.set(island.id, true);
         }
         if (group && !this.islandAwaitingReveal) {
+          // The hold is a FLAG, not a bare `visible = false`: cullIslandGroups
+          // owns `visible` and runs earlier in the same frame, so without a
+          // record of its own the next cull pass would either reveal the group
+          // early or be indistinguishable from one that culled it. Anything
+          // asking "was this island culled?" — the LOD gate included — reads
+          // this flag first.
+          group.userData.buildRevealPending = true;
           group.visible = false;
           this.islandAwaitingReveal = group;
         }
@@ -3712,15 +3725,26 @@ export class Game {
       if (!group) continue;
       const sphere = group.userData.cullSphere as { x: number; y: number; z: number; r: number } | undefined;
       if (!sphere) continue;
-      this.cullSphere.center.set(sphere.x, sphere.y, sphere.z);
-      this.cullSphere.radius = sphere.r;
-      let keep = this.cullFrustum.intersectsSphere(this.cullSphere);
-      if (!keep && shadowCamera) {
-        this.cullSphere.radius = sphere.r + Game.SHADOW_CULL_PAD;
-        keep = this.shadowCullFrustum.intersectsSphere(this.cullSphere);
-      }
-      group.visible = keep;
+      // A group still inside its one-frame build hold stays hidden whatever the
+      // frustum says — and stays flagged, so nothing mistakes the hold for a
+      // cull verdict.
+      group.visible = this.islandGroupInFrustum(group, !!shadowCamera)
+        && !group.userData.buildRevealPending;
     }
+  }
+
+  /** The cull verdict for one island group against the frustums prepared by the
+   *  current `cullIslandGroups` pass. Split out so the build-reveal release can
+   *  hand a group back to the cull instead of forcing it visible. */
+  private islandGroupInFrustum(group: THREE.Object3D, withShadow = true): boolean {
+    const sphere = group.userData.cullSphere as { x: number; y: number; z: number; r: number } | undefined;
+    if (!sphere) return true;
+    this.cullSphere.center.set(sphere.x, sphere.y, sphere.z);
+    this.cullSphere.radius = sphere.r;
+    if (this.cullFrustum.intersectsSphere(this.cullSphere)) return true;
+    if (!withShadow || !this.renderer.getShadowCullCamera()) return false;
+    this.cullSphere.radius = sphere.r + Game.SHADOW_CULL_PAD;
+    return this.shadowCullFrustum.intersectsSphere(this.cullSphere);
   }
 
   private updateEnvironmentLod() {
