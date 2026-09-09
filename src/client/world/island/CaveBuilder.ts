@@ -14,7 +14,7 @@ import { registerBudgetLight } from '../../rendering/LightBudget.js';
 import { buildCaveCutout, type CaveCutout, caveCutoutHit } from './CaveMouthCutout.js';
 import type { CaveMouthCarve, IslandBuildCtx } from './context.js';
 import { ensureMeshGround, type MeshGround } from './GroundTruth.js';
-import { attachInstanceLod } from './InstanceLod.js';
+import { attachInstanceFarLod, attachInstanceLod } from './InstanceLod.js';
 
 /** The authored boulder GLBs the portal frame and the cave rubble are built
  *  from. `a` is a rounded dome, `b` an angular leaning slab, `c` a split stack —
@@ -926,21 +926,25 @@ export function buildCaves(ctx: IslandBuildCtx) {
     for (const [asset, list] of portalXf) {
       const merged = assets.mergedGeometry(asset);
       if (!merged || list.length === 0) continue;
-      const src = Array.isArray(merged.material) ? merged.material[0] : merged.material;
-      const mat = (src as THREE.MeshStandardMaterial).clone();
       // THE FRAME IS ONE COLOUR BY DESIGN — it is the island's rock, not the
       // boulder GLB's. So it must be told to IGNORE the tint baked into the
       // merged geometry, or `.color` stops replacing and starts multiplying and
       // the portal goes black: cost-model §12.4 trap 4. Turning the switch off
       // also hands `roughness`/`metalness` back their ordinary meaning, which is
       // what the three lines below assume.
-      const collapsed = mat as Partial<CollapsedAssetMaterial>;
-      if (collapsed.bakedTint !== undefined) collapsed.bakedTint = false;
-      mat.color.copy(portalRockCol);
-      mat.roughness = 1;
-      mat.metalness = 0;
-      mat.flatShading = true;
-      mat.needsUpdate = true;
+      const dressPortalRock = (source: THREE.Material | THREE.Material[]): THREE.MeshStandardMaterial => {
+        const src = Array.isArray(source) ? source[0] : source;
+        const m = (src as THREE.MeshStandardMaterial).clone();
+        const collapsed = m as Partial<CollapsedAssetMaterial>;
+        if (collapsed.bakedTint !== undefined) collapsed.bakedTint = false;
+        m.color.copy(portalRockCol);
+        m.roughness = 1;
+        m.metalness = 0;
+        m.flatShading = true;
+        m.needsUpdate = true;
+        return m;
+      };
+      const mat = dressPortalRock(merged.material);
       // BIGGEST FIRST, for the same reason the prop scatter sorts: three draws
       // the first `count` instances of a batch, so an ordering by scale is what
       // makes lowering the count mean "lose the rubble" instead of "lose
@@ -967,6 +971,25 @@ export function buildCaves(ctx: IslandBuildCtx) {
       if (!merged.geometry.boundingBox) merged.geometry.computeBoundingBox();
       const box = merged.geometry.boundingBox;
       attachInstanceLod(inst, list.map((entry) => entry.scale), box ? box.max.y - box.min.y : 0);
+      // AND THE FAR SIBLING THE PROP BATCHES HAVE HAD SINCE 7.4b. The portal
+      // frame is built out of the same boulder GLBs the scatterer uses, every
+      // one of which ships a `<name>_far.glb` at ~20-30% of the triangles — but
+      // this batch was never given one, so a cave mouth across a bay drew the
+      // full 4.6k-triangle boulder per instance while the palm beside it drew
+      // its decimated twin. Measured on the world-fidelity views (seed
+      // 20260801, SwiftShader): 57k of the LOW tier's 344k-triangle calm-water
+      // frame and 312k of the HIGH tier's 1,675k were portal rock, colour and
+      // shadow passes together, all of it on mouths tens of pixels wide. Count
+      // thinning could not touch it — the pixel floor keeps the jaws to the rim
+      // of the map on purpose, because the portal is a landmark.
+      const far = assets.mergedFarGeometry(asset);
+      if (far) {
+        attachInstanceFarLod(
+          inst,
+          { geometry: merged.geometry, material: mat },
+          { geometry: far.geometry, material: dressPortalRock(far.material) },
+        );
+      }
       group.add(inst);
       portalRockCount += list.length;
     }
