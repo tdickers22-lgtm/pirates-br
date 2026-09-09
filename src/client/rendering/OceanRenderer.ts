@@ -564,8 +564,19 @@ export const OCEAN_FRAG = /* glsl */`
       float tint = noise(wp * 0.021 + u_time * vec2(0.004, 0.003));
       flank = mix(flank, 0.5 + (tint - 0.5) * 0.34, flankFlat);
     }
-    vec3 deep   = mix(vec3(0.008, 0.09, 0.28), vec3(0.004, 0.045, 0.15), stormSea);
-    vec3 lifted = mix(vec3(0.045, 0.30, 0.50), vec3(0.11, 0.33, 0.44), stormSea);
+    // THE BODY COLOUR FOLLOWS THE SKY, NOT ONLY THE SWELL (storm-12 / r3-102).
+    // These two mixes rode stormSea alone — the WAVE field, which inside the
+    // ring is ~0 at every phase (stormWaveIntensity's inside term is
+    // phase01 * 0.38 and its edge term needs distOutside > 0). So a player
+    // standing 95 m from a slate wall of weather got water whose body was the
+    // full tropical blue, and test-storm-wall's noon read said so: sea chroma
+    // 28.8 against the wall's 14.2, a 2.03x ratio under a 1.3x cap. The sky's
+    // own storminess belongs here: what greys open water under an overcast is
+    // the light, not the chop. Fair weather is untouched — u_stormIntensity is
+    // 0 there, so this is byte-for-byte the old mix.
+    float bodyStorm = max(stormSea, u_stormIntensity);
+    vec3 deep   = mix(vec3(0.008, 0.09, 0.28), vec3(0.004, 0.045, 0.15), bodyStorm);
+    vec3 lifted = mix(vec3(0.045, 0.30, 0.50), vec3(0.11, 0.33, 0.44), bodyStorm);
     vec3 base   = mix(deep, lifted, flank);
 
     // ── Shore shallows: turquoise ramp toward the beach ─────────────────
@@ -623,7 +634,13 @@ export const OCEAN_FRAG = /* glsl */`
     // blue constant: this term, not the body colour, is what carried the night
     // inversion at grazing angles.
     vec3 skyTint = skyShape(u_horizonColor);
-    vec3 reflCol = mix(vec3(0.38, 0.54, 0.82) * lightScale, skyTint, 0.42);
+    // AND SO DOES THE REFLECTION. mix(base, reflCol, fresnel * 0.42) is applied
+    // AFTER the storm blend below, so this constant was putting a hard-coded
+    // saturated blue back into water the storm had just greyed — at grazing
+    // angles (fresnel -> 1) up to 42% of it, ungated by weather while every
+    // other term in this shader is gated. Under a slate front the sky the water
+    // mirrors IS the slate front.
+    vec3 reflCol = mix(vec3(0.38, 0.54, 0.82) * lightScale, skyTint, 0.42 + 0.52 * u_stormIntensity);
     reflCol = mix(reflCol, vec3(1.0, 0.55, 0.30), sunPath * sunLow * 0.6);
     // UNDER AN OVERCAST SKY THE SEA IS THE SKY. Most of what the eye gets off
     // water at grazing angles is reflection, so a slate front turns the water

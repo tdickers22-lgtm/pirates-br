@@ -117,6 +117,28 @@ async function main() {
       return { sky: bandStats(png, SKY_BAND[0], SKY_BAND[1]), sea: bandStats(png, SEA_BAND[0], SEA_BAND[1]) };
     };
     const bolt = () => page.evaluate(() => Number(window.__piratesBR.envFx?.debugBoltEnvelope?.() ?? 0));
+
+    // ── NO STRIKES WHILE THE SHUTTER IS OPEN ──────────────────────────────
+    // ?stormdemo rolls its own bolt every 0.56-1.92 s (EnvironmentFx keeps the
+    // local roll because the preview has no server behind it), and a screenshot
+    // on the software rasteriser is seconds. Rejecting flashed frames alone was
+    // therefore not enough: 13 of 18 attempts at this stand were rejected and
+    // the read never converged. So the demo's own countdown is pinned past the
+    // end of the run — the branch fires only when lightningTimer falls through
+    // zero — and the strike already in flight is allowed its 0.45 s to finish.
+    // Nothing about the STORM is pinned by this; only the strobe on top of it,
+    // which is not what either cap grades.
+    const pinned = await page.evaluate(() => {
+      const fx = window.__piratesBR.envFx;
+      if (!fx || typeof fx.lightningTimer !== 'number') return false;
+      const hold = () => { fx.lightningTimer = 1e6; requestAnimationFrame(hold); };
+      hold();
+      return true;
+    });
+    await page.waitForTimeout(1_500);
+    expect('lightning pinned off for the read (envFx.lightningTimer held) and no strike burning',
+      pinned && (await bolt()) === 0,
+      'a strobe frame would be graded as the storm look — this is what made the gate a coin flip');
     const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 
     /**
