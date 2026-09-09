@@ -20,10 +20,23 @@
 // Thresholds are deliberately generous (verifier note on storm-18).
 // PIRATES_BR_STORM_WALL_SHOTS=1 also writes the frames to test-results/storm-wall/.
 //
+// EVERY READ IS THE MEDIAN OF FIVE CONVERGED, FLASH-FREE FRAMES — see
+// gradedFrame. Before that (P.0b), one flat 2,500 ms settle and one shot made
+// the verdict a coin flip: gate-0 read 1.26 / 2.65 / 2.50 / 2.43 on the noon
+// row at ONE commit. Pinned, two runs of one commit read 2.00× and 2.01×.
+//
 // RED ON HEAD (2026-09-02, overlays cleared): noon storm sea chroma 39.3 vs sky
-// 5.9 (6.67×) — the blue sea under a slate front. The night row reads 0.56× at
-// this placement and is green; it stays as the guard against the inversion.
-// Green on the noon row is the storm-look lane's job.
+// 5.9 (6.67×) — the blue sea under a slate front. Pinned and re-measured
+// 2026-09-09 it is 27.9 vs 13.9 (2.01×): improved, still red, still the
+// storm-look lane's job. The night row is green at 0.83-0.91× and stays as the
+// guard against the inversion.
+//
+// KNOWN, NOT FIXED HERE: t=854 is labelled "noon" but renders as a dark hour
+// (see test-results/storm-wall/noon-inside-near-out.png). The clause it grades
+// — sea chroma against sky chroma under the front — is meaningful at any hour,
+// but whoever closes the row should check the stand actually shows the wall:
+// at 0.9 x r with pitch +0.06 the bank fills the upper half and a bright band
+// of open horizon survives underneath it, which is its own coherence question.
 //
 //   node scripts/run-all-tests.mjs --only storm-wall
 import { chromium } from 'playwright';
