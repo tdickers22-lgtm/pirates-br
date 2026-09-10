@@ -185,6 +185,7 @@ runner grows an `expectRed` vocabulary. They are not in the quick tier.
 | `test-aim-wire` | POSE-01 wire half: `aiming`/`atCapstan` cross the wire, are momentary (cleared at the top of every tick so a dropped client cannot freeze mid-aim), refuse full hands (chest/cannon/swimming/reload), a cutlass aim stays a GUARD, and a bot raises hers from the turn not the shot | POSE-01 avatar-06/11 (lane 7.5); red proof: comment out `updateAimStance` (2 fail) or the `player.atCapstan = true` line (1 fail) |
 | `test-asset-bounds` | boulder_b r 2.6 vs reach 2.3, log sphere 0.38x (world-space TRS applied) | ASSETS lane |
 | `glb-census --check` | the models README's counts vs disk + `ASSET_NAMES`/`FAR_ASSET_NAMES` (78 = 63 + 15, 0 unwired) | PROPCOL-01 assets-20 (lane 2.5) |
+| `test-far-lod-integrity` | every `<name>_far.glb` parsed and welded at 1e-4 against its source: rocks 0 boundary loops, every decimated far file ≥ 92% of the source's surface area and ≤ 40% of its triangles; the shark puppet on triangles only | [rocks] 2026-09-09; red proof: the 2026-09-06 far files (27 failures — boulder_a 76 loops / 42% area, searock_a 93 / 51%, bush 123 / 59%), Collapse on split vertices deleted faces |
 | `test-quality-preference` | Safari M2 Air (opaque "Apple GPU") and four other rows grade `balanced` | PERF-01 (lane 2.6) |
 | `test-storm-wall` (browser) | noon sea chroma 6.67× sky | STORMVIS-01 (lane 5.4) |
 

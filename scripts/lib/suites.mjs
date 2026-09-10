@@ -59,6 +59,12 @@ export const LOGIC = [
   quick(tsx('test-terrain-detail.mjs')),
   tsx('test-perf-scenes.mjs'),
   quick(tsx('test-foliage-geometry.mjs')),
+  // [rocks] (2026-09-09). Every `<name>_far.glb` welded at 1e-4 against its
+  // source: a rock's far file has no boundary loop, every decimated far file
+  // keeps ≥ 92% of the surface area and ≤ 40% of the triangles. The first far
+  // files were Collapse run on split vertices — half the surface deleted —
+  // and nothing measured them as surfaces. 0.2 s of file arithmetic.
+  quick(plain('test-far-lod-integrity.mjs')),
   quick(tsx('test-ocean-dynamics.mjs')),
   // PLAID-01 (wave 3.4). The far-ocean lattice, graded as a 2-D power spectrum
   // of the shipped foam field rather than as an FFT of a screenshot: the plaid
