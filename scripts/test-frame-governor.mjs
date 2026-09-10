@@ -692,6 +692,134 @@ section('A 30 Hz CAP IS NOT A SLOW MACHINE — setDisplayHz (perf-v-01)');
     Math.abs(gov.getTargetBudgetMs() - 1000 / 60) < 0.01, `${gov.getTargetBudgetMs()} ms`);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+section('A TIER IS A LOOK; A GPU CLASS IS A FILL CEILING — fillCeilingForGpu (airsafe)');
+// ═══════════════════════════════════════════════════════════════════════════
+// RED on HEAD 8d5cc8db: `decideRenderQuality` hands back a `?quality=` or a
+// stored player choice FIRST and uncapped, so a manual High on the owner's
+// fanless M2 Air opened at 1.25x on its 1470x956 dPR-2 panel — 3.37 M
+// framebuffer pixels, a 2048² shadow map and 2x MSAA behind the post chain —
+// and the GPU firmware locked up ("firmware-detected lockup", WindowServer
+// watchdog, the whole desktop down; the same lockup hit this repo's own
+// headless runs on 2026-09-08). pixelRatioCaps knew the tier and the viewport
+// and nothing about the part. Every row below that names the Air failed.
+{
+  const mod = await import('../src/client/rendering/FrameGovernor.js');
+  const has = (n) => typeof mod[n] === 'function';
+  expect('fillCeilingForGpu is exported', has('fillCeilingForGpu'));
+  expect('cappedShadowMapSize, composerMsaaSamples, fillCapReport and fillClassFor are exported',
+    has('cappedShadowMapSize') && has('composerMsaaSamples') && has('fillCapReport') && has('fillClassFor'));
+  const fb = (w, h, r) => Math.round(w * r) * Math.round(h * r);
+  const shadow = (size, cls) => (has('cappedShadowMapSize') ? mod.cappedShadowMapSize(size, cls) : -1);
+  const msaa = (q, cls) => (has('composerMsaaSamples') ? mod.composerMsaaSamples(q, cls) : -1);
+
+  // THE OWNER'S MACHINE: Chrome, "Apple M2", 8 cores, 1470x956 @2, High pinned.
+  const airHigh = pixelRatioCaps('high', 1470, 956, 2, 'apple-base');
+  const airHighPx = fb(1470, 956, airHigh.maxPixelRatio);
+  expect(`a High pin on an M2 Air opens at <= 1.45 Mpx (${(airHighPx / 1e6).toFixed(2)} Mpx at ${airHigh.maxPixelRatio.toFixed(3)}x)`,
+    airHighPx <= 1_450_000 && airHigh.maxPixelRatio <= 1 + 1e-9);
+  expect(`…with a 1536 shadow map, not 2048 (${shadow(2048, 'apple-base')})`, shadow(2048, 'apple-base') === 1536);
+  expect(`…and keeps 2x MSAA — the resolve is tile memory there (${msaa('high', 'apple-base')})`, msaa('high', 'apple-base') === 2);
+  expect(`…and its ladder floor is still High's 0.8 (${airHigh.minPixelRatio.toFixed(3)})`, Math.abs(airHigh.minPixelRatio - 0.8) < 0.005);
+
+  // AN M2 MAX (12 cores, a fan) is today's numbers, untouched.
+  const maxHigh = pixelRatioCaps('high', 1470, 956, 2, 'apple-pro');
+  expect(`a High pin on an M2 Max stays at today's 1.25x (${maxHigh.maxPixelRatio.toFixed(3)}, ${(fb(1470, 956, maxHigh.maxPixelRatio) / 1e6).toFixed(2)} Mpx)`,
+    Math.abs(maxHigh.maxPixelRatio - 1.25) < 0.005);
+  expect(`…and today's 2048 shadow map (${shadow(2048, 'apple-pro')})`, shadow(2048, 'apple-pro') === 2048);
+  expect('…and discrete / unknown are uncapped too',
+    Math.abs(pixelRatioCaps('high', 1470, 956, 2, 'discrete').maxPixelRatio - 1.25) < 0.005
+    && Math.abs(pixelRatioCaps('high', 1470, 956, 2, 'unknown').maxPixelRatio - 1.25) < 0.005
+    && shadow(2048, 'discrete') === 2048 && shadow(2048, 'unknown') === 2048);
+
+  // THE FOUR-ARGUMENT CALL IS BYTE-IDENTICAL: 'unknown' is the default.
+  let drift = null;
+  for (const q of ['low', 'balanced', 'high']) {
+    for (const [w, h, d] of [[390, 844, 3], [1366, 768, 1], [1470, 956, 2], [1920, 1080, 1], [3840, 2160, 1]]) {
+      const a = pixelRatioCaps(q, w, h, d);
+      const b = pixelRatioCaps(q, w, h, d, 'unknown');
+      if (a.maxPixelRatio !== b.maxPixelRatio || a.minPixelRatio !== b.minPixelRatio) drift ??= `${q} ${w}x${h}@${d}`;
+    }
+  }
+  expect('every existing caller (four arguments) gets exactly what it got before', drift === null, drift ?? '');
+
+  // MEDIUM ON THE AIR IS UNCHANGED — the tier the owner plays, and the one that
+  // does not crash: ratio 1.0, 1536², 2x. That fill IS the apple-base ceiling.
+  const airBal = pixelRatioCaps('balanced', 1470, 956, 2, 'apple-base');
+  const airBalToday = pixelRatioCaps('balanced', 1470, 956, 2);
+  expect(`Medium on the Air is byte-identical (${airBal.maxPixelRatio.toFixed(3)} / ${airBal.minPixelRatio.toFixed(3)}, shadow ${shadow(1536, 'apple-base')}, msaa ${msaa('balanced', 'apple-base')})`,
+    airBal.maxPixelRatio === airBalToday.maxPixelRatio && airBal.minPixelRatio === airBalToday.minPixelRatio
+    && shadow(1536, 'apple-base') === 1536 && msaa('balanced', 'apple-base') === 2);
+  const airLow = pixelRatioCaps('low', 1470, 956, 2, 'apple-base');
+  expect(`…and so is Low (${airLow.maxPixelRatio.toFixed(3)})`, Math.abs(airLow.maxPixelRatio - 0.62) < 0.005);
+
+  // SAFARI'S OPAQUE "Apple GPU" gets the Air's numbers: it may be an Ultra, but
+  // the cost of being wrong upward is a dead desktop.
+  const opq = pixelRatioCaps('high', 1470, 956, 2, 'apple-opaque');
+  expect(`apple-opaque is capped like apple-base (${opq.maxPixelRatio.toFixed(3)}, shadow ${shadow(2048, 'apple-opaque')})`,
+    opq.maxPixelRatio === airHigh.maxPixelRatio && shadow(2048, 'apple-opaque') === 1536 && msaa('high', 'apple-opaque') === 2);
+
+  // INTEGRATED (Intel UHD 620 ultrabook, 1536x864 @1.25) at High: <= 1.2 Mpx,
+  // 1024² and NO samples — the resolve is main-memory traffic there.
+  const uhd = pixelRatioCaps('high', 1536, 864, 1.25, 'integrated');
+  const uhdPx = fb(1536, 864, uhd.maxPixelRatio);
+  // The ceiling is a square root and the buffer is integer-sized, so the
+  // rounded dimensions may overshoot the budget by up to one row plus one
+  // column (1536 + 864 px here) — a rounding, not a loosening.
+  expect(`a High pin on an Intel UHD 620 opens at <= 1.2 Mpx (${(uhdPx / 1e6).toFixed(2)} Mpx at ${uhd.maxPixelRatio.toFixed(3)}x)`,
+    uhdPx <= 1_200_000 + 1536 + 864 && uhd.maxPixelRatio <= 1 + 1e-9);
+  expect(`…shadow 1024 and 0 samples (${shadow(2048, 'integrated')}, ${msaa('high', 'integrated')})`,
+    shadow(2048, 'integrated') === 1024 && msaa('high', 'integrated') === 0);
+
+  // A PHONE (Adreno, 412x915 @2.625) at High: <= 0.9 Mpx, but never narrower
+  // than the 640 px legibility floor — a 640 px buffer is not what locks a GPU
+  // up, and pixelRatioCaps' own floor still wins.
+  const phone = pixelRatioCaps('high', 412, 915, 2.625, 'mobile-gpu');
+  const phonePx = fb(412, 915, phone.maxPixelRatio);
+  expect(`a High pin on a phone opens at <= 0.9 Mpx (${(phonePx / 1e6).toFixed(2)} Mpx) and >= 640 px wide (${(412 * phone.maxPixelRatio).toFixed(0)} px)`,
+    phonePx <= 900_000 * 1.02 && 412 * phone.maxPixelRatio >= 640 - 0.5);
+  const narrow = pixelRatioCaps('low', 390, 844, 3, 'mobile-gpu');
+  expect(`the legibility floor beats the class cap on a narrow panel (${(390 * narrow.maxPixelRatio).toFixed(0)} px wide)`,
+    390 * narrow.maxPixelRatio >= 640 - 0.5);
+
+  // SOFTWARE caps only the pixel count (0.6 Mpx) — never the shadow map or the
+  // samples — and at the 960x540 @1 every rig in this repo uses nothing binds.
+  const sw = pixelRatioCaps('high', 960, 540, 1, 'software');
+  const swToday = pixelRatioCaps('high', 960, 540, 1);
+  expect(`a 960x540 @1 software rig at High is byte-identical (${sw.maxPixelRatio.toFixed(3)})`,
+    sw.maxPixelRatio === swToday.maxPixelRatio && sw.minPixelRatio === swToday.minPixelRatio);
+  expect(`…and the software class never touches the shadow map or the samples (${shadow(2048, 'software')}, ${msaa('high', 'software')})`,
+    shadow(2048, 'software') === 2048 && msaa('high', 'software') === 2);
+  expect('…and a URL pin on the software rasteriser is a measurement rig: its fill class is uncapped',
+    has('fillClassFor') && mod.fillClassFor('software', 'url') === 'unknown'
+    && mod.fillClassFor('software', 'player') === 'software'
+    && mod.fillClassFor('apple-base', 'url') === 'apple-base');
+
+  // THE TABLE ITSELF, so a change to it is a visible change.
+  if (has('fillCeilingForGpu')) {
+    const t = (c) => mod.fillCeilingForGpu(c);
+    expect('apple-base: 1.45 Mpx / ratio <= 1.0 / shadow <= 1536 / msaa <= 2 / opens at the floor',
+      t('apple-base').maxFramebufferPixels === 1_450_000 && t('apple-base').maxPixelRatio === 1
+      && t('apple-base').maxShadowMapSize === 1536 && t('apple-base').msaaSamplesCap === 2 && t('apple-base').openAtFloor === true);
+    expect('integrated: 1.2 Mpx / 1.0 / 1024 / 0 / floor; mobile-gpu: 0.9 Mpx / 1.0 / 1024 / 0 / floor',
+      t('integrated').maxFramebufferPixels === 1_200_000 && t('integrated').maxShadowMapSize === 1024 && t('integrated').msaaSamplesCap === 0 && t('integrated').openAtFloor === true
+      && t('mobile-gpu').maxFramebufferPixels === 900_000 && t('mobile-gpu').maxShadowMapSize === 1024 && t('mobile-gpu').msaaSamplesCap === 0 && t('mobile-gpu').openAtFloor === true);
+    expect('apple-pro / discrete / unknown: no cap beyond the tier\'s own, and they open where they always did',
+      ['apple-pro', 'discrete', 'unknown'].every((c) => !Number.isFinite(t(c).maxFramebufferPixels) && !Number.isFinite(t(c).maxShadowMapSize) && t(c).openAtFloor === false));
+  }
+
+  // THE REPORT the renderer hands the settings panel: binds on the Air at High,
+  // not on the Max, not on the Air's own Medium.
+  if (has('fillCapReport')) {
+    const r = (q, cls) => mod.fillCapReport(q, 1470, 956, 2, cls, q === 'low' ? 0 : q === 'high' ? 2048 : 1536);
+    const airReport = r('high', 'apple-base');
+    expect(`fillCapReport binds for High on the Air (px ${airReport.framebufferPixels} of ${airReport.tierFramebufferPixels}, shadow ${airReport.shadowMapSize} of ${airReport.tierShadowMapSize})`,
+      airReport.binds === true && airReport.openAtFloor === true && airReport.framebufferPixels <= 1_450_000 && airReport.shadowMapSize === 1536);
+    expect('…and not for High on an M2 Max, nor for Medium or Low on the Air',
+      r('high', 'apple-pro').binds === false && r('balanced', 'apple-base').binds === false && r('low', 'apple-base').binds === false);
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);
   process.exit(1);

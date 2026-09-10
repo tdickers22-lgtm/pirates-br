@@ -452,12 +452,25 @@ export type QualityVerdict = {
 export function decideRenderQuality(): QualityVerdict {
   const param = new URLSearchParams(window.location.search).get('quality');
   const requested = parseRenderQuality(param);
-  if (requested) return { quality: requested, reason: 'url', rendererString: null };
+  if (requested) return pinnedVerdict(requested, 'url');
 
   const stored = loadQualityPreference();
-  if (stored !== 'auto') return { quality: stored, reason: 'player', rendererString: readGpuRendererString() };
+  if (stored !== 'auto') return pinnedVerdict(stored, 'player');
 
   return detectRenderQuality();
+}
+
+/**
+ * A pinned tier still needs the GPU's name. The tier is a LOOK; the part's
+ * fill ceiling (FrameGovernor.fillCeilingForGpu) is what keeps a manual High
+ * on a fanless Air from locking the GPU up, and it has to know what part it
+ * is. The URL path used to return `rendererString: null`, which classified
+ * every `?quality=` session as 'unknown' — uncapped — and that is the exact
+ * path a manual High takes (airsafe).
+ */
+function pinnedVerdict(quality: RenderQuality, reason: 'url' | 'player'): QualityVerdict {
+  const rendererString = readGpuRendererString();
+  return { quality, reason, rendererString, rule: matchRendererRule(rendererString)?.name };
 }
 
 /**

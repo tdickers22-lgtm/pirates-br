@@ -215,6 +215,44 @@ for (const { row, score, want, why } of BENCH_ROWS) {
     mod.isTileBasedGpu('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))') === false);
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// THE PINNED PATHS KNOW THE GPU TOO (airsafe).
+//
+// `decideRenderQuality` returned `rendererString: null` for a `?quality=` pin,
+// so the renderer classified a URL-pinned session as 'unknown' and the GPU-class
+// fill ceiling (FrameGovernor.fillCeilingForGpu) had nothing to bind on — the
+// exact path a manual High on the owner's Air takes. RED on HEAD 8d5cc8db.
+console.log('\nThe pinned paths carry the renderer string');
+{
+  const row = ROWS[1]; // Chrome on an M2 Air
+  installEnv(row);
+  globalThis.window.location.search = '?quality=high';
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const v = mod.decideRenderQuality();
+  expect(`?quality=high still wins (reason ${v.reason}, tier ${v.quality})`, v.reason === 'url' && v.quality === 'high');
+  expect(`…and carries the GPU's name (got ${JSON.stringify(v.rendererString)})`, v.rendererString === row.renderer);
+  expect(`…so the class is known (${mod.classifyRenderer(v.rendererString)})`, mod.classifyRenderer(v.rendererString) === 'apple-base');
+  expect(`…and the rule that matched is named (${v.rule ?? 'none'})`, typeof v.rule === 'string' && v.rule.length > 0);
+}
+{
+  const row = ROWS[1];
+  installEnv(row, { quality: 'high' });
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const v = mod.decideRenderQuality();
+  expect(`a stored High carries it too (reason ${v.reason}, got ${JSON.stringify(v.rendererString)})`,
+    v.reason === 'player' && v.rendererString === row.renderer && typeof v.rule === 'string');
+}
+{
+  // A masked renderer stays null on the pinned paths — null means masked, and
+  // the class it earns is 'unknown', which is uncapped.
+  const row = ROWS[5];
+  installEnv(row);
+  globalThis.window.location.search = '?quality=high';
+  const mod = await import(`${pathToFileURL(modPath).href}?row=${i++}`);
+  const v = mod.decideRenderQuality();
+  expect(`a masked renderer is still null on the URL path (got ${JSON.stringify(v.rendererString)})`, v.rendererString === null && v.reason === 'url');
+}
+
 console.log(`\n${checks} checks, ${failures} failed`);
 if (checks === 0) { console.error('VACUOUS'); process.exit(1); }
 process.exit(failures > 0 ? 1 : 0);

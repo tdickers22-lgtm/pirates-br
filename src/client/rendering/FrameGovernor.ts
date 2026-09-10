@@ -66,7 +66,7 @@
  * a machine whose only GL backend draws one frame a second.
  */
 
-import { renderQualityLabel, type RenderQuality } from './QualityPreference.js';
+import { renderQualityLabel, type GpuClass, type QualityReason, type RenderQuality } from './QualityPreference.js';
 
 /** What the controller is currently trying to hold. */
 export type GovernorMode =
@@ -607,15 +607,135 @@ export const TIER_NATIVE_FLOOR_MAX_PIXELS: Record<RenderQuality, number> = {
   high: 2_100_000,
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// A TIER IS A LOOK; A GPU CLASS IS A FILL CEILING (airsafe)
+// ─────────────────────────────────────────────────────────────────────────────
 /**
- * The tier's pixel-ratio ceiling and floor for THIS viewport. Pure, so the
- * governor suite can grade a phone without a phone.
+ * WHY A SECOND CEILING. `decideRenderQuality` hands back a `?quality=` value or
+ * a stored player choice FIRST, with no cap at all, so a manual High on the
+ * owner's fanless M2 Air was honoured verbatim: 1.25x on a 1470x956 dPR-2
+ * panel is 2.2 M framebuffer pixels, plus a 2048² shadow map and 2x MSAA
+ * behind the post chain. On 2026-09-08 the GPU firmware locked up under this
+ * repo's own headless runs (`restart_reason_desc: "firmware-detected lockup"`,
+ * WindowServer watchdog, the whole desktop down), and "high graphics crashes
+ * my computer" is the owner's report of the same thing. The tier is simply more
+ * fill than a fanless base chip can sustain — and the governor cannot see it
+ * coming: there is no GPU timing (no EXT_disjoint_timer_query), a GPU-bound
+ * stall only shows in the rAF interval after the fact, and a firmware lockup
+ * leaves no after.
+ *
+ * So the tier stays a LOOK — materials, sky, grade, clouds, LOD radii — and the
+ * GPU class becomes a FILL CEILING over the levers that are fragments and
+ * texels: the framebuffer's pixel count, the pixel ratio, the shadow map, and
+ * the composer target's sample count. A player who pins High on an Air keeps
+ * the High look, and the settings note tells them what was held and why
+ * (`describeFillCap`).
+ *
+ * THE NUMBERS. Medium on the Air — the tier the owner plays, and the one that
+ * does not crash — is ratio 1.0 (1.41 Mpx native), a 1536² map and 2x MSAA in
+ * tile memory. That fill IS the `apple-base` ceiling: a capped High costs what
+ * Medium costs and looks like High. `apple-opaque` (Safari's "Apple GPU") gets
+ * the same numbers — it may be an Ultra, but the cost of being wrong upward is
+ * a dead desktop and the cost of being wrong downward is a tier the governor
+ * hands back. Integrated and phone parts are immediate-mode, so their sample
+ * cap is 0 (the resolve is main-memory traffic there, see `isTileBasedGpu`) and
+ * their shadow cap is the ladder's 1024² rung. `software` caps only the pixel
+ * count: every measurement rig in this repo runs on SwiftShader and pins its
+ * tier by URL, and a rig must measure the tier it asked for — `fillClassFor`
+ * exempts a URL pin on a software part for exactly that reason, and the probes
+ * that pin the ratio write `minPixelRatio`/`maxPixelRatio` past this table
+ * anyway. `apple-pro`, `discrete` and `unknown` have no ceiling beyond the
+ * tier's own, and `unknown` is the default argument everywhere, so every
+ * existing caller is byte-identical.
+ *
+ * `openAtFloor`: where the ceiling binds, the session opens with every runtime
+ * lever spent and the governor auditions UPWARD to the class ceiling, rather
+ * than opening at the ceiling and being walked down while the desktop stutters.
+ */
+export interface GpuFillCeiling {
+  /** Drawing-buffer pixels (device width × device height) the class may open at. */
+  maxFramebufferPixels: number;
+  maxPixelRatio: number;
+  maxShadowMapSize: number;
+  msaaSamplesCap: number;
+  /** Open at the bottom of the ladder and audition upward, instead of at 0.85. */
+  openAtFloor: boolean;
+}
+
+const UNCAPPED: GpuFillCeiling = Object.freeze({
+  maxFramebufferPixels: Infinity, maxPixelRatio: Infinity, maxShadowMapSize: Infinity, msaaSamplesCap: Infinity, openAtFloor: false,
+});
+/** The fanless-or-nearly class: Medium's fill, whatever the look. */
+const AIR_CLASS: GpuFillCeiling = Object.freeze({
+  maxFramebufferPixels: 1_450_000, maxPixelRatio: 1.0, maxShadowMapSize: 1536, msaaSamplesCap: 2, openAtFloor: true,
+});
+
+export const GPU_FILL_CEILING: Readonly<Record<GpuClass, GpuFillCeiling>> = Object.freeze({
+  'apple-base': AIR_CLASS,
+  'apple-opaque': AIR_CLASS,
+  integrated: Object.freeze({ maxFramebufferPixels: 1_200_000, maxPixelRatio: 1.0, maxShadowMapSize: 1024, msaaSamplesCap: 0, openAtFloor: true }),
+  'mobile-gpu': Object.freeze({ maxFramebufferPixels: 900_000, maxPixelRatio: 1.0, maxShadowMapSize: 1024, msaaSamplesCap: 0, openAtFloor: true }),
+  software: Object.freeze({ maxFramebufferPixels: 600_000, maxPixelRatio: 1.0, maxShadowMapSize: Infinity, msaaSamplesCap: Infinity, openAtFloor: false }),
+  'apple-pro': UNCAPPED,
+  discrete: UNCAPPED,
+  unknown: UNCAPPED,
+});
+
+export function fillCeilingForGpu(gpuClass: GpuClass): GpuFillCeiling {
+  return GPU_FILL_CEILING[gpuClass] ?? UNCAPPED;
+}
+
+/**
+ * The class whose ceiling APPLIES to this session. A `?quality=` pin on the
+ * software rasteriser is one of this repo's measurement rigs, and a rig must
+ * measure the tier it asked for; a player on a software part (a VM, a remote
+ * desktop) is still capped, because a player's choice is not a census.
+ */
+export function fillClassFor(gpuClass: GpuClass, reason: QualityReason): GpuClass {
+  return gpuClass === 'software' && reason === 'url' ? 'unknown' : gpuClass;
+}
+
+/** The shadow map the TIER opens with, before any class cap; 0 where the tier
+ *  has no shadows. The numbers are Renderer.baseShadowMapSize's, held here so
+ *  the cap can be graded without THREE. */
+export function tierShadowMapSize(quality: RenderQuality): number {
+  return quality === 'low' ? 0 : quality === 'high' ? 2048 : 1536;
+}
+
+export function cappedShadowMapSize(tierSize: number, gpuClass: GpuClass): number {
+  return Math.min(tierSize, fillCeilingForGpu(gpuClass).maxShadowMapSize);
+}
+
+/**
+ * The composer target's sample count the TIER asks for, before any class cap.
+ * `high` has always taken 2x. `balanced` takes it too on Apple silicon
+ * (AA-01/graphics-16): the resolve is free-ish in tile memory there, while
+ * FXAA costs a whole extra screen of fill and softens the rigging it is
+ * supposed to be fixing. On immediate-mode parts (Intel, AMD, NVIDIA) the
+ * resolve is paid through main memory and FXAA remains the cheaper answer.
+ */
+export function tierMsaaSamples(quality: RenderQuality, gpuClass: GpuClass): number {
+  if (quality === 'high') return 2;
+  if (quality !== 'balanced') return 0;
+  return gpuClass === 'apple-base' || gpuClass === 'apple-pro' || gpuClass === 'apple-opaque' ? 2 : 0;
+}
+
+/** …and after it. 0 means PostFx builds the FXAA pass instead. */
+export function composerMsaaSamples(quality: RenderQuality, gpuClass: GpuClass): number {
+  return Math.min(tierMsaaSamples(quality, gpuClass), fillCeilingForGpu(gpuClass).msaaSamplesCap);
+}
+
+/**
+ * The tier's pixel-ratio ceiling and floor for THIS viewport — and, when a GPU
+ * class is named, that class's fill ceiling over it. Pure, so the governor
+ * suite can grade a phone without a phone and an Air without locking one up.
  */
 export function pixelRatioCaps(
   quality: RenderQuality,
   cssWidth: number,
   cssHeight: number,
   devicePixelRatio: number,
+  gpuClass: GpuClass = 'unknown',
 ): { maxPixelRatio: number; minPixelRatio: number } {
   const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
   const w = Math.max(1, cssWidth);
@@ -629,9 +749,103 @@ export function pixelRatioCaps(
   // either (see TIER_NATIVE_FLOOR_MAX_PIXELS). Also capped at 1.0: this is a
   // floor at native, not a licence to supersample.
   const nativeFloor = cssPixels <= TIER_NATIVE_FLOOR_MAX_PIXELS[quality] ? Math.min(dpr, 1) : 0;
-  const maxPixelRatio = Math.min(dpr, Math.max(tierCap, openFloor, nativeFloor));
+  const tierCeiling = Math.max(tierCap, nativeFloor);
+  // THE CLASS CEILING (airsafe). Sits under the tier's own ceiling and its
+  // native floor — a class cap only ever tightens — and above the 640 px
+  // legibility floor, because a buffer narrower than that is not what locks a
+  // GPU up. 'unknown' is Infinity here, which makes the four-argument call
+  // exactly `max(tierCap, openFloor, nativeFloor)`, as it always was.
+  const fill = fillCeilingForGpu(gpuClass);
+  const classCeiling = Math.min(fill.maxPixelRatio, Math.sqrt(fill.maxFramebufferPixels / cssPixels));
+  const maxPixelRatio = Math.min(dpr, Math.max(Math.min(tierCeiling, classCeiling), openFloor));
   const minPixelRatio = Math.min(maxPixelRatio, Math.max(TIER_MIN_PIXEL_RATIO[quality], ladderFloor));
   return { maxPixelRatio, minPixelRatio };
+}
+
+/** What the class ceiling held, next to what the tier alone would have opened
+ *  at. The renderer computes it once and hands it to the settings panel. */
+export interface FillCapReport {
+  gpuClass: GpuClass;
+  tier: RenderQuality;
+  /** True when at least one lever is held under what the tier alone would open at. */
+  binds: boolean;
+  openAtFloor: boolean;
+  maxPixelRatio: number;
+  tierMaxPixelRatio: number;
+  /** Drawing-buffer pixels at the (capped) ceiling on this viewport. */
+  framebufferPixels: number;
+  tierFramebufferPixels: number;
+  shadowMapSize: number;
+  tierShadowMapSize: number;
+  msaaSamples: number;
+  tierMsaaSamples: number;
+}
+
+export function fillCapReport(
+  quality: RenderQuality,
+  cssWidth: number,
+  cssHeight: number,
+  devicePixelRatio: number,
+  gpuClass: GpuClass,
+  tierShadow: number = tierShadowMapSize(quality),
+): FillCapReport {
+  const tier = pixelRatioCaps(quality, cssWidth, cssHeight, devicePixelRatio);
+  const capped = pixelRatioCaps(quality, cssWidth, cssHeight, devicePixelRatio, gpuClass);
+  const px = (ratio: number) => Math.round(cssWidth * ratio) * Math.round(cssHeight * ratio);
+  const shadowMapSize = cappedShadowMapSize(tierShadow, gpuClass);
+  const tierMsaa = tierMsaaSamples(quality, gpuClass);
+  const msaaSamples = composerMsaaSamples(quality, gpuClass);
+  const binds = capped.maxPixelRatio < tier.maxPixelRatio - 1e-9
+    || shadowMapSize < tierShadow
+    || msaaSamples < tierMsaa;
+  return {
+    gpuClass,
+    tier: quality,
+    binds,
+    openAtFloor: binds && fillCeilingForGpu(gpuClass).openAtFloor,
+    maxPixelRatio: capped.maxPixelRatio,
+    tierMaxPixelRatio: tier.maxPixelRatio,
+    framebufferPixels: px(capped.maxPixelRatio),
+    tierFramebufferPixels: px(tier.maxPixelRatio),
+    shadowMapSize,
+    tierShadowMapSize: tierShadow,
+    msaaSamples,
+    tierMsaaSamples: tierMsaa,
+  };
+}
+
+/**
+ * What the settings note says when the PART, not the tier, set the ceiling —
+ * or null when nothing was held. A player who pinned High and sees native
+ * resolution and 1536 shadows was told, rather than left to discover it.
+ */
+export function describeFillCap(report: FillCapReport, rendererString: string | null): string | null {
+  if (!report.binds) return null;
+  const look = renderQualityLabel(report.tier);
+  const held: string[] = [];
+  if (report.maxPixelRatio < report.tierMaxPixelRatio - 1e-9) {
+    held.push(report.maxPixelRatio >= 0.999
+      ? 'resolution is held at native'
+      : `resolution is held at ${report.maxPixelRatio.toFixed(2)}×`);
+  }
+  if (report.shadowMapSize < report.tierShadowMapSize) held.push(`shadows at ${report.shadowMapSize}`);
+  if (report.msaaSamples < report.tierMsaaSamples) held.push('multisampling is off');
+  const what = held.length <= 1 ? held.join('') : `${held.slice(0, -1).join(', ')} and ${held[held.length - 1]}`;
+  const chip = rendererString?.match(/apple\s+m\d+(?:\s+(?:pro|max|ultra))?/i)?.[0] ?? null;
+  switch (report.gpuClass) {
+    case 'apple-base':
+      return `${look} look, capped for this Mac: an ${chip ?? 'Apple silicon'} Air has no fan to spare, so ${what} to keep the GPU from locking up.`;
+    case 'apple-opaque':
+      return `${look} look, capped for this Mac: Safari does not say which Apple chip this is, so it is treated as a fanless Air and ${what} to keep the GPU from locking up.`;
+    case 'integrated':
+      return `${look} look, capped for this machine: integrated graphics share memory with the CPU, so ${what} to keep the frame whole.`;
+    case 'mobile-gpu':
+      return `${look} look, capped for this device: a phone GPU cannot pay for the full tier, so ${what}.`;
+    case 'software':
+      return `${look} look, capped for software rendering: ${what}.`;
+    default:
+      return `${look} look, capped for this GPU: ${what}.`;
+  }
 }
 
 export interface LeverCaps {
