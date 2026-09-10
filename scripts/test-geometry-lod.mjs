@@ -160,7 +160,28 @@ const READ_BATCHES = ([islandName, batchName]) => {
       const d = Math.hypot(wx - cam.x, wz - cam.z);
       if (d < nearest) nearest = d;
     }
+    // WHAT IS BEING DRAWN, graded as a surface: positions welded at 1e-4 (the
+    // exporter splits every vertex of a flat-shaded rock), then the count of
+    // edges with exactly one triangle. A rock has none; the 2026-09-06 far
+    // files had 1,100+ per boulder, and Low drew them at arm's length.
+    const geo = batch.mesh.geometry;
+    const pos = geo.attributes.position.array;
+    const idx = geo.index ? geo.index.array : null;
+    const nV = pos.length / 3; const ids = new Int32Array(nV); const keys = new Map(); let w = 0;
+    for (let v = 0; v < nV; v++) {
+      const k = `${Math.round(pos[v * 3] * 1e4)},${Math.round(pos[v * 3 + 1] * 1e4)},${Math.round(pos[v * 3 + 2] * 1e4)}`;
+      let id = keys.get(k); if (id === undefined) { id = w++; keys.set(k, id); } ids[v] = id;
+    }
+    const edges = new Map(); const tris = idx ? idx.length / 3 : nV / 3;
+    for (let t = 0; t < tris; t++) {
+      const a = ids[idx ? idx[t * 3] : t * 3]; const b = ids[idx ? idx[t * 3 + 1] : t * 3 + 1]; const c = ids[idx ? idx[t * 3 + 2] : t * 3 + 2];
+      if (a === b || b === c || a === c) continue;
+      for (const [x, y] of [[a, b], [b, c], [c, a]]) { const k = x < y ? x * w + y : y * w + x; edges.set(k, (edges.get(k) ?? 0) + 1); }
+    }
+    let openEdges = 0; for (const f of edges.values()) if (f === 1) openEdges += 1;
     out.push({
+      drawnTris: Math.round(tris),
+      openEdges,
       count: batch.mesh.count,
       full: batch.full,
       visible: batch.mesh.visible,
@@ -345,16 +366,16 @@ async function run(browser, quality) {
       'an unsorted batch drops the wrong stones and nothing downstream can tell',
     );
     if (quality === 'low') {
-      // THE LOW TIER'S NEAR BAND ([rocks], 2026-09-09). [P.1] d pinned the
-      // opposite here — "low portal rocks use their lightweight geometry even
-      // on approach" — and that lightweight geometry was full of holes, so on
-      // Low the player looked through every boulder at arm's length. The
-      // contract now (InstanceLod.LOW_NEAR_BAND_M): a batch whose nearest
-      // instance is within 45 apparent metres of the camera draws its NEAR
-      // geometry; one whose nearest instance is beyond draws FAR. Both stands
-      // are ON the island, where the island-edge distance is negative and the
-      // tier swap can say nothing — which is exactly why this needs its own
-      // line, and why the distance graded is camera-to-instance.
+      // THE LOW TIER AT ARM'S LENGTH ([rocks], 2026-09-09). [P.1] d pinned
+      // "low portal rocks use their lightweight geometry even on approach"
+      // from 30 m offshore, and that lightweight geometry was full of holes:
+      // on Low the player looked through every boulder. Low still draws the
+      // far mesh at every distance (the tier's budget: a near band for rocks
+      // alone measured 589k/470k inland and 601k/560k in the cave), so the
+      // contract is graded where it hurts — 4 m from the largest portal
+      // rock, ON the island — and on the thing that matters: the mesh being
+      // drawn there is WATERTIGHT. Welded at 1e-4 it has no open edge. The
+      // 2026-09-06 far files fail this line with 1,100+ open edges per rock.
       const anchor = nearPortal.batches.find((b) => b.first)?.first ?? null;
       expect('[low] a portal batch reports an instance position to stand beside', !!anchor, JSON.stringify(nearPortal.batches));
       if (anchor) {
@@ -367,18 +388,16 @@ async function run(browser, quality) {
         // Arm's length: 4 m from the largest portal rock, looking at it.
         await PLACE(page, { x: anchor.x + dx * 4, y: anchor.y + 2, z: anchor.z + dz * 4, ax: anchor.x, az: anchor.z });
         const arm = await page.evaluate(READ_BATCHES, [subject, 'cave-portal-rock']);
+        const summary = (rows) => rows.map((b) => `${b.full} stones: ${b.drawnTris} tris, ${b.openEdges} open edges, far=${b.farApplied}`).join('; ');
         expect(
-          `[low] inside the near band (${arm.batches[0]?.nearestInstance} m from the nearest portal rock, island edge ${arm.edgeDist} m) the portal draws its NEAR geometry`,
-          arm.batches.length > 0 && arm.batches.every((b) => b.nearestInstance <= 45 && !b.farApplied && !b.usesFarGeometry),
-          JSON.stringify(arm.batches),
+          `[low] ${arm.batches[0]?.nearestInstance} m from the nearest portal rock (island edge ${arm.edgeDist} m) the portal draws its far mesh — the tier's budget policy`,
+          arm.batches.length > 0 && arm.batches.every((b) => b.nearestInstance <= 45 && b.farApplied && b.usesFarGeometry),
+          summary(arm.batches),
         );
-        // 70 m out along the same bearing: every stone of the frame is beyond the band.
-        await PLACE(page, { x: anchor.x + dx * 70, y: anchor.y + 6, z: anchor.z + dz * 70, ax: anchor.x, az: anchor.z });
-        const beyond = await page.evaluate(READ_BATCHES, [subject, 'cave-portal-rock']);
         expect(
-          `[low] beyond the band (${beyond.batches[0]?.nearestInstance} m from the nearest portal rock, island edge ${beyond.edgeDist} m) the portal draws FAR`,
-          beyond.batches.length > 0 && beyond.batches.every((b) => b.nearestInstance > 45 && b.farApplied && b.usesFarGeometry),
-          JSON.stringify(beyond.batches),
+          '[low] …and that mesh is WATERTIGHT at arm\'s length: 0 open edges after welding at 1e-4',
+          arm.batches.length > 0 && arm.batches.every((b) => b.openEdges === 0),
+          `${summary(arm.batches)} — a far rock with open edges is the see-through boulder of 2026-09-09`,
         );
       }
     }

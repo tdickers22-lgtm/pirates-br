@@ -3850,7 +3850,7 @@ export class Game {
           // which drops the smallest instances first, in the order the batch was
           // sorted at build time. Below 1 it thins; it can never thin the island
           // you are standing on, whose edge distance is negative.
-          updateInstanceLod(instanceBatches, edgeDist, quality, lodDistanceScale * levers.instanceDensityScale, cam.x, cam.z);
+          updateInstanceLod(instanceBatches, edgeDist, quality, lodDistanceScale * levers.instanceDensityScale);
         }
         // Cave INTERIOR decor + lights (torch, crystals, stalactites, treasure)
         // reveal within ~45m so the warm glow greets you at the mouth and the

@@ -106,10 +106,10 @@ const stand = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.
 Lod.attachLazyStoryLod(stand, () => { asks += 1; });
 const batches = Lod.collectInstanceLodBatches(stand);
 expect('the placeholder is collected as a batch', batches.length === 1);
-Lod.updateInstanceLod(batches, Lib.LAZY_PRIORITY_M + 50, 'low', 1, 0, 0);
+Lod.updateInstanceLod(batches, Lib.LAZY_PRIORITY_M + 50, 'low', 1);
 expect('no promotion outside LAZY_PRIORITY_M', asks === 0, `asked ${asks}x`);
-Lod.updateInstanceLod(batches, Lib.LAZY_PRIORITY_M - 100, 'low', 1, 0, 0);
-Lod.updateInstanceLod(batches, 10, 'low', 1, 0, 0);
+Lod.updateInstanceLod(batches, Lib.LAZY_PRIORITY_M - 100, 'low', 1);
+Lod.updateInstanceLod(batches, 10, 'low', 1);
 expect('one promotion inside LAZY_PRIORITY_M, and only one', asks === 1, `asked ${asks}x`);
 expect('the placeholder is never thinned away', stand.count === 1 && stand.visible);
 
