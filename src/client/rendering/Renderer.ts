@@ -7,11 +7,12 @@ import { clamp, smoothstep } from '../../shared/utils/index.js';
 import {
   classifyRenderer, decideRenderQuality, readGpuRendererString, saveAutoTierCeiling, saveAutoTierProof,
   wantsDefaultFramebufferMsaa,
-  tierAbove, tierBelow, type QualityVerdict, type RenderQuality,
+  tierAbove, tierBelow, type GpuClass, type QualityVerdict, type RenderQuality,
 } from './QualityPreference.js';
 import {
   FrameGovernor, resolveLevers, describeGovernor, pixelRatioCaps,
-  type GovernorLevers, type GovernorMode, type LeverCaps,
+  cappedShadowMapSize, composerMsaaSamples, fillCapReport, fillClassFor, tierShadowMapSize,
+  type FillCapReport, type GovernorLevers, type GovernorMode, type LeverCaps,
 } from './FrameGovernor.js';
 import { frameBudgetScale, setFrameBudgetScale } from './FrameBudget.js';
 
@@ -777,12 +778,26 @@ export class Renderer {
   private stormLevel = 0;
   private readonly qualityVerdict: QualityVerdict = decideRenderQuality();
   private readonly quality = this.qualityVerdict.quality;
-  /** Derived from the tier's framebuffer-pixel budget and THIS viewport, and
-   *  re-derived whenever the window changes size. Not `readonly`: the perf
-   *  probes pin both to 1 through `window.__piratesBR.renderer` so fps is the
-   *  only free variable, and `applyPixelRatio` reads them on every call. */
-  private minPixelRatio = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1).minPixelRatio;
-  private maxPixelRatio = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1).maxPixelRatio;
+  /**
+   * THE PART THAT WILL RENDER THE FRAME. The tier is a look; the class is a
+   * FILL CEILING over it (FrameGovernor § "a tier is a look"): a manual High on
+   * a fanless M2 Air keeps the High look and has its pixel count, shadow map
+   * and sample count held to what the part can sustain, because the alternative
+   * on 2026-09-08 was a GPU firmware lockup that took the desktop down.
+   * `decideRenderQuality` carries the renderer string on every path now, so the
+   * class is always known — the URL path used to hand back null.
+   */
+  private readonly gpuClass: GpuClass = classifyRenderer(this.qualityVerdict.rendererString ?? readGpuRendererString());
+  /** The class whose ceiling applies. The software rasteriser under a URL pin
+   *  is a measurement rig, and a rig must measure the tier it asked for. */
+  private readonly fillClass: GpuClass = fillClassFor(this.gpuClass, this.qualityVerdict.reason);
+  /** Derived from the tier's framebuffer-pixel budget, the GPU class's fill
+   *  ceiling and THIS viewport, and re-derived whenever the window changes
+   *  size. Not `readonly`: the perf probes pin both to 1 through
+   *  `window.__piratesBR.renderer` so fps is the only free variable, and
+   *  `applyPixelRatio` reads them on every call. */
+  private minPixelRatio = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1, this.fillClass).minPixelRatio;
+  private maxPixelRatio = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1, this.fillClass).maxPixelRatio;
   private currentPixelRatio = 1;
   /**
    * THE SHADOW MAP WAS THIRTY-TWO TIMES THE SIZE OF THE SCREEN.
@@ -802,9 +817,10 @@ export class Renderer {
    *
    * 2048² is 4.19 M texels and 28.0 MB; `balanced` at 1536² is 2.36 M and
    * 15.75 MB. The governor's ladder steps down from whichever of those the tier
-   * opened with.
+   * opened with — after the GPU class's ceiling has had its say: an Air-class
+   * part opens High at 1536², an integrated one at 1024² (airsafe).
    */
-  private readonly baseShadowMapSize = this.quality === 'high' ? 2048 : 1536;
+  private readonly baseShadowMapSize = cappedShadowMapSize(this.quality === 'high' ? 2048 : 1536, this.fillClass);
   private postFx: PostFx | null = null;
   private readonly shadowFocus = new THREE.Vector3();
   private readonly shadowBasis = new THREE.Matrix4();
@@ -839,7 +855,15 @@ export class Renderer {
    * measured different things, disagreed, and between them could take the
    * picture apart in a way nothing in the client could report.
    */
-  private readonly governor = new FrameGovernor({}, Renderer.OPENING_SCALAR);
+  /** What the class ceiling held against what the tier alone would have opened
+   *  at — computed once, handed to the settings panel and the browser gate. */
+  private readonly fillCap: FillCapReport = fillCapReport(
+    this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1,
+    this.fillClass, tierShadowMapSize(this.quality),
+  );
+  private readonly governor = new FrameGovernor(
+    {}, this.fillCap.openAtFloor ? Renderer.CAPPED_OPENING_SCALAR : Renderer.OPENING_SCALAR,
+  );
   private governorCaps: LeverCaps = {
     tier: this.quality,
     maxPixelRatio: this.maxPixelRatio,
@@ -860,8 +884,19 @@ export class Renderer {
    * frames inside budget hands all of it straight back.
    */
   private static readonly OPENING_SCALAR = 0.85;
-  private levers: GovernorLevers = resolveLevers(Renderer.OPENING_SCALAR, this.governorCaps);
-  private appliedScalar = Renderer.OPENING_SCALAR;
+  /**
+   * Where a session opens when the CLASS ceiling binds (a pinned High on an
+   * Air, see `fillCap`): the bottom of the ladder, every runtime lever spent,
+   * and the governor auditions UPWARD to the class ceiling — 0.8x resolution,
+   * a 1024² map and thinned far dressing for the first minute of a High
+   * session on a part that has just proven, by lockup, that it cannot open at
+   * the top. The tier floor is still the tier floor; the ratchet is unchanged.
+   * A pinned session with the governor OFF (`?quality=`) opens at the class
+   * ceiling itself, because `setEnabled(false)` hands back scalar 1.
+   */
+  private static readonly CAPPED_OPENING_SCALAR = 0;
+  private levers: GovernorLevers = resolveLevers(this.governor.getScalar(), this.governorCaps);
+  private appliedScalar = this.governor.getScalar();
   private appliedShadowExtent = SHADOW_HALF_EXTENT;
   private lastStormWeather = -1;
 
@@ -1179,10 +1214,9 @@ export class Renderer {
    * resolve is paid through main memory and FXAA remains the cheaper answer.
    */
   private msaaSamples(): number {
-    if (this.quality === 'high') return 2;
-    if (this.quality !== 'balanced') return 0;
-    const gpu = classifyRenderer(this.qualityVerdict.rendererString ?? readGpuRendererString());
-    return gpu === 'apple-base' || gpu === 'apple-pro' || gpu === 'apple-opaque' ? 2 : 0;
+    // The tier's answer, then the class ceiling's (FrameGovernor.tierMsaaSamples
+    // / composerMsaaSamples): an integrated part pinned to High gets FXAA.
+    return composerMsaaSamples(this.quality, this.fillClass);
   }
 
   getQuality(): RenderQuality {
@@ -1438,9 +1472,15 @@ export class Renderer {
     p95Ms: number;
     pixelRatio: number;
     shadowMapSize: number;
+    /** The drawing buffer as it actually is — the side effect, not the ratio. */
+    framebufferPixels: number;
+    gpuClass: GpuClass;
+    /** What the class ceiling held, or `binds: false` (airsafe). */
+    fillCap: FillCapReport;
     label: string;
   } {
     const stats = this.governor.getStats();
+    const buffer = this.renderer?.domElement;
     return {
       enabled: this.governor.isEnabled(),
       mode: this.governor.getMode(),
@@ -1451,6 +1491,9 @@ export class Renderer {
       p95Ms: stats.p95Ms,
       pixelRatio: this.currentPixelRatio,
       shadowMapSize: this.sun?.castShadow ? this.sun.shadow.mapSize.x : 0,
+      framebufferPixels: buffer ? buffer.width * buffer.height : 0,
+      gpuClass: this.gpuClass,
+      fillCap: this.fillCap,
       label: describeGovernor(
         this.quality,
         this.qualityVerdict.reason === 'player' || this.qualityVerdict.reason === 'url',
@@ -2254,7 +2297,7 @@ export class Renderer {
    */
   private refreshPixelRatioCaps() {
     if (this.minPixelRatio === this.maxPixelRatio) return;
-    const caps = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
+    const caps = pixelRatioCaps(this.quality, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1, this.fillClass);
     if (Math.abs(caps.maxPixelRatio - this.maxPixelRatio) < 0.001
       && Math.abs(caps.minPixelRatio - this.minPixelRatio) < 0.001) return;
     this.minPixelRatio = caps.minPixelRatio;
