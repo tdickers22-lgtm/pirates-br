@@ -157,6 +157,27 @@ const FAR_SWAP_M: Record<RenderQuality, number> = {
 };
 const FAR_SWAP_HYSTERESIS = 0.85;
 
+/**
+ * THE LOW TIER'S NEAR BAND — apparent metres from the camera to a batch's
+ * NEAREST instance, inside which the batch draws its near geometry.
+ *
+ * [P.1] a made the low tier draw the far sibling at EVERY distance
+ * (`wantFar = quality === 'low' || …`), because the island-edge rule cannot
+ * thin the island you stand on (its edge distance is negative) and the low
+ * inland view was 729k triangles against a 580k ceiling. That put a decimated
+ * mesh in the player's face — and the far files of the time were full of
+ * holes (build_far_lods.py ran Collapse on split vertices and deleted faces),
+ * so on Low every boulder was see-through at arm's length. The far files are
+ * watertight now (test-far-lod-integrity), and this band is what keeps a
+ * decimated mesh out of arm's reach regardless: on low, a batch keeps NEAR
+ * while any instance of it is within 45 apparent metres of the camera and
+ * draws FAR beyond that, with the tier swap's 0.85 hysteresis. Measured from
+ * the camera to the instances rather than from the island's edge, because
+ * that is the only measure that can tell the boulder at your feet from the
+ * one across the island. Balanced and high never read it.
+ */
+const LOW_NEAR_BAND_M = 45;
+
 /** The tier's near→far swap distance in apparent metres, for the few things
  *  that are not instanced batches (sea rocks) and swap on their own. */
 export function farSwapDistance(quality: RenderQuality): number {
@@ -399,18 +420,46 @@ function countAbovePixelFloor(batch: InstanceLodBatch, minWorldHeight: number): 
 }
 
 /**
+ * Apparent XZ distance from the camera to the batch's nearest instance, read
+ * straight off the instance matrices already uploaded (elements 12/14 of each
+ * 16-float block, pushed through the mesh's world matrix). No per-batch
+ * storage and no allocation: a few thousand multiply-adds a frame, and only on
+ * the low tier for islands whose edge is inside LOW_NEAR_BAND_M. Instances are
+ * scanned up to `full`, not `count`: one thinned out this frame is still the
+ * nearest rock when the player walks up to it.
+ */
+function nearestInstanceApparent(batch: InstanceLodBatch, camX: number, camZ: number, distanceScale: number): number {
+  const arr = batch.mesh.instanceMatrix.array as ArrayLike<number>;
+  const e = batch.mesh.matrixWorld.elements;
+  const n = Math.min(batch.full, arr.length >> 4);
+  let best = Infinity;
+  for (let i = 0; i < n; i++) {
+    const o = i << 4;
+    const lx = arr[o + 12]; const ly = arr[o + 13]; const lz = arr[o + 14];
+    const dx = e[0] * lx + e[4] * ly + e[8] * lz + e[12] - camX;
+    const dz = e[2] * lx + e[6] * ly + e[10] * lz + e[14] - camZ;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < best) best = d2;
+  }
+  return Math.sqrt(best) / Math.max(1e-3, distanceScale);
+}
+
+/**
  * Write this frame's instance count for every batch on one island.
  *
  * `edgeDist` is metres from the camera to the island's FOOTPRINT edge and is
  * negative when the camera is on the island — which is what makes "never thin
  * the ground you are standing on" fall out of the arithmetic rather than needing
- * a special case.
+ * a special case. `camX`/`camZ` are the camera's world position, read only by
+ * the low tier's near band (LOW_NEAR_BAND_M).
  */
 export function updateInstanceLod(
   batches: readonly InstanceLodBatch[],
   edgeDist: number,
   quality: RenderQuality,
   distanceScale: number,
+  camX: number,
+  camZ: number,
 ): void {
   if (batches.length === 0) return;
   const apparent = Math.max(0, edgeDist) / Math.max(1e-3, distanceScale);
@@ -455,12 +504,17 @@ export function updateInstanceLod(
       const sizeSpread = Math.min(1.05, Math.max(0.78, 0.70 + batch.height / 14));
       const threshold = farSwap * sizeSpread * (0.82 + batch.stagger * 0.36);
       const d = apparent;
-      // Low uses the authored lightweight mesh even on the player's island.
-      // Edge distance is negative anywhere inland: a distance-only swap kept
-      // every boulder/fern in that island at high detail (729k triangles in
-      // the low inland view). Keep all placements and the same silhouettes.
-      const wantFar = quality === 'low'
-        || (batch.farApplied ? d > threshold * FAR_SWAP_HYSTERESIS : d > threshold);
+      let wantFar: boolean;
+      if (quality === 'low') {
+        // Low: near geometry for anything the player can walk up to, far
+        // beyond LOW_NEAR_BAND_M (see it). The island-edge distance is a lower
+        // bound on every instance's, so an island whose edge is already
+        // outside the band is decided without scanning its instances.
+        const band = batch.farApplied ? LOW_NEAR_BAND_M * FAR_SWAP_HYSTERESIS : LOW_NEAR_BAND_M;
+        wantFar = d > band || nearestInstanceApparent(batch, camX, camZ, distanceScale) > band;
+      } else {
+        wantFar = batch.farApplied ? d > threshold * FAR_SWAP_HYSTERESIS : d > threshold;
+      }
       if (wantFar !== batch.farApplied) {
         batch.farApplied = wantFar;
         const set = wantFar ? batch.far : batch.near;

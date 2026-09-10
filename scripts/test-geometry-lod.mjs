@@ -145,6 +145,21 @@ const READ_BATCHES = ([islandName, batchName]) => {
     for (let i = 1; i < batch.scales.length; i++) {
       if (batch.scales[i] > batch.scales[i - 1] + 1e-6) { sorted = false; break; }
     }
+    // Where the batch's instances actually are: the nearest one to the camera
+    // (the low tier's near band is measured against exactly this) and the
+    // first (largest) one, which the low-tier stands below are planned from.
+    const e = batch.mesh.matrixWorld.elements;
+    const arr = batch.mesh.instanceMatrix.array;
+    let nearest = Infinity; let first = null;
+    for (let i = 0; i < batch.full; i++) {
+      const o = i * 16;
+      const wx = e[0] * arr[o + 12] + e[4] * arr[o + 13] + e[8] * arr[o + 14] + e[12];
+      const wy = e[1] * arr[o + 12] + e[5] * arr[o + 13] + e[9] * arr[o + 14] + e[13];
+      const wz = e[2] * arr[o + 12] + e[6] * arr[o + 13] + e[10] * arr[o + 14] + e[14];
+      if (i === 0) first = { x: wx, y: wy, z: wz };
+      const d = Math.hypot(wx - cam.x, wz - cam.z);
+      if (d < nearest) nearest = d;
+    }
     out.push({
       count: batch.mesh.count,
       full: batch.full,
@@ -154,6 +169,8 @@ const READ_BATCHES = ([islandName, batchName]) => {
       usesFarGeometry: !!batch.far && batch.mesh.geometry === batch.far.geometry,
       scaleCount: batch.scales.length,
       sorted,
+      nearestInstance: Math.round(nearest * 10) / 10,
+      first,
     });
   }
   return {
@@ -328,9 +345,42 @@ async function run(browser, quality) {
       'an unsorted batch drops the wrong stones and nothing downstream can tell',
     );
     if (quality === 'low') {
-      expect('low portal rocks use their lightweight geometry even on approach',
-        nearPortal.batches.length > 0 && nearPortal.batches.every((b) => b.farApplied && b.usesFarGeometry),
-        JSON.stringify(nearPortal.batches));
+      // THE LOW TIER'S NEAR BAND ([rocks], 2026-09-09). [P.1] d pinned the
+      // opposite here — "low portal rocks use their lightweight geometry even
+      // on approach" — and that lightweight geometry was full of holes, so on
+      // Low the player looked through every boulder at arm's length. The
+      // contract now (InstanceLod.LOW_NEAR_BAND_M): a batch whose nearest
+      // instance is within 45 apparent metres of the camera draws its NEAR
+      // geometry; one whose nearest instance is beyond draws FAR. Both stands
+      // are ON the island, where the island-edge distance is negative and the
+      // tier swap can say nothing — which is exactly why this needs its own
+      // line, and why the distance graded is camera-to-instance.
+      const anchor = nearPortal.batches.find((b) => b.first)?.first ?? null;
+      expect('[low] a portal batch reports an instance position to stand beside', !!anchor, JSON.stringify(nearPortal.batches));
+      if (anchor) {
+        const centre = await page.evaluate((name) => {
+          const i = window.__piratesBR.state.islands.find((x) => x.name === name);
+          return { x: i.position.x, z: i.position.z };
+        }, subject);
+        let dx = anchor.x - centre.x; let dz = anchor.z - centre.z;
+        const len = Math.hypot(dx, dz) || 1; dx /= len; dz /= len;
+        // Arm's length: 4 m from the largest portal rock, looking at it.
+        await PLACE(page, { x: anchor.x + dx * 4, y: anchor.y + 2, z: anchor.z + dz * 4, ax: anchor.x, az: anchor.z });
+        const arm = await page.evaluate(READ_BATCHES, [subject, 'cave-portal-rock']);
+        expect(
+          `[low] inside the near band (${arm.batches[0]?.nearestInstance} m from the nearest portal rock, island edge ${arm.edgeDist} m) the portal draws its NEAR geometry`,
+          arm.batches.length > 0 && arm.batches.every((b) => b.nearestInstance <= 45 && !b.farApplied && !b.usesFarGeometry),
+          JSON.stringify(arm.batches),
+        );
+        // 70 m out along the same bearing: every stone of the frame is beyond the band.
+        await PLACE(page, { x: anchor.x + dx * 70, y: anchor.y + 6, z: anchor.z + dz * 70, ax: anchor.x, az: anchor.z });
+        const beyond = await page.evaluate(READ_BATCHES, [subject, 'cave-portal-rock']);
+        expect(
+          `[low] beyond the band (${beyond.batches[0]?.nearestInstance} m from the nearest portal rock, island edge ${beyond.edgeDist} m) the portal draws FAR`,
+          beyond.batches.length > 0 && beyond.batches.every((b) => b.nearestInstance > 45 && b.farApplied && b.usesFarGeometry),
+          JSON.stringify(beyond.batches),
+        );
+      }
     }
     expect(
       `[${quality}] every pebble mesh on ${subject} is registered for instance LOD`,
