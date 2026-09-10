@@ -10,10 +10,13 @@ import type { InputManager } from '../input/InputManager.js';
 import { openOnboardingCards } from '../ui/OnboardingCards.js';
 import { installModalStack, modalStack } from '../ui/ModalStack.js';
 import {
-  decideRenderQuality, loadQualityPreference, renderQualityLabel,
+  classifyRenderer, decideRenderQuality, loadQualityPreference, parseRenderQuality, renderQualityLabel,
   saveAutoTierCeiling, saveQualityPreference,
-  type QualityPreference,
+  type QualityPreference, type RenderQuality,
 } from '../rendering/QualityPreference.js';
+import {
+  describeFillCap, fillCapReport, fillClassFor, tierShadowMapSize, type FillCapReport,
+} from '../rendering/FrameGovernor.js';
 
 const STORAGE_KEY = 'piratesBR.name';
 const SETTINGS_KEY = 'piratesBR.settings';
@@ -52,6 +55,8 @@ export interface GovernorStatus {
   targetFps: number;
   pixelRatio: number;
   shadowMapSize: number;
+  /** What the GPU class's fill ceiling held under the tier, if anything (airsafe). */
+  fillCap?: FillCapReport | null;
   label: string;
 }
 
@@ -883,6 +888,18 @@ export class MenuController {
     } else {
       lines.push(`Tier: ${tierLabel} — ${detail}.`);
     }
+    // THE CLASS CEILING, SAID OUT LOUD (airsafe). A manual High on a fanless
+    // M2 Air keeps the High look but has its resolution, shadow map and sample
+    // count held to what the part can sustain — and a player who pinned High
+    // and sees native resolution and 1536 shadows must have been told rather
+    // than left to discover it. On a fresh pick the note describes the tier
+    // they just chose, so they know before they reload.
+    const justPicked = justChanged ? parseRenderQuality(this.settingsQualitySelect.value) : null;
+    const fillCap = justPicked
+      ? this.fillCapFor(justPicked)
+      : status?.fillCap ?? this.fillCapFor(verdict.quality);
+    const capNote = describeFillCap(fillCap, verdict.rendererString);
+    if (capNote) lines.push(capNote);
     if (status?.enabled) {
       lines.push(pinned
         ? 'Your choice sets the CEILING. Auto still lowers resolution and detail below it '
@@ -893,6 +910,34 @@ export class MenuController {
     this.settingsQualityNote.textContent = lines.join(' ');
   }
 
+  /** The class ceiling's report for a tier on THIS machine, from the boot
+   *  verdict's GPU name — the same arithmetic the renderer does, so the panel
+   *  can describe a tier the player has not loaded yet. */
+  private fillCapFor(tier: RenderQuality): FillCapReport {
+    const verdict = this.bootQualityVerdict;
+    const gpuClass = fillClassFor(classifyRenderer(verdict.rendererString), verdict.reason);
+    return fillCapReport(tier, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1, gpuClass, tierShadowMapSize(tier));
+  }
+
+  /** "High — maximum detail, capped for this Mac": the option says so before
+   *  the player picks it, on a machine where the class ceiling would bind. A
+   *  pick from this select is a player pin, so the software rasteriser is
+   *  capped here even though a URL pin on it is not. */
+  private labelCappedTiers(): void {
+    const gpuClass = classifyRenderer(this.bootQualityVerdict.rendererString);
+    const device = gpuClass === 'apple-base' || gpuClass === 'apple-opaque' ? 'Mac'
+      : gpuClass === 'mobile-gpu' ? 'device' : 'machine';
+    for (const option of Array.from(this.settingsQualitySelect.options)) {
+      const tier = parseRenderQuality(option.value);
+      if (!tier || option.dataset.capLabelled) continue;
+      const report = fillCapReport(tier, window.innerWidth, window.innerHeight, window.devicePixelRatio || 1, gpuClass, tierShadowMapSize(tier));
+      if (!report.binds) continue;
+      option.dataset.capLabelled = '1';
+      const base = option.textContent?.split(', ')[0] ?? renderQualityLabel(tier);
+      option.textContent = `${base}, capped for this ${device}`;
+    }
+  }
+
   private applyPersistedSettings(): void {
     const s = this.loadSettings();
     this.settingsVolumeSlider.value = String(Math.round(s.volume * 100));
@@ -900,6 +945,7 @@ export class MenuController {
     this.settingsMuteCheckbox.checked = s.muted;
     this.settingsSensSlider.value = String(Math.round(s.sensitivity * 100));
     this.settingsSensVal.textContent = s.sensitivity.toFixed(2) + '×';
+    this.labelCappedTiers();
     this.settingsQualitySelect.value = loadQualityPreference();
     this.renderQualityNote(false);
     this.audio.setVolume(s.volume);

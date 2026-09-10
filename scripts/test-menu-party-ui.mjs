@@ -169,6 +169,45 @@ expect('the code chip is copyable from the party panel', hasId('lobby-copy-btn')
 expect('PLAY AGAIN WITH CREW is on the end screen', hasId('endmatch-play-again-btn'));
 expect('the party panel has a ready button', hasId('lobby-ready-btn'));
 
+// ── 3. The graphics note says when the PART, not the tier, set the ceiling ──
+// (airsafe). A manual High on the owner's fanless M2 Air used to be honoured
+// verbatim and locked the GPU firmware up. The tier is now a LOOK and the GPU
+// class a FILL CEILING (FrameGovernor.fillCeilingForGpu); when that ceiling
+// binds on a pinned or URL tier the settings note must say so, in words, so a
+// player who pinned High and sees native resolution and 1536 shadows was told
+// rather than left to discover it. RED on HEAD 8d5cc8db: no such note, no such
+// function.
+console.log('\nThe graphics note says when the Mac, not the tier, set the ceiling');
+{
+  const gov = await import('../src/client/rendering/FrameGovernor.ts');
+  const has = (n) => typeof gov[n] === 'function';
+  expect('describeFillCap and fillCapReport are exported from FrameGovernor', has('describeFillCap') && has('fillCapReport'));
+  if (has('describeFillCap') && has('fillCapReport')) {
+    const m2 = 'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)';
+    const air = gov.fillCapReport('high', 1470, 956, 2, 'apple-base', 2048);
+    const note = gov.describeFillCap(air, m2) ?? '';
+    expect(`High on the Air: "${note}"`,
+      /^High look, capped for this Mac/.test(note) && /Apple M2 Air has no fan to spare/.test(note)
+      && /resolution is held at native/.test(note) && /shadows at 1536/.test(note) && /locking up/.test(note));
+    const max = gov.fillCapReport('high', 1470, 956, 2, 'apple-pro', 2048);
+    expect('High on an M2 Max: no note at all', gov.describeFillCap(max, m2.replace('Apple M2', 'Apple M2 Max')) === null);
+    const medium = gov.fillCapReport('balanced', 1470, 956, 2, 'apple-base', 1536);
+    expect('Medium on the Air: no note (nothing is held; it is the tier the owner plays)', gov.describeFillCap(medium, m2) === null);
+    const uhd = gov.fillCapReport('high', 1536, 864, 1.25, 'integrated', 2048);
+    const uhdNote = gov.describeFillCap(uhd, 'ANGLE (Intel, Intel(R) UHD Graphics 620, D3D11)') ?? '';
+    expect(`High on an Intel UHD 620: "${uhdNote}"`,
+      /^High look, capped/.test(uhdNote) && /shadows at 1024/.test(uhdNote) && /multisampling is off/.test(uhdNote));
+    const opq = gov.fillCapReport('high', 1470, 956, 2, 'apple-opaque', 2048);
+    const opqNote = gov.describeFillCap(opq, 'Apple GPU') ?? '';
+    expect(`High in Safari (opaque "Apple GPU"): "${opqNote}"`, /^High look, capped for this Mac/.test(opqNote) && /Safari/.test(opqNote));
+  }
+  // The panel actually prints it, and the renderer actually hands it over.
+  const rendererSrc = readFileSync(`${ROOT}src/client/rendering/Renderer.ts`, 'utf8');
+  expect('Renderer.getGovernorStatus exposes the fill-cap report', /fillCap:\s*this\.fillCap/.test(rendererSrc));
+  expect('renderQualityNote prints describeFillCap when the ceiling binds', /describeFillCap\(/.test(ctrl) && /fillCap/.test(ctrl));
+  expect('the tier options say "capped" on a machine where the class ceiling binds', /capped for this/.test(ctrl));
+}
+
 console.log(failures === 0
   ? `\nPASS — the party panel opens the door it advertises`
   : `\nFAIL — ${failures} assertion(s)`);
