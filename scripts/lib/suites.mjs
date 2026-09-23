@@ -291,6 +291,10 @@ export const LOGIC = [
   // T0+12 s, a countdown crew swaps out a bot hull (fleet never grows), at the
   // match ceiling a crew stays queued with a position. Real matches, no port.
   tsx('test-queue-latency.mjs'),
+  // b1.2h (online capacity): the real LobbyServer dispatch with StubMatch via
+  // LobbyServer.matchFactory, capsim.py's survival curve, 60 min x 7 seeds, pooled
+  // p95 queue wait per MAX_MATCHES row (DEPLOY.md capacity table). ~5 s, no port.
+  tsx('test-capacity-sim.mjs'),
   // b1.2d (online-06, vm:correctness:4): public-internet abuse limits on a real
   // LobbyServer (port 0, forged x-forwarded-for): 8 sockets/IP, 400 total,
   // 20 new/min/IP, Origin allowlist, per-session buckets, 1008 after 10 s over
