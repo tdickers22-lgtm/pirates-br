@@ -35,6 +35,10 @@ import { NetworkClient } from '../network/NetworkClient.js';
 import { connectCopy, waitForRetry, type ConnectPhase } from '../network/connectPolicy.js';
 import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
+import { isBound } from '../../shared/bindings.js';
+import { lockHintVisible } from '../input/inputAuthority.js';
+import { requestLockSafe } from '../input/pointerLock.js';
+import { wheelToChartAction } from '../input/wheelGesture.js';
 import { assets, type AssetName } from '../assets/AssetLibrary.js';
 import { buildSharkMesh, buildWildlifeMesh } from '../rendering/factories/FaunaMeshFactory.js';
 import { disposeSharkAnim, playSharkBite, updateSharkPose } from '../rendering/SharkRenderer.js';
@@ -628,7 +632,7 @@ export class Game {
   private bugSnapRequested = false;
   private bugSnapListenerBound = false;
   private readonly bugSnapListener = (event: KeyboardEvent) => {
-    if (event.code === 'F8') {
+    if (isBound('bugReport', event.code)) {
       event.preventDefault();
       this.bugSnapRequested = true;
     }
@@ -1156,12 +1160,27 @@ export class Game {
     this.bindSupplyWheelActions();
     // Scroll to zoom the opened map, anchored on the cursor — point at a distant
     // island and scroll and it comes to you. Bound on window so it catches
-    // regardless of the overlay's pointer-events.
+    // regardless of the overlay's pointer-events. Zoom is continuous in the
+    // scroll distance (a trackpad flick used to slam 1x -> 7x at a fixed step
+    // per event, crossdevice-09); ctrl-wheel is the macOS pinch; deltaX pans.
+    // In a match ctrl-wheel never zooms the PAGE (crossdevice-10); menus keep
+    // browser zoom for accessibility.
     window.addEventListener('wheel', (e) => {
-      if (!this.map.mapOpen) return;
-      e.preventDefault();
-      this.map.zoomAtClient(e.deltaY < 0 ? 1.18 : 1 / 1.18, e.clientX, e.clientY);
+      if (this.map.mapOpen) {
+        e.preventDefault();
+        const action = wheelToChartAction(e, window.innerHeight);
+        if (action.zoomFactor !== 1) this.map.zoomAtClient(action.zoomFactor, e.clientX, e.clientY);
+        if (action.panDx !== 0 || action.panDy !== 0) this.map.panByClient(action.panDx, action.panDy);
+        return;
+      }
+      if (e.ctrlKey && this.inMatch && !this.menu.isVisible()) e.preventDefault();
     }, { passive: false });
+    // Safari (macOS trackpad + iOS) zooms the page on its own gesture events.
+    for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+      document.addEventListener(type, (e) => {
+        if (this.inMatch && !this.menu.isVisible()) e.preventDefault();
+      }, { passive: false });
+    }
     // Audio unlocks on the gestures WebKit accepts (pointerup/touchend/click/
     // keydown, window capture), iOS audio session 'playback', hidden/interrupted
     // suspend-resume: SoundEngine.installLifecycle (b1.1c, audio-08).
@@ -1922,9 +1941,9 @@ export class Game {
       const active = document.activeElement as HTMLElement | null;
       if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
 
-      if (event.code === 'KeyM' && this.inMatch) {
+      if (isBound('map', event.code) && this.inMatch) {
         this.toggleMap();
-      } else if (event.code === 'Escape' && this.map.mapOpen) {
+      } else if (isBound('pause', event.code) && this.map.mapOpen) {
         this.toggleMap(false);
       }
     });
@@ -4063,7 +4082,10 @@ export class Game {
     if (!this.pointerLockHintEl) return;
     const inMatch = !!this.localPlayerId;
     const menuVisible = this.menu.isVisible();
-    const showHint = inMatch && !menuVisible && !this.input.isLocked();
+    // Mouse scheme only: a phone or a pad cannot "click to look" (crossdevice-02).
+    const showHint = lockHintVisible({
+      inMatch, menuVisible, pointerLocked: this.input.isLocked(), scheme: this.input.scheme.current,
+    });
     this.pointerLockHintEl.classList.toggle('visible', showHint);
     // "WASD to move" was wrong at the two stations where a new player most
     // often loses pointer lock: at the wheel W/S are sails and A/D is rudder,
@@ -7537,7 +7559,7 @@ export class Game {
       this.map.drawMaps();
     } else if (this.inMatch && !this.input.isLocked()) {
       // Give the helm back its mouse the moment the chart is folded away.
-      this.renderer.renderer.domElement.requestPointerLock?.()?.catch?.(() => {});
+      if (this.input.scheme.current === 'mouse') requestLockSafe(this.renderer.renderer.domElement);
     }
   }
 

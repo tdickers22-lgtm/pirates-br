@@ -226,6 +226,9 @@ export const LOGIC = [
   quick(tsx('test-hud-storm-warnings.mjs')),
   // FEED-01 client half (hud-23, hud-29, liveplay-06/23) + hud-26 (w1.6).
   quick(tsx('test-hud-feed-scope.mjs')),
+  // b1.4a: one bindings table, input authority per scheme, safe pointer lock,
+  // continuous wheel/trackpad chart zoom (crossdevice-02/09/10/11/14, mechanicshud-05).
+  quick(tsx('test-input-bindings.mjs')),
   // FEED-01/liveplay-21: the defender's ship_hit — HULL STRUCK line, compass
   // arc at the guns, bounded shudder, one feed row per attacker (w1.6).
   quick(tsx('test-hud-ship-struck.mjs')),
