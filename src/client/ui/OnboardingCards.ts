@@ -19,6 +19,7 @@
  */
 
 import { modalStack } from './ModalStack.js';
+import { glyph } from './InputGlyphs.js';
 
 type Card = { kicker: string; glyph: string; title: string; lines: string[] };
 
@@ -30,7 +31,7 @@ const CARDS: readonly Card[] = [
     glyph: '⛵',
     title: 'Sail',
     lines: [
-      'Your ship is the one ringed in gold on the map ([M]) and on the minimap. Walk aboard.',
+      `Your ship is the one ringed in gold on the map (${glyph('map')}) and on the minimap. Walk aboard.`,
       'TAKE THE WHEEL FIRST: hold <b>X</b> at it, steer with <b>A</b>/<b>D</b>, and let the sails out and in with <b>W</b>/<b>S</b>.',
       'Weigh anchor FROM the wheel — hold <b>W</b> there. The bow capstan does it too, but she sails herself off the berth with nobody steering.',
       'No crew may fire for the first <b>2:30</b> (the TRUCE clock, beside the storm timer). Get under way before it runs out.',

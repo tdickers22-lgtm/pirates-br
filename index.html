@@ -114,7 +114,7 @@
       <h2>How to Play</h2>
       <div id="howto-win">
         <div class="howto-win-title">Two ways to take the seas</div>
-        <div class="howto-win-row"><span class="howto-win-key">💰</span><span>Bank <strong>9,000 gold</strong> — dig treasure, sell it to a Tallyman.</span></div>
+        <div class="howto-win-row"><span class="howto-win-key">💰</span><span>Bank <strong data-win-gold></strong> — dig treasure, sell it to a Tallyman.</span></div>
         <div class="howto-win-row"><span class="howto-win-key">☠</span><span>Or be the <strong>last crew afloat</strong> when every other hull is down.</span></div>
       </div>
       <div id="howto-controls">Controls load with the game.</div>
@@ -155,11 +155,8 @@
       <div id="settings-quality-note" style="font-size:0.7rem;color:#7f92a8;line-height:1.5;letter-spacing:0.03em;margin:-4px 0 6px 0;"></div>
       <div id="settings-controls-block" style="font-size:0.74rem;color:#7f92a8;line-height:1.6;letter-spacing:0.04em;margin-top:6px;">
         <div><strong style="color:#9ec0e5;">Controls</strong></div>
-        WASD · Move &nbsp;|&nbsp; SPACE · Jump / Swim up &nbsp;|&nbsp; Z · Swim down &nbsp;|&nbsp; C · Crouch &nbsp;|&nbsp; X · Interact<br>
-        1–4 · Weapons &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; P · Spyglass<br>
-        LMB · Fire &nbsp;|&nbsp; SHIFT/RMB · Aim (guard, with a cutlass) &nbsp;|&nbsp; E · Special &nbsp;|&nbsp; G · Keg<br>
-        Hold I · Supply Wheel (1-9, 0 · Q flips to charts) &nbsp;|&nbsp; B · Drop Chest &nbsp;|&nbsp; M · Map &nbsp;|&nbsp; L · Controls &nbsp;|&nbsp; F8 · Bug report<br>
-        At Helm: A/D · Steer &nbsp;|&nbsp; W/S · Sails out / in &nbsp;|&nbsp; Q/F · Angle the sails &nbsp;|&nbsp; Hold W · Weigh anchor
+        <!-- Generated from src/shared/bindings.ts for the active device (InputGlyphs.renderGlyphs). -->
+        <div data-legend></div>
       </div>
       <div class="menu-row menu-panel-footer">
         <button class="menu-btn primary" id="settings-back-btn">Back</button>
@@ -275,7 +272,7 @@
                told about. It gets a chip beside the map's, in the one header a
                new pirate already reads. -->
           <div id="minimap-head-chips">
-            <div id="controls-toggle">[L]<span class="ct-word"> Controls</span></div>
+            <div id="controls-toggle"><span data-glyph="legend"></span><span class="ct-word"> Controls</span></div>
             <div id="minimap-toggle">M</div>
           </div>
         </div>
@@ -301,7 +298,7 @@
         <div id="treasure-chart-route">Talk to a Tallyman</div>
       </div>
       <div id="pocket-wheel">
-        <div class="pw-hint">Hold [I] — supply wheel · click a tool to equip, a supply to use · [Q] quest maps</div>
+        <div class="pw-hint"><span data-glyph-hold="supplyWheel"></span> supply wheel · click a tool to equip, a supply to use · <span data-glyph="wheelPage"></span> quest maps</div>
         <svg id="pocket-wheel-svg" viewBox="-100 -100 200 200" aria-label="Supply wheel">
           <path class="wheel-slice" data-wheel-slot="0" d="M 0 0 L -28.4 -87.5 A 92 92 0 0 1 28.4 -87.5 Z"></path>
           <path class="wheel-slice" data-wheel-slot="1" d="M 0 0 L 28.4 -87.5 A 92 92 0 0 1 74.4 -54.1 Z"></path>
@@ -343,18 +340,18 @@
       </div>
       <div id="map-wheel">
         <div class="mw-title">Quest Maps</div>
-        <div class="mw-hint">[Q] quest maps · [Q] again for the Tallyman's table · press a number (or click) to equip a chart</div>
+        <div class="mw-hint"><span data-glyph="wheelPage"></span> quest maps · <span data-glyph="wheelPage"></span> again for the Tallyman's table · press a number (or click) to equip a chart</div>
         <div id="map-wheel-list" style="width:100%; display:flex; flex-direction:column; gap:6px;"></div>
       </div>
       <div id="shop-wheel">
         <div class="mw-title">The Tallyman's Table</div>
-        <div class="mw-hint">[Q] back to supplies · press a number (or click) to buy</div>
+        <div class="mw-hint"><span data-glyph="wheelPage"></span> back to supplies · press a number (or click) to buy</div>
         <div id="shop-wheel-list" style="width:100%; display:flex; flex-direction:column; gap:6px;"></div>
       </div>
     </aside>
 
     <div id="hud-center-prompt">
-      <div id="interact-prompt">[X] Open Chest</div>
+      <div id="interact-prompt"></div>
       <div id="context-label"></div>
     </div>
 
@@ -452,24 +449,16 @@
          the menu's How to Play panel clones this element's markup at boot
          (MenuController.mirrorLegendIntoHowto) so the two can never drift. -->
     <div id="controls-hint">
-      <div class="legend-title">SHIP'S ORDERS — [L] to close</div>
+      <div class="legend-title">SHIP'S ORDERS — <span data-glyph="legend"></span> to close</div>
       <div id="legend-body">
         <!-- .legend-win is stripped from the menu's copy: How to Play states the
              win condition in its own banner and would say it twice. -->
-        <span class="legend-win"><strong style="color:#f0dda9;">To win:</strong> bank <strong>9,000 gold</strong> — or be the <strong>last crew afloat</strong>. Either one takes the seas.
+        <span class="legend-win"><strong style="color:#f0dda9;">To win:</strong> bank <strong data-win-gold></strong> — or be the <strong>last crew afloat</strong>. Either one takes the seas.
         <br>Gold comes from treasure: dig chests with the shovel, carry them to a Tallyman, and sell.
         <br>
-        <br></span>WASD (or the arrow keys) · Move &nbsp;|&nbsp; SPACE · Jump / Swim up &nbsp;|&nbsp; Z · Swim down &nbsp;|&nbsp; C · Crouch
-        <br>X · Interact — walk up and look at a thing, one prompt shows &nbsp;|&nbsp; B · Drop a carried chest
-        <br>Look for the gold station tags aboard: ⚓ Capstan at the bow · Hold X raises the anchor
-        <br>⛵ Rope stations at the mast rails · Hold X drops / raises the sails (crewmates on the rope haul faster)
-        <br>Helm: A/D · Steer &nbsp;·&nbsp; W/S · Sails out / in &nbsp;·&nbsp; Q/F · Angle the sails &nbsp;·&nbsp; Hold W · Weigh anchor &nbsp;|&nbsp; Crow's nest · ladder up the mainmast
-        <br>1–4 · Weapons &nbsp;|&nbsp; R · Reload &nbsp;|&nbsp; E · Special attack &nbsp;|&nbsp; 5/6/7 · Cannon Ammo &nbsp;|&nbsp; G · Hold for powder keg, release to place
-        <br>Hold I · Supply wheel &amp; tools (1-9, 0 to take one · Q flips to your charts)
-        <br>LMB · Fire &nbsp;|&nbsp; SHIFT or RMB · Aim — with a cutlass drawn it raises your guard instead
-        <br>P · Spyglass &nbsp;|&nbsp; M · Map (Esc closes) &nbsp;|&nbsp; L · This card &nbsp;|&nbsp; F8 · Bug report
+        </span><span data-legend></span>
         <br>
-        <br><strong style="color:#f0dda9;">Kill streak rewards:</strong> 4 kills · super cannonball &nbsp;·&nbsp; 8 · mega keg &nbsp;·&nbsp; 14 · tsunami [E]
+        <br><strong style="color:#f0dda9;">Kill streak rewards:</strong> 4 kills · super cannonball &nbsp;·&nbsp; 8 · mega keg &nbsp;·&nbsp; 14 · tsunami <span data-glyph="special"></span>
         <br>The storm ring shrinks all match. Outside it your hull takes breaches and your crew bleeds.
       </div>
       <!-- The tour is re-openable FOREVER, and this is the door a lost player
@@ -483,7 +472,7 @@
     <div id="downed-banner">DOWNED</div>
     <div id="damage-vignette"></div>
     <div id="knockback-flash"></div>
-    <div id="pointer-lock-hint">Click to look around · WASD to move</div>
+    <div id="pointer-lock-hint">Click to look around</div>
   </div>
   <!-- HUD-BLOCK-END -->
 
@@ -511,7 +500,7 @@
         <canvas id="map-canvas" width="1024" height="1024"></canvas>
         <!-- The chart pans, zooms and centres on a click; the line that used to
              sit here only named two colours the legend already carries. -->
-        <div id="map-help">Drag to pan · Scroll to zoom · Click an isle or label to centre · [M]/[Esc] closes</div>
+        <div id="map-help">Drag to pan · Scroll to zoom · Click an isle or label to centre · <span data-glyph="map"></span>/<span data-glyph="pause"></span> closes</div>
       </div>
       <!-- The chart's glyph key. Painted by MapRenderer.drawGlyphKey with the
            SAME vector marks the chart itself draws, so the key can never show

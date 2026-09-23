@@ -25,6 +25,7 @@ import type { UiRefs } from './UiRefs.js';
 import { BROKER_NAME, itemDisplayName, shipClassName, weaponSlotName } from './DisplayNames.js';
 import { closeOnboardingCards, openOnboardingCards, wireOnboardingCards } from './OnboardingCards.js';
 import { crewStripRows, type CrewStripRow } from './crewStrip.js';
+import { glyph, glyphSet, keys } from './InputGlyphs.js';
 
 /** Everything the HUD reads or writes on the Game instance. */
 export type HudView = {
@@ -1327,7 +1328,7 @@ export class HudController {
       // The four section bars are gone with the section model. What a captain
       // needs is the count of open planking and the bilge gauge beside it.
       this.view.ui.shipLeaks.textContent = openLeaks > 0
-        ? `${openLeaks} LEAK${openLeaks === 1 ? '' : 'S'}${aboard ? ' — hold [X] at a hole to plank it' : ' — she is taking water'}`
+        ? `${openLeaks} LEAK${openLeaks === 1 ? '' : 'S'}${aboard ? ` — hold ${glyph('interact')} at a hole to plank it` : ' — she is taking water'}`
         : 'Hull sound';
       this.view.ui.shipLeaks.style.color = openLeaks >= 4
         ? '#ff8a6a'
@@ -1357,10 +1358,10 @@ export class HudController {
       const trimHint = Math.abs(trimDelta) < 0.08
         ? 'best angle'
         : trimDelta > 0
-          ? 'turn sails right [F]'
-          : 'turn sails left [Q]';
+          ? `turn sails right ${glyph('trimRight')}`
+          : `turn sails left ${glyph('trimLeft')}`;
       const rig = ship.sailIntegrity < 0.99
-        ? ` · Sails torn, ${Math.round(ship.sailIntegrity * 100)}% of the cloth left${aboard ? ' (hold [X] at the sails, planks in hand)' : ''}`
+        ? ` · Sails torn, ${Math.round(ship.sailIntegrity * 100)}% of the cloth left${aboard ? ` (hold ${glyph('interact')} at the sails, planks in hand)` : ''}`
         : '';
       // PLAIN ENGLISH. "Wind NW -> 138deg from starboard" is a bearing, a delta
       // and an ASCII arrow, and it told a new captain nothing they could steer
@@ -1390,8 +1391,8 @@ export class HudController {
         // captain stood on the dais leaning on W and watched nothing happen.
         // The wheel has to be TAKEN first, and the line now says so in order.
         this.view.ui.sailStatus.textContent = player.atHelm
-          ? `Anchored · hold [W] to weigh anchor · ${windLine}`
-          : `Anchored · hold [X] at the wheel, then [W] — or hold [X] at the capstan · ${windLine}`;
+          ? `Anchored · hold ${glyph('sailsOut')} to weigh anchor · ${windLine}`
+          : `Anchored · hold ${glyph('interact')} at the wheel, then ${glyph('sailsOut')} — or hold ${glyph('interact')} at the capstan · ${windLine}`;
       } else {
         // Numeric trim is a HELM readout: it only means anything to the hand on
         // the wheel, and off the wheel it was just more arithmetic on screen.
@@ -1596,15 +1597,15 @@ export class HudController {
       this.view.ui.contextLabel.textContent = countdown.label;
     } else if (player.atCannon) {
       this.view.ui.interactPrompt.style.display = 'block';
-      this.view.ui.interactPrompt.textContent = '[X] Leave Cannon · [SPACE] Launch Yourself';
+      this.view.ui.interactPrompt.textContent = `${glyph('interact')} Leave Cannon · ${glyph('jump')} Launch Yourself`;
       this.view.ui.contextLabel.style.display = 'block';
       const superShot = player.superCannonballs > 0 && player.selectedCannonAmmo === 'cannonball'
         ? ` · SUPER x5 ready (${player.superCannonballs})`
         : '';
-      this.view.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · [5/6/7] shot type`;
+      this.view.ui.contextLabel.textContent = `Cannon ${player.cannonIndex + 1} · ${player.selectedCannonAmmo.replace('_', ' ')}${superShot} · ${glyphSet(['ammoRound', 'ammoFire', 'ammoChain'])} shot type`;
     } else if (player.atHelm) {
       this.view.ui.interactPrompt.style.display = 'block';
-      this.view.ui.interactPrompt.textContent = '[X] Leave Helm';
+      this.view.ui.interactPrompt.textContent = `${glyph('interact')} Leave Helm`;
       this.view.ui.contextLabel.style.display = 'block';
       if (ship?.anchored) {
         // The dead end that ate a whole playtest: W at the wheel drops canvas,
@@ -1613,7 +1614,7 @@ export class HudController {
         // looking, and name the key that actually works from this station.
         const raised = Math.round((ship.anchorRaiseProgress ?? 0) * 100);
         this.view.ui.contextLabel.textContent =
-          `ANCHOR DOWN — she cannot move. Hold [W] to haul it up (${raised}%) · or [X] off the wheel and hold [X] at the bow capstan`;
+          `ANCHOR DOWN — she cannot move. Hold ${glyph('sailsOut')} to haul it up (${raised}%) · or ${glyph('interact')} off the wheel and hold ${glyph('interact')} at the bow capstan`;
       } else if (ship) {
         // "make and shorten sail" is the correct order and means nothing to a
         // first-time captain. The verbs are what the keys do.
@@ -1623,9 +1624,9 @@ export class HudController {
       }
     } else if (player.atCrowNest) {
       this.view.ui.interactPrompt.style.display = 'block';
-      this.view.ui.interactPrompt.textContent = '[X] Climb Down';
+      this.view.ui.interactPrompt.textContent = `${glyph('interact')} Climb Down`;
       this.view.ui.contextLabel.style.display = 'block';
-      this.view.ui.contextLabel.textContent = 'Crow\'s nest · [X] remounts the ladder';
+      this.view.ui.contextLabel.textContent = `Crow\'s nest · ${glyph('interact')} remounts the ladder`;
     } else if (player.mastClimb !== null) {
       // Mid-ladder: W/S climbs (server-driven), X lets go at the bottom.
       this.view.ui.interactPrompt.style.display = 'block';
@@ -1640,7 +1641,7 @@ export class HudController {
       this.view.ui.contextLabel.textContent = lookInteraction.label;
     } else if (player.carryingChestId) {
       this.view.ui.interactPrompt.style.display = 'block';
-      this.view.ui.interactPrompt.textContent = '[B] Drop Chest';
+      this.view.ui.interactPrompt.textContent = `${glyph('dropChest')} Drop Chest`;
       this.view.ui.contextLabel.style.display = 'block';
       this.view.ui.contextLabel.textContent = `Carrying treasure · sell to the ${BROKER_NAME} or stow on ship`;
     } else {
@@ -1653,10 +1654,10 @@ export class HudController {
       const ambientLabel = player.state === 'downed'
         ? ''
         : player.state === 'swimming'
-          ? 'Swimming · W follows look · Space up · Z down · LMB fire · Shift/RMB aim'
+          ? `Swimming · ${keys('moveForward')} follows look · ${keys('jump')} up · ${keys('swimDown')} down · ${keys('fire')} fire · ${keys('aim')} aim`
           : weapon?.weaponId === 'cutlass'
-            ? `Cutlass · hold LMB to charge dash · Shift/RMB block · ${this.getKegSummary(player)}`
-            : `[I] Supply wheel · Shift/RMB aim · ${this.getKegSummary(player)}`;
+            ? `Cutlass · hold ${keys('fire')} to charge dash · ${keys('aim')} block · ${this.getKegSummary(player)}`
+            : `${glyph('supplyWheel')} Supply wheel · ${keys('aim')} aim · ${this.getKegSummary(player)}`;
       this.view.ui.contextLabel.style.display = ambientLabel ? 'block' : 'none';
       this.view.ui.contextLabel.textContent = ambientLabel;
     }
@@ -1732,14 +1733,14 @@ export class HudController {
     },
     storm: {
       title: 'TAKEN BY THE STORM',
-      cause: 'The tempest tore the last of your health away. The safe circle shrinks all match — watch it on the chart [M].',
+      cause: `The tempest tore the last of your health away. The safe circle shrinks all match — watch it on the chart ${glyph('map')}.`,
       reason: 'Lost to the storm',
       spectate: 'The storm took you — there is no respawn from here',
       blame: 'the storm took you',
     },
     drowned: {
       title: 'DROWNED',
-      cause: 'You stayed under too long. Surface, or find a hull to climb back onto — [SPACE] swims up.',
+      cause: `You stayed under too long. Surface, or find a hull to climb back onto — ${glyph('jump')} swims up.`,
       reason: 'Drowned',
       spectate: 'You went under with no ship to swim back to — no respawn from here',
       blame: 'you went under',
@@ -1781,7 +1782,7 @@ export class HudController {
     },
     blade: {
       title: 'CUT DOWN',
-      cause: 'A cutlass finished you at arm’s length. Hold [RMB] to block — a parried swing costs them the trade.',
+      cause: `A cutlass finished you at arm’s length. Hold ${glyph('aim')} to block — a parried swing costs them the trade.`,
       reason: 'Cut down',
       spectate: 'You were cut down — there is no respawn from here',
       blame: 'a blade cut you down',
@@ -2356,7 +2357,7 @@ export class HudController {
     const metres = Math.round(Math.hypot(dx, dz));
     const text = own.sinking || own.sinkProgress > 0.02
       ? `Your own ${shipClassName(own.type).toLowerCase()} is going down, ${metres} m off`
-      : `Your own ${shipClassName(own.type).toLowerCase()} is ${metres} m ${this.compassWord(dx, dz)} — ringed gold on [M]`;
+      : `Your own ${shipClassName(own.type).toLowerCase()} is ${metres} m ${this.compassWord(dx, dz)} — ringed gold on ${glyph('map')}`;
     if (text === this.ownBearingText) return;
     this.ownBearingText = text;
     el.textContent = text;
@@ -2499,9 +2500,9 @@ export class HudController {
       // ship, and telling a stuck captain to back off would be the same species of
       // lie as the wind panel that read backwards. Hard over is what actually
       // works, and test-storm-outrun proves it does before this line may say it.
-      aground ? 'Aground — hard over on [A] or [D] to swing her off the shoal'
-        : inIrons ? 'Bow into the wind — steer [A] or [D] until the sails fill'
-          : 'Sails are slack — press [Q] or [F] to swing the yard into the wind',
+      aground ? `Aground — hard over on ${glyph('steerLeft')} or ${glyph('steerRight')} to swing her off the shoal`
+        : inIrons ? `Bow into the wind — steer ${glyph('steerLeft')} or ${glyph('steerRight')} until the sails fill`
+          : `Sails are slack — press ${glyph('trimLeft')} or ${glyph('trimRight')} to swing the yard into the wind`,
     );
   }
 
@@ -2640,10 +2641,16 @@ export class HudController {
    *  Built from KILL_STREAK_LADDER so the copy can never quote a rung the
    *  server does not award (the legend said "20 · tsunami" for months while a
    *  ten-crew lobby made 20 straight kills a thing nobody had ever seen). */
-  private static readonly POWER_TABLE = `Kill-streak rewards: ${
-    KILL_STREAK_LADDER.map((tier, i) => (i === 0 ? `${tier.kills} kills · ${tier.label}` : `${tier.kills} · ${tier.label}`))
-      .join('  ·  ')
+  /** A getter, not a static string: the special attack's glyph follows the device. */
+  private static get POWER_TABLE(): string {
+    return `Kill-streak rewards: ${
+    KILL_STREAK_LADDER.map((tier, i) => {
+      // The top rung is fired with the special-attack control.
+      const label = i === KILL_STREAK_LADDER.length - 1 ? `${tier.label} ${glyph('special')}` : tier.label;
+      return i === 0 ? `${tier.kills} kills · ${label}` : `${tier.kills} · ${label}`;
+    }).join('  ·  ')
   }`;
+  }
 
   /** Streak seen on the previous HUD pass; −1 means "not seeded yet". */
   private lastStreakSeen = -1;
@@ -2732,7 +2739,7 @@ export class HudController {
     // Aboard, but nothing is moving yet — the one beat between boarding and the
     // open game (see firstSailPending; spent the moment she has the wheel).
     if (this.firstSailPending(player, ship)) {
-      return 'Objective: take the helm [X] at the wheel, then hold W to get under way';
+      return `Objective: take the helm ${glyph('interact')} at the wheel, then hold ${keys('sailsOut')} to get under way`;
     }
     if (player.carryingChestId && context.closestHoarder) {
       return `Objective: sell chest at ${context.closestHoarder.island.name}`;
@@ -2749,7 +2756,7 @@ export class HudController {
     // spawn island and never dug, because nothing ever named the tell it was
     // walking past: a mound of turned sand with gold sparkling over it.
     if (player.gold < ECONOMY.GOLD_WIN_TARGET * 0.06 && !context.chestsInHold && !player.carryingChestId) {
-      return 'Objective: dig a chest — sparkling sand on the beaches, hold [X] with the shovel';
+      return `Objective: dig a chest — sparkling sand on the beaches, hold ${glyph('interact')} with the shovel`;
     }
     if (player.gold >= ECONOMY.GOLD_WIN_TARGET * 0.72) return 'Objective: protect your lead and finish the gold run';
     if (ship && ship.upgrades.length < 2) return 'Objective: claim upgrades, raid ships, and sell treasure';
