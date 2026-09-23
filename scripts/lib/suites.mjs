@@ -481,6 +481,12 @@ export const LOGIC = [
   //                                 additive/unlit/untone-mapped with no alphaTest, and the Points program variants
   //                                 in src/client stay <= 4 (the sparkle replaces its variant) (islands-10, b1.1f)
   quick(tsx('test-dig-sparkle.mjs')),
+  //   test-asset-provenance       — every GLB in public/assets/models has a PROVENANCE.json row (the scripts/blender
+  //                                 build script carrying its literal output name, or a CC0/CC-BY LICENSES.md row with
+  //                                 a URL); committed file == fresh provenance-scan; no generator-tool string in any
+  //                                 asset.generator/copyright/extras, scripts/ or src/; self-tests 9 failing fixtures
+  //                                 every run (critique-06, D37, b1.1h)
+  quick(plain('test-asset-provenance.mjs')),
 ];
 
 /**
