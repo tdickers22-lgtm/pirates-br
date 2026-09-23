@@ -27,7 +27,7 @@
 import { Match } from '../src/server/core/Match.ts';
 import { MapGenerator } from '../src/server/world/MapGenerator.ts';
 import { buildWireSnapshot } from '../src/server/core/snapshot.ts';
-import { SERVER_TICK_MS, WRECK_EVENT, WRECK_SITES, SEA_POI, WORLD } from '../src/shared/constants/index.ts';
+import { SERVER_TICK_MS, BOT_EARLY_PEACE_SECONDS, WRECK_EVENT, WRECK_SITES, SEA_POI, WORLD } from '../src/shared/constants/index.ts';
 import { getIslandSurfaceY, getIslandMaxRadius, dist2D } from '../src/shared/utils/index.ts';
 
 let failures = 0;
@@ -349,7 +349,11 @@ console.log('\nCrews converge:');
 console.log('\nCrews convert:');
 {
   const match = makeMatch('wreck-convert');
-  run(match, 25);
+  // She rises with the first shrink, the second the early peace and the D23
+  // truce lift (WRECK_EVENT.SPAWN_PHASE). Raising her at 25 s put the whole
+  // hunt inside the truce, where no bot may seek a fight: the case only passed
+  // while nobody ever carried the strongbox (prizeHull null = vacuous).
+  run(match, BOT_EARLY_PEACE_SECONDS);
   const wreck = match.forceRaiseGildedWreck();
   const host = match.state.islands.find((island) => island.id === wreck.hostIslandId);
 
@@ -372,10 +376,15 @@ console.log('\nCrews convert:');
         : null);
     if (!holderShipId) continue;
     prizeHull = match.state.ships.find((s) => s.id === holderShipId) ?? prizeHull;
-    let hunters = 0;
+    // The decision lives on the CREW (Blackboard CrewState, one mind per hull);
+    // BotState has no behavior/targetShipId, so reading them off the body
+    // counted 0 hunters forever. Count hunting crews, not bodies.
+    const huntingCrews = new Set();
     for (const bot of match.bots.bots.values()) {
-      if (bot.shipId !== holderShipId && bot.behavior === 'engage' && bot.targetShipId === holderShipId) hunters += 1;
+      const crew = bot.crew;
+      if (crew && crew.shipId !== holderShipId && crew.behavior === 'engage' && crew.targetShipId === holderShipId) huntingCrews.add(crew.shipId);
     }
+    const hunters = huntingCrews.size;
     if (hunters > huntersOnPrize) huntersOnPrize = hunters;
   }
   console.log(`  chests off her: ${everTaken}  ·  hunters on the prize: ${huntersOnPrize}`);
