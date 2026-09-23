@@ -11,6 +11,7 @@ import { assets, isLazyAsset, type AssetName } from '../../assets/AssetLibrary.j
 import { BIOME_PALETTES, getPropGroundY, PROP_COLLIDERS, radialFill } from '../../../shared/props.js';
 import { coverBudget, makeFernRosetteGeometry, makeGrassTuftGeometry, understoryDensity } from './FoliageGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
+import { refreshFrozenChild } from '../../rendering/three-util.js';
 import { makePlayerMesh } from '../../rendering/factories/PlayerMeshFactory.js';
 import type { IslandBuildCtx, IslandBuilderCtx, NpcMeshRecord } from './context.js';
 import type { TerrainBuild } from './TerrainMeshBuilder.js';
@@ -133,10 +134,32 @@ function lazyStoryStandIn(
         blendStoryPad(obj, island);
       }
     });
-    parent.add(real);
-    parent.remove(ph);
+    swapInStoryScene(ph, real);
   });
   return ph;
+}
+
+/**
+ * Replace a story stand-in with the scene that just landed, in the stand-in's
+ * slot. Returns false (and adds nothing) when the stand-in has left the graph.
+ *
+ * THE SLOT IS INSIDE A FROZEN ISLAND (islands-16). IslandBuilder froze the
+ * island group with freezeStaticSubtree long before this GLB arrived, and three
+ * r160's per-frame walk never descends into a frozen root: a node added under
+ * it keeps the matrixWorld it was born with, the identity. Every hero scene
+ * drew at the world origin, buried in Old Maw Caldera, while its island showed
+ * only the orphan contact shadow. refreshFrozenChild recomputes the new subtree
+ * against the parent's (correct, frozen) world matrix; nothing in a story scene
+ * moves afterwards, so once is enough. scripts/test-frozen-insertions.mjs keeps
+ * every other late insertion under a frozen island to the same rule.
+ */
+export function swapInStoryScene(ph: THREE.Object3D, real: THREE.Object3D): boolean {
+  const parent = ph.parent;
+  if (!parent) return false;
+  parent.add(real);
+  refreshFrozenChild(real);
+  parent.remove(ph);
+  return true;
 }
 
 function makeStoryPlaceholder(type: string, position: THREE.Vector3, yaw: number, scale: number): THREE.InstancedMesh {

@@ -121,10 +121,65 @@ expect('the stand-in lifts the unit box by its own half-height (seated, not sunk
   /new THREE\.Vector3\(0, half\[1\] \* scale, 0\)/.test(scat));
 expect('the stand-in carries the prop-<type> name through the swap',
   /real\.name = ph\.name/.test(scat));
-expect('the swap re-parents at the same transform',
-  /parent\.add\(real\);[\s\S]{0,40}parent\.remove\(ph\)/.test(scat));
+expect('the swap goes through swapInStoryScene',
+  /swapInStoryScene\(ph, real\)/.test(scat.split('function lazyStoryStandIn')[1] ?? ''));
+expect('the swap re-parents into the stand-in\'s slot',
+  /parent\.add\(real\);[\s\S]{0,120}parent\.remove\(ph\)/.test(scat.split('function swapInStoryScene')[1] ?? ''));
 expect('the real scene gets the shadow flags and the story-pad blend',
   /blendStoryPad\(obj, island\)/.test(scat.split('function lazyStoryStandIn')[1] ?? ''));
+
+// ── 5. the swapped-in scene stands at its island, not at the world origin ─
+// islands-16: the island group is frozen (freezeStaticSubtree clears
+// matrixWorldAutoUpdate on the ROOT), and three's per-frame walk never descends
+// into a frozen root. A node added under it after the freeze keeps whatever
+// matrixWorld it was born with (identity), so every story scene that landed
+// after its island was built drew at (0,0,0), inside Old Maw Caldera.
+{
+  const Scat = await import('../src/client/world/island/PropScatterer.ts');
+  const { freezeStaticParent, freezeStaticSubtree } = await import('../src/client/rendering/three-util.ts');
+  // The game's graph: a still scene and a still environment root (Renderer /
+  // Game freezeStaticParent them), so the walk reaches the island group with
+  // force=false and skips it — exactly the condition the freeze exists for.
+  const scene = new THREE.Scene();
+  const env = new THREE.Group();
+  scene.add(env);
+  freezeStaticParent(scene);
+  freezeStaticParent(env);
+  const islandGroup = new THREE.Group();
+  islandGroup.position.set(-528, 0, -600);
+  islandGroup.rotation.y = 0.7;
+  env.add(islandGroup);
+  const ph = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial());
+  ph.position.set(12, 9.5, -4);
+  ph.rotation.y = 1.1;
+  islandGroup.add(ph);
+  freezeStaticSubtree(islandGroup);
+  scene.updateMatrixWorld();
+  const phWorld = ph.getWorldPosition(new THREE.Vector3());
+
+  const real = new THREE.Group();
+  real.position.copy(ph.position);
+  real.rotation.copy(ph.rotation);
+  const part = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial());
+  part.position.set(0.5, 1.2, -0.3);
+  real.add(part);
+  const swapped = Scat.swapInStoryScene(ph, real);
+  for (let frame = 0; frame < 3; frame++) scene.updateMatrixWorld(); // the renderer's walk
+  const want = new THREE.Matrix4().multiplyMatrices(islandGroup.matrixWorld, real.matrix);
+  const wantPart = new THREE.Matrix4().multiplyMatrices(want, part.matrix);
+  const close = (a, b) => a.elements.every((v, i) => Math.abs(v - b.elements[i]) < 1e-4);
+  const at = new THREE.Vector3().setFromMatrixPosition(real.matrixWorld);
+  expect('the swap reports success and replaces the stand-in',
+    swapped === true && real.parent === islandGroup && ph.parent === null);
+  expect('after the swap real.matrixWorld == island.matrixWorld * real.matrix (frozen parent)',
+    close(real.matrixWorld, want),
+    `scene draws at (${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}), stand-in stood at (${phWorld.x.toFixed(1)}, ${phWorld.y.toFixed(1)}, ${phWorld.z.toFixed(1)})`);
+  expect('the scene\'s own children are refreshed too', close(part.matrixWorld, wantPart));
+  expect('the scene stands where its stand-in stood', at.distanceTo(phWorld) < 1e-3,
+    `off by ${at.distanceTo(phWorld).toFixed(1)} m`);
+  expect('a stand-in that already left the graph swaps nothing',
+    Scat.swapInStoryScene(ph, new THREE.Group()) === false);
+}
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — ${checks - failures}/${checks} checks`);
 process.exit(failures === 0 ? 0 : 1);
