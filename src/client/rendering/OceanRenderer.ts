@@ -329,6 +329,12 @@ export const OCEAN_FRAG = /* glsl */`
   uniform vec3  u_keyLight;
   uniform vec3  u_ambient;
   uniform vec3  u_sunDirTrue;
+  // Pure functions of the uniforms above, folded on the CPU by
+  // syncDerivedLight() whenever an input changes (b1.1a): the sunset path's
+  // horizontal sun and the two lights' brightness scale.
+  uniform vec3  u_sunPathDir;
+  uniform vec3  u_lightScale;
+  uniform float u_sunLow;
   uniform float u_moonness;
   // scene.fog.density, so the water fogs on three's own curve. See the fog block
   // near the end of main().
@@ -493,16 +499,21 @@ export const OCEAN_FRAG = /* glsl */`
 #endif
 
     vec3 V = normalize(u_cameraPos - v_worldPos);
-    vec3 L = normalize(u_sunDir);
-    // The TRUE sun, which is under the horizon all night. Only the warm sunset
-    // streak may key off it — hand it to the diffuse or the specular and the
-    // whole sea goes unlit the moment the sun sets, which is what it did.
-    vec3 S = normalize(u_sunDirTrue);
+    // u_sunDir arrives unit length (setSunDirection normalises on the CPU, once
+    // per change), so the per-pixel normalize() it used to get was 5 ops of
+    // nothing (b1.1a, correctness-10).
+    vec3 L = u_sunDir;
+    // The TRUE sun (u_sunDirTrue) is under the horizon all night. Only the warm
+    // sunset streak may key off it — hand it to the diffuse or the specular and
+    // the whole sea goes unlit the moment the sun sets, which is what it did.
+    // It reaches this shader only through u_sunPathDir and u_sunLow, which
+    // syncDerivedLight() folds from it on the CPU.
     // The two lights as one "how bright is it out" scale, normalised to 1.0 at
     // noon (0.48 + 0.62*0.55 = 0.821). Terms that are not albedo — foam, spray,
     // the shore film — used to carry their own hand-rolled night mix; they ride
     // this instead, so a change to the scene's lights moves them too.
-    vec3 lightScale = (u_ambient + u_keyLight * 0.55) / 0.821;
+    // (u_ambient + u_keyLight * 0.55) / 0.821, folded on the CPU.
+    vec3 lightScale = u_lightScale;
 
     // How far the EYE sits above this patch of surface. Swimming or wading, the
     // whole visible sea is at grazing incidence, and both the shallow tint and
@@ -533,12 +544,14 @@ export const OCEAN_FRAG = /* glsl */`
     float detailFade = 1.0 - smoothstep(40.0 + 120.0 * wading, 560.0 + 520.0 * wading, viewDist);
     // Kept for the shoreline below: the same ripple field that tilts the
     // normal also has to refract the bed the shallow tint reads.
-    vec2 rippleXZ = vec2(0.0);
+    // Only the SUM of the two slope components is ever read (the shoreline
+    // terms tilt along one diagonal), so it is kept as one float, summed once.
+    float rippleTilt = 0.0;
     if (detailFade > 0.001) {
       vec2 ripples = rippleSlope(wp, surfaceFootprint);
       float rippleAmp = (0.24 + 0.35 * calm + 0.26 * stormSea) * detailFade;
       N = normalize(N + vec3(-ripples.x, 0.0, -ripples.y) * rippleAmp);
-      rippleXZ = ripples * detailFade;
+      rippleTilt = (ripples.x + ripples.y) * detailFade;
     }
 
     // ── Base water color: deep troughs to lifted flanks. Height is
@@ -605,7 +618,7 @@ export const OCEAN_FRAG = /* glsl */`
     // already in registers) makes every shoreline term break up per ripple,
     // and the plate becomes water. ±0.35 of slope is ±1.4 sd, i.e. ±0.28 m of
     // apparent depth, well under the 2-11 band the lap film lives in.
-    sd = max(0.0, sd + (rippleXZ.x + rippleXZ.y) * 6.0);
+    sd = max(0.0, sd + rippleTilt * 6.0);
     // FROM ALTITUDE THE SHELF IS A PASTED DISC. shallowMask ramps over 48 sd
     // (under 10 m of bed) and shallowMix served it at 0.9: from 300 m up that
     // is a saturated cyan ellipse with a hard rim, brightest on the ellipse
@@ -640,7 +653,7 @@ export const OCEAN_FRAG = /* glsl */`
       // …and the tint itself is read through the ripples: a face tilted
       // toward the eye shows the sand, its back the sky. Without this the
       // shelf is one value across the whole lagoon, whatever the surface does.
-      * clamp(0.8 + (rippleXZ.x + rippleXZ.y) * 1.8, 0.4, 1.3)
+      * clamp(0.8 + rippleTilt * 1.8, 0.4, 1.3)
       * (1.0 - u_stormIntensity * 0.55)
       * (1.0 - u_twilightFactor * 0.42)
       * shoreLight
@@ -651,7 +664,8 @@ export const OCEAN_FRAG = /* glsl */`
     float NdotV   = max(0.0, dot(N, V));
     float fresnel = 0.028 + 0.972 * pow(1.0 - NdotV, 5.0);
     // Warm reflection streak only when the sun sits low (sunrise/sunset).
-    float sunLow  = 1.0 - smoothstep(0.16, 0.48, S.y);
+    // 1.0 - smoothstep(0.16, 0.48, sunDirTrue.y), folded on the CPU.
+    float sunLow  = u_sunLow;
     // The KEY light's own elevation — the sun by day, the moon by night, and
     // never below 0.16 — so there is a specular lobe after dark to carry the
     // moon path. The old sunUp = smoothstep(-0.06, 0.10, L.y) went to 0 the
@@ -659,7 +673,7 @@ export const OCEAN_FRAG = /* glsl */`
     // sunPath above stay on the TRUE sun, so the warm sunset streak they tint
     // does not reappear at midnight under the moon.
     float keyUp   = smoothstep(-0.06, 0.10, L.y);
-    float sunPath = pow(max(0.0, dot(normalize(vec3(V.x, 0.14, V.z)), normalize(vec3(S.x, 0.14, S.z)))), 5.0);
+    float sunPath = pow(max(0.0, dot(normalize(vec3(V.x, 0.14, V.z)), u_sunPathDir)), 5.0);
     // The sky the water mirrors, shaped the way the sky dome shapes itself, so
     // the reflection dims with the sky at night instead of staying a daylight
     // blue constant: this term, not the body colour, is what carried the night
@@ -1003,7 +1017,8 @@ export const OCEAN_FRAG = /* glsl */`
     // The far dissolve target is the SKY, so it is shaped like the sky. Fed raw,
     // the horizon swatch landed ~1.7 stops hot through ACES and the last two
     // kilometres of sea became a flat white sheet with a hard edge on it.
-    vec3 horizonCol = skyShape(u_horizonColor);
+    // Same shaping, same input as skyTint above: reuse it, not a second pow().
+    vec3 horizonCol = skyTint;
     // The 0.78 ceiling is gone with it: land reaches the fog colour completely
     // and the sea stopped 22% short of it, which is the same mismatch measured
     // at infinity instead of at 800 m.
@@ -1252,6 +1267,10 @@ export class OceanRenderer {
         u_keyLight:   { value: new THREE.Color(0.62, 0.62, 0.62) },
         u_ambient:    { value: new THREE.Color(0.48, 0.48, 0.48) },
         u_sunDirTrue: { value: this.sunDir.clone() },
+        // Derived from the three above by syncDerivedLight(), never set alone.
+        u_sunPathDir: { value: new THREE.Vector3() },
+        u_lightScale: { value: new THREE.Vector3() },
+        u_sunLow:     { value: 0 },
         u_moonness:   { value: 0 },
         // The scene's day density, until getAtmosphere sends the live one.
         u_fogDensity: { value: 0.00112 },
@@ -1289,6 +1308,8 @@ export class OceanRenderer {
       side: THREE.DoubleSide,
       extensions: { derivatives: true },
     });
+
+    this.syncDerivedLight();
 
     this.group = new THREE.Group();
     this.group.name = 'ocean-lod-grid';
@@ -1457,6 +1478,24 @@ export class OceanRenderer {
     if (atmo.twilightFactor !== undefined) {
       u.u_twilightFactor.value = Math.max(0, Math.min(1, atmo.twilightFactor));
     }
+    this.syncDerivedLight();
+  }
+
+  /** Fold the uniform-only light terms the fragment shader used to solve per
+   *  pixel: the horizontal sun the sunset path aligns with, how low the true
+   *  sun sits (sunLow), and the
+   *  (ambient + key * 0.55) / 0.821 brightness scale (1.0 at noon). */
+  private syncDerivedLight() {
+    const u = this.material.uniforms;
+    const s = u.u_sunDirTrue.value as THREE.Vector3;
+    (u.u_sunPathDir.value as THREE.Vector3).set(s.x, 0.14, s.z).normalize();
+    const t = Math.max(0, Math.min(1, (s.y - 0.16) / 0.32));
+    u.u_sunLow.value = 1 - t * t * (3 - 2 * t);
+    const k = u.u_keyLight.value as THREE.Color;
+    const a = u.u_ambient.value as THREE.Color;
+    (u.u_lightScale.value as THREE.Vector3).set(
+      (a.r + k.r * 0.55) / 0.821, (a.g + k.g * 0.55) / 0.821, (a.b + k.b * 0.55) / 0.821,
+    );
   }
 
   /** Cut the exterior sea out of these hulls (WATER-01 / ships-02).
