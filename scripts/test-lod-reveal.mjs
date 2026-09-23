@@ -16,6 +16,10 @@
 // Free-cam steps in from 1000m to 400m off each island's EDGE, three times
 // over, and records the worst rAF gap parked at each waypoint.
 //
+// It opens with the STORY phase (b1.1g, see storyPhase below):
+//   node scripts/test-lod-reveal.mjs --story-only       the story cases alone
+//   node scripts/test-lod-reveal.mjs --mutate-eager     eager ensure: MUST fail
+//
 // Needs the dev stack (vite 3000 + game server 8090).
 //   node scripts/test-lod-reveal.mjs
 //
@@ -123,6 +127,201 @@ const browser = await chromium.launch({
     '--enable-precise-memory-info',
   ]),
 });
+// ── STORY SCENES LAZY FOR REAL (b1.1g, performance-09) ───────────────────
+// The fifteen 25-48k story tableaux used to be ensured at build time, so all
+// of them were fetched within 20 s of the horn wherever you were. Now a 2-4k
+// `<name>_far.glb` proxy rides the world set and LOD0 is fetched only when the
+// island EDGE comes inside 600 m (400 m on a phone); a phone disposes LOD0
+// beyond 1.5 km and fetches it again on the next approach. Graded here:
+//   1. 20 s parked where no island edge is inside 600 m: <= 3 story GLBs fetched;
+//   2. crossing 600 m swaps proxy -> LOD0 within 2 s, and no poll ever sees
+//      neither of them drawn (no pop gap);
+//   3. ?profile=mobile: LOD0 goes beyond 1.5 km (proxy back) and is fetched
+//      again on approach.
+// `--story-only` runs just this phase; `--mutate-eager` rewrites the served
+// PropScatterer so every story slot ensures at any distance (the old bug) and
+// case 1 MUST fail. Requests are counted off the wire with routing on, which
+// disables the HTTP cache, so a re-fetch after eviction is a real request.
+const STORY_NAMES = ['smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton', 'rum_still', 'crow_roost',
+  'mermaid_shrine', 'castaway_camp', 'kraken_wreck', 'dig_site', 'gallows', 'parley_table', 'mine_head',
+  'widow_memorial', 'gibbet_cage'];
+const CLI = new Set(process.argv.slice(2));
+const STORY_ONLY = CLI.has('--story-only');
+const MUTATE_EAGER = CLI.has('--mutate-eager');
+const STORY_SWAP_LIMIT_MS = 2000;
+
+async function bootStoryPage(query) {
+  const p = await browser.newPage({ viewport: VIEWPORT });
+  const errors = [];
+  const fetched = [];
+  let mutated = false;
+  p.on('pageerror', (e) => errors.push(e.message));
+  p.on('request', (req) => {
+    const m = req.url().match(/\/assets\/models\/([a-z0-9_]+)\.glb/);
+    if (m && STORY_NAMES.includes(m[1])) fetched.push({ name: m[1], t: Date.now() });
+  });
+  await p.route(/\/assets\/models\/[a-z0-9_]+\.glb/, (route) => route.continue());
+  if (MUTATE_EAGER) {
+    await p.route(/\/src\/client\/world\/island\/PropScatterer\.ts/, async (route) => {
+      const res = await route.fetch();
+      const body = await res.text();
+      const next = body.replace(/if \(edgeMetres < fetchM\) \{/, 'if (edgeMetres < Infinity) {');
+      mutated = next !== body;
+      await route.fulfill({ response: res, body: next });
+    });
+  }
+  await p.goto(`${URL}/?debug&forceinput&quality=balanced${query}`, { waitUntil: 'domcontentloaded' });
+  await p.waitForSelector('#menu-solo-btn', { timeout: 60_000 });
+  await p.click('#menu-solo-btn', { noWaitAfter: true });
+  await p.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', undefined, { timeout: 180_000 });
+  // Park at the open-water point farthest from every island edge, first thing.
+  const park = await p.evaluate(() => {
+    const g = window.__piratesBR;
+    const isl = (g.state.islands ?? []).map((i) => ({ x: i.position.x, z: i.position.z, r: i.radius }));
+    const edge = (x, z) => Math.min(...isl.map((i) => Math.hypot(x - i.x, z - i.z) - i.r));
+    const me = g.state.players?.find?.((pl) => pl.id === g.state.localPlayerId) ?? null;
+    const cam = g.renderer?.camera?.position;
+    const spawnEdge = cam ? edge(cam.x, cam.z) : (me ? edge(me.position.x, me.position.z) : NaN);
+    const xs = isl.map((i) => i.x); const zs = isl.map((i) => i.z);
+    let best = { x: 0, z: 0, e: -Infinity };
+    for (let x = Math.min(...xs) - 1500; x <= Math.max(...xs) + 1500; x += 100) {
+      for (let z = Math.min(...zs) - 1500; z <= Math.max(...zs) + 1500; z += 100) {
+        const e = edge(x, z);
+        if (e > best.e && e < 2500) best = { x, z, e };
+      }
+    }
+    g.enableFreeCam(best.x, 40, best.z, 0, -0.05);
+    return { spawnEdge, ...best };
+  });
+  return { p, errors, fetched, park, mutated: () => mutated };
+}
+
+/** Story slots in the scene: the proxy (InstancedMesh, 'prop-<name>' or
+ *  'story-proxy-prop-<name>' once LOD0 stands) with its world position. */
+const LIST_STORY_SLOTS = (names) => {
+  const out = [];
+  const v = new window.__piratesBR.renderer.camera.position.constructor();
+  window.__piratesBR.renderer.scene.traverse((o) => {
+    if (!o.isInstancedMesh) return;
+    const m = o.name.match(/^(?:story-proxy-)?prop-([a-z0-9_]+)$/);
+    if (!m || !names.includes(m[1])) return;
+    o.getWorldPosition(v);
+    out.push({ name: m[1], x: v.x, z: v.z, uuid: o.uuid });
+  });
+  return out;
+};
+/** Is the slot's LOD0 standing, and is anything drawn there? */
+const SLOT_STATE = (uuid) => {
+  let proxy = null;
+  window.__piratesBR.renderer.scene.traverse((o) => { if (o.uuid === uuid) proxy = o; });
+  if (!proxy) return { gone: true };
+  const name = proxy.name.replace(/^story-proxy-/, '');
+  const real = proxy.parent?.children.find((c) => c !== proxy && c.name === name && !c.isInstancedMesh) ?? null;
+  return { real: !!real, proxyVisible: proxy.visible };
+};
+
+async function approachSlot(p, slot, edge) {
+  return p.evaluate(([s, e]) => {
+    const g = window.__piratesBR;
+    const isl = (g.state.islands ?? []).map((i) => ({ x: i.position.x, z: i.position.z, r: i.radius }));
+    const home = isl.reduce((a, b) => (Math.hypot(b.x - s.x, b.z - s.z) < Math.hypot(a.x - s.x, a.z - s.z) ? b : a));
+    // Come in along the line from the island centre through the slot.
+    const dx = s.x - home.x; const dz = s.z - home.z; const len = Math.hypot(dx, dz) || 1;
+    const d = home.r + e;
+    g.enableFreeCam(home.x + (dx / len) * d, 40, home.z + (dz / len) * d, 0, -0.05);
+    // Every OTHER island must be farther than this one, or the crossing is not ours.
+    const cx = home.x + (dx / len) * d; const cz = home.z + (dz / len) * d;
+    return Math.min(...isl.filter((i) => i !== home).map((i) => Math.hypot(cx - i.x, cz - i.z) - i.r));
+  }, [slot, edge]);
+}
+
+async function waitSlot(p, uuid, want, limitMs) {
+  const t0 = Date.now();
+  let gap = false;
+  while (Date.now() - t0 < limitMs) {
+    const st = await p.evaluate(SLOT_STATE, uuid);
+    if (!st.gone && !st.real && !st.proxyVisible) gap = true;
+    if (!st.gone && st.real === want) return { ms: Date.now() - t0, gap };
+    await sleep(100);
+  }
+  return { ms: Infinity, gap };
+}
+
+async function storyPhase() {
+  console.log(`\n  ── story scenes lazy (desktop)${MUTATE_EAGER ? ' — MUTATION: eager ensure' : ''} ──`);
+  const d = await bootStoryPage('');
+  try {
+    if (MUTATE_EAGER) expect('mutation applied to the served PropScatterer', d.mutated(), 'anchor not found', false);
+    const parkedAt = Date.now();
+    await sleep(20_000);
+    const slots = await d.p.evaluate(LIST_STORY_SLOTS, STORY_NAMES);
+    const since = d.park.spawnEdge >= 600 ? 0 : parkedAt;
+    const names = [...new Set(d.fetched.filter((f) => f.t >= since).map((f) => f.name))];
+    console.log(`    spawn edge ${Math.round(d.park.spawnEdge)} m, parked ${Math.round(d.park.e)} m from every island edge; ${slots.length} story slot(s) in the match`);
+    console.log(`    story GLBs fetched ${since ? 'since parking' : 'since load'}: ${names.length} [${names.join(', ')}]`);
+    expect('a spawn with no island inside 600 m fetches <= 3 story GLBs in 20 s', d.park.e >= 600 && names.length <= 3,
+      `${names.length} fetched: ${names.join(', ')} (parked ${Math.round(d.park.e)} m out)`);
+    if (MUTATE_EAGER) return;
+    const slot = slots.find((s) => !d.fetched.some((f) => f.name === s.name)) ?? slots[0];
+    expect('the match stands at least one story slot to approach', !!slot, `${slots.length} slots`);
+    if (!slot) return;
+    const other = await approachSlot(d.p, slot, 800);
+    await sleep(3000);
+    const outside = await d.p.evaluate(SLOT_STATE, slot.uuid);
+    expect(`${slot.name}: the proxy stands alone at 800 m from the edge`, outside.proxyVisible && !outside.real,
+      JSON.stringify(outside));
+    await approachSlot(d.p, slot, 540);
+    const swap = await waitSlot(d.p, slot.uuid, true, 15_000);
+    console.log(`    ${slot.name}: proxy -> LOD0 ${swap.ms} ms after crossing 600 m (nearest other island edge ${Math.round(other)} m)`);
+    expect(`${slot.name}: proxy -> LOD0 within ${STORY_SWAP_LIMIT_MS} ms of crossing 600 m`, swap.ms <= STORY_SWAP_LIMIT_MS, `${swap.ms} ms`);
+    expect(`${slot.name}: no poll saw neither proxy nor LOD0 drawn (no pop gap)`, !swap.gap);
+    expect('no page errors (story, desktop)', d.errors.length === 0, d.errors.slice(0, 3).join('\n     '), false);
+  } finally {
+    await d.p.close();
+  }
+
+  console.log('\n  ── story scenes lazy (?profile=mobile) ──');
+  const m = await bootStoryPage('&profile=mobile');
+  try {
+    await sleep(3000);
+    const slots = await m.p.evaluate(LIST_STORY_SLOTS, STORY_NAMES);
+    const slot = slots[0];
+    expect('the phone match stands a story slot', !!slot);
+    if (!slot) return;
+    const count = () => m.fetched.filter((f) => f.name === slot.name).length;
+    await approachSlot(m.p, slot, 350);
+    const in1 = await waitSlot(m.p, slot.uuid, true, 20_000);
+    const n1 = count();
+    await approachSlot(m.p, slot, 1650);
+    const out = await waitSlot(m.p, slot.uuid, false, 10_000);
+    const back = await m.p.evaluate(SLOT_STATE, slot.uuid);
+    await sleep(1500);
+    await approachSlot(m.p, slot, 350);
+    const in2 = await waitSlot(m.p, slot.uuid, true, 20_000);
+    const n2 = count();
+    console.log(`    ${slot.name}: LOD0 at 350 m after ${in1.ms} ms (${n1} fetch), gone at 1650 m after ${out.ms} ms, back after ${in2.ms} ms (${n2} fetches)`);
+    expect(`phone: ${slot.name} LOD0 stands inside 400 m`, in1.ms < Infinity);
+    expect(`phone: ${slot.name} LOD0 evicted beyond 1.5 km, proxy drawn again`, out.ms < Infinity && back.proxyVisible, JSON.stringify(back));
+    expect(`phone: ${slot.name} LOD0 fetched again on the next approach`, in2.ms < Infinity && n2 > n1, `fetches ${n1} -> ${n2}`);
+    expect('no pop gap on the phone', !in1.gap && !out.gap && !in2.gap);
+    expect('no page errors (story, phone)', m.errors.length === 0, m.errors.slice(0, 3).join('\n     '), false);
+  } finally {
+    await m.p.close();
+  }
+}
+
+try {
+  await storyPhase();
+} catch (err) {
+  expect('story phase ran', false, String(err?.stack ?? err));
+}
+if (STORY_ONLY || MUTATE_EAGER) {
+  await browser.close();
+  if (failures > 0) { console.error(`\n${failures} assertion(s) failed.`); process.exit(1); }
+  console.log(`\nStory-lazy checks passed (${substantive} graded).`);
+  process.exit(0);
+}
+
 const page = await browser.newPage({ viewport: VIEWPORT });
 const pageErrors = [];
 page.on('pageerror', (error) => pageErrors.push(error.message));
