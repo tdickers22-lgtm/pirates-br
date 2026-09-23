@@ -42,7 +42,7 @@ import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
 import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MID, shipClassName, weaponDisplayName } from '../ui/DisplayNames.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
-import { apparentDistanceScale, updateInstanceLod, type InstanceLodBatch } from '../world/island/InstanceLod.js';
+import { apparentDistanceScale, updateInstanceLod, updateLazyStoryResidency, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
 import { isCrewmate } from '../ui/crewStrip.js';
@@ -3859,6 +3859,10 @@ export class Game {
           // sorted at build time. Below 1 it thins; it can never thin the island
           // you are standing on, whose edge distance is negative.
           updateInstanceLod(instanceBatches, edgeDist, quality, lodDistanceScale * levers.instanceDensityScale);
+        } else if (instanceBatches) {
+          // Off the detail band a phone must still learn the island went past
+          // the story-LOD0 eviction line (b1.1g).
+          updateLazyStoryResidency(instanceBatches, edgeDist);
         }
         // Cave INTERIOR decor + lights (torch, crystals, stalactites, treasure)
         // reveal within ~45m so the warm glow greets you at the mouth and the
