@@ -50,6 +50,7 @@ import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
 import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MID, shipClassName, weaponDisplayName } from '../ui/DisplayNames.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
+import { memoryCensus, type MemoryCensus } from '../debug/memoryCensus.js';
 import { apparentDistanceScale, updateInstanceLod, updateLazyStoryResidency, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
@@ -3255,6 +3256,10 @@ export class Game {
   private readonly frameLoop = (now: number) => this.frame(now);
   /** Debug hook: the next `n` frames throw (frame-fault-probe). */
   injectFrameFault(n: number): void { this.frameGuard.injectFault(n); }
+  /** Debug hook (b1.7b): GPU-resident + heap bytes; scripts/test-memory-budget.mjs grades it. */
+  memoryCensus(): MemoryCensus {
+    return memoryCensus({ gl: this.renderer.renderer, scene: this.renderer.scene, root: this });
+  }
 
   private frame(now: number) {
     this.frameGuard.run(now, (t) => this.frameBody(t), this.frameLoop);
