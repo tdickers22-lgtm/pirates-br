@@ -16,6 +16,7 @@ import { validateClientMsg } from '../net/validate.js';
 import { ABUSE_CLOSE_CODE, ConnectionGate, SessionLimiter, classifyMsg } from '../net/limits.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
+import { BEACON_ROUTES, getBeaconStore, sanitizeSession, serveBeaconRoute } from '../net/beaconStore.js';
 import { MODES, MODE_IDS, botFillFor, isModeId, type ModeId } from '../../shared/constants/index.js';
 
 // ── Tunables ──────────────────────────────────────────────────
@@ -2212,6 +2213,7 @@ export class LobbyServer {
     this.emergencyStop(reason);
     if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    getBeaconStore().close(); // b1.7c: the triage ring reaches the volume before the machine stops
     await new Promise<void>((resolve) => {
       let left = 2;
       const done = () => { if (--left === 0) resolve(); };
@@ -2447,6 +2449,11 @@ export class LobbyServer {
       return;
     }
 
+    if (BEACON_ROUTES.has(rawPath)) {
+      serveBeaconRoute(getBeaconStore(), req, res, rawPath);
+      return;
+    }
+
     if (rawPath === '/beacon' && req.method === 'POST') {
       this.serveBeacon(req, res);
       return;
@@ -2665,9 +2672,18 @@ export class LobbyServer {
       if (refused) return;
       let parsed: unknown;
       try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { parsed = null; }
+      const session = sanitizeSession(parsed);
+      if (session) {
+        getBeaconStore().recordSession(session);
+        logEvent('client_session', session);
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       const beacon = sanitizeBeacon(parsed);
       if (!beacon) { this.replyBadRequest(res); return; }
       logEvent('client_error', beacon);
+      getBeaconStore().recordError(beacon);
       res.writeHead(204);
       res.end();
     });
