@@ -97,14 +97,37 @@ FAR = {
 # until their LOD0 arrived, which on a phone was never "near": every one was
 # fetched within 20 s of the horn and held for the whole match. Each now ships
 # a 2-4k `<name>_far.glb` proxy that rides the world set and stands until the
-# island edge is close enough to want the hero (PropScatterer). Same weld ->
-# per-part decimate -> card -> base snap as the nature set, same integrity bar
-# (area >= 92%, no new boundary loop), plus a triangle BAND: the collapse ratio
-# is not a constant but is solved per scene (up to five builds) until the far
-# file lands inside STORY_TRIS, and verify() fails any scene outside it. The
-# closed-part floor is lower than nature's 12 because a tableau is hundreds of
-# small closed props (bottles, coins, rope beads) and a 12-triangle floor on
-# each would hold the file above the band on floors alone.
+# island edge is close enough to want the hero (PropScatterer). Same weld and
+# base snap as the nature set and the same integrity bar (area >= 92%, no new
+# boundary loop), plus a triangle BAND solved per scene (up to six builds).
+#
+# The first story build ran the nature recipe (one collapse ratio for every
+# part, a closed-part floor of 4, open sheets to single cards) and failed: at
+# ~10% Collapse shrinks every thin closed part (area kept 77-95%), a 4-tri
+# floor turns a 12-tri plank into a tetrahedron, and single-sided cards on
+# sheets that touched other sheets at a vertex split one welded loop into
+# several (+1..+3 loops on crow_roost, mermaid_shrine, skull_totem). So the
+# story path (build_story_once) is its own recipe:
+#   - the triangle budget is shared between loose parts by AREA (a 2 m hull
+#     plank gets its share, a coin gets its floor), solved by bisection;
+#   - a closed part never goes under 12 triangles (a box stays a box), and a
+#     Collapse that opens a closed part is retried at twice the ratio; the
+#     one exception is a thin SLAB (a plank, thinnest extent < 1/4 of its
+#     width) whose area share cannot buy 12: it becomes a closed double card
+#     of its own outline (4 triangles, half its area per side), which at
+#     600 m+ is what a plank is, where a tetrahedron is not;
+#   - each reduced part is scaled about its centre back to its own source
+#     area (capped at 1.3x linear): Collapse shrinks convex shapes inward, the
+#     rescale is what a quadric decimator does not do for you;
+#   - an open sheet (sail, cloth, net, fin) is reduced (card when tiny) and
+#     then CLOSED by a reversed back copy at the same positions: zero-
+#     thickness, no boundary once welded, and visible from both sides, which
+#     a single-sided sheet is not. The back copy is not counted as surface:
+#     verify() grades the VISIBLE area (each sheet once), so the node gate's
+#     figure (which counts both sides) is always the looser of the two;
+#   - parts too small to afford their floor are dropped smallest-first, never
+#     more than 4% of the scene's surface in total (a coin at 600 m+ is well
+#     under a pixel).
 STORY = [
     'smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton',
     'rum_still', 'crow_roost', 'mermaid_shrine', 'castaway_camp',
@@ -113,7 +136,9 @@ STORY = [
 ]
 STORY_TRIS = (2000, 4000)
 STORY_TARGET = 3000
-STORY_MIN_CLOSED_TRIS = 4
+STORY_MIN_CLOSED_TRIS = 12
+STORY_MAX_DROP = 0.04
+STORY_RESCALE_CAP = 1.3
 # The story set is built only when asked for (BR_FAR_STORY=1, or named in
 # BR_FAR_ONLY): a default nature rebuild must not depend on it.
 STORY_FAR = {_n: (None, 'card') for _n in STORY}
@@ -211,7 +236,7 @@ def apply_modifier(part, mod):
     bpy.ops.object.modifier_apply(modifier=mod.name)
 
 
-def card_from_part(part):
+def card_from_part(part, area_scale=1.0):
     """Replace an open sheet with ONE flat quad of the same surface area.
 
     Best-fit plane by PCA of the part's vertices, the rectangle spanned by the
@@ -267,7 +292,7 @@ def card_from_part(part):
     if w < 1e-6 or h < 1e-6:
         bm.free()
         return
-    scale = math.sqrt(area / (w * h))
+    scale = math.sqrt(area * area_scale / (w * h))
     centre = Vector(centroid.tolist()) + a1 * float((p.max() + p.min()) / 2) + a2 * float((q.max() + q.min()) / 2)
     hw = w / 2 * scale
     hh = h / 2 * scale
@@ -365,18 +390,287 @@ def snap_base(obj, zmin):
 def build(name, ratio, sheets):
     if ratio is not None:
         return build_once(name, ratio, sheets, MIN_CLOSED_TRIS)
-    # Story proxy: solve the ratio for the triangle band (see STORY).
+    # Story proxy: solve the triangle budget for the band (see STORY).
     lo, hi = STORY_TRIS
-    r = 0.11
+    budget = STORY_TARGET
     row = None
-    for _attempt in range(5):
-        row = build_once(name, r, sheets, STORY_MIN_CLOSED_TRIS)
-        src_t, far_t = row['src']['tris'], row['far']['tris']
-        target = min(STORY_TARGET, 0.37 * src_t)
-        if lo <= far_t <= hi and far_t <= 0.4 * src_t:
+    last = None
+    for _attempt in range(6):
+        row = build_story_once(name, budget)
+        far_t = row['far']['tris']
+        if far_t == last:
+            break  # the floors, not the budget, set the count: another pass changes nothing
+        last = far_t
+        target = min(STORY_TARGET, 0.37 * row['src']['tris'])  # gibbet_cage is 5.6k: its band is 2000-2240
+        print(f"  story {name}: budget {budget} -> {far_t} tris, visible area {row['far']['area'] / max(1e-9, row['src']['area']):.1%}, loops {row['src']['loops']} -> {row['far']['loops']}, dropped {row['dropped']} part(s) {row['dropped_share']:.1%}")
+        if lo <= far_t <= hi and far_t <= 0.4 * row['src']['tris']:
             break
-        r = min(0.38, max(0.004, r * target / max(1, far_t)))
+        budget = max(400, int(budget * target / max(1, far_t)))
     return row
+
+
+def world_co(obj):
+    me = obj.data
+    co = np.empty(len(me.vertices) * 3)
+    me.vertices.foreach_get('co', co)
+    co = co.reshape(-1, 3)
+    m = np.array(obj.matrix_world)
+    return co @ m[:3, :3].T + m[:3, 3]
+
+
+def world_tris(obj):
+    me = obj.data
+    me.calc_loop_triangles()
+    idx = np.empty(len(me.loop_triangles) * 3, dtype=np.int64)
+    me.loop_triangles.foreach_get('vertices', idx)
+    return idx.reshape(-1, 3)
+
+
+def world_area(obj):
+    co = world_co(obj)
+    t = world_tris(obj)
+    if len(t) == 0:
+        return 0.0
+    a, b, c = co[t[:, 0]], co[t[:, 1]], co[t[:, 2]]
+    return float(0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1).sum())
+
+
+def census(objs):
+    """The node gate's census, in Blender: world positions welded by rounding
+    to WELD over the WHOLE file, then triangles, area, and boundary loops
+    (edges with one face, chained through shared vertices)."""
+    q = 1.0 / WELD
+    keymap = {}
+    tris = 0
+    area = 0.0
+    edge_count = Counter()
+    for obj in objs:
+        co = world_co(obj)
+        t = world_tris(obj)
+        keys = np.round(co * q).astype(np.int64)
+        ids = [keymap.setdefault(tuple(k), len(keymap)) for k in keys.tolist()]
+        if len(t):
+            a, b, c = co[t[:, 0]], co[t[:, 1]], co[t[:, 2]]
+            area += float(0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1).sum())
+        for tri in t.tolist():
+            x, y, z = ids[tri[0]], ids[tri[1]], ids[tri[2]]
+            tris += 1
+            if x == y or y == z or x == z:
+                continue
+            for u, v in ((x, y), (y, z), (z, x)):
+                edge_count[(u, v) if u < v else (v, u)] += 1
+    parent = {}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+
+    for (u, v), n in edge_count.items():
+        if n != 1:
+            continue
+        parent.setdefault(u, u)
+        parent.setdefault(v, v)
+        ru, rv = find(u), find(v)
+        if ru != rv:
+            parent[ru] = rv
+    loops = len({find(v) for v in parent})
+    return {'tris': tris, 'area': area, 'loops': loops}
+
+
+def rescale_to_area(part, area_src):
+    """Scale a reduced part about its bounding-box centre back to its source
+    area (capped): Collapse pulls convex surfaces inward."""
+    a = world_area(part)
+    if a <= 1e-12 or a >= area_src:
+        return
+    s = min(STORY_RESCALE_CAP, math.sqrt(area_src / a))
+    me = part.data
+    co = np.empty(len(me.vertices) * 3)
+    me.vertices.foreach_get('co', co)
+    co = co.reshape(-1, 3)
+    c = (co.min(axis=0) + co.max(axis=0)) / 2
+    co = c + (co - c) * s
+    me.vertices.foreach_set('co', co.ravel())
+    me.update()
+
+
+def is_slab(part):
+    """A closed part whose thinnest principal extent is under a quarter of
+    its middle one: a plank, a board, a lid."""
+    co = world_co(part)
+    if len(co) < 4:
+        return False
+    rel = co - co.mean(axis=0)
+    _u, _s, vt = np.linalg.svd(rel, full_matrices=False)
+    ext = [float(np.ptp(rel @ vt[k])) for k in range(3)]
+    return ext[2] < 0.25 * ext[1]
+
+
+def close_sheet(part):
+    """Give an open sheet a reversed back copy at the same positions: once
+    welded every boundary edge has two faces, so the sheet closes (zero
+    thickness) and draws from both sides. Colours, UVs and materials ride the
+    duplicate; the copy owns its own vertices, so smooth normals never
+    average front against back."""
+    me = part.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    faces = list(bm.faces)
+    dup = bmesh.ops.duplicate(bm, geom=list(bm.verts) + list(bm.edges) + faces)
+    back = [g for g in dup['geom'] if isinstance(g, bmesh.types.BMFace)]
+    bmesh.ops.reverse_faces(bm, faces=back)
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+
+
+def collapse(part, ratio):
+    mod = part.modifiers.new('far', 'DECIMATE')
+    mod.decimate_type = 'COLLAPSE'
+    mod.ratio = ratio
+    mod.use_collapse_triangulate = True
+    apply_modifier(part, mod)
+
+
+def tri_count(me):
+    return sum(max(0, len(p.vertices) - 2) for p in me.polygons)
+
+
+def build_story_once(name, budget):
+    wipe()
+    src = os.path.abspath(os.path.join(SRC_DIR, f'{name}.glb'))
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=src)
+    imported = [o for o in bpy.data.objects if o not in before]
+    meshes = [o for o in imported if o.type == 'MESH']
+    src_base = world_min_z(meshes)
+    flat_faces = 0
+    faces_total = 0
+    groups = []
+    for obj in meshes:
+        me = obj.data
+        flags = flat_face_flags(me)
+        flat_faces += sum(flags)
+        faces_total += len(flags)
+        clear_custom_normals(obj)
+        me.polygons.foreach_set('use_smooth', [not f for f in flags])
+        weld(me)
+    src_stats = census(meshes)
+    for obj in meshes:
+        existing = set(bpy.data.objects)
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.separate(type='LOOSE')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        groups.append((obj, [obj] + [o for o in bpy.data.objects if o not in existing and o.type == 'MESH']))
+    info = []
+    for _obj, parts in groups:
+        for part in parts:
+            t = tri_count(part.data)
+            opened = has_boundary(part.data)
+            slab = not opened and is_slab(part)
+            full = t * (2 if opened else 1)
+            floor = min(full, 4 if (opened or slab) else STORY_MIN_CLOSED_TRIS)
+            info.append({'part': part, 'open': opened, 'slab': slab, 'tris': t, 'area': world_area(part), 'full': full, 'floor': floor, 'drop': False})
+    total_area = sum(i['area'] for i in info)
+    # Drop the smallest parts while the floors alone would eat the budget.
+    dropped_area = 0.0
+    for i in sorted(info, key=lambda x: x['area']):
+        if sum(j['floor'] for j in info if not j['drop']) <= 0.6 * budget:
+            break
+        if dropped_area + i['area'] > STORY_MAX_DROP * total_area:
+            break
+        i['drop'] = True
+        dropped_area += i['area']
+    kept = [i for i in info if not i['drop']]
+
+    def cost(k):
+        return sum(min(i['full'], max(i['floor'], k * i['area'])) for i in kept)
+
+    lo_k, hi_k = 0.0, 1.0
+    while cost(hi_k) < budget and hi_k < 1e9:
+        hi_k *= 2
+    for _ in range(50):
+        mid = (lo_k + hi_k) / 2
+        if cost(mid) < budget:
+            lo_k = mid
+        else:
+            hi_k = mid
+    visible = 0.0
+    for i in info:
+        part = i['part']
+        if i['drop']:
+            bm = bmesh.new()
+            bm.from_mesh(part.data)
+            bmesh.ops.delete(bm, geom=list(bm.verts), context='VERTS')
+            bm.to_mesh(part.data)
+            bm.free()
+            continue
+        b = min(i['full'], max(i['floor'], lo_k * i['area']))
+        target = b / 2 if i['open'] else b
+        if i['open'] and (target <= 4 or i['tris'] <= 8) and i['tris'] > 2:
+            card_from_part(part)
+        elif i['slab'] and b < STORY_MIN_CLOSED_TRIS:
+            # A thin closed plank that cannot afford a box: a closed double
+            # card, each side half the plank's area (both sides are surface
+            # here, as both faces of the plank were), never a tetrahedron.
+            card_from_part(part, 0.5)
+            rescale_to_area(part, i['area'] / 2)
+            visible += 2 * world_area(part)
+            close_sheet(part)
+            continue
+        elif target < i['tris']:
+            ratio = target / i['tris']
+            if i['open']:
+                collapse(part, ratio)
+            else:
+                orig = part.data.copy()
+                for _try in range(4):
+                    collapse(part, ratio)
+                    if not has_boundary(part.data):
+                        break
+                    part.data = orig.copy()
+                    ratio = min(1.0, ratio * 2)
+                    if ratio >= 1.0:
+                        break
+        rescale_to_area(part, i['area'])
+        visible += world_area(part)
+        if i['open']:
+            close_sheet(part)
+        i['alloc'] = b
+        i['got'] = tri_count(part.data)
+    if os.environ.get('BR_STORY_DIAG'):
+        k = [i for i in info if 'got' in i]
+        print(f"  diag {name}: parts {len(info)} kept {len(k)} floors {sum(i['floor'] for i in k)} alloc {sum(i['alloc'] for i in k):.0f} got {sum(i['got'] for i in k)}"
+              f" | open {sum(1 for i in k if i['open'])} slab {sum(1 for i in k if i['slab'])} at-floor {sum(1 for i in k if i['alloc'] <= i['floor'])}")
+        for i in sorted(k, key=lambda x: x['alloc'] - x['got'])[:4]:
+            print(f"    over: tris {i['tris']} alloc {i['alloc']:.0f} got {i['got']} open {i['open']} slab {i['slab']} area {i['area']:.3f}")
+    for obj, parts in groups:
+        bpy.ops.object.select_all(action='DESELECT')
+        for part in parts:
+            part.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        if len(parts) > 1:
+            bpy.ops.object.join()
+    snapped = sum(snap_base(obj, src_base) for obj in meshes)
+    gate = census(meshes)
+    far_stats = {'tris': gate['tris'], 'area': visible, 'loops': gate['loops']}
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in imported:
+        obj.select_set(True)
+    path = export_selected(name)
+    return {
+        'name': name, 'ratio': None, 'sheets': 'closed', 'path': path,
+        'flat_share': flat_faces / max(1, faces_total),
+        'src': src_stats, 'far': far_stats, 'gate_area': gate['area'],
+        'dropped': sum(1 for i in info if i['drop']), 'dropped_share': dropped_area / max(1e-9, total_area),
+        'src_base': src_base, 'far_base': world_min_z(meshes), 'snapped': snapped,
+    }
 
 
 def build_once(name, ratio, sheets, floor):
@@ -413,6 +707,16 @@ def build_once(name, ratio, sheets, floor):
     bpy.ops.object.select_all(action='DESELECT')
     for obj in imported:
         obj.select_set(True)
+    path = export_selected(name)
+    return {
+        'name': name, 'ratio': ratio, 'sheets': sheets, 'path': path,
+        'flat_share': flat_faces / max(1, faces_total),
+        'src': src_stats, 'far': far_stats,
+        'src_base': src_base, 'far_base': world_min_z(meshes), 'snapped': snapped,
+    }
+
+
+def export_selected(name):
     os.makedirs(EXPORT_DIR, exist_ok=True)
     path = os.path.join(EXPORT_DIR, f'{name}_far.glb')
     kwargs = dict(
@@ -433,12 +737,7 @@ def build_once(name, ratio, sheets, floor):
             continue
     else:
         raise RuntimeError(f'gltf export failed for {name}')
-    return {
-        'name': name, 'ratio': ratio, 'sheets': sheets, 'path': path,
-        'flat_share': flat_faces / max(1, faces_total),
-        'src': src_stats, 'far': far_stats,
-        'src_base': src_base, 'far_base': world_min_z(meshes), 'snapped': snapped,
-    }
+    return path
 
 
 def verify(rows):
