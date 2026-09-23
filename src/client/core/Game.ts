@@ -1637,11 +1637,13 @@ export class Game {
     const handler = () => this.goBackToMenuFromMatch();
     document.getElementById('death-return-btn')?.addEventListener('click', handler);
     // NEXT TARGET while spectating (b1.5f, liveplay-06): the bar's button (tap
-    // or click), E / Space / right arrow, and the gamepad A or right bumper.
+    // or click), interact / jump / right arrow / N, and the gamepad A or right bumper.
     document.getElementById('death-next-btn')?.addEventListener('click', () => this.cycleSpectateTarget());
     window.addEventListener('keydown', (e) => {
       if (!document.body.classList.contains('spectating')) return;
-      if (e.code === 'KeyE' || e.code === 'Space' || e.code === 'ArrowRight' || e.code === 'KeyN') {
+      // Through the live bindings table (a rebind moves it too), plus the two
+      // fixed "next" keys a spectator reaches for: right arrow and N.
+      if (isBound('interact', e.code) || isBound('jump', e.code) || e.key === 'ArrowRight' || e.key === 'n' || e.key === 'N') {
         e.preventDefault();
         this.cycleSpectateTarget();
       }

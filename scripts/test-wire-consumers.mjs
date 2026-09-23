@@ -156,7 +156,12 @@ for (const [type, why] of Object.entries(KNOWN_DARK)) {
 //
 // Declared exceptions go in KNOWN_UNSENT and are graded both ways, like
 // KNOWN_DARK.
-const KNOWN_UNSENT = {};
+const KNOWN_UNSENT = {
+  dev_scuttle: 'b1.5f test hook, not a game message: the server honours it only '
+    + 'in Solo with PIRATES_BR_DEV_HOOKS=1, and scripts/test-elimination-spectate.mjs '
+    + 'sends it through window.__piratesBR.network.send so the gate sinks a real hull. '
+    + 'No player path may build it; if one ever does, this entry fails.',
+};
 
 const clientUnionStart = typesSrc.indexOf('type ClientMsgType');
 const clientUnionEnd = typesSrc.indexOf(';', clientUnionStart);
