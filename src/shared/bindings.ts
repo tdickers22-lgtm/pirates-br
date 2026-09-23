@@ -122,8 +122,32 @@ const DEFAULTS = {
 } satisfies Record<string, BindingRow>;
 
 export type BindingAction = keyof typeof DEFAULTS;
-export const BINDINGS: Readonly<Record<BindingAction, BindingRow>> = DEFAULTS;
+export type BindingTable = Readonly<Record<BindingAction, BindingRow>>;
+/** The shipped defaults, never mutated (rebinding's "Reset" and its diff base). */
+export const DEFAULT_BINDINGS: BindingTable = DEFAULTS;
+/**
+ * The LIVE table every consumer reads (b1.4g). It starts as a copy of the
+ * defaults; rebinding swaps whole rows in through setLiveBindings(), so code
+ * that reads BINDINGS[action] at call time (InputGlyphs, prompts) follows a
+ * rebind with no extra wiring, and code that precomputes a lookup
+ * (InputManager's code map, GamepadSource's routes) rebuilds on
+ * onBindingsChanged().
+ */
+const LIVE: Record<BindingAction, BindingRow> = { ...DEFAULTS };
+export const BINDINGS: BindingTable = LIVE;
 export const BINDING_ACTIONS = Object.keys(DEFAULTS) as BindingAction[];
+
+const bindingListeners = new Set<() => void>();
+/** Replace the live rows (a validated table from rebinding.ts) and notify. */
+export function setLiveBindings(table: BindingTable): void {
+  for (const action of BINDING_ACTIONS) LIVE[action] = table[action] ?? DEFAULTS[action];
+  for (const fn of bindingListeners) fn();
+}
+/** Run fn after every setLiveBindings(); returns the unsubscribe. */
+export function onBindingsChanged(fn: () => void): () => void {
+  bindingListeners.add(fn);
+  return () => { bindingListeners.delete(fn); };
+}
 
 export function isNotApplicable(binding: SchemeBinding): binding is NotApplicable {
   return !Array.isArray(binding);

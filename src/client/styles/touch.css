@@ -184,3 +184,12 @@ html[data-input-scheme="touch"] #pocket-wheel.visible #pocket-wheel-svg { pointe
   .tc-keg { left: calc(152px + env(safe-area-inset-left)); }
   .tc-special { left: calc(220px + env(safe-area-inset-left)); }
 }
+
+/* Settings > Controls (b1.4g). Button size 80-140% rides the CSS scale property
+   so it composes with any transform; left-handed mirrors the whole overlay and
+   counter-flips each control so its label reads the right way round. */
+.tc-btn, .tc-helm-box { scale: var(--tc-scale, 1); }
+#touch-controls.tc-lefty { transform: scaleX(-1); }
+#touch-controls.tc-lefty .tc-btn,
+#touch-controls.tc-lefty .tc-helm-box,
+#touch-controls.tc-lefty .tc-stick { transform: scaleX(-1); }

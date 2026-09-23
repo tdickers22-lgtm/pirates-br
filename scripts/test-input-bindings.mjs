@@ -273,5 +273,122 @@ if (WHEEL) {
     /ctrlKey/.test(GAME_SRC) && /gesturestart/.test(GAME_SRC));
 }
 
+// ── b1.4g: Controls settings + rebinding (crossdevice-13, crossdevice-14) ──
+console.log('\nControls settings: one clamp table, persisted round-trip');
+const RB = await tryImport('../src/client/input/rebinding.ts');
+const memStore = () => { const m = new Map(); return { m, getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
+if (RB && B) {
+  const { CONTROL_RANGES, clampSetting, loadControlSettings, saveControlSettings, DEFAULT_CONTROL_SETTINGS } = RB;
+  const r = CONTROL_RANGES;
+  expect('ranges per the spec: mouse 0.2-3.0, ADS 0.3-1.5, touch/stick look 0.3-3.0, buttons 0.8-1.4',
+    r.mouseSens.min === 0.2 && r.mouseSens.max === 3.0 && r.adsMult.min === 0.3 && r.adsMult.max === 1.5
+    && r.touchLook.min === 0.3 && r.touchLook.max === 3.0 && r.stickLook.min === 0.3 && r.stickLook.max === 3.0
+    && r.touchButtonSize.min === 0.8 && r.touchButtonSize.max === 1.4);
+  expect('clampSetting clamps both ends and rejects NaN', clampSetting('mouseSens', 9) === 3.0 && clampSetting('mouseSens', 0.01) === 0.2 && clampSetting('adsMult', 'x') === 1.0);
+  const st = memStore();
+  const custom = { ...DEFAULT_CONTROL_SETTINGS, mouseSens: 2.35, adsMult: 0.55, touchLook: 1.8, stickLook: 0.7, touchButtonSize: 1.25,
+    invertY: { mouse: false, gamepad: true, touch: true }, aimAssist: false, vibration: false, rawMouse: true, leftHanded: true, touchButtons: 'off' };
+  saveControlSettings(custom, st);
+  const back = loadControlSettings(st);
+  expect('every Controls setting survives save -> load', JSON.stringify(back) === JSON.stringify(custom), `${JSON.stringify(back)}`);
+  st.setItem('piratesBR.controls', JSON.stringify({ mouseSens: 40, adsMult: -1, touchButtons: 'sometimes', invertY: { mouse: 'yes' } }));
+  const bad = loadControlSettings(st);
+  expect('tampered storage is clamped to the same table', bad.mouseSens === 3.0 && bad.adsMult === 0.3 && bad.touchButtons === 'auto' && bad.invertY.mouse === false);
+  const legacy = memStore();
+  legacy.setItem('piratesBR.settings', JSON.stringify({ volume: 0.5, muted: false, sensitivity: 1.7 }));
+  legacy.setItem('piratesBR.haptics', 'off');
+  const mig = loadControlSettings(legacy);
+  expect('pre-b1.4g mouse speed and vibration toggle migrate', mig.mouseSens === 1.7 && mig.vibration === false);
+
+  // The one clamp: nobody else spells a sensitivity range.
+  const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
+  const SITES = ['src/client/input/InputManager.ts', 'src/client/menu/MenuController.ts', 'src/client/menu/ControlsSettings.ts', 'src/client/input/GamepadSource.ts', 'src/client/input/TouchControls.ts'];
+  const stray = SITES.filter((f) => /Math\.(max|min)\(\s*0\.2\s*,|Math\.min\(\s*(2\.0|2\.5|3\.0|3)\s*,|sensitivity\s*\*\s*100|max=\\?"200\\?"/.test(src(f)));
+  expect('no clamp site outside rebinding.ts spells its own sensitivity range', stray.length === 0, stray.join(', '));
+  const IMSRC = src('src/client/input/InputManager.ts');
+  expect('InputManager clamps through clampSetting from rebinding.ts', /from '\.\/rebinding\.js'/.test(IMSRC) && /clampSetting\('mouseSens'/.test(IMSRC));
+  const CSSRC = src('src/client/menu/ControlsSettings.ts');
+  expect('the Controls page builds its sliders from CONTROL_RANGES', /CONTROL_RANGES\[key\]/.test(CSSRC) && /input\.min = String\(spec\.min\)/.test(CSSRC) && /input\.max = String\(spec\.max\)/.test(CSSRC));
+  const MC = src('src/client/menu/MenuController.ts');
+  const HTML = src('index.html');
+  expect('the old 0.2-2.0 menu slider is gone and the Controls page is mounted',
+    !/settings-sensitivity/.test(HTML) && !/settingsSens/.test(MC) && /mountControlsSettings\(/.test(MC) && /id="settings-controls-mount"/.test(HTML));
+
+  console.log('\nRebinding: conflict swaps, refusals, reset');
+  const { rebind, resetBindings, diffBindings, saveBindingTable, loadBindingTable, isRebindable } = RB;
+  const { DEFAULT_BINDINGS, validateBindings, setLiveBindings, BINDINGS: LIVE } = B;
+  const a = rebind(DEFAULT_BINDINGS, 'reload', 'keyboard', 'KeyX');
+  expect('reload -> X swaps interact onto R (both foot)', a.ok && a.table.reload.keyboard[0] === 'KeyX' && a.table.interact.keyboard[0] === 'KeyR'
+    && a.swapped.length === 1 && a.swapped[0].action === 'interact', JSON.stringify(a.ok ? a.swapped : a.reason));
+  expect('the swapped table still validates', a.ok && validateBindings(a.table).length === 0);
+  const g = rebind(DEFAULT_BINDINGS, 'special', 'gamepad', 'Pad:LS.click');
+  expect('pad: special -> LS click swaps keg onto RS click', g.ok && g.table.special.gamepad[0] === 'Pad:LS.click' && g.table.keg.gamepad[0] === 'Pad:RS.click');
+  const q = rebind(DEFAULT_BINDINGS, 'crouch', 'keyboard', 'KeyQ');
+  expect('crouch -> Q needs no swap (Q is trim at the helm, page in the wheel)', q.ok && q.swapped.length === 0 && q.table.trimLeft.keyboard[0] === 'KeyQ');
+  const alt = rebind(DEFAULT_BINDINGS, 'aim', 'keyboard', 'KeyV', 1);
+  expect('slot 1 replaces only the alternate (aim keeps Mouse2, ShiftLeft -> V)', alt.ok && alt.table.aim.keyboard[0] === 'Mouse2' && alt.table.aim.keyboard[1] === 'KeyV');
+  expect('pause, wheel pick and look are fixed; Escape and Pad:Menu are refused',
+    !isRebindable('pause', 'keyboard') && !isRebindable('wheelPick', 'gamepad') && !isRebindable('look', 'keyboard')
+    && !rebind(DEFAULT_BINDINGS, 'reload', 'keyboard', 'Escape').ok && !rebind(DEFAULT_BINDINGS, 'reload', 'gamepad', 'Pad:Menu').ok);
+  const bst = memStore();
+  saveBindingTable(a.table, bst);
+  const stored = JSON.parse(bst.getItem('piratesBR.bindings') ?? '{}');
+  expect('only the changed rows persist', Object.keys(stored).sort().join(',') === 'interact,reload', Object.keys(stored).join(','));
+  const reloaded = loadBindingTable(bst);
+  expect('stored rebinds load back', reloaded.reload.keyboard[0] === 'KeyX' && reloaded.interact.keyboard[0] === 'KeyR');
+  bst.setItem('piratesBR.bindings', JSON.stringify({ reload: { keyboard: ['KeyX'] } }));
+  expect('a stored table that would clash falls back to the defaults', loadBindingTable(bst).reload.keyboard[0] === 'KeyR');
+  const reset = resetBindings();
+  saveBindingTable(reset, bst);
+  expect('reset restores every default and clears storage', Object.keys(diffBindings(reset)).length === 0 && bst.getItem('piratesBR.bindings') === null
+    && JSON.stringify(reset) === JSON.stringify(DEFAULT_BINDINGS));
+
+  if (IM) {
+    console.log('\nInputManager follows the live table and the settings');
+    const { body, fire } = makeDom(() => undefined);
+    globalThis.localStorage = memStore();
+    const input = new IM();
+    input.init(body);
+    setLiveBindings(a.table);
+    expect('live BINDINGS row changed', LIVE.reload.keyboard[0] === 'KeyX');
+    fire('keydown', { code: 'KeyX' });
+    const viaX = input.buildInput().reload === true;
+    fire('keyup', { code: 'KeyX' });
+    input.buildInput();
+    fire('keydown', { code: 'KeyR' });
+    const viaR = input.buildInput().reload === true;
+    fire('keyup', { code: 'KeyR' });
+    expect('after the rebind X reloads and R does not', viaX && !viaR, `X ${viaX} R ${viaR}`);
+    setLiveBindings(resetBindings());
+    fire('keydown', { code: 'KeyR' });
+    expect('reset: R reloads again', input.buildInput().reload === true);
+    fire('keyup', { code: 'KeyR' });
+    input.buildInput();
+    const pitchStep = (fn) => { input.setLook(0, 0); fn(); return input.getPitch(); };
+    input.applyControlSettings({ invertY: { mouse: false, gamepad: false, touch: false } });
+    const pMouse = pitchStep(() => input.applyLookDelta(0, 100));
+    input.applyControlSettings({ invertY: { mouse: true, gamepad: false, touch: false } });
+    const pMouseInv = pitchStep(() => input.applyLookDelta(0, 100));
+    const pTouch = pitchStep(() => input.applyTouchLook(0, 20));
+    expect('invert Y flips the mouse only (touch keeps its sign)', pMouse < 0 && Math.abs(pMouseInv + pMouse) < 1e-12 && pTouch < 0, `${pMouse} ${pMouseInv} ${pTouch}`);
+    input.applyControlSettings({ invertY: { mouse: false, gamepad: false, touch: false }, touchLook: 2 });
+    const pTouch2 = pitchStep(() => input.applyTouchLook(0, 20));
+    expect('touch look 2.0 turns twice as far as 1.0', Math.abs(pTouch2 - 2 * pTouch) < 1e-12, `${pTouch2} vs ${pTouch}`);
+    input.applyControlSettings({ adsMult: 0.5 });
+    globalThis.document.pointerLockElement = body; // the mouse scheme aims only while locked
+    fire('pointerlockchange');
+    fire('keydown', { code: 'ShiftLeft' });
+    const pAds = pitchStep(() => input.applyLookDelta(0, 100));
+    fire('keyup', { code: 'ShiftLeft' });
+    expect('ADS x0.5 halves the look while aiming', Math.abs(pAds - 0.5 * pMouse) < 1e-12, `${pAds} vs ${pMouse}`);
+    input.applyControlSettings({ mouseSens: 99, vibration: false });
+    expect('applyControlSettings clamps through the same table and drives haptics', input.getSensitivity() === 3.0 && input.haptics.isEnabled() === false);
+    input.setSensitivity(0.01);
+    expect('setSensitivity clamps to 0.2', input.getSensitivity() === 0.2);
+    input.applyControlSettings({ rawMouse: true });
+    expect('raw mouse asks for unadjustedMovement', input.lockOptions()?.unadjustedMovement === true);
+  }
+}
+
 console.log(failures === 0 ? '\nPASS test-input-bindings' : `\nFAIL test-input-bindings (${failures})`);
 process.exit(failures === 0 ? 0 : 1);

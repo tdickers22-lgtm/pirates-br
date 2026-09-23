@@ -1,7 +1,8 @@
 import type { CannonAmmoType, PlayerInput, WeaponSlot } from '../../shared/types/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
 import { sliceForDigit } from '../ui/RadialMenu.js';
-import { BINDINGS, BINDING_ACTIONS, type BindingAction, mouseButtonsFor, tokensFor } from '../../shared/bindings.js';
+import { BINDINGS, BINDING_ACTIONS, type BindingAction, mouseButtonsFor, onBindingsChanged, setLiveBindings, tokensFor } from '../../shared/bindings.js';
+import { clampSetting, DEFAULT_CONTROL_SETTINGS, loadBindingTable, loadControlSettings, sanitizeControlSettings, type ControlSettings } from './rebinding.js';
 import { InputSchemeTracker, initialScheme } from './InputScheme.js';
 import { resolveInputAuthority } from './inputAuthority.js';
 import { LookDeltaFilter, requestLockSafe } from './pointerLock.js';
@@ -24,7 +25,7 @@ const WHEEL_PAGE_ORDER: readonly WheelPage[] = ['items', 'maps', 'shop'];
 /** KeyboardEvent.code -> the live (non-reserved) actions it triggers, from the
  *  one bindings table (b1.4a). Reserved rows (ping, emote, scoreboard) claim
  *  their keys but nothing reads them until their slice lands. */
-const ACTIONS_BY_CODE: ReadonlyMap<string, readonly BindingAction[]> = (() => {
+function buildActionsByCode(): ReadonlyMap<string, readonly BindingAction[]> {
   const map = new Map<string, BindingAction[]>();
   for (const action of BINDING_ACTIONS) {
     if (BINDINGS[action].reserved) continue;
@@ -35,8 +36,14 @@ const ACTIONS_BY_CODE: ReadonlyMap<string, readonly BindingAction[]> = (() => {
     }
   }
   return map;
-})();
-const FIRE_BUTTONS = mouseButtonsFor('fire');
+}
+/** Rebuilt on every rebind (b1.4g): the live table is the only source. */
+let ACTIONS_BY_CODE = buildActionsByCode();
+let FIRE_BUTTONS = mouseButtonsFor('fire');
+onBindingsChanged(() => {
+  ACTIONS_BY_CODE = buildActionsByCode();
+  FIRE_BUTTONS = mouseButtonsFor('fire');
+});
 const SLOT_ACTIONS: ReadonlyArray<readonly [BindingAction, WeaponSlot]> = [
   ['weapon1', 0], ['weapon2', 1], ['weapon3', 2], ['weapon4', 3],
 ];
@@ -112,8 +119,17 @@ export class InputManager {
   private pendingShopLineIndex: number | null = null;
   private pendingSelectMapIndex: number | null = null;
 
+  /** Raw mouse input (Chromium): pointer lock with unadjustedMovement; requestLockSafe falls back. */
+  lockOptions(): { unadjustedMovement: boolean } | undefined {
+    return this.controls.rawMouse ? { unadjustedMovement: true } : undefined;
+  }
+
   init(lockElement: HTMLElement = document.body) {
     this.lockElement = lockElement;
+    // Stored rebinds and Controls settings (b1.4g) before the first key.
+    setLiveBindings(loadBindingTable());
+    this.controls = loadControlSettings();
+    this.sensitivity = this.controls.mouseSens;
     this.scheme.attach(typeof document !== 'undefined' ? document : undefined);
     document.addEventListener('keydown', (e) => {
       // Never hijack keys while the player is typing in a text field (e.g. the
@@ -173,13 +189,13 @@ export class InputManager {
       if (this.kegHeld && FIRE_BUTTONS.includes(e.button)) {
         e.preventDefault();
         this.actionUp('keg');
-        if (!this.locked && !this.debugAssumeLocked) requestLockSafe(this.lockElement);
+        if (!this.locked && !this.debugAssumeLocked) requestLockSafe(this.lockElement, this.lockOptions());
         return;
       }
       if (!this.locked && !this.debugAssumeLocked) {
         // The first click after Esc only re-acquires the lock; it never fires.
         this.wantsRelock = true;
-        requestLockSafe(this.lockElement);
+        requestLockSafe(this.lockElement, this.lockOptions());
         e.preventDefault();
         return;
       }
@@ -212,6 +228,7 @@ export class InputManager {
       this.touch = new TouchControls(this, this.scheme);
       this.touch.onMinimapTap = () => this.onMinimapTap?.();
       this.touch.mount();
+      this.applyControlSettings({});
     }
 
     this.startPadLoop();
@@ -260,7 +277,8 @@ export class InputManager {
     const ctx = this.padContext();
     this.pad.setContext(ctx);
     const wasPad = this.scheme.current === 'gamepad';
-    this.pad.poll(pad, dtSec, { sensitivity: this.sensitivity, fovScale: this.fovScale });
+    const padLook = this.lookScale('gamepad');
+    this.pad.poll(pad, dtSec, { sensitivity: this.controls.stickLook * padLook.k, fovScale: this.fovScale });
     if (ctx !== 'menu' || !pad || typeof document === 'undefined') return;
     if (this.scheme.current !== 'gamepad') return;
     this.padNav ??= new MenuNav(document);
@@ -301,7 +319,7 @@ export class InputManager {
   applyPadLook(dxRad: number, dyRad: number) {
     if (!Number.isFinite(dxRad) || !Number.isFinite(dyRad)) return;
     this.yaw -= dxRad;
-    this.pitch -= dyRad;
+    this.pitch -= dyRad * this.lookScale('gamepad').ySign;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 
@@ -394,7 +412,7 @@ export class InputManager {
     if (action === 'spyglass') this.spyglassHeld = false;
     if (action === 'supplyWheel' && this.vHeld) {
       this.vHeld = false;
-      if (this.scheme.current === 'mouse') requestLockSafe(this.lockElement);
+      if (this.scheme.current === 'mouse') requestLockSafe(this.lockElement, this.lockOptions());
     }
     if (action === 'keg' && this.kegHeld) {
       this.kegHeld = false;
@@ -599,28 +617,52 @@ export class InputManager {
     this.fovScale = Math.max(0.05, Math.min(1, scale));
   }
 
-  /** 1.0 is the historical default; clamped to a sane range to avoid flick-aim accidents. */
-  private sensitivity = 1.0;
+  /** Mouse look scale, 1.0 the historical default. Clamped by CONTROL_RANGES
+   *  (rebinding.ts), the one clamp table the menu and storage use too. */
+  private sensitivity: number = DEFAULT_CONTROL_SETTINGS.mouseSens;
   setSensitivity(scale: number) {
     if (!Number.isFinite(scale)) return;
-    this.sensitivity = Math.max(0.2, Math.min(2.5, scale));
+    this.sensitivity = clampSetting('mouseSens', scale);
+    this.controls.mouseSens = this.sensitivity;
   }
   getSensitivity() { return this.sensitivity; }
 
+  /** Every Controls setting (b1.4g), sanitized; read by look, lock, haptics and the touch overlay. */
+  private controls: ControlSettings = sanitizeControlSettings(DEFAULT_CONTROL_SETTINGS);
+  applyControlSettings(next: Partial<ControlSettings>) {
+    this.controls = sanitizeControlSettings({ ...this.controls, ...next });
+    this.sensitivity = this.controls.mouseSens;
+    this.haptics.setEnabled(this.controls.vibration);
+    this.touch?.setLayout({ scale: this.controls.touchButtonSize, leftHanded: this.controls.leftHanded, show: this.controls.touchButtons });
+  }
+  getControlSettings(): ControlSettings { return sanitizeControlSettings(this.controls); }
+  /** D13: aim assist reads this (b1.4h); it only ever applies on touch and gamepad. */
+  aimAssistEnabled() { return this.controls.aimAssist && this.scheme.current !== 'mouse'; }
+
+  /** ADS multiplier while aiming, and the per-scheme Y sign. */
+  private lookScale(scheme: 'mouse' | 'gamepad' | 'touch') {
+    return {
+      k: this.isAimHeld() ? this.controls.adsMult : 1,
+      ySign: this.controls.invertY[scheme] ? -1 : 1,
+    };
+  }
+
   private applyLookDelta(dx: number, dy: number) {
-    const k = 0.002 * this.sensitivity * this.fovScale;
+    const s = this.lookScale('mouse');
+    const k = 0.002 * this.sensitivity * this.fovScale * s.k;
     this.yaw -= dx * k;
-    this.pitch -= dy * k;
+    this.pitch -= dy * k * s.ySign;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 
   /** Finger drag on the look pad (TouchControls): same yaw/pitch as the mouse,
-   *  0.0055 rad/px x sensitivity x fovScale (a phone swipe is ~5x fewer px). */
+   *  0.0055 rad/px x touch look x fovScale (a phone swipe is ~5x fewer px). */
   applyTouchLook(dxPx: number, dyPx: number) {
     if (!Number.isFinite(dxPx) || !Number.isFinite(dyPx)) return;
-    const k = TOUCH_LOOK_RAD_PER_PX * this.sensitivity * this.fovScale;
+    const s = this.lookScale('touch');
+    const k = TOUCH_LOOK_RAD_PER_PX * this.controls.touchLook * this.fovScale * s.k;
     this.yaw -= dxPx * k;
-    this.pitch -= dyPx * k;
+    this.pitch -= dyPx * k * s.ySign;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 

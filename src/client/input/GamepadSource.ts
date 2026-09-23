@@ -27,7 +27,7 @@
  */
 import {
   BINDINGS, BINDING_ACTIONS, CONTEXT_OVERLAPS, PAD_BUTTON_INDEX,
-  type BindingAction, type BindingContext, type PadButton, tokensFor,
+  type BindingAction, type BindingContext, type PadButton, tokensFor, onBindingsChanged,
 } from '../../shared/bindings.js';
 
 export const PAD_DEADZONE = 0.12;
@@ -126,6 +126,8 @@ export function padRoutes(context: Exclude<BindingContext, 'global'>) {
 }
 
 const ROUTES = new Map<string, ReturnType<typeof padRoutes>>();
+// A rebind (b1.4g) swaps rows in the live table: drop the cached routes.
+onBindingsChanged(() => ROUTES.clear());
 function routesFor(context: Exclude<BindingContext, 'global'>) {
   let r = ROUTES.get(context);
   if (!r) { r = padRoutes(context); ROUTES.set(context, r); }

@@ -93,6 +93,8 @@ export class TouchControls {
   private progress: { fire: number | null; interact: number | null; anchor: number | null } = { fire: null, interact: null, anchor: null };
   private readonly roles = new Map<number, Role>();
   private active = false;
+  /** Controls settings (b1.4g): button scale, mirrored layout, auto/on/off. */
+  private layout: { scale: number; leftHanded: boolean; show: 'auto' | 'on' | 'off' } = { scale: 1, leftHanded: false, show: 'auto' };
   private interactSince = 0;
   private ringRaf = 0;
   private poll: ReturnType<typeof setInterval> | null = null;
@@ -281,9 +283,18 @@ export class TouchControls {
     set('anchor', this.progress.anchor);
   }
 
-  /** Shown on the touch scheme, in a match. */
+  /** Settings > Controls: size 0.8-1.4 (clamped upstream by CONTROL_RANGES), left-handed mirror, show mode. */
+  setLayout(next: { scale: number; leftHanded: boolean; show: 'auto' | 'on' | 'off' }) {
+    this.layout = { ...next };
+    this.root?.style.setProperty('--tc-scale', String(next.scale));
+    this.root?.classList.toggle('tc-lefty', next.leftHanded);
+    this.refresh();
+  }
+
+  /** Shown on the touch scheme (auto) or always (on), in a match; never when off. */
   private refresh() {
-    const want = this.scheme.current === 'touch' && hiddenEl('menu-screen') && hiddenEl('loading-screen');
+    const shown = this.layout.show === 'on' || (this.layout.show === 'auto' && this.scheme.current === 'touch');
+    const want = shown && hiddenEl('menu-screen') && hiddenEl('loading-screen');
     if (want === this.active) return;
     this.active = want;
     this.root?.classList.toggle('active', want);
@@ -369,7 +380,8 @@ export class TouchControls {
     const w = window.innerWidth || 1;
     const hasStick = [...this.roles.values()].some((r) => r.kind === 'stick');
     const hasLook = [...this.roles.values()].some((r) => r.kind === 'look');
-    if (e.clientX < w * STICK_ZONE && stickEnabled(this.context)) {
+    const stickSide = this.layout.leftHanded ? e.clientX > w * (1 - STICK_ZONE) : e.clientX < w * STICK_ZONE;
+    if (stickSide && stickEnabled(this.context)) {
       if (hasStick) return;
       this.roles.set(e.pointerId, { kind: 'stick', baseX: e.clientX, baseY: e.clientY });
       this.showStick(e.clientX, e.clientY, 0, 0);
@@ -422,7 +434,8 @@ export class TouchControls {
   private showStick(x: number, y: number, dx: number, dy: number) {
     if (!this.stickBase || !this.stickKnob) return;
     this.stickBase.classList.add('shown');
-    this.stickBase.style.left = `${x}px`;
+    // The lefty overlay is mirrored with scaleX(-1): place the base in mirrored coordinates.
+    this.stickBase.style.left = `${this.layout.leftHanded ? (window.innerWidth || 0) - x : x}px`;
     this.stickBase.style.top = `${y}px`;
     this.stickKnob.style.transform = `translate(${dx}px, ${dy}px)`;
   }
