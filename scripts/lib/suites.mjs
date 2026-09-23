@@ -716,6 +716,10 @@ export const BROWSER = [
   //   test-storm-wall  — the old storm-wall-probe as a gate: night sea ≤ sky luma,
   //                      noon sea chroma ≤ 1.3× sky (RED on HEAD: noon 6.67×, blue sea under slate)
   { ...plain('test-fill-budget.mjs'), slow: true },
+  // b1.7b (critique-09): memoryCensus() phone + iPad rows after a 60 s island tour
+  // (GPU resident / textures / JS heap vs budgets.mjs MEMORY_BUDGETS); --mutate
+  // (every story scene resident at LOD0 twice) must FAIL; --prod grades the built bundle.
+  { ...plain('test-memory-budget.mjs'), slow: true },
   { ...plain('test-storm-wall.mjs'), slow: true },
   // OCEAN-01 (wave 1.4). The fair-weather half of what test-storm-wall grades
   // under the ring: is the ocean lit by the sky it dissolves into? Reads the

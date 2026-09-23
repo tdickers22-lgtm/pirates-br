@@ -1565,3 +1565,27 @@ Where the ceilings live now: `scripts/lib/budgets.mjs`. `scripts/test-budget-rat
 fails any value looser than release, this baseline or the PLAN 3.4/3.14 tables, prints the declared
 deviations (phone/iPad programs 70 vs 66, balanced cave 1540 / 1.835 M vs 970 / 1.43 M, the iPad
 0.44 floor vs 0.45) and fails a budgets commit that also touches `src/` or `public/`.
+
+## 18. Resident memory: the phone and iPad rows (b1.7b, critique gap 9)
+
+`window.__piratesBR.memoryCensus()` (`src/client/debug/memoryCensus.ts`) after a scripted 60 s tour standing
+off all 14 islands (nearest-neighbour order) on the emulated device, graded by `scripts/test-memory-budget.mjs`
+against `MEMORY_BUDGETS` in `scripts/lib/budgets.mjs`. SwiftShader, own 3101/8091 stack, seed 20260801,
+HEAD dda21c1e + this slice, 2026-09-23. MB = 2^20 bytes. Byte counts are exact bookkeeping (unique buffers and
+texture sources reachable from the scene, render targets, drawing buffer); the heap is Chromium's
+`usedJSHeapSize` after three forced GCs, which INCLUDES ArrayBuffer backing stores (probe: +100 MB
+Float32Array = +100.0 MB), so geometry CPU copies are heap too.
+
+| device | build | GPU resident | geometry | textures | RT + drawing buffer | JS heap | of which typed arrays | ceiling GPU / tex / heap |
+|---|---|---|---|---|---|---|---|---|
+| phone 844x390 @3 | vite build | 122.9 | 95.5 | 21.8 | 5.6 | **213.6** | 116.5 | 140 / 64 / 120 |
+| iPad 1024x768 @2 | vite build | 125.8 | 95.5 | 21.8 | 8.5 | **212.8** | 116.5 | 220 / 96 / 150 |
+| phone, dev server | vite dev | 122.9 | 95.5 | 21.8 | 5.6 | 209.9 | 116.5 | |
+| phone, `--mutate` (story LOD0 x2) | vite dev | 158.9 | 131.5 | 21.8 | 5.6 | 269.8 | 154.6 | |
+
+Both heap rows are RED at launch: 94 MB over on the phone. 116.5 MB of it is typed arrays (95.5 MB scene
+geometry CPU copies + 19.9 MB library templates/merged copies that three keeps after upload), the rest
+~97 MB of ordinary JS objects. The dev server is not the cause (the built bundle reads the same). The two
+levers are the CPU-copy release for render-only meshes (b3.1b) and a heap profile of the non-array 97 MB.
+0 render targets is honest on the device tier (low: no post-fx, no shadow map). The phone GPU ceiling was
+tightened 160 -> 140 MB so the story-LOD0 leak mutation (158.9) fails on the GPU row, not only on the heap.
