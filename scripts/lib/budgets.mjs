@@ -290,6 +290,16 @@ export const FRAME_GOVERNOR = {
   ],
 };
 
+// ═══ resident memory (b1.7b, critique gap 9; PLAN 3.4 device table) ═════════════════════════════════
+// memoryCensus() after a scripted 60 s tour on the emulated device (scripts/test-memory-budget.mjs):
+// gpuMB = geometry + textures + render targets + drawing buffer, texturesMB = unique texture sources,
+// heapMB = performance.memory.usedJSHeapSize (Chromium) or the census estimate elsewhere. MB = 2^20.
+// The desktop rows land in b3.1b and the per-family rows in b3.1g; both only ever tighten these.
+export const MEMORY_BUDGETS = {
+  phone: { gpuMB: 160, texturesMB: 64, heapMB: 120 },
+  ipad: { gpuMB: 220, texturesMB: 96, heapMB: 150 },
+};
+
 // ═══ the ratchet's view ═════════════════════════════════════════════════════════════════════════════
 /** Every graded family, by the name the ratchet and the baseline fixture use. */
 export const ALL_BUDGETS = {
@@ -304,6 +314,7 @@ export const ALL_BUDGETS = {
   oceanFragOps: OCEAN_FRAG_OPS,
   snapshotBytes: SNAPSHOT_BYTES,
   frameGovernor: FRAME_GOVERNOR,
+  memory: MEMORY_BUDGETS,
 };
 
 /** Keys that are readings or scene inputs, never budgets. */

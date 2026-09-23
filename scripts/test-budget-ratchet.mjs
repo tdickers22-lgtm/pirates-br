@@ -69,6 +69,13 @@ const PLAN_RULES = [
   { re: /^frameGovernor\.mobileRows\.iPad[^.]*\.openMin$/, min: 0.70, src: '3.4 D open Mpx' },
   { re: /^frameGovernor\.mobileRows\.iPad[^.]*\.floorMin$/, min: 0.45, src: '3.4 D floor Mpx' },
   { re: /^frameGovernor\.legibilityFloorWidthPx$/, min: 640, src: '3.4 C never under 640 px wide' },
+  // b1.7b memory rows (PLAN b1.7 exit / 3.4 C-D): phone 160 / 64 / 120 MB, iPad 220 / 96 / 150 MB.
+  { re: /^memory\.phone\.gpuMB$/, max: 160, src: 'b1.7b phone GPU resident MB' },
+  { re: /^memory\.phone\.texturesMB$/, max: 64, src: 'b1.7b phone texture MB' },
+  { re: /^memory\.phone\.heapMB$/, max: 120, src: 'b1.7b phone JS heap MB' },
+  { re: /^memory\.ipad\.gpuMB$/, max: 220, src: 'b1.7b iPad GPU resident MB' },
+  { re: /^memory\.ipad\.texturesMB$/, max: 96, src: 'b1.7b iPad texture MB' },
+  { re: /^memory\.ipad\.heapMB$/, max: 150, src: 'b1.7b iPad JS heap MB' },
 ];
 /** DECLARED deviations from the plan table: path -> { value it may not exceed, owner, why }. This list
  *  may only shrink; a value past its declared figure, or a new entry, is a failure by construction. */
