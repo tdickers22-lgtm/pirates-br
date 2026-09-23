@@ -235,7 +235,7 @@ export const CLIENT_VALIDATORS: {
   queue_join: (raw) => {
     const p = bag(raw);
     if (!p) return null;
-    return { mode: p.mode === undefined ? null : str(p.mode) };
+    return { mode: p.mode === undefined ? null : str(p.mode), ...(p.soak === true ? { soak: true } : {}) };
   },
   queue_leave: (raw) => (bag(raw) ? {} : null),
   solo_start: (raw) => {

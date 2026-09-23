@@ -1272,6 +1272,9 @@ export interface QueueUpdatePayload {
   /** 1-based place in the host-wide line (oldest crew first), sent while
    *  atCapacity. */
   position?: number;
+  /** b1.2h: at capacity, seconds left in the newest same-mode match's late-join
+   *  window (a bot hull may be taken over until then). Absent otherwise. */
+  lateJoinWindowSec?: number;
 }
 
 export interface PlayerStatsRecord {
@@ -1355,6 +1358,9 @@ export interface MatchStartPayload {
   botCount: number;
   /** Set when the match was launched from a private crew party. Null for solo or public-queue. */
   partyCode: string | null;
+  /** b1.2h (D10): set when this crew took over a bot hull in a match already
+   *  past its horn. The HUD says "Joined a voyage in progress (storm phase N)". */
+  lateJoin?: { stormPhase: number; sinceHornSec: number } | null;
 }
 
 export interface NetMsg {
@@ -1521,7 +1527,9 @@ export interface ClientMsgPayloads {
   party_transfer_host: { clientId: string };
   update_party_settings: { mode: string | null; botFill: number | null };
   start_match: { force: boolean };
-  queue_join: { mode: string | null };
+  /** soak (b1.2h): a load-test crew. Soak-only matches are preemptible: they
+   *  end as a no-contest before a real crew ever waits for capacity. */
+  queue_join: { mode: string | null; soak?: boolean };
   queue_leave: EmptyMsgPayload;
   solo_start: { botCount: number | null };
   return_to_menu: EmptyMsgPayload;

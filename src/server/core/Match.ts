@@ -1012,6 +1012,154 @@ export class Match {
     return true;
   }
 
+  /** Wall seconds since the horn (the lobby's late-join clock), or null while
+   *  the match still stands off the dock or is over. */
+  sinceHornSec(): number | null {
+    if (this.playingSinceWallMs === null || this.state.phase !== 'playing') return null;
+    return Math.max(0, (Date.now() - this.playingSinceWallMs) / 1000);
+  }
+
+  /** 1-based storm phase for the "Joined a voyage in progress" line. */
+  stormPhase(): number {
+    return (this.state.storm?.phase ?? 0) + 1;
+  }
+
+  /**
+   * LATE JOIN ELIGIBILITY (b1.2h, critique gap 1, D10). A bot hull a queued
+   * crew may take over after the horn, or null. Eligible = bot-crewed, afloat,
+   * 0 open holes, not on fire, flooded < 30 % (the "hull HP >= 70 %" of D10:
+   * there is no hull-HP pool, sinkProgress is the damage state), every hand
+   * aboard, alive and empty-handed (so nothing is dropped and no body is left),
+   * inside the ring she will face 60 s from now, no other hull within 250 m,
+   * no human pirate within 150 m of her or any hand (the bot crew can never
+   * vanish inside a human's view at close range), and no damage dealt or taken
+   * by a hand in the last 20 s. Pure read: no RNG draw, no state write.
+   */
+  lateJoinCandidate(): Ship | null {
+    if (this.state.phase !== 'playing') return null;
+    const L = Match.LATE_JOIN;
+    const storm = this.state.storm;
+    const soon = !!storm && (storm.shrinking || storm.shrinkTimer <= L.ringMarginSec);
+    const ringX = storm ? (soon ? storm.nextCenterX : storm.centerX) : 0;
+    const ringZ = storm ? (soon ? storm.nextCenterZ : storm.centerZ) : 0;
+    const ringR = storm ? Math.min(storm.safeRadius, soon ? storm.nextRadius : storm.safeRadius) : Infinity;
+    const humans = this.state.players.filter((p) => !p.isBot && p.state !== 'eliminated');
+    const recent = this.t - L.quietSec;
+    const ships = this.state.ships.filter((sh) => sh.alive && !sh.sinking);
+    // Newest-built bot hull first, the same order as the countdown swap.
+    for (let i = ships.length - 1; i >= 0; i--) {
+      const ship = ships[i];
+      const handIds = ship.crewIds ?? [];
+      if (handIds.length === 0) continue;
+      const hands = handIds.map((id) => this.playersById.get(id));
+      if (!hands.every((h) => !!h && h.isBot && h.state === 'alive' && h.onShipId === ship.id && !h.carryingChestId)) continue;
+      if (ship.holes.some((hole) => !hole.patched) || ship.onFire || ship.sinkProgress > L.maxSinkProgress) continue;
+      if (Math.hypot(ship.position.x - ringX, ship.position.z - ringZ) > ringR) continue;
+      const near = (a: { x: number; z: number }, b: { x: number; z: number }, r: number) => Math.hypot(a.x - b.x, a.z - b.z) < r;
+      if (ships.some((o) => o !== ship && near(o.position, ship.position, L.enemyClearM))) continue;
+      const spots = [ship.position, ...hands.map((h) => h!.position)];
+      if (humans.some((hu) => spots.some((sp) => near(hu.position, sp, L.humanClearM)))) continue;
+      const handSet = new Set(handIds);
+      if (hands.some((h) => h!.lastDamagedAt !== null && h!.lastDamagedAt >= recent)) continue;
+      if (this.state.players.some((p) => p.lastDamagedAt !== null && p.lastDamagedAt >= recent
+        && p.lastDamagedById !== null && handSet.has(p.lastDamagedById))) continue;
+      const hullHitAt = this.hullCombatAt.get(ship.id);
+      if (hullHitAt !== undefined && hullHitAt >= recent) continue;
+      return ship;
+    }
+    return null;
+  }
+
+  /** Hull hits in sim seconds, stamped once a second from nextHoleId growth on
+   *  the victim AND on its lastHostileShipId (damage dealt), for lateJoinCandidate. */
+  private hullCombatAt = new Map<string, number>();
+  private hullHoleSeen = new Map<string, number>();
+  private sampleHullCombat(): void {
+    for (const ship of this.state.ships) {
+      const seen = this.hullHoleSeen.get(ship.id) ?? 0;
+      if (ship.nextHoleId > seen) {
+        this.hullHoleSeen.set(ship.id, ship.nextHoleId);
+        if (seen > 0 || ship.holes.length > 0) {
+          this.hullCombatAt.set(ship.id, this.t);
+          if (ship.lastHostileShipId) this.hullCombatAt.set(ship.lastHostileShipId, this.t);
+        }
+      }
+    }
+  }
+
+  static readonly LATE_JOIN = {
+    ringMarginSec: 60,
+    maxSinkProgress: 0.3,
+    enemyClearM: 250,
+    humanClearM: 150,
+    quietSec: 20,
+  } as const;
+
+  /**
+   * THE LATE-JOIN TAKEOVER (b1.2h). A crew that queued after the horn takes an
+   * eligible bot hull (lateJoinCandidate): every bot hand is removed from the
+   * world out of every human's view (no body, no loot, no kill credit, no RNG
+   * draw), the ship object is KEPT (her stores, cargo, upgrades, bank gold and
+   * course), the hands' carried gold goes to the new crew, and the humans stand
+   * on her aft deck at the helm. Returns null when no hull is eligible.
+   */
+  takeOverBotHull(members: { ws: WebSocket; name: string }[]): {
+    crewId: string;
+    shipId: string;
+    stormPhase: number;
+    sinceHornSec: number;
+    joins: { playerId: string; shipId: string; send: () => { playerId: string; shipId: string; snapshot: GameState } }[];
+  } | null {
+    const roster = members.slice(0, CREW_MAX_MEMBERS);
+    if (roster.length === 0) return null;
+    const ship = this.lateJoinCandidate();
+    if (!ship) return null;
+    const hands = new Set(ship.crewIds);
+    let botGold = 0;
+    for (const id of hands) {
+      botGold += this.playersById.get(id)?.gold ?? 0;
+      this.bots.removeBot(id);
+      this.lastDamageSourceById.delete(id);
+    }
+    this.state.players = this.state.players.filter((p) => !hands.has(p.id));
+    for (const p of this.state.players) {
+      if (p.lastDamagedById && hands.has(p.lastDamagedById)) p.lastDamagedById = null;
+    }
+
+    const crewId = uuid();
+    const memberIds = roster.map(() => uuid());
+    const taken = this.state.players.map((p) => p.name);
+    const names = roster.map((member) => {
+      const name = dedupeName((member.name || '').trim().slice(0, 24) || 'Pirate', taken);
+      taken.push(name);
+      return name;
+    });
+    ship.crewIds = [...memberIds];
+    ship.crewId = crewId;
+    ship.ownerId = memberIds[0];
+    this.state.crews = [...(this.state.crews ?? []), {
+      id: crewId, name: names[0], color: ship.teamColor, shipId: ship.id, memberIds: [...memberIds], leaderId: memberIds[0],
+    }];
+    const players = roster.map((_, index) => this.createPlayer(memberIds[index], names[index], ship.id, false, crewId));
+    const deck = this.getRespawnDeckPosition(ship);
+    const cos = Math.cos(ship.rotation);
+    const sin = Math.sin(ship.rotation);
+    const share = Math.floor(botGold / players.length);
+    players.forEach((player, index) => {
+      const along = (index - (players.length - 1) / 2) * CREW_LANDING_STRIDE;
+      player.position = { x: deck.x + sin * along, y: deck.y, z: deck.z + cos * along };
+      player.onShipId = ship.id;
+      player.gold += share + (index === 0 ? botGold - share * players.length : 0);
+    });
+    for (const player of players) this.state.players.push(player);
+    this.configuredBotCount = Math.max(0, this.configuredBotCount - 1);
+    this.state.shipsAlive = this.state.ships.filter((s) => s.alive && !s.sinking).length;
+    this.rebuildEntityIndexes();
+    const joins = this.registerCrewClients(roster, players, crewId, ship.id);
+    console.log(`[Match ${this.id.slice(0, 6)}] late join: ${roster.length} took bot hull ${ship.id.slice(0, 6)} (storm phase ${this.stormPhase()})`);
+    return { crewId, shipId: ship.id, stormPhase: this.stormPhase(), sinceHornSec: this.sinceHornSec() ?? 0, joins };
+  }
+
   /** The roster this match was built on, and the hands each hull is crewed for
    *  (MODE-01). The lobby reads them to size the crew it hands to createCrew. */
   modeId(): ModeId {
@@ -1624,7 +1772,17 @@ export class Match {
     for (const player of players) this.state.players.push(player);
     this.state.shipsAlive = this.state.ships.filter(s => s.alive && !s.sinking).length;
     this.rebuildEntityIndexes();
+    return { crewId, shipId, joins: this.registerCrewClients(roster, players, crewId, shipId) };
+  }
 
+  /** Register one ConnectedClient per crew member and build their join sends
+   *  around ONE wire snapshot (createCrew and the late-join takeover). */
+  private registerCrewClients(
+    roster: { ws: WebSocket; name: string }[],
+    players: Player[],
+    crewId: string,
+    shipId: string,
+  ): { playerId: string; shipId: string; send: () => { playerId: string; shipId: string; snapshot: GameState } }[] {
     const joins = players.map((player, index) => {
       this.statsDelta(player.id); // stamp join sim-time (match start = 0, late join > 0)
       const client: ConnectedClient = {
@@ -1668,10 +1826,7 @@ export class Match {
     // unquantized floats disagreed with the quantized stream that followed. It
     // is built ONCE for the whole crew, after every member is in the state.
     const snapshot = buildWireSnapshot(this.buildSnapshot(true), true);
-    return {
-      crewId,
-      shipId,
-      joins: joins.map(({ player, client }) => ({
+    return joins.map(({ player, client }) => ({
         playerId: player.id,
         shipId,
         send: () => {
@@ -1684,8 +1839,7 @@ export class Match {
             + ` crew=${crewId.slice(0, 6)} of ${roster.length}; humans=${this.clients.size}`);
           return { playerId: player.id, shipId, snapshot };
         },
-      })),
-    };
+      }));
   }
 
   /**
@@ -2211,6 +2365,8 @@ export class Match {
     this.t += dt;
     this.tickCount++;
     this.state.tick++;
+    // b1.2h: once a second, stamp hull hits for the late-join quiet window.
+    if (this.tickCount % 60 === 0) this.sampleHullCombat();
     // ONE SUNSET PER MATCH. The sky used to run a free 16-minute cycle off the
     // client's own render clock, so a match that opens at noon is in pitch dark
     // four minutes later — new players learned the stations in night rain while

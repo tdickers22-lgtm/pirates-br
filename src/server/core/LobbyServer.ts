@@ -60,6 +60,17 @@ const QUEUE_SOFT_MIN_CREWS = 2;
  *  bots and a late crew swaps one out (Match.retireBotHullBeforeHorn), so the
  *  fleet is the mode's size whether or not anybody arrives. */
 const QUEUE_COUNTDOWN_SWAP_MAX = 3;
+/** LATE JOIN (b1.2h, critique gap 1, D8/D10). After the horn a queued crew
+ *  takes over an eligible BOT hull (Match.lateJoinCandidate) of a running match
+ *  of its mode: until horn + 150 s (the truce), and while every match slot is
+ *  busy until horn + 475 s (the end of storm phase 3's wait), the pressure
+ *  window that makes MAX_MATCHES 4 carry 1 lone player/min at p95 <= 30 s
+ *  (test-capacity-sim). */
+const LATE_JOIN_TRUCE_SEC = 150;
+const LATE_JOIN_PRESSURE_SEC = 475;
+/** What queue_update.etaSeconds quotes at capacity while a late-join window is
+ *  open: hulls go quiet on a combat timescale of ~20 s, rechecked every tick. */
+const LATE_JOIN_ETA_SECONDS = 10;
 const MATCH_GC_AFTER_END_MS = 60_000;
 const ENDED_MATCH_DETACH_MS = 25_000; // auto-return-to-menu after this if client doesn't act
 /** How long after the last roster change the host may start a crew that has not
@@ -450,6 +461,8 @@ interface QueueEntry {
   sessionIds: string[];
   partyCode: string | null;
   joinedAt: number;
+  /** b1.2h: a load-test crew (queue_join.soak). */
+  soak?: boolean;
 }
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
@@ -484,7 +497,19 @@ export class LobbyServer {
     hostForceStartMs: HOST_FORCE_START_MS,
     joinFailLimit: JOIN_FAIL_LIMIT,
     joinLockoutMs: JOIN_LOCKOUT_MS,
+    /** Match ceiling (PIRATES_BR_MAX_MATCHES); test-capacity-sim sweeps it. */
+    maxMatches: MAX_MATCHES_PER_PROCESS,
+    /** b1.2h late join (D10): a queued crew may take over an eligible bot hull
+     *  until horn + truce, or horn + pressure while every match slot is busy. */
+    lateJoinTruceSec: LATE_JOIN_TRUCE_SEC,
+    lateJoinPressureSec: LATE_JOIN_PRESSURE_SEC,
   };
+  /** b1.2h: how matches are built. test-capacity-sim swaps in stub matches so
+   *  the REAL dispatch code drives an hour of queue in seconds. */
+  static matchFactory: (opts: { matchId: string; botCount: number; mode: ModeId }) => Match =
+    (opts) => new Match(opts);
+  /** Matches dispatched from an all-soak cohort: preemptible (b1.2h). */
+  private soakMatches: Set<string> = new Set();
 
   private httpServer = createServer((req, res) => this.handleHttp(req, res));
   private wss!: WebSocketServer;
@@ -1250,11 +1275,14 @@ export class LobbyServer {
       sessionIds: crewSessions.map((c) => c.id),
       partyCode,
       joinedAt: Date.now(),
+      ...(msg.payload.soak === true ? { soak: true } : {}),
     };
     logEvent('queue_join', { mode: modeId, crew: crewSessions.length, party: partyCode !== null });
     // A crew arriving during a match's pre-horn countdown boards THAT match
-    // rather than opening a second lobby of one.
+    // rather than opening a second lobby of one; after the horn it takes an
+    // eligible bot hull of a running match (b1.2h late join).
     if (this.tryBackfill(entry)) return;
+    if (this.tryLateJoin(entry)) return;
     this.queue.push(entry);
     this.broadcastQueue();
     this.tryDispatchQueue();
@@ -1542,17 +1570,24 @@ export class LobbyServer {
       const entries = this.queue.filter((e) => e.mode === mode);
       if (entries.length === 0) continue;
       const spec = MODES[mode];
-      const eta = this.queueSecondsRemaining(mode);
+      const clockEta = this.queueSecondsRemaining(mode);
       for (const entry of entries) {
+        // b1.2h: at capacity the ETA is the late-join window's (a hull goes
+        // quiet on a ~20 s combat timescale), or the dispatch clock when a soak
+        // match will be preempted for her; null only when neither applies.
+        const window = full ? this.lateJoinWindowLeft(mode, !!entry.soak) : 0;
+        const preempt = full && !entry.soak && !this.draining && this.soakMatches.size > 0;
+        const eta = !full || preempt ? clockEta : window > 0 ? Math.min(LATE_JOIN_ETA_SECONDS, Math.ceil(window)) : null;
         const payload: QueueUpdatePayload = {
           inQueue: entries.reduce((n, e) => n + e.sessionIds.length, 0),
           // THE LINE PROMISES WHAT THE SERVER ACTUALLY WAITS FOR (netcode-11):
           // `needed` is the mode's real minimum, in pirates.
           needed: spec.minCrews * spec.crewSize,
-          secondsRemaining: eta,
+          secondsRemaining: eta ?? clockEta,
           starting: false,
-          etaSeconds: full ? null : eta,
-          ...(full ? { atCapacity: true, position: this.queue.indexOf(entry) + 1 } : {}),
+          etaSeconds: eta,
+          ...(full && !preempt ? { atCapacity: true, position: this.queue.indexOf(entry) + 1 } : {}),
+          ...(window > 0 ? { lateJoinWindowSec: Math.ceil(window) } : {}),
         };
         for (const id of entry.sessionIds) {
           const c = this.clients.get(id);
@@ -1588,6 +1623,7 @@ export class LobbyServer {
         this.queueMatchSlots.delete(matchId);
         continue;
       }
+      if (this.soakMatches.has(matchId) !== !!entry.soak) continue;
       const members = this.liveMembers(entry);
       if (members.length === 0) return false;
       if (!match.retireBotHullBeforeHorn()) {
@@ -1614,6 +1650,76 @@ export class LobbyServer {
     return false;
   }
 
+  /** Seconds left in the late-join window of the newest same-mode match past
+   *  its horn (pressure window at capacity, truce otherwise); 0 when none. */
+  private lateJoinWindowLeft(mode: ModeId, soak: boolean): number {
+    const window = this.atCapacity() ? LobbyServer.tunables.lateJoinPressureSec : LobbyServer.tunables.lateJoinTruceSec;
+    let best = 0;
+    for (const [id, match] of this.matches) {
+      if (match.modeId() !== mode || match.endedAtMs() || this.soakMatches.has(id) !== soak) continue;
+      const since = match.sinceHornSec();
+      if (since === null) continue;
+      best = Math.max(best, window - since);
+    }
+    return best;
+  }
+
+  /**
+   * LATE JOIN (b1.2h, critique gap 1, D10). After the horn a queued crew takes
+   * over an eligible bot hull (Match.takeOverBotHull) in a running match of
+   * its mode, oldest match first, inside the late-join window. Soak crews and
+   * real crews never share a match. Returns true when she sailed.
+   */
+  private tryLateJoin(entry: QueueEntry): boolean {
+    const members = this.liveMembers(entry);
+    if (members.length === 0) return false;
+    const window = this.atCapacity() ? LobbyServer.tunables.lateJoinPressureSec : LobbyServer.tunables.lateJoinTruceSec;
+    for (const [matchId, match] of this.matches) {
+      if (match.modeId() !== entry.mode || match.endedAtMs() || match.isQuarantined()) continue;
+      if (this.soakMatches.has(matchId) !== !!entry.soak) continue;
+      const since = match.sinceHornSec();
+      if (since === null || since > window) continue;
+      if (match.crewSize() < members.length) continue;
+      const pending = match.takeOverBotHull(members.map((c) => ({ ws: c.ws, name: c.name })));
+      if (!pending) continue;
+      const starting: QueueUpdatePayload = {
+        inQueue: members.length,
+        needed: MODES[entry.mode].minCrews * MODES[entry.mode].crewSize,
+        secondsRemaining: 0,
+        starting: true,
+        etaSeconds: 0,
+      };
+      for (const c of members) this.send(c.ws, { type: 'queue_update', ts: Date.now(), payload: starting });
+      try {
+        this.placeCrewIntoMatch(members, match, 'queue', entry.partyCode, members.length, match.botCrewCount(), pending);
+      } catch (err) {
+        console.error(`[Lobby] late join placement failed in ${matchId.slice(0, 6)}:`, err);
+        for (const c of members) this.failPlacement(c, match);
+        return true;
+      }
+      this.markPartyAtSea(entry);
+      logEvent('late_join', { mode: entry.mode, crew: members.length, sinceHornSec: Math.round(since), stormPhase: pending.stormPhase, window });
+      return true;
+    }
+    return false;
+  }
+
+  /** b1.2h: while a REAL crew is queued and the host is at its ceiling, the
+   *  oldest soak-tagged match is ended as a no-contest (Match.interrupt, which
+   *  saves stats as a no-contest) and reaped, so capacity frees for her. */
+  private preemptSoakMatches(): void {
+    if (this.draining || this.soakMatches.size === 0 || !this.atCapacity()) return;
+    if (!this.queue.some((e) => !e.soak)) return;
+    for (const id of this.soakMatches) {
+      const match = this.matches.get(id);
+      if (!match) { this.soakMatches.delete(id); continue; }
+      try { match.interrupt(); } catch (err) { console.error(`[Lobby] soak preempt interrupt ${id.slice(0, 6)} failed:`, err); }
+      this.reapMatch(id, match, 'soak preempted');
+      logEvent('soak_preempted', { matchId: id.slice(0, 6) });
+      if (!this.atCapacity()) return;
+    }
+  }
+
   private tryDispatchQueue(): void {
     if (this.queue.length === 0) return;
     // Stale reservations: a match that sounded its horn stops being backfillable.
@@ -1623,6 +1729,14 @@ export class LobbyServer {
         this.queueMatchSlots.delete(matchId);
       }
     }
+    // b1.2h: every waiting crew (oldest first) first tries a bot hull of a
+    // running match inside its late-join window.
+    for (const entry of [...this.queue]) {
+      if (this.tryLateJoin(entry)) this.queue = this.queue.filter((e) => e !== entry);
+    }
+    if (this.queue.length === 0) return;
+    // b1.2h: a soak match never makes a real crew wait for capacity.
+    this.preemptSoakMatches();
     // online-17: at the ceiling (or draining) nothing is spliced out of the
     // line, so nobody who waited is bounced with "host is full"; the crews keep
     // their places (broadcastQueue sends position) and go the moment a match
@@ -1682,6 +1796,7 @@ export class LobbyServer {
       // hull, so the cohort's shape survives all the way into createCrew.
       const { match, placed } = this.spawnAndBoard(crews, botCount, mode, 'queue', partyCode);
       if (placed > 0) for (const e of cohort) this.markPartyAtSea(e);
+      if (match && placed > 0 && cohort.every((e) => e.soak)) this.soakMatches.add(match.id);
       if (match && placed > 0 && swappable > 0) {
         this.queueMatchSlots.set(match.id, { mode, slots: swappable });
       }
@@ -1699,7 +1814,14 @@ export class LobbyServer {
    *  nothing new (RECON-01's other half). */
   private atCapacity(): boolean {
     if (this.draining) return true;
-    return MAX_MATCHES_PER_PROCESS > 0 && this.matches.size >= MAX_MATCHES_PER_PROCESS;
+    const max = LobbyServer.tunables.maxMatches;
+    if (max <= 0) return false;
+    // b1.2h: the ceiling is a CPU budget, and an ENDED match runs no sim (only
+    // a slow end-screen snapshot) while it waits MATCH_GC_AFTER_END_MS for its
+    // reap, so it no longer holds a slot a queued crew is waiting for.
+    let live = 0;
+    for (const m of this.matches.values()) if (!m.endedAtMs()) live += 1;
+    return live >= max;
   }
 
   private spawnMatch(opts: { botCount: number; mode: ModeId; source: 'party' | 'queue' }): Match {
@@ -1707,7 +1829,7 @@ export class LobbyServer {
     // The mode decides the bot fleet's crew size and hull class (MODE-01): a
     // Duos match is nine Corsairs with two hands each, not nine single-handed
     // ships of whatever class the spawn table rolled.
-    const match = new Match({ matchId, botCount: opts.botCount, mode: opts.mode });
+    const match = LobbyServer.matchFactory({ matchId, botCount: opts.botCount, mode: opts.mode });
     match.onMatchEnd = (result) => this.onMatchEnd(matchId, result);
     // b1.2a: a quarantined match (repeated tick faults) is reaped on the next
     // turn of the event loop, outside its own runTicks stack; reapMatch sends
@@ -1740,7 +1862,7 @@ export class LobbyServer {
     if (this.atCapacity()) {
       // Refuse EARLY, before a hull, a dock or a colour is handed out: the
       // members keep their party and can queue again the moment a match ends.
-      console.warn(`[Lobby] refusing ${source} match: ${this.matches.size}/${MAX_MATCHES_PER_PROCESS} matches on this host`);
+      console.warn(`[Lobby] refusing ${source} match: ${this.matches.size}/${LobbyServer.tunables.maxMatches} matches on this host`);
       logEvent('refused', { reason: 'capacity', source, humans: members.length, matches: this.matches.size });
       // ONE message, not two: failPlacement's generic "could not board" would
       // land on top of this and the player would read the wrong reason.
@@ -1822,14 +1944,18 @@ export class LobbyServer {
    * now goes through createCrew in one call, gets one hull sized by
    * hullForCrewSize(n), and lands together on one pier.
    */
-  private placeCrewIntoMatch(crew: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null, expectedHumans = 1, botCount = 0): void {
+  private placeCrewIntoMatch(
+    crew: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null, expectedHumans = 1, botCount = 0,
+    prebuilt?: ReturnType<Match['takeOverBotHull']>,
+  ): void {
     if (crew.length === 0) return;
     // Build the join payloads first (no send) so a throw in world/spawn setup
     // can never leave a client with a torn-down menu and no join ever arriving.
     // The client still needs match_start BEFORE the join snapshot — it resets
     // local round state on match_start, which would otherwise wipe
     // localPlayerId and unanchor the camera/input.
-    const pending = match.createCrew(crew.map((session) => ({ ws: session.ws, name: session.name })));
+    const pending = prebuilt ?? match.createCrew(crew.map((session) => ({ ws: session.ws, name: session.name })));
+    const lateJoin = prebuilt ? { stormPhase: prebuilt.stormPhase, sinceHornSec: Math.round(prebuilt.sinceHornSec) } : null;
     crew.forEach((session, index) => {
       const join = pending.joins[index];
       if (!join) return;
@@ -1845,6 +1971,7 @@ export class LobbyServer {
         expectedHumans,
         botCount,
         partyCode,
+        ...(lateJoin ? { lateJoin } : {}),
       };
       this.send(session.ws, { type: 'match_start', ts: Date.now(), payload: startMsg });
       const { playerId } = join.send();
@@ -2137,6 +2264,7 @@ export class LobbyServer {
     }
     match.stop();
     this.matches.delete(matchId);
+    this.soakMatches.delete(matchId);
     this.matchStartedAt.delete(matchId);
     this.matchEmptySince.delete(matchId);
     this.statsIdentity.delete(matchId);
