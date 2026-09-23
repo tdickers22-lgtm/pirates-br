@@ -553,6 +553,12 @@ export const LOGIC = [
   //                                 forced-red smoke rolls back to the previous non-destroyed image,
   //                                 HEALTH_KEY reaches the smoke (b1.3d, 20 clauses, ~3 s, offline)
   plain('ci-rollback-dryrun.mjs'),
+  //   test-run-batch-gate         — the cumulative batch-gate runner (b1.3f, critique gap 2): the committed
+  //                                 fixtures/batch-gates.json == a fresh --sync of the plan, dry-run b1..b5 lists
+  //                                 every suite with gate(bN) ⊇ gate(bN-1), unregistered/non-cumulative plans FAIL
+  //                                 the sync, and on a fake registry: FAIL/VACUOUS/TIMEOUT/MISSING exit 1, a re-run
+  //                                 skips the saved PASS, --fresh and a stale PASS re-run (~3 s, no ports)
+  plain('test-run-batch-gate.mjs'),
 ];
 
 /**
@@ -690,6 +696,8 @@ export const EXCLUDED = {
     'the pacing instrument (lane 0.3 owns it); its gate is test-pacing-curve, opt-in under PACING=1',
   'smoke-online.mjs':
     'the post-deploy smoke against a LIVE URL (deploy.yml, the batch gate live block); its offline gate is test-smoke-online (b1.3b)',
+  'run-batch-gate.mjs':
+    'the cumulative batch-gate RUNNER (b1.3f): runs every suite a batch gate names, resumably, plus the live block; graded by test-run-batch-gate',
   'wait-idle.mjs':
     'deploy.yml step: polls the live /health until no match runs (20 min cap); graded by test-smoke-online section F (b1.3b)',
 };
