@@ -1,29 +1,50 @@
-# Pirates BR on Fly.io — ONLINE-01 phase 1/2 (netcode-24).
+# Pirates BR on Fly.io (D8, online-01/02/08/19; runbook in DEPLOY.md).
 #
 # One service: the Node game server also serves the built client, so the browser
 # reaches wss://<app>.fly.dev/ws on the same origin over TLS that Fly terminates
-# at the edge. `fly deploy` uses the repo Dockerfile.
+# at the edge. `fly deploy` uses the repo Dockerfile (remote builder).
 #
-# Read DEPLOY.md "Capacity, drain and the proxy" before changing anything here;
-# every value below is load-bearing and the reasons are not obvious.
+# ONE MACHINE, ALWAYS. Parties, resume tokens and the public queue live in one
+# process's memory. Two machines behind the proxy split them in half (a friend's
+# party code lands on the other box). Two belts keep it at one: the [[mounts]]
+# volume below, and `--ha=false` on every deploy line. Never raise the machine
+# count above one until fly-replay routing ships (b5.5d).
+#
+# scripts/test-deploy-config.mjs grades every value in this file. Read DEPLOY.md
+# "Capacity, drain and the proxy" before changing anything.
+#
+# TOML trap: a bare key AFTER a [table] header belongs to that table. The old file
+# had kill_timeout after [[vm]], so Fly read it as a vm key and kept its 5 s
+# default, cutting the 10 s drain off. Top-level keys stay up here.
 
 app = "pirates-br"
 primary_region = "yyz"
+
+# SIGTERM starts the graceful drain (LobbyServer.shutdown). kill_timeout must be
+# at least PIRATES_BR_DRAIN_SECONDS + 10 s, or players see a 1006 instead of a
+# clean 1012 "server restarting".
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
 
 [build]
   dockerfile = "Dockerfile"
 
 [env]
   PORT = "8090"
+  # The public origin. If the app name is ever changed (fallback: pirates-br-game),
+  # change app above, this and the allowlist together; test-deploy-config checks.
+  PIRATES_BR_PUBLIC_URL = "https://pirates-br.fly.dev"
+  # Browsers may open /ws only from these origins (comma separated).
+  PIRATES_BR_ALLOWED_ORIGINS = "https://pirates-br.fly.dev"
   # Fly terminates TLS at the edge, so every socket's remoteAddress is the edge.
   # Without this the per-IP throttles collapse to one bucket for the internet.
   PIRATES_BR_TRUST_PROXY = "1"
-  # Measured with scripts/perf-server-load.mjs. shared-cpu-2x carries this
-  # comfortably; raise it only after that script stays under its 0.1 s
-  # worstSimLagSec budget at the new number ON THIS MACHINE SIZE.
-  PIRATES_BR_MAX_MATCHES = "8"
+  # PROVISIONAL until b1.3c's remote 10-minute soak measures this machine size
+  # (worstSimLagSec < 0.1, 30% headroom). Re-measured at every deploy gate; the
+  # DEPLOY.md "Capacity record" row must match, and test-deploy-config fails if
+  # this exceeds the recorded measurement.
+  PIRATES_BR_MAX_MATCHES = "2"
   # Seconds a drained machine gives its live matches before it closes sockets.
-  # Must stay well under kill_timeout below.
   PIRATES_BR_DRAIN_SECONDS = "10"
 
 [http_service]
@@ -31,17 +52,15 @@ primary_region = "yyz"
   force_https = true
   # A MACHINE WITH A LIVE MATCH MUST NEVER BE STOPPED FOR BEING "IDLE".
   # Fly's autostop looks at HTTP concurrency, and a match is a WebSocket that
-  # sends no HTTP requests at all — an eight-match host looks idle from up there
-  # and would be suspended mid-broadside.
+  # sends no HTTP requests at all, so a busy host looks idle from up there.
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
 
   [http_service.concurrency]
-    # Concurrency here is the ROUTING hint, not the sim ceiling
-    # (PIRATES_BR_MAX_MATCHES is the sim ceiling). Counted in connections
-    # because every player holds one WebSocket for the whole match: 24 players
-    # per match x 8 matches, with headroom for menu and party sockets.
+    # The ROUTING hint, not the sim ceiling (PIRATES_BR_MAX_MATCHES is that).
+    # Counted in connections because every player holds one WebSocket for the
+    # whole match. The server's own ceiling is 400 sockets (PIRATES_BR_MAX_CLIENTS).
     type = "connections"
     soft_limit = 200
     hard_limit = 260
@@ -56,18 +75,17 @@ primary_region = "yyz"
   path = "/health"
   timeout = "4s"
 
+# Dedicated core (online-01). NEVER shared-cpu: the shared quota is pooled at
+# 5 ms per 80 ms per vCPU (12.5% of a core for shared-cpu-2x) with a 500 s burst
+# cap, and one match in combat needs ~25% of a core. The sim is single-threaded
+# Node, so performance-2x buys nothing until matches run in worker threads (b2.0b-c).
 [[vm]]
-  size = "shared-cpu-2x"
+  size = "performance-1x"
   memory = "2gb"
 
-# SIGTERM starts the graceful drain (see LobbyServer.shutdown). Fly's default
-# 5 s kill timeout would cut it off mid-drain and every player would see a 1006
-# instead of a clean 1012 "server restarting".
-kill_signal = "SIGTERM"
-kill_timeout = "30s"
-
-# Stats are ephemeral without this. The game runs fine without it (the
-# leaderboard resets on each deploy); uncomment to keep it.
-# [[mounts]]
-#   source = "pirates_data"
-#   destination = "/app/data"
+# Stats survive deploys, and a volume also pins the app to one machine (online-08).
+# Create it once: fly volumes create pirates_data --region yyz --size 1 --yes -a pirates-br
+# Fly mounts it root-owned; scripts/docker-entrypoint.sh chowns it, then drops to node.
+[[mounts]]
+  source = "pirates_data"
+  destination = "/app/data"

@@ -13,3 +13,10 @@ data
 .DS_Store
 scripts/blender
 public/assets/models/README.md
+# b1.3a: CI config, docs, caches and local tooling never reach the remote builder
+.github
+.claude
+docs
+playwright-report
+**/__pycache__
+coverage

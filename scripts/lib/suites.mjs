@@ -517,6 +517,15 @@ export const LOGIC = [
   //                                 asset.generator/copyright/extras, scripts/ or src/; self-tests 9 failing fixtures
   //                                 every run (critique-06, D37, b1.1h)
   quick(plain('test-asset-provenance.mjs')),
+  //   test-deploy-config          — fly.toml/Dockerfile/entrypoint/DEPLOY.md(/deploy.yml): performance-* VM, [[mounts]]
+  //                                 pirates_data -> /app/data, auto_stop false, top-level kill_timeout >= drain + 10 s,
+  //                                 --ha=false on every deploy line, no app-generator command, root dropped via
+  //                                 setpriv, BUILD_ID build-arg, MAX_MATCHES <= the DEPLOY.md capacity row and that
+  //                                 row not older than the last src/server|src/shared commit; 18 in-memory mutations
+  //                                 must each FAIL every run (online-01/02/08/19, D8, gap 8, b1.3a). NOT quick on
+  //                                 purpose: once the row is measured, any src/server commit turns it red until the
+  //                                 next deploy gate re-measures; the live block runs it with --require-measured
+  plain('test-deploy-config.mjs'),
 ];
 
 /**

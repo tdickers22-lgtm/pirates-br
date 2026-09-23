@@ -1,127 +1,161 @@
 # Deploying Pirates BR
 
 Pirates BR is a **single service**: the Node WebSocket game server (`dist/server/index.js`)
-also serves the built client bundle (`dist/client`). Client and game socket share one
-origin — the browser connects to `wss://<host>/ws` automatically over HTTPS.
+also serves the built client (`dist/client`). Client and game socket share one origin; the
+browser connects to `wss://<host>/ws` over HTTPS.
 
-**Requirements for the host:**
-- Node 20+ (or Docker)
-- **WebSocket support** (Fly, Render, Railway, Heroku, a VPS — all fine)
-- Reads the `PORT` env var. The server, the Dockerfile and every recipe below default to
-  **8090**. Never 8080: local content filters (seen on macOS) replay the first client TCP
-  segment on that port and corrupt every WebSocket handshake with an RSV1 error, so an
-  image mapped to that host port cannot even be smoke-tested where it was built.
-- Health check path: `GET /health` → `200 {"ok":true,...}`. Load-balance on
-  **`accepting`**, not on the status code: a FULL host is still healthy (its eight live
-  matches must keep their players) and answers `200 {"accepting": false}`. Only a host that
-  is DRAINING answers `503`, and that is the one an orchestrator should replace.
+The production host is **Fly.io**: app `pirates-br`, region `yyz`, ONE `performance-1x` / 2 GB
+machine with the `pirates_data` volume at `/app/data`. Public URL `https://pirates-br.fly.dev`.
+`scripts/test-deploy-config.mjs` grades `fly.toml`, the `Dockerfile`, the entrypoint and this
+file; run it after any edit to them.
 
-Stats (`data/stats.json`) are written at runtime and are **ephemeral** unless you mount a
-persistent volume at `/app/data`. The game runs fine without persistence (leaderboard resets).
+> **ONE MACHINE, ALWAYS.** Parties, resume tokens and the public queue live in one process's
+> memory. With two machines behind the proxy a friend's party code lands on the other box and
+> reconnects lose their seat. Every deploy line carries `--ha=false`, the volume pins the app to
+> one machine, and nobody raises the machine count above one until fly-replay routing ships
+> (b5.5d). Never run Fly's app-generator command either: it rewrites the committed `fly.toml`.
+> The app is created with `fly apps create`.
+
+## Launch runbook (Fly, exact)
+
+The owner signs in once (step 1). Agents run the rest only when their lane prompt authorises
+authenticated `fly` (PLAN rule 8). The Air has no local Docker daemon: builds use Fly's remote
+builder (`--remote-only`).
+
+1. **Sign in (owner, once).** `fly auth login`, sign in in the browser tab it opens.
+   Check: `fly auth whoami` prints his email.
+2. **Create the app.**
+   `cd ~/ai-dev-system/projects/pirates-br && fly apps create pirates-br`
+   If the name is taken: `fly apps create pirates-br-game`, then in `fly.toml` set
+   `app = "pirates-br-game"` and change `PIRATES_BR_PUBLIC_URL` and `PIRATES_BR_ALLOWED_ORIGINS`
+   to `https://pirates-br-game.fly.dev` in the same commit (test-deploy-config checks they agree),
+   and use `-a pirates-br-game` below.
+3. **Create the stats volume (once).**
+   `fly volumes create pirates_data --region yyz --size 1 --yes -a pirates-br`
+4. **Secrets.**
+   `fly secrets set HEALTH_KEY=$(openssl rand -hex 16) BUGSNAP_KEY=$(openssl rand -hex 24) -a pirates-br --stage`
+   Everything else lives in `fly.toml [env]` (PORT, PIRATES_BR_PUBLIC_URL,
+   PIRATES_BR_ALLOWED_ORIGINS, PIRATES_BR_TRUST_PROXY, PIRATES_BR_MAX_MATCHES,
+   PIRATES_BR_DRAIN_SECONDS) and the Dockerfile (NODE_ENV=production). Never set
+   PIRATES_BR_DEV or PIRATES_BR_DEV_HOOKS on this host.
+5. **Deploy.**
+   `fly deploy --remote-only --ha=false --build-arg BUILD_ID=$(git rev-parse --short=12 HEAD) -a pirates-br`
+6. **Status.** `fly status -a pirates-br`: exactly 1 machine, `performance-1x`, state
+   `started`, check passing. `fly volumes list -a pirates-br`: `pirates_data` attached to it.
+7. **Smoke.** `node scripts/smoke-online.mjs --url https://pirates-br.fly.dev` exits 0 (b1.3b:
+   static + brotli, `/health` machineId stable over 20 requests, wss welcome with the deployed
+   buildId, solo match join, inputs to snapshots, public queue to a match, party create + join).
+8. **Capacity soak (after every deploy gate, PLAN rule 11).** Run the 10-minute remote soak
+   (`smoke-online --soak N --minutes 10`, b1.3b/c) past any burst window; take the largest N with
+   `worstSimLagSec < 0.1` and dropped ticks < 1%, set `PIRATES_BR_MAX_MATCHES` to that N with 30%
+   headroom (floor), run `node --import tsx scripts/test-capacity-sim.mjs` for the humans figure at
+   that value, stamp the **Capacity record** row below with the measured commit, commit
+   `fly.toml` + `DEPLOY.md`, and redeploy with step 5.
+9. **CI deploy token (b1.3d).**
+   `fly tokens create deploy -a pirates-br -x 8760h`, stored as the GitHub Actions secret
+   `FLY_API_TOKEN` (with `HEALTH_KEY`). From then on `.github/workflows/deploy.yml` deploys the
+   `release` branch: wait-idle, then
+   `flyctl deploy --remote-only --ha=false --build-arg BUILD_ID=${{ github.sha }}`, then the
+   smoke, then a redeploy of the previous image on a red smoke.
+10. **Rollback by hand.** `fly releases -a pirates-br --image` lists the images; then
+    `fly deploy --image <previous image ref> --ha=false -a pirates-br`.
+
+**Backups.** Fly snapshots the volume daily (5-day retention; `fly volumes snapshots list <vol-id>`).
+A copy on demand: `fly ssh sftp get /app/data/stats.json ./stats-backup.json -a pirates-br`.
+
+## Capacity record
+
+The top row is the one in force. `test-deploy-config` fails when `fly.toml`'s
+`PIRATES_BR_MAX_MATCHES` exceeds it, when `machine` is not the `fly.toml` VM size, when
+`worstSimLagSec >= 0.1`, and when `measuredAtCommit` is older than the last commit touching
+`src/server` or `src/shared` (so every deploy gate re-measures). `unmeasured` is allowed only at
+the provisional MAX_MATCHES 2 and never under `--require-measured` (the live block).
+`humans` = mean concurrent humans the queue holds at p95 wait <= 30 s, from
+`test-capacity-sim` at that MAX_MATCHES (0 = even 1 lone player/min waits longer than 30 s at p95).
+
+| machine | MAX_MATCHES | measuredAtCommit | worstSimLagSec | humans at p95 wait <= 30 s | date | note |
+|---|---|---|---|---|---|---|
+| performance-1x | 2 | unmeasured | - | 0 | 2026-09-23 | provisional until b1.3c's remote soak. test-capacity-sim at d3663698, MAX_MATCHES 2: p95 wait 239 s at 1 lone player/min (6.7 mean humans), so the D8 bar needs MAX_MATCHES >= 4 (p95 20 s). Shortfall: at 2 matches the queue shows position + ETA at peaks, never an error. |
+
+Queue model at this commit (`node --import tsx scripts/test-capacity-sim.mjs`, 60 min x 7 seeds,
+70/30 Solo/Duos, late join truce 150 s / pressure 475 s):
+
+| arrivals/min | MAX_MATCHES | p95 wait (s) | mean humans | peak humans | lobby_error |
+|---|---|---|---|---|---|
+| 1 | 2 | 239 | 6.7 | 14 | 0 |
+| 1 | 4 | 20 | 6.8 | 15 | 0 |
+| 1 | 6 | 20 | 7.5 | 18 | 0 |
+| 2 | 2 | 2345 | 13.3 | 27 | 0 |
+| 2 | 4 | 66 | 14.1 | 29 | 0 |
+| 2 | 6 | 20 | 14.8 | 35 | 0 |
+| 3 | 2 | 3868 | 16.0 | 30 | 0 |
+| 3 | 4 | 278 | 21.6 | 39 | 0 |
+| 3 | 6 | 20 | 19.8 | 32 | 0 |
+
+**Lever ladder** when the measured value misses the bar (D8): late join + pressure window
+(shipped, b1.2h), cheaper ticks (b2.1h), match worker threads (b2.0b-c) and only then
+performance-2x / 4 GB after the owner's yes (O6), fly-replay scale-out (b5.5d).
 
 ## Environment
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `PORT` | `8090` | Listen port (HTTP + `/ws`). |
-| `PIRATES_BR_DEV` | unset | `1` opens `POST /bugsnap` (F8 bug reports) outright. Never set on a public host. |
-| `PIRATES_BR_DEV_HOOKS` | unset | `1` enables the in-match dev hooks (`dev_grant_gold`, `dev_bot_peace`); a match that used one is flagged `devAssisted` and kept out of stats. Never set on a public host. |
-| `BUGSNAP_KEY` | unset | Lets a client with header `X-Bugsnap-Key: <key>` post bug snaps to a production host. Without it (and without `PIRATES_BR_DEV`) `/bugsnap` is a 404. |
-| `BUGSNAP_DIR` | `data/bugsnaps` | Where snaps land; the server keeps the newest 50 and takes one per IP per 10 s. |
-| `PIRATES_BR_MAX_MATCHES` | `8` | How many matches this process will carry. The (N+1)th crew is refused with "This host is full" from a lobby that is still responsive, and `/health` reports `accepting: false` so a fleet in front routes elsewhere. `0` disables the ceiling. Measure your own box with `node --import tsx scripts/perf-server-load.mjs` (see below) before raising it. |
-| `PIRATES_BR_TRUST_PROXY` | unset | `1` attributes requests to the left-most `x-forwarded-for` hop instead of the socket. **Set this on any host behind a proxy or edge** (Fly, Render, Railway, nginx): without it every player shares the edge's address, so the `/bugsnap` per-IP throttle collapses to one report per 10 s for the whole internet. **Never set it on a directly exposed host** — the header is client-supplied and would become a forgeable identity. |
-| `PIRATES_BR_MAP_SEED` | unset | Pins the world roll; reported by `/health` as `mapSeed`. |
+| Variable | Where | Default | Meaning |
+|---|---|---|---|
+| `PORT` | fly.toml | `8090` | Listen port (HTTP + `/ws`). Never 8080 (this Mac's content filter corrupts WebSockets there). |
+| `PIRATES_BR_PUBLIC_URL` | fly.toml | unset | The public origin; read by the runbook and the smoke scripts. |
+| `PIRATES_BR_ALLOWED_ORIGINS` | fly.toml | unset (any) | Comma-separated origins allowed to open `/ws`. Must contain the public URL. |
+| `PIRATES_BR_TRUST_PROXY` | fly.toml | unset | `1` attributes requests to the left-most `x-forwarded-for` hop. Set it behind any edge (Fly, Render, nginx), never on a directly exposed host (the header is client-supplied). |
+| `PIRATES_BR_MAX_MATCHES` | fly.toml | `8` | Matches this process carries. Above it a crew queues with position + ETA and `/health` reports `accepting: false`. On Fly it comes from the Capacity record above. |
+| `PIRATES_BR_DRAIN_SECONDS` | fly.toml | `10` | Seconds a SIGTERM'd host gives its live matches before closing sockets with 1012. `kill_timeout` must be >= this + 10 s. |
+| `PIRATES_BR_MAX_CLIENTS` / `_MAX_SOCKETS_PER_IP` / `_NEW_SOCKETS_PER_MIN` | code | `400` / `8` / `20` | Public-internet socket limits. |
+| `HEALTH_KEY` | secret | unset | `/health` detail (and `/health/beacons`, `/health/telemetry`) needs header `X-Health-Key`. Public `/health` stays slim. |
+| `BUGSNAP_KEY` | secret | unset | Lets a client with `X-Bugsnap-Key: <key>` post bug snaps; without it (and without `PIRATES_BR_DEV`) `/bugsnap` is a 404. |
+| `BUGSNAP_DIR` | code | `data/bugsnaps` | Where snaps land (on the volume); newest 50 kept. |
+| `PIRATES_BR_STATS_PATH` | code | `data/stats.json` | Stats file (on the volume). |
+| `BUILD_ID` | build-arg | git sha or timestamp | Baked into the bundle and `dist/build-id.txt`; clients on another build reload. |
+| `FLY_MACHINE_ID` | Fly | set by Fly | Reported by `/health` as `machineId`; the smoke asserts one value. |
+| `PIRATES_BR_MAP_SEED` | unset | unset | Pins the world roll; reported by `/health` as `mapSeed`. |
+| `PIRATES_BR_DEV` / `PIRATES_BR_DEV_HOOKS` | never on Fly | unset | Local play only (`npm run dev` sets both): F8 bug snaps and in-match dev hooks. |
 
-`npm run dev` sets both `PIRATES_BR_DEV=1` and `PIRATES_BR_DEV_HOOKS=1` (local play keeps F8 snaps and the hooks); `npm start` sets neither.
+## Capacity, drain and the proxy
 
-**Process safety.** A malformed request (bad percent-encoding, unparseable URL) is answered
-`400`; a throw inside a join or a lobby timer is logged and the server keeps serving; the
-failed player is told and can queue again. After 5 fatal errors in 60 s the server closes
-every socket with `1012 server restarting` and exits so your platform restarts it. Run it
-under something that restarts on exit (Docker `HEALTHCHECK` + restart policy, Fly, Render,
-Railway all do).
+**One process is not one match.** `PIRATES_BR_MAX_MATCHES` exists because a host degrades by
+dropping ticks for everybody at once: the extra match does not make one game bad, it makes all of
+them slow. The sim is single-threaded Node, so one dedicated core is the unit that matters; a
+shared-cpu VM is forbidden (its pooled quota is 12.5% of a core for shared-cpu-2x, and one combat
+match needs about 25%). The old default of 8 was measured on an M-series laptop, not on a Fly
+vCPU; it does not apply to Fly.
 
----
+**Draining.** `SIGTERM` (what Fly sends before replacing a machine) starts a graceful drain:
+`/health` flips to `503` so the edge stops routing new players here, live matches get
+`PIRATES_BR_DRAIN_SECONDS`, then sockets close with 1012 "server restarting". A second `SIGTERM`
+exits at once. `fly.toml` keeps `kill_timeout = "30s"` as a TOP-LEVEL key: written after a
+`[table]` header it silently belongs to that table and Fly falls back to its 5 s default.
 
-## Bare Node (VPS / local)
+**Health.** Load-balance on `accepting`, not on the status code: a FULL host is healthy and answers
+`200 {"accepting": false}`. Only a DRAINING host answers `503`.
 
-```bash
-npm ci
-npm run build          # tsc(server) + vite build → dist/
-PORT=8090 npm start    # node dist/server/index.js  → http://localhost:8090
-```
+**Process safety.** A malformed request is answered `400`; a throw inside a join or a lobby timer
+is logged and the server keeps serving. After 5 fatal errors in 60 s the server closes every socket
+with 1012 and exits so Fly restarts it.
 
-## Docker (any host)
+## The image
 
-```bash
-docker build -t pirates-br .
-docker run -p 8090:8090 pirates-br      # → http://localhost:8090
-# persist stats:  docker run -p 8090:8090 -v pbr-data:/app/data pirates-br
-```
+- `Dockerfile`: two stages on `node:20-bookworm-slim`. The build stage sets
+  `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` (playwright is a test-only devDependency), takes
+  `--build-arg BUILD_ID`, and runs `npm run build` (server tsc, client typecheck, vite build,
+  brotli/gzip siblings). The runtime stage has production deps and `dist/` only.
+- `scripts/docker-entrypoint.sh` starts as root only to `chown` the mounted volume (Fly mounts it
+  root-owned), then `exec setpriv` drops to user `node`; it exits rather than run the server as
+  root. `exec` keeps SIGTERM going straight to the drain.
+- `.dockerignore` keeps `.git`, `node_modules`, `dist`, `data`, docs, CI config and the Blender
+  scripts out of the build context.
+- Size today: `dist/client` is about 64 MB (122 GLBs with their `.br`/`.gz` siblings); the JS
+  entry is split into the app, three.js and two workers.
 
-## Fly.io  (Dockerfile auto-detected)
+## Other hosts
 
-```bash
-fly launch --no-deploy      # generates fly.toml; set internal_port = 8090
-fly deploy
-```
-Ensure `fly.toml` has `[http_service] internal_port = 8090` and `force_https = true`
-(WebSockets ride the same HTTPS service — no extra config).
-
-## Railway  (Dockerfile auto-detected)
-
-```bash
-railway init
-railway up
-```
-Railway injects `PORT` automatically; the server honors it. Enable the public domain.
-
-## Render  (Docker)
-
-New **Web Service** → connect the repo → Render detects the `Dockerfile`.
-- Health check path: `/health`
-- No build/start command needed (Docker `CMD` runs `node dist/server/index.js`)
-- Or, without Docker: Build `npm ci && npm run build`, Start `npm start`.
-
----
-
-### Notes
-- The client bundle is ~290 kB gzipped (app + three.js). All 21 GLB assets ship inside
-  `dist/client/assets/models/` (copied from `public/` by Vite at build time).
-- Only prod deps (`ws`, `uuid`, `simplex-noise`, `three`) are needed at runtime; the
-  Docker runtime stage installs with `--omit=dev`.
-
-
-## Capacity, drain and the proxy (ONLINE-01)
-
-**One process is not one match.** `PIRATES_BR_MAX_MATCHES` (default 8) is the ceiling, and
-it exists because a host degrades by dropping ticks for *everybody at once*: the ninth
-match does not make the ninth game bad, it makes all nine slow. Above the ceiling a crew
-gets a refusal message from a responsive lobby instead of a broken game.
-
-Measure the ceiling for the box you are actually deploying to:
-
-```bash
-PIRATES_BR_LOAD_MATCHES=8 node --import tsx scripts/perf-server-load.mjs
-```
-
-It stands N solo matches up on one process, runs them, and reads `worstSimLagSec` off
-`/health`. The budget is **0.1 s**; on the author's fanless MacBook Air, 8 matches settle at
-**0.01-0.02 s with 0 dropped ticks**, so 8 is a conservative default for anything bigger.
-Raise `PIRATES_BR_MAX_MATCHES` only after the run stays under budget at the new N.
-
-**Draining.** `SIGTERM` (what Fly, Render and Kubernetes send before replacing a machine)
-now starts a graceful drain: `/health` flips to `503` immediately so the edge stops routing
-new players here, no disconnected seat is held for a process that is not coming back, live
-matches get `PIRATES_BR_DRAIN_SECONDS` (default 10) to finish, and only then are sockets
-closed with 1012 "server restarting". A second `SIGTERM` exits at once.
-
-**Behind an edge.** Set `PIRATES_BR_TRUST_PROXY=1` on Fly/Render/Railway/nginx. See the
-environment table for why it is off by default.
-
-### fly.toml
-
-`fly.toml` in the repo root is a working starting point: one shared-cpu-2x machine, health
-check on `/health`, `PIRATES_BR_TRUST_PROXY=1`, a 30 s kill timeout so the drain has room,
-and `auto_stop_machines = false` (a machine with a live match must never be stopped for
-being idle at the HTTP layer).
+Bare Node: `npm ci && npm run build && PORT=8090 npm start`. Any Docker host:
+`docker build --build-arg BUILD_ID=$(git rev-parse --short=12 HEAD) -t pirates-br .` then
+`docker run -p 8090:8090 -v pbr-data:/app/data pirates-br`. Render and Railway detect the
+Dockerfile and inject `PORT`; set `PIRATES_BR_TRUST_PROXY=1`, `PIRATES_BR_ALLOWED_ORIGINS` and a
+measured `PIRATES_BR_MAX_MATCHES` there too, and run exactly one instance.
