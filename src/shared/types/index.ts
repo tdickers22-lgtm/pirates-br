@@ -1392,7 +1392,10 @@ export type InteractIntent =
   | 'bail'
   | 'revive'
   | 'cannon'
-  | 'ammo';
+  | 'ammo'
+  /** Not an [X]: R with an empty reserve, or a trigger the truce holds (b1.6e). */
+  | 'reload'
+  | 'fire';
 
 /** Why an [X] the server heard could not be granted. */
 export type InteractRefusalReason =
@@ -1412,6 +1415,10 @@ export type InteractRefusalReason =
   | 'no_ladder'
   /** She is going down — stations are closed. */
   | 'sinking'
+  /** R (or the trigger) on an empty magazine with no reserve: an ammo crate refills. */
+  | 'no_ammo'
+  /** Inside the opening truce no crew may harm another (src/shared/truce.ts). */
+  | 'truce'
   | 'unavailable';
 
 /** Server → client: your [X] was heard and refused. Drives one short amber feed

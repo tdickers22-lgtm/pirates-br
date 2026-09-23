@@ -51,6 +51,7 @@ import {
 } from '../../shared/utils/index.js';
 import { intersectRayShipHull, raymarchIslandSurface } from '../../shared/raycast.js';
 import { isSameCrew, playerCrewId, smallArmsHitsCrewmate } from '../../shared/crew.js';
+import { truceShieldsPlayer, truceShieldsHullFromKeg, truceBlocksBounty } from '../../shared/truce.js';
 import {
   findNearbyCannonIndex as findSharedNearbyCannonIndex,
   findMermaidReturnShip,
@@ -687,7 +688,7 @@ export class Match {
     this.botSkill = opts.botSkill ?? 'normal';
     this.devHooks = opts.devHooks ?? process.env.PIRATES_BR_DEV_HOOKS === '1';
     this.rng = makeMatchRng(opts.matchId);
-    this.weapons = new WeaponSystem(this.rng);
+    this.weapons = new WeaponSystem(this.rng, () => this.t);
     this.storm = new StormSystem(this.rng);
     this.trading = new TradingSystem(this.rng);
     this.bots = new BotSystem(this.rng);
@@ -2869,7 +2870,8 @@ export class Match {
     if (input.reload && !player.carryingChestId && this.consumeOneShot(client, 'reload', input.seq)) {
       const activeWeapon = player.weapons[player.activeSlot];
       if (!activeWeapon || !WEAPONS[activeWeapon.weaponId].melee) {
-        this.weapons.startReload(player);
+        const noReload = this.weapons.startReload(player);
+        if (noReload) this.sendInteractRefused(client, 'reload', noReload);
       }
     }
 
@@ -3409,6 +3411,8 @@ export class Match {
         if (traces.length > 0) {
           this.resolveFirearmHits(player, traces);
         }
+        const held = this.truceHeldShotBy === player.id ? 'truce' : (traces.length === 0 ? this.weapons.lastRefusal : null);
+        if (held) { this.truceHeldShotBy = null; this.sendInteractRefused(client, 'fire', held); }
       }
     }
 
@@ -4287,6 +4291,7 @@ export class Match {
     const playerDamageMult = keg.mega ? 1.35 : 1;
 
     for (const hit of this.getKegShipHits(keg)) {
+      if (truceShieldsHullFromKeg(this.t, attacker, hit.ship.id)) continue;
       this.markShipDamagedByPlayer(hit.ship.id, keg.plantedById);
       // A keg blast caves the hull in RADIALLY from where the barrel sat: the
       // face it was lashed to is stove wide open in a tight cluster, the other
@@ -4320,6 +4325,7 @@ export class Match {
 
     for (const player of this.state.players) {
       if (player.state === 'eliminated' || player.state === 'respawning' || player.respawnProtectionTimer > 0) continue;
+      if (truceShieldsPlayer(this.t, attacker, player)) continue;
       const dx = player.position.x - keg.position.x;
       const dy = (player.position.y + PLAYER.HEIGHT * 0.4) - keg.position.y;
       const dz = player.position.z - keg.position.z;
@@ -5192,6 +5198,12 @@ export class Match {
       ) {
         continue;
       }
+      // THE TRUCE (b1.6e): the ball passes through another crew's pirate; a
+      // shot that would have landed is refused back to the shooter.
+      if (truceShieldsPlayer(this.t, shooter, target)) {
+        if (this.intersectPlayerHitboxes(trace.origin, trace.direction, trace.range, target)) this.truceHeldShotBy = shooter.id;
+        continue;
+      }
 
       const hit = this.intersectPlayerHitboxes(trace.origin, trace.direction, trace.range, target);
       if (!hit) continue;
@@ -5660,6 +5672,8 @@ export class Match {
   /** Why the last refused [X] was refused — set by refuse(), read by the caller
    *  when it sends the nudge back. Single-threaded tick, single call site. */
   private lastRefusalReason: InteractRefusalReason = 'unavailable';
+  /** Shooter whose shot the truce held this tick (findClosestFirearmHit). */
+  private truceHeldShotBy: string | null = null;
 
   /** Refuse an interaction WITH a reason. Always returns false, so it drops
    *  straight into the existing `return false` shape of every branch. */
@@ -5905,7 +5919,7 @@ export class Match {
     // fighting; they just have no home ship left to respawn on. The sinker
     // still earns credit for the play.
     const sinkKiller = sunkByPlayerId ? this.getPlayer(sunkByPlayerId) : null;
-    if (sinkKiller && sinkKiller.state !== 'eliminated' && sinkKiller.shipId !== ship.id) {
+    if (sinkKiller && sinkKiller.state !== 'eliminated' && sinkKiller.shipId !== ship.id && !truceBlocksBounty(this.t)) {
       this.creditShipSink(ship, sinkKiller);
     }
 
