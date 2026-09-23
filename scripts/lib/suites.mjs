@@ -453,6 +453,16 @@ export const LOGIC = [
   //                                 Game.frame() through the guard, context lost+restored handlers, no audition
   //                                 ceiling while graphics are held (correctness-06, performance-03, b1.1b)
   quick(tsx('test-frame-guard.mjs')),
+  //   test-sound-finite           — every public SoundEngine play*/set*/start*/update*/stop* called with NaN,
+  //                                 undefined, +-Infinity against AudioParams that throw like a browser: 0 escapes,
+  //                                 0 non-finite writes, 0 backstop faults; static: every Net dispatcher callback
+  //                                 runs inside the per-event guard (liveplay-05, b1.1c)
+  quick(tsx('test-sound-finite.mjs')),
+  //   test-audio-lifecycle        — WebKit-like fake context: 100 setAmbience before a gesture build 0 contexts,
+  //                                 pointerdown does not unlock, touchend does (1-sample silent buffer),
+  //                                 audioSession 'playback', hidden -> suspend once, 'interrupted' re-arms the
+  //                                 unlock; static: Game arms the lifecycle (audio-08, crossdevice-12, D14, b1.1c)
+  quick(tsx('test-audio-lifecycle.mjs')),
 ];
 
 /**

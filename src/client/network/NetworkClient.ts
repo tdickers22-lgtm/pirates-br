@@ -390,6 +390,23 @@ export class NetworkClient {
     console.warn(`[Net] Disconnected (code ${code}${reason ? `: ${reason}` : ''})`);
   }
 
+  /**
+   * PER-EVENT GUARD (liveplay-05). Each server message's bookkeeping above (clock
+   * pairing, snapshot queueing, session state) runs outside this; only the game's
+   * callback runs inside it, so a cosmetic throw in a handler (it was a NaN
+   * reaching an AudioParam) can no longer unwind the dispatcher. The log line keeps
+   * the census prefix so the 5-minute bot-match gate still counts every one.
+   */
+  handlerFaults = 0;
+  private emit(type: string, fn: () => void): void {
+    try {
+      fn();
+    } catch (err) {
+      this.handlerFaults += 1;
+      console.error(`[Net] error handling server message '${type}':`, err);
+    }
+  }
+
   private handleMsg(msg: NetMsg, receivedAt: number) {
     switch (msg.type) {
       case 'welcome': {
@@ -399,7 +416,7 @@ export class NetworkClient {
         if (this.sessionToken) {
           try { globalThis.sessionStorage?.setItem(NetworkClient.TOKEN_KEY, this.sessionToken); } catch {}
         }
-        this.onWelcome?.(p);
+        this.emit(msg.type, () => this.onWelcome?.(p));
         break;
       }
       case 'resume_ok': {
@@ -408,19 +425,19 @@ export class NetworkClient {
         // The `join` that follows re-opens the match channel; until it lands,
         // nothing match-scoped may leave (same rule as a fresh join).
         this.joined = false;
-        this.onResumed?.(p);
+        this.emit(msg.type, () => this.onResumed?.(p));
         break;
       }
       case 'resume_failed': {
         this.wantConnected = false;
-        this.onResumeFailed?.(msg.payload as ResumeFailedPayload);
+        this.emit(msg.type, () => this.onResumeFailed?.(msg.payload as ResumeFailedPayload));
         break;
       }
       case 'join': {
         const p = msg.payload as { playerId: string; shipId: string; snapshot: GameState };
         // Handshake complete — the match channel is open from here.
         this.joined = true;
-        this.onJoin?.(p.playerId, p.shipId, p.snapshot);
+        this.emit(msg.type, () => this.onJoin?.(p.playerId, p.shipId, p.snapshot));
         break;
       }
       case 'state_snapshot': {
@@ -443,60 +460,60 @@ export class NetworkClient {
         // against a real 32ms, which inflated the render delay six-fold.
         // Recording a sample is six float writes into a ring; it can afford to
         // happen on arrival.
-        this.onHotHistory?.(p);
+        this.emit(msg.type, () => this.onHotHistory?.(p));
         this.queueHotSnapshot(p);
         break;
       }
-      case 'player_downed': this.onPlayerDowned?.(msg.payload as Parameters<NonNullable<typeof this.onPlayerDowned>>[0]); break;
-      case 'revive_complete': this.onReviveComplete?.(msg.payload as Parameters<NonNullable<typeof this.onReviveComplete>>[0]); break;
-      case 'player_hit': this.onPlayerHit?.(msg.payload); break;
-      case 'ship_hit': this.onShipHit?.(msg.payload); break;
-      case 'ship_damage': this.onShipDamage?.(msg.payload); break;
-      case 'ship_impact': this.onShipImpact?.(msg.payload); break;
-      case 'kill_event': this.onKillEvent?.(msg.payload); break;
-      case 'keg_exploded': this.onKegExploded?.(msg.payload); break;
-      case 'chest_opened': this.onChestOpened?.(msg.payload); break;
-      case 'barrel_opened': this.onBarrelOpened?.(msg.payload); break;
-      case 'ship_upgraded': this.onShipUpgraded?.(msg.payload); break;
-      case 'prop_removed': this.onPropRemoved?.(msg.payload); break;
-      case 'treasure_sold': this.onTreasureSold?.(msg.payload); break;
-      case 'armor_bought': this.onArmorBought?.(msg.payload); break;
-      case 'shop_bought': this.onShopBought?.(msg.payload); break;
-      case 'ship_captured': this.onShipCaptured?.(msg.payload); break;
-      case 'ammo_refilled': this.onAmmoRefilled?.(msg.payload); break;
-      case 'interact_refused': this.onInteractRefused?.(msg.payload); break;
-      case 'treasure_map': this.onTreasureMap?.(msg.payload); break;
-      case 'trade_request': this.onTradeRequest?.(msg.payload); break;
-      case 'trade_update': this.onTradeUpdate?.(msg.payload); break;
-      case 'trade_result': this.onTradeResult?.(msg.payload); break;
-      case 'game_over': this.onGameOver?.(msg.payload); break;
-      case 'match_ended': this.onMatchEnded?.(msg.payload); break;
-      case 'match_countdown': this.onMatchCountdown?.(msg.payload as Parameters<NonNullable<typeof this.onMatchCountdown>>[0]); break;
-      case 'match_horn': this.onMatchHorn?.(msg.payload as Parameters<NonNullable<typeof this.onMatchHorn>>[0]); break;
-      case 'ship_sunk': this.onShipSunk?.(msg.payload as Parameters<NonNullable<typeof this.onShipSunk>>[0]); break;
-      case 'crew_eliminated': this.onCrewEliminated?.(msg.payload as Parameters<NonNullable<typeof this.onCrewEliminated>>[0]); break;
-      case 'carpenter_patch': this.onCarpenterPatch?.(msg.payload as Parameters<NonNullable<typeof this.onCarpenterPatch>>[0]); break;
-      case 'bounty_raised': this.onBountyRaised?.(msg.payload as Parameters<NonNullable<typeof this.onBountyRaised>>[0]); break;
-      case 'cargo_spilled': this.onCargoSpilled?.(msg.payload as Parameters<NonNullable<typeof this.onCargoSpilled>>[0]); break;
-      case 'spoil_claimed': this.onSpoilClaimed?.(msg.payload as Parameters<NonNullable<typeof this.onSpoilClaimed>>[0]); break;
-      case 'wreck_event': this.onWreckEvent?.(msg.payload as Parameters<NonNullable<typeof this.onWreckEvent>>[0]); break;
-      case 'player_spawned': this.onPlayerSpawned?.(msg.payload); break;
-      case 'lobby_update': this.onLobbyUpdate?.(msg.payload as LobbyUpdatePayload); break;
-      case 'lobby_left': this.clearMatchSession(); this.onLobbyLeft?.(); break;
-      case 'lobby_error': this.onLobbyError?.((msg.payload as { reason?: string }).reason ?? 'Unknown error'); break;
-      case 'queue_update': this.onQueueUpdate?.(msg.payload as QueueUpdatePayload); break;
+      case 'player_downed': this.emit('player_downed', () => this.onPlayerDowned?.(msg.payload as Parameters<NonNullable<typeof this.onPlayerDowned>>[0])); break;
+      case 'revive_complete': this.emit('revive_complete', () => this.onReviveComplete?.(msg.payload as Parameters<NonNullable<typeof this.onReviveComplete>>[0])); break;
+      case 'player_hit': this.emit('player_hit', () => this.onPlayerHit?.(msg.payload)); break;
+      case 'ship_hit': this.emit('ship_hit', () => this.onShipHit?.(msg.payload)); break;
+      case 'ship_damage': this.emit('ship_damage', () => this.onShipDamage?.(msg.payload)); break;
+      case 'ship_impact': this.emit('ship_impact', () => this.onShipImpact?.(msg.payload)); break;
+      case 'kill_event': this.emit('kill_event', () => this.onKillEvent?.(msg.payload)); break;
+      case 'keg_exploded': this.emit('keg_exploded', () => this.onKegExploded?.(msg.payload)); break;
+      case 'chest_opened': this.emit('chest_opened', () => this.onChestOpened?.(msg.payload)); break;
+      case 'barrel_opened': this.emit('barrel_opened', () => this.onBarrelOpened?.(msg.payload)); break;
+      case 'ship_upgraded': this.emit('ship_upgraded', () => this.onShipUpgraded?.(msg.payload)); break;
+      case 'prop_removed': this.emit('prop_removed', () => this.onPropRemoved?.(msg.payload)); break;
+      case 'treasure_sold': this.emit('treasure_sold', () => this.onTreasureSold?.(msg.payload)); break;
+      case 'armor_bought': this.emit('armor_bought', () => this.onArmorBought?.(msg.payload)); break;
+      case 'shop_bought': this.emit('shop_bought', () => this.onShopBought?.(msg.payload)); break;
+      case 'ship_captured': this.emit('ship_captured', () => this.onShipCaptured?.(msg.payload)); break;
+      case 'ammo_refilled': this.emit('ammo_refilled', () => this.onAmmoRefilled?.(msg.payload)); break;
+      case 'interact_refused': this.emit('interact_refused', () => this.onInteractRefused?.(msg.payload)); break;
+      case 'treasure_map': this.emit('treasure_map', () => this.onTreasureMap?.(msg.payload)); break;
+      case 'trade_request': this.emit('trade_request', () => this.onTradeRequest?.(msg.payload)); break;
+      case 'trade_update': this.emit('trade_update', () => this.onTradeUpdate?.(msg.payload)); break;
+      case 'trade_result': this.emit('trade_result', () => this.onTradeResult?.(msg.payload)); break;
+      case 'game_over': this.emit('game_over', () => this.onGameOver?.(msg.payload)); break;
+      case 'match_ended': this.emit('match_ended', () => this.onMatchEnded?.(msg.payload)); break;
+      case 'match_countdown': this.emit('match_countdown', () => this.onMatchCountdown?.(msg.payload as Parameters<NonNullable<typeof this.onMatchCountdown>>[0])); break;
+      case 'match_horn': this.emit('match_horn', () => this.onMatchHorn?.(msg.payload as Parameters<NonNullable<typeof this.onMatchHorn>>[0])); break;
+      case 'ship_sunk': this.emit('ship_sunk', () => this.onShipSunk?.(msg.payload as Parameters<NonNullable<typeof this.onShipSunk>>[0])); break;
+      case 'crew_eliminated': this.emit('crew_eliminated', () => this.onCrewEliminated?.(msg.payload as Parameters<NonNullable<typeof this.onCrewEliminated>>[0])); break;
+      case 'carpenter_patch': this.emit('carpenter_patch', () => this.onCarpenterPatch?.(msg.payload as Parameters<NonNullable<typeof this.onCarpenterPatch>>[0])); break;
+      case 'bounty_raised': this.emit('bounty_raised', () => this.onBountyRaised?.(msg.payload as Parameters<NonNullable<typeof this.onBountyRaised>>[0])); break;
+      case 'cargo_spilled': this.emit('cargo_spilled', () => this.onCargoSpilled?.(msg.payload as Parameters<NonNullable<typeof this.onCargoSpilled>>[0])); break;
+      case 'spoil_claimed': this.emit('spoil_claimed', () => this.onSpoilClaimed?.(msg.payload as Parameters<NonNullable<typeof this.onSpoilClaimed>>[0])); break;
+      case 'wreck_event': this.emit('wreck_event', () => this.onWreckEvent?.(msg.payload as Parameters<NonNullable<typeof this.onWreckEvent>>[0])); break;
+      case 'player_spawned': this.emit('player_spawned', () => this.onPlayerSpawned?.(msg.payload)); break;
+      case 'lobby_update': this.emit('lobby_update', () => this.onLobbyUpdate?.(msg.payload as LobbyUpdatePayload)); break;
+      case 'lobby_left': this.clearMatchSession(); this.emit(msg.type, () => this.onLobbyLeft?.()); break;
+      case 'lobby_error': this.emit('lobby_error', () => this.onLobbyError?.((msg.payload as { reason?: string }).reason ?? 'Unknown error')); break;
+      case 'queue_update': this.emit('queue_update', () => this.onQueueUpdate?.(msg.payload as QueueUpdatePayload)); break;
       // The match is over for us either way: shut the input channel like
       // lobby_left does, so nothing addressed to the old match leaks out.
-      case 'match_detached': this.clearMatchSession(); this.onMatchDetached?.(msg.payload as MatchDetachedPayload); break;
-      case 'party_available': this.onPartyAvailable?.(msg.payload as PartyAvailablePayload); break;
+      case 'match_detached': this.clearMatchSession(); this.emit(msg.type, () => this.onMatchDetached?.(msg.payload as MatchDetachedPayload)); break;
+      case 'party_available': this.emit('party_available', () => this.onPartyAvailable?.(msg.payload as PartyAvailablePayload)); break;
       case 'match_start':
         // The NEXT match's join has not landed yet — shut the input channel
         // until it does, so the gap between match_start and join can't leak
         // inputs addressed to the match we just left.
         this.clearMatchSession();
-        this.onMatchStart?.(msg.payload as MatchStartPayload);
+        this.emit(msg.type, () => this.onMatchStart?.(msg.payload as MatchStartPayload));
         break;
-      case 'stats_update': this.onStatsUpdate?.(msg.payload as PlayerStatsRecord); break;
+      case 'stats_update': this.emit('stats_update', () => this.onStatsUpdate?.(msg.payload as PlayerStatsRecord)); break;
       case 'pong': this.notePong(msg.payload); break;
     }
   }

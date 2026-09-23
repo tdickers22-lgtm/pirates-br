@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { Vec3 } from '../../shared/types/index.js';
 import { finiteClamp } from '../../shared/utils/index.js';
+import { AudioLifecycle, audioParamStats, finiteDistance, finitePos, safeSet } from './audioLifecycle.js';
 
 /** A looped, filtered-noise voice with an optional tremolo/gust LFO on its gain. */
 interface LoopVoice {
@@ -520,8 +521,93 @@ export class SoundEngine {
   constructor() {
     // CombatFx (and anything else outside Game's reach) resolves the engine here.
     sharedEngine = this;
+    this.installBackstop();
   }
 
+  // ── Resilience (b1.1c) ─────────────────────────────────────────────
+  /** Exceptions a public play/set/start/update/stop/tick method threw and the backstop swallowed. */
+  private backstopFaults = 0;
+  private lifecycle: AudioLifecycle | null = null;
+
+  /**
+   * Sound is cosmetic: no play/set call may ever throw into its caller (a
+   * network handler, the frame loop). Every such method on the prototype is
+   * wrapped once per instance; a throw is counted, logged once per method and
+   * swallowed. test-sound-finite fails if this backstop ever fires, so it is
+   * a seatbelt, not the fix (the fix is safeSet + the finite guards).
+   */
+  private installBackstop(): void {
+    const proto = SoundEngine.prototype as unknown as Record<string, unknown>;
+    const self = this as unknown as Record<string, unknown>;
+    const logged = new Set<string>();
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (!/^(play|set|start|update|stop|tick)/.test(name)) continue;
+      const fn = proto[name];
+      if (typeof fn !== 'function') continue;
+      self[name] = (...args: unknown[]) => {
+        try {
+          return (fn as (...a: unknown[]) => unknown).apply(this, args);
+        } catch (err) {
+          this.backstopFaults += 1;
+          if (!logged.has(name)) {
+            logged.add(name);
+            console.warn(`[Audio] ${name} threw (swallowed, sound only):`, err);
+          }
+          return undefined;
+        }
+      };
+    }
+  }
+
+  /** Backstop catches + AudioParam writes the platform still refused. Tests read it. */
+  get audioFaults(): number {
+    return this.backstopFaults + audioParamStats().faults;
+  }
+
+  /**
+   * Arm the gesture unlock, the iOS audio session and the visibility /
+   * interruption handling (see audioLifecycle.ts). Game calls this once.
+   */
+  installLifecycle(
+    target: EventTarget = window,
+    doc: Document | null = typeof document !== 'undefined' ? document : null,
+    nav: Navigator | null = typeof navigator !== 'undefined' ? navigator : null,
+  ): AudioLifecycle {
+    if (this.lifecycle) return this.lifecycle;
+    this.lifecycle = new AudioLifecycle(
+      {
+        target: target as unknown as ConstructorParameters<typeof AudioLifecycle>[0]['target'],
+        doc: doc as unknown as ConstructorParameters<typeof AudioLifecycle>[0]['doc'],
+        nav: nav as unknown as ConstructorParameters<typeof AudioLifecycle>[0]['nav'],
+      },
+      {
+        createInGesture: () => { this.unlock(); return this.ctx; },
+        current: () => this.ctx,
+        onRunning: () => { if (this.musicContext !== 'none') this.startMusicTimer(); },
+      },
+    );
+    this.lifecycle.install();
+    return this.lifecycle;
+  }
+
+  /** D14 "Mix with other audio": iOS audio session 'ambient' instead of 'playback'. */
+  setMixWithOthers(mix: boolean): void {
+    this.lifecycle?.setMixWithOthers(mix);
+  }
+
+  /** The context state, or 'none' before the first gesture (tests, HUD hints). */
+  getContextState(): string {
+    return this.ctx ? (this.ctx.state as string) : 'none';
+  }
+
+  /**
+   * GESTURE ENTRY. Creates the context (first call) and resumes it. Only
+   * gesture handlers call this: the AudioLifecycle's pointerup/touchend/click/
+   * keydown listeners (installLifecycle), or an explicit UI action. No play*
+   * or set* method creates a context any more (audio-08): until a gesture has
+   * landed they return at their `if (!ctx) return`, so per-frame setters are
+   * no-ops and the next frame after the unlock applies their targets.
+   */
   unlock(): void {
     if (!this.ctx) {
       const Ctor =
@@ -532,22 +618,22 @@ export class SoundEngine {
       const ctx = this.ctx;
 
       this.compressor = ctx.createDynamicsCompressor();
-      this.compressor.threshold.value = -14;
-      this.compressor.knee.value = 16;
-      this.compressor.ratio.value = 3.4;
-      this.compressor.attack.value = 0.005;
-      this.compressor.release.value = 0.18;
+      safeSet(this.compressor.threshold, 'value', -14);
+      safeSet(this.compressor.knee, 'value', 16);
+      safeSet(this.compressor.ratio, 'value', 3.4);
+      safeSet(this.compressor.attack, 'value', 0.005);
+      safeSet(this.compressor.release, 'value', 0.18);
 
       this.master = ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : this.masterVolume;
+      safeSet(this.master.gain, 'value', this.muted ? 0 : this.masterVolume);
       this.master.connect(this.compressor);
       this.compressor.connect(ctx.destination);
 
       // World filter — wide open above water, swept down to a muffle when submerged.
       this.worldFilter = ctx.createBiquadFilter();
       this.worldFilter.type = 'lowpass';
-      this.worldFilter.frequency.value = 20000;
-      this.worldFilter.Q.value = 0.4;
+      safeSet(this.worldFilter.frequency, 'value', 20000);
+      safeSet(this.worldFilter.Q, 'value', 0.4);
       this.worldFilter.connect(this.master);
 
       // Wet (reverb) bus — two parallel convolvers so the space can crossfade
@@ -557,11 +643,11 @@ export class SoundEngine {
       this.convolverCave = ctx.createConvolver();
       this.convolverCave.buffer = this.createReverbImpulse(ctx, 2.8, 3.5);
       this.wetOutdoor = ctx.createGain();
-      this.wetOutdoor.gain.value = 1;
+      safeSet(this.wetOutdoor.gain, 'value', 1);
       this.wetCave = ctx.createGain();
-      this.wetCave.gain.value = 0;
+      safeSet(this.wetCave.gain, 'value', 0);
       this.busReverb = ctx.createGain();
-      this.busReverb.gain.value = 0.22;
+      safeSet(this.busReverb.gain, 'value', 0.22);
       this.busReverb.connect(this.wetOutdoor);
       this.busReverb.connect(this.wetCave);
       this.wetOutdoor.connect(this.convolver);
@@ -570,27 +656,27 @@ export class SoundEngine {
       this.convolverCave.connect(this.worldFilter);
 
       this.busDry = ctx.createGain();
-      this.busDry.gain.value = 1;
+      safeSet(this.busDry.gain, 'value', 1);
       this.busDry.connect(this.worldFilter);
 
       // Ambient bed bus — looped ambience routes through here so booms can duck it.
       this.busBed = ctx.createGain();
-      this.busBed.gain.value = 1;
+      safeSet(this.busBed.gain, 'value', 1);
       this.busBed.connect(this.worldFilter);
 
       // Music bus. It sits BEHIND the world (post-worldFilter, so it muffles
       // when you go under) and behind its own duck node, which combat and
       // weather pull down. Music is flavour: it never fights the mix.
       this.busMusic = ctx.createGain();
-      this.busMusic.gain.value = 0;
+      safeSet(this.busMusic.gain, 'value', 0);
       this.musicDuck = ctx.createGain();
-      this.musicDuck.gain.value = 1;
+      safeSet(this.musicDuck.gain, 'value', 1);
       this.busMusic.connect(this.musicDuck);
       this.musicDuck.connect(this.worldFilter);
       // One generous send for the whole score — a concertina in a taproom, not
       // in a laboratory. Tapped post-duck so a ducked tune loses its tail too.
       this.musicSend = ctx.createGain();
-      this.musicSend.gain.value = 0.34;
+      safeSet(this.musicSend.gain, 'value', 0.34);
       this.musicDuck.connect(this.musicSend);
       this.musicSend.connect(this.busReverb);
       // Notes routed straight at the music bus must not add a second send.
@@ -598,7 +684,8 @@ export class SoundEngine {
 
       this.noise = this.createNoiseBuffer(ctx);
     }
-    if (this.ctx.state === 'suspended') void this.ctx.resume();
+    const state = this.ctx.state as string;
+    if (state === 'suspended' || state === 'interrupted') void this.ctx.resume().catch(() => {});
     // First gesture just landed (or the context was already live) — arm the
     // score. Nothing is SCHEDULED until the context actually reports 'running',
     // so a suspended context can never bank up a batch that dumps at once.
@@ -606,13 +693,13 @@ export class SoundEngine {
   }
 
   setVolume(volume: number): void {
-    this.masterVolume = THREE.MathUtils.clamp(volume, 0, 1);
-    if (this.master) this.master.gain.value = this.muted ? 0 : this.masterVolume;
+    this.masterVolume = finiteClamp(volume, 0, 1, this.masterVolume);
+    if (this.master) safeSet(this.master.gain, 'value', this.muted ? 0 : this.masterVolume);
   }
 
   setMuted(muted: boolean): void {
-    this.muted = muted;
-    if (this.master) this.master.gain.value = muted ? 0 : this.masterVolume;
+    this.muted = muted === true;
+    if (this.master) safeSet(this.master.gain, 'value', muted ? 0 : this.masterVolume);
   }
 
   // ── Listener pose / world acoustics ──────────────────────────────
@@ -623,6 +710,9 @@ export class SoundEngine {
    * @param forward  look direction (any length) OR a yaw in radians where 0 = -Z.
    */
   setListenerPose(position: SoundPos, forward: SoundPos | number): void {
+    // A non-finite pose would poison every pan after it: keep the last good one.
+    if (!finitePos(position)) return;
+    if (typeof forward === 'number' ? !Number.isFinite(forward) : !finitePos(forward)) return;
     this.listenerPos.set(position.x, position.y, position.z);
     if (typeof forward === 'number') {
       this.listenerFwd.set(-Math.sin(forward), 0, -Math.cos(forward));
@@ -681,7 +771,6 @@ export class SoundEngine {
 
   // ── Pocket use (fruit / wood) ────────────────────────────────────
   playFruitEat(kind: 'banana' | 'coconut' | 'mango' = 'banana'): void {
-    this.unlock();
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -689,7 +778,7 @@ export class SoundEngine {
       banana: { base: 1700, body: 280, wet: false, chomps: 3, soft: 0.6 },
       coconut: { base: 980, body: 160, wet: false, chomps: 4, soft: 0.2 }, // hard crunch
       mango: { base: 1450, body: 220, wet: true, chomps: 3, soft: 0.85 },
-    }[kind];
+    }[kind] ?? { base: 1700, body: 280, wet: false, chomps: 3, soft: 0.6 }; // unknown kind -> banana
 
     for (let i = 0; i < profile.chomps; i++) {
       const at = now + i * (0.08 + (i % 2) * 0.02);
@@ -712,7 +801,6 @@ export class SoundEngine {
   }
 
   playMeatEat(): void {
-    this.unlock();
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -740,14 +828,12 @@ export class SoundEngine {
   }
 
   playWoodPlank(): void {
-    this.unlock();
     if (!this.ctx) return;
     this.plankHit(this.ctx.currentTime, 1);
   }
 
   /** Three-hit hammering burst for a full repair action. */
   playRepairSequence(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const offsets = [0, 0.24, 0.46];
@@ -758,7 +844,6 @@ export class SoundEngine {
   // ── Digging ──────────────────────────────────────────────────────
   /** Each strike is a metallic ping into a soft dirt thud — fire on every animation strike. */
   playDigStrike(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Shovel scrape
@@ -775,7 +860,6 @@ export class SoundEngine {
   // ── Harvesting ───────────────────────────────────────────────────
   /** Axe biting into a palm trunk / boulder face — low knock + wood crack. */
   playAxeChop(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Low haft knock — the blow landing.
@@ -791,7 +875,6 @@ export class SoundEngine {
   /** Felled palm hitting the ground — soft heavy earth thud + frond rustle.
    *  @param distance metres from the listener; rolls off like other spatials. */
   playTreeFallThud(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 110) return;
     const now = this.ctx.currentTime;
@@ -809,7 +892,6 @@ export class SoundEngine {
   /** Windup growl — low sawtooth slide under a noise rumble (the dodge cue).
    *  @param distance metres from the listener; rolls off like other spatials. */
   playSharkGrowl(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 90) return;
     const now = this.ctx.currentTime;
@@ -821,7 +903,6 @@ export class SoundEngine {
 
   /** Lunge bite — sharp noise snap over two low body tones. */
   playSharkChomp(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 90) return;
     const now = this.ctx.currentTime;
@@ -834,7 +915,6 @@ export class SoundEngine {
 
   /** Shark killed — wet gurgling thrash that sinks away. */
   playSharkDeath(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 160) return;
     const now = this.ctx.currentTime;
@@ -854,7 +934,6 @@ export class SoundEngine {
 
   // ── Treasure chests ──────────────────────────────────────────────
   playChestPickup(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Heave-grunt bass + lock rattle + shimmer up
@@ -870,7 +949,6 @@ export class SoundEngine {
   }
 
   playChestStow(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Drop onto deck planks: heavy thud, plank rattle, settle creak
@@ -884,7 +962,6 @@ export class SoundEngine {
   }
 
   playChestOpen(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Hinge squeak train (stick-slip friction), then the latch and the reveal.
@@ -909,7 +986,6 @@ export class SoundEngine {
    * squeaks — a continuous slide sounds like a synth portamento, not a hinge.
    */
   playDoorCreak(opening: boolean): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Squeak train: rising as it swings open, falling as it's pulled shut.
@@ -956,7 +1032,6 @@ export class SoundEngine {
    * formant bandpasses reads as a throat, where a bare tone reads as a UI beep.
    */
   playPlayerHurt(damage: number): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     this.markCombat();
     const now = this.ctx.currentTime;
@@ -979,7 +1054,6 @@ export class SoundEngine {
 
   /** Confirmation chirp when YOU land a hit on someone. Dry — no outdoor reverb on chrome. */
   playHitMarker(headshot: boolean): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     if (headshot) {
@@ -995,7 +1069,6 @@ export class SoundEngine {
 
   /** Heavier stinger when you actually killed someone. */
   playKill(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Bell-toll body + descending growl + impact noise
@@ -1014,7 +1087,6 @@ export class SoundEngine {
    * never smears into the world reverb.
    */
   playKillConfirm(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     this.playNoise(now, 0.03, 6200, 1.4, 0.1, 'highpass', undefined, 0);
@@ -1028,7 +1100,6 @@ export class SoundEngine {
    * dark bell toll. Deliberately longer and lower than any hit feedback.
    */
   playDeathSting(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Impact + sub drop.
@@ -1051,7 +1122,6 @@ export class SoundEngine {
    * @param draw first swing after a weapon switch — adds a faint edge ring.
    */
   playCutlassSwing(draw = false): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Two-stage whoosh: swept body + high-pass leading edge.
@@ -1068,7 +1138,6 @@ export class SoundEngine {
    * would read as a struck tuning fork.
    */
   playSwordBlock(): void {
-    this.unlock();
     if (!this.ctx) return;
     if (!this.throttle('clang')) return;
     const now = this.ctx.currentTime;
@@ -1086,7 +1155,6 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = your own weapon).
    */
   playGunshot(kind: GunshotKind = 'flintlock', distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('gunshot')) return;
     this.markCombat();
@@ -1142,7 +1210,6 @@ export class SoundEngine {
    *   Beyond 140m this becomes a soft, delayed distant thump instead of a sharp crack.
    */
   playCannonFire(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;
     if (!this.throttle('cannonFire')) return;
@@ -1181,8 +1248,8 @@ export class SoundEngine {
     const g = 1 / (1 + distance / 60); // gentler rolloff for the low thump
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 320;
-    filter.Q.value = 0.6;
+    safeSet(filter.frequency, 'value', 320);
+    safeSet(filter.Q, 'value', 0.6);
     this.connectGroup(filter, pos, 0.24);
     this.playTone(at, 70, 40, 0.6, 0.5 * g, 'sine', 0.02, filter);
     this.playTone(at + 0.02, 48, 30, 0.85, 0.4 * g, 'sine', 0.03, filter);
@@ -1192,7 +1259,6 @@ export class SoundEngine {
 
   /** Non-cannon projectile launches (firebomb lob, chainshot spin-up, tsunami surge). */
   playProjectileLaunch(kind: LaunchKind, distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('launch')) return;
     const now = this.ctx.currentTime;
@@ -1219,7 +1285,6 @@ export class SoundEngine {
 
   /** Projectile terminal impact on a solid (hull hits use {@link playHullImpact}). */
   playProjectileImpact(kind: ImpactKind, distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('impact')) return;
     const now = this.ctx.currentTime;
@@ -1248,7 +1313,6 @@ export class SoundEngine {
 
   /** Respawn / revive beacon shimmer at a world position. */
   playRespawnBeacon(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 220) return;
     const now = this.ctx.currentTime;
@@ -1264,7 +1328,6 @@ export class SoundEngine {
    *  Deliberately NOT the respawn beacon — this is UI chrome, not a world event,
    *  so it never spatialises and never fades with distance. */
   playCountdownPip(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     this.playNoise(now, 0.035, 3200, 1.4, 0.09, 'highpass', undefined, 0);
@@ -1274,7 +1337,6 @@ export class SoundEngine {
 
   /** Two-note confirm that YOUR shot landed on an enemy hull. Mostly dry chrome. */
   playShipHitConfirm(distance = 0): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Always audible — this is feedback, not world audio — but distance still colours it.
@@ -1291,7 +1353,6 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = local).
    */
   playSplash(intensity: number, distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('splash')) return;
     const now = this.ctx.currentTime;
@@ -1311,7 +1372,6 @@ export class SoundEngine {
   }
 
   playAnchorChange(dropped: boolean): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const clankCount = dropped ? 5 : 3;
@@ -1330,7 +1390,6 @@ export class SoundEngine {
   }
 
   playAnchorMovement(amount = 1): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(amount, 0.25, 1.25);
@@ -1342,7 +1401,6 @@ export class SoundEngine {
   }
 
   playHelmTurn(amount = 1): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(amount, 0.25, 1.2);
@@ -1358,7 +1416,6 @@ export class SoundEngine {
   }
 
   playHullSplash(amount = 1): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(amount, 0.2, 1.3);
@@ -1376,7 +1433,6 @@ export class SoundEngine {
    * @param amount 0.4 = idle tread, ~1.1 = a hard forward stroke / surfacing.
    */
   playSwimSplash(amount = 1): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const v = THREE.MathUtils.clamp(amount, 0.3, 1.25);
@@ -1393,7 +1449,6 @@ export class SoundEngine {
   }
 
   playSailTrim(amount = 1): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(amount, 0.35, 1.25);
@@ -1415,7 +1470,6 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = your own feet)
    */
   playFootstep(surface: FootstepSurface, running = false, distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 30) return;
     if (!this.throttle('footstep')) return;
@@ -1448,7 +1502,6 @@ export class SoundEngine {
 
   // ── Match flow ───────────────────────────────────────────────────
   playMatchStart(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Snare roll accelerating into the resolution.
@@ -1472,15 +1525,14 @@ export class SoundEngine {
 
   /** Deep ship's horn — the "match is live" call, under/before the fanfare. */
   playMatchStartHorn(): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const ctx = this.ctx;
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.setValueAtTime(500, now);
-    lp.frequency.linearRampToValueAtTime(1100, now + 0.5);
-    lp.Q.value = 0.6;
+    safeSet(lp.frequency, 'set', 500, now);
+    safeSet(lp.frequency, 'linear', 1100, now + 0.5);
+    safeSet(lp.Q, 'value', 0.6);
     this.connectGroup(lp, undefined, 0.4);
     // Two barely-detuned reeds beating against each other = a real horn's growl.
     this.playTone(now, 110, 110, 1.7, 0.3, 'sawtooth', 0.22, lp);
@@ -1492,7 +1544,6 @@ export class SoundEngine {
   }
 
   playVictory(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Major arpeggio C5 E5 G5 C6, brass-ified, with octave bass and a pad.
@@ -1516,15 +1567,14 @@ export class SoundEngine {
   }
 
   playDefeat(): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const ctx = this.ctx;
     // Long descending minor — saws kept dark so it mourns instead of buzzing.
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 1200;
-    lp.Q.value = 0.7;
+    safeSet(lp.frequency, 'value', 1200);
+    safeSet(lp.Q, 'value', 0.7);
     this.connectGroup(lp, undefined, 0.4);
     this.playTone(now, 392, 392, 0.5, 0.24, 'sawtooth', 0.04, lp);
     this.playTone(now + 0.32, 311, 311, 0.62, 0.26, 'sawtooth', 0.04, lp);
@@ -1541,7 +1591,6 @@ export class SoundEngine {
 
   // ── Economy / progression ────────────────────────────────────────
   playUpgradeBought(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Anvil clank → bright ascending chord
@@ -1560,7 +1609,6 @@ export class SoundEngine {
   }
 
   playGoldEarn(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     // Multiple coin clinks in quick succession + high sparkle (dry — it's chrome).
@@ -1576,7 +1624,6 @@ export class SoundEngine {
 
   // ── UI / chrome (fully dry: reverb on a click muddies the whole UI) ──
   playUiClick(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     this.playTone(now, 1320, 880, 0.04, 0.16, 'square', 0, undefined, 0);
@@ -1585,7 +1632,6 @@ export class SoundEngine {
   }
 
   playUiHover(): void {
-    this.unlock();
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     this.playTone(now, 1400, 1600, 0.04, 0.06, 'sine', 0, undefined, 0);
@@ -1599,7 +1645,6 @@ export class SoundEngine {
       this.stopWind();
       return;
     }
-    this.unlock();
     const ctx = this.ctx;
     const bed = this.busBed;
     const noise = this.noise;
@@ -1609,24 +1654,24 @@ export class SoundEngine {
       // Slow LFO modulation on filter cutoff for gust feel
       const lfo = ctx.createOscillator();
       lfo.type = 'sine';
-      lfo.frequency.value = 0.18;
+      safeSet(lfo.frequency, 'value', 0.18);
       const lfoGain = ctx.createGain();
-      lfoGain.gain.value = 90;
+      safeSet(lfoGain.gain, 'value', 90);
       lfo.connect(lfoGain);
       lfoGain.connect(v.filter.frequency);
       lfo.start();
       this.wind = { ...v, lfo, lfoGain };
     }
     const target = clamped * 0.22;
-    this.wind.gain.gain.linearRampToValueAtTime(target, ctx.currentTime + 0.4);
-    this.wind.filter.frequency.linearRampToValueAtTime(360 + clamped * 360, ctx.currentTime + 0.4);
-    if (this.wind.lfoGain) this.wind.lfoGain.gain.linearRampToValueAtTime(60 + clamped * 220, ctx.currentTime + 0.4);
+    safeSet(this.wind.gain.gain, 'linear', target, ctx.currentTime + 0.4);
+    safeSet(this.wind.filter.frequency, 'linear', 360 + clamped * 360, ctx.currentTime + 0.4);
+    if (this.wind.lfoGain) safeSet(this.wind.lfoGain.gain, 'linear', 60 + clamped * 220, ctx.currentTime + 0.4);
   }
 
   private stopWind(): void {
     const ctx = this.ctx;
     if (!this.wind || !ctx) return;
-    this.wind.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.6);
+    safeSet(this.wind.gain.gain, 'linear', 0, ctx.currentTime + 0.6);
     const fading = this.wind;
     this.wind = null;
     window.setTimeout(() => {
@@ -1644,11 +1689,10 @@ export class SoundEngine {
     const clamped = finiteClamp(intensity, 0, 1, 0);
     if (clamped <= 0.001) {
       if (this.waveBed && this.ctx) {
-        this.waveBed.gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 0.5);
+        safeSet(this.waveBed.gain.gain, 'linear', 0, this.ctx.currentTime + 0.5);
       }
       return;
     }
-    this.unlock();
     const ctx = this.ctx;
     const bed = this.busBed;
     const noise = this.noise;
@@ -1659,15 +1703,15 @@ export class SoundEngine {
       source.loop = true;
       const filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
-      filter.frequency.value = 380;
-      filter.Q.value = 0.4;
+      safeSet(filter.frequency, 'value', 380);
+      safeSet(filter.Q, 'value', 0.4);
       // Second pole kills the white-noise sizzle (closer to pink).
       const filter2 = ctx.createBiquadFilter();
       filter2.type = 'lowpass';
-      filter2.frequency.value = 1200;
-      filter2.Q.value = 0.3;
+      safeSet(filter2.frequency, 'value', 1200);
+      safeSet(filter2.Q, 'value', 0.3);
       const gain = ctx.createGain();
-      gain.gain.value = 0;
+      safeSet(gain.gain, 'value', 0);
       source.connect(filter);
       filter.connect(filter2);
       filter2.connect(gain);
@@ -1679,9 +1723,9 @@ export class SoundEngine {
       // Cutoff drift — the sea "breathing" through the mix.
       const fLfo = ctx.createOscillator();
       fLfo.type = 'sine';
-      fLfo.frequency.value = 0.05;
+      safeSet(fLfo.frequency, 'value', 0.05);
       const fLfoGain = ctx.createGain();
-      fLfoGain.gain.value = 110;
+      safeSet(fLfoGain.gain, 'value', 110);
       fLfo.connect(fLfoGain);
       fLfoGain.connect(filter.frequency);
       fLfo.start();
@@ -1693,9 +1737,9 @@ export class SoundEngine {
       };
     }
     const target = clamped * 0.085;
-    this.waveBed.gain.gain.linearRampToValueAtTime(target, ctx.currentTime + 0.6);
-    this.waveBed.filter.frequency.linearRampToValueAtTime(260 + clamped * 360, ctx.currentTime + 0.8);
-    this.waveBed.filter.Q.linearRampToValueAtTime(0.32 + clamped * 0.34, ctx.currentTime + 0.8);
+    safeSet(this.waveBed.gain.gain, 'linear', target, ctx.currentTime + 0.6);
+    safeSet(this.waveBed.filter.frequency, 'linear', 260 + clamped * 360, ctx.currentTime + 0.8);
+    safeSet(this.waveBed.filter.Q, 'linear', 0.32 + clamped * 0.34, ctx.currentTime + 0.8);
     // Bigger seas swell harder.
     if (this.waveBed.lfoGain) this.ramp(this.waveBed.lfoGain.gain, target * 0.35, 0.8);
     if (this.waveBed.lfoGain2) this.ramp(this.waveBed.lfoGain2.gain, target * 0.22, 0.8);
@@ -1711,11 +1755,10 @@ export class SoundEngine {
     const motionClamped = finiteClamp(motion, 0, 1, 0);
     if (clamped <= 0.001) {
       if (this.hullCreak && this.ctx) {
-        this.hullCreak.gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 0.7);
+        safeSet(this.hullCreak.gain.gain, 'linear', 0, this.ctx.currentTime + 0.7);
       }
       return;
     }
-    this.unlock();
     const ctx = this.ctx;
     const bed = this.busBed;
     const wet = this.busReverb;
@@ -1727,33 +1770,33 @@ export class SoundEngine {
       source.loop = true;
       const filter = ctx.createBiquadFilter();
       filter.type = 'bandpass';
-      filter.frequency.value = 210;
-      filter.Q.value = 4.8;
+      safeSet(filter.frequency, 'value', 210);
+      safeSet(filter.Q, 'value', 4.8);
       const gain = ctx.createGain();
-      gain.gain.value = 0;
+      safeSet(gain.gain, 'value', 0);
       const lfo = ctx.createOscillator();
       lfo.type = 'sine';
-      lfo.frequency.value = 0.13;
+      safeSet(lfo.frequency, 'value', 0.13);
       const lfoGain = ctx.createGain();
-      lfoGain.gain.value = 80;
+      safeSet(lfoGain.gain, 'value', 80);
       lfo.connect(lfoGain);
       lfoGain.connect(filter.frequency);
       source.connect(filter);
       filter.connect(gain);
       gain.connect(bed);
       const wetGain = ctx.createGain();
-      wetGain.gain.value = 0.18;
+      safeSet(wetGain.gain, 'value', 0.18);
       gain.connect(wetGain);
       wetGain.connect(wet);
       source.start(0, Math.random() * Math.max(0.1, noise.duration - 0.2));
       lfo.start();
       this.hullCreak = { source, gain, filter, lfo, lfoGain };
     }
-    this.hullCreak.gain.gain.linearRampToValueAtTime(0.006 + clamped * 0.027, ctx.currentTime + 0.55);
-    this.hullCreak.filter.frequency.linearRampToValueAtTime(160 + motionClamped * 190, ctx.currentTime + 0.7);
-    this.hullCreak.filter.Q.linearRampToValueAtTime(4.2 + clamped * 2.2, ctx.currentTime + 0.7);
-    this.hullCreak.lfo.frequency.linearRampToValueAtTime(0.1 + motionClamped * 0.28, ctx.currentTime + 0.7);
-    this.hullCreak.lfoGain.gain.linearRampToValueAtTime(55 + clamped * 115, ctx.currentTime + 0.7);
+    safeSet(this.hullCreak.gain.gain, 'linear', 0.006 + clamped * 0.027, ctx.currentTime + 0.55);
+    safeSet(this.hullCreak.filter.frequency, 'linear', 160 + motionClamped * 190, ctx.currentTime + 0.7);
+    safeSet(this.hullCreak.filter.Q, 'linear', 4.2 + clamped * 2.2, ctx.currentTime + 0.7);
+    safeSet(this.hullCreak.lfo.frequency, 'linear', 0.1 + motionClamped * 0.28, ctx.currentTime + 0.7);
+    safeSet(this.hullCreak.lfoGain.gain, 'linear', 55 + clamped * 115, ctx.currentTime + 0.7);
   }
 
   /**
@@ -1784,6 +1827,7 @@ export class SoundEngine {
     const dy = position.y - cameraPos.y;
     const dz = position.z - cameraPos.z;
     const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (!Number.isFinite(d) || !(maxDistance > 0)) return 0;
     const n = 1 - THREE.MathUtils.clamp(d / maxDistance, 0, 1);
     return n * n * boost;
   }
@@ -1795,9 +1839,9 @@ export class SoundEngine {
    * Cannon/keg beyond 140m degrade into a soft, delayed distant thump.
    */
   playAt(kind: SpatialKind, worldDistance: number, opts: SpatialOpts = {}): void {
-    const d = Math.max(0, worldDistance);
-    const intensity = opts.intensity ?? 1;
-    const pos = opts.pos;
+    const d = finiteDistance(worldDistance);
+    const intensity = Number.isFinite(opts.intensity) ? (opts.intensity as number) : 1;
+    const pos = finitePos(opts.pos) ?? undefined;
     switch (kind) {
       case 'cannonFire': this.playCannonFire(d, pos); break;
       case 'cannonballWhistle': this.playCannonballWhistle(d, pos); break;
@@ -1813,7 +1857,8 @@ export class SoundEngine {
   }
 
   /** Stereo pan for a world position, or 0 when the listener pose is unknown. */
-  private panFor(pos?: SoundPos | null): number {
+  private panFor(rawPos?: SoundPos | null): number {
+    const pos = finitePos(rawPos);
     if (!pos || !this.listenerKnown) return 0;
     const dx = pos.x - this.listenerPos.x;
     const dz = pos.z - this.listenerPos.z;
@@ -1838,14 +1883,14 @@ export class SoundEngine {
     let tail: AudioNode = node;
     if (pan !== 0) {
       const panner = ctx.createStereoPanner();
-      panner.pan.value = pan;
+      safeSet(panner.pan, 'value', pan);
       node.connect(panner);
       tail = panner;
     }
     tail.connect(this.busDry as GainNode);
     if (send > 0 && this.busReverb) {
       const sendGain = ctx.createGain();
-      sendGain.gain.value = send;
+      safeSet(sendGain.gain, 'value', send);
       tail.connect(sendGain);
       sendGain.connect(this.busReverb);
     }
@@ -1864,13 +1909,13 @@ export class SoundEngine {
     send = 0.22,
   ): { dest: BiquadFilterNode; gain: number } {
     const ctx = this.ctx as AudioContext;
-    const d = Math.max(0, distance);
+    const d = finiteDistance(distance);
     const gain = 1 / (1 + d / 24);
     const cutoff = THREE.MathUtils.clamp(19000 / (1 + d / 45), 380, 19000);
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = cutoff;
-    filter.Q.value = 0.5;
+    safeSet(filter.frequency, 'value', cutoff);
+    safeSet(filter.Q, 'value', 0.5);
     this.connectGroup(filter, pos, send);
     return { dest: filter, gain };
   }
@@ -1879,11 +1924,11 @@ export class SoundEngine {
   private makePanGroup(pan: number, send: number, bus?: AudioNode): AudioNode {
     const ctx = this.ctx as AudioContext;
     const panner = ctx.createStereoPanner();
-    panner.pan.value = THREE.MathUtils.clamp(pan, -1, 1);
+    safeSet(panner.pan, 'value', THREE.MathUtils.clamp(pan, -1, 1));
     panner.connect(bus ?? (this.busDry as GainNode));
     if (send > 0 && this.busReverb) {
       const sendGain = ctx.createGain();
-      sendGain.gain.value = send;
+      safeSet(sendGain.gain, 'value', send);
       panner.connect(sendGain);
       sendGain.connect(this.busReverb);
     }
@@ -1898,17 +1943,17 @@ export class SoundEngine {
   private makeFormantDest(f1: number, q1: number, f2: number, q2: number, mix2: number, send: number): AudioNode {
     const ctx = this.ctx as AudioContext;
     const input = ctx.createGain();
-    input.gain.value = 1;
+    safeSet(input.gain, 'value', 1);
     const out = ctx.createGain();
-    out.gain.value = 1;
+    safeSet(out.gain, 'value', 1);
     this.connectGroup(out, null, send);
     for (const [freq, q, level] of [[f1, q1, 1], [f2, q2, mix2]] as const) {
       const bp = ctx.createBiquadFilter();
       bp.type = 'bandpass';
-      bp.frequency.value = freq;
-      bp.Q.value = q;
+      safeSet(bp.frequency, 'value', freq);
+      safeSet(bp.Q, 'value', q);
       const g = ctx.createGain();
-      g.gain.value = level;
+      safeSet(g.gain, 'value', level);
       input.connect(bp);
       bp.connect(g);
       g.connect(out);
@@ -1923,7 +1968,6 @@ export class SoundEngine {
    * @param delaySeconds schedule the pass ahead of time (time-of-flight to closest approach).
    */
   playCannonballWhistle(distance = 0, pos?: SoundPos, delaySeconds = 0): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('whistle')) return;
     const now = this.ctx.currentTime + Math.max(0, delaySeconds);
@@ -1935,7 +1979,6 @@ export class SoundEngine {
 
   /** Cannonball smashing a hull — deep thud under a burst of wood splinters. */
   playHullImpact(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (!this.throttle('hullImpact')) return;
     const now = this.ctx.currentTime;
@@ -1963,7 +2006,6 @@ export class SoundEngine {
    * @param distance metres from the listener (0 = your own ship)
    */
   playShipImpact(kind: 'ram' | 'ground' | 'rock', speed: number, distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.28);
@@ -2008,7 +2050,6 @@ export class SoundEngine {
    * @param distance  metres from the listener
    */
   playBodyThud(intensity = 1, distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 60) return;
     const now = this.ctx.currentTime;
@@ -2027,7 +2068,6 @@ export class SoundEngine {
 
   /** Rotating whoosh of chainshot spinning on its chain — deliberate pitch wobble. */
   playChainshotWhirr(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22);
@@ -2043,7 +2083,6 @@ export class SoundEngine {
 
   /** Canvas tearing when chainshot rips a sail. */
   playSailRip(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24);
@@ -2058,7 +2097,6 @@ export class SoundEngine {
 
   /** Powder-keg fuse hiss. Call once when the fuse lights, passing its burn time. */
   playKegFuse(duration = 1.6, distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     if (distance > 40) return;
     const now = this.ctx.currentTime;
@@ -2075,7 +2113,6 @@ export class SoundEngine {
 
   /** Powder-keg detonation — sub drop, blast body, debris patter, and a rolling tail. */
   playKegExplosion(distance = 0, pos?: SoundPos): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const delay = distance > 140 ? THREE.MathUtils.clamp(distance / 343, 0.2, 1.2) : 0;
@@ -2099,7 +2136,6 @@ export class SoundEngine {
   // ── Burning-ship fire crackle (looped, max 2 concurrent) ─────────
   /** Start a fire crackle loop keyed by ship id. Past two fires the oldest is stolen. */
   startFire(id: string, distance = 0): void {
-    this.unlock();
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2130,7 +2166,7 @@ export class SoundEngine {
     const ctx = this.ctx;
     this.fires.delete(id);
     if (!f || !ctx) return;
-    f.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.6);
+    safeSet(f.gain.gain, 'linear', 0, ctx.currentTime + 0.6);
     window.setTimeout(() => {
       try { f.source.stop(); } catch { /* ignore */ }
       try { f.lfo?.stop(); } catch { /* ignore */ }
@@ -2153,7 +2189,6 @@ export class SoundEngine {
       if (this.waterfallBed && ctx) this.ramp(this.waterfallBed.gain.gain, 0, 0.7);
       return;
     }
-    this.unlock();
     const bed = this.busBed;
     if (!this.ctx || !bed || !this.noise) return;
     if (!this.waterfallBed) {
@@ -2172,7 +2207,6 @@ export class SoundEngine {
   // ── Interior flooding slosh (single instance) ────────────────────
   /** Begin the interior water-slosh loop. level is 0..1 waterline. */
   startFlooding(level = 0): void {
-    this.unlock();
     const ctx = this.ctx;
     if (!ctx || !this.busDry || !this.noise) return;
     if (!this.flooding) {
@@ -2182,9 +2216,9 @@ export class SoundEngine {
       // Slosh: a slow LFO wobbles the filter cutoff for a moving-water feel.
       const lfo2 = ctx.createOscillator();
       lfo2.type = 'sine';
-      lfo2.frequency.value = 0.32;
+      safeSet(lfo2.frequency, 'value', 0.32);
       const lfo2Gain = ctx.createGain();
-      lfo2Gain.gain.value = 120;
+      safeSet(lfo2Gain.gain, 'value', 120);
       lfo2.connect(lfo2Gain);
       lfo2Gain.connect(v.filter.frequency);
       lfo2.start();
@@ -2208,7 +2242,7 @@ export class SoundEngine {
     const f = this.flooding;
     this.flooding = null;
     if (!ctx || !f) return;
-    f.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.7);
+    safeSet(f.gain.gain, 'linear', 0, ctx.currentTime + 0.7);
     window.setTimeout(() => {
       try { f.source.stop(); } catch { /* ignore */ }
       try { f.lfo?.stop(); } catch { /* ignore */ }
@@ -2218,7 +2252,6 @@ export class SoundEngine {
 
   /** Scoop-and-toss bilge bail one-shot. */
   playBail(): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     // Scoop swish
@@ -2239,7 +2272,6 @@ export class SoundEngine {
    *   rain-on-deck droplets); optional so existing callers keep working.
    */
   setSailingState(state: { speed01: number; roughness01: number; heel01: number; luffing: boolean; aboard?: boolean }): void {
-    this.unlock();
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2289,7 +2321,7 @@ export class SoundEngine {
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
     if (amount <= 0.001) {
-      if (this.canvasFlap) this.canvasFlap.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
+      if (this.canvasFlap) safeSet(this.canvasFlap.gain.gain, 'linear', 0, ctx.currentTime + 0.4);
       return;
     }
     if (!this.canvasFlap) {
@@ -2308,7 +2340,6 @@ export class SoundEngine {
    *   audible even before the call site forwards the real value.
    */
   setAmbience(a: { nightFactor: number; storminess: number; nearShore01: number; rain01?: number }): void {
-    this.unlock();
     const ctx = this.ctx;
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
@@ -2431,7 +2462,7 @@ export class SoundEngine {
     const bed = this.busBed;
     if (!ctx || !bed || !this.noise) return;
     if (amount <= 0.001) {
-      if (this.breaker) this.breaker.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.7);
+      if (this.breaker) safeSet(this.breaker.gain.gain, 'linear', 0, ctx.currentTime + 0.7);
       return;
     }
     if (!this.breaker) {
@@ -2482,9 +2513,9 @@ export class SoundEngine {
       // Body-conducted pressure hum under the muffle.
       const hum = ctx.createOscillator();
       hum.type = 'sine';
-      hum.frequency.value = 55;
+      safeSet(hum.frequency, 'value', 55);
       const humGain = ctx.createGain();
-      humGain.gain.value = 0.3;
+      safeSet(humGain.gain, 'value', 0.3);
       hum.connect(humGain);
       humGain.connect(this.submergedBed.gain);
       hum.start();
@@ -2578,21 +2609,21 @@ export class SoundEngine {
     if (!ctx) return;
     const osc = ctx.createOscillator();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(base, at);
-    osc.frequency.exponentialRampToValueAtTime(base * 1.15, at + 0.06);
-    osc.frequency.exponentialRampToValueAtTime(base * 0.6, at + 0.25);
+    safeSet(osc.frequency, 'set', base, at);
+    safeSet(osc.frequency, 'exp', base * 1.15, at + 0.06);
+    safeSet(osc.frequency, 'exp', base * 0.6, at + 0.25);
     // Vibrato is what makes a bird call sound alive.
     const vib = ctx.createOscillator();
     vib.type = 'sine';
-    vib.frequency.value = 5.5;
+    safeSet(vib.frequency, 'value', 5.5);
     const vibGain = ctx.createGain();
-    vibGain.gain.value = base * 0.03;
+    safeSet(vibGain.gain, 'value', base * 0.03);
     vib.connect(vibGain);
     vibGain.connect(osc.frequency);
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, at);
-    gain.gain.exponentialRampToValueAtTime(0.05, at + 0.012);
-    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.26);
+    safeSet(gain.gain, 'set', 0.0001, at);
+    safeSet(gain.gain, 'exp', 0.05, at + 0.012);
+    safeSet(gain.gain, 'exp', 0.0001, at + 0.26);
     osc.connect(gain);
     gain.connect(dest);
     osc.start(at);
@@ -2613,7 +2644,6 @@ export class SoundEngine {
    *  nominal), a bright strike transient, and a very long decay. Distance rolls
    *  the top off and pushes the tolls further apart. */
   playWreckBell(distance = 400): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
@@ -2622,8 +2652,8 @@ export class SoundEngine {
     const far = ctx.createBiquadFilter();
     far.type = 'lowpass';
     // Distant tolls lose their strike edge long before they lose their hum.
-    far.frequency.value = 2600 - (d / 1400) * 1750;
-    far.Q.value = 0.4;
+    safeSet(far.frequency, 'value', 2600 - (d / 1400) * 1750);
+    safeSet(far.Q, 'value', 0.4);
     this.connectGroup(far, null, 0.55);
     for (let toll = 0; toll < 3; toll++) {
       const at = now + toll * (1.45 + (d / 1400) * 0.35);
@@ -2692,11 +2722,11 @@ export class SoundEngine {
     if (!this.wreckChain) {
       const input = ctx.createBiquadFilter();
       input.type = 'lowpass';
-      input.frequency.value = 900;
-      input.Q.value = 0.4;
+      safeSet(input.frequency, 'value', 900);
+      safeSet(input.Q, 'value', 0.4);
       const panner = ctx.createStereoPanner();
       const gain = ctx.createGain();
-      gain.gain.value = 0;
+      safeSet(gain.gain, 'value', 0);
       input.connect(panner);
       panner.connect(gain);
       gain.connect(bed);
@@ -2704,7 +2734,7 @@ export class SoundEngine {
       // a far, dull wreck must send a far, dull signal to the tail as well.
       if (this.busReverb) {
         const send = ctx.createGain();
-        send.gain.value = 0.4;
+        safeSet(send.gain, 'value', 0.4);
         gain.connect(send);
         send.connect(this.busReverb);
       }
@@ -2741,8 +2771,8 @@ export class SoundEngine {
     if (now >= this.nextWreckTollAt) {
       const far = ctx.createBiquadFilter();
       far.type = 'lowpass';
-      far.frequency.value = 900 + 2400 * near;
-      far.Q.value = 0.4;
+      safeSet(far.frequency, 'value', 900 + 2400 * near);
+      safeSet(far.Q, 'value', 0.4);
       this.connectGroup(far, this.wreckPos, 0.55);
       this.wreckToll(now + 0.02, 0.34 * level, far);
       // Never metronomic: a bell hung in a rolling hull comes round late.
@@ -2754,7 +2784,6 @@ export class SoundEngine {
   playThunder(distance = 300): void {
     // (delay/brightness live in thunderArrivalDelay + THUNDER_MAX_DISTANCE_M
     //  below, so scripts/test-storm-visuals.mjs can grade them with no ctx.)
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
@@ -2763,8 +2792,8 @@ export class SoundEngine {
     const near = d < 120;
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = near ? 1600 : 400 + (1 - d / THUNDER_MAX_DISTANCE_M) * 600;
-    filter.Q.value = 0.5;
+    safeSet(filter.frequency, 'value', near ? 1600 : 400 + (1 - d / THUNDER_MAX_DISTANCE_M) * 600);
+    safeSet(filter.Q, 'value', 0.5);
     this.connectGroup(filter, null, 0.35);
     const at = now + thunderArrivalDelay(distance);
     if (near) {
@@ -2780,7 +2809,6 @@ export class SoundEngine {
   // ── Stingers ─────────────────────────────────────────────────────
   /** Ominous rising swell for a storm-zone shrink warning. < 2.5s. */
   playStormShrink(): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     this.playTone(now, 55, 110, 1.6, 0.3, 'sawtooth', 0.4);
@@ -2798,7 +2826,6 @@ export class SoundEngine {
    * with a little brass on the resolution.
    */
   playIslandDiscovery(): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const notes = [523.25, 659.25, 783.99, 987.77];
@@ -2813,7 +2840,6 @@ export class SoundEngine {
 
   /** Tiny coin tick for animating a gold counter. Pitch rises with index for a run-up feel. */
   playGoldCount(index = 0): void {
-    this.unlock();
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const freq = 1500 + THREE.MathUtils.clamp(index, 0, 24) * 40;
@@ -2881,11 +2907,11 @@ export class SoundEngine {
     if (!this.tavernChain) {
       const input = ctx.createBiquadFilter();
       input.type = 'lowpass';
-      input.frequency.value = 1400;
-      input.Q.value = 0.5;
+      safeSet(input.frequency, 'value', 1400);
+      safeSet(input.Q, 'value', 0.5);
       const panner = ctx.createStereoPanner();
       const gain = ctx.createGain();
-      gain.gain.value = 0;
+      safeSet(gain.gain, 'value', 0);
       input.connect(panner);
       panner.connect(gain);
       gain.connect(bus);
@@ -2934,7 +2960,6 @@ export class SoundEngine {
    * (`bounty_raised`, `wreck_event`) and Game.ts fires this from each.
    */
   playEventSting(kind: 'bounty' | 'wreck' = 'bounty'): void {
-    this.unlock();
     const ctx = this.ctx;
     if (!ctx || !this.busDry) return;
     const now = ctx.currentTime;
@@ -3193,40 +3218,37 @@ export class SoundEngine {
 
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.Q.value = p.q;
-    lp.frequency.setValueAtTime(THREE.MathUtils.clamp(p.cutoffFrom, 60, nyq), p.when);
-    lp.frequency.exponentialRampToValueAtTime(
-      THREE.MathUtils.clamp(p.cutoffTo, 60, nyq),
-      p.when + Math.max(0.02, Math.min(p.duration * 0.7, attack + 0.25)),
-    );
+    safeSet(lp.Q, 'value', p.q);
+    safeSet(lp.frequency, 'set', THREE.MathUtils.clamp(p.cutoffFrom, 60, nyq), p.when);
+    safeSet(lp.frequency, 'exp', THREE.MathUtils.clamp(p.cutoffTo, 60, nyq), p.when + Math.max(0.02, Math.min(p.duration * 0.7, attack + 0.25)));
 
     const amp = ctx.createGain();
     const sustainAt = Math.min(Math.max(p.when + attack + 0.005, end - release), end - 0.004);
-    amp.gain.setValueAtTime(0.0001, p.when);
-    amp.gain.exponentialRampToValueAtTime(peak, p.when + attack);
-    amp.gain.exponentialRampToValueAtTime(peak * 0.72, sustainAt);
-    amp.gain.exponentialRampToValueAtTime(0.0001, end);
+    safeSet(amp.gain, 'set', 0.0001, p.when);
+    safeSet(amp.gain, 'exp', peak, p.when + attack);
+    safeSet(amp.gain, 'exp', peak * 0.72, sustainAt);
+    safeSet(amp.gain, 'exp', 0.0001, end);
     lp.connect(amp);
     amp.connect(p.dest);
 
     const lfo = ctx.createOscillator();
     lfo.type = 'sine';
-    lfo.frequency.value = p.vibRate;
+    safeSet(lfo.frequency, 'value', p.vibRate);
     const lfoGain = ctx.createGain();
-    lfoGain.gain.setValueAtTime(0, p.when);
-    lfoGain.gain.linearRampToValueAtTime(p.vibCents, p.when + Math.min(Math.max(p.vibDelay, 0.02), p.duration));
+    safeSet(lfoGain.gain, 'set', 0, p.when);
+    safeSet(lfoGain.gain, 'linear', p.vibCents, p.when + Math.min(Math.max(p.vibDelay, 0.02), p.duration));
     lfo.connect(lfoGain);
     lfo.start(p.when);
     lfo.stop(end + 0.05);
 
     const stack = ctx.createGain();
-    stack.gain.value = 1 / Math.max(1, p.detuneCents.length);
+    safeSet(stack.gain, 'value', 1 / Math.max(1, p.detuneCents.length));
     stack.connect(lp);
     for (const cents of p.detuneCents) {
       const osc = ctx.createOscillator();
       osc.type = p.type;
-      osc.frequency.value = Math.min(p.freq, nyq);
-      osc.detune.value = cents;
+      safeSet(osc.frequency, 'value', Math.min(p.freq, nyq));
+      safeSet(osc.detune, 'value', cents);
       lfoGain.connect(osc.detune);
       osc.connect(stack);
       osc.start(p.when);
@@ -3310,11 +3332,11 @@ export class SoundEngine {
     const g = duck.gain;
     // A second bang must never RAISE a duck that's already in place.
     const target = Math.max(0.0001, Math.min(depth, g.value));
-    g.cancelScheduledValues(now);
-    g.setValueAtTime(Math.max(0.0001, g.value), now);
-    g.linearRampToValueAtTime(target, now + 0.05);
-    g.setValueAtTime(target, now + hold);
-    g.linearRampToValueAtTime(1, now + hold + recover);
+    safeSet(g, 'cancel', 0, now);
+    safeSet(g, 'set', Math.max(0.0001, g.value), now);
+    safeSet(g, 'linear', target, now + 0.05);
+    safeSet(g, 'set', target, now + hold);
+    safeSet(g, 'linear', 1, now + hold + recover);
   }
 
   /** Lead is in the air: the idle whistling keeps away for a while. */
@@ -3333,10 +3355,10 @@ export class SoundEngine {
     source.loop = true;
     const filter = ctx.createBiquadFilter();
     filter.type = type;
-    filter.frequency.value = freq;
-    filter.Q.value = q;
+    safeSet(filter.frequency, 'value', freq);
+    safeSet(filter.Q, 'value', q);
     const gain = ctx.createGain();
-    gain.gain.value = 0;
+    safeSet(gain.gain, 'value', 0);
     source.connect(filter);
     filter.connect(gain);
     gain.connect(dest);
@@ -3349,9 +3371,9 @@ export class SoundEngine {
     const ctx = this.ctx as AudioContext;
     const lfo = ctx.createOscillator();
     lfo.type = 'sine';
-    lfo.frequency.value = rate;
+    safeSet(lfo.frequency, 'value', rate);
     const lfoGain = ctx.createGain();
-    lfoGain.gain.value = depth;
+    safeSet(lfoGain.gain, 'value', depth);
     lfo.connect(lfoGain);
     lfoGain.connect(gain.gain);
     lfo.start();
@@ -3361,7 +3383,7 @@ export class SoundEngine {
   private ramp(param: AudioParam, value: number, time = 0.3): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    param.linearRampToValueAtTime(value, ctx.currentTime + time);
+    safeSet(param, 'linear', value, ctx.currentTime + time);
   }
 
   /** Sidechain-ish duck of every ambient bed for a boom. depth ~0.5 ≈ -6dB. */
@@ -3371,11 +3393,11 @@ export class SoundEngine {
     if (!ctx || !bus) return;
     const now = ctx.currentTime;
     const g = bus.gain;
-    g.cancelScheduledValues(now);
-    g.setValueAtTime(Math.max(0.0001, g.value), now);
-    g.linearRampToValueAtTime(depth, now + 0.03);
-    g.setValueAtTime(depth, now + hold);
-    g.linearRampToValueAtTime(1, now + hold + recover);
+    safeSet(g, 'cancel', 0, now);
+    safeSet(g, 'set', Math.max(0.0001, g.value), now);
+    safeSet(g, 'linear', depth, now + 0.03);
+    safeSet(g, 'set', depth, now + hold);
+    safeSet(g, 'linear', 1, now + hold + recover);
     // Anything loud enough to duck the world ducks the MUSIC harder and marks
     // the fight, so the idle whistling stays out of a firefight entirely.
     this.duckMusic(0.1, hold + 0.4, recover + 1.2);
@@ -3440,24 +3462,24 @@ export class SoundEngine {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = type;
-    osc.frequency.setValueAtTime(fromFreq, when);
+    safeSet(osc.frequency, 'set', fromFreq, when);
     if (toFreq !== fromFreq) {
-      osc.frequency.exponentialRampToValueAtTime(Math.max(20, toFreq), when + duration);
+      safeSet(osc.frequency, 'exp', Math.max(20, toFreq), when + duration);
     }
     if (attack > 0) {
-      gain.gain.setValueAtTime(0.0001, when);
-      gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), when + Math.min(attack, duration * 0.5));
-      gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+      safeSet(gain.gain, 'set', 0.0001, when);
+      safeSet(gain.gain, 'exp', Math.max(0.0002, volume), when + Math.min(attack, duration * 0.5));
+      safeSet(gain.gain, 'exp', 0.0001, when + duration);
     } else {
-      gain.gain.setValueAtTime(Math.max(0.0001, volume), when);
-      gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+      safeSet(gain.gain, 'set', Math.max(0.0001, volume), when);
+      safeSet(gain.gain, 'exp', 0.0001, when + duration);
     }
     osc.connect(gain);
     gain.connect(dest ?? dry);
     const send = wet ?? (dest && this.ownSendNodes.has(dest) ? 0 : 0.35);
     if (send > 0) {
       const wetGain = ctx.createGain();
-      wetGain.gain.value = send;
+      safeSet(wetGain.gain, 'value', send);
       gain.connect(wetGain);
       wetGain.connect(bus);
     }
@@ -3504,19 +3526,19 @@ export class SoundEngine {
     source.buffer = noise;
     const filter = ctx.createBiquadFilter();
     filter.type = filterType;
-    filter.frequency.setValueAtTime(Math.max(20, curve[0][1]), when);
+    safeSet(filter.frequency, 'set', Math.max(20, curve[0][1]), when);
     for (let i = 1; i < curve.length; i++) {
-      filter.frequency.exponentialRampToValueAtTime(Math.max(20, curve[i][1]), when + curve[i][0]);
+      safeSet(filter.frequency, 'exp', Math.max(20, curve[i][1]), when + curve[i][0]);
     }
-    filter.Q.value = q;
+    safeSet(filter.Q, 'value', q);
     const gain = ctx.createGain();
     if (attack > 0) {
-      gain.gain.setValueAtTime(0.0001, when);
-      gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), when + Math.min(attack, duration * 0.5));
-      gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+      safeSet(gain.gain, 'set', 0.0001, when);
+      safeSet(gain.gain, 'exp', Math.max(0.0002, volume), when + Math.min(attack, duration * 0.5));
+      safeSet(gain.gain, 'exp', 0.0001, when + duration);
     } else {
-      gain.gain.setValueAtTime(Math.max(0.0001, volume), when);
-      gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+      safeSet(gain.gain, 'set', Math.max(0.0001, volume), when);
+      safeSet(gain.gain, 'exp', 0.0001, when + duration);
     }
     source.connect(filter);
     filter.connect(gain);
@@ -3524,7 +3546,7 @@ export class SoundEngine {
     const send = wet ?? (dest && this.ownSendNodes.has(dest) ? 0 : 0.25);
     if (send > 0) {
       const wetGain = ctx.createGain();
-      wetGain.gain.value = send;
+      safeSet(wetGain.gain, 'value', send);
       gain.connect(wetGain);
       wetGain.connect(bus);
     }
@@ -3556,9 +3578,9 @@ export class SoundEngine {
     // Filter envelope opening across the note = the blare of a brass instrument.
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.Q.value = 0.7;
-    lp.frequency.setValueAtTime(1400, when);
-    lp.frequency.exponentialRampToValueAtTime(2600, when + Math.max(0.05, duration * 0.6));
+    safeSet(lp.Q, 'value', 0.7);
+    safeSet(lp.frequency, 'set', 1400, when);
+    safeSet(lp.frequency, 'exp', 2600, when + Math.max(0.05, duration * 0.6));
     this.connectGroup(lp, null, wet);
     for (const cents of [-8, 0, 8]) {
       const f = freq * Math.pow(2, cents / 1200);
