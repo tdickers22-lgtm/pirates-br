@@ -471,6 +471,16 @@ export const LOGIC = [
   //   test-connect-policy         — schedule sums to 60 s, no public host gets the npm copy, versionGate reload-once /
   //                                 defer, Game.connectToServer has no 6 s race; DIST=<dir> greps a build (online-10/05)
   quick(tsx('test-connect-policy.mjs')),
+  //   test-frozen-insertions      — nothing added under a frozen island keeps an identity matrixWorld: the real
+  //                                 story swap on a graph frozen like the game's lands at parent * local (a bare add
+  //                                 is detected), every .add in an island-build .then/timer callback and every add
+  //                                 into islandMeshes.get()/inst.parent refreshes the node or is covered by a
+  //                                 proven per-frame refresh; scanners self-test (islands-16, b1.1f)
+  quick(tsx('test-frozen-insertions.mjs')),
+  //   test-dig-sparkle            — the dig-site motes sample the shared soft round sprite (corner alpha 0), stay
+  //                                 additive/unlit/untone-mapped with no alphaTest, and the Points program variants
+  //                                 in src/client stay <= 4 (the sparkle replaces its variant) (islands-10, b1.1f)
+  quick(tsx('test-dig-sparkle.mjs')),
 ];
 
 /**

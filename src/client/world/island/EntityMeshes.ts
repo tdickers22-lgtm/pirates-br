@@ -142,31 +142,7 @@ export function buildChestMeshes(ctx: IslandBuildCtx) {
       // advertising itself as a dig site the instant the sand comes off.
       scar.scale.setScalar(1);
 
-      // Sparkle: eight motes on a lifted disc. Unlit, tone-mapping off, so it
-      // holds the same treasure-gold at noon, at dusk and by lantern.
-      const moteGeo = new THREE.BufferGeometry();
-      const motes = new Float32Array(8 * 3);
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2;
-        motes[i * 3] = Math.cos(a) * (0.35 + 0.5 * ((i * 37) % 7) / 7);
-        motes[i * 3 + 1] = 0.55 + 0.75 * ((i * 53) % 5) / 5;
-        motes[i * 3 + 2] = Math.sin(a) * (0.35 + 0.5 * ((i * 29) % 6) / 6);
-      }
-      moteGeo.setAttribute('position', new THREE.BufferAttribute(motes, 3));
-      const sparkle = new THREE.Points(
-        moteGeo,
-        new THREE.PointsMaterial({
-          color: 0xffd77a,
-          size: 0.34,
-          sizeAttenuation: true,
-          transparent: true,
-          opacity: 0.9,
-          depthWrite: false,
-          blending: THREE.AdditiveBlending,
-          toneMapped: false,
-        }),
-      );
-      sparkle.name = 'dig-sparkle';
+      const sparkle = makeDigSparkle(host.getSoftParticleTexture());
       sparkle.position.y = surfaceY - chest.position.y;
       sparkle.frustumCulled = false;
       mound.add(sparkle);
@@ -365,4 +341,50 @@ export function buildUpgradeStationMeshes(ctx: IslandBuildCtx) {
       type: station.type,
     });
   }
+}
+
+/**
+ * The dig-site tell: eight gold motes on a lifted disc over the mound.
+ *
+ * Sparkle: unlit, tone-mapping off, so it holds the same treasure-gold at noon,
+ * at dusk and by lantern (exposure swings with the day cycle; a tone-mapped
+ * mote would dim at night exactly when it should read).
+ *
+ * ROUND, NOT SQUARE (islands-10). A PointsMaterial without a map rasterises
+ * every point as a screen-aligned square; at eye height the eight motes read as
+ * pale UI boxes hovering over the sand. The map is the session's one soft round
+ * particle sprite (the ash / ember / steam / mist texture), whose radial falloff
+ * reaches zero at the sprite's inscribed circle, so a corner contributes nothing
+ * under additive blending. No alphaTest: that is a program define, and the map
+ * alone already makes the corners invisible. The material stays the only
+ * tone-mapping-off points material in the game, so it REPLACES the one program
+ * variant the square motes used rather than adding one. The size grows a little
+ * because the falloff eats the rim a hard square used to fill.
+ */
+export function makeDigSparkle(softParticle: THREE.Texture): THREE.Points {
+  const moteGeo = new THREE.BufferGeometry();
+  const motes = new Float32Array(8 * 3);
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    motes[i * 3] = Math.cos(a) * (0.35 + 0.5 * ((i * 37) % 7) / 7);
+    motes[i * 3 + 1] = 0.55 + 0.75 * ((i * 53) % 5) / 5;
+    motes[i * 3 + 2] = Math.sin(a) * (0.35 + 0.5 * ((i * 29) % 6) / 6);
+  }
+  moteGeo.setAttribute('position', new THREE.BufferAttribute(motes, 3));
+  const sparkle = new THREE.Points(
+    moteGeo,
+    new THREE.PointsMaterial({
+      color: 0xffd77a,
+      map: softParticle,
+      size: 0.46,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    }),
+  );
+  sparkle.name = 'dig-sparkle';
+  return sparkle;
 }
