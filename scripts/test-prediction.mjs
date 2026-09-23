@@ -14,7 +14,8 @@
  * dropped `|| 1` — shows up as a bit difference on some tick.
  *
  * 1. Land tape: 600 ticks, walk/strafe/crouch/jump/yaw sweep. Bit-identical.
- * 2. Swim tape:  600 ticks, pitch dive + jump-up + sailLower. Bit-identical.
+ * 2. Swim tape:  600 ticks, level stroke, C/steep dive + jump-up + sailLower. Bit-identical
+ *    (swim block re-pinned in b1.6d to the surface-swimming rule).
  * 3. Grounded parity on real generated terrain (island footing + dock + deck).
  * 4. Match.applyInput no longer integrates movement inline (it calls the shared
  *    step) — the structural half of the claim.
@@ -46,7 +47,11 @@ function referenceStep(player, input, dt, env) {
   const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   const moveZ = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
   if (player.state === 'swimming') {
-    const pitch = input.pitch;
+    // RE-PINNED b1.6d (liveplay-09): W is a level stroke unless the look is
+    // below -35 deg or C is held; an upward look still rises; a stroke with no
+    // vertical wish leaves velocity.y to the water.
+    const diveByLook = input.pitch < -35 * Math.PI / 180 || !!input.crouch;
+    const pitch = diveByLook ? input.pitch : Math.max(0, input.pitch);
     const forwardScale = Math.cos(pitch);
     const forwardX = Math.sin(yaw) * forwardScale;
     const forwardY = Math.sin(pitch);
@@ -77,7 +82,7 @@ function referenceStep(player, input, dt, env) {
       const vertBlend = 1 - Math.exp(-dt * 3.5);
       player.velocity.x += (targetVx - player.velocity.x) * horizBlend;
       player.velocity.z += (targetVz - player.velocity.z) * horizBlend;
-      player.velocity.y += (targetVy - player.velocity.y) * vertBlend;
+      if (wishY !== 0) player.velocity.y += (targetVy - player.velocity.y) * vertBlend;
       player.position.x += player.velocity.x * dt;
       player.position.z += player.velocity.z * dt;
     }
@@ -145,6 +150,7 @@ function runTape(label, mode, ticks, env) {
       pitch: (r() - 0.5) * 1.2,
     };
     const crouch = r() < 0.15;
+    input.crouch = crouch; // in the water C is the deliberate dive (b1.6d)
     a.crouching = crouch;
     b.crouching = crouch;
     // Velocity.y is PhysicsSystem's business; feed both the same drift so the

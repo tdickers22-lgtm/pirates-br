@@ -109,7 +109,7 @@ type HullSweepHit =
   | { kind: HullImpactKind; point: Vec3 }
   | { kind: 'player'; point: Vec3; player: Player };
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
-import { resolveWalkerAgainstWildlife } from '../../shared/locomotion.js';
+import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 
 // ── Ship wave-riding dynamics tuning ─────────────────────────────────────────
@@ -1653,6 +1653,11 @@ export class PhysicsSystem {
             const maxLift = depthBelowSurface > 12 ? 2.4 : 2.8;
             const buoyancy = clamp((surfaceY - player.position.y) * buoyancyScale, -2.0, maxLift);
             player.velocity.y += buoyancy * dt;
+            // vm:physics:4: near the float line a swimmer who is not diving
+            // RIDES the swell (spring damped against the surface's own vertical
+            // speed) instead of lagging it by half a wave. Shared helper.
+            const surfaceVy = (waveY - gerstnerHeight(player.position.x, player.position.z, t - dt, WAVE_PARAMS, playerSea)) / dt;
+            player.velocity.y = swimFloatVelocity(player.position.y, player.velocity.y, surfaceY, surfaceVy, dt);
             // Water drag — gentler vertical drag so plunge momentum carries through
             // 1–2 metres of submersion before buoyancy turns the player around.
             const yDamp = Math.pow(0.55, dt); // ~45 %/sec retention

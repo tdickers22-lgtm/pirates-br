@@ -226,8 +226,48 @@ export interface PirateMoveInput {
   jump?: boolean;
   jumpPressed?: boolean;
   sailLower?: boolean;
+  /** Hold-C. Ashore it crouches; in the water it is the deliberate dive: W
+   *  follows the look pitch while it is held (liveplay-09). */
+  crouch?: boolean;
   yaw: number;
   pitch: number;
+}
+
+/**
+ * SURFACE SWIMMING (liveplay-09). W in the water is a HORIZONTAL stroke unless
+ * the pirate asks to dive: look steeper than this below the horizon, or hold C.
+ * The old rule ("W follows look") dove anyone who glanced a few degrees down at
+ * the pier and drowned new players inside the truce. Looking UP still rises,
+ * because heading for air never drowns anybody.
+ */
+export const SWIM_DIVE_PITCH = -35 * Math.PI / 180;
+
+/** Half-height of the band around the rest float line where a swimmer who is
+ *  not diving rides the swell instead of lagging it (vm:physics:4). */
+export const SWIM_FLOAT_BAND_M = 0.9;
+/** Natural frequency of the float spring, rad/s. A swell has ~0.8-1.6 rad/s,
+ *  so 3 rad/s rides an 8 s, 1.5 m swell within ~0.1 m. */
+export const SWIM_FLOAT_OMEGA = 3;
+/** Sinking faster than the surface by more than this is a dive (C, a steep W or
+ *  a plunge) and the float lets go. */
+export const SWIM_FLOAT_DIVE_VREL = -0.5;
+
+/**
+ * The vertical velocity of a floating swimmer after one tick of riding the
+ * swell: a critically damped spring on the offset from the float line
+ * (`restY`, the wave height plus the head-out margin) with the damping taken
+ * RELATIVE to the surface's own vertical speed, so a pirate treading water
+ * rises and falls with the wave instead of being dragged against it. Outside
+ * the band, or while diving, the velocity comes back unchanged and the plain
+ * buoyancy/drag model owns the body. PURE (server and any client predictor).
+ */
+export function swimFloatVelocity(y: number, vy: number, restY: number, surfaceVy: number, dt: number): number {
+  const off = restY - y;
+  if (Math.abs(off) > SWIM_FLOAT_BAND_M) return vy;
+  const vrel = vy - surfaceVy;
+  if (vrel < SWIM_FLOAT_DIVE_VREL) return vy;
+  const w = SWIM_FLOAT_OMEGA;
+  return vy + (w * w * off - 2 * w * vrel) * dt;
 }
 
 export interface PirateStepEnv {
@@ -306,7 +346,10 @@ export function stepPirate(
   const moveX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   const moveZ = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
   if (k.state === 'swimming') {
-    const pitch = input.pitch;
+    // Surface stroke unless the pirate dives on purpose (SWIM_DIVE_PITCH / C):
+    // a shallow downward look swims level; an upward look still rises.
+    const diveByLook = input.pitch < SWIM_DIVE_PITCH || !!input.crouch;
+    const pitch = diveByLook ? input.pitch : Math.max(0, input.pitch);
     const forwardScale = Math.cos(pitch);
     const forwardX = Math.sin(yaw) * forwardScale;
     const forwardY = Math.sin(pitch);
@@ -349,7 +392,9 @@ export function stepPirate(
       const vertBlend  = 1 - Math.exp(-dt * 3.5); // ~0.29 s response on Y
       k.velocity.x += (targetVx - k.velocity.x) * horizBlend;
       k.velocity.z += (targetVz - k.velocity.z) * horizBlend;
-      k.velocity.y += (targetVy - k.velocity.y) * vertBlend;
+      // A level stroke (no vertical wish) leaves the height to the water, so
+      // the float can ride the swell; only a real up/down wish steers Y.
+      if (wishY !== 0) k.velocity.y += (targetVy - k.velocity.y) * vertBlend;
       k.position.x += k.velocity.x * dt;
       k.position.z += k.velocity.z * dt;
     }

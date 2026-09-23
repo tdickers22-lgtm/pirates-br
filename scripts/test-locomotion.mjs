@@ -28,6 +28,8 @@ import {
   getIslandDistRatio,
 } from '../src/shared/utils/index.ts';
 import { PROP_COLLIDERS } from '../src/shared/props.ts';
+import { stepPirate } from '../src/shared/locomotion.ts';
+import { stormSeaState } from '../src/server/systems/PhysicsSystem.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -529,6 +531,58 @@ function findDryHighGround(pool) {
     }
   }
   return null;
+}
+
+// ── 7. Surface swimming (liveplay-09) + riding the swell (vm:physics:4) ─────
+// Drives the SHARED stepPirate (what Match.applyInput and the client predictor
+// both run) and the real PhysicsSystem over a moving Gerstner sea.
+{
+  console.log('\n7. Surface swimming: W is a level stroke, the swimmer rides the swell');
+  const sea = findOpenSea(POOL);
+  const env = { ship: null, islands: [], jumpBlocked: false };
+  const floatLine = (p, t) => gerstnerHeight(p.position.x, p.position.z, t, WAVE_PARAMS, stormSeaState(null, p.position.x, p.position.z)) + 0.32;
+  function swim(input, seconds, settle = 2) {
+    const p = makePlayer({ x: sea.x, y: 0, z: sea.z }, { state: 'swimming' });
+    let t = 3;
+    p.position.y = floatLine(p, t);
+    let worst = 0, deepest = 0, minY = Infinity, maxY = -Infinity, minS = Infinity, maxS = -Infinity;
+    const x0 = p.position.x, z0 = p.position.z;
+    for (let i = 0; i < Math.round(seconds / DT); i++) {
+      stepPirate(p, input, DT, env);
+      physics.update(DT, t, [], [p], [], [], []);
+      t += DT;
+      const s = floatLine(p, t);
+      if (t - 3 >= settle) {
+        worst = Math.max(worst, Math.abs(p.position.y - s));
+        minY = Math.min(minY, p.position.y); maxY = Math.max(maxY, p.position.y);
+        minS = Math.min(minS, s); maxS = Math.max(maxS, s);
+      }
+      deepest = Math.max(deepest, s - p.position.y);
+    }
+    return { worst, deepest, travel: Math.hypot(p.position.x - x0, p.position.z - z0), yRange: maxY - minY, sRange: maxS - minS, state: p.state };
+  }
+  const physics = new PhysicsSystem();
+  if (!sea) expect('open sea found for the swim cases', false);
+  else {
+    const base = { forward: false, back: false, left: false, right: false, jump: false, jumpPressed: false, sailLower: false, crouch: false, yaw: 0.7, pitch: 0 };
+    const level = swim({ ...base, forward: true, pitch: -0.2 }, 20);
+    expect('W at pitch -0.2 keeps the head within 0.3 m of the float line for 18 s',
+      level.worst <= 0.3 && level.state === 'swimming', `worst=${level.worst.toFixed(3)}m deepest=${level.deepest.toFixed(3)}m`);
+    expect('W at pitch -0.2 still makes way (> 40 m in 20 s)', level.travel > 40, `travel=${level.travel.toFixed(1)}m`);
+    const tread = swim({ ...base }, 24, 4);
+    expect('treading water rides the swell (within 0.3 m of the moving surface)',
+      tread.worst <= 0.3, `worst=${tread.worst.toFixed(3)}m swell range=${tread.sRange.toFixed(2)}m`);
+    expect('the treading swimmer rises and falls >= 80% of the swell height',
+      tread.sRange > 0.2 && tread.yRange >= 0.8 * tread.sRange, `yRange=${tread.yRange.toFixed(2)}m swell=${tread.sRange.toFixed(2)}m`);
+    const steep = swim({ ...base, forward: true, pitch: -0.8 }, 4, 99);
+    expect('a steep look down (< -35 deg) with W still dives (> 1.5 m in 4 s)', steep.deepest > 1.5, `deepest=${steep.deepest.toFixed(2)}m`);
+    const crouchDive = swim({ ...base, forward: true, crouch: true, pitch: -0.5 }, 4, 99);
+    expect('holding C with W follows the look down (> 1.0 m in 4 s at -0.5)', crouchDive.deepest > 1.0, `deepest=${crouchDive.deepest.toFixed(2)}m`);
+    const shallowNoCrouch = swim({ ...base, forward: true, pitch: -0.5 }, 4, 99);
+    expect('the same -0.5 look WITHOUT C stays at the surface (< 0.3 m)', shallowNoCrouch.deepest < 0.3, `deepest=${shallowNoCrouch.deepest.toFixed(2)}m`);
+    const diveKey = swim({ ...base, sailLower: true }, 4, 99);
+    expect('the dive key still takes the swimmer under (> 1.0 m in 4 s)', diveKey.deepest > 1.0, `deepest=${diveKey.deepest.toFixed(2)}m`);
+  }
 }
 
 if (failures > 0) {
