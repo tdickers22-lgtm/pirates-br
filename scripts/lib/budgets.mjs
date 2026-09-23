@@ -296,7 +296,7 @@ export const FRAME_GOVERNOR = {
 // heapMB = performance.memory.usedJSHeapSize (Chromium) or the census estimate elsewhere. MB = 2^20.
 // The desktop rows land in b3.1b and the per-family rows in b3.1g; both only ever tighten these.
 export const MEMORY_BUDGETS = {
-  phone: { gpuMB: 160, texturesMB: 64, heapMB: 120 },
+  phone: { gpuMB: 140, texturesMB: 64, heapMB: 120 },
   ipad: { gpuMB: 220, texturesMB: 96, heapMB: 150 },
 };
 
