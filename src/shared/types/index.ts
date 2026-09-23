@@ -1302,6 +1302,9 @@ export interface WelcomePayload {
   /** Opaque secret this client presents to `resume` after a blip. */
   sessionToken: string;
   protocolVersion: number;
+  /** Server build id (git sha / dist hash). The client's version gate reloads a
+   *  tab on another build: menu now, in a match after it ends (online-05). */
+  buildId?: string;
 }
 
 /** The server found the held session and re-bound this socket to it. */
