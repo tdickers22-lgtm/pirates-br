@@ -39,6 +39,7 @@ import { isBound } from '../../shared/bindings.js';
 import { lockHintVisible } from '../input/inputAuthority.js';
 import { requestLockSafe } from '../input/pointerLock.js';
 import { wheelToChartAction } from '../input/wheelGesture.js';
+import { resolveTouchContext, routeHeldTool, touchProgress } from '../input/touchContexts.js';
 import { assets, type AssetName } from '../assets/AssetLibrary.js';
 import { buildSharkMesh, buildWildlifeMesh } from '../rendering/factories/FaunaMeshFactory.js';
 import { disposeSharkAnim, playSharkBite, updateSharkPose } from '../rendering/SharkRenderer.js';
@@ -3338,15 +3339,10 @@ export class Game {
         const legend = document.getElementById('controls-hint');
         if (legend) legend.style.display = legend.style.display === 'block' ? 'none' : 'block';
       }
-      const input = this.input.buildInput();
-      if (this.spyglassActive || equippedTool) {
-        // A raised spyglass or a held tool occupies both hands — no weapon fire.
-        // But the ATTACK button (LMB) now drives the held tool's own verb: bail
-        // with the bucket, raise the lantern. Route it via useItem, keep fire off.
-        input.useItem = !!equippedTool && !this.spyglassActive && this.input.isFiring();
-        input.fire = false;
-        input.aim = false;
-      }
+      // A raised spyglass or a held tool occupies both hands — no weapon fire.
+      // The ATTACK button (LMB, touch Bail/Dig, pad RT) drives the held tool's
+      // own verb through useItem (touchContexts.routeHeldTool, gated b1.4c).
+      const input = routeHeldTool(this.input.buildInput(), equippedTool, this.spyglassActive, this.input.isFiring());
       if (input.useWheelItem && input.wheelIndex !== null) {
         this.startPocketUsePreview(input.wheelIndex);
       }
@@ -3444,6 +3440,7 @@ export class Game {
    *  allocation bench runs it too. */
   private stepFramePost() {
     this.updatePointerLockHint();
+    this.updateTouchContext();
     // Outside every `if (!this.state)` guard: the ceremony must keep counting
     // while the join snapshot and the island builds are still landing.
     this.updateStartSequenceFrame();
@@ -4073,6 +4070,34 @@ export class Game {
       z: player.position.z + (dz / len) * offset,
       shipId: ship.id,
     };
+  }
+
+  /** Touch contexts (b1.4c): the on-screen arc follows the station, the water
+   *  and the hands. Nothing runs (and nothing allocates) off the touch scheme. */
+  private updateTouchContext(): void {
+    const touch = this.input.getTouchControls();
+    if (!touch?.isActive()) return;
+    const me = this.getLocalPlayer();
+    if (!me) return;
+    const ship = me.onShipId ? this.state?.ships.find((s) => s.id === me.onShipId) ?? null : null;
+    const anchored = !!(me.atHelm && ship?.anchored);
+    const chest = me.equippedTool === 'shovel' && me.nearChestId ? this.findChestById(me.nearChestId) : null;
+    touch.setContext({
+      context: resolveTouchContext({
+        atHelm: me.atHelm, atCannon: me.atCannon, swimming: me.state === 'swimming',
+        carrying: !!me.carryingChestId, equippedTool: me.equippedTool, anchored,
+      }),
+      anchored,
+      tool: me.equippedTool,
+      progress: touchProgress({
+        equippedTool: me.equippedTool,
+        bailScoopProgress: me.bailScoopProgress ?? 0,
+        bucketFilled: !!me.bucketFilled,
+        hullRepairProgress: me.hullRepairProgress ?? 0,
+        digProgress: chest && chest.buried ? chest.digProgress : null,
+        anchorRaiseProgress: anchored && ship ? ship.anchorRaiseProgress : null,
+      }),
+    });
   }
 
   private updatePointerLockHint(): void {

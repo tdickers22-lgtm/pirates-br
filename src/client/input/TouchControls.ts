@@ -12,13 +12,25 @@
  *    brace, dig and revive all work by finger. The [X] prompt itself is the
  *    same hold target on touch.
  *
+ * b1.4c adds CONTEXTS (src/client/input/touchContexts.ts): Game.ts calls
+ * setContext() every frame and the arc re-forms for the helm (wheel slider,
+ * sails, trim, weigh anchor, Leave), the cannon (drag aim, Fire, ammo chips,
+ * Leave), swimming (Up/Down), a held tool (Bail/Dig/Raise with a fill ring,
+ * Stow) and a carried chest (Drop). A button that disappears while held is
+ * released, so a context change never leaves an action stuck on.
+ *
  * The overlay only shows on the touch scheme, in a match (menu and loading
  * screens hidden). Everything it does goes through VirtualInputSource into
  * the one bindings table; nothing here touches the wire.
  */
 import type { BindingAction } from '../../shared/bindings.js';
 import { SHIP } from '../../shared/constants/index.js';
+import type { EquippableTool } from '../../shared/types/index.js';
 import type { InputSchemeTracker } from './InputScheme.js';
+import {
+  HELM_SPRING_KEY, HelmSlider, TOUCH_BUTTONS, labelFor, stickEnabled,
+  type TouchButtonSpec, type TouchContext,
+} from './touchContexts.js';
 import { VirtualInputSource, type VirtualInputSink } from './VirtualInputSource.js';
 
 /** Share of the screen width (from the left) that belongs to the move stick. */
@@ -26,15 +38,18 @@ export const STICK_ZONE = 0.45;
 /** Stick radius in CSS px: full deflection at this distance from the spawn point. */
 export const STICK_RADIUS_PX = 56;
 
-interface ButtonSpec { id: string; action: BindingAction; label: string; }
-const BUTTONS: readonly ButtonSpec[] = [
-  { id: 'fire', action: 'fire', label: 'Fire' },
-  { id: 'aim', action: 'aim', label: 'Aim' },
-  { id: 'jump', action: 'jump', label: 'Jump' },
-  { id: 'crouch', action: 'crouch', label: 'Crouch' },
-  { id: 'reload', action: 'reload', label: 'Reload' },
-  { id: 'interact', action: 'interact', label: 'X' },
-];
+/** What Game.ts tells the overlay every frame. */
+export interface TouchContextView {
+  context: TouchContext;
+  anchored: boolean;
+  tool: EquippableTool | null;
+  /** Server progress for the rings (null = the button runs its own clock). */
+  progress?: { fire: number | null; interact: number | null; anchor: number | null };
+}
+
+function readSpring(): boolean {
+  try { return globalThis.localStorage?.getItem(HELM_SPRING_KEY) !== '0'; } catch { return true; }
+}
 
 type Role = { kind: 'stick'; baseX: number; baseY: number } | { kind: 'look'; lastX: number; lastY: number };
 
@@ -56,6 +71,16 @@ export class TouchControls {
   private stickBase: HTMLDivElement | null = null;
   private stickKnob: HTMLDivElement | null = null;
   private interactBtn: HTMLButtonElement | null = null;
+  private readonly buttons = new Map<string, { el: HTMLButtonElement; spec: TouchButtonSpec; release: () => void }>();
+  private helmEl: HTMLDivElement | null = null;
+  private helmKnob: HTMLDivElement | null = null;
+  private springBtn: HTMLButtonElement | null = null;
+  private readonly helm = new HelmSlider(readSpring());
+  private helmPointer: number | null = null;
+  private context: TouchContext = 'foot';
+  private viewKey = '';
+  /** Server-driven ring values; null = the button's own clock. */
+  private progress: { fire: number | null; interact: number | null; anchor: number | null } = { fire: null, interact: null, anchor: null };
   private readonly roles = new Map<number, Role>();
   private active = false;
   private interactSince = 0;
@@ -83,16 +108,18 @@ export class TouchControls {
     knob.className = 'tc-knob';
     base.appendChild(knob);
     root.append(zone, base);
-    for (const spec of BUTTONS) {
+    for (const spec of TOUCH_BUTTONS) {
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = `tc-btn tc-${spec.id}`;
+      btn.className = `tc-btn tc-${spec.id}${spec.ring ? ' tc-ring' : ''}`;
       btn.dataset.touch = spec.id;
       btn.textContent = spec.label;
-      this.bindHold(btn, spec.action);
+      const release = this.bindHold(btn, spec.action);
       root.appendChild(btn);
+      this.buttons.set(spec.id, { el: btn, spec, release });
       if (spec.id === 'interact') this.interactBtn = btn;
     }
+    root.appendChild(this.buildHelm());
     parent.appendChild(root);
     this.root = root;
     this.zone = zone;
@@ -115,7 +142,127 @@ export class TouchControls {
 
     this.scheme.onChange(() => this.refresh());
     this.poll = setInterval(() => this.refresh(), 250);
+    this.applyView({ context: 'foot', anchored: false, tool: null }, true);
     this.refresh();
+  }
+
+  /** The helm wheel slider: a track across the lower left, the knob follows
+   *  the thumb; +-22% of the half width puts the rudder over (HelmSlider). */
+  private buildHelm() {
+    const wrap = document.createElement('div');
+    wrap.className = 'tc-helm';
+    wrap.dataset.touch = 'helm-slider';
+    const knob = document.createElement('div');
+    knob.className = 'tc-helm-knob';
+    wrap.appendChild(knob);
+    const spring = document.createElement('button');
+    spring.type = 'button';
+    spring.className = 'tc-helm-spring';
+    spring.dataset.touch = 'helm-spring';
+    this.helmEl = wrap;
+    this.helmKnob = knob;
+    this.springBtn = spring;
+    this.renderSpring();
+    const valueAt = (e: PointerEvent) => {
+      const r = wrap.getBoundingClientRect();
+      return ((e.clientX - r.left) / Math.max(1, r.width)) * 2 - 1;
+    };
+    wrap.addEventListener('pointerdown', (e) => {
+      if (this.helmPointer !== null) return;
+      e.preventDefault(); e.stopPropagation();
+      try { wrap.setPointerCapture(e.pointerId); } catch { /* synthetic pointers */ }
+      this.helmPointer = e.pointerId;
+      this.setHelm(valueAt(e));
+    });
+    wrap.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== this.helmPointer) return;
+      e.preventDefault();
+      this.setHelm(valueAt(e));
+    });
+    const end = (e: PointerEvent) => {
+      if (e.pointerId !== this.helmPointer) return;
+      this.helmPointer = null;
+      this.helm.release();
+      this.setHelm(this.helm.value);
+    };
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) wrap.addEventListener(type, end);
+    spring.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      this.helm.spring = !this.helm.spring;
+      try { globalThis.localStorage?.setItem(HELM_SPRING_KEY, this.helm.spring ? '1' : '0'); } catch { /* private mode */ }
+      if (this.helm.spring && this.helmPointer === null) { this.helm.release(); this.setHelm(0); }
+      this.renderSpring();
+    });
+    const box = document.createElement('div');
+    box.className = 'tc-helm-box';
+    box.append(wrap, spring);
+    return box;
+  }
+
+  private renderSpring() {
+    if (!this.springBtn) return;
+    this.springBtn.textContent = this.helm.spring ? 'Spring' : 'Hold';
+    this.springBtn.classList.toggle('pressed', !this.helm.spring);
+  }
+
+  private setHelm(v: number) {
+    this.helm.set(v);
+    const steer = this.helm.steer();
+    for (const action of ['steerLeft', 'steerRight'] as const) {
+      if (steer[action]) this.source.press(action);
+      else this.source.release(action);
+    }
+    if (this.helmKnob) this.helmKnob.style.left = `${((this.helm.value + 1) / 2) * 100}%`;
+    this.helmEl?.classList.toggle('over', steer.steerLeft || steer.steerRight);
+  }
+
+  /** Game.ts, every frame: where the pirate is and what is in her hands. */
+  setContext(view: TouchContextView) {
+    if (view.progress) this.progress = view.progress;
+    this.applyView(view, false);
+    this.paintProgress();
+  }
+
+  getContext() { return this.context; }
+
+  private applyView(view: TouchContextView, force: boolean) {
+    const key = `${view.context}|${view.anchored ? 1 : 0}|${view.tool ?? ''}`;
+    if (!force && key === this.viewKey) return;
+    this.viewKey = key;
+    const leaving = this.context;
+    this.context = view.context;
+    this.root?.setAttribute('data-ctx', view.context);
+    // Hidden controls let go first (a Sails-up thumb when the helm is left).
+    const shown = new Set<string>();
+    for (const [id, b] of this.buttons) {
+      const on = b.spec.contexts.includes(view.context) && (!b.spec.whenAnchored || view.anchored);
+      if (on) shown.add(id);
+      else if (b.el.classList.contains('pressed')) b.release();
+      b.el.hidden = !on;
+      b.el.textContent = labelFor(b.spec, view.context, view.tool);
+    }
+    if (leaving === 'helm' && view.context !== 'helm') {
+      this.helmPointer = null;
+      this.helm.value = 0;
+      this.setHelm(0);
+    }
+    if (this.helmEl?.parentElement) (this.helmEl.parentElement as HTMLElement).hidden = view.context !== 'helm';
+    if (!stickEnabled(view.context)) {
+      for (const [id, role] of this.roles) {
+        if (role.kind === 'stick') { this.roles.delete(id); this.source.setStick(0, 0); this.stickBase?.classList.remove('shown'); }
+      }
+    }
+  }
+
+  /** Rings that follow the server (bail scoop, dig, repair, anchor). */
+  private paintProgress() {
+    const set = (id: string, v: number | null) => {
+      const b = this.buttons.get(id);
+      if (!b || v === null) return;
+      b.el.style.setProperty('--tc-hold', v.toFixed(3));
+    };
+    set('fire', this.context === 'tool' ? this.progress.fire : null);
+    set('anchor', this.progress.anchor);
   }
 
   /** Shown on the touch scheme, in a match. */
@@ -129,7 +276,7 @@ export class TouchControls {
 
   isActive() { return this.active; }
 
-  private bindHold(el: HTMLElement, action: BindingAction, touchOnly = false) {
+  private bindHold(el: HTMLElement, action: BindingAction, touchOnly = false): () => void {
     const ids = new Set<number>();
     el.addEventListener('pointerdown', (e) => {
       if (touchOnly && !isFingerLike(e)) return;
@@ -152,6 +299,13 @@ export class TouchControls {
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
     el.addEventListener('lostpointercapture', end);
+    return () => {
+      if (ids.size === 0) return;
+      ids.clear();
+      el.classList.remove('pressed');
+      this.source.release(action);
+      if (action === 'interact') this.stopRing();
+    };
   }
 
   /** The hold ring: one sweep per hammer swing (SHIP.HULL_REPAIR_SWING_TIME),
@@ -162,7 +316,8 @@ export class TouchControls {
     const tick = () => {
       if (!this.interactBtn) return;
       const t = (performance.now() - this.interactSince) / 1000;
-      const frac = (t % SHIP.HULL_REPAIR_SWING_TIME) / SHIP.HULL_REPAIR_SWING_TIME;
+      const frac = this.progress.interact
+        ?? (t % SHIP.HULL_REPAIR_SWING_TIME) / SHIP.HULL_REPAIR_SWING_TIME;
       this.interactBtn.style.setProperty('--tc-hold', frac.toFixed(3));
       this.ringRaf = requestAnimationFrame(tick);
     };
@@ -181,7 +336,7 @@ export class TouchControls {
     const w = window.innerWidth || 1;
     const hasStick = [...this.roles.values()].some((r) => r.kind === 'stick');
     const hasLook = [...this.roles.values()].some((r) => r.kind === 'look');
-    if (e.clientX < w * STICK_ZONE) {
+    if (e.clientX < w * STICK_ZONE && stickEnabled(this.context)) {
       if (hasStick) return;
       this.roles.set(e.pointerId, { kind: 'stick', baseX: e.clientX, baseY: e.clientY });
       this.showStick(e.clientX, e.clientY, 0, 0);
@@ -234,7 +389,13 @@ export class TouchControls {
     this.source.releaseAll();
     this.stopRing();
     this.stickBase?.classList.remove('shown');
-    this.root?.querySelectorAll('.pressed').forEach((el) => el.classList.remove('pressed'));
+    // Blur or leaving the match recentres even a latched wheel: the rudder
+    // bits were just released, so the knob must not show her still turning.
+    this.helmPointer = null;
+    this.helm.value = 0;
+    this.helmEl?.classList.remove('over');
+    this.helmKnob?.style.setProperty('left', `${((this.helm.value + 1) / 2) * 100}%`);
+    this.root?.querySelectorAll('.tc-btn.pressed').forEach((el) => el.classList.remove('pressed'));
     document.getElementById('interact-prompt')?.classList.remove('pressed');
   }
 

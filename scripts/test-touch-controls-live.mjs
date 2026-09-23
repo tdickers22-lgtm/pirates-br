@@ -99,7 +99,7 @@ try {
     const inp = window.__piratesBR.input;
     if (!inp.__tcWrapped) {
       const orig = inp.buildInput.bind(inp);
-      inp.buildInput = () => { const r = orig(); window.__tcLog?.push({ fire: r.fire, ih: r.interactHeld, i: r.interact }); return r; };
+      inp.buildInput = () => { const r = orig(); window.__tcLog?.push({ fire: r.fire, ih: r.interactHeld, i: r.interact, right: r.right }); return r; };
       inp.__tcWrapped = true;
     }
     window.__tcLog = [];
@@ -134,10 +134,12 @@ try {
       `${log.filter((e) => e.fire).length}/${log.length} inputs; finger landed on ${await hitAt(r.cx, r.cy)}`);
   }
 
-  async function checkLayout(vp, name) {
+  async function checkLayout(vp, name, want = 6) {
     const L = await page.evaluate(() => {
       const box = (el) => { const r = el.getBoundingClientRect(); return { id: el.id || el.className, x: r.left, y: r.top, w: r.width, h: r.height }; };
-      const btns = [...document.querySelectorAll('#touch-controls .tc-btn')].map(box);
+      // Visible controls of the current context (b1.4c hides the rest), plus the helm slider.
+      const btns = [...document.querySelectorAll('#touch-controls .tc-btn, #touch-controls .tc-helm, #touch-controls .tc-helm-spring')]
+        .filter((el) => el.getBoundingClientRect().width > 0).map(box);
       const hud = ['minimap-shell', 'objective-line', 'hud-feed', 'kill-feed', 'interact-prompt', 'health-bar', 'hud-bottom']
         .map((id) => document.getElementById(id))
         .filter((el) => el && el.getBoundingClientRect().width > 0 && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden')
@@ -149,8 +151,10 @@ try {
       const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
       return ox > 1 && oy > 1 ? Math.round(ox * oy) : 0;
     };
-    const outside = L.btns.filter((b) => b.x < 0 || b.y < 0 || b.x + b.w > vp.width || b.y + b.h > vp.height || b.w < 40);
-    expect(`${name}: all ${L.btns.length} touch buttons are inside the window and >= 40 px`, L.btns.length === 6 && outside.length === 0,
+    // D12: touch targets >= 56 CSS px (the helm spring chip is 36 px tall, 72+ wide).
+    const outside = L.btns.filter((b) => b.x < 0 || b.y < 0 || b.x + b.w > vp.width || b.y + b.h > vp.height
+      || (/spring/.test(b.id) ? b.h < 36 || b.w < 72 : Math.min(b.w, b.h) < 56));
+    expect(`${name}: all ${L.btns.length} touch controls (want ${want}) are inside the window and >= 56 px`, L.btns.length === want && outside.length === 0,
       outside.map((b) => `${b.id} ${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.w)}x${Math.round(b.h)}`).join('; '));
     const clash = [];
     for (let i = 0; i < L.btns.length; i += 1) for (let j = i + 1; j < L.btns.length; j += 1) {
@@ -262,6 +266,38 @@ try {
     && cancelLog.length > 0 && cancelLog.every((e) => !e.ih), `before ${heldBefore}, after ${JSON.stringify(cancel)}, ${cancelLog.length} inputs`);
 
   await checkLayout(PHONE, 'phone');
+
+  // ── 6. contexts (b1.4c): helm slider + arc, cannon arc ────────────────────
+  // Game.updateTouchContext is paused (instance shadow) so the overlay can be
+  // put in a context without sailing there; the server half of the helm,
+  // cannon and bail is proven by test-touch-controls on a real Match.
+  const setCtx = (ctx, anchored = false) => page.evaluate(([c, a]) => {
+    const g = window.__piratesBR;
+    g.updateTouchContext = () => {};
+    g.input.getTouchControls().setContext({ context: c, anchored: a, tool: null });
+  }, [ctx, anchored]);
+  await setCtx('helm', true);
+  await sleep(100);
+  await checkLayout(PHONE, 'phone helm (anchored)', 8);
+  const slider = await rectOf('#touch-controls .tc-helm');
+  await startLog();
+  await touch('touchStart', [[slider.cx, slider.cy, 7]]);
+  await touch('touchMove', [[slider.cx + slider.w * 0.4, slider.cy, 7]]);
+  await sleep(250);
+  const steerHeld = await page.evaluate(() => window.__piratesBR.input.getTouchControls().source.isHeld('steerRight'));
+  const steerLog = await readLog();
+  await page.screenshot({ path: `${OUT}/touch-844x390-helm.png`, timeout: budget(30_000) }).catch(() => {});
+  await touch('touchEnd', []);
+  await sleep(150);
+  const steerAfter = await page.evaluate(() => window.__piratesBR.input.getTouchControls().source.isHeld('steerRight'));
+  expect('helm: dragging the wheel slider right holds steerRight (right=true on the wire), springs back on lift',
+    steerHeld && steerLog.some((e) => e.right) && !steerAfter, `held ${steerHeld}, logged right ${steerLog.filter((e) => e.right).length}/${steerLog.length}, after ${steerAfter}`);
+  await setCtx('cannon');
+  await sleep(100);
+  await checkLayout(PHONE, 'phone cannon', 5);
+  await page.screenshot({ path: `${OUT}/touch-844x390-cannon.png`, timeout: budget(30_000) }).catch(() => {});
+  await setCtx('foot');
+  await page.evaluate(() => { delete window.__piratesBR.updateTouchContext; });
 
   // ── iPad landscape ────────────────────────────────────────────────────────
   console.log(`\n${IPAD.width}x${IPAD.height} (iPad landscape)`);

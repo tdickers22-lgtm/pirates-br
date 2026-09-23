@@ -153,5 +153,140 @@ if (holdFrames.length) {
     !cutShort.patched && cutShort.planksLeft === 1, JSON.stringify(cutShort));
 }
 
+
+// ── Touch contexts I (b1.4c): helm, cannon, swim, tools, carry ────────────
+console.log('\nTouch contexts (b1.4c)');
+const TC = await tryImport('../src/client/input/touchContexts.ts');
+if (TC) {
+  const base = { atHelm: false, atCannon: false, swimming: false, carrying: false, equippedTool: null, anchored: false };
+  const ctx = (o) => TC.resolveTouchContext({ ...base, ...o });
+  expect('context table: helm > cannon > swim > carry > tool > foot',
+    ctx({ atHelm: true, swimming: true }) === 'helm' && ctx({ atCannon: true }) === 'cannon'
+    && ctx({ swimming: true, carrying: true }) === 'swim' && ctx({ carrying: true, equippedTool: 'bucket' }) === 'carry'
+    && ctx({ equippedTool: 'bucket' }) === 'tool' && ctx({ equippedTool: 'spyglass' }) === 'foot' && ctx({}) === 'foot');
+  const ids = (c, anchored = false) => TC.buttonsFor(c, anchored).map((b) => b.id);
+  const has = (c, want, anchored = false) => want.every((id) => ids(c, anchored).includes(id));
+  expect(`helm: Sails up/down, Trim L/R, Leave (${ids('helm')})`, has('helm', ['sails-up', 'sails-down', 'trim-left', 'trim-right', 'leave']) && !ids('helm').includes('fire'));
+  expect('helm: Weigh anchor only while anchored', !ids('helm').includes('anchor') && ids('helm', true).includes('anchor'));
+  expect(`cannon: Fire, three ammo chips, Leave, no stick (${ids('cannon')})`,
+    has('cannon', ['fire', 'ammo-round', 'ammo-fire', 'ammo-chain', 'leave']) && !TC.stickEnabled('cannon') && !TC.stickEnabled('helm'));
+  expect(`swim: Up and Down (${ids('swim')})`, has('swim', ['swim-up', 'swim-down']) && TC.stickEnabled('swim'));
+  expect(`carry: Drop, no Fire (${ids('carry')})`, has('carry', ['drop']) && !ids('carry').includes('fire'));
+  const fireSpec = TC.TOUCH_BUTTONS.find((b) => b.id === 'fire');
+  expect('tool: the big button reads Bail / Dig with a ring',
+    TC.labelFor(fireSpec, 'tool', 'bucket') === 'Bail' && TC.labelFor(fireSpec, 'tool', 'shovel') === 'Dig' && fireSpec.ring === true);
+  const spring = new TC.HelmSlider(true);
+  spring.set(0.8);
+  const r1 = spring.steer();
+  spring.release();
+  const latched = new TC.HelmSlider(false);
+  latched.set(-0.9); latched.release();
+  expect('slider: right = steerRight, spring centres on release, latched stays over',
+    r1.steerRight && !r1.steerLeft && !spring.steer().steerRight && latched.steer().steerLeft);
+  const tp = TC.touchProgress({ equippedTool: 'bucket', bailScoopProgress: 0.25, bucketFilled: true, hullRepairProgress: 0, digProgress: null, anchorRaiseProgress: 0.4 });
+  expect('fill rings: bail reads the scoop clock, anchor reads the raise, no repair -> own clock',
+    Math.abs(tp.fire - 0.75) < 1e-9 && Math.abs(tp.anchor - 0.4) < 1e-9 && tp.interact === null);
+}
+
+console.log('\nTouch contexts on the real server');
+function stationMatch(id) {
+  const match = new Match({ matchId: id, botCount: 1 });
+  match.state.phase = 'playing';
+  match.state.storm.safeRadius = 99999;
+  match.state.storm.damagePerSec = 0;
+  match.broadcast = () => {};
+  const joined = match.addHumanClient({ readyState: 1, bufferedAmount: 0, send() {}, close() {} }, 'Thumbs');
+  const player = match.state.players.find((p) => p.id === joined.playerId);
+  const ship = match.state.ships.find((s) => s.id === joined.shipId);
+  const im = new IM.InputManager();
+  im.scheme.note('touch');
+  const src = new V.VirtualInputSource(im);
+  let seq = 1;
+  const stand = { at: null };
+  // One 60 Hz server tick with the packet the touch player would send now.
+  // stand.at (walking to a station) keeps her aboard at that spot, as the
+  // repair replay above does: spawn parks the hull at a berth with nobody on it.
+  const send = (intent = null, route = null) => {
+    if (stand.at && !player.atHelm && !player.atCannon) { player.onShipId = ship.id; stand.at(); }
+    let input = im.buildInput();
+    if (route) input = route(input);
+    input.seq = seq++;
+    if (intent && (input.interact || input.interactHeld)) input.interactIntent = intent;
+    match.handleClientMessage(joined.playerId, { type: 'player_input', ts: 0, payload: input });
+    match.tick();
+    return input;
+  };
+  const tap = (action, intent) => { src.press(action); send(intent); src.release(action); send(); };
+  return { match, player, ship, im, src, send, tap, stand };
+}
+if (TC && V && IM) {
+  // Take the helm by a tap on Interact, steer with the slider, leave by Leave.
+  const h = stationMatch('touch-helm');
+  h.stand.at = () => h.match.snapPlayerToHelm(h.player, h.ship);
+  h.ship.anchored = false;
+  h.tap('interact', 'helm');
+  expect('a tap on Interact at the wheel takes the helm', h.player.atHelm === true);
+  expect('the helm context is what the overlay shows there',
+    TC.resolveTouchContext({ atHelm: h.player.atHelm, atCannon: false, swimming: false, carrying: false, equippedTool: null, anchored: false }) === 'helm');
+  h.ship.sailHeight = 1;
+  const r0 = h.ship.rotation;
+  h.ship.velocity = { x: Math.sin(r0) * 7, y: 0, z: Math.cos(r0) * 7 };
+  const slider = new TC.HelmSlider(true);
+  slider.set(0.8);
+  for (let i = 0; i < 180; i++) {
+    const want = slider.steer();
+    for (const a of ['steerLeft', 'steerRight']) want[a] ? h.src.press(a) : h.src.release(a);
+    h.send();
+  }
+  slider.release();
+  h.src.release('steerRight');
+  const r1 = h.ship.rotation;
+  // yaw r faces (sin r, cos r); facing +Z the right hand is -X, so starboard of heading r0 is (-cos r0, sin r0).
+  const starboard = Math.sin(r1) * -Math.cos(r0) + Math.cos(r1) * Math.sin(r0);
+  expect(`slider right for 3 s turns the bow to starboard (bow . starboard0 = ${starboard.toFixed(3)}, rotation ${r0.toFixed(3)} -> ${r1.toFixed(3)})`,
+    starboard > 0.05);
+  h.stand.at = null;
+  h.tap('interact');
+  expect('Leave (the [X] edge) frees the helm', h.player.atHelm === false);
+
+  // Cannon: tap Interact at a gun, touch Fire spawns a ball.
+  const c = stationMatch('touch-cannon');
+  c.stand.at = () => c.match.snapPlayerToCannon(c.player, c.ship, 0);
+  c.tap('interact', 'cannon');
+  expect('a tap on Interact at a gun mans the cannon', c.player.atCannon === true);
+  // Past the gun's own cooldown (the opening truce of a station).
+  c.ship.cannonCooldowns = c.ship.cannonCooldowns.map(() => 0);
+  for (let i = 0; i < 30; i++) c.send();
+  const isBall = (p) => p.ownerId === c.player.id && /cannon|chain|fire/i.test(String(p.type ?? p.kind ?? p.ammo ?? ''));
+  const balls0 = c.match.state.projectiles.filter(isBall).length;
+  c.src.press('fire');
+  c.src.release('fire');
+  let fired = 0;
+  for (let i = 0; i < 12; i++) { c.send(); fired = Math.max(fired, c.match.state.projectiles.filter(isBall).length - balls0); }
+  const sample = c.match.state.projectiles.at(-1);
+  expect(`a touch Fire tap at the manned cannon spawns a cannonball (${fired}; last ${sample ? JSON.stringify({ type: sample.type, kind: sample.kind, ammo: sample.ammo, owner: sample.ownerId === c.player.id }) : 'none'})`,
+    fired >= 1 && c.player.atCannon === true);
+
+  // Bail: the big button with a bucket in hand scoops through useItem.
+  const b = stationMatch('touch-bail');
+  b.stand.at = () => b.match.snapPlayerToHelm(b.player, b.ship);
+  b.player.equippedTool = 'bucket';
+  b.ship.waterLevel = 0.6;
+  const w0 = b.ship.waterLevel;
+  const route = (inp) => TC.routeHeldTool(inp, 'bucket', false, b.im.isFiring());
+  b.src.press('fire');
+  let useItemTicks = 0; let fireLeaked = 0; let scoops = 0; let wasFilled = false;
+  for (let i = 0; i < 150; i++) {
+    const sent = b.send(null, route);
+    if (sent.useItem) useItemTicks++;
+    if (sent.fire) fireLeaked++;
+    if (b.player.bucketFilled && !wasFilled) scoops++;
+    wasFilled = b.player.bucketFilled;
+  }
+  b.src.release('fire');
+  expect(`holding Bail 2.5 s scoops (${scoops} scoops, water ${w0} -> ${b.ship.waterLevel.toFixed(3)}, useItem ${useItemTicks}/150, fire leaked ${fireLeaked})`,
+    scoops >= 2 && b.ship.waterLevel < w0 && fireLeaked === 0);
+}
+
 console.log(failures ? `\nFAIL test-touch-controls (${failures})` : '\nPASS test-touch-controls');
 process.exit(failures ? 1 : 0);

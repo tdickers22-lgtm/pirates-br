@@ -42,7 +42,8 @@ html[data-input-scheme="touch"] canvas { touch-action: none; }
   position: absolute;
   pointer-events: auto;
   touch-action: none;
-  width: 52px; height: 52px;
+  /* D12: every touch target >= 56 CSS px (was 52 in b1.4b). */
+  width: 56px; height: 56px;
   border-radius: 50%;
   border: 2px solid rgba(240, 221, 178, 0.55);
   background: rgba(10, 16, 24, 0.42);
@@ -67,12 +68,76 @@ html[data-input-scheme="touch"] canvas { touch-action: none; }
 .tc-interact {
   width: 60px; height: 60px; font-size: 18px;
   right: calc(96px + env(safe-area-inset-right)); bottom: calc(164px + env(safe-area-inset-bottom));
+}
+/* Any ringed button (Interact, the tool verb, Weigh anchor): the fill ring
+   follows the server progress Game.ts passes in, or the button's own clock. */
+.tc-ring {
   --tc-hold: 0;
   background:
     radial-gradient(circle, rgba(10, 16, 24, 0.55) 60%, transparent 61%),
     conic-gradient(#c9a84c calc(var(--tc-hold) * 360deg), rgba(240, 221, 178, 0.18) 0);
 }
+.tc-ring.pressed {
+  color: #10161e;
+  background:
+    radial-gradient(circle, rgba(201, 168, 76, 0.62) 60%, transparent 61%),
+    conic-gradient(#f0ddb2 calc(var(--tc-hold) * 360deg), rgba(240, 221, 178, 0.18) 0);
+}
 .tc-interact.pressed { color: #f0ddb2; }
+
+/* ── Contexts (b1.4c). Buttons outside the context carry [hidden]. ───────── */
+.tc-btn[hidden], .tc-helm-box[hidden] { display: none; }
+.tc-btn { font-size: 11px; line-height: 1.05; }
+
+/* Helm: the wheel slider across the lower left, sails and trim on the right. */
+.tc-helm-box {
+  position: absolute;
+  left: calc(24px + env(safe-area-inset-left)); bottom: calc(28px + env(safe-area-inset-bottom));
+  width: min(40vw, 340px); height: 104px;
+  pointer-events: none;
+}
+.tc-helm {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 60px;
+  border-radius: 30px;
+  border: 2px solid rgba(240, 221, 178, 0.45);
+  background: linear-gradient(90deg, rgba(120, 40, 30, 0.35), rgba(10, 16, 24, 0.3) 39%, rgba(10, 16, 24, 0.3) 61%, rgba(30, 90, 50, 0.35));
+  pointer-events: auto; touch-action: none;
+}
+.tc-helm-knob {
+  position: absolute; left: 50%; top: 50%;
+  width: 56px; height: 56px; margin: -28px 0 0 -28px;
+  border-radius: 50%;
+  background: rgba(240, 221, 178, 0.6);
+  border: 2px solid rgba(16, 22, 30, 0.5);
+}
+.tc-helm.over .tc-helm-knob { background: rgba(201, 168, 76, 0.85); }
+.tc-helm-spring {
+  position: absolute; left: 0; top: 0; height: 36px; min-width: 72px;
+  pointer-events: auto; touch-action: none;
+  border-radius: 18px; border: 2px solid rgba(240, 221, 178, 0.45);
+  background: rgba(10, 16, 24, 0.42); color: #f0ddb2;
+  font: 600 11px/1 system-ui, -apple-system, sans-serif;
+}
+.tc-helm-spring.pressed { background: rgba(201, 168, 76, 0.55); color: #10161e; }
+.tc-sails-up { right: calc(30px + env(safe-area-inset-right)); bottom: calc(110px + env(safe-area-inset-bottom)); }
+.tc-sails-down { right: calc(30px + env(safe-area-inset-right)); bottom: calc(28px + env(safe-area-inset-bottom)); }
+.tc-trim-right { right: calc(104px + env(safe-area-inset-right)); bottom: calc(28px + env(safe-area-inset-bottom)); }
+.tc-trim-left { right: calc(176px + env(safe-area-inset-right)); bottom: calc(28px + env(safe-area-inset-bottom)); }
+.tc-anchor { right: calc(104px + env(safe-area-inset-right)); bottom: calc(110px + env(safe-area-inset-bottom)); }
+.tc-leave { right: calc(176px + env(safe-area-inset-right)); bottom: calc(110px + env(safe-area-inset-bottom)); }
+
+/* Cannon: Fire stays put, ammo chips in a row to its left, Leave above it. */
+.tc-ammo-round { right: calc(112px + env(safe-area-inset-right)); bottom: calc(22px + env(safe-area-inset-bottom)); }
+.tc-ammo-fire { right: calc(176px + env(safe-area-inset-right)); bottom: calc(22px + env(safe-area-inset-bottom)); }
+.tc-ammo-chain { right: calc(240px + env(safe-area-inset-right)); bottom: calc(22px + env(safe-area-inset-bottom)); }
+#touch-controls[data-ctx="cannon"] .tc-leave { right: calc(30px + env(safe-area-inset-right)); bottom: calc(116px + env(safe-area-inset-bottom)); }
+
+/* Swimming: Up where Jump was, Down where Fire was. Tool: Stow where Aim was.
+   Carrying: Drop where Fire was. */
+.tc-swim-up { right: calc(30px + env(safe-area-inset-right)); bottom: calc(116px + env(safe-area-inset-bottom)); }
+.tc-swim-down { right: calc(30px + env(safe-area-inset-right)); bottom: calc(34px + env(safe-area-inset-bottom)); }
+.tc-stow { right: calc(112px + env(safe-area-inset-right)); bottom: calc(22px + env(safe-area-inset-bottom)); }
+.tc-drop { width: 64px; height: 64px; right: calc(28px + env(safe-area-inset-right)); bottom: calc(32px + env(safe-area-inset-bottom)); }
 
 html[data-input-scheme="touch"] #interact-prompt { touch-action: none; -webkit-user-select: none; user-select: none; }
 html[data-input-scheme="touch"] #interact-prompt.pressed { border-color: #c9a84c; }
