@@ -336,6 +336,27 @@ if (TCL) {
     TCL.tapHitsBox(760, 150, box) && !TCL.tapHitsBox(600, 150, box) && !TCL.tapHitsBox(760, 150, null)
     && TCL.TAP_MAX_TRAVEL_PX <= 12 && TCL.TAP_MAX_MS <= 400);
 }
+if (TCL) {
+  // b1-device-02: left-handed layout. The stick owns the RIGHT 45 %, where the
+  // phone minimap sits; a finger that lands on the minimap must get the look
+  // role (so a still tap opens the chart) in every stick context.
+  const W = 844;
+  const mini = { left: 732, top: 6, right: 832, bottom: 106 };
+  const role = TCL.zoneRoleFor;
+  const ok = typeof role === 'function'
+    && role({ x: 780, y: 50, width: W, leftHanded: true, stickOn: true, minimap: mini }) === 'look'
+    && role({ x: 780, y: 300, width: W, leftHanded: true, stickOn: true, minimap: mini }) === 'stick'
+    && role({ x: 100, y: 300, width: W, leftHanded: true, stickOn: true, minimap: mini }) === 'look'
+    && role({ x: 100, y: 300, width: W, leftHanded: false, stickOn: true, minimap: mini }) === 'stick'
+    && role({ x: 780, y: 50, width: W, leftHanded: false, stickOn: true, minimap: mini }) === 'look'
+    && role({ x: 100, y: 300, width: W, leftHanded: false, stickOn: false, minimap: mini }) === 'look';
+  expect('leftHanded on foot: a touch on the minimap is a look (chart tap), below it the stick', ok);
+  // The lefty overlay is mirrored with scaleX(-1); the utility row (Satchel,
+  // Scope, Keg, Special) must NOT follow it under the top-right minimap.
+  const css = (await import('node:fs')).readFileSync(new URL('../src/client/styles/touch.css', import.meta.url), 'utf8');
+  const lefty = /#touch-controls\.tc-lefty \.tc-satchel[^{]*\.tc-special[^{]*\{[^}]*left:\s*auto;[^}]*right:\s*calc\(var\(--tc-ux\)\s*\+\s*env\(safe-area-inset-left\)\)/.test(css);
+  expect('leftHanded: the utility row stays top-left (mirrored right: offset), clear of the minimap', lefty);
+}
 if (WG) {
   // A chart model with MapRenderer's rules: focus = world at the canvas centre,
   // panByClient moves focus by -d/scale, zoomAtClient keeps the anchor fixed

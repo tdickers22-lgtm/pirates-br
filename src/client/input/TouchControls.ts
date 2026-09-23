@@ -63,6 +63,29 @@ export function tapHitsBox(x: number, y: number, box: { left: number; top: numbe
   return !!box && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
 }
 
+/**
+ * Which role a new zone touch takes (b1-device-02). A touch that lands on the
+ * minimap is always a look (a still tap there opens the chart), even where the
+ * stick zone would claim it: in the left-handed layout the stick owns the right
+ * side and the phone minimap sits top-right, so without this a lefty on foot
+ * had no way to open the chart.
+ */
+export function zoneRoleFor(p: {
+  x: number; y: number; width: number; leftHanded: boolean; stickOn: boolean;
+  minimap: { left: number; top: number; right: number; bottom: number } | null;
+}): 'stick' | 'look' {
+  if (!p.stickOn || tapHitsBox(p.x, p.y, p.minimap)) return 'look';
+  const w = p.width || 1;
+  const stickSide = p.leftHanded ? p.x > w * (1 - STICK_ZONE) : p.x < w * STICK_ZONE;
+  return stickSide ? 'stick' : 'look';
+}
+
+function minimapBox(): DOMRect | null {
+  const mini = document.getElementById('minimap-shell');
+  const r = mini && getComputedStyle(mini).visibility !== 'hidden' ? mini.getBoundingClientRect() : null;
+  return r && r.width > 0 ? r : null;
+}
+
 function isFingerLike(e: PointerEvent) {
   return e.pointerType === 'touch' || e.pointerType === 'pen';
 }
@@ -377,11 +400,13 @@ export class TouchControls {
   private onZoneDown(e: PointerEvent) {
     if (!this.active || this.roles.has(e.pointerId)) return;
     e.preventDefault();
-    const w = window.innerWidth || 1;
     const hasStick = [...this.roles.values()].some((r) => r.kind === 'stick');
     const hasLook = [...this.roles.values()].some((r) => r.kind === 'look');
-    const stickSide = this.layout.leftHanded ? e.clientX > w * (1 - STICK_ZONE) : e.clientX < w * STICK_ZONE;
-    if (stickSide && stickEnabled(this.context)) {
+    const kind = zoneRoleFor({
+      x: e.clientX, y: e.clientY, width: window.innerWidth || 1,
+      leftHanded: this.layout.leftHanded, stickOn: stickEnabled(this.context), minimap: minimapBox(),
+    });
+    if (kind === 'stick') {
       if (hasStick) return;
       this.roles.set(e.pointerId, { kind: 'stick', baseX: e.clientX, baseY: e.clientY });
       this.showStick(e.clientX, e.clientY, 0, 0);
@@ -425,9 +450,7 @@ export class TouchControls {
       && e.timeStamp - role.since < TAP_MAX_MS) {
       // The minimap is read-only for fingers (touch.css), so the look pad
       // under it decides: a still, short tap inside its box opens the chart.
-      const mini = document.getElementById('minimap-shell');
-      const r = mini && getComputedStyle(mini).visibility !== 'hidden' ? mini.getBoundingClientRect() : null;
-      if (tapHitsBox(role.startX, role.startY, r && r.width > 0 ? r : null)) this.onMinimapTap?.();
+      if (tapHitsBox(role.startX, role.startY, minimapBox())) this.onMinimapTap?.();
     }
   }
 

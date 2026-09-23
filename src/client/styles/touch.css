@@ -142,11 +142,14 @@ html[data-input-scheme="touch"] canvas { touch-action: none; }
 /* Utility row (b1.4d), top left inside the safe area, clear of the right
    thumb arc and the helm slider: Satchel (supply wheel toggle), Scope
    (spyglass toggle), Keg (hold, release to place), Special (tap). */
-.tc-satchel, .tc-spyglass, .tc-keg, .tc-special { top: calc(12px + env(safe-area-inset-top)); font-size: 11px; }
-.tc-satchel { left: calc(16px + env(safe-area-inset-left)); }
-.tc-spyglass { left: calc(80px + env(safe-area-inset-left)); }
-.tc-keg { left: calc(144px + env(safe-area-inset-left)); }
-.tc-special { left: calc(208px + env(safe-area-inset-left)); }
+.tc-satchel, .tc-spyglass, .tc-keg, .tc-special {
+  top: calc(12px + env(safe-area-inset-top)); font-size: 11px;
+  left: calc(var(--tc-ux) + env(safe-area-inset-left));
+}
+.tc-satchel { --tc-ux: 16px; }
+.tc-spyglass { --tc-ux: 80px; }
+.tc-keg { --tc-ux: 144px; }
+.tc-special { --tc-ux: 208px; }
 
 html[data-input-scheme="touch"] #interact-prompt { touch-action: none; -webkit-user-select: none; user-select: none; }
 html[data-input-scheme="touch"] #interact-prompt.pressed { border-color: #c9a84c; }
@@ -180,9 +183,9 @@ html[data-input-scheme="touch"] #pocket-wheel.visible #pocket-wheel-svg { pointe
     width: 68px; height: 68px;
     right: calc(108px + env(safe-area-inset-right)); bottom: calc(196px + env(safe-area-inset-bottom));
   }
-  .tc-spyglass { left: calc(84px + env(safe-area-inset-left)); }
-  .tc-keg { left: calc(152px + env(safe-area-inset-left)); }
-  .tc-special { left: calc(220px + env(safe-area-inset-left)); }
+  .tc-spyglass { --tc-ux: 84px; }
+  .tc-keg { --tc-ux: 152px; }
+  .tc-special { --tc-ux: 220px; }
 }
 
 /* Settings > Controls (b1.4g). Button size 80-140% rides the CSS scale property
@@ -193,3 +196,11 @@ html[data-input-scheme="touch"] #pocket-wheel.visible #pocket-wheel-svg { pointe
 #touch-controls.tc-lefty .tc-btn,
 #touch-controls.tc-lefty .tc-helm-box,
 #touch-controls.tc-lefty .tc-stick { transform: scaleX(-1); }
+/* The utility row does NOT follow the mirror (b1-device-02): mirrored, it sat
+   under the top-right phone minimap (#hud z 100 over this overlay). In the
+   flipped frame a right: offset lands on the visual left, so it stays top-left
+   in both layouts, on the visual left safe-area inset. */
+#touch-controls.tc-lefty .tc-satchel, #touch-controls.tc-lefty .tc-spyglass,
+#touch-controls.tc-lefty .tc-keg, #touch-controls.tc-lefty .tc-special {
+  left: auto; right: calc(var(--tc-ux) + env(safe-area-inset-left));
+}
