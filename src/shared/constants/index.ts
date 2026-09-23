@@ -944,9 +944,9 @@ export const STORM_PHASES = [
   // dock geometry every match (see STORM_DOCK_COVER_MARGIN) and widens the
   // first ring if a world ever pushes a berth past this number — the constant
   // is the design intent, the runtime check is the guarantee.
-  { waitSec: 150, shrinkSec: 85,  startRadius: 950, endRadius: 836, dmgPerSec:  0.6 },
+  { waitSec: 150, shrinkSec: 85,  startRadius: 950, endRadius: 840, dmgPerSec:  0.6 },
   // Phase 2 — circle tightens, time to sail inward
-  { waitSec: 105, shrinkSec: 55,  startRadius: 836, endRadius: 480, dmgPerSec:  1.3 },
+  { waitSec: 105, shrinkSec: 55,  startRadius: 840, endRadius: 480, dmgPerSec:  1.3 },
   // Phase 3 — urgency kicks in
   { waitSec:  80, shrinkSec: 45,  startRadius: 480, endRadius: 320, dmgPerSec:  2.2 },
   // Phase 4 — getting spicy (60 s wait)
