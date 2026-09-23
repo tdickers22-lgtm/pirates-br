@@ -22,6 +22,13 @@ The owner signs in once (step 1). Agents run the rest only when their lane promp
 authenticated `fly` (PLAN rule 8). The Air has no local Docker daemon: builds use Fly's remote
 builder (`--remote-only`).
 
+Steps 2-8 are one resumable program: `node scripts/fly-launch.mjs` (b1.3c). It grades each side
+effect (one machine, the VM size, a passing check, the volume attached, a green smoke, the soak
+budget) and stops with exit 3 when an owner step is needed (O1 sign-in, O2 billing). Resume with
+`--from <step>`; `--dry-run` prints the plan; `--self-test` checks the pure parts offline. The
+soak step keeps HEALTH_KEY in `~/.config/pirates-br/fly-<app>.env` (0600), because Fly never hands
+a secret back. The commands below are what it runs.
+
 1. **Sign in (owner, once).** `fly auth login`, sign in in the browser tab it opens.
    Check: `fly auth whoami` prints his email.
 2. **Create the app.**
