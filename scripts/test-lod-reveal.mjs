@@ -149,6 +149,8 @@ const CLI = new Set(process.argv.slice(2));
 const STORY_ONLY = CLI.has('--story-only');
 const MUTATE_EAGER = CLI.has('--mutate-eager');
 const STORY_SWAP_LIMIT_MS = 2000;
+/** The same 2 s at 60 Hz, in frames: the graded bar (see INSTALL_FRAMES). */
+const STORY_SWAP_LIMIT_FRAMES = 120;
 
 async function bootStoryPage(query) {
   const p = await browser.newPage({ viewport: VIEWPORT });
@@ -217,7 +219,23 @@ const SLOT_STATE = (uuid) => {
   if (!proxy) return { gone: true };
   const name = proxy.name.replace(/^story-proxy-/, '');
   const real = proxy.parent?.children.find((c) => c !== proxy && c.name === name && !c.isInstancedMesh) ?? null;
-  return { real: !!real, proxyVisible: proxy.visible };
+  // HELD: a detail reveal (IslandDetailWarmup) hides every mesh under the
+  // island when the camera crosses the detail radius and lets them out over
+  // frames, the story proxy with the rest of the trim. That is the island's
+  // staged reveal, not a proxy -> LOD0 gap, so the gap poll excludes it.
+  let held = false;
+  for (const job of window.__piratesBR.lodWarmer?.reveals?.values() ?? []) {
+    const i = job.units.findIndex((u) => u.mesh === proxy);
+    if (i >= job.cursor) held = true;
+  }
+  return { real: !!real, proxyVisible: proxy.visible, held, frames: window.__storyFrames ?? 0 };
+};
+/** A rAF counter: the swap latency is graded in FRAMES (software GL runs a
+ *  frame ~10x slower than any GPU; wall-clock is printed, not graded). */
+const INSTALL_FRAMES = () => {
+  window.__storyFrames = 0;
+  const tick = () => { window.__storyFrames += 1; requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
 };
 
 async function approachSlot(p, slot, edge) {
@@ -238,13 +256,24 @@ async function approachSlot(p, slot, edge) {
 async function waitSlot(p, uuid, want, limitMs) {
   const t0 = Date.now();
   let gap = false;
+  let double = false;
+  let f0 = null;
   while (Date.now() - t0 < limitMs) {
     const st = await p.evaluate(SLOT_STATE, uuid);
-    if (!st.gone && !st.real && !st.proxyVisible) gap = true;
-    if (!st.gone && st.real === want) return { ms: Date.now() - t0, gap };
+    if (f0 === null) f0 = st.frames ?? 0;
+    if (!st.gone && !st.real && !st.proxyVisible && !st.held) gap = true;
+    if (!st.gone && st.real && st.proxyVisible) double = true;
+    if (!st.gone && st.real === want) {
+      // Settle a few frames: a reveal releasing the proxy after the swap is
+      // the double draw this poll exists to catch.
+      await sleep(600);
+      const after = await p.evaluate(SLOT_STATE, uuid);
+      if (!after.gone && after.real && after.proxyVisible) double = true;
+      return { ms: Date.now() - t0, frames: st.frames - f0, gap, double };
+    }
     await sleep(100);
   }
-  return { ms: Infinity, gap };
+  return { ms: Infinity, frames: Infinity, gap, double };
 }
 
 async function storyPhase() {
@@ -270,11 +299,13 @@ async function storyPhase() {
     const outside = await d.p.evaluate(SLOT_STATE, slot.uuid);
     expect(`${slot.name}: the proxy stands alone at 800 m from the edge`, outside.proxyVisible && !outside.real,
       JSON.stringify(outside));
+    await d.p.evaluate(INSTALL_FRAMES);
     await approachSlot(d.p, slot, 540);
     const swap = await waitSlot(d.p, slot.uuid, true, 15_000);
-    console.log(`    ${slot.name}: proxy -> LOD0 ${swap.ms} ms after crossing 600 m (nearest other island edge ${Math.round(other)} m)`);
-    expect(`${slot.name}: proxy -> LOD0 within ${STORY_SWAP_LIMIT_MS} ms of crossing 600 m`, swap.ms <= STORY_SWAP_LIMIT_MS, `${swap.ms} ms`);
-    expect(`${slot.name}: no poll saw neither proxy nor LOD0 drawn (no pop gap)`, !swap.gap);
+    console.log(`    ${slot.name}: proxy -> LOD0 ${swap.frames} frames / ${swap.ms} ms after crossing 600 m (nearest other island edge ${Math.round(other)} m; ms advisory under software GL, bar ${STORY_SWAP_LIMIT_MS} ms)`);
+    expect(`${slot.name}: proxy -> LOD0 within ${STORY_SWAP_LIMIT_FRAMES} frames (${STORY_SWAP_LIMIT_MS} ms at 60 Hz) of crossing 600 m`, swap.frames <= STORY_SWAP_LIMIT_FRAMES, `${swap.frames} frames, ${swap.ms} ms`);
+    expect(`${slot.name}: no poll saw neither proxy nor LOD0 drawn outside a reveal hold (no pop gap)`, !swap.gap);
+    expect(`${slot.name}: never proxy AND LOD0 drawn together (no double draw)`, !swap.double);
     expect('no page errors (story, desktop)', d.errors.length === 0, d.errors.slice(0, 3).join('\n     '), false);
   } finally {
     await d.p.close();
@@ -304,6 +335,7 @@ async function storyPhase() {
     expect(`phone: ${slot.name} LOD0 evicted beyond 1.5 km, proxy drawn again`, out.ms < Infinity && back.proxyVisible, JSON.stringify(back));
     expect(`phone: ${slot.name} LOD0 fetched again on the next approach`, in2.ms < Infinity && n2 > n1, `fetches ${n1} -> ${n2}`);
     expect('no pop gap on the phone', !in1.gap && !out.gap && !in2.gap);
+    expect('no double draw on the phone', !in1.double && !out.double && !in2.double);
     expect('no page errors (story, phone)', m.errors.length === 0, m.errors.slice(0, 3).join('\n     '), false);
   } finally {
     await m.p.close();

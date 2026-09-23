@@ -177,6 +177,11 @@ export function makeStoryResidency(opts: {
   let pending = false;
   let gen = 0;
   return (edgeMetres: number) => {
+    // A detail reveal that held the proxy when it began gives the proxy its
+    // old `visible` back when it lets it out (IslandDetailWarmup), which after
+    // a swap is a double draw of proxy and LOD0. The swap owns that flag, so
+    // it is re-asserted on every update (same frame, before the draw).
+    if (real && proxy.visible) proxy.visible = false;
     if (edgeMetres < fetchM) {
       if (real || pending) return;
       pending = true;
