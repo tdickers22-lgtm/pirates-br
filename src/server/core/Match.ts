@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import type {
-  Crew, GameState, HullSections, InteractIntent, InteractRefusalReason, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
+  Crew, GameState, HullSections, InteractRefusalReason, InteractRefusedIntent, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
 } from '../../shared/types/index.js';
 import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, WRECK_SITES, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
 import { warmIslandGrounds } from '../../shared/terrainGrid.js';
@@ -5694,7 +5694,7 @@ export class Match {
   /** Answer a dead [X] — one short nudge per press storm, to the presser only. */
   private sendInteractRefused(
     client: ConnectedClient,
-    intent: InteractIntent,
+    intent: InteractRefusedIntent,
     reason: InteractRefusalReason = this.lastRefusalReason,
   ) {
     if (this.t - client.lastRefusalAt < INTERACT_REFUSAL_INTERVAL) return;

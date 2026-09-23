@@ -1392,10 +1392,13 @@ export type InteractIntent =
   | 'bail'
   | 'revive'
   | 'cannon'
-  | 'ammo'
-  /** Not an [X]: R with an empty reserve, or a trigger the truce holds (b1.6e). */
-  | 'reload'
-  | 'fire';
+  | 'ammo';
+
+/** What an interact_refused names: every [X] intent, plus the two refusals that
+ *  are not an [X] (b1.6e): R with an empty reserve, or a trigger the truce holds.
+ *  Kept out of InteractIntent so the client can never SEND them as an intent and
+ *  the wire whitelist (VALID_INTERACT_INTENTS) stays equal to the union. */
+export type InteractRefusedIntent = InteractIntent | 'reload' | 'fire';
 
 /** Why an [X] the server heard could not be granted. */
 export type InteractRefusalReason =
@@ -1424,7 +1427,7 @@ export type InteractRefusalReason =
 /** Server → client: your [X] was heard and refused. Drives one short amber feed
  *  line plus a dull thud, so a dead press is never silent. */
 export interface InteractRefusedPayload {
-  intent: InteractIntent;
+  intent: InteractRefusedIntent;
   reason: InteractRefusalReason;
 }
 
