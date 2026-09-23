@@ -139,11 +139,6 @@
         <input type="checkbox" id="settings-mute" style="transform:scale(1.4);margin-left:8px;" />
       </div>
       <div class="lobby-row">
-        <span class="label">Mouse Sensitivity</span>
-        <input type="range" id="settings-sensitivity" min="20" max="200" step="5" value="100" style="flex:1;" />
-        <span id="settings-sensitivity-val" style="font-family:monospace;color:#f4e2b2;min-width:36px;text-align:right;">1.0×</span>
-      </div>
-      <div class="lobby-row">
         <span class="label">Graphics</span>
         <select id="settings-quality" style="flex:1;background:rgba(10,18,28,0.72);color:#f4e2b2;border:1px solid rgba(126,172,220,0.28);border-radius:4px;padding:5px 8px;font-family:inherit;font-size:0.8rem;">
           <option value="auto">Auto — protects frame rate</option>
@@ -153,6 +148,8 @@
         </select>
       </div>
       <div id="settings-quality-note" style="font-size:0.7rem;color:#7f92a8;line-height:1.5;letter-spacing:0.03em;margin:-4px 0 6px 0;"></div>
+      <!-- Settings > Controls (look speeds, invert Y, aim assist, touch layout, rebinding): src/client/menu/ControlsSettings.ts -->
+      <div id="settings-controls-mount"></div>
       <div id="settings-controls-block" style="font-size:0.74rem;color:#7f92a8;line-height:1.6;letter-spacing:0.04em;margin-top:6px;">
         <div><strong style="color:#9ec0e5;">Controls</strong></div>
         <!-- Generated from src/shared/bindings.ts for the active device (InputGlyphs.renderGlyphs). -->

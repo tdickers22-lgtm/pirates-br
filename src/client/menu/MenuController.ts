@@ -9,6 +9,7 @@ import type { SoundEngine } from '../audio/SoundEngine.js';
 import type { InputManager } from '../input/InputManager.js';
 import { openOnboardingCards } from '../ui/OnboardingCards.js';
 import { installModalStack, modalStack } from '../ui/ModalStack.js';
+import { mountControlsSettings } from './ControlsSettings.js';
 import {
   classifyRenderer, decideRenderQuality, loadQualityPreference, parseRenderQuality, renderQualityLabel,
   saveAutoTierCeiling, saveQualityPreference,
@@ -26,7 +27,6 @@ type MenuPanel = 'main' | 'lobby' | 'queue' | 'settings' | 'howto';
 interface PersistedSettings {
   volume: number;       // 0–1
   muted: boolean;
-  sensitivity: number;  // 0.2–2.0
 }
 
 interface MenuControllerOptions {
@@ -89,8 +89,6 @@ export class MenuController {
   private settingsVolumeSlider!: HTMLInputElement;
   private settingsVolumeVal!: HTMLElement;
   private settingsMuteCheckbox!: HTMLInputElement;
-  private settingsSensSlider!: HTMLInputElement;
-  private settingsSensVal!: HTMLElement;
   private settingsQualitySelect!: HTMLSelectElement;
   private settingsQualityNote!: HTMLElement;
   private nameInput!: HTMLInputElement;
@@ -231,8 +229,8 @@ export class MenuController {
     this.settingsVolumeSlider = this.must<HTMLInputElement>('settings-volume');
     this.settingsVolumeVal = this.must('settings-volume-val');
     this.settingsMuteCheckbox = this.must<HTMLInputElement>('settings-mute');
-    this.settingsSensSlider = this.must<HTMLInputElement>('settings-sensitivity');
-    this.settingsSensVal = this.must('settings-sensitivity-val');
+    // Look speeds, invert Y, aim assist, touch layout and rebinding (b1.4g).
+    mountControlsSettings(document.getElementById('settings-controls-mount'), this.inputMgr ?? undefined);
     this.settingsQualitySelect = this.must<HTMLSelectElement>('settings-quality');
     this.settingsQualityNote = this.must('settings-quality-note');
 
@@ -576,13 +574,6 @@ export class MenuController {
       this.persistSettings({ muted });
     });
 
-    this.settingsSensSlider.addEventListener('input', () => {
-      const pct = Number(this.settingsSensSlider.value);
-      const sens = pct / 100;
-      this.settingsSensVal.textContent = sens.toFixed(2) + '×';
-      this.inputMgr?.setSensitivity(sens);
-      this.persistSettings({ sensitivity: sens });
-    });
 
     // GRAPHICS TIER. The renderer reads this at construction, so a change here
     // lands on the next load rather than this one — say so, plainly, instead of
@@ -808,7 +799,7 @@ export class MenuController {
   }
 
   private loadSettings(): PersistedSettings {
-    const fallback: PersistedSettings = { volume: 0.55, muted: false, sensitivity: 1.0 };
+    const fallback: PersistedSettings = { volume: 0.55, muted: false };
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
       if (!raw) return fallback;
@@ -816,9 +807,6 @@ export class MenuController {
       return {
         volume: typeof parsed.volume === 'number' ? clamp01(parsed.volume) : fallback.volume,
         muted: !!parsed.muted,
-        sensitivity: typeof parsed.sensitivity === 'number'
-          ? Math.max(0.2, Math.min(2.0, parsed.sensitivity))
-          : fallback.sensitivity,
       };
     } catch { return fallback; }
   }
@@ -943,14 +931,11 @@ export class MenuController {
     this.settingsVolumeSlider.value = String(Math.round(s.volume * 100));
     this.settingsVolumeVal.textContent = String(Math.round(s.volume * 100));
     this.settingsMuteCheckbox.checked = s.muted;
-    this.settingsSensSlider.value = String(Math.round(s.sensitivity * 100));
-    this.settingsSensVal.textContent = s.sensitivity.toFixed(2) + '×';
     this.labelCappedTiers();
     this.settingsQualitySelect.value = loadQualityPreference();
     this.renderQualityNote(false);
     this.audio.setVolume(s.volume);
     this.audio.setMuted(s.muted);
-    this.inputMgr?.setSensitivity(s.sensitivity);
   }
 
   private renderLobby(payload: LobbyUpdatePayload): void {
