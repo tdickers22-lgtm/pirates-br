@@ -31,9 +31,21 @@ FAILS (exit 1, no silent "done") if a rock gained any boundary loop or any
 asset kept under 92% of its surface. scripts/test-far-lod-integrity.mjs runs
 the same census on the shipped files without Blender.
 
+THE BASE IS RE-SNAPPED (2026-09-23, b1.1a). An equal-area card is scaled about
+its centre, so a curved sheet whose flat extent is smaller than its surface
+(a drooping petal, a bent stem blade) comes out LARGER than the sheet and can
+reach below the ground the asset stands on: wildflowers_far's base sat at
+-0.135 m against its near sibling's 0.0, i.e. the far flowers poked through
+the terrain and test-asset-bounds went red. After decimation every far vertex
+below the SOURCE's lowest point is lifted onto it (world space, so a node
+transform cannot hide it), and verify() fails the build if a far base still
+sits under its source base.
+
 Run headless, one process, never while a browser probe runs:
     /Applications/Blender.app/Contents/MacOS/Blender --factory-startup -b -P scripts/blender/build_far_lods.py
 BR_EXPORT_DIR redirects the output (defaults to public/assets/models).
+BR_FAR_ONLY=wildflowers,bush builds only the named assets (a lane that owns one
+far file ships one far file).
 """
 import math
 import os
@@ -48,6 +60,7 @@ from mathutils import Vector
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from _helpers import EXPORT_DIR  # noqa: E402
+EXPORT_DIR = os.environ.get('BR_EXPORT_DIR') or EXPORT_DIR  # the docstring's promise; _helpers hard-codes it
 
 SRC_DIR = os.path.join(HERE, '..', '..', 'public', 'assets', 'models')
 
@@ -295,6 +308,34 @@ def decimate_per_part(obj, ratio, sheets):
     return obj
 
 
+def world_min_z(objs):
+    zmin = math.inf
+    for obj in objs:
+        m = obj.matrix_world
+        for v in obj.data.vertices:
+            z = (m @ v.co).z
+            if z < zmin:
+                zmin = z
+    return zmin
+
+
+def snap_base(obj, zmin):
+    """Lift every vertex under the source's lowest point onto it (world
+    space). Returns how many moved. See THE BASE IS RE-SNAPPED above."""
+    m = obj.matrix_world
+    inv = m.inverted()
+    moved = 0
+    for v in obj.data.vertices:
+        w = m @ v.co
+        if w.z < zmin - 1e-6:
+            w.z = zmin
+            v.co = inv @ w
+            moved += 1
+    if moved:
+        obj.data.update()
+    return moved
+
+
 def build(name, ratio, sheets):
     wipe()
     src = os.path.abspath(os.path.join(SRC_DIR, f'{name}.glb'))
@@ -306,6 +347,8 @@ def build(name, ratio, sheets):
     far_stats = {'tris': 0, 'area': 0.0, 'loops': 0}
     flat_faces = 0
     faces_total = 0
+    src_base = world_min_z(meshes)
+    snapped = 0
     for obj in meshes:
         me = obj.data
         flags = flat_face_flags(me)
@@ -320,6 +363,7 @@ def build(name, ratio, sheets):
         for k in src_stats:
             src_stats[k] += s[k]
         decimate_per_part(obj, ratio, sheets)
+        snapped += snap_base(obj, src_base)
         f = surface_stats(obj.data)
         for k in far_stats:
             far_stats[k] += f[k]
@@ -350,6 +394,7 @@ def build(name, ratio, sheets):
         'name': name, 'ratio': ratio, 'sheets': sheets, 'path': path,
         'flat_share': flat_faces / max(1, faces_total),
         'src': src_stats, 'far': far_stats,
+        'src_base': src_base, 'far_base': world_min_z(meshes), 'snapped': snapped,
     }
 
 
@@ -357,7 +402,7 @@ def verify(rows):
     """FAIL the build on the two things a picture would show: a rock with an
     open edge, or a far surface that lost more than 8% of its area."""
     print('')
-    print(f"{'asset':>14} {'ratio':>5} {'sheet':>5} {'flat':>5} {'src tris':>8} {'far tris':>8} {'keep':>5} {'src loops':>9} {'far loops':>9} {'src area':>9} {'far area':>9} {'area%':>6}  verdict")
+    print(f"{'asset':>14} {'ratio':>5} {'sheet':>5} {'flat':>5} {'src tris':>8} {'far tris':>8} {'keep':>5} {'src loops':>9} {'far loops':>9} {'src area':>9} {'far area':>9} {'area%':>6} {'base':>7} {'snap':>5}  verdict")
     failed = []
     for r in rows:
         s, f = r['src'], r['far']
@@ -372,15 +417,22 @@ def verify(rows):
             problems.append(f'area {area_keep:.0%} < {MIN_AREA_KEEP:.0%}')
         if keep > 0.4:
             problems.append(f'keeps {keep:.0%} of the triangles (> 40%)')
+        if r['far_base'] < r['src_base'] - 1e-4:
+            problems.append(f"far base {r['far_base']:.3f} under source base {r['src_base']:.3f}")
         verdict = 'ok' if not problems else 'FAIL: ' + '; '.join(problems)
         if problems:
             failed.append(r['name'])
         sheets = '-' if r['sheets'] is None else r['sheets']
-        print(f"{r['name']:>14} {r['ratio']:>5.2f} {sheets:>5} {r['flat_share']:>5.0%} {s['tris']:>8} {f['tris']:>8} {keep:>5.0%} {s['loops']:>9} {f['loops']:>9} {s['area']:>9.2f} {f['area']:>9.2f} {area_keep:>6.0%}  {verdict}")
+        print(f"{r['name']:>14} {r['ratio']:>5.2f} {sheets:>5} {r['flat_share']:>5.0%} {s['tris']:>8} {f['tris']:>8} {keep:>5.0%} {s['loops']:>9} {f['loops']:>9} {s['area']:>9.2f} {f['area']:>9.2f} {area_keep:>6.0%} {r['far_base']:>7.3f} {r['snapped']:>5}  {verdict}")
     return failed
 
 
-rows = [build(asset, ratio, sheets) for asset, (ratio, sheets) in FAR.items()]
+ONLY = {n.strip() for n in os.environ.get('BR_FAR_ONLY', '').split(',') if n.strip()}
+unknown = ONLY - set(FAR)
+if unknown:
+    print(f"BR_FAR_ONLY names no far asset: {', '.join(sorted(unknown))}")
+    sys.exit(1)
+rows = [build(asset, ratio, sheets) for asset, (ratio, sheets) in FAR.items() if not ONLY or asset in ONLY]
 failed = verify(rows)
 if failed:
     print(f"FAR LODS FAILED: {', '.join(failed)}")
