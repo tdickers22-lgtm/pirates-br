@@ -88,6 +88,34 @@ const INIT = () => {
   const w = window;
   w.__load = { playReadyAt: null, menuVisibleAt: null, phases: [] };
   let lastText = '';
+  // Socket-worker milestones (row A diagnosis): spawn, first message (the
+  // socket is open), first 'msg' (welcome) as seen by the main thread.
+  const W = w.Worker;
+  if (W) {
+    w.Worker = function (...a) {
+      const wk = new W(...a);
+      const mark = (k) => w.__load.phases.push([Math.round(performance.now()), `(worker ${k})`]);
+      mark('spawned');
+      let seen = 0;
+      wk.addEventListener('message', (e) => { if (seen < 2) { seen += 1; mark(`message ${e.data?.k ?? '?'}`); } });
+      return wk;
+    };
+    w.Worker.prototype = W.prototype;
+  }
+  // Long tasks >= 250 ms before Play is tappable (row A diagnosis): start + duration.
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (w.__load.playReadyAt == null && e.duration >= 250) w.__load.phases.push([Math.round(e.startTime), `(long task ${Math.round(e.duration)} ms)`]);
+      }
+    }).observe({ type: 'longtask', buffered: true });
+  } catch { /* no longtask API */ }
+  const rafWrap = w.requestAnimationFrame;
+  let rafMarks = 0;
+  w.requestAnimationFrame = (cb) => rafWrap.call(w, (ts) => {
+    const t0 = performance.now(); cb(ts); const d = performance.now() - t0;
+    if (d >= 250 && rafMarks < 4 && w.__load.playReadyAt == null) { rafMarks += 1; w.__load.phases.push([Math.round(t0), `(rAF callback ${Math.round(d)} ms)`]); }
+  });
   const poll = () => {
     if (w.__load.playReadyAt != null) return;
     const now = performance.now();
@@ -202,6 +230,19 @@ try {
     const cdp = await throttle(page);
     const net = { requests: 0, bytes: 0 };
     cdp.on('Network.loadingFinished', (e) => { net.requests += 1; net.bytes += e.encodedDataLength ?? 0; });
+    // Request timeline (diagnosis for row A variance): url, start, end, KB,
+    // relative to the navigation's first request, printed for every fetch
+    // that STARTED before Play was tappable.
+    const reqs = new Map();
+    let t0 = null;
+    cdp.on('Network.requestWillBeSent', (e) => {
+      if (t0 == null) t0 = e.timestamp;
+      reqs.set(e.requestId, { url: e.request.url.replace(BASE, ''), start: e.timestamp, end: null, kb: 0 });
+    });
+    cdp.on('Network.loadingFinished', (e) => { const r = reqs.get(e.requestId); if (r) { r.end = e.timestamp; r.kb = (e.encodedDataLength ?? 0) / 1024; } });
+    cdp.on('Network.webSocketCreated', (e) => { if (t0 != null) reqs.set(e.requestId, { url: `WS ${e.url.replace(/^ws:\/\/[^/]+/, '')}`, start: null, end: null, kb: 0, wsCreated: true }); });
+    cdp.on('Network.webSocketWillSendHandshakeRequest', (e) => { const r = reqs.get(e.requestId); if (r) r.start = e.timestamp; });
+    cdp.on('Network.webSocketHandshakeResponseReceived', (e) => { const r = reqs.get(e.requestId); if (r) r.end = e.timestamp; });
     await page.goto(`${BASE}/?server=${PORT}`, { waitUntil: 'commit', timeout: 60_000 });
     await page.waitForFunction(() => window.__load?.playReadyAt != null, null, { timeout: 60_000, polling: 100 })
       .catch(() => null);
@@ -211,6 +252,14 @@ try {
     out.load = { playClickableMs: clickable && Math.round(clickable), menuVisibleMs: t.menuVisibleAt && Math.round(t.menuVisibleAt), requests: snap.requests, encodedKB: Math.round(snap.bytes / 1024), phases: t.phases };
     console.log(`  A  menu up (connected) at ${out.load.menuVisibleMs ?? 'never'} ms, Play tappable at ${out.load.playClickableMs ?? 'never'} ms; ${snap.requests} requests, ${out.load.encodedKB} KB on the wire by then (or by the 60 s timeout)`);
     for (const [ms, text] of t.phases) console.log(`       ${String(ms).padStart(6)} ms  ${text}`);
+    if (t0 != null) {
+      const rel = (x) => (x == null ? '     -' : String(Math.round((x - t0) * 1000)).padStart(6));
+      const rows = [...reqs.values()].filter((r) => r.start != null && (clickable == null || (r.start - t0) * 1000 <= clickable))
+        .sort((a, b) => a.start - b.start);
+      out.load.timeline = rows.map((r) => ({ url: r.url, startMs: Math.round((r.start - t0) * 1000), endMs: r.end == null ? null : Math.round((r.end - t0) * 1000), kb: Math.round(r.kb) }));
+      console.log(`     requests started before Play was tappable (${rows.length}; ms from the first request):`);
+      for (const r of rows) console.log(`       ${rel(r.start)} -> ${rel(r.end)}  ${String(Math.round(r.kb)).padStart(5)} KB  ${r.url.slice(0, 90)}`);
+    }
     expect(`Play clickable within ${BUDGET.playClickableMs} ms on the throttled 4G phone (${out.load.playClickableMs ?? 'never'} ms)`,
       clickable != null && clickable <= BUDGET.playClickableMs);
     expect('no page errors during the cold load', errors.length === 0, errors.join(' | '));

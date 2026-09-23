@@ -1721,11 +1721,20 @@ export class Game {
   }
 
   /** Lets the browser paint `setLoading` before the next long synchronous chunk (main-thread init was freezing the bar). */
+  /** Let the loading text/bar paint between boot steps. One frame, then resume
+   *  from a task queued in that frame's rAF (it runs after the paint) instead of
+   *  waiting out a whole second frame, and never longer than 100 ms: boot used to
+   *  park on paint cadence (two full frames per step, ~8 steps), which is ~0.5 s
+   *  on a low-power 30 Hz phone, over a second on a slow compositor
+   *  (throttled-load-probe row A: 'Opening crew waters' -> 'Finding the Reach'
+   *  alone took 150-1230 ms), and forever in a background tab, where rAF never
+   *  fires. */
   private yieldForLoadingPaint(): Promise<void> {
     return new Promise((resolve) => {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => resolve());
-      });
+      let done = false;
+      const finish = (): void => { if (!done) { done = true; resolve(); } };
+      requestAnimationFrame(() => { setTimeout(finish, 0); });
+      setTimeout(finish, 100);
     });
   }
 
