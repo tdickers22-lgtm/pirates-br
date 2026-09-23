@@ -1,0 +1,35 @@
+# CI (online-04, b1.3b): every push and PR gets the typecheck and the logic tier.
+# No browser suites here (they need GPU/SwiftShader Chromium and a stack on
+# 3101/8091); the batch gates run those on the owner's machine.
+name: ci
+on:
+  push:
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  logic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # The static-serving suites grade dist/ (brotli siblings, build id).
+      - run: npm run build
+      - run: node scripts/run-all-tests.mjs --logic
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logic-results
+          path: test-results/
+          if-no-files-found: ignore

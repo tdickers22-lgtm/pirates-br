@@ -203,11 +203,29 @@ export function check(f, git, { requireMeasured = false } = {}) {
   expect('DEPLOY.md has at least one fly deploy line', mdDeploys.length > 0, `${mdDeploys.length} lines`);
   expect('every DEPLOY.md fly deploy line carries --ha=false (online-02)', badMd.length === 0, badMd.join(' || '));
   expect("DEPLOY.md never says 'fly launch' (it regenerates fly.toml)", !/\b(fly|flyctl)\s+launch\b/.test(f.deployMd));
-  if (f.deployYml != null) {
-    const ymlDeploys = deployLines(f.deployYml);
-    const badYml = ymlDeploys.filter((l) => !/--ha=false/.test(l));
-    expect('every deploy.yml fly deploy line carries --ha=false', ymlDeploys.length > 0 && badYml.length === 0, badYml.join(' || ') || `${ymlDeploys.length} lines`);
-  }
+  // b1.3b (online-04): the CI deploy path. The workflow must exist from here on.
+  expect('.github/workflows/deploy.yml exists (online-04)', f.deployYml != null);
+  const yml = f.deployYml ?? '';
+  const ymlDeploys = deployLines(yml);
+  const badYml = ymlDeploys.filter((l) => !/--ha=false/.test(l));
+  expect('every deploy.yml fly deploy line carries --ha=false', ymlDeploys.length > 0 && badYml.length === 0, badYml.join(' || ') || `${ymlDeploys.length} lines`);
+  const ylines = yml.split('\n').filter((l) => !/^\s*#/.test(l));
+  const tokenSets = ylines.filter((l) => /FLY_API_TOKEN\s*[:=]/.test(l));
+  const badTok = tokenSets.filter((l) => !/FLY_API_TOKEN\s*[:=]\s*\$\{\{\s*secrets\.FLY_API_TOKEN\s*\}\}\s*$/.test(l));
+  const literal = /FlyV1\s+\S|\bf[mo][12]_[A-Za-z0-9]{8}/.test(yml);
+  expect('deploy.yml: FLY_API_TOKEN only from ${{ secrets.FLY_API_TOKEN }}, never a literal',
+    tokenSets.length > 0 && badTok.length === 0 && !literal, `${badTok.join(' || ')}${literal ? ' literal token in file' : ''}` || `${tokenSets.length} set(s)`);
+  const idx = (re) => ylines.findIndex((l) => re.test(l));
+  const firstDeploy = idx(/\b(fly|flyctl)\s+deploy\b(?!.*--image)/);
+  const waitAt = idx(/node\s+scripts\/wait-idle\.mjs/);
+  const smokeAt = ylines.findIndex((l, i) => i > firstDeploy && /node\s+scripts\/smoke-online\.mjs/.test(l));
+  expect('deploy.yml: wait-idle runs before the deploy (online-11)', waitAt >= 0 && firstDeploy >= 0 && waitAt < firstDeploy, `wait-idle@${waitAt} deploy@${firstDeploy}`);
+  expect('deploy.yml: smoke-online runs after the deploy, against the deployed build id', firstDeploy >= 0 && smokeAt > firstDeploy && /--build-id\s+\$\{\{\s*github\.sha\s*\}\}/.test(ylines[smokeAt] ?? ''), `deploy@${firstDeploy} smoke@${smokeAt}`);
+  const rbAt = ylines.findIndex((l, i) => i > smokeAt && smokeAt >= 0 && /\b(fly|flyctl)\s+deploy\b.*--image/.test(l));
+  const rbIf = rbAt > 0 ? ylines.slice(Math.max(0, rbAt - 4), rbAt).some((l) => /if:.*failure\(\)/.test(l) && /steps\.smoke\.outcome/.test(l)) : false;
+  expect('deploy.yml: a red smoke redeploys the previous image (if: failure() on the smoke step)', rbAt > 0 && rbIf, `rollback@${rbAt}`);
+  expect("deploy.yml: concurrency group 'deploy', never cancelled mid-deploy", /concurrency:\s*\n\s+group:\s*deploy\s*\n\s+cancel-in-progress:\s*false/.test(yml));
+  expect('deploy.yml: triggers are workflow_dispatch + push to release', /workflow_dispatch:/.test(yml) && /push:\s*\n\s+branches:\s*\[\s*release\s*\]/.test(yml));
 
   // image: build-arg, playwright skip, root dropped by the entrypoint
   const df = f.dockerfile;
@@ -251,7 +269,6 @@ for (const r of check(files, realGit, { requireMeasured: REQUIRE_MEASURED })) {
   if (r.ok) console.log(`  ✓ ${r.clause}`);
   else { failed++; console.log(`  ✗ ${r.clause}${r.detail ? `  [${r.detail}]` : ''}`); }
 }
-if (files.deployYml == null) console.log('  (.github/workflows/deploy.yml absent: its --ha=false lint arms when b1.3b adds it)');
 const row = parseCapacityRow(files.deployMd);
 if (row?.measuredAtCommit === 'unmeasured' && !REQUIRE_MEASURED) {
   console.log(`  WARN capacity is UNMEASURED on Fly: MAX_MATCHES held at ${PROVISIONAL_MAX_MATCHES}; b1.3c's remote soak must stamp the row`);
@@ -281,6 +298,13 @@ const MUTATIONS = [
   ["'fly deploy' without --ha=false in DEPLOY.md", { deployMd: `${files.deployMd}\n    fly deploy --remote-only\n` }],
   ["'fly launch' in DEPLOY.md", { deployMd: `${files.deployMd}\nfly launch --no-deploy\n` }],
   ['deploy.yml deploy without --ha=false', { deployYml: '      - run: flyctl deploy --remote-only --build-arg BUILD_ID=${{ github.sha }}\n' }],
+  ['deploy.yml deleted', { deployYml: null }],
+  ['literal fly token in deploy.yml', { deployYml: (files.deployYml ?? '').replace(/FLY_API_TOKEN: \$\{\{ secrets\.FLY_API_TOKEN \}\}/, 'FLY_API_TOKEN: FlyV1 fm2_lJPECAAAAAAAAAAA') }],
+  ['fly token from repo vars, not secrets', { deployYml: (files.deployYml ?? '').replace(/secrets\.FLY_API_TOKEN/, 'vars.FLY_API_TOKEN') }],
+  ['no smoke after the deploy', { deployYml: (files.deployYml ?? '').replace(/^.*node scripts\/smoke-online\.mjs --build-id.*$/m, '        run: echo deployed') }],
+  ['no wait-idle before the deploy', { deployYml: (files.deployYml ?? '').replace(/^.*node scripts\/wait-idle\.mjs.*$/m, '        run: echo go') }],
+  ['no rollback on a red smoke', { deployYml: (files.deployYml ?? '').replace(/^.*--image.*$/m, '          echo no rollback') }],
+  ['deploys can cancel each other', { deployYml: (files.deployYml ?? '').replace(/cancel-in-progress: false/, 'cancel-in-progress: true') }],
   ['Dockerfile never drops root', { dockerfile: files.dockerfile.replace(/^ENTRYPOINT.*$/m, '').replace(/^USER.*$/gm, '') }],
   ['entrypoint falls back to root', { entrypoint: (files.entrypoint ?? '').replace(/exec\s+setpriv[^\n]*/g, 'exec "$@"') }],
   ['no BUILD_ID build-arg', { dockerfile: files.dockerfile.replace(/^ARG BUILD_ID.*$/m, '') }],

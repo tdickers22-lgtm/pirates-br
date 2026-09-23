@@ -521,11 +521,18 @@ export const LOGIC = [
   //                                 pirates_data -> /app/data, auto_stop false, top-level kill_timeout >= drain + 10 s,
   //                                 --ha=false on every deploy line, no app-generator command, root dropped via
   //                                 setpriv, BUILD_ID build-arg, MAX_MATCHES <= the DEPLOY.md capacity row and that
-  //                                 row not older than the last src/server|src/shared commit; 18 in-memory mutations
+  //                                 row not older than the last src/server|src/shared commit; deploy.yml (b1.3b): secret-only
+  //                                 FLY_API_TOKEN, wait-idle -> deploy -> smoke -> rollback, concurrency 'deploy'; 25 in-memory mutations
   //                                 must each FAIL every run (online-01/02/08/19, D8, gap 8, b1.3a). NOT quick on
   //                                 purpose: once the row is measured, any src/server commit turns it red until the
   //                                 next deploy gate re-measures; the live block runs it with --require-measured
   plain('test-deploy-config.mjs'),
+  //   test-smoke-online           — smoke-online.mjs against a real LobbyServer (port 0) behind a fake edge: the
+  //                                 healthy host passes all 8 stages, and the smoke FAILS on a stopped app, a
+  //                                 build id mismatch, a two-machine /health and a bundle without br; wait-idle
+  //                                 idle/unreachable/cap on a fake clock. One real public-queue wait: ~12 s, not
+  //                                 quick (online-04, online-11, b1.3b)
+  tsx('test-smoke-online.mjs'),
 ];
 
 /**
@@ -661,6 +668,10 @@ export const EXCLUDED = {
     'shared instrument library (planScenes, measureScene, sessionQuery) imported by twelve browser suites — a module, not a gate',
   'pacing-sim.mjs':
     'the pacing instrument (lane 0.3 owns it); its gate is test-pacing-curve, opt-in under PACING=1',
+  'smoke-online.mjs':
+    'the post-deploy smoke against a LIVE URL (deploy.yml, the batch gate live block); its offline gate is test-smoke-online (b1.3b)',
+  'wait-idle.mjs':
+    'deploy.yml step: polls the live /health until no match runs (20 min cap); graded by test-smoke-online section F (b1.3b)',
 };
 
 export const ALL = [
