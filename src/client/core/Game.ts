@@ -2014,7 +2014,11 @@ export class Game {
       close.setAttribute('aria-label', 'Close the chart');
       close.style.cssText = 'min-width:56px;min-height:44px;margin-left:auto;pointer-events:auto;'
         + 'background:rgba(20,14,8,0.8);color:#f3e2b8;border:1px solid #b08a4a;border-radius:8px;font:inherit;cursor:pointer;';
-      close.addEventListener('click', () => this.toggleMap(false));
+      // pointerup, not click: a finger's click is suppressed by the page's
+      // touch preventDefault (measured: the tap landed, the chart stayed up).
+      // click with detail 0 is keyboard activation (Enter/Space on focus).
+      close.addEventListener('pointerup', (e) => { e.preventDefault(); if (this.map.mapOpen) this.toggleMap(false); });
+      close.addEventListener('click', (e) => { if (e.detail === 0 && this.map.mapOpen) this.toggleMap(false); });
       meta.appendChild(close);
     }
     // Tapping the minimap opens the chart (touch; the corner map is read-only
