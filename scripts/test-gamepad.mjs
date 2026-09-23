@@ -164,11 +164,12 @@ try {
   expect('RT rumbles the pad with the fire pulse (dual-rumble 12 ms)', rumble.some((r) => r.type === 'dual-rumble' && r.duration === 12), JSON.stringify(rumble));
 
   await startLog();
+  // Wait on the page's own state, not a timer: one SwiftShader frame can take
+  // longer than a human's LB press (run 3 read open=false at 300 ms).
   await setButton(4, true);
-  await sleep(300);
-  const open = await page.evaluate(() => window.__piratesBR.input.isSupplyWheelOpen());
+  const open = await page.waitForFunction(() => window.__piratesBR.input.isSupplyWheelOpen(), null, { timeout: budget(10_000) }).then(() => true, () => false);
   await setAxes([0, 0, 1, 0]);
-  await sleep(400);
+  await page.waitForFunction(() => window.__piratesBR.supplyWheel?.hoverSlot === 3, null, { timeout: budget(10_000) }).catch(() => {});
   const hover = await page.evaluate(() => window.__piratesBR.supplyWheel?.hoverSlot ?? null);
   await page.screenshot({ path: `${OUT}/gamepad-wheel.png` }).catch(() => {});
   await setAxes([0, 0, 0, 0]);
