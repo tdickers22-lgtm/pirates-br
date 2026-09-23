@@ -1,0 +1,17 @@
+{
+  "generatedBy": "scripts/build-credits.mjs (do not hand-edit; add rows to a LICENSES.md and rerun)",
+  "engine": [
+    {
+      "name": "three.js",
+      "license": "MIT",
+      "source": "https://threejs.org"
+    },
+    {
+      "name": "ws",
+      "license": "MIT",
+      "source": "https://github.com/websockets/ws"
+    }
+  ],
+  "sources": [],
+  "rows": []
+}

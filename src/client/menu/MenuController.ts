@@ -22,7 +22,7 @@ import {
 const STORAGE_KEY = 'piratesBR.name';
 const SETTINGS_KEY = 'piratesBR.settings';
 
-type MenuPanel = 'main' | 'lobby' | 'queue' | 'settings' | 'howto';
+type MenuPanel = 'main' | 'lobby' | 'queue' | 'settings' | 'howto' | 'credits';
 
 interface PersistedSettings {
   volume: number;       // 0–1
@@ -81,6 +81,8 @@ export class MenuController {
   private panelQueue!: HTMLElement;
   private panelSettings!: HTMLElement;
   private panelHowto!: HTMLElement;
+  private panelCredits!: HTMLElement;
+  private creditsLoaded = false;
   private howtoBtn!: HTMLButtonElement;
   private howtoBackBtn!: HTMLButtonElement;
   private howtoControls!: HTMLElement;
@@ -220,6 +222,7 @@ export class MenuController {
 
     this.panelSettings = this.must('menu-panel-settings');
     this.panelHowto = this.must('menu-panel-howto');
+    this.panelCredits = this.must('menu-panel-credits');
     this.howtoBtn = this.must<HTMLButtonElement>('menu-howto-btn');
     this.howtoBackBtn = this.must<HTMLButtonElement>('howto-back-btn');
     this.howtoControls = this.must('howto-controls');
@@ -260,7 +263,9 @@ export class MenuController {
       const raw = normalisePartyCode(params.get('party') ?? '');
       if (isPartyCode(raw)) {
         this.pendingPartyJoin = raw;
-        this.flashStatus(`Crew invite ${raw} — enter your pirate name to join.`, false);
+        // One tap (online-16): a first-time invitee gets an auto Pirate#### name
+        // on welcome and joins at once; the name stays editable on the menu.
+        this.flashStatus(`Joining crew ${raw}…`, false);
       }
       // Strip the param so refreshes don't re-fire and so a copied URL stays clean post-join.
       if (params.has('party')) {
@@ -405,7 +410,7 @@ export class MenuController {
     const submitName = (autoName = false) => {
       let name = this.nameInput.value.trim();
       if (!name && autoName) {
-        name = `Pirate${Math.floor(1000 + Math.random() * 9000)}`;
+        name = autoPirateName();
         this.nameInput.value = name;
       }
       if (!name) {
@@ -481,15 +486,9 @@ export class MenuController {
       if (e.key === 'Enter') submitJoin();
     });
 
-    // Lobby — copy a full invite URL so friends can one-click join.
-    this.lobbyCopyBtn.addEventListener('click', () => {
-      const code = this.lobbyCode.textContent ?? '';
-      if (!code || code === '----') return;
-      const url = this.buildInviteUrl(code);
-      void navigator.clipboard?.writeText(url).catch(() => {});
-      this.lobbyCopyBtn.textContent = 'Copied!';
-      window.setTimeout(() => { this.lobbyCopyBtn.textContent = 'Copy Link'; }, 1200);
-    });
+    // Lobby invite (online-16): the share sheet on phones/iPad, an HONEST copy
+    // elsewhere. 'Copied!' used to show even when the clipboard refused.
+    this.lobbyCopyBtn.addEventListener('click', () => this.inviteFriends());
 
     this.lobbyBotSlider.addEventListener('input', () => {
       this.lobbyBotCount.textContent = String(this.lobbyBotSlider.value);
@@ -551,6 +550,8 @@ export class MenuController {
     // How to Play
     this.howtoBtn.addEventListener('click', () => this.showPanel('howto'));
     this.howtoBackBtn.addEventListener('click', () => this.showPanel('main'));
+    this.must<HTMLButtonElement>('menu-credits-btn').addEventListener('click', () => this.showPanel('credits'));
+    this.must<HTMLButtonElement>('credits-back-btn').addEventListener('click', () => this.showPanel('main'));
     // …and the three-card tour, from the one screen a player reads BEFORE the
     // horn. The cards used to be a once-per-browser event with no way back.
     document.getElementById('howto-cards-btn')?.addEventListener('click', () => openOnboardingCards());
@@ -616,6 +617,16 @@ export class MenuController {
         this.network.setName(stored);
         this.nameSubmitted = true;
         this.consumePendingPartyJoin();
+      } else if (this.pendingPartyJoin && !this.nameSubmitted) {
+        // Invite link, no stored name: do not block on typing (online-16).
+        const typed = this.nameInput.value.trim();
+        const name = typed || autoPirateName();
+        this.nameInput.value = name;
+        try { localStorage.setItem(STORAGE_KEY, name); } catch { /* private mode */ }
+        this.network.setName(name);
+        this.nameSubmitted = true;
+        this.consumePendingPartyJoin();
+        if (!typed) this.flashStatus(`Joined as ${name}. Change your name on the main menu any time.`, false);
       }
       if (payload.stats) this.applyStats(payload.stats);
     };
@@ -752,18 +763,21 @@ export class MenuController {
     // ESCAPE AND ENTER BOTH MEAN BACK on the two panels that have a Back
     // button (hud-22). Registered as they open, dropped as they close, so the
     // stack never holds a panel that is not on screen.
-    if (which === 'settings' || which === 'howto') {
+    if (which === 'settings' || which === 'howto' || which === 'credits') {
       const back = () => this.showPanel('main');
       modalStack.open({ id: `menu-panel-${which}`, close: back, confirm: back });
     } else {
       modalStack.notifyClosed('menu-panel-settings');
       modalStack.notifyClosed('menu-panel-howto');
+      modalStack.notifyClosed('menu-panel-credits');
     }
+    if (which === 'credits') this.loadCredits();
     this.panelMain.classList.toggle('visible', which === 'main');
     this.panelLobby.classList.toggle('visible', which === 'lobby');
     this.panelQueue.classList.toggle('visible', which === 'queue');
     this.panelSettings.classList.toggle('visible', which === 'settings');
     this.panelHowto.classList.toggle('visible', which === 'howto');
+    this.panelCredits.classList.toggle('visible', which === 'credits');
     this.setGovernorPolling(which === 'settings');
   }
 
@@ -1237,18 +1251,63 @@ export class MenuController {
     this.network.joinParty(code);
   }
 
-  private buildInviteUrl(code: string): string {
-    try {
-      const u = new URL(window.location.href);
-      // Strip any existing party param so we don't double-stack it.
-      u.searchParams.delete('party');
-      u.searchParams.set('party', code);
-      // Drop the hash — friends don't need it.
-      u.hash = '';
-      return u.toString();
-    } catch {
-      return code;
+  private inviteFriends(): void {
+    const code = normalisePartyCode(this.lobbyCode.textContent ?? '');
+    if (!isPartyCode(code)) return;
+    const url = buildInviteUrl(window.location.href, code);
+    const label = (text: string) => {
+      this.lobbyCopyBtn.textContent = text;
+      window.setTimeout(() => { this.lobbyCopyBtn.textContent = 'Invite Friends'; }, 1600);
+    };
+    const showCode = () => {
+      // Nothing could carry the link: select the big code so it can be read
+      // out or long-pressed, and say so instead of pretending.
+      label('Copy failed');
+      this.flashStatus(`Could not copy. Crew code: ${code}, or share ${url}`, true);
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(this.lobbyCode);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      } catch { /* selection unsupported */ }
+    };
+    const copy = () => {
+      if (!navigator.clipboard?.writeText) { showCode(); return; }
+      navigator.clipboard.writeText(url)
+        .then(() => { label('Copied!'); this.flashStatus(`Invite link copied. Crew code ${code}.`, false); }, showCode);
+    };
+    const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+    const action = chooseInviteAction({
+      share: typeof navigator.share === 'function', coarse, clipboard: !!navigator.clipboard?.writeText,
+    });
+    if (action === 'share') {
+      navigator.share(inviteShareData(code, url))
+        .then(() => label('Shared!'))
+        .catch((err: unknown) => {
+          // The player closed the sheet: that is an answer, not a failure.
+          if ((err as { name?: string } | null)?.name === 'AbortError') return;
+          copy();
+        });
+    } else if (action === 'copy') {
+      copy();
+    } else {
+      showCode();
     }
+  }
+
+  /** Credits come from /credits.json (scripts/build-credits.mjs), fetched once. */
+  private loadCredits(): void {
+    if (this.creditsLoaded) return;
+    this.creditsLoaded = true;
+    const list = this.must('credits-list');
+    fetch('/credits.json', { cache: 'no-cache' })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: CreditsFile) => { list.innerHTML = renderCreditsHtml(data); })
+      .catch(() => {
+        this.creditsLoaded = false;
+        list.textContent = 'Credits could not load. Check your connection and open this panel again.';
+      });
   }
 
   private flashStatus(text: string, isError: boolean): void {
@@ -1287,7 +1346,72 @@ function escapeHtml(s: string): string {
  *  release (PLAN §7 — shared links must not break). Tolerates a pasted URL's
  *  punctuation, a lowercase code and trailing whitespace. */
 export function normalisePartyCode(raw: string): string {
-  return (raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+  // A pasted invite LINK carries its code in ?party= (online-16): read that,
+  // or the URL's own letters ("HTTPSP…") became the code.
+  const fromLink = /[?&]party=([^&#\s]*)/i.exec(raw ?? '')?.[1];
+  const src = fromLink !== undefined ? decodeURIComponent(fromLink) : (raw ?? '');
+  return src.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+}
+
+/** The invite link for `code` on the page at `href`: one party param, no hash
+ *  (friends do not need it), every other param (quality, debug) kept. */
+export function buildInviteUrl(href: string, code: string): string {
+  try {
+    const u = new URL(href);
+    u.searchParams.delete('party');
+    u.searchParams.set('party', code);
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return code;
+  }
+}
+
+export type InviteAction = 'share' | 'copy' | 'show';
+
+/** Share sheet on touch devices that have one (phones, iPad); clipboard on
+ *  desktop, where navigator.share (Safari, Edge) opens a sheet nobody expects
+ *  from a "copy" button; otherwise show the code. */
+export function chooseInviteAction(caps: { share: boolean; coarse: boolean; clipboard: boolean }): InviteAction {
+  if (caps.share && caps.coarse) return 'share';
+  if (caps.clipboard) return 'copy';
+  return caps.share ? 'share' : 'show';
+}
+
+export function inviteShareData(code: string, url: string): { title: string; text: string; url: string } {
+  return { title: 'Join my crew in Pirates BR', text: `Crew code ${code}. Tap to join my ship.`, url };
+}
+
+/** 'Pirate' + four digits: the name a first-time invitee or a solo sailor
+ *  gets without typing. Digits only, so no sanitiser or filter can object. */
+export function autoPirateName(rand: () => number = Math.random): string {
+  const n = 1000 + Math.min(8999, Math.max(0, Math.floor(rand() * 9000)));
+  return `Pirate${n}`;
+}
+
+interface CreditRow { file?: string; source?: string; author?: string; license?: string; notes?: string }
+interface CreditsFile { engine?: { name: string; license: string; source?: string }[]; rows?: CreditRow[] }
+
+/** The Credits panel body. Every string is escaped: LICENSES.md is data. */
+export function renderCreditsHtml(data: CreditsFile): string {
+  const rows = data.rows ?? [];
+  const engine = (data.engine ?? [])
+    .map((e) => `${escapeHtml(e.name)} (${escapeHtml(e.license)})`).join(', ');
+  const parts: string[] = [];
+  if (engine) parts.push(`<p>Built with ${engine}.</p>`);
+  if (rows.length === 0) {
+    parts.push('<p>Nothing in this build carries an attribution requirement yet. Licensed sounds, models and textures are listed here as they are added.</p>');
+  } else {
+    parts.push('<ul style="padding-left:1.1em;margin:0.4em 0;">');
+    for (const r of rows) {
+      const by = r.author ? ` by ${escapeHtml(r.author)}` : '';
+      const src = r.source && /^https?:\/\//.test(r.source)
+        ? ` <a href="${escapeHtml(r.source)}" target="_blank" rel="noopener noreferrer" style="color:#9ec0e5;">source</a>` : '';
+      parts.push(`<li>${escapeHtml(r.file ?? '')}${by}, ${escapeHtml(r.license ?? '')}${src}</li>`);
+    }
+    parts.push('</ul>');
+  }
+  return parts.join('');
 }
 
 export function isPartyCode(code: string): boolean {
