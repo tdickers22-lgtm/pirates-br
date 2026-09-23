@@ -978,7 +978,7 @@ export const STORM_ARC_SECONDS = STORM_PHASES.reduce((sum, phase) => sum + phase
  *  in the opening phase, so the ring is sized off real geometry plus this belt:
  *  the hull lies alongside (half a galleon's beam), the crew walks the pier,
  *  and neither is inside the wall when phase 1 settles. */
-export const STORM_DOCK_COVER_MARGIN = 45;
+export const STORM_DOCK_COVER_MARGIN = 60;
 
 /** Grace after a hold begins before a CREWLESS respawn converts to a tow.
  *  Long enough that a mate who is one second from reviving still owns the

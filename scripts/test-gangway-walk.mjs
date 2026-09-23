@@ -99,6 +99,22 @@ expect('the walk reaches the deck on every plank', stranded.length === 0,
 
 console.log(`     planks=${planked.length} worstOffAxis=${Math.max(...planked.map((r) => r.worstOffAxis)).toFixed(2)}m`);
 
+// Spawn berths sit well inside the phase-1 ring (liveplay-09): a new crew that
+// drifts or swims a little during the truce must not be outside the circle.
+{
+  const ring = match['storm'].getFirstRingRadius();
+  let worst = null;
+  for (const island of dockIslands) {
+    for (const p of [island.dock.berthPosition, island.dock.respawnPoint]) {
+      const inside = ring - Math.hypot(p.x, p.z);
+      if (!worst || inside < worst.inside) worst = { inside, island: island.name };
+    }
+  }
+  expect('every spawn berth and pier respawn is >= 60 m inside the phase-1 ring', worst && worst.inside >= 60,
+    worst ? `${worst.island}: ${worst.inside.toFixed(1)} m inside a ${ring.toFixed(0)} m ring` : 'no docks');
+  console.log(`     ring=${ring.toFixed(0)}m tightest berth ${worst?.inside.toFixed(1)}m inside (${worst?.island})`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} gangway-walk assertion(s) failed.`);
   process.exit(1);
