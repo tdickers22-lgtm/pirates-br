@@ -99,6 +99,32 @@ console.info('POST /beacon:');
   expect('bad JSON -> 400', junk === 400, `status=${junk}`);
   const kind = await post('203.0.113.5', { kind: 'rm -rf', message: 'x' });
   expect('unknown kind -> 400', kind === 400, `status=${kind}`);
+  // b1-bugs-02: a refused body must not burn the IP's 10 s slot.
+  const afterRefusal = await post('203.0.113.5', valid);
+  expect('a refused (400) report does not charge the IP slot: the next valid one -> 204', afterRefusal === 204, `status=${afterRefusal}`);
+
+  // b1-bugs-02: every kind the client can send is accepted. The literals are
+  // read from the client source (reportBeacon('x') call sites) so a new
+  // client kind the server does not know turns this red.
+  {
+    const { readFileSync, readdirSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const kinds = new Set();
+    const walk = (dir) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.ts$/.test(name)) for (const m of readFileSync(p, 'utf8').matchAll(/reportBeacon\(\s*'([a-z-]+)'/g)) kinds.add(m[1]);
+      }
+    };
+    walk(new URL('../src/client', import.meta.url).pathname);
+    for (const k of ['frame-fault', 'frame-wedged', 'webglcontextrestored']) kinds.add(k);
+    const { sanitizeBeacon } = await import('../src/server/core/LobbyServer.ts');
+    const refusedKinds = [...kinds].filter((k) => sanitizeBeacon({ kind: k, message: 'm' })?.kind !== k);
+    expect(`every client beacon kind is accepted by sanitizeBeacon (${kinds.size} kinds)`, kinds.size >= 5 && refusedKinds.length === 0, `refused: ${refusedKinds.join(', ')}`);
+    const live = await post('203.0.113.9', { kind: 'frame-fault', message: 'render threw' });
+    expect('POST /beacon frame-fault -> 204', live === 204, `status=${live}`);
+  }
 
   const before2 = jsonLines().length;
   const s2 = await post('203.0.113.6', { kind: 'webglcontextlost', message: 'm'.repeat(1000), stack: 's'.repeat(2400) });

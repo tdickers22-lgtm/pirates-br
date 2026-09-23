@@ -18,6 +18,7 @@ import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
 import { BEACON_ROUTES, getBeaconStore, sanitizeSession, serveBeaconRoute } from '../net/beaconStore.js';
 import { MODES, MODE_IDS, botFillFor, isModeId, type ModeId } from '../../shared/constants/index.js';
+import { BEACON_KINDS } from '../../shared/beacon.js';
 
 // ── Tunables ──────────────────────────────────────────────────
 const PARTY_CAPACITY = 16;
@@ -334,13 +335,14 @@ export function logEvent(evt: string, fields: Record<string, unknown> = {}): voi
 const BEACON_MAX_BYTES = 4 * 1024;
 const BEACON_MIN_INTERVAL_MS = 10_000;
 const BEACON_GLOBAL_PER_SEC = 20;
-const BEACON_KINDS: ReadonlySet<string> = new Set(['error', 'rejection', 'webglcontextlost', 'longload', 'fps-floor']);
+/** Shared with the client's BeaconKind (src/shared/beacon.ts), so the two lists cannot drift. */
+const BEACON_KIND_SET: ReadonlySet<string> = new Set<string>(BEACON_KINDS);
 /** The fields a beacon may carry, each clipped; anything else is dropped. */
 export function sanitizeBeacon(raw: unknown): Record<string, string> | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const body = raw as Record<string, unknown>;
   const kind = typeof body.kind === 'string' ? body.kind : '';
-  if (!BEACON_KINDS.has(kind)) return null;
+  if (!BEACON_KIND_SET.has(kind)) return null;
   const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
   const out: Record<string, string> = { kind, message: clip(body.message, 300) };
   const stack = clip(body.stack, 1500);
@@ -2652,10 +2654,15 @@ export class LobbyServer {
       return;
     }
     this.beaconWindow.count += 1;
-    this.beaconLastByIp.set(ip, now);
-    if (this.beaconLastByIp.size > 10_000) {
-      for (const [k, t] of this.beaconLastByIp) if (now - t >= BEACON_MIN_INTERVAL_MS) this.beaconLastByIp.delete(k);
-    }
+    // The per-IP slot is charged only once a body is ACCEPTED (b1-bugs-02):
+    // a refused report must not silence that client's next valid one for 10 s.
+    // The global window above still counts every attempt.
+    const chargeIp = () => {
+      this.beaconLastByIp.set(ip, now);
+      if (this.beaconLastByIp.size > 10_000) {
+        for (const [k, t] of this.beaconLastByIp) if (now - t >= BEACON_MIN_INTERVAL_MS) this.beaconLastByIp.delete(k);
+      }
+    };
     const chunks: Buffer[] = [];
     let size = 0;
     let refused = false;
@@ -2677,6 +2684,7 @@ export class LobbyServer {
       try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { parsed = null; }
       const session = sanitizeSession(parsed);
       if (session) {
+        chargeIp();
         getBeaconStore().recordSession(session);
         logEvent('client_session', session);
         res.writeHead(204);
@@ -2685,6 +2693,7 @@ export class LobbyServer {
       }
       const beacon = sanitizeBeacon(parsed);
       if (!beacon) { this.replyBadRequest(res); return; }
+      chargeIp();
       logEvent('client_error', beacon);
       getBeaconStore().recordError(beacon);
       res.writeHead(204);

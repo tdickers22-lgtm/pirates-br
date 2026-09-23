@@ -18,9 +18,10 @@
  * harmless: the POST is fire-and-forget.
  */
 
-export type BeaconKind =
-  | 'error' | 'rejection' | 'frame-fault' | 'frame-wedged'
-  | 'webglcontextlost' | 'webglcontextrestored' | 'longload';
+import type { BeaconKind } from '../../shared/beacon.js';
+import { CLIENT_BUILD_ID } from './versionGate.js';
+
+export type { BeaconKind } from '../../shared/beacon.js';
 
 export const BEACON_URL = '/beacon';
 export const MAX_PER_SESSION = 5;
@@ -28,7 +29,9 @@ const MESSAGE_MAX = 300;
 const STACK_MAX = 1500;
 
 interface BeaconContext { buildId: string; tier: string }
-const context: BeaconContext = { buildId: 'dev', tier: 'unknown' };
+// buildId defaults to the bundle's own id so every error beacon can be split
+// by build on /health/beacons (b1-bugs-02); it used to stay 'dev' forever.
+const context: BeaconContext = { buildId: CLIENT_BUILD_ID, tier: 'unknown' };
 const sentKeys = new Set<string>();
 let sent = 0;
 let installed = false;
