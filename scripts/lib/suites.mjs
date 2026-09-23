@@ -580,6 +580,9 @@ export const BROWSER = [
   //   frame-fault-probe  — injectFrameFault(1) keeps frames advancing with no overlay; (60) shows it
   { ...plain('probes/context-loss-probe.mjs'), slow: true },
   plain('probes/frame-fault-probe.mjs'),
+  // b1.1d: every bound/live program linked (0 useProgram INVALID_OPERATION), tour deck/hold/sea/cave/under,
+  //        real swim not >95% black; --mutate (unlinkable ShaderMaterial) must be seen AND flattened
+  { ...plain('test-program-validity.mjs'), slow: true },
 ];
 
 /**

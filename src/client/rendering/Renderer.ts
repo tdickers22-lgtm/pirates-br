@@ -1,3 +1,4 @@
+import { ProgramFallback } from './programFallback';
 import * as THREE from 'three';
 import { PostFx } from './PostFx.js';
 import { initLightBudget, updateLightBudget } from './LightBudget.js';
@@ -998,6 +999,8 @@ export class Renderer {
     // back on around its own budgeted first-use call, so every program it warms
     // is still fully checked; `?shadererrors` re-arms it globally for shader work.
     this.renderer.debug.checkShaderErrors = shaderErrorsForced();
+    // A program that fails to link is logged and its materials flattened (liveplay-04).
+    this.programFallback.install(this.renderer, this.scene);
     this.renderer.shadowMap.enabled = this.quality !== 'low';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.installShadowPassGate();
@@ -2001,6 +2004,7 @@ export class Renderer {
     } finally {
       this.programWarmer.release();
     }
+    this.programFallback.tick(this.renderer, this.scene);
     if (this.restoreSettling) this.stepContextRestore();
   }
 
@@ -2191,6 +2195,7 @@ export class Renderer {
 
   /** Pre-pays shader program links so no frame of the load has to. */
   readonly programWarmer = new ProgramWarmer();
+  readonly programFallback = new ProgramFallback();
 
   /** Render target used by the real scene pass, or null when rendering direct. */
   getSceneRenderTarget(): THREE.WebGLRenderTarget | null {

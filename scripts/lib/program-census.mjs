@@ -284,3 +284,82 @@ export const PROGRAM_CENSUS_SOURCE = String.raw`
   window.__programCensus = census;
 })();
 `;
+
+// ── PROGRAM VALIDITY (b1.1d, liveplay-04) ───────────────────────────────────
+//
+// A different question from the join census above: not WHEN a program linked
+// but WHETHER it did. `useProgram` on a program whose link failed is
+// INVALID_OPERATION "program not valid", and three draws nothing with it. With
+// `checkShaderErrors` off (Renderer.ts, for speed) nothing says so. This asks
+// LINK_STATUS once per program at its first bind (a join, so probe pages only)
+// and keeps the program log, both shader logs, three's wrapper name/cacheKey
+// and the stack that bound it. `finish()` also sweeps every live program.
+export const PROGRAM_VALIDITY_SOURCE = String.raw`
+(() => {
+  if (window.__programValidity) return;
+  const LINK_STATUS = 0x8B82;
+  const seen = new WeakSet();
+  const pending = [];
+  const v = {
+    phase: 'boot', checked: 0, invalidAtBind: [], invalidLive: [], live: 0, fallbacks: 0,
+    describe(gl, program, where) {
+      const e = { where, phase: v.phase, name: '', cacheKey: '', programLog: '', vsLog: '', fsLog: '', stack: '' };
+      try { e.programLog = gl.getProgramInfoLog(program) || ''; } catch {}
+      try {
+        for (const sh of gl.getAttachedShaders(program) || []) {
+          const type = gl.getShaderParameter(sh, 0x8B4F);
+          const log = gl.getShaderInfoLog(sh) || '';
+          if (type === 0x8B31) e.vsLog = log; else e.fsLog = log;
+        }
+      } catch {}
+      e._gl = program;
+      return e;
+    },
+    resolve(list) {
+      const r = window.__piratesBR?.renderer?.renderer;
+      const byGl = new Map();
+      for (const p of r?.info?.programs ?? []) byGl.set(p.program, p);
+      for (const e of list) {
+        const w = byGl.get(e._gl);
+        if (w) { e.name = String(w.name ?? ''); e.cacheKey = String(w.cacheKey ?? ''); }
+        delete e._gl;
+      }
+      return list;
+    },
+    finish() {
+      const r = window.__piratesBR?.renderer?.renderer;
+      const gl = r?.getContext?.();
+      const programs = r?.info?.programs ?? [];
+      v.live = programs.length;
+      if (gl) for (const p of programs) {
+        let ok = true;
+        try { ok = gl.getProgramParameter(p.program, LINK_STATUS) === true; } catch {}
+        if (!ok) v.invalidLive.push(v.describe(gl, p.program, 'live'));
+      }
+      v.fallbacks = window.__piratesBR?.renderer?.programFallback?.failures?.length ?? 0;
+      v.resolve(v.invalidAtBind); v.resolve(v.invalidLive);
+      return { phase: v.phase, checked: v.checked, invalidAtBind: v.invalidAtBind, invalidLive: v.invalidLive, live: v.live, fallbacks: v.fallbacks };
+    },
+  };
+  window.__programValidity = v;
+  for (const C of [window.WebGL2RenderingContext, window.WebGLRenderingContext]) {
+    if (!C) continue;
+    const orig = C.prototype.useProgram;
+    C.prototype.useProgram = function (program) {
+      if (program && !seen.has(program)) {
+        seen.add(program);
+        try {
+          v.checked += 1;
+          if (this.getProgramParameter(program, LINK_STATUS) !== true) {
+            const e = v.describe(this, program, 'bind');
+            e.stack = String(new Error().stack || '').split('\n').slice(2, 9).map((s) => s.trim()).join('\n');
+            v.invalidAtBind.push(e);
+          }
+        } catch {}
+      }
+      return orig.call(this, program);
+    };
+  }
+  void pending;
+})();
+`;
