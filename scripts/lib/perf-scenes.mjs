@@ -369,3 +369,109 @@ export const TALLY_TRAVERSAL = () => {
     outsideDrawn: outside.reduce((s, i) => s + i.drawn, 0),
   };
 };
+
+/**
+ * PHONE AND TABLET PROFILES (b1.5d, performance-12).
+ *
+ * Every budget row used to be a 960x540 desktop window, so every lane tuned
+ * until the desktop rows passed and the phone, which is where the frame actually
+ * breaks, was graded by nothing. These are the two device sessions the perf,
+ * fill and 4G gates share, so a row measured by one rig is the same device the
+ * other rig graded.
+ *
+ * NEITHER PROFILE PINS A TIER. The phone row exists to grade what a phone GETS,
+ * and a phone gets its tier from the detector (isMobileClient -> low, reason
+ * 'mobile') and its framebuffer from the b1.5c pixel profile. A `?quality=` pin
+ * here would grade a tier a player never lands in; `mutateQuery` is the one
+ * place a tier is forced, and forcing one must turn the rows red.
+ *
+ * The iPad sends the desktop Safari UA iPadOS has sent since 13 (no "iPad" in
+ * it), so it is detected the way a real one is: touch points + coarse pointer.
+ * 1024x768 is the iPad 9.7/mini-class landscape, chosen over an 11-inch
+ * 1180x820 because COMMON.md caps emulated device windows at 1024x768 on this
+ * machine; the tablet pixel profile opens 800k px either way.
+ */
+export const DEVICE_PROFILES = Object.freeze({
+  phone: Object.freeze({
+    id: 'phone',
+    label: 'iPhone 14 landscape 844x390 @3',
+    context: Object.freeze({
+      viewport: { width: 844, height: 390 },
+      screen: { width: 844, height: 390 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+      hasTouch: true,
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+    }),
+    // What the pixel profile must open at (FrameGovernor MOBILE_PIXEL_PROFILE,
+    // section 3 device table): 0.45-0.60 Mpx, never under 640 px wide.
+    fill: Object.freeze({ minMpx: 0.45, maxMpx: 0.60, minWidth: 640 }),
+  }),
+  ipad: Object.freeze({
+    id: 'ipad',
+    label: 'iPad 1024x768 @2 (iPadOS desktop UA)',
+    context: Object.freeze({
+      viewport: { width: 1024, height: 768 },
+      screen: { width: 1024, height: 768 },
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+    }),
+    fill: Object.freeze({ minMpx: 0.70, maxMpx: 0.82, minWidth: 640 }),
+    // A real iPad reports 5 touch points; Chromium's touch emulation reports 1,
+    // and with the Mac UA that made the emulated iPad a DESKTOP (measured: tier
+    // 'low' for the wrong reason, framebuffer 640x480 = 0.307 Mpx).
+    maxTouchPoints: 5,
+  }),
+});
+
+/** A browser context that IS the device: UA, touch, dpr, screen, touch points.
+ *  Every rig opens device sessions through this so they cannot disagree. */
+export async function newDeviceContext(browser, profile) {
+  const context = await browser.newContext({ ...profile.context });
+  if (profile.maxTouchPoints) {
+    await context.addInitScript((n) => {
+      Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => n, configurable: true });
+    }, profile.maxTouchPoints);
+  }
+  return context;
+}
+
+/** The tier a device profile must be detected at, and why. */
+export const DEVICE_EXPECTED_VERDICT = Object.freeze({ quality: 'low', reason: 'mobile' });
+
+/**
+ * The query a device session opens with. `forceTier` is the mutation knob: the
+ * rows' own proof that they can fail is a phone forced to 'balanced'.
+ */
+export function deviceQuery(base = ['debug'], forceTier = '') {
+  return forceTier ? [...base, `quality=${forceTier}`] : [...base];
+}
+
+/**
+ * Hold the resolution where the DEVICE opened it, not at 1. The desktop rows pin
+ * 1 so the budget measures geometry; a device row pins the profile's own open
+ * ratio so the fill it grades is the fill the phone pays, and the governor's
+ * SwiftShader-speed walk down the ladder cannot move the reading mid-capture.
+ */
+export const PIN_DEVICE_PIXEL_RATIO = () => {
+  const r = window.__piratesBR?.renderer;
+  if (!r) return null;
+  const ratio = r.maxPixelRatio;
+  r.minPixelRatio = ratio;
+  r.applyPixelRatio(ratio);
+  const gl = r.renderer.getContext();
+  const width = gl.drawingBufferWidth;
+  const height = gl.drawingBufferHeight;
+  return { ratio, width, height, mpx: (width * height) / 1e6 };
+};
+
+/** Tier, reason and fill class the session actually runs at. */
+export const READ_DEVICE_VERDICT = () => {
+  const r = window.__piratesBR?.renderer;
+  const v = r?.getQualityVerdict?.() ?? null;
+  return { quality: r?.getQuality?.() ?? null, reason: v?.reason ?? null, maxPixelRatio: r?.maxPixelRatio ?? null };
+};

@@ -18,6 +18,7 @@
 //
 //   node --import tsx scripts/test-first-draw-budget.mjs
 import * as THREE from 'three';
+import { resolveFrameCap } from '../src/client/core/framePacer.js';
 import {
   beginFirstDrawFrame,
   clearFirstDrawBudget,
@@ -184,6 +185,47 @@ const ALLOWANCE = 48;
   showWhenAffordable(prop, true);
   clearFirstDrawBudget();
   expect('a match teardown forgets what the driver had drawn', !hasBeenDrawn(prop));
+}
+
+// ── PHONE AND TABLET ROWS (b1.5d) ─────────────────────────────────────────
+// The allowance is per FRAME, and a phone's frame is twice a desktop's (the
+// pacer caps phones at 30, tablets at 60). A per-SECOND allowance would hand
+// a phone twice the uploads in each of its frames, which is exactly the hitch
+// the allowance exists to stop, on the device least able to absorb it. So the
+// same 44-chest burst is replayed at each form's default cap: no frame may
+// exceed the allowance, the burst must land, and it must land within the
+// 0.5 s reveal bound (wall time at that cap; this rig's own bound, not a section-3 number).
+// --mutate (PIRATES_BR_MUTATE_FIRST_DRAW=phone) grants the phone a per-second
+// allowance (48 x 60 / cap per frame) and these rows must FAIL.
+{
+  const MUTATE_PHONE = process.argv.includes('--mutate') || process.env.PIRATES_BR_MUTATE_FIRST_DRAW === 'phone';
+  for (const form of ['phone', 'tablet']) {
+    const cap = resolveFrameCap(form, { choice: 'auto', batterySaver: false });
+    expect(`[${form}] default frame cap is ${form === 'phone' ? 30 : 60} fps (got ${cap})`, cap === (form === 'phone' ? 30 : 60));
+    const perFrame = MUTATE_PHONE ? Math.round(ALLOWANCE * (60 / cap)) : ALLOWANCE;
+    clearFirstDrawBudget();
+    const world = new THREE.Group();
+    const props = [];
+    for (let i = 0; i < 44; i++) props.push(makeProp(world, 8, `chest-${i}`));
+    for (let i = 0; i < 12; i++) props.push(makeProp(world, 1, `rock-${i}`));
+    let worst = 0, frames = 0, before = 0;
+    while (props.some((p) => !p.visible) && frames < 500) {
+      beginFirstDrawFrame();
+      // The mutated allowance: extra frames' worth granted inside one frame.
+      for (let k = 0; k < perFrame / ALLOWANCE; k++) {
+        if (k > 0) beginFirstDrawFrame();
+        for (const p of props) showWhenAffordable(p, true);
+      }
+      const now = drawnMeshes(props);
+      worst = Math.max(worst, now - before);
+      before = now;
+      frames += 1;
+    }
+    const wallMs = (frames * 1000) / cap;
+    expect(`[${form}] no frame at ${cap} fps shows more than ${ALLOWANCE} new meshes (worst ${worst})`, worst <= ALLOWANCE);
+    expect(`[${form}] the whole burst lands (${props.filter((p) => !p.visible).length} still hidden)`, props.every((p) => p.visible));
+    expect(`[${form}] and lands within 500 ms at ${cap} fps (${frames} frames = ${Math.round(wallMs)} ms)`, wallMs <= 500);
+  }
 }
 
 if (failures > 0) {

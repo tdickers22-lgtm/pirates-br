@@ -23,18 +23,33 @@
 // and renderOrder -1 before the census: sky layers read 1.000 and this gate
 // must FAIL. That is its proof it can.
 //
+// DEVICE ROWS (b1.5d, performance-12). After the desktop session the same
+// census runs on an emulated iPhone 14 (844x390 @3) and iPad (1024x768 @2)
+// from lib/perf-scenes.mjs DEVICE_PROFILES: no tier pin (the detector must say
+// low / 'mobile'), resolution held at the b1.5c pixel profile's OPEN ratio, and
+// the framebuffer graded against the section-3 device table (phone 0.45-0.60
+// Mpx, iPad 0.70-0.82 Mpx, never under 640 px wide) on top of the same layer
+// ceilings. --mutate-device (PIRATES_BR_MUTATE_DEVICE_TIER=balanced) opens the
+// device sessions at ?quality=balanced and the verdict rows must FAIL.
+// PIRATES_BR_FILL_PROFILES=desktop,phone,ipad picks sessions (default all).
+//
 //   node scripts/test-fill-budget.mjs            (needs PIRATES_BR_URL + server)
 //   node scripts/run-all-tests.mjs --only fill-budget
 import { chromium } from 'playwright';
 import { browserArgs, describeGl } from './lib/browser-args.mjs';
 import { planScenes, readWorld, measureScene, sessionQuery, SERVER_PORT, PIN_PIXEL_RATIO } from './perf-probe.mjs';
 import { COST_PRELUDE } from './lib/cost-model-prelude.mjs';
+import { DEVICE_PROFILES, DEVICE_EXPECTED_VERDICT, newDeviceContext, deviceQuery, PIN_DEVICE_PIXEL_RATIO, READ_DEVICE_VERDICT } from './lib/perf-scenes.mjs';
 
 const URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3101').replace(/\/$/, '');
 const MUTATE = process.argv.includes('--mutate') || process.env.PIRATES_BR_MUTATE_SKY === '1';
 const VIEWPORT = { width: 960, height: 540 };
 const MAX_LAYERS = 24;
 const QUALITY = 'low';
+const MUTATE_DEVICE_TIER = process.env.PIRATES_BR_MUTATE_DEVICE_TIER
+  ?? (process.argv.includes('--mutate-device') ? 'balanced' : '');
+const PROFILES = (process.env.PIRATES_BR_FILL_PROFILES ?? 'desktop,phone,ipad').split(',');
+if (PROFILES.some((p) => p !== 'desktop' && !DEVICE_PROFILES[p])) throw new Error('PIRATES_BR_FILL_PROFILES: desktop, phone, ipad');
 
 const BUDGET = {
   'dock-vista': { sky: 0.55, whole: 1.9, blended: 0.9 },
@@ -63,11 +78,29 @@ async function main() {
 
   const browser = await chromium.launch({ args: browserArgs(['--mute-audio', '--disable-gpu-vsync', '--disable-frame-rate-limit']) });
   try {
-    const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+    for (const id of PROFILES) await runSession(browser, id === 'desktop' ? null : DEVICE_PROFILES[id]);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+  console.log(`\n${checks} checks, ${failures} failed${MUTATE || MUTATE_DEVICE_TIER ? ' (mutated run: a failure is the expected outcome)' : ''}`);
+  if (checks === 0) { console.error('VACUOUS'); process.exit(1); }
+  process.exit(failures > 0 ? 1 : 0);
+}
+
+/** One session: desktop at ?quality=low, pixel ratio 1; or a device profile. */
+async function runSession(browser, profile) {
+  const tag = profile ? `[${profile.id}] ` : '';
+  const context = profile ? await newDeviceContext(browser, profile) : await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+  try {
+    const page = await context.newPage();
     page.setDefaultTimeout(0);
     const errors = [];
     page.on('pageerror', (e) => errors.push(String(e.message).slice(0, 200)));
-    await page.goto(`${URL}/?${sessionQuery(['debug', `quality=${QUALITY}`])}`, { waitUntil: 'domcontentloaded' });
+    const query = profile
+      ? sessionQuery(deviceQuery(['debug', 'fps=uncapped'], MUTATE_DEVICE_TIER))
+      : sessionQuery(['debug', `quality=${QUALITY}`]);
+    if (profile) console.log(`\n  ${profile.label}${MUTATE_DEVICE_TIER ? `  [MUTATED: ?quality=${MUTATE_DEVICE_TIER}]` : ''}`);
+    await page.goto(`${URL}/?${query}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#menu-solo-btn', { timeout: 90_000 });
     await page.click('#menu-solo-btn', { noWaitAfter: true });
     await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 300_000 });
@@ -89,31 +122,39 @@ async function main() {
       });
       console.log('  ! mutation applied: skyMesh depthTest=false, renderOrder=-1');
     }
-    const tier = await page.evaluate(() => window.__piratesBR.renderer.getQuality());
-    expect(`session runs at quality=${QUALITY} (got ${tier})`, tier === QUALITY);
+    if (profile) {
+      const v = await page.evaluate(READ_DEVICE_VERDICT);
+      expect(`${tag}detected as ${DEVICE_EXPECTED_VERDICT.quality} / '${DEVICE_EXPECTED_VERDICT.reason}' (got ${v.quality} / ${v.reason})`,
+        v.quality === DEVICE_EXPECTED_VERDICT.quality && v.reason === DEVICE_EXPECTED_VERDICT.reason);
+    } else {
+      const tier = await page.evaluate(() => window.__piratesBR.renderer.getQuality());
+      expect(`session runs at quality=${QUALITY} (got ${tier})`, tier === QUALITY);
+    }
 
     const plan = planScenes(await readWorld(page));
     for (const [scene, budget] of Object.entries(BUDGET)) {
-      if (!plan[scene]) { expect(`${scene}: placement exists in this world`, false); continue; }
-      await page.evaluate(PIN_PIXEL_RATIO);
+      if (!plan[scene]) { expect(`${tag}${scene}: placement exists in this world`, false); continue; }
+      const fb = profile ? await page.evaluate(PIN_DEVICE_PIXEL_RATIO) : await page.evaluate(PIN_PIXEL_RATIO);
       await measureScene(page, plan[scene], { warmupMs: 1200, captureMs: 400, settle: true });
+      if (profile) {
+        const f = profile.fill;
+        expect(`${tag}${scene}: framebuffer ${fb.width}x${fb.height} = ${fb.mpx.toFixed(3)} Mpx inside ${f.minMpx}-${f.maxMpx}, >= ${f.minWidth} px wide`,
+          fb.mpx >= f.minMpx && fb.mpx <= f.maxMpx && fb.width >= f.minWidth, `ratio ${fb.ratio}`);
+      }
       const whole = await page.evaluate((l) => window.__cost.stencilOverdraw({ maxLayers: l }), MAX_LAYERS);
       const blended = await page.evaluate((l) => window.__cost.stencilOverdraw({ maxLayers: l, blendedOnly: true }), MAX_LAYERS);
       const sky = skyKey ? await page.evaluate(([l, k]) => window.__cost.stencilOverdraw({ maxLayers: l, only: k }), [MAX_LAYERS, skyKey]) : null;
-      console.log(`  [${scene}] whole ${whole.meanAll.toFixed(3)} layers (p95 ${whole.p95}, ${whole.sceneDraws} draws)  blended ${blended.meanAll.toFixed(3)}  sky ${sky ? sky.meanAll.toFixed(3) : 'n/a'} over ${sky ? (sky.coveredFraction * 100).toFixed(1) : '?'}% of the frame`);
-      expect(`${scene}: sky layers ${sky ? sky.meanAll.toFixed(3) : 'n/a'} ≤ ${budget.sky}`, !!sky && sky.meanAll <= budget.sky,
+      console.log(`  ${tag}[${scene}] whole ${whole.meanAll.toFixed(3)} layers (p95 ${whole.p95}, ${whole.sceneDraws} draws)  blended ${blended.meanAll.toFixed(3)}  sky ${sky ? sky.meanAll.toFixed(3) : 'n/a'} over ${sky ? (sky.coveredFraction * 100).toFixed(1) : '?'}% of the frame`);
+      expect(`${tag}${scene}: sky layers ${sky ? sky.meanAll.toFixed(3) : 'n/a'} ≤ ${budget.sky}`, !!sky && sky.meanAll <= budget.sky,
         'the dome is being shaded on pixels the world paints over (depthTest off / drawn first)');
-      expect(`${scene}: whole-frame mean ${whole.meanAll.toFixed(3)} ≤ ${budget.whole}`, whole.meanAll <= budget.whole);
-      expect(`${scene}: blended mean ${blended.meanAll.toFixed(3)} ≤ ${budget.blended}`, blended.meanAll <= budget.blended);
+      expect(`${tag}${scene}: whole-frame mean ${whole.meanAll.toFixed(3)} ≤ ${budget.whole}`, whole.meanAll <= budget.whole);
+      expect(`${tag}${scene}: blended mean ${blended.meanAll.toFixed(3)} ≤ ${budget.blended}`, blended.meanAll <= budget.blended);
     }
-    expect('no page errors', errors.length === 0, errors.join(' | '));
+    expect(`${tag}no page errors`, errors.length === 0, errors.join(' | '));
     await page.close().catch(() => {});
   } finally {
-    await browser.close().catch(() => {});
+    await context.close().catch(() => {});
   }
-  console.log(`\n${checks} checks, ${failures} failed${MUTATE ? ' (mutated run: a failure is the expected outcome)' : ''}`);
-  if (checks === 0) { console.error('VACUOUS'); process.exit(1); }
-  process.exit(failures > 0 ? 1 : 0);
 }
 
 main().catch((e) => { console.error(`  ✗ FAIL: ${e?.stack ?? e}`); process.exit(1); });

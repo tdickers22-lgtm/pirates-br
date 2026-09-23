@@ -44,6 +44,7 @@ import { PIN_PIXEL_RATIO, planScenes, readWorld, measureScene, sessionQuery, SER
 import { browserArgs, describeGl, IS_SOFTWARE_GL } from './lib/browser-args.mjs';
 import {
   FIND_WATERFALL_ISLAND, planWaterfallDeck, planWreckScene, TALLY_DRAW_SOURCES,
+  DEVICE_PROFILES, DEVICE_EXPECTED_VERDICT, newDeviceContext, deviceQuery, PIN_DEVICE_PIXEL_RATIO, READ_DEVICE_VERDICT,
 } from './lib/perf-scenes.mjs';
 
 const ROOT_URL = process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000/';
@@ -62,10 +63,19 @@ const READY_TIMEOUT_MS = 45_000;
 const VIEWPORT = { width: 960, height: 540 };
 // A targeted rerun never silently becomes a full pass: log the selected tiers
 // and skip comparisons whose other tier was not measured. Default stays full.
-const PERF_TIERS = (process.env.PIRATES_PERF_TIERS ?? 'high,balanced,low').split(',');
-if (!PERF_TIERS.length || PERF_TIERS.some((tier) => !['high', 'balanced', 'low'].includes(tier))) {
-  throw new Error('PIRATES_PERF_TIERS must contain high, balanced and/or low');
+// 'phone' and 'ipad' are DEVICE rows (b1.5d): the session is an emulated
+// device with no tier pin, graded at what the detector gives it.
+const ALL_TIERS = ['high', 'balanced', 'low', 'phone', 'ipad'];
+const PERF_TIERS = (process.env.PIRATES_PERF_TIERS ?? ALL_TIERS.join(',')).split(',');
+if (!PERF_TIERS.length || PERF_TIERS.some((tier) => !ALL_TIERS.includes(tier))) {
+  throw new Error('PIRATES_PERF_TIERS must contain high, balanced, low, phone and/or ipad');
 }
+/** MUTATION KNOB for the device rows' proof (b1.5d): `--mutate` (or
+ *  PIRATES_BR_MUTATE_DEVICE_TIER=balanced) opens the phone and iPad sessions
+ *  with `?quality=balanced`, the tier a phone would get if the mobile verdict
+ *  were lost. The verdict check and the draw/triangle rows must then FAIL. */
+const MUTATE_DEVICE_TIER = process.env.PIRATES_BR_MUTATE_DEVICE_TIER
+  ?? (process.argv.includes('--mutate') ? 'balanced' : '');
 
 /**
  * THE WORLD HAS TO BE THE SAME WORLD.
@@ -143,6 +153,34 @@ const ALLOW_ANY_MAP = process.env.PIRATES_BR_ANY_MAP === '1';
  * needs adjusting. Widening the ceiling to fit a regression is how the July
  * table came to be 30% above a reality nobody had measured in a month.
  */
+// DEVICE ROWS (b1.5d). Measured 2026-09-23 at d8097e14 on the pinned map,
+// SwiftShader, device profile from lib/perf-scenes.mjs, resolution held at the
+// pixel profile's open ratio (phone 1060x490 = 0.519 Mpx, iPad 1032x774 =
+// 0.799 Mpx). Ceilings are the SMALLER of the section-3 device table (phone
+// 450 draws / 400k tris, iPad 550 / 500k) and ~1.12x the reading, so a row
+// that sits far under the table still has a tripwire at its own cost. The
+// deck-aft phone row is the tight one: 433 against 450, the scene whose camera
+// rides a drifting hull; b4.4a's phone levers are what buy it headroom.
+//
+// PROGRAMS: the table says <= 66 per match and the phone reads 66 through three
+// scenes and 68 once open water adds its materials (iPad 68-69 over two runs;
+// renderer.info.programs is cumulative, so the last scene carries the total).
+// The ceiling is 70 (the table's desktop-low figure) until the programs owner
+// (b3.1, ProgramWarmup / programCensus) brings phones to 66: a DECLARED spec
+// deviation, handed off in the b1.5 report, never a silent one.
+const DEVICE_PROGRAMS = 70;
+const DEVICE_ROWS_PHONE = [
+  { scene: 'dock-vista', label: 'wide island vista (phone)', measured: 328, draws: 370, tris: 400_000, programs: DEVICE_PROGRAMS },
+  { scene: 'island-interior', label: 'island interior (phone)', measured: 410, draws: 450, tris: 295_000, programs: DEVICE_PROGRAMS },
+  { scene: 'deck-aft', label: 'on-deck aft look (phone)', measured: 433, draws: 450, tris: 380_000, programs: DEVICE_PROGRAMS },
+  { scene: 'open-sea', label: 'open water (phone)', measured: 235, draws: 265, tris: 76_000, programs: DEVICE_PROGRAMS },
+];
+const DEVICE_ROWS_IPAD = [
+  { scene: 'dock-vista', label: 'wide island vista (iPad)', measured: 250, draws: 290, tris: 380_000, programs: DEVICE_PROGRAMS },
+  { scene: 'island-interior', label: 'island interior (iPad)', measured: 295, draws: 330, tris: 265_000, programs: DEVICE_PROGRAMS },
+  { scene: 'deck-aft', label: 'on-deck aft look (iPad)', measured: 383, draws: 430, tris: 300_000, programs: DEVICE_PROGRAMS },
+  { scene: 'open-sea', label: 'open water (iPad)', measured: 237, draws: 265, tris: 76_000, programs: DEVICE_PROGRAMS },
+];
 const BUDGETS = {
   high: [
     // Four pinned runs after the geometry pass: 1646-1727 draws, 1694-1784k
@@ -242,6 +280,13 @@ const BUDGETS = {
     { scene: 'open-sea', label: 'open water (balanced tier)', measured: 442, draws: 495, tris: 395_000 },
     { scene: 'cave-interior', label: 'cave interior (balanced tier)', measured: 1374, draws: 1540, tris: 1_835_000 },
   ],
+  // DEVICE ROWS (b1.5d, performance-12). An emulated iPhone 14 (844x390 @3) and
+  // iPad (1024x768 @2), tier left to the detector (low, reason 'mobile'), the
+  // resolution held where the b1.5c pixel profile opens it. Ceilings are the
+  // section-3 device table: phone <= 450 draws / 400k tris / 66 programs, iPad
+  // <= 550 / 500k / 66 (programs: see DEVICE_PROGRAMS).
+  phone: DEVICE_ROWS_PHONE,
+  ipad: DEVICE_ROWS_IPAD,
 };
 
 /** THE GILDED WRECK gets her OWN ceiling, and it is not the dock's.
@@ -381,13 +426,24 @@ function stopDevServer(handle) {
  *  One page per tier, closed before the next opens: two live rAF loops on a CPU
  *  rasteriser is exactly the concurrency this repo's crash history is made of. */
 async function measureTier(browser, quality, { wantWreck }) {
-  const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+  const profile = DEVICE_PROFILES[quality] ?? null;
+  // A device row is its own context (UA, touch, dpr, screen): a page in the
+  // default context would be a desktop with a small window.
+  const context = profile
+    ? await newDeviceContext(browser, profile)
+    : await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+  const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const results = {};
+  const query = profile
+    // fps=uncapped: the phone pacer (30 fps) must not thin the capture window.
+    ? sessionQuery(deviceQuery(['debug', 'fps=uncapped'], MUTATE_DEVICE_TIER))
+    : sessionQuery(['debug', `quality=${quality}`]);
+  if (profile) console.log(`  [${quality}] ${profile.label}${MUTATE_DEVICE_TIER ? `  [MUTATED: ?quality=${MUTATE_DEVICE_TIER}]` : ''}`);
   try {
     await page.goto(
-      `${ROOT_URL.replace(/\/$/, '')}/?${sessionQuery(['debug', `quality=${quality}`])}`,
+      `${ROOT_URL.replace(/\/$/, '')}/?${query}`,
       { waitUntil: 'domcontentloaded' },
     );
     await page.waitForSelector('#menu-solo-btn', { timeout: 40_000 });
@@ -404,6 +460,15 @@ async function measureTier(browser, quality, { wantWreck }) {
     // Let the streamed island/sea-rock build queues finish before counting.
     await page.waitForTimeout(12_000);
     await page.evaluate(() => window.__piratesBR.setBotPeace(true));
+    if (profile) {
+      // The row grades a PHONE only if the session is the tier a phone gets.
+      const v = await page.evaluate(READ_DEVICE_VERDICT);
+      expect(
+        `[${quality}] ${profile.label} detected as ${DEVICE_EXPECTED_VERDICT.quality} (reason '${DEVICE_EXPECTED_VERDICT.reason}')`,
+        v.quality === DEVICE_EXPECTED_VERDICT.quality && v.reason === DEVICE_EXPECTED_VERDICT.reason,
+        `got ${v.quality} (reason ${v.reason})`,
+      );
+    }
 
     const plan = planScenes(await readWorld(page));
     const waterfall = await page.evaluate(FIND_WATERFALL_ISLAND);
@@ -422,12 +487,21 @@ async function measureTier(browser, quality, { wantWreck }) {
         continue;
       }
       // Resolution is pinned so the budget measures geometry, not screen area.
-      await page.evaluate(PIN_PIXEL_RATIO);
+      // A device row pins the profile's OWN open ratio instead (see perf-scenes).
+      const fill = profile ? await page.evaluate(PIN_DEVICE_PIXEL_RATIO) : await page.evaluate(PIN_PIXEL_RATIO);
       // settle: true — see the header. A count taken mid-reveal is a lie.
       const r = await measureScene(page, plan[budget.scene], { warmupMs: 2500, captureMs: 3000, settle: true });
       const sources = await page.evaluate(TALLY_DRAW_SOURCES).catch(() => []);
-      results[budget.scene] = { draws: Math.round(r.draws), tris: Math.round(r.tris), peakDraws: r.peakDraws, sources };
+      results[budget.scene] = { draws: Math.round(r.draws), tris: Math.round(r.tris), peakDraws: r.peakDraws, programs: r.programs, sources };
       report(quality, budget, results[budget.scene], r);
+      if (profile) {
+        console.log(`      framebuffer ${fill?.width}x${fill?.height} = ${fill?.mpx?.toFixed(3)} Mpx at ratio ${fill?.ratio?.toFixed(4)}`);
+        expect(
+          `[${quality}] ${budget.label} links no more than ${budget.programs} programs`,
+          r.programs <= budget.programs,
+          `measured ${r.programs}, ceiling ${budget.programs}`,
+        );
+      }
       graded += 1;
     }
     // EVERY ROW OR NO PASS. A placement that went missing (a readWorld or
@@ -460,6 +534,7 @@ async function measureTier(browser, quality, { wantWreck }) {
     expect(`No page errors at quality=${quality}`, errors.length === 0, errors.join('\n'));
   } finally {
     await page.close().catch(() => {});
+    await context.close().catch(() => {});
   }
   return results;
 }
@@ -555,6 +630,8 @@ async function main() {
     const high = PERF_TIERS.includes('high') ? await measureTier(browser, 'high', { wantWreck }) : {};
     const balanced = PERF_TIERS.includes('balanced') ? await measureTier(browser, 'balanced', { wantWreck: false }) : {};
     const low = PERF_TIERS.includes('low') ? await measureTier(browser, 'low', { wantWreck: false }) : {};
+    if (PERF_TIERS.includes('phone')) await measureTier(browser, 'phone', { wantWreck: false });
+    if (PERF_TIERS.includes('ipad')) await measureTier(browser, 'ipad', { wantWreck: false });
 
     for (const budget of BUDGETS.balanced) {
       const a = high[budget.scene];
