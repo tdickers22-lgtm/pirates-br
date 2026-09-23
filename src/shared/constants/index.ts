@@ -1328,7 +1328,7 @@ export const KILL_STREAK_TIERS = {
 export const KILL_STREAK_LADDER: ReadonlyArray<{ kills: number; label: string }> = [
   { kills: KILL_STREAK_TIERS.super_cannonball, label: 'super cannonball' },
   { kills: KILL_STREAK_TIERS.mega_keg, label: 'mega keg' },
-  { kills: KILL_STREAK_TIERS.tsunami, label: 'tsunami [E]' },
+  { kills: KILL_STREAK_TIERS.tsunami, label: 'tsunami' },
 ];
 
 // ── Early-game pacing governor ───────────────────────────────
