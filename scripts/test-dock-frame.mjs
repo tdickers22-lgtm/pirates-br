@@ -14,7 +14,8 @@
 import { Match } from '../src/server/core/Match.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import { dockLocalToWorld, getIslandDockSwimLadderPoint } from '../src/shared/utils/index.ts';
-import { SHIP_STATS } from '../src/shared/constants/index.ts';
+import { SHIP_STATS, BERTH } from '../src/shared/constants/index.ts';
+import { hullBeamHalf } from '../src/shared/interactions.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -106,7 +107,7 @@ expect('the fixed world has docks to check', docks.length >= 8, `${docks.length}
   expect('the shore end is NOT a swim-up ladder (mirrored-frame regression)', shoreEndAccepted === 0, `${shoreEndAccepted} docks`);
 }
 
-// ── (b) Berths: alongside the dock run, parallel, 1.0m gap ──────────────────
+// ── (b) Berths: alongside the dock run, parallel, BERTH.RAIL_GAP of water ─────
 {
   const rows = [];
   for (const { dock } of docks) {
@@ -120,7 +121,9 @@ expect('the fixed world has docks to check', docks.length >= 8, `${docks.length}
       rows.push({
         type, dock, berth,
         along: local.z,
-        gap: Math.abs(local.x) - dock.width * 0.5 - stats.width * 0.5,
+        // Pier edge to the hull's WIDEST planking (b1.6d): stats.width*0.5 is
+        // the nominal beam the drawn wale overhangs by 0.43-1.16 m.
+        gap: Math.abs(local.x) - dock.width * 0.5 - hullBeamHalf(type),
         sternInside: local.z - half <= tip,
         overlap: Math.max(0, Math.min(local.z + half, tip) - Math.max(local.z - half, -tip)) / stats.length,
       });
@@ -132,8 +135,8 @@ expect('the fixed world has docks to check', docks.length >= 8, `${docks.length}
     missing.map((r) => `${r.type} @ L=${r.dock.length.toFixed(1)}`).join(', '));
 
   const placed = rows.filter((r) => r.berth);
-  const badGap = placed.filter((r) => Math.abs(r.gap - 1.0) > 0.05);
-  expect('hull-to-dock-edge gap is 1.00m on every berth', badGap.length === 0,
+  const badGap = placed.filter((r) => Math.abs(r.gap - BERTH.RAIL_GAP) > 0.05);
+  expect(`widest-planking-to-dock-edge gap is ${BERTH.RAIL_GAP.toFixed(2)}m on every berth`, badGap.length === 0,
     badGap.map((r) => `${r.type}: gap=${r.gap.toFixed(2)}`).join('\n     '));
 
   const parallel = placed.every((r) => Math.abs(r.dock.berthRotation - r.dock.rotation) < 1e-9);
