@@ -85,6 +85,15 @@ export function renameAppInDeployMd(md, from, to) {
     .replace(new RegExp(`fly apps create ${esc}(?![\\w-])`, 'g'), `fly apps create ${to}`);
 }
 
+/** Owner step O2 in Fly's own words: its billing URL (the org slug, not "personal") and
+ *  whether it is a missing card or overdue invoices, so the one step handed over is exact. */
+export function billingStep(text) {
+  const url = (String(text).match(/https:\/\/fly\.io\/dashboard\/[\w-]+\/billing/) ?? [])[0]
+    ?? 'https://fly.io/dashboard (Billing)';
+  const what = /overdue invoice/i.test(text) ? 'pay the overdue invoices' : 'add a card';
+  return `owner step O2: ${what} at ${url}, then re-run`;
+}
+
 /** What a failed `fly apps create` means. */
 export function classifyCreateError(text) {
   if (/billing|payment|credit card|add a card/i.test(text)) return 'billing';
@@ -194,6 +203,10 @@ function selfTest() {
   expect('rename is idempotent on a renamed file', renameAppInToml(r, app, fb) === r);
   expect('classify: taken', classifyCreateError('Error: Validation failed: Name has already been taken') === 'taken');
   expect('classify: billing is owner step O2', classifyCreateError('Error: We need your payment information to continue! Add a credit card') === 'billing');
+  const overdue = 'Error: failed to run mutation($input: CreateAppInput!) { createApp(input: $input) { app { id } } }: Your account has overdue invoices. Please update your payment information: https://fly.io/dashboard/tobias-augustin-dicker/billing';
+  expect('classify: overdue invoices is owner step O2', classifyCreateError(overdue) === 'billing');
+  expect('O2 step quotes Fly\'s own billing URL and names the overdue invoices', /overdue invoices/.test(billingStep(overdue)) && billingStep(overdue).includes('https://fly.io/dashboard/tobias-augustin-dicker/billing') && !billingStep(overdue).includes('/dashboard/personal/'), billingStep(overdue));
+  expect('O2 step without a URL in the error falls back to the dashboard', billingStep('Add a credit card').includes('https://fly.io/dashboard'));
   expect('classify: auth is owner step O1', classifyCreateError('Error: no access token available. Please login with \'flyctl auth login\'') === 'auth');
   const good = { id: 'm1', state: 'started', config: { guest: { cpu_kind: 'performance', cpus: 1, memory_mb: 2048 } }, checks: [{ name: 'servicecheck-00-http-8090', status: 'passing' }] };
   const vmBlock = toml.slice(toml.indexOf('[[vm]]'));
@@ -240,7 +253,7 @@ function sh(cmd, args, { input, allowFail = false, quiet = false } = {}) {
   if (r.status !== 0 && !allowFail) {
     const kind = classifyCreateError(out);
     if (kind === 'auth') throw new OwnerStep('owner step O1: run `fly auth login` in Terminal');
-    if (kind === 'billing') throw new OwnerStep('owner step O2: add a card at https://fly.io/dashboard/personal/billing');
+    if (kind === 'billing') throw new OwnerStep(billingStep(out));
     throw new Error(`${cmd} ${args[0]} exited ${r.status}: ${out.trim().slice(-800)}`);
   }
   return { status: r.status, stdout: r.stdout ?? '', out };
@@ -314,7 +327,7 @@ const steps = {
     const r = fly(['apps', 'create', ctx.app, '--org', 'personal'], { allowFail: true });
     if (r.status === 0) return;
     const kind = classifyCreateError(r.out);
-    if (kind === 'billing') throw new OwnerStep('owner step O2: add a card at https://fly.io/dashboard/personal/billing, then re-run');
+    if (kind === 'billing') throw new OwnerStep(billingStep(r.out));
     if (kind !== 'taken') throw new Error(`fly apps create ${ctx.app}: ${r.out.trim()}`);
     const toml = readFileSync(join(ROOT, 'fly.toml'), 'utf8');
     const fb = fallbackAppName(toml);
