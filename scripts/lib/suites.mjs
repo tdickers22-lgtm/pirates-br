@@ -189,6 +189,9 @@ export const LOGIC = [
   // (3.3 m of daylight at a galleon bow before it).
   quick(tsx('test-deck-attitude.mjs')),
   quick(tsx('test-snapshot-size.mjs')),
+  // BUDGET RATCHET (b1.7a, rule 13): every ceiling in scripts/lib/budgets.mjs is no looser than
+  // origin/release, the f5fee97e baseline or the PLAN 3.4/3.14 tables; budget gates import it.
+  quick(plain('test-budget-ratchet.mjs')),
   quick(tsx('test-combat-fixes.mjs')),
   quick(tsx('test-geyser.mjs')),
   // PHYSREM-01 (wave 8.3). Bodies in the cannonBallistic branch driven over the

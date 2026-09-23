@@ -1523,3 +1523,45 @@ the whole reason there are two numbers, is exactly zero.
 2. **`pushFrame` cleared the one-off mark above the enabled/suspended guards**,
    so a frame that was never sampled could eat the mark and let the frame the
    caller actually named into the window.
+
+## 17. The f5fee97e count baseline (b1.7a, critique gap 5c)
+
+The campaign of 2026-09-22 started at `f5fee97e` (also `origin/release` then). "Better" from here on is a
+diff against this table, and b5.6b must be equal or better on every row. Counts only: SwiftShader, own
+3101/8091 stack, seed 20260801, a detached worktree at f5fee97e with node_modules symlinked, one browser
+at a time, 2026-09-23. Machine-readable twin: `scripts/fixtures/budget-baseline-f5fee97e.json`, which also
+holds every ceiling the six budget gates carried at that commit (59 rows) for `test-budget-ratchet`.
+
+| tier | scene | draws | tris | programs | ceiling (draws / tris) |
+|---|---|---|---|---|---|
+| high | dock-vista | 944 | 1430k | 74 | 1950 / 2000k |
+| high | deck-aft | 1711 | 2177k | 81 | 2650 / 2900k |
+| high | open-sea | 747 | 780k | 85 | 1120 / 930k |
+| high | waterfall-deck | 1674 | 2838k | 87 | 2650 / 2750k |
+| high | cave-interior | 2056 | 2499k | 87 | 3250 / 3150k |
+| balanced | dock-vista | 802 | 1153k | 83 | 970 / 1430k |
+| balanced | open-sea | 423 | 287k | 86 | 495 / 395k |
+| balanced | cave-interior | 1379 | 1527k | 87 | 1540 / 1835k |
+| low | dock-vista | 261 | 336k | 62 | 680 / 580k |
+| low | open-sea | 277 | 135k | 66 | 320 / 180k |
+| low | cave-interior | 557 | 490k | 66 | 650 / 560k |
+| low | island-interior | 433 | 396k | 67 | 520 / 470k |
+| low | deck-aft | 387 | 333k | 67 | 500 / 440k |
+
+Fill (low tier, stencil census, layers per pixel): dock-vista whole 1.319 / blended 0.626 / sky 0.401;
+deck-aft 1.801 / 0.505 / 0.380; open-sea 1.286 / 0.724 / 0.485.
+
+What the table says out loud:
+- **high waterfall-deck read 2,838k triangles against its own 2,750k ceiling at f5fee97e.** The one row
+  that was red at the baseline commit on this run (draws were fine at 1,674 / 2,650). The ceiling was
+  NOT raised; the row is carried as a known red for the perf lane.
+- **balanced dock-vista is 802 draws against 944 at high (85%)**, above the 0.80 balanced ratio the
+  suite applies elsewhere; the per-scene 0.90 exception in budgets.mjs is what lets it pass.
+- The Gilded Wreck row was skipped (the stack was not started with `PIRATES_WRECK_SEC`).
+- Phone and iPad rows have no f5fee97e reading: the device tiers did not exist in that harness. They are
+  graded against the PLAN 3.4 C/D columns by the ratchet instead.
+
+Where the ceilings live now: `scripts/lib/budgets.mjs`. `scripts/test-budget-ratchet.mjs` (quick tier)
+fails any value looser than release, this baseline or the PLAN 3.4/3.14 tables, prints the declared
+deviations (phone/iPad programs 70 vs 66, balanced cave 1540 / 1.835 M vs 970 / 1.43 M, the iPad
+0.44 floor vs 0.45) and fails a budgets commit that also touches `src/` or `public/`.

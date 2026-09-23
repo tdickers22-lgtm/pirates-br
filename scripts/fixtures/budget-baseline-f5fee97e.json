@@ -1,0 +1,179 @@
+{
+ "commit": "f5fee97e",
+ "note": "b1.7a (critique gap 5b/5c). ceilings = every graded value the six budget gates carried at f5fee97e (origin/release at the time), flattened by budgets.flattenBudgets; rows added after f5fee97e (phone/iPad perf rows, mobile pixel rows) have no baseline and are graded by the PLAN table instead. measured = counts read on a detached worktree at f5fee97e (node_modules symlinked), own 3101/8091 stack, SwiftShader, seed 20260801, one browser at a time; counts only, timings are advisory and omitted. Phone/iPad counts do not exist at f5fee97e (no device tiers in that harness).",
+ "measuredAt": "2026-09-23",
+ "ceilings": {
+  "perf.high.dock-vista.draws": 1950,
+  "perf.high.dock-vista.tris": 2000000,
+  "perf.high.deck-aft.draws": 2650,
+  "perf.high.deck-aft.tris": 2900000,
+  "perf.high.open-sea.draws": 1120,
+  "perf.high.open-sea.tris": 930000,
+  "perf.high.waterfall-deck.draws": 2650,
+  "perf.high.waterfall-deck.tris": 2750000,
+  "perf.high.cave-interior.draws": 3250,
+  "perf.high.cave-interior.tris": 3150000,
+  "perf.low.dock-vista.draws": 680,
+  "perf.low.dock-vista.tris": 580000,
+  "perf.low.open-sea.draws": 320,
+  "perf.low.open-sea.tris": 180000,
+  "perf.low.cave-interior.draws": 650,
+  "perf.low.cave-interior.tris": 560000,
+  "perf.low.island-interior.draws": 520,
+  "perf.low.island-interior.tris": 470000,
+  "perf.low.deck-aft.draws": 500,
+  "perf.low.deck-aft.tris": 440000,
+  "perf.balanced.dock-vista.draws": 970,
+  "perf.balanced.dock-vista.tris": 1430000,
+  "perf.balanced.open-sea.draws": 495,
+  "perf.balanced.open-sea.tris": 395000,
+  "perf.balanced.cave-interior.draws": 1540,
+  "perf.balanced.cave-interior.tris": 1835000,
+  "perfWreck.draws": 2100,
+  "perfWreck.tris": 1900000,
+  "perfLowTierMaxRatio.draws": 0.5,
+  "perfLowTierMaxRatio.tris": 0.45,
+  "perfMidTierMaxRatio.draws": 0.8,
+  "perfMidTierMaxRatio.tris": 0.8,
+  "perfMidTierMaxRatioByScene.dock-vista.draws": 0.9,
+  "perfMidTierMaxRatioByScene.dock-vista.tris": 0.9,
+  "fill.dock-vista.sky": 0.55,
+  "fill.dock-vista.whole": 1.9,
+  "fill.dock-vista.blended": 0.9,
+  "fill.deck-aft.sky": 0.55,
+  "fill.deck-aft.whole": 2.2,
+  "fill.deck-aft.blended": 0.9,
+  "fill.open-sea.sky": 0.55,
+  "fill.open-sea.whole": 1.9,
+  "fill.open-sea.blended": 0.9,
+  "firstDrawAllowance": 48,
+  "oceanFragOps.low": 950,
+  "oceanFragOps.balanced": 1400,
+  "oceanFragOps.high": 1750,
+  "snapshotBytes.hot": 8192,
+  "snapshotBytes.full": 35840,
+  "snapshotBytes.worldFull": 256000,
+  "snapshotBytes.egressPerSecond": 122880,
+  "snapshotBytes.joinCompressed": 61440,
+  "frameGovernor.airHighMaxPixels": 1450000,
+  "frameGovernor.integratedHighMaxPixels": 1200000,
+  "frameGovernor.phoneHighMaxPixels": 900000,
+  "frameGovernor.legibilityFloorWidthPx": 640,
+  "frameGovernor.settledTotalVariation": 0.15,
+  "frameGovernor.jitterTotalVariation": 0.25,
+  "frameGovernor.settledSpread": 0.12
+ },
+ "measured": {
+  "fill": {
+   "dock-vista": {
+    "whole": 1.319,
+    "blended": 0.626,
+    "sky": 0.401,
+    "draws": 420
+   },
+   "deck-aft": {
+    "whole": 1.801,
+    "blended": 0.505,
+    "sky": 0.38,
+    "draws": 461
+   },
+   "open-sea": {
+    "whole": 1.286,
+    "blended": 0.724,
+    "sky": 0.485,
+    "draws": 264
+   }
+  },
+  "perf": {
+   "high": {
+    "dock-vista": {
+     "draws": 944,
+     "peakDraws": 944,
+     "trisK": 1430,
+     "programs": 74
+    },
+    "deck-aft": {
+     "draws": 1711,
+     "peakDraws": 1711,
+     "trisK": 2177,
+     "programs": 81
+    },
+    "open-sea": {
+     "draws": 747,
+     "peakDraws": 747,
+     "trisK": 780,
+     "programs": 85
+    },
+    "waterfall-deck": {
+     "draws": 1674,
+     "peakDraws": 1674,
+     "trisK": 2838,
+     "programs": 87
+    },
+    "cave-interior": {
+     "draws": 2056,
+     "peakDraws": 2087,
+     "trisK": 2499,
+     "programs": 87
+    }
+   },
+   "balanced": {
+    "dock-vista": {
+     "draws": 802,
+     "peakDraws": 802,
+     "trisK": 1153,
+     "programs": 83
+    },
+    "open-sea": {
+     "draws": 423,
+     "peakDraws": 423,
+     "trisK": 287,
+     "programs": 86
+    },
+    "cave-interior": {
+     "draws": 1379,
+     "peakDraws": 1379,
+     "trisK": 1527,
+     "programs": 87
+    }
+   },
+   "low": {
+    "dock-vista": {
+     "draws": 261,
+     "peakDraws": 268,
+     "trisK": 336,
+     "programs": 62
+    },
+    "open-sea": {
+     "draws": 277,
+     "peakDraws": 281,
+     "trisK": 135,
+     "programs": 66
+    },
+    "cave-interior": {
+     "draws": 557,
+     "peakDraws": 557,
+     "trisK": 490,
+     "programs": 66
+    },
+    "island-interior": {
+     "draws": 433,
+     "peakDraws": 433,
+     "trisK": 396,
+     "programs": 67
+    },
+    "deck-aft": {
+     "draws": 387,
+     "peakDraws": 387,
+     "trisK": 333,
+     "programs": 67
+    }
+   }
+  },
+  "notes": [
+   "high waterfall-deck read 2838k tris against its own 2750k ceiling at f5fee97e (the one row red at the baseline commit on this run)",
+   "the Gilded Wreck row was skipped (server started without PIRATES_WRECK_SEC)",
+   "first attempt aborted mid-balanced by a stray process kill; the rerun is the one recorded; high dock/deck/open-sea agreed within 2% between the two runs (966/944, 1714/1711, 750/747 draws)"
+  ]
+ }
+}
