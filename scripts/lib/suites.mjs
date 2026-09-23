@@ -463,6 +463,14 @@ export const LOGIC = [
   //                                 audioSession 'playback', hidden -> suspend once, 'interrupted' re-arms the
   //                                 unlock; static: Game arms the lifecycle (audio-08, crossdevice-12, D14, b1.1c)
   quick(tsx('test-audio-lifecycle.mjs')),
+  //   test-connect-supervisor     — real NetworkClient, fake socket Worker, virtual clock: cold start 7 s -> connect()
+  //                                 resolves once, one live transport, no resume from a fresh page; drop -> one resume
+  //                                 with this page's token; 60 s give-up + retryNow; offline/online; silent background
+  //                                 death -> resume; buildId skew menu/in_match (correctness-04, vm:online:2, b1.1e)
+  quick(tsx('test-connect-supervisor.mjs')),
+  //   test-connect-policy         — schedule sums to 60 s, no public host gets the npm copy, versionGate reload-once /
+  //                                 defer, Game.connectToServer has no 6 s race; DIST=<dir> greps a build (online-10/05)
+  quick(tsx('test-connect-policy.mjs')),
 ];
 
 /**

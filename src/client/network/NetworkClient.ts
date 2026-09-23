@@ -9,6 +9,11 @@ import type {
   PlayerStatsRecord, ResumeOkPayload, ResumeFailedPayload,
 } from '../../shared/types/index.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
+import { nextWaitMs, CONNECT_STEPS_MS, type ConnectProgress } from './connectPolicy.js';
+import { VersionGate, type VersionPhase } from './versionGate.js';
+
+interface EventTargetLike { addEventListener(type: string, fn: (e: { persisted?: boolean }) => void): void }
+interface DocLike { visibilityState?: string; addEventListener(type: string, fn: () => void): void }
 
 export class NetworkClient {
   private ws!: WebSocket;
@@ -111,15 +116,13 @@ export class NetworkClient {
   private reconnectAttempt = 0;
   private reconnectStartedAt = 0;
   /**
-   * BACKOFF, 0.5 → 8 s, with 20% jitter, for at most RECONNECT_BUDGET_MS.
+   * BACKOFF, 0.5 → 8 s, with 20% jitter, for at most CONNECT_BUDGET_MS (connectPolicy.ts).
    * The budget is the server's grace (RECONNECT_GRACE_MS, 60 s) — past it the
    * seat is gone and retrying only holds a loading screen open on a lie.
    * Jitter matters for the case this exists for: a server restart drops every
    * client in the same millisecond, and un-jittered backoff would bring all of
    * them back in the same millisecond too, onto a process that is still booting.
    */
-  private static readonly RECONNECT_STEPS_MS = [500, 1_000, 2_000, 4_000, 8_000];
-  private static readonly RECONNECT_BUDGET_MS = 60_000;
   /** Close codes that mean "the link failed", not "you were let go". 1000 is a
    *  clean goodbye (match reaped, we called disconnect) and 1008 is a policy
    *  kick — reconnecting into either is how a client ends up in a hot loop. */
@@ -184,41 +187,136 @@ export class NetworkClient {
   }
 
   /**
-   * RECON-01 (netcode-31): connect is a SUPERVISOR, not a single attempt.
+   * RECON-01 (netcode-31) + b1.1e (correctness-04): connect is a SUPERVISOR,
+   * and there is exactly ONE of it at a time.
    *
-   * The two things every online player hits both used to end the session here:
-   * a platform cold start (the first connect fails and Game.connectToServer
-   * painted "Cannot reach game server … then refresh") and a 2-10 s blip (one
-   * close and the only UI was a Reload button). Now the first attempt that
-   * fails is retried on the backoff above until the budget runs out, and
-   * `onReconnecting` lets the menu say what is happening.
+   * The first connect retries on the connectPolicy schedule for the server's
+   * 60 s seat budget, reporting `onConnectProgress`, and rejects once when the
+   * budget is spent (the loading screen then offers Retry -> `retryNow()`).
+   * While that loop owns the retries, a transport's own 'closed' never starts a
+   * second timer (the old race: two supervisors, the second tore the first
+   * down and connect() never settled). A fresh page never sends `resume`: only a
+   * token handed out on THIS page is replayed after a drop.
    */
   async connect(url: string): Promise<void> {
     this.url = url;
     this.wantConnected = true;
+    this.installLifecycle();
+    if (this.transportOpen) return;
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.supervising = true;
     this.reconnectStartedAt = Date.now();
     let attempt = 0;
-    for (;;) {
-      try {
-        await this.openTransport(url);
-        this.reconnectAttempt = 0;
-        return;
-      } catch (err) {
-        attempt += 1;
-        const elapsed = Date.now() - this.reconnectStartedAt;
-        const wait = NetworkClient.backoffMs(attempt);
-        if (!this.wantConnected || elapsed + wait > NetworkClient.RECONNECT_BUDGET_MS) throw err;
-        this.onReconnecting?.(attempt, wait);
-        await new Promise((r) => setTimeout(r, wait));
+    try {
+      for (;;) {
+        try {
+          await this.openTransport(url);
+          this.reconnectAttempt = 0;
+          return;
+        } catch (err) {
+          this.teardownTransport();
+          attempt += 1;
+          const wait = nextWaitMs(attempt, Date.now() - this.reconnectStartedAt);
+          if (!this.wantConnected || wait === null) throw err;
+          this.reportProgress(this.isOffline() ? 'offline' : 'retrying', attempt, wait);
+          await this.sleepOrKick(wait);
+          if (!this.wantConnected) throw err;
+        }
       }
+    } finally {
+      this.supervising = false;
+      this.kick = null;
     }
   }
 
-  /** 0.5/1/2/4/8 s, then 8 s forever, ±20% jitter. Exported shape for the gate. */
+  /** The Retry button: a fresh 60 s budget. */
+  retryNow(): Promise<void> {
+    if (!this.url) return Promise.reject(new Error('never connected'));
+    return this.connect(this.url);
+  }
+
+  /** Progress for the loading screen (first connect) — see connectPolicy.connectCopy. */
+  public onConnectProgress: ((p: ConnectProgress) => void) | null = null;
+  private reportProgress(phase: ConnectProgress['phase'], attempt: number, nextInMs: number): void {
+    try { this.onConnectProgress?.({ phase, attempt, nextInMs }); } catch (err) { console.error('[Net] connect progress handler threw:', err); }
+  }
+
+  /** 0.5/1/2/4/8 s, then 8 s forever, ±20% jitter (connectPolicy). */
   static backoffMs(attempt: number): number {
-    const steps = NetworkClient.RECONNECT_STEPS_MS;
-    const base = steps[Math.min(attempt, steps.length) - 1] ?? steps[steps.length - 1];
-    return Math.round(base * (0.8 + Math.random() * 0.4));
+    return nextWaitMs(attempt, 0, Math.random, Number.POSITIVE_INFINITY) ?? CONNECT_STEPS_MS[CONNECT_STEPS_MS.length - 1];
+  }
+
+  private supervising = false;
+  private kick: (() => void) | null = null;
+  private sleepOrKick(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { this.kick = null; resolve(); }, ms);
+      this.kick = () => { clearTimeout(t); this.kick = null; resolve(); };
+    });
+  }
+
+  private isOffline(): boolean {
+    try { return globalThis.navigator?.onLine === false || this.offline; } catch { return this.offline; }
+  }
+
+  // ── Page lifecycle (vm:online:2, vm:correctness:1, vm:crossdevice:4) ────────
+  // iOS/Android freeze a backgrounded page and drop its socket, often without a
+  // close event reaching us; a wifi -> 4G handover does the same. Inside the
+  // server's 60 s seat grace the client must come back on its own.
+  private lifecycleInstalled = false;
+  private offline = false;
+  private hiddenAt = 0;
+  private lastInboundAt = 0;
+  private foregroundCheck: ReturnType<typeof setTimeout> | null = null;
+  /** Hidden longer than this -> verify the socket is really alive on return. */
+  private static readonly BACKGROUND_SUSPECT_MS = 5_000;
+  /** Pong cadence is 3 s; nothing inbound for this long after returning = dead. */
+  private static readonly FOREGROUND_PROBE_MS = 4_000;
+
+  installLifecycle(win: EventTargetLike | null = (globalThis as unknown as { addEventListener?: unknown }).addEventListener ? globalThis as unknown as EventTargetLike : null,
+    doc: DocLike | null = (globalThis as unknown as { document?: DocLike }).document ?? null): void {
+    if (this.lifecycleInstalled || !win) return;
+    this.lifecycleInstalled = true;
+    win.addEventListener('offline', () => {
+      this.offline = true;
+      if (!this.transportOpen && this.wantConnected) this.reportProgress('offline', this.reconnectAttempt, 0);
+    });
+    win.addEventListener('online', () => { this.offline = false; this.retrySoon(); });
+    win.addEventListener('pagehide', () => { this.hiddenAt ||= Date.now(); });
+    win.addEventListener('pageshow', (e: { persisted?: boolean }) => { if (e?.persisted) this.onForeground(); });
+    doc?.addEventListener('visibilitychange', () => {
+      if (doc.visibilityState === 'hidden') { this.hiddenAt ||= Date.now(); return; }
+      this.onForeground();
+    });
+  }
+
+  private onForeground(): void {
+    const hiddenFor = this.hiddenAt ? Date.now() - this.hiddenAt : 0;
+    this.hiddenAt = 0;
+    if (!this.wantConnected) return;
+    if (!this.transportOpen) { this.retrySoon(); return; }
+    if (hiddenFor < NetworkClient.BACKGROUND_SUSPECT_MS) return;
+    // The socket SAYS it is open. Prove it: the worker's 3 s ping draws a pong.
+    const since = Date.now();
+    if (this.foregroundCheck) clearTimeout(this.foregroundCheck);
+    this.foregroundCheck = setTimeout(() => {
+      this.foregroundCheck = null;
+      if (!this.transportOpen || this.lastInboundAt >= since) return;
+      console.warn(`[Net] no traffic ${NetworkClient.FOREGROUND_PROBE_MS} ms after ${Math.round(hiddenFor / 1000)} s in the background; reconnecting`);
+      this.teardownTransport();
+      this.noteClosed(1006, 'stale after background');
+    }, NetworkClient.FOREGROUND_PROBE_MS);
+  }
+
+  /** Something says the network is back: skip the rest of the backoff wait. */
+  private retrySoon(): void {
+    if (!this.wantConnected || this.transportOpen) return;
+    if (this.kick) { this.kick(); return; }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.runReconnectAttempt();
+    }
   }
 
   private openTransport(url: string): Promise<void> {
@@ -227,9 +325,14 @@ export class NetworkClient {
     return worker ? this.connectViaWorker(worker, url) : this.connectDirect(url);
   }
 
+  /** Settles the in-flight attempt's promise when its transport is torn down. */
+  private abandonAttempt: ((err: Error) => void) | null = null;
+
   /** Drop whatever transport is in play without telling the supervisor to stop. */
   private teardownTransport(): void {
     this.stopHeartbeat();
+    const abandon = this.abandonAttempt;
+    this.abandonAttempt = null;
     if (this.worker) {
       const worker = this.worker;
       this.worker = null;
@@ -245,6 +348,8 @@ export class NetworkClient {
     }
     this.connected = false;
     this.transportOpen = false;
+    // A superseded attempt must settle, never hang (correctness-04).
+    abandon?.(new Error('transport superseded'));
   }
 
   /**
@@ -255,34 +360,57 @@ export class NetworkClient {
    */
   private scheduleReconnect(code: number): void {
     if (!this.wantConnected || !this.url) return;
+    // connect() owns the retries until its first open: no second supervisor.
+    if (this.supervising) return;
     if (!NetworkClient.RESUMABLE_CLOSE_CODES.has(code)) { this.wantConnected = false; return; }
     if (this.reconnectTimer) return;
-    if (this.reconnectAttempt === 0) this.reconnectStartedAt = Date.now();
+    if (this.reconnectAttempt === 0) {
+      this.reconnectStartedAt = Date.now();
+      // The token THIS page was handed; never one from sessionStorage.
+      this.resumeToken = this.sessionToken;
+    }
     this.reconnectAttempt += 1;
-    const wait = NetworkClient.backoffMs(this.reconnectAttempt);
-    if (Date.now() - this.reconnectStartedAt + wait > NetworkClient.RECONNECT_BUDGET_MS) {
+    const wait = nextWaitMs(this.reconnectAttempt, Date.now() - this.reconnectStartedAt);
+    if (wait === null) {
       this.wantConnected = false;
+      this.resumeToken = null;
       this.onResumeFailed?.({ reason: 'expired' });
       return;
     }
     this.onReconnecting?.(this.reconnectAttempt, wait);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (!this.wantConnected || !this.url) return;
-      this.openTransport(this.url).then(() => {
-        this.reconnectAttempt = 0;
-        // The token from the PREVIOUS socket. The new socket's own welcome will
-        // overwrite `sessionToken` moments from now, which is what we want for
-        // the NEXT blip — so the resume is sent from the value read here.
-        const token = this.sessionToken ?? this.readStoredToken();
-        if (!token) return;
-        this.send({ type: 'resume', ts: Date.now(), payload: { token, protocolVersion: PROTOCOL_VERSION } });
-      }).catch(() => { this.scheduleReconnect(1006); });
+      this.runReconnectAttempt();
     }, wait);
   }
 
-  private readStoredToken(): string | null {
+  private resumeToken: string | null = null;
+  private runReconnectAttempt(): void {
+    if (!this.wantConnected || !this.url || this.supervising) return;
+    this.openTransport(this.url).then(() => {
+      this.reconnectAttempt = 0;
+      const token = this.resumeToken;
+      this.resumeToken = null;
+      if (!token) return;
+      this.send({ type: 'resume', ts: Date.now(), payload: { token, protocolVersion: PROTOCOL_VERSION } });
+    }).catch(() => {
+      this.teardownTransport();
+      this.scheduleReconnect(1006);
+    });
+  }
+
+  /** The token a previous load of this tab stored. Only an explicit caller may
+   *  use it (a deliberate "reload to rejoin"); the supervisor never does. */
+  storedSessionToken(): string | null {
     try { return globalThis.sessionStorage?.getItem(NetworkClient.TOKEN_KEY) ?? null; } catch { return null; }
+  }
+
+  // ── Version gate (online-05) ────────────────────────────────────────────────
+  private versionGate: VersionGate = new VersionGate();
+  private phaseProvider: () => VersionPhase = () => (this.joined ? 'in_match' : 'menu');
+  setVersionGate(gate: VersionGate | null, phase?: () => VersionPhase): void {
+    if (gate) this.versionGate = gate;
+    if (phase) this.phaseProvider = phase;
   }
 
   /** Build the socket worker, or null on any environment that refuses one. */
@@ -304,6 +432,7 @@ export class NetworkClient {
     this.worker = worker;
     return new Promise((resolve, reject) => {
       let settled = false;
+      this.abandonAttempt = (err) => { if (!settled) { settled = true; reject(err); } };
       worker.onmessage = (e: MessageEvent<
         | { k: 'open' }
         | { k: 'msg'; data: string; n: number; receivedAt: number }
@@ -315,9 +444,10 @@ export class NetworkClient {
           case 'open':
             this.connected = true;
             this.transportOpen = true;
+            this.lastInboundAt = Date.now();
             // No startHeartbeat() here: the worker is already beating, and a
             // second beat from a thread that can stall is worse than none.
-            if (!settled) { settled = true; resolve(); }
+            if (!settled) { settled = true; this.abandonAttempt = null; resolve(); }
             break;
           case 'msg':
             // ACK FIRST, unconditionally. This is the worker's only signal that
@@ -327,18 +457,20 @@ export class NetworkClient {
             this.ingest(m.data, m.receivedAt);
             break;
           case 'closed':
+            // An attempt that never opened is the supervisor's business, not a
+            // disconnect: no "Disconnected" UI, no second retry timer.
+            if (!settled) { settled = true; this.abandonAttempt = null; reject(new Error(`socket closed (${m.code})`)); break; }
             this.noteClosed(m.code, m.reason);
-            if (!settled) { settled = true; reject(new Error(`socket closed (${m.code})`)); }
             break;
           case 'failed':
             this.transportOpen = false;
-            if (!settled) { settled = true; reject(new Error('socket failed to open')); }
+            if (!settled) { settled = true; this.abandonAttempt = null; reject(new Error('socket failed to open')); }
             break;
         }
       };
       worker.onerror = (err) => {
         console.error('[Net] socket worker error:', err.message);
-        if (!settled) { settled = true; reject(new Error(err.message || 'socket worker error')); }
+        if (!settled) { settled = true; this.abandonAttempt = null; reject(new Error(err.message || 'socket worker error')); }
       };
       worker.postMessage({ k: 'open', url });
     });
@@ -347,21 +479,28 @@ export class NetworkClient {
   /** Pre-worker path, kept byte-for-byte in behaviour for environments without workers. */
   private connectDirect(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      this.abandonAttempt = (err) => { if (!settled) { settled = true; reject(err); } };
       this.ws = new WebSocket(url);
       this.ws.onopen = () => {
         this.connected = true;
         this.transportOpen = true;
+        this.lastInboundAt = Date.now();
         this.startHeartbeat();
-        resolve();
+        if (!settled) { settled = true; this.abandonAttempt = null; resolve(); }
       };
-      this.ws.onerror = (e) => reject(e);
+      this.ws.onerror = (e) => { if (!settled) { settled = true; this.abandonAttempt = null; reject(e); } };
       this.ws.onmessage = (e) => this.ingest(e.data as string, Date.now());
-      this.ws.onclose = (e) => this.noteClosed(e.code, e.reason);
+      this.ws.onclose = (e) => {
+        if (!settled) { settled = true; this.abandonAttempt = null; reject(new Error(`socket closed (${e.code})`)); return; }
+        this.noteClosed(e.code, e.reason);
+      };
     });
   }
 
   /** Parse + route one server frame. Identical for both transports. */
   private ingest(raw: string, receivedAt = Date.now()): void {
+    this.lastInboundAt = Date.now();
     try {
       const msg: NetMsg = JSON.parse(raw);
       this.handleMsg(msg, receivedAt);
@@ -417,6 +556,9 @@ export class NetworkClient {
           try { globalThis.sessionStorage?.setItem(NetworkClient.TOKEN_KEY, this.sessionToken); } catch {}
         }
         this.emit(msg.type, () => this.onWelcome?.(p));
+        // online-05: a server on another build reloads this tab (menu: now; in a
+        // match: when it is over). No-op while either side reports no build id.
+        this.emit('version_gate', () => { this.versionGate.onWelcome(p.buildId, this.phaseProvider()); });
         break;
       }
       case 'resume_ok': {
@@ -686,6 +828,9 @@ export class NetworkClient {
   returnToMenu() {
     this.clearMatchSession();
     this.send({ type: 'return_to_menu', ts: Date.now(), payload: {} });
+    // A reload owed since a mid-match welcome from a newer server: after the
+    // goodbye above has left (the worker posts it at once), not before.
+    setTimeout(() => this.emit('version_gate', () => { this.versionGate.onMenu(); }), 150);
   }
   playAgain() {
     this.clearMatchSession();
@@ -713,6 +858,12 @@ export class NetworkClient {
     // A deliberate goodbye: the supervisor must not fight it.
     this.wantConnected = false;
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.foregroundCheck) { clearTimeout(this.foregroundCheck); this.foregroundCheck = null; }
+    this.resumeToken = null;
+    this.kick?.();
+    const abandon = this.abandonAttempt;
+    this.abandonAttempt = null;
+    abandon?.(new Error('disconnected'));
     // Stop the timer even if there is no socket to close — connect() can reject
     // before ever assigning one, and a stray interval would outlive the client.
     this.stopHeartbeat();
