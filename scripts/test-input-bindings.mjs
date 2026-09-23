@@ -94,6 +94,30 @@ for (const [name, src] of [['InputManager.ts', INPUT_SRC], ['Game.ts', GAME_SRC]
   expect(`${name}: no unguarded requestPointerLock?.().catch`, unsafe.length === 0);
 }
 
+// ── Player copy never hard-codes a mouse button (b1-ask-07) ────────────────
+// A string literal that says "right-click"/"left-click" is wrong on touch,
+// gamepad and a Mac trackpad; copy must come from InputGlyphs (glyph('aim')).
+// InputGlyphs.ts itself is the label table and is exempt; comments are skipped.
+console.log('\nNo hard-coded mouse-button words in player copy');
+{
+  const { readdirSync } = await import('node:fs');
+  const dirs = ['../src/client/ui/', '../src/client/menu/', '../src/client/core/'];
+  const clickHits = [];
+  for (const d of dirs) {
+    const dirUrl = new URL(d, import.meta.url);
+    for (const f of readdirSync(dirUrl)) {
+      if (!f.endsWith('.ts') || f === 'InputGlyphs.ts') continue;
+      const lines = readFileSync(new URL(f, dirUrl), 'utf8').split('\n');
+      lines.forEach((ln, i) => {
+        const code = ln.replace(/\/\/.*$/, '');
+        if (/^\s*(\*|\/\*)/.test(code)) return;
+        if (/['"`][^'"`]*\b(right|left)[- ]click/i.test(code)) clickHits.push(`${f}:${i + 1}`);
+      });
+    }
+  }
+  expect(`0 "right-click"/"left-click" literals in ui/menu/core copy (${clickHits.length})`, clickHits.length === 0, clickHits.join(', '));
+}
+
 // ── The legend still names every live key the table binds ──────────────────
 // (Carries test-onboarding-ux's legend audit now that the codes live in the
 // table instead of InputManager's source.)

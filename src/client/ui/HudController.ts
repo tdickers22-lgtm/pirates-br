@@ -1498,7 +1498,7 @@ export class HudController {
     this.view.renderTreasureInventoryChart(player, mappedIsland, closestHoarder);
     this.view.ui.pocketWheelStats.textContent = this.view.input.isSupplyWheelOpen()
       ? (player.equippedTool
-          ? `Equipped: ${player.equippedTool.toUpperCase()} · ${player.equippedTool === 'spyglass' ? 'aim (right-click) to zoom · draw a weapon to stow' : 'right-click or re-select to stow'} · tools = scope/compass/bucket/shovel/axe · fruit heals · planks → ship stores`
+          ? `Equipped: ${player.equippedTool.toUpperCase()} · ${player.equippedTool === 'spyglass' ? `${glyph('aim')} to zoom · draw a weapon to stow` : `${glyph('aim')} or re-select to stow`} · tools = scope/compass/bucket/shovel/axe · fruit heals · planks → ship stores`
           : 'Tools: scope · compass · bucket (bail) · shovel · lantern · axe (chop/mine) — select to equip · fruit heals · planks → ship stores')
       : '';
     this.updateSupplyWheelCounts(player);
