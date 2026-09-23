@@ -45,7 +45,7 @@ import { requestLockSafe } from '../input/pointerLock.js';
 import { wheelToChartAction, pinchStep } from '../input/wheelGesture.js';
 import { SupplyWheel } from '../ui/SupplyWheel.js';
 import { resolveTouchContext, routeHeldTool, touchProgress } from '../input/touchContexts.js';
-import { assets, type AssetName } from '../assets/AssetLibrary.js';
+import { assets, BOOT_ASSET_NAMES, type AssetName } from '../assets/AssetLibrary.js';
 import { buildSharkMesh, buildWildlifeMesh } from '../rendering/factories/FaunaMeshFactory.js';
 import { disposeSharkAnim, playSharkBite, updateSharkPose } from '../rendering/SharkRenderer.js';
 import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
@@ -1122,10 +1122,17 @@ export class Game {
     this.setLoading(8, 'Charting the horizon...');
     await this.yieldForLoadingPaint();
 
-    // Real progress: the GLB prop library is the bulk of boot time. Failures are
-    // tolerated inside preload() — missing assets keep their procedural fallbacks.
-    await assets.preload((done, total) => {
-      this.setLoading(8 + (done / total) * 44, `Loading ship's stores... ${done}/${total}`);
+    // Boot waits on the boot set only (hull, berth, the player's hands and rig:
+    // AssetLibrary.BOOT_ASSET_NAMES). The island/world set loads behind the
+    // menu and the queue (kicked right after menu.show below); every world
+    // build drain waits on it (worldAssetsReady), so no island is ever built
+    // from procedural fallbacks. Awaiting the whole library here parked a
+    // throttled phone on "Loading ship's stores" for ~4.5 s before Play could
+    // be tapped (throttled-load-probe row A, 7.8 s vs 3.5 s).
+    const bootTotal = BOOT_ASSET_NAMES.length;
+    await assets.preloadBoot((done) => {
+      const n = Math.min(done, bootTotal);
+      this.setLoading(8 + (n / bootTotal) * 44, `Loading ship's stores... ${n}/${bootTotal}`);
     });
     await this.yieldForLoadingPaint();
 
@@ -1222,8 +1229,19 @@ export class Game {
     this.ui.loadingScreen.classList.add('hidden');
     this.ui.loadingScreen.style.display = 'none';
     this.menu.show();
+    // The world set streams in while the player reads the menu and queues.
+    void assets.preloadWorld();
 
     requestAnimationFrame((time) => this.frame(time));
+  }
+
+  /** True once the island/world GLB set is in. Until then world drains hold
+   *  their queues (a world built early would keep procedural stand-ins for the
+   *  whole match). Joins/starts the one shared world fetch, idempotently. */
+  private worldAssetsReady(): boolean {
+    if (assets.isFullyLoaded) return true;
+    void assets.preloadWorld();
+    return false;
   }
 
   private async connectToServer(): Promise<boolean> {
@@ -3114,6 +3132,7 @@ export class Game {
   drainIslandBuildQueue(count = 1) {
     // Library templates are being refetched after last match's CPU release.
     if (assets.rehydrating) return;
+    if (!this.worldAssetsReady()) return;
     this.maybeReleaseLibraryCpuCopies();
     if (this.islandAwaitingReveal) {
       // Hand the group BACK to the cull rather than forcing it visible. The
@@ -3237,6 +3256,7 @@ export class Game {
    *  as the spawn island stacked their first draws onto that one freeze. */
   private drainSeaRockBuildQueue(count = 6) {
     if (assets.rehydrating) return;
+    if (!this.worldAssetsReady()) return;
     for (let i = 0; i < count && this.pendingSeaRockBuilds.length > 0; i++) {
       const rock = this.pendingSeaRockBuilds.shift()!;
       if (this.seaRockMeshes.has(rock.id)) continue;

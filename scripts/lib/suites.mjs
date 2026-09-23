@@ -630,6 +630,12 @@ export const SERVER = [
   // writes the siblings itself, which costs ~12 s the first time and ~0.3 s
   // after, since they are stamped at their source's mtime.
   { ...tsx('test-static-serving.mjs'), timeoutMs: 120_000 },
+  // b1.5d 4G launch gate, registered at the b1 gate: it grades the BUILT client
+  // served by its own 8091 game server, so it builds first and runs in this
+  // tier, before the runner stands up its 3101/8091 browser stack (one headless
+  // SwiftShader Chromium, killed in finally). Row A Play clickable <= 3.5 s,
+  // row B <= 3 long tasks outside render() in 20 s after the horn. ~4 min.
+  { file: 'probes/throttled-load-probe.mjs', cmd: ['sh', '-c', 'npx vite build && node scripts/postbuild-compress.mjs && node scripts/probes/throttled-load-probe.mjs'], timeoutMs: 600_000 },
 ];
 
 /** Watchdog per tier (ms); an entry's `timeoutMs` overrides it. A suite silent
