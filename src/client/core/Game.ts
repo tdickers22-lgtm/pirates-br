@@ -1260,6 +1260,7 @@ export class Game {
       this.renderCrewFoundCard();
     }
     this.inMatch = true;
+    this.renderer.resetPacedCeiling();
     sessionTelemetry.matchStart();
     this.menu.setLastMatchPartyCode(payload?.partyCode ?? null);
     this.hud.setPartyCode(payload?.partyCode ?? null);

@@ -34,6 +34,7 @@ import {
 import { budgeted, setFrameBudgetScale, resetFrameBudgetScale } from '../src/client/rendering/FrameBudget.js';
 import { parseRenderQuality } from '../src/client/rendering/QualityPreference.js';
 import { FRAME_GOVERNOR as FG_BUDGET } from './lib/budgets.mjs';
+import { framePacer } from '../src/client/core/framePacer.js';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -899,6 +900,113 @@ section('PHONES AND TABLETS GET A PIXEL PROFILE, NOT A LAPTOP RATIO (performance
     if (r.maxPixelRatio !== max || r.minPixelRatio !== min) drift ??= `${q} ${w}x${h}@${d} ${c}: ${r.maxPixelRatio}/${r.minPixelRatio} vs ${max}/${min}`;
   }
   expect(`Air, Intel UHD, 1080p, 4K, Apple Pro and SwiftShader rows are byte-identical (${TODAY.length} rows)`, drift === null, drift ?? '');
+}
+
+// b1-device-01: THE PACED CEILING MUST NOT BE A ONE-WAY RATCHET. Every phone
+// (30 cap) and iPad (60 cap) session is paced. A GC pause or a notification
+// banner is three frames that miss ONE 60 Hz slot: that is a transient, not
+// heat, and it must not cost the rest of the session resolution. A median that
+// runs late (the thermal / genuinely-too-heavy signature) must still ratchet,
+// and must not pump back up into the lateness every minute.
+section('PACED CEILING: TRANSIENTS RECOVER, SUSTAINED LATENESS STILL RATCHETS (b1-device-01)');
+{
+  const SLOT = 1000 / 60;
+  // Feed `n` frames of `ms`, advancing a clock; returns the new clock.
+  const feed = (gov, t, n, ms) => {
+    for (let i = 0; i < n; i += 1) { t += ms; gov.pushFrame(ms); gov.update(t); }
+    return t;
+  };
+  framePacer.setCap(30);
+  try {
+    // 1) Eight isolated 3 x 50 ms hitches, two minutes of on-slot frames apart.
+    {
+      const gov = new FrameGovernor({}, 1);
+      gov.setDisplayHz(60);
+      let t = feed(gov, 1000, 30 * 10, 2 * SLOT);
+      const after = [];
+      for (let h = 0; h < 8; h += 1) {
+        t = feed(gov, t, 3, 3 * SLOT);
+        t = feed(gov, t, 30 * 120, 2 * SLOT);
+        after.push(gov.getScalar());
+      }
+      expect(`8 isolated 3x50 ms hitches end at scalar >= 0.95 (after each: ${after.map((v) => v.toFixed(3)).join(' ')})`,
+        after[after.length - 1] >= 0.95);
+    }
+    // 2) One 3 x 60 ms hitch, then ten minutes of perfect on-slot frames.
+    {
+      const gov = new FrameGovernor({}, 1);
+      gov.setDisplayHz(60);
+      let t = feed(gov, 1000, 30 * 10, 2 * SLOT);
+      t = feed(gov, t, 3, 60);
+      const dipped = gov.getScalar();
+      t = feed(gov, t, 30 * 600, 2 * SLOT);
+      expect(`a single 3x60 ms hitch recovers (dipped to ${dipped.toFixed(3)}, ${gov.getScalar().toFixed(3)} after 10 min on-slot)`,
+        gov.getScalar() >= 0.95);
+    }
+    // 3) Sustained lateness: the frame's work is 18 + 20 x scalar ms on a 60 Hz
+    //    panel, so it holds the 33.3 ms slot only up to scalar ~0.76 and lands
+    //    a whole refresh late (50 ms) above it. Fifteen minutes.
+    const lateMachine = (lateAt, extraLate = () => false) => {
+      const gov = new FrameGovernor({}, 1);
+      gov.setDisplayHz(60);
+      let t = 1000, late = 0, frames = 0, downs = 0, downsLast5 = 0, prev = gov.getScalar();
+      const end = 1000 + 15 * 60 * 1000;
+      const scalars = [];
+      let i = 0;
+      while (t < end) {
+        const work = 18 + 20 * gov.getScalar();
+        const isLate = work > lateAt || extraLate(i, gov.getScalar());
+        const ms = isLate ? 3 * SLOT : 2 * SLOT;
+        t += ms; frames += 1; i += 1;
+        if (isLate) late += 1;
+        gov.pushFrame(ms);
+        const s = gov.update(t);
+        if (s < prev - 1e-9) { downs += 1; if (t > end - 5 * 60 * 1000) downsLast5 += 1; }
+        prev = s;
+        if (t > end - 5 * 60 * 1000) scalars.push(s);
+      }
+      const mean = scalars.reduce((a, b) => a + b, 0) / scalars.length;
+      return { gov, lateFrac: late / frames, downs, downsLast5, mean };
+    };
+    {
+      const r = lateMachine(2 * SLOT);
+      expect(`a median-late machine still ratchets below its limit (mean scalar last 5 min ${r.mean.toFixed(3)}, holds <= 0.76)`,
+        r.mean <= 0.77 && r.mean >= 0.5);
+      expect(`…and does not pump back into the lateness (${r.downsLast5} down steps in the last 5 min, ${r.downs} total, ${(r.lateFrac * 100).toFixed(2)}% frames late)`,
+        r.downsLast5 <= 1 && r.lateFrac < 0.03);
+    }
+    // 4) Tail lateness that REPEATS (every 10th frame misses its slot above
+    //    scalar 0.8, median on-slot): not a transient; it must settle, not pump.
+    {
+      const r = lateMachine(1e9, (i, s) => s > 0.8 && i % 10 === 0);
+      expect(`repeating tail lateness settles at or below 0.8 (mean last 5 min ${r.mean.toFixed(3)}) without pumping (${r.downsLast5} downs in last 5 min, ${(r.lateFrac * 100).toFixed(2)}% late)`,
+        r.mean <= 0.81 && r.downsLast5 <= 1 && r.lateFrac < 0.03);
+    }
+    // 5) reset() and a new match forget the ceiling.
+    {
+      // Opens at 0.6 so reset() puts the scalar BELOW 1: only a cleared ceiling
+      // lets it climb from there.
+      const gov = new FrameGovernor({}, 0.6);
+      gov.setDisplayHz(60);
+      let t = feed(gov, 1000, 30 * 10, 2 * SLOT);
+      t = feed(gov, t, 60, 3 * SLOT);
+      gov.reset();
+      t = feed(gov, t, 30 * 20, 2 * SLOT);
+      expect(`reset() clears the paced ceiling (scalar ${gov.getScalar().toFixed(3)} 20 s after a reset from 0.6)`, gov.getScalar() >= 0.7);
+      const g2 = new FrameGovernor({}, 1);
+      g2.setDisplayHz(60);
+      let t2 = feed(g2, 1000, 30 * 10, 2 * SLOT);
+      t2 = feed(g2, t2, 60, 3 * SLOT);
+      t2 = feed(g2, t2, 30 * 3, 2 * SLOT); // the late frames drain out of the window
+      const low = g2.getScalar();
+      if (typeof g2.resetPacedCeiling === 'function') g2.resetPacedCeiling();
+      t2 = feed(g2, t2, 30 * 20, 2 * SLOT);
+      expect(`resetPacedCeiling() (match start) lets the scalar climb back (${low.toFixed(3)} -> ${g2.getScalar().toFixed(3)} in 20 s)`,
+        g2.getScalar() > low + 0.05);
+    }
+  } finally {
+    framePacer.setCap(0);
+  }
 }
 
 if (failures > 0) {

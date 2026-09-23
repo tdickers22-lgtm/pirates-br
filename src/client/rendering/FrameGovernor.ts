@@ -153,6 +153,28 @@ export interface GovernorTuning {
  *  display refresh late (8.3 ms at 120 Hz, 16.7 ms at 60), far past 10%. */
 export const PACED_SLACK = 0.1;
 
+/**
+ * THE PACED CEILING IS RECOVERABLE (b1-device-01). It used to be set on every
+ * paced step down and cleared only when the cap value changed, so three frames
+ * that each missed one 60 Hz slot (a GC pause, a notification banner) lowered a
+ * phone's resolution for the rest of the session, hitch after hitch: 1.0 walked
+ * to 0.84 over eight isolated hitches and never came back. Three rules now:
+ *  - Only SUSTAINED lateness lowers the ceiling: a median-late window (the
+ *    thermal / too-heavy signature), or tail lateness that REPEATS within
+ *    PACED_REPEAT_MS. An isolated p95-only window steps the scalar down like
+ *    any hitch and the scalar climbs back after the rebound lockout.
+ *  - After PACED_RECOVER_MS of on-slot windows at the ceiling, the ceiling
+ *    rises one maxUpStep. If that audition goes late within
+ *    PACED_FAIL_WINDOW_MS the ceiling returns to the last known-good value and
+ *    the wait doubles (to PACED_RECOVER_MAX_MS), so a phone that really is hot
+ *    auditions at most once every eight minutes instead of pumping.
+ *  - reset() and resetPacedCeiling() (match start) forget it.
+ */
+export const PACED_REPEAT_MS = 20_000;
+export const PACED_RECOVER_MS = 60_000;
+export const PACED_RECOVER_MAX_MS = 480_000;
+export const PACED_FAIL_WINDOW_MS = 30_000;
+
 export const GOVERNOR_TUNING: GovernorTuning = {
   targetFps: 60,
   floorFps: 30,
@@ -215,8 +237,20 @@ export class FrameGovernor {
   /** Last display rate reported (setDisplayHz) and the pacer's cap (0 = none). */
   private displayHz: number = GOVERNOR_TUNING.targetFps;
   private capFps = 0;
-  /** Highest scalar a paced session may climb back to: where it was last late. */
+  /** Highest scalar a paced session may climb back to: where it was last
+   *  SUSTAINEDLY late. Recoverable (see PACED_RECOVER_MS). */
   private pacedCeiling = 1;
+  /** When the last paced 'over' fired (a p95-only over within PACED_REPEAT_MS
+   *  of it is repeating, not a transient). */
+  private lastPacedOverAt = -1e9;
+  /** Since when the window has held its slot with the scalar at the ceiling. */
+  private pacedCleanSince = -1;
+  /** Current recovery wait (doubles on a failed audition). */
+  private pacedRecoverMs = PACED_RECOVER_MS;
+  /** The last ceiling raise, and the ceiling before it (the known-good value a
+   *  failed audition returns to). */
+  private pacedRaisedAt = -1e9;
+  private pacedCeilingBeforeRaise = 1;
 
   /**
    * `startScalar` is where the session OPENS, and it is deliberately not 1.
@@ -338,7 +372,7 @@ export class FrameGovernor {
    */
   setFrameCap(capFps: number): void {
     const cap = Number.isFinite(capFps) && capFps > 0 ? capFps : 0;
-    if (cap !== this.capFps) this.pacedCeiling = 1;
+    if (cap !== this.capFps) this.resetPacedCeiling();
     this.capFps = cap;
     this.retarget();
   }
@@ -427,15 +461,21 @@ export class FrameGovernor {
     // (or more) late. So a paced session reads 'over' as the median past the
     // budget by more than PACED_SLACK, and 'headroom' as frames holding their
     // slot, and it climbs only up to the scalar where it was last late
-    // (pacedCeiling): up until the first late window, one step back, hold.
-    // That is what stops the climb-late-drop pump a slot-based signal would
-    // otherwise produce, and it is why a thermally throttled phone walks down
-    // and never auditions back up into the heat.
+    // (pacedCeiling): up until the first SUSTAINED late window, one step back,
+    // hold. That is what stops the climb-late-drop pump a slot-based signal
+    // would otherwise produce. The ceiling is not a one-way ratchet: an
+    // isolated hitch never moves it, and a long clean run at it earns one
+    // audition upward, with a doubling wait if that audition goes late
+    // (PACED_RECOVER_MS, b1-device-01), so a hot phone does not pump and a
+    // cooled one gets its picture back.
     const paced = this.capFps > 0;
     const slack = paced ? budget * PACED_SLACK : 0;
-    const over = median > budget * t.downMedianRatio + slack || p95 > budget * t.downP95Ratio;
+    const medianOver = median > budget * t.downMedianRatio + slack;
+    const over = medianOver || p95 > budget * t.downP95Ratio;
+    const onSlot = paced && this.count >= t.minSamples && median <= budget + slack && p95 <= budget + slack;
+    if (paced) this.recoverPacedCeiling(onSlot && !over, nowMs);
     const under = this.count >= t.minSamples && (paced
-      ? median <= budget + slack && p95 <= budget + slack && this.scalar < this.pacedCeiling - 1e-6
+      ? onSlot && this.scalar < this.pacedCeiling - 1e-6
       : median < budget * t.upMedianRatio && p95 < budget * t.upP95Ratio);
 
     if (over) {
@@ -458,7 +498,11 @@ export class FrameGovernor {
       const step = clamp((overshoot - 1) * t.downGain, t.minDownStep, t.maxDownStep);
       this.applyStep(-step, nowMs);
       this.lastDownAt = nowMs;
-      if (paced) this.pacedCeiling = this.scalar;
+      if (paced) {
+        const sustained = medianOver || nowMs - this.lastPacedOverAt < PACED_REPEAT_MS;
+        this.lastPacedOverAt = nowMs;
+        if (sustained) this.lowerPacedCeiling(nowMs);
+      }
       return this.scalar;
     }
 
@@ -525,8 +569,47 @@ export class FrameGovernor {
 
   private lastStreamingScale = 1;
 
+  /** A paced session was late in a way that is not a transient. */
+  private lowerPacedCeiling(nowMs: number): void {
+    if (nowMs - this.pacedRaisedAt < PACED_FAIL_WINDOW_MS) {
+      // The audition failed: back to the last value that held, and wait
+      // longer before the next one.
+      this.pacedCeiling = Math.min(this.pacedCeiling, Math.max(this.scalar, this.pacedCeilingBeforeRaise));
+      this.pacedRecoverMs = Math.min(this.pacedRecoverMs * 2, PACED_RECOVER_MAX_MS);
+      this.pacedRaisedAt = -1e9;
+    } else {
+      this.pacedCeiling = this.scalar;
+    }
+    this.pacedCleanSince = -1;
+  }
+
+  /** Raise the ceiling one maxUpStep after a long enough clean run AT it. */
+  private recoverPacedCeiling(clean: boolean, nowMs: number): void {
+    if (this.pacedCeiling >= 1 - 1e-6) { this.pacedCleanSince = -1; return; }
+    if (!clean || this.scalar < this.pacedCeiling - 1e-6) { this.pacedCleanSince = -1; return; }
+    if (this.pacedCleanSince < 0) { this.pacedCleanSince = nowMs; return; }
+    if (nowMs - this.pacedCleanSince < this.pacedRecoverMs) return;
+    this.pacedCeilingBeforeRaise = this.pacedCeiling;
+    this.pacedCeiling = Math.min(1, this.pacedCeiling + this.tuning.maxUpStep);
+    this.pacedRaisedAt = nowMs;
+    this.pacedCleanSince = -1;
+    if (this.pacedCeiling >= 1 - 1e-6) this.pacedRecoverMs = PACED_RECOVER_MS;
+  }
+
+  /** Forget where a paced session was last late: a new match is a new scene
+   *  (and a cap change a new budget). Leaves the scalar where it is. */
+  resetPacedCeiling(): void {
+    this.pacedCeiling = 1;
+    this.lastPacedOverAt = -1e9;
+    this.pacedCleanSince = -1;
+    this.pacedRecoverMs = PACED_RECOVER_MS;
+    this.pacedRaisedAt = -1e9;
+    this.pacedCeilingBeforeRaise = 1;
+  }
+
   /** Match teardown / tier change. Keeps nothing. */
   reset(): void {
+    this.resetPacedCeiling();
     this.scalar = this.startScalar;
     this.mode = 'target';
     this.floorCeiling = 1;

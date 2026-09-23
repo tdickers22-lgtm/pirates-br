@@ -1464,6 +1464,12 @@ export class Renderer {
     this.governor.markOneOff();
   }
 
+  /** Match start: a new scene, so a paced session forgets where the last
+   *  match's frames ran late (b1-device-01). The scalar itself stays put. */
+  resetPacedCeiling(): void {
+    this.governor.resetPacedCeiling();
+  }
+
   /** What the settings panel prints, and what the browser gate reads. */
   getGovernorStatus(): {
     enabled: boolean;
