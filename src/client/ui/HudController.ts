@@ -9,7 +9,7 @@ import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
 import type { GameState, Island, IslandNpc, ItemStack, Player, Ship, ShipHole, ShipUpgradeType, WeaponInstance } from '../../shared/types/index.js';
 import { cargoBallastPenalty, cargoTier, cargoTierLabel } from '../../shared/cargo.js';
-import { countOpenHoles } from '../../shared/interactions.js';
+import { countOpenHoles, handOfSide, sideOfBearing } from '../../shared/interactions.js';
 import {
   STORM_GUST_BLOWOUT_DEPLOYMENT,
   STORM_GUST_BLOWOUT_PULSE,
@@ -2620,7 +2620,8 @@ export class HudController {
     // Where it comes FROM: the source bearing, which is what a sailor names.
     const wrapped = angleWrap(relative + Math.PI);
     const deg = Math.abs(THREE.MathUtils.radToDeg(wrapped));
-    const side = wrapped < 0 ? 'port' : 'starboard';
+    // +x is PORT (physics-04): a source at +bearing sits on the port hand.
+    const side = sideOfBearing(wrapped);
     if (deg <= 22) return 'dead ahead';
     if (deg >= 158) return 'astern';
     if (deg < 67) return `on the ${side} bow`;
@@ -2643,7 +2644,7 @@ export class HudController {
     // behind you, which is rel ≈ π, not rel ≈ 0.
     const wrapped = angleWrap(relative + Math.PI);
     const deg = Math.abs(THREE.MathUtils.radToDeg(wrapped));
-    const hand = wrapped < 0 ? 'left' : 'right';
+    const hand = handOfSide(sideOfBearing(wrapped));
     if (deg <= 22) return '';
     if (deg >= 158) return ' — from behind';
     if (deg < 67) return ` — from ahead-${hand}`;
@@ -2686,7 +2687,9 @@ export class HudController {
     // rotation. The old `+ 180` pointed it upwind while the words said the opposite
     // thing about the same angle; both halves of the chip are now the same story as
     // the physics (see windBearingPhrase).
-    vane.arrow.style.transform = `rotate(${degrees}deg)`;
+    // CSS turns clockwise and +relative is the PORT (screen-left) hand, so the
+    // angle is negated (physics-04, gated by test-handedness).
+    vane.arrow.style.transform = `rotate(${-degrees}deg)`;
     vane.text.textContent = phrase.replace('on the ', '');
     vane.root.title = sentence;
   }
