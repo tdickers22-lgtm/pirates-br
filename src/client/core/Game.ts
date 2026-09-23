@@ -1161,14 +1161,10 @@ export class Game {
       e.preventDefault();
       this.map.zoomAtClient(e.deltaY < 0 ? 1.18 : 1 / 1.18, e.clientX, e.clientY);
     }, { passive: false });
-    document.body.addEventListener('pointerdown', () => {
-      this.combatFx.unlockAudio();
-      this.audio.unlock();
-    });
-    document.body.addEventListener('keydown', () => {
-      this.combatFx.unlockAudio();
-      this.audio.unlock();
-    });
+    // Audio unlocks on the gestures WebKit accepts (pointerup/touchend/click/
+    // keydown, window capture), iOS audio session 'playback', hidden/interrupted
+    // suspend-resume: SoundEngine.installLifecycle (b1.1c, audio-08).
+    this.audio.installLifecycle();
     // Universal UI feedback — anything that's a <button> chirps on click.
     document.body.addEventListener('click', (event) => {
       const target = event.target as HTMLElement | null;
@@ -1233,7 +1229,6 @@ export class Game {
     this.bindReturnToMenuButtons();
     // No fanfare here: the horn now blows at the horn (match_horn), not during
     // the sub-second load where nobody was there to hear it.
-    this.audio.unlock();
     // Menu air off, world score on: at sea nothing plays continuously — only
     // the tavern jig and the odd whistled phrase surface.
     this.audio.setMusicContext('world');
@@ -1289,7 +1284,6 @@ export class Game {
 
   /** Queue popped: 'CREW FOUND' hold + sting, so joining reads found → countdown → horn. */
   private beginCrewFoundBeat(): void {
-    this.audio.unlock();
     this.crewFoundAtMs = performance.now();
     this.renderCrewFoundCard();
     // Weighing anchor: iron running in through the hawse. The big fanfare is
@@ -1388,7 +1382,6 @@ export class Game {
     // Release: the HUD comes back UP with the horn, not two seconds after it —
     // the banner rides over a live HUD, which is what "you are loose" looks like.
     document.body.classList.remove('match-ceremony');
-    this.audio.unlock();
     // Deep ship's horn UNDER the heroic fanfare — the pairing the engine's own
     // doc calls for ("under/before the fanfare").
     this.audio.playMatchStartHorn();
