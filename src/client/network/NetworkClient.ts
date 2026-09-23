@@ -34,6 +34,8 @@ export class NetworkClient {
   public onShipDamage: ((payload: unknown) => void) | null = null;
   public onShipImpact: ((payload: unknown) => void) | null = null;
   public onKillEvent: ((payload: unknown) => void) | null = null;
+  /** b1.2e server_notice: this host is draining for a deploy (HUD banner, b1.5f). */
+  onServerNotice?: (payload: { kind: 'restarting'; seconds: number }) => void;
   public onKegExploded: ((payload: unknown) => void) | null = null;
   public onChestOpened: ((payload: unknown) => void) | null = null;
   public onBarrelOpened: ((payload: unknown) => void) | null = null;
@@ -613,6 +615,7 @@ export class NetworkClient {
       case 'ship_damage': this.emit('ship_damage', () => this.onShipDamage?.(msg.payload)); break;
       case 'ship_impact': this.emit('ship_impact', () => this.onShipImpact?.(msg.payload)); break;
       case 'kill_event': this.emit('kill_event', () => this.onKillEvent?.(msg.payload)); break;
+      case 'server_notice': this.emit('server_notice', () => this.onServerNotice?.(msg.payload as { kind: 'restarting'; seconds: number })); break;
       case 'keg_exploded': this.emit('keg_exploded', () => this.onKegExploded?.(msg.payload)); break;
       case 'chest_opened': this.emit('chest_opened', () => this.onChestOpened?.(msg.payload)); break;
       case 'barrel_opened': this.emit('barrel_opened', () => this.onBarrelOpened?.(msg.payload)); break;

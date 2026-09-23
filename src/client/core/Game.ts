@@ -1252,6 +1252,7 @@ export class Game {
     }
     this.inMatch = true;
     this.menu.setLastMatchPartyCode(payload?.partyCode ?? null);
+    this.hud.setPartyCode(payload?.partyCode ?? null);
     this.scheduleJoinAssignmentWatchdog();
     this.bindReturnToMenuButtons();
     // No fanfare here: the horn now blows at the horn (match_horn), not during
@@ -1635,6 +1636,16 @@ export class Game {
     this.returnToMenuButtonsBound = true;
     const handler = () => this.goBackToMenuFromMatch();
     document.getElementById('death-return-btn')?.addEventListener('click', handler);
+    // NEXT TARGET while spectating (b1.5f, liveplay-06): the bar's button (tap
+    // or click), E / Space / right arrow, and the gamepad A or right bumper.
+    document.getElementById('death-next-btn')?.addEventListener('click', () => this.cycleSpectateTarget());
+    window.addEventListener('keydown', (e) => {
+      if (!document.body.classList.contains('spectating')) return;
+      if (e.code === 'KeyE' || e.code === 'Space' || e.code === 'ArrowRight' || e.code === 'KeyN') {
+        e.preventDefault();
+        this.cycleSpectateTarget();
+      }
+    });
     document.getElementById('win-return-btn')?.addEventListener('click', handler);
   }
 
@@ -2131,6 +2142,7 @@ export class Game {
 
   /** Join / snapshot flow and match lifecycle. */
   private bindSessionNetworkEvents() {
+    this.network.onServerNotice = (p) => this.hud.showServerNotice(p.kind, p.seconds);
     this.network.onJoin = (playerId, shipId, snapshot) => {
       this.clearJoinAssignmentWatchdog();
       this.localPlayerId = playerId;
@@ -6657,7 +6669,38 @@ export class Game {
    * Returns the world point to orbit, or null if there is nothing at all (no
    * state yet), in which case the caller keeps orbiting the body.
    */
+  private spectatePadWasDown = false;
+  /** Watch the next living crew (stable order by id), and hold the choice. */
+  cycleSpectateTarget(): string | null {
+    const state = this.state;
+    if (!state) return null;
+    const pool = state.players
+      .filter((c) => c.id !== this.localPlayerId && c.state !== 'eliminated' && c.state !== 'respawning' && !this.isSkeletonName(c))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    if (pool.length === 0) return null;
+    // One subject per HULL: skip crewmates of the ship already watched.
+    const cur = pool.find((c) => c.id === this.spectateSubjectId);
+    const start = cur ? pool.indexOf(cur) : -1;
+    let next = pool[(start + 1) % pool.length];
+    for (let i = 1; i <= pool.length; i++) {
+      const c = pool[(start + i) % pool.length];
+      if (!cur || !c.onShipId || c.onShipId !== cur.onShipId) { next = c; break; }
+    }
+    this.spectateSubjectId = next.id;
+    this.spectateRepickAt = this.ocean.getTime() + 45;
+    return next.id;
+  }
+
+  private pollSpectatePad(): void {
+    const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : [];
+    let down = false;
+    for (const pad of pads) if (pad && (pad.buttons[0]?.pressed || pad.buttons[5]?.pressed)) down = true;
+    if (down && !this.spectatePadWasDown) this.cycleSpectateTarget();
+    this.spectatePadWasDown = down;
+  }
+
   private updateSpectateSubject(): THREE.Vector3 | null {
+    this.pollSpectatePad();
     const state = this.state;
     if (!state) return null;
     const now = this.ocean.getTime();
