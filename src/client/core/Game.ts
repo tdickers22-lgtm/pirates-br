@@ -144,7 +144,7 @@ const INTERACT_INTENT_NOUN: Record<string, string> = {
   gold_hoarder: `the ${BROKER_NAME}`, stow_chest: 'the hold', helm: 'the wheel',
   sails: 'the halyard', brace: 'the brace', crow: 'the mast ladder', anchor: 'the capstan',
   repair: 'that breach', bail: 'the bilge', revive: 'your crewmate', cannon: 'that cannon',
-  ammo: 'the ammo chest',
+  ammo: 'the ammo chest', reload: 'that reload', fire: 'that shot',
 };
 
 /** 'the Black Fin' read attributively — "a Black Fin pennant". Derived, never
@@ -412,6 +412,8 @@ function interactRefusalLine(intent?: string, reason?: string): string {
     case 'nothing_there': return `Nothing to do at ${noun}.`;
     case 'no_ladder': return 'No rungs in reach — swim closer to the hull.';
     case 'sinking': return "She's going down — that station is closed.";
+    case 'no_ammo': return 'Out of shot. An ammo crate refills.';
+    case 'truce': return 'Truce: no crew may fire until 2:30.';
     default: return `Can't do that with ${noun} right now.`;
   }
 }
