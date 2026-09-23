@@ -32,6 +32,7 @@ import { SeaEventRenderer } from '../world/SeaEventRenderer.js';
 import { CombatFx } from '../rendering/CombatFx.js';
 import { SoundEngine, type FootstepSurface } from '../audio/SoundEngine.js';
 import { NetworkClient } from '../network/NetworkClient.js';
+import { connectCopy, waitForRetry, type ConnectPhase } from '../network/connectPolicy.js';
 import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
 import { assets, type AssetName } from '../assets/AssetLibrary.js';
@@ -1190,26 +1191,25 @@ export class Game {
   }
 
   private async connectToServer(): Promise<boolean> {
-    const socketUrl = this.getSocketUrl();
-    this.setLoading(80, `Connecting to ${socketUrl} ...`);
+    // b1.1e: NetworkClient retries for the 60 s seat budget; the loading screen
+    // shows player copy (connectPolicy) and a Retry button when it gives up.
+    const host = window.location.hostname;
+    const say = (phase: ConnectPhase, attempt = 0): void =>
+      this.setLoading(phase === 'gave_up' || phase === 'offline' ? 0 : 80, connectCopy(phase, { host, attempt, port: GAME_SERVER_PORT }).text);
+    this.network.onConnectProgress = (p) => say(p.phase, p.attempt);
+    this.network.setVersionGate(null, () => (this.inMatch ? 'in_match' : 'menu'));
+    say('connecting');
     await this.yieldForLoadingPaint();
-    const connectTimeoutMs = 6_000;
-    try {
-      await Promise.race([
-        this.network.connect(socketUrl),
-        new Promise<never>((_, reject) => {
-          window.setTimeout(() => reject(new Error('connect-timeout')), connectTimeoutMs);
-        }),
-      ]);
-    } catch {
-      this.network.disconnect();
-      this.setLoading(
-        0,
-        `Cannot reach game server at ${socketUrl}. Make sure 'npm run dev' is running (server on :${GAME_SERVER_PORT}), then refresh.`,
-      );
-      return false;
+    for (let first = true; ; first = false) {
+      try {
+        await (first ? this.network.connect(this.getSocketUrl()) : this.network.retryNow());
+        return true;
+      } catch {
+        say(navigator.onLine === false ? 'offline' : 'gave_up');
+        await waitForRetry(this.ui.loadingText);
+        say('connecting');
+      }
     }
-    return true;
   }
 
   private onMatchStartFromMenu(payload?: MatchStartPayload): void {
