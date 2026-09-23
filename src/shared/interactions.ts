@@ -1,5 +1,5 @@
 import { FLOODING, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
-import type { Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipHoleTier, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
+import type { HullSections, Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipHoleTier, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
 import {
   angleWrap, clamp, dist2D, getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckRaiseAt, getShipDeckWalkHalfWidth, getShipDeckY, getShipHoldFloorY, isInsideSwimHullFootprint, getSwimHullVerticalT, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
 
@@ -34,6 +34,50 @@ export function toShipLocalPoint(position: { x: number; z: number }, ship: Pick<
   return toShipLocalPointInto({ x: 0, z: 0 }, position, ship);
 }
 
+// ── Handedness: the ONE port/starboard truth (physics-04) ─────────────────────
+// The ship-local frame is +z bow and +x on the helmsman's LEFT: stepPirate's
+// RIGHT press at yaw = ship.rotation walks toward local -x, and toShipWorldPoint
+// maps local +x to world (cos, -sin). So +x is PORT. The physics has always been
+// self-consistent; only the NAMES were mirrored (a breach on the left rail was
+// called "starboard", "wind on the starboard beam" came from the left). Every
+// word a player reads about a side goes through these helpers. The physics axes
+// and the HullSections KEYS are untouched: the key 'starboard' still holds the
+// +x (true port) face's HP, so a key is data, never a label (hullSectionSide).
+export type HullSide = 'port' | 'starboard';
+
+/** Nautical side of a ship-local x: +x = port, -x = starboard. */
+export function sideOfLocalX(x: number): HullSide {
+  return x > 0 ? 'port' : 'starboard';
+}
+
+/** Nautical side of a bearing relative to the bow in yaw terms (forward is
+ *  (sin, cos), so a bearing b sits at local x = sin b): +b = port. */
+export function sideOfBearing(relativeYaw: number): HullSide {
+  return sideOfLocalX(Math.sin(relativeYaw));
+}
+
+/** What a player sees: port -> left, starboard -> right (facing the bow). */
+export function handOfSide(side: HullSide): 'left' | 'right' {
+  return side === 'port' ? 'left' : 'right';
+}
+
+/** Title-case side word for prompts ("Brace the Yard to Port"). */
+export function sideTitle(side: HullSide): 'Port' | 'Starboard' {
+  return side === 'port' ? 'Port' : 'Starboard';
+}
+
+/** Local x (sign) of the face a HullSections KEY stores. Legacy data naming:
+ *  key 'starboard' = +x, key 'port' = -x (Match.getSectionAimLocal,
+ *  PhysicsSystem's section picker). Bow/stern are 0. */
+export function hullSectionLocalX(section: keyof HullSections): number {
+  return section === 'starboard' ? 1 : section === 'port' ? -1 : 0;
+}
+
+/** Display side of a HullSections key: the ONLY way a key may reach a label. */
+export function hullSectionSide(section: keyof HullSections): 'bow' | 'stern' | HullSide {
+  return section === 'bow' || section === 'stern' ? section : sideOfLocalX(hullSectionLocalX(section));
+}
+
 export function toShipWorldPoint(local: ShipLocalPoint, ship: Pick<Ship, 'position' | 'rotation'>): ShipLocalPoint {
   const cos = Math.cos(ship.rotation);
   const sin = Math.sin(ship.rotation);
@@ -53,8 +97,8 @@ export function toShipWorldPoint(local: ShipLocalPoint, ship: Pick<Ship, 'positi
 // the shot aimed at the drawn body missed the server capsule by the same.
 //
 // These three functions are the ONE frame. Conventions match evaluateHoleFlood
-// and updateShipWaveAttitude exactly: positive roll lifts the starboard rail
-// (+x), positive pitch dips the bow (+z).
+// and updateShipWaveAttitude exactly: positive roll lifts the +x (port) rail
+// (see sideOfLocalX), positive pitch dips the bow (+z).
 //
 // Deliberately NOT changed (verifier's correction on physics-01): toShipLocalPoint,
 // clampDeckPosition and the hold/deck footprints stay 2D. A tilted deck's PLAN
@@ -376,7 +420,8 @@ function tiltFloor(flatWorldY: number, local: ShipLocalPoint, ship: Pick<Ship, '
   return ship.position.y + shipLocalUpY(local.x, flatWorldY - ship.position.y, local.z, ship);
 }
 
-/** Which rail a gun sits on: +1 starboard (first half of the indices), −1 port. */
+/** Which rail a gun sits on: +1 = the +x rail (PORT, first half of the
+ *  indices), −1 = the −x rail (starboard). Name it with sideOfLocalX. */
 export function getCannonSide(stats: Pick<ShipStats, 'cannonCount'>, cannonIndex: number): 1 | -1 {
   return cannonIndex < Math.max(1, stats.cannonCount / 2) ? 1 : -1;
 }
@@ -511,8 +556,9 @@ export function isNearSailStation(player: PlayerLike, ship: ShipLike): boolean {
     Math.abs(local.x - station.x) < 1.15 && Math.abs(local.z - station.z) < 1.35);
 }
 
-/** Which brace station the player is working: -1 = port (yard to port),
- *  +1 = starboard, 0 = not at a brace rail. */
+/** Which brace station the player is working: +1 = the +x rail (PORT, hauls
+ *  the port brace: sailAngle up, +x yardarm aft), -1 = the -x rail
+ *  (starboard), 0 = not at a brace rail. */
 export function findBraceStationDir(player: PlayerLike, ship: ShipLike): -1 | 0 | 1 {
   if (player.onShipId !== ship.id) return 0;
   const stats = SHIP_STATS[ship.type];
@@ -577,7 +623,7 @@ export interface GangwayPlan {
   /** Outboard end resting on the dock deck, world XZ + walkable Y. */
   dockEnd: Vec3;
   halfWidth: number;
-  /** Which bulwark it hangs from: -1 = port, +1 = starboard. */
+  /** Which bulwark it hangs from: +1 = +x (port), -1 = -x (starboard). */
   side: -1 | 1;
   /** Ship-local XZ of the inboard end (for drawing in ship space). */
   shipLocal: ShipLocalPoint;

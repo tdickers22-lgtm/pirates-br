@@ -363,7 +363,7 @@ export function evaluateHoleFlood(
     if (hole.patched) continue;
     const worldX = ship.position.x + hole.x * cosR + hole.z * sinR;
     const worldZ = ship.position.z + hole.z * cosR - hole.x * sinR;
-    // Positive roll lifts starboard (+x); positive pitch dips the bow (+z).
+    // Positive roll lifts the +x (PORT, see sideOfLocalX) rail; positive pitch dips the bow (+z).
     const holeY = ship.position.y + hole.y + hole.x * sinRoll - hole.z * sinPitch;
     // Storm seas break over holes that calm water would leave dry.
     const surfaceY = gerstnerHeight(worldX, worldZ, t, WAVE_PARAMS, storm);
@@ -403,7 +403,8 @@ export function shipIngressRate(ship: Ship, t: number, storm = 0): number {
  * and a seeded match replays the same lean.
  *
  * Conventions match the renderer and updateShipWaveAttitude: positive roll
- * LIFTS starboard, so breaches to starboard produce a NEGATIVE roll (that rail
+ * LIFTS the +x (port) rail, so breaches keyed 'starboard' (= +x, the legacy
+ * HullSections key) produce a NEGATIVE roll (that rail
  * goes down); positive pitch DIPS the bow, so a flooded bow trims positive.
  * evaluateHoleFlood already reads pitch/roll, which is what closes the doom
  * spiral: the list dips the holed side, the holed side then gushes harder.
@@ -2028,14 +2029,14 @@ export class PhysicsSystem {
   private onProjectileHitShip(proj: Projectile, ship: Ship, t: number, impact: HullImpactKind = 'band', players: Player[] = []) {
     if (proj.type === 'bullet') return;
 
-    // Canonical ship-local frame (+z bow, +x starboard) — correct at every
+    // Canonical ship-local frame (+z bow, +x PORT) — correct at every
     // heading. This is the EXACT point the ball struck, in the same frame the
     // hull loft and its discard shader use, so the breach opens where you shot.
     const local = this.toShipLocal(proj.position, ship);
     const localY = proj.position.y - ship.position.y;
     const section: keyof HullSections = this.impactHullSection(local);
-    // Drawn face from the ball's own heading: a ball flying to port struck the
-    // STARBOARD planking, so the breach carries that sign even when the skin
+    // Drawn face from the ball's own heading: a ball flying toward -x struck the
+    // +x planking, so the breach carries that sign even when the skin
     // crossing sits within a few centimetres of the centreline (stem rakes).
     const stats = SHIP_STATS[ship.type];
     const localVel = this.rotateWorldToShipLocal(proj.velocity.x, proj.velocity.z, ship.rotation);
@@ -2282,7 +2283,7 @@ export class PhysicsSystem {
     return true;
   }
 
-  /** Rotate a world-space direction into a ship's local frame. +z = forward, +x = starboard.
+  /** Rotate a world-space direction into a ship's local frame. +z = forward, +x = port.
    *  Same rotation convention as the canonical toShipLocalPoint in shared/interactions. */
   private rotateWorldToShipLocal(wx: number, wz: number, rotation: number) {
     const cos = Math.cos(rotation);
@@ -2301,7 +2302,8 @@ export class PhysicsSystem {
     return 1 + lateral * lateral * 0.9;
   }
 
-  /** Pick the hull section (bow/stern/port/starboard) that absorbed the hit. */
+  /** Pick the HullSections KEY that absorbed the hit. Keys are data: 'starboard'
+   *  holds the +x (true PORT) face; labels go through hullSectionSide. */
   private impactHullSection(localImpact: { x: number; z: number }): keyof HullSections {
     return Math.abs(localImpact.z) >= Math.abs(localImpact.x)
       ? (localImpact.z >= 0 ? 'bow' : 'stern')
@@ -2908,7 +2910,7 @@ export class PhysicsSystem {
    * Sample the shared Gerstner field at bow/stern/port/starboard hull points
    * (canonical ship transform) and chase the resulting slope with a
    * near-critically-damped spring. Conventions match the client renderer:
-   * positive pitch dips the bow, positive roll lifts the starboard rail.
+   * positive pitch dips the bow, positive roll lifts the +x (port) rail.
    * Magnitudes stay inside the client's defensive clamps (±0.5 / ±0.6).
    */
   /** World height of the FLAT weather deck at a hull-local point, lifted onto
@@ -2936,8 +2938,9 @@ export class PhysicsSystem {
     const halfW = stats.width * 0.4;
     const bow = this.toShipWorld(0, halfL, ship);
     const stern = this.toShipWorld(0, -halfL, ship);
-    const starboard = this.toShipWorld(halfW, 0, ship);
-    const port = this.toShipWorld(-halfW, 0, ship);
+    // +x is PORT (sideOfLocalX); the roll math below is unchanged.
+    const port = this.toShipWorld(halfW, 0, ship);
+    const starboard = this.toShipWorld(-halfW, 0, ship);
     const bowY = gerstnerHeight(bow.x, bow.z, t, WAVE_PARAMS, seaState);
     const sternY = gerstnerHeight(stern.x, stern.z, t, WAVE_PARAMS, seaState);
     const starboardY = gerstnerHeight(starboard.x, starboard.z, t, WAVE_PARAMS, seaState);
@@ -2966,7 +2969,7 @@ export class PhysicsSystem {
     );
     const turnHeel = shipTurnHeel(ship.angularVelocity, speedFrac);
     const targetRoll = clamp(
-      (Math.atan2(starboardY - portY, stats.width * 0.8) + turnHeel + windHeel) * anchorCalm + list.roll,
+      (Math.atan2(portY - starboardY, stats.width * 0.8) + turnHeel + windHeel) * anchorCalm + list.roll,
       -rollCap, rollCap,
     );
 
@@ -3133,7 +3136,7 @@ export class PhysicsSystem {
 
     const keelY = ship.position.y - stats.height * SHIP.HULL_DRAFT_F[ship.type] - SHIP.GROUND_KEEL_SAFETY;
     const wallY = ship.position.y - WATERLINE_WALL_DROP;
-    // Abeam basis: forward is (sin, cos), so starboard is (cos, -sin).
+    // Abeam basis: forward is (sin, cos), so local +x (port) is (cos, -sin).
     const sinR = Math.sin(ship.rotation);
     const cosR = Math.cos(ship.rotation);
     let deepest: { x: number; z: number; depth: number } | null = null;

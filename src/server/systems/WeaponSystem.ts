@@ -426,11 +426,11 @@ export class WeaponSystem {
   getCannonMuzzlePosition(ship: Ship, cannonIndex: number, yaw: number, pitch: number): Vec3 {
     const stats = SHIP_STATS[ship.type];
     const cannonsPerSide = Math.max(1, stats.cannonCount / 2);
-    const starboardSide = cannonIndex < cannonsPerSide;
+    const plusXSide = cannonIndex < cannonsPerSide; // +x = port (sideOfLocalX)
     // Muzzle x pokes outboard of the bulwark; the row z comes from the SHARED
     // stand-point math so the visual gun, prompt zone, mount snap and muzzle
     // always agree (the sloop's single gun per side sits amidships now).
-    const localX = (starboardSide ? 1 : -1) * (stats.width * 0.5 + 0.08);
+    const localX = (plusXSide ? 1 : -1) * (stats.width * 0.5 + 0.08);
     const localZ = getCannonDeckLocalPosition(stats, cannonIndex).z;
     const baseX = ship.position.x + localX * Math.cos(ship.rotation) + localZ * Math.sin(ship.rotation);
     const baseY = ship.position.y + stats.height + 0.18;
