@@ -262,7 +262,83 @@ const MIME_TYPES: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
+  // b1.2g (online-14): the D3 sample formats iOS Safari decodes, the PWA
+  // manifest and AVIF. Without them every one went out as octet-stream, which
+  // an <audio> element on iOS refuses and nosniff now forbids guessing at.
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.webmanifest': 'application/manifest+json',
+  '.avif': 'image/avif',
 };
+
+/** HTTP HARDENING (b1.2g, online-13). Every response: no MIME sniffing, no
+ *  full-URL referrers, no camera/mic/location for anything we serve, and no
+ *  framing by another site. Behind the trusted proxy (Fly force_https) HSTS
+ *  too; a plain-http dev host must never send it. */
+const BASE_SECURITY_HEADERS: Readonly<Record<string, string>> = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  'x-frame-options': 'DENY',
+};
+/** The HTML document's CSP. Only same-origin script; `'wasm-unsafe-eval'` is
+ *  the one allowance, for the meshopt/basis WebAssembly decoders the D6 asset
+ *  transport brings (it permits wasm compilation, NOT eval). Workers are our
+ *  own bundles plus the blob: workers three's KTX2 loader spins up. Inline
+ *  style attributes are how the HUD positions itself, so style-src keeps
+ *  'unsafe-inline'. `ws:` only on a plain-http host (dev rigs, the local
+ *  webkit probe): older Safari does not match a ws: URL against 'self'. */
+export function contentSecurityPolicy(behindTlsProxy: boolean): string {
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'wasm-unsafe-eval'",
+    "worker-src 'self' blob:",
+    `connect-src 'self' wss:${behindTlsProxy ? '' : ' ws:'} data: blob:`,
+    "img-src 'self' data: blob:",
+    "media-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "style-src 'self' 'unsafe-inline'",
+    "manifest-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
+/** ONE JSON LINE PER LIFECYCLE EVENT (b1.2g, online-12): what `fly logs` is
+ *  read for after launch (time-to-match, refusals, client errors). Never an IP,
+ *  never a name: only counts, modes, reasons and durations. */
+export function logEvent(evt: string, fields: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({ t: new Date().toISOString(), evt, ...fields }));
+}
+
+/** POST /beacon (b1.2g, online-12): client error reports. <= 4 KB, one per
+ *  IP per 10 s, 20 per second for the whole host, logged as one JSON line. */
+const BEACON_MAX_BYTES = 4 * 1024;
+const BEACON_MIN_INTERVAL_MS = 10_000;
+const BEACON_GLOBAL_PER_SEC = 20;
+const BEACON_KINDS: ReadonlySet<string> = new Set(['error', 'rejection', 'webglcontextlost', 'longload', 'fps-floor']);
+/** The fields a beacon may carry, each clipped; anything else is dropped. */
+export function sanitizeBeacon(raw: unknown): Record<string, string> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const body = raw as Record<string, unknown>;
+  const kind = typeof body.kind === 'string' ? body.kind : '';
+  if (!BEACON_KINDS.has(kind)) return null;
+  const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const out: Record<string, string> = { kind, message: clip(body.message, 300) };
+  const stack = clip(body.stack, 1500);
+  if (stack) out.stack = stack;
+  for (const [k, n] of [['buildId', 40], ['ua', 64], ['quality', 16]] as const) {
+    const v = clip(body[k], n);
+    if (v) out[k] = v;
+  }
+  return out;
+}
 
 /** Extensions worth a precompressed sibling. Everything here is text or an
  *  uncompressed binary container; .png/.webp/.woff2 are already compressed and
@@ -432,6 +508,11 @@ export class LobbyServer {
    *  moment that crew lands (netcode-16). */
   private joinWaiters: Map<string, Set<string>> = new Map();
   private bugsnapLastByIp: Map<string, number> = new Map();
+  /** b1.2g: /beacon per-IP spacing and the host-wide per-second window. */
+  private beaconLastByIp: Map<string, number> = new Map();
+  private beaconWindow = { startMs: 0, count: 0 };
+  /** b1.2g: when each match started, for match_end's durationSec. */
+  private matchStartedAt: Map<string, number> = new Map();
   /** token → parked session, awaiting a `resume` inside RECONNECT_GRACE_MS. */
   private held: Map<string, ClientSession> = new Map();
   /** RECON-01/netcode-29: set by shutdown(); no seat is held while the process
@@ -490,6 +571,7 @@ export class LobbyServer {
           return;
         }
         console.warn(`[Lobby] refused upgrade from ${ip}: ${verdict.reason} (${verdict.status})`);
+        logEvent('refused', { reason: verdict.reason, status: verdict.status });
         done(false, verdict.status, verdict.reason === 'origin' ? 'Forbidden' : 'Too Many Connections');
       },
     });
@@ -1169,6 +1251,7 @@ export class LobbyServer {
       partyCode,
       joinedAt: Date.now(),
     };
+    logEvent('queue_join', { mode: modeId, crew: crewSessions.length, party: partyCode !== null });
     // A crew arriving during a match's pre-horn countdown boards THAT match
     // rather than opening a second lobby of one.
     if (this.tryBackfill(entry)) return;
@@ -1602,7 +1685,10 @@ export class LobbyServer {
       if (match && placed > 0 && swappable > 0) {
         this.queueMatchSlots.set(match.id, { mode, slots: swappable });
       }
-      console.log(`[Lobby] ${mode} match dispatched: ${cohort.length} crew(s), ${placed} pirate(s), ${botCount} bots (${swappable} swappable)`);
+      logEvent('match_dispatch', {
+        mode, crews: cohort.length, humans: placed, bots: botCount, swappable,
+        waitedSec: Number(((now - cohort[0].joinedAt) / 1000).toFixed(1)),
+      });
       this.broadcastQueue();
     }
   }
@@ -1631,6 +1717,7 @@ export class LobbyServer {
     }));
     match.start();
     this.matches.set(matchId, match);
+    this.matchStartedAt.set(matchId, Date.now());
     return match;
   }
 
@@ -1654,6 +1741,7 @@ export class LobbyServer {
       // Refuse EARLY, before a hull, a dock or a colour is handed out: the
       // members keep their party and can queue again the moment a match ends.
       console.warn(`[Lobby] refusing ${source} match: ${this.matches.size}/${MAX_MATCHES_PER_PROCESS} matches on this host`);
+      logEvent('refused', { reason: 'capacity', source, humans: members.length, matches: this.matches.size });
       // ONE message, not two: failPlacement's generic "could not board" would
       // land on top of this and the player would read the wrong reason.
       for (const member of members) {
@@ -1772,7 +1860,13 @@ export class LobbyServer {
   }
 
   private onMatchEnd(matchId: string, result: MatchEndResult): void {
-    console.log(`[Lobby] match ${matchId.slice(0, 6)} ended (${result.reason}) — ${result.humans.length} humans`);
+    const startedAt = this.matchStartedAt.get(matchId);
+    this.matchStartedAt.delete(matchId);
+    logEvent('match_end', {
+      reason: result.reason,
+      durationSec: startedAt === undefined ? null : Math.round((Date.now() - startedAt) / 1000),
+      humans: result.humans.length,
+    });
     // A quarantined match (b1.2a) ended because the server faulted, not because
     // anyone won or lost: nothing is persisted, the crews just go home.
     if (result.reason === 'server_fault') return;
@@ -1914,6 +2008,7 @@ export class LobbyServer {
     session.closedForAbuse = true;
     this.abuseClosed += 1;
     console.warn(`[Lobby] closing ${session.id.slice(0, 6)} (${session.ip}) 1008: over message budget, ${session.limiter.dropped} frames dropped`);
+    logEvent('refused', { reason: 'message_budget', status: 1008, dropped: session.limiter.dropped });
     try { session.ws.close(ABUSE_CLOSE_CODE, 'policy violation'); } catch {}
     // A client that never answers the close handshake is cut after 2 s rather
     // than ws's 30 s default.
@@ -2042,6 +2137,7 @@ export class LobbyServer {
     }
     match.stop();
     this.matches.delete(matchId);
+    this.matchStartedAt.delete(matchId);
     this.matchEmptySince.delete(matchId);
     this.statsIdentity.delete(matchId);
     console.log(`[Lobby] match ${matchId.slice(0, 6)} reaped (${reason}) — ${this.matches.size} running`);
@@ -2096,6 +2192,9 @@ export class LobbyServer {
       this.replyBadRequest(res);
       return;
     }
+    // b1.2g: every answer below (health, 404, 405, 400, static) carries these.
+    for (const [k, v] of Object.entries(BASE_SECURITY_HEADERS)) res.setHeader(k, v);
+    if (TRUST_PROXY) res.setHeader('strict-transport-security', 'max-age=31536000');
     if (rawPath === '/health' || rawPath === '/healthz') {
       // 503 ONLY while draining. A FULL host is still healthy — its live
       // matches must keep their players — so it answers 200 with
@@ -2106,6 +2205,20 @@ export class LobbyServer {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-cache',
       });
+      // online-20: the public gets the load-balancing answer and nothing
+      // about the host's internals (map seed, per-match sims, counters).
+      if (!this.healthDetailAllowed(req)) {
+        res.end(JSON.stringify({
+          ok: !this.draining,
+          accepting: !this.atCapacity(),
+          draining: this.draining,
+          buildId: this.buildId,
+          machineId: process.env.FLY_MACHINE_ID ?? null,
+          clients: this.clients.size,
+          matches: this.matches.size,
+        }));
+        return;
+      }
       // simLag / droppedTicks are the whole point of this endpoint under load:
       // the sim degrades by silently dropping ticks, so a host that has quietly
       // fallen into slow motion is otherwise indistinguishable from a healthy
@@ -2128,6 +2241,7 @@ export class LobbyServer {
         accepting: !this.atCapacity(),
         draining: this.draining,
         buildId: this.buildId,
+        machineId: process.env.FLY_MACHINE_ID ?? null,
         // Frames the wire validator refused since boot. A client build that has
         // drifted off the protocol shows up here as a rising count instead of
         // as silence.
@@ -2205,6 +2319,20 @@ export class LobbyServer {
       return;
     }
 
+    if (rawPath === '/beacon' && req.method === 'POST') {
+      this.serveBeacon(req, res);
+      return;
+    }
+
+    // online-13: static paths answer GET and HEAD only; anything else used to
+    // be served the file.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      req.resume();
+      res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET, HEAD' });
+      res.end('Method Not Allowed');
+      return;
+    }
+
     if (rawPath.startsWith('/ws')) {
       res.writeHead(426, { 'content-type': 'text/plain; charset=utf-8' });
       res.end('Upgrade Required');
@@ -2245,6 +2373,7 @@ export class LobbyServer {
     }
 
     const ext = extname(filePath);
+    if (ext === '.html') res.setHeader('content-security-policy', contentSecurityPolicy(TRUST_PROXY));
     const info = this.statFile(filePath);
     if (!info) { this.replyBadRequest(res, 500); return; }
 
@@ -2290,6 +2419,12 @@ export class LobbyServer {
       'content-length': String(bodyInfo.size),
     };
     if (encoding) headers['content-encoding'] = encoding;
+    // HEAD: the headers a GET would get, and never open the file.
+    if (req.method === 'HEAD') {
+      res.writeHead(200, headers);
+      res.end();
+      return;
+    }
 
     // A ReadStream that fails to open (dist/client emptied by an in-place
     // `vite build` between the stat and the open) emits 'error'; unhandled,
@@ -2332,6 +2467,82 @@ export class LobbyServer {
     } catch {
       return null;
     }
+  }
+
+  /** online-20: the detailed /health body (map seed, sims, counters) goes to
+   *  a request carrying X-Health-Key == HEALTH_KEY, or, with no key
+   *  configured, to a loopback caller that did not come through the edge (the
+   *  local test and perf rigs). Anything relayed by Fly's proxy is public. Env
+   *  read per request so a test can flip posture without a restart. */
+  private healthDetailAllowed(req: IncomingMessage): boolean {
+    const key = process.env.HEALTH_KEY;
+    if (key) {
+      const given = req.headers['x-health-key'];
+      if (typeof given !== 'string') return false;
+      const a = Buffer.from(given);
+      const b = Buffer.from(key);
+      return a.length === b.length && timingSafeEqual(a, b);
+    }
+    if (req.headers['fly-client-ip'] !== undefined || req.headers['x-forwarded-for'] !== undefined) return false;
+    const addr = req.socket.remoteAddress ?? '';
+    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+  }
+
+  /** POST /beacon (online-12): a client error report, <= BEACON_MAX_BYTES,
+   *  one per IP per 10 s and BEACON_GLOBAL_PER_SEC for the host, written as
+   *  one JSON line WITHOUT the IP. 204 on success; nothing is stored. */
+  private serveBeacon(req: IncomingMessage, res: ServerResponse): void {
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > BEACON_MAX_BYTES) {
+      req.resume();
+      res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' });
+      res.end('Payload Too Large');
+      return;
+    }
+    const ip = clientIp(req);
+    const now = Date.now();
+    const last = this.beaconLastByIp.get(ip);
+    if (last !== undefined && now - last < BEACON_MIN_INTERVAL_MS) {
+      req.resume();
+      this.replyBadRequest(res, 429);
+      return;
+    }
+    if (now - this.beaconWindow.startMs >= 1000) this.beaconWindow = { startMs: now, count: 0 };
+    if (this.beaconWindow.count >= BEACON_GLOBAL_PER_SEC) {
+      req.resume();
+      this.replyBadRequest(res, 429);
+      return;
+    }
+    this.beaconWindow.count += 1;
+    this.beaconLastByIp.set(ip, now);
+    if (this.beaconLastByIp.size > 10_000) {
+      for (const [k, t] of this.beaconLastByIp) if (now - t >= BEACON_MIN_INTERVAL_MS) this.beaconLastByIp.delete(k);
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let refused = false;
+    req.on('data', (chunk: Buffer) => {
+      if (refused) return;
+      size += chunk.length;
+      if (size > BEACON_MAX_BYTES) {
+        refused = true;
+        res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' });
+        res.end('Payload Too Large', () => req.destroy());
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('error', () => {});
+    req.on('end', () => {
+      if (refused) return;
+      let parsed: unknown;
+      try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { parsed = null; }
+      const beacon = sanitizeBeacon(parsed);
+      if (!beacon) { this.replyBadRequest(res); return; }
+      logEvent('client_error', beacon);
+      res.writeHead(204);
+      res.end();
+    });
   }
 
   /** PIRATES_BR_DEV=1 opens /bugsnap outright (local play); otherwise only a

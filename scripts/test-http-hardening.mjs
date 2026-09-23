@@ -266,6 +266,98 @@ console.log('/bugsnap is gated, capped and rate-limited:');
   delete process.env.PIRATES_BR_DEV;
 }
 
+// ─── b1.2g (online-13/14/20): security headers, methods, MIME, slim /health ──
+console.log('Security headers, 405, HEAD, MIME, slim /health (b1.2g):');
+{
+  const { existsSync: exists, readdirSync: ls } = await import('node:fs');
+  const DIST = new URL('../dist/client/', import.meta.url).pathname;
+  if (!exists(join(DIST, 'index.html'))) {
+    expect('dist/client/index.html exists (run `npm run build` before this suite)', false);
+  } else {
+    const hdr = (res, k) => res.headers.get(k) ?? '';
+    const baseOk = (res, where) => {
+      expect(`${where}: X-Content-Type-Options nosniff`, hdr(res, 'x-content-type-options') === 'nosniff', hdr(res, 'x-content-type-options'));
+      expect(`${where}: Referrer-Policy strict-origin-when-cross-origin`, hdr(res, 'referrer-policy') === 'strict-origin-when-cross-origin');
+      expect(`${where}: Permissions-Policy denies camera/microphone/geolocation`,
+        /camera=\(\)/.test(hdr(res, 'permissions-policy')) && /microphone=\(\)/.test(hdr(res, 'permissions-policy')) && /geolocation=\(\)/.test(hdr(res, 'permissions-policy')),
+        hdr(res, 'permissions-policy'));
+    };
+    const root = await fetch(`${HTTP}/`);
+    const rootEtag = hdr(root, 'etag');
+    await root.arrayBuffer();
+    baseOk(root, '/');
+    const csp = hdr(root, 'content-security-policy');
+    expect("/: CSP default-src 'self', frame-ancestors 'none', worker-src blob:, connect-src wss:, object-src 'none'",
+      /default-src 'self'/.test(csp) && /frame-ancestors 'none'/.test(csp) && /worker-src[^;]*'self'[^;]*blob:/.test(csp)
+        && /connect-src[^;]*'self'[^;]*wss:/.test(csp) && /object-src 'none'/.test(csp) && /script-src 'self'/.test(csp)
+        && !/script-src[^;]*'unsafe-inline'/.test(csp) && !/script-src[^;]*'unsafe-eval'/.test(csp), csp);
+    expect('/: X-Frame-Options DENY', hdr(root, 'x-frame-options') === 'DENY');
+    expect('/: no HSTS on a host that is not behind the trusted proxy', hdr(root, 'strict-transport-security') === '');
+
+    const js = ls(join(DIST, 'assets')).find((f) => /^index-.*\.js$/.test(f));
+    const jsRes = await fetch(`${HTTP}/assets/${js}`);
+    await jsRes.arrayBuffer();
+    baseOk(jsRes, `/assets/${js}`);
+    expect('/assets/*.js: no CSP on a script (HTML only)', hdr(jsRes, 'content-security-policy') === '');
+
+    const nm = await fetch(`${HTTP}/`, { headers: { 'if-none-match': rootEtag } });
+    expect('conditional / -> 304', nm.status === 304, `status=${nm.status} etag=${rootEtag}`);
+    baseOk(nm, '304 /');
+    expect('304 /: CSP still present', /frame-ancestors 'none'/.test(hdr(nm, 'content-security-policy')));
+
+    const p = await fetch(`${HTTP}/`, { method: 'POST', body: 'x' });
+    expect('POST / -> 405 with Allow: GET, HEAD', p.status === 405 && /GET/.test(hdr(p, 'allow')) && /HEAD/.test(hdr(p, 'allow')),
+      `status=${p.status} allow=${hdr(p, 'allow')}`);
+    const put = await fetch(`${HTTP}/assets/${js}`, { method: 'PUT', body: 'x' });
+    expect('PUT /assets/*.js -> 405', put.status === 405, `status=${put.status}`);
+    const del = await fetch(`${HTTP}/index.html`, { method: 'DELETE' });
+    expect('DELETE /index.html -> 405', del.status === 405, `status=${del.status}`);
+
+    const head = await rawRequest('HEAD / HTTP/1.1');
+    const [headPart, bodyPart = ''] = head.split('\r\n\r\n');
+    expect('HEAD / -> 200 with content-length and NO body',
+      /^HTTP\/1\.1 200/.test(headPart) && /content-length: \d+/i.test(headPart) && bodyPart.length === 0,
+      `head=${JSON.stringify(headPart.slice(0, 40))} body bytes=${bodyPart.length}`);
+
+    // MIME for the D3 audio formats, the PWA manifest and AVIF.
+    const fixtures = { 'b12g-probe.mp3': 'audio/mpeg', 'b12g-probe.m4a': 'audio/mp4', 'b12g-probe.webmanifest': 'application/manifest+json', 'b12g-probe.avif': 'image/avif' };
+    try {
+      for (const f of Object.keys(fixtures)) writeFileSync(join(DIST, f), Buffer.alloc(16));
+      for (const [f, type] of Object.entries(fixtures)) {
+        const r = await fetch(`${HTTP}/${f}`);
+        await r.arrayBuffer();
+        expect(`.${f.split('.').pop()} -> ${type}`, r.status === 200 && hdr(r, 'content-type').startsWith(type), `status=${r.status} type=${hdr(r, 'content-type')}`);
+      }
+    } finally {
+      for (const f of Object.keys(fixtures)) rmSync(join(DIST, f), { force: true });
+    }
+  }
+
+  // /health: slim for the public, detail only with the key (or a bare loopback
+  // dev rig when no key is configured).
+  const get = async (headers = {}) => { const r = await fetch(`${HTTP}/health`, { headers }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
+  const dev = await get();
+  expect('/health from loopback with no HEALTH_KEY configured keeps the detail (dev rigs)', Array.isArray(dev.body.sims) && 'mapSeed' in dev.body, JSON.stringify(Object.keys(dev.body)));
+  process.env.HEALTH_KEY = 'b12g-secret';
+  const pub = await get();
+  const slimKeys = ['ok', 'accepting', 'draining', 'buildId', 'machineId', 'clients', 'matches'];
+  expect('/health without the key omits mapSeed, sims, trustProxy, rejectedFrames',
+    pub.status === 200 && !('mapSeed' in pub.body) && !('sims' in pub.body) && !('trustProxy' in pub.body) && !('rejectedFrames' in pub.body),
+    JSON.stringify(pub.body));
+  expect('/health without the key is exactly {ok, accepting, draining, buildId, machineId, clients, matches}',
+    JSON.stringify(Object.keys(pub.body).sort()) === JSON.stringify([...slimKeys].sort()), JSON.stringify(Object.keys(pub.body)));
+  const wrong = await get({ 'x-health-key': 'nope' });
+  expect('/health with a wrong key is slim', !('sims' in wrong.body), JSON.stringify(Object.keys(wrong.body)));
+  const keyed = await get({ 'x-health-key': 'b12g-secret' });
+  expect('/health with X-Health-Key carries the detail', Array.isArray(keyed.body.sims) && 'mapSeed' in keyed.body && 'worstSimLagSec' in keyed.body,
+    JSON.stringify(Object.keys(keyed.body)));
+  const flyish = await get({ 'fly-client-ip': '203.0.113.9' });
+  delete process.env.HEALTH_KEY;
+  const flyNoKey = await get({ 'fly-client-ip': '203.0.113.9' });
+  expect('/health relayed by the edge (Fly-Client-IP) is slim even with no key configured', !('sims' in flyish.body) && !('sims' in flyNoKey.body),
+    JSON.stringify(Object.keys(flyNoKey.body)));
+}
+
 rmSync(snapDir, { recursive: true, force: true });
 await sleep(200);
 if (failures > 0) {

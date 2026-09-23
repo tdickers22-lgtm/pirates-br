@@ -264,6 +264,12 @@ export const LOGIC = [
   // 1012, and a match still at sea is saved as a no-contest (never a loss).
   // Real LobbyServer on port 0, one real 8 s countdown: ~11 s, not quick.
   tsx('test-version-skew.mjs'),
+  // b1.2g (online-12): POST /beacon on a real LobbyServer (port 0, TRUST_PROXY,
+  // Fly-Client-IP per request): 204 + one JSON client_error line without the
+  // IP, 5 KB -> 413, same IP within 10 s -> 429, 20/s host ceiling, bad JSON /
+  // unknown kind -> 400; queue_join / match_dispatch / match_end / refused JSON
+  // lifecycle lines. One real 2 s queue wait: ~5 s, not quick.
+  tsx('test-beacon.mjs'),
   // ONLINE-01 phase 2 (netcode-24): N matches on ONE process. Server-side only
   // (no browser, no GPU) but ~45 s and CPU-bound, so NOT quick tier. Grades
   // worstSimLagSec < 0.1 at 8 matches, the capacity refusal above the ceiling,
