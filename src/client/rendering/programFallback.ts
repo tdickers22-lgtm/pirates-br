@@ -38,7 +38,7 @@ const FALLBACK_VS = `void main() {
 }`;
 const FALLBACK_FS = 'void main() { gl_FragColor = vec4(0.42, 0.40, 0.38, 1.0); }';
 
-interface ProgramWrapper { program: WebGLProgram; name?: string; cacheKey?: string }
+interface ProgramWrapper { program: WebGLProgram; name?: string; type?: string; cacheKey?: string }
 export interface ProgramFailure { name: string; cacheKey: string; log: string; materials: number }
 
 export class ProgramFallback {
@@ -92,11 +92,13 @@ export class ProgramFallback {
     ].map((s) => s.trim()).filter(Boolean).join(' | ');
     const materials = this.downgrade(renderer, scene, program);
     const failure: ProgramFailure = {
-      name: String(wrapper?.name ?? ''), cacheKey: String(wrapper?.cacheKey ?? '').slice(0, 160),
+      // three names a program after material.name, which is usually empty: fall
+      // back to the shader type so the log line says which material family broke.
+      name: String(wrapper?.name || wrapper?.type || 'unknown'), cacheKey: String(wrapper?.cacheKey ?? '').slice(0, 160),
       log: logs.slice(0, 1200), materials,
     };
     this.failures.push(failure);
-    console.error(`[program-fallback] '${failure.name}' did not link; ${materials} material(s) now draw the fallback. ${failure.log}`);
+    console.error(`[program-fallback] '${failure.name}' did not link; ${materials} material(s) now draw the fallback. key=${failure.cacheKey.slice(0, 80)} ${failure.log}`);
     reportBeacon('error', new Error(`program-link-failed ${failure.name}: ${failure.log.slice(0, 200)}`));
   }
 
@@ -117,7 +119,7 @@ export class ProgramFallback {
     return done.size;
   }
 
-  /** Rebuild `mat` as a program that links everywhere. Exported for the unit test. */
+  /** Rebuild `mat` as a program that links everywhere (static so a probe can call it directly). */
   static flatten(mat: THREE.Material): void {
     mat.userData.programFallback = true;
     if ((mat as THREE.ShaderMaterial).isShaderMaterial) {
