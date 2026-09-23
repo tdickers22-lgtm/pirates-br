@@ -239,6 +239,10 @@ export const LOGIC = [
   // b1.4h aim assist (D13): touch + gamepad only, x0.55 slowdown in 2.5 deg <= 60 m with
   // LOS, magnetism <= 3 deg/s in 4 deg only while aiming, never cannons/Glass, never snaps.
   quick(tsx('test-aim-assist.mjs')),
+  // b1.5a mobile shell (crossdevice-03/06/10): viewport-fit=cover, manifest + icons
+  // at their declared sizes, apple metas, safe-area env() on every #hud-* region,
+  // touch-action none/pan-y, MobileShell's gesture/ctrl-wheel/rotate/fullscreen rules.
+  quick(tsx('test-mobile-shell.mjs')),
   // b1.4b touch core: virtual stick/look/buttons through the real InputManager,
   // and the touch [X] hold replayed into a real Match closes a breach (logic half).
   tsx('test-touch-controls.mjs'),
@@ -638,6 +642,11 @@ export const BROWSER = [
   // 960x540. Menu ring + A presses Play, D-pad to Solo, LS 2 s >=1.5 m, RS 1 s
   // 3.0-4.6 rad, RT fire + 12 ms rumble, LB/RS/release takes wheel slot 3.
   { ...plain('test-gamepad.mjs') },
+  // b1.5a mobile shell, browser half: 390x844 isMobile+hasTouch. CDP pinch on the menu
+  // and pinch + double-tap in a match leave visualViewport.scale 1 (menu 3 at HEAD
+  // b1.4h), ctrl-wheel prevented in a match only, rotate card at 390x844 not 844x390,
+  // Play asks for fullscreen.
+  { file: 'test-mobile-shell.mjs', cmd: ['node', '--import', 'tsx', 'scripts/test-mobile-shell.mjs', '--browser'] },
   { ...plain('test-geometry-lod.mjs') },
   { ...plain('test-shadow-gate.mjs') },
   { ...plain('test-decor-batch.mjs') },

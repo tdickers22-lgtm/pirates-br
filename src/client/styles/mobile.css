@@ -1,0 +1,93 @@
+/* Mobile shell (b1.5a; crossdevice-03, -06, -10). Linked AFTER hud.css.
+   1. No browser zoom: touch-action none on the page and every game layer, so a
+      two-thumb moment (stick + look) or a double-tap never becomes pinch-zoom
+      (a pinch left the page stuck at 5x). Menu scroll panels keep pan-y, which
+      scrolls but never zooms. MobileShell.ts adds the WebKit gesture events.
+   2. Safe areas: viewport-fit=cover lets the canvas reach under the notch and
+      the home indicator; every HUD region steps in by env(safe-area-inset-*).
+      Added as MARGINS on the absolutely placed regions, so they stack on the
+      offsets hud.css sets in each media query instead of replacing them
+      (0 on desktop: nothing moves there).
+   3. The "turn your phone sideways" card: phone, portrait, in a match
+      (html[data-rotate="1"], set by MobileShell). Menus stay usable upright. */
+
+html, body {
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+canvas, #hud, #touch-controls, #map-overlay, #rotate-card { touch-action: none; }
+html[data-in-match="1"] body {
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Menu and end-of-voyage scroll panels: a finger scrolls them, never zooms. */
+#menu-screen, .menu-panel, #menu-panel-howto, #stats-panel, .lobby-roster,
+#endmatch-board, #death-panel, #controls-hint.docked { touch-action: pan-y; }
+
+/* Safe areas on every HUD region (the #hud-* children ride inside these). */
+#hud-top-nav {
+  margin-top: env(safe-area-inset-top, 0px);
+  margin-left: env(safe-area-inset-left, 0px);
+  margin-right: env(safe-area-inset-right, 0px);
+}
+#hud-right-tactical {
+  margin-top: env(safe-area-inset-top, 0px);
+  margin-right: env(safe-area-inset-right, 0px);
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+#hud-center-prompt {
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+#hud-bottom-combat {
+  margin-left: env(safe-area-inset-left, 0px);
+  margin-right: env(safe-area-inset-right, 0px);
+  margin-bottom: env(safe-area-inset-bottom, 0px);
+}
+/* The menu and the end screens pad the notch too (they fill the glass). */
+#menu-screen {
+  padding-top: max(28px, env(safe-area-inset-top, 0px));
+  padding-bottom: max(28px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(28px, env(safe-area-inset-left, 0px));
+  padding-right: max(28px, env(safe-area-inset-right, 0px));
+}
+
+/* Turn your phone sideways. */
+#rotate-card {
+  display: none;
+  position: fixed; inset: 0;
+  z-index: 5000;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 18px;
+  padding: max(24px, env(safe-area-inset-top, 0px)) 28px max(24px, env(safe-area-inset-bottom, 0px));
+  background: radial-gradient(ellipse at 50% 40%, #102544 0%, #071326 60%, #000 100%);
+  color: #e8d5a3;
+  font-family: Georgia, serif;
+  text-align: center;
+  pointer-events: auto;
+}
+html[data-rotate="1"] #rotate-card { display: flex; }
+#rotate-card h2 { margin: 0; font-size: 1.35rem; letter-spacing: 0.12em; color: #f0dca0; }
+#rotate-card p { margin: 0; max-width: 18rem; font-size: 0.95rem; line-height: 1.45; color: #c9b88e; }
+#rotate-card .rc-phone {
+  width: 54px; height: 92px;
+  border: 3px solid #c9a84c; border-radius: 10px;
+  position: relative;
+  animation: rc-turn 2.4s ease-in-out infinite;
+}
+#rotate-card .rc-phone::after {
+  content: ''; position: absolute; left: 50%; bottom: 6px;
+  width: 16px; height: 3px; margin-left: -8px; border-radius: 2px;
+  background: #c9a84c;
+}
+@keyframes rc-turn {
+  0%, 20% { transform: rotate(0deg); }
+  55%, 85% { transform: rotate(-90deg); }
+  100% { transform: rotate(0deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #rotate-card .rc-phone { animation: none; transform: rotate(-90deg); }
+}

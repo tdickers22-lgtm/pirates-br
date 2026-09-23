@@ -2,13 +2,27 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- viewport-fit=cover: the canvas reaches under the notch and the HUD steps in
+       by env(safe-area-inset-*) (mobile.css). maximum-scale is only a hint (iOS
+       ignores it since iOS 10); touch-action + MobileShell.ts stop the zoom. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#071326" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Pirates BR" />
+  <meta name="format-detection" content="telephone=no" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png" />
   <title>Pirates BR</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23071326'/%3E%3Ctext x='50%25' y='58%25' text-anchor='middle' font-family='Georgia,serif' font-size='42' fill='%23c9a84c'%3E%E2%9A%93%3C/text%3E%3C/svg%3E" />
   <!-- HUD/menu CSS lives in src/client/styles/*.css (HUDS-01). Vite bundles both
        through these links; menu.css MUST stay first (cascade order). -->
   <link rel="stylesheet" href="/src/client/styles/menu.css" />
   <link rel="stylesheet" href="/src/client/styles/hud.css" />
+  <!-- Mobile shell (b1.5a): no zoom, safe areas, rotate card. After hud.css. -->
+  <link rel="stylesheet" href="/src/client/styles/mobile.css" />
+  <script type="module" src="/src/client/input/MobileShell.ts"></script>
 </head>
 <body>
 
@@ -571,6 +585,13 @@
     <h1>LAST SHIP STANDING</h1>
     <div class="end-stats" id="win-stats"></div>
     <button class="restart-btn" id="win-return-btn">RETURN TO PORT</button>
+  </div>
+
+  <!-- Phone held upright in a match (MobileShell sets html[data-rotate]). -->
+  <div id="rotate-card" role="alert" aria-live="polite">
+    <div class="rc-phone" aria-hidden="true"></div>
+    <h2>Turn your phone sideways</h2>
+    <p>Pirates BR plays in landscape. Your ship keeps sailing while you turn.</p>
   </div>
 
   <script type="module" src="/src/client/main.ts"></script>
