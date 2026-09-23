@@ -957,6 +957,32 @@ export class Match {
     return this.configuredBotCount;
   }
 
+  /** THE COUNTDOWN SWAP (b1.2c, online-03 / D10). A crew that queues while this
+   *  match still stands off the dock takes a BOT hull instead of adding one:
+   *  the youngest bot ship (last built) is spliced out with every hand aboard,
+   *  so the fleet stays the mode's size. Only before the horn, the same window
+   *  in which removeClient splices a human hull, so the client already handles
+   *  a ship vanishing from the snapshot. No RNG draw, no loot, no kill credit.
+   *  Returns false when there is nothing to swap. */
+  retireBotHullBeforeHorn(): boolean {
+    if (!this.isAwaitingHorn()) return false;
+    const byId = new Map(this.state.players.map((p) => [p.id, p]));
+    const ship = [...this.state.ships].reverse().find((sh) => {
+      const hands = sh.crewIds ?? [];
+      return sh.alive && !sh.sinking && hands.length > 0 && hands.every((id) => byId.get(id)?.isBot === true);
+    });
+    if (!ship) return false;
+    const hands = new Set(ship.crewIds);
+    for (const id of hands) this.bots.removeBot(id);
+    this.state.players = this.state.players.filter((p) => !hands.has(p.id));
+    this.state.ships = this.state.ships.filter((sh) => sh.id !== ship.id);
+    this.state.kegs = this.state.kegs.filter((keg) => keg.shipId !== ship.id);
+    this.state.shipsAlive = this.state.ships.filter((sh) => sh.alive && !sh.sinking).length;
+    this.configuredBotCount = Math.max(0, this.configuredBotCount - 1);
+    this.rebuildEntityIndexes();
+    return true;
+  }
+
   /** The roster this match was built on, and the hands each hull is crewed for
    *  (MODE-01). The lobby reads them to size the crew it hands to createCrew. */
   modeId(): ModeId {

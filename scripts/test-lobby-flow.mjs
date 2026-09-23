@@ -588,8 +588,52 @@ LobbyServer.tunables.queueHardWaitSeconds = 3.2;
   await scuttle();
 }
 
-LobbyServer.tunables.queueSoftWaitSeconds = 45;
-LobbyServer.tunables.queueHardWaitSeconds = 90;
+{
+  // correctness-07 / D10 (b1.2c): a private party larger than the mode's crew
+  // is cut into mode-sized RIVAL crews in join order, one hull each, never one
+  // overcrowded hull. Six friends in Squads are a crew of four and a crew of
+  // two; the same six in Solo are six sloops.
+  for (const [mode, want, hullType] of [['squads', [4, 2], 'galleon'], ['solo', [1, 1, 1, 1, 1, 1], 'sloop']]) {
+    const six = await crew(`${mode}1`, `${mode}2`, `${mode}3`, `${mode}4`, `${mode}5`, `${mode}6`);
+    const [host, ...rest] = six;
+    host.send('create_party');
+    await sleep(120);
+    const code = roster(host).code;
+    for (const m of rest) { m.send('join_party', { code }); await sleep(60); }
+    await sleep(120);
+    host.send('update_party_settings', { mode, botFill: 2 });
+    await sleep(120);
+    host.send('start_match', { force: true });
+    await sleep(900);
+    const match = onlyMatch();
+    const humans = match ? match.state.players.filter((p) => !p.isBot) : [];
+    const perHull = new Map();
+    for (const p of humans) perHull.set(p.shipId, (perHull.get(p.shipId) ?? 0) + 1);
+    const sizes = [...perHull.values()].sort((a, b) => b - a);
+    const crewSize = mode === 'squads' ? 4 : 1;
+    expect(`a 6-member party in ${mode} boards all six`, humans.length === 6,
+      `humans=${humans.length} errors=${JSON.stringify(six.map(errorText).filter(Boolean))}`);
+    expect(`in ${mode} they are ${want.length} human crews (${want.join('+')}) on separate hulls`,
+      JSON.stringify(sizes) === JSON.stringify(want), `crews per hull=${JSON.stringify(sizes)}`);
+    expect(`no ${mode} hull carries more than ${crewSize} human(s)`, sizes.every((n) => n <= crewSize),
+      JSON.stringify(sizes));
+    // A FULL crew sails the mode's hull; a short remainder crew (the 2 of
+    // 4 + 2) is sized by hullForCrewSize like any short public crew.
+    const fullHulls = [...perHull].filter(([, n]) => n === crewSize).map(([id]) => id);
+    expect(`every full ${mode} crew sails the mode's ${hullType}`,
+      !!match && fullHulls.length > 0
+        && fullHulls.every((id) => match.state.ships.find((sh) => sh.id === id)?.type === hullType),
+      fullHulls.map((id) => match?.state.ships.find((sh) => sh.id === id)?.type).join(','));
+    expect(`crewmates of the first ${mode} crew share one crew record, rivals do not`,
+      !!match && (match.state.crews ?? []).length === want.length,
+      `crews=${(match?.state.crews ?? []).length}`);
+    await scuttle();
+  }
+}
+
+// Back to the shipped clocks (b1.2c: 12 s soft with >= 2 crews, 20 s hard).
+LobbyServer.tunables.queueSoftWaitSeconds = 12;
+LobbyServer.tunables.queueHardWaitSeconds = 20;
 
 await sleep(200);
 if (failures > 0) {

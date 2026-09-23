@@ -248,6 +248,11 @@ export const LOGIC = [
   // twice keeps ONE hold, the sweep's terminate + late 'close' keeps the seat, a
   // close from a superseded socket is ignored. No port, fake sockets, < 1 s.
   tsx('test-lobby-hold-idempotent.mjs'),
+  // b1.2c (online-03, online-17): the public queue with the PRODUCTION clocks on
+  // fake time: lone solo sails <= 20 s, two crews 10 s apart share a match at
+  // T0+12 s, a countdown crew swaps out a bot hull (fleet never grows), at the
+  // match ceiling a crew stays queued with a position. Real matches, no port.
+  tsx('test-queue-latency.mjs'),
   // ONLINE-01 phase 2 (netcode-24): N matches on ONE process. Server-side only
   // (no browser, no GPU) but ~45 s and CPU-bound, so NOT quick tier. Grades
   // worstSimLagSec < 0.1 at 8 matches, the capacity refusal above the ceiling,

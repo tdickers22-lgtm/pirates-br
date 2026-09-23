@@ -1258,6 +1258,16 @@ export interface QueueUpdatePayload {
   secondsRemaining: number;
   /** True when the queue is locked in and a match is about to start. */
   starting: boolean;
+  /** b1.2c (online-03): honest seconds until this mode's clock dispatches
+   *  (T0+12 s once >= 2 crews wait, T0+20 s regardless; bots fill empty
+   *  ships). null while every match slot on the host is busy (atCapacity). */
+  etaSeconds?: number | null;
+  /** b1.2c (online-17): true while the host is at its match ceiling; the crew
+   *  stays queued and is dispatched the moment a berth frees. */
+  atCapacity?: boolean;
+  /** 1-based place in the host-wide line (oldest crew first), sent while
+   *  atCapacity. */
+  position?: number;
 }
 
 export interface PlayerStatsRecord {
