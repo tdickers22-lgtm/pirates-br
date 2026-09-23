@@ -51,7 +51,7 @@ import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MI
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { memoryCensus, type MemoryCensus } from '../debug/memoryCensus.js';
-import { releaseRenderOnlyCpuCopies } from '../rendering/CpuCopyRelease.js';
+import { releaseRenderOnlyCpuCopies, cpuCopyReleaseEnabled } from '../rendering/CpuCopyRelease.js';
 import { apparentDistanceScale, updateInstanceLod, updateLazyStoryResidency, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
@@ -1856,6 +1856,9 @@ export class Game {
     // past the already-built check and put last match's reef in this one's sea.
     this.pendingIslandBuilds.length = 0;
     this.pendingSeaRockBuilds.length = 0;
+    // Phone/iPad released the library templates' CPU copies last match; refetch
+    // them before this match's islands build (drains wait on `rehydrating`).
+    void assets.rehydrateReleased(this.renderer.scene);
     this.envFx.volcanicFx = [];
     // disposeSceneObject() disposes this shared particle texture along with the
     // volcanic point clouds (it isn't an AssetLibrary-owned resource), so drop
@@ -3098,6 +3101,9 @@ export class Game {
    *  build-frame from reveal-frame means at most one island's worth of shaders
    *  ever compiles per frame. */
   drainIslandBuildQueue(count = 1) {
+    // Library templates are being refetched after last match's CPU release.
+    if (assets.rehydrating) return;
+    this.maybeReleaseLibraryCpuCopies();
     if (this.islandAwaitingReveal) {
       // Hand the group BACK to the cull rather than forcing it visible. The
       // release used to write `visible = true` unconditionally, which drew an
@@ -3148,6 +3154,15 @@ export class Game {
         console.error(`[World] failed to build island ${island.id}:`, err);
       }
     }
+  }
+
+  /** Phone/iPad: once every island and sea rock of the match is built and
+   *  revealed, the library templates' vertices have been read for the last time
+   *  (batcher, merges); release their CPU copies (AssetLibrary.releaseCpuCopies). */
+  private maybeReleaseLibraryCpuCopies(): void {
+    if (this.pendingIslandBuilds.length > 0 || this.pendingSeaRockBuilds.length > 0) return;
+    if (this.islandAwaitingReveal || this.islandMeshes.size === 0 || !cpuCopyReleaseEnabled()) return;
+    assets.releaseCpuCopies(this.renderer.scene);
   }
 
   /** Island built this frame, drawn for the first time on the next one. */
@@ -3210,6 +3225,7 @@ export class Game {
   /** Build a few queued sea rocks. Thirty-six of them landing on the same frame
    *  as the spawn island stacked their first draws onto that one freeze. */
   private drainSeaRockBuildQueue(count = 6) {
+    if (assets.rehydrating) return;
     for (let i = 0; i < count && this.pendingSeaRockBuilds.length > 0; i++) {
       const rock = this.pendingSeaRockBuilds.shift()!;
       if (this.seaRockMeshes.has(rock.id)) continue;
