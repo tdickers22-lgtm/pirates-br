@@ -40,6 +40,14 @@ let enabled: boolean | null = null;
 let armedBytes = 0;
 let releasedBytes = 0;
 
+/** b1-ask-04: after a WebGL context loss a released attribute re-uploads
+ *  empty, so this session stops releasing (islands built from now on keep
+ *  their CPU copy and survive the next loss). Called by Renderer on
+ *  webglcontextlost. Islands released BEFORE the loss still need a rebuild. */
+export function disableCpuCopyReleaseAfterContextLoss(): void {
+  enabled = false;
+}
+
 export function cpuCopyReleaseEnabled(): boolean {
   if (enabled !== null) return enabled;
   let forced: string | null = null;

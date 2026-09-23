@@ -1,3 +1,4 @@
+import { disableCpuCopyReleaseAfterContextLoss } from './CpuCopyRelease.js';
 import { ProgramFallback } from './programFallback';
 import * as THREE from 'three';
 import { PostFx } from './PostFx.js';
@@ -2073,6 +2074,7 @@ export class Renderer {
       this.contextLost = true;
       this.restoreSettling = false;
       this.contextLosses += 1;
+      disableCpuCopyReleaseAfterContextLoss();
       this.governor.setSuspended(true);
       if (!this.auditionDone) {
         // Start the audition over once the hold ends rather than splice a
