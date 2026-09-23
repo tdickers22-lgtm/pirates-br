@@ -18,6 +18,7 @@
 //
 //   node --import tsx scripts/test-first-draw-budget.mjs
 import * as THREE from 'three';
+import { FIRST_DRAW_ALLOWANCE } from './lib/budgets.mjs';
 import { resolveFrameCap } from '../src/client/core/framePacer.js';
 import {
   beginFirstDrawFrame,
@@ -59,7 +60,8 @@ function drawnMeshes(roots) {
   return n;
 }
 
-const ALLOWANCE = 48;
+// Ceiling: scripts/lib/budgets.mjs (b1.7a, rule 13).
+const ALLOWANCE = FIRST_DRAW_ALLOWANCE;
 
 // ── the cap binds, and it binds across tiers ──────────────────────────────
 {

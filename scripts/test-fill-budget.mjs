@@ -37,6 +37,7 @@
 //   node scripts/run-all-tests.mjs --only fill-budget
 import { chromium } from 'playwright';
 import { browserArgs, describeGl } from './lib/browser-args.mjs';
+import { FILL_BUDGET } from './lib/budgets.mjs';
 import { planScenes, readWorld, measureScene, sessionQuery, SERVER_PORT, PIN_PIXEL_RATIO } from './perf-probe.mjs';
 import { COST_PRELUDE } from './lib/cost-model-prelude.mjs';
 import { DEVICE_PROFILES, DEVICE_EXPECTED_VERDICT, newDeviceContext, deviceQuery, PIN_DEVICE_PIXEL_RATIO, READ_DEVICE_VERDICT } from './lib/perf-scenes.mjs';
@@ -51,11 +52,8 @@ const MUTATE_DEVICE_TIER = process.env.PIRATES_BR_MUTATE_DEVICE_TIER
 const PROFILES = (process.env.PIRATES_BR_FILL_PROFILES ?? 'desktop,phone,ipad').split(',');
 if (PROFILES.some((p) => p !== 'desktop' && !DEVICE_PROFILES[p])) throw new Error('PIRATES_BR_FILL_PROFILES: desktop, phone, ipad');
 
-const BUDGET = {
-  'dock-vista': { sky: 0.55, whole: 1.9, blended: 0.9 },
-  'deck-aft': { sky: 0.55, whole: 2.2, blended: 0.9 },
-  'open-sea': { sky: 0.55, whole: 1.9, blended: 0.9 },
-};
+// Ceilings: scripts/lib/budgets.mjs (b1.7a, rule 13).
+const BUDGET = FILL_BUDGET;
 
 let failures = 0, checks = 0;
 function expect(label, ok, detail = '') {

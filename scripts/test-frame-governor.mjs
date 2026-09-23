@@ -33,6 +33,7 @@ import {
 } from '../src/client/rendering/FrameGovernor.js';
 import { budgeted, setFrameBudgetScale, resetFrameBudgetScale } from '../src/client/rendering/FrameBudget.js';
 import { parseRenderQuality } from '../src/client/rendering/QualityPreference.js';
+import { FRAME_GOVERNOR as FG_BUDGET } from './lib/budgets.mjs';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -141,7 +142,7 @@ section('NO OSCILLATION — the dead band has to make a limit cycle impossible')
   const { trace } = run(gov, machine, 120);
   const tv = totalVariation(trace, 0.5);
   expect('a machine parked on the threshold does not pump the quality scalar',
-    tv <= 0.15, `total variation over the last minute was ${tv.toFixed(3)}`);
+    tv <= FG_BUDGET.settledTotalVariation, `total variation over the last minute was ${tv.toFixed(3)}`);
 }
 {
   // …and with 8% frame-to-frame jitter on top, which is what a real machine
@@ -150,11 +151,11 @@ section('NO OSCILLATION — the dead band has to make a limit cycle impossible')
   const gov = new FrameGovernor();
   const { trace } = run(gov, machine, 180);
   const tv = totalVariation(trace, 0.6);
-  expect('nor does jitter around the threshold', tv <= 0.25,
+  expect('nor does jitter around the threshold', tv <= FG_BUDGET.jitterTotalVariation,
     `total variation over the tail was ${tv.toFixed(3)}`);
   const tail = trace.slice(Math.floor(trace.length * 0.6));
   const spread = Math.max(...tail) - Math.min(...tail);
-  expect('…and the scalar stays inside a narrow band once settled', spread <= 0.12,
+  expect('…and the scalar stays inside a narrow band once settled', spread <= FG_BUDGET.settledSpread,
     `tail spread ${spread.toFixed(3)}`);
 }
 
@@ -717,7 +718,7 @@ section('A TIER IS A LOOK; A GPU CLASS IS A FILL CEILING — fillCeilingForGpu (
   const airHigh = pixelRatioCaps('high', 1470, 956, 2, 'apple-base');
   const airHighPx = fb(1470, 956, airHigh.maxPixelRatio);
   expect(`a High pin on an M2 Air opens at <= 1.45 Mpx (${(airHighPx / 1e6).toFixed(2)} Mpx at ${airHigh.maxPixelRatio.toFixed(3)}x)`,
-    airHighPx <= 1_450_000 && airHigh.maxPixelRatio <= 1 + 1e-9);
+    airHighPx <= FG_BUDGET.airHighMaxPixels && airHigh.maxPixelRatio <= 1 + 1e-9);
   expect(`…with a 1536 shadow map, not 2048 (${shadow(2048, 'apple-base')})`, shadow(2048, 'apple-base') === 1536);
   expect(`…and keeps 2x MSAA — the resolve is tile memory there (${msaa('high', 'apple-base')})`, msaa('high', 'apple-base') === 2);
   expect(`…and its ladder floor is still High's 0.8 (${airHigh.minPixelRatio.toFixed(3)})`, Math.abs(airHigh.minPixelRatio - 0.8) < 0.005);
@@ -767,7 +768,7 @@ section('A TIER IS A LOOK; A GPU CLASS IS A FILL CEILING — fillCeilingForGpu (
   // rounded dimensions may overshoot the budget by up to one row plus one
   // column (1536 + 864 px here) — a rounding, not a loosening.
   expect(`a High pin on an Intel UHD 620 opens at <= 1.2 Mpx (${(uhdPx / 1e6).toFixed(2)} Mpx at ${uhd.maxPixelRatio.toFixed(3)}x)`,
-    uhdPx <= 1_200_000 + 1536 + 864 && uhd.maxPixelRatio <= 1 + 1e-9);
+    uhdPx <= FG_BUDGET.integratedHighMaxPixels + 1536 + 864 && uhd.maxPixelRatio <= 1 + 1e-9);
   expect(`…shadow 1024 and 0 samples (${shadow(2048, 'integrated')}, ${msaa('high', 'integrated')})`,
     shadow(2048, 'integrated') === 1024 && msaa('high', 'integrated') === 0);
 
@@ -777,7 +778,7 @@ section('A TIER IS A LOOK; A GPU CLASS IS A FILL CEILING — fillCeilingForGpu (
   const phone = pixelRatioCaps('high', 412, 915, 2.625, 'mobile-gpu');
   const phonePx = fb(412, 915, phone.maxPixelRatio);
   expect(`a High pin on a phone opens at <= 0.9 Mpx (${(phonePx / 1e6).toFixed(2)} Mpx) and >= 640 px wide (${(412 * phone.maxPixelRatio).toFixed(0)} px)`,
-    phonePx <= 900_000 * 1.02 && 412 * phone.maxPixelRatio >= 640 - 0.5);
+    phonePx <= FG_BUDGET.phoneHighMaxPixels * 1.02 && 412 * phone.maxPixelRatio >= FG_BUDGET.legibilityFloorWidthPx - 0.5);
   const narrow = pixelRatioCaps('low', 390, 844, 3, 'mobile-gpu');
   expect(`the legibility floor beats the class cap on a narrow panel (${(390 * narrow.maxPixelRatio).toFixed(0)} px wide)`,
     390 * narrow.maxPixelRatio >= 640 - 0.5);
@@ -854,16 +855,8 @@ section('PHONES AND TABLETS GET A PIXEL PROFILE, NOT A LAPTOP RATIO (performance
 
   const mpx = (w, h, c) => (w * c.maxPixelRatio) * (h * c.maxPixelRatio) / 1e6;
   const floorMpx = (w, h, c) => (w * c.minPixelRatio) * (h * c.minPixelRatio) / 1e6;
-  const rows = [
-    // name, w, h, dpr, open band, floor min
-    ['iPhone 14 landscape', 844, 390, 3, [0.45, 0.60], 0.30],
-    ['iPhone SE landscape', 667, 375, 2, [0.45, 0.60], 0.30],
-    ['Pixel 7 landscape', 915, 412, 2.625, [0.45, 0.60], 0.30],
-    ['iPhone 15 Pro Max landscape', 932, 430, 3, [0.45, 0.60], 0.30],
-    ['iPad Air 11 landscape', 1180, 820, 2, [0.70, 0.816], 0.44],
-    ['iPad Pro 12.9 landscape', 1366, 1024, 2, [0.70, 0.816], 0.44],
-  ];
-  for (const [name, w, h, dpr, [lo, hi], fl] of rows) {
+  const rows = FG_BUDGET.mobileRows; // scripts/lib/budgets.mjs (b1.7a, rule 13)
+  for (const { name, w, h, dpr, openMin: lo, openMax: hi, floorMin: fl } of rows) {
     const c = pixelRatioCaps('low', w, h, dpr, 'mobile-gpu', null);
     const open = mpx(w, h, c), floor = floorMpx(w, h, c);
     expect(`${name} low-mobile opens ${lo}-${hi} Mpx (${open.toFixed(3)}), floor >= ${fl} (${floor.toFixed(3)}), ratio <= min(dpr,2) (${c.maxPixelRatio.toFixed(3)})`,
@@ -877,7 +870,7 @@ section('PHONES AND TABLETS GET A PIXEL PROFILE, NOT A LAPTOP RATIO (performance
   const high = pixelRatioCaps('high', 844, 390, 3, 'mobile-gpu', null);
   expect(`no tier inversion on a phone (low ${mpx(844, 390, low).toFixed(3)}, medium ${mpx(844, 390, bal).toFixed(3)}, high ${mpx(844, 390, high).toFixed(3)} Mpx), all inside the phone budget`,
     mpx(844, 390, bal) >= mpx(844, 390, low) - 1e-9 && mpx(844, 390, high) >= mpx(844, 390, bal) - 1e-9
-    && mpx(844, 390, high) <= 0.52 + 1e-6);
+    && mpx(844, 390, high) <= FG_BUDGET.phoneTierMaxMpx + 1e-6);
   // A dpr-1 part is never supersampled; the 640 px floor still holds on a narrow
   // portrait panel.
   const dpr1 = pixelRatioCaps('low', 844, 390, 1, 'mobile-gpu', null);
