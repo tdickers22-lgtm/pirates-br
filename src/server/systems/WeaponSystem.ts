@@ -3,6 +3,11 @@ import type { Player, Ship, Projectile, ProjectileType, Vec3, WeaponId } from '.
 import { WEAPONS, SHIP, SHIP_STATS, PLAYER, SHIP_UPGRADES } from '../../shared/constants/index.js';
 import { angleWrap, degreesToRad } from '../../shared/utils/index.js';
 import { getCannonDeckLocalPosition, getConstrainedCannonAim } from '../../shared/interactions.js';
+import { truceRefusesCannon } from '../../shared/truce.js';
+
+/** Why a fire or reload press did nothing (b1.6e): Match turns it into an
+ *  interact_refused nudge so a dead trigger or a dead R is never silent. */
+export type WeaponRefusal = 'no_ammo' | 'truce';
 
 export interface HitscanTrace {
   origin: Vec3;
@@ -17,9 +22,17 @@ export interface HitscanTrace {
 }
 
 export class WeaponSystem {
-  /** Match-seeded stream (RNG-01): shot spread draws from it. Unseeded it is Math.random. */
-  constructor(private readonly rng: () => number = Math.random) {}
+  /** Match-seeded stream (RNG-01): shot spread draws from it. Unseeded it is
+   *  Math.random. `clock` is the match's sim seconds since the horn (the truce
+   *  clock); unwired it reads as long after the truce. */
+  constructor(
+    private readonly rng: () => number = Math.random,
+    private readonly clock: () => number = () => Infinity,
+  ) {}
   private pendingProjectiles: Projectile[] = [];
+  /** Why the LAST tryFire / startReload call did nothing, or null when it
+   *  acted (or had nothing to say). Single-threaded tick, read right after. */
+  lastRefusal: WeaponRefusal | null = null;
 
   update(dt: number, players: Player[]) {
     for (const player of players) {
@@ -58,10 +71,16 @@ export class WeaponSystem {
     // Downed pirates crawl — weapons are locked until revived. A pirate on the
     // respawn clock is dead: no gun fires for a corpse (Match gates human input
     // earlier; this closes the bot ghost-helm path, BOT-02).
+    this.lastRefusal = null;
     if (player.state === 'eliminated' || player.state === 'downed' || player.state === 'respawning') return [];
 
-    // If player is at a cannon, fire ship cannon
+    // If player is at a cannon, fire ship cannon. THE TRUCE (b1.6e): the guns
+    // stay cold for every crew until TRUCE_SECONDS; the press is refused.
     if (player.atCannon && ship) {
+      if (truceRefusesCannon(this.clock())) {
+        this.lastRefusal = 'truce';
+        return [];
+      }
       this.fireShipCannon(player, ship, yaw, pitch, cannonIndex);
       return [];
     }
@@ -321,14 +340,22 @@ export class WeaponSystem {
     return refilled;
   }
 
-  startReload(player: Player) {
+  /** Returns null when a reload started (or none was needed: melee, a full
+   *  magazine, one already under way) and 'no_ammo' when the magazine wants
+   *  shot and the reserve is empty (ammo crate aboard refills). The reason is
+   *  also left in lastRefusal for the fire path. */
+  startReload(player: Player): WeaponRefusal | null {
     const weapon = player.weapons[player.activeSlot];
-    if (!weapon || weapon.reloading) return;
+    if (!weapon || weapon.reloading) return null;
     const def = WEAPONS[weapon.weaponId];
-    if (def.melee || weapon.ammo >= def.ammoMax) return;
-    if (weapon.reserve <= 0) return; // nothing left to load — find an ammo pickup
+    if (def.melee || weapon.ammo >= def.ammoMax) return null;
+    if (weapon.reserve <= 0) {
+      this.lastRefusal = 'no_ammo';
+      return 'no_ammo';
+    }
     weapon.reloading = true;
     weapon.reloadTimer = def.reloadTime;
+    return null;
   }
 
   tickCannons(dt: number, ships: Ship[]) {

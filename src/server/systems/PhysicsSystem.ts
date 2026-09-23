@@ -2,6 +2,7 @@ import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, 
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
 import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRiggingMasts } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
+import { truceSparesContact, truceBlocksBounty } from '../../shared/truce.js';
 import type { GangwayPlan } from '../../shared/interactions.js';
 import { DOCK_DECK_RISE, toShipLocalPoint, toShipWorldPoint, getShipGangwayPlan, getGangwayFloorY, getShipFloorYAt, getShipHoldHalfWidth, isInsideShipHoldFootprint, countOpenHoles, getShipHoleTier, shipLocalUpY } from '../../shared/interactions.js';
 import { drawnIslandSurfaceY } from '../../shared/terrainGrid.js';
@@ -957,7 +958,7 @@ export class PhysicsSystem {
         // hulls alongside the same wreck behave differently purely by array
         // order: one sailed through her, the other bounced.
         if (!other.alive || other.sinking) continue;
-        this.resolveShipShipCollision(ship, other, helmsmanByShip);
+        this.resolveShipShipCollision(ship, other, helmsmanByShip, t);
       }
 
       // Wave attitude — pitch/roll chase the sampled Gerstner slope through a
@@ -2992,7 +2993,7 @@ export class PhysicsSystem {
    * phantom contact, while rams resolve at the true contact point with a
    * linear impulse plus r×J torque on both hulls.
    */
-  private resolveShipShipCollision(ship: Ship, other: Ship, helmsmanByShip?: Map<string, string>) {
+  private resolveShipShipCollision(ship: Ship, other: Ship, helmsmanByShip?: Map<string, string>, t = Infinity) {
     const stats = SHIP_STATS[ship.type];
     const otherStats = SHIP_STATS[other.type];
     const dxC = ship.position.x - other.position.x;
@@ -3071,7 +3072,10 @@ export class PhysicsSystem {
 
     // Damage on hard collision — T-bone (broadside) victims take heavier damage
     // than rammers hitting with their bow/stern. Both ships still take some.
-    if (relSpd > 2.5) {
+    // THE TRUCE (b1.6e): inside it a contact under TRUCE_CONTACT_SPEED is a
+    // bump (the impulse above still parts the hulls), never a breach, and no
+    // contact at any speed banks ram credit toward a sink bounty.
+    if (relSpd > 2.5 && !truceSparesContact(t, relSpd)) {
       const baseDmg = relSpd * 12;
       // The face of each ship that touched the other = impact normal in its local frame.
       const shipImpact = this.rotateWorldToShipLocal(-nx, -nz, ship.rotation);
@@ -3095,13 +3099,13 @@ export class PhysicsSystem {
       // helmsman (or its owner), so ramming a ship to death now credits the
       // rammer — eliminating the crew and awarding kills like every other
       // sink route (Match resolves it via markShipDamagedByPlayer).
-      this.combatEvents.push({
+      if (!truceBlocksBounty(t)) this.combatEvents.push({
         type: 'ship_ram',
         attackerId: helmsmanByShip?.get(other.id) ?? other.ownerId,
         targetId: ship.id,
         damage: baseDmg * shipFactor,
       });
-      this.combatEvents.push({
+      if (!truceBlocksBounty(t)) this.combatEvents.push({
         type: 'ship_ram',
         attackerId: helmsmanByShip?.get(ship.id) ?? ship.ownerId,
         targetId: other.id,

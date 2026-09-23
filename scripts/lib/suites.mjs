@@ -50,6 +50,7 @@ export const LOGIC = [
   quick(tsx('test-wildlife-meat.mjs')),
   quick(tsx('test-anim-no-inversion.mjs')), // b1.6a: wheel, flag, foliage, heel, head pitch signs; b1.6b: viewmodel recoil, slash ribbon, draw, near plane (~0.3 s)
   quick(tsx('test-handedness.mjs')), // b1.6c: +x = port; walk/helm vs sideOfLocalX, ship_hit side, wind phrase/gloss/vane, brace prompt, no raw side ternary or HullSections key in display paths (~0.2 s)
+  quick(tsx('test-ammo-truth.mjs')), // b1.6e: HUD card == server mag | reserve over 6 shots, 7th reload refused no_ammo (R and trigger), no '∞' for firearms (~0.2 s)
   tsx('test-wildlife-flee.mjs'),
   quick(tsx('test-ship-interactions.mjs')),
   quick(tsx('test-swimmer-ship-collision.mjs')),
@@ -378,6 +379,7 @@ export const LOGIC = [
   // many draws each takes off the shared seeded stream. Pins the Match.ts split
   // against a silent re-order. Swap two update* calls in tick() to see it fail.
   tsx('test-tick-order.mjs'),
+  tsx('test-truce-integrity.mjs'), // b1.6e: 12 seeded solo worlds to t=150 s: 0 ram/cannon/keg holes, 0 founders, 0 sink credits; shots/cannons held in the truce, land after; solo-bot triage (~4 min)
   quick(tsx('test-death-causes.mjs')),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
   // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens
