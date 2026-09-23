@@ -99,7 +99,7 @@ try {
     const inp = window.__piratesBR.input;
     if (!inp.__tcWrapped) {
       const orig = inp.buildInput.bind(inp);
-      inp.buildInput = () => { const r = orig(); window.__tcLog?.push({ fire: r.fire, ih: r.interactHeld, i: r.interact, right: r.right }); return r; };
+      inp.buildInput = () => { const r = orig(); window.__tcLog?.push({ fire: r.fire, ih: r.interactHeld, i: r.interact, right: r.right, wi: r.useWheelItem ? r.wheelIndex : null }); return r; };
       inp.__tcWrapped = true;
     }
     window.__tcLog = [];
@@ -265,7 +265,62 @@ try {
   expect('a pointercancel on the held chip releases interact', heldBefore && !cancel.held && !cancel.pressed
     && cancelLog.length > 0 && cancelLog.every((e) => !e.ih), `before ${heldBefore}, after ${JSON.stringify(cancel)}, ${cancelLog.length} inputs`);
 
-  await checkLayout(PHONE, 'phone');
+  await checkLayout(PHONE, 'phone', 10);
+
+  // ── 6b. the radial satchel, minimap tap, chart pinch (b1.4d) ─────────────
+  const satchel = await rectOf('#touch-controls .tc-satchel');
+  await touch('touchStart', [[satchel.cx, satchel.cy, 11]]);
+  await touch('touchEnd', []);
+  await page.waitForFunction(() => window.__piratesBR.input.isSupplyWheelOpen(), null, { timeout: budget(5_000) }).catch(() => {});
+  const wheelOpen = await page.evaluate(() => window.__piratesBR.input.isSupplyWheelOpen());
+  await sleep(200);
+  const svg = await rectOf('#pocket-wheel-svg');
+  // Planks (slot 3) at 108 deg, on its label (0.8 of the radius), not the path centre.
+  const ang = (108 * Math.PI) / 180;
+  const wx = svg.cx + Math.sin(ang) * svg.w * 0.4;
+  const wy = svg.cy - Math.cos(ang) * svg.w * 0.4;
+  const landedOn = await hitAt(wx, wy);
+  await startLog();
+  await touch('touchStart', [[wx, wy, 12]]);
+  await touch('touchEnd', []);
+  await page.waitForFunction(() => (window.__tcLog?.length ?? 0) >= 3, null, { timeout: budget(10_000) }).catch(() => {});
+  const wheelLog = await readLog();
+  const wheelAfter = await page.evaluate(() => window.__piratesBR.input.isSupplyWheelOpen());
+  expect('Satchel tap opens the supply wheel; a tap on the Planks wedge sends wheelIndex 3 once and closes it',
+    wheelOpen && wheelLog.filter((e) => e.wi === 3).length === 1 && !wheelAfter,
+    `open ${wheelOpen}, finger on ${landedOn}, picks ${JSON.stringify(wheelLog.filter((e) => e.wi !== null))}, after ${wheelAfter}`);
+
+  const mini = await rectOf('#minimap-shell');
+  // Tap the minimap where no touch button covers it (its top-left quarter).
+  const mx = mini.cx - mini.w * 0.25; const my = mini.cy - mini.h * 0.25;
+  await touch('touchStart', [[mx, my, 13]]);
+  await sleep(60);
+  await touch('touchEnd', []);
+  await page.waitForFunction(() => window.__piratesBR.map.mapOpen, null, { timeout: budget(5_000) }).catch(() => {});
+  const mapOpen = await page.evaluate(() => window.__piratesBR.map.mapOpen);
+  expect('a tap on the minimap opens the chart', mapOpen, `finger on ${await hitAt(mx, my)}`);
+  if (mapOpen) {
+    await sleep(300);
+    const mc = await rectOf('#map-canvas');
+    const z0 = await page.evaluate(() => window.__piratesBR.map.mapZoom);
+    let ax = mc.cx - 40; let bx = mc.cx + 40;
+    await touch('touchStart', [[ax, mc.cy, 21], [bx, mc.cy, 22]]);
+    for (let i = 0; i < 8; i += 1) {
+      ax -= 5; bx += 5;
+      await touch('touchMove', [[ax, mc.cy, 21], [bx, mc.cy, 22]]);
+      await sleep(16);
+    }
+    await touch('touchEnd', []);
+    await sleep(150);
+    const z1 = await page.evaluate(() => window.__piratesBR.map.mapZoom);
+    await page.screenshot({ path: `${OUT}/touch-844x390-chart-pinch.png`, timeout: budget(30_000) }).catch(() => {});
+    expect(`a two-finger pinch 80 -> 160 px zooms the chart ~2x (${z0.toFixed(2)} -> ${z1.toFixed(2)})`, z1 / z0 > 1.8 && z1 / z0 < 2.2);
+    const close = await rectOf('#map-close');
+    await touch('touchStart', [[close.cx, close.cy, 23]]);
+    await touch('touchEnd', []);
+    await sleep(200);
+    expect('the chart Close button closes it under a finger', !(await page.evaluate(() => window.__piratesBR.map.mapOpen)));
+  }
 
   // ── 6. contexts (b1.4c): helm slider + arc, cannon arc ────────────────────
   // Game.updateTouchContext is paused (instance shadow) so the overlay can be
@@ -278,7 +333,7 @@ try {
   }, [ctx, anchored]);
   await setCtx('helm', true);
   await sleep(100);
-  await checkLayout(PHONE, 'phone helm (anchored)', 8);
+  await checkLayout(PHONE, 'phone helm (anchored)', 10);
   const slider = await rectOf('#touch-controls .tc-helm');
   await startLog();
   await touch('touchStart', [[slider.cx, slider.cy, 7]]);
@@ -294,7 +349,7 @@ try {
     steerHeld && steerLog.some((e) => e.right) && !steerAfter, `held ${steerHeld}, logged right ${steerLog.filter((e) => e.right).length}/${steerLog.length}, after ${steerAfter}`);
   await setCtx('cannon');
   await sleep(100);
-  await checkLayout(PHONE, 'phone cannon', 5);
+  await checkLayout(PHONE, 'phone cannon', 6);
   await page.screenshot({ path: `${OUT}/touch-844x390-cannon.png`, timeout: budget(30_000) }).catch(() => {});
   await setCtx('foot');
   await page.evaluate(() => { delete window.__piratesBR.updateTouchContext; });
@@ -305,7 +360,7 @@ try {
   await sleep(1_500);
   await lookDrag('iPad', IPAD);
   await fireTap('iPad');
-  await checkLayout(IPAD, 'iPad');
+  await checkLayout(IPAD, 'iPad', 10);
   await page.screenshot({ path: `${OUT}/touch-${IPAD.width}x${IPAD.height}.png`, timeout: budget(30_000) }).catch((e) => console.log(`    (screenshot skipped: ${e.message.split('\n')[0]})`));
 } catch (err) {
   expect('suite ran to completion', false, err.message.split('\n')[0]);

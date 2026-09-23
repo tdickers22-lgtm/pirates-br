@@ -139,6 +139,15 @@ html[data-input-scheme="touch"] canvas { touch-action: none; }
 .tc-stow { right: calc(112px + env(safe-area-inset-right)); bottom: calc(22px + env(safe-area-inset-bottom)); }
 .tc-drop { width: 64px; height: 64px; right: calc(28px + env(safe-area-inset-right)); bottom: calc(32px + env(safe-area-inset-bottom)); }
 
+/* Utility row (b1.4d), top left inside the safe area, clear of the right
+   thumb arc and the helm slider: Satchel (supply wheel toggle), Scope
+   (spyglass toggle), Keg (hold, release to place), Special (tap). */
+.tc-satchel, .tc-spyglass, .tc-keg, .tc-special { top: calc(12px + env(safe-area-inset-top)); font-size: 11px; }
+.tc-satchel { left: calc(16px + env(safe-area-inset-left)); }
+.tc-spyglass { left: calc(80px + env(safe-area-inset-left)); }
+.tc-keg { left: calc(144px + env(safe-area-inset-left)); }
+.tc-special { left: calc(208px + env(safe-area-inset-left)); }
+
 html[data-input-scheme="touch"] #interact-prompt { touch-action: none; -webkit-user-select: none; user-select: none; }
 html[data-input-scheme="touch"] #interact-prompt.pressed { border-color: #c9a84c; }
 
@@ -166,4 +175,7 @@ html[data-input-scheme="touch"] #hud-bottom-combat > * { pointer-events: none; }
     width: 68px; height: 68px;
     right: calc(108px + env(safe-area-inset-right)); bottom: calc(196px + env(safe-area-inset-bottom));
   }
+  .tc-spyglass { left: calc(84px + env(safe-area-inset-left)); }
+  .tc-keg { left: calc(152px + env(safe-area-inset-left)); }
+  .tc-special { left: calc(220px + env(safe-area-inset-left)); }
 }

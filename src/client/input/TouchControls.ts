@@ -51,7 +51,17 @@ function readSpring(): boolean {
   try { return globalThis.localStorage?.getItem(HELM_SPRING_KEY) !== '0'; } catch { return true; }
 }
 
-type Role = { kind: 'stick'; baseX: number; baseY: number } | { kind: 'look'; lastX: number; lastY: number };
+type Role = { kind: 'stick'; baseX: number; baseY: number }
+  | { kind: 'look'; lastX: number; lastY: number; startX: number; startY: number; since: number; travel: number };
+
+/** A look-pad touch this short and still is a TAP (minimap opens the chart). */
+export const TAP_MAX_TRAVEL_PX = 10;
+export const TAP_MAX_MS = 350;
+
+/** Did a look-pad tap land on the minimap (its box, even under the arc)? */
+export function tapHitsBox(x: number, y: number, box: { left: number; top: number; right: number; bottom: number } | null): boolean {
+  return !!box && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+}
 
 function isFingerLike(e: PointerEvent) {
   return e.pointerType === 'touch' || e.pointerType === 'pen';
@@ -86,6 +96,8 @@ export class TouchControls {
   private interactSince = 0;
   private ringRaf = 0;
   private poll: ReturnType<typeof setInterval> | null = null;
+  /** Set by InputManager: a look-pad tap on the minimap (Game opens the chart). */
+  onMinimapTap: (() => void) | null = null;
 
   constructor(sink: VirtualInputSink, private readonly scheme: InputSchemeTracker) {
     this.source = new VirtualInputSource(sink);
@@ -114,7 +126,7 @@ export class TouchControls {
       btn.className = `tc-btn tc-${spec.id}${spec.ring ? ' tc-ring' : ''}`;
       btn.dataset.touch = spec.id;
       btn.textContent = spec.label;
-      const release = this.bindHold(btn, spec.action);
+      const release = spec.toggle ? this.bindToggle(btn, spec.action) : this.bindHold(btn, spec.action);
       root.appendChild(btn);
       this.buttons.set(spec.id, { el: btn, spec, release });
       if (spec.id === 'interact') this.interactBtn = btn;
@@ -220,6 +232,10 @@ export class TouchControls {
   setContext(view: TouchContextView) {
     if (view.progress) this.progress = view.progress;
     this.applyView(view, false);
+    // Toggles show their real state (the wheel closes itself after a pick).
+    for (const b of this.buttons.values()) {
+      if (b.spec.toggle) b.el.classList.toggle('pressed', this.source.isHeld(b.spec.action));
+    }
     this.paintProgress();
   }
 
@@ -275,6 +291,23 @@ export class TouchControls {
   }
 
   isActive() { return this.active; }
+
+  /** Tap on, tap off. The press edge runs on the first tap; the release edge
+   *  on the second (or when the owner closes it, e.g. a wheel pick). */
+  private bindToggle(el: HTMLElement, action: BindingAction): () => void {
+    el.addEventListener('pointerdown', (e) => {
+      if (!isFingerLike(e) && this.scheme.current !== 'touch') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.source.isHeld(action)) this.source.release(action);
+      else this.source.press(action);
+      el.classList.toggle('pressed', this.source.isHeld(action));
+    });
+    return () => {
+      if (this.source.isHeld(action)) this.source.release(action);
+      el.classList.remove('pressed');
+    };
+  }
 
   private bindHold(el: HTMLElement, action: BindingAction, touchOnly = false): () => void {
     const ids = new Set<number>();
@@ -342,7 +375,10 @@ export class TouchControls {
       this.showStick(e.clientX, e.clientY, 0, 0);
     } else {
       if (hasLook) return;
-      this.roles.set(e.pointerId, { kind: 'look', lastX: e.clientX, lastY: e.clientY });
+      this.roles.set(e.pointerId, {
+        kind: 'look', lastX: e.clientX, lastY: e.clientY,
+        startX: e.clientX, startY: e.clientY, since: performance.now(), travel: 0,
+      });
     }
     try { this.zone?.setPointerCapture(e.pointerId); } catch { /* synthetic pointers */ }
   }
@@ -360,6 +396,7 @@ export class TouchControls {
       this.showStick(role.baseX, role.baseY, dx, dy);
     } else {
       this.source.look(e.clientX - role.lastX, e.clientY - role.lastY);
+      role.travel += Math.hypot(e.clientX - role.lastX, e.clientY - role.lastY);
       role.lastX = e.clientX;
       role.lastY = e.clientY;
     }
@@ -372,6 +409,13 @@ export class TouchControls {
     if (role.kind === 'stick') {
       this.source.setStick(0, 0);
       this.stickBase?.classList.remove('shown');
+    } else if (e.type === 'pointerup' && role.travel < TAP_MAX_TRAVEL_PX
+      && performance.now() - role.since < TAP_MAX_MS) {
+      // The minimap is read-only for fingers (touch.css), so the look pad
+      // under it decides: a still, short tap inside its box opens the chart.
+      const mini = document.getElementById('minimap-shell');
+      const r = mini && getComputedStyle(mini).visibility !== 'hidden' ? mini.getBoundingClientRect() : null;
+      if (tapHitsBox(role.startX, role.startY, r && r.width > 0 ? r : null)) this.onMinimapTap?.();
     }
   }
 

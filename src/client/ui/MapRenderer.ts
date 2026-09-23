@@ -4,6 +4,7 @@
  * Owns the map's own UI state (open flag, zoom, cached island bitmaps) and
  * reads the world through a narrow `MapView`.
  */
+import { zoomFocusAbout } from '../input/wheelGesture.js';
 import * as THREE from 'three';
 import { WORLD } from '../../shared/constants/index.js';
 import type { GameState, Island, IslandNpc, Player, Ship, TreasureChest } from '../../shared/types/index.js';
@@ -168,14 +169,14 @@ export class MapRenderer {
     const focus = this.clampChartFocus(this.currentChartFocus(), m.canvas.width, m.canvas.height, m.scale);
     const px = (clientX - m.rect.left) * m.pxPerClientX - m.canvas.width * 0.5;
     const py = (clientY - m.rect.top) * m.pxPerClientY - m.canvas.height * 0.5;
-    const worldX = focus.x + px / m.scale;
-    const worldZ = focus.z + py / m.scale;
     this.mapZoom = nextZoom;
     const nextScale = Math.min(m.canvas.width, m.canvas.height) / WORLD.SIZE * nextZoom;
-    this.chartFocus = this.clampChartFocus({
-      x: worldX - px / nextScale,
-      z: worldZ - py / nextScale,
-    }, m.canvas.width, m.canvas.height, nextScale);
+    // One anchor rule for the wheel, the trackpad pinch and the touch pinch
+    // (b1.4d): the water under the cursor / the fingers' midpoint stays put.
+    this.chartFocus = this.clampChartFocus(
+      zoomFocusAbout(focus, px, py, m.scale, nextScale),
+      m.canvas.width, m.canvas.height, nextScale,
+    );
   }
 
   /** Click an island (its name label or its land) to centre and open it up.

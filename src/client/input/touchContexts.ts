@@ -59,6 +59,8 @@ export interface TouchButtonSpec {
   ring?: boolean;
   /** Only while the ship is anchored (helm). */
   whenAnchored?: boolean;
+  /** A tap flips it on, the next tap flips it off (b1.4d: satchel, spyglass). */
+  toggle?: boolean;
 }
 
 export const TOUCH_BUTTONS: readonly TouchButtonSpec[] = [
@@ -86,6 +88,14 @@ export const TOUCH_BUTTONS: readonly TouchButtonSpec[] = [
   { id: 'ammo-chain', action: 'ammoChain', label: 'Chain', contexts: ['cannon'] },
   // Leave a station: the [X] edge the server reads as "exit current station".
   { id: 'leave', action: 'interact', label: 'Leave', contexts: ['helm', 'cannon'] },
+  // The utility column (b1.4d): the satchel opens the supply wheel (a tap on a
+  // wedge takes it and closes it), the keg is hold-to-aim / release-to-place
+  // like [G], the spyglass is a toggle (a finger cannot hold [P] and look),
+  // special is a tap. The chart opens from a tap on the minimap.
+  { id: 'satchel', action: 'supplyWheel', label: 'Satchel', contexts: ['foot', 'tool', 'helm', 'cannon'], toggle: true },
+  { id: 'keg', action: 'keg', label: 'Keg', contexts: ['foot'] },
+  { id: 'spyglass', action: 'spyglass', label: 'Scope', contexts: ['foot', 'helm'], toggle: true },
+  { id: 'special', action: 'special', label: 'Special', contexts: ['foot'] },
 ];
 
 /** Buttons visible in a context (helm Weigh only at anchor). */

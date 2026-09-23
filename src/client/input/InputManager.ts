@@ -1,5 +1,6 @@
 import type { CannonAmmoType, PlayerInput, WeaponSlot } from '../../shared/types/index.js';
-import { WHEEL_SLOTS, wheelSlotForDigitCode } from '../../shared/wheel.js';
+import { WHEEL_SLOTS } from '../../shared/wheel.js';
+import { sliceForDigit } from '../ui/RadialMenu.js';
 import { BINDINGS, BINDING_ACTIONS, type BindingAction, mouseButtonsFor, tokensFor } from '../../shared/bindings.js';
 import { InputSchemeTracker, initialScheme } from './InputScheme.js';
 import { resolveInputAuthority } from './inputAuthority.js';
@@ -106,7 +107,7 @@ export class InputManager {
           this.actionDown('wheelPage');
           return;
         }
-        const slot = wheelSlotForDigitCode(e.code);
+        const slot = sliceForDigit(e.code, WHEEL_SLOTS.length);
         if (slot !== null) {
           e.preventDefault();
           this.pickWheelSlot(slot);
@@ -178,6 +179,7 @@ export class InputManager {
 
     if (touchCapable()) {
       this.touch = new TouchControls(this, this.scheme);
+      this.touch.onMinimapTap = () => this.onMinimapTap?.();
       this.touch.mount();
     }
 
@@ -357,6 +359,16 @@ export class InputManager {
   isInteractHeld() { return this.held('interact'); }
   /** True while [I] is held — supply wheel overlay */
   isSupplyWheelOpen() { return this.vHeld; }
+
+  /** Close the wheel from outside a key (a finger picked a wedge). Releases the
+   *  Satchel toggle through its own source so the next tap opens it again. */
+  closeSupplyWheel() {
+    if (this.touch?.source.isHeld('supplyWheel')) this.touch.source.release('supplyWheel');
+    else if (this.virtualHeld.has('supplyWheel')) this.setActionHeld('supplyWheel', false);
+  }
+
+  /** Game sets this: a tap on the minimap opens the chart (touch). */
+  onMinimapTap: (() => void) | null = null;
   /** Which wheel page is showing while [I] is held ([Q] toggles). */
   getWheelPage(): WheelPage { return this.wheelPage; }
 

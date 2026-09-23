@@ -38,7 +38,8 @@ import { InputManager } from '../input/InputManager.js';
 import { isBound } from '../../shared/bindings.js';
 import { lockHintVisible } from '../input/inputAuthority.js';
 import { requestLockSafe } from '../input/pointerLock.js';
-import { wheelToChartAction } from '../input/wheelGesture.js';
+import { wheelToChartAction, pinchStep } from '../input/wheelGesture.js';
+import { SupplyWheel } from '../ui/SupplyWheel.js';
 import { resolveTouchContext, routeHeldTool, touchProgress } from '../input/touchContexts.js';
 import { assets, type AssetName } from '../assets/AssetLibrary.js';
 import { buildSharkMesh, buildWildlifeMesh } from '../rendering/factories/FaunaMeshFactory.js';
@@ -669,10 +670,8 @@ export class Game {
   private previousKnockback = 0;
   private activeTradeSessionId: string | null = null;
   private localTradeOffer: ItemStack[] = [];
-  /** Supply-wheel slot the mouse is hovering while it's open (radial select). */
-  private wheelHoverSlot: number | null = null;
-  /** Whether the supply wheel was open last frame — to catch the release edge. */
-  private wheelWasOpen = false;
+  /** The supply wheel on the shared radial (hover, tap, stick, release-to-take). */
+  private supplyWheel: SupplyWheel | null = null;
   /** Aim button state last frame — so right-click can lower a raised spyglass. */
   private scopeAimWasDown = false;
   /** Wind vector + clock driving the palm/foliage sway shader (updated per frame). */
@@ -1027,7 +1026,7 @@ export class Game {
       get state() { return self.state; },
       get localPlayerId() { return self.localPlayerId; },
       get spyglassActive() { return self.spyglassActive; },
-      get wheelHoverSlot() { return self.wheelHoverSlot; },
+      get wheelHoverSlot() { return self.supplyWheel?.hoverSlot ?? null; },
       get islandBannerHideAt() { return self.islandBannerHideAt; },
       get barrelBrowse() { return self.barrelBrowse; },
       set barrelBrowse(v) { self.barrelBrowse = v; },
@@ -1953,37 +1952,49 @@ export class Game {
     // island (or island label) it landed on. Without this the chart was welded
     // to the player and half the Reach could never be looked at.
     const canvas = this.ui.mapCanvas;
-    let dragPointer: number | null = null;
-    let dragX = 0;
-    let dragY = 0;
+    // Touch (b1.4d): one finger pans, two fingers pinch-zoom about their
+    // midpoint (and pan with it). Every live pointer is tracked by id so the
+    // second finger turns a drag into a pinch and lifting one goes back to a pan.
+    const pointers = new Map<number, { x: number; y: number }>();
     let dragTravel = 0;
+    let pinched = false;
+    canvas.style.touchAction = 'none';
     canvas.addEventListener('pointerdown', (event) => {
-      if (!this.map.mapOpen || event.button !== 0) return;
+      if (!this.map.mapOpen || event.button !== 0 || pointers.size >= 2) return;
       event.preventDefault();
-      dragPointer = event.pointerId;
-      dragX = event.clientX;
-      dragY = event.clientY;
-      dragTravel = 0;
+      if (pointers.size === 0) { dragTravel = 0; pinched = false; }
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 2) pinched = true;
       canvas.setPointerCapture?.(event.pointerId);
       canvas.style.cursor = 'grabbing';
     });
     canvas.addEventListener('pointermove', (event) => {
-      if (dragPointer !== event.pointerId || !this.map.mapOpen) return;
-      const dx = event.clientX - dragX;
-      const dy = event.clientY - dragY;
-      dragX = event.clientX;
-      dragY = event.clientY;
-      dragTravel += Math.hypot(dx, dy);
-      this.map.panByClient(dx, dy);
+      const prev = pointers.get(event.pointerId);
+      if (!prev || !this.map.mapOpen) return;
+      const cur = { x: event.clientX, y: event.clientY };
+      if (pointers.size === 2) {
+        const otherId = [...pointers.keys()].find((id) => id !== event.pointerId)!;
+        const other = pointers.get(otherId)!;
+        const step = pinchStep(prev, other, cur, other);
+        pointers.set(event.pointerId, cur);
+        this.map.panByClient(step.panDx, step.panDy);
+        this.map.zoomAtClient(step.zoomFactor, step.midX, step.midY);
+      } else {
+        const dx = cur.x - prev.x;
+        const dy = cur.y - prev.y;
+        pointers.set(event.pointerId, cur);
+        dragTravel += Math.hypot(dx, dy);
+        this.map.panByClient(dx, dy);
+      }
       this.map.drawFullMap();
     });
     const endMapDrag = (event: PointerEvent) => {
-      if (dragPointer !== event.pointerId) return;
-      dragPointer = null;
+      if (!pointers.delete(event.pointerId)) return;
       canvas.releasePointerCapture?.(event.pointerId);
+      if (pointers.size > 0) return;
       canvas.style.cursor = 'grab';
-      // Under ~5px of travel is a click, not a drag.
-      if (dragTravel < 5 && this.map.mapOpen) {
+      // Under ~5px of travel is a click, not a drag (never after a pinch).
+      if (!pinched && dragTravel < 5 && this.map.mapOpen && event.type === 'pointerup') {
         if (this.map.focusIslandAtClient(event.clientX, event.clientY)) {
           this.audio.playUiClick();
           this.map.drawFullMap();
@@ -1992,30 +2003,35 @@ export class Game {
     };
     canvas.addEventListener('pointerup', endMapDrag);
     canvas.addEventListener('pointercancel', endMapDrag);
+
+    // A close control a finger can reach (the chart otherwise closes on M/Esc).
+    const meta = document.getElementById('map-meta');
+    if (meta && !document.getElementById('map-close')) {
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.id = 'map-close';
+      close.textContent = 'Close';
+      close.setAttribute('aria-label', 'Close the chart');
+      close.style.cssText = 'min-width:56px;min-height:44px;margin-left:auto;pointer-events:auto;'
+        + 'background:rgba(20,14,8,0.8);color:#f3e2b8;border:1px solid #b08a4a;border-radius:8px;font:inherit;cursor:pointer;';
+      close.addEventListener('click', () => this.toggleMap(false));
+      meta.appendChild(close);
+    }
+    // Tapping the minimap opens the chart (touch; the corner map is read-only
+    // for the mouse, which has [M]).
+    this.input.onMinimapTap = () => { if (this.inMatch && !this.map.mapOpen) this.toggleMap(true); };
   }
 
   private bindSupplyWheelActions() {
-    for (const slice of this.ui.pocketWheel.querySelectorAll<SVGPathElement>('[data-wheel-slot]')) {
-      slice.addEventListener('pointerdown', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.activateWheelSlot(Number(slice.dataset.wheelSlot));
-      });
-    }
-    // Radial select: while the wheel is open, the mouse angle from the hub picks
-    // a slot (highlighted); releasing [I] over it activates it — the SoT feel.
+    // The shared radial (b1.4d): mouse hover + release, click/tap on a wedge,
+    // pad stick. Digits stay in InputManager (the modal key layer).
     const svgEl = this.ui.pocketWheel.querySelector<SVGSVGElement>('#pocket-wheel-svg');
-    window.addEventListener('mousemove', (e) => {
-      if (!this.input.isSupplyWheelOpen() || !svgEl) { this.wheelHoverSlot = null; return; }
-      const rect = svgEl.getBoundingClientRect();
-      const dx = e.clientX - (rect.left + rect.width * 0.5);
-      const dy = e.clientY - (rect.top + rect.height * 0.5);
-      // Inside the hub dead-zone (r≈26 of the 200-unit viewBox) selects nothing.
-      if (Math.hypot(dx, dy) < rect.width * 0.13) { this.wheelHoverSlot = null; return; }
-      let ang = Math.atan2(dx, -dy); // clockwise from the top (slot 0)
-      if (ang < 0) ang += Math.PI * 2;
-      this.wheelHoverSlot = Math.round(ang / (Math.PI * 2 / 10)) % 10; // 10-slice wheel
+    this.supplyWheel = new SupplyWheel(svgEl, {
+      isOpen: () => this.input.isSupplyWheelOpen(),
+      activate: (slot) => this.activateWheelSlot(slot),
+      close: () => this.input.closeSupplyWheel(),
     });
+    this.supplyWheel.bind(svgEl);
   }
 
   /** ECON-01 SEND HALF (w6.1 slice d, deferred there, landed by the final
@@ -2078,12 +2094,7 @@ export class Game {
 
   /** On the frame the wheel closes, activate whatever slot was hovered. */
   private updateWheelRelease() {
-    const open = this.input.isSupplyWheelOpen();
-    if (this.wheelWasOpen && !open && this.wheelHoverSlot !== null) {
-      this.activateWheelSlot(this.wheelHoverSlot);
-    }
-    if (!open) this.wheelHoverSlot = null;
-    this.wheelWasOpen = open;
+    this.supplyWheel?.update();
   }
 
   /** Wires every server message. Split by topic so each registrar stays

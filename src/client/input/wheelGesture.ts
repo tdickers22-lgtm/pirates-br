@@ -54,3 +54,53 @@ export function wheelToChartAction(event: WheelLike, pageHeight = 800): ChartWhe
   const panDx = event.ctrlKey ? 0 : -dx;
   return { zoomFactor, panDx, panDy: 0 };
 }
+
+// ── Touch on the chart (b1.4d): one finger pans, two fingers pinch ──────────
+
+export type Pt = { readonly x: number; readonly y: number };
+
+export type PinchStep = {
+  /** Zoom to apply about (midX, midY): the new finger spread over the old. */
+  readonly zoomFactor: number;
+  readonly midX: number;
+  readonly midY: number;
+  /** The midpoint's own travel, applied as a pan (two fingers dragging together). */
+  readonly panDx: number;
+  readonly panDy: number;
+};
+
+/** Fingers closer than this never zoom (a spread of 0 would divide by zero). */
+const PINCH_MIN_SPREAD_PX = 12;
+
+/**
+ * One pointermove of a two-finger gesture. Pan first by the midpoint's travel,
+ * then zoom about the NEW midpoint by the spread ratio, so the water between
+ * the fingers stays between the fingers (the same anchor rule as the wheel).
+ */
+export function pinchStep(prevA: Pt, prevB: Pt, curA: Pt, curB: Pt): PinchStep {
+  const d0 = Math.hypot(prevB.x - prevA.x, prevB.y - prevA.y);
+  const d1 = Math.hypot(curB.x - curA.x, curB.y - curA.y);
+  const zoomFactor = d0 >= PINCH_MIN_SPREAD_PX && d1 >= PINCH_MIN_SPREAD_PX && Number.isFinite(d1 / d0) ? d1 / d0 : 1;
+  const midX = (curA.x + curB.x) / 2;
+  const midY = (curA.y + curB.y) / 2;
+  return {
+    zoomFactor,
+    midX,
+    midY,
+    panDx: midX - (prevA.x + prevB.x) / 2,
+    panDy: midY - (prevA.y + prevB.y) / 2,
+  };
+}
+
+/**
+ * Chart focus after a zoom about a screen point (MapRenderer.zoomAtClient's
+ * rule, pure): the world point at (px, py) canvas px from the centre stays at
+ * (px, py). focus = world at the canvas centre; scale = canvas px per metre.
+ */
+export function zoomFocusAbout(
+  focus: { x: number; z: number }, px: number, py: number, scale0: number, scale1: number,
+): { x: number; z: number } {
+  const worldX = focus.x + px / scale0;
+  const worldZ = focus.z + py / scale0;
+  return { x: worldX - px / scale1, z: worldZ - py / scale1 };
+}

@@ -229,6 +229,7 @@ export const LOGIC = [
   // b1.4a: one bindings table, input authority per scheme, safe pointer lock,
   // continuous wheel/trackpad chart zoom (crossdevice-02/09/10/11/14, mechanicshud-05).
   quick(tsx('test-input-bindings.mjs')),
+  quick(tsx('test-radial-menu.mjs')),
   // b1.4b touch core: virtual stick/look/buttons through the real InputManager,
   // and the touch [X] hold replayed into a real Match closes a breach (logic half).
   tsx('test-touch-controls.mjs'),

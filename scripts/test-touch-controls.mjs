@@ -288,5 +288,89 @@ if (TC && V && IM) {
     scoops >= 2 && b.ship.waterLevel < w0 && fireLeaked === 0);
 }
 
+// ── Radial, utility row, minimap and chart pinch (b1.4d) ─────────────────
+console.log('\nRadial satchel, utility row, chart pinch (b1.4d)');
+const SWM = await tryImport('../src/client/ui/SupplyWheel.ts');
+const WG = await tryImport('../src/client/input/wheelGesture.ts');
+const TCL = await tryImport('../src/client/input/TouchControls.ts');
+if (TC) {
+  const foot = TC.buttonsFor('foot').map((b) => b.id);
+  const spec = (id) => TC.TOUCH_BUTTONS.find((b) => b.id === id);
+  expect(`foot has Satchel, Scope, Keg, Special (${foot})`, ['satchel', 'spyglass', 'keg', 'special'].every((id) => foot.includes(id)));
+  expect('Satchel = supplyWheel toggle, Scope = spyglass toggle, Keg = keg HOLD (release places), Special = special',
+    spec('satchel')?.action === 'supplyWheel' && spec('satchel')?.toggle === true
+    && spec('spyglass')?.action === 'spyglass' && spec('spyglass')?.toggle === true
+    && spec('keg')?.action === 'keg' && !spec('keg')?.toggle && spec('special')?.action === 'special');
+  expect('Satchel also at the helm and cannon (the wheel works there on the keyboard)',
+    TC.buttonsFor('helm').some((b) => b.id === 'satchel') && TC.buttonsFor('cannon').some((b) => b.id === 'satchel'));
+}
+if (SWM && IM && V) {
+  // Satchel tap opens the wheel, a tap on a wedge takes it: the wire carries it.
+  const im = new IM.InputManager();
+  im.scheme.note('touch');
+  const src = new V.VirtualInputSource(im);
+  src.press('supplyWheel');
+  const openAfterTap = im.isSupplyWheelOpen();
+  im.buildInput();
+  const box = { getBoundingClientRect: () => ({ left: 222, top: 20, width: 400, height: 400 }) };
+  const wheel = new SWM.SupplyWheel(box, {
+    isOpen: () => im.isSupplyWheelOpen(),
+    activate: (slot) => im.queueWheelSlot(slot),
+    close: () => { if (src.isHeld('supplyWheel')) src.release('supplyWheel'); },
+  });
+  // Planks (slot 3) sit at 108 deg: tap the label area, not the painted path's centre.
+  const a = (108 * Math.PI) / 180;
+  const picked = wheel.tapAt(422 + Math.sin(a) * 170, 220 - Math.cos(a) * 170, true);
+  await sleep(160); // VirtualInputSource keeps a tap alive >= 120 ms
+  const sent = im.buildInput();
+  expect(`Satchel tap opens the wheel (${openAfterTap}); tapping the Planks wedge selects slot 3 (${picked})`, openAfterTap && picked === 3);
+  expect(`the pick rides the wire once (wheelIndex ${sent.wheelIndex}, useWheelItem ${sent.useWheelItem}) and the wheel closed (${im.isSupplyWheelOpen()})`,
+    sent.wheelIndex === 3 && sent.useWheelItem === true && !im.isSupplyWheelOpen() && im.buildInput().useWheelItem === false);
+  src.press('supplyWheel');
+  expect('the next Satchel tap opens it again (the toggle was released by the pick)', im.isSupplyWheelOpen());
+  src.releaseAll();
+}
+if (TCL) {
+  const box = { left: 700, top: 92, right: 830, bottom: 222 };
+  expect('a look-pad tap inside the minimap box opens the chart, outside does not',
+    TCL.tapHitsBox(760, 150, box) && !TCL.tapHitsBox(600, 150, box) && !TCL.tapHitsBox(760, 150, null)
+    && TCL.TAP_MAX_TRAVEL_PX <= 12 && TCL.TAP_MAX_MS <= 400);
+}
+if (WG) {
+  // A chart model with MapRenderer's rules: focus = world at the canvas centre,
+  // panByClient moves focus by -d/scale, zoomAtClient keeps the anchor fixed
+  // (the same zoomFocusAbout MapRenderer calls), zoom clamped 1..7.
+  const W = 844; const H = 390; const base = 0.4;
+  const chart = { focus: { x: 0, z: 0 }, zoom: 1 };
+  const scale = () => base * chart.zoom;
+  const worldAt = (p) => ({ x: chart.focus.x + (p.x - W / 2) / scale(), z: chart.focus.z + (p.y - H / 2) / scale() });
+  const pan = (dx, dy) => { chart.focus = { x: chart.focus.x - dx / scale(), z: chart.focus.z - dy / scale() }; };
+  const zoomAt = (f, x, y) => {
+    const s0 = scale(); chart.zoom = Math.min(7, Math.max(1, chart.zoom * f));
+    chart.focus = WG.zoomFocusAbout(chart.focus, x - W / 2, y - H / 2, s0, scale());
+  };
+  let A = { x: 470, y: 230 }; let B = { x: 570, y: 230 }; // 100 px apart, midpoint (520, 230)
+  const mid0 = { x: 520, y: 230 };
+  const under0 = worldAt(mid0);
+  for (let i = 0; i < 10; i += 1) {
+    // Fingers move one at a time, like real pointermove events.
+    const nA = { x: A.x - 5, y: A.y };
+    let st = WG.pinchStep(A, B, nA, B); A = nA; pan(st.panDx, st.panDy); zoomAt(st.zoomFactor, st.midX, st.midY);
+    const nB = { x: B.x + 5, y: B.y };
+    st = WG.pinchStep(B, A, nB, A); B = nB; pan(st.panDx, st.panDy); zoomAt(st.zoomFactor, st.midX, st.midY);
+  }
+  const under1 = worldAt(mid0);
+  const drift = Math.hypot(under1.x - under0.x, under1.z - under0.z) * scale();
+  expect(`pinch 100 -> 200 px reaches 2x (${chart.zoom.toFixed(3)}x) about the midpoint (drift ${drift.toFixed(3)} px)`,
+    Math.abs(chart.zoom - 2) < 0.01 && drift < 0.5);
+  const one = WG.pinchStep({ x: 10, y: 10 }, { x: 12, y: 10 }, { x: 40, y: 10 }, { x: 12, y: 10 });
+  expect('fingers closer than 12 px never zoom (no divide-by-zero slam)', one.zoomFactor === 1);
+  const gameSrc = (await import('node:fs')).readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  const mapSrc = (await import('node:fs')).readFileSync(new URL('../src/client/ui/MapRenderer.ts', import.meta.url), 'utf8');
+  expect('Game pans + zooms the chart from pinchStep; MapRenderer.zoomAtClient uses zoomFocusAbout; minimap tap wired',
+    /pinchStep\(/.test(gameSrc) && /zoomAtClient\(step\.zoomFactor, step\.midX, step\.midY\)/.test(gameSrc)
+    && /zoomFocusAbout\(/.test(mapSrc) && /onMinimapTap\s*=/.test(gameSrc));
+}
+
 console.log(failures ? `\nFAIL test-touch-controls (${failures})` : '\nPASS test-touch-controls');
 process.exit(failures ? 1 : 0);
