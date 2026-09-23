@@ -13,7 +13,8 @@
 // classes, at every dock in the fixed world, through the REAL PhysicsSystem.
 import { Match } from '../src/server/core/Match.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
-import { getShipGangwayPlan } from '../src/shared/interactions.js';
+import { getShipGangwayPlan, toShipLocalPoint } from '../src/shared/interactions.js';
+import { toDockLocalPoint, dockLocalToWorld } from '../src/shared/utils/index.ts';
 import { SHIP_STATS, PLAYER } from '../src/shared/constants/index.ts';
 
 let failures = 0;
@@ -113,6 +114,86 @@ console.log(`     planks=${planked.length} worstOffAxis=${Math.max(...planked.ma
   expect('every spawn berth and pier respawn is >= 60 m inside the phase-1 ring', worst && worst.inside >= 60,
     worst ? `${worst.island}: ${worst.inside.toFixed(1)} m inside a ${ring.toFixed(0)} m ring` : 'no docks');
   console.log(`     ring=${ring.toFixed(0)}m tightest berth ${worst?.inside.toFixed(1)}m inside (${worst?.island})`);
+}
+
+// FROM THE SPAWN POINT (liveplay-09): createCrew lands each member on the pier
+// (respawnPoint + the BERTH_LANDING_SPREAD offset, a stride apart) beside the
+// hull it just parked. Two first-20-seconds walks must board her dry:
+//   ROUTE  — along the pier to the plank's foot, then up the plank;
+//   NAIVE  — straight at the hull's centre, the way a newcomer does it.
+// And the pier edge to the rail where the plank lands must be a step, not a
+// swim: < 0.4 m (the plank bridges the rest of the berth's RAIL_GAP).
+{
+  const fakeWs = () => ({ readyState: 1, bufferedAmount: 0, send() {}, close() {} });
+  const spawnMatch = new Match({ matchId: 'gangway-spawn', botCount: 0 });
+  const sState = spawnMatch['state'];
+  const walks = [];
+  const gaps = [];
+  for (let c = 0; c < 16; c++) {
+    const size = (c % 4) + 1;
+    const { shipId } = spawnMatch.createCrew(Array.from({ length: size }, (_, i) => ({ ws: fakeWs(), name: `S${c}-${i}` })));
+    const ship = sState.ships.find((s) => s.id === shipId);
+    const crew = sState.players.filter((p) => p.shipId === shipId);
+    if (crew.some((p) => p.onShipId === shipId)) continue; // no berth left: rides at anchor
+    const island = sState.islands.find((i) => i.dock && Math.hypot(i.dock.position.x - ship.position.x, i.dock.position.z - ship.position.z) < 80);
+    const dock = island?.dock;
+    const plan = dock ? getShipGangwayPlan(ship, dock) : null;
+    if (!plan) { walks.push({ ship: ship.type, island: island?.name, mode: 'plan', ok: false, why: 'no plank' }); continue; }
+    const inDock = toDockLocalPoint(dock, ship.position.x, ship.position.z);
+    const halfZ = dock.length * 0.5;
+    const edge = dockLocalToWorld(dock, Math.sign(inDock.x) * dock.width * 0.5, 0,
+      Math.max(-halfZ + 0.6, Math.min(halfZ - 0.6, inDock.z)));
+    gaps.push({ island: island.name, type: ship.type, gap: Math.hypot(edge.x - plan.shipEnd.x, edge.z - plan.shipEnd.z) });
+    const spawns = crew.map((p) => ({ ...p.position }));
+    for (const mode of ['route', 'naive']) {
+      for (const [i, member] of crew.entries()) {
+        for (const other of crew) { other.onShipId = null; other.state = 'alive'; }
+        member.position = { ...spawns[i] };
+        member.velocity = { x: 0, y: 0, z: 0 };
+        const physics = new PhysicsSystem();
+        const waypoints = mode === 'route'
+          ? [plan.dockEnd, plan.shipEnd, {
+            // then step down off the rail onto the deck, 1.5 m further inboard
+            x: plan.shipEnd.x + (plan.shipEnd.x - plan.dockEnd.x) / Math.hypot(plan.shipEnd.x - plan.dockEnd.x, plan.shipEnd.z - plan.dockEnd.z) * 1.5,
+            z: plan.shipEnd.z + (plan.shipEnd.z - plan.dockEnd.z) / Math.hypot(plan.shipEnd.x - plan.dockEnd.x, plan.shipEnd.z - plan.dockEnd.z) * 1.5,
+          }]
+          : [{ x: ship.position.x, z: ship.position.z }];
+        let wp = 0, swam = false, boarded = false, t = 0;
+        const dt = 1 / 30;
+        for (let step = 0; step < 30 * 20 && !boarded; step++) {
+          const target = waypoints[Math.min(wp, waypoints.length - 1)];
+          const dx = target.x - member.position.x, dz = target.z - member.position.z;
+          const d = Math.hypot(dx, dz);
+          if (d < 0.3 && wp < waypoints.length - 1) wp += 1;
+          const ux = d > 1e-3 ? dx / d : 0, uz = d > 1e-3 ? dz / d : 0;
+          member.velocity.x = ux * PLAYER.MOVE_SPEED;
+          member.velocity.z = uz * PLAYER.MOVE_SPEED;
+          member.position.x += member.velocity.x * dt;
+          member.position.z += member.velocity.z * dt;
+          physics.update(dt, t, sState.ships, [member], [], sState.islands, sState.seaRocks ?? [], null);
+          t += dt;
+          if (member.state === 'swimming') { swam = true; break; }
+          if (member.onShipId === ship.id) boarded = true;
+        }
+        walks.push({ ship: ship.type, island: island.name, mode, member: i, ok: boarded && !swam, swam, boarded,
+          at: `${member.position.x.toFixed(1)},${member.position.y.toFixed(2)},${member.position.z.toFixed(1)}` });
+      }
+    }
+  }
+  const berthed = new Set(walks.map((w) => `${w.island}/${w.ship}`)).size;
+  expect('createCrew berthed crews at docks to walk from', berthed >= 4, `berthed=${berthed}`);
+  const bad = walks.filter((w) => (w.mode === 'route' || w.mode === 'plan') && !w.ok);
+  expect(`walk from the spawn point via the plank boards the hull without swimming (${walks.filter((w) => w.mode === 'route').length} walks)`,
+    bad.length === 0, bad.map((w) => `${w.ship} @ ${w.island} member ${w.member}: ${w.why ?? (w.swam ? 'SWAM' : 'stranded')} at ${w.at}`).join('\n     '));
+  // MEASURED, NOT YET GATED (b1.6d remaining): the berth leaves BERTH.RAIL_GAP
+  // (1.0 m at max beam) of open water between pier edge and hull, so a newcomer
+  // walking straight at the hull off the plank's line drops into it. Closing it
+  // to < 0.4 m moves every berth (world re-pin) and is its own commit.
+  const naive = walks.filter((w) => w.mode === 'naive');
+  const worstGap = gaps.reduce((a, g) => (!a || g.gap > a.gap ? g : a), null);
+  console.log(`     MEASURE naive straight-at-the-hull walks dry: ${naive.filter((w) => w.ok).length}/${naive.length}; `
+    + `worst pier-edge to rail gap ${worstGap?.gap.toFixed(2)} m (target < 0.4)`);
+  console.log(`     spawn walks=${walks.length} berths=${berthed} worst pier-to-rail gap ${worstGap?.gap.toFixed(2)} m (${worstGap?.type} @ ${worstGap?.island})`);
 }
 
 if (failures > 0) {
