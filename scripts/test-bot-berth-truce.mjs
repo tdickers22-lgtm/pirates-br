@@ -21,6 +21,7 @@ process.env.PIRATES_BR_MAP_SEED ??= '20260801';
 import { Match } from '../src/server/core/Match.ts';
 import { BOT_EARLY_PEACE_SECONDS, SERVER_TICK_MS } from '../src/shared/constants/index.ts';
 import { botMayFireCannons, isMooredAtBerth, BOT_BERTH_TRUCE_SECONDS } from '../src/server/systems/BotSystem.ts';
+import { TRUCE_SECONDS } from '../src/shared/truce.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -111,6 +112,9 @@ function sailBerth({ seconds, provokeAt = null }) {
   let provoked = false;
   for (let i = 0; i < Math.ceil(seconds / dt); i += 1) {
     t = i * dt;
+    // The match clock is the truce clock WeaponSystem reads (b1.6e): keep it
+    // on the harness's time or every cannon reads as t=0, inside the truce.
+    match.t = t;
     pinA(); pinB();
     if (provokeAt !== null && !provoked && t >= provokeAt) {
       // The moored hull fires first: a cannon hole in A (Match's projectile
@@ -134,12 +138,22 @@ expect(`not one cannon shot at the moored hull before ${BOT_BERTH_TRUCE_SECONDS}
 expect('once the truce lifts the moored hull is fair game (the harness can fire)', afterTruce.length > 0,
   `shots after ${BOT_BERTH_TRUCE_SECONDS} s = ${afterTruce.length}, behaviour=${quiet.behaviorA}`);
 
-console.log('\nThe moored hull shoots first at 60 s');
-const answered = sailBerth({ seconds: 120, provokeAt: 60 });
+// b1.6e re-pin: the match truce (TRUCE_SECONDS, src/shared/truce.ts) refuses
+// every crew's cannons, so a provocation at 60 s cannot be answered by cannon
+// before it lifts. The berth-truce contract (answered inside the 270 s berth
+// truce, never before she fired) is proved with the provocation after it.
+console.log('\nThe moored hull shoots first at 60 s (inside the match truce)');
+const early = sailBerth({ seconds: 120, provokeAt: 60 });
+console.log(`  · shots: ${early.shots.length}`);
+expect(`no cannon answers before the match truce lifts at ${TRUCE_SECONDS} s`, early.shots.length === 0, `shots=${early.shots.length}`);
+
+const provokeAt = TRUCE_SECONDS + 10;
+console.log(`\nThe moored hull shoots first at ${provokeAt} s (after the match truce, inside the berth truce)`);
+const answered = sailBerth({ seconds: provokeAt + 80, provokeAt });
 console.log(`  · shots: ${answered.shots.length} (first ${answered.shots.length ? answered.shots[0].toFixed(1) + ' s' : 'never'})`);
-expect('a moored hull that opens fire is answered inside the truce', answered.shots.some((s) => s < BOT_EARLY_PEACE_SECONDS),
+expect('a moored hull that opens fire is answered inside the berth truce', answered.shots.some((s) => s < BOT_BERTH_TRUCE_SECONDS),
   `shots=${answered.shots.length}`);
-expect('and never before she fired', answered.shots.every((s) => s >= 60), answered.shots.length ? `first at ${answered.shots[0].toFixed(1)} s` : '');
+expect('and never before she fired', answered.shots.every((s) => s >= provokeAt), answered.shots.length ? `first at ${answered.shots[0].toFixed(1)} s` : '');
 
 if (failures > 0) {
   console.error(`\n${failures} berth-truce assertion(s) failed.`);
