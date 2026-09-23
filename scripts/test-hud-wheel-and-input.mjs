@@ -162,7 +162,10 @@ const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 // keyframes below are graded on the document plus the sheets it loads.
 const css = html + '\n' + ['hud', 'menu']
   .map((f) => readFileSync(new URL(`../src/client/styles/${f}.css`, import.meta.url), 'utf8')).join('\n');
-const legendBlocks = html.split('\n').filter((l) => /·\s*(Spyglass|Special|Supply [Ww]heel|Trade)/.test(l));
+// b1.4f: the card body is generated from the bindings table (InputGlyphs.legendLines
+// fills #legend-body [data-legend]); grade the generated mouse+keyboard lines too.
+const { legendLines } = await import('../src/client/ui/InputGlyphs.ts');
+const legendBlocks = [...html.split('\n'), ...legendLines('mouse')].filter((l) => /·\s*(Spyglass|Special|Supply [Ww]heel|Trade)/.test(l));
 expect('the controls legend was found in index.html', legendBlocks.length >= 3, `blocks=${legendBlocks.length}`);
 expect('no "Trade" key is advertised in the legend (hud-15)',
   legendBlocks.every((l) => !/Trade/.test(l)),

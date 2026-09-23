@@ -53,6 +53,7 @@ import {
 } from '../../shared/interactions.js';
 import type { ClientInteractKind } from '../core/Game.js';
 import type { UiRefs } from '../ui/UiRefs.js';
+import { glyph, glyphSet, holdGlyph } from '../ui/InputGlyphs.js';
 
 /** Eye→station distance inside which you are HANDS ON the thing: it owns [X]. */
 const HANDS_ON_REACH = 1.6;
@@ -219,7 +220,7 @@ export class InteractionPrompts {
           new THREE.Vector3(other.position.x, other.position.y + 0.5, other.position.z),
           3.4,
           0.1,
-          `[X] Revive ${other.name}`,
+          `${glyph('interact')} Revive ${other.name}`,
           'Hold to stabilize your crewmate',
           'revive',
         );
@@ -237,7 +238,7 @@ export class InteractionPrompts {
         new THREE.Vector3(this.view.mermaidAnchor!.x, player.position.y + 0.65, this.view.mermaidAnchor!.z),
         6.4,
         0.12,
-        '[X] Return To Ship',
+        `${glyph('interact')} Return To Ship`,
         'Mermaid ferry waiting nearby',
         'mermaid',
       );
@@ -253,7 +254,7 @@ export class InteractionPrompts {
           barrelPos,
           5.5,
           0.72,
-          browsingThisBarrel ? '[X] Take All' : '[X] Look Inside',
+          browsingThisBarrel ? `${glyph('interact')} Take All` : `${glyph('interact')} Look Inside`,
           browsingThisBarrel ? 'Transfer supplies' : 'Supply barrel · opening shows what’s inside',
           'barrel',
         );
@@ -269,10 +270,10 @@ export class InteractionPrompts {
         4.6,
         0.2,
         player.carryingChestId
-          ? '[X] Sell Chest'
+          ? `${glyph('interact')} Sell Chest`
           : (player.treasureMapIslandId && player.gold >= ECONOMY.ARMOR_PRICE && (player.armor ?? 0) < PLAYER.MAX_ARMOR * 0.5)
-            ? `[X] Buy Iron Cuirass (${ECONOMY.ARMOR_PRICE}g)`
-            : '[X] Get Treasure Map',
+            ? `${glyph('interact')} Buy Iron Cuirass (${ECONOMY.ARMOR_PRICE}g)`
+            : `${glyph('interact')} Get Treasure Map`,
         player.carryingChestId
           ? `The ${BROKER_NAME} pays toward ${ECONOMY.GOLD_WIN_TARGET}`
           : (player.treasureMapIslandId && player.gold >= ECONOMY.ARMOR_PRICE && (player.armor ?? 0) < PLAYER.MAX_ARMOR * 0.5)
@@ -296,14 +297,14 @@ export class InteractionPrompts {
       if (chestPos && chest && chestInReach && chest.carriedByPlayerId !== player.id) {
         const digging = chest.buried && chest.digProgress < 1;
         const prompt = digging
-          ? (player.hasShovel ? '[Hold X] Dig' : 'Find a shovel')
+          ? (player.hasShovel ? `${holdGlyph('interact')} Dig` : 'Find a shovel')
           : chest.carriedByPlayerId
-            ? '[X] Steal Chest'
+            ? `${glyph('interact')} Steal Chest`
             : chest.storedOnShipId
-              ? '[X] Take Chest'
+              ? `${glyph('interact')} Take Chest`
               : chest.floating
-                ? '[X] Grab Floating Chest'
-                : '[X] Pick Up Chest';
+                ? `${glyph('interact')} Grab Floating Chest`
+                : `${glyph('interact')} Pick Up Chest`;
         const label = digging
           ? `Buried treasure · ${Math.round(chest.digProgress * 100)}% dug`
           : `Base ${chest.value} gold · ${BROKER_NAME_PLURAL} pay more`;
@@ -334,7 +335,7 @@ export class InteractionPrompts {
           // are facing (the rungs may be behind your head) but yields to
           // anything actually within reach, like a floating chest.
           candidates.push({
-            prompt: '[X] Climb Aboard',
+            prompt: `${glyph('interact')} Climb Aboard`,
             label: player.state === 'swimming'
               ? 'Haul yourself up the side of your ship'
               : 'Climb the side of your ship from here',
@@ -350,7 +351,7 @@ export class InteractionPrompts {
           // shows a prompt is always honoured (and the server LATCHES it for
           // ~2s so a press between two physics ticks is never swallowed).
           const boardPoint = new THREE.Vector3(ladder.x, targetShip.position.y + SHIP_STATS[targetShip.type].height * 0.4, ladder.z);
-          this.pushInteractionCandidate(candidates, player, boardPoint, 7.0, 0.35, '[X] Climb Ladder', 'Board from the side ladder', 'board');
+          this.pushInteractionCandidate(candidates, player, boardPoint, 7.0, 0.35, `${glyph('interact')} Climb Ladder`, 'Board from the side ladder', 'board');
         }
       }
     }
@@ -369,7 +370,7 @@ export class InteractionPrompts {
           new THREE.Vector3(bestProp.x, propY + (isPalm ? 1.6 : 0.7), bestProp.z),
           HARVEST.RANGE + 1.6,
           0.2,
-          isPalm ? '[Hold LMB] Chop Palm — wood' : '[Hold LMB] Crack Boulder — ore',
+          isPalm ? `${holdGlyph('fire')} Chop Palm — wood` : `${holdGlyph('fire')} Crack Boulder — ore`,
           isPalm
             ? `Fells in ~${HARVEST.CHOP_TIME}s · ${HARVEST.WOOD_PER_TREE_MIN}–${HARVEST.WOOD_PER_TREE_MAX} wood`
             : `Cracks in ~${HARVEST.MINE_TIME}s · ${HARVEST.ORE_PER_BOULDER_MIN}–${HARVEST.ORE_PER_BOULDER_MAX} ore`,
@@ -401,7 +402,7 @@ export class InteractionPrompts {
           new THREE.Vector3(ladderPoint.x, ladderPoint.y, ladderPoint.z),
           4.2,
           0.45,
-          '[X] Climb Dock Ladder',
+          `${glyph('interact')} Climb Dock Ladder`,
           'Swim up to the wooden dock',
           'dock',
         );
@@ -416,7 +417,7 @@ export class InteractionPrompts {
         new THREE.Vector3(nearbyKeg.position.x, nearbyKeg.position.y + 0.45, nearbyKeg.position.z),
         3,
         0.3,
-        '[X] Defuse Powder Keg',
+        `${glyph('interact')} Defuse Powder Keg`,
         `${Math.max(1, Math.ceil(nearbyKeg.timer))}s until detonation`,
         'keg_diffuse',
       );
@@ -433,13 +434,13 @@ export class InteractionPrompts {
         let prompt: string;
         let label: string;
         if (!hasBucket) {
-          prompt = 'Equip the Bucket [Hold I] to bail';
+          prompt = `Equip the Bucket ${holdGlyph('supplyWheel')} to bail`;
           label = `Bilge flooding ${pct}% · grab the bucket from the supply wheel`;
         } else if (player.bucketFilled) {
-          prompt = '[X] Heave the water overboard';
+          prompt = `${glyph('interact')} Heave the water overboard`;
           label = 'Bucket full — toss it over the side';
         } else {
-          prompt = '[X] Fill the bucket from the bilge';
+          prompt = `${glyph('interact')} Fill the bucket from the bilge`;
           label = `Bilge flooding ${pct}% · scoop a bucketful out`;
         }
         // Ambient (no geometry of its own): only ever the fallback offer.
@@ -468,7 +469,7 @@ export class InteractionPrompts {
           pumpPoint,
           2.4,
           -1,
-          dryBilge ? 'Bilge pump — she is dry' : '[Hold X] Work the Bilge Pump',
+          dryBilge ? 'Bilge pump — she is dry' : `${holdGlyph('interact')} Work the Bilge Pump`,
           dryBilge
             ? 'Nothing in her to pump'
             : `Bilge ${bilgePct}% · the pump beats one breach, not three`,
@@ -504,7 +505,7 @@ export class InteractionPrompts {
           stowPoint,
           4.8,
           0.16,
-          '[X] Stow Chest',
+          `${glyph('interact')} Stow Chest`,
           'Place chest on deck for the crew',
           'stow_chest',
         );
@@ -537,7 +538,7 @@ export class InteractionPrompts {
           4.4,
           0.2,
           canPay
-            ? `[X] Claim ${meta.name} — ${cost.wood} wood · ${cost.ore} ore`
+            ? `${glyph('interact')} Claim ${meta.name} — ${cost.wood} wood · ${cost.ore} ore`
             : `${meta.name} — ${needs.join(' · ')}`,
           `${canPay ? 'Materials ready' : `${cost.wood} wood · ${cost.ore} ore`} · ${meta.effect}`,
           canPay ? 'upgrade' : 'info',
@@ -551,7 +552,7 @@ export class InteractionPrompts {
       if (standingAtHelm || isNearHelm(player, ship)) {
         const helm = getHelmControlLocal(SHIP_STATS[ship.type]);
         const helmPoint = this.view.getShipReachPoint(ship, helm.x, helm.z, SHIP_STATS[ship.type].height + 0.95);
-        const helmPrompt = '[X] Take Helm';
+        const helmPrompt = `${glyph('interact')} Take Helm`;
         const helmLabel = 'A/D or arrows turn · W/S trims sails';
         if (standingAtHelm) {
           // RULE 4. Feet on the station: skip the dot gate entirely. The wheel's
@@ -587,10 +588,10 @@ export class InteractionPrompts {
         const sailPct = Math.round(ship.sailHeight * 100);
         const canvasTorn = ship.sailIntegrity < 0.995;
         const sailPrompt = canvasTorn
-          ? `[X] Hold — Mend the Rigging (${Math.round(ship.sailIntegrity * 100)}%)`
+          ? `${glyph('interact')} Hold — Mend the Rigging (${Math.round(ship.sailIntegrity * 100)}%)`
           : ship.sailHeight < 0.5
-            ? `[X] Hold — Drop the Sails (${sailPct}%)`
-            : `[X] Hold — Raise the Sails (${sailPct}%)`;
+            ? `${glyph('interact')} Hold — Drop the Sails (${sailPct}%)`
+            : `${glyph('interact')} Hold — Raise the Sails (${sailPct}%)`;
         this.pushInteractionCandidate(
           candidates,
           player,
@@ -621,7 +622,7 @@ export class InteractionPrompts {
             bracePoint,
             BRACE_PROMPT_REACH,
             0.1,
-            `[X] Hold — Brace the Yard to ${brace.dir > 0 ? 'Starboard' : 'Port'} (${trimDeg > 0 ? '+' : ''}${trimDeg}°)`,
+            `${glyph('interact')} Hold — Brace the Yard to ${brace.dir > 0 ? 'Starboard' : 'Port'} (${trimDeg > 0 ? '+' : ''}${trimDeg}°)`,
             'Angle the sails to catch the wind',
             'brace',
           );
@@ -638,7 +639,7 @@ export class InteractionPrompts {
           ladderPoint,
           3.2,
           0.24,
-          '[X] Climb the Mast',
+          `${glyph('interact')} Climb the Mast`,
           'Main mast ladder · W/S climbs to the crow\'s nest',
           'crow',
         );
@@ -654,7 +655,7 @@ export class InteractionPrompts {
           anchorPoint,
           4.4,
           0.18,
-          ship.anchored ? `[X] Hold — Raise the Anchor (${anchorProgress}%)` : '[X] Drop the Anchor',
+          ship.anchored ? `${glyph('interact')} Hold — Raise the Anchor (${anchorProgress}%)` : `${glyph('interact')} Drop the Anchor`,
           ship.anchored ? 'Man the capstan · crewmates speed the turn' : 'Stops the ship fast — you will have to crank it back up',
           'anchor',
         );
@@ -674,7 +675,7 @@ export class InteractionPrompts {
           repairPoint,
           4.5,
           belowDeck ? REPAIR_MIN_DOT_BELOW_DECK : REPAIR_MIN_DOT_ON_DECK,
-          plankCount > 0 ? '[X] Hold — Plank This Leak' : '⚠ Leak here',
+          plankCount > 0 ? `${glyph('interact')} Hold — Plank This Leak` : '⚠ Leak here',
           plankCount > 0
             ? `${plankCount} plank${plankCount === 1 ? '' : 's'} ready`
             : 'No planks ready',
@@ -696,8 +697,8 @@ export class InteractionPrompts {
           cannonPoint,
           4.8,
           0.16,
-          '[X] Use Cannon',
-          `Broadside cannon ${nearbyCannon + 1} · [5/6/7] ammo`,
+          `${glyph('interact')} Use Cannon`,
+          `Broadside cannon ${nearbyCannon + 1} · ${glyphSet(['ammoRound', 'ammoFire', 'ammoChain'])} ammo`,
           'cannon',
         );
       }
@@ -712,7 +713,7 @@ export class InteractionPrompts {
           cratePoint,
           3.6,
           0.2,
-          '[X] Ammo Chest — Refill Firearms',
+          `${glyph('interact')} Ammo Chest — Refill Firearms`,
           'Tops up every gun and clears reloads',
           'ammo',
         );
@@ -732,7 +733,7 @@ export class InteractionPrompts {
           doorPoint,
           3.4,
           0.2,
-          `[X] ${door.open ? 'Close' : 'Open'} Door`,
+          `${glyph('interact')} ${door.open ? 'Close' : 'Open'} Door`,
           'Tavern',
           'door',
         );

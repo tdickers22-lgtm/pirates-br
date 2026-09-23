@@ -229,6 +229,9 @@ export const LOGIC = [
   // b1.4a: one bindings table, input authority per scheme, safe pointer lock,
   // continuous wheel/trackpad chart zoom (crossdevice-02/09/10/11/14, mechanicshud-05).
   quick(tsx('test-input-bindings.mjs')),
+  // b1.4f: 0 key literals in player copy; glyph(action, scheme) per device; generated
+  // legend + win gold (mechanicshud-05, crossdevice-08/18, vm:mechanicshud:3).
+  quick(tsx('test-no-hardcoded-keys.mjs')),
   quick(tsx('test-radial-menu.mjs')),
   // b1.4e gamepad: radial deadzone 0.12/0.95, look curve ^2 at 220/150 deg/s, table
   // routes per context, Y tap/hold split, MenuNav pickNext, haptics table + off switch.

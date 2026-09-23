@@ -35,7 +35,7 @@ import { NetworkClient } from '../network/NetworkClient.js';
 import { connectCopy, waitForRetry, type ConnectPhase } from '../network/connectPolicy.js';
 import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
-import { isBound } from '../../shared/bindings.js';
+import { isBound, type BindingAction } from '../../shared/bindings.js';
 import { lockHintVisible } from '../input/inputAuthority.js';
 import { requestLockSafe } from '../input/pointerLock.js';
 import { wheelToChartAction, pinchStep } from '../input/wheelGesture.js';
@@ -72,6 +72,7 @@ import { applyPlayerTeamColor, makePlayerMesh } from '../rendering/factories/Pla
 import { makePlayerRig } from '../rendering/factories/PlayerRigFactory.js';
 import { buildMermaidMesh, hudAnchorLocal, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
+import { glyph, installGlyphs, keys } from '../ui/InputGlyphs.js';
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
@@ -363,9 +364,11 @@ export function hullShudderTrauma(openHoles: number): number {
 /** The click-to-look hint, in the verbs of the station the pirate is standing
  *  at. Pure so it can be gated (hud-26). */
 export function pointerLockHintFor(station: 'helm' | 'cannon' | 'foot'): string {
-  if (station === 'helm') return 'Click to look around · A/D steer · W/S sails';
+  // Only ever shown on the mouse scheme (lockHintVisible), so it names keys, from the table.
+  const k = (a: BindingAction) => keys(a, 'mouse');
+  if (station === 'helm') return `Click to look around · ${k('steerLeft')}/${k('steerRight')} steer · ${k('sailsOut')}/${k('sailsIn')} sails`;
   if (station === 'cannon') return 'Click to look around · move the mouse to aim';
-  return 'Click to look around · WASD to move';
+  return `Click to look around · ${k('moveForward')}${k('moveLeft')}${k('moveBack')}${k('moveRight')} to move`;
 }
 
 /** ECON-01: the order of the Tallyman's shelf. ONE declaration, read by the
@@ -1094,6 +1097,9 @@ export class Game {
   // drawn on the water.)
 
   async init() {
+    // Static copy (legend, How to Play, wheel hints, win gold) speaks the active
+    // device, and follows every scheme change from here on (b1.4f).
+    installGlyphs();
     installErrorBeacon({ isLoaded: () => this.ui.loadingScreen.classList.contains('hidden') });
     document.addEventListener('contextmenu', (event) => event.preventDefault());
 
@@ -2875,8 +2881,8 @@ export class Game {
    * present tense, because they are read while there is still time to act.
    */
   private static readonly ENV_DAMAGE_COPY: Record<string, { label: string; feed: string }> = {
-    storm: { label: 'THE STORM', feed: 'The storm is tearing at you — get inside the ring [M]' },
-    drowned: { label: 'DROWNING', feed: 'You are drowning — [SPACE] swims up' },
+    storm: { label: 'THE STORM', feed: `The storm is tearing at you — get inside the ring ${glyph('map')}` },
+    drowned: { label: 'DROWNING', feed: `You are drowning — ${glyph('jump')} swims up` },
     fall: { label: 'THE FALL', feed: 'The landing hurt — deep water breaks a fall, rock does not' },
     fire: { label: 'FIRE', feed: 'You are burning — get off the fire, or douse it with a bucket' },
     shark: { label: 'SHARK', feed: 'A shark has you — get out of the water' },

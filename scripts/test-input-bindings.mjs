@@ -94,10 +94,12 @@ for (const [name, src] of [['InputManager.ts', INPUT_SRC], ['Game.ts', GAME_SRC]
 // table instead of InputManager's source.)
 if (B) {
   console.log('\nThe legend card against the table');
+  // b1.4f: the card is generated from the table (InputGlyphs.legendLines) into
+  // the #legend-body [data-legend] slot, so audit the generated mouse+keyboard card.
+  const G = await tryImport('../src/client/ui/InputGlyphs.ts');
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  const start = html.indexOf('<div id="controls-hint">');
-  const legend = html.slice(start, html.indexOf('legend-foot', start))
-    .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ');
+  expect('index.html #legend-body carries the generated [data-legend] slot', /id="legend-body"[\s\S]{0,800}data-legend/.test(html));
+  const legend = (G ? G.legendLines('mouse').join(' ') : '').replace(/\s+/g, ' ');
   const LEGEND_TOKENS = {
     KeyW: /WASD/, KeyA: /WASD/, KeyS: /WASD/, KeyD: /WASD/,
     ArrowUp: /arrow keys/i, ArrowDown: /arrow keys/i, ArrowLeft: /arrow keys/i, ArrowRight: /arrow keys/i,
@@ -106,7 +108,7 @@ if (B) {
     KeyQ: /Q\/F|Q flips/, KeyF: /Q\/F/, ShiftLeft: /SHIFT/, ShiftRight: /SHIFT/,
     Digit1: /1–4/, Digit2: /1–4/, Digit3: /1–4/, Digit4: /1–4/,
     Digit5: /5\/6\/7/, Digit6: /5\/6\/7/, Digit7: /5\/6\/7/,
-    Digit8: /1-9/, Digit9: /1-9/, Digit0: /0 to take/, F8: /F8/, Escape: /Esc/i,
+    Digit8: /1[-–]9/, Digit9: /1[-–]9/, Digit0: /0 to take/, F8: /F8/, Escape: /Esc/i,
   };
   const codes = B.keyboardCodes();
   const unknown = codes.filter((c) => !(c in LEGEND_TOKENS));
