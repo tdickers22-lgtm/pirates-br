@@ -49,6 +49,8 @@ import {
   isStandingAtHelm,
   isStandingInShipHold,
   SHIP_BOARD_LADDER_REACH,
+  sideOfLocalX,
+  sideTitle,
   toShipLocalPoint,
 } from '../../shared/interactions.js';
 import type { ClientInteractKind } from '../core/Game.js';
@@ -622,7 +624,7 @@ export class InteractionPrompts {
             bracePoint,
             BRACE_PROMPT_REACH,
             0.1,
-            `${glyph('interact')} Hold — Brace the Yard to ${brace.dir > 0 ? 'Starboard' : 'Port'} (${trimDeg > 0 ? '+' : ''}${trimDeg}°)`,
+            `${glyph('interact')} Hold — Brace the Yard to ${sideTitle(sideOfLocalX(brace.x))} (${trimDeg > 0 ? '+' : ''}${trimDeg}°)`,
             'Angle the sails to catch the wind',
             'brace',
           );
