@@ -1,3 +1,4 @@
+import { queueLines } from './queueText.js';
 import { checkName, NAME_MIN } from '../../shared/names.js';
 import type {
   LobbyUpdatePayload, QueueUpdatePayload, PlayerStatsRecord, MatchStartPayload, WelcomePayload,
@@ -1138,14 +1139,11 @@ export class MenuController {
       }
       return;
     }
-    if (payload.inQueue >= payload.needed) {
-      this.queueStatusLine.textContent = 'Crew complete — setting sail…';
-    } else {
-      this.queueStatusLine.textContent = 'Searching the Reach for fellow pirates…';
-    }
-    this.queueDetailLine.textContent = `${payload.inQueue} / ${payload.needed} pirates · ${payload.secondsRemaining}s`;
-    const pct = Math.min(100, Math.round((payload.inQueue / payload.needed) * 100));
-    this.queueProgressBar.style.width = pct + '%';
+    // Position, ETA and the at-capacity line come from the server (b1-ask-02).
+    const lines = queueLines(payload);
+    this.queueStatusLine.textContent = lines.status;
+    this.queueDetailLine.textContent = lines.detail;
+    this.queueProgressBar.style.width = lines.pct + '%';
   }
 
   private applyStats(stats: PlayerStatsRecord): void {

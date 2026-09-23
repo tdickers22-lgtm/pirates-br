@@ -213,6 +213,7 @@ export const LOGIC = [
   quick(tsx('test-deck-safety.mjs')),
   quick(tsx('test-stats.mjs')),
   quick(tsx('test-names.mjs')),
+  quick(tsx('test-queue-text.mjs')), // b1-ask-02: queue position/ETA/at-capacity copy + late-join line
   quick(tsx('test-dock-frame.mjs')),
   quick(tsx('test-gangway-walk.mjs')),
   quick(tsx('test-climb-verbs.mjs')),

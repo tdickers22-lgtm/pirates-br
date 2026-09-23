@@ -1,3 +1,4 @@
+import { lateJoinNotice } from '../menu/queueText.js';
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, SHOP_PRICES, SHOP_QUANTITIES, WEAPONS, WILDLIFE, type ShopLine } from '../../shared/constants/index.js';
 import type {
@@ -1262,6 +1263,9 @@ export class Game {
     sessionTelemetry.matchStart();
     this.menu.setLastMatchPartyCode(payload?.partyCode ?? null);
     this.hud.setPartyCode(payload?.partyCode ?? null);
+    // D10 (b1-ask-02): a crew that took over a bot hull after the horn is told so.
+    const lateJoin = lateJoinNotice(payload?.lateJoin);
+    if (lateJoin) this.hud.pushFeed(lateJoin, '#f3d27a');
     this.scheduleJoinAssignmentWatchdog();
     this.bindReturnToMenuButtons();
     // No fanfare here: the horn now blows at the horn (match_horn), not during
