@@ -36,13 +36,54 @@ import { mkdirSync, readFileSync } from 'node:fs';
 // a real failure.
 const BASE_URL = (process.env.PIRATES_BR_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
 
-const OUT = process.argv[2] ?? 'test-results/onboarding-ux';
+const OUT = process.argv.slice(2).find((a) => !a.startsWith('--')) ?? 'test-results/onboarding-ux';
 mkdirSync(OUT, { recursive: true });
 
 let failures = 0;
 function expect(label, condition, detail = '') {
   if (condition) console.log(`  ✓ ${label}`);
   else { console.error(`  ✗ FAIL: ${label}${detail ? `\n     ${detail}` : ''}`); failures += 1; }
+}
+
+// ── First-time tips: the pure decision (b1.5g, mechanicshud-11) ──────────
+// The three-card wall is gone. A verb is taught once, the first time it is
+// needed, per action AND per scheme (a new device means new buttons).
+console.log('\nFirst-time tips (pure):');
+const { dueTip, markSeen, tipCopy, TIP_PRIORITY } = await import('../src/client/ui/firstTimeTips.ts');
+const { ECONOMY } = await import('../src/shared/constants/index.ts');
+const WIN_GOLD = new RegExp(ECONOMY.GOLD_WIN_TARGET.toLocaleString('en-US').replace(',', ',?'));
+{
+  const idle = { busy: false, atHelm: false, atCannon: false, holeInReach: false, stormPressing: false };
+  const TRIGGER = { wheel: { atHelm: true }, hole: { holeInReach: true }, cannon: { atCannon: true }, storm: { stormPressing: true } };
+  expect('the four tips are wheel, hole, cannon, storm', ['wheel', 'hole', 'cannon', 'storm'].every((t) => TIP_PRIORITY.includes(t)) && TIP_PRIORITY.length === 4, TIP_PRIORITY.join(','));
+  expect('nothing triggered, no tip', dueTip(idle, {}, 'mouse') === null);
+  for (const scheme of ['mouse', 'gamepad', 'touch']) {
+    let seen = {};
+    for (const [id, trig] of Object.entries(TRIGGER)) {
+      const ctx = { ...idle, ...trig };
+      const first = dueTip(ctx, seen, scheme);
+      seen = markSeen(seen, scheme, first ?? id);
+      const second = dueTip(ctx, seen, scheme);
+      expect(`${scheme}: first ${id} shows the ${id} tip, once`, first === id && second === null, `first=${first} second=${second}`);
+      expect(`${scheme}: busy (dead, modal, countdown) holds the ${id} tip`, dueTip({ ...ctx, busy: true }, {}, scheme) === null);
+    }
+  }
+  const learnedOnKeys = ['wheel', 'hole', 'cannon', 'storm'].reduce((s, id) => markSeen(s, 'mouse', id), {});
+  expect('a new scheme re-arms the tip (new buttons, new lesson)', dueTip({ ...idle, atHelm: true }, learnedOnKeys, 'touch') === 'wheel');
+  expect('a storm outranks a station lesson', dueTip({ ...idle, atHelm: true, stormPressing: true }, {}, 'mouse') === 'storm');
+  for (const id of TIP_PRIORITY) {
+    const kb = tipCopy(id, 'mouse');
+    const touch = tipCopy(id, 'touch');
+    const pad = tipCopy(id, 'gamepad');
+    expect(`${id}: one line, a glyph, short (${kb.text.length} chars)`, !!kb.icon && !/\n/.test(kb.text) && kb.text.length <= 90, kb.text);
+    expect(`${id}: keyboard copy names a key`, /\[[^\]]+\]/.test(kb.text), kb.text);
+    expect(`${id}: pad copy names a pad button`, /\([^)]+\)/.test(pad.text) && !/\[/.test(pad.text), pad.text);
+    expect(`${id}: touch copy draws the on-screen button, no keys`, /‹[^›]+›/.test(touch.text) && !/\b(WASD|LMB|RMB|Click to)\b|\[/.test(touch.text), touch.text);
+  }
+}
+if (process.argv.includes('--pure')) {
+  console.log(failures ? `\n✗ ${failures} failure(s)` : '\n✓ first-time tips (pure) hold');
+  process.exit(failures ? 1 : 0);
 }
 
 const browser = await chromium.launch({ args: browserArgs() });
@@ -111,47 +152,44 @@ const howto = await page.evaluate(() => {
 });
 await shot('02-menu-how-to-play');
 expect('How to Play opens over the main panel', howto.visible && howto.mainHidden, JSON.stringify(howto));
-expect('the gold win condition is stated', /9,?000\s*gold/i.test(howto.text), howto.text.slice(0, 240));
+expect('the gold win condition is stated (from the rule)', new RegExp(`${WIN_GOLD.source}\\s*gold`, 'i').test(howto.text), howto.text.slice(0, 240));
 expect('the last-crew-standing win condition is stated', /last crew afloat/i.test(howto.text), howto.text.slice(0, 240));
 expect('the controls card is mirrored in, not re-typed', howto.controlsCloned > 200 && /WASD/.test(howto.text),
   `clonedChars=${howto.controlsCloned}`);
 
-// ── The three cards, on demand, from the menu ────────────────
-// Onboarding used to be the whole legend card dumped once per BROWSER, forever,
-// at the second the horn went. It is three cards now, and this is one of the
-// two doors back to them.
-console.log('\nThe three-card tour:');
-expect('How to Play offers the card tour', menuHasCardsBtn(await page.evaluate(() =>
+// ── One card, How to win, on demand from the menu (b1.5g) ────
+// The three-card SAIL/FIGHT/WIN tour is gone: the verbs are first-time tips
+// now, and the only card left is how the match is won.
+console.log('\nThe How to win card:');
+expect('How to Play offers the card', menuHasCardsBtn(await page.evaluate(() =>
   [...document.querySelectorAll('#menu-panel-howto .menu-btn')].map((b) => b.id))));
 await page.click('#howto-cards-btn');
 const card1 = await readCard(page);
-await shot('02b-cards-1-sail');
-expect('card one is open and is about sailing', card1.open && /sail/i.test(card1.title), JSON.stringify(card1));
-expect('card one carries copy, not a wall', card1.paragraphs >= 2 && card1.paragraphs <= 4, `${card1.paragraphs} lines`);
-expect('three dots, the first lit', card1.dots === 3 && card1.dotOn === 0, JSON.stringify(card1));
+await shot('02b-card-how-to-win');
+expect('it opens and is about winning', card1.open && /win/i.test(card1.title), JSON.stringify(card1));
+expect('it states both win conditions from the rule', WIN_GOLD.test(card1.body) && /last crew afloat/i.test(card1.body), card1.body.slice(0, 200));
+expect('one card, not a tour: no page dots, no Next', card1.dots === 0 && !/next/i.test(card1.next), JSON.stringify(card1));
+expect('short: at most four lines', card1.paragraphs >= 2 && card1.paragraphs <= 4, `${card1.paragraphs} lines`);
+expect('it teaches no keys (the tips do that, per device)', !/\b(WASD|LMB|RMB)\b|hold <b>|\bA\/D\b|\bW\/S\b/i.test(card1.body), card1.body);
 await page.click('#oc-next');
-const card2 = await readCard(page);
-await shot('02c-cards-2-fight');
-expect('card two is about fighting', /fight/i.test(card2.title), card2.title);
-expect('the dots track the tour', card2.dotOn === 1, JSON.stringify(card2));
-await page.click('#oc-next');
-const card3 = await readCard(page);
-await shot('02d-cards-3-win');
-expect('card three is about winning', /win/i.test(card3.title), card3.title);
-expect('card three states both win conditions',
-  /9,?000/.test(card3.body) && /last crew afloat/i.test(card3.body), card3.body.slice(0, 200));
-expect('the last card sends you to sea instead of saying Next',
-  /set sail/i.test(card3.next), card3.next);
-await page.click('#oc-next');
-expect('finishing the tour closes it', !(await readCard(page)).open);
-// Skip works from card one.
-await page.click('#howto-cards-btn');
-await page.click('#oc-skip');
-expect('Skip closes it too', !(await readCard(page)).open);
+expect('its button closes it', !(await readCard(page)).open);
 await page.click('#howto-back-btn');
 
 // ── Into a match ─────────────────────────────────────────────
 await page.click('#menu-solo-btn', { noWaitAfter: true });
+// A FIRST VOYAGE: the How to win card rides the countdown (the helm is locked)
+// and the horn takes it away. Sampled while body.match-ceremony is up.
+const duringCount = await page.waitForFunction(() => {
+  const g = window.__piratesBR;
+  const counting = document.body.classList.contains('match-ceremony');
+  // The horn went and nothing was sampled open: report the miss, do not wait out the timeout.
+  if (!counting) return g?.state?.phase === 'playing' && g.getLocalPlayer?.() && window.__sawCeremony ? { open: false, missed: true } : null;
+  window.__sawCeremony = true;
+  const open = !!document.getElementById('onboard-cards')?.classList.contains('visible');
+  return open ? { open, title: document.getElementById('oc-title')?.textContent ?? '' } : null;
+}, null, { timeout: 180_000, polling: 100 }).then((h) => h.jsonValue(), () => null);
+await shot('02e-countdown-card');
+expect('the How to win card opens during the first countdown', !!duringCount?.open && /win/i.test(duringCount?.title ?? ''), JSON.stringify(duringCount));
 await page.waitForFunction(() => window.__piratesBR?.state?.phase === 'playing', null, { timeout: 180_000 });
 await page.waitForTimeout(2000);
 await page.evaluate(() => window.__piratesBR.setDayNightOverride(854));
@@ -188,8 +226,8 @@ await shot('03-spawn-hud-legend-open');
 expect('an [L] chip advertises the controls card', /\[L\]/.test(spawn.chip) && spawn.chipVisible, spawn.chip);
 // A FIRST VOYAGE GETS THE CARDS, NOT THE WALL. This assertion used to demand
 // the 14-line legend open itself over the horn; that was the defect.
-expect('the three cards open themselves on a first-ever voyage',
-  spawn.cardsOpen === true && /sail/i.test(spawn.cardTitle), JSON.stringify({ o: spawn.cardsOpen, t: spawn.cardTitle }));
+expect('the horn closed the countdown card (no three-card wall over the first move)',
+  spawn.cardsOpen === false, JSON.stringify({ o: spawn.cardsOpen, t: spawn.cardTitle }));
 expect('and the fourteen-line wall does NOT dump itself on top of the horn',
   spawn.legendOpen === false, `legendOpen=${spawn.legendOpen}`);
 // A LONE PIRATE SAILS A CUTTER. The spawn table rolls three hull classes for the
@@ -237,7 +275,14 @@ const secondPass = await page.evaluate(() => {
   document.getElementById('onboard-cards').classList.remove('visible');
   document.getElementById('controls-hint').style.display = 'none';
   g.hud.legendAutoOpenChecked = false;
+  // Pretend the countdown again: the persisted flag, not the latch, keeps it shut.
+  document.body.classList.add('match-ceremony');
+  const view = g.hud.view;
+  const ceremony = Object.getOwnPropertyDescriptor(view, 'startCeremonyActive');
+  Object.defineProperty(view, 'startCeremonyActive', { get: () => true, configurable: true });
   g.hud.maybeAutoOpenLegend();
+  if (ceremony) Object.defineProperty(view, 'startCeremonyActive', ceremony);
+  document.body.classList.remove('match-ceremony');
   return {
     reopened: document.getElementById('onboard-cards').classList.contains('visible'),
     legendDumped: getComputedStyle(document.getElementById('controls-hint')).display === 'block',
@@ -271,11 +316,53 @@ await shot('03b-legend-footer-reopen');
 expect("the [L] card carries a 'How to Play' door", reopened.hasButton && /how to play/i.test(reopened.label),
   reopened.label);
 expect('and it is actually clickable through the legend overlay', reopened.clickable, JSON.stringify(reopened));
-expect('it re-opens the tour at card one', reopened.open && /sail/i.test(reopened.title), JSON.stringify(reopened));
+expect('it re-opens the How to win card', reopened.open && /win/i.test(reopened.title), JSON.stringify(reopened));
 await page.evaluate(() => {
   document.getElementById('onboard-cards').classList.remove('visible');
   document.getElementById('controls-hint').style.display = 'none';
 });
+
+// ── First-time tips through the real controller and DOM (b1.5g) ──
+console.log('\nFirst-time tips (in the match):');
+const tipRun = await page.evaluate(async () => {
+  const g = window.__piratesBR;
+  const tips = g.hud.firstTips;
+  const box = () => document.getElementById('first-tip');
+  const read = () => ({ shown: !!box()?.classList.contains('visible'), text: box()?.querySelector('.ft-text')?.textContent ?? '', inPrompt: box()?.parentElement?.id ?? '' });
+  const html = document.documentElement;
+  const scheme0 = html.dataset.inputScheme;
+  html.dataset.inputScheme = 'mouse';
+  tips.reset();
+  const idle = { busy: false, atHelm: false, atCannon: false, holeInReach: false, stormPressing: false };
+  const t0 = performance.now() + 1e6;
+  tips.update({ ...idle, atHelm: true }, t0);
+  const first = read();
+  const stored = localStorage.getItem('piratesBR.tipsSeen');
+  document.getElementById('first-tip-dismiss')?.click();
+  const dismissed = read();
+  tips.update({ ...idle, atHelm: true }, t0 + 5000);
+  const again = read();
+  html.dataset.inputScheme = 'touch';
+  tips.update({ ...idle, atHelm: true }, t0 + 10000);
+  const touch = read();
+  tips.hide(t0 + 10001);
+  tips.update({ ...idle, atHelm: true, busy: true }, t0 + 20000);
+  const busy = read();
+  html.dataset.inputScheme = scheme0 ?? 'mouse';
+  tips.update({ ...idle, atCannon: true }, t0 + 30000);
+  const expire0 = read();
+  tips.update({ ...idle }, t0 + 30000 + 7100);
+  const expired = read();
+  return { first, stored, dismissed, again, touch, busy, expire0, expired };
+});
+await shot('03c-first-tip');
+expect('the first wheel shows one line at the centre prompt', tipRun.first.shown && tipRun.first.inPrompt === 'hud-center-prompt' && /\[[^\]]+\]/.test(tipRun.first.text), JSON.stringify(tipRun.first));
+expect('and it is recorded per scheme', /"mouse":\["wheel"\]/.test(tipRun.stored ?? ''), tipRun.stored);
+expect('the dismiss control closes it', !tipRun.dismissed.shown);
+expect('the same wheel on the same scheme never shows it again', !tipRun.again.shown, JSON.stringify(tipRun.again));
+expect('a new scheme gets the touch version once', tipRun.touch.shown && /‹[^›]+›/.test(tipRun.touch.text) && !/\[/.test(tipRun.touch.text), JSON.stringify(tipRun.touch));
+expect('busy (death, modal, countdown) shows nothing', !tipRun.busy.shown);
+expect('an undismissed tip leaves by itself', tipRun.expire0.shown && !tipRun.expired.shown, JSON.stringify({ a: tipRun.expire0, b: tipRun.expired }));
 
 // ── Every key the game reads is on the card ──────────────────
 // The legend omitted Q, C and B outright. This audits the LEGEND against the

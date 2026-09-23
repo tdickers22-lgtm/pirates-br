@@ -1886,3 +1886,32 @@ body.spectating #death-actions { margin: 0 0 0 auto; display: flex; gap: 8px; }
 body.spectating #death-actions .restart-btn { padding: 8px 14px; font-size: 0.9rem; min-height: 44px; }
 #death-next-btn { display: none; }
 body.spectating #death-next-btn { display: inline-block; }
+
+/* ── First-time tips (b1.5g): one line + glyph above the centre prompt ──
+   firstTimeTips.ts inserts #first-tip as the first child of #hud-center-prompt.
+   The line lets clicks and touches through; only the dismiss control takes
+   them (touch.css turns pointer-events off on the other centre children, and
+   an explicit value on the button beats the inherited one). */
+#first-tip {
+  display: none; align-items: center; gap: 8px;
+  max-width: min(460px, calc(100vw - 32px));
+  padding: 6px 6px 6px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(201, 168, 76, 0.45);
+  background: rgba(6, 14, 26, 0.86);
+  color: #f0dda6; font-size: 14px; line-height: 1.3; text-align: left;
+  pointer-events: none;
+}
+#first-tip.visible { display: flex; animation: menuFadeIn 0.25s ease; }
+#first-tip .ft-icon { font-size: 18px; flex: none; }
+#first-tip .ft-text { flex: 1 1 auto; }
+#first-tip-dismiss {
+  flex: none; min-width: 32px; min-height: 32px;
+  border: 0; border-radius: 8px; background: rgba(201, 168, 76, 0.18);
+  color: #f0dda6; font-size: 14px; cursor: pointer;
+  pointer-events: auto; touch-action: manipulation;
+}
+html[data-input-scheme="touch"] #first-tip-dismiss { min-width: 40px; min-height: 40px; }
+@media (max-height: 500px) and (pointer: coarse) {
+  #first-tip { font-size: 13px; padding: 4px 4px 4px 10px; }
+}

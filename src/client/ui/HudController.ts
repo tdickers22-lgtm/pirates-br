@@ -24,9 +24,10 @@ import type { OceanRenderer } from '../rendering/OceanRenderer.js';
 import type { Renderer } from '../rendering/Renderer.js';
 import type { UiRefs } from './UiRefs.js';
 import { BROKER_NAME, itemDisplayName, shipClassName, weaponSlotName } from './DisplayNames.js';
-import { closeOnboardingCards, openOnboardingCards, wireOnboardingCards } from './OnboardingCards.js';
+import { areOnboardingCardsOpen, closeOnboardingCards, syncCountdownCard, wireOnboardingCards } from './OnboardingCards.js';
+import { FirstTimeTips } from './firstTimeTips.js';
 import { crewStripRows, type CrewStripRow } from './crewStrip.js';
-import { glyph, glyphSet, keys } from './InputGlyphs.js';
+import { glyph, glyphEither, glyphSet, keys } from './InputGlyphs.js';
 
 /** Everything the HUD reads or writes on the Game instance. */
 export type HudView = {
@@ -395,6 +396,8 @@ export class HudController {
   private islandPresenceSeeded = false;
   private compassTapeBuilt = false;
   private crewPulseTimer: number | null = null;
+  /** First-time tips at the centre prompt (b1.5g). Public for the onboarding suite. */
+  readonly firstTips = new FirstTimeTips();
 
   /** Called on match teardown so per-match latches don't leak into the next round. */
   resetForMatch(): void {
@@ -423,6 +426,7 @@ export class HudController {
     // The three-card tour is the same kind of curtain, and it is modal — left
     // open across a return to port it would dim the new match's first frame.
     closeOnboardingCards();
+    this.firstTips.hide();
     this.brProgressSignature = '';
     this.holdCargoSignature = '';
     if (this.holdCargoEl) this.holdCargoEl.style.display = 'none';
@@ -1602,6 +1606,19 @@ export class HudController {
       atRepairPrompt: !!repairHole, aiming: aimingNow, holding, scopeShowing,
     });
     const lookInteraction = this.view.getLookInteraction(player, ship, nearbyCannon, repairHole);
+    // FIRST-TIME TIPS (b1.5g): one line + glyph above the prompt, once per
+    // action per scheme. Never over a death, a modal, the wheel or the countdown.
+    const storm = this.view.state.storm;
+    this.firstTips.update({
+      busy: player.state === 'eliminated' || player.state === 'respawning' || player.state === 'downed'
+        || this.view.startCeremonyActive || this.view.input.isSupplyWheelOpen() || areOnboardingCardsOpen()
+        || this.view.ui.mapOverlay.classList.contains('visible'),
+      atHelm: !!player.atHelm,
+      atCannon: !!player.atCannon,
+      holeInReach: !!repairHole,
+      stormPressing: !!storm.shrinking
+        || dist2D(player.position.x, player.position.z, storm.centerX, storm.centerZ) > storm.safeRadius,
+    });
     this.view.visibleInteractKind = null;
 
     if (player.state !== 'respawning') this.resetRespawnCountdown();
@@ -1667,7 +1684,7 @@ export class HudController {
       } else if (ship) {
         // "make and shorten sail" is the correct order and means nothing to a
         // first-time captain. The verbs are what the keys do.
-        this.view.ui.contextLabel.textContent = 'At the wheel · A/D steer · W/S let the sails out and in · compass to your right';
+        this.view.ui.contextLabel.textContent = `At the wheel · ${glyphEither('steerLeft', 'steerRight')} steer · ${glyph('sailsOut')}/${glyph('sailsIn')} let the sails out and in · compass to your right`;
       } else {
         this.view.ui.contextLabel.textContent = 'At the wheel';
       }
@@ -1681,7 +1698,7 @@ export class HudController {
       this.view.ui.interactPrompt.style.display = 'block';
       this.view.ui.interactPrompt.textContent = `Climbing the mast — ${Math.round((player.mastClimb ?? 0) * 100)}%`;
       this.view.ui.contextLabel.style.display = 'block';
-      this.view.ui.contextLabel.textContent = 'W/S · climb — X · let go';
+      this.view.ui.contextLabel.textContent = `${glyphSet(['moveForward', 'moveBack'])} · climb — ${glyph('interact')} · let go`;
     } else if (lookInteraction) {
       this.view.visibleInteractKind = lookInteraction.kind;
       this.view.ui.interactPrompt.style.display = 'block';
@@ -2001,36 +2018,22 @@ export class HudController {
   }
 
   // ─── First voyage ────────────────────────────────────────────
-  /** Set once a pirate has been shown the controls card. Sits beside
-   *  `piratesBR.name` / `piratesBR.settings` in localStorage. */
-  private static readonly SEEN_CONTROLS_KEY = 'piratesBR.seenControls';
-  private legendAutoOpenChecked = false;
+  // (the seen flag, piratesBR.seenControls, lives in OnboardingCards.syncCountdownCard)
 
   /**
-   * A FIRST VOYAGE IS THREE CARDS, NOT A WALL.
+   * A FIRST VOYAGE IS ONE CARD, DURING THE COUNTDOWN (b1.5g).
    *
-   * What a new pirate used to get, once per browser and never again, was the
-   * whole SHIP'S ORDERS card: fourteen lines of keys, stations and win
-   * conditions dropped on the screen in the same second the horn went. Nobody
-   * reads fourteen lines with a countdown finishing behind them, and there was
-   * no way back to it — the one teaching moment the game had, spent.
-   *
-   * It is now three short cards — sail · fight · win — with Next and Skip, and
-   * they are RE-OPENABLE forever: from How to Play in the menu, and from the
-   * 'How to Play' button in the footer of the [L] card. The persisted flag only
-   * decides whether they open THEMSELVES.
+   * It was fourteen lines of legend over the horn, then three cards over the
+   * horn. Now the verbs arrive as first-time tips when they are needed, and the
+   * only card is How to win, shown while the countdown runs (the helm is locked,
+   * so it costs no play time) and closed by the horn. It stays re-openable from
+   * How to Play and from the [L] card's footer; the flag only decides whether it
+   * opens itself.
    */
   private maybeAutoOpenLegend(): void {
-    if (this.legendAutoOpenChecked) return;
-    if (this.view.state?.phase !== 'playing') return;
-    if (this.view.startCeremonyActive) return;
-    if (this.view.input.isSupplyWheelOpen()) return;
-    this.legendAutoOpenChecked = true;
-    let seen = false;
-    try { seen = localStorage.getItem(HudController.SEEN_CONTROLS_KEY) === '1'; } catch { /* private mode */ }
-    if (seen) return;
-    try { localStorage.setItem(HudController.SEEN_CONTROLS_KEY, '1'); } catch { /* private mode */ }
-    openOnboardingCards();
+    // The card follows body.match-ceremony itself (OnboardingCards watches the
+    // class); this per-frame call is the belt to that observer's braces.
+    syncCountdownCard();
   }
 
   // ─── Ship's Orders: a card, not a curtain ────────────────────

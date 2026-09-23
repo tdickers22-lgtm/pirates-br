@@ -206,6 +206,7 @@ function measureCards() {
     const el = document.getElementById(id);
     if (!el) return { id, missing: true };
     const r = el.getBoundingClientRect();
+    if (r.width < 1 && r.height < 1) return { id, hidden: true };
     const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
     return { id, x0: r.left, y0: r.top, x1: r.right, y1: r.bottom, inside: r.left >= -1 && r.top >= -1 && r.right <= W + 1 && r.bottom <= H + 1, hit: !!hit && (hit === el || el.contains(hit)) };
   };
@@ -229,7 +230,9 @@ try {
   const ctx = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true, isMobile: true, deviceScaleFactor: 1 });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log('    PAGEERROR', e.message));
-  await page.addInitScript(() => { try { localStorage.setItem('piratesBR.seenControls', '1'); } catch { /* private */ } });
+  // Veteran storage: no countdown card, and every first-time tip already seen, so
+// the HUD rows measure the HUD; the tip rows below raise one on purpose.
+await page.addInitScript(() => { try { localStorage.setItem('piratesBR.seenControls', '1'); const all = ['wheel', 'hole', 'cannon', 'storm']; localStorage.setItem('piratesBR.tipsSeen', JSON.stringify({ mouse: all, gamepad: all, touch: all })); } catch { /* private */ } });
   const openMenu = async () => {
     await page.goto(`${BASE_URL}/?debug`, { waitUntil: 'domcontentloaded', timeout: 90_000 });
     await page.waitForSelector('#menu-solo-btn', { state: 'visible', timeout: 90_000 });
@@ -268,8 +271,9 @@ try {
     expect(`cards ${w}x${h}: open`, c.open);
     expect(`cards ${w}x${h}: layout viewport is the device viewport`, c.W === w && c.H === h, `${c.W}x${c.H}`);
     expect(`cards ${w}x${h}: panel inside the viewport`, c.panel.inside, fmt(c.panel));
-    expect(`cards ${w}x${h}: Skip inside and hittable`, c.skip.inside && c.skip.hit, fmt(c.skip));
-    expect(`cards ${w}x${h}: Next inside and hittable`, c.next.inside && c.next.hit, fmt(c.next));
+    // One card now (b1.5g): Skip is hidden beside a button that already closes it.
+    expect(`cards ${w}x${h}: Skip hidden or inside and hittable`, c.skip.missing || c.skip.hidden || (c.skip.inside && c.skip.hit), fmt(c.skip));
+    expect(`cards ${w}x${h}: its button inside and hittable`, c.next.inside && c.next.hit, fmt(c.next));
     await openMenu();
   }
 
@@ -289,6 +293,45 @@ try {
     await shot(page, `hud-touch-${w}x${h}`);
     gradeHud(`hud ${w}x${h}`, m, { touch: true, w, h });
   }
+  // FIRST-TIME TIP ROWS (b1.5g): the one-line tip at the centre prompt fits the
+  // glass and its dismiss control is reachable by a finger (elementFromPoint at
+  // its centre lands on it; touch.css lets touches through the other centre
+  // children), at the phone and the iPad sizes.
+  console.log('\nFirst-time tip (touch)');
+  for (const [w, h] of [[844, 390], [1024, 768]]) {
+    await page.setViewportSize({ width: w, height: h });
+    await page.waitForTimeout(500);
+    await page.evaluate(() => { window.__piratesBR.hud.firstTips.show('wheel'); });
+    await page.waitForTimeout(350);
+    const t = await page.evaluate(() => {
+      const W = innerWidth, H = innerHeight;
+      const box = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return { id, missing: true };
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        return { id, x0: r.left, y0: r.top, x1: r.right, y1: r.bottom, w: r.width, h: r.height,
+          inside: r.width > 1 && r.left >= -1 && r.top >= -1 && r.right <= W + 1 && r.bottom <= H + 1,
+          hit: !!hit && (hit === el || el.contains(hit)), hitId: hit?.id ?? hit?.tagName ?? '' };
+      };
+      return { W, H, shown: !!document.getElementById('first-tip')?.classList.contains('visible'), tip: box('first-tip'), dismiss: box('first-tip-dismiss'),
+        text: document.querySelector('#first-tip .ft-text')?.textContent ?? '' };
+    });
+    const m = await page.evaluate(measureHud);
+    report.rows.push({ kind: 'tip', w, h, t });
+    await shot(page, `tip-${w}x${h}`);
+    const fmt = (b) => b.missing ? 'missing' : `[${Math.round(b.x0)},${Math.round(b.y0)}..${Math.round(b.x1)},${Math.round(b.y1)}] hit ${b.hit} (${b.hitId})`;
+    expect(`tip ${w}x${h}: shown with touch copy`, t.shown && /‹[^›]+›/.test(t.text), t.text);
+    expect(`tip ${w}x${h}: box inside the viewport`, !t.tip.missing && t.tip.inside, fmt(t.tip));
+    expect(`tip ${w}x${h}: dismiss inside and hittable`, !t.dismiss.missing && t.dismiss.inside && t.dismiss.hit, fmt(t.dismiss));
+    expect(`tip ${w}x${h}: dismiss is a finger-sized target (>= 40 px)`, (t.dismiss.w ?? 0) >= 40 && (t.dismiss.h ?? 0) >= 40, `${t.dismiss.w}x${t.dismiss.h}`);
+    gradeHud(`hud ${w}x${h} with a tip up`, m, { touch: true, w, h });
+    await page.tap('#first-tip-dismiss').catch(() => {});
+    await page.waitForTimeout(250);
+    const gone = await page.evaluate(() => !document.getElementById('first-tip')?.classList.contains('visible'));
+    expect(`tip ${w}x${h}: a tap on dismiss closes it`, gone);
+  }
+
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(700);
   const port = await page.evaluate(measureHud);

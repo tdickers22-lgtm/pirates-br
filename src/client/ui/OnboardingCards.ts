@@ -1,63 +1,41 @@
 /**
- * THE FIRST VOYAGE, IN THREE CARDS.
+ * ONE CARD: HOW TO WIN (b1.5g, mechanicshud-11).
  *
- * What a new pirate used to be told was the entire SHIP'S ORDERS legend — a
- * fourteen-line card of keys, stations, streak tables and win conditions —
- * dumped on screen once per browser, forever, in the same second the starting
- * horn went off. Nobody reads that. Worse, nothing in the game could bring it
- * back: the single teaching moment was spent, and a player who blinked never
- * learned there were two ways to win.
- *
- * This is the replacement: three short cards — SAIL, FIGHT, WIN — one idea
- * each, with Next and Skip. They open themselves on a first-ever voyage, and
- * they are re-openable forever from two places a lost player will actually
- * look: How to Play in the menu, and the 'How to Play' button in the footer of
- * the [L] card.
+ * This used to be a three-card tour (SAIL, FIGHT, WIN) that opened itself over
+ * the horn on a first voyage. On a phone it ran off the glass, and it taught
+ * keys the phone does not have, minutes before the player met a wheel, a hole
+ * or a gun. The verbs now arrive as first-time tips at the moment they are
+ * needed (firstTimeTips.ts). What is left here is the one thing no station can
+ * teach: how the match is won. It shows during the countdown of a first voyage
+ * (the player cannot move yet, so it costs nothing), closes itself at the horn,
+ * and stays re-openable from How to Play in the menu and from the [L] card.
  *
  * The DOM lives in index.html (#onboard-cards); this module owns its behaviour
  * so the menu and the HUD drive exactly one implementation.
  */
 
 import { modalStack } from './ModalStack.js';
-import { glyph } from './InputGlyphs.js';
+import { glyph, winGoldText } from './InputGlyphs.js';
+import { BROKER_NAME } from '../../shared/DisplayNames.js';
 
 type Card = { kicker: string; glyph: string; title: string; lines: string[] };
 
-/** Three cards, three verbs. Each is what a pirate must do NEXT, not a list of
- *  everything the key does — the legend is still there for the full table. */
-const CARDS: readonly Card[] = [
-  {
-    kicker: 'One of three',
-    glyph: '⛵',
-    title: 'Sail',
-    lines: [
-      `Your ship is the one ringed in gold on the map (${glyph('map')}) and on the minimap. Walk aboard.`,
-      'TAKE THE WHEEL FIRST: hold <b>X</b> at it, steer with <b>A</b>/<b>D</b>, and let the sails out and in with <b>W</b>/<b>S</b>.',
-      'Weigh anchor FROM the wheel — hold <b>W</b> there. The bow capstan does it too, but she sails herself off the berth with nobody steering.',
-      'No crew may fire for the first <b>2:30</b> (the TRUCE clock, beside the storm timer). Get under way before it runs out.',
-    ],
-  },
-  {
-    kicker: 'Two of three',
-    glyph: '⚔',
-    title: 'Fight',
-    lines: [
-      '<b>1</b>–<b>4</b> pick a weapon, <b>left mouse</b> fires, <b>Shift</b> aims, <b>R</b> reloads.',
-      'Cannons are stations: stand at one, hold <b>X</b> to aim and fire it. <b>5</b>/<b>6</b>/<b>7</b> choose the shot.',
-      'Holes let the sea in. Hold <b>X</b> at a hole to plank it, and keep planks in the hold.',
-    ],
-  },
-  {
-    kicker: 'Three of three',
-    glyph: '☠',
-    title: 'Win',
-    lines: [
-      'Two ways to take the seas: <b>bank 9,000 gold</b>, or be the <b>last crew afloat</b>.',
-      'Gold comes out of the sand. Dig chests with the shovel, carry them aboard, and sell them to a <b>Tallyman</b> — the gold coin on your chart.',
-      'The storm ring shrinks all match. Outside it your hull opens up and your crew bleeds. Stay inside the circle.',
-    ],
-  },
-];
+/** Built at open time so the win target and the map glyph follow the rule and the device. */
+const winCard = (): Card => ({
+  kicker: 'How to win',
+  glyph: '☠',
+  title: 'Two ways to win',
+  lines: [
+    `<b>Bank ${winGoldText()}</b>, or be the <b>last crew afloat</b>.`,
+    `Dig chests on the islands, carry them aboard and sell them to a <b>${BROKER_NAME}</b> (the gold coin on your map ${glyph('map')}).`,
+    'The storm ring shrinks all match. Stay inside it.',
+    'Tips show up the first time you take the wheel, find a hole or man a cannon.',
+  ],
+});
+
+let CARDS: readonly Card[] = [winCard()];
+/** 'countdown' = opened by the start sequence; the horn closes it. */
+let openedFor: 'countdown' | 'user' | null = null;
 
 let index = 0;
 let wired = false;
@@ -77,18 +55,21 @@ function paint(): void {
   if (title) title.textContent = card.title;
   // Authored copy only — no player-supplied text ever reaches this innerHTML.
   if (body) body.innerHTML = card.lines.map((line) => `<p>${line}</p>`).join('');
-  if (next) next.textContent = index === CARDS.length - 1 ? 'Set sail' : 'Next';
-  if (dots) {
-    dots.innerHTML = CARDS.map((_, i) => `<span class="oc-dot${i === index ? ' on' : ''}"></span>`).join('');
-  }
+  if (next) next.textContent = index === CARDS.length - 1 ? 'Got it' : 'Next';
+  // One card: no page dots, and no Skip beside a button that already closes it.
+  if (dots) dots.innerHTML = CARDS.length > 1 ? CARDS.map((_, i) => `<span class="oc-dot${i === index ? ' on' : ''}"></span>`).join('') : '';
+  const skip = el('oc-skip');
+  if (skip) skip.style.display = CARDS.length > 1 ? '' : 'none';
 }
 
-/** Open (or re-open) the card tour at card one. */
-export function openOnboardingCards(): void {
+/** Open (or re-open) the How to win card. */
+export function openOnboardingCards(reason: 'countdown' | 'user' = 'user'): void {
   wireOnboardingCards();
   const root = el('onboard-cards');
   if (!root) return;
+  CARDS = [winCard()];
   index = 0;
+  openedFor = reason;
   paint();
   root.classList.add('visible');
   // hud-22: the tour was mouse-only. Escape skips it, Enter is Next / Set sail
@@ -97,9 +78,47 @@ export function openOnboardingCards(): void {
 }
 
 export function closeOnboardingCards(): void {
+  openedFor = null;
   el('onboard-cards')?.classList.remove('visible');
   modalStack.notifyClosed('onboarding-cards');
 }
+
+/** The horn: a card the countdown opened goes with it (one the player opened stays). */
+export function closeCountdownCard(): void {
+  if (openedFor === 'countdown' && areOnboardingCardsOpen()) closeOnboardingCards();
+}
+
+const SEEN_KEY = 'piratesBR.seenControls';
+
+/**
+ * The countdown is <body class="match-ceremony"> (Game.showStartSequence adds
+ * it, the horn removes it). The card follows that class directly: the HUD's
+ * frame needs the join snapshot, which on a slow machine lands after the horn,
+ * so a HUD-driven open missed the whole countdown. First voyage only (the
+ * persisted flag); the horn closes it.
+ */
+export function syncCountdownCard(): void {
+  const counting = !!globalThis.document?.body?.classList.contains('match-ceremony');
+  if (!counting) {
+    closeCountdownCard();
+    return;
+  }
+  if (areOnboardingCardsOpen()) return;
+  let seen = false;
+  try { seen = localStorage.getItem(SEEN_KEY) === '1'; } catch { /* private mode */ }
+  if (seen) return;
+  try { localStorage.setItem(SEEN_KEY, '1'); } catch { /* private mode */ }
+  openOnboardingCards('countdown');
+}
+
+let countdownWatch: MutationObserver | null = null;
+export function installCountdownCard(): void {
+  const body = globalThis.document?.body;
+  if (countdownWatch || !body || typeof MutationObserver === 'undefined') return;
+  countdownWatch = new MutationObserver(syncCountdownCard);
+  countdownWatch.observe(body, { attributes: true, attributeFilter: ['class'] });
+}
+installCountdownCard();
 
 export function areOnboardingCardsOpen(): boolean {
   return !!el('onboard-cards')?.classList.contains('visible');
@@ -126,7 +145,7 @@ export function wireOnboardingCards(): void {
   wired = true;
   el('oc-next')?.addEventListener('click', advance);
   el('oc-skip')?.addEventListener('click', closeOnboardingCards);
-  el('legend-howto-btn')?.addEventListener('click', openOnboardingCards);
+  el('legend-howto-btn')?.addEventListener('click', () => openOnboardingCards());
   // Clicking the dim outside the card is a skip; clicking the card is not.
   root.addEventListener('click', (event) => {
     if (event.target === root) closeOnboardingCards();
