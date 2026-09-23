@@ -27,6 +27,7 @@ const EMPTY_STATS = (name: string): PlayerStatsRecord => ({
   damageDealt: 0,
   headshots: 0,
   playSeconds: 0,
+  noContests: 0,
 });
 
 /** Per-match deltas rolled into the lifetime record at match end. */
@@ -50,6 +51,9 @@ interface MatchStatDeltas {
   playSeconds?: number;
   /** DEV-01: a match in which dev_grant_gold / dev_bot_peace was honoured. Skipped entirely. */
   devAssisted?: boolean;
+  /** b1.2e (online-11): the match was cut short by a server restart. What the
+   *  player earned is kept; the match counts as neither played nor lost. */
+  noContest?: boolean;
 }
 
 /**
@@ -121,10 +125,18 @@ export class StatsStore {
     rec.kills += input.kills;
     rec.deaths += input.deaths;
     rec.totalGold += input.gold;
-    rec.matchesPlayed += 1;
-    if (input.isWinner) rec.wins += 1;
-    if (input.placement > 0 && (rec.bestPlacement === 0 || input.placement < rec.bestPlacement)) {
-      rec.bestPlacement = input.placement;
+    // A NO CONTEST (b1.2e, online-11): a deploy ended the match, not the sea.
+    // "Your stats are saved" means the gold, kills and counters below; it does
+    // not mean a played match with a placement, and above all not a loss
+    // (losses are matchesPlayed - wins, so bumping matchesPlayed would be one).
+    if (input.noContest) {
+      rec.noContests += 1;
+    } else {
+      rec.matchesPlayed += 1;
+      if (input.isWinner) rec.wins += 1;
+      if (input.placement > 0 && (rec.bestPlacement === 0 || input.placement < rec.bestPlacement)) {
+        rec.bestPlacement = input.placement;
+      }
     }
     rec.shipsSunk += input.shipsSunk ?? 0;
     rec.chestsSold += input.chestsSold ?? 0;

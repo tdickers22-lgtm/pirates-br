@@ -223,8 +223,10 @@ export interface MatchEndResult {
   winnerId: string | null;
   winnerName: string | null;
   /** 'server_fault': the match was quarantined after repeated tick faults
-   *  (b1.2a); its result is not a real placement and is never persisted. */
-  reason: 'gold' | 'last_ship' | 'abandoned' | 'draw' | 'server_fault';
+   *  (b1.2a); its result is not a real placement and is never persisted.
+   *  'interrupted': the host went away mid-match (deploy drain, b1.2e); the
+   *  lobby records it as a NO CONTEST (stats kept, never a loss). */
+  reason: 'gold' | 'last_ship' | 'abandoned' | 'draw' | 'server_fault' | 'interrupted';
   humans: MatchHumanResult[];
   /** Every crew in the match, ranked. See MatchBoardRow. */
   board: MatchBoardRow[];
@@ -937,6 +939,32 @@ export class Match {
       } catch {}
     }
     this.clients.clear();
+  }
+
+  /**
+   * THE HOST IS GOING AWAY (b1.2e, online-11). A deploy drain ran out of grace
+   * with this match still at sea. Stop the sim and end it as 'interrupted':
+   * the clients get their match_ended board and the lobby records every human
+   * as a no-contest (stats saved, never a loss). A match still standing off
+   * the dock (pre-horn) was never played: it just stops, nothing is emitted.
+   * Returns true when an interrupted result was emitted. Idempotent.
+   */
+  interrupt(): boolean {
+    if (this.tickInterval) {
+      clearInterval(this.tickInterval);
+      this.tickInterval = null;
+    }
+    if (this.endResultEmitted || !this.state || this.state.phase !== 'playing') return false;
+    try {
+      this.state.phase = 'ended';
+      this.endedAt ??= Date.now();
+      this.endReason = 'interrupted';
+      this.emitMatchEnd();
+      return true;
+    } catch (err) {
+      console.error(`[Match ${this.id.slice(0, 6)}] interrupt: end board failed:`, err);
+      return false;
+    }
   }
 
   isPlaying(): boolean { return this.state?.phase === 'playing'; }

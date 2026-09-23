@@ -148,6 +148,23 @@ try {
     doc.status === 200 && String(doc.headers['cache-control']) === 'no-cache',
     `status ${doc.status}, cache-control ${doc.headers['cache-control']}`);
 
+  // ── 6b. a missing file is a 404, never the SPA shell (b1.2e, online-05) ────
+  // After a deploy an old tab asks for /assets/<chunk>-<oldhash>.js. Answering
+  // 200 text/html killed the module/worker on a MIME error (and a CDN would
+  // cache the HTML under the .js name). Extensionless routes still get the shell.
+  const gone = await get('/assets/missing-deadbeef.js');
+  expect('GET /assets/missing-deadbeef.js -> 404, not index.html',
+    gone.status === 404 && !String(gone.headers['content-type']).includes('text/html'),
+    `status ${gone.status}, content-type ${gone.headers['content-type']}`);
+  const goneModel = await get('/assets/models/no_such_model.glb');
+  expect('a missing model under /assets/ -> 404', goneModel.status === 404, `status ${goneModel.status}`);
+  const goneRoot = await get('/missing-worker-deadbeef.js');
+  expect('a missing file with an extension outside /assets/ -> 404', goneRoot.status === 404, `status ${goneRoot.status}`);
+  const route = await get('/party/ABC123');
+  expect('an extensionless route still falls back to index.html (200 text/html)',
+    route.status === 200 && String(route.headers['content-type']).includes('text/html'),
+    `status ${route.status}, content-type ${route.headers['content-type']}`);
+
   // ── 7. the whole boot payload, which is the number netcode-33 is about ─────
   const modelsRaw = totals.raw;
   expect('the built client compresses to under 40% of its raw size',

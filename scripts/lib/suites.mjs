@@ -258,6 +258,11 @@ export const LOGIC = [
   // 20 new/min/IP, Origin allowlist, per-session buckets, 1008 after 10 s over
   // budget, and a 60 Hz client never limited over 60 s. ~62 s, not quick.
   tsx('test-abuse-limits.mjs'),
+  // b1.2e (online-05, online-11): welcome/health carry the build id; a drain
+  // sends server_notice{restarting,s} to every client before any close, closes
+  // 1012, and a match still at sea is saved as a no-contest (never a loss).
+  // Real LobbyServer on port 0, one real 8 s countdown: ~11 s, not quick.
+  tsx('test-version-skew.mjs'),
   // ONLINE-01 phase 2 (netcode-24): N matches on ONE process. Server-side only
   // (no browser, no GPU) but ~45 s and CPU-bound, so NOT quick tier. Grades
   // worstSimLagSec < 0.1 at 8 matches, the capacity refusal above the ceiling,

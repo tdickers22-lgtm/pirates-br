@@ -15,6 +15,7 @@
 // Runs automatically as npm's `postbuild`. Idempotent: a sibling newer than its
 // source is left alone, so a rebuild of one chunk does not recompress 27 MB.
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { brotliCompressSync, gzipSync, constants as zc } from 'node:zlib';
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, utimesSync } from 'node:fs';
 import path from 'node:path';
@@ -111,6 +112,23 @@ const invokedDirectly = (() => {
   }
 })();
 
+/**
+ * THE BUILD ID THE SERVER HANDS OUT (b1.2e, online-05). vite.config.ts bakes one
+ * id into the bundle and into index.html as <meta name="pirates-build-id">; copy
+ * that SAME value to <dist>/build-id.txt (one level above the client root) so
+ * the server can put it on every welcome. An index.html without the meta (an
+ * older build) gets a content hash of itself: stable per build, never 'dev'.
+ * Returns the id written.
+ */
+export function writeBuildId(clientDir) {
+  const html = readFileSync(path.join(clientDir, 'index.html'), 'utf8');
+  const meta = html.match(/<meta[^>]*name="pirates-build-id"[^>]*content="([\w.-]{1,40})"/)
+    ?? html.match(/<meta[^>]*content="([\w.-]{1,40})"[^>]*name="pirates-build-id"/);
+  const id = meta ? meta[1] : `h${createHash('sha256').update(html).digest('hex').slice(0, 12)}`;
+  writeFileSync(path.join(path.dirname(clientDir), 'build-id.txt'), `${id}\n`);
+  return id;
+}
+
 if (invokedDirectly) {
   const dir = path.resolve(process.argv[2] ?? path.join(ROOT, 'dist/client'));
   if (!existsSync(dir)) {
@@ -118,6 +136,7 @@ if (invokedDirectly) {
     process.exit(1);
   }
   const t0 = Date.now();
+  console.log(`[compress] build id ${writeBuildId(dir)} -> ${path.join(path.dirname(dir), 'build-id.txt')}`);
   const totals = compressTree(dir, { log: process.argv.includes('--verbose') });
   const mb = (n) => `${(n / 1048576).toFixed(2)} MB`;
   console.log(`[compress] ${totals.files} files (${totals.skipped} already fresh) in ${((Date.now() - t0) / 1000).toFixed(1)}s`);

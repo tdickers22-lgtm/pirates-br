@@ -1121,7 +1121,11 @@ type MsgType =
   | 'resume'
   | 'resume_ok'
   | 'resume_failed'
-  | 'stats_update';
+  | 'stats_update'
+  /** b1.2e (online-11): the host is about to go away (deploy drain). Sent to
+   *  every connected client BEFORE any socket is closed; the closes that follow
+   *  use 1012 (service restart). Payload: ServerNoticePayload. */
+  | 'server_notice';
 
 // ── Lobby payload shapes ─────────────────────────────────────
 export interface LobbyMember {
@@ -1299,6 +1303,10 @@ export interface PlayerStatsRecord {
   headshots: number;
   /** Total seconds in matches. */
   playSeconds: number;
+  /** b1.2e (online-11): matches cut short by a server restart. Their kills,
+   *  gold and counters are kept, but they count as neither played nor lost
+   *  (matchesPlayed / wins / bestPlacement untouched). */
+  noContests: number;
 }
 
 /** Bumped whenever the wire shape changes incompatibly: a client holding a
@@ -1315,6 +1323,15 @@ export interface WelcomePayload {
   /** Server build id (git sha / dist hash). The client's version gate reloads a
    *  tab on another build: menu now, in a match after it ends (online-05). */
   buildId?: string;
+}
+
+/** b1.2e (online-11): `server_notice`. kind 'restarting' = this host is
+ *  draining for a deploy; `seconds` is how long until every socket is closed
+ *  with 1012 (0 = now). Matches still running then end as a no-contest: stats
+ *  are saved, nobody is scored a loss. The HUD shows a top banner (b1.5 hook). */
+export interface ServerNoticePayload {
+  kind: 'restarting';
+  seconds: number;
 }
 
 /** The server found the held session and re-bound this socket to it. */

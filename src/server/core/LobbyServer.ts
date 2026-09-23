@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { basename, extname, join, normalize, sep } from 'node:path';
@@ -8,7 +8,7 @@ import { v4 as uuid } from 'uuid';
 import type {
   NetMsg, ClientMsg, LobbyUpdatePayload, LobbyMember, QueueUpdatePayload,
   WelcomePayload, MatchStartPayload, PlayerStatsRecord,
-  ResumeOkPayload, ResumeFailedPayload,
+  ResumeOkPayload, ResumeFailedPayload, ServerNoticePayload,
 } from '../../shared/types/index.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
 import { validateClientMsg } from '../net/validate.js';
@@ -219,6 +219,24 @@ const MATCH_BUILD_GRACE_MS = 75_000;
 
 const PROJECT_ROOT = join(fileURLToPath(new URL('../../..', import.meta.url)));
 const CLIENT_DIST_ROOT = join(PROJECT_ROOT, 'dist/client');
+
+/** WHICH BUILD THIS HOST SERVES (b1.2e, online-05). The client bundle carries
+ *  its own id (vite.config.ts bakes it into VITE_BUILD_ID and a
+ *  <meta name="pirates-build-id">; postbuild-compress.mjs copies it to
+ *  dist/build-id.txt). The server reads it once at boot and hands it out on
+ *  every welcome and on /health, so a tab left open across a deploy can see it
+ *  is running an old bundle (client/network/versionGate.ts). `BUILD_ID` in the
+ *  environment wins (CI build-arg, tests); no file and no env = 'dev', which
+ *  the client's gate treats as "unknown, never reload". */
+export function resolveServerBuildId(env: NodeJS.ProcessEnv = process.env, distRoot = join(PROJECT_ROOT, 'dist')): string {
+  const fromEnv = String(env.BUILD_ID ?? '').trim();
+  if (fromEnv) return fromEnv.slice(0, 40);
+  try {
+    const fromFile = readFileSync(join(distRoot, 'build-id.txt'), 'utf8').trim();
+    if (/^[\w.-]{1,40}$/.test(fromFile)) return fromFile;
+  } catch { /* no build on disk */ }
+  return 'dev';
+}
 const MIME_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
@@ -415,6 +433,10 @@ export class LobbyServer {
   /** RECON-01/netcode-29: set by shutdown(); no seat is held while the process
    *  is on its way out, because there is nothing left to come back to. */
   private draining = false;
+  /** b1.2e: the build this host serves (resolveServerBuildId), read at boot. */
+  readonly buildId: string = resolveServerBuildId();
+  /** b1.2e: the restart notice went out; it is sent once, before any close. */
+  private restartNoticeSent = false;
   /** Frames the wire validator refused since boot (unknown type, or a payload
    *  that did not match its declared shape). Reported by /health so a client
    *  build that has drifted off the protocol is visible without a debugger. */
@@ -588,6 +610,7 @@ export class LobbyServer {
       partyCapacity: PARTY_CAPACITY,
       sessionToken: session.token,
       protocolVersion: PROTOCOL_VERSION,
+      buildId: this.buildId,
     };
     this.send(ws, { type: 'welcome', ts: Date.now(), payload: welcome });
     console.log(`[Lobby] client connected: ${clientId.slice(0, 6)} (${this.clients.size} online)`);
@@ -1722,6 +1745,9 @@ export class LobbyServer {
     // A quarantined match (b1.2a) ended because the server faulted, not because
     // anyone won or lost: nothing is persisted, the crews just go home.
     if (result.reason === 'server_fault') return;
+    // b1.2e (online-11): a deploy cut the match short. Stats are saved, but it
+    // is a no-contest: neither a played match nor a loss.
+    const noContest = result.reason === 'interrupted';
 
     // Persist stats for every human in the result, even ones whose ws already closed —
     // identity is by display name (the canonical key for the JSON store).
@@ -1746,6 +1772,7 @@ export class LobbyServer {
         headshots: r.headshots,
         playSeconds: r.playSeconds,
         devAssisted: result.devAssisted,
+        noContest,
       });
       const clientSession = this.findClientByPlayerId(r.playerId);
       if (clientSession) {
@@ -1914,6 +1941,10 @@ export class LobbyServer {
     if (this.draining) return;
     this.draining = true;
     console.log(`[Lobby] draining (${reason}): ${this.matches.size} matches, ${this.clients.size} clients`);
+    // online-11: WARN FIRST. Every connected client hears how long it has
+    // before a single socket is closed; with no match running there is no grace
+    // to wait out, so the honest number is 0.
+    this.broadcastRestartNotice(this.matches.size > 0 ? Math.ceil(graceMs / 1000) : 0);
     if (graceMs > 0) {
       const deadline = Date.now() + graceMs;
       while (this.matches.size > 0 && Date.now() < deadline) {
@@ -1935,12 +1966,29 @@ export class LobbyServer {
 
   emergencyStop(reason: string): void {
     console.error(`[Lobby] EMERGENCY STOP (${reason}): ${this.matches.size} matches, ${this.clients.size} clients`);
+    // Direct callers (index.ts on repeated fatals) skipped shutdown(): the
+    // notice still goes out before the first close, with 0 s of warning.
+    this.broadcastRestartNotice(0);
     for (const [id, match] of Array.from(this.matches)) {
+      // A match still at sea ends as a NO CONTEST (online-11): its board goes
+      // out and onMatchEnd saves every human's stats without scoring a loss.
+      try { match.interrupt(); } catch (err) { console.error(`[Lobby] interrupt ${id.slice(0, 6)} failed:`, err); }
       try { this.reapMatch(id, match, `emergency: ${reason}`); } catch {}
     }
+    this.stats.flush();
     for (const session of Array.from(this.clients.values())) {
       try { session.ws.close(1012, 'server restarting'); } catch {}
     }
+  }
+
+  /** b1.2e (online-11): `server_notice{kind:'restarting', seconds}` to every
+   *  connected session, once, before any socket is closed. */
+  private broadcastRestartNotice(seconds: number): void {
+    if (this.restartNoticeSent) return;
+    this.restartNoticeSent = true;
+    const payload: ServerNoticePayload = { kind: 'restarting', seconds: Math.max(0, Math.round(seconds)) };
+    const msg: NetMsg = { type: 'server_notice', ts: Date.now(), payload };
+    for (const session of this.clients.values()) this.send(session.ws, msg);
   }
 
   /** Stop a match, forget it, and send any sessions still pointed at it home. */
@@ -2042,6 +2090,7 @@ export class LobbyServer {
         maxMatches: MAX_MATCHES_PER_PROCESS,
         accepting: !this.atCapacity(),
         draining: this.draining,
+        buildId: this.buildId,
         // Frames the wire validator refused since boot. A client build that has
         // drifted off the protocol shows up here as a rising count instead of
         // as silence.
@@ -2145,6 +2194,16 @@ export class LobbyServer {
     if (!filePath.startsWith(CLIENT_DIST_ROOT)) {
       filePath = join(CLIENT_DIST_ROOT, 'index.html');
     } else if (!this.isServableFile(filePath)) {
+      // online-05: a MISSING FILE IS A 404, never the SPA shell. After a
+      // deploy an old tab asks for /assets/<chunk>-<oldhash>.js; answering
+      // with 200 text/html made the worker/module die on a MIME error instead
+      // of the loader seeing "gone" (and a CDN would cache the HTML under the
+      // .js name). Only extensionless routes fall back to index.html.
+      if (normalizedPath.split(sep).join('/').startsWith('/assets/') || extname(normalizedPath) !== '') {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache' });
+        res.end('Not Found');
+        return;
+      }
       filePath = join(CLIENT_DIST_ROOT, 'index.html');
     }
 
