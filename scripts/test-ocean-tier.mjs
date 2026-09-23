@@ -40,6 +40,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { fragmentOps, preprocess } from './lib/glsl-ops.mjs';
+import { OCEAN_FRAG_OPS } from './lib/budgets.mjs';
 
 const MUTATE = process.argv.includes('--mutate');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,7 +68,7 @@ expect('the HULL_MASK program carries the SAME define',
   /defines:\s*\{\s*HULL_MASK:\s*'1',\s*OCEAN_TIER:\s*OCEAN_TIER\[quality\]\s*\}/.test(src));
 
 // ── the count falls, tier by tier, under a ceiling each ──────────────────
-const CEIL = { low: 950, balanced: 1400, high: 1750 };
+const CEIL = OCEAN_FRAG_OPS; // scripts/lib/budgets.mjs (b1.7a, rule 13)
 const ops = {
   low: fragmentOps(Ocean.OCEAN_FRAG, { OCEAN_TIER: MUTATE ? 2 : 0, SHADOW: false }),
   balanced: fragmentOps(Ocean.OCEAN_FRAG, { OCEAN_TIER: 1, SHADOW: false }),

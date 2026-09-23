@@ -20,6 +20,7 @@
 //
 // LOGIC suite: drives the real Match, no stack, no browser.
 import zlib from 'node:zlib';
+import { SNAPSHOT_BYTES } from './lib/budgets.mjs';
 import { Match } from '../src/server/core/Match.ts';
 import { buildHotSnapshot, buildWireSnapshot } from '../src/server/core/snapshot.ts';
 import * as Lobby from '../src/server/core/LobbyServer.ts';
@@ -93,9 +94,9 @@ const fullWithWorld = JSON.stringify(buildWireSnapshot(match.buildSnapshot(true)
 const hot = JSON.stringify(buildHotSnapshot(match.state, match.t));
 
 console.log(`\n  sizes: hot=${(hot.length / 1024).toFixed(1)}KB full=${(full.length / 1024).toFixed(1)}KB full+world=${(fullWithWorld.length / 1024).toFixed(1)}KB`);
-expect('31Hz hot payload stays tiny (<8KB)', hot.length < 8 * 1024, `${hot.length}B`);
-expect('10Hz quantized full stays lean (<35KB)', full.length < 35 * 1024, `${full.length}B`);
-expect('static-world full stays sane (<250KB, rides ~1/20s + join)', fullWithWorld.length < 250 * 1024, `${fullWithWorld.length}B`);
+expect('31Hz hot payload stays tiny (<8KB)', hot.length < SNAPSHOT_BYTES.hot, `${hot.length}B`);
+expect('10Hz quantized full stays lean (<35KB)', full.length < SNAPSHOT_BYTES.full, `${full.length}B`);
+expect('static-world full stays sane (<250KB, rides ~1/20s + join)', fullWithWorld.length < SNAPSHOT_BYTES.worldFull, `${fullWithWorld.length}B`);
 expect('statics stripped from ordinary fulls', !full.includes('"caves"'), 'islands leaked into a non-world snapshot');
 match.stop();
 
@@ -107,8 +108,8 @@ match.stop();
 // netcode measurement left out.
 const TICKS_PER_SECOND = 1000 / SERVER_TICK_MS;
 const WORLD_RESEND_SECONDS = (FULL_SNAPSHOT_TICKS * 200) / TICKS_PER_SECOND;
-const EGRESS_CAP = 120 * 1024;   // bytes/s per client
-const JOIN_CAP = 60 * 1024;      // compressed join message
+const EGRESS_CAP = SNAPSHOT_BYTES.egressPerSecond;   // bytes/s per client
+const JOIN_CAP = SNAPSHOT_BYTES.joinCompressed;      // compressed join message
 
 /** @param {{label:string, botCount:number, mode?:string, crews:number, crewSize:number}} cfg */
 async function measure(cfg) {
@@ -263,7 +264,7 @@ for (const cfg of CONFIGS) {
 // the same at 180KB and at 249KB. Whoever adds the next island, cave system or
 // prop registry field should see the wall coming in the same output that tells
 // them they cleared it.
-const WORLD_CEILING = 250 * 1024;
+const WORLD_CEILING = SNAPSHOT_BYTES.worldFull;
 const headroom = WORLD_CEILING - fullWithWorld.length;
 console.log(
   `\n  headroom: static-world full has ${(headroom / 1024).toFixed(1)}KB left under the 250KB ceiling `
