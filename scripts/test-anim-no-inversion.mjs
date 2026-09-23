@@ -35,7 +35,7 @@ import { makePlayerRig, updatePlayerRig, playerRigOf } from '../src/client/rende
 import { makePlayerMesh } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
 import {
   weaponPose, recoilEnvelope, recoilSpecFor, recoilDelta, drawDelta, muzzleTipFor, cutlassSlashPose, slashRibbonPose,
-  CUTLASS_TIP, SLASH_RIBBON_HALF_SPAN, SLASH_SWING_TIME, VIEW_DRAW_TIME,
+  CUTLASS_TIP, SLASH_RIBBON_HALF_SPAN, SLASH_SWING_TIME, VIEW_DRAW_TIME, toolPose, TOOL_MIN_OFF_AXIS,
 } from '../src/client/rendering/viewmodel/poses.ts';
 import { makeHeldWeaponMesh } from '../src/client/rendering/factories/WeaponMeshFactory.ts';
 const DEG = Math.PI / 180;
@@ -395,6 +395,29 @@ console.log('First-person viewmodel');
     expect(`slash side ${side > 0 ? '+1' : '-1'}: negative control (HEAD ribbon) is caught`,
       !(n.agree === n.moved && n.whipGap < 35), `${n.agree}/${n.moved} agree, whip gap ${n.whipGap.toFixed(0)} deg`);
   }
+  // Held tools (toolPose): the axe head rides UP at rest, the chop brings it DOWN, and the haft never goes dead-on the view axis.
+  {
+    const T = { bob: 0, sway: 0, time: 0, firing: false, bailScoopProgress: 0, bucketFilled: false };
+    const headY = (pose) => { const g = rootOf(pose, 1); return V(0, 0, -0.6).applyMatrix4(g.matrixWorld).y - V(0, 0, 0).applyMatrix4(g.matrixWorld).y; };
+    const rest = toolPose('axe', T);
+    expect('axe rest: the head (far -Z end) sits ABOVE the hand', headY(rest) > 0.1, `head dy ${headY(rest).toFixed(3)}`);
+    const flipped = [...rest]; flipped[3] = -flipped[3];
+    expect('axe: negative control (pitch sign flipped, the head-in-hand grip) is caught', !(headY(flipped) > 0.1));
+    const at = (cycle) => toolPose('axe', { ...T, firing: true, time: cycle / 1.4 });
+    const cocked = headY(at(0.4)), struck = headY(at(0.63));
+    expect('axe chop: the strike drives the head DOWN from the cock', struck < cocked - 0.2, `cocked ${cocked.toFixed(3)} struck ${struck.toFixed(3)}`);
+    let minOff = Infinity;
+    for (let c = 0; c < 1; c += 0.005) {
+      const g = rootOf(at(c), 1);
+      const dir = V(0, 0, -1).transformDirection(g.matrixWorld);
+      minOff = Math.min(minOff, Math.acos(Math.min(1, -dir.z)));
+    }
+    expect(`axe chop: the haft stays >= ${TOOL_MIN_OFF_AXIS} rad off the view axis all cycle`, minOff >= TOOL_MIN_OFF_AXIS - 0.01, `min ${minOff.toFixed(3)} rad`);
+    for (const tool of ['compass', 'bucket', 'spyglass', 'lantern', 'axe', 'shovel']) {
+      const p = toolPose(tool, T);
+      expect(`${tool}: toolPose returns a finite pose in front of the eye`, p.every(Number.isFinite) && p[2] < -0.3, p.map((x) => x.toFixed(2)).join(','));
+    }
+  }
   const vm = src('src/client/rendering/ViewmodelController.ts');
   expect('ViewmodelController poses firearms through weaponPose, reload through reloadChoreography, draw through drawDelta',
     /weaponPose\(weaponId,/.test(vm) && /= reloadChoreography\(weaponId,/.test(vm) && /drawDelta\(this\.localViewDrawTimer\)/.test(vm)
@@ -403,6 +426,7 @@ console.log('First-person viewmodel');
     /recoilEnvelope\(/.test(vm) && !/kickTarget/.test(vm) && !/recoilBack/.test(vm));
   expect('ViewmodelController: slash ribbon driven by slashRibbonPose (no -grow mirror)',
     /slashRibbonPose\(r\.side/.test(vm) && !/-grow/.test(vm) && /cutlassSlashPose\(this\.cutlassSlashSide/.test(vm));
+  expect('ViewmodelController: held tools posed through toolPose', /const cfg = toolPose\(tool, \{/.test(vm) && !/tool === 'compass'\n?\s*\/\//.test(vm));
 }
 
 const ms = performance.now() - t0;

@@ -20,17 +20,11 @@ import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
 import {
   CUTLASS_GUARD, SLASH_SWING_TIME, VIEW_DRAW_TIME, cutlassLungePose, cutlassRestPose, cutlassSlashPose,
-  drawDelta, muzzleTipFor, recoilEnvelope, recoilSpecFor, reloadChoreography, slashRibbonPose, weaponPose,
+  drawDelta, muzzleTipFor, toolPose, recoilEnvelope, recoilSpecFor, reloadChoreography, slashRibbonPose, weaponPose,
   type Pose6,
 } from './viewmodel/poses.js';
 
-/**
- * Minimum angle (radians ≈ 20.6°) a long tool's shaft is allowed to sit off the
- * view axis. Dead-on, a 1 m haft projects to a few pixels behind the fists and
- * the tool disappears out of its own animation — the lesson the cutlass thrust
- * and the rifle ADS both had to learn the expensive way.
- */
-const MIN_OFF_AXIS = 0.36;
+// MIN_OFF_AXIS (the long-tool off-axis floor) now lives in viewmodel/poses.ts as TOOL_MIN_OFF_AXIS.
 
 /** A first-person hand attachment in viewmodel-root space. */
 type HandGrip = { pos: [number, number, number]; rot: [number, number, number]; scale?: number };
@@ -1199,122 +1193,13 @@ export class ViewmodelController {
         const moveAmount = Math.min(1, Math.hypot(moveAxes.x, moveAxes.z));
         const bob = Math.sin(time * (3.1 + moveAmount * 2.4)) * (0.006 + moveAmount * 0.02);
         const sway = Math.sin(time * (1.8 + moveAmount * 1.1)) * (0.006 + moveAmount * 0.014);
-        const cfg = tool === 'compass'
-          // At z −0.38 the compass face was 38cm from the eye: it swallowed the
-          // lower-right quarter of the frame and threw its own holding fist to
-          // ndc [0.50, −0.70], in the corner behind the HUD tiles. Held at arm's
-          // length instead the fist reads at [0.28, −0.43] and the card is still
-          // easily large enough to take a bearing off.
-          ? { p: [0.16 + sway * 0.5, -0.13 + bob, -0.56], r: [-0.88 + bob, 0.16 + sway * 0.3, 0.08] }
-          : tool === 'bucket'
-            ? (() => {
-              // The SCOOP→HEAVE cycle must READ: bailScoopProgress runs 1→0
-              // over 0.6s after each press. Just-scooped (filled) dips the
-              // bucket low then lifts the load; just-heaved (emptied) hoists
-              // and FLINGS it forward — the eject the cycle was missing.
-              const prog = THREE.MathUtils.clamp(player.bailScoopProgress ?? 0, 0, 1);
-              const anim = 1 - prog; // 0 → 1 across the action
-              if (prog > 0.01 && player.bucketFilled) {
-                const dip = Math.sin(Math.min(1, anim / 0.7) * Math.PI);
-                return {
-                  p: [0.24 + sway * 0.3, -0.35 - dip * 0.24 + bob, -0.56 - dip * 0.14],
-                  r: [-0.12 - dip * 0.55 + bob, 0.2, -0.1 + dip * 0.08],
-                };
-              }
-              if (prog > 0.01 && !player.bucketFilled) {
-                const fling = Math.sin(Math.min(1, anim / 0.5) * Math.PI);
-                return {
-                  p: [0.24, -0.35 + fling * 0.3 + bob, -0.56 - fling * 0.36],
-                  r: [-0.12 - fling * 1.25 + bob, 0.2, -0.1 + fling * 0.16],
-                };
-              }
-              return { p: [0.24 + sway * 0.5, -0.35 + bob, -0.56], r: [-0.12 + bob, 0.2 + sway * 0.3, -0.1] };
-            })()
-            : tool === 'spyglass'
-              ? { p: [0.2 + sway * 0.4, -0.2 + bob, -0.46], r: [0.05, -0.5 + sway * 0.2, 0.12] }
-              : tool === 'lantern'
-                ? { p: [0.26 + sway * 0.5, -0.16 + bob, -0.5], r: [0.02 + bob, 0.2, -0.05] } // held up like a lamp
-              : tool === 'axe'
-                ? (() => {
-                  // AXIS NOTE (corrected from a user screenshot of the flipped
-                  // grip): with the haft along Z, POSITIVE rot.x raises the
-                  // HEAD (the far −Z end) — negative pitch lifted the BUTT and
-                  // read as holding the axe by its head, handle in the sky.
-                  if (this.view.input.isFiring()) {
-                    const cycle = (time * 1.4) % 1;
-                    // Re-timed so the cycle isn't 70% static hold with the head
-                    // buried in the trunk: COCK high 0–0.3, brief HOLD to 0.5,
-                    // fast STRIKE 0.5–0.62, then recover.
-                    const raise = THREE.MathUtils.smoothstep(cycle, 0, 0.3);
-                    const strike = THREE.MathUtils.clamp((cycle - 0.5) / 0.12, 0, 1) ** 1.6;
-                    const recover = THREE.MathUtils.smoothstep(cycle, 0.66, 1);
-                    const arc = 1 - recover;
-                    const pitch = 0.5 + (raise * 0.9 - strike * 2.4) * arc;
-                    // THE SLIVER (the cutlass-thrust lesson, again). With the
-                    // haft along Z the blade points along −Z, so its angle off
-                    // the view axis is acos(cos(yaw)·cos(pitch)) — it foreshortens
-                    // to NOTHING whenever pitch and yaw are BOTH near zero. The
-                    // old keys swept yaw from +0.45 through −0.30, so it sat at
-                    // ~0 at exactly the two moments pitch crossed the eyeline
-                    // (mid-strike, and again for ~80 ms of the slow recovery,
-                    // which is the frame the eye actually samples). Measured
-                    // there: 0.9° off axis — a sliver of steel hiding behind the
-                    // fists.
-                    //
-                    // Two changes, both needed. FIRST the yaw now OPENS with the
-                    // chop instead of crossing over, so the swing travels
-                    // diagonally across frame and the yaw never changes sign
-                    // (a sign flip under the floor below would snap).
-                    const yawKey = 0.15 + (raise * 0.3 + strike * 0.28) * arc;
-                    // SECOND, a floor that makes the guarantee unconditional:
-                    // whatever the keys ask for, hold ≥ MIN_OFF_AXIS of blade off
-                    // the eyeline. The floor is 0 at the edge of the band and
-                    // grows smoothly to its maximum at pitch = 0, so it eases in
-                    // rather than snapping — and it is inert everywhere else,
-                    // including at rest.
-                    const cosPitch = Math.abs(Math.cos(pitch));
-                    const yawFloor = cosPitch > Math.cos(MIN_OFF_AXIS)
-                      ? Math.acos(THREE.MathUtils.clamp(Math.cos(MIN_OFF_AXIS) / cosPitch, -1, 1))
-                      : 0;
-                    return {
-                      // Same rest anchor as below (0.26 / −0.20 / −0.80) so the
-                      // chop swings away from a pose whose fists are in frame.
-                      p: [
-                        0.26 + (raise * 0.14 - strike * 0.4) * arc,
-                        -0.2 + (raise * 0.16 - strike * 0.26) * arc,
-                        -0.8 - strike * 0.14 * arc,
-                      ],
-                      r: [
-                        pitch,
-                        Math.max(yawKey, yawFloor),
-                        // Roll is a spin about the haft — it never moves the head,
-                        // so it is free to sell the bite of the blade.
-                        -0.15 + (-raise * 0.2 + strike * 0.6) * arc,
-                      ],
-                    };
-                  }
-                  // Rest: head UP at the far end, hand low on the haft, pulled
-                  // back so the blade clears the trunk you're stood against.
-                  // FRAMING (this is the audited "axe floats with zero hands"):
-                  // at z −0.62 the rear fist projected to ndc [0.47, −0.79] —
-                  // the extreme bottom-right corner, behind the ship-hull and
-                  // weapon-slot HUD tiles — while the head swept across mid
-                  // screen, so the axe read as a prop with nothing holding it.
-                  // Pushed 0.18 further out and lifted 0.04: fists now land at
-                  // [0.30, −0.51] and [0.22, −0.28], on clear frame.
-                  return { p: [0.26 + sway * 0.4, -0.2 + bob, -0.8], r: [0.5 + bob, 0.15 + sway * 0.2, -0.15] };
-                })()
-              // Shovel is long — lay it DIAGONALLY across the lower-right (blade
-              // low, handle up-left) via a roll about the view axis, so the whole
-              // tool stays in the frame plane instead of receding down-forward.
-              // At z −0.54 the rear fist was only 0.41m from the eye, which threw
-              // its palm to ndc.y −1.02 — literally off the bottom of the frame,
-              // measured. 0.24 further out and 0.06 up puts both fists on the
-              // haft in shot ([0.28, −0.52] and [0.15, −0.40]).
-              : { p: [0.2 + sway * 0.4, -0.28 + bob, -0.78], r: [-0.2 + bob, 0.3 + sway * 0.2, 0.8] }; // shovel
+        const cfg = toolPose(tool, {
+          bob, sway, time, firing: this.view.input.isFiring(),
+          bailScoopProgress: player.bailScoopProgress ?? 0, bucketFilled: !!player.bucketFilled,
+        });
         this.localViewPocketRoot.visible = true;
-        this.localViewPocketRoot.position.set(cfg.p[0], cfg.p[1], cfg.p[2]);
-        this.localViewPocketRoot.rotation.set(cfg.r[0], cfg.r[1], cfg.r[2]);
+        this.localViewPocketRoot.position.set(cfg[0], cfg[1], cfg[2]);
+        this.localViewPocketRoot.rotation.set(cfg[3], cfg[4], cfg[5]);
         return true;
       }
       this.localViewPocketRoot.visible = false;
