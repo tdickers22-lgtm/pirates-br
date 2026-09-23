@@ -38,6 +38,11 @@ export function setBeaconContext(patch: Partial<BeaconContext>): void {
   if (patch.tier) context.tier = String(patch.tier).slice(0, 20);
 }
 
+/** The tier/build the beacons carry (read by sessionTelemetry, b1.7c). */
+export function getBeaconContext(): Readonly<BeaconContext> {
+  return { ...context };
+}
+
 /** Coarse device class: browser family + OS + phone/tablet/desktop. Never the raw UA. */
 export function uaClass(ua: string = globalThis.navigator?.userAgent ?? '', touchPoints = globalThis.navigator?.maxTouchPoints ?? 0): string {
   const os = /iPhone|iPod/.test(ua) ? 'ios'
@@ -69,9 +74,13 @@ export function reportBeacon(kind: BeaconKind, err?: unknown): boolean {
   if (sentKeys.has(key) || sent >= MAX_PER_SESSION) return false;
   sentKeys.add(key);
   sent += 1;
-  const body = JSON.stringify({
+  return sendBeaconBody(JSON.stringify({
     buildId: context.buildId, kind, message, stack, ua: uaClass(), tier: context.tier,
-  });
+  }));
+}
+
+/** The transport, shared with sessionTelemetry (b1.7c): sendBeacon, keepalive fetch fallback. */
+export function sendBeaconBody(body: string): boolean {
   try {
     const nav = globalThis.navigator;
     if (nav?.sendBeacon && nav.sendBeacon(BEACON_URL, new Blob([body], { type: 'application/json' }))) return true;
