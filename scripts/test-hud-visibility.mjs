@@ -20,7 +20,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 let fails = 0;
 let passes = 0;
 const check = (name, ok, detail = '') => {
-  if (ok) passes++;
+  if (ok) { passes++; console.log(`  ✓ ${name}`); }
   else { fails++; console.log(`FAIL ${name}${detail ? ` :: ${detail}` : ''}`); }
 };
 
@@ -127,6 +127,53 @@ check('dead #damage-vignette deleted', !/id="damage-vignette"/.test(html) && !/d
 check('#server-notice banner exists', /id="server-notice"/.test(html));
 check('#party-chip exists', /id="party-chip"/.test(html));
 check('death bar has a next-target button', /id="death-next-btn"/.test(html));
+
+// ── 6. the model drives the painters (b1.5f continuation) ────────────────────
+// The ship card, the crew strip and the feed used to keep their own writers:
+// the card followed any deck you stood on (an enemy's included), the strip
+// showed on a phone that has no room for it. These rows fail until the model
+// owns them.
+if (M) {
+  const near = M.shipCardNear;
+  check('shipCardNear exported', typeof near === 'function');
+  if (typeof near === 'function') {
+    const own = { ownShipId: 's1', ownShipAlive: true, onShipId: null, metresToOwn: 500 };
+    check('ship card: aboard own hull', near({ ...own, onShipId: 's1', metresToOwn: 3 }) === true);
+    check('ship card: ashore 29 m from own hull', near({ ...own, metresToOwn: 29 }) === true);
+    check('ship card: ashore 31 m from own hull hides it', near({ ...own, metresToOwn: 31 }) === false);
+    check('ship card: on an enemy deck 500 m out hides it', near({ ...own, onShipId: 'enemy' }) === false);
+    check('ship card: on an enemy deck 12 m from own hides it (it would describe their hull)', near({ ...own, onShipId: 'enemy', metresToOwn: 12 }) === false);
+    check('ship card: own hull sunk hides it', near({ ...own, ownShipAlive: false, onShipId: 's1', metresToOwn: 0 }) === false);
+    check('ship card: no ship of your own', near({ ...own, ownShipId: null, metresToOwn: 0 }) === false);
+  }
+  check('phone: feed hidden while empty', !M.hudVisibility({ ...base, device: 'phone', feedLines: 0 }).has('feed'));
+  check('phone: feed shows while it has lines', M.hudVisibility({ ...base, device: 'phone', feedLines: 2 }).has('feed'));
+  check('phone: crew strip stays off in a party', !M.hudVisibility({ ...base, device: 'phone', inParty: true }).has('crewStrip'));
+  check('desktop: crew strip in a party', M.hudVisibility({ ...base, inParty: true }).has('crewStrip'));
+  const desat = M.lowHealthDesaturation;
+  check('lowHealthDesaturation exported', typeof desat === 'function');
+  if (typeof desat === 'function') {
+    check('desaturation: none at 100, 30 and 15 HP', desat(100) === 0 && desat(30) === 0 && desat(15) === 0, `${desat(100)},${desat(30)},${desat(15)}`);
+    check('desaturation: starts below 15 HP', desat(14) > 0 && desat(14) < 0.15, `${desat(14)}`);
+    check('desaturation: deep at 1 HP, never full grey', desat(1) >= 0.6 && desat(1) <= 0.85, `${desat(1)}`);
+    let mono = true;
+    for (let h = 15; h > 1; h -= 0.5) if (desat(h - 0.5) < desat(h)) mono = false;
+    check('desaturation: monotonic as health falls', mono);
+    check('desaturation: dead or unknown is 0', desat(0) === 0 && desat(NaN) === 0);
+  }
+}
+{
+  const hud6 = readFileSync(join(ROOT, 'src/client/ui/HudController.ts'), 'utf8');
+  const html6 = readFileSync(join(ROOT, 'index.html'), 'utf8');
+  const fx6 = readFileSync(join(ROOT, 'src/client/rendering/CombatFx.ts'), 'utf8');
+  check('HudController decides the ship card through shipCardNear', /shipCardNear\(/.test(hud6));
+  for (const [id, ref] of [['shipCard', 'shipStatus'], ['crewStrip', 'crew-strip'], ['feed', 'killFeed']]) {
+    check(`model paints ${id} (${ref})`, new RegExp(`\\[\\s*'${id}'\\s*,[^\\]]*${ref}`).test(hud6));
+  }
+  check('HudController toggles .hud-model-off', /classList\.toggle\(\s*'hud-model-off'/.test(hud6));
+  check('index.html hides .hud-model-off', /\.hud-model-off\s*\{\s*display:\s*none\s*!important/.test(html6));
+  check('CombatFx desaturates through the model below 15 % HP', /lowHealthDesaturation\(/.test(fx6) && /mix-blend-mode:\s*saturation/.test(fx6));
+}
 
 console.log(`test-hud-visibility: ${passes} pass, ${fails} fail`);
 process.exit(fails ? 1 : 0);

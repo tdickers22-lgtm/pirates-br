@@ -89,6 +89,49 @@ export interface HudContext {
   /** The message plan let an island banner through this frame. */
   bannerUp: boolean;
   serverNotice: boolean;
+  /** Lines in the event feed right now. On a phone the feed is transient: it
+   *  shows only while it has something to say, and never counts as chrome. */
+  feedLines?: number;
+}
+
+/** The ship card's distance rule (PLAN 3.x HUD: "only aboard or within 30 m"). */
+export const SHIP_CARD_RANGE_M = 30;
+
+export interface ShipCardInput {
+  /** The hull this pirate crews, or null. */
+  ownShipId: string | null;
+  /** False once she has sunk (the card has nothing true left to say). */
+  ownShipAlive: boolean;
+  /** The deck underfoot, or null (ashore, swimming). */
+  onShipId: string | null;
+  /** Horizontal metres from the pirate to the own hull's centre. */
+  metresToOwn: number;
+}
+
+/**
+ * The ship card is about YOUR hull and nothing else. It used to follow
+ * whichever deck you stood on, so a boarder read an enemy's leaks and sails as
+ * her own. Shown aboard the own hull, or ashore/in the water within 30 m of
+ * it; never while standing on someone else's deck (it would describe theirs).
+ */
+export function shipCardNear(s: ShipCardInput): boolean {
+  if (!s.ownShipId || !s.ownShipAlive) return false;
+  if (s.onShipId === s.ownShipId) return true;
+  if (s.onShipId) return false;
+  return Number.isFinite(s.metresToOwn) && s.metresToOwn <= SHIP_CARD_RANGE_M;
+}
+
+/**
+ * Screen desaturation below 15 % HP (mechanicshud spec: pulse below 30 %,
+ * desaturation below 15 %). 0 at 15 HP and above, easing in to 0.75 at 1 HP,
+ * never full grey (the red of the pulse and the enemy must still read).
+ * Dead or unknown health is 0: the death card owns that screen.
+ */
+export const DESATURATE_BELOW_HP = 15;
+export function lowHealthDesaturation(health: number): number {
+  if (!Number.isFinite(health) || health <= 0 || health >= DESATURATE_BELOW_HP) return 0;
+  const t = (DESATURATE_BELOW_HP - health) / (DESATURATE_BELOW_HP - 1);
+  return Math.round(0.75 * Math.min(1, t) ** 0.8 * 1000) / 1000;
 }
 
 export type CrosshairMode = 'none' | 'dot' | 'ring' | 'cannon';
@@ -122,6 +165,9 @@ export function hudVisibility(ctx: HudContext): Set<HudElementId> {
 
   for (const id of phone ? PHONE_ALWAYS_ON : ALWAYS_ON) out.add(id);
   if (!ctx.inParty) out.delete('crewStrip');
+  // A phone has no room for a standing feed; kill and refusal lines still land
+  // while they are fresh, then the corner is glass again.
+  if (phone && (ctx.feedLines ?? 0) > 0) out.add('feed');
   // The party code is a label in the minimap head, not a box of its own, and
   // a phone shares the code through the share sheet instead (b1.5b).
   if (ctx.inParty && !phone) out.add('partyChip');

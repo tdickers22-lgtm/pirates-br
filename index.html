@@ -45,6 +45,9 @@
   <!-- Mobile shell (b1.5a): no zoom, safe areas, rotate card. After hud.css. -->
   <link rel="stylesheet" href="/src/client/styles/mobile.css" />
   <script type="module" src="/src/client/input/MobileShell.ts"></script>
+  <!-- b1.5f: the HUD model (src/client/ui/hudModel.ts) hides what it does not
+       list this frame; this beats any display a widget's own writer sets. -->
+  <style>.hud-model-off { display: none !important; }</style>
 </head>
 <body>
 

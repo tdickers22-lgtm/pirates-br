@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Projectile, ProjectileType, Vec3, WeaponId } from '../../shared/types/index.js';
 import { getSharedSoundEngine, type GunshotKind, type SoundEngine } from '../audio/SoundEngine.js';
 import { registerBudgetLight } from './LightBudget.js';
+import { lowHealthDesaturation } from '../ui/hudModel.js';
 
 // Fallback sea surface height; Game feeds the live Gerstner surface via
 // setWaterSurfaceY each frame so splash-vs-hull classification tracks swells
@@ -1071,6 +1072,10 @@ export class CombatFx {
   /** Brief blue-white wash when you go into the water (see the splash cue). */
   private splashFlash = 0;
   private splashOverlay: HTMLDivElement | null = null;
+  /** 0..1 target and eased screen desaturation below 15 % HP (b1.5f). */
+  private desatTarget = 0;
+  private desatShown = 0;
+  private desatOverlay: HTMLDivElement | null = null;
   private healthBarFlash = 0;
 
   /**
@@ -1092,9 +1097,12 @@ export class CombatFx {
       this.vitalsSwimming = false;
       this.chipAccum = 0;
       this.attrition = Math.max(0, this.attrition - dt * 2);
+      this.desatTarget = 0;
       return;
     }
     const health = player.health ?? 0;
+    // Below 15 % HP the world drains of colour (spec: pulse < 30 %, grey < 15 %).
+    this.desatTarget = lowHealthDesaturation(health);
     const armor = player.armor ?? 0;
     const swimming = player.state === 'swimming';
 
@@ -1168,6 +1176,8 @@ export class CombatFx {
       this.splashOverlay.style.opacity = '0';
     }
 
+    this.updateDesaturation(dt);
+
     if (this.attrition <= 0.02) {
       if (this.attritionOverlay && this.attritionOverlay.style.opacity !== '0') {
         this.attritionOverlay.style.opacity = '0';
@@ -1191,6 +1201,36 @@ export class CombatFx {
     const swell = Math.exp(-beatPhase * 5) * 0.35;
     const overlay = this.ensureAttritionOverlay();
     overlay.style.opacity = THREE.MathUtils.clamp(pressure * (0.5 + swell), 0, 0.92).toFixed(3);
+  }
+
+  /**
+   * LOW-HEALTH DESATURATION (b1.5f). A grey layer in mix-blend-mode:saturation
+   * takes the colour out of everything under it (canvas, vignettes) and none
+   * of the HUD above it (z 100), so the red health bar still reads. It is a
+   * compositor blend, not a canvas filter or a post pass: no shader, no extra
+   * render target on a phone, and it only exists after the first time health
+   * drops under 15. Eased at ~0.6 s so a bandage fades the colour back in.
+   */
+  private updateDesaturation(dt: number) {
+    const k = 1 - Math.exp(-dt / 0.2);
+    this.desatShown += (this.desatTarget - this.desatShown) * k;
+    if (this.desatShown < 0.005 && this.desatTarget === 0) this.desatShown = 0;
+    if (this.desatShown === 0 && !this.desatOverlay) return;
+    const overlay = this.desatOverlay ?? this.ensureDesatOverlay();
+    const op = this.desatShown.toFixed(3);
+    if (overlay.style.opacity !== op) overlay.style.opacity = op;
+  }
+
+  private ensureDesatOverlay(): HTMLDivElement {
+    const overlay = document.createElement('div');
+    overlay.id = 'low-hp-desaturate';
+    overlay.style.cssText = [
+      'position:fixed', 'inset:0', 'pointer-events:none', 'z-index:90', 'opacity:0',
+      'background:#808080', 'mix-blend-mode: saturation',
+    ].join(';');
+    document.body.appendChild(overlay);
+    this.desatOverlay = overlay;
+    return overlay;
   }
 
   private ensureAttritionOverlay(): HTMLDivElement {

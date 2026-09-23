@@ -3,7 +3,7 @@
  * panels, weapon + combat readouts and the kill/event feed. Reads game state
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
-import { hudMessagePlan, hudVisibility, crosshairMode, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
+import { hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
 import * as THREE from 'three';
 import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
@@ -1598,7 +1598,7 @@ export class HudController {
 
     const nearbyCannon = ship ? this.view.findNearbyCannonIndex(player, ship) : null;
     const repairHole = ship ? this.view.findRepairableHole(player, ship) : null;
-    this.applyHudVisibility(player, ship, {
+    this.applyHudVisibility(player, {
       atRepairPrompt: !!repairHole, aiming: aimingNow, holding, scopeShowing,
     });
     const lookInteraction = this.view.getLookInteraction(player, ship, nearbyCannon, repairHole);
@@ -2808,22 +2808,42 @@ export class HudController {
     if (el.textContent !== text) el.textContent = text;
   }
 
+  private modelPaintedCache: Array<[HudElementId, HTMLElement]> | null = null;
+  /** Elements whose presence is decided by hudVisibility alone. */
+  private modelPainted(): Array<[HudElementId, HTMLElement]> {
+    if (this.modelPaintedCache) return this.modelPaintedCache;
+    const rows: Array<[HudElementId, HTMLElement | null]> = [
+      ['shipCard', this.view.ui.shipStatus],
+      ['crewStrip', document.getElementById('crew-strip')],
+      ['feed', this.view.ui.killFeed],
+    ];
+    this.modelPaintedCache = rows.filter((r): r is [HudElementId, HTMLElement] => !!r[1]);
+    return this.modelPaintedCache;
+  }
+
   /** One visibility set per frame from the pure model (b1.5f). */
   private applyHudVisibility(
     player: Player,
-    ship: Ship | null,
     extra: { atRepairPrompt: boolean; aiming: boolean; holding: 'firearm' | 'blunderbuss' | 'melee' | 'tool' | 'none'; scopeShowing: boolean },
   ): void {
     const crew = player.shipId ? (this.view.state?.players ?? []).filter((p) => p.shipId === player.shipId).length : 1;
     const inParty = crew > 1 || !!this.partyCode;
     const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
     const short = typeof window !== 'undefined' && window.innerHeight <= 500;
+    // The card is about the OWN hull (shipsById, not the tracked deck): aboard
+    // her, or within 30 m of her and not standing on someone else's deck.
+    const own = player.shipId ? this.view.shipsById.get(player.shipId) ?? null : null;
+    const nearOwnShip = shipCardNear({
+      ownShipId: own?.id ?? null,
+      ownShipAlive: !!own && own.alive !== false && (own.sinkProgress ?? 0) < 1,
+      onShipId: player.onShipId ?? null,
+      metresToOwn: own ? dist2D(player.position.x, player.position.z, own.position.x, own.position.z) : Infinity,
+    });
     const vis = hudVisibility({
       playerState: HudController.hudPlayerState(player.state),
       device: coarse && short ? 'phone' : coarse ? 'tablet' : 'desktop',
       inParty,
-      nearOwnShip: !!ship && player.shipId === ship.id
-        && (player.onShipId === ship.id || dist2D(player.position.x, player.position.z, ship.position.x, ship.position.z) < 30),
+      nearOwnShip,
       atCannon: player.atCannon,
       atHelm: player.atHelm,
       atRepairPrompt: extra.atRepairPrompt,
@@ -2835,8 +2855,15 @@ export class HudController {
       alarmUp: !!this.frameHudPlan?.alarm,
       bannerUp: performance.now() <= this.view.islandBannerHideAt,
       serverNotice: performance.now() < this.serverNoticeHideAt,
+      feedLines: this.view.ui.killFeed.childElementCount,
     });
     this.frameVisibility = vis;
+    // The model owns whether these exist at all; their own writers only fill
+    // them. A class, not style.display, so a writer that sets display (the
+    // crew strip's flex) cannot fight the model back on.
+    for (const [id, el] of this.modelPainted()) {
+      el.classList.toggle('hud-model-off', !vis.has(id));
+    }
     const ammo = document.getElementById('ammo-display');
     if (ammo) ammo.style.display = vis.has('ammoDisplay') ? '' : 'none';
     const chip = this.view.ui.partyChip;
