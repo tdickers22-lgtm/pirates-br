@@ -161,6 +161,11 @@ html[data-input-scheme="touch"] #interact-prompt.pressed { border-color: #c9a84c
 html[data-input-scheme="touch"] #hud-right-tactical > *,
 html[data-input-scheme="touch"] #hud-center-prompt > *:not(#interact-prompt),
 html[data-input-scheme="touch"] #hud-bottom-combat > * { pointer-events: none; }
+/* The supply wheel is a modal a finger must reach (b1.4d, measured: with the
+   rule above a wedge tap fell through to the look pad and the wheel stayed
+   open, swallowing every later press). Its pages take touches while shown. */
+html[data-input-scheme="touch"] #pocket-wheel.visible,
+html[data-input-scheme="touch"] #pocket-wheel.visible #pocket-wheel-svg { pointer-events: auto; touch-action: none; }
 
 @media (min-width: 900px) and (min-height: 700px) {
   /* iPad: a little larger, same arc, re-spaced so no two buttons touch

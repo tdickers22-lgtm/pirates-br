@@ -377,7 +377,7 @@ export class TouchControls {
       if (hasLook) return;
       this.roles.set(e.pointerId, {
         kind: 'look', lastX: e.clientX, lastY: e.clientY,
-        startX: e.clientX, startY: e.clientY, since: performance.now(), travel: 0,
+        startX: e.clientX, startY: e.clientY, since: e.timeStamp, travel: 0,
       });
     }
     try { this.zone?.setPointerCapture(e.pointerId); } catch { /* synthetic pointers */ }
@@ -410,7 +410,7 @@ export class TouchControls {
       this.source.setStick(0, 0);
       this.stickBase?.classList.remove('shown');
     } else if (e.type === 'pointerup' && role.travel < TAP_MAX_TRAVEL_PX
-      && performance.now() - role.since < TAP_MAX_MS) {
+      && e.timeStamp - role.since < TAP_MAX_MS) {
       // The minimap is read-only for fingers (touch.css), so the look pad
       // under it decides: a still, short tap inside its box opens the chart.
       const mini = document.getElementById('minimap-shell');

@@ -289,6 +289,11 @@ try {
   expect('Satchel tap opens the supply wheel; a tap on the Planks wedge sends wheelIndex 3 once and closes it',
     wheelOpen && wheelLog.filter((e) => e.wi === 3).length === 1 && !wheelAfter,
     `open ${wheelOpen}, finger on ${landedOn}, picks ${JSON.stringify(wheelLog.filter((e) => e.wi !== null))}, after ${wheelAfter}`);
+  if (wheelAfter) { // never leave the modal open: it would swallow every later press
+    await touch('touchStart', [[satchel.cx, satchel.cy, 14]]);
+    await touch('touchEnd', []);
+    await sleep(200);
+  }
 
   const mini = await rectOf('#minimap-shell');
   // Tap the minimap where no touch button covers it (its top-left quarter).
