@@ -10,6 +10,7 @@ import {
   BERTH, SHIP, WORLD, SHIP_STATS, CHEST_LOOT_TABLE, BARREL_LOOT_TABLE, ECONOMY, WILDLIFE, SEA_ROCKS,
   SEA_POI, WRECK_EVENT, WRECK_SUPPLY_TABLE, PLAYER, SHIP_SPAWN_STORES, LANDING_STORES_MIN,
 } from '../../shared/constants/index.js';
+import { berthLateralOffset } from '../../shared/interactions.js';
 // The cast's names and spoken lines are a RENDERED SURFACE (nameplate, cutscene
 // card, banner), so every proper noun in them comes from the display layer —
 // the same module the client reads. Hardcoding "Black Fin" here is how the
@@ -1506,7 +1507,7 @@ export class MapGenerator {
     const stats = SHIP_STATS.galleon;
     const need = -(stats.height * SHIP.HULL_DRAFT_F.galleon + SHIP.GROUND_KEEL_SAFETY + BERTH.BOB_MARGIN);
     const targetY = need - BERTH.DREDGE_HEADROOM;
-    const lateral = width * 0.5 + stats.width * 0.5 + BERTH.RAIL_GAP;
+    const lateral = berthLateralOffset(width, 'galleon');
     // Wide enough to swallow the three centreline stations the berth planner and
     // grounding both sample, but held off the pier itself: a disc that reached
     // under the walkway sank its lantern posts to the waterline.

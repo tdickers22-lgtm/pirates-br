@@ -447,8 +447,13 @@ export const SHIP = {
 // hull. When these drifted apart, the planner slid a galleon 13m past the tip
 // of a short pier looking for water the generator had never dug.
 export const BERTH = {
-  /** Gap between a berthed hull's side and the dock edge (metres). */
-  RAIL_GAP: 1.0,
+  /** Open water between a berthed hull's WIDEST planking (the loft beam, not
+   *  stats.width, which the drawn hull overhangs by up to 23%) and the pier's
+   *  edge, in metres. Under 0.4 so a pirate walking at his hull off the pier
+   *  is caught by the hull, not the sea; over the few cm a berth-shelter roll
+   *  swings the wale so the hull never rubs the planking. Applied through
+   *  berthLateralOffset (shared/interactions.ts). */
+  RAIL_GAP: 0.25,
   /** How far inside the dock's seaward tip a berthed bow sits. */
   BOW_INSET: 0.6,
   /** Extra water under a berthed keel beyond the grounding threshold (wave bob). */

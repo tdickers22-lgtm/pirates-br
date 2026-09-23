@@ -1,4 +1,5 @@
-import { FLOODING, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
+import { BERTH, FLOODING, PLAYER, SHIP, SHIP_STATS } from './constants/index.js';
+import { getHullContactChain } from './hull.js';
 import type { HullSections, Island, IslandDock, IslandNpc, Player, Ship, ShipHole, ShipHoleTier, ShipKeg, UpgradeStation, Vec3 } from './types/index.js';
 import {
   angleWrap, clamp, dist2D, getSailRopeStationLocals, getBraceStationLocals, getCrowNestLadderInteractionBounds, getSailStationLocal, getShipCompanionwayConfig, getShipDeckRaiseAt, getShipDeckWalkHalfWidth, getShipDeckY, getShipHoldFloorY, isInsideSwimHullFootprint, getSwimHullVerticalT, toDockLocalPoint, dockLocalToWorld } from './utils/index.js';
@@ -602,6 +603,25 @@ export function isNearAmmoCrate(player: PlayerLike, ship: ShipLike): boolean {
 // stepping aboard a galleon is a walk up a plank instead of a 2 m freeboard
 // climb. One shared geometry source: ShipRenderer draws exactly this plank and
 // PhysicsSystem makes exactly this plank walkable.
+
+/** Half of a hull's widest planking (the loft beam the ship-vs-pier contact
+ *  chain uses), in metres. stats.width is the nominal beam; the drawn wale
+ *  stands 0.43 m (sloop) to 1.16 m (galleon) outboard of it. */
+export function hullBeamHalf(type: Ship['type']): number {
+  let widest = 0;
+  for (const station of getHullContactChain(type)) widest = Math.max(widest, station.halfF);
+  return SHIP_STATS[type].width * widest;
+}
+
+/** Dock centreline to berthed hull centreline, in metres: half the pier, half
+ *  the hull's REAL beam, and BERTH.RAIL_GAP of water between them. Shared by
+ *  the berth planner (Match.computeBerthFor) and the mooring-lane dredge
+ *  (MapGenerator) so the two cannot drift. The old width*0.5 + 1.0 left a
+ *  galleon's wale 0.16 m INSIDE the pier box (the dock pushout shoved her off
+ *  every tick) and a sloop 0.57 m of open water a newcomer walked into. */
+export function berthLateralOffset(dockWidth: number, type: Ship['type']): number {
+  return dockWidth * 0.5 + hullBeamHalf(type) + BERTH.RAIL_GAP;
+}
 
 /** Longest gap the plank will span, rail to dock edge (metres). */
 const GANGWAY_MAX_GAP = 3.0;
