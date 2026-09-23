@@ -16,6 +16,8 @@
 //      queued) and fire after it (negative control).
 //   D. Solo-bot hole triage: a bot alone on its hull given 2 waterline holes at
 //      t=30 has 0 open holes by t=75.
+//   E. The contact rule: bot-vs-bot contact inside the truce is a bump at any
+//      speed; a human helm still needs < TRUCE_CONTACT_SPEED (controls both ways).
 //
 //   node --import tsx scripts/test-truce-integrity.mjs      (SEEDS=n to shorten)
 const { Match } = await import('../src/server/core/Match.ts');
@@ -26,7 +28,7 @@ const { TRUCE_SECONDS } = await import('../src/shared/truce.ts');
 const dt = SERVER_TICK_MS / 1000;
 const failures = [];
 let checks = 0;
-const expect = (ok, label) => { checks += 1; console.log(`${ok ? 'ok  ' : 'FAIL'} ${label}`); if (!ok) failures.push(label); };
+const expect = (ok, label) => { checks += 1; console.log(`  ${ok ? '✓' : '✗ FAIL:'} ${label}`); if (!ok) failures.push(label); };
 
 function makeMatch(seed, id) {
   process.env.PIRATES_BR_MAP_SEED = String(seed);
@@ -124,6 +126,25 @@ expect(totalSinkCredits === 0, `A: 0 sink credits (SHIP_SINK_GOLD) inside the tr
   expect(given >= 2, `D: the solo bot's hull was given 2 waterline holes at t=30 (open ${given})`);
   expect(left === 0 && ship.alive, `D: 0 open holes by t=75 (open ${left}, alive ${ship.alive})`);
   match.stop?.();
+}
+
+// ── E. the contact rule (b1.6e2): bot-vs-bot contact inside the truce is a
+// bump at ANY speed (seed 42 closed at >= 6 m/s leaving neighbouring berths);
+// a HUMAN at either helm still needs < TRUCE_CONTACT_SPEED; after the truce
+// every contact counts (negative controls, so E cannot pass vacuously).
+{
+  const { truceSparesContact, TRUCE_CONTACT_SPEED } = await import('../src/shared/truce.ts');
+  const fast = TRUCE_CONTACT_SPEED + 3, slow = TRUCE_CONTACT_SPEED - 2, mid = TRUCE_SECONDS * 0.4;
+  expect(truceSparesContact(mid, fast, false), `E: bot-vs-bot contact at ${fast} m/s inside the truce is a bump`);
+  expect(truceSparesContact(mid, slow, true), `E: human-helmed contact at ${slow} m/s inside the truce is a bump`);
+  expect(!truceSparesContact(mid, fast, true), `E control: human-helmed contact at ${fast} m/s inside the truce still breaches`);
+  expect(!truceSparesContact(TRUCE_SECONDS + 1, fast, false), `E control: bot-vs-bot contact at ${fast} m/s after the truce breaches`);
+  expect(truceSparesContact(mid, fast) === false, 'E: no helm info defaults to human-helmed (fail closed toward the old rule)');
+  const { readFileSync } = await import('node:fs');
+  const physSrc = readFileSync(new URL('../src/server/systems/PhysicsSystem.ts', import.meta.url), 'utf8');
+  expect(/if \(!player\.isBot\) humanHelmShipIds\.add/.test(physSrc)
+    && /truceSparesContact\(t, relSpd, humanAtEitherHelm\)/.test(physSrc),
+    'E wiring: PhysicsSystem feeds human-helm truth into truceSparesContact');
 }
 
 console.log(`\ntest-truce-integrity: ${checks} checks, ${failures.length} failed`);

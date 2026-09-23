@@ -13,8 +13,8 @@
 //     pirate (the shooter gets one 'truce' refusal); PvE targets still take hits.
 //   - Match.explodeKeg: a blast opens no hole in another crew's hull and hurts
 //     no pirate of another crew.
-//   - PhysicsSystem.resolveShipShipCollision: contact under TRUCE_CONTACT_SPEED
-//     opens no hole; no contact at any speed banks ram credit (no ram bounty).
+//   - PhysicsSystem.resolveShipShipCollision: contact under TRUCE_CONTACT_SPEED,
+//     or any contact with no human at either helm, opens no hole; no contact at any speed banks ram credit (no ram bounty).
 //   - Match's sink credit: no SHIP_SINK_GOLD inside the truce.
 // Server-only authority; the client reads TRUCE_SECONDS for the HUD chip.
 
@@ -57,9 +57,15 @@ export function truceRefusesCannon(t: number): boolean {
   return inTruce(t);
 }
 
-/** A ship-ship contact inside the truce under TRUCE_CONTACT_SPEED opens no hole. */
-export function truceSparesContact(t: number, closingSpeed: number): boolean {
-  return inTruce(t) && closingSpeed < TRUCE_CONTACT_SPEED;
+/** A ship-ship contact inside the truce opens no hole when it is a bump:
+ *  closing under TRUCE_CONTACT_SPEED, OR no human holds either helm. Bots never
+ *  ram inside the truce on purpose (their early peace forbids it), so any
+ *  bot-vs-bot contact there is berth traffic, however fast it closed (seed 42
+ *  measured two sloops leaving neighbouring berths at >= 6 m/s: both stove in,
+ *  both foundered before 2:30). Only a HUMAN at a helm can make a truce-time
+ *  contact at >= TRUCE_CONTACT_SPEED count, and even that banks no bounty. */
+export function truceSparesContact(t: number, closingSpeed: number, humanAtEitherHelm = true): boolean {
+  return inTruce(t) && (closingSpeed < TRUCE_CONTACT_SPEED || !humanAtEitherHelm);
 }
 
 /** No ram bounty and no sink gold inside the truce. */

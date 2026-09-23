@@ -15,7 +15,7 @@ import { WEAPONS } from '../src/shared/constants/index.ts';
 
 const failures = [];
 let checks = 0;
-const expect = (ok, label) => { checks += 1; console.log(`${ok ? 'ok  ' : 'FAIL'} ${label}`); if (!ok) failures.push(label); };
+const expect = (ok, label) => { checks += 1; console.log(`  ${ok ? '✓' : '✗ FAIL:'} ${label}`); if (!ok) failures.push(label); };
 
 const hud = readFileSync(new URL('../src/client/ui/HudController.ts', import.meta.url), 'utf8');
 const match = readFileSync(new URL('../src/server/core/Match.ts', import.meta.url), 'utf8');

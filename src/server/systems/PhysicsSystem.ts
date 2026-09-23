@@ -703,10 +703,12 @@ export class PhysicsSystem {
     this.rebuildEnvSafeShips(t, ships, players, islands, storm);
     const helmedShipIds = new Set<string>();
     const helmsmanByShip = new Map<string, string>();
+    const humanHelmShipIds = new Set<string>();
     for (const player of players) {
       if (player.atHelm && player.onShipId) {
         helmedShipIds.add(player.onShipId);
         helmsmanByShip.set(player.onShipId, player.id);
+        if (!player.isBot) humanHelmShipIds.add(player.onShipId);
       }
     }
     this.shipRotationDeltas.clear();
@@ -958,7 +960,7 @@ export class PhysicsSystem {
         // hulls alongside the same wreck behave differently purely by array
         // order: one sailed through her, the other bounced.
         if (!other.alive || other.sinking) continue;
-        this.resolveShipShipCollision(ship, other, helmsmanByShip, t);
+        this.resolveShipShipCollision(ship, other, helmsmanByShip, t, humanHelmShipIds);
       }
 
       // Wave attitude — pitch/roll chase the sampled Gerstner slope through a
@@ -2993,7 +2995,7 @@ export class PhysicsSystem {
    * phantom contact, while rams resolve at the true contact point with a
    * linear impulse plus r×J torque on both hulls.
    */
-  private resolveShipShipCollision(ship: Ship, other: Ship, helmsmanByShip?: Map<string, string>, t = Infinity) {
+  private resolveShipShipCollision(ship: Ship, other: Ship, helmsmanByShip?: Map<string, string>, t = Infinity, humanHelmShipIds?: Set<string>) {
     const stats = SHIP_STATS[ship.type];
     const otherStats = SHIP_STATS[other.type];
     const dxC = ship.position.x - other.position.x;
@@ -3074,8 +3076,13 @@ export class PhysicsSystem {
     // than rammers hitting with their bow/stern. Both ships still take some.
     // THE TRUCE (b1.6e): inside it a contact under TRUCE_CONTACT_SPEED is a
     // bump (the impulse above still parts the hulls), never a breach, and no
-    // contact at any speed banks ram credit toward a sink bounty.
-    if (relSpd > 2.5 && !truceSparesContact(t, relSpd)) {
+    // contact at any speed banks ram credit toward a sink bounty. A contact
+    // with no human at either helm is berth traffic at any speed inside the
+    // truce (seed 42: a bot stepped off one helm at 63.6 s, so 'both helms
+    // bot-held' missed it). No set passed = no helm info: human-helmed.
+    const humanAtEitherHelm = !humanHelmShipIds
+      || humanHelmShipIds.has(ship.id) || humanHelmShipIds.has(other.id);
+    if (relSpd > 2.5 && !truceSparesContact(t, relSpd, humanAtEitherHelm)) {
       const baseDmg = relSpd * 12;
       // The face of each ship that touched the other = impact normal in its local frame.
       const shipImpact = this.rotateWorldToShipLocal(-nx, -nz, ship.rotation);
