@@ -4,7 +4,8 @@ import type {
   BountyRaisedPayload, CargoSpilledPayload, CarpenterPatchPayload, CrewEliminatedPayload, GameState, HotSnapshotPayload, ShipSunkPayload, SpoilClaimedPayload, InteractIntent, MatchCountdownPayload, MatchHornPayload, Island, IslandDock, IslandNpc, ItemStack, MatchStartPayload, Player, PlayerInput, Projectile, SeaRock, Shark, SharkAttackState, Ship, ShipHole, ShipUpgradeType, TradeSession, TreasureChest, WeaponId,
 } from '../../shared/types/index.js';
 import { wheelPocketForSlot, wheelSlotForTool } from '../../shared/wheel.js';
-import { WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, isOnDockDeck, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
+import { foliageWindInto } from '../rendering/signConventions.js';
+import { sampleLocalWind, WALK_FOOTPRINT_MARGIN, dist2D, finiteClamp, getBridgeDeckY, getIslandSurfaceY, isPointInsideIslandFootprint, isOnDockDeck, angleWrap, gerstnerHeight, WAVE_PARAMS, getStormWaveIntensity, getIslandMaxRadius, getCaveFloorY, getCaveCeilingY, isInsideCaveInterior, getIslandCoastType, getIslandDistRatio, toDockLocalPoint, isInsideSwimHullFootprint, pushOutOfSwimHullFootprint, getSwimHullVerticalBand, getSwimHullVerticalT, getShipQuarterdeckConfig } from '../../shared/utils/index.js';
 import { getPropGroundY, getSeatSurfaceY } from '../../shared/props.js';
 import { seatedEntityY } from '../world/island/EntityMeshes.js';
 import {
@@ -3352,7 +3353,11 @@ export class Game {
     // Drive the palm/foliage sway: advance its clock and gust the wind strength.
     this.foliageTime.value = worldTime;
     const gust = 0.75 + 0.35 * Math.sin(worldTime * 0.27) + 0.15 * Math.sin(worldTime * 0.11);
-    this.foliageWind.value.set(0.68 * gust, 0.46 * gust);
+    // Lean WITH the wind at the camera (animations-11: a fixed world vector
+    // leaned palms across or against the sails' wind); the storm gale bends harder.
+    const cam = this.renderer.camera.position;
+    const foliageAir = sampleLocalWind(worldTime, cam.x, cam.z, this.state?.storm);
+    foliageWindInto(this.foliageWind.value, foliageAir.direction, foliageAir.strength, gust);
     // Held lantern: warm light follows the view while the lantern tool is up,
     // with a gentle candle flicker. Lets you see inside caves and at night.
     const lampOn = this.getLocalPlayer()?.equippedTool === 'lantern';
