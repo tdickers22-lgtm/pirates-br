@@ -48,6 +48,7 @@ export const LOGIC = [
   quick(plain('test-barrel-flow.mjs')),
   quick(plain('test-kill-streak-powers.mjs')),
   quick(tsx('test-wildlife-meat.mjs')),
+  quick(tsx('test-anim-no-inversion.mjs')), // b1.6a: wheel, flag, foliage, heel, head pitch signs (~0.2 s)
   tsx('test-wildlife-flee.mjs'),
   quick(tsx('test-ship-interactions.mjs')),
   quick(tsx('test-swimmer-ship-collision.mjs')),

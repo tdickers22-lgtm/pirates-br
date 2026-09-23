@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { IslandDock, Player, Ship, ShipHole, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
+import {
+  helmWheelRotZ, apparentWindLocal, flagPivotYaw, flagSlack, FLAG_MAX_DROOP, type ApparentWind,
+} from './signConventions.js';
 import { sampleWind, angleWrap, getSailRopeStationLocals, getBraceStationLocals, getShipBoardingLadderLocals, getMainMastLocalZ, getCrowNestStandingY, getShipCompanionwayConfig, getShipQuarterdeckConfig, gerstnerHeight, getStormWaveIntensity, WAVE_PARAMS } from '../../shared/utils/index.js';
 import { cargoTier } from '../../shared/cargo.js';
 import { getAmmoCrateLocal, getCannonDeckLocalPosition, getShipGangwayPlan } from '../../shared/interactions.js';
@@ -64,7 +67,6 @@ import { makeHoldCargoStacks, makeShipInterior } from './ship/interior.js';
 const HULL_Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 /** Three quarter-turns of the helm from hard a-port to hard a-starboard. */
-const WHEEL_TURNS_LOCK_TO_LOCK = 0.75;
 /**
  * ONE threshold decides whether the canvas is set or rolled on the yard.
  * Deployed used `> 0.05` and the furled bundle `<= 0.12`, so for ~7% of the
@@ -253,6 +255,8 @@ export class ShipRenderer {
   private readonly teamSailTex = new Map<number, THREE.CanvasTexture>();
   private readonly teamHullTex = new Map<number, THREE.CanvasTexture>();
   private readonly tempShipPos = new THREE.Vector3();
+  /** Scratch for the per-ship apparent wind the flag and pennants fly on. */
+  private readonly apparentWind: ApparentWind = { localYaw: 0, speed: 0 };
   private readonly tempHoleQuat = new THREE.Quaternion();
   private readonly tempCannonPos = new THREE.Vector3();
   /** Shared pulsing halo for hull-hole decals — depth-tested so it can never
@@ -3169,7 +3173,7 @@ export class ShipRenderer {
       const rudder01 = THREE.MathUtils.clamp(rudderAngle / SHIP.RUDDER_MAX_ANGLE, -1, 1);
       const helmAlpha = 1 - Math.exp(-9 * dt);
       mesh.wheel.rotation.z = THREE.MathUtils.lerp(
-        mesh.wheel.rotation.z, -rudder01 * WHEEL_TURNS_LOCK_TO_LOCK * Math.PI, helmAlpha,
+        mesh.wheel.rotation.z, helmWheelRotZ(rudder01), helmAlpha,
       );
       mesh.rudderPivot.rotation.y = THREE.MathUtils.lerp(mesh.rudderPivot.rotation.y, rudderAngle, helmAlpha);
       mesh.compassNeedle.rotation.y = -mesh.root.rotation.y;
@@ -3291,23 +3295,29 @@ export class ShipRenderer {
         furled.scale.setScalar(0.88 + Math.sin(t * 0.9 + furledSeed) * 0.015);
       }
 
-      const localWind = angleWrap(wind.direction - ship.rotation);
-
-      // Masthead flag: stream downwind off the pivot's +X, and ripple harder the
-      // faster you sail and the worse the weather. Phase is per-ship (id hash),
-      // so a fleet never flutters in unison.
-      mesh.flag.pivot.rotation.y = Math.PI * 0.5 + localWind;
+      // Masthead flag: stream DOWNWIND OF THE APPARENT WIND off the pivot's +X
+      // (animations-06: PI/2 + yaw pointed it exactly upwind), hang slack when
+      // a run at the wind's own speed kills the apparent wind, and ripple
+      // harder the faster you sail and the worse the weather. Phase is per-ship
+      // (id hash), so a fleet never flutters in unison.
+      const apparent = apparentWindLocal(
+        wind.direction, wind.strength, ship.rotation, ship.velocity.x, ship.velocity.z, this.apparentWind,
+      );
+      const flagYaw = flagPivotYaw(apparent.localYaw);
+      const slack = flagSlack(apparent.speed);
+      mesh.flag.pivot.rotation.y = flagYaw;
+      mesh.flag.pivot.rotation.z = -slack * FLAG_MAX_DROOP;
       const flagSpeed01 = Math.min(1, Math.hypot(ship.velocity.x, ship.velocity.z) / 9);
       mesh.flag.uniforms.uFlagTime.value = t;
       // Even becalmed at anchor the cloth breathes (0.012 m) — a dead-still flag
       // is what made it read as a painted board.
       mesh.flag.uniforms.uFlagWave.value.x =
-        0.012 + wind.strength * 0.032 + flagSpeed01 * 0.030 + storm01 * 0.055;
+        (0.012 + wind.strength * 0.032 + flagSpeed01 * 0.030 + storm01 * 0.055) * (1 - slack * 0.7);
 
       for (let p = 0; p < mesh.pennants.length; p++) {
         const pennant = mesh.pennants[p];
-        pennant.rotation.y = Math.PI * 0.5 + localWind;
-        pennant.rotation.z = Math.sin(t * 8 + pennant.position.z * 0.14) * 0.12;
+        pennant.rotation.y = flagYaw;
+        pennant.rotation.z = Math.sin(t * 8 + pennant.position.z * 0.14) * 0.12 * (1 - slack) - slack * FLAG_MAX_DROOP;
         pennant.scale.x = 1.05 + wind.strength * 0.65 + Math.min(0.4, Math.hypot(ship.velocity.x, ship.velocity.z) * 0.03);
       }
       const pennantTypes = this.upgradePennantTypes
@@ -3316,8 +3326,8 @@ export class ShipRenderer {
         const pennant = mesh.upgradePennants[type];
         pennant.visible = activeUpgrades.has(type);
         if (!pennant.visible) continue;
-        pennant.rotation.y = Math.PI * 0.5 + localWind;
-        pennant.rotation.z = Math.sin(t * 9.5 + pennant.position.y * 0.3) * 0.18;
+        pennant.rotation.y = flagYaw;
+        pennant.rotation.z = Math.sin(t * 9.5 + pennant.position.y * 0.3) * 0.18 * (1 - slack) - slack * FLAG_MAX_DROOP;
         pennant.scale.x = 1.1 + wind.strength * 0.55 + Math.min(0.35, Math.hypot(ship.velocity.x, ship.velocity.z) * 0.025);
       }
 

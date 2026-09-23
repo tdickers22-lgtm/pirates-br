@@ -284,6 +284,19 @@ export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, o
   ship.angularVelocity += (targetOmega - ship.angularVelocity) * blend;
 }
 
+/**
+ * TURN HEEL (physics-10). A displacement hull in a steady turn heels OUTWARD:
+ * the keel's lateral resistance acts below the centre of mass, so the
+ * centripetal force tips the rig away from the centre of the turn. omega < 0
+ * is a turn to the right (bow toward local -X), whose outer rail is +X, and
+ * +roll lifts +X (toShipWorld3), so the heel carries omega's sign. Capped at
+ * 3 degrees; the moment model (m v omega (KG - KR)) lands in b2.
+ */
+export const TURN_HEEL_MAX = 0.05;
+export function shipTurnHeel(angularVelocity: number, speedFrac: number): number {
+  return clamp(angularVelocity * speedFrac * 0.5, -TURN_HEEL_MAX, TURN_HEEL_MAX);
+}
+
 /** What a keel found this tick. `contact` is penetration of any kind; `into` is
  *  the hull DRIVING at the obstacle rather than sliding out of a shallow berth,
  *  and it is the only one of the two that means she is stuck. */
@@ -2935,7 +2948,7 @@ export class PhysicsSystem {
     const forwardSpeed = sinR * ship.velocity.x + cosR * ship.velocity.z;
     const speedFrac = clamp(Math.abs(forwardSpeed) / Math.max(1, stats.maxSpeed), 0, 1.15);
 
-    // Slight bow-up trim at speed; turn heel leans the hull out of a hard turn.
+    // Slight bow-up trim at speed; turn heel leans the hull OUTWARD in a hard turn.
     // Storm seas produce steeper sampled slopes — let the targets breathe a
     // little wider so heavy weather genuinely pitches the deck (still inside
     // the client renderer's defensive clamps of ±0.5 / ±0.6).
@@ -2951,7 +2964,7 @@ export class PhysicsSystem {
       (Math.atan2(sternY - bowY, stats.length * 0.8) - speedFrac * 0.035) * anchorCalm + list.trim,
       -pitchCap, pitchCap,
     );
-    const turnHeel = clamp(-ship.angularVelocity * speedFrac * 0.5, -0.06, 0.06);
+    const turnHeel = shipTurnHeel(ship.angularVelocity, speedFrac);
     const targetRoll = clamp(
       (Math.atan2(starboardY - portY, stats.width * 0.8) + turnHeel + windHeel) * anchorCalm + list.roll,
       -rollCap, rollCap,

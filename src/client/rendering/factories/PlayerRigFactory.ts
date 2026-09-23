@@ -40,6 +40,7 @@ import type { Player } from '../../../shared/types/index.js';
 import { assets, type AssetName } from '../../assets/AssetLibrary.js';
 import type { RenderQuality } from '../QualityPreference.js';
 import { AVATAR_RIG } from './PlayerMeshFactory.js';
+import { pitchUpToBoneX } from '../signConventions.js';
 
 const RIG_ASSET = 'pirate_base' as string as AssetName;
 
@@ -478,7 +479,10 @@ export function updatePlayerRig(
   if (headBone) {
     rig.headClipX = headBone.rotation.x; // whatever the clip left, solve-free
     rig.headClipY = headBone.rotation.y;
-    headBone.rotation.x = rig.headClipX + THREE.MathUtils.clamp(lookPitch, -0.5, 0.5);
+    // +x on this bone turns the gaze DOWN (+Z toward -Y) and look pitch is + for
+    // UP, so the look goes in through pitchUpToBoneX (animations-08: a sniper
+    // aiming up at a crow's nest used to nod at his boots).
+    headBone.rotation.x = rig.headClipX + pitchUpToBoneX(THREE.MathUtils.clamp(lookPitch, -0.5, 0.5));
     // PLAN 2.5's limits. Past 0.6 rad a neck would break, and the shoulders are
     // what should have turned — the body yaw is already tracking, so clamping
     // here reads as a glance rather than as an owl.

@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { PLAYER, WEAPONS } from '../../shared/constants/index.js';
 import type { Player, Ship } from '../../shared/types/index.js';
 import { angleWrap } from '../../shared/utils/index.js';
+import { lowTierHeadPitchX, pitchUpToBoneX } from './signConventions.js';
 import { getShipFloorYAt, toShipLocalPointInto } from '../../shared/interactions.js';
 import { AVATAR_RIG } from './factories/PlayerMeshFactory.js';
 import { applyRigFlinch, playRigDeath, updatePlayerRig } from './factories/PlayerRigFactory.js';
@@ -496,8 +497,9 @@ export class PlayerAnimator {
     // longer snaps to the look yaw (Game hands remotes a lagged body yaw), the
     // residual yaw here is a real head turn of up to ±0.6 rad rather than the
     // easing error it used to be. Clamped asymmetrically: a neck looks further
-    // up than down.
-    const lookPitch = THREE.MathUtils.clamp(lookPitchRaw * 0.55, -0.6, 0.5);
+    // up than down. +rotation.x turns this +Z-facing head DOWN, so the up-is-+
+    // look pitch goes in negated (vm:animations:1: it nodded the wrong way).
+    const lookPitch = lowTierHeadPitchX(lookPitchRaw);
     const headYaw = THREE.MathUtils.clamp(angleWrap(player.rotation.x - mesh.rotation.y), -0.85, 0.85);
     head.rotation.set(lookPitch, headYaw, 0);
     hair.rotation.set(lookPitch, head.rotation.y, 0);
@@ -739,7 +741,7 @@ export class PlayerAnimator {
         // suppressed because a pirate taking aim plants the weapon.
         const sighted = !!player.aiming;
         rightArmPivot.rotation.set(
-          (sighted ? -1.34 : -0.94) + aimPitch * 0.52 - armSwing * (sighted ? 0.03 : 0.12),
+          (sighted ? -1.34 : -0.94) + pitchUpToBoneX(aimPitch) * 0.52 - armSwing * (sighted ? 0.03 : 0.12),
           sighted ? -0.06 : -0.14,
           sighted ? 0.08 : 0.16,
         );
@@ -748,7 +750,7 @@ export class PlayerAnimator {
         // unless she is sighted, and then it stays on the grip.
         const support = sighted ? 1 : 1 - moveRatio * moveRatio;
         leftArmPivot.rotation.set(
-          (-0.72 + aimPitch * 0.4) * support + (0.2 + armSwing) * (1 - support),
+          (-0.72 + pitchUpToBoneX(aimPitch) * 0.4) * support + (0.2 + armSwing) * (1 - support),
           0.3 * support,
           -0.34 * support - 0.12 * (1 - support),
         );
@@ -862,7 +864,7 @@ export class PlayerAnimator {
       let wristX = 0;
       if (wristFree) {
         wristX = -rightArmPivot.rotation.x * 0.94;
-        if (firearmReady) wristX += THREE.MathUtils.clamp(lookPitchRaw, -0.7, 0.7);
+        if (firearmReady) wristX += pitchUpToBoneX(THREE.MathUtils.clamp(lookPitchRaw, -0.7, 0.7));
       }
       rightWrist.rotation.x = wristX;
     }
