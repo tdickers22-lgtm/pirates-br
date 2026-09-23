@@ -814,6 +814,10 @@ export class InteractionPrompts {
     el.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      // On touch the prompt is a HOLD target (TouchControls presses and
+      // releases interact on it, so repair/bail/capstan work by finger:
+      // crossdevice-04). A one-shot here would send the press twice.
+      if (document.documentElement.dataset.inputScheme === 'touch') return;
       // THE CLICK SENDS WHAT THE PAINT PAINTED. This used to re-arbitrate on
       // the click frame and fall back to whatever kind was last shown, then
       // decide "launch" by string-matching the English word 'Launch' in the

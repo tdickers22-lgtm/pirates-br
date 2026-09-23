@@ -4,6 +4,10 @@ import { BINDINGS, BINDING_ACTIONS, type BindingAction, mouseButtonsFor, tokensF
 import { InputSchemeTracker, initialScheme } from './InputScheme.js';
 import { resolveInputAuthority } from './inputAuthority.js';
 import { LookDeltaFilter, requestLockSafe } from './pointerLock.js';
+import { TouchControls, touchCapable } from './TouchControls.js';
+
+/** Finger drag-to-look gain (b1.4b): rad per CSS px before sensitivity and fovScale. */
+export const TOUCH_LOOK_RAD_PER_PX = 0.0055;
 
 /** The pages [Q] cycles while the supply wheel is held open. */
 export type WheelPage = 'items' | 'maps' | 'shop';
@@ -52,6 +56,8 @@ export class InputManager {
   private readonly lookFilter = new LookDeltaFilter();
   /** The active scheme (last device used). Drives input authority and the lock pill. */
   readonly scheme = new InputSchemeTracker(initialScheme());
+  /** On-screen stick, look pad and buttons (b1.4b); mounted on touch-capable devices. */
+  private touch: TouchControls | null = null;
 
   // One-shot flags (cleared each frame)
   private interactPressed = false;
@@ -169,6 +175,11 @@ export class InputManager {
         if (this.wantsRelock) this.wantsRelock = false;
       }
     });
+
+    if (touchCapable()) {
+      this.touch = new TouchControls(this, this.scheme);
+      this.touch.mount();
+    }
 
     window.addEventListener('blur', () => this.releaseAllKeys());
     document.addEventListener('visibilitychange', () => {
@@ -371,6 +382,7 @@ export class InputManager {
    *  off the keyboard" — drop every held key and one-shot, and flag a forced
    *  send so the zeroed input reaches the server on the very next tick. */
   private releaseAllKeys() {
+    this.touch?.reset();
     this.keys.clear();
     this.mouseButtons.clear();
     this.virtualHeld.clear();
@@ -462,6 +474,19 @@ export class InputManager {
     this.pitch -= dy * k;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
+
+  /** Finger drag on the look pad (TouchControls): same yaw/pitch as the mouse,
+   *  0.0055 rad/px x sensitivity x fovScale (a phone swipe is ~5x fewer px). */
+  applyTouchLook(dxPx: number, dyPx: number) {
+    if (!Number.isFinite(dxPx) || !Number.isFinite(dyPx)) return;
+    const k = TOUCH_LOOK_RAD_PER_PX * this.sensitivity * this.fovScale;
+    this.yaw -= dxPx * k;
+    this.pitch -= dyPx * k;
+    this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
+  }
+
+  /** Touch overlay, for probes and the HUD layout (null off touch devices). */
+  getTouchControls() { return this.touch; }
 
   /** Headless-automation hook: pointer lock never engages under Playwright,
    *  so screenshot tours drive the camera through this instead of mouse deltas. */

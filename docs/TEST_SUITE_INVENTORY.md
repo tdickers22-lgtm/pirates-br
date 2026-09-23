@@ -436,3 +436,4 @@ server happened to have rolled.
   assertion two lines above confirms the wreck carries four. The wreck's cargo is
   either not on an island's list or arrives on a later snapshot. This is a wire
   question, not a timing one.
+| test-touch-controls.mjs | logic | b1.4b touch core: stick -> WASD rows (8 dirs, deadzone), 150 px drag 0.35-1.2 rad, fire tap survives a tick, touch [X] hold = interactHeld every tick, pointercancel releases, replayed hold closes a hull breach on a real Match and a 0.4 s cut hold does not. Browser half (CDP touch 844x390/1024x768) is b1.4b2. |

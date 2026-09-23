@@ -229,6 +229,9 @@ export const LOGIC = [
   // b1.4a: one bindings table, input authority per scheme, safe pointer lock,
   // continuous wheel/trackpad chart zoom (crossdevice-02/09/10/11/14, mechanicshud-05).
   quick(tsx('test-input-bindings.mjs')),
+  // b1.4b touch core: virtual stick/look/buttons through the real InputManager,
+  // and the touch [X] hold replayed into a real Match closes a breach (logic half).
+  tsx('test-touch-controls.mjs'),
   // FEED-01/liveplay-21: the defender's ship_hit — HULL STRUCK line, compass
   // arc at the guns, bounded shudder, one feed row per attacker (w1.6).
   quick(tsx('test-hud-ship-struck.mjs')),
