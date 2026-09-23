@@ -10,6 +10,7 @@ import type { InputManager } from '../input/InputManager.js';
 import { openOnboardingCards } from '../ui/OnboardingCards.js';
 import { installModalStack, modalStack } from '../ui/ModalStack.js';
 import { mountControlsSettings } from './ControlsSettings.js';
+import { mountShowFpsSetting } from '../network/sessionTelemetry.js';
 import {
   classifyRenderer, decideRenderQuality, loadQualityPreference, parseRenderQuality, renderQualityLabel,
   saveAutoTierCeiling, saveQualityPreference,
@@ -234,6 +235,7 @@ export class MenuController {
     this.settingsMuteCheckbox = this.must<HTMLInputElement>('settings-mute');
     // Look speeds, invert Y, aim assist, touch layout and rebinding (b1.4g).
     mountControlsSettings(document.getElementById('settings-controls-mount'), this.inputMgr ?? undefined);
+    mountShowFpsSetting(document.getElementById('settings-controls-mount')); // b1.7c: Settings > Show FPS pill
     this.settingsQualitySelect = this.must<HTMLSelectElement>('settings-quality');
     this.settingsQualityNote = this.must('settings-quality-note');
 
