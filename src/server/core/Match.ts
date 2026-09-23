@@ -2327,8 +2327,29 @@ export class Match {
     });
   }
 
+  /** A bot crewmate is crew furniture: when a HUMAN claims a station the bot
+   *  holds, the bot steps off in the same tick so the human's [X] is honoured
+   *  (liveplay-08). A human occupant never yields, and a bot never displaces. */
+  private yieldStationFromBots(
+    ship: Ship,
+    station: 'helm' | 'cannon',
+    claimant: Player,
+    cannonIndex: number | null = null,
+  ) {
+    // Only the claimant's OWN crew's bots: a boarder never bumps an enemy hand.
+    if (claimant.isBot || claimant.shipId !== ship.id) return;
+    for (const other of this.state.players) {
+      if (!other.isBot || other.id === claimant.id || other.onShipId !== ship.id || other.shipId !== ship.id) continue;
+      const holds = station === 'helm'
+        ? other.atHelm
+        : other.atCannon && other.cannonIndex === cannonIndex;
+      if (holds) this.clearStationFlags(other);
+    }
+  }
+
   private enterHelm(player: Player, ship: Ship): boolean {
     if (ship.sinking) return false;
+    this.yieldStationFromBots(ship, 'helm', player);
     if (this.isStationOccupied(ship, 'helm', player.id)) return false;
     this.clearStationFlags(player);
     player.atHelm = true;
@@ -2350,6 +2371,7 @@ export class Match {
 
   private enterCannon(player: Player, ship: Ship, cannonIndex: number, yaw: number, pitch: number): boolean {
     if (ship.sinking) return false;
+    this.yieldStationFromBots(ship, 'cannon', player, cannonIndex);
     if (this.isStationOccupied(ship, 'cannon', player.id, cannonIndex)) return false;
     this.clearStationFlags(player);
     player.atCannon = true;
