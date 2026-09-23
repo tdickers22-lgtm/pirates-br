@@ -15,6 +15,7 @@ import {
   HULL_SATURATION,
 } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
+import { TRUCE_SECONDS } from '../src/shared/truce.ts';
 import { SHIP, SHIP_STATS, FLOODING, SHIP_UPGRADES, PLAYER } from '../src/shared/constants/index.ts';
 import {
   countOpenHoles,
@@ -408,6 +409,9 @@ console.log('\nSinking by flooding (waterLevel ≥ 1): crew SURVIVES the sink (r
 {
   const match = new Match({ matchId: 'flooding-test', botCount: 3 });
   match.state.phase = 'playing';
+  // The sink lands after the match truce (b1.6e): inside it no crew banks
+  // SHIP_SINK_GOLD, which is test-truce-integrity's row, not this one.
+  match['t'] = TRUCE_SECONDS + 1;
   const st = match.state;
   const victimShip = st.ships[0];
   const attacker = st.players.find((p) => p.shipId && p.shipId !== victimShip.id);

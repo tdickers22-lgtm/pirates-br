@@ -10,6 +10,7 @@
 //
 // LOGIC suite: drives the real Match, no stack, no browser.
 import { Match } from '../src/server/core/Match.ts';
+import { TRUCE_SECONDS } from '../src/shared/truce.ts';
 import { ECONOMY, SHIP_STATS } from '../src/shared/constants/index.ts';
 
 let failures = 0;
@@ -29,6 +30,9 @@ const fakeWs = () => ({ readyState: 1, send() {} });
 // that shares a hull — the shape a crew has had since long before crew records.
 console.log('Small arms pass through a crewmate:');
 const ffMatch = new Match({ matchId: 'crews-ff', botCount: 3 });
+// The round flies after the match truce (b1.6e): inside it the enemy crew's
+// pirate is shielded too, and the trace would find nobody.
+ffMatch['t'] = TRUCE_SECONDS + 1;
 const [shooter, mate, enemy] = ffMatch.state.players;
 mate.shipId = shooter.shipId;
 mate.crewId = shooter.crewId ?? shooter.shipId;

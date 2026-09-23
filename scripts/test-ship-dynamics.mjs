@@ -8,6 +8,12 @@ import {
 } from '../src/server/systems/PhysicsSystem.ts';
 import { FLOODING, SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import { getHullContactChain } from '../src/shared/hull.ts';
+import { TRUCE_SECONDS } from '../src/shared/truce.ts';
+
+// Ship-ship contacts run after the match truce (b1.6e): inside it an unhelmed
+// contact opens no plank at any speed, so the collision rows below would pass
+// (or fail) against the truce, not the contact model.
+const AFTER_TRUCE = TRUCE_SECONDS + 1;
 import {
   angleWrap,
   gerstnerHeight,
@@ -193,7 +199,7 @@ console.log('\nShip-ship collision (oriented hulls)');
   const a = makeShip('galleon', { anchored: true });
   const b = makeShip('galleon', { anchored: true });
   b.position.x = 13;
-  for (let i = 0; i < 60; i++) physics.update(DT, i * DT, [a, b], [], [], [], []);
+  for (let i = 0; i < 60; i++) physics.update(DT, AFTER_TRUCE + i * DT, [a, b], [], [], [], []);
   const gap = Math.abs(b.position.x - a.position.x);
   expect('parallel galleons a beam clear of touching do not collide', Math.abs(gap - 13) < 0.25, `gap=${gap.toFixed(2)}`);
   expect('rail-to-rail hulls stay undamaged', a.holes.length === 0 && b.holes.length === 0);
@@ -202,7 +208,7 @@ console.log('\nShip-ship collision (oriented hulls)');
   const c = makeShip('galleon', { anchored: true });
   const d = makeShip('galleon', { anchored: true });
   d.position.x = 11;
-  for (let i = 0; i < 240; i++) physics2.update(DT, i * DT, [c, d], [], [], [], []);
+  for (let i = 0; i < 240; i++) physics2.update(DT, AFTER_TRUCE + i * DT, [c, d], [], [], [], []);
   const gap2 = Math.abs(d.position.x - c.position.x);
   expect('overlapping galleons ease out to the loft contact beam', gap2 > touch - 0.4 && gap2 < touch + 1.2,
     `gap=${gap2.toFixed(2)} vs touch ${touch.toFixed(2)}`);
@@ -217,7 +223,7 @@ function runConvergence(setup) {
   for (let i = 0; i < 600 && !contact; i++) {
     driveA(a);
     driveB(b);
-    physics.update(DT, i * DT, [a, b], [], [], [], []);
+    physics.update(DT, AFTER_TRUCE + i * DT, [a, b], [], [], [], []);
     const damaged = a.holes.length > 0 || b.holes.length > 0;
     if (damaged) {
       contact = {

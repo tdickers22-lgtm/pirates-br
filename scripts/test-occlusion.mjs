@@ -6,6 +6,7 @@ import { gerstnerHeight, WAVE_PARAMS, getIslandSurfaceY, getIslandMaxRadius } fr
 import { SHIP_STATS, PLAYER } from '../src/shared/constants/index.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
+import { TRUCE_SECONDS } from '../src/shared/truce.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -236,6 +237,9 @@ console.log('\nProjectile vs player pose');
 console.log('\nMatch hitscan occlusion');
 {
   const match = new Match({ matchId: 'occlusion-test', botCount: 0 });
+  // Shots land after the match truce (b1.6e); inside it another crew's pirate
+  // takes nothing and every 'blocks' row below would pass vacuously.
+  match['t'] = TRUCE_SECONDS + 1;
   const state = match.state;
   state.ships = [];
   state.seaRocks = [];
@@ -313,6 +317,9 @@ console.log('\nMatch hitscan occlusion');
 console.log('\nHitscan vs island structures');
 {
   const match = new Match({ matchId: 'structure-occlusion', botCount: 0 });
+  // Shots land after the match truce (b1.6e); inside it another crew's pirate
+  // takes nothing and every 'blocks' row below would pass vacuously.
+  match['t'] = TRUCE_SECONDS + 1;
   const island = makeIsland();
   const groundY = getIslandSurfaceY(island, 0, 0);
 

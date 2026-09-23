@@ -16,6 +16,7 @@
 import { PhysicsSystem, updateShipFlooding, evaluateHoleFlood } from '../src/server/systems/PhysicsSystem.ts';
 import { WeaponSystem } from '../src/server/systems/WeaponSystem.ts';
 import { Match } from '../src/server/core/Match.ts';
+import { TRUCE_SECONDS } from '../src/shared/truce.ts';
 import { SHIP, SHIP_STATS, FLOODING, PLAYER } from '../src/shared/constants/index.ts';
 import { gerstnerHeight, WAVE_PARAMS } from '../src/shared/utils/index.ts';
 import { countOpenHoles, getShipFloorYAt, isStandingInShipHold, toShipLocalPoint } from '../src/shared/interactions.ts';
@@ -292,6 +293,9 @@ console.log('\n3. Ramming a ship to death credits the attacking crew');
   const match = new Match({ matchId: 'combat-ram', botCount: 3 });
   const st = match.state;
   st.phase = 'playing';
+  // The ram lands after the match truce (b1.6e): inside it an unhelmed contact
+  // opens no plank and banks no bounty (test-truce-integrity's rows).
+  match['t'] = TRUCE_SECONDS + 1;
   const attacker = st.players[0];
   const shipA = st.ships.find((s) => s.id === attacker.shipId);
   const shipB = st.ships.find((s) => s.id !== shipA.id);

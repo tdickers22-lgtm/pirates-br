@@ -2,6 +2,7 @@
 import { Match } from '../src/server/core/Match.ts';
 import { SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import { getIslandSurfaceY } from '../src/shared/utils/index.ts';
+import { TRUCE_SECONDS } from '../src/shared/truce.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -74,6 +75,9 @@ expect('World keg blast resolves impact section logically', hits.find((hit) => h
 // single most dangerous thing aboard. One blast is capped now.
 for (const mega of [false, true]) {
   const blastMatch = new Match({ matchId: `keg-blast-${mega}`, botCount: 1 });
+  // The blast lands after the match truce (b1.6e): inside it a keg planted by
+  // anyone but the hull's own crew opens nothing, which is not what this pins.
+  blastMatch['t'] = TRUCE_SECONDS + 1;
   const target = blastMatch.state.ships[0];
   target.holes = [];
   target.nextHoleId = 1;
