@@ -11,6 +11,7 @@ import { GamepadSource, type PadContext, type PadLike } from './GamepadSource.js
 import { MenuNav, type NavDir } from './MenuNav.js';
 import { Haptics } from './Haptics.js';
 import { modalStack } from '../ui/ModalStack.js';
+import { lookSlowdown, magnetismStep, type AimAssistFrame } from './AimAssist.js';
 
 /** Where the player is, for the pad's context routes (Game sets it each frame). */
 export type PlayContext = 'foot' | 'helm' | 'cannon' | 'swim';
@@ -178,8 +179,13 @@ export class InputManager {
       }
     });
 
-    lockElement.addEventListener('mousedown', (e) => {
+    lockElement.addEventListener('mousedown', (ev) => {
       if (this.vHeld) return;
+      // Trackpad parity (b1.4h): a two-finger click already arrives as button 2;
+      // control-click is the Mac's other secondary click, so it aims too and
+      // never fires. Nothing else binds Control.
+      const e = ev.button === 0 && ev.ctrlKey ? { button: 2, preventDefault: () => ev.preventDefault() } : ev;
+      if (e !== ev) this.ctrlClickAim = true;
       // A tap on a phone synthesises a compatibility mousedown: touch input is
       // driven by TouchControls through setActionHeld, never by these events,
       // and a touch session never asks for pointer lock.
@@ -204,6 +210,10 @@ export class InputManager {
 
     document.addEventListener('mouseup', (e) => {
       this.mouseButtons.delete(e.button);
+      if (e.button === 0 && this.ctrlClickAim) {
+        this.ctrlClickAim = false;
+        this.mouseButtons.delete(2);
+      }
     });
 
     document.addEventListener('mousemove', (e) => {
@@ -318,8 +328,9 @@ export class InputManager {
   /** Right stick look: radians this frame, same signs as the mouse. */
   applyPadLook(dxRad: number, dyRad: number) {
     if (!Number.isFinite(dxRad) || !Number.isFinite(dyRad)) return;
-    this.yaw -= dxRad;
-    this.pitch -= dyRad * this.lookScale('gamepad').ySign;
+    const slow = this.aimSlowFor('gamepad');
+    this.yaw -= dxRad * slow;
+    this.pitch -= dyRad * slow * this.lookScale('gamepad').ySign;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 
@@ -639,6 +650,44 @@ export class InputManager {
   /** D13: aim assist reads this (b1.4h); it only ever applies on touch and gamepad. */
   aimAssistEnabled() { return this.controls.aimAssist && this.scheme.current !== 'mouse'; }
 
+  /** Control-click stands in for the right button until the left one is released. */
+  private ctrlClickAim = false;
+  /** Aim assist (b1.4h): the slowdown factor for this frame and the last magnetism step. */
+  private aimSlow = 1;
+  private aimSlowScheme: 'gamepad' | 'touch' | null = null;
+  private lastMagnet = { dYaw: 0, dPitch: 0 };
+  /** The slowdown applies only to the scheme it was computed for: mouse never. */
+  private aimSlowFor(scheme: 'gamepad' | 'touch') { return this.aimSlowScheme === scheme ? this.aimSlow : 1; }
+
+  /**
+   * Game, once per frame: the world half of aim assist (eye, enemy hitboxes, a
+   * line-of-sight test, the weapon in hand). null = nothing to assist (off the
+   * match, the mouse scheme, the setting off). The scheme, the setting, the
+   * play context and fovScale come from here, so a mouse can never be assisted.
+   */
+  tickAimAssist(dtSec: number, world: Pick<AimAssistFrame, 'eye' | 'targets' | 'los' | 'weaponId' | 'scoped'> | null) {
+    const scheme = this.scheme.current;
+    this.aimSlow = 1;
+    this.aimSlowScheme = null;
+    this.lastMagnet = { dYaw: 0, dPitch: 0 };
+    if (!world || scheme === 'mouse' || !this.hasAuthority) return;
+    const frame: AimAssistFrame = {
+      ...world,
+      scheme,
+      enabled: this.controls.aimAssist,
+      context: this.playContext,
+      fovScale: this.fovScale,
+    };
+    this.aimSlow = lookSlowdown(frame, this.yaw, this.pitch);
+    this.aimSlowScheme = scheme;
+    const m = magnetismStep(frame, this.yaw, this.pitch, this.isAimHeld(), dtSec);
+    this.yaw += m.dYaw;
+    this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch + m.dPitch));
+    this.lastMagnet = m;
+  }
+  /** Debug/probe read of the assist this frame. */
+  getAimAssistState() { return { slowdown: this.aimSlow, scheme: this.aimSlowScheme, magnet: { ...this.lastMagnet } }; }
+
   /** ADS multiplier while aiming, and the per-scheme Y sign. */
   private lookScale(scheme: 'mouse' | 'gamepad' | 'touch') {
     return {
@@ -660,7 +709,7 @@ export class InputManager {
   applyTouchLook(dxPx: number, dyPx: number) {
     if (!Number.isFinite(dxPx) || !Number.isFinite(dyPx)) return;
     const s = this.lookScale('touch');
-    const k = TOUCH_LOOK_RAD_PER_PX * this.controls.touchLook * this.fovScale * s.k;
+    const k = TOUCH_LOOK_RAD_PER_PX * this.controls.touchLook * this.fovScale * s.k * this.aimSlowFor('touch');
     this.yaw -= dxPx * k;
     this.pitch -= dyPx * k * s.ySign;
     this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));

@@ -69,6 +69,11 @@ if (B) {
     return t.includes('Mouse2') && t.length === 1;
   });
   expect('no action needs the right button without an alternative', rmbOnly.length === 0, rmbOnly.join(', '));
+  expect('aim answers the two-finger click (Mouse2) AND a key (trackpad table)',
+    tokensFor('aim', 'mouse').includes('Mouse2') && tokensFor('aim', 'mouse').some((t) => !t.startsWith('Mouse')));
+  const gameSrc = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  expect('the context menu is suppressed (two-finger click never opens it in a match)',
+    /document\.addEventListener\('contextmenu', \(event\) => event\.preventDefault\(\)\)/.test(gameSrc));
   // Gamepad tokens are Standard Gamepad names.
   const padNames = new Set(Object.keys(B.PAD_BUTTON_INDEX));
   const badPad = BINDING_ACTIONS.flatMap((a) => tokensFor(a, 'gamepad')).filter((t) => {
@@ -224,6 +229,18 @@ if (IM) {
   fire('mousedown', { button: 0 });
   expect('mouse scheme, locked: click fires', input.buildInput().fire === true);
   fire('mouseup', { button: 0 });
+  // Trackpad parity (b1.4h): two-finger click (button 2) and control-click both
+  // aim and neither fires; releasing the click releases the aim.
+  fire('mousedown', { button: 2 });
+  const twoFinger = input.buildInput();
+  fire('mouseup', { button: 2 });
+  expect('trackpad two-finger click (button 2) aims, does not fire', twoFinger.aim === true && twoFinger.fire === false);
+  fire('mousedown', { button: 0, ctrlKey: true });
+  const ctrlClick = input.buildInput();
+  fire('mouseup', { button: 0, ctrlKey: false });
+  const released = input.buildInput();
+  expect('control-click aims, does not fire, and lets go on release', ctrlClick.aim === true && ctrlClick.fire === false && released.aim === false && released.fire === false,
+    `aim ${ctrlClick.aim} fire ${ctrlClick.fire} after ${released.aim}/${released.fire}`);
 }
 
 // ── The lock helper alone ─────────────────────────────────────────────────

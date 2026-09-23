@@ -236,6 +236,9 @@ export const LOGIC = [
   // b1.4e gamepad: radial deadzone 0.12/0.95, look curve ^2 at 220/150 deg/s, table
   // routes per context, Y tap/hold split, MenuNav pickNext, haptics table + off switch.
   quick(tsx('test-gamepad-curves.mjs')),
+  // b1.4h aim assist (D13): touch + gamepad only, x0.55 slowdown in 2.5 deg <= 60 m with
+  // LOS, magnetism <= 3 deg/s in 4 deg only while aiming, never cannons/Glass, never snaps.
+  quick(tsx('test-aim-assist.mjs')),
   // b1.4b touch core: virtual stick/look/buttons through the real InputManager,
   // and the touch [X] hold replayed into a real Match closes a breach (logic half).
   tsx('test-touch-controls.mjs'),

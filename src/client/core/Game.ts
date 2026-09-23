@@ -35,6 +35,7 @@ import { NetworkClient } from '../network/NetworkClient.js';
 import { connectCopy, waitForRetry, type ConnectPhase } from '../network/connectPolicy.js';
 import { MenuController } from '../menu/MenuController.js';
 import { InputManager } from '../input/InputManager.js';
+import { collectAimTargets, makeAimLineOfSight } from '../input/AimAssist.js';
 import { isBound, type BindingAction } from '../../shared/bindings.js';
 import { lockHintVisible } from '../input/inputAuthority.js';
 import { requestLockSafe } from '../input/pointerLock.js';
@@ -3473,6 +3474,7 @@ export class Game {
   private stepFramePost() {
     this.updatePointerLockHint();
     this.updateTouchContext();
+    this.updateAimAssist();
     // Outside every `if (!this.state)` guard: the ceremony must keep counting
     // while the join snapshot and the island builds are still landing.
     this.updateStartSequenceFrame();
@@ -4102,6 +4104,21 @@ export class Game {
       z: player.position.z + (dz / len) * offset,
       shipId: ship.id,
     };
+  }
+
+  /** Aim assist (b1.4h, D13): hands InputManager the eye, enemy hitboxes and a
+   *  cover test. Touch and gamepad only; a mouse frame costs one branch. */
+  private updateAimAssist(): void {
+    const me = this.inMatch && this.state && this.input.aimAssistEnabled() ? this.getLocalPlayer() : null;
+    if (!me || !this.state) { this.input.tickAimAssist(this.frameDt, null); return; }
+    const eye = this.renderer.camera.position;
+    this.input.tickAimAssist(this.frameDt, {
+      eye: { x: eye.x, y: eye.y, z: eye.z },
+      targets: collectAimTargets(this.state, me),
+      los: makeAimLineOfSight(this.state),
+      weaponId: me.weapons[me.activeSlot]?.weaponId ?? null,
+      scoped: this.input.isSpyglassHeld() || me.equippedTool === 'spyglass',
+    });
   }
 
   /** Touch contexts (b1.4c): the on-screen arc follows the station, the water
