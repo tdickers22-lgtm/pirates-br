@@ -99,7 +99,7 @@ export const SESSION_LIMITS: Record<MsgClass, BucketSpec> = {
 export const ABUSE_CLOSE_MS = 10_000;
 export const ABUSE_CLOSE_CODE = 1008;
 
-const MATCH_SCOPED = new Set(['shop_buy', 'trade_action', 'dev_bot_peace', 'dev_grant_gold']);
+const MATCH_SCOPED = new Set(['shop_buy', 'trade_action', 'dev_bot_peace', 'dev_grant_gold', 'dev_scuttle']);
 
 /** Which bucket a parsed frame's `type` is charged to. Unknown types are
  *  charged as lobby traffic (the strictest general bucket): the validator

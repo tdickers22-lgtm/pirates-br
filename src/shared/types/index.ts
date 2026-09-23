@@ -1091,6 +1091,8 @@ type MsgType =
    *  ballast / bounty / spill loop can be driven in a live browser probe
    *  without grinding 9000 gold of chests first. */
   | 'dev_grant_gold'
+  /** dev-only (honoured solo): your hull founders and you go down with her. */
+  | 'dev_scuttle'
   // lobby-scoped messages (server orchestration)
   | 'welcome'
   | 'set_name'
@@ -1506,7 +1508,8 @@ export type ClientMsgType =
   | 'shop_buy'
   | 'trade_action'
   | 'dev_bot_peace'
-  | 'dev_grant_gold';
+  | 'dev_grant_gold'
+  | 'dev_scuttle';
 
 /** A verb that carries no data. Still validated: a non-object payload is a
  *  malformed frame whatever the type, and it is dropped rather than routed. */
@@ -1541,6 +1544,7 @@ export interface ClientMsgPayloads {
   trade_action: TradeActionPayload;
   dev_bot_peace: { enabled: boolean };
   dev_grant_gold: { gold: number };
+  dev_scuttle: Record<string, never>;
 }
 
 /** One validated client message. */

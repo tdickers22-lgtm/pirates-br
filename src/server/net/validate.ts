@@ -273,6 +273,7 @@ export const CLIENT_VALIDATORS: {
     const p = bag(raw);
     return p ? { enabled: p.enabled === true } : null;
   },
+  dev_scuttle: (raw) => (bag(raw) ? {} : null),
   dev_grant_gold: (raw) => {
     const p = bag(raw);
     if (!p) return null;

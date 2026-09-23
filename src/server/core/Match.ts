@@ -2282,6 +2282,16 @@ export class Match {
         }
         break;
       }
+      case 'dev_scuttle': {
+        // Dev/testing (solo only, b1.5f): your own hull founders and you go down
+        // with her, through the same startShipSinking + handlePlayerDeath path a
+        // real sinking takes, so the elimination -> spectate gate is not faked.
+        if (!this.devHooks) { console.log(`[Match ${this.id}] ${msg.type} refused: PIRATES_BR_DEV_HOOKS unset`); break; }
+        const me = this.clients.size <= 1 && this.state.phase === 'playing' ? this.getPlayer(client.playerId) : null;
+        const hull = me ? this.getAliveShip(me.shipId) : null;
+        if (me && hull && me.state !== 'eliminated' && me.state !== 'respawning') { this.devAssisted = true; this.startShipSinking(hull, true, null); this.handlePlayerDeath(me); }
+        break;
+      }
     }
   }
 
