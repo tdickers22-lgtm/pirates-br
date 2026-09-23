@@ -240,6 +240,10 @@ export const LOGIC = [
   // fleet, set_name's throwing .trim(), the unchecked party ids, ping's 64 KB
   // echo, trade_action's crashing cast) are pinned one by one (w8.4).
   quick(tsx('test-wire-validation.mjs')),
+  // b1.2a (correctness-01): a match whose tick throws 3x in 5 s is quarantined
+  // (match_ended{server_fault}, crews reaped to party) while a second match keeps
+  // ticking and nothing reaches the process fatal budget. Real timers, ~1.5 s.
+  tsx('test-match-fault-isolation.mjs'),
   // ONLINE-01 phase 2 (netcode-24): N matches on ONE process. Server-side only
   // (no browser, no GPU) but ~45 s and CPU-bound, so NOT quick tier. Grades
   // worstSimLagSec < 0.1 at 8 matches, the capacity refusal above the ceiling,

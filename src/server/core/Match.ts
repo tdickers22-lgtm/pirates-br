@@ -222,7 +222,9 @@ export interface MatchEndResult {
   matchId: string;
   winnerId: string | null;
   winnerName: string | null;
-  reason: 'gold' | 'last_ship' | 'abandoned' | 'draw';
+  /** 'server_fault': the match was quarantined after repeated tick faults
+   *  (b1.2a); its result is not a real placement and is never persisted. */
+  reason: 'gold' | 'last_ship' | 'abandoned' | 'draw' | 'server_fault';
   humans: MatchHumanResult[];
   /** Every crew in the match, ranked. See MatchBoardRow. */
   board: MatchBoardRow[];
@@ -560,6 +562,10 @@ export class Match {
 
   /** Called once when the match definitively ends (winner found, last ship, or abandoned). */
   onMatchEnd: ((result: MatchEndResult) => void) | null = null;
+  /** Called once when repeated tick faults quarantine this match (b1.2a). The
+   *  lobby reaps it on the next turn of the event loop, which sends every crew
+   *  back to its party; no other match is touched. */
+  onFault: ((reason: 'server_fault') => void) | null = null;
   /** Called when an in-match client's WebSocket closes — lobby uses this to clean its session. */
   onClientDisconnect: ((playerId: string) => void) | null = null;
 
@@ -778,6 +784,7 @@ export class Match {
    * with a clean log. So count what we throw away and say it out loud.
    */
   private runTicks() {
+    if (this.quarantined) return;
     const now = performance.now();
     this.tickBacklogSec += (now - this.lastTickWallMs) / 1000;
     this.lastTickWallMs = now;
@@ -785,7 +792,19 @@ export class Match {
     let steps = 0;
     while (this.tickBacklogSec >= step && steps < MAX_CATCHUP_TICKS) {
       this.tickBacklogSec -= step;
-      this.tick();
+      // PER-MATCH FAULT BOUNDARY (correctness-01). This interval has no caller:
+      // a throw here used to reach process 'uncaughtException', and because the
+      // interval stayed armed the same deterministic throw re-fired every
+      // 16.7 ms, so index.ts's FATAL_BUDGET (5 in 60 s) tripped in ~80 ms and
+      // emergencyStop() ended EVERY match on the machine. Now a fault ends this
+      // callback (the rest of the backlog would only re-run a half-updated
+      // tick) and is counted against this match alone.
+      try {
+        this.tick();
+      } catch (err) {
+        this.noteTickFault(err);
+        return;
+      }
       steps++;
     }
     // After an extreme stall, drop the surplus backlog instead of grinding through it.
@@ -793,6 +812,70 @@ export class Match {
       const dropped = Math.floor((this.tickBacklogSec - step * MAX_CATCHUP_TICKS) / step);
       this.tickBacklogSec = step * MAX_CATCHUP_TICKS;
       this.noteDroppedTicks(dropped);
+    }
+  }
+
+  /** Wall-ms stamps of recent tick faults, pruned to TICK_FAULT_WINDOW_MS. */
+  private tickFaultStamps: number[] = [];
+  /** Set once repeated faults stopped this match; runTicks is then a no-op. */
+  private quarantined = false;
+  static readonly TICK_FAULT_LIMIT = 3;
+  static readonly TICK_FAULT_WINDOW_MS = 5_000;
+
+  isQuarantined(): boolean { return this.quarantined; }
+
+  /**
+   * One tick threw. Log it as a structured `match_fault` line (grep-able in
+   * `fly logs`), and on the TICK_FAULT_LIMIT-th fault inside
+   * TICK_FAULT_WINDOW_MS quarantine the match: stop the interval, tell its
+   * clients `match_ended{reason:'server_fault'}`, and hand it to the lobby via
+   * onFault. A one-off fault (a transient bad ref) keeps the match running.
+   */
+  private noteTickFault(err: unknown): void {
+    const now = Date.now();
+    this.tickFaultStamps.push(now);
+    while (this.tickFaultStamps.length > 0 && now - this.tickFaultStamps[0] > Match.TICK_FAULT_WINDOW_MS) {
+      this.tickFaultStamps.shift();
+    }
+    const n = this.tickFaultStamps.length;
+    const stack = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    console.error(`[match_fault] ${JSON.stringify({
+      matchId: this.id, tick: this.tickCount, phase: this.state?.phase ?? null,
+      faults: n, limit: Match.TICK_FAULT_LIMIT, windowMs: Match.TICK_FAULT_WINDOW_MS,
+    })}\n${stack}`);
+    if (n >= Match.TICK_FAULT_LIMIT) this.quarantine();
+  }
+
+  private quarantine(): void {
+    if (this.quarantined) return;
+    this.quarantined = true;
+    if (this.tickInterval) {
+      clearInterval(this.tickInterval);
+      this.tickInterval = null;
+    }
+    console.error(`[match_fault] ${JSON.stringify({ matchId: this.id, quarantined: true, humans: this.clients.size })}`);
+    // The end result is built from sim state that just threw three times; if
+    // building it throws too, the clients still get a minimal match_ended so
+    // nobody sits on a frozen sea.
+    try {
+      if (this.state) this.state.phase = 'ended';
+      this.endedAt ??= Date.now();
+      this.endReason = 'server_fault';
+      this.emitMatchEnd();
+    } catch (err) {
+      console.error(`[match_fault] ${this.id} end board failed:`, err);
+      if (!this.endResultEmitted) {
+        this.endResultEmitted = true;
+        const result: MatchEndResult = {
+          matchId: this.id, winnerId: null, winnerName: null, reason: 'server_fault',
+          humans: [], board: [], crewCount: 0, devAssisted: this.devAssisted,
+        };
+        this.broadcast({ type: 'match_ended', ts: Date.now(), payload: result });
+        try { this.onMatchEnd?.(result); } catch {}
+      }
+    }
+    try { this.onFault?.('server_fault'); } catch (err) {
+      console.error(`[match_fault] ${this.id} onFault threw:`, err);
     }
   }
 

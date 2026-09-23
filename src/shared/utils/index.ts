@@ -210,10 +210,27 @@ export function randAngle(rng: () => number = Math.random): number {
   return rng() * Math.PI * 2;
 }
 
+/**
+ * Wrap an angle into [-PI, PI]. O(1) (correctness-03, b1.2a).
+ *
+ * This used to be a subtract loop: O(|a|), so a client yaw of 1e9 cost ~0.8 s
+ * of server event loop and 1e17 never returned (1e17 - 2*PI === 1e17). One
+ * player_input frame froze every match on the host.
+ *
+ * In-band values return untouched, so every result the loop produced for a
+ * sane angle is bit-identical and client prediction (stepPirate) stays equal to
+ * the server. Out of band the modulo form agrees with the loop to ulps, keeps
+ * the loop's sign convention at the seam (a > PI lands in (-PI, PI], a < -PI in
+ * [-PI, PI)), and non-finite input is 0 instead of a hang (Infinity) or NaN
+ * leaking into the sim.
+ */
 export function angleWrap(a: number): number {
-  while (a > Math.PI) a -= Math.PI * 2;
-  while (a < -Math.PI) a += Math.PI * 2;
-  return a;
+  if (a >= -Math.PI && a <= Math.PI) return a;
+  if (!Number.isFinite(a)) return 0;
+  const TAU = Math.PI * 2;
+  let r = ((a + Math.PI) % TAU + TAU) % TAU - Math.PI;
+  if (a > 0 && r <= -Math.PI) r += TAU;
+  return r;
 }
 
 export function degreesToRad(d: number): number {

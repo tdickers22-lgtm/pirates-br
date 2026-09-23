@@ -49,6 +49,9 @@ export const VALID_INTERACT_INTENTS: ReadonlySet<InteractIntent> = new Set<Inter
  *  this is the backstop that keeps a 60 KB string out of a party roster. */
 const MAX_FIELD_CHARS = 128;
 
+/** Largest |yaw| / |pitch| (radians) a player_input may carry. */
+export const MAX_WIRE_ANGLE = 1e4;
+
 type Bag = Record<string, unknown>;
 
 /** A payload must be an object (or absent). Arrays and primitives are not. */
@@ -87,6 +90,10 @@ export function sanitizePlayerInput(raw: unknown): PlayerInput | null {
   const yaw = num(input.yaw);
   const pitch = num(input.pitch);
   if (seq === null || yaw === null || pitch === null) return null;
+  // A real client sends a wrapped yaw and a clamped pitch; a magnitude past
+  // 1e4 rad is a forged frame, refused before any maths runs on it
+  // (correctness-03: angleWrap was O(|yaw|) and 1e17 never returned).
+  if (Math.abs(yaw) > MAX_WIRE_ANGLE || Math.abs(pitch) > MAX_WIRE_ANGLE) return null;
 
   const slot = input.slot === 0 || input.slot === 1 || input.slot === 2 || input.slot === 3
     ? input.slot

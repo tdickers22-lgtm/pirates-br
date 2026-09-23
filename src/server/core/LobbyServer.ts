@@ -1440,6 +1440,12 @@ export class LobbyServer {
     // ships of whatever class the spawn table rolled.
     const match = new Match({ matchId, botCount: opts.botCount, mode: opts.mode });
     match.onMatchEnd = (result) => this.onMatchEnd(matchId, result);
+    // b1.2a: a quarantined match (repeated tick faults) is reaped on the next
+    // turn of the event loop, outside its own runTicks stack; reapMatch sends
+    // every crew back to its party. No other match is touched.
+    match.onFault = () => setImmediate(() => this.guarded('reap faulted match', () => {
+      if (this.matches.get(matchId) === match) this.reapMatch(matchId, match, 'server_fault');
+    }));
     match.start();
     this.matches.set(matchId, match);
     return match;
@@ -1581,6 +1587,9 @@ export class LobbyServer {
 
   private onMatchEnd(matchId: string, result: MatchEndResult): void {
     console.log(`[Lobby] match ${matchId.slice(0, 6)} ended (${result.reason}) — ${result.humans.length} humans`);
+    // A quarantined match (b1.2a) ended because the server faulted, not because
+    // anyone won or lost: nothing is persisted, the crews just go home.
+    if (result.reason === 'server_fault') return;
 
     // Persist stats for every human in the result, even ones whose ws already closed —
     // identity is by display name (the canonical key for the JSON store).
@@ -1646,31 +1655,53 @@ export class LobbyServer {
         this.disposeSession(parked);
       }
     }
+    // LOBBY TICK GUARD (b1.2a). tick() as a whole is already inside
+    // guarded('tick'), but one throw used to skip everything after it every
+    // second: a bad queue entry starved match GC, a bad match starved the
+    // sweep. Each section and each match now has its own boundary.
     if (this.queue.length > 0) {
-      this.tryDispatchQueue();
-      this.broadcastQueue();
+      this.guarded('tick: queue', () => {
+        this.tryDispatchQueue();
+        this.broadcastQueue();
+      });
     }
 
     const now = Date.now();
-    for (const [matchId, match] of this.matches) {
+    for (const [matchId, match] of Array.from(this.matches)) {
+      this.guarded(`tick: gc ${matchId.slice(0, 6)}`, () => this.gcMatch(matchId, match, now));
+    }
+
+    // Auto-detach clients lingering on the post-match screen too long.
+    this.guarded('tick: ended-screen sweep', () => this.sweepEndedSessions(now));
+  }
+
+  /** One match's GC step (see tick). A quarantined match is reaped here too,
+   *  as the backstop for its onFault hook. */
+  private gcMatch(matchId: string, match: Match, now: number): void {
+    if (match.isQuarantined()) {
+      this.reapMatch(matchId, match, 'server_fault');
+      return;
+    }
+    {
       const endedAt = match.endedAtMs();
       if (endedAt) {
         this.matchEmptySince.delete(matchId);
         if (now - endedAt > LobbyServer.tunables.matchGcAfterEndMs) this.reapMatch(matchId, match, 'ended');
-        continue;
+        return;
       }
       // Zombie sweep — see EMPTY_MATCH_GC_MS.
       if (match.humanCount() > 0) {
         this.matchEmptySince.delete(matchId);
-        continue;
+        return;
       }
       const emptySince = this.matchEmptySince.get(matchId);
       if (emptySince === undefined) this.matchEmptySince.set(matchId, now);
       else if (now - emptySince > EMPTY_MATCH_GC_MS) this.reapMatch(matchId, match, 'no humans');
     }
+  }
 
-    // Auto-detach clients lingering on the post-match screen too long.
-    for (const session of this.clients.values()) {
+  private sweepEndedSessions(now: number): void {
+    for (const session of Array.from(this.clients.values())) {
       if (session.state === 'match_ended' && session.endedMatchSince
           && now - session.endedMatchSince > LobbyServer.tunables.endedMatchDetachMs) {
         this.detachToParty(session, 'timeout');
