@@ -144,6 +144,18 @@ try {
   const again = await open('203.0.113.7');
   expect('closing one of the 8 frees the slot', again.ok, `got ${again.status}`);
 
+  // Fly appends to a client-supplied x-forwarded-for; Fly-Client-IP is the
+  // edge's own word. A 9th socket that forges a fresh XFF but carries the same
+  // Fly-Client-IP is still the same client.
+  const forged = await new Promise((resolve) => {
+    const ws = new WebSocket(WS_URL, { headers: { 'x-forwarded-for': '198.51.100.99', 'fly-client-ip': '203.0.113.7' } });
+    opened.push(ws);
+    ws.once('open', () => resolve({ ok: true }));
+    ws.once('unexpected-response', (_q, res) => { resolve({ ok: false, status: res.statusCode }); res.resume(); });
+    ws.once('error', (e) => resolve({ ok: false, status: `error:${e.message}` }));
+  });
+  expect('Fly-Client-IP wins over a forged x-forwarded-for (9th socket still refused 429)', !forged.ok && forged.status === 429, `got ${forged.ok ? 'open' : forged.status}`);
+
   console.log('new sockets per minute per IP (20)');
   let admittedNew = 0;
   let firstRefusal = null;

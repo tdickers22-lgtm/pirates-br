@@ -169,6 +169,13 @@ const TRUST_PROXY = process.env.PIRATES_BR_TRUST_PROXY === '1';
  */
 function clientIp(req: IncomingMessage): string {
   if (TRUST_PROXY) {
+    // b1.2d: Fly's edge APPENDS to a client-supplied x-forwarded-for, so its
+    // left-most hop is forgeable there and would let one script dodge every
+    // per-IP abuse limit. Fly-Client-IP is set (overwritten) by the edge
+    // itself: prefer it whenever it is present.
+    const fly = req.headers['fly-client-ip'];
+    const flyIp = (Array.isArray(fly) ? fly[0] : fly)?.trim() ?? '';
+    if (flyIp && flyIp.length <= 64) return flyIp;
     const header = req.headers['x-forwarded-for'];
     const raw = Array.isArray(header) ? header[0] : header;
     const first = (raw ?? '').split(',')[0]?.trim() ?? '';
