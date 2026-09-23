@@ -513,6 +513,15 @@ export class Match {
   private endedAt: number | null = null;
   private endReason: MatchEndResult['reason'] | null = null;
   private endResultEmitted = false;
+  /** RESUME REPLAY (correctness-08). A held seat's socket is dead while the
+   *  match goes on, so the frames that open the death and end screens
+   *  (game_over, match_ended) went nowhere. They are kept here and handed back
+   *  by resumeReplay() so a player who resumes sees the same screen, cause and
+   *  end board the live path would have shown. Per-player: the latest personal
+   *  game_over (died + cause). Match-wide: the end game_over and match_ended. */
+  private lastPersonalGameOver = new Map<string, NetMsg>();
+  private endGameOverMsg: NetMsg | null = null;
+  private matchEndedMsg: NetMsg | null = null;
   /** Tracks final stats at the moment of elimination so disconnect-after-elim still has stats. */
   private humanFinalStats: Map<string, { name: string; kills: number; deaths: number; gold: number }> = new Map();
   /** Per-player lifetime-stat deltas accumulated over the match (bots too — only humans persist). */
@@ -870,7 +879,8 @@ export class Match {
           matchId: this.id, winnerId: null, winnerName: null, reason: 'server_fault',
           humans: [], board: [], crewCount: 0, devAssisted: this.devAssisted,
         };
-        this.broadcast({ type: 'match_ended', ts: Date.now(), payload: result });
+        this.matchEndedMsg = { type: 'match_ended', ts: Date.now(), payload: result };
+        this.broadcast(this.matchEndedMsg);
         try { this.onMatchEnd?.(result); } catch {}
       }
     }
@@ -1682,6 +1692,36 @@ export class Match {
     return { playerId, shipId, snapshot };
   }
 
+  /**
+   * RESUME REPLAY (correctness-08): the screen-opening frames this seat missed
+   * while its socket was dead, in live order: the player's own game_over (only
+   * while he is still eliminated), then the match's end game_over, then
+   * match_ended with the end board. Sent by the lobby right after the resume
+   * 'join', so the client's existing onGameOver / onMatchEnded handlers paint
+   * exactly what the live path would have. Fresh `ts` on each copy.
+   */
+  resumeReplay(playerId: string): NetMsg[] {
+    const out: NetMsg[] = [];
+    const personal = this.lastPersonalGameOver.get(playerId);
+    if (personal && this.playersById.get(playerId)?.state === 'eliminated') out.push(personal);
+    if (this.endGameOverMsg) out.push(this.endGameOverMsg);
+    if (this.matchEndedMsg) out.push(this.matchEndedMsg);
+    return out.map((msg) => ({ ...msg, ts: Date.now() }));
+  }
+
+  /** A human's own game_over: sent if his socket is live, and kept for resumeReplay. */
+  private sendPersonalGameOver(playerId: string, msg: NetMsg): void {
+    this.lastPersonalGameOver.set(playerId, msg);
+    const client = this.clients.get(playerId);
+    if (client) this.send(client.ws, msg);
+  }
+
+  /** The match-wide end game_over: broadcast, and kept for resumeReplay. */
+  private broadcastEndGameOver(msg: NetMsg): void {
+    this.endGameOverMsg = msg;
+    this.broadcast(msg);
+  }
+
   removeClient(playerId: string, closeWs: boolean = false): void {
     const client = this.clients.get(playerId);
     if (!client) return;
@@ -1889,7 +1929,8 @@ export class Match {
       crewCount: board.length,
       devAssisted: this.devAssisted,
     };
-    this.broadcast({ type: 'match_ended', ts: Date.now(), payload: result });
+    this.matchEndedMsg = { type: 'match_ended', ts: Date.now(), payload: result };
+    this.broadcast(this.matchEndedMsg);
     this.onMatchEnd?.(result);
   }
 
@@ -6603,14 +6644,11 @@ export class Match {
     if (player.isBot && player.state === 'eliminated') {
       this.bots.removeBot(player.id);
     } else if (!player.isBot && player.state === 'eliminated') {
-      const client = this.clients.get(player.id);
-      if (client) {
-        this.send(client.ws, {
-          type: 'game_over',
-          ts: Date.now(),
-          payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold, cause: eliminationCause },
-        });
-      }
+      this.sendPersonalGameOver(player.id, {
+        type: 'game_over',
+        ts: Date.now(),
+        payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold, cause: eliminationCause },
+      });
     }
 
     this.broadcast({
@@ -6909,7 +6947,7 @@ export class Match {
       this.state.winnerId = goldWinner.id;
       this.endedAt = Date.now();
       this.endReason = 'gold';
-      this.broadcast({
+      this.broadcastEndGameOver({
         type: 'game_over',
         ts: Date.now(),
         payload: {
@@ -6955,7 +6993,7 @@ export class Match {
       this.state.winnerId = ranked[0]?.id ?? null;
       this.endReason = ranked[0] ? 'last_ship' : 'draw';
       this.endedAt = Date.now();
-      this.broadcast({ type: 'game_over', ts: Date.now(),
+      this.broadcastEndGameOver({ type: 'game_over', ts: Date.now(),
         payload: { winnerId: this.state.winnerId, reason: this.endReason } });
       this.emitMatchEnd();
       return;
@@ -6978,7 +7016,7 @@ export class Match {
       this.endReason = 'draw';
     }
     this.endedAt = Date.now();
-    this.broadcast({
+    this.broadcastEndGameOver({
       type: 'game_over',
       ts: Date.now(),
       payload: { winnerId: this.state.winnerId, reason: this.endReason },
@@ -8297,16 +8335,13 @@ export class Match {
         if (player.isBot) {
           this.bots.removeBot(player.id);
         } else {
-          const client = this.clients.get(player.id);
-          if (client) {
-            this.send(client.ws, {
-              type: 'game_over',
-              ts: Date.now(),
-              // Waiting to respawn when the hull went out from under you: the one
-              // elimination that genuinely IS the ship going down.
-              payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold, cause: 'ship_sunk' },
-            });
-          }
+          this.sendPersonalGameOver(player.id, {
+            type: 'game_over',
+            ts: Date.now(),
+            // Waiting to respawn when the hull went out from under you: the one
+            // elimination that genuinely IS the ship going down.
+            payload: { winnerId: null, died: true, kills: player.kills, gold: player.gold, cause: 'ship_sunk' },
+          });
         }
         this.respawnHoldSince.delete(player.id);
         continue;

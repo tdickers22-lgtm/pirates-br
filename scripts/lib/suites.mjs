@@ -244,6 +244,10 @@ export const LOGIC = [
   // (match_ended{server_fault}, crews reaped to party) while a second match keeps
   // ticking and nothing reaches the process fatal budget. Real timers, ~1.5 s.
   tsx('test-match-fault-isolation.mjs'),
+  // RECON-01 seat hold vs the heartbeat sweep (correctness-02, b1.2b): onDisconnect
+  // twice keeps ONE hold, the sweep's terminate + late 'close' keeps the seat, a
+  // close from a superseded socket is ignored. No port, fake sockets, < 1 s.
+  tsx('test-lobby-hold-idempotent.mjs'),
   // ONLINE-01 phase 2 (netcode-24): N matches on ONE process. Server-side only
   // (no browser, no GPU) but ~45 s and CPU-bound, so NOT quick tier. Grades
   // worstSimLagSec < 0.1 at 8 matches, the capacity refusal above the ceiling,

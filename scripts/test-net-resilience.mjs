@@ -244,6 +244,142 @@ console.log('A blip is not a departure — the seat is held and resumed (RECON-0
   }
 }
 
+console.log('A silently dead socket swept by the heartbeat keeps its seat (correctness-02):');
+{
+  // The half-open case RECON-01 exists for: iOS freezes a backgrounded tab, a
+  // lid closes, wifi dies. The client sends NOTHING and answers no ws ping
+  // (autoPong:false), so only the server's heartbeat sweep can notice. The
+  // sweep terminates the socket and parks the seat; the 'close' that terminate
+  // emits a tick later used to run onDisconnect a second time, find the seat
+  // "already held", and dispose it: eliminated, hull foundered, resume refused.
+  const frames = [];
+  const ws = new WebSocket(URL, { autoPong: false });
+  ws.on('message', (data) => { try { frames.push(JSON.parse(data.toString())); } catch {} });
+  ws.on('error', () => {});
+  await new Promise((resolve) => ws.once('open', resolve));
+  const waitFor = async (buf, type, ms = 20_000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const hit = buf.find((m) => m.type === type);
+      if (hit) return hit;
+      await sleep(100);
+    }
+    return null;
+  };
+  const welcome = await waitFor(frames, 'welcome', 5_000);
+  ws.send(JSON.stringify({ type: 'set_name', ts: Date.now(), payload: { name: 'Sleeper' } }));
+  ws.send(JSON.stringify({ type: 'solo_start', ts: Date.now(), payload: { botCount: 2 } }));
+  const join = await waitFor(frames, 'join');
+  expect('the sleeper joined a match', !!welcome && !!join, `frames=${frames.map((f) => f.type).join(',')}`);
+  if (welcome && join) {
+    const playerId = join.payload.playerId;
+    const session = [...server.clients.values()].find((s) => s.matchPlayerId === playerId);
+    const match = server.matches.get(session?.matchId);
+    // Skip the wall-clock wait, not the mechanism: the world build is long
+    // done and the socket has been silent past HEARTBEAT_TIMEOUT_MS. The REAL
+    // heartbeat timer does the sweep (it fires every 5 s).
+    session.matchJoinedAt = undefined;
+    session.lastSeenAt = Date.now() - HEARTBEAT_TIMEOUT_MS - 1_000;
+    for (let i = 0; i < 80 && session.ws.readyState === WebSocket.OPEN; i += 1) await sleep(100);
+    expect('the heartbeat sweep dropped the silent socket', session.ws.readyState !== WebSocket.OPEN,
+      `readyState=${session.ws.readyState}`);
+    await sleep(1_000); // the late 'close' from terminate() has long landed by now
+    const player = match?.playersById?.get(playerId);
+    expect('the seat is still held after the late close', server.held.get(welcome.payload.sessionToken) === session,
+      `held=${server.held.size} disposed=${session.disposed}`);
+    expect('the sleeper is still in the match and never eliminated',
+      !!match && match.clients.has(playerId) && !!player && player.state !== 'eliminated',
+      `inMatch=${match?.clients.has(playerId)} state=${player?.state}`);
+
+    const back = [];
+    const second = new WebSocket(URL);
+    second.on('message', (data) => { try { back.push(JSON.parse(data.toString())); } catch {} });
+    second.on('error', () => {});
+    await new Promise((resolve) => second.once('open', resolve));
+    await waitFor(back, 'welcome', 5_000);
+    second.send(JSON.stringify({ type: 'resume', ts: Date.now(),
+      payload: { token: welcome.payload.sessionToken, protocolVersion: PROTOCOL_VERSION } }));
+    const ok = await waitFor(back, 'resume_ok', 8_000);
+    const rejoin = await waitFor(back, 'join', 8_000);
+    const failed = back.find((m) => m.type === 'resume_failed');
+    expect('the resume after a sweep is accepted', !!ok, failed ? `resume_failed: ${JSON.stringify(failed.payload)}` : '');
+    expect('same pirate, seat kept', !!ok && ok.payload.playerId === playerId && !!rejoin,
+      `${ok?.payload.playerId} != ${playerId}, join=${!!rejoin}`);
+    expect('still not eliminated after the resume', match?.playersById?.get(playerId)?.state !== 'eliminated');
+    second.close();
+  }
+  try { ws.terminate(); } catch {}
+}
+
+console.log('A match that ends during the hold replays its end on resume (correctness-08):');
+{
+  const frames = [];
+  const ws = new WebSocket(URL);
+  ws.on('message', (data) => { try { frames.push(JSON.parse(data.toString())); } catch {} });
+  ws.on('error', () => {});
+  await new Promise((resolve) => ws.once('open', resolve));
+  const waitFor = async (buf, type, ms = 20_000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const hit = buf.find((m) => m.type === type);
+      if (hit) return hit;
+      await sleep(100);
+    }
+    return null;
+  };
+  const welcome = await waitFor(frames, 'welcome', 5_000);
+  ws.send(JSON.stringify({ type: 'set_name', ts: Date.now(), payload: { name: 'Absentee' } }));
+  ws.send(JSON.stringify({ type: 'solo_start', ts: Date.now(), payload: { botCount: 2 } }));
+  const join = await waitFor(frames, 'join');
+  expect('the absentee joined a match', !!welcome && !!join);
+  if (welcome && join) {
+    const playerId = join.payload.playerId;
+    const session = [...server.clients.values()].find((s) => s.matchPlayerId === playerId);
+    const match = server.matches.get(session?.matchId);
+    ws.terminate(); // the link dies mid-match
+    for (let i = 0; i < 30 && !server.held.has(welcome.payload.sessionToken); i += 1) await sleep(100);
+    expect('the seat is held', server.held.has(welcome.payload.sessionToken));
+    // While he is gone his crew banks the win: a real gold victory through the
+    // match's own win check, which broadcasts game_over and match_ended to a
+    // socket that is dead.
+    const player = match.playersById.get(playerId);
+    player.gold = 1e9;
+    match.state.phase = 'playing';
+    match.checkWinCondition();
+    expect('the match ended while he was away', match.isEnded(), `phase=${match.state.phase}`);
+    await sleep(300);
+
+    const back = [];
+    const second = new WebSocket(URL);
+    second.on('message', (data) => { try { back.push(JSON.parse(data.toString())); } catch {} });
+    second.on('error', () => {});
+    await new Promise((resolve) => second.once('open', resolve));
+    await waitFor(back, 'welcome', 5_000);
+    second.send(JSON.stringify({ type: 'resume', ts: Date.now(),
+      payload: { token: welcome.payload.sessionToken, protocolVersion: PROTOCOL_VERSION } }));
+    await waitFor(back, 'match_ended', 5_000);
+    const types = back.map((m) => m.type);
+    const iOk = types.indexOf('resume_ok');
+    const iJoin = types.indexOf('join');
+    const iOver = types.indexOf('game_over');
+    const iEnd = types.indexOf('match_ended');
+    expect('resume_ok, then join, then game_over, then match_ended',
+      iOk >= 0 && iJoin > iOk && iOver > iJoin && iEnd > iOver, `frames=${types.join(',')}`);
+    const over = back[iOver];
+    const ended = back[iEnd];
+    expect('the replayed game_over names the gold win', !!over && over.payload.reason === 'gold'
+      && over.payload.winnerId === playerId, JSON.stringify(over?.payload));
+    expect('the replayed match_ended carries the end board', !!ended && Array.isArray(ended.payload.board)
+      && ended.payload.board.length > 0 && ended.payload.humans.some((h) => h.playerId === playerId),
+      JSON.stringify(ended?.payload && { board: ended.payload.board?.length, humans: ended.payload.humans?.length }));
+    const resumed = [...server.clients.values()].find((s) => s.matchPlayerId === playerId);
+    expect('the resumed session is on the end screen with a fresh detach clock',
+      resumed?.state === 'match_ended' && Date.now() - (resumed?.endedMatchSince ?? 0) < 2_000,
+      `state=${resumed?.state} endedAgo=${Date.now() - (resumed?.endedMatchSince ?? 0)}`);
+    second.close();
+  }
+}
+
 console.log('The client supervises its own link (RECON-01 client half):');
 {
   // NetworkClient, driven straight from node: no Worker (spawnWorker catches the
@@ -257,7 +393,9 @@ console.log('The client supervises its own link (RECON-01 client half):');
   const coldPort = await freePort();
   const cold = new NetworkClient();
   const attempts = [];
-  cold.onReconnecting = (n) => attempts.push(n);
+  // b1.1e: connect() owns the initial retries and reports them through
+  // onConnectProgress (onReconnecting is the post-join supervisor's hook).
+  cold.onConnectProgress = (p) => { if (p.phase === 'retrying' || p.phase === 'offline') attempts.push(p.attempt); };
   const coldServer = new LobbyServer();
   setTimeout(() => coldServer.init(coldPort), 2_200);
   const t0 = Date.now();

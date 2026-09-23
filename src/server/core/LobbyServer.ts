@@ -486,7 +486,10 @@ export class LobbyServer {
       }
     });
 
-    ws.on('close', () => this.onDisconnect(session));
+    // IDENTITY-SAFE (correctness-02): only the socket this session speaks
+    // through may park or dispose it. A late close from a socket the session
+    // no longer owns is not news about the session.
+    ws.on('close', () => { if (session.ws === ws) this.onDisconnect(session); });
     // Without this, ws re-emits every protocol violation (bad RSV bit, reserved
     // opcode, invalid close code, invalid UTF-8, junk bytes, oversized frame) as
     // an unhandled 'error' — which exits the process and kills EVERY live match.
@@ -525,6 +528,13 @@ export class LobbyServer {
    */
   private onDisconnect(session: ClientSession): void {
     if (session.disposed) return;
+    // IDEMPOTENT HOLD (correctness-02). The heartbeat sweep calls onDisconnect
+    // right after terminate(), and terminate() then emits 'close' a tick later,
+    // which calls it again. The second call used to find shouldHold() false
+    // ("already held") and dispose the seat the first call had just parked:
+    // eliminated, hull foundered, resume refused. A parked seat's only exits
+    // are handleResume and the grace expiry in tick().
+    if (session.heldSince !== undefined) return;
     if (this.shouldHold(session)) {
       session.heldSince = Date.now();
       this.held.set(session.token, session);
@@ -591,8 +601,9 @@ export class LobbyServer {
         console.log(`[Lobby] dropping silent client ${session.id.slice(0, 6)} (${silentFor}ms > ${budget}ms, state=${session.state})`);
         try { session.ws.terminate(); } catch {}
         // terminate() is not guaranteed to emit 'close' on an already-broken
-        // socket in every Node version — clean up explicitly (onDisconnect is
-        // idempotent via session.disposed).
+        // socket in every Node version — clean up explicitly. onDisconnect is
+        // idempotent (session.disposed, and heldSince for a parked seat), so the
+        // late 'close' terminate() usually emits is a no-op.
         this.onDisconnect(session);
         continue;
       }
@@ -753,6 +764,16 @@ export class LobbyServer {
         ts: Date.now(),
         payload: { playerId: resumed.playerId, shipId: resumed.shipId, snapshot: resumed.snapshot, matchId: session.matchId },
       });
+      // RESUME REPLAY (correctness-08): the game_over / match_ended frames that
+      // went to the dead socket while the seat was held, in live order, so the
+      // client's own handlers paint the death cause and the end board instead
+      // of the snapshot-driven generic screen. A player who never saw the end
+      // board gets the full end-screen window before the auto-detach.
+      const replay = match!.resumeReplay(resumed.playerId);
+      for (const frame of replay) this.send(session.ws, frame);
+      if (session.state === 'match_ended' && replay.some((f) => f.type === 'match_ended')) {
+        session.endedMatchSince = Date.now();
+      }
     }
     console.log(`[Lobby] client ${session.id.slice(0, 6)} resumed (state=${session.state}, seat=${resumed ? 'kept' : 'gone'})`);
   }
