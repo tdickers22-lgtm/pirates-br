@@ -130,15 +130,15 @@ export function isLazyAsset(name: string): boolean {
 
 /** The story scenes whose 2-4k `<name>_far.glb` proxy has SHIPPED (passed
  *  build_far_lods.py's verify and test-far-lod-integrity). Only these are
- *  fetched with the world set; the rest keep the seated box until their proxy
- *  lands. Thirteen of fifteen (b1.1g2): kraken_wreck (459 closed parts) and
- *  widow_memorial (356 twelve-triangle stones) sit above the 4k band on the
- *  12-triangle closed-part floor alone, so they keep the box until a merge
- *  pass for adjacent parts exists. */
+ *  fetched with the world set; a name missing here keeps the seated box until
+ *  its proxy lands. All fifteen (b1.1g): kraken_wreck (459 closed parts) and
+ *  widow_memorial (356 twelve-triangle stones) were floor-bound above the 4k
+ *  band until the build's compact path turned their small closed parts into
+ *  4-triangle tetrahedra (2840 and 2270 tris). */
 export const STORY_PROXY_NAMES: readonly AssetName[] = [
   'smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton', 'rum_still',
-  'crow_roost', 'mermaid_shrine', 'castaway_camp', 'dig_site', 'gallows',
-  'parley_table', 'mine_head', 'gibbet_cage',
+  'crow_roost', 'mermaid_shrine', 'castaway_camp', 'kraken_wreck', 'dig_site', 'gallows',
+  'parley_table', 'mine_head', 'widow_memorial', 'gibbet_cage',
 ];
 
 /** Metres from the island's EDGE inside which a story scene's LOD0 is fetched

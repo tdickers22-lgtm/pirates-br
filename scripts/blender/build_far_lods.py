@@ -136,6 +136,7 @@ STORY = [
 ]
 STORY_TRIS = (2000, 4000)
 STORY_TARGET = 3000
+STORY_COMPACT_TARGET = 3600
 STORY_MIN_CLOSED_TRIS = 12
 STORY_MAX_DROP = 0.04
 STORY_RESCALE_CAP = 1.3
@@ -387,6 +388,80 @@ def snap_base(obj, zmin):
     return moved
 
 
+def tetra_from_part(part):
+    """Replace a small closed part with a closed 4-triangle tetrahedron on
+    four alternating corners of its oriented (PCA) bounding box: a cube
+    becomes the inscribed regular tetrahedron (58% of its area before the
+    rescale), a beam a full-length wedge. Material, smooth flag and colour
+    layers by the same majority/mean rule as card_from_part, flat shaded;
+    outward winding by the centroid test."""
+    me = part.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    faces = list(bm.faces)
+    verts = list(bm.verts)
+    if len(faces) < 4 or len(verts) < 4:
+        bm.free()
+        return
+    avg = {}
+    for coll in (bm.loops.layers.color, bm.loops.layers.float_color):
+        for _name, layer in coll.items():
+            tot = Vector((0.0, 0.0, 0.0, 0.0))
+            n = 0
+            for f in faces:
+                for lp in f.loops:
+                    tot += Vector(lp[layer])
+                    n += 1
+            avg[('loop', layer)] = tot / max(1, n)
+    for coll in (bm.verts.layers.color, bm.verts.layers.float_color):
+        for _name, layer in coll.items():
+            tot = Vector((0.0, 0.0, 0.0, 0.0))
+            for v in verts:
+                tot += Vector(v[layer])
+            avg[('vert', layer)] = tot / max(1, len(verts))
+    mat = Counter(f.material_index for f in faces).most_common(1)[0][0]
+    pts = np.array([v.co[:] for v in verts])
+    centroid = pts.mean(axis=0)
+    rel = pts - centroid
+    _u, _s, vt = np.linalg.svd(rel, full_matrices=False)
+    proj = rel @ vt.T
+    lo, hi = proj.min(axis=0), proj.max(axis=0)
+    if float(np.min(hi - lo)) < 1e-6:
+        bm.free()
+        return
+    mid = (lo + hi) / 2
+    half = (hi - lo) / 2
+    corners = []
+    for sx, sy, sz in ((-1, -1, -1), (1, 1, -1), (1, -1, 1), (-1, 1, 1)):
+        local = mid + half * np.array([sx, sy, sz])
+        corners.append(Vector((centroid + local @ vt).tolist()))
+    centre = sum(corners, Vector((0.0, 0.0, 0.0))) / 4
+    bmesh.ops.delete(bm, geom=verts, context='VERTS')
+    vs = [bm.verts.new(co) for co in corners]
+    new_faces = []
+    for a, b, c in ((0, 1, 2), (0, 3, 1), (0, 2, 3), (1, 3, 2)):
+        f = bm.faces.new((vs[a], vs[b], vs[c]))
+        f.normal_update()
+        fc = (vs[a].co + vs[b].co + vs[c].co) / 3
+        if f.normal.dot(fc - centre) < 0:
+            bmesh.ops.reverse_faces(bm, faces=[f])
+        f.material_index = mat
+        f.smooth = False  # four facets, never a smooth-shaded blob
+        new_faces.append(f)
+    for f in new_faces:
+        for (kind, layer), val in avg.items():
+            if kind == 'loop':
+                for lp in f.loops:
+                    lp[layer] = val
+    for (kind, layer), val in avg.items():
+        if kind == 'vert':
+            for v in vs:
+                v[layer] = val
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+
+
 def build(name, ratio, sheets):
     if ratio is not None:
         return build_once(name, ratio, sheets, MIN_CLOSED_TRIS)
@@ -402,8 +477,13 @@ def build(name, ratio, sheets):
             break  # the floors, not the budget, set the count: another pass changes nothing
         last = far_t
         target = min(STORY_TARGET, 0.37 * row['src']['tris'])  # gibbet_cage is 5.6k: its band is 2000-2240
+        if row['compact']:
+            # A compact scene spends its spare band on boxes: every triangle
+            # over the target turns a tetrahedron back into a brick (a wall
+            # of tetrahedra lets the sky through where a wall of boxes does not).
+            target = min(STORY_COMPACT_TARGET, 0.37 * row['src']['tris'])
         print(f"  story {name}: budget {budget} -> {far_t} tris, visible area {row['far']['area'] / max(1e-9, row['src']['area']):.1%}, loops {row['src']['loops']} -> {row['far']['loops']}, dropped {row['dropped']} part(s) {row['dropped_share']:.1%}")
-        if lo <= far_t <= hi and far_t <= 0.4 * row['src']['tris']:
+        if lo <= far_t <= hi and far_t <= 0.4 * row['src']['tris'] and (not row['compact'] or far_t >= 0.9 * target):
             break
         budget = max(400, int(budget * target / max(1, far_t)))
     return row
@@ -578,15 +658,47 @@ def build_story_once(name, budget):
             floor = min(full, 4 if (opened or slab) else STORY_MIN_CLOSED_TRIS)
             info.append({'part': part, 'open': opened, 'slab': slab, 'tris': t, 'area': world_area(part), 'full': full, 'floor': floor, 'drop': False})
     total_area = sum(i['area'] for i in info)
-    # Drop the smallest parts while the floors alone would eat the budget.
-    dropped_area = 0.0
-    for i in sorted(info, key=lambda x: x['area']):
-        if sum(j['floor'] for j in info if not j['drop']) <= 0.6 * budget:
-            break
-        if dropped_area + i['area'] > STORY_MAX_DROP * total_area:
-            break
-        i['drop'] = True
-        dropped_area += i['area']
+
+    def drop_smallest():
+        # Drop the smallest parts while the floors alone would eat the budget.
+        for i in info:
+            i['drop'] = False
+        dropped = 0.0
+        for i in sorted(info, key=lambda x: x['area']):
+            if sum(j['floor'] for j in info if not j['drop']) <= 0.6 * budget:
+                break
+            if dropped + i['area'] > STORY_MAX_DROP * total_area:
+                break
+            i['drop'] = True
+            dropped += i['area']
+        return dropped
+
+    dropped_area = drop_smallest()
+    # FLOOR-BOUND scenes (kraken_wreck: 459 closed parts, widow_memorial: 356
+    # twelve-triangle stones): the 12-tri box floor alone is over the band
+    # even after the 4% drop. There, and only there, a compact closed part
+    # whose share cannot buy a box becomes a closed 4-tri TETRAHEDRON on four
+    # alternating corners of its own oriented bounding box (the solid a
+    # stone or a beam is at 600 m+; a stick keeps its full length and
+    # diagonal), rescaled to its area like every other part. Scenes that fit
+    # the band never enter this path, so their proxies are unchanged.
+    compact = sum(j['floor'] for j in info if not j['drop']) > STORY_TRIS[1]
+    if compact:
+        for i in info:
+            if not i['open'] and not i['slab']:
+                i['floor'] = min(i['full'], 4)
+        dropped_area = drop_smallest()
+        # Bricks before detail: the biggest compact parts buy their box back
+        # (floor 12) while the floors stay under 3/4 of the budget, so a
+        # wall keeps its bricks and the statue, not the wall, gives way.
+        room = 0.75 * budget - sum(j['floor'] for j in info if not j['drop'])
+        for i in sorted(info, key=lambda x: -x['area']):
+            if i['drop'] or i['open'] or i['slab'] or i['full'] < STORY_MIN_CLOSED_TRIS or i['floor'] >= STORY_MIN_CLOSED_TRIS:
+                continue
+            if room < STORY_MIN_CLOSED_TRIS - i['floor']:
+                break
+            room -= STORY_MIN_CLOSED_TRIS - i['floor']
+            i['floor'] = STORY_MIN_CLOSED_TRIS
     kept = [i for i in info if not i['drop']]
 
     def cost(k):
@@ -624,6 +736,9 @@ def build_story_once(name, budget):
             visible += 2 * world_area(part)
             close_sheet(part)
             continue
+        elif compact and not i['open'] and b < STORY_MIN_CLOSED_TRIS and i['tris'] > 4:
+            tetra_from_part(part)
+            i['tetra'] = True
         elif target < i['tris']:
             ratio = target / i['tris']
             if i['open']:
@@ -647,7 +762,8 @@ def build_story_once(name, budget):
     if os.environ.get('BR_STORY_DIAG'):
         k = [i for i in info if 'got' in i]
         print(f"  diag {name}: parts {len(info)} kept {len(k)} floors {sum(i['floor'] for i in k)} alloc {sum(i['alloc'] for i in k):.0f} got {sum(i['got'] for i in k)}"
-              f" | open {sum(1 for i in k if i['open'])} slab {sum(1 for i in k if i['slab'])} at-floor {sum(1 for i in k if i['alloc'] <= i['floor'])}")
+              f" | open {sum(1 for i in k if i['open'])} slab {sum(1 for i in k if i['slab'])} at-floor {sum(1 for i in k if i['alloc'] <= i['floor'])}"
+              f" | compact {compact} tetra {sum(1 for i in k if i.get('tetra'))}")
         for i in sorted(k, key=lambda x: x['alloc'] - x['got'])[:4]:
             print(f"    over: tris {i['tris']} alloc {i['alloc']:.0f} got {i['got']} open {i['open']} slab {i['slab']} area {i['area']:.3f}")
     for obj, parts in groups:
@@ -668,6 +784,7 @@ def build_story_once(name, budget):
         'name': name, 'ratio': None, 'sheets': 'closed', 'path': path,
         'flat_share': flat_faces / max(1, faces_total),
         'src': src_stats, 'far': far_stats, 'gate_area': gate['area'],
+        'compact': compact,
         'dropped': sum(1 for i in info if i['drop']), 'dropped_share': dropped_area / max(1e-9, total_area),
         'src_base': src_base, 'far_base': world_min_z(meshes), 'snapped': snapped,
     }
