@@ -33,6 +33,10 @@
  */
 import * as THREE from 'three';
 import { assets, LAZY_ASSET_NAMES } from '../assets/AssetLibrary.js';
+import { releasedGpuBytes, cpuCopyReleaseStats } from '../rendering/CpuCopyRelease.js';
+
+/** Bytes the current census walk found released from the CPU (reset per census). */
+let cpuReleasedAcc = 0;
 
 const MB = 1024 * 1024;
 /** What a running three.js game holds before any content (module code, three,
@@ -53,12 +57,15 @@ export interface MemoryCensus {
    *  Chromium's usedJSHeapSize includes ArrayBuffer backing stores (measured: +100 MB typed
    *  array = +100 MB), so this is the share the b3.1b CPU-copy release can win back. */
   heapTypedArrayBytes: number;
+  /** Of `geometryBytes`: GPU-only bytes whose CPU copy was released after upload (CpuCopyRelease). */
+  cpuReleasedBytes: number;
+  cpuRelease: { enabled: boolean; armedBytes: number; releasedBytes: number };
   counts: {
     geometries: number; attributes: number; textures: number; renderTargets: number;
     infoGeometries: number; infoTextures: number; storyLod0Resident: number;
   };
   /** The same totals in MB (1 MB = 2^20 bytes), rounded to 0.1. */
-  mb: { gpu: number; geometry: number; textures: number; renderTargets: number; heap: number; library: number; heapTypedArrays: number };
+  mb: { gpu: number; geometry: number; textures: number; renderTargets: number; heap: number; library: number; heapTypedArrays: number; cpuReleased: number };
   /** Top texture sources by bytes, for triage. */
   topTextures: { name: string; w: number; h: number; mb: number }[];
 }
@@ -134,6 +141,10 @@ function attributeBytes(a: THREE.BufferAttribute | THREE.InterleavedBufferAttrib
     : (a as THREE.BufferAttribute).array;
   if (!arr || seen.has(arr)) return 0;
   seen.add(arr);
+  // A released attribute (rendering/CpuCopyRelease) still holds its bytes on the
+  // GPU; only the CPU copy is gone. Count the GPU side, note the CPU saving.
+  const released = releasedGpuBytes(a);
+  if (released !== undefined) { cpuReleasedAcc += released; return released; }
   return (arr as ArrayBufferView).byteLength ?? 0;
 }
 
@@ -219,6 +230,7 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
   };
 
   let geometry = 0;
+  cpuReleasedAcc = 0;
   let storyLod0Resident = 0;
   const lazy = new Set<string>(LAZY_ASSET_NAMES);
   scene.traverse((o) => {
@@ -271,7 +283,7 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
   const heapSource = typeof measuredHeap === 'number' && measuredHeap > 0 ? 'performance.memory' : 'estimate';
   // Three keeps each attribute's typed array after upload (no onUploadCallback
   // release yet, b3.1b), so the CPU copy of counted geometry IS heap.
-  const heap = heapSource === 'performance.memory' ? measuredHeap! : RUNTIME_FLOOR_BYTES + geometry + library + dataPayload;
+  const heap = heapSource === 'performance.memory' ? measuredHeap! : RUNTIME_FLOOR_BYTES + geometry - cpuReleasedAcc + library + dataPayload;
 
   const gpu = geometry + textures + renderTargets + drawingBuffer;
   const r = (b: number) => Math.round((b / MB) * 10) / 10;
@@ -286,12 +298,14 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
     libraryRetainedBytes: library,
     heapBytes: heap,
     heapSource,
-    heapTypedArrayBytes: geometry + library + dataPayload,
+    heapTypedArrayBytes: geometry - cpuReleasedAcc + library + dataPayload,
+    cpuReleasedBytes: cpuReleasedAcc,
+    cpuRelease: cpuCopyReleaseStats(),
     counts: {
       geometries: seenGeoms.size, attributes: seenArrays.size, textures: sources.size, renderTargets: rts.length,
       infoGeometries: gl.info.memory.geometries, infoTextures: gl.info.memory.textures, storyLod0Resident,
     },
-    mb: { gpu: r(gpu), geometry: r(geometry), textures: r(textures), renderTargets: r(renderTargets + drawingBuffer), heap: r(heap), library: r(library), heapTypedArrays: r(geometry + library + dataPayload) },
+    mb: { gpu: r(gpu), geometry: r(geometry), textures: r(textures), renderTargets: r(renderTargets + drawingBuffer), heap: r(heap), library: r(library), heapTypedArrays: r(geometry - cpuReleasedAcc + library + dataPayload), cpuReleased: r(cpuReleasedAcc) },
     topTextures: top,
   };
 }
