@@ -58,12 +58,36 @@ a secret back. The commands below are what it runs.
    headroom (floor), run `node --import tsx scripts/test-capacity-sim.mjs` for the humans figure at
    that value, stamp the **Capacity record** row below with the measured commit, commit
    `fly.toml` + `DEPLOY.md`, and redeploy with step 5.
-9. **CI deploy token (b1.3d).**
-   `fly tokens create deploy -a pirates-br -x 8760h`, stored as the GitHub Actions secret
-   `FLY_API_TOKEN` (with `HEALTH_KEY`). From then on `.github/workflows/deploy.yml` deploys the
-   `release` branch: wait-idle, then
-   `flyctl deploy --remote-only --ha=false --build-arg BUILD_ID=${{ github.sha }}`, then the
-   smoke, then a redeploy of the previous image on a red smoke.
+9. **CI deploy path (b1.3d), after step 4 has run once.** The `release` branch exists on
+   `origin` (created at the campaign baseline `f5fee97e`, which has no workflow, so it deployed
+   nothing). Tokens and keys go through pipes, never onto the screen or into a file in the repo:
+
+   ```sh
+   APP=$(sed -nE "s/^app *= *['\"]([^'\"]+)['\"].*/\1/p" fly.toml | head -1)
+   fly tokens create deploy -a "$APP" -x 8760h | gh secret set FLY_API_TOKEN -R tdickers22-lgtm/pirates-br
+   grep '^HEALTH_KEY=' ~/.config/pirates-br/fly-$APP.env | cut -d= -f2- | gh secret set HEALTH_KEY -R tdickers22-lgtm/pirates-br
+   gh secret list -R tdickers22-lgtm/pirates-br            # both names listed
+   ```
+
+   `.github/workflows/deploy.yml` then deploys every push to `release`: resolve the app from
+   `fly.toml`, record the image serving now, wait-idle, then
+   `flyctl deploy --remote-only --ha=false --build-arg BUILD_ID=${{ github.sha }}`, then the smoke
+   (with `HEALTH_KEY`), then a redeploy of the recorded image on a red smoke. Prove it in this order:
+
+   - **Dry run first.** `git push origin <sha>:refs/tags/deploy-dryrun-<sha8>` (a tag, because
+     `workflow_dispatch` only works once the workflow is on the default branch `main`, which it
+     is not; once it is, `gh workflow run deploy.yml --ref release -f dry_run=true` does the same).
+     It deploys nothing, forces the smoke red and prints the image the rollback would redeploy.
+     Grade it: `node scripts/ci-rollback-dryrun.mjs --run <run id>` (the rollback must name the
+     image that was serving).
+   - **Then the real path.** `git push origin <green sha>:release`, wait for the run, then
+     `node scripts/ci-rollback-dryrun.mjs --run <run id>`: conclusion success, deploy success,
+     `PASS smoke-online` against that sha, rollback skipped.
+
+   Offline, `node scripts/ci-rollback-dryrun.mjs` executes the workflow's own step scripts with
+   fake `flyctl`/`node` for seven scenarios (dry run by dispatch and by tag, red and green real
+   deploys, first deploy with no rollback target, a destroyed machine listed first) and fails if
+   a dry run could deploy or the rollback could pick any image but the one that was serving.
 10. **Rollback by hand.** `fly releases -a pirates-br --image` lists the images; then
     `fly deploy --image <previous image ref> --ha=false -a pirates-br`.
 

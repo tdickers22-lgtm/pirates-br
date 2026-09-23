@@ -1,8 +1,15 @@
-# DEPLOY (online-04, online-11, b1.3b). Manual, or a push to `release` (the
+# DEPLOY (online-04, online-11, b1.3b/d). Manual, or a push to `release` (the
 # batch gates fast-forward `release` to their last green commit, PLAN rule 8).
 #
 #   wait-idle -> flyctl deploy --remote-only --ha=false -> smoke-online
 #   -> on a red smoke, redeploy the image that was serving before, smoke again.
+#
+# DRY RUN (b1.3d): dispatch with dry_run=true, or push a tag deploy-dryrun-<anything>
+# (works before this file is on the default branch, which workflow_dispatch needs).
+# It records the serving image, runs wait-idle, deploys NOTHING, forces the smoke red
+# and lets the rollback step print the exact image it would redeploy. Grade a run with
+# node scripts/ci-rollback-dryrun.mjs --run <id>; offline, the same script executes
+# these steps with fake flyctl/node for every scenario.
 #
 # FLY_API_TOKEN comes ONLY from the repo secret (fly tokens create deploy -a
 # pirates-br). test-deploy-config lints this file: the secret-only token,
@@ -11,8 +18,14 @@
 name: deploy
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: no deploy, forced red smoke, rollback only prints its target'
+        type: boolean
+        default: false
   push:
     branches: [release]
+    tags: ['deploy-dryrun-*']
 concurrency:
   group: deploy
   cancel-in-progress: false
@@ -24,7 +37,8 @@ jobs:
     timeout-minutes: 60
     env:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      FLY_APP: pirates-br
+      HEALTH_KEY: ${{ secrets.HEALTH_KEY }}
+      DRY_RUN: ${{ (inputs.dry_run || startsWith(github.ref, 'refs/tags/deploy-dryrun-')) && '1' || '' }}
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v4
@@ -35,21 +49,30 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Resolve the app from fly.toml (fly-launch may have renamed it)
+        run: |
+          APP=$(sed -nE "s/^app *= *['\"]([^'\"]+)['\"].*/\1/p" fly.toml | head -1)
+          test -n "$APP"
+          echo "FLY_APP=$APP" >> "$GITHUB_ENV"
+          echo "app: $APP  dry run: ${DRY_RUN:-no}"
       - name: Record the image serving now (rollback target)
         id: prev
         run: |
-          PREV=$(flyctl machine list -a "$FLY_APP" --json | jq -r '.[0].config.image // empty' || true)
+          PREV=$( (flyctl machine list -a "$FLY_APP" --json || echo '[]') | jq -r '[.[] | select(.state != "destroyed" and .state != "destroying") | .config.image // empty][0] // empty' || true)
           echo "previous image: ${PREV:-none (first deploy)}"
           echo "image=$PREV" >> "$GITHUB_OUTPUT"
       - name: Wait for an idle host (<= 20 min, then the drain notice covers live matches)
         run: node scripts/wait-idle.mjs --cap-min 20
       - name: Deploy
+        if: env.DRY_RUN != '1'
         run: flyctl deploy --remote-only --ha=false --build-arg BUILD_ID=${{ github.sha }} -a "$FLY_APP"
       - name: Smoke the live URL
         id: smoke
-        run: node scripts/smoke-online.mjs --build-id ${{ github.sha }}
+        run: |
+          if [ "$DRY_RUN" = 1 ]; then echo "DRY-RUN: forced smoke failure (proves the rollback path)"; exit 1; fi
+          node scripts/smoke-online.mjs --build-id ${{ github.sha }}
       - name: Roll back to the previous image
         if: failure() && steps.smoke.outcome == 'failure' && steps.prev.outputs.image != ''
         run: |
-          flyctl deploy --image "${{ steps.prev.outputs.image }}" --ha=false -a "$FLY_APP"
-          node scripts/smoke-online.mjs --skip-queue
+          ${DRY_RUN:+echo DRY-RUN rollback would run:} flyctl deploy --image "${{ steps.prev.outputs.image }}" --ha=false -a "$FLY_APP"
+          [ "$DRY_RUN" = 1 ] || node scripts/smoke-online.mjs --skip-queue
