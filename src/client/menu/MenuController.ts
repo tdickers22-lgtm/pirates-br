@@ -1,3 +1,4 @@
+import { checkName, NAME_MIN } from '../../shared/names.js';
 import type {
   LobbyUpdatePayload, QueueUpdatePayload, PlayerStatsRecord, MatchStartPayload, WelcomePayload,
 } from '../../shared/types/index.js';
@@ -419,6 +420,17 @@ export class MenuController {
         this.flashStatus('Enter a pirate name first.', true);
         return false;
       }
+      // Same predicate the server runs (shared/names.ts): a refused name is
+      // caught here, so the menu never keeps showing a name the lobby replaced.
+      const check = checkName(name);
+      if (!check.ok) {
+        this.flashStatus(check.reason === 'blocked'
+          ? 'That name is not allowed. Pick another.'
+          : `Names need at least ${NAME_MIN} letters.`, true);
+        return false;
+      }
+      name = check.name;
+      this.nameInput.value = name;
       localStorage.setItem(STORAGE_KEY, name);
       this.network.setName(name);
       this.nameSubmitted = true;
@@ -613,7 +625,9 @@ export class MenuController {
   private bindNetwork(): void {
     this.network.onWelcome = (payload: WelcomePayload) => {
       // Auto-set name on connect if we have one stored.
-      const stored = localStorage.getItem(STORAGE_KEY) ?? '';
+      const storedRaw = localStorage.getItem(STORAGE_KEY) ?? '';
+      const storedCheck = checkName(storedRaw);
+      const stored = storedCheck.ok ? storedCheck.name : '';
       if (stored && !this.nameSubmitted) {
         this.nameInput.value = stored;
         this.network.setName(stored);

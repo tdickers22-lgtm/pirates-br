@@ -394,6 +394,27 @@ console.log("\n8. Match: a second 'Pirate4821' in one match sails as 'Pirate4821
     JSON.stringify(names));
   m8.stop?.();
 }
+console.log('\n9. b1-bugs-01: the device id reaches the server and survives a resume');
+{
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/client/network/NetworkClient.ts'), 'utf8');
+  const setName = src.slice(src.indexOf('setName(name: string)'), src.indexOf('setName(name: string)') + 400);
+  expect('client set_name payload carries deviceId', /payload:[^;]*deviceId/.test(setName), setName.split('\n')[0]);
+  expect('client device id persists in localStorage and matches DEVICE_ID_RE',
+    /localStorage\?\.setItem\(DEVICE_STORAGE_KEY/.test(src) && /isDeviceId\(id\)/.test(src));
+  const { LobbyServer } = await import('../src/server/core/LobbyServer.ts');
+  const { PROTOCOL_VERSION } = await import('../src/shared/types/index.ts');
+  const server = new LobbyServer();
+  server.stats = new StatsStore(join(TMP, 's9.json'));
+  const parked = { id: 'old-1', token: 'tok-9', ws: makeFakeWs([]), name: 'Anne', deviceId: devId(9), state: 'menu', lastSeenAt: Date.now() };
+  server.held.set('tok-9', parked);
+  const sink = [];
+  const fresh = { id: 'new-1', token: 'tok-new', ws: makeFakeWs(sink), name: '', state: 'menu', lastSeenAt: Date.now() };
+  server.handleResume(fresh, { type: 'resume', ts: 0, payload: { token: 'tok-9', protocolVersion: PROTOCOL_VERSION } });
+  expect('resume took the parked seat', fresh.id === 'old-1' && fresh.name === 'Anne', `id=${fresh.id} name=${fresh.name}`);
+  expect('resume keeps the parked deviceId (stats stay device-keyed)', fresh.deviceId === devId(9), `deviceId=${fresh.deviceId}`);
+  server.handleSetName(fresh, { type: 'set_name', ts: 0, payload: { name: 'Anne', deviceId: devId(10) } });
+  expect('set_name with a typed deviceId sets the session key', fresh.deviceId === devId(10), `deviceId=${fresh.deviceId}`);
+}
 rmSync(TMP, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nAll stats assertions passed' : `\n${failures} FAILURES`);

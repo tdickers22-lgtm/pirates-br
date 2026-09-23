@@ -1,3 +1,4 @@
+import { isDeviceId } from '../../shared/names.js';
 import type {
   HotSnapshotPayload,
   NetMsg, PlayerInput, GameState, TradeActionPayload,
@@ -804,7 +805,13 @@ export class NetworkClient {
   }
 
   // ─── Lobby-scoped sends ──────────────────────────────────────
-  setName(name: string) { this.send({ type: 'set_name', ts: Date.now(), payload: { name } }); }
+  /** b1.2f (online-07): lifetime stats are keyed by an anonymous per-browser
+   *  device id, so every set_name carries it. Without it the server falls back
+   *  to the name key and anyone typing the same name shares the record. */
+  setName(name: string) {
+    const deviceId = getDeviceId();
+    this.send({ type: 'set_name', ts: Date.now(), payload: deviceId ? { name, deviceId } : { name } });
+  }
   createParty() { this.send({ type: 'create_party', ts: Date.now(), payload: {} }); }
   joinParty(code: string) { this.send({ type: 'join_party', ts: Date.now(), payload: { code } }); }
   leaveParty() { this.send({ type: 'leave_party', ts: Date.now(), payload: {} }); }
@@ -886,4 +893,28 @@ export class NetworkClient {
     if (!this.ws) return;
     this.ws.close();
   }
+}
+
+const DEVICE_STORAGE_KEY = 'pbr.device';
+let cachedDeviceId: string | null | undefined;
+
+/** The anonymous device id (32 hex chars, matches DEVICE_ID_RE), created once
+ *  and kept in localStorage. Private mode without storage still gets a
+ *  per-tab id so one session's stats stay together. Null only when there is no
+ *  crypto at all. */
+export function getDeviceId(): string | null {
+  if (cachedDeviceId !== undefined) return cachedDeviceId;
+  let id: string | null = null;
+  try { id = globalThis.localStorage?.getItem(DEVICE_STORAGE_KEY) ?? null; } catch { id = null; }
+  if (!isDeviceId(id)) {
+    id = null;
+    const c = (globalThis as { crypto?: Crypto }).crypto;
+    if (c?.getRandomValues) {
+      const bytes = c.getRandomValues(new Uint8Array(16));
+      id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      try { globalThis.localStorage?.setItem(DEVICE_STORAGE_KEY, id); } catch { /* private mode */ }
+    }
+  }
+  cachedDeviceId = id;
+  return id;
 }

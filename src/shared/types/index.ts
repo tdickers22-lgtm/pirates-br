@@ -1528,7 +1528,8 @@ export type EmptyMsgPayload = Record<string, never>;
  * one", never "the client sent rubbish" (rubbish is dropped at the boundary).
  */
 export interface ClientMsgPayloads {
-  set_name: { name: string };
+  /** deviceId: the anonymous stats key (b1.2f); dropped at the boundary when malformed. */
+  set_name: { name: string; deviceId?: string };
   create_party: EmptyMsgPayload;
   join_party: { code: string };
   leave_party: EmptyMsgPayload;

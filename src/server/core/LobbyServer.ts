@@ -934,6 +934,9 @@ export class LobbyServer {
     this.clients.delete(parked.id);
     session.id = parked.id;
     session.name = parked.name;
+    // The stats key rides the seat: without it a resumed player's next match
+    // lands on the name-keyed record and splits his lifetime stats.
+    session.deviceId = parked.deviceId;
     session.state = parked.state;
     session.partyCode = parked.partyCode;
     session.matchId = parked.matchId;
@@ -1009,9 +1012,9 @@ export class LobbyServer {
     // b1.2f (online-07): stats follow the anonymous device, not the name.
     // set_name never creates a record and never writes the file.
     // validate.ts adds `deviceId` only when its shape is valid; re-checked
-    // here because the shared payload type does not declare it yet (b1.5 hook).
-    const payload = msg.payload;
-    if ('deviceId' in payload && isDeviceId(payload.deviceId)) session.deviceId = payload.deviceId;
+    // here so a handler called without the boundary still refuses rubbish.
+    const deviceId = msg.payload.deviceId;
+    if (isDeviceId(deviceId)) session.deviceId = deviceId;
     this.sendStats(session, this.statsFor(session));
   }
 
