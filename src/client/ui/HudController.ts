@@ -2828,12 +2828,12 @@ export class HudController {
       atHelm: player.atHelm,
       atRepairPrompt: extra.atRepairPrompt,
       wheelHeld: this.view.input.isSupplyWheelOpen(),
-      mapOpen: false,
+      mapOpen: this.view.ui.mapOverlay.classList.contains('visible'),
       aiming: extra.aiming,
       holding: extra.holding,
       scopeShowing: extra.scopeShowing,
       alarmUp: !!this.frameHudPlan?.alarm,
-      bannerUp: false,
+      bannerUp: performance.now() <= this.view.islandBannerHideAt,
       serverNotice: performance.now() < this.serverNoticeHideAt,
     });
     this.frameVisibility = vis;

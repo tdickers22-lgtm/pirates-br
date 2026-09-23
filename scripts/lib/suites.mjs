@@ -660,6 +660,7 @@ export const BROWSER = [
   // overlaps, touch controls clear of widgets, minimap >= 90, menu without nested scroll,
   // inputs >= 16 px, no zoom-out (HEAD f5fee97e..5fb10c51: 20 FAIL).
   { file: 'test-responsive-hud.mjs', cmd: ['node', 'scripts/test-responsive-hud.mjs'] },
+  { file: 'test-elimination-spectate.mjs', cmd: ['node', 'scripts/test-elimination-spectate.mjs'] },
   { ...plain('test-geometry-lod.mjs') },
   { ...plain('test-shadow-gate.mjs') },
   { ...plain('test-decor-batch.mjs') },

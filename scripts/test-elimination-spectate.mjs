@@ -35,7 +35,7 @@ const killAll = () => { for (const c of kids) { try { process.kill(-c.pid, 'SIGT
 let browser = null;
 try {
   if (OWN) {
-    start('npx tsx src/server/index.ts', { PORT: '8091', PIRATES_BR_MAP_SEED: '20260801', PIRATES_BR_DEV: '1' });
+    start('npx tsx src/server/index.ts', { PORT: '8091', PIRATES_BR_MAP_SEED: '20260801', PIRATES_BR_DEV: '1', PIRATES_BR_DEV_HOOKS: '1' });
     start('npx vite --port 3101 --strictPort', { PIRATES_BR_SERVER_PORT: '8091' });
     for (let i = 0; i < 60; i++) {
       try { if ((await fetch(`${BASE_URL}/`)).ok) break; } catch { /* booting */ }
@@ -54,14 +54,23 @@ try {
   }, null, { timeout: 120_000 });
   expect('a Solo match with other crews is live', true);
 
-  // OUT OF THE VOYAGE. Snapshots rewrite the local player every tick, so the
-  // eliminated state is re-asserted each frame, exactly as the server would.
-  await page.evaluate(() => {
+  // OUT OF THE VOYAGE, FOR REAL. After the horn, scuttle our own sloop through
+  // the server's solo-only dev_scuttle hook: the hull founders and we go down
+  // with her via startShipSinking + handlePlayerDeath, so the elimination,
+  // the game_over{died} and the death card are the ones a real sinking sends.
+  await page.waitForFunction(() => {
     const g = window.__piratesBR;
-    const hold = () => { const p = g.getLocalPlayer(); if (p) p.state = 'eliminated'; requestAnimationFrame(hold); };
-    hold();
-    g.returnToLobbyAfterLoss(0, 0, 'Your ship went down');
+    const me = g.getLocalPlayer?.();
+    return g.state?.phase === 'playing' && !!me?.shipId && me.state !== 'respawning';
+  }, null, { timeout: 90_000 });
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => {
+    window.__piratesBR.network.send({ type: 'dev_scuttle', ts: Date.now(), payload: {} });
   });
+  const out = await page.waitForFunction(() => window.__piratesBR.getLocalPlayer?.()?.state === 'eliminated', null, { timeout: 8_000 })
+    .then(() => true, () => false);
+  expect('scuttling our own sloop in Solo puts us out (server state eliminated)', out,
+    out ? '' : 'is PIRATES_BR_DEV_HOOKS=1 set on the server?');
   const t0 = Date.now();
   const bannerUp = await page.waitForFunction(() => {
     const b = document.getElementById('spectate-banner');
