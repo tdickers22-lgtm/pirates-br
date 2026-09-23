@@ -5,7 +5,7 @@
   <!-- viewport-fit=cover: the canvas reaches under the notch and the HUD steps in
        by env(safe-area-inset-*) (mobile.css). maximum-scale is only a hint (iOS
        ignores it since iOS 10); touch-action + MobileShell.ts stop the zoom. -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#071326" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -638,6 +638,18 @@
     <p>Pirates BR plays in landscape. Your ship keeps sailing while you turn.</p>
   </div>
 
+  <!-- Phone ship card (b1.5e): a pill until tapped, then the full card for 5 s.
+       Touch and pen only; a mouse never needed it (the card is always open there). -->
+  <script type="module">
+    const card = document.getElementById('ship-status');
+    let timer = 0;
+    card?.addEventListener('pointerup', (e) => {
+      if (e.pointerType === 'mouse') return;
+      card.classList.toggle('expanded');
+      clearTimeout(timer);
+      if (card.classList.contains('expanded')) timer = setTimeout(() => card.classList.remove('expanded'), 5000);
+    });
+  </script>
   <script type="module" src="/src/client/main.ts"></script>
 </body>
 </html>

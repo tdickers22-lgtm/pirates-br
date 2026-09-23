@@ -1665,3 +1665,193 @@ body.match-ceremony #hit-marker { opacity: 0 !important; }
 #weapon-slots .weapon-slot { display: none; }
 #weapon-slots .weapon-slot.active,
 #weapon-slots.revealed .weapon-slot { display: block; }
+
+/* ══ TOUCH AND PHONE LAYOUT (b1.5e; crossdevice-07, liveplay-03) ═══════════
+   Graded by scripts/test-responsive-hud.mjs at 667x375, 844x390, 932x430,
+   1024x768, 1180x820, 1366x1024 (touch) and 960x540 (mouse): no two widgets
+   overlap, none leaves the glass, no touch control sits on a widget, minimap
+   >= 90x90. Measured before this block (844x390): the Satchel/Scope row sat on
+   the gold, Fire on the weapon card, Interact on the health bars and the ship
+   card; the health block ran under the crosshair.
+   Two tiers, both keyed off where the thumbs are (touch.css):
+     1. html[data-input-scheme="touch"] (every touch device, iPad included):
+        the desktop arrangement stays, but the thumb zones are reserved. The
+        gold steps under the top-left utility row, health climbs above the
+        stick and the helm slider, the weapon + ammo pill rides above the right
+        arc, the ship stores centre between the two thumbs.
+     2. @media (max-height: 500px) and (pointer: coarse) (phone landscape):
+        a compact layout on top of that: one top strip (utility row | compass
+        + storm | ships + 100 px minimap), the ship card as a tap-to-expand
+        pill, a thin health bar above the stick.
+   Widgets leave their grid cells for position:fixed here (no transformed
+   ancestor, so fixed means the viewport); safe-area insets are added on each.
+   Phone selectors carry html:root so they tie the touch tier's specificity
+   and win by source order. */
+html[data-input-scheme="touch"] #pointer-lock-hint,
+html[data-input-scheme="gamepad"] #pointer-lock-hint { display: none !important; }
+html[data-input-scheme="touch"] #hud-top-left { padding-top: 66px; }
+html[data-input-scheme="touch"] #hud-right-tactical { max-height: calc(100vh - 92px - 340px); }
+html[data-input-scheme="touch"] #hud-bottom-left,
+html[data-input-scheme="touch"] #hud-bottom-mid,
+html[data-input-scheme="touch"] #hud-bottom-right { display: contents; }
+html[data-input-scheme="touch"] #health-bar-wrap {
+  position: fixed; width: 200px;
+  left: calc(16px + env(safe-area-inset-left, 0px));
+  bottom: calc(236px + env(safe-area-inset-bottom, 0px));
+}
+html[data-input-scheme="touch"] #hud-bottom-left > div:last-child {
+  position: fixed; margin: 0 !important;
+  flex-direction: row !important; align-items: baseline;
+  right: calc(150px + env(safe-area-inset-right, 0px));
+  bottom: calc(284px + env(safe-area-inset-bottom, 0px));
+}
+html[data-input-scheme="touch"] #weapon-slots {
+  position: fixed; flex-wrap: nowrap;
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  bottom: calc(284px + env(safe-area-inset-bottom, 0px));
+}
+html[data-input-scheme="touch"] .weapon-slot:not(.active) { display: none; }
+html[data-input-scheme="touch"] .weapon-slot.active {
+  width: auto; min-width: 96px; min-height: 0;
+  flex-direction: row; gap: 8px; padding: 6px 10px;
+}
+html[data-input-scheme="touch"] .weapon-slot.active > div:nth-child(3) { display: none; }
+html[data-input-scheme="touch"] #ship-stores-wrap {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  max-width: calc(100vw - 560px);
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+}
+html[data-input-scheme="touch"] .ship-inventory-label { display: none; }
+html[data-input-scheme="touch"] #hud-center-prompt {
+  bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+  max-width: min(480px, calc(100vw - 560px));
+}
+
+@media (max-height: 500px) and (pointer: coarse) {
+  html:root #pointer-lock-hint { display: none !important; }
+  /* The strip is pinned, not a 1fr|auto|1fr grid: with the ships chip pushed
+     left of the minimap the grid centred the compass 61 px off the middle at
+     667x375, onto the Special button. */
+  html:root #hud-top-nav { display: block; padding: 6px 12px 0; min-height: 0; }
+  html:root #hud-top-center { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); }
+  html:root #hud-top-right { position: absolute; top: 6px; right: 12px; }
+  html:root #hud-top-left { padding-top: 62px; }
+  html:root #gold-display { padding: 3px 8px; gap: 6px; }
+  html:root #gold-display .num, html:root #player-count .num { font-size: 0.92rem; }
+  html:root #hud-top-center { gap: 4px; }
+  html:root #compass { width: 130px; height: 26px; }
+  html:root #wind-vane { display: none; }
+  html:root #storm-info {
+    display: flex; align-items: baseline; justify-content: center; gap: 6px;
+    max-width: max(120px, calc(100vw - 548px));
+    white-space: nowrap; overflow: hidden;
+  }
+  html:root #storm-phase { font-size: 0.52rem; }
+  html:root #storm-timer { font-size: 0.8rem; }
+  html:root #storm-warning { font-size: 0.52rem; }
+  /* One line, below the utility row, clear of the gold and the minimap. */
+  html:root #objective-line {
+    position: absolute; top: 66px; left: 50%; transform: translateX(-50%);
+    width: max-content; max-width: calc(100vw - 270px);
+    margin: 0; font-size: 0.56rem;
+  }
+  html:root #hud-top-right { margin-right: 112px; }
+  html:root #player-count { padding: 3px 8px; }
+  html:root #player-count .lbl { font-size: 0.46rem; }
+  html:root #hud-right-tactical {
+    top: 6px; right: 12px; width: 100px;
+    max-height: none; overflow: visible;
+  }
+  html:root #minimap-shell { width: 100px; gap: 0; }
+  html:root #minimap-head { display: none; }
+  html:root #minimap { width: 100px !important; height: 100px !important; }
+  html:root #minimap canvas { width: 100% !important; height: 100% !important; }
+  html:root #kill-feed {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    top: calc(92px + env(safe-area-inset-top, 0px));
+    width: max-content; max-width: calc(100vw - 280px);
+    max-height: 34px; overflow: hidden;
+  }
+  html:root #kill-feed:not(:empty) { min-height: 0; }
+  /* The ship card is a pill: title + holes. A tap opens the rest (index.html
+     toggles .expanded; it closes itself after 5 s). */
+  html:root #ship-status {
+    position: fixed; min-width: 0; max-width: 170px;
+    left: calc(16px + env(safe-area-inset-left, 0px));
+    top: calc(114px + env(safe-area-inset-top, 0px));
+    padding: 4px 10px; border-radius: 999px;
+    display: flex; align-items: baseline; gap: 6px; white-space: nowrap; overflow: hidden;
+  }
+  html:root #ship-status h3 { margin: 0; font-size: 0.5rem; }
+  html:root #ship-status #ship-leaks { margin: 0; font-size: 0.56rem; }
+  html:root #ship-status:not(.expanded) #sail-status,
+  html:root #ship-status:not(.expanded) #ship-upgrades,
+  html:root #ship-status:not(.expanded) #ship-own-bearing { display: none; }
+  html:root #ship-status.expanded { display: block; border-radius: 8px; white-space: normal; z-index: 5; }
+  html[data-input-scheme="touch"] #hud-right-tactical > #ship-status { pointer-events: auto; }
+  html:root #treasure-chart {
+    position: fixed; width: 150px;
+    left: calc(60px + env(safe-area-inset-left, 0px));
+    top: calc(150px + env(safe-area-inset-top, 0px));
+  }
+  html:root #treasure-chart canvas { display: none; }
+  html:root #water-gauge {
+    left: calc(16px + env(safe-area-inset-left, 0px));
+    top: calc(150px + env(safe-area-inset-top, 0px));
+    transform: scale(0.42); transform-origin: top left;
+  }
+  html:root #hud-bottom-left, html:root #hud-bottom-mid, html:root #hud-bottom-right { display: contents; }
+  html:root #health-bar-wrap {
+    position: fixed; width: 150px; gap: 3px;
+    left: calc(16px + env(safe-area-inset-left, 0px));
+    bottom: calc(120px + env(safe-area-inset-bottom, 0px));
+  }
+  html:root #health-bar-wrap .bar-label { display: none; }
+  html:root #health-bar-wrap .bar-outer { height: 7px; }
+  html:root #hud-bottom-left > div:last-child {
+    position: fixed; margin: 0 !important; gap: 6px !important;
+    flex-direction: row !important; align-items: baseline;
+    right: calc(146px + env(safe-area-inset-right, 0px));
+    bottom: calc(230px + env(safe-area-inset-bottom, 0px));
+  }
+  html:root #ammo-display { font-size: 1rem; }
+  html:root #weapon-slots {
+    position: fixed; flex-wrap: nowrap;
+    right: calc(24px + env(safe-area-inset-right, 0px));
+    bottom: calc(230px + env(safe-area-inset-bottom, 0px));
+  }
+  html:root .weapon-slot:not(.active) { display: none; }
+  html:root .weapon-slot.active {
+    width: auto; min-width: 0; max-width: 118px; min-height: 0;
+    flex-direction: row; gap: 6px; padding: 4px 8px; white-space: nowrap;
+  }
+  html:root .weapon-slot.active > div:nth-child(3) { display: none; }
+  html:root #ship-stores-wrap {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    max-width: calc(100vw - 480px);
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+  html:root .ship-inventory-label { display: none; }
+  html:root #hud-center-prompt {
+    bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    max-width: calc(100vw - 480px);
+  }
+}
+
+/* Onboarding card on any short screen: never taller than the glass, the body
+   scrolls, Skip / Next stay pinned at the bottom (crossdevice-08,
+   mechanicshud-11: Skip sat 4.6 px below a 390 px viewport). */
+#oc-panel {
+  display: flex; flex-direction: column;
+  max-height: calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+}
+#oc-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; touch-action: pan-y; overscroll-behavior: contain; }
+#oc-dots, #oc-actions { flex: 0 0 auto; }
+@media (max-height: 500px) {
+  #oc-panel { padding: 12px 22px 12px; width: min(620px, calc(100vw - 40px)); }
+  #oc-glyph { font-size: 1.4rem; margin: 4px 0 0; }
+  #oc-title { margin-bottom: 6px; }
+  #oc-body p { font-size: 0.84rem; line-height: 1.5; margin-bottom: 6px; }
+  #oc-dots { margin: 6px 0 8px; }
+  .oc-btn { padding: 10px 22px; min-height: 44px; }
+}

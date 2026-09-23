@@ -653,6 +653,10 @@ export const BROWSER = [
   // b1.4h), ctrl-wheel prevented in a match only, rotate card at 390x844 not 844x390,
   // Play asks for fullscreen.
   { file: 'test-mobile-shell.mjs', cmd: ['node', '--import', 'tsx', 'scripts/test-mobile-shell.mjs', '--browser'] },
+  // b1.5e responsive HUD/menu/cards at 667x375..1366x1024 touch + 960x540 mouse: no widget
+  // overlaps, touch controls clear of widgets, minimap >= 90, menu without nested scroll,
+  // inputs >= 16 px, no zoom-out (HEAD f5fee97e..5fb10c51: 20 FAIL).
+  { file: 'test-responsive-hud.mjs', cmd: ['node', 'scripts/test-responsive-hud.mjs'] },
   { ...plain('test-geometry-lod.mjs') },
   { ...plain('test-shadow-gate.mjs') },
   { ...plain('test-decor-batch.mjs') },
