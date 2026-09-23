@@ -94,8 +94,8 @@ const DEFAULTS = {
   weapon2: { label: 'Weapon 2', contexts: ['foot'], kind: 'tap', keyboard: ['Digit2'], gamepad: na('RB / D-pad cycles weapons (weaponNext/weaponPrev)'), touch: ['weapon-2'] },
   weapon3: { label: 'Weapon 3', contexts: ['foot'], kind: 'tap', keyboard: ['Digit3'], gamepad: na('RB / D-pad cycles weapons (weaponNext/weaponPrev)'), touch: ['weapon-3'] },
   weapon4: { label: 'Weapon 4', contexts: ['foot'], kind: 'tap', keyboard: ['Digit4'], gamepad: na('RB / D-pad cycles weapons (weaponNext/weaponPrev)'), touch: ['weapon-4'] },
-  weaponNext: { label: 'Next weapon', contexts: ['foot'], kind: 'tap', keyboard: na('digits 1-4 pick a weapon directly'), gamepad: ['Pad:RB', 'Pad:DRight'], touch: na('the weapon chips pick a weapon directly'), reserved: 'b1.4e' },
-  weaponPrev: { label: 'Previous weapon', contexts: ['foot'], kind: 'tap', keyboard: na('digits 1-4 pick a weapon directly'), gamepad: ['Pad:DLeft'], touch: na('the weapon chips pick a weapon directly'), reserved: 'b1.4e' },
+  weaponNext: { label: 'Next weapon', contexts: ['foot'], kind: 'tap', keyboard: na('digits 1-4 pick a weapon directly'), gamepad: ['Pad:RB', 'Pad:DRight'], touch: na('the weapon chips pick a weapon directly') },
+  weaponPrev: { label: 'Previous weapon', contexts: ['foot'], kind: 'tap', keyboard: na('digits 1-4 pick a weapon directly'), gamepad: ['Pad:DLeft'], touch: na('the weapon chips pick a weapon directly') },
   supplyWheel: { label: 'Supply wheel (hold)', contexts: ['foot', 'helm', 'cannon'], kind: 'hold', keyboard: ['KeyI'], gamepad: ['Pad:LB'], touch: ['satchel'] },
   // ── Stations ──
   steerLeft: { label: 'Steer to port', contexts: ['helm'], kind: 'axis', keyboard: ['KeyA', 'ArrowLeft'], gamepad: ['Pad:LS.left'], touch: ['helm-slider.left'] },

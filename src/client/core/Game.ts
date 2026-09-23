@@ -2028,6 +2028,10 @@ export class Game {
     // Tapping the minimap opens the chart (touch; the corner map is read-only
     // for the mouse, which has [M]).
     this.input.onMinimapTap = () => { if (this.inMatch && !this.map.mapOpen) this.toggleMap(true); };
+    // Pad (b1.4e): View opens/closes the chart, Menu closes it when it is open.
+    this.input.onPadMap = () => { if (this.inMatch) this.toggleMap(); };
+    this.input.onPadPause = () => { if (!this.map.mapOpen) return false; this.toggleMap(false); return true; };
+    this.input.currentWeaponSlot = () => this.getLocalPlayer()?.activeSlot ?? null;
   }
 
   private bindSupplyWheelActions() {
@@ -2102,6 +2106,9 @@ export class Game {
 
   /** On the frame the wheel closes, activate whatever slot was hovered. */
   private updateWheelRelease() {
+    // Pad right stick selects on the shared radial (b1.4e); LB release takes it.
+    const padStick = this.input.getPadWheelStick();
+    if (padStick) this.supplyWheel?.stick(padStick.x, padStick.y);
     this.supplyWheel?.update();
   }
 
@@ -4094,6 +4101,9 @@ export class Game {
   /** Touch contexts (b1.4c): the on-screen arc follows the station, the water
    *  and the hands. Nothing runs (and nothing allocates) off the touch scheme. */
   private updateTouchContext(): void {
+    // The pad's context routes (b1.4e) read where she is, on every scheme.
+    const pc = this.inMatch ? this.getLocalPlayer() : null;
+    this.input.setPlayContext(pc ? (pc.atHelm ? 'helm' : pc.atCannon ? 'cannon' : pc.state === 'swimming' ? 'swim' : 'foot') : null);
     const touch = this.input.getTouchControls();
     if (!touch?.isActive()) return;
     const me = this.getLocalPlayer();

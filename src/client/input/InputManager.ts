@@ -6,6 +6,13 @@ import { InputSchemeTracker, initialScheme } from './InputScheme.js';
 import { resolveInputAuthority } from './inputAuthority.js';
 import { LookDeltaFilter, requestLockSafe } from './pointerLock.js';
 import { TouchControls, touchCapable } from './TouchControls.js';
+import { GamepadSource, type PadContext, type PadLike } from './GamepadSource.js';
+import { MenuNav, type NavDir } from './MenuNav.js';
+import { Haptics } from './Haptics.js';
+import { modalStack } from '../ui/ModalStack.js';
+
+/** Where the player is, for the pad's context routes (Game sets it each frame). */
+export type PlayContext = 'foot' | 'helm' | 'cannon' | 'swim';
 
 /** Finger drag-to-look gain (b1.4b): rad per CSS px before sensitivity and fovScale. */
 export const TOUCH_LOOK_RAD_PER_PX = 0.0055;
@@ -59,6 +66,30 @@ export class InputManager {
   readonly scheme = new InputSchemeTracker(initialScheme());
   /** On-screen stick, look pad and buttons (b1.4b); mounted on touch-capable devices. */
   private touch: TouchControls | null = null;
+  /** Standard gamepad (b1.4e): polled every animation frame, presses table rows. */
+  readonly pad = new GamepadSource({
+    setActionHeld: (action, held) => this.padAction(action, held),
+    applyPadLook: (dx, dy) => this.applyPadLook(dx, dy),
+    notePad: () => { this.scheme.note('gamepad'); },
+  });
+  private padNav: MenuNav | null = null;
+  private currentPad: PadLike | null = null;
+  private lastPadPoll = 0;
+  private playContext: PlayContext | null = null;
+  private menuScreenEl: HTMLElement | null = null;
+  /** Rumble / vibrate (b1.4e): table values, one setting. */
+  readonly haptics = new Haptics({
+    pad: () => this.currentPad as never,
+    vibrate: typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function' ? (ms) => navigator.vibrate(ms) : null,
+    scheme: () => this.scheme.current,
+  });
+  /** Game sets these: the pad's View (chart) and Menu (pause) buttons. Return
+   *  true from onPadPause when it consumed the press (closed the chart). */
+  onPadMap: (() => void) | null = null;
+  onPadPause: (() => boolean) | null = null;
+  /** Game sets this so RB/D-pad cycle from the weapon actually in hand. */
+  currentWeaponSlot: (() => WeaponSlot | null) | null = null;
+  private lastSlot: WeaponSlot = 0;
 
   // One-shot flags (cleared each frame)
   private interactPressed = false;
@@ -183,10 +214,95 @@ export class InputManager {
       this.touch.mount();
     }
 
+    this.startPadLoop();
+    this.scheme.onChange((next) => { if (next !== 'gamepad') this.padNav?.clear(); });
+
     window.addEventListener('blur', () => this.releaseAllKeys());
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') this.releaseAllKeys();
     });
+  }
+
+  /** Game, every frame: where the local player is (null = not in a match). */
+  setPlayContext(context: PlayContext | null) { this.playContext = context; }
+
+  /** The pad's context: menus (no match, the menu screen, or any modal up),
+   *  the supply wheel while it is open, else where the player stands. */
+  private padContext(): PadContext {
+    if (!this.playContext || modalStack.depth() > 0) return 'menu';
+    if (typeof document !== 'undefined') {
+      // #menu-screen is position:fixed (offsetParent is always null): read its box.
+      this.menuScreenEl ??= document.getElementById('menu-screen');
+      const m = this.menuScreenEl;
+      if (m && m.getClientRects().length > 0 && getComputedStyle(m).display !== 'none' && getComputedStyle(m).visibility !== 'hidden') return 'menu';
+    }
+    return this.vHeld ? 'wheel' : this.playContext;
+  }
+
+  private startPadLoop() {
+    if (typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function' || typeof requestAnimationFrame !== 'function') return;
+    const tick = (t: number) => {
+      requestAnimationFrame(tick);
+      const dt = this.lastPadPoll ? Math.min(0.25, Math.max(0, (t - this.lastPadPoll) / 1000)) : 0;
+      this.lastPadPoll = t;
+      this.pollPad(dt);
+    };
+    requestAnimationFrame(tick);
+  }
+
+  /** One pad frame (also the probe hook: tests may call it with their own dt). */
+  pollPad(dtSec: number) {
+    let pads: ArrayLike<PadLike | null> | null = null;
+    try { pads = navigator.getGamepads() as unknown as ArrayLike<PadLike | null>; } catch { pads = null; }
+    const pad = GamepadSource.pick(pads);
+    if (!pad && !this.currentPad) return;
+    this.currentPad = pad;
+    const ctx = this.padContext();
+    this.pad.setContext(ctx);
+    const wasPad = this.scheme.current === 'gamepad';
+    this.pad.poll(pad, dtSec, { sensitivity: this.sensitivity, fovScale: this.fovScale });
+    if (ctx !== 'menu' || !pad || typeof document === 'undefined') return;
+    if (this.scheme.current !== 'gamepad') return;
+    this.padNav ??= new MenuNav(document);
+    // The press that wakes the pad only shows the ring: picking the pad up and
+    // pressing A must not queue a match the player never saw was selected.
+    if (!wasPad) { this.padNav.ensureFocus(); return; }
+    const e = this.pad.edges;
+    const b = pad.buttons;
+    const ls = this.pad.leftStick;
+    let dir: NavDir | null = b[12]?.pressed ? 'up' : b[13]?.pressed ? 'down' : b[14]?.pressed ? 'left' : b[15]?.pressed ? 'right' : null;
+    if (!dir && Math.hypot(ls.x, ls.y) >= 0.5) dir = Math.abs(ls.x) > Math.abs(ls.y) ? (ls.x > 0 ? 'right' : 'left') : (ls.y > 0 ? 'down' : 'up');
+    this.padNav.update({ dir, a: e.has('A'), b: e.has('B') }, Date.now());
+  }
+
+  /** The pad's right stick while the supply wheel is open (Game feeds SupplyWheel.stick). */
+  getPadWheelStick(): { x: number; y: number } | null {
+    return this.vHeld && this.currentPad ? this.pad.rightStick : null;
+  }
+
+  /** Pad presses that are not PlayerInput rows: the chart, pause, the wheel pick. */
+  private padAction(action: BindingAction, held: boolean) {
+    if (action === 'map' || action === 'pause') {
+      if (!held) return;
+      if (action === 'map') this.onPadMap?.();
+      // Menu in a match: close the chart if it is open, else the controls card
+      // (the pad row for the legend is "the pause menu shows the controls card").
+      else if (!this.onPadPause?.()) this.legendPressed = true;
+      return;
+    }
+    if (action === 'wheelPick') {
+      if (held) this.closeSupplyWheel();
+      return;
+    }
+    this.setActionHeld(action, held);
+  }
+
+  /** Right stick look: radians this frame, same signs as the mouse. */
+  applyPadLook(dxRad: number, dyRad: number) {
+    if (!Number.isFinite(dxRad) || !Number.isFinite(dyRad)) return;
+    this.yaw -= dxRad;
+    this.pitch -= dyRad;
+    this.pitch = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 
   /** Virtual sources (touch buttons, gamepad) press and release actions here.
@@ -197,6 +313,9 @@ export class InputManager {
     if (held === was) return;
     if (held) {
       this.virtualHeld.add(action);
+      if (action === 'fire' && this.scheme.current !== 'mouse') {
+        this.haptics.pulse(this.playContext === 'cannon' ? 'cannonFire' : 'fire');
+      }
       if (!this.vHeld || action === 'supplyWheel' || action === 'wheelPage') this.actionDown(action);
     } else {
       this.virtualHeld.delete(action);
@@ -252,6 +371,13 @@ export class InputManager {
       case 'reload': this.reloadPressed = true; return;
       case 'dropChest': this.dropChestPressed = true; return;
       case 'special': this.specialAttackPressed = true; return;
+      case 'weaponNext':
+      case 'weaponPrev': {
+        const from = this.currentWeaponSlot?.() ?? this.lastSlot;
+        this.slotPressed = ((from + (action === 'weaponNext' ? 1 : 3)) % 4) as WeaponSlot;
+        this.lastSlot = this.slotPressed;
+        return;
+      }
       case 'keg':
         if (this.kegHeld) return;
         this.kegHeld = true;
@@ -259,7 +385,7 @@ export class InputManager {
         return;
       default: break;
     }
-    for (const [slotAction, slot] of SLOT_ACTIONS) if (action === slotAction) this.slotPressed = slot;
+    for (const [slotAction, slot] of SLOT_ACTIONS) if (action === slotAction) { this.slotPressed = slot; this.lastSlot = slot; }
     for (const [ammoAction, ammo] of AMMO_ACTIONS) if (action === ammoAction) this.cannonAmmoPressed = ammo;
   }
 
@@ -394,6 +520,7 @@ export class InputManager {
    *  off the keyboard" — drop every held key and one-shot, and flag a forced
    *  send so the zeroed input reaches the server on the very next tick. */
   private releaseAllKeys() {
+    this.pad.releaseAll();
     this.touch?.reset();
     this.keys.clear();
     this.mouseButtons.clear();

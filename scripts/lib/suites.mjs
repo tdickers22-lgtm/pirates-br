@@ -230,6 +230,9 @@ export const LOGIC = [
   // continuous wheel/trackpad chart zoom (crossdevice-02/09/10/11/14, mechanicshud-05).
   quick(tsx('test-input-bindings.mjs')),
   quick(tsx('test-radial-menu.mjs')),
+  // b1.4e gamepad: radial deadzone 0.12/0.95, look curve ^2 at 220/150 deg/s, table
+  // routes per context, Y tap/hold split, MenuNav pickNext, haptics table + off switch.
+  quick(tsx('test-gamepad-curves.mjs')),
   // b1.4b touch core: virtual stick/look/buttons through the real InputManager,
   // and the touch [X] hold replayed into a real Match closes a breach (logic half).
   tsx('test-touch-controls.mjs'),
@@ -625,6 +628,10 @@ export const BROWSER = [
   // 0.35-1.2 rad, Fire tap -> fire=true on the wire, a 1.5 s Interact hold keeps
   // interactHeld on every built input, pointercancel releases. PNGs of the arc.
   { ...plain('test-touch-controls-live.mjs') },
+  // b1.4e gamepad, browser half: stubbed navigator.getGamepads (standard pad) at
+  // 960x540. Menu ring + A presses Play, D-pad to Solo, LS 2 s >=1.5 m, RS 1 s
+  // 3.0-4.6 rad, RT fire + 12 ms rumble, LB/RS/release takes wheel slot 3.
+  { ...plain('test-gamepad.mjs') },
   { ...plain('test-geometry-lod.mjs') },
   { ...plain('test-shadow-gate.mjs') },
   { ...plain('test-decor-batch.mjs') },
