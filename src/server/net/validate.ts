@@ -31,6 +31,7 @@
  * `sanitizePlayerInput` here). Graded by `scripts/test-wire-validation.mjs`,
  * which fails if any member of `ClientMsgType` has no validator.
  */
+import { isDeviceId } from '../../shared/names.js';
 import type {
   AnyClientMsg, ClientMsgPayloads, ClientMsgType, InteractIntent, ItemStack,
   NetMsg, PlayerInput, TradeActionPayload,
@@ -191,7 +192,10 @@ export const CLIENT_VALIDATORS: {
     const p = bag(raw);
     if (!p) return null;
     const name = p.name === undefined ? '' : str(p.name);
-    return name === null ? null : { name };
+    if (name === null) return null;
+    // b1.2f: the anonymous device id rides set_name. A malformed one is
+    // dropped (the player keeps a name-keyed identity), never a refused frame.
+    return isDeviceId(p.deviceId) ? { name, deviceId: p.deviceId } : { name };
   },
   create_party: (raw) => (bag(raw) ? {} : null),
   join_party: (raw) => {

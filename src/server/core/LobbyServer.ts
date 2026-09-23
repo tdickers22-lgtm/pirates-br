@@ -1,5 +1,5 @@
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { timingSafeEqual } from 'node:crypto';
+import { randomInt, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { basename, extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ import type {
   ResumeOkPayload, ResumeFailedPayload, ServerNoticePayload,
 } from '../../shared/types/index.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
+import { checkName, isDeviceId } from '../../shared/names.js';
 import { validateClientMsg } from '../net/validate.js';
 import { ABUSE_CLOSE_CODE, ConnectionGate, SessionLimiter, classifyMsg } from '../net/limits.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
@@ -314,6 +315,9 @@ interface ClientSession {
    *  behind a trusted proxy) and its per-message-class token buckets. */
   ip: string;
   limiter: SessionLimiter;
+  /** b1.2f: the anonymous device id sent with set_name (validated shape).
+   *  Lifetime stats are keyed by its sha256; never logged or broadcast. */
+  deviceId?: string;
   /** Set when the socket was closed 1008 for staying over its message budget:
    *  no seat is held for it and no further frame is routed. */
   closedForAbuse?: boolean;
@@ -447,6 +451,10 @@ export class LobbyServer {
   private rateLimitedFrames = 0;
   private abuseClosed = 0;
   private stats: StatsStore;
+  /** b1.2f: matchId -> playerId -> whose stats a result is (device + the name
+   *  as set, before any in-match ' (2)'). Survives the socket closing, so a
+   *  player who dropped before the end is still credited. */
+  private statsIdentity = new Map<string, Map<string, { deviceId?: string; name: string }>>();
 
   constructor() {
     this.stats = new StatsStore(defaultStatsPath(PROJECT_ROOT));
@@ -877,11 +885,31 @@ export class LobbyServer {
   }
 
   private handleSetName(session: ClientSession, msg: ClientMsg<'set_name'>): void {
-    const name = msg.payload.name.trim().slice(0, 24);
-    if (!name) return this.lobbyError(session, 'Name cannot be empty');
+    // b1.2f (online-15): the shared names.ts rules; strangers read this name
+    // in every killfeed. A refused name still gets the player to sea, as a
+    // Pirate#### the client is told about.
+    const check = checkName(msg.payload.name);
+    if (!check.ok && check.reason === 'empty') return this.lobbyError(session, 'Name cannot be empty');
+    let name = check.name;
+    if (!check.ok) {
+      name = `Pirate${randomInt(1000, 10000)}`;
+      this.lobbyError(session, check.reason === 'short'
+        ? `Names need at least 2 letters. You sail as ${name}.`
+        : `That name is not allowed. You sail as ${name}.`);
+    }
     session.name = name;
-    const stats = this.stats.ensure(name);
-    this.sendStats(session, stats);
+    // b1.2f (online-07): stats follow the anonymous device, not the name.
+    // set_name never creates a record and never writes the file.
+    // validate.ts adds `deviceId` only when its shape is valid; re-checked
+    // here because the shared payload type does not declare it yet (b1.5 hook).
+    const payload = msg.payload;
+    if ('deviceId' in payload && isDeviceId(payload.deviceId)) session.deviceId = payload.deviceId;
+    this.sendStats(session, this.statsFor(session));
+  }
+
+  /** The menu's read of a session's lifetime stats (never creates a record). */
+  private statsFor(session: ClientSession): PlayerStatsRecord {
+    return this.stats.lookup({ deviceId: session.deviceId, name: session.name });
   }
 
   private handleCreateParty(session: ClientSession, _msg: ClientMsg<'create_party'>): void {
@@ -1215,7 +1243,7 @@ export class LobbyServer {
     if (code) this.removeFromParty(session, true);
     this.maybeClearPartyInMatch(code);
     this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
-    if (session.name) this.sendStats(session, this.stats.ensure(session.name));
+    if (session.name) this.sendStats(session, this.statsFor(session));
   }
 
   /** Let go of the match without touching the crew. */
@@ -1257,7 +1285,7 @@ export class LobbyServer {
       this.ensureHost(party);
       this.broadcastLobby(party);
     }
-    if (session.name) this.sendStats(session, this.stats.ensure(session.name));
+    if (session.name) this.sendStats(session, this.statsFor(session));
   }
 
   /**
@@ -1276,13 +1304,13 @@ export class LobbyServer {
       session.state = 'menu';
       session.partyCode = undefined;
       this.send(session.ws, { type: 'lobby_left', ts: Date.now(), payload: {} });
-      if (session.name) this.sendStats(session, this.stats.ensure(session.name));
+      if (session.name) this.sendStats(session, this.statsFor(session));
       return;
     }
     session.state = 'party';
     this.maybeClearPartyInMatch(code);
     this.ensureHost(party);
-    if (session.name) this.sendStats(session, this.stats.ensure(session.name));
+    if (session.name) this.sendStats(session, this.statsFor(session));
     this.broadcastLobby(party);
   }
 
@@ -1732,6 +1760,9 @@ export class LobbyServer {
       };
       this.send(session.ws, { type: 'match_start', ts: Date.now(), payload: startMsg });
       const { playerId } = join.send();
+      let ids = this.statsIdentity.get(match.id);
+      if (!ids) this.statsIdentity.set(match.id, ids = new Map());
+      ids.set(playerId, { deviceId: session.deviceId, name: session.name });
       session.state = 'in_match';
       session.matchId = match.id;
       session.matchPlayerId = playerId;
@@ -1749,12 +1780,17 @@ export class LobbyServer {
     // is a no-contest: neither a played match nor a loss.
     const noContest = result.reason === 'interrupted';
 
-    // Persist stats for every human in the result, even ones whose ws already closed —
-    // identity is by display name (the canonical key for the JSON store).
+    // Persist stats for every human in the result, even ones whose ws already
+    // closed. Identity is the device captured at placement (b1.2f), and the
+    // name as set, not the in-match ' (2)' display name.
+    const ids = this.statsIdentity.get(matchId);
+    this.statsIdentity.delete(matchId);
     for (const r of result.humans) {
-      if (!r.name || r.name === 'Pirate') continue;
+      const who = ids?.get(r.playerId) ?? { name: r.name };
+      if (!who.name || (!who.deviceId && who.name === 'Pirate')) continue;
       const updated = this.stats.applyMatchResult({
-        name: r.name,
+        deviceId: who.deviceId,
+        name: who.name,
         kills: r.kills,
         deaths: r.deaths,
         gold: r.gold,
@@ -1787,8 +1823,8 @@ export class LobbyServer {
         }
       }
     }
-
-    this.stats.flush();
+    // No flush here (b1.2f): applyMatchResult marked the store dirty and it
+    // writes asynchronously, at most once per STATS_FLUSH_INTERVAL_MS.
   }
 
   private findClientByPlayerId(playerId: string): ClientSession | null {
@@ -1975,7 +2011,7 @@ export class LobbyServer {
       try { match.interrupt(); } catch (err) { console.error(`[Lobby] interrupt ${id.slice(0, 6)} failed:`, err); }
       try { this.reapMatch(id, match, `emergency: ${reason}`); } catch {}
     }
-    this.stats.flush();
+    this.stats.flushSync();
     for (const session of Array.from(this.clients.values())) {
       try { session.ws.close(1012, 'server restarting'); } catch {}
     }
@@ -2007,6 +2043,7 @@ export class LobbyServer {
     match.stop();
     this.matches.delete(matchId);
     this.matchEmptySince.delete(matchId);
+    this.statsIdentity.delete(matchId);
     console.log(`[Lobby] match ${matchId.slice(0, 6)} reaped (${reason}) — ${this.matches.size} running`);
   }
 

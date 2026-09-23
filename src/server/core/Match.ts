@@ -5,6 +5,7 @@ import type {
 } from '../../shared/types/index.js';
 import { BERTH, CARGO, SERVER_TICK_MS, SNAPSHOT_RATE, FULL_SNAPSHOT_TICKS, FIRST_SAIL_ASSIST, MATCH_END, MATCH_START_COUNTDOWN_SEC, DBNO, ECONOMY, HARVEST, KILL_STREAK_TIERS, PLAYER, POCKET, RESPAWN_HOLD_GRACE_SECONDS, RESPAWN_HOLD_MAX_SECONDS, SHIP, SHARK, SHIP_STATS, STORM_ARC_SECONDS, STORM_PHASES, STORM_RESPAWN_GRACE_SECONDS, UPGRADE_COSTS, WEAPONS, WORLD, WILDLIFE, FLOODING, WRECK_EVENT, WRECK_SITES, SHOP_PRICES, SHOP_QUANTITIES, type ShopLine, hullForCrewSize, botDifficultyLadder, MODES, isModeId, type BotSkill, type ModeId } from '../../shared/constants/index.js';
 import { warmIslandGrounds } from '../../shared/terrainGrid.js';
+import { dedupeName } from '../../shared/names.js';
 import {
   boardingStealCap,
   bountyClearGold,
@@ -1544,7 +1545,14 @@ export class Match {
     const crewId = uuid();
     const shipId = uuid();
     const memberIds = roster.map(() => uuid());
-    const names = roster.map((member) => (member.name || '').trim().slice(0, 24) || 'Pirate');
+    // b1.2f (online-15): two 'Pirate4821' in one match are indistinguishable in
+    // the killfeed; the second sails as 'Pirate4821 (2)'. Bots count as taken.
+    const taken = this.state.players.map((p) => p.name);
+    const names = roster.map((member) => {
+      const name = dedupeName((member.name || '').trim().slice(0, 24) || 'Pirate', taken);
+      taken.push(name);
+      return name;
+    });
 
     const spawns = this.mapGen.generateShipSpawns(this.state.islands);
     const seaSpawn = this.pickHumanSpawn(spawns) ?? {

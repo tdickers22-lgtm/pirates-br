@@ -3,12 +3,22 @@
 //   1. StatsStore: legacy records (pre-stats-panel JSON) zero-fill the new
 //      fields; applyMatchResult sums counters, min-merges bestPlacement and
 //      max-merges bestKillStreak / bestMatchGold; records survive a reload
+//   5-8. b1.2f: device identity (same name, two devices = two records), a
+//      legacy record claimed once, 10k set_name = 0 records + 0 writes, 50k LRU
+//      cap, async flush p99 loop delay < 5 ms, <= 1 write per interval,
+//      PIRATES_BR_STATS_PATH, in-match name dedupe
 //   2. Match: a melee duel accumulates damageDealt swing-by-swing and the kill
 //      path stamps bestKillStreak; the real axe-harvest path accumulates
 //      woodChopped; the match-end result carries all deltas on MatchHumanResult
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { tmpdir } from 'node:os';
+import { readFileSync, mkdtempSync } from 'node:fs';
+// liveplay-14: the LobbyServer built in section 6 must never touch data/stats.json.
+const TMP = mkdtempSync(join(tmpdir(), 'pbr-stats-'));
+process.env.PIRATES_BR_STATS_PATH = join(TMP, 'lobby-stats.json');
 import { StatsStore } from '../src/server/core/StatsStore.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { WEAPONS, HARVEST } from '../src/shared/constants/index.ts';
@@ -115,7 +125,7 @@ console.log('\n2. applyMatchResult sums counters and merges the bests');
 console.log('\n3. flush() persists — a fresh store reloads the accumulated record');
 
 {
-  store.flush();
+  await store.flush();
   const reloaded = new StatsStore(statsPath);
   const rec = reloaded.get('olddog'); // key is case-insensitive
   expect('reloaded record matches accumulated totals',
@@ -279,6 +289,112 @@ console.log('\n6. Match-end result carries the deltas on MatchHumanResult');
     human.playSeconds === Math.max(0, match.t - delta.joinedAtSimTime) && human.playSeconds > 0,
     `playSeconds=${human.playSeconds}, t=${match.t}, joined=${delta.joinedAtSimTime}`);
 }
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// b1.2f (online-07, liveplay-14): device identity, no records on set_name,
+// 50k LRU cap, async chunked flush at most once per interval.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const recordCount = (s) => (typeof s.size === 'number' ? s.size : Object.keys(s.data?.players ?? {}).length);
+const devId = (i) => `dev${String(i).padStart(6, '0')}abcdefghijklmnop`;
+
+console.log('\n5. Same name + different device -> separate records; a legacy record is claimed once');
+{
+  const p5 = join(TMP, 's5.json');
+  writeFileSync(p5, JSON.stringify({ version: 1, players: { olddog: { name: 'OldDog', kills: 5, deaths: 3, wins: 1, matchesPlayed: 4, totalGold: 900 } } }));
+  const s5 = new StatsStore(p5);
+  const base = { name: 'Same Name', deaths: 0, gold: 10, placement: 2, isWinner: false };
+  s5.applyMatchResult({ ...base, deviceId: devId(1), kills: 3 });
+  s5.applyMatchResult({ ...base, deviceId: devId(2), kills: 5 });
+  const a = s5.getByDevice?.(devId(1)), b = s5.getByDevice?.(devId(2));
+  expect('two devices, one name: two records (kills 3 and 5)', a?.kills === 3 && b?.kills === 5,
+    `a=${JSON.stringify(a)?.slice(0, 60)} b=${JSON.stringify(b)?.slice(0, 60)} (name-keyed store merges them)`);
+  const c = s5.applyMatchResult({ name: 'OldDog', deviceId: devId(3), kills: 1, deaths: 0, gold: 0, placement: 0, isWinner: false });
+  expect('first device finishing a match as OldDog claims the legacy record', c.kills === 6 && c.totalGold === 900, JSON.stringify(c));
+  expect('the claimed legacy key is gone (claimed once)', s5.get('OldDog') === null, JSON.stringify(s5.get('OldDog')));
+  const d = s5.applyMatchResult({ name: 'OldDog', deviceId: devId(4), kills: 1, deaths: 0, gold: 0, placement: 0, isWinner: false });
+  expect('a second device named OldDog starts from zero', d.kills === 1 && d.totalGold === 0, JSON.stringify(d));
+  await s5.flush();
+  const text = readFileSync(p5, 'utf8');
+  expect('the raw device id never reaches the file (sha256 only)', !text.includes(devId(1)) && /"d:[0-9a-f]{64}"/.test(text));
+  expect('compact JSON (no pretty-print indentation)', !text.includes('\n  '));
+}
+
+console.log('\n6. 10k set_name through the real LobbyServer -> 0 new records, 0 writes; hostile name refused');
+{
+  const { LobbyServer } = await import('../src/server/core/LobbyServer.ts');
+  const server = new LobbyServer();
+  expect('LobbyServer honours PIRATES_BR_STATS_PATH (tmp, not data/stats.json)',
+    server.stats.path === process.env.PIRATES_BR_STATS_PATH, `path=${server.stats.path}`);
+  const p6 = join(TMP, 's6.json');
+  const s6 = new StatsStore(p6);
+  server.stats = s6;
+  const sink = [];
+  const session = { id: 'sess-1', token: 't', ws: makeFakeWs(sink), name: '', state: 'menu', lastSeenAt: Date.now() };
+  for (let i = 0; i < 10_000; i++) {
+    const name = `Rnd${Math.random().toString(36).slice(2, 10)}`;
+    server.handleSetName(session, { type: 'set_name', ts: 0, payload: i % 2 ? { name, deviceId: devId(i) } : { name } });
+  }
+  await sleep(700);
+  expect('0 records created by 10k set_name', recordCount(s6) === 0, `records=${recordCount(s6)}`);
+  expect('0 file writes', !existsSync(p6) && (s6.writes ?? 0) === 0, `file=${existsSync(p6)} writes=${s6.writes}`);
+  expect('every set_name still answered with a stats_update',
+    sink.filter((m) => m.type === 'stats_update').length === 10_000);
+  const r = (w) => w.replace(/[a-z]/g, (ch) => String.fromCharCode(((ch.charCodeAt(0) - 97 + 13) % 26) + 97));
+  sink.length = 0;
+  server.handleSetName(session, { type: 'set_name', ts: 0, payload: { name: `x${r('avttre')}x` } });
+  expect('a blocked name sails as Pirate#### and the client is told why',
+    /^Pirate\d{4}$/.test(session.name) && sink.some((m) => m.type === 'lobby_error' && /not allowed/.test(m.payload.reason)),
+    `name=${session.name} msgs=${sink.map((m) => m.type).join(',')}`);
+  server.handleSetName(session, { type: 'set_name', ts: 0, payload: { name: '\u202EAnne\u200BBonny' } });
+  expect('bidi/zero-width stripped from an accepted name', session.name === 'AnneBonny', session.name);
+}
+
+console.log('\n7. 50k records: LRU cap, async flush p99 event-loop delay < 5 ms, at most one write per interval');
+{
+  const p7 = join(TMP, 's7.json');
+  const s7 = new StatsStore(p7);
+  const one = { deaths: 0, gold: 5, placement: 3, isWinner: false, kills: 1 };
+  for (let i = 0; i < 50_010; i++) s7.applyMatchResult({ ...one, name: `P${i}`, deviceId: devId(i) });
+  expect('capped at 50,000 records', recordCount(s7) === 50_000, `records=${recordCount(s7)}`);
+  expect('the 10 least recently played were evicted, the 11th kept',
+    s7.getByDevice?.(devId(0)) === null && s7.getByDevice?.(devId(9)) === null && !!s7.getByDevice?.(devId(10)));
+  const h = monitorEventLoopDelay({ resolution: 1 });
+  h.enable();
+  await sleep(15); // the sampling timer must be running BEFORE the flush starts
+  const t0 = performance.now();
+  await s7.flush();
+  await sleep(20); // let a blocked timer land its sample
+  h.disable();
+  const p99 = h.percentile(99) / 1e6, max = h.max / 1e6;
+  console.log(`     flush of 50k: ${(performance.now() - t0).toFixed(0)} ms wall, loop delay p99 ${p99.toFixed(2)} ms, max ${max.toFixed(2)} ms`);
+  expect('flush p99 event-loop delay < 5 ms', p99 < 5, `p99=${p99.toFixed(2)} ms`);
+  const reloaded = new StatsStore(p7);
+  expect('reload keeps 50,000 records in LRU order', recordCount(reloaded) === 50_000 && !!reloaded.getByDevice?.(devId(10)));
+
+  const p8 = join(TMP, 's8.json');
+  const s8 = new StatsStore(p8, { flushIntervalMs: 400 });
+  s8.applyMatchResult({ ...one, name: 'A1', deviceId: devId(1) });
+  await sleep(150);
+  expect('first result written promptly', s8.writes === 1, `writes=${s8.writes}`);
+  for (let i = 0; i < 20; i++) s8.applyMatchResult({ ...one, name: 'A1', deviceId: devId(1) });
+  await sleep(100);
+  expect('20 more results inside the interval: still 1 write', s8.writes === 1, `writes=${s8.writes}`);
+  await sleep(350);
+  expect('exactly one more write once the interval passes', s8.writes === 2, `writes=${s8.writes}`);
+}
+
+console.log("\n8. Match: a second 'Pirate4821' in one match sails as 'Pirate4821 (2)'");
+{
+  const m8 = new Match({ matchId: `stats-dup-${Math.random().toString(36).slice(2, 8)}`, botCount: 0 });
+  const j1 = m8.addHumanClient(makeFakeWs(), 'Pirate4821');
+  const j2 = m8.addHumanClient(makeFakeWs(), 'pirate4821');
+  const names = m8.state.players.filter((p) => p.id === j1.playerId || p.id === j2.playerId).map((p) => p.name);
+  expect('duplicate display name deduped in-match', names.includes('Pirate4821') && names.includes('pirate4821 (2)'),
+    JSON.stringify(names));
+  m8.stop?.();
+}
+rmSync(TMP, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nAll stats assertions passed' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

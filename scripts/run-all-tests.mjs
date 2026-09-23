@@ -41,13 +41,27 @@
 //   node scripts/run-all-tests.mjs --only hud,minimap
 //   node scripts/run-all-tests.mjs --list
 import { execSync, spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { createWriteStream, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ALL, EVIDENCE, EXCLUDED, TIER_TIMEOUT_MS } from './lib/suites.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LOG_DIR = path.join(ROOT, 'test-results');
+
+/**
+ * TEST MATCHES ARE NOT LIFETIME STATS (liveplay-14, b1.2f). The runner's
+ * server, and every suite that builds its own LobbyServer, inherit
+ * PIRATES_BR_STATS_PATH pointing at a tmp file; data/stats.json (2,876 probe
+ * "players" by 2026-09-22) is checked untouched at the verdict.
+ */
+const REAL_STATS = path.join(ROOT, 'data', 'stats.json');
+const statsStamp = () => { try { const st = statSync(REAL_STATS); return `${st.size}:${st.mtimeMs}`; } catch { return 'absent'; } };
+const REAL_STATS_BEFORE = statsStamp();
+if (!process.env.PIRATES_BR_STATS_PATH) {
+  process.env.PIRATES_BR_STATS_PATH = path.join(mkdtempSync(path.join(os.tmpdir(), 'pbr-run-stats-')), 'stats.json');
+}
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(`--${f}`);
@@ -403,8 +417,23 @@ if (wantQuick) {
     console.log(`  ✓ quick tier within its ${QUICK_BUDGET_MS / 1000}s ceiling`);
   }
 }
-if (bad.length || code || quickOver) {
-  console.error(`\n[test] ${bad.length} suite(s) not green${quickOver ? ', quick ceiling blown' : ''}.`);
+let statsLeak = false;
+if (statsStamp() !== REAL_STATS_BEFORE) {
+  // The owner's own dev server (8090) writes data/stats.json when HE finishes
+  // a match; only a change with no such server up is the runner's fault.
+  let ownerServer = false;
+  try { ownerServer = (await fetch('http://127.0.0.1:8090/health', { signal: AbortSignal.timeout(1500) })).ok; } catch {}
+  if (ownerServer) {
+    console.log('  ! data/stats.json changed during the run, but a dev server is up on 8090 (the owner playing): not graded');
+  } else {
+    console.error(`  ✗ FAIL: data/stats.json changed during the run; test matches must write to PIRATES_BR_STATS_PATH (${process.env.PIRATES_BR_STATS_PATH})`);
+    statsLeak = true;
+  }
+} else {
+  console.log(`  ✓ stats writes stayed in tmp (${process.env.PIRATES_BR_STATS_PATH}); data/stats.json untouched`);
+}
+if (bad.length || code || quickOver || statsLeak) {
+  console.error(`\n[test] ${bad.length} suite(s) not green${quickOver ? ', quick ceiling blown' : ''}${statsLeak ? ', stats leaked into data/stats.json' : ''}.`);
   process.exit(1);
 }
 console.log('[test] ALL SUITES PASSED');

@@ -206,6 +206,7 @@ export const LOGIC = [
   quick(tsx('test-skeleton-crowd.mjs')),
   quick(tsx('test-deck-safety.mjs')),
   quick(tsx('test-stats.mjs')),
+  quick(tsx('test-names.mjs')),
   quick(tsx('test-dock-frame.mjs')),
   quick(tsx('test-gangway-walk.mjs')),
   quick(tsx('test-climb-verbs.mjs')),
