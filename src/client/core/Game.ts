@@ -74,6 +74,7 @@ import { makePlayerRig } from '../rendering/factories/PlayerRigFactory.js';
 import { buildMermaidMesh, hudAnchorLocal, makeNameplateSprite, makeProjectileMesh } from '../rendering/factories/MiscMeshFactory.js';
 import type { PocketPreviewKind } from '../rendering/factories/WeaponMeshFactory.js';
 import { glyph, installGlyphs, keys } from '../ui/InputGlyphs.js';
+import { framePacer } from './framePacer.js';
 
 const CLIENT_INPUT_SEND_INTERVAL = 1 / 45;
 const CLIENT_INPUT_HEARTBEAT_INTERVAL = 0.2;
@@ -3243,6 +3244,10 @@ export class Game {
   }
 
   private frameBody(now: number) {
+    // Frame pacer (b1.5c, performance-06): skip callbacks inside the cap's slot
+    // BEFORE stamping lastFrameTime, so the rendered frame's rawDt (sim dt and
+    // the governor's sample) is the RENDERED interval, not the display's.
+    if (!framePacer.shouldRender(now)) return;
     const rawDtMs = now - this.lastFrameTime;
     const dt = Math.min(0.05, rawDtMs / 1000);
     this.lastFrameTime = now;
