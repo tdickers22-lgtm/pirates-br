@@ -79,6 +79,7 @@ import {
   isNearBilgePump as isSharedNearBilgePump,
   isStandingInFloodedHold,
   isStandingInShipHold,
+  sideOfLocalX,
 } from '../../shared/interactions.js';
 import { stepPirate } from '../../shared/locomotion.js';
 import { sanitizePlayerInput } from '../net/validate.js';
@@ -7568,7 +7569,7 @@ export class Match {
     const local = this.toShipLocal(event.position, ship);
     const side = Math.abs(local.z) > Math.abs(local.x)
       ? (local.z > 0 ? 'bow' : 'stern')
-      : (local.x > 0 ? 'starboard' : 'port');
+      : sideOfLocalX(local.x); // +x = port (physics-04), never the raw section key
     const payload = {
       targetId: ship.id,
       incoming: true as const,
