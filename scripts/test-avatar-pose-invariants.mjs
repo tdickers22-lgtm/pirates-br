@@ -388,13 +388,16 @@ console.log('\n[replicated fields the pose must express]');
   const mesh = makePlayerMesh(0x3366cc, 'pirate', 'crew');
   const parts = mesh.userData.animation.parts;
 
-  // avatar-07: look pitch reaches the head.
+  // avatar-07: look pitch reaches the head. Look pitch is + for UP
+  // (InputManager pitch -= dy; Game forward.y = sin(pitch)) and +x on this
+  // +Z-facing head turns it DOWN, so UP reads as head.x < 0. These rows used
+  // to pin the inverted sign (b1.6a, vm:animations:1; re-pinned, not loosened).
   scenarioSwing = 0;
-  run(mesh, makePlayer({ rotation: { x: 0, y: -0.5 } }), null, 30);
-  expect(`look up (pitch -0.5): head.x ${parts.head.rotation.x.toFixed(3)} < -0.2`,
-    parts.head.rotation.x < -0.2, 'the head never showed pitch: everyone looked straight ahead');
   run(mesh, makePlayer({ rotation: { x: 0, y: 0.5 } }), null, 30);
-  expect(`look down (pitch +0.5): head.x ${parts.head.rotation.x.toFixed(3)} > 0.2`,
+  expect(`look up (pitch +0.5): head.x ${parts.head.rotation.x.toFixed(3)} < -0.2`,
+    parts.head.rotation.x < -0.2, 'the head never showed pitch: everyone looked straight ahead');
+  run(mesh, makePlayer({ rotation: { x: 0, y: -0.5 } }), null, 30);
+  expect(`look down (pitch -0.5): head.x ${parts.head.rotation.x.toFixed(3)} > 0.2`,
     parts.head.rotation.x > 0.2);
 
   // avatar-08: the carpenter. Sampled across a whole hammer cycle, because the
@@ -552,7 +555,7 @@ console.log('\n[remote timeline, flinch direction, sleeve tint]');
 
   // avatar-12: the animator reads the buffered pitch, not the raw one.
   run(mesh, makePlayer({ rotation: { x: 0, y: 0 } }), null, 30);
-  for (let i = 0; i < 30; i++) { clock += 1 / 60; animator.animatePlayerMesh(mesh, makePlayer({ rotation: { x: 0, y: 0 } }), null, 1 / 60, { pitch: -0.5, vx: 0, vz: 0 }); }
+  for (let i = 0; i < 30; i++) { clock += 1 / 60; animator.animatePlayerMesh(mesh, makePlayer({ rotation: { x: 0, y: 0 } }), null, 1 / 60, { pitch: 0.5, vx: 0, vz: 0 }); }
   expect(`a remote's head follows the BUFFERED pitch (head.x ${parts.head.rotation.x.toFixed(3)} < -0.2)`,
     parts.head.rotation.x < -0.2,
     'the raw snapshot pitch would step the head at the 31 Hz snapshot rate');
