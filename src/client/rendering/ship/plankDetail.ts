@@ -125,10 +125,13 @@ uniform float uWetBand;
 ${HASH_GLSL}`,
       )
       // The plank grid and its per-cell random are needed by BOTH the colour
-      // block and the normal block, and <normal_fragment_begin> runs first, so
-      // the grid is computed there and both blocks read the same cell.
+      // block and the normal block. In three's standard/physical fragment
+      // <map_fragment> runs BEFORE <normal_fragment_begin>, so the grid is
+      // declared ahead of the colour block. (It used to sit at the normal
+      // block: 'shipPlankSeam: undeclared identifier', the hull and deck
+      // programs never linked and drew nothing on every GPU; liveplay-04.)
       .replace(
-        '#include <normal_fragment_begin>',
+        '#include <map_fragment>',
         `vec2 shipPlankQ = vec2(${alongExpr} / ${alongSize.toFixed(3)}, ${acrossExpr} / ${acrossSize.toFixed(3)});
   // Stagger every other strake so the butt joints do not line up into a ladder
   // (a straight column of butts is the classic "it is a texture" tell).
@@ -141,7 +144,11 @@ ${HASH_GLSL}`,
   float shipPlankSeamB = smoothstep(0.0, ${seamAcross.toFixed(4)}, min(shipPlankF.y, 1.0 - shipPlankF.y));
   float shipPlankSeam = min(shipPlankSeamA, shipPlankSeamB);
   float shipPlankWet = 1.0 - smoothstep(0.0, uWetBand, vPlankPos.y - uWetY);
-#include <normal_fragment_begin>
+#include <map_fragment>`,
+      )
+      .replace(
+        '#include <normal_fragment_begin>',
+        `#include <normal_fragment_begin>
 #ifdef SHIP_PLANK_HIGH
   // Bevel: each plank is chamfered at its edges, so the normal tilts ACROSS the
   // plank toward the seam. vPlankAcross is that object axis in view space, so
