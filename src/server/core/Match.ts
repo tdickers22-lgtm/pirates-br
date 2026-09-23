@@ -3386,6 +3386,10 @@ export class Match {
     }
 
     const cutlassHandled = this.updateCutlassAttack(player, input, dt);
+    if (cutlassHandled && this.truceHeldShotBy === player.id) {
+      this.truceHeldShotBy = null;
+      this.sendInteractRefused(client, 'fire', 'truce');
+    }
 
     // Fire (suppressed entirely while a treasure chest is in your hands — Sea-of-Thieves style)
     if (!cutlassHandled && input.fire && !player.carryingChestId) {
@@ -3496,6 +3500,11 @@ export class Match {
       const target = this.getPlayer(hit.targetId);
       if (!target) continue;
       if (target.respawnProtectionTimer > 0 || target.state === 'respawning') continue;
+      // Blades pass through a crewmate, same rule as small arms (netcode-12).
+      if (smallArmsHitsCrewmate(player, target)) continue;
+      // THE TRUCE (b1.6e) covers the blade too: a swing that would have landed
+      // on another crew's pirate is refused back to the swinger ('truce').
+      if (truceShieldsPlayer(this.t, player, target)) { this.truceHeldShotBy = player.id; continue; }
       const blockScale = this.getCutlassBlockScale(target, player, options?.guardBreak);
       const blocked = blockScale < 1;
       const damage = hit.damage * blockScale;

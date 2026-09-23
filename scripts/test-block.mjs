@@ -18,9 +18,14 @@ function expect(label, condition, detail = '') {
   }
 }
 
+const { TRUCE_SECONDS } = await import('../src/shared/truce.ts');
+
 function makeDuel() {
   const match = new Match({ matchId: `block-${Math.random().toString(36).slice(2, 8)}`, botCount: 2 });
   match.state.phase = 'playing';
+  // The blade honours the truce (b1-ask-03): these duels are about blocking and
+  // stats, so they run after it.
+  match.t = TRUCE_SECONDS + 1;
   const [attacker, target] = match.state.players;
   for (const p of [attacker, target]) {
     p.state = 'alive';

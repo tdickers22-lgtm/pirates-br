@@ -165,6 +165,9 @@ function makeInput(seq, overrides = {}) {
 
 const match = new Match({ matchId: `stats-${Math.random().toString(36).slice(2, 8)}`, botCount: 2 });
 match.state.phase = 'playing';
+// The blade honours the truce (b1-ask-03): these duels are about blocking and
+// stats, so they run after it.
+match.t = (await import('../src/shared/truce.ts')).TRUCE_SECONDS + 1;
 const joined = match.addHumanClient(makeFakeWs(), 'StatHero');
 const client = match.clients.get(joined.playerId);
 const attacker = match.state.players.find((p) => p.id === joined.playerId);

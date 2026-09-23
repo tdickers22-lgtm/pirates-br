@@ -264,6 +264,8 @@ console.log('Blade:');
   other.position = { x: 1.0, y: 2, z: 0 };
   other.activeSlot = other.weapons.findIndex((w) => w?.weaponId === 'cutlass');
   const before = victim.health;
+  // The blade honours the truce (b1-ask-03): this case is about the death cause.
+  match.t = Math.max(match.t, (await import('../src/shared/truce.ts')).TRUCE_SECONDS + 1);
   match.performMeleeAttack(other, Math.atan2(victim.position.x - other.position.x, victim.position.z - other.position.z));
   expect('the cutlass connects', victim.health < before, `health=${victim.health}`);
   const cause = causeOfDeathNow();

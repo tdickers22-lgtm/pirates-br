@@ -110,6 +110,46 @@ expect(totalSinkCredits === 0, `A: 0 sink credits (SHIP_SINK_GOLD) inside the tr
   match.stop?.();
 }
 
+// ── M. the blade (b1-ask-03): cutlass swing and charged lunge inside the
+// truce deal 0 to another crew and are held for a 'truce' refusal; the same
+// swing after the truce lands; a crewmate is never cut (either side of it).
+{
+  const match = makeMatch(20260801, 'truce-melee');
+  tickTo(match, 5);
+  const players = match['state'].players.filter((p) => p.state !== 'eliminated');
+  const swinger = players[0];
+  const enemy = players.find((p) => p.id !== swinger.id && (p.crewId ?? p.shipId) !== (swinger.crewId ?? swinger.shipId));
+  const mate = { ...enemy, id: `${swinger.id}-mate`, crewId: swinger.crewId, shipId: swinger.shipId, health: 100 };
+  match['state'].players.push(mate);
+  match['playersById'].set(mate.id, mate);
+  const slot = swinger.weapons.findIndex((w) => w && w.weaponId === 'cutlass');
+  if (slot < 0) swinger.weapons.push({ weaponId: 'cutlass', ammo: 0, reloading: false, reloadTimer: 0 });
+  swinger.activeSlot = slot >= 0 ? slot : swinger.weapons.length - 1;
+  const swing = (target, lunge = false) => {
+    for (const p of [enemy, mate]) { p.position = { x: 10000, y: 0, z: 10000 }; }
+    target.health = 100; target.respawnProtectionTimer = 0; target.state = 'alive'; target.blocking = false;
+    target.position = { x: swinger.position.x, y: swinger.position.y, z: swinger.position.z + 1.2 };
+    match['truceHeldShotBy'] = null;
+    match['performMeleeAttack'](swinger, 0, lunge ? { damageMultiplier: 1.5, rangeMultiplier: 2.15, knockbackMultiplier: 2.35, guardBreak: true } : undefined);
+    return { dealt: 100 - target.health, held: match['truceHeldShotBy'] === swinger.id };
+  };
+  const t0 = swing(enemy);
+  expect(t0.dealt === 0 && t0.held, `M: a cutlass swing at another crew at t=${match['t'].toFixed(1)}s deals 0 and is held (dealt ${t0.dealt}, held ${t0.held})`);
+  const l0 = swing(enemy, true);
+  expect(l0.dealt === 0 && l0.held, `M: the charged lunge inside the truce deals 0 (dealt ${l0.dealt})`);
+  const m0 = swing(mate);
+  expect(m0.dealt === 0, `M: a cutlass swing at a crewmate inside the truce deals 0 (dealt ${m0.dealt})`);
+  const src = (await import('node:fs')).readFileSync(new URL('../src/server/core/Match.ts', import.meta.url), 'utf8');
+  expect(/updateCutlassAttack\(player, input, dt\);\s*if \(cutlassHandled && this\.truceHeldShotBy === player\.id\)[\s\S]{0,120}sendInteractRefused\(client, 'fire', 'truce'\)/.test(src),
+    "M: the human blade path sends interact_refused {intent:'fire', reason:'truce'}");
+  match['t'] = TRUCE_SECONDS + 1;
+  const t1 = swing(enemy);
+  expect(t1.dealt > 0 && !t1.held, `M control: the same swing after the truce lands (dealt ${t1.dealt})`);
+  const m1 = swing(mate);
+  expect(m1.dealt === 0, `M: a crewmate is never cut, after the truce either (dealt ${m1.dealt})`);
+  match.stop?.();
+}
+
 // ── D. solo-bot hole triage ─────────────────────────────────────────────────
 {
   const match = makeMatch(20260801, 'truce-triage');
