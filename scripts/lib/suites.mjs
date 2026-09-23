@@ -448,6 +448,11 @@ export const LOGIC = [
   //                                 phones, Adreno and Intel UHD to 'low', 'low' is the unknown default, and a
   //                                 fill-bench score or a headroom proof is the only way back up (PERF-01, lane 2.6)
   tsx('test-quality-preference.mjs'),
+  //   test-frame-guard            — a throwing frame still schedules the next; 30 consecutive faults raise the
+  //                                 reload overlay once; error beacon dedupe/<=5/anonymous body; static wiring:
+  //                                 Game.frame() through the guard, context lost+restored handlers, no audition
+  //                                 ceiling while graphics are held (correctness-06, performance-03, b1.1b)
+  quick(tsx('test-frame-guard.mjs')),
 ];
 
 /**
@@ -558,6 +563,13 @@ export const BROWSER = [
   // the wiring that makes those possible (shared fog density, scene light
   // uniforms, the active light after dark). RED on HEAD on every band.
   { ...plain('horizon-luminance-probe.mjs'), slow: true },
+  // b1.1b resilience probes (graded; they live in probes/ because the plan names them so):
+  //   context-loss-probe — loseContext/restoreContext mid-match: frames resume <= 3 s, programs back to the
+  //                        pre-loss count <= 5 s, auto-tier ceiling unchanged, pill shown then hidden;
+  //                        --mutate (restore handler removed) must FAIL
+  //   frame-fault-probe  — injectFrameFault(1) keeps frames advancing with no overlay; (60) shows it
+  { ...plain('probes/context-loss-probe.mjs'), slow: true },
+  plain('probes/frame-fault-probe.mjs'),
 ];
 
 /**

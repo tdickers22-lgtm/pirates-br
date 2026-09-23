@@ -3,6 +3,7 @@ import { PostFx } from './PostFx.js';
 import { initLightBudget, updateLightBudget } from './LightBudget.js';
 import { freezeStaticParent } from './three-util.js';
 import { ProgramWarmer, shaderErrorsForced } from './ProgramWarmup.js';
+import { reportBeacon, setBeaconContext } from '../network/errorBeacon.js';
 import { clamp, smoothstep } from '../../shared/utils/index.js';
 import {
   classifyRenderer, decideRenderQuality, readGpuRendererString, saveAutoTierCeiling, saveAutoTierProof,
@@ -1004,6 +1005,7 @@ export class Renderer {
     this.renderer.toneMappingExposure = 1.12;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     document.body.insertBefore(this.renderer.domElement, document.body.firstChild);
+    this.installContextLossHandlers(this.renderer.domElement);
 
     // ── Sky dome ────────────────────────────────────────────────
     // TESSELLATION IS NOT COSMETIC HERE. v_dir is the interpolated object-space
@@ -1449,7 +1451,7 @@ export class Renderer {
   /** The world is still arriving (or a ceremony owns the screen): sample
    *  nothing. A frame spent building an island measures the build. */
   setGovernorSuspended(suspended: boolean): void {
-    this.governor.setSuspended(suspended);
+    this.governor.setSuspended(suspended || this.graphicsHeld());
   }
 
   /** A frame the caller can name as a one-off — a match start, a respawn.
@@ -1550,6 +1552,10 @@ export class Renderer {
    */
   private auditionTier(avgFps: number) {
     if (this.auditionDone) return;
+    // A lost context renders nothing and a restored one re-links every program:
+    // neither is a measurement of this machine, so no window that touches the
+    // hold is sampled and no ceiling can be written from it (performance-03).
+    if (this.graphicsHeld()) return;
     if (this.qualityVerdict.reason === 'url' || this.qualityVerdict.reason === 'player') {
       this.auditionDone = true;
       return;
@@ -1955,6 +1961,7 @@ export class Renderer {
   }
 
   render() {
+    if (this.contextLost) return;
     // The strike override goes on LAST, after every per-frame clamp that would
     // otherwise overwrite it in the same frame — see applyBoltFill.
     this.applyBoltFill();
@@ -1994,6 +2001,142 @@ export class Renderer {
     } finally {
       this.programWarmer.release();
     }
+    if (this.restoreSettling) this.stepContextRestore();
+  }
+
+  // ── WebGL context loss (performance-03, vm:correctness:2, vm:crossdevice:3) ──
+  //
+  // iOS drops the context when the tab is backgrounded or memory runs short;
+  // desktop GPUs drop it on a driver reset. three r160 only preventDefault()s
+  // the loss and silently skips render(), and on restore recompiles EVERY
+  // program at first draw in the middle of play (the 2026-08 cost model: 58 s
+  // of 60 in link joins before warm-up existed) — which the governor used to
+  // read as slowness and the audition as a reason to write a permanent tier
+  // ceiling. Now: the loss pauses our render work, suspends the governor and
+  // the audition, shows a "Restoring graphics" pill and sends one beacon; the
+  // restore re-arms the program warmer under its guard (materials wait for
+  // their program instead of linking inside a frame), marks worker-filled
+  // DataTextures and the shadow map for re-upload, and holds the governor
+  // until the warmer has caught up plus a settle tail. Render targets (the
+  // PostFx composer, bloom mips, shadow maps) are re-created by three on their
+  // first bind, because the restore gives it a fresh property store.
+  // The simulation is server-authoritative and never pauses.
+  private contextLost = false;
+  private restoreSettling = false;
+  private restoreStartedAt = 0;
+  private restoreCleanFrames = 0;
+  private graphicsHoldUntil = 0;
+  private contextLosses = 0;
+  private contextRestores = 0;
+  private restorePill: HTMLElement | null = null;
+  /** After the warmer catches up, how long the governor and audition keep ignoring frames. */
+  private static readonly RESTORE_SETTLE_TAIL_MS = 2000;
+  /** The pill never outlives this, whatever the warmer says. */
+  private static readonly RESTORE_MAX_MS = 6000;
+
+  /** True while the context is lost or a restore is still settling. */
+  graphicsHeld(now = performance.now()): boolean {
+    return this.contextLost || this.restoreSettling || now < this.graphicsHoldUntil;
+  }
+
+  /** What the context-loss probe reads. */
+  getGraphicsStatus(): {
+    lost: boolean; settling: boolean; held: boolean; pill: boolean;
+    losses: number; restores: number; programs: number;
+  } {
+    return {
+      lost: this.contextLost,
+      settling: this.restoreSettling,
+      held: this.graphicsHeld(),
+      pill: !!this.restorePill && this.restorePill.style.display !== 'none',
+      losses: this.contextLosses,
+      restores: this.contextRestores,
+      programs: this.renderer.info.programs?.length ?? 0,
+    };
+  }
+
+  private installContextLossHandlers(canvas: HTMLCanvasElement): void {
+    setBeaconContext({ tier: this.quality });
+    canvas.addEventListener('webglcontextlost', (event) => {
+      // Without preventDefault the browser never offers a restore.
+      event.preventDefault();
+      this.contextLost = true;
+      this.restoreSettling = false;
+      this.contextLosses += 1;
+      this.governor.setSuspended(true);
+      if (!this.auditionDone) {
+        // Start the audition over once the hold ends rather than splice a
+        // window from before the loss onto one from after it.
+        this.auditionElapsed = 0;
+        this.auditionSamples = 0;
+      }
+      this.setRestorePill(true);
+      reportBeacon('webglcontextlost', `context lost (#${this.contextLosses}) on ${this.quality}`);
+    }, false);
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.contextLost = false;
+      this.contextRestores += 1;
+      this.restoreSettling = true;
+      this.restoreStartedAt = performance.now();
+      this.restoreCleanFrames = 0;
+      // Every program the warmer had paid for died with the context.
+      this.programWarmer.resetForNewContext();
+      this.programWarmer.setGuard(true);
+      this.programWarmer.setBoosted(true);
+      this.markGpuResourcesDirty();
+      this.governor.setSuspended(true);
+    }, false);
+  }
+
+  /** Re-upload what three cannot rebuild from nothing: CPU-side DataTextures
+   *  (ocean bathymetry is filled by a worker into one) and the gated shadow map. */
+  private markGpuResourcesDirty(): void {
+    const seen = new Set<THREE.Texture>();
+    const visit = (value: unknown) => {
+      if (value instanceof THREE.DataTexture && !seen.has(value)) {
+        seen.add(value);
+        if (value.image?.data) value.needsUpdate = true;
+      }
+    };
+    this.scene.traverse((object) => {
+      const material = (object as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      if (!material) return;
+      for (const m of Array.isArray(material) ? material : [material]) {
+        for (const v of Object.values(m as unknown as Record<string, unknown>)) visit(v);
+        const uniforms = (m as THREE.ShaderMaterial).uniforms;
+        if (uniforms) for (const u of Object.values(uniforms)) visit(u?.value);
+      }
+    });
+    this.renderer.shadowMap.needsUpdate = true;
+  }
+
+  /** One rendered frame after a restore: settle once the warmer holds nothing back. */
+  private stepContextRestore(): void {
+    const now = performance.now();
+    this.restoreCleanFrames = this.programWarmer.stats.heldNow === 0 ? this.restoreCleanFrames + 1 : 0;
+    const caughtUp = this.restoreCleanFrames >= 3;
+    if (!caughtUp && now - this.restoreStartedAt < Renderer.RESTORE_MAX_MS) return;
+    this.restoreSettling = false;
+    this.graphicsHoldUntil = now + Renderer.RESTORE_SETTLE_TAIL_MS;
+    this.setRestorePill(false);
+    reportBeacon('webglcontextrestored', `restored in ${Math.round(now - this.restoreStartedAt)} ms, caughtUp=${caughtUp}`);
+  }
+
+  private setRestorePill(visible: boolean): void {
+    if (!visible && !this.restorePill) return;
+    if (!this.restorePill) {
+      const pill = document.createElement('div');
+      pill.id = 'gfx-restore-pill';
+      pill.setAttribute('role', 'status');
+      pill.textContent = 'Restoring graphics';
+      pill.style.cssText = 'position:fixed;left:50%;top:calc(env(safe-area-inset-top, 0px) + 14px);'
+        + 'transform:translateX(-50%);z-index:2147482000;padding:8px 18px;border-radius:999px;'
+        + 'background:rgba(8,12,20,0.78);color:#f3e7c9;font:600 14px/1.2 system-ui,-apple-system,sans-serif;'
+        + 'pointer-events:none;';
+      document.body.append(pill);
+      this.restorePill = pill;
+    }
+    this.restorePill.style.display = visible ? '' : 'none';
   }
 
   /** Pre-pays shader program links so no frame of the load has to. */
@@ -2007,12 +2150,12 @@ export class Renderer {
   /** True while the load path must not block: the gate holds unwarmed materials
    *  out of a frame rather than letting them link inside it. */
   setLoadGuard(active: boolean): void {
-    this.programWarmer.setGuard(active);
+    this.programWarmer.setGuard(active || this.graphicsHeld());
   }
 
   /** Warm harder — a ceremony owns the screen and nobody is playing. */
   setWarmBoost(boosted: boolean): void {
-    this.programWarmer.setBoosted(boosted);
+    this.programWarmer.setBoosted(boosted || this.graphicsHeld());
   }
 
   /** Per-frame atmosphere snapshot for the ocean/other systems. Returned objects are reused. */

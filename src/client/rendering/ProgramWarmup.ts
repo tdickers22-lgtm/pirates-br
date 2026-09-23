@@ -232,7 +232,7 @@ export class ProgramWarmer {
   private readonly pendingKeys = new Set<string>();
   /** How many frames each held-back material has been held. Weak: a disposed
    *  material must not be kept alive by the bookkeeping that hid it once. */
-  private readonly heldFrames = new WeakMap<THREE.Material, number>();
+  private heldFrames = new WeakMap<THREE.Material, number>();
   /** Materials hidden for the current frame, to be restored after the render. */
   private readonly held: THREE.Material[] = [];
   /** Keys whose join found no program to join, and how often. */
@@ -283,6 +283,18 @@ export class ProgramWarmer {
   setGuard(active: boolean): void {
     this.guard = active;
     this.stats.guard = active;
+  }
+
+  /**
+   * A restored WebGL context (performance-03): every paid program died with the
+   * old one, and a material held back before the loss must not arrive already
+   * out of patience — it would fail open and link on screen, the exact stall a
+   * restore is meant to avoid.
+   */
+  resetForNewContext(): void {
+    this.reset();
+    this.heldFrames = new WeakMap<THREE.Material, number>();
+    this.stats.heldNow = 0;
   }
 
   reset(): void {

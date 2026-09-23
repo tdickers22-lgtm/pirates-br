@@ -188,6 +188,9 @@ runner grows an `expectRed` vocabulary. They are not in the quick tier.
 | `test-far-lod-integrity` | every `<name>_far.glb` parsed and welded at 1e-4 against its source: rocks 0 boundary loops, every decimated far file ≥ 92% of the source's surface area and ≤ 40% of its triangles; the shark puppet on triangles only | [rocks] 2026-09-09; red proof: the 2026-09-06 far files (27 failures — boulder_a 76 loops / 42% area, searock_a 93 / 51%, bush 123 / 59%), Collapse on split vertices deleted faces |
 | `test-quality-preference` | Safari M2 Air (opaque "Apple GPU") and four other rows grade `balanced` | PERF-01 (lane 2.6) |
 | `test-storm-wall` (browser) | noon sea chroma 6.67× sky | STORMVIS-01 (lane 5.4) |
+| `test-frame-guard` | a throwing frame body still schedules the next frame; 30 consecutive faults raise the reload overlay flag once; beacon <= 5/session, anonymous fields only; static: Game.frame() runs through FrameGuard, Renderer listens for webglcontextlost + webglcontextrestored, the audition returns while graphics are held | correctness-06 / performance-03 / online-12 (b1.1b); red on f5fee97e: 5 static checks FAIL (frame() re-arms rAF last, no context handlers) |
+| `probes/context-loss-probe` (browser) | WEBGL_lose_context mid-match: frames resume <= 3 s after restore, renderer.info.programs back to the pre-loss count <= 5 s, saved auto-tier ceiling unchanged, `#gfx-restore-pill` shown then hidden; `--mutate` (restore handler removed) FAILS | performance-03 (b1.1b) |
+| `probes/frame-fault-probe` (browser) | `injectFrameFault(1)` keeps frames advancing with no overlay; `injectFrameFault(60)` shows `#frame-fault-overlay` | correctness-06 (b1.1b) |
 
 `test-perf-budget` also gained balanced-tier rows (dock-vista / open-sea /
 cave-interior) with a `MID_TIER_MAX_RATIO` of 0.80 against high, except
