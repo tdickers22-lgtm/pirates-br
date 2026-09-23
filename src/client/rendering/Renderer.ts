@@ -2024,6 +2024,7 @@ export class Renderer {
   private contextLost = false;
   private restoreSettling = false;
   private restoreStartedAt = 0;
+  private restoreFrames = 0;
   private restoreCleanFrames = 0;
   private graphicsHoldUntil = 0;
   private contextLosses = 0;
@@ -2031,8 +2032,12 @@ export class Renderer {
   private restorePill: HTMLElement | null = null;
   /** After the warmer catches up, how long the governor and audition keep ignoring frames. */
   private static readonly RESTORE_SETTLE_TAIL_MS = 2000;
-  /** The pill never outlives this, whatever the warmer says. */
-  private static readonly RESTORE_MAX_MS = 6000;
+  /** The pill never outlives this many RENDERED frames, whatever the warmer
+   *  says. Frames, not milliseconds (b1.1b2): the restore is paid for per frame,
+   *  so a wall-clock cap fired on a slow host after one long frame and left the
+   *  rest of the program set to link inside play. 360 is the old 6 s at 60 fps;
+   *  the serial restore finishes a ~60-program scene in about as many frames. */
+  private static readonly RESTORE_MAX_FRAMES = 360;
 
   /** True while the context is lost or a restore is still settling. */
   graphicsHeld(now = performance.now()): boolean {
@@ -2057,6 +2062,7 @@ export class Renderer {
 
   private installContextLossHandlers(canvas: HTMLCanvasElement): void {
     setBeaconContext({ tier: this.quality });
+    this.hardenCompileAsync();
     canvas.addEventListener('webglcontextlost', (event) => {
       // Without preventDefault the browser never offers a restore.
       event.preventDefault();
@@ -2078,14 +2084,50 @@ export class Renderer {
       this.contextRestores += 1;
       this.restoreSettling = true;
       this.restoreStartedAt = performance.now();
+      this.restoreFrames = 0;
       this.restoreCleanFrames = 0;
       // Every program the warmer had paid for died with the context.
       this.programWarmer.resetForNewContext();
+      this.programWarmer.setSerial(true);
       this.programWarmer.setGuard(true);
       this.programWarmer.setBoosted(true);
       this.markGpuResourcesDirty();
       this.governor.setSuspended(true);
     }, false);
+  }
+
+  /**
+   * three r160's compileAsync polls `properties.get(material).currentProgram
+   * .isReady()` from a setTimeout. A context restore hands three a fresh
+   * property store, so a chunk still polling across the loss dereferences
+   * undefined: measured as 8 uncaught TypeErrors per restore, and the promise
+   * never settles, which leaves IslandDetailWarmup's chunk "still linking"
+   * forever. Same poll, but a material with no program (its context died under
+   * it) counts as done: the warmer or the next draw links it again.
+   */
+  private hardenCompileAsync(): void {
+    const renderer = this.renderer;
+    // Read `renderer.properties` on every poll: the restore replaces the store.
+    type Props = { properties: { get(o: object): { currentProgram?: { isReady(): boolean } } | undefined } };
+    renderer.compileAsync = function compileAsync(scene, camera, targetScene = null) {
+      const materials = renderer.compile(scene, camera, targetScene);
+      return new Promise((resolve) => {
+        const check = (): void => {
+          materials.forEach((material) => {
+            let ready = true;
+            try {
+              ready = (renderer as unknown as Props).properties
+                .get(material)?.currentProgram?.isReady() ?? true;
+            } catch { ready = true; }
+            if (ready) materials.delete(material);
+          });
+          if (materials.size === 0) { resolve(scene); return; }
+          setTimeout(check, 10);
+        };
+        if (renderer.extensions.get('KHR_parallel_shader_compile') !== null) check();
+        else setTimeout(check, 10);
+      });
+    };
   }
 
   /** Re-upload what three cannot rebuild from nothing: CPU-side DataTextures
@@ -2113,13 +2155,21 @@ export class Renderer {
   /** One rendered frame after a restore: settle once the warmer holds nothing back. */
   private stepContextRestore(): void {
     const now = performance.now();
-    this.restoreCleanFrames = this.programWarmer.stats.heldNow === 0 ? this.restoreCleanFrames + 1 : 0;
+    this.restoreFrames += 1;
+    const warm = this.programWarmer.stats;
+    // Caught up = nothing visible held back. Hidden meshes still owing go back
+    // to the steady-state rules of whichever path this host runs (warmed in the
+    // background with KHR_parallel_shader_compile; linked at first draw without
+    // it, as on the initial load) — waiting for them doubled the SwiftShader pill.
+    this.restoreCleanFrames = warm.heldNow === 0 ? this.restoreCleanFrames + 1 : 0;
     const caughtUp = this.restoreCleanFrames >= 3;
-    if (!caughtUp && now - this.restoreStartedAt < Renderer.RESTORE_MAX_MS) return;
+    if (!caughtUp && this.restoreFrames < Renderer.RESTORE_MAX_FRAMES) return;
     this.restoreSettling = false;
+    this.programWarmer.setSerial(false);
     this.graphicsHoldUntil = now + Renderer.RESTORE_SETTLE_TAIL_MS;
     this.setRestorePill(false);
-    reportBeacon('webglcontextrestored', `restored in ${Math.round(now - this.restoreStartedAt)} ms, caughtUp=${caughtUp}`);
+    reportBeacon('webglcontextrestored',
+      `restored in ${Math.round(now - this.restoreStartedAt)} ms / ${this.restoreFrames} frames, caughtUp=${caughtUp}`);
   }
 
   private setRestorePill(visible: boolean): void {

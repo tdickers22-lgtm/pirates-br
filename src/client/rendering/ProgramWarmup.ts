@@ -115,6 +115,29 @@ const JOIN_MS_PER_FRAME_BOOST = 24;
 const MAX_HELD_FRAMES = 40;
 
 /**
+ * SERIAL RESTORE (b1.1b2). With no KHR_parallel_shader_compile the warmer is
+ * off, and on a WebGL context restore that meant three re-linked EVERY program
+ * inside the first frame after it: measured under SwiftShader, 54 links and
+ * 16.2 s of one frame blocked in getProgramParameter (19.3 s to the first draw),
+ * while texture re-uploads cost ~1 ms of that frame. Safari without the
+ * extension would take the same shape, shorter. So, only while a restore is
+ * settling and the "Restoring graphics" pill explains the gaps, the no-extension
+ * path runs a SERIAL warmer: link one program, join it (a synchronous link is
+ * the only honest way to know it is done), check the budget, repeat. A frame
+ * pays at most the budget plus one link; everything still owed stays hidden.
+ * The budget tracks the rest of the frame (so linking gets about half the wall
+ * clock) inside [MIN, MAX].
+ */
+const SERIAL_MS_PER_FRAME_MIN = 60;
+const SERIAL_MS_PER_FRAME_MAX = 400;
+/** A serial restore links one program per frame at worst, so the hold must
+ *  outlast the whole program set, not the load-time 40 frames. */
+const SERIAL_MAX_HELD_FRAMES = 300;
+/** A join under this is a program three already had: the chunk may grow. */
+const SERIAL_CHEAP_JOIN_MS = 4;
+const SERIAL_CHUNK_MAX = 32;
+
+/**
  * Cost of the guard itself: the scene walk stops after this many NODES.
  *
  * IT MUST BE BIG ENOUGH TO FINISH. The first version of this budgeted 4,000
@@ -243,6 +266,10 @@ export class ProgramWarmer {
 
   private boosted = false;
   private guard = true;
+  /** No-extension restore mode — see SERIAL RESTORE. */
+  private serial = false;
+  private serialChunk = 1;
+  private lastPrepareAt = 0;
   /** Scratch container handed to `compile` — children are ASSIGNED, never
    *  `add`ed, so meshes keep their real parents and their baked world matrices. */
   private readonly batch = (() => {
@@ -266,7 +293,16 @@ export class ProgramWarmer {
     joinCount: 0, joinTotalMs: 0,
     walked: 0, owed: 0, unjoinable: 0, retired: 0,
     guard: true, active: false, parallel: null as boolean | null,
+    serial: false, serialLinks: 0, serialMs: 0,
   };
+
+  /** Run the serial no-extension warmer (context restore only). No effect where
+   *  KHR_parallel_shader_compile exists: that path already never blocks. */
+  setSerial(serial: boolean): void {
+    this.serial = serial;
+    this.serialChunk = 1;
+    this.stats.serial = serial;
+  }
 
   /** Warm harder while a ceremony owns the screen — nobody is playing, and a
    *  frame spent linking there is a frame that is not spent linking later. */
@@ -295,6 +331,9 @@ export class ProgramWarmer {
     this.reset();
     this.heldFrames = new WeakMap<THREE.Material, number>();
     this.stats.heldNow = 0;
+    // The gap since the last pre-loss frame is not a frame: start the serial
+    // budget at its minimum so the first frame back reaches the screen fast.
+    this.lastPrepareAt = 0;
   }
 
   reset(): void {
@@ -330,7 +369,10 @@ export class ProgramWarmer {
     // Without an honest readiness signal, every `getUniforms()` is allowed to
     // become an unbounded synchronous link. Do not kick a large backlog and do
     // not hide the world waiting for an optimisation we cannot safely finish.
-    if (!this.parallelCompile(renderer)) {
+    const parallel = this.parallelCompile(renderer);
+    const frameGapMs = this.lastPrepareAt > 0 ? startedAt - this.lastPrepareAt : 0;
+    this.lastPrepareAt = startedAt;
+    if (!parallel && !this.serial) {
       this.stats.active = false;
       this.stats.heldNow = 0;
       this.stats.owed = 0;
@@ -400,7 +442,55 @@ export class ProgramWarmer {
     // a completed program leaves the queue, even visible work waits rather than
     // turning backpressure into more driver work.
     const owing = visibleOwing.length > 0 ? [...visibleOwing, ...hiddenOwing] : hiddenOwing;
-    if (kickCap > 0 && owing.length > 0) {
+    if (!parallel) {
+      // SERIAL RESTORE: kick one, join it, check the budget. The first link of
+      // the frame always runs, so a restore can never stall with work owed.
+      const restOfFrame = Math.max(0, frameGapMs - this.stats.lastMs);
+      const budget = Math.min(SERIAL_MS_PER_FRAME_MAX, Math.max(SERIAL_MS_PER_FRAME_MIN, restOfFrame));
+      // Kicks go in chunks because renderer.compile() walks the whole scene for
+      // lights on every call (~17 ms a call under SwiftShader; 3,529 one-mesh
+      // kicks cost 62 s in the first try). Most materials share a program that
+      // is already linked, so the chunk doubles while every join in it comes
+      // back cheap and drops to one the moment a join pays a real link.
+      let links = 0;
+      let cursor = 0;
+      while (cursor < owing.length) {
+        if (links > 0 && performance.now() - startedAt >= budget) break;
+        const chunk: Owed[] = [];
+        const keys = new Set<string>();
+        for (; cursor < owing.length && chunk.length < this.serialChunk; cursor++) {
+          const entry = owing[cursor]!;
+          if (this.paid.has(entry.key) || keys.has(entry.key)) continue;
+          keys.add(entry.key);
+          chunk.push(entry);
+        }
+        if (chunk.length === 0) break;
+        const linkStart = performance.now();
+        this.kick(renderer, scene, camera, chunk.map((e) => e.mesh), renderTarget);
+        let worst = 0;
+        for (const entry of chunk) {
+          const joinStart = performance.now();
+          const joined = this.join(renderer, entry.material);
+          worst = Math.max(worst, performance.now() - joinStart);
+          if (joined) {
+            this.paid.add(entry.key);
+            this.stats.paid += 1;
+          } else {
+            const tries = (this.joinTries.get(entry.key) ?? 0) + 1;
+            this.joinTries.set(entry.key, tries);
+            if (tries >= MAX_JOIN_TRIES) { this.paid.add(entry.key); this.stats.unjoinable += 1; }
+          }
+        }
+        const linkMs = performance.now() - linkStart;
+        links += 1;
+        this.serialChunk = worst < SERIAL_CHEAP_JOIN_MS ? Math.min(SERIAL_CHUNK_MAX, this.serialChunk * 2) : 1;
+        this.stats.serialLinks += chunk.length;
+        this.stats.serialMs = +(this.stats.serialMs + linkMs).toFixed(1);
+        this.stats.joinCount += chunk.length;
+        this.stats.joinTotalMs = +(this.stats.joinTotalMs + linkMs).toFixed(1);
+        if (worst > this.stats.worstJoinMs) this.stats.worstJoinMs = +worst.toFixed(1);
+      }
+    } else if (kickCap > 0 && owing.length > 0) {
       const chunk: THREE.Mesh[] = [];
       const kicked: Kicked[] = [];
       const seen = new Set<string>();
@@ -546,7 +636,7 @@ export class ProgramWarmer {
         const material = entry.material;
         if (!material.visible) continue;
         const held = (this.heldFrames.get(material) ?? 0) + 1;
-        if (held > MAX_HELD_FRAMES) { this.stats.forced += 1; continue; } // fail open — a stall beats a hole
+        if (held > (parallel ? MAX_HELD_FRAMES : SERIAL_MAX_HELD_FRAMES)) { this.stats.forced += 1; continue; } // fail open — a stall beats a hole
         this.heldFrames.set(material, held);
         material.visible = false;
         this.held.push(material);
