@@ -66,6 +66,19 @@ export class FramePacer {
   private due = Number.NEGATIVE_INFINITY;
   private renderedCount = 0;
   private skippedCount = 0;
+  /** b1.7c: rendered-interval tap (ms between two DRAWN frames) for sessionTelemetry. */
+  private lastRenderedAt = Number.NaN;
+  private renderedTap: ((intervalMs: number) => void) | null = null;
+
+  setRenderedTap(fn: ((intervalMs: number) => void) | null): void {
+    this.renderedTap = fn;
+  }
+
+  private noteRendered(nowMs: number): void {
+    this.renderedCount += 1;
+    if (this.renderedTap && this.lastRenderedAt === this.lastRenderedAt) this.renderedTap(nowMs - this.lastRenderedAt);
+    this.lastRenderedAt = nowMs;
+  }
 
   constructor(capFps = 0) {
     this.setCap(capFps);
@@ -87,7 +100,7 @@ export class FramePacer {
   /** True when this rAF callback should draw; false = skip it entirely. */
   shouldRender(nowMs: number): boolean {
     if (this.intervalMs <= 0) {
-      this.renderedCount += 1;
+      this.noteRendered(nowMs);
       return true;
     }
     if (nowMs < this.due - FRAME_CAP_TOLERANCE_MS) {
@@ -95,7 +108,7 @@ export class FramePacer {
       return false;
     }
     this.due = nowMs - this.due > this.intervalMs ? nowMs + this.intervalMs : this.due + this.intervalMs;
-    this.renderedCount += 1;
+    this.noteRendered(nowMs);
     return true;
   }
 
