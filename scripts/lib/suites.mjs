@@ -214,6 +214,7 @@ export const LOGIC = [
   quick(tsx('test-stats.mjs')),
   quick(tsx('test-names.mjs')),
   quick(tsx('test-queue-text.mjs')), // b1-ask-02: queue position/ETA/at-capacity copy + late-join line
+  quick(tsx('test-cpu-copy-release.mjs')), // b1.7b CPU-copy release + b1-device-03 bounded rehydrate
   quick(tsx('test-dock-frame.mjs')),
   quick(tsx('test-gangway-walk.mjs')),
   quick(tsx('test-climb-verbs.mjs')),

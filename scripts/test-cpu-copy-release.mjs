@@ -96,6 +96,25 @@ expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
   expect('runtime-cloned world asset never dropped outright', cutlass.geometry.attributes.position.array.length > 0 && lib.clone('cutlass') !== null);
   expect('a released key is never merged again', lib.mergedGeometry('fort') === null);
   expect('release is idempotent within a match', lib.releaseCpuCopies(scene) === 0);
+
+  // b1-device-03: next match's rehydrate is BOUNDED (a phone must not refetch
+  // and re-parse every released GLB at once on its main thread).
+  const { REHYDRATE_CONCURRENCY } = await import('../src/client/assets/AssetLibrary.ts');
+  const released = lib.cpuReleased.size;
+  let inFlight = 0; let peak = 0; let loads = 0;
+  lib.loadOne = async (_name, key) => {
+    inFlight += 1; loads += 1; peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    const g = new THREE.Group(); g.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial()));
+    lib.scenes.set(key, g);
+    inFlight -= 1;
+  };
+  const job = lib.rehydrateReleased(scene);
+  expect('rehydrate gates island builds while it runs', lib.rehydrating === true);
+  await job;
+  expect(`rehydrate refetched every released key (${loads}/${released}) and cleared the set`, released >= 3 && loads === released && lib.cpuReleased.size === 0 && !lib.rehydrating);
+  expect(`rehydrate concurrency bounded (peak ${peak} <= ${REHYDRATE_CONCURRENCY} of ${released} keys)`,
+    typeof REHYDRATE_CONCURRENCY === 'number' && REHYDRATE_CONCURRENCY >= 1 && peak <= REHYDRATE_CONCURRENCY);
 }
 
 if (failures) { console.error(`\nCPU-copy release: ${failures} failure(s).`); process.exit(1); }

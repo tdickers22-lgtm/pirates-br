@@ -229,6 +229,9 @@ function cpuReleasableKey(key: string): boolean {
   return !BOOT_ASSET_SET.has(base) && !isLazyAsset(base);
 }
 
+/** Released GLBs refetched + re-parsed at once at the next match (b1-device-03). */
+export const REHYDRATE_CONCURRENCY = 3;
+
 export class AssetLibrary {
   private scenes = new Map<AssetKey, THREE.Group>();
   private merged = new Map<AssetKey, MergedAsset>();
@@ -479,7 +482,19 @@ export class AssetLibrary {
       if (m.material) for (const x of Array.isArray(m.material) ? m.material : [m.material]) keepMat.add(x);
     });
     this.rehydrateJob = (async () => {
-      await Promise.all(keys.map(async (key) => {
+      // Bounded (b1-device-03): each load refetches (a conditional GET) and
+      // re-parses a GLB on the main thread; all ~50 at once on a phone was a
+      // heap spike plus a 4G burst. REHYDRATE_CONCURRENCY workers drain the
+      // list, yielding a task between parses so frames keep landing.
+      let next = 0;
+      const worker = async () => {
+        while (next < keys.length) {
+          const key = keys[next++];
+          await rehydrateOne(key);
+          await new Promise<void>((r) => setTimeout(r, 0));
+        }
+      };
+      const rehydrateOne = async (key: AssetKey) => {
         const old = this.scenes.get(key);
         const oldMerged = this.merged.get(key);
         try {
@@ -510,7 +525,8 @@ export class AssetLibrary {
           }
         });
         if (oldMerged) drop(oldMerged.geometry, keepGeo);
-      }));
+      };
+      await Promise.all(Array.from({ length: Math.min(REHYDRATE_CONCURRENCY, keys.length) }, worker));
     })().finally(() => { this.rehydrating = false; this.rehydrateJob = null; });
     return this.rehydrateJob;
   }
