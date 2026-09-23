@@ -51,6 +51,7 @@ import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MI
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { memoryCensus, type MemoryCensus } from '../debug/memoryCensus.js';
+import { releaseRenderOnlyCpuCopies } from '../rendering/CpuCopyRelease.js';
 import { apparentDistanceScale, updateInstanceLod, updateLazyStoryResidency, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
@@ -3116,6 +3117,9 @@ export class Game {
       try {
         this.islands.buildIsland(island);
         const group = this.islandMeshes.get(island.id);
+        // Phone/iPad: drop the static batches' CPU copies once they are on the GPU
+        // (armed here, before the island's first draw; see rendering/CpuCopyRelease).
+        if (group) releaseRenderOnlyCpuCopies(group, (o) => assets.isShared(o));
         // Arm the chunked reveal HERE, not at the LOD radius crossing. The
         // group is held hidden for one frame and then made visible by the next
         // drain — which runs AFTER updateEnvironmentLod — so an island built
