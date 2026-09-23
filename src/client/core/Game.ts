@@ -2005,21 +2005,25 @@ export class Game {
     canvas.addEventListener('pointercancel', endMapDrag);
 
     // A close control a finger can reach (the chart otherwise closes on M/Esc).
-    const meta = document.getElementById('map-meta');
-    if (meta && !document.getElementById('map-close')) {
+    // It rides the overlay's top-right corner, not the chart header: at
+    // 844x390 the chart + glyph key column overflows the short side and the
+    // header sat at y = -1, off the glass (measured by test-touch-controls-live).
+    const overlay = this.ui.mapOverlay;
+    if (overlay && !document.getElementById('map-close')) {
       const close = document.createElement('button');
       close.type = 'button';
       close.id = 'map-close';
       close.textContent = 'Close';
       close.setAttribute('aria-label', 'Close the chart');
-      close.style.cssText = 'min-width:56px;min-height:44px;margin-left:auto;pointer-events:auto;'
+      close.style.cssText = 'position:absolute;z-index:2;top:max(10px, env(safe-area-inset-top));'
+        + 'right:max(10px, env(safe-area-inset-right));min-width:56px;min-height:44px;pointer-events:auto;'
         + 'background:rgba(20,14,8,0.8);color:#f3e2b8;border:1px solid #b08a4a;border-radius:8px;font:inherit;cursor:pointer;';
-      // pointerup, not click: a finger's click is suppressed by the page's
-      // touch preventDefault (measured: the tap landed, the chart stayed up).
-      // click with detail 0 is keyboard activation (Enter/Space on focus).
+      // pointerup, not click: a touchstart preventDefault anywhere up the
+      // tree suppresses a finger's click. click with detail 0 is keyboard
+      // activation (Enter/Space on focus).
       close.addEventListener('pointerup', (e) => { e.preventDefault(); if (this.map.mapOpen) this.toggleMap(false); });
       close.addEventListener('click', (e) => { if (e.detail === 0 && this.map.mapOpen) this.toggleMap(false); });
-      meta.appendChild(close);
+      overlay.appendChild(close);
     }
     // Tapping the minimap opens the chart (touch; the corner map is read-only
     // for the mouse, which has [M]).

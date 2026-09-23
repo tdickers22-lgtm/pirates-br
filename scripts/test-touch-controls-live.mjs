@@ -76,8 +76,13 @@ try {
   });
 
   const cdp = await context.newCDPSession(page);
-  const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', {
+  // `at` (seconds since epoch) stamps the touch like a phone's digitizer does:
+  // a real tap's timestamps are taken in hardware, not when a busy renderer
+  // gets round to it, so tap-window checks pin them instead of inheriting
+  // SwiftShader frame stalls between two dispatches.
+  const touch = (type, points, at) => cdp.send('Input.dispatchTouchEvent', {
     type, touchPoints: points.map(([x, y, id]) => ({ x, y, id, radiusX: 8, radiusY: 8, force: 1 })),
+    ...(at ? { timestamp: at } : {}),
   });
   const rectOf = (sel) => page.evaluate((s) => {
     const r = document.querySelector(s)?.getBoundingClientRect();
@@ -298,12 +303,20 @@ try {
   const mini = await rectOf('#minimap-shell');
   // Tap the minimap where no touch button covers it (its top-left quarter).
   const mx = mini.cx - mini.w * 0.25; const my = mini.cy - mini.h * 0.25;
-  await touch('touchStart', [[mx, my, 13]]);
+  await page.evaluate(() => {
+    window.__tapTrace = [];
+    for (const t of ['pointerdown', 'pointerup', 'pointercancel']) {
+      window.addEventListener(t, (e) => window.__tapTrace?.push(`${t}@${Math.round(e.timeStamp)}>${e.target?.id || e.target?.tagName}`), { capture: true });
+    }
+  });
+  const tapAt = Date.now() / 1000;
+  await touch('touchStart', [[mx, my, 13]], tapAt);
   await sleep(60);
-  await touch('touchEnd', []);
+  await touch('touchEnd', [], tapAt + 0.06);
   await page.waitForFunction(() => window.__piratesBR.map.mapOpen, null, { timeout: budget(5_000) }).catch(() => {});
   const mapOpen = await page.evaluate(() => window.__piratesBR.map.mapOpen);
-  expect('a tap on the minimap opens the chart', mapOpen, `finger on ${await hitAt(mx, my)}`);
+  const tapTrace = await page.evaluate(() => { const t = window.__tapTrace; window.__tapTrace = null; return t; });
+  expect('a tap on the minimap opens the chart', mapOpen, `finger on ${await hitAt(mx, my)}, ${JSON.stringify(tapTrace)}`);
   if (mapOpen) {
     await sleep(300);
     const mc = await rectOf('#map-canvas');
@@ -321,10 +334,16 @@ try {
     await page.screenshot({ path: `${OUT}/touch-844x390-chart-pinch.png`, timeout: budget(30_000) }).catch(() => {});
     expect(`a two-finger pinch 80 -> 160 px zooms the chart ~2x (${z0.toFixed(2)} -> ${z1.toFixed(2)})`, z1 / z0 > 1.8 && z1 / z0 < 2.2);
     const close = await rectOf('#map-close');
+    const closeHit = await hitAt(close.cx, close.cy);
+    await page.evaluate(() => { window.__tapTrace = []; });
     await touch('touchStart', [[close.cx, close.cy, 23]]);
     await touch('touchEnd', []);
     await sleep(200);
-    expect('the chart Close button closes it under a finger', !(await page.evaluate(() => window.__piratesBR.map.mapOpen)));
+    const closeTrace = await page.evaluate(() => { const t = window.__tapTrace; window.__tapTrace = null; return t; });
+    const chartClosed = !(await page.evaluate(() => window.__piratesBR.map.mapOpen));
+    expect('the chart Close button closes it under a finger', chartClosed,
+      `button at ${Math.round(close.cx)},${Math.round(close.cy)} (${Math.round(close.w)}x${Math.round(close.h)}), finger on ${closeHit}, ${JSON.stringify(closeTrace)}`);
+    if (!chartClosed) await page.evaluate(() => window.__piratesBR.toggleMap(false)); // never leave the chart over the pad
   }
 
   // ── 6. contexts (b1.4c): helm slider + arc, cannon arc ────────────────────
