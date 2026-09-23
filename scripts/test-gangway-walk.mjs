@@ -13,9 +13,10 @@
 // classes, at every dock in the fixed world, through the REAL PhysicsSystem.
 import { Match } from '../src/server/core/Match.ts';
 import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
-import { getShipGangwayPlan, toShipLocalPoint } from '../src/shared/interactions.js';
+import { getShipGangwayPlan, toShipLocalPoint, hullBeamHalf } from '../src/shared/interactions.ts';
+import { getHullContactChain } from '../src/shared/hull.ts';
 import { toDockLocalPoint, dockLocalToWorld } from '../src/shared/utils/index.ts';
-import { SHIP_STATS, PLAYER } from '../src/shared/constants/index.ts';
+import { SHIP_STATS, PLAYER, SHIP } from '../src/shared/constants/index.ts';
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -121,8 +122,9 @@ console.log(`     planks=${planked.length} worstOffAxis=${Math.max(...planked.ma
 // hull it just parked. Two first-20-seconds walks must board her dry:
 //   ROUTE  — along the pier to the plank's foot, then up the plank;
 //   NAIVE  — straight at the hull's centre, the way a newcomer does it.
-// And the pier edge to the rail where the plank lands must be a step, not a
-// swim: < 0.4 m (the plank bridges the rest of the berth's RAIL_GAP).
+// And the open water between the pier edge and her widest planking must be a
+// step, not a swim: < 0.4 m, yet clear of the pier box (the ship-vs-dock
+// pushout's own contact chain) by more than a 3 deg roll swings the wale.
 {
   const fakeWs = () => ({ readyState: 1, bufferedAmount: 0, send() {}, close() {} });
   const spawnMatch = new Match({ matchId: 'gangway-spawn', botCount: 0 });
@@ -139,11 +141,7 @@ console.log(`     planks=${planked.length} worstOffAxis=${Math.max(...planked.ma
     const dock = island?.dock;
     const plan = dock ? getShipGangwayPlan(ship, dock) : null;
     if (!plan) { walks.push({ ship: ship.type, island: island?.name, mode: 'plan', ok: false, why: 'no plank' }); continue; }
-    const inDock = toDockLocalPoint(dock, ship.position.x, ship.position.z);
-    const halfZ = dock.length * 0.5;
-    const edge = dockLocalToWorld(dock, Math.sign(inDock.x) * dock.width * 0.5, 0,
-      Math.max(-halfZ + 0.6, Math.min(halfZ - 0.6, inDock.z)));
-    gaps.push({ island: island.name, type: ship.type, gap: Math.hypot(edge.x - plan.shipEnd.x, edge.z - plan.shipEnd.z) });
+    gaps.push({ island: island.name, type: ship.type, ship, dock });
     const spawns = crew.map((p) => ({ ...p.position }));
     for (const mode of ['route', 'naive']) {
       for (const [i, member] of crew.entries()) {
@@ -185,15 +183,38 @@ console.log(`     planks=${planked.length} worstOffAxis=${Math.max(...planked.ma
   const bad = walks.filter((w) => (w.mode === 'route' || w.mode === 'plan') && !w.ok);
   expect(`walk from the spawn point via the plank boards the hull without swimming (${walks.filter((w) => w.mode === 'route').length} walks)`,
     bad.length === 0, bad.map((w) => `${w.ship} @ ${w.island} member ${w.member}: ${w.why ?? (w.swam ? 'SWAM' : 'stranded')} at ${w.at}`).join('\n     '));
-  // MEASURED, NOT YET GATED (b1.6d remaining): the berth leaves BERTH.RAIL_GAP
-  // (1.0 m at max beam) of open water between pier edge and hull, so a newcomer
-  // walking straight at the hull off the plank's line drops into it. Closing it
-  // to < 0.4 m moves every berth (world re-pin) and is its own commit.
   const naive = walks.filter((w) => w.mode === 'naive');
-  const worstGap = gaps.reduce((a, g) => (!a || g.gap > a.gap ? g : a), null);
-  console.log(`     MEASURE naive straight-at-the-hull walks dry: ${naive.filter((w) => w.ok).length}/${naive.length}; `
-    + `worst pier-edge to rail gap ${worstGap?.gap.toFixed(2)} m (target < 0.4)`);
-  console.log(`     spawn walks=${walks.length} berths=${berthed} worst pier-to-rail gap ${worstGap?.gap.toFixed(2)} m (${worstGap?.type} @ ${worstGap?.island})`);
+  const naiveBad = naive.filter((w) => !w.ok);
+  expect(`a newcomer walking straight at his hull's centre from where he lands boards her dry (${naive.length} walks)`,
+    naive.length > 0 && naiveBad.length === 0,
+    naiveBad.map((w) => `${w.ship} @ ${w.island} member ${w.member}: ${w.swam ? 'SWAM' : 'stranded'} at ${w.at}`).join('\n     '));
+  // Measured AFTER the walks ran PhysicsSystem over every hull for up to 20 s:
+  // a berth the pier pushout shoves (the old galleon, 0.16 m inside the box)
+  // shows up here as a drifted gap.
+  const berthGaps = gaps.map(({ island, type, ship, dock }) => {
+    const stats = SHIP_STATS[type];
+    const inDock = toDockLocalPoint(dock, ship.position.x, ship.position.z);
+    const skin = Math.abs(inDock.x) - dock.width * 0.5 - hullBeamHalf(type);
+    let chainClear = Infinity;
+    for (const st of getHullContactChain(type)) {
+      const zl = st.zF * stats.length;
+      const p = toDockLocalPoint(dock, ship.position.x + zl * Math.sin(ship.rotation), ship.position.z + zl * Math.cos(ship.rotation));
+      chainClear = Math.min(chainClear, Math.abs(p.x) - dock.width * 0.5 - stats.width * st.halfF);
+    }
+    const rollSwing = Math.sin(3 * Math.PI / 180) * stats.height * (1 - SHIP.HULL_DRAFT_F[type]);
+    return { island, type, skin, chainClear, rollSwing };
+  });
+  const wide = berthGaps.filter((g) => !(g.skin < 0.4));
+  expect(`pier edge to the hull's widest planking is < 0.4 m at every spawn berth (${berthGaps.length})`, berthGaps.length > 0 && wide.length === 0,
+    wide.map((g) => `${g.type} @ ${g.island}: ${g.skin.toFixed(2)} m`).join('\n     '));
+  const rub = berthGaps.filter((g) => !(g.chainClear > g.rollSwing));
+  expect('no berthed hull touches the pier, even rolled 3 deg', rub.length === 0,
+    rub.map((g) => `${g.type} @ ${g.island}: clear ${g.chainClear.toFixed(2)} m, roll swing ${g.rollSwing.toFixed(2)} m`).join('\n     '));
+  const worstGap = berthGaps.reduce((a, g) => (!a || g.skin > a.skin ? g : a), null);
+  const tightest = berthGaps.reduce((a, g) => (!a || g.chainClear - g.rollSwing < a.chainClear - a.rollSwing ? g : a), null);
+  console.log(`     spawn walks=${walks.length} berths=${berthed} naive dry ${naive.length - naiveBad.length}/${naive.length}; `
+    + `widest pier-to-planking gap ${worstGap?.skin.toFixed(2)} m (${worstGap?.type} @ ${worstGap?.island}); `
+    + `tightest pier clearance ${tightest?.chainClear.toFixed(2)} m vs roll swing ${tightest?.rollSwing.toFixed(2)} m (${tightest?.type})`);
 }
 
 if (failures > 0) {
