@@ -32,6 +32,7 @@ import {
   getIslandSurfaceY,
   isPointInsideIslandFootprint,
   dockLocalToWorld,
+  toDockLocalPoint,
   randRange,
   randAngle,
   randInt,
@@ -80,6 +81,8 @@ import {
   isStandingInFloodedHold,
   isStandingInShipHold,
   sideOfLocalX,
+  berthLateralOffset,
+  getShipGangwayPlan as gangwayPlanFor,
 } from '../../shared/interactions.js';
 import { stepPirate } from '../../shared/locomotion.js';
 import { sanitizePlayerInput } from '../net/validate.js';
@@ -471,7 +474,6 @@ const DOCK_LADDER_LOCAL_Z_FRAC = 0.44;
 const DOCK_CLIMB_REACH = 4.2;
 // Berthing geometry is SHARED with the map generator's mooring-lane dredge —
 // the planner must look for water exactly where the generator dug it.
-const BERTH_RAIL_GAP = BERTH.RAIL_GAP;
 const BERTH_BOW_INSET = BERTH.BOW_INSET;
 const BERTH_BOB_MARGIN = BERTH.BOB_MARGIN;
 const BERTH_SEARCH_REACH = BERTH.SEARCH_REACH;
@@ -1741,7 +1743,29 @@ export class Match {
       // and its members stand a stride apart instead of inside each other.
       const dockFwd = { x: Math.sin(spawnBerth.dock.rotation), z: Math.cos(spawnBerth.dock.rotation) };
       const base = spawnBerth.side * Math.min(BERTH_LANDING_SPREAD, spawnBerth.dock.length * 0.25);
-      players.forEach((player, index) => {
+      // Land at the foot of her OWN plank (liveplay-09): on the berth-side half
+      // of the pier, abreast of the hull, a stride apart along the planking.
+      // Landing at the shore-end respawn put the hull 10-20 m off down the pier,
+      // and the straight line a newcomer walks at her left the planking before
+      // it reached her side. The crew stands in a file ACROSS the pier on the
+      // plank's line (0.9 m apart, the other berth's crew offset 0.9 m along
+      // it), so walking at the hull is walking up the plank. No plank (should
+      // not happen at a fresh berth) keeps the old spot.
+      const plank = gangwayPlanFor(ship, spawnBerth.dock);
+      if (plank) {
+        const dock = spawnBerth.dock;
+        const foot = toDockLocalPoint(dock, plank.dockEnd.x, plank.dockEnd.z);
+        const toHull = Math.sign(foot.x) || 1;
+        const reachX = Math.max(0, dock.width * 0.5 - 0.4);
+        const halfZ = Math.max(0, dock.length * 0.5 - 0.8);
+        const lz = clamp(foot.z + spawnBerth.side * 0.45, -halfZ, halfZ);
+        players.forEach((player, index) => {
+          const lx = toHull * clamp(dock.width * 0.5 - 0.9 - index * 0.9, -reachX, reachX);
+          const at = dockLocalToWorld(dock, lx, 0, lz);
+          player.position = { x: at.x, y: dock.respawnPoint.y + 0.2, z: at.z };
+          player.onShipId = null;
+        });
+      } else players.forEach((player, index) => {
         const along = base + (index - (players.length - 1) / 2) * CREW_LANDING_STRIDE;
         player.position = {
           x: spawnBerth.dock.respawnPoint.x + dockFwd.x * along,
@@ -9244,7 +9268,7 @@ export class Match {
    *  offset from the dock CENTRE: 80% of sloop berths had zero hull-alongside
    *  overlap and some sat 24-38m past the tip.)
    *
-   *  Lateral: hull side to dock edge is a fixed BERTH_RAIL_GAP.
+   *  Lateral: widest planking to dock edge is BERTH.RAIL_GAP (berthLateralOffset).
    *  Depth: the keel must clear the seabed at the same three centreline stations
    *  grounding uses (±0.44·length, mid). If the canonical anchor is too shallow
    *  the berth shifts along the dock by the SMALLEST amount that floats — never
@@ -9271,7 +9295,7 @@ export class Match {
     const fwd = { x: Math.sin(dock.rotation), z: Math.cos(dock.rotation) };
     const right = { x: Math.cos(dock.rotation), z: -Math.sin(dock.rotation) };
     const half = stats.length * 0.5;
-    const lateral = dock.width * 0.5 + stats.width * 0.5 + BERTH_RAIL_GAP;
+    const lateral = berthLateralOffset(dock.width, type);
     // Depth requirement measured off the RENDERED keel (SHIP.HULL_DRAFT_F — the
     // draft grounding and swim-hull collision use) plus the grounding safety bite
     // and a wave-bob margin. The old conservative KEEL_DRAFT_RATIO figure demanded
