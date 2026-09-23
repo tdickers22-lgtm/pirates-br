@@ -285,7 +285,7 @@ console.log('\nUnder fire:');
     struck[0]?.payload.attackerCrew?.includes(raider.name),
     `attackerCrew=${struck[0]?.payload.attackerCrew} raiderHull=${raiderHull?.type}`);
   expect('...and the face that took it, with the breach it opened',
-    struck[0]?.payload.side === 'starboard' && struck[0]?.payload.holeId === 7
+    struck[0]?.payload.side === 'port' && struck[0]?.payload.holeId === 7
       && struck[0]?.payload.topside === false,
     `side=${struck[0]?.payload.side} holeId=${struck[0]?.payload.holeId} topside=${struck[0]?.payload.topside} (${stats.x})`);
 }
