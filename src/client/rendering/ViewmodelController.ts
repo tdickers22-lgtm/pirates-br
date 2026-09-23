@@ -18,9 +18,11 @@ import { CUTLASS_VIEW_CHARGE_TIME } from './PlayerAnimator.js';
 import type { CombatFx } from './CombatFx.js';
 import type { OceanRenderer } from './OceanRenderer.js';
 import type { Renderer } from './Renderer.js';
-
-/** Seconds for a freshly drawn weapon/tool to rise into its rest pose. */
-const VIEW_DRAW_TIME = 0.3;
+import {
+  CUTLASS_GUARD, SLASH_SWING_TIME, VIEW_DRAW_TIME, cutlassLungePose, cutlassRestPose, cutlassSlashPose,
+  drawDelta, muzzleTipFor, recoilEnvelope, recoilSpecFor, reloadChoreography, slashRibbonPose, weaponPose,
+  type Pose6,
+} from './viewmodel/poses.js';
 
 /**
  * Minimum angle (radians ≈ 20.6°) a long tool's shaft is allowed to sit off the
@@ -69,7 +71,17 @@ export class ViewmodelController {
   readonly localViewPocketRoot = new THREE.Group();
   localViewPocketKind: PocketPreviewKind | null = null;
   localViewWeaponId: WeaponInstance['weaponId'] | null = null;
-  localViewWeaponKick = 0;
+  /** Seconds since the last shot's recoil impulse (Infinity = settled). */
+  private recoilAge = Infinity;
+  /** Envelope value when the last shot landed (a follow-up climbs from there). */
+  private recoilFrom = 0;
+  /** Current recoil envelope 0..1 (poses.recoilEnvelope). Writing 0 settles it. */
+  get localViewWeaponKick(): number {
+    return recoilEnvelope(recoilSpecFor(this.localViewWeaponId ?? 'flintknock'), this.recoilAge, this.recoilFrom);
+  }
+  set localViewWeaponKick(v: number) {
+    if (v <= 0) { this.recoilAge = Infinity; this.recoilFrom = 0; }
+  }
   /** First-person muzzle flash + powder smoke on the local viewmodel barrel. */
   private muzzleFlash: THREE.Sprite | null = null;
   private muzzleGlow: THREE.PointLight | null = null;
@@ -178,12 +190,7 @@ export class ViewmodelController {
    * muzzle position × the mesh scale applied in syncLocalViewWeapon, negated.
    */
   private muzzleTipFor(weaponId: WeaponId): [number, number, number] {
-    switch (weaponId) {
-      case 'eye_of_reach': return [0, 0.069, -1.24];
-      case 'blunderbuss': return [0, 0.052, -0.94];
-      case 'flintknock': return [0, 0.054, -0.53];
-      default: return [0, 0.024, -0.79];
-    }
+    return muzzleTipFor(weaponId);
   }
 
   triggerMuzzleFlash(weaponId: WeaponId) {
@@ -736,18 +743,14 @@ export class ViewmodelController {
         r.mat.opacity = 0;
         continue;
       }
-      const grow = 0.92 + p * 0.62;
-      // The ribbon SWEEPS with the blade instead of flashing in place: it rides
-      // the same anticipation→follow-through rotation, so the eye is given the
-      // arc the sword took even on a frame where the blade itself is a thin
-      // edge-on line. The sweep is 2.6rad to match the blade's new 2.7rad roll
-      // (cock −0.85 → follow-through +1.85); the old 1.75 under-swept it and the
-      // ribbon and the steel visibly disagreed about where the cut went.
-      r.mesh.scale.set(r.side * grow, -grow, 1);
-      r.mesh.rotation.z = (0.95 - 2.6 * p) * r.side;
-      // Peak mid-swing rather than at the wind-up (a linear fade from full made
-      // the brightest frame the one where nothing had moved yet).
-      r.mat.opacity = 0.98 * Math.sin(Math.min(1, p) * Math.PI) ** 0.6;
+      // The ribbon RIDES THE BLADE (poses.slashRibbonPose): its head points
+      // where the steel points on screen and sweeps the same way on both
+      // diagonals. The old scale (a Y reflection) plus a DECREASING rotation
+      // drew the upside-down mirror of the cut (animations-04).
+      const rp = slashRibbonPose(r.side, r.age / SLASH_SWING_TIME);
+      r.mesh.scale.set(rp.scaleX, rp.scaleY, 1);
+      r.mesh.rotation.z = rp.rotZ;
+      r.mat.opacity = rp.opacity;
     }
     const s = this.slashStreak;
     if (s && s.mesh.visible) {
@@ -1380,88 +1383,6 @@ export class ViewmodelController {
    * @returns additive root offset [x,y,z,rx,ry,rz] plus `ram`, the 0..1 ramrod
    *          plunge used to drive the support hand down the muzzle.
    */
-  private reloadChoreography(weaponId: WeaponId, p: number) {
-    if (p <= 0.0001) return { pose: [0, 0, 0, 0, 0, 0], ram: 0, pulseIndex: -1 };
-    const pulses = weaponId === 'blunderbuss' ? 2 : weaponId === 'eye_of_reach' ? 1 : 3;
-    const inspect = THREE.MathUtils.smoothstep(p, 0, 0.3);
-    const back = THREE.MathUtils.smoothstep(p, 0.72, 1);
-    const hold = inspect * (1 - back);
-    // Discrete plunges, timed so the last one lands right as RETURN starts.
-    let ram = 0;
-    let pulseIndex = -1;
-    if (p > 0.3 && p < 0.74) {
-      const u = (p - 0.3) / 0.44;
-      pulseIndex = Math.floor(u * pulses);
-      const frac = u * pulses - pulseIndex;
-      ram = Math.sin(THREE.MathUtils.clamp(frac, 0, 1) * Math.PI) ** 1.6;
-    }
-    // Overshoot on the way home sells the snap-up.
-    const overshoot = Math.sin(THREE.MathUtils.clamp((p - 0.72) / 0.28, 0, 1) * Math.PI) * 0.9;
-    const bolt = weaponId === 'eye_of_reach' ? 1 : 0;
-    if (weaponId === 'blunderbuss') {
-      // SILHOUETTE RULE (this IS the audited "diagonal stack of gold spheres"
-      // frame, and the previous attempt did not fix it — measured, the old keys
-      // put the breech at camera z −0.55 and the muzzle at −1.56, so the gun
-      // ran almost straight down the view axis: 1m of foreshortened barrel with
-      // its bands turning into a diagonal row of gold ellipses, and the trigger
-      // fist thrown to ndc.y −1.02, clean off the bottom of the frame.
-      //
-      // BROADSIDE means BROADSIDE: yaw the whole gun ~75° (total ry ≈ 1.30) and
-      // push it 0.18 further out, so both ends sit at a comparable depth
-      // (muzzle z −1.25, breech −0.93) and the reload silhouette is a gun lying
-      // across the lower-middle frame — muzzle screen-left at ndc [−0.48,−0.28],
-      // breech screen-right at [0.27,−0.42], support fist on the fore-end at
-      // [−0.09,−0.47] and trigger fist at [0.10,−0.54].
-      return {
-        pose: [
-          hold * -0.22 + ram * 0.03,
-          hold * -0.02 - ram * 0.03,
-          hold * -0.18 - ram * 0.04,
-          hold * 0.15 - ram * 0.1 - overshoot * 0.08,
-          hold * 1.16 + ram * 0.06,
-          hold * 0.18 + ram * 0.05 + overshoot * 0.1,
-        ],
-        ram,
-        pulseIndex,
-      };
-    }
-    if (weaponId === 'flintknock') {
-      // A pistol is primed UP at eye level, not dropped to the hip: the shared
-      // keys shoved it 0.18 nearer the lens and 0.13 down, which put the whole
-      // gun (and its fist) below the frame at ndc.y −1.8.
-      return {
-        pose: [
-          hold * -0.04 + ram * 0.02,
-          hold * 0.06 - ram * 0.04,
-          hold * 0.04 + ram * 0.04,
-          hold * 0.3 - ram * 0.14,
-          hold * -0.15,
-          hold * 0.55 + ram * 0.06 + overshoot * 0.12,
-        ],
-        ram,
-        pulseIndex,
-      };
-    }
-    // Long arms (Eye of Reach + fallback): the old keys dropped the gun 0.13 and
-    // rolled it 1.1rad, which swung the trigger fist down to ndc.y −0.89 —
-    // riding the bottom edge, and under the weapon-slot HUD tiles that live at
-    // ndc.y −0.82…−0.97. Half the roll, a third of the drop, and a small push
-    // AWAY from the lens keeps both fists at ndc.y ≈ −0.5 through the whole
-    // choreography while the lock plate still comes up to the eye.
-    return {
-      pose: [
-        hold * -0.06 + ram * 0.02,
-        hold * -0.04 - ram * 0.04,
-        hold * 0.06 + ram * 0.05,
-        hold * (0.5 + bolt * 0.1) - ram * 0.12 - overshoot * 0.12,
-        hold * -0.28 + bolt * hold * 0.2,
-        hold * (0.5 + bolt * 0.35) + ram * 0.06 + overshoot * 0.1,
-      ],
-      ram,
-      pulseIndex,
-    };
-  }
-
   // ── Incoming damage watch ─────────────────────────────────────────────────
   /** Last seen local health/armour, for the "something just hit me" edge. */
   private prevWatchedHealth: number | null = null;
@@ -1605,9 +1526,6 @@ export class ViewmodelController {
     const strafeTilt = moveAxes.x * (0.008 + moveAmount * 0.018);
     const travelSwing = Math.cos(time * (5.2 + moveAmount * 2.5)) * moveAmount * 0.016;
     const ammoSignature = `${weaponId}:${activeWeapon.ammo}:${activeWeapon.reloading ? 1 : 0}`;
-    if (this.localViewWeaponAmmoSignature && ammoSignature !== this.localViewWeaponAmmoSignature && activeWeapon.reloading) {
-      this.localViewWeaponKick = Math.min(1.25, this.localViewWeaponKick + 0.24);
-    }
     this.localViewWeaponAmmoSignature = ammoSignature;
     // Muzzle flash + smoke + recoil the instant you pull the trigger
     // (client-predicted press edge), so feedback is immediate rather than
@@ -1619,11 +1537,18 @@ export class ViewmodelController {
       // Crack the shot locally the instant the trigger drops (sniper included),
       // instead of waiting for the server tracer to replicate ~1 RTT later.
       this.view.combatFx.playLocalShot(weaponId, this.view.renderer.camera.position);
-      this.localViewWeaponKick = Math.min(1.35, this.localViewWeaponKick + 0.55);
+      // Recoil is an IMPULSE (poses.recoilEnvelope): back toward the eye and
+      // muzzle-UP, peak in 65-85 ms, settled by 200-255 ms. It used to push the
+      // gun forward, down and muzzle-down, and holding the trigger parked it
+      // there at 0.72 (animations-03).
+      this.recoilFrom = this.localViewWeaponKick;
+      this.recoilAge = 0;
+    } else if (Number.isFinite(this.recoilAge)) {
+      this.recoilAge += this.view.frameDt;
+      if (this.recoilAge > 1) this.recoilAge = Infinity;
     }
     this.prevLocalFiring = firingNow;
-    const kickTarget = firearmEquipped && this.view.input.isFiring() && !activeWeapon.reloading ? 0.72 : 0;
-    this.localViewWeaponKick += (kickTarget - this.localViewWeaponKick) * Math.min(1, this.view.frameDt * (kickTarget > this.localViewWeaponKick ? 18 : 13));
+    const recoil = firearmEquipped ? this.localViewWeaponKick : 0;
     const reloadBlend = activeWeapon.reloading && firearmEquipped
       ? 1 - THREE.MathUtils.clamp(activeWeapon.reloadTimer / Math.max(0.001, WEAPONS[weaponId].reloadTime), 0, 1)
       : 0;
@@ -1634,220 +1559,74 @@ export class ViewmodelController {
     }
     // Real reload choreography (INSPECT → RAM → RETURN) instead of the old
     // near-invisible sine tilt; `ram` also drives the support hand.
-    const reload = this.reloadChoreography(weaponId, this.localViewWeaponReloadPhase);
-    const [rlX, rlY, rlZ, rlRX, rlRY, rlRZ] = reload.pose;
+    const reload = reloadChoreography(weaponId, this.localViewWeaponReloadPhase);
     if (reload.pulseIndex >= 0 && reload.pulseIndex !== this.prevReloadPulse) {
       // A small camera nudge per ramrod stroke — the shove has weight.
       this.view.cameraShake = Math.min(1, this.view.cameraShake + 0.05);
     }
     this.prevReloadPulse = reload.pulseIndex;
-    const recoilBack = this.localViewWeaponKick * 0.12;
-    const recoilLift = this.localViewWeaponKick * 0.045;
-    const recoilRoll = this.localViewWeaponKick * 0.055;
-
     // A raised spyglass (hold P) occupies both hands — stow the weapon.
     this.localViewWeaponRoot.visible = !this.view.spyglassActive;
 
-    switch (weaponId) {
-      case 'eye_of_reach':
-        // The rifle is 1.4m of viewmodel: pointed straight down the view axis
-        // it foreshortened into a stock corner at the right edge (and recoil
-        // pushed even that off-screen). Yaw it POSITIVE so the barrel crosses
-        // toward screen centre and sits as a readable diagonal.
-        this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.24, 0.025, aimBlend) + sway * 0.26 + travelSwing * 0.18 + rlX,
-          THREE.MathUtils.lerp(-0.26, -0.15, aimBlend) + bob * 0.75 - recoilLift + rlY,
-          THREE.MathUtils.lerp(-0.96, -0.42, aimBlend) - recoilBack * 0.72 + rlZ,
-        );
-        this.localViewWeaponRoot.rotation.set(
-          -0.16 + aimBlend * 0.16 - recoilLift * 1.1 + rlRX,
-          THREE.MathUtils.lerp(0.3, 0.0, aimBlend) + rlRY,
-          -0.06 - strafeTilt * 0.8 - recoilRoll + rlRZ,
-        );
-        break;
-      case 'blunderbuss':
-        // Lower-right hip with real screen PRESENCE (reads as a gun) without
-        // parking the fat stock over center; barrel angled toward the
-        // crosshair so the muzzle flash lands in the visible lower third.
-        this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.32, 0.16, aimBlend) + sway * 0.36 + travelSwing * 0.28 + rlX,
-          THREE.MathUtils.lerp(-0.28, -0.24, aimBlend) + bob - recoilLift * 0.8 + rlY,
-          THREE.MathUtils.lerp(-0.82, -0.7, aimBlend) - recoilBack * 0.72 + rlZ,
-        );
-        this.localViewWeaponRoot.rotation.set(
-          -0.2 - aimBlend * 0.07 - recoilLift + rlRX,
-          THREE.MathUtils.lerp(0.14, 0.06, aimBlend) + rlRY,
-          -0.08 - strafeTilt - recoilRoll * 0.8 + rlRZ,
-        );
-        break;
-      case 'cutlass':
-        {
-          // Shared progress helper — denominator locked per swing (basic 0.55s
-          // vs lunge 1.05s) so the animation always plays forward from windup.
-          // POSE MATH NOTE: the cutlass mesh is authored blade-UP along +Y
-          // (grip at the origin, tip at y≈1). Every key below was derived from
-          // that axis and verified frame-by-frame — small positive X pitches
-          // point the tip INTO the camera (the old "upside down" read).
-          const cooldownProgress = this.view.getCutlassSwingProgress(player);
-          const swingKind = this.view.cutlassSwingKind.get(player.id) ?? 'swing';
-          const charge = this.localCutlassCharge;
-          const chargeReadyPulse = charge > 0.96 ? Math.sin(time * 22) * 0.018 : 0;
-          if (cooldownProgress > 0.001 && this.view.prevCutlassSwingProgress <= 0.001) {
-            if (swingKind === 'lunge') {
-              this.view.cutlassDashKick = 1;
-              this.view.cameraShake = Math.min(1, this.view.cameraShake + 0.2);
-              this.spawnViewSlashStreak();
-            } else {
-              this.cutlassSlashSide = this.cutlassSlashSide === 1 ? -1 : 1;
-              this.spawnViewSlashArc(this.cutlassSlashSide);
-            }
-          }
-          this.view.prevCutlassSwingProgress = cooldownProgress;
-          const mixPose = (a: number[], b: number[], t: number) => {
-            for (let i = 0; i < 6; i++) a[i] += (b[i] - a[i]) * t;
-            return a;
-          };
-          // Ready stance: hilt lower-right, blade rising across toward screen
-          // center, tip angled forward — the sword is SEEN at rest.
-          // Lifted from y −0.36 so the hilt, knuckle bow and gripping hand all
-          // stay in frame (they used to sit below the bottom edge).
-          const REST = [0.33, -0.26, -0.66, -0.62, -0.1, 0.28];
-          if (cutlassBlocking) {
-            // Guard: the full blade crosses horizontally UNDER the crosshair
-            // (it used to sit as a gold arc in the bottom-right corner with the
-            // blade angled out of frame).
-            this.localViewWeaponRoot.position.set(
-              0.06 + sway * 0.14,
-              -0.16 + bob * 0.45,
-              -0.44 + travelSwing * 0.08,
-            );
-            this.localViewWeaponRoot.rotation.set(-0.35, 0.15, -1.5 - strafeTilt * 0.4);
-          } else if (cooldownProgress > 0.001 && swingKind === 'lunge') {
-            // DASH THRUST: pull back, then the blade rams dead-forward
-            // (rot.x −1.62 maps the +Y blade onto the view axis) and holds
-            // extended through the dash before sweeping home.
-            const p = cooldownProgress;
-            const windup = THREE.MathUtils.smoothstep(p, 0, 0.09);
-            const stab = THREE.MathUtils.smoothstep(p, 0.09, 0.24);
-            const carry = THREE.MathUtils.smoothstep(p, 0.24, 0.6);
-            const recover = THREE.MathUtils.smoothstep(p, 0.6, 1);
-            const pose = mixPose(
-              mixPose(
-                mixPose(
-                  // Windup was pulled UP and forward: at y −0.35 / z −0.45 the
-                  // hilt projected to ndc.y −1.09 — the fist and guard were
-                  // under the frame and the blade looked detached, floating in
-                  // mid-screen, which is exactly how the charge-dash read.
-                  mixPose([...REST], [0.42, -0.2, -0.62, -0.55, -0.35, -0.55], windup),
-                  // Thrust keys are kept ~0.35rad OFF the view axis: dead-on
-                  // (rot.x −1.62) foreshortened the blade into a nub inside a
-                  // giant gold guard — the "holding a donut" frame.
-                  [0.2, -0.16, -0.88, -1.24, 0.3, -0.08], stab,
-                ),
-                [0.22, -0.18, -0.82, -1.18, 0.32, -0.16], carry,
-              ),
-              REST, recover,
-            );
-            this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
-            this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.6);
-          } else if (cooldownProgress > 0.001) {
-            // SLASH — ANTICIPATION → WHIP → FOLLOW-THROUGH → RECOVERY.
-            //
-            // THE BUG THESE KEYS FIX (measured, not guessed): the old arc only
-            // ever rolled the blade from −0.85 to +1.24 rad, so it passed
-            // through VERTICAL — i.e. through the rest pose — at exactly the
-            // middle of the swing. Projected: at p = 0.32 the tip sat at ndc
-            // [0.05, 0.51] and at rest it sits at [0.05, 0.50]. The one frame
-            // the eye actually samples was pixel-identical to "idle". That is
-            // the whole "rest and mid-slash look the same" report.
-            //
-            // Now the blade LIES FLAT ACROSS THE SCREEN at the cut (roll 1.45,
-            // tip ndc ≈ [−0.83, 0.16] with the hilt still at [0.30, −0.20] —
-            // a horizontal blade through the crosshair, nothing like rest) and
-            // the whip window is 77ms wide, so barely one frame is spent
-            // anywhere near vertical. Every key is projected offline: hilt /
-            // guard / mid-blade / tip all stay inside the frame for the whole
-            // 0.55s on BOTH diagonals, and the follow-through still holds the
-            // blade in shot at p = 0.55 (tip [−0.73, −0.59], hilt [0.18,
-            // −0.08]) — the open item from 6586c3b, now frame-verified.
-            const sSide = this.cutlassSlashSide;
-            const p = cooldownProgress;
-            const cock = THREE.MathUtils.smoothstep(p, 0, 0.2);
-            const cut = THREE.MathUtils.smoothstep(p, 0.2, 0.34);
-            const through = THREE.MathUtils.smoothstep(p, 0.34, 0.56);
-            const recover = THREE.MathUtils.smoothstep(p, 0.62, 1);
-            // Roll-dominant, and MIRRORED about the view axis per diagonal —
-            // a partial mirror (the old `0.24 + 0.1·side`) left the off-side
-            // swing's tip at ndc.x +1.22, off the right-hand edge.
-            const pose = mixPose(
-              mixPose(
-                mixPose(
-                  // ANTICIPATION: hilt lifts to ndc [0.34, −0.30] and the blade
-                  // lays right back over the shoulder (tip [0.77, 0.60]) — a
-                  // wind-up you can read in a single frame.
-                  mixPose([...REST], [0.31 * sSide, -0.15, -0.68, -0.75, -0.3 * sSide, -0.85 * sSide], cock),
-                  // WHIP: blade horizontal across the crosshair.
-                  [0.29 * sSide, -0.11, -0.72, -0.3, 0.25 * sSide, 1.45 * sSide], cut,
-                ),
-                // FOLLOW-THROUGH: rolled past horizontal and pushed forward to
-                // z −0.92, finishing down-across the far side of the frame.
-                [0.22 * sSide, -0.06, -0.92, -0.1, 0.3 * sSide, 1.85 * sSide], through,
-              ),
-              REST, recover,
-            );
-            this.localViewWeaponRoot.position.set(pose[0], pose[1] + bob * 0.3, pose[2]);
-            this.localViewWeaponRoot.rotation.set(pose[3], pose[4], pose[5] - strafeTilt * 0.8);
-          } else {
-            // Rest / charge wind-up. The old charge keys cocked the sword DOWN
-            // and 0.10 nearer the lens, which walked the gripping fist to ndc
-            // [0.56, −0.82] — off the bottom AND directly behind the weapon-slot
-            // HUD tiles (ndc.y −0.82…−0.97). With no fist in shot the blade read
-            // as a gold shape detached in mid-screen, which is exactly the
-            // "cutlass detaches during the charge dash" report. A real windup
-            // lifts the sword anyway: hilt now settles at ndc [0.46, −0.44] with
-            // the tip at [0.43, 0.72] — the whole weapon and its fist in frame.
-            this.localViewWeaponRoot.position.set(
-              REST[0] + charge * 0.06 + sway * 0.24 + travelSwing * 0.42,
-              REST[1] + charge * 0.05 + chargeReadyPulse + bob * 0.75,
-              REST[2] + charge * 0.02,
-            );
-            this.localViewWeaponRoot.rotation.set(
-              REST[3] + charge * 0.02,
-              REST[4] - charge * 0.3,
-              REST[5] - charge * 0.55 - strafeTilt * 1.4,
-            );
-          }
+    const root = this.localViewWeaponRoot;
+    const setPose = (p: Pose6) => {
+      root.position.set(p[0], p[1], p[2]);
+      root.rotation.set(p[3], p[4], p[5]);
+    };
+    if (weaponId === 'cutlass') {
+      // Shared progress helper: denominator locked per swing (basic 0.55 s vs
+      // lunge 1.05 s) so the animation always plays forward from windup. The
+      // keys live in viewmodel/poses.ts (blade authored UP along +Y).
+      const cooldownProgress = this.view.getCutlassSwingProgress(player);
+      const swingKind = this.view.cutlassSwingKind.get(player.id) ?? 'swing';
+      const charge = this.localCutlassCharge;
+      const chargeReadyPulse = charge > 0.96 ? Math.sin(time * 22) * 0.018 : 0;
+      if (cooldownProgress > 0.001 && this.view.prevCutlassSwingProgress <= 0.001) {
+        if (swingKind === 'lunge') {
+          this.view.cutlassDashKick = 1;
+          this.view.cameraShake = Math.min(1, this.view.cameraShake + 0.2);
+          this.spawnViewSlashStreak();
+        } else {
+          this.cutlassSlashSide = this.cutlassSlashSide === 1 ? -1 : 1;
+          this.spawnViewSlashArc(this.cutlassSlashSide);
         }
-        break;
-      default:
-        // Flintknock + fallback: readable lower-right presence, barrel angled
-        // toward the crosshair so the muzzle flash lands on screen. Carried a
-        // touch higher and further out than before — the pistol was posed so
-        // low and so near the lens that its own gripping fist projected to
-        // ndc.y −0.89 at rest and −1.83 mid-reload (clean off the bottom).
-        this.localViewWeaponRoot.position.set(
-          THREE.MathUtils.lerp(0.24, 0.085, aimBlend) + sway * 0.64 + travelSwing * 0.38 + rlX,
-          THREE.MathUtils.lerp(-0.15, -0.12, aimBlend) + bob - recoilLift * 0.62 + rlY,
-          THREE.MathUtils.lerp(-0.62, -0.5, aimBlend) - recoilBack * 0.8 + rlZ,
-        );
-        this.localViewWeaponRoot.rotation.set(
-          -0.16 - aimBlend * 0.07 - recoilLift + rlRX,
-          THREE.MathUtils.lerp(0.16, 0.06, aimBlend) + rlRY,
-          -0.1 - strafeTilt - recoilRoll + rlRZ,
-        );
-        break;
+      }
+      this.view.prevCutlassSwingProgress = cooldownProgress;
+      if (cutlassBlocking) {
+        const g = CUTLASS_GUARD;
+        setPose([g[0] + sway * 0.14, g[1] + bob * 0.45, g[2] + travelSwing * 0.08, g[3], g[4], g[5] - strafeTilt * 0.4]);
+      } else if (cooldownProgress > 0.001 && swingKind === 'lunge') {
+        const pose = cutlassLungePose(cooldownProgress);
+        pose[1] += bob * 0.3;
+        pose[5] -= strafeTilt * 0.6;
+        setPose(pose);
+      } else if (cooldownProgress > 0.001) {
+        const pose = cutlassSlashPose(this.cutlassSlashSide, cooldownProgress);
+        pose[1] += bob * 0.3;
+        pose[5] -= strafeTilt * 0.8;
+        setPose(pose);
+      } else {
+        const pose = cutlassRestPose(charge);
+        pose[0] += sway * 0.24 + travelSwing * 0.42;
+        pose[1] += chargeReadyPulse + bob * 0.75;
+        pose[5] -= strafeTilt * 1.4;
+        setPose(pose);
+      }
+    } else {
+      setPose(weaponPose(weaponId, { aimBlend, bob, sway, strafeTilt, travelSwing, reload: reload.pose, recoil }));
     }
 
-    // ── DRAW: the fresh weapon rises into the pose with a slight overshoot
-    // instead of appearing mid-frame already at rest.
+    // ── DRAW: the fresh weapon rises into the pose MUZZLE-LOW and rotates up
+    // into line (poses.drawDelta); it used to start 43 deg muzzle-high.
     if (this.localViewDrawTimer < 1) {
-      const e = 1 - this.localViewDrawTimer;
-      const overshoot = Math.sin(this.localViewDrawTimer * Math.PI) * 0.1;
-      this.localViewWeaponRoot.position.y -= 0.34 * e * e;
-      this.localViewWeaponRoot.position.z += 0.1 * e * e;
-      this.localViewWeaponRoot.rotation.x += 0.75 * e * e - overshoot;
+      const d = drawDelta(this.localViewDrawTimer);
+      root.position.x += d[0];
+      root.position.y += d[1];
+      root.position.z += d[2];
+      root.rotation.x += d[3];
+      root.rotation.y += d[4];
+      root.rotation.z += d[5];
     }
-
     // ── HANDS: real forearms and fists on the grips. They ride inside the
     // weapon root, so every pose above (bob, recoil, reload, swing) carries
     // them for free — this is what kills the "floating prop" read.

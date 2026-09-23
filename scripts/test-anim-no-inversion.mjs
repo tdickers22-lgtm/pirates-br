@@ -33,6 +33,12 @@ import { SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import { assets } from '../src/client/assets/AssetLibrary.ts';
 import { makePlayerRig, updatePlayerRig, playerRigOf } from '../src/client/rendering/factories/PlayerRigFactory.ts';
 import { makePlayerMesh } from '../src/client/rendering/factories/PlayerMeshFactory.ts';
+import {
+  weaponPose, recoilEnvelope, recoilSpecFor, recoilDelta, drawDelta, muzzleTipFor, cutlassSlashPose, slashRibbonPose,
+  CUTLASS_TIP, SLASH_RIBBON_HALF_SPAN, SLASH_SWING_TIME, VIEW_DRAW_TIME,
+} from '../src/client/rendering/viewmodel/poses.ts';
+import { makeHeldWeaponMesh } from '../src/client/rendering/factories/WeaponMeshFactory.ts';
+const DEG = Math.PI / 180;
 
 const t0 = performance.now();
 let failures = 0;
@@ -225,7 +231,181 @@ console.log('Wiring');
   expect('PhysicsSystem attitude uses shipTurnHeel', /const turnHeel = shipTurnHeel\(/.test(phys));
 }
 
+// ── 7. FIRST-PERSON VIEWMODEL (b1.6b): recoil, slash ribbon, draw ────────────
+// Poses come from src/client/rendering/viewmodel/poses.ts (pure), projected
+// with a real PerspectiveCamera (fov 74, 16:9) exactly like the browser. At
+// f5fee97e every gun kicked FORWARD, DOWN and muzzle-DOWN (dot +0.09, pitch
+// -2.5 deg), the ribbon swept opposite to the blade, and a draw started 43 deg
+// muzzle-HIGH (evidence/animations/vm-ship-inversion.out.txt).
+console.log('First-person viewmodel');
+{
+  const cam = new THREE.PerspectiveCamera(74, 16 / 9, 0.1, 100);
+  cam.updateMatrixWorld(true);
+  const Z6 = [0, 0, 0, 0, 0, 0];
+  const still = (aimBlend, recoil) => ({ aimBlend, bob: 0, sway: 0, strafeTilt: 0, travelSwing: 0, reload: Z6, recoil });
+  const HIP_HALF = THREE.MathUtils.degToRad(37);
+  const rootScale = (id, aim) => id !== 'eye_of_reach' ? 1
+    : aim ? Math.tan(THREE.MathUtils.degToRad(14 * 0.85 * 0.5)) / Math.tan(HIP_HALF) : 0.82;
+  const meshScale = { eye_of_reach: 0.92, blunderbuss: 0.95, cutlass: 0.92 };
+  const rootOf = (pose, scale) => {
+    const g = new THREE.Group();
+    g.position.set(pose[0], pose[1], pose[2]);
+    g.rotation.set(pose[3], pose[4], pose[5]);
+    g.scale.setScalar(scale);
+    g.updateMatrixWorld(true);
+    return g;
+  };
+  const muzzleOf = (id, pose, scale) => {
+    const g = rootOf(pose, scale);
+    return { tip: V(...muzzleTipFor(id)).applyMatrix4(g.matrixWorld), fwd: V(0, 0, -1).transformDirection(g.matrixWorld) };
+  };
+  const pitchDeg = (v) => Math.asin(v.y / v.length()) / DEG;
+  const grade = (label, rest, peak) => {
+    const d = peak.tip.clone().sub(rest.tip);
+    return { along: d.dot(rest.fwd), climb: pitchDeg(peak.fwd) - pitchDeg(rest.fwd) };
+  };
+  // Recoil timing: peak <= 90 ms (>= 60), settled <= 260 ms (>= 180), no plateau.
+  const BANDS = { flintknock: [4, 6], blunderbuss: [8, 11], eye_of_reach: [5, 7] };
+  for (const id of ['flintknock', 'blunderbuss', 'eye_of_reach']) {
+    const spec = recoilSpecFor(id);
+    let tPeak = 0, kPeak = -1, tSettled = Infinity;
+    for (let ms = 0; ms <= 600; ms += 1) {
+      const k = recoilEnvelope(spec, ms / 1000);
+      if (k > kPeak + 1e-9) { kPeak = k; tPeak = ms; }
+    }
+    for (let ms = tPeak; ms <= 600; ms += 1) if (recoilEnvelope(spec, ms / 1000) < 0.01) { tSettled = ms; break; }
+    let later = 0;
+    for (let ms = tSettled; ms <= 600; ms += 1) later = Math.max(later, recoilEnvelope(spec, ms / 1000));
+    expect(`${id}: recoil peaks in 60-90 ms and settles by 180-260 ms, then stays settled (no hold plateau)`,
+      tPeak >= 60 && tPeak <= 90 && tSettled >= 180 && tSettled <= 260 && later < 0.01,
+      `peak ${tPeak} ms, settled ${tSettled} ms, max after settle ${later.toFixed(3)}`);
+    for (const aim of [0, 1]) {
+      const s = rootScale(id, aim);
+      const rest = muzzleOf(id, weaponPose(id, still(aim, 0)), s);
+      const peak = muzzleOf(id, weaponPose(id, still(aim, 1)), s);
+      const g = grade(id, rest, peak);
+      expect(`${id} ${aim ? 'ADS' : 'hip'}: the kick drives the muzzle BACK along the barrel (< -0.03 m) and UP (> +2 deg)`,
+        g.along < -0.03 && g.climb > 2, `along ${g.along.toFixed(3)} m, climb ${g.climb.toFixed(2)} deg`);
+      if (!aim) {
+        const [lo, hi] = BANDS[id];
+        expect(`${id}: muzzle climb in the ${lo}-${hi} deg band`, g.climb >= lo && g.climb <= hi, `${g.climb.toFixed(2)} deg`);
+      }
+      const ndc = peak.tip.clone().project(cam);
+      if (!(id === 'eye_of_reach' && aim)) {
+        expect(`${id} ${aim ? 'ADS' : 'hip'}: the muzzle flash is in frame at the kick peak`,
+          Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1 && peak.tip.z < -0.1, `ndc ${ndc.x.toFixed(2)},${ndc.y.toFixed(2)}`);
+      }
+    }
+    if (id === 'eye_of_reach') {
+      const back = recoilDelta(spec, 1)[2];
+      expect('eye_of_reach: the kick comes ~9 cm back toward the eye', back >= 0.085 && back <= 0.1, `${(back * 100).toFixed(1)} cm`);
+    }
+  }
+  // Negative control: the f5fee97e flintknock kick (kick 1 = hold 0.72 plus a shot).
+  {
+    const k = 1, rest = weaponPose('flintknock', still(0, 0));
+    const old = [...rest]; old[1] -= 0.045 * k * 0.62; old[2] -= 0.12 * k * 0.8; old[3] -= 0.045 * k; old[5] -= 0.055 * k;
+    const g = grade('old', muzzleOf('flintknock', rest, 1), muzzleOf('flintknock', old, 1));
+    expect('negative control: the HEAD recoil formula is caught', !(g.along < -0.03 && g.climb > 2), `along ${g.along.toFixed(3)} climb ${g.climb.toFixed(2)}`);
+  }
+  // Near plane: every weapon vertex stays at camera z < -0.12 at the kick peak (hip + ADS) and at draw start.
+  for (const id of ['flintknock', 'blunderbuss', 'eye_of_reach']) {
+    let nearest = -Infinity, where = '';
+    for (const [tag, aim, drawT] of [['hip peak', 0, 1], ['ADS peak', 1, 1], ['draw start', 0, 0]]) {
+      const pose = weaponPose(id, still(aim, drawT < 1 ? 0 : 1));
+      const d = drawDelta(drawT);
+      for (let i = 0; i < 6; i++) pose[i] += d[i];
+      const root = rootOf(pose, rootScale(id, aim));
+      const mesh = makeHeldWeaponMesh(id);
+      mesh.rotation.y = Math.PI;
+      mesh.scale.setScalar(meshScale[id] ?? 1.2);
+      root.add(mesh);
+      root.updateMatrixWorld(true);
+      const v = V(0, 0, 0);
+      mesh.traverse((o) => {
+        if (!o.isMesh || !o.geometry?.attributes?.position) return;
+        if (id === 'eye_of_reach' && aim && (o.userData.eorHideInScope === true
+          || /vm-eor-(grip|stock|barrel|butt)/.test(o.name) || /vm-eor-(grip|stock|barrel|butt)/.test(o.parent?.name ?? ''))) return;
+        const pos = o.geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+          if (v.z > nearest) { nearest = v.z; where = tag; }
+        }
+      });
+    }
+    expect(`${id}: near-plane rule, every vertex z < -0.12 (kick peak hip/ADS, draw start)`, nearest < -0.12, `nearest z ${nearest.toFixed(3)} at ${where}`);
+  }
+  // Draw: starts MUZZLE-LOW and rotates up into line.
+  for (const id of ['flintknock', 'blunderbuss', 'eye_of_reach']) {
+    const aimPose = weaponPose(id, still(0, 0));
+    const start = [...aimPose]; const d = drawDelta(0);
+    for (let i = 0; i < 6; i++) start[i] += d[i];
+    const s = rootScale(id, 0);
+    const dp = pitchDeg(muzzleOf(id, start, s).fwd) - pitchDeg(muzzleOf(id, aimPose, s).fwd);
+    expect(`${id}: draw starts muzzle BELOW the aim (pitch delta < -10 deg)`, dp < -10, `${dp.toFixed(1)} deg`);
+    const old = [...aimPose]; old[1] -= 0.34; old[2] += 0.1; old[3] += 0.75;
+    expect(`${id}: negative control (HEAD draw, +0.75 rad) is caught`,
+      !(pitchDeg(muzzleOf(id, old, s).fwd) - pitchDeg(muzzleOf(id, aimPose, s).fwd) < -10));
+  }
+  expect('draw lands in the 220-280 ms band', VIEW_DRAW_TIME >= 0.22 && VIEW_DRAW_TIME <= 0.28, `${VIEW_DRAW_TIME} s`);
+  // Slash ribbon rides the blade: same rotation sense on both diagonals, head within 35 deg of the tip at the whip.
+  const screenAngle = (a, b) => {
+    const pa = a.clone().project(cam), pb = b.clone().project(cam);
+    return Math.atan2(pb.y - pa.y, (pb.x - pa.x) * cam.aspect);
+  };
+  const bladeAngle = (pose) => {
+    const g = rootOf(pose, 1);
+    return screenAngle(V(0, 0, 0).applyMatrix4(g.matrixWorld), V(...CUTLASS_TIP).applyMatrix4(g.matrixWorld));
+  };
+  const ribbonAngle = (rotZ, sx, sy) => {
+    const g = new THREE.Group();
+    g.position.set(0, -0.02, -0.86); g.rotation.z = rotZ; g.scale.set(sx, sy, 1); g.updateMatrixWorld(true);
+    const head = V(Math.cos(SLASH_RIBBON_HALF_SPAN) * 0.62, Math.sin(SLASH_RIBBON_HALF_SPAN) * 0.62, 0).applyMatrix4(g.matrixWorld);
+    return screenAngle(V(0, 0, 0).applyMatrix4(g.matrixWorld), head);
+  };
+  const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+  const ribbonCase = (side, ribbonAt) => {
+    let agree = 0, moved = 0, whipGap = 0, bladeSweep = 0, ribbonSweep = 0;
+    let pb = null, pr = null;
+    for (let p = 0.2; p <= 0.5601; p += 0.02) {
+      const b = bladeAngle(cutlassSlashPose(side, p));
+      const r = ribbonAt(side, p);
+      if (pb !== null) {
+        const db = wrap(b - pb), dr = wrap(r - pr);
+        bladeSweep += db; ribbonSweep += dr;
+        if (Math.abs(db) > 0.5 * DEG) { moved += 1; if (Math.sign(db) === Math.sign(dr)) agree += 1; }
+      }
+      if (p >= 0.26 && p <= 0.34) whipGap = Math.max(whipGap, Math.abs(wrap(r - b)) / DEG);
+      pb = b; pr = r;
+    }
+    return { agree, moved, whipGap, bladeSweep: bladeSweep / DEG, ribbonSweep: ribbonSweep / DEG };
+  };
+  const shipped = (side, p) => { const rp = slashRibbonPose(side, p); return ribbonAngle(rp.rotZ, rp.scaleX, rp.scaleY); };
+  const headRibbon = (side, p) => { // f5fee97e: scale(side*g, -g), rot (0.95 - 2.6q)*side, q = age/0.34
+    const q = p * SLASH_SWING_TIME / 0.34; const g = 0.92 + q * 0.62;
+    return ribbonAngle((0.95 - 2.6 * q) * side, side * g, -g);
+  };
+  for (const side of [1, -1]) {
+    const r = ribbonCase(side, shipped);
+    expect(`slash side ${side > 0 ? '+1' : '-1'}: ribbon sweeps the same way as the blade (every moving step, p 0.2-0.56)`,
+      r.moved >= 8 && r.agree === r.moved && Math.sign(r.bladeSweep) === Math.sign(r.ribbonSweep),
+      `${r.agree}/${r.moved} steps agree, blade ${r.bladeSweep.toFixed(0)} deg ribbon ${r.ribbonSweep.toFixed(0)} deg`);
+    expect(`slash side ${side > 0 ? '+1' : '-1'}: ribbon head within 35 deg of the blade tip at the whip`, r.whipGap < 35, `${r.whipGap.toFixed(1)} deg`);
+    const n = ribbonCase(side, headRibbon);
+    expect(`slash side ${side > 0 ? '+1' : '-1'}: negative control (HEAD ribbon) is caught`,
+      !(n.agree === n.moved && n.whipGap < 35), `${n.agree}/${n.moved} agree, whip gap ${n.whipGap.toFixed(0)} deg`);
+  }
+  const vm = src('src/client/rendering/ViewmodelController.ts');
+  expect('ViewmodelController poses firearms through weaponPose, reload through reloadChoreography, draw through drawDelta',
+    /weaponPose\(weaponId,/.test(vm) && /= reloadChoreography\(weaponId,/.test(vm) && /drawDelta\(this\.localViewDrawTimer\)/.test(vm)
+    && !/private reloadChoreography/.test(vm) && !/0\.75 \* e \* e/.test(vm));
+  expect('ViewmodelController: recoil is an impulse (no hold plateau, no inline recoilBack)',
+    /recoilEnvelope\(/.test(vm) && !/kickTarget/.test(vm) && !/recoilBack/.test(vm));
+  expect('ViewmodelController: slash ribbon driven by slashRibbonPose (no -grow mirror)',
+    /slashRibbonPose\(r\.side/.test(vm) && !/-grow/.test(vm) && /cutlassSlashPose\(this\.cutlassSlashSide/.test(vm));
+}
+
 const ms = performance.now() - t0;
 console.log(`\n${checks - failures}/${checks} checks, ${ms.toFixed(0)} ms`);
 if (failures) { console.error(`FAIL: ${failures} inversion check(s)`); process.exit(1); }
-console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch)');
+console.log('PASS: nothing inverted (wheel, flag, foliage, heel, head pitch, viewmodel recoil/ribbon/draw)');
