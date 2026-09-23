@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { auditAssetMaterial } from './materialAudit.js';
 import { collapseChunks } from './AssetMaterialCollapse.js';
+import { trackUpload, geometryUploaded, releaseGeometryCpu } from '../rendering/CpuCopyRelease.js';
 
 /**
  * Preloaded GLB asset library. Assets are authored in Blender
@@ -208,6 +209,26 @@ export interface MergedAsset {
   material: THREE.Material | THREE.Material[];
 }
 
+/** World keys a runtime caller clones long after the islands are built (weapon
+ *  pickups, fauna spawns). Their templates are never dropped outright by the
+ *  CPU-copy release, only after upload, so `clone()` keeps serving them. */
+const RUNTIME_CLONED: ReadonlySet<string> = new Set<string>([
+  'cutlass', 'flintlock', 'flintknock', 'eye_of_reach', 'blunderbuss',
+  'shark', 'crab', 'chicken', 'pig', 'gull',
+  // Sea rocks drain on their own queue, which may trail the islands'.
+  'searock_a', 'searock_b', 'searock_c',
+]);
+const STORY_PROXY_KEYS: ReadonlySet<string> = new Set<string>(STORY_PROXY_NAMES.map((n) => `${n}_far`));
+/** A library key whose template/merged CPU copies the phone release may drop:
+ *  world-set GLBs and their far siblings. Never boot assets (ships, kegs and
+ *  chests are cloned all match long), never lazy story scenes (evict() owns
+ *  them) or their proxies (the story slot re-merges them on eviction). */
+function cpuReleasableKey(key: string): boolean {
+  if (STORY_PROXY_KEYS.has(key)) return false;
+  const base = key.replace(/_far$/, '');
+  return !BOOT_ASSET_SET.has(base) && !isLazyAsset(base);
+}
+
 export class AssetLibrary {
   private scenes = new Map<AssetKey, THREE.Group>();
   private merged = new Map<AssetKey, MergedAsset>();
@@ -245,6 +266,23 @@ export class AssetLibrary {
   private lazyActive = 0;
   private readonly loader = new GLTFLoader();
   private done = 0;
+
+  /**
+   * CPU-COPY RELEASE OF LIBRARY TEMPLATES (phone/iPad, b1.7b; see
+   * rendering/CpuCopyRelease). `cpuReleased`: keys whose template (and merged)
+   * arrays were released after the match's islands were built. `cloneDead`:
+   * keys whose template was never drawn and was dropped outright, so `clone()`
+   * answers null (the documented fallback). A released key is never MERGED
+   * again (the cached merge is served; an uncached one answers null), because a
+   * merge reads the template's vertices. The next match calls
+   * `rehydrateReleased()`, which refetches exactly these GLBs (HTTP cache) and
+   * holds island builds (`rehydrating`) until they are back.
+   */
+  private readonly cpuReleased = new Set<AssetKey>();
+  private readonly cloneDead = new Set<AssetKey>();
+  private cpuReleaseDone = false;
+  private rehydrateJob: Promise<void> | null = null;
+  rehydrating = false;
 
   /**
    * Boot first, then the world — the old whole-library behaviour, unchanged for
@@ -335,6 +373,148 @@ export class AssetLibrary {
     }
   }
 
+  /** Fetch + register one GLB under `key` (`name` is its base asset name). */
+  private async loadOne(name: AssetName, key: AssetKey): Promise<void> {
+    const gltf = await this.loader.loadAsync(`/assets/models/${key}.glb`);
+    const root = gltf.scene;
+    root.traverse((o) => {
+      if (o instanceof THREE.Mesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+        if (o.name) this.assetNodeNames.add(o.name);
+        this.sharedResources.add(o.geometry);
+        trackUpload(o.geometry);
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of mats) {
+          this.sharedResources.add(m);
+          // Register texture slots too — material clones (cloneTinted) share
+          // texture references, so per-clone disposal must skip them.
+          const record = m as unknown as Record<string, unknown>;
+          for (const key of Object.keys(record)) {
+            const value = record[key] as { isTexture?: boolean } | null;
+            if (value && value.isTexture) this.sharedResources.add(value);
+          }
+          if (m instanceof THREE.MeshStandardMaterial) {
+            // The GLB's own normals decide (assets-06). The exporter
+            // already writes SPLIT normals wherever the builder chose
+            // flat — every rock ships 3 verts per triangle — and SHARED
+            // normals wherever it chose smooth: ropes, kraken tentacles,
+            // the mermaid idol, the shark's fusiform body, palm trunks.
+            // Forcing flatShading here faceted all of them and capped the
+            // payoff of every high-poly rebuild (a 10k-tri smooth boulder
+            // still showed 10k facets). Collapse keys on flatShading
+            // (AssetMaterialCollapse), so this must stay uniform per
+            // asset — an empty allowlist keeps it uniform (all false) and
+            // lets MORE pieces share a batch, not fewer.
+            m.flatShading = FLAT_SHADED_ASSETS.has(name);
+            // Lift near-black albedo off the AgX toe and cap metalness
+            // while the scene ships without an envMap — see materialAudit.
+            auditAssetMaterial(m);
+            m.needsUpdate = true;
+          }
+        }
+      }
+    });
+    this.scenes.set(key, root);
+    if (gltf.animations.length) this.clips.set(key, gltf.animations);
+  }
+
+  /**
+   * Release the CPU copies of every world template and merged geometry (phone/
+   * iPad; the caller gates on cpuCopyReleaseEnabled). Call once the match's
+   * islands and sea rocks are all built — the batcher and the merges have read
+   * the vertices they will ever read. `scene` decides what is drawn: a template
+   * nothing references and nothing has uploaded is dropped outright and stops
+   * being served; everything else drops after its GPU upload. Idempotent until
+   * the next `rehydrateReleased()`. Returns the CPU bytes released or armed.
+   */
+  releaseCpuCopies(scene: THREE.Object3D): number {
+    if (this.cpuReleaseDone || this.rehydrating) return 0;
+    this.cpuReleaseDone = true;
+    const inScene = new Set<object>();
+    scene.traverse((o) => { const g = (o as THREE.Mesh).geometry; if (g) inScene.add(g); });
+    let bytes = 0;
+    for (const [key, root] of this.scenes) {
+      if (this.cpuReleased.has(key) || !cpuReleasableKey(key)) continue;
+      const geoms = new Set<THREE.BufferGeometry>();
+      let skinned = false;
+      root.traverse((o) => {
+        if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
+        else if (o instanceof THREE.Mesh) geoms.add(o.geometry);
+      });
+      if (skinned || geoms.size === 0) continue;
+      // Bounds from the vertices while they exist: callers fit clones with them.
+      if (!key.endsWith('_far')) this.bounds(key as AssetName);
+      const dead = !RUNTIME_CLONED.has(key.replace(/_far$/, ''))
+        && [...geoms].every((g) => !inScene.has(g) && !geometryUploaded(g));
+      for (const g of geoms) bytes += releaseGeometryCpu(g, dead);
+      if (dead) this.cloneDead.add(key);
+      const merged = this.merged.get(key);
+      if (merged) {
+        const mergedDead = !inScene.has(merged.geometry) && !geometryUploaded(merged.geometry);
+        bytes += releaseGeometryCpu(merged.geometry, mergedDead);
+        if (mergedDead) this.merged.delete(key);
+      }
+      this.cpuReleased.add(key);
+    }
+    return bytes;
+  }
+
+  /**
+   * Next match: refetch every released GLB (the HTTP cache answers) so the
+   * batcher and the merges have vertices again. Island builds wait on
+   * `rehydrating`. Old GPU resources nothing in `scene` still uses are disposed.
+   */
+  rehydrateReleased(scene: THREE.Object3D): Promise<void> {
+    this.cpuReleaseDone = false;
+    if (this.rehydrateJob) return this.rehydrateJob;
+    if (this.cpuReleased.size === 0) return Promise.resolve();
+    const keys = [...this.cpuReleased];
+    this.rehydrating = true;
+    const keepGeo = new Set<object>();
+    const keepMat = new Set<object>();
+    scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.geometry) keepGeo.add(m.geometry);
+      if (m.material) for (const x of Array.isArray(m.material) ? m.material : [m.material]) keepMat.add(x);
+    });
+    this.rehydrateJob = (async () => {
+      await Promise.all(keys.map(async (key) => {
+        const old = this.scenes.get(key);
+        const oldMerged = this.merged.get(key);
+        try {
+          await this.loadOne(key.replace(/_far$/, '') as AssetName, key);
+        } catch (err) {
+          console.warn(`[assets] rehydrate ${key} failed — it stays released (fallbacks draw)`, err);
+          return;
+        }
+        this.cpuReleased.delete(key);
+        this.cloneDead.delete(key);
+        this.merged.delete(key);
+        this.boundsCache.delete(key as AssetName);
+        const seen = new Set<object>();
+        const drop = (r: { dispose(): void } | null | undefined, keep: Set<object>) => {
+          if (!r || seen.has(r) || keep.has(r)) return;
+          seen.add(r);
+          r.dispose();
+        };
+        old?.traverse((o) => {
+          if (!(o instanceof THREE.Mesh)) return;
+          drop(o.geometry, keepGeo);
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+            if (!m || keepMat.has(m)) continue;
+            for (const v of Object.values(m as unknown as Record<string, unknown>)) {
+              if (v && (v as { isTexture?: boolean }).isTexture) drop(v as THREE.Texture, keepMat);
+            }
+            drop(m, keepMat);
+          }
+        });
+        if (oldMerged) drop(oldMerged.geometry, keepGeo);
+      }));
+    })().finally(() => { this.rehydrating = false; this.rehydrateJob = null; });
+    return this.rehydrateJob;
+  }
+
   /** Loads a set of GLBs in parallel. Failures are logged and tolerated:
    *  callers get `null` from clone() and should keep their procedural fallback.
    *  `done`/`total` stay a count over the WHOLE library across both calls, so a
@@ -344,50 +524,7 @@ export class AssetLibrary {
     onProgress?: (done: number, total: number) => void,
     withFarLods = false,
   ): Promise<void> {
-    const loader = this.loader;
-    const loadOne = async (name: AssetName, key: AssetKey) => {
-        const gltf = await loader.loadAsync(`/assets/models/${key}.glb`);
-        const root = gltf.scene;
-        root.traverse((o) => {
-          if (o instanceof THREE.Mesh) {
-            o.castShadow = true;
-            o.receiveShadow = true;
-            if (o.name) this.assetNodeNames.add(o.name);
-            this.sharedResources.add(o.geometry);
-            const mats = Array.isArray(o.material) ? o.material : [o.material];
-            for (const m of mats) {
-              this.sharedResources.add(m);
-              // Register texture slots too — material clones (cloneTinted) share
-              // texture references, so per-clone disposal must skip them.
-              const record = m as unknown as Record<string, unknown>;
-              for (const key of Object.keys(record)) {
-                const value = record[key] as { isTexture?: boolean } | null;
-                if (value && value.isTexture) this.sharedResources.add(value);
-              }
-              if (m instanceof THREE.MeshStandardMaterial) {
-                // The GLB's own normals decide (assets-06). The exporter
-                // already writes SPLIT normals wherever the builder chose
-                // flat — every rock ships 3 verts per triangle — and SHARED
-                // normals wherever it chose smooth: ropes, kraken tentacles,
-                // the mermaid idol, the shark's fusiform body, palm trunks.
-                // Forcing flatShading here faceted all of them and capped the
-                // payoff of every high-poly rebuild (a 10k-tri smooth boulder
-                // still showed 10k facets). Collapse keys on flatShading
-                // (AssetMaterialCollapse), so this must stay uniform per
-                // asset — an empty allowlist keeps it uniform (all false) and
-                // lets MORE pieces share a batch, not fewer.
-                m.flatShading = FLAT_SHADED_ASSETS.has(name);
-                // Lift near-black albedo off the AgX toe and cap metalness
-                // while the scene ships without an envMap — see materialAudit.
-                auditAssetMaterial(m);
-                m.needsUpdate = true;
-              }
-            }
-          }
-        });
-        this.scenes.set(key, root);
-        if (gltf.animations.length) this.clips.set(key, gltf.animations);
-    };
+    const loadOne = (name: AssetName, key: AssetKey) => this.loadOne(name, key);
     await Promise.all([
       ...names.map(async (name) => {
         try {
@@ -464,7 +601,7 @@ export class AssetLibrary {
   /** Deep-clone the asset scene graph; geometry/materials stay shared. */
   clone(name: AssetName): THREE.Group | null {
     const src = this.scenes.get(name);
-    if (!src) return null;
+    if (!src || this.cloneDead.has(name)) return null;
     return src.clone(true);
   }
 
@@ -483,8 +620,9 @@ export class AssetLibrary {
    *  asset has none — callers then simply keep the near clone at every distance. */
   cloneFar(name: AssetName): THREE.Group | null {
     if (!(FAR_ASSET_NAMES as readonly string[]).includes(name)) return null;
-    const src = this.scenes.get(`${name as (typeof FAR_ASSET_NAMES)[number]}_far`);
-    if (!src) return null;
+    const key = `${name as (typeof FAR_ASSET_NAMES)[number]}_far` as AssetKey;
+    const src = this.scenes.get(key);
+    if (!src || this.cloneDead.has(key)) return null;
     return src.clone(true);
   }
 
@@ -586,7 +724,7 @@ export class AssetLibrary {
     const cached = this.merged.get(name);
     if (cached) return cached;
     const src = this.scenes.get(name);
-    if (!src) return null;
+    if (!src || this.cpuReleased.has(name)) return null;
 
     const geoms: THREE.BufferGeometry[] = [];
     const mats: THREE.Material[] = [];
@@ -646,6 +784,7 @@ export class AssetLibrary {
       ? { geometry: finalGeom, material: collapsed }
       : { geometry: finalGeom, material: orderedMats.length === 1 ? orderedMats[0] : orderedMats };
     this.sharedResources.add(finalGeom);
+    trackUpload(finalGeom);
     for (const m of orderedMats) this.sharedResources.add(m);
     if (collapsed) this.sharedResources.add(collapsed);
     this.merged.set(name, result);

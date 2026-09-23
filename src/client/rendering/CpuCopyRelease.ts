@@ -97,3 +97,69 @@ export function releaseRenderOnlyCpuCopies(root: THREE.Object3D, isShared: (o: o
 export function cpuCopyReleaseStats(): { enabled: boolean; armedBytes: number; releasedBytes: number } {
   return { enabled: cpuCopyReleaseEnabled(), armedBytes, releasedBytes };
 }
+
+// ─── library templates (AssetLibrary.releaseCpuCopies) ──────────────────────────────────────────────
+//
+// The same drop, applied to the AssetLibrary's own template and merged geometry
+// once a match's islands are built. A library geometry is shared by every clone,
+// so it may be uploaded long before or long after the release; the tracker below
+// records WHEN it was uploaded (armed at load, so the flag is honest), and the
+// release then either drops at once (already on the GPU), arms the drop for the
+// upload (not drawn yet but in the scene or clonable), or drops outright with no
+// GPU copy (`dead`: nothing draws it and the library stops serving it).
+
+const UPLOADED_KEY = '__gpuUploaded';
+const DROP_ARMED_KEY = '__cpuDropArmed';
+type Tracked = Releasable & { [UPLOADED_KEY]?: boolean; [DROP_ARMED_KEY]?: boolean };
+
+function markUploaded(this: THREE.BufferAttribute): void {
+  const attr = this as Tracked;
+  attr[UPLOADED_KEY] = true;
+  if (attr[DROP_ARMED_KEY]) dropAfterUpload.call(attr);
+}
+
+function geometryAttributes(g: THREE.BufferGeometry): (THREE.BufferAttribute | null)[] {
+  return [g.index, ...(Object.values(g.attributes) as THREE.BufferAttribute[])];
+}
+
+/** Record every later upload of `g`'s attributes. Call once, at load/merge time. */
+export function trackUpload(g: THREE.BufferGeometry): void {
+  for (const a of geometryAttributes(g)) if (a && releasable(a)) a.onUpload(markUploaded);
+}
+
+/** True when every attribute of `g` has reached the GPU at least once. */
+export function geometryUploaded(g: THREE.BufferGeometry): boolean {
+  return geometryAttributes(g).every((a) => a === null || (a as Tracked)[UPLOADED_KEY] === true);
+}
+
+/**
+ * Release `g`'s CPU copies. `dead` drops them now whatever the GPU state (the
+ * caller guarantees nothing draws or reads it again); otherwise an uploaded
+ * attribute drops now and a pending one drops inside its upload. Bounds are
+ * computed first. Returns the CPU bytes released or armed; 0 when the geometry
+ * is not eligible (interleaved, dynamic, morph targets).
+ */
+export function releaseGeometryCpu(g: THREE.BufferGeometry, dead: boolean): number {
+  const attrs = geometryAttributes(g);
+  if (Object.keys(g.morphAttributes).length > 0 || g.userData.keepCpu) return 0;
+  if (!attrs.every((a) => a === null || releasable(a))) return 0;
+  if (!g.boundingBox) g.computeBoundingBox();
+  if (!g.boundingSphere) g.computeBoundingSphere();
+  let bytes = 0;
+  for (const a of attrs) {
+    const attr = a as Tracked | null;
+    if (!attr || attr[RELEASED_KEY] !== undefined) continue;
+    bytes += attr.array.byteLength;
+    if (dead && !attr[UPLOADED_KEY]) {
+      const arr = attr.array as unknown as { constructor: new (n: number) => THREE.TypedArray };
+      attr[RELEASED_KEY] = 0; // never on the GPU: nothing to count anywhere
+      attr.array = new arr.constructor(0);
+    } else if (attr[UPLOADED_KEY]) {
+      dropAfterUpload.call(attr);
+    } else {
+      attr[DROP_ARMED_KEY] = true;
+    }
+  }
+  armedBytes += bytes;
+  return bytes;
+}

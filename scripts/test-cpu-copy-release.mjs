@@ -56,5 +56,47 @@ expect('without the isShared guard the library mesh WOULD be released (guard is 
 const again = releaseRenderOnlyCpuCopies(w.root, (o) => w.sharedSet.has(o));
 expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
 
+// ── library templates (AssetLibrary.releaseCpuCopies / rehydrate gating) ──
+{
+  const { AssetLibrary } = await import('../src/client/assets/AssetLibrary.ts');
+  const { trackUpload } = await import('../src/client/rendering/CpuCopyRelease.ts');
+  const lib = new AssetLibrary();
+  const tpl = (key) => {
+    const g = new THREE.Group();
+    const box = new THREE.BoxGeometry(1, 2, 3); box.clearGroups();
+    const m = new THREE.Mesh(box, new THREE.MeshStandardMaterial());
+    g.add(m);
+    trackUpload(m.geometry);
+    lib.scenes.set(key, g);
+    return m;
+  };
+  const palm = tpl('palm_a');        // merged-only world asset: never drawn as a template
+  const boulder = tpl('boulder_a');  // cloned into the scene, not drawn yet
+  const fort = tpl('fort');          // cloned and already drawn
+  const barrel = tpl('barrel');      // boot asset
+  const cutlass = tpl('cutlass');    // runtime-cloned world asset
+  const palmMerged = lib.mergedGeometry('palm_a');
+  expect('merge served before the release', !!palmMerged && palmMerged.geometry.attributes.position.array.length > 0);
+  trackUpload(palmMerged.geometry);
+  const scene = new THREE.Scene();
+  scene.add(lib.clone('boulder_a'), lib.clone('fort'));
+  upload(fort.geometry);
+  const bytes = lib.releaseCpuCopies(scene);
+  expect('library release armed/dropped bytes', bytes > 0, `${bytes}`);
+  expect('undrawn, unreferenced template dropped outright', palm.geometry.attributes.position.array.length === 0);
+  expect('...and clone() answers null for it (fallback, never an empty mesh)', lib.clone('palm_a') === null);
+  expect('undrawn merged copy dropped from the cache (mergedGeometry null, no re-merge from empty arrays)', lib.mergedGeometry('palm_a') === null);
+  expect('in-scene template keeps its arrays until its upload', boulder.geometry.attributes.position.array.length > 0);
+  upload(boulder.geometry);
+  expect('...and drops them inside the upload', boulder.geometry.attributes.position.array.length === 0);
+  expect('...with its GPU bytes recorded for the census', releasedGpuBytes(boulder.geometry.attributes.position) > 0);
+  expect('drawn template dropped at once, clone still served', fort.geometry.attributes.position.array.length === 0 && lib.clone('fort') !== null);
+  expect('bounds precomputed before the drop', !!fort.geometry.boundingBox && !lib.bounds('fort').isEmpty());
+  expect('boot asset untouched', barrel.geometry.attributes.position.array.length > 0 && lib.clone('barrel') !== null);
+  expect('runtime-cloned world asset never dropped outright', cutlass.geometry.attributes.position.array.length > 0 && lib.clone('cutlass') !== null);
+  expect('a released key is never merged again', lib.mergedGeometry('fort') === null);
+  expect('release is idempotent within a match', lib.releaseCpuCopies(scene) === 0);
+}
+
 if (failures) { console.error(`\nCPU-copy release: ${failures} failure(s).`); process.exit(1); }
 console.log('\nCPU-copy release passed.');
