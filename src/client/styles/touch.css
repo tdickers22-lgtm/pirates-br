@@ -77,9 +77,28 @@ html[data-input-scheme="touch"] canvas { touch-action: none; }
 html[data-input-scheme="touch"] #interact-prompt { touch-action: none; -webkit-user-select: none; user-select: none; }
 html[data-input-scheme="touch"] #interact-prompt.pressed { border-color: #c9a84c; }
 
+/* THE HUD IS READ, NOT TOUCHED, ON THE TOUCH SCHEME (b1.4b2, measured).
+   #hud sits at z-index 100 above this overlay (30), and its region children
+   re-arm pointer-events for the mouse. At 844x390 the right tactical stack
+   (minimap, chips) and the weapon card covered the Interact chip, the look pad
+   and Fire: a 150 px drag turned 0.000 rad and a Fire tap sent fire=false.
+   On touch those panels let the finger through to the controls underneath;
+   the [X] prompt stays a hold target (TouchControls binds it). */
+html[data-input-scheme="touch"] #hud-right-tactical > *,
+html[data-input-scheme="touch"] #hud-center-prompt > *:not(#interact-prompt),
+html[data-input-scheme="touch"] #hud-bottom-combat > * { pointer-events: none; }
+
 @media (min-width: 900px) and (min-height: 700px) {
-  /* iPad: a little larger, same arc. */
+  /* iPad: a little larger, same arc, re-spaced so no two buttons touch
+     (the phone offsets with iPad sizes put Reload 4 px into Fire). */
   .tc-btn { width: 60px; height: 60px; }
   .tc-fire { width: 84px; height: 84px; }
-  .tc-interact { width: 68px; height: 68px; }
+  .tc-aim { right: calc(124px + env(safe-area-inset-right)); }
+  .tc-crouch { right: calc(200px + env(safe-area-inset-right)); }
+  .tc-reload { right: calc(120px + env(safe-area-inset-right)); bottom: calc(112px + env(safe-area-inset-bottom)); }
+  .tc-jump { right: calc(34px + env(safe-area-inset-right)); bottom: calc(128px + env(safe-area-inset-bottom)); }
+  .tc-interact {
+    width: 68px; height: 68px;
+    right: calc(108px + env(safe-area-inset-right)); bottom: calc(196px + env(safe-area-inset-bottom));
+  }
 }

@@ -619,6 +619,11 @@ export const BROWSER = [
   // storm clock, and the [X] prompt inside the window AND clear of the footer.
   // One browser, one solo match, three resizes: ~95 s on this Air (w6.5).
   { ...plain('hud-layout-probe.mjs') },
+  // b1.4b2 touch, browser half: CDP touches on a hasTouch/isMobile page at 844x390
+  // and 1024x768 in a real solo match. Stick 2 s moves >=1.5 m, 150 px drag turns
+  // 0.35-1.2 rad, Fire tap -> fire=true on the wire, a 1.5 s Interact hold keeps
+  // interactHeld on every built input, pointercancel releases. PNGs of the arc.
+  { ...plain('test-touch-controls-live.mjs') },
   { ...plain('test-geometry-lod.mjs') },
   { ...plain('test-shadow-gate.mjs') },
   { ...plain('test-decor-batch.mjs') },
