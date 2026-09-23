@@ -12,6 +12,7 @@ import type {
 } from '../../shared/types/index.js';
 import { PROTOCOL_VERSION } from '../../shared/types/index.js';
 import { validateClientMsg } from '../net/validate.js';
+import { ABUSE_CLOSE_CODE, ConnectionGate, SessionLimiter, classifyMsg } from '../net/limits.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
 import { MODES, MODE_IDS, botFillFor, isModeId, type ModeId } from '../../shared/constants/index.js';
@@ -284,6 +285,16 @@ interface ClientSession {
   /** Wall time of the last byte received from this socket (pong counts) — the
    *  heartbeat sweep drops sockets that go silent so their player leaves the match. */
   lastSeenAt: number;
+  /** online-06: the address this socket is attributed to (x-forwarded-for
+   *  behind a trusted proxy) and its per-message-class token buckets. */
+  ip: string;
+  limiter: SessionLimiter;
+  /** Set when the socket was closed 1008 for staying over its message budget:
+   *  no seat is held for it and no further frame is routed. */
+  closedForAbuse?: boolean;
+  /** Armed on the first over-budget frame for the moment the 10 s runs out,
+   *  so the 1008 lands on time even if the flood stops sending. */
+  abuseTimer?: ReturnType<typeof setTimeout>;
   /** Wall time this client was placed into its current match — opens the
    *  world-build window, where silence is expected rather than suspicious.
    *  Cleared when the client leaves the match. See MATCH_BUILD_WINDOW_MS. */
@@ -401,6 +412,11 @@ export class LobbyServer {
    *  that did not match its declared shape). Reported by /health so a client
    *  build that has drifted off the protocol is visible without a debugger. */
   private rejectedFrames = 0;
+  /** online-06: the pre-upgrade gate (Origin, per-IP, total, new-socket rate)
+   *  and what the per-session buckets dropped / closed since boot. */
+  private gate = new ConnectionGate();
+  private rateLimitedFrames = 0;
+  private abuseClosed = 0;
   private stats: StatsStore;
 
   constructor() {
@@ -425,8 +441,22 @@ export class LobbyServer {
       // constant above). This is the single biggest byte win on the wire and it
       // costs the client nothing — every browser negotiates permessage-deflate.
       perMessageDeflate: { ...WS_PERMESSAGE_DEFLATE, zlibDeflateOptions: { ...WS_PERMESSAGE_DEFLATE.zlibDeflateOptions } },
+      // online-06: refuse BEFORE the upgrade, so a refused socket never costs a
+      // session, a uuid or a deflate window. The callback is answered
+      // synchronously, so ws completes the upgrade (and 'connection' counts the
+      // socket live) in the same tick: no window where N upgrades all pass.
+      verifyClient: (info, done) => {
+        const ip = clientIp(info.req);
+        const verdict = this.gate.check(ip, info.req.headers.origin, Date.now());
+        if (verdict.ok) {
+          done(true);
+          return;
+        }
+        console.warn(`[Lobby] refused upgrade from ${ip}: ${verdict.reason} (${verdict.status})`);
+        done(false, verdict.status, verdict.reason === 'origin' ? 'Forbidden' : 'Too Many Connections');
+      },
     });
-    this.wss.on('connection', (ws) => this.onConnect(ws));
+    this.wss.on('connection', (ws, req) => this.onConnect(ws, req));
     // A ws-level error (failed upgrade, socket blow-up before 'connection') is
     // emitted on the SERVER; unhandled it takes the whole process down.
     this.wss.on('error', (err) => {
@@ -457,8 +487,10 @@ export class LobbyServer {
   }
 
   // ─── Connection lifecycle ────────────────────────────────────
-  private onConnect(ws: WebSocket): void {
+  private onConnect(ws: WebSocket, req?: IncomingMessage): void {
     const clientId = uuid();
+    // No request = an in-process suite handing in a fake socket.
+    const ip = req ? clientIp(req) : 'local';
     const session: ClientSession = {
       id: clientId,
       token: uuid(),
@@ -466,15 +498,28 @@ export class LobbyServer {
       name: '',
       state: 'menu',
       lastSeenAt: Date.now(),
+      ip,
+      limiter: new SessionLimiter(Date.now()),
     };
     this.clients.set(clientId, session);
+    // The gate's live count follows the SOCKET, not the session (a resume moves
+    // a parked seat onto a new socket; a parked session has no socket at all).
+    this.gate.open(ip);
+    ws.once('close', () => this.gate.close(ip));
 
     ws.on('message', (data, isBinary) => {
       // EVERY inbound frame counts as liveness — whatever its type, whether it
       // is pre-join (`set_name`) or match-scoped (`player_input`), whether it
       // parses at all. Refreshed here, ahead of every size check, JSON.parse and
       // route, so no message type can ever be forgotten on the way in.
-      session.lastSeenAt = Date.now();
+      const now = Date.now();
+      session.lastSeenAt = now;
+      if (session.closedForAbuse) return;
+      // online-06: every frame pays before it is even measured or parsed.
+      if (!session.limiter.admit('frame', now)) {
+        this.noteRateLimited(session, now);
+        return;
+      }
       // Frame decode itself must be contained: a hostile payload that throws in
       // Buffer/JSON handling would otherwise escape the 'message' emit.
       let msg: NetMsg;
@@ -491,6 +536,11 @@ export class LobbyServer {
         if (!parsed || typeof parsed !== 'object' || typeof (parsed as NetMsg).type !== 'string') return;
         msg = parsed as NetMsg;
       } catch {
+        return;
+      }
+      // Then the frame's own class: lobby 10/s, input 120/s, ping 2/s, match 30/s.
+      if (!session.limiter.admit(classifyMsg(msg.type), now)) {
+        this.noteRateLimited(session, now);
         return;
       }
       // A handler throw on one client's (possibly malformed/hostile) message
@@ -565,6 +615,7 @@ export class LobbyServer {
 
   private shouldHold(session: ClientSession): boolean {
     if (session.heldSince !== undefined || this.draining) return false;
+    if (session.closedForAbuse) return false;
     if (session.state !== 'in_match' || !session.matchId || !session.matchPlayerId) return false;
     const match = this.matches.get(session.matchId);
     return !!match && !match.isEnded();
@@ -1747,6 +1798,57 @@ export class LobbyServer {
 
     // Auto-detach clients lingering on the post-match screen too long.
     this.guarded('tick: ended-screen sweep', () => this.sweepEndedSessions(now));
+    this.guarded('tick: abuse sweep', () => this.sweepAbuse(now));
+  }
+
+  /** online-06: a flood that STOPS sending is still closed on time (its
+   *  buckets stay in debt), and the per-IP rate map is pruned so attacker-chosen
+   *  keys cannot grow it without bound. */
+  private sweepAbuse(now: number): void {
+    for (const session of this.clients.values()) {
+      if (session.closedForAbuse || session.ws.readyState !== WebSocket.OPEN) continue;
+      if (session.limiter.shouldClose(now)) this.closeForAbuse(session);
+    }
+    this.gate.prune(now);
+  }
+
+  /** A frame went over its bucket: drop it, count it, and close 1008 once the
+   *  socket has stayed over budget for ABUSE_CLOSE_MS. */
+  private noteRateLimited(session: ClientSession, now: number): void {
+    this.rateLimitedFrames += 1;
+    if (session.limiter.shouldClose(now)) {
+      this.closeForAbuse(session);
+      return;
+    }
+    this.armAbuseTimer(session, now);
+  }
+
+  private armAbuseTimer(session: ClientSession, now: number): void {
+    if (session.abuseTimer || session.closedForAbuse) return;
+    const due = session.limiter.closeDueAt(now);
+    if (due === null) return;
+    session.abuseTimer = setTimeout(() => {
+      session.abuseTimer = undefined;
+      this.guarded('abuse timer', () => {
+        if (session.closedForAbuse || session.ws.readyState !== WebSocket.OPEN) return;
+        const t = Date.now();
+        if (session.limiter.shouldClose(t)) this.closeForAbuse(session);
+        else this.armAbuseTimer(session, t);
+      });
+    }, Math.max(0, due - now) + 5);
+    session.abuseTimer.unref?.();
+  }
+
+  private closeForAbuse(session: ClientSession): void {
+    if (session.closedForAbuse) return;
+    session.closedForAbuse = true;
+    this.abuseClosed += 1;
+    console.warn(`[Lobby] closing ${session.id.slice(0, 6)} (${session.ip}) 1008: over message budget, ${session.limiter.dropped} frames dropped`);
+    try { session.ws.close(ABUSE_CLOSE_CODE, 'policy violation'); } catch {}
+    // A client that never answers the close handshake is cut after 2 s rather
+    // than ws's 30 s default.
+    const ws = session.ws;
+    setTimeout(() => { if (ws.readyState !== WebSocket.CLOSED) try { ws.terminate(); } catch {} }, 2_000).unref?.();
   }
 
   /** One match's GC step (see tick). A quarantined match is reaped here too,
@@ -1937,6 +2039,12 @@ export class LobbyServer {
         // drifted off the protocol shows up here as a rising count instead of
         // as silence.
         rejectedFrames: this.rejectedFrames,
+        // online-06 abuse limits: upgrades refused before the handshake, frames
+        // dropped over a session bucket, sockets closed 1008 for it.
+        liveSockets: this.gate.liveCount(),
+        refusedConnections: this.gate.refused,
+        rateLimitedFrames: this.rateLimitedFrames,
+        abuseClosed: this.abuseClosed,
         trustProxy: TRUST_PROXY,
         // WHICH WORLD THIS HOST ROLLS. Draw-call ceilings are measured against
         // one pinned map, and the seed is read from the environment at match

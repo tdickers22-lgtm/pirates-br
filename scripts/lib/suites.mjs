@@ -253,6 +253,11 @@ export const LOGIC = [
   // T0+12 s, a countdown crew swaps out a bot hull (fleet never grows), at the
   // match ceiling a crew stays queued with a position. Real matches, no port.
   tsx('test-queue-latency.mjs'),
+  // b1.2d (online-06, vm:correctness:4): public-internet abuse limits on a real
+  // LobbyServer (port 0, forged x-forwarded-for): 8 sockets/IP, 400 total,
+  // 20 new/min/IP, Origin allowlist, per-session buckets, 1008 after 10 s over
+  // budget, and a 60 Hz client never limited over 60 s. ~62 s, not quick.
+  tsx('test-abuse-limits.mjs'),
   // ONLINE-01 phase 2 (netcode-24): N matches on ONE process. Server-side only
   // (no browser, no GPU) but ~45 s and CPU-bound, so NOT quick tier. Grades
   // worstSimLagSec < 0.1 at 8 matches, the capacity refusal above the ceiling,
