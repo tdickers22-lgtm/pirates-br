@@ -66,7 +66,11 @@
  * a machine whose only GL backend draws one frame a second.
  */
 
-import { renderQualityLabel, type GpuClass, type QualityReason, type RenderQuality } from './QualityPreference.js';
+import {
+  renderQualityLabel, deviceFillEvidence, mobileFormFactor,
+  type GpuClass, type QualityReason, type RenderQuality,
+} from './QualityPreference.js';
+import { activeFrameCapFps } from '../core/framePacer.js';
 
 /** What the controller is currently trying to hold. */
 export type GovernorMode =
@@ -143,6 +147,12 @@ export interface GovernorTuning {
  * wider than the frame-time change any single step of this ladder produces —
  * which is what makes a limit cycle impossible rather than merely unlikely.
  */
+/** How late (as a fraction of the budget) a PACED frame's median may run before
+ *  it counts as over: rAF timestamps jitter and an on-time paced frame sits
+ *  exactly on the budget. A frame that genuinely missed its slot is a whole
+ *  display refresh late (8.3 ms at 120 Hz, 16.7 ms at 60), far past 10%. */
+export const PACED_SLACK = 0.1;
+
 export const GOVERNOR_TUNING: GovernorTuning = {
   targetFps: 60,
   floorFps: 30,
@@ -202,6 +212,11 @@ export class FrameGovernor {
    *  end. */
   private floorCeiling = 1;
   private now = 0;
+  /** Last display rate reported (setDisplayHz) and the pacer's cap (0 = none). */
+  private displayHz: number = GOVERNOR_TUNING.targetFps;
+  private capFps = 0;
+  /** Highest scalar a paced session may climb back to: where it was last late. */
+  private pacedCeiling = 1;
 
   /**
    * `startScalar` is where the session OPENS, and it is deliberately not 1.
@@ -307,6 +322,33 @@ export class FrameGovernor {
    */
   setDisplayHz(hz: number): void {
     if (!Number.isFinite(hz) || hz <= 0) return;
+    this.displayHz = hz;
+    this.retarget();
+  }
+
+  /**
+   * THE FRAME PACER'S CAP (performance-06, b1.5c). A pacer holding a phone to
+   * 30 fps delivers 33 ms frames with the GPU half idle; graded against a
+   * 16.7 ms budget they read as 2x over and the ladder would walk the phone to
+   * its floor for nothing, which is the same mis-grading setDisplayHz exists
+   * to stop. So the target is min(display, cap), and the frames fed in are the
+   * RENDERED intervals (Game.frameBody skips before it stamps lastFrameTime).
+   * `update` reads the live cap from framePacer every call, so a settings
+   * change or Battery saver retargets on the next frame. 0 = uncapped.
+   */
+  setFrameCap(capFps: number): void {
+    const cap = Number.isFinite(capFps) && capFps > 0 ? capFps : 0;
+    if (cap !== this.capFps) this.pacedCeiling = 1;
+    this.capFps = cap;
+    this.retarget();
+  }
+
+  getFrameCap(): number {
+    return this.capFps;
+  }
+
+  private retarget(): void {
+    const hz = this.capFps > 0 ? Math.min(this.displayHz, this.capFps) : this.displayHz;
     const targetFps = Math.min(GOVERNOR_TUNING.targetFps, Math.round(hz));
     const floorFps = Math.min(GOVERNOR_TUNING.floorFps, Math.round(hz * 0.8));
     if (targetFps === this.tuning.targetFps && floorFps === this.tuning.floorFps) return;
@@ -359,6 +401,8 @@ export class FrameGovernor {
    */
   update(nowMs: number): number {
     this.now = nowMs;
+    const cap = activeFrameCapFps();
+    if (cap !== this.capFps) this.setFrameCap(cap);
     if (!this.enabled || this.suspended) return this.scalar;
     if (this.windowOpenedAt === 0) this.windowOpenedAt = nowMs;
     // BEFORE any step, because a step clears the window. On the machine this
@@ -376,10 +420,23 @@ export class FrameGovernor {
     const p95 = this.percentile(0.95);
     const t = this.tuning;
 
-    const over = median > budget * t.downMedianRatio || p95 > budget * t.downP95Ratio;
-    const under = this.count >= t.minSamples
-      && median < budget * t.upMedianRatio
-      && p95 < budget * t.upP95Ratio;
+    // PACED (b1.5c): under a frame cap every on-time frame arrives exactly one
+    // cap interval apart, so the median SITS on the budget whatever the load and
+    // 'under budget x 0.8' can never be true. Lateness is the only load signal a
+    // paced frame carries: a frame that missed its slot lands a display refresh
+    // (or more) late. So a paced session reads 'over' as the median past the
+    // budget by more than PACED_SLACK, and 'headroom' as frames holding their
+    // slot, and it climbs only up to the scalar where it was last late
+    // (pacedCeiling): up until the first late window, one step back, hold.
+    // That is what stops the climb-late-drop pump a slot-based signal would
+    // otherwise produce, and it is why a thermally throttled phone walks down
+    // and never auditions back up into the heat.
+    const paced = this.capFps > 0;
+    const slack = paced ? budget * PACED_SLACK : 0;
+    const over = median > budget * t.downMedianRatio + slack || p95 > budget * t.downP95Ratio;
+    const under = this.count >= t.minSamples && (paced
+      ? median <= budget + slack && p95 <= budget + slack && this.scalar < this.pacedCeiling - 1e-6
+      : median < budget * t.upMedianRatio && p95 < budget * t.upP95Ratio);
 
     if (over) {
       this.headroomSince = -1;
@@ -401,6 +458,7 @@ export class FrameGovernor {
       const step = clamp((overshoot - 1) * t.downGain, t.minDownStep, t.maxDownStep);
       this.applyStep(-step, nowMs);
       this.lastDownAt = nowMs;
+      if (paced) this.pacedCeiling = this.scalar;
       return this.scalar;
     }
 
@@ -424,7 +482,7 @@ export class FrameGovernor {
 
     if (!under) { this.headroomSince = -1; return this.scalar; }
 
-    const ceiling = this.mode === 'floor' ? this.floorCeiling : 1;
+    const ceiling = Math.min(this.mode === 'floor' ? this.floorCeiling : 1, paced ? this.pacedCeiling : 1);
     if (this.scalar >= ceiling - 1e-6) { this.headroomSince = nowMs; return this.scalar; }
     if (nowMs - this.lastDownAt < t.reboundLockoutMs) { this.headroomSince = -1; return this.scalar; }
     if (this.headroomSince < 0) { this.headroomSince = nowMs; return this.scalar; }
@@ -691,7 +749,18 @@ export function fillCeilingForGpu(gpuClass: GpuClass): GpuFillCeiling {
  * measure the tier it asked for; a player on a software part (a VM, a remote
  * desktop) is still capped, because a player's choice is not a census.
  */
-export function fillClassFor(gpuClass: GpuClass, reason: QualityReason): GpuClass {
+export function fillClassFor(
+  gpuClass: GpuClass,
+  reason: QualityReason,
+  mobile: boolean = reason === 'mobile' || deviceFillEvidence().mobile,
+): GpuClass {
+  // A PHONE OR TABLET IS FILLED AS ONE (performance-04), whatever its renderer
+  // string says. iPhone and iPad Safari report 'Apple GPU', which classifies as
+  // apple-opaque and handed a Medium pin on a phone the LAPTOP ceiling: 1536²
+  // shadows and 2x MSAA on a part that throttles in minutes. Checked before the
+  // SwiftShader rig exemption on purpose: a rig that EMULATES a phone (b1.5d's
+  // phone rows) must measure the phone profile it is grading.
+  if (mobile) return 'mobile-gpu';
   return gpuClass === 'software' && reason === 'url' ? 'unknown' : gpuClass;
 }
 
@@ -736,10 +805,14 @@ export function pixelRatioCaps(
   cssHeight: number,
   devicePixelRatio: number,
   gpuClass: GpuClass = 'unknown',
+  benchMpxs: number | null = deviceFillEvidence().benchMpxs,
 ): { maxPixelRatio: number; minPixelRatio: number } {
   const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
   const w = Math.max(1, cssWidth);
   const cssPixels = Math.max(1, w * Math.max(1, cssHeight));
+  if (gpuClass === 'mobile-gpu' && !(benchMpxs !== null && benchMpxs < MOBILE_PROFILE_MIN_BENCH_MPXS)) {
+    return mobilePixelCaps(w, Math.max(1, cssHeight), dpr);
+  }
   const budgetRatio = Math.sqrt(TIER_PIXEL_BUDGET[quality] / cssPixels);
   const tierCap = Math.min(budgetRatio, TIER_MAX_PIXEL_RATIO[quality]);
   // Never wider than the panel actually is: supersampling is not a floor.
@@ -759,6 +832,58 @@ export function pixelRatioCaps(
   const classCeiling = Math.min(fill.maxPixelRatio, Math.sqrt(fill.maxFramebufferPixels / cssPixels));
   const maxPixelRatio = Math.min(dpr, Math.max(Math.min(tierCeiling, classCeiling), openFloor));
   const minPixelRatio = Math.min(maxPixelRatio, Math.max(TIER_MIN_PIXEL_RATIO[quality], ladderFloor));
+  return { maxPixelRatio, minPixelRatio };
+}
+
+/**
+ * THE PHONE AND TABLET PIXEL PROFILE (performance-04, vm:crossdevice:1, b1.5c).
+ *
+ * The tier ratios above were calibrated on a 1470x956 Air window. Applied to a
+ * 390 CSS px tall phone, `low`'s 0.62 lands under the 640 px legibility floor,
+ * so an iPhone 14 rendered 640x296 = 0.19 Mpx and stretched it 4x over a
+ * 2532x1170 panel (rigging, rope and the horizon turn to mush), and an iPad Air
+ * opened at 0.37 Mpx. A phone GPU (A15+, Adreno 7xx, Mali-G7xx) can pay for
+ * ~0.5 Mpx on the low geometry set at the 30 fps the frame pacer holds phones
+ * to, so a mobile part gets an ABSOLUTE framebuffer budget per form factor:
+ *
+ *   phone   520k px open, 330k px ladder floor
+ *   tablet  800k px open, 450k px ladder floor
+ *
+ * ratio capped at min(dpr, 2) (never supersampled, never past 2x even on a dpr-3
+ * phone), the 640 px width floor kept. It is TIER-INDEPENDENT on purpose: on a
+ * phone the tier is a look (materials, shadows, sky), and the old table made
+ * Medium SOFTER than this profile gives Low. The class's shadow cap (1024), MSAA
+ * cap (0) and open-at-floor audition still apply (GPU_FILL_CEILING).
+ *
+ * GATED BY THE MENU FILLBENCH (performance verifier): the ocean shader is about
+ * half the frame, so 2.5x the phone's pixels is only safe on a part that can
+ * shade it. A bench score under MOBILE_PROFILE_MIN_BENCH_MPXS keeps today's
+ * numbers exactly. No score yet (the first launch) opens the profile at its
+ * FLOOR, because mobile-gpu opens at floor and the governor auditions upward.
+ */
+export const MOBILE_PIXEL_PROFILE = Object.freeze({
+  phone: Object.freeze({ openPixels: 520_000, floorPixels: 330_000 }),
+  tablet: Object.freeze({ openPixels: 800_000, floorPixels: 450_000 }),
+  maxPixelRatio: 2,
+});
+
+/**
+ * Bench Mpx/s under which a mobile part keeps the old numbers. The bench shades
+ * an ocean-shaped fragment (FillBench.ts). A frame at the phone profile costs
+ * about 520k px x ~3 ocean-equivalent screens = 1.6 M shaded px; at 30 fps that
+ * is 47 Mpx/s, so a part that cannot bench 60 would spend the whole frame on
+ * fill. BENCH_LOW_MPXS (250) is the desktop low/balanced line, far above it.
+ */
+export const MOBILE_PROFILE_MIN_BENCH_MPXS = 60;
+
+function mobilePixelCaps(w: number, h: number, dpr: number): { maxPixelRatio: number; minPixelRatio: number } {
+  const cssPixels = w * h;
+  const profile = MOBILE_PIXEL_PROFILE[mobileFormFactor(w, h)];
+  const ratioCap = Math.min(dpr, MOBILE_PIXEL_PROFILE.maxPixelRatio);
+  const openFloor = Math.min(dpr, MIN_BUFFER_WIDTH / w);
+  const ladderFloor = Math.min(dpr, MIN_BUFFER_WIDTH_FLOOR / w);
+  const maxPixelRatio = Math.max(Math.min(ratioCap, Math.sqrt(profile.openPixels / cssPixels)), openFloor);
+  const minPixelRatio = Math.min(maxPixelRatio, Math.max(Math.min(ratioCap, Math.sqrt(profile.floorPixels / cssPixels)), ladderFloor));
   return { maxPixelRatio, minPixelRatio };
 }
 

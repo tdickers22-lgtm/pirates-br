@@ -84,6 +84,7 @@ minute rather than the twentieth.
 | `test-frame-allocation` | bytes a steady-state CPU frame throws away | yes | reads one frame at a time; a heap delta across frames measures allocation minus GC |
 | `test-frame-governor-live` | the governor in a real GL context | yes | **has `--mutate`** |
 | `test-join-stall-survival` | a pinned main thread must not read as a dead player | yes | induces the stall on purpose |
+| `test-frame-pacer` | the frame cap holds on 90/120/144 Hz rAF (60 +-1, 30 +-1), per-form defaults (desktop display rate, tablet 60, phone 30 + 60 opt-in, Battery saver 30), the governor targets the cap and grades RENDERED intervals, a paced phone climbs to what it holds without pumping (b1.5c) | yes | **has `--mutate=noskip|governor`** |
 | `test-sim-lag-honesty` | a slow client must never be reported as a slow server | yes | **has `--mutate`** |
 | `test-motion-continuity` | moving things keep moving between snapshots; deck passengers hold station | yes | reports **ungraded** rather than passed when it sampled too little — the right pattern, and the model for `VACUOUS` |
 | `test-remote-smoothness` | remote bodies are drawn along a continuous path | yes | **wired for the first time in this audit** — shipped with the remote-motion wave and run by nothing |

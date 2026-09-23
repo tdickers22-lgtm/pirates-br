@@ -820,6 +820,94 @@ section('A TIER IS A LOOK; A GPU CLASS IS A FILL CEILING — fillCeilingForGpu (
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+section('PHONES AND TABLETS GET A PIXEL PROFILE, NOT A LAPTOP RATIO (performance-04, vm:crossdevice:1, b1.5c)');
+// ═══════════════════════════════════════════════════════════════════════════
+// RED before b1.5c: a phone forced to 'low' inherited the Air's 0.62 x CSS rule,
+// hit the 640 px legibility floor and rendered 640x296 = 0.19 Mpx stretched over
+// a 2532x1170 iPhone panel; an iPad Air opened at 0.37 Mpx. An iPhone in Safari
+// reports 'Apple GPU', so a Medium pin there got the LAPTOP ceiling (1536²
+// shadows, 2x MSAA). The profile is an absolute framebuffer budget per form
+// factor, ratio <= min(dpr, 2), the 640 px floor kept, and it only opens when
+// the menu FillBench has not measured the part as slow.
+{
+  const mod = await import('../src/client/rendering/FrameGovernor.js');
+  const has = (n) => typeof mod[n] !== 'undefined';
+  expect('MOBILE_PIXEL_PROFILE and MOBILE_PROFILE_MIN_BENCH_MPXS are exported',
+    has('MOBILE_PIXEL_PROFILE') && has('MOBILE_PROFILE_MIN_BENCH_MPXS'));
+  const P = mod.MOBILE_PIXEL_PROFILE ?? { phone: {}, tablet: {} };
+  expect('profile numbers: phones 520k open / 330k floor, tablets 800k / 450k, ratio cap 2',
+    P.phone.openPixels === 520_000 && P.phone.floorPixels === 330_000
+    && P.tablet.openPixels === 800_000 && P.tablet.floorPixels === 450_000 && P.maxPixelRatio === 2);
+
+  // THE FILL CLASS: any mobile client is 'mobile-gpu', whatever its renderer
+  // string says, and whether the tier was detected or pinned.
+  const cls = (g, r, m) => (typeof mod.fillClassFor === 'function' ? mod.fillClassFor(g, r, m) : null);
+  expect(`an iPhone ('Apple GPU', reason mobile) is filled as 'mobile-gpu' (got ${cls('apple-opaque', 'mobile', true)})`,
+    cls('apple-opaque', 'mobile', true) === 'mobile-gpu');
+  expect(`…and so is a Medium pin on that iPhone (got ${cls('apple-opaque', 'player', true)}), so it never opens with 1536² shadows or MSAA`,
+    cls('apple-opaque', 'player', true) === 'mobile-gpu'
+    && mod.cappedShadowMapSize(1536, 'mobile-gpu') === 1024 && mod.composerMsaaSamples('balanced', 'mobile-gpu') === 0);
+  expect('…while a desktop keeps its own class, and a SwiftShader URL rig stays uncapped',
+    cls('apple-opaque', 'player', false) === 'apple-opaque' && cls('apple-base', 'default', false) === 'apple-base'
+    && cls('software', 'url', false) === 'unknown');
+
+  const mpx = (w, h, c) => (w * c.maxPixelRatio) * (h * c.maxPixelRatio) / 1e6;
+  const floorMpx = (w, h, c) => (w * c.minPixelRatio) * (h * c.minPixelRatio) / 1e6;
+  const rows = [
+    // name, w, h, dpr, open band, floor min
+    ['iPhone 14 landscape', 844, 390, 3, [0.45, 0.60], 0.30],
+    ['iPhone SE landscape', 667, 375, 2, [0.45, 0.60], 0.30],
+    ['Pixel 7 landscape', 915, 412, 2.625, [0.45, 0.60], 0.30],
+    ['iPhone 15 Pro Max landscape', 932, 430, 3, [0.45, 0.60], 0.30],
+    ['iPad Air 11 landscape', 1180, 820, 2, [0.70, 0.816], 0.44],
+    ['iPad Pro 12.9 landscape', 1366, 1024, 2, [0.70, 0.816], 0.44],
+  ];
+  for (const [name, w, h, dpr, [lo, hi], fl] of rows) {
+    const c = pixelRatioCaps('low', w, h, dpr, 'mobile-gpu', null);
+    const open = mpx(w, h, c), floor = floorMpx(w, h, c);
+    expect(`${name} low-mobile opens ${lo}-${hi} Mpx (${open.toFixed(3)}), floor >= ${fl} (${floor.toFixed(3)}), ratio <= min(dpr,2) (${c.maxPixelRatio.toFixed(3)})`,
+      open >= lo && open <= hi && floor >= fl && c.maxPixelRatio <= Math.min(dpr, 2) + 1e-9 && c.minPixelRatio <= c.maxPixelRatio + 1e-9);
+  }
+  // A tier is a look on a phone: Medium and High must never render SOFTER than
+  // Low (the inversion the old table produced: Medium on an iPhone was capped at
+  // ratio 1.0 = 0.33 Mpx while the profile gives Low 0.52).
+  const low = pixelRatioCaps('low', 844, 390, 3, 'mobile-gpu', null);
+  const bal = pixelRatioCaps('balanced', 844, 390, 3, 'mobile-gpu', null);
+  const high = pixelRatioCaps('high', 844, 390, 3, 'mobile-gpu', null);
+  expect(`no tier inversion on a phone (low ${mpx(844, 390, low).toFixed(3)}, medium ${mpx(844, 390, bal).toFixed(3)}, high ${mpx(844, 390, high).toFixed(3)} Mpx), all inside the phone budget`,
+    mpx(844, 390, bal) >= mpx(844, 390, low) - 1e-9 && mpx(844, 390, high) >= mpx(844, 390, bal) - 1e-9
+    && mpx(844, 390, high) <= 0.52 + 1e-6);
+  // A dpr-1 part is never supersampled; the 640 px floor still holds on a narrow
+  // portrait panel.
+  const dpr1 = pixelRatioCaps('low', 844, 390, 1, 'mobile-gpu', null);
+  expect(`a dPR-1 mobile panel is never supersampled (${dpr1.maxPixelRatio.toFixed(3)})`, dpr1.maxPixelRatio <= 1 + 1e-9);
+  const portrait = pixelRatioCaps('low', 390, 844, 3, 'mobile-gpu', null);
+  expect(`the 640 px legibility floor is kept (${(390 * portrait.maxPixelRatio).toFixed(0)} px wide in portrait)`,
+    390 * portrait.maxPixelRatio >= 640 - 0.5);
+
+  // GATED BY THE MENU FILLBENCH: a part the bench measured as slow keeps
+  // today's numbers exactly; no bench yet (first launch) opens the profile at
+  // its floor (mobile-gpu opens at floor and auditions upward).
+  const slow = (mod.MOBILE_PROFILE_MIN_BENCH_MPXS ?? 1) - 1;
+  const slowCaps = pixelRatioCaps('low', 844, 390, 3, 'mobile-gpu', slow);
+  expect(`a phone the FillBench measured as slow keeps today's 640x296 (${mpx(844, 390, slowCaps).toFixed(3)} Mpx)`,
+    Math.abs(slowCaps.maxPixelRatio - 640 / 844) < 1e-9);
+  const fast = pixelRatioCaps('low', 844, 390, 3, 'mobile-gpu', (mod.MOBILE_PROFILE_MIN_BENCH_MPXS ?? 0) + 1);
+  expect('…and a phone that measured fast gets the profile', Math.abs(mpx(844, 390, fast) - 0.52) < 0.005);
+  expect('mobile-gpu still opens at its floor and auditions upward', mod.fillCeilingForGpu('mobile-gpu').openAtFloor === true);
+
+  // AIR / UHD / DESKTOP ROWS ARE BYTE-IDENTICAL to the values captured at
+  // d2bbc2c6 before this slice (pinned literals, not a re-computation).
+  const TODAY = [["low",1470,956,2,"apple-base",0.62,0.44],["low",1470,956,2,"apple-opaque",0.62,0.44],["low",1536,864,1.25,"integrated",0.62,0.44],["low",1920,1080,1,"unknown",0.5150137838260878,0.44],["low",3840,2160,1,"unknown",0.2575068919130439,0.2575068919130439],["low",1470,956,2,"apple-pro",0.62,0.44],["low",960,540,1,"software",0.6666666666666666,0.5],["balanced",1470,956,2,"apple-base",1,0.58],["balanced",1470,956,2,"apple-opaque",1,0.58],["balanced",1536,864,1.25,"integrated",0.9509072178909134,0.58],["balanced",1920,1080,1,"unknown",1,0.58],["balanced",3840,2160,1,"unknown",0.38036288715636535,0.38036288715636535],["balanced",1470,956,2,"apple-pro",1,0.58],["balanced",960,540,1,"software",1,0.58],["high",1470,956,2,"apple-base",1,0.8],["high",1470,956,2,"apple-opaque",1,0.8],["high",1536,864,1.25,"integrated",0.9509072178909134,0.8],["high",1920,1080,1,"unknown",1,0.8],["high",3840,2160,1,"unknown",0.537914353639919,0.537914353639919],["high",1470,956,2,"apple-pro",1.25,0.8],["high",960,540,1,"software",1,0.8]];
+  let drift = null;
+  for (const [q, w, h, d, c, max, min] of TODAY) {
+    const r = pixelRatioCaps(q, w, h, d, c);
+    if (r.maxPixelRatio !== max || r.minPixelRatio !== min) drift ??= `${q} ${w}x${h}@${d} ${c}: ${r.maxPixelRatio}/${r.minPixelRatio} vs ${max}/${min}`;
+  }
+  expect(`Air, Intel UHD, 1080p, 4K, Apple Pro and SwiftShader rows are byte-identical (${TODAY.length} rows)`, drift === null, drift ?? '');
+}
+
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed.`);
   process.exit(1);

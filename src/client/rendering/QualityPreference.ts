@@ -408,6 +408,47 @@ export function isMobileClient(rendererString: string | null, nav: Navigator): b
 }
 
 /**
+ * PHONE OR TABLET (b1.5c). The pixel profile and the frame pacer both need the
+ * form factor, and neither may guess it from the GPU: an iPad and an iPhone
+ * both say 'Apple GPU'. The SHORT side decides, because it does not change with
+ * orientation: every phone is under 500 CSS px on it (iPhone 15 Pro Max 430,
+ * Galaxy Fold unfolded 673 is the outlier and is tablet-shaped anyway), every
+ * iPad is 744 or more (mini 744, Air 820, Pro 12.9 1024).
+ */
+export const TABLET_MIN_SHORT_SIDE_CSS = 700;
+export type MobileFormFactor = 'phone' | 'tablet';
+
+export function mobileFormFactor(cssWidth: number, cssHeight: number): MobileFormFactor {
+  return Math.min(cssWidth, cssHeight) >= TABLET_MIN_SHORT_SIDE_CSS ? 'tablet' : 'phone';
+}
+
+/**
+ * What the fill ceiling needs to know about the DEVICE rather than the part:
+ * is this a phone/tablet, and has the menu FillBench measured it. Read once
+ * and cached for the session, so a bench that finishes mid-session cannot move
+ * the resolution under the player (the bench is for the next launch, see
+ * FillBench.ts). Outside a browser (the node suites) it is the neutral answer,
+ * which keeps every pure caller byte-identical.
+ */
+export interface DeviceFillEvidence {
+  mobile: boolean;
+  benchMpxs: number | null;
+}
+
+let deviceFillEvidenceCache: DeviceFillEvidence | null = null;
+
+export function deviceFillEvidence(): DeviceFillEvidence {
+  if (deviceFillEvidenceCache) return deviceFillEvidenceCache;
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return { mobile: false, benchMpxs: null };
+  const rendererString = readGpuRendererString();
+  deviceFillEvidenceCache = {
+    mobile: isMobileClient(rendererString, navigator),
+    benchMpxs: loadBenchScore(rendererString),
+  };
+  return deviceFillEvidenceCache;
+}
+
+/**
  * The fallback for when the GPU's name is MASKED: a HiDPI panel driven by a
  * modest core count.
  *
