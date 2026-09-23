@@ -395,5 +395,66 @@ console.log('\nWeighing anchor from the wheel (server)');
   expect('and the same key then makes sail', ship.sailHeight > 0.05, `sail=${ship.sailHeight.toFixed(2)}`);
 }
 
+// ── A bot crewmate yields a station to a human (liveplay-08) ───────────────
+// The prompt said "[X] Use Cannon" and the press did nothing because a bot
+// crewmate stood at it. A bot is crew furniture: when a human presses [X] at
+// the station the bot steps off and the human has it in the SAME tick. A
+// human at the station still refuses another human ('occupied').
+console.log('\nStation handover (server)');
+{
+  const helmWorld = toShipWorldPoint({ x: 0, z: -stats.length * SHIP.HELM_LOCAL_Z_F }, ship);
+  const placeAtHelm = (p) => {
+    p.onShipId = ship.id;
+    p.state = 'alive';
+    p.position = { x: helmWorld.x, y: ship.position.y + stats.height + 0.4, z: helmWorld.z };
+  };
+  const bot = match['createPlayer']('arbiter-bot', 'Bosun Bot', ship.id, true, player.crewId ?? null);
+  const mate = match['createPlayer']('arbiter-mate', 'Human Mate', ship.id, false, player.crewId ?? null);
+  state.players.push(bot, mate);
+  match['rebuildEntityIndexes']();
+
+  // Helm: bot at the wheel, human presses [X].
+  match['clearStationFlags'](player);
+  placeAtHelm(player);
+  placeAtHelm(bot);
+  bot.atHelm = true;
+  match['t'] += 0.3; // clear of the one-shot [X] throttle
+  step({ interact: true, interactHeld: false, interactIntent: 'helm' });
+  expect('a bot at the helm yields it to a human within 1 tick', player.atHelm === true && bot.atHelm === false,
+    `human.atHelm=${player.atHelm} bot.atHelm=${bot.atHelm}`);
+
+  // Cannon: bot at gun 0, human presses [X] beside it.
+  match['clearStationFlags'](player);
+  match['clearStationFlags'](bot);
+  bot.atCannon = true;
+  bot.cannonIndex = 0;
+  match['snapPlayerToCannon'](bot, ship, 0);
+  player.onShipId = ship.id;
+  player.state = 'alive';
+  player.position = { ...bot.position };
+  const gun = match['getNearbyCannonIndex'](player, ship);
+  match['t'] += 0.3;
+  step({ interact: true, interactHeld: false, interactIntent: 'cannon' }, 1);
+  expect('a bot at a gun yields it to a human within 1 tick',
+    gun === 0 && player.atCannon === true && player.cannonIndex === 0 && bot.atCannon === false,
+    `nearbyGun=${gun} human.atCannon=${player.atCannon}/${player.cannonIndex} bot.atCannon=${bot.atCannon}`);
+
+  // Negative control: a HUMAN at the wheel does not yield to another human.
+  match['clearStationFlags'](player);
+  match['clearStationFlags'](bot);
+  placeAtHelm(mate);
+  mate.atHelm = true;
+  placeAtHelm(player);
+  match['t'] += 0.3;
+  step({ interact: true, interactHeld: false, interactIntent: 'helm' });
+  expect('a human at the helm is not displaced by another human', mate.atHelm === true && player.atHelm === false,
+    `mate.atHelm=${mate.atHelm} human.atHelm=${player.atHelm}`);
+  // And a bot never displaces anyone.
+  match['clearStationFlags'](mate);
+  player.atHelm = true;
+  placeAtHelm(bot);
+  expect('a bot never takes a station a human holds', match['enterHelm'](bot, ship) === false && player.atHelm === true);
+}
+
 console.log(failures === 0 ? '\nThe prompt and the press agree.' : `\n${failures} failure(s)`);
 process.exit(failures === 0 ? 0 : 1);
