@@ -256,6 +256,9 @@
        (body.showing-death-screen), so the spectate caption the HUD wrote into
        the interact prompt was painted into a hidden subtree and nobody ever
        saw it. Top-centre, and nothing in the middle 60% of the screen. -->
+  <!-- b1.5f: server_notice (a deploy is draining this host). Outside #hud so
+       the dead and the spectating see it too. -->
+  <div id="server-notice" role="status" aria-live="polite"></div>
   <div id="spectate-banner">
     <div id="spectate-line">Spectating</div>
     <div id="spectate-sub"></div>
@@ -320,6 +323,7 @@
     </div>
 
     <aside id="hud-right-tactical">
+      <div id="party-chip" title="Your crew code"></div>
       <div id="minimap-shell">
         <div id="minimap-head">
           <div id="minimap-title">The Reach</div>
@@ -525,7 +529,6 @@
     </div>
 
     <div id="downed-banner">DOWNED</div>
-    <div id="damage-vignette"></div>
     <div id="knockback-flash"></div>
     <div id="pointer-lock-hint">Click to look around</div>
   </div>
@@ -619,6 +622,7 @@
       <div class="end-stats" id="death-stats"></div>
       <div id="death-wait">Waiting for the voyage to end…</div>
       <div id="death-actions">
+        <button class="restart-btn" id="death-next-btn" type="button">NEXT SHIP</button>
         <button class="restart-btn" id="death-return-btn">RETURN TO PORT</button>
       </div>
     </div>

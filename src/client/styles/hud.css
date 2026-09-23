@@ -1069,11 +1069,6 @@ body.showing-death-screen #story-cutscene-overlay { display: none !important; }
 @keyframes hintPulse { 0%,100%{opacity:0.85} 50%{opacity:1} }
 
 /* Damage vignette */
-#damage-vignette {
-  position: fixed; inset: 0;
-  background: radial-gradient(ellipse at center, transparent 40%, #e74c3c 100%);
-  opacity: 0; pointer-events: none; z-index: 90; transition: opacity 0.1s;
-}
 
 /* Knockback flash */
 #knockback-flash {
@@ -1855,3 +1850,39 @@ html[data-input-scheme="touch"] #hud-center-prompt {
   #oc-dots { margin: 6px 0 8px; }
   .oc-btn { padding: 10px 22px; min-height: 44px; }
 }
+
+/* ── b1.5f: HUD model surfaces ─────────────────────────────────────────── */
+/* The crosshair ring fades in only while aiming (a dot at rest). */
+#crosshair.shotgun { animation: xhairRingIn 0.12s ease-out; }
+@keyframes xhairRingIn { from { opacity: 0; transform: translate(-50%, -50%) scale(0.85); } }
+#party-chip {
+  display: none; align-self: flex-end; margin-bottom: 4px; padding: 2px 10px;
+  font: 700 0.8rem/1.4 system-ui, sans-serif; letter-spacing: 0.08em; color: #f5e6c8;
+  background: rgba(10, 18, 28, 0.72); border: 1px solid rgba(245, 230, 200, 0.35); border-radius: 999px;
+}
+#party-chip.visible { display: block; }
+#server-notice {
+  display: none; position: fixed; left: 50%; transform: translateX(-50%);
+  top: calc(env(safe-area-inset-top, 0px) + 6px); z-index: 1200; max-width: min(92vw, 640px);
+  padding: 6px 14px; border-radius: 8px; text-align: center; pointer-events: none;
+  font: 600 0.9rem/1.35 system-ui, sans-serif; color: #fff4d6;
+  background: rgba(120, 40, 20, 0.9); border: 1px solid rgba(255, 200, 150, 0.5);
+}
+#server-notice.visible { display: block; }
+/* Spectating: the death card is a bottom bar, the match shows behind it. */
+body.spectating #death-screen {
+  inset: auto 0 0 0; height: auto; background: transparent; align-items: flex-end;
+  padding-bottom: env(safe-area-inset-bottom, 0px); pointer-events: none;
+}
+body.spectating #death-panel {
+  pointer-events: auto; width: min(96vw, 760px); margin: 0 auto 10px; padding: 8px 14px;
+  display: flex; flex-flow: row wrap; align-items: center; gap: 6px 14px;
+  background: rgba(8, 14, 22, 0.82); border-radius: 12px;
+}
+body.spectating #death-panel h1 { font-size: 1.05rem; margin: 0; }
+body.spectating #death-cause, body.spectating #death-wait { font-size: 0.82rem; margin: 0; }
+body.spectating #death-stats { display: none; }
+body.spectating #death-actions { margin: 0 0 0 auto; display: flex; gap: 8px; }
+body.spectating #death-actions .restart-btn { padding: 8px 14px; font-size: 0.9rem; min-height: 44px; }
+#death-next-btn { display: none; }
+body.spectating #death-next-btn { display: inline-block; }

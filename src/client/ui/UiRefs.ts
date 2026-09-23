@@ -47,7 +47,8 @@ export type UiRefs = {
   damageIndicatorLayer: HTMLDivElement;
   scopeOverlay: HTMLDivElement;
   killFeed: HTMLDivElement;
-  damageVignette: HTMLDivElement;
+  serverNotice: HTMLDivElement;
+  partyChip: HTMLDivElement;
   knockbackFlash: HTMLDivElement;
   tradeUi: HTMLDivElement;
   yourTradeItems: HTMLDivElement;
@@ -69,7 +70,6 @@ export type UiRefs = {
   matchStartCrews: HTMLSpanElement;
   matchStartIsland: HTMLDivElement;
   matchStartCount: HTMLDivElement;
-  matchStartBanner: HTMLDivElement;
   matchStartHint: HTMLDivElement;
   /** Screen-projected "board your ship" marker over the player's own hull. */
   ownShipMarker: HTMLDivElement;
@@ -143,7 +143,8 @@ export function buildUiRefs(): UiRefs {
     damageIndicatorLayer: requireElement('damage-indicator-layer'),
     scopeOverlay: requireElement('scope-overlay'),
     killFeed: requireElement('kill-feed'),
-    damageVignette: requireElement('damage-vignette'),
+    serverNotice: requireElement('server-notice'),
+    partyChip: requireElement('party-chip'),
     knockbackFlash: requireElement('knockback-flash'),
     tradeUi: requireElement('trade-ui'),
     yourTradeItems: requireElement('your-trade-items'),
@@ -164,7 +165,6 @@ export function buildUiRefs(): UiRefs {
     matchStartCrews: requireElement('ms-crews'),
     matchStartIsland: requireElement('ms-island'),
     matchStartCount: requireElement('ms-count'),
-    matchStartBanner: requireElement('ms-banner'),
     matchStartHint: requireElement('ms-hint'),
     ownShipMarker: requireElement('own-ship-marker'),
     ownShipMarkerDistance: requireElement('osm-dist'),

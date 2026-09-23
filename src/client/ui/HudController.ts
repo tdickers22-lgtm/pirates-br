@@ -3,6 +3,7 @@
  * panels, weapon + combat readouts and the kill/event feed. Reads game state
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
+import { hudMessagePlan, hudVisibility, crosshairMode, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
 import * as THREE from 'three';
 import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
@@ -1285,12 +1286,11 @@ export class HudController {
     this.view.ui.stormWarning.textContent = lines.storm ?? '';
     this.view.ui.stormWarning.style.color = (this.view.state.storm.eyeCollapse ?? 0) > 0 || outsideStorm
       ? '#ff6b6b' : '#ffb366';
-    const alarm = this.ensureShipAlarmEl();
-    if (alarm) {
-      alarm.style.display = lines.ship ? 'block' : 'none';
-      alarm.textContent = lines.ship ?? '';
-      alarm.style.color = ship?.sinking ? '#ff6b6b' : '#ffb366';
-    }
+    // The ONE alarm slot is painted from hudMessagePlan below (b1.5f); only
+    // the inputs it needs are kept from here.
+    this.frameSailAlarm = ship && player.onShipId === ship.id ? canvasState?.alarm ?? null : null;
+    this.frameMetresOutside = shipMetresOutside;
+    this.frameOpenLeaks = openLeaks;
     this.updateTruceLine();
 
     this.view.ui.shipsAlive.textContent = String(this.view.state.shipsAlive);
@@ -1383,7 +1383,7 @@ export class HudController {
       if (!aboard) {
         // Ashore: STATE, never orders.
         this.view.ui.sailStatus.textContent =
-          `${ship.anchored ? 'Anchored' : `Under way · ${speedLine}`} · ${canvas}${rig} · ${windLine}`;
+          `${ship.anchored ? 'Anchored' : speedLine.startsWith('Adrift') ? speedLine : `Under way · ${speedLine}`} · ${canvas}${rig} · ${windLine}`;
       } else if (ship.anchored) {
         // The helm can weigh the anchor too now, so the panel must not send a
         // lone captain forward to the bow capstan. But "or [W] at the helm"
@@ -1446,7 +1446,37 @@ export class HudController {
     // the upgrade count — four numbers a player had already been shown
     // somewhere else, on the one line that is supposed to say what to do next.
     // It says what to do next, and nothing else.
-    const progLine = powerLine ? `${objectiveLine} · ${powerLine}` : objectiveLine;
+    // ONE MESSAGE PLAN (b1.5f, mechanicshud-07, liveplay-13): objective, alarm
+    // and banner come from one priority, dead > sinking > flooding > outside
+    // ring > carrying loot > default, so no two lines contradict each other.
+    const plan = hudMessagePlan({
+      playerState: HudController.hudPlayerState(player.state),
+      respawnSeconds: player.respawnTimer,
+      shipSinking: !!ship?.sinking,
+      shipLeaks: ship ? this.frameOpenLeaks : 0,
+      shipWater: ship ? THREE.MathUtils.clamp(ship.waterLevel ?? 0, 0, 1) : 0,
+      shipOnFire,
+      outsideRing: outsideStorm || (this.frameMetresOutside !== null && this.frameMetresOutside > 0),
+      metresOutside: this.frameMetresOutside,
+      eyeCollapse: (this.view.state.storm.eyeCollapse ?? 0) > 0,
+      lootCarried: chestsInHold,
+      lootSellAt: closestHoarder?.island.name ?? null,
+      defaultObjective: objectiveLine,
+      sailAlarm: this.frameSailAlarm,
+      bannerRequested: null,
+      wheelGlyph: glyph('supplyWheel'),
+    });
+    this.frameHudPlan = plan;
+    const alarmEl = this.ensureShipAlarmEl();
+    if (alarmEl) {
+      alarmEl.style.display = plan.alarm ? 'block' : 'none';
+      if (alarmEl.textContent !== (plan.alarm ?? '')) alarmEl.textContent = plan.alarm ?? '';
+      alarmEl.style.color = plan.severity >= TIER_SEVERITY.flooding ? '#ff6b6b' : '#ffb366';
+    }
+    // The storm line never repeats the alarm slot, and says nothing to the dead.
+    if (plan.tier === 'outside' || plan.tier === 'dead') this.view.ui.stormWarning.style.display = 'none';
+    this.paintServerNotice();
+    const progLine = powerLine && plan.tier === 'default' ? `${plan.objective} · ${powerLine}` : plan.objective;
     if (progLine !== this.brProgressSignature) {
       this.view.ui.objectiveLine.textContent = progLine;
       this.view.ui.objectiveLine.title = progLine;
@@ -1502,14 +1532,15 @@ export class HudController {
       && insideIslandId !== this.view.prevIsInsideIsland;
     if (isNewIsland && !this.view.startCeremonyActive) {
       const isl = this.view.state.islands.find((i) => i.id === insideIslandId);
-      if (isl) {
+      if (isl && (this.frameHudPlan?.severity ?? 0) < TIER_SEVERITY.flooding) {
         this.view.flashIslandBanner(isl.name);
         this.view.playIslandArrivalFanfare();
       }
     }
     this.islandPresenceSeeded = true;
     this.view.prevIsInsideIsland = insideIslandId;
-    if (performance.now() > this.view.islandBannerHideAt) {
+    if (performance.now() > this.view.islandBannerHideAt
+      || (this.frameHudPlan?.severity ?? 0) >= TIER_SEVERITY.flooding) {
       this.view.ui.islandBanner.classList.remove('visible');
     }
 
@@ -1543,11 +1574,23 @@ export class HudController {
     this.view.ui.scopeOverlay.classList.toggle('spyglass', this.view.spyglassActive);
     // No crosshair while looking through a scope OR holding any tool (bucket/
     // compass/shovel/spyglass) — you're not aiming a weapon.
-    this.view.ui.crosshair.style.display = scopeShowing || player.equippedTool ? 'none' : '';
-    this.view.ui.crosshair.classList.toggle('cannon', player.atCannon);
-    const shotgunCrosshair = !player.atCannon && weapon?.weaponId === 'blunderbuss';
-    this.view.ui.crosshair.classList.toggle('shotgun', shotgunCrosshair);
-    if (shotgunCrosshair) {
+    // A DOT AT REST (b1.5f, mechanicshud-14): the blunderbuss spread ring
+    // only while aiming; nothing over a scope, a tool, the helm or the dead.
+    const weaponDefNow = weapon ? WEAPONS[weapon.weaponId] : null;
+    const holding = player.equippedTool ? 'tool'
+      : !weapon ? 'none'
+      : weapon.weaponId === 'blunderbuss' ? 'blunderbuss'
+      : weaponDefNow?.melee ? 'melee' : 'firearm';
+    const aimingNow = this.view.input.isAiming();
+    const xhair = crosshairMode({
+      playerState: HudController.hudPlayerState(player.state),
+      atCannon: player.atCannon, atHelm: player.atHelm, aiming: aimingNow, holding, scopeShowing,
+    });
+    this.view.ui.crosshair.style.display = xhair === 'none' ? 'none' : '';
+    this.view.ui.crosshair.classList.toggle('cannon', xhair === 'cannon');
+    this.view.ui.crosshair.classList.toggle('shotgun', xhair === 'ring');
+    this.view.ui.crosshair.classList.toggle('dot', xhair === 'dot');
+    if (xhair === 'ring') {
       this.view.ui.crosshair.style.setProperty('--shotgun-spread', `${this.view.getBlunderbussCrosshairSize(player)}px`);
     } else {
       this.view.ui.crosshair.style.removeProperty('--shotgun-spread');
@@ -1555,6 +1598,9 @@ export class HudController {
 
     const nearbyCannon = ship ? this.view.findNearbyCannonIndex(player, ship) : null;
     const repairHole = ship ? this.view.findRepairableHole(player, ship) : null;
+    this.applyHudVisibility(player, ship, {
+      atRepairPrompt: !!repairHole, aiming: aimingNow, holding, scopeShowing,
+    });
     const lookInteraction = this.view.getLookInteraction(player, ship, nearbyCannon, repairHole);
     this.view.visibleInteractKind = null;
 
@@ -1568,6 +1614,9 @@ export class HudController {
     // on with this frame's line. Cheap: classList.toggle on an unchanged value
     // is a no-op, and the text is only written when it differs.
     if (player.state !== 'eliminated') this.setSpectateBanner(false, '', '');
+    // THE DEATH CARD COLLAPSES TO A BOTTOM BAR (b1.5f, liveplay-06): the modal
+    // covered the spectate view it was meant to sit over.
+    document.body.classList.toggle('spectating', player.state === 'eliminated');
     if (player.state === 'eliminated') {
       this.view.ui.interactPrompt.style.display = 'block';
       // SPECTATING IS NOT A VOID WITH A CAPTION.
@@ -2078,9 +2127,10 @@ export class HudController {
         nameEl.textContent = weapon ? weaponSlotName(weapon.weaponId) : 'Empty';
       }
       if (ammoEl) {
+        // AMMO ONCE (b1.5f): mag | reserve from server truth, on the card only.
         ammoEl.textContent = weapon && WEAPONS[weapon.weaponId].ammoMax > 0
-          ? `${weapon.ammo}/∞`
-          : '∞';
+          ? `${weapon.ammo} | ${weapon.reserve}`
+          : '';
       }
     }
 
@@ -2091,7 +2141,7 @@ export class HudController {
     }
 
     this.view.ui.ammoCurrent.textContent = String(activeWeapon.ammo);
-    this.view.ui.ammoReserve.textContent = '∞';
+    this.view.ui.ammoReserve.textContent = String(activeWeapon.reserve);
   }
 
   updateCombatHud(dt: number) {
@@ -2203,7 +2253,9 @@ export class HudController {
       && player.state !== 'swimming'
       && player.state !== 'eliminated'
       && player.state !== 'respawning'
-      && (player.onShipId === ship.id || nearOwnShip);
+      && (player.onShipId === ship.id || nearOwnShip)
+      // Stores only where they are spent (b1.5f): the wheel, a cannon, a repair.
+      && (this.frameVisibility?.has('stores') ?? false);
     this.view.ui.shipInventory.classList.toggle('visible', visible);
     if (!ship) {
       this.shipInventorySignature = '';
@@ -2434,7 +2486,8 @@ export class HudController {
    */
   private speedPhrase(ship: Ship, tailwind: number): string {
     const knots = Math.hypot(ship.velocity.x, ship.velocity.z) * HudController.KNOTS_PER_UNIT;
-    const made = knots < 0.15 ? 'dead in the water' : `making ${knots.toFixed(1)} kn`;
+    // "Under way · dead in the water" read as a contradiction (mechanicshud-07).
+    const made = knots < 0.15 ? 'Adrift' : `making ${knots.toFixed(1)} kn`;
     // A pinned hull is not slow, she is HELD, and the number alone cannot tell
     // the difference: 1.1 kn on a shoal and 1.1 kn in irons read identically.
     // Naming it here means the panel agrees with the coach pill instead of
@@ -2714,6 +2767,84 @@ export class HudController {
       return false;
     }
     return true;
+  }
+
+  private frameSailAlarm: string | null = null;
+  private frameMetresOutside: number | null = null;
+  private frameOpenLeaks = 0;
+  private frameHudPlan: HudMessagePlan | null = null;
+  private frameVisibility: Set<HudElementId> | null = null;
+  private partyCode: string | null = null;
+  private serverNoticeEndsAt = 0;
+  private serverNoticeHideAt = 0;
+
+  static hudPlayerState(state: Player['state']): HudPlayerState {
+    if (state === 'eliminated' || state === 'respawning' || state === 'downed' || state === 'swimming') return state;
+    return 'alive';
+  }
+
+  /** The party code for the chip (Game hands it over from match_start). */
+  setPartyCode(code: string | null): void { this.partyCode = code; }
+
+  /** b1.2e server_notice{kind:'restarting', seconds}: a top banner with a live count. */
+  showServerNotice(kind: 'restarting', seconds: number): void {
+    if (kind !== 'restarting') return;
+    const now = performance.now();
+    this.serverNoticeEndsAt = now + Math.max(0, seconds) * 1000;
+    this.serverNoticeHideAt = this.serverNoticeEndsAt + 8000;
+    this.paintServerNotice();
+  }
+
+  private paintServerNotice(): void {
+    const el = this.view.ui.serverNotice;
+    const now = performance.now();
+    const on = now < this.serverNoticeHideAt;
+    el.classList.toggle('visible', on);
+    if (!on) return;
+    const left = Math.max(0, Math.ceil((this.serverNoticeEndsAt - now) / 1000));
+    const text = left > 0
+      ? `Server update in ${left} s. This match will end with no result, and your stats are kept.`
+      : 'Server updating now. Reconnecting you in a moment.';
+    if (el.textContent !== text) el.textContent = text;
+  }
+
+  /** One visibility set per frame from the pure model (b1.5f). */
+  private applyHudVisibility(
+    player: Player,
+    ship: Ship | null,
+    extra: { atRepairPrompt: boolean; aiming: boolean; holding: 'firearm' | 'blunderbuss' | 'melee' | 'tool' | 'none'; scopeShowing: boolean },
+  ): void {
+    const crew = player.shipId ? (this.view.state?.players ?? []).filter((p) => p.shipId === player.shipId).length : 1;
+    const inParty = crew > 1 || !!this.partyCode;
+    const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
+    const short = typeof window !== 'undefined' && window.innerHeight <= 500;
+    const vis = hudVisibility({
+      playerState: HudController.hudPlayerState(player.state),
+      device: coarse && short ? 'phone' : coarse ? 'tablet' : 'desktop',
+      inParty,
+      nearOwnShip: !!ship && player.shipId === ship.id
+        && (player.onShipId === ship.id || dist2D(player.position.x, player.position.z, ship.position.x, ship.position.z) < 30),
+      atCannon: player.atCannon,
+      atHelm: player.atHelm,
+      atRepairPrompt: extra.atRepairPrompt,
+      wheelHeld: this.view.input.isSupplyWheelOpen(),
+      mapOpen: false,
+      aiming: extra.aiming,
+      holding: extra.holding,
+      scopeShowing: extra.scopeShowing,
+      alarmUp: !!this.frameHudPlan?.alarm,
+      bannerUp: false,
+      serverNotice: performance.now() < this.serverNoticeHideAt,
+    });
+    this.frameVisibility = vis;
+    const ammo = document.getElementById('ammo-display');
+    if (ammo) ammo.style.display = vis.has('ammoDisplay') ? '' : 'none';
+    const chip = this.view.ui.partyChip;
+    chip.classList.toggle('visible', vis.has('partyChip'));
+    if (vis.has('partyChip')) {
+      const text = this.partyCode ? `Crew ${this.partyCode}` : `Crew of ${crew}`;
+      if (chip.textContent !== text) chip.textContent = text;
+    }
   }
 
   private getObjectiveSummary(

@@ -244,6 +244,9 @@ export const LOGIC = [
   // at their declared sizes, apple metas, safe-area env() on every #hud-* region,
   // touch-action none/pan-y, MobileShell's gesture/ctrl-wheel/rotate/fullscreen rules.
   quick(tsx('test-mobile-shell.mjs')),
+  // b1.5f HUD model (mechanicshud-06/07/14, liveplay-13, vm:mechanicshud:6): 12 spec contexts,
+  // always-on budgets, 10 contradiction rows, every UiRefs id has a writer, wiring.
+  quick(tsx('test-hud-visibility.mjs')),
   // b1.5b front door (online-09/16, vm:online:5, vm:audio:6): absolute OG/twitter
   // card on fly.toml's PIRATES_BR_PUBLIC_URL, og-card.jpg 1200x630 < 300 KB,
   // manifest + icons, credits.json fresh from every LICENSES.md, privacy line,

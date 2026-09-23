@@ -1137,6 +1137,13 @@ export class CombatFx {
       this.attrition + dt * (takingDamage ? 1 / 2.5 : -1 / 0.9),
       0, 1,
     );
+    // LOW-HEALTH PULSE AT REST (b1.5f; spec: below 30 % HP). The attrition read
+    // used to fade a second after the last hit, so a pirate on 12 HP looked as
+    // healthy as one on 100. Below 30 % it holds a floor that deepens toward 0,
+    // and the heartbeat keeps time with it until you eat or die.
+    if (health > 0 && health < 30) {
+      this.attrition = Math.max(this.attrition, 0.3 + 0.45 * (1 - health / 30));
+    }
   }
 
   /** The escalating attrition vignette + heartbeat + health-bar flash. */
