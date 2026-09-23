@@ -23,6 +23,8 @@ import {
   findRepairableHole as sharedFindRepairableHole,
 } from '../../shared/interactions.js';
 import { Renderer, dayNightSecondsForMatchProgress } from '../rendering/Renderer.js';
+import { FrameGuard, showFrameFaultOverlay } from './frameGuard.js';
+import { installErrorBeacon, reportBeacon } from '../network/errorBeacon.js';
 import { OceanRenderer } from '../rendering/OceanRenderer.js';
 import { ShipRenderer } from '../rendering/ShipRenderer.js';
 import { SpoilsRenderer } from '../rendering/SpoilsRenderer.js';
@@ -1087,6 +1089,7 @@ export class Game {
   // drawn on the water.)
 
   async init() {
+    installErrorBeacon({ isLoaded: () => this.ui.loadingScreen.classList.contains('hidden') });
     document.addEventListener('contextmenu', (event) => event.preventDefault());
 
     this.setLoading(4, 'Hoisting sails...');
@@ -3179,7 +3182,21 @@ export class Game {
    *  (ashfall, embers, smoke, erupting geyser plumes). Each closure distance-
    *  culls itself against its own island, so idle isles cost almost nothing. */
 
+  /** correctness-06: one throw costs one frame, never the loop (see frameGuard). */
+  private readonly frameGuard = new FrameGuard({
+    schedule: (cb) => requestAnimationFrame(cb),
+    onFault: (err) => reportBeacon('frame-fault', err),
+    onWedged: (err) => { showFrameFaultOverlay(); reportBeacon('frame-wedged', err); },
+  });
+  private readonly frameLoop = (now: number) => this.frame(now);
+  /** Debug hook: the next `n` frames throw (frame-fault-probe). */
+  injectFrameFault(n: number): void { this.frameGuard.injectFault(n); }
+
   private frame(now: number) {
+    this.frameGuard.run(now, (t) => this.frameBody(t), this.frameLoop);
+  }
+
+  private frameBody(now: number) {
     const rawDtMs = now - this.lastFrameTime;
     const dt = Math.min(0.05, rawDtMs / 1000);
     this.lastFrameTime = now;
@@ -3199,8 +3216,6 @@ export class Game {
     }
     this.stepFramePost();
     this.updateDebugPerfPanel(dt);
-
-    requestAnimationFrame((time) => this.frame(time));
   }
 
   /**
