@@ -28,9 +28,11 @@
  *    client is meant to run, on the real acks the server sends.
  *
  * BARS.
- *  - remote pirates (world path, composed on the hull): unexplained step p99
- *    <= 0.02 m and <= 1.0 discontinuities per body-second, held/empty answers
- *    <= 3%: the test-remote-smoothness bound, unchanged.
+ *  - remote pirates, split ashore / aboard (world path, aboard composed on the
+ *    hull), unexplained step in VECTOR form: p99 <= 0.02 m and <= 1.0
+ *    discontinuities per body-second, held/empty answers <= 3%: the
+ *    test-remote-smoothness bound. Ashore is graded at it; aboard at its
+ *    measured bound (see MEASURED) until b2.0d.
  *  - local reconciliation: correction at each ack p99 < 0.3 m.
  *  - downstream per client <= 120 KB/s hard (80 KB/s target printed).
  *  - mutation proof, same run: the interpolation buffer forced to 0 ms must FAIL
@@ -38,6 +40,7 @@
  *    inputs must FAIL the local bar. A bar the broken arm clears cannot fail.
  *
  * Usage: node --import tsx scripts/test-wan-netcode.mjs [--seconds 30] [--seed 7] [--strict]
+ *        (deterministic per seed; WAN_STATS=1 prints p50/p90/p95/p99 per population)
  *        [--buffer-ms 0]   (runs ONLY the forced-0 arm and grades it: the red run)
  *        [--lan]           (control: clean link)
  */
@@ -81,17 +84,37 @@ const MIN_MOVING_SAMPLES = 250;
  * anything above 3.7 m), so it is reported, not graded, until b2.0d.
  */
 const STRICT = argv.includes('--strict');
-// Re-measured over 3 runs (the Match is not seeded, so runs differ): p99
-// 0.137-0.150 m, rate 10.95-13.31/body-s, while the buffer-0 mutant reads p99
-// 0.36-0.53 m. Under WAN the RATE does not separate the arms (the mutant read
-// 7.9-17.3), so p99 is the discriminating bound and the rate bound only catches a
-// gross regression; --strict grades both at the launch bar.
-const MEASURED = { p99: 0.2, rate: 20 };
-const GRADE = STRICT ? { ...BAR } : { ...BAR, ...MEASURED };
+// SEEDED, SPLIT, VECTOR (b1.3e finish). The run is deterministic per --seed (see
+// DETERMINISM below), so the bounds are measured, not sampled. 30 s window,
+// seeds 1-7, shipped arm vs buffer-0 mutant (vector form, p99 m / disc per body-s):
+//                shipped                         buffer 0 ms
+//   ashore  p99 0.0117-0.0171, 0.23-0.95/s   p99 0.0224-0.0446, 1.31-3.61/s
+//   aboard  p99 0.169-0.187,  19.0-39.7/s    p99 0.489-0.641,  16.4-39.7/s
+// Ashore the shipped client MEETS the launch bar and the mutant misses it on
+// both clauses on every seed, so ashore is graded at the launch bar itself.
+// Aboard (deck pose composed on the interpolated hull) is the recorded miss: the
+// p99 bound 0.3 m sits 38% above the shipped worst and 39% below the mutant's
+// best. The aboard RATE does not separate the arms (both 16-40/s), so its bound
+// (60) only catches a gross regression. --strict grades both populations at the
+// launch bar: that is b2.0d's exit gate and it is RED on aboard today.
+const POPS = ['ashore', 'aboard'];
+const MEASURED = { ashore: { p99: BAR.p99, rate: BAR.rate }, aboard: { p99: 0.3, rate: 60 } };
+const GRADE = STRICT
+  ? { ashore: { ...BAR }, aboard: { ...BAR } }
+  : { ashore: { ...BAR, ...MEASURED.ashore }, aboard: { ...BAR, ...MEASURED.aboard } };
 
 // ── virtual clock: the client's performance.now IS the sim's wall clock ──────
 let VNOW = 0;
 Object.defineProperty(performance, 'now', { value: () => VNOW, configurable: true, writable: true });
+// ── DETERMINISM: one seed fixes the whole run, so arms (and runs) compare ────
+// The Match reads PIRATES_BR_MAP_SEED at construction (map, spawns, its RNG-01
+// gameplay stream, join docks); Date.now drives its wall-clock accounting
+// (countdown, elapsed, bot timers), so it rides the virtual clock too; and
+// Math.random (anything outside the seeded streams, client included) is
+// re-seeded at the start of every arm. Same seed => bit-identical numbers.
+process.env.PIRATES_BR_MAP_SEED = String(SEED);
+const EPOCH_MS = 1_790_000_000_000;
+Date.now = () => EPOCH_MS + Math.floor(VNOW);
 
 const deflateCfg = Lobby.WS_PERMESSAGE_DEFLATE ?? null;
 function makeCompressor() {
@@ -125,6 +148,7 @@ const pct = (arr, q) => {
  */
 async function runArm(arm) {
   VNOW = 0;
+  Math.random = makeRng(SEED * 104729 + 3);
   const rng = makeRng(SEED * 7919 + 1);
   const down = new TcpLink({ ...PROFILE, seed: SEED * 2 + 1 });
   const up = new TcpLink({ ...PROFILE, seed: SEED * 2 + 2 });
@@ -185,7 +209,8 @@ async function runArm(arm) {
   const measureFromMs = WARMUP_S * 1000;
   const endMs = (WARMUP_S + SECONDS) * 1000;
   const prevPose = new Map();
-  const pop = { samples: 0, moving: 0, unexplained: [], discontinuities: 0, bodySeconds: 0, teleports: 0, frameChanges: 0 };
+  const newSub = () => ({ u: [], disc: 0, bodyS: 0 });
+  const pop = { samples: 0, moving: 0, mag: [], ashore: newSub(), aboard: newSub(), teleports: 0, frameChanges: 0 };
   const modeStart = { ...cs.remote.modeCounts };
   let downBytes = 0;
   let downMsgs = 0;
@@ -282,7 +307,8 @@ async function runArm(arm) {
         }
         pop.samples += 1;
         const prev = prevPose.get(p.id);
-        prevPose.set(p.id, { x, y, z, t: VNOW, frame, step: prev && prev.frame === frame ? Math.hypot(x - prev.x, z - prev.z) : null, dt: prev ? VNOW - prev.t : null });
+        const same = prev && prev.frame === frame;
+        prevPose.set(p.id, { x, y, z, t: VNOW, frame, step: same ? Math.hypot(x - prev.x, z - prev.z) : null, dx: same ? x - prev.x : null, dz: same ? z - prev.z : null, dt: prev ? VNOW - prev.t : null });
         if (!prev || prev.frame !== frame) { if (prev) pop.frameChanges += 1; continue; }
         const dt = VNOW - prev.t;
         if (dt > 50) continue;
@@ -293,23 +319,36 @@ async function runArm(arm) {
         if (speed < MOVING_SPEED_MPS || speed > MAX_GRADEABLE_SPEED_MPS) continue;
         // unexplained = | step_i − (step_{i−1}/dt_{i−1}) × dt_i |, as a vector would be
         // better, but the magnitude form is the smoothness suite's own definition.
-        const u = Math.abs(step - (prev.step / prev.dt) * dt);
+        // GRADED: the vector form, |d_i - d_(i-1) * dt_i / dt_(i-1)|: the displacement
+        // this frame minus the one the previous frame's VELOCITY explains. It sees a
+        // direction wobble at constant speed, which the magnitude form (the
+        // smoothness suite's |step_i - speed_(i-1) * dt_i|, kept as info) is blind to.
+        // Split by population: a pirate ashore is one interpolated track; a pirate
+        // aboard is his deck pose composed on the interpolated hull, two tracks.
+        const k = dt / prev.dt;
+        const uv = Math.hypot((x - prev.x) - prev.dx * k, (z - prev.z) - prev.dz * k);
+        const sub = frame ? pop.aboard : pop.ashore;
+        sub.u.push(uv);
+        sub.bodyS += dt / 1000;
+        if (uv > DISCONTINUITY_M) sub.disc += 1;
         pop.moving += 1;
-        pop.bodySeconds += dt / 1000;
-        pop.unexplained.push(u);
-        if (u > DISCONTINUITY_M) pop.discontinuities += 1;
+        pop.mag.push(Math.abs(step - (prev.step / prev.dt) * dt));
       }
     }
   }
   comp.end();
+  if (process.env.WAN_STATS) {
+    const q = (a) => [0.5, 0.9, 0.95, 0.99].map((x) => +pct(a, x).toFixed(4));
+    console.log('STATS', arm.label, JSON.stringify({ ashore: q(pop.ashore.u), aboard: q(pop.aboard.u) }));
+  }
   const modes = {};
   for (const k of Object.keys(cs.remote.modeCounts)) modes[k] = cs.remote.modeCounts[k] - (modeStart[k] ?? 0);
   const answers = Object.values(modes).reduce((a, b) => a + b, 0);
   return {
     label: arm.label,
     remote: {
-      samples: pop.samples, moving: pop.moving, p99: pct(pop.unexplained, 0.99), worst: pct(pop.unexplained, 1),
-      rate: pop.bodySeconds > 0 ? pop.discontinuities / pop.bodySeconds : NaN, teleports: pop.teleports,
+      samples: pop.samples, moving: pop.moving, magP99: pct(pop.mag, 0.99), teleports: pop.teleports,
+      ashore: summarize(pop.ashore), aboard: summarize(pop.aboard),
       held: answers > 0 ? (modes.held + modes.empty) / answers : NaN, extrapolated: answers > 0 ? modes.extrapolated / answers : NaN,
       delayMs: cs.remote.timeline.delay * 1000, jitterMs: cs.remote.timeline.jitter * 1000, hardSnaps: cs.remote.timeline.hardSnaps,
     },
@@ -317,6 +356,10 @@ async function runArm(arm) {
     down: { bytesPerSec: downBytes / SECONDS, msgs: downMsgs, joinBytes },
     link: { down: down.stats, up: up.stats },
   };
+}
+
+function summarize(sub) {
+  return { n: sub.u.length, p99: pct(sub.u, 0.99), worst: pct(sub.u, 1), rate: sub.bodyS > 0 ? sub.disc / sub.bodyS : NaN };
 }
 
 let failures = 0;
@@ -328,7 +371,8 @@ const f = (n, d = 3) => (Number.isFinite(n) ? n.toFixed(d) : String(n));
 const printArm = (r) => {
   const R = r.remote; const L = r.local;
   console.log(`\n[${r.label}] link ${PROFILE.rttMs} ms RTT / ${PROFILE.jitterMs} ms jitter / ${(PROFILE.loss * 100).toFixed(1)}% loss; down HOL stalls ${r.link.down.holStalls} (worst ${f(r.link.down.maxHolMs, 0)} ms), lost ${r.link.down.lost} down / ${r.link.up.lost} up`);
-  console.log(`  remote pirates: ${R.moving} moving samples of ${R.samples}; unexplained p99 ${f(R.p99)} m, worst ${f(R.worst)} m, ${f(R.rate, 2)} disc/body-s; held+empty ${f(R.held * 100, 2)}%, extrapolated ${f(R.extrapolated * 100, 2)}%; delay ${f(R.delayMs, 1)} ms, jitter est ${f(R.jitterMs, 1)} ms, hard snaps ${R.hardSnaps}`);
+  console.log(`  remote pirates: ${R.moving} moving samples of ${R.samples}; held+empty ${f(R.held * 100, 2)}%, extrapolated ${f(R.extrapolated * 100, 2)}%; delay ${f(R.delayMs, 1)} ms, jitter est ${f(R.jitterMs, 1)} ms, hard snaps ${R.hardSnaps}; magnitude-form p99 ${f(R.magP99)} m (info)`);
+  for (const k of POPS) console.log(`    ${k.padEnd(6)} ${String(R[k].n).padStart(5)} samples: unexplained p99 ${f(R[k].p99, 4)} m, worst ${f(R[k].worst)} m, ${f(R[k].rate, 2)} disc/body-s`);
   console.log(`  local reconciliation: ${L.graded} graded acks (${L.transitions} state/frame transitions skipped), correction p50 ${f(L.p50)} / p99 ${f(L.p99)} / worst ${f(L.worst)} m; predicted path ${f(L.pathM, 1)} m; rtt est ${f(L.rttEstMs, 0)} ms`);
   console.log(`  downstream ${f(r.down.bytesPerSec / 1024, 1)} KB/s per client (target <= ${DOWN_TARGET / 1024}, hard <= ${DOWN_HARD / 1024}); join ${f(r.down.joinBytes / 1024, 1)} KB compressed`);
 };
@@ -339,19 +383,25 @@ if (FORCED_BUFFER !== null) {
   // THE RED RUN: grade the forced-0 arm against the real bar. It must FAIL.
   const r = await runArm({ bufferZero: Number(FORCED_BUFFER) === 0, replay: true, label: `buffer forced ${FORCED_BUFFER} ms` });
   printArm(r);
-  expect(`remote sampling measured something (>= ${MIN_MOVING_SAMPLES} moving samples)`, r.remote.moving >= MIN_MOVING_SAMPLES, String(r.remote.moving));
-  expect(`remote pirate p99 <= ${GRADE.p99} m`, r.remote.p99 <= GRADE.p99, f(r.remote.p99));
-  expect(`remote discontinuities <= ${GRADE.rate}/body-s`, r.remote.rate <= GRADE.rate, f(r.remote.rate, 2));
+  for (const k of POPS) {
+    expect(`${k}: sampling measured something (>= ${MIN_MOVING_SAMPLES})`, r.remote[k].n >= MIN_MOVING_SAMPLES, String(r.remote[k].n));
+    expect(`${k}: unexplained step p99 <= ${GRADE[k].p99} m`, r.remote[k].p99 <= GRADE[k].p99, f(r.remote[k].p99, 4));
+    expect(`${k}: discontinuities <= ${GRADE[k].rate}/body-s`, r.remote[k].rate <= GRADE[k].rate, f(r.remote[k].rate, 2));
+  }
 } else {
   const on = await runArm({ bufferZero: false, replay: true, label: 'shipped client' });
   printArm(on);
   const off = await runArm({ bufferZero: true, replay: false, label: 'mutants: buffer 0 ms, no replay' });
   printArm(off);
   console.log('\nBars (shipped client):');
-  expect(`remote sampling measured something (>= ${MIN_MOVING_SAMPLES} moving samples)`, on.remote.moving >= MIN_MOVING_SAMPLES, String(on.remote.moving));
   const miss = (ok) => (ok ? 'bar met' : 'launch bar MISSED -> b2.0d');
-  expect(`remote pirate unexplained step p99 <= ${GRADE.p99} m${STRICT ? '' : ' (measured bound)'}`, on.remote.p99 <= GRADE.p99, `${f(on.remote.p99)}; bar ${BAR.p99}: ${miss(on.remote.p99 <= BAR.p99)}`);
-  expect(`remote discontinuities <= ${GRADE.rate}/body-s${STRICT ? '' : ' (measured bound)'}`, on.remote.rate <= GRADE.rate, `${f(on.remote.rate, 2)}; bar ${BAR.rate}: ${miss(on.remote.rate <= BAR.rate)}`);
+  const tag = (k, key) => (GRADE[k][key] === BAR[key] ? ' (launch bar)' : ' (measured bound)');
+  for (const k of POPS) {
+    const R = on.remote[k];
+    expect(`${k}: sampling measured something (>= ${MIN_MOVING_SAMPLES})`, R.n >= MIN_MOVING_SAMPLES, String(R.n));
+    expect(`${k}: remote pirate unexplained step p99 <= ${GRADE[k].p99} m${tag(k, 'p99')}`, R.p99 <= GRADE[k].p99, `${f(R.p99, 4)}; bar ${BAR.p99}: ${miss(R.p99 <= BAR.p99)}`);
+    expect(`${k}: remote discontinuities <= ${GRADE[k].rate}/body-s${tag(k, 'rate')}`, R.rate <= GRADE[k].rate, `${f(R.rate, 2)}; bar ${BAR.rate}: ${miss(R.rate <= BAR.rate)}`);
+  }
   expect(`held/empty answers <= ${BAR.held * 100}%`, on.remote.held <= BAR.held, `${f(on.remote.held * 100, 2)}%`);
   expect('local body moved (the reconciliation had work to do)', on.local.pathM > 20 && on.local.graded > 200, `${f(on.local.pathM, 1)} m, ${on.local.graded} acks`);
   if (STRICT) expect(`local reconciliation correction p99 < ${RECON_P99_M} m`, on.local.p99 < RECON_P99_M, f(on.local.p99));
@@ -359,7 +409,11 @@ if (FORCED_BUFFER !== null) {
   expect(`downstream <= ${DOWN_HARD / 1024} KB/s per client (hard)`, on.down.bytesPerSec <= DOWN_HARD, `${f(on.down.bytesPerSec / 1024, 1)} KB/s; target ${DOWN_TARGET / 1024}: ${on.down.bytesPerSec <= DOWN_TARGET ? 'met' : 'MISSED'}`);
   console.log('\nMutation proof (the bars must be ones the broken arms cannot clear):');
   // VACUOUS counts as FAIL: a mutant arm that measured nothing has proven nothing.
-  expect('buffer forced to 0 ms FAILS the graded remote bound', off.remote.moving >= MIN_MOVING_SAMPLES && Number.isFinite(off.remote.p99) && !(off.remote.p99 <= GRADE.p99 && off.remote.rate <= GRADE.rate), `p99 ${f(off.remote.p99)} m, ${f(off.remote.rate, 2)}/body-s`);
+  // It must fail the SAME graded bounds the shipped arm passed, on every seed
+  // (5-seed spread in the header), not by luck of one population.
+  const clears = (R) => R.n >= MIN_MOVING_SAMPLES && R.p99 <= GRADE.aboard.p99 && R.rate <= GRADE.aboard.rate;
+  expect('buffer forced to 0 ms FAILS the graded aboard bound', off.remote.aboard.n >= MIN_MOVING_SAMPLES && Number.isFinite(off.remote.aboard.p99) && !clears(off.remote.aboard), `p99 ${f(off.remote.aboard.p99, 4)} m, ${f(off.remote.aboard.rate, 2)}/body-s`);
+  expect('buffer forced to 0 ms FAILS the graded ashore bound', off.remote.ashore.n >= MIN_MOVING_SAMPLES && Number.isFinite(off.remote.ashore.p99) && !(off.remote.ashore.p99 <= GRADE.ashore.p99 && off.remote.ashore.rate <= GRADE.ashore.rate), `p99 ${f(off.remote.ashore.p99, 4)} m, ${f(off.remote.ashore.rate, 2)}/body-s`);
   expect('snapping to the ack without replay FAILS the local bar', off.local.graded > 200 && Number.isFinite(off.local.p99) && !(off.local.p99 < RECON_P99_M), `p99 ${f(off.local.p99)} m`);
 }
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — test-wan-netcode (${failures} failure${failures === 1 ? '' : 's'}, ${((Date.now() - t0) / 1000).toFixed(1)} s)`);

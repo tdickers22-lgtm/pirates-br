@@ -535,6 +535,24 @@ export const LOGIC = [
   //                                 idle/unreachable/cap on a fake clock. One real public-queue wait: ~12 s, not
   //                                 quick (online-04, online-11, b1.3b)
   tsx('test-smoke-online.mjs'),
+  //   test-wan-netcode            — the real-internet bar (b1.3e, critique gap 7): a real bot Match replayed both
+  //                                 ways through net-shim's TCP model (150 ms RTT, 30 ms jitter, 1% loss,
+  //                                 head-of-line stalls) into the real ClientState/RemoteInterpolator on a
+  //                                 virtual clock, seeded (deterministic per --seed). Remote pirates in vector
+  //                                 form, ashore at the launch bar, aboard at its measured bound; same-run
+  //                                 mutants (buffer 0 ms, no-replay snap) must FAIL. No port, ~45 s, not quick.
+  //                                 `--strict` (launch bar on both populations + recon) is b2.0d's exit gate.
+  { ...tsx('test-wan-netcode.mjs'), timeoutMs: 240_000 },
+  //   net-shim --self-test        — the WAN link model itself: 75 ms one way, ~1% segment loss, in-order,
+  //                                 loss as head-of-line stalls, LAN never stalls (b1.3e, 0.05 s)
+  quick({ file: 'net-shim.mjs', cmd: ['node', 'scripts/net-shim.mjs', '--self-test'] }),
+  //   fly-launch --self-test      — the soft-launch program's graders (machine count, lag, 30% headroom,
+  //                                 humans lookup, the MAX_MATCHES stamp) on fixtures, no network (b1.3c, 0.06 s)
+  quick({ file: 'fly-launch.mjs', cmd: ['node', 'scripts/fly-launch.mjs', '--self-test'] }),
+  //   ci-rollback-dryrun          — deploy.yml's own step scripts with fake flyctl/node: dry run never deploys,
+  //                                 forced-red smoke rolls back to the previous non-destroyed image,
+  //                                 HEALTH_KEY reaches the smoke (b1.3d, 20 clauses, ~3 s, offline)
+  plain('ci-rollback-dryrun.mjs'),
 ];
 
 /**
