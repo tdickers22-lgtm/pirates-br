@@ -104,9 +104,16 @@ function sailPair({ atTime, seconds, provoke }) {
 
   if (provoke) physics.openHoleAt(a, { x: 1.2, y: 0.1, z: 2 }, 3, provoke);
 
+  // shots = a ball actually left a gun (the cooldown moved). attempts = a bot at
+  // a cannon pulled the trigger at all. Since the D23 truce (b1.6e, 21665d46
+  // wired WeaponSystem to the match clock) every cannon is cold for everyone
+  // until TRUCE_SECONDS, so inside the peace an answer is an ATTEMPT the truce
+  // refuses, never a ball.
   let shots = 0;
+  let attempts = 0;
   const realTryFire = weapons.tryFire.bind(weapons);
   weapons.tryFire = (player, ship, yaw, pitch, cannonIndex, options) => {
+    if (player?.atCannon && ship) attempts += 1;
     const before = ship?.cannonCooldowns?.[cannonIndex] ?? 0;
     const trace = realTryFire(player, ship, yaw, pitch, cannonIndex, options);
     if (ship && ship.cannonCooldowns[cannonIndex] !== before) shots += 1;
@@ -115,29 +122,34 @@ function sailPair({ atTime, seconds, provoke }) {
 
   for (let i = 0; i < Math.ceil(seconds / dt); i += 1) {
     const t = atTime + i * dt;
+    // The weapon's truce clock reads the match's sim time; keep it on the
+    // harness clock or every gun reads as "still in the truce" forever.
+    match.t = t;
     pinPair();
     match.bots.update(dt, t, state.players, state.ships, state.islands, state.storm, weapons, state.seaRocks);
     for (const cooldowns of [a.cannonCooldowns, b.cannonCooldowns]) {
       for (let c = 0; c < cooldowns.length; c += 1) cooldowns[c] = Math.max(0, cooldowns[c] - dt);
     }
   }
-  return shots;
+  return { shots, attempts };
 }
 
-const groundShots = sailPair({ atTime: 40, seconds: 60, provoke: 'ground' });
+const ground = sailPair({ atTime: 40, seconds: 60, provoke: 'ground' });
 expect('a grounded bot does not open fire on its neighbour during the peace',
-  groundShots === 0, `shots=${groundShots}`);
+  ground.attempts === 0 && ground.shots === 0, `attempts=${ground.attempts} shots=${ground.shots}`);
 
-const cannonShots = sailPair({ atTime: 40, seconds: 60, provoke: 'cannon' });
-expect('a bot that took a cannonball DOES answer during the peace',
-  cannonShots > 0, `shots=${cannonShots}`);
+const cannon = sailPair({ atTime: 40, seconds: 60, provoke: 'cannon' });
+expect('a bot that took a cannonball DOES answer during the peace (it tries the guns)',
+  cannon.attempts > 0, `attempts=${cannon.attempts}`);
+expect('...and the D23 truce refuses the answer: no ball leaves a gun before TRUCE_SECONDS',
+  cannon.shots === 0, `shots=${cannon.shots}`);
 
-const quietShots = sailPair({ atTime: 40, seconds: 60, provoke: null });
+const quiet = sailPair({ atTime: 40, seconds: 60, provoke: null });
 expect('two untouched bots in broadside range hold fire during the peace',
-  quietShots === 0, `shots=${quietShots}`);
+  quiet.attempts === 0 && quiet.shots === 0, `attempts=${quiet.attempts} shots=${quiet.shots}`);
 
-const afterShots = sailPair({ atTime: BOT_EARLY_PEACE_SECONDS + 5, seconds: 60, provoke: null });
-expect('the same two bots fight once the window lifts', afterShots > 0, `shots=${afterShots}`);
+const after = sailPair({ atTime: BOT_EARLY_PEACE_SECONDS + 5, seconds: 60, provoke: null });
+expect('the same two bots fight once the window lifts', after.shots > 0, `shots=${after.shots}`);
 
 // ── Deterministic: the peace includes the pistols ─────────────────────────
 // maybeFireAtBoarder ran for every bot every tick with no clock: a human 12 m
