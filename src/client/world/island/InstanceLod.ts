@@ -54,7 +54,6 @@
  */
 import type * as THREE from 'three';
 import type { RenderQuality } from '../../rendering/QualityPreference.js';
-import { LAZY_PRIORITY_M } from '../../assets/AssetLibrary.js';
 
 /** Shared empty rail for batches that carry no per-instance scales. */
 const EMPTY_SCALES = new Float32Array(0);
@@ -94,13 +93,13 @@ export type InstanceLodBatch = {
   /** True while THIS module is the reason the mesh is invisible. Without it a
    *  restore would fight the radius gates that hide the same nodes. */
   hidden: boolean;
-  /** A lazily-loaded story scene standing behind a placeholder (LOD-01). The
-   *  batch is not a density batch at all — it carries no ramp and is skipped by
-   *  every rule below; all it wants is to be TOLD when its island is close
-   *  enough that the tableau is about to be legible, so the fetch already
-   *  queued at build time can jump the queue. `asked` latches: the promotion is
-   *  one call, not a per-frame one. */
-  lazy?: { request: () => void; asked: boolean };
+  /** A lazily-loaded story scene standing behind its far proxy (LOD-01,
+   *  b1.1g). Not a density batch — it carries no ramp and every rule below
+   *  skips it; all it wants is the island's EDGE distance in real metres each
+   *  time the island is updated, so its slot can fetch LOD0 inside the fetch
+   *  line and (phones) evict it beyond the eviction line. The slot latches its
+   *  own state, so a call with nothing to do is two comparisons. */
+  lazy?: { residency: (edgeMetres: number) => void };
 };
 
 type LodMesh = THREE.InstancedMesh & {
@@ -308,15 +307,17 @@ export function attachInstanceFarLod(
 
 /** Register a ground-cover batch: density-only, no pixel rule, steeper ramp. */
 /**
- * Register a story-scene PLACEHOLDER so the per-frame update can promote its
- * fetch when the island comes inside LAZY_PRIORITY_M (LOD-01 / assets-08).
+ * Register a story-scene PROXY so the per-frame update can drive its LOD0
+ * residency (LOD-01, b1.1g): `residency(edgeMetres)` is told the island's edge
+ * distance every time the island is updated, on or off its detail band (see
+ * updateLazyStoryResidency).
  *
- * The placeholder is a one-instance InstancedMesh purely so it is a batch like
- * any other and rides the array `collectInstanceLodBatches` already builds at
+ * The proxy is a one-instance InstancedMesh purely so it is a batch like any
+ * other and rides the array `collectInstanceLodBatches` already builds at
  * island-build time — the per-frame update never walks a scene graph, and this
  * must not be the exception that does.
  */
-export function attachLazyStoryLod(mesh: THREE.InstancedMesh, request: () => void): void {
+export function attachLazyStoryLod(mesh: THREE.InstancedMesh, residency: (edgeMetres: number) => void): void {
   (mesh as LodMesh).userData.instanceLod = {
     mesh,
     scales: EMPTY_SCALES,
@@ -327,8 +328,17 @@ export function attachLazyStoryLod(mesh: THREE.InstancedMesh, request: () => voi
     applied: mesh.count,
     hidden: false,
     farApplied: false,
-    lazy: { request, asked: false },
+    lazy: { residency },
   };
+}
+
+/**
+ * Story residency for an island whose detail band is OFF (Game calls this
+ * where it skips updateInstanceLod): the thinning rules have nothing to draw,
+ * but a phone must still learn that the island went past the eviction line.
+ */
+export function updateLazyStoryResidency(batches: readonly InstanceLodBatch[], edgeDist: number): void {
+  for (let b = 0; b < batches.length; b++) batches[b].lazy?.residency(edgeDist);
 }
 
 export function attachCoverLod(mesh: THREE.InstancedMesh): void {
@@ -422,12 +432,11 @@ export function updateInstanceLod(
 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
-    // A story-scene placeholder is not scenery to be thinned — it is a promise
-    // that the real tableau is coming. One latched call at LAZY_PRIORITY_M and
-    // then nothing, ever again, for that batch.
+    // A story-scene proxy is not scenery to be thinned — it is a slot whose
+    // LOD0 comes and goes with REAL edge metres (a scope must not fetch).
     const lazy = batch.lazy;
     if (lazy) {
-      if (!lazy.asked && apparent < LAZY_PRIORITY_M) { lazy.asked = true; lazy.request(); }
+      lazy.residency(edgeDist);
       continue;
     }
     // Stagger spreads a type's thresholds ±17% around the shared ramp, so a

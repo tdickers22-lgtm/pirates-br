@@ -128,9 +128,43 @@ export function isLazyAsset(name: string): boolean {
   return LAZY_ASSET_SET.has(name);
 }
 
-/** Metres. Inside this an island's story scenes are wanted NOW (they are about
- *  to be legible); outside it they still load, just behind everything else. */
-export const LAZY_PRIORITY_M = 400;
+/** The story scenes whose 2-4k `<name>_far.glb` proxy has SHIPPED (passed
+ *  build_far_lods.py's verify and test-far-lod-integrity). Only these are
+ *  fetched with the world set; the rest keep the seated box until their proxy
+ *  lands. b1.1g2 fills this to all fifteen (the first build kept 77-95% of the
+ *  surface at 2-4k tris; the bar is 92%). */
+export const STORY_PROXY_NAMES: readonly AssetName[] = [];
+
+/** Metres from the island's EDGE inside which a story scene's LOD0 is fetched
+ *  and swapped in over its far proxy (b1.1g, performance-09). Outside it the
+ *  2-4k `<name>_far.glb` proxy, which rides the world set, stands alone: lazy
+ *  means "when near", not "after the countdown". Real metres, not apparent
+ *  ones — a spyglass sweep must not fetch the map. */
+export const LAZY_PRIORITY_M = 600;
+/** The same line on a phone, where LOD0 is the biggest resident item. */
+export const STORY_LOD0_PHONE_M = 400;
+/** A phone disposes a story scene's LOD0 (its proxy stays) once the island
+ *  edge is beyond this, and re-ensures it on the next approach. */
+export const STORY_EVICT_PHONE_M = 1500;
+
+let phoneProfile: boolean | null = null;
+/** True on a phone/tablet (`?profile=mobile` forces it, `?profile=desktop`
+ *  forbids it): the profile whose story LOD0 is fetched later and evicted. */
+export function storyPhoneProfile(): boolean {
+  if (phoneProfile !== null) return phoneProfile;
+  let forced: string | null = null;
+  try { forced = new URLSearchParams(globalThis.location?.search ?? '').get('profile'); } catch { forced = null; }
+  if (forced === 'mobile') phoneProfile = true;
+  else if (forced === 'desktop') phoneProfile = false;
+  else {
+    const nav = globalThis.navigator as Navigator | undefined;
+    const ua = typeof nav?.userAgent === 'string' ? nav.userAgent : '';
+    const touch = typeof nav?.maxTouchPoints === 'number' ? nav.maxTouchPoints : 0;
+    const coarse = typeof globalThis.matchMedia === 'function' && globalThis.matchMedia('(pointer: coarse)').matches;
+    phoneProfile = /android|iphone|ipad|ipod|\bmobile\b|silk|kindle/i.test(ua) || (touch > 1 && coarse);
+  }
+  return phoneProfile;
+}
 
 /** The 38 the world build needs, the menu does not, and that are not lazy. */
 export const WORLD_ASSET_NAMES: readonly AssetName[] =
@@ -159,7 +193,8 @@ export const FAR_ASSET_NAMES = [
   // skinning shader variant (FAUNAGLB-01).
   'shark',
 ] as const satisfies readonly AssetName[];
-type FarKey = `${(typeof FAR_ASSET_NAMES)[number]}_far`;
+type FarKey = `${(typeof FAR_ASSET_NAMES)[number] | (typeof LAZY_ASSET_NAMES)[number]}_far`;
+const STORY_PROXY_SET: ReadonlySet<string> = new Set<string>(STORY_PROXY_NAMES);
 type AssetKey = AssetName | FarKey;
 
 export interface MergedAsset {
@@ -370,6 +405,16 @@ export class AssetLibrary {
           console.warn(`[assets] no far LOD for ${name} (${name}_far.glb) — near geometry at every distance`, err);
         }
       }) : []),
+      // The story proxies (b1.1g) ride the world set for the opposite reason:
+      // they ARE the content until the island is near, so their LOD0 can stay
+      // out of memory. 15 x 2-4k triangles, a few hundred KB in all.
+      ...(withFarLods ? STORY_PROXY_NAMES.map(async (name) => {
+        try {
+          await loadOne(name, `${name as (typeof LAZY_ASSET_NAMES)[number]}_far`);
+        } catch (err) {
+          console.warn(`[assets] no story proxy for ${name} (${name}_far.glb) — box stand-in until LOD0`, err);
+        }
+      }) : []),
     ]);
   }
 
@@ -468,6 +513,59 @@ export class AssetLibrary {
    */
   mergedGeometry(name: AssetName): MergedAsset | null {
     return this.mergeKey(name);
+  }
+
+  /** The 2-4k far proxy of a lazy story scene, merged like a batch so one
+   *  InstancedMesh stands for it until LOD0 arrives. Null before the world set
+   *  lands or when the proxy file is missing (the caller keeps a box). */
+  mergedStoryProxy(name: AssetName): MergedAsset | null {
+    if (!STORY_PROXY_SET.has(name)) return null;
+    return this.mergeKey(`${name as (typeof LAZY_ASSET_NAMES)[number]}_far`);
+  }
+
+  /** How many story LOD0s have been disposed by `evict()` this session. */
+  storyEvictions = 0;
+
+  /**
+   * Drop a lazy story scene's LOD0 from memory (phones, beyond
+   * STORY_EVICT_PHONE_M): its source scene, merged copy, clips and bounds go,
+   * geometry/material/texture GPU resources are disposed, and the next
+   * `ensure()` fetches it again. Only lazy assets, only once loaded; the
+   * caller (PropScatterer's story slot) guarantees no clone is still in the
+   * scene graph. Returns true when something was released.
+   */
+  evict(name: AssetName): boolean {
+    if (!isLazyAsset(name)) return false;
+    const src = this.scenes.get(name);
+    if (!src) return false;
+    const merged = this.merged.get(name);
+    this.scenes.delete(name);
+    this.merged.delete(name);
+    this.clips.delete(name);
+    this.boundsCache.delete(name);
+    this.ensured.delete(name);
+    const seen = new Set<object>();
+    const drop = (r: { dispose(): void } | null | undefined) => {
+      if (!r || seen.has(r)) return;
+      seen.add(r);
+      r.dispose();
+    };
+    src.traverse((o) => {
+      if (!(o instanceof THREE.Mesh)) return;
+      drop(o.geometry);
+      for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+        if (!m) continue;
+        for (const v of Object.values(m as unknown as Record<string, unknown>)) {
+          if (v && (v as { isTexture?: boolean }).isTexture) drop(v as THREE.Texture);
+        }
+        drop(m);
+      }
+    });
+    // The merged copy's geometry is this asset's own; its materials may be
+    // collapsed and shared with other assets, so they are left alone.
+    if (merged) drop(merged.geometry);
+    this.storyEvictions += 1;
+    return true;
   }
 
   /** The decimated far variant of a rebuilt nature asset, merged and collapsed

@@ -100,31 +100,159 @@ expect('every ensured scene lands', names.every((n) => lib.has(n)));
 expect('an already-loaded name ensures without a fetch',
   lib.ensure(names[0]) instanceof Promise && started.filter((n) => n === names[0]).length === 1);
 
-// ── 3. the per-frame promotion latches, and only inside LAZY_PRIORITY_M ──
-let asks = 0;
-const stand = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial(), 1);
-Lod.attachLazyStoryLod(stand, () => { asks += 1; });
-const batches = Lod.collectInstanceLodBatches(stand);
-expect('the placeholder is collected as a batch', batches.length === 1);
-Lod.updateInstanceLod(batches, Lib.LAZY_PRIORITY_M + 50, 'low', 1);
-expect('no promotion outside LAZY_PRIORITY_M', asks === 0, `asked ${asks}x`);
-Lod.updateInstanceLod(batches, Lib.LAZY_PRIORITY_M - 100, 'low', 1);
-Lod.updateInstanceLod(batches, 10, 'low', 1);
-expect('one promotion inside LAZY_PRIORITY_M, and only one', asks === 1, `asked ${asks}x`);
-expect('the placeholder is never thinned away', stand.count === 1 && stand.visible);
+// ── 3. LAZY MEANS NEAR (b1.1g, performance-09) ───────────────────────────
+// The slot's LOD0 state machine, driven with a stub library: nothing fetched
+// beyond the fetch line, one priority ensure inside it, the proxy hidden in the
+// same step LOD0 appears, a phone evicting past 1.5 km and re-fetching on the
+// next approach, and eviction held while another slot still shows the scene.
+// RED ON f5fee97e..5e1edb53: makeStoryResidency does not exist and
+// lazyStoryStandIn queues an unconditional `assets.ensure(name)` at build time.
+const Scat = await import('../src/client/world/island/PropScatterer.ts');
+const tick = () => new Promise((r) => setTimeout(r, 0));
+function stubLib(deferred = false) {
+  const calls = { ensure: [], evict: [] };
+  const loaded = new Set();
+  const opens = [];
+  return {
+    calls, opens,
+    ensure(n, priority) {
+      calls.ensure.push({ n, priority });
+      if (!deferred) { loaded.add(n); return Promise.resolve(); }
+      return new Promise((res) => opens.push(() => { loaded.add(n); res(); }));
+    },
+    evict(n) { calls.evict.push(n); return loaded.delete(n); },
+  };
+}
+function slotFor(name, phone, lib) {
+  const island = new THREE.Group();
+  const ph = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial());
+  ph.name = `prop-${name}`;
+  island.add(ph);
+  const built = [];
+  const res = Scat.makeStoryResidency({ name, proxy: ph, phone, lib, build: () => { const g = new THREE.Group(); built.push(g); return g; } });
+  return { island, ph, built, res };
+}
+expect('fetch lines: 600 m desktop, 400 m phone, evict beyond 1500 m (phone)',
+  Lib.LAZY_PRIORITY_M === 600 && Lib.STORY_LOD0_PHONE_M === 400 && Lib.STORY_EVICT_PHONE_M === 1500);
+{
+  const lib = stubLib();
+  const s = slotFor('kraken_wreck', false, lib);
+  for (const d of [3000, 1500, 900, Lib.LAZY_PRIORITY_M + 1]) s.res(d);
+  await tick();
+  expect('desktop: no LOD0 fetch while the island edge is beyond 600 m', lib.calls.ensure.length === 0,
+    `fetched ${lib.calls.ensure.length}x`);
+  s.res(Lib.LAZY_PRIORITY_M - 1);
+  await tick();
+  expect('desktop: one PRIORITY ensure on crossing 600 m', lib.calls.ensure.length === 1 && lib.calls.ensure[0].priority === true);
+  const real = s.built[0];
+  expect('the resolve swaps LOD0 in and hides the proxy in the same step (no gap, no double draw)',
+    real?.parent === s.island && s.ph.parent === s.island && s.ph.visible === false && real.name === 'prop-kraken_wreck',
+    `real parent ${real?.parent === s.island}, proxy visible ${s.ph.visible}, name ${real?.name}`);
+  expect('while LOD0 stands the prop-<type> name is on the scene only',
+    s.island.children.filter((c) => c.name === 'prop-kraken_wreck').length === 1);
+  s.res(10); s.res(300);
+  await tick();
+  expect('no second fetch or build while LOD0 stands', lib.calls.ensure.length === 1 && s.built.length === 1);
+  s.res(5000);
+  await tick();
+  expect('desktop never evicts', lib.calls.evict.length === 0 && s.ph.visible === false && real.parent === s.island);
+}
+{
+  const lib = stubLib();
+  const s = slotFor('gallows', true, lib);
+  s.res(500);
+  await tick();
+  expect('phone: no LOD0 fetch at 500 m (phone line is 400 m)', lib.calls.ensure.length === 0);
+  s.res(399);
+  await tick();
+  const first = s.built[0];
+  expect('phone: LOD0 fetched and shown inside 400 m', lib.calls.ensure.length === 1 && first?.parent === s.island && !s.ph.visible);
+  s.res(1400);
+  await tick();
+  expect('phone: LOD0 held between 400 m and 1500 m (hysteresis)', lib.calls.evict.length === 0 && first.parent === s.island);
+  s.res(1501);
+  await tick();
+  expect('phone: past 1500 m LOD0 leaves, the proxy returns, the library evicts once',
+    first.parent === null && s.ph.visible === true && s.ph.name === 'prop-gallows' && lib.calls.evict.length === 1 && lib.calls.evict[0] === 'gallows',
+    `scene parent ${first.parent}, proxy visible ${s.ph.visible}, evictions ${lib.calls.evict.length}`);
+  s.res(2500);
+  expect('phone: an evicted slot evicts nothing more', lib.calls.evict.length === 1);
+  s.res(350);
+  await tick();
+  expect('phone: re-approach re-ensures and re-shows LOD0',
+    lib.calls.ensure.length === 2 && s.built.length === 2 && s.built[1].parent === s.island && !s.ph.visible);
+}
+{
+  const lib = stubLib(true);
+  const s = slotFor('dig_site', true, lib);
+  s.res(100);
+  s.res(1600);
+  lib.opens.shift()();
+  await tick(); await tick();
+  expect('phone: a fetch that lands after its slot went far is not shown and is evicted',
+    s.built.length === 0 && s.ph.visible === true && lib.calls.evict.filter((n) => n === 'dig_site').length === 2);
+}
+{
+  const lib = stubLib();
+  const a = slotFor('mine_head', true, lib);
+  const b = slotFor('mine_head', true, lib);
+  a.res(100); b.res(100);
+  await tick();
+  a.res(2000);
+  expect('phone: a scene another slot still shows is not evicted', lib.calls.evict.length === 0);
+  b.res(2000);
+  expect('phone: the last holder letting go evicts it', lib.calls.evict.length === 1);
+}
+{
+  const seen = [];
+  const stand = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial(), 1);
+  Lod.attachLazyStoryLod(stand, (d) => seen.push(d));
+  const batches = Lod.collectInstanceLodBatches(stand);
+  expect('the proxy is collected as a batch', batches.length === 1);
+  Lod.updateInstanceLod(batches, 500, 'low', 12);
+  Lod.updateLazyStoryResidency(batches, 1800);
+  expect('residency gets REAL edge metres (a 12x scope does not fetch the map), on and off the detail band',
+    seen.length === 2 && seen[0] === 500 && seen[1] === 1800, `saw ${seen.join(', ')}`);
+  expect('the proxy is never thinned away', stand.count === 1 && stand.visible);
+  const game = read('src/client/core/Game.ts');
+  expect('Game drives residency for islands off the detail band', /else if \(instanceBatches\)[\s\S]{0,200}updateLazyStoryResidency\(instanceBatches, edgeDist\)/.test(game));
+}
+{
+  // AssetLibrary: proxies ride the world set, LOD0 does not; evict releases.
+  const lib2 = new Lib.AssetLibrary();
+  const urls = [];
+  lib2.loader = { loadAsync(url) { urls.push(url.replace('/assets/models/', '').replace('.glb', '')); return Promise.resolve({ scene: new THREE.Group(), animations: [] }); } };
+  await lib2.preloadWorld();
+  const proxies = Lib.STORY_PROXY_NAMES;
+  expect(`preloadWorld fetches every shipped story proxy (${proxies.length}/15) and no story LOD0`,
+    proxies.every((n) => urls.includes(`${n}_far`)) && ![...lazy].some((n) => urls.includes(n))
+    && urls.filter((u) => u.endsWith('_far') && lazy.has(u.slice(0, -4))).length === proxies.length);
+  expect('every shipped proxy is a story scene', proxies.every((n) => lazy.has(n)));
+  await lib2.ensure('whale_skeleton');
+  expect('evict() releases a loaded story scene', lib2.evict('whale_skeleton') === true && !lib2.has('whale_skeleton') && lib2.storyEvictions === 1);
+  expect('evict() refuses a non-story asset', lib2.evict('palm_a') === false);
+  const before = urls.filter((u) => u === 'whale_skeleton').length;
+  await lib2.ensure('whale_skeleton');
+  expect('an evicted scene is fetched again by the next ensure()', urls.filter((u) => u === 'whale_skeleton').length === before + 1);
+}
 
 // ── 4. the placeholder is seated and named like the scene it replaces ────
 const scat = read('src/client/world/island/PropScatterer.ts');
-expect('the non-instanced path falls back to a story stand-in',
-  /buildPropInstance\([\s\S]{0,200}?\?\?\s*lazyStoryStandIn\(/.test(scat));
+expect('a story type always starts as its proxy (residency decides, not build order)',
+  /isLazyAsset\(prop\.type\)\s*\?\s*lazyStoryStandIn\(/.test(scat));
+const standIn = (scat.split('function lazyStoryStandIn')[1] ?? '').split('\n}\n')[0];
+expect('EAGER-ENSURE MUTATION GUARD: the stand-in queues no fetch at build time',
+  !/assets\.ensure\(/.test(standIn), 'lazyStoryStandIn calls assets.ensure() — every story LOD0 would load whatever the distance');
+expect('the stand-in is the merged far proxy (box only as a fallback)',
+  /assets\.mergedStoryProxy\(/.test(scat.split('function makeStoryProxy')[1] ?? ''));
 expect('the stand-in lifts the unit box by its own half-height (seated, not sunk)',
   /new THREE\.Vector3\(0, half\[1\] \* scale, 0\)/.test(scat));
 expect('the stand-in carries the prop-<type> name through the swap',
   /real\.name = ph\.name/.test(scat));
 expect('the swap goes through swapInStoryScene',
-  /swapInStoryScene\(ph, real\)/.test(scat.split('function lazyStoryStandIn')[1] ?? ''));
-expect('the swap re-parents into the stand-in\'s slot',
-  /parent\.add\(real\);[\s\S]{0,120}parent\.remove\(ph\)/.test(scat.split('function swapInStoryScene')[1] ?? ''));
+  /swapInStoryScene\(proxy, node\)/.test(scat.split('function makeStoryResidency')[1] ?? ''));
+expect('the swap adds into the stand-in\'s slot and hides the proxy',
+  /parent\.add\(real\);[\s\S]{0,120}ph\.visible = false/.test(scat.split('function swapInStoryScene')[1] ?? ''));
 expect('the real scene gets the shadow flags and the story-pad blend',
   /blendStoryPad\(obj, island\)/.test(scat.split('function lazyStoryStandIn')[1] ?? ''));
 
@@ -169,8 +297,8 @@ expect('the real scene gets the shadow flags and the story-pad blend',
   const wantPart = new THREE.Matrix4().multiplyMatrices(want, part.matrix);
   const close = (a, b) => a.elements.every((v, i) => Math.abs(v - b.elements[i]) < 1e-4);
   const at = new THREE.Vector3().setFromMatrixPosition(real.matrixWorld);
-  expect('the swap reports success and replaces the stand-in',
-    swapped === true && real.parent === islandGroup && ph.parent === null);
+  expect('the swap reports success, adds the scene and hides the stand-in',
+    swapped === true && real.parent === islandGroup && ph.parent === islandGroup && ph.visible === false);
   expect('after the swap real.matrixWorld == island.matrixWorld * real.matrix (frozen parent)',
     close(real.matrixWorld, want),
     `scene draws at (${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}), stand-in stood at (${phWorld.x.toFixed(1)}, ${phWorld.y.toFixed(1)}, ${phWorld.z.toFixed(1)})`);
@@ -178,7 +306,7 @@ expect('the real scene gets the shadow flags and the story-pad blend',
   expect('the scene stands where its stand-in stood', at.distanceTo(phWorld) < 1e-3,
     `off by ${at.distanceTo(phWorld).toFixed(1)} m`);
   expect('a stand-in that already left the graph swaps nothing',
-    Scat.swapInStoryScene(ph, new THREE.Group()) === false);
+    (islandGroup.remove(ph), Scat.swapInStoryScene(ph, new THREE.Group()) === false));
 }
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — ${checks - failures}/${checks} checks`);

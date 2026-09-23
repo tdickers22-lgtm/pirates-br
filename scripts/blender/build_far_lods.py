@@ -92,6 +92,32 @@ FAR = {
     'searock_a': (0.19, None), 'searock_b': (0.19, None), 'searock_c': (0.17, None),
 }
 
+# THE STORY PROXIES (2026-09-23, b1.1g). The fifteen lazy story tableaux are
+# 25-48k triangles each (gibbet_cage 5.6k) and stood behind a flat brown BOX
+# until their LOD0 arrived, which on a phone was never "near": every one was
+# fetched within 20 s of the horn and held for the whole match. Each now ships
+# a 2-4k `<name>_far.glb` proxy that rides the world set and stands until the
+# island edge is close enough to want the hero (PropScatterer). Same weld ->
+# per-part decimate -> card -> base snap as the nature set, same integrity bar
+# (area >= 92%, no new boundary loop), plus a triangle BAND: the collapse ratio
+# is not a constant but is solved per scene (up to five builds) until the far
+# file lands inside STORY_TRIS, and verify() fails any scene outside it. The
+# closed-part floor is lower than nature's 12 because a tableau is hundreds of
+# small closed props (bottles, coins, rope beads) and a 12-triangle floor on
+# each would hold the file above the band on floors alone.
+STORY = [
+    'smuggler_cache', 'skull_totem', 'wrecker_tower', 'whale_skeleton',
+    'rum_still', 'crow_roost', 'mermaid_shrine', 'castaway_camp',
+    'kraken_wreck', 'dig_site', 'gallows', 'parley_table',
+    'mine_head', 'widow_memorial', 'gibbet_cage',
+]
+STORY_TRIS = (2000, 4000)
+STORY_TARGET = 3000
+STORY_MIN_CLOSED_TRIS = 4
+# The story set is built only when asked for (BR_FAR_STORY=1, or named in
+# BR_FAR_ONLY): a default nature rebuild must not depend on it.
+STORY_FAR = {_n: (None, 'card') for _n in STORY}
+
 
 def wipe():
     bpy.ops.object.select_all(action='SELECT')
@@ -267,7 +293,7 @@ def card_from_part(part):
     me.update()
 
 
-def decimate_per_part(obj, ratio, sheets):
+def decimate_per_part(obj, ratio, sheets, floor=MIN_CLOSED_TRIS):
     """Reduce each LOOSE PART on its own: Collapse for closed parts, a flat
     equal-area card for open sheets (when `sheets == 'card'`).
 
@@ -296,7 +322,7 @@ def decimate_per_part(obj, ratio, sheets):
             tris = len(part.data.polygons)
             mod = part.modifiers.new('far', 'DECIMATE')
             mod.decimate_type = 'COLLAPSE'
-            mod.ratio = max(ratio, min(1.0, MIN_CLOSED_TRIS / max(1, tris)))
+            mod.ratio = max(ratio, min(1.0, floor / max(1, tris)))
             mod.use_collapse_triangulate = True
             apply_modifier(part, mod)
     bpy.ops.object.select_all(action='DESELECT')
@@ -337,6 +363,23 @@ def snap_base(obj, zmin):
 
 
 def build(name, ratio, sheets):
+    if ratio is not None:
+        return build_once(name, ratio, sheets, MIN_CLOSED_TRIS)
+    # Story proxy: solve the ratio for the triangle band (see STORY).
+    lo, hi = STORY_TRIS
+    r = 0.11
+    row = None
+    for _attempt in range(5):
+        row = build_once(name, r, sheets, STORY_MIN_CLOSED_TRIS)
+        src_t, far_t = row['src']['tris'], row['far']['tris']
+        target = min(STORY_TARGET, 0.37 * src_t)
+        if lo <= far_t <= hi and far_t <= 0.4 * src_t:
+            break
+        r = min(0.38, max(0.004, r * target / max(1, far_t)))
+    return row
+
+
+def build_once(name, ratio, sheets, floor):
     wipe()
     src = os.path.abspath(os.path.join(SRC_DIR, f'{name}.glb'))
     before = set(bpy.data.objects)
@@ -362,7 +405,7 @@ def build(name, ratio, sheets):
         s = surface_stats(me)
         for k in src_stats:
             src_stats[k] += s[k]
-        decimate_per_part(obj, ratio, sheets)
+        decimate_per_part(obj, ratio, sheets, floor)
         snapped += snap_base(obj, src_base)
         f = surface_stats(obj.data)
         for k in far_stats:
@@ -417,18 +460,23 @@ def verify(rows):
             problems.append(f'area {area_keep:.0%} < {MIN_AREA_KEEP:.0%}')
         if keep > 0.4:
             problems.append(f'keeps {keep:.0%} of the triangles (> 40%)')
+        if r['name'] in STORY and not (STORY_TRIS[0] <= f['tris'] <= STORY_TRIS[1]):
+            problems.append(f"story proxy {f['tris']} tris outside {STORY_TRIS[0]}-{STORY_TRIS[1]}")
         if r['far_base'] < r['src_base'] - 1e-4:
             problems.append(f"far base {r['far_base']:.3f} under source base {r['src_base']:.3f}")
         verdict = 'ok' if not problems else 'FAIL: ' + '; '.join(problems)
         if problems:
             failed.append(r['name'])
         sheets = '-' if r['sheets'] is None else r['sheets']
-        print(f"{r['name']:>14} {r['ratio']:>5.2f} {sheets:>5} {r['flat_share']:>5.0%} {s['tris']:>8} {f['tris']:>8} {keep:>5.0%} {s['loops']:>9} {f['loops']:>9} {s['area']:>9.2f} {f['area']:>9.2f} {area_keep:>6.0%} {r['far_base']:>7.3f} {r['snapped']:>5}  {verdict}")
+        print(f"{r['name']:>14} {r['ratio'] if r['ratio'] is not None else 0:>5.3f} {sheets:>5} {r['flat_share']:>5.0%} {s['tris']:>8} {f['tris']:>8} {keep:>5.0%} {s['loops']:>9} {f['loops']:>9} {s['area']:>9.2f} {f['area']:>9.2f} {area_keep:>6.0%} {r['far_base']:>7.3f} {r['snapped']:>5}  {verdict}")
     return failed
 
 
 ONLY = {n.strip() for n in os.environ.get('BR_FAR_ONLY', '').split(',') if n.strip()}
-unknown = ONLY - set(FAR)
+WANT_STORY = os.environ.get('BR_FAR_STORY') == '1' or bool(ONLY & set(STORY_FAR))
+if WANT_STORY:
+    FAR.update(STORY_FAR)
+unknown = ONLY - set(FAR) - set(STORY_FAR)
 if unknown:
     print(f"BR_FAR_ONLY names no far asset: {', '.join(sorted(unknown))}")
     sys.exit(1)

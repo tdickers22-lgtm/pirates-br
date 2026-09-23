@@ -7,7 +7,7 @@
  */
 import * as THREE from 'three';
 import type { Island, IslandNpc, IslandProp, IslandPropType } from '../../../shared/types/index.js';
-import { assets, isLazyAsset, type AssetName } from '../../assets/AssetLibrary.js';
+import { assets, isLazyAsset, LAZY_PRIORITY_M, STORY_EVICT_PHONE_M, STORY_LOD0_PHONE_M, storyPhoneProfile, type AssetName } from '../../assets/AssetLibrary.js';
 import { BIOME_PALETTES, getPropGroundY, PROP_COLLIDERS, radialFill } from '../../../shared/props.js';
 import { coverBudget, makeFernRosetteGeometry, makeGrassTuftGeometry, understoryDensity } from './FoliageGeometry.js';
 import { registerBudgetLight } from '../../rendering/LightBudget.js';
@@ -97,15 +97,19 @@ let placeholderGeo: THREE.BoxGeometry | null = null;
 let placeholderMat: THREE.MeshStandardMaterial | null = null;
 
 /**
- * Stand a placeholder for a story scene that has not been fetched yet, queue
- * the fetch, and swap the real tableau in at the same transform when it lands
- * (LOD-01 / assets-08). Returns null for anything that is not a lazy asset —
- * a genuinely failed GLB still falls through to the caller's `continue`.
+ * Stand a story scene's 2-4k far PROXY (b1.1g; a box only when the proxy file
+ * is missing) and hand its LOD0 residency to the per-frame LOD update. Returns
+ * null for anything that is not a lazy asset.
  *
- * TWO requests, deliberately: the background one here means every scene arrives
- * whether or not the player ever sails near (the prop census and the world's
- * own completeness do not depend on where the camera went), and the promotion
- * `updateInstanceLod` fires inside LAZY_PRIORITY_M only re-orders the queue.
+ * LAZY MEANS NEAR (performance-09). This used to queue a background
+ * `assets.ensure(name)` right here, so every one of the fifteen 25-48k scenes
+ * was fetched within 20 s of the horn and held for the whole match whatever
+ * the distance, behind a flat brown box. Now nothing is fetched at build time:
+ * LOD0 is ensured when the island EDGE comes inside LAZY_PRIORITY_M (600 m;
+ * STORY_LOD0_PHONE_M 400 m on a phone), the proxy stands until it resolves,
+ * and a phone disposes LOD0 beyond STORY_EVICT_PHONE_M and re-ensures it on
+ * the next approach. scripts/test-story-lazy.mjs grades the state machine and
+ * fails an eager ensure.
  */
 function lazyStoryStandIn(
   type: string,
@@ -117,31 +121,96 @@ function lazyStoryStandIn(
 ): THREE.InstancedMesh | null {
   if (!isLazyAsset(type)) return null;
   const name = type as AssetName;
-  const ph = makeStoryPlaceholder(type, position, yaw, scale);
+  const ph = makeStoryProxy(type, position, yaw, scale);
   ph.castShadow = !lowDetail;
   ph.receiveShadow = true;
-  attachLazyStoryLod(ph, () => { void assets.ensure(name, true); });
-  void assets.ensure(name).then(() => {
-    const parent = ph.parent;
-    if (!parent) return;
-    const real = buildPropInstance(name, position, yaw, scale);
-    if (!real) return;
-    real.name = ph.name;
-    real.traverse((obj) => {
-      if (obj instanceof THREE.Mesh) {
-        obj.castShadow = !lowDetail;
-        obj.receiveShadow = true;
-        blendStoryPad(obj, island);
-      }
-    });
-    swapInStoryScene(ph, real);
-  });
+  attachLazyStoryLod(ph, makeStoryResidency({
+    name,
+    proxy: ph,
+    phone: storyPhoneProfile(),
+    build: () => {
+      const real = buildPropInstance(name, position, yaw, scale);
+      if (!real) return null;
+      real.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.castShadow = !lowDetail;
+          obj.receiveShadow = true;
+          blendStoryPad(obj, island);
+        }
+      });
+      return real;
+    },
+  }));
   return ph;
 }
 
+/** Slots currently fetching or showing each story scene's LOD0. A phone
+ *  evicts a name only when its last holder lets go. */
+const storyHolders = new Map<string, Set<object>>();
+
+export interface StoryResidencyLib {
+  ensure(name: AssetName, priority?: boolean): Promise<void>;
+  evict(name: AssetName): boolean;
+}
+
 /**
- * Replace a story stand-in with the scene that just landed, in the stand-in's
- * slot. Returns false (and adds nothing) when the stand-in has left the graph.
+ * The LOD0 state machine of one story slot: proxy -> fetching -> LOD0 shown,
+ * and on a phone back to proxy (LOD0 disposed) past the eviction line. The
+ * returned function takes the island's edge distance in real metres; it does
+ * nothing (two comparisons) when there is nothing to change. `lib` is the
+ * asset library (injectable for the logic suite).
+ */
+export function makeStoryResidency(opts: {
+  name: AssetName;
+  proxy: THREE.Object3D;
+  phone: boolean;
+  build: () => THREE.Object3D | null;
+  lib?: StoryResidencyLib;
+}): (edgeMetres: number) => void {
+  const { name, proxy, phone, build } = opts;
+  const lib: StoryResidencyLib = opts.lib ?? assets;
+  const fetchM = phone ? STORY_LOD0_PHONE_M : LAZY_PRIORITY_M;
+  let holders = storyHolders.get(name);
+  if (!holders) { holders = new Set(); storyHolders.set(name, holders); }
+  const slot = {};
+  let real: THREE.Object3D | null = null;
+  let pending = false;
+  let gen = 0;
+  return (edgeMetres: number) => {
+    if (edgeMetres < fetchM) {
+      if (real || pending) return;
+      pending = true;
+      holders.add(slot);
+      const mine = ++gen;
+      void lib.ensure(name, true).then(() => {
+        if (mine !== gen) {
+          // Evicted while in flight: the file landed with nobody wanting it.
+          if (phone && holders.size === 0) lib.evict(name);
+          return;
+        }
+        pending = false;
+        const node = build();
+        if (!node || !swapInStoryScene(proxy, node)) { holders.delete(slot); return; }
+        real = node;
+      });
+      return;
+    }
+    if (phone && edgeMetres > STORY_EVICT_PHONE_M && (real || pending)) {
+      gen += 1;
+      pending = false;
+      if (real) { swapOutStoryScene(proxy, real); real = null; }
+      holders.delete(slot);
+      if (holders.size === 0) lib.evict(name);
+    }
+  };
+}
+
+/**
+ * Show a story scene that just landed in its proxy's slot, and hide the proxy
+ * in the same synchronous step (no frame shows neither). The proxy STAYS in
+ * the graph: it carries the residency batch, and on a phone it comes back when
+ * LOD0 is evicted. The `prop-<type>` name moves to the scene while it stands.
+ * Returns false (and adds nothing) when the proxy has left the graph.
  *
  * THE SLOT IS INSIDE A FROZEN ISLAND (islands-16). IslandBuilder froze the
  * island group with freezeStaticSubtree long before this GLB arrived, and three
@@ -156,10 +225,42 @@ function lazyStoryStandIn(
 export function swapInStoryScene(ph: THREE.Object3D, real: THREE.Object3D): boolean {
   const parent = ph.parent;
   if (!parent) return false;
+  real.name = ph.name;
   parent.add(real);
   refreshFrozenChild(real);
-  parent.remove(ph);
+  ph.visible = false;
+  ph.name = `story-proxy-${real.name}`;
   return true;
+}
+
+/** Undo swapInStoryScene (phone eviction): the proxy shows again in the same
+ *  step the scene leaves, and the scene's own (non-library) materials — the
+ *  story-pad blends — are disposed with it. */
+export function swapOutStoryScene(ph: THREE.Object3D, real: THREE.Object3D): void {
+  ph.visible = true;
+  ph.name = real.name;
+  real.parent?.remove(real);
+  real.traverse((obj) => {
+    if (!(obj instanceof THREE.Mesh)) return;
+    for (const m of Array.isArray(obj.material) ? obj.material : [obj.material]) {
+      if (m && !assets.isShared(m)) m.dispose();
+    }
+  });
+}
+
+/** The far proxy as a one-instance InstancedMesh (so it is a LOD batch), or
+ *  the old seated box when the proxy file did not load. */
+function makeStoryProxy(type: string, position: THREE.Vector3, yaw: number, scale: number): THREE.InstancedMesh {
+  const merged = assets.mergedStoryProxy(type as AssetName);
+  if (!merged) return makeStoryPlaceholder(type, position, yaw, scale);
+  const mesh = new THREE.InstancedMesh(merged.geometry, merged.material, 1);
+  mesh.setMatrixAt(0, new THREE.Matrix4());
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.position.copy(position);
+  mesh.rotation.y = yaw;
+  mesh.scale.setScalar(scale);
+  mesh.frustumCulled = true;
+  return mesh;
 }
 
 function makeStoryPlaceholder(type: string, position: THREE.Vector3, yaw: number, scale: number): THREE.InstancedMesh {
@@ -529,9 +630,11 @@ export function buildServerProps(ctx: IslandBuildCtx) {
         getPropGroundY(island, prop) - propBaseLift(prop.type, prop.scale),
         prop.z - island.position.z,
       );
-      const node: THREE.Object3D | null =
-        buildPropInstance(prop.type as AssetName, localPos, prop.yaw, prop.scale)
-        ?? lazyStoryStandIn(prop.type, localPos, prop.yaw, prop.scale, island, lowDetail);
+      // A story scene ALWAYS starts as its proxy, even when LOD0 is already
+      // resident: residency, not build order, decides what stands (b1.1g).
+      const node: THREE.Object3D | null = isLazyAsset(prop.type)
+        ? lazyStoryStandIn(prop.type, localPos, prop.yaw, prop.scale, island, lowDetail)
+        : buildPropInstance(prop.type as AssetName, localPos, prop.yaw, prop.scale);
       if (!node) continue;
       node.name = `prop-${prop.type}`;
       queueContactShadow(ctx, localPos.x, localPos.z, propShadowRadius(prop.type, prop.scale), propShadowStrength(prop.type));

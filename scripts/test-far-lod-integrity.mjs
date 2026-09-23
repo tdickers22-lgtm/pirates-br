@@ -42,6 +42,9 @@ export const MIN_AREA_KEEP = 0.92;
 /** …and one that keeps more triangles than this is not a far LOD. */
 export const MAX_TRI_KEEP = 0.4;
 const TABLE_ONLY = process.argv.includes('--table');
+/** b1.1g: a story proxy stands in for a 25-48k tableau until the island is
+ *  near, so it must be a real shape (same area/loop bar) AND a cheap one. */
+export const STORY_TRIS = [2000, 4000];
 
 export const isRock = (name) => /^(boulder|searock)_/.test(name);
 /** The shark's far file is a rigid puppet built from scratch, not a decimation
@@ -206,8 +209,17 @@ export function farAssetNames() {
   return [...block[1].matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]);
 }
 
+/** The story scenes whose `<name>_far.glb` proxy has shipped (AssetLibrary
+ *  STORY_PROXY_NAMES): wired, so a missing file fails and the band applies. */
+export function storyAssetNames() {
+  const src = fs.readFileSync(ASSET_LIB, 'utf8');
+  const block = src.match(/STORY_PROXY_NAMES[^=]*=\s*\[([\s\S]*?)\]/);
+  if (!block) throw new Error('STORY_PROXY_NAMES not found in AssetLibrary.ts');
+  return [...block[1].matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]);
+}
+
 export function gradeAll() {
-  const wired = farAssetNames();
+  const wired = [...farAssetNames(), ...storyAssetNames()];
   const onDisk = fs.readdirSync(DIR).filter((f) => f.endsWith('_far.glb')).map((f) => f.slice(0, -'_far.glb'.length));
   const names = [...new Set([...wired, ...onDisk])].sort();
   const rows = [];
@@ -247,6 +259,7 @@ function main() {
   printTable(rows);
   if (TABLE_ONLY) return;
   console.log('');
+  console.log(`  – story proxies shipped: ${storyAssetNames().length}/15 (b1.1g2 ships the rest)`);
   expect('every far file on disk has a source, and every wired far asset has a file', rows.every((r) => !r.missing),
     rows.filter((r) => r.missing).map((r) => `${r.name}: ${r.missing}`).join('; '));
   for (const r of rows) {
@@ -263,6 +276,10 @@ function main() {
       expect(`${name}_far opens no more boundary loops than its source`,
         far.boundaryLoops <= near.boundaryLoops,
         `${far.boundaryLoops} loop(s) vs source ${near.boundaryLoops}`);
+    }
+    if (storyAssetNames().includes(name)) {
+      expect(`${name}_far is a ${STORY_TRIS[0]}-${STORY_TRIS[1]} triangle story proxy`,
+        far.drawnTris >= STORY_TRIS[0] && far.drawnTris <= STORY_TRIS[1], `${far.drawnTris} triangles`);
     }
     if (isDecimated(name)) {
       expect(`${name}_far keeps ≥ ${Math.round(MIN_AREA_KEEP * 100)}% of the source's surface area`,
