@@ -29,6 +29,7 @@ const V = await tryImport('../src/client/input/VirtualInputSource.ts');
 const IM = await tryImport('../src/client/input/InputManager.ts');
 const { Match } = await import('../src/server/core/Match.ts');
 const { SHIP } = await import('../src/shared/constants/index.ts');
+const { TRUCE_SECONDS } = await import('../src/shared/truce.ts');
 
 // ── The stick and the buttons ─────────────────────────────────────────────
 console.log('\nVirtual stick and buttons');
@@ -254,7 +255,10 @@ if (TC && V && IM) {
   c.stand.at = () => c.match.snapPlayerToCannon(c.player, c.ship, 0);
   c.tap('interact', 'cannon');
   expect('a tap on Interact at a gun mans the cannon', c.player.atCannon === true);
-  // Past the gun's own cooldown (the opening truce of a station).
+  // Past the gun's own cooldown (the opening truce of a station), and past the
+  // D23 match truce: WeaponSystem reads match.t since 21665d46 and refuses every
+  // cannon before TRUCE_SECONDS, so the plan's case is "fires AFTER the truce".
+  c.match.t = TRUCE_SECONDS + 1;
   c.ship.cannonCooldowns = c.ship.cannonCooldowns.map(() => 0);
   for (let i = 0; i < 30; i++) c.send();
   const isBall = (p) => p.ownerId === c.player.id && /cannon|chain|fire/i.test(String(p.type ?? p.kind ?? p.ammo ?? ''));
