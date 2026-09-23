@@ -26,6 +26,7 @@ import {
 import { Renderer, dayNightSecondsForMatchProgress } from '../rendering/Renderer.js';
 import { FrameGuard, showFrameFaultOverlay } from './frameGuard.js';
 import { installErrorBeacon, reportBeacon } from '../network/errorBeacon.js';
+import { installSessionTelemetry, sessionTelemetry } from '../network/sessionTelemetry.js';
 import { OceanRenderer } from '../rendering/OceanRenderer.js';
 import { ShipRenderer } from '../rendering/ShipRenderer.js';
 import { SpoilsRenderer } from '../rendering/SpoilsRenderer.js';
@@ -1108,6 +1109,8 @@ export class Game {
     // device, and follows every scheme change from here on (b1.4f).
     installGlyphs();
     installErrorBeacon({ isLoaded: () => this.ui.loadingScreen.classList.contains('hidden') });
+    installSessionTelemetry(); // b1.7c: one summary per match + the memory-kill marker check
+    framePacer.setRenderedTap((ms) => sessionTelemetry.recordFrame(ms));
     document.addEventListener('contextmenu', (event) => event.preventDefault());
 
     this.setLoading(4, 'Hoisting sails...');
@@ -1256,6 +1259,7 @@ export class Game {
       this.renderCrewFoundCard();
     }
     this.inMatch = true;
+    sessionTelemetry.matchStart();
     this.menu.setLastMatchPartyCode(payload?.partyCode ?? null);
     this.hud.setPartyCode(payload?.partyCode ?? null);
     this.scheduleJoinAssignmentWatchdog();
@@ -1951,6 +1955,7 @@ export class Game {
   private goBackToMenuFromMatch(): void {
     this.network.returnToMenu();
     this.inMatch = false;
+    sessionTelemetry.matchEnd(false);
     this.matchResultsShown = false;
     this.ui.deathScreen.classList.remove('visible');
     this.ui.deathScreen.style.display = 'none';
@@ -2275,6 +2280,7 @@ export class Game {
           ? 'Last crew afloat takes the seas'
           : 'The voyage ended';
       this.matchResultsShown = true;
+      sessionTelemetry.matchEnd(true);
       const fleet = result.crewCount ?? rows.length;
       const standing = youRow
         ? (won ? `Place: #1 of ${fleet} — the seas are yours` : `Place: #${youRow.placement} of ${fleet}`)
