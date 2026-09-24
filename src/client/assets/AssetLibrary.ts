@@ -234,6 +234,8 @@ export const REHYDRATE_CONCURRENCY = 3;
 
 export class AssetLibrary {
   private scenes = new Map<AssetKey, THREE.Group>();
+  /** cloneTinted copies, one per (template material uuid, colour). */
+  private tintedMaterials = new Map<string, THREE.MeshStandardMaterial>();
   private merged = new Map<AssetKey, MergedAsset>();
   /** Animation clips per asset — GLTFLoader hands them back beside the scene,
    *  not on it, so they would otherwise be dropped on the floor. */
@@ -689,13 +691,22 @@ export class AssetLibrary {
   cloneTinted(name: AssetName, matchMat: string, color: THREE.ColorRepresentation): THREE.Group | null {
     const root = this.clone(name);
     if (!root) return null;
+    const hex = new THREE.Color(color).getHexString();
     root.traverse((o) => {
       if (o instanceof THREE.Mesh) {
         const mats = Array.isArray(o.material) ? o.material : [o.material];
         const cloned = mats.map((m) => {
           if (m.name === matchMat && m instanceof THREE.MeshStandardMaterial) {
-            const c = m.clone();
-            c.color.set(color);
+            // b1-ask-05: one tinted copy per (template material, colour), shared by
+            // every clone; each copy costs the renderer its own uniforms clone.
+            const key = `${m.uuid}|${hex}`;
+            let c = this.tintedMaterials.get(key);
+            if (!c) {
+              c = m.clone();
+              c.color.set(color);
+              this.tintedMaterials.set(key, c);
+              this.sharedResources.add(c); // per-object disposal must skip it now
+            }
             return c;
           }
           return m;
