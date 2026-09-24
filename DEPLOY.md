@@ -127,6 +127,25 @@ Queue model at this commit (`node --import tsx scripts/test-capacity-sim.mjs`, 6
 (shipped, b1.2h), cheaper ticks (b2.1h), match worker threads (b2.0b-c) and only then
 performance-2x / 4 GB after the owner's yes (O6), fly-replay scale-out (b5.5d).
 
+**Match worker threads (lever 3, b2.0b-c).** `PIRATES_BR_MATCH_WORKERS = "auto"` is in `fly.toml`:
+one worker_thread per vCPU, and 0 (matches on the lobby thread, exactly as before) on a 1-vCPU
+machine, so it does nothing on performance-1x and turns on by itself on performance-2x. The gate is
+`node --import tsx scripts/perf-server-load.mjs --scaling 2` (in-process `--report`, then
+`--report --workers 2`, two fresh processes; bar: >= 1.8x the single-thread match count at
+`worstSimLagSec < 0.1`). `node --import tsx scripts/test-capacity-sim.mjs --deployed` grades the D8
+bar at the MAX_MATCHES `fly.toml` ships (red at the provisional 2 by design). Local runs on the Air
+(8 cores, other sessions loading it; not a Fly measurement, never stamped into the table above):
+
+| run | commit | threads | maxMatches (worstSimLagSec < 0.1) | load1 | date |
+|---|---|---|---|---|---|
+| `--report` | 96214750 | 1 (in-process) | 4 (5th: lag 1.27 s, 144 dropped) | 6.8 | 2026-09-24 |
+
+Moving to performance-2x is owner step O6 (about $62/month instead of about $31/month) and only
+after the app exists (O2). On a yes: `fly scale vm performance-2x --memory 4096 -a pirates-br`, then
+`fly ssh console -C "node --import tsx scripts/perf-server-load.mjs --report"` (workers come from
+the env), set `PIRATES_BR_MAX_MATCHES` to the result with 30% headroom, run
+`test-capacity-sim --deployed`, and add the new top row to the capacity record.
+
 ## Environment
 
 | Variable | Where | Default | Meaning |
