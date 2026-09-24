@@ -24,8 +24,21 @@ import { storyPhoneProfile } from '../assets/AssetLibrary.js';
  * was already uploaded before arming simply keeps its copy (a missed saving, never
  * a broken mesh). Bounds are computed first so frustum culling never needs the
  * vertices again. The array is replaced by an empty one of the same type rather
- * than null: a context restore then re-uploads an empty buffer (the mesh vanishes
- * until reload) instead of throwing inside the render loop.
+ * than null, so a draw between a context restore and the rebuild below uploads
+ * an empty buffer instead of throwing inside the render loop.
+ *
+ * CONTEXT LOSS (b1-ask-04). A lost context takes the GPU copy with it, and a
+ * released attribute has no CPU copy left to re-upload, so every island batch
+ * and every released library template would draw nothing for the rest of the
+ * match. So the drop first parks the bytes in a Blob (off the JS heap: WebKit
+ * keeps blob data in the network process, Chromium in the browser process, so
+ * neither the tab's heap nor the jetsam footprint pays for it), and
+ * `restoreReleasedCpuCopies()` (Renderer, on webglcontextrestored) reads every
+ * backup back, gives the attributes their arrays, disposes the geometry's GL
+ * buffers (the empty ones a draw made on the new context: three's buffer update
+ * is a bufferSubData that cannot grow them) and re-queues the geometry for the
+ * eager pass, which drops the arrays again after the fresh upload. Release stays
+ * on after a loss; a second loss restores the same way.
  *
  * WHERE. Phone/iPad profile only (storyPhoneProfile) — desktops have the memory,
  * and desktop audits read batch vertices. `?cpurelease=1` forces it on, `=0` off.
@@ -34,7 +47,7 @@ import { storyPhoneProfile } from '../assets/AssetLibrary.js';
 const RELEASED_KEY = '__cpuReleasedBytes';
 const BATCH_NAME = /-batch\d*$/;
 
-type Releasable = THREE.BufferAttribute & { [RELEASED_KEY]?: number };
+type Releasable = THREE.BufferAttribute & { [RELEASED_KEY]?: number; __cpuBackup?: Blob };
 
 let enabled: boolean | null = null;
 let armedBytes = 0;
@@ -43,13 +56,96 @@ let releasedBytes = 0;
 let eagerPasses = 0;
 let eagerBytes = 0;
 
-/** b1-ask-04: after a WebGL context loss a released attribute re-uploads
- *  empty, so this session stops releasing (islands built from now on keep
- *  their CPU copy and survive the next loss). Called by Renderer on
- *  webglcontextlost. Islands released BEFORE the loss still need a rebuild. */
-export function disableCpuCopyReleaseAfterContextLoss(): void {
-  enabled = false;
-  pending.clear();
+const BACKUP_KEY = '__cpuBackup';
+
+/** Geometries holding at least one released attribute with a backup (restore set). */
+const releasedGeoms = new Set<THREE.BufferGeometry>();
+/** Attribute -> geometry, recorded when the drop is armed (the upload callback only sees the attribute). */
+const ownerOf = new WeakMap<THREE.BufferAttribute, THREE.BufferGeometry>();
+/** True while the restore itself disposes GL buffers (not a real disposal). */
+let resettingGpu = false;
+let restoreJob: Promise<number> | null = null;
+let restoresPending = 0;
+let restoredGeoms = 0;
+let restoredBytes = 0;
+
+function onReleasedDispose(event: { target: THREE.BufferGeometry }): void {
+  if (resettingGpu) return;
+  const g = event.target;
+  releasedGeoms.delete(g);
+  g.removeEventListener('dispose', onReleasedDispose);
+  for (const a of geometryAttributes(g)) if (a) delete (a as Releasable)[BACKUP_KEY];
+}
+
+function noteOwner(a: THREE.BufferAttribute | null, g: THREE.BufferGeometry): void {
+  if (a) ownerOf.set(a, g);
+}
+
+/** Park the bytes off the JS heap before the drop; reuse the backup of a re-drop. */
+function backUp(attr: Releasable): void {
+  if (attr[BACKUP_KEY] || typeof Blob !== 'function') return;
+  const g = ownerOf.get(attr);
+  if (!g) return;
+  attr[BACKUP_KEY] = new Blob([attr.array as unknown as BlobPart]);
+  if (!releasedGeoms.has(g)) {
+    releasedGeoms.add(g);
+    g.addEventListener('dispose', onReleasedDispose);
+  }
+}
+
+/** True while a context-restore rebuild is still reading backups (Renderer holds its pill). */
+export function cpuCopyRestorePending(): boolean {
+  return restoresPending > 0;
+}
+
+async function restoreAll(): Promise<number> {
+  let bytes = 0;
+  for (const g of [...releasedGeoms]) {
+    if (!releasedGeoms.has(g)) continue; // disposed while an earlier geometry was reading
+    const attrs = geometryAttributes(g).filter((a): a is THREE.BufferAttribute =>
+      !!a && !!(a as Releasable)[RELEASED_KEY] && !!(a as Releasable)[BACKUP_KEY]);
+    if (attrs.length === 0) continue;
+    let bufs: ArrayBuffer[];
+    try {
+      bufs = await Promise.all(attrs.map((a) => ((a as Releasable)[BACKUP_KEY] as Blob).arrayBuffer()));
+    } catch (err) {
+      console.warn('[cpu-release] backup read failed; this mesh stays empty until the next match', err);
+      continue;
+    }
+    if (!releasedGeoms.has(g)) continue;
+    // Synchronous from here: every array of g is back before any draw can upload it.
+    attrs.forEach((a, i) => {
+      const attr = a as Tracked;
+      const Ctor = (attr.array as unknown as { constructor: new (b: ArrayBuffer) => THREE.TypedArray }).constructor;
+      attr.array = new Ctor(bufs[i]);
+      releasedBytes -= attr[RELEASED_KEY] ?? 0;
+      delete attr[RELEASED_KEY];
+      // Drop again after the fresh upload (same backup, no second copy).
+      attr[UPLOADED_KEY] = false;
+      attr[DROP_ARMED_KEY] = true;
+      attr.onUpload(markUploaded);
+      bytes += attr.array.byteLength;
+    });
+    resettingGpu = true;
+    try { g.dispose(); } finally { resettingGpu = false; }
+    queueUpload(g);
+    restoredGeoms += 1;
+  }
+  restoredBytes += bytes;
+  return bytes;
+}
+
+/**
+ * Give every released attribute its array back after a WebGL context restore
+ * (see CONTEXT LOSS above). Runs are chained, so a loss during a restore just
+ * queues another pass. Resolves with the CPU bytes restored by this pass.
+ */
+export function restoreReleasedCpuCopies(): Promise<number> {
+  restoresPending += 1;
+  const job = (restoreJob ?? Promise.resolve(0)).catch(() => 0).then(restoreAll);
+  restoreJob = job;
+  void job.finally(() => { restoresPending -= 1; if (restoreJob === job) restoreJob = null; }).catch(() => undefined);
+  return job;
 }
 
 // ─── eager upload (b1-ask-05, OD2) ─────────────────────────────────────────────
@@ -175,7 +271,8 @@ export function releasedGpuBytes(a: unknown): number | undefined {
 function dropAfterUpload(this: THREE.BufferAttribute): void {
   const attr = this as Releasable;
   const arr = attr.array as unknown as { byteLength: number; constructor: new (n: number) => THREE.TypedArray };
-  if (!arr || attr[RELEASED_KEY] !== undefined) return;
+  if (!arr || attr[RELEASED_KEY] !== undefined || arr.byteLength === 0) return;
+  backUp(attr);
   attr[RELEASED_KEY] = arr.byteLength;
   releasedBytes += arr.byteLength;
   attr.array = new arr.constructor(0);
@@ -206,6 +303,7 @@ export function releaseRenderOnlyCpuCopies(root: THREE.Object3D, isShared: (o: o
     for (const a of attrs) {
       if (!a || (a as Releasable)[RELEASED_KEY] !== undefined) continue;
       a.onUpload(dropAfterUpload);
+      noteOwner(a, g);
       bytes += a.array.byteLength;
     }
     queueUpload(g);
@@ -219,12 +317,17 @@ export interface CpuCopyReleaseStats {
   /** Queued for the eager pass and not handed to GL yet (count, CPU bytes incl. index). */
   pendingCount: number; pendingBytes: number;
   eagerPasses: number; eagerBytes: number;
+  /** Context-loss rebuild (b1-ask-04): geometries with a backup, geometries and bytes restored. */
+  backedUpGeoms: number; restoredGeoms: number; restoredBytes: number; restorePending: boolean;
 }
 
 export function cpuCopyReleaseStats(): CpuCopyReleaseStats {
   let pendingBytes = 0;
   for (const g of pending) pendingBytes += unreleasedAttributeBytes(g) + (g.index?.array.byteLength ?? 0);
-  return { enabled: cpuCopyReleaseEnabled(), armedBytes, releasedBytes, pendingCount: pending.size, pendingBytes, eagerPasses, eagerBytes };
+  return {
+    enabled: cpuCopyReleaseEnabled(), armedBytes, releasedBytes, pendingCount: pending.size, pendingBytes, eagerPasses, eagerBytes,
+    backedUpGeoms: releasedGeoms.size, restoredGeoms, restoredBytes, restorePending: restoresPending > 0,
+  };
 }
 
 // ─── library templates (AssetLibrary.releaseCpuCopies) ──────────────────────────────────────────────
@@ -253,7 +356,7 @@ function geometryAttributes(g: THREE.BufferGeometry): (THREE.BufferAttribute | n
 
 /** Record every later upload of `g`'s attributes. Call once, at load/merge time. */
 export function trackUpload(g: THREE.BufferGeometry): void {
-  for (const a of geometryAttributes(g)) if (a && releasable(a)) a.onUpload(markUploaded);
+  for (const a of geometryAttributes(g)) if (a && releasable(a)) { a.onUpload(markUploaded); noteOwner(a, g); }
 }
 
 /** True when every attribute of `g` has reached the GPU at least once. */
@@ -278,6 +381,7 @@ export function releaseGeometryCpu(g: THREE.BufferGeometry, dead: boolean): numb
   for (const a of attrs) {
     const attr = a as Tracked | null;
     if (!attr || attr[RELEASED_KEY] !== undefined) continue;
+    noteOwner(attr, g);
     bytes += attr.array.byteLength;
     if (dead && !attr[UPLOADED_KEY]) {
       const arr = attr.array as unknown as { constructor: new (n: number) => THREE.TypedArray };

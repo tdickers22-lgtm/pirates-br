@@ -1,4 +1,4 @@
-import { disableCpuCopyReleaseAfterContextLoss } from './CpuCopyRelease.js';
+import { restoreReleasedCpuCopies, cpuCopyRestorePending } from './CpuCopyRelease.js';
 import { ProgramFallback } from './programFallback';
 import * as THREE from 'three';
 import { PostFx } from './PostFx.js';
@@ -2080,7 +2080,6 @@ export class Renderer {
       this.contextLost = true;
       this.restoreSettling = false;
       this.contextLosses += 1;
-      disableCpuCopyReleaseAfterContextLoss();
       this.governor.setSuspended(true);
       if (!this.auditionDone) {
         // Start the audition over once the hold ends rather than splice a
@@ -2104,6 +2103,9 @@ export class Renderer {
       this.programWarmer.setGuard(true);
       this.programWarmer.setBoosted(true);
       this.markGpuResourcesDirty();
+      // Released CPU copies (phone/iPad) come back from their backups; the
+      // settle below holds the pill until they have (b1-ask-04).
+      void restoreReleasedCpuCopies();
       this.governor.setSuspended(true);
     }, false);
   }
@@ -2173,7 +2175,7 @@ export class Renderer {
     // to the steady-state rules of whichever path this host runs (warmed in the
     // background with KHR_parallel_shader_compile; linked at first draw without
     // it, as on the initial load) — waiting for them doubled the SwiftShader pill.
-    this.restoreCleanFrames = warm.heldNow === 0 ? this.restoreCleanFrames + 1 : 0;
+    this.restoreCleanFrames = warm.heldNow === 0 && !cpuCopyRestorePending() ? this.restoreCleanFrames + 1 : 0;
     const caughtUp = this.restoreCleanFrames >= 3;
     if (!caughtUp && this.restoreFrames < Renderer.RESTORE_MAX_FRAMES) return;
     this.restoreSettling = false;

@@ -204,5 +204,43 @@ expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
   expect('eager budget: a bad dt falls back to one 60 Hz frame', eagerUploadBudget(NaN) === at60 && eagerUploadBudget(-5) === at60);
 }
 
+// ── context loss (b1-ask-04): a released attribute comes back on restore ──
+// A lost context takes the GPU copy; without a backup the batch re-uploads an
+// empty buffer and the island is gone for the rest of the match (red on e3e50b54:
+// restoreReleasedCpuCopies does not exist).
+{
+  const mod = await import('../src/client/rendering/CpuCopyRelease.ts');
+  const root = new THREE.Group();
+  const geo = new THREE.BoxGeometry(3, 1, 2);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial()); mesh.name = 'island-9-batch'; root.add(mesh);
+  const origPos = Float32Array.from(geo.attributes.position.array);
+  const origIdx = Uint16Array.from(geo.index.array);
+  mod.releaseRenderOnlyCpuCopies(root, () => false);
+  upload(geo);
+  expect('ctx: batch released before the loss', geo.attributes.position.array.length === 0 && geo.index.array.length === 0);
+  expect('ctx: a backup is parked for the released geometry', mod.cpuCopyReleaseStats().backedUpGeoms >= 1, JSON.stringify(mod.cpuCopyReleaseStats()));
+  let disposes = 0; geo.addEventListener('dispose', () => { disposes += 1; });
+  expect('ctx: restore is exported', typeof mod.restoreReleasedCpuCopies === 'function');
+  const p = mod.restoreReleasedCpuCopies?.();
+  expect('ctx: restore reports pending until the backups are read', mod.cpuCopyRestorePending?.() === true);
+  const restored = await p;
+  const pos = geo.attributes.position;
+  expect('ctx: position array back, byte-identical', pos.array.length === origPos.length && pos.array.every((v, i) => v === origPos[i]), `${pos.array.length}`);
+  expect('ctx: index back, byte-identical, same type', geo.index.array instanceof Uint16Array && geo.index.array.every((v, i) => v === origIdx[i]));
+  expect('ctx: restore bytes counted', restored > 0 && mod.cpuCopyReleaseStats().restoredGeoms >= 1, `${restored}`);
+  expect('ctx: GL buffers reset (geometry disposed once so the new context re-creates full-size buffers)', disposes === 1, `${disposes}`);
+  expect('ctx: no longer pending', mod.cpuCopyRestorePending() === false);
+  expect('ctx: re-queued for the eager pass', mod.pendingUploadCount() >= 1, `${mod.pendingUploadCount()}`);
+  upload(geo);
+  expect('ctx: dropped again after the fresh upload', pos.array.length === 0 && geo.index.array.length === 0);
+  const again = await mod.restoreReleasedCpuCopies();
+  expect('ctx: a second loss restores from the same backup', again > 0 && pos.array.length === origPos.length, `${again}`);
+  upload(geo);
+  geo.dispose();
+  expect('ctx: a disposed geometry leaves the restore set (no GPU re-upload of dead meshes)',
+    !mod.cpuCopyReleaseStats().backedUpGeoms || (await mod.restoreReleasedCpuCopies()) === 0);
+  expect('ctx: disposed geometry stays empty', pos.array.length === 0);
+}
+
 if (failures) { console.error(`\nCPU-copy release: ${failures} failure(s).`); process.exit(1); }
 console.log('\nCPU-copy release passed.');
