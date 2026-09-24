@@ -253,14 +253,22 @@ async function approachSlot(p, slot, edge) {
   }, [slot, edge]);
 }
 
-async function waitSlot(p, uuid, want, limitMs) {
+async function waitSlot(p, uuid, want, limitMs, limitFrames = null) {
   const t0 = Date.now();
   let gap = false;
   let double = false;
   let f0 = null;
-  while (Date.now() - t0 < limitMs) {
+  // A swap graded in FRAMES must not be cut off by a wall clock that is
+  // tighter than the frame bar: software GL on a loaded host ran ~4 s a frame
+  // (a 2-frame swap took 7.9 s), so a flat 15 s poll gave up after ~4 frames
+  // against a 120-frame budget and reported Infinity. With limitFrames the
+  // poll ends when that many frames have passed (plus one, so a swap AT the
+  // bar is still seen) or at a 180 s safety wall, whichever comes first.
+  const wall = limitFrames === null ? limitMs : Math.max(limitMs, 180_000);
+  while (Date.now() - t0 < wall) {
     const st = await p.evaluate(SLOT_STATE, uuid);
     if (f0 === null) f0 = st.frames ?? 0;
+    if (limitFrames !== null && Date.now() - t0 >= limitMs && (st.frames ?? 0) - f0 > limitFrames + 1) break;
     if (!st.gone && !st.real && !st.proxyVisible && !st.held) gap = true;
     if (!st.gone && st.real && st.proxyVisible) double = true;
     if (!st.gone && st.real === want) {
@@ -301,7 +309,7 @@ async function storyPhase() {
       JSON.stringify(outside));
     await d.p.evaluate(INSTALL_FRAMES);
     await approachSlot(d.p, slot, 540);
-    const swap = await waitSlot(d.p, slot.uuid, true, 15_000);
+    const swap = await waitSlot(d.p, slot.uuid, true, 15_000, STORY_SWAP_LIMIT_FRAMES);
     console.log(`    ${slot.name}: proxy -> LOD0 ${swap.frames} frames / ${swap.ms} ms after crossing 600 m (nearest other island edge ${Math.round(other)} m; ms advisory under software GL, bar ${STORY_SWAP_LIMIT_MS} ms)`);
     expect(`${slot.name}: proxy -> LOD0 within ${STORY_SWAP_LIMIT_FRAMES} frames (${STORY_SWAP_LIMIT_MS} ms at 60 Hz) of crossing 600 m`, swap.frames <= STORY_SWAP_LIMIT_FRAMES, `${swap.frames} frames, ${swap.ms} ms`);
     expect(`${slot.name}: no poll saw neither proxy nor LOD0 drawn outside a reveal hold (no pop gap)`, !swap.gap);
