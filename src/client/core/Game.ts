@@ -6758,13 +6758,18 @@ export class Game {
       .filter((c) => c.id !== this.localPlayerId && c.state !== 'eliminated' && c.state !== 'respawning' && !this.isSkeletonName(c))
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     if (pool.length === 0) return null;
-    // One subject per HULL: skip crewmates of the ship already watched.
+    // One subject per HULL: skip crewmates of the ship already watched, and
+    // anybody standing on her deck. The deck test alone let a press land on a
+    // crewmate ashore or swimming (onShipId null), so "next" kept the same
+    // "<captain>'s cutter" label and read as a dead key (b1.5f-verify).
     const cur = pool.find((c) => c.id === this.spectateSubjectId);
     const start = cur ? pool.indexOf(cur) : -1;
     let next = pool[(start + 1) % pool.length];
     for (let i = 1; i <= pool.length; i++) {
       const c = pool[(start + i) % pool.length];
-      if (!cur || !c.onShipId || c.onShipId !== cur.onShipId) { next = c; break; }
+      const sameCrew = !!cur && !!c.shipId && c.shipId === cur.shipId;
+      const sameDeck = !!cur && !!c.onShipId && c.onShipId === cur.onShipId;
+      if (!cur || (!sameCrew && !sameDeck)) { next = c; break; }
     }
     this.spectateSubjectId = next.id;
     this.spectateRepickAt = this.ocean.getTime() + 45;
