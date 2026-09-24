@@ -557,6 +557,7 @@ export const LOGIC = [
   quick(tsx('test-dig-sparkle.mjs')),
   quick(tsx('test-session-telemetry.mjs')),
   quick(tsx('test-beacon-store.mjs')),
+  quick(tsx('test-sailing-handling.mjs')),
   //   triage-beacons --self-test  — b2.0a (D35, rule 14): the bN.0 triage gate's red cases stay red (missing report,
   //                                 other batch, never pulled = VACUOUS, a >= 3-session signature with neither a
   //                                 [bN.0->lane] fix commit in git nor a bN.<lane>.z0 slice); a batch gate names it as

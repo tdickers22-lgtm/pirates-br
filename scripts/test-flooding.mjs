@@ -3,6 +3,7 @@
 // a point in the hull-local frame, it leaks only while that point sits under
 // the live surface, ingress scales with how deep it sits, a plank shuts ONE of
 // them, and water — never a hull-HP pool — is what sinks the ship.
+import { idealBrace } from '../src/shared/sailing.ts';
 import {
   PhysicsSystem,
   applyShipRudderSteering,
@@ -296,7 +297,7 @@ function steadySpeedAtWater(waterLevel) {
     ship.rotation = angleWrap(wind.direction + Math.PI - offWind);
     ship.angularVelocity = 0;
     const signedRelative = angleWrap(wind.direction - ship.rotation);
-    ship.sailAngle = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
+    ship.sailAngle = idealBrace(signedRelative);
     ship.waterLevel = waterLevel; // hold the bilge fixed (intact hull would pump dry)
     physics.update(DT, t, [ship], [], [], [], []);
   }
@@ -326,7 +327,7 @@ console.log('\nA torn hull also drags: open breaches cost speed on top of the wa
       const wind = sampleWind(t);
       ship.rotation = angleWrap(wind.direction + Math.PI - Math.PI / 2);
       ship.angularVelocity = 0;
-      ship.sailAngle = Math.sin(angleWrap(wind.direction - ship.rotation)) * SHIP.MAX_SAIL_ANGLE * 0.92;
+      ship.sailAngle = idealBrace(angleWrap(wind.direction - ship.rotation));
       ship.waterLevel = 0;
       physics.update(DT, t, [ship], [], [], [], []);
     }

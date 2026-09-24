@@ -9,6 +9,7 @@ import {
 import { FLOODING, SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
 import { getHullContactChain } from '../src/shared/hull.ts';
 import { TRUCE_SECONDS } from '../src/shared/truce.ts';
+import { idealBrace } from '../src/shared/sailing.ts';
 
 // Ship-ship contacts run after the match truce (b1.6e): inside it an unhelmed
 // contact opens no plank at any speed, so the collision rows below would pass
@@ -103,14 +104,23 @@ console.log('Sail polar (points of sail)');
   expect('whole no-go cone luffs equally', ironsEdge === irons);
   expect('in-irons < close-hauled', irons < closeHauled, `${irons} vs ${closeHauled}`);
   expect('close-hauled < beam', closeHauled < beam, `${closeHauled} vs ${beam}`);
-  expect('polar rises monotonically to the broad-reach peak',
-    irons < closeHauled && closeHauled < reach && reach < beam && beam < broad,
-    `[${irons.toFixed(2)}, ${closeHauled.toFixed(2)}, ${reach.toFixed(2)}, ${beam.toFixed(2)}, ${broad.toFixed(2)}]`);
-  expect('broad reach is the 1.0 peak', Math.abs(broad - 1) < 1e-9, `broad=${broad}`);
-  expect('dead run eases to ~0.85 but stays fast',
-    Math.abs(run - 0.85) < 1e-9 && run > quarter - 0.16 && run > closeHauled,
+  // D16 (b2.1a): per-class polars from shared/sailing.ts. The sloop peaks on
+  // the BEAM (14.0 m/s), eases through the broad reach to 11/14 on a dead run;
+  // the galleon peaks off the wind. Spec change, not a loosening: the old
+  // single-shape polar (sloop peak at 110 deg) contradicted D16.
+  expect('polar rises monotonically to the beam peak (sloop)',
+    irons < closeHauled && closeHauled < reach && reach < beam,
+    `[${irons.toFixed(2)}, ${closeHauled.toFixed(2)}, ${reach.toFixed(2)}, ${beam.toFixed(2)}]`);
+  expect('beam is the sloop 1.0 peak', Math.abs(beam - 1) < 1e-9, `beam=${beam}`);
+  expect('broad reach eases off the sloop peak', broad < beam && broad > 0.9, `broad=${broad}`);
+  expect('dead run eases to 11/14 but stays fast',
+    Math.abs(run - 11 / 14) < 1e-9 && run > quarter - 0.16 && run > closeHauled,
     `run=${run} quarter=${quarter}`);
   expect('dead run below the reach peak', run < broad);
+  const galleonRun = computeSailPolar(Math.PI, 'galleon');
+  const galleonBeam = computeSailPolar(Math.PI / 2, 'galleon');
+  expect('galleon: the dead run is her 1.0 peak, the beam is not',
+    Math.abs(galleonRun - 1) < 1e-9 && galleonBeam < 0.9, `run=${galleonRun} beam=${galleonBeam}`);
 }
 
 // Integration: actual steady-state boat speed obeys the polar ordering, and
@@ -125,7 +135,7 @@ function simulateSailing(offWind, seconds = 25) {
     ship.rotation = angleWrap(wind.direction + Math.PI - offWind);
     ship.angularVelocity = 0;
     const signedRelative = angleWrap(wind.direction - ship.rotation);
-    ship.sailAngle = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92; // perfect trim
+    ship.sailAngle = idealBrace(signedRelative); // perfect trim (shared/sailing.ts)
     physics.update(DT, t, [ship], [], [], [], []);
   }
   return { speed: Math.hypot(ship.velocity.x, ship.velocity.z), ship };
@@ -415,7 +425,7 @@ console.log('\nServer wave attitude (pitch/roll/heave)');
     t += DT;
     const wind = sampleWind(t);
     const signedRelative = angleWrap(wind.direction - ship.rotation);
-    ship.sailAngle = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
+    ship.sailAngle = idealBrace(signedRelative);
     physics.update(DT, t, [ship], [], [], [], []);
     maxPitch = Math.max(maxPitch, Math.abs(ship.pitch ?? 0));
     maxRoll = Math.max(maxRoll, Math.abs(ship.roll ?? 0));

@@ -1,4 +1,4 @@
-import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState } from '../../shared/types/index.js';
+import type { Ship, ShipHole, ShipHoleSource, Player, Projectile, Island, Vec3, HullSections, SeaRock, StormState, ShipType } from '../../shared/types/index.js';
 import { PHYSICS, SHIP_STATS, SHIP, PLAYER, SHIP_UPGRADES, WORLD, FLOODING, GEYSER, BERTH_ENV_SAFE_MAX_PHASE, BOT_GROUNDING_FORGIVENESS_SECONDS, FIRST_SAIL_ASSIST } from '../../shared/constants/index.js';
 import { getHullContactChain, getHullWaterlineOutline, getMastHeight, getShipRiggingMasts } from '../../shared/hull.js';
 import { cargoBallastFactor } from '../../shared/cargo.js';
@@ -112,6 +112,7 @@ type HullSweepHit =
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
+import { CLASS_TOP_SPEED, polarSpeed, sailPolarFraction, trimEfficiency as sailTrimEfficiency } from '../../shared/sailing.js';
 
 // ── Ship wave-riding dynamics tuning ─────────────────────────────────────────
 /** Near-critical damping for the heave spring (k = PHYSICS.BUOYANCY_SPRING). */
@@ -119,8 +120,6 @@ const HEAVE_DAMPING = 3.8;
 /** Wave-attitude spring: pitch/roll chase the sampled wave slope. */
 const ATTITUDE_STIFFNESS = 4;
 const ATTITUDE_DAMPING = 3.8;
-/** Broad reach (~110° off the wind) is the power point of the sail polar. */
-const SAIL_POLAR_PEAK = 1.92;
 /** A hull's own contact chain lies inside her widest timber by no more than
  *  this, so two hulls lying alongside always overlap a little before they are
  *  truly pressed together. Below it the resolution is a SPRING (a slow nudge,
@@ -227,22 +226,12 @@ const BALLISTIC_SWEEP_MAX_STEPS = 12;
 const BALLISTIC_WALL_SLOPE = 1.15;
 
 /**
- * Arcade points-of-sail polar over the angle off the wind
- * (0 = bow dead upwind, PI = dead run):
- * - inside the no-go cone the sails luff to a crawl (~0.10)
- * - power builds through close-hauled toward the beam
- * - peaks at 1.0 on a beam/broad reach
- * - eases to ~0.85 on a dead run (following wind spills from the canvas)
+ * The points-of-sail polar as a share of the class top speed, read from the
+ * one shared table (shared/sailing.ts, D16 per-class polars). Kept as an
+ * export for test-ship-dynamics; the physics below reads polarSpeed directly.
  */
-export function computeSailPolar(offWind: number): number {
-  const a = clamp(offWind, 0, Math.PI);
-  if (a <= SHIP.SAIL_NO_GO_ANGLE) return 0.10;
-  if (a < SAIL_POLAR_PEAK) {
-    const t = (a - SHIP.SAIL_NO_GO_ANGLE) / (SAIL_POLAR_PEAK - SHIP.SAIL_NO_GO_ANGLE);
-    return 0.10 + 0.90 * Math.pow(t, 0.7);
-  }
-  const t = (a - SAIL_POLAR_PEAK) / (Math.PI - SAIL_POLAR_PEAK);
-  return 1 - 0.15 * t * t;
+export function computeSailPolar(offWind: number, type: ShipType = 'sloop'): number {
+  return sailPolarFraction(type, clamp(offWind, 0, Math.PI));
 }
 
 /**
@@ -796,13 +785,12 @@ export class PhysicsSystem {
       }
       const wind = sampleLocalWind(t, ship.position.x, ship.position.z, storm);
       const signedRelative = angleWrap(wind.direction - ship.rotation);
-      const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
-      const trimError = Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE;
-      const trimEfficiency = 1 - Math.pow(Math.min(1, trimError), 1.15);
-      // Points of sail — angle off the wind drives an arcade polar (in-irons
-      // crawl, close-hauled builds, beam/broad reach peak, dead run eases off).
+      // The yard against the ONE shared ideal brace (shared/sailing.ts), the
+      // same function the bots, the HUD Catch% and the sail renderer read.
+      const trimEff = sailTrimEfficiency(ship.sailAngle, signedRelative);
+      // Points of sail: each class's own polar (D16), in m/s at wind 1.0.
       const offWind = Math.PI - Math.abs(signedRelative);
-      const sailPolar = computeSailPolar(offWind);
+      const polarMps = polarSpeed(ship.type, offWind);
       const sailDeployment =
         (chainshotted ? 0.42 : 1) * ship.sailHeight * clamp(ship.sailIntegrity, 0, 1);
       // Inside the no-go cone with canvas set the sails visibly luff (client flutter).
@@ -838,7 +826,7 @@ export class PhysicsSystem {
         // A hull hard aground makes only a share of her rig (SHIP.AGROUND_SAIL_SCALE):
         // the bar's hold is thrust-relative, not absolute, so a beaching costs every
         // class the same share of her way whatever the class ladder is tuned to.
-        : stats.maxSpeed * speedMult * sailDeployment * (0.16 + trimEfficiency * 0.84) * sailPolar * wind.strength * floodPenalty * waterSpeedFactor * ballast
+        : polarMps * speedMult * sailDeployment * (0.16 + trimEff * 0.84) * wind.strength * floodPenalty * waterSpeedFactor * ballast
           * (ship.aground ? SHIP.AGROUND_SAIL_SCALE : 1);
       const sailLoad = clamp(ship.sailHeight * clamp(ship.sailIntegrity, 0, 1), 0, 1);
       const accelRate = ship.anchored ? SHIP.ANCHOR_BRAKE * 1.28 : 1.55 + sailLoad * 1.05;
@@ -868,7 +856,7 @@ export class PhysicsSystem {
       }
 
       const speed = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.z ** 2);
-      const maxSpeed = stats.maxSpeed * speedMult * 1.08 * ballast;
+      const maxSpeed = CLASS_TOP_SPEED[ship.type] * speedMult * 1.08 * ballast;
       if (speed > maxSpeed) {
         const scale = maxSpeed / Math.max(speed, 0.001);
         ship.velocity.x *= scale;

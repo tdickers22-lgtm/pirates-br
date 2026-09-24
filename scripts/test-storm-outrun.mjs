@@ -20,6 +20,7 @@
 // weather immunity, and it is NOT combat immunity (or it would be a boarding tool).
 //
 //   node --import tsx scripts/test-storm-outrun.mjs
+import { idealBrace } from '../src/shared/sailing.ts';
 import { Match } from '../src/server/core/Match.ts';
 import { StormSystem } from '../src/server/systems/StormSystem.ts';
 import {
@@ -124,7 +125,7 @@ function closeTheRing(match, radius) {
 /** How much of the wind the yard is actually holding, by PhysicsSystem's rule. */
 function catchOf(ship, wind) {
   const signedRelative = angleWrap(wind.direction - ship.rotation);
-  const desired = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
+  const desired = idealBrace(signedRelative);
   return 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desired)) / SHIP.MAX_SAIL_ANGLE);
 }
 
@@ -444,8 +445,8 @@ for (const isleName of ['Gallows Sands', 'Mermaid\'s Folly', 'Crow\'s Perch']) {
   // on anchor-up and this hull is being placed rather than sailed in, so without
   // this the yard stays SQUARE and the pin reads as a 9% catch — which is the
   // slack-yard fault the coach already names, not the silent one.
-  const trimmed = Math.sin(angleWrap(wIsle.direction - approach))
-    * SHIP.MAX_SAIL_ANGLE * FIRST_SAIL_ASSIST.TRIM_FRACTION;
+  const trimmed = idealBrace(angleWrap(wIsle.direction - approach))
+    * FIRST_SAIL_ASSIST.TRIM_FRACTION;
   let beached = false;
   for (let r = (isle.radius ?? 60) + 30; r > 4 && !beached; r -= 3) {
     ship.position.x = isle.position.x - Math.sin(approach) * r;

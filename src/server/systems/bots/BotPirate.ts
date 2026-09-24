@@ -6,6 +6,7 @@ import { dist2D, angleWrap, sampleLocalWind, getIslandSurfaceY, getIslandMaxRadi
 import { raymarchIslandSurface, intersectRayShipHull } from '../../../shared/raycast.js';
 import { getCannonBroadsideYaw, getHelmControlLocal } from '../../../shared/interactions.js';
 import { applyShipRudderSteering } from '../PhysicsSystem.js';
+import { idealBrace } from '../../../shared/sailing.js';
 import type { WeaponSystem } from '../WeaponSystem.js';
 import type { Blackboard } from './Blackboard.js';
 import type { BotState, CrewState } from './Blackboard.js';
@@ -853,7 +854,9 @@ export class BotPirate {
     const gusting = sampleLocalWind(t, ship.position.x, ship.position.z, this.bb.storm);
     const wind = { ...gusting, direction: gusting.meanDirection, strength: gusting.meanStrength };
     const signedRelative = angleWrap(wind.direction - ship.rotation);
-    const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.95;
+    // The ONE shared ideal brace (shared/sailing.ts): the bot trims to the
+    // exact yard the physics pays for (it used to aim 0.95 of a 0.92 target).
+    const desiredTrim = idealBrace(signedRelative);
     const delta = desiredTrim - ship.sailAngle;
     const step = Math.sign(delta) * Math.min(Math.abs(delta), SHIP.SAIL_TRIM_RATE * 0.9 * dt);
     ship.sailAngle += step;
