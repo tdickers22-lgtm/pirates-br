@@ -16,8 +16,13 @@ interface StatsFile {
 export const STATS_MAX_RECORDS = 50_000;
 /** At most one file write per this many ms, however many matches end. */
 export const STATS_FLUSH_INTERVAL_MS = 5_000;
-/** Records serialised per chunk before yielding to the event loop. */
+/** Most records serialised per chunk before yielding to the event loop. */
 const FLUSH_CHUNK = 500;
+/** Serialisation time per chunk before yielding, whatever the record count.
+ *  Serialising 500 records costs ~2 ms on an idle Air but ~10 ms on a slow or
+ *  contended vCPU (shared Fly CPU, a loaded host), and the loop was blocked
+ *  for all of it; the slice ends on whichever limit comes first. */
+const FLUSH_SLICE_MS = 2;
 
 /** The stats key of a device: 'd:' + sha256(deviceId). The raw id is never
  *  stored, so the file cannot be used to impersonate a device. Legacy keys
@@ -297,15 +302,21 @@ export class StatsStore {
       const keys = Array.from(this.players.keys());
       await fh.write('{"version":1,"players":{');
       let first = true;
-      for (let i = 0; i < keys.length; i += FLUSH_CHUNK) {
+      let i = 0;
+      while (i < keys.length) {
         let chunk = '';
-        for (let j = i; j < Math.min(keys.length, i + FLUSH_CHUNK); j++) {
-          const rec = this.players.get(keys[j]);
-          if (!rec) continue; // evicted mid-flush
-          chunk += (first ? '' : ',') + JSON.stringify(keys[j]) + ':' + JSON.stringify(rec);
-          first = false;
+        const sliceStart = performance.now();
+        const end = Math.min(keys.length, i + FLUSH_CHUNK);
+        for (; i < end; i++) {
+          const rec = this.players.get(keys[i]);
+          if (rec) { // else evicted mid-flush
+            chunk += (first ? '' : ',') + JSON.stringify(keys[i]) + ':' + JSON.stringify(rec);
+            first = false;
+          }
+          if ((i & 15) === 15 && performance.now() - sliceStart >= FLUSH_SLICE_MS) { i++; break; }
         }
         if (chunk) await fh.write(chunk); // the await is the yield
+        else await new Promise<void>((r) => setImmediate(r));
       }
       await fh.write('}}');
     } finally {
