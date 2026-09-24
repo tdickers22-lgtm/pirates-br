@@ -621,6 +621,13 @@ export class Game {
   private joinAssignmentWatchdog: number | null = null;
   private lastFrameTime = performance.now();
   private frameDt = 1 / 60;
+  /** Presentation clock: the rendered interval, capped at 0.5 s (a tab coming
+   *  back from the background) instead of the 50 ms physics clamp. Camera eases
+   *  and the HUD repaint cadence run on it, so a device drawing 5 fps still
+   *  lifts the spectate camera and names its subject in real seconds; on the
+   *  sim clamp one rendered second was 0.05 s of ease and the "watching" line
+   *  took ~20 s to appear under SwiftShader (b1.5f-verify). */
+  private presentDt = 1 / 60;
   /** Reused per-frame id set for the wildlife reaper — a fresh Set (plus every
    *  entry it grows) once a frame is garbage for a question answered in-place. */
   private readonly wildlifeSeen = new Set<string>();
@@ -1745,6 +1752,7 @@ export class Game {
     this.spectateSubjectId = null;
     this.spectateSubjectLabel = '';
     this.spectateHandoff = 0;
+    this.spectateRepickAt = 0;
     // The server's snapshot counter restarts per match — so must ours.
     this.clientState.lastAppliedSeq = -1;
     this.clearStartSequence();
@@ -3334,6 +3342,7 @@ export class Game {
     const dt = Math.min(0.05, rawDtMs / 1000);
     this.lastFrameTime = now;
     this.frameDt = dt;
+    this.presentDt = Math.min(0.5, Math.max(0, rawDtMs / 1000));
     // True frame time for the debug overlay (physics dt above is clamped to
     // 50ms for sim stability, which was pinning 'worst' at exactly 50.0).
     this.debugRawFrameMs = rawDtMs;
@@ -4371,6 +4380,7 @@ export class Game {
     // Feed the local vitals watch BEFORE the fx update consumes them: storm,
     // fire and drowning bill in fractions of a point per snapshot, and nothing
     // in the client was announcing that kind of damage at all.
+    this.combatFx.presentDt = this.presentDt;
     this.combatFx.watchLocalVitals(
       this.getLocalPlayer(),
       dt,
@@ -4414,7 +4424,10 @@ export class Game {
       this.windWispTimer = effectScale < 0.55 ? 1 / 20 : effectScale < 0.85 ? 1 / 30 : 0;
     }
     this.envFx.updateLightning(dt);
-    this.hudTimer -= dt;
+    // Repaint cadence is a presentation throttle: on the 50 ms sim clamp a
+    // 1 fps device repainted the HUD every other frame and the spectate line
+    // trailed the camera by a subject (b1.5f-verify).
+    this.hudTimer -= this.presentDt;
     if (this.hudTimer <= 0) {
       this.hud.updateHud();
       this.hudTimer = effectScale < 0.55 ? 0.09 : 0.06;
@@ -6470,10 +6483,10 @@ export class Game {
     }
     this.spectateLift = THREE.MathUtils.clamp(
       this.spectateLift
-        + this.frameDt * (spectating ? 1 / Game.SPECTATE_RISE_SECONDS : -1 / 0.4),
+        + this.presentDt * (spectating ? 1 / Game.SPECTATE_RISE_SECONDS : -1 / 0.4),
       0, 1,
     );
-    this.spectateOrbit = this.spectateLift > 0.001 ? this.spectateOrbit + this.frameDt * 0.05 : 0;
+    this.spectateOrbit = this.spectateLift > 0.001 ? this.spectateOrbit + this.presentDt * 0.05 : 0;
     this.updateSpectateLight();
     const firearmEquipped = !!activeWeapon && !WEAPONS[activeWeapon.weaponId].melee;
     const aiming = this.input.isAiming();
@@ -6594,7 +6607,7 @@ export class Game {
         const subject = player.state === 'eliminated' ? this.updateSpectateSubject() : null;
         this.spectateHandoff = THREE.MathUtils.clamp(
           this.spectateHandoff
-            + this.frameDt * (subject ? 1 / Game.SPECTATE_HANDOFF_SECONDS : -1 / 0.8),
+            + this.presentDt * (subject ? 1 / Game.SPECTATE_HANDOFF_SECONDS : -1 / 0.8),
           0, 1,
         );
         // Ease in AFTER the body lift has finished, so the two moves read as one
@@ -6772,7 +6785,9 @@ export class Game {
       if (!cur || (!sameCrew && !sameDeck)) { next = c; break; }
     }
     this.spectateSubjectId = next.id;
-    this.spectateRepickAt = this.ocean.getTime() + 45;
+    // A chosen subject is held until they leave play; the nearest-crew re-pick
+    // used to take the camera back after 45 s with no key pressed.
+    this.spectateRepickAt = Number.POSITIVE_INFINITY;
     return next.id;
   }
 

@@ -161,7 +161,7 @@ try {
   await page.evaluate(() => {
     window.__piratesBR.network.send({ type: 'dev_scuttle', ts: Date.now(), payload: {} });
   });
-  const out = await page.waitForFunction(() => window.__piratesBR.getLocalPlayer?.()?.state === 'eliminated', null, { timeout: 8_000 })
+  const out = await page.waitForFunction(() => window.__piratesBR.getLocalPlayer?.()?.state === 'eliminated', null, { timeout: 20_000 })
     .then(() => true, () => false);
   expect('scuttling our own sloop in Solo puts us out (server state eliminated)', out,
     out ? '' : 'is PIRATES_BR_DEV_HOOKS=1 set on the server?');
@@ -231,7 +231,10 @@ try {
   const waitNewCrew = async (b, ms) => {
     const t0 = Date.now();
     let a = await subjectNow();
-    while (Date.now() - t0 < ms && (a.id === b.id || a.crew === b.crew)) {
+    // The key moves the id at once (keydown, between frames); the line follows
+    // on the next HUD repaint. Wait for both, so a label that stays on the old
+    // crew is caught instead of read one frame early.
+    while (Date.now() - t0 < ms && (a.id === b.id || a.crew === b.crew || a.line === b.line)) {
       await page.waitForTimeout(150);
       a = await subjectNow();
     }
@@ -240,8 +243,9 @@ try {
   for (const key of ['ArrowRight', 'Space', 'KeyX']) {
     const b = await subjectNow();
     await page.keyboard.press(key);
-    const a = await waitNewCrew(b, 4000);
+    const a = await waitNewCrew(b, 8000);
     expect(`${key} moves the camera to another crew`, a.id !== b.id && a.crew !== b.crew, `${b.crew?.slice(0, 8)} -> ${a.crew?.slice(0, 8)} "${a.line}"`);
+    expect(`${key}: the watching line names the new crew`, a.line !== b.line && /watching/i.test(a.line), `"${b.line}" -> "${a.line}"`);
   }
   {
     const b = await subjectNow();
@@ -249,6 +253,18 @@ try {
     await page.waitForTimeout(1500);
     const a = await subjectNow();
     expect('KeyE (not bound to interact or jump) leaves the subject alone', a.id === b.id, `${b.id?.slice(0, 8)} -> ${a.id?.slice(0, 8)}`);
+    // A chosen subject is held: the nearest-crew re-pick (every 6 game s) must
+    // not take the camera back while nobody presses a key.
+    const g1 = await page.evaluate(() => window.__piratesBR.ocean.getTime());
+    let held = await subjectNow();
+    while ((await page.evaluate(() => window.__piratesBR.ocean.getTime())) - g1 < 8) {
+      await page.waitForTimeout(500);
+      held = await subjectNow();
+      if (held.id !== a.id) break;
+    }
+    const alive = await page.evaluate((id) => window.__piratesBR.state.players.find((c) => c.id === id)?.state ?? 'gone', a.id);
+    expect('a chosen subject holds for 8 game s with no key pressed', held.id === a.id || alive === 'eliminated' || alive === 'gone',
+      `${a.id?.slice(0, 8)} -> ${held.id?.slice(0, 8)} (${alive})`);
   }
 } catch (err) {
   expect('run completed', false, String(err?.message ?? err).split('\n')[0]);

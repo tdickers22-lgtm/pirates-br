@@ -1076,6 +1076,9 @@ export class CombatFx {
   private desatTarget = 0;
   private desatShown = 0;
   private desatOverlay: HTMLDivElement | null = null;
+  /** Rendered frame interval (capped), set by Game each frame; the physics dt
+   *  is clamped at 50 ms and would run this fade at a fraction of real time. */
+  presentDt = 0;
   private healthBarFlash = 0;
 
   /**
@@ -1212,7 +1215,9 @@ export class CombatFx {
    * drops under 15. Eased at ~0.6 s so a bandage fades the colour back in.
    */
   private updateDesaturation(dt: number) {
-    const k = 1 - Math.exp(-dt / 0.2);
+    // Screen fade, not sim: ease on the rendered interval when the host feeds
+    // one, so a 2 fps device greys in ~1 s instead of 20 (b1.5f-verify).
+    const k = 1 - Math.exp(-Math.max(dt, this.presentDt) / 0.2);
     this.desatShown += (this.desatTarget - this.desatShown) * k;
     if (this.desatShown < 0.005 && this.desatTarget === 0) this.desatShown = 0;
     if (this.desatShown === 0 && !this.desatOverlay) return;
