@@ -16,6 +16,7 @@ import { validateClientMsg } from '../net/validate.js';
 import { ABUSE_CLOSE_CODE, ConnectionGate, SessionLimiter, classifyMsg } from '../net/limits.js';
 import { Match, matchSeedFromEnv, type MatchEndResult } from './Match.js';
 import { StatsStore, defaultStatsPath } from './StatsStore.js';
+import { MatchWorkerHost, matchWorkerCountFromEnv, type MatchHandle } from './MatchWorkerHost.js';
 import { BEACON_ROUTES, getBeaconStore, sanitizeSession, serveBeaconRoute } from '../net/beaconStore.js';
 import { MODES, MODE_IDS, botFillFor, isModeId, type ModeId } from '../../shared/constants/index.js';
 import { BEACON_KINDS } from '../../shared/beacon.js';
@@ -509,8 +510,22 @@ export class LobbyServer {
   };
   /** b1.2h: how matches are built. test-capacity-sim swaps in stub matches so
    *  the REAL dispatch code drives an hour of queue in seconds. */
-  static matchFactory: (opts: { matchId: string; botCount: number; mode: ModeId }) => Match =
-    (opts) => new Match(opts);
+  static matchFactory: (opts: { matchId: string; botCount: number; mode: ModeId }) => MatchHandle =
+    (opts) => {
+      // b2.0b (D8 lever 3): PIRATES_BR_MATCH_WORKERS=N|auto runs each match in
+      // a worker_thread (one per vCPU); unset/0 keeps them on this event loop.
+      const host = LobbyServer.matchWorkerHost();
+      return host ? host.createMatch(opts) : new Match(opts);
+    };
+  private static workerHost: MatchWorkerHost | null | undefined;
+  static matchWorkerHost(): MatchWorkerHost | null {
+    if (LobbyServer.workerHost === undefined) {
+      const n = matchWorkerCountFromEnv();
+      LobbyServer.workerHost = n > 0 ? new MatchWorkerHost(n) : null;
+      if (n > 0) console.log(`[Lobby] match workers: ${n} (PIRATES_BR_MATCH_WORKERS)`);
+    }
+    return LobbyServer.workerHost;
+  }
   /** Matches dispatched from an all-soak cohort: preemptible (b1.2h). */
   private soakMatches: Set<string> = new Set();
 
@@ -528,7 +543,7 @@ export class LobbyServer {
    *  a late crew may still swap in for (see QUEUE_COUNTDOWN_SWAP_MAX). Dropped when the
    *  match leaves 'waiting' or is reaped. */
   private queueMatchSlots: Map<string, { mode: ModeId; slots: number }> = new Map();
-  private matches: Map<string, Match> = new Map();
+  private matches: Map<string, MatchHandle> = new Map();
   /** When each running match last had zero humans in it (zombie sweep). */
   private matchEmptySince: Map<string, number> = new Map();
   private clientToMatch: Map<string, string> = new Map(); // clientId → matchId
@@ -1830,7 +1845,7 @@ export class LobbyServer {
     return live >= max;
   }
 
-  private spawnMatch(opts: { botCount: number; mode: ModeId; source: 'party' | 'queue' }): Match {
+  private spawnMatch(opts: { botCount: number; mode: ModeId; source: 'party' | 'queue' }): MatchHandle {
     const matchId = uuid();
     // The mode decides the bot fleet's crew size and hull class (MODE-01): a
     // Duos match is nine Corsairs with two hands each, not nine single-handed
@@ -1863,7 +1878,7 @@ export class LobbyServer {
     mode: ModeId,
     source: 'party' | 'queue',
     partyCode: string | null = null,
-  ): { match: Match | null; placed: number } {
+  ): { match: MatchHandle | null; placed: number } {
     const members = crews.flat();
     if (this.atCapacity()) {
       // Refuse EARLY, before a hull, a dock or a colour is handed out: the
@@ -1877,7 +1892,7 @@ export class LobbyServer {
       }
       return { match: null, placed: 0 };
     }
-    let match: Match;
+    let match: MatchHandle;
     try {
       match = this.spawnMatch({ botCount, mode, source });
     } catch (err) {
@@ -1904,7 +1919,7 @@ export class LobbyServer {
    *  is told, sent home, and can queue again; a match nobody could board is
    *  reaped at once instead of running empty for EMPTY_MATCH_GC_MS.
    *  Returns how many members boarded. */
-  private placeCohort(crews: ClientSession[][], match: Match, source: 'party' | 'queue', partyCode: string | null = null, botCount = 0): number {
+  private placeCohort(crews: ClientSession[][], match: MatchHandle, source: 'party' | 'queue', partyCode: string | null = null, botCount = 0): number {
     let placed = 0;
     const humans = crews.reduce((n, crew) => n + crew.length, 0);
     // The boundary is now the CREW, because the hull is: createCrew builds one
@@ -1923,7 +1938,7 @@ export class LobbyServer {
     return placed;
   }
 
-  private failPlacement(session: ClientSession, match: Match | null, reason = 'Could not board the match. Try again.'): void {
+  private failPlacement(session: ClientSession, match: MatchHandle | null, reason = 'Could not board the match. Try again.'): void {
     if (match && session.matchPlayerId) {
       try { match.detachClient(session.matchPlayerId); } catch {}
     }
@@ -1951,7 +1966,7 @@ export class LobbyServer {
    * hullForCrewSize(n), and lands together on one pier.
    */
   private placeCrewIntoMatch(
-    crew: ClientSession[], match: Match, source: 'party' | 'queue', partyCode: string | null = null, expectedHumans = 1, botCount = 0,
+    crew: ClientSession[], match: MatchHandle, source: 'party' | 'queue', partyCode: string | null = null, expectedHumans = 1, botCount = 0,
     prebuilt?: ReturnType<Match['takeOverBotHull']>,
   ): void {
     if (crew.length === 0) return;
@@ -2151,7 +2166,7 @@ export class LobbyServer {
 
   /** One match's GC step (see tick). A quarantined match is reaped here too,
    *  as the backstop for its onFault hook. */
-  private gcMatch(matchId: string, match: Match, now: number): void {
+  private gcMatch(matchId: string, match: MatchHandle, now: number): void {
     if (match.isQuarantined()) {
       this.reapMatch(matchId, match, 'server_fault');
       return;
@@ -2257,7 +2272,7 @@ export class LobbyServer {
   }
 
   /** Stop a match, forget it, and send any sessions still pointed at it home. */
-  private reapMatch(matchId: string, match: Match, reason: string): void {
+  private reapMatch(matchId: string, match: MatchHandle, reason: string): void {
     // Detach BEFORE stop(). A session still pointed at this match used to be
     // set to 'menu' in place: partyCode kept, `inMatch` never cleared, no
     // lobby_left and no match_detached — a second, independent source of the
