@@ -1162,7 +1162,11 @@ export class ShipRenderer {
     for (const side of [-1, 1] as const) {
       const bulwark = new THREE.Mesh(
         makeSheerRunGeometry(profile, side, {
-          y0: H, y1: bulwarkTop, thickness: 0.14, zFrom: -halfDeckZ, zTo: halfDeckZ,
+          // y0 is the deck's WALKING surface, not H: the weather-deck slab's
+          // edge runs on this same sheer outline up to deckSurfaceY, and both
+          // are ship-deck-planking in one merged draw, so from H the two outer
+          // faces shared a band of plane (hull-alongside patch ties, b1 gate).
+          y0: deckSurfaceY, y1: bulwarkTop, thickness: 0.14, zFrom: -halfDeckZ, zTo: halfDeckZ,
         }),
         deckMat,
       );
