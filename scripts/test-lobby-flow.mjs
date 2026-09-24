@@ -75,6 +75,9 @@ async function pirate(name) {
   ws.on('error', () => {});
   await new Promise((resolve) => ws.once('open', resolve));
   await new Promise((resolve) => setTimeout(resolve, 60));
+  // welcome is the first frame after open, but a loaded host can deliver it
+  // past 60 ms (C=undefined in netcode-37 on this Mac): wait on the message.
+  await until(() => msgs.some((m) => m.type === 'welcome'));
   // Read the id ONCE, off welcome: forget() clears the message log and a
   // clientId derived from it would go undefined halfway through a section.
   const clientId = msgs.find((m) => m.type === 'welcome')?.payload?.clientId;
@@ -133,11 +136,24 @@ const liveMatches = () => server.matches.size;
 const onlyMatch = () => [...server.matches.values()].at(-1);
 
 /** Host starts; members must be Ready first (PLAN 2.2). */
+/** Poll until pred() holds or ms elapse. The server builds the match world
+ *  synchronously before match_start goes out, and permessage-deflate delivers
+ *  asynchronously, so on a loaded host match_start can land after any fixed
+ *  sleep (600 ms read 'undefined' on this Mac at 3fc010d8..c715b286 while the
+ *  message arrived ~0.6-1.1 s after start_match). Waiting on the message is the
+ *  contract; the fixed sleep was a race, not a latency budget. */
+async function until(pred, ms = 5_000) {
+  const t0 = Date.now();
+  while (!pred() && Date.now() - t0 < ms) await sleep(25);
+  return pred();
+}
+
 async function launch(host, ...others) {
   for (const o of others) { o.send('party_ready', { ready: true }); }
   await sleep(120);
   host.send('start_match');
   await sleep(600);
+  await until(() => [host, ...others].every((c) => c.saw('match_start')));
   return onlyMatch();
 }
 
@@ -441,6 +457,7 @@ LobbyServer.tunables.queueHardWaitSeconds = 3.2;
   const match = onlyMatch();
   const humans = match ? match.state.players.filter((p) => !p.isBot).length : 0;
   expect('all six are in it', humans === 6, `humans=${humans}`);
+  await until(() => six[0].saw('match_start'));
   const start = six[0].of('match_start')?.payload ?? {};
   expect('match_start.expectedHumans is the real cohort, not "so far" (netcode-17)',
     start.expectedHumans === 6, JSON.stringify(start));
