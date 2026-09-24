@@ -117,5 +117,80 @@ expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
     typeof REHYDRATE_CONCURRENCY === 'number' && REHYDRATE_CONCURRENCY >= 1 && peak <= REHYDRATE_CONCURRENCY);
 }
 
+// ── lazy story LOD0 (b1-ask-05, OD2): lands via ensure() after the library sweep;
+//    on the release profile its arrays drop inside their own upload.
+{
+  const { AssetLibrary } = await import('../src/client/assets/AssetLibrary.ts');
+  const { trackUpload } = await import('../src/client/rendering/CpuCopyRelease.ts');
+  const lib = new AssetLibrary();
+  let fetches = 0;
+  const meshes = [];
+  lib.loadOne = async (_name, key) => {
+    fetches += 1;
+    const g = new THREE.Group();
+    const box = new THREE.BoxGeometry(2, 4, 6); box.clearGroups();
+    const m = new THREE.Mesh(box, new THREE.MeshStandardMaterial());
+    g.add(m);
+    trackUpload(m.geometry);
+    lib.scenes.set(key, g);
+    meshes.push(m);
+  };
+  lib.releaseCpuCopies(new THREE.Scene()); // the match sweep already ran
+  await lib.ensure('wrecker_tower', true);
+  const lod0 = meshes[0];
+  expect('story LOD0 fetched once', fetches === 1 && !!lod0, `${fetches}`);
+  expect('story LOD0 keeps its arrays until its upload (slot clones it first)', lod0.geometry.attributes.position.array.length > 0);
+  expect('story LOD0 clone still served', lib.clone('wrecker_tower') !== null);
+  upload(lod0.geometry);
+  expect('story LOD0 position dropped inside its upload', lod0.geometry.attributes.position.array.length === 0);
+  expect('story LOD0 index dropped too', lod0.geometry.index.array.length === 0);
+  expect('story LOD0 GPU bytes recorded for the census', releasedGpuBytes(lod0.geometry.attributes.position) > 0);
+  expect('story LOD0 bounds precomputed before the drop', !!lod0.geometry.boundingSphere && !lib.bounds('wrecker_tower').isEmpty());
+  expect('story LOD0 never merged from emptied arrays', lib.mergedGeometry('wrecker_tower') === null);
+  expect('evict still releases it', lib.evict('wrecker_tower') === true);
+  await lib.ensure('wrecker_tower', true);
+  const again = meshes[1];
+  expect('re-ensure refetches a full copy', fetches === 2 && again.geometry.attributes.position.array.length > 0);
+  upload(again.geometry);
+  expect('...which is re-armed and drops inside its upload', again.geometry.attributes.position.array.length === 0);
+}
+
+// ── eager upload of armed-but-undrawn geometry (b1-ask-05): a fake renderer
+//    stands in for three's projectObject, which uploads every non-index
+//    attribute of a mesh (onUpload) before it checks material.visible.
+{
+  const { uploadPendingCpuCopies, pendingUploadCount } = await import('../src/client/rendering/CpuCopyRelease.ts');
+  let draws = 0;
+  const fake = {
+    autoClear: true,
+    render(scene) {
+      scene.traverse((o) => {
+        if (!o.isMesh) return;
+        for (const attr of Object.values(o.geometry.attributes)) attr.onUploadCallback();
+        if (o.material.visible) draws += 1;
+      });
+    },
+  };
+  const root = new THREE.Group();
+  const mk = (name) => { const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()); m.name = name; root.add(m); return m; };
+  const a = mk('eager-a-batch'); const b = mk('eager-b-batch'); const gone = mk('eager-c-batch');
+  uploadPendingCpuCopies(fake, 1e9); draws = 0; // earlier legs' leftovers
+  const before = pendingUploadCount();
+  releaseRenderOnlyCpuCopies(root, () => false);
+  expect('armed batches are queued for an eager upload', pendingUploadCount() === before + 3, `${pendingUploadCount()} vs ${before}+3`);
+  gone.geometry.dispose();
+  expect('a disposed geometry leaves the queue (never re-created on the GPU)', pendingUploadCount() === before + 2);
+  const tiny = uploadPendingCpuCopies(fake, 1);
+  expect('a 1-byte budget still uploads one geometry', tiny > 0 && pendingUploadCount() === before + 1, `${tiny}`);
+  uploadPendingCpuCopies(fake, 1e9);
+  expect('the queue drains', pendingUploadCount() === 0);
+  expect('eager upload drops the vertex arrays', a.geometry.attributes.position.array.length === 0 && b.geometry.attributes.normal.array.length === 0);
+  expect('...keeps the index (it only uploads inside a real draw)', a.geometry.index.array.length > 0);
+  expect('...draws nothing (invisible material, no program)', draws === 0, `${draws}`);
+  expect('...restores autoClear', fake.autoClear === true);
+  expect('...and never touched the disposed geometry', gone.geometry.attributes.position.array.length > 0);
+  expect('an empty queue costs nothing', uploadPendingCpuCopies(fake, 1e9) === 0);
+}
+
 if (failures) { console.error(`\nCPU-copy release: ${failures} failure(s).`); process.exit(1); }
 console.log('\nCPU-copy release passed.');

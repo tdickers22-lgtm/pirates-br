@@ -46,6 +46,94 @@ let releasedBytes = 0;
  *  webglcontextlost. Islands released BEFORE the loss still need a rebuild. */
 export function disableCpuCopyReleaseAfterContextLoss(): void {
   enabled = false;
+  pending.clear();
+}
+
+// ─── eager upload (b1-ask-05, OD2) ─────────────────────────────────────────────
+//
+// A drop armed for "inside the upload" never happens for geometry nothing draws:
+// the batches of an island the player never looks at, a story LOD0 behind the
+// camera. The phone census found 20-55 MB of such armed-but-never-uploaded
+// copies after a 60 s tour (more the less the tour saw), all of it counted as
+// GPU-resident by the budget already. So armed geometry is queued here and
+// uploaded ahead of its first draw, a byte budget per frame, which is what fires
+// the drop. The upload goes through three's own path: a throwaway mesh with an
+// INVISIBLE material in a private scene. WebGLRenderer.projectObject calls
+// objects.update(object) (every non-index attribute -> gl.bufferData ->
+// onUpload) BEFORE it checks material.visible, so nothing is drawn, no program
+// is linked, no draw call is counted. The index buffer only uploads inside a
+// real draw (WebGLBindingStates), so it keeps its armed drop until then.
+
+const pending = new Set<THREE.BufferGeometry>();
+
+function onPendingDispose(event: { target: THREE.BufferGeometry }): void {
+  pending.delete(event.target);
+  event.target.removeEventListener('dispose', onPendingDispose);
+}
+
+function queueUpload(g: THREE.BufferGeometry): void {
+  if (pending.has(g)) return;
+  pending.add(g);
+  g.addEventListener('dispose', onPendingDispose);
+}
+
+function unreleasedAttributeBytes(g: THREE.BufferGeometry): number {
+  let bytes = 0;
+  for (const a of Object.values(g.attributes)) {
+    const attr = a as Releasable;
+    if (attr[RELEASED_KEY] === undefined && attr.array?.byteLength) bytes += attr.array.byteLength;
+  }
+  return bytes;
+}
+
+let upScene: THREE.Scene | null = null;
+let upCamera: THREE.Camera | null = null;
+let upMaterial: THREE.MeshBasicMaterial | null = null;
+
+/** Armed geometries still waiting for their first upload. */
+export function pendingUploadCount(): number {
+  return pending.size;
+}
+
+/**
+ * Upload up to `maxBytes` of queued armed geometry now (at least one geometry
+ * when any is queued), so its CPU copy drops. Call once per frame OUTSIDE any
+ * other render (before the frame's own render). Returns the bytes handed to GL.
+ */
+export function uploadPendingCpuCopies(renderer: THREE.WebGLRenderer, maxBytes: number): number {
+  if (pending.size === 0) return 0;
+  if (!upScene || !upCamera || !upMaterial) {
+    upScene = new THREE.Scene();
+    upScene.matrixWorldAutoUpdate = false;
+    upCamera = new THREE.Camera();
+    upMaterial = new THREE.MeshBasicMaterial();
+    upMaterial.visible = false;
+  }
+  const batch: THREE.Mesh[] = [];
+  let bytes = 0;
+  for (const g of pending) {
+    if (bytes >= maxBytes) break;
+    pending.delete(g);
+    g.removeEventListener('dispose', onPendingDispose);
+    const b = unreleasedAttributeBytes(g);
+    if (b === 0) continue;
+    const mesh = new THREE.Mesh(g, upMaterial);
+    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
+    batch.push(mesh);
+    upScene.add(mesh);
+    bytes += b;
+  }
+  if (batch.length === 0) return 0;
+  const autoClear = renderer.autoClear;
+  renderer.autoClear = false;
+  try {
+    renderer.render(upScene, upCamera);
+  } finally {
+    renderer.autoClear = autoClear;
+    for (const mesh of batch) upScene.remove(mesh);
+  }
+  return bytes;
 }
 
 export function cpuCopyReleaseEnabled(): boolean {
@@ -97,6 +185,7 @@ export function releaseRenderOnlyCpuCopies(root: THREE.Object3D, isShared: (o: o
       a.onUpload(dropAfterUpload);
       bytes += a.array.byteLength;
     }
+    queueUpload(g);
   });
   armedBytes += bytes;
   return bytes;
@@ -166,6 +255,7 @@ export function releaseGeometryCpu(g: THREE.BufferGeometry, dead: boolean): numb
       dropAfterUpload.call(attr);
     } else {
       attr[DROP_ARMED_KEY] = true;
+      queueUpload(g);
     }
   }
   armedBytes += bytes;

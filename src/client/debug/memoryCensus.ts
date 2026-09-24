@@ -70,6 +70,10 @@ export interface MemoryCensus {
   topTextures: { name: string; w: number; h: number; mb: number }[];
   objects: number;
   topRetained: { name: string; mb: number; n: number; uploaded: number }[];
+  /** Distinct scene materials (each compiled one carries its own uniform clone). */
+  materials: number;
+  /** Distinct materials by `<type>:<name>`, biggest families first (b1-ask-05). */
+  topMaterials: { key: string; n: number }[];
 }
 
 type AnyTex = THREE.Texture & { isCompressedTexture?: boolean; isCubeTexture?: boolean; isDataTexture?: boolean;
@@ -240,6 +244,8 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
   const retained = new Map<string, { bytes: number; n: number; uploaded: number }>();
   const retainedSeen = new Set<unknown>();
   const lazy = new Set<string>(LAZY_ASSET_NAMES);
+  const matSeen = new Set<THREE.Material>();
+  const matFamilies = new Map<string, number>();
   scene.traverse((o) => {
     objects += 1;
     // The proxy carries the same `prop-<type>` name until LOD0 lands; LOD0 is the non-mesh root.
@@ -269,7 +275,14 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
       geometry += attributeBytes(inst.instanceColor, seenArrays);
     }
     const mat = mesh.material;
-    if (mat) for (const m of Array.isArray(mat) ? mat : [mat]) materialTextures(m, addTexture);
+    if (mat) for (const m of Array.isArray(mat) ? mat : [mat]) {
+      materialTextures(m, addTexture);
+      if (m && !matSeen.has(m)) {
+        matSeen.add(m);
+        const key = `${m.type}:${(m.name || (o.name || o.type)).replace(/[\d_.-]+$/g, '').slice(0, 32)}`;
+        matFamilies.set(key, (matFamilies.get(key) ?? 0) + 1);
+      }
+    }
   });
   if ((scene.background as THREE.Texture | null)?.isTexture) addTexture(scene.background as THREE.Texture);
   if (scene.environment) addTexture(scene.environment);
@@ -332,6 +345,8 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
     objects,
     topRetained: [...retained.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 14)
       .map(([name, e]) => ({ name, mb: r(e.bytes), n: e.n, uploaded: e.uploaded })),
+    materials: matSeen.size,
+    topMaterials: [...matFamilies.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([key, n]) => ({ key, n })),
   };
 }
 
@@ -350,10 +365,13 @@ export async function forceStoryLod0(game: CensusHost, copies = 2): Promise<numb
   scene.add(holder);
   for (const name of LAZY_ASSET_NAMES) {
     await assets.ensure(name, true).catch(() => undefined);
-    const src = lib.scenes?.get(name);
-    if (!src) continue;
+    if (!lib.scenes?.get(name)) continue;
     for (let i = 0; i < copies; i++) {
-      const copy = src.clone(true);
+      // A fresh parse per copy: the library's own LOD0 may already have
+      // dropped its CPU arrays on the release profile (b1-ask-05), and a clone
+      // of an emptied geometry would make this mutation vacuous.
+      const copy = await assets.loadDetached(name).catch(() => null);
+      if (!copy) continue;
       copy.traverse((o) => {
         const mesh = o as THREE.Mesh;
         if (!mesh.isMesh) return;

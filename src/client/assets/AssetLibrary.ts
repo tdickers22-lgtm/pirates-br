@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { auditAssetMaterial } from './materialAudit.js';
 import { collapseChunks } from './AssetMaterialCollapse.js';
-import { trackUpload, geometryUploaded, releaseGeometryCpu } from '../rendering/CpuCopyRelease.js';
+import { trackUpload, geometryUploaded, releaseGeometryCpu, cpuCopyReleaseEnabled } from '../rendering/CpuCopyRelease.js';
 
 /**
  * Preloaded GLB asset library. Assets are authored in Blender
@@ -284,6 +284,8 @@ export class AssetLibrary {
   private readonly cpuReleased = new Set<AssetKey>();
   private readonly cloneDead = new Set<AssetKey>();
   private cpuReleaseDone = false;
+  /** Lazy story LOD0s whose CPU copies are armed to drop after upload (b1-ask-05). */
+  private lazyCpuArmed = new Set<AssetKey>();
   private rehydrateJob: Promise<void> | null = null;
   rehydrating = false;
 
@@ -353,10 +355,48 @@ export class AssetLibrary {
     if (priority) this.lazyQueue.unshift(job); else this.lazyQueue.push(job);
     const settled = gate
       .then(() => this.loadSet([name]))
+      .then(() => { this.armLazyCpuRelease(name); })
       .finally(() => { this.lazyActive -= 1; this.pumpLazy(); });
     this.ensured.set(name, settled);
     this.pumpLazy();
     return settled;
+  }
+
+  /**
+   * PHONE HEAP, STORY LOD0 (b1-ask-05, OD2). A lazy story scene lands through
+   * ensure() at any time in the match — often after releaseCpuCopies() ran — and
+   * cpuReleasableKey() rightly keeps it out of that sweep (evict() owns its
+   * lifetime). But nothing reads its vertices once it is on the GPU: the story
+   * slot clones it (clone() shares the geometry), blendStoryPad reads only the
+   * bounding sphere, and nothing merges a LOD0. So on the release profile each
+   * LOD0 geometry drops its CPU copy inside its own upload, bounds computed
+   * first. evict() still disposes it and the next ensure() refetches a fresh,
+   * full copy (re-armed here). Measured before: 12.5 MB of story LOD0 arrays
+   * retained on the phone after the 60 s tour (58302dc1). Returns bytes armed.
+   */
+  private armLazyCpuRelease(name: AssetName): number {
+    if (!cpuCopyReleaseEnabled() || this.lazyCpuArmed.has(name)) return 0;
+    const src = this.scenes.get(name);
+    if (!src) return 0;
+    const geoms = new Set<THREE.BufferGeometry>();
+    let skinned = false;
+    src.traverse((o) => {
+      if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
+      else if (o instanceof THREE.Mesh) geoms.add(o.geometry);
+    });
+    if (skinned) return 0;
+    this.bounds(name);
+    let bytes = 0;
+    for (const g of geoms) bytes += releaseGeometryCpu(g, false);
+    this.lazyCpuArmed.add(name);
+    return bytes;
+  }
+
+  /** A fresh, library-independent parse of one GLB (own buffers, own textures).
+   *  For the memory census mutation only: it must not share anything the
+   *  release above has emptied. */
+  async loadDetached(name: AssetName): Promise<THREE.Group> {
+    return (await this.loader.loadAsync(`/assets/models/${name}.glb`)).scene;
   }
 
   /** Has this name been asked for through `ensure()` (settled or in flight)? */
@@ -704,6 +744,7 @@ export class AssetLibrary {
     this.clips.delete(name);
     this.boundsCache.delete(name);
     this.ensured.delete(name);
+    this.lazyCpuArmed.delete(name);
     const seen = new Set<object>();
     const drop = (r: { dispose(): void } | null | undefined) => {
       if (!r || seen.has(r)) return;
@@ -740,7 +781,8 @@ export class AssetLibrary {
     const cached = this.merged.get(name);
     if (cached) return cached;
     const src = this.scenes.get(name);
-    if (!src || this.cpuReleased.has(name)) return null;
+    // A lazy LOD0 armed for release may already hold empty arrays: no merge.
+    if (!src || this.cpuReleased.has(name) || this.lazyCpuArmed.has(name)) return null;
 
     const geoms: THREE.BufferGeometry[] = [];
     const mats: THREE.Material[] = [];

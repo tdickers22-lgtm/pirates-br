@@ -137,6 +137,7 @@ async function censusFor(browser, id) {
     console.log(`      CPU copies released after upload ${c.mb.cpuReleased} MB (${c.cpuRelease?.enabled ? 'release on' : 'release OFF'}; armed ${(c.cpuRelease?.armedBytes / 1e6).toFixed(1)} MB)`);
     console.log(`      counts ${JSON.stringify(c.counts)}`);
     console.log(`      scene objects ${c.objects}; CPU-retained geometry by family: ${(c.topRetained ?? []).map((t) => `${t.name} ${t.mb}MB x${t.n} (${t.uploaded} uploaded)`).join(', ')}`);
+    console.log(`      materials ${c.materials}: ${(c.topMaterials ?? []).map((t) => `${t.key} x${t.n}`).join(', ')}`);
     console.log(`      top textures ${c.topTextures.slice(0, 5).map((t) => `${t.name} ${t.w}x${t.h} ${t.mb}MB`).join(', ')}`);
     // The census must have SEEN something, or every row below passes vacuously.
     expect(`[${id}] census is not vacuous (geometry, textures and targets all counted)`,
