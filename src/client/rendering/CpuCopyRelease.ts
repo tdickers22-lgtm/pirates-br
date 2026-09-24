@@ -60,14 +60,9 @@ export function disableCpuCopyReleaseAfterContextLoss(): void {
 // the drop. The upload goes through three's own path: a throwaway mesh with an
 // INVISIBLE material in a private scene. WebGLRenderer.projectObject calls
 // objects.update(object) (every non-index attribute -> gl.bufferData ->
-// onUpload) BEFORE it checks material.visible. The index buffer only uploads
-// inside renderBufferDirect (WebGLBindingStates.setup), and the phone census
-// found story LOD0 and batch indices still held after the vertex arrays had
-// gone (b1-ask-05). So the pass material is VISIBLE but writes nothing
-// (colorWrite/depthWrite/depthTest off), and each geometry's drawRange count is
-// 0 for the pass: renderBufferDirect returns only on drawCount < 0, so setup
-// runs (index uploaded, its drop fires) and the draw rasterises 0 indices. One
-// cheap MeshBasicMaterial program serves the whole pass; drawRange is restored.
+// onUpload) BEFORE it checks material.visible, so nothing is drawn, no program
+// is linked, no draw call is counted. The index buffer only uploads inside a
+// real draw (WebGLBindingStates), so it keeps its armed drop until then.
 
 const pending = new Set<THREE.BufferGeometry>();
 
@@ -84,9 +79,8 @@ function queueUpload(g: THREE.BufferGeometry): void {
 
 function unreleasedAttributeBytes(g: THREE.BufferGeometry): number {
   let bytes = 0;
-  for (const a of [g.index, ...Object.values(g.attributes)]) {
-    const attr = a as Releasable | null;
-    if (!attr) continue;
+  for (const a of Object.values(g.attributes)) {
+    const attr = a as Releasable;
     if (attr[RELEASED_KEY] === undefined && attr.array?.byteLength) bytes += attr.array.byteLength;
   }
   return bytes;
@@ -112,11 +106,10 @@ export function uploadPendingCpuCopies(renderer: THREE.WebGLRenderer, maxBytes: 
     upScene = new THREE.Scene();
     upScene.matrixWorldAutoUpdate = false;
     upCamera = new THREE.Camera();
-    upMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: false, fog: false });
-    upMaterial.name = 'cpu-copy-upload-pass';
+    upMaterial = new THREE.MeshBasicMaterial();
+    upMaterial.visible = false;
   }
   const batch: THREE.Mesh[] = [];
-  const ranges: [THREE.BufferGeometry, number, number][] = [];
   let bytes = 0;
   for (const g of pending) {
     if (bytes >= maxBytes) break;
@@ -124,8 +117,6 @@ export function uploadPendingCpuCopies(renderer: THREE.WebGLRenderer, maxBytes: 
     g.removeEventListener('dispose', onPendingDispose);
     const b = unreleasedAttributeBytes(g);
     if (b === 0) continue;
-    ranges.push([g, g.drawRange.start, g.drawRange.count]);
-    g.setDrawRange(0, 0);
     const mesh = new THREE.Mesh(g, upMaterial);
     mesh.frustumCulled = false;
     mesh.matrixAutoUpdate = false;
@@ -141,7 +132,6 @@ export function uploadPendingCpuCopies(renderer: THREE.WebGLRenderer, maxBytes: 
   } finally {
     renderer.autoClear = autoClear;
     for (const mesh of batch) upScene.remove(mesh);
-    for (const [g, start, count] of ranges) g.setDrawRange(start, count);
   }
   return bytes;
 }

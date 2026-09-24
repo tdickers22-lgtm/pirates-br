@@ -160,27 +160,14 @@ expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
 //    attribute of a mesh (onUpload) before it checks material.visible.
 {
   const { uploadPendingCpuCopies, pendingUploadCount } = await import('../src/client/rendering/CpuCopyRelease.ts');
-  // Mirrors three r160: projectObject uploads the vertex attributes before the
-  // material.visible check; a visible material reaches renderBufferDirect,
-  // which links a program, uploads the INDEX in bindingStates.setup (drawCount
-  // 0 still gets there, only < 0 returns) and then draws drawRange.count.
   let draws = 0;
-  let drawnIndices = 0;
-  const programs = new Set();
   const fake = {
     autoClear: true,
     render(scene) {
       scene.traverse((o) => {
         if (!o.isMesh) return;
         for (const attr of Object.values(o.geometry.attributes)) attr.onUploadCallback();
-        if (!o.material.visible) return;
-        programs.add(o.material);
-        const g = o.geometry;
-        const total = g.index ? g.index.count : g.attributes.position.count;
-        const count = Math.min(total, g.drawRange.count);
-        if (count < 0) return;
-        if (g.index) g.index.onUploadCallback();
-        draws += 1; drawnIndices += count;
+        if (o.material.visible) draws += 1;
       });
     },
   };
@@ -198,10 +185,8 @@ expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
   uploadPendingCpuCopies(fake, 1e9);
   expect('the queue drains', pendingUploadCount() === 0);
   expect('eager upload drops the vertex arrays', a.geometry.attributes.position.array.length === 0 && b.geometry.attributes.normal.array.length === 0);
-  expect('...drops the index too (uploaded through a zero-count draw)', a.geometry.index.array.length === 0 && b.geometry.index.array.length === 0);
-  expect('...rasterises nothing (drawRange count 0 during the upload pass)', drawnIndices === 0, `${drawnIndices} indices drawn`);
-  expect('...links at most one program for the whole pass', programs.size <= 1, `${programs.size}`);
-  expect('...restores each geometry drawRange', a.geometry.drawRange.count === Infinity && b.geometry.drawRange.start === 0);
+  expect('...keeps the index (it only uploads inside a real draw)', a.geometry.index.array.length > 0);
+  expect('...draws nothing (invisible material, no program)', draws === 0, `${draws}`);
   expect('...restores autoClear', fake.autoClear === true);
   expect('...and never touched the disposed geometry', gone.geometry.attributes.position.array.length > 0);
   expect('an empty queue costs nothing', uploadPendingCpuCopies(fake, 1e9) === 0);
