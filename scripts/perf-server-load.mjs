@@ -151,6 +151,12 @@ async function addMatch(i) {
   const m = [...server.matches.values()].find((x) => !known.has(x));
   if (!m) throw new Error(`match ${i} never started (${c.seen.slice(-5).join(',')}; ${c.errors.join(';')})`);
   known.add(m);
+  // The load crew is read on the lobby thread, which a fast-forward blocks
+  // (in-process: the loop; workers: Atomics.wait while the OTHER matches keep
+  // ticking), so its socket backs up and enforceCongestion (sim time) evicted
+  // it: the seat expired 60 s later and the match was reaped mid-report. That
+  // is the harness, not a player; the rows grade the sim with N live matches.
+  if (WORKERS > 0) m.debug('loadNoEvict'); else m.enforceCongestion = () => {};
   if (WORKERS > 0) {
     let r;
     // Short chunks with a yield between them: the lobby thread sits in

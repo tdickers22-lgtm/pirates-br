@@ -245,6 +245,10 @@ export function runMatchWorker(init: WorkerInit): void {
         if (done) { for (const f of m.__ffMuted) delete m[f]; m.__ffMuted = null; }
         return row;
       }
+      // The load crew shares the lobby thread, which sits in Atomics.wait
+      // through another match's fast-forward: its socket cannot drain, and that
+      // is the harness, not a player. Capacity rows grade the sim.
+      case 'loadNoEvict': { m.enforceCongestion = () => {}; return true; }
       case 'loadRebase': {
         const wall = Date.now(); const perf = performance.now();
         if (m.state.phase === 'playing') m.playingSinceWallMs = wall - m.t * 1000;
