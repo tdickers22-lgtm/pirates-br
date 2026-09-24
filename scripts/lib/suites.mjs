@@ -557,6 +557,11 @@ export const LOGIC = [
   quick(tsx('test-dig-sparkle.mjs')),
   quick(tsx('test-session-telemetry.mjs')),
   quick(tsx('test-beacon-store.mjs')),
+  //   triage-beacons --self-test  — b2.0a (D35, rule 14): the bN.0 triage gate's red cases stay red (missing report,
+  //                                 other batch, never pulled = VACUOUS, a >= 3-session signature with neither a
+  //                                 [bN.0->lane] fix commit in git nor a bN.<lane>.z0 slice); a batch gate names it as
+  //                                 `triage-beacons --check --batch bN` to grade $D/batches/bN/triage.json
+  quick({ ...plain('triage-beacons.mjs'), cmd: ['node', 'scripts/triage-beacons.mjs', '--self-test'] }),
   //   test-asset-provenance       — every GLB in public/assets/models has a PROVENANCE.json row (the scripts/blender
   //                                 build script carrying its literal output name, or a CC0/CC-BY LICENSES.md row with
   //                                 a URL); committed file == fresh provenance-scan; no generator-tool string in any
