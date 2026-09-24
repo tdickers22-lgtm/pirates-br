@@ -115,9 +115,12 @@ for (const [key, dir, label] of [
 }
 // PLAN §2.1 pins the spread itself: a Cutter must FEEL like a different ship
 // from a Corsair, and 15/13/10 with 0.70/0.45/0.25 was too flat to read.
-expect('speed spread is 15.5 / 14 / 11.5',
-  SHIP_STATS.sloop.maxSpeed === 15.5 && SHIP_STATS.brigantine.maxSpeed === 14
-    && SHIP_STATS.galleon.maxSpeed === 11.5,
+// D16 (b2.1a re-pin): maxSpeed is now each class's TOP speed on its own best
+// point of sail (sloop beam, brig broad reach, galleon downwind); the per-class
+// polars in shared/sailing.ts carry the rest (test-sailing-handling section 2).
+expect('top-speed spread is 14 / 13.5 / 13 (D16)',
+  SHIP_STATS.sloop.maxSpeed === 14 && SHIP_STATS.brigantine.maxSpeed === 13.5
+    && SHIP_STATS.galleon.maxSpeed === 13,
   LADDER.map((t) => `${t}=${SHIP_STATS[t].maxSpeed}`).join(' '));
 expect('turn spread is 0.72 / 0.52 / 0.32',
   SHIP_STATS.sloop.turnRate === 0.72 && SHIP_STATS.brigantine.turnRate === 0.52

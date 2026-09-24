@@ -268,18 +268,22 @@ export const SHIP_STATS: Record<ShipType, {
   // both ends (15.5 → 11.5, 0.72 → 0.32) makes the class a real choice: the
   // Cutter outruns and out-turns everything and dies to one good broadside; the
   // Man-o'-War cannot run from anything and does not have to.
+  // D16 (b2.1a): maxSpeed is each class's TOP speed on its best point of sail,
+  // mirroring shared/sailing.ts CLASS_TOP_SPEED (sloop 14.0 beam, brig 13.5
+  // broad reach, galleon 13.0 downwind); the per-class polars there decide the
+  // speed on every other heading. The ladder still falls as the hull grows.
   sloop: {
-    maxHull: 600, cannonCount: 2, maxSpeed: 15.5,
+    maxHull: 600, cannonCount: 2, maxSpeed: 14.0,
     turnRate: 0.72, width: 5, length: 12, height: 2.2, mastCount: 1,
     crewStations: 1,
   },
   brigantine: {
-    maxHull: 900, cannonCount: 4, maxSpeed: 14,
+    maxHull: 900, cannonCount: 4, maxSpeed: 13.5,
     turnRate: 0.52, width: 7, length: 16, height: 2.8, mastCount: 2,
     crewStations: 2,
   },
   galleon: {
-    maxHull: 1400, cannonCount: 8, maxSpeed: 11.5,
+    maxHull: 1400, cannonCount: 8, maxSpeed: 13.0,
     turnRate: 0.32, width: 10, length: 22, height: 3.5, mastCount: 3,
     crewStations: 4,
   },
@@ -315,7 +319,10 @@ export const SHIP = {
   FIELD_REPAIR_DELAY: 10,
   FIELD_REPAIR_INTERVAL: 2.5,
   FIELD_REPAIR_HP: 120,
-  MAX_SAIL_ANGLE: Math.PI * 0.48,
+  /** Square-rig brace limit, 65 deg. Mirrors shared/sailing.ts MAX_BRACE (the
+   *  source; sailing imports this module, so it cannot import back);
+   *  test-sailing-handling asserts the two are identical. Was 0.48 PI = 86 deg. */
+  MAX_SAIL_ANGLE: (65 * Math.PI) / 180,
   /** Full hoist takes ~2.2s solo, ~1.5s with a crewmate on the rope. */
   SAIL_HOIST_RATE: 0.45,
   SAIL_TRIM_RATE: 1.55,
