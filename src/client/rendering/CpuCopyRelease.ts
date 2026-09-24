@@ -39,6 +39,9 @@ type Releasable = THREE.BufferAttribute & { [RELEASED_KEY]?: number };
 let enabled: boolean | null = null;
 let armedBytes = 0;
 let releasedBytes = 0;
+/** Eager-pass bookkeeping for the census: frames it ran, bytes it handed to GL. */
+let eagerPasses = 0;
+let eagerBytes = 0;
 
 /** b1-ask-04: after a WebGL context loss a released attribute re-uploads
  *  empty, so this session stops releasing (islands built from now on keep
@@ -90,6 +93,24 @@ let upScene: THREE.Scene | null = null;
 let upCamera: THREE.Camera | null = null;
 let upMaterial: THREE.MeshBasicMaterial | null = null;
 
+/** Eager-pass throughput: 1 MB per 60 Hz frame, i.e. a constant ~60 MB/s. */
+const EAGER_BYTES_PER_MS = 1_000_000 / (1000 / 60);
+const EAGER_MIN_BYTES = 1_000_000;
+const EAGER_MAX_BYTES = 8_000_000;
+
+/**
+ * Bytes the eager pass may hand to GL this frame, from the rendered interval.
+ * A per-FRAME budget left the queue full on a slow device (phone census run 5,
+ * 2026-09-23: 44 of 94 MB armed never drained in a 60 s tour at a few fps, heap
+ * 121 MB; the same tree drained it and read 108 MB when the frames came faster),
+ * so the budget is per unit of TIME: a device at 20 fps uploads 3 MB a frame,
+ * one at 60 fps 1 MB, capped at 8 MB so a hitch never becomes a stall.
+ */
+export function eagerUploadBudget(rawDtMs: number): number {
+  const ms = Number.isFinite(rawDtMs) && rawDtMs > 0 ? rawDtMs : 1000 / 60;
+  return Math.max(EAGER_MIN_BYTES, Math.min(EAGER_MAX_BYTES, Math.round(ms * EAGER_BYTES_PER_MS)));
+}
+
 /** Armed geometries still waiting for their first upload. */
 export function pendingUploadCount(): number {
   return pending.size;
@@ -125,6 +146,8 @@ export function uploadPendingCpuCopies(renderer: THREE.WebGLRenderer, maxBytes: 
     bytes += b;
   }
   if (batch.length === 0) return 0;
+  eagerPasses += 1;
+  eagerBytes += bytes;
   const autoClear = renderer.autoClear;
   renderer.autoClear = false;
   try {
@@ -191,8 +214,17 @@ export function releaseRenderOnlyCpuCopies(root: THREE.Object3D, isShared: (o: o
   return bytes;
 }
 
-export function cpuCopyReleaseStats(): { enabled: boolean; armedBytes: number; releasedBytes: number } {
-  return { enabled: cpuCopyReleaseEnabled(), armedBytes, releasedBytes };
+export interface CpuCopyReleaseStats {
+  enabled: boolean; armedBytes: number; releasedBytes: number;
+  /** Queued for the eager pass and not handed to GL yet (count, CPU bytes incl. index). */
+  pendingCount: number; pendingBytes: number;
+  eagerPasses: number; eagerBytes: number;
+}
+
+export function cpuCopyReleaseStats(): CpuCopyReleaseStats {
+  let pendingBytes = 0;
+  for (const g of pending) pendingBytes += unreleasedAttributeBytes(g) + (g.index?.array.byteLength ?? 0);
+  return { enabled: cpuCopyReleaseEnabled(), armedBytes, releasedBytes, pendingCount: pending.size, pendingBytes, eagerPasses, eagerBytes };
 }
 
 // ─── library templates (AssetLibrary.releaseCpuCopies) ──────────────────────────────────────────────

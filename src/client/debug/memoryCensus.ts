@@ -33,7 +33,7 @@
  */
 import * as THREE from 'three';
 import { assets, LAZY_ASSET_NAMES } from '../assets/AssetLibrary.js';
-import { releasedGpuBytes, cpuCopyReleaseStats, geometryUploaded } from '../rendering/CpuCopyRelease.js';
+import { releasedGpuBytes, cpuCopyReleaseStats, geometryUploaded, type CpuCopyReleaseStats } from '../rendering/CpuCopyRelease.js';
 
 /** Bytes the current census walk found released from the CPU (reset per census). */
 let cpuReleasedAcc = 0;
@@ -59,7 +59,7 @@ export interface MemoryCensus {
   heapTypedArrayBytes: number;
   /** Of `geometryBytes`: GPU-only bytes whose CPU copy was released after upload (CpuCopyRelease). */
   cpuReleasedBytes: number;
-  cpuRelease: { enabled: boolean; armedBytes: number; releasedBytes: number };
+  cpuRelease: CpuCopyReleaseStats;
   counts: {
     geometries: number; attributes: number; textures: number; renderTargets: number;
     infoGeometries: number; infoTextures: number; storyLod0Resident: number;
@@ -69,7 +69,7 @@ export interface MemoryCensus {
   /** Top texture sources by bytes, for triage. */
   topTextures: { name: string; w: number; h: number; mb: number }[];
   objects: number;
-  topRetained: { name: string; mb: number; n: number; uploaded: number }[];
+  topRetained: { name: string; mb: number; n: number; uploaded: number; indexMb: number }[];
   /** Distinct scene materials (each compiled one carries its own uniform clone). */
   materials: number;
   /** Distinct materials by `<type>:<name>`, biggest families first (b1-ask-05). */
@@ -241,7 +241,7 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
   let objects = 0;
   // b1-ask-05: which meshes still hold CPU typed arrays after the tour, by
   // name family (digits stripped), so the heap cut targets real bytes.
-  const retained = new Map<string, { bytes: number; n: number; uploaded: number }>();
+  const retained = new Map<string, { bytes: number; n: number; uploaded: number; index: number }>();
   const retainedSeen = new Set<unknown>();
   const lazy = new Set<string>(LAZY_ASSET_NAMES);
   const matSeen = new Set<THREE.Material>();
@@ -255,17 +255,21 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
       seenGeoms.add(mesh.geometry);
       geometry += geometryBytes(mesh.geometry, seenArrays);
       let cpu = 0;
+      let idx = 0;
       const g = mesh.geometry;
       for (const a of [...Object.values(g.attributes), g.index]) {
         const arr = (a as THREE.BufferAttribute | null)?.array as ArrayBufferView | undefined;
-        if (arr?.byteLength && !retainedSeen.has(arr)) { retainedSeen.add(arr); cpu += arr.byteLength; }
+        if (arr?.byteLength && !retainedSeen.has(arr)) {
+          retainedSeen.add(arr); cpu += arr.byteLength;
+          if (a === g.index) idx += arr.byteLength;
+        }
       }
       if (cpu > 0) {
         let n = o as THREE.Object3D | null;
         while (n && !n.name) n = n.parent;
         const key = (n?.name || o.type).replace(/[\d_.-]+$/g, '').slice(0, 40) + ((mesh as THREE.SkinnedMesh).isSkinnedMesh ? ' (skinned)' : '');
-        const e = retained.get(key) ?? { bytes: 0, n: 0, uploaded: 0 };
-        e.bytes += cpu; e.n += 1; if (geometryUploaded(g)) e.uploaded += 1;
+        const e = retained.get(key) ?? { bytes: 0, n: 0, uploaded: 0, index: 0 };
+        e.bytes += cpu; e.index += idx; e.n += 1; if (geometryUploaded(g)) e.uploaded += 1;
         retained.set(key, e);
       }
     }
@@ -352,7 +356,7 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
     topTextures: top,
     objects,
     topRetained: [...retained.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 14)
-      .map(([name, e]) => ({ name, mb: r(e.bytes), n: e.n, uploaded: e.uploaded })),
+      .map(([name, e]) => ({ name, mb: r(e.bytes), n: e.n, uploaded: e.uploaded, indexMb: r(e.index) })),
     materials: matSeen.size,
     topMaterials: [...matFamilies.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([key, n]) => ({ key, n })),
   };

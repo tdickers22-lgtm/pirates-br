@@ -192,5 +192,17 @@ expect('re-arming a released subtree arms nothing', again === 0, `${again}`);
   expect('an empty queue costs nothing', uploadPendingCpuCopies(fake, 1e9) === 0);
 }
 
+// ── eager budget is per unit of TIME, not per frame (phone census run 5: a
+// per-frame 1 MB left 44 MB queued after a 60 s tour at a few fps, heap 121 MB).
+{
+  const { eagerUploadBudget } = await import('../src/client/rendering/CpuCopyRelease.ts');
+  const at60 = eagerUploadBudget(1000 / 60), at20 = eagerUploadBudget(50), at2 = eagerUploadBudget(500);
+  expect('eager budget: 1 MB per 60 Hz frame', Math.abs(at60 - 1_000_000) <= 1, `${at60}`);
+  expect('eager budget: a 20 fps frame uploads 3x a 60 fps one (same MB per second)', Math.abs(at20 - 3_000_000) <= 1, `${at20}`);
+  expect('eager budget: capped at 8 MB so a hitch never becomes a stall', at2 === 8_000_000, `${at2}`);
+  expect('eager budget: a 240 Hz frame still makes progress (>= 1 MB)', eagerUploadBudget(1000 / 240) === 1_000_000);
+  expect('eager budget: a bad dt falls back to one 60 Hz frame', eagerUploadBudget(NaN) === at60 && eagerUploadBudget(-5) === at60);
+}
+
 if (failures) { console.error(`\nCPU-copy release: ${failures} failure(s).`); process.exit(1); }
 console.log('\nCPU-copy release passed.');
