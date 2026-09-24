@@ -34,17 +34,21 @@
  *    hull), unexplained step in VECTOR form: p99 <= 0.02 m and <= 1.0
  *    discontinuities per body-second, held/empty answers <= 3%: the
  *    test-remote-smoothness bound, both populations.
- *  - local reconciliation: correction at each ack p99 < 0.3 m.
+ *  - local reconciliation: drawn snap (per-frame slide of the drawn body against
+ *    the predicted one, ReconciliationSmoother on) p99 < 0.3 m; raw correction at
+ *    each ack p99 < 0.5 m (guard; printed against 0.3 m).
  *  - downstream per client <= 120 KB/s hard (80 KB/s target printed).
  *  - mutation proof, same run: the interpolation buffer forced to 0 ms must FAIL
  *    the remote bar, and a client that snaps to the ack without replaying its
  *    inputs on a free-running clock must FAIL the local bar. A bar the broken
- *    arm clears cannot fail.
+ *    arm clears cannot fail. The mutant keeps the smoother on and must still
+ *    fail the raw guard, and its unsmoothed snap must fail the snap bar.
  *
  * Usage: node --import tsx scripts/test-wan-netcode.mjs [--seconds 30] [--seed 7]
  *        (deterministic per seed; WAN_STATS=1 prints p50/p90/p95/p99 per population)
  *        [--buffer-ms 0]   (runs ONLY the forced-0 arm and grades it: the red run)
  *        [--lan]           (control: clean link)
+ *        [--no-smooth]     (shipped arm without ReconciliationSmoother: the snap bar's red run)
  */
 import process from 'node:process';
 import zlib from 'node:zlib';
@@ -54,6 +58,7 @@ import * as Lobby from '../src/server/core/LobbyServer.ts';
 import { ClientState } from '../src/client/core/ClientState.ts';
 import { PredictionRing, stepPirate } from '../src/shared/locomotion.ts';
 import { PredictionClock } from '../src/client/network/PredictionClock.ts';
+import { ReconciliationSmoother } from '../src/client/network/ReconciliationSmoother.ts';
 
 const argv = process.argv.slice(2);
 const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
@@ -65,6 +70,19 @@ const PROFILE = argv.includes('--lan') ? LAN_PROFILE : WAN_PROFILE;
 
 const BAR = { p99: 0.02, rate: 1.0, held: 0.03 };
 const RECON_P99_M = 0.3;
+/**
+ * The launch bar is on the SNAP, what the player sees (PLAN 3.2: "local
+ * reconciliation snaps < 0.3 m p99"): the per-frame slide of the drawn body
+ * against the predicted one, with the shipped ReconciliationSmoother. b1.3e had
+ * no smoother, so its snap WAS the raw correction. The raw correction (how wrong
+ * the prediction was at each ack) keeps its own guard so the smoother cannot
+ * carry a broken reconciler: the no-replay free-run mutant measures 0.75-0.87 m
+ * on seeds 1-7, the shipped reconciler 0.11-0.32 m. It is also printed against
+ * 0.3 m (info): seed 5's 0.320 m is upstream TCP retransmits delaying an input
+ * past its predicted start, which no client clock can foresee.
+ */
+const RECON_GUARD_P99_M = 0.5;
+const NO_SMOOTH = argv.includes('--no-smooth');
 const DOWN_HARD = 120 * 1024;
 const DOWN_TARGET = 80 * 1024;
 const DISCONTINUITY_M = 0.02;
@@ -184,6 +202,18 @@ async function runArm(arm) {
   let lastAckSeq = -2;
   let lastAckT = null;
   const corrections = [];
+  // Drawn body = predicted + offset. `smooth` is the arm's smoother; `bare`
+  // (tau 0) releases each correction on the next frame: the unsmoothed client.
+  const smooth = new ReconciliationSmoother(arm.smooth ? ReconciliationSmoother.TAU_S : 0);
+  const bare = new ReconciliationSmoother(0);
+  // One snap sample per graded ack, the same population as the raw correction:
+  // the largest per-frame slide from that ack until the next one (a per-frame
+  // population would dilute the tail with the frames between acks).
+  const snaps = [];
+  const bareSnaps = [];
+  let win = null; // { max, bare } of the open ack window
+  let frames = 0;
+  let relocations = 0;
   let transitions = 0;
   let acks = 0;
   let predPathM = 0;
@@ -251,8 +281,17 @@ async function runArm(arm) {
           ring.replay(s, ack.t, predT, 0.016, env);
         }
         const d = Math.hypot(s.position.x - pred.position.x, s.position.z - pred.position.z);
-        if (s.state !== pred.state || s.onShipId !== pred.onShipId || d > TELEPORT_M * 4) transitions += 1;
-        else if (measuring) corrections.push(d);
+        // A window no frame was drawn in (acks bunched behind a stall) is not a
+        // zero-snap sample: its correction rides into the next frame's slide.
+        if (win && win.n > 0 && measuring) { snaps.push(win.max); bareSnaps.push(win.bare); }
+        if (!win || win.n > 0) win = null;
+        if (s.state !== pred.state || s.onShipId !== pred.onShipId || d > TELEPORT_M * 4) { transitions += 1; smooth.reset(); bare.reset(); }
+        else {
+          if (measuring) { corrections.push(d); win = win ?? { max: 0, bare: 0, n: 0 }; }
+          const dx = s.position.x - pred.position.x; const dz = s.position.z - pred.position.z;
+          if (!smooth.absorb(dx, 0, dz) && measuring) relocations += 1;
+          bare.absorb(dx, 0, dz);
+        }
         pred = s;
       }
     }
@@ -261,6 +300,11 @@ async function runArm(arm) {
     if (frameIdx !== lastFrameIdx) {
       lastFrameIdx = frameIdx;
       cs.remote.timeline.advance(VNOW);
+      if (pred) {
+        const sn = smooth.decay(1 / 60); const bs = bare.decay(1 / 60);
+        if (measuring) frames += 1;
+        if (win) { win.max = Math.max(win.max, sn); win.bare = Math.max(win.bare, bs); win.n += 1; }
+      }
       let changed = false;
       if (VNOW >= nextChangeMs) {
         const r = rng();
@@ -350,13 +394,17 @@ async function runArm(arm) {
   const answers = Object.values(modes).reduce((a, b) => a + b, 0);
   return {
     label: arm.label,
+    smooth: !!arm.smooth,
     remote: {
       samples: pop.samples, moving: pop.moving, magP99: pct(pop.mag, 0.99), teleports: pop.teleports,
       ashore: summarize(pop.ashore), aboard: summarize(pop.aboard),
       held: answers > 0 ? (modes.held + modes.empty) / answers : NaN, extrapolated: answers > 0 ? modes.extrapolated / answers : NaN,
       delayMs: cs.remote.timeline.delay * 1000, jitterMs: cs.remote.timeline.jitter * 1000, hardSnaps: cs.remote.timeline.hardSnaps,
     },
-    local: { acks, graded: corrections.length, transitions, p99: pct(corrections, 0.99), p50: pct(corrections, 0.5), worst: pct(corrections, 1), pathM: predPathM, rttEstMs: rttEst },
+    local: {
+      acks, graded: corrections.length, transitions, p99: pct(corrections, 0.99), p50: pct(corrections, 0.5), worst: pct(corrections, 1), pathM: predPathM, rttEstMs: rttEst,
+      frames, snapAcks: snaps.length, snapP99: pct(snaps, 0.99), snapWorst: pct(snaps, 1), bareSnapP99: pct(bareSnaps, 0.99), relocations,
+    },
     down: { bytesPerSec: downBytes / SECONDS, msgs: downMsgs, joinBytes },
     link: { down: down.stats, up: up.stats },
   };
@@ -377,7 +425,8 @@ const printArm = (r) => {
   console.log(`\n[${r.label}] link ${PROFILE.rttMs} ms RTT / ${PROFILE.jitterMs} ms jitter / ${(PROFILE.loss * 100).toFixed(1)}% loss; down HOL stalls ${r.link.down.holStalls} (worst ${f(r.link.down.maxHolMs, 0)} ms), lost ${r.link.down.lost} down / ${r.link.up.lost} up`);
   console.log(`  remote pirates: ${R.moving} moving samples of ${R.samples}; held+empty ${f(R.held * 100, 2)}%, extrapolated ${f(R.extrapolated * 100, 2)}%; delay ${f(R.delayMs, 1)} ms, jitter est ${f(R.jitterMs, 1)} ms, hard snaps ${R.hardSnaps}; magnitude-form p99 ${f(R.magP99)} m (info)`);
   for (const k of POPS) console.log(`    ${k.padEnd(6)} ${String(R[k].n).padStart(5)} samples: unexplained p99 ${f(R[k].p99, 4)} m, worst ${f(R[k].worst)} m, ${f(R[k].rate, 2)} disc/body-s`);
-  console.log(`  local reconciliation: ${L.graded} graded acks (${L.transitions} state/frame transitions skipped), correction p50 ${f(L.p50)} / p99 ${f(L.p99)} / worst ${f(L.worst)} m; predicted path ${f(L.pathM, 1)} m; rtt est ${f(L.rttEstMs, 0)} ms`);
+  console.log(`  local reconciliation: ${L.graded} graded acks (${L.transitions} state/frame transitions skipped), correction p50 ${f(L.p50)} / p99 ${f(L.p99)} / worst ${f(L.worst)} m (0.3 m: ${L.p99 < RECON_P99_M ? 'met' : 'missed'}, info); predicted path ${f(L.pathM, 1)} m; rtt est ${f(L.rttEstMs, 0)} ms`);
+  console.log(`  drawn snap (largest per-frame slide per ack window) over ${L.snapAcks} acks / ${L.frames} frames: p99 ${f(L.snapP99)} / worst ${f(L.snapWorst)} m${r.smooth ? '' : ' (UNSMOOTHED)'}; unsmoothed p99 ${f(L.bareSnapP99)} m; relocations snapped ${L.relocations}`);
   console.log(`  downstream ${f(r.down.bytesPerSec / 1024, 1)} KB/s per client (target <= ${DOWN_TARGET / 1024}, hard <= ${DOWN_HARD / 1024}); join ${f(r.down.joinBytes / 1024, 1)} KB compressed`);
 };
 
@@ -393,9 +442,12 @@ if (FORCED_BUFFER !== null) {
     expect(`${k}: discontinuities <= ${GRADE[k].rate}/body-s`, r.remote[k].rate <= GRADE[k].rate, f(r.remote[k].rate, 2));
   }
 } else {
-  const on = await runArm({ bufferZero: false, replay: true, anchor: true, label: 'shipped client' });
+  const on = await runArm({ bufferZero: false, replay: true, anchor: true, smooth: !NO_SMOOTH, label: NO_SMOOTH ? 'shipped client, smoother OFF' : 'shipped client' });
   printArm(on);
-  const off = await runArm({ bufferZero: true, replay: false, label: 'mutants: buffer 0 ms, no replay, free-run clock' });
+  // The mutant keeps the smoother ON: it must fail the raw guard anyway (the
+  // smoother cannot carry a broken reconciler), and its unsmoothed snap must fail
+  // the snap bar (the bar can fail).
+  const off = await runArm({ bufferZero: true, replay: false, smooth: true, label: 'mutants: buffer 0 ms, no replay, free-run clock (smoother on)' });
   printArm(off);
   console.log('\nBars (shipped client):');
   const miss = (ok) => (ok ? 'bar met' : 'launch bar MISSED');
@@ -407,7 +459,9 @@ if (FORCED_BUFFER !== null) {
   }
   expect(`held/empty answers <= ${BAR.held * 100}%`, on.remote.held <= BAR.held, `${f(on.remote.held * 100, 2)}%`);
   expect('local body moved (the reconciliation had work to do)', on.local.pathM > 20 && on.local.graded > 200, `${f(on.local.pathM, 1)} m, ${on.local.graded} acks`);
-  expect(`local reconciliation correction p99 < ${RECON_P99_M} m`, on.local.p99 < RECON_P99_M, f(on.local.p99));
+  expect(`local reconciliation drawn snap p99 < ${RECON_P99_M} m (launch bar)`, on.local.snapAcks > 200 && on.local.snapP99 < RECON_P99_M, `${f(on.local.snapP99)} m over ${on.local.snapAcks} acks`);
+  expect(`local reconciliation raw correction p99 < ${RECON_GUARD_P99_M} m (guard)`, on.local.p99 < RECON_GUARD_P99_M, `${f(on.local.p99)}; 0.3 m ${on.local.p99 < RECON_P99_M ? 'met' : 'missed'}`);
+  expect('no relocation snaps (offset past SNAP_M)', on.local.relocations === 0, String(on.local.relocations));
   expect(`downstream <= ${DOWN_HARD / 1024} KB/s per client (hard)`, on.down.bytesPerSec <= DOWN_HARD, `${f(on.down.bytesPerSec / 1024, 1)} KB/s; target ${DOWN_TARGET / 1024}: ${on.down.bytesPerSec <= DOWN_TARGET ? 'met' : 'MISSED'}`);
   console.log('\nMutation proof (the bars must be ones the broken arms cannot clear):');
   // VACUOUS counts as FAIL: a mutant arm that measured nothing has proven nothing.
@@ -416,7 +470,8 @@ if (FORCED_BUFFER !== null) {
   const clears = (R) => R.n >= MIN_MOVING_SAMPLES && R.p99 <= GRADE.aboard.p99 && R.rate <= GRADE.aboard.rate;
   expect('buffer forced to 0 ms FAILS the graded aboard bound', off.remote.aboard.n >= MIN_MOVING_SAMPLES && Number.isFinite(off.remote.aboard.p99) && !clears(off.remote.aboard), `p99 ${f(off.remote.aboard.p99, 4)} m, ${f(off.remote.aboard.rate, 2)}/body-s`);
   expect('buffer forced to 0 ms FAILS the graded ashore bound', off.remote.ashore.n >= MIN_MOVING_SAMPLES && Number.isFinite(off.remote.ashore.p99) && !(off.remote.ashore.p99 <= GRADE.ashore.p99 && off.remote.ashore.rate <= GRADE.ashore.rate), `p99 ${f(off.remote.ashore.p99, 4)} m, ${f(off.remote.ashore.rate, 2)}/body-s`);
-  expect('snapping to the ack without replay FAILS the local bar', off.local.graded > 200 && Number.isFinite(off.local.p99) && !(off.local.p99 < RECON_P99_M), `p99 ${f(off.local.p99)} m`);
+  expect('snapping to the ack without replay FAILS the raw guard (smoother on)', off.local.graded > 200 && Number.isFinite(off.local.p99) && !(off.local.p99 < RECON_GUARD_P99_M), `p99 ${f(off.local.p99)} m`);
+  expect('the same client unsmoothed FAILS the snap bar', off.local.snapAcks > 200 && Number.isFinite(off.local.bareSnapP99) && !(off.local.bareSnapP99 < RECON_P99_M), `p99 ${f(off.local.bareSnapP99)} m`);
 }
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'} — test-wan-netcode (${failures} failure${failures === 1 ? '' : 's'}, ${((Date.now() - t0) / 1000).toFixed(1)} s)`);
 process.exit(failures === 0 ? 0 : 1);
