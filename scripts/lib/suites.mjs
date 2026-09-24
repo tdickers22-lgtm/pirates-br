@@ -635,7 +635,9 @@ export const SERVER = [
   // tier, before the runner stands up its 3101/8091 browser stack (one headless
   // SwiftShader Chromium, killed in finally). Row A Play clickable <= 3.5 s,
   // row B <= 3 long tasks outside render() in 20 s after the horn. ~4 min.
-  { file: 'probes/throttled-load-probe.mjs', cmd: ['sh', '-c', 'npx vite build && node scripts/postbuild-compress.mjs && node scripts/probes/throttled-load-probe.mjs'], timeoutMs: 600_000 },
+  // "$@" forwards a gate name's arguments (OD1: `probes/throttled-load-probe
+  // --rows A` in b1-b3, `--rows A,B` from b4) to the probe, not to the build.
+  { file: 'probes/throttled-load-probe.mjs', cmd: ['sh', '-c', 'npx vite build && node scripts/postbuild-compress.mjs && node scripts/probes/throttled-load-probe.mjs "$@"', 'sh'], timeoutMs: 600_000 },
 ];
 
 /** Watchdog per tier (ms); an entry's `timeoutMs` overrides it. A suite silent

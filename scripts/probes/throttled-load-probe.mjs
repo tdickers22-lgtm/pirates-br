@@ -33,9 +33,12 @@
 //   --mutate=busy    a 70 ms busy loop every 8th frame after the horn:
 //                    row B must FAIL.
 //
+// Rows (OD1): --rows A | B | A,B, default A,B. Batch gates b1-b3 grade
+// `--rows A`; from b4 (lane b4.1's static-world worker) `--rows A,B`.
+//
 // Run from the repo root AFTER a build (never 3000/8090/8080; own 8091 server,
 // ONE headless SwiftShader Chromium, both killed in finally; ~2-3 minutes):
-//   npx vite build && node scripts/postbuild-compress.mjs && node scripts/probes/throttled-load-probe.mjs
+//   npx vite build && node scripts/postbuild-compress.mjs && node scripts/probes/throttled-load-probe.mjs [--rows A]
 // Writes test-results/throttled-load.json.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -47,8 +50,35 @@ import { DEVICE_PROFILES, newDeviceContext } from '../lib/perf-scenes.mjs';
 const PORT = 8091;
 const BASE = `http://127.0.0.1:${PORT}`;
 const MUTATE = (process.argv.find((a) => a.startsWith('--mutate=')) ?? '').slice('--mutate='.length);
-// --only=A / --only=B runs one row (the mutation proofs each need only theirs).
-const ONLY = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice('--only='.length).toUpperCase();
+// --rows A | B | A,B (default A,B) picks the graded rows (orchestrator decision
+// OD1: row B's fix is the b4.1 static-world worker, so batch gates b1-b3 run
+// `--rows A` and b4-b5 `--rows A,B`; neither row's ceiling moves). `--rows=X`
+// works too; the older `--only=A|B` is the same switch. A mutation whose row is
+// not selected is refused (it could not fail), so both proofs still fail their row.
+function parseRows(argv) {
+  let raw = null;
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--rows') raw = argv[i + 1] ?? '';
+    else if (a.startsWith('--rows=')) raw = a.slice('--rows='.length);
+    else if (a.startsWith('--only=')) raw = a.slice('--only='.length);
+  }
+  if (raw == null) return ['A', 'B'];
+  const rows = raw.toUpperCase().split(',').map((x) => x.trim()).filter(Boolean);
+  if (!rows.length || rows.some((r) => r !== 'A' && r !== 'B')) {
+    console.error(`  ✗ FAIL: --rows takes A, B or A,B (got '${raw}')`);
+    process.exit(2);
+  }
+  return [...new Set(rows)].sort();
+}
+const ROWS = parseRows(process.argv.slice(2));
+const ONLY = ROWS.length === 1 ? ROWS[0] : '';
+const MUTATION_ROW = { bloat: 'A', busy: 'B' };
+if (MUTATE && !MUTATION_ROW[MUTATE]) { console.error(`  ✗ FAIL: unknown --mutate=${MUTATE} (bloat | busy)`); process.exit(2); }
+if (MUTATE && !ROWS.includes(MUTATION_ROW[MUTATE])) {
+  console.error(`  ✗ FAIL: --mutate=${MUTATE} proves row ${MUTATION_ROW[MUTATE]}, which --rows ${ROWS.join(',')} does not run (a mutation that cannot fail proves nothing)`);
+  process.exit(2);
+}
 // --calibrate: same device, same build, NO network or CPU throttle. Not the
 // gate: it proves both rows CAN pass on this rig (a gate that cannot pass is as
 // broken as one that cannot fail), so a RED under the throttle is the product.
@@ -187,7 +217,7 @@ let serverOut = '';
 server.stdout.on('data', (d) => { serverOut += d; });
 server.stderr.on('data', (d) => { serverOut += d; });
 
-const out = { gl: describeGl(), distBuildId, profile: DEVICE_PROFILES.phone.label, throttle: THROTTLE, budget: BUDGET, mutate: MUTATE || null, calibrate: CALIBRATE, only: ONLY || null };
+const out = { gl: describeGl(), distBuildId, profile: DEVICE_PROFILES.phone.label, throttle: THROTTLE, budget: BUDGET, mutate: MUTATE || null, calibrate: CALIBRATE, rows: ROWS.join(','), only: ONLY || null };
 let browser;
 try {
   let served = null;
@@ -199,7 +229,7 @@ try {
   expect(`server serves the fresh build (${served} == dist ${distBuildId})`, served === distBuildId);
 
   browser = await chromium.launch({ args: browserArgs(['--mute-audio']) });
-  console.log(`4G launch gate — GL ${out.gl}, ${out.profile}, ${THROTTLE.downMbit} Mbit/s, ${THROTTLE.rttMs} ms RTT, CPU ${THROTTLE.cpuRate}x, cold cache${MUTATE ? `  [MUTATED: ${MUTATE}]` : ''}${CALIBRATE ? '  [CALIBRATION: throttle OFF, not the gate]' : ''}${ONLY ? `  [row ${ONLY} only]` : ''}`);
+  console.log(`4G launch gate — GL ${out.gl}, ${out.profile}, ${THROTTLE.downMbit} Mbit/s, ${THROTTLE.rttMs} ms RTT, CPU ${THROTTLE.cpuRate}x, cold cache${MUTATE ? `  [MUTATED: ${MUTATE}]` : ''}${CALIBRATE ? '  [CALIBRATION: throttle OFF, not the gate]' : ''}  [rows ${ROWS.join(',')}]`);
 
   // ── A: cold load to a tappable Play ────────────────────────────────────
   if (ONLY !== 'B') {

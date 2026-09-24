@@ -16,6 +16,10 @@
 //      before scripts/ changed) is re-run; VACUOUS, TIMEOUT, MISSING and a
 //      failed review each fail; server suites get port 0; a deploy gate without
 //      --deploy exits 4, with --suites-only 0
+//   F  gate-name arguments (OD1): `x --rows A,B` reaches the suite's argv (also
+//      through a `sh -c '... "$@"'` registry command), `--rows A,B` covers an
+//      earlier `--rows A` while a gate that drops a row is refused, and the
+//      fixture grades throttled-load-probe rows A in b1-b3 and A,B in b4-b5
 //
 //   node scripts/test-run-batch-gate.mjs            (RUNNER=<path> grades another copy)
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -42,6 +46,9 @@ const run = (...args) => {
 const tmp = (name, obj) => { const p = path.join(TMP, name); writeFileSync(p, typeof obj === 'string' ? obj : JSON.stringify(obj)); return p; };
 const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8'));
 const names = (b) => [...b.suites, ...b.conditional.map((c) => c.name)];
+// Independent of the runner: `x --rows A,B` still runs every row of `x --rows A`.
+const rowsName = (n) => { const m = /^(\S+) --rows ([AB,]+)$/.exec(n); return m ? { base: m[1], rows: m[2].split(',') } : null; };
+const stillRuns = (cur, n) => cur.has(n) || (rowsName(n) && [...cur].some((c) => { const a = rowsName(c), p = rowsName(n); return a && a.base === p.base && p.rows.every((r) => a.rows.includes(r)); }));
 
 console.log('A  fixture in sync with the plan');
 if (existsSync(PLAN)) {
@@ -66,7 +73,7 @@ for (const b of fixture.batches) {
   ok(listed.length === names(b).length && names(b).every((n) => listed.includes(n)), `${b.id} lists every one of its ${names(b).length} suites`, `listed ${listed.length}`);
   if (prev) {
     const cur = new Set(listed);
-    const dropped = prev.listed.filter((n) => !cur.has(n));
+    const dropped = prev.listed.filter((n) => !stillRuns(cur, n));
     ok(dropped.length === 0, `gate(${b.id}) ⊇ gate(${prev.id}) (${listed.length} ⊇ ${prev.listed.length})`, dropped.join(', '));
   }
   prev = { id: b.id, listed };
@@ -159,6 +166,34 @@ export const ALL = ${JSON.stringify([
   ok(r.code === 4 && /INCOMPLETE/.test(r.out), `a green deploy gate without --deploy exits ${r.code} (want 4, INCOMPLETE)`, r.out.slice(-200));
   r = g('--fixture', f3, '--batch', 'f3', '--suites-only');
   ok(r.code === 0 && /PASS f3 gate \(suites only\)/.test(r.out), `--suites-only on the same green suites exits ${r.code} (want 0)`, r.out.slice(-200));
+}
+
+console.log('F  gate-name arguments (OD1 --rows)');
+{
+  const seen = path.join(TMP, 'argv.txt');
+  const probe = `require('fs').writeFileSync(${JSON.stringify(seen)},process.argv.slice(1).join(' '));console.log('✓ argv '+process.argv.slice(1).join(' '))`;
+  const registry = tmp('fake-suites-args.mjs', `export const TIER_TIMEOUT_MS = { logic: 20000, server: 20000, browser: 20000 };
+export const ALL = ${JSON.stringify([
+    { file: 'argv-f.mjs', kind: 'logic', cmd: ['node', '-e', probe, '--'] },
+    { file: 'argv-sh.mjs', kind: 'logic', cmd: ['sh', '-c', `true && node -e ${JSON.stringify(probe)} -- "$@"`, 'sh'] },
+  ])};\n`);
+  const b = (id, suites) => ({ id, deploy: false, quickTier: false, suites, conditional: [], reviews: [], liveSteps: [] });
+  const resDir = path.join(TMP, 'gates-args');
+  const g = (fx, ...a) => run('--registry', registry, '--results-dir', resDir, '--fixture', tmp(`fx-args-${a[1]}.json`, { aliases: {}, retired: {}, batches: fx }), ...a);
+  const grown = [b('g1', ['argv-f --rows A', 'argv-sh --rows A']), b('g2', ['argv-f --rows A,B', 'argv-sh --rows A,B'])];
+  let r = g(grown, '--batch', 'g1');
+  ok(r.code === 0 && readFileSync(seen, 'utf8') === '--rows A', `'argv-sh --rows A' reaches the suite through sh -c "$@" (argv '${existsSync(seen) ? readFileSync(seen, 'utf8') : ''}')`, r.out.slice(-300));
+  r = g(grown, '--batch', 'g2', '--fresh');
+  ok(r.code === 0 && readFileSync(seen, 'utf8') === '--rows A,B', `g2 runs 'argv-f --rows A,B' and passes (argv '${readFileSync(seen, 'utf8')}'), and --rows A,B covers g1's --rows A`, r.out.slice(-300));
+  r = g([b('g1', ['argv-f --rows A,B']), b('g2', ['argv-f --rows B'])], '--batch', 'g2', '--dry-run');
+  ok(r.code !== 0 && r.out.includes('drops argv-f --rows A,B'), `a gate that narrows --rows A,B to --rows B is refused (exit ${r.code})`, r.out.slice(-300));
+  const tl = 'probes/throttled-load-probe';
+  const want = { b1: `${tl} --rows A`, b2: `${tl} --rows A`, b3: `${tl} --rows A`, b4: `${tl} --rows A,B`, b5: `${tl} --rows A,B` };
+  for (const [id, n] of Object.entries(want)) {
+    const bb = fixture.batches.find((x) => x.id === id);
+    const tlNames = bb ? bb.suites.filter((x) => x.startsWith(tl)) : [];
+    ok(tlNames.length === 1 && tlNames[0] === n, `${id} grades '${n}' (OD1)`, tlNames.join(', ') || 'absent');
+  }
 }
 
 if (fails) { console.log(`\nFAIL test-run-batch-gate: ${fails} clause(s) red`); process.exit(1); }

@@ -83,24 +83,61 @@ const liveStepFor = (prose) => LIVE_STEPS.filter((s) => s.match.test(prose));
 
 // ── resolution ──────────────────────────────────────────────────────────────
 
-/** name -> registry entry. `test-x:browser` picks the browser-tier entry of
- *  test-x.mjs; `probes/x` is scripts/probes/x.mjs; aliases map prose names
- *  ("viewmodel-states probe") onto a registered suite once one exists. */
+/** A gate name may carry arguments for its suite: `probes/throttled-load-probe
+ *  --rows A` (OD1). Only `--flag` / `--flag value` tokens of plain characters
+ *  count as arguments; anything else is part of a prose name. */
+const ARG_TAIL = /^(\S+)((?:\s+--[\w-]+(?:=[\w.,-]+)?(?:\s+(?!--)[\w.,-]+)?)+)$/;
+function splitArgs(name) {
+  const m = ARG_TAIL.exec(name);
+  return m ? { base: m[1], args: m[2].trim().split(/\s+/) } : { base: name, args: [] };
+}
+
+/** name -> registry entry, with the name's arguments appended to its command.
+ *  `test-x:browser` picks the browser-tier entry of test-x.mjs; `probes/x` is
+ *  scripts/probes/x.mjs; aliases map prose names ("viewmodel-states probe")
+ *  onto a registered suite once one exists. */
 function resolve(name, aliases = {}, retired = {}) {
   const n = aliases[name] ?? retired[name] ?? name;
-  const [base, variant] = n.split(':');
-  const hits = REGISTERED.filter((s) => s.file === `${base}.mjs` && (!variant || s.kind === variant));
-  return hits[0] ?? null;
+  const { base: b, args } = splitArgs(n);
+  const [base, variant] = b.split(':');
+  const hit = REGISTERED.find((s) => s.file === `${base}.mjs` && (!variant || s.kind === variant)) ?? null;
+  return hit && args.length ? { ...hit, cmd: [...hit.cmd, ...args] } : hit;
 }
 
 function gateNames(b) { return [...b.suites, ...b.conditional.map((c) => c.name)]; }
+
+/** `--rows` values of a gate name as a set (null when the name has none). */
+function rowsOf(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--rows') return new Set(String(args[i + 1] ?? '').split(','));
+    if (args[i].startsWith('--rows=')) return new Set(args[i].slice(7).split(','));
+  }
+  return null;
+}
+/** Does a gate holding `cur` still run `name`? Identical names do; so does the
+ *  same suite with the same other arguments and a `--rows` superset (OD1:
+ *  `--rows A,B` in b4 covers b3's `--rows A`; dropping a row is a violation). */
+function covers(cur, name) {
+  if (cur.has(name)) return true;
+  const p = splitArgs(name);
+  const pRows = rowsOf(p.args);
+  if (!pRows) return false;
+  const rest = (a) => a.filter((x, i) => x !== '--rows' && a[i - 1] !== '--rows' && !x.startsWith('--rows=')).join(' ');
+  for (const c of cur) {
+    const q = splitArgs(c);
+    const qRows = rowsOf(q.args);
+    if (q.base !== p.base || !qRows || rest(q.args) !== rest(p.args)) continue;
+    if ([...pRows].every((r) => qRows.has(r))) return true;
+  }
+  return false;
+}
 
 /** gate(bN) ⊇ gate(bN-1) for every batch up to `upTo`. Returns the violations. */
 function supersetViolations(batches, upTo = batches.length - 1) {
   const out = [];
   for (let i = 1; i <= upTo; i++) {
     const cur = new Set(gateNames(batches[i]));
-    for (const n of gateNames(batches[i - 1])) if (!cur.has(n)) out.push(`${batches[i].id} drops ${n} (in ${batches[i - 1].id})`);
+    for (const n of gateNames(batches[i - 1])) if (!covers(cur, n)) out.push(`${batches[i].id} drops ${n} (in ${batches[i - 1].id})`);
   }
   return out;
 }
