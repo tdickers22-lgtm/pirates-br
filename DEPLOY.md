@@ -139,6 +139,9 @@ bar at the MAX_MATCHES `fly.toml` ships (red at the provisional 2 by design). Lo
 | run | commit | threads | maxMatches (worstSimLagSec < 0.1) | load1 | date |
 |---|---|---|---|---|---|
 | `--report` | 96214750 | 1 (in-process) | 4 (5th: lag 1.27 s, 144 dropped) | 6.8 | 2026-09-24 |
+| `--report --workers 2` | 96214750 | 2 workers + lobby | 1 (2nd: lag 0.18 s, 8 dropped, tick p99 50.9 ms) | 10.4 | 2026-09-24 |
+
+The first `--scaling 2` run is RED (ratio 0.25, bar 1.8): under workers the second match already missed the lag budget. Not yet known whether that is host noise (load1 10.4 from other sessions) or a worker-path cost (per-tick mirror + snapshot relay through the lobby, or the match's own timer catching up between fast-forward chunks). Until it is green, workers stay off on performance-1x (auto = 0) and O6 is not worth a yes.
 
 Moving to performance-2x is owner step O6 (about $62/month instead of about $31/month) and only
 after the app exists (O2). On a yes: `fly scale vm performance-2x --memory 4096 -a pirates-br`, then
