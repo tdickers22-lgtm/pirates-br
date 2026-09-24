@@ -105,6 +105,13 @@ globalThis.AudioContext = FakeAudioContext;
 globalThis.document ??= { visibilityState: 'visible', hidden: false, addEventListener() {}, removeEventListener() {} };
 globalThis.addEventListener ??= () => {};
 globalThis.removeEventListener ??= () => {};
+// The engine's burst limiters (throttle, voiceBudgetOk) read performance.now().
+// On a fast host the 1096 calls land inside one window, the limiters drop most
+// voices and the poisoned args never reach start()/stop(); on a loaded host the
+// windows expire and they do. Step the clock 10 s per read so every limiter is
+// always open and the verdict never depends on host speed.
+let fakeNowMs = 0;
+performance.now = () => (fakeNowMs += 10_000);
 
 const THREE = await import('three');
 const { SoundEngine } = await import('../src/client/audio/SoundEngine.ts');

@@ -3458,6 +3458,9 @@ export class SoundEngine {
     const dry = this.busDry;
     const bus = this.busReverb;
     if (!ctx || !dry || !bus) return;
+    // A non-finite start or length (a NaN distance or pose upstream) would make
+    // start()/stop() throw; drop the voice here, before it spends the budget.
+    if (!Number.isFinite(when) || !Number.isFinite(duration)) return;
     if (!this.voiceBudgetOk()) return;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -3521,6 +3524,7 @@ export class SoundEngine {
     const bus = this.busReverb;
     const noise = this.noise;
     if (!ctx || !dry || !bus || !noise || curve.length === 0) return;
+    if (!Number.isFinite(when) || !Number.isFinite(duration)) return;
     if (!this.voiceBudgetOk()) return;
     const source = ctx.createBufferSource();
     source.buffer = noise;
