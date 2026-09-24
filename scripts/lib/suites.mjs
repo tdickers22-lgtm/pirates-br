@@ -68,7 +68,7 @@ export const LOGIC = [
   // files were Collapse run on split vertices — half the surface deleted —
   // and nothing measured them as surfaces. 0.2 s of file arithmetic.
   quick(plain('test-far-lod-integrity.mjs')),
-  quick(tsx('test-ocean-dynamics.mjs')),
+  tsx('test-ocean-dynamics.mjs'),
   // PLAID-01 (wave 3.4). The far-ocean lattice, graded as a 2-D power spectrum
   // of the shipped foam field rather than as an FFT of a screenshot: the plaid
   // is a property of the FIELD, and the field is closed form, so this is a
@@ -133,7 +133,7 @@ export const LOGIC = [
   quick(tsx('test-viewmodel-envelope.mjs')),
   // [I.2] the 1024² bathymetry texture is built a few rows per frame; the
   // deadline must be read inside a row or the 2 ms budget is a fiction.
-  quick(tsx('test-bathymetry-budget.mjs')),
+  tsx('test-bathymetry-budget.mjs'),
   // [9.1] FLORA-01: radial scatter sampling must be area-uniform (the old
   // radius-uniform draw made every island ~7x denser in the middle than at the
   // rim) and the low tier must get a ground-cover BUDGET, not a gate that left
@@ -167,14 +167,14 @@ export const LOGIC = [
   // DEV-01: dev hooks refused without PIRATES_BR_DEV_HOOKS=1 / MatchOptions.devHooks;
   // stats skip dev-assisted matches. Pure Match + StatsStore, ~1 s.
   quick(tsx('test-dev-hooks.mjs')),
-  quick(tsx('test-traversal.mjs')),
+  tsx('test-traversal.mjs'),
   quick(tsx('test-revive.mjs')),
   // SPAWN-01: 12 crews, 10 piers x 2 berths — no hull stacked on another, bot
   // fleet moored, late joiner anchored. ~4 s of real Match, no stack.
-  quick(tsx('test-spawn-berths.mjs')),
+  tsx('test-spawn-berths.mjs'),
   // CREW-01: a party of N shares ONE hull — crew record, crew-scaled hull,
   // crewmates set down a stride apart, small arms passing through a crewmate.
-  quick(tsx('test-crews.mjs')),
+  tsx('test-crews.mjs'),
   // DECK-01 / ships-24 phase 1: the hull loft moved to src/shared/hull.ts —
   // pins every derived number against the pre-move renderer capture, the sheer
   // vs walk-taper standing contract, and "only one LOFT_STATIONS in src/".
@@ -188,37 +188,37 @@ export const LOGIC = [
   // frame graded against an independent Ry·Rx·Rz reference at the attitude caps
   // (3.3 m of daylight at a galleon bow before it).
   quick(tsx('test-deck-attitude.mjs')),
-  quick(tsx('test-snapshot-size.mjs')),
+  tsx('test-snapshot-size.mjs'),
   // BUDGET RATCHET (b1.7a, rule 13): every ceiling in scripts/lib/budgets.mjs is no looser than
   // origin/release, the f5fee97e baseline or the PLAN 3.4/3.14 tables; budget gates import it.
   quick(plain('test-budget-ratchet.mjs')),
-  quick(tsx('test-combat-fixes.mjs')),
-  quick(tsx('test-geyser.mjs')),
+  tsx('test-combat-fixes.mjs'),
+  tsx('test-geyser.mjs'),
   // PHYSREM-01 (wave 8.3). Bodies in the cannonBallistic branch driven over the
   // real fixed world: single-tick vertical LIFT at cliff faces (a landing may
   // raise a body onto the ground under it, never by a cliff height), bodies held
   // under cave roofs, and the tavern's slates as a real surface. Quick tier, no
   // stack, 0.5 s measured on this Air.
-  quick(tsx('test-ballistic-terrain.mjs')),
+  tsx('test-ballistic-terrain.mjs'),
   tsx('test-cave-walk.mjs'),
   tsx('test-swim-shore.mjs'),
-  quick(tsx('test-harvest.mjs')),
-  quick(tsx('test-shark-lunge.mjs')),
-  quick(tsx('test-shark-surface.mjs')),
-  quick(tsx('test-shark-inland-shove.mjs')),
-  quick(tsx('test-shark-spawn-curve.mjs')),
+  tsx('test-harvest.mjs'),
+  tsx('test-shark-lunge.mjs'),
+  tsx('test-shark-surface.mjs'),
+  tsx('test-shark-inland-shove.mjs'),
+  tsx('test-shark-spawn-curve.mjs'),
   quick(tsx('test-station-spacing.mjs')),
-  quick(tsx('test-block.mjs')),
-  quick(tsx('test-skeleton-crowd.mjs')),
+  tsx('test-block.mjs'),
+  tsx('test-skeleton-crowd.mjs'),
   quick(tsx('test-deck-safety.mjs')),
-  quick(tsx('test-stats.mjs')),
+  tsx('test-stats.mjs'),
   quick(tsx('test-names.mjs')),
-  quick(tsx('test-queue-text.mjs')), // b1-ask-02: queue position/ETA/at-capacity copy + late-join line
-  quick(tsx('test-cpu-copy-release.mjs')), // b1.7b CPU-copy release + b1-device-03 bounded rehydrate
-  quick(tsx('test-dock-frame.mjs')),
-  quick(tsx('test-gangway-walk.mjs')),
-  quick(tsx('test-climb-verbs.mjs')),
-  quick(tsx('test-prop-colliders.mjs')),
+  tsx('test-queue-text.mjs'), // b1-ask-02: queue position/ETA/at-capacity copy + late-join line
+  tsx('test-cpu-copy-release.mjs'), // b1.7b CPU-copy release + b1-device-03 bounded rehydrate
+  tsx('test-dock-frame.mjs'),
+  tsx('test-gangway-walk.mjs'),
+  tsx('test-climb-verbs.mjs'),
+  tsx('test-prop-colliders.mjs'),
   quick(tsx('test-light-budget.mjs')),
   quick(tsx('test-first-draw-budget.mjs')),
   quick(tsx('test-frame-governor.mjs')),
@@ -226,10 +226,10 @@ export const LOGIC = [
   quick(tsx('test-island-reveal.mjs')),
   tsx('test-interaction-arbiter.mjs'),
   // HUD-01/hud-12: prompt ⊆ grant on a 0.25 m deck grid, all three hulls (w1.6).
-  quick(tsx('test-interact-parity.mjs')),
+  tsx('test-interact-parity.mjs'),
   // HUD-01/hud-01,02,03,27: one wheel table, the axe's key, the modal layer,
   // and letting go of every held key on blur (w1.6).
-  quick(tsx('test-hud-wheel-and-input.mjs')),
+  tsx('test-hud-wheel-and-input.mjs'),
   // HUD-01/hud-04, liveplay-07, storm-09: two alarm lines, the ring bearing,
   // the wall distance and its ETA (w1.6).
   quick(tsx('test-hud-storm-warnings.mjs')),
@@ -240,7 +240,7 @@ export const LOGIC = [
   quick(tsx('test-input-bindings.mjs')),
   // b1.4f: 0 key literals in player copy; glyph(action, scheme) per device; generated
   // legend + win gold (mechanicshud-05, crossdevice-08/18, vm:mechanicshud:3).
-  quick(tsx('test-no-hardcoded-keys.mjs')),
+  tsx('test-no-hardcoded-keys.mjs'),
   quick(tsx('test-radial-menu.mjs')),
   // b1.4e gamepad: radial deadzone 0.12/0.95, look curve ^2 at 220/150 deg/s, table
   // routes per context, Y tap/hold split, MenuNav pickNext, haptics table + off switch.
@@ -330,7 +330,7 @@ export const LOGIC = [
   // CREWHUD-01: who is on my crew, what they are doing, and the throttle that
   // keeps the strip off the per-frame allocation path (w3.5).
   quick(tsx('test-crew-ui.mjs')),
-  quick(tsx('test-block-hold.mjs')),
+  tsx('test-block-hold.mjs'),
   tsx('test-grounding-cap.mjs'),
   // Not quick: 103.6s of its own on this machine (2026-09-03 run), which alone
   // blew the 60s quick-tier ceiling. It still runs in the full logic tier.
@@ -356,10 +356,10 @@ export const LOGIC = [
   // voice — >=3 distinct branches per crew over an arc, >=1 line per 2 min.
   // Not `quick`: it sails a whole 9-crew match (~90 s on this Air) (w6.2).
   tsx('bot-intent-probe.mjs'),
-  quick(tsx('test-oneshot-underload.mjs')),
+  tsx('test-oneshot-underload.mjs'),
   tsx('test-gold-cargo.mjs'),
   tsx('test-wreck-event.mjs'),
-  quick(tsx('test-wreck-site.mjs')),
+  tsx('test-wreck-site.mjs'),
   tsx('test-capture.mjs'),
   quick(tsx('test-reach-vocabulary.mjs')),
   quick(tsx('test-story-delivery.mjs')),
@@ -372,28 +372,28 @@ export const LOGIC = [
   // within 1 mm, tier-independent positions, ring doubling, the 1.22 apron, a
   // watertight stitch and the baked vertex AO. MUTATE=analytic|tier|nostitch
   // proves each half can fail.
-  quick(tsx('test-terrain-grid.mjs')),
+  tsx('test-terrain-grid.mjs'),
   // GRID-01 slice c (w7.2): one apron for the walk floor, the swim seabed and
   // the terrain raycast. MUTATE=footprint|seabed|raylimit restores each of the
   // three old cut-offs and each turns it red.
-  quick(tsx('test-walk-off-edge.mjs')),
+  tsx('test-walk-off-edge.mjs'),
   // ENTITYSEAT (w7.2): chests, barrels and stations on the DRAWN ground, not
   // the analytic field. MUTATE=raw restores the old placement (60/133 out).
   quick(tsx('test-entity-seat.mjs')),
   // POSE-01 wire half (w7.5): `aiming` and `atCapstan` cross the wire, are
   // momentary, and cost nothing when false. Comment out updateAimStance (or the
   // atCapstan line) in Match to see it fail.
-  quick(tsx('test-aim-wire.mjs')),
+  tsx('test-aim-wire.mjs'),
   // MATCHSPLIT-01 (w7.5): the tick spine — which subsystem runs when, and how
   // many draws each takes off the shared seeded stream. Pins the Match.ts split
   // against a silent re-order. Swap two update* calls in tick() to see it fail.
   tsx('test-tick-order.mjs'),
   { ...tsx('test-truce-integrity.mjs'), timeoutMs: 420_000 }, // runner timeout only, the 120 s logic default TIMED OUT at the b1 gate; b1.6e: 12 seeded solo worlds to t=150 s: 0 ram/cannon/keg holes, 0 founders, 0 sink credits; shots/cannons held in the truce, land after; solo-bot triage (~4 min)
-  quick(tsx('test-death-causes.mjs')),
+  tsx('test-death-causes.mjs'),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
   // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens
   // of seconds of sim, so neither is tagged `quick`.
-  quick(tsx('test-win-condition.mjs')),
+  tsx('test-win-condition.mjs'),
   tsx('test-respawn-tow.mjs'),
   tsx('test-capstan-first-safe.mjs'),
   tsx('test-storm-spawn-safety.mjs'),
@@ -403,7 +403,7 @@ export const LOGIC = [
   // Not `quick` for that reason — it is a logic-tier suite, not a browser one.
   tsx('test-storm-endgame.mjs'),
   tsx('test-damage-visibility.mjs'),
-  quick(tsx('test-endmatch-board.mjs')),
+  tsx('test-endmatch-board.mjs'),
   quick(tsx('test-landing-stores.mjs')),
   // WIRED HERE FOR THE FIRST TIME. The gates for the remote-motion wave shipped
   // with the wave and were run by nothing: a continuous-path proof and its
