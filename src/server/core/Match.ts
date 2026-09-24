@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import { idealBrace } from '../../shared/sailing.js';
 import { v4 as uuid } from 'uuid';
 import type {
   Crew, GameState, HullSections, InteractRefusalReason, InteractRefusedIntent, InteractRefusedPayload, Island, IslandDock, IslandProp, Player, Projectile, SeaRock, Ship, ShipHole, ShipKeg, ShipUpgrade, TreasureChest, Vec3, WeaponId, NetMsg, PlayerInput, TradeActionPayload, Shark, WildlifeAnimal, WildlifeType, EquippableTool, WreckEvent, ItemType,
@@ -8783,9 +8784,9 @@ export class Match {
     this.firstSailAssisted.add(ship.id);
     const wind = sampleLocalWind(this.t, ship.position.x, ship.position.z, this.state.storm);
     const signedRelative = angleWrap(wind.direction - ship.rotation);
-    // 0.92 is PhysicsSystem's own desired-trim constant — the same optimum the
-    // HUD's Catch% is measured against, so this reads as a high number there.
-    const optimal = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
+    // The ONE shared ideal brace (shared/sailing.ts) — the optimum the physics
+    // pays for and the HUD's Catch% measures, so this reads high there.
+    const optimal = idealBrace(signedRelative);
     ship.sailAngle = clamp(
       optimal * FIRST_SAIL_ASSIST.TRIM_FRACTION,
       -SHIP.MAX_SAIL_ANGLE,
