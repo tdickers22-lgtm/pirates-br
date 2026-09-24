@@ -3,6 +3,7 @@
  * panels, weapon + combat readouts and the kill/event feed. Reads game state
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
+import { braceCatch, idealBrace } from '../../shared/sailing.js';
 import { hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
 import * as THREE from 'three';
 import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
@@ -1348,10 +1349,10 @@ export class HudController {
         this.view.state?.storm ?? null,
       );
       const signedRelative = angleWrap(wind.direction - ship.rotation);
-      // 0.92 matches PhysicsSystem's desired-trim constant + the sail-cloth luff
-      // visual, so the displayed Catch% peaks exactly where the ship is fastest.
-      const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
-      const trimCatch = 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE);
+      // The ONE shared ideal brace (shared/sailing.ts) the physics pays for, so
+      // the displayed Catch% peaks exactly where the ship is fastest.
+      const desiredTrim = idealBrace(signedRelative);
+      const trimCatch = braceCatch(ship.sailAngle, signedRelative);
       const trimDelta = angleWrap(desiredTrim - ship.sailAngle);
       // MINUTE ZERO SPEAKS PLAIN. "Trim centered · Catch 62% · Trim Right [F]"
       // is three pieces of sailing vocabulary for one idea: how much of the wind
