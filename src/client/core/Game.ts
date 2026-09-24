@@ -52,7 +52,7 @@ import { buildUiRefs, type UiRefs } from '../ui/UiRefs.js';
 import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MID, shipClassName, weaponDisplayName } from '../ui/DisplayNames.js';
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
-import { memoryCensus, type MemoryCensus } from '../debug/memoryCensus.js';
+import { memoryCensus, type CensusOptions, type MemoryCensus } from '../debug/memoryCensus.js';
 import { releaseRenderOnlyCpuCopies, cpuCopyReleaseEnabled, uploadPendingCpuCopies, eagerUploadBudget } from '../rendering/CpuCopyRelease.js';
 import { apparentDistanceScale, updateInstanceLod, updateLazyStoryResidency, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
@@ -3325,8 +3325,8 @@ export class Game {
   /** Debug hook: the next `n` frames throw (frame-fault-probe). */
   injectFrameFault(n: number): void { this.frameGuard.injectFault(n); }
   /** Debug hook (b1.7b): GPU-resident + heap bytes; scripts/test-memory-budget.mjs grades it. */
-  memoryCensus(): MemoryCensus {
-    return memoryCensus({ gl: this.renderer.renderer, scene: this.renderer.scene, root: this });
+  memoryCensus(opts?: CensusOptions): MemoryCensus {
+    return memoryCensus({ gl: this.renderer.renderer, scene: this.renderer.scene, root: this }, opts);
   }
 
   private frame(now: number) {

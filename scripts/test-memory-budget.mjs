@@ -129,7 +129,11 @@ async function censusFor(browser, id) {
     const before = await page.evaluate(() => window.__piratesBR.memoryCensus().mb.heap);
     const c = await page.evaluate(async () => {
       for (let i = 0; i < 3; i++) { window.gc?.(); await new Promise((r) => setTimeout(r, 250)); }
-      return window.__piratesBR.memoryCensus();
+      // The loop lets finalizers and the array-buffer sweeper run; the reading itself
+      // is taken right after one more synchronous gc(), before the census walk and
+      // before another uncapped frame allocates (b1.gate: 250 ms of frames plus the
+      // walk's own maps swung the reading ~25 MB, after-GC > before-GC in 3 of 5).
+      return window.__piratesBR.memoryCensus({ collect: true });
     });
     console.log(`      heap before GC ${before} MB, after ${c.mb.heap} MB${c.gcExposed === false ? ' (gc not exposed)' : ''}`);
     console.log(`      GPU ${c.mb.gpu} MB = geometry ${c.mb.geometry} + textures ${c.mb.textures} + targets/drawing buffer ${c.mb.renderTargets}`);

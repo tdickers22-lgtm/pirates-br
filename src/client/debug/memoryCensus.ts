@@ -213,8 +213,21 @@ export interface CensusHost {
   root: object;
 }
 
-export function memoryCensus(game: CensusHost): MemoryCensus {
+export interface CensusOptions {
+  /** Collect (window.gc, exposed by --js-flags=--expose-gc) synchronously and read
+   *  the heap in the same task, before the walk below allocates its maps and before
+   *  another frame runs: the reading is then what survives a collection (what iOS
+   *  kills on), not that plus up to a young generation of per-frame garbage. */
+  collect?: boolean;
+}
+
+export function memoryCensus(game: CensusHost, opts: CensusOptions = {}): MemoryCensus {
   const { gl, scene } = game;
+  const gcFn = (globalThis as unknown as { gc?: () => void }).gc;
+  if (opts.collect) gcFn?.();
+  // Read first: every Set/Map/array this census builds is garbage that the heap
+  // counter would otherwise include.
+  const measuredHeap = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize;
   const seenArrays = new Set<unknown>();
   const seenGeoms = new Set<THREE.BufferGeometry>();
   const sources = new Map<unknown, { bytes: number; name: string; w: number; h: number; tex: THREE.Texture }>();
@@ -325,8 +338,6 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
   }));
   lib.merged?.forEach((m) => { if (m?.geometry) library += geometryBytes(m.geometry, libSeen); });
 
-  const perf = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory;
-  const measuredHeap = perf?.usedJSHeapSize;
   const heapSource = typeof measuredHeap === 'number' && measuredHeap > 0 ? 'performance.memory' : 'estimate';
   // Three keeps each attribute's typed array after upload (no onUploadCallback
   // release yet, b3.1b), so the CPU copy of counted geometry IS heap.
