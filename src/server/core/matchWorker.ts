@@ -226,7 +226,9 @@ export function runMatchWorker(init: WorkerInit): void {
       case 'loadFastForward': {
         const [ffSec, budgetMs] = args as [number, number];
         if (!m.__ffMuted) {
-          m.__ffMuted = ['broadcast', 'broadcastVolatile', 'send'].filter((f) => typeof m[f] === 'function');
+          // enforceCongestion runs on sim time: 300 sim s against a socket the
+          // blocked lobby cannot drain evicted the match's own load crew.
+          m.__ffMuted = ['broadcast', 'broadcastVolatile', 'send', 'enforceCongestion'].filter((f) => typeof m[f] === 'function');
           for (const f of m.__ffMuted) m[f] = () => {};
           m.__ffTicks = 0; m.__ffMs = 0;
         }

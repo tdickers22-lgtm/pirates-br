@@ -53,7 +53,7 @@ if (SCALING !== undefined) {
     child.stdout.on('data', (d) => { out += d; process.stdout.write(d); });
     await new Promise((r) => child.on('close', r));
     const max = Number(out.match(/REPORT maxMatches=(\d+)/)?.[1] ?? NaN);
-    return { max, capped: /capped at PIRATES_BR_LOAD_MAX/.test(out), load1, sec: (Date.now() - t0) / 1000 };
+    return { max, capped: /capped at PIRATES_BR_LOAD_MAX/.test(out), lost: /harness lost a match/.test(out), load1, sec: (Date.now() - t0) / 1000 };
   };
   console.log(`Scaling gate: --report in-process vs --report --workers ${W} (bar ${SCALING_BAR}x)\n`);
   const single = await run([]);
@@ -63,6 +63,8 @@ if (SCALING !== undefined) {
   let bad = 0;
   const ok = (label, c, d = '') => { if (c) console.log(`  ✓ ${label}`); else { console.error(`  ✗ FAIL: ${label}${d ? `\n     ${d}` : ''}`); bad += 1; } };
   ok('the in-process run carried at least one match', single.max >= 1, `single=${single.max}`);
+  ok('both runs measured only live matches (no crew evicted, no match reaped mid-report)', !single.lost && !multi.lost,
+    `single lost=${single.lost} workers lost=${multi.lost}`);
   ok(`--workers ${W} carries >= ${SCALING_BAR}x the single-thread match count at worstSimLagSec < 0.1`,
     Number.isFinite(ratio) && ratio >= SCALING_BAR, `${multi.max} / ${single.max} = ${ratio.toFixed(2)}${multi.capped ? ' (capped: raise PIRATES_BR_LOAD_MAX)' : ''}`);
   console.log(bad === 0 ? '\nPASS server load scaling' : `\nFAIL server load scaling (${bad})`);
@@ -151,12 +153,19 @@ async function addMatch(i) {
   known.add(m);
   if (WORKERS > 0) {
     let r;
-    do { r = m.debug('loadFastForward', FF_SEC, 2000); } while (!r.done);
+    // Short chunks with a yield between them: the lobby thread sits in
+    // Atomics.wait for each chunk, and the OTHER matches keep ticking in their
+    // workers, so a 2 s chunk starved their crews' sockets long enough for
+    // enforceCongestion to evict them (the lost-match guard caught it).
+    do { r = m.debug('loadFastForward', FF_SEC, 400); if (!r.done) await sleep(25); } while (!r.done);
     return { i, t: r.t, phase: r.phase, ffMs: r.ffMs, ticks: r.ticks, ships: r.ships, alive: r.alive };
   }
   // Mute the wire while fast-forwarding: ~9k snapshots queued to a blocked
   // local socket would be graded as window CPU afterwards.
-  const muted = ['broadcast', 'broadcastVolatile', 'send'].filter((f) => typeof m[f] === 'function');
+  // enforceCongestion too: it runs on SIM time, so 300 sim seconds against a
+  // socket the blocked loop cannot drain evicted the match's own crew (seat
+  // held 60 s, then the match was abandoned and reaped mid-report).
+  const muted = ['broadcast', 'broadcastVolatile', 'send', 'enforceCongestion'].filter((f) => typeof m[f] === 'function');
   for (const f of muted) m[f] = () => {};
   const t0 = performance.now();
   const cap = Math.ceil((FF_SEC + 60) * 1000 / 16);
@@ -203,6 +212,16 @@ async function measureWindow() {
   return { h, per, p50: Math.max(...per.map((p) => p.p50)), p99: Math.max(...per.map((p) => p.p99)) };
 }
 const fmt = (x) => (Number.isFinite(x) ? x.toFixed(2) : String(x));
+/** Every load crew still holds its socket and every match still plays. A row
+ *  that lost one measured fewer matches than it claims: before b2.0c the
+ *  fast-forward evicted each match's own crew as congested, the held seat
+ *  expired 60 s later and the match was reaped, so the "N = 4" rows carried
+ *  about 2 live matches. */
+function liveCheck(n) {
+  const open = clients.filter((c) => c.ws.readyState === WebSocket.OPEN).length;
+  const live = [...server.matches.values()].filter((m) => !m.isEnded()).length;
+  return { ok: open === n && live === n, open, live, want: n };
+}
 
 const clients = [];
 if (REPORT) {
@@ -214,6 +233,8 @@ if (REPORT) {
     const w = await measureWindow();
     const lag = w.h.body.worstSimLagSec;
     console.log(`  ${String(i + 1).padStart(2)}  ${String(row.alive).padStart(5)}  ${(row.ffMs / 1000).toFixed(1).padStart(4)}  ${fmt(lag).padStart(14)}  ${String(w.h.body.droppedTicks).padStart(7)}  ${fmt(w.p50).padStart(11)}  ${fmt(w.p99).padStart(11)}  ${fmt(w.h.body.healthWorstSimLagSec)}`);
+    const alive = liveCheck(i + 1);
+    if (!alive.ok) { expect(`row ${i + 1} measured ${i + 1} live matches (the harness lost a match)`, false, JSON.stringify(alive)); break; }
     if (!(typeof lag === 'number' && lag < WORST_SIM_LAG_BUDGET_SEC)) break;
     maxOk = i + 1;
   }
@@ -244,6 +265,8 @@ const loaded = w.h;
 const worst = loaded.body.worstSimLagSec;
 const dropped = loaded.body.droppedTicks;
 console.log(`  worstSimLagSec ${worst}  droppedTicks ${dropped}  clients ${loaded.body.clients}  tick p50 ${fmt(w.p50)} ms  p99 ${fmt(w.p99)} ms (worst match)`);
+const alive = liveCheck(N);
+expect(`every load crew kept its socket and all ${N} matches stayed live (the harness lost a match otherwise)`, alive.ok, JSON.stringify(alive));
 expect('every match ticked through the window (the timer was measured, not idle)', w.per.every((p) => p.n >= WINDOW_SEC * 30), JSON.stringify(w.per.map((p) => p.n)));
 expect(`worstSimLagSec < ${WORST_SIM_LAG_BUDGET_SEC} at ${N} mid-match matches`,
   typeof worst === 'number' && worst < WORST_SIM_LAG_BUDGET_SEC,
