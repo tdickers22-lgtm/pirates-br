@@ -51,8 +51,19 @@ try {
   const page = await browser.newPage({ viewport: { width: 960, height: 540 } });
   await page.addInitScript(() => { try { localStorage.setItem('piratesBR.seenControls', '1'); } catch { /* private */ } });
   await page.goto(`${BASE_URL}/?debug`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  await page.waitForSelector('#menu-solo-btn', { timeout: 60_000 });
-  await page.click('#menu-solo-btn', { noWaitAfter: true });
+  // The Solo button is static HTML, laid out long before the game connects;
+  // under the loading veil a click waits on it and times out when the asset
+  // preload is slow (a loaded Mac took > 30 s). Game.init calls menu.show()
+  // only after connectToServer() resolved, so wait for the menu itself with
+  // the veil gone (the throttled-load probe's definition) before tapping.
+  await page.waitForFunction(() => {
+    const menu = document.getElementById('menu-screen');
+    const veil = document.getElementById('loading-screen');
+    const veilGone = !veil || veil.classList.contains('hidden') || getComputedStyle(veil).display === 'none';
+    const btn = document.getElementById('menu-solo-btn');
+    return !!menu?.classList.contains('visible') && veilGone && !!btn && !btn.disabled;
+  }, null, { timeout: 180_000, polling: 250 });
+  await page.click('#menu-solo-btn', { noWaitAfter: true, timeout: 60_000 });
   await page.waitForFunction(() => {
     const g = window.__piratesBR;
     return !!(g?.hud && g.getLocalPlayer?.() && g.state?.ships?.length && g.state.players?.length > 2);
@@ -210,17 +221,8 @@ try {
   expect('the world behind the bar is not >95 % black', darkPct <= 95, `${darkPct.toFixed(1)} % near-black`);
   await page.screenshot({ path: '/tmp/pbr-b15f-spectate.png' });
 
-  const before = await page.evaluate(() => window.__piratesBR.spectateSubjectId);
-  await page.keyboard.press('KeyN');
-  const after = await page.waitForFunction((b) => {
-    const id = window.__piratesBR.spectateSubjectId;
-    const line = document.getElementById('spectate-line')?.textContent ?? '';
-    return id && id !== b && /watching/i.test(line) ? line : null;
-  }, before, { timeout: 30_000, polling: 150 }).then((h) => h.jsonValue(), () => null);
-  expect('N moves the camera to the next subject and names it', !!after, `"${after}"`);
-
   // Every "next" key: interact and jump through the live bindings table
-  // (KeyX, Space by default), plus the fixed right arrow. E is not bound to
+  // (KeyX, Space by default), plus the fixed right arrow and N. E is not bound to
   // interact any more, so it must NOT cycle.
   const subjectNow = () => page.evaluate(() => {
     const g = window.__piratesBR;
@@ -240,7 +242,10 @@ try {
     }
     return a;
   };
-  for (const key of ['ArrowRight', 'Space', 'KeyX']) {
+  // N is graded like the others: a new crew AND a new watching line (the old
+  // N row passed on a new subject id alone, so a crewmate on the same hull or
+  // a line one repaint late read as a move).
+  for (const key of ['KeyN', 'ArrowRight', 'Space', 'KeyX']) {
     const b = await subjectNow();
     await page.keyboard.press(key);
     const a = await waitNewCrew(b, 8000);
