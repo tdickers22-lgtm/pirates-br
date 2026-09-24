@@ -388,7 +388,7 @@ export const LOGIC = [
   // many draws each takes off the shared seeded stream. Pins the Match.ts split
   // against a silent re-order. Swap two update* calls in tick() to see it fail.
   tsx('test-tick-order.mjs'),
-  { ...tsx('test-truce-integrity.mjs'), timeoutMs: 420_000 }, // runner timeout only, the 120 s logic default TIMED OUT at the b1 gate; b1.6e: 12 seeded solo worlds to t=150 s: 0 ram/cannon/keg holes, 0 founders, 0 sink credits; shots/cannons held in the truce, land after; solo-bot triage (~4 min)
+  { ...tsx('test-truce-integrity.mjs'), timeoutMs: 900_000 }, // runner timeout only (not a product budget): 12 worlds x 9375 ticks (150 s at 62.5 Hz) x ~6 ms = ~56 s/seed, ~12 min with legs B-M, same cost at f8c8793d; b1.6e: 12 seeded solo worlds to t=150 s: 0 ram/cannon/keg holes, 0 founders, 0 sink credits; shots/cannons held in the truce, land after; solo-bot triage (~4 min)
   tsx('test-death-causes.mjs'),
   // WIN-01 / TOW-01 / OPEN-01 (wave 1.5). All three drive a real Match on real
   // ticks with no stack; test-respawn-tow and test-capstan-first-safe run tens
