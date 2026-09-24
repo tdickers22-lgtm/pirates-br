@@ -279,7 +279,15 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
       materialTextures(m, addTexture);
       if (m && !matSeen.has(m)) {
         matSeen.add(m);
-        const key = `${m.type}:${(m.name || (o.name || o.type)).replace(/[\d_.-]+$/g, '').slice(0, 32)}`;
+        // Unnamed material on an unnamed mesh: attribute it to the nearest
+        // named ancestor (`~<ancestor>`) so the creation site is findable.
+        let label = m.name || o.name;
+        if (!label) {
+          let n = o.parent;
+          while (n && !n.name) n = n.parent;
+          label = n?.name ? `~${n.name}` : o.type;
+        }
+        const key = `${m.type}:${label.replace(/[\d_.-]+$/g, '').slice(0, 32)}`;
         matFamilies.set(key, (matFamilies.get(key) ?? 0) + 1);
       }
     }
@@ -346,7 +354,7 @@ export function memoryCensus(game: CensusHost): MemoryCensus {
     topRetained: [...retained.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 14)
       .map(([name, e]) => ({ name, mb: r(e.bytes), n: e.n, uploaded: e.uploaded })),
     materials: matSeen.size,
-    topMaterials: [...matFamilies.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([key, n]) => ({ key, n })),
+    topMaterials: [...matFamilies.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([key, n]) => ({ key, n })),
   };
 }
 
