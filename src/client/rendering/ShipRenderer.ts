@@ -326,6 +326,14 @@ export class ShipRenderer {
   /** Shared across every planked breach on every hull (see addPlankPatch). */
   private plankPatchMat: THREE.MeshStandardMaterial | null = null;
   private plankPatchRimMat: THREE.MeshStandardMaterial | null = null;
+  /** b1-ask-05: constant materials never mutated after build, one per renderer
+   *  instead of one per ship (each distinct material holds its own uniform clone). */
+  private readonly sharedMats = new Map<string, THREE.MeshStandardMaterial>();
+  private sharedMat(key: string, params: THREE.MeshStandardMaterialParameters): THREE.MeshStandardMaterial {
+    let m = this.sharedMats.get(key);
+    if (!m) this.sharedMats.set(key, (m = new THREE.MeshStandardMaterial(params)));
+    return m;
+  }
 
   init(scene: THREE.Scene, quality: RenderQuality = 'balanced') {
     this.scene = scene;
@@ -2008,13 +2016,13 @@ export class ShipRenderer {
     // - Dark iron barrel with three brass reinforcing bands
     // - Brass muzzle bell at the front so the gun reads clearly even from far
     // - Beefier oak carriage with iron-banded wheels and trunnion caps
-    const brassMat = new THREE.MeshStandardMaterial({ color: 0xb48335, roughness: 0.45, metalness: 0.7 });
-    const ironMat = new THREE.MeshStandardMaterial({ color: 0x1c1c20, roughness: 0.55, metalness: 0.55 });
-    const oakMat = new THREE.MeshStandardMaterial({ color: 0x4f3520, roughness: 0.95 });
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x261810, roughness: 0.95 });
-    const ironBandMat = new THREE.MeshStandardMaterial({ color: 0x3a3a40, roughness: 0.5, metalness: 0.7 });
+    const brassMat = this.sharedMat('brass-fitting', { color: 0xb48335, roughness: 0.45, metalness: 0.7 });
+    const ironMat = this.sharedMat('iron', { color: 0x1c1c20, roughness: 0.55, metalness: 0.55 });
+    const oakMat = this.sharedMat('oak', { color: 0x4f3520, roughness: 0.95 });
+    const wheelMat = this.sharedMat('wheel', { color: 0x261810, roughness: 0.95 });
+    const ironBandMat = this.sharedMat('iron-band', { color: 0x3a3a40, roughness: 0.5, metalness: 0.7 });
     const boreMat = new THREE.MeshBasicMaterial({ color: 0x040404 });
-    const lashingMat = new THREE.MeshStandardMaterial({ color: 0xc8b27a, roughness: 1 });
+    const lashingMat = this.sharedMat('lashing', { color: 0xc8b27a, roughness: 1 });
     const chargedMetalMat = new THREE.MeshStandardMaterial({
       color: UPGRADE_PENNANT_COLORS.charged_cannons,
       emissive: 0xff3200,
@@ -2255,10 +2263,10 @@ export class ShipRenderer {
       return candidates[candidates.length - 1]; // last candidate clears on every hull class
     };
 
-    const barrelHoopMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.7 });
+    const barrelHoopMat = this.sharedMat('hoop', { color: 0x2a2a2a, roughness: 0.5, metalness: 0.7 });
     const supplyBarrels: THREE.Group[] = [];
     const addSupplyBarrel = (kind: SupplyKind, x: number, z: number) => {
-      const lidMat = new THREE.MeshStandardMaterial({ map: supplyLidTexture(kind), roughness: 0.78 });
+      const lidMat = this.sharedMat(`supply-lid-${kind}`, { map: supplyLidTexture(kind), roughness: 0.78 });
       const barrel = makeBarrel(barrelWoodMat, barrelHoopMat, lidMat);
       barrel.name = `supply-barrel-${kind}`;
       barrel.userData.supplyKind = kind;
@@ -2312,8 +2320,8 @@ export class ShipRenderer {
       const crateSpot = getAmmoCrateLocal(stats);
       const crate = new THREE.Group();
       crate.name = 'ammo-crate';
-      const crateOak = new THREE.MeshStandardMaterial({ color: 0x453019, roughness: 0.9 });
-      const crateIron = new THREE.MeshStandardMaterial({ color: 0x23232a, roughness: 0.5, metalness: 0.65 });
+      const crateOak = this.sharedMat('crate-oak', { color: 0x453019, roughness: 0.9 });
+      const crateIron = this.sharedMat('crate-iron', { color: 0x23232a, roughness: 0.5, metalness: 0.65 });
       const body = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.5, 0.62), crateOak);
       body.position.y = 0.25;
       body.castShadow = true;
@@ -2328,7 +2336,7 @@ export class ShipRenderer {
       lid.position.set(0, 0.62, -0.36);
       lid.rotation.x = -Math.PI * 0.42;
       crate.add(lid);
-      const ballMat = new THREE.MeshStandardMaterial({ color: 0x14141a, roughness: 0.35, metalness: 0.6 });
+      const ballMat = this.sharedMat('crate-ball', { color: 0x14141a, roughness: 0.35, metalness: 0.6 });
       for (const [bx, bz] of [[-0.2, 0.08], [0.05, -0.1], [0.26, 0.1], [0.02, 0.14]] as const) {
         const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8), ballMat);
         ball.position.set(bx, 0.52, bz);
@@ -2354,7 +2362,7 @@ export class ShipRenderer {
       decorSpots.push({ x: rumSpot[0], z: rumSpot[1], lid: 0x6a2808 });
     }
     for (const spot of decorSpots) {
-      const lidMat = new THREE.MeshStandardMaterial({ color: spot.lid, roughness: 0.8 });
+      const lidMat = this.sharedMat(`decor-lid-${spot.lid}`, { color: spot.lid, roughness: 0.8 });
       const barrel = makeBarrel(barrelWoodMat, barrelHoopMat, lidMat);
       barrel.position.set(spot.x, H + 0.5, spot.z);
       // Deterministic yaw from the barrel's own berth, NOT Math.random. It was
