@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { braceCatch } from '../../shared/sailing.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { IslandDock, Player, Ship, ShipHole, ShipUpgradeType, Vec2 } from '../../shared/types/index.js';
 import { FLOODING, SHIP, SHIP_STATS } from '../../shared/constants/index.js';
@@ -3159,7 +3160,7 @@ export class ShipRenderer {
       for (let s = 0; s < mesh.proxySails.length; s++) {
         const sail = mesh.proxySails[s];
         sail.visible = !detailNear && ship.sailHeight > 0.06;
-        sail.rotation.y = THREE.MathUtils.lerp(sail.rotation.y, ship.sailAngle * 0.6, 1 - Math.exp(-8 * dt));
+        sail.rotation.y = THREE.MathUtils.lerp(sail.rotation.y, ship.sailAngle, 1 - Math.exp(-8 * dt)); // 1:1 with the simulated brace
         sail.scale.y = THREE.MathUtils.lerp(sail.scale.y, Math.max(0.18, ship.sailHeight), 1 - Math.exp(-8 * dt));
       }
       if (!detailNear) {
@@ -3252,10 +3253,9 @@ export class ShipRenderer {
         const sail = mesh.sails[s];
         sail.visible = ship.sailHeight > SAIL_FURL_THRESHOLD;
         const signedRelative = angleWrap(wind.direction - ship.rotation);
-        // 0.92 matches the server's desired-trim constant (PhysicsSystem) so the
-        // luff/billow visuals agree with the authoritative sail power.
-        const desiredTrim = Math.sin(signedRelative) * SHIP.MAX_SAIL_ANGLE * 0.92;
-        const rawTrimCatch = 1 - Math.min(1, Math.abs(angleWrap(ship.sailAngle - desiredTrim)) / SHIP.MAX_SAIL_ANGLE);
+        // The ONE shared brace catch (shared/sailing.ts) so the luff/billow
+        // visuals agree with the authoritative sail power.
+        const rawTrimCatch = braceCatch(ship.sailAngle, signedRelative);
         const trimCatch = luffing ? Math.min(rawTrimCatch, 0.08) : rawTrimCatch;
         const phaseSeed = typeof sail.userData.phaseSeed === 'number' ? sail.userData.phaseSeed : sail.position.z;
         // Jibs and other stay-sails have a fixed yaw (centerline of the ship).
