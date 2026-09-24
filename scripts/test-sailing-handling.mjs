@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // test-sailing-handling (b2.1, PLAN 3.7 / D16 / physics targetSpec).
 // Sections implemented so far:
+//   1  ships have mass (b2.1b): on the REAL PhysicsSystem at the 62.5 Hz tick,
+//      t90 from rest with canvas set, sail-struck coast-down from top speed,
+//      a hard-over tack from the beam through the no-go cone, and the world
+//      edge (a soft inward current, never a bounce)
 //   2  class identity: per-class polars vs the D16 table, ordering, and the
 //      real PhysicsSystem sailing at the polar (steady speed / wind strength)
 //   5  sail trim: idealBrace monotonic over 40-180 deg, <= 65 deg, bisecting
@@ -9,8 +13,7 @@
 //   H  hull params: mass 1 : 1.9 : 3.6, drag solved to the D16 top speeds and
 //      t90 targets, keel >= 25x, yaw inertia m(L^2+B^2)/12 (design analytics;
 //      the force-based dynamics that consume them are b2.1b, section 1)
-// Sections 1 and 3 (t90/coast-down/tack on the real sim, turning) land with
-// b2.1b and b2.1d.
+// Section 3 (turning: yaw inertia, rudder moment) lands with b2.1d.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -18,8 +21,8 @@ import {
   CLASS_TOP_SPEED, HULL_PARAMS, KEEL_LATERAL_RATIO, MAX_BRACE, braceCatch,
   idealBrace, polarSpeed,
 } from '../src/shared/sailing.ts';
-import { PhysicsSystem } from '../src/server/systems/PhysicsSystem.ts';
-import { SHIP, SHIP_STATS } from '../src/shared/constants/index.ts';
+import { PhysicsSystem, applyShipRudderSteering } from '../src/server/systems/PhysicsSystem.ts';
+import { SHIP, SHIP_STATS, WORLD } from '../src/shared/constants/index.ts';
 import { angleWrap, sampleWind } from '../src/shared/utils/index.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -107,6 +110,121 @@ function steadySpeed(type, offDeg, seconds = 30) {
 for (const [t, d] of [['sloop', 90], ['sloop', 180], ['brigantine', 135], ['galleon', 180], ['galleon', 45]]) {
   const v = steadySpeed(t, d);
   expect(`PhysicsSystem ${t} at ${d} deg sails its polar (+-10%)`, within(v, at(t, d), 0.10), `sim ${v.toFixed(2)} / polar ${at(t, d).toFixed(2)} m/s per unit wind`);
+}
+
+// ── Section 1: ships have mass ───────────────────────────────────────────────
+console.log('\nSection 1: force-based dynamics (t90, coast-down, tack, world edge)');
+const TICK = 0.016; // the fixed 62.5 Hz server tick
+const BEST = { sloop: 90, brigantine: 135, galleon: 135 };
+const fwdOf = (s) => Math.sin(s.rotation) * s.velocity.x + Math.cos(s.rotation) * s.velocity.z;
+const helmFor = (s) => ({ id: `helm-${s.id}`, atHelm: true, onShipId: s.id, state: 'eliminated', respawnProtectionTimer: 0, shipBoundaryGraceTimer: 0 });
+// Hold a heading `offDeg` off the wind on the side `side` (+1/-1) with the ideal brace.
+function holdPointOfSail(ship, t, offDeg, side = 1) {
+  const w = sampleWind(t);
+  ship.rotation = angleWrap(w.direction + side * (Math.PI - offDeg * DEG));
+  ship.angularVelocity = 0;
+  ship.sailAngle = idealBrace(angleWrap(w.direction - ship.rotation));
+  return w;
+}
+const T90_WIN = { sloop: [7, 9], brigantine: [10, 12], galleon: [14, 17] };
+const COAST_WIN = { sloop: [6, 12], brigantine: [8, 15], galleon: [10, 18] };
+const TACK_MAX = { sloop: 8, brigantine: 11, galleon: 16 };
+for (const type of CLASSES) {
+  // t90: from rest, canvas already set, the class's best point of sail.
+  {
+    const physics = new PhysicsSystem();
+    const ship = makeShip(type);
+    let t = 0; let t90 = null;
+    for (let i = 0; i < 40 / TICK && t90 === null; i++) {
+      const w = holdPointOfSail(ship, t, BEST[type]);
+      t += TICK;
+      physics.update(TICK, t, [ship], [], [], [], []);
+      if (fwdOf(ship) >= 0.9 * polarSpeed(type, BEST[type] * DEG) * w.strength) t90 = t;
+    }
+    expect(`${type}: t90 from rest with sails set ${T90_WIN[type].join('-')} s`, t90 !== null && t90 >= T90_WIN[type][0] && t90 <= T90_WIN[type][1], `t90 ${t90 === null ? 'never' : t90.toFixed(2)} s`);
+  }
+  // Coast-down: at the class top speed, strike sail, time to < 1 m/s.
+  {
+    const physics = new PhysicsSystem();
+    const ship = makeShip(type);
+    let t = 0;
+    holdPointOfSail(ship, t, BEST[type]);
+    ship.velocity.x = Math.sin(ship.rotation) * CLASS_TOP_SPEED[type];
+    ship.velocity.z = Math.cos(ship.rotation) * CLASS_TOP_SPEED[type];
+    ship.sailHeight = 0;
+    let tStop = null; let dist = 0;
+    for (let i = 0; i < 60 / TICK && tStop === null; i++) {
+      const x0 = ship.position.x; const z0 = ship.position.z;
+      t += TICK;
+      physics.update(TICK, t, [ship], [], [], [], []);
+      dist += Math.hypot(ship.position.x - x0, ship.position.z - z0);
+      if (Math.hypot(ship.velocity.x, ship.velocity.z) < 1) tStop = t;
+    }
+    expect(`${type}: sail-struck coast-down from ${CLASS_TOP_SPEED[type]} m/s to < 1 m/s in ${COAST_WIN[type].join('-')} s`, tStop !== null && tStop >= COAST_WIN[type][0] && tStop <= COAST_WIN[type][1], `${tStop === null ? 'never' : tStop.toFixed(2)} s over ${dist.toFixed(0)} m`);
+  }
+  // Tack: steady on the beam, hard over toward the wind, through the no-go
+  // cone, done when she bears 60 deg off the wind on the other tack.
+  {
+    const physics = new PhysicsSystem();
+    const ship = makeShip(type);
+    ship.rudderAngle = 0;
+    let t = 0;
+    for (let i = 0; i < 45 / TICK; i++) { holdPointOfSail(ship, t, 90, 1); t += TICK; physics.update(TICK, t, [ship], [], [], [], []); }
+    const entry = Math.hypot(ship.velocity.x, ship.velocity.z);
+    const side0 = Math.sign(angleWrap(sampleWind(t).direction - ship.rotation));
+    const helm = helmFor(ship);
+    // physics targetSpec 1: she "keeps >= 45 % of entry speed THROUGH the 70 deg
+    // no-go cone": vCone is the least speed from helm-over until the bow leaves
+    // the cone on the new tack (momentum is all that carries her there). After
+    // that the canvas draws again and she settles toward her close-hauled polar,
+    // which for the galleon is itself ~31% of top; vMin (whole manoeuvre) is
+    // printed for the record.
+    let vMin = entry; let vCone = entry; let exited = false; let done = null; let crossed = false; let reversed = false;
+    for (let i = 0; i < 40 / TICK && done === null; i++) {
+      const w = sampleWind(t);
+      const sr = angleWrap(w.direction - ship.rotation);
+      ship.sailAngle = idealBrace(sr);
+      applyShipRudderSteering(ship, TICK, side0, 1);
+      t += TICK;
+      physics.update(TICK, t, [ship], [helm], [], [], []);
+      vMin = Math.min(vMin, Math.hypot(ship.velocity.x, ship.velocity.z));
+      if (fwdOf(ship) < 0) reversed = true;
+      const sr1 = angleWrap(sampleWind(t).direction - ship.rotation);
+      if (!crossed && Math.sign(sr1) === -side0 && Math.PI - Math.abs(sr1) < 0.5) crossed = true;
+      if (!exited) vCone = Math.min(vCone, Math.hypot(ship.velocity.x, ship.velocity.z));
+      if (crossed && Math.PI - Math.abs(sr1) > SHIP.SAIL_NO_GO_ANGLE) exited = true;
+      if (crossed && Math.PI - Math.abs(sr1) >= 60 * DEG) done = i * TICK + TICK;
+    }
+    expect(`${type}: hard-over tack completes within ${TACK_MAX[type]} s`, done !== null && done <= TACK_MAX[type], `${done === null ? 'never' : done.toFixed(2)} s`);
+    expect(`${type}: the tack keeps >= 45% of entry speed through the no-go cone (way carried through irons)`, exited && vCone >= 0.45 * entry && !reversed,
+      `entry ${entry.toFixed(2)} through-cone min ${vCone.toFixed(2)} m/s (${(100 * vCone / entry).toFixed(0)}%); whole-manoeuvre min ${vMin.toFixed(2)} (${(100 * vMin / entry).toFixed(0)}%)`);
+  }
+  // World edge: sail at the wall at full speed; no bounce, never past it.
+  {
+    const physics = new PhysicsSystem();
+    const ship = makeShip(type);
+    let t = 0;
+    const boundary = WORLD.HALF - WORLD.SHIP_MARGIN;
+    holdPointOfSail(ship, t, BEST[type]);
+    // Start 180 m inside the wall the bow points at most squarely, at speed.
+    const hx = Math.sin(ship.rotation); const hz = Math.cos(ship.rotation);
+    const axisX = Math.abs(hx) >= Math.abs(hz);
+    const s = Math.sign(axisX ? hx : hz);
+    if (axisX) ship.position.x = s * (boundary - 180); else ship.position.z = s * (boundary - 180);
+    ship.velocity.x = hx * CLASS_TOP_SPEED[type] * 0.9; ship.velocity.z = hz * CLASS_TOP_SPEED[type] * 0.9;
+    let minFwd = Infinity; let minNormal = Infinity; let maxPos = 0;
+    for (let i = 0; i < 40 / TICK; i++) {
+      holdPointOfSail(ship, t, BEST[type]);
+      t += TICK;
+      physics.update(TICK, t, [ship], [], [], [], []);
+      minFwd = Math.min(minFwd, fwdOf(ship));
+      minNormal = Math.min(minNormal, s * (axisX ? ship.velocity.x : ship.velocity.z));
+      maxPos = Math.max(maxPos, Math.abs(ship.position.x), Math.abs(ship.position.z));
+    }
+    expect(`${type}: at the world edge the heading velocity never reverses`, minFwd >= -1e-6, `min forward ${minFwd.toFixed(3)} m/s`);
+    expect(`${type}: the edge is a soft current, not a bounce (inward normal speed <= 1 m/s)`, minNormal >= -1, `min outward-normal ${minNormal.toFixed(2)} m/s`);
+    expect(`${type}: never past the boundary`, maxPos <= boundary + 1e-6, `max |pos| ${maxPos.toFixed(2)} / ${boundary}`);
+  }
 }
 
 // ── Section 5: sail trim ─────────────────────────────────────────────────────

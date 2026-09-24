@@ -112,7 +112,7 @@ type HullSweepHit =
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
-import { CLASS_TOP_SPEED, polarSpeed, sailPolarFraction, trimEfficiency as sailTrimEfficiency } from '../../shared/sailing.js';
+import { CLASS_TOP_SPEED, HULL_PARAMS, polarSpeed, sailPolarFraction, trimEfficiency as sailTrimEfficiency } from '../../shared/sailing.js';
 
 // ── Ship wave-riding dynamics tuning ─────────────────────────────────────────
 /** Near-critical damping for the heave spring (k = PHYSICS.BUOYANCY_SPRING). */
@@ -285,6 +285,25 @@ export function applyShipRudderSteering(ship: Ship, dt: number, steer: number, o
 export const TURN_HEEL_MAX = 0.05;
 export function shipTurnHeel(angularVelocity: number, speedFrac: number): number {
   return clamp(angularVelocity * speedFrac * 0.5, -TURN_HEEL_MAX, TURN_HEEL_MAX);
+}
+
+/** World-edge set (physics-13): over the last EDGE_BAND metres before the
+ *  ship boundary an inward current of up to EDGE_CURRENT m/s^2 builds, and the
+ *  outward component of the velocity is damped at up to EDGE_DAMP /s. Applied
+ *  per axis before the position step; the caller clamps at the line. Never
+ *  reflects: the damping only shrinks the outward component toward zero. */
+export const EDGE_BAND = 60;
+export const EDGE_CURRENT = 0.6;
+export const EDGE_DAMP = 2.5;
+export function edgeCurrentVelocity(pos: number, vel: number, boundary: number, dt: number): number {
+  const over = Math.abs(pos) - (boundary - EDGE_BAND);
+  if (over <= 0) return vel;
+  const side = Math.sign(pos);
+  const ramp = Math.min(1, over / EDGE_BAND);
+  let v = vel;
+  const outward = v * side;
+  if (outward > 0) v -= side * outward * (1 - Math.exp(-EDGE_DAMP * ramp * dt));
+  return v - side * EDGE_CURRENT * ramp * dt;
 }
 
 /** What a keel found this tick. `contact` is penetration of any kind; `into` is
@@ -821,21 +840,49 @@ export class PhysicsSystem {
       // sails slower (shared/cargo.ts). This is what makes the leader catchable
       // — the gold race is only a race if the front-runner can be run down.
       const ballast = cargoBallastFactor(ship.cargoGold ?? 0);
-      const targetSpeed = ship.anchored
-        ? 0
+      // SHIPS HAVE MASS (physics-01/02, b2.1b). m dv/dt = F_sail - R(v): the
+      // canvas makes a force, the hull resists with c1 v + c2 v|v| solved in
+      // shared/sailing.ts to the D16 top speeds and t90 targets, so a galleon
+      // takes ~14.5 s to reach her way and carries it ~17 s after the sail is
+      // struck, and a tack coasts through the no-go cone on momentum instead of
+      // stopping dead. `driveSpeed` is the speed the canvas alone would hold
+      // (polar x canvas x trim x wind); F_sail is the hull resistance at that
+      // speed, so a clean hull settles exactly where the old target sat.
+      const hull = HULL_PARAMS[ship.type];
+      const driveSpeed = polarMps * speedMult * sailDeployment * (0.16 + trimEff * 0.84) * wind.strength
         // A hull hard aground makes only a share of her rig (SHIP.AGROUND_SAIL_SCALE):
         // the bar's hold is thrust-relative, not absolute, so a beaching costs every
         // class the same share of her way whatever the class ladder is tuned to.
-        : polarMps * speedMult * sailDeployment * (0.16 + trimEff * 0.84) * wind.strength * floodPenalty * waterSpeedFactor * ballast
-          * (ship.aground ? SHIP.AGROUND_SAIL_SCALE : 1);
-      const sailLoad = clamp(ship.sailHeight * clamp(ship.sailIntegrity, 0, 1), 0, 1);
-      const accelRate = ship.anchored ? SHIP.ANCHOR_BRAKE * 1.28 : 1.55 + sailLoad * 1.05;
-      const speedBlend = 1 - Math.exp(-accelRate * dt);
-      const forwardSpeed = currentFwd + (targetSpeed - currentFwd) * speedBlend;
-      const lateralDamping = ship.anchored
-        ? 8.5
-        : 3.15 + Math.min(1.9, Math.abs(currentFwd) / Math.max(1, stats.maxSpeed) * 1.15);
-      const lateralSpeed = currentLat * Math.exp(-dt * lateralDamping);
+        * (ship.aground ? SHIP.AGROUND_SAIL_SCALE : 1);
+      const fSail = hull.c1 * driveSpeed + hull.c2 * driveSpeed * driveSpeed;
+      // Breaches, bilge water and gold in the hold are DRAG, not a speed cap: the
+      // resistance is multiplied so the equilibrium lands at driveSpeed x penalty
+      // exactly (the old steady speeds), and a holed hull also loses her way
+      // faster once the canvas comes in. dragMult = R(vD) / R(p vD), >= 1.
+      const penalty = floodPenalty * waterSpeedFactor * ballast;
+      const dragMult = (hull.c1 + hull.c2 * driveSpeed) / (hull.c1 * penalty + hull.c2 * penalty * penalty * driveSpeed);
+      // Flogging canvas in irons adds drag (physics-02): staying head to wind
+      // still costs way, it just no longer costs it all in one tick.
+      const luffC2 = ship.luffing ? hull.c2 * 1.3 * sailDeployment : 0;
+      let forwardSpeed: number;
+      let lateralSpeed: number;
+      if (ship.anchored) {
+        // The anchor itself (rode, bite, anchor turn) is b2.1c's state machine;
+        // until then the anchored hull keeps the old brake.
+        const speedBlend = 1 - Math.exp(-SHIP.ANCHOR_BRAKE * 1.28 * dt);
+        forwardSpeed = currentFwd - currentFwd * speedBlend;
+        lateralSpeed = currentLat * Math.exp(-dt * 8.5);
+      } else {
+        // Semi-implicit Euler at the fixed tick: the drag is taken implicitly
+        // (linearised about |v|), so it can slow a hull to zero but never flip
+        // her velocity, at any dt.
+        const fwdDragCoef = dragMult * (hull.c1 + (hull.c2 + luffC2) * Math.abs(currentFwd));
+        forwardSpeed = (currentFwd * hull.mass + fSail * dt) / (hull.mass + fwdDragCoef * dt);
+        // The keel: lateral resistance >= 25x the forward drag (KEEL_LATERAL_RATIO),
+        // so turning redirects the momentum instead of skidding it away.
+        const latDragCoef = hull.cLat1 + hull.cLat2 * Math.abs(currentLat);
+        lateralSpeed = (currentLat * hull.mass) / (hull.mass + latDragCoef * dt);
+      }
 
       ship.velocity.x = sinR * forwardSpeed + cosR * lateralSpeed;
       ship.velocity.z = cosR * forwardSpeed - sinR * lateralSpeed;
@@ -863,18 +910,25 @@ export class PhysicsSystem {
         ship.velocity.z *= scale;
       }
 
+      // THE WORLD EDGE IS A CURRENT, NOT A TRAMPOLINE (physics-13). Over the
+      // last EDGE_BAND metres an inward set builds and eats the outward way;
+      // at the line itself the outward component is clamped to zero. Nothing
+      // reflects, so a hull run at the edge slides along it and never shoots
+      // backwards at half her speed.
+      const boundary = WORLD.HALF - WORLD.SHIP_MARGIN;
+      ship.velocity.x = edgeCurrentVelocity(ship.position.x, ship.velocity.x, boundary, dt);
+      ship.velocity.z = edgeCurrentVelocity(ship.position.z, ship.velocity.z, boundary, dt);
       ship.position.x += ship.velocity.x * dt;
       ship.position.z += ship.velocity.z * dt;
-
-      // World boundary bounce
-      const boundary = WORLD.HALF - WORLD.SHIP_MARGIN;
       if (Math.abs(ship.position.x) > boundary) {
-        ship.velocity.x *= -0.5;
-        ship.position.x = Math.sign(ship.position.x) * boundary;
+        const sx = Math.sign(ship.position.x);
+        ship.position.x = sx * boundary;
+        if (ship.velocity.x * sx > 0) ship.velocity.x = 0;
       }
       if (Math.abs(ship.position.z) > boundary) {
-        ship.velocity.z *= -0.5;
-        ship.position.z = Math.sign(ship.position.z) * boundary;
+        const sz = Math.sign(ship.position.z);
+        ship.position.z = sz * boundary;
+        if (ship.velocity.z * sz > 0) ship.velocity.z = 0;
       }
 
       // Buoyancy — a spring-damper heave (not a bare lerp) so the hull carries
