@@ -53,7 +53,7 @@ import { BROKER_NAME, FLEET_PENNANT, SHIP_CLASS_NAMES, WORLD_NAME, WORLD_NAME_MI
 import { IslandBuilder } from '../world/IslandBuilder.js';
 import type { ChestMeshRecord, NpcMeshRecord, UpgradeStationMeshRecord } from '../world/IslandBuilder.js';
 import { memoryCensus, type MemoryCensus } from '../debug/memoryCensus.js';
-import { releaseRenderOnlyCpuCopies, cpuCopyReleaseEnabled, uploadPendingCpuCopies } from '../rendering/CpuCopyRelease.js';
+import { releaseRenderOnlyCpuCopies, cpuCopyReleaseEnabled, uploadPendingCpuCopies, eagerUploadBudget } from '../rendering/CpuCopyRelease.js';
 import { apparentDistanceScale, updateInstanceLod, updateLazyStoryResidency, type InstanceLodBatch } from '../world/island/InstanceLod.js';
 import { updateSeaRockLod } from '../world/island/SeaRockBuilder.js';
 import { HudController, shouldAnnounceUnderFire, type HudView, type HullStruckEvent } from '../ui/HudController.js';
@@ -3339,9 +3339,10 @@ export class Game {
     this.debugRawFrameMs = rawDtMs;
     this.stepFrameCpu(now, dt, rawDtMs);
     // Phone/iPad (b1-ask-05): upload armed geometry the view has not drawn yet so
-    // its CPU copy drops; held while islands still build/reveal (their own budget).
+    // its CPU copy drops, a byte budget per unit of time; held while islands still
+    // build/reveal (their own budget).
     if (this.pendingIslandBuilds.length === 0 && !this.islandAwaitingReveal && cpuCopyReleaseEnabled()) {
-      uploadPendingCpuCopies(this.renderer.renderer, 1_000_000);
+      uploadPendingCpuCopies(this.renderer.renderer, eagerUploadBudget(rawDtMs));
     }
     this.renderer.render();
     if (this.bugSnapRequested) {
