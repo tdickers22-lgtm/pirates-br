@@ -18,6 +18,11 @@
 //   PIRATES_BR_LOAD_SECONDS=12     measurement window (s)
 //   PIRATES_BR_LOAD_FF_SECONDS=300 sim seconds each match is fast-forwarded to
 //   PIRATES_BR_LOAD_MAX=12         --report ceiling
+//   --workers W   run the matches in W match worker threads (b2.0c, D8 lever 3;
+//                 the shipped path is PIRATES_BR_MATCH_WORKERS). 0 = in-process.
+//   --scaling W   the capacity gate: --report in-process, then --report --workers W,
+//                 each in its own process; PASS when the worker run carries
+//                 >= 1.8x the single-thread match count at worstSimLagSec < 0.1.
 //
 // On Fly (owner or deploy gate): fly ssh console -C "node --import tsx scripts/perf-server-load.mjs --report"
 // Server-side only: no browser, no GPU. The fast-forward blocks the event loop
@@ -26,7 +31,43 @@
 import { WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
 
+const argOf = (flag) => { const i = process.argv.indexOf(flag); return i >= 0 ? process.argv[i + 1] : undefined; };
 const REPORT = process.argv.includes('--report');
+const WORKERS = Math.max(0, Number(argOf('--workers') ?? 0) || 0);
+const SCALING = argOf('--scaling');
+const SCALING_BAR = 1.8;
+
+if (SCALING !== undefined) {
+  // Two fresh processes, so the second run never inherits the first's heap,
+  // JIT state or leftover timers.
+  const { spawn } = await import('node:child_process');
+  const { loadavg } = await import('node:os');
+  const W = Math.max(2, Number(SCALING) || 2);
+  const run = async (extra) => {
+    const t0 = Date.now(); const load1 = loadavg()[0];
+    // Streamed, not buffered: a 10-minute report must be pollable while it runs.
+    let out = '';
+    const child = spawn(process.execPath, [...process.execArgv, new URL(import.meta.url).pathname, '--report', ...extra],
+      { stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env } });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d) => { out += d; process.stdout.write(d); });
+    await new Promise((r) => child.on('close', r));
+    const max = Number(out.match(/REPORT maxMatches=(\d+)/)?.[1] ?? NaN);
+    return { max, capped: /capped at PIRATES_BR_LOAD_MAX/.test(out), load1, sec: (Date.now() - t0) / 1000 };
+  };
+  console.log(`Scaling gate: --report in-process vs --report --workers ${W} (bar ${SCALING_BAR}x)\n`);
+  const single = await run([]);
+  const multi = await run(['--workers', String(W)]);
+  const ratio = multi.max / single.max;
+  console.log(`\nSCALING single=${single.max} (load1 ${single.load1.toFixed(1)}, ${single.sec.toFixed(0)} s) workers${W}=${multi.max}${multi.capped ? '+' : ''} (load1 ${multi.load1.toFixed(1)}, ${multi.sec.toFixed(0)} s) ratio=${ratio.toFixed(2)}`);
+  let bad = 0;
+  const ok = (label, c, d = '') => { if (c) console.log(`  ✓ ${label}`); else { console.error(`  ✗ FAIL: ${label}${d ? `\n     ${d}` : ''}`); bad += 1; } };
+  ok('the in-process run carried at least one match', single.max >= 1, `single=${single.max}`);
+  ok(`--workers ${W} carries >= ${SCALING_BAR}x the single-thread match count at worstSimLagSec < 0.1`,
+    Number.isFinite(ratio) && ratio >= SCALING_BAR, `${multi.max} / ${single.max} = ${ratio.toFixed(2)}${multi.capped ? ' (capped: raise PIRATES_BR_LOAD_MAX)' : ''}`);
+  console.log(bad === 0 ? '\nPASS server load scaling' : `\nFAIL server load scaling (${bad})`);
+  process.exit(bad === 0 ? 0 : 1);
+}
 const flyMax = (() => {
   try { return Number(readFileSync(new URL('../fly.toml', import.meta.url), 'utf8').match(/PIRATES_BR_MAX_MATCHES\s*=\s*"(\d+)"/)?.[1]); } catch { return NaN; }
 })();
@@ -40,6 +81,12 @@ const WORST_SIM_LAG_BUDGET_SEC = 0.1;
 // Read BEFORE importing the server: the ceiling is a module-load constant.
 process.env.PIRATES_BR_MAX_MATCHES = String(REPORT ? N_MAX : N);
 const { LobbyServer } = await import('../src/server/core/LobbyServer.ts');
+if (WORKERS > 0) {
+  // The shipped host, with the load hooks on: install it before the first
+  // match so LobbyServer.matchFactory hands every match to it.
+  const { MatchWorkerHost } = await import('../src/server/core/MatchWorkerHost.ts');
+  LobbyServer.workerHost = new MatchWorkerHost(WORKERS, { testHooks: true });
+}
 
 let failures = 0;
 function expect(label, condition, detail = '') {
@@ -102,6 +149,11 @@ async function addMatch(i) {
   const m = [...server.matches.values()].find((x) => !known.has(x));
   if (!m) throw new Error(`match ${i} never started (${c.seen.slice(-5).join(',')}; ${c.errors.join(';')})`);
   known.add(m);
+  if (WORKERS > 0) {
+    let r;
+    do { r = m.debug('loadFastForward', FF_SEC, 2000); } while (!r.done);
+    return { i, t: r.t, phase: r.phase, ffMs: r.ffMs, ticks: r.ticks, ships: r.ships, alive: r.alive };
+  }
   // Mute the wire while fast-forwarding: ~9k snapshots queued to a blocked
   // local socket would be graded as window CPU afterwards.
   const muted = ['broadcast', 'broadcastVolatile', 'send'].filter((f) => typeof m[f] === 'function');
@@ -120,6 +172,7 @@ async function addMatch(i) {
 function rebaseAll() {
   const wall = Date.now(); const perf = performance.now();
   for (const m of server.matches.values()) {
+    if (WORKERS > 0) { m.debug('loadRebase'); continue; }
     if (m.state.phase === 'playing') m.playingSinceWallMs = wall - m.t * 1000;
     m.tickBacklogSec = 0; m.lastTickWallMs = perf; m.droppedTicks = 0;
     if (!m.__timed) {
@@ -137,12 +190,14 @@ async function measureWindow() {
   rebaseAll();
   await sleep(WINDOW_SEC * 1000);
   const h = await health();
-  const per = [...server.matches.values()].map((m) => ({ p50: quantile(m.__tickMs, 0.5), p99: quantile(m.__tickMs, 0.99), n: m.__tickMs.length }));
+  const stats = [...server.matches.values()].map((m) => (WORKERS > 0 ? m.debug('loadStats')
+    : { p50: quantile(m.__tickMs, 0.5), p99: quantile(m.__tickMs, 0.99), n: m.__tickMs.length, lagGrowth: m.simLagSeconds() - (m.__lag0 ?? 0) }));
+  const per = stats.map(({ p50, p99, n }) => ({ p50, p99, n }));
   // Lag GROWN during the window, per match. The absolute /health value carried
   // a stale offset on the newest match in the first --report run (28.12 s at
   // N=4 = its own fast-forward time, with 0 dropped ticks and p99 5.2 ms), so
   // the budget grades what the window itself added; /health's value is printed.
-  const lagGrowth = Math.max(0, ...[...server.matches.values()].map((m) => m.simLagSeconds() - (m.__lag0 ?? 0)));
+  const lagGrowth = Math.max(0, ...stats.map((x) => x.lagGrowth));
   h.body.healthWorstSimLagSec = h.body.worstSimLagSec;
   h.body.worstSimLagSec = Number(lagGrowth.toFixed(3));
   return { h, per, p50: Math.max(...per.map((p) => p.p50)), p99: Math.max(...per.map((p) => p.p99)) };
@@ -151,7 +206,7 @@ const fmt = (x) => (Number.isFinite(x) ? x.toFixed(2) : String(x));
 
 const clients = [];
 if (REPORT) {
-  console.log(`Server load --report: up to ${N_MAX} full matches, each at t=${FF_SEC}s, ${WINDOW_SEC}s windows (budget worstSimLagSec < ${WORST_SIM_LAG_BUDGET_SEC})`);
+  console.log(`Server load --report (${WORKERS > 0 ? `${WORKERS} match worker threads` : 'in-process, one thread'}): up to ${N_MAX} full matches, each at t=${FF_SEC}s, ${WINDOW_SEC}s windows (budget worstSimLagSec < ${WORST_SIM_LAG_BUDGET_SEC})`);
   console.log('   N  ships  ff s  worstSimLagSec  dropped  tick p50 ms  tick p99 ms  (/health abs)');
   let maxOk = 0;
   for (let i = 0; i < N_MAX; i += 1) {
@@ -172,7 +227,7 @@ if (REPORT) {
   process.exit(failures === 0 ? 0 : 1);
 }
 
-console.log(`Server load: ${N} full matches on one process, each fast-forwarded to t=${FF_SEC}s, ${WINDOW_SEC}s window`);
+console.log(`Server load (${WORKERS > 0 ? `${WORKERS} match workers` : 'in-process'}): ${N} full matches on one process, each fast-forwarded to t=${FF_SEC}s, ${WINDOW_SEC}s window`);
 const buildStart = Date.now();
 for (let i = 0; i < N; i += 1) {
   const row = await addMatch(i);

@@ -219,6 +219,49 @@ export function runMatchWorker(init: WorkerInit): void {
         m.updateCaptures = () => { throw new Error('injected tick fault (test-match-worker)'); };
         return true;
       case 'tickCount': return m.tickCount;
+      // b2.0c perf-server-load --workers: the same mid-match fast-forward,
+      // rebase and per-tick timing the in-process load run does on the lobby
+      // thread, run where the match lives. Chunked by wall time so no single
+      // call nears SYNC_CALL_TIMEOUT_MS.
+      case 'loadFastForward': {
+        const [ffSec, budgetMs] = args as [number, number];
+        if (!m.__ffMuted) {
+          m.__ffMuted = ['broadcast', 'broadcastVolatile', 'send'].filter((f) => typeof m[f] === 'function');
+          for (const f of m.__ffMuted) m[f] = () => {};
+          m.__ffTicks = 0; m.__ffMs = 0;
+        }
+        const t0 = performance.now();
+        const cap = Math.ceil((ffSec + 60) * 1000 / SERVER_TICK_MS);
+        let done = false;
+        while (performance.now() - t0 < budgetMs) {
+          done = m.__ffTicks >= cap || (m.state.phase === 'playing' && m.t >= ffSec) || m.state.phase === 'ended';
+          if (done) break;
+          m.tick(); m.__ffTicks += 1;
+        }
+        m.__ffMs += performance.now() - t0;
+        const row = { t: m.t, phase: m.state.phase, ticks: m.__ffTicks, ffMs: m.__ffMs, ships: m.state.ships?.length ?? 0, alive: m.state.shipsAlive ?? m.state.ships?.length ?? 0, done };
+        if (done) { for (const f of m.__ffMuted) delete m[f]; m.__ffMuted = null; }
+        return row;
+      }
+      case 'loadRebase': {
+        const wall = Date.now(); const perf = performance.now();
+        if (m.state.phase === 'playing') m.playingSinceWallMs = wall - m.t * 1000;
+        m.tickBacklogSec = 0; m.lastTickWallMs = perf; m.droppedTicks = 0;
+        if (!m.__timed) {
+          const tick = m.tick.bind(m);
+          m.__tickMs = [];
+          m.tick = (...a: unknown[]) => { const s0 = performance.now(); try { return tick(...a); } finally { m.__tickMs.push(performance.now() - s0); } };
+          m.__timed = true;
+        }
+        m.__tickMs.length = 0;
+        m.__lag0 = m.simLagSeconds();
+        return true;
+      }
+      case 'loadStats': {
+        const xs = [...(m.__tickMs ?? [])].sort((x: number, y: number) => x - y);
+        const q = (p: number) => (xs.length ? xs[Math.min(xs.length - 1, Math.floor(p * xs.length))] : NaN);
+        return { p50: q(0.5), p99: q(0.99), n: xs.length, lagGrowth: m.simLagSeconds() - (m.__lag0 ?? 0), dropped: m.droppedTickCount() };
+      }
       default: throw new Error(`unknown debug op ${op}`);
     }
   }

@@ -44,6 +44,12 @@ kill_timeout = "30s"
   # DEPLOY.md "Capacity record" row must match, and test-deploy-config fails if
   # this exceeds the recorded measurement.
   PIRATES_BR_MAX_MATCHES = "2"
+  # D8 lever 3 (b2.0b-c): run each match in a worker_thread, one per vCPU.
+  # "auto" = availableParallelism(), and 0 (matches stay on the lobby thread)
+  # on a 1-vCPU machine, so this is inert on performance-1x and live on
+  # performance-2x (owner step O6). A bigger VM buys NOTHING without it: the
+  # sim is single-threaded Node. Local measurement: DEPLOY.md capacity record.
+  PIRATES_BR_MATCH_WORKERS = "auto"
   # Seconds a drained machine gives its live matches before it closes sockets.
   PIRATES_BR_DRAIN_SECONDS = "10"
 

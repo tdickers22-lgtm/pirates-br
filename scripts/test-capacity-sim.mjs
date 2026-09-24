@@ -23,6 +23,12 @@
  *   3/min at MAX_MATCHES=6 -> pooled p95 wait <= 30 s and >= 18 mean concurrent humans
  *   MUTATION: pressure window off (lateJoinPressureSec = truce) -> the 1/min row FAILS
  * Prints the MAX_MATCHES x arrival-rate table for DEPLOY.md.
+ *
+ * --deployed [N] (b2.0c): grade the MAX_MATCHES that ships instead of the
+ * table: N, else fly.toml's PIRATES_BR_MAX_MATCHES. FAILS unless 1 lone
+ * player/min at that value waits <= 30 s at p95 with 0 lobby_error (the D8
+ * bar), and prints the DEPLOY.md capacity-row figure: mean concurrent humans
+ * at the highest arrival rate (1-3/min) that still meets p95 <= 30 s.
  */
 import { EventEmitter } from 'node:events';
 import { WebSocket } from 'ws';
@@ -238,6 +244,41 @@ if (typeof LobbyServer.matchFactory !== 'function' || typeof LobbyServer.tunable
   Date.now = realNow;
   console.error('  ✗ FAIL: LobbyServer has no matchFactory / late-join tunables / maxMatches: the dispatch cannot be driven');
   process.exit(1);
+}
+const DEPLOYED = process.argv.includes('--deployed');
+if (DEPLOYED) {
+  const { readFileSync } = await import('node:fs');
+  const arg = Number(process.argv[process.argv.indexOf('--deployed') + 1]);
+  const fly = Number(readFileSync(new URL('../fly.toml', import.meta.url), 'utf8').match(/PIRATES_BR_MAX_MATCHES\s*=\s*"(\d+)"/)?.[1]);
+  const M = Number.isFinite(arg) && arg > 0 ? arg : fly;
+  const started = realNow();
+  let rowsD = [];
+  try {
+    if (!(M > 0)) { console.error('  ✗ FAIL: no MAX_MATCHES (fly.toml PIRATES_BR_MAX_MATCHES missing)'); process.exit(1); }
+    console.log = () => {};
+    for (const lam of [1, 2, 3]) {
+      const r = cell(lam, M);
+      rowsD.push({ lam, M, ...r });
+      if (r.p95 > 30) break; // a higher rate cannot pass where a lower one failed
+    }
+  } finally {
+    console.log = realLog;
+    Date.now = realNow;
+  }
+  console.log(`deployed MAX_MATCHES ${M} (${Number.isFinite(arg) && arg > 0 ? '--deployed N' : 'fly.toml'})\n`);
+  console.log('| arrivals/min | MAX_MATCHES | p95 wait (s) | mean humans | peak humans | lobby_error |');
+  console.log('|---|---|---|---|---|---|');
+  for (const r of rowsD) console.log(`| ${r.lam} | ${r.M} | ${r.p95.toFixed(0)} | ${r.mean.toFixed(1)} | ${r.peak} | ${r.errors} |`);
+  const passing = rowsD.filter((r) => r.p95 <= 30 && r.errors === 0);
+  const humans = passing.length ? passing[passing.length - 1].mean : 0;
+  console.log(`\nCAPACITY maxMatches=${M} humansAtP95Le30=${humans.toFixed(1)}`);
+  const r1 = rowsD[0];
+  expect(`D8 bar at the deployed MAX_MATCHES=${M}: 1 lone player/min waits <= 30 s at p95`, r1.p95 <= 30,
+    `p95=${r1.p95.toFixed(1)} s over ${r1.n} crews: the queue shows position + ETA at peaks; lever ladder in DEPLOY.md (measured MAX_MATCHES >= 4 meets it)`);
+  expect('  ...and 0 lobby_error', r1.errors === 0, `errors=${r1.errors}`);
+  console.log(`(${((realNow() - started) / 1000).toFixed(1)} s)`);
+  console.log(failures === 0 ? '\nAll capacity-sim --deployed assertions passed.' : `\n${failures} capacity-sim --deployed assertion(s) failed.`);
+  process.exit(failures === 0 ? 0 : 1);
 }
 const PRESSURE = LobbyServer.tunables.lateJoinPressureSec;
 const TRUCE = LobbyServer.tunables.lateJoinTruceSec;
