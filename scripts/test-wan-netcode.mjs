@@ -23,7 +23,9 @@
  *    composed against the interpolated hull like Game.getPlayerRenderPosition.
  *  - Local player: the shared PredictionRing + stepPirate reconciliation
  *    (src/shared/locomotion.ts) that the server's own movement runs through.
- *    NOTE: Game.ts does not consume input_ack today (the live client draws its
+ *    The prediction clock (when the input sent now is applied, on the server's
+ *    clock) is src/client/network/PredictionClock.ts, steered by every ack.
+ *    NOTE: Game.ts does not consume input_ack yet (the live client draws its
  *    own body by dead reckoning); this grades the reconciliation path the
  *    client is meant to run, on the real acks the server sends.
  *
@@ -31,15 +33,15 @@
  *  - remote pirates, split ashore / aboard (world path, aboard composed on the
  *    hull), unexplained step in VECTOR form: p99 <= 0.02 m and <= 1.0
  *    discontinuities per body-second, held/empty answers <= 3%: the
- *    test-remote-smoothness bound. Ashore is graded at it; aboard at its
- *    measured bound (see MEASURED) until b2.0d.
+ *    test-remote-smoothness bound, both populations.
  *  - local reconciliation: correction at each ack p99 < 0.3 m.
  *  - downstream per client <= 120 KB/s hard (80 KB/s target printed).
  *  - mutation proof, same run: the interpolation buffer forced to 0 ms must FAIL
  *    the remote bar, and a client that snaps to the ack without replaying its
- *    inputs must FAIL the local bar. A bar the broken arm clears cannot fail.
+ *    inputs on a free-running clock must FAIL the local bar. A bar the broken
+ *    arm clears cannot fail.
  *
- * Usage: node --import tsx scripts/test-wan-netcode.mjs [--seconds 30] [--seed 7] [--strict]
+ * Usage: node --import tsx scripts/test-wan-netcode.mjs [--seconds 30] [--seed 7]
  *        (deterministic per seed; WAN_STATS=1 prints p50/p90/p95/p99 per population)
  *        [--buffer-ms 0]   (runs ONLY the forced-0 arm and grades it: the red run)
  *        [--lan]           (control: clean link)
@@ -51,6 +53,7 @@ import { Match } from '../src/server/core/Match.ts';
 import * as Lobby from '../src/server/core/LobbyServer.ts';
 import { ClientState } from '../src/client/core/ClientState.ts';
 import { PredictionRing, stepPirate } from '../src/shared/locomotion.ts';
+import { PredictionClock } from '../src/client/network/PredictionClock.ts';
 
 const argv = process.argv.slice(2);
 const arg = (n, d = null) => { const i = argv.indexOf(`--${n}`); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
@@ -70,38 +73,21 @@ const MOVING_SPEED_MPS = 1.0;
 const MAX_GRADEABLE_SPEED_MPS = 15;
 const MIN_MOVING_SAMPLES = 250;
 /**
- * THE RECORDED MISS (PLAN b1.3e gate: "a miss is fixed by a <= 20-line hook or
- * recorded as its measured bound with slice b2.0d filed, never a silently
- * loosened bound"). First run at 7a1 (seed 7, 20 s): remote pirate p99 0.137 m
- * at 10.95 disc/body-s against the 0.02 m / 1.0 bar; local reconciliation p99
- * 3.67 m against 0.3 m (and the no-replay control reads 0.72 m, so the replay
- * itself is what is wrong: it steps the deck-carry against the hull's NEWEST
- * pose instead of its pose at each replayed tick). Neither fits a 20-line hook,
- * so the default run grades the MEASURED bound below (it still fails a
- * regression) and prints the launch bar as MISSED; `--strict` grades the launch
- * bar itself and is what b2.0d must turn green, then delete this table.
- * The local miss has no honest measured bound (the no-replay mutant clears
- * anything above 3.7 m), so it is reported, not graded, until b2.0d.
+ * THE b1.3e MISSES, FIXED IN b2.0d (the launch bar is graded on both populations,
+ * no measured bound left). Seeds 1-7, 30 s, shipped arm vs mutants:
+ *  - aboard 0.169-0.187 m p99 / 19-40 disc per body-s was the HARNESS, not the
+ *    client: RemoteInterpolator.poseAt answers in one reused scratch, and the
+ *    sampler asked for the hull before reading the pirate's deck pose, so it
+ *    composed the hull's world position spun by the hull's yaw (0.0003 rad of
+ *    yaw x 700 m = 0.2 m a sample). Game reads the drawn hull from ShipRenderer
+ *    and never had it. Fixed, aboard reads like ashore (see the b2.0d report).
+ *  - local reconciliation 3.8 m p99 was the prediction clock: seeded once from
+ *    the first ack (in the countdown, when the sim clock stands still) and then
+ *    free-run, so every replay started the inputs ~0.67 s early. PredictionClock
+ *    re-derives it from the measured apply delay on every ack.
  */
-const STRICT = argv.includes('--strict');
-// SEEDED, SPLIT, VECTOR (b1.3e finish). The run is deterministic per --seed (see
-// DETERMINISM below), so the bounds are measured, not sampled. 30 s window,
-// seeds 1-7, shipped arm vs buffer-0 mutant (vector form, p99 m / disc per body-s):
-//                shipped                         buffer 0 ms
-//   ashore  p99 0.0117-0.0171, 0.23-0.95/s   p99 0.0224-0.0446, 1.31-3.61/s
-//   aboard  p99 0.169-0.187,  19.0-39.7/s    p99 0.489-0.641,  16.4-39.7/s
-// Ashore the shipped client MEETS the launch bar and the mutant misses it on
-// both clauses on every seed, so ashore is graded at the launch bar itself.
-// Aboard (deck pose composed on the interpolated hull) is the recorded miss: the
-// p99 bound 0.3 m sits 38% above the shipped worst and 39% below the mutant's
-// best. The aboard RATE does not separate the arms (both 16-40/s), so its bound
-// (60) only catches a gross regression. --strict grades both populations at the
-// launch bar: that is b2.0d's exit gate and it is RED on aboard today.
 const POPS = ['ashore', 'aboard'];
-const MEASURED = { ashore: { p99: BAR.p99, rate: BAR.rate }, aboard: { p99: 0.3, rate: 60 } };
-const GRADE = STRICT
-  ? { ashore: { ...BAR }, aboard: { ...BAR } }
-  : { ashore: { ...BAR, ...MEASURED.ashore }, aboard: { ...BAR, ...MEASURED.aboard } };
+const GRADE = { ashore: { ...BAR }, aboard: { ...BAR } };
 
 // ── virtual clock: the client's performance.now IS the sim's wall clock ──────
 let VNOW = 0;
@@ -190,11 +176,13 @@ async function runArm(arm) {
 
   // ── local prediction ──
   const ring = new PredictionRing();
+  const clock = new PredictionClock();
   const sentAt = new Map();
   let pred = null; // PirateMotionState
   let predT = 0;
   let rttEst = null;
   let lastAckSeq = -2;
+  let lastAckT = null;
   const corrections = [];
   let transitions = 0;
   let acks = 0;
@@ -242,12 +230,22 @@ async function runArm(arm) {
         if (ack.seq !== lastAckSeq && sentAt.has(ack.seq)) {
           const sample = VNOW - sentAt.get(ack.seq);
           rttEst = rttEst === null ? sample : Math.min(rttEst * 1.02, sample);
+          // First ack carrying this seq: the server applied it in (last ack t, this ack t].
+          const appliedS = lastAckT !== null && lastAckT <= ack.t ? (lastAckT + ack.t) / 2 : ack.t;
+          clock.noteApplied(sentAt.get(ack.seq) / 1000, appliedS);
         }
+        if (lastAckT === null || ack.t > lastAckT) lastAckT = ack.t;
         lastAckSeq = ack.seq;
-        if (rttEst === null || ack.seq < 0) continue;
+        if (!clock.ready && clock.offsetS !== null) clock.anchor(VNOW / 1000);
+        if (!clock.ready || ack.seq < 0) continue;
         ring.pruneTo(ack.seq);
         const s = { position: { ...ack.pos }, velocity: { ...ack.vel }, crouching: false, state: ack.state, atCrowNest: false, onShipId: ack.onShipId };
-        if (!pred) { pred = s; predT = ack.t + rttEst / 1000; continue; }
+        // The shipped client steers its prediction clock on every ack from the
+        // measured apply delay; the free-run mutant keeps the clock it seeded on
+        // the first ack (b1.3e's harness, and the 3.8 m p99 it measured).
+        if (!pred) { pred = s; predT = clock.t; continue; }
+        clock.t = predT; // the clock was stepped with the prediction since the last ack
+        if (arm.anchor) predT = clock.anchor(VNOW / 1000);
         if (arm.replay) {
           const env = { ship: s.onShipId ? cs.shipsById.get(s.onShipId) ?? null : null, islands: cs.state?.islands ?? [], jumpBlocked: false };
           ring.replay(s, ack.t, predT, 0.016, env);
@@ -294,16 +292,22 @@ async function runArm(arm) {
         if (p.id === localId) continue;
         const pose = cs.remote.poseAt(`P:${p.id}`, VNOW);
         if (!pose) continue;
+        // poseAt answers in ONE reused scratch object: read the pirate's pose out
+        // BEFORE asking for the hull, or the hull's answer overwrites it and the
+        // "deck pose" composed below is the hull's world position spun by its own
+        // yaw (b2.0d: that aliasing was the whole aboard miss b1.3e recorded; Game
+        // reads the hull from ShipRenderer, not poseAt, so it never had it).
         let x = pose.x; let y = pose.y; let z = pose.z;
         const frame = pose.frame || '';
         if (frame) {
+          const lx = x; const ly = y; const lz = z;
           const hp = cs.remote.poseAt(`S:${frame}`, VNOW);
           if (!hp) continue;
           shipPose.x = hp.x; shipPose.y = hp.y; shipPose.z = hp.z; shipPose.yaw = hp.yaw;
           const c = Math.cos(shipPose.yaw); const sn = Math.sin(shipPose.yaw);
-          x = shipPose.x + pose.x * c + pose.z * sn;
-          z = shipPose.z + pose.z * c - pose.x * sn;
-          y = shipPose.y + pose.y;
+          x = shipPose.x + lx * c + lz * sn;
+          z = shipPose.z + lz * c - lx * sn;
+          y = shipPose.y + ly;
         }
         pop.samples += 1;
         const prev = prevPose.get(p.id);
@@ -381,7 +385,7 @@ console.log(`test-wan-netcode: seed ${SEED}, ${SECONDS} s measured after ${WARMU
 const t0 = Date.now();
 if (FORCED_BUFFER !== null) {
   // THE RED RUN: grade the forced-0 arm against the real bar. It must FAIL.
-  const r = await runArm({ bufferZero: Number(FORCED_BUFFER) === 0, replay: true, label: `buffer forced ${FORCED_BUFFER} ms` });
+  const r = await runArm({ bufferZero: Number(FORCED_BUFFER) === 0, replay: true, anchor: true, label: `buffer forced ${FORCED_BUFFER} ms` });
   printArm(r);
   for (const k of POPS) {
     expect(`${k}: sampling measured something (>= ${MIN_MOVING_SAMPLES})`, r.remote[k].n >= MIN_MOVING_SAMPLES, String(r.remote[k].n));
@@ -389,23 +393,21 @@ if (FORCED_BUFFER !== null) {
     expect(`${k}: discontinuities <= ${GRADE[k].rate}/body-s`, r.remote[k].rate <= GRADE[k].rate, f(r.remote[k].rate, 2));
   }
 } else {
-  const on = await runArm({ bufferZero: false, replay: true, label: 'shipped client' });
+  const on = await runArm({ bufferZero: false, replay: true, anchor: true, label: 'shipped client' });
   printArm(on);
-  const off = await runArm({ bufferZero: true, replay: false, label: 'mutants: buffer 0 ms, no replay' });
+  const off = await runArm({ bufferZero: true, replay: false, label: 'mutants: buffer 0 ms, no replay, free-run clock' });
   printArm(off);
   console.log('\nBars (shipped client):');
-  const miss = (ok) => (ok ? 'bar met' : 'launch bar MISSED -> b2.0d');
-  const tag = (k, key) => (GRADE[k][key] === BAR[key] ? ' (launch bar)' : ' (measured bound)');
+  const miss = (ok) => (ok ? 'bar met' : 'launch bar MISSED');
   for (const k of POPS) {
     const R = on.remote[k];
     expect(`${k}: sampling measured something (>= ${MIN_MOVING_SAMPLES})`, R.n >= MIN_MOVING_SAMPLES, String(R.n));
-    expect(`${k}: remote pirate unexplained step p99 <= ${GRADE[k].p99} m${tag(k, 'p99')}`, R.p99 <= GRADE[k].p99, `${f(R.p99, 4)}; bar ${BAR.p99}: ${miss(R.p99 <= BAR.p99)}`);
-    expect(`${k}: remote discontinuities <= ${GRADE[k].rate}/body-s${tag(k, 'rate')}`, R.rate <= GRADE[k].rate, `${f(R.rate, 2)}; bar ${BAR.rate}: ${miss(R.rate <= BAR.rate)}`);
+    expect(`${k}: remote pirate unexplained step p99 <= ${GRADE[k].p99} m`, R.p99 <= GRADE[k].p99, `${f(R.p99, 4)}; bar ${BAR.p99}: ${miss(R.p99 <= BAR.p99)}`);
+    expect(`${k}: remote discontinuities <= ${GRADE[k].rate}/body-s`, R.rate <= GRADE[k].rate, `${f(R.rate, 2)}; bar ${BAR.rate}: ${miss(R.rate <= BAR.rate)}`);
   }
   expect(`held/empty answers <= ${BAR.held * 100}%`, on.remote.held <= BAR.held, `${f(on.remote.held * 100, 2)}%`);
   expect('local body moved (the reconciliation had work to do)', on.local.pathM > 20 && on.local.graded > 200, `${f(on.local.pathM, 1)} m, ${on.local.graded} acks`);
-  if (STRICT) expect(`local reconciliation correction p99 < ${RECON_P99_M} m`, on.local.p99 < RECON_P99_M, f(on.local.p99));
-  else console.log(`  - local reconciliation correction p99 ${f(on.local.p99)} m vs bar < ${RECON_P99_M} m: ${miss(on.local.p99 < RECON_P99_M)} (reported, not graded until b2.0d)`);
+  expect(`local reconciliation correction p99 < ${RECON_P99_M} m`, on.local.p99 < RECON_P99_M, f(on.local.p99));
   expect(`downstream <= ${DOWN_HARD / 1024} KB/s per client (hard)`, on.down.bytesPerSec <= DOWN_HARD, `${f(on.down.bytesPerSec / 1024, 1)} KB/s; target ${DOWN_TARGET / 1024}: ${on.down.bytesPerSec <= DOWN_TARGET ? 'met' : 'MISSED'}`);
   console.log('\nMutation proof (the bars must be ones the broken arms cannot clear):');
   // VACUOUS counts as FAIL: a mutant arm that measured nothing has proven nothing.
