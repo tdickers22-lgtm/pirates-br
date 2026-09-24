@@ -358,7 +358,7 @@ export const LOGIC = [
   tsx('bot-intent-probe.mjs'),
   tsx('test-oneshot-underload.mjs'),
   tsx('test-gold-cargo.mjs'),
-  tsx('test-wreck-event.mjs'),
+  { ...tsx('test-wreck-event.mjs'), timeoutMs: 300_000 }, // runner timeout only (not a product budget): deterministic ~190 s of sim (early peace + 150 s hunt); same code measured 80 s at fbafeba3 and 167 s wall / 172 s CPU at 13ba86f8 (load1 ~6), so the 120 s tier wall killed it in its last section
   tsx('test-wreck-site.mjs'),
   tsx('test-capture.mjs'),
   quick(tsx('test-reach-vocabulary.mjs')),
@@ -396,7 +396,7 @@ export const LOGIC = [
   tsx('test-win-condition.mjs'),
   tsx('test-respawn-tow.mjs'),
   tsx('test-capstan-first-safe.mjs'),
-  tsx('test-storm-spawn-safety.mjs'),
+  { ...tsx('test-storm-spawn-safety.mjs'), timeoutMs: 300_000 }, // runner timeout only (not a product budget): 3 never-sails worlds to T+5:00, 84-104 s on this Air and TIMEOUT at the 120 s tier wall while still progressing at load1 10-20
   tsx('test-storm-outrun.mjs'),
   // END-01 (wave 3.3). The eye-collapse sim and the ring Monte Carlo: 200 ring
   // sequences over 5 generated worlds, so it costs ~60 s of CPU and no stack.
