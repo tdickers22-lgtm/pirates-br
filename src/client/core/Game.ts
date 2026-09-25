@@ -1238,6 +1238,10 @@ export class Game {
     // Audio unlocks on the gestures WebKit accepts (pointerup/touchend/click/
     // keydown, window capture), iOS audio session 'playback', hidden/interrupted
     // suspend-resume: SoundEngine.installLifecycle (b1.1c, audio-08).
+    // The audio tier IS the render tier (b2-device-02, b2-ask-11): a desktop the
+    // quality probe puts on balanced/low (fanless Air, weak iGPU, ?quality pin)
+    // gets the 40/24 voice cap and equalpower panners, not 64 HRTF voices.
+    this.audio.setAudioTier(this.renderer.getQuality());
     this.audio.installLifecycle();
     // Universal UI feedback — anything that's a <button> chirps on click.
     document.body.addEventListener('click', (event) => {

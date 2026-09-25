@@ -256,6 +256,24 @@ const { SoundEngine } = await import('../src/client/audio/SoundEngine.ts');
     created.slice(b4).some((n) => n.kind === 'Oscillator'));
 }
 
+// ── 3a. HRTF follows the render tier (b2-device-02) ─────────────────────────
+{
+  const e = new SoundEngine();
+  e.unlock();
+  e.setListenerPose({ x: 0, y: 0, z: 0 }, 0);
+  const fresh = () => { const b = created.length; e.playCannonFire(20, { x: 20, y: 0, z: 0 }); return created.slice(b).filter((n) => n.kind === 'Panner').map((n) => n.panningModel); };
+  e.setAudioTier('balanced');
+  const bal = fresh();
+  e.setAudioTier('high');
+  const hi = fresh();
+  check('engine: balanced tier positions with equalpower, high-tier desktop with HRTF',
+    bal.length > 0 && bal.every((m) => m === 'equalpower') && hi.length > 0 && hi.every((m) => m === 'HRTF'), `balanced ${bal.join()} / high ${hi.join()}`);
+  const { readFileSync } = await import('node:fs');
+  const game = readFileSync(new URL('../src/client/core/Game.ts', import.meta.url), 'utf8');
+  check('wiring: Game hands the render tier to the audio engine (setAudioTier(renderer.getQuality()))',
+    /this\.audio\.setAudioTier\(this\.renderer\.getQuality\(\)\)/.test(game));
+}
+
 // ── 3b. the combat duck is the ENGINE's, not just the helper's (b2-ask-07) ──
 {
   const gainOf = (n) => (n?.gain?.ramped ?? n?.gain?.value);
