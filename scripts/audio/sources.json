@@ -754,6 +754,133 @@
           "member": "birdsCrickets/frog.wav"
         }
       ]
+    },
+    "chest.coins": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/handleCoins.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/handleCoins2.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/handleCoins.ogg",
+          "semitones": 1.5
+        }
+      ]
+    },
+    "chest.creak": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak1.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak2.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/creak3.ogg"
+        }
+      ]
+    },
+    "chest.latch": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/metalLatch.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/metalClick.ogg"
+        }
+      ]
+    },
+    "chest.drop": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactWood_heavy_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactWood_heavy_001.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactWood_heavy_002.ogg"
+        }
+      ]
+    },
+    "door.open": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/doorOpen_1.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/doorOpen_2.ogg"
+        }
+      ]
+    },
+    "door.close": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/doorClose_1.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/doorClose_2.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/doorClose_3.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/doorClose_4.ogg"
+        }
+      ]
+    },
+    "wood.chop": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/chop.ogg"
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/chop.ogg",
+          "semitones": -1.2
+        },
+        {
+          "src": "kenneyRpg",
+          "member": "Audio/chop.ogg",
+          "semitones": 1.0
+        }
+      ]
     }
   }
 }

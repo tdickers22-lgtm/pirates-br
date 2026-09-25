@@ -671,6 +671,166 @@
       "license": "CC0-1.0",
       "notes": "birdsCrickets/frog.wav",
       "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.coins.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/handleCoins.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.coins.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/handleCoins2.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.coins.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/handleCoins.ogg (pitch +1.5 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.creak.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/creak1.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.creak.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/creak2.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.creak.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/creak3.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.latch.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/metalLatch.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.latch.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/metalClick.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.drop.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/impactWood_heavy_000.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.drop.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/impactWood_heavy_001.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/chest.drop.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/impactWood_heavy_002.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/door.open.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/doorOpen_1.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/door.open.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/doorOpen_2.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/door.close.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/doorClose_1.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/door.close.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/doorClose_2.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/door.close.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/doorClose_3.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/door.close.4.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/doorClose_4.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/wood.chop.1.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/chop.ogg",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/wood.chop.2.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/chop.ogg (pitch -1.2 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
+    },
+    {
+      "file": "match/wood.chop.3.mp3",
+      "source": "https://kenney.nl/media/pages/assets/rpg-audio/8e99002d76-1677590336/kenney_rpg-audio.zip",
+      "author": "Kenney (kenney.nl)",
+      "license": "CC0-1.0",
+      "notes": "Audio/chop.ogg (pitch +1 st of variant source)",
+      "from": "public/assets/audio/LICENSES.md"
     }
   ]
 }

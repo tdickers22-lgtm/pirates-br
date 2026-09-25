@@ -63,6 +63,13 @@ export type FootstepSurface = 'deck' | 'sand' | 'stone' | 'grass';
 
 /** Black-powder firearm families (each gets its own crack/body/tail balance). */
 export type GunshotKind = 'flintlock' | 'blunderbuss' | 'flintknock' | 'longRifle';
+/** b2.4f: how each weapon voices the shared gun.shot recordings (rate < 1 = bigger bore / charge). */
+const GUNSHOT_VOICE: Record<GunshotKind, { rate: number; level: number }> = {
+  flintlock: { rate: 1.0, level: 0.9 },
+  longRifle: { rate: 0.93, level: 1.0 },
+  blunderbuss: { rate: 0.78, level: 1.05 },
+  flintknock: { rate: 1.18, level: 0.75 },
+};
 
 /** Non-cannon projectile launches (cannonballs go through {@link SoundEngine.playCannonFire}). */
 type LaunchKind = 'firebomb' | 'chainshot' | 'tsunami';
@@ -837,26 +844,8 @@ export class SoundEngine {
       } else dest = this.busDry;
       if (!dest) return false;
       const level = finiteClamp(opts?.volume ?? 1, 0, 4, 1) * distanceGain;
-      const rate = finiteClamp(opts?.rate ?? 1, 0.25, 4, 1);
-      const now = ctx.currentTime;
-      const when = Math.max(now, finiteClamp(opts?.when ?? now, now, now + 30, now));
-      const src = ctx.createBufferSource();
-      const id = this.voices.acquire({
-        priority: finiteClamp(opts?.priority ?? (bus === 'ui' ? VOICE_PRIORITY.ui : VOICE_PRIORITY.world), 0, 100, VOICE_PRIORITY.world),
-        gain: level,
-        now,
-        duration: when - now + travel + pick.buffer.duration / rate + 0.05,
-        stop: () => { try { src.stop(); } catch { /* never started or already ended */ } },
-      });
-      if (id === null) return true;
-      const gain = ctx.createGain();
-      safeSet(gain.gain, 'value', level);
-      src.buffer = pick.buffer;
-      safeSet(src.playbackRate, 'value', rate);
-      src.connect(gain);
-      gain.connect(dest);
-      src.onended = () => { this.voices.release(id); try { gain.disconnect(); } catch { /* gone */ } };
-      src.start(when);
+      const priority = finiteClamp(opts?.priority ?? (bus === 'ui' ? VOICE_PRIORITY.ui : VOICE_PRIORITY.world), 0, 100, VOICE_PRIORITY.world);
+      this.startSampleVoice(ctx, pick.buffer, dest, level, finiteClamp(opts?.rate ?? 1, 0.25, 4, 1), priority, opts?.when, travel);
       return true;
     } catch (err) {
       // Counted where test-sound-finite looks (audioFaults), then the caller plays its fallback.
@@ -864,6 +853,67 @@ export class SoundEngine {
       if (this.backstopFaults <= 3) console.warn('[Audio] playSample failed (fallback used):', err);
       return false;
     }
+  }
+
+  /** Jitter source for sampled one-shots (tests may pin it). */
+  rand: () => number = Math.random;
+
+  /**
+   * b2.4f (audio-01, audio-09): one SAMPLED layer of a combat/foley event, played into the event's
+   * own spatial chain (`dest` from makeSpatialDest, so the sample and any procedural sweetener
+   * share one delay + panner). `level` already carries the event's distance gain. Round robin is
+   * SampleBank.pick (never the same variant twice in a row when another is decoded); every voice
+   * gets +-`semis` pitch and +-`db` level jitter around `rate`/`level`. Returns false only when
+   * no decoded variant exists (the caller then plays its procedural voice); a voice the
+   * allocator drops still returns true, so a dropped layer never falls back into a node burst.
+   */
+  private sampleLayer(
+    key: string,
+    dest: AudioNode | null | undefined,
+    level: number,
+    o: { rate?: number; semis?: number; db?: number; priority?: number; when?: number } = {},
+  ): boolean {
+    const ctx = this.ctx;
+    const bank = this.bank;
+    if (!ctx || !bank || !dest) return false;
+    try {
+      const pick = bank.pick(key);
+      if (!pick) return false;
+      const r = (): number => { const v = this.rand(); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) * 2 - 1 : 0; };
+      const semis = finiteClamp(o.semis ?? 0.5, 0, 3, 0.5);
+      const db = finiteClamp(o.db ?? 1.5, 0, 6, 1.5);
+      const rate = finiteClamp((o.rate ?? 1) * 2 ** ((r() * semis) / 12), 0.25, 4, 1);
+      const lvl = finiteClamp(level, 0, 4, 0) * 10 ** ((r() * db - db) / 40);
+      this.startSampleVoice(ctx, pick.buffer, dest, lvl, rate, finiteClamp(o.priority ?? VOICE_PRIORITY.world, 0, 100, VOICE_PRIORITY.world), o.when, 0);
+      return true;
+    } catch (err) {
+      this.backstopFaults += 1;
+      if (this.backstopFaults <= 3) console.warn('[Audio] sampleLayer failed (fallback used):', err);
+      return false;
+    }
+  }
+
+  /** One BufferSource -> Gain -> dest under the VoiceAllocator (shared by playSample and sampleLayer). */
+  private startSampleVoice(ctx: AudioContext, buffer: AudioBuffer, dest: AudioNode, level: number, rate: number, priority: number, whenIn: number | undefined, travel: number): void {
+    const now = ctx.currentTime;
+    const when = Math.max(now, finiteClamp(whenIn ?? now, now, now + 30, now));
+    const src = ctx.createBufferSource();
+    const id = this.voices.acquire({
+      priority,
+      gain: level,
+      now,
+      duration: when - now + travel + buffer.duration / rate + 0.05,
+      stop: () => { try { src.stop(); } catch { /* never started or already ended */ } },
+    });
+    if (id === null) return;
+    const gain = ctx.createGain();
+    safeSet(gain.gain, 'value', level);
+    src.buffer = buffer;
+    safeSet(src.playbackRate, 'value', rate);
+    src.connect(gain);
+    gain.connect(dest);
+    src.onended = () => { this.voices.release(id); try { gain.disconnect(); } catch { /* gone */ } };
+    src.start(when);
   }
 
   setMuted(muted: boolean): void {
@@ -996,6 +1046,8 @@ export class SoundEngine {
 
   /** One mallet strike. Factored out so the repair sequence can chain several. */
   private plankHit(when: number, vol = 1): void {
+    // b2.4f: recorded mallet on board (each blow a different variant, jittered).
+    if (this.sampleLayer('hammer.hit', this.busDry, 0.8 * vol, { semis: 0.8, priority: VOICE_PRIORITY.foley, when })) return;
     // Heavy mallet-on-board: stiff transient, woody body resonance, low thud.
     this.playNoise(when, 0.05, 1800, 1.2, 0.25 * vol, 'bandpass');
     this.playTone(when, 240, 110, 0.16, 0.32 * vol, 'triangle', 0.005);
@@ -1041,6 +1093,11 @@ export class SoundEngine {
   playAxeChop(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // b2.4f: recorded chop; one procedural fibre-tear keeps palm wood from sounding like a log.
+    if (this.sampleLayer('wood.chop', this.busDry, 0.8, { semis: 0.9, priority: VOICE_PRIORITY.foley })) {
+      this.playNoise(now + 0.07, 0.12, 900, 0.7, 0.08, 'bandpass');
+      return;
+    }
     // Low haft knock — the blow landing.
     this.playTone(now, 130, 62, 0.14, 0.34, 'triangle', 0.004);
     this.playNoise(now, 0.1, 320, 0.9, 0.3, 'lowpass');
@@ -1115,6 +1172,11 @@ export class SoundEngine {
   playChestPickup(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // b2.4f: coins shifting inside as it is heaved up, over a procedural heave-grunt.
+    if (this.sampleLayer('chest.coins', this.busDry, 0.55, { semis: 0.8, priority: VOICE_PRIORITY.foley })) {
+      this.playTone(now, 96, 72, 0.22, 0.32, 'sine', 0.01);
+      return;
+    }
     // Heave-grunt bass + lock rattle + shimmer up
     this.playTone(now, 96, 72, 0.22, 0.32, 'sine', 0.01);
     this.playTone(now, 660, 660, 0.18, 0.18, 'sine');
@@ -1130,6 +1192,11 @@ export class SoundEngine {
   playChestStow(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // b2.4f: recorded heavy wood set-down + the coins settling a beat later.
+    if (this.sampleLayer('chest.drop', this.busDry, 0.8, { rate: 0.85, semis: 0.8, priority: VOICE_PRIORITY.foley })) {
+      this.sampleLayer('chest.coins', this.busDry, 0.3, { rate: 0.9, semis: 1, priority: VOICE_PRIORITY.foley, when: now + 0.08 });
+      return;
+    }
     // Drop onto deck planks: heavy thud, plank rattle, settle creak
     this.playTone(now, 110, 60, 0.2, 0.34, 'triangle', 0.005);
     this.playNoise(now, 0.18, 220, 0.9, 0.32, 'lowpass');
@@ -1143,6 +1210,15 @@ export class SoundEngine {
   playChestOpen(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // b2.4f: recorded latch, lid creak and the coins inside; a short procedural reveal chime
+    // (two tones) stays as the reward sweetener.
+    if (this.sampleLayer('chest.latch', this.busDry, 0.55, { semis: 0.6, priority: VOICE_PRIORITY.foley })) {
+      this.sampleLayer('chest.creak', this.busDry, 0.6, { rate: 1.1, semis: 1, priority: VOICE_PRIORITY.foley, when: now + 0.05 });
+      this.sampleLayer('chest.coins', this.busDry, 0.45, { semis: 0.8, priority: VOICE_PRIORITY.foley, when: now + 0.22 });
+      this.playTone(now + 0.28, 990, 1320, 0.36, 0.1, 'sine');
+      this.playTone(now + 0.4, 1320, 1760, 0.34, 0.08, 'sine');
+      return;
+    }
     // Hinge squeak train (stick-slip friction), then the latch and the reveal.
     this.squeakTrain(now, 0.4, 900, 1500, 0.075, 5);
     this.playNoise(now, 0.35, 320, 0.7, 0.07, 'lowpass');
@@ -1167,6 +1243,8 @@ export class SoundEngine {
   playDoorCreak(opening: boolean): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // b2.4f: recorded door open / close; the squeak train is the fallback.
+    if (this.sampleLayer(opening ? 'door.open' : 'door.close', this.busDry, 0.7, { semis: 0.7, priority: VOICE_PRIORITY.foley })) return;
     // Squeak train: rising as it swings open, falling as it's pulled shut.
     if (opening) {
       this.playNoise(now, 0.035, 4200, 1.6, 0.12, 'highpass'); // latch lifts first
@@ -1303,6 +1381,9 @@ export class SoundEngine {
   playCutlassSwing(draw = false): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // b2.4f: the first swing after a switch pulls steel from the scabbard (recorded); the air
+    // whoosh itself stays procedural (no CC0 swing recording shipped, and a swept noise IS air).
+    if (draw && this.sampleLayer('foley.drawBlade', this.busDry, 0.5, { semis: 0.8, priority: VOICE_PRIORITY.own })) draw = false;
     // Two-stage whoosh: swept body + high-pass leading edge.
     this.playNoiseCurve(now, 0.22, [[0, 600], [0.1, 1400], [0.22, 900]], 1.1, 0.24, 'bandpass', 0.02);
     this.playNoise(now + 0.02, 0.18, 3200, 0.7, 0.18, 'highpass');
@@ -1320,6 +1401,8 @@ export class SoundEngine {
     if (!this.ctx) return;
     if (!this.throttle('clang')) return;
     const now = this.ctx.currentTime;
+    // b2.4f: recorded steel-on-steel; the inharmonic synth ring is the fallback.
+    if (this.sampleLayer('sword.clash', this.busDry, 0.85, { semis: 0.7, priority: VOICE_PRIORITY.own })) return;
     const f0 = 1900 + Math.random() * 500;
     this.playNoise(now, 0.008, 5000, 0.8, 0.3, 'highpass');   // impact snap
     this.metalClang(now, f0, 1);                              // ringing steel
@@ -1343,6 +1426,15 @@ export class SoundEngine {
     // Flash in the pan — the flint striking, just before ignition.
     this.playNoise(now, 0.02, 5000, 1.2, 0.07 * v, 'highpass', dest);
     const at = now + 0.045;
+    // b2.4f: per-weapon voicing of the recorded shot (rate = barrel/charge size, level = load),
+    // the blunderbuss gets a low procedural body under it and a near shot keeps its slapback.
+    const voice = typeof kind === 'string' && Object.prototype.hasOwnProperty.call(GUNSHOT_VOICE, kind) ? GUNSHOT_VOICE[kind] : GUNSHOT_VOICE.flintlock;
+    const pri = distance < 1 ? VOICE_PRIORITY.own : VOICE_PRIORITY.combat;
+    if (this.sampleLayer('gun.shot', dest, voice.level * v, { rate: voice.rate, semis: 0.5, db: 1.5, priority: pri, when: at })) {
+      if (kind === 'blunderbuss') this.playTone(at, 150, 55, 0.2, 0.4 * v, 'triangle', 0.003, dest);
+      if (distance < 30) this.playNoise(at + 0.14, 0.25, 380, 0.6, 0.1 * v, 'lowpass', dest);
+      return;
+    }
     switch (kind) {
       case 'longRifle': {
         // Long barrel: hardest, brightest crack and a rolling echo tail.
@@ -1400,6 +1492,18 @@ export class SoundEngine {
     if (crack < 1) this.distantCannonThump(now, g0 * (1 - crack), dest);
     if (crack <= 0) return;
     const g = g0 * crack;
+    const pri = d < 1 ? VOICE_PRIORITY.own : VOICE_PRIORITY.combat;
+    // b2.4f: the recorded report is the body + rolling tail; a 30 ms procedural high-pass crack
+    // sits on its front edge (the recording's own transient softens once pitch-jittered), and the
+    // ship-shaking sub + bed duck stay procedural (they are driven by range, not a recording).
+    if (this.sampleLayer('cannon.fire', dest, 1.05 * g, { semis: 0.6, db: 1.5, priority: pri })) {
+      this.playNoise(now, 0.03, 4200, 0.7, 0.34 * g, 'highpass', dest);
+      if (d < 28) {
+        this.playTone(now, 44, 26, 0.7, 0.4 * (1 - d / 28), 'sine', 0.01, dest);
+        this.duckBeds(0.5, 0.4, 0.4);
+      }
+      return;
+    }
     // Muzzle crack, low pressure wave, carriage thump, and a rolling smoky tail.
     this.playNoise(now, 0.03, 4200, 0.7, 0.5 * g, 'highpass', dest);
     this.playNoise(now, 0.045, 5200, 0.8, 0.34 * g, 'highpass', dest);
@@ -1470,6 +1574,19 @@ export class SoundEngine {
     if (!this.throttle('impact')) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24, 'impact');
+    // b2.4f: iron into earth/stone = the recorded rock hit; clay firebomb = a wood/clay break
+    // under a procedural flame whoosh; a ball = a small wood knock pitched up with its tick.
+    if (kind === 'cannonball') {
+      if (this.sampleLayer('cannon.hitRock', dest, 0.9 * g, { semis: 0.8, priority: VOICE_PRIORITY.combat })) return;
+    } else if (kind === 'firebomb') {
+      if (this.sampleLayer('wood.break', dest, 0.6 * g, { rate: 1.15, semis: 0.8, priority: VOICE_PRIORITY.combat })) {
+        this.playNoiseCurve(now, 0.34, [[0, 1300], [0.34, 420]], 1.0, 0.4 * g, 'bandpass', 0.004, dest);
+        return;
+      }
+    } else if (this.sampleLayer('wood.hit', dest, 0.45 * g, { rate: 1.5, semis: 1, priority: VOICE_PRIORITY.world })) {
+      this.playNoise(now, 0.012, 5200, 1.2, 0.2 * g, 'highpass', dest);
+      return;
+    }
     if (kind === 'cannonball') {
       // Iron burying itself in earth/timber: crack, thud, and debris rain.
       this.playNoise(now, 0.02, 3600, 1.0, 0.3 * g, 'highpass', dest);
@@ -1540,6 +1657,11 @@ export class SoundEngine {
     const volume = THREE.MathUtils.clamp(intensity, 0.1, 1.5);
     const { dest, gain } = this.makeSpatialDest(distance, pos, 0.22, 'splash');
     const v = volume * gain;
+    // b2.4f: a ball or a body (intensity >= 0.8) is the heavy recorded plunge, anything smaller
+    // the light splash; bigger water drops a little in pitch.
+    const big = volume >= 0.8;
+    if (this.sampleLayer(big ? 'splash.cannon' : 'splash.small', dest, (big ? 0.75 : 0.9) * v,
+      { rate: 1.08 - 0.12 * volume, semis: 0.9, priority: big ? VOICE_PRIORITY.combat : VOICE_PRIORITY.world })) return;
     this.playNoise(now, 0.26, 4600, 0.45, 0.36 * v, 'highpass', dest);
     this.playNoise(now + 0.025, 0.42, 980, 0.75, 0.38 * v, 'bandpass', dest);
     this.playNoise(now + 0.08, 0.55, 260, 0.55, 0.22 * v, 'lowpass', dest);
@@ -1843,6 +1965,8 @@ export class SoundEngine {
   playGoldEarn(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    // b2.4f: a real handful of coins on the ui bus (chrome: never muffled underwater).
+    if (this.playSample('chest.coins', { bus: 'ui', volume: 0.5, rate: 1.05 + 0.1 * this.rand() })) return;
     // Multiple coin clinks in quick succession + high sparkle (dry — it's chrome).
     for (let i = 0; i < 3; i++) {
       const at = now + i * 0.04;
@@ -2384,6 +2508,13 @@ export class SoundEngine {
     if (!this.throttle('hullImpact')) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.26, 'impact');
+    // b2.4f: recorded ball-through-planks (splinters included) with a procedural low thump
+    // under it so the hit has hull mass.
+    if (this.sampleLayer('cannon.hitWood', dest, 0.95 * g, { semis: 0.7, priority: VOICE_PRIORITY.combat })) {
+      this.playTone(now + 0.006, 76, 40, 0.3, 0.26 * g, 'sine', 0.008, dest);
+      if (distance < 24) this.duckBeds(0.6, 0.3, 0.25);
+      return;
+    }
     this.playTone(now, 120, 46, 0.22, 0.42 * g, 'triangle', 0.004, dest);
     this.playTone(now + 0.006, 76, 40, 0.3, 0.3 * g, 'sine', 0.008, dest);
     this.playNoise(now, 0.16, 300, 0.8, 0.4 * g, 'lowpass', dest);
@@ -2413,6 +2544,16 @@ export class SoundEngine {
     // 2..9 m/s maps to a 0.45..1.15 weight so a light nudge is a bump and a
     // full-speed slam is a house-shaking crash.
     const w = THREE.MathUtils.clamp(0.45 + (speed - 2) / 10, 0.45, 1.15);
+    // b2.4f: recorded timber break, pitched down with impact weight, a stone hit on top when a
+    // rock tears in; the speed-driven sub thud and the ground keel-drag stay procedural.
+    if (this.sampleLayer('wood.break', dest, 0.8 * w * g, { rate: 0.85 - 0.15 * (w - 0.45), semis: 0.6, priority: VOICE_PRIORITY.combat })) {
+      this.playTone(now, 96, 44, 0.3, 0.5 * w * g, 'triangle', 0.004, dest);
+      if (kind === 'rock') this.sampleLayer('cannon.hitRock', dest, 0.5 * w * g, { rate: 1.1, semis: 0.8, priority: VOICE_PRIORITY.combat });
+      else if (kind === 'ground') this.playNoise(now + 0.02, 0.8 + 0.4 * w, 180, 0.4, 0.2 * w * g, 'lowpass', dest);
+      else this.playTone(now + 0.09, 82, 60, 0.34, 0.3 * w * g, 'triangle', 0.02, dest);
+      if (distance < 40) this.duckBeds(0.55 * w, 0.35, 0.3);
+      return;
+    }
     // Core timber smash: sub thud, a low wooden boom, a lowpassed body, and a
     // splinter burst — heavier and a touch lower than a cannonball hull hit.
     this.playTone(now, 96, 44, 0.3, 0.5 * w * g, 'triangle', 0.004, dest);
@@ -2518,6 +2659,14 @@ export class SoundEngine {
     const now = this.ctx.currentTime;
     const at = now; // travel time lives in the spatial chain (d/343, no cap)
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.32, 'explosion');
+    // b2.4f: a keg is a cannon report pitched down (bigger charge, no barrel) plus the timber of
+    // the keg breaking apart; the sub drop stays procedural.
+    if (this.sampleLayer('cannon.fire', dest, 1.1 * g, { rate: 0.72, semis: 0.5, priority: VOICE_PRIORITY.combat })) {
+      this.sampleLayer('wood.break', dest, 0.55 * g, { rate: 0.9, semis: 1, priority: VOICE_PRIORITY.combat });
+      this.playTone(at, 120, 30, 0.9, 0.6 * g, 'sine', 0.005, dest);
+      this.duckBeds(0.5, 0.6, 0.4);
+      return;
+    }
     this.playNoise(at, 0.06, 6000, 0.7, 0.4 * g, 'highpass', dest);
     this.playTone(at, 120, 30, 0.9, 0.7 * g, 'sine', 0.005, dest);
     this.playTone(at + 0.02, 70, 24, 1.2, 0.55 * g, 'sine', 0.01, dest);

@@ -566,6 +566,12 @@ export const LOGIC = [
   //                                 >= 12 dB under your own; punch/patch/mallet/founder edges; engine: one
   //                                 PannerNode per breach (not one centred loop), junk frames never throw.
   quick(tsx('test-flood-audio.mjs')),
+  //   test-audio-events           — b2.4f combat/foley one-shots to samples (audio-01, audio-09): every sample key
+  //                                 literal resolves in the manifest, every public event has a caller (4 owned
+  //                                 exceptions, exact list) and a route; 25 events each play their own sample with
+  //                                 <= 3 sample layers and <= 3 procedural sweeteners, fall back when no bank; 12
+  //                                 cannon shots: round robin never repeats, pitch/level jitter live and bounded.
+  quick(tsx('test-audio-events.mjs')),
   //   test-connect-supervisor     — real NetworkClient, fake socket Worker, virtual clock: cold start 7 s -> connect()
   //                                 resolves once, one live transport, no resume from a fresh page; drop -> one resume
   //                                 with this page's token; 60 s give-up + retryNow; offline/online; silent background
