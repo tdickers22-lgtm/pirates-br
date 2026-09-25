@@ -146,6 +146,11 @@ export const LOGIC = [
   // (srcSha256), same nodes/TRS/materials/tris/bounds, brotli per set boot<=0.6 world<=6 lazy<=12
   // far<=1 MB; --mutate (one raw GLB shipped) must FAIL. ~1.9 s, so logic tier, not quick.
   tsx('test-model-transport.mjs'),
+  // b3.1c: no PNG/JPEG inside a packed GLB (allowlist empty), KTX2 = ETC1S colour/ORM + UASTC/zstd
+  // normals with full mips, GPU MB per tier after AssetLibrary's top-mip caps within half the D27
+  // residency column, ETC1S mean deltaE < 3 vs the source JPEG, public/basis == three's transcoder
+  // with .br/.gz siblings; --mutate (one JPEG left) must FAIL. ~3 s, logic tier.
+  plain('test-texture-budget.mjs'),
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),
