@@ -151,6 +151,10 @@ export const LOGIC = [
   // residency column, ETC1S mean deltaE < 3 vs the source JPEG, public/basis == three's transcoder
   // with .br/.gz siblings; --mutate (one JPEG left) must FAIL. ~3 s, logic tier.
   plain('test-texture-budget.mjs'),
+  // b3.1f: vite build to a temp dir; entry <= 180 / JS to menu <= 330 / total <= 520 / any chunk <= 300
+  // KB brotli (BUNDLE_BUDGETS_KB), the menu shell in the entry closure, Game.ts a dynamic import that
+  // index.html modulepreloads; --mutate (static Game import in main.ts) must FAIL. ~6 s, logic tier.
+  plain('test-bundle-budget.mjs'),
   quick(tsx('test-ship-dynamics.mjs')),
   quick(tsx('test-ship-ladder.mjs')),
   quick(tsx('test-server-fixes.mjs')),
