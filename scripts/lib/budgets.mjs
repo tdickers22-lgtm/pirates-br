@@ -300,6 +300,10 @@ export const MEMORY_BUDGETS = {
   ipad: { gpuMB: 220, texturesMB: 96, heapMB: 150 },
 };
 
+// ═══ test-tick-budget: server ms per tick (b2.1h) ═══════════════════════════════════════════════════
+// 12 hulls in combat at storm sea state, measured on this Air (quiet host: p50 1.07 / p99 1.96 ms).
+export const TICK_BUDGET = { p99Ms: 4.0, p50Ms: 2.0 };
+
 // ═══ the ratchet's view ═════════════════════════════════════════════════════════════════════════════
 /** Every graded family, by the name the ratchet and the baseline fixture use. */
 export const ALL_BUDGETS = {
@@ -315,6 +319,7 @@ export const ALL_BUDGETS = {
   snapshotBytes: SNAPSHOT_BYTES,
   frameGovernor: FRAME_GOVERNOR,
   memory: MEMORY_BUDGETS,
+  tick: TICK_BUDGET,
 };
 
 /** Keys that are readings or scene inputs, never budgets. */

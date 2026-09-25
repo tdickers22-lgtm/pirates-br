@@ -17,6 +17,8 @@
 // injected into updateWildlife must fail both limits. MUTATE=wildlife3ms runs
 // the graded window itself mutated (the RED demonstration).
 
+import { TICK_BUDGET } from './lib/budgets.mjs';
+
 process.env.PIRATES_BR_MAP_SEED ??= '20260801';
 process.env.BOT_EARLY_PEACE_SECONDS ??= '0';
 const { Match } = await import('../src/server/core/Match.ts');
@@ -27,8 +29,7 @@ const HULLS = 12;
 const SECONDS = Number(process.env.SECONDS ?? 30);
 const FF_SECONDS = Number(process.env.FF_SECONDS ?? 60);
 const STORM_PHASE = 5;
-const P99_LIMIT = 4.0;
-const P50_LIMIT = 2.0;
+const { p99Ms: P99_LIMIT, p50Ms: P50_LIMIT } = TICK_BUDGET;
 const ALLOWANCE = 1.5;
 const dt = SERVER_TICK_MS / 1000;
 
