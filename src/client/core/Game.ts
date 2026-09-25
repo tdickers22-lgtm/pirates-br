@@ -7330,19 +7330,14 @@ export class Game {
     if (stormPhase !== this.prevStormPhase) {
       this.prevStormPhase = stormPhase;
     }
-    this.audio.setWindIntensity(THREE.MathUtils.clamp(this.stormWeatherIntensity, 0, 1));
+    // Wind, wave and hull-creak beds have ONE writer each inside SoundEngine (setAmbience /
+    // setSailingState, audio-03); this block only schedules the hull splashes.
 
     const localShipSpeed = localShip ? Math.hypot(localShip.velocity.x, localShip.velocity.z) : 0;
     const localShipStats = localShip ? SHIP_STATS[localShip.type] : null;
     const localShipMotion = localShipStats
       ? THREE.MathUtils.clamp(localShipSpeed / Math.max(localShipStats.maxSpeed, 0.001), 0, 1)
       : 0;
-    const swimmingWaveBoost = player?.state === 'swimming' ? 0.26 : 0;
-    this.audio.setWaveBed(THREE.MathUtils.clamp(0.36 + swimmingWaveBoost + localShipMotion * 0.32 + this.stormWeatherIntensity * 0.38, 0, 1));
-    this.audio.setHullCreakIntensity(
-      localShip ? THREE.MathUtils.clamp(0.18 + localShipMotion * 0.62 + this.stormWeatherIntensity * 0.28, 0, 1) : 0,
-      localShipMotion,
-    );
 
     if (localShip) {
       const hullSplashAmount = THREE.MathUtils.clamp(localShipMotion * 0.9 + this.stormWeatherIntensity * 0.38, 0, 1.25);
@@ -7647,6 +7642,7 @@ export class Game {
       storminess,
       nearShore01,
       rain01: THREE.MathUtils.clamp(this.stormRainIntensity, 0, 1),
+      swimming: player?.state === 'swimming',
     });
 
     // Sailing bed — reflects the ship the player is physically standing on.
@@ -7659,7 +7655,12 @@ export class Game {
       const roughness01 = THREE.MathUtils.clamp(storminess * 0.8 + heel01 * 0.4, 0, 1);
       this.audio.setSailingState({ speed01, roughness01, heel01, luffing: !!aboardShip.luffing });
     } else {
-      this.audio.setSailingState({ speed01: 0, roughness01: 0, heel01: 0, luffing: false });
+      // Not aboard: the creak is silent unless a hull is within 15 m (hullCreakStrain).
+      let nearHullM = Infinity;
+      for (const ship of this.shipsById.values()) {
+        nearHullM = Math.min(nearHullM, dist2D(cam.x, cam.z, ship.position.x, ship.position.z) - SHIP_STATS[ship.type].length * 0.5);
+      }
+      this.audio.setSailingState({ speed01: 0, roughness01: storminess * 0.8, heel01: 0, luffing: false, aboard: false, nearHullM });
     }
 
     // Breach jets and boil (b2.3b, holes-08): every hull within 70 m with an
