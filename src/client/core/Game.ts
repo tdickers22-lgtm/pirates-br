@@ -1,4 +1,5 @@
 import { lateJoinNotice } from '../menu/queueText.js';
+import { ballisticPositionAt, projectileGravity } from '../../shared/ballistics.js';
 import * as THREE from 'three';
 import { ECONOMY, PHYSICS, PLAYER, SHARK, SHIP, SHIP_STATS, SHIP_UPGRADES, SHOP_PRICES, SHOP_QUANTITIES, WEAPONS, WILDLIFE, type ShopLine } from '../../shared/constants/index.js';
 import type {
@@ -5500,16 +5501,9 @@ export class Game {
    */
   private getProjectileRenderPosition(projectile: Projectile) {
     const age = Math.min(0.3, Math.max(0, (performance.now() - this.lastSnapshotAt) / 1000));
-    const out = this.tempProjectilePos.set(
-      projectile.position.x + projectile.velocity.x * age,
-      projectile.position.y + projectile.velocity.y * age,
-      projectile.position.z + projectile.velocity.z * age,
-    );
-    if (!projectile.visualOnly) {
-      const gravity = PHYSICS.GRAVITY * (projectile.type === 'bullet' ? 0.3 : SHIP.CANNON_GRAVITY_MULT);
-      out.y += 0.5 * gravity * age * age;
-    }
-    return out;
+    // The server's own model (shared/ballistics, D17); visual-only rounds fly straight.
+    const g = projectile.visualOnly ? 0 : projectileGravity(projectile.type);
+    return ballisticPositionAt(projectile.position, projectile.velocity, g, age, this.tempProjectilePos);
   }
 
   private syncProjectiles(dt: number) {
