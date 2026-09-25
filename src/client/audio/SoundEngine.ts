@@ -545,6 +545,11 @@ export class SoundEngine {
   private floodAudio: FloodAudio | null = null;
   // Per-burning-ship fire crackle loops (capped at 2; oldest is stolen)
   private readonly fires = new Map<string, LoopVoice>();
+  /** Fire loops playing the recorded bed.fire (level/filter law differs from the noise body). */
+  private readonly sampledFires = new Set<string>();
+  /** Capstan ratchet / helm creak takes still sounding (ctx time): no re-trigger until then. */
+  private capstanSampleUntil = 0;
+  private helmCreakUntil = 0;
   // Island zones (b2.4h, audio-07): jungle, caldera, lava, geysers. Plans once a frame in setAmbience.
   private readonly zones = new Ambience(() => this.rand());
   private zonesPreloaded = false;
@@ -1797,6 +1802,14 @@ export class SoundEngine {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22, 'foley');
+    // b2-ask-06: recorded chain first (a drop runs out twice as long, pitched heavier), the
+    // hawse thud kept as the one procedural sweetener; the anchor still takes the water.
+    if (this.sampleLayer('chain.rattle', dest, (dropped ? 1.0 : 0.75) * g, { rate: dropped ? 0.88 : 1.05, semis: 1, priority: VOICE_PRIORITY.foley })) {
+      if (dropped) this.sampleLayer('chain.rattle', dest, 0.8 * g, { rate: 0.8, semis: 1, priority: VOICE_PRIORITY.foley, when: now + 0.45 });
+      this.playTone(now, dropped ? 92 : 128, dropped ? 48 : 86, dropped ? 0.42 : 0.28, 0.2 * g, 'triangle', 0.006, dest);
+      if (dropped) this.playSplash(0.9, Math.max(6, distance), pos);
+      return;
+    }
     const clankCount = dropped ? 5 : 3;
     this.playTone(now, dropped ? 92 : 128, dropped ? 48 : 86, dropped ? 0.42 : 0.28, 0.26 * g, 'triangle', 0.006, dest);
     this.playNoise(now, dropped ? 0.44 : 0.28, 260, 0.82, (dropped ? 0.34 : 0.22) * g, 'lowpass', dest);
@@ -1817,6 +1830,17 @@ export class SoundEngine {
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18, 'foley');
     const volume = THREE.MathUtils.clamp(amount, 0.25, 1.25) * g;
+    // b2-ask-06: the recorded crank ratchet (1.3-2 s per take) while the capstan turns; a call
+    // that lands while the last take is still sounding adds nothing (no pile-up at tick rate).
+    if (this.bank?.pick('capstan.ratchet')) {
+      if (now < this.capstanSampleUntil) return;
+      if (this.sampleLayer('capstan.ratchet', dest, 0.7 * volume, { rate: 0.95 + 0.1 * Math.min(1, amount), semis: 0.6, priority: VOICE_PRIORITY.foley })) {
+        this.capstanSampleUntil = now + 0.9;
+        // The pawl dropping into the next tooth (the take already carries the crank).
+        this.playNoise(now + 0.026, 0.03, 2200, 2.5, 0.06 * volume, 'bandpass', dest);
+        return;
+      }
+    }
     // Capstan pawl ratchet, chain scrape, and a low wooden groan while the anchor is raised.
     this.playTone(now, 160, 96, 0.12, 0.09 * volume, 'triangle', 0.004, dest);
     this.playNoise(now, 0.16, 340, 1.2, 0.11 * volume, 'bandpass', dest);
@@ -1829,6 +1853,15 @@ export class SoundEngine {
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18, 'foley');
     const volume = THREE.MathUtils.clamp(amount, 0.25, 1.2) * g;
+    // b2-ask-06: recorded tiller-rope creak (rudder strain) once per take, then <= 3 spoke ticks.
+    if (this.bank?.pick('rope.creak')) {
+      const creak = now >= this.helmCreakUntil
+        && this.sampleLayer('rope.creak', dest, 0.5 * volume, { rate: 1.05 + 0.15 * Math.min(1, amount), semis: 1.5, priority: VOICE_PRIORITY.foley });
+      if (creak) this.helmCreakUntil = now + 0.8;
+      const n = 1 + Math.min(2, Math.round(volume * 2));
+      for (let i = 0; i < n; i++) this.playNoise(now + 0.02 + i * (0.045 + Math.random() * 0.02), 0.015, 2200, 3, 0.04 * volume, 'bandpass', dest);
+      return;
+    }
     // Old wooden wheel: axle creak plus rope/rudder strain.
     this.playNoise(now, 0.16, 520, 1.05, 0.11 * volume, 'bandpass', dest);
     this.playTone(now, 260, 170, 0.18, 0.075 * volume, 'sawtooth', 0.025, dest);
@@ -1888,6 +1921,11 @@ export class SoundEngine {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     const volume = THREE.MathUtils.clamp(amount, 0.2, 1.3);
+    // b2-ask-06: recorded splash pitched into a heavier hull wash, one low sine as the hull thud.
+    if (this.playSample('splash.small', { volume: 0.42 * volume, rate: 0.72 + 0.08 * this.rand(), priority: VOICE_PRIORITY.ambient })) {
+      this.playTone(now + 0.03, 88, 58, 0.3, 0.05 * volume, 'sine', 0.03);
+      return;
+    }
     // Bow wash against the hull: soft low slosh with bright spray flecks.
     this.playNoise(now, 0.42, 260, 0.45, 0.12 * volume, 'lowpass');
     this.playNoise(now + 0.02, 0.24, 1180, 0.7, 0.09 * volume, 'bandpass');
@@ -1905,6 +1943,12 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const v = THREE.MathUtils.clamp(amount, 0.3, 1.25);
+    // b2-ask-06: a recorded splash per stroke (brighter and quieter than a hull wash), a bubble
+    // tail on the hard strokes / surfacing.
+    if (this.playSample('splash.small', { volume: 0.3 * v, rate: 1.0 + 0.15 * this.rand(), priority: VOICE_PRIORITY.foley })) {
+      if (v > 0.8) this.playSample('water.bubbles', { volume: 0.18 * v, rate: 0.9 + 0.2 * this.rand(), priority: VOICE_PRIORITY.ambient, when: now + 0.12 });
+      return;
+    }
     // Body of the stroke: a short swept low slosh (arm/leg pushing water).
     this.playNoise(now, 0.2 + 0.1 * v, 300, 0.5, 0.09 * v, 'lowpass');
     this.playNoise(now + 0.015, 0.16, 780, 0.7, 0.06 * v, 'bandpass');
@@ -1922,6 +1966,13 @@ export class SoundEngine {
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.18, 'foley');
     const volume = THREE.MathUtils.clamp(amount, 0.35, 1.25) * g;
+    // b2-ask-06: recorded canvas flap as the sail shifts on the yard, the sheet squealing through
+    // its block (rope creak pitched up), and the yard's low knock as the one sweetener.
+    if (this.sampleLayer('sail.flap', dest, 0.55 * volume, { rate: 0.9, semis: 1, priority: VOICE_PRIORITY.foley })) {
+      this.sampleLayer('rope.creak', dest, 0.35 * volume, { rate: 1.45, semis: 1.5, priority: VOICE_PRIORITY.foley });
+      this.playTone(now + 0.1, 180, 130, 0.22, 0.05 * volume, 'triangle', 0.03, dest);
+      return;
+    }
     this.playNoise(now, 0.18, 760, 0.8, 0.16 * volume, 'bandpass', dest);
     this.playNoise(now + 0.025, 0.12, 2100, 1.1, 0.13 * volume, 'bandpass', dest);
     // Rope squealing through the block.
@@ -2758,6 +2809,11 @@ export class SoundEngine {
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.22, 'foley');
     const v = THREE.MathUtils.clamp(intensity, 0.3, 1);
+    // b2-ask-06: a recorded soft-body impact, the low sine as its weight.
+    if (this.sampleLayer('body.thud', dest, 0.8 * v * g, { rate: 1.05 - 0.15 * v, semis: 0.8, priority: VOICE_PRIORITY.foley })) {
+      this.playTone(now, 78, 40, 0.18, 0.24 * v * g, 'sine', 0.006, dest);
+      return;
+    }
     this.playTone(now, 78, 40, 0.18, 0.34 * v * g, 'sine', 0.006, dest);
     this.playNoise(now, 0.13, 240, 0.8, 0.3 * v * g, 'lowpass', dest);
     this.playNoise(now + 0.01, 0.09, 900, 1.0, 0.12 * v * g, 'bandpass', dest);
@@ -2789,6 +2845,11 @@ export class SoundEngine {
     if (!this.ctx || !this.busDry) return;
     const now = this.ctx.currentTime;
     const { dest, gain: g } = this.makeSpatialDest(distance, pos, 0.24);
+    // b2-ask-06: recorded cloth tear first, the flap of the loose canvas behind it.
+    if (this.sampleLayer('sail.rip', dest, 0.9 * g, { rate: 1.0, semis: 1, priority: VOICE_PRIORITY.combat })) {
+      this.sampleLayer('sail.flap', dest, 0.4 * g, { rate: 0.85, semis: 1, priority: VOICE_PRIORITY.foley, when: now + 0.5 });
+      return;
+    }
     this.playNoise(now, 0.5, 3200, 1.2, 0.18 * g, 'bandpass', dest);
     this.playNoise(now + 0.04, 0.4, 1500, 1.4, 0.14 * g, 'bandpass', dest);
     for (let i = 0; i < 10; i++) {
@@ -2855,9 +2916,32 @@ export class SoundEngine {
       const oldest = this.fires.keys().next().value;
       if (oldest !== undefined) this.stopFire(oldest);
     }
-    const v = this.makeNoiseLoop('bandpass', 620, 1.1, bed);
-    const trem = this.addGainTremolo(v.gain, 6.5, 0.045); // flicker
-    this.fires.set(id, { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain });
+    // b2-ask-06: the recorded fire (bed.fire, a looped burn) once decoded; the flickering band of
+    // noise until then.
+    const pick = this.bank?.pick('bed.fire') ?? null;
+    if (pick) {
+      const source = ctx.createBufferSource();
+      source.buffer = pick.buffer;
+      source.loop = true;
+      const f = pick.file as { loopStart?: number; loopEnd?: number };
+      if (Number.isFinite(f.loopStart)) source.loopStart = f.loopStart as number;
+      if (Number.isFinite(f.loopEnd) && (f.loopEnd as number) > (f.loopStart ?? 0)) source.loopEnd = f.loopEnd as number;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      safeSet(filter.Q, 'value', 0.5);
+      const gain = ctx.createGain();
+      safeSet(gain.gain, 'value', 0);
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(bed);
+      source.start(0, Math.random() * Math.max(0.05, pick.buffer.duration - 0.2));
+      this.fires.set(id, { source, gain, filter });
+      this.sampledFires.add(id);
+    } else {
+      const v = this.makeNoiseLoop('bandpass', 620, 1.1, bed);
+      const trem = this.addGainTremolo(v.gain, 6.5, 0.045); // flicker
+      this.fires.set(id, { ...v, lfo: trem.lfo, lfoGain: trem.lfoGain });
+    }
     this.updateFire(id, distance);
   }
 
@@ -2866,6 +2950,12 @@ export class SoundEngine {
     const f = this.fires.get(id);
     if (!f || !this.ctx) return;
     const g = 1 / (1 + distance / 24);
+    if (this.sampledFires.has(id)) {
+      // The recording is already a fire: distance only dulls its crackle.
+      this.ramp(f.gain.gain, 0.55 * g, 0.4);
+      this.ramp(f.filter.frequency, 1800 + 9000 * g, 0.4);
+      return;
+    }
     this.ramp(f.gain.gain, 0.12 * g, 0.4);
     this.ramp(f.filter.frequency, 480 + 260 * g, 0.4);
   }
@@ -2875,6 +2965,7 @@ export class SoundEngine {
     const f = this.fires.get(id);
     const ctx = this.ctx;
     this.fires.delete(id);
+    this.sampledFires.delete(id);
     if (!f || !ctx) return;
     safeSet(f.gain.gain, 'linear', 0, ctx.currentTime + 0.6);
     window.setTimeout(() => {
@@ -3012,10 +3103,10 @@ export class SoundEngine {
       hammer: { key: 'hammer.hit', rate: 1, cat: 'foley', pri: VOICE_PRIORITY.own },
       scoop: { key: 'splash.small', rate: 1, cat: 'splash', pri: VOICE_PRIORITY.foley },
       fling: { key: 'splash.small', rate: 1, cat: 'splash', pri: VOICE_PRIORITY.foley },
-      groan: { key: 'ship.creak', rate: 0.55, cat: 'impact', pri: VOICE_PRIORITY.world },
+      groan: { key: 'ship.groan', rate: 1, cat: 'impact', pri: VOICE_PRIORITY.world },
       frameCrack: { key: 'wood.crack', rate: 0.62, cat: 'impact', pri: VOICE_PRIORITY.world },
-      airRelease: { key: 'splash.cannon', rate: 0.7, cat: 'splash', pri: VOICE_PRIORITY.world },
-      suction: { key: 'splash.cannon', rate: 0.42, cat: 'splash', pri: VOICE_PRIORITY.world },
+      airRelease: { key: 'water.bubbles', rate: 0.72, cat: 'splash', pri: VOICE_PRIORITY.world },
+      suction: { key: 'water.bubbles', rate: 0.48, cat: 'splash', pri: VOICE_PRIORITY.world },
     };
     const e = table[kind];
     if (!e) return;
@@ -3025,6 +3116,10 @@ export class SoundEngine {
     let played = false;
     try {
       played = this.playSample(e.key, { pos: at, volume: vol, rate: e.rate * finiteClamp(rate, 0.25, 4, 1), priority: e.pri, category: e.cat });
+      // b2-ask-06: the bucket itself (rim and bail clank) under the scoop / fling water.
+      if (played && (kind === 'scoop' || kind === 'fling')) {
+        this.playSample('bucket.clank', { pos: at, volume: 0.45 * vol, rate: kind === 'scoop' ? 1.05 : 0.95, priority: VOICE_PRIORITY.foley, category: 'foley' });
+      }
     } finally {
       this.insideVoice = false;
     }
@@ -3677,6 +3772,16 @@ export class SoundEngine {
     safeSet(filter.Q, 'value', 0.5);
     this.connectGroup(filter, null, 0.35);
     const at = now + thunderArrivalDelay(distance);
+    // b2-ask-06: a recorded strike + roll (3 s take) through the distance filter; far strikes are
+    // pitched down and dulled. The long low roll past the take stays procedural (2 layers, slow
+    // attack so it grows out of the recording instead of starting on top of it).
+    if (this.sampleLayer('env.thunder', filter, 1.2 * g, { when: at, rate: near ? 1 : 0.82, semis: 1, priority: VOICE_PRIORITY.world })) {
+      safeSet(filter.frequency, 'value', near ? 7000 : 700 + (1 - d / THUNDER_MAX_DISTANCE_M) * 1800);
+      this.playNoiseCurve(at + 1.2, 2.2 + (1 - g) * 1.2, [[0, 220], [2.2, 110]], 0.4, 0.14 * g, 'lowpass', 0.8, filter);
+      this.playTone(at + 0.1, 60, 34, 1.6 + (1 - g), 0.16 * g, 'sine', 0.05, filter);
+      if (near) this.duckBeds(0.55, 0.5, 0.5);
+      return;
+    }
     if (near) {
       this.playNoise(at, 0.08, 5000, 0.7, 0.34 * g, 'highpass', filter);
       this.playTone(at, 90, 40, 0.5, 0.4 * g, 'sine', 0.004, filter);

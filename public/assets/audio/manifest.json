@@ -10,7 +10,7 @@
   },
   "tierBytes": {
     "boot": 215546,
-    "match": 912509,
+    "match": 1472364,
     "zones": 461841
   },
   "keys": {
@@ -1635,6 +1635,386 @@
           "channels": 1,
           "lufs": -18.5,
           "peakDb": -5.2
+        }
+      ]
+    },
+    "env.thunder": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/env.thunder.1.mp3",
+          "source": "bsbThunder1",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/env.thunder.2.mp3",
+          "source": "bsbThunder2",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -2.2
+        },
+        {
+          "file": "match/env.thunder.3.mp3",
+          "source": "bsbThunder3",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -3.2
+        }
+      ]
+    },
+    "sail.flap": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/sail.flap.1.mp3",
+          "source": "bsbFlag1",
+          "bytes": 7576,
+          "duration": 0.7,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.8
+        },
+        {
+          "file": "match/sail.flap.2.mp3",
+          "source": "bsbFlag4",
+          "bytes": 5747,
+          "duration": 0.5,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/sail.flap.3.mp3",
+          "source": "bsbFlag3",
+          "bytes": 13061,
+          "duration": 1.25,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.8
+        }
+      ]
+    },
+    "sail.rip": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/sail.rip.1.mp3",
+          "source": "bsbClothRip",
+          "bytes": 30041,
+          "duration": 2.95,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.3
+        },
+        {
+          "file": "match/sail.rip.2.mp3",
+          "source": "bsbClothRip",
+          "bytes": 26122,
+          "duration": 2.55,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.6
+        }
+      ]
+    },
+    "chain.rattle": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/chain.rattle.1.mp3",
+          "source": "bsbChainHeavy",
+          "bytes": 14106,
+          "duration": 1.35,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.3
+        },
+        {
+          "file": "match/chain.rattle.2.mp3",
+          "source": "bsbChainMedium",
+          "bytes": 13584,
+          "duration": 1.3,
+          "channels": 1,
+          "lufs": -18.1,
+          "peakDb": -3.4
+        },
+        {
+          "file": "match/chain.rattle.3.mp3",
+          "source": "bsbChainHandle",
+          "bytes": 12278,
+          "duration": 1.15,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -1.7
+        }
+      ]
+    },
+    "capstan.ratchet": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/capstan.ratchet.1.mp3",
+          "source": "bsbWinch",
+          "bytes": 13584,
+          "duration": 1.3,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/capstan.ratchet.2.mp3",
+          "source": "bsbWinch",
+          "bytes": 20637,
+          "duration": 2,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.6
+        },
+        {
+          "file": "match/capstan.ratchet.3.mp3",
+          "source": "bsbWinch",
+          "bytes": 20637,
+          "duration": 2,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1
+        }
+      ]
+    },
+    "bucket.clank": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/bucket.clank.1.mp3",
+          "source": "bsbBucket",
+          "bytes": 12539,
+          "duration": 1.2,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/bucket.clank.2.mp3",
+          "source": "bsbBucket",
+          "bytes": 9665,
+          "duration": 0.9,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.4
+        },
+        {
+          "file": "match/bucket.clank.3.mp3",
+          "source": "bsbBucket",
+          "bytes": 15674,
+          "duration": 1.5,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.5
+        }
+      ]
+    },
+    "rope.creak": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/rope.creak.1.mp3",
+          "source": "bsbRope1",
+          "bytes": 9143,
+          "duration": 0.85,
+          "channels": 1,
+          "lufs": -18.7,
+          "peakDb": -1.3
+        },
+        {
+          "file": "match/rope.creak.2.mp3",
+          "source": "bsbRope2",
+          "bytes": 25600,
+          "duration": 2.5,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -1.7
+        },
+        {
+          "file": "match/rope.creak.3.mp3",
+          "source": "bsbRopeBig",
+          "bytes": 25600,
+          "duration": 2.5,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -1.8
+        }
+      ]
+    },
+    "water.bubbles": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/water.bubbles.1.mp3",
+          "source": "rdWater",
+          "member": "bubble_01.ogg",
+          "bytes": 7576,
+          "duration": 0.696,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.7
+        },
+        {
+          "file": "match/water.bubbles.2.mp3",
+          "source": "rdWater",
+          "member": "bubble_02.ogg",
+          "bytes": 4180,
+          "duration": 0.36,
+          "channels": 1,
+          "lufs": -18.5,
+          "peakDb": -2.9
+        },
+        {
+          "file": "match/water.bubbles.3.mp3",
+          "source": "rdWater",
+          "member": "bubble_03.ogg",
+          "bytes": 6008,
+          "duration": 0.547,
+          "channels": 1,
+          "lufs": -18.6,
+          "peakDb": -1.6
+        }
+      ]
+    },
+    "ship.groan": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": false,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/ship.groan.1.mp3",
+          "source": "bsbBarnCreak",
+          "derived": "pitch -7 st of variant source",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -9.1
+        },
+        {
+          "file": "match/ship.groan.2.mp3",
+          "source": "bsbBarnCreak",
+          "derived": "pitch -6 st of variant source",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -6.4
+        },
+        {
+          "file": "match/ship.groan.3.mp3",
+          "source": "bsbRopeBig",
+          "derived": "pitch -5 st of variant source",
+          "bytes": 30563,
+          "duration": 3,
+          "channels": 1,
+          "lufs": -18.4,
+          "peakDb": -1.9
+        }
+      ]
+    },
+    "bed.fire": {
+      "tier": "match",
+      "kind": "bed",
+      "loop": true,
+      "frequent": false,
+      "targetLufs": -26,
+      "files": [
+        {
+          "file": "match/bed.fire.1.mp3",
+          "source": "bsbFire",
+          "bytes": 64573,
+          "duration": 8,
+          "channels": 1,
+          "lufs": -26.6,
+          "peakDb": -1.5,
+          "loopStart": 0,
+          "loopEnd": 8
+        }
+      ]
+    },
+    "body.thud": {
+      "tier": "match",
+      "kind": "oneshot",
+      "loop": false,
+      "frequent": true,
+      "targetLufs": -18,
+      "files": [
+        {
+          "file": "match/body.thud.1.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactSoft_heavy_000.ogg",
+          "bytes": 6008,
+          "duration": 0.527,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/body.thud.2.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactSoft_heavy_001.ogg",
+          "bytes": 6269,
+          "duration": 0.569,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.9
+        },
+        {
+          "file": "match/body.thud.3.mp3",
+          "source": "kenneyImpact",
+          "member": "Audio/impactSoft_heavy_002.ogg",
+          "bytes": 6269,
+          "duration": 0.569,
+          "channels": 1,
+          "lufs": -18.3,
+          "peakDb": -1.8
         }
       ]
     }

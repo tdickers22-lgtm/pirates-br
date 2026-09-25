@@ -127,6 +127,24 @@ const EVENTS = [
   ['playWoodPlank', [], ['hammer.hit']],
   ['playAxeChop', [], ['wood.chop']],
   ['playUiClick', [], ['ui.click']],
+  // b2-ask-06: the D3 list that was still synthesised (thunder, sails, rope, chain, helm, swim/hull
+  // splashes, bubbles, bucket, fire, sinking groan, body thud) is sample-first now.
+  ['playThunder', [80], ['env.thunder']],
+  ['playSailTrim', [1, { x: 0, y: 2, z: 5 }, 5], ['sail.flap', 'rope.creak']],
+  ['playSailRip', [20, { x: 20, y: 5, z: 0 }], ['sail.rip']],
+  ['playAnchorChange', [true, { x: 0, y: 0, z: -12 }, 12], ['chain.rattle']],
+  ['playAnchorChange', [false, { x: 0, y: 0, z: -12 }, 12], ['chain.rattle']],
+  ['playAnchorMovement', [1, { x: 0, y: 0, z: -12 }, 12], ['capstan.ratchet']],
+  ['playHelmTurn', [1, { x: 0, y: 1, z: 6 }, 6], ['rope.creak']],
+  ['playSwimSplash', [1], ['splash.small']],
+  ['playHullSplash', [1], ['splash.small']],
+  ['playBodyThud', [1, 5, { x: 5, y: 0, z: 0 }], ['body.thud']],
+  ['playBucket', ['scoop', { x: 0, y: -1, z: 2 }], ['splash.small', 'bucket.clank']],
+  ['playBucket', ['fling', { x: 0, y: 1, z: 2 }], ['splash.small', 'bucket.clank']],
+  ['playFloodOneShot', ['groan', { x: 0, y: -1, z: 3 }, 1, 1], ['ship.groan']],
+  ['playFloodOneShot', ['airRelease', { x: 0, y: -1, z: 3 }, 1, 1], ['water.bubbles']],
+  ['playFloodOneShot', ['suction', { x: 0, y: -1, z: 3 }, 1, 1], ['water.bubbles']],
+  ['startFire', ['ship-fire-1', 10], ['bed.fire']],
 ];
 
 // ── fake Web Audio graph (same shape as test-audio-models) ─────────────────

@@ -203,6 +203,108 @@
       "page": "https://opengameart.org/content/solo-seagull-sound-effects",
       "author": "rango-mango",
       "license": "CC0-1.0"
+    },
+    "bsbThunder1": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/3113.mp3",
+      "page": "https://bigsoundbank.com/thunder-2-s3113.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbThunder2": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/3114.mp3",
+      "page": "https://bigsoundbank.com/thunder-3-s3114.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbThunder3": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/3115.mp3",
+      "page": "https://bigsoundbank.com/thunder-4-s3115.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbFlag1": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/1787.mp3",
+      "page": "https://bigsoundbank.com/flag-1-s1787.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbFlag3": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/1789.mp3",
+      "page": "https://bigsoundbank.com/flag-3-s1789.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbFlag4": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/1790.mp3",
+      "page": "https://bigsoundbank.com/flag-4-s1790.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbClothRip": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0013.mp3",
+      "page": "https://bigsoundbank.com/cloth-s0013.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbChainHeavy": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0359.mp3",
+      "page": "https://bigsoundbank.com/heavy-chain-s0359.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbChainMedium": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0360.mp3",
+      "page": "https://bigsoundbank.com/medium-chain-1-s0360.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbChainHandle": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0619.mp3",
+      "page": "https://bigsoundbank.com/medium-chain-s0619.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbWinch": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0901.mp3",
+      "page": "https://bigsoundbank.com/manual-winch-1-s0901.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbBucket": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0543.mp3",
+      "page": "https://bigsoundbank.com/metal-bucket-s0543.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbRope1": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/3420.mp3",
+      "page": "https://bigsoundbank.com/rope-1-s3420.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbRope2": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/3418.mp3",
+      "page": "https://bigsoundbank.com/rope-2-s3418.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbRopeBig": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/3426.mp3",
+      "page": "https://bigsoundbank.com/big-rope-s3426.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbBarnCreak": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0539.mp3",
+      "page": "https://bigsoundbank.com/creaking-barn-door-s0539.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
+    },
+    "bsbFire": {
+      "url": "https://bigsoundbank.com/UPLOAD/mp3/0987.mp3",
+      "page": "https://bigsoundbank.com/big-branching-fire-1-s0987.html",
+      "author": "Joseph Sardin (BigSoundBank.com)",
+      "license": "CC0-1.0"
     }
   },
   "keys": {
@@ -1000,6 +1102,226 @@
           "src": "kenneyRpg",
           "member": "Audio/creak3.ogg",
           "semitones": 3.0
+        }
+      ]
+    },
+    "env.thunder": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "bsbThunder1",
+          "start": 0.3,
+          "dur": 3.0
+        },
+        {
+          "src": "bsbThunder2",
+          "start": 0.1,
+          "dur": 3.0
+        },
+        {
+          "src": "bsbThunder3",
+          "start": 0.4,
+          "dur": 3.0
+        }
+      ]
+    },
+    "sail.flap": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "bsbFlag1",
+          "start": 0.2,
+          "dur": 0.7
+        },
+        {
+          "src": "bsbFlag4",
+          "start": 0.33,
+          "dur": 0.5
+        },
+        {
+          "src": "bsbFlag3",
+          "start": 1.2,
+          "dur": 1.25
+        }
+      ]
+    },
+    "sail.rip": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "bsbClothRip",
+          "start": 3.1,
+          "dur": 2.95
+        },
+        {
+          "src": "bsbClothRip",
+          "start": 7.05,
+          "dur": 2.55
+        }
+      ]
+    },
+    "chain.rattle": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "bsbChainHeavy",
+          "start": 0.3,
+          "dur": 1.35
+        },
+        {
+          "src": "bsbChainMedium",
+          "start": 0.1,
+          "dur": 1.3
+        },
+        {
+          "src": "bsbChainHandle",
+          "start": 1.55,
+          "dur": 1.15
+        }
+      ]
+    },
+    "capstan.ratchet": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "bsbWinch",
+          "start": 0.45,
+          "dur": 1.3
+        },
+        {
+          "src": "bsbWinch",
+          "start": 2.0,
+          "dur": 2.0
+        },
+        {
+          "src": "bsbWinch",
+          "start": 5.0,
+          "dur": 2.0
+        }
+      ]
+    },
+    "bucket.clank": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "bsbBucket",
+          "start": 0.7,
+          "dur": 1.2
+        },
+        {
+          "src": "bsbBucket",
+          "start": 2.08,
+          "dur": 0.9
+        },
+        {
+          "src": "bsbBucket",
+          "start": 4.55,
+          "dur": 1.5
+        }
+      ]
+    },
+    "rope.creak": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "bsbRope1",
+          "start": 0,
+          "dur": 0.85
+        },
+        {
+          "src": "bsbRope2",
+          "start": 0.6,
+          "dur": 2.5
+        },
+        {
+          "src": "bsbRopeBig",
+          "start": 10,
+          "dur": 2.5
+        }
+      ]
+    },
+    "water.bubbles": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "rdWater",
+          "member": "bubble_01.ogg"
+        },
+        {
+          "src": "rdWater",
+          "member": "bubble_02.ogg"
+        },
+        {
+          "src": "rdWater",
+          "member": "bubble_03.ogg"
+        }
+      ]
+    },
+    "ship.groan": {
+      "tier": "match",
+      "kind": "oneshot",
+      "variants": [
+        {
+          "src": "bsbBarnCreak",
+          "start": 2,
+          "dur": 2.5,
+          "semitones": -7
+        },
+        {
+          "src": "bsbBarnCreak",
+          "start": 12,
+          "dur": 2.5,
+          "semitones": -6
+        },
+        {
+          "src": "bsbRopeBig",
+          "start": 20,
+          "dur": 2.5,
+          "semitones": -5
+        }
+      ]
+    },
+    "bed.fire": {
+      "tier": "match",
+      "kind": "bed",
+      "loopLen": 8,
+      "variants": [
+        {
+          "src": "bsbFire",
+          "start": 3
+        }
+      ]
+    },
+    "body.thud": {
+      "tier": "match",
+      "kind": "oneshot",
+      "frequent": true,
+      "variants": [
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactSoft_heavy_000.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactSoft_heavy_001.ogg"
+        },
+        {
+          "src": "kenneyImpact",
+          "member": "Audio/impactSoft_heavy_002.ogg"
         }
       ]
     }
