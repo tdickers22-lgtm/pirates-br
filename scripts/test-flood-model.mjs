@@ -191,6 +191,28 @@ console.log('\nDesign race (PLAN 3.6): one bailer vs small holes, bailer + pump 
   expect('sloop: one bailer still loses to three small waterline holes', Number.isFinite(s3), `t=${Number.isFinite(s3) ? s3.toFixed(0) : 'held'} s`);
 }
 
+// b2.2d3: the three-way race is judged at the same 0.2 m depth as the small row
+// above. On the waterline the only head is the 0.15 m wash margin, so one
+// bailer holds even a size-2 hole there on every class; below the surface the
+// sqrt law bites. Judging at depth keeps the section-7 windows untouched.
+console.log('\nDesign race at depth (PLAN 3.6): holes 0.2 m under, settle in the loop');
+{
+  const fmtT = (v) => (Number.isFinite(v) ? `${v.toFixed(0)} s` : 'held');
+  for (const type of CLASSES) {
+    const bail = FLOODING.BAIL_RATE;
+    const small = founderTime(type, waterlineHoles(type, 1, 1, -0.2), { bail });
+    const medium = founderTime(type, waterlineHoles(type, 1, 2, -0.2), { bail });
+    const mediumUntended = founderTime(type, waterlineHoles(type, 1, 2, -0.2));
+    const threeSmall = founderTime(type, waterlineHoles(type, 3, 1, -0.2), { bail });
+    expect(`${type}: one bailer beats one small hole 0.2 m under`, !Number.isFinite(small), `t=${fmtT(small)}`);
+    expect(`${type}: one bailer loses to one medium hole 0.2 m under`, Number.isFinite(medium), `t=${fmtT(medium)}`);
+    expect(`${type}: ...slowly (>= 2x the untended medium time)`, Number.isFinite(medium) && medium >= 2 * mediumUntended,
+      `bailed ${fmtT(medium)} vs untended ${fmtT(mediumUntended)}`);
+    expect(`${type}: one bailer loses fast to three small 0.2 m under (sooner than the medium)`,
+      Number.isFinite(threeSmall) && threeSmall < medium, `three small ${fmtT(threeSmall)} vs medium ${fmtT(medium)}`);
+  }
+}
+
 console.log('\nTime-to-founder table (s; calm, holes on the waterline, settle in the loop)');
 console.log('  class       size | untended 1 / 3 / 6    | 1 bailer 1 / 3 / 6     | bailer+pump 1 / 3 / 6');
 const fmt = (v) => (Number.isFinite(v) ? v.toFixed(0) : 'held').padStart(5);
