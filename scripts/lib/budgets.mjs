@@ -306,6 +306,13 @@ export const MEMORY_BUDGETS = {
 // 12 hulls in combat at storm sea state, measured on this Air (quiet host: p50 1.07 / p99 1.96 ms).
 export const TICK_BUDGET = { p99Ms: 4.0, p50Ms: 2.0 };
 
+// ═══ test-bundle-budget: JavaScript on the wire, KB of brotli q11 (b3.1f, performance-10) ════════════
+// entryBr = the entry chunk; toMenuBr = entry + its static import closure (the menu shell); totalBr =
+// every chunk + workers; chunkBr = any single chunk. Decoders (meshopt/basis/zstd, KTX2Loader) are
+// excluded from every row: they are paid in the world stage (test-model-transport). PLAN section 4 b3.1f.
+// measured 2026-09-25 at fefa9f47 (one entry, no split): entry 375.0, toMenu 491.8, total 497.0.
+export const BUNDLE_BUDGETS_KB = { entryBr: 180, toMenuBr: 330, totalBr: 520, chunkBr: 300 };
+
 // ═══ the ratchet's view ═════════════════════════════════════════════════════════════════════════════
 /** Every graded family, by the name the ratchet and the baseline fixture use. */
 export const ALL_BUDGETS = {
@@ -322,6 +329,7 @@ export const ALL_BUDGETS = {
   frameGovernor: FRAME_GOVERNOR,
   memory: MEMORY_BUDGETS,
   tick: TICK_BUDGET,
+  bundle: BUNDLE_BUDGETS_KB,
 };
 
 /** Keys that are readings or scene inputs, never budgets. */
