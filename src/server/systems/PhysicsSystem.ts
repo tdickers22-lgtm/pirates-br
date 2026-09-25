@@ -2414,8 +2414,9 @@ export class PhysicsSystem {
     local: { x: number; y: number; z: number },
     count = 1,
     source?: ShipHoleSource,
+    size = 1,
   ): ShipHole[] {
-    return openShipHoles(ship, local, count, source);
+    return openShipHoles(ship, local, count, source, size);
   }
 
   /**
@@ -3362,8 +3363,9 @@ export class PhysicsSystem {
       // stem shrugs off what caves in a sloop's quarter.
       const shipHoles = ramHolesForDamage(shipDamage);
       const otherHoles = ramHolesForDamage(otherDamage);
-      if (shipHoles > 0) this.openHoleAt(ship, { x: shipLocal.x, y: bandY, z: shipLocal.z }, shipHoles, 'ram');
-      if (otherHoles > 0) this.openHoleAt(other, { x: otherLocal.x, y: bandY, z: otherLocal.z }, otherHoles, 'ram');
+      // Size by energy (b2.2b): every band past the second tears the wound wider.
+      if (shipHoles > 0) this.openHoleAt(ship, { x: shipLocal.x, y: bandY, z: shipLocal.z }, shipHoles, 'ram', Math.min(3, Math.max(1, shipHoles - 1)));
+      if (otherHoles > 0) this.openHoleAt(other, { x: otherLocal.x, y: bandY, z: otherLocal.z }, otherHoles, 'ram', Math.min(3, Math.max(1, otherHoles - 1)));
 
       // Ram kill credit: each hull's damage is banked to the OTHER hull's
       // helmsman (or its owner), so ramming a ship to death now credits the
@@ -3547,7 +3549,7 @@ export class PhysicsSystem {
       const breaches = this.takeGroundingBreachBudget(ship, t, impactSpeed, impactSpeed > 5 ? 2 : 1);
       if (breaches > 0) {
         const local = this.toShipLocal({ x: deepest.x, y: 0, z: deepest.z }, ship);
-        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, breaches, 'ground');
+        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, breaches, 'ground', impactSpeed > 6 ? 2 : 1);
       }
       if (impactSpeed > SHIP.GROUND_HOLE_MIN_IMPACT) {
         this.combatEvents.push({
@@ -3623,7 +3625,7 @@ export class PhysicsSystem {
       const breaches = this.takeGroundingBreachBudget(ship, t, impactSpeed, impactSpeed > 5 ? 2 : 1);
       if (breaches > 0) {
         const local = this.toShipLocal({ x: deepest.sampleX, y: 0, z: deepest.sampleZ }, ship);
-        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, breaches, 'ground');
+        this.openHoleAt(ship, { x: local.x, y: 0.12, z: local.z }, breaches, 'ground', impactSpeed > 6 ? 2 : 1);
       }
       if (impactSpeed > SHIP.GROUND_HOLE_MIN_IMPACT) {
         this.combatEvents.push({
@@ -3732,6 +3734,7 @@ export class PhysicsSystem {
             { x: local.x, y: (FLOODING.HOLE_BAND_Y.min + FLOODING.HOLE_BAND_Y.max) * 0.5, z: local.z },
             breaches,
             'rock',
+            impactSpeed > 6 ? 2 : 1,
           );
         }
         this.combatEvents.push({
