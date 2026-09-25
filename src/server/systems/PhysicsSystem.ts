@@ -91,6 +91,7 @@ type HullSweepHit =
   | { kind: 'player'; point: Vec3; player: Player };
 import { intersectRayIslandProps, resolvePropCollision } from '../../shared/props.js';
 import { resolveWalkerAgainstWildlife, swimFloatVelocity } from '../../shared/locomotion.js';
+import { applyHoldWater } from './holdMovement.js';
 import { raymarchIslandSurface } from '../../shared/raycast.js';
 import { hullPointVelocity, hullRatesOf, projectileGravity, recordHullRates, stepBallistic, trySkip } from '../../shared/ballistics.js';
 import { CLASS_TOP_SPEED, HULL_PARAMS, polarSpeed, sailPolarFraction, trimEfficiency as sailTrimEfficiency } from '../../shared/sailing.js';
@@ -1551,6 +1552,7 @@ export class PhysicsSystem {
         }
 
         const floorY = getShipFloorYAt(player.position, onShip, local);
+        let holdSwimming = false;
 
         // Gravity (crow's nest: walkable basket — the nest deck is a FLOOR, not
         // a Y pin, so a jump reads as a jump: gravity + velocity.y run normally
@@ -1577,11 +1579,19 @@ export class PhysicsSystem {
             player.velocity.y = 0;
           }
         } else {
-          player.velocity.y += PHYSICS.GRAVITY * dt;
-          player.position.y += player.velocity.y * dt;
+          // b2.2f (holes-07): the flooded hold is water. Wading caps the walk;
+          // afloat, buoyancy replaces gravity and the drowning clock runs.
+          const holdWater = !player.atHelm && !player.atCannon && player.position.y < deckY - 0.18
+            ? applyHoldWater(player, onShip, dt, t)
+            : null;
+          holdSwimming = holdWater?.mode === 'swim';
+          if (!holdSwimming) {
+            player.velocity.y += PHYSICS.GRAVITY * dt;
+            player.position.y += player.velocity.y * dt;
+          }
           if (player.position.y < floorY) {
             player.position.y = floorY;
-            player.velocity.y = 0;
+            if (player.velocity.y < 0) player.velocity.y = 0;
           }
         }
 
@@ -1620,7 +1630,7 @@ export class PhysicsSystem {
           }
         }
 
-        player.swimTimer = 0;
+        if (!holdSwimming) player.swimTimer = 0;
         if (!downed) player.state = 'alive';
         if (onShip.onFire && player.respawnProtectionTimer <= 0) {
           // Environmental damage keeps the attacker record (CREDIT-01): the
