@@ -14,6 +14,9 @@ import { installModalStack, modalStack } from '../ui/ModalStack.js';
 import { mountControlsSettings } from './ControlsSettings.js';
 import { mountShowFpsSetting } from '../network/sessionTelemetry.js';
 import {
+  AUDIO_SLIDER_BUS, applyAudioSettings, parseAudioSettings, serializeAudioSettings, type AudioSettings,
+} from '../audio/audioSettings.js';
+import {
   classifyRenderer, decideRenderQuality, loadQualityPreference, parseRenderQuality, renderQualityLabel,
   saveAutoTierCeiling, saveQualityPreference,
   type QualityPreference, type RenderQuality,
@@ -27,10 +30,8 @@ const SETTINGS_KEY = 'piratesBR.settings';
 
 type MenuPanel = 'main' | 'lobby' | 'queue' | 'settings' | 'howto' | 'credits';
 
-interface PersistedSettings {
-  volume: number;       // 0–1
-  muted: boolean;
-}
+/** The audio half of the shared `piratesBR.settings` record (b2.4h: + bus sliders, focus mute, mix). */
+type PersistedSettings = AudioSettings;
 
 interface MenuControllerOptions {
   network: NetworkClient;
@@ -589,6 +590,7 @@ export class MenuController {
       this.audio.setMuted(muted);
       this.persistSettings({ muted });
     });
+    this.mountAudioMixer();
 
 
     // GRAPHICS TIER. The renderer reads this at construction, so a change here
@@ -830,21 +832,92 @@ export class MenuController {
   }
 
   private loadSettings(): PersistedSettings {
-    const fallback: PersistedSettings = { volume: 0.55, muted: false };
-    try {
-      const raw = localStorage.getItem(SETTINGS_KEY);
-      if (!raw) return fallback;
-      const parsed = JSON.parse(raw) as Partial<PersistedSettings>;
-      return {
-        volume: typeof parsed.volume === 'number' ? clamp01(parsed.volume) : fallback.volume,
-        muted: !!parsed.muted,
-      };
-    } catch { return fallback; }
+    try { return parseAudioSettings(localStorage.getItem(SETTINGS_KEY)); } catch { return parseAudioSettings(null); }
   }
 
+  /** Merge into the ONE shared record: the graphics tier (QualityPreference) and anything else
+   *  stored beside the audio fields survives (the old write kept only volume + muted). */
   private persistSettings(patch: Partial<PersistedSettings>): void {
-    const merged = { ...this.loadSettings(), ...patch };
-    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged)); } catch {}
+    try {
+      let other: Record<string, unknown> = {};
+      try {
+        const raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') as unknown;
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) other = raw as Record<string, unknown>;
+      } catch { /* corrupt record: rewrite it */ }
+      const audio = JSON.parse(serializeAudioSettings({ ...this.loadSettings(), ...patch })) as PersistedSettings;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...other, ...audio }));
+    } catch {}
+  }
+
+  /** Mixer rows under Mute (audio-11, D14): Music / Effects / Ambience / Interface sliders, mute
+   *  when the window loses focus, and iOS "Mix with other audio" (audio session 'ambient'). */
+  private readonly mixerSliders = new Map<keyof typeof AUDIO_SLIDER_BUS, { input: HTMLInputElement; val: HTMLElement }>();
+  private muteUnfocusedBox: HTMLInputElement | null = null;
+  private mixWithOthersBox: HTMLInputElement | null = null;
+
+  private mountAudioMixer(): void {
+    const anchor = this.settingsMuteCheckbox.closest('.lobby-row');
+    if (!anchor) return;
+    const rows: HTMLElement[] = [];
+    const labels: Record<keyof typeof AUDIO_SLIDER_BUS, string> = { music: 'Music', effects: 'Effects', ambience: 'Ambience', ui: 'Interface' };
+    for (const key of Object.keys(AUDIO_SLIDER_BUS) as (keyof typeof AUDIO_SLIDER_BUS)[]) {
+      const row = document.createElement('div');
+      row.className = 'lobby-row';
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = labels[key];
+      const input = document.createElement('input');
+      input.type = 'range'; input.min = '0'; input.max = '100'; input.step = '1';
+      input.id = `settings-vol-${key}`;
+      input.style.flex = '1';
+      input.setAttribute('aria-label', `${labels[key]} volume`);
+      const val = document.createElement('span');
+      val.style.cssText = 'font-family:monospace;color:#f4e2b2;min-width:36px;text-align:right;';
+      input.addEventListener('input', () => {
+        const pct = Number(input.value);
+        val.textContent = String(pct);
+        this.audio.unlock();
+        this.audio.setBusVolume(AUDIO_SLIDER_BUS[key], pct / 100);
+        this.persistSettings({ [key]: pct / 100 } as Partial<PersistedSettings>);
+      });
+      row.append(label, input, val);
+      rows.push(row);
+      this.mixerSliders.set(key, { input, val });
+    }
+    const toggle = (id: string, text: string, title: string, onChange: (on: boolean) => void): HTMLInputElement => {
+      const row = document.createElement('div');
+      row.className = 'lobby-row';
+      row.title = title;
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = text;
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.id = id;
+      box.style.cssText = 'transform:scale(1.4);margin-left:8px;';
+      box.addEventListener('change', () => onChange(box.checked));
+      row.append(label, box);
+      rows.push(row);
+      return box;
+    };
+    this.muteUnfocusedBox = toggle('settings-mute-unfocused', 'Mute When Unfocused', 'Silence the game while another window or app is in front.', (on) => {
+      this.audio.setMuteWhenUnfocused(on);
+      this.persistSettings({ muteUnfocused: on });
+    });
+    this.mixWithOthersBox = toggle('settings-mix-others', 'Mix With Other Audio', 'iPhone / iPad: keep your own music playing (the game then follows the silent switch).', (on) => {
+      this.audio.setMixWithOthers(on);
+      this.persistSettings({ mixWithOthers: on });
+    });
+    anchor.after(...rows);
+    // Focus mute: blur / focus of the page window (the engine applies it only while the setting is on).
+    window.addEventListener('blur', () => this.audio.setWindowFocused(false));
+    window.addEventListener('focus', () => this.audio.setWindowFocused(true));
+    // Menu hover tick on a real mouse (touch has no hover; a tick on every tap would double the click).
+    document.getElementById('menu-screen')?.addEventListener('pointerover', (e) => {
+      const btn = (e.target as HTMLElement | null)?.closest?.('button');
+      if (!btn || e.pointerType !== 'mouse' || btn.contains(e.relatedTarget as Node | null)) return;
+      this.audio.playUiHover();
+    });
   }
 
   /** What Auto decided and why — and, once the player changes it, that the new
@@ -965,8 +1038,13 @@ export class MenuController {
     this.labelCappedTiers();
     this.settingsQualitySelect.value = loadQualityPreference();
     this.renderQualityNote(false);
-    this.audio.setVolume(s.volume);
-    this.audio.setMuted(s.muted);
+    for (const [key, el] of this.mixerSliders) {
+      el.input.value = String(Math.round(s[key] * 100));
+      el.val.textContent = el.input.value;
+    }
+    if (this.muteUnfocusedBox) this.muteUnfocusedBox.checked = s.muteUnfocused;
+    if (this.mixWithOthersBox) this.mixWithOthersBox.checked = s.mixWithOthers;
+    applyAudioSettings(this.audio, s);
   }
 
   private renderLobby(payload: LobbyUpdatePayload): void {
@@ -1334,9 +1412,6 @@ export class MenuController {
   }
 }
 
-function clamp01(v: number): number {
-  return Math.max(0, Math.min(1, v));
-}
 
 function formatPlayTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);

@@ -77,8 +77,6 @@ const methods = new Map();
   // Known unwired events, each owned by a later slice. The list must match EXACTLY: a new dead
   // event fails, and wiring one of these fails until its row is deleted (no stale allowances).
   const KNOWN_DEAD = {
-    setBusVolume: 'b2.4h settings sliders (MenuController)',
-    playUiHover: 'b2.4h menu hover (MenuController)',
     startFire: 'burning-ship fire loop: needs a Game/CombatFx caller (b2.3 hook)',
     playGoldCount: 'HUD gold tally counter (HUD lane)',
     playFootLanding: 'jump/fall landing (vy > 3 m/s): Game.ts updateFootsteps caller (b2.3 hook, handoff in b2.4.json)',

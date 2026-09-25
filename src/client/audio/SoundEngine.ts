@@ -12,6 +12,7 @@ import {
 import { CANNON_MUZZLE_SPEED } from '../../shared/ballistics.js';
 import { REVERB_SPACES, dbToGain, generateImpulse, occlusionFor, type ListenerSpace, type Occlusion, type ReverbSpaceName } from './reverb.js';
 import { oceanLayers, windBedLevels, type AmbienceBeds, type WindBedLevels } from './AudioDirector.js';
+import { Ambience, waterfallLevel, zoneSources, type ZoneCall } from './Ambience.js';
 import {
   FloodAudio, type FloodAudioFrame, type FloodAudioHost, type FloodLoopHandle, type FloodLoopKind, type FloodOneShotKind,
   type FloodVec,
@@ -544,8 +545,12 @@ export class SoundEngine {
   private floodAudio: FloodAudio | null = null;
   // Per-burning-ship fire crackle loops (capped at 2; oldest is stolen)
   private readonly fires = new Map<string, LoopVoice>();
-  // Nearest-waterfall bed (single voice; the environment picks the fall)
-  private waterfallBed: RichLoopVoice | null = null;
+  // Island zones (b2.4h, audio-07): jungle, caldera, lava, geysers. Plans once a frame in setAmbience.
+  private readonly zones = new Ambience(() => this.rand());
+  private zonesPreloaded = false;
+  // Mute when the window loses focus (settings, default on), separate from the player's mute.
+  private muteUnfocused = true;
+  private windowFocused = true;
 
   // ── Music (see the "Procedural shanty" section) ────────────────────
   /** Music sums here BEFORE the duck, so one gain sets the whole score's level. */
@@ -728,7 +733,7 @@ export class SoundEngine {
 
       // Bus graph (b2.4b AudioCore): master -> glue -> limiter -> out; sfx / ambience / music
       // levels behind the world filter, the ui level straight into master (audio-11).
-      const core = buildAudioCore(ctx, this.muted ? 0 : this.masterVolume);
+      const core = buildAudioCore(ctx, this.masterGainTarget());
       this.core = core;
       this.master = core.master;
       this.worldFilter = core.worldFilter;
@@ -813,7 +818,24 @@ export class SoundEngine {
 
   setVolume(volume: number): void {
     this.masterVolume = finiteClamp(volume, 0, 1, this.masterVolume);
-    if (this.master) safeSet(this.master.gain, 'value', this.muted ? 0 : this.masterVolume);
+    if (this.master) safeSet(this.master.gain, 'value', this.masterGainTarget());
+  }
+
+  /** Master gain: 0 when muted, or when unfocused with "mute when unfocused" on. */
+  private masterGainTarget(): number {
+    return this.muted || (this.muteUnfocused && !this.windowFocused) ? 0 : this.masterVolume;
+  }
+
+  /** Settings: silence the game while another window has focus (default on). */
+  setMuteWhenUnfocused(on: boolean): void {
+    this.muteUnfocused = on !== false;
+    if (this.master) safeSet(this.master.gain, 'value', this.masterGainTarget());
+  }
+
+  /** The page's window gained / lost focus (MenuController listens to focus/blur). */
+  setWindowFocused(focused: boolean): void {
+    this.windowFocused = focused !== false;
+    if (this.master) safeSet(this.master.gain, 'value', this.masterGainTarget());
   }
 
   /** Per-bus slider (Music / Effects / Ambience / UI), 0..1. Master stays on setVolume. */
@@ -969,7 +991,7 @@ export class SoundEngine {
 
   setMuted(muted: boolean): void {
     this.muted = muted === true;
-    if (this.master) safeSet(this.master.gain, 'value', muted ? 0 : this.masterVolume);
+    if (this.master) safeSet(this.master.gain, 'value', this.masterGainTarget());
   }
 
   // ── Listener pose / world acoustics ──────────────────────────────
@@ -2872,24 +2894,10 @@ export class SoundEngine {
    * @param scale 0..1 for how big that fall is (drives cutoff + level).
    */
   setWaterfallBed(distance: number | null, scale = 1): void {
-    const ctx = this.ctx;
-    if (distance === null || distance > 130) {
-      if (this.waterfallBed && ctx) this.ramp(this.waterfallBed.gain.gain, 0, 0.7);
-      return;
-    }
-    const bed = this.busBed;
-    if (!this.ctx || !bed || !this.noise) return;
-    if (!this.waterfallBed) {
-      const v = this.makeNoiseLoop('lowpass', 1500, 0.5, bed);
-      // Slow surge, so the hiss breathes instead of sitting flat under the mix.
-      const surge = this.addGainTremolo(v.gain, 0.13, 0.02);
-      this.waterfallBed = { ...v, lfo: surge.lfo, lfoGain: surge.lfoGain };
-    }
-    const g = 1 / (1 + distance / 26);
-    const size = THREE.MathUtils.clamp(scale, 0.3, 1.6);
-    this.ramp(this.waterfallBed.gain.gain, 0.115 * g * size, 0.5);
-    this.ramp(this.waterfallBed.filter.frequency, 700 + 1500 * g, 0.5);
-    if (this.waterfallBed.lfoGain) this.ramp(this.waterfallBed.lfoGain.gain, 0.03 * g, 0.5);
+    // b2.4h: the recorded fall (bed.waterfall) once decoded, the filtered-noise hiss until then.
+    const lv = waterfallLevel(distance, scale);
+    const near = distance === null || !Number.isFinite(distance) ? 0 : 1 / (1 + Math.max(0, distance) / 26);
+    this.setLayer('waterfall', 'bed.waterfall', lv, { type: 'lowpass', freq: 900 + 5200 * near, q: 0.5, procGain: 0.115, sampleGain: 0.5 }, 0.6);
   }
 
   // ── Flooding (b2.4d, audio-02) ──────────────────────────────────
@@ -3203,7 +3211,54 @@ export class SoundEngine {
     // passed 0.45, with no flash, no bolt and no relation to the strike
     // EnvironmentFx sounds for real — and the two doubled up on each other.
     // Thunder now has exactly one cause: a bolt, at the bolt's own distance.
+    this.updateZones(night, storm);
     this.tickSchedulers(now);
+  }
+
+  /**
+   * Island zones (b2.4h, audio-07): the Ambience planner reads every island VolcanicFx registered
+   * (biome, caldera, geysers at the plume's own geyserEruptionLevel) and this applies the plan on
+   * the bed bus: caldera rumble, the geyser hiss + roar, a jungle insect shimmer, and positioned
+   * one-shots (canopy birds, frogs, lava bubbles, a steam burst at each eruption onset).
+   */
+  private updateZones(night: number, storm: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.listenerKnown) return;
+    const f = this.zones.update(ctx.currentTime, this.listenerPos, night, storm, zoneSources());
+    if (f.nearIsland && !this.zonesPreloaded && this.bank) {
+      this.zonesPreloaded = true;
+      this.bank.preloadTier('zones');
+    }
+    this.setLayer('caldera', null, f.caldera * (1 - storm * 0.3), { type: 'lowpass', freq: 55 + 70 * f.caldera, q: 0.9, procGain: 0.3 }, 1.2);
+    const gz = f.geyser;
+    this.setLayer('geyserHiss', null, gz.hiss, { type: 'bandpass', freq: gz.cutoffHz, q: 0.45, procGain: 0.2 }, 0.25);
+    this.setLayer('geyserRoar', null, gz.roar, { type: 'lowpass', freq: 260 + 300 * gz.level, q: 0.6, procGain: 0.34 }, 0.25);
+    this.setLayer('insects', null, f.insects, { type: 'bandpass', freq: 5600, q: 5, procGain: 0.03 }, 1.5);
+    for (const c of f.calls) this.playZoneCall(c);
+  }
+
+  /** One positioned zone one-shot on the bed bus: the sample, else a <= 3-node procedural voice. */
+  private playZoneCall(c: ZoneCall): void {
+    const ctx = this.ctx;
+    const bed = this.busBed;
+    const p = finitePos(c.pos);
+    if (!ctx || !bed || !p) return;
+    const d = Math.hypot(p.x - this.listenerPos.x, p.y - this.listenerPos.y, p.z - this.listenerPos.z);
+    const g = gainFor('creature', d) * finiteClamp(c.volume, 0, 1.5, 0);
+    if (g <= 0.002) return;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    safeSet(filter.frequency, 'value', airCutoffFor(d));
+    const panner = makeWorldPanner(ctx, p, this.panningModel());
+    filter.connect(panner);
+    panner.connect(bed);
+    const at = ctx.currentTime + delayFor(d);
+    if (c.key && this.sampleLayer(c.key, filter, g, { rate: c.rate, priority: VOICE_PRIORITY.ambient, when: at })) return;
+    if (!this.throttle('zone')) return;
+    if (c.fallback === 'bubble') this.playTone(at, 140 * c.rate, 420 * c.rate, 0.07, 0.09 * g, 'sine', 0.004, filter);
+    else if (c.fallback === 'frog') this.playTone(at, 190 * c.rate, 150 * c.rate, 0.12, 0.05 * g, 'square', 0.01, filter);
+    else if (c.fallback === 'bird') this.playTone(at, 2600 * c.rate, 3900 * c.rate, 0.09, 0.03 * g, 'sine', 0.005, filter);
+    else this.playNoise(at, 1.2, 3200, 0.6, 0.12 * g, 'highpass', filter);
   }
 
   /**

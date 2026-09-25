@@ -572,6 +572,10 @@ export const LOGIC = [
   //                                 <= 3 sample layers and <= 3 procedural sweeteners, fall back when no bank; 12
   //                                 cannon shots: round robin never repeats, pitch/level jitter live and bounded.
   quick(tsx('test-audio-events.mjs')),
+  //   test-ambience               — b2.4h zones + mixer (audio-07, audio-11): geyser voice non-decreasing in
+  //                                 geyserEruptionLevel, caldera/lava/waterfall/jungle laws, planner one-shots,
+  //                                 settings parse/serialise round trip, VolcanicFx/SoundEngine/Menu wiring.
+  quick(tsx('test-ambience.mjs')),
   //   test-connect-supervisor     — real NetworkClient, fake socket Worker, virtual clock: cold start 7 s -> connect()
   //                                 resolves once, one live transport, no resume from a fresh page; drop -> one resume
   //                                 with this page's token; 60 s give-up + retryNow; offline/online; silent background

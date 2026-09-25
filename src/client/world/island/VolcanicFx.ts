@@ -12,6 +12,41 @@ import { geyserEruptionLevel, getIslandSurfaceY } from '../../../shared/utils/in
 import { refreshFrozenChild } from '../../rendering/three-util.js';
 import { ensureMeshGround } from './GroundTruth.js';
 import type { IslandBuildCtx } from './context.js';
+import { setZoneSourceProvider, type IslandSoundZone } from '../../audio/Ambience.js';
+import type { IslandGeyser } from '../../../shared/types/index.js';
+
+// ── Island sound zones (b2.4h, audio-07) ─────────────────────────────────────
+// Every island this builder sees registers what the ear needs (biome, centre, radius, caldera,
+// geyser vents). The audio reads it through the read-only accessor below, which reports each
+// geyser at geyserEruptionLevel for the world time the plume was LAST DRAWN with, so the voice
+// can never lead or trail the steam. An island whose group is no longer the live mesh (match
+// rebuild clears islandMeshes) drops out.
+type SoundZoneRecord = {
+  group: THREE.Object3D;
+  meshes: ReadonlyMap<string, THREE.Object3D>;
+  zone: Omit<IslandSoundZone, 'geysers'>;
+  vents: { x: number; y: number; z: number; geyser: IslandGeyser }[];
+};
+const soundZones = new Map<string, SoundZoneRecord>();
+let soundWorldTime: number | null = null;
+
+/** Read-only accessor for the audio (installed as Ambience's zone provider). */
+export function readVolcanicSoundZones(): IslandSoundZone[] {
+  const out: IslandSoundZone[] = [];
+  for (const [id, rec] of soundZones) {
+    const live = rec.meshes.get(id);
+    if (live !== undefined && live !== rec.group) { soundZones.delete(id); continue; }
+    // Not (yet / any more) the live mesh: mid-build, or the match rebuild cleared the map.
+    if (live === undefined) continue;
+    const t = soundWorldTime;
+    out.push({
+      ...rec.zone,
+      geysers: rec.vents.map((v) => ({ x: v.x, y: v.y, z: v.z, level: t === null ? 0 : geyserEruptionLevel(v.geyser, t) })),
+    });
+  }
+  return out;
+}
+setZoneSourceProvider(readVolcanicSoundZones);
 
 /** Caldera lava, ashfall, embers, smoke and geyser plumes. */
 export function buildVolcanicFx(ctx: IslandBuildCtx) {
@@ -19,6 +54,16 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
     host, island, group, r, rng, lowDetail, visualDetail, seatDecor,
     islandMaxR, footprintX, footprintZ, paletteRock, isVolcanic,
   } = ctx;
+  const soundZone: SoundZoneRecord = {
+    group,
+    meshes: host.islandMeshes,
+    zone: {
+      islandId: island.id, biome: island.profile.biome ?? (isVolcanic ? 'volcanic' : 'lush'),
+      x: island.position.x, z: island.position.z, radius: islandMaxR, caldera: null,
+    },
+    vents: [],
+  };
+  soundZones.set(island.id, soundZone);
   if (isVolcanic) {
     const pulse = host.magmaPulseUniform;
     const particleTex = host.getSoftParticleTexture();
@@ -45,6 +90,7 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
     const cpz = Math.sin(peakAngle) * peakOffset * footprintZ;
     const peakY = getIslandSurfaceY(island, cpx + island.position.x, cpz + island.position.z);
     const lavaR = Math.max(2.6, r * 0.055);
+    soundZone.zone.caldera = { x: cpx + island.position.x, y: peakY, z: cpz + island.position.z };
 
     // Ashfall — grey flakes settling over the whole island (drift + wrap).
     const baseAshY = Math.max(6, peakY * 0.4);
@@ -176,6 +222,7 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
       // The vent's own seat: the server's geyser.y is the analytic surface and
       // stays the launch height for physics; the STONE is drawn where the mesh is.
       const gy = groundAt(gx, gz, geyser.y);
+      soundZone.vents.push({ x: geyser.x, y: gy + group.position.y, z: geyser.z, geyser });
       // ── Vent: a real cracked-stone rim around a recessed dark throat ──
       // (was a flat orange RingGeometry decal + emissive disc lying on the
       // grass — the open backlog defect: "geyser vents are painted circles").
@@ -281,6 +328,7 @@ export function buildVolcanicFx(ctx: IslandBuildCtx) {
       splash.renderOrder = 2;
       group.add(splash);
       host.pushVolcanicFx((_dt, wt, cam) => {
+        soundWorldTime = wt; // the clock the plume draws with; the geyser voice reads the same one
         const far = cam.distanceTo(islandCenter) > cullRadius;
         idleSteam.visible = !far;
         if (far) { plume.visible = false; splash.visible = false; return; }
