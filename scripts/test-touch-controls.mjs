@@ -28,8 +28,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const V = await tryImport('../src/client/input/VirtualInputSource.ts');
 const IM = await tryImport('../src/client/input/InputManager.ts');
 const { Match } = await import('../src/server/core/Match.ts');
-const { SHIP } = await import('../src/shared/constants/index.ts');
+const { SHIP, SHIP_STATS, FLOODING } = await import('../src/shared/constants/index.ts');
+const { getShipDeckWalkHalfWidth } = await import('../src/shared/utils/index.ts');
+const { BAIL_RETURN_DELAY } = await import('../src/shared/flooding/bail.ts');
 const { TRUCE_SECONDS } = await import('../src/shared/truce.ts');
+const { holeRepairTime } = await import('../src/shared/flooding/floodModel.ts');
+const { findRepairableHole, getRepairLookRay } = await import('../src/shared/interactions.ts');
+// b2.2b (f6a2284c): a size-1 hole takes holeRepairTime(1) s of held input, so
+// the hold is derived from that clock plus a 0.3 s margin, never a literal.
+const REPAIR_HOLD_MS = Math.round((holeRepairTime(1) + 0.3) * 1000);
+const RECORD_MS = REPAIR_HOLD_MS + 100;
 
 // ── The stick and the buttons ─────────────────────────────────────────────
 console.log('\nVirtual stick and buttons');
@@ -81,7 +89,7 @@ function recordHold({ holdMs, cancelAtMs = null }) {
   const src = new V.VirtualInputSource(im);
   const frames = [];
   src.press('interact');
-  for (let t = 0; t <= 1600; t += TICK_MS) {
+  for (let t = 0; t <= RECORD_MS; t += TICK_MS) {
     if (cancelAtMs !== null && t >= cancelAtMs && src.isHeld('interact')) src.release('interact');
     if (t >= holdMs && src.isHeld('interact')) src.release('interact');
     const inp = im.buildInput();
@@ -91,10 +99,10 @@ function recordHold({ holdMs, cancelAtMs = null }) {
 }
 let holdFrames = [];
 if (V && IM) {
-  holdFrames = recordHold({ holdMs: 1500 });
-  const during = holdFrames.filter((f) => f.t < 1500);
+  holdFrames = recordHold({ holdMs: REPAIR_HOLD_MS });
+  const during = holdFrames.filter((f) => f.t < REPAIR_HOLD_MS);
   expect('one interact edge on the press, none after', holdFrames.filter((f) => f.interact).length === 1 && holdFrames[0].interact);
-  expect(`interactHeld true on every tick of the 1.5 s hold (${during.filter((f) => f.interactHeld).length}/${during.length})`,
+  expect(`interactHeld true on every tick of the ${REPAIR_HOLD_MS / 1000} s hold (${during.filter((f) => f.interactHeld).length}/${during.length})`,
     during.length > 40 && during.every((f) => f.interactHeld));
   expect('released after the finger lifts', holdFrames.at(-1).interactHeld === false);
   const cancelled = recordHold({ holdMs: 99999, cancelAtMs: 400 });
@@ -121,10 +129,26 @@ function replayAtHole(frames) {
     const c = Math.cos(ship.rotation), s = Math.sin(ship.rotation);
     player.onShipId = ship.id;
     player.atHelm = player.atCannon = player.atCrowNest = false;
-    player.position = { x: ship.position.x + hole.x * c + hole.z * s, y: ship.position.y + hole.y, z: ship.position.z - hole.x * s + hole.z * c };
+    // A waterline breach is worked from the hold sole beside it (the b2 reach
+    // rule test-flooding grades), not from a point in the hull skin.
+    const lx = hole.x * 0.4;
+    player.position = { x: ship.position.x + lx * c + hole.z * s, y: ship.position.y + SHIP.HOLD_FLOOR_OFFSET, z: ship.position.z - lx * s + hole.z * c };
   };
+  // b2.2e: the breach worked is the one the pirate LOOKS at (the camera ray
+  // the client prompt uses). Find the look that names this hole through the
+  // shared rule, then hold it, as a thumb on the look pad would.
+  stand();
+  let aim = null;
+  for (let yi = 0; yi < 72 && !aim; yi++) {
+    for (let pi = 0; pi <= 16 && !aim; pi++) {
+      const yaw = ship.rotation + (yi * Math.PI) / 36, pitch = -(pi * Math.PI) / 32;
+      if (findRepairableHole(player.position, ship, getRepairLookRay(player, yaw, pitch))?.id === hole.id) aim = { yaw, pitch };
+    }
+  }
+  if (!aim) expect('the breach is in reach and sight from the hold stand', false);
+  aim ??= { yaw: 0, pitch: 0 };
   let seq = 1;
-  const ticks = Math.round(1.6 * 60);
+  const ticks = Math.round((RECORD_MS / 1000) * 60);
   for (let i = 0; i < ticks && !hole.patched; i++) {
     const t = (i * 1000) / 60;
     const f = [...frames].reverse().find((fr) => fr.t <= t) ?? frames[0];
@@ -132,7 +156,7 @@ function replayAtHole(frames) {
     match.handleClientMessage(joined.playerId, {
       type: 'player_input', ts: 0,
       // The arbiter names 'repair' at a breach (Game.ts, unchanged by touch).
-      payload: { seq: seq++, yaw: 0, pitch: 0, interact: f.interact, interactHeld: f.interactHeld,
+      payload: { seq: seq++, yaw: aim.yaw, pitch: aim.pitch, interact: f.interact, interactHeld: f.interactHeld,
         interactIntent: f.interact || f.interactHeld ? 'repair' : null },
     });
     match.tick();
@@ -142,7 +166,7 @@ function replayAtHole(frames) {
 }
 if (holdFrames.length) {
   const held = replayAtHole(holdFrames);
-  expect(`holding Interact 1.5 s with a plank closes the hole (swing ${SHIP.HULL_REPAIR_SWING_TIME} s, plank used)`,
+  expect(`holding Interact ${REPAIR_HOLD_MS / 1000} s with a plank closes the hole (size-1 repair ${holeRepairTime(1)} s, plank used)`,
     held.patched && held.planksLeft === 0, JSON.stringify(held));
   // The server also patches on a lone [X] press (the throttled one-press path,
   // Match.ts), so the hold is graded on the swing clock instead: 0.4 s of
@@ -271,25 +295,50 @@ if (TC && V && IM) {
   expect(`a touch Fire tap at the manned cannon spawns a cannonball (${fired}; last ${sample ? JSON.stringify({ type: sample.type, kind: sample.kind, ammo: sample.ammo, owner: sample.ownerId === c.player.id }) : 'none'})`,
     fired >= 1 && c.player.atCannon === true);
 
-  // Bail: the big button with a bucket in hand scoops through useItem.
+  // Bail: the big button with a bucket in hand works the b2.2d SoT bucket
+  // through useItem: down in the hold it scoops (the water at her feet), up at
+  // the rail facing outboard it heaves the bucketful over the side. Since
+  // b2.2d there is no remote drain, so the hold is where the scoop happens.
   const b = stationMatch('touch-bail');
-  b.stand.at = () => b.match.snapPlayerToHelm(b.player, b.ship);
+  const bStats = SHIP_STATS[b.ship.type];
+  const atLocal = (lx, ly, lz) => {
+    const c = Math.cos(b.ship.rotation), s = Math.sin(b.ship.rotation);
+    b.player.position = { x: b.ship.position.x + lx * c + lz * s, y: b.ship.position.y + ly, z: b.ship.position.z - lx * s + lz * c };
+  };
+  b.stand.at = () => atLocal(0, SHIP.HOLD_FLOOR_OFFSET, 0);
   b.player.equippedTool = 'bucket';
   b.ship.waterLevel = 0.6;
   const w0 = b.ship.waterLevel;
-  const route = (inp) => TC.routeHeldTool(inp, 'bucket', false, b.im.isFiring());
-  b.src.press('fire');
-  let useItemTicks = 0; let fireLeaked = 0; let scoops = 0; let wasFilled = false;
-  for (let i = 0; i < 150; i++) {
-    const sent = b.send(null, route);
-    if (sent.useItem) useItemTicks++;
-    if (sent.fire) fireLeaked++;
-    if (b.player.bucketFilled && !wasFilled) scoops++;
-    wasFilled = b.player.bucketFilled;
-  }
-  b.src.release('fire');
-  expect(`holding Bail 2.5 s scoops (${scoops} scoops, water ${w0} -> ${b.ship.waterLevel.toFixed(3)}, useItem ${useItemTicks}/150, fire leaked ${fireLeaked})`,
-    scoops >= 2 && b.ship.waterLevel < w0 && fireLeaked === 0);
+  let look = { yaw: 0, pitch: 0 };
+  const route = (inp) => ({ ...TC.routeHeldTool(inp, 'bucket', false, b.im.isFiring()), yaw: b.ship.rotation + look.yaw, pitch: look.pitch });
+  let useItemTicks = 0; let fireLeaked = 0; let sentTicks = 0;
+  const holdBail = (n) => {
+    b.src.press('fire');
+    for (let i = 0; i < n; i++) {
+      const sent = b.send(null, route);
+      sentTicks++;
+      if (sent.useItem) useItemTicks++;
+      if (sent.fire) fireLeaked++;
+    }
+    b.src.release('fire');
+    for (let i = 0; i < 6; i++) b.send(null, route);
+  };
+  // One press-and-hold shorter than the BAIL_SCOOP_TIME lock = one action
+  // (a longer hold re-fires when the lock clears and would heave in the hold).
+  const ACTION_TICKS = Math.floor(FLOODING.BAIL_SCOOP_TIME * 60 * 0.5);
+  holdBail(ACTION_TICKS);
+  const scooped = b.player.bucketFilled === true;
+  const wScoop = b.ship.waterLevel;
+  // Up at the starboard rail, facing outboard (yawRel +90 deg), level look.
+  b.stand.at = () => atLocal(getShipDeckWalkHalfWidth(bStats, 0) - 0.2, bStats.height + SHIP.DECK_STAND_OFFSET, 0);
+  look = { yaw: Math.PI / 2, pitch: 0 };
+  for (let i = 0; i < Math.ceil(FLOODING.BAIL_SCOOP_TIME * 60); i++) b.send(null, route);
+  holdBail(ACTION_TICKS);
+  const heaved = b.player.bucketFilled === false;
+  for (let i = 0; i < Math.ceil((BAIL_RETURN_DELAY + 0.5) * 60); i++) b.send(null, route);
+  expect(`holding Bail in the hold scoops, holding it at the rail heaves it overboard (scooped ${scooped}, heaved ${heaved}, water ${w0} -> ${wScoop.toFixed(3)} -> ${b.ship.waterLevel.toFixed(3)} after the return delay, useItem ${useItemTicks}/${sentTicks}, fire leaked ${fireLeaked})`,
+    scooped && heaved && wScoop < w0 - FLOODING.BAIL_SCOOP_VOLUME * 0.5 && b.ship.waterLevel <= wScoop + 1e-9
+    && useItemTicks === sentTicks && fireLeaked === 0);
 }
 
 // ── Radial, utility row, minimap and chart pinch (b1.4d) ─────────────────
