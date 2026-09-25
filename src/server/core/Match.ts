@@ -18,8 +18,8 @@ import {
 } from '../../shared/cargo.js';
 import { MapGenerator } from '../world/MapGenerator.js';
 import type { HullImpactKind } from '../systems/PhysicsSystem.js';
-import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_DECK_AWASH_F, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
-import { pickRepairTargetHole } from '../systems/FloodSystem.js';
+import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
+import { FOUNDER, founderPlan, pickRepairTargetHole, takeFounderStages } from '../systems/FloodSystem.js';
 import { holeRepairTime } from '../../shared/flooding/floodModel.js';
 import { BAIL_RETURN_DELAY, bailPoseOf, canScoop, throwLanding, type BailPose } from '../../shared/flooding/bail.js';
 import { buildInputAck, buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
@@ -6086,7 +6086,7 @@ export class Match {
    * The founder, per pirate: a hand stays aboard while there is still a plank
    * above water under him, and goes over the side the moment his own footing
    * (heeled and trimmed with her) is FOUNDER_WADE_DEPTH under the live surface,
-   * or at FOUNDER_DECK_AWASH_F of SINK_TIME at the very latest. So the pirate
+   * or when the plunge begins (FOUNDER.PLUNGE_F of SINK_TIME) at the very latest. So the pirate
    * at the high end genuinely stays dry longer than the one at the flooded end,
    * and nobody is teleported off a deck that is still above the sea.
    */
@@ -6113,12 +6113,24 @@ export class Match {
         // already full to the deckhead, so he comes out the moment she starts
         // to go (ejectFounderingCrew puts him over the side, not into her).
         if (
-          ship.sinkProgress >= FOUNDER_DECK_AWASH_F
+          ship.sinkProgress >= FOUNDER.PLUNGE_F
           || footing < surfaceY - FOUNDER_WADE_DEPTH
           || isStandingInFloodedHold(player.position, ship)
         ) {
           this.ejectFounderingCrew(ship, player, rapid);
         }
+      }
+      // Settle / burst / plunge, once each, for the FX and audio lanes (b2.2g).
+      for (const stage of takeFounderStages(ship)) {
+        const plan = founderPlan(ship);
+        this.broadcast({
+          type: 'ship_founder_stage',
+          ts: Date.now(),
+          payload: {
+            shipId: ship.id, stage, x: ship.position.x, y: ship.position.y, z: ship.position.z,
+            endZ: (plan?.endSign ?? 1) * SHIP_STATS[ship.type].length * 0.5,
+          },
+        });
       }
       // Her roster empties only once the last hand is actually off her.
       if (ship.crewIds.length > 0 && !this.state.players.some((p) => p.onShipId === ship.id)) {

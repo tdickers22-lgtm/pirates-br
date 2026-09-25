@@ -1078,6 +1078,10 @@ type MsgType =
    *  still be swimming, boarding and fighting, so this is emphatically not an
    *  elimination (WIN-01). */
   | 'ship_sunk'
+  /** One stage of a founder (b2.2g), sent once each for FX and audio:
+   *  payload { shipId, stage: 'settle' | 'burst' | 'plunge', x, y, z, endZ }
+   *  (endZ = hull-local z of the flooded end she goes down by). */
+  | 'ship_founder_stage'
   /** A crew is off the board (nobody left who can still contend) — HUD announce
    *  + CREWS AFLOAT counter pulse. */
   | 'crew_eliminated'

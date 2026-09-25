@@ -449,3 +449,175 @@ export function pickRepairTargetHole(ship: Ship, t: number, storm = 0): ShipHole
   }
   return best;
 }
+
+// ── The founder profile (b2.2g, holes-09) ───────────────────────────────────
+/** Fraction of SHIP.SINK_TIME by which her weather deck (midships) is
+ *  FOUNDER_WADE_DEPTH under, and by which the plunge is about to begin. */
+export const FOUNDER_DECK_AWASH_F = 0.6;
+/** How deep the plank under a pirate's boots must go before he is swimming
+ *  rather than wading: the same number the descent aims the deck at. */
+export const FOUNDER_WADE_DEPTH = 0.4;
+/** The founder, in three stages over SHIP.SINK_TIME (20 s):
+ *  - SETTLE 0 -> SETTLE_F (0-4 s): the last of her buoyancy goes, she drops
+ *    SETTLE_SHARE of her remaining freeboard fast (ease-out) and trims to
+ *    half her final angle, so the flooded end's deck goes awash first;
+ *  - TRIM SETTLE_F -> PLUNGE_F: she keeps sinking slowly and trims on to
+ *    TRIM_MIN..TRIM_MAX toward the water (15-25 deg), list <= LIST_MAX;
+ *  - PLUNGE PLUNGE_F -> 1: down by the flooded end at PLUNGE_RATE, steepening
+ *    by PLUNGE_TRIM_EXTRA.
+ *  Stage events {settle, burst, plunge} fire once each for FX and audio;
+ *  `burst` is the air coming out of the hatches as the flooded end goes
+ *  under (first tick in BURST_F window with that deck below the sea). */
+export const FOUNDER = {
+  SETTLE_F: 0.2,
+  SETTLE_SHARE: 0.45,
+  PLUNGE_F: 0.7,
+  PLUNGE_RATE: 2.0,
+  /** Seconds the plunge takes to reach PLUNGE_RATE from the settling rate. */
+  PLUNGE_RAMP: 0.4,
+  TRIM_MIN: 0.28,
+  TRIM_MAX: 0.38,
+  PLUNGE_TRIM_EXTRA: 0.05,
+  /** Trim fraction reached by the end of the settle. */
+  SETTLE_TRIM_SHARE: 0.55,
+  /** Progress by which the full trim is reached. */
+  TRIM_FULL_F: 0.5,
+  LIST_MAX: 0.34,
+  /** Rate the attitude chases its target (1/s). */
+  ATTITUDE_RATE: 2.5,
+  BURST_F: [0.1, 0.3] as const,
+  /** Where along her half-length the flooded end's deck is judged. */
+  END_DECK_F: 0.9,
+} as const;
+
+export type FounderStage = 'settle' | 'burst' | 'plunge';
+
+interface FounderState {
+  /** Metres her midships deck had to fall at the founder to be WADE under. */
+  deckDrop: number;
+  /** +1 down by the head, -1 by the stern. */
+  endSign: number;
+  /** Final trim magnitude (rad) and signed list target (rad). */
+  trim: number;
+  roll: number;
+  plungeT: number;
+  sent: Set<FounderStage>;
+  pending: FounderStage[];
+}
+const founderByShip = new WeakMap<Ship, FounderState>();
+
+/** Where the water is: the list it gives her (slosh centroid + flooding
+ *  breaches, floodListTargets) plus her breaches by area, since at fill 1 the
+ *  hold has no free surface and every hole's inside head is spent. Both
+ *  normalised to her half-length / half-beam. */
+function founderWaterCentroid(ship: Ship, t: number, storm: number): { cx: number; cz: number } {
+  const stats = SHIP_STATS[ship.type];
+  const halfW = Math.max(0.001, stats.width * 0.5);
+  const halfL = Math.max(0.001, stats.length * 0.5);
+  const list = floodListTargets(ship, t, storm);
+  let area = 0;
+  let hx = 0;
+  let hz = 0;
+  for (const h of ship.holes ?? []) {
+    if (h.patched) continue;
+    const a = holeSizeArea(h.size);
+    area += a;
+    hx += a * clamp(h.x / halfW, -1, 1);
+    hz += a * clamp(h.z / halfL, -1, 1);
+  }
+  if (area > 0) { hx /= area; hz /= area; }
+  // floodListTargets: water at +x rolls NEGATIVE, water forward trims POSITIVE.
+  const cx = -list.roll / FLOODING.LIST_ROLL_MAX + hx;
+  const cz = list.trim / FLOODING.LIST_TRIM_MAX + hz;
+  return { cx: clamp(cx, -1, 1), cz: clamp(cz, -1, 1) };
+}
+
+/** Called the instant a hull founders, BEFORE the wreck is riddled: freezes
+ *  the end she goes down by and how far she has to fall from where she IS
+ *  (already settled by her full hold). */
+export function beginShipFounder(ship: Ship, t: number, storm = 0): void {
+  const stats = SHIP_STATS[ship.type];
+  const { cx, cz } = founderWaterCentroid(ship, t, storm);
+  // No asymmetry at all: ships go by the head.
+  const endSign = cz < -0.02 ? -1 : 1;
+  const trim = FOUNDER.TRIM_MIN + (FOUNDER.TRIM_MAX - FOUNDER.TRIM_MIN) * Math.min(1, Math.abs(cz));
+  const roll = -clamp(cx * 0.5, -1, 1) * FOUNDER.LIST_MAX;
+  const deckDrop = Math.max(0.3, ship.position.y + stats.height + SHIP.DECK_STAND_OFFSET + FOUNDER_WADE_DEPTH);
+  founderByShip.set(ship, { deckDrop, endSign, trim, roll, plungeT: 0, sent: new Set(), pending: [] });
+}
+
+/** Read-only founder plan (suites). */
+export function founderPlan(ship: Ship): Readonly<Omit<FounderState, 'sent' | 'pending'>> | undefined {
+  return founderByShip.get(ship);
+}
+
+/** Stage events raised since the last call (Match broadcasts them). */
+export function takeFounderStages(ship: Ship): FounderStage[] {
+  const st = founderByShip.get(ship);
+  if (!st || st.pending.length === 0) return [];
+  const out = st.pending;
+  st.pending = [];
+  return out;
+}
+
+function smooth01(x: number): number {
+  const c = clamp(x, 0, 1);
+  return c * c * (3 - 2 * c);
+}
+
+/** One tick of a foundering hull: descent, attitude and stage events. The
+ *  caller retires her when sinkProgress reaches 1. */
+export function stepShipFounder(ship: Ship, dt: number, t: number, storm = 0): void {
+  if (!founderByShip.has(ship)) beginShipFounder(ship, t, storm);
+  const st = founderByShip.get(ship)!;
+  const stats = SHIP_STATS[ship.type];
+  const emit = (stage: FounderStage) => {
+    if (st.sent.has(stage)) return;
+    st.sent.add(stage);
+    st.pending.push(stage);
+  };
+  emit('settle');
+  ship.sinkProgress += dt / SHIP.SINK_TIME;
+  const p = ship.sinkProgress;
+  const F = FOUNDER;
+  // Descent.
+  const settleDrop = st.deckDrop * F.SETTLE_SHARE;
+  const trimRate = (st.deckDrop - settleDrop) / ((FOUNDER_DECK_AWASH_F - F.SETTLE_F) * SHIP.SINK_TIME);
+  let descent: number;
+  if (p < F.SETTLE_F) {
+    const x = p / F.SETTLE_F;
+    descent = (2 * (1 - x) * settleDrop) / (F.SETTLE_F * SHIP.SINK_TIME);
+  } else if (p < F.PLUNGE_F) {
+    descent = trimRate;
+  } else {
+    emit('plunge');
+    st.plungeT += dt;
+    descent = trimRate + (F.PLUNGE_RATE - trimRate) * Math.min(1, st.plungeT / F.PLUNGE_RAMP);
+  }
+  ship.position.y -= dt * descent;
+  // She loses way (frame-rate independent, the per-16 ms feel kept).
+  const sinkDrag = Math.pow(0.94, dt / 0.016);
+  ship.velocity.x *= sinkDrag;
+  ship.velocity.z *= sinkDrag;
+  ship.angularVelocity *= Math.pow(0.9, dt / 0.016);
+  // Attitude: trim toward the flooded end, list toward the wet side.
+  const trimShare = p < F.SETTLE_F
+    ? F.SETTLE_TRIM_SHARE * smooth01(p / F.SETTLE_F)
+    : F.SETTLE_TRIM_SHARE + (1 - F.SETTLE_TRIM_SHARE) * smooth01((p - F.SETTLE_F) / (F.TRIM_FULL_F - F.SETTLE_F));
+  const trimTarget = st.endSign * (st.trim * trimShare + F.PLUNGE_TRIM_EXTRA * smooth01((p - F.PLUNGE_F) / 0.15));
+  const rollTarget = st.roll * smooth01(p / F.TRIM_FULL_F);
+  const blend = 1 - Math.exp(-dt * F.ATTITUDE_RATE);
+  ship.pitch = (ship.pitch ?? 0) + (trimTarget - (ship.pitch ?? 0)) * blend;
+  ship.roll = (ship.roll ?? 0) + (rollTarget - (ship.roll ?? 0)) * blend;
+  ship.heave = 0;
+  ship.luffing = false;
+  ship.aground = false;
+  // Burst: the flooded end's deck goes under and the air comes out of her.
+  if (!st.sent.has('burst') && p >= F.BURST_F[0]) {
+    const lz = st.endSign * stats.length * 0.5 * F.END_DECK_F;
+    const deckY = ship.position.y + stats.height + SHIP.DECK_STAND_OFFSET - lz * Math.sin(ship.pitch ?? 0);
+    const wx = ship.position.x + lz * Math.sin(ship.rotation);
+    const wz = ship.position.z + lz * Math.cos(ship.rotation);
+    if (p >= F.BURST_F[1] || deckY < gerstnerHeight(wx, wz, t, WAVE_PARAMS, storm)) emit('burst');
+  }
+}

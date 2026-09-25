@@ -733,13 +733,18 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   // A full hold has settled her (the heave target reads floodSettle): the
   // fixture jumps the water, so it takes the settle too, or the D15 inside
   // head reads the breach as pushed back by a hold she has not sunk into.
-  // The descent profile is still paced from the design datum (b2.2g re-paces
-  // the founder from the settled hull), so the settle is lifted again once the
-  // founder has captured her list.
+  // b2.2g paces the founder from the hull as she IS (settled), so the settle
+  // stays on: no lift after the capture.
   const settle = floodSettle(ship.type, 1);
   ship.position.y -= settle;
+  // Every founder stage event Match sends (b2.2g), with the progress it fired at.
+  const stageEvents = [];
+  match.broadcast = (msg) => {
+    if (msg.type === 'ship_founder_stage' && msg.payload?.shipId === ship.id) {
+      stageEvents.push({ stage: msg.payload.stage, p: ship.sinkProgress });
+    }
+  };
   match.evaluateShipSinking(ship);
-  ship.position.y += settle;
   expect('she founders', ship.sinking === true);
   expect('a foundering hull does NOT let go her anchor', ship.anchored === false,
     `anchored=${ship.anchored}`);
@@ -750,9 +755,34 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
   const ticks = Math.round(SHIP.SINK_TIME * 60);
   const aboardAt = new Map(crew.map((p) => [p.id, ticks]));
   let deckAwashAt = ticks;
+  // b2.2g founder profile samples.
+  let maxPitchBeforePlunge = -Infinity;
+  let maxAbsPitch = 0;
+  let maxAbsRoll = 0;
+  let yAtPlunge = null;
+  let pAtPlunge = null;
+  let yLast = ship.position.y;
+  let pLast = ship.sinkProgress;
+  let minLateRate = Infinity;
+  let maxLateRate = 0;
   for (let i = 0; i < ticks; i += 1) {
+    const yBefore = ship.position.y;
     match.physics.update(DT, i * DT, st.ships, st.players, [], [], [], null);
     match.updateFounderingCrew(DT);
+    if (ship.alive) {
+      const p = ship.sinkProgress;
+      if (p < 0.7) maxPitchBeforePlunge = Math.max(maxPitchBeforePlunge, ship.pitch ?? 0);
+      maxAbsPitch = Math.max(maxAbsPitch, Math.abs(ship.pitch ?? 0));
+      maxAbsRoll = Math.max(maxAbsRoll, Math.abs(ship.roll ?? 0));
+      if (p >= 0.7 && yAtPlunge === null) { yAtPlunge = yBefore; pAtPlunge = p - DT / SHIP.SINK_TIME; }
+      if (p >= 0.75) {
+        const rate = (yBefore - ship.position.y) / DT;
+        minLateRate = Math.min(minLateRate, rate);
+        maxLateRate = Math.max(maxLateRate, rate);
+      }
+      yLast = ship.position.y;
+      pLast = p;
+    }
     for (const p of crew) {
       if (p.onShipId !== ship.id && aboardAt.get(p.id) === ticks) aboardAt.set(p.id, i);
     }
@@ -774,12 +804,42 @@ console.log('\nThe founder is a SCENE: crew ride the deck down, no anchor, down 
         `pitch=${(ship.pitch ?? 0).toFixed(3)}`);
     }
   }
+  // ── b2.2g: the founder PROFILE (holes-09). Settle, trim toward the flooded
+  // end 15-25 deg with a list <= 20 deg, then a 1.5-2.5 m/s plunge.
+  expect('b2.2g: she trims >= 0.26 rad (15 deg) down by the flooded HEAD before sinkProgress 0.7',
+    maxPitchBeforePlunge >= 0.26, `max pitch before 0.7 = ${maxPitchBeforePlunge.toFixed(3)} rad`);
+  expect('b2.2g: the trim never passes 25 deg and the list never passes 20 deg',
+    maxAbsPitch <= 0.437 && maxAbsRoll <= 0.35,
+    `max |pitch| ${maxAbsPitch.toFixed(3)} max |roll| ${maxAbsRoll.toFixed(3)}`);
+  const plungeRate = yAtPlunge === null ? 0 : (yAtPlunge - yLast) / ((pLast - pAtPlunge) * SHIP.SINK_TIME);
+  expect('b2.2g: she plunges in the last 30%: mean descent 1.5-2.5 m/s',
+    plungeRate >= 1.5 && plungeRate <= 2.5,
+    `mean ${plungeRate.toFixed(2)} m/s over p ${pAtPlunge?.toFixed(3)}..${pLast.toFixed(3)}`);
+  expect('b2.2g: ...and every tick past 75% goes down at 1.5-2.5 m/s (no stall, no drop)',
+    minLateRate >= 1.5 && maxLateRate <= 2.5,
+    `tick rate ${minLateRate.toFixed(2)}..${maxLateRate.toFixed(2)} m/s`);
+  console.log(`    founder profile: max pitch before 0.7 ${maxPitchBeforePlunge.toFixed(3)} rad, max |roll| ${maxAbsRoll.toFixed(3)}, `
+    + `plunge ${plungeRate.toFixed(2)} m/s (ticks ${minLateRate.toFixed(2)}..${maxLateRate.toFixed(2)}), `
+    + `deck awash ${(deckAwashAt / ticks).toFixed(2)}, hands off fwd ${(aboardAt.get(fwd.id) / ticks).toFixed(2)} aft ${(aboardAt.get(aft.id) / ticks).toFixed(2)}, `
+    + `stages ${stageEvents.map((e) => `${e.stage}@${e.p.toFixed(3)}`).join(' ')}`);
+  const stageCount = (name) => stageEvents.filter((e) => e.stage === name).length;
+  const stageAt = (name) => stageEvents.find((e) => e.stage === name)?.p ?? NaN;
+  expect('b2.2g: stage events settle, burst, plunge are each sent exactly once',
+    stageEvents.length === 3 && stageCount('settle') === 1 && stageCount('burst') === 1 && stageCount('plunge') === 1,
+    JSON.stringify(stageEvents.map((e) => `${e.stage}@${e.p.toFixed(3)}`)));
+  expect('b2.2g: ...in order: settle at the founder, burst at 0.1-0.3, plunge at 0.7',
+    stageAt('settle') <= 0.01 && stageAt('burst') >= 0.1 && stageAt('burst') <= 0.3
+      && stageAt('plunge') >= 0.7 && stageAt('plunge') < 0.72,
+    `settle ${stageAt('settle').toFixed(3)} burst ${stageAt('burst').toFixed(3)} plunge ${stageAt('plunge').toFixed(3)}`);
   expect('her weather deck goes under around 60% of SINK_TIME, not on the first tick',
     deckAwashAt > ticks * 0.4 && deckAwashAt < ticks * 0.8,
     `awash at tick ${deckAwashAt}/${ticks} (${(deckAwashAt / ticks * 100).toFixed(0)}%)`);
   expect('the pirate at the flooded end swims first, the one at the high end stays dry longer',
     aboardAt.get(fwd.id) < aboardAt.get(aft.id),
     `fwd=${aboardAt.get(fwd.id)} aft=${aboardAt.get(aft.id)} of ${ticks}`);
+  expect('b2.2g: the hand at the high end rides her past 60% (his planks are still dry; he goes at the plunge at the latest)',
+    aboardAt.get(aft.id) > ticks * 0.62 && aboardAt.get(aft.id) <= ticks * 0.71,
+    `aft off at ${(aboardAt.get(aft.id) / ticks).toFixed(3)}`);
   expect('everyone is off her by the time she is gone',
     crew.every((p) => p.onShipId === null && (p.state === 'swimming' || p.state === 'downed' || p.state === 'eliminated')),
     crew.map((p) => `${p.state}:${p.onShipId}`).join(','));
