@@ -161,6 +161,9 @@ export const LOGIC = [
   // RNG-01: two seeded Matches ticked 90 s side by side, state hashed each
   // second, plus a different-matchId control. ~11 s, so not in the quick tier.
   tsx('test-match-determinism.mjs'),
+  // performance-13 / vm:physics:5 (b2.1h): ms per server tick, 12 hulls in
+  // combat, storm sea state, 30 s sim: p99 <= 4.0 ms, p50 <= 2.0 ms. ~30 s.
+  tsx('test-tick-budget.mjs'),
   // RNG-01 pacing gate: minutes of seeded sim, so opt-in (PACING=1) and long.
   { ...tsx('test-pacing-curve.mjs'), optIn: 'PACING', timeoutMs: 1_500_000,
     why: 'opt-in slow tier: set PACING=1 (two 13-minute seeded matches)' },
