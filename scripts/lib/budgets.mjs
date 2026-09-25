@@ -298,6 +298,8 @@ export const FRAME_GOVERNOR = {
 export const MEMORY_BUDGETS = {
   phone: { gpuMB: 140, texturesMB: 64, heapMB: 120 },
   ipad: { gpuMB: 220, texturesMB: 96, heapMB: 150 },
+  // b3.1b: the desktop low row (section 3 column 1: Air-class laptop on the low tier, 960x540 @1).
+  desktopLow: { gpuMB: 256, texturesMB: 96, heapMB: 150 },
 };
 
 // ═══ test-tick-budget: server ms per tick (b2.1h) ═══════════════════════════════════════════════════
