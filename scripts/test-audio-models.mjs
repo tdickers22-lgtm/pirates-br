@@ -186,8 +186,16 @@ function downstream(from) {
     return d.has(core.worldFilter) && d.has(core.limiter) && d.has(ctx.destination);
   });
   check('core: sfx, ambience and music pass the world filter and the limiter', world && AUDIO_BUSES.length === 4);
-  check('core: limiter is the last node (limiter -> destination only)',
-    core.limiter.outs.length === 1 && core.limiter.outs[0] === ctx.destination && core.limiter.ratio.value >= 12 && core.limiter.threshold.value <= -1);
+  // b2.4h: the limiter overshoots on transients in a real render, so a half-scale WaveShaper
+  // ceiling follows it (identity below 0.75, never reaching -1.05 dBFS): limiter -> half -> shaper -> out.
+  const half = core.limiter.outs.length === 1 ? core.limiter.outs[0] : null;
+  const shaper = half?.outs?.length === 1 ? half.outs[0] : null;
+  const curve = shaper?.curve ?? null;
+  const ceilOk = !!curve && curve.length >= 1024 && Math.max(...Array.from(curve, Math.abs)) < 10 ** (-1 / 20)
+    && Math.abs(curve[Math.round((curve.length - 1) * 0.6)] - 0.4) < 2e-3;
+  check('core: limiter -> half-scale peak ceiling -> destination (identity below the knee, max < -1 dBFS)',
+    !!shaper && shaper.outs.length === 1 && shaper.outs[0] === ctx.destination && half.gain?.value === 0.5 && ceilOk
+      && core.limiter.ratio.value >= 12 && core.limiter.threshold.value <= -1);
   const near = combatDuckGains(30);
   const far = combatDuckGains(41);
   check('core: combat within 40 m ducks ambience -6 dB and music -12 dB, never ui',

@@ -41,6 +41,26 @@ export interface AudioCoreNodes {
   levels: Record<AudioBusName, GainNode>;
 }
 
+/** Sample-peak ceiling after the limiter (b2.4h). The DynamicsCompressor limiter overshoots on
+ *  transients (audio-render-probe measured a broadside at +0.14 dBFS and splash.small at -0.5 through
+ *  it), so a WaveShaper catches what it lets through: identity below CEILING_KNEE, a tanh shoulder
+ *  above that can never reach CEILING_DB. The shaper sees the signal at half scale (inputs up to
+ *  +6 dBFS land inside its [-1, 1] domain). */
+export const CEILING_DB = -1.05;
+export const CEILING_KNEE = 0.75;
+export function ceilingCurve(n = 4096): Float32Array<ArrayBuffer> {
+  const c = Math.pow(10, CEILING_DB / 20);
+  const k = CEILING_KNEE;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const y = ((i / (n - 1)) * 2 - 1) * 2; // shaper input x in [-1, 1] carries y = 2x
+    const a = Math.abs(y);
+    const v = a <= k ? a : k + (c - k) * Math.tanh((a - k) / (c - k));
+    out[i] = Math.sign(y) * v;
+  }
+  return out;
+}
+
 /** Limiter settings: threshold -1.5 dB, hard knee, 20:1, 2 ms attack. */
 export const LIMITER = { threshold: -1.5, knee: 0, ratio: 20, attack: 0.002, release: 0.1 } as const;
 
@@ -51,7 +71,19 @@ export function buildAudioCore(ctx: AudioGraphContext, masterGain = 0.55): Audio
   safeSet(limiter.ratio, 'value', LIMITER.ratio);
   safeSet(limiter.attack, 'value', LIMITER.attack);
   safeSet(limiter.release, 'value', LIMITER.release);
-  limiter.connect(ctx.destination);
+  const shaperCtor = (ctx as unknown as { createWaveShaper?: () => WaveShaperNode }).createWaveShaper;
+  if (typeof shaperCtor === 'function') {
+    const half = ctx.createGain();
+    safeSet(half.gain, 'value', 0.5);
+    const ceiling = shaperCtor.call(ctx);
+    ceiling.curve = ceilingCurve();
+    ceiling.oversample = '2x';
+    limiter.connect(half);
+    half.connect(ceiling);
+    ceiling.connect(ctx.destination);
+  } else {
+    limiter.connect(ctx.destination);
+  }
 
   const glue = ctx.createDynamicsCompressor();
   safeSet(glue.threshold, 'value', -14);
