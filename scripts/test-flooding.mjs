@@ -1118,6 +1118,96 @@ console.log('\nHole sizes 1-3: a hit near a wound widens it, a bigger breach tak
   expect('a size-3 repair needs >= 3.0 s of held input', s3.held >= 3.0 && s3.held < 3.5, `held=${s3.held.toFixed(2)} s`);
 }
 
+console.log('\nThe SoT bucket (b2.2d, holes-05): scoop in the hold water, throw over the rail, bots walk the cycle, no auto-carpenter:');
+{
+  const setup = (id) => {
+    const match = new Match({ matchId: `bucket-${id}`, botCount: 1 });
+    match.state.phase = 'playing';
+    const ship = match.state.ships[0];
+    ship.holes = []; ship.pitch = 0; ship.roll = 0; ship.heave = 0; ship.anchored = true;
+    ship.waterLevel = 0.5;
+    const stats = SHIP_STATS[ship.type];
+    const player = match.state.players.find((p) => p.shipId === ship.id) ?? match.state.players[0];
+    player.onShipId = ship.id; player.shipId = ship.id;
+    player.atCannon = false; player.atHelm = false; player.atCrowNest = false;
+    player.equippedTool = 'bucket'; player.bucketFilled = false; player.bailScoopProgress = 0;
+    const cos = Math.cos(ship.rotation), sin = Math.sin(ship.rotation);
+    const place = (lx, ly, lz) => {
+      player.position = { x: ship.position.x + lx * cos + lz * sin, y: ship.position.y + ly, z: ship.position.z + lz * cos - lx * sin };
+    };
+    const deckY = stats.height + SHIP.DECK_STAND_OFFSET;
+    const holdY = SHIP.HOLD_FLOOR_OFFSET;
+    const client = { playerId: player.id, appliedInputSeq: 0, consumedSeq: {}, lastOneShotAt: {} };
+    let seq = 0;
+    const press = (yawRel, pitch) => {
+      match.t += 1; player.bailScoopProgress = 0; seq += 1;
+      match.applyInput(client, { seq, yaw: ship.rotation + yawRel, pitch, useItem: true }, 1 / 30);
+      player.bailScoopProgress = 0;
+    };
+    const settle = (seconds) => { const end = match.t + seconds; while (match.t < end) { match.t += 1 / 30; match.processBailReturns?.(); } };
+    return { match, ship, stats, player, place, deckY, holdY, press, settle };
+  };
+
+  { // 1. weather deck, looking ahead: refused
+    const k = setup('deck');
+    k.place(0.3, k.deckY, -k.stats.length * 0.3);
+    k.press(0, -0.2);
+    expect('a scoop from the weather deck is refused (water unchanged)', k.ship.waterLevel === 0.5 && !k.player.bucketFilled,
+      `water ${k.ship.waterLevel} filled ${k.player.bucketFilled}`);
+  }
+  { // 2. in the hold: scoop works, a heave down there comes back within 1.5 s
+    const k = setup('hold');
+    k.place(k.stats.width * 0.2, k.holdY, -k.stats.length * 0.2);
+    k.press(0, -0.6);
+    const afterScoop = k.ship.waterLevel;
+    expect('standing in hold water 0.5 the scoop takes a bucketful', k.player.bucketFilled && afterScoop < 0.5, `water ${afterScoop}`);
+    k.press(0, 0);
+    k.settle(1.5);
+    expect('a heave inside the hold returns within 1.5 s (net 0)', Math.abs(k.ship.waterLevel - 0.5) < 1e-9 && !k.player.bucketFilled,
+      `water ${k.ship.waterLevel}`);
+    expect('the spilled bucket raises a splash event', (k.match.bailSpills ?? []).some((e) => e.landing === 'inHold'), JSON.stringify(k.match.bailSpills));
+    // 3. at the starboard rail, aimed outboard: gone for good
+    k.press(0, -0.6);
+    const scooped = k.ship.waterLevel;
+    k.place(k.stats.width * 0.40, k.deckY, 0);
+    k.press(Math.PI / 2, 0);
+    k.settle(2);
+    expect('a heave at the rail aimed outboard removes it', Math.abs(k.ship.waterLevel - scooped) < 1e-9 && scooped < 0.5,
+      `scooped ${scooped} now ${k.ship.waterLevel}`);
+    // ... and the same heave aimed inboard lands on deck and runs back
+    k.place(k.stats.width * 0.2, k.holdY, -k.stats.length * 0.2);
+    k.press(0, -0.6);
+    const s2 = k.ship.waterLevel;
+    k.place(k.stats.width * 0.40, k.deckY, 0);
+    k.press(-Math.PI / 2, 0);
+    k.settle(1.5);
+    expect('a heave at the rail aimed inboard lands on deck and returns', Math.abs(k.ship.waterLevel - (s2 + FLOODING.BAIL_SCOOP_VOLUME)) < 1e-9,
+      `scooped ${s2} now ${k.ship.waterLevel}`);
+  }
+  { // 4. a bot on the weather deck does not drain remotely
+    const k = setup('bot');
+    k.player.isBot = true;
+    k.place(0.4, k.deckY, -k.stats.length * 0.3);
+    const start = { ...k.player.position };
+    for (let i = 0; i < 30; i += 1) { k.match.t += 1 / 30; k.match.updateBotFlooding(1 / 30); }
+    expect('a bot on the weather deck with water 0.5 lowers it by 0 in 1 s', k.ship.waterLevel === 0.5, `water ${k.ship.waterLevel}`);
+    const moved = Math.hypot(k.player.position.x - start.x, k.player.position.z - start.z);
+    expect('... and he is walking to the hold, not standing still', moved > 0.05 || (k.player.velocity && Math.hypot(k.player.velocity.x, k.player.velocity.z) > 0.1), `moved ${moved.toFixed(3)} m`);
+    k.place(k.stats.width * 0.2, k.holdY, -k.stats.length * 0.2);
+    for (let i = 0; i < 3; i += 1) { k.match.t += 1 / 30; k.match.updateBotFlooding(1 / 30); }
+    expect('once in the hold water the bot scoops a bucketful', k.player.bucketFilled && k.ship.waterLevel < 0.5, `water ${k.ship.waterLevel}`);
+  }
+  { // 5. no auto-carpenter
+    const k = setup('carpenter');
+    k.ship.inventory = [{ item: 'wood_plank', qty: 20 }];
+    k.ship.holes = [hole(k.stats.width * 0.45, 0.05, 0), hole(-k.stats.width * 0.45, 0.05, 1)];
+    for (const p of k.match.state.players) { p.onShipId = null; p.position = { x: 9999, y: 0, z: 9999 }; }
+    for (let i = 0; i < 60 * 30; i += 1) { k.match.t += 1 / 30; k.match.updateFieldRepairs(1 / 30); }
+    expect('no hole closes without a pirate at it (60 s anchored, 20 planks aboard)', k.ship.holes.every((h) => !h.patched),
+      `patched ${k.ship.holes.filter((h) => h.patched).length}`);
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} flooding assertion(s) failed.`);
   process.exit(1);

@@ -26,6 +26,7 @@
  *     take it back. No sailing station ever can.
  */
 import * as THREE from 'three';
+import { bailPoseOf, canScoop, throwLanding } from '../../shared/flooding/bail.js';
 import { ECONOMY, HARVEST, PLAYER, SHIP_STATS, UPGRADE_COSTS } from '../../shared/constants/index.js';
 import { BROKER_NAME, BROKER_NAME_PLURAL } from '../ui/DisplayNames.js';
 import type { GameState, Island, IslandNpc, IslandProp, ItemStack, Player, Ship, ShipHole, ShipKeg, ShipUpgradeType, TreasureChest, UpgradeStation } from '../../shared/types/index.js';
@@ -438,12 +439,24 @@ export class InteractionPrompts {
         if (!hasBucket) {
           prompt = `Equip the Bucket ${holdGlyph('supplyWheel')} to bail`;
           label = `Bilge flooding ${pct}% · grab the bucket from the supply wheel`;
-        } else if (player.bucketFilled) {
-          prompt = `${glyph('interact')} Heave the water overboard`;
-          label = 'Bucket full — toss it over the side';
         } else {
-          prompt = `${glyph('interact')} Fill the bucket from the bilge`;
-          label = `Bilge flooding ${pct}% · scoop a bucketful out`;
+          // b2.2d: the SAME predicates the server bails by (shared/flooding/bail.ts).
+          const pose = bailPoseOf(player.position, player.rotation.x, player.rotation.y, ship);
+          if (player.bucketFilled) {
+            const clears = throwLanding(ship.type, pose).landing === 'overboard';
+            prompt = clears
+              ? `${glyph('interact')} Heave the water overboard`
+              : 'Throw it OVER THE SIDE';
+            label = clears
+              ? 'Bucket full · heave it over the rail'
+              : 'Bucket full · on deck it runs back into the bilge, go to the rail';
+          } else if (canScoop(ship.type, ship.waterLevel ?? 0, pose)) {
+            prompt = `${glyph('interact')} Fill the bucket from the bilge`;
+            label = `Bilge flooding ${pct}% · scoop a bucketful out`;
+          } else {
+            prompt = 'Go below to the hold water to scoop';
+            label = `Bilge flooding ${pct}% · stand in the water or look down at it`;
+          }
         }
         // Ambient (no geometry of its own): only ever the fallback offer.
         candidates.push({ prompt, label, score: -0.5, kind: 'bail', tier: TIER_AMBIENT, distance: 0, dot: 0 });

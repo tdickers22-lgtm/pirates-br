@@ -21,6 +21,7 @@ import type { HullImpactKind } from '../systems/PhysicsSystem.js';
 import { PhysicsSystem, applyShipRudderSteering, stormSeaState, FOUNDER_DECK_AWASH_F, FOUNDER_WADE_DEPTH } from '../systems/PhysicsSystem.js';
 import { pickRepairTargetHole } from '../systems/FloodSystem.js';
 import { holeRepairTime } from '../../shared/flooding/floodModel.js';
+import { BAIL_RETURN_DELAY, bailPoseOf, canScoop, throwLanding, type BailPose } from '../../shared/flooding/bail.js';
 import { buildInputAck, buildHotSnapshot, buildWireSnapshot } from './snapshot.js';
 import { WeaponSystem } from '../systems/WeaponSystem.js';
 import type { HitscanTrace } from '../systems/WeaponSystem.js';
@@ -47,6 +48,7 @@ import {
   getShipDeckRaiseAt,
   getShipDeckY,
   getShipCompanionwayConfig,
+  getShipDeckWalkHalfWidth,
   gerstnerHeight,
   WAVE_PARAMS,
   intersectRaySeaRock,
@@ -395,9 +397,6 @@ const CUTLASS_LUNGE_DAMAGE = 50;
 // slide), 52 measured ~15m ("wayyyy too far"). 40 lands ~11.5-12m — a real
 // gap-closer that stays chill.
 const CUTLASS_LUNGE_IMPULSE = 40;
-/** A crewmate this close to a breach owns it: the auto-carpenter stands aside
- *  rather than closing the hole the pirate is standing at with a hammer. */
-const CARPENTER_STAND_ASIDE_METERS = 6;
 /** Kill credit for prior damage expires after this long (storm/drown deaths). */
 const KILL_CREDIT_WINDOW_SECONDS = 90;
 /**
@@ -653,6 +652,15 @@ export class Match {
   private lastJumpHeldByPlayer = new Map<string, boolean>();
   /** Per-bot cooldown (sim seconds) before the next plank-repair while flooding. */
   private botRepairCooldownAt = new Map<string, number>();
+  /** Bot damage-control: when a bot's next scoop/heave or repair blow may land, and
+   *  how long he has held the hammer on the current breach (b2.2d). */
+  private botBailReadyAt = new Map<string, number>();
+  private botRepairHeld = new Map<string, { holeId: number; held: number }>();
+  /** Bucketfuls thrown inside the hull outline, running back to the bilge (b2.2d). */
+  readonly pendingBailReturns: Array<{ shipId: string; at: number; volume: number }> = [];
+  /** Splash events for heaves that landed aboard: {shipId, playerId, x, z, landing, t}.
+   *  Server-side record; the wire type + client splash FX is b2.3/b2.4's (handoff). */
+  readonly bailSpills: Array<{ shipId: string; playerId: string; x: number; z: number; landing: string; t: number }> = [];
   /** Per-bot cooldown (sim seconds) between finisher swings on downed enemies. */
   private botFinishCooldownAt = new Map<string, number>();
   /** Who downed each DBNO player — bleed-out/finish credit survives env damage
@@ -2542,6 +2550,7 @@ export class Match {
     this.updateCaptures(dt);
     this.updateIslandSkeletons(dt);
     this.processBotLooting();
+    this.processBailReturns();
     this.updateBotFlooding(dt);
     this.updateBotDbno(dt);
     this.updateDownedAndRevives(dt);
@@ -3245,16 +3254,12 @@ export class Match {
         && player.bailScoopProgress <= 0.05
         && this.consumeOneShot(client, 'bail', input.seq);
       if (bailPress) {
-        if (player.bucketFilled) {
-          // Heave the carried bucketful overboard — empties it.
-          player.bucketFilled = false;
-          player.bailScoopProgress = 1;
-        } else if ((ship.waterLevel ?? 0) > 0.001) {
-          // Scoop a bucketful out of the bilge — fills the bucket, water drops.
-          player.bucketFilled = true;
-          ship.waterLevel = Math.max(0, (ship.waterLevel ?? 0) - FLOODING.BAIL_SCOOP_VOLUME);
-          player.bailScoopProgress = 1;
-        }
+        // b2.2d (holes-05): the SoT bucket. The scoop needs the hold water at
+        // your feet or under your eyes within reach; the heave has to clear
+        // the rail or the bucketful runs back down to the bilge.
+        const pose = bailPoseOf(player.position, player.rotation.x, player.rotation.y, ship);
+        if (player.bucketFilled) this.heaveBucket(player, ship, pose);
+        else this.scoopBucket(player, ship, pose);
       }
       // Decay the scoop/heave animation; bailing flag rides it for client FX.
       if (player.bailScoopProgress > 0) {
@@ -4587,12 +4592,17 @@ export class Match {
       // humans get).
       if (targetHole && (this.botRepairCooldownAt.get(player.id) ?? 0) <= this.t && getRepairPlankCount(player, ship) > 0) {
         if (this.getRepairableHole(player, ship)?.id === targetHole.id) {
+          // b2.2d: he HOLDS the hammer for the real repair time of the breach
+          // (1.6/2.4/3.2 s by size), like a human, then spends the plank.
+          const held = this.botRepairHeld.get(player.id);
+          const acc = held && held.holeId === targetHole.id ? held.held + dt : dt;
+          this.botRepairHeld.set(player.id, { holeId: targetHole.id, held: acc });
+          if (player.bailing) player.bailing = false;
+          if (acc < holeRepairTime(targetHole.size)) continue;
+          this.botRepairHeld.delete(player.id);
           if (this.consumeRepairPlank(player, ship)) {
             this.physics.patchHole(ship, targetHole.id);
-            // A bigger breach keeps the bot at it longer (b2.2b): the size-1
-            // repair time is already inside FIELD_REPAIR_INTERVAL.
-            this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL
-              + holeRepairTime(targetHole.size) - FLOODING.HOLE_REPAIR_TIME[0]);
+            this.botRepairCooldownAt.set(player.id, this.t + SHIP.FIELD_REPAIR_INTERVAL - FLOODING.HOLE_REPAIR_TIME[0]);
           }
         } else {
           const stand = this.getHoleWorkStandLocal(player, ship, targetHole);
@@ -4604,14 +4614,90 @@ export class Match {
       }
 
       // Priority 2: bail down deep water (bucket line caps at two per hull).
+      // b2.2d: the SAME bucket a human carries — down to the hold, scoop, up
+      // to the rail, heave outboard. No remote drain.
       const activeBailers = bailersByShip.get(ship.id) ?? 0;
-      if (water > FLOODING.BOT_BAIL_THRESHOLD && activeBailers < 2) {
-        ship.waterLevel = Math.max(0, water - FLOODING.BAIL_RATE * dt);
-        player.bailing = true;
+      if ((water > FLOODING.BOT_BAIL_THRESHOLD || player.bucketFilled) && activeBailers < 2) {
         bailersByShip.set(ship.id, activeBailers + 1);
+        this.stepBotBailCycle(player, ship, dt);
       } else if (player.bailing) {
         player.bailing = false;
       }
+    }
+  }
+
+  /** One bot step of the bucket cycle: hold -> scoop -> companionway -> rail -> heave. */
+  private stepBotBailCycle(player: Player, ship: Ship, dt: number) {
+    const stats = SHIP_STATS[ship.type];
+    const stair = getShipCompanionwayConfig(stats);
+    const local = this.toShipLocal(player.position, ship);
+    const inHold = isStandingInShipHold(player.position, ship);
+    const ready = (this.botBailReadyAt.get(player.id) ?? 0) <= this.t;
+    player.bailing = !ready;
+    const walkTo = (x: number, z: number) => {
+      const world = this.toShipWorld(x, z, ship);
+      this.stepBotToward(player, { x: world.x, y: player.position.y, z: world.z }, dt);
+    };
+    if (!player.bucketFilled) {
+      // Look down at the water at his feet: the scoop rule does the rest.
+      const pose = bailPoseOf(player.position, ship.rotation, -1.2, ship);
+      if (canScoop(ship.type, ship.waterLevel ?? 0, pose)) {
+        if (ready && this.scoopBucket(player, ship, pose)) {
+          this.botBailReadyAt.set(player.id, this.t + FLOODING.BAIL_SCOOP_TIME);
+        }
+        return;
+      }
+      if (inHold) { walkTo(stair.cx, stair.stairBackZ - 0.9); return; }
+      const linedUp = Math.abs(local.x - stair.cx) < stair.stairHalfWidth && local.z < stair.stairFrontZ + 1.4;
+      walkTo(stair.cx, linedUp ? stair.stairBackZ - 0.9 : stair.stairFrontZ + 1.0);
+      return;
+    }
+    // Carrying a bucketful: up the ladder, then the nearest rail.
+    if (inHold) { walkTo(stair.cx, stair.stairFrontZ + 1.0); return; }
+    const side = local.x >= 0 ? 1 : -1;
+    const railX = side * (getShipDeckWalkHalfWidth(stats, local.z) - 0.2);
+    if (Math.abs(local.x) < Math.abs(railX) - 0.35) { walkTo(railX, local.z); return; }
+    // At the rail: face outboard and heave.
+    player.rotation.x = ship.rotation + side * Math.PI / 2;
+    player.rotation.y = 0;
+    if (!ready) return;
+    const pose = bailPoseOf(player.position, player.rotation.x, 0, ship);
+    this.heaveBucket(player, ship, pose);
+    this.botBailReadyAt.set(player.id, this.t + FLOODING.BAIL_SCOOP_TIME);
+  }
+
+  /** Fill the empty bucket if the SoT scoop rule allows it (b2.2d). */
+  private scoopBucket(player: Player, ship: Ship, pose: BailPose): boolean {
+    if (player.bucketFilled || !canScoop(ship.type, ship.waterLevel ?? 0, pose)) return false;
+    player.bucketFilled = true;
+    ship.waterLevel = Math.max(0, (ship.waterLevel ?? 0) - FLOODING.BAIL_SCOOP_VOLUME);
+    player.bailScoopProgress = 1;
+    player.bailing = true;
+    return true;
+  }
+
+  /** Heave the carried bucketful. Past the rail it is gone; aboard it runs back
+   *  to the bilge after BAIL_RETURN_DELAY with a splash event (b2.2d). */
+  private heaveBucket(player: Player, ship: Ship, pose: BailPose) {
+    if (!player.bucketFilled) return;
+    player.bucketFilled = false;
+    player.bailScoopProgress = 1;
+    player.bailing = true;
+    const land = throwLanding(ship.type, pose);
+    if (land.landing === 'overboard') return;
+    this.pendingBailReturns.push({ shipId: ship.id, at: this.t + BAIL_RETURN_DELAY, volume: FLOODING.BAIL_SCOOP_VOLUME });
+    this.bailSpills.push({ shipId: ship.id, playerId: player.id, x: land.x, z: land.z, landing: land.landing, t: this.t });
+    if (this.bailSpills.length > 32) this.bailSpills.shift();
+  }
+
+  /** Bucketfuls that landed aboard run back down to the bilge. */
+  private processBailReturns() {
+    for (let i = this.pendingBailReturns.length - 1; i >= 0; i -= 1) {
+      const r = this.pendingBailReturns[i];
+      if (r.at > this.t) continue;
+      this.pendingBailReturns.splice(i, 1);
+      const ship = this.getAliveShip(r.shipId);
+      if (ship && !ship.sinking) ship.waterLevel = Math.min(1, (ship.waterLevel ?? 0) + r.volume);
     }
   }
 
@@ -4703,54 +4789,18 @@ export class Match {
   }
 
   /**
-   * The ship's own carpenter: on an ANCHORED hull he planks one leak every
-   * FIELD_REPAIR_INTERVAL out of the hold's planks.
-   *
-   * Two things were wrong with him (OPEN-01/liveplay-08). He worked in total
-   * SILENCE, so a hull riding at anchor through a storm turned sixteen planks
-   * into one with nothing on screen to say where they went. And he worked over
-   * the crew's shoulder: a pirate standing at the breach with a hammer watched
-   * it close itself. He now announces every plank he spends, and he stands aside
-   * for a crewmate who is right there — the hole is that pirate's to plank.
+   * THE AUTO-CARPENTER IS GONE (b2.2d, D15, vm:holes:1). An anchored hull used
+   * to plank one leak every FIELD_REPAIR_INTERVAL out of the hold's planks with
+   * nobody at the hole. A hole now only closes with a pirate at it (human, or a
+   * bot holding the hammer through the real repair time). What stays is the
+   * ship's repair cooldown clock.
    */
   updateFieldRepairs(dt: number) {
     for (const ship of this.state.ships) {
       if (!ship.alive || ship.sinking) continue;
-
       ship.repairCooldown = Math.max(0, ship.repairCooldown - dt);
-      const target = this.getBotRepairTargetHole(ship);
-      const plankStack = ship.inventory.find((entry) => entry.item === 'wood_plank' && entry.qty > 0);
-      if (
-        !ship.anchored || ship.onFire || ship.repairCooldown > 0 || !target || !plankStack
-        || this.crewIsAtHole(ship, target)
-      ) {
-        ship.autoRepairProgress = 0;
-        continue;
-      }
-
-      ship.autoRepairProgress += dt;
-      if (ship.autoRepairProgress < SHIP.FIELD_REPAIR_INTERVAL) continue;
       ship.autoRepairProgress = 0;
-      if (!this.consumeShipItem(ship, 'wood_plank', 1)) continue;
-      this.physics.patchHole(ship, target.id);
-      const left = ship.inventory.find((entry) => entry.item === 'wood_plank')?.qty ?? 0;
-      this.broadcast({
-        type: 'carpenter_patch',
-        ts: Date.now(),
-        payload: { shipId: ship.id, holeId: target.id, planksLeft: left },
-      });
     }
-  }
-
-  /** A living crewmate on this deck, within reach of the breach: his to plank. */
-  private crewIsAtHole(ship: Ship, hole: { x: number; z: number }): boolean {
-    const world = toShipWorldPoint({ x: hole.x, z: hole.z }, ship);
-    for (const p of this.state.players) {
-      if (p.onShipId !== ship.id) continue;
-      if (p.state === 'eliminated' || p.state === 'respawning' || p.health <= 0) continue;
-      if (dist2D(p.position.x, p.position.z, world.x, world.z) <= CARPENTER_STAND_ASIDE_METERS) return true;
-    }
-    return false;
   }
 
   /**
