@@ -48,12 +48,76 @@ function buildIdMeta(buildId: string): Plugin {
     };
   }
 
+/**
+ * MODULEPRELOAD FOR THE GAME CHUNK (b3.1f, performance-10).
+ *
+ * src/client/main.ts is a shell that dynamic-imports core/Game.ts on its first
+ * line. Vite only preloads a dynamic import's deps when the import() RUNS, one
+ * round trip after the entry arrives; on a 70 ms-RTT 4G phone that is a
+ * visible delay before Play. This puts <link rel="modulepreload"> for the game
+ * chunk and every chunk it statically imports into index.html, so the browser
+ * starts all of them at HTML parse, the same moment the old single entry did.
+ * scripts/test-bundle-budget.mjs fails a build whose index.html lacks it.
+ */
+function preloadGameChunk(): Plugin {
+  return {
+    name: 'pirates-preload-game',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler(_html, ctx) {
+        const bundle = ctx.bundle;
+        const entry = ctx.chunk;
+        if (!bundle || !entry) return [];
+        const chunkOf = (file: string) => {
+          const c = bundle[file];
+          return c && c.type === 'chunk' ? c : null;
+        };
+        const isGame = (file: string) => Object.keys(chunkOf(file)?.modules ?? {})
+          .some((id) => /[\\/]src[\\/]client[\\/]core[\\/]Game\.ts$/.test(id));
+        const staticOfEntry = new Set<string>();
+        const walkStatic = (file: string, into: Set<string>) => {
+          if (into.has(file)) return;
+          into.add(file);
+          for (const dep of chunkOf(file)?.imports ?? []) walkStatic(dep, into);
+        };
+        walkStatic(entry.fileName, staticOfEntry);
+        const wanted = new Set<string>();
+        for (const file of staticOfEntry) {
+          for (const dyn of chunkOf(file)?.dynamicImports ?? []) if (isGame(dyn)) walkStatic(dyn, wanted);
+        }
+        return [...wanted].filter((f) => !staticOfEntry.has(f)).map((f) => ({
+          tag: 'link',
+          attrs: { rel: 'modulepreload', crossorigin: true, href: `/${f}` },
+          injectTo: 'head' as const,
+        }));
+      },
+    },
+  };
+}
+
+/**
+ * CHUNKS (b3.1f). Only ACYCLIC groups: three; three's addons (loaders,
+ * decoders: they import three and nothing of ours); src/shared (pure, imports
+ * only itself); the audio engine (imports shared and itself). A group that
+ * imports back into the game chunk (world/, rendering/, ui/) would make a
+ * circular chunk graph, whose init order rollup cannot promise.
+ */
+function chunkFor(id: string): string | undefined {
+  const p = id.split('\\').join('/');
+  if (p.includes('/node_modules/three/build/')) return 'three';
+  if (p.includes('/node_modules/three/examples/')) return 'three-addons';
+  if (p.includes('/src/shared/')) return 'shared';
+  if (p.includes('/src/client/audio/')) return 'audio';
+  return undefined;
+}
+
   export default defineConfig(({ command }) => {
     const BUILD_ID = command === 'build' ? resolveBuildId() : 'dev';
     return {
     root: '.',
     publicDir: 'public',
-    plugins: [buildIdMeta(BUILD_ID)],
+    plugins: [buildIdMeta(BUILD_ID), preloadGameChunk()],
     define: {
       __GAME_SERVER_PORT__: JSON.stringify(GAME_SERVER_PORT),
       __BUILD_ID__: JSON.stringify(BUILD_ID),
@@ -64,9 +128,7 @@ function buildIdMeta(buildId: string): Plugin {
       rollupOptions: {
         input: 'index.html',
         output: {
-          manualChunks: {
-            three: ['three']
-          }
+          manualChunks: chunkFor
         }
       }
     },
