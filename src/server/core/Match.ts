@@ -3344,10 +3344,9 @@ export class Match {
         // the classic turnRate cap, a stationary ship barely answers the helm.
         // Chainshot fouls the rigging AND the helm — ~25% rudder authority cut
         // while active (waterLevel dulls it further inside applyShipRudderSteering).
-        const omegaCapScale = (0.5 + ship.sailHeight * 0.5)
-          * (chainshotted ? 0.75 : 1)
-          * (ship.sailIntegrity < 0.5 ? 0.9 : 1);
-        applyShipRudderSteering(ship, dt, steerInput, omegaCapScale);
+        // physics-11 (b2.1d): no sailHeight cap, the blade's lift scales with way.
+        const rudderAuthority = chainshotted ? 0.75 : 1;
+        applyShipRudderSteering(ship, dt, steerInput, rudderAuthority);
         // Rotation itself is integrated in PhysicsSystem.updateShips for all ships.
       }
     }
