@@ -93,6 +93,17 @@ const r = run({ matchId: 'tick-budget-A', seconds: SECONDS, mutate: mutateMain }
 console.log(`scenario: seed ${process.env.PIRATES_BR_MAP_SEED}, ${r.hulls} hulls (${r.hullsAtStart} afloat at the window start, ${r.hullsAtEnd} at the end), `
   + `${r.shotsInWindow} projectiles fired in the window, storm phase ${r.stormPhase}, mean hull sea state ${r.sea.toFixed(2)}, `
   + `${SECONDS} s sim in ${(r.wall / 1000).toFixed(1)} s wall${mutateMain ? ' [MUTATED: 3 ms busy loop in wildlife]' : ''}`);
+// The verdict is ms on THIS Air, so say how busy the Air was. Measured on the
+// same code 2026-09-24: load1 1.78 -> p50 1.07 / p99 1.96 ms (green); a Swift
+// build alongside, load1 4.85 -> p50 4.02 / p99 12.9 ms (the fanless Air
+// throttles and the tick lands on an efficiency core). The flag is printed,
+// the limits are never relaxed for it.
+{
+  const { loadavg, availableParallelism } = await import('node:os');
+  const l1 = loadavg()[0]; const cores = availableParallelism();
+  const busy = l1 > Math.max(2, cores / 4);
+  console.log(`host load1 ${l1.toFixed(2)} on ${cores} cores${busy ? ' -- BUSY HOST: re-run on a quiet Air before reading these numbers' : ''}`);
+}
 console.log(`phases (mean ms/tick): ${Object.entries(r.cost.phasesMs).map(([k, v]) => `${k} ${v.toFixed(3)}`).join(', ')}`);
 console.log(`noise allowance ${ALLOWANCE}x (printed, NOT applied): p99 would be allowed ${(P99_LIMIT * ALLOWANCE).toFixed(1)} ms, p50 ${(P50_LIMIT * ALLOWANCE).toFixed(1)} ms`);
 
@@ -107,6 +118,39 @@ if (!mutateMain) {
   const c = run({ matchId: 'tick-budget-A', seconds: 5, mutate: true });
   const blind = c.cost.p50Ms <= P50_LIMIT || c.cost.p99Ms <= P99_LIMIT;
   ok(!blind, `control: a 3 ms busy loop in wildlife breaks both limits (${fmt(c.cost)}, wildlife ${c.cost.phasesMs.wildlife.toFixed(2)} ms)`);
+}
+
+// /health detail (performance-13): the same TickProfiler numbers reach the
+// keyed /health sims[] rows, including for a match living in a worker thread
+// (b2.0b), where the lobby only sees it through MatchProxy's mirror.
+if (process.env.HEALTH !== '0') {
+  const { MatchWorkerHost } = await import('../src/server/core/MatchWorkerHost.ts');
+  const { LobbyServer } = await import('../src/server/core/LobbyServer.ts');
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  const host = new MatchWorkerHost(1, { testHooks: true });
+  const server = new LobbyServer();
+  try {
+    const proxy = host.createMatch({ matchId: 'tick-budget-W', botCount: 3, mode: 'solo' });
+    proxy.debug('forcePlaying');
+    proxy.debug('step', 160);
+    const cost = () => (typeof proxy.tickCost === 'function' ? proxy.tickCost() : null);
+    for (let i = 0; i < 40 && !(cost()?.n > 0); i++) await sleep(50);
+    const wc = cost();
+    ok(!!wc && wc.n >= 64 && wc.p50Ms > 0 && wc.p99Ms >= wc.p50Ms,
+      `a worker match's tick cost crosses the mirror (MatchProxy.tickCost: ${wc ? fmt(wc) : 'missing'})`);
+    delete process.env.HEALTH_KEY;
+    server.init(0);
+    for (let i = 0; i < 50 && server.boundPort == null; i++) await sleep(100);
+    server['matches'].set('tick-budget-W', proxy);
+    const body = await (await fetch(`http://127.0.0.1:${server.boundPort}/health`)).json();
+    server['matches'].delete('tick-budget-W');
+    const row = Array.isArray(body.sims) ? body.sims[0] : undefined;
+    ok(!!row && row.tickP50Ms > 0 && row.tickP99Ms >= row.tickP50Ms && row.tickP50Ms === proxy.tickCost?.()?.p50Ms,
+      `/health detail sims[] carries tickP50Ms / tickP99Ms from the worker match (${JSON.stringify(row)})`);
+  } finally {
+    await server.shutdown?.('test', 0).catch(() => {});
+    await host.close();
+  }
 }
 
 console.log(fails ? `\nFAIL ${fails} check(s)` : '\nPASS test-tick-budget');
