@@ -13,6 +13,8 @@ export type UiRefs = {
   goldAmount: HTMLDivElement;
   healthFill: HTMLDivElement;
   armorFill: HTMLDivElement;
+  breathWrap: HTMLDivElement;
+  breathFill: HTMLDivElement;
   /** One-line breach readout that replaced the four hull-section bars. */
   shipLeaks: HTMLDivElement;
   sailStatus: HTMLDivElement;
@@ -111,6 +113,8 @@ export function buildUiRefs(): UiRefs {
     goldAmount: requireElement('gold-amount'),
     healthFill: requireElement('health-fill'),
     armorFill: requireElement('armor-fill'),
+    breathWrap: requireElement('breath-wrap'),
+    breathFill: requireElement('breath-fill'),
     shipLeaks: requireElement('ship-leaks'),
     sailStatus: requireElement('sail-status'),
     shipStatus: requireElement('ship-status'),

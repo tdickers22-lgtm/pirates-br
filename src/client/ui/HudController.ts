@@ -4,7 +4,7 @@
  * through a narrow `HudView` handed in by Game; it never touches the scene.
  */
 import { braceCatch, idealBrace } from '../../shared/sailing.js';
-import { hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, floodCard, bilgeGaugeHidden, BILGE_GAUGE_PREF_KEY, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
+import { breathPlan, hudMessagePlan, hudVisibility, crosshairMode, shipCardNear, floodCard, bilgeGaugeHidden, BILGE_GAUGE_PREF_KEY, TIER_SEVERITY, type HudMessagePlan, type HudPlayerState, type HudElementId } from './hudModel';
 import * as THREE from 'three';
 import { BOT_EARLY_PEACE_SECONDS, ECONOMY, FIRST_SAIL_ASSIST, KILL_STREAK_LADDER, PLAYER, RESPAWN_HOLD_MAX_SECONDS, SHIP, STORM_ARC_SECONDS, STORM_PHASES, WEAPONS } from '../../shared/constants/index.js';
 import { WHEEL_SLOTS } from '../../shared/wheel.js';
@@ -1352,6 +1352,13 @@ export class HudController {
     this.renderHoldCargo(ship);
     this.view.ui.healthFill.style.width = `${Math.max(0, player.health)}%`;
     this.view.ui.armorFill.style.width = `${Math.max(0, Math.min(100, ((player.armor ?? 0) / PLAYER.MAX_ARMOR) * 100))}%`;
+    // b2-ask-02: the drowning clock as a breath bar (sea or flooded hold).
+    const breath = breathPlan(player);
+    if (this.view.ui.breathWrap.hidden === breath.visible) this.view.ui.breathWrap.hidden = !breath.visible;
+    if (breath.visible) {
+      this.view.ui.breathFill.style.width = `${(breath.fraction * 100).toFixed(1)}%`;
+      this.view.ui.breathWrap.classList.toggle('low', breath.low);
+    }
 
     if (ship) {
       // ORDERS ONLY WHEN THEY CAN BE OBEYED. Every "hold [X] at …" clause below

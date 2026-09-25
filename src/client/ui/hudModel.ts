@@ -27,7 +27,7 @@
  *    behind it is visible.
  */
 
-import { FLOODING } from '../../shared/constants/index.js';
+import { FLOODING, PLAYER } from '../../shared/constants/index.js';
 
 export type HudElementId =
   | 'compass'
@@ -441,4 +441,27 @@ export function floodCard(input: FloodCardInput): FloodCard {
     trendGlyph: trend === 'rising' ? '▲' : trend === 'falling' ? '▼' : '▬',
     fast: !input.sinking && floodIsFast(fill, input.floodingRate),
   };
+}
+
+// ── Breath (b2-ask-02) ─────────────────────────────────────────────────────
+/** The breath bar flashes below this fraction of air left. */
+export const BREATH_LOW_FRACTION = 0.25;
+export interface BreathPlan {
+  visible: boolean;
+  /** Air left, 1 = full lungs, 0 = drowning. */
+  fraction: number;
+  low: boolean;
+}
+/**
+ * The drowning clock the server runs on `swimTimer` (open sea at 1x, a
+ * flooded hold at 1x afloat and HOLD_BREATH_UNDER_RATE x with the head under;
+ * damage past PLAYER.DROWN_TIME) as a breath bar. Shown whenever the clock is
+ * running, i.e. swimming in the sea or afloat in a flooded hold, which is the
+ * only time swimTimer is non-zero on the wire.
+ */
+export function breathPlan(p: { state: string; swimTimer?: number }): BreathPlan {
+  const timer = Math.max(0, p.swimTimer ?? 0);
+  const fraction = Math.max(0, Math.min(1, 1 - timer / PLAYER.DROWN_TIME));
+  const visible = p.state !== 'dead' && p.state !== 'spectating' && timer > 0;
+  return { visible, fraction, low: visible && fraction < BREATH_LOW_FRACTION };
 }

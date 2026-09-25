@@ -207,6 +207,9 @@
 .bar-inner { height: 100%; border-radius: 999px; transition: width 0.2s ease; }
 #health-fill { background: linear-gradient(90deg, #c0392b, #e74c3c); }
 #armor-fill { background: linear-gradient(90deg, #2980b9, #3498db); }
+#breath-fill { background: linear-gradient(90deg, #7fd3e8, #d8f4fb); transition: width 0.15s linear; }
+#breath-wrap.low #breath-fill { background: linear-gradient(90deg, #c0392b, #ff6b6b); animation: breath-low-flash 0.5s steps(2, jump-none) infinite alternate; }
+@keyframes breath-low-flash { from { opacity: 1; } to { opacity: 0.35; } }
 
 /* Ship health */
 #ship-status {

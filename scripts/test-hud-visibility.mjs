@@ -260,5 +260,33 @@ if (M) {
   }
 }
 
+// ── 7. breath (b2-ask-02) ──────────────────────────────────────────────────
+// The server runs a drowning clock (swimTimer; 4x with the head under in a
+// flooded hold, damage past DROWN_TIME) that the client never showed, so a
+// pirate under the hold water drowned with no warning.
+{
+  const bp = M?.breathPlan;
+  check('hudModel exports breathPlan', typeof bp === 'function');
+  if (typeof bp === 'function') {
+    const DROWN = 60;
+    const dry = bp({ state: 'alive', swimTimer: 0 });
+    check('breath hidden on dry land (clock at 0)', !dry.visible);
+    const sea = bp({ state: 'swimming', swimTimer: 10 });
+    check('breath shown while the sea clock runs', sea.visible && Math.abs(sea.fraction - (1 - 10 / DROWN)) < 1e-9, JSON.stringify(sea));
+    const hold = bp({ state: 'alive', swimTimer: 30 });
+    check('breath shown afloat in a flooded hold (state alive)', hold.visible && !hold.low, JSON.stringify(hold));
+    const low = bp({ state: 'alive', swimTimer: DROWN * 0.8 });
+    check('breath flashes low under 25% air', low.visible && low.low, JSON.stringify(low));
+    const drowning = bp({ state: 'swimming', swimTimer: DROWN + 5 });
+    check('drowning reads as empty lungs', drowning.visible && drowning.fraction === 0 && drowning.low);
+    check('breath hidden when dead', !bp({ state: 'dead', swimTimer: 20 }).visible);
+  }
+  const hud8 = readFileSync(join(ROOT, 'src/client/ui/HudController.ts'), 'utf8');
+  check('HudController paints the breath bar through breathPlan', /breathPlan\(player\)/.test(hud8) && /ui\.breathFill/.test(hud8));
+  check('#breath-wrap + #breath-fill exist', /id="breath-wrap"/.test(html) && /id="breath-fill"/.test(html));
+  const css = readFileSync(join(ROOT, 'src/client/styles/hud.css'), 'utf8');
+  check('the low-breath state flashes', /#breath-wrap\.low[^{]*\{[^}]*animation/.test(css));
+}
+
 console.log(`test-hud-visibility: ${passes} pass, ${fails} fail`);
 process.exit(fails ? 1 : 0);
