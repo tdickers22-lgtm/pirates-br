@@ -45,7 +45,10 @@ export interface AudioCoreNodes {
  *  transients (audio-render-probe measured a broadside at +0.14 dBFS and splash.small at -0.5 through
  *  it), so a WaveShaper catches what it lets through: identity below CEILING_KNEE, a tanh shoulder
  *  above that can never reach CEILING_DB. The shaper sees the signal at half scale (inputs up to
- *  +6 dBFS land inside its [-1, 1] domain). */
+ *  +6 dBFS land inside its [-1, 1] domain). It runs WITHOUT oversampling: the '2x' path's
+ *  downsampling low-pass rings after a shaped transient and put splash.cannon out at -0.9 dBFS
+ *  (b2 gate), so only the bare curve is a hard sample-peak bound. The shoulder engages only above
+ *  -2.5 dBFS, after the limiter, so the aliasing it can add is a few samples per transient. */
 export const CEILING_DB = -1.05;
 export const CEILING_KNEE = 0.75;
 export function ceilingCurve(n = 4096): Float32Array<ArrayBuffer> {
@@ -77,7 +80,7 @@ export function buildAudioCore(ctx: AudioGraphContext, masterGain = 0.55): Audio
     safeSet(half.gain, 'value', 0.5);
     const ceiling = shaperCtor.call(ctx);
     ceiling.curve = ceilingCurve();
-    ceiling.oversample = '2x';
+    ceiling.oversample = 'none';
     limiter.connect(half);
     half.connect(ceiling);
     ceiling.connect(ctx.destination);

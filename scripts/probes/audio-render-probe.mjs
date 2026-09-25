@@ -8,7 +8,7 @@
 //   scene    a 6-gun broadside at 8-40 m + return fire hitting the hull, splashes, a hole punched
 //            with the flooding gush loop running, a geyser erupting 12 m away and a lava crater,
 //            master at 100 %: peak <= -1 dBFS after the limiter, no NaN / Infinity, not silent.
-//   keys     every scripted sample key renders on its own through playSample: decoded, returns
+//   keys     every VARIANT of every scripted sample key renders on its own through playSample: decoded, returns
 //            true, peak above -50 dBFS (no silent sample path).
 //   zones    the geyser voice at eruption level 1 is louder than at level 0 (same place, same
 //            renderer), and the lava crater + caldera rumble render audible.
@@ -85,11 +85,22 @@ try {
       return { off, eng, missing: [...missing] };
     }
     const out = { keys: {}, scene: null, zones: {} };
+    // EVERY variant of every key renders (b2 gate): SampleBank.pick draws a random variant, so a
+    // one-render-per-key row passed or failed by which variant it drew (splash.cannon).
     for (const key of KEYS) {
-      const { off, eng, missing } = await engineOn(2, [key]);
-      const played = eng.playSample(key, { bus: key === 'ui.click' ? 'ui' : 'sfx', volume: 1 });
-      const m = measure(await off.startRendering());
-      out.keys[key] = { ...m, played, decoded: missing.length === 0 };
+      const n = (await (await fetch('/assets/audio/manifest.json')).json()).keys[key]?.files?.length ?? 0;
+      for (let i = 0; i < Math.max(1, n); i++) {
+        const { off, eng, missing } = await engineOn(2, [key]);
+        const bank = eng.bank;
+        const t0 = performance.now();
+        const allReady = () => { for (let j = 0; j < n; j++) if (!bank.cache.has(`${key}#${j}`)) return false; return true; };
+        while (bank && !allReady() && performance.now() - t0 < 30000) await sleep(100);
+        const orig = bank.pick.bind(bank);
+        bank.pick = (k) => { bank.lastPick.delete(k); return orig(k, () => (i + 0.5) / n); };
+        const played = eng.playSample(key, { bus: key === 'ui.click' ? 'ui' : 'sfx', volume: 1 });
+        const m = measure(await off.startRendering());
+        out.keys[`${key}#${i + 1}`] = { ...m, played, decoded: missing.length === 0 && allReady() };
+      }
     }
     {
       const { off, eng, missing } = await engineOn(4, ['cannon.fire', 'wood.crack', 'splash.cannon', 'bed.floodGush', 'steam.hiss']);
